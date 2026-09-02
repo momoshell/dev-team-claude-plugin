@@ -134,6 +134,16 @@ test('each condition can independently make a verdict ineligible', () => {
   }
 })
 
+test('a harden escalation is never eligible for the review regrant', () => {
+  const harden = clone(escalation)
+  harden.details.escalation.where = 'harden'
+  const verdict = regrantVerdict(harden, rows, { regranted: false })
+  const reason = verdict.reasons.find((entry) => entry.condition === 'where-review')
+  assert.equal(verdict.eligible, false)
+  assert.equal(reason?.ok, false)
+  assert.match(reason?.detail || '', /harden, not review/)
+})
+
 test('must-fix counts converge at one but not above one, and ledger rows are accepted', () => {
   assert.equal(regrantVerdict(escalation, [{ dispatch_id: 'd3', must_fix: 2 }, { dispatch_id: 'd8', must_fix: 1 }], {}).eligible, true)
   const above = clone(rows); above.at(-1).must_fix = 2

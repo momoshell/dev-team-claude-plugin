@@ -4,7 +4,7 @@
 // bounce exhaustion->accept/escalate, out-of-set lead answers, commit gating.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, readdirSync } from 'node:fs'; import { ROOT as REPO_ROOT, scratchDir } from '../test/helpers.mjs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, readdirSync } from 'node:fs'; import { ROOT as REPO_ROOT, scratchDir, treeDigest } from '../test/helpers.mjs'
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 
@@ -34,6 +34,7 @@ import {
   validateMutations, checkFailureLine, MUTATION_OUTCOMES, MUTATION_BINDING_FAILURES, MUTATIONS_MAX, CHECK_FAIL_PREFIX,
   bindMutationAnchor, applyMutationAnchor,
   FINDING_SEVERITIES, FINDING_DISPOSITIONS, FINDING_ID_SHAPE, RESIDUAL_TYPES, reviewFindings, reviewOutcome,
+  HARDENING_MARKS, HARDENING_REFUSALS, HARDENING_OUTCOMES, NAME_VERDICTS, nameVerdict, hardeningOf, hardeningDebt, hardenCommand, hardenWitnessCommand, scopedPath, mutationChangesTokens, validateHardened, hardeningBounceLines, hardeningBriefLines,
   verdictFindingsDefect, findingIdDefect, reviewShapeDefect, guardedWrite, acceptedRawById, patchTargets, dispositionOf, dispositionPlan, askUserLines,
   validateAcceptDecision, validatePlanResiduals, acceptContractLines, planAcceptContractLines, acceptedViaLabel, REFUTATION_EVIDENCE_MAX, ACCEPT_REFUSALS, ACCEPT_REASKS, acceptBounceLines,
   CARVE_VERDICTS, validateCarve, GROWTH_DIVERGENCE_FACTOR, growthRecord, growthLines, divergenceConsultLines,
@@ -45,6 +46,7 @@ import {
   stageEnabled, undeclaredStage, shapeDefect, sourcesDefect, outOfScopeFiles, envelopeDefect, envelopeFieldsPresent,
   ENVELOPE_REFUSAL_REASONS, bounceTargetOf, staleVerdictLines,
   PLAN_SCOPE, PLAN_SCOPE_VERDICTS, planScopeVerdict,
+  SCOPE_REFUSALS, ENVELOPE_DEBRIS, scopeRefusal, scopeBounceBrief,
 } from './drive.mjs'
 
 const TD = '/tmp/fake-task'
@@ -255,6 +257,11 @@ const reviewEnv = (verdict, findings) => ({
     ...(findings === undefined ? {} : { findings }),
   },
 })
+const legacyReviewerExemptions = (findings) => Array.isArray(findings)
+  ? findings.map((finding) => finding?.severity === 'must-fix' && finding.hardening === undefined
+    ? { ...finding, hardening: 'ungateable', hardening_why: 'legacy fixture has no guard declaration' }
+    : finding)
+  : findings
 const reconEnv = (over = {}) => ({
   status: 'done', role: 'planner', summary: 'recon complete',
   artifacts: [`${TD}/scout.md`],
@@ -466,8 +473,8 @@ function planThenReviewIo(laterDetails, correction = laterDetails) {
       'tech-lead:1': checkEnv('revise'), 'tech-lead:2': checkEnv('revise'),
       'lead:1': leadEnv('accept', 'record the plan gap', { residuals: [PLAN_RESIDUAL] }),
       'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(),
-      'reviewer:1': reviewEnv('changes-needed', PLAN_CHECK_FINDINGS),
-      'reviewer:2': reviewEnv('changes-needed', PLAN_CHECK_FINDINGS),
+      'reviewer:1': reviewEnv('changes-needed', legacyReviewerExemptions(PLAN_CHECK_FINDINGS)),
+      'reviewer:2': reviewEnv('changes-needed', legacyReviewerExemptions(PLAN_CHECK_FINDINGS)),
       'lead:2': leadEnv('accept', 'record the review decision', laterDetails),
       'lead:3': leadEnv('accept', 'correct the review decision', correction),
     },
@@ -520,7 +527,7 @@ test('a later refused review accept supersedes the plan-check decision on conver
       'planner:1': CONVERGE_PLAN(), 'tech-lead:1': checkEnv('revise'),
       'lead:1': leadEnv('accept', 'record the plan gap', { residuals: [PLAN_RESIDUAL] }),
       'builder:1': buildEnv(), 'builder:2': buildEnv(),
-      'reviewer:1': reviewEnv('changes-needed', REVIEW_FINDINGS),
+      'reviewer:1': reviewEnv('changes-needed', legacyReviewerExemptions(REVIEW_FINDINGS)),
       'lead:2': leadEnv('accept', 'record the refused review claim', { residuals: [{ id: 'unknown-review', type: 'cosmetic' }] }),
       'lead:3': leadEnv('accept', 'record the refused review claim', { residuals: [{ id: 'unknown-review', type: 'cosmetic' }] }),
     },
@@ -1906,8 +1913,8 @@ test('a passing verify round is free while the changes-needed round is charged',
 })
 
 test('a re-review that surfaces NEW must-fixes is charged like any other', () => {
-  const firstFindings = [{ id: 'RV1-1', severity: 'must-fix', location: 'a.mjs:1', summary: 'the original defect' }]
-  const secondFindings = [{ id: 'RV2-1', severity: 'must-fix', location: 'a.mjs:9', summary: 'a NEW defect the fix introduced' }]
+  const firstFindings = [{ id: 'RV1-1', severity: 'must-fix', location: 'a.mjs:1', summary: 'the original defect', hardening: 'ungateable', hardening_why: 'legacy charging fixture' }]
+  const secondFindings = [{ id: 'RV2-1', severity: 'must-fix', location: 'a.mjs:9', summary: 'a NEW defect the fix introduced', hardening: 'ungateable', hardening_why: 'legacy charging fixture' }]
   const io = fakeIo({
     envelopes: {
       'planner:1': planEnv(),
@@ -2261,14 +2268,14 @@ test('review rounds exhausted + lead escalates -> escalation envelope, NO commit
 })
 
 const ACCEPT_FINDINGS = [
-  { id: 'RV1-1', severity: 'must-fix', location: 'a.mjs:1', summary: 'load-bearing defect' },
+  { id: 'RV1-1', severity: 'must-fix', location: 'a.mjs:1', summary: 'load-bearing defect', hardening: 'ungateable', hardening_why: 'legacy accept fixture' },
   { id: 'RV1-2', severity: 'should-fix', location: 'b.mjs:2', summary: 'cosmetic follow-up' },
 ]
 const ACCEPT_FINDINGS_SOFT = [
   { id: 'RV1-2', severity: 'should-fix', location: 'b.mjs:2', summary: 'cosmetic follow-up' },
 ]
 const MUST_FIX_REFUTATION_FINDINGS = [
-  { id: 'RV2-1', severity: 'must-fix', location: 'src/panel.svelte:41', summary: 'duplicate key in a keyed each' },
+  { id: 'RV2-1', severity: 'must-fix', location: 'src/panel.svelte:41', summary: 'duplicate key in a keyed each', hardening: 'ungateable', hardening_why: 'legacy refutation fixture' },
 ]
 const REFUTATION_CLAIM = 'the reviewer is wrong: row.reason is unique within a group, so the keyed each cannot collide at render'
 const REFUTATION_CONVERGE_PLAN = () => planEnv({
@@ -5747,7 +5754,7 @@ test('reviewer findings become stable residuals and only must-fix findings file 
 const REVIEW_GATE_PASS = `all checks passed\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":0,"errored":0}`
 const REVIEW_FINDINGS = [
   { id: 'RV-2', severity: 'should-fix', location: 'a.mjs:2', summary: 'follow-up wording' },
-  { id: 'RV-1', severity: 'must-fix', location: 'a.mjs:1', summary: 'close the defect' },
+  { id: 'RV-1', severity: 'must-fix', location: 'a.mjs:1', summary: 'close the defect', hardening: 'ungateable', hardening_why: 'legacy converge fixture' },
 ]
 
 function reviewConvergeIo({ suite = { ok: true, output: '' }, seam = true, gateless = false } = {}) {
@@ -5758,7 +5765,7 @@ function reviewConvergeIo({ suite = { ok: true, output: '' }, seam = true, gatel
     envelopes: {
       'planner:1': plan,
       'builder:1': buildEnv(), 'builder:2': buildEnv(),
-      'reviewer:1': reviewEnv('changes-needed', REVIEW_FINDINGS),
+      'reviewer:1': reviewEnv('changes-needed', legacyReviewerExemptions(REVIEW_FINDINGS)),
       'lead:1': leadEnv('escalate', 'the reviewer names unresolved findings'),
     },
     runs: {
@@ -5870,7 +5877,7 @@ test('non-continuation keeps the ordinary assignment and review brief write set 
 })
 
 test('continuation panel assigns reviewer, partner, and adjudicator with blind briefs', () => {
-  const findingsA = [{ id: 'A1', severity: 'must-fix', location: 'a.mjs:10-20', summary: 'only A' }]
+  const findingsA = [{ id: 'A1', severity: 'must-fix', location: 'a.mjs:10-20', summary: 'only A', hardening: 'ungateable', hardening_why: 'legacy panel fixture' }]
   const findingsB = [{ id: 'B1', severity: 'must-fix', location: 'a.mjs:12-18', summary: 'only B' }]
   const io = fakeIo({
     envelopes: {
@@ -5932,19 +5939,31 @@ test('panel dismissals become panel dissents and are removed from the fused verd
 })
 
 test('an unclosed panel class adds a synthetic must-fix and preserves a review bounce without findings', () => {
+  const classGuard = { ...B376_HARDENED, finding: 'panel-class-1', name: 'panel class guard' }
   const io = fakeIo({
     envelopes: {
       'planner:1': planEnv(), 'tech-lead:1': checkEnv('approve'), 'builder:1': buildEnv(),
       'reviewer:1': reviewEnv('pass', []),
       'tech-lead:2': { status: 'done', role: 'tech-lead', details: { verdict: 'pass', findings: [] } },
       'lead:1': { status: 'done', role: 'lead', details: { closes_class: false, class_invariant: 'class remains open' } },
-      'builder:2': buildEnv(), 'reviewer:2': reviewEnv('pass', []),
+      'builder:2': buildEnv({ details: { ...buildEnv().details, hardened: [classGuard] } }), 'reviewer:2': reviewEnv('pass', []),
       'tech-lead:3': { status: 'done', role: 'tech-lead', details: { verdict: 'pass', findings: [] } },
       'lead:2': { status: 'done', role: 'lead', details: { closes_class: true } },
     },
     runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
-    changed: ['a.mjs', 'a.test.mjs'],
+    changed: ['a.mjs', 'a.test.mjs'], files: B376_FILES, writeThrough: true,
   })
+  const baseRun = io.run
+  io.run = function (cmd) {
+    const result = baseRun.call(this, cmd)
+    if (cmd === hardenWitnessCommand(B376_TEST_FILE)) return { ok: true, output: 'ok 1 - a.test.mjs\n# pass 1\n# fail 0' }
+    if (cmd === hardenCommand(B376_TEST_FILE, 'panel class guard')) {
+      const count = this.calls.run.filter(({ cmd: seen }) => seen === cmd).length
+      const output = [B376_GREEN, B376_PRE_RED, B376_MUT_RED][count - 1] || B376_MUT_RED
+      return { ...output, output: output.output.replaceAll('F1 guard', 'panel class guard') }
+    }
+    return result
+  }
   const result = driveTask({ ...CTX_TL, continuation: true, limits: { build_rounds: 2, review_rounds: 2 } }, io)
   assert.equal(result.status, 'done')
   const outcome = io.calls.logs.map((line) => line.review_outcome).find((row) => row?.panel)
@@ -7068,7 +7087,7 @@ const replayResumeStages = (io) => {
 const resumeKeys = ['stages', 'escalation', 'commit', 'dissents', 'extra_rounds_granted', 'growth', 'modifiers', 'gate', 'seq_high_water', 'gate_attempt_high_water', 'cursor', 'consults_spent', 'accept_findings', 'head']
 const CRASH_WHY = 'builder: no valid envelope at builder:3 within 2400s'
 const CRASH_STAGES = [
-  'plan:r1', 'gate-baseline', 'build:r1', 'build:r2', 'scope-gate:r2',
+  'plan:r1', 'gate-baseline', 'build:r1', 'scope-gate:r1', 'build:r2', 'scope-gate:r2',
   'lane:r2', 'gate:r2', 'gate-proof:1', 'review:r1', 'build:r3',
 ]
 const CRASH_FINDINGS = [{ id: 'B263-1', severity: 'must-fix', location: 'a.mjs:7', summary: 'the distinctive finding', disposition: null }]
@@ -7549,9 +7568,11 @@ const DRIVE_JOURNAL_EXPECTED = Object.freeze([
   ['recordRow', '', 'at gate_proof_unproven gate_generation'],
   ['recordRow', '', 'at gate_check_proof_unproven gate_generation'],
   ['recordRow', '', 'at gate_check_discrimination gate_generation gate_check_discriminations ...(checkProofNote ? { gate_check_proof_note: checkProofNote } : {})'],
+  ['recordRow', '', 'at finding_hardened'],
   ['recordRow', '', 'at ...entry'],
   ['recordRow', '', 'at auto_fix'],
   ['recordRow', '', 'at auto_fix_revalidation'],
+  ['recordRow', '', 'at scope_gate'],
   ['recordRow', '', 'at member_questions'],
   ['recordRow', '', 'at question_answers'],
   ['recordRow', '', 'at review_round'],
@@ -7577,7 +7598,7 @@ test('the journal channel vocabulary is closed, exported and additive', () => {
 test('every journal emit site in the driver is inventoried, wrapped and on the right channel', () => {
   const text = readFileSync(new URL('./drive.mjs', import.meta.url), 'utf8')
   const sites = driveJournalSites(text)
-  assert.equal(sites.length, 47)
+  assert.equal(sites.length, 49)
   assert.deepEqual(sites.map(({ wrapper, events, keys }) => [wrapper, events, keys]), DRIVE_JOURNAL_EXPECTED)
   assert.ok(sites.every(({ wrapper }) => wrapper === 'recordRow' || wrapper === 'operationalRow'))
   assert.equal(sites.filter(({ wrapper }) => wrapper === 'operationalRow').length, 1)
@@ -8424,8 +8445,8 @@ const D_PATCH_MIXED_RENAME = [
 const D_PATCH_EMPTY_PATH = ['diff --git a/ b/', '--- a/', '+++ b/', '@@ -1 +1 @@', '-const x = 1', '+const x = 2', ''].join('\n')
 const D_GREEN_GATE = `green\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":0,"errored":0}`
 const D_RED_GATE = (marker) => `${marker}\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":3,"errored":0}`
-const D_AUTO = { id: 'RV1-1', severity: 'must-fix', location: 'a.mjs:1', summary: 'a dead import survives', disposition: 'auto-fix', patch: D_PATCH_A }
-const D_ASK = { id: 'RV1-1', severity: 'must-fix', location: 'a.mjs:1', summary: 'the change narrows the public contract', disposition: 'ask-user' }
+const D_AUTO = { id: 'RV1-1', severity: 'must-fix', location: 'a.mjs:1', summary: 'a dead import survives', disposition: 'auto-fix', patch: D_PATCH_A, hardening: 'ungateable', hardening_why: 'legacy disposition fixture' }
+const D_ASK = { id: 'RV1-1', severity: 'must-fix', location: 'a.mjs:1', summary: 'the change narrows the public contract', disposition: 'ask-user', hardening: 'ungateable', hardening_why: 'legacy disposition fixture' }
 const D_PANEL_CTX = Object.freeze({ ...CTX_TL, continuation: true })
 
 const dPlanEnv = (details = {}) => planEnv({ details: { ...planEnv().details, ...details } })
@@ -8448,34 +8469,36 @@ const dApplyCommand = (id, round = 1) => `git apply --whitespace=nowarn ${shellA
 function dispositionIo(findings, {
   verdict = 'changes-needed', plan = {}, runs = {}, changed = ['a.mjs', 'a.test.mjs'],
   leadDecision = 'escalate', reviewer2 = dReviewEnv('pass', []), reviewer3 = dReviewEnv('pass', []),
+  builder1 = buildEnv(), builder2 = buildEnv(), builder3 = buildEnv(), files = {}, writeThrough = false,
 } = {}) {
   return fakeIo({
     envelopes: {
       'planner:1': dPlanEnv(plan),
-      'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(),
+      'builder:1': builder1, 'builder:2': builder2, 'builder:3': builder3,
       'reviewer:1': dReviewEnv(verdict, findings), 'reviewer:2': reviewer2, 'reviewer:3': reviewer3,
       'lead:1': leadEnv(leadDecision), 'lead:2': leadEnv('escalate'),
     },
     runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' }, ...runs },
-    changed,
+    changed, files, writeThrough,
   })
 }
 
 function dispositionPanelIo({
   reviewer1, partner1, adjudication1 = dAdjEnv(), reviewer2 = dReviewEnv('pass', []),
   partner2 = dPartnerEnv('pass', []), adjudication2 = dAdjEnv(), lead3 = leadEnv('escalate'),
-  runs = {}, changed = ['a.mjs', 'a.test.mjs'],
+  builder1 = buildEnv(), builder2 = buildEnv(), builder3 = buildEnv(),
+  runs = {}, changed = ['a.mjs', 'a.test.mjs'], files = {}, writeThrough = false, throwOn = null,
 } = {}) {
   return fakeIo({
     envelopes: {
       'planner:1': dPlanEnv(), 'tech-lead:1': checkEnv('approve'),
-      'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(),
+      'builder:1': builder1, 'builder:2': builder2, 'builder:3': builder3,
       'reviewer:1': reviewer1, 'tech-lead:2': partner1, 'lead:1': adjudication1,
       'reviewer:2': reviewer2, 'tech-lead:3': partner2, 'lead:2': adjudication2,
       'reviewer:3': dReviewEnv('pass', []), 'tech-lead:4': dPartnerEnv('pass', []), 'lead:3': lead3,
     },
     runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' }, ...runs },
-    changed,
+    changed, files, writeThrough, throwOn,
   })
 }
 
@@ -9058,19 +9081,38 @@ const D_COLLISION_CTX = Object.freeze({ ...D_PANEL_CTX, limits: { build_rounds: 
 const dPanelOutcomes = (io) => io.calls.logs.map((row) => row.review_outcome).filter((row) => row?.panel)
 const dRemintRows = (io) => io.calls.logs.map((row) => row.panel_id_reminted).filter(Boolean)
 
+function legacyPanelProof(io, name) {
+  const baseRun = io.run
+  io.run = function (cmd) {
+    const result = baseRun.call(this, cmd)
+    if (cmd === hardenWitnessCommand(B376_TEST_FILE)) return { ok: true, output: 'ok 1 - a.test.mjs\n# pass 1\n# fail 0' }
+    if (cmd === hardenCommand(B376_TEST_FILE, name)) {
+      const count = this.calls.run.filter(({ cmd: seen }) => seen === cmd).length
+      const output = [B376_GREEN, B376_PRE_RED, B376_MUT_RED][count - 1] || B376_MUT_RED
+      return { ...output, output: output.output.replaceAll('F1 guard', name) }
+    }
+    return result
+  }
+  return io
+}
+
 function classCollisionIo() {
-  return dispositionPanelIo({
+  return legacyPanelProof(dispositionPanelIo({
     reviewer1: dReviewEnv('changes-needed', [D_CLASS_COLLIDING]),
     partner1: dPartnerEnv('changes-needed', [D_CLASS_PARTNER]),
     adjudication1: dAdjEnv({ closes_class: false, class_invariant: 'the class is not closed' }),
-  })
+    builder2: buildEnv({ details: { ...buildEnv().details, hardened: [{ ...B376_HARDENED, finding: 'panel-remint-1', name: 'panel class guard' }] } }),
+    files: B376_FILES, writeThrough: true,
+  }), 'panel class guard')
 }
 
 function divergentCollisionIo() {
-  return dispositionPanelIo({
+  return legacyPanelProof(dispositionPanelIo({
     reviewer1: dReviewEnv('changes-needed', [D_DIVERGENT_A]),
     partner1: dPartnerEnv('changes-needed', [D_DIVERGENT_PARTNER]),
-  })
+    builder2: buildEnv({ details: { ...buildEnv().details, hardened: [{ ...B376_HARDENED, finding: 'panel-remint-1', name: 'divergent guard' }] } }),
+    files: B376_FILES, writeThrough: true,
+  }), 'divergent guard')
 }
 
 test('#800 §7b 43 — panel class findings remint around a reviewer-origin collision', () => {
@@ -9439,4 +9481,646 @@ test("the repair shape's own scope rule is untouched", () => {
   assert.equal(result.details.escalation.where, 'triage-scope')
   assert.match(result.details.escalation.why,
     /a triage that needs a wider surface is an escalation, not a re-plan/)
+})
+
+// ---------------------------------------------------------------------------
+// #846 + #839 — b376 loop gates. The fixtures below keep the driver harness fake,
+// except for B5f's explicit child-process witness check.
+const B376_TEST_FILE = 'a.test.mjs'
+const B376_IMPL_FILE = 'a.mjs'
+const B376_FINDING = { id: 'F1', severity: 'must-fix', location: 'a.mjs:1', summary: 'the implementation defect' }
+const B376_HARDENED = { finding: 'F1', test: B376_TEST_FILE, name: 'F1 guard', file: B376_IMPL_FILE, find: 'const guard = false', replace: 'const guard = true' }
+const B376_FILES = {
+  [`${CTX.checkout}/${B376_TEST_FILE}`]: 'export const repaired = true\n',
+  [`${CTX.checkout}/${B376_IMPL_FILE}`]: 'const guard = false\n',
+}
+const B376_GREEN = { ok: true, output: `ok 1 - F1 guard\n# pass 1\n# fail 0` }
+const B376_PRE_RED = { ok: false, output: `not ok 1 - F1 guard\n# pass 0\n# fail 1` }
+const B376_MUT_RED = { ok: false, output: `not ok 1 - F1 guard\n# pass 0\n# fail 1` }
+const b376Build = (hardened) => buildEnv({ details: { ...buildEnv().details, ...(hardened === undefined ? {} : { hardened }) } })
+const b376Review = (verdict, findings = []) => reviewEnv(verdict, findings)
+
+function b376ProofIo({ hardened = [B376_HARDENED], reviewer1 = b376Review('changes-needed', [B376_FINDING]), reviewer2 = b376Review('pass', []), reviewer3 = b376Review('pass', []), builder2 = b376Build(hardened), builder3 = b376Build(hardened), limits = { build_rounds: 2 }, files = B376_FILES, witnessOutput = { ok: true, output: `ok 1 - a.test.mjs\n# pass 1\n# fail 0` }, proofOutputs = [B376_GREEN, B376_PRE_RED, B376_MUT_RED], plan = {}, runs = {}, changed = ['a.mjs', 'a.test.mjs'], cleanRuns = null, throwOn = null } = {}) {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, ...plan } }),
+      'builder:1': buildEnv(), 'builder:2': builder2, 'builder:3': builder3,
+      'reviewer:1': reviewer1, 'reviewer:2': reviewer2, 'reviewer:3': reviewer3,
+    },
+    files, writeThrough: true, runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' }, ...runs },
+    changed, cleanRuns, throwOn,
+  })
+  const baseRun = io.run
+  io.run = function (cmd) {
+    const result = baseRun.call(this, cmd)
+    if (cmd === hardenWitnessCommand(B376_TEST_FILE)) return witnessOutput
+    if (cmd === hardenCommand(B376_TEST_FILE, 'F1 guard')) {
+      const count = this.calls.run.filter(({ cmd: seen }) => seen === cmd).length
+      return proofOutputs[count - 1] ?? proofOutputs.at(-1)
+    }
+    return result
+  }
+  return io
+}
+
+function b376DiskProofIo({ throwAtProofRun = null } = {}) {
+  const checkout = scratchDir('b376-restore-')
+  const testPath = join(checkout, B376_TEST_FILE)
+  const implementationPath = join(checkout, B376_IMPL_FILE)
+  const witnessedTest = 'export const reviewTime = true\n'
+  const witnessedImplementation = 'const guard = false\n'
+  const repairedTest = 'export const permanentGuard = true\n'
+  const repairedImplementation = 'const guard = true\n'
+  const hardened = { ...B376_HARDENED, find: 'const guard = true', replace: 'const guard = false' }
+  writeFileSync(testPath, witnessedTest)
+  writeFileSync(implementationPath, witnessedImplementation)
+  const io = b376ProofIo({ hardened: [hardened] })
+  const baseWait = io.wait
+  let builtDigest = null
+  io.wait = function (returnPath, timeoutS) {
+    const env = baseWait.call(this, returnPath, timeoutS)
+    if (returnPath === 'builder:2') {
+      writeFileSync(testPath, repairedTest)
+      writeFileSync(implementationPath, repairedImplementation)
+      builtDigest = treeDigest(checkout)
+    }
+    return env
+  }
+  const baseRead = io.readFile
+  io.readFile = function (path) {
+    if (path === testPath || path === implementationPath) return existsSync(path) ? readFileSync(path, 'utf8') : null
+    return baseRead.call(this, path)
+  }
+  const baseWrite = io.writeFile
+  io.writeFile = function (path, content) {
+    if (path === testPath || path === implementationPath) {
+      this.calls.writes[path] = content
+      this.calls.writeLog.push({ path, content })
+      writeFileSync(path, content)
+      return
+    }
+    return baseWrite.call(this, path, content)
+  }
+  const baseRun = io.run
+  let proofRuns = 0
+  io.run = function (cmd) {
+    const result = baseRun.call(this, cmd)
+    if (cmd === hardenWitnessCommand(B376_TEST_FILE) || cmd === hardenCommand(B376_TEST_FILE, 'F1 guard')) {
+      proofRuns += 1
+      if (proofRuns === throwAtProofRun) throw new Error(`injected hardening run ${proofRuns}`)
+    }
+    return result
+  }
+  return {
+    io, checkout, testPath, implementationPath, witnessedTest, witnessedImplementation,
+    repairedTest, repairedImplementation, builtDigest: () => builtDigest,
+  }
+}
+
+const b376StageStack = (io) => {
+  const stack = []
+  for (const row of io.calls.logs) {
+    if (typeof row.stage === 'string') stack.push(row.stage)
+    if (typeof row.stage_done === 'string') assert.equal(stack.pop(), row.stage_done)
+  }
+  return stack
+}
+
+test('b376 A1 a bounced build round runs its scope gate with rounds remaining', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(),
+      'builder:1': { status: 'insufficient', role: 'builder', summary: 'steer', artifacts: [], details: {} },
+      'lead:1': leadEnv('bounce'), 'builder:2': buildEnv(), 'reviewer:1': reviewEnv('pass', []),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: [['returns/d2.builder.json', 'rogue.mjs'], ['a.mjs', 'a.test.mjs']],
+  })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.assign.filter(({ role, note }) => role === 'builder' && note === 'scope-fix').length, 1)
+  assert.deepEqual(io.calls.logs.filter((row) => row.scope_gate).map((row) => row.scope_gate.reason), ['envelope-and-edits'])
+  assert.equal(io.calls.logs.some((row) => row.member_questions), false)
+  assert.equal(io.calls.logs.some((row) => row.decision), false)
+  assert.deepEqual(b376StageStack(io), [])
+})
+
+test('b376 A2 a returns json in the checkout is named a misdirected envelope', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, files_in_scope: ['a.mjs', 'a.test.mjs', 'returns/d1.builder.json'] } }),
+      'builder:1': buildEnv(),
+    },
+    changed: ['returns/d1.builder.json'],
+  })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 1 } }, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'scope')
+  assert.equal(result.details.escalation.why, "an envelope was written to the checkout instead of the assignment's absolute returnPath: returns/d1.builder.json")
+  assert.doesNotMatch(result.details.escalation.why, /out-of-scope edits persisted/)
+  const row = io.calls.logs.find((entry) => entry.scope_gate)?.scope_gate
+  assert.deepEqual(row, { round: 1, reason: 'envelope-in-checkout', envelopes: ['returns/d1.builder.json'], edits: [] })
+})
+
+test('b376 A3 a genuine out-of-scope source edit reports exactly as today', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(), 'builder:1': buildEnv(), 'builder:2': buildEnv(), 'reviewer:1': reviewEnv('pass', []),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: [['rogue.mjs'], ['a.mjs', 'a.test.mjs']],
+  })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  assert.equal(result.status, 'done')
+  const scopeBrief = Object.entries(io.calls.writes).find(([path]) => path.endsWith('build-bounce-r1.md'))?.[1] || ''
+  assert.equal(io.calls.logs.find((entry) => entry.scope_gate)?.scope_gate.reason, 'out-of-scope-edits')
+  assert.match(scopeBrief, /OUTSIDE the plan's scope/)
+  assert.deepEqual(result.details.stages.filter((stage) => stage.startsWith('scope-gate')), ['scope-gate:r1', 'scope-gate:r2'])
+})
+
+test('b376 A4 an in-scope bounced round keeps its byte-identical build bounce', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(), 'builder:1': { status: 'insufficient', role: 'builder', summary: 'thin', artifacts: [], details: {} },
+      'lead:1': leadEnv('bounce', 'steer'), 'builder:2': buildEnv(), 'reviewer:1': reviewEnv('pass', []),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } }, changed: [['a.mjs', 'a.test.mjs'], ['a.mjs', 'a.test.mjs']],
+  })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 1 } }, io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.writes[`${TD}/build-bounce-r1.md`], `# Build bounce (round 1)\n\nsteer\n\nPlan: ${TD}/plan.md`)
+  assert.equal(io.calls.logs.some((row) => row.scope_gate), false)
+  assert.equal(io.calls.logs.filter((row) => row.modifier?.kind === 'build').length, 1)
+})
+
+test('b376 B5a a proven hardening is accepted and clears the debt', () => {
+  const io = b376ProofIo()
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.assign.filter(({ role, note }) => role === 'builder' && note === 'harden-fix').length, 0)
+  assert.equal(result.details.stages.includes('lane:harden:r2'), true)
+  assert.equal(result.details.stages.includes('review:r2'), true)
+})
+
+test('b376 B5b the finding-hardened row carries the finding id and the check name', () => {
+  const io = b376ProofIo()
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  assert.equal(result.status, 'done')
+  const row = io.calls.logs.find((entry) => entry.finding_hardened)?.finding_hardened
+  assert.deepEqual(row, { round: 2, finding: 'F1', test: 'a.test.mjs', check: 'F1 guard', outcome: 'killed', why: null })
+})
+
+test('b376 B5c an existing named test is not gate growth', () => {
+  const nestedSkipped = [
+    "const label = 'F1'",
+    "test('outer', async (t) => { await t.test(`${label} guard`, { skip: true }, () => {}) })",
+  ].join('\n')
+  const files = { ...B376_FILES, [`${CTX.checkout}/${B376_TEST_FILE}`]: nestedSkipped }
+  const witnessOutput = { ok: true, output: 'ok 1 - outer\n    ok 1 - F1 guard # SKIP\n# pass 1\n# fail 0\n# skipped 1' }
+  const io = b376ProofIo({ files, witnessOutput, limits: { build_rounds: 2 } })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'harden')
+  const row = io.calls.logs.find((entry) => entry.finding_hardened)?.finding_hardened
+  assert.equal(row.outcome, 'name-not-new')
+  assert.match(row.why, /skipped/)
+
+  const unprovenIo = b376ProofIo({
+    witnessOutput: { ok: false, output: 'not ok 1 - unrelated\n# pass 0\n# fail 1' },
+    limits: { build_rounds: 2 },
+  })
+  const unprovenResult = driveTask({ ...CTX, limits: { build_rounds: 2 } }, unprovenIo)
+  const unproven = unprovenIo.calls.logs.find((entry) => entry.finding_hardened)?.finding_hardened
+  assert.equal(unprovenResult.status, 'escalation')
+  assert.equal(unproven.outcome, 'unproven')
+})
+
+test('b376 B5f the witnessed run executes nested checks without filtering their parents', () => {
+  const root = scratchDir('b376-witness-')
+  const testFile = join(root, 'nested.test.mjs')
+  const source = [
+    "import { test } from 'node:test'",
+    "const label = 'F1'",
+    "test('outer', async (t) => { await t.test(`${label} guard`, { skip: true }, () => {}) })",
+  ].join('\n') + '\n'
+  try {
+    writeFileSync(testFile, source)
+    const childEnv = { ...process.env }
+    delete childEnv.NODE_TEST_CONTEXT
+    const full = spawnSync(process.execPath, ['--test', '--test-reporter=tap', testFile], { encoding: 'utf8', env: childEnv })
+    const filtered = spawnSync(process.execPath, ['--test', '--test-reporter=tap', '--test-name-pattern=F1 guard', testFile], { encoding: 'utf8', env: childEnv })
+    assert.equal(full.status, 0)
+    assert.equal(nameVerdict(full.stdout, 'F1 guard'), 'skipped')
+    assert.equal(nameVerdict(filtered.stdout, 'F1 guard'), 'absent')
+
+    const io = b376ProofIo()
+    driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+    const witnessCalls = io.calls.run.filter(({ cmd }) => cmd === "node --test --test-reporter=tap 'a.test.mjs'")
+    assert.equal(witnessCalls.length, 1)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('b376 B5d hardening must fail on the witnessed pre-repair surface', () => {
+  const io = b376ProofIo({ proofOutputs: [B376_GREEN, B376_GREEN, B376_MUT_RED] })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'harden')
+  const row = io.calls.logs.find((entry) => entry.finding_hardened)?.finding_hardened
+  assert.equal(row.outcome, 'pre-repair-green')
+  assert.match(row.why, /witnessed pre-repair/)
+})
+
+test('b376 B5e must-fix debt survives auto-fix and ask-user routing', () => {
+  const dGuard = { ...B376_HARDENED, finding: 'RV1-1', name: 'RV1 guard' }
+  const dFiles = { ...B376_FILES, [`${CTX.checkout}/${B376_IMPL_FILE}`]: 'const guard = false\n' }
+  const dProof = (findings, leadDecision = 'escalate') => {
+    const io = dispositionIo(findings, {
+      leadDecision,
+      builder2: buildEnv({ details: { ...buildEnv().details, hardened: [dGuard] } }),
+      files: dFiles, writeThrough: true,
+    })
+    const baseRun = io.run
+    io.run = function (cmd) {
+      const result = baseRun.call(this, cmd)
+      if (cmd === hardenWitnessCommand(B376_TEST_FILE)) return { ok: true, output: 'ok 1 - a.test.mjs\n# pass 1\n# fail 0' }
+      if (cmd === hardenCommand(B376_TEST_FILE, 'RV1 guard')) {
+        const count = this.calls.run.filter(({ cmd: seen }) => seen === cmd).length
+        const output = [B376_GREEN, B376_PRE_RED, B376_MUT_RED][count - 1] || B376_MUT_RED
+        return { ...output, output: output.output.replaceAll('F1 guard', 'RV1 guard') }
+      }
+      return result
+    }
+    return io
+  }
+  assert.equal(hardeningDebt({ findings: [{ ...D_AUTO, hardening: undefined, hardening_why: undefined }] }).owed.length, 1)
+  assert.equal(hardeningDebt({ findings: [{ ...D_ASK, hardening: undefined, hardening_why: undefined }] }).owed.length, 1)
+  for (const [finding, leadDecision] of [[D_AUTO, 'escalate'], [D_ASK, 'bounce']]) {
+    const unmarked = { ...finding, hardening: undefined, hardening_why: undefined }
+    const io = dProof(unmarked, leadDecision)
+    const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+    assert.equal(result.status, 'done')
+    assert.equal(io.calls.logs.some((entry) => entry.finding_hardened?.finding === 'RV1-1' && entry.finding_hardened.outcome === 'killed'), true)
+    assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 2)
+  }
+})
+
+test('b376 B6 an unhardened must-fix repair bounces naming the finding', () => {
+  const io = b376ProofIo({ hardened: [] })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'harden')
+  assert.match(result.details.escalation.why, /F1/)
+  assert.match(result.details.escalation.why, /no-declaration/)
+  assert.doesNotMatch(result.details.escalation.why, /insufficient\\b/)
+  assert.equal(io.calls.logs.some((entry) => entry.finding_hardened), false)
+})
+
+test('b376 B7a a reviewer ungateable mark exempts the finding', () => {
+  const marked = { ...B376_FINDING, hardening: 'ungateable', hardening_why: 'the reviewer supplied no safe anchor' }
+  const io = b376ProofIo({
+    reviewer1: b376Review('changes-needed', [marked]),
+    reviewer2: b376Review('pass', []),
+    hardened: [],
+  })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  assert.equal(result.status, 'done')
+  const row = io.calls.logs.find((entry) => entry.finding_hardened)?.finding_hardened
+  assert.deepEqual(row, { round: 1, finding: 'F1', test: null, check: null, outcome: 'ungateable', why: 'the reviewer supplied no safe anchor' })
+
+  const repeated = b376ProofIo({
+    reviewer1: b376Review('changes-needed', [marked]), reviewer2: b376Review('changes-needed', [marked]), reviewer3: b376Review('pass', []),
+    hardened: [], limits: { build_rounds: 3 },
+  })
+  const repeatedResult = driveTask({ ...CTX, limits: { build_rounds: 3, review_rounds: 3 } }, repeated)
+  assert.equal(repeatedResult.status, 'done')
+  assert.equal(repeated.calls.logs.filter((entry) => entry.finding_hardened?.outcome === 'ungateable').length, 2)
+})
+
+test('b376 B7b a builder-claimed exemption is refused', () => {
+  for (const exemption of [
+    { exempt: 'the builder cannot waive a reviewer obligation' },
+    { ungateable: true },
+  ]) {
+    const io = b376ProofIo({ hardened: [{ ...B376_HARDENED, ...exemption }] })
+    const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+    assert.equal(result.status, 'escalation')
+    assert.equal(result.details.escalation.where, 'harden')
+    assert.match(result.details.escalation.why, /builder-exemption|only the reviewer may/)
+    assert.equal(io.calls.logs.some((entry) => entry.finding_hardened?.outcome === 'killed'), false)
+  }
+})
+
+test('b376 B7c only reviewer-origin ungateable survives a continuation panel', () => {
+  const partnerFinding = { id: 'F2', severity: 'must-fix', location: 'a.mjs:1', summary: 'the partner guard', hardening: 'ungateable', hardening_why: 'the partner cannot waive this' }
+  const reviewerFinding = { ...B376_FINDING, hardening: 'ungateable', hardening_why: 'reviewer cannot name a safe guard' }
+  const f2 = { ...B376_HARDENED, finding: 'F2', name: 'F2 guard', find: 'const guard = false', replace: 'const guard = true' }
+  const panel = dispositionPanelIo({
+    reviewer1: dReviewEnv('changes-needed', [reviewerFinding]),
+    partner1: dPartnerEnv('changes-needed', [B376_FINDING, partnerFinding]), adjudication1: dAdjEnv(),
+    reviewer2: dReviewEnv('pass', []), partner2: dPartnerEnv('pass', []), adjudication2: dAdjEnv(),
+    builder2: buildEnv({ details: { ...buildEnv().details, hardened: [f2] } }),
+    files: B376_FILES, writeThrough: true,
+  })
+  const f2Outputs = [B376_GREEN, B376_PRE_RED, B376_MUT_RED].map((entry) => ({ ...entry, output: entry.output.replaceAll('F1 guard', 'F2 guard') }))
+  const oldRun = panel.run
+  panel.run = function (cmd) {
+    const result = oldRun.call(this, cmd)
+    if (cmd === hardenWitnessCommand(B376_TEST_FILE)) return { ok: true, output: 'ok 1 - a.test.mjs\n# pass 1\n# fail 0' }
+    if (cmd === hardenCommand(B376_TEST_FILE, 'F2 guard')) {
+      const count = this.calls.run.filter(({ cmd: seen }) => seen === cmd).length
+      return f2Outputs[count - 1] || f2Outputs.at(-1)
+    }
+    return result
+  }
+  const result = driveTask({ ...D_PANEL_CTX, limits: { build_rounds: 2 } }, panel)
+  assert.equal(result.status, 'done')
+  const rows = panel.calls.logs.filter((entry) => entry.finding_hardened).map((entry) => entry.finding_hardened)
+  assert.equal(rows.some((row) => row.finding === 'F1' && row.outcome === 'ungateable'), true)
+  assert.equal(rows.some((row) => row.finding === 'F2' && row.outcome === 'killed'), true)
+})
+
+test('b376 B8 the hardening proof adds no gate result', () => {
+  const markedReviewer2 = b376Review('changes-needed', [B376_FINDING])
+  const io = b376ProofIo({
+    reviewer2: markedReviewer2, reviewer3: b376Review('pass', []), limits: { build_rounds: 3 },
+    proofOutputs: [B376_GREEN, B376_PRE_RED, B376_MUT_RED, B376_GREEN, B376_PRE_RED, B376_MUT_RED],
+  })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 3, review_rounds: 3 } }, io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.run.filter(({ cmd }) => cmd === hardenWitnessCommand(B376_TEST_FILE)).length, 2)
+  assert.equal(io.calls.run.filter(({ cmd }) => cmd === hardenCommand(B376_TEST_FILE, 'F1 guard')).length, 6)
+  const hardeningCommands = new Set([hardenWitnessCommand(B376_TEST_FILE), hardenCommand(B376_TEST_FILE, 'F1 guard')])
+  assert.equal(io.calls.emits.some(({ kind, cmd }) => kind === 'gate' && hardeningCommands.has(cmd)), false)
+})
+
+test('b376 B9 a surviving hardening mutation is refused', () => {
+  for (const mutant of [
+    { ok: false, output: 'not ok 1 - unrelated\n# pass 0\n# fail 1' },
+    { ok: true, output: 'ok 1 - unrelated\n# pass 1\n# fail 0' },
+  ]) {
+    const io = b376ProofIo({ proofOutputs: [B376_GREEN, B376_PRE_RED, mutant] })
+    const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+    assert.equal(result.status, 'escalation')
+    assert.equal(result.details.escalation.where, 'harden')
+    const row = io.calls.logs.find((entry) => entry.finding_hardened)?.finding_hardened
+    assert.equal(row.outcome, 'survived')
+    assert.match(row.why, /unrelated|absent/)
+  }
+})
+
+test('b376 B10 hardening paths cannot escape a directory scope', () => {
+  const proveRefusal = (entry, escaped, reason) => {
+    const io = b376ProofIo({
+      hardened: [entry], changed: [], limits: { build_rounds: 3 },
+      plan: { files_in_scope: ['crew/tests/'] },
+    })
+    const baseRead = io.readFile
+    io.calls.read = []
+    io.readFile = function (path) {
+      this.calls.read.push(path)
+      return baseRead.call(this, path)
+    }
+    const result = driveTask({ ...CTX, limits: { build_rounds: 3 } }, io)
+    const bounce = io.calls.writes[`${TD}/build-bounce-r2.md`]
+    const escapedAbsolute = `${CTX.checkout}/${escaped}`
+    assert.equal(result.status, 'escalation')
+    assert.match(bounce, new RegExp(`F1: ${reason}`))
+    assert.equal(io.calls.assign.filter(({ role, note }) => role === 'builder' && note === 'harden-fix').length, 1)
+    assert.equal(io.calls.read.includes(escapedAbsolute), false)
+    assert.equal(io.calls.writeLog.some(({ path }) => path === escapedAbsolute), false)
+    assert.equal(io.calls.run.some(({ cmd }) => cmd.includes(escaped)), false)
+  }
+  const escapedTest = 'crew/tests/../../outside.test.mjs'
+  proveRefusal({ ...B376_HARDENED, test: escapedTest, file: 'crew/tests/inside.mjs' }, escapedTest, 'test-not-in-scope')
+  const escapedFile = 'crew/tests/../../outside.mjs'
+  proveRefusal({ ...B376_HARDENED, test: 'crew/tests/inside.test.mjs', file: escapedFile }, escapedFile, 'file-not-in-scope')
+})
+
+test('b376 B11 a hardening restore failure stops the run with the mutation in flight', () => {
+  const io = b376ProofIo({ builder3: b376Build([]) })
+  const baseRead = io.readFile
+  let implementationReads = 0
+  io.readFile = function (path) {
+    if (path === `${CTX.checkout}/${B376_IMPL_FILE}` && implementationReads++ === 0) return 'const guard = true\n'
+    return baseRead.call(this, path)
+  }
+  const baseWrite = io.writeFile
+  let implementationWrites = 0
+  io.writeFile = function (path, content) {
+    if (path === `${CTX.checkout}/${B376_IMPL_FILE}`) {
+      implementationWrites += 1
+      if (implementationWrites === 2) throw new Error('writeFile: the restore write failed')
+    }
+    return baseWrite.call(this, path, content)
+  }
+  const result = driveTask({ ...CTX, limits: { build_rounds: 3 } }, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'harden')
+  assert.match(result.details.escalation.why, /could not restore|run stops/)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 2)
+  const hardenRow = io.calls.logs.find((entry) => entry.finding_hardened)?.finding_hardened
+  assert.equal(hardenRow.outcome, 'unproven')
+})
+
+test('b376 B12 a test-file wrapper cannot satisfy a named hardening check', () => {
+  const entry = { ...B376_HARDENED, name: B376_TEST_FILE }
+  const io = b376ProofIo({ hardened: [entry] })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'harden')
+  assert.match(result.details.escalation.why, /name-file-wrapper/)
+  assert.equal(io.calls.run.some(({ cmd }) => cmd.includes('--test-name-pattern')), false)
+})
+
+test('b376 B13 hardening refuses a mutation that changes only whitespace', () => {
+  const entry = { ...B376_HARDENED, find: 'const guard = false', replace: 'const  guard = false' }
+  const hardening = validateHardened({ hardened: [entry] }, [{ id: 'F1' }], scopeMatcher(['a.mjs', 'a.test.mjs']))
+  assert.equal(mutationChangesTokens(entry.find, entry.replace), false)
+  assert.equal(hardening.entries.length, 0)
+  assert.equal(hardening.refusals[0].reason, 'replace-identical')
+  const plan = validateMutations([{ check: 'F1', file: 'a.mjs', find: entry.find, replace: entry.replace }], scopeMatcher(['a.mjs', 'a.test.mjs']))
+  assert.equal(plan[0]?.why, 'find and replace differ only in whitespace — that mutates no token')
+})
+
+test('#846 scope refusals distinguish envelope debris from ordinary edits', () => {
+  assert.deepEqual(SCOPE_REFUSALS, ['out-of-scope-edits', 'envelope-in-checkout', 'envelope-and-edits'])
+  const cases = [
+    [[], { reason: null, envelopes: [], edits: [], why: null }],
+    [['rogue.mjs'], { reason: 'out-of-scope-edits', envelopes: [], edits: ['rogue.mjs'], why: 'out-of-scope edits persisted: rogue.mjs' }],
+    [['returns/d1.builder.json'], { reason: 'envelope-in-checkout', envelopes: ['returns/d1.builder.json'], edits: [], why: "an envelope was written to the checkout instead of the assignment's absolute returnPath: returns/d1.builder.json" }],
+    [['returns/d1.builder.json', 'rogue.mjs'], { reason: 'envelope-and-edits', envelopes: ['returns/d1.builder.json'], edits: ['rogue.mjs'], why: "an envelope was written to the checkout instead of the assignment's absolute returnPath: returns/d1.builder.json; out-of-scope edits persisted: rogue.mjs" }],
+    [['x/returns/d1.builder.json'], { reason: 'envelope-in-checkout', envelopes: ['x/returns/d1.builder.json'], edits: [], why: "an envelope was written to the checkout instead of the assignment's absolute returnPath: x/returns/d1.builder.json" }],
+    [['returns/notes.md'], { reason: 'out-of-scope-edits', envelopes: [], edits: ['returns/notes.md'], why: 'out-of-scope edits persisted: returns/notes.md' }],
+  ]
+  for (const [files, expected] of cases) assert.deepEqual(scopeRefusal(files), expected)
+  assert.equal(ENVELOPE_DEBRIS.test('x/returns/d1.builder.json'), true)
+  assert.equal(ENVELOPE_DEBRIS.test('returns/notes.md'), false)
+  const mixed = scopeRefusal(['returns/d1.builder.json', 'rogue.mjs'])
+  const brief = scopeBounceBrief(2, mixed, ['a.mjs'], `${TD}/plan.md`)
+  assert.match(brief, /ENVELOPE was written into the CHECKOUT/)
+  assert.match(brief, /OUTSIDE the plan's scope/)
+})
+
+test('#839 hardening commands escape exact names and keep witnesses unfiltered', () => {
+  const file = "o'hare.test.mjs"
+  const name = 'guard (.$)'
+  const quotedFile = `'o'"'"'hare.test.mjs'`
+  assert.equal(hardenCommand(file, name), `node --test --test-reporter=tap --test-name-pattern='guard \\(\\.\\$\\)' ${quotedFile}`)
+  assert.equal(hardenWitnessCommand(file), `node --test --test-reporter=tap ${quotedFile}`)
+  assert.doesNotMatch(hardenWitnessCommand(file), /--test-name-pattern/)
+  assert.match(hardenCommand(file, name), /--test-name-pattern=/)
+})
+
+test('#839 reviewer hardening marks preserve the five-key finding shape unless valid', () => {
+  const base = { id: 'F1', severity: 'must-fix', location: 'a.mjs:1', summary: 'guard the defect' }
+  const fiveKeys = { ...base, disposition: null }
+  assert.deepEqual(HARDENING_MARKS, ['ungateable'])
+  assert.deepEqual(HARDENING_REFUSALS, [
+    'no-declaration', 'not-an-array', 'unknown-finding', 'duplicate-finding',
+    'test-not-in-scope', 'file-not-in-scope', 'name-missing', 'name-file-wrapper', 'find-missing',
+    'replace-identical', 'builder-exemption',
+  ])
+  assert.deepEqual(HARDENING_OUTCOMES, [
+    'killed', 'survived', 'ungateable',
+    'name-not-new', 'name-absent', 'name-ambiguous', 'control-red', 'control-skipped',
+    'pre-repair-green', 'witness-missing', 'witness-absent', 'witness-unreadable',
+    'unproven', 'unapplied', 'anchor-absent', 'anchor-ambiguous', 'anchor-unsafe',
+  ])
+  const marked = { ...base, hardening: 'ungateable', hardening_why: ' documented exception ' }
+  assert.equal(hardeningOf(marked), 'ungateable')
+  assert.deepEqual(reviewFindings({ findings: [marked] }).findings, [{ ...fiveKeys, hardening: 'ungateable', hardening_why: 'documented exception' }])
+  assert.deepEqual(hardeningDebt({ findings: [marked] }), { owed: [], exempt: [{ id: 'F1', why: 'documented exception' }] })
+  for (const [label, candidate] of [
+    ['unknown mark', { ...base, hardening: 'ungatable', hardening_why: 'typo' }],
+    ['missing why', { ...base, hardening: 'ungateable' }],
+    ['empty why', { ...base, hardening: 'ungateable', hardening_why: '   ' }],
+  ]) {
+    assert.equal(hardeningOf(candidate), null, label)
+    assert.deepEqual(reviewFindings({ findings: [candidate] }).findings, [fiveKeys], label)
+    assert.deepEqual(hardeningDebt({ findings: [candidate] }), { owed: [{ id: 'F1', location: 'a.mjs:1', summary: 'guard the defect' }], exempt: [] }, label)
+  }
+})
+
+test('#839 name verdicts classify recorded Node TAP outcomes', () => {
+  const root = scratchDir('b376-name-verdict-')
+  const testFile = join(root, 'name-verdict.test.mjs')
+  const source = [
+    "import { test } from 'node:test'",
+    "test('passed', () => {})",
+    "test('failed', () => { throw new Error('expected failure') })",
+    "test('duplicate', () => {})",
+    "test('duplicate', () => {})",
+    "test('skipped', { skip: true }, () => {})",
+    "test('todo', { todo: true }, () => {})",
+    "test('outer', async (t) => {",
+    "  await t.test('nested passed', () => {})",
+    "  await t.test('nested failed', () => { throw new Error('expected failure') })",
+    '})',
+  ].join('\n')
+  try {
+    writeFileSync(testFile, `${source}\n`)
+    const env = { ...process.env }
+    delete env.NODE_TEST_CONTEXT
+    const recorded = spawnSync(process.execPath, ['--test', '--test-reporter=tap', testFile], { encoding: 'utf8', env })
+    const noMatch = spawnSync(process.execPath, ['--test', '--test-reporter=tap', '--test-name-pattern=no-such-check', testFile], { encoding: 'utf8', env })
+    assert.equal(recorded.status, 1)
+    assert.equal(noMatch.status, 0)
+    assert.deepEqual(NAME_VERDICTS, ['passed', 'failed', 'skipped', 'absent', 'ambiguous'])
+    assert.equal(nameVerdict(recorded.stdout, 'passed'), 'passed')
+    assert.equal(nameVerdict(recorded.stdout, 'failed'), 'failed')
+    assert.equal(nameVerdict(recorded.stdout, 'duplicate'), 'ambiguous')
+    assert.equal(nameVerdict(recorded.stdout, 'skipped'), 'skipped')
+    assert.equal(nameVerdict(recorded.stdout, 'todo'), 'skipped')
+    assert.equal(nameVerdict(recorded.stdout, 'nested passed'), 'passed')
+    assert.equal(nameVerdict(recorded.stdout, 'nested failed'), 'failed')
+    assert.equal(nameVerdict(noMatch.stdout, 'passed'), 'absent')
+    assert.equal(nameVerdict(recorded.stdout, 'not present'), 'absent')
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('#839 scoped hardening paths reject traversal, directories, and non-strings', () => {
+  const directoryScope = scopeMatcher(['crew/tests/'])
+  assert.equal(scopedPath('crew/tests/a.test.mjs', directoryScope), true)
+  assert.equal(scopedPath('crew/tests/../../outside.mjs', directoryScope), false)
+  assert.equal(scopedPath('crew/tests/', directoryScope), false)
+  assert.equal(scopedPath(null, directoryScope), false)
+  assert.equal(scopedPath('crew/drive.mjs', scopeMatcher(['crew/drive.mjs'])), true)
+})
+
+test('#839 witness cells distinguish read, absent, and unreadable review-time paths', () => {
+  const freshFiles = () => ({
+    [`${CTX.checkout}/${B376_TEST_FILE}`]: 'export const repaired = true\n',
+    [`${CTX.checkout}/${B376_IMPL_FILE}`]: 'const guard = false\n',
+  })
+  const readIo = b376ProofIo({ files: freshFiles() })
+  const readResult = driveTask({ ...CTX, limits: { build_rounds: 2 } }, readIo)
+  assert.equal(readResult.status, 'done')
+  assert.equal(readIo.calls.logs.find((entry) => entry.finding_hardened)?.finding_hardened.outcome, 'killed')
+
+  const absentFiles = freshFiles()
+  delete absentFiles[`${CTX.checkout}/${B376_IMPL_FILE}`]
+  const absentIo = b376ProofIo({ files: absentFiles })
+  const absentResult = driveTask({ ...CTX, limits: { build_rounds: 2 } }, absentIo)
+  const absentRow = absentIo.calls.logs.find((entry) => entry.finding_hardened)?.finding_hardened
+  assert.equal(absentResult.details.escalation.where, 'harden')
+  assert.equal(absentRow.outcome, 'witness-absent')
+  assert.match(absentRow.why, /did not exist/)
+
+  const unreadableIo = b376ProofIo({ files: freshFiles() })
+  const baseRead = unreadableIo.readFile
+  let denied = false
+  unreadableIo.readFile = function (path) {
+    if (!denied && path === `${CTX.checkout}/${B376_IMPL_FILE}`) {
+      denied = true
+      throw new Error('EACCES: witness read denied')
+    }
+    return baseRead.call(this, path)
+  }
+  const unreadableResult = driveTask({ ...CTX, limits: { build_rounds: 2 } }, unreadableIo)
+  const unreadableRow = unreadableIo.calls.logs.find((entry) => entry.finding_hardened)?.finding_hardened
+  assert.equal(unreadableResult.details.escalation.where, 'harden')
+  assert.equal(unreadableRow.outcome, 'witness-unreadable')
+  assert.match(unreadableRow.why, /EACCES/)
+  assert.doesNotMatch(unreadableRow.why, /did not exist/)
+})
+
+test('#839 hardening briefs and bounces retain specific findings', () => {
+  const brief = hardeningBriefLines([{ id: 'F1', location: 'a.mjs:1', summary: 'guard it' }], [{ id: 'F2' }])
+  assert.match(brief.join('\n'), /F1 \(a\.mjs:1\) — guard it/)
+  assert.match(brief.join('\n'), /Reviewer exemption recorded for F2/)
+  assert.deepEqual(hardeningBriefLines([], []), [])
+  const bounce = hardeningBounceLines(2, [{ finding: 'F1', reason: 'no-declaration', why: 'missing declaration' }], [
+    { finding: 'F2', outcome: 'survived', why: 'the mutation passed' },
+    { finding: 'F3', outcome: 'killed', why: null },
+  ])
+  assert.match(bounce.join('\n'), /F1: no-declaration — missing declaration/)
+  assert.match(bounce.join('\n'), /F2: survived — the mutation passed/)
+  assert.doesNotMatch(bounce.join('\n'), /F3: killed/)
+})
+
+test('#839 hardening proof restores the dirty built tree after success and each contained run failure', () => {
+  for (const [label, throwAtProofRun, outcome] of [
+    ['success', null, 'killed'],
+    ['witness', 1, 'unproven'],
+    ['control', 2, 'unproven'],
+    ['pre-repair', 3, 'unproven'],
+    ['mutation', 4, 'unproven'],
+  ]) {
+    const fixture = b376DiskProofIo({ throwAtProofRun })
+    const result = driveTask({ ...CTX, checkout: fixture.checkout, limits: { build_rounds: 2 } }, fixture.io)
+    const row = fixture.io.calls.logs.find((entry) => entry.finding_hardened)?.finding_hardened
+    assert.equal(typeof fixture.builtDigest(), 'string', label)
+    assert.equal(treeDigest(fixture.checkout), fixture.builtDigest(), label)
+    assert.equal(readFileSync(fixture.testPath, 'utf8'), fixture.repairedTest, label)
+    assert.equal(readFileSync(fixture.implementationPath, 'utf8'), fixture.repairedImplementation, label)
+    assert.notEqual(readFileSync(fixture.testPath, 'utf8'), fixture.witnessedTest, label)
+    assert.notEqual(readFileSync(fixture.implementationPath, 'utf8'), fixture.witnessedImplementation, label)
+    assert.equal(row.outcome, outcome, label)
+    if (throwAtProofRun === null) {
+      assert.equal(result.status, 'done', label)
+    } else {
+      assert.equal(result.details.escalation.where, 'harden', label)
+      assert.doesNotMatch(result.details.escalation.why, /could not restore the built tree/, label)
+    }
+  }
 })

@@ -15,6 +15,7 @@ import { fileURLToPath } from 'node:url'
 import { ROOT, sqliteAvailable } from './helpers.mjs'
 import { openRun, recordCellFailure, _resetNoticeGuardsForTest, main } from '../scripts/factory/emit.mjs'
 import { openLedger, PAYLOAD_KEYS, NODE_FLOOR } from '../scripts/factory/ledger.mjs'
+import { headlessIo } from '../crew/headless.mjs'
 
 // A handful of this file's tests query the real SQLite mirror directly (via
 // openLedger().dumpTable(...)) or otherwise assert a real, non-null
@@ -1585,4 +1586,65 @@ test('no test file names a virtual filesystem as a real path', () => {
     })
   }
   assert.deepEqual(offenders, [], `a test file names a virtual filesystem as a real path: ${offenders.join(', ')}`)
+})
+
+test('b381 A2 authentication_failed never spends the fallback', { skip: SKIP }, () => {
+  const dir = freshDir('b381-auth-fallback')
+  const taskDir = join(dir, 'task'); const returnsDir = join(dir, 'returns')
+  mkdirSync(taskDir); mkdirSync(returnsDir)
+  const crewPath = join(dir, 'crew.json')
+  const fallback = { provider: 'anthropic', id: 'claude-opus-5', agent: 'claude', effort: 'high', model: 'claude-opus-5' }
+  const member = {
+    transport: 'headless-json', agent: 'claude', provider: 'anthropic', id: 'claude-fable-5', effort: 'high', model: 'claude-fable-5',
+    fallback: [{ ...fallback }],
+  }
+  const crew = {
+    schema_version: 3, tier: 'judge', checkout: dir,
+    members: { 'tech-lead': member }, seats: { 'tech-lead': { ...member, fallback: [{ ...fallback }] } },
+  }
+  writeFileSync(crewPath, JSON.stringify(crew, null, 2))
+  const journal = []; let spawns = 0; let pid = 4200; let lastRunDir = null
+  const writeRefusal = (runDir, status = null) => {
+    const assistant = { type: 'assistant', message: { model: '<synthetic>' } }
+    const result = { type: 'result', terminal_reason: 'api_error', subtype: 'success', ...(status == null ? {} : { api_error_status: status }) }
+    writeFileSync(join(runDir, 'stream.jsonl'), `${JSON.stringify(assistant)}\n${JSON.stringify(result)}\n`)
+    writeFileSync(join(runDir, 'exit'), '1')
+  }
+  const writeAnswer = (runDir) => {
+    writeFileSync(join(returnsDir, 'd1.tech-lead.json'), JSON.stringify({ assignment_id: 'd1', role: 'tech-lead', status: 'done' }))
+    writeFileSync(join(runDir, 'stream.jsonl'), `${JSON.stringify({ type: 'result', terminal_reason: 'completed', subtype: 'success' })}\n`)
+    writeFileSync(join(runDir, 'exit'), '0')
+  }
+  const io = headlessIo({
+    crew, paths: { dir, taskDir, returnsDir }, taskDir, checkout: dir, adapters: null, bin: '/frozen/worker/bin',
+    deps: {
+      log: (row) => journal.push(row), kill: () => {}, sleep: () => {}, uuid: () => 'b381-auth-session',
+      spawn() {
+        spawns += 1
+        const root = join(taskDir, 'headless')
+        const dirs = readdirSync(root).filter((name) => /^d\d+$/.test(name)).sort((a, b) => Number(a.slice(1)) - Number(b.slice(1)))
+        lastRunDir = join(root, dirs.at(-1))
+        if (spawns === 1) writeRefusal(lastRunDir, 401)
+        else writeAnswer(lastRunDir)
+        return { pid: ++pid, unref() {} }
+      },
+    },
+  })
+  try {
+    const run = io.assign({ role: 'tech-lead', briefFile: join(taskDir, 'brief.md') })
+    const before = readFileSync(crewPath, 'utf8')
+    assert.throws(() => io.wait(run.returnPath, 600), (err) => err.stage === 'headless-budget-refused')
+    assert.equal(spawns, 1)
+    assert.equal(journal.filter((row) => row.event === 'seat-fallback').length, 0)
+    assert.equal(readFileSync(crewPath, 'utf8'), before)
+
+    // Replace the first turn with the same budget refusal but no provider kind.
+    // The still-present fallback proves the authentication refusal did not spend it.
+    writeRefusal(lastRunDir)
+    const envelope = io.wait(run.returnPath, 600)
+    assert.equal(envelope.assignment_id, 'd1')
+    assert.equal(spawns, 2)
+    assert.equal(journal.filter((row) => row.event === 'seat-fallback').length, 1)
+    assert.equal(JSON.parse(readFileSync(crewPath, 'utf8')).members['tech-lead'].model, 'claude-opus-5')
+  } finally { rmSync(dir, { recursive: true, force: true }) }
 })

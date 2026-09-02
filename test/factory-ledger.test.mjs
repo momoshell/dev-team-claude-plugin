@@ -28,9 +28,10 @@ import {
   RUN_VARIANTS, RUN_VARIANT_MARKERS, STAGE_MARKER_CHUNK, variantFromFirstMessage,
   REQUEST_MAX_CHARS, ADVISOR_AB_INCOMPLETE_REASONS, USAGE_ABSENT_CAUSES, usageAbsentCause,
   CELL_RATE_FLOOR, CELL_PRICE_UNITS, REVIEW_VERDICTS,
+  ingestJournal, ingestExternalFenceRegister,
 } from '../scripts/factory/ledger.mjs'
 import { FAILURE_UPGRADE, MODIFIER_OUTCOMES, SENSITIVITY_FLOOR, VARIANT_NAMES } from '../crew/drive.mjs'
-import { emitAdapter } from '../crew/seat-io.mjs'
+import { emitAdapter, SEAT_RETRY_EVENTS, SEAT_RETRY_KINDS } from '../crew/seat-io.mjs'
 import { headlessIo } from '../crew/headless.mjs'
 import { modelString as piModelString } from '../crew/adapters/adapter-pi.mjs'
 // openRun is the only production writer of sessions.tier and the compiler
@@ -5010,7 +5011,7 @@ test('ledger query docs pin typed outcomes, run seats, closed vocabularies, and 
   for (const source of ['roster', 'profile_recommendation', 'operator_override', 'reseat']) {
     assert.ok(docs.includes(`\`${source}\``), `docs missing ${source}`)
   }
-  assert.match(docs, /\*\*23 tables\*\*/)
+  assert.match(docs, /\*\*30 tables\*\*/)
   assert.match(docs, /FROM\s+run_seats/i)
 })
 
@@ -5851,4 +5852,283 @@ test('outside a test process the home-default resolution and open remain unchang
   const expected = join(home, '.dev-team', 'factory', 'ledger.db')
   assert.deepEqual(JSON.parse(child.stdout.trim()), { dbPath: expected })
   assert.equal(existsSync(expected), true)
+})
+
+// b381 recorded exhibits. These are kept as source rows rather than synthetic
+// fixtures so the ingest tests prove the producer's actual JSON shapes.
+// Copied from /Users/momoshell/.crew/dt-b371-loopgates/b371-loopgates/journal.jsonl:422.
+const B381_PROVIDER_FAILURE_LINE = String.raw`{"at":1788292622004,"headless_outcome":"budget-refused","exit_code":1,"signal":null,"terminal_reason":"api_error","lines":959,"stream":"/Users/momoshell/.crew/dt-b371-loopgates/b371-loopgates/task/headless/d1/stream.jsonl","provider_failure":{"kind":"rate_limit","status":429}}`
+// Copied from /Users/momoshell/.crew/dt-b374-loopgates/b374-loopgates/journal.jsonl:218.
+const B381_PLAN_SCOPE_LINE = String.raw`{"at":1788293864633,"plan_scope":{"round":1,"verdict":"plan-scope-same","added":[],"dropped":[],"dispatched":8,"planned":8},"channel":"record"}`
+// Copied from /Users/momoshell/.crew/dt-b374-loopgates/b374-loopgates/journal.jsonl:1909.
+const B381_TIMEOUT_REASK_LINE = String.raw`{"at":1788303101703,"event":"seat-timeout-reask","role":"builder","id":"d6","cause":"timeout","outcome":"failed","spent_ms":2828375,"ceiling_s":2400,"from_return_path":"/Users/momoshell/.crew/dt-b374-loopgates/b374-loopgates/returns/d6.builder.json","to_return_path":"/Users/momoshell/.crew/dt-b374-loopgates/b374-loopgates/returns/d6.retry.builder.json","from_run_id":"d6","to_run_id":null,"failure":"timeout","second":"rpc-timeout","channel":"record"}`
+// Copied from /Users/momoshell/.crew/dt-b374-loopgates/b374-loopgates/journal.jsonl:1887.
+const B381_RPC_EXIT_LINE = String.raw`{"at":1788303101702,"rpc_exit_context":{"role":"builder","id":"d6","outcome":"timeout","exit_code":143,"exit_signo":15,"exit_signal":"SIGTERM","attribution":"driver-retired","driver_signalled":true,"group_before_signal":"alive","turn_index":5,"frames":189,"last_frame":"response","last_frame_at":1788303101702,"last_tool":"bash","last_tool_at":1788299242622,"exit_seen_at":1788303101702,"exit_gap_ms":0,"stderr_bytes":119,"stderr_tail":"Warning: No project session found with id '44975ae8-15c9-4248-b83d-db399edb76bb'; creating a new session with that id.\n","stderr_truncated":false,"stderr_reason":null}}`
+// Copied from /Users/momoshell/.crew/dt-b368-scopesubset/b368-scopesubset/journal.jsonl:4.
+const B381_PLAN_ADOPTION_LINE = String.raw`{"at":"2026-09-01T17:34:33.665Z","event":"plan-adopted","task":"b368-scopesubset","lane":"b368-scopesubset","archive":"/Users/momoshell/.crew/dt-b365-scopesubset/b365-scopesubset","source":"/Users/momoshell/.crew/dt-b365-scopesubset/b365-scopesubset/task","plan_sha":"db151a63f9133b26e351a99a1a2b20bcd9a2d724fd540aab8129737f645578bb","files":["plan.md","gate.mjs","plan-check.md"],"findings":true,"adopt_from":"cli"}`
+// The full b374 register entry from /Users/momoshell/.crew/batch-2026-09-01-r8/out/dispatch.external.fences.json.
+const B381_EXTERNAL_REGISTER = JSON.stringify({ lanes: [{
+  lane: 'b374-loopgates',
+  files: [
+    'crew/drive.mjs', 'crew/drive.test.mjs', 'crew/daemon.test.mjs',
+    'crew/io-contract.test.mjs', 'crew/escalation-policy.test.mjs',
+    'crew/roles/anchors.json', 'crew/roles/planner.md', 'crew/roles/tech-lead.md',
+  ],
+  reads: [
+    'crew/child.mjs', 'crew/crew.mjs', 'crew/daemon.mjs', 'crew/factoryctl.mjs',
+    'crew/headless.mjs', 'crew/limits.mjs', 'crew/protected-paths.mjs',
+    'crew/seat-io.mjs', 'crew/variants.mjs',
+    'docs/audits/2026-08-23/hunt/h2/repro/A-08-run-resolvers.mjs',
+    'docs/audits/2026-08-23/hunt/h2/repro/B-e5-shape-and-usage.mjs',
+    'docs/audits/2026-08-23/hunt/h2/repro/C-a1-validate.mjs',
+    'docs/audits/2026-08-23/hunt/h2/repro/C-a2-matcher.mjs',
+    'docs/audits/2026-08-23/hunt/h2/repro/C-a3-fence-e2e.mjs',
+    'docs/audits/2026-08-23/hunt/h2/repro/C-a4-fence-e2e.mjs',
+    'docs/audits/2026-08-23/hunt/h2/repro/C-a5-directed-mutations.mjs',
+    'docs/audits/2026-08-23/hunt/h2/repro/C-a6-fs-aliasing.mjs',
+    'docs/audits/2026-08-23/hunt/h2/repro/C-a7-residual.mjs',
+    'docs/audits/2026-08-23/hunt/h2/repro/C-a8-constant-drift.mjs',
+    'docs/audits/2026-08-23/hunt/h2/repro/D-a5-protected-bypass.mjs',
+    'docs/audits/2026-08-23/hunt/h2/repro/E-probe1.mjs',
+    'docs/audits/2026-08-23/hunt/h2/repro/E-probe3.mjs',
+    'docs/audits/2026-08-23/hunt/h3/repro/f1-orphaned-issues.mjs',
+    'docs/audits/2026-08-23/hunt/h3/repro/f2-acceptfindings-clobber.mjs',
+    'docs/audits/2026-08-23/hunt/h3/repro/f3-ungoverned-extra-rounds.mjs',
+    'docs/audits/2026-08-23/hunt/h3/repro/f4-unreachable-no-envelope.mjs',
+    'docs/audits/2026-08-23/hunt/h3/repro/f5-unreachable-build-exhaustion.mjs',
+    'docs/audits/2026-08-23/hunt/h3/repro/f6-pure-helper-defects.mjs',
+    'docs/audits/2026-08-23/hunt/h3/repro/harness.mjs',
+    'scripts/factory/dispatch-batch.mjs', 'scripts/factory/emit.mjs',
+    'scripts/factory/lane-watch.mjs', 'scripts/factory/ledger.mjs',
+    'scripts/factory/make-brief.mjs', 'skills/qa-test-writing/anchor-pin.mjs',
+    'visualizer/server/journal-source.mjs',
+  ].map((file) => ({ file, why: 'compiler reported a coupled source while compiling lane b374-loopgates' })),
+}] })
+
+function ingestJournalLine(line, adwId) {
+  const ledger = openTestLedger()
+  const journalPath = join(nextDir(), 'journal.jsonl')
+  writeFileSync(journalPath, `${line}\n`)
+  const result = ingestJournal(journalPath, ledger, { adw_id: adwId })
+  return { ledger, journalPath, result, dbPath: ledger._dbPath }
+}
+
+function journalFactsCli(dbPath, flags = []) {
+  const result = run(['journal-facts', ...flags], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(result.status, 0, result.stderr)
+  return JSON.parse(result.stdout)
+}
+
+test('b381 F1 the recorded b371 provider_failure row round-trips journal to ledger to query', { skip: SKIP }, () => {
+  const adwId = 'b381-f1'
+  const { ledger, result, dbPath } = ingestJournalLine(B381_PROVIDER_FAILURE_LINE, adwId)
+  try {
+    assert.deepEqual(result, { applied: 1, skipped: 0, ignored: 0, failed: 0, complete: true, first_failure: null })
+    assert.deepEqual({ ...ledger.dumpTable('provider_failures')[0] }, {
+      adw_id: adwId, role: null, dispatch_id: null, kind: 'rate_limit', status: 429,
+      outcome: 'budget-refused', at_ms: 1788292622004, created_at: isoMs(1788292622004),
+    })
+  } finally { ledger.close() }
+  const payload = journalFactsCli(dbPath)
+  assert.equal(payload.provider_failures.count, 1)
+  assert.equal(payload.provider_failures.failures, 1)
+  assert.equal(payload.provider_failures.runs_seen, 1)
+})
+
+test('b381 F2 the recorded b374 plan_scope row round-trips journal to ledger to query', { skip: SKIP }, () => {
+  const adwId = 'b381-f2'
+  const { ledger, result, dbPath } = ingestJournalLine(B381_PLAN_SCOPE_LINE, adwId)
+  try {
+    assert.deepEqual(result, { applied: 1, skipped: 0, ignored: 0, failed: 0, complete: true, first_failure: null })
+    assert.deepEqual({ ...ledger.dumpTable('plan_scope_changes')[0] }, {
+      adw_id: adwId, round: 1, verdict: 'plan-scope-same', added: 0, dropped: 0,
+      dispatched: 8, planned: 8, created_at: isoMs(1788293864633),
+    })
+  } finally { ledger.close() }
+  const payload = journalFactsCli(dbPath)
+  assert.equal(payload.plan_scope.count, 1)
+  assert.equal(payload.plan_scope.changes, 1)
+  assert.equal(payload.plan_scope.rounds_seen, 1)
+})
+
+test('b381 F3 the recorded b374 seat-timeout-reask row round-trips journal to ledger to query', { skip: SKIP }, () => {
+  const adwId = 'b381-f3'
+  const { ledger, result, dbPath } = ingestJournalLine(B381_TIMEOUT_REASK_LINE, adwId)
+  try {
+    assert.deepEqual(result, { applied: 1, skipped: 0, ignored: 0, failed: 0, complete: true, first_failure: null })
+    assert.deepEqual({ ...ledger.dumpTable('seat_reasks')[0] }, {
+      adw_id: adwId, event: 'seat-timeout-reask', role: 'builder', dispatch_id: 'd6', cause: 'timeout',
+      outcome: 'failed', spent_ms: 2828375, ceiling_s: 2400, from_run_id: 'd6', to_run_id: null,
+      at_ms: 1788303101703, created_at: isoMs(1788303101703),
+    })
+  } finally { ledger.close() }
+  const payload = journalFactsCli(dbPath)
+  assert.equal(payload.seat_reasks.count, 1)
+  assert.equal(payload.seat_reasks.reasks, 1)
+  assert.equal(payload.seat_reasks.reasks_seen, 1)
+})
+
+test('b381 F4 a seat-abort-reask row round-trips journal to ledger to query', { skip: SKIP }, () => {
+  const source = JSON.parse(B381_TIMEOUT_REASK_LINE)
+  source.event = SEAT_RETRY_EVENTS[SEAT_RETRY_KINDS[1]]
+  source.cause = SEAT_RETRY_KINDS[1]
+  const adwId = 'b381-f4'
+  const { ledger, result, dbPath } = ingestJournalLine(JSON.stringify(source), adwId)
+  try {
+    assert.deepEqual(result, { applied: 1, skipped: 0, ignored: 0, failed: 0, complete: true, first_failure: null })
+    assert.deepEqual({ ...ledger.dumpTable('seat_reasks')[0] }, {
+      adw_id: adwId, event: SEAT_RETRY_EVENTS[SEAT_RETRY_KINDS[1]], role: 'builder', dispatch_id: 'd6',
+      cause: SEAT_RETRY_KINDS[1], outcome: 'failed', spent_ms: 2828375, ceiling_s: 2400,
+      from_run_id: 'd6', to_run_id: null, at_ms: 1788303101703, created_at: isoMs(1788303101703),
+    })
+  } finally { ledger.close() }
+  const payload = journalFactsCli(dbPath)
+  assert.equal(payload.seat_reasks.count, 1)
+  assert.equal(payload.seat_reasks.reasks_seen, 1)
+})
+
+test('b381 F5 the recorded b374 rpc_exit_context row round-trips journal to ledger to query', { skip: SKIP }, () => {
+  const adwId = 'b381-f5'
+  const { ledger, result, dbPath } = ingestJournalLine(B381_RPC_EXIT_LINE, adwId)
+  try {
+    assert.deepEqual(result, { applied: 1, skipped: 0, ignored: 0, failed: 0, complete: true, first_failure: null })
+    assert.deepEqual({ ...ledger.dumpTable('rpc_exit_contexts')[0] }, {
+      adw_id: adwId, role: 'builder', dispatch_id: 'd6', outcome: 'timeout', exit_code: 143,
+      exit_signal: 'SIGTERM', attribution: 'driver-retired', driver_signalled: 1,
+      group_before_signal: 'alive', turn_index: 5, frames: 189, last_frame: 'response', last_tool: 'bash',
+      exit_gap_ms: 0, stderr_bytes: 119, at_ms: 1788303101702, created_at: isoMs(1788303101702),
+    })
+  } finally { ledger.close() }
+  const payload = journalFactsCli(dbPath)
+  assert.equal(payload.rpc_exits.count, 1)
+  assert.equal(payload.rpc_exits.exits, 1)
+  assert.equal(payload.rpc_exits.exits_seen, 1)
+})
+
+test('b381 F6 the recorded b368 plan-adopted row round-trips journal to ledger to query', { skip: SKIP }, () => {
+  const adwId = 'b381-f6'
+  const { ledger, result, dbPath } = ingestJournalLine(B381_PLAN_ADOPTION_LINE, adwId)
+  try {
+    assert.deepEqual(result, { applied: 1, skipped: 0, ignored: 0, failed: 0, complete: true, first_failure: null })
+    assert.deepEqual({ ...ledger.dumpTable('plan_adoptions')[0] }, {
+      task_slug: 'b368-scopesubset', lane: 'b368-scopesubset',
+      archive: '/Users/momoshell/.crew/dt-b365-scopesubset/b365-scopesubset',
+      source: '/Users/momoshell/.crew/dt-b365-scopesubset/b365-scopesubset/task',
+      plan_sha: 'db151a63f9133b26e351a99a1a2b20bcd9a2d724fd540aab8129737f645578bb',
+      files: 3, findings: 1, adopt_from: 'cli', at_ms: Date.parse('2026-09-01T17:34:33.665Z'),
+      created_at: '2026-09-01T17:34:33.665Z',
+    })
+  } finally { ledger.close() }
+  const payload = journalFactsCli(dbPath)
+  assert.equal(payload.plan_adoptions.count, 1)
+  assert.equal(payload.plan_adoptions.adoptions, 1)
+  assert.equal(payload.plan_adoptions.adoptions_seen, 1)
+})
+
+test('b381 F7 the recorded b374 external fence register round-trips to ledger to query', { skip: SKIP }, () => {
+  const ledger = openTestLedger({ now: () => Date.parse('2026-09-02T00:00:00.000Z') })
+  const registerPath = join(nextDir(), 'dispatch.external.fences.json')
+  writeFileSync(registerPath, B381_EXTERNAL_REGISTER)
+  const batchId = 'batch-2026-09-01-r8'
+  try {
+    const result = ingestExternalFenceRegister(registerPath, ledger, { batch_id: batchId })
+    assert.deepEqual(result, { applied: 1, skipped: 0, ignored: 0, failed: 0, complete: true, first_failure: null })
+    assert.deepEqual({ ...ledger.dumpTable('external_fences')[0] }, {
+      batch_id: batchId, lane: 'b374-loopgates', files: 8, reads: 36,
+      register_path: registerPath, created_at: '2026-09-02T00:00:00.000Z',
+    })
+  } finally {
+    const dbPath = ledger._dbPath
+    ledger.close()
+    const payload = journalFactsCli(dbPath)
+    assert.equal(payload.external_fences.count, 1)
+    assert.equal(payload.external_fences.fences, 1)
+    assert.equal(payload.external_fences.lanes_seen, 1)
+  }
+})
+
+test('b381 A1 an accept-reask emit reaches the ledger through the adapter', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const emitter = { adwId: 'b381-a1', emit: (fn) => fn(ledger) }
+  try {
+    const receipt = emitAdapter(emitter)({ kind: 'accept-reask', where: 'accept', reask: 1, errors: ['missing finding'] })
+    assert.equal(receipt.at_ms, null)
+    assert.equal(receipt.reask, 1)
+    assert.equal(receipt.errors, 1)
+    assert.deepEqual({ ...ledger.dumpTable('accept_reasks')[0] }, {
+      adw_id: 'b381-a1', where_at: 'accept', reask: 1, errors: 1, at_ms: null,
+      created_at: receipt.created_at,
+    })
+  } finally { ledger.close() }
+})
+
+function measuredJournalFactsDb() {
+  const ledger = openTestLedger({ now: () => Date.parse('2024-01-01T00:00:00.000Z') })
+  const at = '2024-01-01T00:00:00.000Z'
+  ledger.recordProviderFailure({ adw_id: 'b381-denom', kind: 'rate_limit', status: 429, created_at: at })
+  ledger.recordPlanScope({ adw_id: 'b381-denom', round: 1, verdict: 'plan-scope-same', dispatched: 1, planned: 1, created_at: at })
+  ledger.recordSeatReask({ adw_id: 'b381-denom', event: 'seat-timeout-reask', outcome: 'failed', created_at: at })
+  ledger.recordAcceptReask({ adw_id: 'b381-denom', created_at: at })
+  ledger.recordRpcExitContext({ adw_id: 'b381-denom', role: 'builder', outcome: 'timeout', created_at: at })
+  ledger.recordPlanAdoption({ lane: 'b381-denom', plan_sha: 'sha', created_at: at })
+  ledger.recordExternalFence({ batch_id: 'b381-denom', lane: 'b381-denom', created_at: at })
+  const dbPath = ledger._dbPath
+  ledger.close()
+  return dbPath
+}
+
+function assertMeasuredAndAbsent(dbPath, family, denominator, countName) {
+  const measured = journalFactsCli(dbPath)
+  assert.equal(measured[family].measured, true)
+  assert.equal(measured[family][countName], 1)
+  assert.equal(measured[family][denominator], 1)
+  const absent = journalFactsCli(dbPath, ['--since', '2030-01-01T00:00:00Z', '--until', '2031-01-01T00:00:00Z'])
+  assert.equal(absent[family].measured, false)
+  assert.equal(absent[family][countName], null)
+  assert.equal(absent[family][denominator], null)
+  assert.equal(absent[family].absent, 'no rows in this window — not measured, never a measured zero')
+  assert.notEqual(absent[family][denominator], 0)
+}
+
+test('b381 D1 the provider_failures family publishes runs_seen beside its count', { skip: SKIP }, () => {
+  assertMeasuredAndAbsent(measuredJournalFactsDb(), 'provider_failures', 'runs_seen', 'failures')
+})
+test('b381 D2 the plan_scope family publishes rounds_seen beside its count', { skip: SKIP }, () => {
+  assertMeasuredAndAbsent(measuredJournalFactsDb(), 'plan_scope', 'rounds_seen', 'changes')
+})
+test('b381 D3 the seat_reasks family publishes reasks_seen beside its count', { skip: SKIP }, () => {
+  assertMeasuredAndAbsent(measuredJournalFactsDb(), 'seat_reasks', 'reasks_seen', 'reasks')
+})
+test('b381 D4 the accept_reasks family publishes accepts_seen beside its count', { skip: SKIP }, () => {
+  assertMeasuredAndAbsent(measuredJournalFactsDb(), 'accept_reasks', 'accepts_seen', 'reasks')
+})
+test('b381 D5 the rpc_exits family publishes exits_seen beside its count', { skip: SKIP }, () => {
+  assertMeasuredAndAbsent(measuredJournalFactsDb(), 'rpc_exits', 'exits_seen', 'exits')
+})
+test('b381 D6 the plan_adoptions family publishes adoptions_seen beside its count', { skip: SKIP }, () => {
+  assertMeasuredAndAbsent(measuredJournalFactsDb(), 'plan_adoptions', 'adoptions_seen', 'adoptions')
+})
+test('b381 D7 the external_fences family publishes lanes_seen beside its count', { skip: SKIP }, () => {
+  assertMeasuredAndAbsent(measuredJournalFactsDb(), 'external_fences', 'lanes_seen', 'fences')
+})
+
+test('b381 E1 a journal carrying none of these rows leaves the ledger byte-identical', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const adwId = 'b381-e1'
+  ledger.startSession({ adw_id: adwId, repo_slug: 'r', task_slug: 'none' })
+  const beforeBytes = readFileSync(ledger._jsonlPath)
+  const beforeRows = Object.fromEntries(Object.keys(TABLES).map((table) => [table, ledger.dumpTable(table)]))
+  const journalPath = join(nextDir(), 'journal.jsonl')
+  const none = [
+    { at: '2026-01-01T00:00:00.000Z', event: 'boot', task: 'b381-e1' },
+    { at: '2026-01-01T00:00:01.000Z', event: 'ordinary-log', message: 'not one of the seven facts' },
+    { at: '2026-01-01T00:00:02.000Z', event: 'heartbeat', role: 'builder' },
+  ]
+  writeFileSync(journalPath, `${none.map((row) => JSON.stringify(row)).join('\n')}\n`)
+  try {
+    const result = ingestJournal(journalPath, ledger, { adw_id: adwId })
+    assert.deepEqual(result, { applied: 0, skipped: 0, ignored: none.length, failed: 0, complete: true, first_failure: null })
+    assert.deepEqual(readFileSync(ledger._jsonlPath), beforeBytes)
+    for (const table of Object.keys(TABLES)) assert.deepEqual(ledger.dumpTable(table), beforeRows[table], table)
+  } finally { ledger.close() }
 })

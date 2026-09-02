@@ -699,7 +699,12 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
   // (the reask contract at :416), and the SAME absolute deadline. A re-assign
   // that THROWS is journalled and yields null, so the caller escalates on the
   // original outcome rather than on a reservation error nobody asked about.
-  function reaskOnFallback(run, returnPath, deadline) {
+  function reaskOnFallback(run, returnPath, deadline, providerFailure = null) {
+    if (providerFailure?.kind === PROVIDER_FAILURE_KINDS.AUTHENTICATION_FAILED) {
+      log({ at: now(), event: 'seat-fallback-declined', role: run.role,
+        assignment_id: run.id, cause: PROVIDER_FAILURE_KINDS.AUTHENTICATION_FAILED })
+      return null
+    }
     if (!fallbackFor(run, deadline)) return null
     try {
       runs.delete(returnPath)
@@ -721,7 +726,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
       const env = readEnvelopeOrFail(run)
       if (env) { const exitCode = parseExit(run.exit, read, exists); const stream = parseStream(run.stream, read, exists); const outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: env, timedOut: false, budgetRefused: stream.budgetRefused }); recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); return env }
       const exitCode = parseExit(run.exit, read, exists)
-      if (exitCode !== null) { const stream = parseStream(run.stream, read, exists); const outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: null, timedOut: false, budgetRefused: stream.budgetRefused }); recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); if (outcome === 'budget-refused') { const again = reaskOnFallback(run, returnPath, deadline); if (again) return again() } throw outcomeError(run, outcome) }
+      if (exitCode !== null) { const stream = parseStream(run.stream, read, exists); const outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: null, timedOut: false, budgetRefused: stream.budgetRefused }); recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); if (outcome === 'budget-refused') { const again = reaskOnFallback(run, returnPath, deadline, stream.providerFailure); if (again) return again() } throw outcomeError(run, outcome) }
       sleep(WAIT_POLL_MS)
     }
     if (run.pid != null) { try { kill(-run.pid, 'SIGTERM') } catch {} }
@@ -742,7 +747,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
     const raced = readEnvelopeOrFail(run)
     if (raced) { const stream = parseStream(run.stream, read, exists); const exitCode = parseExit(run.exit, read, exists); const outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: raced, timedOut: false, budgetRefused: stream.budgetRefused }); recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); return raced }
     const exitCode = parseExit(run.exit, read, exists), stream = parseStream(run.stream, read, exists), outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: null, timedOut: true, budgetRefused: stream.budgetRefused })
-    recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); if (outcome === 'budget-refused') { const again = reaskOnFallback(run, returnPath, deadline); if (again) return again() } throw outcomeError(run, outcome)
+    recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); if (outcome === 'budget-refused') { const again = reaskOnFallback(run, returnPath, deadline, stream.providerFailure); if (again) return again() } throw outcomeError(run, outcome)
   }
   return { assign, wait }
 }

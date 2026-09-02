@@ -79,14 +79,14 @@ test("each lever section carries its own measurement", () => {
   const sections = [
     [null, ['13 stages', '4 of 7', '24m of 41m', '59%', '21m of 82m', '17m of 48m', '17m of 106m', '11m of 33m', '9m of 63m', '9m of 41m', '76-163s', '75-132s', '10-15%', '1 of 4', '3 of 3']],
     ['## Lever 1', ['choose the shape', 'add a mode', 'b184', 'b187', 'three tech-lead rounds', 'round 1']],
-    ['## Lever 2', ['crew/drive.mjs:23', 'plan_rounds', '2 + 1 granted and needed 4', '--plan-rounds 3']],
+    ['## Lever 2', ['crew/drive.mjs:27', 'plan_rounds', '2 + 1 granted and needed 4', '--plan-rounds 3']],
     ['## Lever 3', ['before review', 'b190', '5 control/kill pairs', 'no findings', 'b186', '3 review rounds']],
     ['## Lever 4', ['serial discovery', 'two new ones', 'lever 3']],
     ['## Lever 5', ['b190', 'second-largest brief', 'second-fastest plan', 'b188', '24 minutes']],
     ['## Lever 6', ['5 files', '30 acks', '72KB', '17m', '2 files', '2 acks', '26KB', '9m']],
     ['## Lever 7', ['a recorded baseline is a fact about a commit and is never consumed', 'scripts/factory/make-brief.mjs:1421', '4 lanes x 2 passes', '8 identical measurements']],
     ['## Lever 8', ['#584', 'compile once']],
-    ['## Lever 9', ['no valid envelope within 2400s', '1890s', '14 files', 'six kill-mutations', '--wait-builder', 'crew/drive.mjs:48']],
+    ['## Lever 9', ['no valid envelope within 2400s', '1890s', '14 files', 'six kill-mutations', '--wait-builder', 'crew/drive.mjs:52']],
   ]
   for (const [heading, tokens] of sections) {
     const body = section(text, heading)
@@ -119,7 +119,7 @@ test('the batch reference names every refusal the sequence can hit', () => {
 // Mutation killed: widening the measured shell claim or dropping a zero-count guard must make this test fail.
 test('the shell reference records the measured zero counts and no stronger claim', () => {
   const text = readText(join(HERE, 'references/shell.md'))
-  for (const token of ['shell: true', '0 occurrences', 'process.env.SHELL', "GATE_REAP_SHELL = '/bin/bash'", 'crew/drive.mjs:343', 'crew/drive.test.mjs:3036', '${!arr[@]}', 'zsh does not word-split', 'execSync']) {
+  for (const token of ['shell: true', '0 occurrences', 'process.env.SHELL', "GATE_REAP_SHELL = '/bin/bash'", 'crew/drive.mjs:347', 'crew/drive.test.mjs:3105', '${!arr[@]}', 'zsh does not word-split', 'execSync']) {
     assert.ok(text.includes(token), `shell.md must name ${token}`)
   }
   assert.equal(text.includes('every subprocess uses an argv array'), false)

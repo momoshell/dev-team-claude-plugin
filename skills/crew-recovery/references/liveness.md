@@ -67,4 +67,4 @@ The fact leaves the pane only through the seat's `seat-retrying` / `seat-retry-c
 
 A `seat-stale` condition is retired only by measured growth or a completing envelope; a budget that expired measured nothing.
 
-The `recogniseProviderRetry` reader is implemented at `crew/seat-io.mjs:1666`.
+The `recogniseProviderRetry` reader is implemented at `crew/seat-io.mjs:1670`.

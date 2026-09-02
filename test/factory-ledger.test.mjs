@@ -461,7 +461,7 @@ test('typed endSession fields round-trip, default to NULL, and validate their en
 test('escalationCause maps the archived envelopes and never guesses an unknown pair', () => {
   const cases = [
     // b309-dispatchprep — /Users/momoshell/.crew/dt-b309-dispatchprep/b309-dispatchprep.archive-2026-08-29T08-11-33-004Z/returns/task.json
-    { where: 'planner', why: 'planner: no valid envelope at /Users/momoshell/.crew/dt-b309-dispatchprep/b309-dispatchprep/returns/d1.planner.json within 1800s — the seat is WORKING: planner produced a transcript frame 30s ago and simply exceeded its ', cause: 'budget', actor: 'driver' },
+    { where: 'planner', why: 'planner: no valid envelope at /Users/momoshell/.crew/dt-b309-dispatchprep/b309-dispatchprep/returns/d1.planner.json within 1800s — the seat is WORKING: planner produced a transcript frame 30s ago and simply exceeded its ', cause: 'seat-timeout', actor: 'driver' }, // Previously ratified the budget misclassification (#854 (1)).
     // b317-drivergone — /Users/momoshell/.crew/dt-b317-drivergone/b317-drivergone.archive-2026-08-29T14-24-05-878Z/returns/task.json
     { where: 'cold-suite', why: 'the cold verification produced no verdict (unproven): neutralColdPath: no neutral cold checkout path for ["b317-drivergone","dt-b317-drivergone","dev-team-claude-plugin"] — every candidate root was rejected [/private/var', cause: 'infrastructure', actor: 'driver' },
     // b321-driverpublish — /Users/momoshell/.crew/dt-b321-driverpublish/b321-driverpublish.archive-2026-08-29T16-35-01-212Z/returns/task.json
@@ -510,10 +510,14 @@ test('escalationCause maps the archived envelopes and never guesses an unknown p
   assert.deepEqual(escalationCause({ where: 'scope', why: 'exceeded its 1800s budget' }), { cause: 'plan-build-disagreement', actor: 'driver' })
   // Matched on `where` alone: prose is never what carries a seat death.
   assert.deepEqual(escalationCause({ where: 'seat-died', why: '' }), { cause: 'seat-lost', actor: 'driver' })
+  assert.deepEqual(escalationCause({ where: 'transport', why: 'a location no producer emits' }), { cause: 'unclassified', actor: null })
   assert.ok(ESCALATION_CAUSES.includes('seat-lost'))
   for (const cause of ['seat-timeout', 'seat-aborted', 'plan-rounds-exhausted']) {
     assert.ok(ESCALATION_CAUSES.includes(cause))
   }
+  assert.deepEqual([...ESCALATION_CAUSES].slice(-3), [
+    'envelope-unusable', 'envelope-absent', 'build-rounds-exhausted',
+  ])
   assert.deepEqual([...ESCALATION_CAUSES].slice(0, 8), [
     'transport', 'budget', 'plan-build-disagreement', 'brief-contradiction',
     'gate-defect', 'review-unresolved', 'infrastructure', 'seat-lost',
@@ -531,6 +535,11 @@ test('escalationCause matches a seat failure on its stage, not on its prose', ()
   assert.deepEqual(escalationCause({ where: 'builder', why: 'headless aborted: seat builder produced no valid envelope at /x' }), { cause: 'seat-aborted', actor: 'driver' })
   assert.deepEqual(escalationCause({ where: 'reviewer', why: 'rpc aborted: seat reviewer produced no envelope at /x' }), { cause: 'seat-aborted', actor: 'driver' })
   assert.deepEqual(escalationCause({ where: 'headless-budget-refused', why: 'headless budget-refused: seat planner produced no valid envelope at /x' }), { cause: 'budget', actor: 'driver' })
+  assert.deepEqual(escalationCause({ where: 'headless-no-envelope', why: 'headless no-envelope: seat planner produced no valid envelope at /Users/momoshell/.crew/dt-b377-escalcause/b377-escalcause/returns/d1.planner.json' }), { cause: 'envelope-absent', actor: 'driver' })
+  assert.deepEqual(escalationCause({ where: 'rpc-no-envelope', why: 'rpc no-envelope: seat planner produced no envelope at /Users/momoshell/.crew/dt-b377-escalcause/b377-escalcause/returns/d1.planner.json' }), { cause: 'envelope-absent', actor: 'driver' })
+  assert.deepEqual(escalationCause({ where: 'headless-malformed', why: 'headless malformed: seat builder produced no valid envelope at /Users/momoshell/.crew/dt-b377-escalcause/b377-escalcause/returns/d2.builder.json' }), { cause: 'envelope-unusable', actor: 'driver' })
+  assert.deepEqual(escalationCause({ where: 'rpc-malformed', why: 'rpc malformed: seat builder produced no envelope at /Users/momoshell/.crew/dt-b377-escalcause/b377-escalcause/returns/d2.builder.json' }), { cause: 'envelope-unusable', actor: 'driver' })
+  assert.deepEqual(escalationCause({ where: 'rpc-parse-error', why: 'rpc parse failed: malformed input' }), { cause: 'envelope-unusable', actor: 'driver' })
 })
 
 test('the plan round cap is bounded to its own sentence', () => {
@@ -539,6 +548,46 @@ test('the plan round cap is bounded to its own sentence', () => {
   assert.deepEqual(escalationCause({ where: 'plan', why: 'no accepted plan within rounds' }), { cause: 'unclassified', actor: null })
   assert.deepEqual(escalationCause({ where: 'plan', why: 'planner envelope carries no files_in_scope — the scope gate cannot run without it' }), { cause: 'unclassified', actor: null })
   assert.deepEqual(escalationCause({ where: 'plan', why: "allowlisted read-only recipe' test reddens the moment package.json gains factory:closeout. The compiled brief therefore demands (acceptance h + 'Full suite green') something its own fence forbids — a contradiction inside an artifact compiled outside this workspace. A bounce is wo" }), { cause: 'brief-contradiction', actor: 'operator' })
+})
+
+test('review-unresolved producer stage maps to the named cause', () => {
+  assert.deepEqual(escalationCause({
+    where: 'review-unresolved',
+    why: 'the lead could not settle the ask-user finding and no review round remains',
+  }), { cause: 'review-unresolved', actor: 'lead' })
+})
+
+test('build round cap is anchored to its own generated sentence', () => {
+  assert.deepEqual(escalationCause({ where: 'build', why: 'no accepted build within 6 rounds' }), { cause: 'build-rounds-exhausted', actor: 'lead' })
+  assert.deepEqual(escalationCause({ where: 'build', why: 'no accepted build within rounds' }), { cause: 'unclassified', actor: null })
+})
+
+test('plan-scope-widened producer stage maps to a plan-build disagreement', () => {
+  assert.deepEqual(escalationCause({
+    where: 'plan-scope-widened',
+    why: 'the plan widens the dispatched write surface with crew/drive.mjs — a lane may narrow the surface it was dispatched with, never widen it; on the final plan round there is no revision left to bounce it to',
+  }), { cause: 'plan-build-disagreement', actor: 'driver' })
+})
+
+test('substrate-gone producer stage maps to transport', () => {
+  assert.deepEqual(escalationCause({
+    where: 'substrate-gone',
+    why: 'substrate gone: planner — the pane manager stopped answering (3 consecutive substrate probes over 180s), so every pane it owned is unreachable and no envelope arrived at /Users/momoshell/.crew/dt-b377-escalcause/b377-escalcause/returns/d1.planner.json',
+  }), { cause: 'transport', actor: 'driver' })
+})
+
+test('seat-refused producer stage maps to transport', () => {
+  assert.deepEqual(escalationCause({
+    where: 'seat-refused',
+    why: 'seat refused: builder — the provider says: usage limit reached (rate-limit, from the claude transcript at 2026-09-01T10:00:00.000Z); no envelope arrived at /Users/momoshell/.crew/dt-b377-escalcause/b377-escalcause/returns/d2.builder.json',
+  }), { cause: 'transport', actor: 'driver' })
+})
+
+test('variant-wrapped seat death maps to seat-lost', () => {
+  assert.deepEqual(escalationCause({
+    where: 'scout',
+    why: 'the planner seat failed: seat died: planner — its pane is gone (2 consecutive liveness probes) and no envelope arrived at /Users/momoshell/.crew/dt-b377-escalcause/b377-escalcause/returns/d1.planner.json',
+  }), { cause: 'seat-lost', actor: 'driver' })
 })
 
 test('new escalation causes round-trip through sessions and escalations', { skip: SKIP }, () => {
@@ -3534,6 +3583,11 @@ test('escalations CLI prints grouped causes and refuses unbounded or invalid win
   ledger.endSession({ adw_id: 'cli-escalation-driver', status: 'aborted', outcome: 'escalated', terminal_reason: 'transport', terminal_actor: 'driver', ended_at: '2024-01-02T00:00:00.000Z' })
   ledger.startSession({ adw_id: 'cli-escalation-lead', repo_slug: 'r', task_slug: 'cli-escalation-lead' })
   ledger.endSession({ adw_id: 'cli-escalation-lead', status: 'aborted', outcome: 'escalated', terminal_reason: 'transport', terminal_actor: 'lead', ended_at: '2024-01-02T00:00:01.000Z' })
+  for (let i = 0; i < 3; i += 1) {
+    const adw_id = `cli-escalation-success-${i}`
+    ledger.startSession({ adw_id, repo_slug: 'r', task_slug: adw_id })
+    ledger.endSession({ adw_id, status: 'ok', outcome: 'success', ended_at: `2024-01-03T00:00:0${i}.000Z` })
+  }
   const dbPath = ledger._dbPath
   ledger.close()
 
@@ -3549,6 +3603,25 @@ test('escalations CLI prints grouped causes and refuses unbounded or invalid win
     { cause: 'transport', actor: 'lead', count: 1 },
   ])
   assert.deepEqual(payload.absent, null)
+  assert.ok(payload.causes.includes('unclassified'))
+
+  const measuredZero = run(['escalations', '--since', '2024-01-03T00:00:00Z', '--until', '2024-01-03T00:01:00Z'], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(measuredZero.status, 0, measuredZero.stderr)
+  const zeroPayload = JSON.parse(measuredZero.stdout)
+  assert.equal(zeroPayload.measured, true)
+  assert.equal(zeroPayload.escalated, 0)
+  assert.equal(zeroPayload.runs_ended, 3)
+  assert.deepEqual(zeroPayload.absent, null)
+  assert.deepEqual(zeroPayload.rows, [])
+  assert.ok(zeroPayload.causes.includes('unclassified'))
+
+  const unmeasured = run(['escalations', '--since', '2024-01-04T00:00:00Z', '--until', '2024-01-04T00:01:00Z'], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(unmeasured.status, 0, unmeasured.stderr)
+  const unmeasuredPayload = JSON.parse(unmeasured.stdout)
+  assert.equal(unmeasuredPayload.measured, false)
+  assert.equal(unmeasuredPayload.escalated, null)
+  assert.equal(unmeasuredPayload.runs_ended, null)
+  assert.deepEqual(unmeasuredPayload.absent, { escalations: 'no run ended in this window — not measured, never a measured zero' })
 
   for (const args of [
     ['escalations'],
@@ -3677,6 +3750,87 @@ test('escalations groups typed outcomes by cause and actor over ended_at half-op
   assert.deepEqual(ledger.escalations({ since: '2024-01-02T00:01:00.000Z' }).map((row) => ({ ...row })), [
     { cause: 'transport', actor: 'driver', count: 1, first_at: '2024-01-02T00:01:00.000Z', last_at: '2024-01-02T00:01:00.000Z' },
   ])
+})
+
+test('endedRuns groups every ended outcome over an ended_at half-open window', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const seed = (adwId, endedAt, outcome, terminalReason = null, terminalActor = null) => {
+    ledger.startSession({ adw_id: adwId, repo_slug: 'r', task_slug: adwId, started_at: '2024-01-01T00:00:00.000Z' })
+    const status = outcome === 'escalated' || outcome === 'aborted' ? 'aborted' : outcome === 'failed' ? 'fail' : 'ok'
+    ledger.endSession({ adw_id: adwId, status, outcome, terminal_reason: terminalReason, terminal_actor: terminalActor, ended_at: endedAt })
+  }
+  seed('ended-success', '2024-01-02T00:00:00.000Z', 'success')
+  seed('ended-escalated', '2024-01-02T00:00:01.000Z', 'escalated', 'transport', 'driver')
+  seed('ended-failed', '2024-01-02T00:00:02.000Z', 'failed')
+  seed('ended-untyped', '2024-01-02T00:00:03.000Z', null)
+  seed('ended-at-until', '2024-01-02T00:01:00.000Z', 'success')
+
+  try {
+    const rows = ledger.endedRuns({ since: '2024-01-02T00:00:00.000Z', until: '2024-01-02T00:01:00.000Z' }).map((row) => ({ ...row }))
+    assert.deepEqual(rows, [
+      { outcome: null, count: 1, first_at: '2024-01-02T00:00:03.000Z', last_at: '2024-01-02T00:00:03.000Z' },
+      { outcome: 'escalated', count: 1, first_at: '2024-01-02T00:00:01.000Z', last_at: '2024-01-02T00:00:01.000Z' },
+      { outcome: 'failed', count: 1, first_at: '2024-01-02T00:00:02.000Z', last_at: '2024-01-02T00:00:02.000Z' },
+      { outcome: 'success', count: 1, first_at: '2024-01-02T00:00:00.000Z', last_at: '2024-01-02T00:00:00.000Z' },
+    ])
+  } finally { ledger.close() }
+})
+
+test('escalationWindow takes its numerator and denominator from one SQLite snapshot', { skip: SKIP }, () => {
+  const writer = openTestLedger()
+  const dbPath = writer._dbPath
+  const since = '2024-01-02T00:00:00.000Z'
+  const until = '2024-01-02T00:01:00.000Z'
+  writer.startSession({ adw_id: 'snapshot-success', repo_slug: 'r', task_slug: 'snapshot-success', started_at: '2024-01-01T00:00:00.000Z' })
+  writer.endSession({ adw_id: 'snapshot-success', status: 'ok', outcome: 'success', ended_at: '2024-01-02T00:00:00.000Z' })
+  writer.startSession({ adw_id: 'snapshot-late-escalation', repo_slug: 'r', task_slug: 'snapshot-late-escalation', started_at: '2024-01-01T00:00:00.000Z' })
+
+  const reader = openLedger({ dbPath, readOnly: true, stderr: { write: () => {} } })
+  const conn = reader.readConnection()
+  const prepare = conn.prepare.bind(conn)
+  let snapshotStatements = 0
+  let lateEscalationEnded = false
+  conn.prepare = (sql) => {
+    const statement = prepare(sql)
+    if (!sql.includes('WITH window_sessions AS')) return statement
+    snapshotStatements += 1
+    return new Proxy(statement, {
+      get(target, property) {
+        if (property === 'all') {
+          return (...args) => {
+            const rows = target.all(...args)
+            // This commit is exactly after the only reader statement consumed
+            // its snapshot. Two independent statements would put the new run
+            // in the denominator but leave it out of the numerator.
+            if (!lateEscalationEnded) {
+              lateEscalationEnded = true
+              writer.endSession({
+                adw_id: 'snapshot-late-escalation', status: 'aborted', outcome: 'escalated',
+                terminal_reason: 'transport', terminal_actor: 'driver', ended_at: '2024-01-02T00:00:01.000Z',
+              })
+            }
+            return rows
+          }
+        }
+        const value = Reflect.get(target, property, target)
+        return typeof value === 'function' ? value.bind(target) : value
+      },
+    })
+  }
+
+  try {
+    const snapshot = reader.escalationWindow({ since, until })
+    const total = (rows) => rows.reduce((n, row) => n + Number(row.count ?? 0), 0)
+    assert.equal(snapshotStatements, 1, 'the CLI reader must issue one aggregate statement')
+    assert.equal(lateEscalationEnded, true)
+    assert.equal(total(snapshot.rows), 0)
+    assert.equal(total(snapshot.endedRows), 1)
+    assert.equal(total(writer.escalations({ since, until })), 1)
+    assert.equal(total(writer.endedRuns({ since, until })), 2)
+  } finally {
+    reader.close()
+    writer.close()
+  }
 })
 
 test('tableNames reads live schema names', { skip: SKIP }, () => {

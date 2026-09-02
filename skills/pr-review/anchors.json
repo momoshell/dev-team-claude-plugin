@@ -1,0 +1,8 @@
+{
+  "crew/roles/reviewer.md:12": "2. Judge two separate questions, in order:",
+  "crew/roles/reviewer.md:14": "Out-of-plan edits are findings even when harmless.",
+  "crew/roles/reviewer.md:41": "\"details\": { \"review_path\": \"<abs>\", \"verdict\": \"pass\"|\"changes-needed\",",
+  "crew/roles/reviewer.md:55": "`findings` is optional: omit it and the run behaves exactly as before.",
+  "crew/drive.mjs:1388": "export function validateScopeEntries(entries) {",
+  "crew/drive.mjs:2040": "for (const match of narration.matchAll(/[A-Za-z0-9_.-]+\\/[A-Za-z0-9_./-]+/g)) {"
+}

@@ -6,7 +6,7 @@ Dispatch a batch in this order, and record what refuses at each boundary:
 2. Boot with **one shared fence register for the whole batch**. Boot writes the
    other lanes' files, so every write lane must be known before any seat boots.
 3. Ask the compiler with `--discover-reads <lane>` for the reads a lane must acknowledge, write those records into the register, and perform a **single compile**. If that compile still refuses, the batch refuses `reads-unresolved` rather than retrying. A hand-authored register with spare acknowledgements remains guarded by **`stale-read-ack`**, while the coupled-source-unfenced refusal names the records discovery returns. A `where` path that does not exist refuses
-   **`missing-path`** (`scripts/factory/make-brief.mjs:112`, `COUPLED_SOURCE_UNFENCED = 'coupled-source-unfenced'`; `scripts/factory/make-brief.mjs:113`, `STALE_READ_ACK = 'stale-read-ack'`).
+   **`missing-path`** (`scripts/factory/make-brief.mjs:112`, `COUPLED_SOURCE_UNFENCED = 'coupled-source-unfenced'`; `scripts/factory/make-brief.mjs:113`, `STALE_READ_ACK = 'stale-read-ack'`). An unreadable adopted plan or gate refuses **`plan-adopt-unreadable`** before anything is copied.
 4. Verify through **`validateScopeEntries`** and **`scopeMatcher`** for own-file
    coverage and zero sibling leaks.
 5. Check the protected floor with **`protectedHitsIn`** over
@@ -14,8 +14,10 @@ Dispatch a batch in this order, and record what refuses at each boundary:
    `references/tier.md`.
 6. Boot the lanes, then background `run`.
 7. Check **arrival, not parsing**: `crew.json` carries `lane_name` for the own
-   lane and `lane_fence` for siblings (a count of batch total minus own); the
-   journal carries the `lane-fence` event. **`fence=NONE`** in a write lane means
+   lane and `lane_fence` for siblings (`batch total minus one` batch siblings
+   plus `one entry per external` fence); `checkArrival` counts only non-external
+   members against `batchTotal - 1` and separately requires each external to be
+   present. The journal carries the `lane-fence` event. **`fence=NONE`** in a write lane means
    a boot-only flag went to the wrong verb.
 
 Parallelise on file-set disjointness, never on workspace count. The batch's
@@ -41,7 +43,7 @@ one.
 
 A register entry marked `"external": true` names a live lane from ANOTHER batch: it denies every batch lane's write surface, it is not counted in the sibling total `checkArrival` derives, and a stale entry refuses `external-fence-stale` by name.
 
-Fence isolation now spans concurrent batches. The dispatcher verifies that the named lane's crew dir persists that exact lane name and its run has not settled, and the deny set is never derived by scanning `~/.crew`. It also consults the journal freshness signal: an external lane with no terminal stage whose journal has been silent for `DRIVER_GONE_PERIODS × HEARTBEAT_PERIOD_MS` refuses `external-fence-abandoned`, distinct from `external-fence-stale`; the refusal constants are `EXTERNAL_FENCE_STALE = 'external-fence-stale'` at `scripts/factory/dispatch-batch.mjs:47` and `EXTERNAL_FENCE_ABANDONED = 'external-fence-abandoned'` at `scripts/factory/dispatch-batch.mjs:48`.
+Fence isolation now spans concurrent batches. The dispatcher verifies that the named lane's crew dir persists that exact lane name and its run has not settled, and the deny set is never derived by scanning `~/.crew`. `sibling-leak` enforcement applies to externals like any other entry: the leak loop iterates every register entry, and only a `depends_on` edge exempts. While the deny SET is never derived by scanning `~/.crew`, external LIVENESS is read from `~/.crew` by `externalFenceLiveness`. It also consults the journal freshness signal: an external lane with no terminal stage whose journal has been silent for `DRIVER_GONE_PERIODS × HEARTBEAT_PERIOD_MS` refuses `external-fence-abandoned`, distinct from `external-fence-stale`; the refusal constants are `EXTERNAL_FENCE_STALE = 'external-fence-stale'` at `scripts/factory/dispatch-batch.mjs:47` and `EXTERNAL_FENCE_ABANDONED = 'external-fence-abandoned'` at `scripts/factory/dispatch-batch.mjs:48`.
 
 `run-settled`, `run-complete`, and `run-escalated` are three distinct terminal reasons. The declared file list is compared with the external lane's own `crew.json` sibling claims and a contradiction is reported, not silently cleared. That comparison cannot measure an under-declared external because a lane's own fence is not recorded in its own `crew.json`; an unmeasured heartbeat (`heartbeat_age_ms: null`) is never read as abandoned.
 

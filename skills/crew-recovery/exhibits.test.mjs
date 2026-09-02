@@ -4,15 +4,55 @@ import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { ROOT } from '../../test/helpers.mjs'
+import { PLAN_SCOPE } from '../../crew/drive.mjs'
+import { SEAT_DIED_STAGE, SEAT_REFUSAL_STAGE } from '../../crew/seat-io.mjs'
+import { VARIANT_NAMES } from '../../crew/variants.mjs'
 import { assertAnchorsPinned } from '../qa-test-writing/anchor-pin.mjs'
 
 const HERE = fileURLToPath(new URL('./', import.meta.url))
+const DRIVE = 'crew/drive.mjs'
+const STAGE_FILES = [DRIVE, 'crew/seat-io.mjs', 'crew/headless.mjs', 'crew/headless-rpc.mjs', 'crew/child.mjs', 'crew/reclaim.mjs', 'crew/daemon.mjs']
+const QUOTE = "['\"`]"
 
 function readText(path) {
   const text = readFileSync(path, 'utf8')
   assert.ok(text.length > 0, `${path} is empty`)
   return text
 }
+
+// Mutation killed: adding a producer without a row reddens this equality, so the emitted driver set cannot drift undocumented.
+test("escalations.md's driver table equals the escalate() producers", () => {
+  const source = readFileSync(join(ROOT, DRIVE), 'utf8')
+  const emitted = new Set()
+  for (const match of source.matchAll(new RegExp(`\\bescalate\\(\\s*${QUOTE}([a-z][a-z0-9-]*)${QUOTE}`, 'g'))) emitted.add(match[1])
+  for (const name of VARIANT_NAMES) emitted.add(name)
+  emitted.add(PLAN_SCOPE.widened)
+  emitted.add('driver')
+  const documented = new Set([...readText(join(HERE, 'references/escalations.md')).matchAll(/^\|\s*`escalate:([a-z][a-z0-9-]*)`\s*\|/gm)].map((match) => match[1]))
+  assert.deepEqual([...documented].sort(), [...emitted].sort())
+})
+
+// Mutation killed: adding a producer without a row reddens this equality, so every transport err.stage reaches the crash table.
+test("escalations.md's crash table equals the err.stage producers", () => {
+  const emitted = new Set()
+  for (const rel of STAGE_FILES) {
+    const source = readFileSync(join(ROOT, rel), 'utf8')
+    for (const pattern of [
+      `\\.stage\\s*=\\s*${QUOTE}([a-z][a-z0-9-]*)${QUOTE}`,
+      `\\bstage:\\s*${QUOTE}([a-z][a-z0-9-]*)${QUOTE}`,
+      `\\bstaged\\(\\s*${QUOTE}([a-z][a-z0-9-]*)${QUOTE}`,
+      `\\bfail\\(\\s*${QUOTE}([a-z][a-z0-9-]*)${QUOTE}`,
+    ]) for (const match of source.matchAll(new RegExp(pattern, 'g'))) emitted.add(match[1])
+  }
+  emitted.add(SEAT_REFUSAL_STAGE)
+  emitted.add(SEAT_DIED_STAGE)
+  emitted.add('headless-no-envelope')
+  const text = readText(join(HERE, 'references/escalations.md'))
+  const start = text.indexOf('## Crash stages')
+  assert.notEqual(start, -1, 'escalations.md is missing the crash stages section')
+  const documented = new Set([...text.slice(start).matchAll(/^\|\s*`([a-z][a-z0-9-]*)`\s*\|/gm)].map((match) => match[1]))
+  assert.deepEqual([...documented].sort(), [...emitted].sort())
+})
 
 // Mutation killed: moving an instrument citation or weakening its source substring must redden the recovery pin.
 test('every crew-recovery path:line anchor carries what the prose claims', () => {

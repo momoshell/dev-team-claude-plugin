@@ -19,8 +19,19 @@ case per measurement:
 - `node --test` can silently ignore a path that does not exist while exiting 0 with `# fail 0`; a green summary is not evidence that a test file ran.
 
 Since PR #577, a seat that looks alive may have been refused: the runtime names
-the refusal from the transport's typed frame, journals `seat-refusal`, re-prompts
-**once**, and ends on a second rejection. Read the journal and returns rather
+the refusal from the transport's typed frame, journals `seat-refusal`, and the
+seat-refusal re-prompt is **one of three re-asks** sharing a single grace (see
+liveness.md). It ends on a second rejection. Read the journal and returns rather
 than the pane. Re-derive a surprising measurement **a second way** before
 acting; a memory recording a MEASUREMENT is not overturned by another module's
 intent — find the mechanism in code first.
+
+- `rpc_exit_context` is emitted only by the `headless-rpc` transport and only for a
+  turn that ended **WITHOUT** an envelope. Its `attribution` is the closed
+  `EXIT_ATTRIBUTIONS` set `driver-retired | external-signal | self-exit | unknown`.
+  The `headless-json` transport emits none, so its absence is not evidence.
+- `provider_failure` is present only when a provider failure was classified. Its
+  `kind` is the closed `PROVIDER_FAILURE_KINDS` set
+  `rate_limit | authentication_failed | server_error | provider-unclassified`
+  (including the hyphenated member), and it carries `status`. A non-finite status
+  yields no kind at all rather than a guess.

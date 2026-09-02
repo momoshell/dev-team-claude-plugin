@@ -21,6 +21,7 @@ a parsed brief or a green-looking dispatch insufficient evidence.
 | Dispatching a batch | `references/batch.md` | Follow the refusal-aware sequence and verify fence arrival. |
 | Choosing shell invocation | `references/shell.md` | Keep shell for invocation and node for logic, at the measured boundary. |
 | Writing boot or run arguments | `references/flags.md` | Treat `KNOWN_FLAGS` as per-verb, and keep boot-only fence state at boot. |
+| Handling adoption/redispatch | `references/flags.md` | Use the dispatch-batch flag family for archive adoption and redispatch. |
 | Compiling and checking a fence | `references/fences.md` | Check both compiler passes, consumers, and arrival in the live lane. |
 | Choosing tier for a protected surface | `references/tier.md` | Apply the floor at plan-accept and settle the pane tier at boot. |
 | Isolating and closing the checkout | `references/worktree.md` | Use a real worktree, detect dirty symlinks, and rebase before the PR. |

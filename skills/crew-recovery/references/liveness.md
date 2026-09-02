@@ -18,6 +18,13 @@ planner's mutation declaration, open the seat's own
 `returns/d1.planner.json` (or the corresponding per-seat return), then inspect
 `details.findings` or `details.mutations` there.
 
+## Seat re-asks
+
+`SEAT_RETRY_EVENTS` emits the two retry rows `seat-timeout-reask` and
+`seat-abort-reask` (`seat-io.mjs`). `REASK_MAX = 1` is one shared grace per
+assignment, spent by the timeout re-ask, the abort re-ask and the unusable-envelope
+re-ask alike. The refusal says it verbatim: "the bound is 1 per assignment, shared across causes".
+
 ## Two instruments, one verdict
 
 Use status for alive, the cmux surface for pane presence, and journal recency

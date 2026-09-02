@@ -33,10 +33,11 @@ place that runs the review flow.
   both positions and resolve it using `references/divergence.md`.
 - Never report a rate without its denominator. A measured yield is a claim about
   the corpus and its denominator, not a free-floating percentage.
-- `confidence` is mandatory on every finding. Use the scout shape for scout
-  findings; the reviewer envelope's finding is a different object,
-  `{id, severity, location, summary}`, at `crew/roles/reviewer.md:37-42` and
-  optional at `crew/roles/reviewer.md:49`.
+- The reviewer envelope's finding object is at `crew/roles/reviewer.md:41-48` and
+  it is `{id, severity, disposition, patch, location, summary}` — not the
+  four-field shape the sentence claims; `findings` is optional, at
+  `crew/roles/reviewer.md:55`. `confidence` appears in reviewer.md only in the
+  scout/recommendation shape.
 
 ## Rubric, ordered by measured yield
 

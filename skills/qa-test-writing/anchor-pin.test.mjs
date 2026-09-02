@@ -1,9 +1,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { join, relative } from 'node:path'
 import { tmpdir } from 'node:os'
-import { assertAnchorsPinned, checkAnchors, checkSkillAnchors, MIN_EXPECTED_LENGTH, repairAnchorsInPlace, repairCli, skillDocs } from './anchor-pin.mjs'
+import { ROOT, git, scratchDir } from '../../test/helpers.mjs'
+import { assertAnchorsPinned, checkAnchors, checkSkillAnchors, laneFence, MIN_EXPECTED_LENGTH, repairAnchorsInPlace, repairCli, skillDocs } from './anchor-pin.mjs'
 
 const EXPECTED = "KEY = 'anchored-sentinel-value'"
 
@@ -427,5 +428,208 @@ test('checking reports a shift but never rewrites the manifest or the doc', () =
     assert.equal(bytes(fx), before)
   } finally {
     dispose(fx)
+  }
+})
+
+test('repair vacates a line before another anchor claims it', () => {
+  // Mutation killed: checking collisions only against the original manifest refuses a destination another repair vacates.
+  const root = scratchDir('b383-anchor-repair-')
+  mkdirSync(join(root, 'crew'), { recursive: true })
+  writeFileSync(join(root, 'crew/sample.mjs'), [
+    '// header',
+    '// pad a',
+    '// pad b',
+    '// pad c',
+    "const ALPHA = 'anchor-alpha-value'",
+    'const other = 1',
+    "const BETA = 'anchor-beta-value'",
+    '',
+  ].join('\n'))
+  const skillDir = join(root, 'skills/sample')
+  mkdirSync(skillDir, { recursive: true })
+  const doc = join(skillDir, 'SKILL.md')
+  writeFileSync(doc, '# sample\n\nAlpha: `crew/sample.mjs:3`. Beta: `crew/sample.mjs:5`.\n')
+  const manifestPath = join(skillDir, 'anchors.json')
+  writeFileSync(manifestPath, JSON.stringify({
+    'crew/sample.mjs:3': "const ALPHA = 'anchor-alpha-value'",
+    'crew/sample.mjs:5': "const BETA = 'anchor-beta-value'",
+  }, null, 2))
+  try {
+    const result = repairAnchorsInPlace({ root, skillDir, manifestPath })
+    assert.deepEqual(result.refusals, [])
+    assert.equal(result.repairs.length, 2)
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+    assert.equal(manifest['crew/sample.mjs:5'], "const ALPHA = 'anchor-alpha-value'")
+    assert.equal(manifest['crew/sample.mjs:7'], "const BETA = 'anchor-beta-value'")
+    const repaired = readFileSync(doc, 'utf8')
+    assert.ok(repaired.includes('crew/sample.mjs:5'))
+    assert.ok(repaired.includes('crew/sample.mjs:7'))
+    assert.deepEqual(checkAnchors({ root, docs: [doc], manifest }), { anchors: 2, failures: [], shifted: [] })
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('an in-fence shift is a hard failure', () => {
+  // Mutation killed: treating every shift as an out-of-fence warning lets changed files drift silently.
+  const source = ['// header', '// inserted before the declaration', `const ${EXPECTED}`, 'const other = 1', 'export default KEY', '']
+  const fx = fixture({ source })
+  try {
+    assert.throws(
+      () => assertAnchorsPinned({ root: fx.root, skillDir: fx.skillDir, manifestPath: fx.manifestPath, minAnchors: 1, fence: ['crew/sample.mjs'], log: () => {} }),
+      /crew\/sample\.mjs:2.*inside this lane's fence/,
+    )
+  } finally {
+    dispose(fx)
+  }
+})
+
+test('an out-of-fence shift warns and returns the anchor count', () => {
+  // Mutation killed: refusing an out-of-fence shift would make drift outside this lane's ownership block the suite.
+  const source = ['// header', '// inserted before the declaration', `const ${EXPECTED}`, 'const other = 1', 'export default KEY', '']
+  const fx = fixture({ source })
+  const captured = []
+  try {
+    assert.equal(assertAnchorsPinned({ root: fx.root, skillDir: fx.skillDir, manifestPath: fx.manifestPath, minAnchors: 1, fence: ['crew/other.mjs'], log: (line) => captured.push(line) }), 1)
+    assert.equal(captured.length, 1)
+    assert.match(captured[0], /crew\/sample\.mjs:2/)
+  } finally {
+    dispose(fx)
+  }
+})
+
+test('an unmeasurable lane fence is empty and warns rather than throwing', () => {
+  // Mutation killed: guessing a scratch directory's fence would turn an unmeasured blind spot into a false hard failure.
+  const source = ['// header', '// inserted before the declaration', `const ${EXPECTED}`, 'const other = 1', 'export default KEY', '']
+  const fx = fixture({ source })
+  const captured = []
+  try {
+    const measured = laneFence({ root: fx.root })
+    assert.deepEqual(measured.paths, [])
+    assert.equal(measured.measured, false)
+    assert.ok(measured.reason)
+    assert.equal(assertAnchorsPinned({ root: fx.root, skillDir: fx.skillDir, manifestPath: fx.manifestPath, minAnchors: 1, log: (line) => captured.push(line) }), 1)
+    assert.ok(captured.some((line) => line.includes('anchor fence unmeasured')))
+    assert.ok(captured.some((line) => line.includes('crew/sample.mjs:2')))
+  } finally {
+    dispose(fx)
+  }
+})
+
+test('laneFence excludes main-only paths after a lane forks', () => {
+  // Mutation killed: diffing against the main tip reports an upstream-only path as lane-owned.
+  const root = scratchDir('b383-lane-fence-')
+  mkdirSync(join(root, 'crew'), { recursive: true })
+  mkdirSync(join(root, 'skills'), { recursive: true })
+  git(root, 'init', '--quiet')
+  git(root, 'symbolic-ref', 'HEAD', 'refs/heads/main')
+  writeFileSync(join(root, 'crew/sample.mjs'), "const MAIN_ONLY = 'base'\n")
+  git(root, 'add', '.')
+  git(root, 'commit', '--quiet', '-m', 'base')
+  git(root, 'checkout', '--quiet', '-b', 'lane')
+  git(root, 'checkout', '--quiet', 'main')
+  writeFileSync(join(root, 'crew/sample.mjs'), "// main advanced\nconst MAIN_ONLY = 'base'\n")
+  git(root, 'add', 'crew/sample.mjs')
+  git(root, 'commit', '--quiet', '-m', 'main only')
+  git(root, 'checkout', '--quiet', 'lane')
+  writeFileSync(join(root, 'skills/lane-note.md'), 'this lane owns this file\n')
+  const repoRoot = realpathSync(root)
+  const result = laneFence({ root: repoRoot })
+  assert.deepEqual(result, { paths: ['skills/lane-note.md'], measured: true, reason: null })
+  assert.equal(result.paths.includes('crew/sample.mjs'), false)
+})
+
+test('repair CLI leaves a committed out-of-fence shift untouched', () => {
+  // Mutation killed: ignoring the measured repair fence rewrites a pin whose target is outside the lane.
+  const root = scratchDir('b383-anchor-repair-fence-')
+  const skillDir = join(root, 'skills/sample')
+  const doc = join(skillDir, 'SKILL.md')
+  const manifestPath = join(skillDir, 'anchors.json')
+  mkdirSync(join(root, 'crew'), { recursive: true })
+  mkdirSync(skillDir, { recursive: true })
+  git(root, 'init', '--quiet')
+  git(root, 'symbolic-ref', 'HEAD', 'refs/heads/main')
+  writeFileSync(join(root, 'crew/sample.mjs'), ['// header', `const ${EXPECTED}`, 'export default KEY', ''].join('\n'))
+  writeFileSync(doc, '# sample\n\nExhibit: `crew/sample.mjs:1`.\n')
+  writeFileSync(manifestPath, JSON.stringify({ 'crew/sample.mjs:1': EXPECTED }, null, 2))
+  git(root, 'add', '.')
+  git(root, 'commit', '--quiet', '-m', 'stale external pin')
+  git(root, 'checkout', '--quiet', '-b', 'lane')
+  writeFileSync(join(root, 'skills/lane-note.md'), 'this lane owns this file\n')
+  const repoRoot = realpathSync(root)
+  const fence = laneFence({ root: repoRoot })
+  assert.equal(fence.measured, true)
+  assert.ok(fence.paths.includes('skills/lane-note.md'))
+  assert.equal(fence.paths.includes('crew/sample.mjs'), false)
+  const beforeManifest = readFileSync(manifestPath, 'utf8')
+  const beforeDoc = readFileSync(doc, 'utf8')
+  const output = []
+  assert.equal(repairCli(['--repair', skillDir, '--root', repoRoot], output.push.bind(output)), 0)
+  assert.deepEqual(output, [])
+  assert.equal(readFileSync(manifestPath, 'utf8'), beforeManifest)
+  assert.equal(readFileSync(doc, 'utf8'), beforeDoc)
+  assert.deepEqual(
+    checkAnchors({ root: repoRoot, docs: [doc], manifest: JSON.parse(readFileSync(manifestPath, 'utf8')) }),
+    { anchors: 1, failures: [], shifted: [{ key: 'crew/sample.mjs:1', rel: 'crew/sample.mjs', from: 1, to: 2, nextKey: 'crew/sample.mjs:2' }] },
+  )
+})
+
+test('repair-all CLI repairs a committed shift on clean main', () => {
+  // Mutation killed: dropping repair-all's fence override leaves a committed main shift unrepaired.
+  const root = scratchDir('b383-anchor-repair-all-')
+  const skillDir = join(root, 'skills/sample')
+  const doc = join(skillDir, 'SKILL.md')
+  const manifestPath = join(skillDir, 'anchors.json')
+  mkdirSync(join(root, 'crew'), { recursive: true })
+  mkdirSync(skillDir, { recursive: true })
+  git(root, 'init', '--quiet')
+  git(root, 'symbolic-ref', 'HEAD', 'refs/heads/main')
+  writeFileSync(join(root, 'crew/sample.mjs'), ['// header', `const ${EXPECTED}`, 'export default KEY', ''].join('\n'))
+  writeFileSync(doc, '# sample\n\nExhibit: `crew/sample.mjs:1`.\n')
+  writeFileSync(manifestPath, JSON.stringify({ 'crew/sample.mjs:1': EXPECTED }, null, 2))
+  git(root, 'add', '.')
+  git(root, 'commit', '--quiet', '-m', 'committed shift')
+  const repoRoot = realpathSync(root)
+  assert.deepEqual(laneFence({ root: repoRoot }), { paths: [], measured: true, reason: null })
+  const warnings = []
+  assert.equal(assertAnchorsPinned({ root: repoRoot, skillDir, manifestPath, minAnchors: 1, log: warnings.push.bind(warnings) }), 1)
+  assert.equal(warnings.length, 1)
+  assert.match(warnings[0], /--repair-all/)
+  const output = []
+  assert.equal(repairCli(['--repair-all', skillDir, '--root', repoRoot], output.push.bind(output)), 0)
+  assert.deepEqual(output, ['repaired crew/sample.mjs:1 -> crew/sample.mjs:2'])
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+  assert.equal(manifest['crew/sample.mjs:2'], EXPECTED)
+  assert.equal(Object.hasOwn(manifest, 'crew/sample.mjs:1'), false)
+  assert.match(readFileSync(doc, 'utf8'), /crew\/sample\.mjs:2/)
+  assert.deepEqual(checkAnchors({ root: repoRoot, docs: [doc], manifest }), { anchors: 1, failures: [], shifted: [] })
+})
+
+function anchorManifestDirs(root) {
+  const found = []
+  function visit(dir) {
+    const entries = readdirSync(dir, { withFileTypes: true })
+    if (entries.some((entry) => entry.isFile() && entry.name === 'anchors.json')) found.push(dir)
+    for (const entry of entries) {
+      if (entry.isDirectory() && entry.name !== '.git' && entry.name !== 'node_modules') visit(join(dir, entry.name))
+    }
+  }
+  visit(root)
+  return found.sort()
+}
+
+test('the discovered anchor-manifest corpus checks clean', () => {
+  // Mutation killed: omitting a discovered manifest, especially skills/pr-review, leaves a new pin corpus unverified.
+  const dirs = anchorManifestDirs(ROOT)
+  const relativeDirs = dirs.map((dir) => relative(ROOT, dir))
+  assert.ok(relativeDirs.includes('skills/pr-review'))
+  for (const dir of dirs) {
+    const docs = skillDocs(dir).filter((doc) => {
+      // tier.md is exempt for the duplicated quoted-runtime anchor, as documented at skills/crew-dispatch/exhibits.test.mjs:56-62.
+      return doc !== join(dir, 'references/tier.md')
+    })
+    const manifest = JSON.parse(readFileSync(join(dir, 'anchors.json'), 'utf8'))
+    const result = checkAnchors({ root: ROOT, docs, manifest })
+    assert.deepEqual(result.failures, [], `${relative(ROOT, dir)} manifest failures`)
   }
 })

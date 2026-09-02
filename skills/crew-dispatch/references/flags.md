@@ -20,6 +20,20 @@ still be non-empty. `boot_only` is exactly `fences`, then `lane`.
 The per-role wait budgets default to `WAITS_S` and are the flag lever 9 names;
 they are `run` flags, not boot flags.
 
+## Batch dispatch: the dispatch-batch flag family
+
+`parseCliArgs` accepts these `dispatch-batch` flags:
+
+- Value flags: `--batch --fences --checkout --parent --out --tier --variant --wave --plan-rounds --build-rounds --review-rounds --wait-builder --wait-planner --wait-reviewer --wait-lead --wait-tech-lead --validation-lane --suite --baseline --memory-dir --memory-backend --memory-budget-bytes`.
+- Boolean flags: `--dry-run --force --no-keep --headless-all --panes`.
+- Repeatable: `--adopt`.
+- Prefix-matched per-seat forms: `--agent-<role> --model-<role> --effort-<role> --allow-shortfall-<role>`.
+
+`--batch` and `--fences` are required. Anything else refuses
+`unknown option: --<name>`. `--adopt` is accepted by `dispatch-batch` alone —
+`crew.mjs` and `make-brief.mjs` have no such flag; see the plan-adoption section
+below for its archive contract.
+
 The runtime's misplaced-flag refusal is:
 
 > `crew.mjs <verb> does not read --fences: this is a BOOT-time flag — pass it to \`crew.mjs boot\`, which persists it into crew.json (lane_name/lane_fence) and it is the run's single source of fence truth`

@@ -4,7 +4,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { ROOT } from '../../test/helpers.mjs'
-import { checkAnchors, collectAnchors, skillDocs } from '../qa-test-writing/anchor-pin.mjs'
+import { checkAnchors, collectAnchors, laneFence, partitionShifts, skillDocs } from '../qa-test-writing/anchor-pin.mjs'
 import { PROTECTED_PATHS, resolveProtectedPaths } from '../../crew/protected-paths.mjs'
 
 const HERE = fileURLToPath(new URL('./', import.meta.url))
@@ -49,6 +49,8 @@ test('every crew-dispatch path:line anchor carries what the prose claims', () =>
   const manifest = JSON.parse(readText(join(HERE, 'anchors.json')))
   const result = checkAnchors({ root: ROOT, docs, manifest })
   assert.deepEqual(result.failures, [])
+  const { inFence } = partitionShifts({ shifted: result.shifted, fence: laneFence({ root: ROOT }).paths })
+  assert.deepEqual(inFence, [], 'a shift on a file this lane changed must be repaired, not tolerated')
   assert.ok(result.anchors >= MIN_ANCHORS)
 })
 
@@ -109,7 +111,7 @@ test('the protected floor is documented as the resolved union', () => {
 // Mutation killed: deleting one refusal token lets a batch skip a compiler or arrival failure.
 test('the batch reference names every refusal the sequence can hit', () => {
   const text = readText(join(HERE, 'references/batch.md'))
-  for (const token of ['coupled-source-unfenced', 'stale-read-ack', 'missing-path', 'validateScopeEntries', 'scopeMatcher', 'protectedHitsIn', 'lane_name', 'lane_fence', 'lane-fence', 'fence=NONE']) {
+  for (const token of ['coupled-source-unfenced', 'stale-read-ack', 'missing-path', 'validateScopeEntries', 'scopeMatcher', 'protectedHitsIn', 'lane_name', 'lane_fence', 'lane-fence', 'fence=NONE', 'plan-adopt-unreadable', 'externalFenceLiveness']) {
     assert.ok(text.includes(token), `batch.md must name ${token}`)
   }
 })

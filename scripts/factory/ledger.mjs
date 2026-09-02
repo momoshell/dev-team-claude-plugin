@@ -146,23 +146,46 @@ export const ESCALATION_CAUSES = Object.freeze([
   'transport', 'budget', 'plan-build-disagreement', 'brief-contradiction',
   'gate-defect', 'review-unresolved', 'infrastructure', 'seat-lost',
   'seat-timeout', 'seat-aborted', 'plan-rounds-exhausted',
+  'envelope-unusable', 'envelope-absent', 'build-rounds-exhausted',
 ])
 export const ESCALATION_CAUSE_UNCLASSIFIED = 'unclassified'
 
-// The ordered escalation classifier is deliberately the ONE mapping surface:
-// the first matching rule wins, and the fallback refuses to guess. Inputs are
-// untrusted envelope fields, so non-strings become empty text and never throw.
+// The driver's own wait ceiling (crew/drive.mjs:2541), wrapped by
+// crew/drive.mjs:617 fail() into `${stage}: ${msg}` and recorded by the crash
+// envelope as `where: <role>`. STRUCTURAL, not prose: the `${where}: ` prefix
+// and the generated `within Ns` tail are the driver's own sentence shape, and
+// they are what tells a ceiling kill apart from every other row carrying the
+// same three words — a budget-refused seat's message among them, which must
+// stay `budget` (test/factory-ledger.test.mjs:591).
+function isWaitCeiling(where, why) {
+  return where !== '' && why.startsWith(`${where}: no valid envelope at `) && /\bwithin \d+s\b/.test(why)
+}
+
 export function escalationCause(input = {}) {
   const where = typeof input?.where === 'string' ? input.where : ''
   const why = typeof input?.why === 'string' ? input.why : ''
-  // Rule 1: transport evidence is the explicit sendLine marker or transport
-  // location; it precedes all other prose so a transport failure stays driver-owned.
-  if (/\bsendLine\b/.test(why) || where === 'transport') {
+  // Rule 1: the explicit sendLine marker is transport evidence and precedes all
+  // other prose so a transport failure stays driver-owned. The `where ===
+  // 'transport'` arm this rule used to carry had NO producer anywhere in the
+  // repo and is deleted (#854 (2)); the two locations below are its real
+  // producers.
+  if (/\bsendLine\b/.test(why)) {
+    return Object.freeze({ cause: 'transport', actor: 'driver' })
+  }
+  // Rule 1b: the pane manager stopped answering (crew/seat-io.mjs:1883, stage
+  // 'substrate-gone') or the provider refused the seat (crew/seat-io.mjs:2306,
+  // SEAT_REFUSAL_STAGE, which crew/drive.mjs:2115 lets escape to the crash
+  // recorder). Both are the host, not the seat — cellFailureKind already calls
+  // them transport-error (crew/seat-io.mjs:1234, :1239). The prose arm catches
+  // the substrate shape re-wrapped under a variant (crew/drive.mjs:2866).
+  if (new Set(['substrate-gone', 'seat-refused']).has(where) || /\bsubstrate gone: /.test(why)) {
     return Object.freeze({ cause: 'transport', actor: 'driver' })
   }
   // Rule 2: scope/anchor/unapplied evidence is a plan-build disagreement. It
-  // deliberately precedes the budget rule because b325's anchor prose mentions budget.
-  if (where === 'scope' || /\banchor-(absent|ambiguous|unsafe)\b/.test(why) || /\bunapplied\b/.test(why)) {
+  // deliberately precedes the budget rule because b325's anchor prose mentions
+  // budget. 'plan-scope-widened' (crew/drive.mjs:3101, #852) is the same fact
+  // reached one round earlier: the plan and the dispatched surface disagree.
+  if (where === 'scope' || where === 'plan-scope-widened' || /\banchor-(absent|ambiguous|unsafe)\b/.test(why) || /\bunapplied\b/.test(why)) {
     return Object.freeze({ cause: 'plan-build-disagreement', actor: 'driver' })
   }
   // Rule 3: a seat-death location is a NAMED, measured loss — the worker died
@@ -170,27 +193,28 @@ export function escalationCause(input = {}) {
   // nothing that separates a wait-ceiling kill from an OOM or an external
   // signal, and inferring one from prose would be a guess. Matched on `where`
   // alone so both seat-death message shapes classify identically — pane
-  // (crew/seat-io.mjs:1847) and headless (crew/seat-io.mjs:2185) share only the
-  // words 'no envelope arrived', which rule 7's 'no valid envelope' never sees.
+  // (crew/seat-io.mjs:1875) and headless (crew/seat-io.mjs:2213) share only the
+  // words 'no envelope arrived', which rule 9's 'no valid envelope' never sees.
   // FOLLOW-UP: the emitting side — a distinct seat-wait-expired signal from the
   // driver, which would let a ceiling kill be told apart from a death — lands
   // once b359-slotdriver frees the crew surface.
-  if (where === 'seat-died') {
+  // The prose arm is the SAME death re-wrapped under a scout/repair/directed
+  // variant by crew/drive.mjs:2866, where `where` is the variant and no
+  // location survives.
+  if (where === 'seat-died' || /\bseat died: /.test(why)) {
     return Object.freeze({ cause: 'seat-lost', actor: 'driver' })
   }
   // Rule 4: the driver's own wait ceiling fired — it killed the seat; nothing
   // died under it. `where` is the raised error's stage: `headless-${outcome}`
-  // (crew/headless.mjs:497) or the literal 'rpc-timeout' (crew/headless-rpc.mjs:701).
+  // (crew/headless.mjs:553) or the literal 'rpc-timeout' (crew/headless-rpc.mjs:785).
   // The message-shape arm catches the SAME failure re-wrapped under a seat
-  // variant, where `where` becomes the role (crew/drive.mjs:2866). It must
-  // precede the budget rule: the headless timeout message carries 'produced no
-  // valid envelope', which rule 7 would otherwise claim as budget — b342's real
-  // row measured exactly that (#840).
+  // variant (crew/drive.mjs:2866), where `where` becomes the VARIANT and the
+  // role survives only in the prose.
   if (where === 'rpc-timeout' || where === 'headless-timeout' || /\b(rpc|headless) timeout:/.test(why)) {
     return Object.freeze({ cause: 'seat-timeout', actor: 'driver' })
   }
   // Rule 5: the worker exited MID-STREAM — an exit file, no envelope and no
-  // terminal frame (crew/headless-rpc.mjs:680, and crew/headless.mjs:497 over
+  // terminal frame (crew/headless-rpc.mjs:762, and crew/headless.mjs:553 over
   // classifyRun's 'aborted'). Deliberately distinct from seat-lost (a corpse
   // the driver found by probe) and from seat-timeout (a ceiling kill): the three
   // imply different operator actions — retry a transient, investigate a kill,
@@ -198,7 +222,29 @@ export function escalationCause(input = {}) {
   if (where === 'rpc-aborted' || where === 'headless-aborted' || /\b(rpc|headless) aborted:/.test(why)) {
     return Object.freeze({ cause: 'seat-aborted', actor: 'driver' })
   }
-  // Rule 6: the plan loop hit its round cap (crew/drive.mjs:3198) — the lead's
+  // Rule 5b: the seat settled and wrote NO envelope (crew/headless.mjs:553 over
+  // classifyRun's 'no-envelope', crew/headless-rpc.mjs:762, and the lost-seat
+  // re-ask at crew/seat-io.mjs:2786/:2796). ONE failure, ONE cause on BOTH
+  // transports: the two differ only in the word 'valid', which is why this
+  // matches the STAGE and never the prose (#854 (2)).
+  if (/^(headless|rpc)-no-envelope$/.test(where)) {
+    return Object.freeze({ cause: 'envelope-absent', actor: 'driver' })
+  }
+  // Rule 5c: the seat produced output the driver cannot read as an envelope —
+  // no JSON at all (classifyRun 'malformed') or a parse failure
+  // (crew/headless-rpc.mjs:717). Deliberately distinct from envelope-absent:
+  // cellFailureKind separates them the same way (crew/seat-io.mjs:1244-1245).
+  if (/^(headless|rpc)-(malformed|parse-error)$/.test(where)) {
+    return Object.freeze({ cause: 'envelope-unusable', actor: 'driver' })
+  }
+  // Rule 6: the driver's own wait ceiling on the PANE/driver path
+  // (crew/drive.mjs:2541). It must precede the budget rule for the same reason
+  // rule 4 does — the ceiling sentence carries 'no valid envelope', and rule 4's
+  // own comment already says a ceiling kill is not budget (#854 (1)).
+  if (isWaitCeiling(where, why)) {
+    return Object.freeze({ cause: 'seat-timeout', actor: 'driver' })
+  }
+  // Rule 7: the plan loop hit its round cap (crew/drive.mjs:3243) — the lead's
   // loop did not converge. This is the ONE rule anchored on the why rather than
   // the where, because `where` is 'plan' for several unrelated escalations
   // (b329's brief contradiction among them). The sentence is the driver's own
@@ -207,23 +253,33 @@ export function escalationCause(input = {}) {
   if (/^no accepted plan within \d+ rounds$/.test(why.trim())) {
     return Object.freeze({ cause: 'plan-rounds-exhausted', actor: 'lead' })
   }
-  // Rule 7: no envelope or an exceeded budget is a driver budget outcome.
+  // Rule 8: the build loop hit its round cap (crew/drive.mjs:4390) — the exact
+  // twin of rule 7's plan sentence, and anchored the same way so a row that
+  // merely mentions it is never claimed.
+  if (where === 'build' && /^no accepted build within \d+ rounds$/.test(why.trim())) {
+    return Object.freeze({ cause: 'build-rounds-exhausted', actor: 'lead' })
+  }
+  // Rule 9: an exceeded budget is a driver budget outcome. It runs AFTER every
+  // structural rule above: its 'no valid envelope' arm is prose that four
+  // different producers emit, and only the location tells them apart (#854 (3)).
   if (/\bno valid envelope\b/.test(why) || /\bexceeded its \d+s budget\b/.test(why)) {
     return Object.freeze({ cause: 'budget', actor: 'driver' })
   }
-  // Rule 8: contradiction in the escalation prose is an operator-owned brief issue.
+  // Rule 10: contradiction in the escalation prose is an operator-owned brief issue.
   if (/\bcontradict/i.test(why)) {
     return Object.freeze({ cause: 'brief-contradiction', actor: 'operator' })
   }
-  // Rule 9: a gate location identifies a lead-owned gate defect.
+  // Rule 11: a gate location identifies a lead-owned gate defect.
   if (where === 'gate') {
     return Object.freeze({ cause: 'gate-defect', actor: 'lead' })
   }
-  // Rule 10: review and refuted-must-fix locations identify an unresolved review.
-  if (where === 'review' || where === 'refuted-must-fix') {
+  // Rule 12: review locations identify an unresolved review. 'review-unresolved'
+  // is the driver's own location for a finding the lead could not settle
+  // (crew/drive.mjs:4264) and reaches the cause of the same name.
+  if (new Set(['review', 'refuted-must-fix', 'review-unresolved']).has(where)) {
     return Object.freeze({ cause: 'review-unresolved', actor: 'lead' })
   }
-  // Rule 11: these locations are infrastructure failures owned by the driver.
+  // Rule 13: these locations are infrastructure failures owned by the driver.
   if (new Set(['driver', 'cold-suite', 'suite', 'rebase', 'publish', 'converge-pr']).has(where)) {
     return Object.freeze({ cause: 'infrastructure', actor: 'driver' })
   }
@@ -3528,6 +3584,65 @@ export function openLedger({
     `, [since, since, until, until])
   }
 
+  // The DENOMINATOR the escalations verb divides by: every session that ENDED in
+  // the window, whatever its outcome. A window in which no run ended was never
+  // measured; a window that ended runs and lost none of them is a measured zero
+  // (#854). Same half-open [since, until) bound and same ended_at column as
+  // escalations() above. The CLI calls escalationWindow() below so its numerator
+  // and denominator share one SQLite statement/snapshot.
+  function endedRuns({ since = null, until = null } = {}) {
+    return queryRows(`
+      SELECT outcome, COUNT(*) AS count, MIN(ended_at) AS first_at, MAX(ended_at) AS last_at
+      FROM sessions
+      WHERE ended_at IS NOT NULL
+        AND (? IS NULL OR ended_at >= ?) AND (? IS NULL OR ended_at < ?)
+      GROUP BY outcome
+      ORDER BY outcome
+    `, [since, since, until, until])
+  }
+
+  // A session can end between two independent reads. Keep the detailed
+  // escalation numerator and the all-ended denominator in ONE statement, so
+  // this readout describes one SQLite snapshot rather than an interleaving.
+  function escalationWindow({ since = null, until = null } = {}) {
+    const snapshotRows = queryRows(`
+      WITH window_sessions AS (
+        SELECT outcome, terminal_reason, terminal_actor, ended_at
+        FROM sessions
+        WHERE ended_at IS NOT NULL
+          AND (? IS NULL OR ended_at >= ?) AND (? IS NULL OR ended_at < ?)
+      ),
+      grouped_escalations AS (
+        SELECT terminal_reason AS cause, terminal_actor AS actor,
+          COUNT(*) AS count, MIN(ended_at) AS first_at, MAX(ended_at) AS last_at
+        FROM window_sessions
+        WHERE outcome = 'escalated'
+        GROUP BY terminal_reason, terminal_actor
+      ),
+      grouped_ended_runs AS (
+        SELECT outcome, COUNT(*) AS count, MIN(ended_at) AS first_at, MAX(ended_at) AS last_at
+        FROM window_sessions
+        GROUP BY outcome
+      )
+      SELECT 'escalation' AS row_kind, cause, actor, count, first_at, last_at, NULL AS outcome
+      FROM grouped_escalations
+      UNION ALL
+      SELECT 'ended' AS row_kind, NULL AS cause, NULL AS actor, count, first_at, last_at, outcome
+      FROM grouped_ended_runs
+      ORDER BY row_kind DESC, cause, actor, outcome
+    `, [since, since, until, until])
+    const rows = []
+    const endedRows = []
+    for (const row of snapshotRows) {
+      if (row.row_kind === 'escalation') {
+        rows.push({ cause: row.cause, actor: row.actor, count: row.count, first_at: row.first_at, last_at: row.last_at })
+      } else {
+        endedRows.push({ outcome: row.outcome, count: row.count, first_at: row.first_at, last_at: row.last_at })
+      }
+    }
+    return { rows, endedRows }
+  }
+
   function seatReclaims({ since = null, until = null } = {}) {
     return queryRows(`
       SELECT outcome, reason, coverage_outcome, coverage_reason,
@@ -3946,7 +4061,7 @@ export function openLedger({
     recordGateResult, recordGateDiscrimination, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown, recordSeatReclaim,
     startProcess, endProcess, heartbeat, startAgentSession, endAgentSession,
     recordSourceError, linkRun,
-    listSessions, listEvents, getSession, dumpTable, tableNames, columnNames, sessionsFiltered, runsStartedWithin, phasesFor, runConfigurationsFor, runSeatsFor, agentEventsFor, agentSessionsFor, gateDiscriminationsFor, gateResultsFor, reviewOutcomesFor, acceptDecisionsFor, supportsJson1, eventsPage, maxEventId, cellFailureRowsFor, unattributableCellFailures, seatTeardownRowsFor, intakePicks, intakeSweepTotals, intakeCandidateRefusals, intakeCandidatePicks, agentSessionTokenTotals, gateReviewGap, cellFailures, cellReviews, cellUsage, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, escalations, seatReclaims, eligibleTasks, runSet, transportsFor, taskReadout, jsonlDrift,
+    listSessions, listEvents, getSession, dumpTable, tableNames, columnNames, sessionsFiltered, runsStartedWithin, phasesFor, runConfigurationsFor, runSeatsFor, agentEventsFor, agentSessionsFor, gateDiscriminationsFor, gateResultsFor, reviewOutcomesFor, acceptDecisionsFor, supportsJson1, eventsPage, maxEventId, cellFailureRowsFor, unattributableCellFailures, seatTeardownRowsFor, intakePicks, intakeSweepTotals, intakeCandidateRefusals, intakeCandidatePicks, agentSessionTokenTotals, gateReviewGap, cellFailures, cellReviews, cellUsage, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, escalations, endedRuns, escalationWindow, seatReclaims, eligibleTasks, runSet, transportsFor, taskReadout, jsonlDrift,
     stats: statsFn,
     captureMirrorErrors,
     readConnection,
@@ -5095,9 +5210,13 @@ export function main(argv) {
       const hasUntil = Object.prototype.hasOwnProperty.call(flags, 'until')
       const until = hasUntil ? windowBound(flags.until, 'until', 'escalations') : null
       if (until != null && until <= since) refuse('escalations: --until must be later than --since')
-      const rows = ledger.escalations({ since, until })
+      const { rows, endedRows } = ledger.escalationWindow({ since, until })
       if (ledger.stats().degraded) refuse('escalations: the ledger mirror is degraded — this window is unanswerable, not empty')
-      const measured = rows.length > 0
+      // A window in which NO run ended was not measured — the honesty rule
+      // ci-cycles already follows with watchedWindow (:5136). A window that ended
+      // runs and lost NONE of them still reports a real measured zero (#854).
+      const settledWindow = endedRows.length > 0
+      const runsEnded = settledWindow ? endedRows.reduce((n, row) => n + Number(row.count ?? 0), 0) : null
       stdout.write(`${JSON.stringify({
         schema: 1,
         question: 'How many lanes did the factory lose to itself, and to what?',
@@ -5105,17 +5224,19 @@ export function main(argv) {
           unit: 'one run whose outcome is escalated',
           window: 'counted at sessions.ended_at — an escalation is a terminal fact',
           cause: `the closed vocabulary (${ESCALATION_CAUSES.join(', ')}), plus ${ESCALATION_CAUSE_UNCLASSIFIED} for a pair no rule classifies — never a guess`,
+          denominator: 'runs_ended counts every session whose ended_at falls in the window, whatever its outcome — the total this loss is a share OF; null with an `absent` marker means no run ended here, never a measured zero',
           absent: 'null with an `absent` marker means the window was never measured — never a measured zero',
           coverage: 'crew/crew.mjs records typed escalation causes; child-driven runs still carry NULL typed outcome fields until their endRun writer is widened, so they remain unmeasured here',
         },
         since,
         until,
-        causes: ESCALATION_CAUSES,
+        causes: [...ESCALATION_CAUSES, ESCALATION_CAUSE_UNCLASSIFIED],
         actors: TERMINAL_ACTORS,
-        measured,
-        escalated: measured ? rows.reduce((n, row) => n + Number(row.count ?? 0), 0) : null,
+        measured: settledWindow,
+        escalated: settledWindow ? rows.reduce((n, row) => n + Number(row.count ?? 0), 0) : null,
+        runs_ended: runsEnded,
         rows,
-        absent: measured ? null : { escalations: 'no escalated run in this window — not measured, never a measured zero' },
+        absent: settledWindow ? null : { escalations: 'no run ended in this window — not measured, never a measured zero' },
       })}\n`)
       return 0
     }

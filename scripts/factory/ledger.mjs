@@ -314,6 +314,26 @@ export const GATE_DISCRIMINATION_VERDICTS = Object.freeze(['proven', 'failed', '
 // `unproven` is an honest non-answer — LIVENESS.UNKNOWN — never quietly
 // counted as clean.
 export const SEAT_TEARDOWN_OUTCOMES = Object.freeze(['proven', 'failed', 'unproven'])
+// #874 — whether the builder's one authoring moment was used, and how. MUST equal
+// MUTATION_CORRECTION_OUTCOMES in crew/drive.mjs, pinned equal by the b385 F1 test. Closed
+// because the ledger's job here is a RATE, and a fourth value would record a run as corrected by
+// a mechanism nothing in the crew implements. `pending` is deliberately absent: it is an internal
+// word in crew/drive.mjs's finalizeCorrections and never reaches a journal or a row.
+export const MUTATION_ANCHOR_CORRECTIONS = Object.freeze(['none', 'refused', 'accepted'])
+// The terminal refusal reasons a `refused` correction may carry. MUST equal
+// MUTATION_CORRECTION_REFUSALS in crew/drive.mjs — the driver is the PRODUCER, this file is the
+// register, and the subsystem direction is one-way (crew -> factory), so the vocabulary is
+// RESTATED here and a test holds the two lists equal. That is the same convention
+// MODIFIER_ATTEMPT_OUTCOMES and RUN_VARIANTS already follow (scripts/factory/ledger.mjs:417-420,
+// :443-445), and the same pin test/factory-ledger.test.mjs:4580 applies to
+// SEAT_TEARDOWN_OUTCOMES. `MUTATION_ANCHOR_CORRECTIONS` above is pinned to
+// `MUTATION_CORRECTION_OUTCOMES` the same way. The durable `refusal` column is enum-validated,
+// never unvalidated TEXT: a register that admits an unknown terminal state admits drift.
+export const MUTATION_ANCHOR_REFUSALS = Object.freeze([
+  'not-an-array', 'unknown-check', 'duplicate-check', 'correction-not-absent',
+  'correction-shape', 'correction-absent', 'correction-ambiguous',
+  'correction-green', 'correction-unproven',
+])
 export const REVIEW_VERDICTS = Object.freeze(['pass', 'changes-needed'])
 // A floor on SAMPLE SIZE, reported beside every rate and never enforced: a
 // share over a handful of reviews is not a policy input, and the readout says
@@ -1122,6 +1142,36 @@ export const TABLES = Object.freeze({
     unique: [['batch_id', 'lane']],
     indexes: [],
   },
+  mutation_anchor_binds: {
+    columns: [
+      { name: 'adw_id', decl: 'TEXT' },
+      { name: 'gate_generation', decl: 'INTEGER' },
+      { name: 'declared', decl: 'INTEGER' },
+      { name: 'exact', decl: 'INTEGER' },
+      { name: 'normalized', decl: 'INTEGER' },
+      { name: 'absent', decl: 'INTEGER' },
+      { name: 'corrected', decl: 'INTEGER' },
+      { name: 'at_ms', decl: 'INTEGER' },
+      { name: 'created_at', decl: 'TEXT' },
+    ],
+    unique: [['adw_id', 'gate_generation']],
+    indexes: [],
+  },
+  mutation_anchor_absences: {
+    columns: [
+      { name: 'adw_id', decl: 'TEXT' },
+      { name: 'gate_generation', decl: 'INTEGER' },
+      { name: 'check_name', decl: 'TEXT' },
+      { name: 'file', decl: 'TEXT' },
+      { name: 'correction', decl: 'TEXT' },
+      { name: 'refusal', decl: 'TEXT' },
+      { name: 'why', decl: 'TEXT' },
+      { name: 'at_ms', decl: 'INTEGER' },
+      { name: 'created_at', decl: 'TEXT' },
+    ],
+    unique: [['adw_id', 'gate_generation', 'check_name']],
+    indexes: [],
+  },
 })
 
 // The closed set of public writer method names — also the closed set of
@@ -1134,6 +1184,8 @@ export const JOURNAL_FACT_KEYS = Object.freeze({
   plan_scope: 'recordPlanScope',
   accept_reask: 'recordAcceptReask',
   rpc_exit_context: 'recordRpcExitContext',
+  mutation_anchor_bind: 'recordMutationAnchorBind',
+  mutation_anchor_absent: 'recordMutationAnchorAbsence',
 })
 
 // A crew journal row whose `event` is this value is that fact.
@@ -1146,7 +1198,7 @@ export const JOURNAL_FACT_EVENTS = Object.freeze({
 export const WRITERS = Object.freeze([
   'startSession', 'endSession', 'startPhase', 'endPhase', 'recordEvent',
   'recordEnvelope', 'recordSessionRequest', 'recordRunConfiguration', 'recordRunSeat', 'recordGateResult', 'recordGateDiscrimination',
-  'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'recordCiCycle', 'recordCiDispatch', 'recordIntakeSweep', 'recordIntakeRefusal', 'recordIntakeBrake', 'recordIntakeDispatch', 'recordSeatTeardown', 'recordSeatReclaim', 'recordProviderFailure', 'recordPlanScope', 'recordSeatReask', 'recordAcceptReask', 'recordRpcExitContext', 'recordPlanAdoption', 'recordExternalFence', 'startProcess', 'endProcess', 'heartbeat',
+  'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'recordCiCycle', 'recordCiDispatch', 'recordIntakeSweep', 'recordIntakeRefusal', 'recordIntakeBrake', 'recordIntakeDispatch', 'recordSeatTeardown', 'recordSeatReclaim', 'recordProviderFailure', 'recordPlanScope', 'recordSeatReask', 'recordAcceptReask', 'recordRpcExitContext', 'recordPlanAdoption', 'recordExternalFence', 'recordMutationAnchorBind', 'recordMutationAnchorAbsence', 'startProcess', 'endProcess', 'heartbeat',
   'startAgentSession', 'endAgentSession', 'recordSourceError', 'linkRun',
 ])
 
@@ -1185,6 +1237,8 @@ export const WRITER_MIRROR_TABLES = Object.freeze({
   recordRpcExitContext: 'rpc_exit_contexts',
   recordPlanAdoption: 'plan_adoptions',
   recordExternalFence: 'external_fences',
+  recordMutationAnchorBind: 'mutation_anchor_binds',
+  recordMutationAnchorAbsence: 'mutation_anchor_absences',
   startProcess: 'processes',
   startAgentSession: 'agent_sessions',
 })
@@ -1676,7 +1730,7 @@ function stableJson(value) {
   return JSON.stringify(value)
 }
 
-// The honesty rule (docs/ledger-queries.md:31): an authority that cannot be
+// The honesty rule (docs/ledger-queries.md:39): an authority that cannot be
 // read is UNMEASURED, never a measured zero drift.
 function unmeasuredDrift(jsonlPath, reason) {
   return {
@@ -2740,6 +2794,54 @@ export function openLedger({
       const cols = tableColumnNames('external_fences')
       const sqlCols = cols.map(quoteSqlIdentifier)
       conn.prepare(`INSERT OR IGNORE INTO external_fences (${sqlCols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
+        .run(...cols.map((c) => toBindable(args[c])))
+    })
+    return args
+  }
+
+  function recordMutationAnchorBind(input = {}) {
+    requireFields(input, ['adw_id', 'gate_generation', 'declared'], 'recordMutationAnchorBind')
+    const args = redact({
+      adw_id: input.adw_id,
+      gate_generation: integerOrNull(input.gate_generation, 'recordMutationAnchorBind', 'gate_generation'),
+      declared: integerOrNull(input.declared, 'recordMutationAnchorBind', 'declared'),
+      exact: integerOrNull(input.exact, 'recordMutationAnchorBind', 'exact'),
+      normalized: integerOrNull(input.normalized, 'recordMutationAnchorBind', 'normalized'),
+      absent: integerOrNull(input.absent, 'recordMutationAnchorBind', 'absent'),
+      corrected: integerOrNull(input.corrected, 'recordMutationAnchorBind', 'corrected'),
+      at_ms: epochMsOrNull(input.at_ms),
+      created_at: isoMs(input.created_at ?? now()),
+    }, stats)
+    appendJsonl('recordMutationAnchorBind', args)
+    mirror((conn) => {
+      const cols = tableColumnNames('mutation_anchor_binds')
+      const sqlCols = cols.map(quoteSqlIdentifier)
+      conn.prepare(`INSERT OR IGNORE INTO mutation_anchor_binds (${sqlCols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
+        .run(...cols.map((c) => toBindable(args[c])))
+    })
+    return args
+  }
+
+  function recordMutationAnchorAbsence(input = {}) {
+    requireFields(input, ['adw_id', 'gate_generation', 'check_name'], 'recordMutationAnchorAbsence')
+    requireEnum(input.correction, MUTATION_ANCHOR_CORRECTIONS, 'recordMutationAnchorAbsence', 'correction')
+    if (input.refusal != null) requireEnum(input.refusal, MUTATION_ANCHOR_REFUSALS, 'recordMutationAnchorAbsence', 'refusal')
+    const args = redact({
+      adw_id: input.adw_id,
+      gate_generation: integerOrNull(input.gate_generation, 'recordMutationAnchorAbsence', 'gate_generation'),
+      check_name: textOrNull(input.check_name, 200),
+      file: textOrNull(input.file, 1000),
+      correction: input.correction,
+      refusal: input.refusal == null ? null : input.refusal,
+      why: input.why == null ? null : String(input.why).slice(0, 500),
+      at_ms: epochMsOrNull(input.at_ms),
+      created_at: isoMs(input.created_at ?? now()),
+    }, stats)
+    appendJsonl('recordMutationAnchorAbsence', args)
+    mirror((conn) => {
+      const cols = tableColumnNames('mutation_anchor_absences')
+      const sqlCols = cols.map(quoteSqlIdentifier)
+      conn.prepare(`INSERT OR IGNORE INTO mutation_anchor_absences (${sqlCols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
         .run(...cols.map((c) => toBindable(args[c])))
     })
     return args
@@ -4047,6 +4149,9 @@ export function openLedger({
     const exitRows = journalFactRows('rpc_exit_contexts', { since, until })
     const adoptionRows = journalFactRows('plan_adoptions', { since, until })
     const fenceRows = journalFactRows('external_fences', { since, until })
+    const bindRows = journalFactRows('mutation_anchor_binds', { since, until })
+    const absenceRows = journalFactRows('mutation_anchor_absences', { since, until })
+    const bindMeasured = bindRows.length > 0
     const providerMeasured = providerRows.length > 0
     const scopeMeasured = scopeRows.length > 0
     const reaskMeasured = reaskRows.length > 0
@@ -4091,6 +4196,22 @@ export function openLedger({
           reads: journalFactSum(fenceRows, 'reads'),
         }),
         lanes_seen: fenceMeasured ? lanesSeen : null,
+      },
+      // #874 (3) — the drift rate's BOTH terms. `declarations_seen` is the denominator: every
+      // anchor bind-checked in the window, INCLUDING the passes that found nothing wrong. A
+      // window with no bind-check pass is unmeasured and says so; it is never a measured zero.
+      mutation_anchors: {
+        ...journalFactFamily(bindRows, 'binds', {
+          absences: bindMeasured ? journalFactSum(bindRows, 'absent') : null,
+          corrections: bindMeasured ? journalFactSum(bindRows, 'corrected') : null,
+          by_correction: journalFactCounts(absenceRows, 'correction'),
+          by_refusal: journalFactCounts(absenceRows, 'refusal'),
+          // MUTATION F2: delete this property and the query publishes a bare count — a
+          // numerator with no denominator, which this repo does not accept as a rate.
+          // MUTATION F3: coalesce the unmeasured arm to 0 and an empty window reads as a
+          // measured zero — "unknown is never a guess and never a zero", inverted.
+          declarations_seen: bindMeasured ? journalFactSum(bindRows, 'declared') : null,   // ANCHOR F2/F3
+        }),
       },
     }
   }
@@ -4499,7 +4620,7 @@ export function openLedger({
   const handle = {
     get degraded() { return degraded },
     startSession, endSession, recordSessionRequest, recordRunConfiguration, recordRunSeat, startPhase, endPhase, recordEvent, recordEnvelope,
-    recordGateResult, recordGateDiscrimination, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown, recordSeatReclaim, recordProviderFailure, recordPlanScope, recordSeatReask, recordAcceptReask, recordRpcExitContext, recordPlanAdoption, recordExternalFence,
+    recordGateResult, recordGateDiscrimination, recordMutationAnchorBind, recordMutationAnchorAbsence, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown, recordSeatReclaim, recordProviderFailure, recordPlanScope, recordSeatReask, recordAcceptReask, recordRpcExitContext, recordPlanAdoption, recordExternalFence,
     startProcess, endProcess, heartbeat, startAgentSession, endAgentSession,
     recordSourceError, linkRun,
     listSessions, listEvents, getSession, dumpTable, tableNames, columnNames, sessionsFiltered, runsStartedWithin, phasesFor, runConfigurationsFor, runSeatsFor, agentEventsFor, agentSessionsFor, gateDiscriminationsFor, gateResultsFor, reviewOutcomesFor, acceptDecisionsFor, supportsJson1, eventsPage, maxEventId, cellFailureRowsFor, unattributableCellFailures, seatTeardownRowsFor, intakePicks, intakeSweepTotals, intakeCandidateRefusals, intakeCandidatePicks, agentSessionTokenTotals, gateReviewGap, cellFailures, cellReviews, cellUsage, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, escalations, endedRuns, escalationWindow, seatReclaims, journalFacts, eligibleTasks, runSet, transportsFor, taskReadout, jsonlDrift,
@@ -4628,6 +4749,34 @@ function journalFactArgs(writer, row, adwId) {
       dropped: scope.dropped,
       dispatched: scope.dispatched,
       planned: scope.planned,
+      ...(createdAt === undefined ? {} : { created_at: createdAt }),
+    }
+  }
+  if (writer === JOURNAL_FACT_KEYS.mutation_anchor_bind) {
+    const bind = value('mutation_anchor_bind')
+    return {
+      adw_id: rowAdwId,
+      gate_generation: bind.generation,
+      declared: bind.declared,
+      exact: bind.exact,
+      normalized: bind.normalized,
+      absent: bind.absent,
+      corrected: bind.corrected,
+      at_ms: atMs,
+      ...(createdAt === undefined ? {} : { created_at: createdAt }),
+    }
+  }
+  if (writer === JOURNAL_FACT_KEYS.mutation_anchor_absent) {
+    const absence = value('mutation_anchor_absent')
+    return {
+      adw_id: rowAdwId,
+      gate_generation: absence.generation,
+      check_name: absence.check,
+      file: absence.file,
+      correction: absence.correction ?? 'none',
+      refusal: absence.refusal ?? null,
+      why: absence.why ?? null,
+      at_ms: atMs,
       ...(createdAt === undefined ? {} : { created_at: createdAt }),
     }
   }
@@ -5992,11 +6141,14 @@ export function main(argv) {
           rpc_exits: 'one recorded RPC exit context; exits_seen is the number of recorded contexts',
           plan_adoptions: 'one recorded adopted plan; adoptions_seen is the number of recorded adoptions',
           external_fences: 'one dispatch-register lane entry; lanes_seen is the number of recorded lanes',
+          mutation_anchors: 'one bind-check pass over a plan\'s declared mutation anchors; declarations_seen is the number of declared anchors bind-checked, and absences is how many did not reach the built tree with an accepted correction',
           absent: 'null with an absent marker means the family was not measured — never a measured zero',
         },
         provider_failure_kinds: PROVIDER_FAILURE_LEDGER_KINDS,
         plan_scope_verdicts: PLAN_SCOPE_VERDICTS,
         seat_reask_events: SEAT_REASK_EVENTS,
+        mutation_anchor_corrections: MUTATION_ANCHOR_CORRECTIONS,
+        mutation_anchor_refusals: MUTATION_ANCHOR_REFUSALS,
         since,
         until,
         ...facts,

@@ -1432,6 +1432,29 @@ export const MUTATION_OUTCOMES = Object.freeze(['killed', 'survived', 'unapplied
 // builder did not write. `survived` stays the ONLY member of MUTATION_OUTCOMES that indicts the gate itself (#733); `anchor-unsafe` is a binding failure, never a gate defect (#742).
 export const MUTATION_BINDING_FAILURES = Object.freeze(['unapplied', 'anchor-absent', 'anchor-ambiguous', 'anchor-unsafe'])
 const BINDING_OUTCOME = Object.freeze({ absent: 'anchor-absent', ambiguous: 'anchor-ambiguous', unsafe: 'anchor-unsafe' })
+// #874 — the bind check's closed status set, reported for EVERY declaration BEFORE any mutation
+// is applied. Three values, not five: `exact` and `normalized` are the two ways an anchor reaches
+// the built tree, and every way of failing to reach it is one fact — `absent`. The precise mode
+// survives in the row's `why`, which is where a reader needs it.
+export const MUTATION_BIND_STATUSES = Object.freeze(['exact', 'normalized', 'absent'])
+// MUTATION A2: collapse `normalized` onto `exact` here and the report can no longer tell a
+// re-wrapped anchor from a byte-identical one.
+const BIND_STATUS = Object.freeze({ exact: 'exact', normalized: 'normalized', absent: 'absent', ambiguous: 'absent', unsafe: 'absent' })   // ANCHOR A2
+// #874 — the TERMINAL state of a check's correction. Three values, and `pending` is deliberately
+// not one of them: a statically admissible correction is a CANDIDATE, and the third acceptance
+// condition — the check still FAILS under it — can only be answered by an adjudicated proof row.
+// `pending` is an internal word inside finalizeCorrections and reaches no journal and no envelope.
+export const MUTATION_CORRECTION_OUTCOMES = Object.freeze(['none', 'refused', 'accepted'])
+// ONE terminal refusal vocabulary, static and proof-time reasons together, because they describe
+// the same terminal fact: the offered correction was refused. Splitting them would make a consumer
+// join two enums to answer one question. The validator produces the static reasons; proof
+// finalization produces `correction-green` (the corrected mutation left its check green) and
+// `correction-unproven` (the candidate never produced an adjudicated row at all).
+export const MUTATION_CORRECTION_REFUSALS = Object.freeze([
+  'not-an-array', 'unknown-check', 'duplicate-check', 'correction-not-absent',
+  'correction-shape', 'correction-absent', 'correction-ambiguous',
+  'correction-green', 'correction-unproven',
+])
 // The driver dictates ONE output convention for a gate that declares per-check
 // mutations, exactly as it already dictates GATE_SUMMARY_PREFIX (:204): a failing
 // check prints a line beginning `FAIL <check>`. A label SUBSTRING is not proof —
@@ -3334,14 +3357,41 @@ function runTask(ctx, io, crash) {
   let checkProofs = null       // rows for the CURRENT generation, non-null once its pass completed
   let checkProofOutput = null  // the mutated run of the first check that was not killed
   let checkProofNote = null    // a CONTAINED io failure during the pass (never loses a build)
-  let checkProofVerdict = null // 'proven' | 'failed' | 'unproven' | null — the PER-CHECK
+  let checkProofVerdict = null // 'proven' | 'failed' | 'unbound' | 'unproven' | null — the PER-CHECK
   let checkProofPending = null // the generation that OWES a per-check pass, awaiting an observed green
+  let checkProofBinds = []     // #874 — the bind report's rows, one per declared ANCHOR, terminal
+  let checkProofUnbound = []   // the unresolved disagreements, taken from that report
+  let checkProofBindMeasured = false   // the ALL-OR-NOTHING measurement sentinel: true only after
+                                       // bindMutationDeclarations returned every row
   let gateProofFatal = null    // the built tree still carries a mutation: the run must stop
-  gateBlock = () => (gateCmd ? { cmd: gateCmd, repairs: gateRepairs, generation: gateGeneration, discrimination: gateDiscrimination ?? 'unproven', reap: { ...gateReapTally }, ...(gateProofNote ? { discrimination_note: gateProofNote } : {}), ...(gateHistory.length ? { replaced: gateHistory } : {}), ...(gateReverified !== null ? { reverified: gateReverified } : {}), ...(checkProofs ? { check_discrimination: checkProofVerdict, check_discriminations: checkProofs } : {}), ...(checkProofNote ? { check_proof_note: checkProofNote } : {}) } : null)
+  gateBlock = () => (gateCmd ? { cmd: gateCmd, repairs: gateRepairs, generation: gateGeneration, discrimination: gateDiscrimination ?? 'unproven', reap: { ...gateReapTally }, ...(gateProofNote ? { discrimination_note: gateProofNote } : {}), ...(gateHistory.length ? { replaced: gateHistory } : {}), ...(gateReverified !== null ? { reverified: gateReverified } : {}), ...(checkProofs ? { check_discrimination: checkProofVerdict, check_discriminations: checkProofs } : {}), ...(checkProofNote ? { check_proof_note: checkProofNote } : {}), ...(checkProofBindMeasured && checkProofBinds.some((row) => row.status === 'absent') ? { mutation_bind: bindReport(), mutation_binds: checkProofBinds } : {}) } : null)
   const resetCheckProof = () => {
     checkProofs = null; checkProofOutput = null; checkProofNote = null
     checkProofVerdict = null; checkProofPending = null
+    checkProofBinds = []; checkProofUnbound = []; checkProofBindMeasured = false   // ANCHOR A3
   }
+  // #874 — the driver's io stays the only file authority; the exported binder takes repo-relative
+  // paths and this resolves them, exactly as the mutation loop already does.
+  const readBuilt = (file) => io.readFile(`${ctx.checkout}/${file}`)
+  // #874 (1)(3) — the bind report. `checks` is the per-check closed status set the acceptance
+  // wording asks to be JOURNALED — an aggregate cannot say WHICH declaration was absent — and the
+  // counts beside it are what the ledger ingests. `absent: 0` on an all-bind lane is a MEASURED
+  // zero: a pass that found nothing is not a pass that did not run.
+  // MUTATION G1: count every row as absent and an all-bind lane's report claims a drift that did
+  // not happen — the rate loses its meaning in the direction that manufactures alarm.
+  const bindReport = () => ({
+    generation: gateGeneration,
+    declared: checkProofBinds.length,
+    exact: checkProofBinds.filter((row) => row.status === 'exact').length,
+    normalized: checkProofBinds.filter((row) => row.status === 'normalized').length,
+    absent: checkProofBinds.filter((row) => row.status === 'absent').length,                         // ANCHOR G1
+    corrected: checkProofBinds.filter((row) => row.correction === 'accepted').length,
+    checks: checkProofBinds.map((row) => ({ check: row.check, file: row.file, status: row.status })),
+  })
+  // #874 (1) — a plan/build disagreement. NOT `checkProofVerdict === 'failed'`: the driver's own
+  // vocabulary says only `survived` indicts the gate (crew/drive.mjs:1432), and gate custody cannot
+  // repair this one at all.
+  const checkProofDisagreement = () => checkProofUnbound.length > 0
   const recordGateProof = (label) => {
     resetCheckProof()                     // FIRST, before every early return: a
     gateProvenGeneration = gateGeneration  // generation never inherits the previous
@@ -3393,8 +3443,28 @@ function runTask(ctx, io, crash) {
     const rows = []
     let survivor = null
     let active = null            // the ONE mutation in flight: {abs, original, writeAttempted}
+    let corrections = { entries: [], refusals: [] }
     try {
-      for (const [index, mutation] of mutations.entries()) {
+      // #874 (1) — the bind check runs FIRST, for EVERY declaration, before a single mutation is
+      // written, and its report is assigned IMMEDIATELY: from here it is the authority on which
+      // anchors reached the built tree, so a pass interrupted later still knows. It is inside the
+      // try because io.readFile may throw and an interrupted pass must settle `unproven` rather
+      // than lose the build.
+      // MUTATION A1: hand this the empty list and no declaration is ever bind-checked — the
+      // b381-journalfacts and b384-suiteslot blind spot, restored.
+      const binds = bindMutationDeclarations(mutations, readBuilt)                                   // ANCHOR A1
+      checkProofBinds = binds.map((row) => ({ ...row, correction: 'none' }))
+      // #874 — set ONLY here, and only after every declaration was read: bindMutationDeclarations
+      // either returns all rows or throws, so reaching this line is exactly the condition
+      // "a completed bind check measured this window". Nothing downstream may publish a count
+      // without it. MUTATION A3 flips the reset above, not this line, because a mutant that never
+      // measures anything is silent while one that always claims to have measured is the defect.
+      checkProofBindMeasured = true
+      corrections = validateMutationCorrections(builderEnv?.details, binds, mutations, readBuilt)
+      // MUTATION C1: drop the accepted candidates here and the builder's one authoring moment is
+      // discarded — a corrected anchor never reaches the proof and b384's lane escalates as it did.
+      const effective = correctedMutations(mutations, binds, corrections.entries)                    // ANCHOR C1
+      for (const [index, mutation] of effective.entries()) {
         if (mutation.exempt) {
           rows.push({ check: mutation.check, outcome: 'exempt', why: mutation.exempt, file: null, summary: null })
           continue
@@ -3406,7 +3476,6 @@ function runTask(ctx, io, crash) {
         if (original === null) {
           rows.push({ check: mutation.check, outcome: 'unapplied', file: mutation.file, summary: null,
             why: `${mutation.file} does not exist in the built tree` })
-          survivor ??= rows[rows.length - 1]
           active = null
           continue
         }
@@ -3414,7 +3483,6 @@ function runTask(ctx, io, crash) {
         if (bound.text === null) {
           rows.push({ check: mutation.check, outcome: BINDING_OUTCOME[bound.mode], file: mutation.file, summary: null,
             why: bindingWhy(bound.mode, mutation.file) })
-          survivor ??= rows[rows.length - 1]
           active = null
           continue
         }
@@ -3438,19 +3506,31 @@ function runTask(ctx, io, crash) {
                 ? `the gate went red and DID print ${wantedLine}, but with a delimiter the driver does not read: the label must END THE LINE or be followed by a colon (${wantedLine} or ${JSON.stringify(`${CHECK_FAIL_PREFIX} ${mutation.check}: why`)}) — the print is not missing, its delimiter is wrong`
                 : `the gate went red but printed no ${wantedLine} line, so the check that failed is not the one under proof`)
         rows.push({ check: mutation.check, outcome: why ? 'survived' : 'killed', file: mutation.file, summary, why })
-        if (why) { survivor ??= rows[rows.length - 1]; checkProofOutput ??= res.output }
+        // #874 — a corrected anchor that leaves its check green is the BUILDER's refusal, not a
+        // gate defect. An UNcorrected survivor is untouched and still indicts the gate.
+        if (why) { if (!mutation.corrected) survivor ??= rows[rows.length - 1]; checkProofOutput ??= res.output }
       }
     } catch (err) {
       checkProofNote = err?.message || String(err)
       io.log(recordRow({ at: io.now(), gate_check_proof_unproven: checkProofNote, gate_generation: gateGeneration }))
       gateProofFatal = dirtyAfterFailure(active, err)
     }
+    // #874 — finalize BEFORE anything reads: bindReport(), settleCheckProof() and
+    // anchorAbsentWhy() all see terminal states only.
+    const finalized = finalizeCorrections(checkProofBinds, corrections, rows)
+    checkProofBinds = finalized.binds
+    checkProofUnbound = finalized.unresolved
+    rows.splice(0, rows.length, ...finalized.rows)
     checkProofs = rows
-    // Precedence, and it matters: a KNOWN survivor is a gate defect even if the
-    // pass was later interrupted; an interrupted pass with no survivor proved
-    // nothing and may never claim `proven` — that is the same false claim as a
-    // vacuous check passing the whole-gate proof, one level down.
-    checkProofVerdict = survivor ? 'failed' : checkProofNote ? 'unproven' : 'proven'
+    // #733/#874 — three precedences, and each matters. A KNOWN survivor is a gate defect even if
+    // the pass was later interrupted. An interrupted pass with no survivor proved nothing and may
+    // never claim `proven`. `unbound` sits between them: it is neither a gate defect nor an absence
+    // of evidence but a MEASURED plan/build disagreement — the only one of the three that gate
+    // custody cannot repair. A survivor still WINS the verdict, so a real gate defect is never
+    // hidden by a disagreement recorded beside it; the ROUTE is decided separately, below.
+    // MUTATION B2: report an unresolved anchor as `failed` and the record indicts a gate that
+    // proved everything it was given; `survived` stops being the only gate defect.
+    checkProofVerdict = survivor ? 'failed' : checkProofDisagreement() ? 'unbound' : checkProofNote ? 'unproven' : 'proven'   // ANCHOR B2
     settleCheckProof()
     stageComplete()
     return survivor
@@ -3491,6 +3571,19 @@ function runTask(ctx, io, crash) {
   // fenced to lane b36, so persistence beside gate_discriminations is a follow-up
   // lane, by decision, not by omission.
   const settleCheckProof = () => {
+    // #874 (1)(3) — the bind report and its absences go FIRST, before the discrimination row they
+    // are ABOUT: a reader replaying the journal must know which declarations reached the built tree
+    // before it reads the verdict computed from them. This row is written on EVERY bind-check pass,
+    // which is what gives the drift rate a denominator rather than a bare count.
+    // ...but ONLY when a completed bind check measured them. An interrupted preflight journals
+    // NEITHER key: the ledger window stays unmeasured rather than recording a zero denominator,
+    // and journalFactFamily's own absent reason is then the honest answer for that window.
+    if (checkProofBindMeasured) io.log(recordRow({ at: io.now(), mutation_anchor_bind: bindReport() }))
+    for (const bind of (checkProofBindMeasured ? checkProofBinds : []).filter((row) => row.status === 'absent')) {
+      // #874 (3) — one row per disagreement, EITHER WAY: the check, the file and the TERMINAL
+      // correction state, so a human amending a fixed envelope has every fact the amendment needs.
+      io.log(recordRow({ at: io.now(), mutation_anchor_absent: { generation: gateGeneration, check: bind.check, file: bind.file, correction: bind.correction, refusal: bind.correction_refusal ?? null, why: bind.why } }))
+    }
     io.log(recordRow({ at: io.now(), gate_check_discrimination: checkProofVerdict, gate_generation: gateGeneration,
       gate_check_discriminations: checkProofs, ...(checkProofNote ? { gate_check_proof_note: checkProofNote } : {}) }))
     emit({ kind: 'check-discrimination', generation: gateGeneration, verdict: checkProofVerdict,
@@ -4308,6 +4401,31 @@ function runTask(ctx, io, crash) {
       // the single gate_repairs budget bounds that to once.
       while (gateRes.ok && checkProofPending === gateGeneration) {
         completeCheckProof(`gate-proof:${gateGeneration}:checks`)
+        // #874 — the DIRTY TREE outranks every diagnosis. settleFailedProof's first branch
+        // (crew/drive.mjs:3526-3528) refuses to continue while `gateProofFatal` is set, because the
+        // built tree still carries the driver's OWN mutation; nothing about the plan matters until
+        // it is restored, and bouncing anyone onto that tree asks them to repair code the driver
+        // broke. Settled here so a dirty restore is never reported merely as drift.
+        if (gateProofFatal) {
+          const fatal = settleFailedProof()
+          if (fatal.escalation) {
+            stageComplete()
+            return fatal.escalation
+          }
+        }
+        // #874 (1) — a plan/build disagreement is NOT gate custody's to repair: the lead may not
+        // edit the planner's envelope and the planner is never assigned again. It escalates here,
+        // carrying the whole bind report, rather than spending the single gate repair on a gate
+        // that proved everything it was given. A survivor recorded beside it keeps
+        // checkProofVerdict at `failed`, so the real gate defect stays measured; it just does not
+        // buy a repair round on a lane that is terminal until the fixed contract is amended.
+        // MUTATION B1: replace this return with `checkProofVerdict = 'failed'` and control falls
+        // through to settleFailedProof on the next loop step — the b384-suiteslot GATE-CUSTODY
+        // misroute, genuinely restored.
+        if (checkProofDisagreement()) {
+          stageComplete()
+          return escalate('anchor-absent', anchorAbsentWhy(checkProofUnbound))                       // ANCHOR B1
+        }
         if (!gateProofFatal && checkProofVerdict !== 'failed') break
         const settled = settleFailedProof()
         if (settled.escalation) {
@@ -4990,6 +5108,198 @@ const bindingWhy = (mode, file) => (mode === 'ambiguous'
   : mode === 'unsafe'
     ? `the declared find's normalized match crosses a line that carries a // comment inside the span, so a verbatim replacement would land in the comment; declare a find that starts after the comment`
     : `the declared find text is nowhere in the built ${file}, exactly or whitespace-normalized`)
+
+// #874 — THE BIND CHECK. Every declaration measured against the built tree before a single
+// mutation is written. b384-suiteslot lost a lane because check B2's declared `find` joined
+// crew/drive.mjs:5178 and :5187 with one newline while the built tree carried nine comment lines
+// between them — the block the ACCEPTED plan prescribed in its own §2. Nothing compared the
+// declaration with the built source until the anchor was applied, and by then the only actor who
+// could correct it was gone. An exemption declares no anchor, so it produces no row: `declared`
+// counts anchors, which is the denominator a drift rate needs.
+export function bindMutationDeclarations(entries, readFile) {
+  const rows = []
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    if (entry?.exempt) continue
+    const original = readFile(entry.file)
+    if (original === null) {
+      rows.push({ check: entry.check, file: entry.file, status: 'absent', why: `${entry.file} does not exist in the built tree` })
+      continue
+    }
+    const bound = bindMutationAnchor(original, entry.find)
+    const status = BIND_STATUS[bound.mode]
+    rows.push({ check: entry.check, file: entry.file, status, why: status === 'absent' ? bindingWhy(bound.mode, entry.file) : null })
+  }
+  return rows
+}
+
+// #874 — a CORRECTION must bind EXACTLY ONCE. bindMutationAnchor's normalized arm already refuses
+// a second span, but its exact arm is bare `indexOf` and applyMutationAnchor rewrites with
+// `replaceAll`, so a PLAN declaration may legitimately hit several spans. A builder's correction
+// may not: the check whose anchor it replaces has to be the one span the gate reddens on, so a
+// second exact occurrence is `ambiguous` here and refused.
+// The second search resumes at `first + 1`, NOT at `first + find.length`, because OVERLAPPING
+// candidate start offsets are still MULTIPLE textual binds: `'aa'` occurs at offsets 0 AND 1 of
+// `'aaa'`, and skipping the overlap would call an anchor unique that is not. (It is NOT that
+// `replaceAll` would rewrite both: measured, `'aaa'.replaceAll('aa','X')` is `'Xa'`, one rewrite.
+// The rule is a uniqueness rule, not a rewrite-count one.) One character is also exactly how the
+// normalized arm counts its spans (crew/drive.mjs:4965), so exact-correction uniqueness and the
+// existing normalized uniqueness contract agree rather than disagreeing by one character.
+// MUTATION D2b: resume at `first + find.length` and an overlapping second occurrence is skipped —
+// the correction is admitted as unique when a second textual bind exists.
+export function bindMutationCorrection(original, find) {
+  const bound = bindMutationAnchor(original, find)
+  if (bound.mode !== 'exact') return bound
+  const first = original.indexOf(find)
+  return original.indexOf(find, first + 1) === -1 ? bound : { mode: 'ambiguous', spans: [] }   // ANCHOR D2b
+}
+
+// #874 (2) — the BUILDER's one authoring moment, validated the way validateHardened validates the
+// reviewer's owed guards: [{ entries, refusals }], closed reason tokens, never free prose.
+// `entries` are CANDIDATES, not acceptances: only finalizeCorrections can accept one, and only on
+// an adjudicated `killed` row. `file` is NOT the builder's to name — it comes from the declaration,
+// so a correction can re-aim the anchor inside the file the plan chose and never at another file.
+// Labels are PRE-COUNTED so a duplicate is atomic: a duplicated label yields no candidate at all
+// and exactly one refusal, rather than pushing the first entry before noticing the second.
+export function validateMutationCorrections(details, binds, declarations, readFile) {
+  const refusals = []
+  const entries = []
+  const refuse = (check, reason, why) => { refusals.push({ check: check ?? null, reason, why }) }
+  const declared = details?.mutation_corrections
+  if (declared === undefined) return { entries, refusals }
+  if (!Array.isArray(declared)) {
+    refuse(null, 'not-an-array', 'details.mutation_corrections must be an array of corrections')
+    return { entries, refusals }
+  }
+  const byCheck = new Map((Array.isArray(declarations) ? declarations : []).map((entry) => [entry?.check, entry]))
+  const bindByCheck = new Map((Array.isArray(binds) ? binds : []).map((row) => [row?.check, row]))
+  const labelOf = (entry) => (entry && typeof entry === 'object' && typeof entry.check === 'string' ? entry.check : null)
+  const labelCounts = new Map()
+  for (const entry of declared) { const label = labelOf(entry); if (label != null) labelCounts.set(label, (labelCounts.get(label) ?? 0) + 1) }
+  const duplicated = new Set()
+  for (const entry of declared) {
+    const check = labelOf(entry)
+    const declaration = byCheck.get(check)
+    if (!check || declaration === undefined) {
+      refuse(check, 'unknown-check', `the correction names ${check ?? '(no check)'} but the plan declared no mutation with that label`)
+      continue
+    }
+    // MUTATION E2: raise this pre-counted threshold out of reach and the FIRST of two corrections
+    // for one label becomes a candidate before the second is seen — the label is then both a
+    // candidate and refused, and the candidate is still applied.
+    if (labelCounts.get(check) > 1) {                                                                // ANCHOR E2
+      if (!duplicated.has(check)) { duplicated.add(check); refuse(check, 'duplicate-check', `more than one correction names check ${check}`) }
+      continue
+    }
+    const bind = bindByCheck.get(check)
+    // MUTATION E1: widen this to any status but `exact` and the builder may re-aim a mutation whose
+    // declared anchor bound perfectly — the plan's proof, replaced at build time by the very seat
+    // the proof exists to measure.
+    if (bind?.status !== 'absent') {                                                                 // ANCHOR E1
+      refuse(check, 'correction-not-absent', `check ${check} bound ${bind?.status ?? 'nothing'} against the built tree, so there is no anchor to correct`)
+      continue
+    }
+    if (typeof entry.find !== 'string' || entry.find.length === 0 || typeof entry.replace !== 'string' || entry.replace === entry.find || !mutationChangesTokens(entry.find, entry.replace) || ['file', 'exempt'].some((key) => Object.prototype.hasOwnProperty.call(entry, key))) {
+      refuse(check, 'correction-shape', 'a correction carries exactly check, find and replace, with a non-empty literal find and a replace that changes a token')
+      continue
+    }
+    const original = readFile(declaration.file)
+    const fit = original === null ? { mode: 'absent' } : bindMutationCorrection(original, entry.find)
+    // MUTATION D1: rename the mode this branch reads and a correction that reaches nothing falls
+    // into the ambiguity branch instead — the operator is sent hunting a second span that never
+    // existed, and the two failures stop being distinguishable.
+    if (fit.mode === 'absent') {                                                                     // ANCHOR D1
+      refuse(check, 'correction-absent', `the corrected find for ${check} is nowhere in the built ${declaration.file}, exactly or whitespace-normalized`)
+      continue
+    }
+    // MUTATION D2: make this predicate unsatisfiable and a correction matching more than one span
+    // becomes a candidate — the gate then reddens on a span nobody chose.
+    if (fit.mode !== 'exact' && fit.mode !== 'normalized') {                                         // ANCHOR D2
+      refuse(check, 'correction-ambiguous', `the corrected find for ${check} does not bind exactly once in the built ${declaration.file}: ${bindingWhy(fit.mode, declaration.file)}`)
+      continue
+    }
+    entries.push({ check, file: declaration.file, find: entry.find, replace: entry.replace })
+  }
+  return { entries, refusals }
+}
+
+// #874 — the accepted candidates substituted into the declaration list. The plan's `mutations`
+// array is never edited: this is the ONE place a build-time anchor replaces a plan-time one, and
+// the `corrected` flag it sets is what lets the proof attribute the row to the builder.
+export function correctedMutations(mutations, binds, corrections) {
+  const byCheck = new Map((Array.isArray(corrections) ? corrections : []).map((entry) => [entry.check, entry]))
+  return (Array.isArray(mutations) ? mutations : []).map((entry) => {
+    const correction = byCheck.get(entry?.check)
+    return correction === undefined ? entry : { ...entry, find: correction.find, replace: correction.replace, corrected: true }
+  })
+}
+
+// #874 — ONE TERMINAL STATE per check, computed once, before bindReport(), settleCheckProof() or
+// anchorAbsentWhy() reads anything. The plan-check's finding, in one function: a statically
+// admissible correction is a CANDIDATE and nothing more. The final states are exactly
+//   accepted                       — a candidate whose corrected row was adjudicated `killed`
+//   refused / correction-green     — a candidate whose corrected row SURVIVED
+//   refused / correction-unproven  — a candidate that never produced an adjudicated row at all
+//                                    (an earlier contained throw, or a loop that never reached it)
+//   refused / <static reason>      — a candidate the validator refused
+//   none                           — no correction was offered for this check
+// `unresolved` comes from the BIND REPORT, never from the proof rows that happened to execute: a
+// declaration measured absent before the pass began stays a disagreement even if an earlier
+// mutation threw and its own row was never written.
+export function finalizeCorrections(binds, corrections, rows) {
+  const bindRows = Array.isArray(binds) ? binds : []
+  const proofRows = Array.isArray(rows) ? rows : []
+  const candidates = new Set((corrections?.entries || []).map((entry) => entry.check))
+  const staticRefusal = new Map()
+  for (const refusal of corrections?.refusals || []) {
+    if (refusal?.check != null && !staticRefusal.has(refusal.check)) staticRefusal.set(refusal.check, refusal.reason)
+  }
+  const outcomeOf = (check) => proofRows.find((row) => row.check === check)?.outcome ?? null
+  const terminal = (check) => {
+    if (candidates.has(check)) {
+      const outcome = outcomeOf(check)
+      // MUTATION C2: accept on any outcome rather than only on `killed` and a correction is
+      // credited before the evidence exists — the premature acceptance #874 is about, one level
+      // down: a survived or never-adjudicated correction reaches the journal as `accepted`.
+      if (outcome === 'killed') return { correction: 'accepted', refusal: null }                     // ANCHOR C2
+      // MUTATION D3: return `accepted` from this arm and the third acceptance condition is deleted:
+      // the builder can pick a no-op anchor, the check resolves, and the lane commits with a
+      // mutation that killed nothing.
+      return { correction: 'refused', refusal: outcome === 'survived' ? 'correction-green' : 'correction-unproven' }   // ANCHOR D3
+    }
+    if (staticRefusal.has(check)) return { correction: 'refused', refusal: staticRefusal.get(check) }
+    return { correction: 'none', refusal: null }
+  }
+  const withTerminal = (row) => { const t = terminal(row.check); return { ...row, correction: t.correction, ...(t.refusal ? { correction_refusal: t.refusal } : {}) } }
+  const finalBinds = bindRows.map(withTerminal)
+  // A row for a check nobody corrected is returned UNTOUCHED — INCLUDING an uncorrected
+  // binding-failure row. Only a check that has a correction CANDIDATE or a static refusal is
+  // decorated, because only those have terminal correction state worth reading. The terminal state
+  // for every declaration lives on `finalBinds` and on the dedicated absence journal row, which is
+  // where the operator reads it; putting `correction: 'none'` on a legacy proof row would change a
+  // shape nothing asked to change and break the exact deep-equals at crew/drive.test.mjs:4205
+  // (killed), :4232 (exempt), :4266 (anchor-absent) and :4418 (unapplied) for no gain.
+  const finalRows = proofRows.map((row) => (candidates.has(row.check) || staticRefusal.has(row.check) ? withTerminal(row) : row))
+  // MUTATION B3: derive this from `finalRows` instead and an absent declaration the pass never
+  // reached vanishes from the routing decision — proof rows carry no `status`, so the filter
+  // matches nothing and the lane continues as `unproven`, exactly as before #874.
+  const unresolved = finalBinds.filter((row) => row.status === 'absent' && row.correction !== 'accepted')   // ANCHOR B3
+  return { binds: finalBinds, rows: finalRows, unresolved }
+}
+
+// #874 (1)(2) — the operator-facing sentence for a plan/build disagreement, and the one place that
+// names the class. It ALWAYS carries the literal `anchor-absent`, because that token is what
+// escalationCause Rule 2 (scripts/factory/ledger.mjs:189) reads to classify the row as
+// `plan-build-disagreement` / `driver`; a sentence without it lands `unclassified` (measured).
+// It ALSO keeps the established literal `did not BIND to the built tree`, which is the phrase
+// today's percheckNote uses for the same class (crew/drive.mjs:3385) and which three existing
+// assertions read — crew/drive.test.mjs:4017, :4058 and, negatively, :4018/:4060 (`did not kill`
+// must NOT appear). This sentence takes the route percheckNote's binding-failure branch used to
+// take, so it inherits that branch's vocabulary rather than minting a second one.
+export function anchorAbsentWhy(unresolved) {
+  const rows = Array.isArray(unresolved) ? unresolved : []
+  const detail = rows.map((row) => `${JSON.stringify(row.check)} in ${row.file} (bind ${row.status}, correction ${row.correction}${row.correction_refusal ? `/${row.correction_refusal}` : ''}${row.why ? `: ${row.why}` : ''})`).join('; ')
+  return `the per-check proof found a PLAN/BUILD disagreement, not a gate defect — anchor-absent: ${rows.length} declared ${rows.length === 1 ? 'anchor' : 'anchors'} did not BIND to the built tree with an accepted correction: ${detail}. The plan predicted source the builder did not write; gate custody cannot repair it, because the lead may not edit the planner's envelope and the planner is never assigned again`
+}
 
 // --- the journal channel split (#608's producer half) --------------------------
 // The journal is two interleaved streams and said so nowhere. Measured on

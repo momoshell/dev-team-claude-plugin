@@ -21,6 +21,7 @@ investigating.
 | `escalate:refuted-must-fix` | A must-fix was refuted but the acceptance policy refused to settle it automatically. | Read both finding positions and the acceptance record; do not erase the finding. |
 | `escalate:suite` | The full suite went red after an otherwise accepted build. | Capture the colour-neutral suite output and return to the committed tree. |
 | `escalate:gate` | The acceptance gate is red or its proof could not settle. | Save the gate output and inspect the named `FAIL <check>` line. |
+| `escalate:anchor-absent` | A declared `details.mutations` anchor did not reach the built tree and no accepted builder correction resolved it. | A PLAN/BUILD disagreement, not a gate indictment: read the bind report's `absent` rows and the builder's `details.mutation_corrections`. The gate is not defective and its one repair is unspent. |
 | `escalate:envelope` | A seat returned an envelope that does not match the selected shape. | Open that seat's return and compare its fields with the variant contract. |
 | `escalate:full` | The `full` shape could not complete its reviewed lifecycle. | Preserve the plan, gate, and review records before considering a retry. |
 | `escalate:scout` | The read-only scout envelope or scope check failed. | Read the scout return and confirm that it made no checkout writes. |

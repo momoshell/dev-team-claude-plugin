@@ -32,7 +32,7 @@ import {
   parseGateSummary, baselineGateDefect, GATE_SUMMARY_PREFIX, GATE_CUSTODIAN, roundCursor,
   gateReapCommand, gateReapSweepCommand, gateReapOriginal, gateReapVerdict, gateReapFresh, GATE_REAP_CMD_EOF, GATE_REAP_SWEEP_MARKER,
   validateMutations, checkFailureLine, MUTATION_OUTCOMES, MUTATION_BINDING_FAILURES, MUTATIONS_MAX, CHECK_FAIL_PREFIX,
-  bindMutationAnchor, applyMutationAnchor,
+  bindMutationAnchor, applyMutationAnchor, bindMutationDeclarations, bindMutationCorrection, validateMutationCorrections, correctedMutations, finalizeCorrections, anchorAbsentWhy, MUTATION_BIND_STATUSES, MUTATION_CORRECTION_OUTCOMES, MUTATION_CORRECTION_REFUSALS,
   FINDING_SEVERITIES, FINDING_DISPOSITIONS, FINDING_ID_SHAPE, RESIDUAL_TYPES, reviewFindings, reviewOutcome,
   HARDENING_MARKS, HARDENING_REFUSALS, HARDENING_OUTCOMES, NAME_VERDICTS, nameVerdict, hardeningOf, hardeningDebt, hardenCommand, hardenWitnessCommand, scopedPath, mutationChangesTokens, validateHardened, hardeningBounceLines, hardeningBriefLines,
   verdictFindingsDefect, findingIdDefect, reviewShapeDefect, guardedWrite, acceptedRawById, patchTargets, dispositionOf, dispositionPlan, askUserLines,
@@ -76,7 +76,7 @@ const CTX = Object.freeze({
 // Scripted fake io: `script` maps `${role}:${n-th call}` -> envelope; runs and
 // git are scripted per call. Everything is recorded for assertions.
 function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cleanThrows = false, cold = 'green', showDoc = false, emit = false, files = {}, reseat = null, gh = null, writeThrough = false, throwOn = null, throwWrites = [], seqIds = false, now = () => 0, slots = null } = {}) {
-  const calls = { order: [], trace: [], assign: [], run: [], runClean: [], runCold: [], wrapped: [], sweeps: [], reseat: [], commits: [], writes: {}, writeLog: [], logs: [], showDoc: [], emits: [], gh: [], waits: [], sleeps: [], slotFactories: [], files }
+  const calls = { order: [], trace: [], assign: [], run: [], runClean: [], runCold: [], wrapped: [], sweeps: [], reseat: [], commits: [], writes: {}, writeLog: [], checkoutLog: [], logs: [], showDoc: [], emits: [], gh: [], waits: [], sleeps: [], slotFactories: [], files }
   const counts = {}; let seq = 0
 
   const writeCounts = {}
@@ -96,6 +96,7 @@ function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cle
     writeFile(path, content) {
       if (throwWrites.includes(path)) throw new Error('writeFile: report truncation failed')
       if (path.startsWith(`${CTX.checkout}/`)) {
+        calls.checkoutLog.push({ op: 'write', path })
         writeCounts[path] = (writeCounts[path] || 0) + 1
         if (throwOn === 'apply' && writeCounts[path] % 2 === 1) throw new Error('writeFile: read-only filesystem')
         if (throwOn === 'restore' && writeCounts[path] % 2 === 0) throw new Error('writeFile: the restore write failed')
@@ -105,6 +106,7 @@ function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cle
       if (writeThrough) files[path] = content
     },
     readFile(p) {
+      if (p.startsWith(`${CTX.checkout}/`)) calls.checkoutLog.push({ op: 'read', path: p })
       if (throwOn === 'read' && p.startsWith(`${CTX.checkout}/`)) throw new Error('readFile: permission denied')
       if (Object.prototype.hasOwnProperty.call(files, p)) return files[p]
       if (/gate-reap\.\d+\.json$/.test(p)) return '{"pgid":"4242","outcome":"already-dead","reason":"probe-dead","signals":0,"survivors":""}'
@@ -3901,6 +3903,48 @@ const CHECK_RUNS = (mutationOutput = `FAIL check-one: caught\n${GATE_SUMMARY_PRE
   'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
 })
 const CHECK_CLEAN = { 'gate-cmd': { ok: false, output: RED(3) } }
+const B384_CORRECTED_FIND = 'try { recordWait(); return run() } finally { pool.release(handle) }'
+const B384_CORRECTED_REPLACE = 'recordWait(); try { return run() } finally { pool.release(handle) }'
+const B384_BUILT = [
+  'export function withSlot(pool, run) {',
+  '  const handle = pool.acquire()',
+  '  // the wait is recorded before the body runs, so a queue that never drains still shows its',
+  '  // depth; #822 measured 3 of 4 slots held for the whole run.',
+  `  ${B384_CORRECTED_FIND}`,
+  '}',
+].join('\n')
+const B384_MUTATION = {
+  check: 'B2', file: 'crew/drive.mjs',
+  find: 'const handle = pool.acquire()\ntry { recordWait(); return run() } finally { pool.release(handle) }',
+  replace: 'const handle = null',
+}
+const B384_PLAN = (mutations = [B384_MUTATION], files_in_scope = ['crew/drive.mjs']) => planEnv({
+  details: { ...planEnv().details, files_in_scope, gate_cmd: 'gate-cmd', mutations },
+})
+const B384_FILE = `${CTX.checkout}/crew/drive.mjs`
+const B384_GREEN = `green\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":0,"errored":0}`
+const B384_RED = `FAIL B2: caught\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":1,"errored":0}`
+function b384Io({ mutations = [B384_MUTATION], scope = ['crew/drive.mjs'], builder = buildEnv(), files = {}, runs = {}, throwMutation = false } = {}) {
+  const io = fakeIo({
+    files: { [B384_FILE]: B384_BUILT, ...files }, writeThrough: true, cleanRuns: CHECK_CLEAN,
+    envelopes: { 'planner:1': B384_PLAN(mutations, scope), 'builder:1': builder, 'reviewer:1': reviewEnv('pass') },
+    runs: { ...CHECK_RUNS(), ...runs }, changed: scope, emit: true,
+    reseat: () => ({ applied: true, already: true }),
+  })
+  if (throwMutation) {
+    const originalRun = io.run
+    let gateCalls = 0
+    io.run = function (cmd) {
+      const original = gateReapOriginal(cmd)
+      if (!String(cmd).includes(GATE_REAP_SWEEP_MARKER) && original === 'gate-cmd') {
+        gateCalls += 1
+        if (gateCalls === 3) throw new Error('mutation gate exploded')
+      }
+      return originalRun.call(this, cmd)
+    }
+  }
+  return io
+}
 const CHECK_ENVELOPES = (mutations, extra = {}) => ({
   'planner:1': CHECK_PLAN(mutations), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'), ...extra,
 })
@@ -3964,6 +4008,33 @@ test('a re-wrapped built anchor binds and the per-check proof kills the check', 
   const row = io.calls.emits.find((event) => event.kind === 'check-discrimination').checks[0]
   assert.equal(row.outcome, 'killed')
   assert.deepEqual(io.calls.writeLog.filter(({ path }) => path === CHECK_FILE).map(({ content }) => content), [mutated, built])
+})
+
+test('b385 A1 the bind check reads every declaration before the first checkout write and journals their statuses', () => {
+  const mutations = [
+    { check: 'check-one', file: 'a.mjs', find: 'true', replace: 'false' },
+    { check: 'ghost', file: 'a.mjs', find: 'true\nexport const other = false', replace: 'false\nexport const other = true' },
+  ]
+  const built = 'export const guard = true\n// interposed comment block\nexport const other = false\n'
+  const io = fakeIo({
+    files: { [CHECK_FILE]: built }, writeThrough: true, cleanRuns: CHECK_CLEAN,
+    envelopes: CHECK_ENVELOPES(mutations), runs: CHECK_RUNS(), changed: ['a.mjs', 'a.test.mjs'], emit: true,
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'escalation')
+  const firstWrite = io.calls.checkoutLog.findIndex(({ op }) => op === 'write')
+  assert.ok(firstWrite >= 0)
+  const declarationReads = io.calls.checkoutLog.slice(0, firstWrite).filter(({ op, path }) => op === 'read' && path === CHECK_FILE)
+  assert.ok(declarationReads.length >= 2)
+  assert.ok(io.calls.writeLog.some(({ path }) => path === CHECK_FILE))
+  const bind = io.calls.logs.find((line) => line.mutation_anchor_bind)?.mutation_anchor_bind
+  assert.deepEqual(bind?.checks, [
+    { check: 'check-one', file: 'a.mjs', status: 'exact' },
+    { check: 'ghost', file: 'a.mjs', status: 'absent' },
+  ])
+  assert.deepEqual({ declared: bind?.declared, exact: bind?.exact, normalized: bind?.normalized, absent: bind?.absent, corrected: bind?.corrected }, {
+    declared: 2, exact: 1, normalized: 0, absent: 1, corrected: 0,
+  })
 })
 
 test('a token-different anchor is absent and writes nothing', () => {
@@ -4261,7 +4332,9 @@ test('an anchor-absent mutation is not accepted as proof', () => {
     runs: { ...CHECK_RUNS(), 'gate-fixed:1': { ok: true, output: '' } }, changed: ['a.mjs', 'a.test.mjs'] })
   const res = driveTask(CTX, io)
   assert.equal(res.status, 'escalation')
-  assert.equal(res.details.escalation.where, 'gate')
+  assert.equal(res.details.escalation.where, 'anchor-absent')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'lead').length, 0)
+  assert.equal(res.details.gate.repairs, 0)
   assert.equal(res.details.escalation.why.includes('ghost'), true)
   assert.deepEqual(io.calls.logs.find((line) => line.gate_check_discriminations).gate_check_discriminations[0], { check: 'ghost', outcome: 'anchor-absent', file: 'a.mjs', summary: null, why: 'the declared find text is nowhere in the built a.mjs, exactly or whitespace-normalized' })
   assert.equal(io.calls.writeLog.filter(({ path }) => path === CHECK_FILE).length, 0)
@@ -4276,6 +4349,9 @@ test('an interrupted read records unproven per-check evidence without losing the
   assert.equal(res.details.gate.check_discriminations.length, 0)
   assert.equal(io.calls.commits.length, 1)
   assert.ok(io.calls.logs.some((line) => line.gate_check_proof_unproven))
+  assert.equal(io.calls.writeLog.filter(({ path }) => path.startsWith(`${CTX.checkout}/`)).length, 0)
+  assert.equal(io.calls.logs.filter((line) => line.mutation_anchor_bind).length, 0)
+  assert.equal(io.calls.logs.filter((line) => line.mutation_anchor_absent).length, 0)
 })
 
 test('a failed restore escalates rather than committing the driver mutation', () => {
@@ -4332,6 +4408,113 @@ test('a surviving mutation enters the existing lead gate repair path', () => {
   assert.equal(io.calls.logs.find((line) => line.gate_check_discriminations).gate_check_discriminations[0].why, 'the gate stayed GREEN under the mutation')
 })
 
+test('b385 B1 an unresolved anchor escalates at anchor-absent and never reaches gate custody', () => {
+  const first = b384Io()
+  const firstRes = driveTask(CTX, first)
+  assert.equal(firstRes.status, 'escalation')
+  assert.equal(firstRes.details.escalation.where, 'anchor-absent')
+  assert.match(firstRes.details.escalation.why, /\banchor-absent\b/)
+  assert.equal(first.calls.assign.filter(({ role, note }) => role === 'lead' && ['gate-repair', 'gate-fix'].includes(note)).length, 0)
+  assert.equal(firstRes.details.gate.repairs, 0)
+
+  const interrupted = b384Io({
+    mutations: [CHECK_MUTATION, B384_MUTATION], scope: ['a.mjs', 'crew/drive.mjs'],
+    files: { [CHECK_FILE]: CHECK_BUILT }, throwMutation: true,
+  })
+  const interruptedRes = driveTask(CTX, interrupted)
+  assert.equal(interruptedRes.status, 'escalation')
+  assert.equal(interruptedRes.details.escalation.where, 'anchor-absent')
+  assert.match(interruptedRes.details.escalation.why, /B2/)
+  assert.equal(interruptedRes.details.gate.repairs, 0)
+  assert.equal(interrupted.calls.assign.filter(({ role, note }) => role === 'lead' && ['gate-repair', 'gate-fix'].includes(note)).length, 0)
+
+  const mixed = b384Io({
+    mutations: [CHECK_MUTATION, B384_MUTATION], scope: ['a.mjs', 'crew/drive.mjs'],
+    files: { [CHECK_FILE]: CHECK_BUILT }, runs: { 'gate-cmd:3': { ok: true, output: B384_GREEN } },
+  })
+  const mixedRes = driveTask(CTX, mixed)
+  assert.equal(mixedRes.status, 'escalation')
+  assert.equal(mixedRes.details.escalation.where, 'anchor-absent')
+  assert.equal(mixedRes.details.gate.repairs, 0)
+  assert.equal(mixed.calls.assign.filter(({ role, note }) => role === 'lead' && ['gate-repair', 'gate-fix'].includes(note)).length, 0)
+  assert.equal(mixedRes.details.gate.check_discrimination, 'failed')
+})
+
+test('b385 B2 an unresolved anchor leaves the whole-gate proof proven and the check verdict unbound', () => {
+  const io = b384Io()
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'escalation')
+  assert.equal(res.details.gate.discrimination, 'proven')
+  assert.equal(res.details.gate.check_discrimination, 'unbound')
+  assert.equal(res.details.gate.mutation_bind.absent, 1)
+  assert.match(res.details.escalation.why, /not a gate defect/)
+})
+
+test('b385 C1 a builder correction that binds once and leaves its check failing is accepted', () => {
+  const builder = buildEnv({ details: {
+    ...buildEnv().details,
+    mutation_corrections: [{ check: 'B2', find: B384_CORRECTED_FIND, replace: B384_CORRECTED_REPLACE }],
+  } })
+  const io = b384Io({ builder, runs: { 'gate-cmd:3': { ok: false, output: B384_RED } } })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.equal(res.details.gate.check_discrimination, 'proven')
+  const proof = io.calls.emits.find((event) => event.kind === 'check-discrimination')?.checks?.[0]
+  assert.deepEqual(proof, { check: 'B2', outcome: 'killed', file: 'crew/drive.mjs', summary: { total: 3, failed: 1, errored: 0 }, why: null, correction: 'accepted' })
+  const bind = io.calls.logs.find((line) => line.mutation_anchor_bind)?.mutation_anchor_bind
+  assert.equal(bind.corrected, 1)
+  const absence = io.calls.logs.find((line) => line.mutation_anchor_absent)?.mutation_anchor_absent
+  assert.deepEqual({ correction: absence.correction, refusal: absence.refusal }, { correction: 'accepted', refusal: null })
+})
+
+test('b385 D3 a correction that survives or never adjudicates is refused and escalates', () => {
+  const correction = { mutation_corrections: [{ check: 'B2', find: B384_CORRECTED_FIND, replace: B384_CORRECTED_REPLACE }] }
+  const greenBuilder = buildEnv({ details: { ...buildEnv().details, ...correction } })
+  const greenIo = b384Io({ builder: greenBuilder, runs: { 'gate-cmd:3': { ok: true, output: B384_GREEN } } })
+  const green = driveTask(CTX, greenIo)
+  assert.equal(green.status, 'escalation')
+  assert.equal(green.details.escalation.where, 'anchor-absent')
+  assert.match(green.details.escalation.why, /correction-green/)
+  assert.equal(green.details.gate.mutation_bind.corrected, 0)
+  const greenBind = greenIo.calls.logs.find((line) => line.mutation_anchor_bind)?.mutation_anchor_bind
+  const greenAbsence = greenIo.calls.logs.find((line) => line.mutation_anchor_absent)?.mutation_anchor_absent
+  assert.deepEqual({ correction: green.details.gate.mutation_binds[0].correction, refusal: green.details.gate.mutation_binds[0].correction_refusal }, { correction: 'refused', refusal: 'correction-green' })
+  assert.deepEqual({ correction: greenAbsence.correction, refusal: greenAbsence.refusal }, { correction: 'refused', refusal: 'correction-green' })
+  assert.equal(greenBind.corrected, 0)
+  assert.equal(green.details.gate.repairs, 0)
+  assert.equal(greenIo.calls.assign.filter(({ role, note }) => role === 'lead' && ['gate-repair', 'gate-fix'].includes(note)).length, 0)
+
+  const throwBuilder = buildEnv({ details: { ...buildEnv().details, ...correction } })
+  const throwIo = b384Io({ builder: throwBuilder, throwMutation: true })
+  const thrown = driveTask(CTX, throwIo)
+  assert.equal(thrown.status, 'escalation')
+  assert.equal(thrown.details.escalation.where, 'anchor-absent')
+  assert.match(thrown.details.escalation.why, /correction-unproven/)
+  assert.equal(thrown.details.gate.mutation_bind.corrected, 0)
+  const throwBind = throwIo.calls.logs.find((line) => line.mutation_anchor_bind)?.mutation_anchor_bind
+  const throwAbsence = throwIo.calls.logs.find((line) => line.mutation_anchor_absent)?.mutation_anchor_absent
+  assert.deepEqual({ correction: thrown.details.gate.mutation_binds[0].correction, refusal: thrown.details.gate.mutation_binds[0].correction_refusal }, { correction: 'refused', refusal: 'correction-unproven' })
+  assert.deepEqual({ correction: throwAbsence.correction, refusal: throwAbsence.refusal }, { correction: 'refused', refusal: 'correction-unproven' })
+  assert.equal(throwBind.corrected, 0)
+  assert.equal(thrown.details.gate.repairs, 0)
+  assert.equal(throwIo.calls.assign.filter(({ role, note }) => role === 'lead' && ['gate-repair', 'gate-fix'].includes(note)).length, 0)
+})
+
+test('b385 G1 an all-bind lane pins its legacy proof row byte-identically beside one additive bind row', () => {
+  const io = fakeIo({
+    files: { [CHECK_FILE]: CHECK_BUILT }, writeThrough: true, cleanRuns: CHECK_CLEAN,
+    envelopes: CHECK_ENVELOPES([CHECK_MUTATION]), runs: CHECK_RUNS(), changed: ['a.mjs', 'a.test.mjs'], emit: true,
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.equal(res.details.gate.check_discrimination, 'proven')
+  assert.deepEqual(res.details.gate.check_discriminations[0], { check: 'check-one', outcome: 'killed', file: 'a.mjs', summary: { total: 3, failed: 1, errored: 0 }, why: null })
+  assert.equal(Object.hasOwn(res.details.gate, 'mutation_bind'), false)
+  const binds = io.calls.logs.filter((line) => line.mutation_anchor_bind).map((line) => line.mutation_anchor_bind)
+  assert.deepEqual(binds, [{ generation: 1, declared: 1, exact: 1, normalized: 0, absent: 0, corrected: 0, checks: [{ check: 'check-one', file: 'a.mjs', status: 'exact' }] }])
+  assert.equal(io.calls.logs.filter((line) => line.mutation_anchor_absent).length, 0)
+})
+
 test('a known survivor outranks a later interrupted mutation pass', () => {
   const mutations = [
     CHECK_MUTATION,
@@ -4355,8 +4538,17 @@ test('a known survivor outranks a later interrupted mutation pass', () => {
     changed: ['a.mjs', 'b.mjs'], emit: true,
   })
   const originalRead = io.readFile
+  let bReads = 0
   io.readFile = function (path) {
-    if (path === `${CTX.checkout}/b.mjs`) throw new Error('second read failed')
+    // #874 — the FIRST read of b.mjs is the bind preflight and must succeed, so this fixture
+    // still reaches the proof loop with both anchors bound. Every read AFTER it throws, exactly
+    // as before: generation 1 interrupts on the proof-loop read, after check-one has already
+    // survived, and generation 2's own preflight interrupts the same way, leaving it `unproven`
+    // with no survivor — which is what generation 2 recorded before this change too.
+    if (path === `${CTX.checkout}/b.mjs`) {
+      bReads += 1
+      if (bReads > 1) throw new Error('second read failed')
+    }
     return originalRead.call(this, path)
   }
   const res = driveTask(CTX, io)
@@ -7892,6 +8084,8 @@ const DRIVE_JOURNAL_EXPECTED = Object.freeze([
   ['recordRow', '', 'at gate_discrimination gate_generation gate_summary gate_proof_note'],
   ['recordRow', '', 'at gate_proof_unproven gate_generation'],
   ['recordRow', '', 'at gate_check_proof_unproven gate_generation'],
+  ['recordRow', '', 'at mutation_anchor_bind'],
+  ['recordRow', '', 'at mutation_anchor_absent'],
   ['recordRow', '', 'at gate_check_discrimination gate_generation gate_check_discriminations ...(checkProofNote ? { gate_check_proof_note: checkProofNote } : {})'],
   ['recordRow', '', 'at finding_hardened'],
   ['recordRow', '', 'at ...entry'],
@@ -7924,7 +8118,7 @@ test('the journal channel vocabulary is closed, exported and additive', () => {
 test('every journal emit site in the driver is inventoried, wrapped and on the right channel', () => {
   const text = readFileSync(new URL('./drive.mjs', import.meta.url), 'utf8')
   const sites = driveJournalSites(text)
-  assert.equal(sites.length, 50)
+  assert.equal(sites.length, 52)
   assert.deepEqual(sites.map(({ wrapper, events, keys }) => [wrapper, events, keys]), DRIVE_JOURNAL_EXPECTED)
   assert.ok(sites.every(({ wrapper }) => wrapper === 'recordRow' || wrapper === 'operationalRow'))
   assert.equal(sites.filter(({ wrapper }) => wrapper === 'operationalRow').length, 2)
@@ -10451,4 +10645,20 @@ test('#839 hardening proof restores the dirty built tree after success and each 
       assert.doesNotMatch(result.details.escalation.why, /could not restore the built tree/, label)
     }
   }
+})
+
+test('RV1-1 an all-exempt declaration set journals a completed bind check', () => {
+  const mutations = [{ check: 'all-exempt', exempt: 'no source anchor is required' }]
+  const io = fakeIo({ cleanRuns: CHECK_CLEAN,
+    envelopes: CHECK_ENVELOPES(mutations), runs: CHECK_RUNS(), changed: ['a.mjs', 'a.test.mjs'], emit: true })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.equal(res.details.gate.check_discrimination, 'proven')
+  assert.deepEqual(res.details.gate.check_discriminations, [
+    { check: 'all-exempt', outcome: 'exempt', why: 'no source anchor is required', file: null, summary: null },
+  ])
+  assert.deepEqual(io.calls.logs.filter((line) => line.mutation_anchor_bind).map((line) => line.mutation_anchor_bind), [
+    { generation: 1, declared: 0, exact: 0, normalized: 0, absent: 0, corrected: 0, checks: [] },
+  ])
+  assert.equal(io.calls.logs.filter((line) => line.mutation_anchor_absent).length, 0)
 })

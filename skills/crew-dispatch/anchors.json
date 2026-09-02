@@ -4,8 +4,6 @@
   "scripts/factory/make-brief.mjs:113": "STALE_READ_ACK = 'stale-read-ack'",
   "scripts/factory/make-brief.mjs:119": "CREATES_EXISTS = 'creates-exists'",
   "scripts/factory/dispatch-batch.mjs:33": "FENCE_NOT_ARRIVED = 'fence-not-arrived'",
-  "scripts/factory/dispatch-batch.mjs:127": "BOOT_TRANSPORT = 'headless-all'",
-  "scripts/factory/dispatch-batch.mjs:128": "PANE_TRANSPORT = 'panes'",
   "scripts/factory/dispatch-batch.mjs:21": "TRANSPORT_CONFLICT = 'transport-conflict'",
   "scripts/factory/dispatch-batch.mjs:37": "DEPENDENCY_UNKNOWN = 'dependency-unknown'",
   "scripts/factory/dispatch-batch.mjs:38": "DEPENDENT_BASE_STALE = 'dependent-base-stale'",
@@ -16,5 +14,7 @@
   "crew/drive.mjs:27": "plan_rounds: 2, // planner attempts",
   "crew/drive.mjs:52": "builder: 2400, reviewer: 1800",
   "crew/drive.mjs:347": "export const GATE_REAP_SHELL = '/bin/bash'",
-  "crew/drive.test.mjs:3107": "'/path/that/does/not/exist'"
+  "crew/drive.test.mjs:3107": "'/path/that/does/not/exist'",
+  "scripts/factory/dispatch-batch.mjs:144": "BOOT_TRANSPORT = 'headless-all'",
+  "scripts/factory/dispatch-batch.mjs:145": "PANE_TRANSPORT = 'panes'"
 }

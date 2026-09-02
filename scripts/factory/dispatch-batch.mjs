@@ -445,8 +445,6 @@ export function normalDeps(deps = {}) {
     appendFileSync: deps.appendFileSync || appendFileSync,
     readdirSync: deps.readdirSync || fsReaddirSync,
     mkdirSync: deps.mkdirSync || mkdirSync,
-    writeFileSync: deps.writeFileSync || writeFileSync,
-    appendFileSync: deps.appendFileSync || appendFileSync,
     home: deps.home || homedir(),
     spawn: deps.spawn || ((options) => options?.background
       ? spawnBackground(options)

@@ -81,7 +81,6 @@ import {
 import { parseDirectedBrief } from '../crew/drive.mjs'
 import { laneFenceFor, renderBrief } from '../scripts/factory/make-brief.mjs'
 import { DRIVER_GONE_PERIODS, HEARTBEAT_PERIOD_MS } from '../scripts/factory/lane-watch.mjs'
-import { laneFenceFor } from '../scripts/factory/make-brief.mjs'
 import { scratchDir } from './helpers.mjs'
 
 const root = scratchDir('factory-dispatch-batch-')
@@ -1513,6 +1512,8 @@ test('machinery budget reports over-creation as one ask-user finding', () => {
   const symbolsOnly = checkMachineryBudget({ lane: 'lane-a', creates: [], newFiles: [], newSymbols: ['alpha', 'beta', 'gamma'] })
   assert.equal(symbolsOnly.findings.length, 1)
   assert.doesNotThrow(() => checkMachineryBudget({ lane: 'lane-a', creates: ['lib/one.mjs'], newFiles: ['lib/one.mjs', 'lib/two.mjs', 'lib/three.mjs'], newSymbols: ['alpha', 'beta'] }))
+})
+
 test('collectAnchorPins scans the roles manifest even when skills is absent', () => {
   const checkout = join(root, 'roles-anchor-checkout')
   put(join(checkout, 'crew', 'roles', 'anchors.json'), JSON.stringify({
@@ -1871,6 +1872,10 @@ async function dispatchFixture({
   readObserver = () => {},
   home = root,
   existsProbe = null,
+  // A caller whose subject WRITES through the seam (adoption) passes real
+  // writers; the default recorder is for callers that only observe the write.
+  writeFile = null,
+  appendFile = null,
 } = {}) {
   const batch = join(root, `dispatch-${label}-${Math.random().toString(36).slice(2)}`)
   const parent = join(root, `dispatch-${label}-parent`)
@@ -1917,8 +1922,8 @@ async function dispatchFixture({
       }
       return readFileSync(text, encoding || 'utf8')
     },
-    writeFileSync: (path, content) => { wrote.set(String(path), String(content)) },
-    appendFileSync: (path, content) => { appended.push({ path: String(path), content: String(content) }) },
+    writeFileSync: (path, content) => { wrote.set(String(path), String(content)); if (writeFile) writeFile(path, content) },
+    appendFileSync: (path, content) => { appended.push({ path: String(path), content: String(content) }); if (appendFile) appendFile(path, content) },
     spawn: (call) => {
       spawned.push(call)
       const args = (call.args || []).map(String)
@@ -1985,6 +1990,10 @@ async function adoptionDispatchFixture({
     briefs,
     outcomes,
     home,
+    // applyAdoption copies through the write seam (#856), so the adoption
+    // fixture must land those bytes on disk, not merely record them.
+    writeFile: (path, content) => put(path, content),
+    appendFile: (path, content) => { mkdirSync(dirname(String(path)), { recursive: true }); fsAppendFileSync(path, content) },
     existsProbe: (path) => fsExistsSync(path)
       || (String(path).endsWith('returns/task.json') && Object.hasOwn(outcomes, laneFromOutcomePath(String(path)))),
     spawnAsync: async (call) => {

@@ -10,7 +10,7 @@ Production code reads `CI_DECISIONS` when it validates a decision.
 Exhibit: `scripts/factory/ledger.mjs:2905`.
 
 `DECISIONS` is exported and frozen but read by no production code; only
-`crew/drive.test.mjs:5128-4160` reads it, so it is not the exhibit for "callers
+`crew/drive.test.mjs:5128-5130` reads it, so it is not the exhibit for "callers
 actually consult".
 
 Keep the refusal message derived from the same set.

@@ -1325,6 +1325,10 @@ export function emitAdapter(emitter, crew = null) {
         unverified_count: unverified.length,
         invalid_reasons: errors.map(({ id, why }) => `${id ?? ''}: ${why}`).join('; '),
       }))
+    } else if (event.kind === 'accept-reask') {
+      return emitter.emit((handle) => handle.recordAcceptReask({ adw_id: emitter.adwId,
+        where_at: event.where ?? null, reask: event.reask ?? null,
+        errors: Array.isArray(event.errors) ? event.errors.length : null, at_ms: null }))
     } else if (event.kind === 'seat-teardown') {
       const m = (crew && crew.members && crew.members[event.role]) || null
       return emitter.emit((handle) => handle.recordSeatTeardown({

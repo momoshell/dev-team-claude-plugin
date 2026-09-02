@@ -54,6 +54,7 @@
 // `escalations --since <iso> [--until <iso>]` |
 // `ci-cycles [--since <iso>] [--until <iso>]` |
 // `intake-sweeps [--since <iso>] [--until <iso>]` |
+// `journal-facts [--since <iso>] [--until <iso>]` |
 // `task <adw_id|task_slug>` — the read-only verbs the npm `ledger:*` recipes invoke
 // (spellings are a contract with package.json; see do-40-02) — plus
 // `advisor-ab --run-dir <dir> --run-started-at <iso|ms> --adjudications <path> <dispatch-id>…`,
@@ -334,6 +335,13 @@ export const ADVISOR_AB_INCOMPLETE_REASONS = Object.freeze([
 // docs/advisor-ab-protocol.md), never silently enforced here.
 export const ADVISOR_AB_DISPATCH_FLOOR = 12
 export const ACCEPT_DECISION_OUTCOMES = Object.freeze(['accepted', 'escalated'])
+export const PROVIDER_FAILURE_LEDGER_KINDS = Object.freeze([
+  'rate_limit', 'authentication_failed', 'server_error', 'provider-unclassified',
+])
+export const PLAN_SCOPE_VERDICTS = Object.freeze([
+  'plan-scope-same', 'plan-scope-narrowed', 'plan-scope-widened',
+])
+export const SEAT_REASK_EVENTS = Object.freeze(['seat-timeout-reask', 'seat-abort-reask'])
 
 // The adjudication of one watched CI check. 'green' is a MEASURED fact, not
 // a gap — recording it is what gives "how often does CI catch what the local
@@ -1005,14 +1013,140 @@ export const TABLES = Object.freeze({
     unique: [['adw_id', 'transport', 'seat_id', 'reservation_id', 'sweep_id']],
     indexes: [{ name: 'seat_reclaims_outcome_idx', cols: ['outcome', 'created_at'] }],
   },
+  provider_failures: {
+    columns: [
+      { name: 'adw_id', decl: 'TEXT' },
+      { name: 'role', decl: 'TEXT' },
+      { name: 'dispatch_id', decl: 'TEXT' },
+      { name: 'kind', decl: 'TEXT' },
+      { name: 'status', decl: 'INTEGER' },
+      { name: 'outcome', decl: 'TEXT' },
+      { name: 'at_ms', decl: 'INTEGER' },
+      { name: 'created_at', decl: 'TEXT' },
+    ],
+    unique: [['adw_id', 'role', 'dispatch_id', 'at_ms']],
+    indexes: [],
+  },
+  plan_scope_changes: {
+    columns: [
+      { name: 'adw_id', decl: 'TEXT' },
+      { name: 'round', decl: 'INTEGER' },
+      { name: 'verdict', decl: 'TEXT' },
+      { name: 'added', decl: 'INTEGER' },
+      { name: 'dropped', decl: 'INTEGER' },
+      { name: 'dispatched', decl: 'INTEGER' },
+      { name: 'planned', decl: 'INTEGER' },
+      { name: 'created_at', decl: 'TEXT' },
+    ],
+    unique: [['adw_id', 'round']],
+    indexes: [],
+  },
+  seat_reasks: {
+    columns: [
+      { name: 'adw_id', decl: 'TEXT' },
+      { name: 'event', decl: 'TEXT' },
+      { name: 'role', decl: 'TEXT' },
+      { name: 'dispatch_id', decl: 'TEXT' },
+      { name: 'cause', decl: 'TEXT' },
+      { name: 'outcome', decl: 'TEXT' },
+      { name: 'spent_ms', decl: 'INTEGER' },
+      { name: 'ceiling_s', decl: 'INTEGER' },
+      { name: 'from_run_id', decl: 'TEXT' },
+      { name: 'to_run_id', decl: 'TEXT' },
+      { name: 'at_ms', decl: 'INTEGER' },
+      { name: 'created_at', decl: 'TEXT' },
+    ],
+    unique: [['adw_id', 'event', 'role', 'dispatch_id', 'at_ms']],
+    indexes: [],
+  },
+  accept_reasks: {
+    columns: [
+      { name: 'adw_id', decl: 'TEXT' },
+      { name: 'where_at', decl: 'TEXT' },
+      { name: 'reask', decl: 'INTEGER' },
+      { name: 'errors', decl: 'INTEGER' },
+      { name: 'at_ms', decl: 'INTEGER' },
+      { name: 'created_at', decl: 'TEXT' },
+    ],
+    unique: [['adw_id', 'where_at', 'reask']],
+    indexes: [],
+  },
+  rpc_exit_contexts: {
+    columns: [
+      { name: 'adw_id', decl: 'TEXT' },
+      { name: 'role', decl: 'TEXT' },
+      { name: 'dispatch_id', decl: 'TEXT' },
+      { name: 'outcome', decl: 'TEXT' },
+      { name: 'exit_code', decl: 'INTEGER' },
+      { name: 'exit_signal', decl: 'TEXT' },
+      { name: 'attribution', decl: 'TEXT' },
+      { name: 'driver_signalled', decl: 'INTEGER' },
+      { name: 'group_before_signal', decl: 'TEXT' },
+      { name: 'turn_index', decl: 'INTEGER' },
+      { name: 'frames', decl: 'INTEGER' },
+      { name: 'last_frame', decl: 'TEXT' },
+      { name: 'last_tool', decl: 'TEXT' },
+      { name: 'exit_gap_ms', decl: 'INTEGER' },
+      { name: 'stderr_bytes', decl: 'INTEGER' },
+      { name: 'at_ms', decl: 'INTEGER' },
+      { name: 'created_at', decl: 'TEXT' },
+    ],
+    unique: [['adw_id', 'role', 'dispatch_id', 'at_ms']],
+    indexes: [],
+  },
+  plan_adoptions: {
+    columns: [
+      { name: 'task_slug', decl: 'TEXT' },
+      { name: 'lane', decl: 'TEXT' },
+      { name: 'archive', decl: 'TEXT' },
+      { name: 'source', decl: 'TEXT' },
+      { name: 'plan_sha', decl: 'TEXT' },
+      { name: 'files', decl: 'INTEGER' },
+      { name: 'findings', decl: 'INTEGER' },
+      { name: 'adopt_from', decl: 'TEXT' },
+      { name: 'at_ms', decl: 'INTEGER' },
+      { name: 'created_at', decl: 'TEXT' },
+    ],
+    unique: [['lane', 'plan_sha']],
+    indexes: [],
+  },
+  external_fences: {
+    columns: [
+      { name: 'batch_id', decl: 'TEXT' },
+      { name: 'lane', decl: 'TEXT' },
+      { name: 'files', decl: 'INTEGER' },
+      { name: 'reads', decl: 'INTEGER' },
+      { name: 'register_path', decl: 'TEXT' },
+      { name: 'created_at', decl: 'TEXT' },
+    ],
+    unique: [['batch_id', 'lane']],
+    indexes: [],
+  },
 })
 
 // The closed set of public writer method names — also the closed set of
 // JSONL line `kind` values. replayJsonl refuses any `kind` outside this set.
+// A crew journal row carrying this KEY is that fact. The crew journal is the driver's
+// archive; ledger.jsonl is the ledger's own authority (replayJsonl). Two different
+// sources: ingestJournal is the only reader of the first, and it never writes one.
+export const JOURNAL_FACT_KEYS = Object.freeze({
+  provider_failure: 'recordProviderFailure',
+  plan_scope: 'recordPlanScope',
+  accept_reask: 'recordAcceptReask',
+  rpc_exit_context: 'recordRpcExitContext',
+})
+
+// A crew journal row whose `event` is this value is that fact.
+export const JOURNAL_FACT_EVENTS = Object.freeze({
+  'seat-timeout-reask': 'recordSeatReask',
+  'seat-abort-reask': 'recordSeatReask',
+  'plan-adopted': 'recordPlanAdoption',
+})
+
 export const WRITERS = Object.freeze([
   'startSession', 'endSession', 'startPhase', 'endPhase', 'recordEvent',
   'recordEnvelope', 'recordSessionRequest', 'recordRunConfiguration', 'recordRunSeat', 'recordGateResult', 'recordGateDiscrimination',
-  'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'recordCiCycle', 'recordCiDispatch', 'recordIntakeSweep', 'recordIntakeRefusal', 'recordIntakeBrake', 'recordIntakeDispatch', 'recordSeatTeardown', 'recordSeatReclaim', 'startProcess', 'endProcess', 'heartbeat',
+  'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'recordCiCycle', 'recordCiDispatch', 'recordIntakeSweep', 'recordIntakeRefusal', 'recordIntakeBrake', 'recordIntakeDispatch', 'recordSeatTeardown', 'recordSeatReclaim', 'recordProviderFailure', 'recordPlanScope', 'recordSeatReask', 'recordAcceptReask', 'recordRpcExitContext', 'recordPlanAdoption', 'recordExternalFence', 'startProcess', 'endProcess', 'heartbeat',
   'startAgentSession', 'endAgentSession', 'recordSourceError', 'linkRun',
 ])
 
@@ -1044,6 +1178,13 @@ export const WRITER_MIRROR_TABLES = Object.freeze({
   recordIntakeDispatch: 'intake_dispatches',
   recordSeatTeardown: 'seat_teardowns',
   recordSeatReclaim: 'seat_reclaims',
+  recordProviderFailure: 'provider_failures',
+  recordPlanScope: 'plan_scope_changes',
+  recordSeatReask: 'seat_reasks',
+  recordAcceptReask: 'accept_reasks',
+  recordRpcExitContext: 'rpc_exit_contexts',
+  recordPlanAdoption: 'plan_adoptions',
+  recordExternalFence: 'external_fences',
   startProcess: 'processes',
   startAgentSession: 'agent_sessions',
 })
@@ -1264,6 +1405,37 @@ export function isoMs(t) {
     refuse(ISO_MS_RANGE_REFUSAL)
   }
   return iso
+}
+
+function epochMsOrNull(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) return Math.trunc(value)
+  if (value instanceof Date) {
+    const time = value.getTime()
+    return Number.isFinite(time) ? Math.trunc(time) : null
+  }
+  if (typeof value === 'string' && value.trim()) {
+    const numeric = Number(value)
+    if (Number.isFinite(numeric)) return Math.trunc(numeric)
+    const parsed = Date.parse(value)
+    return Number.isFinite(parsed) ? parsed : null
+  }
+  return null
+}
+
+function integerOrNull(value, ctx, field) {
+  if (value === undefined || value === null) return null
+  if (Array.isArray(value)) return value.length
+  if (typeof value === 'boolean') return value ? 1 : 0
+  const number = typeof value === 'number' ? value : Number(value)
+  if (!Number.isFinite(number) || !Number.isInteger(number) || number < 0) {
+    refuse(`${ctx}: field '${field}' must be a non-negative integer when present`)
+  }
+  return number
+}
+
+function textOrNull(value, max = 1000) {
+  if (value === undefined || value === null) return null
+  return String(value).slice(0, max)
 }
 
 // Parses a semver-ish string into [major, minor, patch], stripping any
@@ -2400,6 +2572,174 @@ export function openLedger({
     mirror((conn) => {
       const cols = tableColumnNames('accept_decisions').filter((c) => c !== 'id')
       conn.prepare(`INSERT OR IGNORE INTO accept_decisions (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
+        .run(...cols.map((c) => toBindable(args[c])))
+    })
+    return args
+  }
+
+  function recordProviderFailure(input = {}) {
+    requireFields(input, ['kind', 'status'], 'recordProviderFailure')
+    requireEnum(input.kind, PROVIDER_FAILURE_LEDGER_KINDS, 'recordProviderFailure', 'kind')
+    const args = redact({
+      adw_id: input.adw_id ?? null,
+      role: textOrNull(input.role, 120),
+      dispatch_id: textOrNull(input.dispatch_id ?? input.id, 120),
+      kind: input.kind,
+      status: integerOrNull(input.status, 'recordProviderFailure', 'status'),
+      outcome: textOrNull(input.outcome, 120),
+      at_ms: epochMsOrNull(input.at_ms),
+      created_at: isoMs(input.created_at ?? now()),
+    }, stats)
+    appendJsonl('recordProviderFailure', args)
+    mirror((conn) => {
+      const cols = tableColumnNames('provider_failures')
+      const sqlCols = cols.map(quoteSqlIdentifier)
+      conn.prepare(`INSERT OR IGNORE INTO provider_failures (${sqlCols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
+        .run(...cols.map((c) => toBindable(args[c])))
+    })
+    return args
+  }
+
+  function recordPlanScope(input = {}) {
+    requireFields(input, ['round', 'verdict', 'dispatched', 'planned'], 'recordPlanScope')
+    requireEnum(input.verdict, PLAN_SCOPE_VERDICTS, 'recordPlanScope', 'verdict')
+    const args = redact({
+      adw_id: input.adw_id ?? null,
+      round: integerOrNull(input.round, 'recordPlanScope', 'round'),
+      verdict: input.verdict,
+      added: integerOrNull(input.added, 'recordPlanScope', 'added'),
+      dropped: integerOrNull(input.dropped, 'recordPlanScope', 'dropped'),
+      dispatched: integerOrNull(input.dispatched, 'recordPlanScope', 'dispatched'),
+      planned: integerOrNull(input.planned, 'recordPlanScope', 'planned'),
+      created_at: isoMs(input.created_at ?? now()),
+    }, stats)
+    appendJsonl('recordPlanScope', args)
+    mirror((conn) => {
+      const cols = tableColumnNames('plan_scope_changes')
+      const sqlCols = cols.map(quoteSqlIdentifier)
+      conn.prepare(`INSERT OR IGNORE INTO plan_scope_changes (${sqlCols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
+        .run(...cols.map((c) => toBindable(args[c])))
+    })
+    return args
+  }
+
+  function recordSeatReask(input = {}) {
+    requireFields(input, ['event', 'outcome'], 'recordSeatReask')
+    requireEnum(input.event, SEAT_REASK_EVENTS, 'recordSeatReask', 'event')
+    const args = redact({
+      adw_id: input.adw_id ?? null,
+      event: input.event,
+      role: textOrNull(input.role, 120),
+      dispatch_id: textOrNull(input.dispatch_id ?? input.id, 120),
+      cause: textOrNull(input.cause, 120),
+      outcome: textOrNull(input.outcome, 120),
+      spent_ms: integerOrNull(input.spent_ms, 'recordSeatReask', 'spent_ms'),
+      ceiling_s: integerOrNull(input.ceiling_s, 'recordSeatReask', 'ceiling_s'),
+      from_run_id: textOrNull(input.from_run_id, 120),
+      to_run_id: textOrNull(input.to_run_id, 120),
+      at_ms: epochMsOrNull(input.at_ms),
+      created_at: isoMs(input.created_at ?? now()),
+    }, stats)
+    appendJsonl('recordSeatReask', args)
+    mirror((conn) => {
+      const cols = tableColumnNames('seat_reasks')
+      const sqlCols = cols.map(quoteSqlIdentifier)
+      conn.prepare(`INSERT OR IGNORE INTO seat_reasks (${sqlCols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
+        .run(...cols.map((c) => toBindable(args[c])))
+    })
+    return args
+  }
+
+  function recordAcceptReask(input = {}) {
+    requireFields(input, ['adw_id'], 'recordAcceptReask')
+    const args = redact({
+      adw_id: input.adw_id,
+      where_at: textOrNull(input.where_at ?? input.where, 120),
+      reask: integerOrNull(input.reask, 'recordAcceptReask', 'reask'),
+      errors: integerOrNull(input.errors, 'recordAcceptReask', 'errors'),
+      at_ms: epochMsOrNull(input.at_ms),
+      created_at: isoMs(input.created_at ?? now()),
+    }, stats)
+    appendJsonl('recordAcceptReask', args)
+    mirror((conn) => {
+      const cols = tableColumnNames('accept_reasks')
+      const sqlCols = cols.map(quoteSqlIdentifier)
+      conn.prepare(`INSERT OR IGNORE INTO accept_reasks (${sqlCols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
+        .run(...cols.map((c) => toBindable(args[c])))
+    })
+    return args
+  }
+
+  function recordRpcExitContext(input = {}) {
+    requireFields(input, ['role', 'outcome'], 'recordRpcExitContext')
+    const args = redact({
+      adw_id: input.adw_id ?? null,
+      role: textOrNull(input.role, 120),
+      dispatch_id: textOrNull(input.dispatch_id ?? input.id, 120),
+      outcome: textOrNull(input.outcome, 120),
+      exit_code: integerOrNull(input.exit_code, 'recordRpcExitContext', 'exit_code'),
+      exit_signal: textOrNull(input.exit_signal, 120),
+      attribution: textOrNull(input.attribution, 120),
+      driver_signalled: integerOrNull(input.driver_signalled, 'recordRpcExitContext', 'driver_signalled'),
+      group_before_signal: textOrNull(input.group_before_signal, 120),
+      turn_index: integerOrNull(input.turn_index, 'recordRpcExitContext', 'turn_index'),
+      frames: integerOrNull(input.frames, 'recordRpcExitContext', 'frames'),
+      last_frame: textOrNull(input.last_frame, 120),
+      last_tool: textOrNull(input.last_tool, 120),
+      exit_gap_ms: integerOrNull(input.exit_gap_ms, 'recordRpcExitContext', 'exit_gap_ms'),
+      stderr_bytes: integerOrNull(input.stderr_bytes, 'recordRpcExitContext', 'stderr_bytes'),
+      at_ms: epochMsOrNull(input.at_ms),
+      created_at: isoMs(input.created_at ?? now()),
+    }, stats)
+    appendJsonl('recordRpcExitContext', args)
+    mirror((conn) => {
+      const cols = tableColumnNames('rpc_exit_contexts')
+      const sqlCols = cols.map(quoteSqlIdentifier)
+      conn.prepare(`INSERT OR IGNORE INTO rpc_exit_contexts (${sqlCols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
+        .run(...cols.map((c) => toBindable(args[c])))
+    })
+    return args
+  }
+
+  function recordPlanAdoption(input = {}) {
+    requireFields(input, ['lane', 'plan_sha'], 'recordPlanAdoption')
+    const args = redact({
+      task_slug: textOrNull(input.task_slug ?? input.task, 200),
+      lane: textOrNull(input.lane, 200),
+      archive: textOrNull(input.archive, 1000),
+      source: textOrNull(input.source, 1000),
+      plan_sha: textOrNull(input.plan_sha, 200),
+      files: integerOrNull(input.files, 'recordPlanAdoption', 'files'),
+      findings: integerOrNull(input.findings, 'recordPlanAdoption', 'findings'),
+      adopt_from: textOrNull(input.adopt_from, 120),
+      at_ms: epochMsOrNull(input.at_ms),
+      created_at: isoMs(input.created_at ?? now()),
+    }, stats)
+    appendJsonl('recordPlanAdoption', args)
+    mirror((conn) => {
+      const cols = tableColumnNames('plan_adoptions')
+      const sqlCols = cols.map(quoteSqlIdentifier)
+      conn.prepare(`INSERT OR IGNORE INTO plan_adoptions (${sqlCols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
+        .run(...cols.map((c) => toBindable(args[c])))
+    })
+    return args
+  }
+
+  function recordExternalFence(input = {}) {
+    requireFields(input, ['lane'], 'recordExternalFence')
+    const args = redact({
+      batch_id: textOrNull(input.batch_id, 200),
+      lane: textOrNull(input.lane, 200),
+      files: integerOrNull(input.files, 'recordExternalFence', 'files'),
+      reads: integerOrNull(input.reads, 'recordExternalFence', 'reads'),
+      register_path: textOrNull(input.register_path, 1000),
+      created_at: isoMs(input.created_at ?? now()),
+    }, stats)
+    appendJsonl('recordExternalFence', args)
+    mirror((conn) => {
+      const cols = tableColumnNames('external_fences')
+      const sqlCols = cols.map(quoteSqlIdentifier)
+      conn.prepare(`INSERT OR IGNORE INTO external_fences (${sqlCols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
         .run(...cols.map((c) => toBindable(args[c])))
     })
     return args
@@ -3654,6 +3994,107 @@ export function openLedger({
     `, [since, since, until, until])
   }
 
+  function journalFactRows(table, { since = null, until = null } = {}) {
+    return queryRows(`
+      SELECT * FROM ${quoteSqlIdentifier(table)}
+      WHERE (? IS NULL OR created_at >= ?) AND (? IS NULL OR created_at < ?)
+      ORDER BY created_at
+    `, [since, since, until, until])
+  }
+
+  function journalFactCounts(rows, field) {
+    if (rows.length === 0) return null
+    const counts = {}
+    for (const row of rows) {
+      const value = row[field]
+      if (value == null) continue
+      const key = String(value)
+      counts[key] = (counts[key] ?? 0) + 1
+    }
+    return counts
+  }
+
+  function journalFactSum(rows, field) {
+    if (rows.length === 0) return null
+    const values = rows.map((row) => row[field]).filter((value) => value != null)
+    return values.length === 0 ? null : values.reduce((total, value) => total + Number(value), 0)
+  }
+
+  function journalFactDistinct(rows, fields) {
+    if (rows.length === 0) return null
+    const keys = new Set(rows.map((row) => JSON.stringify(fields.map((field) => row[field] ?? null))))
+    return keys.size
+  }
+
+  const JOURNAL_FACT_ABSENT = 'no rows in this window — not measured, never a measured zero'
+
+  function journalFactFamily(rows, countName, extras = {}) {
+    const measured = rows.length > 0
+    return {
+      measured,
+      [countName]: measured ? rows.length : null,
+      count: measured ? rows.length : null,
+      ...extras,
+      absent: measured ? null : JOURNAL_FACT_ABSENT,
+    }
+  }
+
+  function journalFacts({ since = null, until = null } = {}) {
+    const providerRows = journalFactRows('provider_failures', { since, until })
+    const scopeRows = journalFactRows('plan_scope_changes', { since, until })
+    const reaskRows = journalFactRows('seat_reasks', { since, until })
+    const acceptRows = journalFactRows('accept_reasks', { since, until })
+    const exitRows = journalFactRows('rpc_exit_contexts', { since, until })
+    const adoptionRows = journalFactRows('plan_adoptions', { since, until })
+    const fenceRows = journalFactRows('external_fences', { since, until })
+    const providerMeasured = providerRows.length > 0
+    const scopeMeasured = scopeRows.length > 0
+    const reaskMeasured = reaskRows.length > 0
+    const acceptMeasured = acceptRows.length > 0
+    const exitMeasured = exitRows.length > 0
+    const adoptionMeasured = adoptionRows.length > 0
+    const fenceMeasured = fenceRows.length > 0
+    const runsSeen = journalFactDistinct(providerRows, ['adw_id'])
+    const roundsSeen = journalFactDistinct(scopeRows, ['adw_id', 'round'])
+    const lanesSeen = journalFactDistinct(fenceRows, ['lane'])
+    return {
+      provider_failures: {
+        ...journalFactFamily(providerRows, 'failures', { by_kind: journalFactCounts(providerRows, 'kind') }),
+        runs_seen: providerMeasured ? runsSeen : null,
+      },
+      plan_scope: {
+        ...journalFactFamily(scopeRows, 'changes', { by_verdict: journalFactCounts(scopeRows, 'verdict') }),
+        rounds_seen: scopeMeasured ? roundsSeen : null,
+      },
+      seat_reasks: {
+        ...journalFactFamily(reaskRows, 'reasks', { by_event: journalFactCounts(reaskRows, 'event') }),
+        reasks_seen: reaskMeasured ? reaskRows.length : null,
+      },
+      accept_reasks: {
+        ...journalFactFamily(acceptRows, 'reasks', { errors: journalFactSum(acceptRows, 'errors') }),
+        accepts_seen: acceptMeasured ? acceptRows.length : null,
+      },
+      rpc_exits: {
+        ...journalFactFamily(exitRows, 'exits', { by_outcome: journalFactCounts(exitRows, 'outcome') }),
+        exits_seen: exitMeasured ? exitRows.length : null,
+      },
+      plan_adoptions: {
+        ...journalFactFamily(adoptionRows, 'adoptions', {
+          files: journalFactSum(adoptionRows, 'files'),
+          findings: journalFactSum(adoptionRows, 'findings'),
+        }),
+        adoptions_seen: adoptionMeasured ? adoptionRows.length : null,
+      },
+      external_fences: {
+        ...journalFactFamily(fenceRows, 'fences', {
+          files: journalFactSum(fenceRows, 'files'),
+          reads: journalFactSum(fenceRows, 'reads'),
+        }),
+        lanes_seen: fenceMeasured ? lanesSeen : null,
+      },
+    }
+  }
+
   function eligibleTasks() {
     return queryRows(`
       SELECT s.adw_id, s.task_slug,
@@ -4058,10 +4499,10 @@ export function openLedger({
   const handle = {
     get degraded() { return degraded },
     startSession, endSession, recordSessionRequest, recordRunConfiguration, recordRunSeat, startPhase, endPhase, recordEvent, recordEnvelope,
-    recordGateResult, recordGateDiscrimination, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown, recordSeatReclaim,
+    recordGateResult, recordGateDiscrimination, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown, recordSeatReclaim, recordProviderFailure, recordPlanScope, recordSeatReask, recordAcceptReask, recordRpcExitContext, recordPlanAdoption, recordExternalFence,
     startProcess, endProcess, heartbeat, startAgentSession, endAgentSession,
     recordSourceError, linkRun,
-    listSessions, listEvents, getSession, dumpTable, tableNames, columnNames, sessionsFiltered, runsStartedWithin, phasesFor, runConfigurationsFor, runSeatsFor, agentEventsFor, agentSessionsFor, gateDiscriminationsFor, gateResultsFor, reviewOutcomesFor, acceptDecisionsFor, supportsJson1, eventsPage, maxEventId, cellFailureRowsFor, unattributableCellFailures, seatTeardownRowsFor, intakePicks, intakeSweepTotals, intakeCandidateRefusals, intakeCandidatePicks, agentSessionTokenTotals, gateReviewGap, cellFailures, cellReviews, cellUsage, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, escalations, endedRuns, escalationWindow, seatReclaims, eligibleTasks, runSet, transportsFor, taskReadout, jsonlDrift,
+    listSessions, listEvents, getSession, dumpTable, tableNames, columnNames, sessionsFiltered, runsStartedWithin, phasesFor, runConfigurationsFor, runSeatsFor, agentEventsFor, agentSessionsFor, gateDiscriminationsFor, gateResultsFor, reviewOutcomesFor, acceptDecisionsFor, supportsJson1, eventsPage, maxEventId, cellFailureRowsFor, unattributableCellFailures, seatTeardownRowsFor, intakePicks, intakeSweepTotals, intakeCandidateRefusals, intakeCandidatePicks, agentSessionTokenTotals, gateReviewGap, cellFailures, cellReviews, cellUsage, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, escalations, endedRuns, escalationWindow, seatReclaims, journalFacts, eligibleTasks, runSet, transportsFor, taskReadout, jsonlDrift,
     stats: statsFn,
     captureMirrorErrors,
     readConnection,
@@ -4156,6 +4597,216 @@ export function replayJsonl(jsonlPath, ledger) {
     if (restore !== null) ledger._setReplaying(restore)
   }
   return { applied, skipped, failed, complete: failed === 0 && skipped === 0, first_failure: firstFailure }
+}
+
+function journalFactArgs(writer, row, adwId) {
+  const source = row && typeof row === 'object' && !Array.isArray(row) ? row : {}
+  const value = (key) => source[key] && typeof source[key] === 'object' && !Array.isArray(source[key]) ? source[key] : {}
+  const rowAdwId = source.adw_id ?? adwId ?? null
+  const atMs = epochMsOrNull(source.at)
+  const createdAt = atMs === null ? undefined : atMs
+  if (writer === JOURNAL_FACT_KEYS.provider_failure) {
+    const failure = value('provider_failure')
+    return {
+      adw_id: rowAdwId,
+      role: source.role ?? failure.role ?? null,
+      dispatch_id: source.dispatch_id ?? source.id ?? failure.dispatch_id ?? null,
+      kind: failure.kind,
+      status: failure.status,
+      outcome: source.headless_outcome ?? source.outcome ?? null,
+      at_ms: atMs,
+      ...(createdAt === undefined ? {} : { created_at: createdAt }),
+    }
+  }
+  if (writer === JOURNAL_FACT_KEYS.plan_scope) {
+    const scope = value('plan_scope')
+    return {
+      adw_id: rowAdwId,
+      round: scope.round,
+      verdict: scope.verdict,
+      added: scope.added,
+      dropped: scope.dropped,
+      dispatched: scope.dispatched,
+      planned: scope.planned,
+      ...(createdAt === undefined ? {} : { created_at: createdAt }),
+    }
+  }
+  if (writer === JOURNAL_FACT_KEYS.accept_reask) {
+    const accept = value('accept_reask')
+    return {
+      adw_id: rowAdwId,
+      where_at: accept.where_at ?? accept.where ?? source.where ?? null,
+      reask: accept.reask ?? source.reask ?? null,
+      errors: accept.errors ?? source.errors ?? null,
+      at_ms: atMs,
+      ...(createdAt === undefined ? {} : { created_at: createdAt }),
+    }
+  }
+  if (writer === JOURNAL_FACT_KEYS.rpc_exit_context) {
+    const context = value('rpc_exit_context')
+    return {
+      adw_id: rowAdwId,
+      role: context.role ?? source.role ?? null,
+      dispatch_id: context.dispatch_id ?? context.id ?? source.dispatch_id ?? source.id ?? null,
+      outcome: context.outcome ?? null,
+      exit_code: context.exit_code ?? null,
+      exit_signal: context.exit_signal ?? null,
+      attribution: context.attribution ?? null,
+      driver_signalled: context.driver_signalled ?? null,
+      group_before_signal: context.group_before_signal ?? null,
+      turn_index: context.turn_index ?? null,
+      frames: context.frames ?? null,
+      last_frame: context.last_frame ?? null,
+      last_tool: context.last_tool ?? null,
+      exit_gap_ms: context.exit_gap_ms ?? null,
+      stderr_bytes: context.stderr_bytes ?? null,
+      at_ms: atMs,
+      ...(createdAt === undefined ? {} : { created_at: createdAt }),
+    }
+  }
+  if (writer === JOURNAL_FACT_EVENTS['seat-timeout-reask'] || writer === JOURNAL_FACT_EVENTS['seat-abort-reask']) {
+    return {
+      adw_id: rowAdwId,
+      event: source.event,
+      role: source.role ?? null,
+      dispatch_id: source.dispatch_id ?? source.id ?? null,
+      cause: source.cause ?? null,
+      outcome: source.outcome ?? null,
+      spent_ms: source.spent_ms ?? null,
+      ceiling_s: source.ceiling_s ?? null,
+      from_run_id: source.from_run_id ?? null,
+      to_run_id: source.to_run_id ?? null,
+      at_ms: atMs,
+      ...(createdAt === undefined ? {} : { created_at: createdAt }),
+    }
+  }
+  if (writer === JOURNAL_FACT_EVENTS['plan-adopted']) {
+    return {
+      task_slug: source.task_slug ?? source.task ?? null,
+      lane: source.lane,
+      archive: source.archive ?? null,
+      source: source.source ?? null,
+      plan_sha: source.plan_sha,
+      files: source.files ?? null,
+      findings: source.findings ?? null,
+      adopt_from: source.adopt_from ?? null,
+      ...(createdAt === undefined ? {} : { at_ms: createdAt }),
+      ...(createdAt === undefined ? {} : { created_at: createdAt }),
+    }
+  }
+  return {}
+}
+
+const INGEST_ABSENT = Object.freeze({
+  applied: 0, skipped: 0, ignored: 0, failed: 0, complete: true, first_failure: null,
+})
+
+function ingestReadFailure(err) {
+  return {
+    applied: 0,
+    skipped: 0,
+    ignored: 0,
+    failed: 0,
+    complete: false,
+    first_failure: { line: null, reason: err?.code || err?.name || 'ReadError' },
+  }
+}
+
+function ingestFailureReason(err) {
+  return err instanceof LedgerUsageError ? err.message : (err?.name || 'Error')
+}
+
+export function ingestJournal(journalPath, ledger, { adw_id = null } = {}) {
+  let content
+  try {
+    content = readFileSync(journalPath, 'utf8')
+  } catch (err) {
+    if (err?.code === 'ENOENT') return { ...INGEST_ABSENT }
+    return ingestReadFailure(err)
+  }
+  let applied = 0
+  let skipped = 0
+  let ignored = 0
+  let failed = 0
+  let firstFailure = null
+  const lines = String(content).split('\n')
+  for (const [index, line] of lines.entries()) {
+    const lineNo = index + 1
+    if (!line) continue
+    let parsed
+    try {
+      parsed = JSON.parse(line)
+    } catch {
+      skipped += 1
+      continue
+    }
+    let writer = null
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      for (const key of Object.keys(JOURNAL_FACT_KEYS)) {
+        if (Object.prototype.hasOwnProperty.call(parsed, key)) {
+          writer = JOURNAL_FACT_KEYS[key]
+          break
+        }
+      }
+      if (!writer && Object.prototype.hasOwnProperty.call(JOURNAL_FACT_EVENTS, parsed.event)) {
+        writer = JOURNAL_FACT_EVENTS[parsed.event]
+      }
+    }
+    if (!writer) { ignored += 1; continue }
+    try {
+      ledger[writer](journalFactArgs(writer, parsed, adw_id))
+      applied += 1
+    } catch (err) {
+      failed += 1
+      if (firstFailure === null) firstFailure = { line: lineNo, reason: ingestFailureReason(err) }
+    }
+  }
+  return { applied, skipped, ignored, failed, complete: failed === 0 && skipped === 0, first_failure: firstFailure }
+}
+
+export function ingestExternalFenceRegister(registerPath, ledger, { batch_id = null } = {}) {
+  let content
+  try {
+    content = readFileSync(registerPath, 'utf8')
+  } catch (err) {
+    if (err?.code === 'ENOENT') return { ...INGEST_ABSENT }
+    return ingestReadFailure(err)
+  }
+  let register
+  try {
+    register = JSON.parse(content)
+  } catch (err) {
+    return {
+      applied: 0, skipped: 0, ignored: 0, failed: 1, complete: false,
+      first_failure: { line: null, reason: ingestFailureReason(err) },
+    }
+  }
+  if (!register || typeof register !== 'object' || Array.isArray(register) || !Array.isArray(register.lanes)) {
+    return {
+      applied: 0, skipped: 0, ignored: 0, failed: 1, complete: false,
+      first_failure: { line: null, reason: 'register must contain a lanes array' },
+    }
+  }
+  let applied = 0
+  let failed = 0
+  let firstFailure = null
+  for (const [index, lane] of register.lanes.entries()) {
+    const row = {
+      batch_id,
+      lane: lane && typeof lane === 'object' ? lane.lane : null,
+      files: lane && typeof lane === 'object' ? lane.files : null,
+      reads: lane && typeof lane === 'object' ? lane.reads : null,
+      register_path: registerPath,
+    }
+    try {
+      ledger.recordExternalFence(row)
+      applied += 1
+    } catch (err) {
+      failed += 1
+      if (firstFailure === null) firstFailure = { line: index + 1, reason: ingestFailureReason(err) }
+    }
+  }
+  return { applied, skipped: 0, ignored: 0, failed, complete: failed === 0, first_failure: firstFailure }
 }
 
 // ---------------------------------------------------------------------------
@@ -4394,6 +5045,7 @@ const VERB_FLAGS = Object.freeze({
   escalations: new Set(['since', 'until']),
   'ci-cycles': new Set(['since', 'until']),
   'intake-sweeps': new Set(['since', 'until']),
+  'journal-facts': new Set(['since', 'until']),
   task: new Set([]),
   request: new Set(['from-brief']),
   'advisor-ab': new Set(['run-dir', 'run-started-at', 'adjudications']),
@@ -4775,7 +5427,7 @@ export function main(argv) {
   try {
     const { verb, positional, flags } = parseArgs(argv)
     if (!verb) {
-      refuse('a verb is required: sessions | phases | tail | procs | gate-review-gap | eligible-tasks | run-set --since <iso> [--until <iso>] | cell-failures [--since <iso>] [--until <iso>] | cells [--since <iso>] [--until <iso>] [--prices <path>] | modifier-attempts [--since <iso>] [--until <iso>] | seat-teardowns [--since <iso>] [--until <iso>] | escalations --since <iso> [--until <iso>] | ci-cycles [--since <iso>] [--until <iso>] | intake-sweeps [--since <iso>] [--until <iso>] | task | request <adw_id> --from-brief <path> | advisor-ab --run-dir <dir> --run-started-at <iso|ms> --adjudications <path> <dispatch-id>… | doctor | kill')
+      refuse('a verb is required: sessions | phases | tail | procs | gate-review-gap | eligible-tasks | run-set --since <iso> [--until <iso>] | cell-failures [--since <iso>] [--until <iso>] | cells [--since <iso>] [--until <iso>] [--prices <path>] | modifier-attempts [--since <iso>] [--until <iso>] | seat-teardowns [--since <iso>] [--until <iso>] | escalations --since <iso> [--until <iso>] | ci-cycles [--since <iso>] [--until <iso>] | intake-sweeps [--since <iso>] [--until <iso>] | journal-facts [--since <iso>] [--until <iso>] | task | request <adw_id> --from-brief <path> | advisor-ab --run-dir <dir> --run-started-at <iso|ms> --adjudications <path> <dispatch-id>… | doctor | kill')
     }
 
     // TEST SEAM: DEVTEAM_LEDGER_FAKE_NODE_VERSION substitutes for
@@ -5315,6 +5967,39 @@ export function main(argv) {
         refusal_rows: refusalRows,
         dispatches,
         absent: sweptWindow ? null : { intake_sweeps: 'no intake_sweeps rows in this window — not swept, never swept-and-empty; any refusal or dispatch rows are listed unaggregated beside this marker' },
+      })}\n`)
+      return 0
+    }
+
+    if (verb === 'journal-facts') {
+      if (positional.length > 0) refuse('journal-facts: takes no positional arguments')
+      const hasSince = Object.prototype.hasOwnProperty.call(flags, 'since')
+      const hasUntil = Object.prototype.hasOwnProperty.call(flags, 'until')
+      const since = hasSince ? windowBound(flags.since, 'since', 'journal-facts') : null
+      const until = hasUntil ? windowBound(flags.until, 'until', 'journal-facts') : null
+      if (until != null && since != null && until <= since) refuse('journal-facts: --until must be later than --since')
+      const facts = ledger.journalFacts({ since, until })
+      if (ledger.stats().degraded) refuse('journal-facts: the ledger mirror is degraded — this window is unanswerable, not empty')
+      stdout.write(`${JSON.stringify({
+        schema: 1,
+        question: 'Which journal and dispatch-register facts were measured in this window, and what is each family denominator?',
+        definition: {
+          window: 'rows whose created_at falls in [since, until); a missing family is unmeasured, never a measured zero',
+          provider_failures: 'one recorded provider refusal; runs_seen is the distinct run count represented by those rows',
+          plan_scope: 'one recorded plan scope observation; rounds_seen is the distinct run/round count represented by those rows',
+          seat_reasks: 'one recorded lost-seat re-ask; reasks_seen is the number of recorded re-asks',
+          accept_reasks: 'one recorded malformed-accept correction; accepts_seen is the number of recorded corrections',
+          rpc_exits: 'one recorded RPC exit context; exits_seen is the number of recorded contexts',
+          plan_adoptions: 'one recorded adopted plan; adoptions_seen is the number of recorded adoptions',
+          external_fences: 'one dispatch-register lane entry; lanes_seen is the number of recorded lanes',
+          absent: 'null with an absent marker means the family was not measured — never a measured zero',
+        },
+        provider_failure_kinds: PROVIDER_FAILURE_LEDGER_KINDS,
+        plan_scope_verdicts: PLAN_SCOPE_VERDICTS,
+        seat_reask_events: SEAT_REASK_EVENTS,
+        since,
+        until,
+        ...facts,
       })}\n`)
       return 0
     }

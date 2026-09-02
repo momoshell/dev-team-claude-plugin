@@ -835,12 +835,12 @@ export function reviewFindings(details) {
       rejected.push({ index, why: 'duplicate id' })
       return
     }
-    seen.add(entry.id)
+    seen.add(entry.id); const mark = hardeningOf(entry)
     findings.push({
       id: entry.id,
       severity: entry.severity,
       location: trimmedOrNull(entry.location),
-      summary: trimmedOrNull(entry.summary), disposition: dispositionOf(entry),
+      summary: trimmedOrNull(entry.summary), disposition: dispositionOf(entry), ...(mark ? { hardening: mark, hardening_why: entry.hardening_why.trim() } : {}),
     })
   })
   return { findings, rejected }
@@ -1507,7 +1507,7 @@ export function validateMutations(entries, inScope = () => true) {
       // it with `survived` for a declaration that changed nothing (#742). ONE
       // normalization — normalizeAnchor, the binder's own — never a second collapse
       // rule, or validation and binding drift on the characters they disagree about.
-      } else if (!exempt && normalizeAnchor(entry.find).text === normalizeAnchor(entry.replace).text) {
+      } else if (!exempt && !mutationChangesTokens(entry.find, entry.replace)) {
         why = 'find and replace differ only in whitespace — that mutates no token'
       }
     }
@@ -3430,9 +3430,9 @@ function runTask(ctx, io, crash) {
     if (!active || !active.writeAttempted) return null   // nothing of ours is in the tree
     let current
     try { current = io.readFile(active.abs) }
-    catch (readErr) { return `${active.abs} could not be re-read after a failed per-check mutation (${readErr.message}; original failure: ${err.message})` }
+    catch (readErr) { return `${active.abs} could not be re-read after a failed per-check mutation (${readErr?.message ?? String(readErr)}; original failure: ${err?.message ?? String(err)})` }
     if (current === active.original) return null
-    return `${active.abs} does not match the built content after a per-check mutation (${current === null ? 'the file is gone' : 'byte comparison failed'}): ${err.message}`
+    return `${active.abs} does not match the built content after a per-check mutation (${current === null ? 'the file is gone' : 'byte comparison failed'}): ${err?.message ?? String(err)}`
   }
 
   // Every path that can produce a REPLACEMENT gate says this, because the
@@ -3628,6 +3628,21 @@ function runTask(ctx, io, crash) {
   let accepted = null
   let extraRounds = 0
   let extraReviews = 0
+  let hardenOwed = { owed: [], exempt: [] }
+  let hardenWitness = null              // Map<repo-relative path, {state, bytes}>, or null
+  const witnessTree = (files) => {
+    const witness = new Map()
+    for (const file of Array.isArray(files) ? files : []) {
+      let cell
+      try { const bytes = io.readFile(`${ctx.checkout}/${file}`); cell = bytes === null ? { state: 'absent', bytes: null } : { state: 'read', bytes } }
+      catch (err) { cell = { state: 'unreadable', bytes: null, why: err?.message || String(err) } }
+      witness.set(file, cell)
+    }
+    return witness
+  }
+  // MUTATION B5b: drop the check name here and the ledger can no longer link a hardened
+  // defect class to the guard that closed it.
+  const logHardened = (round, row) => io.log(recordRow({ at: io.now(), finding_hardened: { round, finding: row.finding, test: row.test, check: row.name, outcome: row.outcome, why: row.why } }))   // ANCHOR B5b
   let lastReviewPath = art('review.md')
   let staleVerdict = null
   let panelBriefText = ''
@@ -3645,6 +3660,7 @@ function runTask(ctx, io, crash) {
       'You are one of two independent reviewers on a regranted continuation round.',
       'Report typed findings in details.findings (id, severity from the closed set must-fix|should-fix|consider, location as path:line or path:start-end, summary).',
       'Return the identical details.verdict shape: verdict must be pass or changes-needed, with must_fix, should_fix, and consider counts.',
+      'A must-fix whose defect class cannot become a mechanical guard may carry "hardening": "ungateable" with a non-empty "hardening_why"; only the reviewer may set it.',
     ].join('\n')
     const base = panelBriefText
     const aBrief = art(`panel-a-brief-${n}.md`)
@@ -3772,6 +3788,21 @@ function runTask(ctx, io, crash) {
     // not execute. The map is acceptedRawById, so a rejected entry can no more
     // authorize a patch here than it can on the ordinary path.
     const accepted = acceptedRawById(aEnv.details)
+    // #839 — the panel must be able to REFUSE a partner's or an adjudicator's mark,
+    // which means it must first be able to SEE one: a rule that cannot see the thing it
+    // forbids cannot be proven to forbid it. Both sides' raw entries are indexed WITH
+    // their origin; only a reviewer-origin mark is ever reattached. Reviewer A's ids are
+    // never reminted (crew/drive.mjs:3711-3718), so the consensus lookup is exact.
+    const markById = new Map()
+    for (const [origin, env] of [['reviewer', aEnv], [panel.partner, bEnv]]) {
+      for (const [id, raw] of acceptedRawById(env?.details)) {
+        const mark = hardeningOf(raw)
+        if (mark && !markById.has(id)) markById.set(id, { origin, fields: { hardening: mark, hardening_why: raw.hardening_why.trim() } })
+      }
+    }
+    // MUTATION B7c: stop checking the mark's ORIGIN and a partner's or an adjudicator's
+    // ungateable exempts a finding the reviewer never excused.
+    const markOf = (id, origin) => { const m = markById.get(id); return m && m.origin === 'reviewer' && origin === 'reviewer' ? m.fields : {} }   // ANCHOR B7c
     const withRouting = (finding, origin) => {
       const raw = origin === 'reviewer' ? accepted.get(finding.id) : null
       if (!raw) return finding
@@ -3783,8 +3814,8 @@ function runTask(ctx, io, crash) {
       }
     }
     const findings = [
-      ...allocatedConsensus.map(({ id, severity, location, summary }) => withRouting({ id, severity, location, summary, reviewer: 'both' }, 'reviewer')),
-      ...adjudicated.upheld.map(({ id, severity, location, summary, source }) => withRouting({ id, severity, location, summary, reviewer: source }, source)),
+      ...allocatedConsensus.map(({ id, severity, location, summary }) => ({ ...withRouting({ id, severity, location, summary, reviewer: 'both' }, 'reviewer'), ...markOf(id, 'reviewer') })),
+      ...adjudicated.upheld.map(({ id, severity, location, summary, source }) => ({ ...withRouting({ id, severity, location, summary, reviewer: source }, source), ...markOf(id, source) })),
     ]
     if (adjudicated.closesClass !== true && !findings.some((finding) => finding.severity === 'must-fix')) {
       findings.push({
@@ -3893,6 +3924,7 @@ function runTask(ctx, io, crash) {
       `# Review bounce (round ${round})`, '',
       `Close every must-fix in the review at ${reviewPath}. Plan: ${planPath}${panelNote}`,
       ...applyPrescriptionLines('the review'),
+      ...hardeningBriefLines(hardenOwed.owed, hardenOwed.exempt),
     ].join('\n')
   }
   // #800 — a finding the reviewer marked `auto-fix` and shipped a patch for is applied
@@ -3939,7 +3971,9 @@ function runTask(ctx, io, crash) {
       return { ok: false, kind, brief: [
         `# Auto-fix revalidation bounce (round ${roundNo})`, '',
         `The driver applied the reviewer's auto-fix patch(es) — ${applied.join(', ')} — and re-ran the code-owned checks. ${what}`,
-        '', detail, '', `Plan: ${planPath}`,
+        '', detail,
+        ...hardeningBriefLines(hardenOwed.owed, hardenOwed.exempt),
+        '', `Plan: ${planPath}`,
       ].join('\n') }
     }
     const outside = outOfScopeFiles(io.changedFiles(), inScope)
@@ -3969,12 +4003,156 @@ function runTask(ctx, io, crash) {
   const panel = ctx.continuation === true ? panelSeats(seatList) : null
   if (ctx.continuation === true && !panel) panelLog({ panel_skipped: 'seats' })
   let gateTriaged = false
+  // Gate A (mechanical): scope by git, never by self-report. #846 — it runs on EVERY
+  // build round, bounced ones included. On b363-seatreask the non-done bounce path
+  // `continue`d before this gate, so two envelope-shaped files the builder wrote into a
+  // `returns/` directory at the CHECKOUT ROOT during build:r2 were invisible until
+  // build:r3 succeeded; the lane paid for three rounds and then escalated on debris
+  // that had existed for three minutes across a round boundary.
+  const scopeGate = (round, finalRound) => {
+    stage(`scope-gate:r${round}`)
+    const changed = io.changedFiles()
+    const gateFenceHits = laneFenceHits(changed, ctx.laneFence)
+    if (gateFenceHits.length > 0) {
+      stageComplete()
+      return { escalation: escalate('scope',
+        `the build crossed another live lane's fence: ${fenceBreachList(gateFenceHits)} — a file a sibling crew owns is never a bounce, it is a human's call`) }
+    }
+    // #846 — protocol debris is classified BEFORE scope subtraction. `outOfScopeFiles`
+    // mechanically removes every in-scope path (crew/drive.mjs:1519-1529, and
+    // `scopeMatcher` at :1519-1522), so a plan that names `returns/d1.builder.json` in
+    // files_in_scope could write exactly that checkout debris and be told the tree is
+    // clean. The ask makes the envelope refusal a property of a `returns/*.json` being
+    // INSIDE the CHECKOUT, never a property of what the planner happened to fence.
+    const debris = changed.filter((f) => ENVELOPE_DEBRIS.test(f))
+    const refusal = scopeRefusal([...new Set([...outOfScopeFiles(changed, inScope), ...debris])])
+    // MUTATION A4: invert this early return and a round whose tree is entirely in scope
+    // starts paying for a gate it does not need.
+    if (refusal.reason === null) { stageComplete(); return { ok: true } }              // ANCHOR A4
+    io.log(recordRow({ at: io.now(), scope_gate: { round, reason: refusal.reason, envelopes: refusal.envelopes, edits: refusal.edits } }))
+    if (!plans || finalRound()) {
+      stageComplete()
+      return { escalation: escalate('scope', refusal.why) }
+    }
+    const b = art(`build-bounce-r${round}.md`)
+    failureUpgrade('scope', 'builder')
+    io.writeFile(b, scopeBounceBrief(round, refusal, scopeFiles, planPath))
+    stageComplete()
+    return { bounce: b }
+  }
+  // MUTATION B8: route the proof through runGate and each of its invocations becomes
+  // a gate_results row, moving the gate-review-gap numerator (#839 (i).
+  const hardenRun = (cmd) => io.run(cmd)                                             // ANCHOR B8
+  const proveHardening = (entries) => {
+    const rows = []
+    let fatal = null
+    const proveEntry = (entry) => {
+      let active = null
+      const row = (outcome, why) => ({ finding: entry.finding, test: entry.test, name: entry.name, outcome, why })
+      try {
+        const W = hardenWitness?.get(entry.test)
+        const S = hardenWitness?.get(entry.file)
+        if (!W || !S) return row('witness-missing', `the review-time witness has no cell for ${!W ? entry.test : entry.file}`)
+        if (W.state === 'unreadable' || S.state === 'unreadable') {
+          const unreadable = W.state === 'unreadable' ? entry.test : entry.file
+          return row('witness-unreadable', `the review-time witness could not read ${unreadable}: ${W.state === 'unreadable' ? W.why : S.why}`)
+        }
+        if (S.state !== 'read') return row('witness-absent', `the declared implementation ${entry.file} did not exist on the review-time tree`)
+        const testAbs = `${ctx.checkout}/${entry.test}`
+        const fileAbs = `${ctx.checkout}/${entry.file}`
+        const cmd = hardenCommand(entry.test, entry.name)
+        const witnessCmd = hardenWitnessCommand(entry.test)   // UNFILTERED: see hardenWitnessCommand
+        const repairedTest = io.readFile(testAbs)
+        if (repairedTest === null) return row('unapplied', `${entry.test} does not exist in the built tree`)
+        let witnessRun = null
+        let witnessCounts = null
+        if (W.state === 'read') {
+          active = { abs: testAbs, original: repairedTest, writeAttempted: false }
+          let witnessResult
+          try {
+            active.writeAttempted = true
+            io.writeFile(testAbs, W.bytes)
+            witnessResult = hardenRun(witnessCmd)
+          } finally { io.writeFile(testAbs, repairedTest) }
+          active = null
+          const out = witnessResult?.output
+          witnessRun = nameVerdict(out, entry.name)
+          witnessCounts = parseSuiteCounts(out)          // aggregate, and ONLY to ask "green and parseable?"
+          // MUTATION B5c: drop this branch and a runtime name that ALREADY EXISTED on the
+          // witnessed tree — interpolated, nested, or carrying a `# SKIP`/`# TODO`
+          // directive, so no contiguous bytes of the witnessed source show it and no
+          // aggregate red marks it — passes as gate growth. The gate never grew.
+          // EVERY non-absent verdict is an existing name: `passed`, `failed`, `skipped`
+          // and `ambiguous` alike.
+          if (witnessRun !== 'absent') return row('name-not-new', `the declared name ${entry.name} already exists in the witnessed ${entry.test}: ${witnessRun}`)   // ANCHOR B5c
+          // Only an exact ABSENT on an otherwise green, parseable run proves the witnessed
+          // source carried no such runtime check. A red or unparseable witnessed-test run
+          // measured nothing and is never read as `new`.
+          if (witnessCounts === null || witnessCounts.fail > 0) return row('unproven', `the witnessed ${entry.test} run was not green and parseable, so the absence of ${entry.name} proves nothing: counts ${JSON.stringify(witnessCounts)}`)
+        }
+        const control = nameVerdict(hardenRun(cmd)?.output, entry.name)
+        if (control === 'absent') return row('name-absent', `the repaired control reported no exact test named ${entry.name}`)
+        if (control === 'ambiguous') return row('name-ambiguous', `the repaired control reported more than one exact test named ${entry.name}`)
+        if (control === 'failed') return row('control-red', `the repaired control left ${entry.name} failing`)
+        if (control === 'skipped') return row('control-skipped', `the repaired control skipped ${entry.name}`)
+        const repairedFile = io.readFile(fileAbs)
+        if (repairedFile === null) return row('unapplied', `${entry.file} does not exist in the built tree`)
+        let pre = null
+        active = { abs: fileAbs, original: repairedFile, writeAttempted: false }
+        let preResult
+        try {
+          active.writeAttempted = true
+          io.writeFile(fileAbs, S.bytes)
+          preResult = hardenRun(cmd)
+        } finally { io.writeFile(fileAbs, repairedFile) }
+        active = null
+        pre = nameVerdict(preResult?.output, entry.name)
+        // MUTATION B5d: drop the witnessed pre-repair conjunct and a guard that was
+        // already green on the review-time tree is certified as having caught the defect.
+        if (pre !== 'failed') return row('pre-repair-green', `the declared check ${entry.name} does not fail on the witnessed pre-repair ${entry.file}: ${pre}`)   // ANCHOR B5d
+        const bound = applyMutationAnchor(repairedFile, entry.find, entry.replace)
+        if (bound.text === null) return row(BINDING_OUTCOME[bound.mode], bindingWhy(bound.mode, entry.file))
+        let mut = null
+        active = { abs: fileAbs, original: repairedFile, writeAttempted: false }
+        let mutResult
+        try {
+          active.writeAttempted = true
+          io.writeFile(fileAbs, bound.text)
+          mutResult = hardenRun(cmd)
+        } finally { io.writeFile(fileAbs, repairedFile) }
+        active = null
+        mut = nameVerdict(mutResult?.output, entry.name)
+        // MUTATION B9: drop the exact-name mutant conjunct and ANY red — a syntax error,
+        // an unrelated failing subtest, a file-level failure — certifies a guard that
+        // never ran. This is the aggregate rule the round-1 draft proposed, restored.
+        if (mut !== 'failed') return row('survived', `the declared mutation left ${entry.name} ${mut}`)   // ANCHOR B9
+        return row('killed', null)
+      } catch (err) {
+        const why = err?.message || String(err)
+        fatal = dirtyAfterFailure(active, err)
+        return row('unproven', `the hardening proof was interrupted: ${why}`)
+      }
+    }
+    for (const entry of Array.isArray(entries) ? entries : []) {
+      rows.push(proveEntry(entry))
+      if (fatal) break
+    }
+    return { rows, fatal }
+  }
   build:
   for (let round = 1; round <= limits.build_rounds + extraRounds; round += 1) {
     const finalRound = () => round >= limits.build_rounds + extraRounds
     stage(`build:r${round}`)
     const env = assignAndWait('builder', buildBrief, buildNote)
     if (env.status !== 'done') {
+      // #846 — mechanical before judgment, and the round is closed first so the journal
+      // still replays as a balanced stack (crew/drive.test.mjs:7375).
+      // MUTATION A1: neutralise this call and a bounced round again reaches no scope
+      // gate — the b363-seatreask defect, restored.
+      stageComplete()
+      const bounced = scopeGate(round, finalRound)                                    // ANCHOR A1
+      if (bounced.escalation) return bounced.escalation
+      if (bounced.bounce) { buildBrief = bounced.bounce; buildNote = 'scope-fix'; continue }
       const asked = parseQuestions(env.details)
       const questions = asked?.questions ?? []
       if (asked) io.log(recordRow({ at: io.now(), member_questions: { role: 'builder', round, total: questions.length, ids: questions.map((q) => q.id), rejected: asked.rejected } }))
@@ -3984,7 +4162,6 @@ function runTask(ctx, io, crash) {
         ['bounce', 'escalate'], [buildBrief, ...(env.artifacts || [])],
       )
       if (c.decision === 'escalate') {
-        stageComplete()
         return escalate('build', c.reason, env.artifacts || [])
       }
       if (finalRound()) extraRounds += 1 // the granted bounce needs a round to land in
@@ -3998,35 +4175,14 @@ function runTask(ctx, io, crash) {
         ...answerBounceLines(questions, matched),
       ].join('\n'))
       buildBrief = b; buildNote = 'build-fix'
-      stageComplete()
       continue
     }
     builderEnv = env
     stageComplete()
 
-    // Gate A (mechanical): scope by git, never by self-report.
-    stage(`scope-gate:r${round}`)
-    const changed = io.changedFiles()
-    const gateFenceHits = laneFenceHits(changed, ctx.laneFence)
-    if (gateFenceHits.length > 0) {
-      stageComplete()
-      return escalate('scope',
-        `the build crossed another live lane's fence: ${fenceBreachList(gateFenceHits)} — a file a sibling crew owns is never a bounce, it is a human's call`)
-    }
-    const outOfScope = outOfScopeFiles(changed, inScope)
-    if (outOfScope.length > 0) {
-      if (!plans || finalRound()) {
-        stageComplete()
-        return escalate('scope', `out-of-scope edits persisted: ${outOfScope.join(', ')}`)
-      }
-      const b = art(`build-bounce-r${round}.md`)
-      failureUpgrade('scope', 'builder')
-      io.writeFile(b, `# Scope bounce (round ${round})\n\nThese files are OUTSIDE the plan's scope — revert them or stop touching them:\n${outOfScope.map((f) => `- ${f}`).join('\n')}\n\nIn-scope set:\n${scopeFiles.map((f) => `- ${f}`).join('\n')}\nPlan: ${planPath}`)
-      buildBrief = b; buildNote = 'scope-fix'
-      stageComplete()
-      continue
-    }
-    stageComplete()
+    const scoped = scopeGate(round, finalRound)
+    if (scoped.escalation) return scoped.escalation
+    if (scoped.bounce) { buildBrief = scoped.bounce; buildNote = 'scope-fix'; continue }
 
     // Gate B (mechanical): the validation lane, run by code.
     stage(`lane:r${round}`)
@@ -4152,6 +4308,49 @@ function runTask(ctx, io, crash) {
       stageComplete()
     }
 
+    // Gate B3 (mechanical): #839 — a must-fix repair must also land the permanent guard
+    // that would have caught it. The gate-review gap was 37% — 14 of 38 runs
+    // (`npm run ledger:gate-review-gap`), b314-vizhonesty at max_must_fix 4 across four
+    // green gate runs — and each bounce spent a build round while the knowledge the
+    // reviewer produced evaporated with it. A guard is vacuous unless proven by
+    // mutation, so the declared kill-mutation is APPLIED here, never argued about.
+    // ADR-038: proof on the changed surface beats argument about it.
+    if (hardenOwed.owed.length > 0) {
+      stage(`lane:harden:r${round}`)
+      const { entries, refusals } = validateHardened(builderEnv.details, hardenOwed.owed, inScope)
+      const { rows, fatal } = proveHardening(entries)
+      for (const row of rows) logHardened(round, row)
+      // #839 — a failed RESTORE is not a repair bounce. `settleFailedProof`
+      // (crew/drive.mjs:3490-3492) already refuses to continue when `gateProofFatal` is
+      // set, because the built tree still carries the driver's OWN mutation; bouncing
+      // the builder onto that tree would ask it to repair code the driver broke. Same rule,
+      // same place in the sequence: after the rows are journalled, before anything is
+      // accepted or bounced.
+      // MUTATION B11: turn the terminal into an ordinary bounce and a failed restore
+      // sends the builder back onto a tree still carrying the driver's own mutation.
+      if (fatal) {                                                                     // ANCHOR B11
+        stageComplete()
+        return escalate('harden', `the hardening proof could not restore the built tree: ${fatal} — the run stops rather than continue with the driver's own mutation`)
+      }
+      // MUTATION B5a: narrow this predicate to an outcome nothing produces and no
+      // repair, however well proven, is ever accepted.
+      if (refusals.length === 0 && rows.every((row) => row.outcome === 'killed' || row.outcome === 'ungateable')) {   // ANCHOR B5a
+        hardenOwed = { owed: [], exempt: [] }
+        hardenWitness = null
+        stageComplete()
+      } else if (!plans || finalRound()) {
+        stageComplete()
+        return escalate('harden', hardeningBounceLines(round, refusals, rows).join(' '))
+      } else {
+        const b = art(`build-bounce-r${round}.md`)
+        failureUpgrade('harden', 'builder')
+        io.writeFile(b, hardeningBounceLines(round, refusals, rows).join('\n'))
+        buildBrief = b; buildNote = 'harden-fix'
+        stageComplete()
+        continue
+      }
+    }
+
     // Gate C (judgment, but enum-consumed): the reviewer. An unreadable
     // verdict re-asks the REVIEWER in place — the builder is never re-run
     // for a reviewer's malformed envelope.
@@ -4246,6 +4445,21 @@ function runTask(ctx, io, crash) {
       // — bounce-builder carries the lead's own steer straight to the builder and never
       // falls through to a second consult.
       const disposed = dispositionPlan(review.details)
+      // #839 — the debt is armed by the review that carries a must-fix and cleared only
+      // by a proven guard, so a round that goes red on the lane in between does not drop
+      // it. The WITNESS is the pre-repair tree: nothing later can reconstruct it, and a
+      // proof that cannot compare against it can only assert that some test failed, not
+      // that THIS check caught THAT defect.
+      if (v) {
+        const debt = hardeningDebt(review.details)
+        if (debt.owed.length > 0 || debt.exempt.length > 0) {
+          hardenOwed = debt
+          hardenWitness = witnessTree(scopeFiles)
+          for (const { id, why } of debt.exempt) {
+            logHardened(roundNo, { finding: id, test: null, name: null, outcome: 'ungateable', why })
+          }
+        }
+      }
       // #800 revision 2 — journalled HERE, not in the pass branch below, because the
       // ask-user branch `continue`s the build loop and the pass branch is therefore
       // unreachable for a pass carrying BOTH dispositions. The patch was correctly not
@@ -4272,7 +4486,9 @@ function runTask(ctx, io, crash) {
         const b = art(`build-bounce-r${round}.md`)
         failureUpgrade('review', 'builder')
         io.writeFile(b, [`# Ask-user bounce (round ${round})`, '', c.guidance, '',
-          ...askUserLines(disposed.askUser), '', `Review: ${lastReviewPath}`, `Plan: ${planPath}`].join('\n'))
+          ...askUserLines(disposed.askUser),
+          ...hardeningBriefLines(hardenOwed.owed, hardenOwed.exempt),
+          '', `Review: ${lastReviewPath}`, `Plan: ${planPath}`].join('\n'))
         buildBrief = b; buildNote = 'review-fix'
         stageComplete()
         continue build
@@ -4280,7 +4496,10 @@ function runTask(ctx, io, crash) {
       if (v === 'pass') { stageComplete(); stage('review:pass'); accepted = 'review pass'; stageComplete(); break build }
       if (v === 'revise') {
         const fixes = applyAutoFixes(disposed.autoFix, roundNo)
-        if (fixes.applied.length > 0 && disposed.needsSeat.length === 0 && fixes.refused.length === 0) {
+        // #839 — CODE closed every finding that demanded a change, but the guard that
+        // would catch the class next time does not exist yet and only a builder can
+        // write it. With debt open the in-place re-review is not available.
+        if (fixes.applied.length > 0 && disposed.needsSeat.length === 0 && fixes.refused.length === 0 && hardenOwed.owed.length === 0) {
           // Every finding that demanded a change is closed, and CODE closed it. Re-prove
           // the tree code changed, then re-review it in place rather than spending a
           // builder round on work that is already done; the review budget still bounds
@@ -5053,4 +5272,293 @@ export function askUserLines(findings) {
     ...findings.map((f) => `- ${f.id} (${f.severity ?? 'unstated'}) ${f.location ?? ''} — ${f.summary ?? ''}`.replace(/\s+/g, ' ').trim()),
     'Send them to the builder with guidance, or escalate to a human.',
   ]
+}
+
+// #846 — the driver knows its own artifact vocabulary. A `returns/*.json` inside the
+// CHECKOUT is protocol-shaped debris in a protocol-named directory, not a rogue source
+// edit; naming it as one sent an operator hunting a change nobody had made (b363).
+export const SCOPE_REFUSALS = Object.freeze(['out-of-scope-edits', 'envelope-in-checkout', 'envelope-and-edits'])
+export const ENVELOPE_DEBRIS = /(?:^|\/)returns\/[^/]+\.json$/
+export function scopeRefusal(outOfScope) {
+  const files = (Array.isArray(outOfScope) ? outOfScope : []).filter((f) => typeof f === 'string' && f !== '')
+  const envelopes = files.filter((f) => ENVELOPE_DEBRIS.test(f))
+  const edits = files.filter((f) => !ENVELOPE_DEBRIS.test(f))
+  const envelopeWhy = `an envelope was written to the checkout instead of the assignment's absolute returnPath: ${envelopes.join(', ')}`
+  const editWhy = `out-of-scope edits persisted: ${edits.join(', ')}`                 // ANCHOR A3
+  if (files.length === 0) return { reason: null, envelopes, edits, why: null }
+  if (envelopes.length === 0) return { reason: 'out-of-scope-edits', envelopes, edits, why: editWhy }
+  // MUTATION A2: return the generic refusal here and a returns/*.json in the checkout
+  // is once more reported as a rogue source edit.
+  if (edits.length === 0) return { reason: 'envelope-in-checkout', envelopes, edits, why: envelopeWhy }   // ANCHOR A2
+  return { reason: 'envelope-and-edits', envelopes, edits, why: `${envelopeWhy}; ${editWhy}` }
+}
+
+export function scopeBounceBrief(round, refusal, scopeFiles, planPath) {
+  const lines = [`# Scope bounce (round ${round})`, '']
+  if (refusal.envelopes.length > 0) {
+    lines.push("An ENVELOPE was written into the CHECKOUT instead of the assignment's absolute returnPath:",
+      ...refusal.envelopes.map((f) => `- ${f}`),
+      'Delete it from the checkout and write your envelope to the returnPath the assignment names. Every scratch or fixture envelope belongs in a tmpdir.', '')
+  }
+  if (refusal.edits.length > 0) {
+    lines.push("These files are OUTSIDE the plan's scope — revert them or stop touching them:",
+      ...refusal.edits.map((f) => `- ${f}`), '')
+  }
+  lines.push('In-scope set:', ...scopeFiles.map((f) => `- ${f}`), `Plan: ${planPath}`)
+  return lines.join('\n')
+}
+
+// #839 — the closed set of marks a REVIEWER may put on a finding to say the defect
+// class cannot become a mechanical guard (a naming choice, docs prose). Read ONLY from
+// a review envelope: the seat that found the defect is the seat that knows whether it
+// is expressible, and a builder that could set this could exempt itself from every
+// guard the review asked for. It is NOT a fourth disposition — FINDING_DISPOSITIONS is
+// pinned against prose by skills/pr-review/findings-shape.test.mjs:79.
+export const HARDENING_MARKS = Object.freeze(['ungateable'])
+export function hardeningOf(entry) {
+  const declared = typeof entry?.hardening === 'string' ? entry.hardening.trim() : null
+  const why = typeof entry?.hardening_why === 'string' ? entry.hardening_why.trim() : ''
+  return HARDENING_MARKS.includes(declared) && why !== '' ? declared : null
+}
+
+export const HARDENING_REFUSALS = Object.freeze([
+  'no-declaration', 'not-an-array', 'unknown-finding', 'duplicate-finding',
+  'test-not-in-scope', 'file-not-in-scope', 'name-missing', 'name-file-wrapper', 'find-missing',
+  'replace-identical', 'builder-exemption',
+])
+// Proof OUTCOMES. `name-not-new` is the check's own word for an already-existing test
+// name; it lives here rather than in HARDENING_REFUSALS because the witness it is
+// measured against exists at PROOF time, not at declaration-validation time.
+export const HARDENING_OUTCOMES = Object.freeze([
+  'killed', 'survived', 'ungateable',
+  'name-not-new', 'name-absent', 'name-ambiguous', 'control-red', 'control-skipped',
+  'pre-repair-green',
+  'witness-missing', 'witness-absent', 'witness-unreadable',
+  'unproven', 'unapplied', 'anchor-absent', 'anchor-ambiguous', 'anchor-unsafe',
+])
+
+// #839 — `parseSuiteCounts` (crew/drive.mjs:1789) reads AGGREGATE totals and names no
+// test, and a `--test-name-pattern` matching nothing reports the FILE wrapper as
+// `ok 1 - <file>` with `# pass 1 # fail 0` (measured, Node v26.7.0). An aggregate rule
+// therefore reads an ABSENT check as a passing one and reads ANY unrelated red — a
+// syntax error, another subtest — as the declared check failing. Neither is proof, so
+// hardening is adjudicated on the EXACT declared subtest and nothing else.
+// `parseSuiteCounts` remains the suite-summary parser and adjudicates no hardening.
+// EXISTENCE and SUCCESS are different questions, and one parser answers both only if it
+// keeps them apart (round-3 check, Prescription 1). A nested subtest line is INDENTED and
+// a skipped one carries a `# SKIP`/`# TODO` directive; both are names that EXIST. A parser
+// that anchors at `^` or discards a directive line reports `absent` for a check that was
+// already there, and `absent` is the one verdict the growth step reads as "the gate grew".
+export const NAME_VERDICTS = Object.freeze(['passed', 'failed', 'skipped', 'absent', 'ambiguous'])
+export function nameVerdict(output, name) {
+  const text = String(output || '').replace(/\x1b\[[0-9;]*m/g, '')
+  const hits = []
+  for (const line of text.split('\n')) {
+    const m = /^\s*(not ok|ok) \d+ - (.*)$/.exec(line)   // \s*: a NESTED subtest is indented
+    if (!m) continue
+    const directive = /#\s*(SKIP|TODO)\b/.test(m[2])
+    const label = m[2].replace(/\s*#\s*(SKIP|TODO)\b.*$/, '').trim()  // strip AFTER the name is kept
+    if (label !== String(name)) continue                 // EXACT: a file wrapper is not a check
+    hits.push(directive ? 'skipped' : (m[1] === 'ok' ? 'passed' : 'failed'))
+  }
+  if (hits.length === 0) return 'absent'                 // the name is on NO line of this run
+  if (hits.length > 1) return 'ambiguous'                // two tests of one name adjudicate nothing
+  return hits[0]
+}
+
+// The findings that OWE a permanent guard, and the ones the reviewer exempted. Derived
+// from the FINDINGS, never from the routing: `dispositionPlan(...).needsSeat` excludes
+// auto-fix, ask-user and no-op (crew/drive.mjs:5030-5043), yet an ask-user must-fix
+// reaches the builder at crew/drive.mjs:4258-4278 and an auto-fix-only must-fix changes
+// the tree and re-reviews in place at crew/drive.mjs:4283-4291. Disposition selects WHO
+// repairs; it is not a hardening waiver.
+export function hardeningDebt(details) {
+  const parsed = reviewFindings(details)
+  // MUTATION B5e: restore the needsSeat-only selection and disposition silently waives
+  // hardening debt on both the auto-fix and the ask-user repair routes.
+  const candidates = parsed?.findings ?? []                                            // ANCHOR B5e
+  const owed = []
+  const exempt = []
+  for (const finding of candidates) {
+    if (finding.severity !== 'must-fix') continue
+    // MUTATION B7a: stop reading the reviewer's mark and a finding the reviewer
+    // declared ungateable is demanded a guard that cannot exist.
+    if (finding.hardening === 'ungateable') {                                          // ANCHOR B7a
+      exempt.push({ id: finding.id, why: finding.hardening_why })
+      continue
+    }
+    owed.push({ id: finding.id, location: finding.location, summary: finding.summary })
+  }
+  return { owed, exempt }
+}
+
+// A node --test-name-pattern is a REGEX, so the declared name is escaped before it
+// becomes one: an unescaped `(` is a syntax error and an unescaped `.` matches a name
+// nobody wrote.
+export function hardenCommand(testFile, name) {
+  const pattern = String(name).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return `node --test --test-reporter=tap --test-name-pattern=${shellArg(pattern)} ${shellArg(testFile)}`
+}
+
+// #839 — the WITNESS run carries NO name filter, and that is load-bearing.
+// `--test-name-pattern` SUPPRESSES a nested test whose PARENT does not also match, so a
+// filtered witness run cannot observe a nested pre-existing name and `nameVerdict` cannot
+// see a line node never emits. Re-measured on this checkout, Node v26.7.0, on a file
+// declaring ``test('outer', async (t) => { await t.test(`${label} guard`, { skip: true }, …) })``:
+//   --test-name-pattern='F1 guard'          → `ok 1 - n.test.mjs`, `# pass 1 # fail 0 # skipped 0` — NO `F1 guard` line
+//   --test-name-pattern='outer|F1 guard'    → `    ok 1 - F1 guard # SKIP`, `# skipped 1`
+//   no filter at all                        → `    ok 1 - F1 guard # SKIP`, `# skipped 1`
+// The unfiltered run exists ONLY so node registers nested descendants; the exact declared
+// name is still the sole adjudicator, through `nameVerdict`. The repaired control, the
+// witnessed pre-repair and the mutant runs stay FILTERED — they ask whether one named
+// check passes, not what names exist.
+export function hardenWitnessCommand(testFile) {
+  // MUTATION B5f: filter the witness run to the declared child name and node suppresses
+  // the nested line, so an already-existing nested check reads `absent` and is credited
+  // as gate growth.
+  return `node --test --test-reporter=tap ${shellArg(testFile)}`                       // ANCHOR B5f
+}
+
+// #839 — ONE predicate for both declared paths, drawn where `validateMutations` already
+// draws it for a declared mutation file (crew/drive.mjs:1475-1500). A directory scope
+// matcher is a RAW PREFIX check (crew/drive.mjs:1519-1522), so under scope `crew/tests/`
+// the path `crew/tests/../../outside.mjs` satisfies `inScope` and
+// `${ctx.checkout}/${file}` escapes the authorized subtree. The hardening proof READS,
+// RUNS and WRITES builder-declared paths, so it needs that same boundary — the traversal
+// must be refused BEFORE any io.readFile, io.run or io.writeFile touches it.
+// MUTATION B10: drop the traversal conjunct and a declared `crew/tests/../../outside.mjs`
+// is read, run and written outside the fence.
+export const scopedPath = (file, inScope) => typeof file === 'string' && validateScopeEntries([file]).length === 0 && !file.endsWith('/') && inScope(file)   // ANCHOR B10
+
+// ONE token-change predicate, shared by the plan-mutation contract (`validateMutations`,
+// crew/drive.mjs:1510) and the hardening declaration contract. `normalizeAnchor` is the
+// BINDER's own normalization (crew/drive.mjs:4662), so validation and binding can never
+// drift on the characters they disagree about; duplicating this comparison at two call
+// sites would recreate exactly the drift the shared helper exists to prevent — and would
+// make B13's anchor ambiguous.
+// MUTATION B13: make every declaration look like a token change and a hardening mutation
+// that only re-spaces its `find` is admitted and can be credited `killed`.
+export function mutationChangesTokens(find, replace) {
+  return normalizeAnchor(find).text !== normalizeAnchor(replace).text                    // ANCHOR B13
+}
+
+export function validateHardened(details, owed, inScope) {
+  const wanted = Array.isArray(owed) ? owed : []
+  const wantedIds = wanted.map(({ id }) => id)
+  const wantedSet = new Set(wantedIds)
+  const refusals = []
+  const entries = []
+  const refusedOwed = new Set()
+  const refuse = (finding, reason, why) => {
+    if (wantedSet.has(finding)) {
+      if (refusedOwed.has(finding)) return
+      refusedOwed.add(finding)
+    }
+    refusals.push({ finding: finding ?? null, reason, why })
+  }
+  const declared = details?.hardened
+  if (declared !== undefined && !Array.isArray(declared)) {
+    for (const id of wantedIds) refuse(id, 'not-an-array', 'details.hardened must be an array of declarations')
+    return { entries, refusals }
+  }
+  const byFinding = new Map()
+  for (const entry of Array.isArray(declared) ? declared : []) {
+    const id = entry && typeof entry === 'object' && typeof entry.finding === 'string' ? entry.finding : null
+    if (!id || !wantedSet.has(id)) {
+      refuse(id, 'unknown-finding', `the hardened entry names ${id ?? '(no finding)'} but the review carries no owed finding with that id`)
+      continue
+    }
+    if (byFinding.has(id)) {
+      refuse(id, 'duplicate-finding', `more than one details.hardened entry names finding ${id}`)
+      continue
+    }
+    byFinding.set(id, entry)
+  }
+  const scope = typeof inScope === 'function' ? inScope : () => false
+  for (const id of wantedIds) {
+    const entry = byFinding.get(id)
+    // MUTATION B6: strip the finding id and the reason out of this refusal and the
+    // bounce is the bare `insufficient` #839 (5) forbids — the operator is told a
+    // repair failed and never told WHICH finding lacks a check.
+    if (entry === undefined) {
+      if (!refusedOwed.has(id)) {
+        refusals.push({ finding: id, reason: 'no-declaration', why: `no details.hardened entry names finding ${id}` })   // ANCHOR B6
+        refusedOwed.add(id)
+      }
+      continue
+    }
+    // MUTATION B7b: stop refusing a builder-claimed exemption and the builder can
+    // exempt itself from every guard the reviewer asked for.
+    if (entry.hardening !== undefined || entry.exempt !== undefined || entry.ungateable !== undefined) {   // ANCHOR B7b
+      refuse(id, 'builder-exemption', `only the reviewer may mark a finding ${HARDENING_MARKS.join(' or ')}; a builder entry claiming it is refused`)
+      continue
+    }
+    if (!scopedPath(entry.test, scope)) {
+      refuse(id, 'test-not-in-scope', `the hardened test ${entry.test ?? '(missing)'} is not a file inside files_in_scope`)
+      continue
+    }
+    if (!scopedPath(entry.file, scope)) {
+      refuse(id, 'file-not-in-scope', `the hardened implementation ${entry.file ?? '(missing)'} is not a file inside files_in_scope`)
+      continue
+    }
+    if (typeof entry.name !== 'string' || entry.name.trim() === '') {
+      refuse(id, 'name-missing', `the hardened entry for finding ${id} must carry a non-empty test name`)
+      continue
+    }
+    // #839 — node reports the TEST-FILE ARGUMENT as the wrapper subtest whenever no exact
+    // subtest ran, so a declared `name` equal to the declared `test` is adjudicated by that
+    // wrapper and not by any named check. Re-measured on Node v26.7.0 with
+    // `wrapper.test.mjs` under `--test-name-pattern='wrapper\\.test\\.mjs'`: a module with no
+    // matching `test()` emits `ok 1 - wrapper.test.mjs` (`nameVerdict` → `passed`), and the
+    // same module throwing at top level emits `not ok 1 - wrapper.test.mjs`
+    // (`nameVerdict` → `failed`). A builder could then land a bare top-level assertion, get
+    // `passed` on the repaired control and `failed` on both the witnessed implementation and
+    // the mutant, and reach `killed` — the guard may be real, but it is not the new NAMED
+    // check #839 requires and the journal would record a file path as the check name. The
+    // name is REFUSED, never silently rewritten.
+    // MUTATION B12: drop this branch and a declared name equal to the test file is
+    // adjudicated by node's own wrapper label and falsely accepted as a named guard.
+    if (entry.name === entry.test) {                                                     // ANCHOR B12
+      refuse(id, 'name-file-wrapper', `the declared name ${entry.name} is the test FILE: node reports the test-file argument as a passing or failing wrapper subtest when no exact subtest ran, so a file path cannot identify a named guard`)
+      continue
+    }
+    // #839 — the whitespace rule is the SAME rule the plan-mutation contract already
+    // enforces (crew/drive.mjs:1505-1511), through the SAME predicate: a pair whose
+    // normalized forms are equal binds the same token sequence and rewrites the same
+    // tokens, so it mutates nothing (#742). `replace-identical` is the existing token and
+    // its `why` says so in the contract's own words.
+    if (typeof entry.find !== 'string' || entry.find.length === 0) {
+      refuse(id, 'find-missing', `the hardened entry for finding ${id} must carry a non-empty literal find`)
+      continue
+    }
+    if (typeof entry.replace !== 'string' || entry.replace === entry.find || !mutationChangesTokens(entry.find, entry.replace)) {
+      refuse(id, 'replace-identical', 'find and replace differ only in whitespace — that mutates no token')
+      continue
+    }
+    entries.push(entry)
+  }
+  return { entries, refusals }
+}
+
+export function hardeningBounceLines(round, refusals, rows) {
+  const lines = [`# Hardening bounce (round ${round})`, '', 'Every owed must-fix needs a permanent named guard proven by its declared mutation.']
+  for (const refusal of Array.isArray(refusals) ? refusals : []) {
+    lines.push(`- ${refusal.finding ?? '(unknown finding)'}: ${refusal.reason} — ${refusal.why}`)
+  }
+  for (const row of Array.isArray(rows) ? rows : []) {
+    if (row.outcome === 'killed' || row.outcome === 'ungateable') continue
+    lines.push(`- ${row.finding}: ${row.outcome} — ${row.why}`)
+  }
+  lines.push('', 'Return details.hardened entries shaped exactly as { finding, test, name, file, find, replace }; the declared name must not exist on the tree the review read.', `Hardening proof for round ${round} did not close every finding.`)
+  return lines
+}
+
+export function hardeningBriefLines(owed, exempt) {
+  const findings = Array.isArray(owed) ? owed : []
+  if (findings.length === 0) return []
+  const lines = ['', '## Permanent guards required (#839)', 'Every must-fix below needs a permanent named test guard, and its declared kill-mutation must be proven by the driver.']
+  lines.push(...findings.map(({ id, location, summary }) => `- ${id} (${location || 'location unspecified'}) — ${summary || 'close this finding with a named guard'}`))
+  lines.push('Declare each guard in details.hardened with the exact shape { finding, test, name, file, find, replace }.', 'The declared name must be one that does not exist on the tree the review read; only the reviewer may mark a finding ungateable with a non-empty hardening_why.')
+  if (Array.isArray(exempt) && exempt.length > 0) lines.push(...exempt.map(({ id }) => `Reviewer exemption recorded for ${id}.`))
+  return lines
 }

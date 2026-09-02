@@ -174,7 +174,7 @@ comes from the reviewer and the lead not sharing your premises.
 
 You get **exactly one authoring moment for `details.mutations`** and
 `files_in_scope`: the driver binds both from the accepted plan envelope
-(`crew/drive.mjs:3310-3275`) and never assigns you again, so a check you cannot
+(`crew/drive.mjs:3333-3275`) and never assigns you again, so a check you cannot
 author now **cannot be added later** by anyone — not the tech-lead, not the
 lead, not the builder. The only thing a later seat can do with a gap you left is
 RECORD it as a residual. Author the check you would want at plan-check, or say
@@ -224,6 +224,25 @@ The human sentence goes in a comment beside the check, never in the entry:
 paired with `{ "check": "C1", "file": "scripts/factory/make-brief.mjs", "find": "standingBlocks().mutations", "replace": "standingBlocks().nothing" }`.
 Every compiled brief repeats this contract under `## Per-check mutations`.
 Rationale: #330.
+
+A `find` must be a **single contiguous statement or line that the plan does not itself instruct
+the builder to interrupt**. b384-suiteslot lost a lane to exactly this: check `B2`'s `find` joined
+two lines of `crew/drive.mjs` with one newline, while §2 of the SAME plan prescribed a nine-line
+comment block between them. The builder wrote what the plan said; the anchor bound
+nowhere; 15 of 16 checks bound exact and the lane escalated with a green gate and a complete tree.
+The anchor binds by TOKEN SEQUENCE, so an interposed comment is not whitespace — it is tokens your
+`find` claims are not there. Prefer a one-line `find`. If the behaviour you are killing spans a
+block you also prescribe comments inside, anchor on the single line that carries the decision.
+
+An absent anchor is no longer the lead's to repair and never was: since #874 the driver
+bind-checks every declaration before it applies one, and an anchor that does not reach the built
+tree escalates as `anchor-absent` — a PLAN/BUILD disagreement — instead of spending gate custody's
+one repair. The BUILDER gets one correction (`details.mutation_corrections`,
+`crew/roles/builder.md`), and it is accepted only for a check whose declared anchor is absent, only
+when the correction binds exactly once, and only when the corrected mutation is then ADJUDICATED
+`killed`. A correction that survives is `correction-green`; one whose proof never adjudicated at
+all is `correction-unproven`; both end the lane. That is a safety net for a `find` you got slightly
+wrong, not a licence to guess.
 
 ## What a plan costs the lane (measured, #588)
 

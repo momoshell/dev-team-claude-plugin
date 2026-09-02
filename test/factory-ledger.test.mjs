@@ -24,13 +24,13 @@ import {
   openLedger, mkdirpBounded, replayJsonl, isoMs, TABLES, MIGRATIONS, applyMigrations, NODE_FLOOR,
   SESSION_STATUSES, SESSION_OUTCOMES, SEAT_VALUE_SOURCES, TERMINAL_ACTORS, ESCALATION_CAUSES, escalationCause, TERM_TO_KILL_MS, WRITERS, WRITER_MIRROR_TABLES, UPDATE_ONLY_WRITERS, DRIFT_REMEDY, DRIFT_COLLAPSE_REMEDY, LedgerUsageError,
   MODIFIER_KINDS, MODIFIER_ATTEMPT_OUTCOMES, INTAKE_DISPATCH_OUTCOMES,
-  SEAT_TEARDOWN_OUTCOMES, GATE_DISCRIMINATION_VERDICTS, CELL_FAILURE_KINDS, CELL_FAILURE_ATTRIBUTIONS,
+  SEAT_TEARDOWN_OUTCOMES, GATE_DISCRIMINATION_VERDICTS, MUTATION_ANCHOR_CORRECTIONS, MUTATION_ANCHOR_REFUSALS, CELL_FAILURE_KINDS, CELL_FAILURE_ATTRIBUTIONS,
   RUN_VARIANTS, RUN_VARIANT_MARKERS, STAGE_MARKER_CHUNK, variantFromFirstMessage,
   REQUEST_MAX_CHARS, ADVISOR_AB_INCOMPLETE_REASONS, USAGE_ABSENT_CAUSES, usageAbsentCause,
   CELL_RATE_FLOOR, CELL_PRICE_UNITS, REVIEW_VERDICTS,
   ingestJournal, ingestExternalFenceRegister,
 } from '../scripts/factory/ledger.mjs'
-import { FAILURE_UPGRADE, MODIFIER_OUTCOMES, SENSITIVITY_FLOOR, VARIANT_NAMES } from '../crew/drive.mjs'
+import { FAILURE_UPGRADE, MODIFIER_OUTCOMES, SENSITIVITY_FLOOR, VARIANT_NAMES, anchorAbsentWhy, MUTATION_CORRECTION_OUTCOMES, MUTATION_CORRECTION_REFUSALS } from '../crew/drive.mjs'
 import { emitAdapter, SEAT_RETRY_EVENTS, SEAT_RETRY_KINDS } from '../crew/seat-io.mjs'
 import { headlessIo } from '../crew/headless.mjs'
 import { modelString as piModelString } from '../crew/adapters/adapter-pi.mjs'
@@ -5011,7 +5011,7 @@ test('ledger query docs pin typed outcomes, run seats, closed vocabularies, and 
   for (const source of ['roster', 'profile_recommendation', 'operator_override', 'reseat']) {
     assert.ok(docs.includes(`\`${source}\``), `docs missing ${source}`)
   }
-  assert.match(docs, /\*\*30 tables\*\*/)
+  assert.match(docs, /\*\*32 tables\*\*/)
   assert.match(docs, /FROM\s+run_seats/i)
 })
 
@@ -6047,6 +6047,60 @@ test('b381 F7 the recorded b374 external fence register round-trips to ledger to
   }
 })
 
+test('b385 F1 a mutation_anchor_absent journal row round-trips to the ledger through the public handle', { skip: SKIP }, () => {
+  const at = '2026-09-03T00:00:00.000Z'
+  const adwId = 'b385-f1'
+  const absenceLine = JSON.stringify({ at, mutation_anchor_absent: {
+    generation: 1, check: 'B2', file: 'crew/drive.mjs', correction: 'accepted', refusal: null, why: 'corrected and killed',
+  } })
+  const absence = ingestJournalLine(absenceLine, adwId)
+  try {
+    assert.deepEqual(absence.result, { applied: 1, skipped: 0, ignored: 0, failed: 0, complete: true, first_failure: null })
+    assert.deepEqual({ ...absence.ledger.dumpTable('mutation_anchor_absences')[0] }, {
+      adw_id: adwId, gate_generation: 1, check_name: 'B2', file: 'crew/drive.mjs', correction: 'accepted',
+      refusal: null, why: 'corrected and killed', at_ms: Date.parse(at), created_at: at,
+    })
+  } finally { absence.ledger.close() }
+
+  const bindLine = JSON.stringify({ at, mutation_anchor_bind: {
+    generation: 1, declared: 2, exact: 1, normalized: 0, absent: 1, corrected: 1,
+    checks: [{ check: 'B2', file: 'crew/drive.mjs', status: 'absent' }],
+  } })
+  const bind = ingestJournalLine(bindLine, adwId)
+  try {
+    assert.deepEqual(bind.result, { applied: 1, skipped: 0, ignored: 0, failed: 0, complete: true, first_failure: null })
+    assert.deepEqual({ ...bind.ledger.dumpTable('mutation_anchor_binds')[0] }, {
+      adw_id: adwId, gate_generation: 1, declared: 2, exact: 1, normalized: 0, absent: 1, corrected: 1,
+      at_ms: Date.parse(at), created_at: at,
+    })
+    assert.throws(() => bind.ledger.recordMutationAnchorAbsence({ adw_id: adwId, gate_generation: 2, check_name: 'bad', correction: 'unknown' }), LedgerUsageError)
+    assert.throws(() => bind.ledger.recordMutationAnchorAbsence({ adw_id: adwId, gate_generation: 3, check_name: 'bad', correction: 'none', refusal: 'unknown' }), LedgerUsageError)
+  } finally { bind.ledger.close() }
+  assert.deepEqual(MUTATION_ANCHOR_CORRECTIONS, MUTATION_CORRECTION_OUTCOMES)
+  assert.deepEqual(MUTATION_ANCHOR_REFUSALS, MUTATION_CORRECTION_REFUSALS)
+})
+
+test('b385 F2 the mutation_anchors family publishes declarations_seen beside its count', { skip: SKIP }, () => {
+  const dbPath = measuredJournalFactsDb()
+  const measured = journalFactsCli(dbPath)
+  assertMeasuredAndAbsent(dbPath, 'mutation_anchors', 'declarations_seen', 'binds')
+  assert.ok(Object.hasOwn(measured.mutation_anchors, 'by_correction'))
+  assert.ok(Object.hasOwn(measured.mutation_anchors, 'by_refusal'))
+  const why = anchorAbsentWhy([{ check: 'B2', file: 'crew/drive.mjs', status: 'absent', correction: 'none', why: 'nowhere' }])
+  assert.deepEqual(escalationCause({ where: 'anchor-absent', why }), { cause: 'plan-build-disagreement', actor: 'driver' })
+})
+
+test('b385 F3 an empty mutation_anchors window returns null with a reason and never zero', { skip: SKIP }, () => {
+  const dbPath = measuredJournalFactsDb()
+  const absent = journalFactsCli(dbPath, ['--since', '2030-01-01T00:00:00Z', '--until', '2031-01-01T00:00:00Z'])
+  assert.equal(absent.mutation_anchors.measured, false)
+  assert.equal(absent.mutation_anchors.binds, null)
+  assert.equal(absent.mutation_anchors.declarations_seen, null)
+  assert.equal(absent.mutation_anchors.absences, null)
+  assert.notEqual(absent.mutation_anchors.declarations_seen, 0)
+  assert.equal(absent.mutation_anchors.absent, 'no rows in this window — not measured, never a measured zero')
+})
+
 test('b381 A1 an accept-reask emit reaches the ledger through the adapter', { skip: SKIP }, () => {
   const ledger = openTestLedger()
   const emitter = { adwId: 'b381-a1', emit: (fn) => fn(ledger) }
@@ -6072,6 +6126,8 @@ function measuredJournalFactsDb() {
   ledger.recordRpcExitContext({ adw_id: 'b381-denom', role: 'builder', outcome: 'timeout', created_at: at })
   ledger.recordPlanAdoption({ lane: 'b381-denom', plan_sha: 'sha', created_at: at })
   ledger.recordExternalFence({ batch_id: 'b381-denom', lane: 'b381-denom', created_at: at })
+  ledger.recordMutationAnchorBind({ adw_id: 'b381-denom', gate_generation: 1, declared: 1, exact: 1, normalized: 0, absent: 0, corrected: 0, created_at: at })
+  ledger.recordMutationAnchorAbsence({ adw_id: 'b381-denom', gate_generation: 1, check_name: 'B2', correction: 'none', refusal: null, why: 'nowhere', created_at: at })
   const dbPath = ledger._dbPath
   ledger.close()
   return dbPath

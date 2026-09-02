@@ -7,5 +7,5 @@
   "crew/seat-io.mjs:87": "export const TRANSCRIPT_STALE_MS = 900_000",
   "crew/seat-io.mjs:1670": "export function recogniseProviderRetry(text) {",
   "crew/drive.mjs:52": "builder: 2400, reviewer: 1800",
-  "crew/drive.mjs:3390": "const completeCheckProof = (label) => {"
+  "crew/drive.mjs:3440": "const completeCheckProof = (label) => {"
 }

@@ -41,7 +41,9 @@ one.
 
 A register entry marked `"external": true` names a live lane from ANOTHER batch: it denies every batch lane's write surface, it is not counted in the sibling total `checkArrival` derives, and a stale entry refuses `external-fence-stale` by name.
 
-Fence isolation now spans concurrent batches. The dispatcher verifies that the named lane's crew dir persists that exact lane name and its run has not settled, and the deny set is never derived by scanning `~/.crew`. The refusal constant is `EXTERNAL_FENCE_STALE = 'external-fence-stale'` at `scripts/factory/dispatch-batch.mjs:47`.
+Fence isolation now spans concurrent batches. The dispatcher verifies that the named lane's crew dir persists that exact lane name and its run has not settled, and the deny set is never derived by scanning `~/.crew`. It also consults the journal freshness signal: an external lane with no terminal stage whose journal has been silent for `DRIVER_GONE_PERIODS × HEARTBEAT_PERIOD_MS` refuses `external-fence-abandoned`, distinct from `external-fence-stale`; the refusal constants are `EXTERNAL_FENCE_STALE = 'external-fence-stale'` at `scripts/factory/dispatch-batch.mjs:47` and `EXTERNAL_FENCE_ABANDONED = 'external-fence-abandoned'` at `scripts/factory/dispatch-batch.mjs:48`.
+
+`run-settled`, `run-complete`, and `run-escalated` are three distinct terminal reasons. The declared file list is compared with the external lane's own `crew.json` sibling claims and a contradiction is reported, not silently cleared. That comparison cannot measure an under-declared external because a lane's own fence is not recorded in its own `crew.json`; an unmeasured heartbeat (`heartbeat_age_ms: null`) is never read as abandoned.
 
 ## The executable form
 
@@ -93,8 +95,8 @@ so an unflagged batch is unchanged and behaves exactly as before. The two
 transport names and the refusal are pinned in the dispatcher:
 `BOOT_TRANSPORT = 'headless-all'`, `PANE_TRANSPORT = 'panes'`, and
 `TRANSPORT_CONFLICT = 'transport-conflict'`
-(`scripts/factory/dispatch-batch.mjs:122`,
-`scripts/factory/dispatch-batch.mjs:123`,
+(`scripts/factory/dispatch-batch.mjs:127`,
+`scripts/factory/dispatch-batch.mjs:128`,
 `scripts/factory/dispatch-batch.mjs:21`).
 
 `--headless-all` explicitly selects the factory transport. `--panes` selects
@@ -129,8 +131,8 @@ one exemption that exists.
 A **wave** is a topological level of the declared graph. The operator authors
 an edge in the request; it is never inferred, because an inferred ordering is
 one nobody can audit. Unknown names and cycles refuse by name: **dependency-unknown**
-and **dependency-cycle** are the reasons pinned by `scripts/factory/dispatch-batch.mjs:36`
-and `scripts/factory/dispatch-batch.mjs:35`.
+and **dependency-cycle** are the reasons pinned by `scripts/factory/dispatch-batch.mjs:37`
+and `scripts/factory/dispatch-batch.mjs:36`.
 
 A wave runs only after every predecessor reached `done`, **never on an `escalation`**.
 A dependent lane briefed against work that did not land is

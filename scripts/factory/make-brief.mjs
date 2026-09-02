@@ -954,7 +954,10 @@ export function gatherFences({ fencesPath, checkout } = {}) {
     if (entry.files.some((file) => typeof file !== 'string' || !file.trim())) {
       refuseUsage(`fences.lanes[${index}].files must contain non-blank strings`, BAD_FENCES)
     }
-    const unknown = Object.keys(entry).filter((key) => !['lane', 'files', 'reads'].includes(key))
+    const unknown = Object.keys(entry).filter((key) => !['lane', 'files', 'reads', 'external'].includes(key))
+    if (Object.hasOwn(entry, 'external') && entry.external !== true) {
+      refuseUsage(`fences.lanes[${index}] external must be true or absent, found ${JSON.stringify(entry.external)}`, BAD_FENCES)
+    }
     if (unknown.length > 0) refuseUsage(`fences.lanes[${index}] has unknown keys`, BAD_FENCES)
     let reads = []
     if (Object.prototype.hasOwnProperty.call(entry, 'reads')) {

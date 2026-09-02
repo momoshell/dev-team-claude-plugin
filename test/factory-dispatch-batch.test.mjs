@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { existsSync as fsExistsSync, mkdirSync, readFileSync, readdirSync as fsReaddirSync, writeFileSync } from 'node:fs'
+import { appendFileSync as fsAppendFileSync, existsSync as fsExistsSync, mkdirSync, readFileSync, readdirSync as fsReaddirSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import {
+  ADOPT_BLOCK,
   BAND_FLOOR_REASONS,
   BatchRefusal,
   CROSS_BATCH_BLIND_SPOT,
@@ -36,12 +37,17 @@ import {
   checkDirectedBrief,
   externalCrewDir,
   externalFenceLiveness,
+  externalLaneReason,
+  applyAdoption,
+  adoptSourceDir,
   checkFences,
   checkPlanScope,
   checkMachineryBudget,
   crossBatchCollisions,
   collectAnchorPins,
   collectTestReach,
+  ROLES_ANCHOR_COMPANIONS,
+  ROLES_ANCHOR_MANIFEST,
   crewJsonPath,
   compileLane,
   dispatchBatch,
@@ -74,6 +80,8 @@ import {
 } from '../scripts/factory/dispatch-batch.mjs'
 import { parseDirectedBrief } from '../crew/drive.mjs'
 import { laneFenceFor, renderBrief } from '../scripts/factory/make-brief.mjs'
+import { DRIVER_GONE_PERIODS, HEARTBEAT_PERIOD_MS } from '../scripts/factory/lane-watch.mjs'
+import { laneFenceFor } from '../scripts/factory/make-brief.mjs'
 import { scratchDir } from './helpers.mjs'
 
 const root = scratchDir('factory-dispatch-batch-')
@@ -230,7 +238,7 @@ function reachFixture(name, { extraDirect = 0, files = {} } = {}) {
   return checkout
 }
 
-function crewFixture({ home, repoDir, laneDir, lane = laneDir, fence = [], checkout, malformed = false, archived = false, stamp = '2026-08-01T00-00-00Z' }) {
+function crewFixture({ home, repoDir, laneDir, lane = laneDir, fence = [], checkout, malformed = false, archived = false, stamp = '2026-08-01T00-00-00Z', at = Date.now() }) {
   const directory = archived
     ? join(home, '.crew', repoDir, `${laneDir}.archive-${stamp}`)
     : join(home, '.crew', repoDir, laneDir)
@@ -242,7 +250,7 @@ function crewFixture({ home, repoDir, laneDir, lane = laneDir, fence = [], check
     lane_fence: fence,
   })
   put(join(directory, 'crew.json'), crew)
-  put(join(directory, 'journal.jsonl'), `${JSON.stringify({ at: 1, stage: archived ? 'done' : 'build:r1' })}\n`)
+  put(join(directory, 'journal.jsonl'), `${JSON.stringify({ at, stage: archived ? 'done' : 'build:r1' })}\n`)
   if (archived) put(join(directory, 'returns', 'task.json'), JSON.stringify({ status: 'done' }))
   return directory
 }
@@ -346,6 +354,101 @@ test('externalFenceLiveness distinguishes live, settled, and absent crew directo
   assert.equal(rows[0].dir, externalCrewDir({ lane: 'live-external', parentDir, deps: { home } }))
 })
 
+test('externalFenceLiveness uses fresh heartbeats, abandons stale activity, and leaves empty journals unmeasured', () => {
+  const checkout = gitFixture()
+  const home = join(root, 'external-heartbeat-states')
+  const parentDir = join(root, 'external-heartbeat-parent')
+  const now = 10 * 60 * 60 * 1000
+  const staleAfter = DRIVER_GONE_PERIODS * HEARTBEAT_PERIOD_MS
+  crewFixture({ home, repoDir: 'dt-fresh-heartbeat', laneDir: 'fresh-heartbeat', checkout, at: now - staleAfter })
+  const abandoned = crewFixture({ home, repoDir: 'dt-abandoned-heartbeat', laneDir: 'abandoned-heartbeat', checkout, at: now - staleAfter - 1 })
+  const unmeasured = crewFixture({ home, repoDir: 'dt-empty-heartbeat', laneDir: 'empty-heartbeat', checkout, at: now - staleAfter - 1 })
+  put(join(unmeasured, 'journal.jsonl'), '')
+  const rows = externalFenceLiveness({
+    externals: ['fresh-heartbeat', 'abandoned-heartbeat', 'empty-heartbeat'],
+    parentDir,
+    deps: { home, now: () => now },
+  })
+  assert.deepEqual(rows.map(({ lane, live, reason, heartbeat_age_ms, stale_after_ms }) => ({
+    lane, live, reason, heartbeat_age_ms, stale_after_ms,
+  })), [
+    { lane: 'fresh-heartbeat', live: true, reason: null, heartbeat_age_ms: staleAfter, stale_after_ms: staleAfter },
+    { lane: 'abandoned-heartbeat', live: false, reason: 'external-fence-abandoned', heartbeat_age_ms: staleAfter + 1, stale_after_ms: staleAfter },
+    { lane: 'empty-heartbeat', live: true, reason: null, heartbeat_age_ms: null, stale_after_ms: staleAfter },
+  ])
+  assert.equal(rows[2].sibling_files.length, 0)
+})
+
+test('externalLaneReason preserves settled, complete, and escalated terminal reasons', () => {
+  assert.equal(externalLaneReason({ settled: true, stage: 'escalate:scope' }), 'run-settled')
+  assert.equal(externalLaneReason({ settled: false, stage: 'done' }), 'run-complete')
+  assert.equal(externalLaneReason({ settled: false, stage: 'escalate:scope' }), 'run-escalated')
+  assert.equal(externalLaneReason({ settled: false, stage: null }), 'run-complete')
+})
+
+test('checkFences distinguishes an abandoned external refusal from a settled one', () => {
+  const checkout = gitFixture()
+  const home = join(root, 'external-terminal-reasons')
+  const parentDir = join(root, 'external-terminal-parent')
+  const now = 10 * 60 * 60 * 1000
+  const staleAfter = DRIVER_GONE_PERIODS * HEARTBEAT_PERIOD_MS
+  crewFixture({ home, repoDir: 'dt-abandoned-external', laneDir: 'abandoned-external', checkout, at: now - staleAfter - 1 })
+  const abandoned = thrown(() => checkFences({
+    fences: [entry('lane-a', ['src/owned.mjs']), entry('abandoned-external', ['README.md'])],
+    lanes: [{ lane: 'lane-a', where: [] }],
+    checkout,
+    externals: ['abandoned-external'],
+    parentDir,
+    deps: { home, now: () => now, log: () => {} },
+  }))
+  assert.equal(abandoned.reason, 'external-fence-abandoned')
+  assert.match(abandoned.message, /heartbeat age/)
+  assert.match(abandoned.message, /stale after/)
+  const settledDir = crewFixture({ home, repoDir: 'dt-settled-external', laneDir: 'settled-external', checkout, at: now - staleAfter - 1 })
+  put(join(settledDir, 'returns', 'task.json'), JSON.stringify({ status: 'done' }))
+  const settled = thrown(() => checkFences({
+    fences: [entry('lane-a', ['src/owned.mjs']), entry('settled-external', ['README.md'])],
+    lanes: [{ lane: 'lane-a', where: [] }],
+    checkout,
+    externals: ['settled-external'],
+    parentDir,
+    deps: { home, now: () => now, log: () => {} },
+  }))
+  assert.equal(settled.reason, 'external-fence-stale')
+})
+
+test('checkFences reports external fence contradictions and marks an empty comparison unmeasured', () => {
+  const checkout = gitFixture()
+  const home = join(root, 'external-fence-comparison')
+  const parentDir = join(root, 'external-fence-comparison-parent')
+  const now = 10 * 60 * 60 * 1000
+  crewFixture({
+    home, repoDir: 'dt-claimed-external', laneDir: 'claimed-external', checkout, at: now,
+    fence: [{ lane: 'external-sibling', files: ['docs/claimed.md'] }],
+  })
+  crewFixture({ home, repoDir: 'dt-empty-external', laneDir: 'empty-external', checkout, at: now })
+  const logs = []
+  const report = checkFences({
+    fences: [
+      entry('lane-a', ['src/owned.mjs']),
+      entry('lane-b', ['src/stale.mjs']),
+      entry('claimed-external', ['docs/claimed.md']),
+      entry('empty-external', ['README.md']),
+    ],
+    lanes: [{ lane: 'lane-a', where: [] }, { lane: 'lane-b', where: [] }],
+    checkout,
+    externals: ['claimed-external', 'empty-external'],
+    parentDir,
+    deps: { home, now: () => now, log: (line) => logs.push(String(line)) },
+  })
+  const mismatch = report.warnings.find(({ kind }) => kind === 'external-fence-mismatch')
+  assert.deepEqual(mismatch.declared, ['docs/claimed.md'])
+  assert.deepEqual(mismatch.claimed, ['docs/claimed.md'])
+  assert.deepEqual(mismatch.files, ['docs/claimed.md'])
+  assert.match(mismatch.text, /under-declared external is not measured/)
+  assert.ok(logs.some((line) => line.includes('lane=empty-external') && line.includes('fence_compare=unmeasured')))
+})
+
 test('externalFenceLiveness rejects a slug-collision crew identity by the requested name', () => {
   const checkout = gitFixture()
   const home = join(root, 'external-slug-collision')
@@ -374,6 +477,15 @@ test('externalFenceLiveness rejects a slug-collision crew identity by the reques
   assert.equal(error.message.includes('crew-lane-mismatch'), true)
 })
 
+test('checkFences refuses a batch lane marked external', () => {
+  refusal(() => checkFences({
+    fences: [entry('lane-a', ['README.md'])],
+    lanes: [{ lane: 'lane-a', where: [] }],
+    externals: ['lane-a'],
+    deps: { home: join(root, 'claimed-both-home'), log: () => {} },
+  }), 'fence-register-mismatch')
+})
+
 test('crossBatchCollisions skips only the named external self-pair', () => {
   const files = ['README.md']
   assert.deepEqual(crossBatchCollisions({
@@ -388,6 +500,17 @@ test('crossBatchCollisions skips only the named external self-pair', () => {
   })
   assert.equal(collisions.length, 1)
   assert.equal(collisions[0].lane, 'lane-a')
+})
+
+test('crossBatchCollisions reports a collision when a different live lane holds an external entry', () => {
+  const collisions = crossBatchCollisions({
+    entries: [{ lane: 'external-lane', files: ['docs/notes.md'] }],
+    live: [{ lane: 'different-live-lane', dir: '/tmp/different-live', files: ['docs/notes.md'] }],
+    externals: ['external-lane'],
+  })
+  assert.deepEqual(collisions, [{
+    lane: 'external-lane', live: 'different-live-lane', dir: '/tmp/different-live', files: ['docs/notes.md'],
+  }])
 })
 
 test('checkFences validates external liveness, logs carried rows, and preserves sibling leakage', () => {
@@ -1390,6 +1513,48 @@ test('machinery budget reports over-creation as one ask-user finding', () => {
   const symbolsOnly = checkMachineryBudget({ lane: 'lane-a', creates: [], newFiles: [], newSymbols: ['alpha', 'beta', 'gamma'] })
   assert.equal(symbolsOnly.findings.length, 1)
   assert.doesNotThrow(() => checkMachineryBudget({ lane: 'lane-a', creates: ['lib/one.mjs'], newFiles: ['lib/one.mjs', 'lib/two.mjs', 'lib/three.mjs'], newSymbols: ['alpha', 'beta'] }))
+test('collectAnchorPins scans the roles manifest even when skills is absent', () => {
+  const checkout = join(root, 'roles-anchor-checkout')
+  put(join(checkout, 'crew', 'roles', 'anchors.json'), JSON.stringify({
+    'crew/drive.mjs:1': 'export const DRIVE = 1',
+  }))
+  const pins = collectAnchorPins({ checkout })
+  assert.deepEqual(pins.manifests, [ROLES_ANCHOR_MANIFEST])
+  assert.deepEqual([...pins.byFile.keys()], ['crew/drive.mjs'])
+})
+
+test('collectAnchorPins keeps the roles and skills manifests in one scan', () => {
+  const checkout = join(root, 'roles-and-skills-anchor-checkout')
+  put(join(checkout, 'crew', 'roles', 'anchors.json'), JSON.stringify({
+    'crew/drive.mjs:1': 'export const DRIVE = 1',
+  }))
+  put(join(checkout, 'skills', 'valid', 'anchors.json'), JSON.stringify({
+    'crew/crew.mjs:2': 'export const CREW = 2',
+  }))
+  const pins = collectAnchorPins({ checkout })
+  assert.deepEqual(pins.manifests, [ROLES_ANCHOR_MANIFEST, 'skills/valid/anchors.json'])
+  assert.deepEqual([...pins.byFile.keys()], ['crew/drive.mjs', 'crew/crew.mjs'])
+})
+
+test('a roles anchor warning names its bijection companions and does not refuse', () => {
+  const checkout = join(root, 'roles-anchor-warning-checkout')
+  put(join(checkout, 'crew', 'drive.test.mjs'), 'import { test } from \'node:test\'\n')
+  put(join(checkout, 'crew', 'roles', 'anchors.json'), JSON.stringify({
+    'crew/drive.test.mjs:1': "import { test } from 'node:test'",
+  }))
+  put(join(checkout, 'crew', 'roles', 'planner.md'), '# planner\n')
+  put(join(checkout, 'crew', 'roles', 'tech-lead.md'), '# tech-lead\n')
+  const report = checkFences({
+    fences: [entry('lane-a', ['crew/drive.test.mjs']), entry('lane-b', ['docs/notes.md'])],
+    lanes: [{ lane: 'lane-a', where: ['crew/drive.test.mjs'] }, { lane: 'lane-b', where: [] }],
+    checkout,
+    deps: { home: root, log: () => {} },
+  })
+  const warning = report.warnings.find(({ kind, lane }) => kind === 'anchor-pin' && lane === 'lane-a')
+  assert.ok(warning)
+  for (const path of [ROLES_ANCHOR_MANIFEST, ...ROLES_ANCHOR_COMPANIONS, 'crew/drive.test.mjs:1041']) {
+    assert.match(warning.text, new RegExp(path.replaceAll('/', '\\/').replaceAll('.', '\\.') ))
+  }
 })
 
 test('collectAnchorPins skips an unreadable or malformed manifest', () => {
@@ -1423,7 +1588,9 @@ test('created paths are covered by the own fence, cannot leak to a sibling, and 
   assert.deepEqual(report.perLane['lane-a'].creates, ['crew/new/file.mjs'])
 })
 
-test('crew state paths and arrival checks use the runtime slug and exact sibling count', () => {
+test('crew state paths honor injected home and arrival checks use the runtime slug', () => {
+  const home = join(root, 'crew-json-home')
+  assert.equal(crewJsonPath({ checkout: '/tmp/dt-lane-a', lane: 'lane_a', deps: { home } }), join(home, '.crew', 'dt-lane-a', 'lane-a', 'crew.json'))
   assert.match(crewJsonPath({ checkout: '/tmp/dt-lane-a', lane: 'lane_a' }), /\/lane-a\/crew\.json$/)
   refusal(() => checkArrival({ crew: { lane_fence: [] }, lane: 'lane-a', batchTotal: 1 }), 'fence-not-arrived')
   refusal(() => checkArrival({ crew: { lane_name: 'lane-a', lane_fence: [] }, lane: 'lane-a', batchTotal: 2 }), 'fence-count-mismatch')
@@ -1809,35 +1976,28 @@ async function adoptionDispatchFixture({
   outcomes = {},
   home = join(root, `adoption-home-${label}-${Math.random().toString(36).slice(2)}`),
 } = {}) {
-  const previousHome = process.env.HOME
-  process.env.HOME = home
-  try {
-    return await dispatchFixture({
-      label,
-      names,
-      requests,
-      runFlags,
-      brief,
-      briefs,
-      outcomes,
-      home,
-      existsProbe: (path) => fsExistsSync(path)
-        || (String(path).endsWith('returns/task.json') && Object.hasOwn(outcomes, laneFromOutcomePath(String(path)))),
-      spawnAsync: async (call) => {
-        const args = (call.args || []).map(String)
-        if (args.includes('--discover-reads')) return { status: 0, stdout: '[]', stderr: '' }
-        const outIndex = args.indexOf('--out')
-        if (outIndex >= 0) {
-          const lane = compilerLane(args)
-          put(args[outIndex + 1], briefs[lane] ?? brief)
-        }
-        return { status: 0, stdout: '', stderr: '' }
-      },
-    })
-  } finally {
-    if (previousHome === undefined) delete process.env.HOME
-    else process.env.HOME = previousHome
-  }
+  return dispatchFixture({
+    label,
+    names,
+    requests,
+    runFlags,
+    brief,
+    briefs,
+    outcomes,
+    home,
+    existsProbe: (path) => fsExistsSync(path)
+      || (String(path).endsWith('returns/task.json') && Object.hasOwn(outcomes, laneFromOutcomePath(String(path)))),
+    spawnAsync: async (call) => {
+      const args = (call.args || []).map(String)
+      if (args.includes('--discover-reads')) return { status: 0, stdout: '[]', stderr: '' }
+      const outIndex = args.indexOf('--out')
+      if (outIndex >= 0) {
+        const lane = compilerLane(args)
+        put(args[outIndex + 1], briefs[lane] ?? brief)
+      }
+      return { status: 0, stdout: '', stderr: '' }
+    },
+  })
 }
 
 function basenameOf(path) {
@@ -2425,7 +2585,7 @@ test('a dispatch over a checkout with pinned files unrelated to the batch still 
 
 test('normalDeps supplies the house-style dependency surface', () => {
   const deps = normalDeps({})
-  assert.deepEqual(Object.keys(deps).sort(), ['appendFileSync', 'assertQuiet', 'env', 'existsSync', 'home', 'log', 'now', 'readFileSync', 'readdirSync', 'sleep', 'slots', 'spawn', 'spawnAsync', 'writeFileSync'])
+  assert.deepEqual(Object.keys(deps).sort(), ['appendFileSync', 'assertQuiet', 'env', 'existsSync', 'home', 'log', 'mkdirSync', 'now', 'readFileSync', 'readdirSync', 'sleep', 'slots', 'spawn', 'spawnAsync', 'writeFileSync'])
 })
 
 test('compileLane discovers reads once and compiles once', async () => {
@@ -2927,6 +3087,125 @@ test('parseCliArgs accepts repeated --adopt and refuses a spec with no lane', ()
   }
 })
 
+test('adoptSourceDir takes an operator-named task directory at its word', () => {
+  const task = join(root, 'operator-named-task', 'task')
+  assert.equal(adoptSourceDir(task), task)
+  assert.equal(adoptSourceDir(dirname(task)), task)
+})
+
+test('resolveAdoptions refuses a CLI adoption whose lane is outside the batch', () => {
+  const archive = adoptionArchive('outside-batch')
+  refusal(() => resolveAdoptions({
+    lanes: [{ lane: 'lane-a' }],
+    runFlags: { adopt: [`not-in-batch=${archive}`] },
+  }), 'plan-adopt-unreadable')
+})
+
+test('resolveAdoptions refuses an unreadable plan-check.md', () => {
+  const archive = adoptionArchive('unreadable-plan-check', { planCheck: 'VERDICT: revise\n' })
+  const checkPath = join(archive, 'task', 'plan-check.md')
+  const error = thrown(() => resolveAdoptions({
+    lanes: [{ lane: 'lane-a' }],
+    runFlags: { adopt: [`lane-a=${archive}`] },
+    deps: {
+      readFileSync: (path, encoding) => {
+        if (String(path) === checkPath) throw new Error('EACCES: permission denied')
+        return readFileSync(path, encoding)
+      },
+    },
+  }))
+  assert.equal(error.reason, 'plan-adopt-unreadable')
+  assert.match(error.message, /plan-check\.md is unreadable/)
+  assert.match(error.message, /EACCES: permission denied/)
+})
+
+test('applyAdoption refuses each required source missing at copy time without creating task files', () => {
+  for (const missing of ['plan.md', 'gate.mjs']) {
+    const archive = adoptionArchive(`copy-time-missing-${missing}`, { omit: missing })
+    const crewDir = join(root, `copy-time-missing-${missing}-crew`)
+    const briefPath = put(join(root, `copy-time-missing-${missing}-brief.md`), '# brief\n')
+    const error = thrown(() => applyAdoption({
+      adoption: { lane: 'lane-a', archive, source: join(archive, 'task'), revise: false, from: 'cli' },
+      crewDir,
+      briefPath,
+    }))
+    assert.equal(error.reason, 'plan-adopt-unreadable')
+    assert.match(error.message, new RegExp(missing.replace('.', '\\.') ))
+    assert.equal(fsExistsSync(join(crewDir, 'task')), false)
+  }
+})
+
+test('applyAdoption reads every source before writing and rolls back a later write failure', () => {
+  const archive = adoptionArchive('atomic-write')
+  const crewDir = join(root, 'atomic-write-crew')
+  const briefPath = put(join(root, 'atomic-write-brief.md'), '# brief\n')
+  const calls = []
+  const error = thrown(() => applyAdoption({
+    adoption: { lane: 'lane-a', archive, source: join(archive, 'task'), revise: false, from: 'cli' },
+    crewDir,
+    briefPath,
+    deps: {
+      mkdirSync: (...args) => { calls.push('mkdir'); mkdirSync(...args) },
+      writeFileSync: (path, body) => {
+        calls.push(`write:${basenameOf(path)}`)
+        if (String(path).endsWith('/gate.mjs')) throw new Error('interrupted write')
+        writeFileSync(path, body)
+      },
+      appendFileSync: (...args) => { calls.push('append'); fsAppendFileSync(...args) },
+    },
+  }))
+  assert.equal(error.reason, 'plan-adopt-unreadable')
+  assert.deepEqual(calls.slice(0, 3), ['mkdir', 'write:plan.md', 'write:gate.mjs'])
+  assert.equal(fsExistsSync(join(crewDir, 'task', 'plan.md')), false)
+  assert.equal(fsExistsSync(join(crewDir, 'task', 'gate.mjs')), false)
+  assert.equal(fsExistsSync(briefPath), true)
+  assert.equal(readFileSync(briefPath, 'utf8'), '# brief\n')
+})
+
+test('applyAdoption uses append seams and swallows only journal append failures', () => {
+  const archive = adoptionArchive('append-seams')
+  const crewDir = join(root, 'append-seams-crew')
+  const briefPath = put(join(root, 'append-seams-brief.md'), '# brief\n')
+  const appended = []
+  const applied = applyAdoption({
+    adoption: { lane: 'lane-a', archive, source: join(archive, 'task'), revise: false, from: 'cli' },
+    crewDir,
+    briefPath,
+    deps: {
+      appendFileSync: (path, body) => {
+        appended.push(String(path))
+        if (String(path).endsWith('/journal.jsonl')) throw new Error('journal unavailable')
+        fsAppendFileSync(path, body)
+      },
+    },
+  })
+  assert.equal(applied.files.join(','), 'plan.md,gate.mjs')
+  assert.equal(appended.some((path) => path === briefPath), true)
+  assert.equal(appended.some((path) => path.endsWith('/journal.jsonl')), true)
+  assert.equal(readFileSync(join(crewDir, 'task', 'plan.md'), 'utf8'), '# Archived plan\n')
+  assert.match(readFileSync(briefPath, 'utf8'), /dispatched write surface/)
+})
+
+test('a brief append failure refuses after the copied files have been prepared', () => {
+  const archive = adoptionArchive('append-brief-failure')
+  const crewDir = join(root, 'append-brief-failure-crew')
+  const briefPath = put(join(root, 'append-brief-failure-brief.md'), '# brief\n')
+  const error = thrown(() => applyAdoption({
+    adoption: { lane: 'lane-a', archive, source: join(archive, 'task'), revise: false, from: 'cli' },
+    crewDir,
+    briefPath,
+    deps: {
+      appendFileSync: (path, body) => {
+        if (String(path) === briefPath) throw new Error('brief append unavailable')
+        fsAppendFileSync(path, body)
+      },
+    },
+  }))
+  assert.equal(error.reason, 'plan-adopt-unreadable')
+  assert.match(error.message, /brief append unavailable/)
+  assert.equal(fsExistsSync(join(crewDir, 'task', 'plan.md')), true)
+})
+
 test('both adoption routes copy the same archived plan and gate into the lane task dir', async () => {
   const cliArchive = adoptionArchive('route-cli', { plan: '# CLI archived plan\n', gate: '// CLI archived gate\n' })
   const requestArchive = adoptionArchive('route-request', { plan: '# request archived plan\n', gate: '// request archived gate\n' })
@@ -2960,6 +3239,23 @@ test('an archive missing gate.mjs or plan.md refuses by name and copies nothing'
     assert.match(error.message, new RegExp(missing.replace('.', '\\.') ))
     assert.equal(fsExistsSync(join(home, '.crew')), false)
   }
+})
+
+test('the adopted plan block names the dispatched ceiling before the scope guard runs', () => {
+  const archive = adoptionArchive('ceiling')
+  const briefPath = put(join(root, 'ceiling-brief.md'), '# brief\n')
+  applyAdoption({
+    adoption: { lane: 'lane-a', archive, source: join(archive, 'task'), revise: false, from: 'cli' },
+    crewDir: join(root, 'ceiling-crew'),
+    briefPath,
+  })
+  assert.match(readFileSync(briefPath, 'utf8'), /dispatched write surface/)
+  assert.match(ADOPT_BLOCK, /files_in_scope/)
+  assert.throws(() => checkPlanScope({
+    lane: 'lane-a',
+    declared: ['scripts/factory/dispatch-batch.mjs', 'scripts/factory/make-brief.mjs'],
+    files: ['scripts/factory/dispatch-batch.mjs'],
+  }), (error) => error instanceof BatchRefusal && error.reason === 'plan-scope-outside-fence')
 })
 
 test('the standing adoption block is byte-identical across two adopting lanes', async () => {

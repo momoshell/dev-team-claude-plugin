@@ -1,6 +1,7 @@
 // Content pins for prose citations; see references/citations.md and vacuity.md's detector-key section.
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { execFileSync } from 'node:child_process'
 
 export const MIN_EXPECTED_LENGTH = 12
 export const ANCHOR_ROOTS = Object.freeze(['crew', 'scripts', 'test', 'docs', 'skills', 'visualizer', 'tasks', '.github'])
@@ -127,6 +128,60 @@ export function checkSkillAnchors({ root, skillDir, manifestPath }) {
   return checkAnchors({ root, docs: skillDocs(skillDir), manifest })
 }
 
+// A shift is repairable by whoever owns the file it points at. When the pin names a
+// file this lane changed, the lane could have run --repair and did not: that is a
+// failure. When it names a file no lane here owns, it is a warning, because failing
+// on it would demand a repair outside the fence. #859
+export function partitionShifts({ shifted, fence }) {
+  const fenced = new Set(Array.isArray(fence) ? fence : [])
+  const inFence = []
+  const outOfFence = []
+  for (const shift of shifted) (fenced.has(shift.rel) ? inFence : outOfFence).push(shift)
+  return { inFence, outOfFence }
+}
+
+function defaultRun(args, root) {
+  try {
+    return execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+  } catch {
+    return null
+  }
+}
+
+function outputPaths(output) {
+  if (typeof output !== 'string') return null
+  return output.split(/\r?\n/).filter((path) => path !== '')
+}
+
+// The lane's own fence, measured: the paths this branch changed against its merge
+// base plus anything dirty or untracked. Unmeasurable (no git, no base branch, a
+// scratch fixture root) yields an EMPTY fence and a stated reason - a blind spot is
+// named, never guessed at.
+export function laneFence({ root, base = 'main', run = defaultRun } = {}) {
+  const invoke = (args) => {
+    try { return run(args, root) } catch { return null }
+  }
+  if (typeof root !== 'string' || root.length === 0) return { paths: [], measured: false, reason: 'git root could not be measured' }
+  const top = invoke(['rev-parse', '--show-toplevel'])
+  if (top === null) return { paths: [], measured: false, reason: 'git root could not be measured' }
+  const gitRoot = typeof top === 'string' ? top.trim() : ''
+  if (gitRoot !== root) return { paths: [], measured: false, reason: `git root is ${gitRoot || 'unknown'}, expected ${root}` }
+  const merge = invoke(['merge-base', 'HEAD', base])
+  if (typeof merge !== 'string' || merge.trim() === '') return { paths: [], measured: false, reason: `no merge base with ${base}` }
+  const mergeBase = merge.trim()
+  const changed = outputPaths(invoke(['diff', '--name-only', mergeBase]))
+  if (changed === null) return { paths: [], measured: false, reason: 'changed paths could not be measured' }
+  const untracked = outputPaths(invoke(['ls-files', '--others', '--exclude-standard']))
+  if (untracked === null) return { paths: [], measured: false, reason: 'untracked paths could not be measured' }
+  return { paths: [...new Set([...changed, ...untracked])], measured: true, reason: null }
+}
+
+function shiftLine(shift, skillDir, fenced) {
+  const where = fenced ? ' on a file inside this lane\'s fence' : ''
+  const mode = fenced ? '--repair' : '--repair-all'
+  return `shifted ${shift.key} -> line ${shift.to}${where}; repair with: node skills/qa-test-writing/anchor-pin.mjs ${mode} ${skillDir}`
+}
+
 // Returns the anchor COUNT as a primitive. Both callers assert it under
 // node:assert/strict (skills/backend-node/exhibits.test.mjs:52 and
 // skills/devops/exhibits.test.mjs:53) and neither may be edited by the lane that
@@ -134,12 +189,22 @@ export function checkSkillAnchors({ root, skillDir, manifestPath }) {
 // this lane must leave alone. The shifts are reported two other ways instead:
 // through `log`, so a shift is never SILENT in a suite run, and through
 // checkSkillAnchors for a caller that wants the records themselves.
-export function assertAnchorsPinned({ root, skillDir, manifestPath, minAnchors, log = console.warn }) {
+export function assertAnchorsPinned({ root, skillDir, manifestPath, minAnchors, log = console.warn, fence }) {
   const result = checkSkillAnchors({ root, skillDir, manifestPath })
   const failures = [...result.failures]
   if (result.anchors < minAnchors) failures.push(`expected at least ${minAnchors} anchors, found ${result.anchors}`)
+  const measured = fence === undefined ? laneFence({ root }) : { paths: fence, measured: true, reason: null }
+  const { inFence, outOfFence } = partitionShifts({ shifted: result.shifted, fence: measured.paths })
+  for (const shift of inFence) failures.push(shiftLine(shift, skillDir, true))
   if (failures.length > 0) throw new Error(failures.join('\n'))
-  for (const shift of result.shifted) log(`shifted ${shift.key} -> line ${shift.to}; repair with: node skills/qa-test-writing/anchor-pin.mjs --repair ${skillDir}`)
+  if (!measured.measured) {
+    const warning = `anchor fence unmeasured (${measured.reason}); shifts are warn-only`
+    if (outOfFence.length > 0) {
+      log(`${warning}; ${shiftLine(outOfFence[0], skillDir, false)}`)
+      outOfFence.shift()
+    } else log(warning)
+  }
+  for (const shift of outOfFence) log(shiftLine(shift, skillDir, false))
   return result.anchors
 }
 
@@ -151,7 +216,7 @@ export function rewriteCitations(text, rewrites) {
   return text.replace(pattern, (match) => rewrites.get(match))
 }
 
-export function repairAnchors({ root, docs, manifest }) {
+export function repairAnchors({ root, docs, manifest, repairAll = false }) {
   let anchors
   try {
     anchors = collectAnchors({ docs })
@@ -163,9 +228,14 @@ export function repairAnchors({ root, docs, manifest }) {
   const refusals = []
   const repairs = []
   const rewrites = new Map()
+  const candidates = []
+  const seen = new Set()
+  const repairFence = laneFence({ root })
+  const repairPaths = new Set(repairFence.paths)
 
   for (const anchor of anchors) {
-    if (rewrites.has(anchor.key)) continue
+    if (seen.has(anchor.key)) continue
+    seen.add(anchor.key)
     const { lines, failure } = readTargetLines(root, anchor)
     if (failure) { refusals.push(failure); continue }
     if (!Object.hasOwn(declarations, anchor.key)) {
@@ -190,13 +260,36 @@ export function repairAnchors({ root, docs, manifest }) {
     const nextLine = found[0]
     if (nextLine === anchor.line) continue
     const nextKey = `${anchor.rel}:${nextLine}`
-    if (Object.hasOwn(declarations, nextKey) && declarations[nextKey] !== expected) {
-      refusals.push(`${anchor.key}: line ${nextLine} is already declared by another anchor`)
-      continue
-    }
-    rewrites.set(anchor.key, nextKey)
-    repairs.push({ key: anchor.key, rel: anchor.rel, from: anchor.line, to: nextLine, nextKey })
+    // A measured fence authorizes rewriting only a target this lane owns unless an
+    // operator explicitly requests a repair-all pass for committed external drift.
+    if (!repairAll && repairFence.measured && !repairPaths.has(anchor.rel)) continue
+    candidates.push({ key: anchor.key, rel: anchor.rel, from: anchor.line, to: nextLine, nextKey, expected })
   }
+
+  // Collision is judged against a LIVE occupancy map, not the manifest as it was at
+  // the start of the pass: an anchor that VACATES a line earlier in the same pass no
+  // longer occupies it. The settle loop repeats while any candidate lands, so the
+  // order citations appear in the docs stops deciding the outcome; only a true cycle
+  // is refused. Before this, repairing crew/daemon.test.mjs:253 -> :255 refused
+  // because :255's own anchor had not moved yet, and two of four manifests needed a
+  // hand repair. #859
+  const live = new Map(Object.entries(declarations))
+  let pending = candidates
+  let progress = true
+  while (progress && pending.length > 0) {
+    progress = false
+    const stuck = []
+    for (const candidate of pending) {
+      if (live.has(candidate.nextKey) && live.get(candidate.nextKey) !== candidate.expected) { stuck.push(candidate); continue }
+      live.delete(candidate.key)
+      live.set(candidate.nextKey, candidate.expected)
+      rewrites.set(candidate.key, candidate.nextKey)
+      repairs.push({ key: candidate.key, rel: candidate.rel, from: candidate.from, to: candidate.to, nextKey: candidate.nextKey })
+      progress = true
+    }
+    pending = stuck
+  }
+  for (const candidate of pending) refusals.push(`${candidate.key}: line ${candidate.to} is already declared by another anchor`)
 
   for (const key of Object.keys(declarations)) {
     if (!cited.has(key)) refusals.push(`${key}: manifest entry is orphaned (no citation)`)
@@ -222,14 +315,14 @@ export function repairAnchors({ root, docs, manifest }) {
   return { anchors: anchors.length, repairs, refusals, manifest: next, edits }
 }
 
-export function repairAnchorsInPlace({ root, skillDir, manifestPath }) {
+export function repairAnchorsInPlace({ root, skillDir, manifestPath, repairAll = false }) {
   let manifest
   try {
     manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
   } catch (error) {
     return { anchors: 0, repairs: [], refusals: [`could not read anchor manifest ${manifestPath}: ${error?.message || String(error)}`], manifest: {}, edits: [] }
   }
-  const result = repairAnchors({ root, docs: skillDocs(skillDir), manifest })
+  const result = repairAnchors({ root, docs: skillDocs(skillDir), manifest, repairAll })
   if (result.repairs.length > 0) {
     writeFileSync(manifestPath, `${JSON.stringify(result.manifest, null, 2)}\n`)
     for (const edit of result.edits) writeFileSync(edit.doc, edit.text)
@@ -239,18 +332,24 @@ export function repairAnchorsInPlace({ root, skillDir, manifestPath }) {
 
 export function repairCli(argv, log = console.log) {
   let skillDir = null
+  let repairAll = false
   let root = process.cwd()
   for (let i = 0; i < argv.length; i += 1) {
-    if (argv[i] === '--repair') { skillDir = argv[i + 1]; i += 1; continue }
+    if (argv[i] === '--repair' || argv[i] === '--repair-all') {
+      skillDir = argv[i + 1]
+      repairAll = argv[i] === '--repair-all'
+      i += 1
+      continue
+    }
     if (argv[i] === '--root') { root = argv[i + 1]; i += 1; continue }
     log(`unknown argument ${argv[i]}`)
     return 2
   }
   if (!skillDir || !root) {
-    log('usage: node skills/qa-test-writing/anchor-pin.mjs --repair <dir> [--root <root>]')
+    log('usage: node skills/qa-test-writing/anchor-pin.mjs (--repair | --repair-all) <dir> [--root <root>]')
     return 2
   }
-  const result = repairAnchorsInPlace({ root, skillDir, manifestPath: join(skillDir, 'anchors.json') })
+  const result = repairAnchorsInPlace({ root, skillDir, manifestPath: join(skillDir, 'anchors.json'), repairAll })
   for (const repair of result.repairs) log(`repaired ${repair.key} -> ${repair.nextKey}`)
   for (const refusal of result.refusals) log(`refused ${refusal}`)
   return result.refusals.length > 0 ? 1 : 0

@@ -199,8 +199,8 @@ Headless workers use a frozen binary, resolved in this order:
 `--claude-bin <absolute path>`, `$CREW_CLAUDE_BIN`, then
 `${HOME}/.local/bin/claude` when it exists; there is no bare-PATH fallback.
 `headlessIo` treats the ReturnEnvelope as the record and classifies worker
-runs as `ok`, `ok-degraded`, `aborted`, `no-envelope`, `malformed`, or
-`timeout`; a perfect stream without an envelope is still `no-envelope`.
+runs as `ok`, `ok-degraded`, `aborted`, `no-envelope`, `malformed`,
+`timeout`, or `budget-refused`; a stream without an envelope is `no-envelope`.
 When a headless turn settles it may emit a `usage` event with `{ id, role,
 model, session_id, transcript_path, usage }`, where `usage` is either the four
 `billed_*_tokens` fields or `null`. `emitAdapter` stores these measurements in
@@ -258,8 +258,10 @@ orphaning a dead one from the persisted envelope. **Exit** closes the loop:
 `settleSeatTeardown` records only what each seat's death was proven to be,
 then calls `reclaimDescendants` once more. `npm run crew:reap -- --reclaim`
 (`scripts/factory/reap-stale.mjs`) is that same sweep out of band, across every
-task dir, for the operator whose boot was refused. A sixth seat-lifecycle path
+task dir, for the operator whose boot was refused. A seventh seat-lifecycle path
 is correct only if it, too, treats the seat it finds as unproven until measured.
+The two paths not named above are the child driver's own `settleSeatTeardown` and
+the `teardown` verb, making the count legible.
 
 ## Plan check: growth evidence and the carve verdict
 
@@ -269,6 +271,12 @@ count, a ratio, and a `divergent` label. A round is `divergent` only when its
 combined bytes are at least 2x the round-1 combined bytes. The absolute
 `plan_bytes` and `gate_bytes` sit beside `files_in_scope` so a large plan is
 legible as evidence rather than being mistaken for a scope change.
+
+The driver records a `plan_scope: { round, verdict, added, dropped }` decision row
+per plan round over the closed verdict set
+`plan-scope-undispatched | plan-scope-same | plan-scope-narrowed | plan-scope-widened`.
+A `widened` verdict BOUNCES the plan with a `plan-bounce-r<n>.md` note; on the
+final round it escalates `plan-scope-widened` instead.
 
 `gate_path` must be an absolute path inside the task directory; paths outside it
 are ignored, and the driver never parses `gate_cmd`. Growth is evidence in the

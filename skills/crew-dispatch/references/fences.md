@@ -17,11 +17,17 @@ entry:
     {
       "lane": "<lane>",
       "files": ["skills/crew-dispatch/", "skills/crew-recovery/"],
-      "reads": []
+      "reads": [],
+      "external": true
     }
   ]
 }
 ```
+
+`gatherFences` accepts exactly `lane`, `files`, `reads` and `external`; an
+`external: false` marker is refused, not ignored. `make-brief` drops the marker
+after validating it, while `dispatch-batch` harvests it for the external-fence
+checks.
 
 Compile pass one with the current factory CLI:
 

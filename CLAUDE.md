@@ -50,10 +50,8 @@ exactly that reason. Two decisions have collided here before. ADR numbers are
 cited from shipped code as the authority for invariants, so a citation that
 resolves to nothing is a real defect.
 
-**This plugin ships zero runtime dependencies.** `package.json` has an empty
-`dependencies`; the only devDependencies are svelte/vite for the visualizer.
-Do not add one. `jq` is not available either — use `node -p` for JSON in
-shell recipes.
+**This plugin ships zero runtime dependencies.** `package.json` has no `dependencies` key at all; the only devDependencies are svelte/vite for the visualizer. Do not
+add one. `jq` is not available either — use `node -p` for JSON in shell recipes.
 
 ## Honesty doctrine
 
@@ -83,7 +81,20 @@ procedure; `/dispatch` names it.
 - Verify a fence **arrived** in `crew.json` and `journal.jsonl` — not merely
   that it parsed.
 - Rebase onto `main` before opening the PR.
-- Judge tier only where a protected file forces it.
+- `judge` is the legacy alias of the assurance preset `rigorous` (ADR-035), and
+  ADR-038 means the protected floor no longer forces the plan-check loop — a floor
+  touch forces a kill-mutation on the changed behaviour plus rigorous review, not
+  plan-time adversary rounds.
+
+### Lessons
+
+- **a fenced test can drag non-test files into the fence** — `crew/drive.test.mjs`
+  requires `crew/roles/anchors.json`, `crew/roles/planner.md` and
+  `crew/roles/tech-lead.md`; b362/b365 paid for it. Extends #702.
+- **`returns/` must never land in the checkout** (b363) — hence the `.gitignore`
+  entry below.
+- **Reconcile a brief's premise against `crew/roster.json` before dispatch**
+  (b372).
 
 ## Where the doctrine lives
 

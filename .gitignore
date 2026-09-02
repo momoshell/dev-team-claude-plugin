@@ -18,6 +18,9 @@ node_modules/
 visualizer/web/dist/
 .claude/settings.local.json
 
+# Crew return envelopes never belong in the checkout
+returns/
+
 # Local secrets and machine-specific environment
 .env
 .env.*

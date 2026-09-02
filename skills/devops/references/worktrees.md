@@ -22,10 +22,10 @@ Different values identify a linked checkout in the worker-path probe.
 Status: no reachable checkout implementation performs this probe; see `evidence.md`.
 
 The common Git directory is shared by linked lanes.
-Exhibit: `crew/seat-io.mjs:2818`.
+Exhibit: `crew/seat-io.mjs:2822`.
 
 Stash entries are consequently not isolated per worktree (#471).
-Exhibit: `crew/seat-io.mjs:2818`.
+Exhibit: `crew/seat-io.mjs:2822`.
 
 Use `git worktree remove` for teardown so Git unregisters the worktree.
 Exhibit: `skills/qa-test-writing/references/tooling.md:65-66`.

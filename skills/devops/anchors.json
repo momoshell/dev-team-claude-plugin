@@ -20,7 +20,6 @@
   "skills/qa-test-writing/references/tooling.md:89": "compound `cd` that silently changed what a relative path meant",
   "tasks/cmux-mode/spike-findings.md:58": "Ancestry chain observed:",
   "crew/crew.mjs:2212": "done       -> auto-teardown",
-  "crew/seat-io.mjs:2818": "common git dir from every linked worktree",
   "crew/crew.mjs:801": "unknown boot descendant refusal",
   "crew/daemon.mjs:134": "export const DAEMON_COMMANDS = Object.freeze",
   "crew/daemon.mjs:478": "join(root, 'daemon.sock')",
@@ -29,5 +28,6 @@
   "crew/daemon.mjs:584": "artifacts: [join(run.crew_dir, 'journal.jsonl')]",
   "crew/daemon.mjs:878": "const path = join(run.crew_dir, 'journal.jsonl')",
   "crew/daemon.mjs:1435": "socket.on('error', () => finish(false))",
-  "crew/daemon.mjs:797": "catch { return [] }"
+  "crew/daemon.mjs:797": "catch { return [] }",
+  "crew/seat-io.mjs:2822": "common git dir from every linked worktree"
 }

@@ -19,12 +19,15 @@ import { seatIo as defaultSeatIo, settleSeatTeardown } from './seat-io.mjs'
 import { openRun } from '../scripts/factory/emit.mjs'
 import { checkoutProtectedPaths } from '../scripts/factory/probe-repo.mjs'
 import { paneSeat, isObject } from './daemon.mjs'
+import { runOutcome } from './crew.mjs'
 import { slugOrNull } from './slug.mjs'
 
 const SELF_PATH = fileURLToPath(import.meta.url)
-// The duplication is the read, never the value. The import firewall below is
-// why child.mjs deliberately does not route through crew.mjs; both entrypoints
-// read the same package owner from their module paths. This deliberately does
+// The duplication is the read, never the value. child.mjs imports exactly one
+// pure, state-free mapping (`runOutcome`) from crew.mjs, so the two run
+// entrypoints cannot disagree about a run's typed outcome. The remaining
+// duplications (`SUITE_OWNER_PATH`, `resolveValidationLane`, `specExecution`)
+// stay here because each reads state the child owns. This deliberately does
 // NOT route through runChild's injected readFileSync seam: that seam carries
 // run state, while the owner is part of the checkout this module was loaded
 // from, and several existing tests inject a readFileSync that only answers
@@ -76,9 +79,12 @@ function declaredScope(value, variant) {
   return [...value]
 }
 
-// Deliberate duplicate of the execution-shape seam: the child cannot import
-// crew.mjs, and this check keeps its legacy variant projection aligned with
-// the daemon's run_configuration. crew/crew.test.mjs pins the two spellings.
+// Deliberate duplicate of the execution-shape seam: this reads state the child
+// owns, and keeps its legacy variant projection aligned with the daemon's
+// run_configuration. Unlike this stateful seam, child.mjs imports exactly one
+// pure, state-free mapping (`runOutcome`) from crew.mjs; two copies of an
+// outcome rule are exactly how these paths diverged (#857). crew/crew.test.mjs
+// pins the two spellings.
 export function specExecution(spec = {}) {
   const declared = spec.run_configuration?.execution?.effective
   if (declared === undefined || declared === null) return spec.variant ?? null
@@ -89,8 +95,10 @@ export function specExecution(spec = {}) {
 }
 
 // An identical copy of crew/crew.mjs's resolver: the two run entrypoints must
-// agree on what the round validation lane is, and child.mjs deliberately never
-// imports crew.mjs. crew/crew.test.mjs runs both against one shared table.
+// agree on what the round validation lane is. This stateful seam stays in the
+// child, while child.mjs imports exactly one pure, state-free mapping
+// (`runOutcome`) from crew.mjs; crew/crew.test.mjs runs both against one shared
+// table.
 // `validation_lane` is the spelling with no second meaning; `lane` is what the
 // daemon normalises to null when absent (crew/daemon.mjs:1091) and forwards
 // unconditionally (:948), and what a factoryctl `run --lane` supplies (crew/factoryctl.mjs:192).
@@ -204,7 +212,7 @@ export function runChild(argv, injected = {}) {
       try { publish(mirror, JSON.stringify(result, null, 2)) } catch { /* the run's own envelope is the record; the mirror is a convenience for wait/status/visualizer */ }
     }
     settleSeatTeardown(io)
-    try { emitter?.endRun({ status: result.status === 'done' ? 'ok' : 'aborted' }) } catch { /* never load-bearing */ }
+    try { emitter?.endRun(runOutcome(result)) } catch { /* never load-bearing */ }
     return result
   }
   // NOTHING is armed here, in any window. runChild is synchronous from entry to

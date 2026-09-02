@@ -294,6 +294,12 @@ test('IMPORT FIREWALL: daemon.mjs carries no top-level import of the runner', ()
   assert.doesNotMatch(DAEMON_CODE, /export\s+\*\s+from/, 'daemon must not re-export a runner through a barrel')
 })
 
+test('the child entry shares the typed outcome producer with the pane path', () => {
+  assert.equal(CHILD_CODE.includes("'./crew.mjs'"), true, 'child entry must import crew.mjs for the shared producer')
+  assert.equal(CHILD_CODE.includes('runOutcome(result)'), true, 'child entry must call the shared producer')
+  assert.equal(CHILD_CODE.includes('terminal_actor'), false, 'child entry must not carry a second typed outcome rule')
+})
+
 test('the child entry owns the runner imports', () => {
   assert.equal(CHILD_CODE.includes(`'./${DRIVE_MODULE}'`), true, 'child entry must import the driver')
   assert.equal(CHILD_CODE.includes(`'./${SEAT_IO_MODULE}'`), true, 'child entry must import real io')
@@ -2477,6 +2483,127 @@ test('runChild mirrors per-run envelopes and writes the well-known path only onc
     })
     assert.equal(renames.filter((path) => path === wellKnown.taskReturn).length, 1)
   } finally { wellKnown.cleanup() }
+})
+
+// Provenance: the b357-slotdriver and b360-planadopt envelopes are replayed
+// from their daemon-transport returns/task.json fixtures. Their distinct
+// `where` values exercise the two seat-loss causes rather than a constant.
+const DAEMON_OUTCOME_REPLAYS = [
+  {
+    key: 'b357',
+    envelope: {
+      status: 'escalation',
+      summary: 'Task b357-slotdriver needs a human: seat died',
+      artifacts: [],
+      details: {
+        stages: null, commit: null, dissents: [],
+        escalation: {
+          where: 'seat-died',
+          why: 'seat died: planner — its worker root 47302 (pgid 47302) is gone (probe-dead) and no envelope arrived at /x/returns/d1.planner.json',
+        },
+      },
+    },
+    typed: { status: 'aborted', outcome: 'escalated', terminal_reason: 'seat-lost', terminal_actor: 'driver' },
+  },
+  {
+    key: 'b360',
+    envelope: {
+      status: 'escalation',
+      summary: 'Task b360-planadopt needs a human: rpc aborted',
+      artifacts: [],
+      details: {
+        stages: null, commit: null, dissents: [],
+        escalation: {
+          where: 'rpc-aborted',
+          why: 'rpc aborted: seat reviewer produced no envelope at /x/returns/d3.reviewer.json',
+        },
+      },
+    },
+    typed: { status: 'aborted', outcome: 'escalated', terminal_reason: 'seat-aborted', terminal_actor: 'driver' },
+  },
+  {
+    key: 'done',
+    envelope: { status: 'done', summary: 'landed', artifacts: [], details: { stages: null, commit: 'abc1234', dissents: [] } },
+    typed: { status: 'ok', outcome: 'success', terminal_reason: null, terminal_actor: null },
+  },
+]
+
+function replayDaemonOutcomeRows(dbPath) {
+  const runs = []
+  try {
+    for (const { key, envelope } of DAEMON_OUTCOME_REPLAYS) {
+      const f = fixture()
+      const task = `daemon-outcome-${key}`
+      runs.push({ f, key, task })
+      runChild({
+        crew_dir: f.crewDir, task, checkout: f.dir,
+        task_return: f.taskReturn, ledger_db: dbPath,
+      }, {
+        preflight: false,
+        driveTask: () => envelope,
+        seatIo: () => ({}),
+      })
+    }
+    return {
+      runs,
+      cleanup: () => { for (const { f } of runs) f.cleanup() },
+    }
+  } catch (err) {
+    for (const { f } of runs) f.cleanup()
+    throw err
+  }
+}
+
+test('daemon child replays record typed outcomes for b357, b360, and done', () => {
+  if (!LEDGER_SQLITE_OK) return
+  const root = scratchDir('daemon-outcome-replays-')
+  const dbPath = join(root, 'ledger', 'ledger.db')
+  const replay = replayDaemonOutcomeRows(dbPath)
+  try {
+    const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+    try {
+      const rows = ledger.dumpTable('sessions')
+      for (const { key, task } of replay.runs) {
+        const row = rows.find((candidate) => candidate.task_slug === task)
+        assert.ok(row, `missing daemon session row for ${key}`)
+        const expected = DAEMON_OUTCOME_REPLAYS.find((candidate) => candidate.key === key).typed
+        assert.deepEqual(
+          { status: row.status, outcome: row.outcome, terminal_reason: row.terminal_reason, terminal_actor: row.terminal_actor },
+          expected,
+          key,
+        )
+      }
+    } finally { ledger.close() }
+  } finally {
+    replay.cleanup()
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('daemon-only escalationWindow returns both causes and all three ended rows', () => {
+  if (!LEDGER_SQLITE_OK) return
+  const root = scratchDir('daemon-outcome-window-')
+  const dbPath = join(root, 'ledger', 'ledger.db')
+  const replay = replayDaemonOutcomeRows(dbPath)
+  const since = new Date(Date.now() - 3_600_000).toISOString()
+  const until = new Date(Date.now() + 3_600_000).toISOString()
+  try {
+    const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+    try {
+      const window = ledger.escalationWindow({ since, until })
+      assert.deepEqual(
+        window.rows.map(({ cause, actor, count }) => ({ cause, actor, count })).sort((a, b) => a.cause.localeCompare(b.cause)),
+        [
+          { cause: 'seat-aborted', actor: 'driver', count: 1 },
+          { cause: 'seat-lost', actor: 'driver', count: 1 },
+        ],
+      )
+      assert.equal(window.endedRows.reduce((total, row) => total + Number(row.count), 0), 3)
+    } finally { ledger.close() }
+  } finally {
+    replay.cleanup()
+    rmSync(root, { recursive: true, force: true })
+  }
 })
 
 test('runChild records to the explicit ledger and honors spec.ledger_db', () => {

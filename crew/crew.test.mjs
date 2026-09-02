@@ -2312,26 +2312,73 @@ test('run exits 3 on an escalation, 0 on done, and 1 on anything else', () => {
   ]) assert.equal(runExitCode(result), expected)
 })
 
+const RUN_OUTCOME_CASES = [
+  [{ status: 'escalation', details: { escalation: { where: 'driver', why: 'sendLine: pane did not respond' } } }, { status: 'aborted', outcome: 'escalated', terminal_reason: 'transport', terminal_actor: 'driver' }],
+  [{ status: 'escalation', details: { escalation: { where: 'planner', why: 'no valid envelope after exceeded its 1800s budget' } } }, { status: 'aborted', outcome: 'escalated', terminal_reason: 'budget', terminal_actor: 'driver' }],
+  [{ status: 'escalation', details: { escalation: { where: 'scope', why: 'anchor-absent in the compiled plan' } } }, { status: 'aborted', outcome: 'escalated', terminal_reason: 'plan-build-disagreement', terminal_actor: 'driver' }],
+  [{ status: 'escalation', details: { escalation: { where: 'plan', why: 'a contradiction in the brief' } } }, { status: 'aborted', outcome: 'escalated', terminal_reason: 'brief-contradiction', terminal_actor: 'operator' }],
+  [{ status: 'escalation', details: { escalation: { where: 'gate', why: 'a gate defect remained' } } }, { status: 'aborted', outcome: 'escalated', terminal_reason: 'gate-defect', terminal_actor: 'lead' }],
+  [{ status: 'escalation', details: { escalation: { where: 'review', why: 'the review remained unresolved' } } }, { status: 'aborted', outcome: 'escalated', terminal_reason: 'review-unresolved', terminal_actor: 'lead' }],
+  [{ status: 'escalation', details: { escalation: { where: 'cold-suite', why: 'the cold suite had no checkout' } } }, { status: 'aborted', outcome: 'escalated', terminal_reason: 'infrastructure', terminal_actor: 'driver' }],
+  [{ status: 'escalation', details: { escalation: { where: 'weather', why: 'it rained' } } }, { status: 'aborted', outcome: 'escalated', terminal_reason: 'unclassified', terminal_actor: null }],
+]
+
 test('runOutcome preserves legacy status and maps every typed terminal outcome', () => {
   assert.deepEqual(runOutcome({ status: 'done' }), {
     status: 'ok', outcome: 'success', terminal_reason: null, terminal_actor: null,
   })
-  const cases = [
-    [{ status: 'escalation', details: { escalation: { where: 'driver', why: 'sendLine: pane did not respond' } } }, { status: 'aborted', outcome: 'escalated', terminal_reason: 'transport', terminal_actor: 'driver' }],
-    [{ status: 'escalation', details: { escalation: { where: 'planner', why: 'no valid envelope after exceeded its 1800s budget' } } }, { status: 'aborted', outcome: 'escalated', terminal_reason: 'budget', terminal_actor: 'driver' }],
-    [{ status: 'escalation', details: { escalation: { where: 'scope', why: 'anchor-absent in the compiled plan' } } }, { status: 'aborted', outcome: 'escalated', terminal_reason: 'plan-build-disagreement', terminal_actor: 'driver' }],
-    [{ status: 'escalation', details: { escalation: { where: 'plan', why: 'a contradiction in the brief' } } }, { status: 'aborted', outcome: 'escalated', terminal_reason: 'brief-contradiction', terminal_actor: 'operator' }],
-    [{ status: 'escalation', details: { escalation: { where: 'gate', why: 'a gate defect remained' } } }, { status: 'aborted', outcome: 'escalated', terminal_reason: 'gate-defect', terminal_actor: 'lead' }],
-    [{ status: 'escalation', details: { escalation: { where: 'review', why: 'the review remained unresolved' } } }, { status: 'aborted', outcome: 'escalated', terminal_reason: 'review-unresolved', terminal_actor: 'lead' }],
-    [{ status: 'escalation', details: { escalation: { where: 'cold-suite', why: 'the cold suite had no checkout' } } }, { status: 'aborted', outcome: 'escalated', terminal_reason: 'infrastructure', terminal_actor: 'driver' }],
-    [{ status: 'escalation', details: { escalation: { where: 'weather', why: 'it rained' } } }, { status: 'aborted', outcome: 'escalated', terminal_reason: 'unclassified', terminal_actor: null }],
-  ]
-  for (const [result, expected] of cases) assert.deepEqual(runOutcome(result), expected)
+  for (const [result, expected] of RUN_OUTCOME_CASES) assert.deepEqual(runOutcome(result), expected)
   for (const result of [{ status: 'converge' }, { status: 'unknown' }, {}, null]) {
     assert.deepEqual(runOutcome(result), {
       status: 'aborted', outcome: 'aborted', terminal_reason: typeof result?.status === 'string' ? result.status : null, terminal_actor: 'driver',
     })
   }
+})
+
+test('child ledger rows match the shared runOutcome table', () => {
+  if (!nodeMeetsLedgerFloor) return
+  const root = scratchDir('crew-child-outcome-agreement-')
+  const dbPath = join(root, 'ledger', 'ledger.db')
+  const cases = [
+    ['done', { status: 'done' }],
+    ...RUN_OUTCOME_CASES.slice(0, 2).map(([envelope], index) => [`escalation-${index + 1}`, envelope]),
+  ]
+  const runs = []
+  try {
+    for (const [key, envelope] of cases) {
+      const stateDir = scratchDir(`crew-child-outcome-${key}-`)
+      const crewDir = join(stateDir, 'crew')
+      const returnsDir = join(crewDir, 'returns')
+      const task = `child-outcome-${key}`
+      const taskReturn = join(returnsDir, 'task.json')
+      const roles = ['planner', 'builder', 'reviewer']
+      const members = Object.fromEntries(roles.map((role) => [role, { model: 'x', transport: 'headless-json' }]))
+      mkdirSync(join(crewDir, 'task'), { recursive: true })
+      mkdirSync(returnsDir, { recursive: true })
+      writeFileSync(join(crewDir, 'crew.json'), JSON.stringify({ task, checkout: stateDir, roles, members, task_return: taskReturn }))
+      writeFileSync(join(crewDir, 'journal.jsonl'), '')
+      const result = runChild({ crew_dir: crewDir, task, checkout: stateDir, task_return: taskReturn, ledger_db: dbPath }, {
+        preflight: false,
+        driveTask: () => envelope,
+        seatIo: () => ({}),
+      })
+      assert.deepEqual(result, envelope)
+      runs.push({ task, envelope })
+    }
+    const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+    try {
+      const rows = ledger.dumpTable('sessions')
+      for (const { task, envelope } of runs) {
+        const row = rows.find((candidate) => candidate.task_slug === task)
+        assert.ok(row, `missing child session row for ${task}`)
+        assert.deepEqual(
+          { status: row.status, outcome: row.outcome, terminal_reason: row.terminal_reason, terminal_actor: row.terminal_actor },
+          runOutcome(envelope),
+          task,
+        )
+      }
+    } finally { ledger.close() }
+  } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
 test('installExitMarker writes one terminal line for normal, signal and uncaught exits', () => {

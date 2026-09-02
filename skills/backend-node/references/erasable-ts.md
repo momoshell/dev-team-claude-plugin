@@ -1,6 +1,6 @@
 # TypeScript that both loaders can erase
 
-Read the record first: docs/conventions.md:45 owns this decision; this file owns the checklist.
+Read the record first: docs/conventions.md:46 owns this decision; this file owns the checklist.
 
 Keep `crew/pi/extensions/subagent.ts` erasable-syntax-only.
 Exhibit: `crew/pi/extensions/subagent.ts:5-9`.
@@ -18,27 +18,27 @@ Node's unflagged TypeScript stripping is the other loader to satisfy.
 Exhibit: `crew/pi/extensions/subagent.ts:5-9`.
 
 The local extension test greps for `enum`.
-Exhibit: `crew/pi/extensions/subagent.test.mjs:174`.
+Exhibit: `crew/pi/extensions/subagent.test.mjs:179`.
 
 It also greps for `namespace`.
-Exhibit: `crew/pi/extensions/subagent.test.mjs:175`.
+Exhibit: `crew/pi/extensions/subagent.test.mjs:180`.
 
 That grep has a declared gap: `parameter properties` are not searched.
-Exhibit: `crew/pi/extensions/subagent.test.mjs:174`.
+Exhibit: `crew/pi/extensions/subagent.test.mjs:179`.
 
 Decorators have the same unsearched status; the import test catches failures
 only when loading the module.
 Exhibit: `crew/pi/extensions/subagent.test.mjs:8`.
 
 Node reports unsupported runtime syntax as `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`.
-Exhibit: `docs/conventions.md:45`.
+Exhibit: `docs/conventions.md:46`.
 
 Do not add a construct merely because jiti accepts it in one path.
 Exhibit: `crew/pi/extensions/subagent.ts:5-9`.
 
 Do not claim the grep covers parameter properties or decorators; the gap is
 part of this register's honest checklist.
-Exhibit: `crew/pi/extensions/subagent.test.mjs:174` and `:175`.
+Exhibit: `crew/pi/extensions/subagent.test.mjs:179` and `:175`.
 
 An interrupted import is not a passing syntax check, and an empty source is not
 proof that a construct is absent.
@@ -53,4 +53,4 @@ serve a request.
 Exhibit: `crew/pi/extensions/subagent.ts:5-9`.
 
 When the gap closes, update both this checklist and its co-located test.
-Exhibit: `crew/pi/extensions/subagent.test.mjs:174` and `:175`.
+Exhibit: `crew/pi/extensions/subagent.test.mjs:179` and `:175`.

@@ -22,10 +22,10 @@ Different values identify a linked checkout in the worker-path probe.
 Status: no reachable checkout implementation performs this probe; see `evidence.md`.
 
 The common Git directory is shared by linked lanes.
-Exhibit: `crew/seat-io.mjs:1934`.
+Exhibit: `crew/seat-io.mjs:2818`.
 
 Stash entries are consequently not isolated per worktree (#471).
-Exhibit: `crew/seat-io.mjs:1934`.
+Exhibit: `crew/seat-io.mjs:2818`.
 
 Use `git worktree remove` for teardown so Git unregisters the worktree.
 Exhibit: `skills/qa-test-writing/references/tooling.md:65-66`.
@@ -39,10 +39,10 @@ Exhibit/pointer: `skills/qa-test-writing/references/tooling.md:13-16` for that t
 This skill adds only the removal and registration half of that shared concern.
 
 A completed run may auto-teardown its workspace.
-Exhibit: `crew/crew.mjs:1882`.
+Exhibit: `crew/crew.mjs:2212`.
 
 An escalated run retains its workspace as human-readable context.
-Exhibit: `crew/crew.mjs:1882`.
+Exhibit: `crew/crew.mjs:2212`.
 
 An unknown Git probe is not permission to remove a checkout.
 Status: this fail-closed removal rule is unbacked here; see `evidence.md`.

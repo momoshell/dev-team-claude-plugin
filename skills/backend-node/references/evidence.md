@@ -10,7 +10,7 @@ covered by the nearest passing check.
 ### No repository-wide import scan
 
 The zero-dependency assertion is per module, not a whole-repository sweep.
-Exhibit for that limitation: `crew/pi/extensions/subagent.test.mjs:169`.
+Exhibit for that limitation: `crew/pi/extensions/subagent.test.mjs:171`.
 
 No checkout-wide import scan was found in the cited enforcement shape.
 
@@ -22,7 +22,7 @@ This is an enforcement gap, not a claim that the module rule lacks evidence.
 ### TypeScript constructs outside the grep
 
 The extension test searches `enum` and `namespace`.
-Exhibit: `crew/pi/extensions/subagent.test.mjs:174` and `crew/pi/extensions/subagent.test.mjs:175`.
+Exhibit: `crew/pi/extensions/subagent.test.mjs:179` and `crew/pi/extensions/subagent.test.mjs:180`.
 
 It does not grep `parameter properties`.
 
@@ -47,7 +47,7 @@ No dedicated local test distinguishes an interrupted daemon source read from an
 empty import list while checking an allowlisted leaf.
 
 The firewall test does pin the leaf's normal import-free state at
-`crew/daemon.test.mjs:253`; the interrupted-read edge remains unbacked.
+`crew/daemon.test.mjs:255`; the interrupted-read edge remains unbacked.
 
 Keep that edge marked unbacked in `import-firewall.md` until a mutation pins it.
 
@@ -68,7 +68,7 @@ No dedicated local test or source exhibit was found for an interrupted flag pars
 or for a flag whose value is missing at the end of argv.
 
 The refusal and accepted-window directions are measured in
-`test/factory-ledger.test.mjs:2813` and `:2620`; these two edges remain separate.
+`test/factory-ledger.test.mjs:3487` and `:2620`; these two edges remain separate.
 
 Keep those two CLI edge rules in `cli-flags.md` marked unbacked until a test
 pins interrupted parsing and missing-value behavior.
@@ -89,7 +89,7 @@ No local mutation test separately measures an interrupted child or a malformed
 usage parse after work has started.
 
 The complete-or-absent getter and omitted-key assertion are backed at
-`crew/pi/extensions/subagent.ts:394` and `crew/pi/extensions/subagent.test.mjs:468`.
+`crew/pi/extensions/subagent.ts:471` and `crew/pi/extensions/subagent.test.mjs:486`.
 
 Keep interrupted-child and failed-parse instructions in `usage-records.md`
 marked unbacked until those paths receive a measured fixture.

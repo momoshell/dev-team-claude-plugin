@@ -82,9 +82,9 @@ test("each lever section carries its own measurement", () => {
     ['## Lever 4', ['serial discovery', 'two new ones', 'lever 3']],
     ['## Lever 5', ['b190', 'second-largest brief', 'second-fastest plan', 'b188', '24 minutes']],
     ['## Lever 6', ['5 files', '30 acks', '72KB', '17m', '2 files', '2 acks', '26KB', '9m']],
-    ['## Lever 7', ['a recorded baseline is a fact about a commit and is never consumed', 'scripts/factory/make-brief.mjs:1251', '4 lanes x 2 passes', '8 identical measurements']],
+    ['## Lever 7', ['a recorded baseline is a fact about a commit and is never consumed', 'scripts/factory/make-brief.mjs:1421', '4 lanes x 2 passes', '8 identical measurements']],
     ['## Lever 8', ['#584', 'compile once']],
-    ['## Lever 9', ['no valid envelope within 2400s', '1890s', '14 files', 'six kill-mutations', '--wait-builder', 'crew/drive.mjs:44']],
+    ['## Lever 9', ['no valid envelope within 2400s', '1890s', '14 files', 'six kill-mutations', '--wait-builder', 'crew/drive.mjs:48']],
   ]
   for (const [heading, tokens] of sections) {
     const body = section(text, heading)
@@ -117,7 +117,7 @@ test('the batch reference names every refusal the sequence can hit', () => {
 // Mutation killed: widening the measured shell claim or dropping a zero-count guard must make this test fail.
 test('the shell reference records the measured zero counts and no stronger claim', () => {
   const text = readText(join(HERE, 'references/shell.md'))
-  for (const token of ['shell: true', '0 occurrences', 'process.env.SHELL', "GATE_REAP_SHELL = '/bin/bash'", 'crew/drive.mjs:339', 'crew/drive.test.mjs:2513', '${!arr[@]}', 'zsh does not word-split', 'execSync']) {
+  for (const token of ['shell: true', '0 occurrences', 'process.env.SHELL', "GATE_REAP_SHELL = '/bin/bash'", 'crew/drive.mjs:343', 'crew/drive.test.mjs:3036', '${!arr[@]}', 'zsh does not word-split', 'execSync']) {
     assert.ok(text.includes(token), `shell.md must name ${token}`)
   }
   assert.equal(text.includes('every subprocess uses an argv array'), false)

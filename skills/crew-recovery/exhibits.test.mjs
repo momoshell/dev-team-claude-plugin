@@ -32,7 +32,7 @@ test('every reference file is routed from SKILL.md', () => {
 // Mutation killed: dropping one measured case lets a known instrument failure become an operator rule.
 test('the instruments checklist keeps each measured case', () => {
   const text = readText(join(HERE, 'references/instruments.md'))
-  for (const token of ['the WRAPPER SHELL', 'lazily-opened', 'invented a field', 'sibling lane polluted', 'compound command', 'pid-tracking watcher', 'six alphanumerics', '${PIPESTATUS[0]}', 'alive now', 'load average', 'scripts/factory/make-brief.mjs:657', 'crew/drive.mjs:44']) {
+  for (const token of ['the WRAPPER SHELL', 'lazily-opened', 'invented a field', 'sibling lane polluted', 'compound command', 'pid-tracking watcher', 'six alphanumerics', '${PIPESTATUS[0]}', 'alive now', 'load average', 'scripts/factory/make-brief.mjs:783', 'crew/drive.mjs:48']) {
     assert.ok(text.includes(token), `instruments.md must name ${token}`)
   }
 })

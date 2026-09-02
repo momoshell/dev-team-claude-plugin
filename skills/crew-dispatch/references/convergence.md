@@ -30,7 +30,7 @@ orchestrator decision before dispatch.
 
 ## Lever 2
 
-The default **`plan_rounds`** is 2 (`crew/drive.mjs:23`, **`plan_rounds: 2, // planner attempts`**) plus grantable extras. **b184** used **`2 + 1 granted and needed 4`**: the escalation was budget exhaustion, not disagreement. Use **`--plan-rounds 3`** on a judge lane when that extra attempt is needed.
+The default **`plan_rounds`** is 2 (`crew/drive.mjs:27`, **`plan_rounds: 2, // planner attempts`**) plus grantable extras. **b184** used **`2 + 1 granted and needed 4`**: the escalation was budget exhaustion, not disagreement. Use **`--plan-rounds 3`** on a judge lane when that extra attempt is needed.
 
 ## Lever 3
 
@@ -76,4 +76,4 @@ Scale the seat budget to the proof the brief demands. `b187-jsonleaf` escalated
 at **builder** on **no valid envelope within 2400s** while healthy — **Working…**,
 **1890s** elapsed, mid mutation matrix, on top of the **14 files** its brief demanded,
 because it also demanded **six kill-mutations**, each in its own scratch
-checkout. The builder wait is `builder: 2400, reviewer: 1800` (`crew/drive.mjs:48`); a brief or plan asking for N isolated proofs needs roughly N × suite_time added, passed as **`--wait-builder`** on `run`.
+checkout. The builder wait is `builder: 2400, reviewer: 1800` (`crew/drive.mjs:52`); a brief or plan asking for N isolated proofs needs roughly N × suite_time added, passed as **`--wait-builder`** on `run`.

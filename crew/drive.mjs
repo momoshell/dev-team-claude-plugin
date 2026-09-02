@@ -2,6 +2,10 @@ import { draftPrBody, draftPrTitle, followUpIssueBody, followUpIssueTitle, gateS
 import { adjudicatePanel, fuseFindings } from './escalation-policy.mjs'
 import { VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT } from './variants.mjs'
 import { protectedHitsIn, resolveProtectedPaths } from './protected-paths.mjs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
+import { SUITE_SLOT_KIND, SLOT_WAIT_INTERVAL_MS, SLOT_WAIT_CEILING_MS, slotPolicy } from './host-load.mjs'
+import { slotStore } from './reclaim.mjs'
 
 // crew/drive.mjs — the deterministic task-loop driver (crew v3).
 //
@@ -2084,6 +2088,7 @@ export function applyNarration(record, narrated) {
 //        laneFence?: [{lane, files:[..]}] — OTHER lanes' write surfaces; absent = unfenced,
 //        protectedPathsBasis: <why those paths are in force>,
 //        journal: <real journal.jsonl path (lives in the CREW dir)>,
+//        env?: <environment for the suite-slot admission; defaults to process.env>,
 //        limits?, waits?: {<role>: <seconds>} — the per-role seat wait budget overlay (resolveWaits/waitsCtx above) }
 // io:  { assign({role, briefFile, note}) -> {id, returnPath},
 //        wait(returnPath, timeoutS) -> envelope|null,
@@ -2100,6 +2105,8 @@ export function applyNarration(record, narrated) {
 //        changedFiles() -> [repo-relative..], // git status --porcelain paths
 //        commit(files, message) -> hash,
 //        log(obj) -> void,                    // journal line (code-owned)
+//        slots({dir, kind, capacity}) -> {acquire, release}  // OPTIONAL: the suite-slot pool; absent => crew/reclaim.mjs slotStore
+//        sleep(ms) -> void  // OPTIONAL: the slot poll delay; absent => a synchronous nap
 //        emit(event) -> void,                 // OPTIONAL: mirror a drive event to the factory ledger; instrumentation is NEVER load-bearing
 //        createDraftPr({title, body}) -> {number, url},  // OPTIONAL: factory-mode
 //        createIssue({title, body})   -> {number, url},  // gh seam. Both present
@@ -2260,6 +2267,35 @@ function runTask(ctx, io, crash) {
     S.stages.push(label); io.log(recordRow({ at: io.now(), stage: label })); io.status?.(label); emit({ kind: 'stage', label })
   }
 
+  // LAZY on purpose. slotPolicy THROWS on a malformed CREW_SUITE_SLOTS
+  // (crew/reclaim.mjs:1151-1157), and crash.envelope is not armed until
+  // crew/drive.mjs:2275. Resolving on first CPU phase — long after that line — makes a
+  // malformed capacity the driver's own crash escalation instead of a throw that
+  // escapes driveTask. There is NO catch anywhere below: a pool that cannot be built,
+  // like an acquire that cannot answer, is not admission.
+  let slotAdmit                       // undefined until the first CPU-bound phase
+  let slotPool = null
+  const slotPoolFor = () => {
+    if (slotAdmit === undefined) slotAdmit = slotAdmission(ctx.env ?? process.env)
+    if (!slotAdmit) return null
+    if (slotPool === null) {
+      const build = typeof io.slots === 'function' ? io.slots : slotStore
+      slotPool = build({ dir: slotAdmit.root, kind: SUITE_SLOT_KIND, capacity: slotAdmit.capacity })
+    }
+    return slotPool
+  }
+  // Every io call is a METHOD call: `seatIo.runClean` reads `this`, and a detached
+  // reference crashed a live driver once (crew/drive.mjs:2295-2303). The journal
+  // forward uses this file's own remedy for that, `.call(io, …)` (crew/drive.mjs:2333),
+  // for a second reason too: the source inventory's sink regex reads RAW source, so a
+  // forwarder that spelled the plain call here would register as a journal site of its
+  // own — one with no row wrapper, which is the shape the inventory refuses outright.
+  const phaseSlot = (phase, run) => withPhaseSlot({
+    pool: slotPoolFor(), phase, owner: `${ctx.task}:${phase}`,
+    now: () => io.now(), log: (row) => io.log.call(io, row), emit,
+    ...(typeof io.sleep === 'function' ? { sleep: (ms) => io.sleep(ms) } : {}),
+  }, run)
+
   // Per-run gate invocation counter. The ledger's gate_results is UNIQUE on
   // (adw_id, gate_name, attempt) with INSERT OR IGNORE, so a repeated attempt
   // number silently DROPS a verdict — this counter is monotonic per run so
@@ -2330,7 +2366,7 @@ function runTask(ctx, io, crash) {
     const wrappable = io.calls || typeof io.runClean === 'function'
     let res
     try {
-      res = runner.call(io, wrappable ? wrapped : cmd)
+      res = phaseSlot(SUITE_SLOT_PHASES.gate, () => runner.call(io, wrappable ? wrapped : cmd))
     } finally {
       // Always io.run, never `runner`: runClean would stash a second time. This
       // is the only reap that survives a runner timeout, which kills the wrapper
@@ -2399,7 +2435,7 @@ function runTask(ctx, io, crash) {
     }
 
     stage('converge:suite')
-    const suiteRes = io.run(ctx.suite)
+    const suiteRes = phaseSlot(SUITE_SLOT_PHASES.warm, () => io.run(ctx.suite))
     if (!suiteRes.ok) {
       io.log(recordRow({ at: io.now(), converge_declined: 'suite red' }))
       emit({ kind: 'converge', action: 'declined', where: 'suite', why: 'suite red' })
@@ -4690,7 +4726,7 @@ function runTask(ctx, io, crash) {
   }
 
   stage('suite')
-  const suiteRes = io.run(ctx.suite)
+  const suiteRes = phaseSlot(SUITE_SLOT_PHASES.warm, () => io.run(ctx.suite))
   const warmCounts = parseSuiteCounts(suiteRes?.output)
   if (!suiteRes?.ok) {
     stageComplete()
@@ -4742,7 +4778,7 @@ function runTask(ctx, io, crash) {
   } else {
     try {
       const coldGuards = [...new Set([ctx.laneName, ctx.task].filter((name) => typeof name === 'string' && name.trim()))]
-      const cold = io.runCold(ctx.suite, coldGuards)
+      const cold = phaseSlot(SUITE_SLOT_PHASES.cold, () => io.runCold(ctx.suite, coldGuards))
       coldSuite = cold.ok
         ? { verdict: 'green', path: cold.path, counts: parseSuiteCounts(cold.output) }
         : { verdict: 'red', path: cold.path, kept: cold.kept, output: String(cold.output || '').slice(-2000) }
@@ -5068,6 +5104,88 @@ export const JOURNAL_CHANNEL_NAMES = Object.freeze(Object.keys(JOURNAL_CHANNELS)
 // payload (crew/drive.mjs:2787 spreads a caller-built panel entry).
 export const recordRow = (row) => ({ ...row, channel: JOURNAL_CHANNELS.record })
 export const operationalRow = (row) => ({ ...row, channel: JOURNAL_CHANNELS.operational })
+
+// --- suite slots (#824, parent #822) -----------------------------------------------
+// The phases below are the only places this driver competes with OTHER LANES for local
+// CPU. A model turn is not one of them: a seat waiting on a provider costs this host
+// nothing, so assignAndWait, the panel and every consult run unslotted BY CONSTRUCTION —
+// there is no acquire on that path to disable.
+export const SUITE_SLOT_PHASES = Object.freeze({ gate: 'gate', warm: 'suite-warm', cold: 'suite-cold' })
+export const SUITE_SLOT_PHASE_NAMES = Object.freeze(Object.values(SUITE_SLOT_PHASES))
+export const PHASE_SLOT_WAIT_EVENT = 'phase-slot-wait'
+
+// crew/reclaim.mjs's idiom, and crew/host-load.mjs:96's copy of it: a synchronous wait
+// with no busy loop. Copied a third time for the reason the second copy already records
+// — neither module exports it. io.sleep overrides it, which is how a test waits in zero
+// wall-clock.
+const slotNap = (ms) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms) }
+
+// ONE policy under one name, and ONE root. slotPolicy (crew/host-load.mjs:101) is the
+// resolver the shipped dispatcher already takes (scripts/factory/dispatch-batch.mjs:1624),
+// so an unconfigured host queues in BOTH consumers and CREW_SUITE_SLOTS=0 stays the one
+// documented off switch (crew/reclaim.mjs:1169-1175). The root is factoryStateRoot's,
+// verbatim (scripts/factory/dispatch-batch.mjs:1508-1510) and NOT the arms/profile
+// factory root: in a relocated factory the dispatcher and the driver must lease from the
+// same slots/ directory or the cross-lane cap is two caps.
+export function slotAdmission(env = process.env) {
+  const policy = slotPolicy({ env })
+  if (!policy) return null
+  const root = env?.DEVTEAM_LEDGER_DIR || join(homedir(), '.dev-team', 'factory')
+  return { capacity: policy.capacity, root }
+}
+
+// #823's acquire is non-blocking (crew/reclaim.mjs:1274) and this is the driver's loop
+// around it. A null pool means no policy, and then this is a call to run() and nothing
+// else — no row, no beat, no branch a reader could see.
+export function withPhaseSlot({ pool, phase, owner, now, sleep = slotNap, log = () => {},
+  emit = () => {}, ceiling = SLOT_WAIT_CEILING_MS, interval = SLOT_WAIT_INTERVAL_MS } = {}, run) {
+  if (!pool) return run()
+  const startedAt = now()
+  // A clock that does not advance is not a measurement, so the loop is bounded by scans
+  // as well as by time; neither bound alone can wedge a lane.
+  const maxScans = Math.max(1, Math.ceil(ceiling / interval) + 1)
+  let depth = null
+  let handle = null
+  for (let scan = 0; scan < maxScans; scan += 1) {
+    // NO catch here, deliberately. A store that cannot answer is not admission:
+    // swallowing an unresolvable claim would let every affected lane exceed K at once,
+    // exactly when the pool cannot protect the host. The store exposes that state as a
+    // throw on purpose (crew/reclaim.mjs:1260-1264) and #825's wrapper does not swallow
+    // it either (crew/host-load.mjs:115-133). Only a COMPLETED wait that reaches the
+    // ceiling runs unslotted.
+    const attempt = pool.acquire({ owner })
+    if (attempt?.handle) { handle = attempt.handle; break }
+    depth = Number.isSafeInteger(attempt?.depth) ? attempt.depth : null
+    // The driver is ALIVE and this completed scan is the observation that proves it.
+    // Without this a lane queued behind K suites goes quiet for up to the ceiling and
+    // reads as DEAD to exactly the liveness code that exists to prevent it
+    // (crew/seat-io.mjs:1416, #813).
+    emit({ kind: 'heartbeat', at: now(), role: null })
+    if (now() - startedAt >= ceiling) break
+    sleep(interval)
+  }
+  // ADMISSION row, written once, whether or not a slot was won: a wait nobody recorded
+  // is a wait nobody can price. queue_depth is null when no scan ever reported one —
+  // absent, never 0 (#297).
+  // The optional-call spelling is deliberate: the driver's source inventory recognizes
+  // this helper sink and therefore accounts for the operational row below.
+  const recordWait = () => log?.(operationalRow({ at: now(), event: PHASE_SLOT_WAIT_EVENT, kind: phase,
+    queue_depth: depth, waited_ms: now() - startedAt, slotted: handle !== null }))
+  // A queue is not a refusal (crew/reclaim.mjs:1140): a ceiling REACHED — and only that
+  // — hands the caller its phase back unslotted rather than failing a run that would
+  // have succeeded. Nothing is held on this path, so the row is written outside any
+  // release region.
+  if (!handle) { recordWait(); return run() }
+  // FINALLY, not a trailing statement, and the row write is INSIDE it. io.runCold THROWS
+  // rather than report a verdict it could not take (crew/drive.mjs:4745) — and so does
+  // io.log: the driver turns a journal fault into an escalation
+  // (crew/drive.test.mjs:7440-7457). Every now() and every journal operation performed
+  // after a successful acquire therefore sits inside the release region; a phase — or a
+  // row — that escalates or crashes holding its slot would otherwise strand it for every
+  // other lane until the pool reclaims a dead pid, which it cannot do while this driver
+  // is still alive.
+  try { recordWait(); return run() } finally { pool.release(handle) }
+}
 
 // #800 — the reviewer's finding DISPOSITION. Declared down here, below every
 // crew/roles citation this file carries, so the call sites in envelopeDefect,

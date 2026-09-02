@@ -4682,6 +4682,86 @@ test('an unresolvable roster cell is band-unknown and never passes', () => {
   )
 })
 
+const LOCAL_MEMBER = 'local/qwen3-coder-30b'
+const localCatalog = { [LOCAL_MEMBER]: { cost_in_per_mtok: 0, cost_out_per_mtok: 0, context: 262144, tags: ['local'], source: 'local', last_verified: '2026-09-01' } }
+const ladderWithLocalAt = (band) => {
+  const clone = structuredClone(rosterLadder)
+  clone.bands.find((entry) => entry.band === band).members.push(LOCAL_MEMBER)
+  return loadLadder({ path: '/injected/b375-model-ladder.json', readFile: () => JSON.stringify(clone) })
+}
+
+test('a source:"local" roster model is refused from every judge seat at every ratified band', () => {
+  const bands = ['frontier', 'workhorse', 'utility', 'basement']
+  const roles = ['lead', 'planner', 'builder', 'reviewer', 'tech-lead']
+  for (const band of bands) {
+    const ladder = ladderWithLocalAt(band)
+    for (const role of roles) {
+      const seats = { [role]: { provider: 'local', id: 'qwen3-coder-30b', model: null } }
+      assert.throws(
+        () => assertBandFloors(seats, 'judge', ladder, { models: localCatalog }),
+        (err) => err.reason === 'local-model-judge-seat' && BAND_FLOOR_REFUSALS.includes(err.reason),
+        `${band} ${role}`,
+      )
+    }
+  }
+})
+
+test('the ratified judge roster is admitted unchanged with the roster model catalog in hand', () => {
+  const { seats } = resolveTier(roster, 'judge', {})
+  assert.equal(seatModelKey(seats.lead), 'anthropic/claude-opus-5')
+  assert.equal(seatModelKey(seats.planner), 'anthropic/claude-opus-5')
+  assert.equal(seatModelKey(seats.builder), 'openai/gpt-5.6-luna')
+  assert.equal(seatModelKey(seats.reviewer), 'anthropic/claude-opus-5')
+  assert.equal(seatModelKey(seats['tech-lead']), 'openai/gpt-5.6-sol')
+  assert.doesNotThrow(() => assertBandFloors(seats, 'judge', loadLadder(), { models: roster.models }))
+})
+
+test('a source:"local" model in a mechanical or build seat is admitted at its band', () => {
+  const ladder = ladderWithLocalAt('workhorse')
+  for (const tier of ['mechanical', 'build']) {
+    for (const role of ['planner', 'builder']) {
+      const seats = { [role]: { provider: 'local', id: 'qwen3-coder-30b', model: null } }
+      assert.doesNotThrow(
+        () => assertBandFloors(seats, tier, ladder, { models: localCatalog }),
+        `${tier} ${role}`,
+      )
+    }
+  }
+})
+
+test('the local-model judge refusal names the seat, the model and its closed reason', () => {
+  const ladder = ladderWithLocalAt('basement')
+  assert.throws(
+    () => assertBandFloors(
+      { builder: { provider: 'local', id: 'qwen3-coder-30b', model: null } },
+      'judge', ladder, { models: localCatalog },
+    ),
+    (err) => err.reason === 'local-model-judge-seat'
+      && err.message.includes('builder')
+      && err.message.includes(LOCAL_MEMBER)
+      && err.message.includes('[local-model-judge-seat]'),
+  )
+})
+
+test('a raw --model override resolving to a local ratified member is refused from a judge seat', () => {
+  const adapter = { modelString: ({ provider, id }) => `${provider}-cli/${id}` }
+  const seats = { reviewer: { provider: null, id: null, model: 'local-cli/qwen3-coder-30b' } }
+  assert.throws(
+    () => assertBandFloors(
+      seats, 'judge', ladderWithLocalAt('frontier'),
+      { models: localCatalog, adapters: { reviewer: { adapter } } },
+    ),
+    (err) => err.reason === 'local-model-judge-seat',
+  )
+})
+
+test('boot passes the roster model catalog into the seat band floor check', () => {
+  const source = readFileSync(new URL('./crew.mjs', import.meta.url), 'utf8')
+  const match = source.match(/assertBandFloors\(seats, tierName,[^\n]*/)
+  assert.ok(match)
+  assert.ok(match[0].includes('models: roster?.models'))
+})
+
 test('a tier with no ratified floor refuses floor-unratified', () => {
   const ladder = { path: '/hand-built', ranks: new Map([['utility', 1]]), members: new Map(), floors: {} }
   assert.throws(() => assertBandFloors({}, 'build', ladder), (err) => err.reason === 'floor-unratified')

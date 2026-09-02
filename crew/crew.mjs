@@ -772,6 +772,7 @@ export const BAND_FLOOR_REFUSALS = Object.freeze([
   'floor-unratified',  // the ladder ratifies no floor band for this tier
   'band-unknown',      // the seat's model is a member of no ratified band
   'band-below-floor',  // the seat's band ranks below its tier's ratified floor
+  'local-model-judge-seat', // a source:"local" roster model in a judge-tier seat, at any band
 ])
 
 export function refuseBandFloor(reason, message) {
@@ -938,15 +939,34 @@ export function seatBand(ladder, seat, { adapter = null, localProviders = null }
 // Refuse, never downgrade. PURE: the ladder and the adapter context are passed
 // in, so a boot and a test exercise one code path. `adapters` is the
 // {role: {name, adapter}} map resolveAdapters returns.
-export function assertBandFloors(seats, tier, ladder, { adapters = null, localProviders = null } = {}) {
+export function assertBandFloors(seats, tier, ladder, { adapters = null, localProviders = null, models = null } = {}) {
   const floorName = ladder?.floors?.[tier]
   if (typeof floorName !== 'string' || !ladder.ranks.has(floorName)) {
     throw refuseBandFloor('floor-unratified', `tier ${tier} expected a ratified floor band, found ${JSON.stringify(floorName ?? null)}, at ${ladder?.path} tier_floors.${tier}`)
   }
   const floorRank = ladder.ranks.get(floorName)
+  // #851 / ADR-037 decision 2: a judge seat is closed to a source:"local" model at
+  // EVERY band, frontier included. The band floor cannot express this — tier_floors
+  // stays "utility" for all three tiers because the judge BUILDER seat is
+  // openai/gpt-5.6-luna, a utility member, so a frontier judge floor would make the
+  // whole tier undispatchable (#851, 2026-09-01). SOURCE, not rank, is the
+  // discriminator, and `models` is the ROSTER's own catalog — the runtime's, never
+  // the target checkout's, exactly as the roster and the ladder already are.
+  const judgeSeats = canonicalAssurance(tier) === 'rigorous'
   for (const [role, seat] of Object.entries(seats || {})) {
     const key = seatModelKey(seat)
     const found = seatBand(ladder, seat, { adapter: adapters?.[role]?.adapter, localProviders })
+    // A canonical roster cell names its own catalog key; a raw --model override is
+    // the ADAPTER's namespace, so its catalog key is the ratified member seatBand
+    // proved, and null when it proved none — band-unknown refuses that below.
+    const member = seat?.provider != null && seat?.id != null ? key : found?.member ?? null
+    const localEntry = judgeSeats && member && models && Object.hasOwn(models, member) ? models[member] : null
+    // BEFORE the band questions, so the reason is the SOURCE and never a rank
+    // accident: a local basement model would otherwise refuse as band-below-floor
+    // and a local frontier model would not refuse at all.
+    if (localEntry?.source === 'local') {
+      throw refuseBandFloor('local-model-judge-seat', `seat ${role} expected a hosted model for tier ${tier}, found local model ${member} — ADR-037 decision 2 closes a judge seat to a source "local" model at every band, at crew/roster.json models[].source`)
+    }
     if (found === null) {
       throw refuseBandFloor('band-unknown', `seat ${role} expected a model in a ratified band at or above "${floorName}" for tier ${tier}, found ${JSON.stringify(key || null)} proven by no ratified member, at ${ladder.path} bands[].members`)
     }
@@ -1647,7 +1667,7 @@ export async function bootCmd(args, deps = {}) {
   let ladder = null
   if (seats && tierName) {
     ladder = loadLadder()
-    assertBandFloors(seats, tierName, ladder, { adapters, localProviders: registry.local_providers })
+    assertBandFloors(seats, tierName, ladder, { adapters, localProviders: registry.local_providers, models: roster?.models })
     // #377: the same floor over the models granted agent DEFINITIONS pin.
     assertDefBandFloors(grantedDefModels(adapters, { localProviders: registry.local_providers }), tierName, ladder, { adapters, localProviders: registry.local_providers })
   }

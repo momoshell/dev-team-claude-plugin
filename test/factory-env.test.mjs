@@ -111,6 +111,10 @@ test('config.md review_defaults section documents scripts/factory/*.mjs', () => 
 // records the exported reach points and the explicit openers. The registry is
 // deliberately reviewed against every production home-defaulting expression.
 const LEDGER_DOORS = new Map([
+  ['crew/drive.mjs#driveTask', {
+    kind: 'home-default',
+    why: 'driveTask resolves the suite-slot root through slotAdmission; without DEVTEAM_LEDGER_DIR it reaches ~/.dev-team/factory/slots',
+  }],
   ['scripts/factory/emit.mjs#openRun', {
     kind: 'opener',
     why: 'emit.mjs:498 exports openRun, whose omitted dbPath reaches its state-directory default',
@@ -479,13 +483,6 @@ const LEDGER_SANDBOX_EXEMPT = new Map([
     warranty: (source) => {
       const spans = callArgs(source, 'openRun')
       return spans.length > 0 && spans.every((args) => /\bstateDir\b/.test(args))
-    },
-  }],
-  ['crew/drive.test.mjs', {
-    why: 'drive.test.mjs:4852 injects DEVTEAM_LEDGER_DB into its only runChild call; child.mjs:35 reads that exact injected environment key',
-    warranty: (source) => {
-      const spans = callArgs(source, 'runChild')
-      return spans.length > 0 && spans.every((args) => /\bDEVTEAM_LEDGER_DB\b/.test(args))
     },
   }],
   ['test/visualizer-server.test.mjs', {

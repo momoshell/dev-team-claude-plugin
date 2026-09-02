@@ -2,11 +2,11 @@
 // Every path through driveTask is exercised with a fake io: happy path,
 // red-lane bounce, scope bounce, review bounce, insufficient->lead consult,
 // bounce exhaustion->accept/escalate, out-of-set lead answers, commit gating.
-import { test } from 'node:test'
+import { after, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, readdirSync } from 'node:fs'; import { ROOT as REPO_ROOT, scratchDir, treeDigest } from '../test/helpers.mjs'
 import { spawnSync } from 'node:child_process'
-import { tmpdir } from 'node:os'
+import { cpus as osCpus, tmpdir } from 'node:os'
 
 import { join } from 'node:path'
 import { regrantVerdict } from './escalation-policy.mjs'
@@ -47,18 +47,36 @@ import {
   ENVELOPE_REFUSAL_REASONS, bounceTargetOf, staleVerdictLines,
   PLAN_SCOPE, PLAN_SCOPE_VERDICTS, planScopeVerdict,
   SCOPE_REFUSALS, ENVELOPE_DEBRIS, scopeRefusal, scopeBounceBrief,
+  SUITE_SLOT_PHASES, SUITE_SLOT_PHASE_NAMES, PHASE_SLOT_WAIT_EVENT, slotAdmission, withPhaseSlot,
 } from './drive.mjs'
+
+// Ledger sandbox (#824). crew/drive.mjs#driveTask is a registered home-default door
+// (test/factory-env.test.mjs:113), because slotAdmission resolves the suite-slot root
+// from DEVTEAM_LEDGER_DIR. This module-scope assignment — set before any test runs — is
+// what keeps the operator's ~/.dev-team/factory/slots out of reach of the one call that
+// takes production's absent-env default (crew/drive.test.mjs:7214). tmpdir() is
+// intentional; this converted file must add no raw temp primitive call — it is in
+// TEMP_CONVERTED (test/factory-env.test.mjs:761) and the raw-temp detector (:694) counts
+// those call sites, while the sandbox detector's TEMP_MARKERS (:358) accepts tmpdir( too.
+const LEDGER_SANDBOX = join(tmpdir(), `b384-drive-ledger-${process.pid}`)
+const LEDGER_SANDBOX_PREVIOUS = process.env.DEVTEAM_LEDGER_DIR
+process.env.DEVTEAM_LEDGER_DIR = LEDGER_SANDBOX
+after(() => {
+  if (LEDGER_SANDBOX_PREVIOUS === undefined) delete process.env.DEVTEAM_LEDGER_DIR
+  else process.env.DEVTEAM_LEDGER_DIR = LEDGER_SANDBOX_PREVIOUS
+  rmSync(LEDGER_SANDBOX, { recursive: true, force: true })
+})
 
 const TD = '/tmp/fake-task'
 const CTX = Object.freeze({
   task: 't1', briefFile: '/tmp/brief.md', taskDir: TD, checkout: '/tmp/repo',
-  roles: ['lead', 'planner', 'builder', 'reviewer'], lane: null, suite: 'suite-cmd',
+  roles: ['lead', 'planner', 'builder', 'reviewer'], lane: null, suite: 'suite-cmd', env: { CREW_SUITE_SLOTS: '0' },
 })
 
 // Scripted fake io: `script` maps `${role}:${n-th call}` -> envelope; runs and
 // git are scripted per call. Everything is recorded for assertions.
-function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cleanThrows = false, cold = 'green', showDoc = false, emit = false, files = {}, reseat = null, gh = null, writeThrough = false, throwOn = null, throwWrites = [], seqIds = false } = {}) {
-  const calls = { order: [], assign: [], run: [], runClean: [], runCold: [], wrapped: [], sweeps: [], reseat: [], commits: [], writes: {}, writeLog: [], logs: [], showDoc: [], emits: [], gh: [], waits: [], files }
+function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cleanThrows = false, cold = 'green', showDoc = false, emit = false, files = {}, reseat = null, gh = null, writeThrough = false, throwOn = null, throwWrites = [], seqIds = false, now = () => 0, slots = null } = {}) {
+  const calls = { order: [], trace: [], assign: [], run: [], runClean: [], runCold: [], wrapped: [], sweeps: [], reseat: [], commits: [], writes: {}, writeLog: [], logs: [], showDoc: [], emits: [], gh: [], waits: [], sleeps: [], slotFactories: [], files }
   const counts = {}; let seq = 0
 
   const writeCounts = {}
@@ -98,6 +116,7 @@ function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cle
       const original = gateReapOriginal(cmd)
       counts[original] = (counts[original] || 0) + 1
       calls.run.push({ cmd: original, n: counts[original] })
+      calls.trace.push(`run:${original}`)
       calls.wrapped.push({ cmd: original, wrapped: cmd, clean: false })
       const r = runs[`${original}:${counts[original]}`] ?? runs[original] ?? { ok: true, output: '' }
       return r
@@ -106,12 +125,13 @@ function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cle
     commit(files, message) { calls.order.push('commit'); calls.commits.push({ files, message }); return 'abc1234' },
     status(label) { (calls.status ||= []).push(label) },
     log(obj) { calls.logs.push(obj) },
-    now() { return 0 },
+    now() { return now() },
   }
   if (cold !== null) {
     io.runCold = (cmd, names) => {
       calls.order.push('runCold')
       calls.runCold.push({ cmd, names })
+      calls.trace.push(`runCold:${cmd}`)
       if (cold === 'throw') throw new Error('injected cold runner failure')
       if (cold === 'green') return { ok: true, output: '', path: '/zz/aa11bb', kept: null }
       return cold
@@ -122,6 +142,7 @@ function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cle
       const original = gateReapOriginal(cmd)
       counts[`clean:${original}`] = (counts[`clean:${original}`] || 0) + 1
       calls.runClean.push({ cmd: original, n: counts[`clean:${original}`] })
+      calls.trace.push(`runClean:${original}`)
       calls.wrapped.push({ cmd: original, wrapped: cmd, clean: true })
       if (cleanThrows) throw new Error("runClean: git stash pop FAILED — the checkout is half-restored and the builder's work is in the stash")
       return cleanRuns[`${original}:${counts[`clean:${original}`]}`] ?? cleanRuns[original] ?? { ok: false, output: '' }
@@ -132,6 +153,13 @@ function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cle
   if (reseat) io.reseat = (role, options) => {
     calls.reseat.push({ role, options })
     return reseat(role, options)
+  }
+  if (typeof slots === 'function') {
+    io.slots = (spec) => {
+      calls.slotFactories.push({ ...spec })
+      return slots(spec, calls)
+    }
+    io.sleep = (ms) => { calls.sleeps.push(ms) }
   }
   if (gh) {
     const spec = gh === true ? {} : gh
@@ -155,6 +183,47 @@ function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cle
     }
   }
   return io
+}
+
+function fakePool({ calls, refusals = [], throwOnAcquire = null } = {}) {
+  const pending = [...refusals]
+  let serial = 0
+  return {
+    kind: 'suite', capacity: 4,
+    acquire({ owner }) {
+      const phase = String(owner).split(':').at(-1)
+      const event = { op: 'acquire', label: `acquire:${phase}`, owner, handle: null }
+      calls.trace.push(event)
+      if (throwOnAcquire) {
+        if (throwOnAcquire instanceof Error) throw throwOnAcquire
+        throw new Error(String(throwOnAcquire))
+      }
+      if (pending.length > 0) {
+        const depth = pending.shift()
+        event.depth = depth
+        return { waiting: true, depth }
+      }
+      const slot = `suite-${serial++}`
+      const handle = { kind: 'suite', slot, token: `token-${serial}`, owner }
+      event.handle = handle
+      return { slot, handle }
+    },
+    release(handle) {
+      calls.trace.push({ op: 'release', label: `release:${handle?.slot}`, owner: handle?.owner, handle })
+      return true
+    },
+  }
+}
+
+const traceLabels = (calls) => calls.trace.map((entry) => typeof entry === 'string' ? entry : entry.label)
+const traceSubsequence = (calls, expected) => {
+  const labels = traceLabels(calls)
+  let index = 0
+  for (const label of expected) {
+    index = labels.indexOf(label, index)
+    assert.notEqual(index, -1, `missing ordered trace event ${label}: ${JSON.stringify(labels)}`)
+    index += 1
+  }
 }
 
 function closeoutIo(options = {}) {
@@ -5620,7 +5689,7 @@ const CONVERGE_CTX = Object.freeze({
 const CONVERGE_PLAN = () => planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', commit_subject: 'feat: converge' } })
 const CONVERGE_GATE = RED(3)
 
-function convergeIo({ seam = true, suite = { ok: true, output: '' }, issueThrows = false, prThrows = false, findings = null } = {}) {
+function convergeIo({ seam = true, suite = { ok: true, output: '' }, issueThrows = false, prThrows = false, findings = null, slots = null, now = null } = {}) {
   return fakeIo({
     envelopes: {
       'planner:1': CONVERGE_PLAN(),
@@ -5633,6 +5702,8 @@ function convergeIo({ seam = true, suite = { ok: true, output: '' }, issueThrows
       'suite-cmd': suite,
     },
     changed: ['a.mjs'],
+    ...(typeof slots === 'function' ? { slots } : {}),
+    ...(typeof now === 'function' ? { now } : {}),
     ...(findings ? {
       envelopes: {
         'planner:1': CONVERGE_PLAN(),
@@ -5649,9 +5720,263 @@ function convergeIo({ seam = true, suite = { ok: true, output: '' }, issueThrows
 }
 
 function convergeRun(options = {}) {
-  const io = convergeIo(options)
-  return { io, result: driveTask(CONVERGE_CTX, io) }
+  const { ctx = CONVERGE_CTX, ...ioOptions } = options
+  const io = convergeIo(ioOptions)
+  return { io, result: driveTask(ctx, io) }
 }
+
+const slotCtx = (over = {}) => ({ ...CTX, env: { CREW_SUITE_SLOTS: '4' }, ...over })
+const slotFactory = ({ refusals = [], throwOnAcquire = null } = {}) => (_spec, calls) => (
+  fakePool({ calls, refusals, throwOnAcquire })
+)
+const phaseTrace = (calls, phase, runner) => {
+  const labels = traceLabels(calls)
+  const acquireIndex = calls.trace.findIndex((entry) => entry?.label === `acquire:${phase}` && entry.handle)
+  assert.notEqual(acquireIndex, -1, `missing successful ${phase} acquire: ${JSON.stringify(labels)}`)
+  const acquire = calls.trace[acquireIndex]
+  const runIndex = labels.findIndex((label, index) => index > acquireIndex && label === runner)
+  assert.notEqual(runIndex, -1, `missing ${runner} after ${phase} acquire: ${JSON.stringify(labels)}`)
+  const releaseLabel = `release:${acquire.handle.slot}`
+  const releaseIndex = labels.findIndex((label, index) => index > runIndex && label === releaseLabel)
+  assert.notEqual(releaseIndex, -1, `missing ${releaseLabel}: ${JSON.stringify(labels)}`)
+  assert.ok(acquireIndex < runIndex && runIndex < releaseIndex)
+  return { acquire, acquireIndex, runIndex, releaseIndex }
+}
+
+const directSlotRun = ({ phase, refusals = [], now = () => 0, emit = () => {} } = {}) => {
+  const calls = { trace: [] }
+  const rows = []
+  const result = withPhaseSlot({
+    pool: fakePool({ calls, refusals }), phase, owner: `slot-test:${phase}`, now,
+    sleep: () => {}, log: (row) => rows.push(row), emit,
+  }, () => 'phase-result')
+  return { calls, rows, result }
+}
+
+test('b382 A1 an acceptance gate run takes and gives back a suite slot', () => {
+  const io = closeoutIo({
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }),
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: {
+      'gate-cmd:1': { ok: false, output: RED(3) }, 'gate-cmd:2': { ok: true, output: '' },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    slots: slotFactory(),
+  })
+  const result = driveTask(slotCtx(), io)
+  assert.equal(result.status, 'done')
+  phaseTrace(io.calls, 'gate', 'run:gate-cmd')
+})
+
+test('b382 A2 the release-gate full suite takes and gives back a suite slot', () => {
+  const io = closeoutIo({ slots: slotFactory() })
+  const result = driveTask(slotCtx(), io)
+  assert.equal(result.status, 'done')
+  phaseTrace(io.calls, 'suite-warm', 'run:suite-cmd')
+})
+
+test('b382 A3 the cold verification suite takes and gives back a suite slot', () => {
+  const io = closeoutIo({ slots: slotFactory() })
+  const result = driveTask(slotCtx(), io)
+  assert.equal(result.status, 'done')
+  phaseTrace(io.calls, 'suite-cold', 'runCold:suite-cmd')
+})
+
+test('b382 A4 the converge full suite takes and gives back a suite slot', () => {
+  const { io, result } = convergeRun({
+    ctx: slotCtx({ ...CONVERGE_CTX, env: { CREW_SUITE_SLOTS: '4' } }),
+    slots: slotFactory(),
+  })
+  assert.equal(result.status, 'converge')
+  phaseTrace(io.calls, 'suite-warm', 'run:suite-cmd')
+})
+
+test('b382 B1 a cold suite that throws releases its slot before escalating', () => {
+  const io = closeoutIo({ cold: 'throw', slots: slotFactory() })
+  const result = driveTask(slotCtx(), io)
+  assert.equal(result.details.escalation.where, 'cold-suite')
+  const event = phaseTrace(io.calls, 'suite-cold', 'runCold:suite-cmd')
+  assert.ok(event.releaseIndex < io.calls.trace.length)
+})
+
+test('b382 B2 a wait-row failure releases the acquired slot before the driver escalates', () => {
+  const io = closeoutIo({ slots: slotFactory() })
+  const originalLog = io.log
+  let rowFailure = false
+  io.log = function (row) {
+    if (!rowFailure && row?.event === PHASE_SLOT_WAIT_EVENT) {
+      rowFailure = true
+      throw new Error('phase-slot wait journal write failed')
+    }
+    return originalLog.call(this, row)
+  }
+  const result = driveTask(slotCtx(), io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'driver')
+  assert.match(result.details.escalation.why, /phase-slot wait journal write failed/)
+  const acquire = io.calls.trace.find((entry) => entry?.label === 'acquire:suite-warm' && entry.handle)
+  assert.ok(acquire)
+  assert.ok(io.calls.trace.some((entry) => entry?.label === `release:${acquire.handle.slot}`))
+  assert.equal(traceLabels(io.calls).some((label) => label === 'run:suite-cmd' || label === 'runCold:suite-cmd'), false)
+})
+
+test('b382 C1 the admission row names the phase that waited', () => {
+  for (const phase of SUITE_SLOT_PHASE_NAMES) {
+    const { rows } = directSlotRun({ phase })
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].kind, phase)
+  }
+})
+
+test('b382 C2 the admission row carries the occupancy the last scan measured', () => {
+  const measured = directSlotRun({ phase: SUITE_SLOT_PHASES.warm, refusals: [3] })
+  assert.equal(measured.rows[0].queue_depth, 3)
+  const unknown = directSlotRun({ phase: SUITE_SLOT_PHASES.warm, refusals: [null] })
+  assert.equal(unknown.rows[0].queue_depth, null)
+  assert.notEqual(unknown.rows[0].queue_depth, 0)
+})
+
+test('b382 C3 the admission row carries the measured waited_ms', () => {
+  let clock = 0
+  const { rows } = directSlotRun({
+    phase: SUITE_SLOT_PHASES.warm, refusals: [3],
+    now: () => { clock += 2000; return clock },
+  })
+  assert.equal(rows[0].waited_ms, 8000)
+})
+
+test('b382 D1 a queued phase keeps emitting liveness heartbeats while it waits', () => {
+  const beats = []
+  const { rows } = directSlotRun({ phase: SUITE_SLOT_PHASES.warm, refusals: [1, 2], emit: (event) => beats.push(event) })
+  assert.equal(rows.length, 1)
+  assert.equal(beats.length, 2)
+  assert.ok(beats.every((event) => event.kind === 'heartbeat' && Number.isFinite(event.at)))
+})
+
+test('b382 E1 an unconfigured capacity still queues at the core-derived capacity', () => {
+  const io = closeoutIo({ slots: slotFactory() })
+  const result = driveTask({ ...CTX, env: {} }, io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.slotFactories.length, 1)
+  assert.equal(io.calls.slotFactories[0].capacity, Math.max(2, Math.floor(osCpus().length / 6)))
+  assert.equal(io.calls.slotFactories[0].kind, 'suite')
+  assert.ok(io.calls.trace.some((entry) => entry?.label?.startsWith('acquire:')))
+})
+
+const ZERO_CAPACITY_RESULT = Object.freeze({
+  status: 'done',
+  summary: 'Task t1 complete: committed abc1234 (2 files), suite green, cold-verified from /zz/aa11bb, review pass. Stages: plan:r1 | build:r1 | scope-gate:r1 | lane:r1 | review:r1 | review:pass | commit | suite | suite:cold | done',
+  artifacts: ['/tmp/fake-task/plan.md', '/tmp/fake-task/review.md', '/tmp/fake-task/journal.jsonl'],
+  details: {
+    commit: 'abc1234',
+    stages: ['plan:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:pass', 'commit', 'suite', 'suite:cold', 'done'],
+    files_committed: ['a.mjs', 'a.test.mjs'],
+    consults: 0,
+    dissents: [],
+    accepted_via: 'review pass',
+    escalation: null,
+    cold_suite: { verdict: 'green', path: '/zz/aa11bb', counts: null },
+    extra_rounds_granted: [],
+    growth: [{
+      round: 1, plan_bytes: null, gate_bytes: null, plan_delta: null, gate_delta: null,
+      combined_bytes: null, round1_combined_bytes: null, files_in_scope_count: 2, ratio: null, divergent: false,
+    }],
+    modifiers: [],
+    gate: null,
+  },
+})
+const ZERO_CAPACITY_LOGS = Object.freeze([
+  { stage: 'plan:r1', channel: 'record' },
+  { assign: 'planner1', role: 'planner', brief: '/tmp/brief.md', channel: 'record' },
+  { envelope: 'planner1', role: 'planner', status: 'done', channel: 'record' },
+  { plan_scope: { round: 1, verdict: 'plan-scope-undispatched', added: [], dropped: [], dispatched: null, planned: 2 }, channel: 'record' },
+  { gate_path_rejected: null, channel: 'record' },
+  { plan_growth: { round: 1, plan_bytes: null, gate_bytes: null, plan_delta: null, gate_delta: null, combined_bytes: null, round1_combined_bytes: null, files_in_scope_count: 2, ratio: null, divergent: false }, channel: 'record' },
+  { stage_done: 'plan:r1', channel: 'record' },
+  { stage: 'build:r1', channel: 'record' },
+  { assign: 'builder1', role: 'builder', brief: '/tmp/fake-task/plan.md', channel: 'record' },
+  { envelope: 'builder1', role: 'builder', status: 'done', channel: 'record' },
+  { stage_done: 'build:r1', channel: 'record' },
+  { stage: 'scope-gate:r1', channel: 'record' },
+  { stage_done: 'scope-gate:r1', channel: 'record' },
+  { stage: 'lane:r1', channel: 'record' },
+  { stage_done: 'lane:r1', channel: 'record' },
+  { stage: 'review:r1', channel: 'record' },
+  { assign: 'reviewer1', role: 'reviewer', brief: '/tmp/fake-task/review-brief-1.md', channel: 'record' },
+  { review_outcome: { dispatch: 'reviewer1', verdict: 'pass', must_fix: 0, should_fix: null, consider: null }, channel: 'record' },
+  { envelope: 'reviewer1', role: 'reviewer', status: 'done', channel: 'record' },
+  { review_round: { n: 1, verdict: 'pass', accounting: 'free', charged: 0 }, channel: 'record' },
+  { stage_done: 'review:r1', channel: 'record' },
+  { stage: 'review:pass', channel: 'record' },
+  { stage_done: 'review:pass', channel: 'record' },
+  { stage: 'commit', channel: 'record' },
+  { commit_subject: 'fallback-from-plan-summary', channel: 'record' },
+  { stage_done: 'commit', channel: 'record' },
+  { stage: 'suite', channel: 'record' },
+  { stage_done: 'suite', channel: 'record' },
+  { stage: 'suite:cold', channel: 'record' },
+  { cold_suite: { verdict: 'green', path: '/zz/aa11bb', counts: null }, channel: 'record' },
+  { stage_done: 'suite:cold', channel: 'record' },
+  { stage: 'done', channel: 'record' },
+  { stage_done: 'done', channel: 'record' },
+])
+const normaliseJournalTimes = (rows) => rows.map(({ at: _at, ...row }) => row)
+
+test('b382 E2 a zero capacity run behaves exactly as the pre-feature driver', () => {
+  const io = closeoutIo({ slots: slotFactory() })
+  const result = driveTask({ ...CTX, env: { CREW_SUITE_SLOTS: '0' } }, io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.slotFactories.length, 0)
+  assert.equal(io.calls.logs.some((row) => row.event === PHASE_SLOT_WAIT_EVENT), false)
+  assert.deepEqual(result, ZERO_CAPACITY_RESULT)
+  assert.deepEqual(normaliseJournalTimes(io.calls.logs), ZERO_CAPACITY_LOGS)
+  assert.deepEqual(io.calls.trace, ['run:lane-cmd', 'run:suite-cmd', 'runCold:suite-cmd'])
+})
+
+test('b382 R1 the driver leases from the dispatcher\'s relocated factory root', () => {
+  const io = closeoutIo({ slots: slotFactory() })
+  const result = driveTask({ ...CTX, env: { CREW_SUITE_SLOTS: '4', DEVTEAM_LEDGER_DIR: '/tmp/b382-relocated-factory' } }, io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.slotFactories.length, 1)
+  assert.equal(io.calls.slotFactories[0].dir, '/tmp/b382-relocated-factory')
+})
+
+test('b382 S1 an acquire that cannot answer never runs the phase', () => {
+  const failure = Object.assign(new Error('slot claim unavailable'), { stage: 'slot-claim-unresolvable' })
+  const io = closeoutIo({ slots: slotFactory({ throwOnAcquire: failure }) })
+  const result = driveTask(slotCtx(), io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'slot-claim-unresolvable')
+  assert.match(result.details.escalation.why, /slot claim unavailable/)
+  assert.equal(traceLabels(io.calls).some((label) => label === 'run:suite-cmd' || label === 'runCold:suite-cmd'), false)
+})
+
+test('b382 F1 a run that only takes model turns acquires no suite slot', () => {
+  const io = fakeIo({ envelopes: { 'planner:1': null }, slots: slotFactory() })
+  const result = driveTask(slotCtx(), io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(io.calls.slotFactories.length, 0)
+  assert.equal(io.calls.trace.filter((entry) => entry?.label?.startsWith('acquire:')).length, 0)
+})
+
+test('slot pool construction that throws never runs the phase', () => {
+  const failure = new Error('slot pool construction failed')
+  const io = closeoutIo({ slots: () => { throw failure } })
+  const result = driveTask(slotCtx(), io)
+  assert.equal(result.status, 'escalation')
+  assert.match(result.details.escalation.why, /slot pool construction failed/)
+  assert.equal(traceLabels(io.calls).some((label) => label === 'run:suite-cmd' || label === 'runCold:suite-cmd'), false)
+})
+
+test('a malformed CREW_SUITE_SLOTS becomes the driver\'s own escalation', () => {
+  const io = closeoutIo({ slots: slotFactory() })
+  const result = driveTask({ ...CTX, env: { CREW_SUITE_SLOTS: 'abc' } }, io)
+  assert.equal(result.status, 'escalation')
+  assert.match(result.details.escalation.why, /CREW_SUITE_SLOTS/)
+  assert.equal(io.calls.slotFactories.length, 0)
+})
 
 test('converge happy path files must-fix residuals, commits once, and opens one draft PR', () => {
   const { io, result } = convergeRun()
@@ -7581,6 +7906,7 @@ const DRIVE_JOURNAL_EXPECTED = Object.freeze([
   ['recordRow', '', 'at cold_suite'],
   ['recordRow', '', 'at narration'],
   ['recordRow', '', 'at published'],
+  ['operationalRow', '', 'at event kind queue_depth waited_ms slotted'],
 ])
 
 test('the journal channel vocabulary is closed, exported and additive', () => {
@@ -7598,11 +7924,13 @@ test('the journal channel vocabulary is closed, exported and additive', () => {
 test('every journal emit site in the driver is inventoried, wrapped and on the right channel', () => {
   const text = readFileSync(new URL('./drive.mjs', import.meta.url), 'utf8')
   const sites = driveJournalSites(text)
-  assert.equal(sites.length, 49)
+  assert.equal(sites.length, 50)
   assert.deepEqual(sites.map(({ wrapper, events, keys }) => [wrapper, events, keys]), DRIVE_JOURNAL_EXPECTED)
   assert.ok(sites.every(({ wrapper }) => wrapper === 'recordRow' || wrapper === 'operationalRow'))
-  assert.equal(sites.filter(({ wrapper }) => wrapper === 'operationalRow').length, 1)
-  assert.equal(sites.find(({ wrapper }) => wrapper === 'operationalRow').keys, 'at gate_reap')
+  assert.equal(sites.filter(({ wrapper }) => wrapper === 'operationalRow').length, 2)
+  assert.deepEqual(sites.filter(({ wrapper }) => wrapper === 'operationalRow').map(({ events, keys }) => [events, keys]), [
+    ['', 'at gate_reap'], ['', 'at event kind queue_depth waited_ms slotted'],
+  ])
 })
 
 test('a full drive writes no journal row without a channel', () => {

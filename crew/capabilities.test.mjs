@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   CAPABILITY_ADAPTERS, CAPABILITY_CLASSES, CAPABILITY_DELIVERY, CAPABILITY_PROBES,
-  CAPABILITY_REFUSALS, EMPTY_GRANTS, REGISTER_ROOT, assertGrantsBacked,
+  CAPABILITY_REFUSALS, EMPTY_GRANTS, REGISTER_ROOT, ACP_TRANSPORT_PROFILE, assertGrantsBacked,
   declaredCapabilities, effectiveCapabilities, grantsFor, loadCapabilities, probeCapability,
   refuse, validateCapabilities,
 } from './capabilities.mjs'
@@ -298,6 +298,19 @@ test('the pi subagents probe exercises the granted fan-out bundle', async () => 
   assert.deepEqual(finding('extensions-loaded')?.value, ['subagent.ts', 'lab.ts'])
   assert.equal(Object.hasOwn(process.env, 'CREW_PI_AGENTS'), hadAgents)
   assert.equal(process.env.CREW_PI_AGENTS, beforeAgents)
+})
+
+test('the ACP transport profile matches the pane transport shape', () => {
+  const profile = ACP_TRANSPORT_PROFILE
+  const want = { interjection: 'turn', abort: 'cancel', session_resume: true, durable_cursor: 'protocol', reassign: false }
+  assert.deepEqual({ ...profile }, want)
+  assert.equal(Object.isFrozen(profile), true)
+  const before = profile.abort
+  try { profile.abort = 'signal' } catch {}
+  assert.equal(profile.abort, before)
+  const pane = capabilitiesFor({ transport: 'pane' })
+  const transportKeys = ['interjection', 'abort', 'session_resume', 'durable_cursor', 'reassign']
+  assert.deepEqual(Object.keys(profile).sort(), Object.keys(pane).filter((key) => transportKeys.includes(key)).sort())
 })
 
 test('the pi subagents probe goes red when the register stops being true', async () => {

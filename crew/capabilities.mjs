@@ -314,6 +314,8 @@ export function effectiveCapabilities({ declared, bare, grants = EMPTY_GRANTS } 
 
 export const CAPABILITY_CLASSES = Object.freeze(['probe', 'vendor-binary', 'network', 'resolution'])
 export const CAPABILITY_ADAPTERS = Object.freeze(['claude', 'pi'])
+// TRD §4.1; #795 spreads this frozen transport profile into each adapter's PROFILES.
+export const ACP_TRANSPORT_PROFILE = Object.freeze({ interjection: 'turn', abort: 'cancel', session_resume: true, durable_cursor: 'protocol', reassign: false })
 export const SUBAGENT_EXTENSION = 'crew/pi/extensions/subagent.ts'
 
 // #623: this table asserts against mutable register data, never the presence of

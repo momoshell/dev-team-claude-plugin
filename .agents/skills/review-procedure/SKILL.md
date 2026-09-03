@@ -12,10 +12,21 @@ restates it.
 1. Read `plan.md` in the task dir, then `git diff` / `git status`, then every
    changed file in full.
 2. Run the plan's validation lane yourself. Never trust a reported pass.
-3. Load the guidelines: `node .agents/skills/review-procedure/scripts/load-guidelines.mjs`
-   prints `crew/guidelines/review-do-not-flag.md` to stdout, resolving the repo
-   from the current directory. A non-zero exit names the path it could not
-   find — treat that as a broken checkout, not as an empty list.
+3. Load the guidelines: run `scripts/load-guidelines.mjs` from THIS skill's
+   directory — inside this plugin's own checkout that is
+   `node .agents/skills/review-procedure/scripts/load-guidelines.mjs`, and from
+   any other repository it is that same path made absolute. The loader resolves
+   its data from its own location, so the working directory does not matter, and
+   it exits 0 in every reachable case. There are exactly two outcomes and the
+   loader says which:
+   - **Guidelines loaded** — the bytes on stdout are the list. A copy of
+     `crew/guidelines/review-do-not-flag.md` in the repository under review
+     OVERRIDES the plugin's bundled copy; with no copy there, the bundled one is
+     printed.
+   - **`no reviewer guidelines were loaded`** — the statement names the file it
+     looked for. The do-not-flag list is then an EMPTY list, and that is a blind
+     spot to state in the review, never a clear and never a claim that the
+     checkout under review is defective.
 4. Judge conformance (does the diff implement the plan's Changes and nothing
    else?), then correctness (do the acceptance criteria hold?).
 5. Write `review.md` in the task dir: verdict line first, then findings with

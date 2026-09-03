@@ -91,11 +91,28 @@ export const EXTERNAL_REGISTER_NAME = 'dispatch.external.fences.json'
 export const ROLES_ANCHOR_MANIFEST = 'crew/roles/anchors.json'
 export const ROLES_ANCHOR_COMPANIONS = Object.freeze(['crew/roles/planner.md', 'crew/roles/tech-lead.md'])
 
-// The scan reads anchors.json manifests, which are machine-readable. Prose file:line
-// citations in .md files are not, and a heuristic over prose would refuse every doc that
-// mentions a line number. The check therefore states what it cannot see rather than
-// implying a completeness it does not have.
-export const ANCHOR_BLIND_SPOT = 'BLIND SPOT: prose file:line citations in .md files are not discoverable from anchors.json and this check does not find them; look for them by hand before re-dispatching this lane'
+// The scan reads anchors.json manifests, which are machine-readable. The DOCS that carry
+// those citations are found by citationCarriers below, and its own warning names them, so
+// this check no longer has to send the operator looking by hand. What neither check sees is
+// a file:line citation that no manifest pins: it is in no key, so no search finds it.
+export const ANCHOR_BLIND_SPOT = 'BLIND SPOT: an unpinned file:line citation is in no manifest key, so neither this check nor the citation-carrier check can find it; a citation the anchor corpus does not pin is still discoverable only by hand'
+
+// The blind spot b388-mutanchor paid a whole lane for. Its fence held all four anchors.json
+// manifests and NONE of the nine prose and role files whose path:line citations name the lines
+// it moved, so the plan was approved, the build finished, and the lane died at the scope gate
+// with the work done and no seat able to widen files_in_scope. The manifests are the AUTHORITY
+// on which citations exist, so locating the doc that carries one is a literal search for the
+// manifest key — exact, not a heuristic over prose — and the result is a list of files to fence
+// rather than an instruction to go looking.
+export const CITATION_CARRIER_WARNING_PREFIX = 'dispatch-batch: WARNING citation-carrier-unfenced:'
+export const CITATION_CARRIER_ROW_LIMIT = 12
+// Measured against b388's own loss on 2026-09-03: of the eight citation-bearing files that lane
+// had to edit, this check names seven. The eighth,
+// skills/crew-recovery/references/escalations.md, carries no shifted citation at all — its
+// exhibits.test.mjs:24 set-compares a documented TABLE against the escalate() producers, so a
+// lane that adds a producer reddens it while every path:line in it still resolves. A set
+// comparison is not a citation and no key search can find it.
+export const CITATION_CARRIER_BLIND_SPOT = 'BLIND SPOT: this finds docs carrying a PINNED path:line citation and nothing else. A citation no manifest pins is in no key, and a doc whose exhibit set-compares a documented table against source (skills/crew-recovery/references/escalations.md and the escalate() producers) reddens with every citation in it still correct. Neither is discoverable here; read the exhibits suites of the manifests named above before choosing this fence'
 
 // The scan survives; the refusal does not. #635 made a shifted anchor repairable, so a
 // pin outside a lane's fence is a fact an operator should SEE, not a batch outcome.
@@ -719,6 +736,97 @@ export function collectAnchorPins({ checkout, deps } = {}) {
   return { byFile, manifests }
 }
 
+// A manifest's citation docs: the layout skills/qa-test-writing/anchor-pin.mjs's skillDocs
+// reads, restated here rather than imported because no production module in scripts/factory
+// imports from skills/ and one repair command's path is not worth opening that boundary.
+// test/factory-dispatch-batch.test.mjs pins the two layouts together.
+function manifestDocs(manifest, root, d) {
+  const dir = dirname(manifest)
+  const docs = []
+  const skill = join(root, dir, 'SKILL.md')
+  if (d.existsSync(skill)) docs.push(`${dir}/SKILL.md`)
+  const refs = join(root, dir, 'references')
+  let names = null
+  try { names = d.existsSync(refs) ? d.readdirSync(refs) : null } catch { names = null }
+  if (Array.isArray(names)) {
+    for (const raw of [...names].sort()) {
+      const name = typeof raw === 'string' ? raw : raw?.name
+      if (typeof name === 'string' && name.endsWith('.md')) docs.push(`${dir}/references/${name}`)
+    }
+  }
+  if (docs.length > 0) return docs
+  let own = null
+  try { own = d.readdirSync(join(root, dir)) } catch { own = null }
+  if (!Array.isArray(own)) return docs
+  for (const raw of [...own].sort()) {
+    const name = typeof raw === 'string' ? raw : raw?.name
+    if (typeof name === 'string' && name.endsWith('.md')) docs.push(`${dir}/${name}`)
+  }
+  return docs
+}
+
+// `crew/drive.mjs:34` is a prefix of `crew/drive.mjs:345`, so a bare includes() would
+// attribute the shorter citation to a doc that only carries the longer one. The lookahead is
+// the same guard anchor-pin.mjs's rewriteCitations uses for the same reason.
+function carriesCitation(text, key) {
+  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp(`${escaped}(?!\\d)`).test(text)
+}
+
+// Keyed by the file each citation TARGETS, so the caller can intersect with a lane's write
+// surface exactly as it does with anchorPinsOutsideFence. One read per doc, never one per key.
+export function citationCarriers({ checkout, pins, deps } = {}) {
+  const d = normalDeps(deps)
+  const root = typeof checkout === 'string' && checkout.trim() ? checkout : process.cwd()
+  const byFile = pins && pins.byFile instanceof Map ? pins.byFile : new Map()
+  const keysByManifest = new Map()
+  for (const [file, perManifest] of byFile) {
+    for (const [manifest, keys] of perManifest) {
+      if (!keysByManifest.has(manifest)) keysByManifest.set(manifest, [])
+      for (const key of keys) keysByManifest.get(manifest).push({ key, file })
+    }
+  }
+  const carriers = new Map()
+  const docsScanned = []
+  for (const [manifest, entries] of keysByManifest) {
+    for (const doc of manifestDocs(manifest, root, d)) {
+      let text
+      try { text = d.readFileSync(join(root, doc), 'utf8') } catch { continue }
+      if (typeof text !== 'string') continue
+      docsScanned.push(doc)
+      const perDoc = new Map()
+      for (const { key, file } of entries) {
+        if (!carriesCitation(text, key)) continue
+        if (!perDoc.has(file)) perDoc.set(file, [])
+        perDoc.get(file).push(key)
+      }
+      for (const [file, keys] of perDoc) {
+        if (!carriers.has(file)) carriers.set(file, [])
+        carriers.get(file).push({ doc, keys: [...keys].sort() })
+      }
+    }
+  }
+  return { byFile: carriers, docsScanned }
+}
+
+// A doc that cites a line this lane moves, and that the lane may not edit. Unlike a shifted
+// manifest pin this is NOT repairable in-lane: --repair rewrites the citation inside the doc,
+// so a doc outside the fence leaves the corpus red with no move available to any seat.
+export function citationCarriersOutsideFence({ surface, fenceFiles, carriers } = {}) {
+  const inFence = scopeMatcher(Array.isArray(fenceFiles) ? fenceFiles : [])
+  const matchesSurface = scopeMatcher(Array.isArray(surface) ? surface : [])
+  const byFile = carriers && carriers.byFile instanceof Map ? carriers.byFile : new Map()
+  const found = []
+  for (const [file, docs] of byFile) {
+    if (!matchesSurface(file)) continue
+    for (const { doc, keys } of docs) {
+      if (inFence(doc)) continue
+      found.push({ file, doc, keys })
+    }
+  }
+  return found.sort((a, b) => (a.doc < b.doc ? -1 : a.doc > b.doc ? 1 : a.file < b.file ? -1 : a.file > b.file ? 1 : 0))
+}
+
 export function anchorPinsOutsideFence({ surface, fenceFiles, pins } = {}) {
   const inFence = scopeMatcher(Array.isArray(fenceFiles) ? fenceFiles : [])
   const matchesSurface = scopeMatcher(Array.isArray(surface) ? surface : [])
@@ -1046,6 +1154,9 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
   }))
   let reachIndex = null
   const reachFor = () => (reachIndex ??= collectTestReach({ checkout: scanRoot, deps: d }))
+  // Same posture as reachFor: one scan for the whole batch, and only if a lane needs it.
+  let carrierIndex = null
+  const carriersFor = () => (carrierIndex ??= citationCarriers({ checkout: scanRoot, pins, deps: d }))
   const warnings = []
   const perLane = {}
   for (const lane of batchLanes) {
@@ -1078,6 +1189,22 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
       const text = `${ANCHOR_PIN_WARNING_PREFIX} lane ${name} writes anchor-pinned file(s) whose pinning manifest is outside its fence: ${detail}; a shift is repairable with node skills/qa-test-writing/anchor-pin.mjs --repair <skill dir>, so this does not block dispatch; rot and ambiguity still fail in the skill's own exhibits.test.mjs.${rolesClause} ${ANCHOR_BLIND_SPOT}`
       warnings.push({ kind: 'anchor-pin', lane: name, pins: unfencedPins, text })
       d.log(text)
+    }
+
+    // The docs that CITE the lines this lane moves. A shifted manifest pin is repairable in
+    // lane; a citation inside a doc the fence excludes is not, because the repair rewrites the
+    // doc. b388-mutanchor lost an approved plan and a finished build to exactly this, so the
+    // warning names every file to add rather than reporting that some may exist.
+    const unfencedCarriers = citationCarriersOutsideFence({ surface: ownSurface, fenceFiles: ownFiles, carriers: carriersFor() })
+    if (unfencedCarriers.length > 0) {
+      const docs = [...new Set(unfencedCarriers.map(({ doc }) => doc))]
+      const listed = unfencedCarriers.slice(0, CITATION_CARRIER_ROW_LIMIT)
+        .map(({ doc, file, keys }) => `${doc} cites ${file} at ${keys.join(', ')}`).join('; ')
+      const omitted = unfencedCarriers.length - Math.min(unfencedCarriers.length, CITATION_CARRIER_ROW_LIMIT)
+      const tail = omitted > 0 ? `; ${omitted} further row(s) not listed here and carried on the report` : ''
+      const carrierText = `${CITATION_CARRIER_WARNING_PREFIX} lane ${name} moves lines in file(s) cited by ${docs.length} doc(s) outside its fence (listing at most ${CITATION_CARRIER_ROW_LIMIT}): ${listed}${tail}. Unlike a shifted manifest pin this is NOT repairable in lane — anchor-pin.mjs --repair rewrites the CITATION, so a doc outside the fence stays red and no seat may widen files_in_scope. Add to this lane's fence: ${docs.join(', ')}. ${CITATION_CARRIER_BLIND_SPOT}`
+      warnings.push({ kind: 'citation-carrier', lane: name, carriers: unfencedCarriers, docs, text: carrierText })
+      d.log(carrierText)
     }
 
     const reachRows = fenceHasCode ? testsOutsideFence({ surface: ownSurface, fenceFiles: ownFiles, reach: reachFor() }) : []

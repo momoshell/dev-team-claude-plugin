@@ -18,6 +18,10 @@ import {
   COUPLED_SOURCE_UNFENCED,
   ANCHOR_BLIND_SPOT,
   ANCHOR_PIN_WARNING_PREFIX,
+  CITATION_CARRIER_BLIND_SPOT,
+  CITATION_CARRIER_WARNING_PREFIX,
+  citationCarriers,
+  citationCarriersOutsideFence,
   REFUSAL_REASONS,
   DISPATCH_RECORD_SUFFIX,
   DRY_RUN_BLIND_SPOT,
@@ -4051,4 +4055,134 @@ test('seat vocabulary stays mirrored to crew boot constants', () => {
 test('parseCliArgs accepts --wave and refuses its missing value', () => {
   assert.deepEqual(parseCliArgs(['--batch', 'b', '--wave', '2']), { batch: 'b', wave: '2' })
   refusal(() => parseCliArgs(['--batch', 'b', '--wave']), 'batch-unreadable')
+})
+
+// --- citation carriers (b388-mutanchor) ------------------------------------------
+//
+// b388 held all four anchors.json manifests in its fence and none of the docs whose
+// path:line citations named the lines it moved. Its plan was approved, its build
+// finished, and the scope gate ended the lane with no seat able to widen
+// files_in_scope. These tests pin the derivation that names those docs.
+
+function carrierCheckout(name, { doc = 'skills/one/references/notes.md', citation = 'crew/drive.mjs:2' } = {}) {
+  const checkout = join(root, name)
+  put(join(checkout, 'crew', 'drive.mjs'), 'line one\nexport const TWO = 2\n')
+  put(join(checkout, 'skills', 'one', 'anchors.json'), JSON.stringify({ 'crew/drive.mjs:2': 'export const TWO = 2' }))
+  put(join(checkout, ...doc.split('/')), `The driver declares it (\`${citation}\`).\n`)
+  return checkout
+}
+
+// Mutation killed: drop the doc scan (return an empty byFile) and this finds nothing, which
+// is the b388 shape exactly — the manifest is fenced, the doc that cites it is not.
+test('citationCarriers names the doc that cites a line the lane moves', () => {
+  const checkout = carrierCheckout('carrier-basic')
+  const pins = collectAnchorPins({ checkout })
+  const carriers = citationCarriers({ checkout, pins })
+  assert.deepEqual([...carriers.byFile.keys()], ['crew/drive.mjs'])
+  assert.deepEqual(carriers.byFile.get('crew/drive.mjs'), [{ doc: 'skills/one/references/notes.md', keys: ['crew/drive.mjs:2'] }])
+  const outside = citationCarriersOutsideFence({
+    surface: ['crew/drive.mjs'], fenceFiles: ['crew/drive.mjs', 'skills/one/anchors.json'], carriers,
+  })
+  assert.deepEqual(outside, [{ doc: 'skills/one/references/notes.md', file: 'crew/drive.mjs', keys: ['crew/drive.mjs:2'] }])
+})
+
+// Mutation killed: fence the carrier doc and the row must disappear. Without this a check
+// that always reports would be indistinguishable from one that measures.
+test('a fenced citation carrier produces no row', () => {
+  const checkout = carrierCheckout('carrier-fenced')
+  const pins = collectAnchorPins({ checkout })
+  const carriers = citationCarriers({ checkout, pins })
+  assert.deepEqual(citationCarriersOutsideFence({
+    surface: ['crew/drive.mjs'],
+    fenceFiles: ['crew/drive.mjs', 'skills/one/anchors.json', 'skills/one/references/notes.md'],
+    carriers,
+  }), [])
+})
+
+// Mutation killed: a file the lane does not write must not raise a carrier row, so a lane
+// whose surface misses the cited file stays silent.
+test('a citation of a file outside the write surface is not a carrier row', () => {
+  const checkout = carrierCheckout('carrier-off-surface')
+  const pins = collectAnchorPins({ checkout })
+  const carriers = citationCarriers({ checkout, pins })
+  assert.deepEqual(citationCarriersOutsideFence({ surface: ['crew/other.mjs'], fenceFiles: ['crew/other.mjs'], carriers }), [])
+})
+
+// Mutation killed: drop the (?!\d) lookahead in carriesCitation and `crew/drive.mjs:2` is
+// found inside `crew/drive.mjs:23`, attributing a citation to a doc that never made it.
+test('a longer citation does not satisfy a shorter manifest key', () => {
+  const checkout = join(root, 'carrier-prefix')
+  put(join(checkout, 'crew', 'drive.mjs'), 'line one\nexport const TWO = 2\n')
+  put(join(checkout, 'skills', 'one', 'anchors.json'), JSON.stringify({ 'crew/drive.mjs:2': 'export const TWO = 2' }))
+  put(join(checkout, 'skills', 'one', 'references', 'notes.md'), 'It is at `crew/drive.mjs:23`, elsewhere.\n')
+  const pins = collectAnchorPins({ checkout })
+  const carriers = citationCarriers({ checkout, pins })
+  assert.equal(carriers.byFile.size, 0)
+  assert.deepEqual(carriers.docsScanned, ['skills/one/references/notes.md'])
+})
+
+// Mutation killed: the SKILL.md + references/*.md layout is anchor-pin.mjs's skillDocs
+// (restated, not imported), and crew/roles keeps neither — it holds its charters directly.
+// Read only one layout and crew/roles resolves to no docs and every roles citation is missed,
+// which is the crew/roles/tech-lead.md half of b388's fence gap.
+test('citationCarriers reads the SKILL.md layout and the flat crew/roles one', () => {
+  const checkout = join(root, 'carrier-layouts')
+  put(join(checkout, 'crew', 'drive.mjs'), 'line one\nexport const TWO = 2\n')
+  put(join(checkout, 'skills', 'one', 'anchors.json'), JSON.stringify({ 'crew/drive.mjs:2': 'export const TWO = 2' }))
+  put(join(checkout, 'skills', 'one', 'SKILL.md'), 'Cited at `crew/drive.mjs:2`.\n')
+  put(join(checkout, 'crew', 'roles', 'anchors.json'), JSON.stringify({ 'crew/drive.mjs:2': 'export const TWO = 2' }))
+  put(join(checkout, 'crew', 'roles', 'tech-lead.md'), 'Also cited at `crew/drive.mjs:2`.\n')
+  const pins = collectAnchorPins({ checkout })
+  const carriers = citationCarriers({ checkout, pins })
+  assert.deepEqual(carriers.byFile.get('crew/drive.mjs').map(({ doc }) => doc),
+    ['crew/roles/tech-lead.md', 'skills/one/SKILL.md'])
+})
+
+// Mutation killed: state a completeness this cannot have. escalations.md carries NO shifted
+// citation — its exhibit set-compares a documented table against the escalate() producers —
+// so the warning must say what it cannot find rather than implying it found everything.
+test('the citation-carrier blind spot names the set-comparison case it cannot find', () => {
+  assert.match(CITATION_CARRIER_BLIND_SPOT, /^BLIND SPOT: /)
+  assert.match(CITATION_CARRIER_BLIND_SPOT, /skills\/crew-recovery\/references\/escalations\.md/)
+  assert.match(CITATION_CARRIER_BLIND_SPOT, /no manifest pins/)
+})
+
+// Mutation killed: never push the warning (or read the carriers of a fence that already holds
+// the doc) and checkFences reports nothing, which is what b388's dispatch did. The wiring is
+// what the lane needed, not the derivation alone.
+test('checkFences warns with the citation-carrier prefix and names the fence additions', () => {
+  const checkout = join(root, 'carrier-warning-checkout')
+  put(join(checkout, 'crew', 'drive.mjs'), 'line one\nexport const TWO = 2\n')
+  put(join(checkout, 'skills', 'one', 'anchors.json'), JSON.stringify({ 'crew/drive.mjs:2': 'export const TWO = 2' }))
+  put(join(checkout, 'skills', 'one', 'references', 'notes.md'), 'Declared at `crew/drive.mjs:2`.\n')
+  const files = ['crew/drive.mjs', 'skills/one/anchors.json']
+  const report = checkFences({
+    fences: [entry('lane-a', files)],
+    lanes: [{ lane: 'lane-a', where: files }],
+    checkout,
+    deps: { home: root, log: () => {} },
+  })
+  const warning = report.warnings.find((row) => row.kind === 'citation-carrier')
+  assert.ok(warning, 'no citation-carrier warning')
+  assert.equal(warning.text.startsWith(CITATION_CARRIER_WARNING_PREFIX), true)
+  assert.deepEqual(warning.docs, ['skills/one/references/notes.md'])
+  assert.equal(warning.text.includes('Add to this lane\'s fence: skills/one/references/notes.md'), true)
+  assert.equal(warning.text.includes(CITATION_CARRIER_BLIND_SPOT), true)
+})
+
+// Mutation killed: warn regardless of the fence and a correctly fenced lane is told to widen a
+// fence it already has — the false positive that would make the operator stop reading warnings.
+test('checkFences raises no citation-carrier warning when the doc is fenced', () => {
+  const checkout = join(root, 'carrier-warning-fenced-checkout')
+  put(join(checkout, 'crew', 'drive.mjs'), 'line one\nexport const TWO = 2\n')
+  put(join(checkout, 'skills', 'one', 'anchors.json'), JSON.stringify({ 'crew/drive.mjs:2': 'export const TWO = 2' }))
+  put(join(checkout, 'skills', 'one', 'references', 'notes.md'), 'Declared at `crew/drive.mjs:2`.\n')
+  const files = ['crew/drive.mjs', 'skills/one/anchors.json', 'skills/one/references/notes.md']
+  const report = checkFences({
+    fences: [entry('lane-a', files)],
+    lanes: [{ lane: 'lane-a', where: files }],
+    checkout,
+    deps: { home: root, log: () => {} },
+  })
+  assert.equal(report.warnings.some((row) => row.kind === 'citation-carrier'), false)
 })

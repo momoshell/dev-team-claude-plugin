@@ -5276,8 +5276,8 @@ export function finalizeCorrections(binds, corrections, rows) {
   // decorated, because only those have terminal correction state worth reading. The terminal state
   // for every declaration lives on `finalBinds` and on the dedicated absence journal row, which is
   // where the operator reads it; putting `correction: 'none'` on a legacy proof row would change a
-  // shape nothing asked to change and break the exact deep-equals at crew/drive.test.mjs:4205
-  // (killed), :4232 (exempt), :4266 (anchor-absent) and :4418 (unapplied) for no gain.
+  // shape nothing asked to change and break the exact deep-equals at crew/drive.test.mjs:4276
+  // (killed), :4303 (exempt), :4339 (anchor-absent) and :4610 (unapplied) for no gain.
   const finalRows = proofRows.map((row) => (candidates.has(row.check) || staticRefusal.has(row.check) ? withTerminal(row) : row))
   // MUTATION B3: derive this from `finalRows` instead and an absent declaration the pass never
   // reached vanishes from the routing decision — proof rows carry no `status`, so the filter
@@ -5291,10 +5291,11 @@ export function finalizeCorrections(binds, corrections, rows) {
 // escalationCause Rule 2 (scripts/factory/ledger.mjs:189) reads to classify the row as
 // `plan-build-disagreement` / `driver`; a sentence without it lands `unclassified` (measured).
 // It ALSO keeps the established literal `did not BIND to the built tree`, which is the phrase
-// today's percheckNote uses for the same class (crew/drive.mjs:3385) and which three existing
-// assertions read — crew/drive.test.mjs:4017, :4058 and, negatively, :4018/:4060 (`did not kill`
-// must NOT appear). This sentence takes the route percheckNote's binding-failure branch used to
-// take, so it inherits that branch's vocabulary rather than minting a second one.
+// today's percheckNote uses for the same class (crew/drive.mjs:3435) and which four existing
+// assertions read — positively at crew/drive.test.mjs:4088 and :4128, and negatively at :4089
+// (`did not kill` must NOT appear on an anchor-absent escalation) and :4131 (`did not BIND` must
+// NOT appear on a survived one). This sentence takes the route percheckNote's binding-failure
+// branch used to take, so it inherits that branch's vocabulary rather than minting a second one.
 export function anchorAbsentWhy(unresolved) {
   const rows = Array.isArray(unresolved) ? unresolved : []
   const detail = rows.map((row) => `${JSON.stringify(row.check)} in ${row.file} (bind ${row.status}, correction ${row.correction}${row.correction_refusal ? `/${row.correction_refusal}` : ''}${row.why ? `: ${row.why}` : ''})`).join('; ')

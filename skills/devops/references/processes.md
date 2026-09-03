@@ -57,3 +57,44 @@ Exhibit: `scripts/factory/reap-stale.mjs:105-107`.
 
 Never turn an offer into an automatic signal.
 Exhibit: `crew/crew.mjs:801-667`.
+
+## Stopping a live lane
+
+There is no verb that stops a live lane. `teardown` archives the crew dir and
+reclaims the seats, but it leaves the driver process running, so the operator
+sequence is teardown, then signal the driver by pid, then confirm the session
+reached a terminal row. Measured 2026-09-02 stopping `b389-mutanchor`.
+
+Do not expect SIGTERM to stop a driver. `run` arms SIGTERM and SIGINT handlers
+for the exit marker, and an armed handler suppresses the signal's default
+disposition while being unable to dispatch inside a synchronous nap, so the
+driver absorbs the signal and keeps driving.
+Exhibit: `crew/crew.mjs:1972`.
+
+The driver's waits are synchronous blocks, which is the window that swallows a
+signal.
+Exhibit: `crew/drive.mjs:5432`.
+
+The signalled exit codes the marker reports are 143 and 130, so an absorbed
+signal is visible as neither.
+Exhibit: `crew/crew.mjs:1938`.
+
+A teardown sweep over a headless crew proves nothing about the driver and says
+so; read its withheld claim rather than treating teardown as a stop.
+Exhibit: `crew/crew.mjs:2755`.
+
+A SIGKILLed driver lands no terminal row, because the ledger's finalizer is the
+only writer that can and it is opt-in.
+Exhibit: `scripts/factory/ledger.mjs:4962`.
+
+The finalizer that a graceful stop would reach records `fail`/`failed` with the
+signal as its reason.
+Exhibit: `scripts/factory/ledger.mjs:4988`.
+
+An operator who stops a run by hand settles the session as `operator`, which is
+already a terminal actor; a session left `running` is a measured-looking claim
+that a dead driver is working.
+Exhibit: `scripts/factory/ledger.mjs:145`.
+
+The cost of skipping the terminal row is a session that reads `running`
+forever: two were found in the live ledger, one of them 4.4 days old (#877).

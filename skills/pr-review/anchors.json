@@ -4,5 +4,15 @@
   "crew/roles/reviewer.md:41": "\"details\": { \"review_path\": \"<abs>\", \"verdict\": \"pass\"|\"changes-needed\",",
   "crew/roles/reviewer.md:55": "`findings` is optional: omit it and the run behaves exactly as before.",
   "crew/drive.mjs:2067": "for (const match of narration.matchAll(/[A-Za-z0-9_.-]+\\/[A-Za-z0-9_./-]+/g)) {",
-  "crew/drive.mjs:1373": "export function validateScopeEntries(entries) {"
+  "crew/drive.mjs:1373": "export function validateScopeEntries(entries) {",
+  "crew/drive.mjs:319": "export function panelSeats(seated) {",
+  "crew/drive.mjs:3784": "const panelReview = (n, panel) => {",
+  "crew/drive.mjs:3842": "const fused = fuseFindings(findingsOf(aEnv), findingsOf(bEnv), {",
+  "crew/drive.mjs:3912": "const adjudicated = adjudicatePanel(allocatedDivergent, adjEnv.details)",
+  "crew/drive.mjs:4132": "const panel = ctx.continuation === true ? panelSeats(seatList) : null",
+  "crew/drive.mjs:4576": "const review = panel ? panelReview(roundNo, panel) : assignAndWait('reviewer', revBrief, 'review')",
+  "crew/escalation-policy.mjs:81": "export function fuseFindings(a, b, options = {}) {",
+  "crew/escalation-policy.mjs:128": "export function adjudicatePanel(divergent, details) {",
+  "crew/crew.mjs:1191": "excludedBy = shadowExclusion('vendor-collision'",
+  "crew/child.mjs:266": "The daemon's regrant hook is the sole caller that sets continuation:"
 }

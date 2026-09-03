@@ -21,7 +21,7 @@ place that runs the review flow.
 | Choosing what to attack and how to grade it | `references/rubric.md` | Four axes, ordered by measured yield |
 | Recording a typed scout finding | `references/findings-shape.md` | Keep the scout contract pinned |
 | Resolving two verdicts on one line | `references/divergence.md` | Treat disagreement as signal |
-| Selecting reviewer posture by tier | `references/posture.md` | Scale the panel without pretending it runs |
+| Selecting reviewer posture by tier | `references/posture.md` | The panel is shipped; name which gate a lone reviewer hit |
 | Sizing a claim or naming an evidence gap | `references/evidence.md` | Keep denominators and unbacked rules visible |
 
 ## Critical rules
@@ -38,6 +38,11 @@ place that runs the review flow.
   four-field shape the sentence claims; `findings` is optional, at
   `crew/roles/reviewer.md:55`. `confidence` appears in reviewer.md only in the
   scout/recommendation shape.
+
+- The do-not-flag guidelines are repo data loaded by the procedure layer, and a
+  review is in exactly one of two states: the guidelines loaded, or they did not
+  and the list is a stated **empty list** — a blind spot to declare, never a
+  clear, and never a claim that the repository under review is defective.
 
 ## Rubric, ordered by measured yield
 
@@ -59,5 +64,5 @@ place that runs the review flow.
 - `references/rubric.md` — the four review axes and their grading rules.
 - `references/findings-shape.md` — the scout findings contract and its pin.
 - `references/divergence.md` — divergence-as-signal and the recording example.
-- `references/posture.md` — tier-scaled reviewer posture and the parked panel.
+- `references/posture.md` — tier-scaled reviewer posture and the two gates on the shipped panel.
 - `references/evidence.md` — corpus denominators, limits, and rules with no exhibit.

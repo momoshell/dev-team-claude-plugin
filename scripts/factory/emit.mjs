@@ -541,6 +541,30 @@ export function recordCiCycle({ dbPath, stderr = process.stderr, _openLedger, ..
   }
 }
 
+// #826 — a slot wait is an observation of time the host cost this lane, never
+// control flow: a lane that cannot record its wait still runs its phase. Mirror
+// the CI cycle facade exactly — one open, one row, close — and never let an
+// instrumentation error escape the caller.
+function slotWaitDegraded(stderr, err) {
+  try { stderr.write(`emit: phase slot wait not recorded (${err.message})\n`) } catch { /* best effort */ }
+  return false
+}
+
+export function recordPhaseSlotWait({ dbPath, stderr = process.stderr, _openLedger, ...fields } = {}) {
+  let handle = null
+  try {
+    handle = (_openLedger || openLedger)({ dbPath, stderr })
+    handle.recordPhaseSlotWait(fields)
+    return true
+  } catch (err) {
+    // MUTATION E1: rethrow here instead of degrading and a lane that cannot record
+    // its wait stops running its phase — instrumentation becomes load-bearing.
+    return slotWaitDegraded(stderr, err)
+  } finally {
+    try { if (handle) handle.close() } catch { /* best effort */ }
+  }
+}
+
 // A repair dispatch is an observation of what the bounded loop attempted (or
 // refused), not load-bearing control flow. Mirror the cycle facade exactly:
 // one open, one row, close, and no instrumentation error escapes the caller.

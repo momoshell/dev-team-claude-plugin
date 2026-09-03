@@ -363,6 +363,26 @@ export const PLAN_SCOPE_VERDICTS = Object.freeze([
 ])
 export const SEAT_REASK_EVENTS = Object.freeze(['seat-timeout-reask', 'seat-abort-reask'])
 
+// #826 (parent epic #822) — which phase competed for a suite slot. MUST equal
+// crew/drive.mjs SUITE_SLOT_PHASE_NAMES (drive.mjs:5425): the driver is the
+// producer, this is the register, and the ledger never imports crew (the
+// subsystem direction is one-way, crew -> factory), so a test holds them equal.
+export const PHASE_SLOT_WAIT_KINDS = Object.freeze(['gate', 'suite-warm', 'suite-cold'])
+
+// Why a recorded wait carries no queue depth. The producer reports a depth only
+// from a scan that actually saw one (crew/drive.mjs:5469), so a wait admitted
+// on its FIRST acquire never scans and has no depth to report. All 87 phase-slot-wait
+// rows recorded across ~/.crew journals to 2026-09-03 carry queue_depth: null for
+// exactly this reason — unmeasured on that path, never a queue of length zero (#297).
+export const PHASE_SLOT_WAIT_DEPTH_ABSENT = 'no admission scan reported a queue depth for this wait — unmeasured, never a measured zero'
+
+// Why the family itself can be absent, in its own words: a window whose corpus was
+// written before this mirror landed carries no phase-slot-wait row at all, so "no
+// lane waited" and "nobody measured whether a lane waited" are the same silence.
+// The readout says the second, because the first prices a queue at zero on evidence
+// nobody collected — the anti-#813 rule this epic exists to hold.
+export const PHASE_SLOT_WAIT_ABSENT = 'no phase-slot-wait rows in this window — a corpus predating the ledger mirror for this event reads exactly like a window with no waits, so this is unmeasured and never a measured zero'
+
 // The adjudication of one watched CI check. 'green' is a MEASURED fact, not
 // a gap — recording it is what gives "how often does CI catch what the local
 // lane missed" a denominator. 'unknown' is an honest non-answer carrying its
@@ -1172,6 +1192,23 @@ export const TABLES = Object.freeze({
     unique: [['adw_id', 'gate_generation', 'check_name']],
     indexes: [],
   },
+  // #826 — one recorded wait for a suite slot. queue_depth is INTEGER and nullable
+  // beside its own reason column: the depth is measured on some admission paths and
+  // not others, and the two must stay distinguishable in the STORED value.
+  phase_slot_waits: {
+    columns: [
+      { name: 'adw_id', decl: 'TEXT' },
+      { name: 'kind', decl: 'TEXT' },
+      { name: 'queue_depth', decl: 'INTEGER' },
+      { name: 'queue_depth_absent', decl: 'TEXT' },
+      { name: 'waited_ms', decl: 'INTEGER' },
+      { name: 'slotted', decl: 'INTEGER' },
+      { name: 'at_ms', decl: 'INTEGER' },
+      { name: 'created_at', decl: 'TEXT' },
+    ],
+    unique: [['adw_id', 'kind', 'at_ms']],
+    indexes: [],
+  },
 })
 
 // The closed set of public writer method names — also the closed set of
@@ -1193,12 +1230,13 @@ export const JOURNAL_FACT_EVENTS = Object.freeze({
   'seat-timeout-reask': 'recordSeatReask',
   'seat-abort-reask': 'recordSeatReask',
   'plan-adopted': 'recordPlanAdoption',
+  'phase-slot-wait': 'recordPhaseSlotWait',
 })
 
 export const WRITERS = Object.freeze([
   'startSession', 'endSession', 'startPhase', 'endPhase', 'recordEvent',
   'recordEnvelope', 'recordSessionRequest', 'recordRunConfiguration', 'recordRunSeat', 'recordGateResult', 'recordGateDiscrimination',
-  'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'recordCiCycle', 'recordCiDispatch', 'recordIntakeSweep', 'recordIntakeRefusal', 'recordIntakeBrake', 'recordIntakeDispatch', 'recordSeatTeardown', 'recordSeatReclaim', 'recordProviderFailure', 'recordPlanScope', 'recordSeatReask', 'recordAcceptReask', 'recordRpcExitContext', 'recordPlanAdoption', 'recordExternalFence', 'recordMutationAnchorBind', 'recordMutationAnchorAbsence', 'startProcess', 'endProcess', 'heartbeat',
+  'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'recordCiCycle', 'recordCiDispatch', 'recordIntakeSweep', 'recordIntakeRefusal', 'recordIntakeBrake', 'recordIntakeDispatch', 'recordSeatTeardown', 'recordSeatReclaim', 'recordProviderFailure', 'recordPlanScope', 'recordSeatReask', 'recordAcceptReask', 'recordRpcExitContext', 'recordPlanAdoption', 'recordExternalFence', 'recordMutationAnchorBind', 'recordMutationAnchorAbsence', 'recordPhaseSlotWait', 'startProcess', 'endProcess', 'heartbeat',
   'startAgentSession', 'endAgentSession', 'recordSourceError', 'linkRun',
 ])
 
@@ -1241,6 +1279,7 @@ export const WRITER_MIRROR_TABLES = Object.freeze({
   recordMutationAnchorAbsence: 'mutation_anchor_absences',
   startProcess: 'processes',
   startAgentSession: 'agent_sessions',
+  recordPhaseSlotWait: 'phase_slot_waits',
 })
 
 // Writers whose mirror is an UPDATE of a row another writer created: they add
@@ -2779,6 +2818,39 @@ export function openLedger({
     return args
   }
 
+  function recordPhaseSlotWait(input = {}) {
+    requireFields(input, ['kind', 'waited_ms'], 'recordPhaseSlotWait')
+    requireEnum(input.kind, PHASE_SLOT_WAIT_KINDS, 'recordPhaseSlotWait', 'kind')
+    // MEASURED-OR-ABSENT, decided once and read twice below, so the depth and the
+    // reason beside it can never disagree.
+    // MUTATION B1: coerce the absent depth here and the 87 recorded waits that never
+    // scanned a queue all land as a measured queue of length zero.
+    const depth = integerOrNull(input.queue_depth, 'recordPhaseSlotWait', 'queue_depth')
+    const args = redact({
+      adw_id: input.adw_id ?? null,
+      kind: input.kind,
+      queue_depth: depth,
+      // MUTATION B2: make this unconditional and a MEASURED depth arrives carrying a
+      // reason saying nobody measured it — the column stops telling the paths apart.
+      queue_depth_absent: depth === null ? PHASE_SLOT_WAIT_DEPTH_ABSENT : null,
+      waited_ms: integerOrNull(input.waited_ms, 'recordPhaseSlotWait', 'waited_ms'),
+      slotted: integerOrNull(input.slotted, 'recordPhaseSlotWait', 'slotted'),
+      at_ms: epochMsOrNull(input.at_ms),
+      created_at: isoMs(input.created_at ?? now()),
+    }, stats)
+    appendJsonl('recordPhaseSlotWait', args)
+    mirror((conn) => {
+      const cols = tableColumnNames('phase_slot_waits')
+      const sqlCols = cols.map(quoteSqlIdentifier)
+      // MUTATION A1: point this INSERT at a table that does not exist and the writer
+      // still appends its JSONL line while `mirror` swallows the failure — the wait is
+      // in the authority and unqueryable in the mirror.
+      conn.prepare(`INSERT OR IGNORE INTO phase_slot_waits (${sqlCols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
+        .run(...cols.map((c) => toBindable(args[c])))
+    })
+    return args
+  }
+
   function recordExternalFence(input = {}) {
     requireFields(input, ['lane'], 'recordExternalFence')
     const args = redact({
@@ -4128,6 +4200,23 @@ export function openLedger({
     return keys.size
   }
 
+  // #826 asks "by day", and a day is a slice of created_at, not a SQL cast: the
+  // column is ISO-8601 UTC (isoMs), so its first ten characters ARE the UTC day.
+  // Every bucket carries BOTH terms — a per-day total with no per-day count behind
+  // it is a rate without its denominator.
+  function journalFactWaitsByDay(rows) {
+    if (rows.length === 0) return null
+    const days = {}
+    for (const row of rows) {
+      const day = typeof row.created_at === 'string' ? row.created_at.slice(0, 10) : null
+      if (day === null) continue
+      const bucket = days[day] ?? (days[day] = { waits: 0, waited_ms: null })
+      bucket.waits += 1
+      if (row.waited_ms != null) bucket.waited_ms = (bucket.waited_ms ?? 0) + Number(row.waited_ms)
+    }
+    return days
+  }
+
   const JOURNAL_FACT_ABSENT = 'no rows in this window — not measured, never a measured zero'
 
   function journalFactFamily(rows, countName, extras = {}) {
@@ -4151,6 +4240,8 @@ export function openLedger({
     const fenceRows = journalFactRows('external_fences', { since, until })
     const bindRows = journalFactRows('mutation_anchor_binds', { since, until })
     const absenceRows = journalFactRows('mutation_anchor_absences', { since, until })
+    const waitRows = journalFactRows('phase_slot_waits', { since, until })
+    const waitMeasured = waitRows.length > 0
     const bindMeasured = bindRows.length > 0
     const providerMeasured = providerRows.length > 0
     const scopeMeasured = scopeRows.length > 0
@@ -4212,6 +4303,30 @@ export function openLedger({
           // measured zero — "unknown is never a guess and never a zero", inverted.
           declarations_seen: bindMeasured ? journalFactSum(bindRows, 'declared') : null,   // ANCHOR F2/F3
         }),
+      },
+      // #826 — the wait the suite-slot pool converts into silence, with BOTH terms of
+      // the rate. Spelled out rather than routed through journalFactFamily because every
+      // term this lane introduces needs its own kill-mutation: the total, its
+      // denominator, the per-day split and the absence reason are four separate claims,
+      // and the shared helper would leave three of them unprovable here.
+      phase_slot_waits: {
+        measured: waitMeasured,
+        // MUTATION C2: default this to 0 for an unmeasured window and a corpus written
+        // before this change reports "0 waits" — a measured zero out of nothing.
+        waits: waitMeasured ? waitRows.length : null,
+        count: waitMeasured ? waitRows.length : null,
+        // MUTATION D2: coalesce this to 0 and an EMPTY window reports "no time lost
+        // waiting for a slot" — the exact claim #826 exists to stop.
+        waited_ms: waitMeasured ? journalFactSum(waitRows, 'waited_ms') : null,
+        by_kind: journalFactCounts(waitRows, 'kind'),
+        // MUTATION D3: null this out and "by day" answers with one undifferentiated
+        // total while the total still looks right.
+        by_day: journalFactWaitsByDay(waitRows),
+        depth_measured: waitMeasured ? waitRows.filter((row) => row.queue_depth != null).length : null,
+        depth_absent: waitMeasured ? waitRows.filter((row) => row.queue_depth == null).length : null,
+        // MUTATION C1: strip the reason and an absent family answers null with nothing
+        // saying why — a null nobody can read.
+        absent: waitMeasured ? null : PHASE_SLOT_WAIT_ABSENT,
       },
     }
   }
@@ -4620,7 +4735,7 @@ export function openLedger({
   const handle = {
     get degraded() { return degraded },
     startSession, endSession, recordSessionRequest, recordRunConfiguration, recordRunSeat, startPhase, endPhase, recordEvent, recordEnvelope,
-    recordGateResult, recordGateDiscrimination, recordMutationAnchorBind, recordMutationAnchorAbsence, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown, recordSeatReclaim, recordProviderFailure, recordPlanScope, recordSeatReask, recordAcceptReask, recordRpcExitContext, recordPlanAdoption, recordExternalFence,
+    recordGateResult, recordGateDiscrimination, recordMutationAnchorBind, recordMutationAnchorAbsence, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown, recordSeatReclaim, recordProviderFailure, recordPlanScope, recordSeatReask, recordAcceptReask, recordRpcExitContext, recordPlanAdoption, recordExternalFence, recordPhaseSlotWait,
     startProcess, endProcess, heartbeat, startAgentSession, endAgentSession,
     recordSourceError, linkRun,
     listSessions, listEvents, getSession, dumpTable, tableNames, columnNames, sessionsFiltered, runsStartedWithin, phasesFor, runConfigurationsFor, runSeatsFor, agentEventsFor, agentSessionsFor, gateDiscriminationsFor, gateResultsFor, reviewOutcomesFor, acceptDecisionsFor, supportsJson1, eventsPage, maxEventId, cellFailureRowsFor, unattributableCellFailures, seatTeardownRowsFor, intakePicks, intakeSweepTotals, intakeCandidateRefusals, intakeCandidatePicks, agentSessionTokenTotals, gateReviewGap, cellFailures, cellReviews, cellUsage, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, escalations, endedRuns, escalationWindow, seatReclaims, journalFacts, eligibleTasks, runSet, transportsFor, taskReadout, jsonlDrift,
@@ -4825,6 +4940,17 @@ function journalFactArgs(writer, row, adwId) {
       ceiling_s: source.ceiling_s ?? null,
       from_run_id: source.from_run_id ?? null,
       to_run_id: source.to_run_id ?? null,
+      at_ms: atMs,
+      ...(createdAt === undefined ? {} : { created_at: createdAt }),
+    }
+  }
+  if (writer === JOURNAL_FACT_EVENTS['phase-slot-wait']) {
+    return {
+      adw_id: rowAdwId,
+      kind: source.kind,
+      queue_depth: source.queue_depth ?? null,
+      waited_ms: source.waited_ms,
+      slotted: source.slotted ?? null,
       at_ms: atMs,
       ...(createdAt === undefined ? {} : { created_at: createdAt }),
     }
@@ -6141,12 +6267,14 @@ export function main(argv) {
           rpc_exits: 'one recorded RPC exit context; exits_seen is the number of recorded contexts',
           plan_adoptions: 'one recorded adopted plan; adoptions_seen is the number of recorded adoptions',
           external_fences: 'one dispatch-register lane entry; lanes_seen is the number of recorded lanes',
+          phase_slot_waits: 'one recorded wait for a suite slot; waits is the denominator of waited_ms, by_day splits both terms by UTC day, and depth_absent counts the waits whose queue depth was never scanned',
           mutation_anchors: 'one bind-check pass over a plan\'s declared mutation anchors; declarations_seen is the number of declared anchors bind-checked, and absences is how many did not reach the built tree with an accepted correction',
           absent: 'null with an absent marker means the family was not measured — never a measured zero',
         },
         provider_failure_kinds: PROVIDER_FAILURE_LEDGER_KINDS,
         plan_scope_verdicts: PLAN_SCOPE_VERDICTS,
         seat_reask_events: SEAT_REASK_EVENTS,
+        phase_slot_wait_kinds: PHASE_SLOT_WAIT_KINDS,
         mutation_anchor_corrections: MUTATION_ANCHOR_CORRECTIONS,
         mutation_anchor_refusals: MUTATION_ANCHOR_REFUSALS,
         since,

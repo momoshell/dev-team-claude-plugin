@@ -68,7 +68,7 @@ No dedicated local test or source exhibit was found for an interrupted flag pars
 or for a flag whose value is missing at the end of argv.
 
 The refusal and accepted-window directions are measured in
-`test/factory-ledger.test.mjs:3488` and `:2620`; these two edges remain separate.
+`test/factory-ledger.test.mjs:3489` and `:2620`; these two edges remain separate.
 
 Keep those two CLI edge rules in `cli-flags.md` marked unbacked until a test
 pins interrupted parsing and missing-value behavior.

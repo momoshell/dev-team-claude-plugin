@@ -231,6 +231,7 @@ export const DRY_RUN_BLIND_SPOT = 'dispatch-batch: dry-run BLIND SPOT — nothin
 
 export const TEST_REACH_DEPTH = 2
 export const TEST_REACH_ROW_LIMIT = 12
+export const FENCE_REPORT_FILE = 'dispatch.warnings.json'
 export const SYMBOL_FANOUT_LIMIT = 8
 export const TEST_REACH_WARNING_PREFIX = 'dispatch-batch: WARNING test-reach-unfenced:'
 export const TEST_REACH_BLIND_SPOT = 'BLIND SPOT: this is a proxy in BOTH directions and names candidates, never proof. A test can assert the changed behaviour through a higher-level entry point without importing the changed file at all, and a computed dynamic import is invisible to a static scan — crew/crew.mjs loads every adapter that way. A test can equally import a fenced file without asserting anything about the part being changed. The literal symbol scan sees only whole-word occurrences of an exported name, is blind to a renamed re-export, and drops any symbol naming more than 8 test files as too broad to be evidence. Read the named files before choosing this fence; an unnamed one is not cleared.'
@@ -395,9 +396,12 @@ export function testsOutsideFence({ surface, fenceFiles, reach } = {}) {
     }
   }
   return [...byTest.values()].sort((a, b) => {
+    // Least obvious first: a symbol-only row (hops null) is the coupling an operator will
+    // not guess, and nearest-first put it last — b394 lost 29 minutes of a build round to
+    // exactly that row being cut from the listing (#869).
     const left = a.hops === null ? TEST_REACH_DEPTH + 1 : a.hops
     const right = b.hops === null ? TEST_REACH_DEPTH + 1 : b.hops
-    return left - right || (a.test < b.test ? -1 : a.test > b.test ? 1 : 0)
+    return right - left || (a.test < b.test ? -1 : a.test > b.test ? 1 : 0)
   })
 }
 
@@ -405,6 +409,22 @@ function reachRowText(row) {
   const hops = row.hops === null ? 'symbol-only' : `hops=${row.hops}`
   const symbols = row.symbols.length > 0 ? ` symbols=${row.symbols.join(',')}` : ''
   return `${row.test} -> ${row.file} (${hops}, how=${row.how}${symbols})`
+}
+
+function reportTail(omitted, citation) {
+  if (omitted <= 0) return ''
+  return `; ${omitted} further row(s) not listed here and carried in full on the report ${citation}`
+}
+
+function writeFenceReport({ path, lanes, deps } = {}) {
+  const d = normalDeps(deps)
+  try {
+    d.mkdirSync(dirname(path), { recursive: true })
+    d.writeFileSync(path, JSON.stringify({ schema_version: 1, lanes }, null, 2) + '\n')
+    return null
+  } catch (error) {
+    return error
+  }
 }
 
 export class BatchRefusal extends Error {
@@ -1104,7 +1124,7 @@ export function crossBatchCollisions({ entries, live, externals } = {}) {
   return collisions
 }
 
-export function checkFences({ fences, lanes, graph, checkout, externals, parentDir, deps } = {}) {
+export function checkFences({ fences, lanes, graph, checkout, externals, parentDir, outDir, deps } = {}) {
   const d = normalDeps(deps)
   const entries = fenceEntriesOf(fences).map(normaliseFence)
   const batchLanes = Array.isArray(lanes) ? lanes : []
@@ -1157,6 +1177,10 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
   // Same posture as reachFor: one scan for the whole batch, and only if a lane needs it.
   let carrierIndex = null
   const carriersFor = () => (carrierIndex ??= citationCarriers({ checkout: scanRoot, pins, deps: d }))
+  const reportPath = typeof outDir === 'string' && outDir.trim() ? join(outDir, FENCE_REPORT_FILE) : null
+  let citation = reportPath || '(report unavailable: no-out-dir)'
+  const reportLanes = []
+  const deferredWarnings = []
   const warnings = []
   const perLane = {}
   for (const lane of batchLanes) {
@@ -1201,21 +1225,31 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
       const listed = unfencedCarriers.slice(0, CITATION_CARRIER_ROW_LIMIT)
         .map(({ doc, file, keys }) => `${doc} cites ${file} at ${keys.join(', ')}`).join('; ')
       const omitted = unfencedCarriers.length - Math.min(unfencedCarriers.length, CITATION_CARRIER_ROW_LIMIT)
-      const tail = omitted > 0 ? `; ${omitted} further row(s) not listed here and carried on the report` : ''
-      const carrierText = `${CITATION_CARRIER_WARNING_PREFIX} lane ${name} moves lines in file(s) cited by ${docs.length} doc(s) outside its fence (listing at most ${CITATION_CARRIER_ROW_LIMIT}): ${listed}${tail}. Unlike a shifted manifest pin this is NOT repairable in lane — anchor-pin.mjs --repair rewrites the CITATION, so a doc outside the fence stays red and no seat may widen files_in_scope. Add to this lane's fence: ${docs.join(', ')}. ${CITATION_CARRIER_BLIND_SPOT}`
-      warnings.push({ kind: 'citation-carrier', lane: name, carriers: unfencedCarriers, docs, text: carrierText })
-      d.log(carrierText)
+      const warning = { kind: 'citation-carrier', lane: name, carriers: unfencedCarriers, docs, text: null }
+      warnings.push(warning)
+      deferredWarnings.push(() => {
+        const tail = reportTail(omitted, citation)
+        const carrierText = `${CITATION_CARRIER_WARNING_PREFIX} lane ${name} moves lines in file(s) cited by ${docs.length} doc(s) outside its fence (listing at most ${CITATION_CARRIER_ROW_LIMIT}): ${listed}${tail}. Unlike a shifted manifest pin this is NOT repairable in lane — anchor-pin.mjs --repair rewrites the CITATION, so a doc outside the fence stays red and no seat may widen files_in_scope. Add to this lane's fence: ${docs.join(', ')}. ${CITATION_CARRIER_BLIND_SPOT}`
+        warning.text = carrierText
+        d.log(carrierText)
+      })
     }
 
     const reachRows = fenceHasCode ? testsOutsideFence({ surface: ownSurface, fenceFiles: ownFiles, reach: reachFor() }) : []
     if (reachRows.length > 0) {
       const listed = reachRows.slice(0, TEST_REACH_ROW_LIMIT).map(reachRowText).join('; ')
       const omitted = reachRows.length - Math.min(reachRows.length, TEST_REACH_ROW_LIMIT)
-      const tail = omitted > 0 ? `; ${omitted} further row(s) not listed here and carried on the report` : ''
-      const reachText = `${TEST_REACH_WARNING_PREFIX} lane ${name} changes file(s) reached by ${reachRows.length} test file(s) outside its fence, nearest first (listing at most ${TEST_REACH_ROW_LIMIT}): ${listed}${tail}; a named test is a file to READ before this fence is chosen, not a refusal. ${TEST_REACH_BLIND_SPOT}`
-      warnings.push({ kind: 'test-reach', lane: name, reach: reachRows, text: reachText })
-      d.log(reachText)
+      const warning = { kind: 'test-reach', lane: name, reach: reachRows, text: null }
+      warnings.push(warning)
+      deferredWarnings.push(() => {
+        const tail = reportTail(omitted, citation)
+        const reachText = `${TEST_REACH_WARNING_PREFIX} lane ${name} changes file(s) reached by ${reachRows.length} test file(s) outside its fence, least obvious first (listing at most ${TEST_REACH_ROW_LIMIT}): ${listed}${tail}; a named test is a file to READ before this fence is chosen, not a refusal. ${TEST_REACH_BLIND_SPOT}`
+        warning.text = reachText
+        d.log(reachText)
+      })
     }
+
+    reportLanes.push({ lane: name, test_reach: reachRows, citation_carriers: unfencedCarriers })
 
     const siblings = []
     for (const sibling of entries) {
@@ -1245,6 +1279,11 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
       siblings,
     }
   }
+  if (reportPath) {
+    const reportError = writeFenceReport({ path: reportPath, lanes: reportLanes, deps: d })
+    if (reportError) citation = `(report unavailable: ${reportError?.code || 'write-failed'})`
+  }
+  for (const renderWarning of deferredWarnings) renderWarning()
   // The other half of the invariant the membership loop above measures (#658): a register may
   // not be a SUPERSET of the batch it is dispatched with. A lane's sibling count is DERIVED
   // from batch size, so such a register can only ever be caught at boot, as
@@ -2438,7 +2477,8 @@ export async function dispatchBatch({ batchDir, fences, checkout, parentDir, out
   const { waves, graph } = planWaves({ lanes })
   const root = typeof checkout === 'string' && checkout.trim() ? checkout : process.cwd()
   const parent = typeof parentDir === 'string' && parentDir.trim() ? parentDir : dirname(resolve(root))
-  const fenceReport = checkFences({ fences, lanes, graph, checkout, externals, parentDir: parent, deps: d })
+  const outputDir = typeof outDir === 'string' && outDir.trim() ? resolve(outDir) : join(resolve(batchDir), 'out')
+  const fenceReport = checkFences({ fences, lanes, graph, checkout, externals, parentDir: parent, outDir: outputDir, deps: d })
   // Preflight BEFORE planWorktrees: planWorktrees probes git for existing
   // branches, so an unsupported --variant reached here after the probe and was
   // reported as `branch-taken` when the real cause was an invalid run option
@@ -2465,7 +2505,6 @@ export async function dispatchBatch({ batchDir, fences, checkout, parentDir, out
   const keep = runFlags['no-keep'] !== true
   const dryRun = runFlags['dry-run'] === true || runFlags.dryRun === true
   const batchSeats = batchSeatsFrom(runFlags)
-  const outputDir = typeof outDir === 'string' && outDir.trim() ? resolve(outDir) : join(resolve(batchDir), 'out')
   const registerPath = typeof registerOverride === 'string' && registerOverride.trim()
     ? resolve(registerOverride)
     : typeof runFlags.fences === 'string' && runFlags.fences.trim()

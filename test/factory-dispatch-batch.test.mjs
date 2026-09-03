@@ -19,6 +19,7 @@ import {
   ANCHOR_BLIND_SPOT,
   ANCHOR_PIN_WARNING_PREFIX,
   CITATION_CARRIER_BLIND_SPOT,
+  CITATION_CARRIER_ROW_LIMIT,
   CITATION_CARRIER_WARNING_PREFIX,
   citationCarriers,
   citationCarriersOutsideFence,
@@ -27,6 +28,7 @@ import {
   DRY_RUN_BLIND_SPOT,
   EXTERNAL_FENCE_PREFIX,
   EXTERNAL_REGISTER_NAME,
+  FENCE_REPORT_FILE,
   DISPATCH_ONLY_REQUEST_KEYS,
   MISCLASSIFIED_PREFIX,
   REQUEST_SUFFIX,
@@ -573,12 +575,13 @@ test('checkFences refuses an absent external lane by name', () => {
   assert.equal(error.message.includes('external-missing'), true)
 })
 
-function reachReport(checkout, fenceFiles = ['lib/widget.mjs'], surface = fenceFiles, deps = {}) {
+function reachReport(checkout, fenceFiles = ['lib/widget.mjs'], surface = fenceFiles, deps = {}, outDir) {
   const logs = []
   const report = checkFences({
     fences: [entry('lane-a', fenceFiles)],
     lanes: [{ lane: 'lane-a', where: surface }],
     checkout,
+    outDir,
     deps: { home: root, log: (line) => logs.push(String(line)), ...deps },
   })
   const warning = report.warnings.find((item) => item.kind === 'test-reach')
@@ -1007,12 +1010,13 @@ test('dispatchBatch logs test reach during dry-run without changing the outcome'
   mkdirSync(batch)
   put(join(batch, `lane-a${REQUEST_SUFFIX}`), JSON.stringify(request('measure reach warning', ['lib/widget.mjs'])))
   const logs = []
+  const outDir = join(checkout, 'reach-out')
   const report = await dispatchBatch({
     batchDir: batch,
     fences: [entry('lane-a', ['lib/widget.mjs'])],
     checkout,
     parentDir: join(checkout, 'parents'),
-    outDir: join(checkout, 'reach-out'),
+    outDir,
     runFlags: { 'dry-run': true },
     deps: {
       home: root,
@@ -1027,6 +1031,7 @@ test('dispatchBatch logs test reach during dry-run without changing the outcome'
   const warning = logs.find((line) => line.includes(TEST_REACH_WARNING_PREFIX))
   assert.ok(warning)
   assert.equal(warning.includes('test/twohop.test.mjs'), true)
+  assert.equal(fsExistsSync(join(outDir, FENCE_REPORT_FILE)), true)
 })
 
 test('symbol reach reports literal names and drops broad fan-out', () => {
@@ -1095,9 +1100,81 @@ test('test reach carries every row while warning text caps the listed rows', () 
   assert.ok(warning)
   assert.equal(rows.length, TEST_REACH_ROW_LIMIT + 2)
   assert.equal(warning.text.includes(`listing at most ${TEST_REACH_ROW_LIMIT}`), true)
-  assert.equal(warning.text.includes('2 further row(s) not listed here and carried on the report'), true)
+  assert.equal(warning.text.includes('2 further row(s) not listed here and carried in full on the report (report unavailable: no-out-dir)'), true)
   assert.equal(rows.filter((row) => row.hops === 1).length, TEST_REACH_ROW_LIMIT + 1)
   assert.equal(rows.find((row) => row.test === 'test/twohop.test.mjs')?.hops, 2)
+})
+
+test('test reach lists symbol-only rows before import rows when truncating', () => {
+  const directImports = Object.fromEntries(Array.from({ length: TEST_REACH_ROW_LIMIT }, (_, index) => [
+    `test/direct-value-${String(index).padStart(2, '0')}.test.mjs`, "import { widgetValue } from '../lib/widget.mjs'\nvoid widgetValue\n",
+  ]))
+  const checkout = reachFixture('row-limit-symbol-first', {
+    files: {
+      ...directImports,
+      'test/symbol-only.test.mjs': 'const seen = "widgetShape"\nif (!seen) throw new Error("x")\n',
+    },
+  })
+  const { warning, rows } = reachReport(checkout)
+  assert.ok(warning)
+  assert.equal(rows[0]?.hops, null)
+  assert.equal(rows[0]?.test, 'test/symbol-only.test.mjs')
+  assert.ok(warning.text.includes('test/symbol-only.test.mjs'))
+  const importRows = rows.filter((row) => row.hops !== null).map((row) => row.test)
+  assert.ok(importRows.some((file) => !warning.text.includes(file)))
+})
+
+test('checkFences writes every reach row and cites the report, including unavailable writes', () => {
+  const checkout = reachFixture('report', { extraDirect: TEST_REACH_ROW_LIMIT })
+  const outDir = join(checkout, 'warnings')
+  const { warning, rows } = reachReport(checkout, ['lib/widget.mjs'], ['lib/widget.mjs'], {}, outDir)
+  const reportPath = join(outDir, FENCE_REPORT_FILE)
+  assert.equal(fsExistsSync(reportPath), true)
+  assert.ok(warning.text.includes(reportPath))
+  const report = JSON.parse(readFileSync(reportPath, 'utf8'))
+  assert.equal(report.schema_version, 1)
+  assert.equal(report.lanes.length, 1)
+  assert.deepEqual(report.lanes[0].test_reach, rows)
+  assert.deepEqual(report.lanes[0].citation_carriers, [])
+
+  const noOut = reachReport(reachFixture('report-no-out', { extraDirect: TEST_REACH_ROW_LIMIT }))
+  assert.ok(noOut.warning.text.includes('report unavailable: no-out-dir'))
+
+  const failed = reachReport(reachFixture('report-write-failed', { extraDirect: TEST_REACH_ROW_LIMIT }), ['lib/widget.mjs'], ['lib/widget.mjs'], {
+    writeFileSync: () => { throw Object.assign(new Error('permission denied'), { code: 'EPERM' }) },
+  }, join(checkout, 'failed'))
+  assert.ok(failed.warning.text.includes('report unavailable: EPERM'))
+})
+
+test('checkFences records every carrier and cites its report from both warning kinds', () => {
+  const checkout = reachFixture('report-with-carriers', { extraDirect: TEST_REACH_ROW_LIMIT })
+  const key = 'lib/widget.mjs:1'
+  const expectedCarriers = Array.from({ length: CITATION_CARRIER_ROW_LIMIT + 1 }, (_, index) => ({
+    file: 'lib/widget.mjs',
+    doc: `skills/one/references/notes-${String(index).padStart(2, '0')}.md`,
+    keys: [key],
+  }))
+  put(join(checkout, 'skills', 'one', 'anchors.json'), JSON.stringify({ [key]: 'export const widgetValue = 1' }))
+  for (const { doc } of expectedCarriers) put(join(checkout, ...doc.split('/')), `Declared at \`${key}\`.\n`)
+  const outDir = join(checkout, 'warnings')
+  const report = checkFences({
+    fences: [entry('lane-a', ['lib/widget.mjs', 'skills/one/anchors.json'])],
+    lanes: [{ lane: 'lane-a', where: ['lib/widget.mjs', 'skills/one/anchors.json'] }],
+    checkout,
+    outDir,
+    deps: { home: root, log: () => {} },
+  })
+  const reach = report.warnings.find((row) => row.kind === 'test-reach')
+  const carriers = report.warnings.find((row) => row.kind === 'citation-carrier')
+  const reportPath = join(outDir, FENCE_REPORT_FILE)
+  assert.ok(reach)
+  assert.ok(carriers)
+  assert.ok(reach.text.includes(reportPath))
+  assert.ok(carriers.text.includes(reportPath))
+  const persisted = JSON.parse(readFileSync(reportPath, 'utf8'))
+  assert.deepEqual(persisted.lanes[0].test_reach, reach.reach)
+  assert.deepEqual(carriers.carriers, expectedCarriers)
+  assert.deepEqual(persisted.lanes[0].citation_carriers, expectedCarriers)
 })
 
 test('readBatch reads request JSON, normalises where paths, and sorts lanes', () => {

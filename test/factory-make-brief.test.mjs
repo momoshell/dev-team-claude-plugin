@@ -15,9 +15,10 @@ import {
   ACCEPTANCE_GATE_BLOCK, BROAD_KEY_HIT_LIMIT, CONVENTIONS_BLOCK, DEFAULT_PROTECTED_PATHS,
   DIRECTED_BLOCK, DIRECTED_GATE_NOTE, DIRECTED_KEYS, HOSTILE_ENV_BLOCK, LADDER_BANDS, OPTIONAL_REQUEST_KEYS,
   REFUSAL_REASONS, SLOT_MARKER, TIER_NAMES, crossCheckCoupling, readsToAcknowledge,
-  discoverTripwires, extractKeys, extractSymbols, gatherFences, gatherProtectedPaths, isTripwireFile, main,
+  discoverTripwires, exportEntries, extractKeys, extractSymbols, gatherFences, gatherProtectedPaths, isTripwireFile, main,
   MUTATION_CONTRACT_BLOCK, PACK_ABSENT_REASONS, PROPOSAL_BLOCK, PROPOSAL_KEYS, profileField, proposeTier,
-  readLadderBands, renderBrief, renderProposalBlock, resolveIntent, resolveWriteSurface, validateAsk, writePack,
+  readLadderBands, renderBrief, renderProposalBlock, resolveIntent, resolveWriteSurface, SYMBOL_INDEX_ENTRY_LIMIT,
+  SYMBOL_INDEX_ABSENT_REASONS, testTitleEntries, validateAsk, writePack,
   validateRequest, validateScopeEntries, verifyCreates, verifyWhere,
 } from '../scripts/factory/make-brief.mjs'
 import { PROPOSAL_BLOCK as EMIT_PROPOSAL_BLOCK, PROPOSAL_KEYS as EMIT_PROPOSAL_KEYS } from '../scripts/factory/emit.mjs'
@@ -308,6 +309,131 @@ test('pack mode moves boilerplate to sidecars and preserves the inline verdict',
       .sort()
     assert.ok(context.includes(`- ${dir}/ · ${entries.join(', ')}`), dir)
   }
+})
+
+test('packed context indexes exported declarations and fenced test titles with lines', () => {
+  const root = fixture('symbol-index-kinds')
+  put(root, 'lib/kinds.mjs', [
+    'export const KINDS_CONST = 1',
+    'export function kindsFunction() {}',
+    'export let kindsLet = 2',
+    'export class KindsClass {}',
+    'const kindsInner = 3',
+    'export { kindsInner as kindsAlias }',
+    '',
+  ].join('\n'))
+  put(root, 'test/kinds.test.mjs', [
+    "import { test, describe } from 'node:test'",
+    "describe('kinds group', () => {",
+    "  test(\"kinds function\", () => {})",
+    '})',
+    '',
+  ].join('\n'))
+  git(root, 'add', '-A')
+  const fencesPath = put(root, 'fences.json', `${JSON.stringify({ lanes: [
+    { lane: 'own', files: ['lib/kinds.mjs', 'test/kinds.test.mjs'] },
+  ] }, null, 2)}\n`)
+  const pack = join(root, 'pack')
+  mkdirSync(pack)
+  const { brief } = compile(root, { where: ['lib/kinds.mjs'] }, [
+    '--fences', fencesPath, '--lane', 'own', '--pack', pack,
+  ], 'kinds.brief.md')
+  const context = section(brief, '## Context pack')
+  assert.ok(context.includes('- lib/kinds.mjs · exports · KINDS_CONST:1, kindsFunction:2, kindsLet:3, KindsClass:4, kindsAlias:6'))
+  assert.ok(context.includes('- test/kinds.test.mjs · test titles · kinds group:2, kinds function:3'))
+  const symbols = join(pack, 'kinds.symbols.md')
+  assert.equal(existsSync(symbols), true)
+  assert.ok(readFileSync(symbols, 'utf8').includes('KINDS_CONST:1'))
+})
+
+test('the symbol index records closed absences and does not invent export rows', () => {
+  const root = fixture('symbol-index-absences')
+  put(root, 'lib/not-utf8.mjs', `export const brokenSymbol = 1\n${String.fromCharCode(0)}\n`)
+  put(root, 'lib/missing.mjs', 'export const missingSymbol = 1\n')
+  git(root, 'add', '-A')
+  rmSync(join(root, 'lib/missing.mjs'))
+  const fencesPath = put(root, 'fences.json', `${JSON.stringify({ lanes: [
+    { lane: 'own', files: ['lib/missing.mjs', 'lib/not-utf8.mjs'] },
+  ] }, null, 2)}\n`)
+  const pack = join(root, 'pack')
+  mkdirSync(pack)
+  const { brief } = compile(root, { where: ['lib/not-utf8.mjs'] }, [
+    '--fences', fencesPath, '--lane', 'own', '--pack', pack,
+  ], 'absences.brief.md')
+  const context = section(brief, '## Context pack')
+  assert.deepEqual(new Set(SYMBOL_INDEX_ABSENT_REASONS), new Set(['unreadable', 'not-text']))
+  assert.ok(context.includes('- lib/missing.mjs · unindexed · unreadable'))
+  assert.ok(context.includes('- lib/not-utf8.mjs · unindexed · not-text'))
+  assert.equal(context.includes('lib/missing.mjs · exports ·'), false)
+  assert.equal(context.includes('lib/not-utf8.mjs · exports ·'), false)
+})
+
+test('the inline symbol index is bounded while its sidecar retains the cut entries', () => {
+  const root = fixture('symbol-index-bound')
+  const count = SYMBOL_INDEX_ENTRY_LIMIT + 3
+  put(root, 'lib/big.mjs', `${Array.from({ length: count }, (_, index) => `export const boundSymbol${String(index).padStart(3, '0')} = ${index}`).join('\n')}\n`)
+  git(root, 'add', '-A')
+  const pack = join(root, 'pack')
+  mkdirSync(pack)
+  const { brief } = compile(root, { where: ['lib/big.mjs'] }, ['--pack', pack], 'bound.brief.md')
+  const context = section(brief, '## Context pack')
+  const row = context.split('\n').find((line) => line.startsWith('- lib/big.mjs · exports · '))
+  assert.ok(row)
+  assert.equal(row.slice('- lib/big.mjs · exports · '.length).split(', ').length, SYMBOL_INDEX_ENTRY_LIMIT)
+  const sidecar = join(pack, 'bound.symbols.md')
+  assert.ok(context.includes(`… and 3 more — full index: ${sidecar}`))
+  assert.ok(readFileSync(sidecar, 'utf8').includes('boundSymbol202:203'))
+})
+
+test('the inline symbol index shares one per-file budget between exports and test titles', () => {
+  const root = fixture('symbol-index-mixed-budget')
+  const file = 'test/mixed.test.mjs'
+  const exportCount = SYMBOL_INDEX_ENTRY_LIMIT + 1
+  const titleCount = SYMBOL_INDEX_ENTRY_LIMIT
+  put(root, file, [
+    ...Array.from({ length: exportCount }, (_, index) => `export const mixedHelper${String(index).padStart(3, '0')} = ${index}`),
+    ...Array.from({ length: titleCount }, (_, index) => `test('mixed title ${String(index).padStart(3, '0')}', () => {})`),
+    '',
+  ].join('\n'))
+  git(root, 'add', '-A')
+  const fencesPath = put(root, 'fences.json', `${JSON.stringify({ lanes: [
+    { lane: 'own', files: [file] },
+  ] }, null, 2)}\n`)
+  const pack = join(root, 'pack')
+  mkdirSync(pack)
+  const { brief } = compile(root, { where: [file] }, [
+    '--fences', fencesPath, '--lane', 'own', '--pack', pack,
+  ], 'mixed.brief.md')
+  const context = section(brief, '## Context pack')
+  const rows = context.split('\n').filter((line) =>
+    line.startsWith(`- ${file} · exports · `) || line.startsWith(`- ${file} · test titles · `))
+  const listed = rows.flatMap((line) => {
+    const entries = line.slice(line.lastIndexOf(' · ') + 3)
+    return entries.startsWith('not listed —') ? [] : entries.split(', ')
+  })
+  const sidecar = join(pack, 'mixed.symbols.md')
+  assert.ok(listed.length <= SYMBOL_INDEX_ENTRY_LIMIT)
+  assert.equal(listed.length, SYMBOL_INDEX_ENTRY_LIMIT)
+  assert.ok(context.includes(`… and 1 more — full index: ${sidecar}`))
+  assert.ok(context.includes(`- ${file} · test titles · not listed — the per-file budget of ${SYMBOL_INDEX_ENTRY_LIMIT} entries was spent`))
+  assert.ok(context.includes(`… and ${titleCount} more — full index: ${sidecar}`))
+  assert.ok(readFileSync(sidecar, 'utf8').includes(`mixed title ${String(titleCount - 1).padStart(3, '0')}:${exportCount + titleCount}`))
+})
+
+test('a packed no-code fence emits no symbol index', () => {
+  const root = fixture('symbol-index-no-code')
+  const file = 'config/thing.yml'
+  const fencesPath = put(root, 'fences.json', `${JSON.stringify({ lanes: [
+    { lane: 'own', files: [file] },
+  ] }, null, 2)}\n`)
+  const pack = join(root, 'pack')
+  mkdirSync(pack)
+  const { brief } = compile(root, { where: [file] }, [
+    '--fences', fencesPath, '--lane', 'own', '--pack', pack,
+  ], 'nocode.brief.md')
+  const context = section(brief, '## Context pack')
+  assert.equal(context.includes('symbol index'), false)
+  assert.equal(existsSync(join(pack, 'nocode.symbols.md')), false)
 })
 
 test('pack and issue-body flags refuse their missing prerequisites', () => {
@@ -2050,6 +2176,8 @@ test('extractSymbols is the exported-symbol half and tolerates object input', ()
     "const code = 'cache:miss'",
   ].join('\n') }
   assert.deepEqual(extractSymbols(source), ['PublicAlias', 'PublicValue', 'plain', 'runThing'])
+  const names = [...new Set(exportEntries(source).map((entry) => entry.name))].filter((name) => name.length >= 4).sort()
+  assert.deepEqual(extractSymbols(source), names)
   assert.deepEqual(extractSymbols("export const PublicValue = 1", 'docs/example.txt'), [])
 })
 

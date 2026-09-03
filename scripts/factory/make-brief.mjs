@@ -1451,18 +1451,23 @@ function normaliseSourceInput(source, filePath = '') {
   return { source, filePath }
 }
 
-function exportedSymbols(source) {
-  const symbols = new Set()
-  for (const match of source.matchAll(EXPORTED_DECLARATION)) symbols.add(match[1])
+function exportedSymbolEntries(source) {
+  const entries = []
+  const lineOf = (index) => source.slice(0, index).split('\n').length
+  for (const match of source.matchAll(EXPORTED_DECLARATION)) entries.push({ name: match[1], line: lineOf(match.index) })
   for (const match of source.matchAll(EXPORTED_LIST)) {
     for (const part of match[1].split(',')) {
       const item = part.trim()
       if (!item) continue
       const alias = item.match(/\bas\s+([A-Za-z_$][\w$]*)/) || item.match(/^([A-Za-z_$][\w$]*)/)
-      if (alias) symbols.add(alias[1])
+      if (alias) entries.push({ name: alias[1], line: lineOf(match.index) })
     }
   }
-  return symbols
+  return entries
+}
+
+function exportedSymbols(source) {
+  return new Set(exportedSymbolEntries(source).map((entry) => entry.name))
 }
 
 function isCodeFile(filePath) {
@@ -1474,8 +1479,31 @@ export function extractSymbols(source, filePath = '') {
   ({ source, filePath } = normaliseSourceInput(source, filePath))
   if (typeof source !== 'string') refuseUsage('source must be a string', WRONG_TYPE)
   if (!isCodeFile(filePath)) return []
-  return [...exportedSymbols(source)].filter((key) => key.length >= 4).sort()
+  const names = exportEntries(source, filePath).map((entry) => entry.name)
+  return [...new Set(names)].filter((key) => key.length >= 4).sort()
 }
+
+export function exportEntries(source, filePath = '') {
+  ({ source, filePath } = normaliseSourceInput(source, filePath))
+  if (typeof source !== 'string') refuseUsage('source must be a string', WRONG_TYPE)
+  if (!isCodeFile(filePath)) return []
+  return exportedSymbolEntries(source).sort((a, b) => a.line - b.line || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+}
+
+export function testTitleEntries(source, filePath = '') {
+  ({ source, filePath } = normaliseSourceInput(source, filePath))
+  if (typeof source !== 'string') refuseUsage('source must be a string', WRONG_TYPE)
+  if (!isCodeFile(filePath)) return []
+  const entries = []
+  for (const match of source.matchAll(TEST_TITLE)) {
+    entries.push({ title: match[2] ?? match[3], line: source.slice(0, match.index).split('\n').length })
+  }
+  return entries
+}
+
+const TEST_TITLE = /\b(test|describe|it)\s*\(\s*(?:'([^'\n]*)'|"([^"\n]*)")/g
+export const SYMBOL_INDEX_ENTRY_LIMIT = 200
+export const SYMBOL_INDEX_ABSENT_REASONS = Object.freeze(['unreadable', 'not-text'])
 
 export function extractKeys(source, filePath = '') {
   ({ source, filePath } = normaliseSourceInput(source, filePath))
@@ -1985,6 +2013,55 @@ function treeFor({ checkout, writeSurface }) {
   })
 }
 
+export function symbolIndexFor({ checkout, writeSurface, coupling } = {}) {
+  const rows = []
+  const seen = new Set()
+  const add = (file, label) => {
+    if (typeof file !== 'string' || !file.trim()) return
+    const normal = normaliseRepoPath(file)
+    if (seen.has(normal)) return
+    seen.add(normal)
+    if (!CODE_EXTENSIONS.includes(extname(normal).toLowerCase())) return
+    let source
+    try { source = readFileSync(resolve(checkout, normal), 'utf8') } catch {
+      rows.push({ file: normal, label, reason: 'unreadable', exports: [], titles: [] })
+      return
+    }
+    if (source.includes(String.fromCharCode(0))) {
+      rows.push({ file: normal, label, reason: 'not-text', exports: [], titles: [] })
+      return
+    }
+    rows.push({
+      file: normal,
+      label,
+      reason: null,
+      exports: exportEntries(source, normal),
+      titles: label === 'in fence' && isTripwireFile(normal) ? testTitleEntries(source, normal) : [],
+    })
+  }
+  for (const file of Array.isArray(writeSurface?.files) ? writeSurface.files : []) add(file, 'in fence')
+  for (const entry of Array.isArray(coupling?.coupled) ? coupling.coupled : []) add(entry?.file, 'coupled')
+  return rows
+}
+
+function renderSymbolSidecar(index) {
+  const rows = []
+  for (const entry of Array.isArray(index) ? index : []) {
+    if (entry.reason !== null) {
+      rows.push(`- ${entry.file} · unindexed · ${entry.reason}`)
+      continue
+    }
+    for (const [kind, all, render] of [
+      ['exports', entry.exports, (item) => `${item.name}:${item.line}`],
+      ['test titles', entry.titles, (item) => `${item.title}:${item.line}`],
+    ]) {
+      if (all.length === 0) continue
+      rows.push(`- ${entry.file} · ${kind} · ${all.map(render).join(', ')}`)
+    }
+  }
+  return ['symbol index (full static scan):', ...rows].join('\n')
+}
+
 export function writePack({ packDir, taskName, checkout, request, discovery, writeSurface, coupling, profile, issueBodyPath } = {}) {
   const directory = resolve(packDir)
   const name = String(taskName || 'brief')
@@ -1993,6 +2070,7 @@ export function writePack({ packDir, taskName, checkout, request, discovery, wri
     rows: join(directory, `${name}.tripwires.md`),
     conventions: join(directory, `${name}.conventions.md`),
     fixture: null,
+    symbols: join(directory, `${name}.symbols.md`),
   }
   const issue = issueFor(request, issueBodyPath)
   const journal = journalFor(request, directory, name)
@@ -2008,9 +2086,15 @@ export function writePack({ packDir, taskName, checkout, request, discovery, wri
   const keepGreen = readAndKeepGreenFiles(writeSurface, discovery)
   const lineCounts = lineCountsFor({ checkout: resolve(checkout || process.cwd()), writeSurface, coupling })
   const tree = treeFor({ checkout: resolve(checkout || process.cwd()), writeSurface })
+  const symbolIndex = symbolIndexFor({ checkout: resolve(checkout || process.cwd()), writeSurface, coupling })
   writeFileSync(paths.vocabulary, `${keyList(discovery).join('\n')}\n`)
   writeFileSync(paths.rows, `${renderTripwires(discovery)}\n`)
   writeFileSync(paths.conventions, `${conventionsFile(discovery, writeSurface, profile)}\n`)
+  if (symbolIndex.length > 0) {
+    writeFileSync(paths.symbols, `${renderSymbolSidecar(symbolIndex)}\n`)
+  } else {
+    paths.symbols = null
+  }
   if (paths.fixture) {
     const rows = journal.rows || []
     writeFileSync(paths.fixture, `${rows.join('\n')}\n`)
@@ -2028,6 +2112,7 @@ export function writePack({ packDir, taskName, checkout, request, discovery, wri
     journal: journal.descriptor,
     lineCounts,
     tree,
+    symbolIndex,
   }
 }
 
@@ -2064,6 +2149,37 @@ function renderConventionsSlot(writeSurface, pack) {
   return renderConventionsPointer(writeSurface, pack)
 }
 
+function renderSymbolIndex(pack) {
+  const index = Array.isArray(pack.symbolIndex) ? pack.symbolIndex : []
+  const symbolRows = []
+  for (const entry of index) {
+    if (entry.reason !== null) {
+      symbolRows.push(`- ${entry.file} · unindexed · ${entry.reason}`)
+      continue
+    }
+    let remaining = SYMBOL_INDEX_ENTRY_LIMIT
+    for (const [kind, all, render] of [
+      ['exports', entry.exports, (item) => `${item.name}:${item.line}`],
+      ['test titles', entry.titles, (item) => `${item.title}:${item.line}`],
+    ]) {
+      if (all.length === 0) continue
+      const limit = remaining
+      const listed = all.slice(0, limit)
+      if (limit === 0) {
+        symbolRows.push(`- ${entry.file} · ${kind} · not listed — the per-file budget of ${SYMBOL_INDEX_ENTRY_LIMIT} entries was spent`)
+        symbolRows.push(`  … and ${all.length} more — full index: ${pack.symbols}`)
+        continue
+      }
+      symbolRows.push(`- ${entry.file} · ${kind} · ${listed.map(render).join(', ')}`)
+      remaining -= listed.length
+      const more = all.length - listed.length
+      if (more > 0) symbolRows.push(`  … and ${more} more — full index: ${pack.symbols}`)
+    }
+  }
+  if (symbolRows.length === 0) return []
+  return [`symbol index (static scan — the same exported-symbol scan test-reach-unfenced runs; a symbol match is not a resolved import; at most ${SYMBOL_INDEX_ENTRY_LIMIT} entries listed per file):`, ...symbolRows]
+}
+
 function renderContextPack(pack) {
   if (pack == null) return []
   const lines = ['## Context pack']
@@ -2095,6 +2211,8 @@ function renderContextPack(pack) {
     rows.push(`- ${dir}/ · ${entries.join(', ')}${more ? ` (+${more} more)` : ''}`)
   }
   lines.push(...rows)
+  const symbolRows = renderSymbolIndex(pack)
+  if (symbolRows.length > 0) lines.push(...symbolRows)
   const journal = pack.journal || { path: null, rows: null, copied: 0, truncated: false, reason: NO_JOURNAL_NAMED }
   if (pack.fixture && journal.reason === null) {
     const truncation = journal.truncated ? ` (truncated from ${journal.rows} row(s))` : ''

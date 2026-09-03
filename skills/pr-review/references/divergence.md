@@ -2,7 +2,7 @@ Divergence is a signal, not a tie to be broken. When two reviewers land on the
 same line with different verdicts, the disagreement is **itself** a finding.
 First re-read the line. Then decide whether the reviewers are answering
 different questions — conformance versus correctness, the two questions the
-charter separates at `crew/roles/reviewer.md:12-18`. Record both positions even
+charter separates at `crew/roles/reviewer.md:18-24`. Record both positions even
 when one eventually wins the re-read.
 
 ## Recording a divergence

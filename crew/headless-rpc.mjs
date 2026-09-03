@@ -13,7 +13,7 @@ import { spawn as cpSpawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 
 import { assignmentLine } from './driver.mjs'
-import { shq, classifyRun, readEnvelopeOrThrow, updateCrewJson, attributeExit, decodeExitStatus, stderrTail } from './headless.mjs'
+import { shq, classifyRun, readEnvelopeOrThrow, updateCrewJson, attributeExit, decodeExitStatus, stderrTail, classifyToolCall, TOOL_CLASSES, CENSUS_ABSENT_CAUSES } from './headless.mjs'
 import { reclaimStore, PHASES, VERDICTS, EVIDENCE_KINDS, LIVENESS } from './reclaim.mjs'
 import { readJsonTri } from './json-leaf.mjs'
 import { PI_BUILTIN_TOOLS, PI_SUBAGENT_TOOL, translateDeny } from './adapters/adapter-pi.mjs'
@@ -167,6 +167,146 @@ export function foldRpcUsage(frames) {
   return measured ? total : null
 }
 
+export function newCensus() {
+  return {
+    turns: 0,
+    tool_calls: 0,
+    by_class: Object.fromEntries(TOOL_CLASSES.map((name) => [name, 0])),
+    suite_runs: 0,
+    distinct_files_read: 0,
+    re_reads: 0,
+    tool_spans_matched: 0,
+    tool_spans_unmatched: 0,
+    tool_spans_same_poll: 0,
+    in_tool_ms: Object.fromEntries(TOOL_CLASSES.map((name) => [name, 0])),
+    out_of_tool_ms: 0,
+    span_ms: 0,
+    clock_absent: null,
+    _calls_this_turn: 0,
+    _open: Object.create(null),
+    _files: new Set(),
+    _first_at: null,
+    _last_at: null,
+  }
+}
+
+export function foldCensusFrame(census, frame, at) {
+  if (!census || !frame || typeof frame !== 'object') return census
+  if (Number.isFinite(at)) {
+    if (census._first_at === null) census._first_at = at
+    census._last_at = at
+  }
+  if (frame.type === 'turn_start') census._calls_this_turn = 0
+  if (frame.type === 'tool_execution_start') {
+    census._calls_this_turn += 1
+    census.tool_calls += 1
+    const klass = classifyToolCall(frame.toolName, frame.args)
+    census.by_class[klass] += 1
+    census.suite_runs = census.by_class.test
+    const path = frame.args?.path ?? frame.args?.file_path ?? frame.args?.notebook_path
+    if (typeof path === 'string' && path.trim() !== '') {
+      if (census._files.has(path)) census.re_reads += 1
+      else { census._files.add(path); census.distinct_files_read += 1 }
+    }
+    if (Number.isFinite(at) && frame.toolCallId != null) {
+      census._open[frame.toolCallId] = { at, class: klass }
+    } else if (frame.toolCallId == null) {
+      census.tool_spans_unmatched += 1
+    }
+  }
+  if (frame.type === 'tool_execution_end') {
+    const start = census._open[frame.toolCallId]
+    if (start && at === start.at) { census.tool_spans_same_poll += 1; delete census._open[frame.toolCallId]; return census }
+    if (!start || !Number.isFinite(at) || at < start.at) {
+      census.tool_spans_unmatched += 1
+      if (start) delete census._open[frame.toolCallId]
+    } else {
+      census.in_tool_ms[start.class] += at - start.at
+      census.tool_spans_matched += 1
+      delete census._open[frame.toolCallId]
+    }
+  }
+  const callsThisTurn = census._calls_this_turn
+  if (frame.type === 'turn_end' && callsThisTurn > 0) census.turns += 1
+  return census
+}
+
+export function finaliseCensus(census) {
+  if (!census || typeof census !== 'object') return census
+  for (const id of Object.keys(census._open || {})) census.tool_spans_unmatched += 1
+  const firstAt = census._first_at
+  const lastAt = census._last_at
+  delete census._open
+  delete census._calls_this_turn
+  delete census._files
+  delete census._first_at
+  delete census._last_at
+  if (firstAt === null || lastAt === null) {
+    return {
+      ...census,
+      in_tool_ms: null, out_of_tool_ms: null, clock_absent: CENSUS_ABSENT_CAUSES.replay_no_frame_clock,
+      span_ms: null,
+    }
+  }
+  census.span_ms = lastAt - firstAt
+  if (census.tool_spans_matched === 0 && census.tool_spans_same_poll > 0) {
+    census.in_tool_ms = null
+    census.out_of_tool_ms = null
+    census.clock_absent = CENSUS_ABSENT_CAUSES.same_poll_boundary
+    return census
+  }
+  const inToolTotal = Object.values(census.in_tool_ms).reduce((total, value) => total + value, 0)
+  census.out_of_tool_ms = census.span_ms - inToolTotal
+  census.clock_absent = null
+  return census
+}
+
+function parsedRpcFrames(text) {
+  const frames = []
+  for (const line of String(text ?? '').split('\n')) {
+    if (!line.trim()) continue
+    try {
+      const frame = JSON.parse(line)
+      if (frame && typeof frame === 'object' && !Array.isArray(frame)) frames.push(frame)
+    } catch { /* truncated or diagnostic lines are inert */ }
+  }
+  return frames
+}
+
+function rpcCensusFrames(frames) {
+  const segments = []
+  const prelude = []
+  let current = null
+  for (const frame of frames) {
+    if (frame.type === 'agent_start') {
+      if (current) segments.push(current)
+      current = [...prelude, frame]
+      prelude.length = 0
+    } else if (current) {
+      current.push(frame)
+    } else {
+      prelude.push(frame)
+    }
+  }
+  if (current) segments.push(current)
+  else if (prelude.length > 0) segments.push(prelude)
+  return segments.map((segment) => finaliseCensus(segment.reduce((census, frame) => foldCensusFrame(census, frame, null), newCensus())))
+}
+
+export function rpcCensus(text) {
+  return rpcCensusFrames(parsedRpcFrames(text))
+}
+
+export function rpcStreamCensus(path, readFileSync, existsSync) {
+  try {
+    if (!existsSync(path)) return { censuses: [], absent_reason: CENSUS_ABSENT_CAUSES.stream_absent }
+    let text
+    try { text = readFileSync(path, 'utf8') } catch { return { censuses: [], absent_reason: CENSUS_ABSENT_CAUSES.stream_absent } }
+    if (parsedRpcFrames(text).length === 0) return { censuses: [], absent_reason: CENSUS_ABSENT_CAUSES.no_frames }
+    return { censuses: rpcCensus(text), absent_reason: null }
+  } catch { return { censuses: [], absent_reason: CENSUS_ABSENT_CAUSES.stream_absent } }
+}
+
 function addUsage(a, b) {
   if (b == null) return a
   if (a == null) return b
@@ -316,6 +456,37 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
     if (injectedLog) return injectedLog(value)
     try { write(join(paths.dir, 'journal.jsonl'), `${JSON.stringify(value)}\n`, { flag: 'a' }) } catch { /* diagnostics only */ }
   }
+  function journalTurnCensus(turn, seat) {
+    if (!turn || turn.censusJournalled) return
+    turn.censusJournalled = true
+    neverLoadBearing(() => {
+      const observed = turn.observed || {}
+      const noFrames = observed.frames === 0
+      const census = finaliseCensus(observed.census || newCensus())
+      const absentReason = noFrames ? CENSUS_ABSENT_CAUSES.no_frames : census.clock_absent
+      log({
+        at: now(),
+        seat_turn_census: {
+          role: turn.role,
+          dispatch_id: turn.id,
+          transport: 'headless-rpc',
+          turns: noFrames ? null : census.turns,
+          tool_calls: noFrames ? null : census.tool_calls,
+          distinct_files_read: noFrames ? null : census.distinct_files_read,
+          suite_runs: noFrames ? null : census.suite_runs,
+          re_reads: noFrames ? null : census.re_reads,
+          by_class: noFrames ? null : census.by_class,
+          in_tool_ms: noFrames ? null : census.in_tool_ms,
+          out_of_tool_ms: noFrames ? null : census.out_of_tool_ms,
+          span_ms: noFrames ? null : census.span_ms,
+          tool_spans_matched: noFrames ? null : census.tool_spans_matched,
+          tool_spans_unmatched: noFrames ? null : census.tool_spans_unmatched,
+          tool_spans_same_poll: noFrames ? null : census.tool_spans_same_poll,
+          absent_reason: absentReason,
+        },
+      })
+    })
+  }
   function seatDir(role) { return join(root, role) }
   function seatFile(role, name) { return join(seatDir(role), name) }
   function sessionPath(role) { return seatFile(role, 'session.json') }
@@ -416,6 +587,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
       // b360 corpse's real last frame is lost again.
       obs.lastType = typeof frame.type === 'string' ? frame.type : null
       obs.lastAt = at
+      foldCensusFrame(obs.census, frame, at)
       // MUTATION A2: count agent_start rather than turn_start and the turn
       // index collapses to 1 — "turn 13 of a 10-minute turn" stops being said.
       if (frame.type === 'turn_start') obs.turns += 1
@@ -562,7 +734,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
     const offset = fileSize(seat.stream)
     seat.readOffset = offset; seat.rest = Buffer.alloc(0); seat.responses.clear()
     const prompt = assignmentLine({ id, role, briefFile, returnPath, taskDir: taskDir || paths.taskDir }) + (note ? `\n${note}` : '')
-    const turn = { id, runId, role, returnPath, prompt, retries: 0, offset, usage: null, state: { sawJson: false, settled: false, ended: false }, observed: { frames: 0, turns: 0, lastType: null, lastAt: null, lastTool: null, lastToolAt: null }, sentAt: now() }
+    const turn = { id, runId, role, returnPath, prompt, retries: 0, offset, usage: null, state: { sawJson: false, settled: false, ended: false }, observed: { frames: 0, turns: 0, lastType: null, lastAt: null, lastTool: null, lastToolAt: null, census: newCensus() }, censusJournalled: false, sentAt: now() }
     seat.turn = turn
     const promptId = send(seat, { type: 'prompt', message: prompt, id: runId }, 'prompt')
     turn.promptId = promptId
@@ -714,7 +886,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
       const frames = pollSeat(seat)
       for (const frame of frames) {
         if (frame?.type === 'response' && frame.command === 'parse' && frame.success === false) {
-          emitUsage(turn, seat, turn.usage); finishTurn(seat); throw staged('rpc-parse-error', `rpc parse failed: ${frame.error || 'malformed input'}`, turn.role)
+          emitUsage(turn, seat, turn.usage); journalTurnCensus(turn, seat); finishTurn(seat); throw staged('rpc-parse-error', `rpc parse failed: ${frame.error || 'malformed input'}`, turn.role)
         }
         if (frame?.type === 'response' && frame.id === turn.promptId && frame.success === false) {
           if (isBusyRefusal(frame) && turn.retries < PROMPT_REFUSAL_RETRIES) {
@@ -730,7 +902,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
             log({ at: now(), rpc_prompt_retry: { role: turn.role, id: turn.id, attempt: turn.retries } })
             continue waitLoop
           }
-          emitUsage(turn, seat, turn.usage); finishTurn(seat); throw responseError(turn.role, frame)
+          emitUsage(turn, seat, turn.usage); journalTurnCensus(turn, seat); finishTurn(seat); throw responseError(turn.role, frame)
         }
       }
       // An UNREADABLE envelope is TERMINAL and an ABSENT one is not: the one
@@ -742,6 +914,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
       catch (err) {
         log({ at: now(), rpc_outcome: 'parse-error', role: turn.role, id: turn.id })
         emitUsage(turn, seat, turn.usage)
+        journalTurnCensus(turn, seat)
         finishTurn(seat)
         throw err
       }
@@ -751,6 +924,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
         log({ at: now(), rpc_outcome: outcome, role: turn.role, id: turn.id, exit_code: exitCode })
         journalExitContext({ seat, turn, outcome, exitCode, envelope: env, groupBefore: null })
         emitUsage(turn, seat, turn.usage)
+        journalTurnCensus(turn, seat)
         finishTurn(seat)
         return env
       }
@@ -758,6 +932,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
         const outcome = classifyRun({ exitCode, signal: null, terminal: turn.state.settled, sawJson: turn.state.sawJson, envelope: null, timedOut: false })
         journalExitContext({ seat, turn, outcome, exitCode, envelope: null, groupBefore: probeGroup(seat) })
         emitUsage(turn, seat, turn.usage)
+        journalTurnCensus(turn, seat)
         finishTurn(seat)
         throw staged(`rpc-${outcome}`, `rpc ${outcome}: seat ${turn.role} produced no envelope at ${returnPath}`, turn.role)
       }
@@ -768,6 +943,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
         } catch { /* ADR-026: instrumentation is never load-bearing */ }
         try { log({ at: now(), rpc_outcome: 'no-envelope', role: turn.role, id: turn.id, degraded: true }) } catch { /* diagnostics only */ }
         emitUsage(turn, seat, turn.usage)
+        journalTurnCensus(turn, seat)
         finishTurn(seat)
         return emptyTurnEnvelope({ id: turn.id, role: turn.role, returnPath })
       }
@@ -782,6 +958,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
     pollSeat(seat)
     journalExitContext({ seat, turn, outcome: 'timeout', exitCode: parseExit(seat.exit, read, exists), envelope: null, groupBefore })
     emitUsage(turn, seat, turn.usage)
+    journalTurnCensus(turn, seat)
     finishTurn(seat)
     if (discardSeat) {
       try { closeFd(seat.fd) } catch { /* the fd belongs to a group that is gone */ }

@@ -1,8 +1,4 @@
 {
-  "crew/roles/reviewer.md:12": "2. Judge two separate questions, in order:",
-  "crew/roles/reviewer.md:14": "Out-of-plan edits are findings even when harmless.",
-  "crew/roles/reviewer.md:41": "\"details\": { \"review_path\": \"<abs>\", \"verdict\": \"pass\"|\"changes-needed\",",
-  "crew/roles/reviewer.md:55": "`findings` is optional: omit it and the run behaves exactly as before.",
   "crew/drive.mjs:2067": "for (const match of narration.matchAll(/[A-Za-z0-9_.-]+\\/[A-Za-z0-9_./-]+/g)) {",
   "crew/drive.mjs:1373": "export function validateScopeEntries(entries) {",
   "crew/drive.mjs:319": "export function panelSeats(seated) {",
@@ -14,5 +10,9 @@
   "crew/escalation-policy.mjs:81": "export function fuseFindings(a, b, options = {}) {",
   "crew/escalation-policy.mjs:128": "export function adjudicatePanel(divergent, details) {",
   "crew/crew.mjs:1191": "excludedBy = shadowExclusion('vendor-collision'",
-  "crew/child.mjs:266": "The daemon's regrant hook is the sole caller that sets continuation:"
+  "crew/child.mjs:266": "The daemon's regrant hook is the sole caller that sets continuation:",
+  "crew/roles/reviewer.md:47": "\"details\": { \"review_path\": \"<abs>\", \"verdict\": \"pass\"|\"changes-needed\",",
+  "crew/roles/reviewer.md:61": "`findings` is optional: omit it and the run behaves exactly as before.",
+  "crew/roles/reviewer.md:18": "2. Judge two separate questions, in order:",
+  "crew/roles/reviewer.md:20": "Out-of-plan edits are findings even when harmless."
 }

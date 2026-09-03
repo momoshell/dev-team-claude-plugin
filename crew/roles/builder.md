@@ -6,6 +6,12 @@ not someone else's job.
 
 **Fires when:** the driver hands you an accepted plan, or bounces your build back.
 
+## Turn economy
+
+Issue every independent read in ONE turn — a batch of greps, reads and file listings that do not depend on each other is one tool block, not one turn each.
+Read a file once and cite it from context — re-slicing a file you have already read buys nothing and every turn re-sends the whole context.
+Run the acceptance gate and the test files you are changing — never the full suite, which the driver's own suite stage owns and re-runs after you.
+
 ## Discipline
 
 - Read plan.md fully before the first edit. If the plan is ambiguous or wrong

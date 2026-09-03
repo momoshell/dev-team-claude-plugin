@@ -137,6 +137,55 @@ export function assignmentLine({ id, role, briefFile, returnPath, taskDir }) {
   return line
 }
 
+// --- assignment delivery and its cost ----------------------------------------
+export const DELIVERY_MODES = Object.freeze(['path', 'inline'])
+
+export function assignmentPrompt({ id, role, briefFile, returnPath, taskDir, delivery = 'path', briefText = null }) {
+  if (!DELIVERY_MODES.includes(delivery)) {
+    throw new Error('assignmentPrompt: delivery must be one of path, inline')
+  }
+  if (delivery === 'path') return assignmentLine({ id, role, briefFile, returnPath, taskDir })
+
+  assertToken('id', id)
+  assertToken('role', role)
+  assertPathValue('taskDir', taskDir)
+  assertPathValue('returnPath', returnPath)
+  if (typeof briefText !== 'string' || briefText.length === 0) {
+    throw new Error('assignmentPrompt: briefText must be a non-empty string')
+  }
+  const head = `ASSIGNMENT ${id}: your brief is inlined below, in full — nothing to read first. Task dir: ${taskDir}. Write your ReturnEnvelope to ${returnPath} then print exactly: CREW-DONE ${role} ${id}`
+  // This result is a prompt-delivery seam, not a typed pane line: its rich,
+  // multi-line content is deliberately not passed through assertSafeLine.
+  return [head, '--- BRIEF BEGINS ---', briefText, '--- BRIEF ENDS ---'].join('\n')
+}
+
+export function briefIngestCommands({ stream, briefFile } = {}) {
+  if (typeof briefFile !== 'string' || briefFile.length === 0) {
+    throw new Error('briefIngestCommands: briefFile must be a non-empty string')
+  }
+  const text = typeof stream === 'string' ? stream : stream == null ? '' : String(stream)
+  const tail = briefFile.split('/').pop()
+  let rows = 0
+  let unparsed = 0
+  const commands = []
+  for (const line of text.split('\n')) {
+    if (!line.trim()) continue
+    rows += 1
+    let parsed
+    try { parsed = JSON.parse(line) } catch { unparsed += 1; continue }
+    const content = parsed?.message?.content
+    if (!Array.isArray(content)) continue
+    for (const entry of content) {
+      if (entry?.type !== 'tool_use' || entry?.name !== 'Bash') continue
+      const command = entry?.input?.command
+      if (typeof command !== 'string') continue
+      if (!command.includes(briefFile) && !command.includes(tail)) continue
+      commands.push(command)
+    }
+  }
+  return { rows, unparsed, commands }
+}
+
 function readScreen(surfaceId, cmuxFn = cmux) {
   const res = cmuxFn('read-screen', ['--surface', surfaceId, '--lines', '40'])
   if (!res.ok) return null

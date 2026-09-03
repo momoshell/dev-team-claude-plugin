@@ -38,7 +38,7 @@
 // filename.
 
 import {
-  existsSync, lstatSync, readFileSync, realpathSync, readdirSync, statSync, writeFileSync,
+  existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, readdirSync, statSync, writeFileSync,
 } from 'node:fs'
 import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -703,18 +703,6 @@ export function discoverTripwires({ checkout, files }) {
     }
   }
 
-  // The owner-path mention is intentionally unbounded: it only narrows the
-  // exported-symbol coupling set, never the existing broad-key tripwire set.
-  const mentionsByOwner = new Map()
-  for (const owner of [...ownerFiles].sort()) {
-    const mentions = new Set([
-      ...grepHits(checkout, owner),
-      ...grepHits(checkout, basename(owner)),
-    ])
-    mentions.delete(owner)
-    mentionsByOwner.set(owner, mentions)
-  }
-
   // Check 1: seed coupling with each owner's OWN repo path and basename, so a
   // non-test code file that only CITES a fenced path — in a comment, sharing no
   // exported symbol — surfaces through the same coupled-source flow (#327).
@@ -729,11 +717,23 @@ export function discoverTripwires({ checkout, files }) {
     }
   }
 
+  const hitsByKey = grepHitsForKeys(repoRoot, [...allKeys]), mentionsByOwner = new Map()
+  // The owner-path mention is intentionally unbounded: it only narrows the
+  // exported-symbol coupling set, never the existing broad-key tripwire set.
+  for (const owner of [...ownerFiles].sort()) {
+    const mentions = new Set([
+      ...(hitsByKey.get(owner) || []),
+      ...(hitsByKey.get(basename(owner)) || []),
+    ])
+    mentions.delete(owner)
+    mentionsByOwner.set(owner, mentions)
+  }
+
   const tripwireMap = new Map()
   const coupledMap = new Map()
   const broadKeys = []
   for (const key of [...allKeys].sort()) {
-    const hits = grepHits(checkout, key)
+    const hits = hitsByKey.get(key) || []
     if (hits.length > BROAD_KEY_LIMIT) {
       broadKeys.push({ key, count: hits.length })
       continue
@@ -1489,21 +1489,95 @@ export function extractKeys(source, filePath = '') {
   return [...keys].filter((key) => key.length >= 4).sort()
 }
 
-function grepHits(checkout, key) {
+function trackedFiles(checkout) {
   let result
   try {
-    result = spawnSync('git', ['-C', checkout, 'grep', '-l', '-F', '-e', key, '--', '.'], {
+    result = spawnSync('git', ['-C', checkout, 'ls-files', '-z', '--', '.'], {
       encoding: 'utf8',
       timeout: 30_000,
     })
   } catch {
-    return []
+    refuseUsage('cannot list tracked files for tripwire keys', NOT_A_GIT_REPO)
   }
-  if (!result || (result.status !== 0 && result.status !== 1)) return []
+  if (!result || result.status !== 0) {
+    refuseUsage('cannot list tracked files for tripwire keys', NOT_A_GIT_REPO)
+  }
   return String(result.stdout || '')
-    .split(/\r?\n/)
-    .map((line) => normaliseRepoPath(line.trim()))
+    .split('\0')
+    .map((file) => normaliseRepoPath(file))
     .filter(Boolean)
+}
+
+function trackedFileText(checkout, file) {
+  const target = resolve(checkout, file)
+  let metadata
+  try { metadata = lstatSync(target) } catch (error) {
+    if (error?.code === 'ENOENT' || error?.code === 'ENOTDIR') return null
+    refuseUsage(`cannot inspect tracked file for tripwire keys: ${file}`, MISSING_PATH)
+  }
+  // git grep ignores symlinks, gitlinks, and every other non-regular entry.
+  if (!metadata.isFile()) return null
+  try { return readFileSync(target, 'utf8') } catch (error) {
+    // A regular entry can disappear or become a directory after lstatSync.
+    if (error?.code === 'ENOENT' || error?.code === 'ENOTDIR' || error?.code === 'EISDIR') return null
+    refuseUsage(`cannot read tracked file for tripwire keys: ${file}`, MISSING_PATH)
+  }
+}
+
+function keyMatcher(keys) {
+  const root = { next: new Map(), failure: null, output: null, keys: [] }
+  for (const key of keys) {
+    let node = root
+    for (let index = 0; index < key.length; index += 1) {
+      const character = key[index]
+      if (!node.next.has(character)) node.next.set(character, { next: new Map(), failure: null, output: null, keys: [] })
+      node = node.next.get(character)
+    }
+    node.keys.push(key)
+  }
+  const queue = []
+  for (const node of root.next.values()) {
+    node.failure = root
+    queue.push(node)
+  }
+  for (let index = 0; index < queue.length; index += 1) {
+    const node = queue[index]
+    for (const [character, child] of node.next) {
+      let failure = node.failure
+      while (failure !== root && !failure.next.has(character)) failure = failure.failure
+      child.failure = failure.next.get(character) || root
+      child.output = child.failure.keys.length > 0 ? child.failure : child.failure.output
+      queue.push(child)
+    }
+  }
+  return (source) => {
+    const found = new Set()
+    let node = root
+    for (let index = 0; index < source.length; index += 1) {
+      const character = source[index]
+      while (node !== root && !node.next.has(character)) node = node.failure
+      node = node.next.get(character) || root
+      for (let match = node; match !== null; match = match.output) {
+        for (const key of match.keys) found.add(key)
+      }
+    }
+    return found
+  }
+}
+
+function grepHitsForKeys(checkout, keys) {
+  // Generated modules can put one `-e` per key past ARG_MAX; scan the tracked
+  // files once in-process so a failed exec can never become an empty discovery.
+  const wanted = [...new Set(keys.filter((key) => typeof key === 'string' && key.length > 0))]
+  if (wanted.length === 0) return new Map()
+  const hits = new Map(wanted.map((key) => [key, new Set()]))
+  const match = keyMatcher(wanted)
+  for (const file of trackedFiles(checkout)) {
+    const contents = trackedFileText(checkout, file)
+    if (contents === null) continue
+    for (const key of match(contents)) hits.get(key).add(file)
+  }
+  return new Map([...hits].map(([key, paths]) => [key, [...paths].sort()]))
 }
 
 const BASELINE_UNREADABLE = 'unreadable-baseline'
@@ -1786,6 +1860,251 @@ function renderConventions(profileConventions) {
   return `conventions of record (basis: ${profileConventions.basis}): ${files.length ? files.join(', ') : '(none)'}`
 }
 
+const NO_ISSUE_CITED = 'no-issue-cited'
+const NO_ISSUE_BODY = 'no-issue-body-supplied'
+const ISSUE_BODY_UNREADABLE = 'issue-body-unreadable'
+const NO_JOURNAL_NAMED = 'no-journal-named'
+const JOURNAL_UNREADABLE = 'journal-unreadable'
+export const PACK_ABSENT_REASONS = Object.freeze([NO_ISSUE_CITED, NO_ISSUE_BODY, ISSUE_BODY_UNREADABLE, NO_JOURNAL_NAMED, JOURNAL_UNREADABLE])
+const TREE_ENTRY_LIMIT = 40
+const FIXTURE_ROW_LIMIT = 500
+const ISSUE_CITATION = /#(\d{1,6})\b/
+const JOURNAL_CITATION = /\/[A-Za-z0-9._\-/]+\.jsonl\b/g
+
+function readAndKeepGreenFiles(writeSurface, discovery) {
+  const writable = new Set(Array.isArray(writeSurface?.files)
+    ? writeSurface.files.map((file) => normaliseRepoPath(file))
+    : [])
+  return (Array.isArray(discovery?.candidates) ? discovery.candidates : [])
+    .map((file) => normaliseRepoPath(file))
+    .filter((file, index, files) => !writable.has(file) && files.indexOf(file) === index)
+    .sort()
+}
+
+function conventionsFile(discovery, writeSurface, profile) {
+  const surface = renderWriteSurface(writeSurface, discovery).split('\n')[1]
+    || 'read-and-keep-green (discovered tripwire surface — pinned by keys you touch; do not edit): (none)'
+  return [surface, renderConventions(profile?.conventions), generatedGrep(discovery), CONVENTIONS_BLOCK].join('\n')
+}
+
+function issueFor(request, issueBodyPath) {
+  const match = typeof request?.ask === 'string' ? ISSUE_CITATION.exec(request.ask) : null
+  if (!match) return { number: null, body: null, reason: NO_ISSUE_CITED }
+  const number = Number(match[1])
+  if (typeof issueBodyPath !== 'string' || issueBodyPath.length === 0) {
+    return { number, body: null, reason: NO_ISSUE_BODY }
+  }
+  let body
+  try { body = readFileSync(resolve(issueBodyPath), 'utf8') } catch {
+    return { number, body: null, reason: ISSUE_BODY_UNREADABLE }
+  }
+  if (typeof body !== 'string' || body.trim().length === 0) {
+    return { number, body: null, reason: ISSUE_BODY_UNREADABLE }
+  }
+  return { number, body: body.replace(/[\r\n]+$/, ''), reason: null }
+}
+
+function journalCitations(request) {
+  const citations = []
+  for (const field of ['ask', 'done_means', 'out_of_scope']) {
+    const text = typeof request?.[field] === 'string' ? request[field] : ''
+    for (const match of text.matchAll(JOURNAL_CITATION)) citations.push(match[0])
+  }
+  return citations
+}
+
+function journalFor(request, packDir, taskName) {
+  const citations = journalCitations(request)
+  if (citations.length === 0) {
+    return {
+      descriptor: { path: null, rows: null, copied: 0, truncated: false, reason: NO_JOURNAL_NAMED },
+      rows: null,
+    }
+  }
+  for (const path of citations) {
+    let source
+    try { source = readFileSync(path, 'utf8') } catch { continue }
+    const allRows = source.split('\n')
+    if (allRows.at(-1) === '') allRows.pop()
+    const rows = allRows.slice(0, FIXTURE_ROW_LIMIT)
+    return {
+      descriptor: {
+        path,
+        rows: allRows.length,
+        copied: rows.length,
+        truncated: allRows.length > FIXTURE_ROW_LIMIT,
+        reason: null,
+      },
+      rows,
+      fixture: join(packDir, 'fixtures', `${taskName}.jsonl`),
+    }
+  }
+  return {
+    descriptor: { path: citations[0], rows: null, copied: 0, truncated: false, reason: JOURNAL_UNREADABLE },
+    rows: null,
+  }
+}
+
+function lineCountsFor({ checkout, writeSurface, coupling }) {
+  const files = []
+  const seen = new Set()
+  const add = (file, label) => {
+    if (typeof file !== 'string' || !file.trim()) return
+    const normal = normaliseRepoPath(file)
+    if (seen.has(normal)) return
+    seen.add(normal)
+    let lines = null
+    try { lines = readFileSync(resolve(checkout, normal), 'utf8').split('\n').length } catch { /* unreadable source is carried as unknown */ }
+    files.push({ file: normal, lines, label })
+  }
+  for (const file of Array.isArray(writeSurface?.files) ? writeSurface.files : []) add(file, 'in fence')
+  for (const entry of Array.isArray(coupling?.coupled) ? coupling.coupled : []) add(entry?.file, 'coupled')
+  return files
+}
+
+function treeFor({ checkout, writeSurface }) {
+  const directories = [...new Set((Array.isArray(writeSurface?.files) ? writeSurface.files : [])
+    .filter((file) => typeof file === 'string' && file.trim())
+    .map((file) => dirname(normaliseRepoPath(file).replace(/\/+$/, ''))))].sort()
+  return directories.map((dir) => {
+    const base = resolve(checkout, dir)
+    let names
+    try { names = readdirSync(base) } catch { return { dir, entries: [], more: 0 } }
+    const listed = names
+      .map((name) => typeof name === 'string' ? name : name?.name)
+      .filter((name) => typeof name === 'string')
+      .sort()
+      .map((name) => {
+        try { return statSync(join(base, name)).isDirectory() ? `${name}/` : name } catch { return name }
+      })
+    return {
+      dir,
+      entries: listed.slice(0, TREE_ENTRY_LIMIT),
+      more: Math.max(0, listed.length - TREE_ENTRY_LIMIT),
+    }
+  })
+}
+
+export function writePack({ packDir, taskName, checkout, request, discovery, writeSurface, coupling, profile, issueBodyPath } = {}) {
+  const directory = resolve(packDir)
+  const name = String(taskName || 'brief')
+  const paths = {
+    vocabulary: join(directory, `${name}.tripwires.txt`),
+    rows: join(directory, `${name}.tripwires.md`),
+    conventions: join(directory, `${name}.conventions.md`),
+    fixture: null,
+  }
+  const issue = issueFor(request, issueBodyPath)
+  const journal = journalFor(request, directory, name)
+  if (journal.fixture) {
+    paths.fixture = journal.fixture
+    try {
+      mkdirSync(join(directory, 'fixtures'))
+    } catch (error) {
+      if (error?.code !== 'EEXIST') throw error
+    }
+  }
+  const keys = keyList(discovery)
+  const keepGreen = readAndKeepGreenFiles(writeSurface, discovery)
+  const lineCounts = lineCountsFor({ checkout: resolve(checkout || process.cwd()), writeSurface, coupling })
+  const tree = treeFor({ checkout: resolve(checkout || process.cwd()), writeSurface })
+  writeFileSync(paths.vocabulary, `${keyList(discovery).join('\n')}\n`)
+  writeFileSync(paths.rows, `${renderTripwires(discovery)}\n`)
+  writeFileSync(paths.conventions, `${conventionsFile(discovery, writeSurface, profile)}\n`)
+  if (paths.fixture) {
+    const rows = journal.rows || []
+    writeFileSync(paths.fixture, `${rows.join('\n')}\n`)
+  }
+  return {
+    ...paths,
+    counts: {
+      candidates: Array.isArray(discovery?.candidates) ? discovery.candidates.length : 0,
+      tripwires: Array.isArray(discovery?.tripwires) ? discovery.tripwires.length : 0,
+      broadKeys: Array.isArray(discovery?.broadKeys) ? discovery.broadKeys.length : 0,
+      keys: keys.length,
+      readAndKeepGreen: keepGreen.length,
+    },
+    issue,
+    journal: journal.descriptor,
+    lineCounts,
+    tree,
+  }
+}
+
+function renderTripwirePointer(discovery, pack) {
+  if (pack == null) return renderTripwires(discovery)
+  const counts = pack.counts || {}
+  const paths = pack
+  return [
+    `tripwires: ${counts.candidates ?? 0} candidate(s) · ${counts.tripwires ?? 0} tripwire test(s) · ${counts.broadKeys ?? 0} broad key(s) · ${counts.keys ?? 0} vocabulary key(s)`,
+    `vocabulary: ${paths.vocabulary} — consume it once with: grep -rn -f ${paths.vocabulary} crew/ test/ scripts/ docs/`,
+    `rows: ${paths.rows} — every candidate, tripwire test with its keys, and broad key; read it once with: cat ${paths.rows}`,
+  ].join('\n')
+}
+
+function renderTripwireSlot(discovery, pack) {
+  return renderTripwirePointer(discovery, pack)
+}
+
+function renderConventionsPointer(writeSurface, pack) {
+  if (pack == null) return renderWriteSurface(writeSurface, writeSurface?.__discovery || null)
+  const files = Array.isArray(writeSurface?.files) ? writeSurface.files : []
+  const listedFiles = files.length ? files.join(', ') : '(none)'
+  const basis = writeSurface?.basis === 'fences'
+    ? `fence register, lane "${writeSurface.lane}"`
+    : 'authored where paths, no lane fence applied'
+  const count = pack.counts?.readAndKeepGreen ?? 0
+  return [
+    `files_in_scope (expected write surface; basis: ${basis}): ${listedFiles}`,
+    `conventions: ${pack.conventions} — the read-and-keep-green surface (${count} file(s)), the conventions of record, the declare-every-hit grep and the standing factory conventions; read it once with: cat ${pack.conventions}`,
+  ].join('\n')
+}
+
+function renderConventionsSlot(writeSurface, pack) {
+  return renderConventionsPointer(writeSurface, pack)
+}
+
+function renderContextPack(pack) {
+  if (pack == null) return []
+  const lines = ['## Context pack']
+  const issue = pack.issue || { number: null, body: null, reason: NO_ISSUE_CITED }
+  if (issue.number === null) {
+    lines.push(`issue: (none) — basis: ${issue.reason}`)
+  } else {
+    if (typeof issue.body === 'string') {
+      const body = issue.body
+      lines.push(`issue: #${issue.number} · body inlined below`)
+      lines.push(`--- ISSUE ${issue.number} BODY ---`)
+      lines.push(body)
+      lines.push(`--- END ISSUE ${issue.number} BODY ---`)
+    } else {
+      lines.push(`issue: #${issue.number} · body unavailable — basis: ${issue.reason}`)
+    }
+  }
+  const lineCounts = Array.isArray(pack.lineCounts) ? pack.lineCounts : []
+  const rows = []
+  lines.push('line counts:')
+  for (const { file, lines: count, label } of lineCounts) {
+    if (count === null) rows.push(`- ${file} · (unreadable) · ${label}`)
+    else rows.push(`- ${file} · ${count} lines · ${label}`)
+  }
+  lines.push(...rows)
+  rows.length = 0
+  lines.push('tree (one level, directories named by the fence):')
+  for (const { dir, entries, more } of Array.isArray(pack.tree) ? pack.tree : []) {
+    rows.push(`- ${dir}/ · ${entries.join(', ')}${more ? ` (+${more} more)` : ''}`)
+  }
+  lines.push(...rows)
+  const journal = pack.journal || { path: null, rows: null, copied: 0, truncated: false, reason: NO_JOURNAL_NAMED }
+  if (pack.fixture && journal.reason === null) {
+    const truncation = journal.truncated ? ` (truncated from ${journal.rows} row(s))` : ''
+    lines.push(`fixture rows: ${pack.fixture} · ${journal.copied} row(s) copied from ${journal.path}${truncation} — read it once with: cat ${pack.fixture}`)
+  } else {
+    lines.push(`fixture rows: (none) — basis: ${journal.reason}`)
+  }
+  return lines
+}
+
 function renderValidation(baseline, discovery) {
   const tests = discovery.tripwires.map((tripwire) => tripwire.file).sort()
   const narrow = tests.length ? `node --test ${tests.join(' ')}` : 'no tripwire tests discovered'
@@ -1805,10 +2124,12 @@ export function renderBrief(gathered) {
   const baseline = gathered.baseline || { lane: null, pass: null, fail: null, status: 'unknown', reason: 'not-gathered' }
   const supplied = gathered.supplied ?? null
   const profile = gathered.profile || null
+  const pack = gathered.pack ?? null
   const fences = Object.prototype.hasOwnProperty.call(gathered, 'fences') ? gathered.fences : null
-  const writeSurface = Object.prototype.hasOwnProperty.call(gathered, 'writeSurface')
+  const baseWriteSurface = Object.prototype.hasOwnProperty.call(gathered, 'writeSurface')
     ? gathered.writeSurface
     : resolveWriteSurface({ fences, lane: gathered.lane ?? null, where, creates })
+  const writeSurface = { ...(baseWriteSurface || {}), __discovery: discovery }
   const coupling = gathered.coupling ?? crossCheckCoupling({ discovery, writeSurface, enforce: false })
   const proposal = gathered.proposal ?? proposeTier({ where, discovery })
   const lines = [
@@ -1823,10 +2144,11 @@ export function renderBrief(gathered) {
     renderProposalBlock(proposal),
     '## Where',
     renderWhere(where, creates),
+    ...renderContextPack(pack),
     '## Done means',
     request.done_means,
     '## Tripwires',
-    renderTripwires(discovery),
+    renderTripwireSlot(discovery, pack),
     '## Coupled sources',
     renderCoupled(coupling),
     '## Baseline',
@@ -1846,10 +2168,12 @@ export function renderBrief(gathered) {
     '## Validation lane',
     renderValidation(baseline, discovery),
     '## Conventions',
-    renderWriteSurface(writeSurface, discovery),
-    renderConventions(profile?.conventions),
-    generatedGrep(discovery),
-    standingBlocks().conventions,
+    renderConventionsSlot(writeSurface, pack),
+    ...(pack == null ? [
+      renderConventions(profile?.conventions),
+      generatedGrep(discovery),
+      standingBlocks().conventions,
+    ] : []),
     '',
   ]
   const content = lines.join('\n')
@@ -1868,7 +2192,7 @@ export function renderBrief(gathered) {
 function parseCliArgs(argv) {
   const flags = {}
   const positional = []
-  const valueFlags = new Set(['request', 'checkout', 'out', 'fences', 'protected', 'lane', 'profile', 'baseline', 'measure-baseline', 'discover-reads'])
+  const valueFlags = new Set(['request', 'checkout', 'out', 'fences', 'protected', 'lane', 'profile', 'baseline', 'measure-baseline', 'discover-reads', 'pack', 'issue-body'])
   const booleanFlags = new Set(['force', 'require-profile'])
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]
@@ -1962,7 +2286,19 @@ function compile(flags) {
   if (flags['measure-baseline'] != null) return measureOnly(flags)
   if (typeof flags.request !== 'string' || !flags.request) refuseUsage('--request <file> is required', MISSING_LINE)
   const outPath = outputPathOrNull(flags.out)
+  if (flags.pack != null && outPath == null) refuseUsage('--pack requires --out', MISSING_LINE)
+  if (flags['issue-body'] != null && flags.pack == null) refuseUsage('--issue-body requires --pack', MISSING_LINE)
+  const packPath = flags.pack == null ? null : resolve(flags.pack)
+  if (packPath != null) {
+    let present = false
+    try { present = existsSync(packPath) } catch { present = false }
+    if (!present) refuseUsage(`pack directory does not exist: ${packPath}`, OUT_DIR_MISSING)
+    let packStat
+    try { packStat = statSync(packPath) } catch { packStat = null }
+    if (!packStat || !packStat.isDirectory()) refuseUsage(`pack directory does not exist: ${packPath}`, OUT_DIR_MISSING)
+  }
   const taskName = parseTaskStem(outPath || flags.request)
+  const packTaskName = taskName.endsWith('.brief') ? taskName.slice(0, -'.brief'.length) : taskName
   const request = readRequestFile(flags.request)
   validateRequest(request, { taskName })
   const checkout = gitRoot(flags.checkout || process.cwd())
@@ -2001,6 +2337,18 @@ function compile(flags) {
   }
   const protectedPaths = gatherProtectedPaths({ protectedPathsFile: flags.protected, extra: fromProfile.paths })
   const proposal = proposeTier({ where, discovery, protectedPaths, protectedBasis: fromProfile.basis })
+  const profile = { testCommand, conventions, baseline: recordedBaseline }
+  const pack = packPath == null ? null : writePack({
+    packDir: packPath,
+    taskName: packTaskName,
+    checkout,
+    request,
+    discovery,
+    writeSurface,
+    coupling,
+    profile,
+    issueBodyPath: flags['issue-body'],
+  })
   const content = renderBrief({
     request,
     where,
@@ -2013,7 +2361,8 @@ function compile(flags) {
     lane: flags.lane ?? null,
     writeSurface,
     proposal,
-    profile: { testCommand, conventions, baseline: recordedBaseline },
+    profile,
+    pack,
   })
   writeBrief(content, outPath, flags.force === true)
   return 0

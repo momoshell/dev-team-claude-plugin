@@ -57,7 +57,7 @@ minutes; prescribing does not.
 
 ## Lever 6
 
-Narrow the write surface; it is charged three times. b183: **5 files** → **30 acks** → **72KB** → **17m** plan. b189: **2 files** → **2 acks** → **26KB** → **9m** plan.
+Narrow the write surface; it is charged three times. b183: **5 files** → **30 acks** → **72KB** → **17m** plan. b189: **2 files** → **2 acks** → **26KB** → **9m** plan. For b396's 10-file fence fixture, packing moved the brief from **42,868 bytes to under 25 KB**. Operators now see `brief_bytes` and `top_section` on the settled dispatch line.
 
 ## Lever 7
 

@@ -5,7 +5,7 @@ import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import {
-  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync,
+  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -15,10 +15,10 @@ import {
   ACCEPTANCE_GATE_BLOCK, BROAD_KEY_HIT_LIMIT, CONVENTIONS_BLOCK, DEFAULT_PROTECTED_PATHS,
   DIRECTED_BLOCK, DIRECTED_GATE_NOTE, DIRECTED_KEYS, HOSTILE_ENV_BLOCK, LADDER_BANDS, OPTIONAL_REQUEST_KEYS,
   REFUSAL_REASONS, SLOT_MARKER, TIER_NAMES, crossCheckCoupling, readsToAcknowledge,
-  discoverTripwires, exportEntries, extractKeys, extractSymbols, gatherFences, gatherProtectedPaths, isTripwireFile, main,
+  discoverTripwires, exportEntries, extractKeys, extractSymbols, gatherFences, gatherProtectedPaths, isTripwireFile, main, symbolIndexFor,
   MUTATION_CONTRACT_BLOCK, PACK_ABSENT_REASONS, PROPOSAL_BLOCK, PROPOSAL_KEYS, profileField, proposeTier,
   readLadderBands, renderBrief, renderProposalBlock, resolveIntent, resolveWriteSurface, SYMBOL_INDEX_ENTRY_LIMIT,
-  SYMBOL_INDEX_ABSENT_REASONS, testTitleEntries, validateAsk, writePack,
+  SYMBOL_INDEX_ABSENT_REASONS, SYMBOL_INDEX_SCAN_LIMIT, testTitleEntries, validateAsk, writePack,
   validateRequest, validateScopeEntries, verifyCreates, verifyWhere,
 } from '../scripts/factory/make-brief.mjs'
 import { PROPOSAL_BLOCK as EMIT_PROPOSAL_BLOCK, PROPOSAL_KEYS as EMIT_PROPOSAL_KEYS } from '../scripts/factory/emit.mjs'
@@ -418,6 +418,45 @@ test('the inline symbol index shares one per-file budget between exports and tes
   assert.ok(context.includes(`- ${file} · test titles · not listed — the per-file budget of ${SYMBOL_INDEX_ENTRY_LIMIT} entries was spent`))
   assert.ok(context.includes(`… and ${titleCount} more — full index: ${sidecar}`))
   assert.ok(readFileSync(sidecar, 'utf8').includes(`mixed title ${String(titleCount - 1).padStart(3, '0')}:${exportCount + titleCount}`))
+})
+
+test('the symbol index scan is capped per file and records what it skipped', () => {
+  const root = fixture('symbol-index-scan-cap')
+  const file = 'lib/scan-big.mjs'
+  const count = SYMBOL_INDEX_SCAN_LIMIT + 25
+  put(root, file, `${Array.from({ length: count }, (_, index) => `export const scanSymbol${String(index).padStart(4, '0')} = ${index}`).join('\n')}\n`)
+  git(root, 'add', '-A')
+  const row = symbolIndexFor({ checkout: root, writeSurface: { files: [file] } }).find((entry) => entry.file === file)
+  assert.ok(row)
+  assert.equal(row.exports.length, SYMBOL_INDEX_SCAN_LIMIT)
+  assert.equal(row.exportsSkipped, 25)
+  assert.equal(row.titlesSkipped, 0)
+  const pack = join(root, 'pack')
+  mkdirSync(pack)
+  const { brief } = compile(root, { where: [file] }, ['--pack', pack], 'scan-cap.brief.md')
+  const sidecar = readFileSync(join(pack, 'scan-cap.symbols.md'), 'utf8')
+  const prefix = `- ${file} · exports · `
+  const listed = sidecar.split('\n').find((line) => line.startsWith(prefix) && !line.includes('not indexed'))
+  assert.ok(listed)
+  assert.equal(listed.slice(prefix.length).split(', ').length, SYMBOL_INDEX_SCAN_LIMIT)
+  assert.ok(sidecar.includes(`${file} · exports · 25 not indexed`))
+  assert.match(brief, /25 further exports were not indexed/)
+})
+
+test('indexing a 70k-symbol file stays within a countable byte budget', () => {
+  const root = fixture('symbol-index-byte-budget')
+  const file = 'lib/generated.mjs'
+  const symbolCount = 70_000
+  put(root, file, `${Array.from({ length: symbolCount }, (_, index) => `export const byteBudgetSymbol${String(index).padStart(5, '0')} = ${index}`).join('\n')}\n`)
+  git(root, 'add', '-A')
+  const pack = join(root, 'pack')
+  mkdirSync(pack)
+  compile(root, { where: [file] }, ['--pack', pack], 'byte-budget.brief.md')
+  // This measures bytes emitted, identical on a loaded and an idle machine;
+  // it cannot see the quadratic line numbering — bytes do not move when only
+  // the algorithm's cost changes. The gate's A5 and A9 carry that half as wall
+  // clock with three orders of magnitude of headroom.
+  assert.ok(statSync(join(pack, 'byte-budget.symbols.md')).size <= 65_536)
 })
 
 test('a packed no-code fence emits no symbol index', () => {

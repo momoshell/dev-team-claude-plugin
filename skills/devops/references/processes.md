@@ -85,16 +85,16 @@ Exhibit: `crew/crew.mjs:2755`.
 
 A SIGKILLed driver lands no terminal row, because the ledger's finalizer is the
 only writer that can and it is opt-in.
-Exhibit: `scripts/factory/ledger.mjs:5088`.
+Exhibit: `scripts/factory/ledger.mjs:5281`.
 
 The finalizer that a graceful stop would reach records `fail`/`failed` with the
 signal as its reason.
-Exhibit: `scripts/factory/ledger.mjs:5114`.
+Exhibit: `scripts/factory/ledger.mjs:5307`.
 
 An operator who stops a run by hand settles the session as `operator`, which is
 already a terminal actor; a session left `running` is a measured-looking claim
 that a dead driver is working.
-Exhibit: `scripts/factory/ledger.mjs:145`.
+Exhibit: `scripts/factory/ledger.mjs:146`.
 
 The cost of skipping the terminal row is a session that reads `running`
 forever: two were found in the live ledger, one of them 4.4 days old (#877).

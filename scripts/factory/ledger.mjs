@@ -121,6 +121,7 @@ export function mkdirpBounded(dir, mode = 0o700) {
 export const LEDGER_VERSION = 1
 export const NODE_FLOOR = '26.0.0'
 export const TERM_TO_KILL_MS = 5000
+export const TOOL_CLASSES_LEDGER = Object.freeze(['edit', 'read', 'test', 'other'])
 
 // A refused (changes === 0) mirror insert means another process owns that seq;
 // the record is re-numbered and re-offered. TOTAL attempts per record, not
@@ -1134,6 +1135,37 @@ export const TABLES = Object.freeze({
     unique: [['adw_id', 'role', 'dispatch_id', 'at_ms']],
     indexes: [],
   },
+  seat_turn_census: {
+    columns: [
+      { name: 'adw_id', decl: 'TEXT' },
+      { name: 'role', decl: 'TEXT' },
+      { name: 'dispatch_id', decl: 'TEXT' },
+      { name: 'transport', decl: 'TEXT' },
+      { name: 'turns', decl: 'INTEGER' },
+      { name: 'tool_calls', decl: 'INTEGER' },
+      { name: 'distinct_files_read', decl: 'INTEGER' },
+      { name: 'suite_runs', decl: 'INTEGER' },
+      { name: 're_reads', decl: 'INTEGER' },
+      { name: 'edit_calls', decl: 'INTEGER' },
+      { name: 'read_calls', decl: 'INTEGER' },
+      { name: 'test_calls', decl: 'INTEGER' },
+      { name: 'other_calls', decl: 'INTEGER' },
+      { name: 'in_tool_edit_ms', decl: 'INTEGER' },
+      { name: 'in_tool_read_ms', decl: 'INTEGER' },
+      { name: 'in_tool_test_ms', decl: 'INTEGER' },
+      { name: 'in_tool_other_ms', decl: 'INTEGER' },
+      { name: 'out_of_tool_ms', decl: 'INTEGER' },
+      { name: 'span_ms', decl: 'INTEGER' },
+      { name: 'tool_spans_matched', decl: 'INTEGER' },
+      { name: 'tool_spans_unmatched', decl: 'INTEGER' },
+      { name: 'tool_spans_same_poll', decl: 'INTEGER' },
+      { name: 'absent_reason', decl: 'TEXT' },
+      { name: 'at_ms', decl: 'INTEGER' },
+      { name: 'created_at', decl: 'TEXT' },
+    ],
+    unique: [['adw_id', 'role', 'dispatch_id', 'at_ms']],
+    indexes: [],
+  },
   plan_adoptions: {
     columns: [
       { name: 'task_slug', decl: 'TEXT' },
@@ -1221,6 +1253,7 @@ export const JOURNAL_FACT_KEYS = Object.freeze({
   plan_scope: 'recordPlanScope',
   accept_reask: 'recordAcceptReask',
   rpc_exit_context: 'recordRpcExitContext',
+  seat_turn_census: 'recordSeatTurnCensus',
   mutation_anchor_bind: 'recordMutationAnchorBind',
   mutation_anchor_absent: 'recordMutationAnchorAbsence',
 })
@@ -1236,7 +1269,7 @@ export const JOURNAL_FACT_EVENTS = Object.freeze({
 export const WRITERS = Object.freeze([
   'startSession', 'endSession', 'startPhase', 'endPhase', 'recordEvent',
   'recordEnvelope', 'recordSessionRequest', 'recordRunConfiguration', 'recordRunSeat', 'recordGateResult', 'recordGateDiscrimination',
-  'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'recordCiCycle', 'recordCiDispatch', 'recordIntakeSweep', 'recordIntakeRefusal', 'recordIntakeBrake', 'recordIntakeDispatch', 'recordSeatTeardown', 'recordSeatReclaim', 'recordProviderFailure', 'recordPlanScope', 'recordSeatReask', 'recordAcceptReask', 'recordRpcExitContext', 'recordPlanAdoption', 'recordExternalFence', 'recordMutationAnchorBind', 'recordMutationAnchorAbsence', 'recordPhaseSlotWait', 'startProcess', 'endProcess', 'heartbeat',
+  'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'recordCiCycle', 'recordCiDispatch', 'recordIntakeSweep', 'recordIntakeRefusal', 'recordIntakeBrake', 'recordIntakeDispatch', 'recordSeatTeardown', 'recordSeatReclaim', 'recordProviderFailure', 'recordPlanScope', 'recordSeatReask', 'recordAcceptReask', 'recordRpcExitContext', 'recordSeatTurnCensus', 'recordPlanAdoption', 'recordExternalFence', 'recordMutationAnchorBind', 'recordMutationAnchorAbsence', 'recordPhaseSlotWait', 'startProcess', 'endProcess', 'heartbeat',
   'startAgentSession', 'endAgentSession', 'recordSourceError', 'linkRun',
 ])
 
@@ -1273,6 +1306,7 @@ export const WRITER_MIRROR_TABLES = Object.freeze({
   recordSeatReask: 'seat_reasks',
   recordAcceptReask: 'accept_reasks',
   recordRpcExitContext: 'rpc_exit_contexts',
+  recordSeatTurnCensus: 'seat_turn_census',
   recordPlanAdoption: 'plan_adoptions',
   recordExternalFence: 'external_fences',
   recordMutationAnchorBind: 'mutation_anchor_binds',
@@ -2794,6 +2828,45 @@ export function openLedger({
     return args
   }
 
+  function recordSeatTurnCensus(input = {}) {
+    requireFields(input, ['role'], 'recordSeatTurnCensus')
+    const args = redact({
+      adw_id: input.adw_id ?? null,
+      role: textOrNull(input.role, 120),
+      dispatch_id: textOrNull(input.dispatch_id ?? input.id, 120),
+      transport: textOrNull(input.transport, 120),
+      turns: integerOrNull(input.turns, 'recordSeatTurnCensus', 'turns'),
+      tool_calls: integerOrNull(input.tool_calls, 'recordSeatTurnCensus', 'tool_calls'),
+      distinct_files_read: integerOrNull(input.distinct_files_read, 'recordSeatTurnCensus', 'distinct_files_read'),
+      suite_runs: integerOrNull(input.suite_runs, 'recordSeatTurnCensus', 'suite_runs'),
+      re_reads: integerOrNull(input.re_reads, 'recordSeatTurnCensus', 're_reads'),
+      edit_calls: integerOrNull(input.edit_calls, 'recordSeatTurnCensus', 'edit_calls'),
+      read_calls: integerOrNull(input.read_calls, 'recordSeatTurnCensus', 'read_calls'),
+      test_calls: integerOrNull(input.test_calls, 'recordSeatTurnCensus', 'test_calls'),
+      other_calls: integerOrNull(input.other_calls, 'recordSeatTurnCensus', 'other_calls'),
+      in_tool_edit_ms: integerOrNull(input.in_tool_edit_ms, 'recordSeatTurnCensus', 'in_tool_edit_ms'),
+      in_tool_read_ms: integerOrNull(input.in_tool_read_ms, 'recordSeatTurnCensus', 'in_tool_read_ms'),
+      in_tool_test_ms: integerOrNull(input.in_tool_test_ms, 'recordSeatTurnCensus', 'in_tool_test_ms'),
+      in_tool_other_ms: integerOrNull(input.in_tool_other_ms, 'recordSeatTurnCensus', 'in_tool_other_ms'),
+      out_of_tool_ms: integerOrNull(input.out_of_tool_ms, 'recordSeatTurnCensus', 'out_of_tool_ms'),
+      span_ms: integerOrNull(input.span_ms, 'recordSeatTurnCensus', 'span_ms'),
+      tool_spans_matched: integerOrNull(input.tool_spans_matched, 'recordSeatTurnCensus', 'tool_spans_matched'),
+      tool_spans_unmatched: integerOrNull(input.tool_spans_unmatched, 'recordSeatTurnCensus', 'tool_spans_unmatched'),
+      tool_spans_same_poll: integerOrNull(input.tool_spans_same_poll, 'recordSeatTurnCensus', 'tool_spans_same_poll'),
+      absent_reason: textOrNull(input.absent_reason, 1000),
+      at_ms: epochMsOrNull(input.at_ms),
+      created_at: isoMs(input.created_at ?? now()),
+    }, stats)
+    appendJsonl('recordSeatTurnCensus', args)
+    mirror((conn) => {
+      const cols = tableColumnNames('seat_turn_census')
+      const sqlCols = cols.map(quoteSqlIdentifier)
+      conn.prepare(`INSERT OR IGNORE INTO seat_turn_census (${sqlCols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
+        .run(...cols.map((c) => toBindable(args[c])))
+    })
+    return args
+  }
+
   function recordPlanAdoption(input = {}) {
     requireFields(input, ['lane', 'plan_sha'], 'recordPlanAdoption')
     const args = redact({
@@ -4230,6 +4303,96 @@ export function openLedger({
     }
   }
 
+  function rateOrNull(n, d) { return n === null || d === null || d === 0 ? null : n / d }
+
+  function turnEconomy({ since = null, until = null } = {}) {
+    const result = queryRows(`
+      WITH scoped AS (
+        SELECT c.*, s.tier
+        FROM seat_turn_census c
+        LEFT JOIN sessions s ON s.adw_id = c.adw_id
+        WHERE (? IS NULL OR COALESCE(c.at_ms, CAST(strftime('%s', c.created_at) AS INTEGER) * 1000) >= CAST(strftime('%s', ?) AS INTEGER) * 1000)
+          AND (? IS NULL OR COALESCE(c.at_ms, CAST(strftime('%s', c.created_at) AS INTEGER) * 1000) < CAST(strftime('%s', ?) AS INTEGER) * 1000)
+      ), total AS (
+        SELECT 0 AS bucket, NULL AS role, NULL AS tier,
+          COUNT(*) AS dispatches, COUNT(turns) AS dispatches_measured,
+          SUM(turns) AS turns, SUM(tool_calls) AS tool_calls,
+          SUM(suite_runs) AS suite_runs, SUM(re_reads) AS re_reads,
+          SUM(distinct_files_read) AS distinct_files_read,
+          SUM(edit_calls) AS edit_calls, SUM(read_calls) AS read_calls,
+          SUM(test_calls) AS test_calls, SUM(other_calls) AS other_calls,
+          SUM(in_tool_edit_ms) AS in_tool_edit_ms, SUM(in_tool_read_ms) AS in_tool_read_ms,
+          SUM(in_tool_test_ms) AS in_tool_test_ms, SUM(in_tool_other_ms) AS in_tool_other_ms
+        FROM scoped
+      ), grouped AS (
+        SELECT 1 AS bucket, role, tier,
+          COUNT(*) AS dispatches, COUNT(turns) AS dispatches_measured,
+          SUM(turns) AS turns, SUM(tool_calls) AS tool_calls,
+          SUM(suite_runs) AS suite_runs, SUM(re_reads) AS re_reads,
+          SUM(distinct_files_read) AS distinct_files_read,
+          SUM(edit_calls) AS edit_calls, SUM(read_calls) AS read_calls,
+          SUM(test_calls) AS test_calls, SUM(other_calls) AS other_calls,
+          SUM(in_tool_edit_ms) AS in_tool_edit_ms, SUM(in_tool_read_ms) AS in_tool_read_ms,
+          SUM(in_tool_test_ms) AS in_tool_test_ms, SUM(in_tool_other_ms) AS in_tool_other_ms
+        FROM scoped
+        GROUP BY role, tier
+      )
+      SELECT * FROM total
+      UNION ALL
+      SELECT * FROM grouped
+      ORDER BY bucket, role, tier
+    `, [since, since, until, until])
+    const summary = result.find((row) => row.bucket === 0) || null
+    const rows = Number(summary?.dispatches ?? 0)
+    const measured = Number(summary?.dispatches_measured ?? 0)
+    const dispatches = rows === 0 ? null : rows
+    const dispatches_measured = rows === 0 ? null : measured
+    const sum = (name) => summary?.[name] ?? null
+    const turns = sum('turns')
+    const by_role_tier = result.filter((row) => row.bucket === 1).map((row) => ({
+      role: row.role ?? null,
+      tier: row.tier ?? null,
+      dispatches: row.dispatches,
+      dispatches_measured: row.dispatches_measured,
+      excluded_rows: row.dispatches - row.dispatches_measured,
+      turns: row.turns ?? null,
+      tool_calls: row.tool_calls ?? null,
+      suite_runs: row.suite_runs ?? null,
+      re_reads: row.re_reads ?? null,
+      distinct_files_read: row.distinct_files_read ?? null,
+      edit_calls: row.edit_calls ?? null,
+      read_calls: row.read_calls ?? null,
+      test_calls: row.test_calls ?? null,
+      other_calls: row.other_calls ?? null,
+      in_tool_edit_ms: row.in_tool_edit_ms ?? null,
+      in_tool_read_ms: row.in_tool_read_ms ?? null,
+      in_tool_test_ms: row.in_tool_test_ms ?? null,
+      in_tool_other_ms: row.in_tool_other_ms ?? null,
+      turns_per_dispatch: rateOrNull(row.turns ?? null, row.dispatches_measured),
+    }))
+    const CENSUS_EXCLUDED_REASON = 'a dispatch whose seat journalled no observable turn count is excluded from both terms of every rate'
+    return {
+      dispatches,
+      dispatches_measured,
+      excluded: { rows: dispatches === null ? null : dispatches - dispatches_measured, reason: CENSUS_EXCLUDED_REASON },
+      turns,
+      tool_calls: sum('tool_calls'),
+      suite_runs: sum('suite_runs'),
+      re_reads: sum('re_reads'),
+      distinct_files_read: sum('distinct_files_read'),
+      edit_calls: sum('edit_calls'),
+      read_calls: sum('read_calls'),
+      test_calls: sum('test_calls'),
+      other_calls: sum('other_calls'),
+      in_tool_edit_ms: sum('in_tool_edit_ms'),
+      in_tool_read_ms: sum('in_tool_read_ms'),
+      in_tool_test_ms: sum('in_tool_test_ms'),
+      in_tool_other_ms: sum('in_tool_other_ms'),
+      turns_per_dispatch: rateOrNull(turns, dispatches_measured),
+      by_role_tier,
+    }
+  }
+
   function journalFacts({ since = null, until = null } = {}) {
     const providerRows = journalFactRows('provider_failures', { since, until })
     const scopeRows = journalFactRows('plan_scope_changes', { since, until })
@@ -4735,10 +4898,10 @@ export function openLedger({
   const handle = {
     get degraded() { return degraded },
     startSession, endSession, recordSessionRequest, recordRunConfiguration, recordRunSeat, startPhase, endPhase, recordEvent, recordEnvelope,
-    recordGateResult, recordGateDiscrimination, recordMutationAnchorBind, recordMutationAnchorAbsence, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown, recordSeatReclaim, recordProviderFailure, recordPlanScope, recordSeatReask, recordAcceptReask, recordRpcExitContext, recordPlanAdoption, recordExternalFence, recordPhaseSlotWait,
+    recordGateResult, recordGateDiscrimination, recordMutationAnchorBind, recordMutationAnchorAbsence, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown, recordSeatReclaim, recordProviderFailure, recordPlanScope, recordSeatReask, recordAcceptReask, recordRpcExitContext, recordSeatTurnCensus, recordPlanAdoption, recordExternalFence, recordPhaseSlotWait,
     startProcess, endProcess, heartbeat, startAgentSession, endAgentSession,
     recordSourceError, linkRun,
-    listSessions, listEvents, getSession, dumpTable, tableNames, columnNames, sessionsFiltered, runsStartedWithin, phasesFor, runConfigurationsFor, runSeatsFor, agentEventsFor, agentSessionsFor, gateDiscriminationsFor, gateResultsFor, reviewOutcomesFor, acceptDecisionsFor, supportsJson1, eventsPage, maxEventId, cellFailureRowsFor, unattributableCellFailures, seatTeardownRowsFor, intakePicks, intakeSweepTotals, intakeCandidateRefusals, intakeCandidatePicks, agentSessionTokenTotals, gateReviewGap, cellFailures, cellReviews, cellUsage, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, escalations, endedRuns, escalationWindow, seatReclaims, journalFacts, eligibleTasks, runSet, transportsFor, taskReadout, jsonlDrift,
+    listSessions, listEvents, getSession, dumpTable, tableNames, columnNames, sessionsFiltered, runsStartedWithin, phasesFor, runConfigurationsFor, runSeatsFor, agentEventsFor, agentSessionsFor, gateDiscriminationsFor, gateResultsFor, reviewOutcomesFor, acceptDecisionsFor, supportsJson1, eventsPage, maxEventId, cellFailureRowsFor, unattributableCellFailures, seatTeardownRowsFor, intakePicks, intakeSweepTotals, intakeCandidateRefusals, intakeCandidatePicks, agentSessionTokenTotals, gateReviewGap, cellFailures, cellReviews, cellUsage, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, escalations, endedRuns, escalationWindow, seatReclaims, journalFacts, turnEconomy, eligibleTasks, runSet, transportsFor, taskReadout, jsonlDrift,
     stats: statsFn,
     captureMirrorErrors,
     readConnection,
@@ -4902,6 +5065,36 @@ function journalFactArgs(writer, row, adwId) {
       where_at: accept.where_at ?? accept.where ?? source.where ?? null,
       reask: accept.reask ?? source.reask ?? null,
       errors: accept.errors ?? source.errors ?? null,
+      at_ms: atMs,
+      ...(createdAt === undefined ? {} : { created_at: createdAt }),
+    }
+  }
+  if (writer === JOURNAL_FACT_KEYS.seat_turn_census) {
+    const census = value('seat_turn_census')
+    return {
+      adw_id: rowAdwId,
+      role: census.role ?? source.role ?? null,
+      dispatch_id: census.dispatch_id ?? census.id ?? source.dispatch_id ?? source.id ?? null,
+      transport: census.transport ?? null,
+      turns: census.turns ?? null,
+      tool_calls: census.tool_calls ?? null,
+      distinct_files_read: census.distinct_files_read ?? null,
+      suite_runs: census.suite_runs ?? null,
+      re_reads: census.re_reads ?? null,
+      edit_calls: census.by_class?.edit ?? census.edit_calls ?? null,
+      read_calls: census.by_class?.read ?? census.read_calls ?? null,
+      test_calls: census.by_class?.test ?? census.test_calls ?? null,
+      other_calls: census.by_class?.other ?? census.other_calls ?? null,
+      in_tool_edit_ms: census.in_tool_ms?.edit ?? census.in_tool_edit_ms ?? null,
+      in_tool_read_ms: census.in_tool_ms?.read ?? census.in_tool_read_ms ?? null,
+      in_tool_test_ms: census.in_tool_ms?.test ?? census.in_tool_test_ms ?? null,
+      in_tool_other_ms: census.in_tool_ms?.other ?? census.in_tool_other_ms ?? null,
+      out_of_tool_ms: census.out_of_tool_ms ?? null,
+      span_ms: census.span_ms ?? null,
+      tool_spans_matched: census.tool_spans_matched ?? null,
+      tool_spans_unmatched: census.tool_spans_unmatched ?? null,
+      tool_spans_same_poll: census.tool_spans_same_poll ?? null,
+      absent_reason: census.absent_reason ?? null,
       at_ms: atMs,
       ...(createdAt === undefined ? {} : { created_at: createdAt }),
     }
@@ -5321,6 +5514,7 @@ const VERB_FLAGS = Object.freeze({
   'ci-cycles': new Set(['since', 'until']),
   'intake-sweeps': new Set(['since', 'until']),
   'journal-facts': new Set(['since', 'until']),
+  turns: new Set(['since', 'until']),
   task: new Set([]),
   request: new Set(['from-brief']),
   'advisor-ab': new Set(['run-dir', 'run-started-at', 'adjudications']),
@@ -5702,7 +5896,7 @@ export function main(argv) {
   try {
     const { verb, positional, flags } = parseArgs(argv)
     if (!verb) {
-      refuse('a verb is required: sessions | phases | tail | procs | gate-review-gap | eligible-tasks | run-set --since <iso> [--until <iso>] | cell-failures [--since <iso>] [--until <iso>] | cells [--since <iso>] [--until <iso>] [--prices <path>] | modifier-attempts [--since <iso>] [--until <iso>] | seat-teardowns [--since <iso>] [--until <iso>] | escalations --since <iso> [--until <iso>] | ci-cycles [--since <iso>] [--until <iso>] | intake-sweeps [--since <iso>] [--until <iso>] | journal-facts [--since <iso>] [--until <iso>] | task | request <adw_id> --from-brief <path> | advisor-ab --run-dir <dir> --run-started-at <iso|ms> --adjudications <path> <dispatch-id>… | doctor | kill')
+      refuse('a verb is required: sessions | phases | tail | procs | gate-review-gap | eligible-tasks | run-set --since <iso> [--until <iso>] | cell-failures [--since <iso>] [--until <iso>] | cells [--since <iso>] [--until <iso>] [--prices <path>] | modifier-attempts [--since <iso>] [--until <iso>] | seat-teardowns [--since <iso>] [--until <iso>] | escalations --since <iso> [--until <iso>] | ci-cycles [--since <iso>] [--until <iso>] | intake-sweeps [--since <iso>] [--until <iso>] | journal-facts [--since <iso>] [--until <iso>] | turns [--since <iso>] [--until <iso>] | task | request <adw_id> --from-brief <path> | advisor-ab --run-dir <dir> --run-started-at <iso|ms> --adjudications <path> <dispatch-id>… | doctor | kill')
     }
 
     // TEST SEAM: DEVTEAM_LEDGER_FAKE_NODE_VERSION substitutes for
@@ -6242,6 +6436,33 @@ export function main(argv) {
         refusal_rows: refusalRows,
         dispatches,
         absent: sweptWindow ? null : { intake_sweeps: 'no intake_sweeps rows in this window — not swept, never swept-and-empty; any refusal or dispatch rows are listed unaggregated beside this marker' },
+      })}\n`)
+      return 0
+    }
+
+    if (verb === 'turns') {
+      if (positional.length > 0) refuse('turns: takes no positional arguments')
+      const hasSince = Object.prototype.hasOwnProperty.call(flags, 'since')
+      const hasUntil = Object.prototype.hasOwnProperty.call(flags, 'until')
+      const since = hasSince ? windowBound(flags.since, 'since', 'turns') : null
+      const until = hasUntil ? windowBound(flags.until, 'until', 'turns') : null
+      if (until != null && since != null && until <= since) refuse('turns: --until must be later than --since')
+      const facts = ledger.turnEconomy({ since, until })
+      if (ledger.stats().degraded) refuse('turns: the ledger mirror is degraded — this window is unanswerable, not empty')
+      stdout.write(`${JSON.stringify({
+        schema: 1,
+        question: 'How many turns and tool calls does a dispatch cost, by role and tier?',
+        definition: {
+          dispatches: 'the count of seat_turn_census rows in [since, until)',
+          dispatches_measured: 'the count of rows whose turns value is non-null; this is the denominator of every rate',
+          null: 'a null cell with an absent marker is unmeasured, never a measured zero',
+          excluded: 'excluded.rows counts the dispatches left out of every rate',
+        },
+        tool_classes: TOOL_CLASSES_LEDGER,
+        since,
+        until,
+        absent: facts.dispatches === null ? 'no seat_turn_census rows in this window — no dispatch count was measured, never a measured zero' : null,
+        ...facts,
       })}\n`)
       return 0
     }

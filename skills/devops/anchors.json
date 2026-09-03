@@ -33,8 +33,8 @@
   "crew/crew.mjs:1938": "SIGNAL_EXIT_CODES = Object.freeze({ SIGTERM: 143",
   "crew/crew.mjs:1972": "for (const signal of Object.keys(SIGNAL_EXIT_CODES))",
   "crew/crew.mjs:2755": "every member ran on a surface-less transport",
-  "scripts/factory/ledger.mjs:145": "TERMINAL_ACTORS = Object.freeze(['driver', 'lead', 'operator'",
   "crew/drive.mjs:5432": "const slotNap = (ms) =>",
-  "scripts/factory/ledger.mjs:5088": "installFinalizer — explicit opt-in only, NEVER installed at import",
-  "scripts/factory/ledger.mjs:5114": "terminal_reason: sig, terminal_actor: 'finalizer'"
+  "scripts/factory/ledger.mjs:5281": "installFinalizer — explicit opt-in only, NEVER installed at import",
+  "scripts/factory/ledger.mjs:5307": "terminal_reason: sig, terminal_actor: 'finalizer'",
+  "scripts/factory/ledger.mjs:146": "TERMINAL_ACTORS = Object.freeze(['driver', 'lead', 'operator'"
 }

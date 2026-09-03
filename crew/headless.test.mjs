@@ -4,8 +4,8 @@ import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  attributeExit, classifyRun, decodeExitStatus, degradedSignals, foldUsage, headlessIo, parseStream,
-  PROVIDER_FAILURE_KINDS, providerFailureKind, recogniseProviderCondition, recogniseSeatRefusal,
+  attributeExit, classifyRun, claudeCensus, classifyToolCall, decodeExitStatus, degradedSignals, foldUsage, headlessIo, parseStream,
+  CENSUS_ABSENT_CAUSES, PROVIDER_FAILURE_KINDS, providerFailureKind, recogniseProviderCondition, recogniseSeatRefusal, TOOL_CLASSES,
   SEAT_REFUSALS, SEAT_REFUSAL_ACTIONS, UNCLASSIFIED_REFUSAL, shq, stderrTail, updateCrewJson,
 } from './headless.mjs'
 import { cellFailureKind } from './seat-io.mjs'
@@ -1174,4 +1174,47 @@ test('the journal row carries the provider condition beside the outcome', () => 
       assert.equal(Object.hasOwn(okRow, 'provider_failure'), false)
     } finally { g.cleanup() }
   } finally { f.cleanup() }
+})
+
+test("b401 classifyToolCall maps both transports' tool names onto the four closed classes", () => {
+  assert.deepEqual([...TOOL_CLASSES], ['edit', 'read', 'test', 'other'])
+  assert.equal(classifyToolCall('bash', { command: 'node --test crew/headless.test.mjs' }), 'test')
+  assert.equal(classifyToolCall('Bash', { command: 'git status --short' }), 'other')
+  assert.equal(classifyToolCall('Read', { path: 'a.mjs' }), 'read')
+  assert.equal(classifyToolCall('grep', { pattern: 'needle' }), 'read')
+  assert.equal(classifyToolCall('write', { path: 'a.mjs' }), 'edit')
+  assert.equal(classifyToolCall('Task', {}), 'other')
+})
+
+test('b401 census replays the recorded b381 planner stream to 173 turns and 173 tool calls', (t) => {
+  const path = '/Users/momoshell/.crew/dt-b381-journalfacts/b381-journalfacts/task/headless/d1/stream.jsonl'
+  if (!existsSync(path)) return t.skip('the recorded b381 capture is not on this host')
+  const census = claudeCensus(readFileSync(path, 'utf8'))
+  assert.equal(census.turns, 173)
+  assert.equal(census.tool_calls, 173)
+  assert.equal(census.suite_runs, 3)
+  assert.equal(census.by_class.read, 8)
+})
+
+test("b401 the claude census clocks the tool boundary from the frames' own stamps", (t) => {
+  const path = '/Users/momoshell/.crew/dt-b381-journalfacts/b381-journalfacts/task/headless/d1/stream.jsonl'
+  if (!existsSync(path)) return t.skip('the recorded b381 capture is not on this host')
+  const census = claudeCensus(readFileSync(path, 'utf8'))
+  assert.equal(census.tool_spans_matched, 173)
+  assert.equal(census.tool_spans_unmatched, 0)
+  assert.equal(census.in_tool_ms.test, 155)
+  assert.equal(census.in_tool_ms.read, 81)
+  assert.equal(census.out_of_tool_ms, 723370)
+})
+
+test('b401 a claude stream with no timestamps reports a null clock with a closed reason', () => {
+  const assistantFrame = { type: 'assistant', message: { content: [{ type: 'tool_use', id: 't1', name: 'Read', input: { path: 'a.mjs' } }] } }
+  const userFrame = { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1' }] } }
+  const stream = [JSON.stringify(assistantFrame), JSON.stringify(userFrame)].join('\n')
+  const census = claudeCensus(stream)
+  assert.equal(census.tool_calls, 1)
+  assert.equal(census.turns, 1)
+  assert.equal(census.in_tool_ms, null)
+  assert.equal(census.clock_absent, CENSUS_ABSENT_CAUSES.replay_no_frame_clock)
+  assert.notEqual(census.in_tool_ms, 0)
 })

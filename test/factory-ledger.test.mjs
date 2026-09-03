@@ -5012,7 +5012,7 @@ test('ledger query docs pin typed outcomes, run seats, closed vocabularies, and 
   for (const source of ['roster', 'profile_recommendation', 'operator_override', 'reseat']) {
     assert.ok(docs.includes(`\`${source}\``), `docs missing ${source}`)
   }
-  assert.match(docs, /\*\*33 tables\*\*/)
+  assert.match(docs, /\*\*34 tables\*\*/)
   assert.ok(docs.includes('`phase_slot_waits`'))
   assert.ok(docs.includes('Recipe M'))
   assert.match(docs, /FROM\s+run_seats/i)
@@ -6359,5 +6359,73 @@ test('b381 E1 a journal carrying none of these rows leaves the ledger byte-ident
     assert.deepEqual(result, { applied: 0, skipped: 0, ignored: none.length, failed: 0, complete: true, first_failure: null })
     assert.deepEqual(readFileSync(ledger._jsonlPath), beforeBytes)
     for (const table of Object.keys(TABLES)) assert.deepEqual(ledger.dumpTable(table), beforeRows[table], table)
+  } finally { ledger.close() }
+})
+
+test('b401 a journalled seat_turn_census row ingests to a seat_turn_census ledger row', { skip: SKIP }, () => {
+  const adwId = 'b401-census'
+  const line = JSON.stringify({
+    at: '2030-01-01T00:00:00.000Z',
+    seat_turn_census: {
+      role: 'builder', dispatch_id: 'd1', transport: 'headless-rpc',
+      turns: 10, tool_calls: null, distinct_files_read: 3, suite_runs: 1, re_reads: 2,
+      by_class: { edit: 1, read: 2, test: 3, other: 4 },
+      in_tool_ms: { edit: 10, read: 20, test: 30, other: 40 },
+      out_of_tool_ms: 100, span_ms: 200, tool_spans_matched: 4,
+      tool_spans_unmatched: 1, tool_spans_same_poll: 0, absent_reason: 'tool_calls unmeasured',
+    },
+  })
+  const { ledger, result } = ingestJournalLine(line, adwId)
+  try {
+    assert.deepEqual(result, { applied: 1, skipped: 0, ignored: 0, failed: 0, complete: true, first_failure: null })
+    const row = ledger.dumpTable('seat_turn_census')[0]
+    assert.equal(row.turns, 10)
+    assert.equal(row.tool_calls, null)
+    assert.equal(row.edit_calls, 1)
+    assert.equal(row.read_calls, 2)
+    assert.equal(row.in_tool_test_ms, 30)
+    assert.equal(row.absent_reason, 'tool_calls unmeasured')
+  } finally { ledger.close() }
+})
+
+test('b401 the turns query publishes its denominator and answers null over an empty window', { skip: SKIP }, () => {
+  const emptyDb = join(nextDir(), 'empty.db')
+  const empty = run(['turns', '--since', '2001-01-01T00:00:00.000Z', '--until', '2001-01-02T00:00:00.000Z'], { DEVTEAM_LEDGER_DB: emptyDb })
+  assert.equal(empty.status, 0, empty.stderr)
+  const emptyPayload = JSON.parse(empty.stdout)
+  assert.equal(emptyPayload.dispatches, null)
+  assert.equal(emptyPayload.turns_per_dispatch, null)
+  assert.equal(typeof emptyPayload.absent, 'string')
+  assert.ok(Array.isArray(emptyPayload.by_role_tier))
+
+  const filledDb = join(nextDir(), 'filled.db')
+  const ledger = openLedger({ dbPath: filledDb, jsonlPath: join(nextDir(), 'filled.jsonl') })
+  ledger.recordSeatTurnCensus({ adw_id: 'b401-filled', role: 'builder', dispatch_id: 'd1', transport: 'headless-rpc', turns: 10, at_ms: Date.parse('2030-01-01T00:00:00.000Z'), created_at: '2030-01-01T00:00:00.000Z' })
+  ledger.recordSeatTurnCensus({ adw_id: 'b401-filled', role: 'builder', dispatch_id: 'd2', transport: 'headless-rpc', turns: 20, at_ms: Date.parse('2030-01-01T00:00:01.000Z'), created_at: '2030-01-01T00:00:01.000Z' })
+  ledger.close()
+  const filled = run(['turns', '--since', '2029-12-31T00:00:00.000Z', '--until', '2030-01-02T00:00:00.000Z'], { DEVTEAM_LEDGER_DB: filledDb })
+  assert.equal(filled.status, 0, filled.stderr)
+  const filledPayload = JSON.parse(filled.stdout)
+  assert.equal(filledPayload.dispatches, 2)
+  assert.equal(filledPayload.turns_per_dispatch, 15)
+
+  const typo = run(['turns', '--untill', '2030-01-01T00:00:00.000Z'], { DEVTEAM_LEDGER_DB: emptyDb })
+  assert.equal(typo.status, 2)
+  assert.match(typo.stderr, new RegExp(`turns: unknown flag --${'untill'}`))
+})
+
+test('b401 the turns query excludes an unmeasured turn count from both terms', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const at = Date.parse('2030-01-01T00:00:00.000Z')
+  ledger.recordSeatTurnCensus({ adw_id: 'b401-rate', role: 'builder', dispatch_id: 'd1', transport: 'headless-rpc', turns: 10, tool_calls: 12, at_ms: at, created_at: '2030-01-01T00:00:00.000Z' })
+  ledger.recordSeatTurnCensus({ adw_id: 'b401-rate', role: 'builder', dispatch_id: 'd2', transport: 'pane', turns: null, tool_calls: null, absent_reason: 'pane', at_ms: at + 1000, created_at: '2030-01-01T00:00:01.000Z' })
+  try {
+    const facts = ledger.turnEconomy({ since: '2029-12-31T00:00:00.000Z', until: '2030-01-02T00:00:00.000Z' })
+    assert.equal(facts.dispatches, 2)
+    assert.equal(facts.dispatches_measured, 1)
+    assert.equal(facts.turns, 10)
+    assert.equal(facts.turns_per_dispatch, 10)
+    assert.equal(facts.excluded.rows, 1)
+    assert.ok(facts.excluded.reason.length > 0)
   } finally { ledger.close() }
 })

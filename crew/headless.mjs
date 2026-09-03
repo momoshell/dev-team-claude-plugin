@@ -309,8 +309,169 @@ export function foldUsage(text) {
   return total
 }
 
+export const TOOL_CLASSES = Object.freeze(['edit', 'read', 'test', 'other'])
+const READ_TOOLS = new Set(['read', 'grep', 'ls', 'find', 'glob', 'notebookread'])
+const EDIT_TOOLS = new Set(['edit', 'write', 'multiedit', 'notebookedit'])
+const TEST_COMMAND_RE = /node\s+--test\b|npm\s+(?:run\s+)?test\b/
+
+export function classifyToolCall(toolName, args) {
+  const name = typeof toolName === 'string' ? toolName.toLowerCase() : ''
+  if (READ_TOOLS.has(name)) return 'read'
+  if (EDIT_TOOLS.has(name)) return 'edit'
+  if (name === 'bash') return TEST_COMMAND_RE.test(String(args?.command ?? '')) ? 'test' : 'other'
+  return 'other'
+}
+
+export const CENSUS_ABSENT_CAUSES = Object.freeze({
+  pane: 'the pane transport runs claude interactively with inherited stdio and leaves no seat stream to observe, so no count exists at all',
+  stream_absent: "the dispatch's stream file was never written or could not be read",
+  no_frames: 'the stream exists but carries no parsable frame',
+  replay_no_frame_clock: 'the frames carry no timestamp of their own, so a REPLAY has no clock; only a live wrapper can stamp one',
+  same_poll_boundary: "the call's start and end were observed in the SAME wrapper poll, so the wrapper clock bounds the call's duration by the poll interval but does not measure it",
+})
+
+function censusTimestamp(value) {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Date.parse(value)
+    return Number.isFinite(parsed) ? parsed : null
+  }
+  return null
+}
+
+function censusPath(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return null
+  for (const key of ['path', 'file_path', 'notebook_path']) {
+    if (typeof input[key] === 'string' && input[key].trim() !== '') return input[key]
+  }
+  return null
+}
+
+export function claudeCensus(text) {
+  const byClass = Object.fromEntries(TOOL_CLASSES.map((name) => [name, 0]))
+  const inTool = Object.fromEntries(TOOL_CLASSES.map((name) => [name, 0]))
+  const files = new Set()
+  const starts = new Map()
+  let turns = 0
+  let toolCalls = 0
+  let reReads = 0
+  let matched = 0
+  let unmatched = 0
+  let firstStamp = null
+  let lastStamp = null
+
+  for (const line of String(text ?? '').split('\n')) {
+    if (!line.trim()) continue
+    let frame
+    try { frame = JSON.parse(line) } catch { continue }
+    const stamp = censusTimestamp(frame?.timestamp)
+    if (stamp !== null) {
+      if (firstStamp === null) firstStamp = stamp
+      lastStamp = stamp
+    }
+    if (frame?.type === 'assistant') {
+      const content = Array.isArray(frame.message?.content) ? frame.message.content : []
+      const uses = content.filter((block) => block?.type === 'tool_use')
+      if (uses.length === 0) continue
+      turns += 1
+      for (const use of uses) {
+        const klass = classifyToolCall(use.name, use.input)
+        toolCalls += 1
+        byClass[klass] += 1
+        const path = censusPath(use.input)
+        if (path !== null) {
+          if (files.has(path)) reReads += 1
+          else files.add(path)
+        }
+        if (use.id == null) {
+          unmatched += 1
+        } else {
+          starts.set(use.id, { at: stamp, class: klass })
+        }
+      }
+    }
+    if (frame?.type !== 'user') continue
+    const content = Array.isArray(frame.message?.content) ? frame.message.content : []
+    for (const result of content.filter((block) => block?.type === 'tool_result')) {
+      const start = starts.get(result.tool_use_id)
+      if (!start) {
+        unmatched += 1
+        continue
+      }
+      starts.delete(result.tool_use_id)
+      if (start.at === null || stamp === null || stamp < start.at) {
+        unmatched += 1
+        continue
+      }
+      inTool[start.class] += stamp - start.at
+      matched += 1
+    }
+  }
+  unmatched += starts.size
+  const spanMs = firstStamp === null || lastStamp === null ? null : lastStamp - firstStamp
+  const inToolTotal = Object.values(inTool).reduce((total, value) => total + value, 0)
+  return {
+    turns,
+    tool_calls: toolCalls,
+    by_class: byClass,
+    suite_runs: byClass.test,
+    distinct_files_read: files.size,
+    re_reads: reReads,
+    tool_spans_matched: matched,
+    tool_spans_unmatched: unmatched,
+    tool_spans_same_poll: 0,
+    in_tool_ms: spanMs === null ? null : inTool,
+    out_of_tool_ms: spanMs === null ? null : spanMs - inToolTotal,
+    span_ms: spanMs,
+    clock_absent: spanMs === null ? CENSUS_ABSENT_CAUSES.replay_no_frame_clock : null,
+  }
+}
+
+function censusRow(run, transport, stream) {
+  const census = stream?.census
+  const absentReason = stream?.census_absent ?? census?.clock_absent ?? null
+  if (!census || stream?.census_absent) {
+    return {
+      role: run?.role ?? null,
+      dispatch_id: run?.id ?? null,
+      transport,
+      turns: null,
+      tool_calls: null,
+      distinct_files_read: null,
+      suite_runs: null,
+      re_reads: null,
+      by_class: null,
+      in_tool_ms: null,
+      out_of_tool_ms: null,
+      span_ms: null,
+      tool_spans_matched: null,
+      tool_spans_unmatched: null,
+      tool_spans_same_poll: null,
+      absent_reason: absentReason,
+    }
+  }
+  return {
+    role: run?.role ?? null,
+    dispatch_id: run?.id ?? null,
+    transport,
+    turns: census.turns,
+    tool_calls: census.tool_calls,
+    distinct_files_read: census.distinct_files_read,
+    suite_runs: census.suite_runs,
+    re_reads: census.re_reads,
+    by_class: census.by_class,
+    in_tool_ms: census.in_tool_ms,
+    out_of_tool_ms: census.out_of_tool_ms,
+    span_ms: census.span_ms,
+    tool_spans_matched: census.tool_spans_matched,
+    tool_spans_unmatched: census.tool_spans_unmatched,
+    tool_spans_same_poll: census.tool_spans_same_poll ?? 0,
+    absent_reason: absentReason,
+  }
+}
+
 export function parseStream(path, readFileSync, existsSync) {
-  const absent = { sawJson: false, terminal: false, terminalReason: null, lines: 0, usage: null, budgetRefused: false, providerFailure: null }
+  const absent = { sawJson: false, terminal: false, terminalReason: null, lines: 0, usage: null, budgetRefused: false, providerFailure: null, census: null, census_absent: CENSUS_ABSENT_CAUSES.stream_absent }
   if (!existsSync(path)) return absent
   let text
   try { text = readFileSync(path, 'utf8') } catch { return absent }
@@ -342,6 +503,7 @@ export function parseStream(path, readFileSync, existsSync) {
   const kind = providerFailureKind(apiErrorStatus)
   return {
     sawJson, terminal, terminalReason, lines, usage: foldUsage(text),
+    census: claudeCensus(text), census_absent: sawJson ? null : CENSUS_ABSENT_CAUSES.no_frames,
     budgetRefused: sawSynthetic && sawApiError,
     providerFailure: kind === null ? null : { kind, status: apiErrorStatus },
   }
@@ -546,7 +708,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
   }
   function recordOutcome(run, outcome, stream, exitCode, signal = null) {
     const degraded = outcome === 'ok-degraded' ? degradedSignals({ exitCode, signal, terminal: stream.terminal }) : null
-    log({ at: now(), headless_outcome: outcome, exit_code: exitCode, signal, terminal_reason: stream.terminalReason, lines: stream.lines, stream: run.stream, ...(degraded ? { degraded } : {}), ...(stream.providerFailure ? { provider_failure: stream.providerFailure } : {}) })
+    log({ at: now(), headless_outcome: outcome, exit_code: exitCode, signal, terminal_reason: stream.terminalReason, lines: stream.lines, stream: run.stream, seat_turn_census: censusRow(run, 'headless-json', stream), ...(degraded ? { degraded } : {}), ...(stream.providerFailure ? { provider_failure: stream.providerFailure } : {}) })
   }
   function graceSpentFor(run) {
     return (fallbacksUsed.get(`${run.role}:${run.id}`) ?? 0) >= FALLBACK_MAX

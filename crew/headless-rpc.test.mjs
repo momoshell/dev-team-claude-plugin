@@ -7,10 +7,12 @@ import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { EVIDENCE_KINDS, LIVENESS, reclaimStore } from './reclaim.mjs'
 import {
-  carriesOwnSpend, emptyTurnEnvelope, foldRpcUsage, headlessRpcIo, isBusyRefusal, PROMPT_REFUSAL_RETRIES,
-  rpcCommand, seatCommandPath, SETTLE_GATE_POLLS, splitFrames, steerFrame, teardownOutcome,
+  carriesOwnSpend, emptyTurnEnvelope, finaliseCensus, foldCensusFrame, foldRpcUsage, headlessRpcIo, isBusyRefusal, newCensus, PROMPT_REFUSAL_RETRIES,
+  rpcCensus, rpcCommand, rpcStreamCensus, seatCommandPath, SETTLE_GATE_POLLS, splitFrames, steerFrame, teardownOutcome,
 } from './headless-rpc.mjs'
 import { cellFailureKind } from './seat-io.mjs'
+import { CENSUS_ABSENT_CAUSES } from './headless.mjs'
+import { scratchDir } from '../test/helpers.mjs'
 
 // The b200-helperdedup envelope, byte-exact: 1921 bytes, schema-shaped, and
 // unparseable on ONE literal newline inside the `summary` string value.
@@ -1305,4 +1307,83 @@ test("a re-ask never unlinks the seat's original return file", () => {
   try {
     assert.equal(readFileSync(r.first.returnPath, 'utf8'), r.malformed)
   } finally { r.f.cleanup() }
+})
+
+test('b401 rpcCensus replays the recorded b376 builder stream to four dispatches and 230 turns', (t) => {
+  const path = '/Users/momoshell/.crew/dt-b376-loopgates/b376-loopgates/task/headless-rpc/builder/stream.jsonl'
+  if (!existsSync(path)) return t.skip('the recorded b376 capture is not on this host')
+  const per = rpcCensus(readFileSync(path, 'utf8'))
+  assert.equal(per.length, 4)
+  assert.equal(per.reduce((total, census) => total + census.turns, 0), 230)
+  assert.equal(per.reduce((total, census) => total + census.tool_calls, 0), 286)
+  assert.equal(per.reduce((total, census) => total + census.suite_runs, 0), 47)
+})
+
+test('b401 rpcCensus replays the recorded b394 builder stream to edit 33 read 102 test 24', (t) => {
+  const path = '/Users/momoshell/.crew/dt-b394-briefpack/b394-briefpack.archive-2026-09-03T10-26-17-352Z/task/headless-rpc/builder/stream.jsonl'
+  if (!existsSync(path)) return t.skip('the recorded b394 capture is not on this host')
+  const per = rpcCensus(readFileSync(path, 'utf8'))
+  assert.deepEqual(per[0].by_class, { edit: 33, read: 102, test: 24, other: 54 })
+})
+
+test('b401 the live rpc census stamps the tool boundary from the wrapper clock', () => {
+  const census = newCensus()
+  foldCensusFrame(census, { type: 'tool_execution_start', toolCallId: 't1', toolName: 'read', args: { path: 'a.mjs' } }, 1000)
+  foldCensusFrame(census, { type: 'tool_execution_end', toolCallId: 't1', toolName: 'read' }, 1045)
+  foldCensusFrame(census, { type: 'tool_execution_end', toolCallId: 'missing', toolName: 'read' }, 1100)
+  const result = finaliseCensus(census)
+  assert.equal(result.in_tool_ms.read, 45)
+  assert.equal(result.tool_spans_matched, 1)
+  assert.equal(result.tool_spans_unmatched, 1)
+  assert.equal(result.in_tool_ms.edit, 0)
+  assert.equal(result.distinct_files_read, 1)
+})
+
+test('RV1-1 RPC census counts distinct paths and re-reads', () => {
+  const census = newCensus()
+  const read = (id, path, at) => {
+    foldCensusFrame(census, { type: 'tool_execution_start', toolCallId: id, toolName: 'read', args: { path } }, at)
+    foldCensusFrame(census, { type: 'tool_execution_end', toolCallId: id, toolName: 'read' }, at + 1)
+  }
+  read('first', 'a.mjs', 1000)
+  read('second', 'b.mjs', 1010)
+  read('again', 'a.mjs', 1020)
+  const result = finaliseCensus(census)
+  assert.equal(result.distinct_files_read, 2)
+  assert.equal(result.re_reads, 1)
+})
+
+test('b401 a tool call observed in one poll reports an absent duration and never zero', () => {
+  const start = (id) => ({ type: 'tool_execution_start', toolCallId: id, toolName: 'bash', args: { command: 'node --test crew/headless.test.mjs' } })
+  const end = (id) => ({ type: 'tool_execution_end', toolCallId: id, toolName: 'bash' })
+  const one = newCensus()
+  foldCensusFrame(one, start('t1'), 1000)
+  foldCensusFrame(one, end('t1'), 1000)
+  const only = finaliseCensus(one)
+  assert.equal(only.tool_spans_same_poll, 1)
+  assert.equal(only.tool_spans_matched, 0)
+  assert.equal(only.in_tool_ms, null)
+  assert.equal(only.clock_absent, CENSUS_ABSENT_CAUSES.same_poll_boundary)
+  const mixed = newCensus()
+  foldCensusFrame(mixed, start('t1'), 1000)
+  foldCensusFrame(mixed, end('t1'), 1000)
+  foldCensusFrame(mixed, start('t2'), 2000)
+  foldCensusFrame(mixed, end('t2'), 2500)
+  const both = finaliseCensus(mixed)
+  assert.equal(both.in_tool_ms.test, 500)
+  assert.equal(both.tool_spans_same_poll, 1)
+  assert.equal(both.clock_absent, null)
+})
+
+test('b401 an absent rpc stream is stream_absent and an empty one is no_frames', () => {
+  const dir = scratchDir('rpc-census-')
+  try {
+    const empty = join(dir, 'empty.jsonl')
+    writeFileSync(empty, '\n\n')
+    const missing = rpcStreamCensus(join(dir, 'never-written.jsonl'), readFileSync, existsSync)
+    const blank = rpcStreamCensus(empty, readFileSync, existsSync)
+    assert.equal(missing.absent_reason, CENSUS_ABSENT_CAUSES.stream_absent)
+    assert.equal(blank.absent_reason, CENSUS_ABSENT_CAUSES.no_frames)
+    assert.notEqual(missing.absent_reason, blank.absent_reason)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
 })

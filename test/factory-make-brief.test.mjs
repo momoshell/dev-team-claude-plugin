@@ -5,7 +5,7 @@ import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import {
-  existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync,
+  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -16,8 +16,8 @@ import {
   DIRECTED_BLOCK, DIRECTED_GATE_NOTE, DIRECTED_KEYS, HOSTILE_ENV_BLOCK, LADDER_BANDS, OPTIONAL_REQUEST_KEYS,
   REFUSAL_REASONS, SLOT_MARKER, TIER_NAMES, crossCheckCoupling, readsToAcknowledge,
   discoverTripwires, extractKeys, extractSymbols, gatherFences, gatherProtectedPaths, isTripwireFile, main,
-  MUTATION_CONTRACT_BLOCK, PROPOSAL_BLOCK, PROPOSAL_KEYS, profileField, proposeTier,
-  readLadderBands, renderBrief, renderProposalBlock, resolveIntent, resolveWriteSurface, validateAsk,
+  MUTATION_CONTRACT_BLOCK, PACK_ABSENT_REASONS, PROPOSAL_BLOCK, PROPOSAL_KEYS, profileField, proposeTier,
+  readLadderBands, renderBrief, renderProposalBlock, resolveIntent, resolveWriteSurface, validateAsk, writePack,
   validateRequest, validateScopeEntries, verifyCreates, verifyWhere,
 } from '../scripts/factory/make-brief.mjs'
 import { PROPOSAL_BLOCK as EMIT_PROPOSAL_BLOCK, PROPOSAL_KEYS as EMIT_PROPOSAL_KEYS } from '../scripts/factory/emit.mjs'
@@ -256,6 +256,95 @@ test('the four authored lines are carried verbatim and compilation is idempotent
   assert.match(first, /## Proposed tier/)
   assert.equal((first.match(/^```proposal$/gm) || []).length, 1)
   assert.equal(first, second)
+})
+
+test('pack mode moves boilerplate to sidecars and preserves the inline verdict', () => {
+  const root = fixture('pack-basic', { coupledCaller: true })
+  const issueBody = 'Issue body line one.\nIssue body line two.'
+  const issue = put(root, 'issue-body.md', `${issueBody}\n`)
+  const journal = put(root, 'journal.jsonl', '{"event":"plan"}\n{"event":"build"}\n')
+  const ask = `#123 Move the widget cache contract into a smaller brief and point at sidecars. Journal: ${journal}`
+  const bareBefore = compile(root, { ask: ASK }, [], 'bare-before.md').brief
+  const pack = join(root, 'pack')
+  mkdirSync(pack)
+  const packed = compile(root, { ask }, ['--pack', pack, '--issue-body', issue], 'packed.brief.md').brief
+  const unpacked = compile(root, { ask }, [], 'unpacked.md').brief
+  const bareAfter = compile(root, { ask: ASK }, [], 'bare-after.md').brief
+  const vocabulary = join(pack, 'packed.tripwires.txt')
+  const rows = join(pack, 'packed.tripwires.md')
+  const conventions = join(pack, 'packed.conventions.md')
+  const fixturePath = join(pack, 'fixtures', 'packed.jsonl')
+  const context = section(packed, '## Context pack')
+  for (const path of [vocabulary, rows, conventions, fixturePath]) assert.equal(existsSync(path), true, path)
+  assert.equal(readFileSync(rows, 'utf8'), `${section(unpacked, '## Tripwires')}\n`)
+  assert.equal(readFileSync(fixturePath, 'utf8'), '{"event":"plan"}\n{"event":"build"}\n')
+  assert.doesNotMatch(packed, /declare every hit:/)
+  assert.doesNotMatch(packed, new RegExp(CONVENTIONS_BLOCK.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')))
+  assert.match(unpacked, /declare every hit:/)
+  assert.ok(unpacked.includes(CONVENTIONS_BLOCK))
+  assert.equal(bareAfter, bareBefore)
+  const vocabularyLines = readFileSync(vocabulary, 'utf8').trim().split('\n')
+  assert.ok(vocabularyLines.length > 0)
+  assert.equal(vocabularyLines.some((line) => line.includes('\\|')), false)
+  assert.ok(packed.includes(vocabulary))
+  assert.ok(packed.includes(`grep -rn -f ${vocabulary}`))
+  assert.ok(packed.includes(rows))
+  assert.ok(packed.includes(`cat ${rows}`))
+  assert.ok(packed.includes(conventions))
+  assert.ok(packed.includes(`cat ${conventions}`))
+  assert.equal(packed.split(issueBody).length - 1, 1)
+  assert.ok(context.includes(`--- ISSUE 123 BODY ---\n${issueBody}\n--- END ISSUE 123 BODY ---`))
+  for (const [file, label] of [
+    ['lib/widget.mjs', 'in fence'],
+    ['config/thing.yml', 'in fence'],
+    ['lib/caller.mjs', 'coupled'],
+  ]) {
+    const count = readFileSync(join(root, file), 'utf8').split('\n').length
+    assert.ok(context.includes(`- ${file} · ${count} lines · ${label}`), file)
+  }
+  for (const dir of ['config', 'lib']) {
+    const entries = readdirSync(join(root, dir), { withFileTypes: true })
+      .map((entry) => entry.isDirectory() ? `${entry.name}/` : entry.name)
+      .sort()
+    assert.ok(context.includes(`- ${dir}/ · ${entries.join(', ')}`), dir)
+  }
+})
+
+test('pack and issue-body flags refuse their missing prerequisites', () => {
+  const root = fixture('pack-flag-refusals')
+  const requestPath = request(root)
+  const pack = join(root, 'pack')
+  mkdirSync(pack)
+  const noOut = run(root, ['--request', requestPath, '--checkout', root, '--pack', pack])
+  assert.equal(noOut.status, 2)
+  assert.match(noOut.stderr, /missing-line/)
+  const noPack = run(root, ['--request', requestPath, '--checkout', root, '--issue-body', join(root, 'body.md')])
+  assert.equal(noPack.status, 2)
+  assert.match(noPack.stderr, /missing-line/)
+})
+
+test('every packed absence uses one closed reason and never invents a value', () => {
+  const root = fixture('pack-absence-reasons')
+  const issuePath = join(root, 'missing-issue.md')
+  const journalPath = join(root, 'missing-journal.jsonl')
+  const cases = [
+    { ask: ASK, reason: 'no-issue-cited' },
+    { ask: '#321 Move the widget cache contract into a smaller brief.', reason: 'no-issue-body-supplied' },
+    { ask: '#321 Move the widget cache contract into a smaller brief.', extra: ['--issue-body', issuePath], reason: 'issue-body-unreadable' },
+    { ask: ASK, reason: 'no-journal-named' },
+    { ask: `${ASK} Journal: ${journalPath}`, reason: 'journal-unreadable' },
+  ]
+  assert.equal(new Set(PACK_ABSENT_REASONS).size, 5)
+  for (const [index, item] of cases.entries()) {
+    const pack = join(root, `pack-${index}`)
+    mkdirSync(pack)
+    const brief = compile(root, { ask: item.ask }, ['--pack', pack, ...(item.extra || [])], `absence-${index}.brief.md`).brief
+    assert.match(brief, new RegExp(item.reason))
+    if (item.reason === 'no-journal-named' || item.reason === 'journal-unreadable') {
+      assert.match(brief, /fixture rows: \(none\) — basis:/)
+      assert.equal(existsSync(join(pack, 'fixtures', `absence-${index}.jsonl`)), false)
+    }
+  }
 })
 
 test('intent resolves one collapsed sentence, accepts authored text, and validates its shape', () => {
@@ -559,6 +648,87 @@ test('exported symbols, error codes, and written filenames each find their test'
   assert.match(tripwireBody, /- test\/error-pin\.test\.mjs · .*cache:miss/)
   assert.match(tripwireBody, /- test\/written-pin\.test\.mjs · .*out\/widget\.json/)
   assert.match(brief, /grep -rn/)
+})
+
+test('tracked key discovery retains a tripwire beyond argv limits', () => {
+  const root = fixture('chunked-key-discovery')
+  const symbolAt = (index) => `ARG_MAX_GUARD_${String(index).padStart(5, '0')}`
+  const symbolCount = 70_000
+  const pinned = symbolAt(symbolCount - 1)
+  put(root, 'lib/generated.mjs', `${Array.from({ length: symbolCount }, (_, index) => (
+    `export const ${symbolAt(index)} = ${index}`
+  )).join('\n')}\n`)
+  put(root, 'test/argv-ceiling.test.mjs', [
+    "import { test } from 'node:test'",
+    `import { ${pinned} } from '../lib/generated.mjs'`,
+    `test('argv ceiling pin', () => { void ${pinned} })`,
+    '',
+  ].join('\n'))
+  git(root, 'add', '-A')
+  const where = verifyWhere({ checkout: root, where: ['lib/generated.mjs'] })
+  const tripwire = discoverTripwires({ checkout: root, files: where }).tripwires
+    .find((entry) => entry.file === 'test/argv-ceiling.test.mjs')
+  assert.equal(tripwire?.keys.includes(pinned), true)
+})
+
+test('context pack records complete source data beyond argv limits', () => {
+  const root = fixture('context-at-argv-scale')
+  const symbolAt = (index) => `CONTEXT_ARG_MAX_${String(index).padStart(5, '0')}`
+  const symbolCount = 70_000
+  const pinned = symbolAt(symbolCount - 1)
+  put(root, 'lib/generated.mjs', `${Array.from({ length: symbolCount }, (_, index) => (
+    `export const ${symbolAt(index)} = ${index}`
+  )).join('\n')}\n`)
+  put(root, 'lib/generated-caller.mjs', [
+    `import { ${pinned} } from './generated.mjs'`,
+    `export function callGenerated() { return ${pinned} }`,
+    '',
+  ].join('\n'))
+  put(root, 'test/generated-context.test.mjs', [
+    "import { test } from 'node:test'",
+    `import { ${pinned} } from '../lib/generated.mjs'`,
+    `test('generated context pin', () => { void ${pinned} })`,
+    '',
+  ].join('\n'))
+  const issueBody = 'Context issue body first line.\nContext issue body second line.'
+  const issue = put(root, 'context-issue.md', `${issueBody}\n`)
+  const journal = put(root, 'context-journal.jsonl', '{"event":"context"}\n')
+  git(root, 'add', '-A')
+  const pack = join(root, 'pack')
+  mkdirSync(pack)
+  const ask = `#456 Keep generated context data complete. Journal: ${journal}`
+  const packed = compile(root, { ask, where: ['lib/generated.mjs'] }, [
+    '--pack', pack, '--issue-body', issue,
+  ], 'context-at-scale.brief.md').brief
+  const context = section(packed, '## Context pack')
+  assert.ok(context.includes(`--- ISSUE 456 BODY ---\n${issueBody}\n--- END ISSUE 456 BODY ---`))
+  for (const [file, label] of [
+    ['lib/generated.mjs', 'in fence'],
+    ['lib/generated-caller.mjs', 'coupled'],
+  ]) {
+    const count = readFileSync(join(root, file), 'utf8').split('\n').length
+    assert.ok(context.includes(`- ${file} · ${count} lines · ${label}`), file)
+  }
+  const entries = readdirSync(join(root, 'lib'), { withFileTypes: true })
+    .map((entry) => entry.isDirectory() ? `${entry.name}/` : entry.name)
+    .sort()
+  assert.ok(context.includes(`- lib/ · ${entries.join(', ')}`))
+  const rows = join(pack, 'context-at-scale.tripwires.md')
+  assert.ok(packed.includes(`cat ${rows}`))
+})
+
+test('tracked symlinks and deleted entries do not block brief discovery', () => {
+  const root = fixture('tracked-non-files')
+  const deleted = put(root, 'lib/deleted.mjs', 'export const DELETED_TRACKED_FILE = 1\n')
+  symlinkSync('missing-target', join(root, 'broken-link'))
+  git(root, 'add', 'broken-link', 'lib/deleted.mjs')
+  rmSync(deleted)
+  const where = verifyWhere({ checkout: root, where: ['lib/widget.mjs'] })
+  const discovery = discoverTripwires({ checkout: root, files: where })
+  const tripwire = discovery.tripwires.find((entry) => entry.file === 'test/widget.test.mjs')
+  assert.equal(tripwire?.keys.includes('computeWidget'), true)
+  const { brief } = compile(root, { where: ['lib/widget.mjs'] }, [], 'tracked-non-files.brief.md')
+  assert.match(section(brief, '## Tripwires'), /test\/widget\.test\.mjs · .*computeWidget/)
 })
 
 test('broad keys are reported with counts and are not tripwires', () => {

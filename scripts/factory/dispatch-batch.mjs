@@ -1783,7 +1783,7 @@ export function measureBatchBaseline({ plans, outDir, checkout, heads, deps } = 
   })
 }
 
-function compileCommand({ requestPath, lane, laneDir, registerPath, outDir, baselinePath }) {
+function compileCommand({ requestPath, lane, laneDir, registerPath, outDir, baselinePath, issueBodyPath }) {
   const args = [
     'scripts/factory/make-brief.mjs',
     '--request', requestPath,
@@ -1792,8 +1792,10 @@ function compileCommand({ requestPath, lane, laneDir, registerPath, outDir, base
     '--lane', lane,
     '--out', join(outDir, `${lane}.brief.md`),
     '--force',
+    '--pack', outDir,
   ]
   if (typeof baselinePath === 'string' && baselinePath.trim()) args.push('--baseline', baselinePath)
+  if (typeof issueBodyPath === 'string' && issueBodyPath.trim()) args.push('--issue-body', issueBodyPath)
   return { file: 'node', args, cwd: laneDir }
 }
 
@@ -1825,6 +1827,59 @@ function discoveredReads(stdout, lane) {
     }
     return { file: normaliseRepoPath(record.file), why: record.why }
   })
+}
+
+export function briefMeasure(text) {
+  if (typeof text !== 'string') text = text == null ? '' : String(text)
+  const headings = [...text.matchAll(/^## (.*)$/gm)]
+  let top = null
+  let largest = -1
+  for (let index = 0; index < headings.length; index += 1) {
+    const heading = headings[index]
+    const end = index + 1 < headings.length ? headings[index + 1].index : text.length
+    const size = Buffer.byteLength(text.slice(heading.index, end))
+    if (size > largest) {
+      largest = size
+      top = heading[1].replace(/\r$/, '')
+    }
+  }
+  return { bytes: Buffer.byteLength(text), topSection: top }
+}
+
+function sectionToken(section) {
+  return section == null ? 'none' : String(section).replace(/^## /, '').replaceAll(' ', '_')
+}
+
+function issueNumberFrom(requestPath, d) {
+  let request
+  try { request = JSON.parse(textOf(d.readFileSync(requestPath, 'utf8'))) } catch { return null }
+  const match = typeof request?.ask === 'string' ? /#(\d{1,6})\b/.exec(request.ask) : null
+  return match ? Number(match[1]) : null
+}
+
+function issueBodyFor({ requestPath, lane, checkout, outDir, d }) {
+  const issue = issueNumberFrom(requestPath, d)
+  const unavailable = (reason) => {
+    try { d.log(`dispatch-batch: issue-body lane=${lane} issue=${issue ?? 'none'} status=unavailable reason=${reason}`) } catch { /* diagnostics never block a smaller brief */ }
+    return null
+  }
+  if (issue === null) return unavailable('no-issue-cited')
+  let result
+  try {
+    result = d.spawn({
+      file: 'gh',
+      args: ['issue', 'view', String(issue), '--json', 'body', '--jq', '.body'],
+      cwd: checkout,
+    })
+  } catch {
+    return unavailable('gh-failed')
+  }
+  if (!result || result.status !== 0) return unavailable('gh-failed')
+  const body = textOf(result.stdout)
+  if (!body.trim()) return unavailable('gh-empty')
+  const path = join(outDir, `${lane}.issue.md`)
+  try { d.writeFileSync(path, body) } catch { return unavailable('gh-failed') }
+  return path
 }
 
 export async function compileLane({ lane, batchDir, requestPath, laneDir, registerPath, outDir, fences, baselinePath, deps } = {}) {
@@ -1860,8 +1915,9 @@ export async function compileLane({ lane, batchDir, requestPath, laneDir, regist
     const data = registerData({ fences, registerPath: authoredRegister, d })
     currentRegister = writeUpdatedRegister({ data, lane: name, reads, outDir: outputDir, d })
   }
+  const issueBodyPath = issueBodyFor({ requestPath: compileRequest, lane: name, checkout, outDir: outputDir, d })
   let result
-  try { result = await d.spawnAsync(compileCommand({ lane: name, requestPath: compileRequest, laneDir: checkout, registerPath: currentRegister, outDir: outputDir, baselinePath })) } catch (err) {
+  try { result = await d.spawnAsync(compileCommand({ lane: name, requestPath: compileRequest, laneDir: checkout, registerPath: currentRegister, outDir: outputDir, baselinePath, issueBodyPath })) } catch (err) {
     refuse(`compiler could not start for ${name}: ${err?.message || String(err)}`, COMPILE_REFUSED)
   }
   if (!result || result.status !== 0) {
@@ -1877,7 +1933,8 @@ export async function compileLane({ lane, batchDir, requestPath, laneDir, regist
   try { brief = textOf(d.readFileSync(briefPath, 'utf8')) } catch (err) {
     refuse(`compiler produced no readable brief for ${name}: ${err?.message || String(err)}`, COMPILE_REFUSED)
   }
-  return { lane: name, brief: briefPath, registerPath: currentRegister, proposed: proposalFromBrief(brief), staffing: staffingFromBrief(brief), intent: intentFromBrief(brief) }
+  const measured = briefMeasure(brief)
+  return { lane: name, brief: briefPath, registerPath: currentRegister, proposed: proposalFromBrief(brief), staffing: staffingFromBrief(brief), intent: intentFromBrief(brief), bytes: measured.bytes, topSection: measured.topSection }
 }
 
 export function tierFloor({ files, extra } = {}) {
@@ -2572,7 +2629,7 @@ export async function dispatchBatch({ batchDir, fences, checkout, parentDir, out
     const seats = mergeSeats(batchSeats, laneEntry?.seats)
     const result = reconcileTier({ lane: item.lane, forced: floor.forced, proposed: item.proposed, requested, requestedFrom: laneEntry?.tier ? 'lane' : 'batch' })
     if (!result.tier) refuse(`lane ${item.lane} has no known tier to boot`, BOOT_FAILED)
-    d.log(`dispatch-batch: lane=${item.lane} forced=${floor.forced || 'none'} proposed=${item.proposed || 'none'} requested=${requested || 'none'} requested_from=${laneEntry?.tier ? 'lane' : (tier ? 'batch' : 'none')} variant=${laneVariant || 'none'} variant_from=${laneEntry?.variant ? 'lane' : (variant ? 'batch' : 'none')} settled=${result.tier} seats=${seatSpec(seats)} seats_from=${seatFromSpec(batchSeats, laneEntry?.seats)} shape=${staffing.shape || STAFFING_ABSENT} strength=${staffing.strength || STAFFING_ABSENT} misclassified=${staffing.misclassification ? 'true' : 'false'}${overrideNote(result)}`)
+    d.log(`dispatch-batch: lane=${item.lane} forced=${floor.forced || 'none'} proposed=${item.proposed || 'none'} requested=${requested || 'none'} requested_from=${laneEntry?.tier ? 'lane' : (tier ? 'batch' : 'none')} variant=${laneVariant || 'none'} variant_from=${laneEntry?.variant ? 'lane' : (variant ? 'batch' : 'none')} settled=${result.tier} seats=${seatSpec(seats)} seats_from=${seatFromSpec(batchSeats, laneEntry?.seats)} shape=${staffing.shape || STAFFING_ABSENT} strength=${staffing.strength || STAFFING_ABSENT} misclassified=${staffing.misclassification ? 'true' : 'false'} brief_bytes=${item.bytes} top_section=${sectionToken(item.topSection)}${overrideNote(result)}`)
     const recordPath = join(outputDir, `${item.lane}${DISPATCH_RECORD_SUFFIX}`)
     const record = {
       lane: item.lane,

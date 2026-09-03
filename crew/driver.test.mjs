@@ -2,8 +2,8 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import {
-  assignmentLine, assertSafeLine, pickNeedles, surfaceProcessTree, sendLine,
-  SEND_RETRIES, SUBMIT_ENTER_ATTEMPTS, SUBMIT_PROOF_WINDOW_MS, SUBMIT_TOTAL_BUDGET_MS,
+  assignmentLine, assignmentPrompt, assertSafeLine, briefIngestCommands, pickNeedles, surfaceProcessTree, sendLine,
+  DELIVERY_MODES, SEND_RETRIES, SUBMIT_ENTER_ATTEMPTS, SUBMIT_PROOF_WINDOW_MS, SUBMIT_TOTAL_BUDGET_MS,
 } from './driver.mjs'
 import { capabilitiesFor as claudeCapabilitiesFor } from './adapters/adapter-claude.mjs'
 import { capabilitiesFor as piCapabilitiesFor } from './adapters/adapter-pi.mjs'
@@ -21,6 +21,45 @@ test('assignmentLine returns the exact expected string', () => {
     assignmentLine(GOOD),
     'ASSIGNMENT p1: read your brief at /Users/x/.crew/demo/task/brief-planner.md. Task dir: /Users/x/.crew/demo/task. Write your ReturnEnvelope to /Users/x/.crew/demo/returns/planner.json then print exactly: CREW-DONE planner p1'
   )
+})
+
+test('assignmentPrompt path delivery is byte-identical and modes are closed', () => {
+  assert.deepEqual(DELIVERY_MODES, ['path', 'inline'])
+  assert.equal(assignmentPrompt({ ...GOOD, delivery: 'path' }), assignmentLine(GOOD))
+  assert.throws(() => assignmentPrompt({ ...GOOD, delivery: 'other' }), /assignmentPrompt: delivery must be one of path, inline/)
+})
+
+test('assignmentPrompt inline delivery carries a multiline brief without its path instruction', () => {
+  const briefText = '# Task: inline\n## The ask\nKeep this verbatim.\n'
+  const prompt = assignmentPrompt({ ...GOOD, delivery: 'inline', briefText })
+  assert.match(prompt, /^ASSIGNMENT p1: your brief is inlined below, in full — nothing to read first\./)
+  assert.ok(prompt.includes(briefText))
+  assert.ok(prompt.includes('--- BRIEF BEGINS ---'))
+  assert.ok(prompt.includes('--- BRIEF ENDS ---'))
+  assert.doesNotMatch(prompt, /read your brief at/)
+  assert.doesNotMatch(prompt, new RegExp(GOOD.briefFile.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')))
+  assert.ok(prompt.includes(`Write your ReturnEnvelope to ${GOOD.returnPath}`))
+  assert.ok(prompt.includes(`CREW-DONE ${GOOD.role} ${GOOD.id}`))
+  assert.throws(() => assertSafeLine(prompt), /sendLine: line contains a character outside the allowed charset/)
+  assert.throws(() => assignmentPrompt({ ...GOOD, delivery: 'inline', briefText: '' }), /assignmentPrompt: briefText must be a non-empty string/)
+  for (const [field, value] of [['id', '../p1'], ['role', 'plan/ner'], ['taskDir', 'task']]) {
+    assert.throws(() => assignmentPrompt({ ...GOOD, delivery: 'inline', briefText, [field]: value }), new RegExp(`assignmentLine: ${field}`))
+  }
+})
+
+test('briefIngestCommands counts rows and finds absolute and basename reads', () => {
+  const rows = [
+    { message: { content: [{ type: 'tool_use', name: 'Bash', input: { command: `cat ${GOOD.briefFile}` } }] } },
+    { message: { content: [{ type: 'tool_use', name: 'Bash', input: { command: `cat ${GOOD.briefFile.split('/').pop()}` } }] } },
+    { message: { content: [{ type: 'tool_use', name: 'Read', input: { command: `cat ${GOOD.briefFile}` } }] } },
+  ]
+  const result = briefIngestCommands({ stream: rows.map((row) => JSON.stringify(row)).join('\n') + '\n', briefFile: GOOD.briefFile })
+  assert.equal(result.rows, 3)
+  assert.equal(result.unparsed, 0)
+  assert.deepEqual(result.commands, [`cat ${GOOD.briefFile}`, `cat ${GOOD.briefFile.split('/').pop()}`])
+  const torn = briefIngestCommands({ stream: 'not json\n', briefFile: GOOD.briefFile })
+  assert.deepEqual(torn, { rows: 1, unparsed: 1, commands: [] })
+  assert.throws(() => briefIngestCommands({ stream: '', briefFile: '' }), /briefIngestCommands: briefFile must be a non-empty string/)
 })
 
 test('relative briefFile throws', () => {

@@ -53,6 +53,7 @@ import {
   ROLES_ANCHOR_COMPANIONS,
   ROLES_ANCHOR_MANIFEST,
   crewJsonPath,
+  briefMeasure,
   compileLane,
   dispatchBatch,
   factoryStateRoot,
@@ -2596,6 +2597,12 @@ test('a dispatch over a checkout with pinned files unrelated to the batch still 
   assert.equal(JSON.stringify(withManifest.plans), JSON.stringify(withoutManifest.plans))
 })
 
+test('briefMeasure reports UTF-8 bytes and the largest section, or null', () => {
+  const text = ['## Small', 'one', '## Largest', '·'.repeat(4), 'more', '## Tail', 'x'].join('\n')
+  assert.deepEqual(briefMeasure(text), { bytes: Buffer.byteLength(text), topSection: 'Largest' })
+  assert.deepEqual(briefMeasure('plain text ·'), { bytes: Buffer.byteLength('plain text ·'), topSection: null })
+})
+
 test('normalDeps supplies the house-style dependency surface', () => {
   const deps = normalDeps({})
   assert.deepEqual(Object.keys(deps).sort(), ['appendFileSync', 'assertQuiet', 'env', 'existsSync', 'home', 'log', 'mkdirSync', 'now', 'readFileSync', 'readdirSync', 'sleep', 'slots', 'spawn', 'spawnAsync', 'writeFileSync'])
@@ -2626,10 +2633,83 @@ test('compileLane discovers reads once and compiles once', async () => {
   assert.equal(calls[0].args.includes('--discover-reads'), true)
   assert.equal(calls[0].args.includes('--out'), false)
   assert.equal(calls[1].args.includes('--out'), true)
+  assert.equal(calls[1].args.includes('--pack'), true)
+  assert.equal(calls[1].args[calls[1].args.indexOf('--pack') + 1], out)
   assert.equal(result.proposed, 'build')
   const retry = calls[1].args[calls[1].args.indexOf('--fences') + 1]
   assert.notEqual(retry, register)
   assert.deepEqual(JSON.parse(readFileSync(retry, 'utf8')).lanes[0].reads, [{ file: 'crew/x.mjs', why }])
+})
+
+test('compileLane soft-fails an unavailable issue body without refusing or passing it', async () => {
+  const lane = 'lane-gh'
+  const batch = makeBatch([lane])
+  const requestPath = put(join(batch, `${lane}${REQUEST_SUFFIX}`), JSON.stringify(request(
+    '#867 Carry the cited issue context into this lane brief',
+    ['crew/owned.mjs'],
+  )))
+  const out = join(root, 'compile-gh-out')
+  const register = put(join(root, 'compile-gh-register.json'), JSON.stringify({ lanes: [entry(lane, ['crew/owned.mjs'], [])] }))
+  const calls = []
+  const logs = []
+  const result = await compileLane({
+    lane, batchDir: batch, requestPath, laneDir: root, registerPath: register, outDir: out,
+    fences: [entry(lane, ['crew/owned.mjs'], [])],
+    deps: {
+      spawn: (call) => {
+        calls.push(call)
+        if ((call.args || []).includes('--discover-reads')) return { status: 0, stdout: '[]', stderr: '' }
+        if (call.file === 'gh') return { status: 1, stdout: '', stderr: 'gh failed' }
+        return { status: 0, stdout: '', stderr: '' }
+      },
+      readFileSync: (path, encoding) => String(path).endsWith('.brief.md') ? briefWithTierAndShape : readFileSync(path, encoding || 'utf8'),
+      log: (line) => logs.push(String(line)),
+    },
+  })
+  const compile = calls.find(({ args }) => args.includes('--out'))
+  assert.ok(compile)
+  assert.equal(compile.args.includes('--pack'), true)
+  assert.equal(compile.args.includes('--issue-body'), false)
+  const gh = calls.find(({ file }) => file === 'gh')
+  assert.ok(gh)
+  assert.deepEqual(gh.args, ['issue', 'view', '867', '--json', 'body', '--jq', '.body'])
+  assert.deepEqual(logs, ['dispatch-batch: issue-body lane=lane-gh issue=867 status=unavailable reason=gh-failed'])
+  assert.equal(result.topSection, 'Proposed tier')
+})
+
+test('compileLane passes a fetched issue body path only after gh returns content', async () => {
+  const lane = 'lane-gh-ok'
+  const batch = makeBatch([lane])
+  const requestPath = put(join(batch, `${lane}${REQUEST_SUFFIX}`), JSON.stringify(request(
+    '#42 Carry the cited issue context into this lane brief',
+    ['crew/owned.mjs'],
+  )))
+  const out = join(root, 'compile-gh-ok-out')
+  const register = put(join(root, 'compile-gh-ok-register.json'), JSON.stringify({ lanes: [entry(lane, ['crew/owned.mjs'], [])] }))
+  const calls = []
+  const writes = new Map()
+  const result = await compileLane({
+    lane, batchDir: batch, requestPath, laneDir: root, registerPath: register, outDir: out,
+    fences: [entry(lane, ['crew/owned.mjs'], [])],
+    deps: {
+      spawn: (call) => {
+        calls.push(call)
+        if ((call.args || []).includes('--discover-reads')) return { status: 0, stdout: '[]', stderr: '' }
+        if (call.file === 'gh') return { status: 0, stdout: 'Fetched body.\n', stderr: '' }
+        return { status: 0, stdout: '', stderr: '' }
+      },
+      readFileSync: (path, encoding) => String(path).endsWith('.brief.md') ? briefWithTierAndShape : readFileSync(path, encoding || 'utf8'),
+      writeFileSync: (path, content) => writes.set(String(path), String(content)),
+    },
+  })
+  const compile = calls.find(({ args }) => args.includes('--out'))
+  assert.ok(compile)
+  const issueFlag = compile.args.indexOf('--issue-body')
+  assert.notEqual(issueFlag, -1)
+  const issuePath = compile.args[issueFlag + 1]
+  assert.equal(issuePath, join(out, `${lane}.issue.md`))
+  assert.equal(writes.get(issuePath), 'Fetched body.\n')
+  assert.equal(result.bytes, Buffer.byteLength(briefWithTierAndShape))
 })
 
 test('dispatch records compiler intent in crew.json and the journal', async () => {
@@ -2974,7 +3054,7 @@ test('staffing fields append to the existing settled dispatch log line', async (
   assert.equal(line.startsWith(
     'dispatch-batch: lane=lane-a forced=none proposed=none requested=mechanical requested_from=batch variant=full variant_from=batch settled=mechanical',
   ), true)
-  assert.match(line, / shape=judge strength=workhorse misclassified=false$/)
+  assert.match(line, / shape=judge strength=workhorse misclassified=false brief_bytes=65 top_section=none$/)
 })
 
 async function compileBriefProposal(brief, label) {

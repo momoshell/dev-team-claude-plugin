@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createServer, connect } from 'node:net'
 import { spawn, spawn as spawnProcess, spawnSync } from 'node:child_process'
-import { openLedger, NODE_FLOOR, replayJsonl, WRITERS, USAGE_ABSENT_CAUSES } from '../scripts/factory/ledger.mjs'
+import { openLedger, NODE_FLOOR, PHASE_SLOT_WAIT_ABSENT, replayJsonl, WRITERS, USAGE_ABSENT_CAUSES } from '../scripts/factory/ledger.mjs'
 import { cellHealth } from '../crew/breaker.mjs'
 import { gitGrepHits } from '../scripts/factory/absence.mjs'
 import { parseCliArgs, ServerUsageError, startServer as startVisualizerServer, writeRosterAtomically } from '../visualizer/server/server.mjs'
@@ -452,6 +452,50 @@ test('a feed started before the ledger exists answers from it once it appears', 
     assert.equal(after.runs.length, 1)
     assert.equal(after.runs[0].adw_id, 'feed-reopen-run')
     assert.equal(feed._reason(), null)
+  } finally {
+    feed.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('run rows distinguish measured suite-slot waits from an absent family and no waits', { skip: SKIP }, () => {
+  const dir = scratchDir('visualizer-feed-slot-waits-')
+  const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')
+  const writer = openLedger({ dbPath: ledgerDb, stderr: { write() {} } })
+  try {
+    writer.startSession({ adw_id: 'slot-waited', repo_slug: 'repo', task_slug: 'waited' })
+    writer.startSession({ adw_id: 'slot-never', repo_slug: 'repo', task_slug: 'never' })
+  } finally { writer.close() }
+
+  const initialFeed = createLedgerFeed({ ledgerDb, triageDb })
+  let before
+  try { before = initialFeed.listRuns({}) } finally { initialFeed.close() }
+  assert.equal(before.runs.length, 2)
+  for (const run of before.runs) {
+    assert.equal(run.slot_waits, null)
+    assert.equal(run.slot_waits_absent, PHASE_SLOT_WAIT_ABSENT)
+  }
+
+  const waitedWriter = openLedger({ dbPath: ledgerDb, stderr: { write() {} } })
+  try {
+    waitedWriter.recordPhaseSlotWait({ adw_id: 'slot-waited', kind: 'suite-cold', waited_ms: 12_000, queue_depth: null, slotted: 1 })
+  } finally { waitedWriter.close() }
+
+  const feed = createLedgerFeed({ ledgerDb, triageDb })
+  try {
+    const result = feed.listRuns({})
+    const waited = result.runs.find((run) => run.adw_id === 'slot-waited')
+    const never = result.runs.find((run) => run.adw_id === 'slot-never')
+    assert.ok(waited)
+    assert.ok(never)
+    assert.equal(waited.slot_waits.length, 1)
+    assert.equal(waited.slot_waits[0].waited_ms, 12_000)
+    assert.equal(waited.slot_waits[0].queue_depth, null)
+    assert.ok(waited.slot_waits[0].queue_depth_absent)
+    assert.equal(waited.slot_waits_absent, null)
+    assert.deepEqual(never.slot_waits, [])
+    assert.equal(never.slot_waits_absent, null)
+    assert.deepEqual(Object.keys(waited).sort(), Object.keys(never).sort())
   } finally {
     feed.close()
     rmSync(dir, { recursive: true, force: true })

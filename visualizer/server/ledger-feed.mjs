@@ -3,6 +3,7 @@
 // writable visualizer.db sidecar. An unavailable ledger handle degrades the
 // feed rather than throwing.
 import { openLedger } from '../../scripts/factory/ledger.mjs'
+import { PHASE_SLOT_WAIT_ABSENT } from '../../scripts/factory/ledger.mjs'
 import { createTriage } from './triage.mjs'
 import { shapeRun, matchesFilters } from './shape.mjs'
 // A failed open is a MOMENT, not a verdict. A read-only database handle cannot
@@ -12,7 +13,7 @@ import { shapeRun, matchesFilters } from './shape.mjs'
 // cooldown so a hot read loop cannot construct a handle per read.
 export const FEED_REOPEN_COOLDOWN_MS = 2000
 const OPTIONAL_COLUMNS = { sessions: ['mode', 'engineer'] }
-const OPTIONAL_TABLES = ['run_configurations', 'agent_sessions', 'gate_discriminations', 'gate_results', 'review_outcomes', 'accept_decisions', 'cell_failures', 'intake_sweeps', 'intake_refusals', 'seat_teardowns']
+const OPTIONAL_TABLES = ['run_configurations', 'agent_sessions', 'gate_discriminations', 'gate_results', 'review_outcomes', 'accept_decisions', 'cell_failures', 'intake_sweeps', 'intake_refusals', 'seat_teardowns', 'phase_slot_waits']
 // Which shape fields a missing table makes unknowable. Feeding these into the
 // probe reuses #48's NULL-probe path (shape.mjs) instead of inventing a second
 // mechanism for the same idea.
@@ -45,6 +46,31 @@ export function createLedgerFeed({ ledgerDb, triageDb, stderr = { write() {} }, 
 
   function mirrorErrorReason(errors) {
     return errors.first_message || errors.first_code || 'mirror read failed'
+  }
+
+  // #826 — the per-run suite-slot wait. The feed may not write SQL of its own
+  // (test/visualizer-shape.test.mjs:902-903), so dumpTable is the reader, read once per
+  // listRuns and bucketed by run here. An EMPTY family is not "no lane waited": a corpus
+  // written before the mirror landed looks exactly the same, so it answers with the
+  // ledger's own reason.
+  function slotWaitsFor(ids) {
+    if (probe.missing_tables.includes('phase_slot_waits')) return { rows: null, absent: 'phase_slot_waits predates this ledger mirror' }
+    const { value, errors } = ledger.captureMirrorErrors(() => ledger.dumpTable('phase_slot_waits'))
+    if (errors.count > 0) {
+      if (!probe.missing_tables.includes('phase_slot_waits')) probe.missing_tables.push('phase_slot_waits')
+      return { rows: null, absent: mirrorErrorReason(errors) }
+    }
+    // MUTATION D2: hand an empty family an empty bucket instead of the ledger's reason and
+    // the feed turns "nobody measured" into "nobody waited" before the cell can say so.
+    if (!value.length) return { rows: null, absent: PHASE_SLOT_WAIT_ABSENT }
+    const wanted = new Set(ids)
+    const buckets = new Map()
+    for (const row of value) {
+      if (!wanted.has(row.adw_id)) continue
+      if (!buckets.has(row.adw_id)) buckets.set(row.adw_id, [])
+      buckets.get(row.adw_id).push(row)
+    }
+    return { rows: buckets, absent: null }
   }
 
   function open() {
@@ -152,10 +178,15 @@ export function createLedgerFeed({ ledgerDb, triageDb, stderr = { write() {} }, 
     for (const row of reviewRows) reviewMap.get(row.adw_id)?.push(row)
     for (const row of acceptRows) acceptMap.get(row.adw_id)?.push(row)
     const triageRows = triage.readTriage(ids)
+    const waits = slotWaitsFor(ids)
     const shapeProbe = { ...probe, missing: [...probe.missing, ...probe.missing_tables.flatMap((table) => TABLE_FIELDS[table] ?? [])] }
     const now = Date.now()
-    const runs = sessions.map((session) => shapeRun(session, phaseMap.get(session.adw_id), eventMap.get(session.adw_id), triageRows.get(session.adw_id), shapeProbe, now,
-      { runConfiguration: configurationMap.get(session.adw_id) ?? null, agentSessions: agentSessionMap.get(session.adw_id), gateDiscriminations: gateMap.get(session.adw_id), gateResults: gateResultsMap.get(session.adw_id), reviewOutcomes: reviewMap.get(session.adw_id), acceptDecisions: acceptMap.get(session.adw_id) })).filter((run) => matchesFilters(run, filters))
+    const runs = sessions.map((session) => ({
+      ...shapeRun(session, phaseMap.get(session.adw_id), eventMap.get(session.adw_id), triageRows.get(session.adw_id), shapeProbe, now,
+        { runConfiguration: configurationMap.get(session.adw_id) ?? null, agentSessions: agentSessionMap.get(session.adw_id), gateDiscriminations: gateMap.get(session.adw_id), gateResults: gateResultsMap.get(session.adw_id), reviewOutcomes: reviewMap.get(session.adw_id), acceptDecisions: acceptMap.get(session.adw_id) }),
+      slot_waits: waits.rows === null ? null : (waits.rows.get(session.adw_id) ?? []),
+      slot_waits_absent: waits.absent,
+    })).filter((run) => matchesFilters(run, filters))
     return { runs, degraded: degraded || triage.health().degraded, probe: { ...probe } }
   }
   function listEvents({ adw_id, after = 0, limit = 200, type, role, phase_id } = {}) {

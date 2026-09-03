@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { PANEL_REFRESH_MS, PANEL_STALE_AFTER_MS, acceptRows, brakePanel, cellHealthPanel, fleetCost, fleetEscalationRate, fleetMedianDuration, fleetPassRate, fleetPhasesPerRun, fleetTokens, findingRows, gateChips, intakeCandidateRows, intakePanel, reviewRows, rosterEditForm, rosterPanel, panelAgeLabel, panelReadLoop, readFreshness, rosterProposal, runSetPanel, teardownPanel } from '../visualizer/web/src/lib/panels.js'
 import { parseHash, formatHash } from '../visualizer/web/src/lib/route.js'
-import { absenceMark, costCell, createSemaphore, deriveDisplayStatus, deriveStatus, escalationProbeTargets, fleetActivity, fleetView, gateCell, heartbeatCell, reviewCell, runActivity, tokenCell } from '../visualizer/web/src/lib/fleet.js'
+import { absenceMark, costCell, createSemaphore, deriveDisplayStatus, deriveStatus, escalationProbeTargets, fleetActivity, fleetView, gateCell, heartbeatCell, reviewCell, runActivity, slotWaitCell, tokenCell } from '../visualizer/web/src/lib/fleet.js'
 import { ROLE_ORDER, acceptEvidence, bounceArrows, gateMarkers, gateProofStory, laneRows, phaseFilterId, phasePanel, renderMarkdown } from '../visualizer/web/src/lib/trace.js'
 import { eventStory, eventStreamSummary } from '../visualizer/web/src/lib/event-story.js'
 import { assignmentPath, envelopeFacts, envelopeGroups, envelopeOverview, envelopeSections, trajectoryRowStory, trajectorySummary } from '../visualizer/web/src/lib/diagnostic-story.js'
@@ -699,6 +699,42 @@ test('fleet cells preserve honest absence and discriminate status evidence', () 
   assert.equal(status.why, why)
   assert.equal(new Set(['proven', 'failed', 'unproven'].map((verdict) => gateCell({ gate_generations: [{ verdict }] }).text)).size, 3)
   assert.equal(reviewCell({ reviews: [{ verdict: 'changes-needed' }, { verdict: 'pass' }] }).bounces, 1)
+})
+
+test('slotWaitCell preserves measured waits and honest absence', () => {
+  const depthReason = 'no admission scan reported a queue depth for this wait — unmeasured, never a measured zero'
+  const measuredUnknown = slotWaitCell({
+    slot_waits: [{ waited_ms: 12_000, queue_depth: null, queue_depth_absent: depthReason }],
+    slot_waits_absent: null,
+  })
+  assert.equal(measuredUnknown.text, 'waiting for a suite slot · 12s')
+  assert.equal(measuredUnknown.dashed, false)
+  assert.equal(measuredUnknown.depth, null)
+  assert.equal(measuredUnknown.depth_text, 'queue depth unknown')
+  assert.equal(measuredUnknown.depth_title, depthReason)
+  assert.doesNotMatch(measuredUnknown.text, /0s/)
+  assert.equal(slotWaitCell({ slot_waits: [], slot_waits_absent: null }), null)
+
+  const measuredDepth = slotWaitCell({
+    slot_waits: [{ waited_ms: 1_000, queue_depth: 3, queue_depth_absent: null }],
+    slot_waits_absent: null,
+  })
+  assert.equal(measuredDepth.depth, 3)
+  assert.equal(measuredDepth.depth_text, 'queue depth 3')
+
+  const windowReason = 'no phase-slot-wait rows in this window — a corpus predating the ledger mirror for this event reads exactly like a window with no waits, so this is unmeasured and never a measured zero'
+  const unmeasured = slotWaitCell({ slot_waits: null, slot_waits_absent: windowReason })
+  assert.equal(unmeasured.value, null)
+  assert.equal(unmeasured.dashed, true)
+  assert.equal(unmeasured.text, windowReason)
+  assert.doesNotMatch(unmeasured.text, /0s/)
+
+  const card = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/RunCard.svelte'), 'utf8')
+  assert.match(card, /import \{[^}]*slotWaitCell[^}]*\} from '\.\/fleet\.js'/)
+  assert.match(card, /let slotWait = \$derived\(slotWaitCell\(run\)\)/)
+  assert.match(card, /\{#if slotWait\}/)
+  assert.match(card, /\{slotWait\.text\}/)
+  assert.match(card, /\{slotWait\.depth_text\}/)
 })
 
 test('running records require a fresh heartbeat before the UI calls them live', () => {

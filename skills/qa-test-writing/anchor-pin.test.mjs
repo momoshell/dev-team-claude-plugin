@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync
 import { join, relative } from 'node:path'
 import { tmpdir } from 'node:os'
 import { ROOT, git, scratchDir } from '../../test/helpers.mjs'
-import { assertAnchorsPinned, checkAnchors, checkSkillAnchors, laneFence, MIN_EXPECTED_LENGTH, repairAnchorsInPlace, repairCli, skillDocs } from './anchor-pin.mjs'
+import { assertAnchorsPinned, checkAnchors, checkSkillAnchors, laneFence, MIN_EXPECTED_LENGTH, partitionShifts, repairAnchorsInPlace, repairCli, skillDocs } from './anchor-pin.mjs'
 
 const EXPECTED = "KEY = 'anchored-sentinel-value'"
 
@@ -470,13 +470,13 @@ test('repair vacates a line before another anchor claims it', () => {
   }
 })
 
-test('an in-fence shift is a hard failure', () => {
-  // Mutation killed: treating every shift as an out-of-fence warning lets changed files drift silently.
+test('b384: an in-fence shift is a hard failure', () => {
+  // b384 preserves the fail-closed result when the lane owns the manifest; treating every shift as an out-of-fence warning lets changed files drift silently.
   const source = ['// header', '// inserted before the declaration', `const ${EXPECTED}`, 'const other = 1', 'export default KEY', '']
   const fx = fixture({ source })
   try {
     assert.throws(
-      () => assertAnchorsPinned({ root: fx.root, skillDir: fx.skillDir, manifestPath: fx.manifestPath, minAnchors: 1, fence: ['crew/sample.mjs'], log: () => {} }),
+      () => assertAnchorsPinned({ root: fx.root, skillDir: fx.skillDir, manifestPath: fx.manifestPath, minAnchors: 1, fence: ['crew/sample.mjs', 'skills/sample/anchors.json'], log: () => {} }),
       /crew\/sample\.mjs:2.*inside this lane's fence/,
     )
   } finally {
@@ -484,18 +484,52 @@ test('an in-fence shift is a hard failure', () => {
   }
 })
 
-test('an out-of-fence shift warns and returns the anchor count', () => {
-  // Mutation killed: refusing an out-of-fence shift would make drift outside this lane's ownership block the suite.
+test('a shift whose pinning manifest is outside the fence warns instead of failing (#882)', () => {
+  // Mutation killed: refusing an external-manifest shift would make drift outside this lane's ownership block the suite.
   const source = ['// header', '// inserted before the declaration', `const ${EXPECTED}`, 'const other = 1', 'export default KEY', '']
   const fx = fixture({ source })
   const captured = []
   try {
-    assert.equal(assertAnchorsPinned({ root: fx.root, skillDir: fx.skillDir, manifestPath: fx.manifestPath, minAnchors: 1, fence: ['crew/other.mjs'], log: (line) => captured.push(line) }), 1)
+    assert.equal(assertAnchorsPinned({ root: fx.root, skillDir: fx.skillDir, manifestPath: fx.manifestPath, minAnchors: 1, fence: ['crew/sample.mjs'], log: (line) => captured.push(line) }), 1)
     assert.equal(captured.length, 1)
     assert.match(captured[0], /crew\/sample\.mjs:2/)
+    assert.match(captured[0], /--repair-all/)
+    assert.match(captured[0], /after this lane merges, on main/)
   } finally {
     dispose(fx)
   }
+})
+
+test('rot and ambiguity stay fatal when the manifest is outside the fence', () => {
+  const rot = fixture({ manifest: { 'crew/sample.mjs:2': 'missing-anchor-value' } })
+  const ambiguous = fixture({
+    source: ['// header', `const ${EXPECTED}`, `const ${EXPECTED}`, 'const other = 1', 'export default KEY', ''],
+  })
+  try {
+    assert.throws(
+      () => assertAnchorsPinned({ root: rot.root, skillDir: rot.skillDir, manifestPath: rot.manifestPath, minAnchors: 1, fence: ['crew/sample.mjs'], log: () => {} }),
+      /occur on exactly one target line/,
+    )
+    assert.throws(
+      () => assertAnchorsPinned({ root: ambiguous.root, skillDir: ambiguous.skillDir, manifestPath: ambiguous.manifestPath, minAnchors: 1, fence: ['crew/sample.mjs'], log: () => {} }),
+      /occur on exactly one target line/,
+    )
+  } finally {
+    dispose(rot)
+    dispose(ambiguous)
+  }
+})
+
+test('partitionShifts preserves the omitted-manifest split and routes external manifests out of fence', () => {
+  const shifted = [{ rel: 'crew/sample.mjs' }, { rel: 'crew/other.mjs' }]
+  assert.deepEqual(partitionShifts({ shifted, fence: ['crew/sample.mjs'] }), {
+    inFence: [shifted[0]],
+    outOfFence: [shifted[1]],
+  })
+  assert.deepEqual(partitionShifts({ shifted, fence: ['crew/sample.mjs', 'skills/sample/anchors.json'], manifest: 'skills/other/anchors.json' }), {
+    inFence: [],
+    outOfFence: shifted,
+  })
 })
 
 test('an unmeasurable lane fence is empty and warns rather than throwing', () => {

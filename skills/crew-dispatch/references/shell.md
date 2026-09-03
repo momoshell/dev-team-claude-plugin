@@ -18,7 +18,7 @@ with `script-shell` unset. The only named shells are absolute and deliberate:
 `/bin/sh -c` for gate commands and the headless worker wrapper, and
 **`GATE_REAP_SHELL = '/bin/bash'`** (`crew/drive.mjs:347`), whose reason is in
 the adjacent comment and which is tested against a missing shell
-(`crew/drive.test.mjs:3107`, `'/path/that/does/not/exist'`). The `"name": "zsh"`
+(`crew/drive.test.mjs:3108`, `'/path/that/does/not/exist'`). The `"name": "zsh"`
 strings in the driver fixture are captured pane-tree data, not a dependency.
 
 Write the claim exactly this narrowly. `crew/child.mjs` does run **`execSync`**

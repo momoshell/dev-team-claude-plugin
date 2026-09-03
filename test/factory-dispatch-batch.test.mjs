@@ -17,8 +17,10 @@ import {
   PANE_TRANSPORT,
   COUPLED_SOURCE_UNFENCED,
   ANCHOR_BLIND_SPOT,
+  ANCHOR_PIN_POST_MERGE,
   ANCHOR_PIN_WARNING_PREFIX,
   CITATION_CARRIER_BLIND_SPOT,
+  CITATION_CARRIER_POST_MERGE,
   CITATION_CARRIER_ROW_LIMIT,
   CITATION_CARRIER_WARNING_PREFIX,
   citationCarriers,
@@ -1404,6 +1406,7 @@ test('trips-and-dispatches: an unfenced anchor scan returns with the per-lane re
   assert.deepEqual(report.perLane['lane-a'].files, fixture.files)
   assert.deepEqual(report.perLane['lane-a'].where, fixture.files)
   assert.equal(report.warnings.length, 1)
+  assert.equal(report.warnings[0].text.includes(ANCHOR_PIN_POST_MERGE), true)
 })
 
 test('an anchor warning names both pinned files, all manifests, and every line key', () => {
@@ -1458,7 +1461,25 @@ test('dry-run warns with the anchor prefix and every line key', async () => {
   assert.equal(report.dryRun, true)
   const warning = logs.find((line) => line.includes(ANCHOR_PIN_WARNING_PREFIX))
   assert.ok(warning)
+  assert.equal(warning.includes(ANCHOR_PIN_POST_MERGE), true)
   for (const key of fixture.keys) assert.equal(warning.includes(key), true, `dry-run omitted ${key}`)
+})
+
+test('two lanes with external manifests warn without refusing', () => {
+  const checkout = join(root, 'anchor-warning-two-lanes-checkout')
+  anchorFixtures(checkout, {
+    first: { 'crew/owned-a.mjs:1': 'export const OWNED_A = 1' },
+    second: { 'crew/owned-b.mjs:1': 'export const OWNED_B = 1' },
+  })
+  const report = checkFences({
+    fences: [entry('lane-a', ['crew/owned-a.mjs']), entry('lane-b', ['crew/owned-b.mjs'])],
+    lanes: [{ lane: 'lane-a', where: ['crew/owned-a.mjs'] }, { lane: 'lane-b', where: ['crew/owned-b.mjs'] }],
+    checkout,
+    deps: { home: root, log: () => {} },
+  })
+  const warnings = report.warnings.filter(({ kind }) => kind === 'anchor-pin')
+  assert.equal(warnings.length, 2)
+  assert.deepEqual(warnings.map(({ lane }) => lane), ['lane-a', 'lane-b'])
 })
 
 test('a lane that owns every pinning manifest is silent', () => {
@@ -1635,9 +1656,14 @@ test('a roles anchor warning names its bijection companions and does not refuse'
   })
   const warning = report.warnings.find(({ kind, lane }) => kind === 'anchor-pin' && lane === 'lane-a')
   assert.ok(warning)
-  for (const path of [ROLES_ANCHOR_MANIFEST, ...ROLES_ANCHOR_COMPANIONS, 'crew/drive.test.mjs:1041']) {
+  for (const path of [ROLES_ANCHOR_MANIFEST, ...ROLES_ANCHOR_COMPANIONS]) {
     assert.match(warning.text, new RegExp(path.replaceAll('/', '\\/').replaceAll('.', '\\.') ))
   }
+  assert.match(warning.text, /every crew\/drive\.mjs anchor the tech-lead charter cites resolves to the code it names/)
+  assert.match(warning.text, /post-merge/)
+  assert.match(warning.text, /must still fence all three/)
+  assert.match(warning.text, /line shift is repaired/)
+  assert.equal(warning.text.includes('must be fenced together'), false)
 })
 
 test('collectAnchorPins skips an unreadable or malformed manifest', () => {
@@ -4323,7 +4349,11 @@ test('checkFences warns with the citation-carrier prefix and names the fence add
   assert.ok(warning, 'no citation-carrier warning')
   assert.equal(warning.text.startsWith(CITATION_CARRIER_WARNING_PREFIX), true)
   assert.deepEqual(warning.docs, ['skills/one/references/notes.md'])
-  assert.equal(warning.text.includes('Add to this lane\'s fence: skills/one/references/notes.md'), true)
+  assert.equal(warning.text.includes(CITATION_CARRIER_POST_MERGE), true)
+  assert.equal(warning.text.includes('Fence these docs if you want them correct at merge time: skills/one/references/notes.md'), true)
+  for (const retired of ['Add to this lane\'s fence', 'NOT repairable in lane', 'no seat may widen files_in_scope']) {
+    assert.equal(warning.text.includes(retired), false, `retired carrier wording: ${retired}`)
+  }
   assert.equal(warning.text.includes(CITATION_CARRIER_BLIND_SPOT), true)
 })
 

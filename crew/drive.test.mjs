@@ -10,7 +10,7 @@ import { cpus as osCpus, tmpdir } from 'node:os'
 
 import { join } from 'node:path'
 import { regrantVerdict } from './escalation-policy.mjs'
-import { checkAnchors } from '../skills/qa-test-writing/anchor-pin.mjs'
+import { checkAnchors, laneFence, partitionShifts } from '../skills/qa-test-writing/anchor-pin.mjs'
 
 import { assertSeats, runCmd } from './crew.mjs'
 import { runChild } from './child.mjs'
@@ -1131,8 +1131,9 @@ test('every crew/drive.mjs anchor the tech-lead charter cites resolves to the co
   const result = checkAnchors({ root: REPO_ROOT, docs, manifest })
   assert.ok(result.anchors >= 12, `expected at least 12 anchors, found ${result.anchors}`)
   assert.deepEqual(result.failures, [])
-  const drifted = result.shifted.map((shift) => `${shift.key}: pinned ${JSON.stringify(manifest[shift.key])} is now at line ${shift.to}`)
-  assert.deepEqual(drifted, [])
+  const { inFence, outOfFence } = partitionShifts({ shifted: result.shifted, fence: laneFence({ root: REPO_ROOT }).paths, manifest: 'crew/roles/anchors.json' })
+  for (const shift of outOfFence) console.warn(`shifted ${shift.key} -> line ${shift.to}; repair after this lane merges, on main with: node skills/qa-test-writing/anchor-pin.mjs --repair-all crew/roles`)
+  assert.deepEqual(inFence, [], 'a shift this lane can repair here must be repaired, not tolerated')
   // Both citation forms of the four anchors #698 found stale: the qualified
   // `crew/drive.mjs:2299` and the bare `:2226` continuation the file also used.
   for (const retired of [':2299', ':2226', ':2319', ':2217']) {

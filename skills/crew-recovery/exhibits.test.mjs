@@ -118,6 +118,28 @@ test('closeout keeps teardown last and verifies after it', () => {
   const quietAt = text.indexOf('### Precondition: prove the tree QUIET first')
   const copyAt = text.indexOf('cp -a')
   assert.ok(quietAt < copyAt, 'closeout precondition must precede preserve-by-copy')
+  const reanchorAt = text.indexOf('## Rebase first, then re-anchor')
+  assert.notEqual(reanchorAt, -1, 'closeout is missing the re-anchor section')
+  const reanchor = text.slice(reanchorAt)
+  for (const token of ['ADR-040', '--repair-all', 'main', 'after the wave merges']) {
+    assert.ok(reanchor.includes(token), `re-anchor section must name ${token}`)
+  }
+  assert.equal(reanchor.includes('Re-anchor INTO the commit'), false)
+  assert.equal(reanchor.includes('only the exhibits tests notice'), false)
+})
+
+// RV1-1 guard: restoring the false acceptance-gate claim must fail before post-merge repair is skipped.
+test('RV1-1 closeout states the anchor-shift blind spot', () => {
+  const text = readText(join(HERE, 'references/closeout.md'))
+  const reanchorAt = text.indexOf('## Rebase first, then re-anchor')
+  assert.notEqual(reanchorAt, -1, 'closeout is missing the re-anchor section')
+  const reanchor = text.slice(reanchorAt)
+  for (const token of [
+    'A cited-file edit can shift anchors while every other signal stays green:',
+    "acceptance gate and the edited file's own tests do not read pins",
+    '`exhibits.test.mjs` is where a shift surfaces',
+  ]) assert.ok(reanchor.includes(token), `closeout.md must state ${token}`)
+  assert.equal(reanchor.includes("acceptance gate and the edited file's own tests detect it"), false)
 })
 
 // Mutation killed: restoring the archive scratch recipe or removing first preservation must fail the proof test.

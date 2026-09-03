@@ -117,6 +117,9 @@ export const CITATION_CARRIER_BLIND_SPOT = 'BLIND SPOT: this finds docs carrying
 // The scan survives; the refusal does not. #635 made a shifted anchor repairable, so a
 // pin outside a lane's fence is a fact an operator should SEE, not a batch outcome.
 export const ANCHOR_PIN_WARNING_PREFIX = 'dispatch-batch: WARNING anchor-pin-unfenced:'
+// #882 / ADR-040: external pin repair is an operator-owned post-merge action.
+export const ANCHOR_PIN_POST_MERGE = 'ADR-040: the sanctioned repair is the post-merge pass an operator runs on main after the wave merges — node skills/qa-test-writing/anchor-pin.mjs --repair-all <dir> — so a pinning manifest outside this fence is not an obligation on this lane'
+export const CITATION_CARRIER_POST_MERGE = 'ADR-040: a PINNED citation moves with its manifest key, so the same post-merge --repair-all pass on main rewrites the doc and the manifest together after the wave merges; fencing these docs is optional and only buys correct line numbers at merge time'
 
 // These two names belong to the compiler. The batch dispatcher parses its
 // refusal text but deliberately does not add compiler names to its own list.
@@ -1208,17 +1211,16 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
       const detail = unfencedPins.map(({ file, manifest, keys }) => `${file} pinned by ${manifest} at ${keys.join(', ')}`).join('; ')
       const rolesManifestUnfenced = unfencedPins.some(({ manifest }) => manifest === ROLES_ANCHOR_MANIFEST)
       const rolesClause = rolesManifestUnfenced
-        ? ` The roles manifest is held to a strict bijection with the charters ${ROLES_ANCHOR_COMPANIONS.join(' and ')} at crew/drive.test.mjs:1041, so all three must be fenced together — a hard test failure, not a warning.`
+        ? ` The roles manifest is held to a strict BIJECTION with the charters ${ROLES_ANCHOR_COMPANIONS.join(' and ')} in crew/drive.test.mjs's "every crew/drive.mjs anchor the tech-lead charter cites resolves to the code it names" test, so a lane that adds or removes a citation in a charter must still fence all three; a line shift is repaired post-merge like any other.`
         : ''
-      const text = `${ANCHOR_PIN_WARNING_PREFIX} lane ${name} writes anchor-pinned file(s) whose pinning manifest is outside its fence: ${detail}; a shift is repairable with node skills/qa-test-writing/anchor-pin.mjs --repair <skill dir>, so this does not block dispatch; rot and ambiguity still fail in the skill's own exhibits.test.mjs.${rolesClause} ${ANCHOR_BLIND_SPOT}`
+      const text = `${ANCHOR_PIN_WARNING_PREFIX} lane ${name} writes anchor-pinned file(s) whose pinning manifest is outside its fence: ${detail}; ${ANCHOR_PIN_POST_MERGE}; rot and ambiguity still fail in the skill's own exhibits.test.mjs.${rolesClause} ${ANCHOR_BLIND_SPOT}`
       warnings.push({ kind: 'anchor-pin', lane: name, pins: unfencedPins, text })
       d.log(text)
     }
 
-    // The docs that CITE the lines this lane moves. A shifted manifest pin is repairable in
-    // lane; a citation inside a doc the fence excludes is not, because the repair rewrites the
-    // doc. b388-mutanchor lost an approved plan and a finished build to exactly this, so the
-    // warning names every file to add rather than reporting that some may exist.
+    // The docs that CITE the lines this lane moves. The post-merge pass rewrites the
+    // manifest and its carriers together; this warning names those docs so an operator
+    // can fence them when correct line numbers are needed at merge time.
     const unfencedCarriers = citationCarriersOutsideFence({ surface: ownSurface, fenceFiles: ownFiles, carriers: carriersFor() })
     if (unfencedCarriers.length > 0) {
       const docs = [...new Set(unfencedCarriers.map(({ doc }) => doc))]
@@ -1229,7 +1231,7 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
       warnings.push(warning)
       deferredWarnings.push(() => {
         const tail = reportTail(omitted, citation)
-        const carrierText = `${CITATION_CARRIER_WARNING_PREFIX} lane ${name} moves lines in file(s) cited by ${docs.length} doc(s) outside its fence (listing at most ${CITATION_CARRIER_ROW_LIMIT}): ${listed}${tail}. Unlike a shifted manifest pin this is NOT repairable in lane — anchor-pin.mjs --repair rewrites the CITATION, so a doc outside the fence stays red and no seat may widen files_in_scope. Add to this lane's fence: ${docs.join(', ')}. ${CITATION_CARRIER_BLIND_SPOT}`
+        const carrierText = `${CITATION_CARRIER_WARNING_PREFIX} lane ${name} moves lines in file(s) cited by ${docs.length} doc(s) outside its fence (listing at most ${CITATION_CARRIER_ROW_LIMIT}): ${listed}${tail}. ${CITATION_CARRIER_POST_MERGE}. Fence these docs if you want them correct at merge time: ${docs.join(', ')}. ${CITATION_CARRIER_BLIND_SPOT}`
         warning.text = carrierText
         d.log(carrierText)
       })

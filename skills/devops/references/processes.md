@@ -85,11 +85,11 @@ Exhibit: `crew/crew.mjs:2755`.
 
 A SIGKILLed driver lands no terminal row, because the ledger's finalizer is the
 only writer that can and it is opt-in.
-Exhibit: `scripts/factory/ledger.mjs:4962`.
+Exhibit: `scripts/factory/ledger.mjs:5088`.
 
 The finalizer that a graceful stop would reach records `fail`/`failed` with the
 signal as its reason.
-Exhibit: `scripts/factory/ledger.mjs:4988`.
+Exhibit: `scripts/factory/ledger.mjs:5114`.
 
 An operator who stops a run by hand settles the session as `operator`, which is
 already a terminal actor; a session left `running` is a measured-looking claim

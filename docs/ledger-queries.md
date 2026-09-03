@@ -32,6 +32,7 @@ The factory ledger is the register for run facts. When a session asks what happe
 | Which adopted plans were recorded? | `node scripts/factory/ledger.mjs journal-facts [--since <iso>] [--until <iso>]` — prints `plan_adoptions`, including file and finding totals, beside `adoptions_seen`, the recorded-adoption denominator. The unit is one adopted plan; an absent family is unmeasured, never a measured zero. |
 | Which external fence lanes were registered? | `node scripts/factory/ledger.mjs journal-facts [--since <iso>] [--until <iso>]` — prints `external_fences`, including file/read totals, beside `lanes_seen`, the distinct-lane denominator. The unit is one dispatch-register lane entry; an absent family is unmeasured, never a measured zero. |
 | How often does a plan-time mutation anchor miss the built tree, and how often did the builder correct it? | `node scripts/factory/ledger.mjs journal-facts [--since <iso>] [--until <iso>]` — prints `mutation_anchors`: `binds` (one per bind-check pass), `absences` and `corrections`, `by_correction` over the closed `none`/`refused`/`accepted` set and `by_refusal` over the terminal refusal reasons, beside `declarations_seen`, the declared-anchor denominator. The unit is one declared mutation anchor. `absences: 0` on a measured window is a real zero — every declaration bound; an absent family is unmeasured, never a measured zero. Before #874 this rate had no writer, so the two known cases (b384-suiteslot, b381-journalfacts) are a floor and not a rate. |
+| How much time did lanes lose waiting for a suite slot, and over how many waits? | `node scripts/factory/ledger.mjs journal-facts [--since <iso>] [--until <iso>]` — prints `phase_slot_waits`: `waited_ms` beside `waits`, its denominator, `by_day` splitting both terms by UTC day, `by_kind` over the closed `gate`/`suite-warm`/`suite-cold` set, and `depth_absent`, how many waits never scanned a queue depth. The unit is one recorded wait; an absent family is unmeasured, never a measured zero. See **Recipe M**. |
 | Can a hand-driven run get its compiled request? | **Supported, hand-driven (#456)** — `node scripts/factory/ledger.mjs request <adw_id> --from-brief <path>` reads the first non-blank paragraph under `## The ask` and records it with `request_source: 'brief-file'`; missing, absent, or blank sections refuse rather than guessing. It is **not retired**: it is the only writer that reaches a production ledger today, because the intake dispatcher's call records under `withLedger`, a no-op without a `dbPath` (`scripts/factory/intake.mjs:812`). |
 
 Replace `<adw_id>` or `<task_slug>` placeholders with the run's identifier, and replace `<iso>` placeholders with an ISO-8601 timestamp such as `2026-08-15T00:00:00Z`; the optional tail flags are literal command-line options.
@@ -64,7 +65,7 @@ A sweep with **no** refusal rows means nothing was refused *that sweep*, never t
 
 A `claimed` row with no settled row is a **stranded** dispatch — the run may or may not have started, and the issue is deliberately left out of `Ready` so it is never re-dispatched; a `refused` row means nothing executed; `unreadable` is never a `done`; and a `promoted` row is the only evidence that a PR was seen — the loop never merges, approves or closes anything.
 
-The ledger declares **32 tables** plus SQLite's own `sqlite_sequence`. `run_configurations` and `run_seats` are populated only for runs booted after canonical configuration and effective-seat recording shipped; older runs deliberately have no row. The nine journal-fact tables — `provider_failures`, `plan_scope_changes`, `seat_reasks`, `accept_reasks`, `rpc_exit_contexts`, `plan_adoptions`, `external_fences`, `mutation_anchor_binds`, and `mutation_anchor_absences` — are populated only for records ingested after this lane; older journal and dispatch-register rows are never backfilled. `envelopes` and `processes` are retired by declaration. The empty CI/intake tables remain unreached writers, not measured zeros.
+The ledger declares **33 tables** plus SQLite's own `sqlite_sequence`. `run_configurations` and `run_seats` are populated only for runs booted after canonical configuration and effective-seat recording shipped; older runs deliberately have no row. The ten journal-fact tables — `provider_failures`, `plan_scope_changes`, `seat_reasks`, `accept_reasks`, `rpc_exit_contexts`, `plan_adoptions`, `external_fences`, `mutation_anchor_binds`, `mutation_anchor_absences`, and `phase_slot_waits` — are populated only for records ingested after this lane; older journal and dispatch-register rows are never backfilled. `envelopes` and `processes` are retired by declaration. The empty CI/intake tables remain unreached writers, not measured zeros.
 
 ## Typed run outcomes
 
@@ -707,6 +708,16 @@ GROUP BY source, adw_id
 ORDER BY source, adw_id;
 SQL
 ```
+
+### Recipe M — time lost waiting for a suite slot, by day
+
+Ask 1 of #826. The suite-slot pool (#822) queues a lane's gate and suite phases behind other lanes on the same host; the driver records each wait as a `phase-slot-wait` journal row, and `ingestJournal` mirrors it into `phase_slot_waits`. This recipe reports **both terms**: `waited_ms` beside `waits`, the number of recorded waits it is derived from, split by UTC day in `by_day`.
+
+```sh
+node scripts/factory/ledger.mjs journal-facts --since <iso> --until <iso>
+```
+
+Read `phase_slot_waits` out of the payload. A window with no recorded wait answers `measured: false` and every term `null` beside an `absent` marker — a corpus written before this mirror landed reads exactly like a window in which no lane waited, so the readout never reports `0` for either term. `depth_absent` counts the waits whose `queue_depth` was never scanned: all 87 rows recorded to 2026-09-03 carry `queue_depth: null`, because the producer reports a depth only from an admission scan that saw one.
 
 ### Mechanics that bite
 

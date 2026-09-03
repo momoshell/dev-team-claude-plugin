@@ -28,9 +28,10 @@ import {
   RUN_VARIANTS, RUN_VARIANT_MARKERS, STAGE_MARKER_CHUNK, variantFromFirstMessage,
   REQUEST_MAX_CHARS, ADVISOR_AB_INCOMPLETE_REASONS, USAGE_ABSENT_CAUSES, usageAbsentCause,
   CELL_RATE_FLOOR, CELL_PRICE_UNITS, REVIEW_VERDICTS,
+  PHASE_SLOT_WAIT_KINDS, PHASE_SLOT_WAIT_DEPTH_ABSENT, PHASE_SLOT_WAIT_ABSENT,
   ingestJournal, ingestExternalFenceRegister,
 } from '../scripts/factory/ledger.mjs'
-import { FAILURE_UPGRADE, MODIFIER_OUTCOMES, SENSITIVITY_FLOOR, VARIANT_NAMES, anchorAbsentWhy, MUTATION_CORRECTION_OUTCOMES, MUTATION_CORRECTION_REFUSALS } from '../crew/drive.mjs'
+import { FAILURE_UPGRADE, MODIFIER_OUTCOMES, SENSITIVITY_FLOOR, VARIANT_NAMES, SUITE_SLOT_PHASE_NAMES, anchorAbsentWhy, MUTATION_CORRECTION_OUTCOMES, MUTATION_CORRECTION_REFUSALS } from '../crew/drive.mjs'
 import { emitAdapter, SEAT_RETRY_EVENTS, SEAT_RETRY_KINDS } from '../crew/seat-io.mjs'
 import { headlessIo } from '../crew/headless.mjs'
 import { modelString as piModelString } from '../crew/adapters/adapter-pi.mjs'
@@ -5011,7 +5012,9 @@ test('ledger query docs pin typed outcomes, run seats, closed vocabularies, and 
   for (const source of ['roster', 'profile_recommendation', 'operator_override', 'reseat']) {
     assert.ok(docs.includes(`\`${source}\``), `docs missing ${source}`)
   }
-  assert.match(docs, /\*\*32 tables\*\*/)
+  assert.match(docs, /\*\*33 tables\*\*/)
+  assert.ok(docs.includes('`phase_slot_waits`'))
+  assert.ok(docs.includes('Recipe M'))
   assert.match(docs, /FROM\s+run_seats/i)
 })
 
@@ -5858,6 +5861,22 @@ test('outside a test process the home-default resolution and open remain unchang
 // fixtures so the ingest tests prove the producer's actual JSON shapes.
 // Copied from /Users/momoshell/.crew/dt-b371-loopgates/b371-loopgates/journal.jsonl:422.
 const B381_PROVIDER_FAILURE_LINE = String.raw`{"at":1788292622004,"headless_outcome":"budget-refused","exit_code":1,"signal":null,"terminal_reason":"api_error","lines":959,"stream":"/Users/momoshell/.crew/dt-b371-loopgates/b371-loopgates/task/headless/d1/stream.jsonl","provider_failure":{"kind":"rate_limit","status":429}}`
+
+// b395 recorded exhibits (#826). Kept as source rows rather than synthetic fixtures so
+// the ingest tests prove the producer's actual JSON shape.
+// Copied from /Users/momoshell/.crew/dt-b390-mutanchor/b390-mutanchor/journal.jsonl:345.
+const B395_SLOT_WAIT_GATE_LINE = String.raw`{"at":1788380185199,"event":"phase-slot-wait","kind":"gate","queue_depth":null,"waited_ms":1,"slotted":true,"channel":"operational"}`
+// Copied from /Users/momoshell/.crew/dt-b390-mutanchor/b390-mutanchor/journal.jsonl:2204.
+const B395_SLOT_WAIT_WARM_LINE = String.raw`{"at":1788385340219,"event":"phase-slot-wait","kind":"suite-warm","queue_depth":null,"waited_ms":2,"slotted":true,"channel":"operational"}`
+// Copied from /Users/momoshell/.crew/dt-b390-mutanchor/b390-mutanchor/journal.jsonl:2207.
+const B395_SLOT_WAIT_COLD_LINE = String.raw`{"at":1788385488371,"event":"phase-slot-wait","kind":"suite-cold","queue_depth":null,"waited_ms":1,"slotted":true,"channel":"operational"}`
+// Recorded ledger.jsonl lines that PREDATE this change, copied verbatim from
+// ~/.dev-team/factory/ledger.jsonl:37160 and :37209. Measured 2026-09-03: that live
+// corpus holds 37,238 lines and ZERO recordPhaseSlotWait lines.
+const B395_OLD_CORPUS_LINES = [
+  String.raw`{"v":1,"kind":"startSession","at":"2026-09-03T08:50:00.652Z","args":{"adw_id":"957dce91-dfb9-4b73-add9-58a58ca61016","repo_slug":"dt-b395-slotwait","task_slug":"b395-slotwait","started_at":"2026-09-03T08:50:00.651Z","ended_at":null,"status":"running","billed_input_tokens":null,"billed_output_tokens":null,"billed_cache_write_tokens":null,"billed_cache_read_tokens":null,"billed_cost_usd":null,"ledger_version":1,"request":null,"request_source":null,"last_heartbeat_at":null,"tier":"build","proposed_shape":"mechanical","proposed_strength":"workhorse"}}`,
+  String.raw`{"v":1,"kind":"recordGateResult","at":"2026-09-03T08:52:08.694Z","args":{"adw_id":"c0154d11-e242-47ba-8c17-f7cb3462ab1b","phase_id":482,"gate_name":"gate-baseline","attempt":1,"ok":false,"checks":[{"total":15,"failed":13,"errored":0}],"violations":[],"created_at":"2026-09-03T08:52:08.694Z","gate_generation":1,"pristine":false}}`,
+]
 // Copied from /Users/momoshell/.crew/dt-b374-loopgates/b374-loopgates/journal.jsonl:218.
 const B381_PLAN_SCOPE_LINE = String.raw`{"at":1788293864633,"plan_scope":{"round":1,"verdict":"plan-scope-same","added":[],"dropped":[],"dispatched":8,"planned":8},"channel":"record"}`
 // Copied from /Users/momoshell/.crew/dt-b374-loopgates/b374-loopgates/journal.jsonl:1909.
@@ -5918,6 +5937,160 @@ function journalFactsCli(dbPath, flags = []) {
   assert.equal(result.status, 0, result.stderr)
   return JSON.parse(result.stdout)
 }
+
+test('b395 T1 the recorded phase-slot-wait row round-trips journal to ledger to query', { skip: SKIP }, () => {
+  const adwId = 'b395-t1'
+  const { ledger, result, dbPath } = ingestJournalLine(B395_SLOT_WAIT_GATE_LINE, adwId)
+  try {
+    assert.deepEqual(result, { applied: 1, skipped: 0, ignored: 0, failed: 0, complete: true, first_failure: null })
+    assert.deepEqual({ ...ledger.dumpTable('phase_slot_waits')[0] }, {
+      adw_id: adwId, kind: 'gate', queue_depth: null,
+      queue_depth_absent: PHASE_SLOT_WAIT_DEPTH_ABSENT, waited_ms: 1, slotted: 1,
+      at_ms: 1788380185199, created_at: isoMs(1788380185199),
+    })
+  } finally { ledger.close() }
+  const payload = journalFactsCli(dbPath)
+  assert.equal(payload.phase_slot_waits.waits, 1)
+  assert.equal(payload.phase_slot_waits.waited_ms, 1)
+})
+
+test('b395 T2 all three recorded phase-slot-wait kinds ingest and count by kind', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const journalPath = join(nextDir(), 'journal.jsonl')
+  writeFileSync(journalPath, `${[
+    B395_SLOT_WAIT_GATE_LINE,
+    B395_SLOT_WAIT_WARM_LINE,
+    B395_SLOT_WAIT_COLD_LINE,
+  ].join('\n')}\n`)
+  try {
+    assert.deepEqual(ingestJournal(journalPath, ledger, { adw_id: 'b395-t2' }), {
+      applied: 3, skipped: 0, ignored: 0, failed: 0, complete: true, first_failure: null,
+    })
+    const payload = ledger.journalFacts({})
+    assert.deepEqual(payload.phase_slot_waits.by_kind, {
+      gate: 1, 'suite-warm': 1, 'suite-cold': 1,
+    })
+  } finally { ledger.close() }
+})
+
+test('b395 T3 phase-slot-wait kinds equal the producer vocabulary and reject unknown values', { skip: SKIP }, () => {
+  assert.deepEqual(PHASE_SLOT_WAIT_KINDS, [...SUITE_SLOT_PHASE_NAMES])
+  const ledger = openTestLedger()
+  try {
+    assert.throws(() => ledger.recordPhaseSlotWait({ kind: 'not-a-phase', waited_ms: 1 }), LedgerUsageError)
+  } finally { ledger.close() }
+})
+
+test('b395 T4 a measured queue depth stores an integer without an absence reason', { skip: SKIP }, () => {
+  // No recorded row carries either value; this is derived from the producer's
+  // measured-depth path at crew/drive.mjs:5469, not presented as a capture.
+  const ledger = openTestLedger()
+  try {
+    ledger.recordPhaseSlotWait({
+      adw_id: 'b395-t4', kind: 'suite-cold', queue_depth: 3, waited_ms: 240000,
+      slotted: false, at_ms: 1788385488371, created_at: '2026-09-02T00:00:00.000Z',
+    })
+    const row = ledger.dumpTable('phase_slot_waits')[0]
+    assert.equal(row.queue_depth, 3)
+    assert.equal(row.queue_depth_absent, null)
+    assert.equal(row.slotted, 0)
+  } finally { ledger.close() }
+})
+
+test('b395 T5 the phase-slot-wait JSONL authority replays into a fresh mirror', { skip: SKIP }, () => {
+  const source = openTestLedger()
+  source.recordPhaseSlotWait({
+    adw_id: 'b395-t5', kind: 'gate', queue_depth: null, waited_ms: 1,
+    slotted: true, at_ms: 1788380185199, created_at: '2026-09-01T00:00:00.000Z',
+  })
+  const target = openTestLedger()
+  try {
+    assert.deepEqual(replayJsonl(source._jsonlPath, target), {
+      applied: 1, skipped: 0, failed: 0, complete: true, first_failure: null,
+    })
+    assert.deepEqual(target.dumpTable('phase_slot_waits'), source.dumpTable('phase_slot_waits'))
+  } finally {
+    source.close()
+    target.close()
+  }
+})
+
+test('b395 T6 the recorded pre-change corpus is additive and leaves phase-slot-waits unmeasured', { skip: SKIP }, () => {
+  const jsonlPath = join(nextDir(), 'old-corpus.jsonl')
+  writeFileSync(jsonlPath, `${B395_OLD_CORPUS_LINES.join('\n')}\n`)
+  const ledger = openTestLedger()
+  try {
+    assert.deepEqual(replayJsonl(jsonlPath, ledger), {
+      applied: 2, skipped: 0, failed: 0, complete: true, first_failure: null,
+    })
+    assert.deepEqual(ledger.dumpTable('phase_slot_waits'), [])
+    assert.deepEqual(ledger.journalFacts({}).phase_slot_waits, {
+      measured: false, waits: null, count: null, waited_ms: null, by_kind: null,
+      by_day: null, depth_measured: null, depth_absent: null, absent: PHASE_SLOT_WAIT_ABSENT,
+    })
+  } finally { ledger.close() }
+})
+
+test('b395 T7 phase-slot-wait by_day carries both terms per UTC day', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  try {
+    ledger.recordPhaseSlotWait({
+      adw_id: 'b395-t7-a', kind: 'gate', queue_depth: null, waited_ms: 1,
+      slotted: true, at_ms: 1788380185199, created_at: '2026-09-01T10:00:00.000Z',
+    })
+    ledger.recordPhaseSlotWait({
+      adw_id: 'b395-t7-b', kind: 'suite-warm', queue_depth: null, waited_ms: 2,
+      slotted: true, at_ms: 1788385340219, created_at: '2026-09-02T11:30:00.000Z',
+    })
+    const family = ledger.journalFacts({}).phase_slot_waits
+    assert.deepEqual(family.by_day, {
+      '2026-09-01': { waits: 1, waited_ms: 1 },
+      '2026-09-02': { waits: 1, waited_ms: 2 },
+    })
+    assert.equal(family.waited_ms, 3)
+    assert.equal(family.waits, 2)
+  } finally { ledger.close() }
+})
+
+test('b395 T8 the command in Recipe M runs against a two-wait window', { skip: SKIP }, () => {
+  const docs = readFileSync(join(ROOT, 'docs', 'ledger-queries.md'), 'utf8')
+  const headingAt = docs.indexOf('### Recipe M')
+  assert.notEqual(headingAt, -1)
+  const recipe = docs.slice(headingAt)
+  const fenceAt = recipe.indexOf('```sh')
+  assert.notEqual(fenceAt, -1)
+  const body = recipe.slice(fenceAt + 5)
+  const closeAt = body.indexOf('```')
+  assert.notEqual(closeAt, -1)
+  const lines = body.slice(0, closeAt).split('\n').map((line) => line.trim()).filter(Boolean)
+  const nodeLines = lines.filter((line) => line.startsWith('node '))
+  assert.equal(nodeLines.length, 1)
+  assert.match(nodeLines[0], /^node scripts\/factory\/ledger\.mjs journal-facts/)
+  const bounds = ['2026-09-01T00:00:00.000Z', '2026-09-03T00:00:00.000Z']
+  let bound = 0
+  const tokens = nodeLines[0].split(/\s+/)
+  const args = tokens.slice(2).map((token) => token === '<iso>' ? bounds[bound++] : token)
+  const ledger = openTestLedger()
+  ledger.recordPhaseSlotWait({
+    adw_id: 'b395-t8-a', kind: 'gate', queue_depth: null, waited_ms: 1,
+    slotted: true, at_ms: 1788380185199, created_at: '2026-09-01T10:00:00.000Z',
+  })
+  ledger.recordPhaseSlotWait({
+    adw_id: 'b395-t8-b', kind: 'suite-warm', queue_depth: null, waited_ms: 2,
+    slotted: true, at_ms: 1788385340219, created_at: '2026-09-02T11:30:00.000Z',
+  })
+  const dbPath = ledger._dbPath
+  ledger.close()
+  const result = run(args, { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(result.status, 0, result.stderr)
+  const family = JSON.parse(result.stdout).phase_slot_waits
+  assert.equal(family.waits, 2)
+  assert.equal(family.waited_ms, 3)
+  assert.deepEqual(family.by_day, {
+    '2026-09-01': { waits: 1, waited_ms: 1 },
+    '2026-09-02': { waits: 1, waited_ms: 2 },
+  })
+})
 
 test('b381 F1 the recorded b371 provider_failure row round-trips journal to ledger to query', { skip: SKIP }, () => {
   const adwId = 'b381-f1'

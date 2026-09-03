@@ -13,7 +13,7 @@ import { join, dirname } from 'node:path'
 import { spawn, spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { ROOT, sqliteAvailable } from './helpers.mjs'
-import { openRun, recordCellFailure, _resetNoticeGuardsForTest, main } from '../scripts/factory/emit.mjs'
+import { openRun, recordCellFailure, recordPhaseSlotWait, _resetNoticeGuardsForTest, main } from '../scripts/factory/emit.mjs'
 import { openLedger, PAYLOAD_KEYS, NODE_FLOOR } from '../scripts/factory/ledger.mjs'
 import { headlessIo } from '../crew/headless.mjs'
 
@@ -218,6 +218,36 @@ test('linkRun(null) and linkRun(\'\') are no-ops, including on a degraded emitte
   writeFileSync(blocked, 'not a directory')
   const degraded = openRun({ stateDir: join(blocked, 'state'), repoSlug: 'r', taskSlug: 't', stderr: { write: () => {} } })
   assert.doesNotThrow(() => degraded.linkRun('daemon-degraded-run'))
+})
+
+test('recordPhaseSlotWait is non-load-bearing on a usable and unusable dbPath', { skip: SKIP }, () => {
+  const dir = freshDir('phase-slot-wait')
+  const dbPath = join(dir, 'ledger.db')
+  const capture = { lines: [], write(line) { this.lines.push(line) } }
+  assert.equal(recordPhaseSlotWait({
+    dbPath, stderr: capture, kind: 'gate', queue_depth: null, waited_ms: 1, slotted: true,
+  }), true)
+  const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+  try {
+    const rows = ledger.dumpTable('phase_slot_waits')
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].queue_depth, null)
+  } finally { ledger.close() }
+
+  writeFileSync(join(dir, 'blocker'), 'not a directory')
+  const lines = []
+  let reached = false
+  assert.doesNotThrow(() => {
+    const result = recordPhaseSlotWait({
+      dbPath: join(dir, 'blocker', 'x.db'), stderr: { write: (line) => lines.push(line) },
+      kind: 'gate', queue_depth: null, waited_ms: 1, slotted: true,
+    })
+    assert.equal(result, false)
+    reached = true
+  })
+  assert.equal(reached, true)
+  assert.equal(lines.length, 1)
+  assert.match(lines[0], /phase slot wait not recorded/)
 })
 
 test('run-less recordCellFailure lands exactly one NULL-adw row and never throws on an unusable dbPath', { skip: SKIP }, () => {

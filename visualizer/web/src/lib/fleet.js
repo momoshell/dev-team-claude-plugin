@@ -127,6 +127,39 @@ export function heartbeatCell(run = {}, now = Date.now()) {
   return { text: `silent ${seconds}s`, stale: true, dashed: false, age_ms: age }
 }
 
+// #826 (parent epic #822) — the suite-slot wait a pool would otherwise convert into a
+// silent gap. Three absences and never one zero: an unmeasured window carries the ledger's
+// own reason, a run that never waited carries no chip at all, and a wait whose admission
+// scan never reported a queue depth says unknown.
+export function slotWaitCell(run = {}) {
+  const rows = Array.isArray(run?.slot_waits) ? run.slot_waits : null
+  // MUTATION D1: hand an unmeasured window a measured zero and the row claims no lane
+  // waited, on evidence nobody collected.
+  if (rows === null) return absenceMark(run?.slot_waits_absent)
+  // MUTATION B1: render this case anyway and every row carries a chip — the same blindness
+  // as no chip at all.
+  if (!rows.length) return null
+  const waited = rows.map((row) => row.waited_ms).filter((value) => finiteNumber(value) != null)
+  if (!waited.length) return absenceMark(null)
+  const total = waited.reduce((sum, value) => sum + value, 0)
+  const seconds = Math.max(0, Math.round(total / 1000))
+  // MUTATION C2: read anything but the depth column and a MEASURED queue depth disappears
+  // behind "unknown".
+  const depths = rows.map((row) => row.queue_depth).filter((value) => finiteNumber(value) != null)
+  // MUTATION C1: coalesce an unmeasured depth to 0 and a queue nobody scanned reads as a
+  // measured queue of length zero.
+  const depth = depths.length ? Math.max(...depths) : null
+  return {
+    // MUTATION A1 (from the signature line) / MUTATION E1 (this sentence): drop the chip, or
+    // rename what it says, and the run row stops telling the operator it was queued.
+    ...measuredCell(total, `waiting for a suite slot · ${seconds}s`),
+    waits: rows.length,
+    depth,
+    depth_text: depth === null ? 'queue depth unknown' : `queue depth ${depth}`,
+    depth_title: depth === null ? (rows.find((row) => row.queue_depth_absent)?.queue_depth_absent ?? null) : null,
+  }
+}
+
 export function tokenCell(run = {}) {
   const metrics = run?.metrics ?? run ?? {}
   let total = null
@@ -215,6 +248,7 @@ function visibleRows(runs, envelopes, now, filters) {
       tokens: tokenCell(run),
       cost: costCell(run),
       heartbeat: heartbeatCell(run, now),
+      slot_wait: slotWaitCell(run),
     }
   })
 }

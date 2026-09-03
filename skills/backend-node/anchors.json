@@ -26,10 +26,7 @@
   "crew/pi/extensions/subagent.ts:653": "Complete or absent — never partial",
   "crew/daemon.test.mjs:257": "assert.doesNotMatch(policyCode",
   "crew/drive.mjs:132": "export const DECISIONS = Object.freeze",
-  "crew/drive.test.mjs:5130": "assert.deepEqual([...DECISIONS], ['bounce', 'bounce-builder', 'bounce-reviewer', 'accept', 'escalate'])",
-  "crew/drive.test.mjs:5128": "DECISIONS and LIMITS are the frozen public contract",
   "crew/drive.mjs:252": "ENVELOPE_FIELD_KINDS.includes(field?.kind)",
-  "crew/drive.test.mjs:5129": "Object.isFrozen(DECISIONS) && Object.isFrozen(LIMITS)",
   "crew/drive.mjs:246": "if (!shape || typeof shape !== 'object')",
   "test/factory-emit.test.mjs:1506": "CLI: emit-cli-unknown-flag-refusal",
   "test/factory-ledger.test.mjs:3487": "refused.status, 2, refused.stderr",
@@ -41,5 +38,8 @@
   "scripts/factory/ledger.mjs:5536": "unknown flag --${name}",
   "scripts/factory/ledger.mjs:6624": "unknown verb: ${verb}",
   "scripts/factory/ledger.mjs:392": "export const CI_DECISIONS = Object.freeze",
-  "scripts/factory/ledger.mjs:3050": "requireEnum(input.decision, CI_DECISIONS"
+  "scripts/factory/ledger.mjs:3050": "requireEnum(input.decision, CI_DECISIONS",
+  "crew/drive.test.mjs:5131": "assert.deepEqual([...DECISIONS], ['bounce', 'bounce-builder', 'bounce-reviewer', 'accept', 'escalate'])",
+  "crew/drive.test.mjs:5130": "Object.isFrozen(DECISIONS) && Object.isFrozen(LIMITS)",
+  "crew/drive.test.mjs:5129": "DECISIONS and LIMITS are the frozen public contract"
 }

@@ -49,8 +49,9 @@ test('every crew-dispatch path:line anchor carries what the prose claims', () =>
   const manifest = JSON.parse(readText(join(HERE, 'anchors.json')))
   const result = checkAnchors({ root: ROOT, docs, manifest })
   assert.deepEqual(result.failures, [])
-  const { inFence } = partitionShifts({ shifted: result.shifted, fence: laneFence({ root: ROOT }).paths })
-  assert.deepEqual(inFence, [], 'a shift on a file this lane changed must be repaired, not tolerated')
+  const { inFence, outOfFence } = partitionShifts({ shifted: result.shifted, fence: laneFence({ root: ROOT }).paths, manifest: 'skills/crew-dispatch/anchors.json' })
+  for (const shift of outOfFence) console.warn(`shifted ${shift.key} -> line ${shift.to}; repair after this lane merges, on main with: node skills/qa-test-writing/anchor-pin.mjs --repair-all skills/crew-dispatch`)
+  assert.deepEqual(inFence, [], 'a shift this lane can repair here must be repaired, not tolerated')
   assert.ok(result.anchors >= MIN_ANCHORS)
 })
 
@@ -111,15 +112,16 @@ test('the protected floor is documented as the resolved union', () => {
 // Mutation killed: deleting one refusal token lets a batch skip a compiler or arrival failure.
 test('the batch reference names every refusal the sequence can hit', () => {
   const text = readText(join(HERE, 'references/batch.md'))
-  for (const token of ['coupled-source-unfenced', 'stale-read-ack', 'missing-path', 'validateScopeEntries', 'scopeMatcher', 'protectedHitsIn', 'lane_name', 'lane_fence', 'lane-fence', 'fence=NONE', 'plan-adopt-unreadable', 'externalFenceLiveness']) {
+  for (const token of ['coupled-source-unfenced', 'stale-read-ack', 'missing-path', 'validateScopeEntries', 'scopeMatcher', 'protectedHitsIn', 'lane_name', 'lane_fence', 'lane-fence', 'fence=NONE', 'plan-adopt-unreadable', 'externalFenceLiveness', 'ADR-040', '--repair-all', 'citation-carrier-unfenced', 'only an **unpinned** path:line citation']) {
     assert.ok(text.includes(token), `batch.md must name ${token}`)
   }
+  assert.equal(text.includes('prose file:line citations in'), false)
 })
 
 // Mutation killed: widening the measured shell claim or dropping a zero-count guard must make this test fail.
 test('the shell reference records the measured zero counts and no stronger claim', () => {
   const text = readText(join(HERE, 'references/shell.md'))
-  for (const token of ['shell: true', '0 occurrences', 'process.env.SHELL', "GATE_REAP_SHELL = '/bin/bash'", 'crew/drive.mjs:347', 'crew/drive.test.mjs:3107', '${!arr[@]}', 'zsh does not word-split', 'execSync']) {
+  for (const token of ['shell: true', '0 occurrences', 'process.env.SHELL', "GATE_REAP_SHELL = '/bin/bash'", 'crew/drive.mjs:347', 'crew/drive.test.mjs:3108', '${!arr[@]}', 'zsh does not word-split', 'execSync']) {
     assert.ok(text.includes(token), `shell.md must name ${token}`)
   }
   assert.equal(text.includes('every subprocess uses an argv array'), false)

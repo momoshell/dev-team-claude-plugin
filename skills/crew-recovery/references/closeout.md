@@ -189,26 +189,31 @@ of **4608** lines) into a worktree still based on a tree where that file was
 **4600** — the exact +8. Re-anchoring after the rebase moved **5** anchors
 instead of 10, and a different file set. Restore from `HEAD`, never from `main`.
 
-Two rules the reviewer added, both earned:
+Under **ADR-040**, an external shifted manifest — one this lane does not change —
+is REPORTED in-lane and repaired `after the wave merges, on main` by:
 
-- **Re-anchor INTO the commit, not beside it.** An uncommitted repair is the same
-  failure as a wrongly-staged one, one step later — the branch tip still carries
-  the breakage the branch tip causes.
-- **Verify against the COMMITTED tree.** `git show HEAD:<anchors.json>` against
-  `git show HEAD:<file>` needs no scratch checkout and cannot be fooled by a
-  clean-looking working tree, which is exactly what masks this.
+    node skills/qa-test-writing/anchor-pin.mjs --repair-all <dir>
 
-**Every edit to a cited file rots anchors, and only the exhibits tests notice** —
-the acceptance gate and the edited file's own tests both stay green. `b187`
-paid this four times in one lane: the build, a new pin, a comment, a file-level
-rule. `anchor-pin.mjs` both detects and repairs. The repair covers every pinned directory,
-`crew/roles` among them - the tech-lead charter cites `crew/drive.mjs` by line and
-`crew/roles/anchors.json` pins what each of those lines must contain:
+A plain `--repair` remains an optional in-lane capability for a lane that actually
+changes the manifest. It relocates a pin whose content moved, and refuses rot
+(content nowhere) and ambiguity (content on two lines) rather than guessing
+(#582, #747).
+
+**Verify against the COMMITTED tree.** `git show HEAD:<anchors.json>` against
+`git show HEAD:<file>` needs no scratch checkout and cannot be fooled by a
+clean-looking working tree, which is exactly what masks this.
+
+A cited-file edit can shift anchors while every other signal stays green: the
+acceptance gate and the edited file's own tests do not read pins, so a skill's
+own `exhibits.test.mjs` is where a shift surfaces. `b187` paid this four times
+in one lane: the build, a new pin, a comment, a file-level rule.
+`anchor-pin.mjs` both detects and repairs.
+The repair covers every pinned directory, `crew/roles` among them — the tech-lead
+charter cites `crew/drive.mjs` by line and `crew/roles/anchors.json` pins what
+each of those lines must contain. For an owned manifest, the optional in-lane
+capability is:
 
     node skills/qa-test-writing/anchor-pin.mjs --repair crew/roles
-
-It relocates a pin whose content moved, and refuses rot (content nowhere) and
-ambiguity (content on two lines) rather than guessing (#582, #747).
 
 Until planner.md's and reviewer.md's own citations are pinned too, that command also
 prints three `manifest has no entry` refusals and exits 1. Those name the deferred

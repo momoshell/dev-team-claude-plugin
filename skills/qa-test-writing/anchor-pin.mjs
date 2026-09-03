@@ -1,6 +1,6 @@
 // Content pins for prose citations; see references/citations.md and vacuity.md's detector-key section.
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, relative } from 'node:path'
 import { execFileSync } from 'node:child_process'
 
 export const MIN_EXPECTED_LENGTH = 12
@@ -128,15 +128,17 @@ export function checkSkillAnchors({ root, skillDir, manifestPath }) {
   return checkAnchors({ root, docs: skillDocs(skillDir), manifest })
 }
 
-// A shift is repairable by whoever owns the file it points at. When the pin names a
-// file this lane changed, the lane could have run --repair and did not: that is a
-// failure. When it names a file no lane here owns, it is a warning, because failing
-// on it would demand a repair outside the fence. #859
-export function partitionShifts({ shifted, fence }) {
+// ADR-040 moves repair of a pinning manifest outside this fence to the post-merge pass on main.
+// A shift is repairable by whoever owns BOTH the file it points at and the manifest that
+// pins it. When this lane changed both, it could have run --repair and did not: that is a
+// failure. Otherwise it is a warning, because failing on it would demand a repair outside
+// the fence. #859, #882
+export function partitionShifts({ shifted, fence, manifest }) {
   const fenced = new Set(Array.isArray(fence) ? fence : [])
+  const owned = typeof manifest === 'string' ? fenced.has(manifest) : true
   const inFence = []
   const outOfFence = []
-  for (const shift of shifted) (fenced.has(shift.rel) ? inFence : outOfFence).push(shift)
+  for (const shift of shifted) ((owned && fenced.has(shift.rel)) ? inFence : outOfFence).push(shift)
   return { inFence, outOfFence }
 }
 
@@ -179,7 +181,8 @@ export function laneFence({ root, base = 'main', run = defaultRun } = {}) {
 function shiftLine(shift, skillDir, fenced) {
   const where = fenced ? ' on a file inside this lane\'s fence' : ''
   const mode = fenced ? '--repair' : '--repair-all'
-  return `shifted ${shift.key} -> line ${shift.to}${where}; repair with: node skills/qa-test-writing/anchor-pin.mjs ${mode} ${skillDir}`
+  const when = fenced ? '' : ' after this lane merges, on main'
+  return `shifted ${shift.key} -> line ${shift.to}${where}; repair${when} with: node skills/qa-test-writing/anchor-pin.mjs ${mode} ${skillDir}`
 }
 
 // Returns the anchor COUNT as a primitive. Both callers assert it under
@@ -194,7 +197,8 @@ export function assertAnchorsPinned({ root, skillDir, manifestPath, minAnchors, 
   const failures = [...result.failures]
   if (result.anchors < minAnchors) failures.push(`expected at least ${minAnchors} anchors, found ${result.anchors}`)
   const measured = fence === undefined ? laneFence({ root }) : { paths: fence, measured: true, reason: null }
-  const { inFence, outOfFence } = partitionShifts({ shifted: result.shifted, fence: measured.paths })
+  const manifestRel = typeof manifestPath === 'string' && typeof root === 'string' ? relative(root, manifestPath).replaceAll('\\', '/') : null
+  const { inFence, outOfFence } = partitionShifts({ shifted: result.shifted, fence: measured.paths, manifest: manifestRel })
   for (const shift of inFence) failures.push(shiftLine(shift, skillDir, true))
   if (failures.length > 0) throw new Error(failures.join('\n'))
   if (!measured.measured) {

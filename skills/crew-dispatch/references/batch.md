@@ -66,8 +66,17 @@ fence is no longer a scope the lane cannot satisfy, and refusing on it falsely
 blocked three of five lanes in one batch. What is still fatal is **rot** (content
 nowhere) and **ambiguity** (content more than once), caught by each skill's own
 `exhibits.test.mjs` when they actually happen rather than predicted before the
-lane runs. The machine scan reads `anchors.json`; prose file:line citations in
-`.md` files are its blind spot and must still be checked by hand.
+lane runs.
+
+Under **ADR-040**, a shifted pin whose manifest is outside the lane's fence is a
+WARNING and the lane owes nothing. The sanctioned fix is the post-merge pass the
+operator runs on `main` after the wave merges:
+`node skills/qa-test-writing/anchor-pin.mjs --repair-all <dir>`. The same pass
+rewrites the citing doc, so citation carriers no longer have to be fenced either.
+A lane that DOES change a manifest still has to leave it consistent, and rot and
+ambiguity stay fatal in the skill's own `exhibits.test.mjs`.
+
+`citation-carrier-unfenced` names every pinned carrier; only an **unpinned** path:line citation — one with no manifest keys — is hand-only.
 
 `plan-scope-outside-fence` refuses a planner's declaration wider than its own fence. A
 fence denies siblings' declared surfaces, not unclaimed paths, so silently narrowing
@@ -97,8 +106,8 @@ so an unflagged batch is unchanged and behaves exactly as before. The two
 transport names and the refusal are pinned in the dispatcher:
 `BOOT_TRANSPORT = 'headless-all'`, `PANE_TRANSPORT = 'panes'`, and
 `TRANSPORT_CONFLICT = 'transport-conflict'`
-(`scripts/factory/dispatch-batch.mjs:144`,
-`scripts/factory/dispatch-batch.mjs:145`,
+(`scripts/factory/dispatch-batch.mjs:147`,
+`scripts/factory/dispatch-batch.mjs:148`,
 `scripts/factory/dispatch-batch.mjs:21`).
 
 `--headless-all` explicitly selects the factory transport. `--panes` selects

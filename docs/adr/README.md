@@ -1,7 +1,7 @@
 # Architecture decision register
 
 Every ADR number this repo has ever minted, ratified or not. **Grep here before
-minting a new one** — the next free number is **040**.
+minting a new one** — the next free number is **041**.
 
 That instruction is the point of the file. ADR numbers are cited from shipped
 code as the authority for invariants (`scripts/factory/emit.mjs`,
@@ -67,6 +67,7 @@ not free.
 | 036 | ACP is the headless seat transport; the envelope stays the record | **written 2026-08-31 by #792** | [full document](adr-036-acp-seat-transport.md) |
 | 037 | Local models: the LAN trust boundary, band admission by ratified evidence, and zero cost counted but never reported as savings | ratified 2026-08-30 | [full document](adr-037-local-models.md) |
 | 038 | The protected floor forces proof on the changed surface, not plan-time adversary rounds | ratified 2026-09-01 | [full document](adr-038-floor-forces-proof-not-rounds.md) |
+| 040 | Anchor pins are repaired after the merge, not inside the lane | ratified 2026-09-04 | [full document](adr-040-anchor-pins-repaired-after-merge.md) |
 
 ### The 014–019 tangle, recorded so nobody re-derives it
 
@@ -153,3 +154,5 @@ because the retired ones describe how the crew works today — for that, read
 - **ADR-038 — The protected floor forces proof on the changed surface, not plan-time adversary rounds.** ratified 2026-09-01, no issue yet (measured in-session 2026-09-01). A protected touch must land through a gate carrying a kill-mutation on the changed behaviour in each protected file, plus rigorous review — controls that read the diff. The tech-lead plan-check loop is no longer forced by the floor; it runs when the planner declares `needs_adversary` in its envelope, when the accepted plan's gate cannot prove the protected surface (fails closed), or when the operator forces rigorous. Measured basis: standard lanes plan in ~13m, rigorous lanes spent 64–66m in the plan-check loop on identical round caps, and the loop was forced on mechanical work by file location alone (#824, b354/b357). #507's split rule becomes a dispatcher warning. Changes nothing until the driver's gate-coverage check lands (after b359-slotdriver frees `crew/drive.mjs`). Recorded in full at [`adr-038-floor-forces-proof-not-rounds.md`](adr-038-floor-forces-proof-not-rounds.md).
 
 - **ADR-039 — `review_only` is an execution shape with a structured-findings envelope; "no findings" is a measured outcome.** *proposed* 2026-09-02, issue #783 (TRD `docs/trd-task-configuration-and-run-state.md` §6.2, §13 decision 2). Reserved by the operator so the lane for #783 can cite it; the lane's plan proposes the envelope schema `{id, severity, location, summary, evidence, disposition}`, declared base/head identity, and the zero-write acceptance, and the lead ratifies. Grounds: on 2026-09-02 two changes (#871, #873) merged with no reviewer seat having run, and the only way to review a diff was by hand through `skills/pr-review`. Not yet written; the number is burned.
+
+- **ADR-040 — Anchor pins are repaired after the merge, not inside the lane.** ratified 2026-09-04, issue #882. The post-merge repair pass on `main` keeps line-pin maintenance outside lane fences while preserving fatal rot, ambiguity and manifest bijection checks. Recorded in full at [`adr-040-anchor-pins-repaired-after-merge.md`](adr-040-anchor-pins-repaired-after-merge.md).

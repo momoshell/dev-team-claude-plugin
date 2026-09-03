@@ -63,8 +63,9 @@ export function locate(t, id) {
 }
 
 // --- verified-send (the PR #79 discipline, vendored) -------------------------
-// Type into a live pane, confirm the echo landed EXACTLY once, clear with
-// ctrl+u before any retype, throw on every failure. Assignment lines obey the
+// Type into a live pane, confirm the echo landed EXACTLY once, press enter, and
+// REPORT whether the submit could be proved. This module never clears the input
+// box and never throws on an unproved submit. Assignment lines obey the
 // allowlist charset; content travels in files, never in the line.
 const SAFE_LINE_RE = /^[A-Za-z0-9 _.,:;=/@'+-]+$/
 const SAFE_PATH_RE = /^\/[A-Za-z0-9._/-]+$/
@@ -73,8 +74,8 @@ const SEND_VERIFY_WINDOW_MS = 3000
 const SEND_READY_TIMEOUT_MS = 60_000
 const SEND_READY_POLL_MS = 250
 // One typed copy, then up to SEND_RETRIES more (#759): a send whose echo never
-// lands is cleared back to baseline and RETYPED rather than escalating the lane
-// on its first attempt.
+// lands is RETYPED, but only from a frame that has returned to its measured
+// baseline — see NO CLEAR, NO BOX READ for why there is nothing else to do.
 export const SEND_RETRIES = 2
 // The escalation must show what the pane showed.
 const SCREEN_TAIL_LINES = 12
@@ -265,6 +266,34 @@ export const SUBMIT_PROOF_WINDOW_MS = 20_000
 export const SUBMIT_ENTER_ATTEMPTS = 3
 export const SUBMIT_TOTAL_BUDGET_MS = 120_000
 
+// --- NO CLEAR, NO BOX READ (measured) ----------------------------------------
+// This module sends NO key sequence to clear a pane input box, and it does not
+// try to read one. Both are measurements, not preferences.
+//
+// Clearing, measured against a live claude pane on 2026-08-29 16:57 (#766), one
+// key at a time with a second's settle and a read-screen after each:
+//     ctrl+u               the box was UNCHANGED
+//     ctrl+a then ctrl+k   the box was UNCHANGED
+//     escape               the box was UNCHANGED
+// The comment this replaces claimed ctrl+c was the full input clear; #766
+// falsifies that — it arms an exit warning and clears nothing. No sequence
+// clears the box, so none of the four is sent from any code path here.
+//
+// Reading the box, measured on cmux 0.64.22 build 102 on 2026-09-03:
+// `cmux read-screen --help` accepts only --workspace, --surface, --window,
+// --scrollback and --lines and returns the surface as undifferentiated plain
+// text; no verb in `cmux --help` reads an input region, a composer buffer or a
+// cursor line. Separating box from transcript would mean parsing one agent
+// TUI's own border glyphs, and this driver is renderer-agnostic — cmux
+// new-surface takes --provider codex|claude|opencode. So #889 ask 1 is REFUSED
+// here, with that measurement, and ask 2 is the whole submit contract: a submit
+// this module cannot prove is REPORTED, never fatal. The caller already waits
+// for a return envelope, and an envelope arriving is the only proof of a send
+// that matters — on 2026-09-03 lanes b406-panesend and b405-symbolindex were
+// both killed by this throw while a complete status:"done" envelope was
+// already on disk.
+export const SUBMIT_BLIND_SPOT = 'the frame count cannot separate the input box from the transcript'
+
 // A resend loop is a cost surface, so every attempt and its outcome is
 // journalled. Callers that pass no deps — every production caller today —
 // still journal: to CREW_SEND_JOURNAL when it is set, and a LOUD row to stderr
@@ -308,24 +337,25 @@ export function sendLine(surfaceId, line, deps = {}) {
   let submitted = false
   let enters = 0
   let last = null
+  let provedNeedle = null
   for (let attempt = 1; attempt <= SEND_RETRIES + 1; attempt += 1) {
     if (attempt > 1) {
-      // Clearing a TUI input box is NOT one ctrl+u (live-hit 2026-08-13):
-      // in the claude TUI ctrl+u deletes to the start of the VISUAL line and
-      // then no-ops, leaving a truncated tail of any wrapped line. ctrl+u
-      // first (harmless everywhere), then ONE ctrl+c (claude's full input
-      // clear; on an already-empty box it only arms an exit warning, which
-      // the retype immediately disarms — never send it twice in a row).
-      // Refuse to retype into a box that still shows ANY candidate.
-      cmuxFn('send-key', ['--surface', surfaceId, '--', 'ctrl+u'])
-      settleFn(SEND_READY_POLL_MS)
-      if (!sameCounts(frameNeedleCounts(surfaceId, needles, cmuxFn), before)) {
-        cmuxFn('send-key', ['--surface', surfaceId, '--', 'ctrl+c'])
-        settleFn(SEND_READY_POLL_MS)
-      }
-      if (!sameCounts(frameNeedleCounts(surfaceId, needles, cmuxFn), before)) {
-        throw new Error('sendLine: could not clear the pane input back to baseline before retype')
-      }
+      // There is no clear (see NO CLEAR, NO BOX READ). A retype is safe only
+      // when the frame has returned to its measured baseline: no copy of any
+      // candidate is on screen, so a second copy cannot be created. A frame
+      // that still shows a candidate ends the send instead — it may be a line
+      // this driver already submitted, and the frame cannot tell (#889).
+      const held = frameNeedleCounts(surfaceId, needles, cmuxFn)
+      const atBaseline = sameCounts(held, before)
+      journal({
+        at: new Date(now()).toISOString(),
+        event: 'send-retype-decision',
+        surface_id: surfaceId,
+        attempt,
+        counts: held,
+        outcome: atBaseline ? 'baseline' : 'not-baseline',
+      }, !atBaseline)
+      if (!atBaseline) break
       settleFn(SEND_READY_POLL_MS)
     }
     const send = cmuxFn('send', ['--surface', surfaceId, '--', line])
@@ -356,13 +386,14 @@ export function sendLine(surfaceId, line, deps = {}) {
     }, landed < 0)
     if (landed < 0) continue
     everLanded = true
+    provedNeedle = needles[landed]
 
     // The line is on the screen and intact. Press enter, then PROVE the box
     // let it go, counting the SAME candidate that proved the landing. A
     // re-press is the cheapest recovery and the safest one: on an
     // already-submitted box it submits nothing, so it cannot double an
     // assignment. Only when the re-presses are spent does the outer attempt
-    // fall back to the clear-and-retype ladder above.
+    // fall back to the baseline-only retype above.
     for (let enter = 1; enter <= SUBMIT_ENTER_ATTEMPTS && !submitted; enter += 1) {
       const key = cmuxFn('send-key', ['--surface', surfaceId, '--', 'enter'])
       if (!key.ok) throw new Error(`sendLine: enter failed: ${key.error.message}`)
@@ -390,22 +421,20 @@ export function sendLine(surfaceId, line, deps = {}) {
     if (submitted || now() >= budgetEnd) break
   }
   if (!everLanded) {
-    throw new Error(`sendLine: echo not verified exactly once over baseline (before ${before.join(',')}, last ${last === null ? 'unreadable' : last.join(',')}) — candidates ${needles.join(' | ')} — last ${SCREEN_TAIL_LINES} screen lines: ${screenTail(surfaceId, cmuxFn)}`)
+    throw new Error(`sendLine: echo not verified exactly once over baseline (before ${before.join(',')}, last ${last === null ? 'unreadable' : last.join(',')}) — candidates ${needles.join(' | ')} — blind spot: ${SUBMIT_BLIND_SPOT} — last ${SCREEN_TAIL_LINES} screen lines: ${screenTail(surfaceId, cmuxFn)}`)
   }
 
-  journal({
+  const submitRow = {
     at: new Date(now()).toISOString(),
     event: 'send-submit',
     surface_id: surfaceId,
     enters,
     elapsed_ms: now() - startedAt,
-    outcome: submitted ? 'submitted' : 'not-submitted',
-  }, !submitted)
-  if (!submitted) {
-    const err = new Error(`sendLine: submit not proved — the line never left the input box on surface ${surfaceId} after ${enters} enters over ${now() - startedAt}ms`)
-    err.code = 'send-not-submitted'
-    throw err
+    outcome: submitted ? 'submitted' : 'unproved',
   }
+  if (!submitted) submitRow.blind_spot = SUBMIT_BLIND_SPOT
+  journal(submitRow, !submitted)
+  return { submitted, enters, needle: provedNeedle, elapsed_ms: now() - startedAt, blind_spot: submitted ? null : SUBMIT_BLIND_SPOT }
 }
 
 // --- context-aware surface ops ------------------------------------------------

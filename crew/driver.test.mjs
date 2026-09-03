@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import {
   assignmentLine, assignmentPrompt, assertSafeLine, briefIngestCommands, pickNeedles, surfaceProcessTree, sendLine,
-  DELIVERY_MODES, SEND_RETRIES, SUBMIT_ENTER_ATTEMPTS, SUBMIT_PROOF_WINDOW_MS, SUBMIT_TOTAL_BUDGET_MS,
+  DELIVERY_MODES, SEND_RETRIES, SUBMIT_BLIND_SPOT, SUBMIT_ENTER_ATTEMPTS, SUBMIT_PROOF_WINDOW_MS, SUBMIT_TOTAL_BUDGET_MS,
 } from './driver.mjs'
 import { capabilitiesFor as claudeCapabilitiesFor } from './adapters/adapter-claude.mjs'
 import { capabilitiesFor as piCapabilitiesFor } from './adapters/adapter-pi.mjs'
@@ -178,13 +178,14 @@ function sendInWindow(line, window, options = {}) {
   const journal = []
   let clock = 1_700_000_000_000
   let error = null
+  let report
   try {
-    sendLine('51e89c13-956c-42f5-9787-ba8437699948', line, {
+    report = sendLine('51e89c13-956c-42f5-9787-ba8437699948', line, {
       cmux: fn, log: (row) => journal.push(row),
       now: () => clock, settle: (ms) => { clock += ms },
     })
   } catch (err) { error = err }
-  return { state, journal, error }
+  return { state, journal, error, report }
 }
 
 test('pickNeedles returns unique short head, middle and tail candidates', () => {
@@ -214,11 +215,11 @@ test('head-only and tail-only frames each land with one typed copy', () => {
   }
 })
 
-test('a frame showing nothing retries, clears between attempts and carries its last 12 lines', () => {
+test('a frame showing nothing retries without a clear and carries its last 12 lines', () => {
   const { state, error } = sendInWindow(B322_LINE, () => '')
   assert.ok(error, 'expected a throw when no candidate is visible')
   assert.equal(state.sends, SEND_RETRIES + 1)
-  assert.equal(state.keys.filter((key) => key === 'ctrl+u').length, SEND_RETRIES)
+  assert.equal(state.keys.filter((key) => key !== 'enter').length, 0)
   assert.ok(error.message.includes(SCREEN_MARKER_LAST))
   assert.ok(!error.message.includes(SCREEN_MARKER_15_UP))
 })
@@ -227,14 +228,14 @@ test('SEND_RETRIES is exported as the bounded retype budget', () => {
   assert.equal(SEND_RETRIES, 2)
 })
 
-test('a visible candidate refuses a retype when the input cannot clear', () => {
-  const { state, error } = sendInWindow(B322_LINE, b322HeadWindow, {
+test('a visible candidate that never submits is reported, not cleared and not retyped', () => {
+  const { state, error, report } = sendInWindow(B322_LINE, b322HeadWindow, {
     consume: () => false,
     clears: false,
   })
-  assert.ok(error, 'expected a clear-to-baseline refusal')
-  assert.match(error.message, /could not clear the pane input back to baseline/)
+  assert.equal(error, null)
   assert.equal(state.sends, 1)
+  assert.equal(report.submitted, false)
 })
 
 test('assignmentLine keeps its verbatim template and #759 path-length decision', () => {
@@ -890,25 +891,73 @@ function fakeCmux({ consume = () => true } = {}) {
   return { fn, state }
 }
 
+// The #889 pane renders its transcript and input box in one frame. Consuming
+// enter moves the box contents into the transcript without changing the total
+// frame count for a needle.
+function transcriptCmux({ consume = () => true } = {}) {
+  const state = { box: '', transcript: [], sends: 0, enters: 0, keys: [], calls: [] }
+  const screen = () => [
+    'screen-line-01',
+    ...state.transcript,
+    '─'.repeat(60),
+    `❯ ${state.box}`,
+    '─'.repeat(60),
+    '  auto mode on',
+  ].join('\n')
+  const ok = (stdout = '') => ({ ok: true, stdout, stderr: '', error: null })
+  const fn = (verb, args) => {
+    state.calls.push({ verb, args })
+    const tail = args.indexOf('--') >= 0 ? args.slice(args.indexOf('--') + 1).join(' ') : ''
+    if (verb === 'read-screen') return ok(screen())
+    if (verb === 'send') { state.box += tail; state.sends += 1; return ok() }
+    if (verb === 'send-key') {
+      state.keys.push(tail)
+      if (tail === 'enter') {
+        state.enters += 1
+        if (consume(state) && state.box) { state.transcript.push(state.box); state.box = '' }
+      }
+      return ok()
+    }
+    return ok()
+  }
+  return { fn, state }
+}
+
 function sendWith(consume) {
   const { fn, state } = fakeCmux({ consume })
   const journal = []
   let clock = 1_700_000_000_000
   const start = clock
   let error = null
+  let report
   try {
-    sendLine('51e89c13-956c-42f5-9787-ba8437699948', SEND_LINE, {
+    report = sendLine('51e89c13-956c-42f5-9787-ba8437699948', SEND_LINE, {
       cmux: fn, log: (row) => journal.push(row),
       now: () => clock, settle: (ms) => { clock += ms },
     })
   } catch (err) { error = err }
-  return { state, journal, error, elapsed: clock - start }
+  return { state, journal, error, report, elapsed: clock - start }
 }
 
 const SEND_LINE = assignmentLine({
   id: 'd1', role: 'builder', briefFile: '/tmp/b305/brief.md',
   returnPath: '/tmp/b305/returns/d1.builder.json', taskDir: '/tmp/b305/task',
 })
+
+function sendInTranscript(consume = () => true) {
+  const { fn, state } = transcriptCmux({ consume })
+  const journal = []
+  let clock = 1_700_000_000_000
+  let error = null
+  let report
+  try {
+    report = sendLine('51e89c13-956c-42f5-9787-ba8437699948', SEND_LINE, {
+      cmux: fn, log: (row) => journal.push(row),
+      now: () => clock, settle: (ms) => { clock += ms },
+    })
+  } catch (err) { error = err }
+  return { state, journal, error, report, elapsed: clock - 1_700_000_000_000 }
+}
 
 test('sendLine returns when the line is echoed AND consumed — one enter, no retype', () => {
   const { state, journal, error } = sendWith(() => true)
@@ -920,14 +969,96 @@ test('sendLine returns when the line is echoed AND consumed — one enter, no re
   assert.equal(journal.at(-1).outcome, 'submitted')
 })
 
-test('a line that echoes but is NEVER consumed fails by name, bounded and journalled', () => {
-  const { state, journal, error, elapsed } = sendWith(() => false)
-  assert.ok(error, 'expected a throw')
-  assert.equal(error.code, 'send-not-submitted')
-  assert.match(error.message, /never left the input box/)
+test('a submitted line still visible in the transcript is reported, not fatal', () => {
+  const { state, error, report } = sendInTranscript()
+  assert.equal(error, null)
+  assert.equal(state.sends, 1)
+  assert.equal(state.enters, SUBMIT_ENTER_ATTEMPTS)
+  assert.deepEqual(state.keys, ['enter', 'enter', 'enter'])
+  assert.equal(report.submitted, false)
+})
+
+test('an unprovable submit returns a report the caller can act on', () => {
+  const { journal, error, report } = sendInTranscript()
+  assert.equal(error, null)
+  assert.equal(report.submitted, false)
+  assert.equal(report.enters, 3)
+  assert.equal(report.needle, 'ASSIGNMENTd1:')
+  assert.equal(report.blind_spot, SUBMIT_BLIND_SPOT)
+  const row = journal.filter((entry) => entry.event === 'send-submit').at(-1)
+  assert.equal(row.outcome, 'unproved')
+  assert.equal(row.blind_spot, SUBMIT_BLIND_SPOT)
+})
+
+test('SUBMIT_BLIND_SPOT names both the box and the transcript', () => {
+  assert.ok(SUBMIT_BLIND_SPOT.includes('input box'))
+  assert.ok(SUBMIT_BLIND_SPOT.includes('transcript'))
+})
+
+test('no code path sends a clear key', () => {
+  const source = readFileSync(new URL('./driver.mjs', import.meta.url), 'utf8')
+  const keys = []
+  for (const raw of source.split('\n')) {
+    if (!raw.includes("'send-key'")) continue
+    const quoted = raw.match(/'([^']*)'/g) || []
+    const last = quoted.length ? quoted[quoted.length - 1].slice(1, -1) : null
+    if (last !== null) keys.push(last)
+  }
+  assert.ok(keys.length > 0)
+  assert.deepEqual(keys, ['enter'])
+})
+
+test('the unproved submit does not retype', () => {
+  const { state, journal, error } = sendInTranscript()
+  assert.equal(error, null)
+  assert.equal(state.sends, 1)
+  const rows = journal.filter((entry) => entry.event === 'send-retype-decision')
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].outcome, 'not-baseline')
+})
+
+test('the one escalation that remains states the blind spot and never names the clear', () => {
+  const { error } = sendInWindow(B322_LINE, () => '')
+  assert.ok(error, 'expected an echo verification throw')
+  assert.ok(error.message.includes(SUBMIT_BLIND_SPOT))
+  assert.ok(!error.message.includes('could not clear the pane input back to baseline'))
+})
+
+test('the proving path is unchanged', () => {
+  const { state, journal, error } = sendWith(() => true)
+  assert.equal(error, null)
+  assert.deepEqual(state.calls, [
+    { verb: 'read-screen', args: ['--surface', '51e89c13-956c-42f5-9787-ba8437699948', '--lines', '40'] },
+    { verb: 'send', args: ['--surface', '51e89c13-956c-42f5-9787-ba8437699948', '--', SEND_LINE] },
+    { verb: 'read-screen', args: ['--surface', '51e89c13-956c-42f5-9787-ba8437699948', '--lines', '40'] },
+    { verb: 'send-key', args: ['--surface', '51e89c13-956c-42f5-9787-ba8437699948', '--', 'enter'] },
+    { verb: 'read-screen', args: ['--surface', '51e89c13-956c-42f5-9787-ba8437699948', '--lines', '40'] },
+  ])
+  assert.deepEqual(journal, [
+    {
+      at: '2023-11-14T22:13:20.250Z', event: 'send-echo-attempt', surface_id: '51e89c13-956c-42f5-9787-ba8437699948', attempt: 1,
+      candidates: ['ASSIGNMENTd1:', 'd1.builder.json', 'CREW-DONEbuilderd1'], counts: [1, 1, 1],
+      needle: 'ASSIGNMENTd1:', outcome: 'landed',
+    },
+    {
+      at: '2023-11-14T22:13:20.500Z', event: 'send-submit-attempt', surface_id: '51e89c13-956c-42f5-9787-ba8437699948', attempt: 1, enter: 1,
+      needle: 'ASSIGNMENTd1:', needle_count: 0, expected_in_box: 1, outcome: 'submitted',
+    },
+    {
+      at: '2023-11-14T22:13:20.500Z', event: 'send-submit', surface_id: '51e89c13-956c-42f5-9787-ba8437699948', enters: 1,
+      elapsed_ms: 500, outcome: 'submitted',
+    },
+  ])
+})
+
+test('a line that echoes but is NEVER consumed is reported, bounded and journalled', () => {
+  const { state, journal, error, report, elapsed } = sendWith(() => false)
+  assert.equal(error, null)
+  assert.equal(report.submitted, false)
+  assert.equal(report.enters, state.enters)
   assert.ok(state.enters >= 2 && state.enters <= 16, `bounded enters, got ${state.enters}`)
   assert.equal(journal.filter((row) => row.event === 'send-submit-attempt').length, state.enters)
-  assert.equal(journal.at(-1).outcome, 'not-submitted')
+  assert.equal(journal.at(-1).outcome, 'unproved')
   assert.ok(elapsed >= 60_000, `budget must cover the measured ~60s race, waited ${elapsed}ms`)
   assert.ok(elapsed <= SUBMIT_TOTAL_BUDGET_MS + SUBMIT_PROOF_WINDOW_MS, `bounded, waited ${elapsed}ms`)
 })
@@ -940,12 +1071,13 @@ test('a swallowed first enter is recovered by a re-press, with no second typed c
   assert.deepEqual(journal.filter((row) => row.event === 'send-submit-attempt').map((row) => row.outcome), ['unproved', 'submitted'])
 })
 
-test('when the re-presses are spent the retype ladder runs, and the whole send stays bounded', () => {
-  const { state, error } = sendWith((s) => s.sends >= 2)
+test('when the re-presses are spent there is no retype and no clear', () => {
+  const { state, error, report } = sendWith((s) => s.sends >= 2)
   assert.equal(error, null)
-  assert.equal(state.sends, 2)
-  assert.ok(state.keys.includes('ctrl+u'), 'the existing clear ladder is reused before a retype')
-  assert.equal(state.enters, SUBMIT_ENTER_ATTEMPTS + 1)
+  assert.equal(state.sends, 1)
+  assert.equal(state.keys.filter((key) => key !== 'enter').length, 0)
+  assert.equal(state.enters, SUBMIT_ENTER_ATTEMPTS)
+  assert.equal(report.submitted, false)
 })
 
 test('every enter attempt is journalled with its own outcome', () => {

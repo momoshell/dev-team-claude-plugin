@@ -1451,9 +1451,32 @@ function normaliseSourceInput(source, filePath = '') {
   return { source, filePath }
 }
 
+// Line numbers were O(n²) until #892: this closure re-sliced and re-split the
+// whole prefix of the source for every match, so a file with N exported symbols
+// paid ~N²/2 character copies. MEASURED on this checkout, 2026-09-03, 16 cores
+// at load ~3.5: one exportEntries call over a 70,000-export source cost 32.6s
+// (2.40s at 20k, 0.17s at 5k — 4x the symbols for ~13.6x the time). A
+// precomputed newline table with a binary search does the same 70k in 4.9ms.
+// That is the whole of #892: the two ARG_MAX fixtures took 110.8s and 70.2s and
+// npm test went from 35s to 218s.
+function lineIndex(source) {
+  const starts = [0]
+  for (let at = source.indexOf('\n'); at !== -1; at = source.indexOf('\n', at + 1)) starts.push(at + 1)
+  return (index) => {
+    let low = 0
+    let high = starts.length - 1
+    while (low < high) {
+      const mid = (low + high + 1) >> 1
+      if (starts[mid] <= index) low = mid
+      else high = mid - 1
+    }
+    return low + 1
+  }
+}
+
 function exportedSymbolEntries(source) {
   const entries = []
-  const lineOf = (index) => source.slice(0, index).split('\n').length
+  const lineOf = lineIndex(source)
   for (const match of source.matchAll(EXPORTED_DECLARATION)) entries.push({ name: match[1], line: lineOf(match.index) })
   for (const match of source.matchAll(EXPORTED_LIST)) {
     for (const part of match[1].split(',')) {
@@ -1495,14 +1518,32 @@ export function testTitleEntries(source, filePath = '') {
   if (typeof source !== 'string') refuseUsage('source must be a string', WRONG_TYPE)
   if (!isCodeFile(filePath)) return []
   const entries = []
+  const titleLineOf = lineIndex(source)
   for (const match of source.matchAll(TEST_TITLE)) {
-    entries.push({ title: match[2] ?? match[3], line: source.slice(0, match.index).split('\n').length })
+    entries.push({ title: match[2] ?? match[3], line: titleLineOf(match.index) })
   }
   return entries
 }
 
 const TEST_TITLE = /\b(test|describe|it)\s*\(\s*(?:'([^'\n]*)'|"([^"\n]*)")/g
 export const SYMBOL_INDEX_ENTRY_LIMIT = 200
+// The per-file cap on entries actually INDEXED. #869 bounded the REPORT
+// (SYMBOL_INDEX_ENTRY_LIMIT above); this bounds the scan behind it, and every
+// entry past it is RECORDED as skipped, never silently dropped — the same
+// discipline as the "… and K more" line.
+// MEASURED on this checkout, 2026-09-03, over every tracked .mjs/.js: the
+// largest index-entry count is 576 (crew/drive.test.mjs), then 320
+// (crew/crew.test.mjs), 306 (test/factory-ledger.test.mjs), 204 (crew/drive.mjs).
+// The largest fixture the suite builds needs 402. 2000 is 3.5x the largest real
+// file and 5x the largest fixture, and holds a per-file sidecar row under ~33KB.
+// It is chosen to be unreachable by any real fence and reachable only by the
+// pathological 70,000-symbol ARG_MAX fixtures, which are exactly what it is for.
+export const SYMBOL_INDEX_SCAN_LIMIT = 2000
+
+function boundedIndexEntries(all, limit) {
+  return { entries: all.slice(0, limit), skipped: Math.max(0, all.length - limit) }
+}
+
 export const SYMBOL_INDEX_ABSENT_REASONS = Object.freeze(['unreadable', 'not-text'])
 
 export function extractKeys(source, filePath = '') {
@@ -2024,19 +2065,26 @@ export function symbolIndexFor({ checkout, writeSurface, coupling } = {}) {
     if (!CODE_EXTENSIONS.includes(extname(normal).toLowerCase())) return
     let source
     try { source = readFileSync(resolve(checkout, normal), 'utf8') } catch {
-      rows.push({ file: normal, label, reason: 'unreadable', exports: [], titles: [] })
+      rows.push({ file: normal, label, reason: 'unreadable', exports: [], exportsSkipped: 0, titles: [], titlesSkipped: 0 })
       return
     }
     if (source.includes(String.fromCharCode(0))) {
-      rows.push({ file: normal, label, reason: 'not-text', exports: [], titles: [] })
+      rows.push({ file: normal, label, reason: 'not-text', exports: [], exportsSkipped: 0, titles: [], titlesSkipped: 0 })
       return
     }
+    const exportScan = boundedIndexEntries(exportEntries(source, normal), SYMBOL_INDEX_SCAN_LIMIT)
+    const titleScan = boundedIndexEntries(
+      label === 'in fence' && isTripwireFile(normal) ? testTitleEntries(source, normal) : [],
+      SYMBOL_INDEX_SCAN_LIMIT,
+    )
     rows.push({
       file: normal,
       label,
       reason: null,
-      exports: exportEntries(source, normal),
-      titles: label === 'in fence' && isTripwireFile(normal) ? testTitleEntries(source, normal) : [],
+      exports: exportScan.entries,
+      exportsSkipped: exportScan.skipped,
+      titles: titleScan.entries,
+      titlesSkipped: titleScan.skipped,
     })
   }
   for (const file of Array.isArray(writeSurface?.files) ? writeSurface.files : []) add(file, 'in fence')
@@ -2051,12 +2099,13 @@ function renderSymbolSidecar(index) {
       rows.push(`- ${entry.file} · unindexed · ${entry.reason}`)
       continue
     }
-    for (const [kind, all, render] of [
-      ['exports', entry.exports, (item) => `${item.name}:${item.line}`],
-      ['test titles', entry.titles, (item) => `${item.title}:${item.line}`],
+    for (const [kind, all, skipped, render] of [
+      ['exports', entry.exports, entry.exportsSkipped ?? 0, (item) => `${item.name}:${item.line}`],
+      ['test titles', entry.titles, entry.titlesSkipped ?? 0, (item) => `${item.title}:${item.line}`],
     ]) {
       if (all.length === 0) continue
       rows.push(`- ${entry.file} · ${kind} · ${all.map(render).join(', ')}`)
+      if (skipped > 0) rows.push(`- ${entry.file} · ${kind} · ${skipped} not indexed — the per-file scan cap of ${SYMBOL_INDEX_SCAN_LIMIT} entries was reached`)
     }
   }
   return ['symbol index (full static scan):', ...rows].join('\n')
@@ -2158,9 +2207,9 @@ function renderSymbolIndex(pack) {
       continue
     }
     let remaining = SYMBOL_INDEX_ENTRY_LIMIT
-    for (const [kind, all, render] of [
-      ['exports', entry.exports, (item) => `${item.name}:${item.line}`],
-      ['test titles', entry.titles, (item) => `${item.title}:${item.line}`],
+    for (const [kind, all, skipped, render] of [
+      ['exports', entry.exports, entry.exportsSkipped ?? 0, (item) => `${item.name}:${item.line}`],
+      ['test titles', entry.titles, entry.titlesSkipped ?? 0, (item) => `${item.title}:${item.line}`],
     ]) {
       if (all.length === 0) continue
       const limit = remaining
@@ -2168,12 +2217,14 @@ function renderSymbolIndex(pack) {
       if (limit === 0) {
         symbolRows.push(`- ${entry.file} · ${kind} · not listed — the per-file budget of ${SYMBOL_INDEX_ENTRY_LIMIT} entries was spent`)
         symbolRows.push(`  … and ${all.length} more — full index: ${pack.symbols}`)
+        if (skipped > 0) symbolRows.push(`  … ${skipped} further ${kind} were not indexed — the per-file scan cap of ${SYMBOL_INDEX_SCAN_LIMIT} entries was reached`)
         continue
       }
       symbolRows.push(`- ${entry.file} · ${kind} · ${listed.map(render).join(', ')}`)
       remaining -= listed.length
       const more = all.length - listed.length
       if (more > 0) symbolRows.push(`  … and ${more} more — full index: ${pack.symbols}`)
+      if (skipped > 0) symbolRows.push(`  … ${skipped} further ${kind} were not indexed — the per-file scan cap of ${SYMBOL_INDEX_SCAN_LIMIT} entries was reached`)
     }
   }
   if (symbolRows.length === 0) return []

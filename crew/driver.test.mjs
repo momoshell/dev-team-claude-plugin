@@ -1,12 +1,18 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { scratchDir } from '../test/helpers.mjs'
 import {
-  assignmentLine, assignmentPrompt, assertSafeLine, briefIngestCommands, pickNeedles, surfaceProcessTree, sendLine,
-  DELIVERY_MODES, SEND_RETRIES, SUBMIT_BLIND_SPOT, SUBMIT_ENTER_ATTEMPTS, SUBMIT_PROOF_WINDOW_MS, SUBMIT_TOTAL_BUDGET_MS,
+  assignmentLine, assignmentPrompt, assertSafeLine, briefIngestCommands, confirmDelivery, deliverySentence, pickNeedles, readEventsTail, surfaceProcessTree, sendLine,
+  DELIVERY_CONFIRMED, DELIVERY_MODES, DELIVERY_UNCONFIRMED, DELIVERY_UNKNOWN, DELIVERY_UNKNOWN_REASONS, EVENTS_TAIL_BYTES, SEND_RETRIES, SUBMIT_BLIND_SPOT, SUBMIT_ENTER_ATTEMPTS, SUBMIT_PROOF_WINDOW_MS, SUBMIT_TOTAL_BUDGET_MS,
 } from './driver.mjs'
 import { capabilitiesFor as claudeCapabilitiesFor } from './adapters/adapter-claude.mjs'
 import { capabilitiesFor as piCapabilitiesFor } from './adapters/adapter-pi.mjs'
+
+const NO_EVENTS = join(tmpdir(), 'b418-no-such-events.jsonl')
 
 const GOOD = {
   id: 'p1',
@@ -182,7 +188,7 @@ function sendInWindow(line, window, options = {}) {
   try {
     report = sendLine('51e89c13-956c-42f5-9787-ba8437699948', line, {
       cmux: fn, log: (row) => journal.push(row),
-      now: () => clock, settle: (ms) => { clock += ms },
+      now: () => clock, settle: (ms) => { clock += ms }, eventsPath: NO_EVENTS,
     })
   } catch (err) { error = err }
   return { state, journal, error, report }
@@ -933,7 +939,7 @@ function sendWith(consume) {
   try {
     report = sendLine('51e89c13-956c-42f5-9787-ba8437699948', SEND_LINE, {
       cmux: fn, log: (row) => journal.push(row),
-      now: () => clock, settle: (ms) => { clock += ms },
+      now: () => clock, settle: (ms) => { clock += ms }, eventsPath: NO_EVENTS,
     })
   } catch (err) { error = err }
   return { state, journal, error, report, elapsed: clock - start }
@@ -953,7 +959,7 @@ function sendInTranscript(consume = () => true) {
   try {
     report = sendLine('51e89c13-956c-42f5-9787-ba8437699948', SEND_LINE, {
       cmux: fn, log: (row) => journal.push(row),
-      now: () => clock, settle: (ms) => { clock += ms },
+      now: () => clock, settle: (ms) => { clock += ms }, eventsPath: NO_EVENTS,
     })
   } catch (err) { error = err }
   return { state, journal, error, report, elapsed: clock - 1_700_000_000_000 }
@@ -1090,4 +1096,104 @@ test('every enter attempt is journalled with its own outcome', () => {
     assert.equal(typeof row.attempt, 'number')
     assert.equal(typeof row.enter, 'number')
   }
+})
+
+// --- #768 ask 2: the delivery witness, pinned on a recorded capture ----------
+const EVENTS_FIXTURE = fileURLToPath(new URL('../test/fixtures/cmux-events-input-sent.jsonl', import.meta.url))
+const EVENTS_SINCE = Date.parse('2026-08-28T21:00:00.000Z')
+const EVENTS_SURFACE = '341d4937-65f8-48bb-86e6-0dd6df61f90e'
+const EVENTS_SURFACE_UPPER = '341D4937-65F8-48BB-86E6-0DD6DF61F90E'
+const EVENTS_LINE = 'x'.repeat(404)
+
+function withEventsTemp(fn) {
+  return fn(scratchDir('b418-events-'))
+}
+
+test('the recorded capture confirms an uppercase surface id', () => {
+  const record = confirmDelivery(EVENTS_SURFACE_UPPER, EVENTS_LINE, { sinceMs: EVENTS_SINCE, path: EVENTS_FIXTURE })
+  assert.equal(record.verdict, DELIVERY_CONFIRMED)
+})
+
+test('the recorded capture confirms the lowercase surface id too', () => {
+  const record = confirmDelivery(EVENTS_SURFACE, EVENTS_LINE, { sinceMs: EVENTS_SINCE, path: EVENTS_FIXTURE })
+  assert.equal(record.verdict, DELIVERY_CONFIRMED)
+})
+
+test('a confirmed record carries delivery metadata without sent text', () => {
+  const record = confirmDelivery(EVENTS_SURFACE_UPPER, EVENTS_LINE, { sinceMs: EVENTS_SINCE, path: EVENTS_FIXTURE })
+  assert.equal(record.event_id, '66F30A38-655A-4B21-BB69-C459E349C44B-281')
+  assert.equal(record.seq, 281)
+  assert.equal(record.text_length, 404)
+  assert.equal(record.queued, false)
+  assert.equal(record.content_verified, false)
+  assert.ok(!JSON.stringify(record).includes(EVENTS_LINE))
+})
+
+test('deliverySentence distinguishes confirmed, unconfirmed and unknown records', () => {
+  const confirmed = confirmDelivery(EVENTS_SURFACE, EVENTS_LINE, { sinceMs: EVENTS_SINCE, path: EVENTS_FIXTURE })
+  const unconfirmed = confirmDelivery(EVENTS_SURFACE, EVENTS_LINE.slice(0, -1), { sinceMs: EVENTS_SINCE, path: EVENTS_FIXTURE })
+  const unknown = confirmDelivery(EVENTS_SURFACE, EVENTS_LINE, { sinceMs: EVENTS_SINCE, path: NO_EVENTS })
+  const sentences = [confirmed, unconfirmed, unknown].map(deliverySentence)
+  assert.equal(new Set(sentences).size, 3)
+  assert.ok(sentences[0].includes(confirmed.event_id))
+  assert.match(sentences[0], /content is NOT verified/)
+})
+
+test('a text length off by one is delivery-unconfirmed', () => {
+  const record = confirmDelivery(EVENTS_SURFACE, `${EVENTS_LINE}x`, { sinceMs: EVENTS_SINCE, path: EVENTS_FIXTURE })
+  assert.equal(record.verdict, DELIVERY_UNCONFIRMED)
+})
+
+test('absent, directory and empty event streams are delivery-unknown', () => {
+  withEventsTemp((dir) => {
+    const absent = confirmDelivery(EVENTS_SURFACE, 'x', { sinceMs: 0, path: join(dir, 'absent.jsonl') })
+    assert.equal(absent.verdict, DELIVERY_UNKNOWN)
+    assert.ok(DELIVERY_UNKNOWN_REASONS.includes(absent.reason))
+
+    const eventsDir = join(dir, 'events-dir')
+    mkdirSync(eventsDir)
+    const directory = confirmDelivery(EVENTS_SURFACE, 'x', { sinceMs: 0, path: eventsDir })
+    assert.equal(directory.verdict, DELIVERY_UNKNOWN)
+    assert.ok(DELIVERY_UNKNOWN_REASONS.includes(directory.reason))
+
+    const emptyPath = join(dir, 'empty.jsonl')
+    writeFileSync(emptyPath, '')
+    const empty = confirmDelivery(EVENTS_SURFACE, 'x', { sinceMs: 0, path: emptyPath })
+    assert.equal(empty.verdict, DELIVERY_UNKNOWN)
+    assert.ok(DELIVERY_UNKNOWN_REASONS.includes(empty.reason))
+  })
+})
+
+test('readEventsTail honors its byte bound and drops the first fragment line', () => {
+  withEventsTemp((dir) => {
+    const path = join(dir, 'large.jsonl')
+    writeFileSync(path, `${'fragment'.repeat(EVENTS_TAIL_BYTES)}\nkept\n`)
+    const tail = readEventsTail(path)
+    assert.ok(tail.bytes_read <= EVENTS_TAIL_BYTES)
+    assert.equal(tail.truncated, true)
+    assert.equal(tail.lines[0], 'kept')
+  })
+})
+
+test('sendLine journals confirmed and unknown delivery witnesses on blind panes', () => {
+  const confirmedWindow = windowCmux({ window: () => '' })
+  const confirmedJournal = []
+  let confirmedClock = EVENTS_SINCE
+  let confirmedError = null
+  try {
+    sendLine(EVENTS_SURFACE_UPPER, EVENTS_LINE, {
+      cmux: confirmedWindow.fn, log: (row) => confirmedJournal.push(row),
+      now: () => confirmedClock, settle: (ms) => { confirmedClock += ms }, eventsPath: EVENTS_FIXTURE,
+    })
+  } catch (err) { confirmedError = err }
+  assert.ok(confirmedError)
+  assert.ok(confirmedError.message.includes('66F30A38-655A-4B21-BB69-C459E349C44B-281'))
+  assert.equal(confirmedJournal.at(-1).event, 'send-delivery-witness')
+  assert.equal(confirmedJournal.at(-1).verdict, DELIVERY_CONFIRMED)
+
+  const { error: unknownError, journal: unknownJournal } = sendInWindow(B322_LINE, () => '')
+  assert.ok(unknownError)
+  assert.match(unknownError.message, /delivery unknown/)
+  assert.equal(unknownJournal.at(-1).event, 'send-delivery-witness')
+  assert.equal(unknownJournal.at(-1).verdict, DELIVERY_UNKNOWN)
 })

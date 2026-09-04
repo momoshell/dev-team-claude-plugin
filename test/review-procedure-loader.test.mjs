@@ -68,13 +68,13 @@ test('the stated empty list is a blind spot, not a broken-checkout claim', () =>
 test('posture.md names the continuation gate on the shipped panel', () => {
   const text = readFileSync(join(ROOT, 'skills/pr-review/references/posture.md'), 'utf8')
   assert.ok(text.includes('ctx.continuation'))
-  assert.ok(text.includes('crew/drive.mjs:4132'))
+  assert.ok(text.includes('crew/drive.mjs:4420'))
 })
 
 test('posture.md names the tech-lead seat gate on the shipped panel', () => {
   const text = readFileSync(join(ROOT, 'skills/pr-review/references/posture.md'), 'utf8')
   assert.ok(text.includes('without a seated tech-lead'))
-  assert.ok(text.includes('crew/drive.mjs:319'))
+  assert.ok(text.includes('crew/drive.mjs:531'))
 })
 
 test('no review-skill document calls the shipped panel parked', () => {

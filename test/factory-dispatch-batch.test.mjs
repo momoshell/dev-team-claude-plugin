@@ -64,6 +64,7 @@ import {
   laneOutcome,
   main,
   measureBatchBaseline,
+  mergeCheckLine,
   normalDeps,
   parseCliArgs,
   resolveAdoptions,
@@ -3823,6 +3824,12 @@ test('closing output states the transport, keep policy, and names one teardown c
       `dispatch-batch: teardown lane=${lane} command=node crew/crew.mjs teardown --task ${lane} --checkout ${join(result.parent, `dt-${lane}`)}`,
     ))
   }
+  assert.equal(result.logs.filter((line) => line === 'dispatch-batch: merge-check command=node scripts/factory/closeout.mjs merge-check lane-a lane-b').length, 1)
+})
+
+test('mergeCheckLine renders empty and multiple lane lists', () => {
+  assert.equal(mergeCheckLine([]), 'dispatch-batch: merge-check command=node scripts/factory/closeout.mjs merge-check ')
+  assert.equal(mergeCheckLine(['lane-a', 'lane-b']), 'dispatch-batch: merge-check command=node scripts/factory/closeout.mjs merge-check lane-a lane-b')
 })
 
 test('wave one dispatches only its level and re-emits baseline and memory flags for deferred lanes', async () => {

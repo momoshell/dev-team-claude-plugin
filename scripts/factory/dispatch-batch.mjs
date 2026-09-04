@@ -148,6 +148,22 @@ export const BOOT_TRANSPORT = 'headless-all'
 export const PANE_TRANSPORT = 'panes'
 export const COMPILE_REQUEST_SUFFIX = '.compile-request.json'
 
+// #767: five boots were lost to pane-send mechanics on 2026-08-29 (b321 x1, b322 x2,
+// b325 x2), each with correct work on both sides of the send and each costing a whole
+// dispatch. A lost boot now costs ONE retry: tear the half-booted lane down, re-boot,
+// and journal boot-retried carrying the FIRST failure's reason. The bound is two
+// attempts in all, so a lane that cannot boot still refuses boot-failed exactly once.
+export const BOOT_RETRY_EVENT = 'boot-retried'
+export const BOOT_ATTEMPTS = 2
+// A teardown between attempts PROVES nothing on its own. crew.mjs teardown prints
+// seats: null whenever no seat carried a pane surface to probe (TEARDOWN_ABSENT_CAUSES,
+// crew/crew.mjs), which is every headless lane and the usual shape after a failed boot,
+// so an exit status alone cannot separate "every seat proven dead" from "nothing was
+// measured". The dispatcher reads the PAYLOAD and calls that absence unproven. #601.
+export const TEARDOWN_PROVEN = 'proven'
+export const TEARDOWN_UNPROVEN = 'unproven'
+export const TEARDOWN_SEATS_NULL_WHY = 'teardown returned seats: null - no pane surface to probe, so no seat was proven dead; unproven, never a proven-clean teardown (#601)'
+
 // Plan adoption (#763). A re-dispatched lane whose predecessor already wrote a plan
 // reads it out of its own task dir instead of planning again, and the block that says
 // so is the SAME sentence every time — never a per-lane paragraph typed by hand.
@@ -2383,6 +2399,75 @@ function bootCommand({ lane, laneDir, tier, registerPath, transport, seats, runF
   }
 }
 
+function teardownCommand({ lane, laneDir }) {
+  return {
+    file: 'node',
+    args: ['crew/crew.mjs', 'teardown', '--task', lane, '--checkout', laneDir],
+    cwd: laneDir,
+  }
+}
+
+// One boot attempt, as a value: a thrown spawn and a non-zero exit are the same
+// outcome to the retry, and a ratified floor reason travels with it so a
+// deterministic refusal is never retried.
+function bootOnce({ item, registerPath, transport, runFlags, deps }) {
+  const d = normalDeps(deps)
+  let result
+  try { result = d.spawn(bootCommand({ lane: item.lane, laneDir: item.plan.dir, tier: item.tier, registerPath, transport, seats: item.seats, runFlags })) } catch (err) {
+    return { ok: false, result: null, floorReason: null, why: err?.message || String(err) }
+  }
+  if (result && result.status === 0) return { ok: true, result, floorReason: null, why: null }
+  const failure = childFailure(result)
+  return { ok: false, result, floorReason: seatFloorRefusal(failure), why: JSON.stringify(failure) }
+}
+
+// What the teardown between two boot attempts PROVED, read from its payload rather
+// than its exit status. Anything short of every seat proven dead is unproven.
+export function teardownVerdict(result) {
+  const exit = Number.isInteger(result?.status) ? result.status : null
+  let payload = null
+  for (const line of String(result?.stdout ?? '').split('\n')) {
+    const text = line.trim()
+    if (!text.startsWith('{')) continue
+    try { payload = JSON.parse(text) } catch { /* a non-payload line is not the teardown's answer */ }
+  }
+  if (!payload) return { verdict: TEARDOWN_UNPROVEN, exit, seats: null, why: `teardown printed no readable payload: ${childFailure(result)}` }
+  const seats = payload.seats ?? null
+  if (seats === null) return { verdict: TEARDOWN_UNPROVEN, exit, seats: null, why: TEARDOWN_SEATS_NULL_WHY }
+  if (exit !== 0) return { verdict: TEARDOWN_UNPROVEN, exit, seats, why: `teardown exited ${exit}: ${JSON.stringify(seats)}` }
+  if (seats.proven !== seats.seats) return { verdict: TEARDOWN_UNPROVEN, exit, seats, why: `teardown proved ${seats.proven} of ${seats.seats} seat(s) dead: ${JSON.stringify(seats)}` }
+  return { verdict: TEARDOWN_PROVEN, exit, seats, why: null }
+}
+
+// A failed boot may have left seats alive (#574), so the retry tears the lane down
+// before it re-boots and never stacks a second crew on a half-booted first one.
+function teardownBetweenAttempts({ item, deps }) {
+  const d = normalDeps(deps)
+  let result
+  try { result = d.spawn(teardownCommand({ lane: item.lane, laneDir: item.plan.dir })) } catch (err) {
+    return { verdict: TEARDOWN_UNPROVEN, exit: null, seats: null, why: `teardown did not run: ${err?.message || String(err)}` }
+  }
+  return teardownVerdict(result)
+}
+
+// The row a recovered boot leaves behind. The FIRST failure is the fact nothing else
+// on disk records: the retry succeeded, so the lane looks clean everywhere else.
+export function bootRetryRow({ lane, first, teardown, at = new Date().toISOString() } = {}) {
+  return {
+    at,
+    event: BOOT_RETRY_EVENT,
+    task: lane,
+    lane,
+    attempts: BOOT_ATTEMPTS,
+    first_failure: first,
+    teardown: {
+      verdict: teardown?.verdict ?? TEARDOWN_UNPROVEN,
+      exit: teardown?.exit ?? null,
+      why: teardown?.why ?? null,
+    },
+  }
+}
+
 function preflightRunOptions({ variant, runFlags = {}, lanes = [] } = {}) {
   // Both variant checks are PER LANE now: --variant stays the batch default and a lane's own
   // request key wins, so a scout rides in a batch of full lanes (#634). The closed name set
@@ -2707,16 +2792,31 @@ export async function dispatchBatch({ batchDir, fences, checkout, parentDir, out
 
   const arrivals = []
   for (const item of settled) {
-    let boot
-    try { boot = d.spawn(bootCommand({ lane: item.lane, laneDir: item.plan.dir, tier: item.tier, registerPath, transport, seats: item.seats, runFlags })) } catch (err) {
-      refuse(`crew boot failed for ${item.lane}: ${err?.message || String(err)}`, BOOT_FAILED)
-    }
-    if (!boot || boot.status !== 0) {
-      const floorReason = seatFloorRefusal(childFailure(boot))
-      if (floorReason) refuse(`crew boot refused ${item.lane} at a ratified floor [${floorReason}]: ${JSON.stringify(childFailure(boot))}`, SEAT_FLOOR_CONFLICT)
-      refuse(`crew boot failed for ${item.lane}: ${JSON.stringify(childFailure(boot))}`, BOOT_FAILED)
+    let firstFailure = null
+    let teardown = null
+    for (let attempt = 1; attempt <= BOOT_ATTEMPTS; attempt += 1) {
+      const boot = bootOnce({ item, registerPath, transport, runFlags, deps: d })
+      if (boot.ok) break
+      // A ratified floor refusal is a DECISION, not an accident: the same seats refuse
+      // the same way on a retry, so retrying it burns a second dispatch to reach the
+      // same answer. #767 ask 1 is a retry around a LOST boot, never around one that
+      // was answered.
+      if (boot.floorReason) refuse(`crew boot refused ${item.lane} at a ratified floor [${boot.floorReason}]: ${boot.why}`, SEAT_FLOOR_CONFLICT)
+      if (attempt >= BOOT_ATTEMPTS) {
+        refuse(`crew boot failed for ${item.lane} after ${BOOT_ATTEMPTS} attempts - attempt 1: ${firstFailure ?? boot.why}; attempt ${attempt}: ${boot.why}`, BOOT_FAILED)
+      }
+      firstFailure = boot.why
+      teardown = teardownBetweenAttempts({ item, deps: d })
+      d.log(`dispatch-batch: boot-retry lane=${item.lane} attempt=${attempt} first_failure=${firstFailure} teardown=${teardown.verdict} teardown_exit=${teardown.exit ?? 'none'} teardown_why=${JSON.stringify(teardown.why)}`)
     }
     const path = crewJsonPath({ checkout: item.plan.dir, lane: item.lane, deps: d })
+    if (firstFailure !== null) {
+      const row = bootRetryRow({ lane: item.lane, first: firstFailure, teardown })
+      // Instrumentation is never load-bearing: the retry has already happened and the
+      // log line above carries the same fact, so a journal that cannot be appended
+      // never fails a lane.
+      try { d.appendFileSync(join(dirname(path), 'journal.jsonl'), `${JSON.stringify(row)}\n`) } catch { /* the dispatch line carries the same fact */ }
+    }
     let crew
     try { crew = JSON.parse(d.readFileSync(path, 'utf8')) } catch (err) {
       refuse(`crew boot produced no readable crew.json for ${item.lane}: ${err?.message || String(err)}`, FENCE_NOT_ARRIVED)

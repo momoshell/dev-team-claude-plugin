@@ -119,6 +119,12 @@ export const CITATION_CARRIER_BLIND_SPOT = 'BLIND SPOT: this finds docs carrying
 export const ANCHOR_PIN_WARNING_PREFIX = 'dispatch-batch: WARNING anchor-pin-unfenced:'
 // #882 / ADR-040: external pin repair is an operator-owned post-merge action.
 export const ANCHOR_PIN_POST_MERGE = 'ADR-040: the sanctioned repair is the post-merge pass an operator runs on main after the wave merges — node skills/qa-test-writing/anchor-pin.mjs --repair-all <dir> — so a pinning manifest outside this fence is not an obligation on this lane'
+// #758: the closing command for a batch. The verb name is a CONSTANT so the line
+// dispatch-batch prints and the verb closeout.mjs implements cannot drift apart.
+export const MERGE_CHECK_COMMAND = 'node scripts/factory/closeout.mjs merge-check'
+export function mergeCheckLine(lanes) {
+  return `dispatch-batch: merge-check command=${MERGE_CHECK_COMMAND} ${lanes.join(' ')}`
+}
 export const CITATION_CARRIER_POST_MERGE = 'ADR-040: a PINNED citation moves with its manifest key, so the same post-merge --repair-all pass on main rewrites the doc and the manifest together after the wave merges; fencing these docs is optional and only buys correct line numbers at merge time'
 
 // These two names belong to the compiler. The batch dispatcher parses its
@@ -2890,6 +2896,7 @@ export async function dispatchBatch({ batchDir, fences, checkout, parentDir, out
   for (const item of runs) {
     d.log(`dispatch-batch: teardown lane=${item.lane} command=node crew/crew.mjs teardown --task ${item.lane} --checkout ${item.laneDir}`)
   }
+  d.log(mergeCheckLine(runs.map((item) => item.lane)))
   return { lanes: runs, plans, registerPath, outDir: outputDir, keep, transport, waves, wave: waveNumber, deferred, unstarted }
 }
 

@@ -128,6 +128,18 @@ test('closeout keeps teardown last and verifies after it', () => {
   assert.equal(reanchor.includes('only the exhibits tests notice'), false)
 })
 
+// Mutation killed: removing the closeout entry point leaves recovery as a hand recipe.
+test('recovery closeout routes through the measured command exactly once', () => {
+  const text = readText(join(HERE, 'references/closeout.md'))
+  const sectionAt = text.indexOf('## Recovery closeout — teardown first')
+  assert.notEqual(sectionAt, -1, 'closeout.md is missing the recovery section')
+  const nextAt = text.indexOf('\n## ', sectionAt + 1)
+  const section = nextAt === -1 ? text.slice(sectionAt) : text.slice(sectionAt, nextAt)
+  const command = 'node scripts/factory/closeout.mjs recover <lane>'
+  assert.ok(section.includes(command), 'recovery section must name the closeout command')
+  assert.equal([...text.matchAll(/node scripts\/factory\/closeout\.mjs recover <lane>/g)].length, 1)
+})
+
 // RV1-1 guard: restoring the false acceptance-gate claim must fail before post-merge repair is skipped.
 test('RV1-1 closeout states the anchor-shift blind spot', () => {
   const text = readText(join(HERE, 'references/closeout.md'))

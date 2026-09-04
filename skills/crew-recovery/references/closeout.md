@@ -77,6 +77,15 @@ The driver is gone but the seats may not be. Invert the order to
 **preserve → teardown → commit → prove → suite → push+PR**: preserve by copy
 as always, then tear down FIRST and commit after.
 
+Run the ordered recovery sequence below — quiet-tree check, preserve-by-copy,
+teardown-with-proof, verify, then either the closeout half or the adopt-ready
+stop — with the command below. It refuses by name at the first failed step and
+NEVER dispatches: the decision to run the next lane stays with the operator.
+
+```sh
+node scripts/factory/closeout.mjs recover <lane>
+```
+
 Two reasons, both structural:
 
 - The scope gate protects a fresh run's dirty checkout, and **nothing protects

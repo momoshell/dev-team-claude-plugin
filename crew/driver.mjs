@@ -5,8 +5,9 @@
 // close-surface and doc mounts are window-scoped, send/send-key resolve
 // globally; `send` never auto-submits — send-key enter does).
 import { spawnSync } from 'node:child_process'
-import { appendFileSync, mkdirSync } from 'node:fs'
-import { dirname } from 'node:path'
+import { appendFileSync, closeSync, fstatSync, mkdirSync, openSync, readSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { dirname, join } from 'node:path'
 
 const CMUX_BIN = process.env.CMUX_BIN || 'cmux'
 const SPAWN_TIMEOUT_MS = 10_000
@@ -294,6 +295,140 @@ export const SUBMIT_TOTAL_BUDGET_MS = 120_000
 // already on disk.
 export const SUBMIT_BLIND_SPOT = 'the frame count cannot separate the input box from the transcript'
 
+// --- delivery witness: cmux's own event stream (#768 ask 2) -------------------
+// An echo read off the frame proves CHARACTERS WERE PAINTED; it cannot tell the
+// input box from the transcript (SUBMIT_BLIND_SPOT). cmux logs every send it
+// delivered to ~/.cmuxterm/events.jsonl as a `surface.input_sent` row, so
+// DELIVERY can be a FACT instead of an inference. Three measured facts about a
+// real row decide the shape of this witness (the row is kept verbatim in
+// test/fixtures/cmux-events-input-sent.jsonl, recorded 2026-08-28):
+//   1. THE TEXT IS REDACTED AT SOURCE — `redacted_fields:["text"]`, `text:null`,
+//      and only `text_length` survives. This witness can prove a send was
+//      DELIVERED and how many characters it carried; it can NEVER prove WHICH
+//      text. The needle echo check remains the only evidence of content and
+//      nothing here replaces or weakens it.
+//   2. THE SURFACE ID CASE DIFFERS INSIDE ONE ROW — `params.surface_id` is
+//      lowercase, `result.surface_id` is uppercase. The match is against
+//      `params.surface_id`, the surface the send NAMED, and it is
+//      case-insensitive; a case-sensitive matcher silently matches nothing,
+//      which is exactly the false negative this witness exists to remove.
+//   3. `result.queued` IS A BOOLEAN, and a queued send is not a delivered one,
+//      so it is carried into the record rather than collapsed away.
+// The file is append-only and multi-megabyte, so only a bounded TAIL is read,
+// and an absent or unreadable stream is UNKNOWN with a closed reason — never
+// "not delivered". An absent instrument is a blind spot to state, not a verdict.
+export const EVENTS_TAIL_BYTES = 262_144
+export const DELIVERY_CONFIRMED = 'delivery-confirmed'
+export const DELIVERY_UNCONFIRMED = 'delivery-unconfirmed'
+export const DELIVERY_UNKNOWN = 'delivery-unknown'
+export const DELIVERY_UNKNOWN_REASONS = Object.freeze(['events-absent', 'events-unreadable', 'events-empty', 'events-window-truncated'])
+const SENTENCE_CONFIRMED = 'delivery confirmed by cmux event'
+const SENTENCE_UNCONFIRMED = 'delivery unconfirmed — no surface.input_sent matched this surface after the send'
+const SENTENCE_UNKNOWN = 'delivery unknown'
+const CONTENT_CAVEAT = 'the event text is redacted at source, so content is NOT verified by it'
+// The single place this module decides whether an event proved CONTENT. It never
+// does — see fact 1 above.
+const CONTENT_VERIFIED = false
+
+export function defaultEventsPath() {
+  return process.env.CMUX_EVENTS_FILE || join(homedir(), '.cmuxterm', 'events.jsonl')
+}
+
+// Read at most `bytes` from the END of an append-only file. The first line of a
+// bounded read is a fragment, so it is dropped whenever the read started past
+// byte 0; `truncated` says the window may not reach far enough back.
+export function readEventsTail(path, bytes = EVENTS_TAIL_BYTES) {
+  let fd = null
+  try {
+    fd = openSync(path, 'r')
+    const size = fstatSync(fd).size
+    const want = Math.max(0, Math.min(size, bytes))
+    const offset = size - want
+    const buf = Buffer.alloc(want)
+    const read = want === 0 ? 0 : readSync(fd, buf, 0, want, offset)
+    const lines = buf.subarray(0, read).toString('utf8').split('\n').filter((row) => row.length > 0)
+    const truncated = offset > 0
+    if (truncated) lines.shift()
+    return { status: 'read', reason: null, lines, bytes_read: read, truncated }
+  } catch (err) {
+    const reason = err && err.code === 'ENOENT' ? 'events-absent' : 'events-unreadable'
+    return { status: 'unknown', reason, lines: [], bytes_read: 0, truncated: false }
+  } finally {
+    try { if (fd !== null) closeSync(fd) } catch { /* the witness never throws into the caller */ }
+  }
+}
+
+// cmux emits one surface id uppercase and the other lowercase in the SAME row.
+const sameSurface = (a, b) => typeof a === 'string' && typeof b === 'string' && a.toLowerCase() === b.toLowerCase()
+
+function deliveryRecord(verdict, reason, extra = {}) {
+  return {
+    verdict,
+    reason,
+    event_id: null,
+    seq: null,
+    occurred_at: null,
+    text_length: null,
+    queued: null,
+    content_verified: CONTENT_VERIFIED,
+    scanned: 0,
+    ...extra,
+  }
+}
+
+const unknownDelivery = (reason, scanned = 0) => deliveryRecord(DELIVERY_UNKNOWN, reason, { scanned })
+
+// Ask cmux whether it DELIVERED this send. `sinceMs` is the moment the send was
+// issued: a row older than it belongs to an earlier send and is not evidence.
+export function confirmDelivery(surfaceId, line, { sinceMs = 0, path = defaultEventsPath(), bytes = EVENTS_TAIL_BYTES } = {}) {
+  const tail = readEventsTail(path, bytes)
+  if (tail.status !== 'read') return unknownDelivery(tail.reason, 0)
+  if (!tail.lines.length) return unknownDelivery('events-empty', 0)
+  let scanned = 0
+  let oldest = null
+  let match = null
+  for (const raw of tail.lines) {
+    let row = null
+    try { row = JSON.parse(raw) } catch { continue }
+    scanned += 1
+    const at = Date.parse(row && row.occurred_at ? row.occurred_at : '')
+    if (Number.isFinite(at) && (oldest === null || at < oldest)) oldest = at
+    if (!row || row.name !== 'surface.input_sent') continue
+    const params = (row.payload && row.payload.params) || {}
+    if (!sameSurface(params.surface_id, surfaceId)) continue
+    if (!Number.isFinite(at) || at < sinceMs) continue
+    if (params.text_length !== line.length) continue
+    match = row
+  }
+  // A tail whose OLDEST row is already newer than the send cannot answer the
+  // question it was asked — the window we needed may sit above the bound. Say
+  // so rather than guess a negative.
+  if (!match && tail.truncated && oldest !== null && oldest > sinceMs) return unknownDelivery('events-window-truncated', scanned)
+  if (!match) return deliveryRecord(DELIVERY_UNCONFIRMED, null, { scanned })
+  const result = (match.payload && match.payload.result) || {}
+  return deliveryRecord(DELIVERY_CONFIRMED, null, {
+    event_id: typeof match.id === 'string' ? match.id : null,
+    seq: Number.isFinite(match.seq) ? match.seq : null,
+    occurred_at: typeof match.occurred_at === 'string' ? match.occurred_at : null,
+    text_length: match.payload.params.text_length,
+    queued: typeof result.queued === 'boolean' ? result.queued : null,
+    scanned,
+  })
+}
+
+// The three outcomes stop being one message. A delivered-but-unpainted send is a
+// RENDERING or SUBMIT question; an undelivered one is a delivery failure; an
+// unreadable stream is neither.
+export function deliverySentence(record) {
+  if (record.verdict === DELIVERY_CONFIRMED) {
+    return `${SENTENCE_CONFIRMED} ${record.event_id} (seq ${record.seq}, at ${record.occurred_at}, text_length ${record.text_length}, queued ${record.queued}) — the text WAS delivered, so this is a rendering or submit failure, not a delivery one; ${CONTENT_CAVEAT}`
+  }
+  if (record.verdict === DELIVERY_UNCONFIRMED) {
+    return `${SENTENCE_UNCONFIRMED} (${record.scanned} event rows scanned) — the text was NOT observed delivered`
+  }
+  return `${SENTENCE_UNKNOWN} (${record.reason}) — the cmux event stream could not be consulted, which is a blind spot and not a delivery failure`
+}
+
 // A resend loop is a cost surface, so every attempt and its outcome is
 // journalled. Callers that pass no deps — every production caller today —
 // still journal: to CREW_SEND_JOURNAL when it is set, and a LOUD row to stderr
@@ -421,7 +556,28 @@ export function sendLine(surfaceId, line, deps = {}) {
     if (submitted || now() >= budgetEnd) break
   }
   if (!everLanded) {
-    throw new Error(`sendLine: echo not verified exactly once over baseline (before ${before.join(',')}, last ${last === null ? 'unreadable' : last.join(',')}) — candidates ${needles.join(' | ')} — blind spot: ${SUBMIT_BLIND_SPOT} — last ${SCREEN_TAIL_LINES} screen lines: ${screenTail(surfaceId, cmuxFn)}`)
+    // Before the frame gets the last word, ask cmux whether it DELIVERED the
+    // text. A confirmed delivery makes this a rendering or submit failure, not
+    // a delivery one, and the two outcomes stop being one message (#768).
+    const witness = (deps.confirmDelivery || confirmDelivery)(surfaceId, line, {
+      sinceMs: startedAt,
+      path: deps.eventsPath || defaultEventsPath(),
+    })
+    journal({
+      at: new Date(now()).toISOString(),
+      event: 'send-delivery-witness',
+      surface_id: surfaceId,
+      verdict: witness.verdict,
+      reason: witness.reason,
+      event_id: witness.event_id,
+      seq: witness.seq,
+      occurred_at: witness.occurred_at,
+      queued: witness.queued,
+      text_length: witness.text_length,
+      content_verified: witness.content_verified,
+      scanned: witness.scanned,
+    }, witness.verdict !== DELIVERY_CONFIRMED)
+    throw new Error(`sendLine: echo not verified exactly once over baseline (before ${before.join(',')}, last ${last === null ? 'unreadable' : last.join(',')}) — candidates ${needles.join(' | ')} — ${deliverySentence(witness)} — blind spot: ${SUBMIT_BLIND_SPOT} — last ${SCREEN_TAIL_LINES} screen lines: ${screenTail(surfaceId, cmuxFn)}`)
   }
 
   const submitRow = {

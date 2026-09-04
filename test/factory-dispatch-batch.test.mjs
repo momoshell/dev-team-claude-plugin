@@ -82,6 +82,7 @@ import {
   ROSTER_PATH,
   seatFloorRefusal,
   seatRolesUnseated,
+  teardownVerdict,
   seatsDefect,
   mergeSeats,
   tierFloor,
@@ -4182,6 +4183,164 @@ test('boot band-floor refusals are distinct from capability shortfalls', async (
     && error.reason === 'boot-failed')
   assert.equal(seatFloorRefusal(floorStderr), 'band-below-floor')
   assert.equal(seatFloorRefusal(capabilityStderr), null)
+})
+
+test('a first boot failure tears the lane down, re-boots once, and the lane proceeds', async () => {
+  let boots = 0
+  const result = await dispatchFixture({
+    label: 'boot-retry-proceeds',
+    names: ['lane-a'],
+    spawnResult: (args) => {
+      if (args.includes('boot')) {
+        boots += 1
+        return boots === 1
+          ? { status: 1, stdout: '', stderr: 'first boot failed' }
+          : { status: 0, stdout: '', stderr: '' }
+      }
+      if (args.includes('teardown')) return { status: 0, stdout: '', stderr: '' }
+      return { status: 0, stdout: '', stderr: '' }
+    },
+  })
+  const lifecycle = result.spawned
+    .filter(({ args }) => args.includes('boot') || args.includes('teardown'))
+    .map(({ args }) => args.includes('boot') ? 'boot' : 'teardown')
+  assert.deepEqual(lifecycle, ['boot', 'teardown', 'boot'])
+  assert.deepEqual(result.report.lanes.map(({ lane }) => lane), ['lane-a'])
+})
+
+test('the boot-retried row carries the FIRST failure\'s reason', async () => {
+  let boots = 0
+  const first = 'first boot stderr reason'
+  const second = 'second boot stderr reason'
+  const result = await dispatchFixture({
+    label: 'boot-retry-row',
+    names: ['lane-a'],
+    spawnResult: (args) => {
+      if (args.includes('boot')) {
+        boots += 1
+        return boots === 1
+          ? { status: 1, stdout: '', stderr: first }
+          : { status: 0, stdout: '', stderr: second }
+      }
+      if (args.includes('teardown')) {
+        return {
+          status: 0,
+          stdout: JSON.stringify({ archived: '/tmp/archived', seats: null, seats_absent: 'headless', fingerprint: null }),
+          stderr: '',
+        }
+      }
+      return { status: 0, stdout: '', stderr: '' }
+    },
+  })
+  const rows = result.appended
+    .filter(({ path }) => path.endsWith('journal.jsonl'))
+    .flatMap(({ content }) => content.split('\n').filter((line) => line.trim()).map((line) => JSON.parse(line)))
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].event, 'boot-retried')
+  assert.equal(rows[0].lane, 'lane-a')
+  assert.equal(rows[0].attempts, 2)
+  assert.match(rows[0].first_failure, new RegExp(first))
+  assert.doesNotMatch(rows[0].first_failure, new RegExp(second))
+})
+
+test('a second boot failure refuses boot-failed and names both attempts', async () => {
+  let boots = 0
+  const first = 'first boot failed twice'
+  const second = 'second boot failed twice'
+  const error = await thrownAsync(() => dispatchFixture({
+    label: 'boot-retry-refused',
+    names: ['lane-a'],
+    spawnResult: (args) => {
+      if (args.includes('boot')) {
+        boots += 1
+        return { status: 1, stdout: '', stderr: boots === 1 ? first : second }
+      }
+      if (args.includes('teardown')) return { status: 0, stdout: '', stderr: '' }
+      return { status: 0, stdout: '', stderr: '' }
+    },
+  }))
+  assert.ok(error instanceof BatchRefusal)
+  assert.equal(error.reason, 'boot-failed')
+  assert.equal(boots, 2)
+  assert.match(error.message, new RegExp(`attempt 1: .*${first}`))
+  assert.match(error.message, new RegExp(`attempt 2: .*${second}`))
+})
+
+test('teardownVerdict treats a seats: null payload at exit 0 as unproven', () => {
+  const absent = teardownVerdict({
+    status: 0,
+    stdout: JSON.stringify({ archived: '/tmp/archived', seats: null, seats_absent: 'headless', fingerprint: null }),
+    stderr: '',
+  })
+  assert.equal(absent.verdict, 'unproven')
+  assert.equal(absent.exit, 0)
+  assert.equal(absent.seats, null)
+  assert.match(absent.why, /seats: null/)
+
+  const proven = teardownVerdict({
+    status: 0,
+    stdout: JSON.stringify({ seats: { seats: 2, proven: 2, failed: 0 } }),
+    stderr: '',
+  })
+  assert.equal(proven.verdict, 'proven')
+  assert.deepEqual(proven.seats, { seats: 2, proven: 2, failed: 0 })
+  assert.equal(proven.why, null)
+
+  const incomplete = teardownVerdict({
+    status: 0,
+    stdout: JSON.stringify({ seats: { seats: 2, proven: 1, failed: 1 } }),
+    stderr: '',
+  })
+  assert.equal(incomplete.verdict, 'unproven')
+  assert.match(incomplete.why, /proved 1 of 2/)
+
+  const failed = teardownVerdict({
+    status: 1,
+    stdout: JSON.stringify({ seats: { seats: 2, proven: 2, failed: 0 } }),
+    stderr: 'teardown interrupted',
+  })
+  assert.equal(failed.verdict, 'unproven')
+  assert.equal(failed.exit, 1)
+  assert.match(failed.why, /exited 1/)
+
+  const unreadable = teardownVerdict({ status: 0, stdout: 'not json', stderr: 'payload unavailable' })
+  assert.equal(unreadable.verdict, 'unproven')
+  assert.equal(unreadable.seats, null)
+  assert.match(unreadable.why, /no readable payload/)
+})
+
+test('a boot that succeeds first time spawns no teardown and journals no boot-retried row', async () => {
+  const result = await dispatchFixture({
+    label: 'boot-clean',
+    names: ['lane-a'],
+    spawnResult: (args) => args.includes('boot')
+      ? { status: 0, stdout: '', stderr: '' }
+      : { status: 0, stdout: '', stderr: '' },
+  })
+  assert.equal(result.spawned.filter(({ args }) => args.includes('boot')).length, 1)
+  assert.equal(result.spawned.filter(({ args }) => args.includes('teardown')).length, 0)
+  assert.equal(result.appended.filter(({ path, content }) => path.endsWith('journal.jsonl') && content.includes('boot-retried')).length, 0)
+})
+
+test('a ratified band-floor refusal is not retried', async () => {
+  let boots = 0
+  let teardowns = 0
+  const error = await thrownAsync(() => dispatchFixture({
+    label: 'boot-floor-no-retry',
+    names: ['lane-a'],
+    spawnResult: (args) => {
+      if (args.includes('boot')) {
+        boots += 1
+        return { status: 1, stdout: '', stderr: 'crew boot refused [band-below-floor]' }
+      }
+      if (args.includes('teardown')) teardowns += 1
+      return { status: 0, stdout: '', stderr: '' }
+    },
+  }))
+  assert.ok(error instanceof BatchRefusal)
+  assert.equal(error.reason, 'seat-floor-conflict')
+  assert.equal(boots, 1)
+  assert.equal(teardowns, 0)
 })
 
 test('protected-path seat overrides retain a forced judge tier', async () => {

@@ -126,6 +126,218 @@ export function waitsRecord(resolved, defaults) {
   return record
 }
 
+// --- the per-role turn ceiling (#870) --------------------------------------
+// EXPLICIT-ONLY. There is no default table and no tier derivation: #870's
+// "absent flag -> no ceiling and byte-identical behaviour" is the binding half
+// of its ask, and any default would make an UNFLAGGED run non-identical. The
+// role set is DERIVED from WAIT_ROLES for the reason WAIT_FLAGS is derived from
+// WAITS_S (:56-59) — a role added to the seat table gets its ceiling flag, its
+// refusal reason and its record slot with no second list to keep in sync.
+export const NO_TURN_CEILING = null
+export const TURN_CEILING_ROLES = WAIT_ROLES
+export const TURN_CEILING_FLAGS = Object.freeze(TURN_CEILING_ROLES.map((role) => `max-turns-${role}`))
+export const TURN_CEILING_REFUSALS = Object.freeze(TURN_CEILING_ROLES.map((role) => `invalid-max-turns-${role}`))
+export const TURN_CEILING_MIN = 1
+export const TURN_CEILING_MAX = 1000
+
+export function refuseTurnCeiling(reason, message) {
+  if (!TURN_CEILING_REFUSALS.includes(reason)) throw new Error(`unknown turn ceiling refusal reason ${JSON.stringify(reason)}`)
+  return Object.assign(new Error(`${message} [${reason}]`), { reason })
+}
+
+function resolveTurnCeiling(raw, role) {
+  const badCeiling = () => refuseTurnCeiling(
+    `invalid-max-turns-${role}`,
+    `--max-turns-${role} must be a whole number of turns between ${TURN_CEILING_MIN} and ${TURN_CEILING_MAX}, got ${JSON.stringify(raw)}`,
+  )
+  if (raw === undefined || raw === null) return NO_TURN_CEILING
+  if (typeof raw === 'string' && raw.trim() === '') return NO_TURN_CEILING
+  if (typeof raw !== 'number' && typeof raw !== 'string') throw badCeiling()
+  const text = typeof raw === 'number' ? String(raw) : raw.trim()
+  if (!/^[0-9]+$/.test(text)) throw badCeiling()
+  const value = Number(text)
+  if (!Number.isInteger(value) || value < TURN_CEILING_MIN || value > TURN_CEILING_MAX) throw badCeiling()
+  return value
+}
+
+export function resolveTurnCeilings(raw = {}) {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw refuseTurnCeiling(TURN_CEILING_REFUSALS[0], `turn ceilings must be an object of role -> turns, got ${JSON.stringify(raw)}`)
+  }
+  const out = {}
+  for (const role of TURN_CEILING_ROLES) out[role] = resolveTurnCeiling(raw[role], role)
+  return out
+}
+
+export function turnCeilingArgs(args = {}) {
+  const out = {}
+  for (const role of TURN_CEILING_ROLES) out[role] = args[`max-turns-${role}`]
+  return out
+}
+
+export function turnCeilingsRecord(resolved) {
+  if (TURN_CEILING_ROLES.every((role) => resolved[role] === NO_TURN_CEILING)) return null
+  const record = { source: {} }
+  for (const role of TURN_CEILING_ROLES) {
+    record[role] = resolved[role]
+    record.source[role] = resolved[role] === NO_TURN_CEILING ? 'absent' : 'flag'
+  }
+  return record
+}
+
+export function turnCeilingsJournalPatch(record) {
+  return record ? { turn_ceilings: record } : {}
+}
+
+// --- adopted plans and the plan-round cap (#802) ----------------------------
+export const ADOPTED_PLAN_HEADING = '## Adopted plan'
+export const PLAN_CHECK_APPROVE_MARKER = 'VERDICT: approve'
+export const PLAN_CHECK_REVISE_MARKER = 'VERDICT: revise'
+export const PLAN_CHECK_ABSENT = 'plan-check-absent'
+export const PLAN_CHECK_INVALID = 'plan-check-invalid'
+export const NOT_ADOPTED = 'not-adopted'
+
+// POSITIVE evidence on both halves, because "the predecessor passed" is a claim
+// and the absence of one failure token is not evidence for it. A brief that
+// merely QUOTES the heading mid-sentence is not an adopted brief, so the heading
+// must be a COMPLETE line; and a plan-check that is empty, truncated, or says
+// VERDICT: banana is UNKNOWN, never passed. The contract already puts the
+// verdict on the first line, so only the first line is read.
+export function adoptionSignal({ briefText = null, planCheckText = null } = {}) {
+  const adopted = typeof briefText === 'string'
+    && briefText.split('\n').some((line) => line.trim() === ADOPTED_PLAN_HEADING)
+  if (!adopted) return { adopted: false, predecessor_checked: null, reason: NOT_ADOPTED }
+  if (typeof planCheckText !== 'string') return { adopted, predecessor_checked: null, reason: PLAN_CHECK_ABSENT }
+  const verdict = planCheckText.split('\n')[0].trim()
+  if (verdict === PLAN_CHECK_APPROVE_MARKER) return { adopted, predecessor_checked: true, reason: null }
+  if (verdict === PLAN_CHECK_REVISE_MARKER) return { adopted, predecessor_checked: false, reason: null }
+  return { adopted, predecessor_checked: null, reason: PLAN_CHECK_INVALID }
+}
+
+export function planRoundCap({ limits, adopted = false, predecessorChecked = null, extraPlanRounds = 0 }) {
+  if (adopted && predecessorChecked === null) return limits.plan_rounds + extraPlanRounds
+  const base = adopted && predecessorChecked === true ? 1 : limits.plan_rounds
+  return base + extraPlanRounds
+}
+
+// --- the enforcement preamble (#870 (a) and (c)) ----------------------------
+export function enforcementPreamble(env) {
+  const ceiling = env?.details?.turn_ceiling
+  if (!ceiling || !Number.isFinite(ceiling.budget)) return { kind: null, lines: [] }
+  // MEASURED and over: the count leads the brief, because #870 asks for the
+  // count at the HEAD of the next assignment.
+  if (Number.isFinite(ceiling.turns)) {
+    return {
+      kind: 'turn-ceiling',
+      lines: [
+        `Your previous dispatch returned after ${ceiling.turns} turns against a role budget of ${ceiling.budget}; its envelope was REJECTED.`,
+        'Batch your reads and leave the mechanical proof to the driver; the same assignment is asked again.',
+      ],
+    }
+  }
+  // UNMEASURED: the count is unknown, so the brief says so and names the closed
+  // reason. It never reports a number nobody measured — not a zero, not the
+  // budget. The census is best-effort at both producers, and a ceiling that
+  // cannot be measured is a measurement failure, not a pass.
+  return {
+    kind: 'turn-ceiling-unmeasured',
+    lines: [
+      `Your previous dispatch's turn census is UNAVAILABLE (${ceiling.absent_reason}), so your role budget of ${ceiling.budget} could not be measured; its envelope was REJECTED rather than passed on an unmeasured count.`,
+      'Batch your reads and leave the mechanical proof to the driver; the same assignment is asked again.',
+    ],
+  }
+}
+
+// --- the per-role turn ceiling, POST-RETURN (#870 ASK 1) -----------------------
+// The driver adjudicates a dispatch that has RETURNED. It does not pre-empt a
+// turn and does not replace an outcome another process already wrote: both live
+// in crew/headless.mjs and crew/seat-io.mjs, and both are #908 on #904's fence.
+export const SEAT_TURN_CEILING_EVENT = 'seat-turn-ceiling'
+export const CENSUS_ROW_ABSENT = 'census-row-absent'
+export const CENSUS_TURNS_ABSENT = 'census-turns-absent'
+export const CENSUS_UNREADABLE = 'census-unreadable'
+// CLOSED, and closed at the DRIVER's boundary. The producers' own absent causes
+// are prose sentences (CENSUS_ABSENT_CAUSES, crew/headless.mjs:325-331), so
+// copying one through would publish an OPEN vocabulary under a key this driver
+// promises is closed. Every non-finite count normalises to CENSUS_TURNS_ABSENT.
+export const CENSUS_ABSENT_REASONS = Object.freeze([CENSUS_ROW_ABSENT, CENSUS_TURNS_ABSENT, CENSUS_UNREADABLE])
+// A census is a measurement of the returned envelope only when the producer's
+// own outcome for that dispatch says the turn SUCCEEDED.
+export const CENSUS_ELIGIBLE_OUTCOMES = Object.freeze(['ok', 'ok-degraded'])
+export const RPC_NO_ENVELOPE_OUTCOME = 'no-envelope'
+const CENSUS_RPC_TRANSPORT = 'headless-rpc'
+
+// The OUTCOME-QUALIFIED observation of ONE dispatch, correlated on the COMPOSITE
+// logical key (dispatch_id, role) — never either field alone.
+//
+// Why the composite is load-bearing: `dispatch_id` is NOT globally unique. The
+// two transports mint ids from independent allocators — headless-json scans only
+// its own task/headless/d<n> root (crew/headless.mjs:682-695) while RPC has its
+// own allocator over its own root plus the shared returns dir
+// (crew/headless-rpc.mjs:516-529) — and seatIo creates one instance per
+// transport and returns that transport's id directly
+// (crew/seat-io.mjs:2244-2254,2947-2953), minting no cross-transport sequence.
+// MEASURED in this lane's own journal: tech-lead/headless-rpc `dispatch_id: d2`
+// with 30 turns, and planner/headless-json `dispatch_id: d2` with 34 turns, in
+// one run. Keyed on the id alone, a lost planner append would charge the planner
+// with the tech-lead's count — a plausible number from the wrong seat, which is
+// the best-effort disappearance path with a disguise on.
+//
+// Why the OUTCOME qualification is load-bearing: both transports PRESERVE the
+// outer dispatch id across a re-ask (`const id = reask?.id || runId` —
+// crew/headless.mjs:758, crew/headless-rpc.mjs:730) and record the FAILED
+// attempt's census before invoking the re-ask (crew/headless.mjs:889-912). One
+// (id, role) pair therefore carries several census rows, and a scan that took
+// the last matching one would read an earlier attempt's count as this envelope's
+// measurement the moment the final best-effort append failed.
+//
+// Eligibility follows the rows the producers already write:
+// - headless-json publishes the outcome and the census on ONE row
+//   (crew/headless.mjs:711), so the census is eligible only when that row's
+//   headless_outcome is in CENSUS_ELIGIBLE_OUTCOMES.
+// - headless-rpc publishes `rpc_outcome` (keyed `id` and `role`) and then the
+//   census on the NEXT row (crew/headless-rpc.mjs:922-929), so a census is
+//   eligible only while the latest outcome FOR THIS (id, role) was eligible.
+//   Every later outcome for this pair RESETS the candidate, so a success whose
+//   census never landed is census-row-absent — and a row for ANOTHER role
+//   sharing the id neither sets nor resets anything.
+// - an explicit latest rpc_outcome 'no-envelope' is NOT ADJUDICATED: that
+//   dispatch returned emptyTurnEnvelope (crew/headless-rpc.mjs:376-382,939-948)
+//   and the driver's existing no-envelope handling owns it.
+// Unknown or failure outcomes, and naked census rows carrying no outcome, are
+// never measurements of the returned envelope.
+export function observeTurnCensus(rows, dispatchId, role) {
+  if (rows === null) return { turns: null, absent: CENSUS_UNREADABLE, adjudicate: true }
+  // ONE predicate, used by BOTH arms, so the two arms cannot drift into subtly
+  // different correlation rules and one mutation can bind the whole key.
+  const mine = (id, who) => id === dispatchId && who === role
+  let rpcOutcome = null
+  let found = null
+  for (const row of rows) {
+    if (typeof row?.rpc_outcome === 'string') {
+      if (mine(row.id, row.role)) { rpcOutcome = row.rpc_outcome; found = null }
+      continue
+    }
+    const census = row?.seat_turn_census
+    if (!census || !mine(census.dispatch_id, census.role)) continue
+    const outcome = census.transport === CENSUS_RPC_TRANSPORT ? rpcOutcome : row?.headless_outcome
+    found = CENSUS_ELIGIBLE_OUTCOMES.includes(outcome) ? census : null
+    if (found !== null) rpcOutcome = null
+  }
+  if (rpcOutcome === RPC_NO_ENVELOPE_OUTCOME) return { turns: null, absent: null, adjudicate: false }
+  if (found === null) return { turns: null, absent: CENSUS_ROW_ABSENT, adjudicate: true }
+  if (!Number.isFinite(found.turns)) return { turns: null, absent: CENSUS_TURNS_ABSENT, adjudicate: true }
+  return { turns: found.turns, absent: null, adjudicate: true }
+}
+
+// A breach is turns STRICTLY OVER budget: a seat that spent exactly its budget
+// spent what it was given. A NULL count is never a breach and never a zero —
+// that coercion is the false-measured-zero b414 and b420 both died on.
+export function turnCeilingBreached(turns, budget) {
+  if (!Number.isFinite(turns) || !Number.isFinite(budget)) return false
+  return turns > budget
+}
+
 // The decision enum the lead may return. The driver offers a SUBSET as
 // options in each consult; any answer outside the offered set is treated as
 // escalate (fail toward the human, never toward silent progress).
@@ -2180,8 +2392,10 @@ function runTask(ctx, io, crash) {
   }
   const limits = { ...LIMITS, ...(ctx.limits || {}) }
   const waits = { ...WAITS_S, ...(ctx.waits || {}) }
-  const S = { consults: 0, stages: [], commit: null, dissents: [], grants: [], growth: [], modifiers: [], acceptFindings: null, seqHighWater: 0, planAccept: null }
+  const S = { consults: 0, stages: [], commit: null, dissents: [], grants: [], growth: [], modifiers: [], enforcements: [], acceptFindings: null, seqHighWater: 0, planAccept: null }
   const art = (name) => `${ctx.taskDir}/${name}`
+  const pendingEnforcement = new Map()
+  let enforcementSeq = 0
   // The journal lives in the CREW dir, not the task dir — take its real path
   // from ctx so decision briefs and escalation artifacts never cite a 404.
   const journal = ctx.journal || art('journal.jsonl')
@@ -2557,7 +2771,7 @@ function runTask(ctx, io, crash) {
       details: {
         commit: S.commit, stages: S.stages, files_committed: committing, consults: S.consults,
         dissents: S.dissents, accepted_via: null, escalation: { where, why },
-        extra_rounds_granted: S.grants, growth: S.growth, modifiers: S.modifiers,
+        extra_rounds_granted: S.grants, growth: S.growth, modifiers: S.modifiers, enforcements: S.enforcements,
         gate: gateBlock(),
         ...acceptDecisionBlock(),
         converge: {
@@ -2570,13 +2784,78 @@ function runTask(ctx, io, crash) {
     return result
   }
 
+  // POST-RETURN adjudication of the per-role turn ceiling (#870 ASK 1). INERT
+  // unless the operator configured a ceiling for THIS role: no ceiling -> no
+  // journal read, no row, no envelope rewrite, which is what makes an unflagged
+  // run byte-identical (criterion (b)).
+  //
+  // The census is BEST-EFFORT at both producers (crew/headless.mjs:705-707,
+  // crew/headless-rpc.mjs:455-462, the latter inside neverLoadBearing), so it is
+  // not load-bearing on its own: an observation the driver could not make is a
+  // MEASUREMENT FAILURE carrying a closed reason, never a zero and never a
+  // breach.
+  function censusWindow() {
+    try { return journalRowsSinceRunStart(readCensusText()) } catch { return null }
+  }
+  function readCensusText() {
+    const text = io.readFile(journal)
+    if (typeof text !== 'string') throw new Error('the turn census journal could not be read')
+    return text
+  }
+  function enforceTurnCeiling(role, id, env) {
+    const budget = ctx.turnCeilings?.[role]
+    if (!Number.isFinite(budget)) return env
+    // The EXISTING anti-replay and shape guard runs FIRST, before any journal
+    // read or rewrite. A stale or mis-addressed envelope must reach the
+    // unusable-envelope failure this driver already has
+    // (crew/drive.mjs:2595-2603); manufacturing this dispatch's assignment_id
+    // around it would launder exactly the replay validEnvelope exists to refuse.
+    if (!validEnvelope(env, role, id)) return env
+    const observed = observeTurnCensus(censusWindow(), id, role)
+    // An explicit RPC no-envelope settlement is not a returned envelope at all:
+    // emptyTurnEnvelope PASSES validEnvelope, so only the producer's own outcome
+    // can tell the two apart. Return it untouched and journal nothing.
+    if (observed.adjudicate === false) return env
+    const breached = turnCeilingBreached(observed.turns, budget)
+    const measured = observed.turns !== null
+    io.log(recordRow({ at: io.now(), seat_turn_ceiling: { role, dispatch: id, turns: observed.turns, budget, measured, enforced: breached, absent_reason: observed.absent } }))
+    if (!breached && measured) return env
+    return {
+      assignment_id: id, role, status: 'insufficient',
+      summary: measured
+        ? `${SEAT_TURN_CEILING_EVENT}: ${role} returned after ${observed.turns} turns against a role budget of ${budget}; the envelope was rejected`
+        : `${SEAT_TURN_CEILING_EVENT}: ${role}'s turn census is unavailable (${observed.absent}), so its budget of ${budget} could not be measured; the envelope was rejected`,
+      artifacts: Array.isArray(env.artifacts) ? env.artifacts : [],
+      details: { turn_ceiling: { turns: observed.turns, budget, absent_reason: observed.absent }, rejected_status: env?.status ?? null },
+    }
+  }
+
   function assignAndWait(role, briefFile, note) {
-    const { id, returnPath } = io.assign({ role, briefFile, note })
+    let brief = briefFile
+    const pending = pendingEnforcement.get(role)
+    if (pending) {
+      pendingEnforcement.delete(role)
+      enforcementSeq += 1
+      brief = art(`enforcement-${role}-r${enforcementSeq}.md`)
+      io.writeFile(brief, [
+        `# Enforcement (${pending.kind})`, '',
+        ...pending.lines, '',
+        `Original brief: ${briefFile}`, '',
+      ].join('\n'))
+      io.log(recordRow({ at: io.now(), seat_enforcement: { role, kind: pending.kind, brief, applied: true } }))
+    }
+    const { id, returnPath } = io.assign({ role, briefFile: brief, note })
     const seq = /^d(\d+)$/.exec(id)?.[1]
     if (seq) S.seqHighWater = Math.max(S.seqHighWater, Number(seq))
-    io.log(recordRow({ at: io.now(), assign: id, role, brief: briefFile }))
-    emit({ kind: 'assign', id, role, brief: briefFile })
-    const env = io.wait(returnPath, waits[role] || 1200)
+    io.log(recordRow({ at: io.now(), assign: id, role, brief }))
+    emit({ kind: 'assign', id, role, brief })
+    const env = enforceTurnCeiling(role, id, io.wait(returnPath, waits[role] || 1200))
+    const enforcement = enforcementPreamble(env)
+    if (enforcement.lines.length > 0) {
+      pendingEnforcement.set(role, enforcement)
+      S.enforcements.push({ role, id, kind: enforcement.kind, lines: enforcement.lines })
+      io.log(recordRow({ at: io.now(), seat_enforcement: { role, kind: enforcement.kind, dispatch: id, applied: false } }))
+    }
     const review = reviewOutcome(role, env)
     emit({ kind: 'envelope', id, role, status: env?.status || 'no-envelope', ...(review ? { review } : {}) })
     if (review) io.log(recordRow({ at: io.now(), review_outcome: { dispatch: id, ...review } }))
@@ -2741,7 +3020,7 @@ function runTask(ctx, io, crash) {
     if (terminal) stage(`escalate:${where}`)
     const details = {
       stages: S.stages, escalation: { where, why }, commit, dissents: S.dissents,
-      extra_rounds_granted: S.grants, growth: S.growth, modifiers: S.modifiers,
+      extra_rounds_granted: S.grants, growth: S.growth, modifiers: S.modifiers, enforcements: S.enforcements,
       gate: gateBlock(),
       ...acceptDecisionBlock(),
       seq_high_water: S.seqHighWater,
@@ -2942,7 +3221,7 @@ function runTask(ctx, io, crash) {
       details: {
         variant, commit: null, stages: S.stages, files_committed: [], consults: S.consults,
         dissents: S.dissents, accepted_via: shape.accepted_by, escalation: null,
-        extra_rounds_granted: S.grants, growth: S.growth, modifiers: S.modifiers, gate: null,
+        extra_rounds_granted: S.grants, growth: S.growth, modifiers: S.modifiers, enforcements: S.enforcements, gate: null,
         envelope: { seat, fields: observedFields, files_changed: 0 },
       },
     }
@@ -3087,6 +3366,15 @@ function runTask(ctx, io, crash) {
   let planNote = null
   let extraPlanRounds = 0
   let divergenceConsulted = false
+  const readOrNull = (path) => { try { const text = io.readFile(path); return typeof text === 'string' ? text : null } catch { return null } }
+  // Read ONCE, before the first check round: the driver overwrites plan-check.md
+  // on every round (:3091), so a later read returns this run's own output.
+  const adoption = adoptionSignal({ briefText: readOrNull(ctx.briefFile), planCheckText: readOrNull(art('plan-check.md')) })
+  const planRounds = () => planRoundCap({ limits, adopted: adoption.adopted, predecessorChecked: adoption.predecessor_checked, extraPlanRounds })
+  io.log(recordRow({ at: io.now(), plan_round_cap: {
+    adopted: adoption.adopted, predecessor_checked: adoption.predecessor_checked,
+    reason: adoption.reason, cap: planRounds(),
+  } }))
   const planRevisionBrief = (round, check) => {
     const checkPath = check.details?.check_path || art('plan-check.md')
     return [
@@ -3097,7 +3385,7 @@ function runTask(ctx, io, crash) {
       ...growthLines(S.growth.at(-1)),
     ].join('\n')
   }
-  for (let round = 1; plans && round <= limits.plan_rounds + extraPlanRounds; round += 1) {
+  for (let round = 1; plans && round <= planRounds(); round += 1) {
     stage(`plan:r${round}`)
     const env = assignAndWait('planner', planBrief, planNote ?? (round === 1 ? 'plan' : 'plan-revision'))
     planNote = null
@@ -3154,7 +3442,7 @@ function runTask(ctx, io, crash) {
       const planScope = planScopeVerdict(ctx.files_in_scope, plannedScope)
       io.log(recordRow({ at: io.now(), plan_scope: { round, ...planScope } }))
       if (planScope.verdict === PLAN_SCOPE.widened) {
-        const scopeFinal = round >= limits.plan_rounds + extraPlanRounds
+        const scopeFinal = round >= planRounds()
         if (scopeFinal) {
           stageComplete()
           return escalate(PLAN_SCOPE.widened, planScopeWhy(planScope, true), env.artifacts || [])
@@ -3242,7 +3530,7 @@ function runTask(ctx, io, crash) {
     const growth = S.growth.at(-1)
     const diverging = growth?.round === round && growth.divergent === true
     const divergenceReady = diverging && !divergenceConsulted
-    const exhausted = round >= limits.plan_rounds + extraPlanRounds
+    const exhausted = round >= planRounds()
     if (exhausted || divergenceReady) {
       if (divergenceReady) divergenceConsulted = true
       const options = !exhausted || canGrant('plan-check') ? ['bounce', 'accept', 'escalate'] : ['accept', 'escalate']
@@ -3299,7 +3587,7 @@ function runTask(ctx, io, crash) {
     if (sourced.stop) return sourced.stop
     planEnv = sourced.plan
   }
-  if (!planEnv) return escalate('plan', `no accepted plan within ${limits.plan_rounds + extraPlanRounds} rounds`)
+  if (!planEnv) return escalate('plan', `no accepted plan within ${planRounds()} rounds`)
   const planPath = planEnv.details?.plan_path || art('plan.md')
   if (!docShown) { docShown = true; io.showDoc?.(planPath) }
   const scopeFiles = planEnv.details?.files_in_scope
@@ -5015,7 +5303,7 @@ function runTask(ctx, io, crash) {
       dissents: S.dissents, accepted_via: accepted, escalation: null,
       ...(published ? { pr: published } : {}),
       cold_suite: coldSuite,   // the COLD verdict, never folded into the lane's own suite result
-      extra_rounds_granted: S.grants, growth: S.growth, modifiers: S.modifiers,
+      extra_rounds_granted: S.grants, growth: S.growth, modifiers: S.modifiers, enforcements: S.enforcements,
       gate: gateBlock(),
       ...acceptDecisionBlock(),
     },

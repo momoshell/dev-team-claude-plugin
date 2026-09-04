@@ -6,19 +6,37 @@ are written without the leading `--`; role-prefixed names are accepted only on
 
 ```json
 {
-  "boot": ["task", "checkout", "tier", "roles", "fences", "lane", "headless-all", "model-reviewer", "effort-reviewer", "agent-reviewer"],
+  "boot": ["task", "checkout", "tier", "roles", "fences", "lane", "headless-all", "max-turns-planner", "max-turns-tech-lead", "max-turns-builder", "max-turns-reviewer", "max-turns-lead", "model-reviewer", "effort-reviewer", "agent-reviewer"],
   "run":  ["task", "checkout", "brief-file", "variant", "files-in-scope", "validation-lane", "plan-rounds", "build-rounds", "review-rounds", "wait-planner", "wait-tech-lead", "wait-builder", "wait-reviewer", "wait-lead", "suite", "keep"],
-  "boot_only": ["fences", "lane"]
+  "boot_only": ["fences", "lane", "max-turns-planner", "max-turns-tech-lead", "max-turns-builder", "max-turns-reviewer", "max-turns-lead"]
 }
 ```
 
 `KNOWN_FLAGS` is an allow-list for each verb, not one global option bag. The
 role-prefixed families `model-`, `agent-`, `effort-`, and `allow-shortfall-`
 are a boot-only extension; a concrete suffix such as `model-reviewer` must
-still be non-empty. `boot_only` is exactly `fences`, then `lane`.
+still be non-empty. `boot_only` is `fences`, `lane`, then the five
+`max-turns-<role>` ceilings in role order: planner, tech-lead, builder,
+reviewer, lead.
 
 The per-role wait budgets default to `WAITS_S` and are the flag lever 9 names;
 they are `run` flags, not boot flags.
+
+`--max-turns-<role>` is the #870 turn ceiling and is BOOT-only for the same
+reason `--fences` is: boot persists it into `crew.json` and journals it at
+`run-configuration`, so it is the run's single source of ceiling truth and
+cannot be raised mid-run. It is spelled out per role rather than
+prefix-matched — the five names are literal members of `KNOWN_FLAGS.boot`, not
+a `ROLE_FLAG_PREFIXES` family, so an unknown role suffix refuses as an unknown
+option instead of being silently accepted. Absent the flag there is no ceiling
+and the journal is byte-identical.
+
+The ceiling is enforced AFTER a seat's envelope returns: over budget, the
+driver journals `seat-turn-ceiling` with the count and the budget and bounces
+with the count. It does not pre-empt a seat in flight — that is #908. A lead
+over its ceiling escalates rather than bouncing, because `askLead` maps every
+non-`done` lead envelope straight to escalation and there is no second lead
+assignment to carry the count.
 
 ## Batch dispatch: the dispatch-batch flag family
 

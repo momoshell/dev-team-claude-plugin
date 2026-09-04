@@ -43,7 +43,7 @@ import { execSync } from 'node:child_process'
 import { cmux, tree, sendLine, renameTab, closeSurface, closeWorkspace, logLine } from './driver.mjs'
 import { slug } from './slug.mjs'
 import { FINGERPRINT_FILE, fingerprintWithheld, recordTreeFingerprint } from './tree-fingerprint.mjs'
-import { driveTask, LIMITS, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, validateScopeEntries, WAITS_S, WAIT_FLAGS, resolveWaits, waitsCtx, waitsRecord, RUN_START_EVENT } from './drive.mjs'
+import { driveTask, LIMITS, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, validateScopeEntries, WAITS_S, WAIT_FLAGS, resolveWaits, waitsCtx, waitsRecord, TURN_CEILING_FLAGS, NO_TURN_CEILING, resolveTurnCeilings, turnCeilingArgs, turnCeilingsRecord, turnCeilingsJournalPatch, RUN_START_EVENT } from './drive.mjs'
 import { TASK_PROFILES } from './task-profiles.mjs'
 import { ASSURANCES, ASSURANCE_ALIASES, ASSURANCE_ALIAS_OF, canonicalAssurance } from './assurances.mjs'
 import { loadRoster, normalizeRoster, refuseRoster, rosterSeating, serializeRosterV1, serializeRosterV2, ROSTER_REFUSALS, ROSTER_SCHEMA_VERSIONS } from './roster.mjs'
@@ -1599,6 +1599,8 @@ export async function bootCmd(args, deps = {}) {
   } catch (err) {
     throw flagNamedAliasError(err)
   }
+  const turnCeilingsResolved = resolveTurnCeilings(turnCeilingArgs(args))
+  const turnCeilingRecord = turnCeilingsRecord(turnCeilingsResolved)
   const bootConfigRecord = Object.freeze({ profile: configuration.profile, assurance: configuration.assurance })
   writeAliasDeprecations(configuration)
   const taskSlug = slug(args.task)
@@ -1693,6 +1695,17 @@ export async function bootCmd(args, deps = {}) {
     note: noteRunlessCellFailure })
   const paneRoles = roles.filter((role) => adapters[role].transport === DEFAULT_TRANSPORT)
   const headlessOnly = paneRoles.length === 0
+  const unmeasurable = paneTurnCeilingRefusals(paneRoles, turnCeilingsResolved)
+  if (unmeasurable.length) {
+    const named = unmeasurable.map((u) => `${u.role} (--max-turns-${u.role} ${u.budget}, ${u.transport})`).join(', ')
+    const err = new Error(
+      `${PANE_TURN_CEILING_UNMEASURED}: ${named}. The pane transport emits no seat_turn_census, so the driver cannot measure a returned envelope against this role budget. `
+      + 'Re-boot those seats headless (--headless-all, '
+      + '--headless or --headless-rpc), or drop the flag.'
+    )
+    err.code = PANE_TURN_CEILING_UNMEASURED
+    throw err
+  }
   // #249 / ADR-033: transport follows the MODE, never the seat. A cmux workspace
   // exists so a human can inspect every seat in it, so a piped seat inside one is
   // a mode error, not a configuration. Refuse HERE: after resolveAdapters
@@ -1842,6 +1855,7 @@ export async function bootCmd(args, deps = {}) {
     run_configuration: bootConfigRecord,
     created_at: new Date().toISOString(),
     ...(workerBin ? { claude_bin: workerBin } : {}),
+    ...(turnCeilingRecord ? { turn_ceilings: turnCeilingRecord } : {}),
     ...(tierName ? { tier: tierName, seats } : {}),
     ...(laneFence ? { lane_name: laneFence.lane, lane_fence: laneFence.fence } : {}),
     ...(advisorRecord.granted.length ? { advisor: advisorRecord } : {}),
@@ -1859,6 +1873,7 @@ export async function bootCmd(args, deps = {}) {
   logLine(join(paths.dir, 'journal.jsonl'), {
     at: new Date().toISOString(), event: 'boot', roles,
     run_configuration: bootConfigRecord,
+    ...turnCeilingsJournalPatch(turnCeilingRecord),
     models: Object.fromEntries(roles.map((r) => [r, members[r].model])),
     transports: Object.fromEntries(roles.map((r) => [r, members[r].transport])),
     ...(workerBin ? { claude_bin: workerBin } : {}),
@@ -2079,7 +2094,7 @@ export function runCmd(args, deps = {}) {
   // The EFFECTIVE round validation lane and its source, recorded on every run:
   // an escalation at the lane stage reads differently when no lane was declared.
   logLine(journal, { at: new Date().toISOString(), event: 'validation-lane', lane: validationLane.lane, source: validationLane.source })
-  logLine(journal, { at: new Date().toISOString(), event: 'run-configuration', run_configuration: runConfiguration })
+  logLine(journal, { at: new Date().toISOString(), event: 'run-configuration', run_configuration: runConfiguration, ...turnCeilingsJournalPatch(crew.turn_ceilings ?? null) })
   if (crew.advisor?.granted?.length) {
     const runStartedAt = Date.now()
     const briefText = readFileSync(briefFile, 'utf8')
@@ -2130,6 +2145,7 @@ export function runCmd(args, deps = {}) {
     publish: { branch: readBranch(checkout) },
     ...(limitsOverlay ? { limits: limitsOverlay } : {}),
     ...(waitsOverlay ? { waits: waitsOverlay } : {}),
+    ...(crew.turn_ceilings ? { turnCeilings: crew.turn_ceilings } : {}),
     ...(filesInScope ? { files_in_scope: filesInScope } : {}),
   }
   // Run never launches a seat, so chrome is the right evidence HERE; the fresh
@@ -2782,7 +2798,7 @@ export function parseArgs(argv) {
 }
 
 export const KNOWN_FLAGS = Object.freeze({
-  boot: Object.freeze(['task', 'checkout', 'roles', 'tier', 'fences', 'lane', 'headless', 'headless-rpc', 'headless-all', 'memory-dir', 'memory-backend', 'memory-budget-bytes', 'claude-bin', 'profile', 'assurance']),
+  boot: Object.freeze(['task', 'checkout', 'roles', 'tier', 'fences', 'lane', 'headless', 'headless-rpc', 'headless-all', 'memory-dir', 'memory-backend', 'memory-budget-bytes', 'claude-bin', 'profile', 'assurance', ...TURN_CEILING_FLAGS]),
   run: Object.freeze(['task', 'checkout', 'brief-file', 'variant', 'execution', 'files-in-scope', 'validation-lane', 'lane', 'plan-rounds', 'build-rounds', 'review-rounds', ...WAIT_FLAGS, 'suite', 'keep', 'claude-bin']),
   handoff: Object.freeze(['task', 'checkout', 'brief-file']),
   wait: Object.freeze(['task', 'checkout', 'timeout-s']),
@@ -2805,6 +2821,7 @@ export const FLAG_VALUE_CONTRACT = Object.freeze({
   'files-in-scope': 'value', 'validation-lane': 'value',
   'plan-rounds': 'value', 'build-rounds': 'value', 'review-rounds': 'value',
   ...Object.fromEntries(WAIT_FLAGS.map((flag) => [flag, 'value'])),
+  ...Object.fromEntries(TURN_CEILING_FLAGS.map((flag) => [flag, 'value'])),
   suite: 'value', 'claude-bin': 'value', 'timeout-s': 'value',
   'memory-dir': 'value', 'memory-backend': 'value', 'memory-budget-bytes': 'value',
   // --headless and --headless-rpc take a comma-separated ROLE LIST; bare, they
@@ -2832,7 +2849,20 @@ export const REQUIRED_FLAGS = Object.freeze({
   status: Object.freeze(['task']),
   teardown: Object.freeze(['task']),
 })
-export const BOOT_ONLY_FLAGS = Object.freeze(['fences', 'lane'])
+export const BOOT_ONLY_FLAGS = Object.freeze(['fences', 'lane', ...TURN_CEILING_FLAGS])
+// The boot/transport boundary OWNS this refusal, so the constant is declared and
+// exported HERE and not in drive.mjs's turn-ceiling vocabulary: an imported
+// binding is not re-exported, and D3 requires crew.mjs itself to export it.
+export const PANE_TURN_CEILING_UNMEASURED = 'pane-turn-ceiling-unmeasured'
+
+// Which PANE-seated roles carry a ceiling the pane transport cannot measure.
+// Exported because the boot refusal it drives is otherwise only reachable through
+// a full async bootCmd; the CALL SITE is proved by the fenced boot test.
+export function paneTurnCeilingRefusals(paneRoles, resolved) {
+  return paneRoles
+    .filter((role) => (resolved?.[role] ?? NO_TURN_CEILING) !== NO_TURN_CEILING)
+    .map((role) => ({ role, budget: resolved[role], transport: DEFAULT_TRANSPORT }))
+}
 
 function usageRefusal(message) {
   return Object.assign(new UsageError(message), { reason: FLAG_VALUE_REFUSAL })

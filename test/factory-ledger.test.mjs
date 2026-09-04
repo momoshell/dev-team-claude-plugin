@@ -29,9 +29,11 @@ import {
   REQUEST_MAX_CHARS, ADVISOR_AB_INCOMPLETE_REASONS, USAGE_ABSENT_CAUSES, usageAbsentCause,
   CELL_RATE_FLOOR, CELL_PRICE_UNITS, REVIEW_VERDICTS,
   PHASE_SLOT_WAIT_KINDS, PHASE_SLOT_WAIT_DEPTH_ABSENT, PHASE_SLOT_WAIT_ABSENT,
+  EVAL_ENVELOPE_STATUSES, EVAL_ABSENT_REASONS, EVAL_INCOMPLETE_REASONS, EVAL_PAYLOAD_KEYS,
   ingestJournal, ingestExternalFenceRegister,
 } from '../scripts/factory/ledger.mjs'
 import { FAILURE_UPGRADE, MODIFIER_OUTCOMES, SENSITIVITY_FLOOR, VARIANT_NAMES, SUITE_SLOT_PHASE_NAMES, anchorAbsentWhy, MUTATION_CORRECTION_OUTCOMES, MUTATION_CORRECTION_REFUSALS } from '../crew/drive.mjs'
+import { SUBMIT_BLIND_SPOT } from '../crew/driver.mjs'
 import { emitAdapter, SEAT_RETRY_EVENTS, SEAT_RETRY_KINDS } from '../crew/seat-io.mjs'
 import { headlessIo } from '../crew/headless.mjs'
 import { modelString as piModelString } from '../crew/adapters/adapter-pi.mjs'
@@ -466,16 +468,17 @@ test('escalationCause maps the archived envelopes and never guesses an unknown p
     { where: 'planner', why: 'planner: no valid envelope at /Users/momoshell/.crew/dt-b309-dispatchprep/b309-dispatchprep/returns/d1.planner.json within 1800s — the seat is WORKING: planner produced a transcript frame 30s ago and simply exceeded its ', cause: 'seat-timeout', actor: 'driver' }, // Previously ratified the budget misclassification (#854 (1)).
     // b317-drivergone — /Users/momoshell/.crew/dt-b317-drivergone/b317-drivergone.archive-2026-08-29T14-24-05-878Z/returns/task.json
     { where: 'cold-suite', why: 'the cold verification produced no verdict (unproven): neutralColdPath: no neutral cold checkout path for ["b317-drivergone","dt-b317-drivergone","dev-team-claude-plugin"] — every candidate root was rejected [/private/var', cause: 'infrastructure', actor: 'driver' },
+  // #899: these three fixtures cite a message crew/driver.mjs can still emit.
     // b321-driverpublish — /Users/momoshell/.crew/dt-b321-driverpublish/b321-driverpublish.archive-2026-08-29T16-35-01-212Z/returns/task.json
-    { where: 'driver', why: 'sendLine: could not clear the pane input back to baseline before retype', cause: 'transport', actor: 'driver' },
+    { where: 'driver', why: `sendLine: echo not verified exactly once over baseline (before 0, last 0) — candidates ASSIGNMENT d1 — the cmux event stream recorded no send — blind spot: ${SUBMIT_BLIND_SPOT} — last 40 screen lines: b321`, cause: 'transport', actor: 'driver' },
     // b322-closeout#1 — /Users/momoshell/.crew/dt-b322-closeout/b322-closeout.archive-2026-08-29T15-14-14-427Z/returns/task.json
     { where: 'driver', why: 'sendLine: echo not verified exactly once over baseline (before 0, last 0)', cause: 'transport', actor: 'driver' },
     // b322-closeout#2 — /Users/momoshell/.crew/dt-b322-closeout/b322-closeout.archive-2026-08-29T15-18-22-532Z/returns/task.json
     { where: 'driver', why: 'sendLine: echo not verified exactly once over baseline (before 0, last 0)', cause: 'transport', actor: 'driver' },
     // b324-closeoutscript — /Users/momoshell/.crew/dt-b324-closeoutscript/b324-closeoutscript.archive-2026-08-29T17-05-09-432Z/returns/task.json
-    { where: 'driver', why: 'sendLine: could not clear the pane input back to baseline before retype', cause: 'transport', actor: 'driver' },
+    { where: 'driver', why: `sendLine: echo not verified exactly once over baseline (before 0, last 0) — candidates ASSIGNMENT d1 — the cmux event stream recorded no send — blind spot: ${SUBMIT_BLIND_SPOT} — last 40 screen lines: b324`, cause: 'transport', actor: 'driver' },
     // b325-driverpublish#1 — /Users/momoshell/.crew/dt-b325-driverpublish/b325-driverpublish.archive-2026-08-29T17-01-58-919Z/returns/task.json
-    { where: 'driver', why: 'sendLine: could not clear the pane input back to baseline before retype', cause: 'transport', actor: 'driver' },
+    { where: 'driver', why: `sendLine: echo not verified exactly once over baseline (before 0, last 0) — candidates ASSIGNMENT d1 — the cmux event stream recorded no send — blind spot: ${SUBMIT_BLIND_SPOT} — last 40 screen lines: b325`, cause: 'transport', actor: 'driver' },
     // b325-driverpublish#final — /Users/momoshell/.crew/dt-b325-driverpublish/b325-driverpublish/returns/task.json
     { where: 'gate', why: 'roof is clean (32/32 red, 0 errored) and 31 of 32 per-check mutations killed. The sole failure is A3b, whose outcome is anchor-absent: the plan declared find text "const rebased = baseSha !== mergeBase" for crew/drive.mjs, but the builder wrote `let rebased = false` at crew/drive', cause: 'plan-build-disagreement', actor: 'driver' },
     // b329-closeoutscript — /Users/momoshell/.crew/dt-b329-closeoutscript/b329-closeoutscript.archive-2026-08-30T15-32-26-023Z/returns/task.json
@@ -870,6 +873,14 @@ function exerciseEveryWriter(ledger, adwId) {
     scope_count: 1, task_return: '/tmp/task.json', exit_code: 0,
     created_at: '2024-01-01T00:00:00.000Z',
   })
+  ledger.recordEvalCell({
+    bench: `bench-${adwId}`, adw_id: adwId, role: 'builder', provider: 'anthropic',
+    model_id: 'claude-sonnet-5', agent: 'claude', effort: 'high', production: 1,
+    task_sha: 'task-sha', envelope_status: 'received', absent_reason: null,
+    asserts_declared: 2, asserts_passed: 2, judge_findings: ['f1'],
+    billed_input_tokens: 10, billed_output_tokens: 20, billed_cache_read_tokens: 30,
+    billed_cache_write_tokens: 40, duration_ms: 50, created_at: '2024-01-01T00:00:00.000Z',
+  })
   ledger.recordIntakeSweep({
     board_owner: 'owner', board_project: 7, outcome: 'picked', reason: null,
     considered: 2, pages: 1, picked_issue: 42, rate_limit_remaining: 900,
@@ -1236,6 +1247,90 @@ test('ciDispatches aggregates the dispatch outcome window', { skip: SKIP }, () =
     { variant: 'repair', outcome: 'done', cycle: 1, count: 1, first_at: '2024-01-01T00:00:00.000Z', last_at: '2024-01-01T00:00:00.000Z' },
     { variant: 'repair', outcome: 'done', cycle: 2, count: 1, first_at: '2024-01-01T00:00:01.000Z', last_at: '2024-01-01T00:00:01.000Z' },
   ])
+})
+
+test('eval_cells round-trip through JSONL and expose one bench-keyed reader', { skip: SKIP }, () => {
+  const source = openTestLedger()
+  const target = openTestLedger()
+  const row = {
+    bench: 'eval-roundtrip', adw_id: 'eval-adw', role: 'builder', provider: 'anthropic',
+    model_id: 'claude-sonnet-5', agent: 'claude', effort: 'medium', production: 1,
+    task_sha: 'task-sha', envelope_status: 'received', absent_reason: null,
+    asserts_declared: 4, asserts_passed: 3, judge_findings: ['f1', 'f2'],
+    billed_input_tokens: 100, billed_output_tokens: 200, billed_cache_read_tokens: 300,
+    billed_cache_write_tokens: 400, duration_ms: 500, created_at: '2024-01-01T00:00:00.000Z',
+  }
+  try {
+    source.recordEvalCell(row)
+    assert.deepEqual(source.evalCells({ bench: row.bench }).map(({ id, ...cell }) => cell), [{
+      ...row, judge_findings: '["f1","f2"]',
+    }])
+    const replay = replayJsonl(source._jsonlPath, target)
+    assert.deepEqual(replay, { applied: 1, skipped: 0, failed: 0, complete: true, first_failure: null })
+    assert.deepEqual(target.dumpTable('eval_cells'), source.dumpTable('eval_cells'))
+    assert.equal(WRITERS.filter((writer) => writer === 'recordEvalCell').length, 1)
+    assert.equal(WRITER_MIRROR_TABLES.recordEvalCell, 'eval_cells')
+  } finally {
+    source.close()
+    target.close()
+  }
+})
+
+test('recordEvalCell refuses closed-enum drift and never records asserts for an absent envelope', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const base = {
+    bench: 'eval-refusal', role: 'builder', provider: 'anthropic', model_id: 'claude-sonnet-5',
+    agent: 'claude', effort: 'medium', envelope_status: 'received',
+  }
+  const badStatus = 'eval-status-secret'
+  const badReason = 'eval-reason-secret'
+  try {
+    assert.throws(
+      () => ledger.recordEvalCell({ ...base, envelope_status: badStatus }),
+      (err) => err instanceof LedgerUsageError && !err.message.includes(badStatus),
+    )
+    assert.throws(
+      () => ledger.recordEvalCell({ ...base, absent_reason: badReason }),
+      (err) => err instanceof LedgerUsageError && !err.message.includes(badReason),
+    )
+    assert.throws(
+      () => ledger.recordEvalCell({ ...base, envelope_status: 'absent', absent_reason: 'no-envelope', asserts_declared: 0, asserts_passed: 0 }),
+      (err) => err instanceof LedgerUsageError && err.message.includes('absent envelope cannot carry measured asserts'),
+    )
+    assert.deepEqual(ledger.dumpTable('eval_cells'), [])
+    assert.deepEqual([...EVAL_ENVELOPE_STATUSES], ['received', 'absent'])
+    assert.deepEqual([...EVAL_ABSENT_REASONS], ['no-envelope', 'seat-refused', 'gate-not-run', 'judge-not-briefed'])
+  } finally { ledger.close() }
+})
+
+test('evals CLI publishes exactly the closed payload and keeps an empty bench absent', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const bench = 'eval-cli'.padEnd(64, '0')
+  try {
+    ledger.recordEvalCell({
+      bench, role: 'builder', provider: 'anthropic', model_id: 'claude-sonnet-5', agent: 'claude', effort: 'medium',
+      production: 1, task_sha: 'task-sha', envelope_status: 'received', asserts_declared: 1, asserts_passed: 1,
+      judge_findings: [], billed_input_tokens: 1, billed_output_tokens: 1, billed_cache_read_tokens: 1,
+      billed_cache_write_tokens: 1, duration_ms: 1,
+    })
+  } finally { ledger.close() }
+  const measured = run(['evals', '--bench', bench], { DEVTEAM_LEDGER_DB: ledger._dbPath })
+  assert.equal(measured.status, 0, measured.stderr)
+  const payload = JSON.parse(measured.stdout)
+  assert.deepEqual(Object.keys(payload).sort(), [...EVAL_PAYLOAD_KEYS].sort())
+  assert.equal(payload.rows.length, 1)
+  assert.equal(payload.production.in_table, true)
+  assert.equal(payload.production.model, 'anthropic/claude-sonnet-5')
+  assert.equal(payload.incomplete.some((entry) => entry.reason === 'production-absent'), false)
+
+  const emptyBench = 'eval-empty'.padEnd(64, '0')
+  const empty = run(['evals', '--bench', emptyBench], { DEVTEAM_LEDGER_DB: ledger._dbPath })
+  assert.equal(empty.status, 0, empty.stderr)
+  const emptyPayload = JSON.parse(empty.stdout)
+  assert.equal(emptyPayload.rows, null)
+  assert.equal(emptyPayload.ratifiable, false)
+  assert.equal(emptyPayload.cost_is_floor, true)
+  assert.equal(emptyPayload.incomplete.some((entry) => entry.reason === 'no-cells'), true)
 })
 
 test('ci_cycles refuses collapsed decisions and ignores a repeated identical cycle', { skip: SKIP }, () => {
@@ -3518,6 +3613,8 @@ test('#443: every documented CLI flag remains accepted', { skip: SKIP }, () => {
     { verb: 'cells', flag: 'since', args: ['cells', '--since', since, '--until', until] },
     { verb: 'cells', flag: 'until', args: ['cells', '--since', since, '--until', until] },
     { verb: 'cells', flag: 'prices', args: ['cells', '--prices', join(dir, 'prices.json')] },
+    { verb: 'evals', flag: 'bench', args: ['evals', '--bench', 'eval-case'.padEnd(64, '0')] },
+    { verb: 'evals', flag: 'prices', args: ['evals', '--bench', 'eval-case'.padEnd(64, '0'), '--prices', join(dir, 'prices.json')] },
     { verb: 'modifier-attempts', flag: 'since', args: ['modifier-attempts', '--since', since, '--until', until] },
     { verb: 'modifier-attempts', flag: 'until', args: ['modifier-attempts', '--since', since, '--until', until] },
     { verb: 'seat-teardowns', flag: 'since', args: ['seat-teardowns', '--since', since, '--until', until] },
@@ -3543,7 +3640,7 @@ test('#443: every documented CLI flag remains accepted', { skip: SKIP }, () => {
 })
 
 test('#443: flagless subcommands refuse an unknown flag', { skip: SKIP }, () => {
-  for (const verb of ['sessions', 'phases', 'procs', 'task', 'gate-review-gap', 'eligible-tasks', 'doctor']) {
+  for (const verb of ['sessions', 'phases', 'procs', 'task', 'gate-review-gap', 'eligible-tasks', 'evals', 'doctor']) {
     const result = run([verb, '--nope', 'x'])
     assert.equal(result.status, 2, `${verb}: ${result.stderr}`)
     assert.match(result.stderr, /unknown flag --nope/)

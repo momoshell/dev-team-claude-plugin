@@ -355,6 +355,19 @@ export const ADVISOR_AB_INCOMPLETE_REASONS = Object.freeze([
 // over several runs, so this is reported and compared by the human (see
 // docs/advisor-ab-protocol.md), never silently enforced here.
 export const ADVISOR_AB_DISPATCH_FLOOR = 12
+export const EVAL_ENVELOPE_STATUSES = Object.freeze(['received', 'absent'])
+export const EVAL_ABSENT_REASONS = Object.freeze([
+  'no-envelope', 'seat-refused', 'gate-not-run', 'judge-not-briefed',
+])
+export const EVAL_INCOMPLETE_REASONS = Object.freeze([
+  'no-cells', 'envelope-absent', 'gate-not-run', 'judge-absent',
+  'usd-unpriced', 'production-absent',
+])
+export const EVAL_PAYLOAD_KEYS = Object.freeze([
+  'schema', 'question', 'definition', 'incomplete_reasons', 'absent_reasons',
+  'bench', 'ratifiable', 'incomplete', 'rows', 'production', 'cost_is_floor',
+  'usd_total', 'price_source',
+])
 export const ACCEPT_DECISION_OUTCOMES = Object.freeze(['accepted', 'escalated'])
 export const PROVIDER_FAILURE_LEDGER_KINDS = Object.freeze([
   'rate_limit', 'authentication_failed', 'server_error', 'provider-unclassified',
@@ -924,6 +937,33 @@ export const TABLES = Object.freeze({
     unique: [['branch', 'head_sha', 'check_name', 'cycle']],
     indexes: [{ name: 'ci_dispatches_outcome_idx', cols: ['variant', 'outcome', 'created_at'] }],
   },
+  eval_cells: {
+    columns: [
+      { name: 'id', decl: 'INTEGER PRIMARY KEY' },
+      { name: 'bench', decl: 'TEXT' },
+      { name: 'adw_id', decl: 'TEXT' },
+      { name: 'role', decl: 'TEXT' },
+      { name: 'provider', decl: 'TEXT' },
+      { name: 'model_id', decl: 'TEXT' },
+      { name: 'agent', decl: 'TEXT' },
+      { name: 'effort', decl: 'TEXT' },
+      { name: 'production', decl: 'INTEGER' },
+      { name: 'task_sha', decl: 'TEXT' },
+      { name: 'envelope_status', decl: 'TEXT' },
+      { name: 'absent_reason', decl: 'TEXT' },
+      { name: 'asserts_declared', decl: 'INTEGER' },
+      { name: 'asserts_passed', decl: 'INTEGER' },
+      { name: 'judge_findings', decl: 'TEXT' },
+      { name: 'billed_input_tokens', decl: 'INTEGER' },
+      { name: 'billed_output_tokens', decl: 'INTEGER' },
+      { name: 'billed_cache_read_tokens', decl: 'INTEGER' },
+      { name: 'billed_cache_write_tokens', decl: 'INTEGER' },
+      { name: 'duration_ms', decl: 'INTEGER' },
+      { name: 'created_at', decl: 'TEXT' },
+    ],
+    unique: [['bench', 'provider', 'model_id', 'agent', 'effort']],
+    indexes: [{ name: 'eval_cells_bench_idx', cols: ['bench', 'created_at'] }],
+  },
   intake_sweeps: {
     columns: [
       { name: 'id', decl: 'INTEGER PRIMARY KEY' },
@@ -1269,7 +1309,7 @@ export const JOURNAL_FACT_EVENTS = Object.freeze({
 export const WRITERS = Object.freeze([
   'startSession', 'endSession', 'startPhase', 'endPhase', 'recordEvent',
   'recordEnvelope', 'recordSessionRequest', 'recordRunConfiguration', 'recordRunSeat', 'recordGateResult', 'recordGateDiscrimination',
-  'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'recordCiCycle', 'recordCiDispatch', 'recordIntakeSweep', 'recordIntakeRefusal', 'recordIntakeBrake', 'recordIntakeDispatch', 'recordSeatTeardown', 'recordSeatReclaim', 'recordProviderFailure', 'recordPlanScope', 'recordSeatReask', 'recordAcceptReask', 'recordRpcExitContext', 'recordSeatTurnCensus', 'recordPlanAdoption', 'recordExternalFence', 'recordMutationAnchorBind', 'recordMutationAnchorAbsence', 'recordPhaseSlotWait', 'startProcess', 'endProcess', 'heartbeat',
+  'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'recordCiCycle', 'recordCiDispatch', 'recordEvalCell', 'recordIntakeSweep', 'recordIntakeRefusal', 'recordIntakeBrake', 'recordIntakeDispatch', 'recordSeatTeardown', 'recordSeatReclaim', 'recordProviderFailure', 'recordPlanScope', 'recordSeatReask', 'recordAcceptReask', 'recordRpcExitContext', 'recordSeatTurnCensus', 'recordPlanAdoption', 'recordExternalFence', 'recordMutationAnchorBind', 'recordMutationAnchorAbsence', 'recordPhaseSlotWait', 'startProcess', 'endProcess', 'heartbeat',
   'startAgentSession', 'endAgentSession', 'recordSourceError', 'linkRun',
 ])
 
@@ -1295,6 +1335,7 @@ export const WRITER_MIRROR_TABLES = Object.freeze({
   recordModifierAttempt: 'modifier_attempts',
   recordCiCycle: 'ci_cycles',
   recordCiDispatch: 'ci_dispatches',
+  recordEvalCell: 'eval_cells',
   recordIntakeSweep: 'intake_sweeps',
   recordIntakeRefusal: 'intake_refusals',
   recordIntakeBrake: 'intake_brakes',
@@ -3149,6 +3190,48 @@ export function openLedger({
     return args
   }
 
+  function recordEvalCell(input = {}) {
+    requireFields(input, ['bench', 'role', 'provider', 'model_id', 'agent', 'effort', 'envelope_status'], 'recordEvalCell')
+    requireEnum(input.envelope_status, EVAL_ENVELOPE_STATUSES, 'recordEvalCell', 'envelope_status')
+    if (input.absent_reason != null) requireEnum(input.absent_reason, EVAL_ABSENT_REASONS, 'recordEvalCell', 'absent_reason')
+    if (input.envelope_status === 'absent' && (input.asserts_passed != null || input.asserts_declared != null)) {
+      refuse('recordEvalCell: absent envelope cannot carry measured asserts')
+    }
+    const judgeFindings = Array.isArray(input.judge_findings)
+      ? JSON.stringify(input.judge_findings)
+      : input.judge_findings == null ? null : String(input.judge_findings)
+    const args = redact({
+      bench: input.bench,
+      adw_id: input.adw_id ?? null,
+      role: input.role,
+      provider: input.provider,
+      model_id: input.model_id,
+      agent: input.agent,
+      effort: input.effort,
+      production: input.production ?? null,
+      task_sha: input.task_sha ?? null,
+      envelope_status: input.envelope_status,
+      absent_reason: input.absent_reason ?? null,
+      asserts_declared: input.asserts_declared ?? null,
+      asserts_passed: input.asserts_passed ?? null,
+      judge_findings: judgeFindings,
+      billed_input_tokens: input.billed_input_tokens ?? null,
+      billed_output_tokens: input.billed_output_tokens ?? null,
+      billed_cache_read_tokens: input.billed_cache_read_tokens ?? null,
+      billed_cache_write_tokens: input.billed_cache_write_tokens ?? null,
+      duration_ms: input.duration_ms ?? null,
+      created_at: isoMs(input.created_at ?? now()),
+    }, stats)
+    appendJsonl('recordEvalCell', args)
+    mirror((conn) => {
+      const cols = tableColumnNames('eval_cells').filter((c) => c !== 'id')
+      const sqlCols = cols.map(quoteSqlIdentifier)
+      conn.prepare(`INSERT OR IGNORE INTO eval_cells (${sqlCols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
+        .run(...cols.map((c) => toBindable(args[c])))
+    })
+    return args
+  }
+
   function recordIntakeSweep(input = {}) {
     requireFields(input, ['board_owner', 'board_project', 'outcome', 'considered', 'pages'], 'recordIntakeSweep')
     requireEnum(input.outcome, INTAKE_OUTCOMES, 'recordIntakeSweep', 'outcome')
@@ -4032,6 +4115,12 @@ export function openLedger({
     `, [since, since, until, until])
   }
 
+  function evalCells({ bench } = {}) {
+    return queryRows(`
+      SELECT * FROM eval_cells WHERE bench = ? ORDER BY created_at, id
+    `, [bench])
+  }
+
   function cellUsage({ since = null, until = null } = {}) {
     return queryRows(`
       SELECT r.provider, r.model_id,
@@ -4898,10 +4987,10 @@ export function openLedger({
   const handle = {
     get degraded() { return degraded },
     startSession, endSession, recordSessionRequest, recordRunConfiguration, recordRunSeat, startPhase, endPhase, recordEvent, recordEnvelope,
-    recordGateResult, recordGateDiscrimination, recordMutationAnchorBind, recordMutationAnchorAbsence, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown, recordSeatReclaim, recordProviderFailure, recordPlanScope, recordSeatReask, recordAcceptReask, recordRpcExitContext, recordSeatTurnCensus, recordPlanAdoption, recordExternalFence, recordPhaseSlotWait,
+    recordGateResult, recordGateDiscrimination, recordMutationAnchorBind, recordMutationAnchorAbsence, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordEvalCell, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown, recordSeatReclaim, recordProviderFailure, recordPlanScope, recordSeatReask, recordAcceptReask, recordRpcExitContext, recordSeatTurnCensus, recordPlanAdoption, recordExternalFence, recordPhaseSlotWait,
     startProcess, endProcess, heartbeat, startAgentSession, endAgentSession,
     recordSourceError, linkRun,
-    listSessions, listEvents, getSession, dumpTable, tableNames, columnNames, sessionsFiltered, runsStartedWithin, phasesFor, runConfigurationsFor, runSeatsFor, agentEventsFor, agentSessionsFor, gateDiscriminationsFor, gateResultsFor, reviewOutcomesFor, acceptDecisionsFor, supportsJson1, eventsPage, maxEventId, cellFailureRowsFor, unattributableCellFailures, seatTeardownRowsFor, intakePicks, intakeSweepTotals, intakeCandidateRefusals, intakeCandidatePicks, agentSessionTokenTotals, gateReviewGap, cellFailures, cellReviews, cellUsage, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, escalations, endedRuns, escalationWindow, seatReclaims, journalFacts, turnEconomy, eligibleTasks, runSet, transportsFor, taskReadout, jsonlDrift,
+    listSessions, listEvents, getSession, dumpTable, tableNames, columnNames, sessionsFiltered, runsStartedWithin, phasesFor, runConfigurationsFor, runSeatsFor, agentEventsFor, agentSessionsFor, gateDiscriminationsFor, gateResultsFor, reviewOutcomesFor, acceptDecisionsFor, supportsJson1, eventsPage, maxEventId, cellFailureRowsFor, unattributableCellFailures, seatTeardownRowsFor, intakePicks, intakeSweepTotals, intakeCandidateRefusals, intakeCandidatePicks, agentSessionTokenTotals, gateReviewGap, cellFailures, cellReviews, evalCells, cellUsage, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, escalations, endedRuns, escalationWindow, seatReclaims, journalFacts, turnEconomy, eligibleTasks, runSet, transportsFor, taskReadout, jsonlDrift,
     stats: statsFn,
     captureMirrorErrors,
     readConnection,
@@ -5508,6 +5597,7 @@ const VERB_FLAGS = Object.freeze({
   'run-set': new Set(['since', 'until']),
   'cell-failures': new Set(['since', 'until']),
   cells: new Set(['since', 'until', 'prices']),
+  evals: new Set(['bench', 'prices']),
   'modifier-attempts': new Set(['since', 'until']),
   'seat-teardowns': new Set(['since', 'until']),
   escalations: new Set(['since', 'until']),
@@ -5886,6 +5976,146 @@ export function advisorAbReadout({ epoch, dispatchIds, journalText, envelopeSour
   }
 }
 
+export function evalsReadout({ bench, cells = [], catalog, priceSourcePath } = {}) {
+  cells = Array.isArray(cells) ? cells : []
+  const rowsInput = cells
+  const measured = cells.length > 0
+  const productionRow = cells.find((cell) => cell.production === 1) ?? null
+  const productionInTable = productionRow !== null
+  const priceSource = catalog === null || catalog === undefined ? null : {
+    path: priceSourcePath ?? null,
+    updated_at: catalog.updated_at ?? null,
+    units: CELL_PRICE_UNITS,
+    models: catalog.models && typeof catalog.models === 'object' ? Object.keys(catalog.models).length : 0,
+  }
+  const incomplete = []
+  let emittedRows = null
+
+  if (!measured) {
+    incomplete.push({
+      reason: 'no-cells',
+      detail: `no eval_cells row carries bench ${bench} — UNMEASURED, never an empty result`,
+    })
+  } else {
+    const parseFindings = (value) => {
+      if (Array.isArray(value)) return [...value]
+      if (typeof value !== 'string') return null
+      try {
+        const parsed = JSON.parse(value)
+        return Array.isArray(parsed) ? parsed : null
+      } catch {
+        return null
+      }
+    }
+    const finiteNumber = (value) => typeof value === 'number' && Number.isFinite(value)
+    emittedRows = rowsInput.map((cell) => {
+      const model = cell.provider == null || cell.model_id == null
+        ? null
+        : `${cell.provider}/${cell.model_id}`
+      const assertsMeasured = cell.asserts_passed != null && cell.asserts_declared != null
+      const asserts = assertsMeasured ? `${cell.asserts_passed}/${cell.asserts_declared}` : null
+      const judgeFindings = parseFindings(cell.judge_findings)
+      const absent = {}
+      if (cell.envelope_status === 'absent') {
+        absent.envelope = cell.absent_reason ?? 'no-envelope'
+        incomplete.push({
+          reason: 'envelope-absent',
+          detail: `${model ?? 'unknown cell'}: ${cell.absent_reason ?? 'no-envelope'}`,
+        })
+      }
+      if (!assertsMeasured) {
+        absent.asserts = 'gate results were not recorded for this envelope — UNMEASURED, never a zero'
+        incomplete.push({ reason: 'gate-not-run', detail: `${model ?? 'unknown cell'}: asserts are absent` })
+      }
+      if (judgeFindings === null) {
+        absent.judge_findings = 'judge findings were not recorded — UNMEASURED, never an empty finding set'
+        incomplete.push({ reason: 'judge-absent', detail: `${model ?? 'unknown cell'}: judge findings are absent` })
+      }
+
+      const priceKey = model
+      const price = priceKey === null ? null : catalogPrice(catalog, priceKey)
+      const rates = price === null ? null : [
+        price.cost_in_per_mtok,
+        price.cost_out_per_mtok,
+        price.cost_cache_read_per_mtok,
+        price.cost_cache_write_per_mtok,
+      ]
+      const ratesMeasured = Array.isArray(rates) && rates.every(finiteNumber)
+      const tokenValues = [
+        cell.billed_input_tokens,
+        cell.billed_output_tokens,
+        cell.billed_cache_read_tokens,
+        cell.billed_cache_write_tokens,
+      ]
+      const volumesMeasured = tokenValues.every(finiteNumber)
+      const usd = ratesMeasured && volumesMeasured
+        ? (cell.billed_input_tokens / 1e6) * price.cost_in_per_mtok
+          + (cell.billed_output_tokens / 1e6) * price.cost_out_per_mtok
+          + (cell.billed_cache_read_tokens / 1e6) * price.cost_cache_read_per_mtok
+          + (cell.billed_cache_write_tokens / 1e6) * price.cost_cache_write_per_mtok
+        : null
+      if (usd === null) {
+        const reason = price === null
+          ? `no price for ${priceKey ?? 'unknown cell'} in ${priceSourcePath ?? 'the price catalog'} — unpriced, never free`
+          : !ratesMeasured
+            ? `price for ${priceKey} lacks one or more of cost_in_per_mtok, cost_out_per_mtok, cost_cache_read_per_mtok, cost_cache_write_per_mtok — unpriced, never free`
+            : `no measured ${['billed_input_tokens', 'billed_output_tokens', 'billed_cache_read_tokens', 'billed_cache_write_tokens'].filter((_, index) => !finiteNumber(tokenValues[index])).join(', ') || 'token volume'} for this cell — unpriced, never free`
+        absent.usd = reason
+        incomplete.push({ reason: 'usd-unpriced', detail: `${model ?? 'unknown cell'}: ${reason}` })
+      }
+      if (cell.production == null) absent.production = 'production membership was not measured — UNMEASURED, never a production claim'
+      if (cell.duration_ms == null) absent.duration_ms = 'duration was not measured — UNMEASURED, never a zero'
+      return {
+        model,
+        provider: cell.provider,
+        model_id: cell.model_id,
+        agent: cell.agent,
+        effort: cell.effort,
+        production: cell.production,
+        asserts,
+        judge_findings: judgeFindings,
+        judge_findings_count: judgeFindings === null ? null : judgeFindings.length,
+        usd,
+        duration_ms: cell.duration_ms ?? null,
+        absent,
+      }
+    })
+  }
+  const productionAbsentDetail = `no eval_cells row for bench ${bench} carries production=1 — the table compares candidates against nothing`
+  if (!productionInTable) incomplete.push({ reason: 'production-absent', detail: productionAbsentDetail })
+  if (!measured) {
+    incomplete.length = 0
+    incomplete.push({
+      reason: 'no-cells',
+      detail: `no eval_cells row carries bench ${bench} — UNMEASURED, never an empty result`,
+    })
+  }
+
+  const ratifiable = incomplete.length === 0
+  const costIsFloor = !measured || (emittedRows || []).some((row) => row.usd === null)
+  const usdTotal = measured && emittedRows.every((row) => row.usd !== null)
+    ? emittedRows.reduce((total, row) => total + row.usd, 0)
+    : null
+  const production = productionInTable
+    ? {
+        model: productionRow.provider == null || productionRow.model_id == null
+          ? null
+          : `${productionRow.provider}/${productionRow.model_id}`,
+        in_table: true,
+      }
+    : { model: null, in_table: false }
+  return {
+    bench,
+    ratifiable,
+    incomplete,
+    rows: emittedRows,
+    production,
+    cost_is_floor: costIsFloor,
+    usd_total: usdTotal,
+    price_source: priceSource,
+  }
+}
+
 // The unaudited fields this ledger records but never verifies against any
 // external source — mirrors task-cost-log.mjs's frozen `unverified` array.
 const UNVERIFIED_FIELDS = Object.freeze(['task_slug', 'repo_slug'])
@@ -5896,7 +6126,7 @@ export function main(argv) {
   try {
     const { verb, positional, flags } = parseArgs(argv)
     if (!verb) {
-      refuse('a verb is required: sessions | phases | tail | procs | gate-review-gap | eligible-tasks | run-set --since <iso> [--until <iso>] | cell-failures [--since <iso>] [--until <iso>] | cells [--since <iso>] [--until <iso>] [--prices <path>] | modifier-attempts [--since <iso>] [--until <iso>] | seat-teardowns [--since <iso>] [--until <iso>] | escalations --since <iso> [--until <iso>] | ci-cycles [--since <iso>] [--until <iso>] | intake-sweeps [--since <iso>] [--until <iso>] | journal-facts [--since <iso>] [--until <iso>] | turns [--since <iso>] [--until <iso>] | task | request <adw_id> --from-brief <path> | advisor-ab --run-dir <dir> --run-started-at <iso|ms> --adjudications <path> <dispatch-id>… | doctor | kill')
+      refuse('a verb is required: sessions | phases | tail | procs | gate-review-gap | eligible-tasks | run-set --since <iso> [--until <iso>] | cell-failures [--since <iso>] [--until <iso>] | cells [--since <iso>] [--until <iso>] [--prices <path>] | evals --bench <sha> [--prices <path>] | modifier-attempts [--since <iso>] [--until <iso>] | seat-teardowns [--since <iso>] [--until <iso>] | escalations --since <iso> [--until <iso>] | ci-cycles [--since <iso>] [--until <iso>] | intake-sweeps [--since <iso>] [--until <iso>] | journal-facts [--since <iso>] [--until <iso>] | turns [--since <iso>] [--until <iso>] | task | request <adw_id> --from-brief <path> | advisor-ab --run-dir <dir> --run-started-at <iso|ms> --adjudications <path> <dispatch-id>… | doctor | kill')
     }
 
     // TEST SEAM: DEVTEAM_LEDGER_FAKE_NODE_VERSION substitutes for
@@ -6277,6 +6507,52 @@ export function main(argv) {
         price_source: priceSource,
         rows: emittedRows,
         absent: payloadAbsent,
+      }
+      stdout.write(`${JSON.stringify(payload)}\n`)
+      return 0
+    }
+
+    if (verb === 'evals') {
+      if (positional.length > 0) refuse('evals: takes no positional arguments')
+      if (typeof flags.bench !== 'string' || !flags.bench.trim()) refuse('evals: --bench <sha> is required')
+      const defaultPriceSourcePath = fileURLToPath(new URL('../../crew/roster.json', import.meta.url))
+      const hasPrices = Object.prototype.hasOwnProperty.call(flags, 'prices')
+      const priceSourcePath = hasPrices ? flags.prices : defaultPriceSourcePath
+      let catalog = null
+      if (hasPrices) {
+        try {
+          catalog = loadPriceCatalog(priceSourcePath)
+        } catch {
+          refuse('evals: --prices must be a readable JSON price catalog with a models object')
+        }
+      } else {
+        try {
+          catalog = loadPriceCatalog(priceSourcePath)
+        } catch {
+          catalog = null
+        }
+      }
+      const bench = flags.bench.trim()
+      const cells = ledger.evalCells({ bench })
+      if (ledger.stats().degraded) refuse('evals: the ledger mirror is degraded — this bench is unanswerable, not empty')
+      const readout = evalsReadout({ bench, cells, catalog, priceSourcePath })
+      const payload = {
+        schema: 1,
+        question: 'Which roster candidate did this bench actually measure, and is this readout complete enough to ratify on?',
+        definition: {
+          asserts: 'passed/declared from the mechanical gate; null means the gate did not run, never a measured zero',
+          score: 'no formula combines the candidate columns; this readout publishes observations only, with no composite score or ranking',
+        },
+        incomplete_reasons: EVAL_INCOMPLETE_REASONS,
+        absent_reasons: EVAL_ABSENT_REASONS,
+        bench,
+        ratifiable: readout.ratifiable,
+        incomplete: readout.incomplete,
+        rows: readout.rows,
+        production: readout.production,
+      cost_is_floor: readout.cost_is_floor,
+        usd_total: readout.usd_total,
+        price_source: readout.price_source,
       }
       stdout.write(`${JSON.stringify(payload)}\n`)
       return 0

@@ -6,6 +6,7 @@ import { tmpdir, homedir } from 'node:os'
 import { join, basename, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { EVENT_TYPES, PAYLOAD_KEYS, NODE_FLOOR, openLedger, USAGE_ABSENT_CAUSES } from '../scripts/factory/ledger.mjs'
+import { TURN_CEILING_FLAGS } from './drive.mjs'
 import { openRun, _resetNoticeGuardsForTest } from '../scripts/factory/emit.mjs'
 import {
   composeLayout, SEAT_DEFAULTS, FANOUT_TOOLS, DEFAULT_ROLES, ROLE_ORDER, transportFor, seatTransport, HEADLESS_TRANSPORTS, assertCapabilities, resolveAdapters, bootAllocation, resolveWorkerBin, docOpenArgs,
@@ -21,6 +22,7 @@ import {
   effectiveTools, ADVISOR_CONFIG_VERSION, ADVISOR_BOOT_REFUSALS, SAFE_MODEL, classifyAdvisorCell,
   advisorBootRecord, advisorJournalRecord, advisorEndpointOrigin, assertAdvisorCellLive,
   advisorManifest, assertAdvisorManifest, packageSuite, SUITE_OWNER_PATH, SUITE_REFUSAL,
+  PANE_TURN_CEILING_UNMEASURED, paneTurnCeilingRefusals,
 } from './crew.mjs'
 import {
   runChild, specExecution, resolveValidationLane as resolveChildValidationLane,
@@ -2219,7 +2221,7 @@ test('flag contracts accept known flags, role prefixes, and reject malformed usa
       assert.throws(() => assertUsage(verb, valid), `${verb} empty ${flag}`)
     }
   }
-  assert.deepEqual(BOOT_ONLY_FLAGS, ['fences', 'lane'])
+  assert.deepEqual(BOOT_ONLY_FLAGS, ['fences', 'lane', ...TURN_CEILING_FLAGS])
 })
 
 test('argv value contracts cover every known flag and every hostile shape', () => {
@@ -6662,4 +6664,86 @@ test('proven panes over a retryable row a receipt failure cannot explain away re
   assert.equal(record.seats.proven, record.seats.seats)
   assert.equal(existsSync(join(dir, FINGERPRINT_FILE)), false)
   assert.equal(record.fingerprint.withheld, FINGERPRINT_WITHHELD.writer_unproven)
+})
+
+test('turn-ceiling flags refuse unenforceable panes and persist only when explicitly configured', async () => {
+  assert.deepEqual(paneTurnCeilingRefusals(['builder', 'reviewer'], { builder: 40, reviewer: null }), [
+    { role: 'builder', budget: 40, transport: 'pane' },
+  ])
+  assert.deepEqual(paneTurnCeilingRefusals(['builder'], {}), [])
+  assert.doesNotThrow(() => assertUsage('boot', { task: 'ceiling-cli', 'max-turns-builder': '40' }))
+  assert.throws(
+    () => assertUsage('run', { task: 'ceiling-cli', 'brief-file': '/tmp/brief.md', 'max-turns-builder': '40' }),
+    /BOOT-time/,
+  )
+  assert.throws(
+    () => assertUsage('boot', { task: 'ceiling-cli', 'max-turns-builder': true }),
+    (error) => error.reason === FLAG_VALUE_REFUSAL,
+  )
+
+  const home = scratchDir('crew-ceiling-home-')
+  const { root: checkoutRoot, checkout } = testCheckout('crew-ceiling-checkout-')
+  const bin = process.execPath
+  writeFileSync(join(checkout, 'seed.txt'), 'seed\n')
+  execSync('git init -q && git add -A && git -c user.email=ceiling@fixture -c user.name=ceiling commit -q -m seed', { cwd: checkout })
+  const brief = join(home, 'brief.md')
+  writeFileSync(brief, '# ceiling test\n')
+  const previousBin = process.env.CREW_CLAUDE_BIN
+  process.env.CREW_CLAUDE_BIN = bin
+  try {
+    await withHome(home, async () => {
+      const paneCalls = { cmux: callCounter(), tree: callCounter(), renameTab: callCounter() }
+      await assert.rejects(
+        () => bootCmd(
+          { task: 'ceiling-pane', checkout, tier: 'build', 'max-turns-builder': '40' },
+          paneCalls,
+        ),
+        (error) => error.code === PANE_TURN_CEILING_UNMEASURED
+          && /emits no seat_turn_census/.test(error.message)
+          && !/end the dispatch/.test(error.message),
+      )
+      assert.equal(paneCalls.cmux.calls.length, 0)
+      assert.equal(paneCalls.tree.calls.length, 0)
+      assert.equal(paneCalls.renameTab.calls.length, 0)
+      assert.equal(existsSync(testCrewDir(home, checkout, 'ceiling-pane')), false)
+
+      await bootCmd(
+        { task: 'ceiling-headless', checkout, tier: 'build', 'headless-all': true, 'claude-bin': bin, 'max-turns-builder': '40', 'max-turns-planner': '12' },
+        { cmux: callCounter(), tree: callCounter(), renameTab: callCounter() },
+      )
+      const dir = testCrewDir(home, checkout, 'ceiling-headless')
+      const crew = JSON.parse(readFileSync(join(dir, 'crew.json'), 'utf8'))
+      assert.deepEqual(crew.turn_ceilings, {
+        planner: 12, 'tech-lead': null, builder: 40, reviewer: null, lead: null,
+        source: { planner: 'flag', 'tech-lead': 'absent', builder: 'flag', reviewer: 'absent', lead: 'absent' },
+      })
+      assert.deepEqual(bootRecord(dir).turn_ceilings, crew.turn_ceilings)
+      let seen = null
+      const done = { status: 'done', summary: '', artifacts: [], details: { commit: null, stages: [] } }
+      runCmd({ task: 'ceiling-headless', checkout, 'brief-file': brief, keep: true }, { drive: (ctx) => { seen = ctx; return done } })
+      assert.deepEqual(seen.turnCeilings, crew.turn_ceilings)
+      const configs = readFileSync(seen.journal, 'utf8').trim().split('\n').map((line) => JSON.parse(line)).filter((row) => row.event === 'run-configuration')
+      assert.deepEqual(configs[0].turn_ceilings, crew.turn_ceilings)
+
+      await bootCmd(
+        { task: 'ceiling-plain', checkout, tier: 'build', 'headless-all': true, 'claude-bin': bin },
+        { cmux: callCounter(), tree: callCounter(), renameTab: callCounter() },
+      )
+      const plainDir = testCrewDir(home, checkout, 'ceiling-plain')
+      const plainCrew = JSON.parse(readFileSync(join(plainDir, 'crew.json'), 'utf8'))
+      const plainBoot = bootRecord(plainDir)
+      assert.equal(Object.hasOwn(plainCrew, 'turn_ceilings'), false)
+      assert.equal(Object.hasOwn(plainBoot, 'turn_ceilings'), false)
+      let plainSeen = null
+      runCmd({ task: 'ceiling-plain', checkout, 'brief-file': brief, keep: true }, { drive: (ctx) => { plainSeen = ctx; return done } })
+      assert.equal(Object.hasOwn(plainSeen, 'turnCeilings'), false)
+      const plainConfigs = readFileSync(plainSeen.journal, 'utf8').trim().split('\n').map((line) => JSON.parse(line)).filter((row) => row.event === 'run-configuration')
+      assert.equal(Object.hasOwn(plainConfigs[0], 'turn_ceilings'), false)
+    })
+  } finally {
+    if (previousBin === undefined) delete process.env.CREW_CLAUDE_BIN
+    else process.env.CREW_CLAUDE_BIN = previousBin
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
 })

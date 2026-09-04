@@ -13,11 +13,15 @@ import { regrantVerdict } from './escalation-policy.mjs'
 import { checkAnchors, laneFence, partitionShifts } from '../skills/qa-test-writing/anchor-pin.mjs'
 
 import { assertSeats, runCmd } from './crew.mjs'
+import { ADOPT_BLOCK } from '../scripts/factory/dispatch-batch.mjs'
 import { runChild } from './child.mjs'
 import { SEAT_REFUSAL_STAGE } from './seat-io.mjs'
 
 import {
   driveTask, LIMITS, WAITS_S, WAIT_ROLES, WAIT_FLAGS, WAIT_REFUSALS, WAIT_SECONDS_MIN, WAIT_SECONDS_MAX,
+  NO_TURN_CEILING, TURN_CEILING_ROLES, TURN_CEILING_REFUSALS, resolveTurnCeilings, turnCeilingsRecord,
+  adoptionSignal, planRoundCap, ADOPTED_PLAN_HEADING, PLAN_CHECK_ABSENT, PLAN_CHECK_INVALID,
+  enforcementPreamble, observeTurnCensus, turnCeilingBreached, CENSUS_ROW_ABSENT, CENSUS_TURNS_ABSENT, CENSUS_UNREADABLE, CENSUS_ABSENT_REASONS,
   refuseWait, resolveWaits, waitsCtx, waitsRecord, DECISIONS, SECOND_OPINION, PERSPECTIVE_TARGETS,
   FAILURE_UPGRADE, SENSITIVITY_FLOOR, JUDGE_TIER, PROTECTED_PATHS, resolveProtectedPaths, MODIFIER_OUTCOMES, JOURNAL_CHANNELS, JOURNAL_CHANNEL_NAMES, recordRow, operationalRow,
   validateScopeEntries, scopeMatcher, protectedHits, laneFenceHits, composeCommitMessage,
@@ -5587,6 +5591,7 @@ const HEALTHY_RESULT = {
     escalation: null,
     cold_suite: { verdict: 'green', path: '/zz/aa11bb', counts: null },
     extra_rounds_granted: [],
+    enforcements: [],
     growth: [{
       round: 1, plan_bytes: null, gate_bytes: null, plan_delta: null, gate_delta: null,
       combined_bytes: null, round1_combined_bytes: null, files_in_scope_count: 2,
@@ -5617,7 +5622,7 @@ test('the unexhausted plan path keeps its diagnostics unchanged', () => {
   })
   const result = driveTask(CTX_TL, io)
   assert.deepEqual(Object.keys(result.details).sort(), [
-    'accepted_via', 'cold_suite', 'commit', 'consults', 'dissents', 'escalation', 'extra_rounds_granted',
+    'accepted_via', 'cold_suite', 'commit', 'consults', 'dissents', 'enforcements', 'escalation', 'extra_rounds_granted',
     'files_committed', 'gate', 'growth', 'modifiers', 'stages',
   ])
   assert.deepEqual(result.details.stages, ['plan:r1', 'check:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:pass', 'commit', 'suite', 'suite:cold', 'done'])
@@ -6072,6 +6077,7 @@ const ZERO_CAPACITY_RESULT = Object.freeze({
     escalation: null,
     cold_suite: { verdict: 'green', path: '/zz/aa11bb', counts: null },
     extra_rounds_granted: [],
+    enforcements: [],
     growth: [{
       round: 1, plan_bytes: null, gate_bytes: null, plan_delta: null, gate_delta: null,
       combined_bytes: null, round1_combined_bytes: null, files_in_scope_count: 2, ratio: null, divergent: false,
@@ -6081,6 +6087,7 @@ const ZERO_CAPACITY_RESULT = Object.freeze({
   },
 })
 const ZERO_CAPACITY_LOGS = Object.freeze([
+  { plan_round_cap: { adopted: false, cap: 2, predecessor_checked: null, reason: 'not-adopted' }, channel: 'record' },
   { stage: 'plan:r1', channel: 'record' },
   { assign: 'planner1', role: 'planner', brief: '/tmp/brief.md', channel: 'record' },
   { envelope: 'planner1', role: 'planner', status: 'done', channel: 'record' },
@@ -6526,7 +6533,7 @@ test('full is trace-identical and keeps the eleven legacy detail keys', () => {
   const omitted = driveTask(CTX, omittedIo)
   const explicit = driveTask({ ...CTX, variant: 'full' }, explicitIo)
   assert.deepEqual(omitted.details.stages, ['plan:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:pass', 'commit', 'suite', 'suite:cold', 'done'])
-  assert.deepEqual(Object.keys(omitted.details).sort(), ['accepted_via', 'cold_suite', 'commit', 'consults', 'dissents', 'escalation', 'extra_rounds_granted', 'files_committed', 'gate', 'growth', 'modifiers', 'stages'])
+  assert.deepEqual(Object.keys(omitted.details).sort(), ['accepted_via', 'cold_suite', 'commit', 'consults', 'dissents', 'enforcements', 'escalation', 'extra_rounds_granted', 'files_committed', 'gate', 'growth', 'modifiers', 'stages'])
   assert.deepEqual(omitted, explicit)
   assert.deepEqual(omittedIo.calls, explicitIo.calls)
 })
@@ -6545,7 +6552,7 @@ test('repair uses one bounded triage round and keeps the reviewed finish path', 
   assert.equal(result.details.gate, null)
   assert.deepEqual(io.calls.commits[0].files, ['a.mjs', 'a.test.mjs'])
   assert.equal(io.calls.assign.filter(({ role }) => role === 'planner').length, 1)
-  assert.deepEqual(Object.keys(result.details).sort(), ['accepted_via', 'cold_suite', 'commit', 'consults', 'dissents', 'escalation', 'extra_rounds_granted', 'files_committed', 'gate', 'growth', 'modifiers', 'stages'])
+  assert.deepEqual(Object.keys(result.details).sort(), ['accepted_via', 'cold_suite', 'commit', 'consults', 'dissents', 'enforcements', 'escalation', 'extra_rounds_granted', 'files_committed', 'gate', 'growth', 'modifiers', 'stages'])
   assert.equal(io.calls.assign.find(({ role }) => role === 'builder').briefFile, TRIAGE_NOTE)
   assert.match(io.calls.writes[`${TD}/repair-brief.md`], /Failure brief \(verbatim\)/)
   assert.match(io.calls.writes[`${TD}/repair-brief.md`], /files_in_scope/)
@@ -7319,7 +7326,7 @@ test("a reviewed shape's acceptance is untouched by the envelope contract", () =
   })
   const result = driveTask({ ...CTX, variant: 'full' }, io)
   assert.equal(result.status, 'done')
-  assert.deepEqual(Object.keys(result.details).sort(), ['accepted_via', 'cold_suite', 'commit', 'consults', 'dissents', 'escalation', 'extra_rounds_granted', 'files_committed', 'gate', 'growth', 'modifiers', 'stages'])
+  assert.deepEqual(Object.keys(result.details).sort(), ['accepted_via', 'cold_suite', 'commit', 'consults', 'dissents', 'enforcements', 'escalation', 'extra_rounds_granted', 'files_committed', 'gate', 'growth', 'modifiers', 'stages'])
   assert.equal(io.calls.logs.some((line) => line.envelope_accepted), false)
 
   const triageIo = fakeIo({ envelopes: { 'planner:1': triageEnv({ summary: '' }) }, changed: [] })
@@ -7602,7 +7609,7 @@ const replayResumeStages = (io) => {
   }
   return stack
 }
-const resumeKeys = ['stages', 'escalation', 'commit', 'dissents', 'extra_rounds_granted', 'growth', 'modifiers', 'gate', 'seq_high_water', 'gate_attempt_high_water', 'cursor', 'consults_spent', 'accept_findings', 'head']
+const resumeKeys = ['stages', 'escalation', 'commit', 'dissents', 'extra_rounds_granted', 'growth', 'modifiers', 'enforcements', 'gate', 'seq_high_water', 'gate_attempt_high_water', 'cursor', 'consults_spent', 'accept_findings', 'head']
 const CRASH_WHY = 'builder: no valid envelope at builder:3 within 2400s'
 const CRASH_STAGES = [
   'plan:r1', 'gate-baseline', 'build:r1', 'scope-gate:r1', 'build:r2', 'scope-gate:r2',
@@ -8061,7 +8068,10 @@ const DRIVE_JOURNAL_EXPECTED = Object.freeze([
   ['recordRow', '', 'at converge_declined residual why'],
   ['recordRow', '', 'at converge_declined residual why'],
   ['recordRow', '', 'at commit_subject'],
+  ['recordRow', '', 'at seat_turn_ceiling'],
+  ['recordRow', '', 'at seat_enforcement'],
   ['recordRow', '', 'at assign role brief'],
+  ['recordRow', '', 'at seat_enforcement'],
   ['recordRow', '', 'at review_outcome'],
   ['recordRow', '', 'at review_findings_note'],
   ['recordRow', '', 'at envelope role status'],
@@ -8076,6 +8086,7 @@ const DRIVE_JOURNAL_EXPECTED = Object.freeze([
   ['recordRow', '', 'at envelope_accepted'],
   ['recordRow', '', 'at triage'],
   ['recordRow', '', 'at directed'],
+  ['recordRow', '', 'at plan_round_cap'],
   ['recordRow', '', 'at member_questions'],
   ['recordRow', '', 'at question_answers'],
   ['recordRow', '', 'at plan_scope'],
@@ -8119,7 +8130,7 @@ test('the journal channel vocabulary is closed, exported and additive', () => {
 test('every journal emit site in the driver is inventoried, wrapped and on the right channel', () => {
   const text = readFileSync(new URL('./drive.mjs', import.meta.url), 'utf8')
   const sites = driveJournalSites(text)
-  assert.equal(sites.length, 52)
+  assert.equal(sites.length, 56)
   assert.deepEqual(sites.map(({ wrapper, events, keys }) => [wrapper, events, keys]), DRIVE_JOURNAL_EXPECTED)
   assert.ok(sites.every(({ wrapper }) => wrapper === 'recordRow' || wrapper === 'operationalRow'))
   assert.equal(sites.filter(({ wrapper }) => wrapper === 'operationalRow').length, 2)
@@ -10662,4 +10673,354 @@ test('RV1-1 an all-exempt declaration set journals a completed bind check', () =
     { generation: 1, declared: 0, exact: 0, normalized: 0, absent: 0, corrected: 0, checks: [] },
   ])
   assert.equal(io.calls.logs.filter((line) => line.mutation_anchor_absent).length, 0)
+})
+
+test('turn-ceiling and adopted-plan helpers keep their closed contracts', () => {
+  const absent = resolveTurnCeilings({})
+  assert.deepEqual(Object.keys(absent), TURN_CEILING_ROLES)
+  assert.ok(TURN_CEILING_ROLES.every((role) => absent[role] === NO_TURN_CEILING))
+  assert.equal(turnCeilingsRecord(absent), null)
+  const flagged = resolveTurnCeilings({ planner: '40', builder: 7 })
+  assert.equal(flagged.planner, 40)
+  assert.equal(flagged.builder, 7)
+  assert.equal(flagged.reviewer, null)
+  assert.deepEqual(turnCeilingsRecord(flagged), {
+    planner: 40, 'tech-lead': null, builder: 7, reviewer: null, lead: null,
+    source: { planner: 'flag', 'tech-lead': 'absent', builder: 'flag', reviewer: 'absent', lead: 'absent' },
+  })
+  for (const raw of [{ planner: 'abc' }, { planner: '0' }, { planner: '-1' }, { planner: '1e9' }, { planner: true }, { planner: 1001 }]) {
+    assert.throws(() => resolveTurnCeilings(raw), (error) => TURN_CEILING_REFUSALS.includes(error.reason))
+  }
+
+  const adopted = `${ADOPTED_PLAN_HEADING}\n`
+  assert.deepEqual(adoptionSignal({ briefText: null, planCheckText: 'VERDICT: approve\n' }), { adopted: false, predecessor_checked: null, reason: 'not-adopted' })
+  assert.deepEqual(adoptionSignal({ briefText: adopted, planCheckText: 'VERDICT: approve\n' }), { adopted: true, predecessor_checked: true, reason: null })
+  assert.equal(adoptionSignal({ briefText: `Notice: ${ADOPTED_PLAN_HEADING}\n`, planCheckText: 'VERDICT: approve\n' }).adopted, false)
+  assert.deepEqual(adoptionSignal({ briefText: adopted, planCheckText: 'VERDICT: revise\n' }), { adopted: true, predecessor_checked: false, reason: null })
+  for (const text of ['', 'VERDICT: banana\n', '# Plan check\nVERDICT: approve\n']) {
+    assert.deepEqual(adoptionSignal({ briefText: adopted, planCheckText: text }), { adopted: true, predecessor_checked: null, reason: PLAN_CHECK_INVALID })
+  }
+  assert.deepEqual(adoptionSignal({ briefText: adopted, planCheckText: null }), { adopted: true, predecessor_checked: null, reason: PLAN_CHECK_ABSENT })
+  assert.equal(planRoundCap({ limits: LIMITS, adopted: true, predecessorChecked: true }), 1)
+  assert.equal(planRoundCap({ limits: LIMITS, adopted: true, predecessorChecked: false }), LIMITS.plan_rounds)
+  assert.equal(planRoundCap({ limits: LIMITS, adopted: true, predecessorChecked: null }), LIMITS.plan_rounds)
+  assert.equal(planRoundCap({ limits: LIMITS, adopted: true, predecessorChecked: true, extraPlanRounds: 1 }), 2)
+
+  assert.equal(enforcementPreamble({ details: { turn_ceiling: { turns: 7, budget: 5 } } }).kind, 'turn-ceiling')
+  const unavailable = enforcementPreamble({ details: { turn_ceiling: { turns: null, budget: 5, absent_reason: CENSUS_ROW_ABSENT } } })
+  assert.equal(unavailable.kind, 'turn-ceiling-unmeasured')
+  assert.match(unavailable.lines[0], /census-row-absent/)
+  assert.doesNotMatch(unavailable.lines[0], /after null turns/)
+  for (const env of [null, {}, { details: { turn_ceiling: { turns: '7' } } }, { details: { suite_refusal: { reason: 'x' } } }]) {
+    assert.deepEqual(enforcementPreamble(env), { kind: null, lines: [] })
+  }
+})
+
+test('turn-census observation uses outcome-qualified composite keys and never fabricates a breach', () => {
+  const json = (dispatch_id, role, turns, outcome = 'ok', absent_reason = null) => ({
+    headless_outcome: outcome,
+    seat_turn_census: { dispatch_id, role, transport: 'headless-json', turns, absent_reason },
+  })
+  const rpc = (dispatch_id, role, outcome) => [
+    { rpc_outcome: outcome, id: dispatch_id, role },
+    { seat_turn_census: { dispatch_id, role, transport: 'headless-rpc', turns: 12, absent_reason: null } },
+  ]
+  assert.deepEqual(observeTurnCensus([], 'd1', 'planner'), { turns: null, absent: CENSUS_ROW_ABSENT, adjudicate: true })
+  assert.deepEqual(observeTurnCensus([json('d1', 'planner', 12)], 'd1', 'planner'), { turns: 12, absent: null, adjudicate: true })
+  assert.equal(observeTurnCensus([json('d1', 'planner', 12, 'ok-degraded')], 'd1', 'planner').turns, 12)
+  assert.equal(observeTurnCensus([json('d1', 'planner', 99, 'budget-refused')], 'd1', 'planner').absent, CENSUS_ROW_ABSENT)
+  assert.equal(observeTurnCensus([{ seat_turn_census: { dispatch_id: 'd1', role: 'planner', transport: 'headless-json', turns: 99 } }], 'd1', 'planner').absent, CENSUS_ROW_ABSENT)
+  assert.deepEqual(observeTurnCensus(rpc('d1', 'planner', 'no-envelope'), 'd1', 'planner'), { turns: null, absent: null, adjudicate: false })
+  assert.equal(observeTurnCensus([json('d2', 'planner', 8), json('d1', 'reviewer', 77)], 'd1', 'planner').absent, CENSUS_ROW_ABSENT)
+  assert.equal(observeTurnCensus([json('d1', 'reviewer', 77)], 'd1', 'reviewer').turns, 77)
+  assert.equal(observeTurnCensus([{ rpc_outcome: 'ok', id: 'd1', role: 'reviewer' }, ...rpc('d1', 'planner', 'ok')], 'd1', 'planner').turns, 12)
+  assert.equal(observeTurnCensus([json('d1', 'planner', '12')], 'd1', 'planner').absent, CENSUS_TURNS_ABSENT)
+  assert.equal(observeTurnCensus([json('d1', 'planner', 0, 'ok', 'producer prose')], 'd1', 'planner').turns, 0)
+  assert.equal(observeTurnCensus([json('d1', 'planner', null, 'ok', 'the stream exists but carries no parsable frame')], 'd1', 'planner').absent, CENSUS_TURNS_ABSENT)
+  assert.equal(observeTurnCensus([json('d1', 'planner', null, 'ok', 42)], 'd1', 'planner').absent, CENSUS_TURNS_ABSENT)
+  assert.equal(observeTurnCensus([{ ...json('d1', 'planner', 88, 'budget-refused') }, { rpc_outcome: 'ok', id: 'd1', role: 'planner' }], 'd1', 'planner').absent, CENSUS_ROW_ABSENT)
+  assert.equal(observeTurnCensus([...rpc('d1', 'planner', 'budget-refused'), { rpc_outcome: 'ok', id: 'd1', role: 'planner' }], 'd1', 'planner').absent, CENSUS_ROW_ABSENT)
+  for (const [turns, budget, expected] of [[12, 10, true], [10, 10, false], [9, 10, false], [null, 10, false], [0, 10, false], [12, null, false], ['12', 10, false]]) {
+    assert.equal(turnCeilingBreached(turns, budget), expected, `${JSON.stringify([turns, budget])}`)
+  }
+  assert.ok(CENSUS_ABSENT_REASONS.includes(CENSUS_TURNS_ABSENT))
+  assert.ok(CENSUS_ABSENT_REASONS.includes(CENSUS_ROW_ABSENT))
+  assert.ok(CENSUS_ABSENT_REASONS.includes(CENSUS_UNREADABLE))
+})
+
+test('post-return planner enforcement rejects an over-budget return and carries its count to the next brief', () => {
+  const journal = `${TD}/journal.jsonl`
+  const journalRows = [
+    { event: 'run-start' },
+    { headless_outcome: 'ok', seat_turn_census: { dispatch_id: 'planner1', role: 'planner', transport: 'headless-json', turns: 137, absent_reason: null } },
+    { headless_outcome: 'ok', seat_turn_census: { dispatch_id: 'planner2', role: 'planner', transport: 'headless-json', turns: 1, absent_reason: null } },
+  ]
+  const io = fakeIo({
+    files: { [journal]: `${journalRows.map((row) => JSON.stringify(row)).join('\n')}\n` },
+    envelopes: { 'planner:1': planEnv(), 'lead:1': leadEnv('bounce', 'retry the bounded plan'), 'planner:2': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask({ ...CTX, turnCeilings: { planner: 40 } }, io)
+  assert.equal(result.status, 'done')
+  const measured = io.calls.logs.filter((row) => row.seat_turn_ceiling)
+  assert.deepEqual(measured[0].seat_turn_ceiling, { role: 'planner', dispatch: 'planner1', turns: 137, budget: 40, measured: true, enforced: true, absent_reason: null })
+  const planner = io.calls.assign.filter((row) => row.role === 'planner')
+  assert.equal(planner.length, 2)
+  assert.match(planner[1].briefFile, new RegExp(`^${TD}/enforcement-planner-r\\d+\\.md$`))
+  assert.match(io.calls.writes[planner[1].briefFile], /137 turns against a role budget of 40/)
+  assert.deepEqual(result.details.enforcements[0], { role: 'planner', id: 'planner1', kind: 'turn-ceiling', lines: [
+    'Your previous dispatch returned after 137 turns against a role budget of 40; its envelope was REJECTED.',
+    'Batch your reads and leave the mechanical proof to the driver; the same assignment is asked again.',
+  ] })
+})
+
+test('RV1-1 adopted plan cap drives every live plan-round site', () => {
+  const inherited = (planCheck) => ({ [CTX.briefFile]: ADOPT_BLOCK, [`${TD}/plan-check.md`]: planCheck })
+  const count = (io, role) => io.calls.assign.filter((entry) => entry.role === role).length
+  const capRow = (io) => io.calls.logs.find((entry) => entry.plan_round_cap)?.plan_round_cap
+
+  const approved = fakeIo({
+    files: inherited('VERDICT: approve\n'),
+    envelopes: { 'planner:1': planEnv(), 'tech-lead:1': checkEnv('revise'), 'lead:1': leadEnv('escalate') },
+  })
+  const approvedResult = driveTask(CTX_TL, approved)
+  assert.equal(approvedResult.status, 'escalation')
+  assert.equal(approvedResult.details.escalation.where, 'plan-check')
+  assert.deepEqual(capRow(approved), { adopted: true, predecessor_checked: true, reason: null, cap: 1 })
+  assert.equal(count(approved, 'planner'), 1)
+  assert.equal(count(approved, 'tech-lead'), 1)
+  assert.equal(approvedResult.details.stages.includes('plan:r2'), false)
+  assert.equal(approvedResult.details.stages.includes('check:r2'), false)
+
+  const revised = fakeIo({
+    files: inherited('VERDICT: revise\n'),
+    envelopes: {
+      'planner:1': planEnv(), 'tech-lead:1': checkEnv('revise'),
+      'planner:2': planEnv(), 'tech-lead:2': checkEnv('revise'), 'lead:1': leadEnv('escalate'),
+    },
+  })
+  const revisedResult = driveTask(CTX_TL, revised)
+  assert.equal(revisedResult.status, 'escalation')
+  assert.equal(count(revised, 'planner'), 2)
+  assert.equal(count(revised, 'tech-lead'), 2)
+  assert.equal(revisedResult.details.stages.includes('check:r2'), true)
+
+  const granted = fakeIo({
+    files: inherited('VERDICT: approve\n'),
+    envelopes: {
+      'planner:1': planEnv(), 'tech-lead:1': checkEnv('revise'), 'lead:1': leadEnv('bounce'),
+      'planner:2': planEnv(), 'tech-lead:2': checkEnv('revise'), 'lead:2': leadEnv('escalate'),
+    },
+  })
+  const grantedResult = driveTask(CTX_TL, granted)
+  assert.equal(grantedResult.status, 'escalation')
+  assert.equal(count(granted, 'tech-lead'), 2)
+  assert.equal(grantedResult.details.stages.includes('check:r2'), true)
+  assert.equal(grantedResult.details.stages.includes('check:r3'), false)
+
+  const widened = fakeIo({
+    files: inherited('VERDICT: approve\n'),
+    envelopes: { 'planner:1': planEnv() },
+  })
+  const widenedResult = driveTask({ ...CTX_TL, files_in_scope: ['a.mjs'] }, widened)
+  assert.equal(widenedResult.status, 'escalation')
+  assert.equal(widenedResult.details.escalation.where, 'plan-scope-widened')
+  assert.equal(count(widened, 'planner'), 1)
+  assert.equal(count(widened, 'tech-lead'), 0)
+
+  const bounced = fakeIo({
+    files: inherited('VERDICT: approve\n'),
+    envelopes: {
+      'planner:1': planEnv({ status: 'insufficient', summary: 'retry the plan' }),
+      'lead:1': leadEnv('bounce'),
+    },
+  })
+  const bouncedResult = driveTask(CTX_TL, bounced)
+  assert.equal(bouncedResult.status, 'escalation')
+  assert.equal(bouncedResult.details.escalation.where, 'plan')
+  assert.match(bouncedResult.details.escalation.why, /no accepted plan within 1 rounds/)
+  assert.equal(count(bounced, 'planner'), 1)
+  assert.equal(bouncedResult.details.stages.includes('plan:r2'), false)
+})
+
+test('RV1-2 unmeasured turn census is rejected at every driver seam', () => {
+  const journal = `${TD}/journal.jsonl`
+  const json = (dispatch_id, role, turns, headless_outcome = 'ok') => ({
+    headless_outcome,
+    seat_turn_census: { dispatch_id, role, transport: 'headless-json', turns, absent_reason: null },
+  })
+  const rpc = (dispatch_id, role, turns, rpc_outcome = 'ok') => [
+    { rpc_outcome, id: dispatch_id, role },
+    { seat_turn_census: { dispatch_id, role, transport: 'headless-rpc', turns, absent_reason: null } },
+  ]
+  const journalText = (rows) => `${[{ event: RUN_START_EVENT }, ...rows].map((row) => JSON.stringify(row)).join('\n')}\n`
+  const greenRuns = { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } }
+  const ceilingRow = (io, dispatch) => io.calls.logs.find((entry) => entry.seat_turn_ceiling?.dispatch === dispatch)?.seat_turn_ceiling
+  const delivery = (io, role, n = 2) => {
+    const assignment = io.calls.assign.find((entry) => entry.role === role && entry.n === n)
+    assert.ok(assignment, `missing ${role}:${n} assignment`)
+    return io.calls.writes[assignment.briefFile]
+  }
+  const plannerIo = ({ rows = [], unreadable = false, lead2 = null } = {}) => {
+    const io = fakeIo({
+      files: { [journal]: journalText(rows) },
+      envelopes: {
+        'planner:1': planEnv(), 'lead:1': leadEnv('bounce', 'retry the bounded plan'),
+        'planner:2': planEnv(), ...(lead2 ? { 'lead:2': lead2 } : {}),
+        'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+      },
+      runs: greenRuns,
+      changed: ['a.mjs', 'a.test.mjs'],
+    })
+    if (unreadable) {
+      const readFile = io.readFile
+      io.readFile = (path) => {
+        if (path === journal) throw new Error('EACCES: turn census denied')
+        return readFile(path)
+      }
+    }
+    return io
+  }
+
+  const unmeasured = plannerIo({ rows: [json('planner1', 'planner', null), json('planner2', 'planner', 1)] })
+  const unmeasuredResult = driveTask({ ...CTX, turnCeilings: { planner: 40 } }, unmeasured)
+  assert.equal(unmeasuredResult.status, 'done')
+  assert.deepEqual(ceilingRow(unmeasured, 'planner1'), { role: 'planner', dispatch: 'planner1', turns: null, budget: 40, measured: false, enforced: false, absent_reason: CENSUS_TURNS_ABSENT })
+  assert.equal(unmeasuredResult.details.enforcements[0].kind, 'turn-ceiling-unmeasured')
+  const unmeasuredBrief = delivery(unmeasured, 'planner')
+  assert.match(unmeasuredBrief, /census-turns-absent/)
+  assert.doesNotMatch(unmeasuredBrief, /after null turns/)
+
+  const exact = plannerIo({ rows: [json('planner1', 'planner', 40)] })
+  const exactResult = driveTask({ ...CTX, turnCeilings: { planner: 40 } }, exact)
+  assert.equal(exactResult.status, 'done')
+  assert.deepEqual(ceilingRow(exact, 'planner1'), { role: 'planner', dispatch: 'planner1', turns: 40, budget: 40, measured: true, enforced: false, absent_reason: null })
+  assert.equal(exact.calls.assign.filter((entry) => entry.role === 'planner').length, 1)
+  assert.deepEqual(exactResult.details.enforcements, [])
+
+  for (const [label, rows] of [
+    ['stale failed attempt', [json('planner1', 'planner', 137, 'budget-refused'), json('planner2', 'planner', 1)]],
+    ['foreign role sharing dispatch', [json('planner1', 'reviewer', 137), json('planner2', 'planner', 1)]],
+  ]) {
+    const io = plannerIo({ rows })
+    const result = driveTask({ ...CTX, turnCeilings: { planner: 40 } }, io)
+    assert.equal(result.status, 'done', label)
+    assert.deepEqual(ceilingRow(io, 'planner1'), { role: 'planner', dispatch: 'planner1', turns: null, budget: 40, measured: false, enforced: false, absent_reason: CENSUS_ROW_ABSENT }, label)
+    assert.match(delivery(io, 'planner'), /census-row-absent/, label)
+    assert.doesNotMatch(delivery(io, 'planner'), /137/, label)
+  }
+
+  const unreadable = plannerIo({ unreadable: true, lead2: leadEnv('escalate') })
+  const unreadableResult = driveTask({ ...CTX, turnCeilings: { planner: 40 } }, unreadable)
+  assert.equal(unreadableResult.status, 'escalation')
+  assert.deepEqual(ceilingRow(unreadable, 'planner1'), { role: 'planner', dispatch: 'planner1', turns: null, budget: 40, measured: false, enforced: false, absent_reason: CENSUS_UNREADABLE })
+  assert.match(delivery(unreadable, 'planner'), /census-unreadable/)
+
+  const rpcMeasured = plannerIo({ rows: [...rpc('planner1', 'planner', 137), json('planner2', 'planner', 1)] })
+  const rpcResult = driveTask({ ...CTX, turnCeilings: { planner: 40 } }, rpcMeasured)
+  assert.equal(rpcResult.status, 'done')
+  assert.deepEqual(ceilingRow(rpcMeasured, 'planner1'), { role: 'planner', dispatch: 'planner1', turns: 137, budget: 40, measured: true, enforced: true, absent_reason: null })
+  assert.match(delivery(rpcMeasured, 'planner'), /137 turns against a role budget of 40/)
+
+  for (const [label, envelope] of [
+    ['stale assignment', planEnv({ assignment_id: 'stale-planner' })],
+    ['wrong role', planEnv({ role: 'builder' })],
+    ['missing status', (() => { const env = planEnv(); delete env.status; return env })()],
+    ['no envelope', null],
+  ]) {
+    const io = fakeIo({
+      files: { [journal]: journalText([json('planner1', 'planner', 137)]) },
+      envelopes: { 'planner:1': envelope }, runs: greenRuns, changed: ['a.mjs', 'a.test.mjs'],
+    })
+    let journalReads = 0
+    const readFile = io.readFile
+    io.readFile = (path) => {
+      if (path === journal) journalReads += 1
+      return readFile(path)
+    }
+    const result = driveTask({ ...CTX, turnCeilings: { planner: 40 } }, io)
+    assert.equal(result.status, 'escalation', label)
+    assert.equal(result.details.escalation.where, 'planner', label)
+    assert.equal(ceilingRow(io, 'planner1'), undefined, label)
+    assert.equal(journalReads, 0, label)
+    assert.equal(Object.keys(io.calls.writes).some((path) => path.includes('enforcement-planner-')), false, label)
+  }
+
+  const rpcNoEnvelope = fakeIo({
+    files: { [journal]: journalText([{ rpc_outcome: 'no-envelope', id: 'planner1', role: 'planner' }]) },
+    envelopes: {
+      'planner:1': { assignment_id: 'planner1', role: 'planner', status: 'insufficient', summary: 'rpc returned no envelope', artifacts: [], details: { degraded: 'rpc-no-envelope' } },
+      'lead:1': leadEnv('escalate'),
+    },
+    runs: greenRuns,
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const rpcNoEnvelopeResult = driveTask({ ...CTX, turnCeilings: { planner: 40 } }, rpcNoEnvelope)
+  assert.equal(rpcNoEnvelopeResult.status, 'escalation')
+  assert.equal(ceilingRow(rpcNoEnvelope, 'planner1'), undefined)
+  assert.equal(Object.keys(rpcNoEnvelope.calls.writes).some((path) => path.includes('enforcement-planner-')), false)
+
+  const unconfigured = fakeIo({
+    files: { [journal]: journalText([json('planner1', 'planner', 137)]) },
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: greenRuns,
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  let unconfiguredJournalReads = 0
+  const unconfiguredRead = unconfigured.readFile
+  unconfigured.readFile = (path) => {
+    if (path === journal) unconfiguredJournalReads += 1
+    return unconfiguredRead(path)
+  }
+  const unconfiguredResult = driveTask(CTX, unconfigured)
+  assert.equal(unconfiguredResult.status, 'done')
+  assert.equal(unconfiguredJournalReads, 0)
+  assert.equal(unconfigured.calls.logs.some((entry) => entry.seat_turn_ceiling), false)
+  assert.deepEqual(unconfiguredResult.details.enforcements, [])
+
+  const builder = fakeIo({
+    files: { [journal]: journalText([json('builder1', 'builder', 137), json('builder2', 'builder', 1)]) },
+    envelopes: {
+      'planner:1': planEnv(), 'builder:1': buildEnv(), 'lead:1': leadEnv('bounce', 'retry the build'),
+      'builder:2': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: greenRuns,
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const builderResult = driveTask({ ...CTX, turnCeilings: { builder: 40 } }, builder)
+  assert.equal(builderResult.status, 'done')
+  assert.deepEqual(ceilingRow(builder, 'builder1'), { role: 'builder', dispatch: 'builder1', turns: 137, budget: 40, measured: true, enforced: true, absent_reason: null })
+  assert.match(delivery(builder, 'builder'), /137 turns against a role budget of 40/)
+
+  const reviewer = fakeIo({
+    files: { [journal]: journalText([json('reviewer1', 'reviewer', 137), json('reviewer2', 'reviewer', 1)]) },
+    envelopes: {
+      'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+      'lead:1': leadEnv('bounce', 'retry the review'), 'reviewer:2': reviewEnv('pass'),
+    },
+    runs: greenRuns,
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const reviewerResult = driveTask({ ...CTX, turnCeilings: { reviewer: 40 } }, reviewer)
+  assert.equal(reviewerResult.status, 'done')
+  assert.deepEqual(ceilingRow(reviewer, 'reviewer1'), { role: 'reviewer', dispatch: 'reviewer1', turns: 137, budget: 40, measured: true, enforced: true, absent_reason: null })
+  assert.equal(reviewer.calls.assign.filter((entry) => entry.role === 'reviewer').length, 2)
+  assert.match(delivery(reviewer, 'reviewer'), /137 turns against a role budget of 40/)
+
+  const lead = fakeIo({
+    files: { [journal]: journalText([json('lead1', 'lead', 137)]) },
+    envelopes: {
+      'planner:1': planEnv({ status: 'insufficient', summary: 'needs a lead decision' }),
+      'lead:1': leadEnv('bounce'),
+    },
+    runs: greenRuns,
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const leadResult = driveTask({ ...CTX, turnCeilings: { lead: 40 } }, lead)
+  assert.equal(leadResult.status, 'escalation')
+  assert.match(leadResult.details.escalation.why, /lead returned insufficient/)
+  assert.deepEqual(ceilingRow(lead, 'lead1'), { role: 'lead', dispatch: 'lead1', turns: 137, budget: 40, measured: true, enforced: true, absent_reason: null })
+  assert.equal(lead.calls.assign.filter((entry) => entry.role === 'lead').length, 1)
+  assert.equal(Object.keys(lead.calls.writes).some((path) => path.includes('enforcement-lead-')), false)
 })

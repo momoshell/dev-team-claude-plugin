@@ -14,6 +14,7 @@ No subagent fan-out: this seat spawns no scouts until #808 fills local_providers
 Issue every independent read in ONE turn — a batch of greps, reads and file listings that do not depend on each other is one tool block, not one turn each.
 Read a file once and cite it from context — re-slicing a file you have already read buys nothing and every turn re-sends the whole context.
 Run your own acceptance gate at baseline, exactly once. Run nothing else — the driver owns the validation lane and the suite.
+*Your role turn ceiling is read from your seat's turn census AFTER your dispatch returns: an envelope returned over the role budget is REJECTED, the count and the budget are journaled, and the count reaches you at the head of your next brief. A census that cannot be read is a measurement failure and is rejected the same way, naming the reason.*
 
 
 ## The plan (your deliverable)

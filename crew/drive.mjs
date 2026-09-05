@@ -375,10 +375,48 @@ export { PROTECTED_PATHS, resolveProtectedPaths } from './protected-paths.mjs'
 export const EXECUTIONS = Object.freeze(['reviewed', 'envelope'])
 export const WRITE_SURFACES = Object.freeze(['planned', 'none'])
 export const ENVELOPE_FIELD_KINDS = Object.freeze(['text', 'records'])
+// #915 — the planner's validation_lane is RESOLVED where it is ACCEPTED, not where it is
+// run. b428 burned all three build rounds on a lane naming three fixtures node's loader
+// cannot open: the lane is fixed at plan acceptance (:3781) and no seat may amend it, so
+// the builder got the byte-identical failure three times. A refusal here is a BOUNCE back
+// to the planner inside its own round budget, and never a filter — a filtered lane hides a
+// planner that cannot tell a test from a fixture, and that is a planning defect worth seeing.
+export const VALIDATION_LANE_UNLOADABLE = 'validation-lane-unloadable'
+export const VALIDATION_LANE_EVENT = 'validation-lane-resolved'
+// What `node --test` can load, consulted ONLY after the tree has said the path is a regular
+// file. The order is load-bearing: a DIRECTORY named test/fixtures.jsonl is loadable and an
+// extensionless REGULAR FILE is not, so type is measured first and extension second.
+export const LOADABLE_LANE_EXTENSIONS = Object.freeze(['.mjs', '.js', '.cjs', '.ts'])
+// What the tree probe can report, one line per input. An input the probe did NOT report is
+// `unreadable` and is refused: no unmeasured input is ever accepted.
+export const LANE_PROBE_KINDS = Object.freeze(['dir', 'file', 'other', 'absent'])
+// Closed, per input. Everything except `loadable` is refused.
+export const LANE_INPUT_VERDICTS = Object.freeze([
+  'loadable', 'missing', 'unreadable', 'unsupported-type', 'unsupported-extension', 'glob-unresolved',
+])
+// The command shapes this driver recognises. `node-test` is the one it parses and the one
+// #915's contract binds. `opaque` is a lane making no node --test claim — every existing
+// driveTask test passes 'lane-cmd' — and the driver claims nothing about it rather than
+// pretending to have read it. `unparsable` is a lane whose shell quoting never closes.
+export const LANE_COMMAND_SHAPES = Object.freeze(['node-test', 'opaque', 'unparsable'])
+// node options taking a SPACE-SEPARATED SCALAR value — a timeout, a pattern, a reporter
+// name. Their value is consumed and never probed: without this table `--test-timeout 30000`
+// resolves 30000 as an input and refuses a working lane.
+export const LANE_VALUE_OPTIONS = Object.freeze([
+  '--test-timeout', '--test-name-pattern', '--test-skip-pattern', '--test-reporter',
+  '--test-reporter-destination', '--test-concurrency', '--test-shard', '--test-isolation',
+  '--env-file', '--conditions',
+])
+// #915/VL-4 — node options whose value is a FILE NODE LOADS. The contract is EVERY file the
+// lane would make node load, so these values are INPUTS judged exactly like a positional —
+// never scalars to skip past. `node --test --import <a .jsonl> a.test.mjs` is the b428
+// failure with one flag in front of it: the test file probes clean and the .jsonl is what
+// kills the run. Both spellings are honoured, `--import x` and `--import=x`.
+export const LANE_PATH_OPTIONS = Object.freeze(['--import', '--require', '-r', '--loader', '--experimental-loader'])
 // The CLOSED set of reasons an envelope refusal can name (#427). A refusal is a
 // {reason, why} pair whose reason is one of these; prose stays in `why`.
 export const ENVELOPE_REFUSAL_REASONS = Object.freeze([
-  'no-envelope', 'summary', 'artifacts', 'details', 'field-missing', 'field-kind', 'field-item', 'verdict-findings', 'finding-id', 'carried-silent',
+  'no-envelope', 'summary', 'artifacts', 'details', 'field-missing', 'field-kind', 'field-item', 'verdict-findings', 'finding-id', 'carried-silent', VALIDATION_LANE_UNLOADABLE,
 ])
 export const UNIVERSAL_STAGE_HEADS = Object.freeze(['escalate', 'done'])
 // #251 follow-on — a PARTIAL reviewed shape declares where it gets what a plan
@@ -3604,6 +3642,39 @@ function runTask(ctx, io, crash) {
         continue
       }
     }
+    // #915 — resolve the PLANNER's lane against the tree before accepting the plan. The
+    // operator's ctx.lane is deliberately NOT read here: --lane is already the operator's
+    // responsibility, and this seam exists only for the lane no seat may amend once it is
+    // fixed at :3781. The probe goes through io.run because that is the only authoritative
+    // type seam the driver has, and it already runs with cwd: checkout
+    // (crew/seat-io.mjs:3100), so a relative input resolves the way the lane itself will.
+    // A refusal is a BOUNCE while a plan round remains and an escalation only when none
+    // does — the shape the widened-scope refusal above already uses. Reusing the `plan`
+    // head is deliberate; it classifies `unclassified` in the ledger, like several other
+    // `plan` escalations, and fixing that belongs to a ledger lane, not this fence.
+    const laneAsked = env.details?.validation_lane
+    if (typeof laneAsked === 'string' && laneAsked.trim()) {
+      const laneResolved = resolveValidationLane(laneAsked, (inputs) => {
+        let res = null
+        try { res = io.run(laneProbeCommand(inputs)) } catch { return new Map() }
+        return res && res.ok === true ? laneProbeKinds(res.output) : new Map()
+      })
+      io.log(recordRow({ at: io.now(), event: VALIDATION_LANE_EVENT, validation_lane_resolved: { round, shape: laneResolved.shape.shape, ...laneResolved.counts, refused: laneResolved.refused.map((row) => row.input) } }))
+      if (laneResolved.refused.length > 0) {
+        if (round >= planRounds()) {
+          stageComplete()
+          return escalate('plan', validationLaneWhy(laneResolved, true), env.artifacts || [])
+        }
+        const b = art(`plan-bounce-r${round}.md`)
+        failureUpgrade('plan', 'planner')
+        io.writeFile(b, validationLaneBounceLines(round, laneAsked, laneResolved, ctx.briefFile).join('\n'))
+        planBrief = b
+        planNote = VALIDATION_LANE_UNLOADABLE
+        planEnv = null
+        stageComplete()
+        continue
+      }
+    }
     planEnv = env
     try {
       const bytesOf = (p) => {
@@ -5868,6 +5939,145 @@ export function planScopeBounceLines(round, verdict, briefFile, dispatched) {
     'Re-plan INSIDE the dispatched surface. Narrowing it is legal and is recorded, not refused;',
     'if the task genuinely cannot be built inside it, return status insufficient with the gap as',
     'a numbered details.questions entry rather than widening the surface yourself.', '',
+    `Original brief: ${briefFile}`,
+  ]
+}
+
+// #915 — a validation lane is a SHELL COMMAND, so its inputs must be recovered from it with
+// real shell-word rules before any of them can be resolved against the tree. A whitespace
+// split is not enough: this repo already emits quoted words that contain the quote
+// character itself (shellArg at :2002, crew/drive.test.mjs:10588-10591). Adjacent quote
+// runs concatenate, exactly as /bin/sh does. A quote that never closes is a DEFECT, never
+// a guess.
+export function shellWords(text) {
+  const src = String(text ?? '')
+  const words = []
+  let word = null
+  let mode = 'plain'
+  for (let i = 0; i < src.length; i += 1) {
+    const ch = src[i]
+    if (mode === 'single') { if (ch === "'") mode = 'plain'; else word += ch; continue }
+    if (mode === 'double') {
+      if (ch === '"') { mode = 'plain'; continue }
+      if (ch === '\\' && (src[i + 1] === '"' || src[i + 1] === '\\')) { i += 1; word += src[i]; continue }
+      word += ch
+      continue
+    }
+    if (/\s/.test(ch)) { if (word !== null) { words.push(word); word = null } continue }
+    if (ch === "'") { mode = 'single'; word = word ?? ''; continue }
+    if (ch === '"') { mode = 'double'; word = word ?? ''; continue }
+    if (ch === '\\' && i + 1 < src.length) { i += 1; word = (word ?? '') + src[i]; continue }
+    word = (word ?? '') + ch
+  }
+  if (mode !== 'plain') return { words: [], defect: `the lane has an unterminated ${mode} quote` }
+  if (word !== null) words.push(word)
+  return { words, defect: null }
+}
+// The shape this driver claims to have parsed. Node-test-ness is established FIRST, and
+// only then does the driver decide between parsing and refusing — the order is the whole
+// point. A lane that does not ATTEMPT a node --test run has no Node-test inputs for this
+// resolver to judge and stays `opaque`: crew/drive.test.mjs passes the lane 'lane-cmd' at
+// 221 sites and crew/daemon.test.mjs:1987-1994 drives the real loop with it from outside
+// this lane's write surface. A lane that DOES attempt one and that this driver cannot parse
+// fails CLOSED as `unparsable`, which pushes a refused row: accepting it unparsed would send
+// it to /bin/sh verbatim (:4779), where a pipeline's exit status is `cat`'s and node's own
+// load failure is invisible.
+export function laneCommandShape(cmd) {
+  const { words, defect } = shellWords(cmd)
+  if (defect) return { shape: 'unparsable', words: [], why: defect }
+  if (words.length === 0) return { shape: 'opaque', words, why: 'the lane is empty' }
+  const basename = (word) => word.slice(word.lastIndexOf('/') + 1)
+  if (!words.includes('--test') || !words.some((word) => basename(word) === 'node')) return { shape: 'opaque', words, why: `the lane does not present itself as a node --test invocation (${words[0]})` }
+  if (words.some((word) => /[&|;<>]/.test(word))) return { shape: 'unparsable', words, why: 'the lane attempts a node --test run through shell operators or redirection, which this driver cannot resolve' }
+  if (basename(words[0]) !== 'node') return { shape: 'unparsable', words, why: `the lane attempts a node --test run but its executable is ${words[0]}, so this driver cannot tell which words are its inputs` }
+  return { shape: 'node-test', words, why: null }
+}
+// Every input of a node --test lane, with SCALAR option values consumed, PATH option values
+// kept as inputs, and globs kept SEPARATE — a glob is refused below, never omitted. `--`
+// enters END-OF-OPTIONS mode: every word after it is a positional even when it begins with
+// `-`, which is the only way `node --test -- -fixture.jsonl` names an input at all. A
+// LANE_PATH_OPTIONS value is an input in BOTH spellings, because `--import=x` and `--import x`
+// make node load the same file and #915 judges what node loads.
+export function laneCommandInputs(cmd) {
+  const shape = laneCommandShape(cmd)
+  const inputs = []
+  const globs = []
+  if (shape.shape !== 'node-test') return { shape, inputs, globs }
+  let endOfOptions = false
+  const take = (word) => { if (word.includes('*') || word.includes('?')) globs.push(word); else inputs.push(word) }
+  for (let i = 1; i < shape.words.length; i += 1) {
+    const word = shape.words[i]
+    if (!endOfOptions && word === '--') { endOfOptions = true; continue }
+    if (!endOfOptions && word.startsWith('-')) {
+      const eq = word.indexOf('=')
+      const name = eq > 0 ? word.slice(0, eq) : word
+      if (LANE_PATH_OPTIONS.includes(name)) { const value = eq > 0 ? word.slice(eq + 1) : shape.words[i += 1]; if (value !== undefined && value !== '') take(value); continue }
+      if (LANE_VALUE_OPTIONS.includes(word)) i += 1
+      continue
+    }
+    take(word)
+  }
+  return { shape, inputs, globs }
+}
+// ONE command, one line per input, run in the checkout by io.run (crew/seat-io.mjs:3100).
+// This is the AUTHORITATIVE type probe: a directory is proven by `[ -d ]`, never inferred
+// from a token that happens to carry no extension.
+export function laneProbeCommand(inputs) {
+  return `for p in ${inputs.map((input) => shellArg(input)).join(' ')}; do if [ -d "$p" ]; then echo "dir $p"; elif [ -f "$p" ]; then echo "file $p"; elif [ -e "$p" ]; then echo "other $p"; else echo "absent $p"; fi; done`
+}
+export function laneProbeKinds(output) {
+  const kinds = new Map()
+  for (const line of String(output ?? '').split('\n')) {
+    const space = line.indexOf(' ')
+    if (space <= 0) continue
+    const kind = line.slice(0, space)
+    if (LANE_PROBE_KINDS.includes(kind)) kinds.set(line.slice(space + 1), kind)
+  }
+  return kinds
+}
+// null when the basename carries no extension.
+export function laneInputExtension(token) {
+  const base = token.slice(token.lastIndexOf('/') + 1)
+  const dot = base.lastIndexOf('.')
+  return dot > 0 ? base.slice(dot).toLowerCase() : null
+}
+// `probe` takes the input list and returns a Map of input -> kind. An input the probe did
+// not report is `unreadable` and REFUSED: an unmeasured cell is never read as a pass.
+export function resolveValidationLane(cmd, probe) {
+  const { shape, inputs, globs } = laneCommandInputs(cmd)
+  const rows = []
+  if (shape.shape === 'unparsable') rows.push({ input: String(cmd ?? ''), verdict: 'unreadable', why: shape.why })
+  for (const glob of globs) rows.push({ input: glob, verdict: 'glob-unresolved', why: 'this driver does not expand a glob, so it cannot resolve one — name the test files' })
+  const kinds = inputs.length > 0 ? probe(inputs) : new Map()
+  for (const input of inputs) {
+    const kind = kinds.get(input) ?? null
+    if (kind === null) { rows.push({ input, verdict: 'unreadable', why: 'the tree probe returned no verdict for this input' }); continue }
+    if (kind === 'absent') { rows.push({ input, verdict: 'missing', why: 'no such path in this checkout' }); continue }
+    if (kind === 'dir') { rows.push({ input, verdict: 'loadable', why: null }); continue }
+    if (kind !== 'file') { rows.push({ input, verdict: 'unsupported-type', why: `the path exists but is neither a regular file nor a directory (${kind})` }); continue }
+    const ext = laneInputExtension(input)
+    if (ext !== null && LOADABLE_LANE_EXTENSIONS.includes(ext)) rows.push({ input, verdict: 'loadable', why: null })
+    else rows.push({ input, verdict: 'unsupported-extension', why: `node --test has no loader for ${ext === null ? 'a regular file with no extension' : ext}` })
+  }
+  const counts = { total: rows.length }
+  for (const verdict of LANE_INPUT_VERDICTS) counts[verdict] = rows.filter((row) => row.verdict === verdict).length
+  return { shape, rows, refused: rows.filter((row) => row.verdict !== 'loadable'), counts }
+}
+export function validationLaneWhy(resolved, final) {
+  return `${VALIDATION_LANE_UNLOADABLE}: the plan's validation_lane names ${resolved.refused.length} input(s) node --test cannot run — ${resolved.refused.map((row) => `${row.input} (${row.why})`).join('; ')}${final ? '; on the final plan round there is no revision left to bounce it to' : ''}`
+}
+export function validationLaneBounceLines(round, cmd, resolved, briefFile) {
+  return [
+    `# Validation lane bounce (round ${round})`, '',
+    validationLaneWhy(resolved, false), '',
+    'The lane you returned, unedited — this driver refuses a lane, it never rewrites one:',
+    `    ${cmd}`, '',
+    'The inputs it refused:',
+    ...resolved.refused.map((row) => `- ${row.input} — ${row.why}`), '',
+    'Every input of a node --test lane must EXIST in the checkout and be loadable: a directory,',
+    `or a regular file ending ${LOADABLE_LANE_EXTENSIONS.join(', ')}. A glob is refused because this driver`,
+    'does not expand one. Return a details.validation_lane naming only test files. Nothing was',
+    'dropped from your lane and nothing will be.', '',
     `Original brief: ${briefFile}`,
   ]
 }

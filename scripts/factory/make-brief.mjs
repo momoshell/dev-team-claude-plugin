@@ -734,17 +734,27 @@ export function discoverTripwires({ checkout, files }) {
   const broadKeys = []
   for (const key of [...allKeys].sort()) {
     const hits = hitsByKey.get(key) || []
-    if (hits.length > BROAD_KEY_LIMIT) {
-      broadKeys.push({ key, count: hits.length })
-      continue
-    }
+    // Breadth is measured TWICE because it answers two different questions.
+    // For TRIPWIRES it counts every hit, unchanged: a key pinned by 32 test
+    // files is too broad to be evidence, and that count also raises the tier.
+    // For COUPLED SOURCES it counts only files that could BECOME one — a test
+    // file is a tripwire and never a coupled source, so letting tests decide
+    // this made the cap sensitive to how tests are SPLIT ACROSS FILES rather
+    // than to how widely the symbol is used. Splitting crew/drive.test.mjs
+    // into six subject files pushed driveTask from 29 hits to 34 and dropped
+    // crew/child.mjs's real driveTask coupling with it.
+    const broad = hits.length > BROAD_KEY_LIMIT
+    if (broad) broadKeys.push({ key, count: hits.length })
+    const couplingBroad = hits.filter((hit) => !isTripwireFile(hit)).length > BROAD_KEY_LIMIT
     for (const hit of hits) {
       if (isTripwireFile(hit)) {
+        if (broad) continue
         if (keyOwners.get(key)?.has(hit)) continue
         if (!tripwireMap.has(hit)) tripwireMap.set(hit, new Set())
         tripwireMap.get(hit).add(key)
         continue
       }
+      if (couplingBroad) continue
       if (!CODE_EXTENSIONS.includes(extname(hit).toLowerCase())) continue
       if (ownerFiles.has(hit)) continue
       const owners = symbolOwners.get(key) ?? citationOwners.get(key)

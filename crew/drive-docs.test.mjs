@@ -7,6 +7,37 @@ import {
   FINDING_DISPOSITIONS, FINDING_SEVERITIES, GATE_CUSTODIAN, MAX_QUESTIONS, PROTECTED_PATHS, REPO_ROOT, RESIDUAL_TYPES, applyPrescriptionLines, checkAnchors, existsSync, join, laneFence, partitionShifts, protectedHits, readFileSync, readdirSync, scratchDir, spawnSync,
 } from './drive-fixtures.mjs'
 
+test('the turn-economy rule is stated once and still reaches every seat', () => {
+  const roles = ['builder', 'lead', 'planner', 'reviewer', 'tech-lead']
+  const rules = {
+    builder: "Run the acceptance gate and the test files you are changing — never the full suite, which the driver's own suite stage owns and re-runs after you.",
+    planner: 'Run your own acceptance gate at baseline, exactly once. Run nothing else — the driver owns the validation lane and the suite.',
+    lead: 'Run no tests. The gate proof and the suite result are already journalled; read them from the task dir and the journal rather than re-buying them.',
+    reviewer: 'Run no tests. The gate proof and the suite result are already journalled; read them from the task dir and the journal rather than re-buying them.',
+    'tech-lead': 'Run no tests. The gate proof and the suite result are already journalled; read them from the task dir and the journal rather than re-buying them.',
+  }
+  const rolesDir = join(REPO_ROOT, 'crew', 'roles')
+  const docs = readdirSync(rolesDir).filter((name) => name.endsWith('.md')).map((name) => readFileSync(join(rolesDir, name), 'utf8'))
+  const shared = readFileSync(join(rolesDir, '_shared.md'), 'utf8')
+  const U1 = 'Issue every independent read in ONE turn — a batch of greps, reads and file listings that do not depend on each other is one tool block, not one turn each.'
+  const U2 = 'Read a file once and cite it from context — re-slicing a file you have already read buys nothing and every turn re-sends the whole context.'
+  const occurrences = (text, needle) => text.split(needle).length - 1
+  for (const universal of [U1, U2]) {
+    assert.equal(docs.reduce((count, text) => count + occurrences(text, universal), 0), 1)
+    assert.equal(occurrences(shared, universal), 1)
+  }
+  for (const role of roles) {
+    const card = readFileSync(join(rolesDir, `${role}.md`), 'utf8')
+    assert.equal(occurrences(card, U1), 0)
+    assert.equal(occurrences(card, U2), 0)
+    assert.doesNotMatch(card, /^## Turn economy\s*$/m)
+    const compiled = `${shared}\n\n${card}`
+    assert.equal(occurrences(compiled, U1), 1)
+    assert.equal(occurrences(compiled, U2), 1)
+    assert.equal(occurrences(compiled, rules[role]), 1)
+  }
+})
+
 test('the shared charter and validator agree on the findings contract', () => {
   const charter = readFileSync(new URL('./roles/reviewer.md', import.meta.url), 'utf8')
   const start = charter.indexOf('## Envelope details fields')

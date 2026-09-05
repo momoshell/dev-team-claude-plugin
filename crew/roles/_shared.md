@@ -52,6 +52,11 @@ answers them keyed to your ids and every answer comes back in ONE bounce brief
 reported; they never change the round's outcome. Only the planner's and the
 builder's status returns consume this field today.
 
+## Turn economy
+
+Issue every independent read in ONE turn — a batch of greps, reads and file listings that do not depend on each other is one tool block, not one turn each.
+Read a file once and cite it from context — re-slicing a file you have already read buys nothing and every turn re-sends the whole context.
+
 ## Hard rules
 
 - Your final chat message per assignment is the CREW-DONE line, preceded at

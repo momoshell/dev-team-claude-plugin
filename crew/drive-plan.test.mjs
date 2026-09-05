@@ -302,6 +302,69 @@ test('omitted answers keep the bounce outcome and mark every id UNANSWERED', () 
   assert.deepEqual(io.calls.logs.find((entry) => entry.question_answers)?.question_answers.unanswered, ['q1', 'q2'])
 })
 
+test('#930 an answered planner consult funds the round that reads the answers, once', () => {
+  const questions = (id, question) => ({ status: 'insufficient', summary: `gaps ${id}`, details: { questions: [{ id, question }] } })
+  const answeredIo = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(questions('q1', 'first?')),
+      'lead:1': leadEnv('bounce', 'round one steer', { answers: [{ id: 'q1', answer: 'round one answer' }] }),
+      'planner:2': planEnv(questions('q2', 'second?')),
+      'lead:2': leadEnv('bounce', 'round two steer', { answers: [{ id: 'q2', answer: 'distinctive round-2 answer' }] }),
+      'planner:3': planEnv(questions('q3', 'third?')),
+      'lead:3': leadEnv('escalate', 'unused', { reason: 'a human must decide' }),
+    },
+  })
+  const answered = driveTask(CTX, answeredIo)
+  const planners = answeredIo.calls.assign.filter(({ role }) => role === 'planner')
+  assert.equal(planners.length, 3)
+  assert.ok(answered.details.stages.includes('plan:r3'))
+  assert.equal(planners[2].briefFile, `${TD}/plan-bounce-r2.md`)
+  assert.match(answeredIo.calls.writes[`${TD}/plan-bounce-r2.md`], /ANSWER: distinctive round-2 answer/)
+  assert.deepEqual(answered.details.extra_rounds_granted, [{ where: 'plan-question', round: 2 }])
+  const grants = answeredIo.calls.logs.filter(({ extra_round_granted }) => extra_round_granted?.where === 'plan-question')
+  assert.equal(grants.length, 1)
+  assert.equal(grants[0].extra_round_granted.round, 2)
+  assert.ok(Number.isInteger(grants[0].extra_round_granted.consult))
+  const finalDecision = answeredIo.calls.writes[`${TD}/decision-3.md`]
+  assert.match(finalDecision, /^- escalate$/m)
+  assert.doesNotMatch(finalDecision, /^- bounce$/m)
+  assert.doesNotMatch(finalDecision, /answer ALL/)
+  assert.doesNotMatch(finalDecision, /details\.answers/)
+  assert.match(finalDecision, /do NOT answer them/)
+  assert.match(finalDecision, /No bounce can be funded; escalate and name what a human must decide\./)
+  assert.doesNotMatch(finalDecision, /Bounce it with guidance/)
+  assert.match(answered.details.escalation.why, /plan-question-bounce-unfunded/)
+  assert.match(answered.details.escalation.why, /no answers were solicited/)
+  assert.doesNotMatch(answered.details.escalation.why, /no accepted plan within \d+ rounds/)
+
+  const leadEscalates = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(questions('q1', 'first?')),
+      'lead:1': leadEnv('bounce', 'round one steer', { answers: [{ id: 'q1', answer: 'round one answer' }] }),
+      'planner:2': planEnv(questions('q2', 'second?')),
+      'lead:2': leadEnv('escalate', 'unused', { reason: 'lead says stop here' }),
+    },
+  })
+  const escalated = driveTask(CTX, leadEscalates)
+  assert.deepEqual(escalated.details.extra_rounds_granted, [])
+  assert.equal(leadEscalates.calls.assign.filter(({ role }) => role === 'planner').length, 2)
+  assert.equal(escalated.details.escalation.why, 'lead says stop here')
+
+  const questionless = fakeIo({
+    envelopes: {
+      'planner:1': planEnv({ status: 'insufficient', details: {} }),
+      'lead:1': leadEnv('bounce', 'steer'),
+      'planner:2': planEnv({ status: 'insufficient', details: {} }),
+      'lead:2': leadEnv('bounce', 'steer'),
+    },
+  })
+  const unchanged = driveTask(CTX, questionless)
+  assert.equal(questionless.calls.assign.filter(({ role }) => role === 'planner').length, 2)
+  assert.deepEqual(unchanged.details.stages, ['plan:r1', 'plan:r2', 'escalate:plan'])
+  assert.equal(unchanged.details.escalation.why, 'no accepted plan within 2 rounds')
+  assert.deepEqual(unchanged.details.extra_rounds_granted, [])
+})
+
 test('tech-lead seated: revise verdict bounces the plan, approve on r2 proceeds', () => {
   const ctx = { ...CTX, roles: ['lead', 'planner', 'builder', 'reviewer', 'tech-lead'] }
   const io = fakeIo({

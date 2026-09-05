@@ -11,6 +11,8 @@ import {
   REASK_TIMEOUT_S,
   SEAT_DIED_STAGE,
   WAIT_POLL_MS,
+  ROOT_DEATH_GROWTH_WINDOW_MS,
+  ROOT_DEATH_SUPPRESSED_EVENT,
   seatIo,
   seatRootDeath,
 } from './seat-io.mjs'
@@ -85,6 +87,8 @@ function runHeadless({
   corruptStore = false,
   captureThrows = false,
   growthThrows = false,
+  growth = null,
+  logThrowsOn = null,
 } = {}) {
   const dir = scratchDir('seat-io-death-')
   const taskDir = join(dir, 'task')
@@ -98,7 +102,17 @@ function runHeadless({
   let ticks = 0
   const rows = []
   const returnPath = join(returnsDir, `${dispatchId}.${ROLE}.json`)
-  const snapshot = snapshotFor(ps)
+  let snapshot = snapshotFor(ps)
+  // #931: a root that is present while the seat writes and vanishes afterwards —
+  // the real sequence, and the only one in which growth has a history to outrank
+  // the absence with. A root absent from the FIRST poll has no growth history and
+  // still dies immediately, which the third #931 test pins.
+  if (typeof ps === 'object' && ps && ps.aliveForPolls != null) {
+    let calls = 0
+    const present = snapshotFor('alive')
+    const gone = snapshotFor('absent')
+    snapshot = (...args) => { calls += 1; return calls <= ps.aliveForPolls ? present(...args) : gone(...args) }
+  }
   if (captureThrows) {
     mkdirSync(join(taskDir, 'headless'), { recursive: true })
     writeFileSync(join(taskDir, 'headless', '.capture.active.json'), JSON.stringify({ reservation_id: 'marker-1', pid: ROOT_PID, key: 'd1' }))
@@ -126,19 +140,44 @@ function runHeadless({
   const deps = {
     now: () => clock,
     sleep: (ms) => { clock += ms },
-    logLine: (_path, row) => rows.push(row),
+    logLine: (_path, row) => {
+      if (logThrowsOn && row && row.event === logThrowsOn) throw new Error('journal write failed')
+      rows.push(row)
+    },
     snapshot: captureThrows ? snapshot.captureSnapshot : snapshot,
     kill: () => {},
     spawnSync: () => ({ status: 1, stdout: '' }),
     headlessIo: transport === HEADLESS_TRANSPORT ? fakeTransport : undefined,
     headlessRpcIo: transport === HEADLESS_RPC_TRANSPORT ? fakeTransport : undefined,
   }
-  if (growthThrows) {
-    const streamDir = transport === HEADLESS_RPC_TRANSPORT
-      ? join(taskDir, 'headless-rpc', ROLE)
-      : join(taskDir, 'headless', 'd1')
-    mkdirSync(streamDir, { recursive: true })
-    writeFileSync(join(streamDir, 'stream.jsonl'), '{}\n')
+  if (growthThrows || growth) {
+    const names = growth?.dirs ? Object.keys(growth.dirs) : ['d1']
+    for (const name of names) {
+      const streamDir = transport === HEADLESS_RPC_TRANSPORT
+        ? join(taskDir, 'headless-rpc', ROLE)
+        : join(taskDir, 'headless', name)
+      mkdirSync(streamDir, { recursive: true })
+      writeFileSync(join(streamDir, 'stream.jsonl'), '{}\n')
+    }
+  }
+  // #931: a transcript whose mtime advances on each probe, so the growth reading
+  // and the absent-root reading disagree on the same tick.
+  if (growth) {
+    // Path-AWARE: each run directory advances independently, so a test can grow a
+    // SIBLING seat's transcript while this seat's own stays frozen (#931 must-fix).
+    const dirs = growth.dirs ?? { d1: { stopAfter: growth.stopAfter ?? Infinity } }
+    const probes = new Map()
+    const mtimes = new Map()
+    deps.statSync = (path) => {
+      const key = Object.keys(dirs).find((name) => String(path).includes(`/${name}/`)) ?? String(path)
+      const spec = dirs[key]
+      const n = (probes.get(key) ?? 0) + 1
+      probes.set(key, n)
+      let mtime = mtimes.get(key) ?? 1_000_000
+      if (spec && n > 1 && n <= (spec.stopAfter ?? Infinity)) mtime += spec.perProbe ?? 1000
+      mtimes.set(key, mtime)
+      return { mtimeMs: mtime }
+    }
   }
 
   const crew = {
@@ -408,5 +447,106 @@ test('the death path never needs worker binary resolution', () => {
   withRun({ ps: 'absent' }, (run) => {
     assert.equal(run.error?.stage, SEAT_DIED_STAGE)
     assert.equal(readFileSync(recordPath(run.taskDir, HEADLESS_TRANSPORT, 'd1'), 'utf8').includes('res-1'), true)
+  })
+})
+
+// #931. Six lanes died on 2026-09-05 to a worker root that vanished from ps while
+// its seat was still writing: `growth: true` was journaled 170ms before the root
+// probed absent, four of them at the lead consult after `scope-gate:r1`, and in two
+// of them a VALID ENVELOPE was already on disk when the driver reported that none
+// had arrived. Both readings are taken on the same tick of the sleep hook; only the
+// transcript observed the seat itself.
+//
+// `ps: 'absent'` alone ends the wait in one poll — the first test in this file pins
+// that. These runs keep it absent and let the transcript advance.
+
+// Mutation killed: dropping the growthOutranksRootDeath guard, so an absent root
+// throws while the transcript is still advancing.
+test('#931 a growing transcript outranks an absent worker root and the wait survives', () => {
+  withRun({ ps: { aliveForPolls: 3 }, growth: { stopAfter: Infinity } }, (run) => {
+    // The contrast is with the first test in this file: an absent root with no
+    // growth ends the wait at ticks === 1, elapsedMs === 0. Here the wait runs its
+    // whole budget instead, because the seat kept writing the entire time.
+    assert.equal(run.elapsedMs, run.budgetMs)
+    assert.ok(run.ticks > 1, 'the wait must not end on the first poll the way an unprotected absent root does')
+    const suppressed = run.rows.filter((row) => row && row.event === ROOT_DEATH_SUPPRESSED_EVENT)
+    assert.ok(suppressed.length > 0, 'the disagreement must be journaled, not silently swallowed')
+    assert.equal(suppressed[0].reason, 'probe-dead')
+    assert.equal(suppressed[0].window_ms, ROOT_DEATH_GROWTH_WINDOW_MS)
+    assert.equal(suppressed[0].root_pid, ROOT_PID)
+  })
+})
+
+// Mutation killed: widening the window to Infinity, which would make a genuinely
+// dead seat wait out its whole budget. Growth stops, the window lapses, it dies.
+test('#931 a seat whose transcript stops growing still dies once the window lapses', () => {
+  withRun({ ps: { aliveForPolls: 3 }, growth: { stopAfter: 16 } }, (run) => {
+    assert.equal(run.error?.stage, SEAT_DIED_STAGE)
+    assert.equal(run.error?.reclaim?.root_pid, ROOT_PID)
+    // The window is what makes this a DELAY and not an amnesty. Growth stops at
+    // probe 4, so the death must fire about one window later and well inside the
+    // budget — an unbounded window would suppress it until the wait timed out,
+    // which is a seat nobody ever notices is dead.
+    assert.ok(run.elapsedMs > 0, 'the seat should survive at least one poll before dying')
+    // Pins the WINDOW, not merely "inside the budget": growth stops after probe 4,
+    // so the death must land within one window plus a poll of that point. A window
+    // widened past this fails here, which is what makes the M2 mutation die.
+    // Pins the WINDOW, not merely "somewhere inside the budget": the death must
+    // land within one window of the LAST suppression. A window widened past this
+    // suppresses until the wait times out instead, which is the M2 mutation.
+    const suppressed = run.rows.filter((row) => row && row.event === ROOT_DEATH_SUPPRESSED_EVENT)
+    assert.ok(suppressed.length > 0, 'growth must have protected the seat before it stopped')
+    const lastSuppressedAt = suppressed[suppressed.length - 1].probed_at_ms
+    assert.ok(
+      run.elapsedMs - lastSuppressedAt <= ROOT_DEATH_GROWTH_WINDOW_MS + WAIT_POLL_MS,
+      `death must fire within one window of the last suppression, got ${run.elapsedMs - lastSuppressedAt}`,
+    )
+    assert.ok(run.elapsedMs < run.budgetMs, 'the death must land inside the budget, not as a timeout')
+  })
+})
+
+// Mutation killed: treating a null grewAt as recent growth. A seat that never wrote
+// anything measured NOTHING, and an absence outranks nothing.
+test('#931 a seat that never wrote a transcript is unprotected and dies as before', () => {
+  withRun({ ps: 'absent' }, (run) => {
+    assert.equal(run.error?.stage, SEAT_DIED_STAGE)
+    assert.equal(run.rows.filter((row) => row && row.event === ROOT_DEATH_SUPPRESSED_EVENT).length, 0)
+  })
+})
+
+// #931 must-fix from sol's review. `headlessStreamPaths` enumerates EVERY
+// `headless/d<N>` directory — correct for the lane heartbeat, catastrophic as
+// authority over one seat's death: a sibling seat still writing would renew a
+// dead seat's protection forever, turning the bounded window into an amnesty and
+// hiding the death behind a timeout. The suppression reads only this seat's dir.
+// Mutation killed: reading headlessStreamPaths instead of seatStreamPaths.
+test('#931 a sibling seat\'s growth never protects this seat from its own root death', () => {
+  withRun({
+    ps: { aliveForPolls: 3 },
+    // d1 is THIS seat and is frozen; d2 is a sibling writing throughout.
+    growth: { dirs: { d1: { stopAfter: 0 }, d2: { stopAfter: Infinity } } },
+  }, (run) => {
+    assert.equal(run.error?.stage, SEAT_DIED_STAGE)
+    assert.equal(run.error?.reclaim?.root_pid, ROOT_PID)
+    assert.equal(run.rows.filter((row) => row && row.event === ROOT_DEATH_SUPPRESSED_EVENT).length, 0)
+  })
+})
+
+// #931 must-fix from sol's review. Instrumentation is never load-bearing: a
+// journal that cannot be written must not convert a suppressed death into a
+// thrown one, which is a worse outcome than the defect being fixed.
+// Mutation killed: removing the try/catch around the suppression row.
+test('#931 a throwing journal does not turn a suppressed death into a thrown one', () => {
+  const run = runHeadless({ ps: { aliveForPolls: 3 }, growth: { stopAfter: Infinity } })
+  // Re-run with a logger that throws only for the suppression row.
+  withRun({
+    ps: { aliveForPolls: 3 },
+    growth: { stopAfter: Infinity },
+    logThrowsOn: ROOT_DEATH_SUPPRESSED_EVENT,
+  }, (thrown) => {
+    // The wait must be byte-for-byte the same length as with a working journal:
+    // the suppression still happened, only its evidence was lost.
+    assert.equal(thrown.elapsedMs, run.elapsedMs, 'a throwing journal must not change the wait')
+    assert.equal(thrown.elapsedMs, run.budgetMs, 'and the seat must still survive its whole budget')
   })
 })

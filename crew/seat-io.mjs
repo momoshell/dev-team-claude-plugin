@@ -57,6 +57,15 @@ export const LIVENESS_PROBE_MS = 30_000
 // imports it exactly as it imports LIVENESS_PROBE_MS above.
 export const SEAT_LIVENESS_EVENT = 'seat-liveness'
 export const LIVENESS_MISSES_TO_DIE = 2
+// #931. A worker root can vanish from ps while its seat is still writing — six
+// lanes died on 2026-09-05 with `growth: true` journaled 170ms before the root
+// probed absent, four of them at the lead consult after `scope-gate:r1`. A
+// transcript that grew this recently OUTRANKS an absent root: the seat is
+// observably working, whatever ps says about the pid we recorded. The window is
+// one liveness probe, so a genuinely dead seat still dies one probe later —
+// silence resumes, growth stops, and the death proceeds unchanged.
+export const ROOT_DEATH_GROWTH_WINDOW_MS = LIVENESS_PROBE_MS
+export const ROOT_DEATH_SUPPRESSED_EVENT = 'seat-root-death-suppressed'
 // Every gate, baseline, repair, validation lane and full suite reaches the
 // shell through io.run below. Node's spawnSync default maxBuffer is 1 MiB, and
 // past it the child is SIGTERM'd, `res.error.code` is ENOBUFS and a PASSING
@@ -2140,13 +2149,15 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
   // life. deps.sleep is the ONE owned seam inside those synchronous poll loops. The
   // measurement is transcript GROWTH and the stamp is the observation's OWN mtime:
   // never now(), never a fallback clock.
-  const headlessWatch = { info: null, last: null, noted: null, waitContext: null }
+  const headlessWatch = { info: null, last: null, noted: null, waitContext: null, grewAt: null, seatLast: null }
   const withHeadlessWatch = (info, run, waitContext = null) => {
     headlessWatch.info = info ?? null
     headlessWatch.last = null
     headlessWatch.noted = null
+    headlessWatch.grewAt = null
+    headlessWatch.seatLast = null
     headlessWatch.waitContext = waitContext
-    try { return run() } finally { headlessWatch.info = null; headlessWatch.last = null; headlessWatch.noted = null; headlessWatch.waitContext = null }
+    try { return run() } finally { headlessWatch.info = null; headlessWatch.last = null; headlessWatch.noted = null; headlessWatch.grewAt = null; headlessWatch.seatLast = null; headlessWatch.waitContext = null }
   }
   const sampleHeadlessGrowth = () => {
     const info = headlessWatch.info
@@ -2174,6 +2185,43 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
     if (headlessWatch.noted !== null && probedAt - headlessWatch.noted < LIVENESS_PROBE_MS) return
     headlessWatch.noted = probedAt
     io.log(operationalRow({ at: new Date(probedAt).toISOString(), event: SEAT_LIVENESS_EVENT, role: info.role ?? null, transport: info.transport ?? null, growth: false, probed_at_ms: probedAt, latest_ms: latest, source: 'transcript-growth' }))
+  }
+  // #931. `headlessStreamPaths` enumerates EVERY `headless/d<N>` directory,
+  // which is right for the lane-level heartbeat (:1797-1799) and wrong as
+  // authority over one seat's death: a sibling seat still writing would renew a
+  // dead seat's protection forever, turning a bounded window into an amnesty.
+  // The suppression therefore reads ONLY the current seat's own run directory.
+  // headless-rpc is already role-scoped, so it reuses the shared helper.
+  const seatStreamPaths = () => {
+    const info = headlessWatch.info
+    if (!info || !info.transport) return []
+    if (info.transport === HEADLESS_RPC_TRANSPORT) {
+      return headlessStreamPaths({ taskDir: paths.taskDir, role: info.role, transport: info.transport, deps })
+    }
+    if (info.transport !== HEADLESS_TRANSPORT) return []
+    const identity = currentHeadlessIdentity(info.transport, info.role)
+    const workerId = identity.workerId ?? info.workerId ?? info.id
+    // An unresolvable worker id measures NOTHING, and nothing outranks a death.
+    if (typeof workerId !== 'string' || !/^d\d+$/.test(workerId)) return []
+    const dir = join(paths.taskDir, 'headless', workerId)
+    return [join(dir, 'stream.jsonl'), join(dir, 'stderr.log')]
+  }
+  const sampleSeatGrowth = () => {
+    const files = seatStreamPaths()
+    if (!files.length) return
+    const reading = transcriptGrowth(files, deps)
+    const latest = Number.isFinite(reading) ? reading : null
+    if (latest === null) return
+    if (headlessWatch.seatLast !== null && latest > headlessWatch.seatLast) headlessWatch.grewAt = now()
+    if (headlessWatch.seatLast === null || latest > headlessWatch.seatLast) headlessWatch.seatLast = latest
+  }
+  // #931. TRUE only on a MEASURED recent growth of THIS seat's own transcript.
+  // A null grewAt is an absence — nothing was measured, so nothing outranks
+  // anything and the death stands.
+  const growthOutranksRootDeath = () => {
+    if (!Number.isFinite(headlessWatch.grewAt)) return false
+    const age = now() - headlessWatch.grewAt
+    return Number.isFinite(age) && age >= 0 && age < ROOT_DEATH_GROWTH_WINDOW_MS
   }
   const currentHeadlessIdentity = (transport, role, result = null) => {
     const dirName = DESCENDANT_STORE_DIRS[transport]
@@ -2253,8 +2301,25 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
   transportArgs.deps.sleep = (ms) => {
     try { capture.round() } catch { /* capture is never load-bearing */ }
     try { sampleHeadlessGrowth() } catch { /* the growth reading is evidence, never load-bearing */ }
+    try { sampleSeatGrowth() } catch { /* the seat-local reading is evidence, never load-bearing */ }
     const death = headlessRootDeath()
-    if (death) throw seatDiedError(headlessWatch.info, death)   // verbatim: mutation A1
+    // #931. The root reading and the growth reading are taken on this same tick,
+    // and they can disagree. When they do, the transcript wins: a file that grew
+    // within the last probe is a seat doing work, and killing it loses an envelope
+    // it was about to write — twice on 2026-09-05 the envelope was already on disk.
+    // The disagreement is journaled so the next one is diagnosable from the journal.
+    if (death && growthOutranksRootDeath()) {
+      // Instrumentation is never load-bearing: a journal that cannot be written
+      // must not turn a suppressed death into a thrown one.
+      try { io.log(operationalRow({
+        at: new Date(now()).toISOString(), event: ROOT_DEATH_SUPPRESSED_EVENT,
+        role: headlessWatch.info?.role ?? null, transport: headlessWatch.info?.transport ?? null,
+        root_pid: death.root_pid, root_pgid: death.root_pgid ?? null, reason: death.reason,
+        grew_at_ms: headlessWatch.grewAt, probed_at_ms: now(), window_ms: ROOT_DEATH_GROWTH_WINDOW_MS,
+      })) } catch { /* the disagreement is evidence, never load-bearing */ }
+    } else if (death) {
+      throw seatDiedError(headlessWatch.info, death)   // verbatim: mutation A1
+    }
     sleep(ms)
   }
   function transportIo(name, role) {

@@ -163,6 +163,9 @@ const SEAT_JOURNAL_EXPECTED = Object.freeze([
   ['operationalRow', "event='seat-teardown-sweep'", 'at ...summary'],
   ['operationalRow', '', 'at event role transport growth probed_at_ms latest_ms source'],
   ['operationalRow', '', 'at event role transport growth probed_at_ms latest_ms source'],
+  // #931: the root-death reading and the growth reading are taken on the same tick
+  // and can disagree; the transcript wins and the disagreement is journaled.
+  ['operationalRow', '', 'at event role transport root_pid root_pgid reason grew_at_ms probed_at_ms window_ms'],
   ['recordRow', "event='seat-refusal'", "role id member source message at outcome ...(frame.member === 'overflowed' ? { news: 'first-occurrence' } : {}) ...extra"],
   ['operationalRow', "event='seat-retrying'", 'at role id attempt of retry_in_s condition source'],
   ['operationalRow', "event='seat-retry-cleared'", 'at role id source'],
@@ -188,10 +191,10 @@ test('every journal emit site in seat-io is inventoried, wrapped and on the righ
   const text = readFileSync(new URL('./seat-io.mjs', import.meta.url), 'utf8')
   for (const sink of SEAT_PASS_THROUGH) assert.equal(text.split(sink).length - 1, 1, `pass-through changed or duplicated: ${sink}`)
   const sites = seatJournalSites(text)
-  assert.equal(sites.length, 33)
+  assert.equal(sites.length, 34)
   assert.deepEqual(sites.map(({ wrapper, events, keys }) => [wrapper, events, keys]), SEAT_JOURNAL_EXPECTED)
   assert.ok(sites.every(({ wrapper }) => wrapper === 'recordRow' || wrapper === 'operationalRow'))
-  assert.equal(sites.filter(({ wrapper }) => wrapper === 'operationalRow').length, 26)
+  assert.equal(sites.filter(({ wrapper }) => wrapper === 'operationalRow').length, 27)
   assert.equal(sites.filter(({ wrapper }) => wrapper === 'recordRow').length, 7)
 })
 

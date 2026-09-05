@@ -13,7 +13,7 @@ import { spawn as cpSpawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 
 import { assignmentLine } from './driver.mjs'
-import { shq, classifyRun, readEnvelopeOrThrow, updateCrewJson, attributeExit, decodeExitStatus, stderrTail, classifyToolCall, TOOL_CLASSES, CENSUS_ABSENT_CAUSES } from './headless.mjs'
+import { shq, classifyRun, readEnvelopeOrThrow, updateCrewJson, attributeExit, decodeExitStatus, stderrTail, classifyToolCall, TOOL_CLASSES, CENSUS_ABSENT_CAUSES, suitePolicyCounters, countSuiteDecision, suiteRunPolicy, suitePolicyRow, suiteRefusalRow, suiteRefusalEnvelope } from './headless.mjs'
 import { reclaimStore, PHASES, VERDICTS, EVIDENCE_KINDS, LIVENESS } from './reclaim.mjs'
 import { readJsonTri } from './json-leaf.mjs'
 import { PI_BUILTIN_TOOLS, PI_SUBAGENT_TOOL, translateDeny } from './adapters/adapter-pi.mjs'
@@ -533,12 +533,12 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
   }
   function readFrames(seat) {
     const path = seat.stream
-    if (!exists(path)) return []
+    if (!exists(path)) { seat.lastRead = false; return [] }
     let current
     try {
       const raw = read(path)
       current = Buffer.isBuffer(raw) ? raw : Buffer.from(String(raw), 'utf8')
-    } catch { return [] }
+    } catch { seat.lastRead = false; return [] }
     if (current.length < seat.readOffset) { seat.readOffset = 0; seat.rest = Buffer.alloc(0) }
     const chunk = current.subarray(seat.readOffset)
     seat.readOffset = current.length
@@ -549,6 +549,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
       if (!line.trim()) continue
       try { out.push(JSON.parse(line)) } catch { /* truncated or diagnostic lines are inert */ }
     }
+    seat.lastRead = true
     return out
   }
   function fold(seat, frames) {
@@ -599,7 +600,18 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
       }
     }
   }
-  function pollSeat(seat) { return fold(seat, readFrames(seat)) }
+  // EVERY read of the seat's frames is adjudicated here, which is what makes the
+  // policy non-lossy: abort() polls through this function too, and so does the
+  // teardown drain, so no frame can be consumed by a terminal path before it has
+  // been counted. This function COUNTS and RETAINS; it never ends a dispatch.
+  // That separation is load-bearing — an adjudicator that enforced would re-enter
+  // abort() from inside abort().
+  function pollSeat(seat) {
+    const frames = fold(seat, readFrames(seat))
+    if (seat.turn) seat.turn.policyRead = seat.lastRead !== false
+    adjudicateRpcFrames(seat.turn, frames)
+    return frames
+  }
   function responseError(role, frame) {
     const command = frame.command || 'unknown'
     return staged('rpc-command-error', `rpc command ${JSON.stringify(command)} failed: ${frame.error || 'unknown error'}`, role)
@@ -720,7 +732,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
     } catch { /* diagnostics only */ }
     return settled
   }
-  function assign({ role, briefFile, note, reask = null }) {
+  function assign({ role, briefFile, note, policy = null, reask = null }) {
     const member = crew.members?.[role]
     if (!member) throw new Error(`role ${role} not seated in this crew`)
     let existing = seats.get(role)
@@ -734,7 +746,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
     const offset = fileSize(seat.stream)
     seat.readOffset = offset; seat.rest = Buffer.alloc(0); seat.responses.clear()
     const prompt = assignmentLine({ id, role, briefFile, returnPath, taskDir: taskDir || paths.taskDir }) + (note ? `\n${note}` : '')
-    const turn = { id, runId, role, returnPath, prompt, retries: 0, offset, usage: null, state: { sawJson: false, settled: false, ended: false }, observed: { frames: 0, turns: 0, lastType: null, lastAt: null, lastTool: null, lastToolAt: null, census: newCensus() }, censusJournalled: false, sentAt: now() }
+    const turn = { id, runId, role, returnPath, prompt, retries: 0, offset, usage: null, state: { sawJson: false, settled: false, ended: false }, observed: { frames: 0, turns: 0, lastType: null, lastAt: null, lastTool: null, lastToolAt: null, census: newCensus() }, censusJournalled: false, sentAt: now(), policy: policy ?? null, seenToolCalls: new Set(), policyReported: false, pendingSuiteRefusal: null, enforced: false }
     seat.turn = turn
     const promptId = send(seat, { type: 'prompt', message: prompt, id: runId }, 'prompt')
     turn.promptId = promptId
@@ -745,6 +757,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
   // still be compacting. Park an unsettled turn so the next assign can wait
   // for agent_settled instead of prompting into a refusal.
   function finishTurn(seat) {
+    journalSuitePolicy(seat.turn)
     seat.settling = seat.turn && !seat.turn.state.settled ? seat.turn : null
     seat.turn = null
     seat.responses.clear()
@@ -877,13 +890,113 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
     if (response.success === false) throw responseError(role, response)
     return response
   }
+  // suiteCounters / suiteCountersFor: the SAME two declarations as §4.11, copied
+  // into this module verbatim. Per ROLE, not per turn — #870's "planner ONCE" is
+  // once for the run. They are deliberately not restated here, so §4.11 remains
+  // the single text K3's anchor binds against in crew/headless.mjs.
+  //
+  // Only SHELL frames (round-2 finding 5): the recorded capture
+  // pi-a1-json-baseline.jsonl carries a `toolName: 'write'` frame whose args hold
+  // path/content and no command, and counting that unrecognised would report a
+  // blind spot this transport does not have. Mirrors shellToolCalls, which also
+  // selects only calls carrying a command string.
+  const suiteCounters = new Map()
+  const suiteCountersFor = (role) => {
+    if (!suiteCounters.has(role)) suiteCounters.set(role, suitePolicyCounters())
+    return suiteCounters.get(role)
+  }
+  function adjudicateRpcFrames(turn, frames) {
+    if (!turn || !turn.policy) return null
+    const counters = suiteCountersFor(turn.role)
+    for (const frame of frames) {
+      if (frame?.type !== 'tool_execution_start') continue
+      if (typeof frame.toolName !== 'string' || frame.toolName.toLowerCase() !== 'bash') continue
+      const command = frame.args?.command
+      if (typeof command !== 'string' || command.trim() === '') continue
+      const key = frame.toolCallId ?? `${turn.id}:${command}`
+      if (turn.seenToolCalls.has(key)) continue
+      turn.seenToolCalls.add(key)
+      const verdict = suiteRunPolicy({
+        role: turn.role, command,
+        fence: turn.policy.fence || [], gatePath: turn.policy.gatePath || null,
+        ranBefore: counters.allowance_spent, suiteCommand: turn.policy.suiteCommand || null,
+      })
+      countSuiteDecision(counters, verdict.decision, { kind: verdict.kind, blind: verdict.blind })
+      // The FIRST refusal is the decision; a later one never overwrites it.
+      if (verdict.decision === 'refuse' && !turn.pendingSuiteRefusal) turn.pendingSuiteRefusal = verdict
+    }
+    return turn.pendingSuiteRefusal
+  }
+  // Reads the RETAINED verdict rather than a frame list, so a command consumed in
+  // the same read as a terminal response — or during abort's own polling — is
+  // still decided here. `enforced` latches: two call sites, at most one decision.
+  function enforceRpcBeforeEnvelope(seat, turn, returnPath, { alreadyEnded = false, discardSeat = false } = {}) {
+    if (!turn || turn.enforced) return null
+    const refusal = turn.pendingSuiteRefusal
+    if (!refusal) return null
+    turn.enforced = true
+    // THE SEAT'S FATE, decided by the SAME rule HEAD's timeout teardown already
+    // uses (crew/headless-rpc.mjs:952-965). The decided refusal is retained even
+    // when the terminal path has already begun and its own abort has failed.
+    let evictSeat = alreadyEnded && discardSeat
+    if (!alreadyEnded) {
+      // ROUND-4 FINDING 2. abort() calls send(), and send() writes the FIFO
+      // UNCONTAINED (crew/headless-rpc.mjs:607-612), so a broken pipe on the abort
+      // frame would throw out of a refusal that has ALREADY been decided — the
+      // crash #870 forbids, in place of the refusal it requires. The decided
+      // refusal wins: journal the transport fault and go on to prove the group
+      // dead by signal, which needs no FIFO.
+      try { abort(turn.role, { settleMs: ABORT_SETTLE_MS }) }
+      catch (err) {
+        log({ at: now(), event: 'rpc-enforcement-abort-failed', role: turn.role, id: turn.id, stage: err?.stage ?? null, error: String(err?.message ?? err) })
+      }
+      // An abort that SETTLES keeps the persistent RPC seat. An unsettled one is
+      // proved dead, and a proof of DEAD or UNKNOWN must not leave that seat
+      // reusable: finishTurn only parks the turn and clears seat.turn
+      // (crew/headless-rpc.mjs:747-751), while ensureProcess returns a CACHED
+      // seat whenever its exit marker is absent (:614-618) — and a worker killed by
+      // signal/ESRCH writes no exit marker. Without this the next same-role
+      // assignment is handed the corpse enforcement just proved dead, and the
+      // enforcement preamble this lane exists to deliver is written into it.
+      const proof = turn.state.settled ? null : proveGroupDead(seat)
+      evictSeat = !!proof && proof.liveness !== LIVENESS.ALIVE
+    }
+    emitUsage(turn, seat, turn.usage)
+    journalTurnCensus(turn, seat)
+    log(suiteRefusalRow({ role: turn.role, transport: 'headless-rpc', verdict: refusal }))
+    finishTurn(seat)
+    // ONE cleanup site for the enforcement arm and timeout drain.
+    if (evictSeat) {
+      try { closeFd(seat.fd) } catch { /* the fd belongs to a group that is gone */ }
+      seats.delete(seat.role)
+    }
+    return suiteRefusalEnvelope({ id: turn.id, role: turn.role, returnPath, transport: 'headless-rpc', verdict: refusal })
+  }
+  // THE single polling-and-enforcement seam. Every frame read in wait() goes
+  // through here, and this is the ONLY call to enforceRpcBeforeEnvelope in the
+  // module — deleting this one line disarms the RPC transport entirely, which is
+  // exactly what K2's mutation does.
+  function pollAndEnforce(seat, turn, returnPath, options = {}) {
+    const frames = pollSeat(seat)
+    return { frames, enforced: enforceRpcBeforeEnvelope(seat, turn, returnPath, options) }
+  }
+  // Every terminal passes through finishTurn, so the per-role cumulative
+  // counters are reported here exactly ONCE per turn and nowhere else. The bit
+  // lives on the turn, so a second call (enforcement then teardown) is a no-op
+  // rather than a double count.
+  function journalSuitePolicy(turn) {
+    if (!turn || !turn.policy || turn.policyReported) return
+    turn.policyReported = true
+    log(suitePolicyRow({ role: turn.role, transport: 'headless-rpc', counters: suiteCountersFor(turn.role), read: turn.policyRead !== false }))
+  }
   function wait(returnPath, timeoutS) {
     const seat = [...seats.values()].find((s) => s.turn?.returnPath === returnPath)
     if (!seat) throw staged('rpc-no-envelope', `no rpc turn for ${returnPath}`)
     const turn = seat.turn
     const deadline = now() + Number(timeoutS) * 1000
     waitLoop: while (now() < deadline) {
-      const frames = pollSeat(seat)
+      const { frames, enforced } = pollAndEnforce(seat, turn, returnPath)
+      if (enforced) return enforced
       for (const frame of frames) {
         if (frame?.type === 'response' && frame.command === 'parse' && frame.success === false) {
           emitUsage(turn, seat, turn.usage); journalTurnCensus(turn, seat); finishTurn(seat); throw staged('rpc-parse-error', `rpc parse failed: ${frame.error || 'malformed input'}`, turn.role)
@@ -949,13 +1062,20 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
       }
       sleep(WAIT_POLL_MS)
     }
+    // An expired deadline skips the loop entirely, so this may be the FIRST read
+    // of the turn's frames. Deciding here is what keeps a command observed in the
+    // last interval — or never read at all — from ending as an rpc-timeout with a
+    // false measured zero.
+    const late = pollAndEnforce(seat, turn, returnPath)
+    if (late.enforced) return late.enforced
     const groupBefore = probeGroup(seat)
     abort(turn.role, { settleMs: ABORT_SETTLE_MS })
     const proof = turn.state.settled ? null : proveGroupDead(seat)
     const discardSeat = !!proof && proof.liveness !== LIVENESS.ALIVE
     // SIGTERM/abort handling can append a complete frame after the last
     // abort poll; drain it before the turn is cleared and usage is emitted.
-    pollSeat(seat)
+    const drained = pollAndEnforce(seat, turn, returnPath, { alreadyEnded: true, discardSeat })
+    if (drained.enforced) return drained.enforced
     journalExitContext({ seat, turn, outcome: 'timeout', exitCode: parseExit(seat.exit, read, exists), envelope: null, groupBefore })
     emitUsage(turn, seat, turn.usage)
     journalTurnCensus(turn, seat)

@@ -94,9 +94,10 @@ function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cle
   const changedQueue = Array.isArray(changed[0]) ? [...changed] : [changed]
   const io = {
     calls,
-    assign({ role, briefFile, note }) {
+    assign(spec) {
+      const { role, briefFile, note } = spec
       counts[role] = (counts[role] || 0) + 1; seq += 1
-      calls.assign.push({ role, briefFile, note, n: counts[role] })
+      calls.assign.push({ role, briefFile, note, policy: spec.policy ?? null, n: counts[role] })
       return { id: seqIds ? `d${seq}` : `${role}${counts[role]}`, returnPath: `${role}:${counts[role]}` }
     },
     wait(returnPath, timeoutS) {
@@ -327,6 +328,15 @@ const planEnv = (over = {}) => ({
   artifacts: [`${TD}/plan.md`],
   details: { plan_path: `${TD}/plan.md`, files_in_scope: ['a.mjs', 'a.test.mjs'], validation_lane: 'lane-cmd', consult_questions: [], carve_verdict: 'proceed' },
   ...over,
+})
+const suiteRefusalEnv = (id = 'planner1', role = 'planner') => ({
+  assignment_id: id, role, status: 'insufficient', summary: `${role} stopped after an unowned suite run`, artifacts: [],
+  details: {
+    suite_refusal: {
+      role, transport: 'headless-json', command: 'npm test', kind: 'suite', gate_path: `${TD}/gate.mjs`,
+      reason: `suite-run-not-owned: the driver's gate-proof stage carries this evidence at ${TD}/gate.mjs`,
+    },
+  },
 })
 const buildEnv = (over = {}) => ({
   status: 'done', role: 'builder', summary: 'built',
@@ -1672,6 +1682,20 @@ test('the sensitivity floor has its own budget and does not spend failure-upgrad
   ])
   assert.equal(io.calls.reseat.length, 2)
   assert.equal(io.calls.reseat[1].options.reason, 'lane-bounce')
+})
+
+test('RV1-1 the observe-and-end residual reaches the commit and PR intent verbatim', () => {
+  const residual = "The lane observes and ends a forbidden suite invocation only after it starts; it does not return a tool result to the seat, so #904's tool-result contract remains correctness-unverified."
+  const body = `Account JSON policy calls flushed during termination grace without losing the first refusal\n\n${residual}`
+  const message = composeCommitMessage({
+    task: 'rpcpolicy',
+    planEnv: { summary: 'ignored', details: { commit_subject: 'fix(crew): account suite policy calls', issues: [904] } },
+    builderEnv: { summary: 'ignored', details: { commit_message: body } },
+  })
+  assert.equal(message, `fix(crew): account suite policy calls\n\n${body}\n\nRefs: #904`)
+  assert.equal(commitIntent(message), body)
+  const pr = composePrBody({ intent: commitIntent(message), issues: ['#904'] })
+  assert.equal(pr.slice(0, `${body}\n\nRefs #904`.length), `${body}\n\nRefs #904`)
 })
 
 test('composeCommitMessage uses the plan subject, builder body, and ordered issue refs', () => {
@@ -11359,4 +11383,121 @@ test('RV1-2 unmeasured turn census is rejected at every driver seam', () => {
   assert.deepEqual(ceilingRow(lead, 'lead1'), { role: 'lead', dispatch: 'lead1', turns: 137, budget: 40, measured: true, enforced: true, absent_reason: null })
   assert.equal(lead.calls.assign.filter((entry) => entry.role === 'lead').length, 1)
   assert.equal(Object.keys(lead.calls.writes).some((path) => path.includes('enforcement-lead-')), false)
+})
+
+test('b433 driver carries policy before acceptance and fences only the accepted builder', () => {
+  const preAcceptance = planCheckAcceptIo()
+  const result = driveTask(CTX_TL, preAcceptance)
+  assert.equal(result.status, 'done')
+  const planner = preAcceptance.calls.assign.find((entry) => entry.role === 'planner')
+  const techLead = preAcceptance.calls.assign.find((entry) => entry.role === 'tech-lead')
+  const builder = preAcceptance.calls.assign.find((entry) => entry.role === 'builder')
+  const reviewer = preAcceptance.calls.assign.find((entry) => entry.role === 'reviewer')
+  assert.deepEqual(planner.policy, { suiteCommand: CTX_TL.suite, gatePath: `${TD}/gate.mjs`, fence: [] })
+  assert.deepEqual(techLead.policy, { suiteCommand: CTX_TL.suite, gatePath: `${TD}/gate.mjs`, fence: [] })
+  assert.deepEqual(builder.policy, { suiteCommand: CTX_TL.suite, gatePath: `${TD}/gate.mjs`, fence: ['a.mjs', 'a.test.mjs'] })
+  assert.deepEqual(reviewer.policy, { suiteCommand: CTX_TL.suite, gatePath: `${TD}/gate.mjs`, fence: [] })
+})
+
+test('b433 driver validates the task-local gate path and keeps post-acceptance leads unfenced', () => {
+  const run = (gatePath, builderEnvelope = buildEnv()) => {
+    const plan = planEnv({ details: { ...planEnv().details, gate_path: gatePath } })
+    const io = fakeIo({
+      envelopes: { 'planner:1': plan, 'builder:1': builderEnvelope, 'lead:1': leadEnv('escalate'), 'reviewer:1': reviewEnv('pass') },
+      runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } }, changed: ['a.mjs', 'a.test.mjs'],
+    })
+    return { io, result: driveTask(CTX, io) }
+  }
+  const outside = run(`${CTX.checkout}/gate.mjs`)
+  assert.equal(outside.result.status, 'done')
+  assert.equal(outside.io.calls.assign.find((entry) => entry.role === 'builder').policy.gatePath, `${TD}/gate.mjs`)
+  assert.equal(outside.io.calls.logs.some((entry) => entry.gate_path_rejected), true)
+  const traversal = run(`${TD}/../repo/gate.mjs`)
+  assert.equal(traversal.io.calls.assign.find((entry) => entry.role === 'builder').policy.gatePath, `${TD}/gate.mjs`)
+  const custom = run(`${TD}/custom-gate.mjs`)
+  assert.equal(custom.io.calls.assign.find((entry) => entry.role === 'builder').policy.gatePath, `${TD}/custom-gate.mjs`)
+
+  const consulted = fakeIo({
+    envelopes: { 'planner:1': planEnv(), 'builder:1': { status: 'insufficient', role: 'builder', summary: 'stuck', artifacts: [], details: {} }, 'lead:1': leadEnv('escalate') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } }, changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask(CTX, consulted)
+  assert.equal(result.status, 'escalation')
+  assert.deepEqual(consulted.calls.assign.find((entry) => entry.role === 'lead').policy.fence, [])
+})
+
+test('b433 suite refusal reaches the next brief and survives a configured ceiling', () => {
+  const baseEnvelopes = {
+    'planner:1': suiteRefusalEnv(), 'lead:1': leadEnv('bounce'), 'planner:2': planEnv(),
+    'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+  }
+  const io = fakeIo({
+    envelopes: baseEnvelopes,
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } }, changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'done', JSON.stringify({ result, assigns: io.calls.assign, writes: io.calls.writes, logs: io.calls.logs }))
+  const second = io.calls.assign.find((entry) => entry.role === 'planner' && entry.n === 2)
+  assert.match(second.briefFile, new RegExp(`^${TD}/enforcement-planner-r\\d+\\.md$`))
+  assert.match(io.calls.writes[second.briefFile], /suite-run-not-owned/)
+  assert.equal(io.calls.writes[second.briefFile].includes(`${TD}/gate.mjs`), true)
+  assert.equal(result.details.enforcements[0].kind, 'suite-run-not-owned')
+  assert.equal(enforcementPreamble({ details: { turn_ceiling: { turns: 7, budget: 5 } } }).kind, 'turn-ceiling')
+  assert.equal(enforcementPreamble({ details: { turn_ceiling: { turns: null, budget: 5, absent_reason: CENSUS_ROW_ABSENT } } }).kind, 'turn-ceiling-unmeasured')
+
+  const journal = `${TD}/journal.jsonl`
+  const ceiling = fakeIo({
+    files: { [journal]: '{"event":"run-start"}\n' }, envelopes: baseEnvelopes,
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } }, changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const ceilingResult = driveTask({ ...CTX, turnCeilings: { planner: 40 } }, ceiling)
+  assert.equal(ceilingResult.status, 'escalation', JSON.stringify({ ceilingResult, assigns: ceiling.calls.assign, writes: ceiling.calls.writes, logs: ceiling.calls.logs }))
+  assert.equal(ceilingResult.details.enforcements.some((entry) => entry.kind === 'suite-run-not-owned'), true)
+  assert.equal(ceilingResult.details.enforcements.some((entry) => entry.kind === 'turn-ceiling-unmeasured'), true)
+  assert.match(ceiling.calls.writes[ceiling.calls.assign.find((entry) => entry.role === 'planner' && entry.n === 2).briefFile], /suite-run-not-owned/)
+})
+
+test('b433 driver requires a correlated refusal and never records stale or partial evidence', () => {
+  const positive = suiteRefusalEnv()
+  assert.equal(enforcementPreamble(positive).kind, 'suite-run-not-owned')
+  const malformed = [
+    (env) => { delete env.assignment_id; return env },
+    (env) => { delete env.role; return env },
+    (env) => { delete env.details.suite_refusal.role; return env },
+    (env) => { env.details.suite_refusal.reason = `not-suite-run-not-ownedness at ${TD}/gate.mjs`; return env },
+    (env) => { env.assignment_id = ''; return env },
+    (env) => { env.role = ''; return env },
+    (env) => { env.details.suite_refusal.role = 'reviewer'; return env },
+  ]
+  for (const mutate of malformed) {
+    const env = mutate(JSON.parse(JSON.stringify(positive)))
+    assert.deepEqual(enforcementPreamble(env), { kind: null, lines: [] })
+  }
+
+  const journal = `${TD}/journal.jsonl`
+  const run = (env) => fakeIo({
+    files: { [journal]: '{"event":"run-start"}\n' }, envelopes: { 'planner:1': env },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } }, changed: ['a.mjs', 'a.test.mjs'],
+  })
+  for (const mutate of malformed.slice(0, 4)) {
+    const io = run(mutate(JSON.parse(JSON.stringify(positive))))
+    const result = driveTask({ ...CTX, turnCeilings: { planner: 40 } }, io)
+    const kinds = result.details.enforcements.map((entry) => entry.kind)
+    assert.equal(kinds.includes('suite-run-not-owned'), false)
+    assert.equal(kinds.includes('turn-ceiling-unmeasured'), true)
+    assert.equal(Object.keys(io.calls.writes).some((path) => path.includes('enforcement-planner-')), false)
+  }
+
+  const stale = run({ ...positive, assignment_id: 'other-dispatch' })
+  const staleResult = driveTask({ ...CTX, turnCeilings: { planner: 40 } }, stale)
+  assert.equal(staleResult.status, 'escalation')
+  assert.deepEqual(staleResult.details.enforcements, [])
+  assert.equal(Object.keys(stale.calls.writes).some((path) => path.includes('enforcement-planner-')), false)
+
+  const partial = planEnv({ details: { ...planEnv().details, suite_refusal: { command: 'npm test', gate_path: `${TD}/gate.mjs` } } })
+  const partialIo = run(partial)
+  const partialResult = driveTask({ ...CTX, turnCeilings: { planner: 40 } }, partialIo)
+  const partialKinds = partialResult.details.enforcements.map((entry) => entry.kind)
+  assert.equal(partialKinds.includes('suite-run-not-owned'), false)
+  assert.equal(partialKinds.includes('turn-ceiling-unmeasured'), true)
 })

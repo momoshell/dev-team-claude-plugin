@@ -7,6 +7,9 @@ import {
   attributeExit, classifyRun, claudeCensus, classifyToolCall, decodeExitStatus, degradedSignals, foldUsage, headlessIo, parseStream,
   CENSUS_ABSENT_CAUSES, PROVIDER_FAILURE_KINDS, providerFailureKind, recogniseProviderCondition, recogniseSeatRefusal, TOOL_CLASSES,
   SEAT_REFUSALS, SEAT_REFUSAL_ACTIONS, UNCLASSIFIED_REFUSAL, shq, stderrTail, updateCrewJson,
+  SEAT_SUITE_POLICY_EVENT, SUITE_RUN_REFUSAL, SUITE_RUN_UNRECOGNISED, SUITE_POLICY_STREAM_UNAVAILABLE,
+  suiteRunPolicy, recogniseSuiteInvocation, testTargets, fenceCovers, shellToolCalls,
+  suitePolicyCounters, countSuiteDecision, suitePolicyReport, SUITE_RUN_OWNERSHIP, SUITE_RUN_OWNERSHIP_KINDS,
 } from './headless.mjs'
 import { cellFailureKind } from './seat-io.mjs'
 import { scratchDir, startFileWriter } from '../test/helpers.mjs'
@@ -1217,4 +1220,370 @@ test('b401 a claude stream with no timestamps reports a null clock with a closed
   assert.equal(census.in_tool_ms, null)
   assert.equal(census.clock_absent, CENSUS_ABSENT_CAUSES.replay_no_frame_clock)
   assert.notEqual(census.in_tool_ms, 0)
+})
+
+function b416ClaudeStream({ turns = 2, command = null } = {}) {
+  const frames = []
+  for (let n = 1; n <= turns; n += 1) {
+    const id = `b416-${n}`
+    frames.push({
+      type: 'assistant',
+      message: { content: [{
+        type: 'tool_use', id, name: command && n === 1 ? 'Bash' : 'Read',
+        input: command && n === 1 ? { command } : { path: `file-${n}.mjs` },
+      }] },
+    })
+    frames.push({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: id }] } })
+  }
+  return `${frames.map((frame) => JSON.stringify(frame)).join('\n')}\n`
+}
+
+function b416JsonFixture({ role = 'builder', policy = null, fallback = null, onSleep = null } = {}) {
+  const dir = scratchDir('b416-json-')
+  const taskDir = join(dir, 'task'); const returnsDir = join(dir, 'returns')
+  mkdirSync(taskDir); mkdirSync(returnsDir)
+  const rows = []; const kills = []; const state = { clock: 0 }
+  const crew = { checkout: dir, members: { [role]: { model: 'sonnet', transport: 'headless-json', ...(fallback ? { fallback } : {}) } } }
+  const adapter = { headlessCommand: (spec) => ({ bin: '/worker/bin', args: ['-p', spec.prompt], env: {} }) }
+  const io = headlessIo({
+    crew, paths: { dir, taskDir, returnsDir }, taskDir, checkout: dir,
+    adapters: { [role]: { adapter } }, bin: '/worker/bin',
+    deps: {
+      spawn: () => ({ pid: 4242, unref() {} }), uuid: () => 'b416-json-session',
+      now: () => state.clock,
+      sleep: (ms) => {
+        state.clock += ms
+        onSleep?.({ appendStream: (text, id = assigned.id) => writeFileSync(join(taskDir, 'headless', id, 'stream.jsonl'), text, { flag: 'a' }) })
+      },
+      kill: (pid, signal) => { kills.push([pid, signal]); const err = new Error('gone'); err.code = 'ESRCH'; throw err },
+      log: (row) => rows.push(row),
+    },
+  })
+  const assigned = io.assign({ role, briefFile: join(taskDir, 'brief.md'), policy })
+  return {
+    dir, taskDir, returnsDir, crew, io, rows, kills, state, assigned, role,
+    writeStream: (text, id = assigned.id) => writeFileSync(join(taskDir, 'headless', id, 'stream.jsonl'), text),
+    cleanup: () => rmSync(dir, { recursive: true, force: true }),
+  }
+}
+
+test('b416 K1 JSON scanning observes an opaque Bash frame flushed during termination grace', () => {
+  const gatePath = '/tmp/b416/gate.mjs'
+  let lateAppended = false
+  const f = b416JsonFixture({
+    role: 'reviewer', policy: { gatePath, fence: [], suiteCommand: 'npm test' },
+    onSleep: ({ appendStream }) => {
+      if (lateAppended) return
+      lateAppended = true
+      const frame = { type: 'assistant', message: { content: [{
+        type: 'tool_use', id: 'b416-late', name: 'Bash', input: { command: 'git status --porcelain' },
+      }] } }
+      appendStream(`${JSON.stringify(frame)}\n`)
+    },
+  })
+  try {
+    f.writeStream(b416ClaudeStream({ turns: 1, command: 'node --test crew/headless.test.mjs' }))
+    writeFileSync(f.assigned.returnPath, JSON.stringify({ assignment_id: f.assigned.id, role: 'reviewer', status: 'done', summary: 'forbidden test finished', artifacts: [], details: {} }))
+    const envelope = f.io.wait(f.assigned.returnPath, 60)
+    assert.equal(envelope.status, 'insufficient')
+    assert.equal(envelope.details.suite_refusal.command, 'node --test crew/headless.test.mjs')
+    assert.equal(envelope.details.suite_refusal.gate_path, gatePath)
+    assert.equal(f.rows.filter((row) => row.headless_outcome === 'suite-run-not-owned').length, 1)
+    assert.equal(f.rows.filter((row) => row.event === SEAT_SUITE_POLICY_EVENT && row.suite_policy).length, 1)
+    assert.equal(f.rows.filter((row) => row.event === SEAT_SUITE_POLICY_EVENT && row.refusal === SUITE_RUN_REFUSAL).length, 1)
+    assert.equal(lateAppended, true)
+    const aggregate = f.rows.find((row) => row.event === SEAT_SUITE_POLICY_EVENT && row.suite_policy)
+    assert.equal(aggregate.suite_policy.unrecognised, 1)
+    assert.equal(aggregate.suite_policy.refused_at_least, 1)
+  } finally { f.cleanup() }
+})
+
+test('RV1-2 whole-invocation grammar fails closed across unsafe flags and fence boundaries', () => {
+  const gatePath = '/tmp/b433/gate.mjs'
+  const target = 'crew/headless.test.mjs'
+  const fence = [target]
+  const unsafe = [
+    `node --require=./crew/daemon.mjs --test ${target}`,
+    `node --test --import=./crew/daemon.mjs ${target}`,
+    `node --test --test-reporter=./crew/daemon.mjs ${target}`,
+    `node --experimental-loader=./crew/daemon.mjs --test ${target}`,
+    `node --watch --test ${target}`,
+    `node --test --watch ${target}`,
+    `node script.mjs --test ${target}`,
+    `node --test ${target} crew/headless.mjs`,
+    'node --test crew/pi/',
+    `node --test ${target} "**/*.test.mjs"`,
+    `node --test --test-name-pattern ${target}`,
+    'node --test crew/pi/../../test/vacuity.test.mjs',
+    'node --test /abs/crew/headless.test.mjs',
+    'node --test --test-timeout=30000 "**/*.test.mjs"',
+  ]
+  for (const command of unsafe) {
+    assert.equal(testTargets(command), null, command)
+    assert.equal(recogniseSuiteInvocation(command, { gatePath, suiteCommand: 'npm test' }), 'suite', command)
+    assert.equal(suiteRunPolicy({ role: 'builder', command, fence, gatePath }).decision, 'refuse', command)
+  }
+
+  for (const command of [
+    `'node' --test`, '"node" --test', '/usr/bin/node --test',
+  ]) assert.equal(recogniseSuiteInvocation(command, { gatePath, suiteCommand: 'npm test' }), 'suite', command)
+  for (const command of [
+    `'node' --test ${target}`,
+    `/usr/bin/node --test --test-reporter=tap ${target}`,
+    `node --test --test-timeout=30000 ${target}`,
+  ]) {
+    assert.deepEqual(testTargets(command), [target], command)
+    assert.equal(suiteRunPolicy({ role: 'builder', command, fence, gatePath }).decision, 'admit', command)
+  }
+  assert.equal(recogniseSuiteInvocation(`nodemon --test ${target}`, { gatePath, suiteCommand: 'npm test' }), null)
+  assert.equal(suiteRunPolicy({ role: 'builder', command: `nodemon --test ${target}`, fence, gatePath }).decision, 'unrecognised')
+
+  const directoryFence = ['crew/pi/']
+  const covered = 'crew/pi/extensions/advisor.test.mjs'
+  const traversal = 'crew/pi/../../test/vacuity.test.mjs'
+  assert.equal(fenceCovers(directoryFence, covered), true)
+  assert.equal(fenceCovers(directoryFence, 'test/vacuity.test.mjs'), false)
+  assert.equal(fenceCovers(directoryFence, 'crew/pi-extra/other.test.mjs'), false)
+  assert.equal(fenceCovers(directoryFence, traversal), true)
+  assert.equal(testTargets(`node --test ${traversal}`), null)
+  assert.equal(suiteRunPolicy({ role: 'builder', command: `node --test ${covered}`, fence: directoryFence, gatePath }).decision, 'admit')
+
+  const capture = readFileSync(new URL('../tasks/headless-worker/captures/a-baseline.jsonl', import.meta.url), 'utf8')
+  assert.deepEqual(shellToolCalls(capture).map(({ command }) => command), ['echo hw1-marker'])
+  const mixedCalls = shellToolCalls(`${capture}${JSON.stringify({
+    type: 'assistant', message: { content: [
+      { type: 'tool_use', id: 'non-bash-command', name: 'Write', input: { command: 'npm test' } },
+      { type: 'tool_use', id: 'commandless-bash', name: 'Bash', input: {} },
+      { type: 'tool_use', id: 'later-bash', name: 'Bash', input: { command: 'git status --porcelain' } },
+    ] },
+  })}\n`)
+  assert.deepEqual(mixedCalls.map(({ id, command }) => ({ id, command })), [
+    { id: 'toolu_01DaWW7yDDQPmwPWrkzMv7MQ', command: 'echo hw1-marker' },
+    { id: 'later-bash', command: 'git status --porcelain' },
+  ])
+
+  const unavailable = suitePolicyReport(countSuiteDecision(suitePolicyCounters(), 'refuse'), { read: false })
+  assert.deepEqual(unavailable, {
+    suite_policy: {
+      refused: null, admitted: null, unrecognised: null,
+      refused_at_least: 1, admitted_at_least: 0, unrecognised_at_least: 0,
+    },
+    suite_policy_absent: SUITE_POLICY_STREAM_UNAVAILABLE,
+  })
+  assert.deepEqual(suitePolicyReport(null), { suite_policy: null, suite_policy_absent: null })
+})
+
+test('b416 RV1-2 suite policy coverage guards ownership, laundering, and spent planner allowance', () => {
+  const gatePath = '/tmp/b416/gate.mjs'
+  const fence = ['crew/headless.mjs', 'crew/headless.test.mjs']
+  assert.deepEqual(suitePolicyCounters(), { refused: 0, admitted: 0, unrecognised: 0, allowance_spent: 0, suite_allowance_spent: 0 })
+  for (const role of ['reviewer', 'tech-lead', 'lead']) {
+    assert.equal(suiteRunPolicy({ role, command: 'npm test', gatePath }).decision, 'refuse')
+  }
+  assert.equal(suiteRunPolicy({ role: 'builder', command: 'node --test crew/headless.test.mjs', fence, gatePath }).decision, 'admit')
+  assert.equal(suiteRunPolicy({ role: 'builder', command: `node ${gatePath}`, fence, gatePath }).decision, 'admit')
+  for (const command of ['node --test crew/daemon.test.mjs', 'node --test crew/headless.test.mjs crew/daemon.test.mjs', 'npm test']) {
+    assert.equal(suiteRunPolicy({ role: 'builder', command, fence, gatePath }).decision, 'refuse')
+  }
+  assert.equal(suiteRunPolicy({ role: 'planner', command: 'npm test', ranBefore: 0, gatePath }).decision, 'admit')
+  assert.equal(suiteRunPolicy({ role: 'planner', command: 'npm test', ranBefore: 1, gatePath }).decision, 'refuse')
+  const plannerGate = suiteRunPolicy({ role: 'planner', command: `node ${gatePath}`, ranBefore: 1, gatePath })
+  assert.deepEqual({ decision: plannerGate.decision, reason: plannerGate.reason, kind: plannerGate.kind }, { decision: 'admit', reason: 'gate', kind: 'gate' })
+  for (const command of [`node ${gatePath} && npm test`, `node ${gatePath}; node --test crew/daemon.test.mjs`]) {
+    assert.equal(suiteRunPolicy({ role: 'builder', command, fence, gatePath }).decision, 'refuse')
+  }
+  for (const command of [`node ${gatePath} && bash tools/run-everything.sh`, 'node --test crew/headless.test.mjs && bash tools/run-everything.sh']) {
+    assert.equal(recogniseSuiteInvocation(command, { gatePath, suiteCommand: 'npm test' }), null)
+    assert.equal(suiteRunPolicy({ role: 'builder', command, fence, gatePath, suiteCommand: 'npm test' }).decision, 'unrecognised')
+  }
+  assert.equal(recogniseSuiteInvocation('npm test && bash tools/run-everything.sh', { gatePath, suiteCommand: 'npm test' }), 'suite')
+  const opaque = suiteRunPolicy({ role: 'reviewer', command: 'bash tools/run-everything.sh', gatePath })
+  const opaqueReport = suitePolicyReport(countSuiteDecision(suitePolicyCounters(), opaque.decision))
+  assert.equal(opaque.decision, 'unrecognised')
+  assert.equal(opaqueReport.suite_policy.refused, null)
+  assert.equal(opaqueReport.suite_policy.admitted, null)
+  assert.equal(opaqueReport.suite_policy.unrecognised, 1)
+  assert.equal(opaqueReport.suite_policy_absent, SUITE_RUN_UNRECOGNISED)
+  assert.deepEqual(suitePolicyReport(countSuiteDecision(suitePolicyCounters(), 'refuse')), {
+    suite_policy: { refused: 1, admitted: 0, unrecognised: 0 }, suite_policy_absent: null,
+  })
+})
+
+test('b416 RV1-1 planner gates remain admitted after a spent suite allowance', () => {
+  const gatePath = '/tmp/b416/standalone-gate.mjs'
+  const gate = suiteRunPolicy({ role: 'planner', command: `node ${gatePath}`, ranBefore: 1, gatePath })
+  const suite = suiteRunPolicy({ role: 'planner', command: 'npm test', ranBefore: 1, gatePath })
+  assert.deepEqual({ decision: gate.decision, reason: gate.reason, kind: gate.kind }, { decision: 'admit', reason: 'gate', kind: 'gate' })
+  assert.equal(suite.decision, 'refuse')
+})
+
+test('b416 F2 JSON provider fallback preserves the policy onto its replacement invocation', () => {
+  const dir = scratchDir('b416-fallback-policy-')
+  const taskDir = join(dir, 'task'); const returnsDir = join(dir, 'returns')
+  mkdirSync(taskDir); mkdirSync(returnsDir)
+  const rows = []; let spawns = 0; let clock = 0; let returnPath = null
+  const crew = { checkout: dir, members: { reviewer: {
+    model: 'sonnet', transport: 'headless-json', fallback: [{ model: 'backup', provider: 'test', id: 'backup' }],
+  } } }
+  const adapter = { headlessCommand: (spec) => ({ bin: '/worker/bin', args: ['-p', spec.prompt], env: {} }) }
+  const io = headlessIo({
+    crew, paths: { dir, taskDir, returnsDir }, taskDir, checkout: dir, adapters: { reviewer: { adapter } }, bin: '/worker/bin',
+    deps: {
+      uuid: () => 'b416-fallback-session', now: () => clock, sleep: (ms) => { clock += ms },
+      kill: () => { const err = new Error('gone'); err.code = 'ESRCH'; throw err }, log: (row) => rows.push(row),
+      spawn: () => {
+        spawns += 1
+        if (spawns === 2) {
+          writeFileSync(join(taskDir, 'headless', 'd2', 'stream.jsonl'), b416ClaudeStream({ turns: 1, command: 'node --test crew/headless.test.mjs' }))
+          writeFileSync(returnPath, JSON.stringify({ assignment_id: 'd1', role: 'reviewer', status: 'done', summary: 'replacement done', artifacts: [], details: {} }))
+        }
+        return { pid: 4242, unref() {} }
+      },
+    },
+  })
+  try {
+    const first = io.assign({ role: 'reviewer', briefFile: join(taskDir, 'brief.md'), policy: { gatePath: '/tmp/b416/gate.mjs', fence: [], suiteCommand: 'npm test' } })
+    returnPath = first.returnPath
+    writeFileSync(join(taskDir, 'headless', 'd1', 'stream.jsonl'), `${JSON.stringify({ type: 'assistant', message: { model: '<synthetic>' } })}\n${JSON.stringify({ type: 'result', terminal_reason: 'api_error' })}\n`)
+    writeFileSync(join(taskDir, 'headless', 'd1', 'exit'), '1')
+    const envelope = io.wait(first.returnPath, 60)
+    assert.equal(spawns, 2)
+    assert.equal(envelope.status, 'insufficient')
+    assert.equal(envelope.details.suite_refusal.command, 'node --test crew/headless.test.mjs')
+    assert.equal(rows.filter((row) => row.headless_outcome === 'suite-run-not-owned').length, 1)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('b416 RV1-3 parseStream keeps absent, unreadable, empty, and normal shapes transcript-free', () => {
+  const absent = parseStream('/missing', () => '', () => false)
+  const unreadable = parseStream('/denied', () => { throw Object.assign(new Error('denied'), { code: 'EPERM' }) }, () => true)
+  const empty = parseStream('/empty', () => '', () => true)
+  const normal = parseStream('/normal', () => `${JSON.stringify({ type: 'result', terminal_reason: 'completed' })}\n`, () => true)
+  for (const stream of [absent, unreadable, empty, normal]) assert.equal(Object.hasOwn(stream, 'text'), false)
+  assert.equal(absent.census_absent, CENSUS_ABSENT_CAUSES.stream_absent)
+  assert.equal(unreadable.census_absent, CENSUS_ABSENT_CAUSES.stream_absent)
+  assert.equal(empty.census_absent, CENSUS_ABSENT_CAUSES.no_frames)
+  assert.equal(normal.terminal, true)
+})
+
+test('b416 G2 leaves an unconfigured JSON seat unmeasured while partial Claude census data remains usable', () => {
+  const partial = b416ClaudeStream({ turns: 2, command: 'node --test crew/headless.test.mjs' }).trim().split('\n').slice(0, -1).join('\n')
+  const census = claudeCensus(partial)
+  assert.equal(census.turns, 2)
+  assert.equal(census.by_class.test, 1)
+
+  const f = b416JsonFixture()
+  try {
+    f.writeStream(b416ClaudeStream({ turns: 1 }))
+    writeFileSync(f.assigned.returnPath, JSON.stringify({ assignment_id: f.assigned.id, role: 'builder', status: 'done', summary: 'ordinary unconfigured completion', artifacts: [], details: {} }))
+    const envelope = f.io.wait(f.assigned.returnPath, 60)
+    assert.equal(envelope.status, 'done')
+    assert.equal(f.kills.length, 0)
+    assert.equal(f.rows.some((row) => row.event === SEAT_SUITE_POLICY_EVENT), false)
+    // Normal outcome census is pre-existing telemetry; no ceiling or policy decision is added.
+    assert.equal(f.rows.filter((row) => row.seat_turn_census).length, 1)
+  } finally { f.cleanup() }
+})
+
+// RV1-7. The builder's ownership is `fenced-once`, not `fenced`: every brief in
+// this repo makes `npm test` green a Done condition, so a policy refusing the
+// full suite outright would end the dispatch of a builder doing exactly what it
+// was told. The allowance is ONE run, charged on its own counter, so #866's
+// 18-49 runs per lane still become one.
+// Mutation killed: builder: 'fenced' in SUITE_RUN_OWNERSHIP.
+test('the builder owns exactly one full-suite run and the second is refused', () => {
+  const fence = ['crew/drive.mjs', 'crew/drive.test.mjs']
+  const gatePath = '/task/gate.mjs'
+  const opts = { role: 'builder', command: 'npm test', fence, gatePath, suiteCommand: 'npm test' }
+  assert.equal(SUITE_RUN_OWNERSHIP.builder, 'fenced-once')
+  const first = suiteRunPolicy(opts)
+  assert.equal(first.decision, 'admit')
+  assert.equal(first.reason, 'suite-allowance')
+  assert.equal(first.kind, 'suite')
+  assert.equal(suiteRunPolicy({ ...opts, suiteRanBefore: 1 }).decision, 'refuse')
+  assert.equal(suiteRunPolicy({ ...opts, suiteRanBefore: 2 }).decision, 'refuse')
+})
+
+// Mutation killed: charging the suite allowance from `allowance_spent`, which
+// every non-gate admit increments — a builder that ran two fenced tests would
+// then be refused the full-suite run its Done condition requires.
+test('a fenced scoped test never spends the builder full-suite allowance', () => {
+  const fence = ['crew/drive.mjs', 'crew/drive.test.mjs']
+  const gatePath = '/task/gate.mjs'
+  const counters = suitePolicyCounters()
+  for (const command of ['node --test crew/drive.test.mjs', 'node --test crew/drive.test.mjs']) {
+    const verdict = suiteRunPolicy({ role: 'builder', command, fence, gatePath, suiteCommand: 'npm test' })
+    assert.equal(verdict.decision, 'admit', command)
+    countSuiteDecision(counters, verdict.decision, { kind: verdict.kind, blind: verdict.blind })
+  }
+  assert.equal(counters.allowance_spent, 2)
+  assert.equal(counters.suite_allowance_spent, 0)
+  const suite = suiteRunPolicy({
+    role: 'builder', command: 'npm test', fence, gatePath, suiteCommand: 'npm test',
+    ranBefore: counters.allowance_spent, suiteRanBefore: counters.suite_allowance_spent,
+  })
+  assert.equal(suite.decision, 'admit')
+  countSuiteDecision(counters, suite.decision, { kind: suite.kind, blind: suite.blind })
+  assert.equal(counters.suite_allowance_spent, 1)
+})
+
+// Mutation killed: admitting the gate against the suite allowance. The gate is
+// the builder's mechanical proof and is re-run every round by charter.
+test('the gate is free for the builder and never charges the suite allowance', () => {
+  const gatePath = '/task/gate.mjs'
+  const counters = suitePolicyCounters()
+  const verdict = suiteRunPolicy({ role: 'builder', command: `node ${gatePath}`, fence: [], gatePath, suiteCommand: 'npm test' })
+  assert.equal(verdict.decision, 'admit')
+  assert.equal(verdict.kind, 'gate')
+  countSuiteDecision(counters, verdict.decision, { kind: verdict.kind, blind: verdict.blind })
+  assert.equal(counters.suite_allowance_spent, 0)
+  assert.equal(counters.allowance_spent, 0)
+})
+
+// Mutation killed: widening a never-owner to the builder's allowance. Only the
+// builder gets one; reviewer, tech-lead and lead own no suite run at all.
+test('the suite allowance belongs to the builder alone', () => {
+  for (const role of ['reviewer', 'tech-lead', 'lead']) {
+    assert.equal(SUITE_RUN_OWNERSHIP[role], 'never', role)
+    assert.equal(suiteRunPolicy({ role, command: 'npm test', gatePath: '/task/gate.mjs', suiteCommand: 'npm test', suiteRanBefore: 0 }).decision, 'refuse', role)
+  }
+  assert.equal(SUITE_RUN_OWNERSHIP.planner, 'once')
+})
+
+// Mutation killed: an ownership value outside the closed set silently falling
+// through to admit. A typo in the table must refuse, never open the gate.
+test('every ownership value is declared and an unknown one refuses', () => {
+  for (const value of Object.values(SUITE_RUN_OWNERSHIP)) {
+    assert.ok(SUITE_RUN_OWNERSHIP_KINDS.includes(value), value)
+  }
+  assert.equal(suiteRunPolicy({ role: 'nonesuch', command: 'npm test', gatePath: '/task/gate.mjs', suiteCommand: 'npm test' }).decision, 'refuse')
+})
+
+// Mutation killed: admitting any `kind: 'suite'` against the allowance. `suite`
+// is overloaded — it is also the recognised-but-unaccountable fall-through of
+// #904's posture — so an unsafe invocation must refuse AND spend nothing,
+// leaving the builder's one declared run still available.
+test('an unaccountable suite invocation refuses and never spends the allowance', () => {
+  const fence = ['crew/drive.mjs']
+  const gatePath = '/task/gate.mjs'
+  const counters = suitePolicyCounters()
+  for (const command of ['node --require=./crew/daemon.mjs --test crew/headless.test.mjs', 'node --test --watch crew/drive.test.mjs']) {
+    const verdict = suiteRunPolicy({
+      role: 'builder', command, fence, gatePath, suiteCommand: 'npm test',
+      ranBefore: counters.allowance_spent, suiteRanBefore: counters.suite_allowance_spent,
+    })
+    assert.equal(verdict.decision, 'refuse', command)
+    countSuiteDecision(counters, verdict.decision, { kind: verdict.kind, blind: verdict.blind })
+  }
+  assert.equal(counters.suite_allowance_spent, 0)
+  assert.equal(suiteRunPolicy({
+    role: 'builder', command: 'npm test', fence, gatePath, suiteCommand: 'npm test',
+    suiteRanBefore: counters.suite_allowance_spent,
+  }).decision, 'admit')
+})
+
+// Mutation killed: treating an absent suiteCommand as a licence. With nothing
+// declared there is no command the allowance could name.
+test('with no declared suite command the builder allowance admits nothing', () => {
+  assert.equal(suiteRunPolicy({ role: 'builder', command: 'npm test', fence: [], gatePath: '/task/gate.mjs' }).decision, 'refuse')
 })

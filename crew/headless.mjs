@@ -427,6 +427,322 @@ export function claudeCensus(text) {
   }
 }
 
+// --- the per-role test-run policy (#904) ------------------------------------
+// One event shape per fact, shared by BOTH headless transports and by the pane:
+// the journal is only readable across them if the keys are identical and
+// `transport` is the sole difference.
+export const SEAT_SUITE_POLICY_EVENT = 'seat-suite-policy'
+export const PANE_NO_INTERCEPT = 'pane-no-intercept'
+export const SUITE_RUN_REFUSAL = 'suite-run-not-owned'
+export const SUITE_RUN_UNRECOGNISED = 'suite-run-unrecognised'
+// DATA, not branches: a policy change is a data edit, the posture
+// SEAT_REFUSAL_ACTIONS (:71) already takes.
+export const SUITE_RUN_OWNERSHIP = Object.freeze({
+  planner: 'once', 'tech-lead': 'never', builder: 'fenced-once', reviewer: 'never', lead: 'never',
+})
+// Closed, so a typo in the table above is a refusal and never a silent admit.
+export const SUITE_RUN_OWNERSHIP_KINDS = Object.freeze(['never', 'once', 'fenced', 'fenced-once'])
+
+export function suiteRefusalEnvelope({ id, role, returnPath, transport, verdict }) {
+  return {
+    assignment_id: id, role, status: 'insufficient',
+    summary: `${SUITE_RUN_REFUSAL}: ${role} ran ${JSON.stringify(verdict.command)} on ${transport}; the dispatch was ended and the seat envelope at ${returnPath} was not accepted`,
+    artifacts: [],
+    details: {
+      suite_refusal: {
+        role, transport, command: verdict.command, kind: verdict.kind,
+        gate_path: verdict.gate_path, reason: verdict.reason,
+      },
+    },
+  }
+}
+
+export function suiteRefusalRow({ role, transport, verdict }) {
+  return {
+    event: SEAT_SUITE_POLICY_EVENT, role, transport, refusal: SUITE_RUN_REFUSAL,
+    command: verdict.command, kind: verdict.kind, gate_path: verdict.gate_path, reason: verdict.reason,
+  }
+}
+
+export function suitePolicyCounters() { return { refused: 0, admitted: 0, unrecognised: 0, allowance_spent: 0, suite_allowance_spent: 0 } }
+
+// Two facts beyond the decision, both accounting-only, both defaulted so a legacy
+// two-argument call keeps its old meaning: `kind` absent charges the allowance,
+// `blind` absent invents no blind spot.
+export function countSuiteDecision(counters, decision, { kind = null, blind = false } = {}) {
+  if (decision === 'refuse') counters.refused += 1
+  else if (decision === 'admit') counters.admitted += 1
+  else counters.unrecognised += 1
+  if (decision === 'admit' && kind !== 'gate') counters.allowance_spent += 1
+  // The builder's ONE full-suite run is charged on its own counter: a fenced
+  // scoped test must not spend the allowance its Done condition needs.
+  if (decision === 'admit' && kind === 'suite') counters.suite_allowance_spent += 1
+  if (blind && decision !== 'unrecognised') counters.unrecognised += 1
+  return counters
+}
+
+export const SUITE_POLICY_STREAM_UNAVAILABLE = 'suite-policy-stream-unavailable'
+
+// The blind spot #870 names, accounted honestly. Once ANY observed command was
+// unrecognised, `refused` and `admitted` are LOWER BOUNDS and not measurements,
+// so they are reported as null with a reason and the bounds keep their own
+// names. A zero here would claim the transport looked and saw no violation.
+export function suitePolicyReport(counters, { read = true } = {}) {
+  if (counters === null || counters === undefined) return { suite_policy: null, suite_policy_absent: null }
+  if (read === false) {
+    return {
+      suite_policy: {
+        refused: null, admitted: null, unrecognised: null,
+        refused_at_least: counters.refused, admitted_at_least: counters.admitted,
+        unrecognised_at_least: counters.unrecognised,
+      },
+      suite_policy_absent: SUITE_POLICY_STREAM_UNAVAILABLE,
+    }
+  }
+  if (counters.unrecognised > 0) {
+    return {
+      suite_policy: {
+        refused: null, admitted: null, unrecognised: counters.unrecognised,
+        refused_at_least: counters.refused, admitted_at_least: counters.admitted,
+      },
+      suite_policy_absent: SUITE_RUN_UNRECOGNISED,
+    }
+  }
+  return {
+    suite_policy: { refused: counters.refused, admitted: counters.admitted, unrecognised: 0 },
+    suite_policy_absent: null,
+  }
+}
+
+export function suitePolicyRow({ role, transport, counters = null, absentReason = null, read = true }) {
+  return {
+    event: SEAT_SUITE_POLICY_EVENT, role, transport,
+    ...(counters ? suitePolicyReport(counters, { read }) : { suite_policy: null, suite_policy_absent: absentReason }),
+  }
+}
+
+// Quote-aware tokens. `--opt="a b"` stays ONE token so the option grammar below
+// can read it; every quote is stripped before the glob test, so a quoted glob
+// cannot hide behind its quotes.
+const SHELL_TOKEN_RE = /(?:[^\s"']+|"[^"]*"|'[^']*')+/g
+function shellTokens(text) {
+  return [...String(text ?? '').matchAll(SHELL_TOKEN_RE)].map((match) => match[0].replace(/["']/g, ''))
+}
+// The ONLY options a scoped run may carry, by NAME and by MEANING. Everything
+// else — every option Node adds after this list was written, every separated
+// value form, every bare flag we cannot name — makes the invocation a SUITE run.
+// The reason is code loading, not tidiness: `--require`, `--import`, a loader
+// hook and a custom `--test-reporter` module path all execute code Node was told
+// to load, so a "scoped" run carrying one runs whatever it names. `--watch` is
+// deliberately absent: it turns one accounted call into an indefinitely repeating
+// run.
+const NODE_SAFE_FLAGS = new Set([
+  '--test', '--test-only', '--test-force-exit', '--test-update-snapshots',
+  '--experimental-test-coverage', '--experimental-test-module-mocks',
+])
+// Node's BUILT-IN reporters. A custom reporter is a module path Node loads, so
+// `--test-reporter=./crew/daemon.mjs` is code loading under another name; only
+// these named values are accountable.
+const NODE_BUILTIN_REPORTERS = new Set(['tap', 'spec', 'dot', 'junit', 'lcov'])
+// Value options that cannot load code, in their SELF-CONTAINED `--opt=value` form
+// only. `null` means any non-empty value; a Set means exactly those values.
+const NODE_SAFE_VALUE_OPTIONS = new Map([
+  ['--test-reporter', NODE_BUILTIN_REPORTERS],
+  ['--test-timeout', null],
+  ['--test-concurrency', null],
+  ['--test-name-pattern', null],
+  ['--test-skip-pattern', null],
+  ['--test-shard', null],
+])
+function safeOption(token) {
+  if (NODE_SAFE_FLAGS.has(token)) return true
+  const at = token.indexOf('=')
+  if (at < 0) return false
+  const values = NODE_SAFE_VALUE_OPTIONS.get(token.slice(0, at))
+  if (values === undefined) return false
+  const value = token.slice(at + 1)
+  return values === null ? value !== '' : values.has(value)
+}
+const GLOB_CHARS = /[*?[\]{}]/
+// A target must be the same PLAIN REPO-RELATIVE path a scope entry must be
+// (crew/drive.mjs:1742-1760): no glob, not absolute, and no `.` or `..` segment.
+// A command operand is not a canonical git path — `crew/pi/../../test/x.test.mjs`
+// has the `crew/pi/` prefix and resolves outside it — so the prefix match below
+// is only sound over paths that were validated here first.
+const concreteTestFile = (token) => token.endsWith('.test.mjs')
+  && !GLOB_CHARS.test(token)
+  && !token.startsWith('/')
+  && !token.split('/').some((segment) => segment === '.' || segment === '..')
+
+// TOKEN-AWARE detection of a Node test invocation, replacing the raw
+// `/\bnode\s+[^\n]*--test\b/` gate. The executable may be PLAIN (`node`), QUOTED
+// (`'node'`, which shellTokens has already unquoted) or an ABSOLUTE PATH whose
+// basename is node (`/usr/bin/node`) — all three are plain spellings a seat types
+// by habit — and an actual `--test` TOKEN must be present rather than the
+// substring `--test` anywhere in the text. The raw regex matched none of
+// `'node' --test`: the quote sits exactly where it demands whitespace, so a full
+// suite run reached a never-owner journaled `unrecognised` instead of refused.
+// #904's Posture: fail-closed on plain spellings. Both helpers stay PRIVATE —
+// only recogniseSegment calls them, and an unused export is a name nothing
+// consumes (the same rule GT 6 applies to TEST_COMMAND_RE).
+function nodeExecutable(token) {
+  return token === 'node' || token.endsWith('/node')
+}
+function isNodeTestInvocation(text) {
+  const tokens = shellTokens(text)
+  return tokens.length > 0 && nodeExecutable(tokens[0]) && tokens.slice(1).includes('--test')
+}
+
+// EVERY token of the invocation, or NULL when this policy cannot vouch for what
+// Node will execute. Fail-closed over the WHOLE command line, not only the part
+// after `--test`: a preload sits BEFORE it (`node --require=./x.mjs --test a.test.mjs`)
+// and a non-option prefix operand is a script Node runs instead of the tests.
+export function testTargets(command) {
+  const tokens = shellTokens(command)
+  if (tokens.length === 0) return null
+  const targets = []
+  for (const token of tokens.slice(1)) {
+    if (token.startsWith('-')) {
+      if (!safeOption(token)) return null
+      continue
+    }
+    if (!concreteTestFile(token)) return null
+    targets.push(token)
+  }
+  return targets.length > 0 ? targets : null
+}
+
+// The SAME two branches crew/drive.mjs#scopeMatcher uses (:1915-1919): an entry
+// ending in `/` matches by prefix, anything else matches exactly. Mirrored
+// rather than imported — headless.mjs must not import the driver — and sound only
+// because concreteTestFile has already refused `..` segments.
+export function fenceCovers(fence, target) {
+  return (Array.isArray(fence) ? fence : []).some((entry) => typeof entry === 'string' && (entry.endsWith('/')
+    ? target.startsWith(entry)
+    : target === entry))
+}
+
+// The shell operators that make a command COMPOUND. A gate invocation joined to
+// anything else is not a standalone gate invocation.
+const SHELL_SEPARATOR = /&&|\|\||;|\||\n/
+
+export function splitShellCommands(command) {
+  return String(command ?? '').split(SHELL_SEPARATOR).map((part) => part.trim()).filter(Boolean)
+}
+
+function recogniseSegment(segment, { suiteCommand, gatePath }) {
+  const text = String(segment ?? '')
+  const tokens = text.split(/\s+/).filter(Boolean)
+  if (gatePath && tokens.length === 2 && tokens[0] === 'node' && tokens[1] === gatePath) return 'gate'
+  if (suiteCommand && text.includes(suiteCommand)) return 'suite'
+  if (/\bnpm\s+(?:run\s+)?test\b/.test(text)) return 'suite'
+  if (isNodeTestInvocation(text)) return testTargets(text) ? 'scoped-test' : 'suite'
+  return null
+}
+
+function recogniseInvocation(command, { suiteCommand = null, gatePath = null } = {}) {
+  const segments = splitShellCommands(command)
+  const kinds = segments.map((segment) => recogniseSegment(segment, { suiteCommand, gatePath }))
+  if (kinds.every((kind) => kind === null)) return { kind: null, blind: false }
+  // An EXPLICIT suite segment refuses first: fail-closed beats honest. But the
+  // opaque segment beside it is still a blind spot, and `blind` is how it is
+  // charged — a refusal reporting `unrecognised: 0` claims it read a command it
+  // could not read.
+  if (kinds.includes('suite')) return { kind: 'suite', blind: kinds.includes(null) }
+  // A recognised neighbour may not LAUNDER an opaque one.
+  if (kinds.includes(null)) return { kind: null, blind: false }
+  if (kinds.includes('scoped-test')) return { kind: 'scoped-test', blind: false }
+  if (segments.length === 1 && kinds[0] === 'gate') return { kind: 'gate', blind: false }
+  return { kind: 'suite', blind: false }
+}
+
+export function recogniseSuiteInvocation(command, options = {}) {
+  return recogniseInvocation(command, options).kind
+}
+
+function suiteRefusal(role, command, gatePath, kind) {
+  return {
+    decision: 'refuse',
+    reason: `${SUITE_RUN_REFUSAL}: the driver's gate-proof stage carries this evidence at ${gatePath}`,
+    role, command, kind, gate_path: gatePath,
+  }
+}
+
+function suiteAdmit(why, kind) { return { decision: 'admit', reason: why, kind } }
+
+function decideSuiteRun({ role, command, fence, gatePath, ranBefore, suiteRanBefore, suiteCommand, kind }) {
+  if (kind === null) return { decision: 'unrecognised', reason: SUITE_RUN_UNRECOGNISED, role, command, kind: null, gate_path: gatePath }
+  if (SUITE_RUN_OWNERSHIP[role] === 'never') return suiteRefusal(role, command, gatePath, kind)
+  if (SUITE_RUN_OWNERSHIP[role] === 'once') {
+    // A STANDALONE gate run is the planner's charter-required baseline, re-measured
+    // every plan round, so it is not charged against the one suite run the role owns.
+    if (kind === 'gate') return suiteAdmit('gate', kind)
+    return ranBefore >= 1 ? suiteRefusal(role, command, gatePath, kind) : suiteAdmit('first-run', kind)
+  }
+  if (SUITE_RUN_OWNERSHIP[role] === 'fenced') {
+    if (kind === 'gate') return suiteAdmit('gate', kind)
+    if (kind === 'suite') return suiteRefusal(role, command, gatePath, kind)
+    return fencedScopedTest(command, fence) ? suiteAdmit('fenced-test', kind) : suiteRefusal(role, command, gatePath, kind)
+  }
+  // `fenced-once` is `fenced` plus the ONE full-suite run the builder's Done
+  // condition requires. Every brief in this repo makes `npm test` green a
+  // condition of done, so a policy that refused it outright would end the
+  // dispatch of a builder doing exactly what it was told (RV1-7). It still
+  // kills #866's grievance: the 18-49 runs per lane become one.
+  if (SUITE_RUN_OWNERSHIP[role] === 'fenced-once') {
+    if (kind === 'gate') return suiteAdmit('gate', kind)
+    if (kind === 'suite') {
+      // `suite` is overloaded: it is BOTH the declared suite command and the
+      // recognised-but-unaccountable fall-through (#904's posture). Only the
+      // DECLARED command may spend the allowance — an unaccountable invocation
+      // refuses and is charged nothing, so it can never buy the builder's one run.
+      if (!isDeclaredSuiteRun(command, suiteCommand)) return suiteRefusal(role, command, gatePath, kind)
+      return suiteRanBefore >= 1 ? suiteRefusal(role, command, gatePath, kind) : suiteAdmit('suite-allowance', kind)
+    }
+    return fencedScopedTest(command, fence) ? suiteAdmit('fenced-test', kind) : suiteRefusal(role, command, gatePath, kind)
+  }
+  return suiteRefusal(role, command, gatePath, kind)
+}
+
+// Fail-closed by construction: with no declared suite command there is nothing
+// the allowance could name, so nothing spends it.
+function isDeclaredSuiteRun(command, suiteCommand) {
+  if (typeof suiteCommand !== 'string' || suiteCommand.trim() === '') return false
+  const segments = splitShellCommands(command)
+  return segments.length === 1 && segments[0].trim() === suiteCommand.trim()
+}
+
+function fencedScopedTest(command, fence) {
+  const targets = testTargets(command)
+  return targets !== null && targets.every((target) => fenceCovers(fence, target))
+}
+
+export function suiteRunPolicy({ role, command, fence = [], gatePath = null, ranBefore = 0, suiteRanBefore = 0, suiteCommand = null } = {}) {
+  const { kind, blind } = recogniseInvocation(command, { suiteCommand, gatePath })
+  return { ...decideSuiteRun({ role, command, fence, gatePath, ranBefore, suiteRanBefore, suiteCommand, kind }), blind }
+}
+
+// Every shell invocation the claude stream ALREADY recorded, in order, with the
+// tool-use id that makes each one adjudicable exactly once.
+export function shellToolCalls(text) {
+  const calls = []
+  for (const line of String(text ?? '').split('\n')) {
+    if (!line.trim()) continue
+    let frame
+    try { frame = JSON.parse(line) } catch { continue }
+    if (frame?.type !== 'assistant') continue
+    const content = Array.isArray(frame.message?.content) ? frame.message.content : []
+    for (const use of content) {
+      if (use?.type !== 'tool_use') continue
+      if (typeof use?.name !== 'string' || use.name.toLowerCase() !== 'bash') continue
+      const command = use.input?.command
+      if (typeof command !== 'string' || command.trim() === '') continue
+      calls.push({ id: use.id ?? null, command })
+    }
+  }
+  return calls
+}
+
 function censusRow(run, transport, stream) {
   const census = stream?.census
   const absentReason = stream?.census_absent ?? census?.clock_absent ?? null
@@ -666,6 +982,12 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
   const root = join(taskDir || paths.taskDir, 'headless')
   const store = reclaimStore({ dir: root, actor: `headless:${pid}`, deps })
   const runs = new Map()
+  // Per ROLE, not per assignment: #870's "planner ONCE" is once for the run.
+  const suiteCounters = new Map()
+  const suiteCountersFor = (role) => {
+    if (!suiteCounters.has(role)) suiteCounters.set(role, suitePolicyCounters())
+    return suiteCounters.get(role)
+  }
 
   const crewDeps = { existsSync: exists, readFileSync: read, writeFileSync: write, renameSync: rename, unlinkSync: unlink, mkdirSync: mkdir, readdirSync: readdir, uuid, now, sleep, pid }
   // Best-effort is not silent: a persist that FAILS is journalled, so the
@@ -708,6 +1030,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
   }
   function recordOutcome(run, outcome, stream, exitCode, signal = null) {
     const degraded = outcome === 'ok-degraded' ? degradedSignals({ exitCode, signal, terminal: stream.terminal }) : null
+    if (run.policy) log(suitePolicyRow({ role: run.role, transport: 'headless-json', counters: suiteCountersFor(run.role), read: run.policyRead !== false }))
     log({ at: now(), headless_outcome: outcome, exit_code: exitCode, signal, terminal_reason: stream.terminalReason, lines: stream.lines, stream: run.stream, seat_turn_census: censusRow(run, 'headless-json', stream), ...(degraded ? { degraded } : {}), ...(stream.providerFailure ? { provider_failure: stream.providerFailure } : {}) })
   }
   function graceSpentFor(run) {
@@ -738,7 +1061,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
   // it on, because the seat's own bytes are read, never rewritten. The PHYSICAL
   // run keeps its own `runId`: it is a second invocation and every reservation,
   // directory and journal row must still be able to say so.
-  function assign({ role, briefFile, note, reask = null }) {
+  function assign({ role, briefFile, note, policy = null, reask = null }) {
     const member = crew.members?.[role]
     if (!member) throw new Error(`role ${role} not seated in this crew`)
     const prior = [...runs.values()].reverse().find((r) => r.role === role)
@@ -792,7 +1115,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
     store.advance(handle, PHASES.RUNNING, { pid: child.pid })
     member.started = true
     notePersist(role, persistCrew(paths, role, { started: true }, crewDeps))
-    const run = { role, id, runId, briefFile, note: note ?? null, model: member.model ?? null, sessionId, pid: child.pid, reservation_id: handle.reservation_id, dir, stream, stderr, exit, cmdPath, returnPath, startedAt: now() }
+    const run = { role, id, runId, briefFile, note: note ?? null, model: member.model ?? null, sessionId, pid: child.pid, reservation_id: handle.reservation_id, dir, stream, stderr, exit, cmdPath, returnPath, startedAt: now(), policy: policy ?? null, seenToolCalls: new Set() }
     runs.set(returnPath, run)
     log({ at: now(), event: 'headless-spawn', role, id, run_id: runId, pid: child.pid, dir, returnPath })
     return { id, returnPath }
@@ -870,7 +1193,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
     if (!fallbackFor(run, deadline)) return null
     try {
       runs.delete(returnPath)
-      assign({ role: run.role, briefFile: run.briefFile, note: run.note, reask: { id: run.id, returnPath: run.returnPath } })
+      assign({ role: run.role, briefFile: run.briefFile, note: run.note, policy: run.policy, reask: { id: run.id, returnPath: run.returnPath } })
     } catch (err) {
       log({ at: now(), event: 'seat-fallback-failed', role: run.role, assignment_id: run.id, error: String(err?.message ?? err) })
       return null
@@ -882,15 +1205,9 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
   function wait(returnPath, timeoutS) {
     return waitUntil(returnPath, now() + Number(timeoutS) * 1000)
   }
-  function waitUntil(returnPath, deadline) {
-    const run = runs.get(returnPath) || { role: 'unknown', returnPath, stream: '', exit: '' }
-    while (now() < deadline) {
-      const env = readEnvelopeOrFail(run)
-      if (env) { const exitCode = parseExit(run.exit, read, exists); const stream = parseStream(run.stream, read, exists); const outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: env, timedOut: false, budgetRefused: stream.budgetRefused }); recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); return env }
-      const exitCode = parseExit(run.exit, read, exists)
-      if (exitCode !== null) { const stream = parseStream(run.stream, read, exists); const outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: null, timedOut: false, budgetRefused: stream.budgetRefused }); recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); if (outcome === 'budget-refused') { const again = reaskOnFallback(run, returnPath, deadline, stream.providerFailure); if (again) return again() } throw outcomeError(run, outcome) }
-      sleep(WAIT_POLL_MS)
-    }
+  // The end sequence, factored so the wait expiry, the turn ceiling and a suite
+  // refusal share ONE author: SIGTERM the group, grace, SIGKILL, prove dead, release.
+  function endDispatch(run, returnPath) {
     if (run.pid != null) { try { kill(-run.pid, 'SIGTERM') } catch {} }
     const graceDeadline = now() + KILL_GRACE_MS
     while (now() < graceDeadline && parseExit(run.exit, read, exists) === null) sleep(WAIT_POLL_MS)
@@ -906,6 +1223,77 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
         runs.delete(returnPath) // a proven-dead run is not a live prior (#838)
       } else log({ at: now(), event: 'headless-timeout-marker-retained', role: run.role, id: run.id, run_id: run.runId })
     }
+  }
+  // The policy is adjudicated BEFORE any envelope or exit marker is accepted.
+  // An observation that fails is reported as unavailable; a later successful read
+  // may clear that temporary absence on the next poll.
+  // The stream read is an OBSERVATION with a status, not a string. An absent or
+  // unreadable stream is `read: false` — the wrapper did not look — and a zero
+  // counter published from it would claim it had.
+  function readStreamObservation(run) {
+    if (!exists(run.stream)) return { text: '', read: false }
+    try { return { text: String(read(run.stream, 'utf8')), read: true } }
+    catch { return { text: '', read: false } }
+  }
+  // Every shell call the stream has recorded so far, adjudicated EXACTLY ONCE by
+  // its tool-use id. Returns the first refusal, or null.
+  function adjudicateSuiteCalls(run, text) {
+    if (!run.policy) return null
+    const counters = suiteCountersFor(run.role)
+    let refused = null
+    for (const call of shellToolCalls(text)) {
+      const key = call.id ?? `${run.id}:${call.command}`
+      if (run.seenToolCalls.has(key)) continue
+      run.seenToolCalls.add(key)
+      const verdict = suiteRunPolicy({
+        role: run.role, command: call.command,
+        fence: run.policy.fence || [], gatePath: run.policy.gatePath || null,
+        ranBefore: counters.allowance_spent, suiteRanBefore: counters.suite_allowance_spent,
+        suiteCommand: run.policy.suiteCommand || null,
+      })
+      countSuiteDecision(counters, verdict.decision, { kind: verdict.kind, blind: verdict.blind })
+      // The FIRST refusal decides the dispatch, and the loop still FINISHES: the
+      // remaining calls are in bytes this read already consumed, and a count that
+      // stops at the refusal is not a count of what was read. Mirrors R7.
+      if (verdict.decision === 'refuse' && !refused) refused = verdict
+    }
+    return refused
+  }
+  function enforceBeforeEnvelope(run, returnPath, { alreadyEnded = false } = {}) {
+    if (!run.policy) return null
+    const observed = readStreamObservation(run)
+    run.policyRead = observed.read
+    const verdict = adjudicateSuiteCalls(run, observed.text)
+    if (verdict) {
+      if (!alreadyEnded) endDispatch(run, returnPath)
+      // Termination grace can flush more policy bytes. Observe the cumulative
+      // stream once more before recording, while the retained first refusal
+      // remains the dispatch decision and `seenToolCalls` deduplicates prior calls.
+      const final = readStreamObservation(run)
+      run.policyRead = final.read
+      adjudicateSuiteCalls(run, final.text)
+      const stream = parseStream(run.stream, read, exists)
+      recordOutcome(run, 'suite-run-not-owned', stream, parseExit(run.exit, read, exists))
+      emitUsage(run, stream.usage)
+      log(suiteRefusalRow({ role: run.role, transport: 'headless-json', verdict }))
+      return suiteRefusalEnvelope({ id: run.id, role: run.role, returnPath, transport: 'headless-json', verdict })
+    }
+    return null
+  }
+  function waitUntil(returnPath, deadline) {
+    const run = runs.get(returnPath) || { role: 'unknown', returnPath, stream: '', exit: '' }
+    while (now() < deadline) {
+      const enforced = enforceBeforeEnvelope(run, returnPath)
+      if (enforced) return enforced
+      const env = readEnvelopeOrFail(run)
+      if (env) { const exitCode = parseExit(run.exit, read, exists); const stream = parseStream(run.stream, read, exists); const outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: env, timedOut: false, budgetRefused: stream.budgetRefused }); recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); return env }
+      const exitCode = parseExit(run.exit, read, exists)
+      if (exitCode !== null) { const stream = parseStream(run.stream, read, exists); const outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: null, timedOut: false, budgetRefused: stream.budgetRefused }); recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); if (outcome === 'budget-refused') { const again = reaskOnFallback(run, returnPath, deadline, stream.providerFailure); if (again) return again() } throw outcomeError(run, outcome) }
+      sleep(WAIT_POLL_MS)
+    }
+    endDispatch(run, returnPath)
+    const racedEnforced = enforceBeforeEnvelope(run, returnPath, { alreadyEnded: true })
+    if (racedEnforced) return racedEnforced
     const raced = readEnvelopeOrFail(run)
     if (raced) { const stream = parseStream(run.stream, read, exists); const exitCode = parseExit(run.exit, read, exists); const outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: raced, timedOut: false, budgetRefused: stream.budgetRefused }); recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); return raced }
     const exitCode = parseExit(run.exit, read, exists), stream = parseStream(run.stream, read, exists), outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: null, timedOut: true, budgetRefused: stream.budgetRefused })

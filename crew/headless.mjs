@@ -706,10 +706,19 @@ function decideSuiteRun({ role, command, fence, gatePath, ranBefore, suiteRanBef
 
 // Fail-closed by construction: with no declared suite command there is nothing
 // the allowance could name, so nothing spends it.
+//
+// EXACTLY ONE segment must be the declared command. Requiring it to be the ONLY
+// segment was wrong and cost b438-refstrailer a lane on its first build round:
+// `cd <checkout> && npm test` is how a seat actually runs the suite, and the
+// `cd` made it two segments, so the builder's one legitimate run was refused
+// and its dispatch ended before it could write an envelope. Counting instead of
+// requiring solitude keeps the allowance exact — `npm test && npm test` is two
+// declared runs and still refuses — while admitting the ordinary spelling.
 function isDeclaredSuiteRun(command, suiteCommand) {
   if (typeof suiteCommand !== 'string' || suiteCommand.trim() === '') return false
-  const segments = splitShellCommands(command)
-  return segments.length === 1 && segments[0].trim() === suiteCommand.trim()
+  const declared = suiteCommand.trim()
+  const matches = splitShellCommands(command).filter((segment) => segment.trim() === declared)
+  return matches.length === 1
 }
 
 function fencedScopedTest(command, fence) {

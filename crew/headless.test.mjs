@@ -1587,3 +1587,26 @@ test('an unaccountable suite invocation refuses and never spends the allowance',
 test('with no declared suite command the builder allowance admits nothing', () => {
   assert.equal(suiteRunPolicy({ role: 'builder', command: 'npm test', fence: [], gatePath: '/task/gate.mjs' }).decision, 'refuse')
 })
+
+// b438-refstrailer, 2026-09-05: the builder ran `cd <checkout> && npm test` on
+// its first build round, the two-segment command failed the declared-run guard,
+// its dispatch was ended as suite-run-not-owned before it could write an
+// envelope, and the lane escalated `seat-died`. The allowance must count the
+// declared command, not require it to be the only segment.
+// Mutation killed: requiring segments.length === 1 in isDeclaredSuiteRun.
+test('the builder suite allowance admits the declared command after a cd', () => {
+  const opts = { role: 'builder', fence: ['crew/drive.mjs'], gatePath: '/task/gate.mjs', suiteCommand: 'npm test' }
+  for (const command of ['npm test', 'cd /Users/x/dt-lane && npm test', 'cd /tmp/a && cd /tmp/b && npm test']) {
+    const v = suiteRunPolicy({ ...opts, command, suiteRanBefore: 0 })
+    assert.equal(v.decision, 'admit', command)
+    assert.equal(v.reason, 'suite-allowance', command)
+  }
+})
+
+// Mutation killed: counting any match instead of exactly one. Two declared runs
+// in one command line are two runs, and the allowance is one.
+test('two declared suite runs in one command line are refused', () => {
+  const opts = { role: 'builder', fence: ['crew/drive.mjs'], gatePath: '/task/gate.mjs', suiteCommand: 'npm test' }
+  assert.equal(suiteRunPolicy({ ...opts, command: 'npm test && npm test', suiteRanBefore: 0 }).decision, 'refuse')
+  assert.equal(suiteRunPolicy({ ...opts, command: 'cd /tmp/x && npm test', suiteRanBefore: 1 }).decision, 'refuse')
+})

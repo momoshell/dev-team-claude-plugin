@@ -34,7 +34,7 @@
 import {
   appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync, readdirSync, writeSync,
 } from 'node:fs'
-import { join, dirname, resolve as resolvePath } from 'node:path'
+import { join, dirname, basename, resolve as resolvePath } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
@@ -2094,6 +2094,7 @@ export function runCmd(args, deps = {}) {
   // The EFFECTIVE round validation lane and its source, recorded on every run:
   // an escalation at the lane stage reads differently when no lane was declared.
   logLine(journal, { at: new Date().toISOString(), event: 'validation-lane', lane: validationLane.lane, source: validationLane.source })
+  logLine(journal, { at: new Date().toISOString(), event: BATCH_DIR_EVENT, ...batchDirFromBrief(briefFile) })
   logLine(journal, { at: new Date().toISOString(), event: 'run-configuration', run_configuration: runConfiguration, ...turnCeilingsJournalPatch(crew.turn_ceilings ?? null) })
   if (crew.advisor?.granted?.length) {
     const runStartedAt = Date.now()
@@ -2258,6 +2259,18 @@ export function runCmd(args, deps = {}) {
 // stage list a crashed run's envelope carries must be bounded to the run that
 // crashed. This row is that boundary, and it carries the HEAD the run began at.
 export { RUN_START_EVENT }
+
+// #906: the batch dir is provenance, not an inference. A batched dispatch puts
+// the compiled brief at <batch>/out/<lane>.brief.md, so the batch dir is its
+// grandparent; anything else is an unmeasured value with a closed reason.
+export const BATCH_DIR_EVENT = 'batch-dir'
+export const BATCH_DIR_NOT_BATCHED = 'not-dispatched-from-batch'
+export function batchDirFromBrief(briefFile) {
+  const brief = typeof briefFile === 'string' && briefFile.trim() ? briefFile : null
+  const parent = brief ? dirname(brief) : null
+  if (parent && basename(parent) === 'out') return { batch_dir: dirname(parent), brief, reason: null }
+  return { batch_dir: null, brief, reason: BATCH_DIR_NOT_BATCHED }
+}
 
 // The checkout's HEAD at run start (#583 §1.4): nothing in crew/ records it
 // today, and without it a resume cannot refuse "the worktree has moved on".

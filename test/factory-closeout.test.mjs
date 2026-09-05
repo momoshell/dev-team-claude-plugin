@@ -17,6 +17,7 @@ import { dirname, join } from 'node:path'
 import {
   AMBIGUOUS_MARK,
   ARCHIVE_MARK,
+  BATCH_DIR_ABSENT,
   CLOSEOUT_REFUSALS,
   ENVELOPE_ACCEPTED,
   ENVELOPE_ABSENT,
@@ -39,6 +40,7 @@ import {
   parseArgs,
   parseRepairOutput,
   quietProbe,
+  quietRefusalDetail,
   reap,
   recover,
   refsFromPrBody,
@@ -201,6 +203,7 @@ test('quietProbe distinguishes equal, advancing, and unknown reads', () => {
   const equal = quietProbe({ dirs: ['tree', 'crew'], deps: { newest: () => 10, sleep: () => {} } })
   const moving = quietProbe({ dirs: ['tree'], deps: { newest: () => { advancing += 1; return advancing }, sleep: () => {} } })
   const unknown = quietProbe({ dirs: ['tree'], deps: { newest: () => null, sleep: () => {} } })
+  assert.deepEqual(equal.dirs, ['tree', 'crew'])
   assert.equal(equal.quiet, true)
   assert.equal(equal.unknown, false)
   assert.equal(moving.quiet, false)
@@ -231,9 +234,9 @@ test('envelopeReport classifies stale and matching assignment ids', () => {
 test('adoptCommandLine carries the measured batch and fence values or explicit unknowns', () => {
   const command = adoptCommandLine({ lane, archive: '/tmp/lane.recovery-copy', batchDir: '/tmp/batch', fencesPath: '/tmp/batch/fences.json' })
   assert.equal(command, 'node scripts/factory/dispatch-batch.mjs --batch /tmp/batch --fences /tmp/batch/fences.json --adopt b415-closeout=/tmp/lane.recovery-copy')
-  const unknown = adoptCommandLine({ lane, archive: '/tmp/lane.recovery-copy' })
-  assert.match(unknown, /<batch-dir UNKNOWN: no boot brief row in journal\.jsonl>/)
-  assert.match(unknown, /<fences UNKNOWN: no fences\.json under the batch dir>/)
+  assert.equal(adoptCommandLine({ lane, archive: '/tmp/lane.recovery-copy', fencesPath: '/tmp/batch/fences.json' }), null)
+  assert.equal(adoptCommandLine({ lane, archive: '/tmp/lane.recovery-copy', batchDir: '/tmp/batch' }), null)
+  assert.equal(adoptCommandLine({ lane, archive: '/tmp/lane.recovery-copy' }), null)
 })
 
 test('mergeCheck uses one scratch, merges every lane, runs suite and repairs every manifest', () => {
@@ -417,6 +420,65 @@ test('RV1-1 recover reads the archived crew directory after a real teardown', ()
   assert.equal(spawned(calls, 'dispatch-batch').length, 0)
 })
 
+test('recover probes crew.json checkout unless checkout was explicit', () => {
+  const fixture = laneFixture('closeout-recover-probe-root-')
+  const crewCheckout = join(fixture.home, 'distinct-lane-tree')
+  mkdirSync(crewCheckout, { recursive: true })
+  const crew = JSON.parse(readFileSync(join(fixture.crewDir, 'crew.json'), 'utf8'))
+  crew.checkout = crewCheckout
+  put(join(fixture.crewDir, 'crew.json'), JSON.stringify(crew))
+
+  const implicitDirs = []
+  const implicit = recover({
+    lane,
+    checkout: fixture.checkout,
+    deps: harness({
+      home: fixture.home,
+      newest: (dir) => { implicitDirs.push(dir); return 1000 },
+      answers: [['crew.mjs teardown', teardownReply()]],
+    }).deps,
+  })
+  assert.equal(implicit.refusal, null)
+  assert.ok(implicitDirs.includes(crewCheckout))
+  assert.equal(implicitDirs.includes(fixture.checkout), false)
+  assert.equal(implicit.report.probe_root, crewCheckout)
+  assert.equal(implicit.report.probe_root_source, 'crew-json')
+
+  const explicitDirs = []
+  const explicit = recover({
+    lane,
+    checkout: fixture.checkout,
+    checkoutExplicit: true,
+    deps: harness({
+      home: fixture.home,
+      newest: (dir) => { explicitDirs.push(dir); return 1000 },
+      answers: [['crew.mjs teardown', teardownReply()]],
+    }).deps,
+  })
+  assert.equal(explicit.refusal, null)
+  assert.ok(explicitDirs.includes(fixture.checkout))
+  assert.equal(explicitDirs.includes(crewCheckout), false)
+  assert.equal(explicit.report.probe_root_source, 'checkout-flag')
+})
+
+test('recover names both probe directories and renders unknown mtimes honestly', () => {
+  const fixture = laneFixture('closeout-recover-probe-refusal-')
+  let tick = 0
+  const result = recover({
+    lane,
+    checkout: fixture.checkout,
+    deps: harness({
+      home: fixture.home,
+      newest: () => { tick += 1; return tick === 3 ? null : tick * 1000 },
+      answers: [['crew.mjs teardown', teardownReply()]],
+    }).deps,
+  })
+  assert.equal(result.refusal.reason, CLOSEOUT_REFUSALS.TREE_NOT_QUIET)
+  assert.ok(result.refusal.message.includes(`${fixture.checkout}: newest mtime 1000 then unknown`))
+  assert.ok(result.refusal.message.includes(`${fixture.crewDir}: newest mtime 2000 then 4000`))
+  assert.doesNotMatch(result.refusal.message, /then 0/)
+})
+
 test('recover continues after a clear seats-null pgrep and stops pre-commit at adopt-ready', () => {
   const fixture = laneFixture('closeout-recover-adopt-')
   const { deps, calls } = harness({
@@ -429,9 +491,11 @@ test('recover continues after a clear seats-null pgrep and stops pre-commit at a
   const result = recover({ lane, checkout: fixture.checkout, deps })
   assert.equal(result.code, 0)
   assert.equal(result.report.adopt.archive, `${fixture.crewDir}.recovery-copy`)
+  assert.equal(result.report.adopt.batch_dir_source, 'brief-sibling')
   assert.match(result.report.adopt.command, /--adopt b415-closeout=.*\.recovery-copy/)
   assert.match(result.report.adopt.command, /--batch .*batch-2026-09-04-r18/)
   assert.match(result.report.adopt.command, /--fences .*fences\.json/)
+  assert.doesNotMatch(result.report.adopt.command, /UNKNOWN/)
   assert.equal(result.lines.some((row) => row.step === 'rebase'), false)
   assert.equal(spawned(calls, 'dispatch-batch').length, 0)
 })
@@ -465,12 +529,103 @@ test('recover reports a stale envelope and refuses missing lane fences', () => {
   assert.equal(missing.refusal.reason, CLOSEOUT_REFUSALS.FENCE_ABSENT)
 })
 
-test('recover emits unknown adoption placeholders when journal boot evidence is absent', () => {
+test('recover emits absent adoption evidence when journal and run-log sources are absent', () => {
   const fixture = laneFixture('closeout-recover-unknown-')
   put(join(fixture.crewDir, 'journal.jsonl'), '')
+  put(join(fixture.crewDir, 'run.log'), 'warning: --variant is a DEPRECATED alias\n')
   const result = recover({ lane, checkout: fixture.checkout, deps: harness({ home: fixture.home, answers: [['crew.mjs teardown', teardownReply()]] }).deps })
-  assert.match(result.report.adopt.batch_dir, /<batch-dir UNKNOWN/)
-  assert.match(result.report.adopt.fences, /<fences UNKNOWN/)
+  assert.equal(result.report.adopt.batch_dir, null)
+  assert.equal(result.report.adopt.batch_dir_source, null)
+  assert.equal(result.report.adopt.batch_dir_reason, BATCH_DIR_ABSENT)
+  assert.equal(result.report.adopt.command, null)
+  assert.deepEqual(result.report.adopt.missing, ['--batch', '--fences'])
+  for (const value of Object.values(result.report.adopt)) {
+    assert.equal(typeof value !== 'string' || !value.includes('dispatch-batch.mjs --batch'), true)
+  }
+})
+
+test('RV1-1 recover ignores stale batch provenance after a current non-batch run', () => {
+  const fixture = laneFixture('closeout-recover-current-run-provenance-')
+  const oldBatch = join(fixture.home, 'old-batch')
+  const oldBrief = join(oldBatch, 'out', `${lane}.brief.md`)
+  const looseBrief = join(fixture.home, 'current-loose.brief.md')
+  const oldRunLine = `node crew/crew.mjs run --task ${lane} --brief-file ${oldBrief}`
+  put(join(oldBatch, 'fences.json'), '{}')
+  put(join(fixture.crewDir, 'journal.jsonl'), [
+    { event: 'run-start' },
+    { event: 'batch-dir', batch_dir: oldBatch, brief: oldBrief, reason: null },
+    { assign: 'd1', role: 'planner', brief: oldBrief },
+    { event: 'run-start' },
+    { event: 'batch-dir', batch_dir: null, brief: looseBrief, reason: 'not-dispatched-from-batch' },
+    { assign: 'd2', role: 'builder', brief: looseBrief },
+  ].map((row) => JSON.stringify(row)).join('\n') + '\n')
+  put(join(fixture.crewDir, 'run.log'), `${oldRunLine}\nwarning: no current dispatch line\n`)
+  const result = recover({
+    lane,
+    checkout: fixture.checkout,
+    deps: harness({ home: fixture.home, answers: [['crew.mjs teardown', teardownReply()]] }).deps,
+  })
+  assert.equal(result.code, 0)
+  assert.equal(result.report.adopt.batch_dir, null)
+  assert.equal(result.report.adopt.batch_dir_source, null)
+  assert.equal(result.report.adopt.batch_dir_reason, BATCH_DIR_ABSENT)
+  assert.equal(result.report.adopt.command, null)
+  assert.deepEqual(result.report.adopt.missing, ['--batch', '--fences'])
+})
+
+test('RV2-1 recover treats active null batch provenance as authoritative over append-only run-log evidence', () => {
+  const fixture = laneFixture('closeout-recover-null-over-run-log-')
+  const oldBatch = join(fixture.home, 'old-run-log-batch')
+  const oldBrief = join(oldBatch, 'out', `${lane}.brief.md`)
+  const looseBrief = join(fixture.home, 'current-loose.brief.md')
+  put(join(oldBatch, 'fences.json'), '{}')
+  put(join(fixture.crewDir, 'journal.jsonl'), [
+    { event: 'run-start' },
+    { event: 'batch-dir', batch_dir: null, brief: looseBrief, reason: 'not-dispatched-from-batch' },
+  ].map((row) => JSON.stringify(row)).join('\n') + '\n')
+  put(join(fixture.crewDir, 'run.log'), `node crew/crew.mjs run --task ${lane} --brief-file ${oldBrief}\n`)
+  const result = recover({
+    lane,
+    checkout: fixture.checkout,
+    deps: harness({ home: fixture.home, answers: [['crew.mjs teardown', teardownReply()]] }).deps,
+  })
+  assert.equal(result.code, 0)
+  assert.equal(result.report.adopt.batch_dir, null)
+  assert.equal(result.report.adopt.batch_dir_source, null)
+  assert.equal(result.report.adopt.fences, null)
+  assert.equal(result.report.adopt.command, null)
+  assert.deepEqual(result.report.adopt.missing, ['--batch', '--fences'])
+})
+
+test('recover chooses boot, run-log, then brief-sibling batch evidence in order', () => {
+  const fixture = laneFixture('closeout-recover-source-order-')
+  const batches = {
+    boot: join(fixture.home, 'batch-source-boot'),
+    runLog: join(fixture.home, 'batch-source-run-log'),
+    brief: join(fixture.home, 'batch-source-brief'),
+  }
+  for (const batch of Object.values(batches)) put(join(batch, 'fences.json'), '{}')
+  const bootRow = { event: 'batch-dir', batch_dir: batches.boot, brief: join(batches.boot, 'out', `${lane}.brief.md`), reason: null }
+  const briefRow = { assign: 'd1', role: 'planner', brief: join(batches.brief, 'out', `${lane}.brief.md`) }
+  const planRow = { assign: 'd2', role: 'builder', brief: join(fixture.crewDir, 'task', 'plan.md') }
+  const runLine = `node crew/crew.mjs run --task ${lane} --brief-file ${join(batches.runLog, 'out', `${lane}.brief.md`)}`
+  const adopt = () => recover({ lane, checkout: fixture.checkout, deps: harness({ home: fixture.home, answers: [['crew.mjs teardown', teardownReply()]] }).deps }).report.adopt
+
+  put(join(fixture.crewDir, 'journal.jsonl'), [bootRow, briefRow, planRow].map((row) => JSON.stringify(row)).join('\n') + '\n')
+  put(join(fixture.crewDir, 'run.log'), `${runLine}\n`)
+  const boot = adopt()
+  assert.equal(boot.batch_dir, batches.boot)
+  assert.equal(boot.batch_dir_source, 'boot-journal')
+
+  put(join(fixture.crewDir, 'journal.jsonl'), [briefRow, planRow].map((row) => JSON.stringify(row)).join('\n') + '\n')
+  const runLog = adopt()
+  assert.equal(runLog.batch_dir, batches.runLog)
+  assert.equal(runLog.batch_dir_source, 'run-log')
+
+  put(join(fixture.crewDir, 'run.log'), 'warning: no dispatch line\n')
+  const sibling = adopt()
+  assert.equal(sibling.batch_dir, batches.brief)
+  assert.equal(sibling.batch_dir_source, 'brief-sibling')
 })
 
 test('run-log convention applies to merge-check, reap, and recover', () => {
@@ -549,8 +704,10 @@ test('all emitted step rows carry JSON, finite durations, and the refused row is
 
 test('parseArgs and main use usage, refusal, and success exit codes', () => {
   assert.deepEqual(parseArgs(['merge-check', 'lane-a', '--checkout', '/tmp/repo']), {
-    verb: 'merge-check', lanes: ['lane-a'], checkout: '/tmp/repo', help: false,
+    verb: 'merge-check', lanes: ['lane-a'], checkout: '/tmp/repo', checkout_explicit: true, help: false,
   })
+  assert.equal(parseArgs(['recover', lane]).checkout_explicit, false)
+  assert.equal(parseArgs(['recover', lane, '--checkout', '/tmp/x']).checkout_explicit, true)
   assert.throws(() => parseArgs(['unknown', 'lane']), (error) => error.reason === CLOSEOUT_REFUSALS.USAGE)
   assert.throws(() => parseArgs(['reap']), (error) => error.reason === CLOSEOUT_REFUSALS.USAGE)
   assert.equal(main(['unknown'], { log: () => {} }), 2)

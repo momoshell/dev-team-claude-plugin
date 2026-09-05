@@ -16,9 +16,9 @@ Do not harden correct code: **`shell: true`** has **`0 occurrences`**;
 **`process.env.SHELL`** also has zero occurrences; npm scripts use bare `node …`
 with `script-shell` unset. The only named shells are absolute and deliberate:
 `/bin/sh -c` for gate commands and the headless worker wrapper, and
-**`GATE_REAP_SHELL = '/bin/bash'`** (`crew/drive.mjs:559`), whose reason is in
+**`GATE_REAP_SHELL = '/bin/bash'`** (`crew/drive.mjs:572`), whose reason is in
 the adjacent comment and which is tested against a missing shell
-(`crew/drive.test.mjs:3112`, `'/path/that/does/not/exist'`). The `"name": "zsh"`
+(`crew/drive.test.mjs:3116`, `'/path/that/does/not/exist'`). The `"name": "zsh"`
 strings in the driver fixture are captured pane-tree data, not a dependency.
 
 Write the claim exactly this narrowly. `crew/child.mjs` does run **`execSync`**

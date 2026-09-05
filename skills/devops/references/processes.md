@@ -73,7 +73,7 @@ Exhibit: `crew/crew.mjs:1987`.
 
 The driver's waits are synchronous blocks, which is the window that swallows a
 signal.
-Exhibit: `crew/drive.mjs:5720`.
+Exhibit: `crew/drive.mjs:5898`.
 
 The signalled exit codes the marker reports are 143 and 130, so an absorbed
 signal is visible as neither.

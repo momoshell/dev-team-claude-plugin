@@ -62,7 +62,7 @@ Narrow the write surface; it is charged three times. b183: **5 files** → **30 
 ## Lever 7
 
 The compiler re-measures the suite on every compile and deliberately refuses a
-recorded baseline: **a recorded baseline is a fact about a commit and is never consumed** (`scripts/factory/make-brief.mjs:1421`). The principle is right, but **4 lanes x 2 passes** on one commit is **8 identical measurements**, about nine of the roughly ten minutes before dispatch. Measuring once per commit is consistent with the principle.
+recorded baseline: **a recorded baseline is a fact about a commit and is never consumed** (`scripts/factory/make-brief.mjs:1431`). The principle is right, but **4 lanes x 2 passes** on one commit is **8 identical measurements**, about nine of the roughly ten minutes before dispatch. Measuring once per commit is consistent with the principle.
 
 ## Lever 8
 

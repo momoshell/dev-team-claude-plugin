@@ -12,7 +12,7 @@ case per measurement:
 - **`${PIPESTATUS[0]}`** is bash and prints empty under zsh (`${pipestatus[1]}`); `$?` after a pipe is the last command's status.
 - A suppressed `git rebase` failure read as success from a downstream signal; a process being **alive now** says nothing about whether it died an hour ago, and the crash may be one log away.
 - Checking **too early** looks exactly like an instrument lying. A zero from grep whose pattern guesses formatting is a fact about the pattern, not the result.
-- An empty grep on a pipe may mean decoration: `function colourNeutralEnv(base = process.env)` (`scripts/factory/make-brief.mjs:783`) **deletes** `FORCE_COLOR` rather than only setting `NO_COLOR`.
+- An empty grep on a pipe may mean decoration: `function colourNeutralEnv(base = process.env)` (`scripts/factory/make-brief.mjs:793`) **deletes** `FORCE_COLOR` rather than only setting `NO_COLOR`.
 - Probing the wrong **layer** reads exactly like a missing guard.
 - **`load average`** is the wrong spare-capacity instrument: 16.97 on 16 cores looked saturated, while direct measurement showed 96.7% of 1600%, 2 runnable, and 893 sleeping. Measure `ps -Ao pcpu` and the runnable/sleeping split.
 - An escalation is not proof that work failed: the envelope landed two minutes after the driver's 2400s budget (`crew/drive.mjs:52`, `builder: 2400, reviewer: 1800`), so read `returns/d*.json` and `git status` before rerunning.

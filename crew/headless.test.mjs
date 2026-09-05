@@ -1,8 +1,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync, readdirSync, statSync, unlinkSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { createHash } from 'node:crypto'
 import {
   attributeExit, classifyRun, claudeCensus, classifyToolCall, decodeExitStatus, degradedSignals, foldUsage, headlessIo, parseStream,
   CENSUS_ABSENT_CAUSES, PROVIDER_FAILURE_KINDS, providerFailureKind, providerResetInstant, providerRetryDecision,
@@ -15,7 +16,7 @@ import {
   suitePolicyCounters, countSuiteDecision, suitePolicyReport, SUITE_RUN_OWNERSHIP, SUITE_RUN_OWNERSHIP_KINDS,
 } from './headless.mjs'
 import { cellFailureKind, HEADLESS_TRANSPORT, seatIo } from './seat-io.mjs'
-import { scratchDir, startFileWriter } from '../test/helpers.mjs'
+import { ROOT, scratchDir, startFileWriter } from '../test/helpers.mjs'
 
 // The final three bytes of each real 2026-08-30 refusal tail, copied
 // byte-for-byte so classification is adjudicated against the provider's own
@@ -2224,4 +2225,207 @@ test('#929 commandTokens finds the command word past assignments and wrappers', 
   assert.deepEqual(commandTokens('grep -n "npm test" f'), ['grep', '-n', 'npm test', 'f'])
   assert.deepEqual(commandTokens(executableText('grep -n "npm test" f')), ['grep', '-n', 'f'])
   assert.deepEqual(commandTokens(''), [])
+})
+
+// --- #929 the recorded command corpus ----------------------------------------
+// The suite policy's load-bearing input is a COMMAND STRING, and until now every
+// test of it fed the policy a string someone typed while thinking about the
+// policy. `test/fixtures/suite-policy-corpus.jsonl` is the other half: the
+// distinct shell commands real seats issued across recorded lane streams,
+// redacted of machine-specific paths but otherwise verbatim, each carrying the
+// role that issued it, the stream it came from, and the verdict the policy
+// reaches for it under four named contexts.
+//
+// REFRESH, DO NOT REGENERATE BLINDLY (#929 (4)). The corpus is produced by the
+// lane's extractor, which lives in the task dir and not in this repo: it walks
+// every `stream.jsonl` under `~/.crew`, extracts Bash calls with
+// `shellToolCalls`, redacts, and adjudicates. ADDING AN ENTRY REQUIRES STATING
+// ITS EXPECTED VERDICT — an entry that omits one FAILS this suite rather than
+// defaulting, which is what stops a future widening from silently absorbing a
+// command it should have refused.
+//
+// The fixture is read through ROOT, never through $HOME, so these tests measure
+// the same corpus on every machine.
+//
+// BLIND SPOT, STATED: a corpus proves the policy against commands seats have
+// ALREADY issued. A spelling no recorded seat has used yet is still unproven,
+// and the first one may again arrive in production. That is an argument for
+// refreshing the corpus as lanes run, not for trusting it as complete.
+const CORPUS_PATH = join(ROOT, 'test/fixtures/suite-policy-corpus.jsonl')
+const CORPUS_LINES = readFileSync(CORPUS_PATH, 'utf8').split('\n').filter((line) => line.trim() !== '')
+const CORPUS_HEADER = JSON.parse(CORPUS_LINES[0])
+const CORPUS = CORPUS_LINES.slice(1).map((line) => JSON.parse(line))
+const CORPUS_RECOGNISER = { suiteCommand: 'npm test', gatePath: null }
+const CORPUS_ROLES = ['planner', 'lead', 'reviewer', 'builder', 'tech-lead']
+const CORPUS_KINDS = [null, 'gate', 'scoped-test', 'suite']
+const CORPUS_DECISIONS = ['admit', 'refuse', 'unrecognised']
+// `lead` is the SHARED never-owner verdict: lead, reviewer and tech-lead all carry
+// SUITE_RUN_OWNERSHIP 'never', so one stored value is the expectation for all three
+// and the verdict test compares it against each. That covers every role in the
+// policy without adding two more columns to 488 fixture rows.
+const CORPUS_NEVER_OWNERS = ['lead', 'reviewer', 'tech-lead']
+// Pinned byte-for-byte, so a corpus cannot state a different rule from the one it
+// obeys. The gate's F1 pins the same string; this is the half that SHIPS.
+const CORPUS_SELECTION_RULE = 'Every distinct recorded command the recogniser classifies non-null under suite_command "npm test" with no gate path is selected (selected_by "recognised"); of the rest, a uniform 1-in-64 hash sample is selected (selected_by "sample") -- an unrecognised command is in the sample if and only if the sha256 of its REDACTED text, in lowercase hex, starts with one of sample_digest_prefixes. Each command carries the lexicographically smallest ATTRIBUTABLE occurrence of it: the smallest source_stream among the occurrences whose issuing role could be read, and that occurrence\'s role. A command is excluded only when NO occurrence of it has an attributable role, which is why distinct_commands_with_role is smaller than distinct_commands_redacted.'
+const CORPUS_CONTEXTS = {
+  lead: (command) => suiteRunPolicy({ role: 'lead', command, fence: [], gatePath: null, suiteCommand: 'npm test' }),
+  planner: (command) => suiteRunPolicy({ role: 'planner', command, fence: [], gatePath: null, ranBefore: 0, suiteCommand: 'npm test' }),
+  builder: (command) => suiteRunPolicy({ role: 'builder', command, fence: [], gatePath: null, suiteRanBefore: 0, suiteCommand: 'npm test' }),
+  builder_spent: (command) => suiteRunPolicy({ role: 'builder', command, fence: [], gatePath: null, suiteRanBefore: 1, suiteCommand: 'npm test' }),
+}
+const corpusDigest = (command) => createHash('sha256').update(String(command), 'utf8').digest('hex')
+// PRODUCTION decides what runs a test, not a hand-written regex: a family member is
+// a `cd` segment followed by a later segment the RECOGNISER classifies. A regex
+// keyed on a token ending in `npm`/`node` missed recorded wrapper spellings such as
+// `cd /tmp/b365-scratch && time node --test …`, which production reads as runs.
+const corpusIsFamily = (command) => {
+  const segments = splitShellCommands(command)
+  return segments.length > 1 && /^cd\s/.test(segments[0])
+    && segments.slice(1).some((segment) => recogniseSuiteInvocation(segment, CORPUS_RECOGNISER) !== null)
+}
+
+test('#929 the recorded corpus is adjudicated: every stated kind matches the recogniser', () => {
+  assert.ok(CORPUS.length >= 300, `corpus of ${CORPUS.length}`)
+  for (const entry of CORPUS) {
+    // MUTATION B2: turn this into assert.notEqual and the five shipped corpus
+    // tests stop pinning the fixture in `npm test`.
+    assert.equal(entry.kind, recogniseSuiteInvocation(entry.command, CORPUS_RECOGNISER), entry.id)
+  }
+})
+
+test('#929 the recorded corpus is adjudicated: every stated verdict matches the policy', () => {
+  for (const entry of CORPUS) {
+    for (const [context, adjudicate] of Object.entries(CORPUS_CONTEXTS)) {
+      assert.equal(entry.decisions[context], adjudicate(entry.command).decision, `${entry.id} ${context}`)
+    }
+    // Every never-owner role is adjudicated against the one stored `lead` value, so
+    // a change to reviewer or tech-lead ownership cannot pass this net.
+    for (const role of CORPUS_NEVER_OWNERS) {
+      assert.equal(entry.decisions.lead, suiteRunPolicy({ role, command: entry.command, fence: [], gatePath: null, suiteCommand: 'npm test' }).decision, `${entry.id} ${role}`)
+    }
+  }
+})
+
+test('#929 every corpus entry states a complete verdict, a role and its source stream', () => {
+  const ids = new Set()
+  for (const entry of CORPUS) {
+    for (const key of ['id', 'role', 'source_stream', 'command', 'kind', 'decisions', 'selected_by']) {
+      assert.equal(Object.hasOwn(entry, key), true, `${entry.id} is missing ${key}`)
+    }
+    assert.match(entry.id, /^[0-9a-f]{12}$/)
+    assert.equal(ids.has(entry.id), false, entry.id)
+    ids.add(entry.id)
+    assert.equal(CORPUS_KINDS.includes(entry.kind), true, `${entry.id} kind ${entry.kind}`)
+    assert.equal(CORPUS_ROLES.includes(entry.role), true, `${entry.id} role ${entry.role}`)
+    assert.equal(entry.source_stream.endsWith('/stream.jsonl'), true, `${entry.id} ${entry.source_stream}`)
+    assert.equal(['recognised', 'sample'].includes(entry.selected_by), true, `${entry.id} ${entry.selected_by}`)
+    assert.deepEqual(Object.keys(entry.decisions), ['lead', 'planner', 'builder', 'builder_spent'], entry.id)
+    for (const context of Object.keys(CORPUS_CONTEXTS)) {
+      assert.equal(CORPUS_DECISIONS.includes(entry.decisions[context]), true, `${entry.id} ${context}`)
+    }
+  }
+})
+
+test('#929 the corpus obeys its own stated selection rule and denominators', () => {
+  assert.deepEqual(CORPUS_HEADER.sample_digest_prefixes, ['00', '01', '02', '03'])
+  assert.equal(CORPUS_HEADER.selection_rule, CORPUS_SELECTION_RULE)
+  assert.equal(CORPUS_HEADER.source_root, '~/.crew')
+  let recognised = 0
+  let sampled = 0
+  let family = 0
+  let previousId = null
+  for (const entry of CORPUS) {
+    assert.equal(entry.id, corpusDigest(entry.command).slice(0, 12), entry.command)
+    // Strictly ascending, not merely digest-derived: a reordered or duplicated
+    // fixture is a different corpus and must not pass as a refresh of this one.
+    assert.equal(previousId === null || previousId < entry.id, true, `${previousId} then ${entry.id}`)
+    previousId = entry.id
+    if (corpusIsFamily(entry.command)) family += 1
+    if (entry.selected_by === 'recognised') { recognised += 1; assert.notEqual(entry.kind, null, entry.id); continue }
+    sampled += 1
+    assert.equal(entry.kind, null, entry.id)
+    assert.equal(CORPUS_HEADER.sample_digest_prefixes.some((prefix) => corpusDigest(entry.command).startsWith(prefix)), true, entry.id)
+  }
+  assert.equal(CORPUS_HEADER.recognised_count, recognised)
+  assert.equal(CORPUS_HEADER.recognised_population, recognised)
+  assert.equal(CORPUS_HEADER.sample_count, sampled)
+  assert.equal(CORPUS_HEADER.cd_then_test_family_count, family)
+  assert.equal(CORPUS_HEADER.entries, CORPUS.length)
+  assert.equal(CORPUS_HEADER.recognised_count + CORPUS_HEADER.sample_count, CORPUS_HEADER.entries)
+  assert.equal(CORPUS_HEADER.recognised_population + CORPUS_HEADER.unrecognised_population, CORPUS_HEADER.distinct_commands_with_role)
+  // Never a rate without its denominator: the header states how many commands were
+  // available, how many were selected, and by what rule.
+  assert.ok(CORPUS_HEADER.distinct_commands_recorded > CORPUS_HEADER.entries)
+})
+
+test('#929 the corpus is redacted and stable across machines', () => {
+  const absoluteUser = /(?:^|[^\w~])\/(?:Users|home)\/[A-Za-z0-9._-]+\//
+  // `source_root` is the one header field that can carry a real path, so it is
+  // scanned alongside every entry; the rule and redaction prose DESCRIBE the
+  // forbidden shapes and scanning them would fail the corpus for documenting itself.
+  assert.equal(CORPUS_HEADER.source_root, '~/.crew')
+  for (const entry of [{ source_root: CORPUS_HEADER.source_root }, ...CORPUS]) {
+    const text = JSON.stringify(entry)
+    assert.equal(text.includes(homedir()), false, entry.id)
+    assert.doesNotMatch(text, absoluteUser, entry.id)
+    assert.doesNotMatch(text, /\/(?:private\/)?tmp\/claude-\d+/, entry.id)
+    assert.doesNotMatch(text, /\/var\/folders\/(?!TMP\/)[^/\s"'`]+\/[^/\s"'`]+\/T\//, entry.id)
+  }
+})
+
+// #929 (3) — the shape that bit us, in all three joiners and both allowance
+// states. b438-refstrailer's builder wrote `cd <checkout> && npm test`, the `cd`
+// made it two segments, its one legitimate suite run was refused, and the lane
+// escalated seat-died. `;` and `|` are the same shape with a different connector
+// and each can regress on its own, so each is its own named test.
+const CD_AND = 'cd ~/Dev/dt-b438-refstrailer && npm test'
+const CD_SEMI = 'cd ~/Dev/dt-b438-refstrailer ; npm test'
+const CD_PIPE = 'cd ~/Dev/dt-b438-refstrailer | npm test'
+const CORPUS_BUILDER = { role: 'builder', fence: ['crew/headless.test.mjs'], gatePath: '/task/gate.mjs', suiteCommand: 'npm test' }
+
+test('#929 a cd-and-suite command admits for a builder with an unspent allowance', () => {
+  // MUTATION J1: flip this expectation and the `&&` spelling that cost
+  // b438-refstrailer a lane is no longer pinned as admitted.
+  assert.equal(suiteRunPolicy({ ...CORPUS_BUILDER, command: CD_AND, suiteRanBefore: 0 }).decision, 'admit', CD_AND)
+})
+
+test('#929 a cd-and-suite command refuses for a builder with the allowance spent', () => {
+  // MUTATION J2: flip this expectation and the allowance stops being exactly one.
+  assert.equal(suiteRunPolicy({ ...CORPUS_BUILDER, command: CD_AND, suiteRanBefore: 1 }).decision, 'refuse', CD_AND)
+})
+
+test('#929 a cd-semicolon-suite command admits for a builder with an unspent allowance', () => {
+  // MUTATION J3: flip this expectation and the `;` connector may regress alone.
+  assert.equal(suiteRunPolicy({ ...CORPUS_BUILDER, command: CD_SEMI, suiteRanBefore: 0 }).decision, 'admit', CD_SEMI)
+})
+
+test('#929 a cd-semicolon-suite command refuses for a builder with the allowance spent', () => {
+  // MUTATION J4: flip this expectation and a spent allowance stops refusing `;`.
+  assert.equal(suiteRunPolicy({ ...CORPUS_BUILDER, command: CD_SEMI, suiteRanBefore: 1 }).decision, 'refuse', CD_SEMI)
+})
+
+test('#929 a cd-pipe-suite command admits for a builder with an unspent allowance', () => {
+  // MUTATION J5: flip this expectation and the `|` connector may regress alone.
+  assert.equal(suiteRunPolicy({ ...CORPUS_BUILDER, command: CD_PIPE, suiteRanBefore: 0 }).decision, 'admit', CD_PIPE)
+})
+
+test('#929 a cd-pipe-suite command refuses for a builder with the allowance spent', () => {
+  // MUTATION J6: flip this expectation and a spent allowance stops refusing `|`.
+  assert.equal(suiteRunPolicy({ ...CORPUS_BUILDER, command: CD_PIPE, suiteRanBefore: 1 }).decision, 'refuse', CD_PIPE)
+})
+
+// The RECORDED half of the same shape. Measured, and reported as a finding rather
+// than fixed here (#929 fences `crew/headless.mjs` out of this lane): every one of
+// the recorded family members REFUSES in both allowance states, because
+// `isDeclaredSuiteRun` compares a whole segment to the declared command and every
+// real spelling carries a `2>&1` or a `>` INSIDE that segment. Across the whole
+// recorded population not one command carries a segment equal to `npm test`.
+test('#929 the recorded cd-then-test-run family states both builder allowance verdicts', () => {
+  const family = CORPUS.filter((entry) => corpusIsFamily(entry.command))
+  assert.ok(family.length >= 100, `family of ${family.length}`)
+  assert.equal(family.length, CORPUS_HEADER.cd_then_test_family_count)
+  for (const entry of family) {
+    assert.equal(entry.decisions.builder, CORPUS_CONTEXTS.builder(entry.command).decision, entry.id)
+    assert.equal(entry.decisions.builder_spent, CORPUS_CONTEXTS.builder_spent(entry.command).decision, entry.id)
+  }
 })

@@ -35,7 +35,7 @@ export const LIMITS = Object.freeze({
 
 // A shared counter let b209-journalchannel's measured plan-check grant starve review;
 // keep each exhaustion point on its own bound.
-const EXTRA_ROUND_POINTS = Object.freeze(['plan-check', 'review'])
+const EXTRA_ROUND_POINTS = Object.freeze(['plan-question', 'plan-check', 'review'])
 
 // --- the per-role seat wait budget ---------------------------------------------
 // The measured bases for these numbers, kept as the answer to "why these values"
@@ -1509,6 +1509,41 @@ export function answerBounceLines(questions, matched) {
     if (dropped.length > 0) lines.push(`Dropped answer entries (reported): ${dropped.join('; ')}`)
   }
   return lines
+}
+
+// --- #930: the planner-question consult's own round --------------------------
+// This consult was the only decision point whose `bounce` bought nothing: the
+// lead's keyed answers were written to plan-bounce-r<round>.md and the loop
+// condition then ended the run with a reason naming neither. A consult that can
+// produce KEYED ANSWERS has a named recipient, so the round that reads them is
+// funded at the same per-point bound the plan-check point already uses. When no
+// such round can be funded the consult REFUSES in every register: the question
+// itself asks for an escalation, the question block is not rendered, bounce is
+// not offered, and the lead is told not to answer — soliciting answers nobody
+// will read is the defect, not merely losing them. A QUESTIONLESS bounce is
+// untouched: it carries free-text steering, orphans no keyed answer, and
+// crew/drive.test.mjs pins that path byte-for-byte.
+export const PLAN_QUESTION_POINT = 'plan-question'
+export const PLAN_QUESTION_UNFUNDED = 'plan-question-bounce-unfunded'
+
+// Empty on every consult that is not a FINAL keyed-question one, which is what
+// keeps a non-final and a questionless consult brief byte-identical to today's.
+export function questionRoundLines({ round, cap, questions = 0, final = false, fundable = true } = {}) {
+  if (!final) return []
+  if (fundable) {
+    return ['', `This is plan round ${round} of ${cap}, the LAST one. A bounce here SPENDS this lane's one extra plan round at the ${PLAN_QUESTION_POINT} point and the planner is re-assigned with your answers; it is available once.`]
+  }
+  return [
+    '',
+    `## The planner asked ${questions} question(s) — do NOT answer them`,
+    `This is plan round ${round} of ${cap} and this lane's one extra plan round at the ${PLAN_QUESTION_POINT} point is already spent, so no round exists to re-assign the planner and bounce is not offered. Nothing you write here would reach the planner. Escalate, and say what a human must decide.`,
+  ]
+}
+
+// The terminal reason for exactly that state, distinct from the generic
+// `no accepted plan within N rounds` the ledger classifies as plan-rounds-exhausted.
+export function questionUnfundedWhy({ round, cap, questions, reason } = {}) {
+  return `${PLAN_QUESTION_UNFUNDED}: the planner asked ${questions} keyed question(s) on plan round ${round} of ${cap} and the ${PLAN_QUESTION_POINT} point's grant was unavailable, so bounce was not offered and no answers were solicited — ${reason || 'no reason given'}`
 }
 
 // A bounce is an APPLY instruction, not a re-derive instruction. Measured over
@@ -3663,15 +3698,24 @@ function runTask(ctx, io, crash) {
       const asked = parseQuestions(env.details)
       const questions = asked?.questions ?? []
       if (asked) io.log(recordRow({ at: io.now(), member_questions: { role: 'planner', round, total: questions.length, ids: questions.map((q) => q.id), rejected: asked.rejected } }))
+      // #930 — a bounce this loop cannot execute must not be offered, and one it can
+      // must be FUNDED. `answeredFinal` is the only new trigger: keyed questions on the
+      // last round the cap allows. Read the cap ONCE, before the grant moves it.
+      const questionCap = planRounds()
+      const answeredFinal = questions.length > 0 && round >= questionCap
+      const questionFundable = !answeredFinal || canGrant(PLAN_QUESTION_POINT)
+      const questionAsk = questionFundable ? `The planner returned status=${env.status} on round ${round}: ${env.summary || ''}. Bounce it with guidance, or escalate?` : `The planner returned status=${env.status} on round ${round}: ${env.summary || ''}. No bounce can be funded; escalate and name what a human must decide.`
       const c = consultLead(
-        [`The planner returned status=${env.status} on round ${round}: ${env.summary || ''}. Bounce it with guidance, or escalate?`,
-          ...questionConsultLines('planner', questions)].join('\n'),
-        ['bounce', 'escalate'], [planBrief, ...(env.artifacts || [])],
+        [questionAsk,
+          ...(questionFundable ? questionConsultLines('planner', questions) : []),
+          ...questionRoundLines({ round, cap: questionCap, questions: questions.length, final: answeredFinal, fundable: questionFundable })].join('\n'),
+        questionFundable ? ['bounce', 'escalate'] : ['escalate'], [planBrief, ...(env.artifacts || [])],
       )
       if (c.decision === 'escalate') {
         stageComplete()
-        return escalate('plan', c.reason, env.artifacts || [])
+        return escalate('plan', questionFundable ? c.reason : questionUnfundedWhy({ round, cap: questionCap, questions: questions.length, reason: c.reason }), env.artifacts || [])
       }
+      if (answeredFinal) { grant(PLAN_QUESTION_POINT, round); extraPlanRounds += 1 }
       const matched = matchAnswers(questions, c.answers)
       if (questions.length > 0) io.log(recordRow({ at: io.now(), question_answers: { role: 'planner', round, answered: matched.answered.map((a) => a.id), unanswered: matched.unanswered, rejected: matched.rejected } }))
       const b = art(`plan-bounce-r${round}.md`)

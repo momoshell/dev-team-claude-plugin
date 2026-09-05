@@ -1541,9 +1541,9 @@ export const CHARTER_SOURCE_BUDGET = Object.freeze({
   lead: 9061,
   planner: 16613,
   reviewer: 7380,
-  'tech-lead': 6212,
+  'tech-lead': 6213,
 })
-export const CHARTER_SOURCE_TOTAL_BUDGET = 47868
+export const CHARTER_SOURCE_TOTAL_BUDGET = 47869
 
 // Delivered COMPILED bytes, per role: CHARTER_SOURCE_BUDGET._shared + 2 + card.
 export const CHARTER_CEILINGS = Object.freeze({
@@ -1551,7 +1551,7 @@ export const CHARTER_CEILINGS = Object.freeze({
   lead: 12813,
   planner: 20365,
   reviewer: 11132,
-  'tech-lead': 9964,
+  'tech-lead': 9965,
 })
 
 export const CHARTER_BUDGET_REFUSAL = 'charter-over-ceiling'

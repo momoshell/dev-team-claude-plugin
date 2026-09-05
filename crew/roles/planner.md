@@ -171,7 +171,7 @@ comes from the reviewer and the lead not sharing your premises.
 
 You get **exactly one authoring moment for `details.mutations`** and
 `files_in_scope`: the driver binds both from the accepted plan envelope
-(`crew/drive.mjs:3333-3334`) and never assigns you again, so a check you cannot
+(`crew/drive.mjs:3949-3950`) and never assigns you again, so a check you cannot
 author now **cannot be added later** by anyone — not the tech-lead, not the
 lead, not the builder. The only thing a later seat can do with a gap you left is
 RECORD it as a residual. Author the check you would want at plan-check, or say

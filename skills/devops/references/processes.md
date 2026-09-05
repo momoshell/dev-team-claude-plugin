@@ -69,19 +69,19 @@ Do not expect SIGTERM to stop a driver. `run` arms SIGTERM and SIGINT handlers
 for the exit marker, and an armed handler suppresses the signal's default
 disposition while being unable to dispatch inside a synchronous nap, so the
 driver absorbs the signal and keeps driving.
-Exhibit: `crew/crew.mjs:1987`.
+Exhibit: `crew/crew.mjs:2125`.
 
 The driver's waits are synchronous blocks, which is the window that swallows a
 signal.
-Exhibit: `crew/drive.mjs:6186`.
+Exhibit: `crew/drive.mjs:6265`.
 
 The signalled exit codes the marker reports are 143 and 130, so an absorbed
 signal is visible as neither.
-Exhibit: `crew/crew.mjs:1953`.
+Exhibit: `crew/crew.mjs:2091`.
 
 A teardown sweep over a headless crew proves nothing about the driver and says
 so; read its withheld claim rather than treating teardown as a stop.
-Exhibit: `crew/crew.mjs:2784`.
+Exhibit: `crew/crew.mjs:2922`.
 
 A SIGKILLed driver lands no terminal row, because the ledger's finalizer is the
 only writer that can and it is opt-in.

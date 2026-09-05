@@ -16,5 +16,5 @@
   "scripts/factory/dispatch-batch.mjs:153": "BOOT_TRANSPORT = 'headless-all'",
   "scripts/factory/dispatch-batch.mjs:154": "PANE_TRANSPORT = 'panes'",
   "crew/drive.mjs:654": "export const GATE_REAP_SHELL = '/bin/bash'",
-  "crew/drive.test.mjs:3144": "'/path/that/does/not/exist'"
+  "crew/drive.test.mjs:545": "'/path/that/does/not/exist'"
 }

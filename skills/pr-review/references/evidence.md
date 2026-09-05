@@ -28,11 +28,11 @@ The limits are part of every interpretation:
 - **Divergence-as-signal — no exhibit:** nothing in the corpus records two
   reviewers on one line; the rule is design guidance.
 - **Panel posture — no exhibit:** the cross-vendor panel is shipped and wired
-  (invoked at `crew/drive.mjs:4864`), but the corpus carries no panel round, so
+  (invoked at `crew/drive.mjs:5040`), but the corpus carries no panel round, so
   the tier-scaled panel is **unmeasured, not unbuilt**. Nothing in the corpus
   records which of the two gates in `references/posture.md` — a regranted
-  continuation (`crew/drive.mjs:4420`) or a seated tech-lead
-  (`crew/drive.mjs:531`) — was unmet on a given lane. The audit register
+  continuation (`crew/drive.mjs:4593`) or a seated tech-lead
+  (`crew/drive.mjs:544`) — was unmet on a given lane. The audit register
   recorded this correction at
   `docs/audits/2026-08-23/audit/register-devops-prreview.md` and the skill went
   uncorrected until this lane.

@@ -27,8 +27,6 @@
   "crew/daemon.test.mjs:257": "assert.doesNotMatch(policyCode",
   "test/factory-emit.test.mjs:1506": "CLI: emit-cli-unknown-flag-refusal",
   "scripts/factory/emit.mjs:1448": "function refuseUnknownFlags(verb, flags)",
-  "crew/drive.mjs:344": "export const DECISIONS = Object.freeze",
-  "crew/drive.test.mjs:5135": "assert.deepEqual([...DECISIONS], ['bounce', 'bounce-builder', 'bounce-reviewer', 'accept', 'escalate'])",
   "scripts/factory/ledger.mjs:5618": "function refuseUnknownFlags(verb, flags)",
   "scripts/factory/ledger.mjs:5590": "const VERB_FLAGS = Object.freeze",
   "scripts/factory/ledger.mjs:5626": "unknown flag --${name}",
@@ -37,9 +35,11 @@
   "scripts/factory/ledger.mjs:6900": "unknown verb: ${verb}",
   "scripts/factory/ledger.mjs:405": "export const CI_DECISIONS = Object.freeze",
   "scripts/factory/ledger.mjs:3091": "requireEnum(input.decision, CI_DECISIONS",
-  "crew/drive.test.mjs:5133": "DECISIONS and LIMITS are the frozen public contract",
-  "crew/drive.mjs:464": "ENVELOPE_FIELD_KINDS.includes(field?.kind)",
-  "crew/drive.test.mjs:5134": "Object.isFrozen(DECISIONS) && Object.isFrozen(LIMITS)",
-  "crew/drive.mjs:458": "if (!shape || typeof shape !== 'object')",
-  "test/factory-ledger.test.mjs:3584": "unknown flag --untill"
+  "test/factory-ledger.test.mjs:3584": "unknown flag --untill",
+  "crew/drive.mjs:357": "export const DECISIONS = Object.freeze",
+  "crew/drive.test.mjs:5139": "assert.deepEqual([...DECISIONS], ['bounce', 'bounce-builder', 'bounce-reviewer', 'accept', 'escalate'])",
+  "crew/drive.test.mjs:5137": "DECISIONS and LIMITS are the frozen public contract",
+  "crew/drive.mjs:477": "ENVELOPE_FIELD_KINDS.includes(field?.kind)",
+  "crew/drive.test.mjs:5138": "Object.isFrozen(DECISIONS) && Object.isFrozen(LIMITS)",
+  "crew/drive.mjs:471": "if (!shape || typeof shape !== 'object')"
 }

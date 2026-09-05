@@ -6,7 +6,13 @@ import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import {
   ADOPT_BLOCK,
+  ADOPT_EVENT,
   BAND_FLOOR_REASONS,
+  LINEAGE_BASELINE_REASONS,
+  LINEAGE_SOURCES,
+  carriedLineage,
+  lineageBaseline,
+  lineageLine,
   BatchRefusal,
   CROSS_BATCH_BLIND_SPOT,
   CROSS_BATCH_UNKNOWN_PREFIX,
@@ -2073,11 +2079,12 @@ async function dispatchFixture({
   return { report, spawned, logs, batch, parent, out, fences: laneFences, wrote, appended }
 }
 
-function adoptionArchive(label, { plan = '# Archived plan\n', gate = '// Archived gate\n', planCheck = null, omit = null } = {}) {
+function adoptionArchive(label, { plan = '# Archived plan\n', gate = '// Archived gate\n', planCheck = null, journal = null, omit = null } = {}) {
   const archive = join(root, `adoption-archive-${label}-${Math.random().toString(36).slice(2)}`)
   if (omit !== 'plan.md') put(join(archive, 'task', 'plan.md'), plan)
   if (omit !== 'gate.mjs') put(join(archive, 'task', 'gate.mjs'), gate)
   if (planCheck !== null) put(join(archive, 'task', 'plan-check.md'), planCheck)
+  if (journal !== null) put(join(archive, 'journal.jsonl'), journal)
   return archive
 }
 
@@ -3289,6 +3296,73 @@ test('adoptSourceDir takes an operator-named task directory at its word', () => 
   const task = join(root, 'operator-named-task', 'task')
   assert.equal(adoptSourceDir(task), task)
   assert.equal(adoptSourceDir(dirname(task)), task)
+})
+
+test('lineageBaseline carries measured, explicit-null, predecessor, absent, and unreadable states', () => {
+  assert.deepEqual([...LINEAGE_SOURCES], ['carried', 'predecessor-round1'])
+  const source = join(root, 'lineage-carried', 'task')
+  const carriedPath = join(root, 'lineage-carried', 'journal.jsonl')
+  put(carriedPath, `${JSON.stringify({ event: ADOPT_EVENT, lineage_baseline_bytes: 120, lineage_reason: 'lineage-journal-absent' })}\n${JSON.stringify({ plan_growth: { round: 1, combined_bytes: 999 } })}\n`)
+  assert.deepEqual(lineageBaseline({ source, combined_bytes: 240 }), { baseline_bytes: 120, source: 'carried', reason: null })
+
+  const explicit = join(root, 'lineage-explicit-null', 'task')
+  put(join(root, 'lineage-explicit-null', 'journal.jsonl'), JSON.stringify({
+    event: ADOPT_EVENT, lineage_baseline_bytes: null, lineage_reason: 'lineage-journal-absent',
+  }) + '\n' + JSON.stringify({ plan_growth: { round: 1, combined_bytes: 999 } }) + '\n')
+  assert.deepEqual(lineageBaseline({ source: explicit, combined_bytes: 200 }), { baseline_bytes: null, source: null, reason: 'lineage-journal-absent' })
+
+  const predecessor = join(root, 'lineage-predecessor', 'task')
+  put(join(root, 'lineage-predecessor', 'journal.jsonl'), JSON.stringify({ plan_growth: { round: 1, combined_bytes: 80 } }) + '\n')
+  assert.deepEqual(lineageBaseline({ source: predecessor, combined_bytes: 160 }), { baseline_bytes: 80, source: 'predecessor-round1', reason: null })
+
+  const absent = join(root, 'lineage-absent', 'task')
+  assert.deepEqual(lineageBaseline({ source: absent, combined_bytes: 160 }), { baseline_bytes: null, source: null, reason: 'lineage-journal-absent' })
+  const unreadable = join(root, 'lineage-unreadable', 'task')
+  assert.deepEqual(lineageBaseline({ source: unreadable, combined_bytes: 160, deps: {
+    existsSync: () => true,
+    readFileSync: () => { throw new Error('EPERM') },
+  } }), { baseline_bytes: null, source: null, reason: 'lineage-journal-unreadable' })
+})
+
+test('resolveAdoptions measures the adoption and carries the lineage baseline into its row', () => {
+  const archive = adoptionArchive('lineage-resolve', {
+    plan: 'p'.repeat(30), gate: 'g'.repeat(20),
+    journal: JSON.stringify({ plan_growth: { round: 1, combined_bytes: 10 } }) + '\n',
+  })
+  const adoption = resolveAdoptions({ lanes: [{ lane: 'lane-a', adopt: archive }], runFlags: {} }).get('lane-a')
+  assert.equal(adoption.plan_bytes, 30)
+  assert.equal(adoption.gate_bytes, 20)
+  assert.equal(adoption.combined_bytes, 50)
+  assert.equal(adoption.lineage_baseline_bytes, 10)
+  assert.equal(adoption.lineage_baseline_source, 'predecessor-round1')
+  assert.equal(adoption.lineage_ratio, 5)
+  assert.equal(adoption.lineage_reason, null)
+  const crewDir = join(root, 'lineage-resolve-crew')
+  const briefPath = put(join(root, 'lineage-resolve-brief.md'), '# brief\n')
+  applyAdoption({ adoption, crewDir, briefPath })
+  const row = readFileSync(join(crewDir, 'journal.jsonl'), 'utf8').trim().split('\n').map(JSON.parse).find((entry) => entry.event === ADOPT_EVENT)
+  assert.equal(row.plan_bytes, 30)
+  assert.equal(row.gate_bytes, 20)
+  assert.equal(row.combined_bytes, 50)
+  assert.equal(row.lineage_baseline_bytes, 10)
+  assert.equal(row.lineage_ratio, 5)
+})
+
+test('lineageLine appears on both adoption print surfaces and preserves unmeasured reasons', async () => {
+  const archive = adoptionArchive('lineage-prints', { plan: 'p'.repeat(10), gate: 'g'.repeat(5) })
+  const adoption = resolveAdoptions({ lanes: [{ lane: 'lane-a', adopt: archive }], runFlags: {} }).get('lane-a')
+  const measured = lineageLine(adoption)
+  assert.match(measured, /lineage_baseline=null/)
+  assert.match(measured, /lineage_ratio=null/)
+  assert.match(measured, /lineage-journal-absent/)
+  const dry = await adoptionDispatchFixture({
+    label: 'lineage-dry-print', runFlags: { ...parseCliArgs(['--adopt', `lane-a=${archive}`]), 'dry-run': true },
+  })
+  assert.ok(dry.logs.some((line) => line.includes('dry-run lane=lane-a') && line.includes('lineage_ratio=null')))
+  const normal = await adoptionDispatchFixture({
+    label: 'lineage-normal-print', runFlags: parseCliArgs(['--adopt', `lane-a=${archive}`]),
+  })
+  assert.ok(normal.logs.some((line) => line.includes('plan-adopted lane=lane-a') && line.includes('lineage_ratio=null')))
 })
 
 test('resolveAdoptions refuses a CLI adoption whose lane is outside the batch', () => {

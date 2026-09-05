@@ -177,6 +177,8 @@ export const ADOPT_REQUIRED = Object.freeze(['plan.md', 'gate.mjs'])
 export const ADOPT_OPTIONAL = Object.freeze(['plan-check.md'])
 export const ADOPT_REVISE_MARKER = 'VERDICT: revise'
 export const ADOPT_EVENT = 'plan-adopted'
+export const LINEAGE_BASELINE_REASONS = Object.freeze(['lineage-journal-absent', 'lineage-journal-unreadable', 'lineage-round1-absent'])
+export const LINEAGE_SOURCES = Object.freeze(['carried', 'predecessor-round1'])
 export const ADOPT_BLOCK = [
   '',
   '## Adopted plan',
@@ -199,6 +201,7 @@ export const ADOPT_FINDINGS_CLAUSE = [
   'The previous attempt was BOUNCED: your task dir also holds plan-check.md carrying',
   `${ADOPT_REVISE_MARKER}. Close every finding it names FIRST, and say per finding whether`,
   'you closed it or why it does not apply.',
+  'Mark each one you closed with a line of its own reading `CLOSED: <the finding id>`.',
   '',
 ].join('\n')
 
@@ -2260,6 +2263,41 @@ export function parseAdoptSpec(value) {
   return { lane: text.slice(0, at).trim(), archive: resolve(text.slice(at + 1).trim()) }
 }
 
+export function carriedLineage(row) {
+  const carriedBaseline = row?.lineage_baseline_bytes
+  if (Number.isInteger(carriedBaseline) && carriedBaseline > 0) return { baseline_bytes: carriedBaseline, source: 'carried', reason: null }
+  return { baseline_bytes: null, source: null, reason: LINEAGE_BASELINE_REASONS.includes(row?.lineage_reason) ? row.lineage_reason : 'lineage-round1-absent' }
+}
+
+export function lineageBaseline({ source, combined_bytes, deps } = {}) {
+  const d = normalDeps(deps)
+  const journalPath = typeof source === 'string' && source ? join(dirname(source), 'journal.jsonl') : null
+  try {
+    if (!d.existsSync(journalPath)) return { baseline_bytes: null, source: null, reason: 'lineage-journal-absent' }
+  } catch {
+    return { baseline_bytes: null, source: null, reason: 'lineage-journal-unreadable' }
+  }
+  let text
+  try { text = textOf(d.readFileSync(journalPath, 'utf8')) } catch {
+    return { baseline_bytes: null, source: null, reason: 'lineage-journal-unreadable' }
+  }
+  let adoptedRow = null
+  let predecessorBytes = null
+  for (const line of text.split('\n')) {
+    if (!line.trim()) continue
+    let row
+    try { row = JSON.parse(line) } catch { continue }
+    if (row?.event === ADOPT_EVENT) adoptedRow = row
+    if (predecessorBytes === null && row?.plan_growth?.round === 1
+      && Number.isInteger(row.plan_growth.combined_bytes) && row.plan_growth.combined_bytes > 0) {
+      predecessorBytes = row.plan_growth.combined_bytes
+    }
+  }
+  if (adoptedRow !== null) return carriedLineage(adoptedRow)
+  if (predecessorBytes !== null) return { baseline_bytes: predecessorBytes, source: 'predecessor-round1', reason: null }
+  return { baseline_bytes: null, source: null, reason: 'lineage-round1-absent' }
+}
+
 // Verified BEFORE any worktree is created: a partial adoption is worse than none, so a
 // refusal here has copied nothing anywhere. A --adopt for a lane also carrying an
 // `adopt` request key wins, and the dispatch line says which route was taken.
@@ -2296,9 +2334,32 @@ export function resolveAdoptions({ lanes, runFlags = {}, deps } = {}) {
       }
       revise = text.includes(ADOPT_REVISE_MARKER)
     }
-    adoptions.set(lane, { lane, archive, source, from, revise, planCheck: hasCheck ? checkPath : null })
+    let plan_bytes
+    let gate_bytes
+    try {
+      plan_bytes = Buffer.byteLength(textOf(d.readFileSync(join(source, 'plan.md'), 'utf8')), 'utf8')
+      gate_bytes = Buffer.byteLength(textOf(d.readFileSync(join(source, 'gate.mjs'), 'utf8')), 'utf8')
+    } catch (err) {
+      refuse(`lane ${lane} cannot measure adoption ${archive}: ${err?.message || String(err)}`, PLAN_ADOPT_UNREADABLE)
+    }
+    const combined_bytes = plan_bytes + gate_bytes
+    const lineage = lineageBaseline({ source, combined_bytes, deps: d })
+    const lineage_ratio = lineage.baseline_bytes !== null
+      ? Math.round((combined_bytes / lineage.baseline_bytes) * 100) / 100 : null
+    adoptions.set(lane, {
+      lane, archive, source, from, revise, planCheck: hasCheck ? checkPath : null,
+      plan_bytes, gate_bytes, combined_bytes,
+      lineage_baseline_bytes: lineage.baseline_bytes,
+      lineage_baseline_source: lineage.source,
+      lineage_ratio,
+      lineage_reason: lineage.reason,
+    })
   }
   return adoptions
+}
+
+export function lineageLine(a) {
+  return `lineage_baseline=${a.lineage_baseline_bytes} lineage_source=${a.lineage_baseline_source} combined_bytes=${a.combined_bytes} lineage_ratio=${a.lineage_ratio} lineage_reason=${a.lineage_reason}`
 }
 
 // The standing block is a CONSTANT: the same sentence for every adopting lane, plus one
@@ -2360,6 +2421,13 @@ export function applyAdoption({ adoption, crewDir, briefPath, deps } = {}) {
     files: [...texts.keys()],
     findings: adoption.revise,
     adopt_from: adoption.from,
+    plan_bytes: adoption.plan_bytes,
+    gate_bytes: adoption.gate_bytes,
+    combined_bytes: adoption.combined_bytes,
+    lineage_baseline_bytes: adoption.lineage_baseline_bytes,
+    lineage_baseline_source: adoption.lineage_baseline_source,
+    lineage_ratio: adoption.lineage_ratio,
+    lineage_reason: adoption.lineage_reason,
   }
   // Instrumentation is never load-bearing: the copy has already happened and the
   // dispatch line already names it, so a journal that cannot be appended never fails a lane.
@@ -2656,7 +2724,7 @@ export async function dispatchBatch({ batchDir, fences, checkout, parentDir, out
     }
     for (const lane of waveLanes) {
       const adoption = adoptions.get(lane.lane)
-      if (adoption) d.log(`dispatch-batch: dry-run lane=${lane.lane} adopt=${adoption.archive} source=${adoption.source} findings=${adoption.revise} adopt_from=${adoption.from}`)
+      if (adoption) d.log(`dispatch-batch: dry-run lane=${lane.lane} adopt=${adoption.archive} source=${adoption.source} findings=${adoption.revise} adopt_from=${adoption.from} ${lineageLine(adoption)}`)
     }
     d.log(DRY_RUN_BLIND_SPOT)
     return { dryRun: true, plans, lanes: waveLanes, fences: fenceReport, waves, wave: waveNumber, deferred, unstarted }
@@ -2849,7 +2917,7 @@ export async function dispatchBatch({ batchDir, fences, checkout, parentDir, out
     const applied = applyAdoption({ adoption, crewDir, briefPath: item.brief, deps: d })
     const recorded = recordIntent({ intent: item.intent, crewPath: item.crewPath, crewDir, lane: item.lane, deps: d })
     if (recorded) d.log(`dispatch-batch: intent lane=${item.lane} intent=${JSON.stringify(recorded.intent)}`)
-    if (applied) d.log(`dispatch-batch: plan-adopted lane=${item.lane} archive=${adoption.archive} source=${adoption.source} plan_sha=${applied.plan_sha} files=${applied.files.join(',')} findings=${adoption.revise} adopt_from=${adoption.from}`)
+    if (applied) d.log(`dispatch-batch: plan-adopted lane=${item.lane} archive=${adoption.archive} source=${adoption.source} plan_sha=${applied.plan_sha} files=${applied.files.join(',')} findings=${adoption.revise} adopt_from=${adoption.from} ${lineageLine(adoption)}`)
     let run
     try {
       run = d.spawn({

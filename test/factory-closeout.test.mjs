@@ -18,6 +18,7 @@ import {
   AMBIGUOUS_MARK,
   ARCHIVE_MARK,
   BATCH_DIR_ABSENT,
+  CLOSES_PATTERN,
   CLOSEOUT_REFUSALS,
   ENVELOPE_ACCEPTED,
   ENVELOPE_ABSENT,
@@ -36,12 +37,14 @@ import {
   main,
   mergeCheck,
   newestMtime,
+  issueTrailersFromPrBody,
   normalDeps,
   parseArgs,
   parseRepairOutput,
   quietProbe,
   quietRefusalDetail,
   reap,
+  reapIssueSummary,
   recover,
   refsFromPrBody,
   stripAnsi,
@@ -163,6 +166,17 @@ test('refsFromPrBody reads both trailer shapes and ignores closing keywords', ()
   assert.deepEqual(refsFromPrBody('Closes #999\n'), [])
   assert.deepEqual(refsFromPrBody('no trailer here\n'), [])
   assert.match('Refs #758', REFS_PATTERN)
+})
+
+test('issueTrailersFromPrBody parses Refs and Closes as distinct trailers', () => {
+  assert.deepEqual(issueTrailersFromPrBody('Refs #904\n'), { closes: [], referenced: [904] })
+  assert.deepEqual(issueTrailersFromPrBody('Closes #806\n'), { closes: [806], referenced: [] })
+  assert.deepEqual(issueTrailersFromPrBody('Closes: #806\n'), { closes: [806], referenced: [] })
+  assert.deepEqual(issueTrailersFromPrBody('Closes #806\nRefs #904\n'), { closes: [806], referenced: [904] })
+  assert.deepEqual(issueTrailersFromPrBody('Closes #806\nRefs #806, #904\n'), { closes: [806], referenced: [904] })
+  assert.deepEqual(issueTrailersFromPrBody('no trailer here\n'), { closes: [], referenced: [] })
+  assert.match('Closes #806', CLOSES_PATTERN)
+  assert.equal(refsFromPrBody('Closes #999\n').length, 0)
 })
 
 test('repair output partitions rot, ambiguity, and deferred pin refusals', () => {
@@ -299,7 +313,7 @@ test('RV2-1 mergeCheck blocks anchor refusals and main returns named refusal exi
   assert.equal(main(['merge-check', lane, '--checkout', process.cwd()], rotDeps), 1)
 })
 
-test('reap closes every Refs issue and archives only unarchived recovery copies', () => {
+test('reap closes every Closes issue and archives only unarchived recovery copies', () => {
   const home = scratch('closeout-reap-')
   const checkout = join(home, 'dt-b415-closeout')
   const crewDir = join(home, '.crew', 'dt-b415-closeout', lane)
@@ -307,7 +321,7 @@ test('reap closes every Refs issue and archives only unarchived recovery copies'
   mkdirSync(`${crewDir}${ARCHIVE_MARK}2026-09-04T10-50-36-577Z.recovery-copy`, { recursive: true })
   const { deps, calls } = harness({
     home,
-    answers: [['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', headRefName: lane, body: 'Refs #758, #800' }), stderr: '' }]],
+    answers: [['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', headRefName: lane, body: 'Closes #758, #800' }), stderr: '' }]],
   })
   const result = reap({ lanes: [lane], checkout, deps })
   assert.equal(result.code, 0)
@@ -321,6 +335,37 @@ test('reap closes every Refs issue and archives only unarchived recovery copies'
   assert.equal(calls.rename.length, 1)
   assert.match(calls.rename[0][1], /\.archive-\d{4}-\d{2}-\d{2}T/)
   assert.equal(calls.rm.filter(([path]) => path.startsWith(join(home, '.crew'))).length, 0)
+})
+
+test('reap closes only the Closes set and leaves Refs referenced and open', () => {
+  const { deps, calls } = harness({
+    home: scratch('closeout-reap-trailers-'),
+    answers: [['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: 'Closes: #806\nRefs: #904' }), stderr: '' }]],
+  })
+  const result = reap({ lanes: ['lane-a'], checkout: process.cwd(), deps })
+  const closes = spawned(calls, 'issue close')
+  assert.equal(closes.length, 1)
+  assert.equal(closes[0].args[2], '806')
+  const detail = rows(result).find((row) => row.step === 'issues').detail
+  assert.deepEqual(detail.closed, [806])
+  assert.deepEqual(detail.referenced, [904])
+  assert.deepEqual(result.report.closed, [806])
+  assert.deepEqual(result.report.referenced, [904])
+  assert.equal('issues' in result.report, false)
+})
+
+test('reap reports both sets by name and never infers a close', () => {
+  const { deps, calls } = harness({
+    home: scratch('closeout-reap-no-trailers-'),
+    answers: [['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: 'no trailer here\n' }), stderr: '' }]],
+  })
+  const result = reap({ lanes: ['lane-a'], checkout: process.cwd(), deps })
+  assert.equal(spawned(calls, 'issue close').length, 0)
+  const detail = rows(result).find((row) => row.step === 'issues').detail
+  assert.deepEqual(detail.closed, [])
+  assert.deepEqual(detail.referenced, [])
+  assert.equal(detail.summary, 'closed: none · referenced (left open): none')
+  assert.equal(reapIssueSummary({ closed: [806], referenced: [904] }), 'closed: #806 · referenced (left open): #904')
 })
 
 test('reap refuses an open PR before closing issues or removing anything', () => {
@@ -785,7 +830,7 @@ test('merge-check removes the scratch worktree on the success path', () => {
 test('reap closes each issue with a comment naming the PR', () => {
   const { deps, calls } = harness({
     home: scratch('closeout-named-comment-'),
-    answers: [['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: 'Refs #758, #800' }), stderr: '' }]],
+    answers: [['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: 'Closes #758, #800' }), stderr: '' }]],
   })
   const result = reap({ lanes: ['lane-a'], checkout: process.cwd(), deps })
   const closes = spawned(calls, 'issue close')

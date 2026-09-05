@@ -47,6 +47,9 @@ export const REPAIRED_PREFIX = 'repaired '
 export const REFUSED_PREFIX = 'refused '
 export const MERGED_STATE = 'MERGED'
 export const REFS_PATTERN = /^Refs:?\s+(.*)$/
+export const CLOSES_PATTERN = /^Closes:?\s+(.*)$/
+export const REAP_CLOSED_LABEL = 'closed'
+export const REAP_REFERENCED_LABEL = 'referenced (left open)'
 export const ENVELOPE_RE = /^d(\d+)\.([a-z-]+)\.json$/
 export const ENVELOPE_REFUSED = 'envelope-present-but-refused'
 export const ENVELOPE_ACCEPTED = 'envelope-accepted'
@@ -183,17 +186,34 @@ export function runSteps({ verb, lane, steps, deps } = {}) {
   return { lines, refusal }
 }
 
-export function refsFromPrBody(text) {
-  const refs = []
+export function trailerIssues(text, pattern) {
+  const found = []
   for (const line of String(text || '').split('\n')) {
-    const match = REFS_PATTERN.exec(line)
+    const match = pattern.exec(line)
     if (!match) continue
     for (const ref of match[1].matchAll(/#(\d+)/g)) {
       const number = Number(ref[1])
-      if (!refs.includes(number)) refs.push(number)
+      if (!found.includes(number)) found.push(number)
     }
   }
-  return refs
+  return found
+}
+
+export function refsFromPrBody(text) {
+  return trailerIssues(text, REFS_PATTERN)
+}
+
+// #924 — Refs and Closes are DISTINCT trailers. Only Closes names an issue this
+// merge closed; a number in both is closed, and is reported once, under closed.
+export function issueTrailersFromPrBody(text) {
+  const closes = trailerIssues(text, CLOSES_PATTERN)
+  const referenced = refsFromPrBody(text).filter((number) => !closes.includes(number))
+  return { closes, referenced }
+}
+
+export function reapIssueSummary({ closed = [], referenced = [] } = {}) {
+  const list = (values) => (Array.isArray(values) && values.length ? values.map((number) => `#${number}`).join(', ') : 'none')
+  return `${REAP_CLOSED_LABEL}: ${list(closed)} · ${REAP_REFERENCED_LABEL}: ${list(referenced)}`
 }
 
 export function parseRepairOutput(stdout) {
@@ -531,11 +551,11 @@ export function reap({ lanes, checkout, deps } = {}) {
   const root = typeof checkout === 'string' && checkout.trim() ? checkout : process.cwd()
   const lines = []
   const laneReports = []
-  const summary = { lanes: laneReports, issues: [], archived: [] }
+  const summary = { lanes: laneReports, closed: [], referenced: [], archived: [] }
   let refusal = null
   for (const lane of batch) {
     const laneDir = join(dirname(root), `dt-${lane}`)
-    const laneReport = { lane, issues: [], archived: [] }
+    const laneReport = { lane, closed: [], referenced: [], archived: [] }
     let pr = null
     const runners = {
       'pr-merged': () => {
@@ -544,10 +564,13 @@ export function reap({ lanes, checkout, deps } = {}) {
         return { number: pr.number, state: pr.state }
       },
       issues: () => {
-        const refs = refsFromPrBody(pr.body)
-        for (const issue of refs) closeIssue({ issue, lane, pr, deps: d })
-        laneReport.issues = refs
-        return { issues: refs }
+        // Never infer: a body with neither trailer closes nothing and says so.
+        const trailers = issueTrailersFromPrBody(pr.body)
+        const closing = trailers.closes
+        for (const issue of closing) closeIssue({ issue, lane, pr, deps: d })
+        laneReport.closed = [...closing]
+        laneReport.referenced = [...trailers.referenced]
+        return { closed: laneReport.closed, referenced: laneReport.referenced, summary: reapIssueSummary(laneReport) }
       },
       worktree: () => gitStep({ args: ['worktree', 'remove', laneDir], cwd: root, reason: CLOSEOUT_REFUSALS.WORKTREE_FAILED, step: 'worktree', deps: d, message: `worktree removal failed for ${lane}` }),
       branch: () => gitStep({ args: ['branch', '-d', lane], cwd: root, reason: CLOSEOUT_REFUSALS.BRANCH_FAILED, step: 'branch', deps: d, message: `branch deletion failed for ${lane}` }),
@@ -561,7 +584,8 @@ export function reap({ lanes, checkout, deps } = {}) {
     const run = runSteps({ verb: 'reap', lane, steps: REAP_STEPS.map((name) => ({ name, run: runners[name] })), deps: d })
     lines.push(...run.lines)
     laneReports.push(laneReport)
-    summary.issues.push(...laneReport.issues)
+    summary.closed.push(...laneReport.closed)
+    summary.referenced.push(...laneReport.referenced)
     summary.archived.push(...laneReport.archived)
     if (run.refusal) {
       refusal = refusalObject(run.refusal)

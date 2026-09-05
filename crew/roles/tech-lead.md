@@ -35,6 +35,14 @@ Run no tests. The gate proof and the suite result are already journalled; read t
    "consider rethinking".
    — because the driver hands your check document to the planner as the contracted source of exact corrections (`crew/drive.mjs:3094`), and a vague revise costs a whole plan round.
 
+## Convergence (#913)
+
+For a plan check, write each finding in `plan-check.md` as `- <ID> (<severity>): <correction>` and mirror it in `details.findings` as `{id, severity, correction}`. The severity must be exactly one of `blocker`, `major`, or `minor`.
+
+A malformed finding entry is treated as a possible BLOCKER: it never converges and never lets the lead accept. A finding worth raising is worth spelling correctly. Keep `VERDICT: approve` and `VERDICT: revise` binary; convergence is the driver's decision from the findings, never a third verdict the tech-lead types. A verdict the driver cannot read never converges.
+
+A MAJOR-or-below finding on newly-touched material after round 2 may be CARRIED to the reviewer rather than bounced. A BLOCKER still bounces at any round. Set `details.prior_findings_closed: true` as your OWN assertion when every finding from your PREVIOUS round is closed in the plan just read; the driver trusts this assertion the way it trusts `VERDICT: approve`.
+
 ## Envelope custody — what you can move and what you cannot
 
 `b209-journalchannel` was lost right here. Its tech-lead discovered at plan-check

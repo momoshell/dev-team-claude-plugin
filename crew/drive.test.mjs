@@ -21,6 +21,9 @@ import {
   driveTask, LIMITS, WAITS_S, WAIT_ROLES, WAIT_FLAGS, WAIT_REFUSALS, WAIT_SECONDS_MIN, WAIT_SECONDS_MAX,
   NO_TURN_CEILING, TURN_CEILING_ROLES, TURN_CEILING_REFUSALS, resolveTurnCeilings, turnCeilingsRecord,
   adoptionSignal, planRoundCap, ADOPTED_PLAN_HEADING, PLAN_CHECK_ABSENT, PLAN_CHECK_INVALID,
+  PLAN_CHECK_SEVERITIES, PLAN_CONVERGENCE_REASONS, planCheckFindings, planCheckFindingsFromText, planConvergence,
+  carriedPreambleLines, carriedResolution, carriedSilenceDefect, carriedPrLines,
+  PREDECESSOR_FINDINGS_CLOSED, PLAN_CLOSED_MARKER, predecessorFindingsClosed, lineageFromJournal,
   enforcementPreamble, observeTurnCensus, turnCeilingBreached, CENSUS_ROW_ABSENT, CENSUS_TURNS_ABSENT, CENSUS_UNREADABLE, CENSUS_ABSENT_REASONS,
   refuseWait, resolveWaits, waitsCtx, waitsRecord, DECISIONS, SECOND_OPINION, PERSPECTIVE_TARGETS,
   FAILURE_UPGRADE, SENSITIVITY_FLOOR, JUDGE_TIER, PROTECTED_PATHS, resolveProtectedPaths, MODIFIER_OUTCOMES, JOURNAL_CHANNELS, JOURNAL_CHANNEL_NAMES, recordRow, operationalRow,
@@ -599,7 +602,8 @@ test('a malformed review-exhaustion accept is re-asked with the keyed contract',
 test('a later refused review accept supersedes the plan-check decision on converge', () => {
   const io = fakeIo({
     envelopes: {
-      'planner:1': CONVERGE_PLAN(), 'tech-lead:1': checkEnv('revise'),
+      'planner:1': CONVERGE_PLAN(), 'planner:2': CONVERGE_PLAN(),
+      'tech-lead:1': checkEnv('revise'), 'tech-lead:2': checkEnv('revise'),
       'lead:1': leadEnv('accept', 'record the plan gap', { residuals: [PLAN_RESIDUAL] }),
       'builder:1': buildEnv(), 'builder:2': buildEnv(),
       'reviewer:1': reviewEnv('changes-needed', legacyReviewerExemptions(REVIEW_FINDINGS)),
@@ -613,7 +617,7 @@ test('a later refused review accept supersedes the plan-check decision on conver
     },
     changed: ['a.mjs'], gh: true,
   })
-  const result = driveTask({ ...CTX_TL, limits: { plan_rounds: 1, build_rounds: 2, review_rounds: 1 } }, io)
+  const result = driveTask({ ...CTX_TL, limits: { plan_rounds: 2, build_rounds: 2, review_rounds: 1 } }, io)
   const rows = io.calls.logs.filter((entry) => entry.accept_decision).map((entry) => entry.accept_decision)
   assert.equal(result.status, 'converge')
   assert.deepEqual(rows.map(({ where }) => where), ['plan-check', 'review-exhausted'])
@@ -5387,6 +5391,87 @@ test('growthRecord and growthLines use the cumulative two-times threshold and nu
   assert.match(growthLines(nulls).join('\n'), /plan_bytes=null.*gate_bytes=null.*combined_bytes=null.*ratio=null.*divergent=false/)
 })
 
+test('plan-check findings and convergence use closed machine-readable contracts', () => {
+  assert.deepEqual([...PLAN_CHECK_SEVERITIES], ['blocker', 'major', 'minor'])
+  assert.equal(Object.isFrozen(PLAN_CONVERGENCE_REASONS), true)
+  assert.equal(planCheckFindings({}), null)
+  const parsed = planCheckFindings({ findings: [
+    { id: 'PC-1', severity: 'major', correction: 'close the branch' },
+    { id: 'PC-1', severity: 'minor', correction: 'duplicate' },
+    { id: 'PC-2', severity: 'bad', correction: 'bad severity' },
+    { id: '../x', severity: 'minor', correction: 'bad id' },
+    { id: 'PC-3', severity: 'minor', correction: '   ' },
+  ] })
+  assert.deepEqual(parsed.findings, [{ id: 'PC-1', severity: 'major', correction: 'close the branch' }])
+  assert.equal(parsed.rejected.length, 4)
+  const findings = planCheckFindings({ findings: [{ id: 'PC-4', severity: 'minor', correction: 'do the thing' }] })
+  assert.deepEqual(planConvergence({ verdict: 'approve', round: 2, findings, priorClosed: true }), {
+    converged: false, reason: 'verdict-not-revise', blocker: false, carried: [],
+  })
+  assert.deepEqual(planConvergence({ verdict: 'revise', round: 2, findings: null, priorClosed: true }), {
+    converged: false, reason: 'findings-absent', blocker: false, carried: [],
+  })
+  assert.equal(planConvergence({ verdict: 'revise', round: 1, findings, priorClosed: true }).reason, 'round-1')
+  assert.equal(planConvergence({ verdict: 'revise', round: 2, findings: planCheckFindings({ findings: [{ id: 'PC-5', severity: 'blocker', correction: 'stop' }] }), priorClosed: true }).reason, 'blocker-present')
+  const rejected = planCheckFindings({ findings: [{ id: 'PC-6', severity: 'minor', correction: 'ok' }, { id: 'PC-6', severity: 'minor', correction: 'duplicate' }] })
+  assert.equal(planConvergence({ verdict: 'revise', round: 2, findings: rejected, priorClosed: true }).reason, 'findings-rejected')
+  assert.equal(planConvergence({ verdict: 'revise', round: 2, findings: rejected, priorClosed: true }).blocker, true)
+  assert.equal(planConvergence({ verdict: 'revise', round: 2, findings, priorClosed: false }).reason, 'prior-findings-open')
+  assert.equal(planConvergence({ verdict: 'revise', round: 2, findings: planCheckFindings({ findings: [] }), priorClosed: true }).reason, 'findings-absent')
+  assert.deepEqual(planConvergence({ verdict: 'revise', round: 2, findings, priorClosed: true }), {
+    converged: true, reason: 'prior-findings-closed', blocker: false,
+    carried: [{ id: 'PC-4', severity: 'minor', correction: 'do the thing', round: 2 }],
+  })
+})
+
+test('plan-check text parser reads prescribed finding rows', () => {
+  assert.deepEqual(planCheckFindingsFromText([
+    'VERDICT: revise',
+    '- PC-1 (major): close the branch',
+    '* PC-2 (minor): narrow the scope',
+    '- malformed row',
+  ].join('\n')), [
+    { id: 'PC-1', severity: 'major', correction: 'close the branch' },
+    { id: 'PC-2', severity: 'minor', correction: 'narrow the scope' },
+  ])
+  assert.deepEqual(planCheckFindingsFromText(null), [])
+})
+
+test('carried findings resolve clears, restatements, and silence once', () => {
+  const carried = [{ id: 'PC-1', severity: 'major', correction: 'close it', round: 2 }, { id: 'PC-2', severity: 'minor', correction: 'narrow it', round: 2 }]
+  assert.deepEqual(carriedPreambleLines([]), [])
+  assert.match(carriedPreambleLines(carried).join('\n'), /- PC-1 \(major\): close it/)
+  assert.deepEqual(carriedResolution({ carried_cleared: ['PC-1', 2, 'nobody', 'PC-2'], findings: [{ id: 'PC-2', severity: 'consider', summary: 'still open' }] }, carried), {
+    cleared: ['PC-1'], restated: ['PC-2'], silent: [],
+  })
+  assert.deepEqual(carriedResolution({ carried_cleared: ['PC-1'], findings: [{ id: 'PC-1', severity: 'consider', summary: 'still open' }] }, carried), {
+    cleared: [], restated: ['PC-1'], silent: ['PC-2'],
+  })
+  const refusal = carriedSilenceDefect({}, carried)
+  assert.equal(refusal.reason, 'carried-silent')
+  assert.match(refusal.why, /PC-1, PC-2/)
+  assert.equal(carriedSilenceDefect({ carried_cleared: ['PC-1', 'PC-2'] }, carried), null)
+})
+
+test('carried PR lines and lineage growth preserve measured meaning', () => {
+  assert.deepEqual(carriedPrLines(null), [])
+  assert.deepEqual(carriedPrLines([]), [])
+  const lines = carriedPrLines([{ id: 'PC-1', severity: 'major', correction: 'close it' }, { id: 'PC-2', severity: 'minor', correction: 'narrow it' }])
+  assert.equal(lines.filter((line) => line.includes('carried-to-review')).length, 2)
+  assert.match(lines.join('\n'), /PC-1 \(major\).*close it/)
+  const lineage = lineageFromJournal([
+    '{bad json',
+    JSON.stringify({ event: 'plan-adopted', archive: '/archive', combined_bytes: 199, lineage_baseline_bytes: 100, lineage_baseline_source: 'carried', lineage_reason: null }),
+  ].join('\n'))
+  assert.deepEqual(lineage, { archive: '/archive', combined_bytes: 199, baseline_bytes: 100, source: 'carried', reason: null, ratio: 1.99, divergent: false })
+  assert.equal(lineageFromJournal(JSON.stringify({ event: 'other' })), null)
+  const record = growthRecord(null, null, { round: 1, plan_bytes: 200, gate_bytes: 0 }, { baseline_bytes: 100, source: 'carried', reason: null })
+  assert.equal(record.round1_combined_bytes, 100)
+  assert.equal(record.ratio, 2)
+  assert.equal(record.divergent, true)
+  assert.equal(Object.hasOwn(record, 'baseline_source'), true)
+})
+
 const divergentPlanScenario = (leadDecision) => {
   const files = { [`${TD}/plan.md`]: 'x'.repeat(10), [`${TD}/gate.mjs`]: 'x'.repeat(10) }
   const details = { ...planEnv().details, gate_path: `${TD}/gate.mjs` }
@@ -7121,7 +7206,7 @@ test('scout rejects envelopes that do not match its declared shape', () => {
 
 test('the envelope refusal reason set is closed and frozen', () => {
   assert.equal(Object.isFrozen(ENVELOPE_REFUSAL_REASONS), true)
-  assert.deepEqual([...ENVELOPE_REFUSAL_REASONS], ['no-envelope', 'summary', 'artifacts', 'details', 'field-missing', 'field-kind', 'field-item', 'verdict-findings', 'finding-id'])
+  assert.deepEqual([...ENVELOPE_REFUSAL_REASONS], ['no-envelope', 'summary', 'artifacts', 'details', 'field-missing', 'field-kind', 'field-item', 'verdict-findings', 'finding-id', 'carried-silent'])
   const malformed = [
     null,
     'not an object',
@@ -8087,12 +8172,15 @@ const DRIVE_JOURNAL_EXPECTED = Object.freeze([
   ['recordRow', '', 'at triage'],
   ['recordRow', '', 'at directed'],
   ['recordRow', '', 'at plan_round_cap'],
+  ['recordRow', '', 'at plan_lineage'],
   ['recordRow', '', 'at member_questions'],
   ['recordRow', '', 'at question_answers'],
   ['recordRow', '', 'at plan_scope'],
   ['recordRow', '', 'at gate_path_rejected'],
   ['recordRow', '', 'at plan_growth'],
+  ['recordRow', '', 'at plan_round_cap'],
   ['recordRow', '', 'at carve_verdict'],
+  ['recordRow', '', 'at plan_converged'],
   ['recordRow', '', 'at gate_discrimination gate_generation gate_summary gate_proof_note'],
   ['recordRow', '', 'at gate_proof_unproven gate_generation'],
   ['recordRow', '', 'at gate_check_proof_unproven gate_generation'],
@@ -8130,7 +8218,7 @@ test('the journal channel vocabulary is closed, exported and additive', () => {
 test('every journal emit site in the driver is inventoried, wrapped and on the right channel', () => {
   const text = readFileSync(new URL('./drive.mjs', import.meta.url), 'utf8')
   const sites = driveJournalSites(text)
-  assert.equal(sites.length, 56)
+  assert.equal(sites.length, 59)
   assert.deepEqual(sites.map(({ wrapper, events, keys }) => [wrapper, events, keys]), DRIVE_JOURNAL_EXPECTED)
   assert.ok(sites.every(({ wrapper }) => wrapper === 'recordRow' || wrapper === 'operationalRow'))
   assert.equal(sites.filter(({ wrapper }) => wrapper === 'operationalRow').length, 2)
@@ -8920,14 +9008,14 @@ test('an armed run refuses green suites whose publication counts are unmeasured'
 test('plan-check accept residuals survive into the single driver-written publication body', () => {
   const residual = { id: 'PC1-9', type: 'cosmetic', summary: 'phase table remains for the sibling lane' }
   const io = publicationIo({ envelopes: {
-    'planner:1': planEnv(),
-    'tech-lead:1': checkEnv('revise'),
+    'planner:1': planEnv(), 'planner:2': planEnv(),
+    'tech-lead:1': checkEnv('revise'), 'tech-lead:2': checkEnv('revise'),
     'lead:1': leadEnv('accept', '', { residuals: [residual] }),
     'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
   } })
   const ctx = {
     ...CTX, roles: ['lead', 'planner', 'tech-lead', 'builder', 'reviewer'],
-    task: 'plan-accept', journal: `${TD}/journal.jsonl`, limits: { plan_rounds: 1 },
+    task: 'plan-accept', journal: `${TD}/journal.jsonl`, limits: { plan_rounds: 2 },
     publish: { branch: 'feature/plan-accept' },
   }
   const result = driveTask(ctx, io)

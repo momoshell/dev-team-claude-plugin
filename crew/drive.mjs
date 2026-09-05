@@ -220,6 +220,19 @@ export function planRoundCap({ limits, adopted = false, predecessorChecked = nul
   return base + extraPlanRounds
 }
 
+export const PREDECESSOR_FINDINGS_CLOSED = 'predecessor-findings-closed'
+export const PLAN_CLOSED_MARKER = 'CLOSED:'
+
+export function predecessorFindingsClosed(planCheckText, planText) {
+  const findings = planCheckFindingsFromText(planCheckText)
+  if (findings.length === 0) return false
+  const closed = new Set(String(planText ?? '').split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith(PLAN_CLOSED_MARKER))
+    .map((line) => line.slice(PLAN_CLOSED_MARKER.length).trim().split(/\s/)[0]))
+  return findings.every((f) => closed.has(f.id))
+}
+
 // --- the enforcement preamble (#870 (a) and (c)) ----------------------------
 export function enforcementPreamble(env) {
   const ceiling = env?.details?.turn_ceiling
@@ -365,7 +378,7 @@ export const ENVELOPE_FIELD_KINDS = Object.freeze(['text', 'records'])
 // The CLOSED set of reasons an envelope refusal can name (#427). A refusal is a
 // {reason, why} pair whose reason is one of these; prose stays in `why`.
 export const ENVELOPE_REFUSAL_REASONS = Object.freeze([
-  'no-envelope', 'summary', 'artifacts', 'details', 'field-missing', 'field-kind', 'field-item', 'verdict-findings', 'finding-id',
+  'no-envelope', 'summary', 'artifacts', 'details', 'field-missing', 'field-kind', 'field-item', 'verdict-findings', 'finding-id', 'carried-silent',
 ])
 export const UNIVERSAL_STAGE_HEADS = Object.freeze(['escalate', 'done'])
 // #251 follow-on — a PARTIAL reviewed shape declares where it gets what a plan
@@ -921,6 +934,89 @@ function verdictOf(env) {
 // machine-readable; it does not add a fourth.
 export const FINDING_SEVERITIES = Object.freeze(['must-fix', 'should-fix', 'consider'])
 export const RESIDUAL_TYPES = Object.freeze(['cosmetic', 'correctness-unverified'])
+export const PLAN_CHECK_SEVERITIES = Object.freeze(['blocker', 'major', 'minor'])
+export const PLAN_CONVERGENCE_REASONS = Object.freeze([
+  'prior-findings-closed', 'verdict-not-revise', 'findings-absent', 'round-1', 'blocker-present', 'findings-rejected', 'prior-findings-open',
+])
+
+export function planCheckFindings(details) {
+  if (!Array.isArray(details?.findings)) return null
+  const findings = []
+  const rejected = []
+  const seen = new Set()
+  details.findings.forEach((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry) || typeof entry.id !== 'string' || !FINDING_ID_SHAPE.test(entry.id)) {
+      rejected.push({ index, why: 'id outside the closed shape' })
+      return
+    }
+    if (!PLAN_CHECK_SEVERITIES.includes(entry.severity)) {
+      rejected.push({ index, why: 'severity outside the closed set' })
+      return
+    }
+    if (seen.has(entry.id)) {
+      rejected.push({ index, why: 'duplicate id' })
+      return
+    }
+    if (typeof entry.correction !== 'string' || entry.correction.trim() === '') {
+      rejected.push({ index, why: 'correction must be non-empty' })
+      return
+    }
+    seen.add(entry.id)
+    findings.push({ id: entry.id, severity: entry.severity, correction: entry.correction })
+  })
+  return { findings, rejected }
+}
+
+export function planCheckFindingsFromText(text) {
+  const findings = []
+  const pattern = /^\s*[-*]\s+([A-Za-z0-9_-]{1,64})\s*\((blocker|major|minor)\)\s*:\s*(\S.*)$/
+  for (const line of String(text ?? '').split('\n')) {
+    const match = pattern.exec(line)
+    if (match) findings.push({ id: match[1], severity: match[2], correction: match[3] })
+  }
+  return findings
+}
+
+export function planConvergence({ verdict, round, findings, priorClosed } = {}) {
+  if (verdict !== 'revise') return { converged: false, reason: 'verdict-not-revise', blocker: false, carried: [] }
+  if (!findings) return { converged: false, reason: 'findings-absent', blocker: false, carried: [] }
+  const rejected = findings.rejected.length > 0
+  const blocker = rejected || findings.findings.some((f) => f.severity === 'blocker')
+  if (round < 2) return { converged: false, reason: 'round-1', blocker, carried: [] }
+  if (blocker) return { converged: false, reason: rejected ? 'findings-rejected' : 'blocker-present', blocker: true, carried: [] }
+  if (priorClosed !== true) return { converged: false, reason: 'prior-findings-open', blocker: false, carried: [] }
+  if (findings.findings.length === 0) return { converged: false, reason: 'findings-absent', blocker: false, carried: [] }
+  return {
+    converged: true,
+    reason: 'prior-findings-closed',
+    blocker: false,
+    carried: findings.findings.map((f) => ({ id: f.id, severity: f.severity, correction: f.correction, round })),
+  }
+}
+
+export function carriedPreambleLines(carried) {
+  const rows = Array.isArray(carried) ? carried : []
+  if (rows.length === 0) return []
+  return [
+    '## Carried plan-check findings', '',
+    ...rows.map((f) => `- ${f.id} (${f.severity}): ${f.correction}`), '',
+  ]
+}
+
+export function carriedResolution(details, carried) {
+  const ids = new Set((Array.isArray(carried) ? carried : []).map((f) => f?.id).filter((id) => typeof id === 'string'))
+  const restated = new Set((reviewFindings(details)?.findings ?? []).map((f) => f.id).filter((id) => ids.has(id)))
+  const declared = Array.isArray(details?.carried_cleared) ? details.carried_cleared : []
+  const cleared = declared.filter((id) => typeof id === 'string' && ids.has(id) && !restated.has(id))
+  const silent = [...ids].filter((id) => !restated.has(id) && !cleared.includes(id))
+  return { cleared, restated: [...restated], silent }
+}
+
+export function carriedSilenceDefect(details, carried) {
+  const silent = carriedResolution(details, carried).silent
+  if (silent.length === 0) return null
+  return { reason: 'carried-silent', why: `the review is silent on carried plan-check finding(s) ${silent.join(', ')} — a carried finding must be closed or restated against the diff` }
+}
 
 export const CARVE_VERDICTS = Object.freeze(['proceed', 'carve'])
 
@@ -979,9 +1075,10 @@ export const GROWTH_DIVERGENCE_FACTOR = 2 // ADR-030 §4 as amended at §9.3
 
 const integerOrNull = (value) => (Number.isInteger(value) ? value : null)
 
-export function growthRecord(prev, first, { round, plan_bytes, gate_bytes, files_in_scope_count } = {}) {
+export function growthRecord(prev, first, { round, plan_bytes, gate_bytes, files_in_scope_count } = {}, lineage = null) {
   const plan = integerOrNull(plan_bytes)
   const gate = integerOrNull(gate_bytes)
+  const lineageBaseline = lineage && Number.isInteger(lineage.baseline_bytes) && lineage.baseline_bytes > 0 ? lineage.baseline_bytes : null
   const previous = prev && typeof prev === 'object' ? prev : null
   const plan_delta = previous && plan !== null && Number.isInteger(previous.plan_bytes)
     ? plan - previous.plan_bytes : null
@@ -989,10 +1086,10 @@ export function growthRecord(prev, first, { round, plan_bytes, gate_bytes, files
     ? gate - previous.gate_bytes : null
   const measured = [plan, gate].filter((value) => value !== null)
   const combined_bytes = measured.length > 0 ? measured.reduce((sum, value) => sum + value, 0) : null
-  const round1_combined_bytes = first?.combined_bytes ?? null
+  const round1_combined_bytes = lineage ? lineageBaseline : (first?.combined_bytes ?? null)
   const ratio = combined_bytes !== null && round1_combined_bytes !== null && round1_combined_bytes !== 0
     ? Math.round((combined_bytes / round1_combined_bytes) * 100) / 100 : null
-  const divergent = round >= 2 && combined_bytes !== null && round1_combined_bytes > 0
+  const divergent = (lineage ? true : round >= 2) && combined_bytes !== null && round1_combined_bytes > 0
     && combined_bytes >= GROWTH_DIVERGENCE_FACTOR * round1_combined_bytes
   return {
     round,
@@ -1005,7 +1102,29 @@ export function growthRecord(prev, first, { round, plan_bytes, gate_bytes, files
     files_in_scope_count: integerOrNull(files_in_scope_count),
     ratio,
     divergent,
+    ...(lineage ? { baseline_source: lineage.source ?? null, baseline_reason: lineage.reason ?? null } : {}),
   }
+}
+
+export function lineageFromJournal(text) {
+  let adopted = null
+  for (const line of String(text ?? '').split('\n')) {
+    if (!line.trim()) continue
+    let row
+    try { row = JSON.parse(line) } catch { continue }
+    if (row?.event === 'plan-adopted') adopted = row
+  }
+  if (!adopted) return null
+  const archive = adopted.archive ?? null
+  const combined_bytes = Number.isInteger(adopted.combined_bytes) ? adopted.combined_bytes : null
+  const baseline_bytes = Number.isInteger(adopted.lineage_baseline_bytes) && adopted.lineage_baseline_bytes > 0
+    ? adopted.lineage_baseline_bytes : null
+  const source = adopted.lineage_baseline_source ?? null
+  const reason = adopted.lineage_reason ?? null
+  const ratio = combined_bytes !== null && baseline_bytes !== null
+    ? Math.round((combined_bytes / baseline_bytes) * 100) / 100 : null
+  const divergent = Number.isInteger(baseline_bytes) && baseline_bytes > 0 && Number.isInteger(combined_bytes) && combined_bytes >= GROWTH_DIVERGENCE_FACTOR * baseline_bytes
+  return { archive, combined_bytes, baseline_bytes, source, reason, ratio, divergent }
 }
 
 export function growthLines(record) {
@@ -1017,13 +1136,13 @@ export function growthLines(record) {
 
 // The signal was measured, journalled and printed since the record existed, but
 // nothing read it back; this consumer supplies evidence only — code never decides here.
-export function divergenceConsultLines(record) {
+export function divergenceConsultLines(record, { decisions = null } = {}) {
   if (!record || record.divergent !== true) return []
   return [
     '',
     '## DIVERGENCE (ADR-030 §4 as amended at §9.3)',
     `Plan round ${record.round} measures combined plan+gate ${record.combined_bytes} bytes against round 1's ${record.round1_combined_bytes} — ratio ${record.ratio}, at or past the ratified factor of ${GROWTH_DIVERGENCE_FACTOR}.`,
-    'A diverging plan is growing rather than converging, and the measured history is that the next round produces another wrong shape rather than a smaller one. This is EVIDENCE, not a verdict: bounce, accept and escalate all remain open and the choice is yours.',
+    `A diverging plan is growing rather than converging, and the measured history is that the next round produces another wrong shape rather than a smaller one. This is EVIDENCE, not a verdict: ${decisions ?? 'bounce, accept and escalate'} all remain open and the choice is yours.`,
   ]
 }
 
@@ -2069,6 +2188,13 @@ export function issueTrailers(message) {
   return { closes, refs }
 }
 
+export function carriedPrLines(carried) {
+  const rows = Array.isArray(carried) ? carried : []
+  if (rows.length === 0) return []
+  return ['## Carried plan-check findings (unresolved)',
+    ...rows.map((row) => `- ${row?.id ?? ''} (${row?.severity ?? ''}) carried-to-review: ${row?.correction ?? ''}`), '']
+}
+
 export function composePrBody(record) {
   // Narration is labeled and additive; terminal empties delimit blocks without changing un-narrated facts (#806 U6).
   const narrative = String(record?.narrative ?? '').trim()
@@ -2103,7 +2229,9 @@ export function composePrBody(record) {
   const residuals = Array.isArray(review.residuals) ? review.residuals : []
   const reviewLines = [
     `Review: ${review.verdict || 'not recorded'}, ${residuals.length ? `${residuals.length} residual${residuals.length === 1 ? '' : 's'}:` : 'no residuals'}`,
-    ...residuals.map((row) => `- ${row?.id ?? ''} (${row?.type ?? ''}): ${row?.summary ?? ''}`), '',
+    ...residuals.map((row) => `- ${row?.id ?? ''} (${row?.type ?? ''}): ${row?.summary ?? ''}`),
+    ...carriedPrLines(review.carried),
+    '',
   ]
   const files = Array.isArray(record?.files) ? record.files : []
   const changedLines = files.length ? [`Changed: ${files.join(', ')}`] : []
@@ -2392,7 +2520,7 @@ function runTask(ctx, io, crash) {
   }
   const limits = { ...LIMITS, ...(ctx.limits || {}) }
   const waits = { ...WAITS_S, ...(ctx.waits || {}) }
-  const S = { consults: 0, stages: [], commit: null, dissents: [], grants: [], growth: [], modifiers: [], enforcements: [], acceptFindings: null, seqHighWater: 0, planAccept: null }
+  const S = { consults: 0, stages: [], commit: null, dissents: [], grants: [], growth: [], modifiers: [], enforcements: [], acceptFindings: null, seqHighWater: 0, planAccept: null, carried: [], carriedCleared: new Set() }
   const art = (name) => `${ctx.taskDir}/${name}`
   const pendingEnforcement = new Map()
   let enforcementSeq = 0
@@ -2408,6 +2536,11 @@ function runTask(ctx, io, crash) {
   // escalate(), so a LATER terminal's own accept_decision still wins the envelope
   // and the superseded plan-check row stays in the journal.
   const acceptDecisionBlock = () => (S.planAccept ? { accept_decision: S.planAccept } : {})
+  const carriedOpen = () => S.carried.filter((f) => !S.carriedCleared.has(f.id))
+  const carriedBlock = () => {
+    const open = carriedOpen().map((f) => ({ id: f.id, severity: f.severity, correction: f.correction, round: f.round }))
+    return open.length > 0 ? { carried: open } : {}
+  }
 
   // Instrumentation is never load-bearing (ADR-024/026 clause 1): the
   // emitter itself never throws, and this try/catch means an io that does
@@ -2730,6 +2863,7 @@ function runTask(ctx, io, crash) {
     stage('converge:pr')
     let pr
     try {
+      const carriedLines = carriedPrLines(carriedBlock().carried ?? [])
       pr = io.createDraftPr({
         title: draftPrTitle({ task: ctx.task }),
         body: draftPrBody({
@@ -2738,7 +2872,7 @@ function runTask(ctx, io, crash) {
           escalation: { where, why },
           roundHistory: [...S.stages],
           gateRed,
-        }),
+        }) + (carriedLines.length > 0 ? `\n${carriedLines.join('\n')}\n` : ''),
       })
     } catch (err) {
       const detail = err?.message ?? String(err)
@@ -2774,6 +2908,7 @@ function runTask(ctx, io, crash) {
         extra_rounds_granted: S.grants, growth: S.growth, modifiers: S.modifiers, enforcements: S.enforcements,
         gate: gateBlock(),
         ...acceptDecisionBlock(),
+        ...carriedBlock(),
         converge: {
           pr: { number: pr.number, url: pr.url }, draft: true, issues, residuals,
           gate_summary: { line: gateSummary.line, total: gateSummary.total, failed: gateSummary.failed, errored: gateSummary.errored },
@@ -3023,6 +3158,7 @@ function runTask(ctx, io, crash) {
       extra_rounds_granted: S.grants, growth: S.growth, modifiers: S.modifiers, enforcements: S.enforcements,
       gate: gateBlock(),
       ...acceptDecisionBlock(),
+      ...carriedBlock(),
       seq_high_water: S.seqHighWater,
       gate_attempt_high_water: gateAttempt,
       cursor: roundCursor(S.stages),
@@ -3369,12 +3505,23 @@ function runTask(ctx, io, crash) {
   const readOrNull = (path) => { try { const text = io.readFile(path); return typeof text === 'string' ? text : null } catch { return null } }
   // Read ONCE, before the first check round: the driver overwrites plan-check.md
   // on every round (:3091), so a later read returns this run's own output.
-  const adoption = adoptionSignal({ briefText: readOrNull(ctx.briefFile), planCheckText: readOrNull(art('plan-check.md')) })
-  const planRounds = () => planRoundCap({ limits, adopted: adoption.adopted, predecessorChecked: adoption.predecessor_checked, extraPlanRounds })
+  const adoptedCheckText = readOrNull(art('plan-check.md'))
+  const adoption = adoptionSignal({ briefText: readOrNull(ctx.briefFile), planCheckText: adoptedCheckText })
+  let predecessorChecked = adoption.predecessor_checked
+  const planRounds = () => planRoundCap({ limits, adopted: adoption.adopted, predecessorChecked, extraPlanRounds })
   io.log(recordRow({ at: io.now(), plan_round_cap: {
-    adopted: adoption.adopted, predecessor_checked: adoption.predecessor_checked,
+    adopted: adoption.adopted, predecessor_checked: predecessorChecked,
     reason: adoption.reason, cap: planRounds(),
   } }))
+  const lineage = adoption.adopted ? lineageFromJournal(readOrNull(journal)) : null
+  if (lineage) io.log(recordRow({ at: io.now(), plan_lineage: lineage }))
+  if (lineage && lineage.divergent) {
+    const c = consultLead([
+      `This lane ADOPTED a plan from ${lineage.archive}: the adopted plan+gate measure ${lineage.combined_bytes} bytes against the LINEAGE's baseline of ${lineage.baseline_bytes} — the growth is the lineage's, not this lane's, and no plan round has run yet.`,
+      ...divergenceConsultLines({ round: 1, combined_bytes: lineage.combined_bytes, round1_combined_bytes: lineage.baseline_bytes, ratio: lineage.ratio, divergent: true }, { decisions: 'proceed and escalate' }),
+    ].join('\n'), ['proceed', 'escalate'], [ctx.briefFile, art('plan.md')])
+    if (c.decision === 'escalate') return escalate('plan', c.reason)
+  }
   const planRevisionBrief = (round, check) => {
     const checkPath = check.details?.check_path || art('plan-check.md')
     return [
@@ -3479,10 +3626,14 @@ function runTask(ctx, io, crash) {
         plan_bytes: bytesOf(env.details?.plan_path || art('plan.md')),
         gate_bytes: bytesOf(gatePathOf(env.details)),
         files_in_scope_count: Array.isArray(env.details?.files_in_scope) ? env.details.files_in_scope.length : null,
-      })
+      }, lineage)
       S.growth.push(record)
       io.log(recordRow({ at: io.now(), plan_growth: record }))
     } catch { /* measurement is never load-bearing */ }
+    if (round === 1 && adoption.adopted && predecessorChecked === false && predecessorFindingsClosed(adoptedCheckText, readOrNull(env.details?.plan_path || art('plan.md')))) {
+      predecessorChecked = true
+      io.log(recordRow({ at: io.now(), plan_round_cap: { adopted: true, predecessor_checked: true, reason: PREDECESSOR_FINDINGS_CLOSED, cap: planRounds() } }))
+    }
     if (round >= 2) {
       const carve = validateCarve(env.details)
       io.log(recordRow({ at: io.now(), carve_verdict: { round, verdict: carve.verdict, defect: carve.defect } }))
@@ -3521,6 +3672,19 @@ function runTask(ctx, io, crash) {
       stageComplete()
       break
     }
+    const convergence = planConvergence({
+      verdict: v,
+      round,
+      findings: planCheckFindings(check.details),
+      priorClosed: check.details?.prior_findings_closed === true,
+    })
+    if (convergence.converged) {
+      io.log(recordRow({ at: io.now(), plan_converged: { round, ids: convergence.carried.map((f) => f.id), severities: convergence.carried.map((f) => f.severity), reasons: [convergence.reason, 'blocker-absent'] } }))
+      S.carried = convergence.carried
+      stageComplete()
+      stageComplete()
+      break
+    }
     // The point of decision. Exhaustion reaches it as it always did; a round
     // MEASURED divergent reaches it one round early, so the plan that is
     // growing is ended by a decision instead of discovered at exhaustion. The
@@ -3533,7 +3697,14 @@ function runTask(ctx, io, crash) {
     const exhausted = round >= planRounds()
     if (exhausted || divergenceReady) {
       if (divergenceReady) divergenceConsulted = true
-      const options = !exhausted || canGrant('plan-check') ? ['bounce', 'accept', 'escalate'] : ['accept', 'escalate']
+      const fundable = !exhausted || canGrant('plan-check')
+      const bounceOnly = convergence.blocker || round < 2
+      if (bounceOnly && !fundable) {
+        stageComplete()
+        stageComplete()
+        return escalate('plan-check', `the plan check returned a BLOCKER, or a finding malformed enough to be one, or is still at round 1, on round ${round}, and no plan round remains to bounce it — neither is ever accepted`)
+      }
+      const options = fundable ? (bounceOnly ? ['bounce', 'escalate'] : ['bounce', 'accept', 'escalate']) : ['accept', 'escalate']
       const c = consultLead(
         [
           exhausted
@@ -4277,6 +4448,7 @@ function runTask(ctx, io, crash) {
     const consider = Math.max(count('consider'), preserveReviewerCounts ? rawCount('consider') : 0)
     const reviewPath = typeof aEnv.details?.review_path === 'string'
       ? aEnv.details.review_path : art('review.md')
+    const carriedCleared = carriedResolution(aEnv.details, carriedOpen()).cleared
     const review = {
       status: 'done',
       role: 'reviewer',
@@ -4292,6 +4464,7 @@ function runTask(ctx, io, crash) {
         should_fix: shouldFix,
         consider,
         findings,
+        ...(carriedCleared.length > 0 ? { carried_cleared: carriedCleared } : {}),
         panel: {
           partner: panel.partner,
           adjudicator: panel.adjudicator,
@@ -4853,7 +5026,10 @@ function runTask(ctx, io, crash) {
       const roundNo = reviews + 1
       stage(`review:r${roundNo}`)
       const revBrief = art(`review-brief-${roundNo}.md`)
+      const openCarried = carriedOpen()
+      const carriedHead = carriedPreambleLines(openCarried)
       panelBriefText = [
+        ...carriedHead,
         `# Review (round ${roundNo})`, '',
         `Plan of record: ${planPath}. Changes are uncommitted in ${ctx.checkout} — read the diff with git.`,
         `Re-run the validation lane yourself: ${lane}`,
@@ -4863,10 +5039,11 @@ function runTask(ctx, io, crash) {
       io.writeFile(revBrief, panelBriefText)
       const review = panel ? panelReview(roundNo, panel) : assignAndWait('reviewer', revBrief, 'review')
       lastReviewPath = review.details?.review_path || art('review.md')
-      const shapeRefusal = reviewShapeDefect(review.details)
+      const shapeRefusal = reviewShapeDefect(review.details) || carriedSilenceDefect(review.details, openCarried)
       const v = shapeRefusal ? null : verdictOf(review)
       if (v) finalReview.verdict = v
       if (v) staleVerdict = null
+      if (v) for (const id of carriedResolution(review.details, openCarried).cleared) S.carriedCleared.add(id)
       // A VERIFICATION COSTS NOTHING. Only a round that DEMANDS change spends a
       // review_rounds slot. Measured over 164 archived lanes: of 86 re-reviews,
       // 52 (60%) found nothing — they existed only to confirm the must-fixes
@@ -5259,7 +5436,7 @@ function runTask(ctx, io, crash) {
         discrimination: gateNow.discrimination ?? '',
         repairs: gateNow.repairs ?? 0,
       } : null,
-      review: { verdict: finalReview.verdict === 'pass' ? 'pass' : 'changes-needed', residuals: finalReview.residuals },
+      review: { verdict: finalReview.verdict === 'pass' ? 'pass' : 'changes-needed', residuals: finalReview.residuals, ...carriedBlock() },
       suite: { warm: warmCounts, cold: coldSuite.counts, cold_verified: coldSuite.counts !== null },
       anomalies: prAnomalies(journalRowsSinceRunStart(journalText)),
     }
@@ -5306,6 +5483,7 @@ function runTask(ctx, io, crash) {
       extra_rounds_granted: S.grants, growth: S.growth, modifiers: S.modifiers, enforcements: S.enforcements,
       gate: gateBlock(),
       ...acceptDecisionBlock(),
+      ...carriedBlock(),
     },
   }
   stageComplete()

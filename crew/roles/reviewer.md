@@ -42,10 +42,15 @@ a skill route is one no seat can open.
 Where one of its classes still worries you in this diff, write it as a
 `consider` naming the defense you think fails.
 
+## Carried plan-check findings
+
+A carried plan-check finding arrives at the HEAD of the brief with its id, severity, and the check's prescribed correction. Adjudicate it against the DIFF. Clear it by listing its id in the envelope's carried-clearance field; restate it by carrying a finding with the same id. Silence on a carried id is a review defect: the envelope is refused as `carried-silent` and re-asked. A finding cleared in an earlier round is not shown again and is not owed again.
+
 ## Envelope details fields
 
 "details": { "review_path": "<abs>", "verdict": "pass"|"changes-needed",
              "must_fix": <n>, "should_fix": <n>, "consider": <n>,
+             "carried_cleared": ["<id>"],
              "findings": [ { "id": "<stable within THIS review>",
                              "severity": "must-fix"|"should-fix"|"consider",
                              "disposition": "auto-fix" | "ask-user" | "no-op",

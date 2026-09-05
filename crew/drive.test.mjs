@@ -36,6 +36,10 @@ import {
   narratorConfig, narratorApiRoot, narratorModelsCommand, narratorModelId, narrationPrompt, narratorCommand,
   narrationFromResponse, narrationIsRawJson, trimPathToken, recordFacts, narrationDefect, narrateRecord,
   shellArg, journalRowsSinceRunStart, prAnomalies, parseSuiteCounts, refsFromCommitMessage, composePrBody,
+  VALIDATION_LANE_UNLOADABLE, VALIDATION_LANE_EVENT, LOADABLE_LANE_EXTENSIONS, LANE_PROBE_KINDS,
+  LANE_INPUT_VERDICTS, LANE_COMMAND_SHAPES, LANE_VALUE_OPTIONS, LANE_PATH_OPTIONS, shellWords,
+  laneCommandShape, laneCommandInputs, laneProbeCommand, laneProbeKinds, laneInputExtension,
+  resolveValidationLane, validationLaneWhy, validationLaneBounceLines,
   parseGateSummary, baselineGateDefect, GATE_SUMMARY_PREFIX, GATE_CUSTODIAN, roundCursor,
   gateReapCommand, gateReapSweepCommand, gateReapOriginal, gateReapVerdict, gateReapFresh, GATE_REAP_CMD_EOF, GATE_REAP_SWEEP_MARKER,
   validateMutations, checkFailureLine, MUTATION_OUTCOMES, MUTATION_BINDING_FAILURES, MUTATIONS_MAX, CHECK_FAIL_PREFIX,
@@ -6177,6 +6181,7 @@ const ZERO_CAPACITY_LOGS = Object.freeze([
   { assign: 'planner1', role: 'planner', brief: '/tmp/brief.md', channel: 'record' },
   { envelope: 'planner1', role: 'planner', status: 'done', channel: 'record' },
   { plan_scope: { round: 1, verdict: 'plan-scope-undispatched', added: [], dropped: [], dispatched: null, planned: 2 }, channel: 'record' },
+  { event: 'validation-lane-resolved', validation_lane_resolved: { round: 1, shape: 'opaque', loadable: 0, missing: 0, unreadable: 0, 'unsupported-type': 0, 'unsupported-extension': 0, 'glob-unresolved': 0, refused: [], total: 0 }, channel: 'record' },
   { gate_path_rejected: null, channel: 'record' },
   { plan_growth: { round: 1, plan_bytes: null, gate_bytes: null, plan_delta: null, gate_delta: null, combined_bytes: null, round1_combined_bytes: null, files_in_scope_count: 2, ratio: null, divergent: false }, channel: 'record' },
   { stage_done: 'plan:r1', channel: 'record' },
@@ -7206,7 +7211,7 @@ test('scout rejects envelopes that do not match its declared shape', () => {
 
 test('the envelope refusal reason set is closed and frozen', () => {
   assert.equal(Object.isFrozen(ENVELOPE_REFUSAL_REASONS), true)
-  assert.deepEqual([...ENVELOPE_REFUSAL_REASONS], ['no-envelope', 'summary', 'artifacts', 'details', 'field-missing', 'field-kind', 'field-item', 'verdict-findings', 'finding-id', 'carried-silent'])
+  assert.deepEqual([...ENVELOPE_REFUSAL_REASONS], ['no-envelope', 'summary', 'artifacts', 'details', 'field-missing', 'field-kind', 'field-item', 'verdict-findings', 'finding-id', 'carried-silent', 'validation-lane-unloadable'])
   const malformed = [
     null,
     'not an object',
@@ -8176,6 +8181,7 @@ const DRIVE_JOURNAL_EXPECTED = Object.freeze([
   ['recordRow', '', 'at member_questions'],
   ['recordRow', '', 'at question_answers'],
   ['recordRow', '', 'at plan_scope'],
+  ['recordRow', '', 'at event validation_lane_resolved'],
   ['recordRow', '', 'at gate_path_rejected'],
   ['recordRow', '', 'at plan_growth'],
   ['recordRow', '', 'at plan_round_cap'],
@@ -8218,7 +8224,7 @@ test('the journal channel vocabulary is closed, exported and additive', () => {
 test('every journal emit site in the driver is inventoried, wrapped and on the right channel', () => {
   const text = readFileSync(new URL('./drive.mjs', import.meta.url), 'utf8')
   const sites = driveJournalSites(text)
-  assert.equal(sites.length, 59)
+  assert.equal(sites.length, 60)
   assert.deepEqual(sites.map(({ wrapper, events, keys }) => [wrapper, events, keys]), DRIVE_JOURNAL_EXPECTED)
   assert.ok(sites.every(({ wrapper }) => wrapper === 'recordRow' || wrapper === 'operationalRow'))
   assert.equal(sites.filter(({ wrapper }) => wrapper === 'operationalRow').length, 2)
@@ -10103,6 +10109,248 @@ test("the repair shape's own scope rule is untouched", () => {
   assert.equal(result.details.escalation.where, 'triage-scope')
   assert.match(result.details.escalation.why,
     /a triage that needs a wider surface is an escalation, not a re-plan/)
+})
+
+// ---------------------------------------------------------------------------
+// #915 — planner validation_lane resolution. The probe is scripted through fakeIo's
+// command map: no scratch tree or temp primitive belongs in these tests.
+const validationPlan = (lane) => planEnv({ details: { ...planEnv().details, validation_lane: lane } })
+const validationProbeOutput = (kinds) => {
+  const entries = kinds instanceof Map ? [...kinds.entries()] : Object.entries(kinds)
+  return entries.map(([input, kind]) => `${kind} ${input}`).join('\n') + (entries.length > 0 ? '\n' : '')
+}
+const validationProbeRun = (lane, kinds) => {
+  const { inputs } = laneCommandInputs(lane)
+  return { [laneProbeCommand(inputs)]: { ok: true, output: validationProbeOutput(kinds) } }
+}
+const validationRows = (io) => io.calls.logs.filter((row) => row && row.event === VALIDATION_LANE_EVENT)
+
+// MUTATION A13 — shell-word tokenization keeps quoted paths as one input.
+test("shellWords honours quotes, escapes and adjacent quote runs, and refuses an unterminated one", () => {
+  assert.deepEqual(shellWords("node --test 'a b.mjs'"), {
+    words: ['node', '--test', 'a b.mjs'], defect: null,
+  })
+  assert.deepEqual(shellWords(`node --test 'o'"'"'hare.test.mjs'`).words, [
+    'node', '--test', "o'hare.test.mjs",
+  ])
+  assert.deepEqual(shellWords('node --test a\\ b.mjs').words, ['node', '--test', 'a b.mjs'])
+  assert.deepEqual(shellWords('node --test "a \\"b\\".mjs"').words, ['node', '--test', 'a "b".mjs'])
+  const unterminated = shellWords("node --test 'a")
+  assert.deepEqual(unterminated.words, [])
+  assert.match(unterminated.defect, /unterminated single quote/)
+})
+
+// MUTATIONS A16 and A18 — node-test-ness is established before the fail-closed shape arm.
+test('a lane that does not attempt a node --test run is opaque; one that does and cannot be parsed is unparsable', () => {
+  for (const lane of ['lane-cmd', 'npm test', 'node build.mjs']) {
+    const shaped = laneCommandShape(lane)
+    assert.equal(shaped.shape, 'opaque')
+    assert.ok(shaped.why.includes(lane.split(' ')[0]))
+    assert.ok(LANE_COMMAND_SHAPES.includes(shaped.shape))
+  }
+  for (const lane of [
+    'node --test a.mjs | cat',
+    'node --test a.mjs && node --test b.mjs',
+    'node --test a.mjs > out.txt',
+    'env node --test a.mjs',
+  ]) {
+    const shaped = laneCommandShape(lane)
+    assert.equal(shaped.shape, 'unparsable')
+    assert.ok(LANE_COMMAND_SHAPES.includes(shaped.shape))
+    let probes = 0
+    const resolved = resolveValidationLane(lane, () => { probes += 1; return new Map() })
+    assert.equal(resolved.rows.length, 1)
+    assert.equal(resolved.refused.length, 1)
+    assert.equal(probes, 0)
+  }
+  assert.equal(laneCommandShape('node --test a.mjs').shape, 'node-test')
+})
+
+// MUTATIONS A12, A17 and A19 — scalar values are consumed, path-bearing values are inputs,
+// globs are refused, and -- starts positional parsing.
+test('laneCommandInputs consumes scalar option values, keeps path option values as inputs in both spellings, separates globs, and treats every word after -- as a positional', () => {
+  const scalar = laneCommandInputs("node --test --test-timeout 30000 --test-reporter=tap a.mjs '**/*.test.mjs' -- -b.mjs --c.mjs")
+  assert.deepEqual(scalar.inputs, ['a.mjs', '-b.mjs', '--c.mjs'])
+  assert.deepEqual(scalar.globs, ['**/*.test.mjs'])
+
+  const paths = laneCommandInputs('node --test --import pre.mjs --require=hook.cjs -r other.cjs --loader=l.mjs --experimental-loader el.mjs --test-timeout 30000 a.test.mjs')
+  assert.deepEqual(paths.inputs, ['pre.mjs', 'hook.cjs', 'other.cjs', 'l.mjs', 'el.mjs', 'a.test.mjs'])
+  assert.deepEqual(paths.globs, [])
+  assert.deepEqual(LANE_PATH_OPTIONS.filter((option) => LANE_VALUE_OPTIONS.includes(option)), [])
+  assert.deepEqual(laneCommandInputs('node --test --import=').inputs, [])
+})
+
+// MUTATIONS A9, A11 and A15 — type is authoritative, and every unmeasured or non-file
+// result is refused rather than inferred from a token.
+test('resolveValidationLane classifies every input from the probe and refuses what it could not measure', () => {
+  const cmd = 'node --test load.mjs dotted.jsonl other.mjs missing.mjs omitted.mjs'
+  const probed = new Map([
+    ['load.mjs', 'file'], ['dotted.jsonl', 'dir'], ['other.mjs', 'other'], ['missing.mjs', 'absent'],
+  ])
+  const resolved = resolveValidationLane(cmd, (inputs) => {
+    assert.deepEqual(inputs, [...probed.keys(), 'omitted.mjs'])
+    return probed
+  })
+  assert.deepEqual(resolved.rows.map((row) => row.verdict), [
+    'loadable', 'loadable', 'unsupported-type', 'missing', 'unreadable',
+  ])
+  assert.deepEqual(resolved.refused.map((row) => row.input), ['other.mjs', 'missing.mjs', 'omitted.mjs'])
+  assert.equal(resolved.counts.total, resolved.rows.length)
+  assert.ok(resolved.rows.every((row) => LANE_INPUT_VERDICTS.includes(row.verdict)))
+  assert.equal(resolved.counts.loadable, 2)
+})
+
+// MUTATIONS A9 and A10 — the extension is consulted only after the probe has proved file.
+test('an extensionless regular file is refused and a dotted directory is not', () => {
+  const cmd = 'node --test crew/runner test/fixtures.jsonl'
+  const resolved = resolveValidationLane(cmd, () => new Map([
+    ['crew/runner', 'file'], ['test/fixtures.jsonl', 'dir'],
+  ]))
+  assert.deepEqual(resolved.rows.map(({ input, verdict }) => ({ input, verdict })), [
+    { input: 'crew/runner', verdict: 'unsupported-extension' },
+    { input: 'test/fixtures.jsonl', verdict: 'loadable' },
+  ])
+})
+
+// MUTATION A13 — probe command quoting preserves a path containing an apostrophe.
+test('laneProbeCommand quotes every input and laneProbeKinds reads only the closed kinds', () => {
+  const quoted = "o'hare.test.mjs"
+  const command = laneProbeCommand([quoted, 'crew'])
+  assert.ok(command.includes(shellArg(quoted)))
+  const kinds = laneProbeKinds(`file ${quoted}\nmystery ${quoted}\ndir crew\nnoise-without-a-kind`)
+  assert.equal(kinds.get(quoted), 'file')
+  assert.equal(kinds.get('crew'), 'dir')
+  assert.equal(kinds.has('noise-without-a-kind'), false)
+})
+
+// MUTATIONS A1, A2, A4, A6 and A8 — an unloadable planner lane bounces with one closed
+// reason and escalates only after the final plan round.
+test("a planner lane naming a fixture bounces the planner with the closed reason, and the same lane on the final round escalates", () => {
+  const bad = 'node --test crew/drive.test.mjs test/fixtures/cmux-events-input-sent.jsonl'
+  const good = 'node --test crew/drive.test.mjs'
+  const runs = {
+    ...validationProbeRun(bad, {
+      'crew/drive.test.mjs': 'file',
+      'test/fixtures/cmux-events-input-sent.jsonl': 'file',
+    }),
+    ...validationProbeRun(good, { 'crew/drive.test.mjs': 'file' }),
+    'suite-cmd': { ok: true, output: '' },
+  }
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': validationPlan(bad), 'planner:2': validationPlan(good),
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs, changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'done')
+  assert.deepEqual(io.calls.assign.filter(({ role }) => role === 'planner').map(({ note }) => note), [
+    'plan', VALIDATION_LANE_UNLOADABLE,
+  ])
+  const bounce = io.calls.writes[`${TD}/plan-bounce-r1.md`]
+  assert.match(bounce, new RegExp(VALIDATION_LANE_UNLOADABLE))
+  assert.ok(bounce.includes('test/fixtures/cmux-events-input-sent.jsonl'))
+  assert.ok(bounce.includes(bad))
+  assert.ok(bounce.includes(CTX.briefFile))
+  assert.equal(Object.isFrozen(ENVELOPE_REFUSAL_REASONS), true)
+  assert.ok(ENVELOPE_REFUSAL_REASONS.includes(VALIDATION_LANE_UNLOADABLE))
+
+  const finalIo = fakeIo({
+    envelopes: { 'planner:1': validationPlan(bad), 'planner:2': validationPlan(bad) },
+    runs: validationProbeRun(bad, {
+      'crew/drive.test.mjs': 'file',
+      'test/fixtures/cmux-events-input-sent.jsonl': 'file',
+    }),
+  })
+  const final = driveTask(CTX, finalIo)
+  assert.equal(final.status, 'escalation')
+  assert.equal(final.details.escalation.where, 'plan')
+  assert.match(final.details.escalation.why, new RegExp(VALIDATION_LANE_UNLOADABLE))
+  assert.match(final.details.escalation.why, /no revision left to bounce it to/)
+})
+
+// MUTATIONS A3, A5 and A7 — opaque lanes stay untouched, accepted lanes are byte-identical,
+// and only the planner's lane is resolved.
+test('an unparsed lane is accepted with no probe, an accepted lane runs byte-identically, and ctx.lane is never resolved', () => {
+  const opaqueIo = fakeIo({
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const opaqueResult = driveTask(CTX, opaqueIo)
+  assert.equal(opaqueResult.status, 'done')
+  assert.equal(opaqueIo.calls.assign.filter(({ role }) => role === 'planner').length, 1)
+  assert.equal(opaqueIo.calls.assign.filter(({ role }) => role === 'builder').length, 1)
+  assert.equal(opaqueIo.calls.run.some(({ cmd }) => cmd.startsWith('for p in ')), false)
+
+  const lane = 'node --test crew/drive.test.mjs'
+  const acceptedIo = fakeIo({
+    envelopes: { 'planner:1': validationPlan(lane), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { ...validationProbeRun(lane, { 'crew/drive.test.mjs': 'file' }), 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const acceptedResult = driveTask(CTX, acceptedIo)
+  assert.equal(acceptedResult.status, 'done')
+  assert.equal(acceptedIo.calls.run.some(({ cmd }) => cmd === lane), true)
+  const acceptedPayload = validationRows(acceptedIo)[0]?.validation_lane_resolved
+  assert.deepEqual(
+    { shape: acceptedPayload?.shape, total: acceptedPayload?.total, refused: acceptedPayload?.refused },
+    { shape: 'node-test', total: 1, refused: [] },
+  )
+
+  const details = { ...planEnv().details }
+  delete details.validation_lane
+  const ctxLane = 'node --test test/fixtures/cmux-events-input-sent.jsonl'
+  const ctxIo = fakeIo({
+    envelopes: { 'planner:1': planEnv({ details }), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const ctxResult = driveTask({ ...CTX, lane: ctxLane }, ctxIo)
+  assert.equal(ctxResult.status, 'done')
+  assert.equal(ctxIo.calls.assign.filter(({ role }) => role === 'planner').length, 1)
+  assert.equal(ctxIo.calls.run.some(({ cmd }) => cmd.startsWith('for p in ')), false)
+  assert.equal(ctxIo.calls.run.some(({ cmd }) => cmd === ctxLane), true)
+})
+
+// MUTATIONS A16, A17 and A18 — attempted but unparseable node-test lanes bounce before the
+// verbatim shell runner, while -- still exposes its dash-leading positional.
+test('an attempted node --test lane this driver cannot parse is bounced, never handed to /bin/sh', () => {
+  const good = 'node --test crew/drive.test.mjs'
+  const piped = 'node --test test/fixtures/cmux-events-input-sent.jsonl | cat'
+  const pipedIo = fakeIo({
+    envelopes: { 'planner:1': validationPlan(piped), 'planner:2': validationPlan(good), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { ...validationProbeRun(good, { 'crew/drive.test.mjs': 'file' }), 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const pipedResult = driveTask(CTX, pipedIo)
+  assert.equal(pipedResult.status, 'done')
+  assert.equal(validationRows(pipedIo)[0]?.validation_lane_resolved.shape, 'unparsable')
+  assert.match(pipedIo.calls.writes[`${TD}/plan-bounce-r1.md`], new RegExp(VALIDATION_LANE_UNLOADABLE))
+  assert.equal(pipedIo.calls.run.some(({ cmd }) => cmd === piped), false)
+
+  const dash = 'node --test -- -fixture.jsonl'
+  const dashIo = fakeIo({
+    envelopes: { 'planner:1': validationPlan(dash), 'planner:2': validationPlan(good), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { ...validationProbeRun(dash, { '-fixture.jsonl': 'file' }), ...validationProbeRun(good, { 'crew/drive.test.mjs': 'file' }), 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  driveTask(CTX, dashIo)
+  const dashPayload = validationRows(dashIo)[0]?.validation_lane_resolved
+  assert.equal(dashPayload?.total, 1)
+  assert.deepEqual(dashPayload?.refused, ['-fixture.jsonl'])
+  assert.ok(dashIo.calls.writes[`${TD}/plan-bounce-r1.md`].includes('-fixture.jsonl'))
+
+  const launched = 'env node --test crew/drive.test.mjs'
+  const launchedIo = fakeIo({
+    envelopes: { 'planner:1': validationPlan(launched), 'planner:2': validationPlan(good), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { ...validationProbeRun(good, { 'crew/drive.test.mjs': 'file' }), 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  driveTask(CTX, launchedIo)
+  assert.equal(validationRows(launchedIo)[0]?.validation_lane_resolved.shape, 'unparsable')
+  assert.match(launchedIo.calls.writes[`${TD}/plan-bounce-r1.md`], new RegExp(VALIDATION_LANE_UNLOADABLE))
 })
 
 // ---------------------------------------------------------------------------

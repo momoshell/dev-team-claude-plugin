@@ -9,7 +9,7 @@ import {
   SEAT_REFUSALS, SEAT_REFUSAL_ACTIONS, UNCLASSIFIED_REFUSAL, shq, stderrTail, updateCrewJson,
   SEAT_SUITE_POLICY_EVENT, SUITE_RUN_REFUSAL, SUITE_RUN_UNRECOGNISED, SUITE_POLICY_STREAM_UNAVAILABLE,
   suiteRunPolicy, recogniseSuiteInvocation, testTargets, fenceCovers, shellToolCalls,
-  splitShellCommands, executableText,
+  splitShellCommands, executableText, stripHeredocBodies, commandTokens,
   suitePolicyCounters, countSuiteDecision, suitePolicyReport, SUITE_RUN_OWNERSHIP, SUITE_RUN_OWNERSHIP_KINDS,
 } from './headless.mjs'
 import { cellFailureKind } from './seat-io.mjs'
@@ -1695,4 +1695,125 @@ test('#929 executableText blanks quoted spans and comments while preserving the 
   // Escapes are honoured outside quotes, where the shell honours them.
   assert.equal(executableText('echo \\"npm test\\"'), 'echo \\"npm test\\"')
   assert.equal(executableText(''), '')
+})
+
+// #929, the general case. FIVE lanes died on three different spellings of one
+// defect: a suite command was recognised wherever its letters appeared, so a
+// seat that merely WROTE those letters — in a grep pattern, in an apostrophe
+// that closed its own quote, in a sentence of prose — had its dispatch ended.
+// The commands below are the real ones, taken from each dead lane's
+// seat-suite-policy row. A command is what sits at the COMMAND WORD.
+test('#929 the five commands that each killed a lane are not suite runs', () => {
+  const gatePath = '/task/gate.mjs'
+  const suiteCommand = 'npm test'
+  const killed = [
+    // b443-providerretry: a `node -p` read whose quoted script mentions the suite.
+    'cd /x && node -p "const j=require(\'./crew.json\'); JSON.stringify({suite:j.suite_command||j.suite})" | head -30; grep -n -i "suite\\|npm test" task/role-builder.md | head -30',
+    // b444 and b445: a grep whose PATTERN contains the suite command, and whose
+    // `\\|` alternations were themselves read as pipes before splitShellCommands
+    // learned about quotes.
+    'cd /x/task; grep -n -i "suite\\|validation\\|npm test\\|node --test" role-builder.md | head -40',
+    'cd /x/task && grep -n -i "validation\\|node --test\\|npm test" plan.md | head -60',
+    // b446-providerretry: the apostrophe in `builder's` closes the single-quoted
+    // script exactly as a shell does, leaving the later mention unquoted.
+    'node -e \'const s = "the builder\'s 6 runs were admitted; only the bare npm test was refused"\'',
+    // b449-providerretry: a finished plan envelope written through a quoted
+    // heredoc, whose PROSE said "its single npm test". Every line of the body
+    // was its own segment, and that sentence was segment 43.
+    'cat > /tmp/env.mjs <<\'ENVD4\'\nconst summary = `what the builder should expect from its single npm test`\nwriteFileSync(D + "/returns/d4.planner.json", JSON.stringify(env))\nENVD4\nnode /tmp/env.mjs',
+  ]
+  for (const command of killed) {
+    assert.equal(recogniseSuiteInvocation(command, { gatePath, suiteCommand }), null, command)
+    assert.equal(suiteRunPolicy({ role: 'lead', command, gatePath, suiteCommand }).decision, 'unrecognised', command)
+  }
+})
+
+// MUTATION: make recogniseSegment match by PRESENCE again (substring or a bare
+// regex over the segment) and every check here stops refusing — the position
+// rule must not have bought its silence by going blind to real invocations.
+test('#929 a suite run at the command word still refuses, in every spelling', () => {
+  const gatePath = '/task/gate.mjs'
+  const suiteCommand = 'npm test'
+  for (const command of [
+    'npm test',
+    'cd /x && npm test',
+    'npm run test',
+    'npm run test:unit',
+    'npm run-script test',
+    'npm --silent test',
+    'time npm test',
+    'CI=1 npm test',
+    'npm test && bash tools/run-everything.sh',
+    'cd /x; npm test | tee out.log',
+    '/usr/local/bin/npm test',
+    'node --test "**/*.test.mjs"',
+    '/usr/bin/node --test',
+  ]) {
+    assert.equal(recogniseSuiteInvocation(command, { gatePath, suiteCommand }), 'suite', command)
+    assert.equal(suiteRunPolicy({ role: 'lead', command, gatePath, suiteCommand }).decision, 'refuse', command)
+  }
+  // A fenced scoped run stays admitted, and a quoted glob stays a suite run.
+  const fence = ['crew/headless.test.mjs']
+  assert.equal(suiteRunPolicy({ role: 'builder', command: 'node --test crew/headless.test.mjs', fence, gatePath, suiteCommand }).decision, 'admit')
+  assert.equal(testTargets('node --test "**/*.test.mjs"'), null)
+  // The declared command spends the builder's one allowance, exactly once.
+  const builder = { role: 'builder', fence, gatePath, suiteCommand, command: 'npm test' }
+  assert.equal(suiteRunPolicy({ ...builder, suiteRanBefore: 0 }).decision, 'admit')
+  assert.equal(suiteRunPolicy({ ...builder, suiteRanBefore: 1 }).decision, 'refuse')
+})
+
+// The command-word rule alone saves b449's PROSE line, whose first word is
+// `const`. What only the stripping can save is a heredoc body line that IS a
+// command word — a seat writing a brief, plan or PR body that documents the
+// command a builder must run. Removing stripHeredocBodies from recogniseInvocation
+// leaves this refusing, which is what makes the wiring non-vacuous.
+test('#929 a documented command inside a heredoc body is data, not an invocation', () => {
+  const gatePath = '/task/gate.mjs'
+  const suiteCommand = 'npm test'
+  const writing = [
+    "cat > task/plan.md <<'PLAN'\n## Validation\nnpm test\nnode --test crew/headless.test.mjs\nPLAN",
+    'cat > /tmp/pr-body.md <<"BODY"\nRun the suite with:\nnpm test\nBODY',
+    "cat > brief.md <<'B'\nnpm run test:unit\nB\nls -la",
+  ]
+  for (const command of writing) {
+    assert.equal(recogniseSuiteInvocation(command, { gatePath, suiteCommand }), null, command)
+    assert.equal(suiteRunPolicy({ role: 'lead', command, gatePath, suiteCommand }).decision, 'unrecognised', command)
+  }
+  // The same words OUTSIDE a heredoc are still a run, so the stripping is not a
+  // blanket amnesty for anything that looks like a document.
+  assert.equal(recogniseSuiteInvocation("cat > f <<'B'\nhello\nB\nnpm test", { gatePath, suiteCommand }), 'suite')
+})
+
+// MUTATION: return the command unchanged from stripHeredocBodies and the checks
+// above refuse again, because a newline splits segments and each body line is
+// adjudicated as if a seat had typed it.
+test('#929 stripHeredocBodies removes what the shell feeds to stdin, and nothing else', () => {
+  // The delimiter line closes the heredoc, so it is consumed with the body.
+  assert.equal(stripHeredocBodies("cat <<'EOF'\nnpm test\nEOF\nls"), "cat <<'EOF'\nls")
+  assert.equal(stripHeredocBodies('cat <<EOF\nnpm test\nEOF'), 'cat <<EOF')
+  assert.equal(stripHeredocBodies('cat <<"EOF"\nnpm test\nEOF'), 'cat <<"EOF"')
+  // `<<-` ends at an indented delimiter; the plain form does not.
+  assert.equal(stripHeredocBodies('cat <<-EOF\nnpm test\n\tEOF\nls'), 'cat <<-EOF\nls')
+  assert.equal(stripHeredocBodies("cat <<'EOF'\nnpm test\n\tEOF\nEOF"), "cat <<'EOF'")
+  // Two heredocs on one line are consumed in order.
+  assert.equal(stripHeredocBodies("f <<'A' <<'B'\nnpm test\nA\nnpm test\nB\nls"), "f <<'A' <<'B'\nls")
+  // A here-STRING has no body and must survive untouched.
+  assert.equal(stripHeredocBodies('grep x <<< "npm test"'), 'grep x <<< "npm test"')
+  // An unterminated heredoc consumes the rest, as the shell does.
+  assert.equal(stripHeredocBodies("cat <<'EOF'\nnpm test"), "cat <<'EOF'")
+  assert.equal(stripHeredocBodies('ls -la'), 'ls -la')
+  assert.equal(stripHeredocBodies(''), '')
+})
+
+// MUTATION: drop the assignment/prefix skip and `CI=1 npm test` and
+// `time npm test` stop being recognised at all.
+test('#929 commandTokens finds the command word past assignments and wrappers', () => {
+  assert.deepEqual(commandTokens('npm test'), ['npm', 'test'])
+  assert.deepEqual(commandTokens('CI=1 FORCE_COLOR=0 npm test'), ['npm', 'test'])
+  assert.deepEqual(commandTokens('time nohup npm test'), ['npm', 'test'])
+  // commandTokens reads whatever string it is given; recogniseSegment is what
+  // hands it executableText, and that composition is what removes the mention.
+  assert.deepEqual(commandTokens('grep -n "npm test" f'), ['grep', '-n', 'npm test', 'f'])
+  assert.deepEqual(commandTokens(executableText('grep -n "npm test" f')), ['grep', '-n', 'f'])
+  assert.deepEqual(commandTokens(''), [])
 })

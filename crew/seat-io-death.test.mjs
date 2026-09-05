@@ -428,6 +428,44 @@ test('the seat_died row measures wait budget and leaves final turn usage unknown
   }
 })
 
+test('#887 publishes an unguarded provider park seam beside the death probe', () => {
+  const dir = scratchDir('seat-provider-delay-')
+  const taskDir = join(dir, 'task'); const returnsDir = join(dir, 'returns')
+  mkdirSync(taskDir); mkdirSync(returnsDir)
+  const observed = {}
+  const fakeTransport = ({ deps }) => ({
+    assign: () => {
+      writeNamedRecord(taskDir, { transport: HEADLESS_TRANSPORT, seatId: 'd1', reservationId: 'res-1', seatReservationId: 'res-1', rootPid: 999401 })
+      writeActiveMarker(taskDir, HEADLESS_TRANSPORT, { id: 'd1', reservationId: 'res-1' })
+      return { id: 'd1', returnPath: join(returnsDir, 'd1.builder.json') }
+    },
+    wait: () => {
+      observed.delayIsFunction = typeof deps.delay === 'function'
+      try { deps.delay(1); observed.delay = 'served' } catch (error) { observed.delay = error?.stage || error?.message }
+      try { deps.sleep(1); observed.sleep = 'served' } catch (error) { observed.sleep = error?.stage || error?.message }
+      const error = new Error('composition probe complete'); error.stage = 'headless-no-envelope'; error.role = ROLE
+      throw error
+    },
+  })
+  let clock = 0
+  const deps = {
+    now: () => clock,
+    sleep: (ms) => { clock += ms },
+    logLine: () => {},
+    snapshot: () => ({ ok: true, rows: new Map() }),
+    kill: () => {},
+    spawnSync: () => ({ status: 1, stdout: '' }),
+    headlessIo: fakeTransport,
+  }
+  const crew = { claude_bin: '/bin/true', members: { builder: { transport: HEADLESS_TRANSPORT, agent: 'claude', model: 'test-model' } } }
+  const io = seatIo(crew, { dir, taskDir, returnsDir }, dir, null, {}, {}, deps)
+  const assigned = io.assign({ role: ROLE, briefFile: join(taskDir, 'brief.md') })
+  try { io.wait(assigned.returnPath, 60) } catch { /* the composition probe always throws */ }
+  assert.equal(observed.sleep, 'seat-died')
+  assert.equal(observed.delayIsFunction, true)
+  assert.equal(observed.delay, 'served')
+})
+
 test('diagnostic failures remain load-bearing only for evidence, not for the requested delay', () => {
   withRun({ ps: 'alive', captureThrows: true }, (run) => {
     assert.equal(run.elapsedMs, run.budgetMs + RETRY_WINDOW_MS)

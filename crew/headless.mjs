@@ -588,9 +588,20 @@ const concreteTestFile = (token) => token.endsWith('.test.mjs')
 function nodeExecutable(token) {
   return token === 'node' || token.endsWith('/node')
 }
+// Read the EXECUTABLE text, not the raw text: `node -p "…j.suite_command…"` is a
+// read, and its quoted script must never supply the `--test` that makes this a
+// test invocation (b443's lead died exactly there). The TARGETS below still come
+// from the raw text, so a quoted glob cannot hide behind its quotes.
 function isNodeTestInvocation(text) {
-  const tokens = shellTokens(text)
-  return tokens.length > 0 && nodeExecutable(tokens[0]) && tokens.slice(1).includes('--test')
+  // The command WORD comes from the raw tokens, because quoting it is legal and
+  // `'node' --test` is a real invocation. The `--test` FLAG must come from the
+  // executable text, because `node -p "…--test…"` is a read whose quoted script
+  // may not supply it — b443's lead died exactly there.
+  const named = dropPrefixes(shellTokens(text))
+  const running = dropPrefixes(shellTokens(executableText(text)))
+  // No slice(1) here: when the command word itself was QUOTED it has been blanked
+  // out of `running`, so position 0 of that list is already an argument.
+  return named.length > 0 && nodeExecutable(named[0]) && running.includes('--test')
 }
 
 // EVERY token of the invocation, or NULL when this policy cannot vouch for what
@@ -683,27 +694,95 @@ export function executableText(text) {
   return out.join('').replace(/(^|\s)#[^\n]*/g, '$1')
 }
 
+// Prefixes that RUN the command after them, so the real command word is further
+// along. `FOO=bar cmd` and `time cmd` are the two shapes seats actually write.
+const COMMAND_PREFIXES = new Set(['time', 'nohup', 'exec', 'command', 'nice', 'ionice', 'stdbuf', 'env'])
+const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/
+
+// The segment's tokens from its COMMAND WORD onward. Position is the whole point:
+// a suite command is RUN only from here, and appears anywhere else as data.
+export function commandTokens(code) {
+  return dropPrefixes(shellTokens(code))
+}
+function dropPrefixes(tokens) {
+  let index = 0
+  while (index < tokens.length && (ASSIGNMENT.test(tokens[index]) || COMMAND_PREFIXES.has(tokens[index]))) index += 1
+  return tokens.slice(index)
+}
+
+function npmExecutable(token) { return token === 'npm' || token.endsWith('/npm') }
+function testScript(token) { return token === 'test' || String(token ?? '').startsWith('test:') }
+
+// `npm test`, `npm run test`, `npm run test:unit` — at the command word, never in
+// an argument. Options are skipped so `npm --silent test` still counts.
+function isNpmTestInvocation(tokens) {
+  if (tokens.length === 0 || !npmExecutable(tokens[0])) return false
+  const words = tokens.slice(1).filter((token) => !token.startsWith('-'))
+  if (testScript(words[0])) return true
+  return (words[0] === 'run' || words[0] === 'run-script') && testScript(words[1])
+}
+
+// The DECLARED command must appear as a prefix at the command word. Substring
+// matching is what let a seat's own prose spend — or refuse — a suite run.
+function runsDeclaredSuite(tokens, suiteCommand) {
+  const declared = shellTokens(suiteCommand)
+  return declared.length > 0 && declared.every((token, index) => tokens[index] === token)
+}
+
+// POSITION, not presence (#929). Three lanes died on a quoted grep pattern, one on
+// an apostrophe that closed its own quote, and one on a sentence of PROSE inside a
+// heredoc body — every time because a suite command was recognised wherever its
+// letters appeared. A command is what sits at the command word; everywhere else,
+// those letters are data. Heredoc bodies never reach here at all: recogniseInvocation
+// strips them before segmentation, because a heredoc body is data by construction.
 function recogniseSegment(segment, { suiteCommand, gatePath }) {
   const text = String(segment ?? '')
-  const tokens = text.split(/\s+/).filter(Boolean)
-  if (gatePath && tokens.length === 2 && tokens[0] === 'node' && tokens[1] === gatePath) return 'gate'
-  // #929: these two matches used to read the WHOLE segment text, so
-  // `grep -n "npm test" brief.md` and `ls # npm test` were classified as suite
-  // runs. A lead may never run the suite and every seat greps its own brief, so
-  // this ended THREE lanes in one batch (b443, b444, b445) at the same stage,
-  // each on a grep. They read only what the shell would execute now.
-  const code = executableText(text)
-  if (suiteCommand && code.includes(suiteCommand)) return 'suite'
-  if (/\bnpm\s+(?:run\s+)?test\b/.test(code)) return 'suite'
-  // The node recogniser keeps reading the RAW text on purpose: shellTokens (:527)
-  // strips quotes so that a quoted glob cannot hide behind them, and
-  // `node --test "**/*.test.mjs"` must stay a suite run.
+  const bare = text.split(/\s+/).filter(Boolean)
+  if (gatePath && bare.length === 2 && bare[0] === 'node' && bare[1] === gatePath) return 'gate'
+  const tokens = commandTokens(executableText(text))
+  if (suiteCommand && runsDeclaredSuite(tokens, suiteCommand)) return 'suite'
+  if (isNpmTestInvocation(tokens)) return 'suite'
   if (isNodeTestInvocation(text)) return testTargets(text) ? 'scoped-test' : 'suite'
   return null
 }
 
+// A heredoc BODY is data the shell hands to a command's stdin; it is never itself
+// a command. It also contains newlines, and a newline SPLITS segments — so before
+// this existed, every line of a heredoc became its own segment and was adjudicated
+// as if a seat had typed it. b449-providerretry's planner wrote a finished plan
+// envelope through `cat > f <<'ENVD4'` whose prose read "…its single npm test…",
+// and that sentence became segment 43 and ended the dispatch. Bodies are removed
+// here, before segmentation, so no scanner below ever sees one.
+//
+// `<<WORD`, `<<'WORD'`, `<<"WORD"` and the tab-stripping `<<-WORD` all end at a
+// line equal to WORD (indentation-insensitive only for the `-` form). `<<<` is a
+// here-STRING with no body and is deliberately not matched.
+const HEREDOC_OPEN = /<<(-?)\s*(?:(['"])([A-Za-z_][A-Za-z0-9_]*)\2|([A-Za-z_][A-Za-z0-9_]*))/g
+export function stripHeredocBodies(command) {
+  const lines = String(command ?? '').split('\n')
+  const kept = []
+  let index = 0
+  while (index < lines.length) {
+    const line = lines[index]
+    kept.push(line)
+    index += 1
+    // One line may open several heredocs; the shell consumes their bodies in order.
+    for (const open of [...line.matchAll(HEREDOC_OPEN)]) {
+      if (line[open.index + 2] === '<') continue
+      const stripsTabs = open[1] === '-'
+      const word = open[3] ?? open[4]
+      while (index < lines.length) {
+        const body = lines[index]
+        index += 1
+        if ((stripsTabs ? body.trimStart() : body) === word) break
+      }
+    }
+  }
+  return kept.join('\n')
+}
+
 function recogniseInvocation(command, { suiteCommand = null, gatePath = null } = {}) {
-  const segments = splitShellCommands(command)
+  const segments = splitShellCommands(stripHeredocBodies(command))
   const kinds = segments.map((segment) => recogniseSegment(segment, { suiteCommand, gatePath }))
   if (kinds.every((kind) => kind === null)) return { kind: null, blind: false }
   // An EXPLICIT suite segment refuses first: fail-closed beats honest. But the

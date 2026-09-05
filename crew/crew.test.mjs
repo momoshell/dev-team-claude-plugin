@@ -12,7 +12,7 @@ import {
   composeLayout, SEAT_DEFAULTS, FANOUT_TOOLS, DEFAULT_ROLES, ROLE_ORDER, transportFor, seatTransport, HEADLESS_TRANSPORTS, assertCapabilities, resolveAdapters, bootAllocation, resolveWorkerBin, docOpenArgs,
   resolveTier, resolveSeatModels, FALLBACK_REFUSALS, refuseFallback, loadRoster, normalizeRoster, refuseRoster, rosterSeating, serializeRosterV1, serializeRosterV2, ROSTER_REFUSALS, ROSTER_SCHEMA_VERSIONS, loadLadder, assertBandFloors, grantedDefModels, assertDefBandFloors, refuseBandFloor, seatModelKey, bandForMember, bandForRaw, seatBand, LADDER_PATH, BAND_FLOOR_REFUSALS, shadowCandidates, shadowExclusion, shadowPick, shadowPickBoot, SHADOW_EXCLUSIONS, SHADOW_OUTCOMES, SHADOW_ABSENT, seatReadySignal, assertSeats, phaseForStage, emitAdapter,
   waitForEnvelope, WAIT_POLL_MS, LIVENESS_PROBE_MS, LIVENESS_MISSES_TO_DIE,
-  parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, runExitCode, runOutcome, RUN_EXIT_CODES, RUN_EXIT_UNEXPECTED, RUN_START_EVENT, readHead, readBranch, teardownDecision, stagesFromJournal, assignmentsFromJournal, RUN_CONFIG_DECLARATIONS, resolveRunConfig, aliasDeprecationLines, persistedRunConfig, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, seatLiveness, awaitSeatsReady, teardownCore, teardownCmd, TEARDOWN_EXIT_SEATLESS, TEARDOWN_EXIT_UNPROVEN, TEARDOWN_ABSENT_CAUSES, teardownAbsentCause, TEARDOWN_DRAIN_MS, TEARDOWN_DRAIN_ERROR_MS, installExitMarker, writeTerminalLine, EXITED_STATUS, SIGNAL_EXIT_CODES, UNCAUGHT_EXIT_CODE, terminalLineSeen,
+  parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, runExitCode, runOutcome, RUN_EXIT_CODES, RUN_EXIT_UNEXPECTED, RUN_START_EVENT, BATCH_DIR_EVENT, BATCH_DIR_NOT_BATCHED, batchDirFromBrief, readHead, readBranch, teardownDecision, stagesFromJournal, assignmentsFromJournal, RUN_CONFIG_DECLARATIONS, resolveRunConfig, aliasDeprecationLines, persistedRunConfig, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, seatLiveness, awaitSeatsReady, teardownCore, teardownCmd, TEARDOWN_EXIT_SEATLESS, TEARDOWN_EXIT_UNPROVEN, TEARDOWN_ABSENT_CAUSES, teardownAbsentCause, TEARDOWN_DRAIN_MS, TEARDOWN_DRAIN_ERROR_MS, installExitMarker, writeTerminalLine, EXITED_STATUS, SIGNAL_EXIT_CODES, UNCAUGHT_EXIT_CODE, terminalLineSeen,
   UsageError, KNOWN_FLAGS, ROLE_FLAG_PREFIXES, REQUIRED_FLAGS, BOOT_ONLY_FLAGS, assertUsage,
   parseArgs, FLAG_VALUE_REFUSAL, FLAG_VALUE_CONTRACT, BOOLEAN_FLAGS,
   resolveTimeoutS, TIMEOUT_S_REFUSAL, TIMEOUT_S_DEFAULT,
@@ -1569,6 +1569,52 @@ test('run plumbs flagged budgets, records defaults when absent, and preserves dr
   } finally {
     if (previousLedger === undefined) delete process.env.DEVTEAM_LEDGER_DB
     else process.env.DEVTEAM_LEDGER_DB = previousLedger
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+})
+
+test('batchDirFromBrief derives only compiled briefs under an out directory', () => {
+  const batch = '/tmp/batch-2026-09-05-r32'
+  const compiled = `${batch}/out/lane.brief.md`
+  assert.deepEqual(batchDirFromBrief(compiled), { batch_dir: batch, brief: compiled, reason: null })
+  for (const value of ['/tmp/hand-written.brief.md', '', 42]) {
+    const result = batchDirFromBrief(value)
+    assert.equal(result.batch_dir, null)
+    assert.equal(result.reason, BATCH_DIR_NOT_BATCHED)
+    assert.equal(result.brief, typeof value === 'string' && value.trim() ? value : null)
+  }
+})
+
+test('run journals one batch-dir row per invocation with a closed non-batch reason', async () => {
+  const { root: checkoutRoot, checkout } = testCheckout('crew-batch-dir-run-checkout-')
+  const home = scratchDir('crew-batch-dir-run-home-')
+  const batchBrief = join(home, 'batch-2026-09-05-r32', 'out', 'batch-dir-run.brief.md')
+  const looseBrief = join(home, 'hand-written.brief.md')
+  mkdirSync(dirname(batchBrief), { recursive: true })
+  writeFileSync(batchBrief, '# compiled brief\n')
+  writeFileSync(looseBrief, '# loose brief\n')
+  const task = 'batch-dir-run'
+  const done = { status: 'done', summary: '', artifacts: [], details: { commit: null, stages: [] } }
+  try {
+    execSync('git init -q', { cwd: checkout })
+    await withHome(home, async () => {
+      await bootCmd(
+        { task, checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath },
+        { cmux: callCounter(), tree: callCounter(), renameTab: callCounter() },
+      )
+      runCmd({ task, checkout, 'brief-file': batchBrief, keep: true }, { drive: () => done })
+      runCmd({ task, checkout, 'brief-file': looseBrief, keep: true }, { drive: () => done })
+    })
+    const journal = join(testCrewDir(home, checkout, task), 'journal.jsonl')
+    const rows = readFileSync(journal, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+      .filter((row) => row.event === BATCH_DIR_EVENT)
+    assert.equal(rows.length, 2)
+    assert.deepEqual(rows.map(({ batch_dir, reason }) => ({ batch_dir, reason })), [
+      { batch_dir: join(home, 'batch-2026-09-05-r32'), reason: null },
+      { batch_dir: null, reason: BATCH_DIR_NOT_BATCHED },
+    ])
+  } finally {
     rmSync(home, { recursive: true, force: true })
     rmSync(checkoutRoot, { recursive: true, force: true })
   }

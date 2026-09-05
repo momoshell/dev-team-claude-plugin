@@ -25,7 +25,8 @@ import {
   TEARDOWN_PROVEN,
   teardownVerdict,
 } from './dispatch-batch.mjs'
-import { parseSuiteCounts } from '../../crew/drive.mjs'
+import { journalRowsSinceRunStart, parseSuiteCounts } from '../../crew/drive.mjs'
+import { BATCH_DIR_EVENT, batchDirFromBrief } from '../../crew/crew.mjs'
 
 export const CLOSEOUT_VERBS = Object.freeze(['merge-check', 'reap', 'recover'])
 export const EXIT_OK = 0
@@ -280,7 +281,7 @@ export function quietProbe({ dirs, deps } = {}) {
   const unknown = interrupted || reads.some((tuple) => tuple.some((value) => value === null))
   const first = reads[0] || []
   const quiet = !unknown && reads.every((tuple) => tuple.length === first.length && tuple.every((value, index) => value === first[index]))
-  return { quiet, reads, unknown }
+  return { dirs: paths, quiet, reads, unknown }
 }
 
 function absentEnvelope() {
@@ -329,12 +330,15 @@ export function envelopeReport({ returnsDir, escalationWhy, deps } = {}) {
   }
 }
 
-const BATCH_UNKNOWN = '<batch-dir UNKNOWN: no boot brief row in journal.jsonl>'
-const FENCES_UNKNOWN = '<fences UNKNOWN: no fences.json under the batch dir>'
+export const BATCH_DIR_SOURCES = Object.freeze(['boot-journal', 'run-log', 'brief-sibling'])
+export const BATCH_DIR_ABSENT = 'no source carried a batch dir: no batch-dir boot row, no --brief-file in run.log, and no compiled brief under an out/ directory'
+export const FENCES_ABSENT_BATCH_UNKNOWN = 'the batch dir is unknown, so no fences.json can be located'
+export const FENCES_ABSENT_NO_FILE = 'no fences.json under the batch dir'
 
 export function adoptCommandLine({ lane, archive, batchDir, fencesPath } = {}) {
-  const batch = typeof batchDir === 'string' && batchDir.trim() ? batchDir : BATCH_UNKNOWN
-  const fences = typeof fencesPath === 'string' && fencesPath.trim() ? fencesPath : FENCES_UNKNOWN
+  const batch = typeof batchDir === 'string' && batchDir.trim() ? batchDir : null
+  const fences = typeof fencesPath === 'string' && fencesPath.trim() ? fencesPath : null
+  if (!batch || !fences) return null
   return `node scripts/factory/dispatch-batch.mjs --batch ${batch} --fences ${fences} --adopt ${lane}=${archive}`
 }
 
@@ -571,6 +575,14 @@ function fallbackLaneDir({ lane, checkout, crew }) {
   return typeof crew?.checkout === 'string' && crew.checkout.trim() ? crew.checkout : join(dirname(checkout), `dt-${lane}`)
 }
 
+export function quietRefusalDetail(probe) {
+  const dirs = Array.isArray(probe?.dirs) ? probe.dirs : []
+  const reads = Array.isArray(probe?.reads) ? probe.reads : []
+  const mark = (value) => (value === null || value === undefined ? 'unknown' : String(value))
+  const parts = dirs.map((dir, index) => `${dir}: newest mtime ${mark(reads[0]?.[index])} then ${mark(reads[reads.length - 1]?.[index])}`)
+  return `${parts.join(' · ')} · ${JSON.stringify(probe)}`
+}
+
 function pgrepFallback({ lane, verdict, deps }) {
   const d = normalDeps(deps)
   const result = runCommand({ file: 'pgrep', args: ['-f', lane], cwd: process.cwd() }, d)
@@ -582,15 +594,15 @@ function pgrepFallback({ lane, verdict, deps }) {
   refuse(`teardown for ${lane} remains unproven (${verdict.why}); pgrep result was not a measured clear`, CLOSEOUT_REFUSALS.TEARDOWN_UNPROVEN, 'teardown')
 }
 
-function readCrew({ crewDir, lane, deps }) {
+function readCrew({ crewDir, lane, deps, step = 'verify' }) {
   const d = normalDeps(deps)
   const path = join(crewDir, 'crew.json')
   let crew
   try { crew = JSON.parse(textOf(d.readFileSync(path, 'utf8'))) } catch (error) {
-    refuse(`cannot read crew.json for ${lane}: ${error?.message || String(error)}`, CLOSEOUT_REFUSALS.CREW_UNREADABLE, 'verify')
+    refuse(`cannot read crew.json for ${lane}: ${error?.message || String(error)}`, CLOSEOUT_REFUSALS.CREW_UNREADABLE, step)
   }
   if (!crew || typeof crew !== 'object' || Array.isArray(crew) || crew.lane_name !== lane) {
-    refuse(`crew lane_name is not ${lane}`, CLOSEOUT_REFUSALS.CREW_UNREADABLE, 'verify')
+    refuse(`crew lane_name is not ${lane}`, CLOSEOUT_REFUSALS.CREW_UNREADABLE, step)
   }
   return crew
 }
@@ -645,38 +657,66 @@ function gitOutput({ args, cwd, deps }) {
   }
 }
 
+function fromBootRow(rows) {
+  const row = (Array.isArray(rows) ? rows : []).find((candidate) => candidate?.event === BATCH_DIR_EVENT && typeof candidate.batch_dir === 'string' && candidate.batch_dir.trim())
+  return row ? { batch_dir: row.batch_dir, batch_dir_source: 'boot-journal' } : null
+}
+
+function fromRunLog({ crewDir, deps }) {
+  const d = normalDeps(deps)
+  const runLogPath = join(crewDir, 'run.log')
+  let text
+  try { text = textOf(d.readFileSync(runLogPath, 'utf8')) } catch { return null }
+  const line = text.split('\n').find((entry) => entry.includes('--brief-file'))
+  if (!line) return null
+  const tokens = line.trim().split(/\s+/)
+  const briefAt = tokens.indexOf('--brief-file')
+  const derived = batchDirFromBrief(tokens[briefAt + 1])
+  return derived.batch_dir ? { batch_dir: derived.batch_dir, batch_dir_source: 'run-log' } : null
+}
+
+function fromBriefRow(rows) {
+  for (const row of Array.isArray(rows) ? rows : []) {
+    if (typeof row?.brief !== 'string' || !row.brief.trim()) continue
+    const derived = batchDirFromBrief(row.brief)
+    if (derived.batch_dir) return { batch_dir: derived.batch_dir, batch_dir_source: 'brief-sibling' }
+  }
+  return null
+}
+
+function hasExplicitNullBatchDir(rows) {
+  return (Array.isArray(rows) ? rows : []).some((row) => row?.event === BATCH_DIR_EVENT && row.batch_dir === null)
+}
+
 function batchInfo({ crewDir, deps }) {
   const d = normalDeps(deps)
   let rows
   try {
-    rows = textOf(d.readFileSync(join(crewDir, 'journal.jsonl'), 'utf8')).split('\n').map((line) => {
-      try { return line.trim() ? JSON.parse(line) : null } catch { return null }
-    }).filter(Boolean)
+    const journal = textOf(d.readFileSync(join(crewDir, 'journal.jsonl'), 'utf8'))
+    rows = journalRowsSinceRunStart(journal)
   } catch {
     rows = []
   }
-  const boot = rows.find((row) => row?.event === 'boot' && typeof row.brief === 'string' && row.brief.trim())
-  const batchDir = boot ? dirname(dirname(boot.brief)) : null
-  let fencesPath = null
-  if (batchDir) {
-    try {
-      if (d.existsSync(join(batchDir, 'fences.json'))) fencesPath = join(batchDir, 'fences.json')
-    } catch { fencesPath = null }
+  const activeNullBatchDir = hasExplicitNullBatchDir(rows)
+  const derived = fromBootRow(rows) || fromRunLog({ crewDir, deps: d }) || fromBriefRow(rows) || null
+  if (activeNullBatchDir || !derived) {
+    return { batch_dir: null, batch_dir_source: null, batch_dir_reason: BATCH_DIR_ABSENT, fences: null, fences_reason: FENCES_ABSENT_BATCH_UNKNOWN }
   }
-  return {
-    batch_dir: batchDir || BATCH_UNKNOWN,
-    fences: fencesPath || FENCES_UNKNOWN,
-  }
+  const candidate = join(derived.batch_dir, 'fences.json')
+  let fences = null
+  try { fences = d.existsSync(candidate) ? candidate : null } catch { fences = null }
+  return { ...derived, batch_dir_reason: null, fences, fences_reason: fences ? null : FENCES_ABSENT_NO_FILE }
 }
 
 export function adoptReadyReport({ lane, report, deps }) {
   const d = normalDeps(deps)
-  const archive = typeof report?.archive === 'string' && report.archive.trim()
-    ? report.archive
-    : `${report.crew_dir}${RECOVERY_COPY_SUFFIX}`
+  const archive = typeof report?.archive === 'string' && report.archive.trim() ? report.archive : `${report.crew_dir}${RECOVERY_COPY_SUFFIX}`
   const info = batchInfo({ crewDir: report.crew_dir, deps: d })
-  const command = adoptCommandLine({ lane, archive, batchDir: info.batch_dir === BATCH_UNKNOWN ? null : info.batch_dir, fencesPath: info.fences === FENCES_UNKNOWN ? null : info.fences })
-  return { archive, batch_dir: info.batch_dir, fences: info.fences, command }
+  const command = adoptCommandLine({ lane, archive, batchDir: info.batch_dir, fencesPath: info.fences })
+  const missing = []
+  if (!info.batch_dir) missing.push('--batch')
+  if (!info.fences) missing.push('--fences')
+  return { archive, ...info, adopt_argument: `${lane}=${archive}`, command, missing }
 }
 
 function adoptReady({ lane, report, deps }) {
@@ -761,7 +801,7 @@ function closeoutHalf({ lane, checkout, crewDir, deps, report }) {
   return runSteps({ verb: 'recover', lane, steps: CLOSEOUT_HALF_STEPS.map((name) => ({ name, run: runners[name] })), deps: d })
 }
 
-export function recover({ lane, checkout, deps } = {}) {
+export function recover({ lane, checkout, checkoutExplicit, deps } = {}) {
   const d = normalDeps(deps)
   const name = typeof lane === 'string' ? lane : String(lane ?? '')
   const root = typeof checkout === 'string' && checkout.trim() ? checkout : process.cwd()
@@ -769,9 +809,13 @@ export function recover({ lane, checkout, deps } = {}) {
   const report = { lane: name, crew_dir: crewDir, adopt: null }
   const runners = {
     quiet: () => {
-      const probe = quietProbe({ dirs: [root, crewDir], deps: d })
+      const crew = readCrew({ crewDir, lane: name, deps: d, step: 'quiet' })
+      const probeRoot = checkoutExplicit ? root : fallbackLaneDir({ lane: name, checkout: root, crew })
+      report.probe_root = probeRoot
+      report.probe_root_source = checkoutExplicit ? 'checkout-flag' : (typeof crew?.checkout === 'string' && crew.checkout.trim() ? 'crew-json' : 'sibling-fallback')
+      const probe = quietProbe({ dirs: [probeRoot, crewDir], deps: d })
       report.quiet = probe
-      if (!probe.quiet) refuse(`tree is not quiet for ${name}: ${JSON.stringify(probe)}`, CLOSEOUT_REFUSALS.TREE_NOT_QUIET, 'quiet')
+      if (!probe.quiet) refuse(`tree is not quiet for ${name}: ${quietRefusalDetail(probe)}`, CLOSEOUT_REFUSALS.TREE_NOT_QUIET, 'quiet')
       return probe
     },
     preserve: () => {
@@ -812,6 +856,7 @@ export function parseArgs(argv) {
   if (!Array.isArray(argv)) throw new CloseoutUsageError(USAGE)
   let verb = null
   let checkout = process.cwd()
+  let checkout_explicit = false
   let help = false
   const lanes = []
   for (let index = 0; index < argv.length; index += 1) {
@@ -821,6 +866,7 @@ export function parseArgs(argv) {
       const value = argv[index + 1]
       if (typeof value !== 'string' || value.trim() === '' || value.startsWith('--')) throw new CloseoutUsageError(`${USAGE}: --checkout requires a value`)
       checkout = value
+      checkout_explicit = true
       index += 1
       continue
     }
@@ -828,11 +874,11 @@ export function parseArgs(argv) {
     if (!verb) verb = argument
     else lanes.push(argument)
   }
-  if (help) return { verb, lanes, checkout, help }
+  if (help) return { verb, lanes, checkout, checkout_explicit, help }
   if (!CLOSEOUT_VERBS.includes(verb)) throw new CloseoutUsageError(`${USAGE}: unknown verb ${String(verb)}`)
   if (lanes.length === 0) throw new CloseoutUsageError(`${USAGE}: at least one lane is required`)
   if (verb === 'recover' && lanes.length !== 1) throw new CloseoutUsageError(`${USAGE}: recover accepts exactly one lane`)
-  return { verb, lanes, checkout, help }
+  return { verb, lanes, checkout, checkout_explicit, help }
 }
 
 export function main(argv, deps = {}) {
@@ -845,7 +891,7 @@ export function main(argv, deps = {}) {
       ? mergeCheck({ ...options, lanes: parsed.lanes })
       : parsed.verb === 'reap'
         ? reap({ ...options, lanes: parsed.lanes })
-        : recover({ ...options, lane: parsed.lanes[0] })
+        : recover({ ...options, lane: parsed.lanes[0], checkoutExplicit: parsed.checkout_explicit })
     if (result.refusal) return EXIT_REFUSED
     return EXIT_OK
   } catch (error) {

@@ -3077,7 +3077,7 @@ function runTask(ctx, io, crash) {
     }
   }
 
-  function assignAndWait(role, briefFile, note) {
+  function assignAndWait(role, briefFile, note, { reviewSemantics = true } = {}) {
     let brief = briefFile
     const pending = pendingEnforcement.get(role)
     if (pending) {
@@ -3106,7 +3106,15 @@ function runTask(ctx, io, crash) {
       S.enforcements.push({ role, id, kind: enforcement.kind, lines: enforcement.lines })
       io.log(recordRow({ at: io.now(), seat_enforcement: { role, kind: enforcement.kind, dispatch: id, applied: false } }))
     }
-    const review = reviewOutcome(role, env)
+    // #910/#900 — a HARDENING APPEAL is a reviewer dispatch that is not a review round.
+    // Guarding the one expression guards all three consequences below, because each of
+    // them tests `review`: the `review_outcome` journal row (:3111), the canonical
+    // `S.acceptFindings` replacement (:3119-3120) and the `review_findings_note` row
+    // (:3121-3123). The reviewer charter mandates a verdict, so an appeal envelope
+    // carrying one is compliant — this makes correctness independent of that compliance.
+    // MUTATION C5: restore ordinary review semantics for every dispatch and a
+    // verdict-bearing appeal envelope replaces the canonical review findings again.
+    const review = reviewSemantics ? reviewOutcome(role, env) : null                    // ANCHOR RS1
     emit({ kind: 'envelope', id, role, status: env?.status || 'no-envelope', ...(review ? { review } : {}) })
     if (review) io.log(recordRow({ at: io.now(), review_outcome: { dispatch: id, ...review } }))
     // The canonical set follows the rule lastReview already follows: a reviewer
@@ -4367,6 +4375,14 @@ function runTask(ctx, io, crash) {
   let extraReviews = 0
   let hardenOwed = { owed: [], exempt: [] }
   let hardenWitness = null              // Map<repo-relative path, {state, bytes}>, or null
+  // #910/#900 — ONE reviewer appeal per REVIEWED DEBT GENERATION (R4-1). The turn exists so
+  // a request only the reviewer can grant is not held behind a gate scheduled before the
+  // reviewer; it is bounded because an unbounded one lets a reviewer that grants nothing
+  // spend a seat every round. It is NOT bounded per lane: Gate C replaces the debt on every
+  // later review and a re-review may raise a NEW must-fix, and a lane-global counter would
+  // trap that second generation in exactly the deadlock this removes. The reset happens
+  // where — and only where — Gate C arms a newly reviewed debt.
+  let hardenAppeals = 0
   const witnessTree = (files) => {
     const witness = new Map()
     for (const file of Array.isArray(files) ? files : []) {
@@ -4779,6 +4795,11 @@ function runTask(ctx, io, crash) {
     stageComplete()
     return { bounce: b }
   }
+  // #839 + #910 — ONE predicate for "the debt is closed", so the appeal below and the
+  // accept branch can never disagree about what closing it means.
+  // MUTATION B5a: narrow this to an outcome nothing produces and no repair, however well
+  // proven, is ever accepted.
+  const hardenCleared = (refusals, rows) => refusals.length === 0 && rows.every((row) => row.outcome === 'killed' || row.outcome === 'ungateable')   // ANCHOR B5a
   // MUTATION B8: route the proof through runGate and each of its invocations becomes
   // a gate_results row, moving the gate-review-gap numerator (#839 (i).
   const hardenRun = (cmd) => io.run(cmd)                                             // ANCHOR B8
@@ -4836,19 +4857,43 @@ function runTask(ctx, io, crash) {
         if (control === 'skipped') return row('control-skipped', `the repaired control skipped ${entry.name}`)
         const repairedFile = io.readFile(fileAbs)
         if (repairedFile === null) return row('unapplied', `${entry.file} does not exist in the built tree`)
-        let pre = null
-        active = { abs: fileAbs, original: repairedFile, writeAttempted: false }
-        let preResult
-        try {
-          active.writeAttempted = true
-          io.writeFile(fileAbs, S.bytes)
-          preResult = hardenRun(cmd)
-        } finally { io.writeFile(fileAbs, repairedFile) }
-        active = null
-        pre = nameVerdict(preResult?.output, entry.name)
-        // MUTATION B5d: drop the witnessed pre-repair conjunct and a guard that was
-        // already green on the review-time tree is certified as having caught the defect.
-        if (pre !== 'failed') return row('pre-repair-green', `the declared check ${entry.name} does not fail on the witnessed pre-repair ${entry.file}: ${pre}`)   // ANCHOR B5d
+        // #910/#900 — the witnessed pre-repair conjunct belongs to exactly ONE repair
+        // class, and demanding it of the other is what makes an honest coverage repair
+        // unprovable. The arms are exclusive and the class chooses between them.
+        // MUTATION A1: mis-spell the coverage arm and a coverage repair is adjudicated by
+        // the behavioural proof again — the deadlock three finished lanes paid for.
+        if (hardeningClassOf(entry) === 'coverage') {
+          // The claim is NOT taken on trust. A coverage repair asserts the implementation
+          // was ALREADY correct at review time, so the witnessed bytes and the built bytes
+          // must be the same bytes. This is the conjunct that closes the dishonest route:
+          // a builder that REGRESSED the implementation to manufacture a red pre-repair is
+          // refused here by name, and a builder that did not has nothing to gain from
+          // regressing it, because this arm certifies without a red pre-repair at all.
+          // Everything that makes the guard REAL still holds: the name was absent on the
+          // witnessed tree, it passes on the repaired tree, and the declared mutation must
+          // still kill it below.
+          // MUTATION D1: drop the byte-identity conjunct and the coverage arm certifies a
+          // declaration whose implementation changed — the regression route this closes.
+          if (repairedFile !== S.bytes) return row('source-regressed', `source-regressed: the built ${entry.file} is not byte-identical to the review-time witness, so this is not a coverage repair: a coverage repair certifies that the implementation was already correct at review time, and regressing it to buy a red pre-repair is refused`)   // ANCHOR HC2
+        } else {
+          let pre = null
+          active = { abs: fileAbs, original: repairedFile, writeAttempted: false }
+          let preResult
+          try {
+            active.writeAttempted = true
+            io.writeFile(fileAbs, S.bytes)
+            preResult = hardenRun(cmd)
+          } finally { io.writeFile(fileAbs, repairedFile) }
+          active = null
+          pre = nameVerdict(preResult?.output, entry.name)
+          // MUTATION B2: INVERT the witnessed-red predicate — `pre === 'failed'` — and the
+          // conjunct refuses exactly the behavioural proof it exists to accept: a guard that
+          // DID red on the review-time bytes is reported `pre-repair-green`. Inversion, not
+          // `false`: both `pre !== 'failed'` and `false` are false for a valid behavioural
+          // repair, so replacing the condition with `false` changes nothing this check can
+          // observe (R3-1).
+          if (pre !== 'failed') return row('pre-repair-green', `the declared check ${entry.name} does not fail on the witnessed pre-repair ${entry.file}: ${pre}`)   // ANCHOR B5d
+        }
         const bound = applyMutationAnchor(repairedFile, entry.find, entry.replace)
         if (bound.text === null) return row(BINDING_OUTCOME[bound.mode], bindingWhy(bound.mode, entry.file))
         let mut = null
@@ -5096,19 +5141,52 @@ function runTask(ctx, io, crash) {
         stageComplete()
         return escalate('harden', `the hardening proof could not restore the built tree: ${fatal} — the run stops rather than continue with the driver's own mutation`)
       }
-      // MUTATION B5a: narrow this predicate to an outcome nothing produces and no
-      // repair, however well proven, is ever accepted.
-      if (refusals.length === 0 && rows.every((row) => row.outcome === 'killed' || row.outcome === 'ungateable')) {   // ANCHOR B5a
+      // #910/#900 — Gate B3 runs BEFORE Gate C, so while a hardening debt stands the driver
+      // never schedules the one seat that may grant an exemption: only the reviewer may mark
+      // a finding ungateable, `validateHardened` refuses a builder claim as
+      // `builder-exemption`, and a bounce is provably futile — the builder returns done, B3
+      // re-runs, the same refusal comes back, and the final round escalates anyway. Three
+      // lanes finished green and were landed by hand on this: b415-closeout (#758),
+      // b424-turnceiling (#909), b433-rpcpolicy (#923). The APPEAL gives the reviewer that
+      // turn in place. It records its marks through `logHardened`, the SAME site the
+      // reviewer exemption at :5227 uses, because `crew/drive.test.mjs:1743` freezes this
+      // file's journal call sites and a new one would break a test outside this fence.
+      let excused = new Set()
+      // MUTATION C1: make the appeal unreachable and the request sits behind a gate
+      // scheduled before the only seat that can grant it — #910's ordering deadlock.
+      if (hardenAppeals < HARDEN_APPEAL_MAX && !hardenCleared(refusals, rows) && hardeningAppealable(refusals)) {   // ANCHOR HA3
+        // MUTATION C2: stop spending the appeal and one lane burns a reviewer turn on every
+        // build round — an unbounded seat cost, not an escape hatch.
+        hardenAppeals += 1                                                               // ANCHOR HA4
+        stage(`lane:harden-appeal:r${round}`)
+        const appealBrief = art(`harden-appeal-r${round}.md`)
+        io.writeFile(appealBrief, hardeningAppealLines(round, hardenOwed.owed, refusals, rows).join('\n'))
+        const appeal = assignAndWait('reviewer', appealBrief, 'harden-appeal', { reviewSemantics: false })
+        // R2-2 — a mark is authorised ONLY by an envelope that says the reviewer decided.
+        // `assignAndWait` accepts any string status (crew/drive.mjs:938-943), so without this
+        // a reviewer that says it was insufficient to adjudicate still permanently waives the
+        // debt with whatever tentative fields it left behind. Gate triage takes the same
+        // guard at crew/drive.mjs:4967.
+        // MUTATION C6: drop the status guard and a NON-done appeal envelope waives the debt.
+        const marks = appeal?.status === 'done' ? hardeningAppealMarks(appeal.details, hardenOwed.owed) : []   // ANCHOR HA5
+        for (const { id, why } of marks) logHardened(round, { finding: id, test: null, name: null, outcome: 'ungateable', why })
+        excused = new Set(marks.map(({ id }) => id))
+        hardenOwed = { owed: hardenOwed.owed.filter(({ id }) => !excused.has(id)), exempt: [...hardenOwed.exempt, ...marks] }
+        stageComplete()
+      }
+      const liveRefusals = refusals.filter((refusal) => !excused.has(refusal.finding))
+      const liveRows = rows.filter((row) => !excused.has(row.finding))
+      if (hardenCleared(liveRefusals, liveRows)) {
         hardenOwed = { owed: [], exempt: [] }
         hardenWitness = null
         stageComplete()
       } else if (!plans || finalRound()) {
         stageComplete()
-        return escalate('harden', hardeningBounceLines(round, refusals, rows).join(' '))
+        return escalate('harden', hardeningBounceLines(round, liveRefusals, liveRows).join(' '))
       } else {
         const b = art(`build-bounce-r${round}.md`)
         failureUpgrade('harden', 'builder')
-        io.writeFile(b, hardeningBounceLines(round, refusals, rows).join('\n'))
+        io.writeFile(b, hardeningBounceLines(round, liveRefusals, liveRows).join('\n'))
         buildBrief = b; buildNote = 'harden-fix'
         stageComplete()
         continue
@@ -5221,6 +5299,7 @@ function runTask(ctx, io, crash) {
       if (v) {
         const debt = hardeningDebt(review.details)
         if (debt.owed.length > 0 || debt.exempt.length > 0) {
+          hardenAppeals = 0
           hardenOwed = debt
           hardenWitness = witnessTree(scopeFiles)
           for (const { id, why } of debt.exempt) {
@@ -6498,16 +6577,55 @@ export function scopeBounceBrief(round, refusal, scopeFiles, planPath) {
 // guard the review asked for. It is NOT a fourth disposition — FINDING_DISPOSITIONS is
 // pinned against prose by skills/pr-review/findings-shape.test.mjs:79.
 export const HARDENING_MARKS = Object.freeze(['ungateable'])
+// #910/#900 — a must-fix repair has TWO classes and only one of them can be proven
+// by restoring the review-time implementation. A BEHAVIOURAL repair changed code that
+// was wrong, so the new guard reds against the witnessed bytes and the proof is real.
+// A COVERAGE repair changed no behaviour: the implementation was already correct at
+// review time, the finding was that nothing durable guarded it, and restoring the
+// witness then restores bytes that are already there. The coverage arm therefore does
+// not demand a fabricated red pre-repair.
+//
+// Only an entry that LACKS its own `class` key defaults. `details.hardened` is untrusted
+// envelope input, so an explicit blank, a null, a number, a boolean, an array or an
+// object must reach `class-unknown` and be refused rather than silently adjudicated as
+// behavioural — a closed enum that silently absorbs every non-member is not closed.
+export const HARDENING_CLASSES = Object.freeze(['behavioural', 'coverage'])
+export const HARDENING_DEFAULT_CLASS = 'behavioural'
+export function hardeningClassOf(entry) {
+  // MUTATION B1: change the absent-key default to coverage and every behavioural repair
+  // silently skips the witnessed pre-repair conjunct that proves it caught the defect.
+  if (entry === null || typeof entry !== 'object' || !Object.hasOwn(entry, 'class')) return HARDENING_DEFAULT_CLASS   // ANCHOR HC1
+  return typeof entry.class === 'string' ? entry.class.trim() : null
+}
+
 export function hardeningOf(entry) {
   const declared = typeof entry?.hardening === 'string' ? entry.hardening.trim() : null
   const why = typeof entry?.hardening_why === 'string' ? entry.hardening_why.trim() : ''
   return HARDENING_MARKS.includes(declared) && why !== '' ? declared : null
 }
 
+// #900 R2-1 — the ONE honest thing a builder can do about a guard it cannot write: ASK.
+// The request is explicit, self-contained and TAUGHT (hardeningBriefLines, §6), and it is
+// NOT a grant: the entry is still refused `builder-exemption` and nothing is excused until
+// the reviewer marks the finding in the appeal. An entry that MIXES the request with a
+// declaration is not a request — a builder is either declaring a guard or asking to be
+// excused from one, and a `hardening` key smuggled beside a full declaration is exactly the
+// claim `builder-exemption` exists to refuse.
+export const HARDENING_APPEAL_SHAPE = '{ "finding": "<id>", "hardening": "ungateable", "hardening_why": "<why the defect class cannot become a mechanical guard>" }'
+export const HARDENING_APPEAL_KEYS = Object.freeze(['finding', 'hardening', 'hardening_why'])
+export function hardeningAppealRequest(entry) {
+  if (!entry || typeof entry !== 'object') return null
+  const keys = Object.keys(entry)
+  // MUTATION E2: accept any exemption-shaped entry as a request and a claim that was never
+  // the taught ask spends the lane's one reviewer appeal.
+  if (keys.length !== HARDENING_APPEAL_KEYS.length || !HARDENING_APPEAL_KEYS.every((key) => keys.includes(key))) return null   // ANCHOR HA0
+  return hardeningOf(entry) === 'ungateable' ? entry.hardening_why.trim() : null
+}
+
 export const HARDENING_REFUSALS = Object.freeze([
   'no-declaration', 'not-an-array', 'unknown-finding', 'duplicate-finding',
   'test-not-in-scope', 'file-not-in-scope', 'name-missing', 'name-file-wrapper', 'find-missing',
-  'replace-identical', 'builder-exemption',
+  'replace-identical', 'builder-exemption', 'class-unknown',
 ])
 // Proof OUTCOMES. `name-not-new` is the check's own word for an already-existing test
 // name; it lives here rather than in HARDENING_REFUSALS because the witness it is
@@ -6515,7 +6633,7 @@ export const HARDENING_REFUSALS = Object.freeze([
 export const HARDENING_OUTCOMES = Object.freeze([
   'killed', 'survived', 'ungateable',
   'name-not-new', 'name-absent', 'name-ambiguous', 'control-red', 'control-skipped',
-  'pre-repair-green',
+  'pre-repair-green', 'source-regressed',
   'witness-missing', 'witness-absent', 'witness-unreadable',
   'unproven', 'unapplied', 'anchor-absent', 'anchor-ambiguous', 'anchor-unsafe',
 ])
@@ -6575,6 +6693,55 @@ export function hardeningDebt(details) {
   return { owed, exempt }
 }
 
+export const HARDEN_APPEAL_MAX = 1
+// #910/#900 — the ONE state a bounce provably cannot fix. `builder-exemption` is the
+// builder asking, in the contract's own vocabulary, for a mark only the reviewer may
+// set — and Gate B3 runs before Gate C, so the seat that could grant it is never
+// scheduled while the debt stands. Every other refusal and every other row outcome is
+// builder-correctable: a missing declaration, a surviving mutation, a file-wrapper
+// name, an out-of-scope path — and `pre-repair-green` too, now that a repair whose
+// implementation was already correct can declare `class: "coverage"` and be certified.
+// Those spend a bounce, never a seat.
+export const HARDENING_APPEAL_REFUSALS = Object.freeze(['builder-exemption'])
+export function hardeningAppealable(refusals) {
+  // MUTATION C4: widen what may be appealed and an ordinary builder defect a bounce would
+  // fix — a missing declaration, a malformed claim — spends the lane's one reviewer appeal.
+  return (Array.isArray(refusals) ? refusals : []).some((refusal) => HARDENING_APPEAL_REFUSALS.includes(refusal.reason) && typeof refusal.appeal === 'string' && refusal.appeal !== '')   // ANCHOR HA1
+}
+// The appeal READER. Only a reviewer-origin envelope reaches it — the driver assigns the
+// reviewer seat — and only an id the review ALREADY owed can be excused: an appeal may not
+// mint a finding, re-open a closed one, or excuse something no review raised. It reuses
+// `hardeningDebt` so the mark's shape ('ungateable' plus a NON-EMPTY hardening_why, via
+// `hardeningOf`) is decided by one predicate everywhere.
+export function hardeningAppealMarks(details, owed) {
+  const wanted = new Set((Array.isArray(owed) ? owed : []).map(({ id }) => id))
+  // MUTATION C3: drop the owed intersection and an appeal reviewer can excuse a finding
+  // the review never raised — a mark minted rather than granted.
+  return hardeningDebt(details).exempt.filter(({ id }) => wanted.has(id))               // ANCHOR HA2
+}
+export function hardeningAppealLines(round, owed, refusals, rows) {
+  const byId = new Map((Array.isArray(owed) ? owed : []).map((finding) => [finding.id, finding]))
+  const lines = [`# Hardening appeal (round ${round})`, '',
+    'The builder asked to be excused from a permanent guard below. Only YOU may grant that.',
+    'This is NOT a review round: any verdict you include is not read as a review outcome and cannot replace your standing findings.']
+  for (const refusal of Array.isArray(refusals) ? refusals : []) {
+    const finding = byId.get(refusal.finding)
+    // R2-1 — the reviewer decides on the FINDING, not on an id: the brief carries where the
+    // finding is, what it says, and the builder's own reason for asking. A reviewer handed
+    // an id alone can only rubber-stamp or refuse blind.
+    // MUTATION D5: strip the owed finding's location and summary and the builder's reason
+    // out of the appeal line and that is exactly what is left.
+    lines.push(`- ${refusal.finding ?? '(unknown finding)'} (${finding?.location || 'location unspecified'}) — ${finding?.summary || 'no summary recorded'}; ${refusal.reason}: ${refusal.why}; the builder asks to be excused because: ${refusal.appeal || '(no reason given)'}`)   // ANCHOR HA6
+  }
+  for (const row of Array.isArray(rows) ? rows : []) {
+    if (row.outcome === 'killed' || row.outcome === 'ungateable') continue
+    lines.push(`- ${row.finding}: ${row.outcome} — ${row.why}`)
+  }
+  lines.push('', 'If a finding\'s defect class cannot become a mechanical guard, return it in details.findings carrying "hardening": "ungateable" and a non-empty "hardening_why". Any finding you do not mark stays owed, and you may not mark a finding this review never raised.',
+    'Do NOT ask for a fabricated regression. A coverage repair — one whose implementation was already correct when you reviewed it — is certified WITHOUT a red pre-repair, and regressing the implementation to obtain one is refused as source-regressed.')
+  return lines
+}
+
 // A node --test-name-pattern is a REGEX, so the declared name is escaped before it
 // becomes one: an unescaped `(` is a syntax error and an unescaped `.` matches a name
 // nobody wrote.
@@ -6632,12 +6799,12 @@ export function validateHardened(details, owed, inScope) {
   const refusals = []
   const entries = []
   const refusedOwed = new Set()
-  const refuse = (finding, reason, why) => {
+  const refuse = (finding, reason, why, appeal = null) => {
     if (wantedSet.has(finding)) {
       if (refusedOwed.has(finding)) return
       refusedOwed.add(finding)
     }
-    refusals.push({ finding: finding ?? null, reason, why })
+    refusals.push({ finding: finding ?? null, reason, why, ...(typeof appeal === 'string' && appeal !== '' ? { appeal } : {}) })
   }
   const declared = details?.hardened
   if (declared !== undefined && !Array.isArray(declared)) {
@@ -6673,7 +6840,19 @@ export function validateHardened(details, owed, inScope) {
     // MUTATION B7b: stop refusing a builder-claimed exemption and the builder can
     // exempt itself from every guard the reviewer asked for.
     if (entry.hardening !== undefined || entry.exempt !== undefined || entry.ungateable !== undefined) {   // ANCHOR B7b
-      refuse(id, 'builder-exemption', `only the reviewer may mark a finding ${HARDENING_MARKS.join(' or ')}; a builder entry claiming it is refused`)
+      const asked = hardeningAppealRequest(entry)
+      refuse(id, 'builder-exemption', asked === null
+        ? `only the reviewer may mark a finding ${HARDENING_MARKS.join(' or ')}; a builder entry claiming it is refused`
+        : `only the reviewer may mark a finding ${HARDENING_MARKS.join(' or ')}; this entry is a REQUEST for that mark and grants nothing until the reviewer approves it in a hardening appeal: ${asked}`,
+        asked)
+      continue
+    }
+    // #910/#900 — the class is a CLOSED enum, and this is untrusted envelope input. An
+    // unrecognised value must not fall through to the behavioural default: a typo, an
+    // explicit null or a number would then be adjudicated by a proof the declaration did
+    // not ask for, and the journal would record a class nobody wrote.
+    if (!HARDENING_CLASSES.includes(hardeningClassOf(entry))) {
+      refuse(id, 'class-unknown', `the hardened entry for finding ${id} declares class ${JSON.stringify(entry.class)}; the closed set is ${HARDENING_CLASSES.join(' or ')}`)
       continue
     }
     if (!scopedPath(entry.test, scope)) {
@@ -6732,7 +6911,8 @@ export function hardeningBounceLines(round, refusals, rows) {
     if (row.outcome === 'killed' || row.outcome === 'ungateable') continue
     lines.push(`- ${row.finding}: ${row.outcome} — ${row.why}`)
   }
-  lines.push('', 'Return details.hardened entries shaped exactly as { finding, test, name, file, find, replace }; the declared name must not exist on the tree the review read.', `Hardening proof for round ${round} did not close every finding.`)
+  lines.push('', 'Return details.hardened entries shaped exactly as { finding, test, name, file, find, replace }, and "class": "coverage" when the implementation was already correct at review time; the declared name must not exist on the tree the review read.', `Hardening proof for round ${round} did not close every finding.`)
+  lines.push(`A finding whose defect class cannot become a mechanical guard is asked about, not waived: ask with an entry of exactly ${HARDENING_APPEAL_SHAPE}, which is still refused builder-exemption until the reviewer approves it.`)
   return lines
 }
 
@@ -6741,7 +6921,10 @@ export function hardeningBriefLines(owed, exempt) {
   if (findings.length === 0) return []
   const lines = ['', '## Permanent guards required (#839)', 'Every must-fix below needs a permanent named test guard, and its declared kill-mutation must be proven by the driver.']
   lines.push(...findings.map(({ id, location, summary }) => `- ${id} (${location || 'location unspecified'}) — ${summary || 'close this finding with a named guard'}`))
-  lines.push('Declare each guard in details.hardened with the exact shape { finding, test, name, file, find, replace }.', 'The declared name must be one that does not exist on the tree the review read; only the reviewer may mark a finding ungateable with a non-empty hardening_why.')
+  lines.push('Declare each guard in details.hardened with the exact shape { finding, test, name, file, find, replace }, plus "class": "coverage" when the implementation the finding names was ALREADY correct at review time and the finding was that nothing durable guarded it.',
+    'A coverage declaration is certified WITHOUT a red pre-repair: its file must be byte-identical to the review-time witness, so editing the implementation to manufacture one is refused as source-regressed.',
+    'The declared name must be one that does not exist on the tree the review read; only the reviewer may mark a finding ungateable with a non-empty hardening_why.',
+    `If a finding's defect class cannot become a mechanical guard, ASK: return that finding's entry as exactly ${HARDENING_APPEAL_SHAPE} and nothing else. That request is still refused builder-exemption and grants nothing until the reviewer approves it in a hardening appeal; an entry that mixes the request with a declaration is not a request.`)
   if (Array.isArray(exempt) && exempt.length > 0) lines.push(...exempt.map(({ id }) => `Reviewer exemption recorded for ${id}.`))
   return lines
 }

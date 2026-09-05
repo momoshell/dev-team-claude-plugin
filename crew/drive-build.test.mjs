@@ -6,6 +6,7 @@ import assert from 'node:assert/strict'
 import {
   B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_IMPL_FILE, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, B384_CORRECTED_FIND, B384_CORRECTED_REPLACE, B384_GREEN, B384_MUTATION, B384_RED, B44_LEADLESS_CTX, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_PLAN, CHECK_RUNS, CONVERGE_CTX, CONVERGE_GATE, CONVERGE_PLAN, CTX, CTX_DIRECTED, CTX_REPAIR, DIRECTED_FILES, D_ASK, D_AUTO, ENVELOPE_FIELD_KINDS, EXECUTIONS, FAILURE_UPGRADE, GATE_REAP_CMD_EOF, GATE_REAP_SWEEP_MARKER, GATE_SUMMARY_PREFIX, HARDENING_MARKS, HARDENING_OUTCOMES, HARDENING_REFUSALS, MODIFIER_OUTCOMES, MUTATIONS_MAX, MUTATION_BINDING_FAILURES, MUTATION_OUTCOMES, PARTIAL_REVIEWED, RED, SENSITIVITY_FLOOR, SHAPE_MAJOR_PHASES, SHAPE_ROUNDED_STAGES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, UNIVERSAL_STAGE_HEADS, VALIDATION_LANE_UNLOADABLE, VARIANTS, VARIANT_NAMES, WRITE_SURFACES, applyMutationAnchor, applyPrescriptionLines, b127GatePaths, b127PidAlive, b318Builders, b318SiteA, b376Build, b376DiskProofIo, b376ProofIo, b376Review, b376StageStack, b384Io, b44AssertLeadlessGate, b44GatePlan, bindMutationAnchor, buildEnv, collapseStages, dispositionIo, driveTask, existsSync, fakeIo, gateReapCommand, gateReapFresh, gateReapOriginal, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, hardeningBounceLines, hardeningBriefLines, hardeningDebt, hardeningOf, join, laneFence, leadEnv, mutationChangesTokens, outOfScopeFiles, planEnv, protectedPlanEnv, readFileSync, resumeGreen, resumeRed, reviewConvergeRun, reviewEnv, reviewFindings, rmSync, s843Ctx, s843Io, s843PlanEnv, s843Rows, scopeMatcher, scopedPath, scratchDir, shapeDefect, spawnSync, stageShape, treeDigest, triageEnv, undeclaredStage, validateHardened, validateMutations, validationPlan, validationProbeRun, validationRows,
 } from './drive-fixtures.mjs'
+import { HARDENING_APPEAL_SHAPE, HARDENING_CLASSES, hardeningAppealLines, hardeningAppealRequest, hardeningClassOf } from './drive.mjs'
 
 test('the scope-gate catches a build that crossed another lane fence', () => {
   const file = 'scripts/factory/intake.mjs'
@@ -2026,6 +2027,84 @@ test('b376 A3 a genuine out-of-scope source edit reports exactly as today', () =
   assert.deepEqual(result.details.stages.filter((stage) => stage.startsWith('scope-gate')), ['scope-gate:r1', 'scope-gate:r2'])
 })
 
+const b376SetBuiltImplementation = (io, content) => {
+  const baseWait = io.wait
+  io.wait = function (returnPath, timeoutS) {
+    const env = baseWait.call(this, returnPath, timeoutS)
+    if (returnPath === 'builder:2') this.calls.files[`${CTX.checkout}/${B376_IMPL_FILE}`] = content
+    return env
+  }
+  return io
+}
+
+const B376_APPEAL_REASON = 'the defect class is a human judgement call and cannot become a mechanical guard'
+const B376_APPEAL_REQUEST = { finding: 'F1', hardening: 'ungateable', hardening_why: B376_APPEAL_REASON }
+const B376_APPEAL_MARK = { ...B376_FINDING, hardening: 'ungateable', hardening_why: 'the reviewer approved the exception' }
+
+test('#910 a coverage repair certifies without a red pre-repair', () => {
+  const io = b376ProofIo({ hardened: [{ ...B376_HARDENED, class: 'coverage' }], files: { ...B376_FILES } })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.logs.find((entry) => entry.finding_hardened)?.finding_hardened.outcome, 'killed')
+  assert.equal(io.calls.run.filter(({ cmd }) => cmd === hardenCommand(B376_TEST_FILE, 'F1 guard')).length, 2)
+})
+
+test('#910 a coverage repair still needs its mutation to kill', () => {
+  const io = b376ProofIo({
+    hardened: [{ ...B376_HARDENED, class: 'coverage' }], files: { ...B376_FILES },
+    proofOutputs: [B376_GREEN, B376_GREEN],
+  })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'harden')
+  assert.equal(io.calls.logs.find((entry) => entry.finding_hardened)?.finding_hardened.outcome, 'survived')
+})
+
+test('#910 an undeclared hardening class remains behavioural', () => {
+  const io = b376ProofIo({ hardened: [{ ...B376_HARDENED }], files: { ...B376_FILES }, proofOutputs: [B376_GREEN, B376_GREEN, B376_MUT_RED] })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(io.calls.logs.find((entry) => entry.finding_hardened)?.finding_hardened.outcome, 'pre-repair-green')
+})
+
+test('#910 a behavioural repair certifies with the witnessed-red proof', () => {
+  const entry = { ...B376_HARDENED, find: 'const guard = true', replace: 'const guard = false' }
+  const io = b376SetBuiltImplementation(b376ProofIo({ hardened: [entry], files: { ...B376_FILES } }), 'const guard = true\n')
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.logs.find((entry) => entry.finding_hardened)?.finding_hardened.outcome, 'killed')
+})
+
+test('#910 a coverage claim over a changed implementation is source-regressed', () => {
+  const entry = { ...B376_HARDENED, class: 'coverage', find: 'const guard = true', replace: 'const guard = false' }
+  const io = b376SetBuiltImplementation(b376ProofIo({ hardened: [entry], files: { ...B376_FILES } }), 'const guard = true\n')
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'harden')
+  const row = io.calls.logs.find((entry) => entry.finding_hardened)?.finding_hardened
+  assert.equal(row.outcome, 'source-regressed')
+  assert.match(row.why, /source-regressed/)
+})
+
+test('#910 an unrecognised hardening class is refused by name', () => {
+  for (const [label, value] of [
+    ['typo', 'covrage'], ['blank', ''], ['null', null], ['number', 3], ['undefined', undefined],
+    ['boolean', true], ['array', ['coverage']], ['object', {}],
+  ]) {
+    const entry = { ...B376_HARDENED, class: value }
+    const result = validateHardened({ hardened: [entry] }, [{ id: 'F1' }], scopeMatcher(['a.mjs', 'a.test.mjs']))
+    assert.equal(HARDENING_CLASSES.includes(hardeningClassOf(entry)), false, label)
+    if (typeof value !== 'string') assert.equal(hardeningClassOf(entry), null, label)
+    assert.equal(result.entries.length, 0, label)
+    assert.equal(result.refusals.length, 1, label)
+    assert.equal(result.refusals[0].reason, 'class-unknown', label)
+  }
+  const behavioural = validateHardened({ hardened: [{ ...B376_HARDENED }] }, [{ id: 'F1' }], scopeMatcher(['a.mjs', 'a.test.mjs']))
+  assert.equal(hardeningClassOf(B376_HARDENED), 'behavioural')
+  assert.equal(behavioural.entries.length, 1)
+  assert.equal(behavioural.refusals.length, 0)
+})
+
 test('b376 B5a a proven hardening is accepted and clears the debt', () => {
   const io = b376ProofIo()
   const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
@@ -2158,6 +2237,161 @@ test('b376 B7b a builder-claimed exemption is refused', () => {
   }
 })
 
+test('#900 builder-claimed exemptions remain refused and spend no appeal', () => {
+  for (const claim of [
+    { ...B376_HARDENED, exempt: 'the builder cannot waive a reviewer obligation' },
+    { ...B376_HARDENED, ungateable: true },
+  ]) {
+    const io = b376ProofIo({ hardened: [claim], files: { ...B376_FILES } })
+    const result = driveTask({ ...CTX, limits: { build_rounds: 2, review_rounds: 3 } }, io)
+    assert.equal(result.status, 'escalation')
+    assert.equal(result.details.escalation.where, 'harden')
+    assert.match(result.details.escalation.why, /builder-exemption/)
+    assert.equal(io.calls.logs.some((entry) => entry.finding_hardened?.outcome === 'ungateable' || entry.finding_hardened?.outcome === 'killed'), false)
+    assert.equal(io.calls.assign.filter(({ role, note }) => role === 'reviewer' && note === 'harden-appeal').length, 0)
+  }
+})
+
+test('#900 the reviewer gets an appeal turn on a builder exemption request', () => {
+  const requested = validateHardened({ hardened: [{ ...B376_APPEAL_REQUEST }] }, [{ id: 'F1' }], scopeMatcher(['a.mjs', 'a.test.mjs']))
+  assert.equal(requested.entries.length, 0)
+  assert.equal(requested.refusals[0]?.reason, 'builder-exemption')
+  assert.equal(requested.refusals[0]?.appeal, B376_APPEAL_REASON)
+  const io = b376ProofIo({
+    hardened: [{ ...B376_APPEAL_REQUEST }], reviewer2: b376Review('changes-needed', [B376_APPEAL_MARK]),
+    files: { ...B376_FILES },
+  })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2, review_rounds: 3 } }, io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.assign.filter(({ role, note }) => role === 'reviewer' && note === 'harden-appeal').length, 1)
+  assert.equal(io.calls.logs.some((entry) => entry.finding_hardened?.finding === 'F1' && entry.finding_hardened.outcome === 'ungateable'), true)
+  assert.equal(result.details.stages.includes('lane:harden-appeal:r2'), true)
+  const appealBrief = io.calls.writes[`${TD}/harden-appeal-r2.md`]
+  assert.match(appealBrief, /a\.mjs:1/)
+  assert.match(appealBrief, /the implementation defect/)
+  assert.match(appealBrief, new RegExp(B376_APPEAL_REASON))
+})
+
+test('#900 the hardening appeal is spent once for an unchanged debt generation', () => {
+  const io = b376ProofIo({
+    hardened: [{ ...B376_APPEAL_REQUEST }], reviewer2: b376Review('pass', []), reviewer3: b376Review('pass', []),
+    files: { ...B376_FILES }, limits: { build_rounds: 3 },
+  })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 3, review_rounds: 3 } }, io)
+  assert.equal(io.calls.assign.filter(({ role, note }) => role === 'reviewer' && note === 'harden-appeal').length, 1)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'harden')
+})
+
+test('#900 each reviewed debt generation gets its own appeal', () => {
+  const secondFinding = { id: 'F2', severity: 'must-fix', location: 'a.mjs:2', summary: 'the second defect' }
+  const request2 = { finding: 'F2', hardening: 'ungateable', hardening_why: 'the second defect cannot become a mechanical guard' }
+  const io = b376ProofIo({
+    hardened: [{ ...B376_APPEAL_REQUEST }], builder3: b376Build([request2]),
+    reviewer2: b376Review('changes-needed', [B376_APPEAL_MARK]), reviewer3: b376Review('changes-needed', [secondFinding]),
+    files: { ...B376_FILES }, limits: { build_rounds: 3 },
+  })
+  const extra = {
+    'reviewer:4': b376Review('changes-needed', [{ ...secondFinding, hardening: 'ungateable', hardening_why: request2.hardening_why }]),
+    'reviewer:5': b376Review('pass', []),
+  }
+  const baseWait = io.wait
+  io.wait = function (returnPath, timeoutS) {
+    if (Object.hasOwn(extra, returnPath)) {
+      this.calls.waits.push({ returnPath, timeoutS })
+      return extra[returnPath]
+    }
+    return baseWait.call(this, returnPath, timeoutS)
+  }
+  const result = driveTask({ ...CTX, limits: { build_rounds: 3, review_rounds: 3 } }, io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.assign.filter(({ role, note }) => role === 'reviewer' && note === 'harden-appeal').length, 2)
+  assert.deepEqual(io.calls.logs.filter((entry) => entry.finding_hardened?.outcome === 'ungateable').map((entry) => entry.finding_hardened.finding), ['F1', 'F2'])
+})
+
+test('#900 an appeal excuses only a finding the review owed', () => {
+  const notOwed = { id: 'ZZ9', severity: 'must-fix', location: 'a.mjs:9', summary: 'never owed', hardening: 'ungateable', hardening_why: 'not raised by this review' }
+  const io = b376ProofIo({
+    hardened: [{ ...B376_APPEAL_REQUEST }], reviewer2: b376Review('changes-needed', [notOwed, B376_APPEAL_MARK]),
+    files: { ...B376_FILES },
+  })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2, review_rounds: 3 } }, io)
+  assert.equal(result.status, 'done')
+  assert.deepEqual(io.calls.logs.filter((entry) => entry.finding_hardened?.outcome === 'ungateable').map((entry) => entry.finding_hardened.finding), ['F1'])
+})
+
+test('#900 ordinary builder defects and pre-repair-green spend no appeal', () => {
+  const missing = b376ProofIo({ hardened: [], files: { ...B376_FILES } })
+  const missingResult = driveTask({ ...CTX, limits: { build_rounds: 2, review_rounds: 3 } }, missing)
+  assert.equal(missingResult.status, 'escalation')
+  assert.equal(missing.calls.assign.filter(({ role, note }) => role === 'reviewer' && note === 'harden-appeal').length, 0)
+  const green = b376ProofIo({ files: { ...B376_FILES }, proofOutputs: [B376_GREEN, B376_GREEN, B376_MUT_RED] })
+  const greenResult = driveTask({ ...CTX, limits: { build_rounds: 2, review_rounds: 3 } }, green)
+  assert.equal(greenResult.status, 'escalation')
+  assert.equal(green.calls.assign.filter(({ role, note }) => role === 'reviewer' && note === 'harden-appeal').length, 0)
+})
+
+test('#900 an exemption claim that is not the request shape spends no appeal', () => {
+  const smuggled = { ...B376_HARDENED, hardening: 'ungateable', hardening_why: B376_APPEAL_REASON }
+  const io = b376ProofIo({ hardened: [smuggled], files: { ...B376_FILES } })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2, review_rounds: 3 } }, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(io.calls.assign.filter(({ role, note }) => role === 'reviewer' && note === 'harden-appeal').length, 0)
+  assert.equal(io.calls.logs.some((entry) => entry.finding_hardened?.outcome === 'ungateable'), false)
+  const refusal = validateHardened({ hardened: [smuggled] }, [{ id: 'F1' }], scopeMatcher(['a.mjs', 'a.test.mjs'])).refusals[0]
+  assert.equal(refusal.reason, 'builder-exemption')
+  assert.equal(Object.hasOwn(refusal, 'appeal'), false)
+  assert.equal(hardeningAppealRequest({ ...B376_APPEAL_REQUEST, hardening_why: '  trimmed reason  ' }), 'trimmed reason')
+  assert.equal(hardeningAppealRequest({ ...B376_APPEAL_REQUEST, hardening_why: '   ' }), null)
+  assert.equal(hardeningAppealRequest({ ...B376_APPEAL_REQUEST, hardening: 'ungatable' }), null)
+  assert.equal(hardeningAppealRequest({ ...B376_APPEAL_REQUEST, extra: true }), null)
+})
+
+test('#900 a non-done appeal envelope waives nothing', () => {
+  const tentative = { ...b376Review('changes-needed', [{ ...B376_APPEAL_MARK }]), status: 'insufficient' }
+  const io = b376ProofIo({
+    hardened: [{ ...B376_APPEAL_REQUEST }], reviewer2: tentative, files: { ...B376_FILES },
+  })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2, review_rounds: 3 } }, io)
+  assert.equal(io.calls.assign.filter(({ role, note }) => role === 'reviewer' && note === 'harden-appeal').length, 1)
+  assert.equal(io.calls.logs.some((entry) => entry.finding_hardened?.outcome === 'ungateable'), false)
+  assert.equal(result.status, 'escalation')
+})
+
+test('#900 a hardening appeal is not a review round', () => {
+  const secondFinding = { id: 'F2', severity: 'must-fix', location: 'a.mjs:2', summary: 'the second defect' }
+  const minted = { id: 'QQ7', severity: 'must-fix', location: 'a.mjs:9', summary: 'minted by the appeal', hardening: 'ungateable', hardening_why: 'never owed' }
+  const io = b376ProofIo({
+    hardened: [{ ...B376_APPEAL_REQUEST }], reviewer1: b376Review('changes-needed', [B376_FINDING, secondFinding]),
+    reviewer2: b376Review('changes-needed', [B376_APPEAL_MARK, minted]), reviewer3: b376Review('pass', []), files: { ...B376_FILES },
+  })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2, review_rounds: 3 } }, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'harden')
+  const appealAssign = io.calls.assign.find(({ role, note }) => role === 'reviewer' && note === 'harden-appeal')
+  const appealNumber = io.calls.assign.filter(({ role }) => role === 'reviewer').indexOf(appealAssign) + 1
+  assert.equal(io.calls.logs.some((entry) => entry.review_outcome?.dispatch === `reviewer${appealNumber}`), false)
+  assert.deepEqual((result.details.accept_findings || []).map(({ id }) => id), ['F1', 'F2'])
+  assert.equal(io.calls.logs.some((entry) => entry.finding_hardened?.finding === 'F1' && entry.finding_hardened.outcome === 'ungateable'), true)
+})
+
+test('#900 hardening briefs and appeal briefs state their contracts', () => {
+  const briefText = hardeningBriefLines([{ id: 'F1', location: 'a.mjs:1', summary: 'coverage-only' }], []).join('\n')
+  assert.match(briefText, /"class": "coverage"/)
+  assert.match(briefText, /refused as source-regressed/)
+  assert.equal(briefText.split('source-regressed').length - 1, 1)
+  assert.match(briefText, new RegExp(HARDENING_APPEAL_SHAPE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  assert.match(briefText, /grants nothing until the reviewer approves it/)
+  const bounceText = hardeningBounceLines(2, [{ finding: 'F1', reason: 'builder-exemption', why: 'refused' }], []).join('\n')
+  assert.match(bounceText, /"class": "coverage"/)
+  assert.match(bounceText, /HARDENING_APPEAL_SHAPE|finding.*hardening.*ungateable/)
+  assert.match(bounceText, /grants nothing until the reviewer approves it|until the reviewer approves it/)
+  const appealText = hardeningAppealLines(2, [{ id: 'F1', location: 'a.mjs:1', summary: 'the implementation defect' }], [{ finding: 'F1', reason: 'builder-exemption', why: 'refused', appeal: B376_APPEAL_REASON }], []).join('\n')
+  assert.match(appealText, /a\.mjs:1/)
+  assert.match(appealText, /the implementation defect/)
+  assert.match(appealText, new RegExp(B376_APPEAL_REASON))
+})
+
 test('b376 B8 the hardening proof adds no gate result', () => {
   const markedReviewer2 = b376Review('changes-needed', [B376_FINDING])
   const io = b376ProofIo({
@@ -2275,15 +2509,16 @@ test('#839 reviewer hardening marks preserve the five-key finding shape unless v
   const base = { id: 'F1', severity: 'must-fix', location: 'a.mjs:1', summary: 'guard the defect' }
   const fiveKeys = { ...base, disposition: null }
   assert.deepEqual(HARDENING_MARKS, ['ungateable'])
+  assert.deepEqual(HARDENING_CLASSES, ['behavioural', 'coverage'])
   assert.deepEqual(HARDENING_REFUSALS, [
     'no-declaration', 'not-an-array', 'unknown-finding', 'duplicate-finding',
     'test-not-in-scope', 'file-not-in-scope', 'name-missing', 'name-file-wrapper', 'find-missing',
-    'replace-identical', 'builder-exemption',
+    'replace-identical', 'builder-exemption', 'class-unknown',
   ])
   assert.deepEqual(HARDENING_OUTCOMES, [
     'killed', 'survived', 'ungateable',
     'name-not-new', 'name-absent', 'name-ambiguous', 'control-red', 'control-skipped',
-    'pre-repair-green', 'witness-missing', 'witness-absent', 'witness-unreadable',
+    'pre-repair-green', 'source-regressed', 'witness-missing', 'witness-absent', 'witness-unreadable',
     'unproven', 'unapplied', 'anchor-absent', 'anchor-ambiguous', 'anchor-unsafe',
   ])
   const marked = { ...base, hardening: 'ungateable', hardening_why: ' documented exception ' }

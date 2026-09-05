@@ -2322,6 +2322,14 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
     }
     sleep(ms)
   }
+  // The PARK seam. deps.sleep above is a death PROBE, and the provider park
+  // (crew/headless.mjs, providerRetryOnFailure) waits in precisely the window
+  // where the previous worker root is gone BY DESIGN — measured: with a
+  // captured root armed dead, deps.sleep(1) throws seat-died on the first tick.
+  // Reading that expected absence as a seat death would abort every park, so a
+  // deliberate wait between two spawns gets the raw sleep, unwrapped. There is
+  // no worker to watch during it.
+  transportArgs.deps.delay = (ms) => { sleep(ms) }
   function transportIo(name, role) {
     if (!transportFactories[name]) throw new Error(`unknown transport "${name}" for seat ${role}`)
     if (!transportInstances.has(name)) {

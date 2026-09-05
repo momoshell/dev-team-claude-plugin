@@ -162,6 +162,99 @@ export function providerFailureKind(status) {
   return PROVIDER_FAILURE_KINDS.UNCLASSIFIED
 }
 
+// --- provider retry: routing the kind the stream already carried ------------
+// #887. Four lanes died on 2026-09-03 because a 529, a 429 and a 401 all
+// collapse into one `budget-refused` and the driver escalates. b401 lost a
+// plan, a build, a scope gate, a 17/17 mutation proof and a completed review to
+// a 529 at review:r1, and its own stream shows the worker had ALREADY spent ten
+// retries over 223s inside the turn. The kind was measured the whole time
+// (providerFailureKind, crew/headless.mjs:157) and nothing routed on it. Route here.
+//
+// A retry that never gives up is worse than the escalation it replaces, so BOTH
+// bounds are closed constants and BOTH are consumed: a park that fits the
+// attempt count still runs out of total wait.
+export const PROVIDER_RETRY_MAX = 3
+// Four hours: a POLICY bound this driver chose, not a fact about the provider.
+// The provider's window is five hours (`rateLimitType: "five_hour"` in the
+// recorded 2026-08-30 frame), so a stated reset can legitimately be up to nearly
+// five hours out — and this driver declines to hold a lane that long. A reset
+// further away than this bound is refused with the instant NAMED, so the
+// operator re-dispatches knowing exactly when. The recorded refusal was 1h14m
+// out, comfortably inside it.
+export const PROVIDER_RETRY_TOTAL_WAIT_MS = 4 * 60 * 60 * 1000
+// Minutes, not the worker's seconds: the one retry budget that already existed
+// was at the wrong altitude. The ladder SATURATES on its last rung rather than
+// running off the end, so the attempt bound above is the only thing that stops
+// it.
+export const PROVIDER_BACKOFF_LADDER_MS = Object.freeze([60_000, 300_000, 900_000])
+// OUR slack past a stated reset, so a clock a few seconds fast does not retry
+// into a window that is still closed. Ours and stated — never a provider fact.
+export const PROVIDER_RESET_SETTLE_MS = 60_000
+
+// A reset is only a reset if the frame that carried it REFUSED the turn.
+// Ordinary successful turns emit `rate_limit_event` with `status: "allowed"` and
+// a resetsAt of their own (tasks/headless-worker/captures/a-baseline.jsonl,
+// .../e-max-turns.jsonl) — quota telemetry, not a refusal's stated reset, and
+// stale by the time a terminal 429 lands. Both recorded refusals say
+// "rejected".
+export const PROVIDER_RESET_STATUS = 'rejected'
+// The unix SECONDS a Date can hold. Number.isFinite alone admits a negative, a
+// fractional and an out-of-range value; the beyond-bound path calls
+// toISOString(), which THROWS on an invalid date, so bytes we cannot read must
+// come back UNKNOWN rather than as an instant nobody can print.
+const RESET_SECONDS_MAX = 8.64e15 / 1000
+export function providerResetInstant(seconds) {
+  if (typeof seconds !== 'number' || !Number.isFinite(seconds)) return null
+  if (!Number.isInteger(seconds)) return null
+  if (seconds <= 0 || seconds > RESET_SECONDS_MAX) return null
+  const ms = seconds * 1000
+  return Number.isFinite(new Date(ms).getTime()) ? ms : null
+}
+
+// What the driver does about each kind, as DATA for the same reason
+// SEAT_REFUSAL_ACTIONS (crew/headless.mjs:71) is data: a policy change is a data edit, not a new
+// branch. `none` is TODAY'S behaviour, byte for byte — no row, no wait, no
+// respawn — and it is what an UNCLASSIFIED failure and an unmeasured status
+// both get, because a failure nobody diagnosed must not be retried as though it
+// had been.
+export const PROVIDER_RETRY_ACTIONS = Object.freeze({
+  [PROVIDER_FAILURE_KINDS.SERVER_ERROR]: 'backoff',
+  [PROVIDER_FAILURE_KINDS.RATE_LIMIT]: 'park',
+  [PROVIDER_FAILURE_KINDS.AUTHENTICATION_FAILED]: 'refuse',
+  [PROVIDER_FAILURE_KINDS.UNCLASSIFIED]: 'none',
+})
+
+// A reset instant nobody stated is UNKNOWN with a closed reason, never a
+// guessed delay and never a default. Prose because an operator reads it out of
+// the journal.
+export const PROVIDER_RESET_ABSENT = Object.freeze({
+  NO_FRAME: 'the stream carries no rejected rate_limit_event frame, so the provider stated no reset time',
+  NO_RESET_FIELD: 'the rejected rate_limit_event carries no reset time this driver can read as unix seconds',
+  BEYOND_BOUND: 'the stated reset is further out than the total wait this driver will spend',
+})
+
+// PURE, so the routing is unit-testable without a worker. Every refusal names
+// the kind and what has already been spent; every retry names what it will wait
+// on. Nothing here reads a clock of its own — `at` is the caller's.
+export function providerRetryDecision({ kind = null, status = null, reset = null, attempts = 0, waitedMs = 0, at = 0 }) {
+  const action = PROVIDER_RETRY_ACTIONS[kind] ?? 'none'
+  const bound = { attempts: PROVIDER_RETRY_MAX, total_wait_ms: PROVIDER_RETRY_TOTAL_WAIT_MS }
+  const no = (why, extra = {}) => ({ retry: false, action, wait_ms: null, waited_on: null, reset_at: null, attempts_spent: attempts, bound, why, ...extra })
+  if (action === 'none') return no(`provider failure ${String(kind)} is not a kind this driver routes, so the run keeps the behaviour it has always had`)
+  if (action === 'refuse') return no(`a ${kind} (status ${String(status)}) is a credential fault: a second ask cannot succeed and would spend the remaining budget against a wall`)
+  if (attempts >= PROVIDER_RETRY_MAX) return no(`the provider retry bound of ${PROVIDER_RETRY_MAX} attempts is spent for ${kind} (status ${String(status)}); ${attempts} attempts were taken over ${waitedMs}ms`)
+  if (action === 'park') {
+    const resetAt = Number.isFinite(reset?.at_ms) ? reset.at_ms : null
+    if (resetAt === null) return no(`a ${kind} (status ${String(status)}) stated no reset time this driver could read: ${reset?.absent_reason ?? PROVIDER_RESET_ABSENT.NO_FRAME}`)
+    const waitMs = Math.max(0, resetAt + PROVIDER_RESET_SETTLE_MS - at)
+    if (waitedMs + waitMs > PROVIDER_RETRY_TOTAL_WAIT_MS) return no(`${PROVIDER_RESET_ABSENT.BEYOND_BOUND}: ${kind} resets at ${new Date(resetAt).toISOString()}, ${waitMs}ms out against a ${PROVIDER_RETRY_TOTAL_WAIT_MS}ms bound`, { reset_at: resetAt })
+    return { retry: true, action, wait_ms: waitMs, waited_on: 'reset-time', reset_at: resetAt, attempts_spent: attempts, bound, why: `${kind} (status ${String(status)}) stated a reset; attempt ${attempts + 1} of ${PROVIDER_RETRY_MAX} parks ${waitMs}ms` }
+  }
+  const waitMs = PROVIDER_BACKOFF_LADDER_MS[Math.min(attempts, PROVIDER_BACKOFF_LADDER_MS.length - 1)]
+  if (waitedMs + waitMs > PROVIDER_RETRY_TOTAL_WAIT_MS) return no(`the total provider wait bound of ${PROVIDER_RETRY_TOTAL_WAIT_MS}ms is spent for ${kind} (status ${String(status)}); ${attempts} attempts were taken over ${waitedMs}ms`)
+  return { retry: true, action, wait_ms: waitMs, waited_on: 'backoff-ladder', reset_at: null, attempts_spent: attempts, bound, why: `${kind} (status ${String(status)}) is transient; attempt ${attempts + 1} of ${PROVIDER_RETRY_MAX} backs off ${waitMs}ms` }
+}
+
 // EXACTLY one fallback per assignment. The chain is also CONSUMED (the entry is
 // dropped from the member), so the two bounds are independent: a raised cap
 // still runs out of chain, an unconsumed chain still hits the cap.
@@ -937,7 +1030,7 @@ function censusRow(run, transport, stream) {
 }
 
 export function parseStream(path, readFileSync, existsSync) {
-  const absent = { sawJson: false, terminal: false, terminalReason: null, lines: 0, usage: null, budgetRefused: false, providerFailure: null, census: null, census_absent: CENSUS_ABSENT_CAUSES.stream_absent }
+  const absent = { sawJson: false, terminal: false, terminalReason: null, lines: 0, usage: null, budgetRefused: false, providerFailure: null, providerReset: { at_ms: null, absent_reason: PROVIDER_RESET_ABSENT.NO_FRAME }, census: null, census_absent: CENSUS_ABSENT_CAUSES.stream_absent }
   if (!existsSync(path)) return absent
   let text
   try { text = readFileSync(path, 'utf8') } catch { return absent }
@@ -948,6 +1041,8 @@ export function parseStream(path, readFileSync, existsSync) {
   let sawSynthetic = false
   let sawApiError = false
   let apiErrorStatus = null
+  let resetAtMs = null
+  let sawRejectedRateLimit = false
   for (const line of String(text).split('\n')) {
     if (!line.trim()) continue
     lines += 1
@@ -964,6 +1059,19 @@ export function parseStream(path, readFileSync, existsSync) {
         // turn was also refused, and the two facts are journaled separately.
         if (Number.isFinite(event.api_error_status)) apiErrorStatus = event.api_error_status
       }
+      // The reset instant is MEASURED, not parsed out of the refusal sentence:
+      // the recorded 2026-08-30 tails carry BOTH and they agree to the minute
+      // (resetsAt 1788115200 == "resets 8:40pm (Europe/Belgrade)"). Only a
+      // REJECTED frame states a reset — an `allowed` frame is a healthy turn's
+      // quota telemetry — and only a value that reads as unix seconds is one.
+      if (event?.type === 'rate_limit_event' && event.rate_limit_info?.status === PROVIDER_RESET_STATUS) {
+        sawRejectedRateLimit = true
+        // [F3] REPLACE, never conditionally preserve. The reset that matters is
+        // the one the CURRENT refusal stated, so a later rejected frame with an
+        // unreadable resetsAt must clear an earlier readable one — otherwise the
+        // driver parks until an instant this refusal never named.
+        resetAtMs = providerResetInstant(event.rate_limit_info.resetsAt)
+      }
     } catch { /* truncated trailing JSONL is not itself a malformed run */ }
   }
   const kind = providerFailureKind(apiErrorStatus)
@@ -972,6 +1080,9 @@ export function parseStream(path, readFileSync, existsSync) {
     census: claudeCensus(text), census_absent: sawJson ? null : CENSUS_ABSENT_CAUSES.no_frames,
     budgetRefused: sawSynthetic && sawApiError,
     providerFailure: kind === null ? null : { kind, status: apiErrorStatus },
+    providerReset: resetAtMs !== null
+      ? { at_ms: resetAtMs, absent_reason: null }
+      : { at_ms: null, absent_reason: sawRejectedRateLimit ? PROVIDER_RESET_ABSENT.NO_RESET_FIELD : PROVIDER_RESET_ABSENT.NO_FRAME },
   }
 }
 
@@ -1119,6 +1230,13 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
   const spawn = deps.spawn || cpSpawn
   const now = deps.now || (() => Date.now())
   const sleep = deps.sleep || defaultSleep
+  // [F1] The PARK is a deliberate wait between a refused turn and its
+  // replacement spawn, and in exactly that window the previous worker root is
+  // gone BY DESIGN. seat-io's deps.sleep is a death PROBE that throws
+  // `seat-died` on precisely that state (crew/seat-io.mjs:2301-2324), so the
+  // park gets its own seam. The deps.sleep fallback exists only for a
+  // composition that supplies no park seam at all; seat-io always supplies one.
+  const delay = deps.delay || deps.sleep || defaultSleep
   const exists = deps.existsSync || fsExistsSync
   const read = deps.readFileSync || fsReadFileSync
   const unlink = deps.unlinkSync || fsUnlinkSync
@@ -1289,6 +1407,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
   // One counter per (role, assignment id): a NEW assignment gets a fresh
   // allowance, the SAME one does not.
   const fallbacksUsed = new Map()
+  const providerRetries = new Map()
   // The seat the crew booted refused this turn for BUDGET — not for anything the
   // brief said. Swap in the next declared cell and let the caller re-ask.
   // Returns null when there is nothing to fall back to, or no lawful budget
@@ -1329,6 +1448,124 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
     }, crewDeps))
     log({ at: now(), event: 'seat-fallback', role: run.role, from, to, cause: 'budget', assignment_id: run.id })
     return { from, to }
+  }
+  function providerRetryState(run) {
+    return providerRetries.get(`${run.role}:${run.id}`) ?? { attempts: 0, waited_ms: 0 }
+  }
+  // Park in WAIT_POLL_MS steps rather than one long block, so the wait keeps the
+  // cadence every other wait in this module runs on. Returns the wait MEASURED
+  // off the clock — never the one that was intended.
+  function parkFor(waitMs) {
+    const startedAt = now()
+    const until = startedAt + waitMs
+    while (now() < until) delay(Math.min(WAIT_POLL_MS, until - now()))
+    return now() - startedAt
+  }
+  // A provider failure is not a judgment failure and it is not the seat's fault:
+  // route on the kind the stream already carried, act INSIDE the run, and the
+  // lane keeps its crew dir, its plan, its gate and every envelope it has
+  // already collected.
+  //
+  // [F2] TRI-STATE, and the three states are not interchangeable.
+  //   'none'   — stream.providerFailure is absent, or its kind is
+  //              provider-unclassified. This is today's behaviour: only an
+  //              absent or unrecognised status can reach the model fallback.
+  //              Recorded 429/401/403/5xx statuses are classified provider
+  //              conditions, not model refusals.
+  //   'retry'  — parked or backed off; resume the same assignment.
+  //   'refuse' — a classified terminal decision (a credential fault, a reset
+  //              this driver cannot read, a bound that is spent). It must NOT
+  //              fall through to the model fallback. Fallback answers "this
+  //              MODEL is refusing"; rate limits, credential faults, and
+  //              capacity outages are provider conditions for this retry
+  //              ladder. reaskOnFallback also refuses authentication_failed
+  //              outright, so auth is stated policy rather than a routing
+  //              accident. A 429 with an eligible reset parks through reset plus
+  //              settle within PROVIDER_RETRY_TOTAL_WAIT_MS, then declines when
+  //              its declared bound is spent instead of trying another model.
+  // This routing is local to headlessIo. headlessRpcIo owns the Pi transport
+  // separately, so the Pi tech-lead's declared fallback keeps its existing
+  // behaviour.
+  function providerRetryOnFailure(run, returnPath, deadline, stream) {
+    const failure = stream.providerFailure
+    if (!failure) return { act: 'none' }
+    const key = `${run.role}:${run.id}`
+    const state = providerRetryState(run)
+    const decision = providerRetryDecision({
+      kind: failure.kind, status: failure.status, reset: stream.providerReset,
+      attempts: state.attempts, waitedMs: state.waited_ms, at: now(),
+    })
+    const base = { role: run.role, assignment_id: run.id, kind: failure.kind, status: failure.status, action: decision.action }
+    // [F5] The SECOND call site (crew/headless.mjs:1450) is reached only after the wait loop ran
+    // out on now() >= deadline and endDispatch already killed the worker. A park
+    // there would spend real minutes and then hand the replacement a deadline
+    // that the same park has already moved past — an attempt burnt on a worker
+    // that could never return an envelope. Refuse before the wait, before the
+    // respawn, and before the fallback, naming the budget that is gone.
+    if (decision.retry && now() >= deadline) {
+      log({ at: now(), event: 'provider-retry-declined', ...base, attempts_spent: state.attempts, of: PROVIDER_RETRY_MAX, total_waited_ms: state.waited_ms, reset_at: decision.reset_at, why: `the work budget for this dispatch is already exhausted, so a ${failure.kind} retry would spend ${decision.wait_ms}ms and then leave the replacement no time at all` })
+      return { act: 'refuse' }
+    }
+    if (!decision.retry) {
+      // `none` is TODAY'S behaviour, byte for byte: no row, no wait, no respawn.
+      if (decision.action === 'none') return { act: 'none' }
+      log({ at: now(), event: 'provider-retry-declined', ...base, attempts_spent: decision.attempts_spent, of: PROVIDER_RETRY_MAX, total_waited_ms: state.waited_ms, reset_at: decision.reset_at, why: decision.why })
+      return { act: 'refuse' }
+    }
+    // SCHEDULED. The park can be long, so the row that says one is starting is
+    // written before it, not after — but nothing here is called `resumed` yet.
+    log({ at: now(), event: 'provider-retry', ...base, attempt: state.attempts + 1, of: PROVIDER_RETRY_MAX, wait_ms: decision.wait_ms, waited_on: decision.waited_on, reset_at: decision.reset_at, total_waited_ms: state.waited_ms, bound: { attempts: PROVIDER_RETRY_MAX, total_wait_ms: PROVIDER_RETRY_TOTAL_WAIT_MS } })
+    const waitedMs = parkFor(decision.wait_ms)
+    const totalWaitedMs = state.waited_ms + waitedMs
+    // [F6] The measured wait is recorded whatever happens next — it was really
+    // spent. The ATTEMPT is not, and must not be: an escalation that reports a
+    // retry with no worker behind it destroys the one distinction #887 asks the
+    // operator to be able to make, between a lane that retried and one that only
+    // waited. The attempt is spent below, after a replacement exists.
+    providerRetries.set(key, { attempts: state.attempts, waited_ms: totalWaitedMs })
+    // [F4] The decision bounded the wait it INTENDED. This bounds the wait
+    // actually taken: an oversleep at the edge must not buy a retry after the
+    // bound has already been crossed.
+    if (totalWaitedMs > PROVIDER_RETRY_TOTAL_WAIT_MS) {
+      // `providerRetryState(run)` and not `state`: the map was just written with
+      // the measured wait and an UNCHANGED attempt count, and the row must report
+      // what was recorded rather than a second copy of it. It is also the one
+      // spelling of attempts_spent unique to this row, which is what lets A12b's
+      // kill-mutation bind here and nowhere else.
+      log({ at: now(), event: 'provider-retry-declined', ...base, attempts_spent: providerRetryState(run).attempts, of: PROVIDER_RETRY_MAX, total_waited_ms: totalWaitedMs, reset_at: decision.reset_at, why: `the total provider wait bound of ${PROVIDER_RETRY_TOTAL_WAIT_MS}ms was crossed by the wait actually taken for ${failure.kind}: ${totalWaitedMs}ms, and no replacement was started` })
+      return { act: 'refuse' }
+    }
+    let spawned = true
+    try {
+      runs.delete(returnPath)
+      assign({ role: run.role, briefFile: run.briefFile, note: run.note, policy: run.policy, reask: { id: run.id, returnPath: run.returnPath } })
+    } catch (err) {
+      log({ at: now(), event: 'provider-retry-failed', ...base, attempts_spent: state.attempts, of: PROVIDER_RETRY_MAX, total_waited_ms: totalWaitedMs, error: String(err?.message ?? err) })
+      spawned = false
+    }
+    if (!spawned) return { act: 'refuse' }
+    // [F6] A replacement worker exists. NOW the attempt is spent and NOW the
+    // wait is `resumed`.
+    providerRetries.set(key, { attempts: state.attempts + 1, waited_ms: totalWaitedMs })
+    log({ at: now(), event: 'provider-retry-resumed', ...base, attempt: state.attempts + 1, of: PROVIDER_RETRY_MAX, waited_ms: waitedMs, intended_wait_ms: decision.wait_ms, waited_on: decision.waited_on })
+    // The deadline moves by the wait TAKEN and by nothing else: the seat gets
+    // the working budget it would have had, shifted by the park.
+    return { act: 'retry', resume: () => waitUntil(returnPath, deadline + waitedMs) }
+  }
+  // The escalation NAMES the provider cause and what the bound bought. The
+  // clause is APPENDED and never woven in: escalationCause
+  // (scripts/factory/ledger.mjs:166) matches PROSE for several rules that
+  // precede the budget rule, and the tokens that would re-route it are
+  // deliberately absent from this sentence. A kind whose action is `none` is
+  // annotated with nothing, so today's message stays byte-identical.
+  function providerAnnotated(err, run, stream) {
+    const failure = stream.providerFailure
+    if (!failure || (PROVIDER_RETRY_ACTIONS[failure.kind] ?? 'none') === 'none') return err
+    const state = providerRetryState(run)
+    err.providerFailure = failure
+    err.providerRetry = { attempts: state.attempts, bound: PROVIDER_RETRY_MAX, waited_ms: state.waited_ms }
+    err.message = `${err.message}\n[provider ${failure.kind} status ${failure.status}: ${state.attempts} of ${PROVIDER_RETRY_MAX} retry attempts spent over ${state.waited_ms}ms]`
+    return err
   }
   // A re-ask is not a new assignment: same id, same return path, same brief
   // (the reask contract at :416), and the SAME absolute deadline. A re-assign
@@ -1438,7 +1675,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
       const env = readEnvelopeOrFail(run)
       if (env) { const exitCode = parseExit(run.exit, read, exists); const stream = parseStream(run.stream, read, exists); const outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: env, timedOut: false, budgetRefused: stream.budgetRefused }); recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); return env }
       const exitCode = parseExit(run.exit, read, exists)
-      if (exitCode !== null) { const stream = parseStream(run.stream, read, exists); const outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: null, timedOut: false, budgetRefused: stream.budgetRefused }); recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); if (outcome === 'budget-refused') { const again = reaskOnFallback(run, returnPath, deadline, stream.providerFailure); if (again) return again() } throw outcomeError(run, outcome) }
+      if (exitCode !== null) { const stream = parseStream(run.stream, read, exists); const outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: null, timedOut: false, budgetRefused: stream.budgetRefused }); recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); const routed = providerRetryOnFailure(run, returnPath, deadline, stream); if (routed.act === 'retry') return routed.resume(); if (routed.act === 'none' && outcome === 'budget-refused') { const again = reaskOnFallback(run, returnPath, deadline, stream.providerFailure); if (again) return again() } throw providerAnnotated(outcomeError(run, outcome), run, stream) }
       sleep(WAIT_POLL_MS)
     }
     endDispatch(run, returnPath)
@@ -1447,7 +1684,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
     const raced = readEnvelopeOrFail(run)
     if (raced) { const stream = parseStream(run.stream, read, exists); const exitCode = parseExit(run.exit, read, exists); const outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: raced, timedOut: false, budgetRefused: stream.budgetRefused }); recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); return raced }
     const exitCode = parseExit(run.exit, read, exists), stream = parseStream(run.stream, read, exists), outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: null, timedOut: true, budgetRefused: stream.budgetRefused })
-    recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); if (outcome === 'budget-refused') { const again = reaskOnFallback(run, returnPath, deadline, stream.providerFailure); if (again) return again() } throw outcomeError(run, outcome)
+    recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); const routed = providerRetryOnFailure(run, returnPath, deadline, stream); if (routed.act === 'retry') return routed.resume(); if (routed.act === 'none' && outcome === 'budget-refused') { const again = reaskOnFallback(run, returnPath, deadline, stream.providerFailure); if (again) return again() } throw providerAnnotated(outcomeError(run, outcome), run, stream)
   }
   return { assign, wait }
 }

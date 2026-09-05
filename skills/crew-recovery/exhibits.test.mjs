@@ -7,9 +7,11 @@ import { ROOT } from '../../test/helpers.mjs'
 import { PLAN_SCOPE } from '../../crew/drive.mjs'
 import { SEAT_DIED_STAGE, SEAT_REFUSAL_STAGE } from '../../crew/seat-io.mjs'
 import { VARIANT_NAMES } from '../../crew/variants.mjs'
-import { assertAnchorsPinned } from '../qa-test-writing/anchor-pin.mjs'
+import { assertAnchorsPinned, pinnedKey } from '../qa-test-writing/anchor-pin.mjs'
 
 const HERE = fileURLToPath(new URL('./', import.meta.url))
+const MANIFEST = join(HERE, 'anchors.json')
+const pin = (expected) => pinnedKey({ manifestPath: MANIFEST, expected })
 const DRIVE = 'crew/drive.mjs'
 const STAGE_FILES = [DRIVE, 'crew/seat-io.mjs', 'crew/headless.mjs', 'crew/headless-rpc.mjs', 'crew/child.mjs', 'crew/reclaim.mjs', 'crew/daemon.mjs']
 const QUOTE = "['\"`]"
@@ -72,7 +74,7 @@ test('every reference file is routed from SKILL.md', () => {
 // Mutation killed: dropping one measured case lets a known instrument failure become an operator rule.
 test('the instruments checklist keeps each measured case', () => {
   const text = readText(join(HERE, 'references/instruments.md'))
-  for (const token of ['the WRAPPER SHELL', 'lazily-opened', 'invented a field', 'sibling lane polluted', 'compound command', 'pid-tracking watcher', 'six alphanumerics', '${PIPESTATUS[0]}', 'alive now', 'load average', 'scripts/factory/make-brief.mjs:783', 'crew/drive.mjs:52']) {
+  for (const token of ['the WRAPPER SHELL', 'lazily-opened', 'invented a field', 'sibling lane polluted', 'compound command', 'pid-tracking watcher', 'six alphanumerics', '${PIPESTATUS[0]}', 'alive now', 'load average', pin('function colourNeutralEnv(base = process.env)'), pin('builder: 2400, reviewer: 1800')]) {
     assert.ok(text.includes(token), `instruments.md must name ${token}`)
   }
 })

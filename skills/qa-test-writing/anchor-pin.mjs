@@ -359,4 +359,78 @@ export function repairCli(argv, log = console.log) {
   return result.refusals.length > 0 ? 1 : 0
 }
 
+// The third carrier (#918). A pinned KEY is a line number and a line number moves; the
+// manifest's VALUE is the content, and a repair preserves it verbatim. A carrier that
+// resolves the key from the content is therefore immune to every shift --repair-all makes.
+export function pinnedKey({ manifestPath, expected }) {
+  let manifest
+  try {
+    manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+  } catch (error) {
+    throw new Error(`could not read anchor manifest ${manifestPath}: ${error?.message || String(error)}`)
+  }
+  const keys = Object.entries(manifest).filter(([, value]) => value === expected).map(([key]) => key)
+  if (keys.length !== 1) throw new Error(`${manifestPath}: expected exactly one entry carrying ${JSON.stringify(expected)}, found ${keys.length}`)
+  return keys[0]
+}
+
+export function anchorManifestDirs(root) {
+  const found = []
+  const visit = (dir) => {
+    const entries = readdirSync(dir, { withFileTypes: true })
+    if (entries.some((entry) => entry.isFile() && entry.name === 'anchors.json')) found.push(dir)
+    for (const entry of entries) {
+      if (entry.isDirectory() && entry.name !== '.git' && entry.name !== 'node_modules') visit(join(dir, entry.name))
+    }
+  }
+  visit(root)
+  return found.sort()
+}
+
+export const EXTRA_CITATION_CARRIERS = Object.freeze(['test/review-procedure-loader.test.mjs'])
+
+// Stated blind spot: the scan covers the carrier SET only, and reports a literal that is
+// a CURRENTLY pinned key. A hardcoded literal in a test outside the set is invisible, and
+// so is one whose key a merge has already invalidated - by then the test is simply red.
+export const PINNED_LITERAL_BLIND_SPOT = 'scanned carriers only, and only a literal equal to a currently pinned key'
+
+export function citationCarrierTests(root) {
+  const found = []
+  const visit = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name)
+      if (entry.isDirectory() && entry.name !== '.git' && entry.name !== 'node_modules') visit(path)
+      else if (entry.isFile() && entry.name.endsWith('.test.mjs')) found.push(relative(root, path).replaceAll('\\', '/'))
+    }
+  }
+  const skills = join(root, 'skills')
+  if (existsSync(skills) && statSync(skills).isDirectory()) visit(skills)
+  for (const extra of EXTRA_CITATION_CARRIERS) if (existsSync(join(root, extra))) found.push(extra)
+  return [...new Set(found)].sort()
+}
+
+export function pinnedLiteralsInTests({ root, files = citationCarrierTests(root), manifestDirs = anchorManifestDirs(root) }) {
+  const pinned = new Map()
+  for (const dir of manifestDirs) {
+    const manifestPath = join(dir, 'anchors.json')
+    let manifest
+    try { manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) } catch { continue }
+    if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) continue
+    for (const key of Object.keys(manifest)) if (!pinned.has(key)) pinned.set(key, relative(root, manifestPath).replaceAll('\\', '/'))
+  }
+  const rows = []
+  for (const file of files) {
+    let lines
+    try { lines = readFileSync(join(root, file), 'utf8').split('\n') } catch { continue }
+    for (const [index, text] of lines.entries()) {
+      for (const [, rel, number] of text.matchAll(new RegExp(ANCHOR_PATTERN, 'g'))) {
+        if (!ANCHOR_ROOTS.includes(rel.split('/')[0])) continue
+        const key = `${rel}:${number}`
+        if (pinned.has(key)) rows.push({ file, line: index + 1, key, manifest: pinned.get(key) })
+      }
+    }
+  }
+  return { rows, keys: pinned.size, files, blindSpot: PINNED_LITERAL_BLIND_SPOT }
+}
+
 if (import.meta.main) process.exit(repairCli(process.argv.slice(2)))

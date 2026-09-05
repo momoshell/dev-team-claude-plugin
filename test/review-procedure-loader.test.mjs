@@ -4,10 +4,13 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { dirname, join } from 'node:path'
 import { ROOT, scratchDir } from './helpers.mjs'
+import { pinnedKey } from '../skills/qa-test-writing/anchor-pin.mjs'
 
 const LOADER = join(ROOT, '.agents/skills/review-procedure/scripts/load-guidelines.mjs')
 const GUIDELINES = join(ROOT, 'crew/guidelines/review-do-not-flag.md')
 const EMPTY_MARKER = 'no reviewer guidelines were loaded'
+const PR_REVIEW = join(ROOT, 'skills/pr-review/anchors.json')
+const pin = (expected) => pinnedKey({ manifestPath: PR_REVIEW, expected })
 const runLoader = (loader, cwd) => spawnSync(process.execPath, [loader], { cwd, encoding: 'utf8' })
 
 function emptyLoaderRun() {
@@ -68,13 +71,13 @@ test('the stated empty list is a blind spot, not a broken-checkout claim', () =>
 test('posture.md names the continuation gate on the shipped panel', () => {
   const text = readFileSync(join(ROOT, 'skills/pr-review/references/posture.md'), 'utf8')
   assert.ok(text.includes('ctx.continuation'))
-  assert.ok(text.includes('crew/drive.mjs:4664'))
+  assert.ok(text.includes(pin('const panel = ctx.continuation === true ? panelSeats(seatList) : null')))
 })
 
 test('posture.md names the tech-lead seat gate on the shipped panel', () => {
   const text = readFileSync(join(ROOT, 'skills/pr-review/references/posture.md'), 'utf8')
   assert.ok(text.includes('without a seated tech-lead'))
-  assert.ok(text.includes('crew/drive.mjs:582'))
+  assert.ok(text.includes(pin('export function panelSeats(seated) {')))
 })
 
 test('no review-skill document calls the shipped panel parked', () => {

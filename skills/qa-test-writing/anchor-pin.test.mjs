@@ -4,9 +4,12 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync
 import { join, relative } from 'node:path'
 import { tmpdir } from 'node:os'
 import { ROOT, git, scratchDir } from '../../test/helpers.mjs'
-import { anchorManifestDirs, assertAnchorsPinned, checkAnchors, checkSkillAnchors, citationCarrierTests, laneFence, MIN_EXPECTED_LENGTH, partitionShifts, pinnedKey, pinnedLiteralsInTests, repairAnchorsInPlace, repairCli, skillDocs, PINNED_LITERAL_BLIND_SPOT } from './anchor-pin.mjs'
+import { anchorManifestDirs, assertAnchorsPinned, checkAnchors, checkSkillAnchors, citationCarrierTests, collectAnchors, collectRanges, INVERTED_MARK, laneFence, MIN_EXPECTED_LENGTH, partitionShifts, pinnedKey, pinnedLiteralsInTests, repairAnchorsInPlace, repairCli, rewriteCitations, skillDocs, PINNED_LITERAL_BLIND_SPOT } from './anchor-pin.mjs'
 
 const EXPECTED = "KEY = 'anchored-sentinel-value'"
+const RANGE_EXPECTED = "RANGE = 'range-first-sentinel-value'"
+const RANGE_NEXT = "NEXT = 'range-second-sentinel-value'"
+const RANGE_THIRD = "THIRD = 'range-third-sentinel-value'"
 
 function fixture({ source = ['// header', `const ${EXPECTED}`, 'const other = 1', 'export default KEY', ''], line = 2, cite = `crew/sample.mjs:${line}`, manifest = { 'crew/sample.mjs:2': EXPECTED } } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'b177-anchor-pin-'))
@@ -716,4 +719,239 @@ test('citationCarrierTests covers every skills test plus the named extras', () =
   const result = pinnedLiteralsInTests({ root: ROOT })
   assert.ok(PINNED_LITERAL_BLIND_SPOT.length > 0)
   assert.equal(result.blindSpot, PINNED_LITERAL_BLIND_SPOT)
+})
+
+function anchorKey(line) { return `${'crew/sample.mjs'}:${line}` }
+function rangeCitation(start, end) { return `${'crew/sample.mjs'}:${start}-${end}` }
+
+test('a range whose endpoints are both manifest keys has both repaired', () => {
+  // Mutation killed: omitting the range rewrite leaves the citation's end stale after both pins move.
+  const fx = fixture({
+    source: ['// header', `const ${RANGE_EXPECTED}`, `const ${RANGE_NEXT}`, 'export default KEY', ''],
+    cite: rangeCitation(2, 3),
+    manifest: { [anchorKey(2)]: RANGE_EXPECTED, [anchorKey(3)]: RANGE_NEXT },
+  })
+  try {
+    writeFileSync(join(fx.root, 'crew/sample.mjs'), ['// header', '// inserted above', `const ${RANGE_EXPECTED}`, `const ${RANGE_NEXT}`, 'export default KEY', ''].join('\n'))
+    const result = repairAnchorsInPlace({ root: fx.root, skillDir: fx.skillDir, manifestPath: fx.manifestPath })
+    const manifest = JSON.parse(readFileSync(fx.manifestPath, 'utf8'))
+    const doc = readFileSync(fx.doc, 'utf8')
+    assert.deepEqual(result.refusals, [])
+    assert.equal(result.repairs.length, 2)
+    assert.equal(manifest[anchorKey(3)], RANGE_EXPECTED)
+    assert.equal(manifest[anchorKey(4)], RANGE_NEXT)
+    assert.equal(Object.hasOwn(manifest, anchorKey(2)), false)
+    assert.equal(doc.includes(rangeCitation(3, 4)), true)
+    assert.equal(doc.includes(rangeCitation(2, 3)), false)
+  } finally {
+    dispose(fx)
+  }
+})
+
+test('a manifest-pinned range end with an unpinned start is red in BOTH passes', () => {
+  // Mutation killed: excusing a manifest-pinned end in repairAnchors lets it move alone and leaves the range literal stale.
+  const fx = fixture({
+    source: ['// header', `const ${RANGE_EXPECTED}`, `const ${RANGE_NEXT}`, ''],
+    cite: rangeCitation(2, 3),
+    manifest: { [anchorKey(3)]: RANGE_NEXT },
+  })
+  try {
+    const checked = checkAnchors({ root: fx.root, docs: [fx.doc], manifest: fx.manifest })
+    const repaired = repairAnchorsInPlace({ root: fx.root, skillDir: fx.skillDir, manifestPath: fx.manifestPath })
+    assert.ok(checked.failures.includes(`${anchorKey(2)}: manifest has no entry`))
+    assert.ok(repaired.refusals.includes(`${anchorKey(2)}: manifest has no entry`))
+    assert.ok(repaired.refusals.includes(`${anchorKey(3)}: manifest entry is orphaned (no citation)`))
+    assert.deepEqual(repaired.repairs, [])
+    assert.equal(readFileSync(fx.doc, 'utf8').includes(rangeCitation(2, 3)), true)
+  } finally {
+    dispose(fx)
+  }
+})
+
+test('a range-only end is checked, not excused', () => {
+  // Mutation killed: omitting manifest-backed range ends hides their shift and changes the anchor count.
+  const fx = fixture({
+    source: ['// header', `const ${RANGE_EXPECTED}`, `const ${RANGE_NEXT}`, ''],
+    cite: rangeCitation(2, 3),
+    manifest: { [anchorKey(2)]: RANGE_EXPECTED, [anchorKey(3)]: RANGE_NEXT },
+  })
+  try {
+    writeFileSync(join(fx.root, 'crew/sample.mjs'), ['// header', `const ${RANGE_EXPECTED}`, 'const spacer = 1', `const ${RANGE_NEXT}`, ''].join('\n'))
+    const result = checkAnchors({ root: fx.root, docs: [fx.doc], manifest: fx.manifest })
+    assert.equal(result.anchors, collectAnchors({ docs: [fx.doc] }).length)
+    assert.equal(result.failures.some((failure) => failure.includes('orphan')), false)
+    assert.deepEqual(result.shifted, [{ key: anchorKey(3), rel: 'crew/sample.mjs', from: 3, to: 4, nextKey: anchorKey(4) }])
+  } finally {
+    dispose(fx)
+  }
+})
+
+test('a range-only end whose content rotted is reported as rot, not as an orphan', () => {
+  // Mutation killed: leaving a rotted range end out of endpoint validation mislabels it as an orphan.
+  const fx = fixture({
+    source: ['// header', `const ${RANGE_EXPECTED}`, `const ${RANGE_NEXT}`, ''],
+    cite: rangeCitation(2, 3),
+    manifest: { [anchorKey(2)]: RANGE_EXPECTED, [anchorKey(3)]: RANGE_NEXT },
+  })
+  try {
+    writeFileSync(join(fx.root, 'crew/sample.mjs'), ['// header', `const ${RANGE_EXPECTED}`, 'const spacer = 1', ''].join('\n'))
+    const result = checkAnchors({ root: fx.root, docs: [fx.doc], manifest: fx.manifest })
+    assert.ok(result.failures.some((failure) => failure.startsWith(`${anchorKey(3)}:`) && failure.includes('occur on exactly one target line')))
+    assert.equal(result.failures.some((failure) => failure.includes('orphan')), false)
+  } finally {
+    dispose(fx)
+  }
+})
+
+test('a rotted endpoint withholds its whole range', () => {
+  // Mutation killed: allowing a valid peer to settle after its range partner rots commits a half-repair.
+  const fx = fixture({
+    source: ['// header', `const ${RANGE_EXPECTED}`, `const ${RANGE_NEXT}`],
+    cite: rangeCitation(2, 3),
+    manifest: { [anchorKey(2)]: RANGE_EXPECTED, [anchorKey(3)]: RANGE_NEXT },
+  })
+  const before = bytes(fx)
+  try {
+    writeFileSync(join(fx.root, 'crew/sample.mjs'), ['// header', '// inserted above', '// second inserted', `const ${RANGE_EXPECTED}`].join('\n'))
+    const result = repairAnchorsInPlace({ root: fx.root, skillDir: fx.skillDir, manifestPath: fx.manifestPath })
+    assert.deepEqual(result.repairs, [])
+    assert.equal(bytes(fx), before)
+    assert.ok(result.refusals.some((refusal) => refusal.includes(anchorKey(3)) && refusal.includes('rot, not a shift')))
+    assert.ok(result.refusals.some((refusal) => refusal.includes(anchorKey(2)) && refusal.includes('withheld')))
+  } finally {
+    dispose(fx)
+  }
+})
+
+test('a collision-pending endpoint withholds its whole range', () => {
+  // Mutation killed: committing a peer while its collision-pending range endpoint is withdrawn splits the citation.
+  const fx = fixture({
+    source: ['// header', `const ${RANGE_EXPECTED}`, `const ${RANGE_NEXT}`, 'const spacer = 1', `const ${RANGE_THIRD}`, ''],
+    cite: `${rangeCitation(2, 3)} and ${anchorKey(5)}`,
+    manifest: { [anchorKey(2)]: RANGE_EXPECTED, [anchorKey(3)]: RANGE_NEXT, [anchorKey(5)]: RANGE_THIRD },
+  })
+  const before = bytes(fx)
+  try {
+    writeFileSync(join(fx.root, 'crew/sample.mjs'), ['// header', 'const spacer = 1', `const ${RANGE_THIRD}`, `const ${RANGE_EXPECTED}`, `const ${RANGE_NEXT}`, ''].join('\n'))
+    const result = repairAnchorsInPlace({ root: fx.root, skillDir: fx.skillDir, manifestPath: fx.manifestPath })
+    assert.deepEqual(result.repairs, [])
+    assert.equal(bytes(fx), before)
+    assert.ok(result.refusals.some((refusal) => refusal.includes('already declared by another anchor')))
+  } finally {
+    dispose(fx)
+  }
+})
+
+test('a single-key rewrite does not bind inside a range', () => {
+  // Mutation killed: removing the range-start guard lets a single-key rewrite move only the start endpoint.
+  const text = `Exhibit: \`${rangeCitation(2, 9)}\`.`
+  const rewritten = rewriteCitations(text, new Map([[anchorKey(2), anchorKey(3)]]))
+  assert.equal(rewritten, text)
+})
+
+test('a range whose end is in no manifest refuses by name and freezes the start key', () => {
+  // Mutation killed: allowing a frozen start to move leaves standalone prose and an unpinned range split.
+  const fx = fixture({
+    source: ['// header', `const ${RANGE_EXPECTED}`, 'export default KEY'],
+    cite: anchorKey(2),
+    manifest: { [anchorKey(2)]: RANGE_EXPECTED },
+  })
+  const notes = join(fx.skillDir, 'references/notes.md')
+  writeFileSync(notes, `# notes\n\nExhibit: \`${rangeCitation(2, 9)}\`.\n`)
+  const before = {
+    manifest: readFileSync(fx.manifestPath, 'utf8'),
+    skill: readFileSync(fx.doc, 'utf8'),
+    notes: readFileSync(notes, 'utf8'),
+  }
+  try {
+    writeFileSync(join(fx.root, 'crew/sample.mjs'), ['// header', '// inserted above', `const ${RANGE_EXPECTED}`, 'export default KEY'].join('\n'))
+    const output = []
+    const code = repairCli(['--repair', fx.skillDir, '--root', fx.root], output.push.bind(output))
+    assert.equal(code, 1)
+    assert.equal(readFileSync(fx.manifestPath, 'utf8'), before.manifest)
+    assert.equal(readFileSync(fx.doc, 'utf8'), before.skill)
+    assert.equal(readFileSync(notes, 'utf8'), before.notes)
+    assert.ok(output.some((line) => line.includes(rangeCitation(2, 9)) && line.includes(anchorKey(9))))
+  } finally {
+    dispose(fx)
+  }
+})
+
+function invertedCitation() { return rangeCitation(9, 2) }
+
+test('an inverted range is reported with no manifest at all', () => {
+  // Mutation killed: skipping inversion reporting in checkAnchors lets an unpinned damaged pair pass.
+  const fx = fixture({ source: ['// header', `const ${RANGE_EXPECTED}`, 'export default KEY'], cite: invertedCitation(), manifest: {} })
+  try {
+    const result = checkAnchors({ root: fx.root, docs: [fx.doc], manifest: {} })
+    assert.ok(result.failures.some((failure) => failure.includes(invertedCitation()) && failure.includes(INVERTED_MARK)))
+  } finally {
+    dispose(fx)
+  }
+})
+
+test('the repair pass refuses an inverted range', () => {
+  // Mutation killed: skipping inversion reporting in repairAnchors lets the sanctioned repair pass walk past damage.
+  const fx = fixture({ source: ['// header', `const ${RANGE_EXPECTED}`, 'export default KEY'], cite: invertedCitation(), manifest: {} })
+  const output = []
+  try {
+    assert.equal(repairCli(['--repair', fx.skillDir, '--root', fx.root], output.push.bind(output)), 1)
+    assert.ok(output.some((line) => line.includes(invertedCitation()) && line.includes(INVERTED_MARK)))
+  } finally {
+    dispose(fx)
+  }
+})
+
+test('a blocked range stays silent while nothing has drifted', () => {
+  // Mutation killed: refusing a stable start-only range would break clean post-merge repair-all runs.
+  const fx = fixture({ cite: rangeCitation(2, 9), manifest: { [anchorKey(2)]: EXPECTED } })
+  const before = bytes(fx)
+  const output = []
+  try {
+    assert.equal(repairCli(['--repair', fx.skillDir, '--root', fx.root], output.push.bind(output)), 0)
+    assert.deepEqual(output, [])
+    assert.equal(bytes(fx), before)
+  } finally {
+    dispose(fx)
+  }
+})
+
+test('a repaired pair that inverts is written truthfully and reported', () => {
+  // Mutation killed: straightening a repaired inverted pair would hide the source's true endpoint order.
+  const fx = fixture({
+    source: ['// header', `const ${RANGE_EXPECTED}`, `const ${RANGE_NEXT}`, 'const spacer = 1', 'export default KEY', ''],
+    cite: rangeCitation(2, 3),
+    manifest: { [anchorKey(2)]: RANGE_EXPECTED, [anchorKey(3)]: RANGE_NEXT },
+  })
+  try {
+    writeFileSync(join(fx.root, 'crew/sample.mjs'), ['// header', `const ${RANGE_NEXT}`, 'const spacer = 1', `const ${RANGE_EXPECTED}`, 'export default KEY', ''].join('\n'))
+    const output = []
+    assert.equal(repairCli(['--repair', fx.skillDir, '--root', fx.root], output.push.bind(output)), 1)
+    assert.ok(output.some((line) => line.includes(rangeCitation(4, 2)) && line.includes(INVERTED_MARK)))
+    assert.equal(readFileSync(fx.doc, 'utf8').includes(rangeCitation(4, 2)), true)
+    const manifest = JSON.parse(readFileSync(fx.manifestPath, 'utf8'))
+    assert.equal(manifest[anchorKey(4)], RANGE_EXPECTED)
+    assert.equal(manifest[anchorKey(2)], RANGE_NEXT)
+  } finally {
+    dispose(fx)
+  }
+})
+
+test('collectRanges ignores a path outside ANCHOR_ROOTS', () => {
+  // Mutation killed: accepting an outside-root range would make unrelated prose participate in pin repair.
+  const fx = fixture({ cite: 'foo/bar.mjs:1-2', manifest: {} })
+  try {
+    assert.deepEqual(collectRanges({ docs: [fx.doc] }), [])
+  } finally {
+    dispose(fx)
+  }
+})
+
+test('processes.md cites the manifest-resolved key', () => {
+  // Mutation killed: replacing one exhibit with an unpinned line breaks proof against the live manifest key.
+  const manifestPath = join(ROOT, 'skills/devops/anchors.json')
+  const key = pinnedKey({ manifestPath, expected: 'unknown boot descendant refusal' })
+  const text = readFileSync(join(ROOT, 'skills/devops/references/processes.md'), 'utf8')
+  assert.equal(text.split(key).length - 1, 3)
+  assert.deepEqual(text.match(/crew\/crew\.mjs:\d+-\d+/g) || [], [])
 })

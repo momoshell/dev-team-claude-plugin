@@ -6,6 +6,7 @@ import { execFileSync } from 'node:child_process'
 export const MIN_EXPECTED_LENGTH = 12
 export const ANCHOR_ROOTS = Object.freeze(['crew', 'scripts', 'test', 'docs', 'skills', 'visualizer', 'tasks', '.github'])
 export const ANCHOR_PATTERN = '([A-Za-z0-9_.-]+(?:\\/[A-Za-z0-9_.-]+)+\\.(?:mjs|ts|js|json|md|sh|yml)):(\\d+)'
+export const RANGE_PATTERN = `${ANCHOR_PATTERN}-(\\d+)(?!\\d)`
 
 const ANCHOR_RE = new RegExp(ANCHOR_PATTERN, 'g')
 
@@ -34,6 +35,31 @@ export function collectAnchors({ docs }) {
     }
   }
   return anchors
+}
+
+// A range citation has TWO endpoints and only the START is ever a manifest key: the end
+// is unpinned text no manifest, no --repair-all and no exhibits test can see. Moving the
+// start alone mints a pair that READS maintained - at 724bec1 a repair moved the start of
+// a crew/crew.mjs range to 801 and left the end at 667, inverting it. #937
+export function collectRanges({ docs }) {
+  const ranges = []
+  for (const doc of docs) {
+    const text = readFileSync(doc, 'utf8')
+    for (const [, rel, start, end] of text.matchAll(new RegExp(RANGE_PATTERN, 'g'))) {
+      if (!ANCHOR_ROOTS.includes(rel.split('/')[0])) continue
+      ranges.push({ doc, rel, start: Number(start), end: Number(end), text: `${rel}:${start}-${end}`, startKey: `${rel}:${start}`, endKey: `${rel}:${end}` })
+    }
+  }
+  return ranges
+}
+
+export const INVERTED_MARK = 'inverted range'
+
+// Mechanically detectable with no manifest at all, which is the point: start > end is
+// proof of a previous half-repair or a typo, and it is the one check that would have
+// caught both instances #937 measured.
+export function invertedRangeFailure(range) {
+  return `${range.text}: ${INVERTED_MARK} - start ${range.start} is after end ${range.end} in ${range.doc}; no manifest pins a range end, so this is a half-repair or a typo`
 }
 
 function markdownIn(dir) {
@@ -76,17 +102,31 @@ function readTargetLines(root, anchor) {
 
 export function checkAnchors({ root, docs, manifest }) {
   let anchors
+  let ranges
   try {
     anchors = collectAnchors({ docs })
+    ranges = collectRanges({ docs })
   } catch (error) {
     return { anchors: 0, failures: [`citation docs could not be read (${error?.code || error?.message || String(error)})`], shifted: [] }
   }
   const failures = []
   const shifted = []
   const declarations = manifest && typeof manifest === 'object' && !Array.isArray(manifest) ? manifest : {}
-  const cited = new Set(anchors.map(({ key }) => key))
+  // A manifest-backed range END is a CITATION, and it must be VALIDATED, not merely excused.
+  // Adding it to `cited` alone would stop the orphan report without ever checking the end for
+  // shift, rot, ambiguity or an unreadable target - hiding the blind spot instead of closing it.
+  // The count stays anchors.length: two exhibits assert it exactly (80 and 135). #937
+  const pinnedRangeEnds = ranges.filter((range) => Object.hasOwn(declarations, range.endKey))
+  const checkEndpoints = [...anchors]
+  const seenEndpoint = new Set(anchors.map(({ key }) => key))
+  for (const range of pinnedRangeEnds) {
+    if (seenEndpoint.has(range.endKey)) continue
+    seenEndpoint.add(range.endKey)
+    checkEndpoints.push({ doc: range.doc, rel: range.rel, line: range.end, key: range.endKey })
+  }
+  const cited = new Set(checkEndpoints.map(({ key }) => key))
 
-  for (const anchor of anchors) {
+  for (const anchor of checkEndpoints) {
     const { lines, failure } = readTargetLines(root, anchor)
     if (failure) { failures.push(failure); continue }
 
@@ -109,6 +149,15 @@ export function checkAnchors({ root, docs, manifest }) {
     const at = lines.findIndex((line) => lineCarries(line, expected)) + 1
     if (at === anchor.line) continue
     shifted.push({ key: anchor.key, rel: anchor.rel, from: anchor.line, to: at, nextKey: `${anchor.rel}:${at}` })
+  }
+
+  const invertedSeen = new Set()
+  for (const range of ranges) {
+    if (range.start <= range.end) continue
+    const failure = invertedRangeFailure(range)
+    if (invertedSeen.has(failure)) continue
+    invertedSeen.add(failure)
+    failures.push(failure)
   }
 
   for (const key of Object.keys(declarations)) {
@@ -214,70 +263,33 @@ export function assertAnchorsPinned({ root, skillDir, manifestPath, minAnchors, 
 
 function escapeLiteral(value) { return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') }
 
+// A rewrite key is EITHER a single `rel:line` or a whole range literal `rel:start-end`.
+// Range alternatives come first so a range binds as one unit, and the single-key
+// alternative refuses to bind in front of `-<digits>`: without that guard a single-key
+// rewrite reaches into a range and moves the start alone. #937
+function isRangeKey(key) { return /:\d+-\d+$/.test(key) }
+
+const NOT_A_LONGER_NUMBER = '(?!\\d)'
+const NOT_A_RANGE_START = '(?!-\\d)'
+
 export function rewriteCitations(text, rewrites) {
   if (!(rewrites instanceof Map) || rewrites.size === 0) return text
-  const pattern = new RegExp(`(${[...rewrites.keys()].map(escapeLiteral).join('|')})(?!\\d)`, 'g')
+  const keys = [...rewrites.keys()]
+  const rangeKeys = keys.filter((key) => isRangeKey(key))
+  const singles = keys.filter((key) => !isRangeKey(key))
+  const parts = []
+  if (rangeKeys.length > 0) parts.push(`(?:${rangeKeys.map(escapeLiteral).join('|')})${NOT_A_LONGER_NUMBER}`)
+  if (singles.length > 0) parts.push(`(?:${singles.map(escapeLiteral).join('|')})${NOT_A_LONGER_NUMBER}${NOT_A_RANGE_START}`)
+  const pattern = new RegExp(`(${parts.join('|')})`, 'g')
   return text.replace(pattern, (match) => rewrites.get(match))
 }
 
-export function repairAnchors({ root, docs, manifest, repairAll = false }) {
-  let anchors
-  try {
-    anchors = collectAnchors({ docs })
-  } catch (error) {
-    return { anchors: 0, repairs: [], refusals: [`citation docs could not be read (${error?.code || error?.message || String(error)})`], manifest, edits: [] }
-  }
-  const declarations = manifest && typeof manifest === 'object' && !Array.isArray(manifest) ? manifest : {}
-  const cited = new Set(anchors.map(({ key }) => key))
-  const refusals = []
-  const repairs = []
-  const rewrites = new Map()
-  const candidates = []
-  const seen = new Set()
-  const repairFence = laneFence({ root })
-  const repairPaths = new Set(repairFence.paths)
-
-  for (const anchor of anchors) {
-    if (seen.has(anchor.key)) continue
-    seen.add(anchor.key)
-    const { lines, failure } = readTargetLines(root, anchor)
-    if (failure) { refusals.push(failure); continue }
-    if (!Object.hasOwn(declarations, anchor.key)) {
-      refusals.push(`${anchor.key}: manifest has no entry`)
-      continue
-    }
-    const expected = declarations[anchor.key]
-    if (typeof expected !== 'string' || expected.trim().length < MIN_EXPECTED_LENGTH) {
-      refusals.push(`${anchor.key}: expected ${display(expected)} must be at least ${MIN_EXPECTED_LENGTH} non-space characters`)
-      continue
-    }
-    const found = []
-    for (let i = 0; i < lines.length; i += 1) if (lineCarries(lines[i], expected)) found.push(i + 1)
-    if (found.length === 0) {
-      refusals.push(`${anchor.key}: content appears nowhere in ${anchor.rel}; this is rot, not a shift`)
-      continue
-    }
-    if (found.length > 1) {
-      refusals.push(`${anchor.key}: content occurs ${found.length} times in ${anchor.rel}; a repair refuses to guess`)
-      continue
-    }
-    const nextLine = found[0]
-    if (nextLine === anchor.line) continue
-    const nextKey = `${anchor.rel}:${nextLine}`
-    // A measured fence authorizes rewriting only a target this lane owns unless an
-    // operator explicitly requests a repair-all pass for committed external drift.
-    if (!repairAll && repairFence.measured && !repairPaths.has(anchor.rel)) continue
-    candidates.push({ key: anchor.key, rel: anchor.rel, from: anchor.line, to: nextLine, nextKey, expected })
-  }
-
-  // Collision is judged against a LIVE occupancy map, not the manifest as it was at
-  // the start of the pass: an anchor that VACATES a line earlier in the same pass no
-  // longer occupies it. The settle loop repeats while any candidate lands, so the
-  // order citations appear in the docs stops deciding the outcome; only a true cycle
-  // is refused. Before this, repairing crew/daemon.test.mjs:253 -> :255 refused
-  // because :255's own anchor had not moved yet, and two of four manifests needed a
-  // hand repair. #859
+// The settle loop, unchanged in substance and extracted so an atomic component can be
+// withdrawn and the survivors re-settled from a clean occupancy map. Collision is judged
+// against LIVE occupancy, so an anchor that vacates a line no longer occupies it. #859, #937
+function settleRepairs({ declarations, candidates }) {
   const live = new Map(Object.entries(declarations))
+  const repairs = []
   let pending = candidates
   let progress = true
   while (progress && pending.length > 0) {
@@ -287,13 +299,186 @@ export function repairAnchors({ root, docs, manifest, repairAll = false }) {
       if (live.has(candidate.nextKey) && live.get(candidate.nextKey) !== candidate.expected) { stuck.push(candidate); continue }
       live.delete(candidate.key)
       live.set(candidate.nextKey, candidate.expected)
-      rewrites.set(candidate.key, candidate.nextKey)
       repairs.push({ key: candidate.key, rel: candidate.rel, from: candidate.from, to: candidate.to, nextKey: candidate.nextKey })
       progress = true
     }
     pending = stuck
   }
-  for (const candidate of pending) refusals.push(`${candidate.key}: line ${candidate.to} is already declared by another anchor`)
+  return { repairs, pending }
+}
+
+export function repairAnchors({ root, docs, manifest, repairAll = false }) {
+  let anchors
+  let ranges
+  try {
+    anchors = collectAnchors({ docs })
+    ranges = collectRanges({ docs })
+  } catch (error) {
+    return { anchors: 0, repairs: [], refusals: [`citation docs could not be read (${error?.code || error?.message || String(error)})`], manifest, edits: [] }
+  }
+  const declarations = manifest && typeof manifest === 'object' && !Array.isArray(manifest) ? manifest : {}
+  const cited = new Set(anchors.map(({ key }) => key))
+  const refusals = []
+  const repairs = []
+  const rewrites = new Map()
+  const seen = new Set()
+  const repairFence = laneFence({ root })
+  const repairPaths = new Set(repairFence.paths)
+
+  const invertedRefused = new Set()
+  const invertedRefusals = []
+  for (const range of ranges) {
+    if (range.start <= range.end) continue
+    const refusal = invertedRangeFailure(range)
+    if (invertedRefused.has(refusal)) continue
+    invertedRefused.add(refusal)
+    invertedRefusals.push(refusal)
+  }
+
+  // A range whose END is in no manifest can never be repaired, so its START may not move
+  // EITHER: a manifest key is global, and moving it for a standalone citation elsewhere
+  // leaves the untouched range start undeclared - the manifest/prose split. The unpinned
+  // end is not a manifest key and nothing else is frozen; unrelated keys stay repairable.
+  const frozenKeys = new Map()
+  const pairs = []
+  for (const range of ranges) {
+    if (!Object.hasOwn(declarations, range.startKey)) continue
+    if (Object.hasOwn(declarations, range.endKey)) { pairs.push(range); continue }
+    if (frozenKeys.has(range.startKey)) continue
+    frozenKeys.set(range.startKey, `${range.text}: range end ${range.endKey} is in no manifest, so the start cannot move alone; the prose is left untouched`)
+  }
+
+  const repairEndpoints = [...anchors]
+  const seenEndpoint = new Set(anchors.map(({ key }) => key))
+  for (const range of pairs) {
+    if (seenEndpoint.has(range.endKey)) continue
+    seenEndpoint.add(range.endKey)
+    repairEndpoints.push({ doc: range.doc, rel: range.rel, line: range.end, key: range.endKey })
+  }
+  for (const endpoint of repairEndpoints) cited.add(endpoint.key)
+
+  // PHASE 1 - classify every endpoint BEFORE anything is committed. `moving` is the only
+  // state that can become a repair; `refused`, `frozen` and `gated` block a whole component.
+  const state = new Map()
+  for (const anchor of repairEndpoints) {
+    if (seen.has(anchor.key)) continue
+    seen.add(anchor.key)
+    const { lines, failure } = readTargetLines(root, anchor)
+    if (failure) { state.set(anchor.key, { kind: 'refused', why: failure }); continue }
+    if (!Object.hasOwn(declarations, anchor.key)) { state.set(anchor.key, { kind: 'refused', why: `${anchor.key}: manifest has no entry` }); continue }
+    const expected = declarations[anchor.key]
+    if (typeof expected !== 'string' || expected.trim().length < MIN_EXPECTED_LENGTH) {
+      state.set(anchor.key, { kind: 'refused', why: `${anchor.key}: expected ${display(expected)} must be at least ${MIN_EXPECTED_LENGTH} non-space characters` })
+      continue
+    }
+    const found = []
+    for (let i = 0; i < lines.length; i += 1) if (lineCarries(lines[i], expected)) found.push(i + 1)
+    if (found.length === 0) { state.set(anchor.key, { kind: 'refused', why: `${anchor.key}: content appears nowhere in ${anchor.rel}; this is rot, not a shift` }); continue }
+    if (found.length > 1) { state.set(anchor.key, { kind: 'refused', why: `${anchor.key}: content occurs ${found.length} times in ${anchor.rel}; a repair refuses to guess` }); continue }
+    const nextLine = found[0]
+    if (nextLine === anchor.line) { state.set(anchor.key, { kind: 'stable' }); continue }
+    if (!repairAll && repairFence.measured && !repairPaths.has(anchor.rel)) { state.set(anchor.key, { kind: 'gated' }); continue }
+    if (frozenKeys.has(anchor.key)) { state.set(anchor.key, { kind: 'frozen', why: frozenKeys.get(anchor.key) }); continue }
+    state.set(anchor.key, { kind: 'moving', rel: anchor.rel, from: anchor.line, to: nextLine, nextKey: `${anchor.rel}:${nextLine}`, expected })
+  }
+
+  // Refusals are emitted in ENDPOINT order, which is the order this loop used before, so an
+  // existing fixture's refusal list keeps the position it has always had.
+  const frozenSeen = new Set()
+  for (const [, entry] of state) {
+    if (entry.kind === 'refused') refusals.push(entry.why)
+    else if (entry.kind === 'frozen' && !frozenSeen.has(entry.why)) { frozenSeen.add(entry.why); refusals.push(entry.why) }
+  }
+
+  // PHASE 2 - connected components over both-pinned ranges. An edge joins a range's two
+  // endpoint keys; a key in no range has no component and no peer to wait for.
+  const component = new Map()
+  const members = new Map()
+  let componentCount = 0
+  const ensureComponent = (key) => {
+    if (component.has(key)) return
+    componentCount += 1
+    component.set(key, componentCount)
+    members.set(componentCount, [key])
+  }
+  const joinComponents = (a, b) => {
+    const target = component.get(a)
+    const source = component.get(b)
+    if (target === source) return
+    for (const key of members.get(source)) { component.set(key, target); members.get(target).push(key) }
+    members.delete(source)
+  }
+  for (const range of pairs) {
+    ensureComponent(range.startKey)
+    ensureComponent(range.endKey)
+    joinComponents(range.startKey, range.endKey)
+  }
+
+  // PHASE 3 - a component with ANY endpoint that cannot move is committed in full or not at
+  // all. Half a component is exactly the manifest/prose split #937 measured.
+  const blockedComponents = new Set()
+  for (const [key, id] of component) {
+    const kind = state.get(key)?.kind
+    if (kind === 'refused' || kind === 'frozen' || kind === 'gated') blockedComponents.add(id)
+  }
+
+  // PHASE 4 - settle, withdraw any component a collision left half-landed, and settle again
+  // from a clean occupancy map. Each pass strictly shrinks the candidate set, so it ends.
+  const candidateOf = (key) => {
+    const entry = state.get(key)
+    return { key, rel: entry.rel, from: entry.from, to: entry.to, nextKey: entry.nextKey, expected: entry.expected }
+  }
+  const movingKeys = [...state.entries()].filter(([, entry]) => entry.kind === 'moving').map(([key]) => key)
+  const collisionRefusals = new Map()
+  let admitted = movingKeys.filter((key) => !blockedComponents.has(component.get(key)))
+  let settled = { repairs: [], pending: [] }
+  for (;;) {
+    settled = settleRepairs({ declarations, candidates: admitted.map(candidateOf) })
+    const withdrawing = new Set()
+    for (const candidate of settled.pending) {
+      const id = component.get(candidate.key)
+      if (id === undefined || blockedComponents.has(id)) continue
+      withdrawing.add(id)
+      collisionRefusals.set(candidate.key, `${candidate.key}: line ${candidate.to} is already declared by another anchor`)
+    }
+    if (withdrawing.size === 0) break
+    for (const id of withdrawing) blockedComponents.add(id)
+    admitted = admitted.filter((key) => !blockedComponents.has(component.get(key)))
+  }
+  repairs.push(...settled.repairs)
+  for (const candidate of settled.pending) refusals.push(`${candidate.key}: line ${candidate.to} is already declared by another anchor`)
+  for (const [, refusal] of collisionRefusals) refusals.push(refusal)
+
+  // A key that could have moved but did not, because a peer could not, must say so: silence
+  // is what this whole issue is about.
+  const withheldSeen = new Set()
+  for (const key of movingKeys) {
+    const id = component.get(key)
+    if (id === undefined || !blockedComponents.has(id)) continue
+    const refusal = `${key}: withheld because a peer endpoint of the same range citation cannot move; a range is repaired whole or not at all`
+    if (withheldSeen.has(refusal)) continue
+    withheldSeen.add(refusal)
+    refusals.push(refusal)
+  }
+  for (const refusal of invertedRefusals) refusals.push(refusal)
+
+  for (const repair of repairs) rewrites.set(repair.key, repair.nextKey)
+
+  // The range literal is rewritten from the SETTLED key map, so a pair whose endpoints moved
+  // by different amounts still lands on two lines that each carry their pinned content. A
+  // repaired pair that inverts is written truthfully and reported, never silently
+  // straightened: both numbers are facts about the code.
+  const moved = new Map(repairs.map((repair) => [repair.key, repair.nextKey]))
+  const lineOf = (key) => Number(key.slice(key.lastIndexOf(':') + 1))
+  for (const range of pairs) {
+    if (blockedComponents.has(component.get(range.startKey))) continue
+    const nextStart = lineOf(moved.get(range.startKey) || range.startKey)
+    const nextEnd = lineOf(moved.get(range.endKey) || range.endKey)
+    const nextText = `${range.rel}:${nextStart}-${nextEnd}`
+    if (nextText === range.text) continue
+    rewrites.set(range.text, nextText)
+    if (nextStart > nextEnd) refusals.push(invertedRangeFailure({ text: nextText, start: nextStart, end: nextEnd, doc: range.doc }))
+  }
 
   for (const key of Object.keys(declarations)) {
     if (!cited.has(key)) refusals.push(`${key}: manifest entry is orphaned (no citation)`)

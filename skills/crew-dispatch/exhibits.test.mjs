@@ -121,7 +121,7 @@ test('the batch reference names every refusal the sequence can hit', () => {
 // Mutation killed: widening the measured shell claim or dropping a zero-count guard must make this test fail.
 test('the shell reference records the measured zero counts and no stronger claim', () => {
   const text = readText(join(HERE, 'references/shell.md'))
-  for (const token of ['shell: true', '0 occurrences', 'process.env.SHELL', "GATE_REAP_SHELL = '/bin/bash'", 'crew/drive.mjs:572', 'crew/drive.test.mjs:3116', '${!arr[@]}', 'zsh does not word-split', 'execSync']) {
+  for (const token of ['shell: true', '0 occurrences', 'process.env.SHELL', "GATE_REAP_SHELL = '/bin/bash'", 'crew/drive.mjs:610', 'crew/drive.test.mjs:3120', '${!arr[@]}', 'zsh does not word-split', 'execSync']) {
     assert.ok(text.includes(token), `shell.md must name ${token}`)
   }
   assert.equal(text.includes('every subprocess uses an argv array'), false)

@@ -36,5 +36,5 @@
   "crew/crew.mjs:1953": "SIGNAL_EXIT_CODES = Object.freeze({ SIGTERM: 143",
   "crew/crew.mjs:2771": "every member ran on a surface-less transport",
   "scripts/factory/ledger.mjs:5396": "terminal_reason: sig, terminal_actor: 'finalizer'",
-  "crew/drive.mjs:5898": "const slotNap = (ms) =>"
+  "crew/drive.mjs:6108": "const slotNap = (ms) =>"
 }

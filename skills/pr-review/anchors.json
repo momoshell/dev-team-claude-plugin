@@ -7,12 +7,12 @@
   "crew/roles/reviewer.md:20": "Out-of-plan edits are findings even when harmless.",
   "crew/roles/reviewer.md:51": "\"details\": { \"review_path\": \"<abs>\", \"verdict\": \"pass\"|\"changes-needed\",",
   "crew/roles/reviewer.md:66": "`findings` is optional: omit it and the run behaves exactly as before.",
-  "crew/drive.mjs:2407": "for (const match of narration.matchAll(/[A-Za-z0-9_.-]+\\/[A-Za-z0-9_./-]+/g)) {",
-  "crew/drive.mjs:1704": "export function validateScopeEntries(entries) {",
-  "crew/drive.mjs:5040": "const review = panel ? panelReview(roundNo, panel) : assignAndWait('reviewer', revBrief, 'review')",
-  "crew/drive.mjs:4593": "const panel = ctx.continuation === true ? panelSeats(seatList) : null",
-  "crew/drive.mjs:544": "export function panelSeats(seated) {",
-  "crew/drive.mjs:4243": "const panelReview = (n, panel) => {",
-  "crew/drive.mjs:4301": "const fused = fuseFindings(findingsOf(aEnv), findingsOf(bEnv), {",
-  "crew/drive.mjs:4371": "const adjudicated = adjudicatePanel(allocatedDivergent, adjEnv.details)"
+  "crew/drive.mjs:2445": "for (const match of narration.matchAll(/[A-Za-z0-9_.-]+\\/[A-Za-z0-9_./-]+/g)) {",
+  "crew/drive.mjs:1742": "export function validateScopeEntries(entries) {",
+  "crew/drive.mjs:5111": "const review = panel ? panelReview(roundNo, panel) : assignAndWait('reviewer', revBrief, 'review')",
+  "crew/drive.mjs:4664": "const panel = ctx.continuation === true ? panelSeats(seatList) : null",
+  "crew/drive.mjs:582": "export function panelSeats(seated) {",
+  "crew/drive.mjs:4314": "const panelReview = (n, panel) => {",
+  "crew/drive.mjs:4372": "const fused = fuseFindings(findingsOf(aEnv), findingsOf(bEnv), {",
+  "crew/drive.mjs:4442": "const adjudicated = adjudicatePanel(allocatedDivergent, adjEnv.details)"
 }

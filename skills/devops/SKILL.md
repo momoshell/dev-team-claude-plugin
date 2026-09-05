@@ -27,7 +27,7 @@ safe mechanics from rules whose evidence is explicitly absent in this checkout.
 
 ## Critical rules
 
-- Create worktrees with Git's registration command, remove them with `git worktree remove`, and gate teardown on the run outcome. Exhibit: `crew/arms.mjs:650` and `crew/crew.mjs:2228`. Cost: deleting a directory alone leaves Git's registration behind.
+- Create worktrees with Git's registration command, remove them with `git worktree remove`, and gate teardown on the run outcome. Exhibit: `crew/arms.mjs:650` and `crew/crew.mjs:2229`. Cost: deleting a directory alone leaves Git's registration behind.
 - Treat a linked checkout as shared Git state: detect linked status by comparing `--git-dir` with `--git-common-dir`, and never assume its stash or object metadata is lane-local. Status: no checkout implementation reachable from a production entry point performs that probe, so the detection half is unbacked here; see `references/evidence.md`. Exhibit (shared state only): `crew/seat-io.mjs:2822`. Cost: a lane can restore another lane's stash entry (#471).
 - Give `gh` an absolute `--body-file` and an explicit cwd, then list the output; never a relative path. Exhibit: `scripts/factory/intake.mjs:533` and `scripts/factory/probe-repo.mjs:739`. Cost: a compound `cd` changed the meaning of a relative file twice.
 - Keep an open lane PR intact and refuse publishing from a worker path; do not run `git push origin --delete` against a live lane branch. Status: no checkout implementation reachable from a production entry point publishes a branch, so both halves are unbacked here; see `references/evidence.md`. Cost: a lane writing to the host remote, and the deletion behavior recorded as unbacked in `references/evidence.md`.

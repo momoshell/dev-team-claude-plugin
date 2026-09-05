@@ -81,7 +81,7 @@ Exhibit: `crew/crew.mjs:1953`.
 
 A teardown sweep over a headless crew proves nothing about the driver and says
 so; read its withheld claim rather than treating teardown as a stop.
-Exhibit: `crew/crew.mjs:2771`.
+Exhibit: `crew/crew.mjs:2784`.
 
 A SIGKILLed driver lands no terminal row, because the ledger's finalizer is the
 only writer that can and it is opt-in.

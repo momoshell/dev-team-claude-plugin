@@ -63,3 +63,26 @@ FORCE_COLOR=0 npm test | grep -E '^(pass|fail|GATE-SUMMARY)'
 A survivor is not a pass: record whether the mutation was killed, survived,
 unapplied, or interrupted, and never promote an unreadable or interrupted run
 to a green proof.
+
+## The executable form
+
+`scripts/factory/prove-mutations.mjs` is this procedure as a program. Prefer it to
+a hand loop — the loop above has been got wrong by hand, confidently:
+
+```sh
+node scripts/factory/prove-mutations.mjs --envelope <lane>/returns/d1.planner.json \
+  --checkout <lane checkout> --gate 'node <lane>/task/gate.mjs'
+```
+
+It reads `details.mutations` in both the `check` and the `id` spelling, refuses
+`declarations-invalid` before it runs anything when an entry cannot be read, refuses
+`baseline-not-green` unless the unmutated scratch tree exits 0 AND prints a readable
+summary of checks that actually ran, cuts one detached worktree per declaration,
+restores the bytes in a `finally`, and refuses `tree-not-restored` when the byte
+digest of the whole non-ignored checkout has moved. A red run is credited only when
+the gate's own summary says checks adjudicated: a crash that prints `FAIL` is not a
+kill. Each declaration reports
+`killed (Nf/Ne)`, `SURVIVED`, or `BIND-FAIL(n)`; one unbound declaration never
+ends the run. The summary states how many declarations were read and how many
+bound, because a kill count without its denominator is not a proof. Exit 0 means
+every declaration was killed or exempt, 1 that something survived, 2 a refusal.

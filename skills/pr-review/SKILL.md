@@ -33,10 +33,10 @@ place that runs the review flow.
   both positions and resolve it using `references/divergence.md`.
 - Never report a rate without its denominator. A measured yield is a claim about
   the corpus and its denominator, not a free-floating percentage.
-- The reviewer envelope's finding object is at `crew/roles/reviewer.md:51-54` and
+- The reviewer envelope's finding object is at `crew/roles/reviewer.md:47-54` and
   it is `{id, severity, disposition, patch, location, summary}` — not the
   four-field shape the sentence claims; `findings` is optional, at
-  `crew/roles/reviewer.md:66`. `confidence` appears in reviewer.md only in the
+  `crew/roles/reviewer.md:62`. `confidence` appears in reviewer.md only in the
   scout/recommendation shape.
 
 - The do-not-flag guidelines are repo data loaded by the procedure layer, and a

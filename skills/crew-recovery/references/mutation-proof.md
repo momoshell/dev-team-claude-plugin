@@ -50,7 +50,7 @@ where you think it did.
 
 ## What the driver does
 
-`completeCheckProof` (`crew/drive.mjs:3970`) mutates the built tree **in place** and restores the exact bytes in a `finally`; that is why a hand proof needs its own detached checkout.
+`completeCheckProof` (`crew/drive.mjs:4048`) mutates the built tree **in place** and restores the exact bytes in a `finally`; that is why a hand proof needs its own detached checkout.
 
 When inspecting gate or suite output, suppress the harness colour layer first;
 any grep must be prefixed with `FORCE_COLOR=0`:

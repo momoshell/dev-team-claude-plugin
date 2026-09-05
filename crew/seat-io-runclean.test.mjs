@@ -8,11 +8,11 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import {
   COLD_PATH_FALLBACK_ROOTS, COLD_PATH_MIN_SHARED, cellFailureKind, claudeRefusalFrames, claudeTranscriptPaths, coldGuardNames, coldPathCollision, coldPathRoots, coldRootCollision, DESCENDANT_STORE_DIRS, descendantCapture, emitAdapter, HEADLESS_RPC_TRANSPORT, HEADLESS_TRANSPORT, LIVENESS_MISSES_TO_DIE, LIVENESS_PROBE_MS, neutralColdPath, REASK_SETTLE_POLLS, REASK_TIMEOUT_S, SEAT_DIED_STAGE, SEAT_LIVENESS_EVENT, SUBSTRATE_GRACE_MS, paneRetryFrame, piRefusalFrames, piSessionDir, piTranscriptPaths,
-  providerConditionDetail, paneUsageFrames, readEnvelopeFile, reaskDecision, recogniseProviderRetry, saveCrew, seatIo, seatRetryDecision, settleSeatTeardown,
+  providerConditionDetail, paneUsageFrames, paneSeatPolicyRow, readEnvelopeFile, reaskDecision, recogniseProviderRetry, saveCrew, seatIo, seatRetryDecision, settleSeatTeardown,
   SEAT_RETRY_EVENTS, SEAT_RETRY_KINDS, SEAT_RETRY_MAX,
   SEAT_REFUSAL_STAGE, SILENCE_REASK_MS, TRANSCRIPT_STALE_MS, WAIT_POLL_MS, waitForEnvelope, waitState, transcriptGrowth, silenceReaskDecision,
 } from './seat-io.mjs'
-import { headlessIo, recogniseProviderCondition, SEAT_REFUSALS } from './headless.mjs'
+import { headlessIo, recogniseProviderCondition, PANE_NO_INTERCEPT, SEAT_REFUSALS, SEAT_SUITE_POLICY_EVENT } from './headless.mjs'
 import { JOURNAL_CHANNEL_NAMES } from './drive.mjs'
 import { git, ROOT, scratchDir, startFileWriter } from '../test/helpers.mjs'
 import { teardownCore } from './crew.mjs'
@@ -178,6 +178,7 @@ const SEAT_JOURNAL_EXPECTED = Object.freeze([
   ['operationalRow', "event='tree-witness'", 'at checkout outcome refused modified removed added head_changed cause detail'],
   ['recordRow', '', 'at seat_died returnPath'],
   ['recordRow', '', 'at substrate_gone returnPath'],
+  ['operationalRow', '', 'role id'],
   ['operationalRow', "event='teardown-transports'", 'at declared transports init_failed seats'],
   ['recordRow', '', 'at reseat'],
   ['operationalRow', "event='doc-viewer'", 'at path surface_id'],
@@ -187,10 +188,10 @@ test('every journal emit site in seat-io is inventoried, wrapped and on the righ
   const text = readFileSync(new URL('./seat-io.mjs', import.meta.url), 'utf8')
   for (const sink of SEAT_PASS_THROUGH) assert.equal(text.split(sink).length - 1, 1, `pass-through changed or duplicated: ${sink}`)
   const sites = seatJournalSites(text)
-  assert.equal(sites.length, 32)
+  assert.equal(sites.length, 33)
   assert.deepEqual(sites.map(({ wrapper, events, keys }) => [wrapper, events, keys]), SEAT_JOURNAL_EXPECTED)
   assert.ok(sites.every(({ wrapper }) => wrapper === 'recordRow' || wrapper === 'operationalRow'))
-  assert.equal(sites.filter(({ wrapper }) => wrapper === 'operationalRow').length, 25)
+  assert.equal(sites.filter(({ wrapper }) => wrapper === 'operationalRow').length, 26)
   assert.equal(sites.filter(({ wrapper }) => wrapper === 'recordRow').length, 7)
 })
 
@@ -1516,7 +1517,7 @@ const MALFORMED_REASK = '{"assignment_id":"d1","role":"builder","status":"done",
 const MALFORMED_REASK_2 = '{"assignment_id":"d1","role":"builder","status":"done","summary":"second\ntry"}'
 const VALID_REASK = JSON.stringify({ assignment_id: 'd1', role: 'builder', status: 'done', summary: 'finished the build', artifacts: [], details: {} })
 
-function makeTransportReaskHarness({ transport = HEADLESS_TRANSPORT, waits = [], assignFails = [], onWait = null, unmeasuredFirst = false } = {}) {
+function makeTransportReaskHarness({ transport = HEADLESS_TRANSPORT, waits = [], assignFails = [], onWait = null, unmeasuredFirst = false, policy = undefined } = {}) {
   const root = scratchDir(`seat-transport-reask-${transport}-`)
   const paths = { dir: root, taskDir: join(root, 'task'), returnsDir: join(root, 'returns') }
   mkdirSync(paths.taskDir, { recursive: true }); mkdirSync(paths.returnsDir, { recursive: true })
@@ -1563,7 +1564,7 @@ function makeTransportReaskHarness({ transport = HEADLESS_TRANSPORT, waits = [],
   }
   const io = seatIo(crew, paths, root, null, null, {}, deps)
   io.emit = (event) => events.push(event)
-  const first = io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
+  const first = io.assign({ role: 'builder', briefFile: '/tmp/brief.md', ...(policy === undefined ? {} : { policy }) })
   const reaskPath = join(paths.returnsDir, `${first.id}.reask.builder.json`)
   return { root, paths, crew, io, first, reaskPath, assigns, waitCalls, logs, events, cleanup: () => rmSync(root, { recursive: true, force: true }) }
 }
@@ -3035,6 +3036,34 @@ test('a seat waiting through a substrate outage is journalled and recovers', () 
   }
 })
 
+test('pane wait exception still emits exactly one unmeasured suite-policy row', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    let returnPath = null
+    const rows = []
+    const malformed = '{"assignment_id":"d1","role":"builder","status":"done","summary":"finished\nthe build"}'
+    const io = seatIo({ members: { builder: { surface_id: 'surface-builder', transport: 'pane' } } }, fixture.paths, fixture.repoDir, null, null, {}, {
+      sendLine: () => {},
+      tree: () => ({ windows: [{ workspaces: [{ panes: [{ surfaces: [{ id: 'surface-builder' }] }] }] }] }),
+      locate: () => false,
+      existsSync: (path) => path === returnPath,
+      readFileSync: (path) => path === returnPath ? malformed : readFileSync(path, 'utf8'),
+      logLine: (_path, row) => rows.push(row),
+      now: () => 0,
+      sleep: () => {},
+    })
+    const assigned = io.assign({ role: 'builder', briefFile: '/tmp/b416-pane-throw.md' })
+    returnPath = assigned.returnPath
+    assert.throws(() => io.wait(returnPath, 60), (error) => {
+      assert.equal(error.stage, 'pane-parse-error')
+      return true
+    })
+    const policyRows = rows.filter((row) => row.event === SEAT_SUITE_POLICY_EVENT)
+    assert.equal(policyRows.length, 1)
+    assert.equal(policyRows[0].suite_policy, null)
+    assert.equal(policyRows[0].suite_policy_absent, PANE_NO_INTERCEPT)
+  })
+})
+
 test('seatIo changedFiles keeps both sides of a rename', () => {
   const fixture = commitRepo('rename', ['old.txt', 'kept.txt'])
   try {
@@ -3047,4 +3076,47 @@ test('seatIo changedFiles keeps both sides of a rename', () => {
     assert.equal(changed.length, 3)
     assert.equal(changed.indexOf('old.txt'), changed.indexOf('new.txt') + 1)
   } finally { rmSync(fixture.root, { recursive: true, force: true }) }
+})
+
+test('b416 F2 seat-io keeps suite policy on every headless timeout/abort re-ask', () => {
+  const policy = { suiteCommand: 'npm test', gatePath: '/tmp/b416/gate.mjs', fence: ['crew/headless.mjs'] }
+  for (const [transport, stage] of [[HEADLESS_TRANSPORT, 'headless-timeout'], [HEADLESS_RPC_TRANSPORT, 'rpc-aborted']]) {
+    const harness = makeTransportReaskHarness({
+      transport, policy,
+      waits: [() => { throw stagedReaskFailure(stage, 'first transport lost') }, () => JSON.parse(VALID_REASK)],
+    })
+    try {
+      assert.deepEqual(harness.io.wait(harness.first.returnPath, 37), JSON.parse(VALID_REASK))
+      assert.equal(harness.assigns.length, 2)
+      assert.deepEqual(harness.assigns[0].policy, policy)
+      assert.deepEqual(harness.assigns[1].policy, policy)
+      assert.equal(harness.assigns[1].reask.id, harness.first.id)
+    } finally { harness.cleanup() }
+  }
+})
+
+test('b416 D1 pane policy reports a strict unmeasured shape exactly once on an ordinary pane dispatch', () => {
+  const pure = paneSeatPolicyRow({ role: 'builder', id: 'd1' })
+  assert.equal(pure.event, SEAT_SUITE_POLICY_EVENT)
+  assert.equal(pure.id, 'd1')
+  assert.equal(pure.suite_policy, null)
+  assert.equal(pure.suite_policy_absent, PANE_NO_INTERCEPT)
+
+  withRepo({ dirty: false }, (fixture) => {
+    const rows = []; let returnPath = null
+    const envelope = { assignment_id: 'd1', role: 'builder', status: 'done', artifacts: [], details: {} }
+    const io = seatIo({ members: { builder: { transport: 'pane', surface_id: 'surface-builder' } } }, fixture.paths, fixture.repoDir, null, null, {}, {
+      sendLine: () => {}, tree: () => ({ windows: [] }), locate: () => ({ id: 'surface-builder' }),
+      existsSync: (path) => path === returnPath || existsSync(path),
+      readFileSync: (path, ...args) => path === returnPath ? JSON.stringify(envelope) : readFileSync(path, ...args),
+      logLine: (_path, row) => rows.push(row), now: () => 0, sleep: () => {},
+    })
+    const assigned = io.assign({ role: 'builder', briefFile: '/tmp/b416-pane.md' })
+    returnPath = assigned.returnPath
+    assert.deepEqual(io.wait(returnPath, 60), envelope)
+    const policyRows = rows.filter((row) => row.event === SEAT_SUITE_POLICY_EVENT)
+    assert.equal(policyRows.length, 1)
+    assert.equal(policyRows[0].suite_policy, null)
+    assert.equal(policyRows[0].suite_policy_absent, PANE_NO_INTERCEPT)
+  })
 })

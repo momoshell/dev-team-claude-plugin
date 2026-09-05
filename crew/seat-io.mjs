@@ -16,6 +16,7 @@ import {
 import {
   headlessIo as defaultHeadlessIo, PROVIDER_CONDITIONS, SEAT_REFUSALS, SEAT_REFUSAL_ACTIONS,
   UNCLASSIFIED_REFUSAL, recogniseProviderCondition, recogniseSeatRefusal, writeCrewJson, updateCrewJson,
+  SEAT_SUITE_POLICY_EVENT, PANE_NO_INTERCEPT, suitePolicyRow,
 } from './headless.mjs'
 import { headlessRpcIo as defaultHeadlessRpcIo, teardownOutcome } from './headless-rpc.mjs'
 import { LIVENESS, PHASES, reservationEngine, markerLockName } from './reclaim.mjs'
@@ -27,6 +28,21 @@ import { modelString as piModelString } from './adapters/adapter-pi.mjs'
 import { hostLoad, loadPolicy } from './host-load.mjs'
 import { compareFingerprints, FINGERPRINT_OUTCOMES, fingerprintTree } from './tree-fingerprint.mjs'
 export const DEFAULT_TRANSPORT = 'pane'
+// The pane transport runs claude interactively with inherited stdio: there is no
+// seat stream to observe, so NOTHING here was measured. Every unmeasured cell is
+// null with a closed reason; a zero would claim this transport looked.
+export function paneSeatPolicyRow({ role, id = null }) {
+  return { ...suitePolicyRow({ role, transport: DEFAULT_TRANSPORT, counters: null, absentReason: PANE_NO_INTERCEPT }), id }
+}
+
+// ONE shape for every replacement attempt. A re-ask that drops the policy is a
+// re-ask the suite policy does not govern, and the replacement attempt is
+// precisely where a refused seat would try again. MODULE SCOPE and exported, so
+// a gate check can bind to it; the two CALL SITES are proved by the fenced
+// seat-io tests.
+export function headlessReaskSpec(info, { role, briefFile, id, returnPath }) {
+  return { role, briefFile, reask: { id, returnPath }, policy: info?.policy ?? null }
+}
 // The distinct, named reason a runClean window refuses: a concurrent writer was
 // DETECTED in the working tree the driver had set aside. Never folded into a
 // stash refusal — the stash stack and the working tree fail for different
@@ -2630,7 +2646,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
         for (;;) {
           attempts = polls + 1
           try {
-            const attempt = transport.assign({ role, briefFile: briefPath, reask: { id: reaskId, returnPath: reaskPath } })
+            const attempt = transport.assign(headlessReaskSpec(info, { role, briefFile: briefPath, id: reaskId, returnPath: reaskPath }))
             collectPath = attempt?.returnPath || reaskPath
             bindHeadlessIdentity(info, attempt)
             break
@@ -2772,7 +2788,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
         for (;;) {
           deliveryAttempts = polls + 1
           try {
-            const assigned = transport.assign({ role, briefFile: briefPath, reask: { id: retryId, returnPath: retryPath } })
+            const assigned = transport.assign(headlessReaskSpec(info, { role, briefFile: briefPath, id: retryId, returnPath: retryPath }))
             let identity = null
             try { identity = bindHeadlessIdentity(info, assigned) } catch { identity = null }
             toRunId = identity?.workerId ?? null
@@ -2950,7 +2966,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
           id = result?.id ?? null
           transportForPath.set(result.returnPath, transport)
           const assignedAt = now()
-          const info = { role, id, brief: briefFile, at: assignedAt, returnPath: result.returnPath, transport: m.transport }
+          const info = { role, id, brief: briefFile, at: assignedAt, returnPath: result.returnPath, transport: m.transport, policy: spec.policy ?? null }
           bindHeadlessIdentity(info, result)
           seatFor.set(result.returnPath, info)
           refusalFloor.set(role, assignedAt)
@@ -3074,6 +3090,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
         // transport. Measure in finally so a timeout or seat death still
         // records spend already written to the transcript.
         if (!transport && info?.role) emitPaneUsage(info)
+        if (!transport) { try { io.log(operationalRow(paneSeatPolicyRow({ role: info?.role || 'unknown', id: info?.id ?? null }))) } catch { /* never load-bearing */ } }
         // Transcript refusal frames are durable evidence; no screen run is
         // closed here because liveness no longer reads pane pixels.
       }

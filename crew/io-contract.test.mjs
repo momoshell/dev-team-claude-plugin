@@ -275,6 +275,26 @@ for (const subject of SUBJECTS) {
   })
 }
 
+test('seatIo forwards the driver policy by identity and omits it for legacy assignments', () => {
+  const paths = dirs(); const specs = []
+  const transport = {
+    assign(spec) {
+      specs.push(spec)
+      return { id: `d${specs.length}`, returnPath: join(paths.returnsDir, `d${specs.length}.builder.json`) }
+    },
+    wait: () => ({ status: 'done' }),
+  }
+  const io = seatIo(
+    { members: { builder: { transport: 'headless-json' } } }, paths, paths.dir, null, null, {},
+    { headlessIo: () => transport, resolveWorkerBin: () => '/bin/worker' },
+  )
+  const policy = { suiteCommand: 'suite-cmd', gatePath: join(paths.taskDir, 'gate.mjs'), fence: ['crew/'] }
+  io.assign({ role: 'builder', briefFile: '/brief.md', policy })
+  io.assign({ role: 'builder', briefFile: '/legacy.md' })
+  assert.equal(specs[0].policy, policy)
+  assert.equal(Object.hasOwn(specs[1], 'policy'), false)
+})
+
 test('seatIo removes stale return files and round-trips files', () => {
   const f = makeSeatIo()
   const stale = join(f.paths.returnsDir, 'd1.builder.json')

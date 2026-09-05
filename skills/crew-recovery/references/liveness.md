@@ -51,7 +51,7 @@ Both homes are keyed on the checkout, not the role, so a lane's two pi seats sha
 The reliable signals are ordered: **transcript mtime** first, then the pane's
 **token counters compared across two readings**, then **the spinner, which is worthless**. In particular, a spinner and an elapsed timer are not evidence of life:
 surface can remain present while a seat has stopped mid-turn. The threshold and
-classifier are implemented at `crew/seat-io.mjs:87`; when a wait expires, the
+classifier are implemented at `crew/seat-io.mjs:103`; when a wait expires, the
 driver names the state as `the seat is STALE:`, `the seat REFUSED:`, or `the seat
 is WORKING:`. A `seat-stale` row in `journal.jsonl` is the in-flight warning
 that arrives before the budget does. A stale reading names a state; it does not
@@ -67,4 +67,4 @@ The fact leaves the pane only through the seat's `seat-retrying` / `seat-retry-c
 
 A `seat-stale` condition is retired only by measured growth or a completing envelope; a budget that expired measured nothing.
 
-The `recogniseProviderRetry` reader is implemented at `crew/seat-io.mjs:1670`.
+The `recogniseProviderRetry` reader is implemented at `crew/seat-io.mjs:1686`.

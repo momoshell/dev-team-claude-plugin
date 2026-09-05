@@ -11,7 +11,7 @@ import {
   rpcCensus, rpcCommand, rpcStreamCensus, seatCommandPath, SETTLE_GATE_POLLS, splitFrames, steerFrame, teardownOutcome,
 } from './headless-rpc.mjs'
 import { cellFailureKind } from './seat-io.mjs'
-import { CENSUS_ABSENT_CAUSES } from './headless.mjs'
+import { CENSUS_ABSENT_CAUSES, SEAT_SUITE_POLICY_EVENT, SUITE_RUN_REFUSAL, SUITE_RUN_UNRECOGNISED } from './headless.mjs'
 import { scratchDir } from '../test/helpers.mjs'
 
 // The b200-helperdedup envelope, byte-exact: 1921 bytes, schema-shaped, and
@@ -26,6 +26,7 @@ function b200Bytes(bytes = 1921) {
 }
 
 function fixture(options = {}) {
+  const role = options.role || 'builder'
   const dir = options.dir || mkdtempSync(join(tmpdir(), 'headless-rpc-'))
   const paths = { dir, taskDir: join(dir, 'task'), returnsDir: join(dir, 'returns') }
   mkdirSync(paths.taskDir, { recursive: true }); mkdirSync(paths.returnsDir, { recursive: true })
@@ -33,23 +34,23 @@ function fixture(options = {}) {
   const kill = (pid, signal) => {
     signals.push([pid, signal])
     if (options.kill) return options.kill(pid, signal)
-    if (signal !== 0) writeFileSync(join(paths.taskDir, 'headless-rpc', 'builder', 'exit'), '0')
+    if (signal !== 0) writeFileSync(join(paths.taskDir, 'headless-rpc', role, 'exit'), '0')
   }
   const deps = {
     pid: options.pid ?? 700, uuid: options.uuid || (() => 'session-1'),
-    spawn: () => { commands.push({ kind: 'spawn' }); return { pid: Object.hasOwn(options, 'spawnPid') ? options.spawnPid : 701, unref() {} } }, openSync: options.openSync || (() => 10),
-    writeSync: (_fd, line) => writes.push(JSON.parse(line)), closeSync: () => {}, kill,
+    spawn: options.spawn || (() => { commands.push({ kind: 'spawn' }); return { pid: Object.hasOwn(options, 'spawnPid') ? options.spawnPid : 701, unref() {} } }), openSync: options.openSync || (() => 10),
+    writeSync: options.writeSync || ((_fd, line) => writes.push(JSON.parse(line))), closeSync: () => {}, kill,
     existsSync: options.existsSync || ((path) => existsSync(path) || String(path).endsWith('/cmd.fifo')),
     readdirSync: options.readdirSync || readdirSync,
     writeFileSync: options.writeFileSync || writeFileSync, readFileSync: options.readFileSync || readFileSync, mkdirSync, log: options.log || (() => {}), sleep: options.sleep || (() => {}),
     ...(options.now ? { now: options.now } : {}),
     ...(options.emit ? { emit: options.emit } : {}),
   }
-  const crew = options.crew || { checkout: dir, members: { builder: { model: 'model', transport: 'headless-rpc' } } }
+  const crew = options.crew || { checkout: dir, members: { [role]: { model: 'model', transport: 'headless-rpc' } } }
   const adapter = { rpcCommand: (spec) => { specs.push(spec); return rpcCommand(spec) } }
   const adapterEntry = options.adapterEntry || (options.grants ? { adapter, grants: options.grants } : adapter)
-  const io = headlessRpcIo({ crew, paths, taskDir: paths.taskDir, checkout: dir, adapters: { builder: adapterEntry }, bin: '/bin/pi', deps })
-  return { dir, paths, crew, io, writes, commands, specs, signals, cleanup: () => { if (!options.dir) rmSync(dir, { recursive: true, force: true }) } }
+  const io = headlessRpcIo({ crew, paths, taskDir: paths.taskDir, checkout: dir, adapters: { [role]: adapterEntry }, bin: '/bin/pi', deps })
+  return { dir, paths, crew, io, writes, commands, specs, signals, role, cleanup: () => { if (!options.dir) rmSync(dir, { recursive: true, force: true }) } }
 }
 
 function settle(f, run, frames = [{ type: 'agent_settled' }]) {
@@ -1386,4 +1387,157 @@ test('b401 an absent rpc stream is stream_absent and an empty one is no_frames',
     assert.equal(blank.absent_reason, CENSUS_ABSENT_CAUSES.no_frames)
     assert.notEqual(missing.absent_reason, blank.absent_reason)
   } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+function b416RpcFrames(command, { settled = true } = {}) {
+  return [
+    { type: 'turn_start' },
+    { type: 'tool_execution_start', toolCallId: 'b416-bash', toolName: 'bash', args: { command } },
+    { type: 'tool_execution_end', toolCallId: 'b416-bash', toolName: 'bash' },
+    { type: 'turn_end' },
+    ...(settled ? [{ type: 'agent_settled' }] : []),
+  ]
+}
+
+function b416RpcStream(f, role, frames) {
+  writeFileSync(join(f.paths.taskDir, 'headless-rpc', role, 'stream.jsonl'), `${frames.map((frame) => JSON.stringify(frame)).join('\n')}\n`)
+}
+
+test('b416 K2/F6 RPC policy records one aggregate and one refusal detail before a reviewer done envelope', () => {
+  const rows = []
+  const f = fixture({ role: 'reviewer', log: (row) => rows.push(row) })
+  try {
+    const policy = { suiteCommand: 'npm test', gatePath: '/tmp/b416/gate.mjs', fence: [] }
+    const run = f.io.assign({ role: 'reviewer', briefFile: '/brief.md', policy })
+    b416RpcStream(f, 'reviewer', b416RpcFrames('node --test crew/headless-rpc.test.mjs'))
+    writeFileSync(run.returnPath, JSON.stringify({ assignment_id: run.id, role: 'reviewer', status: 'done', summary: 'done', artifacts: [], details: {} }))
+    const envelope = f.io.wait(run.returnPath, 60)
+    assert.equal(envelope.status, 'insufficient')
+    assert.equal(envelope.details.suite_refusal.command, 'node --test crew/headless-rpc.test.mjs')
+    assert.equal(envelope.details.suite_refusal.gate_path, policy.gatePath)
+    assert.equal(rows.filter((row) => row.event === SEAT_SUITE_POLICY_EVENT && row.suite_policy).length, 1)
+    assert.equal(rows.filter((row) => row.event === SEAT_SUITE_POLICY_EVENT && row.refusal === SUITE_RUN_REFUSAL).length, 1)
+    assert.equal(rows.filter((row) => row.seat_turn_census).length, 1)
+    assert.equal(f.writes.some((frame) => frame.type === 'steer'), false)
+  } finally { f.cleanup() }
+})
+
+test('b416 K2 RPC policy survives parse, zero-deadline opaque, and zero-deadline forbidden terminal boundaries', () => {
+  const policy = { suiteCommand: 'npm test', gatePath: '/tmp/b416/gate.mjs', fence: [] }
+  {
+    const rows = []; const f = fixture({ role: 'reviewer', log: (row) => rows.push(row) })
+    try {
+      const run = f.io.assign({ role: 'reviewer', briefFile: '/brief.md', policy })
+      b416RpcStream(f, 'reviewer', [
+        { type: 'tool_execution_start', toolCallId: 'opaque-parse', toolName: 'bash', args: { command: 'bash tools/run-everything.sh' } },
+        { type: 'response', command: 'parse', success: false, error: 'bad frame' },
+      ])
+      assert.throws(() => f.io.wait(run.returnPath, 60), (error) => error.stage === 'rpc-parse-error')
+      const aggregate = rows.filter((row) => row.event === SEAT_SUITE_POLICY_EVENT && row.suite_policy)
+      assert.equal(aggregate.length, 1)
+      assert.equal(aggregate[0].suite_policy.unrecognised, 1)
+      assert.equal(rows.some((row) => row.refusal === SUITE_RUN_REFUSAL), false)
+    } finally { f.cleanup() }
+  }
+  {
+    let clock = 0; const rows = []
+    const f = fixture({ role: 'reviewer', now: () => clock, sleep: (ms) => { clock += ms }, log: (row) => rows.push(row) })
+    try {
+      const run = f.io.assign({ role: 'reviewer', briefFile: '/brief.md', policy })
+      b416RpcStream(f, 'reviewer', [{ type: 'tool_execution_start', toolCallId: 'opaque-timeout', toolName: 'bash', args: { command: 'bash tools/run-everything.sh' } }])
+      assert.throws(() => f.io.wait(run.returnPath, 0), (error) => error.stage === 'rpc-timeout')
+      assert.equal(rows.filter((row) => row.event === SEAT_SUITE_POLICY_EVENT && row.suite_policy).length, 1)
+      assert.equal(rows.find((row) => row.event === SEAT_SUITE_POLICY_EVENT)?.suite_policy.unrecognised, 1)
+    } finally { f.cleanup() }
+  }
+  {
+    let clock = 0; const rows = []
+    const f = fixture({ role: 'reviewer', now: () => clock, sleep: (ms) => { clock += ms }, log: (row) => rows.push(row) })
+    try {
+      const run = f.io.assign({ role: 'reviewer', briefFile: '/brief.md', policy })
+      b416RpcStream(f, 'reviewer', [{ type: 'tool_execution_start', toolCallId: 'forbidden-timeout', toolName: 'bash', args: { command: 'node --test crew/headless-rpc.test.mjs' } }])
+      const envelope = f.io.wait(run.returnPath, 0)
+      assert.equal(envelope.status, 'insufficient')
+      assert.equal(rows.filter((row) => row.event === SEAT_SUITE_POLICY_EVENT && row.suite_policy).length, 1)
+      assert.equal(rows.filter((row) => row.event === SEAT_SUITE_POLICY_EVENT && row.refusal === SUITE_RUN_REFUSAL).length, 1)
+      assert.equal(f.writes.some((frame) => frame.type === 'steer'), false)
+    } finally { f.cleanup() }
+  }
+})
+
+test('RV1-3 malformed RPC frame types do not consume a later forbidden call', () => {
+  const rows = []
+  const f = fixture({ role: 'reviewer', log: (row) => rows.push(row) })
+  try {
+    const policy = { suiteCommand: 'npm test', gatePath: '/tmp/b433/gate.mjs', fence: [] }
+    const run = f.io.assign({ role: 'reviewer', briefFile: '/brief.md', policy })
+    const captured = readFileSync(new URL('../tasks/headless-worker/captures/pi-a1-json-baseline.jsonl', import.meta.url), 'utf8')
+      .trim().split('\n').map((line) => JSON.parse(line))
+    const settled = captured.findIndex((frame) => frame.type === 'agent_settled')
+    captured.splice(settled, 0,
+      { type: 'tool_execution_start', toolCallId: 'non-string-name', toolName: { toString: 'not-callable' }, args: null },
+      { type: 'tool_execution_start', toolCallId: 'null-args', toolName: 'bash', args: null },
+      { type: 'tool_execution_start', toolCallId: 'later-forbidden', toolName: 'bash', args: { command: 'node --test crew/headless-rpc.test.mjs' } },
+    )
+    b416RpcStream(f, 'reviewer', captured)
+    writeFileSync(run.returnPath, JSON.stringify({ assignment_id: run.id, role: 'reviewer', status: 'done', artifacts: [], details: {} }))
+    const envelope = f.io.wait(run.returnPath, 60)
+    assert.equal(envelope.status, 'insufficient')
+    assert.equal(envelope.details.suite_refusal.command, 'node --test crew/headless-rpc.test.mjs')
+    const aggregate = rows.find((row) => row.event === SEAT_SUITE_POLICY_EVENT && row.suite_policy)
+    assert.equal(aggregate.suite_policy.refused_at_least, 1)
+    assert.equal(aggregate.suite_policy.unrecognised, 1)
+    assert.equal(rows.filter((row) => row.refusal === SUITE_RUN_REFUSAL).length, 1)
+  } finally { f.cleanup() }
+})
+
+test('b416 C5/K2 opaque and non-shell RPC frames remain non-blocking but keep their measured policy counters', () => {
+  const rows = []; const f = fixture({ role: 'reviewer', log: (row) => rows.push(row) })
+  try {
+    const policy = { suiteCommand: 'npm test', gatePath: '/tmp/b416/gate.mjs', fence: [] }
+    const run = f.io.assign({ role: 'reviewer', briefFile: '/brief.md', policy })
+    b416RpcStream(f, 'reviewer', [
+      { type: 'tool_execution_start', toolCallId: 'write-no-command', toolName: 'write', args: { path: 'a.mjs', content: 'x' } },
+      { type: 'tool_execution_start', toolCallId: 'opaque-done', toolName: 'bash', args: { command: 'bash tools/run-everything.sh' } },
+      { type: 'agent_settled' },
+    ])
+    writeFileSync(run.returnPath, JSON.stringify({ assignment_id: run.id, role: 'reviewer', status: 'done', artifacts: [], details: {} }))
+    assert.equal(f.io.wait(run.returnPath, 60).status, 'done')
+    const aggregate = rows.find((row) => row.event === SEAT_SUITE_POLICY_EVENT && row.suite_policy)
+    assert.equal(aggregate.suite_policy.unrecognised, 1)
+    assert.equal(aggregate.suite_policy.refused, null)
+    assert.equal(rows.some((row) => row.suite_policy_absent === SUITE_RUN_UNRECOGNISED), true)
+  } finally { f.cleanup() }
+})
+
+test('b416 F8 an RPC abort write fault returns the decided refusal, evicts the dead seat, and respawns it cleanly', () => {
+  const rows = []; const wire = []; const probes = []; let clock = 0
+  const f = fixture({
+    role: 'reviewer', now: () => clock, sleep: (ms) => { clock += ms }, log: (row) => rows.push(row),
+    writeSync: (_fd, line) => {
+      const frame = JSON.parse(line)
+      if (frame.type === 'abort') throw new Error('broken abort fifo')
+      wire.push(frame)
+    },
+    kill: (_pid, signal) => {
+      probes.push(signal)
+      const error = new Error('worker gone'); error.code = 'ESRCH'; throw error
+    },
+  })
+  try {
+    const policy = { suiteCommand: 'npm test', gatePath: '/tmp/b416/gate.mjs', fence: [] }
+    const first = f.io.assign({ role: 'reviewer', briefFile: '/brief.md', policy })
+    b416RpcStream(f, 'reviewer', [{ type: 'tool_execution_start', toolCallId: 'fault-refusal', toolName: 'bash', args: { command: 'node --test crew/headless-rpc.test.mjs' } }])
+    const envelope = f.io.wait(first.returnPath, 60)
+    assert.equal(envelope.status, 'insufficient')
+    assert.equal(rows.filter((row) => row.event === 'rpc-enforcement-abort-failed').length, 1)
+    assert.equal(rows.filter((row) => row.event === SEAT_SUITE_POLICY_EVENT && row.suite_policy).length, 1)
+    assert.equal(rows.filter((row) => row.event === SEAT_SUITE_POLICY_EVENT && row.refusal === SUITE_RUN_REFUSAL).length, 1)
+    assert.equal(wire.some((frame) => frame.type === 'steer'), false)
+    assert.ok(probes.includes('SIGKILL'))
+    const second = f.io.assign({ role: 'reviewer', briefFile: '/brief-again.md', policy })
+    assert.equal(second.id, 'd2')
+    assert.equal(f.commands.filter((entry) => entry.kind === 'spawn').length, 2)
+    assert.equal(wire.filter((frame) => frame.type === 'prompt').length, 2)
+  } finally { f.cleanup() }
 })

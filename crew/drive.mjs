@@ -234,9 +234,53 @@ export function predecessorFindingsClosed(planCheckText, planText) {
 }
 
 // --- the enforcement preamble (#870 (a) and (c)) ----------------------------
+// The producer's closed refusal marker, declared HERE as the driver's own constant
+// rather than imported from crew/headless.mjs: this driver has no import edge to
+// the transports and does not grow one for a string. Same rule as
+// CENSUS_ABSENT_REASONS (:262) — the driver owns the vocabulary it publishes.
+export const SUITE_RUN_NOT_OWNED = 'suite-run-not-owned'
+
+// CORRELATION, not merely shape. An envelope is this dispatch's refusal only when
+// it is ADDRESSED to this dispatch: a non-empty outer assignment_id and role, an
+// inner role that EQUALS the outer one, and the producer's marker as a
+// token-bound PREFIX.
+function correlatedRefusal(env, refusal) {
+  return typeof env.assignment_id === 'string' && env.assignment_id !== ''
+    && typeof env.role === 'string' && env.role !== ''
+    && refusal.role === env.role
+    && refusal.reason.startsWith(`${SUITE_RUN_NOT_OWNED}:`)
+}
+
+// The ONE predicate for "this envelope IS the wrapper's refusal", shared by
+// the ceiling bypass and by the preamble so the two can never disagree. It
+// validates the fields this driver reads or prints and deliberately does not
+// assert transport or kind.
+export function suiteRefusalOf(env) {
+  if (!env || typeof env !== 'object' || env.status !== 'insufficient') return null
+  const refusal = env.details?.suite_refusal
+  if (!refusal || typeof refusal !== 'object' || Array.isArray(refusal)) return null
+  if (typeof refusal.command !== 'string' || refusal.command === '') return null
+  if (typeof refusal.gate_path !== 'string' || refusal.gate_path === '') return null
+  if (typeof refusal.reason !== 'string' || typeof refusal.role !== 'string') return null
+  if (!correlatedRefusal(env, refusal)) return null
+  return refusal
+}
+
+function suiteRefusalPreamble(env) {
+  const refusal = suiteRefusalOf(env)
+  if (!refusal) return { kind: null, lines: [] }
+  return {
+    kind: 'suite-run-not-owned',
+    lines: [
+      `Your previous dispatch was ENDED: suite-run-not-owned. You ran ${JSON.stringify(refusal.command)}, which your role does not own.`,
+      `The driver's gate-proof stage carries this evidence at ${refusal.gate_path}.`,
+    ],
+  }
+}
+
 export function enforcementPreamble(env) {
   const ceiling = env?.details?.turn_ceiling
-  if (!ceiling || !Number.isFinite(ceiling.budget)) return { kind: null, lines: [] }
+  if (!ceiling || !Number.isFinite(ceiling.budget)) return suiteRefusalPreamble(env)
   // MEASURED and over: the count leads the brief, because #870 asks for the
   // count at the HEAD of the next assignment.
   if (Number.isFinite(ceiling.turns)) {
@@ -2560,6 +2604,27 @@ function runTask(ctx, io, crash) {
   const waits = { ...WAITS_S, ...(ctx.waits || {}) }
   const S = { consults: 0, stages: [], commit: null, dissents: [], grants: [], growth: [], modifiers: [], enforcements: [], acceptFindings: null, seqHighWater: 0, planAccept: null, carried: [], carriedCleared: new Set() }
   const art = (name) => `${ctx.taskDir}/${name}`
+  // ONE task-local path validator, used by the suite policy AND by the growth
+  // measurement, so there is no weaker second check to drift. A bare
+  // `startsWith(taskDir)` accepts `${ctx.taskDir}/../checkout/evil.mjs`; rejecting
+  // `.` and `..` segments is what makes it a validation.
+  const taskLocalPath = (value) => (
+    typeof value === 'string'
+    && value.startsWith(`${ctx.taskDir}/`)
+    && !value.split('/').some((segment) => segment === '.' || segment === '..')
+      ? value : null
+  )
+  // The suite-policy context every assignment carries. `acceptedScope` is EMPTY
+  // until the plan is accepted, which is correct: before there is a fence there
+  // is nothing a builder may run inside one. `acceptedGatePath` defaults to the
+  // task gate so every refusal can name a useful gate-proof path.
+  let acceptedScope = []
+  let acceptedGatePath = art('gate.mjs')
+  const seatPolicy = (role) => ({
+    suiteCommand: ctx.suite ?? null,
+    gatePath: acceptedGatePath,
+    fence: role === 'builder' ? acceptedScope : [],
+  })
   const pendingEnforcement = new Map()
   let enforcementSeq = 0
   // The journal lives in the CREW dir, not the task dir — take its real path
@@ -2984,6 +3049,15 @@ function runTask(ctx, io, crash) {
     // (crew/drive.mjs:2595-2603); manufacturing this dispatch's assignment_id
     // around it would launder exactly the replay validEnvelope exists to refuse.
     if (!validEnvelope(env, role, id)) return env
+    // A suite refusal has ALREADY rejected and ended this dispatch, and it is the
+    // stronger fact: it names the forbidden command and the gate-proof path. A
+    // refusal can never carry an ELIGIBLE census — its outcome is
+    // `suite-run-not-owned`, and observeTurnCensus counts only the outcomes in
+    // CENSUS_ELIGIBLE_OUTCOMES — so without this line every refusal on a role that HAS a
+    // ceiling is rewritten into a `turn-ceiling-unmeasured` envelope whose
+    // details no longer carry suite_refusal, and the next brief names the
+    // measurement failure instead of the forbidden command.
+    if (suiteRefusalOf(env)) return env
     const observed = observeTurnCensus(censusWindow(), id, role)
     // An explicit RPC no-envelope settlement is not a returned envelope at all:
     // emptyTurnEnvelope PASSES validEnvelope, so only the producer's own outcome
@@ -3017,13 +3091,16 @@ function runTask(ctx, io, crash) {
       ].join('\n'))
       io.log(recordRow({ at: io.now(), seat_enforcement: { role, kind: pending.kind, brief, applied: true } }))
     }
-    const { id, returnPath } = io.assign({ role, briefFile: brief, note })
+    const { id, returnPath } = io.assign({ role, briefFile: brief, note, policy: seatPolicy(role) })
     const seq = /^d(\d+)$/.exec(id)?.[1]
     if (seq) S.seqHighWater = Math.max(S.seqHighWater, Number(seq))
     io.log(recordRow({ at: io.now(), assign: id, role, brief }))
     emit({ kind: 'assign', id, role, brief })
     const env = enforceTurnCeiling(role, id, io.wait(returnPath, waits[role] || 1200))
-    const enforcement = enforcementPreamble(env)
+    // Anti-replay FIRST: a stale or mis-addressed envelope is not evidence, and
+    // recording enforcement from one would put a false fact in the terminal record
+    // before the validation below rejects it.
+    const enforcement = validEnvelope(env, role, id) ? enforcementPreamble(env) : { kind: null, lines: [] }
     if (enforcement.lines.length > 0) {
       pendingEnforcement.set(role, enforcement)
       S.enforcements.push({ role, id, kind: enforcement.kind, lines: enforcement.lines })
@@ -3686,9 +3763,8 @@ function runTask(ctx, io, crash) {
       }
       const gatePathOf = (details) => {
         const value = details?.gate_path ?? null
-        if (typeof value === 'string'
-          && value.startsWith(`${ctx.taskDir}/`)
-          && !value.split('/').some((segment) => segment === '.' || segment === '..')) return value
+        const path = taskLocalPath(value)
+        if (path) return path
         try { io.log(recordRow({ at: io.now(), gate_path_rejected: value })) } catch { /* evidence only */ }
         return null
       }
@@ -3848,6 +3924,7 @@ function runTask(ctx, io, crash) {
       `the plan's files_in_scope crosses another live lane's fence: ${fenceBreachList(planFenceHits)} — this lane never edits another lane's write surface`,
       planEnv.artifacts || [])
   }
+  acceptedScope = scopeFiles
   const inScope = scopeMatcher(scopeFiles)
   const lane = planEnv.details?.validation_lane || ctx.lane
   if (!lane) return escalate('plan', 'no validation lane (neither planner envelope nor --lane provided)')
@@ -3860,6 +3937,7 @@ function runTask(ctx, io, crash) {
         planEnv.artifacts || [])
     }
   }
+  acceptedGatePath = taskLocalPath(planEnv.details?.gate_path) ?? art('gate.mjs')
   let gateCmd = planEnv.details?.gate_cmd || null
   const declared = planEnv.details?.mutations
   const mutations = declared == null ? [] : declared

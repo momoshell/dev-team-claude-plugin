@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync
 import { join, relative } from 'node:path'
 import { tmpdir } from 'node:os'
 import { ROOT, git, scratchDir } from '../../test/helpers.mjs'
-import { assertAnchorsPinned, checkAnchors, checkSkillAnchors, laneFence, MIN_EXPECTED_LENGTH, partitionShifts, repairAnchorsInPlace, repairCli, skillDocs } from './anchor-pin.mjs'
+import { anchorManifestDirs, assertAnchorsPinned, checkAnchors, checkSkillAnchors, citationCarrierTests, laneFence, MIN_EXPECTED_LENGTH, partitionShifts, pinnedKey, pinnedLiteralsInTests, repairAnchorsInPlace, repairCli, skillDocs, PINNED_LITERAL_BLIND_SPOT } from './anchor-pin.mjs'
 
 const EXPECTED = "KEY = 'anchored-sentinel-value'"
 
@@ -639,19 +639,6 @@ test('repair-all CLI repairs a committed shift on clean main', () => {
   assert.deepEqual(checkAnchors({ root: repoRoot, docs: [doc], manifest }), { anchors: 1, failures: [], shifted: [] })
 })
 
-function anchorManifestDirs(root) {
-  const found = []
-  function visit(dir) {
-    const entries = readdirSync(dir, { withFileTypes: true })
-    if (entries.some((entry) => entry.isFile() && entry.name === 'anchors.json')) found.push(dir)
-    for (const entry of entries) {
-      if (entry.isDirectory() && entry.name !== '.git' && entry.name !== 'node_modules') visit(join(dir, entry.name))
-    }
-  }
-  visit(root)
-  return found.sort()
-}
-
 test('the discovered anchor-manifest corpus checks clean', () => {
   // Mutation killed: omitting a discovered manifest, especially skills/pr-review, leaves a new pin corpus unverified.
   const dirs = anchorManifestDirs(ROOT)
@@ -666,4 +653,67 @@ test('the discovered anchor-manifest corpus checks clean', () => {
     const result = checkAnchors({ root: ROOT, docs, manifest })
     assert.deepEqual(result.failures, [], `${relative(ROOT, dir)} manifest failures`)
   }
+})
+
+test('no citation carrier test restates a currently pinned anchor key', () => {
+  assert.deepEqual(pinnedLiteralsInTests({ root: ROOT }).rows, [])
+})
+
+test('the pinned-literal tripwire names the file that restates a key', () => {
+  const root = scratchDir('b434-pinned-literals-')
+  const skillDir = join(root, 'skills/sample')
+  const SAMPLE = `${'crew/sample.mjs'}:2`
+  const UNPINNED = `${'crew/sample.mjs'}:9999`
+  mkdirSync(skillDir, { recursive: true })
+  writeFileSync(join(skillDir, 'anchors.json'), `${JSON.stringify({ [SAMPLE]: 'sample pinned content' }, null, 2)}\n`)
+  writeFileSync(join(skillDir, 'offender.test.mjs'), `const cited = '${SAMPLE}'\n`)
+  writeFileSync(join(skillDir, 'clean.test.mjs'), `const cited = '${UNPINNED}'\n`)
+  const result = pinnedLiteralsInTests({ root })
+  assert.equal(result.rows.length, 1)
+  assert.equal(result.rows[0].file, 'skills/sample/offender.test.mjs')
+  assert.equal(result.rows[0].line, 1)
+  assert.equal(result.rows[0].key, SAMPLE)
+  assert.equal(result.rows[0].manifest, 'skills/sample/anchors.json')
+  assert.equal(result.rows.some(({ file }) => file === 'skills/sample/clean.test.mjs'), false)
+})
+
+test('the tripwire ignores the quoted runtime refusal no manifest pins', () => {
+  const cliContract = join(ROOT, 'skills/crew-dispatch/cli-contract.test.mjs')
+  const result = pinnedLiteralsInTests({ root: ROOT, files: ['skills/crew-dispatch/cli-contract.test.mjs'] })
+  assert.deepEqual(result.rows, [])
+  assert.ok(readFileSync(cliContract, 'utf8').includes('crew/crew.mjs' + ':265'))
+})
+
+test('pinnedKey resolves the live key from the pinned content and refuses anything else', () => {
+  const root = scratchDir('b434-pinned-key-')
+  const manifestPath = join(root, 'anchors.json')
+  const SAMPLE = `${'crew/sample.mjs'}:2`
+  const expected = 'sample pinned content'
+  writeFileSync(manifestPath, JSON.stringify({ [SAMPLE]: expected }, null, 2))
+  assert.equal(pinnedKey({ manifestPath, expected }), SAMPLE)
+
+  writeFileSync(manifestPath, '{}\n')
+  assert.throws(
+    () => pinnedKey({ manifestPath, expected }),
+    (error) => error.message.includes(manifestPath) && error.message.includes('found 0'),
+  )
+
+  writeFileSync(manifestPath, JSON.stringify({ [SAMPLE]: expected, [`${'crew/sample.mjs'}:3`]: expected }, null, 2))
+  assert.throws(
+    () => pinnedKey({ manifestPath, expected }),
+    (error) => error.message.includes(manifestPath) && error.message.includes('found 2'),
+  )
+})
+
+test('citationCarrierTests covers every skills test plus the named extras', () => {
+  const files = citationCarrierTests(ROOT)
+  for (const file of [
+    'skills/crew-dispatch/exhibits.test.mjs',
+    'skills/crew-recovery/exhibits.test.mjs',
+    'skills/crew-dispatch/cli-contract.test.mjs',
+    'test/review-procedure-loader.test.mjs',
+  ]) assert.ok(files.includes(file), `carrier set must include ${file}`)
+  const result = pinnedLiteralsInTests({ root: ROOT })
+  assert.ok(PINNED_LITERAL_BLIND_SPOT.length > 0)
+  assert.equal(result.blindSpot, PINNED_LITERAL_BLIND_SPOT)
 })

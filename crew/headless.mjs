@@ -623,19 +623,81 @@ export function fenceCovers(fence, target) {
 }
 
 // The shell operators that make a command COMPOUND. A gate invocation joined to
-// anything else is not a standalone gate invocation.
-const SHELL_SEPARATOR = /&&|\|\||;|\||\n/
+// anything else is not a standalone gate invocation. Recognised by the scanner
+// below rather than by a regex, so that an operator inside quotes is text.
 
+// Quote-aware, because an operator INSIDE a quoted argument is not an operator
+// (#929). Splitting on the bare regex shredded
+// `grep -n -i "validation\\|node --test\\|npm test" plan.md` at the `|`s inside
+// its own pattern, and the fragment `npm test" plan.md` then read as a REAL
+// suite run — the third of three ways one grep killed a lane. An unterminated
+// quote keeps the rest of the string in that quote, which is what the shell does.
 export function splitShellCommands(command) {
-  return String(command ?? '').split(SHELL_SEPARATOR).map((part) => part.trim()).filter(Boolean)
+  const source = String(command ?? '')
+  const parts = []
+  let current = ''
+  let quote = null
+  for (let index = 0; index < source.length; index += 1) {
+    const ch = source[index]
+    if (quote === null && ch === '\\' && index + 1 < source.length) {
+      current += ch + source[index + 1]
+      index += 1
+      continue
+    }
+    if (quote === null && (ch === '"' || ch === "'")) { quote = ch; current += ch; continue }
+    if (quote !== null) { if (ch === quote) quote = null; current += ch; continue }
+    const two = source.slice(index, index + 2)
+    if (two === '&&' || two === '||') { parts.push(current); current = ''; index += 1; continue }
+    if (ch === ';' || ch === '|' || ch === '\n') { parts.push(current); current = ''; continue }
+    current += ch
+  }
+  parts.push(current)
+  return parts.map((part) => part.trim()).filter(Boolean)
+}
+
+// What a segment MENTIONS is not what it RUNS (#929). Quoted spans are ARGUMENTS
+// and a `#` word opens a COMMENT, so neither can be the command; both are blanked
+// to spaces, which preserves every offset outside them and leaves the rest of the
+// segment exactly as written. Blanking rather than deleting matters: `a"x"b` must
+// not become the single token `ab`.
+//
+// Backslash escapes are honoured OUTSIDE quotes only, which is where the shell
+// honours them for quote characters.
+export function executableText(text) {
+  const source = String(text ?? '')
+  const out = []
+  let quote = null
+  for (let index = 0; index < source.length; index += 1) {
+    const ch = source[index]
+    if (quote === null && ch === '\\' && index + 1 < source.length) {
+      out.push(ch, source[index + 1])
+      index += 1
+      continue
+    }
+    if (quote === null && (ch === '"' || ch === "'")) { quote = ch; out.push(' '); continue }
+    if (quote !== null && ch === quote) { quote = null; out.push(' '); continue }
+    out.push(quote === null ? ch : (ch === '\n' ? ch : ' '))
+  }
+  // A `#` opens a comment only at the START of a word, and only outside quotes —
+  // which the pass above has already reduced to spaces.
+  return out.join('').replace(/(^|\s)#[^\n]*/g, '$1')
 }
 
 function recogniseSegment(segment, { suiteCommand, gatePath }) {
   const text = String(segment ?? '')
   const tokens = text.split(/\s+/).filter(Boolean)
   if (gatePath && tokens.length === 2 && tokens[0] === 'node' && tokens[1] === gatePath) return 'gate'
-  if (suiteCommand && text.includes(suiteCommand)) return 'suite'
-  if (/\bnpm\s+(?:run\s+)?test\b/.test(text)) return 'suite'
+  // #929: these two matches used to read the WHOLE segment text, so
+  // `grep -n "npm test" brief.md` and `ls # npm test` were classified as suite
+  // runs. A lead may never run the suite and every seat greps its own brief, so
+  // this ended THREE lanes in one batch (b443, b444, b445) at the same stage,
+  // each on a grep. They read only what the shell would execute now.
+  const code = executableText(text)
+  if (suiteCommand && code.includes(suiteCommand)) return 'suite'
+  if (/\bnpm\s+(?:run\s+)?test\b/.test(code)) return 'suite'
+  // The node recogniser keeps reading the RAW text on purpose: shellTokens (:527)
+  // strips quotes so that a quoted glob cannot hide behind them, and
+  // `node --test "**/*.test.mjs"` must stay a suite run.
   if (isNodeTestInvocation(text)) return testTargets(text) ? 'scoped-test' : 'suite'
   return null
 }

@@ -9,6 +9,7 @@ import {
   SEAT_REFUSALS, SEAT_REFUSAL_ACTIONS, UNCLASSIFIED_REFUSAL, shq, stderrTail, updateCrewJson,
   SEAT_SUITE_POLICY_EVENT, SUITE_RUN_REFUSAL, SUITE_RUN_UNRECOGNISED, SUITE_POLICY_STREAM_UNAVAILABLE,
   suiteRunPolicy, recogniseSuiteInvocation, testTargets, fenceCovers, shellToolCalls,
+  splitShellCommands, executableText,
   suitePolicyCounters, countSuiteDecision, suitePolicyReport, SUITE_RUN_OWNERSHIP, SUITE_RUN_OWNERSHIP_KINDS,
 } from './headless.mjs'
 import { cellFailureKind } from './seat-io.mjs'
@@ -1609,4 +1610,89 @@ test('two declared suite runs in one command line are refused', () => {
   const opts = { role: 'builder', fence: ['crew/drive.mjs'], gatePath: '/task/gate.mjs', suiteCommand: 'npm test' }
   assert.equal(suiteRunPolicy({ ...opts, command: 'npm test && npm test', suiteRanBefore: 0 }).decision, 'refuse')
   assert.equal(suiteRunPolicy({ ...opts, command: 'cd /tmp/x && npm test', suiteRanBefore: 1 }).decision, 'refuse')
+})
+
+// #929 — three lanes (b443-providerretry, b444-charterbytes, b445-hardenproof)
+// died in ONE batch at scope-gate:r1, each because its lead grepped its own
+// brief for the string "npm test". A lead's suite ownership is `never`, so a
+// mention read as a run ends the dispatch and escalates the lane. The commands
+// below are the ACTUAL three, copied from each lane's seat-suite-policy row.
+test('#929 a segment that MENTIONS the suite is not a segment that RUNS it', () => {
+  const gatePath = '/task/gate.mjs'
+  const suiteCommand = 'npm test'
+  const opts = { role: 'lead', gatePath, suiteCommand }
+
+  // MUTATION: restore `text.includes(suiteCommand)` / the regex over the raw
+  // segment text in recogniseSegment, and every one of these refuses again.
+  const measured = [
+    'cd /x/task && grep -n -i "validation\\|node --test\\|npm test" plan.md | head -60',
+    'cd /x/task; grep -n -i "suite\\|validation\\|npm test\\|node --test" role-builder.md | head -40',
+    'cd /x && node -p "const j=require(\'./crew.json\'); JSON.stringify({suite:j.suite_command||j.suite},null,1)" | head -30; echo "=== builder charter on suite ==="; grep -n -i "suite\\|validation lane\\|npm test" task/role-builder.md | head -30',
+  ]
+  for (const command of measured) {
+    assert.equal(recogniseSuiteInvocation(command, { gatePath, suiteCommand }), null, command)
+    assert.equal(suiteRunPolicy({ ...opts, command }).decision, 'unrecognised', command)
+  }
+
+  // A quoted argument and a comment are not the command.
+  for (const command of [
+    'echo "remember to run npm test before you finish"',
+    "echo 'npm test'",
+    'ls -la  # npm test comes later',
+    '# npm test',
+    'grep -rn "npm test" docs/',
+  ]) {
+    assert.equal(recogniseSuiteInvocation(command, { gatePath, suiteCommand }), null, command)
+    assert.equal(suiteRunPolicy({ ...opts, command }).decision, 'unrecognised', command)
+  }
+
+  // MUTATION: make the recogniser admit anything, and each of these stops
+  // refusing — the fix must not have bought its silence by going blind.
+  for (const command of [
+    'npm test',
+    'cd /x && npm test',
+    'npm run test',
+    'npm test && bash tools/run-everything.sh',
+    'cd /x; npm test | tee out.log',
+    'node --test "**/*.test.mjs"',
+  ]) {
+    assert.equal(recogniseSuiteInvocation(command, { gatePath, suiteCommand }), 'suite', command)
+    assert.equal(suiteRunPolicy({ ...opts, command }).decision, 'refuse', command)
+  }
+  // A quoted glob must still not hide behind its quotes: the node recogniser
+  // reads the RAW text, and only the two mention matches read executable text.
+  assert.equal(testTargets('node --test "**/*.test.mjs"'), null)
+})
+
+// The splitter is the other half of the same defect: `|` inside a grep pattern
+// is not a pipe, and splitting there produced the fragment `npm test" plan.md`,
+// which read as a REAL suite run no matter how the mention matches behaved.
+test('#929 splitShellCommands does not split on an operator inside quotes', () => {
+  // MUTATION: restore the bare SHELL_SEPARATOR regex split and this reverts to
+  // five fragments, one of which begins with an unquoted `npm test`.
+  assert.deepEqual(
+    splitShellCommands('grep -n -i "validation\\|node --test\\|npm test" plan.md'),
+    ['grep -n -i "validation\\|node --test\\|npm test" plan.md'],
+  )
+  assert.deepEqual(splitShellCommands("echo 'a;b' ; ls"), ["echo 'a;b'", 'ls'])
+  assert.deepEqual(splitShellCommands('echo "x && y" && ls'), ['echo "x && y"', 'ls'])
+  // Real operators outside quotes still split, including the two-character forms.
+  assert.deepEqual(splitShellCommands('a && b || c ; d | e'), ['a', 'b', 'c', 'd', 'e'])
+  assert.deepEqual(splitShellCommands('a\nb'), ['a', 'b'])
+  // An unterminated quote keeps the rest of the line quoted, as the shell does.
+  assert.deepEqual(splitShellCommands('echo "a | b'), ['echo "a | b'])
+  assert.deepEqual(splitShellCommands(''), [])
+})
+
+test('#929 executableText blanks quoted spans and comments while preserving the rest', () => {
+  // Blanking, not deleting: `a"x"b` must not collapse into the single token `ab`.
+  assert.equal(executableText('a"x"b'), 'a   b')
+  assert.equal(executableText('grep "npm test" f'), 'grep            f')
+  assert.equal(executableText('ls # npm test'), 'ls ')
+  assert.equal(executableText('ls #npm test'), 'ls ')
+  // A `#` mid-word is not a comment (a fragment identifier, a colour literal).
+  assert.equal(executableText('curl http://x/y#frag'), 'curl http://x/y#frag')
+  // Escapes are honoured outside quotes, where the shell honours them.
+  assert.equal(executableText('echo \\"npm test\\"'), 'echo \\"npm test\\"')
+  assert.equal(executableText(''), '')
 })

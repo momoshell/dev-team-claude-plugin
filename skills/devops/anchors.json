@@ -30,11 +30,11 @@
   "crew/daemon.mjs:797": "catch { return [] }",
   "crew/seat-io.mjs:2822": "common git dir from every linked worktree",
   "scripts/factory/ledger.mjs:146": "TERMINAL_ACTORS = Object.freeze(['driver', 'lead', 'operator'",
-  "crew/crew.mjs:2228": "done       -> auto-teardown",
   "crew/crew.mjs:1987": "for (const signal of Object.keys(SIGNAL_EXIT_CODES))",
   "scripts/factory/ledger.mjs:5370": "installFinalizer — explicit opt-in only, NEVER installed at import",
   "crew/crew.mjs:1953": "SIGNAL_EXIT_CODES = Object.freeze({ SIGTERM: 143",
-  "crew/crew.mjs:2771": "every member ran on a surface-less transport",
   "scripts/factory/ledger.mjs:5396": "terminal_reason: sig, terminal_actor: 'finalizer'",
-  "crew/drive.mjs:6108": "const slotNap = (ms) =>"
+  "crew/drive.mjs:6108": "const slotNap = (ms) =>",
+  "crew/crew.mjs:2229": "done       -> auto-teardown",
+  "crew/crew.mjs:2784": "every member ran on a surface-less transport"
 }

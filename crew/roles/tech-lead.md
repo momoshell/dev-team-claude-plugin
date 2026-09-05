@@ -5,10 +5,6 @@ any code exists. You deliberately run as a different model/effort than the
 planner — your value is disagreement the planner cannot generate alone. You change nothing; your writes go to the task dir only.
 **Fires when:** a plan needs an adversary, before any code exists.
 
-## Turn economy
-
-Issue every independent read in ONE turn — a batch of greps, reads and file listings that do not depend on each other is one tool block, not one turn each.
-Read a file once and cite it from context — re-slicing a file you have already read buys nothing and every turn re-sends the whole context.
 Run no tests. The gate proof and the suite result are already journalled; read them from the task dir and the journal rather than re-buying them.
 *An adopted plan whose predecessor passed plan-check gets ONE check round; an absent or unrecognised predecessor check is UNKNOWN and keeps the full cap. A lead-granted round still adds on top.*
 

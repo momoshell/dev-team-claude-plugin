@@ -17,7 +17,7 @@ import {
   parseArgs, FLAG_VALUE_REFUSAL, FLAG_VALUE_CONTRACT, BOOLEAN_FLAGS,
   resolveTimeoutS, TIMEOUT_S_REFUSAL, TIMEOUT_S_DEFAULT,
   BOOT_DESCENDANT_REFUSALS, descendantRefusal, refuseStaleDescendants,
-  MEMORY_ROLES, memoryConfig, CAPABILITY_REFUSALS, loadCapabilities,
+  MEMORY_ROLES, memoryConfig, CHARTER_BASELINE_BYTES, CHARTER_SOURCE_BUDGET, CHARTER_SOURCE_TOTAL_BUDGET, CHARTER_CEILINGS, CHARTER_BUDGET_REFUSAL, CHARTER_UNMEASURED_CAUSES, charterFileBytes, compiledCharterBytes, charterBudgetRefusals, charterSourceRefusals, assertCharterBudgets, charterBytesRecord, CAPABILITY_REFUSALS, loadCapabilities,
   grantsFor, assertGrantsBacked, assertFanoutCoherent, deniedFanout, EMPTY_GRANTS, probeLocalEndpoint,
   effectiveTools, ADVISOR_CONFIG_VERSION, ADVISOR_BOOT_REFUSALS, SAFE_MODEL, classifyAdvisorCell,
   advisorBootRecord, advisorJournalRecord, advisorEndpointOrigin, assertAdvisorCellLive,
@@ -3317,6 +3317,117 @@ test('a missing memory budget value falls back to the default and records invali
   const cfg = memoryConfig({ 'memory-dir': '/tmp/crew-memory-fixture', 'memory-budget-bytes': true })
   assert.equal(cfg.budgetBytes, 8000)
   assert.equal(cfg.reason, 'invalid-budget')
+})
+
+test('the charter ceilings and source budgets are the delivered bytes, below the 2026-09-05 baseline', () => {
+  const roles = ['builder', 'lead', 'planner', 'reviewer', 'tech-lead']
+  const files = ['_shared', ...roles]
+  assert.equal(Object.isFrozen(CHARTER_CEILINGS), true)
+  assert.equal(Object.isFrozen(CHARTER_SOURCE_BUDGET), true)
+  assert.equal(Object.isFrozen(CHARTER_BASELINE_BYTES), true)
+  assert.deepEqual(CHARTER_BASELINE_BYTES, { _shared: 3432, builder: 5169, lead: 9378, planner: 16930, reviewer: 7697, 'tech-lead': 6529 })
+  assert.deepEqual(CHARTER_SOURCE_BUDGET, { _shared: 3750, builder: 4852, lead: 9061, planner: 16613, reviewer: 7380, 'tech-lead': 6212 })
+  assert.deepEqual(CHARTER_CEILINGS, { builder: 8604, lead: 12813, planner: 20365, reviewer: 11132, 'tech-lead': 9964 })
+  for (const value of [...Object.values(CHARTER_BASELINE_BYTES), ...Object.values(CHARTER_SOURCE_BUDGET), ...Object.values(CHARTER_CEILINGS)]) assert.equal(Number.isInteger(value), true)
+  for (const role of roles) {
+    assert.equal(CHARTER_CEILINGS[role], CHARTER_SOURCE_BUDGET._shared + 2 + CHARTER_SOURCE_BUDGET[role])
+    assert.ok(CHARTER_SOURCE_BUDGET[role] < CHARTER_BASELINE_BYTES[role])
+  }
+  assert.equal(CHARTER_SOURCE_TOTAL_BUDGET, 47868)
+  assert.equal(CHARTER_SOURCE_TOTAL_BUDGET, Object.values(CHARTER_SOURCE_BUDGET).reduce((sum, value) => sum + value, 0))
+  assert.ok(CHARTER_SOURCE_TOTAL_BUDGET < 49135)
+
+  const source = charterFileBytes()
+  assert.deepEqual(Object.fromEntries(Object.entries(source).map(([name, entry]) => [name, entry.bytes])), CHARTER_SOURCE_BUDGET)
+  const shared = readFileSync(join(ROOT, 'crew', 'roles', '_shared.md'), 'utf8')
+  for (const name of files) {
+    assert.equal(source[name].reason, null)
+    assert.equal(source[name].bytes, Buffer.byteLength(readFileSync(join(ROOT, 'crew', 'roles', `${name}.md`), 'utf8'), 'utf8'))
+  }
+  const compiled = compiledCharterBytes()
+  for (const role of roles) {
+    const card = readFileSync(join(ROOT, 'crew', 'roles', `${role}.md`), 'utf8')
+    const expected = Buffer.byteLength(`${shared}\n\n${card}`, 'utf8')
+    assert.deepEqual(compiled[role], { bytes: expected, reason: null })
+    assert.equal(compiled[role].bytes, CHARTER_CEILINGS[role])
+  }
+})
+
+test('a charter over its bound refuses by name, at either level', () => {
+  const compiled = compiledCharterBytes()
+  const files = charterFileBytes()
+  assert.doesNotThrow(() => assertCharterBudgets(compiled, files))
+  const atCeiling = Object.fromEntries(Object.entries(CHARTER_CEILINGS).map(([role, bytes]) => [role, { bytes, reason: null }]))
+  const atSource = Object.fromEntries(Object.entries(CHARTER_SOURCE_BUDGET).map(([name, bytes]) => [name, { bytes, reason: null }]))
+  assert.deepEqual(charterBudgetRefusals(atCeiling), [])
+  assert.deepEqual(charterSourceRefusals(atSource), [])
+
+  const overCompiled = { ...compiled, planner: { bytes: compiled.planner.bytes + 1, reason: null } }
+  assert.throws(
+    () => assertCharterBudgets(overCompiled, files),
+    (error) => error.message.includes(CHARTER_BUDGET_REFUSAL) && error.message.includes('planner') && error.message.includes(String(CHARTER_CEILINGS.planner)),
+  )
+  const overSource = { ...files, planner: { bytes: files.planner.bytes + 1, reason: null } }
+  assert.throws(
+    () => assertCharterBudgets(compiled, overSource),
+    (error) => error.message.includes(CHARTER_BUDGET_REFUSAL) && error.message.includes('planner.md') && error.message.includes(String(CHARTER_SOURCE_BUDGET.planner)),
+  )
+  const unmeasuredCompiled = { ...compiled, lead: { bytes: null, reason: CHARTER_UNMEASURED_CAUSES[0] } }
+  assert.throws(() => assertCharterBudgets(unmeasuredCompiled, files), (error) => error.message.includes(CHARTER_BUDGET_REFUSAL) && error.message.includes('lead') && error.message.includes(CHARTER_UNMEASURED_CAUSES[0]))
+  const unmeasuredSource = { ...files, lead: { bytes: null, reason: CHARTER_UNMEASURED_CAUSES[0] } }
+  assert.throws(() => assertCharterBudgets(compiled, unmeasuredSource), (error) => error.message.includes(CHARTER_BUDGET_REFUSAL) && error.message.includes('lead.md') && error.message.includes(CHARTER_UNMEASURED_CAUSES[0]))
+})
+
+test('a memory addendum is measured outside the ceiling, and an unreadable charter is null with a closed cause', () => {
+  const dir = scratchDir('crew-charter-memory-')
+  const shared = readFileSync(join(ROOT, 'crew', 'roles', '_shared.md'), 'utf8')
+  const card = readFileSync(join(ROOT, 'crew', 'roles', 'planner.md'), 'utf8')
+  const section = '## Team memory\n\nA remembered thing.\n'
+  writeFileSync(join(dir, 'role-planner.md'), `${shared}\n\n${card}\n\n${section}`)
+  const record = charterBytesRecord(dir, ['planner'], { planner: section })
+  const memory = Buffer.byteLength(section, 'utf8') + 2
+  assert.equal(record.memory_bytes.planner, memory)
+  assert.equal(record.base.planner, CHARTER_CEILINGS.planner)
+  assert.equal(record.bytes.planner, CHARTER_CEILINGS.planner + memory)
+
+  const empty = scratchDir('crew-charter-empty-')
+  const unreadable = charterBytesRecord(empty, ['planner'])
+  assert.equal(unreadable.bytes.planner, null)
+  assert.equal(unreadable.base.planner, null)
+  assert.ok(CHARTER_UNMEASURED_CAUSES.includes(unreadable.unmeasured.planner))
+  assert.notEqual(unreadable.bytes.planner, 0)
+})
+
+test('boot records what each seat\'s charter costs per turn', async () => {
+  const roles = ['lead', 'planner', 'builder', 'reviewer', 'tech-lead']
+  const home = scratchDir('crew-charter-boot-home-')
+  const { root: checkoutRoot, checkout } = testCheckout('crew-charter-boot-checkout-')
+  const task = 'charter-boot'
+  execSync('git init -q', { cwd: checkout })
+  let output = ''
+  const previousWrite = process.stdout.write
+  try {
+    process.stdout.write = (chunk) => { output += String(chunk); return true }
+    try {
+      await withoutMemoryEnv(() => withHome(home, () => bootCmd(
+        { task, checkout, roles: roles.join(','), 'headless-all': true, 'claude-bin': process.execPath },
+        { cmux: callCounter(), tree: callCounter(), renameTab: callCounter() },
+      )))
+    } finally { process.stdout.write = previousWrite }
+    const dir = testCrewDir(home, checkout, task)
+    const boot = bootRecord(dir)
+    const result = JSON.parse(output.trim().split('\n').at(-1))
+    assert.deepEqual(result.charter_bytes, boot.charter_bytes)
+    for (const role of roles) {
+      const expected = Buffer.byteLength(readFileSync(join(dir, 'task', `role-${role}.md`), 'utf8'), 'utf8')
+      assert.equal(boot.charter_bytes[role], expected)
+      assert.equal(boot.charter_memory_bytes[role], 0)
+      assert.equal(boot.charter_base_bytes[role], CHARTER_CEILINGS[role])
+    }
+  } finally {
+    process.stdout.write = previousWrite
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
 })
 
 test('unconfigured boot keeps every merged prompt byte-identical and omits memory journal data', async () => {

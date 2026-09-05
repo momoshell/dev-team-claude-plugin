@@ -1501,6 +1501,139 @@ export function memoryExtracts(roles, args, taskSlug) {
   }
 }
 
+// #898 — a seat's charter is an appended system prompt re-sent on EVERY turn, so
+// its size is a per-turn cost and nothing measured it. Two DIFFERENT things are
+// bounded here and they must not be confused:
+//   CHARTER_CEILINGS      — per ROLE, the COMPILED base charter writeRolePrompt
+//                           writes: _shared + the 2-byte separator + the card.
+//                           This is the number charter_bytes reports, minus any
+//                           memory addendum, which is measured separately and
+//                           sits OUTSIDE the ceiling (charter_memory_bytes).
+//   CHARTER_SOURCE_BUDGET — per FILE, the six prose files on disk. This is where
+//                           the dedup is bounded: every card is below its
+//                           2026-09-05 baseline and cannot re-grow into it.
+// Both are the DELIVERED bytes with NO headroom: #898 ask 2 forbids a round number
+// and slack is one. Growing a charter is a deliberate, recorded act, and the
+// refusal names the number to write.
+//
+// The #866 turn-economy block was pasted into all five role cards; it is now
+// stated once in _shared.md, which every seat is handed anyway. Measured, in the
+// only unit this checkout can measure (it ships no tokenizer and may not add one):
+// charter-delta: _shared=+318 builder=-317 lead=-317 planner=-317 reviewer=-317 tech-lead=-317 seat-builder=+1 seat-lead=+1 seat-planner=+1 seat-reviewer=+1 seat-tech-lead=+1 source-total=-1267 turns-b381=173 byte-turns-planner=+173 token-delta=unmeasured
+// Read: the source tree loses 1,267 bytes; a SEAT's compiled charter moves by one
+// byte, because a seat only ever received one copy of the block. Replaying b381's
+// 173 planner turns is +173 byte-turns. The duplication was never a per-turn cost
+// — it was five copies of one rule that could drift apart, and three variants of
+// the third line show they had begun to.
+export const CHARTER_BASELINE_BYTES = Object.freeze({
+  _shared: 3432,
+  builder: 5169,
+  lead: 9378,
+  planner: 16930,
+  reviewer: 7697,
+  'tech-lead': 6529,
+})
+
+// Delivered source bytes, per file. Every card is below its baseline above.
+export const CHARTER_SOURCE_BUDGET = Object.freeze({
+  _shared: 3750,
+  builder: 4852,
+  lead: 9061,
+  planner: 16613,
+  reviewer: 7380,
+  'tech-lead': 6212,
+})
+export const CHARTER_SOURCE_TOTAL_BUDGET = 47868
+
+// Delivered COMPILED bytes, per role: CHARTER_SOURCE_BUDGET._shared + 2 + card.
+export const CHARTER_CEILINGS = Object.freeze({
+  builder: 8604,
+  lead: 12813,
+  planner: 20365,
+  reviewer: 11132,
+  'tech-lead': 9964,
+})
+
+export const CHARTER_BUDGET_REFUSAL = 'charter-over-ceiling'
+// Closed: an unmeasured charter is null with one of these causes, never a zero.
+export const CHARTER_UNMEASURED_CAUSES = Object.freeze(['charter-unreadable'])
+
+// Source bytes per charter FILE; unreadable is null with a closed cause.
+export function charterFileBytes(dir = ROLES_DIR, deps = {}) {
+  const read = deps.readFileSync || readFileSync
+  const sizes = {}
+  for (const name of Object.keys(CHARTER_SOURCE_BUDGET)) {
+    try { sizes[name] = { bytes: Buffer.byteLength(read(join(dir, `${name}.md`), 'utf8'), 'utf8'), reason: null } }
+    catch { sizes[name] = { bytes: null, reason: CHARTER_UNMEASURED_CAUSES[0] } }
+  }
+  return sizes
+}
+
+// The COMPILED base charter per role, built exactly as writeRolePrompt builds it.
+export function compiledCharterBytes(dir = ROLES_DIR, deps = {}) {
+  const read = deps.readFileSync || readFileSync
+  const sizes = {}
+  for (const role of Object.keys(CHARTER_CEILINGS)) {
+    try { sizes[role] = { bytes: Buffer.byteLength(`${read(join(dir, '_shared.md'), 'utf8')}\n\n${read(join(dir, `${role}.md`), 'utf8')}`, 'utf8'), reason: null } }
+    catch { sizes[role] = { bytes: null, reason: CHARTER_UNMEASURED_CAUSES[0] } }
+  }
+  return sizes
+}
+
+// The refusal, by name, over the ROLE-keyed compiled measurement — the same shape
+// charter_bytes reports. Over the ceiling and unmeasured both refuse. It is npm
+// test that runs this (crew/crew.test.mjs), not boot: instrumentation is never
+// load-bearing, and a run must not die because prose grew by a byte.
+export function charterBudgetRefusals(compiled = compiledCharterBytes()) {
+  const refusals = []
+  for (const [role, ceiling] of Object.entries(CHARTER_CEILINGS)) {
+    const measured = compiled?.[role]
+    if (!measured || measured.bytes === null) { refusals.push(`${CHARTER_BUDGET_REFUSAL}: compiled charter ${role} is unmeasured (${measured?.reason || CHARTER_UNMEASURED_CAUSES[0]})`); continue }
+    if (measured.bytes > ceiling) refusals.push(`${CHARTER_BUDGET_REFUSAL}: compiled charter ${role} is ${measured.bytes} bytes, over its ${ceiling}-byte ceiling`)
+  }
+  return refusals
+}
+
+// The source-file budget refuses under the same named cause, so a card that
+// re-grows toward its pre-dedup size is red even though no seat noticed.
+export function charterSourceRefusals(files = charterFileBytes()) {
+  const refusals = []
+  for (const [name, budget] of Object.entries(CHARTER_SOURCE_BUDGET)) {
+    const measured = files?.[name]
+    if (!measured || measured.bytes === null) { refusals.push(`${CHARTER_BUDGET_REFUSAL}: charter source ${name}.md is unmeasured (${measured?.reason || CHARTER_UNMEASURED_CAUSES[0]})`); continue }
+    if (measured.bytes > budget) refusals.push(`${CHARTER_BUDGET_REFUSAL}: charter source ${name}.md is ${measured.bytes} bytes, over its ${budget}-byte budget`)
+  }
+  return refusals
+}
+
+export function assertCharterBudgets(compiled = compiledCharterBytes(), files = charterFileBytes()) {
+  const refusals = [...charterBudgetRefusals(compiled), ...charterSourceRefusals(files)]
+  if (refusals.length) throw new Error(refusals.join('; '))
+}
+
+// What a seat actually pays per turn: the COMPILED charter writeRolePrompt just
+// wrote. `base` is the ceiling-comparable part (shared + separator + card) and
+// `memory_bytes` is the addendum outside the ceiling — a deliberately configured
+// section, measured, never hidden inside the bound. A prompt that cannot be read
+// is null with a closed cause, never a zero.
+export function charterBytesRecord(taskDir, roles, sections = {}, deps = {}) {
+  const read = deps.readFileSync || readFileSync
+  const bytes = {}
+  const base = {}
+  const memory_bytes = {}
+  const unmeasured = {}
+  for (const role of roles || []) {
+    const section = sections?.[role] || ''
+    const memory = section ? Buffer.byteLength(section, 'utf8') + 2 : 0
+    memory_bytes[role] = memory
+    try {
+      bytes[role] = Buffer.byteLength(read(join(taskDir, `role-${role}.md`), 'utf8'), 'utf8')
+      base[role] = bytes[role] - memory
+    } catch { bytes[role] = null; base[role] = null; unmeasured[role] = CHARTER_UNMEASURED_CAUSES[0] }
+  }
+  return { bytes, base, memory_bytes, ...(Object.keys(unmeasured).length ? { unmeasured } : {}) }
+}
+
 function writeRolePrompt(role, taskDir, section = '') {
   const seat = SEAT_DEFAULTS[role]
   // --append-system-prompt-file is LAST-WINS, not cumulative (verified against
@@ -1778,6 +1911,7 @@ export async function bootCmd(args, deps = {}) {
   const bootBrief = `Crew for task ${taskSlug}. Task dir ${paths.taskDir}. Read your role in the system prompt, reply exactly ready: your-role, then wait.`
   const memory = memoryExtracts(roles, args, taskSlug)
   for (const role of roles) writeRolePrompt(role, paths.taskDir, memory.sections[role] || '')
+  const charter = charterBytesRecord(paths.taskDir, roles, memory.sections)
   let workspace = null
   let windowId = null
   const members = {}
@@ -1876,6 +2010,10 @@ export async function bootCmd(args, deps = {}) {
     ...turnCeilingsJournalPatch(turnCeilingRecord),
     models: Object.fromEntries(roles.map((r) => [r, members[r].model])),
     transports: Object.fromEntries(roles.map((r) => [r, members[r].transport])),
+    charter_bytes: charter.bytes,
+    charter_base_bytes: charter.base,
+    charter_memory_bytes: charter.memory_bytes,
+    ...(charter.unmeasured ? { charter_unmeasured: charter.unmeasured } : {}),
     ...(workerBin ? { claude_bin: workerBin } : {}),
     ...(tierName ? { tier: tierName, seats } : {}),
     ...(allocation ? { allocation } : {}),
@@ -1892,7 +2030,7 @@ export async function bootCmd(args, deps = {}) {
   // after crew.json is on disk: a boot killed at this line leaves a workspace a
   // `crew teardown --task` can still find and close.
   awaitSeatsReadyDep(crew, 'fresh', join(paths.dir, 'journal.jsonl'))
-  process.stdout.write(`${JSON.stringify({ workspace_id: workspace ? workspace.id : null, members, task_dir: paths.taskDir, crew_json: join(paths.dir, 'crew.json') })}\n`)
+  process.stdout.write(`${JSON.stringify({ workspace_id: workspace ? workspace.id : null, members, task_dir: paths.taskDir, crew_json: join(paths.dir, 'crew.json'), charter_bytes: charter.bytes })}\n`)
 }
 
 function ledgerDbPath() {

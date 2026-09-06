@@ -19,6 +19,42 @@ import { reclaimStore, PHASES, VERDICTS, EVIDENCE_KINDS, LIVENESS } from './recl
 import { readJsonTri } from './json-leaf.mjs'
 
 export const WAIT_POLL_MS = 5000
+
+// #944 — a plan bounce against a still-live seat session must not end the lane.
+// The GUARD below (ADR-029 §5 c3) is correct and untouched: one live invocation
+// per session. What changes is the RESPONSE to it. A refused concurrent turn at
+// a round boundary is transient and has an obvious move — wait for the prior
+// invocation to settle. The bound mirrors crew/seat-io.mjs:176-178
+// (REASK_SETTLE_MS × REASK_SETTLE_POLLS), which waits out the same
+// write-then-exit gap one layer up. ONE bound covers BOTH phases, the probe and
+// the reservation race, so a busy round boundary costs 60s and never 120s.
+export const SESSION_BUSY_SETTLE_MS = 60_000
+export const SESSION_BUSY_EVENT = 'seat-session-busy'
+export const SESSION_BUSY_VERDICTS = Object.freeze(['waiting', 'settled', 'expired', 'unresolvable'])
+export const SESSION_BUSY_PHASES = Object.freeze(['probe', 'reservation'])
+// The driver names its rounds `plan:rN` and passes this transport no stage label
+// (crew/drive.mjs:3129). It does RECORD every stage it opens in the lane journal
+// this module already writes to — {stage} on open (crew/drive.mjs:2775) and
+// {stage_done} on close (:2769) — so replaying that stack here yields the
+// driver's own openStages.at(-1). crew/crew.mjs:2438 stagesFromJournal is the
+// same idiom, including its reset at a run-start row.
+//
+// NOTHING DURABLE IS WRITTEN FOR ANY OF THIS. The fallback ordinal below is
+// DERIVED from the {assign, role} record rows the driver already logs
+// (crew/drive.mjs:3132) — one per OPENED assignment, none for a refused one — so
+// a lane whose rounds never overlap adds no crew-member field, no journal row and
+// no park call. When neither label nor ordinal can be measured the round is
+// reported UNKNOWN; an unmeasured value is never a guess.
+export const SESSION_ROUND_BASIS = 'seat-assignments'
+export const SESSION_DRIVER_BASIS = 'driver-stage'
+export const SESSION_ROUND_UNMEASURED = 'unmeasured'
+export const SESSION_ROUND_BASES = Object.freeze([SESSION_DRIVER_BASIS, SESSION_ROUND_BASIS, SESSION_ROUND_UNMEASURED])
+export const SESSION_STAGE_ABSENT = Object.freeze(['journal-absent', 'journal-unreadable', 'no-open-stage'])
+export const JOURNAL_RECORD_CHANNEL = 'record'
+// The literal of crew/drive.mjs:2076 RUN_START_EVENT, repeated rather than
+// imported: crew/drive.mjs already imports from this module, and an import back
+// would close a cycle. crew/crew.mjs:2223 writes the row and :2447 resets on it.
+export const JOURNAL_RUN_START_EVENT = 'run-start'
 const KILL_GRACE_MS = 10_000
 
 // The provider conditions this transport can RECOGNISE in bytes it ALREADY
@@ -1330,13 +1366,131 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
     if ((fallbacksUsed.get(`${run.role}:${run.id}`) ?? 0) >= FALLBACK_MAX) err.graceSpent = true
     return err
   }
-  function busy(role, sessionId) {
-    const err = new Error(`headless: seat ${role} already has a live invocation against session ${sessionId} — refusing a concurrent turn (ADR-029 §5 c3)`)
-    err.stage = 'headless-session-busy'; err.role = role; return err
+  function busy(role, sessionId, detail = null) {
+    const named = detail ? ` (live dispatch ${detail.dispatch ?? 'unknown'}, round ${detail.round ?? 'unknown'} by ${detail.roundBasis ?? 'unknown'}, seat round ${detail.seatRound ?? 'unknown'}, phase ${detail.phase ?? 'probe'}, waited ${detail.waitedMs ?? 0}ms of ${SESSION_BUSY_SETTLE_MS}ms)` : ''
+    const err = new Error(`headless: seat ${role} already has a live invocation against session ${sessionId}${named} — refusing a concurrent turn (ADR-029 §5 c3)`)
+    err.stage = 'headless-session-busy'; err.role = role
+    if (detail) { err.sessionId = sessionId; err.dispatch = detail.dispatch ?? null; err.round = detail.round ?? null; err.roundBasis = detail.roundBasis ?? null; err.seatRound = detail.seatRound ?? null; err.stageAbsent = detail.stageAbsent ?? null; err.phase = detail.phase ?? 'probe'; err.waitedMs = detail.waitedMs ?? 0 }
+    return err
   }
   function unresolvable(role, sessionId) {
     const err = new Error(`headless: seat ${role} has an unresolvable reservation for session ${sessionId} at ${activePath(role)} — use override to recover it`)
     err.stage = 'headless-unresolvable-reservation'; err.role = role; return err
+  }
+  // #944 — the lane journal is this transport's only view of the driver's round.
+  // crew/seat-io.mjs:3620 and this module's own log() write the SAME file, so the
+  // {stage}/{stage_done}/{assign} record rows are already on disk when assign
+  // runs. Replaying the stage rows as a STACK reproduces the driver's openStages;
+  // its top is openStages.at(-1) — the round the refusal belongs to. Counting the
+  // role's {assign} rows gives the fallback ordinal without storing anything.
+  // Both are scoped to the CURRENT run by the run-start reset, the same idiom as
+  // crew/drive.mjs:2129 and crew/crew.mjs:2447. Read LAZILY: a lane whose rounds
+  // never overlap must touch nothing at all.
+  function journalFacts(role) {
+    const path = join(paths.dir, 'journal.jsonl')
+    if (!exists(path)) return { stage: null, absent: 'journal-absent', assigns: null }
+    let text = null
+    try { text = read(path, 'utf8') } catch { return { stage: null, absent: 'journal-unreadable', assigns: null } }
+    if (typeof text !== 'string') return { stage: null, absent: 'journal-unreadable', assigns: null }
+    const open = []
+    let assigns = 0
+    for (const line of text.split('\n')) {
+      if (!line) continue
+      let row = null
+      try { row = JSON.parse(line) } catch { continue }
+      if (!row) continue
+      if (row.event === JOURNAL_RUN_START_EVENT) { open.length = 0; assigns = 0; continue }
+      if (row.channel !== JOURNAL_RECORD_CHANNEL) continue
+      if (typeof row.assign === 'string' && row.role === role) { assigns += 1; continue }
+      if (typeof row.stage === 'string' && row.event === undefined) { open.push(row.stage); continue }
+      if (typeof row.stage_done === 'string') { const at = open.lastIndexOf(row.stage_done); if (at >= 0) open.splice(at, 1) }
+    }
+    return { stage: open.length ? open[open.length - 1] : null, absent: open.length ? null : 'no-open-stage', assigns }
+  }
+  // ONE measurement per assign, memoised: the journal is read at most once, and
+  // every row and refusal of that assign quotes the same answer.
+  function roundResolver(role, reask) {
+    let named = null
+    return () => {
+      if (named) return named
+      const facts = journalFacts(role)
+      const seat = facts.assigns === null ? null : reask ? Math.max(1, facts.assigns) : facts.assigns + 1
+      named = facts.stage
+        ? { round: facts.stage, roundBasis: SESSION_DRIVER_BASIS, seatRound: seat, stageAbsent: null }
+        : { round: seat, roundBasis: seat === null ? SESSION_ROUND_UNMEASURED : SESSION_ROUND_BASIS, seatRound: seat, stageAbsent: facts.absent }
+      return named
+    }
+  }
+  // The three branches assign already ran, in the same order, returning a verdict
+  // instead of throwing.
+  function sessionProbe(role, prior, persisted) {
+    if (prior && !exists(prior.exit)) return { verdict: 'busy', dispatch: prior.id, handle: null }
+    const reconciliation = store.reconcile(role)
+    if (reconciliation.verdict === VERDICTS.BUSY) return { verdict: 'busy', dispatch: reconciliation.marker?.id ?? prior?.id ?? persisted?.id ?? null, handle: null }
+    if (reconciliation.verdict === VERDICTS.UNRESOLVABLE) return { verdict: 'unresolvable', dispatch: null, handle: null }
+    if (reconciliation.verdict === VERDICTS.RECLAIMABLE) return { verdict: 'clear', dispatch: null, handle: reconciliation.handle }
+    return { verdict: 'clear', dispatch: null, handle: null }
+  }
+  function busyRow(verdict, { role, sessionId, dispatch, phase, round, roundBasis, seatRound, stageAbsent, ...rest }) {
+    return { at: now(), event: SESSION_BUSY_EVENT, verdict, phase, role, session_id: sessionId, dispatch, round, round_basis: roundBasis, seat_round: seatRound, stage_absent: stageAbsent, ...rest }
+  }
+  // The dispatch is RE-MEASURED on every busy probe, never frozen at the first
+  // one: a supervisor that clears a completed winner and reserves the role in the
+  // middle of this wait becomes the live invocation, and naming the one that has
+  // already finished would be a false fact about who holds the seat.
+  function settleSession({ role, sessionId, prior, persisted, roundFor, deadline }) {
+    let probe = sessionProbe(role, prior, persisted)
+    if (probe.verdict !== 'busy') return probe
+    let waitedOn = probe.dispatch
+    const startedAt = now()
+    const where = { role, sessionId, phase: 'probe', ...roundFor() }
+    log(busyRow('waiting', { ...where, dispatch: waitedOn, bound_ms: SESSION_BUSY_SETTLE_MS }))
+    while (now() < deadline) {
+      delay(Math.min(WAIT_POLL_MS, Math.max(1, deadline - now())))
+      probe = sessionProbe(role, prior, persisted)
+      if (probe.verdict === 'busy') { waitedOn = probe.dispatch ?? waitedOn; continue }
+      if (probe.verdict === 'unresolvable') { log(busyRow('unresolvable', { ...where, dispatch: waitedOn, waited_ms: now() - startedAt })); return probe }
+      log(busyRow('settled', { ...where, dispatch: waitedOn, waited_ms: now() - startedAt }))
+      return probe
+    }
+    const waited = now() - startedAt
+    log(busyRow('expired', { ...where, dispatch: waitedOn, waited_ms: waited, bound_ms: SESSION_BUSY_SETTLE_MS }))
+    return { verdict: 'expired', dispatch: waitedOn, handle: null, waited_ms: waited }
+  }
+  // reclaim's reserve() refuses ANY marker whose verdict is not FREE
+  // (crew/reclaim.mjs:1062-1068), RECLAIMABLE included, so a race winner that has
+  // merely FINISHED never yields to a bare retry. Each pass RECONCILES afresh,
+  // keeps waiting while the winner is BUSY, CLEARS its exact handle once it is
+  // reclaimable, and only then reserves. UNRESOLVABLE is not transient: it stops
+  // the wait without claiming anything settled.
+  function settleReservation({ role, sessionId, roundFor, deadline, reserve, first }) {
+    let reservation = first
+    if (reservation.ok || reservation.reason === 'unresolvable') return { reservation, waited_ms: 0, dispatch: null }
+    const racedAt = now()
+    // The SHARED deadline, never one of its own: the probe may already have spent
+    // most of it, and one busy round boundary costs 60s in total and never 120s.
+    const until = deadline
+    // The competing dispatch comes from the MARKER ON DISK — the winner's own
+    // record — never from this supervisor's memory, which knows only its own runs.
+    const raceWinner = (seen) => seen?.marker?.id ?? null
+    let racedWith = raceWinner(store.reconcile(role))
+    const where = { role, sessionId, phase: 'reservation', ...roundFor() }
+    log(busyRow('waiting', { ...where, dispatch: racedWith, reason: reservation.reason ?? null, bound_ms: SESSION_BUSY_SETTLE_MS }))
+    while (now() < until) {
+      delay(Math.min(WAIT_POLL_MS, Math.max(1, until - now())))
+      const seen = store.reconcile(role)
+      racedWith = raceWinner(seen) ?? racedWith
+      if (seen.verdict === VERDICTS.UNRESOLVABLE) { log(busyRow('unresolvable', { ...where, dispatch: racedWith, waited_ms: now() - racedAt })); return { reservation: { ok: false, reason: 'unresolvable' }, waited_ms: now() - racedAt, dispatch: racedWith } }
+      if (seen.verdict === VERDICTS.BUSY) continue
+      if (seen.verdict === VERDICTS.RECLAIMABLE && !store.clear(seen.handle)) continue
+      reservation = reserve()
+      if (!reservation.ok && reservation.reason !== 'unresolvable') continue
+      log(busyRow(reservation.ok ? 'settled' : 'unresolvable', { ...where, dispatch: racedWith, waited_ms: now() - racedAt }))
+      return { reservation, waited_ms: now() - racedAt, dispatch: racedWith }
+    }
+    const racedMs = now() - racedAt
+    log(busyRow('expired', { ...where, dispatch: racedWith, waited_ms: racedMs, bound_ms: SESSION_BUSY_SETTLE_MS }))
+    return { reservation, waited_ms: racedMs, dispatch: racedWith }
   }
   // A RE-ASK is not a new assignment: it is the SAME one, asked again. The caller
   // (crew/seat-io.mjs reaskUnusableEnvelope) owns the bound and supplies BOTH the
@@ -1351,11 +1505,17 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
     const prior = [...runs.values()].reverse().find((r) => r.role === role)
     const persisted = activeRun(role)
     const sessionId = member.session_id || persisted?.sessionId || uuid()
-    if (prior && !exists(prior.exit)) throw busy(role, sessionId)
-    const reconciliation = store.reconcile(role)
-    if (reconciliation.verdict === VERDICTS.BUSY) throw busy(role, sessionId)
-    if (reconciliation.verdict === VERDICTS.UNRESOLVABLE) throw unresolvable(role, sessionId)
-    if (reconciliation.verdict === VERDICTS.RECLAIMABLE) store.clear(reconciliation.handle)
+    // ONE deadline, taken once, read by BOTH waits. Neither mints its own.
+    const deadline = now() + SESSION_BUSY_SETTLE_MS
+    const roundFor = roundResolver(role, !!reask)
+    // The RE-ASK path does not settle: crew/seat-io.mjs:2727 and :2870 already
+    // poll REASK_SETTLE_POLLS times on this very stage, and waiting in both
+    // places multiplies one 60s bound into twelve minutes.
+    const settled = reask ? sessionProbe(role, prior, persisted) : settleSession({ role, sessionId, prior, persisted, roundFor, deadline })
+    if (settled.verdict === 'unresolvable') throw unresolvable(role, sessionId)
+    if (settled.verdict === 'busy') throw busy(role, sessionId, { ...roundFor(), dispatch: settled.dispatch, phase: 'probe', waitedMs: 0 })
+    if (settled.verdict === 'expired') throw busy(role, sessionId, { ...roundFor(), dispatch: settled.dispatch, phase: 'probe', waitedMs: settled.waited_ms })
+    if (settled.handle) store.clear(settled.handle)
     if (!member.session_id) {
       member.session_id = sessionId
       notePersist(role, persistCrew(paths, role, { session_id: sessionId }, crewDeps))
@@ -1371,10 +1531,12 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
     const args = command.args || []
     const pgid = join(dir, 'pgid')
     const shell = `printf '%s' $$ >${shq(`${pgid}.tmp`)}; mv ${shq(`${pgid}.tmp`)} ${shq(pgid)}; ${shq(command.bin)} ${args.map(shq).join(' ')} >${shq(stream)} 2>${shq(stderr)}; printf '%s' $? >${shq(`${exit}.tmp`)}; mv ${shq(`${exit}.tmp`)} ${shq(exit)}`
-    const reservation = store.reserve(role, { phase: PHASES.RESERVED, sessionId, evidence: { kind: EVIDENCE_KINDS.PGID, file: pgid }, role, id: runId, dir, returnPath, exit, startedAt: now() })
+    const reserveOnce = () => store.reserve(role, { phase: PHASES.RESERVED, sessionId, evidence: { kind: EVIDENCE_KINDS.PGID, file: pgid }, role, id: runId, dir, returnPath, exit, startedAt: now() })
+    const raced = reask ? { reservation: reserveOnce(), waited_ms: 0, dispatch: null } : settleReservation({ role, sessionId, roundFor, deadline, reserve: reserveOnce, first: reserveOnce() })
+    const reservation = raced.reservation
     if (!reservation.ok) {
       if (reservation.reason === 'unresolvable') throw unresolvable(role, sessionId)
-      throw busy(role, sessionId)
+      throw busy(role, sessionId, { ...roundFor(), dispatch: raced.dispatch ?? prior?.id ?? persisted?.id ?? null, phase: 'reservation', waitedMs: raced.waited_ms })
     }
     const handle = reservation.handle
     try {

@@ -10,6 +10,8 @@ import {
   PROVIDER_BACKOFF_LADDER_MS, PROVIDER_RESET_ABSENT, PROVIDER_RESET_SETTLE_MS, PROVIDER_RETRY_ACTIONS,
   PROVIDER_RETRY_MAX, PROVIDER_RETRY_TOTAL_WAIT_MS, recogniseProviderCondition, recogniseSeatRefusal, TOOL_CLASSES, WAIT_POLL_MS,
   SEAT_REFUSALS, SEAT_REFUSAL_ACTIONS, UNCLASSIFIED_REFUSAL, shq, stderrTail, updateCrewJson,
+  SESSION_BUSY_EVENT, SESSION_BUSY_SETTLE_MS, SESSION_BUSY_VERDICTS, SESSION_BUSY_PHASES,
+  SESSION_ROUND_BASES, SESSION_STAGE_ABSENT, SESSION_DRIVER_BASIS, SESSION_ROUND_BASIS, SESSION_ROUND_UNMEASURED,
   SEAT_SUITE_POLICY_EVENT, SUITE_RUN_REFUSAL, SUITE_RUN_UNRECOGNISED, SUITE_POLICY_STREAM_UNAVAILABLE,
   suiteRunPolicy, recogniseSuiteInvocation, testTargets, fenceCovers, shellToolCalls,
   splitShellCommands, executableText, stripHeredocBodies, commandTokens,
@@ -83,6 +85,24 @@ function fixture(overrides = {}) {
     spawn() { return { pid: ++pid, unref() {} } }, uuid: () => 'uuid-1', log() {}, ...overrides,
   } })
   return { dir, taskDir, returnsDir, crew, calls, io, cleanup: () => rmSync(dir, { recursive: true, force: true }) }
+}
+
+function timedFixture(overrides = {}) {
+  let clock = 0
+  let polls = 0
+  const { onDelay = null, ...deps } = overrides
+  let fixtureRef = null
+  const f = makeFixture({
+    ...deps,
+    now: () => clock,
+    delay: (ms) => {
+      polls += 1
+      clock += ms
+      onDelay?.({ fixture: fixtureRef, clock, polls, ms })
+    },
+  })
+  fixtureRef = f
+  return { ...f, clock: () => clock, polls: () => polls }
 }
 
 test('classifyRun keeps all six worker traps distinct', () => {
@@ -242,13 +262,14 @@ test('classifyRun reaches budget-refused only when the caller names evidence', (
 })
 
 test('assign composes through adapter, removes stale envelope, and resumes one session', () => {
+  let clock = 0
   const f = fixture()
   try {
     const stale = join(f.returnsDir, 'd1.builder.json'); writeFileSync(stale, '{}')
     const first = f.io.assign({ role: 'builder', briefFile: '/tmp/brief.md', note: 'extra' })
     assert.deepEqual({ id: first.id, returnPath: first.returnPath }, { id: 'd1', returnPath: stale })
     assert.equal(f.calls[0].resume, false); assert.equal(f.calls[0].sessionId, 'uuid-1')
-    const restarted = headlessIo({ crew: f.crew, paths: { dir: f.dir, taskDir: f.taskDir, returnsDir: f.returnsDir }, taskDir: f.taskDir, checkout: f.dir, adapters: { builder: { adapter: f.calls ? { headlessCommand: (s) => ({ bin: '/worker/bin', args: ['-p', s.prompt], env: {} }) } : null } }, bin: '/worker/bin', deps: { spawn() { return { pid: 901, unref() {} } }, uuid: () => 'uuid-2', log() {} } })
+    const restarted = headlessIo({ crew: f.crew, paths: { dir: f.dir, taskDir: f.taskDir, returnsDir: f.returnsDir }, taskDir: f.taskDir, checkout: f.dir, adapters: { builder: { adapter: f.calls ? { headlessCommand: (s) => ({ bin: '/worker/bin', args: ['-p', s.prompt], env: {} }) } : null } }, bin: '/worker/bin', deps: { spawn() { return { pid: 901, unref() {} } }, uuid: () => 'uuid-2', now: () => clock, delay: (ms) => { clock += ms }, log() {} } })
     assert.throws(() => restarted.assign({ role: 'builder', briefFile: '/tmp/brief.md' }), (err) => err.stage === 'headless-session-busy')
     writeFileSync(join(f.dir, 'task', 'headless', 'd1', 'exit'), '0')
     const second = restarted.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
@@ -281,10 +302,379 @@ test('a legacy starting marker is unresolvable, not reclaimed', () => {
 })
 
 test('assign rejects a concurrent invocation for one session', () => {
-  const f = fixture()
+  let clock = 0
+  const f = fixture({ now: () => clock, delay: (ms) => { clock += ms } })
   try {
     f.io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
     assert.throws(() => f.io.assign({ role: 'builder', briefFile: '/tmp/brief.md' }), (err) => err.stage === 'headless-session-busy')
+  } finally { f.cleanup() }
+})
+
+test('a prior invocation that settles during the wait lets the next round open', () => {
+  let first = null
+  const f = timedFixture({
+    onDelay: ({ fixture, polls }) => {
+      if (polls === 2) writeFileSync(join(fixture.taskDir, 'headless', first.id, 'exit'), '0')
+    },
+  })
+  try {
+    first = f.io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
+    const second = f.io.assign({ role: 'builder', briefFile: '/tmp/next.md' })
+    assert.equal(second.id, 'd2')
+    assert.ok(f.polls() >= 2)
+  } finally { f.cleanup() }
+})
+
+test('a busy wait journals its waiting and settled measurements', () => {
+  const logs = []
+  let first = null
+  const f = timedFixture({
+    log: (row) => logs.push(row),
+    onDelay: ({ fixture, polls }) => {
+      if (polls === 1) writeFileSync(join(fixture.taskDir, 'headless', first.id, 'exit'), '0')
+    },
+  })
+  try {
+    first = f.io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
+    f.io.assign({ role: 'builder', briefFile: '/tmp/next.md' })
+    const rows = logs.filter((row) => row.event === SESSION_BUSY_EVENT)
+    const waiting = rows.find((row) => row.verdict === 'waiting')
+    const settled = rows.find((row) => row.verdict === 'settled')
+    assert.ok(waiting)
+    for (const key of ['role', 'session_id', 'dispatch', 'round', 'round_basis', 'seat_round', 'bound_ms']) assert.notEqual(waiting[key], undefined)
+    assert.equal(waiting.dispatch, 'd1')
+    assert.equal(waiting.phase, 'probe')
+    assert.ok(settled)
+    assert.equal(typeof settled.waited_ms, 'number')
+    assert.equal(settled.waited_ms, WAIT_POLL_MS)
+  } finally { f.cleanup() }
+})
+
+test('an expired busy wait names its measured session, dispatch, round and fields', () => {
+  const f = timedFixture()
+  try {
+    const first = f.io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
+    assert.throws(() => f.io.assign({ role: 'builder', briefFile: '/tmp/next.md' }), (err) => {
+      assert.equal(err.stage, 'headless-session-busy')
+      assert.equal(err.sessionId, 'extra-1')
+      assert.equal(err.dispatch, first.id)
+      assert.equal(err.round, null)
+      assert.equal(err.roundBasis, SESSION_ROUND_UNMEASURED)
+      assert.equal(err.seatRound, null)
+      assert.equal(err.phase, 'probe')
+      assert.equal(err.waitedMs, SESSION_BUSY_SETTLE_MS)
+      assert.match(err.message, /session extra-1/)
+      assert.match(err.message, /live dispatch d1/)
+      assert.match(err.message, /round unknown by unmeasured/)
+      assert.match(err.message, /waited 60000ms of 60000ms/)
+      return true
+    })
+  } finally { f.cleanup() }
+})
+
+test('a refused concurrent turn allocates no run directory of its own', () => {
+  const f = timedFixture()
+  try {
+    f.io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
+    assert.throws(() => f.io.assign({ role: 'builder', briefFile: '/tmp/next.md' }), (err) => err.stage === 'headless-session-busy')
+    assert.deepEqual(readdirSync(join(f.taskDir, 'headless')).filter((name) => /^d\d+$/.test(name)), ['d1'])
+  } finally { f.cleanup() }
+})
+
+test('a settled prior invocation takes the fast path without journal or park work', () => {
+  const logs = []
+  const reads = []
+  const f = timedFixture({
+    log: (row) => logs.push(row),
+    readFileSync: (path, ...args) => { reads.push(String(path)); return readFileSync(path, ...args) },
+  })
+  try {
+    const first = f.io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
+    writeFileSync(join(f.taskDir, 'headless', first.id, 'exit'), '0')
+    reads.length = 0
+    f.io.assign({ role: 'builder', briefFile: '/tmp/next.md' })
+    assert.equal(f.polls(), 0)
+    assert.equal(reads.some((path) => path.endsWith('/journal.jsonl')), false)
+    assert.equal(logs.some((row) => row.event === SESSION_BUSY_EVENT), false)
+    assert.equal(Object.hasOwn(f.crew.members.builder, 'rounds'), false)
+  } finally { f.cleanup() }
+})
+
+test('a live prior RE-ASK refuses immediately without a park poll', () => {
+  const f = timedFixture()
+  try {
+    const first = f.io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
+    assert.throws(() => f.io.assign({
+      role: 'builder', briefFile: '/tmp/reask.md',
+      reask: { id: first.id, returnPath: join(f.returnsDir, 'd1.reask.builder.json') },
+    }), (err) => err.stage === 'headless-session-busy')
+    assert.equal(f.polls(), 0)
+    assert.deepEqual(readdirSync(join(f.taskDir, 'headless')).filter((name) => /^d\d+$/.test(name)), ['d1'])
+  } finally { f.cleanup() }
+})
+
+test('session busy constants are closed and the bound is whole park steps', () => {
+  assert.deepEqual(SESSION_BUSY_VERDICTS, ['waiting', 'settled', 'expired', 'unresolvable'])
+  assert.deepEqual(SESSION_BUSY_PHASES, ['probe', 'reservation'])
+  assert.deepEqual(SESSION_ROUND_BASES, ['driver-stage', 'seat-assignments', 'unmeasured'])
+  assert.deepEqual(SESSION_STAGE_ABSENT, ['journal-absent', 'journal-unreadable', 'no-open-stage'])
+  assert.equal(Object.isFrozen(SESSION_BUSY_VERDICTS), true)
+  assert.equal(Object.isFrozen(SESSION_BUSY_PHASES), true)
+  assert.equal(Object.isFrozen(SESSION_ROUND_BASES), true)
+  assert.equal(Object.isFrozen(SESSION_STAGE_ABSENT), true)
+  assert.equal(Number.isInteger(SESSION_BUSY_SETTLE_MS), true)
+  assert.equal(SESSION_BUSY_SETTLE_MS % WAIT_POLL_MS, 0)
+})
+
+function plantReservation(f, { id = 'd97', sessionId = 'rival-session', pgid = '4242' } = {}) {
+  const root = join(f.taskDir, 'headless')
+  const dir = join(root, id)
+  const evidence = join(dir, 'pgid')
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(evidence, pgid)
+  writeFileSync(join(root, '.builder.active.json'), JSON.stringify({
+    reservation_id: `reservation-${id}`, key: 'builder', role: 'builder', phase: 'spawning',
+    owner: { pid: Number(pgid) }, sessionId, id, dir, evidence: { kind: 'pgid', file: evidence },
+    returnPath: join(f.returnsDir, `${id}.builder.json`), exit: join(dir, 'exit'), startedAt: 0,
+  }))
+  return { root, dir, evidence }
+}
+
+test('a probe that becomes unresolvable journals unresolvable and never settled', () => {
+  const logs = []
+  let first = null
+  const f = timedFixture({
+    log: (row) => logs.push(row),
+    onDelay: ({ fixture, polls }) => {
+      if (polls === 2) {
+        writeFileSync(join(fixture.taskDir, 'headless', first.id, 'exit'), '0')
+        writeFileSync(join(fixture.taskDir, 'headless', '.builder.active.json'), JSON.stringify({ phase: 'starting', role: 'builder', ownerPid: 999999999, sessionId: 'extra-1' }))
+      }
+    },
+  })
+  try {
+    first = f.io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
+    assert.throws(() => f.io.assign({ role: 'builder', briefFile: '/tmp/next.md' }), (err) => err.stage === 'headless-unresolvable-reservation')
+    const rows = logs.filter((row) => row.event === SESSION_BUSY_EVENT && row.phase === 'probe')
+    assert.ok(rows.some((row) => row.verdict === 'unresolvable'))
+    assert.equal(rows.some((row) => row.verdict === 'settled'), false)
+  } finally { f.cleanup() }
+})
+
+test('a probe expiry reports the latest live dispatch id', () => {
+  const logs = []
+  let first = null
+  const f = timedFixture({
+    log: (row) => logs.push(row),
+    kill: (pid) => {
+      if (Math.abs(Number(pid)) === 4242) return true
+      return true
+    },
+    onDelay: ({ fixture, polls }) => {
+      if (polls === 1) {
+        writeFileSync(join(fixture.taskDir, 'headless', first.id, 'exit'), '0')
+        plantReservation(fixture)
+      }
+    },
+  })
+  try {
+    first = f.io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
+    assert.throws(() => f.io.assign({ role: 'builder', briefFile: '/tmp/next.md' }), (err) => {
+      assert.equal(err.stage, 'headless-session-busy')
+      assert.equal(err.dispatch, 'd97')
+      return true
+    })
+    const expired = logs.find((row) => row.event === SESSION_BUSY_EVENT && row.phase === 'probe' && row.verdict === 'expired')
+    assert.equal(expired.dispatch, 'd97')
+  } finally { f.cleanup() }
+})
+
+test('a reclaimable reservation race clears its exact winner and retries', () => {
+  const logs = []
+  let planted = false
+  let rivalAlive = true
+  const f = timedFixture({
+    log: (row) => logs.push(row),
+    kill: (pid) => {
+      if (Math.abs(Number(pid)) === 4242) {
+        if (rivalAlive) return true
+        const err = new Error('gone'); err.code = 'ESRCH'; throw err
+      }
+      return true
+    },
+    mkdirSync: (path, options) => {
+      if (!planted && String(path).endsWith('/headless/d2')) { planted = true; plantReservation(f) }
+      return mkdirSync(path, options)
+    },
+    onDelay: ({ polls }) => { if (polls === 1) rivalAlive = false },
+  })
+  try {
+    const first = f.io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
+    writeFileSync(join(f.taskDir, 'headless', first.id, 'exit'), '0')
+    const second = f.io.assign({ role: 'builder', briefFile: '/tmp/next.md' })
+    assert.equal(second.id, 'd2')
+    const rows = logs.filter((row) => row.event === SESSION_BUSY_EVENT && row.phase === 'reservation')
+    assert.equal(rows.some((row) => row.verdict === 'waiting' && row.dispatch === 'd97'), true)
+    assert.equal(rows.some((row) => row.verdict === 'settled'), true)
+    assert.equal(JSON.parse(readFileSync(join(f.taskDir, 'headless', '.builder.active.json'), 'utf8')).id, 'd2')
+  } finally { f.cleanup() }
+})
+
+test('a reservation winner that stays live spends the bound, while an unresolvable winner never settles', () => {
+  const runRace = (corrupt) => {
+    const logs = []
+    let planted = false
+    const f = timedFixture({
+      log: (row) => logs.push(row),
+      kill: () => true,
+      mkdirSync: (path, options) => {
+        if (!planted && String(path).endsWith('/headless/d2')) { planted = true; plantReservation(f) }
+        return mkdirSync(path, options)
+      },
+      onDelay: ({ fixture, polls }) => {
+        if (corrupt && polls === 1) writeFileSync(join(fixture.taskDir, 'headless', '.builder.active.json'), JSON.stringify({ phase: 'starting', role: 'builder', sessionId: 'rival-session' }))
+      },
+    })
+    const first = f.io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
+    writeFileSync(join(f.taskDir, 'headless', first.id, 'exit'), '0')
+    return { f, logs, invoke: () => f.io.assign({ role: 'builder', briefFile: '/tmp/next.md' }) }
+  }
+  const live = runRace(false)
+  try {
+    assert.throws(live.invoke, (err) => err.stage === 'headless-session-busy')
+    const expired = live.logs.find((row) => row.event === SESSION_BUSY_EVENT && row.phase === 'reservation' && row.verdict === 'expired')
+    assert.equal(expired.waited_ms, SESSION_BUSY_SETTLE_MS)
+  } finally { live.f.cleanup() }
+  const corrupt = runRace(true)
+  try {
+    assert.throws(corrupt.invoke, (err) => err.stage === 'headless-unresolvable-reservation')
+    const rows = corrupt.logs.filter((row) => row.event === SESSION_BUSY_EVENT && row.phase === 'reservation')
+    assert.equal(rows.some((row) => row.verdict === 'unresolvable'), true)
+    assert.equal(rows.some((row) => row.verdict === 'settled'), false)
+  } finally { corrupt.f.cleanup() }
+})
+
+test('probe and reservation races share one busy deadline', () => {
+  const logs = []
+  let planted = false
+  const f = timedFixture({
+    log: (row) => logs.push(row),
+    kill: () => true,
+    mkdirSync: (path, options) => {
+      if (!planted && String(path).endsWith('/headless/d2')) { planted = true; plantReservation(f) }
+      return mkdirSync(path, options)
+    },
+    onDelay: ({ fixture, polls }) => {
+      if (polls === 1) writeFileSync(join(fixture.taskDir, 'headless', 'd1', 'exit'), '0')
+    },
+  })
+  try {
+    f.io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
+    assert.throws(() => f.io.assign({ role: 'builder', briefFile: '/tmp/next.md' }), (err) => err.stage === 'headless-session-busy')
+    assert.equal(f.clock(), SESSION_BUSY_SETTLE_MS)
+    assert.equal(f.polls() > 1, true)
+    assert.equal(logs.some((row) => row.event === SESSION_BUSY_EVENT && row.phase === 'probe'), true)
+    assert.equal(logs.some((row) => row.event === SESSION_BUSY_EVENT && row.phase === 'reservation'), true)
+  } finally { f.cleanup() }
+})
+
+test('journal replay reports the current open stage, pops closed stages, resets runs, and reports unreadable data', () => {
+  const f = timedFixture()
+  try {
+    const first = f.io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
+    writeFileSync(join(f.dir, 'journal.jsonl'), [
+      { assign: 'old', role: 'builder', channel: 'record' },
+      { stage: 'plan:old', channel: 'record' },
+      { event: 'run-start', task: 'current' },
+      { assign: 'd9', role: 'lead', channel: 'record' },
+      { assign: 'd1', role: 'builder', channel: 'record' },
+      { stage: 'plan:r1', channel: 'record' },
+      { stage: 'plan:r2', channel: 'record' },
+      { stage_done: 'plan:r2', channel: 'record' },
+    ].map((row) => JSON.stringify(row)).join('\n') + '\n')
+    assert.throws(() => f.io.assign({
+      role: 'builder', briefFile: '/tmp/reask.md', reask: { id: first.id, returnPath: join(f.returnsDir, 'd1.reask.builder.json') },
+    }), (err) => {
+      assert.equal(err.round, 'plan:r1')
+      assert.equal(err.roundBasis, SESSION_DRIVER_BASIS)
+      assert.equal(err.seatRound, 1)
+      assert.equal(err.stageAbsent, null)
+      return true
+    })
+    writeFileSync(join(f.dir, 'journal.jsonl'), [
+      { event: 'run-start', task: 'current' },
+      { assign: 'd1', role: 'builder', channel: 'record' },
+      { stage: 'plan:r1', channel: 'record' },
+      { stage_done: 'plan:r1', channel: 'record' },
+    ].map((row) => JSON.stringify(row)).join('\n') + '\n')
+    assert.throws(() => f.io.assign({
+      role: 'builder', briefFile: '/tmp/reask-closed.md', reask: { id: first.id, returnPath: join(f.returnsDir, 'd1.closed.builder.json') },
+    }), (err) => {
+      assert.equal(err.round, 1)
+      assert.equal(err.roundBasis, SESSION_ROUND_BASIS)
+      assert.equal(err.stageAbsent, 'no-open-stage')
+      return true
+    })
+  } finally { f.cleanup() }
+
+  const denied = Object.assign(new Error('permission denied'), { code: 'EPERM' })
+  const unreadable = timedFixture({
+    readFileSync: (path, ...args) => {
+      if (String(path).endsWith('/journal.jsonl')) throw denied
+      return readFileSync(path, ...args)
+    },
+  })
+  try {
+    const first = unreadable.io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
+    writeFileSync(join(unreadable.dir, 'journal.jsonl'), `${JSON.stringify({ event: 'run-start' })}\n`)
+    assert.throws(() => unreadable.io.assign({
+      role: 'builder', briefFile: '/tmp/unreadable.md', reask: { id: first.id, returnPath: join(unreadable.returnsDir, 'd1.unreadable.builder.json') },
+    }), (err) => {
+      assert.equal(err.round, null)
+      assert.equal(err.roundBasis, SESSION_ROUND_UNMEASURED)
+      assert.equal(err.stageAbsent, 'journal-unreadable')
+      assert.match(err.message, /round unknown by unmeasured/)
+      return true
+    })
+  } finally { unreadable.cleanup() }
+})
+
+test('the seat ordinal is role-scoped, run-scoped, and unchanged by refused attempts', () => {
+  const f = timedFixture({ log() {} })
+  try {
+    const first = f.io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
+    writeFileSync(join(f.dir, 'journal.jsonl'), [
+      { event: 'run-start' },
+      { assign: 'd1', role: 'builder', channel: 'record' },
+      { assign: 'd2', role: 'lead', channel: 'record' },
+    ].map((row) => JSON.stringify(row)).join('\n') + '\n')
+    const attempt = () => f.io.assign({ role: 'builder', briefFile: '/tmp/next.md' })
+    assert.throws(attempt, (err) => { assert.equal(err.seatRound, 2); assert.match(err.message, /seat round 2/); return true })
+    assert.throws(attempt, (err) => { assert.equal(err.seatRound, 2); return true })
+    assert.equal(Object.hasOwn(f.crew.members.builder, 'rounds'), false)
+    assert.equal(first.id, 'd1')
+  } finally { f.cleanup() }
+})
+
+test('transport and RPC-shaped stage rows are ignored by the journal replay', () => {
+  const f = timedFixture()
+  try {
+    const first = f.io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
+    writeFileSync(join(f.dir, 'journal.jsonl'), [
+      { event: 'run-start' },
+      { event: 'rpc-session-busy', stage: 'rpc:r1' },
+      { event: SESSION_BUSY_EVENT, stage: 'transport:busy', role: 'builder' },
+      { event: 'headless-spawn', stage: 'headless:spawn' },
+      { assign: 'lead-1', role: 'lead', channel: 'record' },
+    ].map((row) => JSON.stringify(row)).join('\n') + '\n')
+    assert.throws(() => f.io.assign({
+      role: 'builder', briefFile: '/tmp/reask.md', reask: { id: first.id, returnPath: join(f.returnsDir, 'd1.transport.builder.json') },
+    }), (err) => {
+      assert.equal(err.round, 1)
+      assert.equal(err.roundBasis, SESSION_ROUND_BASIS)
+      assert.equal(err.stageAbsent, 'no-open-stage')
+      return true
+    })
   } finally { f.cleanup() }
 })
 
@@ -514,12 +904,12 @@ test('timeout kills the detached process group and never hangs', () => {
 
 test('allocator is exclusive across supervisors constructed before d1', () => { const a = makeFixture(); try { const b = headlessIo({ crew: a.crew, paths: { dir: a.dir, taskDir: a.taskDir, returnsDir: a.returnsDir }, taskDir: a.taskDir, checkout: a.dir, adapters: { builder: { adapter: { headlessCommand: () => ({ bin: '/worker/bin', args: [], env: {} }) } } }, deps: { pid: 701, uuid: (() => { let n = 0; return () => `b-${++n}` })(), spawn: () => ({ pid: 900, unref() {} }), log() {} } }); const first = a.io.assign({ role: 'builder', briefFile: '/tmp/b' }); writeFileSync(join(a.dir, 'task', 'headless', first.id, 'exit'), '0'); const second = b.assign({ role: 'builder', briefFile: '/tmp/b' }); assert.notEqual(second.id, first.id); assert.equal(existsSync(join(a.dir, 'task', 'headless', second.id, 'exit')), false) } finally { a.cleanup() } })
 test('two roles never adopt one candidate run directory', () => { const f = makeFixture({}, ['builder', 'reviewer']); try { const a = f.io.assign({ role: 'builder', briefFile: '/tmp/b' }); const b = f.io.assign({ role: 'reviewer', briefFile: '/tmp/b' }); assert.notEqual(a.id, b.id) } finally { f.cleanup() } })
-test('running marker write crash retains SPAWNING reservation', () => { let spawned = 0; const f = makeFixture({ spawn: () => { spawned += 1; return { pid: 901, unref() {} } }, writeFileSync(path, data, options) { if (String(data).includes('"phase":"running"')) throw Error('marker write'); return writeFileSync(path, data, options) } }); try { assert.throws(() => f.io.assign({ role: 'builder', briefFile: '/tmp/b' })); assert.equal(spawned, 1); const restart = headlessIo({ crew: f.crew, paths: { dir: f.dir, taskDir: f.taskDir, returnsDir: f.returnsDir }, taskDir: f.taskDir, checkout: f.dir, adapters: { builder: { adapter: { headlessCommand: () => ({ bin: '/worker/bin', args: [], env: {} }) } } }, deps: { pid: 701, spawn: () => { spawned += 1; return { pid: 902, unref() {} } }, kill: () => true, log() {} } }); assert.throws(() => restart.assign({ role: 'builder', briefFile: '/tmp/b' })); assert.equal(spawned, 1) } finally { f.cleanup() } })
+test('running marker write crash retains SPAWNING reservation', () => { let clock = 0; let spawned = 0; const f = makeFixture({ now: () => clock, delay: (ms) => { clock += ms }, spawn: () => { spawned += 1; return { pid: 901, unref() {} } }, writeFileSync(path, data, options) { if (String(data).includes('"phase":"running"')) throw Error('marker write'); return writeFileSync(path, data, options) } }); try { assert.throws(() => f.io.assign({ role: 'builder', briefFile: '/tmp/b' })); assert.equal(spawned, 1); const restart = headlessIo({ crew: f.crew, paths: { dir: f.dir, taskDir: f.taskDir, returnsDir: f.returnsDir }, taskDir: f.taskDir, checkout: f.dir, adapters: { builder: { adapter: { headlessCommand: () => ({ bin: '/worker/bin', args: [], env: {} }) } } }, deps: { pid: 701, now: () => clock, delay: (ms) => { clock += ms }, spawn: () => { spawned += 1; return { pid: 902, unref() {} } }, kill: () => true, log() {} } }); assert.throws(() => restart.assign({ role: 'builder', briefFile: '/tmp/b' })); assert.equal(spawned, 1) } finally { f.cleanup() } })
 test('post-return crash before pgid lands fails closed', () => { let spawned = 0; const f = makeFixture({ spawn: () => { spawned += 1; return { pid: 901, unref() {} } }, writeFileSync(path, data, options) { if (String(data).includes('"phase":"running"')) throw Error('marker write'); return writeFileSync(path, data, options) } }); try { assert.throws(() => f.io.assign({ role: 'builder', briefFile: '/tmp/b' })); const r = headlessIo({ crew: f.crew, paths: { dir: f.dir, taskDir: f.taskDir, returnsDir: f.returnsDir }, taskDir: f.taskDir, checkout: f.dir, adapters: { builder: { adapter: { headlessCommand: () => ({ bin: '/worker/bin', args: [], env: {} }) } } }, deps: { pid: 701, kill: () => { const e = Error(); e.code = 'ESRCH'; throw e }, spawn: () => { spawned += 1; return { pid: 902, unref() {} } }, log() {} } }); assert.throws(() => r.assign({ role: 'builder', briefFile: '/tmp/b' }), (e) => e.stage === 'headless-unresolvable-reservation'); assert.equal(spawned, 1) } finally { f.cleanup() } })
 test('failed SPAWNING advance does not spawn and clears marker', () => { let spawned = 0; const f = makeFixture({ spawn: () => { spawned += 1; return { pid: 900, unref() {} } }, writeFileSync(path, data, options) { if (String(data).includes('"phase":"spawning"')) throw Error('advance'); return writeFileSync(path, data, options) } }); try { assert.throws(() => f.io.assign({ role: 'builder', briefFile: '/tmp/b' })); assert.equal(spawned, 0); assert.equal(existsSync(join(f.taskDir, 'headless', '.builder.active.json')), false) } finally { f.cleanup() } })
 test('failed command write does not spawn and clears marker', () => { let spawned = 0; const f = makeFixture({ spawn: () => { spawned += 1; return { pid: 900, unref() {} } }, writeFileSync(path, data, options) { if (String(path).endsWith('cmd.json')) throw Error('command'); return writeFileSync(path, data, options) } }); try { assert.throws(() => f.io.assign({ role: 'builder', briefFile: '/tmp/b' })); assert.equal(spawned, 0); assert.equal(existsSync(join(f.taskDir, 'headless', '.builder.active.json')), false) } finally { f.cleanup() } })
 test('proven-dead pgid reservation is reclaimed', () => { let spawned = 0; const f = makeFixture({ kill: (pid, signal) => { if (signal === 0) { const e = Error(); e.code = 'ESRCH'; throw e } if (Math.abs(pid) === 111) { const e = Error(); e.code = 'ESRCH'; throw e } }, spawn: () => { spawned += 1; return { pid: 900, unref() {} } } }); try { mkdirSync(join(f.taskDir, 'headless', 'd1')); writeFileSync(join(f.taskDir, 'headless', 'd1', 'pgid'), '111'); writeFileSync(join(f.taskDir, 'headless', '.builder.active.json'), JSON.stringify({ reservation_id: 'old', key: 'builder', phase: 'spawning', owner: { pid: 999999999 }, id: 'd1', evidence: { kind: 'pgid', file: join(f.taskDir, 'headless', 'd1', 'pgid') } })); f.io.assign({ role: 'builder', briefFile: '/tmp/b' }); assert.equal(spawned, 1) } finally { f.cleanup() } })
-test('live pgid reservation is busy', () => { let spawned = 0; const f = makeFixture({ kill: () => true, spawn: () => { spawned += 1; return { pid: 900, unref() {} } } }); try { mkdirSync(join(f.taskDir, 'headless', 'd1')); writeFileSync(join(f.taskDir, 'headless', 'd1', 'pgid'), '222'); writeFileSync(join(f.taskDir, 'headless', '.builder.active.json'), JSON.stringify({ reservation_id: 'old', key: 'builder', phase: 'spawning', owner: { pid: 999999999 }, id: 'd1', evidence: { kind: 'pgid', file: join(f.taskDir, 'headless', 'd1', 'pgid') } })); assert.throws(() => f.io.assign({ role: 'builder', briefFile: '/tmp/b' }), (e) => e.stage === 'headless-session-busy'); assert.equal(spawned, 0) } finally { f.cleanup() } })
+test('live pgid reservation is busy', () => { let clock = 0; let spawned = 0; const f = makeFixture({ now: () => clock, delay: (ms) => { clock += ms }, kill: () => true, spawn: () => { spawned += 1; return { pid: 900, unref() {} } } }); try { mkdirSync(join(f.taskDir, 'headless', 'd1')); writeFileSync(join(f.taskDir, 'headless', 'd1', 'pgid'), '222'); writeFileSync(join(f.taskDir, 'headless', '.builder.active.json'), JSON.stringify({ reservation_id: 'old', key: 'builder', phase: 'spawning', owner: { pid: 999999999 }, id: 'd1', evidence: { kind: 'pgid', file: join(f.taskDir, 'headless', 'd1', 'pgid') } })); assert.throws(() => f.io.assign({ role: 'builder', briefFile: '/tmp/b' }), (e) => e.stage === 'headless-session-busy'); assert.equal(spawned, 0) } finally { f.cleanup() } })
 test('completed legacy marker frees seat', () => { const f = makeFixture(); try { mkdirSync(join(f.taskDir, 'headless', 'd1')); const exit = join(f.taskDir, 'headless', 'd1', 'exit'); writeFileSync(exit, '0'); writeFileSync(join(f.taskDir, 'headless', '.builder.active.json'), JSON.stringify({ phase: 'running', role: 'builder', id: 'd1', exit, sessionId: 'old' })); f.io.assign({ role: 'builder', briefFile: '/tmp/b' }); assert.equal(f.calls[0].sessionId, 'old') } finally { f.cleanup() } })
 test('an active marker that VANISHES between reads yields a fresh uuid rather than a throw (a genuinely malformed marker is REFUSED as unresolvable, not healed)', () => {
   let consumed = false

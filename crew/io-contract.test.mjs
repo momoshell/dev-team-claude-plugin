@@ -461,6 +461,48 @@ test('cellFailureKind classifies every transport stage into the closed availabil
   for (const [err, expected] of cases) assert.equal(cellFailureKind(err), expected)
 })
 
+test('headless session busy details preserve transport-error cell failures for both phases', () => {
+  const paths = dirs()
+  const events = []
+  let phase = 'probe'
+  let assigned = 0
+  const transport = {
+    assign: () => ({ id: `h${++assigned}`, returnPath: join(paths.returnsDir, `h${assigned}.builder.json`) }),
+    wait: () => {
+      const err = new Error(`busy during ${phase}`)
+      Object.assign(err, {
+        stage: 'headless-session-busy', role: 'builder', sessionId: 'seat-session', dispatch: 'd97',
+        round: 'plan:r2', roundBasis: 'driver-stage', seatRound: 2, stageAbsent: null,
+        phase, waitedMs: 60_000,
+      })
+      throw err
+    },
+  }
+  const io = seatIo(
+    { members: { builder: { transport: 'headless-json' } } }, paths, paths.dir, null, null, {},
+    { headlessIo: () => transport, resolveWorkerBin: () => '/bin/worker' },
+  )
+  io.emit = (event) => events.push(event)
+  for (const expectedPhase of ['probe', 'reservation']) {
+    phase = expectedPhase
+    const assignment = io.assign({ role: 'builder', briefFile: '/brief.md' })
+    assert.throws(() => io.wait(assignment.returnPath, 1), (err) => {
+      assert.equal(cellFailureKind(err), 'transport-error')
+      return true
+    })
+  }
+  assert.deepEqual(events, [
+    {
+      kind: 'cell-failure', role: 'builder', id: 'h1', failure: 'transport-error',
+      stage: 'headless-session-busy', detail: 'busy during probe', attribution: null,
+    },
+    {
+      kind: 'cell-failure', role: 'builder', id: 'h2', failure: 'transport-error',
+      stage: 'headless-session-busy', detail: 'busy during reservation', attribution: null,
+    },
+  ])
+})
+
 test('seatIo emits timeout and transport cell failures with the dispatch cell identity', () => {
   const pane = makeSeatIo()
   const paneEvents = []

@@ -1628,7 +1628,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
     return { from, to }
   }
   function providerRetryState(run) {
-    return providerRetries.get(`${run.role}:${run.id}`) ?? { attempts: 0, waited_ms: 0 }
+    return providerRetries.get(`${run.role}:${run.id}`) ?? { attempts: 0, waited_ms: 0, declined: null }
   }
   // Park in WAIT_POLL_MS steps rather than one long block, so the wait keeps the
   // cadence every other wait in this module runs on. Returns the wait MEASURED
@@ -1674,6 +1674,19 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
       attempts: state.attempts, waitedMs: state.waited_ms, at: now(),
     })
     const base = { role: run.role, assignment_id: run.id, kind: failure.kind, status: failure.status, action: decision.action }
+    // [F7] The DECISION, recorded on the run so the escalation can carry it out.
+    // #968: three lanes on 2026-09-06 were declined with an honest sentence in
+    // the journal and an escalation that said only `0 of 3 retry attempts spent
+    // over 0ms`. A count with no reason reads as a ladder that was never
+    // entered, and that is how the issue was written. The count stays; the
+    // reason joins it. attempts and waited_ms are RE-READ rather than copied
+    // from `state`, because the crossed-bound site below has already written the
+    // measured wait and this must not overwrite it with a stale copy.
+    const decline = (why) => {
+      const latest = providerRetryState(run)
+      providerRetries.set(key, { attempts: latest.attempts, waited_ms: latest.waited_ms, declined: why })
+      return { act: 'refuse' }
+    }
     // [F5] The SECOND call site (crew/headless.mjs:1450) is reached only after the wait loop ran
     // out on now() >= deadline and endDispatch already killed the worker. A park
     // there would spend real minutes and then hand the replacement a deadline
@@ -1681,14 +1694,15 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
     // that could never return an envelope. Refuse before the wait, before the
     // respawn, and before the fallback, naming the budget that is gone.
     if (decision.retry && now() >= deadline) {
-      log({ at: now(), event: 'provider-retry-declined', ...base, attempts_spent: state.attempts, of: PROVIDER_RETRY_MAX, total_waited_ms: state.waited_ms, reset_at: decision.reset_at, why: `the work budget for this dispatch is already exhausted, so a ${failure.kind} retry would spend ${decision.wait_ms}ms and then leave the replacement no time at all` })
-      return { act: 'refuse' }
+      const budgetWhy = `the work budget for this dispatch is already exhausted, so a ${failure.kind} retry would spend ${decision.wait_ms}ms and then leave the replacement no time at all`
+      log({ at: now(), event: 'provider-retry-declined', ...base, attempts_spent: state.attempts, of: PROVIDER_RETRY_MAX, total_waited_ms: state.waited_ms, reset_at: decision.reset_at, why: budgetWhy })
+      return decline(budgetWhy)
     }
     if (!decision.retry) {
       // `none` is TODAY'S behaviour, byte for byte: no row, no wait, no respawn.
       if (decision.action === 'none') return { act: 'none' }
       log({ at: now(), event: 'provider-retry-declined', ...base, attempts_spent: decision.attempts_spent, of: PROVIDER_RETRY_MAX, total_waited_ms: state.waited_ms, reset_at: decision.reset_at, why: decision.why })
-      return { act: 'refuse' }
+      return decline(decision.why)
     }
     // SCHEDULED. The park can be long, so the row that says one is starting is
     // written before it, not after — but nothing here is called `resumed` yet.
@@ -1705,13 +1719,14 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
     // actually taken: an oversleep at the edge must not buy a retry after the
     // bound has already been crossed.
     if (totalWaitedMs > PROVIDER_RETRY_TOTAL_WAIT_MS) {
+      const crossedWhy = `the total provider wait bound of ${PROVIDER_RETRY_TOTAL_WAIT_MS}ms was crossed by the wait actually taken for ${failure.kind}: ${totalWaitedMs}ms, and no replacement was started`
       // `providerRetryState(run)` and not `state`: the map was just written with
       // the measured wait and an UNCHANGED attempt count, and the row must report
       // what was recorded rather than a second copy of it. It is also the one
       // spelling of attempts_spent unique to this row, which is what lets A12b's
       // kill-mutation bind here and nowhere else.
-      log({ at: now(), event: 'provider-retry-declined', ...base, attempts_spent: providerRetryState(run).attempts, of: PROVIDER_RETRY_MAX, total_waited_ms: totalWaitedMs, reset_at: decision.reset_at, why: `the total provider wait bound of ${PROVIDER_RETRY_TOTAL_WAIT_MS}ms was crossed by the wait actually taken for ${failure.kind}: ${totalWaitedMs}ms, and no replacement was started` })
-      return { act: 'refuse' }
+      log({ at: now(), event: 'provider-retry-declined', ...base, attempts_spent: providerRetryState(run).attempts, of: PROVIDER_RETRY_MAX, total_waited_ms: totalWaitedMs, reset_at: decision.reset_at, why: crossedWhy })
+      return decline(crossedWhy)
     }
     let spawned = true
     try {
@@ -1721,7 +1736,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
       log({ at: now(), event: 'provider-retry-failed', ...base, attempts_spent: state.attempts, of: PROVIDER_RETRY_MAX, total_waited_ms: totalWaitedMs, error: String(err?.message ?? err) })
       spawned = false
     }
-    if (!spawned) return { act: 'refuse' }
+    if (!spawned) return decline(`a replacement worker for ${failure.kind} could not be started after the wait, so the attempt was never taken`)
     // [F6] A replacement worker exists. NOW the attempt is spent and NOW the
     // wait is `resumed`.
     providerRetries.set(key, { attempts: state.attempts + 1, waited_ms: totalWaitedMs })
@@ -1740,9 +1755,10 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
     const failure = stream.providerFailure
     if (!failure || (PROVIDER_RETRY_ACTIONS[failure.kind] ?? 'none') === 'none') return err
     const state = providerRetryState(run)
+    const declined = state.declined ? `; no further attempt: ${state.declined}` : ''
     err.providerFailure = failure
-    err.providerRetry = { attempts: state.attempts, bound: PROVIDER_RETRY_MAX, waited_ms: state.waited_ms }
-    err.message = `${err.message}\n[provider ${failure.kind} status ${failure.status}: ${state.attempts} of ${PROVIDER_RETRY_MAX} retry attempts spent over ${state.waited_ms}ms]`
+    err.providerRetry = { attempts: state.attempts, bound: PROVIDER_RETRY_MAX, waited_ms: state.waited_ms, declined: state.declined ?? null }
+    err.message = `${err.message}\n[provider ${failure.kind} status ${failure.status}: ${state.attempts} of ${PROVIDER_RETRY_MAX} retry attempts spent over ${state.waited_ms}ms${declined}]`
     return err
   }
   // A re-ask is not a new assignment: same id, same return path, same brief

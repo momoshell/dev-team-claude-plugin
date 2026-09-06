@@ -8,7 +8,7 @@ import {
   attributeExit, classifyRun, claudeCensus, classifyToolCall, decodeExitStatus, degradedSignals, foldUsage, headlessIo, parseStream,
   CENSUS_ABSENT_CAUSES, PROVIDER_FAILURE_KINDS, providerFailureKind, providerResetInstant, providerRetryDecision,
   PROVIDER_BACKOFF_LADDER_MS, PROVIDER_RESET_ABSENT, PROVIDER_RESET_SETTLE_MS, PROVIDER_RETRY_ACTIONS,
-  PROVIDER_RETRY_MAX, PROVIDER_RETRY_TOTAL_WAIT_MS, recogniseProviderCondition, recogniseSeatRefusal, TOOL_CLASSES, WAIT_POLL_MS,
+  PARK_BEAT_EVENT, PARK_BEAT_MS, PARK_BEAT_SOURCE, PROVIDER_RETRY_MAX, PROVIDER_RETRY_TOTAL_WAIT_MS, recogniseProviderCondition, recogniseSeatRefusal, TOOL_CLASSES, WAIT_POLL_MS,
   SEAT_REFUSALS, SEAT_REFUSAL_ACTIONS, UNCLASSIFIED_REFUSAL, shq, stderrTail, updateCrewJson,
   SESSION_BUSY_EVENT, SESSION_BUSY_SETTLE_MS, SESSION_BUSY_VERDICTS, SESSION_BUSY_PHASES,
   SESSION_ROUND_BASES, SESSION_STAGE_ABSENT, SESSION_DRIVER_BASIS, SESSION_ROUND_BASIS, SESSION_ROUND_UNMEASURED,
@@ -18,6 +18,7 @@ import {
   suitePolicyCounters, countSuiteDecision, suitePolicyReport, SUITE_RUN_OWNERSHIP, SUITE_RUN_OWNERSHIP_KINDS,
 } from './headless.mjs'
 import { cellFailureKind, HEADLESS_TRANSPORT, seatIo } from './seat-io.mjs'
+import { DRIVER_GONE_PERIODS, HEARTBEAT_PERIOD_MS } from '../scripts/factory/lane-watch.mjs'
 import { ROOT, scratchDir, startFileWriter } from '../test/helpers.mjs'
 
 // The final three bytes of each real 2026-08-30 refusal tail, copied
@@ -1295,15 +1296,30 @@ function withTerminalStatus(tail, status) {
   }).join('\n')
 }
 
-function providerRetryFixture({ tail, at, refusals = 1, fallback = null, drift = 0, sleepThrows = false, spawnThrowsOn = 0, noExit = false }) {
+function providerRetryFixture({ tail, at, refusals = 1, fallback = null, drift = 0, sleepThrows = false, spawnThrowsOn = 0, noExit = false, emit = null, emitThrows = false, clearRefuse = false }) {
   const dir = scratchDir('headless-provider-retry-')
   const taskDir = join(dir, 'task'); const returnsDir = join(dir, 'returns')
   mkdirSync(taskDir); mkdirSync(returnsDir)
   writeFileSync(join(taskDir, 'brief.md'), '# brief\n')
   const member = { model: 'claude-fable-5', transport: 'headless-json', ...(fallback ? { fallback } : {}) }
   const crew = { checkout: dir, members: { builder: member }, seats: { builder: { ...member } } }
-  const journal = []; const parks = []; const polls = []
-  let clock = at; let spawns = 0; let pid = 9300
+  writeFileSync(join(dir, 'crew.json'), JSON.stringify(crew, null, 2))
+  const journal = []; const parks = []; const polls = []; const beats = []; const parkSamples = []
+  let clock = at; let spawns = 0; let pid = 9300; let clearRefused = false
+  const crewJson = () => {
+    try { return JSON.parse(readFileSync(join(dir, 'crew.json'), 'utf8')) } catch { return null }
+  }
+  const log = (row) => {
+    journal.push(row)
+    if (clearRefused && row?.event === 'crew-json-persist-failed') throw new Error('fixture: the journal refused the persist diagnostic')
+  }
+  const writeCrew = (path, data, options) => {
+    if (clearRefuse && String(path).includes('crew.json') && /"park":\s*null/.test(String(data))) {
+      clearRefused = true
+      throw new Error('fixture: crew.json clear is unwritable')
+    }
+    return writeFileSync(path, data, options)
+  }
   const writeRefusal = (runDir) => {
     writeFileSync(join(runDir, 'stream.jsonl'), tail)
     if (!noExit) writeFileSync(join(runDir, 'exit'), '1')
@@ -1316,13 +1332,15 @@ function providerRetryFixture({ tail, at, refusals = 1, fallback = null, drift =
   const io = headlessIo({
     crew, paths: { dir, taskDir, returnsDir }, taskDir, checkout: dir, adapters: null, bin: '/frozen/worker/bin',
     deps: {
-      log: (row) => journal.push(row), kill: () => {}, uuid: () => 'provider-retry-session',
+      log,
+      emit: emitThrows ? () => { throw new Error('fixture: emitter refused') } : (emit || ((event) => beats.push({ ...event }))),
+      writeFileSync: writeCrew, kill: () => {}, uuid: () => 'provider-retry-session',
       now: () => clock,
       sleep(ms) {
         if (sleepThrows) { const error = new Error('seat died: builder — its worker root is gone'); error.stage = 'seat-died'; throw error }
         clock += ms; polls.push(ms)
       },
-      delay(ms) { clock += ms + drift; parks.push(ms) },
+      delay(ms) { clock += ms + drift; parks.push(ms); parkSamples.push({ at: clock, park: crewJson()?.park ?? null }) },
       spawn() {
         spawns += 1
         if (spawns === spawnThrowsOn) throw new Error('spawn refused')
@@ -1336,7 +1354,7 @@ function providerRetryFixture({ tail, at, refusals = 1, fallback = null, drift =
     },
   })
   const run = io.assign({ role: 'builder', briefFile: join(taskDir, 'brief.md') })
-  return { io, run, journal, parks, polls, spawns: () => spawns, cleanup: () => rmSync(dir, { recursive: true, force: true }) }
+  return { io, run, journal, parks, polls, beats, parkSamples, crewJson, spawns: () => spawns, cleanup: () => rmSync(dir, { recursive: true, force: true }) }
 }
 
 function withoutTerminalStatus(tail) {
@@ -1806,6 +1824,68 @@ test('#887 parks a 429, backs off an unrefused 529, and bypasses the death-probe
     assert.equal(server.journal.filter((row) => row.event === 'provider-retry').length, 1)
     assert.equal(server.journal.find((row) => row.event === 'provider-retry').waited_on, 'backoff-ladder')
   } finally { server.cleanup() }
+})
+
+test('#948 keeps a 429 park observable from start through resume', () => {
+  const at = 1788115200000 + 60_000 - 180_000
+  const f = providerRetryFixture({ tail: B332_D2_TAIL, at })
+  try {
+    assert.equal(f.io.wait(f.run.returnPath, 600).status, 'done')
+    const heartbeats = f.beats.filter((event) => event?.kind === 'heartbeat')
+    const rows = f.journal.filter((row) => row.event === PARK_BEAT_EVENT)
+    assert.ok(heartbeats.length >= 11)
+    assert.ok(rows.length >= 11)
+    assert.ok(heartbeats.every((event) => event.role === 'builder' && Number.isFinite(event.at)))
+    assert.ok(rows.every((row) => row.source === PARK_BEAT_SOURCE && row.beat_ms === PARK_BEAT_MS))
+    const stamps = [at, ...heartbeats.map((event) => event.at).sort((a, b) => a - b), at + 180_000]
+    const floor = DRIVER_GONE_PERIODS * HEARTBEAT_PERIOD_MS
+    for (let i = 1; i < stamps.length; i += 1) assert.ok(stamps[i] - stamps[i - 1] < floor)
+
+    const standing = f.parkSamples.filter((sample) => sample.park && typeof sample.park === 'object')
+    assert.ok(standing.length >= 11)
+    const first = standing[0].park
+    assert.equal(first.kind, 'rate_limit')
+    assert.equal(first.status, 429)
+    assert.equal(first.waited_on, 'reset-time')
+    assert.equal(first.reset_at, 1788115200000)
+    assert.equal(first.until, at + 180_000)
+    const beatTimes = standing.map((sample) => sample.park.beat_at)
+    for (let i = 1; i < beatTimes.length; i += 1) assert.ok(beatTimes[i] >= beatTimes[i - 1])
+    assert.ok(new Set(beatTimes).size >= 11)
+    assert.equal(f.crewJson().park, null)
+  } finally { f.cleanup() }
+})
+
+test('#948 park beats are not load-bearing when the emitter refuses', () => {
+  const at = 1788115200000 + 60_000 - 180_000
+  const f = providerRetryFixture({ tail: B332_D2_TAIL, at, emitThrows: true })
+  try {
+    assert.equal(f.io.wait(f.run.returnPath, 600).status, 'done')
+    assert.equal(f.beats.length, 0)
+    assert.ok(f.journal.filter((row) => row.event === PARK_BEAT_EVENT).length >= 11)
+    assert.equal(f.journal.find((row) => row.event === 'provider-retry-resumed').waited_ms, 180_000)
+  } finally { f.cleanup() }
+})
+
+test('#948 a refused park clear cannot replace a healthy retry result', () => {
+  const at = 1788115200000 + 60_000 - 180_000
+  const f = providerRetryFixture({ tail: B332_D2_TAIL, at, clearRefuse: true })
+  try {
+    assert.equal(f.io.wait(f.run.returnPath, 600).status, 'done')
+    assert.ok(f.journal.filter((row) => row.event === PARK_BEAT_EVENT).length >= 11)
+    assert.equal(f.journal.find((row) => row.event === 'provider-retry-resumed').waited_ms, 180_000)
+    assert.ok(f.journal.some((row) => row.event === 'crew-json-persist-failed'))
+  } finally { f.cleanup() }
+})
+
+test('#948 an unclassified run leaves crew.json unparked and unjournalled', () => {
+  const fallback = [{ model: 'claude-opus-5', provider: 'anthropic', id: 'opus-5', effort: null, agent: 'claude' }]
+  const f = providerRetryFixture({ tail: withTerminalStatus(B332_D2_TAIL, 418), at: 1788115200000 + 60_000 - 180_000, fallback })
+  try {
+    assert.equal(f.io.wait(f.run.returnPath, 600).status, 'done')
+    assert.equal(Object.hasOwn(f.crewJson(), 'park'), false)
+    assert.equal(f.journal.some((row) => row.event === PARK_BEAT_EVENT), false)
+  } finally { f.cleanup() }
 })
 
 test('#887 refuses a classified 401 immediately and leaves an unclassified refusal on fallback', () => {

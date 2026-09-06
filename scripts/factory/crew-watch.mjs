@@ -6,7 +6,7 @@
 import { existsSync, openSync, readSync, closeSync, readFileSync, readdirSync, statSync, appendFileSync, realpathSync } from 'node:fs'
 import { homedir, loadavg, cpus } from 'node:os'
 import { join } from 'node:path'
-import { archivedLanes, crewRoot, discoverLanes, driverState, journalAt, laneActive, laneLedgerView, readJournal, resolveTunables, watchPass, TERMINAL_STAGES } from './lane-watch.mjs'
+import { archivedLanes, crewRoot, discoverLanes, driverState, journalAt, laneActive, laneLedgerView, readJournal, resolveTunables, watchPass, TERMINAL_STAGES, DRIVER_EXITED, DRIVER_GONE, DRIVER_GONE_PERIODS, DRIVER_RUNNING, HEARTBEAT_PERIOD_MS } from './lane-watch.mjs'
 import { fileURLToPath } from 'node:url'
 
 export const DEFAULT_EVENTS = Object.freeze(['stage', 'attention', 'escalat', 'refus', 'review_outcome', 'gate_check_discrimination', 'commit', 'seat-teardown', 'seat-retrying', 'seat-retry-cleared'])
@@ -111,6 +111,70 @@ export function laneCrew(lane, deps = {}) {
     if (!lane || typeof lane.dir !== 'string') return null
     return JSON.parse(d.readFileSync(join(lane.dir, 'crew.json'), 'utf8'))
   } catch { return null }
+}
+
+// #948. crew.json is the source and the journal is not: the row that STARTS a park is
+// followed by hours of silence, so a readout keyed on journal recency reports an
+// unbounded heartbeat age for a lane doing exactly what it was built to do.
+export const DRIVER_PARKED = 'parked'
+// The DISTINCT reason a park that outlived its driver is refused. Never folded into
+// `parked`: the two cases an operator most needs to tell apart during an outage are a
+// lane waiting out a provider limit and a lane whose driver died during one.
+export const PARKED_GONE_WHY = 'parked-driver-gone'
+// DERIVED from the canonical owners above, never repeated: this import direction
+// already exists and closes no cycle. It is deliberately NOT driver.stale_after_ms —
+// that value is the longest configured SEAT wait PLUS this floor
+// (scripts/factory/lane-watch.mjs:230-249) and can be forty minutes, which would keep a
+// driver killed inside a one-minute backoff reported as parked for the whole seat-wait
+// ceiling. A park beat is the DRIVER's own cadence and is judged against the driver's
+// own floor.
+export const PARK_STALE_MS = DRIVER_GONE_PERIODS * HEARTBEAT_PERIOD_MS
+
+// A value that is finite AND that Date can render. Number.MAX_VALUE is finite and
+// throws `RangeError: Invalid time value` from toISOString(), so without this one bad
+// durable field would abort the whole bounded report rather than degrading to the
+// unchanged driver line. Same idiom as crew/headless.mjs:256-266 providerResetInstant.
+function renderableMs(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null
+  return Number.isFinite(new Date(value).getTime()) ? value : null
+}
+
+// The park's verdict, or null when there is nothing measured to report — no `park` key,
+// a malformed one, a field nobody measured (#297), or a record OLDER than a ledger
+// heartbeat that already says the driver is running. A null here leaves the readout
+// byte-identical to what it printed before this existed.
+//
+// FRESHNESS ORDER, and it is total:
+//   1. `exited` wins outright — run.log carrying a terminal frame is positive evidence
+//      this run's driver is finished, and a stale crew.json must not outrank it.
+//   2. a NEWER finite ledger beat on a RUNNING driver wins — `clearPark` is best-effort
+//      and updateCrewJson can return lock-unavailable or write-failed, so a park record
+//      a failed clear left standing must never turn an observably running driver into
+//      driver-gone from older evidence.
+//   3. otherwise the park beat answers, because it is written by the driver itself and
+//      is the fresher observation of the two.
+export function parkReadout(crew, driver, now) {
+  if (!driver || driver.state === null || driver.state === DRIVER_EXITED) return null
+  const park = crew && typeof crew === 'object' && !Array.isArray(crew) ? crew.park : null
+  if (!park || typeof park !== 'object' || Array.isArray(park)) return null
+  const beat = renderableMs(park.beat_at)
+  const until = renderableMs(park.until)
+  if (beat === null || until === null || !Number.isFinite(now)) return null
+  const age = now - beat
+  if (!Number.isFinite(age)) return null
+  const ledgerAge = typeof driver.heartbeat_age_ms === 'number' && Number.isFinite(driver.heartbeat_age_ms) ? driver.heartbeat_age_ms : null
+  if (driver.state === DRIVER_RUNNING && ledgerAge !== null && ledgerAge < age) return null
+  return age < PARK_STALE_MS
+    ? { state: DRIVER_PARKED, until, beat_age_ms: age, why: null }
+    : { state: DRIVER_GONE, until, beat_age_ms: age, why: PARKED_GONE_WHY }
+}
+
+// ONE render for the driver clause, so the parked and unparked forms cannot drift.
+export function driverClause(driver, parked) {
+  if (!driver || driver.state === null) return ''
+  const seconds = (ms) => Math.max(0, Math.floor(ms / 1000))
+  if (parked) return ` driver=${parked.state} until=${new Date(parked.until).toISOString()} heartbeat=${seconds(parked.beat_age_ms)}s${parked.why ? ` why=${parked.why}` : ''}`
+  return ` driver=${driver.state} heartbeat=${driver.heartbeat_age_ms === null ? 'none' : `${seconds(driver.heartbeat_age_ms)}s`}`
 }
 
 export const LIVENESS_UNKNOWN = 'unknown'
@@ -352,10 +416,10 @@ export function boundedReport({ root, names = [], all = false, now, deps = {} } 
     // The driver's own state, distinct from the seat's. #297: a lane whose
     // ledger session cannot be read is `unknown`, never `running`.
     const driver = driverState(lane, journal, laneLedgerView(lane, d))
-    const driverPart = driver.state === null ? ''
-      : ` driver=${driver.state} heartbeat=${driver.heartbeat_age_ms === null ? 'none' : `${Math.max(0, Math.floor(driver.heartbeat_age_ms / 1000))}s`}`
+    const crew = laneCrew(lane, d)
+    const driverPart = driverClause(driver, parkReadout(crew, driver, at))
     lines.push(`[${lane.task}] stage=${stage} age=${ageS}s status=${status}${seen}${driverPart}`)
-    lines.push(...seatLivenessLines({ lane, crew: laneCrew(lane, d), now: at, home: d.homedir(), deps: d }))
+    lines.push(...seatLivenessLines({ lane, crew, now: at, home: d.homedir(), deps: d }))
   }
   for (const lane of selected.archived) {
     const journal = readJournal(lane.journal, d)

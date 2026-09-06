@@ -12,6 +12,8 @@ import {
   WATCHDOG_INTERVAL_S,
   boundedReport,
   createState,
+  PARK_STALE_MS,
+  parkReadout,
   formatEvent,
   follow,
   lineLabels,
@@ -25,7 +27,8 @@ import {
   tick,
   watchdogLine,
 } from '../scripts/factory/crew-watch.mjs'
-import { discoverLanes, watchPass } from '../scripts/factory/lane-watch.mjs'
+import { DRIVER_GONE_PERIODS, HEARTBEAT_PERIOD_MS, discoverLanes, watchPass } from '../scripts/factory/lane-watch.mjs'
+import { PARK_BEAT_MS } from '../crew/headless.mjs'
 import { makeSeedLane } from './helpers.mjs'
 
 const fixtureRoot = mkdtempSync(join(tmpdir(), 'factory-crew-watch-'))
@@ -67,6 +70,22 @@ function transcriptFrame(home, agent, checkout, ageS, name = 'frame.jsonl') {
   const when = (NOW - ageS * 1000) / 1000
   utimesSync(path, when, when)
   return path
+}
+
+function standingPark(beatAgeMs = 5_000, until = NOW + 660_000) {
+  return {
+    role: 'planner', assignment_id: 'd1', kind: 'rate_limit', status: 429,
+    waited_on: 'reset-time', reset_at: NOW + 600_000,
+    started_at: NOW - 30_000, until, beat_at: NOW - beatAgeMs,
+  }
+}
+
+function writePark(lane, park) {
+  const path = join(lane.dir, 'crew.json')
+  const crew = JSON.parse(readFileSync(path, 'utf8'))
+  if (park === undefined) delete crew.park
+  else crew.park = park
+  writeFileSync(path, JSON.stringify(crew))
 }
 
 after(() => rmSync(fixtureRoot, { recursive: true, force: true }))
@@ -707,6 +726,86 @@ test('follow has no process-spawning surface and no child after one tick', async
   } finally {
     try { process.kill(child.pid, 'SIGKILL') } catch {}
   }
+})
+
+test('#948 keeps the park cadence below the canonical liveness floor', () => {
+  assert.equal(PARK_STALE_MS, DRIVER_GONE_PERIODS * HEARTBEAT_PERIOD_MS)
+  assert.ok(PARK_BEAT_MS < PARK_STALE_MS)
+})
+
+test('#948 boundedReport renders a fresh standing park', () => {
+  const root = world()
+  const lane = crewLane(root, { task: 'parked' })
+  writePark(lane, standingPark())
+  const report = boundedReport({
+    root, names: ['parked'], now: NOW,
+    deps: deps(NOW, { readSession: () => ({ ended_at: null, last_heartbeat_at: new Date(NOW - 5_000).toISOString() }) }),
+  })
+  assert.equal(report.lines[0], `[parked] stage=build:r1 age=5s status=active driver=parked until=${new Date(NOW + 660_000).toISOString()} heartbeat=5s`)
+})
+
+test('#948 judges a parked driver against the canonical floor despite a long seat wait', () => {
+  const root = world()
+  const lane = crewLane(root, {
+    task: 'parked-waits',
+    journalLines: [
+      { at: NOW - 5_000, stage: 'build:r1' },
+      { at: NOW - 5_000, event: 'waits', builder: 2400 },
+    ],
+  })
+  const age = 612_000
+  writePark(lane, standingPark(age))
+  const report = boundedReport({
+    root, names: ['parked-waits'], now: NOW,
+    deps: deps(NOW, { readSession: () => ({ ended_at: null, last_heartbeat_at: new Date(NOW - age).toISOString() }) }),
+  })
+  assert.equal(report.lines[0], `[parked-waits] stage=build:r1 age=5s status=active driver=driver-gone until=${new Date(NOW + 660_000).toISOString()} heartbeat=612s why=parked-driver-gone`)
+})
+
+test('#948 reports a dead parked driver without a waits line', () => {
+  const root = world()
+  const lane = crewLane(root, { task: 'parked-default' })
+  const age = 612_000
+  writePark(lane, standingPark(age))
+  const report = boundedReport({
+    root, names: ['parked-default'], now: NOW,
+    deps: deps(NOW, { readSession: () => ({ ended_at: null, last_heartbeat_at: new Date(NOW - age).toISOString() }) }),
+  })
+  assert.equal(report.lines[0], `[parked-default] stage=build:r1 age=5s status=active driver=driver-gone until=${new Date(NOW + 660_000).toISOString()} heartbeat=612s why=parked-driver-gone`)
+})
+
+test('#948 lets a fresher running ledger heartbeat suppress an old park', () => {
+  const root = world()
+  const lane = crewLane(root, { task: 'parked-recovered' })
+  writePark(lane, standingPark(900_000))
+  const report = boundedReport({
+    root, names: ['parked-recovered'], now: NOW,
+    deps: deps(NOW, { readSession: () => ({ ended_at: null, last_heartbeat_at: new Date(NOW - 5_000).toISOString() }) }),
+  })
+  assert.equal(report.lines[0], '[parked-recovered] stage=build:r1 age=5s status=active driver=running heartbeat=5s')
+})
+
+test('#948 ignores an unrenderable park instant without throwing', () => {
+  const root = world()
+  const lane = crewLane(root, { task: 'parked-invalid-until' })
+  writePark(lane, standingPark(5_000, Number.MAX_VALUE))
+  const report = boundedReport({
+    root, names: ['parked-invalid-until'], now: NOW,
+    deps: deps(NOW, { readSession: () => ({ ended_at: null, last_heartbeat_at: new Date(NOW - 5_000).toISOString() }) }),
+  })
+  assert.equal(report.lines[0], '[parked-invalid-until] stage=build:r1 age=5s status=active driver=running heartbeat=5s')
+})
+
+test('#948 parkReadout returns null for absent, malformed, unmeasured, and exited parks', () => {
+  const driver = { state: 'running', heartbeat_age_ms: 5_000 }
+  const park = standingPark()
+  assert.equal(parkReadout({}, driver, NOW), null)
+  for (const value of [null, 'park', [], 1]) assert.equal(parkReadout({ park: value }, driver, NOW), null)
+  for (const value of [Number.NaN, Infinity, Number.MAX_VALUE]) {
+    assert.equal(parkReadout({ park: { ...park, beat_at: value } }, driver, NOW), null)
+    assert.equal(parkReadout({ park: { ...park, until: value } }, driver, NOW), null)
+  }
+  assert.equal(parkReadout({ park }, { state: 'exited', heartbeat_age_ms: 5_000 }, NOW), null)
 })
 
 test('boundedReport reports driver-gone and heartbeat age for a stale heartbeat', () => {

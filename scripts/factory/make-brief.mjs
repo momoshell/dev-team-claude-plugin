@@ -169,6 +169,11 @@ export const PROPOSAL_KEYS = Object.freeze(['shape', 'strength'])
 // the driver. test/factory-make-brief.test.mjs pins the pair equal to
 // crew/drive.mjs's DIRECTED_BLOCK and DIRECTED_KEYS — the same posture PROPOSAL_KEYS
 // holds with scripts/factory/emit.mjs.
+// #945 — the compiler marks paths a lane declares it will create. The driver re-declares
+// this mark rather than importing the compiler, and test/factory-make-brief.test.mjs pins
+// the pair equal.
+export const CREATES_MARK = 'declared · created · '
+
 export const DIRECTED_BLOCK = 'directed'
 export const DIRECTED_KEYS = Object.freeze(['gate_cmd', 'files_in_scope'])
 
@@ -1789,7 +1794,7 @@ function generatedGrep(discovery) {
 function renderWhere(where, creates = []) {
   return [
     ...where.map((entry) => `verified · ${entry.kind} · ${entry.path}`),
-    ...creates.map((entry) => `declared · created · ${entry.path}`),
+    ...creates.map((entry) => `${CREATES_MARK}${entry.path}`),
   ].join('\n')
 }
 

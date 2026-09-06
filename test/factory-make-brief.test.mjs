@@ -12,7 +12,7 @@ import { dirname, join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { git, ROOT } from './helpers.mjs'
 import {
-  ACCEPTANCE_GATE_BLOCK, BROAD_KEY_HIT_LIMIT, CONVENTIONS_BLOCK, DEFAULT_PROTECTED_PATHS,
+  ACCEPTANCE_GATE_BLOCK, BROAD_KEY_HIT_LIMIT, CONVENTIONS_BLOCK, CREATES_MARK, DEFAULT_PROTECTED_PATHS,
   DIRECTED_BLOCK, DIRECTED_GATE_NOTE, DIRECTED_KEYS, HOSTILE_ENV_BLOCK, LADDER_BANDS, OPTIONAL_REQUEST_KEYS,
   REFUSAL_REASONS, SLOT_MARKER, TIER_NAMES, crossCheckCoupling, readsToAcknowledge,
   discoverTripwires, exportEntries, extractKeys, extractSymbols, gatherFences, gatherProtectedPaths, isTripwireFile, main, symbolIndexFor,
@@ -23,7 +23,7 @@ import {
 } from '../scripts/factory/make-brief.mjs'
 import { PROPOSAL_BLOCK as EMIT_PROPOSAL_BLOCK, PROPOSAL_KEYS as EMIT_PROPOSAL_KEYS } from '../scripts/factory/emit.mjs'
 import { defaultProfilePath, probeRepo } from '../scripts/factory/probe-repo.mjs'
-import { CHECK_FAIL_PREFIX, DIRECTED_BLOCK as DRIVE_DIRECTED_BLOCK, DIRECTED_KEYS as DRIVE_DIRECTED_KEYS, MUTATIONS_MAX, parseDirectedBrief } from '../crew/drive.mjs'
+import { CHECK_FAIL_PREFIX, CREATES_MARK as DRIVE_CREATES_MARK, DIRECTED_BLOCK as DRIVE_DIRECTED_BLOCK, DIRECTED_KEYS as DRIVE_DIRECTED_KEYS, MUTATIONS_MAX, createsFromBrief, parseDirectedBrief } from '../crew/drive.mjs'
 import { PROTECTED_PATHS } from '../crew/protected-paths.mjs'
 
 const SCRIPT = join(ROOT, 'scripts', 'factory', 'make-brief.mjs')
@@ -704,6 +704,20 @@ test('a directed plan is accepted whatever variant will read it', () => {
 test('the compiler and the driver declare one directed contract', () => {
   assert.equal(DIRECTED_BLOCK, DRIVE_DIRECTED_BLOCK)
   assert.deepEqual(DIRECTED_KEYS, DRIVE_DIRECTED_KEYS)
+})
+
+test('the compiler and the driver declare one creates contract', () => {
+  assert.equal(CREATES_MARK, DRIVE_CREATES_MARK)
+  const gathered = {
+    request: { ask: ASK, done_means: DONE, out_of_scope: OUT },
+    where: [{ path: 'lib/widget.mjs', kind: 'file' }],
+    creates: [{ path: 'test/new.test.mjs', kind: 'created' }],
+    discovery: { candidates: [], tripwires: [], broadKeys: [] },
+  }
+  const brief = renderBrief(gathered)
+  assert.ok(section(brief, '## Where').includes(`${CREATES_MARK}test/new.test.mjs`))
+  assert.deepEqual(createsFromBrief(brief), ['test/new.test.mjs'])
+  assert.deepEqual(createsFromBrief(renderBrief({ ...gathered, creates: [] })), [])
 })
 
 test('the directed section records where a directed gate lives', () => {

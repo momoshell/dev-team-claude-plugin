@@ -605,3 +605,37 @@ test('the pi subagents probe goes red when the register stops being true', async
   const plannerProbe = await probeCapability('subagents@pi', { register: builderClaim })
   assert.equal(plannerProbe.ok, true)
 })
+
+// A vendor grant carries its OWN tool names and they are backed against the
+// package's declared tools, never against the role's list — so repeating a name
+// under `tools` grants nothing. It is refused rather than absorbed: the fold in
+// grantsFor concatenates, so absorbing it would hand a frozen contract a list
+// with duplicates. Both adapters dedupe today, which is exactly why this would
+// otherwise stay invisible until a consumer counted instead of setting.
+test('a vendor tool also listed under tools is refused as a redundant declaration', () => {
+  const fixture = vendorFixtureRoot()
+
+  // MUTATION: drop the duplicate check in grantsFor and this returns
+  // ['ffgrep','fffind','ffgrep','fffind'] instead of refusing.
+  const doubled = vendorRegister({ role: 'builder' })
+  doubled.roles.builder.tools = ['ffgrep', 'fffind']
+  assert.throws(
+    () => grantsFor(loadCapabilities({ register: doubled }), 'builder', { root: fixture.scratch, vendorRoots: [fixture.root], agent: 'pi' }),
+    (err) => err.reason === 'unknown-grant' && /also lists it under tools/.test(err.message),
+  )
+
+  // One duplicate is enough; the rest of the list is irrelevant to the refusal.
+  const one = vendorRegister({ role: 'builder' })
+  one.roles.builder.tools = ['fffind']
+  assert.throws(() => grantsFor(loadCapabilities({ register: one }), 'builder', { root: fixture.scratch, vendorRoots: [fixture.root], agent: 'pi' }), (err) => err.reason === 'unknown-grant')
+
+  // MUTATION: make the check refuse any non-empty tools list and this fails —
+  // an unrelated role tool beside a vendor grant is legitimate and composes.
+  const beside = vendorRegister({ role: 'builder' })
+  beside.roles.builder.tools = ['Task']
+  assert.deepEqual(grantsFor(loadCapabilities({ register: beside }), 'builder', { root: fixture.scratch, vendorRoots: [fixture.root], agent: 'pi' }).tools, ['Task', 'ffgrep', 'fffind'])
+
+  // The ordinary vendor-only grant is unchanged and carries no duplicate.
+  const plain = vendorRegister({ role: 'builder' })
+  assert.deepEqual(grantsFor(loadCapabilities({ register: plain }), 'builder', { root: fixture.scratch, vendorRoots: [fixture.root], agent: 'pi' }).tools, ['ffgrep', 'fffind'])
+})

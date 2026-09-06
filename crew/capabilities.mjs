@@ -300,6 +300,23 @@ export function grantsFor(register, role, { root = REGISTER_ROOT, exists = exist
   // instead of silently booting a weaker seat.
   const vendor = (spec.vendor_extensions || []).map((grant) => resolveVendorExtension(grant, { roots, exists, readFile, role }))
 
+  // A vendor grant carries its OWN tool names and they are backed against the
+  // package's declared tools, not against the role's list — so repeating a name
+  // in `tools` grants nothing and is a redundant declaration. It is refused
+  // rather than absorbed: the fold below concatenates, so absorbing it would
+  // return a list with duplicates to a frozen contract, and a consumer that
+  // counts rather than sets would be wrong. Both adapters happen to dedupe
+  // today (crew/adapters/adapter-pi.mjs:236, adapter-claude.mjs:68), which is
+  // exactly why this would otherwise go unnoticed until something new consumed
+  // the list. The register's posture is that a grant says each thing once.
+  for (const one of vendor) {
+    for (const tool of one.tools) {
+      if (spec.tools.includes(tool)) {
+        throw refuse('unknown-grant', `seat ${role} declares vendor tool ${JSON.stringify(tool)} on ${JSON.stringify(one.package)} and also lists it under tools; a vendor grant carries its own tool names, so remove the duplicate from tools`)
+      }
+    }
+  }
+
   return deepFreeze({
     tools: [...spec.tools, ...vendor.flatMap((one) => one.tools)],
     extensions: [...extensions, ...vendor.flatMap((one) => one.entries)],

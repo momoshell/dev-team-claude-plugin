@@ -46,6 +46,7 @@ const CROSS_BATCH_COLLISION = 'cross-batch-collision'
 const PLAN_ADOPT_UNREADABLE = 'plan-adopt-unreadable'
 const EXTERNAL_FENCE_STALE = 'external-fence-stale'
 const EXTERNAL_FENCE_ABANDONED = 'external-fence-abandoned'
+const TEST_REACH_UNFENCED = 'test-reach-unfenced'
 
 export const REFUSAL_REASONS = Object.freeze([
   BATCH_EMPTY,
@@ -78,6 +79,7 @@ export const REFUSAL_REASONS = Object.freeze([
   PLAN_ADOPT_UNREADABLE,
   EXTERNAL_FENCE_STALE,
   EXTERNAL_FENCE_ABANDONED,
+  TEST_REACH_UNFENCED,
 ])
 
 export const CROSS_BATCH_UNKNOWN_PREFIX = 'dispatch-batch: WARNING cross-batch-unknown:'
@@ -141,7 +143,12 @@ export const REQUEST_SUFFIX = '.request.json'
 // Keys a lane's request carries for the DISPATCHER, not for the compiler. The
 // compiler's request schema is closed (REQUEST_KEYS, make-brief.mjs:51), so a
 // dispatch-only key is split off here and never reaches the compiled request.
-export const DISPATCH_ONLY_REQUEST_KEYS = Object.freeze(['tier', 'depends_on', 'variant', 'seats', 'adopt'])
+// The one escape hatch for the refusal below, and it is never silent: a lane that has
+// read the named test and decided it must NOT be fenced says so by name, per lane, and
+// the dispatcher logs and persists the decision. A dispatch-only key, so the compiler's
+// closed schema never sees it.
+export const TEST_REACH_OVERRIDE_KEY = 'allow_test_reach'
+export const DISPATCH_ONLY_REQUEST_KEYS = Object.freeze(['tier', 'depends_on', 'variant', 'seats', 'adopt', TEST_REACH_OVERRIDE_KEY])
 // The transports a dispatched batch can boot. Headless is the software-factory
 // mode and stays the DEFAULT, so an unflagged batch behaves exactly as it did
 // before this flag existed. #617 made the transport STATED; it is choosable
@@ -263,6 +270,9 @@ export const FENCE_REPORT_FILE = 'dispatch.warnings.json'
 export const SYMBOL_FANOUT_LIMIT = 8
 export const TEST_REACH_WARNING_PREFIX = 'dispatch-batch: WARNING test-reach-unfenced:'
 export const TEST_REACH_BLIND_SPOT = 'BLIND SPOT: this is a proxy in BOTH directions and names candidates, never proof. A test can assert the changed behaviour through a higher-level entry point without importing the changed file at all, and a computed dynamic import is invisible to a static scan — crew/crew.mjs loads every adapter that way. A test can equally import a fenced file without asserting anything about the part being changed. The literal symbol scan sees only whole-word occurrences of an exported name, is blind to a renamed re-export, and drops any symbol naming more than 8 test files as too broad to be evidence. Read the named files before choosing this fence; an unnamed one is not cleared.'
+export const TEST_REACH_OVERRIDE_PREFIX = 'dispatch-batch: test-reach-override:'
+export const TEST_REACH_REFUSAL_REMEDY = 'the remedy is mechanical — fence the named test; the corrected files_in_scope is'
+export const TEST_REACH_REFUSAL_BLIND_SPOT = 'BLIND SPOT: this refusal is NOT a guarantee and catches ONE class of fence error. It inherits every blind spot of the symbol scan it reads: blind to a renamed re-export, blind to a computed dynamic import, blind to a bare side-effect import that names nothing, and it drops any symbol naming more than 8 test files as too broad. It also cannot see a write target a lane only discovers while planning — of the three fence errors measured on 2026-09-06 it would have caught exactly one (b451-fffgrant); b465-optionalgrant and b472-fleetcontra needed files no pre-plan analysis can name. An unnamed test is not cleared.'
 const CODE_SUFFIX = /\.(?:mjs|js)$/
 const IMPORT_SPECIFIER = /(?:^|[\n;])\s*(?:import|export)[^\n;]*?from\s*['\"]([^'\"]+)['\"]|\bimport\(\s*['\"]([^'\"]+)['\"]\s*\)/g
 
@@ -433,6 +443,42 @@ export function testsOutsideFence({ surface, fenceFiles, reach } = {}) {
   })
 }
 
+// The exported names of the surface this lane declares it will WRITE. The surface is
+// EXPANDED through reach.files with its own scopeMatcher, exactly as testsOutsideFence
+// does at :405-406: a write surface may be a trailing-slash directory prefix
+// (crew/drive.mjs validateScopeEntries), and matching CODE_SUFFIX against the declared
+// entry would drop every directory surface and silently disarm the refusal below.
+export function surfaceExportsOf({ surface, reach } = {}) {
+  const declared = (Array.isArray(surface) ? surface : []).filter((file) => typeof file === 'string').map(normaliseRepoPath)
+  const matchesSurface = scopeMatcher(declared)
+  const names = new Set()
+  const owners = (Array.isArray(reach?.files) ? reach.files : []).filter((file) => typeof file === 'string' && CODE_SUFFIX.test(file) && matchesSurface(file))
+  for (const owner of owners) {
+    let symbols
+    try { symbols = reach?.symbolsFor?.(owner) } catch { symbols = [] }
+    for (const symbol of Array.isArray(symbols) ? symbols : []) names.add(symbol)
+  }
+  return [...names].sort()
+}
+
+// The narrow shape #960 names, and NOTHING wider. Three conjuncts, each of which #635's
+// measurement says must hold before a heuristic may refuse: the test imports the fenced
+// file DIRECTLY (one hop, not two of re-export), through a REAL import (not the literal
+// symbol scan whose blind spots the warning already documents), and it names at least one
+// symbol the lane's own write surface exports. Every other row stays a warning.
+export function reachRefusalRows({ rows, surfaceExports } = {}) {
+  const exported = new Set((Array.isArray(surfaceExports) ? surfaceExports : []).filter((symbol) => typeof symbol === 'string'))
+  const refused = []
+  for (const row of (Array.isArray(rows) ? rows : [])) {
+    const directImport = row?.hops === 1 && row?.how === 'import'
+    if (!directImport) continue
+    const overlap = (Array.isArray(row.symbols) ? row.symbols : []).filter((symbol) => exported.has(symbol))
+    if (overlap.length === 0) continue
+    refused.push({ test: row.test, file: row.file, symbols: overlap })
+  }
+  return refused
+}
+
 function reachRowText(row) {
   const hops = row.hops === null ? 'symbol-only' : `hops=${row.hops}`
   const symbols = row.symbols.length > 0 ? ` symbols=${row.symbols.join(',')}` : ''
@@ -555,6 +601,13 @@ function laneCreatesOf(lane) {
   return []
 }
 
+function laneAllowTestReachOf(lane) {
+  const declared = Array.isArray(lane?.[TEST_REACH_OVERRIDE_KEY])
+    ? lane[TEST_REACH_OVERRIDE_KEY]
+    : Array.isArray(lane?.request?.[TEST_REACH_OVERRIDE_KEY]) ? lane.request[TEST_REACH_OVERRIDE_KEY] : []
+  return declared.filter((file) => typeof file === 'string').map(normaliseRepoPath)
+}
+
 function fenceEntriesOf(fences) {
   if (Array.isArray(fences)) return fences
   if (fences && Array.isArray(fences.lanes)) return fences.lanes
@@ -631,6 +684,11 @@ function splitDispatchKeys(parsed, requestPath) {
       && (typeof dispatch.adopt !== 'string' || dispatch.adopt.trim() === '')) {
     refuse(`request ${requestPath} has an invalid adopt; expected a non-empty string naming an archived crew or task directory`, BATCH_UNREADABLE)
   }
+  if (Object.prototype.hasOwnProperty.call(dispatch, TEST_REACH_OVERRIDE_KEY)
+      && (!Array.isArray(dispatch[TEST_REACH_OVERRIDE_KEY])
+        || !dispatch[TEST_REACH_OVERRIDE_KEY].every((file) => typeof file === 'string' && file.trim() !== ''))) {
+    refuse(`request ${requestPath} has an invalid ${TEST_REACH_OVERRIDE_KEY}; expected an array of non-empty repo-relative test paths`, BATCH_UNREADABLE)
+  }
   if (Object.prototype.hasOwnProperty.call(dispatch, 'seats')) {
     const defect = seatsDefect(dispatch.seats)
     if (defect) refuse(`request ${requestPath} has an invalid seats: ${defect}`, BATCH_UNREADABLE)
@@ -682,6 +740,7 @@ export function readBatch({ batchDir, deps } = {}) {
       variant: typeof dispatch.variant === 'string' ? dispatch.variant : null,
       seats: dispatch.seats && typeof dispatch.seats === 'object' ? dispatch.seats : null,
       adopt: typeof dispatch.adopt === 'string' ? dispatch.adopt : null,
+      [TEST_REACH_OVERRIDE_KEY]: Array.isArray(dispatch[TEST_REACH_OVERRIDE_KEY]) ? dispatch[TEST_REACH_OVERRIDE_KEY].map(normaliseRepoPath) : [],
       depends_on: Array.isArray(dispatch.depends_on) ? [...new Set(dispatch.depends_on)] : [],
       where: request.where.map(normaliseRepoPath),
       creates: Array.isArray(request.creates) ? request.creates.map(normaliseRepoPath) : [],
@@ -1210,6 +1269,7 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
   const reportLanes = []
   const deferredWarnings = []
   const warnings = []
+  const reachRefusals = []
   const perLane = {}
   for (const lane of batchLanes) {
     const name = laneNameOf(lane)
@@ -1263,20 +1323,40 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
     }
 
     const reachRows = fenceHasCode ? testsOutsideFence({ surface: ownSurface, fenceFiles: ownFiles, reach: reachFor() }) : []
-    if (reachRows.length > 0) {
-      const listed = reachRows.slice(0, TEST_REACH_ROW_LIMIT).map(reachRowText).join('; ')
-      const omitted = reachRows.length - Math.min(reachRows.length, TEST_REACH_ROW_LIMIT)
-      const warning = { kind: 'test-reach', lane: name, reach: reachRows, text: null }
+    // Classified BEFORE the warning is queued (#960). The warning closes with "not a
+    // refusal", and the deferred warnings render at :1313, ahead of any refusal raised
+    // after this loop — so listing a row that IS about to refuse would print the
+    // contradiction first and the verdict second. Refused rows are subtracted from the
+    // warning's listing and from nothing else: dispatch.warnings.json still carries every
+    // row, so the operator's listing stays complete. An OVERRIDDEN row keeps warning,
+    // because it genuinely does not refuse.
+    const surfaceExports = fenceHasCode ? surfaceExportsOf({ surface: ownSurface, reach: reachFor() }) : []
+    const allowed = new Set(laneAllowTestReachOf(lane))
+    const candidates = reachRefusalRows({ rows: reachRows, surfaceExports })
+    const overridden = candidates.filter((row) => allowed.has(row.test))
+    const refusedRows = candidates.filter((row) => !allowed.has(row.test))
+    const refusedTests = new Set(refusedRows.map(({ test }) => test))
+    const warnRows = reachRows.filter((row) => !refusedTests.has(row.test))
+    if (warnRows.length > 0) {
+      const listed = warnRows.slice(0, TEST_REACH_ROW_LIMIT).map(reachRowText).join('; ')
+      const omitted = warnRows.length - Math.min(warnRows.length, TEST_REACH_ROW_LIMIT)
+      const warning = { kind: 'test-reach', lane: name, reach: warnRows, text: null }
       warnings.push(warning)
       deferredWarnings.push(() => {
         const tail = reportTail(omitted, citation)
-        const reachText = `${TEST_REACH_WARNING_PREFIX} lane ${name} changes file(s) reached by ${reachRows.length} test file(s) outside its fence, least obvious first (listing at most ${TEST_REACH_ROW_LIMIT}): ${listed}${tail}; a named test is a file to READ before this fence is chosen, not a refusal. ${TEST_REACH_BLIND_SPOT}`
+        const reachText = `${TEST_REACH_WARNING_PREFIX} lane ${name} changes file(s) reached by ${warnRows.length} test file(s) outside its fence, least obvious first (listing at most ${TEST_REACH_ROW_LIMIT}): ${listed}${tail}; a named test is a file to READ before this fence is chosen, not a refusal. ${TEST_REACH_BLIND_SPOT}`
         warning.text = reachText
         d.log(reachText)
       })
     }
-
-    reportLanes.push({ lane: name, test_reach: reachRows, citation_carriers: unfencedCarriers })
+    if (overridden.length > 0) {
+      const overrideText = `${TEST_REACH_OVERRIDE_PREFIX} lane ${name} declares ${TEST_REACH_OVERRIDE_KEY} for ${overridden.length} reaching test(s) that would otherwise refuse: ${overridden.map(({ test, file, symbols }) => `${test} imports ${file} and names ${symbols.join(', ')}`).join('; ')}; the named row(s) do not trigger ${TEST_REACH_UNFENCED}, the test(s) stay OUTSIDE the lane fence, and no seat may widen its own scope to reach them; this records the override only — every later check can still refuse this batch, so it is not a statement of the lane dispatch outcome.`
+      warnings.push({ kind: 'test-reach-override', lane: name, rows: overridden, text: overrideText })
+      d.log(overrideText)
+    }
+    if (refusedRows.length > 0) reachRefusals.push({ lane: name, rows: refusedRows, files: ownFiles })
+    const overrideField = overridden.length > 0 ? { test_reach_overrides: overridden } : {}
+    reportLanes.push({ lane: name, test_reach: reachRows, citation_carriers: unfencedCarriers, ...overrideField })
 
     const siblings = []
     for (const sibling of entries) {
@@ -1311,6 +1391,21 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
     if (reportError) citation = `(report unavailable: ${reportError?.code || 'write-failed'})`
   }
   for (const renderWarning of deferredWarnings) renderWarning()
+  // #960. This REFUSES where the surrounding reach scan only warns, and the difference is
+  // the conjunction, not the severity: #635 downgraded a heuristic that refused on ANY
+  // reach because it falsely blocked three of five lanes in one batch. This one fires only
+  // when the test imports the fenced file DIRECTLY and names a symbol the lane's own write
+  // surface exports — the shape b451-fffgrant was dispatched over, printed as row N of 23
+  // and skimmed. It runs after the report is written and the warnings rendered, so the
+  // refusal can cite a listing the operator already has, and BEFORE the absent check, whose
+  // comment claims the last position among register checks and keeps it.
+  if (reachRefusals.length > 0) {
+    const detail = reachRefusals.flatMap(({ lane: name, rows }) => rows.map(({ test, file, symbols }) => `lane ${name}: ${test} imports ${file} at one hop and names ${symbols.join(', ')}`)).join('; ')
+    const remedy = reachRefusals.map(({ lane: name, rows, files }) => `lane ${name}: ${[...new Set([...files, ...rows.map(({ test }) => test)])].sort().join(', ')}`).join(' | ')
+    const remedyText = `${TEST_REACH_REFUSAL_REMEDY} ${remedy}`
+    const text = `test(s) outside a lane fence assert the behaviour that lane changes: ${detail}; ${remedyText}; declare ${TEST_REACH_OVERRIDE_KEY} on the lane request to dispatch anyway, and the decision is logged and recorded on ${FENCE_REPORT_FILE}. ${TEST_REACH_REFUSAL_BLIND_SPOT}`
+    refuse(text, TEST_REACH_UNFENCED)
+  }
   // The other half of the invariant the membership loop above measures (#658): a register may
   // not be a SUPERSET of the batch it is dispatched with. A lane's sibling count is DERIVED
   // from batch size, so such a register can only ever be caught at boot, as

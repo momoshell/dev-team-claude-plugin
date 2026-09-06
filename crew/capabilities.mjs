@@ -295,10 +295,27 @@ export function grantsFor(register, role, { root = REGISTER_ROOT, exists = exist
     return { name: grant.name, def: path }
   })
 
-  // Vendor grants fold into the same tools/extensions keys consumed by both
-  // pi transports; adapter-claude sees extensions and refuses grant-unsupported
-  // instead of silently booting a weaker seat.
-  const vendor = (spec.vendor_extensions || []).map((grant) => resolveVendorExtension(grant, { roots, exists, readFile, role }))
+  // A vendor grant may be declared OPTIONAL (#956). The package lives in HOST
+  // state, so an absent one downgrades THIS seat rather than ending the run,
+  // and the downgrade is recorded rather than inferred from a shorter list.
+  // Only the register's own vendor-extension-missing refusal is absorbed: any
+  // other error is a defect in this module and still throws.
+  const vendor = []
+  const vendorWithheld = []
+  for (const grant of spec.vendor_extensions || []) {
+    try {
+      vendor.push(resolveVendorExtension(grant, { roots, exists, readFile, role }))
+    } catch (err) {
+      // MUTATION D1: widen this to treat every grant as optional and a REQUIRED
+      // absent grant boots a silently weaker seat instead of refusing — the
+      // "making everything optional cannot pass as a fix" arm of ask 4.
+      const optional = grant.optional === true
+      // MUTATION A1: make this condition always fire and an OPTIONAL absent
+      // grant ends the run again — the 52-failure behaviour this issue removes.
+      if (!optional || err?.reason !== 'vendor-extension-missing') throw err
+      vendorWithheld.push({ package: grant.package, tools: [...grant.tools], reason: err.reason, detail: err.message })
+    }
+  }
 
   // A vendor grant carries its OWN tool names and they are backed against the
   // package's declared tools, not against the role's list — so repeating a name
@@ -309,7 +326,8 @@ export function grantsFor(register, role, { root = REGISTER_ROOT, exists = exist
   // today (crew/adapters/adapter-pi.mjs:236, adapter-claude.mjs:68), which is
   // exactly why this would otherwise go unnoticed until something new consumed
   // the list. The register's posture is that a grant says each thing once.
-  for (const one of vendor) {
+  // Include withheld grants too, so duplicate declarations do not depend on host package state.
+  for (const one of [...vendor, ...vendorWithheld]) {
     for (const tool of one.tools) {
       if (spec.tools.includes(tool)) {
         throw refuse('unknown-grant', `seat ${role} declares vendor tool ${JSON.stringify(tool)} on ${JSON.stringify(one.package)} and also lists it under tools; a vendor grant carries its own tool names, so remove the duplicate from tools`)
@@ -317,10 +335,12 @@ export function grantsFor(register, role, { root = REGISTER_ROOT, exists = exist
     }
   }
 
+  const grantedTools = [...spec.tools, ...vendor.flatMap((one) => one.tools)]
   return deepFreeze({
-    tools: [...spec.tools, ...vendor.flatMap((one) => one.tools)],
+    tools: grantedTools,
     extensions: [...extensions, ...vendor.flatMap((one) => one.entries)],
     vendor_extensions: vendor,
+    vendor_withheld: vendorWithheld,
     agents, skills,
     advisor: spec.advisor, requires: [...spec.requires],
   })
@@ -379,7 +399,7 @@ export function assertGrantsBacked(role, grants, register, { agent = null, vendo
 }
 
 export const EMPTY_GRANTS = deepFreeze({
-  tools: [], extensions: [], vendor_extensions: [], agents: [], skills: [], advisor: false, requires: [],
+  tools: [], extensions: [], vendor_extensions: [], vendor_withheld: [], agents: [], skills: [], advisor: false, requires: [],
 })
 
 // A capability the REGISTER hands out, not one the binary simply has. The
@@ -451,7 +471,7 @@ export const CAPABILITY_PROBES = Object.freeze({
   }),
   vendor_extensions: Object.freeze({
     class: 'vendor-binary',
-    reason: "The claim is that a package the OPERATOR installed under pi's own npm root declares the pi extension entries this checkout can name. That package belongs to the host rather than this checkout, so nothing short of a host with it installed could exercise it; absence is refused by name (vendor-extension-missing) rather than assumed.",
+    reason: "The claim is that a package the OPERATOR installed under pi's own npm root declares the pi extension entries this checkout can name. That package belongs to the host rather than this checkout, so nothing short of a host with it installed could exercise it; absence is refused by name (vendor-extension-missing) for a required grant and recorded by the same name for an optional one.",
   }),
   skills: Object.freeze({
     class: 'resolution',

@@ -64,9 +64,10 @@ function vendorFixtureRoot({
   }
 }
 
-function vendorRegister({ role = 'planner', overlay = false, packageName = '@crew-fixture/pi-thing', tools = ['ffgrep', 'fffind'] } = {}) {
+function vendorRegister({ role = 'planner', overlay = false, packageName = '@crew-fixture/pi-thing', tools = ['ffgrep', 'fffind'], optional } = {}) {
   const base = capabilityRegister()
   const grant = { package: packageName, tools: [...tools] }
+  if (optional !== undefined) grant.optional = optional
   const roleGrant = { ...base.roles[role] }
   if (overlay) roleGrant.by_agent = { pi: { vendor_extensions: [grant] } }
   else roleGrant.vendor_extensions = [grant]
@@ -108,7 +109,7 @@ test('an adapter without an overlay gets exactly the role-level grant', () => {
   assert.deepEqual(claude, roleLevel)
   assert.deepEqual(claude.extensions, [])
   assert.deepEqual(claude.agents, [])
-  assert.deepEqual(Object.keys(claude), ['tools', 'extensions', 'vendor_extensions', 'agents', 'skills', 'advisor', 'requires'])
+  assert.deepEqual(Object.keys(claude), ['tools', 'extensions', 'vendor_extensions', 'vendor_withheld', 'agents', 'skills', 'advisor', 'requires'])
 })
 
 test('adapter-scoped grants are backed only when the adapter is named', () => {
@@ -246,6 +247,152 @@ test('a vendor grant resolves every package-declared entry and reaches the pi co
     assert.ok(first >= 0)
     assert.ok(second > first)
   } finally { rmSync(fixture.scratch, { recursive: true, force: true }) }
+})
+
+test('an optional vendor grant whose package is absent boots the seat without those tools', () => {
+  const scratch = scratchDir('crew-vendor-optional-absent-')
+  try {
+    const register = vendorRegister({ role: 'builder', overlay: true, packageName: '@crew-fixture/never-installed', optional: true })
+    const grants = grantsFor(loadCapabilities({ register }), 'builder', {
+      root: scratch, vendorRoots: [join(scratch, 'node_modules')], agent: 'pi',
+    })
+    assert.deepEqual(grants.tools, [])
+    assert.deepEqual(grants.extensions, [])
+    assert.deepEqual(grants.vendor_extensions, [])
+    const command = piSeatCommand({
+      role: 'builder', model: 'sonnet', promptFile: '/tmp/role-builder.md', tools: 'Read', deny: '',
+      taskDir: '/tmp', bootBrief: 'boot', grants,
+    })
+    assert.match(command, /--no-extensions/)
+    assert.doesNotMatch(command, /ffgrep|fffind|never-installed/)
+  } finally { rmSync(scratch, { recursive: true, force: true }) }
+})
+
+test('a withheld optional vendor grant is recorded with its own reason', () => {
+  const absent = scratchDir('crew-vendor-optional-record-')
+  const fixture = vendorFixtureRoot()
+  try {
+    const absentRegister = vendorRegister({ role: 'builder', overlay: true, packageName: '@crew-fixture/never-installed', optional: true })
+    const absentGrants = grantsFor(loadCapabilities({ register: absentRegister }), 'builder', {
+      root: absent, vendorRoots: [join(absent, 'node_modules')], agent: 'pi',
+    })
+    assert.equal(Object.hasOwn(absentGrants, 'vendor_withheld'), true)
+    assert.equal(absentGrants.vendor_withheld.length, 1)
+    assert.deepEqual(absentGrants.vendor_withheld[0], {
+      package: '@crew-fixture/never-installed', tools: ['ffgrep', 'fffind'],
+      reason: 'vendor-extension-missing', detail: absentGrants.vendor_withheld[0].detail,
+    })
+    assert.match(absentGrants.vendor_withheld[0].detail, /never-installed/)
+
+    const resolvedRegister = vendorRegister({ role: 'builder', overlay: true, optional: true })
+    const resolved = grantsFor(loadCapabilities({ register: resolvedRegister }), 'builder', {
+      root: fixture.scratch, vendorRoots: [fixture.root], agent: 'pi',
+    })
+    assert.deepEqual(resolved.vendor_withheld, [])
+    assert.deepEqual(EMPTY_GRANTS.vendor_withheld, [])
+  } finally {
+    rmSync(absent, { recursive: true, force: true })
+    rmSync(fixture.scratch, { recursive: true, force: true })
+  }
+})
+
+test('an optional vendor grant on a partial package withholds and records rather than refusing', () => {
+  const fixture = vendorFixtureRoot({ missing: ['./lib/second.ts'] })
+  try {
+    const register = vendorRegister({ role: 'builder', overlay: true, optional: true })
+    const grants = grantsFor(loadCapabilities({ register }), 'builder', {
+      root: fixture.scratch, vendorRoots: [fixture.root], agent: 'pi',
+    })
+    assert.deepEqual(grants.tools, [])
+    assert.deepEqual(grants.extensions, [])
+    assert.equal(grants.vendor_extensions.length, 0)
+    assert.equal(grants.vendor_withheld.length, 1)
+    assert.deepEqual(grants.vendor_withheld[0].tools, ['ffgrep', 'fffind'])
+    assert.equal(grants.vendor_withheld[0].reason, 'vendor-extension-missing')
+    assert.match(grants.vendor_withheld[0].detail, /second\.ts/)
+  } finally { rmSync(fixture.scratch, { recursive: true, force: true }) }
+})
+
+test('a required vendor grant whose package is absent still refuses', () => {
+  const scratch = scratchDir('crew-vendor-required-absent-')
+  try {
+    for (const optional of [undefined, false]) {
+      const options = { role: 'builder', overlay: true, packageName: '@crew-fixture/never-installed' }
+      if (optional !== undefined) options.optional = optional
+      const register = vendorRegister(options)
+      assert.throws(
+        () => grantsFor(loadCapabilities({ register }), 'builder', {
+          root: scratch, vendorRoots: [join(scratch, 'node_modules')], agent: 'pi',
+        }),
+        (err) => err.reason === 'vendor-extension-missing',
+      )
+    }
+  } finally { rmSync(scratch, { recursive: true, force: true }) }
+})
+
+test('an optional vendor grant that resolves composes the same pi bundle', () => {
+  const fixture = vendorFixtureRoot()
+  try {
+    const optional = vendorRegister({ role: 'builder', overlay: true, optional: true })
+    const required = vendorRegister({ role: 'builder', overlay: true })
+    const resolve = (register) => grantsFor(loadCapabilities({ register }), 'builder', {
+      root: fixture.scratch, vendorRoots: [fixture.root], agent: 'pi',
+    })
+    const optionalGrants = resolve(optional)
+    const requiredGrants = resolve(required)
+    assert.deepEqual(optionalGrants, requiredGrants)
+    assert.deepEqual(optionalGrants.tools, ['ffgrep', 'fffind'])
+    assert.deepEqual(optionalGrants.extensions, fixture.entries)
+    const command = piSeatCommand({
+      role: 'builder', model: 'sonnet', promptFile: '/tmp/role-builder.md', tools: 'Read', deny: '',
+      taskDir: '/tmp', bootBrief: 'boot', grants: optionalGrants,
+    })
+    const activator = command.match(/--tools "([^"]*)"/)?.[1]?.split(',') || []
+    assert.ok(activator.includes('ffgrep'))
+    assert.ok(activator.includes('fffind'))
+    assert.ok(command.indexOf(`-e "${fixture.entries[0]}"`) < command.indexOf(`-e "${fixture.entries[1]}"`))
+  } finally { rmSync(fixture.scratch, { recursive: true, force: true }) }
+})
+
+test('a pi-scoped optional vendor grant leaves the claude seat at baseline', () => {
+  const fixture = vendorFixtureRoot()
+  try {
+    const scoped = vendorRegister({ role: 'planner', overlay: true, optional: true })
+    const baseline = capabilityRegister()
+    const options = { root: fixture.scratch, vendorRoots: [fixture.root], agent: 'claude' }
+    const scopedGrants = grantsFor(loadCapabilities({ register: scoped }), 'planner', options)
+    const baselineGrants = grantsFor(loadCapabilities({ register: baseline }), 'planner', options)
+    assert.deepEqual(scopedGrants, baselineGrants)
+    const shape = {
+      role: 'planner', model: 'opus', promptFile: '/tmp/role-planner.md', tools: 'Read', deny: '',
+      taskDir: '/tmp', bootBrief: 'boot',
+    }
+    assert.equal(
+      claudeSeatCommand({ ...shape, grants: scopedGrants }),
+      claudeSeatCommand({ ...shape, grants: baselineGrants }),
+    )
+  } finally { rmSync(fixture.scratch, { recursive: true, force: true }) }
+})
+
+test('the schema admits optional as a boolean and nothing else', () => {
+  const accepted = vendorRegister({ role: 'builder', overlay: true, optional: true })
+  assert.doesNotThrow(() => loadCapabilities({ register: accepted }))
+  const nonBoolean = vendorRegister({ role: 'builder', overlay: true, optional: 'yes' })
+  assert.throws(() => loadCapabilities({ register: nonBoolean }), (err) => err.reason === 'register-invalid')
+  const unknown = vendorRegister({ role: 'builder', overlay: true, optional: true })
+  unknown.roles.builder.by_agent.pi.vendor_extensions[0].unexpected = true
+  assert.throws(() => loadCapabilities({ register: unknown }), (err) => err.reason === 'register-invalid')
+})
+
+test('an optional absent vendor grant passes the grantsFor and assertGrantsBacked boot pair', () => {
+  const scratch = scratchDir('crew-vendor-optional-backed-')
+  try {
+    const register = vendorRegister({ role: 'builder', overlay: true, packageName: '@crew-fixture/never-installed', optional: true })
+    const loaded = loadCapabilities({ register })
+    const backing = { root: scratch, vendorRoots: [join(scratch, 'node_modules')], agent: 'pi' }
+    const grants = grantsFor(loaded, 'builder', backing)
+    assert.doesNotThrow(() => assertGrantsBacked('builder', grants, loaded, backing))
+  } finally { rmSync(scratch, { recursive: true, force: true }) }
 })
 
 test('an uninstalled vendor package refuses by its own reason', () => {
@@ -442,7 +589,7 @@ test('capability refusal reasons are closed and EMPTY_GRANTS is frozen', () => {
     () => claudeSeatCommand({ role: 'builder', model: 'sonnet', promptFile: '/tmp/role.md', tools: 'Read', deny: 'Task,Agent', taskDir: '/tmp', bootBrief: 'boot', grants: { tools: [], extensions: ['/tmp/ext.js'], skills: [], agents: [], advisor: false } }),
     (err) => err.reason === 'grant-unsupported' && /grant-unsupported/.test(err.message),
   )
-  assert.deepEqual(EMPTY_GRANTS, { tools: [], extensions: [], vendor_extensions: [], agents: [], skills: [], advisor: false, requires: [] })
+  assert.deepEqual(EMPTY_GRANTS, { tools: [], extensions: [], vendor_extensions: [], vendor_withheld: [], agents: [], skills: [], advisor: false, requires: [] })
   assert.equal(Object.isFrozen(EMPTY_GRANTS), true)
 })
 
@@ -634,6 +781,19 @@ test('a vendor tool also listed under tools is refused as a redundant declaratio
   const beside = vendorRegister({ role: 'builder' })
   beside.roles.builder.tools = ['Task']
   assert.deepEqual(grantsFor(loadCapabilities({ register: beside }), 'builder', { root: fixture.scratch, vendorRoots: [fixture.root], agent: 'pi' }).tools, ['Task', 'ffgrep', 'fffind'])
+
+  // MUTATION R1: an absent optional package must still refuse a duplicate tool.
+  const absent = scratchDir('crew-vendor-duplicate-absent-')
+  try {
+    const absentRegister = vendorRegister({ role: 'builder', overlay: true, optional: true })
+    absentRegister.roles.builder.tools = ['ffgrep']
+    assert.throws(
+      () => grantsFor(loadCapabilities({ register: absentRegister }), 'builder', {
+        root: absent, vendorRoots: [join(absent, 'node_modules')], agent: 'pi',
+      }),
+      (err) => err.reason === 'unknown-grant' && /also lists it under tools/.test(err.message),
+    )
+  } finally { rmSync(absent, { recursive: true, force: true }) }
 
   // The ordinary vendor-only grant is unchanged and carries no duplicate.
   const plain = vendorRegister({ role: 'builder' })

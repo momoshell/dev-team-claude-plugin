@@ -1919,6 +1919,8 @@ export async function bootCmd(args, deps = {}) {
     pane_id: pane?.id || null, surface_id: surface?.id || null,
     transport: adapters[role].transport, model: seats?.[role]?.model || seatModel(role, args), agent: adapters[role].name,
     tools: effectiveTools(role, adapters[role].grants), deny: SEAT_DEFAULTS[role].deny,
+    // Persist optional vendor grant shortfalls in the durable crew record.
+    vendor_withheld: adapters[role].grants?.vendor_withheld ?? [],
     ...(seats ? { effort: seats[role].effort, provider: seats[role].provider, id: seats[role].id } : {}),
     ...(seats?.[role]?.fallback ? { fallback: seats[role].fallback } : {}),
   })
@@ -2010,6 +2012,8 @@ export async function bootCmd(args, deps = {}) {
     ...turnCeilingsJournalPatch(turnCeilingRecord),
     models: Object.fromEntries(roles.map((r) => [r, members[r].model])),
     transports: Object.fromEntries(roles.map((r) => [r, members[r].transport])),
+    // Persist optional vendor grant shortfalls in the append-only boot event.
+    vendor_withheld: Object.fromEntries(roles.map((r) => [r, adapters[r].grants?.vendor_withheld ?? []])),
     charter_bytes: charter.bytes,
     charter_base_bytes: charter.base,
     charter_memory_bytes: charter.memory_bytes,

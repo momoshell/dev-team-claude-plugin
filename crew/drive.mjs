@@ -425,6 +425,9 @@ export const ENVELOPE_FIELD_KINDS = Object.freeze(['text', 'records'])
 // the builder got the byte-identical failure three times. A refusal here is a BOUNCE back
 // to the planner inside its own round budget, and never a filter — a filtered lane hides a
 // planner that cannot tell a test from a fixture, and that is a planning defect worth seeing.
+export const CREATES_MARK = 'declared · created · '
+export const WHERE_HEADING = '## Where'
+export const CREATES_ABSENT = 'creates-declared-absent'
 export const VALIDATION_LANE_UNLOADABLE = 'validation-lane-unloadable'
 export const VALIDATION_LANE_EVENT = 'validation-lane-resolved'
 // What `node --test` can load, consulted ONLY after the tree has said the path is a regular
@@ -434,7 +437,9 @@ export const LOADABLE_LANE_EXTENSIONS = Object.freeze(['.mjs', '.js', '.cjs', '.
 // What the tree probe can report, one line per input. An input the probe did NOT report is
 // `unreadable` and is refused: no unmeasured input is ever accepted.
 export const LANE_PROBE_KINDS = Object.freeze(['dir', 'file', 'other', 'absent'])
-// Closed, per input. Everything except `loadable` is refused.
+// Closed, per input. Everything except `loadable` is refused, with ONE partition carved out
+// downstream: a `missing` row whose input this lane DECLARED under `creates` is deferred to
+// the moment the lane runs (#945), never given a verdict of its own.
 export const LANE_INPUT_VERDICTS = Object.freeze([
   'loadable', 'missing', 'unreadable', 'unsupported-type', 'unsupported-extension', 'glob-unresolved',
 ])
@@ -1844,6 +1849,25 @@ export function validateScopeEntries(entries) {
 // reads is a claim this driver does not honour, not a harmless extra.
 export const DIRECTED_BLOCK = 'directed'
 export const DIRECTED_KEYS = Object.freeze(['gate_cmd', 'files_in_scope'])
+
+// #945 — what this lane DECLARED it will create, read off the compiled brief's `## Where`
+// section. Section-scoped on purpose: a brief inlines an issue body further down, and a
+// body that happens to carry the mark is not a declaration.
+export function createsFromBrief(text) {
+  const lines = String(text ?? '').split('\n')
+  const start = lines.indexOf(WHERE_HEADING)
+  if (start < 0) return []
+  const found = []
+  for (let i = start + 1; i < lines.length; i += 1) {
+    if (lines[i].startsWith('## ')) break
+    if (lines[i].startsWith(CREATES_MARK)) found.push(normaliseLaneInput(lines[i].slice(CREATES_MARK.length)))
+  }
+  return found.filter(Boolean)
+}
+export function planExhaustedWhy(rounds, bounceWhy) {
+  const cause = bounceWhy ? ` — a plan round was bounced and never recovered: ${bounceWhy}` : ''
+  return `no accepted plan within ${rounds} rounds${cause}`
+}
 export function parseDirectedBrief(text) {
   if (typeof text !== 'string' || !text.trim()) return { defect: 'the brief is empty or unreadable' }
   const lines = text.split('\n')
@@ -3654,6 +3678,8 @@ function runTask(ctx, io, crash) {
   }
   const plans = stageEnabled(shape, 'plan') // does this shape plan, or inherit?
   let planEnv = null
+  let laneDeferred = []
+  let planBounceWhy = null
   let planBrief = ctx.briefFile
   // A bounce that has its own machine-readable reason sets this; it is CONSUMED once, so
   // the plan-check bounces keep the 'plan-revision' note they have always carried (#843).
@@ -3661,10 +3687,17 @@ function runTask(ctx, io, crash) {
   let extraPlanRounds = 0
   let divergenceConsulted = false
   const readOrNull = (path) => { try { const text = io.readFile(path); return typeof text === 'string' ? text : null } catch { return null } }
+  const probeLane = (inputs) => {
+    let res = null
+    try { res = io.run(laneProbeCommand(inputs)) } catch { return new Map() }
+    return res && res.ok === true ? laneProbeKinds(res.output) : new Map()
+  }
   // Read ONCE, before the first check round: the driver overwrites plan-check.md
   // on every round (:3091), so a later read returns this run's own output.
   const adoptedCheckText = readOrNull(art('plan-check.md'))
-  const adoption = adoptionSignal({ briefText: readOrNull(ctx.briefFile), planCheckText: adoptedCheckText })
+  const briefText = readOrNull(ctx.briefFile)
+  const adoption = adoptionSignal({ briefText, planCheckText: adoptedCheckText })
+  const declaredCreates = createsFromBrief(briefText)
   let predecessorChecked = adoption.predecessor_checked
   const planRounds = () => planRoundCap({ limits, adopted: adoption.adopted, predecessorChecked, extraPlanRounds })
   io.log(recordRow({ at: io.now(), plan_round_cap: {
@@ -3782,13 +3815,10 @@ function runTask(ctx, io, crash) {
     // head is deliberate; it classifies `unclassified` in the ledger, like several other
     // `plan` escalations, and fixing that belongs to a ledger lane, not this fence.
     const laneAsked = env.details?.validation_lane
+    laneDeferred = []
     if (typeof laneAsked === 'string' && laneAsked.trim()) {
-      const laneResolved = resolveValidationLane(laneAsked, (inputs) => {
-        let res = null
-        try { res = io.run(laneProbeCommand(inputs)) } catch { return new Map() }
-        return res && res.ok === true ? laneProbeKinds(res.output) : new Map()
-      })
-      io.log(recordRow({ at: io.now(), event: VALIDATION_LANE_EVENT, validation_lane_resolved: { round, shape: laneResolved.shape.shape, ...laneResolved.counts, refused: laneResolved.refused.map((row) => row.input) } }))
+      const laneResolved = resolveValidationLane(laneAsked, probeLane, declaredCreates)
+      io.log(recordRow({ at: io.now(), event: VALIDATION_LANE_EVENT, validation_lane_resolved: { round, shape: laneResolved.shape.shape, ...laneResolved.counts, refused: laneResolved.refused.map((row) => row.input), ...(laneResolved.deferred ? { deferred_inputs: laneResolved.deferred.map((row) => row.input) } : {}) } }))
       if (laneResolved.refused.length > 0) {
         if (round >= planRounds()) {
           stageComplete()
@@ -3799,11 +3829,14 @@ function runTask(ctx, io, crash) {
         io.writeFile(b, validationLaneBounceLines(round, laneAsked, laneResolved, ctx.briefFile).join('\n'))
         planBrief = b
         planNote = VALIDATION_LANE_UNLOADABLE
+        planBounceWhy = validationLaneWhy(laneResolved, false)
         planEnv = null
         stageComplete()
         continue
       }
+      laneDeferred = laneResolved.deferred ?? []
     }
+    planBounceWhy = null
     planEnv = env
     try {
       const bytesOf = (p) => {
@@ -3957,7 +3990,7 @@ function runTask(ctx, io, crash) {
     if (sourced.stop) return sourced.stop
     planEnv = sourced.plan
   }
-  if (!planEnv) return escalate('plan', `no accepted plan within ${planRounds()} rounds`)
+  if (!planEnv) return escalate('plan', planExhaustedWhy(planRounds(), planBounceWhy))
   const planPath = planEnv.details?.plan_path || art('plan.md')
   if (!docShown) { docShown = true; io.showDoc?.(planPath) }
   const scopeFiles = planEnv.details?.files_in_scope
@@ -5014,6 +5047,19 @@ function runTask(ctx, io, crash) {
 
     // Gate B (mechanical): the validation lane, run by code.
     stage(`lane:r${round}`)
+    const deferredNow = resolveDeferredCreates(laneDeferred, probeLane)
+    if (deferredNow.length > 0) {
+      if (finalRound()) {
+        stageComplete()
+        return escalate('lane', deferredCreatesWhy(deferredNow, true), builderEnv?.artifacts || [])
+      }
+      const b = art(`build-bounce-r${round}.md`)
+      failureUpgrade('lane', 'builder')
+      io.writeFile(b, deferredCreatesBounceLines(round, lane, deferredNow, planPath).join('\n'))
+      buildBrief = b; buildNote = CREATES_ABSENT
+      stageComplete()
+      continue
+    }
     const laneRes = io.run(lane)
     if (!laneRes.ok) {
       if (finalRound()) {
@@ -6242,27 +6288,64 @@ export function laneInputExtension(token) {
   const dot = base.lastIndexOf('.')
   return dot > 0 ? base.slice(dot).toLowerCase() : null
 }
+export function normaliseLaneInput(token) {
+  const text = String(token ?? '').trim()
+  return text.startsWith('./') ? text.slice(2) : text
+}
+
+export function classifyLaneInput(input, kind) {
+  if (kind === null) return { input, verdict: 'unreadable', why: 'the tree probe returned no verdict for this input' }
+  if (kind === 'absent') return { input, verdict: 'missing', why: 'no such path in this checkout' }
+  if (kind === 'dir') return { input, verdict: 'loadable', why: null }
+  if (kind !== 'file') return { input, verdict: 'unsupported-type', why: `the path exists but is neither a regular file nor a directory (${kind})` }
+  const ext = laneInputExtension(input)
+  if (ext !== null && LOADABLE_LANE_EXTENSIONS.includes(ext)) return { input, verdict: 'loadable', why: null }
+  return { input, verdict: 'unsupported-extension', why: `node --test has no loader for ${ext === null ? 'a regular file with no extension' : ext}` }
+}
+
 // `probe` takes the input list and returns a Map of input -> kind. An input the probe did
 // not report is `unreadable` and REFUSED: an unmeasured cell is never read as a pass.
-export function resolveValidationLane(cmd, probe) {
+export function resolveValidationLane(cmd, probe, creates = []) {
   const { shape, inputs, globs } = laneCommandInputs(cmd)
+  const declared = new Set((Array.isArray(creates) ? creates : []).filter((entry) => typeof entry === 'string').map(normaliseLaneInput))
   const rows = []
   if (shape.shape === 'unparsable') rows.push({ input: String(cmd ?? ''), verdict: 'unreadable', why: shape.why })
   for (const glob of globs) rows.push({ input: glob, verdict: 'glob-unresolved', why: 'this driver does not expand a glob, so it cannot resolve one — name the test files' })
   const kinds = inputs.length > 0 ? probe(inputs) : new Map()
-  for (const input of inputs) {
-    const kind = kinds.get(input) ?? null
-    if (kind === null) { rows.push({ input, verdict: 'unreadable', why: 'the tree probe returned no verdict for this input' }); continue }
-    if (kind === 'absent') { rows.push({ input, verdict: 'missing', why: 'no such path in this checkout' }); continue }
-    if (kind === 'dir') { rows.push({ input, verdict: 'loadable', why: null }); continue }
-    if (kind !== 'file') { rows.push({ input, verdict: 'unsupported-type', why: `the path exists but is neither a regular file nor a directory (${kind})` }); continue }
-    const ext = laneInputExtension(input)
-    if (ext !== null && LOADABLE_LANE_EXTENSIONS.includes(ext)) rows.push({ input, verdict: 'loadable', why: null })
-    else rows.push({ input, verdict: 'unsupported-extension', why: `node --test has no loader for ${ext === null ? 'a regular file with no extension' : ext}` })
-  }
+  for (const input of inputs) rows.push(classifyLaneInput(input, kinds.get(input) ?? null))
   const counts = { total: rows.length }
   for (const verdict of LANE_INPUT_VERDICTS) counts[verdict] = rows.filter((row) => row.verdict === verdict).length
-  return { shape, rows, refused: rows.filter((row) => row.verdict !== 'loadable'), counts }
+  const deferred = rows.filter((row) => row.verdict === 'missing' && declared.has(normaliseLaneInput(row.input)))
+  const refused = rows.filter((row) => row.verdict !== 'loadable' && !deferred.includes(row))
+  return { shape, rows, refused, counts, ...(deferred.length > 0 ? { deferred } : {}) }
+}
+
+// #945 — the deferral is a deferral of the SAME check, never a drop of it. Re-run with no
+// declared set at all: a path the build never authored is `missing` here and refuses by name.
+export function resolveDeferredCreates(deferred, probe) {
+  const inputs = (Array.isArray(deferred) ? deferred : []).map((row) => row && row.input).filter((input) => typeof input === 'string' && input)
+  if (inputs.length === 0) return []
+  let kinds = new Map()
+  try { kinds = probe(inputs) } catch { kinds = new Map() }
+  const rows = inputs.map((input) => classifyLaneInput(input, kinds.get(input) ?? null))
+  return rows.filter((row) => row.verdict !== 'loadable')
+}
+export function deferredCreatesWhy(rows, final) {
+  return `${CREATES_ABSENT}: the validation lane names ${rows.length} path(s) this lane DECLARED it would create and the build has not authored — ${rows.map((row) => `${row.input} (${row.why})`).join('; ')}${final ? '; no build round is left to author them' : ''}`
+}
+export function deferredCreatesBounceLines(round, cmd, rows, planPath) {
+  return [
+    `# Declared-creation bounce (round ${round})`, '',
+    deferredCreatesWhy(rows, false), '',
+    'The validation lane, unedited — this driver refuses a lane, it never rewrites one:',
+    `    ${cmd}`, '',
+    'The declared creations it still cannot load:',
+    ...rows.map((row) => `- ${row.input} — ${row.why}`), '',
+    'This lane DECLARED these paths under `creates`, so the driver accepted the validation',
+    'lane at plan time on the promise that the build would author them. The promise is',
+    'collected here: write the file, do not rewrite the lane.', '',
+    `Plan: ${planPath}`,
+  ]
 }
 export function validationLaneWhy(resolved, final) {
   return `${VALIDATION_LANE_UNLOADABLE}: the plan's validation_lane names ${resolved.refused.length} input(s) node --test cannot run — ${resolved.refused.map((row) => `${row.input} (${row.why})`).join('; ')}${final ? '; on the final plan round there is no revision left to bounce it to' : ''}`

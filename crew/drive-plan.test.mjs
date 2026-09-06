@@ -4,8 +4,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  ADOPTED_PLAN_HEADING, ADOPT_BLOCK, CENSUS_ROW_ABSENT, CENSUS_TURNS_ABSENT, CENSUS_UNREADABLE, CTX, CTX_DIRECTED, CTX_TL, DIRECTED_FILES, ENVELOPE_REFUSAL_REASONS, FAILURE_UPGRADE, GATE_SUMMARY_PREFIX, GROWTH_DIVERGENCE_FACTOR, LANE_COMMAND_SHAPES, LANE_INPUT_VERDICTS, LANE_PATH_OPTIONS, LANE_VALUE_OPTIONS, LIMITS, NO_TURN_CEILING, PLAN_CHECK_ABSENT, PLAN_CHECK_INVALID, PLAN_CHECK_SEVERITIES, PLAN_CONVERGENCE_REASONS, RED, RUN_START_EVENT, S843_ADDED, S843_D2, S843_DISPATCHED, S843_NARROWED, TD, THREW, TURN_CEILING_REFUSALS, TURN_CEILING_ROLES, VALIDATION_LANE_UNLOADABLE, adoptionSignal, bothExhaustionPointsScenario, buildEnv, carriedPrLines, carriedPreambleLines, carriedResolution, carriedSilenceDefect, checkEnv, composeCommitMessage, divergeThenExhaustPlanScenario, divergenceConsultLines, divergentPlanScenario, driveTask, enforcementPreamble, fakeIo, growthLines, growthRecord, join, laneCommandInputs, laneCommandShape, laneFence, leadEnv, lineageFromJournal, persistentDivergenceScenario, planCheckAcceptIo, planCheckFindings, planCheckFindingsFromText, planConvergence, planEnv, planRevisionRun, planRoundCap, planThenReviewIo, protectedPlanEnv, resolveTurnCeilings, resolveValidationLane, resumeGreen, resumeKeys, resumeRed, reviewConvergeRun, reviewEnv, s843Bullets, s843Ctx, s843Io, s843PlanEnv, suiteRefusalEnv, turnCeilingsRecord, validationPlan, validationProbeRun,
+  ADOPTED_PLAN_HEADING, ADOPT_BLOCK, CENSUS_ROW_ABSENT, CENSUS_TURNS_ABSENT, CENSUS_UNREADABLE, CTX, CTX_DIRECTED, CTX_TL, DIRECTED_FILES, ENVELOPE_REFUSAL_REASONS, FAILURE_UPGRADE, GATE_SUMMARY_PREFIX, GROWTH_DIVERGENCE_FACTOR, LANE_COMMAND_SHAPES, LANE_INPUT_VERDICTS, LANE_PATH_OPTIONS, LANE_VALUE_OPTIONS, LIMITS, NO_TURN_CEILING, PLAN_CHECK_ABSENT, PLAN_CHECK_INVALID, PLAN_CHECK_SEVERITIES, PLAN_CONVERGENCE_REASONS, RED, RUN_START_EVENT, S843_ADDED, S843_D2, S843_DISPATCHED, S843_NARROWED, TD, THREW, TURN_CEILING_REFUSALS, TURN_CEILING_ROLES, VALIDATION_LANE_UNLOADABLE, adoptionSignal, bothExhaustionPointsScenario, buildEnv, carriedPrLines, carriedPreambleLines, carriedResolution, carriedSilenceDefect, checkEnv, composeCommitMessage, divergeThenExhaustPlanScenario, divergenceConsultLines, divergentPlanScenario, driveTask, enforcementPreamble, fakeIo, growthLines, growthRecord, join, laneCommandInputs, laneCommandShape, laneFence, leadEnv, lineageFromJournal, persistentDivergenceScenario, planCheckAcceptIo, planCheckFindings, planCheckFindingsFromText, planConvergence, planEnv, planRevisionRun, planRoundCap, planThenReviewIo, protectedPlanEnv, resolveTurnCeilings, resolveValidationLane, resumeGreen, resumeKeys, resumeRed, reviewConvergeRun, reviewEnv, s843Bullets, s843Ctx, s843Io, s843PlanEnv, suiteRefusalEnv, turnCeilingsRecord, validationPlan, validationProbeOutput, validationProbeRun, laneProbeCommand,
 } from './drive-fixtures.mjs'
+import { CREATES_ABSENT } from './drive.mjs'
 
 test('a lead that answers escalate at the accept re-ask escalates with both reasons', () => {
   const io = planCheckAcceptIo(
@@ -1552,6 +1553,105 @@ test("a planner lane naming a fixture bounces the planner with the closed reason
   assert.equal(final.details.escalation.where, 'plan')
   assert.match(final.details.escalation.why, new RegExp(VALIDATION_LANE_UNLOADABLE))
   assert.match(final.details.escalation.why, /no revision left to bounce it to/)
+})
+
+test('#945 a declared-creates validation lane is accepted at plan time and refused by name when the build has not authored it', () => {
+  const created = 'test/factory-createslane.test.mjs'
+  const lane = `node --test crew/drive-plan.test.mjs ${created}`
+  const briefText = ['## Where', `declared · created · ${created}`, '## Done means'].join('\n')
+  const absentRuns = {
+    ...validationProbeRun(lane, { 'crew/drive-plan.test.mjs': 'file', [created]: 'absent' }),
+    [laneProbeCommand([created])]: { ok: true, output: validationProbeOutput({ [created]: 'absent' }) },
+  }
+  const absentIo = fakeIo({
+    files: { [CTX.briefFile]: briefText },
+    envelopes: {
+      'planner:1': validationPlan(lane), 'builder:1': buildEnv(), 'builder:2': buildEnv(),
+    },
+    runs: absentRuns,
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const absent = driveTask({ ...CTX, limits: { build_rounds: 2 } }, absentIo)
+  assert.equal(absentIo.calls.assign.filter(({ role }) => role === 'planner').length, 1)
+  assert.equal(absentIo.calls.assign.find(({ role }) => role === 'planner').note, 'plan')
+  const resolved = absentIo.calls.logs.find(({ event }) => event === 'validation-lane-resolved').validation_lane_resolved
+  assert.deepEqual(resolved.refused, [])
+  assert.deepEqual(resolved.deferred_inputs, [created])
+  assert.equal(resolved.missing, 1)
+  assert.equal(absentIo.calls.writes[`${TD}/build-bounce-r1.md`].includes(CREATES_ABSENT), true)
+  assert.equal(absentIo.calls.writes[`${TD}/build-bounce-r1.md`].includes(created), true)
+  assert.equal(absentIo.calls.assign.find(({ role, n }) => role === 'builder' && n === 2).note, CREATES_ABSENT)
+  assert.equal(absentIo.calls.run.some(({ cmd }) => cmd === lane), false)
+  assert.equal(absent.status, 'escalation')
+
+  const authoredIo = fakeIo({
+    files: { [CTX.briefFile]: briefText },
+    envelopes: {
+      'planner:1': validationPlan(lane), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: {
+      ...validationProbeRun(lane, { 'crew/drive-plan.test.mjs': 'file', [created]: 'absent' }),
+      [laneProbeCommand([created])]: { ok: true, output: validationProbeOutput({ [created]: 'file' }) },
+      [lane]: { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const authored = driveTask(CTX, authoredIo)
+  assert.equal(authored.status, 'done')
+  assert.ok(authoredIo.calls.run.some(({ cmd }) => cmd === lane))
+})
+
+test('#945 a plan that never lands names its last validation-lane bounce in the terminal reason', () => {
+  const refusedInput = 'test/undeclared-createslane.test.mjs'
+  const bad = `node --test crew/drive-plan.test.mjs ${refusedInput}`
+  const badRuns = validationProbeRun(bad, { 'crew/drive-plan.test.mjs': 'file', [refusedInput]: 'absent' })
+  const unrecoveredIo = fakeIo({
+    envelopes: {
+      'planner:1': validationPlan(bad),
+      'planner:2': planEnv({ status: 'insufficient', summary: 'still insufficient', artifacts: [], details: {} }),
+      'lead:1': leadEnv('bounce', 'try the plan again'),
+    },
+    runs: badRuns,
+  })
+  const unrecovered = driveTask(CTX, unrecoveredIo)
+  assert.equal(unrecovered.status, 'escalation')
+  assert.equal(unrecovered.details.escalation.where, 'plan')
+  assert.match(unrecovered.details.escalation.why, /no accepted plan within 2 rounds/)
+  assert.match(unrecovered.details.escalation.why, new RegExp(VALIDATION_LANE_UNLOADABLE))
+  assert.match(unrecovered.details.escalation.why, new RegExp(refusedInput.replaceAll('/', '\\/')))
+
+  const good = 'node --test crew/drive-plan.test.mjs'
+  const recoveredIo = fakeIo({
+    envelopes: {
+      'planner:1': validationPlan(bad), 'planner:2': validationPlan(good),
+      'tech-lead:1': checkEnv('revise'), 'lead:1': leadEnv('bounce'),
+      'planner:3': planEnv({ status: 'insufficient', summary: 'no plan', artifacts: [], details: {} }),
+      'lead:2': leadEnv('bounce'),
+    },
+    runs: {
+      ...badRuns,
+      ...validationProbeRun(good, { 'crew/drive-plan.test.mjs': 'file' }),
+    },
+  })
+  const recovered = driveTask(CTX_TL, recoveredIo)
+  assert.equal(recovered.status, 'escalation')
+  assert.equal(recovered.details.escalation.where, 'plan')
+  assert.equal(recovered.details.escalation.why, 'no accepted plan within 3 rounds')
+  assert.doesNotMatch(recovered.details.escalation.why, new RegExp(refusedInput.replaceAll('/', '\\/')))
+  assert.doesNotMatch(recovered.details.escalation.why, new RegExp(VALIDATION_LANE_UNLOADABLE))
+
+  const neverBouncedIo = fakeIo({
+    envelopes: {
+      'planner:1': planEnv({ status: 'insufficient', summary: 'no plan', artifacts: [], details: {} }),
+      'lead:1': leadEnv('bounce'),
+      'planner:2': planEnv({ status: 'insufficient', summary: 'still no plan', artifacts: [], details: {} }),
+      'lead:2': leadEnv('bounce'),
+    },
+  })
+  const neverBounced = driveTask(CTX, neverBouncedIo)
+  assert.equal(neverBounced.status, 'escalation')
+  assert.equal(neverBounced.details.escalation.where, 'plan')
+  assert.equal(neverBounced.details.escalation.why, 'no accepted plan within 2 rounds')
 })
 
 test('b376 A2 a returns json in the checkout is named a misdirected envelope', () => {

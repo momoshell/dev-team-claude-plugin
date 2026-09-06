@@ -1551,6 +1551,52 @@ export function questionUnfundedWhy({ round, cap, questions, reason } = {}) {
   return `${PLAN_QUESTION_UNFUNDED}: the planner asked ${questions} keyed question(s) on plan round ${round} of ${cap} and the ${PLAN_QUESTION_POINT} point's grant was unavailable, so bounce was not offered and no answers were solicited — ${reason || 'no reason given'}`
 }
 
+// #959 — a QUESTIONLESS non-done envelope on the last round the cap allows.
+// #930 funded the KEYED case and left this one: the loop offers a bounce it
+// cannot execute, the lead takes it, the `continue` falls out of the for-
+// condition at :3726, and the run reports `no accepted plan within N rounds` —
+// a reason that blames the plan for a round that was never spendable. An offer
+// that silently no-ops is worse than a refusal, so the offer is withdrawn and
+// the lead is told why, in the register questionRoundLines already uses.
+export const PLAN_BOUNCE_UNFUNDED_HEADING = '## No plan round remains — bounce is not offered'
+export function planBounceUnfundedLines({ round, cap } = {}) {
+  return [
+    '',
+    PLAN_BOUNCE_UNFUNDED_HEADING,
+    `This is plan round ${round} of ${cap}, the LAST one, and the planner asked no keyed question, so no extra round can be funded at the ${PLAN_QUESTION_POINT} point. A bounce here would write a brief no planner would ever read. Escalate, and say what a human must decide.`,
+  ]
+}
+
+// #959 — the EFFECTIVE plan-round cap, named beside the value the operator asked
+// for, and ONLY when the two differ. planRoundCap (:217) returns BASE +
+// extraPlanRounds, so the note describes the two separately: an adopted plan
+// whose predecessor check approved caps the BASE at one round, and every round a
+// lead granted at an exhaustion point (:3751) is added on top. Saying "the lane
+// is capped at one" when a grant has already moved the effective cap to 2 would
+// put a fresh contradiction in the reason this issue exists to make accurate.
+// Empty when effective and requested agree, so every undivergent lane's
+// exhaustion sentence stays byte-identical — crew/drive.test.mjs:1613 pins one.
+export function planCapNote({ effective, requested, adopted = false, predecessorChecked = null, extraPlanRounds = 0 } = {}) {
+  if (!Number.isFinite(effective) || !Number.isFinite(requested) || effective === requested) return ''
+  const base = adopted && predecessorChecked === true
+    ? 'an ADOPTED plan whose predecessor plan-check approved caps the BASE at one plan round'
+    : 'the base cap was the requested value'
+  const grants = Number.isFinite(extraPlanRounds) && extraPlanRounds > 0
+    ? `, plus ${extraPlanRounds} lead-granted ${extraPlanRounds === 1 ? 'round' : 'rounds'} at an exhaustion point`
+    : ''
+  return ` — the EFFECTIVE plan-round cap was ${effective}, not the ${requested} requested: ${base}${grants}`
+}
+
+// #959 — a plan round that ended in a REFUSED seat dispatch. b473-createslane's
+// planner ran `node --test` on a path outside its fence; #904's per-role policy
+// refused it and ENDED the dispatch, and the lane then reported `no accepted
+// plan within 1 rounds`. Nothing about the plan was at fault. The terminal
+// reason names what actually refused and keeps the stage's own reason behind it.
+export const PLAN_SEAT_REFUSED = 'plan-seat-refused'
+export function planRefusedWhy({ round, cap, refusal, reason } = {}) {
+  return `${PLAN_SEAT_REFUSED}: plan round ${round} of ${cap} ended in a REFUSED seat dispatch, not in a plan this driver rejected — ${refusal.reason}; the command was ${JSON.stringify(refusal.command)} and the gate-proof evidence is at ${refusal.gate_path}. The stage reason behind it: ${reason || 'no reason given'}`
+}
+
 // A bounce is an APPLY instruction, not a re-derive instruction. Measured over
 // 164 archived lanes: a revision turn runs 7-15 minutes and re-derivation is
 // where fresh defects enter — b37-percheck-proof's round-3 delimiter hole
@@ -1864,9 +1910,9 @@ export function createsFromBrief(text) {
   }
   return found.filter(Boolean)
 }
-export function planExhaustedWhy(rounds, bounceWhy) {
+export function planExhaustedWhy(rounds, bounceWhy, capNote = '') {
   const cause = bounceWhy ? ` — a plan round was bounced and never recovered: ${bounceWhy}` : ''
-  return `no accepted plan within ${rounds} rounds${cause}`
+  return `no accepted plan within ${rounds} rounds${cause}${capNote}`
 }
 export function parseDirectedBrief(text) {
   if (typeof text !== 'string' || !text.trim()) return { defect: 'the brief is empty or unreadable' }
@@ -3699,7 +3745,10 @@ function runTask(ctx, io, crash) {
   const adoption = adoptionSignal({ briefText, planCheckText: adoptedCheckText })
   const declaredCreates = createsFromBrief(briefText)
   let predecessorChecked = adoption.predecessor_checked
-  const planRounds = () => planRoundCap({ limits, adopted: adoption.adopted, predecessorChecked, extraPlanRounds })
+  // #959 — keep the long form: shorthand makes this call textually identical to
+  // planCapNote({ … }) from `predecessorChecked` onward, so a text-anchored mutation
+  // aimed at that call would rewrite this cap too. Do not collapse it to shorthand.
+  const planRounds = () => planRoundCap({ limits, adopted: adoption.adopted, predecessorChecked, extraPlanRounds: extraPlanRounds })
   io.log(recordRow({ at: io.now(), plan_round_cap: {
     adopted: adoption.adopted, predecessor_checked: predecessorChecked,
     reason: adoption.reason, cap: planRounds(),
@@ -3731,22 +3780,38 @@ function runTask(ctx, io, crash) {
       const asked = parseQuestions(env.details)
       const questions = asked?.questions ?? []
       if (asked) io.log(recordRow({ at: io.now(), member_questions: { role: 'planner', round, total: questions.length, ids: questions.map((q) => q.id), rejected: asked.rejected } }))
-      // #930 — a bounce this loop cannot execute must not be offered, and one it can
-      // must be FUNDED. `answeredFinal` is the only new trigger: keyed questions on the
-      // last round the cap allows. Read the cap ONCE, before the grant moves it.
       const questionCap = planRounds()
-      const answeredFinal = questions.length > 0 && round >= questionCap
+      const finalRound = round >= questionCap
+      const answeredFinal = questions.length > 0 && finalRound
+      // #959 — the case #930 did not cover: NO keyed questions on the last round
+      // the cap allows. Nothing funds an extra round here, so the bounce is a
+      // dead letter and the offer is withdrawn rather than silently no-opped.
+      const questionlessFinal = questions.length === 0 && finalRound
       const questionFundable = !answeredFinal || canGrant(PLAN_QUESTION_POINT)
-      const questionAsk = questionFundable ? `The planner returned status=${env.status} on round ${round}: ${env.summary || ''}. Bounce it with guidance, or escalate?` : `The planner returned status=${env.status} on round ${round}: ${env.summary || ''}. No bounce can be funded; escalate and name what a human must decide.`
+      const bounceOffered = questionFundable && !questionlessFinal
+      const questionAsk = bounceOffered
+        ? `The planner returned status=${env.status} on round ${round}: ${env.summary || ''}. Bounce it with guidance, or escalate?`
+        : `The planner returned status=${env.status} on round ${round}: ${env.summary || ''}. No bounce can be funded; escalate and name what a human must decide.`
       const c = consultLead(
         [questionAsk,
           ...(questionFundable ? questionConsultLines('planner', questions) : []),
+          ...(questionlessFinal ? planBounceUnfundedLines({ round, cap: questionCap }) : []),
           ...questionRoundLines({ round, cap: questionCap, questions: questions.length, final: answeredFinal, fundable: questionFundable })].join('\n'),
-        questionFundable ? ['bounce', 'escalate'] : ['escalate'], [planBrief, ...(env.artifacts || [])],
+        bounceOffered ? ['bounce', 'escalate'] : ['escalate'], [planBrief, ...(env.artifacts || [])],
       )
       if (c.decision === 'escalate') {
         stageComplete()
-        return escalate('plan', questionFundable ? c.reason : questionUnfundedWhy({ round, cap: questionCap, questions: questions.length, reason: c.reason }), env.artifacts || [])
+        // A REFUSED dispatch is the stronger fact and outranks the stage's own
+        // reason: #945's defect one level up is a terminal reason that blames
+        // the stage instead of naming what actually refused. suiteRefusalOf is
+        // the ONLY admission test — a refusal whose nested role names another
+        // seat is not this dispatch's (:258-268).
+        const refusal = suiteRefusalOf(env)
+        const capNote = planCapNote({ effective: questionCap, requested: limits.plan_rounds, adopted: adoption.adopted, predecessorChecked, extraPlanRounds })
+        const stageWhy = questionlessFinal
+          ? planExhaustedWhy(questionCap, planBounceWhy, capNote)
+          : questionFundable ? c.reason : questionUnfundedWhy({ round, cap: questionCap, questions: questions.length, reason: c.reason })
+        return escalate('plan', refusal ? planRefusedWhy({ round, cap: questionCap, refusal, reason: stageWhy }) : stageWhy, env.artifacts || [])
       }
       if (answeredFinal) { grant(PLAN_QUESTION_POINT, round); extraPlanRounds += 1 }
       const matched = matchAnswers(questions, c.answers)

@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import {
   ADOPTED_PLAN_HEADING, ADOPT_BLOCK, CENSUS_ROW_ABSENT, CENSUS_TURNS_ABSENT, CENSUS_UNREADABLE, CTX, CTX_DIRECTED, CTX_TL, DIRECTED_FILES, ENVELOPE_REFUSAL_REASONS, FAILURE_UPGRADE, GATE_SUMMARY_PREFIX, GROWTH_DIVERGENCE_FACTOR, LANE_COMMAND_SHAPES, LANE_INPUT_VERDICTS, LANE_PATH_OPTIONS, LANE_VALUE_OPTIONS, LIMITS, NO_TURN_CEILING, PLAN_CHECK_ABSENT, PLAN_CHECK_INVALID, PLAN_CHECK_SEVERITIES, PLAN_CONVERGENCE_REASONS, RED, RUN_START_EVENT, S843_ADDED, S843_D2, S843_DISPATCHED, S843_NARROWED, TD, THREW, TURN_CEILING_REFUSALS, TURN_CEILING_ROLES, VALIDATION_LANE_UNLOADABLE, adoptionSignal, bothExhaustionPointsScenario, buildEnv, carriedPrLines, carriedPreambleLines, carriedResolution, carriedSilenceDefect, checkEnv, composeCommitMessage, divergeThenExhaustPlanScenario, divergenceConsultLines, divergentPlanScenario, driveTask, enforcementPreamble, fakeIo, growthLines, growthRecord, join, laneCommandInputs, laneCommandShape, laneFence, leadEnv, lineageFromJournal, persistentDivergenceScenario, planCheckAcceptIo, planCheckFindings, planCheckFindingsFromText, planConvergence, planEnv, planRevisionRun, planRoundCap, planThenReviewIo, protectedPlanEnv, resolveTurnCeilings, resolveValidationLane, resumeGreen, resumeKeys, resumeRed, reviewConvergeRun, reviewEnv, s843Bullets, s843Ctx, s843Io, s843PlanEnv, suiteRefusalEnv, turnCeilingsRecord, validationPlan, validationProbeOutput, validationProbeRun, laneProbeCommand,
 } from './drive-fixtures.mjs'
-import { CREATES_ABSENT } from './drive.mjs'
+import { CREATES_ABSENT, PLAN_BOUNCE_UNFUNDED_HEADING, PLAN_SEAT_REFUSED, planBounceUnfundedLines, planCapNote, planExhaustedWhy, planRefusedWhy } from './drive.mjs'
 
 test('a lead that answers escalate at the accept re-ask escalates with both reasons', () => {
   const io = planCheckAcceptIo(
@@ -1636,7 +1636,7 @@ test('#945 a plan that never lands names its last validation-lane bounce in the 
   const recovered = driveTask(CTX_TL, recoveredIo)
   assert.equal(recovered.status, 'escalation')
   assert.equal(recovered.details.escalation.where, 'plan')
-  assert.equal(recovered.details.escalation.why, 'no accepted plan within 3 rounds')
+  assert.equal(recovered.details.escalation.why, 'no accepted plan within 3 rounds — the EFFECTIVE plan-round cap was 3, not the 2 requested: the base cap was the requested value, plus 1 lead-granted round at an exhaustion point')
   assert.doesNotMatch(recovered.details.escalation.why, new RegExp(refusedInput.replaceAll('/', '\\/')))
   assert.doesNotMatch(recovered.details.escalation.why, new RegExp(VALIDATION_LANE_UNLOADABLE))
 
@@ -1797,7 +1797,7 @@ test('RV1-1 adopted plan cap drives every live plan-round site', () => {
     files: inherited('VERDICT: approve\n'),
     envelopes: {
       'planner:1': planEnv({ status: 'insufficient', summary: 'retry the plan' }),
-      'lead:1': leadEnv('bounce'),
+      'lead:1': leadEnv('escalate'),
     },
   })
   const bouncedResult = driveTask(CTX_TL, bounced)
@@ -1806,6 +1806,7 @@ test('RV1-1 adopted plan cap drives every live plan-round site', () => {
   assert.match(bouncedResult.details.escalation.why, /no accepted plan within 1 rounds/)
   assert.equal(count(bounced, 'planner'), 1)
   assert.equal(bouncedResult.details.stages.includes('plan:r2'), false)
+  assert.doesNotMatch(bounced.calls.writes[`${TD}/decision-1.md`], /^- bounce$/m)
 })
 
 test('RV1-2 unmeasured turn census is rejected at every driver seam', () => {
@@ -2059,4 +2060,96 @@ test('b433 driver requires a correlated refusal and never records stale or parti
   const partialKinds = partialResult.details.enforcements.map((entry) => entry.kind)
   assert.equal(partialKinds.includes('suite-run-not-owned'), false)
   assert.equal(partialKinds.includes('turn-ceiling-unmeasured'), true)
+})
+
+test('b485 a questionless planner envelope on a capped plan round is not offered a bounce', () => {
+  const io = fakeIo({
+    files: { [CTX.briefFile]: ADOPT_BLOCK, [`${TD}/plan-check.md`]: 'VERDICT: approve\n' },
+    envelopes: {
+      'planner:1': { status: 'insufficient', role: 'planner', details: {} },
+      'lead:1': leadEnv('escalate'),
+    },
+  })
+  const result = driveTask(CTX_TL, io)
+  const decision = io.calls.writes[`${TD}/decision-1.md`]
+  assert.equal(result.status, 'escalation')
+  assert.match(decision, /^- escalate$/m)
+  assert.doesNotMatch(decision, /^- bounce$/m)
+  assert.ok(decision.includes(PLAN_BOUNCE_UNFUNDED_HEADING))
+  assert.equal(io.calls.writes[`${TD}/plan-bounce-r1.md`], undefined)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'planner').length, 1)
+  assert.equal(result.details.stages.includes('plan:r2'), false)
+  assert.equal(result.details.escalation.where, 'plan')
+  assert.match(result.details.escalation.why, /no accepted plan within 1 rounds/)
+  assert.match(result.details.escalation.why, /not the 2 requested/)
+})
+
+test('b485 a plan round ended by a refused seat dispatch names the refusal, not the stage', () => {
+  const run = (planner) => {
+    const io = fakeIo({
+      files: { [CTX.briefFile]: ADOPT_BLOCK, [`${TD}/plan-check.md`]: 'VERDICT: approve\n' },
+      envelopes: { 'planner:1': planner, 'lead:1': leadEnv('escalate') },
+    })
+    return { io, result: driveTask(CTX_TL, io) }
+  }
+
+  const positive = run(suiteRefusalEnv())
+  const why = positive.result.details.escalation.why
+  assert.equal(positive.result.status, 'escalation')
+  assert.equal(positive.result.details.escalation.where, 'plan')
+  assert.match(why, new RegExp(PLAN_SEAT_REFUSED))
+  assert.match(why, /npm test/)
+  assert.match(why, new RegExp(`${TD}/gate\\.mjs`))
+  assert.equal(positive.io.calls.assign.filter(({ role }) => role === 'planner').length, 1)
+
+  const uncorrelated = suiteRefusalEnv()
+  uncorrelated.details.suite_refusal.role = 'reviewer'
+  const negative = run(uncorrelated)
+  assert.equal(negative.result.details.escalation.where, 'plan')
+  assert.doesNotMatch(negative.result.details.escalation.why, new RegExp(PLAN_SEAT_REFUSED))
+  assert.equal(negative.io.calls.assign.filter(({ role }) => role === 'planner').length, 1)
+})
+
+test('b485 the plan-round cap note and the exhaustion sentence keep their closed contracts', () => {
+  assert.equal(planCapNote({ effective: 2, requested: 2 }), '')
+  assert.equal(planCapNote({ effective: Infinity, requested: 3 }), '')
+  assert.equal(planCapNote({ effective: 1, requested: Number.NaN }), '')
+
+  const adoptedBase = planCapNote({ effective: 1, requested: 3, adopted: true, predecessorChecked: true, extraPlanRounds: 0 })
+  assert.match(adoptedBase, /EFFECTIVE plan-round cap was 1/)
+  assert.match(adoptedBase, /not the 3 requested/)
+  assert.match(adoptedBase, /BASE at one plan round/)
+
+  const adoptedGrant = planCapNote({ effective: 2, requested: 3, adopted: true, predecessorChecked: true, extraPlanRounds: 1 })
+  assert.match(adoptedGrant, /BASE at one plan round/)
+  assert.match(adoptedGrant, /1 lead-granted round/)
+  assert.doesNotMatch(adoptedGrant, /caps the lane at one/)
+
+  const ordinaryGrant = planCapNote({ effective: 3, requested: 2, adopted: false, predecessorChecked: false, extraPlanRounds: 1 })
+  assert.match(ordinaryGrant, /1 lead-granted round/)
+  assert.doesNotMatch(ordinaryGrant, /ADOPTED plan/)
+
+  assert.equal(planExhaustedWhy(2, null), 'no accepted plan within 2 rounds')
+  assert.equal(planBounceUnfundedLines({ round: 1, cap: 1 })[1], PLAN_BOUNCE_UNFUNDED_HEADING)
+})
+
+test('b485 a lead-granted plan round is named in the cap note, not folded into a one-round claim', () => {
+  const io = fakeIo({
+    files: { [CTX.briefFile]: ADOPT_BLOCK, [`${TD}/plan-check.md`]: 'VERDICT: approve\n' },
+    envelopes: {
+      'planner:1': { status: 'insufficient', role: 'planner', assignment_id: 'planner1', summary: 'gaps', artifacts: [], details: { questions: [{ id: 'q1', question: 'first?' }] } },
+      'lead:1': leadEnv('bounce', 'steer', { answers: [{ id: 'q1', answer: 'X means A' }] }),
+      'planner:2': { status: 'insufficient', role: 'planner', assignment_id: 'planner2', summary: 'still stuck', artifacts: [], details: {} },
+      'lead:2': leadEnv('escalate'),
+    },
+  })
+  const result = driveTask({ ...CTX_TL, limits: { plan_rounds: 3 } }, io)
+  const why = result.details.escalation.why
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'planner').length, 2)
+  assert.deepEqual(result.details.extra_rounds_granted, [{ where: 'plan-question', round: 1 }])
+  assert.equal(result.details.escalation.where, 'plan')
+  assert.match(why, /no accepted plan within 2 rounds/)
+  assert.match(why, /not the 3 requested/)
+  assert.match(why, /1 lead-granted round/)
+  assert.doesNotMatch(why, /caps the lane at one/)
 })

@@ -47,6 +47,12 @@ import {
   TEST_REACH_DEPTH,
   TEST_REACH_ROW_LIMIT,
   TEST_REACH_WARNING_PREFIX,
+  TEST_REACH_OVERRIDE_KEY,
+  TEST_REACH_OVERRIDE_PREFIX,
+  TEST_REACH_REFUSAL_BLIND_SPOT,
+  TEST_REACH_REFUSAL_REMEDY,
+  reachRefusalRows,
+  surfaceExportsOf,
   checkArrival,
   checkDirectedBrief,
   externalCrewDir,
@@ -585,17 +591,59 @@ test('checkFences refuses an absent external lane by name', () => {
   assert.equal(error.message.includes('external-missing'), true)
 })
 
-function reachReport(checkout, fenceFiles = ['lib/widget.mjs'], surface = fenceFiles, deps = {}, outDir) {
+function fixtureTests(checkout) {
+  try { return fsReaddirSync(join(checkout, 'test')).filter((name) => name.endsWith('.test.mjs')).map((name) => `test/${name}`) } catch { return [] }
+}
+
+function reachReport(checkout, fenceFiles = ['lib/widget.mjs'], surface = fenceFiles, deps = {}, outDir, allow = fixtureTests(checkout)) {
   const logs = []
   const report = checkFences({
     fences: [entry('lane-a', fenceFiles)],
-    lanes: [{ lane: 'lane-a', where: surface }],
+    lanes: [{ lane: 'lane-a', where: surface, [TEST_REACH_OVERRIDE_KEY]: allow }],
     checkout,
     outDir,
     deps: { home: root, log: (line) => logs.push(String(line)), ...deps },
   })
   const warning = report.warnings.find((item) => item.kind === 'test-reach')
   return { report, logs, warning, rows: warning?.reach || [] }
+}
+
+function reachCheck({ checkout, fenceFiles, surface = fenceFiles, allow, outDir, extraFences = [], deps = {} }) {
+  const logs = []
+  try {
+    const report = checkFences({
+      fences: [entry('lane-a', fenceFiles), ...extraFences],
+      lanes: [{ lane: 'lane-a', where: surface, [TEST_REACH_OVERRIDE_KEY]: allow }],
+      checkout,
+      outDir,
+      deps: { home: root, log: (line) => logs.push(String(line)), ...deps },
+    })
+    return { report, logs, error: null }
+  } catch (error) {
+    return { report: null, logs, error }
+  }
+}
+
+function namedReachFixture(name, files = {}) {
+  return reachFixture(name, {
+    files: {
+      'crew/capabilities.mjs': 'export const CAPABILITY_REFUSALS = []\n',
+      'crew/adapters/adapter-pi.mjs': [
+        'export function grantsFor() { return {} }',
+        'export function loadCapabilities() { return {} }',
+        'export function assertGrantsBacked() { return true }',
+        '',
+      ].join('\n'),
+      'crew/crew.test.mjs': [
+        "import { grantsFor, loadCapabilities, assertGrantsBacked } from './adapters/adapter-pi.mjs'",
+        'grantsFor()',
+        'loadCapabilities()',
+        'assertGrantsBacked()',
+        '',
+      ].join('\n'),
+      ...files,
+    },
+  })
 }
 
 test('checkFences reports direct and two-hop test reach without refusing', () => {
@@ -608,8 +656,179 @@ test('checkFences reports direct and two-hop test reach without refusing', () =>
   assert.equal(TEST_REACH_DEPTH, 2)
   assert.equal(warning.text.includes('test/twohop.test.mjs'), true)
   assert.equal(warning.text.includes(TEST_REACH_BLIND_SPOT), true)
-  assert.equal(REFUSAL_REASONS.some((reason) => reason.includes('reach')), false)
+  assert.equal(REFUSAL_REASONS.includes('test-reach-unfenced'), true)
   assert.ok(report.perLane['lane-a'])
+})
+
+test('checkFences refuses a one-hop import naming the write surface and names the remedy', () => {
+  const checkout = namedReachFixture('refuse-one-hop')
+  const result = reachCheck({
+    checkout,
+    fenceFiles: ['crew/capabilities.mjs', 'crew/adapters/adapter-pi.mjs'],
+    surface: ['crew/adapters/adapter-pi.mjs'],
+  })
+  assert.ok(result.error instanceof BatchRefusal)
+  assert.equal(result.error.reason, 'test-reach-unfenced')
+  assert.equal(REFUSAL_REASONS.includes('test-reach-unfenced'), true)
+  for (const token of ['crew/crew.test.mjs', 'crew/adapters/adapter-pi.mjs', 'grantsFor', 'loadCapabilities', 'assertGrantsBacked']) {
+    assert.equal(result.error.message.includes(token), true, `refusal omitted ${token}`)
+  }
+  const corrected = ['crew/adapters/adapter-pi.mjs', 'crew/capabilities.mjs', 'crew/crew.test.mjs'].join(', ')
+  assert.equal(result.error.message.includes(corrected), true)
+  assert.equal(result.error.message.includes(TEST_REACH_REFUSAL_REMEDY), true)
+  assert.equal(result.error.message.includes(TEST_REACH_REFUSAL_BLIND_SPOT), true)
+})
+
+test('a trailing-slash directory write surface refuses the same reaching test', () => {
+  const checkout = namedReachFixture('refuse-directory')
+  const result = reachCheck({
+    checkout,
+    fenceFiles: ['crew/adapters/'],
+    surface: ['crew/adapters/'],
+  })
+  assert.ok(result.error instanceof BatchRefusal)
+  assert.equal(result.error.reason, 'test-reach-unfenced')
+  assert.equal(result.error.message.includes('crew/crew.test.mjs'), true)
+  assert.equal(result.error.message.includes('crew/adapters/adapter-pi.mjs'), true)
+  assert.equal(result.error.message.includes('grantsFor'), true)
+  assert.equal(result.error.message.includes('crew/adapters/, crew/crew.test.mjs'), true)
+})
+
+test('test reach still only warns for a symbol-only row, a two-hop row, and an import naming no exported symbol', () => {
+  const symbolCheckout = reachFixture('warn-symbol-only', {
+    files: { 'test/symbol-only.test.mjs': 'const named = "widgetShape"\nif (!named) throw new Error("x")\n' },
+  })
+  const symbolRun = reachCheck({ checkout: symbolCheckout, fenceFiles: ['lib/widget.mjs'], surface: ['lib/widget.mjs'], allow: ['test/direct.test.mjs'] })
+  assert.equal(symbolRun.error, null)
+  const symbolRow = symbolRun.report.warnings.find((row) => row.kind === 'test-reach').reach.find((row) => row.test === 'test/symbol-only.test.mjs')
+  assert.equal(reachRefusalRows({ rows: [symbolRow], surfaceExports: surfaceExportsOf({ surface: ['lib/widget.mjs'], reach: collectTestReach({ checkout: symbolCheckout }) }) }).length, 0)
+
+  const twoHopCheckout = reachFixture('warn-two-hop')
+  const twoHopRun = reachCheck({ checkout: twoHopCheckout, fenceFiles: ['lib/widget.mjs'], surface: ['lib/widget.mjs'], allow: ['test/direct.test.mjs'] })
+  assert.equal(twoHopRun.error, null)
+  const twoHopRow = twoHopRun.report.warnings.find((row) => row.kind === 'test-reach').reach.find((row) => row.test === 'test/twohop.test.mjs')
+  assert.equal(reachRefusalRows({ rows: [twoHopRow], surfaceExports: ['widgetShape'] }).length, 0)
+
+  const noOverlapCheckout = reachFixture('warn-no-overlap', {
+    files: { 'test/no-overlap.test.mjs': "import { notExportedHere } from '../lib/widget.mjs'\nnotExportedHere()\n" },
+  })
+  const noOverlapRun = reachCheck({ checkout: noOverlapCheckout, fenceFiles: ['lib/widget.mjs'], surface: ['lib/widget.mjs'], allow: ['test/direct.test.mjs'] })
+  assert.equal(noOverlapRun.error, null)
+  const noOverlapRow = noOverlapRun.report.warnings.find((row) => row.kind === 'test-reach').reach.find((row) => row.test === 'test/no-overlap.test.mjs')
+  assert.deepEqual(noOverlapRow.symbols, [])
+  assert.equal(reachRefusalRows({ rows: [noOverlapRow], surfaceExports: ['widgetShape'] }).length, 0)
+})
+
+test('reachRefusalRows intersects against the declared write surface, not any symbol', () => {
+  const row = { test: 'test/mixed.test.mjs', file: 'lib/widget.mjs', hops: 1, how: 'import', symbols: ['notExportedHere', 'widgetShape'] }
+  assert.deepEqual(reachRefusalRows({ rows: [row], surfaceExports: ['widgetShape'] }), [{
+    test: 'test/mixed.test.mjs', file: 'lib/widget.mjs', symbols: ['widgetShape'],
+  }])
+})
+
+test('a refused row is never first announced as not a refusal, and the rest still warn', () => {
+  const only = namedReachFixture('warn-suppressed')
+  const onlyRun = reachCheck({
+    checkout: only,
+    fenceFiles: ['crew/capabilities.mjs', 'crew/adapters/adapter-pi.mjs'],
+    surface: ['crew/adapters/adapter-pi.mjs'],
+  })
+  assert.equal(onlyRun.error?.reason, 'test-reach-unfenced')
+  assert.equal(onlyRun.logs.some((line) => line.startsWith(TEST_REACH_WARNING_PREFIX)), false)
+
+  const mixed = namedReachFixture('warn-mixed', {
+    'crew/reader.mjs': "import { grantsFor } from './adapters/adapter-pi.mjs'\nexport const readerValue = grantsFor()\n",
+    'test/twohop.test.mjs': "import { readerValue } from '../crew/reader.mjs'\n// pins grantsFor through readerValue\nif (!readerValue) throw new Error('x')\n",
+  })
+  const outDir = join(mixed, 'warnings')
+  const mixedRun = reachCheck({
+    checkout: mixed,
+    fenceFiles: ['crew/capabilities.mjs', 'crew/adapters/adapter-pi.mjs'],
+    surface: ['crew/adapters/adapter-pi.mjs'],
+    outDir,
+  })
+  assert.equal(mixedRun.error?.reason, 'test-reach-unfenced')
+  const warningText = mixedRun.logs.find((line) => line.startsWith(TEST_REACH_WARNING_PREFIX))
+  assert.ok(warningText)
+  assert.equal(warningText.includes('test/twohop.test.mjs'), true)
+  assert.equal(warningText.includes('crew/crew.test.mjs'), false)
+  const persisted = JSON.parse(readFileSync(join(outDir, FENCE_REPORT_FILE), 'utf8'))
+  assert.deepEqual(persisted.lanes[0].test_reach.map((row) => row.test).sort(), ['crew/crew.test.mjs', 'test/twohop.test.mjs'])
+})
+
+test('test-reach-unfenced precedes the register-superset refusal', () => {
+  const checkout = namedReachFixture('precedence')
+  const result = reachCheck({
+    checkout,
+    fenceFiles: ['crew/capabilities.mjs', 'crew/adapters/adapter-pi.mjs'],
+    surface: ['crew/adapters/adapter-pi.mjs'],
+    extraFences: [entry('lane-ghost', ['docs/ghost.md'])],
+  })
+  assert.ok(result.error instanceof BatchRefusal)
+  assert.equal(result.error.reason, 'test-reach-unfenced')
+})
+
+test('allow_test_reach admits a reaching test and the decision is logged and persisted', () => {
+  const checkout = namedReachFixture('override')
+  const refused = reachCheck({
+    checkout,
+    fenceFiles: ['crew/capabilities.mjs', 'crew/adapters/adapter-pi.mjs'],
+    surface: ['crew/adapters/adapter-pi.mjs'],
+  })
+  assert.equal(refused.error?.reason, 'test-reach-unfenced')
+  const outDir = join(checkout, 'warnings')
+  const admitted = reachCheck({
+    checkout,
+    fenceFiles: ['crew/capabilities.mjs', 'crew/adapters/adapter-pi.mjs'],
+    surface: ['crew/adapters/adapter-pi.mjs'],
+    allow: ['crew/crew.test.mjs'],
+    outDir,
+  })
+  assert.equal(admitted.error, null)
+  const line = admitted.logs.find((value) => value.startsWith(TEST_REACH_OVERRIDE_PREFIX))
+  assert.ok(line)
+  for (const token of ['crew/crew.test.mjs', 'crew/adapters/adapter-pi.mjs', 'grantsFor']) assert.equal(line.includes(token), true)
+  assert.ok(admitted.report.warnings.find((row) => row.kind === 'test-reach-override'))
+  const persisted = JSON.parse(readFileSync(join(outDir, FENCE_REPORT_FILE), 'utf8'))
+  assert.equal(persisted.lanes[0].test_reach_overrides.length, 1)
+  assert.equal(persisted.lanes[0].test_reach_overrides[0].test, 'crew/crew.test.mjs')
+})
+
+test('a batch with no reaching tests writes the fence report it wrote before', () => {
+  const checkout = gitFixture()
+  put(join(checkout, 'lib', 'widget.mjs'), 'export function widgetShape() { return 1 }\n')
+  put(join(checkout, 'test', 'unrelated.test.mjs'), "const other = 1\nif (!other) throw new Error('x')\n")
+  const outDir = join(checkout, 'warnings')
+  const result = reachCheck({ checkout, fenceFiles: ['lib/widget.mjs'], surface: ['lib/widget.mjs'], outDir })
+  assert.equal(result.error, null)
+  const expected = JSON.stringify({
+    schema_version: 1,
+    lanes: [{ lane: 'lane-a', test_reach: [], citation_carriers: [] }],
+  }, null, 2) + '\n'
+  assert.equal(readFileSync(join(outDir, FENCE_REPORT_FILE), 'utf8'), expected)
+  assert.equal(result.logs.some((line) => line.includes('test-reach')), false)
+})
+
+test('splitDispatchKeys refuses a malformed allow_test_reach', () => {
+  for (const allow of [null, 'test/direct.test.mjs', [''], [1]]) {
+    const batch = makeBatch(['lane-a'])
+    const path = join(batch, `lane-a${REQUEST_SUFFIX}`)
+    put(path, JSON.stringify(requestFor('lane-a', { [TEST_REACH_OVERRIDE_KEY]: allow })))
+    assert.throws(() => readBatch({ batchDir: batch }), (error) => error instanceof BatchRefusal
+      && error.reason === 'batch-unreadable'
+      && error.message.includes(path))
+  }
+})
+
+test('readBatch carries allow_test_reach onto the lane', () => {
+  const batch = makeBatch(['lane-a'])
+  put(join(batch, `lane-a${REQUEST_SUFFIX}`), JSON.stringify(requestFor('lane-a', {
+    [TEST_REACH_OVERRIDE_KEY]: ['./test/direct.test.mjs'],
+  })))
+  const [lane] = readBatch({ batchDir: batch })
+  assert.deepEqual(lane[TEST_REACH_OVERRIDE_KEY], ['test/direct.test.mjs'])
+  assert.equal(Object.hasOwn(lane.request, TEST_REACH_OVERRIDE_KEY), false)
+  assert.equal(DISPATCH_ONLY_REQUEST_KEYS.includes(TEST_REACH_OVERRIDE_KEY), true)
 })
 
 test('collectTestReach records no hop beyond TEST_REACH_DEPTH', () => {
@@ -1018,7 +1237,7 @@ test('dispatchBatch logs test reach during dry-run without changing the outcome'
   const checkout = reachFixture('dry-run')
   const batch = join(checkout, 'reach-batch')
   mkdirSync(batch)
-  put(join(batch, `lane-a${REQUEST_SUFFIX}`), JSON.stringify(request('measure reach warning', ['lib/widget.mjs'])))
+  put(join(batch, `lane-a${REQUEST_SUFFIX}`), JSON.stringify({ ...request('measure reach warning', ['lib/widget.mjs']), allow_test_reach: ['test/direct.test.mjs'] }))
   const logs = []
   const outDir = join(checkout, 'reach-out')
   const report = await dispatchBatch({
@@ -1070,7 +1289,7 @@ test('test reach enumerates only when fenced code exists and only once per batch
   const noCodeCalls = []
   const noCodeReport = checkFences({
     fences: [entry('lane-a', ['docs/notes.md'])],
-    lanes: [{ lane: 'lane-a', where: ['docs/notes.md'] }],
+    lanes: [{ lane: 'lane-a', where: ['docs/notes.md'], allow_test_reach: fixtureTests(noCode) }],
     checkout: noCode,
     deps: {
       home: root,
@@ -1086,7 +1305,7 @@ test('test reach enumerates only when fenced code exists and only once per batch
   checkFences({
     fences: [entry('lane-a', ['lib/widget.mjs']), entry('lane-b', ['lib/caller.mjs']), entry('lane-c', ['lib/outer.mjs'])],
     lanes: [
-      { lane: 'lane-a', where: ['lib/widget.mjs'] },
+      { lane: 'lane-a', where: ['lib/widget.mjs'], allow_test_reach: fixtureTests(checkout) },
       { lane: 'lane-b', where: [] },
       { lane: 'lane-c', where: [] },
     ],
@@ -1169,7 +1388,7 @@ test('checkFences records every carrier and cites its report from both warning k
   const outDir = join(checkout, 'warnings')
   const report = checkFences({
     fences: [entry('lane-a', ['lib/widget.mjs', 'skills/one/anchors.json'])],
-    lanes: [{ lane: 'lane-a', where: ['lib/widget.mjs', 'skills/one/anchors.json'] }],
+    lanes: [{ lane: 'lane-a', where: ['lib/widget.mjs', 'skills/one/anchors.json'], allow_test_reach: fixtureTests(checkout) }],
     checkout,
     outDir,
     deps: { home: root, log: () => {} },
@@ -4070,6 +4289,7 @@ test('a request seats compile without carrying seats into the compiler request',
   const seats = { planner: { agent: 'pi', model: 'openai-codex/gpt-5.6-sol', effort: 'high' } }
   assert.equal(DISPATCH_ONLY_REQUEST_KEYS.includes('seats'), true)
   assert.equal(DISPATCH_ONLY_REQUEST_KEYS.includes('adopt'), true)
+  assert.equal(DISPATCH_ONLY_REQUEST_KEYS.includes(TEST_REACH_OVERRIDE_KEY), true)
   const result = await dispatchFixture({
     label: 'seats-request',
     names: ['lane-a'],

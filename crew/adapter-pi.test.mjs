@@ -4,6 +4,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { accessSync, constants, readFileSync, realpathSync, statSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import { delimiter, dirname, join, basename } from 'node:path'
 import { seatCommand, capabilitiesFor, modelString, translateDeny, PI_BUILTIN_TOOLS, PI_PROVIDERS, PI_ADVISOR_EXTENSION, shellSingleQuote } from './adapters/adapter-pi.mjs'
 import { SEAT_DEFAULTS, ROLE_ORDER, assertFanoutCoherent } from './crew.mjs'
@@ -239,6 +240,32 @@ test('granted pi seats append deduped activators and checkout-pinned extension, 
   assert.doesNotMatch(command, /--no-skills/)
   assert.match(command, /PI_CODING_AGENT_DIR="\/checkout\/crew\/pi"/)
   assert.doesNotMatch(command, /--provider/)
+})
+
+test('pi extension operands survive every shell-active character through the shell parser', () => {
+  const shape = {
+    role: 'planner', model: 'sonnet', promptFile: '/tmp/prompt.md', tools: 'Read', deny: '',
+    taskDir: '/tmp', bootBrief: 'boot',
+  }
+  const cases = [
+    ['/tmp/crew-vendor/dollar$$/entry.ts'],
+    ['/tmp/crew-vendor/tick`pwd`/entry.ts'],
+    ['/tmp/crew-vendor/qu"ote/entry.ts'],
+    ['/tmp/crew-vendor/back\\\\slash/entry.ts'],
+    ['/tmp/crew-vendor/it\'s $$ `pwd`/qu"ote/back\\\\slash/entry.ts'],
+  ]
+  const shellWords = (command) => {
+    const output = execFileSync('/bin/sh', ['-c', `printf '%s\\n' ${command}`], { encoding: 'utf8', timeout: 20000 })
+    const words = output.split('\n')
+    words.pop()
+    return words
+  }
+  for (const extensions of cases) {
+    const command = seatCommand({ ...shape, grants: { tools: [], extensions, agents: [], skills: [], advisor: false } })
+    const words = shellWords(command)
+    const operands = words.filter((word, index) => index > 0 && words[index - 1] === '-e')
+    assert.deepEqual(operands, extensions)
+  }
 })
 
 test('a granted pi tool cannot widen the deny boundary', () => {

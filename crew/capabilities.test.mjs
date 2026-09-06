@@ -2,15 +2,16 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, writeFileSync, mkdtempSync, mkdirSync, rmSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { isAbsolute, join, dirname, resolve as resolvePath } from 'node:path'
 import {
   CAPABILITY_ADAPTERS, CAPABILITY_CLASSES, CAPABILITY_DELIVERY, CAPABILITY_PROBES,
   CAPABILITY_REFUSALS, EMPTY_GRANTS, REGISTER_ROOT, ACP_TRANSPORT_PROFILE, assertGrantsBacked,
   declaredCapabilities, effectiveCapabilities, grantsFor, loadCapabilities, probeCapability,
-  refuse, validateCapabilities,
+  refuse, validateCapabilities, vendorRoots,
 } from './capabilities.mjs'
-import { seatCommand, capabilitiesFor } from './adapters/adapter-claude.mjs'
-import { capabilitiesFor as piCapabilitiesFor, PI_SUBAGENT_TOOL } from './adapters/adapter-pi.mjs'
+import { seatCommand as claudeSeatCommand, capabilitiesFor } from './adapters/adapter-claude.mjs'
+import { seatCommand as piSeatCommand, capabilitiesFor as piCapabilitiesFor, PI_SUBAGENT_TOOL, PI_BUILTIN_TOOLS } from './adapters/adapter-pi.mjs'
+import { scratchDir } from '../test/helpers.mjs'
 
 function capabilityRegister(overrides = {}) {
   const grant = (extra = {}) => ({ tools: [], extensions: [], agents: [], skills: [], advisor: false, requires: [], ...extra })
@@ -33,6 +34,43 @@ function capabilityFixtureRoot() {
   writeFileSync(join(root, 'crew', 'pi', 'skills', 'scout.md'), '# skill\n')
   writeFileSync(join(root, 'crew', 'pi', 'explore.json'), JSON.stringify({ name: 'Explore', prompt: 'scout' }))
   return root
+}
+
+function vendorFixtureRoot({
+  entries = ['./lib/other.ts', './lib/second.ts'],
+  missing = [],
+  packageName = '@crew-fixture/pi-thing',
+} = {}) {
+  const scratch = scratchDir('crew-vendor-')
+  const packageDir = join(scratch, 'node_modules', ...packageName.split('/'))
+  mkdirSync(join(packageDir, 'lib'), { recursive: true })
+  mkdirSync(join(packageDir, 'src'), { recursive: true })
+  writeFileSync(join(packageDir, 'package.json'), JSON.stringify({
+    name: packageName, version: '0.0.0', type: 'module', pi: { extensions: entries },
+  }, null, 2))
+  for (const relative of entries) {
+    if (missing.includes(relative)) continue
+    const entry = join(packageDir, relative)
+    mkdirSync(dirname(entry), { recursive: true })
+    writeFileSync(entry, `// fixture entry ${relative}\n`)
+  }
+  writeFileSync(join(packageDir, 'src', 'index.ts'), '// decoy entry\n')
+  return {
+    scratch,
+    root: join(scratch, 'node_modules'),
+    packageDir,
+    entries: entries.map((relative) => join(packageDir, relative)),
+    decoy: join(packageDir, 'src', 'index.ts'),
+  }
+}
+
+function vendorRegister({ role = 'planner', overlay = false, packageName = '@crew-fixture/pi-thing', tools = ['ffgrep', 'fffind'] } = {}) {
+  const base = capabilityRegister()
+  const grant = { package: packageName, tools: [...tools] }
+  const roleGrant = { ...base.roles[role] }
+  if (overlay) roleGrant.by_agent = { pi: { vendor_extensions: [grant] } }
+  else roleGrant.vendor_extensions = [grant]
+  return capabilityRegister({ roles: { [role]: roleGrant } })
 }
 
 test('a grant not present in the register refuses to reach an adapter', () => {
@@ -70,7 +108,7 @@ test('an adapter without an overlay gets exactly the role-level grant', () => {
   assert.deepEqual(claude, roleLevel)
   assert.deepEqual(claude.extensions, [])
   assert.deepEqual(claude.agents, [])
-  assert.deepEqual(Object.keys(claude), ['tools', 'extensions', 'agents', 'skills', 'advisor', 'requires'])
+  assert.deepEqual(Object.keys(claude), ['tools', 'extensions', 'vendor_extensions', 'agents', 'skills', 'advisor', 'requires'])
 })
 
 test('adapter-scoped grants are backed only when the adapter is named', () => {
@@ -181,15 +219,230 @@ test('grantsFor fails closed for missing paths and invalid definitions, and reso
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
+test('a vendor grant resolves every package-declared entry and reaches the pi command', () => {
+  const fixture = vendorFixtureRoot()
+  try {
+    const register = vendorRegister()
+    const grants = grantsFor(loadCapabilities({ register }), 'planner', {
+      root: fixture.scratch, vendorRoots: [fixture.root],
+    })
+    assert.deepEqual(grants.vendor_extensions[0].entries, fixture.entries)
+    assert.deepEqual(grants.extensions, fixture.entries)
+    assert.equal(grants.extensions.includes(fixture.decoy), false)
+    assert.deepEqual(grants.tools, ['ffgrep', 'fffind'])
+
+    const command = piSeatCommand({
+      role: 'planner', model: 'sonnet', promptFile: '/tmp/role.md', tools: 'Read', deny: '',
+      taskDir: '/tmp', bootBrief: 'boot', grants,
+    })
+    const activator = command.match(/--tools "([^"]*)"/)?.[1]
+    assert.ok(activator?.split(',').includes('ffgrep'))
+    assert.ok(activator?.split(',').includes('fffind'))
+    for (const builtin of PI_BUILTIN_TOOLS) assert.ok(activator?.split(',').includes(builtin))
+    assert.equal(command.includes(fixture.decoy), false)
+    assert.match(command, /--no-extensions/)
+    const first = command.indexOf(`-e "${fixture.entries[0]}"`)
+    const second = command.indexOf(`-e "${fixture.entries[1]}"`)
+    assert.ok(first >= 0)
+    assert.ok(second > first)
+  } finally { rmSync(fixture.scratch, { recursive: true, force: true }) }
+})
+
+test('an uninstalled vendor package refuses by its own reason', () => {
+  const scratch = scratchDir('crew-vendor-missing-')
+  try {
+    const register = vendorRegister({ packageName: '@crew-fixture/never-installed' })
+    const loaded = loadCapabilities({ register })
+    assert.throws(
+      () => grantsFor(loaded, 'planner', { root: scratch, vendorRoots: [join(scratch, 'node_modules')] }),
+      (err) => err.reason === 'vendor-extension-missing' && err.reason !== 'extension-missing',
+    )
+  } finally { rmSync(scratch, { recursive: true, force: true }) }
+})
+
+test('vendor grants require at least one tool name at load', () => {
+  const complete = vendorRegister({ tools: ['ffgrep'] })
+  assert.doesNotThrow(() => loadCapabilities({ register: complete }))
+  const empty = vendorRegister({ tools: [] })
+  assert.throws(() => loadCapabilities({ register: empty }), (err) => err.reason === 'register-invalid')
+})
+
+test('validateCapabilities enforces minItems directly', () => {
+  const schema = { type: 'array', minItems: 1, items: { type: 'string' } }
+  assert.ok(validateCapabilities(schema, []).length > 0)
+  assert.deepEqual(validateCapabilities(schema, ['tool']), [])
+})
+
+test('RV1-1 vendor TOOL barrier rejects a forged bundle tool', () => {
+  const fixture = vendorFixtureRoot()
+  try {
+    const register = vendorRegister({ role: 'builder', tools: ['ffgrep', 'fffind'] })
+    const loaded = loadCapabilities({ register })
+    const backing = { vendorRoots: [fixture.root] }
+    const honest = grantsFor(loaded, 'builder', { root: fixture.scratch, vendorRoots: [fixture.root] })
+    assert.doesNotThrow(() => assertGrantsBacked('builder', honest, loaded, backing))
+
+    // Skip-sets built from the register's own re-resolution — never the
+    // caller's bundle — make each of these four barriers independently true.
+    assert.throws(() => assertGrantsBacked('builder', {
+      tools: ['ffgrep'], extensions: fixture.entries, agents: [], skills: [], advisor: false, requires: [],
+      vendor_extensions: [{ package: '@crew-fixture/not-declared', tools: ['ffgrep'], entries: fixture.entries }],
+    }, loaded, backing), (err) => err.reason === 'unknown-grant')
+
+    assert.throws(() => assertGrantsBacked('builder', {
+      tools: ['forged-tool'], extensions: fixture.entries, agents: [], skills: [], advisor: false, requires: [],
+      vendor_extensions: [{ package: '@crew-fixture/pi-thing', tools: [], entries: fixture.entries }],
+    }, loaded, backing), (err) => err.reason === 'unknown-grant' && /forged-tool/.test(err.message))
+
+    // The vendor TOOL barrier on its own: a forged bundle naming a DECLARED
+    // package cannot launder an undeclared tool name into the skip-set,
+    // because vendorTools is seeded from the register's own re-resolution
+    // and only after each supplied name is checked against it.
+    assert.throws(() => assertGrantsBacked('builder', {
+      tools: ['forged-tool'], extensions: fixture.entries, agents: [], skills: [], advisor: false, requires: [],
+      vendor_extensions: [{ package: '@crew-fixture/pi-thing', tools: ['forged-tool'], entries: fixture.entries }],
+    }, loaded, backing), (err) => err.reason === 'unknown-grant' && /unregistered vendor tool grant/.test(err.message))
+
+    const laundered = join(fixture.scratch, 'arbitrary', 'evil.ts')
+    mkdirSync(dirname(laundered), { recursive: true })
+    writeFileSync(laundered, '// exists but is not declared by the package\n')
+    assert.throws(() => assertGrantsBacked('builder', {
+      tools: ['ffgrep'], extensions: fixture.entries, agents: [], skills: [], advisor: false, requires: [],
+      vendor_extensions: [{ package: '@crew-fixture/pi-thing', tools: ['ffgrep'], entries: [...fixture.entries, laundered] }],
+    }, loaded, backing), (err) => err.reason === 'unknown-grant' && err.message.includes(laundered))
+
+    assert.throws(() => assertGrantsBacked('builder', {
+      tools: ['ffgrep'], extensions: [...fixture.entries, laundered], agents: [], skills: [], advisor: false, requires: [],
+      vendor_extensions: [{ package: '@crew-fixture/pi-thing', tools: ['ffgrep'], entries: fixture.entries }],
+    }, loaded, backing), (err) => err.reason === 'unknown-grant' && err.message.includes(laundered))
+  } finally { rmSync(fixture.scratch, { recursive: true, force: true }) }
+})
+
+test('a partial vendor package refuses the missing declared entry', () => {
+  const fixture = vendorFixtureRoot({ missing: ['./lib/second.ts'] })
+  try {
+    const register = vendorRegister()
+    assert.throws(
+      () => grantsFor(loadCapabilities({ register }), 'planner', { root: fixture.scratch, vendorRoots: [fixture.root] }),
+      (err) => err.reason === 'vendor-extension-missing' && err.message.includes(fixture.entries[1]),
+    )
+  } finally { rmSync(fixture.scratch, { recursive: true, force: true }) }
+})
+
+test('vendorRoots uses the explicit, configured, then default precedence arms', () => {
+  const explicit = vendorRoots({
+    env: { CREW_PI_VENDOR_ROOT: 'relative-vendor-root', PI_CODING_AGENT_DIR: '/configured/pi' },
+    home: '/home/operator',
+  })
+  assert.equal(explicit[0], resolvePath('relative-vendor-root'))
+  assert.equal(isAbsolute(explicit[0]), true)
+
+  const configured = vendorRoots({ env: { PI_CODING_AGENT_DIR: '/configured/pi' }, home: '/home/operator' })
+  assert.deepEqual(configured, ['/configured/pi/npm/node_modules'])
+  assert.equal(isAbsolute(configured[0]), true)
+
+  const fallback = vendorRoots({ env: {}, home: '/home/operator' })
+  assert.deepEqual(fallback, ['/home/operator/.pi/agent/npm/node_modules'])
+  assert.equal(isAbsolute(fallback[0]), true)
+})
+
+test('loadCapabilities refuses duplicate vendor packages at each declaration boundary', () => {
+  const base = capabilityRegister()
+  const duplicate = { package: '@crew-fixture/pi-thing', tools: ['ffgrep'] }
+  const bad = capabilityRegister({ roles: {
+    builder: { ...base.roles.builder, vendor_extensions: [duplicate, { ...duplicate, tools: ['fffind'] }] },
+  } })
+  assert.throws(
+    () => loadCapabilities({ register: bad }),
+    (err) => err.reason === 'register-invalid' && /@crew-fixture\/pi-thing/.test(err.message) && /roles\.builder/.test(err.message),
+  )
+  const good = capabilityRegister({ roles: {
+    builder: { ...base.roles.builder, vendor_extensions: [duplicate] },
+  } })
+  assert.doesNotThrow(() => loadCapabilities({ register: good }))
+})
+
+test('overlay vendor packages override once, while duplicate overlays refuse and unknown adapters do nothing', () => {
+  const base = capabilityRegister()
+  const duplicate = { package: '@crew-fixture/pi-thing', tools: ['ffgrep'] }
+  const duplicateOverlay = capabilityRegister({ roles: {
+    planner: { ...base.roles.planner, by_agent: { pi: { vendor_extensions: [duplicate, duplicate] } } },
+  } })
+  assert.throws(
+    () => loadCapabilities({ register: duplicateOverlay }),
+    (err) => err.reason === 'register-invalid' && /roles\.planner\.by_agent\.pi/.test(err.message),
+  )
+
+  const fixture = vendorFixtureRoot()
+  try {
+    const register = capabilityRegister({ roles: {
+      planner: {
+        ...base.roles.planner,
+        vendor_extensions: [{ package: '@crew-fixture/pi-thing', tools: ['base-tool'] }],
+        by_agent: {
+          pi: { vendor_extensions: [{ package: '@crew-fixture/pi-thing', tools: ['overlay-tool'] }] },
+          zz: { vendor_extensions: [{ package: '@crew-fixture/pi-thing', tools: ['unknown-tool'] }] },
+        },
+      },
+    } })
+    const loaded = loadCapabilities({ register })
+    const pi = grantsFor(loaded, 'planner', { root: fixture.scratch, vendorRoots: [fixture.root], agent: 'pi' })
+    assert.deepEqual(pi.vendor_extensions.map((grant) => grant.tools), [['overlay-tool']])
+    assert.deepEqual(pi.tools, ['overlay-tool'])
+    const claude = grantsFor(loaded, 'planner', { root: fixture.scratch, vendorRoots: [fixture.root], agent: 'claude' })
+    assert.deepEqual(claude.vendor_extensions.map((grant) => grant.tools), [['base-tool']])
+    assert.deepEqual(claude.tools, ['base-tool'])
+  } finally { rmSync(fixture.scratch, { recursive: true, force: true }) }
+})
+
+test('vendor extension entries preserve trailing whitespace and reject blank declarations', () => {
+  const spaced = vendorFixtureRoot({ entries: ['./lib/spaced.ts '] })
+  try {
+    const register = vendorRegister()
+    const grants = grantsFor(loadCapabilities({ register }), 'planner', {
+      root: spaced.scratch, vendorRoots: [spaced.root],
+    })
+    assert.equal(grants.extensions[0].endsWith('spaced.ts '), true)
+  } finally { rmSync(spaced.scratch, { recursive: true, force: true }) }
+
+  const blank = vendorFixtureRoot({ entries: ['   '], missing: ['   '] })
+  try {
+    assert.throws(
+      () => grantsFor(loadCapabilities({ register: vendorRegister() }), 'planner', {
+        root: blank.scratch, vendorRoots: [blank.root],
+      }),
+      (err) => err.reason === 'vendor-extension-missing',
+    )
+  } finally { rmSync(blank.scratch, { recursive: true, force: true }) }
+})
+
+test('claude refuses a vendor grant while pi composes the same resolved grant', () => {
+  const fixture = vendorFixtureRoot()
+  try {
+    const grants = grantsFor(loadCapabilities({ register: vendorRegister({ role: 'builder' }) }), 'builder', {
+      root: fixture.scratch, vendorRoots: [fixture.root],
+    })
+    const shape = {
+      role: 'builder', model: 'sonnet', promptFile: '/tmp/role.md', tools: 'Read', deny: '',
+      taskDir: '/tmp', bootBrief: 'boot', grants,
+    }
+    assert.throws(
+      () => claudeSeatCommand(shape),
+      (err) => err.reason === 'grant-unsupported',
+    )
+    assert.doesNotThrow(() => piSeatCommand(shape))
+  } finally { rmSync(fixture.scratch, { recursive: true, force: true }) }
+})
+
 test('capability refusal reasons are closed and EMPTY_GRANTS is frozen', () => {
   assert.equal(Object.isFrozen(CAPABILITY_REFUSALS), true)
-  assert.deepEqual([...CAPABILITY_REFUSALS], ['register-invalid', 'capability-shortfall', 'unknown-grant', 'grant-unsupported', 'extension-missing', 'unknown-skill', 'agent-def-invalid', 'local-settings-missing', 'local-endpoint-dead', 'grant-contradicts-deny'])
+  assert.deepEqual([...CAPABILITY_REFUSALS], ['register-invalid', 'capability-shortfall', 'unknown-grant', 'grant-unsupported', 'extension-missing', 'unknown-skill', 'agent-def-invalid', 'local-settings-missing', 'local-endpoint-dead', 'grant-contradicts-deny', 'vendor-extension-missing'])
   assert.throws(() => refuse('not-a-capability-reason', 'bad'))
   assert.throws(
-    () => seatCommand({ role: 'builder', model: 'sonnet', promptFile: '/tmp/role.md', tools: 'Read', deny: 'Task,Agent', taskDir: '/tmp', bootBrief: 'boot', grants: { tools: [], extensions: ['/tmp/ext.js'], skills: [], agents: [], advisor: false } }),
+    () => claudeSeatCommand({ role: 'builder', model: 'sonnet', promptFile: '/tmp/role.md', tools: 'Read', deny: 'Task,Agent', taskDir: '/tmp', bootBrief: 'boot', grants: { tools: [], extensions: ['/tmp/ext.js'], skills: [], agents: [], advisor: false } }),
     (err) => err.reason === 'grant-unsupported' && /grant-unsupported/.test(err.message),
   )
-  assert.deepEqual(EMPTY_GRANTS, { tools: [], extensions: [], agents: [], skills: [], advisor: false, requires: [] })
+  assert.deepEqual(EMPTY_GRANTS, { tools: [], extensions: [], vendor_extensions: [], agents: [], skills: [], advisor: false, requires: [] })
   assert.equal(Object.isFrozen(EMPTY_GRANTS), true)
 })
 
@@ -246,7 +499,7 @@ test('every declared capability is classified with a recorded reason', async () 
 
   const shipped = loadCapabilities()
   const declared = declaredCapabilities(shipped)
-  assert.deepEqual(declared, ['advisor', 'agents', 'extensions', 'skills', 'subagents@claude', 'subagents@pi'])
+  assert.deepEqual(declared, ['advisor', 'agents', 'extensions', 'skills', 'subagents@claude', 'subagents@pi', 'vendor_extensions'])
   assert.deepEqual(Object.keys(CAPABILITY_PROBES).sort(), declared)
 
   const injected = JSON.parse(readFileSync(new URL('./capabilities.json', import.meta.url), 'utf8'))

@@ -2,6 +2,7 @@
 
 import { existsSync, readFileSync } from 'node:fs'
 import { join, dirname, resolve as resolvePath } from 'node:path'
+import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -9,7 +10,7 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 export const CAPABILITY_REFUSALS = Object.freeze([
   'register-invalid', 'capability-shortfall', 'unknown-grant', 'grant-unsupported',
   'extension-missing', 'unknown-skill', 'agent-def-invalid', 'local-settings-missing',
-  'local-endpoint-dead', 'grant-contradicts-deny',
+  'local-endpoint-dead', 'grant-contradicts-deny', 'vendor-extension-missing',
 ])
 const CAPABILITIES_PATH = join(HERE, 'capabilities.json')
 const CAPABILITIES_SCHEMA_PATH = join(HERE, 'capabilities.schema.json')
@@ -85,6 +86,9 @@ export function validateCapabilities(schema, value) {
       try { valid = new RegExp(s.pattern).test(current) } catch { valid = false }
       if (!valid) errors.push(`${path}: ${JSON.stringify(current)} does not match pattern ${s.pattern}`)
     }
+    if (Array.isArray(current) && Number.isInteger(s.minItems) && current.length < s.minItems) {
+      errors.push(`${path}: expected at least ${s.minItems} item(s), got ${current.length}`)
+    }
     if (Array.isArray(current) && s.items) {
       current.forEach((item, index) => walk(s.items, item, `${path}[${index}]`))
     }
@@ -143,6 +147,21 @@ export function loadCapabilities({ path = CAPABILITIES_PATH, schemaPath = CAPABI
   if (errors.length) {
     throw refuse('register-invalid', `runtime capability register ${path} failed schema validation under the runtime-policy rule: ${errors.slice(0, 3).join('; ')}`)
   }
+  const duplicate = (list, where) => {
+    const seen = new Set()
+    for (const grant of list || []) {
+      if (seen.has(grant?.package)) {
+        throw refuse('register-invalid', `runtime capability register ${path} declares vendor extension package ${JSON.stringify(grant.package)} twice under ${where} — a duplicate package makes the grant ambiguous under the runtime-policy rule`)
+      }
+      seen.add(grant?.package)
+    }
+  }
+  for (const [role, spec] of Object.entries(value?.roles || {})) {
+    duplicate(spec?.vendor_extensions, `roles.${role}`)
+    for (const [agent, overlay] of Object.entries(spec?.by_agent || {})) {
+      duplicate(overlay?.vendor_extensions, `roles.${role}.by_agent.${agent}`)
+    }
+  }
   return deepFreeze(value)
 }
 
@@ -156,6 +175,57 @@ export function pathExists(exists, path) {
 
 export function pathMessage(reason, seat, kind, expected, found, path) {
   return refuse(reason, `seat ${seat} ${kind} expected ${expected}, found ${found}, at ${path}`)
+}
+
+// A vendor extension lives in HOST state, so the register names the PACKAGE
+// and where the host keeps it is resolved here — never written into a register
+// that ships to other checkouts. An explicit CREW_PI_VENDOR_ROOT wins because
+// it is the root an operator selected on purpose; PI_CODING_AGENT_DIR covers a
+// configured pi install, and the final arm is pi's default root. Each arm is
+// normalized so a relative override cannot depend on the driver's cwd.
+// grantsFor runs in the DRIVER: PI_CODING_AGENT_DIR here is the driver's
+// environment, not the value seatCommand later composes.
+export const VENDOR_ROOT_ENV = 'CREW_PI_VENDOR_ROOT'
+export const PI_AGENT_DIR_ENV = 'PI_CODING_AGENT_DIR'
+
+export function vendorRoots({ env = process.env, home = homedir() } = {}) {
+  const named = (value) => typeof value === 'string' && value.trim() !== ''
+  const override = env?.[VENDOR_ROOT_ENV]
+  if (named(override)) return [resolvePath(override.trim())]
+  const agentDir = env?.[PI_AGENT_DIR_ENV]
+  if (named(agentDir)) return [resolvePath(join(agentDir.trim(), 'npm', 'node_modules'))]
+  return [resolvePath(join(home, '.pi', 'agent', 'npm', 'node_modules'))]
+}
+
+export function resolveVendorExtension(grant, { roots = vendorRoots(), exists = existsSync, readFile = readFileSync, role = 'unknown' } = {}) {
+  const dir = roots.map((root) => join(root, ...String(grant.package).split('/'))).find((one) => pathExists(exists, join(one, 'package.json')))
+  if (!dir) throw pathMessage('vendor-extension-missing', role, `vendor extension grant ${grant.package}`, 'an installed package declaring its own pi extension entry', 'not installed', roots.join(', '))
+  const manifestPath = join(dir, 'package.json')
+  let manifest
+  try { manifest = JSON.parse(String(readFile(manifestPath, 'utf8'))) } catch (err) {
+    throw pathMessage('vendor-extension-missing', role, `vendor extension grant ${grant.package}`, 'a readable package manifest', `unreadable (${err.message})`, manifestPath)
+  }
+  const declared = manifest?.pi?.extensions
+  if (!Array.isArray(declared) || declared.length === 0) throw pathMessage('vendor-extension-missing', role, `vendor extension grant ${grant.package}`, 'a non-empty pi.extensions array in the package manifest', JSON.stringify(manifest?.pi?.extensions), manifestPath)
+  // Every entry, not the first: pi's loader iterates the whole pi.extensions
+  // array, and resolving only a prefix would boot a silently weaker bundle.
+  // Fail closed on a partial bundle: pi skips missing entries, but a grant
+  // that half-resolves delivers a bundle nobody authorised.
+  // Blankness is trimmed; resolution is not: pi admits an existing untrimmed
+  // entry, so only whitespace declares nothing and the path is joined verbatim.
+  const entries = declared.map((relative) => {
+    if (typeof relative !== 'string' || relative.trim() === '') throw pathMessage('vendor-extension-missing', role, `vendor extension grant ${grant.package}`, 'every declared pi.extensions entry to be a non-blank path', JSON.stringify(relative), manifestPath)
+    const entry = resolvePath(join(dir, relative))
+    if (!pathExists(exists, entry)) throw pathMessage('vendor-extension-missing', role, `vendor extension grant ${grant.package}`, 'every declared pi extension entry to exist', 'missing', entry)
+    return entry
+  })
+  return Object.freeze({ package: grant.package, tools: Object.freeze([...grant.tools]), entries: Object.freeze(entries) })
+}
+
+function mergeVendor(base, overlay) {
+  const out = new Map(base.map((grant) => [grant.package, grant]))
+  for (const grant of overlay) out.set(grant.package, grant)
+  return [...out.values()]
 }
 
 function mergeAgents(base, overlay) {
@@ -181,10 +251,11 @@ function agentSpec(register, role, agent) {
     extensions: [...new Set([...spec.extensions, ...(overlay.extensions || [])])],
     skills: [...new Set([...spec.skills, ...(overlay.skills || [])])],
     agents: mergeAgents(spec.agents, overlay.agents || []),
+    vendor_extensions: mergeVendor(spec.vendor_extensions || [], overlay.vendor_extensions || []),
   }
 }
 
-export function grantsFor(register, role, { root = REGISTER_ROOT, exists = existsSync, readFile = readFileSync, agent = null } = {}) {
+export function grantsFor(register, role, { root = REGISTER_ROOT, exists = existsSync, readFile = readFileSync, agent = null, vendorRoots: roots = vendorRoots() } = {}) {
   const spec = agentSpec(register, role, agent)
   if (!spec) throw refuse('register-invalid', `runtime capability register has no grant for unknown role ${JSON.stringify(role)} under the runtime-policy rule`)
 
@@ -224,8 +295,16 @@ export function grantsFor(register, role, { root = REGISTER_ROOT, exists = exist
     return { name: grant.name, def: path }
   })
 
+  // Vendor grants fold into the same tools/extensions keys consumed by both
+  // pi transports; adapter-claude sees extensions and refuses grant-unsupported
+  // instead of silently booting a weaker seat.
+  const vendor = (spec.vendor_extensions || []).map((grant) => resolveVendorExtension(grant, { roots, exists, readFile, role }))
+
   return deepFreeze({
-    tools: [...spec.tools], extensions, agents, skills,
+    tools: [...spec.tools, ...vendor.flatMap((one) => one.tools)],
+    extensions: [...extensions, ...vendor.flatMap((one) => one.entries)],
+    vendor_extensions: vendor,
+    agents, skills,
     advisor: spec.advisor, requires: [...spec.requires],
   })
 }
@@ -236,13 +315,32 @@ function relativeGrantMatches(declared, resolved) {
   return candidate === declaration || candidate.endsWith(`/${declaration}`)
 }
 
-export function assertGrantsBacked(role, grants, register, { agent = null } = {}) {
+export function assertGrantsBacked(role, grants, register, { agent = null, vendorRoots: roots = vendorRoots(), exists = existsSync, readFile = readFileSync } = {}) {
   const spec = agentSpec(register, role, agent)
   if (!spec) throw refuse('unknown-grant', `seat ${role} has grants but no matching register role`)
+  // Caller-supplied vendor entries never build skip-sets: each package, tool,
+  // and entry is independently re-resolved from the REGISTER declaration.
+  const vendorTools = new Set()
+  const vendorEntries = new Set()
+  for (const vendor of grants?.vendor_extensions || []) {
+    const declared = (spec.vendor_extensions || []).find((one) => one.package === vendor.package)
+    if (!declared) throw refuse('unknown-grant', `seat ${role} has unregistered vendor extension grant ${JSON.stringify(vendor.package)}`)
+    const resolved = resolveVendorExtension(declared, { roots, exists, readFile, role })
+    for (const tool of vendor.tools || []) {
+      if (!resolved.tools.includes(tool)) throw refuse('unknown-grant', `seat ${role} has unregistered vendor tool grant ${JSON.stringify(tool)} on ${JSON.stringify(vendor.package)}`)
+      vendorTools.add(tool)
+    }
+    for (const entry of vendor.entries || []) {
+      if (!resolved.entries.includes(entry)) throw refuse('unknown-grant', `seat ${role} has unregistered vendor extension entry ${JSON.stringify(entry)} on ${JSON.stringify(vendor.package)}`)
+    }
+    for (const entry of resolved.entries) vendorEntries.add(entry)
+  }
   for (const tool of grants?.tools || []) {
+    if (vendorTools.has(tool)) continue
     if (!spec.tools.includes(tool)) throw refuse('unknown-grant', `seat ${role} has unregistered tool grant ${JSON.stringify(tool)}`)
   }
   for (const extension of grants?.extensions || []) {
+    if (vendorEntries.has(extension)) continue
     if (!spec.extensions.some((declared) => relativeGrantMatches(declared, extension))) {
       throw refuse('unknown-grant', `seat ${role} has unregistered extension grant ${JSON.stringify(extension)}`)
     }
@@ -264,7 +362,7 @@ export function assertGrantsBacked(role, grants, register, { agent = null } = {}
 }
 
 export const EMPTY_GRANTS = deepFreeze({
-  tools: [], extensions: [], agents: [], skills: [], advisor: false, requires: [],
+  tools: [], extensions: [], vendor_extensions: [], agents: [], skills: [], advisor: false, requires: [],
 })
 
 // A capability the REGISTER hands out, not one the binary simply has. The
@@ -332,7 +430,11 @@ export const CAPABILITY_PROBES = Object.freeze({
   }),
   extensions: Object.freeze({
     class: 'resolution',
-    reason: 'The claim is only that a checkout-relative path exists, which grantsFor and assertGrantsBacked already verify at their resolution checks; repeating that fact is redundancy sold as coverage. crew/pi/extensions/lab.ts is claimed as a path only: the probe imports it and reads none of its contents, so rewriting it cannot move this classification.',
+    reason: 'The claim is that each granted extension path exists and is backed by a register declaration; checkout-relative paths and host-resolved vendor paths are both covered by grantsFor and assertGrantsBacked, so repeating that fact is redundancy sold as coverage. crew/pi/extensions/lab.ts is claimed as a path only: the probe imports it and reads none of its contents, so rewriting it cannot move this classification.',
+  }),
+  vendor_extensions: Object.freeze({
+    class: 'vendor-binary',
+    reason: "The claim is that a package the OPERATOR installed under pi's own npm root declares the pi extension entries this checkout can name. That package belongs to the host rather than this checkout, so nothing short of a host with it installed could exercise it; absence is refused by name (vendor-extension-missing) rather than assumed.",
   }),
   skills: Object.freeze({
     class: 'resolution',
@@ -350,7 +452,7 @@ export const CAPABILITY_PROBES = Object.freeze({
 })
 
 export function declaredCapabilities(register, { adapters = CAPABILITY_ADAPTERS } = {}) {
-  const declared = new Set(['extensions', 'agents', 'skills', 'advisor'])
+  const declared = new Set(['extensions', 'agents', 'vendor_extensions', 'skills', 'advisor'])
   const adapterNames = Array.isArray(adapters)
     ? [...new Set(adapters.map((adapter) => String(adapter)))]
     : []

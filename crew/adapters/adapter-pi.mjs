@@ -258,9 +258,27 @@ export function seatCommand({ role, model, promptFile, tools, deny, taskDir, boo
     '--tools', `"${activatedTools.join(',')}"`,
     ...(piDeny.length ? ['--exclude-tools', `"${piDeny.join(',')}"`] : []),
     '--no-extensions',
-    ...extensions.flatMap((extension) => ['-e', `"${extension}"`]),
+    ...extensions.flatMap((extension) => ['-e', piExtensionOperand(extension)]),
     ...(skills.length ? skills.flatMap((skill) => ['--skill', `"${skill}"`]) : ['--no-skills']),
     '--append-system-prompt', `"${promptFile}"`,
     `"${bootBrief}"`,
   ].join(' ')
+}
+
+// How a -e operand is transported. A checkout-relative grant resolves under
+// REGISTER_ROOT and is tame, but a VENDOR grant resolves under HOST state and
+// may carry any character the filesystem allows. The characters POSIX double
+// quotes still INTERPRET are $, a backtick, an embedded " and a shell-active
+// backslash, so a path carrying one of those would reach pi as a different
+// argv word. Every character in the class below is inert inside double quotes
+// — no $, no backtick, no backslash, no quote, no whitespace, no newline — so
+// a path made only of them is byte-exact either way and keeps today's form;
+// anything else goes through shellSingleQuote, this module's existing
+// transport for an arbitrary value (:157-159), already used for the advisor
+// endpoint and model at :246-247. An apostrophe is LITERAL inside double
+// quotes; it matters only because the single-quoted branch must escape it,
+// which shellSingleQuote does.
+export function piExtensionOperand(extension) {
+  const value = String(extension)
+  return /^[A-Za-z0-9@._+\-\/]+$/.test(value) ? `"${value}"` : shellSingleQuote(value)
 }

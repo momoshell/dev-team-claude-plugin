@@ -243,6 +243,24 @@ export const PROVIDER_BACKOFF_LADDER_MS = Object.freeze([60_000, 300_000, 900_00
 // into a window that is still closed. Ours and stated — never a provider fact.
 export const PROVIDER_RESET_SETTLE_MS = 60_000
 
+// #948. A park longer than the liveness floor defeats every liveness instrument at
+// once: crew-watch reads an unbounded heartbeat age and dispatch-batch refuses an
+// unrelated batch as `external-fence-abandoned` against a driver that is alive. This
+// module owns only the CADENCE; the floor it must stay under is owned by
+// scripts/factory/lane-watch.mjs and derived there, never repeated here. The invariant
+// PARK_BEAT_MS < that floor is pinned by test/factory-crew-watch.test.mjs, which can
+// import both sides. Four beats inside a 60 s floor: three may be lost and the lane
+// still never reads abandoned, while a beat on every WAIT_POLL_MS tick would be twelve
+// times the writing for no additional evidence.
+export const PARK_BEAT_MS = 15_000
+// The journal vocabulary for ONE park observation. It is the DRIVER that is measured,
+// never the seat — during a park there is deliberately no seat — so the row names its
+// own source instead of borrowing the seat-liveness one. The `provider-park-` prefix
+// is load-bearing: test/factory-emit.test.mjs:1663 asserts an unclassified failure
+// writes no row whose event starts with `provider-retry`.
+export const PARK_BEAT_EVENT = 'provider-park-beat'
+export const PARK_BEAT_SOURCE = 'driver-park'
+
 // A reset is only a reset if the frame that carried it REFUSED the turn.
 // Ordinary successful turns emit `rate_limit_event` with `status: "allowed"` and
 // a resetsAt of their own (tasks/headless-worker/captures/a-baseline.jsonl,
@@ -1630,13 +1648,51 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
   function providerRetryState(run) {
     return providerRetries.get(`${run.role}:${run.id}`) ?? { attempts: 0, waited_ms: 0, declined: null }
   }
+  // [P2] #948 ask 2. The park is readable from crew.json WITHOUT the journal, so a
+  // reader that never opens journal.jsonl — crew-watch's readout, an operator with
+  // `cat` — still gets what the lane waits on and until when.
+  function writePark(state) {
+    return updateCrewJson(paths, (disk) => { disk.park = state; return true }, crewDeps)
+  }
+  // Returning false when there is nothing to clear keeps an UNPARKED lane's crew.json
+  // byte-identical: a run that never parks never rewrites the file.
+  function clearPark() {
+    return updateCrewJson(paths, (disk) => { if (disk.park == null) return false; disk.park = null; return true }, crewDeps)
+  }
+  // [P1] #948 ask 1. This loop runs IN the driver process, so now() at a tick is a
+  // MEASURED reading of the driver's own liveness — not a wall clock standing in for
+  // an observation nobody made (#297), and not a claim about a seat that by design
+  // does not exist during a park. ADR-026: instrumentation is never load-bearing, so
+  // every write here is wrapped and a beat that fails leaves the wait as it found it.
+  function parkBeat(park, at) {
+    try { emit?.({ kind: 'heartbeat', at, role: park.role ?? null }) } catch { /* never load-bearing */ }
+    try { log({ at, event: PARK_BEAT_EVENT, role: park.role, assignment_id: park.assignment_id, kind: park.kind, status: park.status, waited_on: park.waited_on, reset_at: park.reset_at, until: park.until, beat_ms: PARK_BEAT_MS, source: PARK_BEAT_SOURCE }) } catch { /* diagnostics only */ }
+    try { notePersist(park.role, writePark({ ...park, beat_at: at })) } catch { /* never load-bearing */ }
+  }
   // Park in WAIT_POLL_MS steps rather than one long block, so the wait keeps the
-  // cadence every other wait in this module runs on. Returns the wait MEASURED
-  // off the clock — never the one that was intended.
-  function parkFor(waitMs) {
+  // cadence every other wait in this module runs on. Returns the wait MEASURED off the
+  // clock — never the one that was intended. The clear runs in a `finally` so a throw
+  // out of the wait never leaves crew.json claiming a park that ended; a SIGKILL runs
+  // no finally, which is exactly the case crew-watch reports as abandoned. The clear is
+  // WRAPPED for the same reason every other write here is: updateCrewJson calls
+  // existsSync outside its own catch (:1242-1247) and a failed persist reaches the
+  // injected logger (:1313-1318), so either could otherwise replace a healthy retry
+  // result with a throw.
+  function parkFor(waitMs, park = null) {
     const startedAt = now()
     const until = startedAt + waitMs
-    while (now() < until) delay(Math.min(WAIT_POLL_MS, until - now()))
+    const state = park ? { ...park, started_at: startedAt, until } : null
+    let lastBeat = startedAt
+    if (state) parkBeat(state, startedAt)
+    try {
+      while (now() < until) {
+        delay(Math.min(WAIT_POLL_MS, until - now()))
+        const at = now()
+        if (state && at - lastBeat >= PARK_BEAT_MS) { lastBeat = at; parkBeat(state, at) }
+      }
+    } finally {
+      if (state) { try { notePersist(state.role, clearPark()) } catch { /* never load-bearing */ } }
+    }
     return now() - startedAt
   }
   // A provider failure is not a judgment failure and it is not the seat's fault:
@@ -1707,7 +1763,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
     // SCHEDULED. The park can be long, so the row that says one is starting is
     // written before it, not after — but nothing here is called `resumed` yet.
     log({ at: now(), event: 'provider-retry', ...base, attempt: state.attempts + 1, of: PROVIDER_RETRY_MAX, wait_ms: decision.wait_ms, waited_on: decision.waited_on, reset_at: decision.reset_at, total_waited_ms: state.waited_ms, bound: { attempts: PROVIDER_RETRY_MAX, total_wait_ms: PROVIDER_RETRY_TOTAL_WAIT_MS } })
-    const waitedMs = parkFor(decision.wait_ms)
+    const waitedMs = parkFor(decision.wait_ms, { role: run.role, assignment_id: run.id, kind: failure.kind, status: failure.status, waited_on: decision.waited_on, reset_at: decision.reset_at, attempt: state.attempts + 1, of: PROVIDER_RETRY_MAX })
     const totalWaitedMs = state.waited_ms + waitedMs
     // [F6] The measured wait is recorded whatever happens next — it was really
     // spent. The ATTEMPT is not, and must not be: an escalation that reports a

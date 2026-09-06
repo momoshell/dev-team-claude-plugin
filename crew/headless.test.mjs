@@ -24,6 +24,12 @@ import { ROOT, scratchDir, startFileWriter } from '../test/helpers.mjs'
 // byte-for-byte so classification is adjudicated against the provider's own
 // stream shape rather than a synthetic approximation.
 const B332_D2_TAIL = Buffer.from('eyJ0eXBlIjoicmF0ZV9saW1pdF9ldmVudCIsInJhdGVfbGltaXRfaW5mbyI6eyJzdGF0dXMiOiJyZWplY3RlZCIsInJlc2V0c0F0IjoxNzg4MTE1MjAwLCJyYXRlTGltaXRUeXBlIjoiZml2ZV9ob3VyIiwib3ZlcmFnZVN0YXR1cyI6InJlamVjdGVkIiwib3ZlcmFnZURpc2FibGVkUmVhc29uIjoib3JnX2xldmVsX2Rpc2FibGVkIiwiaXNVc2luZ092ZXJhZ2UiOmZhbHNlLCJ1bmlmaWVkV2luZG93cyI6eyJmaXZlX2hvdXIiOnsidXRpbGl6YXRpb24iOjEsInJlc2V0c0F0IjoxNzg4MTE1MjAwfSwic2V2ZW5fZGF5Ijp7InV0aWxpemF0aW9uIjowLjMxLCJyZXNldHNBdCI6MTc4ODU2NjQwMH19fSwidXVpZCI6IjJjMmYyOWI2LWEyNjctNDE5OS1iNTgzLTAxNmEwOGMzNmRkYyIsInNlc3Npb25faWQiOiI0MmJhNjFhMC0wYTQ4LTRlZWYtOGMzMy1lN2FiNDUyMzgxNzEifQp7InR5cGUiOiJhc3Npc3RhbnQiLCJtZXNzYWdlIjp7ImRpYWdub3N0aWNzIjpudWxsLCJpZCI6IjlkZWI5MGNhLWMwYmItNDQyZS1hZmFmLTdjNDU5MGJlMGEyMiIsImNvbnRhaW5lciI6bnVsbCwibW9kZWwiOiI8c3ludGhldGljPiIsInJvbGUiOiJhc3Npc3RhbnQiLCJzdG9wX2RldGFpbHMiOm51bGwsInN0b3BfcmVhc29uIjoic3RvcF9zZXF1ZW5jZSIsInN0b3Bfc2VxdWVuY2UiOiIiLCJ0eXBlIjoibWVzc2FnZSIsInVzYWdlIjp7Im91dHB1dF90b2tlbnNfZGV0YWlscyI6bnVsbCwiaW5wdXRfdG9rZW5zIjowLCJvdXRwdXRfdG9rZW5zIjowLCJjYWNoZV9jcmVhdGlvbl9pbnB1dF90b2tlbnMiOjAsImNhY2hlX3JlYWRfaW5wdXRfdG9rZW5zIjowLCJzZXJ2ZXJfdG9vbF91c2UiOnsid2ViX3NlYXJjaF9yZXF1ZXN0cyI6MCwid2ViX2ZldGNoX3JlcXVlc3RzIjowfSwic2VydmljZV90aWVyIjpudWxsLCJjYWNoZV9jcmVhdGlvbiI6eyJlcGhlbWVyYWxfMWhfaW5wdXRfdG9rZW5zIjowLCJlcGhlbWVyYWxfNW1faW5wdXRfdG9rZW5zIjowfSwiaW5mZXJlbmNlX2dlbyI6bnVsbCwiaXRlcmF0aW9ucyI6bnVsbCwic3BlZWQiOm51bGx9LCJjb250ZW50IjpbeyJ0eXBlIjoidGV4dCIsInRleHQiOiJZb3UndmUgaGl0IHlvdXIgc2Vzc2lvbiBsaW1pdCDCtyByZXNldHMgODo0MHBtIChFdXJvcGUvQmVsZ3JhZGUpIn1dLCJjb250ZXh0X21hbmFnZW1lbnQiOm51bGx9LCJwYXJlbnRfdG9vbF91c2VfaWQiOm51bGwsInNlc3Npb25faWQiOiI0MmJhNjFhMC0wYTQ4LTRlZWYtOGMzMy1lN2FiNDUyMzgxNzEiLCJ1dWlkIjoiMzAzOGY2MDAtYTliOS00NmZlLWJkZWEtZTFlOGJhYjVhYjExIiwidGltZXN0YW1wIjoiMjAyNi0wOC0zMFQxNzoyNjozMC4xMjFaIiwiZXJyb3IiOiJyYXRlX2xpbWl0IiwicmVxdWVzdF9pZCI6InJlcV8wMTFDZVpLb0xBYTlRdkJNNjZGaVNacmkiLCJpc19hcGlfZXJyb3JfbWVzc2FnZSI6dHJ1ZX0KeyJkdXJhdGlvbl9hcGlfbXMiOjE1MzU5Mywic3RvcF9yZWFzb24iOiJzdG9wX3NlcXVlbmNlIiwic2Vzc2lvbl9pZCI6IjQyYmE2MWEwLTBhNDgtNGVlZi04YzMzLWU3YWI0NTIzODE3MSIsInRvdGFsX2Nvc3RfdXNkIjozLjc4ODA4Mzk5OTk5OTk5OTYsInVzYWdlIjp7ImlucHV0X3Rva2VucyI6MjAsImNhY2hlX2NyZWF0aW9uX2lucHV0X3Rva2VucyI6MjM0MDIxLCJjYWNoZV9yZWFkX2lucHV0X3Rva2VucyI6MjIwMjU5OCwib3V0cHV0X3Rva2VucyI6MTM4NTksIm91dHB1dF90b2tlbnNfZGV0YWlscyI6eyJ0aGlua2luZ190b2tlbnMiOjUyNjN9LCJzZXJ2ZXJfdG9vbF91c2UiOnsid2ViX3NlYXJjaF9yZXF1ZXN0cyI6MCwid2ViX2ZldGNoX3JlcXVlc3RzIjowfSwic2VydmljZV90aWVyIjoic3RhbmRhcmQiLCJjYWNoZV9jcmVhdGlvbiI6eyJlcGhlbWVyYWxfMWhfaW5wdXRfdG9rZW5zIjoyMzQwMjEsImVwaGVtZXJhbF81bV9pbnB1dF90b2tlbnMiOjB9LCJpbmZlcmVuY2VfZ2VvIjoibm90X2F2YWlsYWJsZSIsIml0ZXJhdGlvbnMiOlt7ImlucHV0X3Rva2VucyI6Miwib3V0cHV0X3Rva2VucyI6NDk4LCJjYWNoZV9yZWFkX2lucHV0X3Rva2VucyI6MjUzMjEwLCJjYWNoZV9jcmVhdGlvbl9pbnB1dF90b2tlbnMiOjIzNjUsImNhY2hlX2NyZWF0aW9uIjp7ImVwaGVtZXJhbF81bV9pbnB1dF90b2tlbnMiOjAsImVwaGVtZXJhbF8xaF9pbnB1dF90b2tlbnMiOjIzNjV9LCJ0eXBlIjoibWVzc2FnZSJ9XSwic3BlZWQiOiJzdGFuZGFyZCJ9LCJtb2RlbFVzYWdlIjp7ImNsYXVkZS1vcHVzLTUiOnsiaW5wdXRUb2tlbnMiOjIwLCJvdXRwdXRUb2tlbnMiOjEzODU5LCJjYWNoZVJlYWRJbnB1dFRva2VucyI6MjIwMjU5OCwiY2FjaGVDcmVhdGlvbklucHV0VG9rZW5zIjoyMzQwMjEsIndlYlNlYXJjaFJlcXVlc3RzIjowLCJjb3N0VVNEIjozLjc4ODA4Mzk5OTk5OTk5OTYsImNvbnRleHRXaW5kb3ciOjEwMDAwMDAsIm1heE91dHB1dFRva2VucyI6NjQwMDAsImNhbm9uaWNhbE1vZGVsIjoiY2xhdWRlLW9wdXMtNSIsInByb3ZpZGVyIjoiZmlyc3RQYXJ0eSIsImNvc3RCYXNpcyI6Imxpc3QifX0sInBlcm1pc3Npb25fZGVuaWFscyI6W10sInRlcm1pbmFsX3JlYXNvbiI6ImFwaV9lcnJvciIsImZhc3RfbW9kZV9zdGF0ZSI6Im9mZiIsImZhc3RfbW9kZV9kaXNhYmxlZF9yZWFzb24iOiJzZGtfb3B0X2luX3JlcXVpcmVkIiwic3ViYWdlbnRfc3RhdHMiOnsic3Bhd25lZCI6MCwicmVxdWVzdGVkIjp7ImJhY2tncm91bmQiOjAsImZvcmVncm91bmQiOjAsInVuc2V0IjowfSwic3RhcnRlZF9pbl9iYWNrZ3JvdW5kIjowLCJtYXhfZGVwdGgiOjAsInNwYXduZWRfYnlfc3ViYWdlbnRzIjowLCJjb21wbGV0ZWQiOjAsImZhaWxlZCI6MCwia2lsbGVkIjp7InBhcmVudCI6MCwidXNlciI6MCwic3lzdGVtIjowfSwicmVmdXNlZCI6eyJkZXB0aF9saW1pdCI6MCwiY29uY3VycmVuY3lfbGltaXQiOjAsImJ1ZGdldCI6MH0sImJ5X3R5cGUiOnt9fSwiaXNfZXJyb3IiOnRydWUsIm51bV90dXJucyI6MTEsInN1YnR5cGUiOiJzdWNjZXNzIiwiYXBpX2Vycm9yX3N0YXR1cyI6NDI5LCJyZXN1bHQiOiJZb3UndmUgaGl0IHlvdXIgc2Vzc2lvbiBsaW1pdCDCtyByZXNldHMgODo0MHBtIChFdXJvcGUvQmVsZ3JhZGUpIiwidHlwZSI6InJlc3VsdCIsImR1cmF0aW9uX21zIjoyMjA1NzksInV1aWQiOiI3MjBhNTI4Ny0xZDNhLTQxYTAtYmU3YS01ZGQ4N2M5ZWQ1MzIiLCJxdWV1ZWRfdHVybl9jb3VudCI6MH0K', 'base64').toString('utf8')
+// The planner stream that ended lane b463-sessionbusy on 2026-09-06 at 07:39Z:
+// four verbatim whole lines of its d6/stream.jsonl — an allowed_warning
+// rate_limit_event, the rejected one stating resetsAt 1788695400, the
+// <synthetic> assistant frame and the terminal result carrying
+// api_error_status 429. Recorded, never hand-built (#968).
+const B463_D6_TAIL = Buffer.from('eyJ0eXBlIjoicmF0ZV9saW1pdF9ldmVudCIsInJhdGVfbGltaXRfaW5mbyI6eyJzdGF0dXMiOiJhbGxvd2VkX3dhcm5pbmciLCJyZXNldHNBdCI6MTc4ODY5NTQwMCwicmF0ZUxpbWl0VHlwZSI6ImZpdmVfaG91ciIsInV0aWxpemF0aW9uIjowLjk5LCJpc1VzaW5nT3ZlcmFnZSI6ZmFsc2UsInN1cnBhc3NlZFRocmVzaG9sZCI6MC45LCJ1bmlmaWVkV2luZG93cyI6eyJmaXZlX2hvdXIiOnsidXRpbGl6YXRpb24iOjAuOTksInJlc2V0c0F0IjoxNzg4Njk1NDAwfSwic2V2ZW5fZGF5Ijp7InV0aWxpemF0aW9uIjowLjI2LCJyZXNldHNBdCI6MTc4OTE3MTIwMH19fSwidXVpZCI6IjUwMzNmNDVkLWQwYmYtNDJkMC1hYzk0LWJlY2M2MDI4NWFiMyIsInNlc3Npb25faWQiOiJjODA0NWI4MS0wOGY1LTQ2NmUtYjc5Ny04NTIxZWNkYzMzZDIifQp7InR5cGUiOiJyYXRlX2xpbWl0X2V2ZW50IiwicmF0ZV9saW1pdF9pbmZvIjp7InN0YXR1cyI6InJlamVjdGVkIiwicmVzZXRzQXQiOjE3ODg2OTU0MDAsInJhdGVMaW1pdFR5cGUiOiJmaXZlX2hvdXIiLCJvdmVyYWdlU3RhdHVzIjoicmVqZWN0ZWQiLCJvdmVyYWdlRGlzYWJsZWRSZWFzb24iOiJvcmdfbGV2ZWxfZGlzYWJsZWQiLCJpc1VzaW5nT3ZlcmFnZSI6ZmFsc2UsInVuaWZpZWRXaW5kb3dzIjp7ImZpdmVfaG91ciI6eyJ1dGlsaXphdGlvbiI6MSwicmVzZXRzQXQiOjE3ODg2OTU0MDB9LCJzZXZlbl9kYXkiOnsidXRpbGl6YXRpb24iOjAuMjYsInJlc2V0c0F0IjoxNzg5MTcxMjAwfX19LCJ1dWlkIjoiMTQ5NDIwMDUtMDQyMi00MTU0LTg5NjYtYjIxY2FjYjg1NjNjIiwic2Vzc2lvbl9pZCI6ImM4MDQ1YjgxLTA4ZjUtNDY2ZS1iNzk3LTg1MjFlY2RjMzNkMiJ9CnsidHlwZSI6ImFzc2lzdGFudCIsIm1lc3NhZ2UiOnsiZGlhZ25vc3RpY3MiOm51bGwsImlkIjoiODRkNjk4NzEtODA4ZS00OGQ5LTk1MGItNmNlZTExYjkzMjU4IiwiY29udGFpbmVyIjpudWxsLCJtb2RlbCI6IjxzeW50aGV0aWM+Iiwicm9sZSI6ImFzc2lzdGFudCIsInN0b3BfZGV0YWlscyI6bnVsbCwic3RvcF9yZWFzb24iOiJzdG9wX3NlcXVlbmNlIiwic3RvcF9zZXF1ZW5jZSI6IiIsInR5cGUiOiJtZXNzYWdlIiwidXNhZ2UiOnsib3V0cHV0X3Rva2Vuc19kZXRhaWxzIjpudWxsLCJpbnB1dF90b2tlbnMiOjAsIm91dHB1dF90b2tlbnMiOjAsImNhY2hlX2NyZWF0aW9uX2lucHV0X3Rva2VucyI6MCwiY2FjaGVfcmVhZF9pbnB1dF90b2tlbnMiOjAsInNlcnZlcl90b29sX3VzZSI6eyJ3ZWJfc2VhcmNoX3JlcXVlc3RzIjowLCJ3ZWJfZmV0Y2hfcmVxdWVzdHMiOjB9LCJzZXJ2aWNlX3RpZXIiOm51bGwsImNhY2hlX2NyZWF0aW9uIjp7ImVwaGVtZXJhbF8xaF9pbnB1dF90b2tlbnMiOjAsImVwaGVtZXJhbF81bV9pbnB1dF90b2tlbnMiOjB9LCJpbmZlcmVuY2VfZ2VvIjpudWxsLCJpdGVyYXRpb25zIjpudWxsLCJzcGVlZCI6bnVsbH0sImNvbnRlbnQiOlt7InR5cGUiOiJ0ZXh0IiwidGV4dCI6IllvdSd2ZSBoaXQgeW91ciBzZXNzaW9uIGxpbWl0IMK3IHJlc2V0cyAxOjUwcG0gKEV1cm9wZS9CZWxncmFkZSkifV0sImNvbnRleHRfbWFuYWdlbWVudCI6bnVsbH0sInBhcmVudF90b29sX3VzZV9pZCI6bnVsbCwic2Vzc2lvbl9pZCI6ImM4MDQ1YjgxLTA4ZjUtNDY2ZS1iNzk3LTg1MjFlY2RjMzNkMiIsInV1aWQiOiJhNTNhNTgxOS1jMzQ4LTQ3OGItOGJiZS0zYTNjY2NhNzdjZDQiLCJ0aW1lc3RhbXAiOiIyMDI2LTA5LTA2VDA3OjM5OjI2LjIyNloiLCJlcnJvciI6InJhdGVfbGltaXQiLCJyZXF1ZXN0X2lkIjoicmVxXzAxMUNlbW9oRXd3R1VrOWFTM0NFcDdubyIsImlzX2FwaV9lcnJvcl9tZXNzYWdlIjp0cnVlfQp7ImR1cmF0aW9uX2FwaV9tcyI6MzkwMDM5LCJzdG9wX3JlYXNvbiI6InN0b3Bfc2VxdWVuY2UiLCJzZXNzaW9uX2lkIjoiYzgwNDViODEtMDhmNS00NjZlLWI3OTctODUyMWVjZGMzM2QyIiwidG90YWxfY29zdF91c2QiOjMuMTA4NjUyNDk5OTk5OTk5NCwidXNhZ2UiOnsiaW5wdXRfdG9rZW5zIjoyNiwiY2FjaGVfY3JlYXRpb25faW5wdXRfdG9rZW5zIjo0Mjc0MiwiY2FjaGVfcmVhZF9pbnB1dF90b2tlbnMiOjM1Nzc3MDUsIm91dHB1dF90b2tlbnMiOjM1NjkwLCJvdXRwdXRfdG9rZW5zX2RldGFpbHMiOnsidGhpbmtpbmdfdG9rZW5zIjoxNjI4M30sInNlcnZlcl90b29sX3VzZSI6eyJ3ZWJfc2VhcmNoX3JlcXVlc3RzIjowLCJ3ZWJfZmV0Y2hfcmVxdWVzdHMiOjB9LCJzZXJ2aWNlX3RpZXIiOiJzdGFuZGFyZCIsImNhY2hlX2NyZWF0aW9uIjp7ImVwaGVtZXJhbF8xaF9pbnB1dF90b2tlbnMiOjQyNzQyLCJlcGhlbWVyYWxfNW1faW5wdXRfdG9rZW5zIjowfSwiaW5mZXJlbmNlX2dlbyI6Im5vdF9hdmFpbGFibGUiLCJpdGVyYXRpb25zIjpbeyJpbnB1dF90b2tlbnMiOjIsIm91dHB1dF90b2tlbnMiOjEyNzYsImNhY2hlX3JlYWRfaW5wdXRfdG9rZW5zIjoyOTE3MjQsImNhY2hlX2NyZWF0aW9uX2lucHV0X3Rva2VucyI6MTY5MSwiY2FjaGVfY3JlYXRpb24iOnsiZXBoZW1lcmFsXzVtX2lucHV0X3Rva2VucyI6MCwiZXBoZW1lcmFsXzFoX2lucHV0X3Rva2VucyI6MTY5MX0sInR5cGUiOiJtZXNzYWdlIn1dLCJzcGVlZCI6InN0YW5kYXJkIn0sIm1vZGVsVXNhZ2UiOnsiY2xhdWRlLW9wdXMtNSI6eyJpbnB1dFRva2VucyI6MjYsIm91dHB1dFRva2VucyI6MzU2OTAsImNhY2hlUmVhZElucHV0VG9rZW5zIjozNTc3NzA1LCJjYWNoZUNyZWF0aW9uSW5wdXRUb2tlbnMiOjQyNzQyLCJ3ZWJTZWFyY2hSZXF1ZXN0cyI6MCwiY29zdFVTRCI6My4xMDg2NTI0OTk5OTk5OTk0LCJjb250ZXh0V2luZG93IjoxMDAwMDAwLCJtYXhPdXRwdXRUb2tlbnMiOjY0MDAwLCJ0aGlua2luZ1Rva2VucyI6MTYyODMsImNhbm9uaWNhbE1vZGVsIjoiY2xhdWRlLW9wdXMtNSIsInByb3ZpZGVyIjoiZmlyc3RQYXJ0eSIsImNvc3RCYXNpcyI6Imxpc3QifX0sInBlcm1pc3Npb25fZGVuaWFscyI6W10sInRlcm1pbmFsX3JlYXNvbiI6ImFwaV9lcnJvciIsImZhc3RfbW9kZV9zdGF0ZSI6Im9mZiIsImZhc3RfbW9kZV9kaXNhYmxlZF9yZWFzb24iOiJzZGtfb3B0X2luX3JlcXVpcmVkIiwic3ViYWdlbnRfc3RhdHMiOnsic3Bhd25lZCI6MCwicmVxdWVzdGVkIjp7ImJhY2tncm91bmQiOjAsImZvcmVncm91bmQiOjAsInVuc2V0IjowfSwic3RhcnRlZF9pbl9iYWNrZ3JvdW5kIjowLCJtYXhfZGVwdGgiOjAsInNwYXduZWRfYnlfc3ViYWdlbnRzIjowLCJjb21wbGV0ZWQiOjAsImZhaWxlZCI6MCwia2lsbGVkIjp7InBhcmVudCI6MCwidXNlciI6MCwic3lzdGVtIjowfSwicmVmdXNlZCI6eyJkZXB0aF9saW1pdCI6MCwiY29uY3VycmVuY3lfbGltaXQiOjAsImJ1ZGdldCI6MH0sImJ5X3R5cGUiOnt9fSwiaXNfZXJyb3IiOnRydWUsIm51bV90dXJucyI6MTQsInN1YnR5cGUiOiJzdWNjZXNzIiwiYXBpX2Vycm9yX3N0YXR1cyI6NDI5LCJyZXN1bHQiOiJZb3UndmUgaGl0IHlvdXIgc2Vzc2lvbiBsaW1pdCDCtyByZXNldHMgMTo1MHBtIChFdXJvcGUvQmVsZ3JhZGUpIiwidHlwZSI6InJlc3VsdCIsImR1cmF0aW9uX21zIjozOTI2NzAsInV1aWQiOiIyYzIzMzdkMi0zOGZmLTQ4MTQtOTg0ZC1lNDM4MTM0NzNmNWIiLCJxdWV1ZWRfdHVybl9jb3VudCI6MH0K', 'base64').toString('utf8')
 const B333_D2_TAIL = Buffer.from('eyJ0eXBlIjoicmF0ZV9saW1pdF9ldmVudCIsInJhdGVfbGltaXRfaW5mbyI6eyJzdGF0dXMiOiJyZWplY3RlZCIsInJlc2V0c0F0IjoxNzg4MTE1MjAwLCJyYXRlTGltaXRUeXBlIjoiZml2ZV9ob3VyIiwib3ZlcmFnZVN0YXR1cyI6InJlamVjdGVkIiwib3ZlcmFnZURpc2FibGVkUmVhc29uIjoib3JnX2xldmVsX2Rpc2FibGVkIiwiaXNVc2luZ092ZXJhZ2UiOmZhbHNlLCJ1bmlmaWVkV2luZG93cyI6eyJmaXZlX2hvdXIiOnsidXRpbGl6YXRpb24iOjEsInJlc2V0c0F0IjoxNzg4MTE1MjAwfSwic2V2ZW5fZGF5Ijp7InV0aWxpemF0aW9uIjowLjMxLCJyZXNldHNBdCI6MTc4ODU2NjQwMH19fSwidXVpZCI6IjgwZjUwM2ZjLTc2ODMtNDQ2Zi04OGE3LTU5OWI1MDgxNmMwNSIsInNlc3Npb25faWQiOiIwYmIxZTIyNC02MmZkLTQ5YjctOTM0MC05NGNmYjJhN2RiM2MifQp7InR5cGUiOiJhc3Npc3RhbnQiLCJtZXNzYWdlIjp7ImRpYWdub3N0aWNzIjpudWxsLCJpZCI6IjcyZTY2Y2FkLTE3MWUtNGIwMS1hZjIyLTcwZjk5MzhiNGY3YSIsImNvbnRhaW5lciI6bnVsbCwibW9kZWwiOiI8c3ludGhldGljPiIsInJvbGUiOiJhc3Npc3RhbnQiLCJzdG9wX2RldGFpbHMiOm51bGwsInN0b3BfcmVhc29uIjoic3RvcF9zZXF1ZW5jZSIsInN0b3Bfc2VxdWVuY2UiOiIiLCJ0eXBlIjoibWVzc2FnZSIsInVzYWdlIjp7Im91dHB1dF90b2tlbnNfZGV0YWlscyI6bnVsbCwiaW5wdXRfdG9rZW5zIjowLCJvdXRwdXRfdG9rZW5zIjowLCJjYWNoZV9jcmVhdGlvbl9pbnB1dF90b2tlbnMiOjAsImNhY2hlX3JlYWRfaW5wdXRfdG9rZW5zIjowLCJzZXJ2ZXJfdG9vbF91c2UiOnsid2ViX3NlYXJjaF9yZXF1ZXN0cyI6MCwid2ViX2ZldGNoX3JlcXVlc3RzIjowfSwic2VydmljZV90aWVyIjpudWxsLCJjYWNoZV9jcmVhdGlvbiI6eyJlcGhlbWVyYWxfMWhfaW5wdXRfdG9rZW5zIjowLCJlcGhlbWVyYWxfNW1faW5wdXRfdG9rZW5zIjowfSwiaW5mZXJlbmNlX2dlbyI6bnVsbCwiaXRlcmF0aW9ucyI6bnVsbCwic3BlZWQiOm51bGx9LCJjb250ZW50IjpbeyJ0eXBlIjoidGV4dCIsInRleHQiOiJZb3UndmUgaGl0IHlvdXIgc2Vzc2lvbiBsaW1pdCDCtyByZXNldHMgODo0MHBtIChFdXJvcGUvQmVsZ3JhZGUpIn1dLCJjb250ZXh0X21hbmFnZW1lbnQiOm51bGx9LCJwYXJlbnRfdG9vbF91c2VfaWQiOm51bGwsInNlc3Npb25faWQiOiIwYmIxZTIyNC02MmZkLTQ5YjctOTM0MC05NGNmYjJhN2RiM2MiLCJ1dWlkIjoiMzM3ZTJiZWQtMjdhNC00MTgwLTk3ZTktMTM0YjUyODIzMDQ5IiwidGltZXN0YW1wIjoiMjAyNi0wOC0zMFQxNzozMzo1MC4wNTNaIiwiZXJyb3IiOiJyYXRlX2xpbWl0IiwicmVxdWVzdF9pZCI6InJlcV8wMTFDZVpMTW1FTHl3ZndLNHBIZlFIaWsiLCJpc19hcGlfZXJyb3JfbWVzc2FnZSI6dHJ1ZX0KeyJkdXJhdGlvbl9hcGlfbXMiOjAsInN0b3BfcmVhc29uIjoic3RvcF9zZXF1ZW5jZSIsInNlc3Npb25faWQiOiIwYmIxZTIyNC02MmZkLTQ5YjctOTM0MC05NGNmYjJhN2RiM2MiLCJ0b3RhbF9jb3N0X3VzZCI6MCwidXNhZ2UiOnsib3V0cHV0X3Rva2Vuc19kZXRhaWxzIjp7InRoaW5raW5nX3Rva2VucyI6MH0sImlucHV0X3Rva2VucyI6MCwiY2FjaGVfY3JlYXRpb25faW5wdXRfdG9rZW5zIjowLCJjYWNoZV9yZWFkX2lucHV0X3Rva2VucyI6MCwib3V0cHV0X3Rva2VucyI6MCwic2VydmVyX3Rvb2xfdXNlIjp7IndlYl9zZWFyY2hfcmVxdWVzdHMiOjAsIndlYl9mZXRjaF9yZXF1ZXN0cyI6MH0sInNlcnZpY2VfdGllciI6InN0YW5kYXJkIiwiY2FjaGVfY3JlYXRpb24iOnsiZXBoZW1lcmFsXzFoX2lucHV0X3Rva2VucyI6MCwiZXBoZW1lcmFsXzVtX2lucHV0X3Rva2VucyI6MH0sImluZmVyZW5jZV9nZW8iOiIiLCJpdGVyYXRpb25zIjpbXSwic3BlZWQiOiJzdGFuZGFyZCJ9LCJtb2RlbFVzYWdlIjp7fSwicGVybWlzc2lvbl9kZW5pYWxzIjpbXSwidGVybWluYWxfcmVhc29uIjoiYXBpX2Vycm9yIiwiZmFzdF9tb2RlX3N0YXRlIjoib2ZmIiwiZmFzdF9tb2RlX2Rpc2FibGVkX3JlYXNvbiI6InNka19vcHRfaW5fcmVxdWlyZWQiLCJzdWJhZ2VudF9zdGF0cyI6eyJzcGF3bmVkIjowLCJyZXF1ZXN0ZWQiOnsiYmFja2dyb3VuZCI6MCwiZm9yZWdyb3VuZCI6MCwidW5zZXQiOjB9LCJzdGFydGVkX2luX2JhY2tncm91bmQiOjAsIm1heF9kZXB0aCI6MCwic3Bhd25lZF9ieV9zdWJhZ2VudHMiOjAsImNvbXBsZXRlZCI6MCwiZmFpbGVkIjowLCJraWxsZWQiOnsicGFyZW50IjowLCJ1c2VyIjowLCJzeXN0ZW0iOjB9LCJyZWZ1c2VkIjp7ImRlcHRoX2xpbWl0IjowLCJjb25jdXJyZW5jeV9saW1pdCI6MCwiYnVkZ2V0IjowfSwiYnlfdHlwZSI6e319LCJpc19lcnJvciI6dHJ1ZSwibnVtX3R1cm5zIjoxLCJzdWJ0eXBlIjoic3VjY2VzcyIsImFwaV9lcnJvcl9zdGF0dXMiOjQyOSwicmVzdWx0IjoiWW91J3ZlIGhpdCB5b3VyIHNlc3Npb24gbGltaXQgwrcgcmVzZXRzIDg6NDBwbSAoRXVyb3BlL0JlbGdyYWRlKSIsInR5cGUiOiJyZXN1bHQiLCJkdXJhdGlvbl9tcyI6NDk3LCJ1dWlkIjoiM2M4OGFkNjUtZTk2NS00MDU0LThiNzEtYjE5OTc4YTdjM2E1IiwicXVldWVkX3R1cm5fY291bnQiOjB9Cg==', 'base64').toString('utf8')
 // The b401 d2 529 recording did not survive its lane archive and is not reproducible. DERIVED from the recorded 429 tail, and said to be: the
 // rate_limit_event frame dropped (a 529 states no reset) and api_error_status
@@ -1333,6 +1339,33 @@ function providerRetryFixture({ tail, at, refusals = 1, fallback = null, drift =
   return { io, run, journal, parks, polls, spawns: () => spawns, cleanup: () => rmSync(dir, { recursive: true, force: true }) }
 }
 
+function withoutTerminalStatus(tail) {
+  return tail.split('\n').map((line) => {
+    if (!line.trim()) return line
+    let event
+    try { event = JSON.parse(line) } catch { return line }
+    if (event?.type !== 'result') return line
+    const { api_error_status: _dropped, ...rest } = event
+    return JSON.stringify(rest)
+  }).join('\n')
+}
+
+function providerRetryError(f, timeoutS = 600) {
+  try { f.io.wait(f.run.returnPath, timeoutS) } catch (error) { return error }
+  assert.fail('expected provider retry fixture to end with an error')
+}
+
+function declinedBy(f, reason, timeoutS = 600) {
+  const error = providerRetryError(f, timeoutS)
+  assert.ok(String(error.message).includes(reason), `expected refusal reason ${reason}`)
+  const declared = error.providerRetry?.declined
+  assert.ok(typeof declared === 'string' && declared.includes(reason), `expected declined reason ${reason}`)
+  const row = f.journal.find((entry) => entry.event === 'provider-retry-declined')
+  if (row) assert.equal(row.why, declared)
+  assert.ok(String(error.message).includes(String(declared)))
+  return error
+}
+
 // The transport factory gets seat-io's deliberate provider-delay seam, then
 // drives the real headless transport with recorded provider bytes. This makes
 // the route and its seam observable together without invoking a worker binary.
@@ -1952,6 +1985,151 @@ test('RV1-1 classified provider failures use retry routing before model fallback
     assert.equal(unclassified.journal.filter((row) => row.event === 'seat-fallback').length, 1)
     assert.equal(unclassified.journal.some((row) => typeof row.event === 'string' && row.event.startsWith('provider-retry')), false)
   } finally { unclassified.cleanup() }
+})
+
+test('A1 the recorded 2026-09-06 429 parks on its stated reset and resumes', () => {
+  const f = providerRetryFixture({ tail: B463_D6_TAIL, at: 1788680371297 })
+  try {
+    assert.equal(f.io.wait(f.run.returnPath, 600).status, 'done')
+    assert.equal(f.spawns(), 2)
+    const retry = f.journal.find((row) => row.event === 'provider-retry')
+    assert.equal(retry.waited_on, 'reset-time')
+    assert.equal(retry.reset_at, 1788695400000)
+    assert.equal(f.journal.filter((row) => row.event === 'provider-retry').length, 1)
+    assert.equal(f.journal.filter((row) => row.event === 'provider-retry-resumed').length, 1)
+  } finally { f.cleanup() }
+})
+
+test('A2 a declined provider failure escalates with its reason, not only its count', () => {
+  const reason = 'the stated reset is further out than the total wait this driver will spend'
+  const beyond = 1788695400000 - (PROVIDER_RETRY_TOTAL_WAIT_MS + 3600000)
+  const rate = providerRetryFixture({ tail: B463_D6_TAIL, at: beyond })
+  try {
+    const error = declinedBy(rate, reason)
+    assert.match(error.message, /no further attempt:/)
+    assert.equal(error.providerRetry.declined, rate.journal.find((row) => row.event === 'provider-retry-declined').why)
+  } finally { rate.cleanup() }
+
+  const auth = providerRetryFixture({ tail: withTerminalStatus(B463_D6_TAIL, 401), at: beyond })
+  try {
+    const error = declinedBy(auth, 'is a credential fault')
+    assert.match(error.message, /no further attempt:/)
+    assert.equal(error.providerRetry.declined, auth.journal.find((row) => row.event === 'provider-retry-declined').why)
+  } finally { auth.cleanup() }
+})
+
+test('A3 an exhausted attempt bound escalates saying the bound is spent', () => {
+  const f = providerRetryFixture({ tail: B463_D6_TAIL, at: 1788680371297, refusals: PROVIDER_RETRY_MAX + 2 })
+  try {
+    const error = providerRetryError(f)
+    assert.match(error.message, new RegExp(`${PROVIDER_RETRY_MAX} of ${PROVIDER_RETRY_MAX} retry attempts spent`))
+    assert.match(error.message, new RegExp(`the provider retry bound of ${PROVIDER_RETRY_MAX} attempts is spent`))
+    assert.equal(f.journal.filter((row) => row.event === 'provider-retry').length, PROVIDER_RETRY_MAX)
+  } finally { f.cleanup() }
+})
+
+test('A4 a derived 401 ends the lane on its first refusal', () => {
+  const f = providerRetryFixture({ tail: withTerminalStatus(B463_D6_TAIL, 401), at: 1788680371297 })
+  try {
+    providerRetryError(f)
+    assert.equal(f.spawns(), 1)
+    assert.equal(f.journal.filter((row) => row.event === 'provider-retry').length, 0)
+  } finally { f.cleanup() }
+})
+
+test('A5 an unrouted 418 escalates byte-identically', () => {
+  const f = providerRetryFixture({ tail: withTerminalStatus(B463_D6_TAIL, 418), at: 1788680371297 })
+  try {
+    const error = providerRetryError(f)
+    assert.equal(error.message, `headless budget-refused: seat builder produced no valid envelope at ${f.run.returnPath}`)
+    assert.equal(f.journal.some((row) => typeof row.event === 'string' && row.event.startsWith('provider-retry')), false)
+  } finally { f.cleanup() }
+})
+
+test('A6 the escalated count equals the attempts actually taken', () => {
+  const beyond = 1788695400000 - (PROVIDER_RETRY_TOTAL_WAIT_MS + 3600000)
+  const cases = [
+    [providerRetryFixture({ tail: B463_D6_TAIL, at: beyond }), 0],
+    [providerRetryFixture({ tail: B463_D6_TAIL, at: 1788680371297, refusals: PROVIDER_RETRY_MAX + 2 }), PROVIDER_RETRY_MAX],
+  ]
+  for (const [f, taken] of cases) {
+    try {
+      const error = providerRetryError(f)
+      assert.match(error.message, new RegExp(`${taken} of ${PROVIDER_RETRY_MAX} retry attempts spent`))
+      assert.equal(f.journal.filter((row) => row.event === 'provider-retry-resumed').length, taken)
+    } finally { f.cleanup() }
+  }
+})
+
+test('A7 a seat that never saw a provider failure escalates untouched', () => {
+  const f = providerRetryFixture({ tail: withoutTerminalStatus(B463_D6_TAIL), at: 1788680371297 })
+  try {
+    const error = providerRetryError(f)
+    assert.equal(error.message, `headless budget-refused: seat builder produced no valid envelope at ${f.run.returnPath}`)
+    assert.equal(error.providerFailure, undefined)
+    assert.equal(error.providerRetry, undefined)
+    assert.equal(f.journal.some((row) => typeof row.event === 'string' && row.event.startsWith('provider-retry')), false)
+  } finally { f.cleanup() }
+})
+
+test('B1 the decision-level refusal carries its reason', () => {
+  const beyond = 1788695400000 - (PROVIDER_RETRY_TOTAL_WAIT_MS + 3600000)
+  const cases = [
+    [providerRetryFixture({ tail: B463_D6_TAIL, at: beyond }), 'the stated reset is further out than the total wait this driver will spend'],
+    [providerRetryFixture({ tail: withTerminalStatus(B463_D6_TAIL, 401), at: 1788680371297 }), 'is a credential fault'],
+    [providerRetryFixture({ tail: B463_D6_TAIL, at: 1788680371297, refusals: PROVIDER_RETRY_MAX + 2 }), `the provider retry bound of ${PROVIDER_RETRY_MAX} attempts is spent`],
+  ]
+  for (const [f, reason] of cases) {
+    try { declinedBy(f, reason) } finally { f.cleanup() }
+  }
+})
+
+test('B2 an expired dispatch budget carries its reason', () => {
+  const f = providerRetryFixture({ tail: B463_D6_TAIL, at: 1788680371297, noExit: true })
+  try {
+    declinedBy(f, 'the work budget for this dispatch is already exhausted', 60)
+    assert.equal(f.spawns(), 1)
+    assert.equal(f.journal.some((row) => row.event === 'provider-retry'), false)
+  } finally { f.cleanup() }
+})
+
+test('B3 a measured wait that overshot the bound carries its reason', () => {
+  const boundaryAt = 1788695400000 + PROVIDER_RESET_SETTLE_MS - PROVIDER_RETRY_TOTAL_WAIT_MS
+  const f = providerRetryFixture({ tail: B463_D6_TAIL, at: boundaryAt, drift: 1 })
+  try {
+    declinedBy(f, 'was crossed by the wait actually taken')
+    assert.equal(f.spawns(), 1)
+    assert.equal(f.journal.some((row) => row.event === 'provider-retry-resumed'), false)
+  } finally { f.cleanup() }
+})
+
+test('RV1-1 observes expiry and overshoot only after the retry route runs', () => {
+  const expired = providerRetryFixture({ tail: B463_D6_TAIL, at: 1788680371297, noExit: true })
+  try {
+    declinedBy(expired, 'the work budget for this dispatch is already exhausted', 60)
+    assert.equal(expired.spawns(), 1)
+    assert.equal(expired.journal.some((row) => row.event === 'provider-retry'), false)
+  } finally { expired.cleanup() }
+
+  const boundaryAt = 1788695400000 + PROVIDER_RESET_SETTLE_MS - PROVIDER_RETRY_TOTAL_WAIT_MS
+  const overshot = providerRetryFixture({ tail: B463_D6_TAIL, at: boundaryAt, drift: 1 })
+  try {
+    declinedBy(overshot, 'was crossed by the wait actually taken')
+    assert.equal(overshot.spawns(), 1)
+    assert.equal(overshot.journal.some((row) => row.event === 'provider-retry-resumed'), false)
+  } finally { overshot.cleanup() }
+})
+
+test('B4 a replacement that would not start carries its reason', () => {
+  const f = providerRetryFixture({ tail: B463_D6_TAIL, at: 1788680371297, spawnThrowsOn: 2 })
+  try {
+    assert.equal(f.journal.some((row) => row.event === 'provider-retry-failed'), false)
+    // The wait and failed replacement are driven by the assertion below.
+    const error = declinedBy(f, 'could not be started after the wait')
+    assert.ok(f.journal.some((row) => row.event === 'provider-retry-failed'))
+    assert.equal(f.journal.some((row) => row.event === 'provider-retry-declined'), false)
+    assert.match(error.message, /could not be started after the wait/)
+  } finally { f.cleanup() }
 })
 
 test('the journal row carries the provider condition beside the outcome', () => {

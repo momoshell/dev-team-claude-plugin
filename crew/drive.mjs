@@ -4159,7 +4159,7 @@ function runTask(ctx, io, crash) {
       const effective = correctedMutations(mutations, binds, corrections.entries)                    // ANCHOR C1
       for (const [index, mutation] of effective.entries()) {
         if (mutation.exempt) {
-          rows.push({ check: mutation.check, outcome: 'exempt', why: mutation.exempt, file: null, summary: null })
+          rows.push({ check: mutation.check, outcome: 'exempt', match: null, why: mutation.exempt, file: null, summary: null })
           continue
         }
         const abs = `${ctx.checkout}/${mutation.file}`
@@ -4167,14 +4167,14 @@ function runTask(ctx, io, crash) {
         const original = io.readFile(abs)          // may throw: nothing written yet
         active.original = original
         if (original === null) {
-          rows.push({ check: mutation.check, outcome: 'unapplied', file: mutation.file, summary: null,
+          rows.push({ check: mutation.check, outcome: 'unapplied', match: null, file: mutation.file, summary: null,
             why: `${mutation.file} does not exist in the built tree` })
           active = null
           continue
         }
         const bound = applyMutationAnchor(original, mutation.find, mutation.replace)
         if (bound.text === null) {
-          rows.push({ check: mutation.check, outcome: BINDING_OUTCOME[bound.mode], file: mutation.file, summary: null,
+          rows.push({ check: mutation.check, outcome: BINDING_OUTCOME[bound.mode], match: null, file: mutation.file, summary: null,
             why: bindingWhy(bound.mode, mutation.file) })
           active = null
           continue
@@ -4188,6 +4188,15 @@ function runTask(ctx, io, crash) {
         active = null                              // restored: nothing in flight
         const summary = parseGateSummary(res.output)
         const wantedLine = JSON.stringify(`${CHECK_FAIL_PREFIX} ${mutation.check}`)
+        const matchOf = () => {
+          if (res.ok) return 'gate-green'
+          if (baselineGateDefect(res.output)) return 'errored'
+          // MUTATION F1: collapse the unmatched arm into `matched` and a check the gate
+          // never named reads exactly like one it named and failed.
+          return checkFailureLine(res.output, mutation.check) ? 'matched'               // ANCHOR VD5
+            : checkLabelMisdelimited(res.output, mutation.check) ? 'misdelimited'
+            : 'unmatched'
+        }
         const why = res.ok
           ? 'the gate stayed GREEN under the mutation'
           : baselineGateDefect(res.output)
@@ -4198,7 +4207,7 @@ function runTask(ctx, io, crash) {
               : checkLabelMisdelimited(res.output, mutation.check)
                 ? `the gate went red and DID print ${wantedLine}, but with a delimiter the driver does not read: the label must END THE LINE or be followed by a colon (${wantedLine} or ${JSON.stringify(`${CHECK_FAIL_PREFIX} ${mutation.check}: why`)}) — the print is not missing, its delimiter is wrong`
                 : `the gate went red but printed no ${wantedLine} line, so the check that failed is not the one under proof`)
-        rows.push({ check: mutation.check, outcome: why ? 'survived' : 'killed', file: mutation.file, summary, why })
+        rows.push({ check: mutation.check, outcome: why ? 'survived' : 'killed', match: matchOf(), file: mutation.file, summary, why })
         // #874 — a corrected anchor that leaves its check green is the BUILDER's refusal, not a
         // gate defect. An UNcorrected survivor is untouched and still indicts the gate.
         if (why) { if (!mutation.corrected) survivor ??= rows[rows.length - 1]; checkProofOutput ??= res.output }
@@ -4256,6 +4265,14 @@ function runTask(ctx, io, crash) {
     `A failing check must print \`${CHECK_FAIL_PREFIX} <check>\` or \`${CHECK_FAIL_PREFIX} <check>: <reason>\` on its own`,
     'line, with the identifier matching /^[A-Za-z0-9][A-Za-z0-9._-]*$/ (no spaces, no colons).',
     'A renamed check cannot be re-declared and reads as a mutation that killed nothing.',
+    // MUTATION F2: rewrite the second of these five lines so it no longer says the tap
+    // reporter ESCAPES anything, and the driver stops telling the gate author — in the very
+    // brief that asks for a new gate — which character is silently unmatchable.
+    'A # in a check LABEL is refused outright by the pattern above, and a # in a TEST NAME a',
+    "gate matches is worse: node's tap reporter ESCAPES it, so a test titled #945 is emitted",
+    'as `ok 1 - \\#945` and a matcher looking for #945 never matches. The check then reports a',
+    'failure whose cause is the NAME, not the code (#958). Name checks and tests A1/B2/C3 and',
+    'put the issue number in the PROSE. Only # was measured, on Node v26.7.0.',
   ].join('\n')
 
   // The ADDITIVE record: its own journal line and its own event kind, beside the
@@ -4339,7 +4356,7 @@ function runTask(ctx, io, crash) {
         ...(checkProofs ? [[
           '',
           'Per-check rows:',
-          ...checkProofs.map((row) => `- ${row.check}: ${row.outcome} — ${row.why}`),
+          ...checkProofs.map((row) => `- ${row.check}: ${row.outcome} (match: ${row.match ?? 'not measured'}) — ${row.why}`),
           '',
           'Mutated run output (verbatim, last 2000 chars):',
           String(checkProofOutput || gateProofOutput || '').slice(-2000),
@@ -4835,6 +4852,8 @@ function runTask(ctx, io, crash) {
   const panel = ctx.continuation === true ? panelSeats(seatList) : null
   if (ctx.continuation === true && !panel) panelLog({ panel_skipped: 'seats' })
   let gateTriaged = false
+  let gateObserving = false
+  let gateObserveTriaged = false
   // Gate A (mechanical): scope by git, never by self-report. #846 — it runs on EVERY
   // build round, bounced ones included. On b363-seatreask the non-done bounce path
   // `continue`d before this gate, so two envelope-shaped files the builder wrote into a
@@ -5000,6 +5019,83 @@ function runTask(ctx, io, crash) {
     }
     return { rows, fatal }
   }
+  // #958 — the build-defect-vs-gate-defect triage and its single gate repair, lifted
+  // out of the gate stage so the SAME valve is reachable from a builder round that did
+  // NOT return `done`. It lived inside `if (gateCmd) { stage(`gate:r${round}`) … }`,
+  // which is reachable only after a builder `done`: b464-createslane's builder returned
+  // `insufficient` BECAUSE the gate was red, the driver never ran the gate, the valve
+  // never opened, and the lane burned all four lead consults and escalated with
+  // `gate_repairs` still 0. Returns the (possibly re-run) gate result, and an
+  // `escalation` the CALLER must return — this closure never returns out of driveTask.
+  const gateDefectValve = (round, gateRes) => {
+    if (gateRes.ok || round < limits.gate_fails_to_triage || gateTriaged || gateRepairs >= limits.gate_repairs) return { gateRes }
+    if (gateObserving) gateObserveTriaged = true
+    else gateTriaged = true
+    gateAttention(`the acceptance gate failed ${round} rounds — escalated to reviewer triage (build defect vs gate defect)`, [planPath])
+    const tBrief = art(`gate-triage-r${round}.md`)
+    const partialTreeNote = gateObserving
+      ? '\n\nThe builder did NOT return done and the diff is partial. "The tree is unfinished" is not to be read as "the build is defective".'
+      : ''
+    io.writeFile(tBrief, `# Gate triage (round ${round})\n\nThe acceptance gate keeps failing. Decide which is defective — read the plan at ${planPath} then the gate command and its output, then the diff in ${ctx.checkout}.\n\nGate: ${gateCmd}\nOutput:\n${gateRes.output.slice(-3000)}\n\nReply with details {"defect": "build" | "gate", "reason": "..."}.${partialTreeNote}`)
+    const triage = assignAndWait('reviewer', tBrief, 'gate-triage')
+    if (gateObserving && triage.status === 'done' && triage.details?.defect === 'gate') gateTriaged = true
+    if (triage.status === 'done' && triage.details?.defect === 'gate') {
+      if (noGateCustodian()) {
+        return { gateRes, escalation: gateCustodyEscalate(`the reviewer triaged the repeated gate failures as a GATE defect: ${triage.details?.reason || 'no reason given'}`) }
+      }
+      gateRepairs += 1
+      stage(`gate-repair:${gateRepairs}`)
+      const rBrief = art('gate-repair-bounce.md')
+      io.writeFile(rBrief, `# Gate repair (one allowed per task)\n\nYou hold gate custody after plan acceptance: read the plan, then repair the gate.\n\nThe reviewer diagnosed a GATE DEFECT: ${triage.details?.reason || ''}\n\nPreserve the old gate under a .r1 suffix, then fix the gate so it checks exactly what the brief asked — you may NOT weaken any legitimate check. Return the (possibly identical) gate_cmd in details.\n\nGate: ${gateCmd}\nPlan: ${planPath}\nBrief: ${ctx.briefFile}`)
+      const rep = assignAndWait(GATE_CUSTODIAN, rBrief, 'gate-repair')
+      // TL4 — the `gate-repair:${gateRepairs}` stage opened above is CLOSED on each of the
+      // three NORMAL exits below, so a caller's own stageComplete() always pops its own
+      // `gate:r${round}` and never this one. Stages are a LIFO stack
+      // (crew/drive.mjs:2789-2799) and headless replays these rows to reconstruct the round
+      // a seat refusal belongs to (crew/headless.mjs:1391-1407): a leaked repair stage
+      // misattributes it, and before this lane the DONE path leaked it too. Explicit closes
+      // on the normal branches, NEVER an unconditional `finally` — an unexpected throw must
+      // still leave the failing stage OPEN, which is what the journal contract means.
+      if (rep.status !== 'done' || !rep.details?.gate_cmd) { stageComplete(); return { gateRes } }
+      acceptRepairedGate(rep.details.gate_cmd, `gate-reverify:${gateRepairs}`)
+      // The re-proof no longer trusts bare `pristine.ok`: a repaired gate
+      // that crashes or prints no summary on the pristine tree is not red
+      // for the right reason either (#153, ADR-030 §3). The budget is
+      // already spent here, so a failed re-proof escalates — with the
+      // diagnosis that actually applies.
+      const settled = settleFailedProof()
+      if (settled.escalation) { stageComplete(); return { gateRes, escalation: settled.escalation } }
+      gateRes = runGate(`gate-repair:${gateRepairs}`, gateCmd) // re-run immediately; no builder round consumed
+      stageComplete()
+    }
+    return { gateRes }
+  }
+
+  // #958 — OBSERVATION ONLY. Every triage-eligible non-done round reaches the gate and
+  // the repair valve before the lead is consulted; the judgment route itself is untouched,
+  // red or green. b464-createslane's builder returned `insufficient` BECAUSE the gate was
+  // red, the driver never ran the gate, the valve never opened, and the lane burned all four
+  // lead consults and escalated with `gate_repairs` still 0. Below the triage threshold no
+  // gate can open the valve; once the gate has been triaged or the single repair spent, a
+  // non-done round is byte-for-byte what it was before this lane.
+  const gateBeforeConsult = (round) => {
+    if (!gateCmd || round < limits.gate_fails_to_triage || gateTriaged || gateObserveTriaged || gateRepairs >= limits.gate_repairs) return {}
+    stage(`gate:r${round}`)
+    const probe = runGate(`gate:r${round}`, gateCmd)
+    // MUTATION B2: neutralise this call and a triage-eligible non-done path observes the
+    // gate but never reaches triage, so a lane still terminates on consult exhaustion with
+    // gate_repairs 0.
+    gateObserving = true
+    const triaged = gateDefectValve(round, probe)                                      // ANCHOR VD2
+    gateObserving = false
+    if (triaged.escalation) { stageComplete(); return { escalation: triaged.escalation } }
+    // MUTATION D1: rewrite this two-line tail into `return probe.ok ? {} : { escalation: … }`
+    // and a RED observation again diverts the round away from the lead — its questions never
+    // answered — which is the causation-from-observation shape plan-check TL1 rejected. A
+    // GREEN observation is untouched, so the mutation probes exactly the red half D1 claims.
+    stageComplete()
+    return {}                                                                          // ANCHOR VD3
+  }
   build:
   for (let round = 1; round <= limits.build_rounds + extraRounds; round += 1) {
     const finalRound = () => round >= limits.build_rounds + extraRounds
@@ -5014,6 +5110,11 @@ function runTask(ctx, io, crash) {
       const bounced = scopeGate(round, finalRound)                                    // ANCHOR A1
       if (bounced.escalation) return bounced.escalation
       if (bounced.bounce) { buildBrief = bounced.bounce; buildNote = 'scope-fix'; continue }
+      // MUTATION B1: replace this call with a literal `{}` and a builder that returned
+      // `insufficient` at the triage threshold never runs the gate, so the round reaches the
+      // lead with the gate unobserved and the repair valve unreachable — the b464-createslane defect.
+      const valve = gateBeforeConsult(round)                                           // ANCHOR VD4
+      if (valve.escalation) return valve.escalation
       const asked = parseQuestions(env.details)
       const questions = asked?.questions ?? []
       if (asked) io.log(recordRow({ at: io.now(), member_questions: { role: 'builder', round, total: questions.length, ids: questions.map((q) => q.id), rejected: asked.rejected } }))
@@ -5093,38 +5194,11 @@ function runTask(ctx, io, crash) {
     if (gateCmd) {
       stage(`gate:r${round}`)
       let gateRes = runGate(`gate:r${round}`, gateCmd)
-      if (!gateRes.ok && round >= limits.gate_fails_to_triage && !gateTriaged && gateRepairs < limits.gate_repairs) {
-        gateTriaged = true
-        gateAttention(`the acceptance gate failed ${round} rounds — escalated to reviewer triage (build defect vs gate defect)`, [planPath])
-        const tBrief = art(`gate-triage-r${round}.md`)
-        io.writeFile(tBrief, `# Gate triage (round ${round})\n\nThe acceptance gate keeps failing. Decide which is defective — read the plan at ${planPath} then the gate command and its output, then the diff in ${ctx.checkout}.\n\nGate: ${gateCmd}\nOutput:\n${gateRes.output.slice(-3000)}\n\nReply with details {"defect": "build" | "gate", "reason": "..."}.`)
-        const triage = assignAndWait('reviewer', tBrief, 'gate-triage')
-        if (triage.status === 'done' && triage.details?.defect === 'gate') {
-          if (noGateCustodian()) {
-            stageComplete()
-            return gateCustodyEscalate(`the reviewer triaged the repeated gate failures as a GATE defect: ${triage.details?.reason || 'no reason given'}`)
-          }
-          gateRepairs += 1
-          stage(`gate-repair:${gateRepairs}`)
-          const rBrief = art('gate-repair-bounce.md')
-          io.writeFile(rBrief, `# Gate repair (one allowed per task)\n\nYou hold gate custody after plan acceptance: read the plan, then repair the gate.\n\nThe reviewer diagnosed a GATE DEFECT: ${triage.details?.reason || ''}\n\nPreserve the old gate under a .r1 suffix, then fix the gate so it checks exactly what the brief asked — you may NOT weaken any legitimate check. Return the (possibly identical) gate_cmd in details.\n\nGate: ${gateCmd}\nPlan: ${planPath}\nBrief: ${ctx.briefFile}`)
-          const rep = assignAndWait(GATE_CUSTODIAN, rBrief, 'gate-repair')
-          if (rep.status === 'done' && rep.details?.gate_cmd) {
-            acceptRepairedGate(rep.details.gate_cmd, `gate-reverify:${gateRepairs}`)
-            // The re-proof no longer trusts bare `pristine.ok`: a repaired gate
-            // that crashes or prints no summary on the pristine tree is not red
-            // for the right reason either (#153, ADR-030 §3). The budget is
-            // already spent here, so a failed re-proof escalates — with the
-            // diagnosis that actually applies.
-            const settled = settleFailedProof()
-            if (settled.escalation) {
-              stageComplete()
-              return settled.escalation
-            }
-            gateRes = runGate(`gate-repair:${gateRepairs}`, gateCmd) // re-run immediately; no builder round consumed
-          }
-        }
-      }
+      // MUTATION B3: neutralise this call and the triage this lane hoisted no longer
+      // fires where it always fired — the DONE-path valve, gone.
+      const valved = gateDefectValve(round, gateRes)                                   // ANCHOR VD1
+      if (valved.escalation) { stageComplete(); return valved.escalation }
+      gateRes = valved.gateRes
       // First green of this generation: measure, once. A generation repaired
       // above was already proven by its re-proof, so this is a no-op there —
       // which is what keeps the whole run within ADR-030's `1 + gate_repairs`
@@ -6764,6 +6838,15 @@ export const HARDENING_OUTCOMES = Object.freeze([
   'witness-missing', 'witness-absent', 'witness-unreadable',
   'unproven', 'unapplied', 'anchor-absent', 'anchor-ambiguous', 'anchor-unsafe',
 ])
+
+// #958 — `survived` is ONE token for two different facts: a gate that stayed GREEN under
+// the mutation (the gate does not discriminate) and a gate that went RED while the
+// declared label never reached a `FAIL` line (the check under proof never adjudicated at
+// all). b464-createslane spent its last lead consult telling those apart by hand. The
+// outcome enum is load-bearing downstream (scripts/factory/prove-mutations.mjs,
+// scripts/factory/ledger.mjs, ADR-030), so the distinction is an ADDITIVE field. A row
+// that never ran a mutated gate carries `match: null` — unmeasured is null, never a value.
+export const CHECK_MATCHES = Object.freeze(['matched', 'misdelimited', 'unmatched', 'gate-green', 'errored'])
 
 // #839 — `parseSuiteCounts` (crew/drive.mjs:1789) reads AGGREGATE totals and names no
 // test, and a `--test-name-pattern` matching nothing reports the FILE wrapper as

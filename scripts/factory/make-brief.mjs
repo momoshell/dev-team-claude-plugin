@@ -235,6 +235,9 @@ export const CONVENTIONS_BLOCK = Object.freeze(`- The factory scripts carry a No
 // only delivery that does not depend on an orchestrator remembering. The
 // discrimination proof asks whether a mutation reddens a check, never whether it
 // exercises what the check claims, so the author-side rule ships in the brief (#409).
+// MUTATION F3: rewrite the tap-escape line so it no longer says the reporter escapes
+// anything, and no compiled planner brief carries the warning — every future gate author
+// is told nothing about the one character measured to break matching (#958).
 export const MUTATION_CONTRACT_BLOCK = Object.freeze(`A per-check mutation declaration is MACHINE-APPLIED: the driver find-and-replaces
 on a scratch copy of the built tree, re-runs the gate, and requires that one check
 to redden. A prose field (\`"kills": "leaving the loop unconditional"\`) cannot be
@@ -304,6 +307,18 @@ gate carries, above the check that prints \`FAIL C1\`:
 
 and the declaration is \`{ "check": "C1", "file": "scripts/factory/make-brief.mjs", "find": "standingBlocks().mutations", "replace": "standingBlocks().nothing" }\`.
 Rationale: #330.
+
+NEVER PUT A \`#\` IN A CHECK LABEL, AND NEVER NAME A TEST AFTER THE ISSUE IT CLOSES.
+\`CHECK_LABEL\` refuses a declared \`check\` containing \`#\` outright, so \`{ "check": "#945" }\`
+is refused at plan time. The same character is silently fatal one level down:
+Node's tap reporter ESCAPES a # inside a test title, so a test named "#945 the valve opens"
+is emitted as \`ok 1 - \\#945 the valve opens\` and a gate matching the title \`#945\` never
+matches it. The check then reports a failure whose cause is the NAME, not the code, and it
+reads to an operator exactly like a real red. A lane spent its last lead consult diagnosing
+that and escalated (#958). Use \`A1\`, \`B2\`, \`C3\` for check labels AND for the test names a
+gate adjudicates, and put the issue number in the check's PROSE. Only \`#\` was measured, on
+Node v26.7.0, through \`node:test/reporters\`' tap; which other characters that reporter
+escapes is not enumerated here and may be version-dependent.
 
 A gate that shells out to \`node --test\` MUST pass \`--test-reporter=tap\`. node
 --test picks its reporter by context and the summary lines differ in their

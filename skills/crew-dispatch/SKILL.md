@@ -25,6 +25,7 @@ a parsed brief or a green-looking dispatch insufficient evidence.
 | Compiling and checking a fence | `references/fences.md` | Check both compiler passes, consumers, and arrival in the live lane. |
 | Choosing tier for a protected surface | `references/tier.md` | Apply the floor at plan-accept and settle the pane tier at boot. |
 | Isolating and closing the checkout | `references/worktree.md` | Use a real worktree, detect dirty symlinks, and rebase before the PR. |
+| Deciding whether to dry-run a batch | `references/flags.md` | A dry run is not a step; use it only where creating branches is unwelcome. |
 
 ## Critical rules
 
@@ -37,6 +38,7 @@ a parsed brief or a green-looking dispatch insufficient evidence.
 - Compile the fence register twice: first to discover coupled sources, then to acknowledge exactly them (#145).
 - Verify that the fence ARRIVED in `crew.json` and `journal.jsonl`, not merely that it parsed (b88-b91).
 - Rebase the lane onto `main` before opening the PR (#500).
+- A dry run is not a step of the recipe, and a green one is not a validated dispatch (#961).
 
 ## Key references
 

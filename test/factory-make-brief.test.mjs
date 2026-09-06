@@ -25,6 +25,7 @@ import { PROPOSAL_BLOCK as EMIT_PROPOSAL_BLOCK, PROPOSAL_KEYS as EMIT_PROPOSAL_K
 import { defaultProfilePath, probeRepo } from '../scripts/factory/probe-repo.mjs'
 import { CHECK_FAIL_PREFIX, CREATES_MARK as DRIVE_CREATES_MARK, DIRECTED_BLOCK as DRIVE_DIRECTED_BLOCK, DIRECTED_KEYS as DRIVE_DIRECTED_KEYS, MUTATIONS_MAX, createsFromBrief, parseDirectedBrief } from '../crew/drive.mjs'
 import { PROTECTED_PATHS } from '../crew/protected-paths.mjs'
+import { CTX, buildEnv, driveTask, fakeIo, leadEnv, planEnv, RED, reviewEnv } from '../crew/drive-fixtures.mjs'
 
 const SCRIPT = join(ROOT, 'scripts', 'factory', 'make-brief.mjs')
 const fixtureRoot = mkdtempSync(join(tmpdir(), 'factory-make-brief-'))
@@ -2420,4 +2421,54 @@ test('stale acknowledgements refuse before unfenced coupled sources', () => {
   assert.equal(result.status, 2)
   assert.match(result.stderr, /stale-read-ack/)
   assert.doesNotMatch(result.stderr, /coupled-source-unfenced/)
+})
+
+test('b476 F3 the mutation contract warns that a hash in a test name is unmatchable in tap', () => {
+  const root = fixture('hash-test-name')
+  const { brief } = compile(root)
+  const contract = section(brief, '## Per-check mutations')
+  const flat = (text) => text.replace(/\s+/g, ' ').trim()
+  const clauses = [
+    'NEVER PUT A `#` IN A CHECK LABEL',
+    "Node's tap reporter ESCAPES a # inside a test title",
+    'a test named "#945 the valve opens"',
+    'Use `A1`, `B2`, `C3`',
+    'Only `#` was measured, on Node v26.7.0',
+    '(#958)',
+  ]
+  for (const clause of clauses) {
+    assert.ok(flat(contract).includes(clause), clause)
+    assert.ok(flat(MUTATION_CONTRACT_BLOCK).includes(clause), clause)
+  }
+})
+
+test('b476 RV1 hardening a build verdict on a non-done round leaves the done-path triage armed', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-bad' } }),
+      'builder:1': buildEnv({ status: 'insufficient', summary: 'the tree is still incomplete' }),
+      'lead:1': leadEnv('bounce', 'continue to the triage threshold'),
+      'builder:2': buildEnv({ status: 'insufficient', summary: 'the tree is still incomplete' }),
+      'reviewer:1': { status: 'done', role: 'reviewer', details: { defect: 'build', reason: 'the partial diff is not evidence of a gate defect' } },
+      'lead:2': leadEnv('bounce', 'complete the build before deciding the gate'),
+      'builder:3': buildEnv(),
+      'reviewer:2': { status: 'done', role: 'reviewer', details: { defect: 'gate', reason: 'the completed tree still exposes a gate defect' } },
+      'lead:3': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } },
+      'reviewer:3': reviewEnv('pass'),
+    },
+    runs: {
+      'gate-bad:1': { ok: false, output: RED(3) },
+      'gate-bad:2': { ok: false, output: RED(3) },
+      'gate-bad:3': { ok: false, output: RED(3) },
+      'gate-fixed': { ok: true, output: '' },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.equal(res.details.gate.repairs, 1)
+  assert.equal(res.details.gate.cmd, 'gate-fixed')
+  assert.equal(io.calls.assign.filter(({ role, note }) => role === 'reviewer' && note === 'gate-triage').length, 2)
+  assert.equal(io.calls.assign.filter(({ role, note }) => role === 'lead' && note === 'gate-repair').length, 1)
 })

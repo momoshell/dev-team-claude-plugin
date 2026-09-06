@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import {
   B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_IMPL_FILE, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, B384_CORRECTED_FIND, B384_CORRECTED_REPLACE, B384_GREEN, B384_MUTATION, B384_RED, B44_LEADLESS_CTX, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_PLAN, CHECK_RUNS, CONVERGE_CTX, CONVERGE_GATE, CONVERGE_PLAN, CTX, CTX_DIRECTED, CTX_REPAIR, DIRECTED_FILES, D_ASK, D_AUTO, ENVELOPE_FIELD_KINDS, EXECUTIONS, FAILURE_UPGRADE, GATE_REAP_CMD_EOF, GATE_REAP_SWEEP_MARKER, GATE_SUMMARY_PREFIX, HARDENING_MARKS, HARDENING_OUTCOMES, HARDENING_REFUSALS, MODIFIER_OUTCOMES, MUTATIONS_MAX, MUTATION_BINDING_FAILURES, MUTATION_OUTCOMES, PARTIAL_REVIEWED, RED, SENSITIVITY_FLOOR, SHAPE_MAJOR_PHASES, SHAPE_ROUNDED_STAGES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, UNIVERSAL_STAGE_HEADS, VALIDATION_LANE_UNLOADABLE, VARIANTS, VARIANT_NAMES, WRITE_SURFACES, applyMutationAnchor, applyPrescriptionLines, b127GatePaths, b127PidAlive, b318Builders, b318SiteA, b376Build, b376DiskProofIo, b376ProofIo, b376Review, b376StageStack, b384Io, b44AssertLeadlessGate, b44GatePlan, bindMutationAnchor, buildEnv, collapseStages, dispositionIo, driveTask, existsSync, fakeIo, gateReapCommand, gateReapFresh, gateReapOriginal, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, hardeningBounceLines, hardeningBriefLines, hardeningDebt, hardeningOf, join, laneFence, leadEnv, mutationChangesTokens, outOfScopeFiles, planEnv, protectedPlanEnv, readFileSync, resumeGreen, resumeRed, reviewConvergeRun, reviewEnv, reviewFindings, rmSync, s843Ctx, s843Io, s843PlanEnv, s843Rows, scopeMatcher, scopedPath, scratchDir, shapeDefect, spawnSync, stageShape, treeDigest, triageEnv, undeclaredStage, validateHardened, validateMutations, validationPlan, validationProbeRun, validationRows,
 } from './drive-fixtures.mjs'
-import { HARDENING_APPEAL_SHAPE, HARDENING_CLASSES, hardeningAppealLines, hardeningAppealRequest, hardeningClassOf } from './drive.mjs'
+import { CHECK_MATCHES, HARDENING_APPEAL_SHAPE, HARDENING_CLASSES, hardeningAppealLines, hardeningAppealRequest, hardeningClassOf } from './drive.mjs'
 
 test('the scope-gate catches a build that crossed another lane fence', () => {
   const file = 'scripts/factory/intake.mjs'
@@ -1122,7 +1122,7 @@ test('per-check mutation records an additive killed row and event', () => {
   const res = driveTask(CTX, io)
   assert.equal(res.status, 'done')
   assert.equal(res.details.gate.check_discrimination, 'proven')
-  assert.deepEqual(res.details.gate.check_discriminations[0], { check: 'check-one', outcome: 'killed', file: 'a.mjs', summary: { total: 3, failed: 1, errored: 0 }, why: null })
+  assert.deepEqual(res.details.gate.check_discriminations[0], { check: 'check-one', outcome: 'killed', match: 'matched', file: 'a.mjs', summary: { total: 3, failed: 1, errored: 0 }, why: null })
   assert.equal(io.calls.emits.filter((event) => event.kind === 'check-discrimination').length, 1)
   assert.equal(io.calls.runClean.length, 1)
   assert.equal(io.calls.run.filter(({ cmd }) => cmd === 'gate-cmd').length, 3)
@@ -1149,7 +1149,7 @@ test('an exemption is recorded with its reason and runs no mutation gate', () =>
     envelopes: CHECK_ENVELOPES(mutations), runs: CHECK_RUNS(), changed: ['a.mjs', 'a.test.mjs'] })
   const res = driveTask(CTX, io)
   assert.equal(res.status, 'done')
-  assert.deepEqual(res.details.gate.check_discriminations[0], { check: 'skip', outcome: 'exempt', why: 'not applicable', file: null, summary: null })
+  assert.deepEqual(res.details.gate.check_discriminations[0], { check: 'skip', outcome: 'exempt', match: null, why: 'not applicable', file: null, summary: null })
   assert.equal(io.calls.run.filter(({ cmd }) => cmd === 'gate-cmd').length, 3)
 })
 
@@ -1185,7 +1185,7 @@ test('an anchor-absent mutation is not accepted as proof', () => {
   assert.equal(io.calls.assign.filter(({ role }) => role === 'lead').length, 0)
   assert.equal(res.details.gate.repairs, 0)
   assert.equal(res.details.escalation.why.includes('ghost'), true)
-  assert.deepEqual(io.calls.logs.find((line) => line.gate_check_discriminations).gate_check_discriminations[0], { check: 'ghost', outcome: 'anchor-absent', file: 'a.mjs', summary: null, why: 'the declared find text is nowhere in the built a.mjs, exactly or whitespace-normalized' })
+  assert.deepEqual(io.calls.logs.find((line) => line.gate_check_discriminations).gate_check_discriminations[0], { check: 'ghost', outcome: 'anchor-absent', match: null, file: 'a.mjs', summary: null, why: 'the declared find text is nowhere in the built a.mjs, exactly or whitespace-normalized' })
   assert.equal(io.calls.writeLog.filter(({ path }) => path === CHECK_FILE).length, 0)
 })
 
@@ -1299,7 +1299,7 @@ test('b385 C1 a builder correction that binds once and leaves its check failing 
   assert.equal(res.status, 'done')
   assert.equal(res.details.gate.check_discrimination, 'proven')
   const proof = io.calls.emits.find((event) => event.kind === 'check-discrimination')?.checks?.[0]
-  assert.deepEqual(proof, { check: 'B2', outcome: 'killed', file: 'crew/drive.mjs', summary: { total: 3, failed: 1, errored: 0 }, why: null, correction: 'accepted' })
+  assert.deepEqual(proof, { check: 'B2', outcome: 'killed', match: 'matched', file: 'crew/drive.mjs', summary: { total: 3, failed: 1, errored: 0 }, why: null, correction: 'accepted' })
   const bind = io.calls.logs.find((line) => line.mutation_anchor_bind)?.mutation_anchor_bind
   assert.equal(bind.corrected, 1)
   const absence = io.calls.logs.find((line) => line.mutation_anchor_absent)?.mutation_anchor_absent
@@ -1347,7 +1347,7 @@ test('b385 G1 an all-bind lane pins its legacy proof row byte-identically beside
   const res = driveTask(CTX, io)
   assert.equal(res.status, 'done')
   assert.equal(res.details.gate.check_discrimination, 'proven')
-  assert.deepEqual(res.details.gate.check_discriminations[0], { check: 'check-one', outcome: 'killed', file: 'a.mjs', summary: { total: 3, failed: 1, errored: 0 }, why: null })
+  assert.deepEqual(res.details.gate.check_discriminations[0], { check: 'check-one', outcome: 'killed', match: 'matched', file: 'a.mjs', summary: { total: 3, failed: 1, errored: 0 }, why: null })
   assert.equal(Object.hasOwn(res.details.gate, 'mutation_bind'), false)
   const binds = io.calls.logs.filter((line) => line.mutation_anchor_bind).map((line) => line.mutation_anchor_bind)
   assert.deepEqual(binds, [{ generation: 1, declared: 1, exact: 1, normalized: 0, absent: 0, corrected: 0, checks: [{ check: 'check-one', file: 'a.mjs', status: 'exact' }] }])
@@ -1446,7 +1446,7 @@ test('the missing-file unapplied branch records its distinct reason and writes n
   const first = io.calls.emits.find((event) => event.kind === 'check-discrimination')
   assert.equal(first.checks[0].outcome, 'unapplied')
   assert.match(first.checks[0].why, /does not exist/)
-  assert.deepEqual(first.checks[0], { check: 'missing-file', outcome: 'unapplied', file: 'missing.mjs', summary: null, why: 'missing.mjs does not exist in the built tree' })
+  assert.deepEqual(first.checks[0], { check: 'missing-file', outcome: 'unapplied', match: null, file: 'missing.mjs', summary: null, why: 'missing.mjs does not exist in the built tree' })
   assert.equal(io.calls.writeLog.filter(({ path }) => path.startsWith(`${CTX.checkout}/`)).length, 0)
 })
 
@@ -2631,10 +2631,239 @@ test('RV1-1 an all-exempt declaration set journals a completed bind check', () =
   assert.equal(res.status, 'done')
   assert.equal(res.details.gate.check_discrimination, 'proven')
   assert.deepEqual(res.details.gate.check_discriminations, [
-    { check: 'all-exempt', outcome: 'exempt', why: 'no source anchor is required', file: null, summary: null },
+    { check: 'all-exempt', outcome: 'exempt', match: null, why: 'no source anchor is required', file: null, summary: null },
   ])
   assert.deepEqual(io.calls.logs.filter((line) => line.mutation_anchor_bind).map((line) => line.mutation_anchor_bind), [
     { generation: 1, declared: 0, exact: 0, normalized: 0, absent: 0, corrected: 0, checks: [] },
   ])
   assert.equal(io.calls.logs.filter((line) => line.mutation_anchor_absent).length, 0)
+})
+
+test('b476 A1 a mutation check label carrying a hash is refused as a non-token', () => {
+  const hash = { check: '#945', file: 'a.mjs', find: 'x', replace: 'y' }
+  const refused = validateMutations([hash])
+  assert.equal(refused.length, 1)
+  assert.match(refused[0].why, /stable token/)
+  assert.deepEqual(validateMutations([{ ...hash, check: 'A1' }]), [])
+  const embedded = validateMutations([{ ...hash, check: 'a#b' }])
+  assert.equal(embedded.length, 1)
+  assert.match(embedded[0].why, /stable token/)
+})
+
+test('b476 B1 a non-done builder round runs the acceptance gate before the lead answers', () => {
+  const plan = planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } })
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': plan,
+      'builder:1': buildEnv({ status: 'insufficient', summary: 'the acceptance gate is red and I cannot make it green' }),
+      'lead:1': leadEnv('bounce', 'keep going until the triage threshold'),
+      'builder:2': buildEnv({ status: 'insufficient', summary: 'the acceptance gate is red and I cannot make it green' }),
+      'reviewer:1': { status: 'done', role: 'reviewer', details: { defect: 'build', reason: 'the second-round diff is partial' } },
+      'lead:2': leadEnv('bounce', 'steer the builder'),
+      'builder:3': buildEnv(),
+      'reviewer:2': reviewEnv('pass'),
+    },
+    runs: {
+      'gate-cmd:1': { ok: false, output: RED(3) },
+      'gate-cmd:2': { ok: false, output: 'expected valveX, found nothing, at crew/drive.mjs:5008' },
+      'gate-cmd:3': { ok: true, output: '' },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.ok(res.details.stages.includes('gate:r2'))
+  assert.equal(io.calls.run.filter(({ cmd }) => cmd === 'gate-cmd').length, 3)
+  const gateStage = io.calls.logs.findIndex((row) => row.stage === 'gate:r2')
+  const leadAnswer = io.calls.logs.findIndex((row) => row.envelope === 'lead2')
+  assert.notEqual(gateStage, -1)
+  assert.notEqual(leadAnswer, -1)
+  assert.ok(gateStage < leadAnswer, 'the gate stage must open before the lead answers')
+  assert.equal(res.details.consults, 2)
+  assert.match(io.calls.writes[`${TD}/build-bounce-r2.md`], /Build bounce \(round 2\)/)
+})
+
+test('b476 B2 lead-consult exhaustion cannot terminate a lane with the gate repair unspent', () => {
+  const plan = planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-bad' } })
+  const envelopes = {
+    'planner:1': plan,
+    'reviewer:1': { status: 'done', role: 'reviewer', details: { defect: 'gate', reason: 'the gate names a symbol the brief never asked for' } },
+  }
+  for (let n = 1; n <= 5; n += 1) {
+    envelopes[`builder:${n}`] = buildEnv({ status: 'insufficient', summary: 'the gate is red and I cannot make it green' })
+    envelopes[`lead:${n}`] = leadEnv('bounce', 'keep going', { gate_cmd: 'gate-fixed' })
+  }
+  const io = fakeIo({
+    envelopes,
+    runs: {
+      'gate-bad:1': { ok: false, output: RED(3) }, // baseline
+      // Round 1 is below the triage threshold; round 2 is the observation that triages.
+      'gate-bad:2': { ok: false, output: RED(3) },
+      'gate-fixed': { ok: true, output: '' },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'escalation')
+  assert.equal(res.details.escalation.where, 'build')
+  assert.match(res.details.escalation.why, /lead consult limit \(4\) exhausted/)
+  assert.equal(res.details.gate.repairs, 1)
+  assert.equal(res.details.gate.cmd, 'gate-fixed')
+  assert.equal(io.calls.assign.filter((a) => a.role === 'builder').length, 5)
+  assert.equal(io.calls.run.filter(({ cmd }) => cmd === 'gate-bad').length, 2)
+  assert.ok(Object.values(io.calls.writes).some((content) => /GATE DEFECT/.test(content)))
+  assert.match(io.calls.writes[`${TD}/gate-triage-r2.md`], /builder did NOT return done/)
+
+  const open = []
+  for (const row of io.calls.logs) {
+    if (typeof row.stage === 'string' && row.event === undefined) open.push(row.stage)
+    else if (typeof row.stage_done === 'string') {
+      const at = open.lastIndexOf(row.stage_done)
+      if (at >= 0) open.splice(at, 1)
+    }
+  }
+  assert.deepEqual(open, [], 'the terminal journal must replay as an empty stage stack')
+  const doneAt = (label) => io.calls.logs.findIndex((row) => row.stage_done === label)
+  assert.notEqual(doneAt('gate-repair:1'), -1)
+  assert.notEqual(doneAt('gate:r2'), -1)
+  assert.ok(doneAt('gate-repair:1') < doneAt('gate:r2'), 'the repair stage must close before the gate stage that opened it')
+})
+
+test('b476 RV1 a build verdict on a non-done round leaves the done-path triage armed', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-bad' } }),
+      'builder:1': buildEnv({ status: 'insufficient', summary: 'the tree is still incomplete' }),
+      'lead:1': leadEnv('bounce', 'continue to the triage threshold'),
+      'builder:2': buildEnv({ status: 'insufficient', summary: 'the tree is still incomplete' }),
+      'reviewer:1': { status: 'done', role: 'reviewer', details: { defect: 'build', reason: 'the partial diff is not evidence of a gate defect' } },
+      'lead:2': leadEnv('bounce', 'complete the build before deciding the gate'),
+      'builder:3': buildEnv(),
+      'reviewer:2': { status: 'done', role: 'reviewer', details: { defect: 'gate', reason: 'the completed tree still exposes a gate defect' } },
+      'lead:3': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } },
+      'reviewer:3': reviewEnv('pass'),
+    },
+    runs: {
+      'gate-bad:1': { ok: false, output: RED(3) }, // baseline
+      'gate-bad:2': { ok: false, output: RED(3) }, // round-2 observation
+      'gate-bad:3': { ok: false, output: RED(3) }, // round-3 done path
+      'gate-fixed': { ok: true, output: '' },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.equal(res.details.gate.repairs, 1)
+  assert.equal(res.details.gate.cmd, 'gate-fixed')
+  assert.equal(io.calls.assign.filter(({ role, note }) => role === 'reviewer' && note === 'gate-triage').length, 2)
+  assert.equal(io.calls.assign.filter(({ role, note }) => role === 'lead' && note === 'gate-repair').length, 1)
+  assert.match(io.calls.writes[`${TD}/gate-triage-r2.md`], /builder did NOT return done/)
+  assert.match(io.calls.writes[`${TD}/gate-triage-r2.md`], /diff is partial/)
+  assert.doesNotMatch(io.calls.writes[`${TD}/gate-triage-r3.md`], /builder did NOT return done/)
+})
+
+test('b476 D1 a red-gate insufficient still consults the lead and has its questions answered in that bounce', () => {
+  const questions = [{ id: 'b1', question: 'Which helper should change?' }, { id: 'b2', question: 'Which test should cover it?' }]
+  const plan = planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } })
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': plan,
+      'builder:1': buildEnv({ status: 'insufficient', summary: 'first-round plan gap' }),
+      'lead:1': leadEnv('bounce', 'continue to the triage threshold'),
+      'builder:2': buildEnv({ status: 'insufficient', summary: 'plan gap', details: { questions } }),
+      'reviewer:1': { status: 'done', role: 'reviewer', details: { defect: 'build', reason: 'the diff is partial' } },
+      'lead:2': leadEnv('bounce', 'steer the builder', { answers: [{ id: 'b2', answer: 'crew/drive-build.test.mjs' }] }),
+      'builder:3': buildEnv(),
+      'reviewer:2': reviewEnv('pass'),
+    },
+    runs: {
+      'gate-cmd:1': { ok: false, output: RED(3) },
+      'gate-cmd:2': { ok: false, output: 'expected valveX, found nothing, at crew/drive.mjs:5008' },
+      'gate-cmd:3': { ok: true, output: '' },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.equal(res.details.consults, 2)
+  const decision = io.calls.writes[`${TD}/decision-2.md`]
+  assert.match(decision, /b1/)
+  assert.match(decision, /Which helper should change\?/)
+  assert.match(decision, /b2/)
+  assert.match(decision, /Which test should cover it\?/)
+  const bounce = io.calls.writes[`${TD}/build-bounce-r2.md`]
+  assert.match(bounce, /b2: Which test should cover it\?/)
+  assert.match(bounce, /ANSWER: crew\/drive-build\.test\.mjs/)
+  assert.match(bounce, /b1: Which helper should change\?/)
+  assert.match(bounce, /UNANSWERED/)
+  assert.deepEqual(io.calls.logs.find((entry) => entry.question_answers)?.question_answers.unanswered, ['b1'])
+  assert.equal(Object.values(io.calls.writes).some((content) => /ACCEPTANCE GATE is red/.test(content)), false)
+})
+
+test('b476 E1 a non-done builder round runs the scope gate before the acceptance gate', () => {
+  const file = 'scripts/factory/intake.mjs'
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }),
+      'builder:1': buildEnv({ status: 'insufficient' }),
+    },
+    runs: { 'gate-cmd:1': { ok: false, output: RED(3) } },
+    changed: [file],
+  })
+  const res = driveTask({ ...CTX, laneFence: [{ lane: 'intake-loop', files: [file] }] }, io)
+  assert.equal(res.status, 'escalation')
+  assert.equal(res.details.escalation.where, 'scope')
+  assert.equal(io.calls.run.filter(({ cmd }) => cmd === 'gate-cmd').length, 1)
+})
+
+test('b476 F1 an unmatched FAIL label is recorded distinctly from a killed one', () => {
+  const run = (output) => {
+    const io = fakeIo({
+      files: { [CHECK_FILE]: CHECK_BUILT }, writeThrough: true,
+      cleanRuns: { ...CHECK_CLEAN, 'gate-fixed': { ok: false, output: RED(3) } },
+      envelopes: CHECK_ENVELOPES([CHECK_MUTATION], { 'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } } }),
+      runs: {
+        ...CHECK_RUNS(output),
+        'gate-fixed:1': { ok: true, output: `green\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":0,"errored":0}` },
+        'gate-fixed:2': { ok: false, output: `FAIL check-one: caught\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":1,"errored":0}` },
+      },
+      changed: ['a.mjs', 'a.test.mjs'], emit: true,
+    })
+    const res = driveTask(CTX, io)
+    assert.equal(res.status, 'done')
+    return io.calls.emits.find((event) => event.kind === 'check-discrimination').checks[0]
+  }
+  const unmatched = run(`PASS check-one\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":1,"errored":0}`)
+  const killed = run()
+  assert.equal(unmatched.outcome, 'survived')
+  assert.equal(unmatched.match, 'unmatched')
+  assert.match(unmatched.why, /printed no "FAIL check-one" line/)
+  assert.equal(killed.outcome, 'killed')
+  assert.equal(killed.match, 'matched')
+  assert.notEqual(unmatched.match, killed.match)
+  for (const match of [unmatched.match, killed.match]) assert.ok(CHECK_MATCHES.includes(match), match)
+})
+
+test('b476 F2 the stable-identifier note warns that a hash in a test name is unmatchable in tap', () => {
+  const output = `green\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":0,"errored":0}`
+  const io = fakeIo({
+    files: { [CHECK_FILE]: CHECK_BUILT }, writeThrough: true, cleanRuns: CHECK_CLEAN,
+    envelopes: CHECK_ENVELOPES([CHECK_MUTATION], { 'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-cmd' } } }),
+    runs: {
+      'gate-cmd:1': { ok: false, output: RED(3) },
+      'gate-cmd:2': { ok: true, output }, 'gate-cmd:3': { ok: true, output }, 'gate-cmd:4': { ok: true, output },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  driveTask(CTX, io)
+  const brief = io.calls.writes[`${TD}/gate-discrimination-bounce.md`]
+  assert.match(brief, /CHECK IDENTIFIERS STABLE/)
+  assert.match(brief, /tap reporter ESCAPES/)
+  assert.match(brief, /A1\/B2\/C3/)
+  assert.match(brief, /Node v26\.7\.0/)
 })

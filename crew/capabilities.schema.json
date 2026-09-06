@@ -191,7 +191,8 @@
             "type": "string",
             "pattern": "^[A-Za-z0-9_-]+$"
           }
-        }
+        },
+        "optional": { "type": "boolean" }
       }
     },
     "agentgrant": {

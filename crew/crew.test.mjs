@@ -827,6 +827,48 @@ test('boot reclaims this task\'s provably dead descendants and proceeds', async 
   }
 })
 
+test('boot records a withheld optional vendor grant in crew.json and the journal', async () => {
+  const home = scratchDir('crew-boot-optional-grant-home-')
+  const { root: checkoutRoot, checkout } = testCheckout('crew-boot-optional-grant-checkout-')
+  const vendorless = scratchDir('crew-boot-optional-grant-vendor-')
+  const task = 'optional-vendor-record'
+  const packageName = '@crew-fixture/pi-thing'
+  const tools = ['ffgrep', 'fffind']
+  const base = capabilityRegister()
+  const register = capabilityRegister({ roles: {
+    builder: {
+      ...base.roles.builder,
+      by_agent: { pi: { vendor_extensions: [{ package: packageName, tools, optional: true }] } },
+    },
+  } })
+  try {
+    await withBreakerEnv({ DEVTEAM_LEDGER_DB: undefined, CREW_PI_VENDOR_ROOT: vendorless }, () => withHome(home, () => bootCmd(
+      { task, checkout, roles: 'lead,builder,reviewer', 'agent-builder': 'pi', 'headless-all': true, 'claude-bin': process.execPath },
+      { cmux: callCounter(), tree: callCounter(), renameTab: callCounter(), register },
+    )))
+    const dir = testCrewDir(home, checkout, task)
+    const crew = JSON.parse(readFileSync(join(dir, 'crew.json'), 'utf8'))
+    const boot = bootRecord(dir)
+    const row = crew.members.builder.vendor_withheld?.[0]
+    assert.equal(row?.package, packageName)
+    assert.deepEqual(row?.tools, tools)
+    assert.equal(row?.reason, 'vendor-extension-missing')
+    assert.match(row?.detail || '', new RegExp(packageName.replace('/', '\\/')))
+    assert.deepEqual(crew.members.lead.vendor_withheld, [])
+    assert.deepEqual(crew.members.reviewer.vendor_withheld, [])
+    assert.deepEqual(boot.vendor_withheld.builder, [row])
+    assert.deepEqual(boot.vendor_withheld.lead, [])
+    assert.deepEqual(boot.vendor_withheld.reviewer, [])
+    assert.equal(boot.vendor_withheld.builder[0].reason, 'vendor-extension-missing')
+    assert.equal(crew.members.builder.tools.includes('ffgrep'), false)
+    assert.equal(crew.members.builder.tools.includes('fffind'), false)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+    rmSync(vendorless, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+})
+
 test('boot refuses when a reclaimed descendant lacks a durable stamp', async () => {
   const home = mkdtempSync(join(tmpdir(), 'crew-boot-descendant-stamp-home-'))
   const { root: checkoutRoot, checkout } = testCheckout('crew-boot-descendant-stamp-checkout-')

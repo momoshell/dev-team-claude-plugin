@@ -2429,3 +2429,31 @@ test('#929 the recorded cd-then-test-run family states both builder allowance ve
     assert.equal(entry.decisions.builder_spent, CORPUS_CONTEXTS.builder_spent(entry.command).decision, entry.id)
   }
 })
+
+// The bound must COVER the provider's own five-hour window. It was four hours,
+// and on 2026-09-06 a 429 stated a reset 4h09m out — three lanes were declined
+// nine minutes past the bound with attempts_spent: 0, and the operator
+// re-dispatched into the same limit. A reset inside the provider's window is
+// exactly the case parking exists for.
+test('the total-wait bound covers the provider five-hour window', () => {
+  // MUTATION: put the bound back to 4 * 60 * 60 * 1000 and the 4h09m case
+  // declines again, which is the failure this pins.
+  assert.ok(PROVIDER_RETRY_TOTAL_WAIT_MS >= 5 * 60 * 60 * 1000,
+    `a five_hour window can state a reset just under 5h; bound is ${PROVIDER_RETRY_TOTAL_WAIT_MS}ms`)
+
+  const measured = { at: 0, kind: 'rate_limit', status: 429, attempts: 0, waitedMs: 0 }
+  // The real 2026-09-06 refusal: reset 4h09m out.
+  const parked = providerRetryDecision({ ...measured, reset: { at_ms: (4 * 60 + 9) * 60 * 1000 } })
+  assert.equal(parked.retry, true)
+  assert.equal(parked.waited_on, 'reset-time')
+
+  // A reset just inside the provider's own window still parks.
+  const nearWindow = providerRetryDecision({ ...measured, reset: { at_ms: 4 * 60 * 60 * 1000 + 59 * 60 * 1000 } })
+  assert.equal(nearWindow.retry, true)
+
+  // MUTATION: remove the bound entirely and this stops refusing — a reset
+  // beyond the window is still declined, with the instant named.
+  const beyond = providerRetryDecision({ ...measured, reset: { at_ms: PROVIDER_RETRY_TOTAL_WAIT_MS + 60 * 60 * 1000 } })
+  assert.equal(beyond.retry, false)
+  assert.equal(typeof beyond.reset_at, 'number')
+})

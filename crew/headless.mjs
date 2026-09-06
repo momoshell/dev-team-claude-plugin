@@ -174,14 +174,30 @@ export function providerFailureKind(status) {
 // bounds are closed constants and BOTH are consumed: a park that fits the
 // attempt count still runs out of total wait.
 export const PROVIDER_RETRY_MAX = 3
-// Four hours: a POLICY bound this driver chose, not a fact about the provider.
-// The provider's window is five hours (`rateLimitType: "five_hour"` in the
-// recorded 2026-08-30 frame), so a stated reset can legitimately be up to nearly
-// five hours out — and this driver declines to hold a lane that long. A reset
-// further away than this bound is refused with the instant NAMED, so the
-// operator re-dispatches knowing exactly when. The recorded refusal was 1h14m
-// out, comfortably inside it.
-export const PROVIDER_RETRY_TOTAL_WAIT_MS = 4 * 60 * 60 * 1000
+// Five and a half hours: a POLICY bound this driver chose, not a fact about the
+// provider. The provider's window is five hours (`rateLimitType: "five_hour"` in
+// the recorded 2026-08-30 frame), so a stated reset can legitimately be up to
+// nearly five hours out. This bound now COVERS that window, with half an hour of
+// margin for a clock that disagrees.
+//
+// It was four hours, and four hours was measured to be wrong. On 2026-09-06 a
+// 429 stated a reset 4h09m out and three lanes — b463-sessionbusy,
+// b467-paneorphan, b468-optionalgrant — were declined nine minutes past the
+// bound, each with `provider-retry-declined … attempts_spent: 0`. Declining a
+// reset inside the provider's own window defeats the point of parking on a
+// stated reset at all: the operator re-dispatches into the same limit and pays
+// the plan rounds again. The refusal was honest and the number was simply too
+// small.
+//
+// A reset further away than this is still refused with the instant NAMED, so the
+// operator re-dispatches knowing exactly when.
+//
+// KNOWN TENSION, stated rather than hidden: a park this long is invisible to
+// every liveness instrument (#948) — the driver sleeps emitting nothing, reads
+// `stale` in crew-watch, and `dispatch-batch` refuses an unrelated batch against
+// it as `external-fence-abandoned`. Raising this bound makes that worse in
+// duration, not in kind. #948 is the fix; this constant is not.
+export const PROVIDER_RETRY_TOTAL_WAIT_MS = (5 * 60 + 30) * 60 * 1000
 // Minutes, not the worker's seconds: the one retry budget that already existed
 // was at the wrong altitude. The ladder SATURATES on its last rung rather than
 // running off the end, so the attempt bound above is the only thing that stops

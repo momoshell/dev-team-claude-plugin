@@ -72,9 +72,43 @@ function conciseAge(milliseconds) {
   return `${hours}h ${minutes % 60}m`
 }
 
+// #953 — whether this run's crew state directory is archived is MEASURED BY THE SERVER and
+// only REPORTED here. Three values and never two: true, false, or null with a stated reason.
+// An unmeasured crew state is never read as "not archived".
+export function crewArchive(run = {}) {
+  const state = run?.crew_state && typeof run.crew_state === 'object' ? run.crew_state : null
+  const archived = state && typeof state.archived === 'boolean' ? state.archived : null
+  return {
+    archived,
+    archived_at: state?.archived_at ?? null,
+    // TL8 — when the archive is measured but its instant is not, the reason travels with it.
+    archived_at_absent: state?.archived_at_absent ?? null,
+    absent: archived === null ? absenceMark(run?.pending?.crew_state) : null,
+  }
+}
+
 export function runActivity(run = {}, now = Date.now()) {
   if (!run?.running) return { key: 'settled', live: false, attention: false, heartbeat: heartbeatCell(run, now) }
   const heartbeat = heartbeatCell(run, now)
+  // #953 — the ledger and the crew state dir disagree. Report the disagreement; do not pick
+  // a side. This sits AFTER the settled return, so settlement is read from the ledger and
+  // never from the crew dir, and it answers only on a MEASURED archived === true.
+  //
+  // TL7 — the key is its OWN token and never 'silent'. Every consumer translates 'silent'
+  // into "stale heartbeat", and this lane's heartbeat can be seconds old; that translation
+  // would be a measurement nobody made. execution-steps.js is taught the key in §3.7, so
+  // PhaseGantt keeps rendering "No return recorded" instead of falling through to
+  // "In progress".
+  const archive = crewArchive(run)
+  if (archive.archived === true) {
+    const ledgerSide = run?.started_at ? `started ${run.started_at}` : 'started at a time the ledger did not record'
+    const archiveSide = archive.archived_at ? `archived ${archive.archived_at}` : `archived at a time this feed could not measure (${archive.archived_at_absent || 'no reason was recorded for the absence'})`
+    return {
+      key: 'contradicted', live: false, attention: true, heartbeat,
+      word: 'contradicted · ledger running, crew state archived', tone: 'serious',
+      why: `The ledger row still says running (${ledgerSide}), but this lane's crew state directory is archived (${archiveSide}). The two sides disagree; neither is guessed away. This run is not live, not merely stale, and not settled.`,
+    }
+  }
   if (heartbeat.dashed) {
     return {
       key: 'unverified', live: false, attention: true, heartbeat,
@@ -93,12 +127,33 @@ export function runActivity(run = {}, now = Date.now()) {
   return { key: 'live', live: true, attention: false, heartbeat, word: 'live', tone: 'busy', why: null }
 }
 
+// #953 · TL7 — ONE list of the status keys that mean an operator must look at this run. It
+// was hard-coded in App.svelte:52 and TaskList.svelte:25,:57, which is exactly how a key
+// minted in this module reaches neither. Those two consumers ask this predicate; the
+// fleetView rail selects the key directly and is not a caller.
+export const ATTENTION_KEYS = Object.freeze(['escalated', 'fail', 'aborted', 'silent', 'unverified', 'contradicted'])
+export function needsAttention(statusKey) { return ATTENTION_KEYS.includes(statusKey) }
+
+// #953 · TL7 — the heading an operator reads for an open record that is not live, keyed by
+// the SAME status key. A contradicted lane is NOT stale: its evidence is the crew state
+// directory and its heartbeat may be four seconds old, so calling it stale states a
+// measurement nobody made.
+const OPEN_RECORD_NOTES = Object.freeze({
+  silent: 'Stale open record',
+  unverified: 'Open record not verified',
+  contradicted: 'Ledger running · crew state archived',
+})
+export function openRecordNote(statusKey) { return OPEN_RECORD_NOTES[statusKey] ?? null }
+
 export function fleetActivity(runs = [], now = Date.now()) {
-  const summary = { live: 0, silent: 0, unverified: 0, open: 0 }
+  const summary = { live: 0, silent: 0, contradicted: 0, unverified: 0, open: 0 }
   for (const run of Array.isArray(runs) ? runs : []) {
     const activity = runActivity(run, now)
     if (activity.key === 'live') summary.live += 1
     if (activity.key === 'silent') summary.silent += 1
+    // #953 · TL7 — counted ONCE, in its own bucket. Round 7 incremented `silent` too, and
+    // every consumer that counts `silent` calls the row a stale heartbeat.
+    if (activity.key === 'contradicted') summary.contradicted += 1
     if (activity.key === 'unverified') summary.unverified += 1
     if (run?.running) summary.open += 1
   }
@@ -109,8 +164,10 @@ export function deriveDisplayStatus(run = {}, taskEnvelope = null, now = Date.no
   const recorded = deriveStatus(run, taskEnvelope)
   if (!['running', 'queued'].includes(recorded.key)) return recorded
   const activity = runActivity(run, now)
-  if (activity.key === 'silent' || activity.key === 'unverified') {
-    return { key: activity.key, word: activity.word, tone: activity.tone, where: 'heartbeat', why: activity.why }
+  if (activity.key === 'silent' || activity.key === 'unverified' || activity.key === 'contradicted') {
+    // #953 — a contradicted row's evidence is the crew state directory, not the heartbeat;
+    // `where` was hard-coded to 'heartbeat' and that would now be a false attribution.
+    return { key: activity.key, word: activity.word, tone: activity.tone, where: activity.key === 'contradicted' ? 'crew state' : 'heartbeat', why: activity.why }
   }
   return recorded
 }
@@ -249,6 +306,7 @@ function visibleRows(runs, envelopes, now, filters) {
       cost: costCell(run),
       heartbeat: heartbeatCell(run, now),
       slot_wait: slotWaitCell(run),
+      activity: runActivity(run, now),
     }
   })
 }
@@ -264,9 +322,14 @@ export function fleetView(runs, { envelopes = new Map(), now = Date.now(), filte
   }
   const escalated = rows.filter((row) => row.status.key === 'escalated')
     .map((row) => ({ ...row, why: row.status.why }))
-  const silent = rows.filter((row) => row.status.key === 'running' && row.heartbeat.stale && row.status.key !== 'escalated')
+  const contradicted = rows.filter((row) => row.activity.key === 'contradicted')
+    .map((row) => ({ ...row, why: row.activity.why }))
+  // The rail composition keeps an escalated contradicted lane from appearing on the rail
+  // twice; with no contradicted run present this list is byte-identical to today's. The
+  // contradicted clause is the ONLY clause that can rank a non-escalated lane archived seconds ago whose heartbeat is still fresh.
+  const silent = rows.filter((row) => row.status.key === 'running' && row.heartbeat.stale && row.activity.key !== 'contradicted' && row.status.key !== 'escalated')
     .map((row) => ({ ...row, why: row.heartbeat.text }))
-  return { rows, rail: [...escalated, ...silent], hidden, shown: rows.length }
+  return { rows, rail: [...escalated, ...contradicted.filter((row) => row.status.key !== 'escalated'), ...silent], hidden, shown: rows.length }
 }
 
 export function escalationProbeTargets(rows = []) {

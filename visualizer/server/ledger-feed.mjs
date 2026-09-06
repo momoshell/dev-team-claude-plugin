@@ -6,6 +6,7 @@ import { openLedger } from '../../scripts/factory/ledger.mjs'
 import { PHASE_SLOT_WAIT_ABSENT } from '../../scripts/factory/ledger.mjs'
 import { createTriage } from './triage.mjs'
 import { shapeRun, matchesFilters } from './shape.mjs'
+import { createCrewStateSource } from './crew-state.mjs'
 // A failed open is a MOMENT, not a verdict. A read-only database handle cannot
 // create a missing file, so a visualizer started before the first crew run
 // used to answer empty for the rest of its life (#536/F8). The latch now
@@ -26,7 +27,15 @@ const TABLE_FIELDS = {
   accept_decisions: ['accept_decisions'],
 }
 
-export function createLedgerFeed({ ledgerDb, triageDb, stderr = { write() {} }, reopenCooldownMs = FEED_REOPEN_COOLDOWN_MS, now = () => Date.now() } = {}) {
+export function createLedgerFeed({ ledgerDb, triageDb, crewRoot = null, crewStateSource = null, stderr = { write() {} }, reopenCooldownMs = FEED_REOPEN_COOLDOWN_MS, now = () => Date.now() } = {}) {
+  // #953 — a feed given no crew state root measured nothing and must say so. It never reads
+  // its own silence as "not archived". `crewStateSource` is the TL9 test seam: an injected
+  // source is used as given, so a test can count exactly which sessions were handed to it.
+  const crewState = crewStateSource || (crewRoot ? createCrewStateSource({ crewRoot }) : null)
+  // #953 · TL9 — a settled row's crew state is dead work: fleet.js returns `settled` before it
+  // ever consults the crew state, so a filesystem probe for it is never read. Not reading it
+  // is a DECISION and carries its own reason; it is never the no-crew-root reason.
+  const CREW_STATE_SETTLED = 'not measured — the ledger had already settled this run, so its crew state directory was intentionally not read'
   let ledger = null
   let db = null
   let degraded = false
@@ -178,12 +187,18 @@ export function createLedgerFeed({ ledgerDb, triageDb, stderr = { write() {} }, 
     for (const row of reviewRows) reviewMap.get(row.adw_id)?.push(row)
     for (const row of acceptRows) acceptMap.get(row.adw_id)?.push(row)
     const triageRows = triage.readTriage(ids)
+    // #953 — the archive fact is measured HERE, from the crew state root, and handed to
+    // shapeRun, whose module opens no file. One call per page, not one per row — and only for
+    // rows the ledger still calls running (TL9). /api/sessions is unbounded and App.svelte
+    // re-requests it every 3000 ms, so a probe per settled historical row is unbounded dead work.
+    const runningSessions = sessions.filter((session) => session.status === 'running')
+    const crewStates = crewState ? crewState.readCrewStates(runningSessions) : null
     const waits = slotWaitsFor(ids)
     const shapeProbe = { ...probe, missing: [...probe.missing, ...probe.missing_tables.flatMap((table) => TABLE_FIELDS[table] ?? [])] }
     const now = Date.now()
     const runs = sessions.map((session) => ({
       ...shapeRun(session, phaseMap.get(session.adw_id), eventMap.get(session.adw_id), triageRows.get(session.adw_id), shapeProbe, now,
-        { runConfiguration: configurationMap.get(session.adw_id) ?? null, agentSessions: agentSessionMap.get(session.adw_id), gateDiscriminations: gateMap.get(session.adw_id), gateResults: gateResultsMap.get(session.adw_id), reviewOutcomes: reviewMap.get(session.adw_id), acceptDecisions: acceptMap.get(session.adw_id) }),
+        { runConfiguration: configurationMap.get(session.adw_id) ?? null, agentSessions: agentSessionMap.get(session.adw_id), gateDiscriminations: gateMap.get(session.adw_id), gateResults: gateResultsMap.get(session.adw_id), reviewOutcomes: reviewMap.get(session.adw_id), acceptDecisions: acceptMap.get(session.adw_id), crewState: crewState ? (session.status === 'running' ? (crewStates.get(session.adw_id) ?? null) : { archived: null, reason: CREW_STATE_SETTLED }) : null }),
       slot_waits: waits.rows === null ? null : (waits.rows.get(session.adw_id) ?? []),
       slot_waits_absent: waits.absent,
     })).filter((run) => matchesFilters(run, filters))

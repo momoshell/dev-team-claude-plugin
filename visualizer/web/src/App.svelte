@@ -1,7 +1,7 @@
 <script>
   import { tick } from 'svelte'
   import { getReturns, getSessions } from './lib/api.js'
-  import { createSemaphore, deriveDisplayStatus, fleetActivity } from './lib/fleet.js'
+  import { createSemaphore, deriveDisplayStatus, fleetActivity, needsAttention } from './lib/fleet.js'
   import { journalPulse } from './lib/live.js'
   import { formatHash, parseHash, subscribeHash } from './lib/route.js'
   import TaskList from './lib/TaskList.svelte'
@@ -49,9 +49,10 @@
           ? status.why
           : 'Code declined to fake a result and handed the preserved context to a human.')
     return { run, status, why }
-  }).filter((row) => ['escalated', 'fail', 'aborted', 'silent', 'unverified'].includes(row.status.key) && !row.run.triage?.reviewed_at))
+  }).filter((row) => needsAttention(row.status.key) && !row.run.triage?.reviewed_at))
   let attentionBreakdown = $derived({
     escalated: attentionRows.filter((row) => row.status.key === 'escalated').length,
+    contradicted: attentionRows.filter((row) => row.status.key === 'contradicted').length,
     failed: attentionRows.filter((row) => row.status.key === 'fail').length,
     aborted: attentionRows.filter((row) => row.status.key === 'aborted').length,
     silent: attentionRows.filter((row) => row.status.key === 'silent').length,
@@ -135,7 +136,7 @@
   function openPhase(name) { if (selectedRun) navigate({ view: 'phase', adw_id: selectedRun.adw_id, phase: name }) }
   function backToTasks() { navigate({ view: 'fleet' }) }
   async function focusActivity() {
-    const state = activity.silent || activity.unverified ? 'attention' : activity.live ? 'active' : 'all'
+    const state = activity.silent || activity.unverified || activity.contradicted ? 'attention' : activity.live ? 'active' : 'all'
     taskFocus = { state, revision: Date.now() }
     if (route.view !== 'fleet') navigate({ view: 'fleet' })
     await tick()
@@ -156,7 +157,7 @@
     <button class:active={route.view === 'ops'} onclick={() => navigate({ view: 'ops' })}>Operations</button>
   </nav>
   <div class="tools">
-    <span class:degraded={feedDegraded} class:silent={!feedDegraded && (activity.silent || activity.unverified)} class="connection"><i></i>{feedDegraded ? 'Feed degraded' : activity.silent ? `${activity.open} open · ${activity.silent} stale${activity.unverified ? ` · ${activity.unverified} unverified` : ''}` : activity.unverified ? `${activity.open} open · ${activity.unverified} unverified` : activity.live ? `${activity.live} live` : 'Ledger ready'}</span>
+    <span class:degraded={feedDegraded} class:silent={!feedDegraded && (activity.silent || activity.unverified || activity.contradicted)} class="connection"><i></i>{feedDegraded ? 'Feed degraded' : activity.contradicted ? `${activity.open} open · ${activity.contradicted} contradicted${activity.silent ? ` · ${activity.silent} stale` : ''}${activity.unverified ? ` · ${activity.unverified} unverified` : ''}` : activity.silent ? `${activity.open} open · ${activity.silent} stale${activity.unverified ? ` · ${activity.unverified} unverified` : ''}` : activity.unverified ? `${activity.open} open · ${activity.unverified} unverified` : activity.live ? `${activity.live} live` : 'Ledger ready'}</span>
     <label class="theme"><span>Theme</span><Dropdown bind:value={theme} options={THEME_OPTIONS} ariaLabel="Theme" width="5.2rem" variant="compact" /></label>
   </div>
 </header>
@@ -187,7 +188,7 @@
     {#if error}<p class="error-banner">{error}</p>{/if}
     {#if attentionRows.length}
       <details class="attention">
-        <summary><span class="attention-mark" aria-hidden="true">!</span><span class="attention-title"><strong>Needs attention</strong><small>{attentionBreakdown.escalated} escalated{attentionBreakdown.failed ? ` · ${attentionBreakdown.failed} failed` : ''}{attentionBreakdown.aborted ? ` · ${attentionBreakdown.aborted} aborted` : ''}{attentionBreakdown.silent ? ` · ${attentionBreakdown.silent} stale` : ''}{attentionBreakdown.unverified ? ` · ${attentionBreakdown.unverified} unverified` : ''}</small></span><span class="attention-total">{attentionRows.length}</span><span class="attention-action">Review queue <i aria-hidden="true"></i></span></summary>
+        <summary><span class="attention-mark" aria-hidden="true">!</span><span class="attention-title"><strong>Needs attention</strong><small>{attentionBreakdown.escalated} escalated{attentionBreakdown.contradicted ? ` · ${attentionBreakdown.contradicted} contradicted` : ''}{attentionBreakdown.failed ? ` · ${attentionBreakdown.failed} failed` : ''}{attentionBreakdown.aborted ? ` · ${attentionBreakdown.aborted} aborted` : ''}{attentionBreakdown.silent ? ` · ${attentionBreakdown.silent} stale` : ''}{attentionBreakdown.unverified ? ` · ${attentionBreakdown.unverified} unverified` : ''}</small></span><span class="attention-total">{attentionRows.length}</span><span class="attention-action">Review queue <i aria-hidden="true"></i></span></summary>
         <div class="attention-list" aria-label="Tasks needing attention">{#each attentionRows as row (row.run.adw_id)}<button onclick={() => openRun(row.run)}><span><strong>{row.run.goal || row.run.adw_id}</strong><small>{row.status.where || row.run.repo_slug || (row.status.key === 'fail' ? 'Failed run' : row.status.key === 'aborted' ? 'Aborted run' : 'Escalated')}</small></span><span class="rail-why">{row.why}</span><span class={`rail-status ${row.status.tone}`}>{row.status.word}</span><b>Open →</b></button>{/each}</div>
       </details>
     {/if}

@@ -1,5 +1,5 @@
 <script>
-  import { deriveDisplayStatus, durationCell, gateCell, reviewCell, runActivity, tokenCell } from './fleet.js'
+  import { deriveDisplayStatus, durationCell, gateCell, needsAttention, reviewCell, runActivity, tokenCell } from './fleet.js'
   import { assuranceOption, executionMeta, runConfiguration, taskProfileMeta } from './workflow-semantics.js'
   import Pagination from './Pagination.svelte'
   import Dropdown from './Dropdown.svelte'
@@ -22,7 +22,7 @@
     const status = statusFor(run)
     if (state === 'active') return activityFor(run).live
     if (state === 'completed') return !run.running
-    if (state === 'attention') return ['escalated', 'fail', 'aborted', 'silent', 'unverified'].includes(status.key)
+    if (state === 'attention') return needsAttention(status.key)
     return true
   }
   function matchesQuery(run) {
@@ -54,7 +54,7 @@
     all: runs.filter((run) => !run.triage?.reviewed_at).length,
     active: runs.filter((run) => activityFor(run).live && !run.triage?.reviewed_at).length,
     completed: runs.filter((run) => !run.running && !run.triage?.reviewed_at).length,
-    attention: runs.filter((run) => ['escalated', 'fail', 'aborted', 'silent', 'unverified'].includes(statusFor(run).key) && !run.triage?.reviewed_at).length,
+    attention: runs.filter((run) => needsAttention(statusFor(run).key) && !run.triage?.reviewed_at).length,
   })
   let filtered = $derived(runs.filter((run) => (showArchived || !run.triage?.reviewed_at) && (run.goal || showArchived) && matchesState(run) && (assurance === 'all' || configurationFor(run).assurance.key === assurance) && (taskProfile === 'all' || run.task_profile === taskProfile) && (executionShape === 'all' || (run.execution_shape ?? run.variant) === executionShape) && matchesQuery(run)))
   let paged = $derived(filtered.slice((page - 1) * pageSize, page * pageSize))

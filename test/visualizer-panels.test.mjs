@@ -1,10 +1,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { PANEL_REFRESH_MS, PANEL_STALE_AFTER_MS, acceptRows, brakePanel, cellHealthPanel, fleetCost, fleetEscalationRate, fleetMedianDuration, fleetPassRate, fleetPhasesPerRun, fleetTokens, findingRows, gateChips, intakeCandidateRows, intakePanel, reviewRows, rosterEditForm, rosterPanel, panelAgeLabel, panelReadLoop, readFreshness, rosterProposal, runSetPanel, teardownPanel } from '../visualizer/web/src/lib/panels.js'
 import { parseHash, formatHash } from '../visualizer/web/src/lib/route.js'
-import { absenceMark, costCell, createSemaphore, deriveDisplayStatus, deriveStatus, escalationProbeTargets, fleetActivity, fleetView, gateCell, heartbeatCell, reviewCell, runActivity, slotWaitCell, tokenCell } from '../visualizer/web/src/lib/fleet.js'
+import { absenceMark, costCell, createSemaphore, crewArchive, deriveDisplayStatus, deriveStatus, escalationProbeTargets, fleetActivity, fleetView, gateCell, heartbeatCell, needsAttention, openRecordNote, reviewCell, runActivity, slotWaitCell, tokenCell } from '../visualizer/web/src/lib/fleet.js'
 import { ROLE_ORDER, acceptEvidence, bounceArrows, gateMarkers, gateProofStory, laneRows, phaseFilterId, phasePanel, renderMarkdown } from '../visualizer/web/src/lib/trace.js'
 import { eventStory, eventStreamSummary } from '../visualizer/web/src/lib/event-story.js'
 import { assignmentPath, envelopeFacts, envelopeGroups, envelopeOverview, envelopeSections, trajectoryRowStory, trajectorySummary } from '../visualizer/web/src/lib/diagnostic-story.js'
@@ -12,6 +12,11 @@ import { factoryStepCategory, factoryStepName, factoryStepTrace } from '../visua
 import { crewSummary } from '../visualizer/web/src/lib/crew.js'
 import { assuranceMeta, assuranceOption, executionMeta, runConfiguration, taskProfileMeta } from '../visualizer/web/src/lib/workflow-semantics.js'
 import { diffLines } from '../visualizer/web/src/lib/diff-lines.js'
+import { shapeRun } from '../visualizer/server/shape.mjs'
+import { createCrewStateSource } from '../visualizer/server/crew-state.mjs'
+import { createLedgerFeed } from '../visualizer/server/ledger-feed.mjs'
+import { openLedger } from '../scripts/factory/ledger.mjs'
+import { scratchDir, sqliteAvailable } from './helpers.mjs'
 
 test('workflow semantics separate profile, execution and assurance without inference', () => {
   assert.deepEqual(assuranceOption('build'), { value:'build', label:'Standard · build' })
@@ -747,7 +752,7 @@ test('running records require a fresh heartbeat before the UI calls them live', 
   assert.equal(runActivity(stale, now).word, 'stale · heartbeat 1h 2m ago')
   assert.equal(runActivity(unverified, now).key, 'unverified')
   assert.equal(deriveDisplayStatus(stale, null, now).key, 'silent')
-  assert.deepEqual(fleetActivity([fresh, stale, unverified], now), { live: 1, silent: 1, unverified: 1, open: 3 })
+  assert.deepEqual(fleetActivity([fresh, stale, unverified], now), { live: 1, silent: 1, contradicted: 0, unverified: 1, open: 3 })
 })
 
 test('fleet view pins escalations and silent runs and probes only non-green slugged runs', () => {
@@ -1387,4 +1392,393 @@ test('each panel wires its own read clock and tears its timer down', () => {
     assert.ok(source.includes('{panel.freshness.label}'), file)
     assert.ok(source.includes('{panel.freshness.refresh_label}'), file)
   }
+})
+
+function writeCrewCandidate(root, repo, name, adw_id, marker = 'valid') {
+  const directory = join(root, repo, name)
+  mkdirSync(directory, { recursive: true })
+  if (marker === 'absent') return directory
+  mkdirSync(join(directory, 'ledger'), { recursive: true })
+  writeFileSync(join(directory, 'ledger', 'run.json'), marker === 'malformed' ? '{ not json' : `${JSON.stringify({ adw_id })}\n`)
+  return directory
+}
+
+test('a contradicted lane names both sides and is never called stale', () => {
+  const now = Date.parse('2026-09-06T00:00:00.000Z')
+  const run = {
+    status: 'running', running: true, phases: [{}],
+    started_at: '2026-09-05T20:00:00.000Z',
+    last_heartbeat_at: new Date(now - 4_000).toISOString(),
+    crew_state: { archived: true, archived_at: '2026-09-05T22:15:38.543Z' },
+  }
+  const activity = runActivity(run, now)
+  assert.equal(activity.key, 'contradicted')
+  assert.notEqual(activity.key, 'silent')
+  assert.equal(activity.attention, true)
+  assert.match(activity.word, /crew state archived/)
+  assert.match(activity.why, /2026-09-05T20:00:00.000Z/)
+  assert.match(activity.why, /2026-09-05T22:15:38.543Z/)
+  assert.equal(deriveDisplayStatus(run, null, now).where, 'crew state')
+  const stale = { ...run, crew_state: { archived: false }, last_heartbeat_at: new Date(now - 91_000).toISOString() }
+  assert.equal(runActivity(stale, now).key, 'silent')
+  assert.equal(deriveDisplayStatus(stale, null, now).where, 'heartbeat')
+})
+
+test('an unmeasured crew state is never read as not archived', () => {
+  const now = Date.parse('2026-09-06T00:00:00.000Z')
+  const reason = 'crew state read returned EACCES'
+  const run = {
+    status: 'running', running: true, phases: [{}],
+    last_heartbeat_at: new Date(now - 91_000).toISOString(),
+    pending: { crew_state: reason },
+  }
+  const state = crewArchive(run)
+  assert.equal(state.archived, null)
+  assert.equal(state.absent.text, reason)
+  assert.equal(runActivity(run, now).key, 'silent')
+  assert.notEqual(runActivity(run, now).key, 'contradicted')
+  assert.notEqual(runActivity(run, now).key, 'settled')
+  const measured = { ...run, crew_state: { archived: false } }
+  assert.equal(crewArchive(measured).archived, false)
+  assert.equal(crewArchive(measured).absent, null)
+})
+
+test('settlement is read from the ledger, never from the crew dir', () => {
+  const now = Date.parse('2026-09-06T00:00:00.000Z')
+  const archived = { archived: true, archived_at: '2026-09-05T22:15:38.543Z' }
+  const settled = {
+    status: 'ok', running: false, ended_at: '2026-09-05T22:10:00.000Z',
+    phases: [{}], last_heartbeat_at: new Date(now - 4_000).toISOString(), crew_state: archived,
+  }
+  assert.equal(runActivity(settled, now).key, 'settled')
+  const running = { ...settled, status: 'running', running: true, ended_at: null }
+  const activity = runActivity(running, now)
+  assert.equal(activity.key, 'contradicted')
+  assert.equal(activity.heartbeat.stale, false)
+  assert.notEqual(activity.key, 'live')
+})
+
+test('a contradicted lane is not suppressed', () => {
+  const now = Date.parse('2026-09-06T00:00:00.000Z')
+  const base = {
+    repo_slug: 'repo', status: 'running', running: true, phases: [{}],
+    started_at: '2026-09-05T20:00:00.000Z', triage: { reviewed_at: null },
+    pending: {}, metrics: {}, goal: 'task',
+  }
+  const fresh = { ...base, adw_id: 'fresh', last_heartbeat_at: new Date(now - 4_000).toISOString(), crew_state: { archived: true, archived_at: '2026-09-05T22:15:38.543Z' } }
+  const stale = { ...base, adw_id: 'stale', goal: 'stale-task', last_heartbeat_at: new Date(now - 91_000).toISOString(), crew_state: { archived: true, archived_at: '2026-09-05T22:15:38.543Z' } }
+  const view = fleetView([fresh, stale], { now })
+  assert.equal(view.hidden.count, 0)
+  assert.equal(view.rows.length, 2)
+  assert.equal(view.rail.filter((row) => row.adw_id === 'fresh').length, 1)
+  assert.equal(view.rail.filter((row) => row.adw_id === 'stale').length, 1)
+  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/fleet.js'), 'utf8')
+  assert.match(source, /run\?\.triage\?\.reviewed_at/)
+})
+
+test('an escalated contradicted lane appears on the rail once', () => {
+  const now = Date.parse('2026-09-06T00:00:00.000Z')
+  const why = 'review evidence needs a human decision'
+  const run = {
+    adw_id: 'escalated-contradicted', goal: 'task', repo_slug: 'repo', status: 'running', running: true,
+    phases: [{}], started_at: '2026-09-05T20:00:00.000Z', last_heartbeat_at: new Date(now - 4_000).toISOString(),
+    crew_state: { archived: true, archived_at: '2026-09-05T22:15:38.543Z' }, triage: { reviewed_at: null }, pending: {}, metrics: {},
+  }
+  const view = fleetView([run], {
+    now,
+    envelopes: new Map([[run.adw_id, { status: 'escalation', details: { escalation: { where: 'review', why } } }]]),
+  })
+  assert.equal(view.rows[0].status.key, 'escalated')
+  assert.equal(view.rows[0].activity.key, 'contradicted')
+  const rail = view.rail.filter((row) => row.adw_id === run.adw_id)
+  assert.equal(rail.length, 1)
+  assert.equal(rail[0].why, why)
+})
+
+test('fleetActivity counts contradictions without changing its denominator', () => {
+  const now = Date.parse('2026-09-06T00:00:00.000Z')
+  const fresh = { running: true, status: 'running', phases: [{}], last_heartbeat_at: new Date(now - 4_000).toISOString(), crew_state: { archived: true } }
+  const stale = { running: true, status: 'running', phases: [{}], last_heartbeat_at: new Date(now - 91_000).toISOString(), crew_state: { archived: false } }
+  assert.deepEqual(fleetActivity([fresh, stale], now), { live: 0, silent: 1, contradicted: 1, unverified: 0, open: 2 })
+})
+
+test('shapeRun reports the crew state it was handed and never guesses', () => {
+  const session = {
+    adw_id: 'shape-crew', task_slug: 'task', repo_slug: 'repo', status: 'running',
+    started_at: '2026-09-05T20:00:00.000Z', ended_at: null,
+  }
+  const shape = (crewState, extras = {}) => shapeRun(session, [], [], null, {}, Date.parse('2026-09-06T00:00:00.000Z'), { ...extras, ...(crewState === undefined ? {} : { crewState }) })
+  const measuredTrue = shape({ archived: true, archived_at: '2026-09-05T22:15:38.543Z', archive_dir: '/crew/archive', observed_at: 'now' })
+  assert.deepEqual(measuredTrue.crew_state, { archived: true, archived_at: '2026-09-05T22:15:38.543Z', archived_at_absent: null, archive_dir: '/crew/archive', observed_at: 'now' })
+  assert.equal(measuredTrue.pending.crew_state, undefined)
+  const measuredFalse = shape({ archived: false, observed_at: 'now' })
+  assert.deepEqual(measuredFalse.crew_state, { archived: false, archived_at: null, archived_at_absent: null, archive_dir: null, observed_at: 'now' })
+  assert.equal(measuredFalse.pending.crew_state, undefined)
+  const reason = 'not measured — root EACCES'
+  const unmeasured = shape({ archived: null, reason })
+  assert.equal(unmeasured.crew_state, null)
+  assert.equal(unmeasured.pending.crew_state, reason)
+  const absent = shape(undefined)
+  assert.equal(absent.crew_state, null)
+  assert.match(absent.pending.crew_state, /not measured/)
+  assert.deepEqual(Object.keys(measuredFalse).sort(), Object.keys(absent).sort())
+})
+
+test('the crew state source resolves a directory by run identity, not by task slug', () => {
+  const root = scratchDir('visualizer-crew-state-')
+  const b313A = '5b25c6f1-8671-4bc9-ae6d-f46dbd373b5e'
+  const b313B = '82081ddd-9538-42c8-ac2a-b53a2922f7e7'
+  const repo = 'dt-b313-waitextend', task = 'b313-waitextend'
+  const firstDir = writeCrewCandidate(root, repo, `${task}.archive-2026-08-29T11-04-24-110Z`, b313A)
+  const secondDir = writeCrewCandidate(root, repo, `${task}.archive-2026-08-29T11-52-44-236Z`, b313B)
+  const source = createCrewStateSource({ crewRoot: root })
+  const states = source.readCrewStates([
+    { adw_id: b313A, repo_slug: repo, task_slug: task },
+    { adw_id: b313B, repo_slug: repo, task_slug: task },
+  ])
+  assert.equal(states.get(b313A).archived_at, '2026-08-29T11:04:24.110Z')
+  assert.equal(states.get(b313B).archived_at, '2026-08-29T11:52:44.236Z')
+  assert.equal(states.get(b313A).archive_dir, firstDir)
+  assert.equal(states.get(b313B).archive_dir, secondDir)
+
+  const liveDir = writeCrewCandidate(root, 'repo-live', 'task-live', 'live-id')
+  const live = source.readCrewStates([{ adw_id: 'live-id', repo_slug: 'repo-live', task_slug: 'task-live' }]).get('live-id')
+  assert.equal(live.archived, false)
+  assert.equal(live.reason, null)
+
+  writeCrewCandidate(root, 'repo-both', 'task-both', 'both-id')
+  writeCrewCandidate(root, 'repo-both', 'task-both.archive-2026-09-01T00-00-00-000Z', 'both-id')
+  const both = source.readCrewStates([{ adw_id: 'both-id', repo_slug: 'repo-both', task_slug: 'task-both' }]).get('both-id')
+  assert.equal(both.archived, null)
+  assert.match(both.reason, /both a live/)
+
+  const absentDir = writeCrewCandidate(root, 'repo-markers', 'task-markers.archive-2026-09-01T00-00-00-000Z', 'absent-id', 'valid')
+  rmSync(join(absentDir, 'ledger'), { recursive: true, force: true })
+  writeCrewCandidate(root, 'repo-markers', 'task-markers.archive-2026-09-02T00-00-00-000Z', 'malformed-id', 'malformed')
+  const markers = source.readCrewStates([{ adw_id: 'wanted-id', repo_slug: 'repo-markers', task_slug: 'task-markers' }]).get('wanted-id')
+  assert.equal(markers.archived, null)
+  assert.match(markers.reason, /task-markers\.archive-2026-09-01T00-00-00-000Z/)
+  assert.match(markers.reason, /task-markers\.archive-2026-09-02T00-00-00-000Z/)
+
+  writeCrewCandidate(root, 'repo-mixed-live', 'task-mixed', 'mixed-id')
+  writeCrewCandidate(root, 'repo-mixed-live', 'task-mixed.archive-2026-09-03T00-00-00-000Z', 'mixed-id')
+  rmSync(join(root, 'repo-mixed-live', 'task-mixed', 'ledger', 'run.json'), { force: true })
+  const mixedLive = source.readCrewStates([{ adw_id: 'mixed-id', repo_slug: 'repo-mixed-live', task_slug: 'task-mixed' }]).get('mixed-id')
+  assert.equal(mixedLive.archived, null)
+  assert.match(mixedLive.reason, /task-mixed directory could not be identified/)
+
+  writeCrewCandidate(root, 'repo-mixed-archive', 'task-mixed', 'mixed-archive-id')
+  writeCrewCandidate(root, 'repo-mixed-archive', 'task-mixed.archive-2026-09-03T00-00-00-000Z', 'missing-id', 'absent')
+  const mixedArchive = source.readCrewStates([{ adw_id: 'mixed-archive-id', repo_slug: 'repo-mixed-archive', task_slug: 'task-mixed' }]).get('mixed-archive-id')
+  assert.equal(mixedArchive.archived, null)
+  assert.match(mixedArchive.reason, /task-mixed\.archive-2026-09-03T00-00-00-000Z/)
+
+  const rootEacces = scratchDir('visualizer-crew-root-')
+  const rootError = new Error('injected root listing failure')
+  rootError.code = 'EACCES'
+  const injected = createCrewStateSource({
+    crewRoot: rootEacces,
+    deps: {
+      readdirSync: (path) => { if (path === rootEacces) throw rootError; return ['task-root'] },
+      statSync: () => ({ isDirectory: () => true }),
+      readFileSync: () => JSON.stringify({ adw_id: 'root-id' }),
+    },
+  })
+  const rootState = injected.readCrewStates([{ adw_id: 'root-id', repo_slug: 'repo-root', task_slug: 'task-root' }]).get('root-id')
+  assert.equal(rootState.archived, null)
+  assert.match(rootState.reason, /EACCES/)
+
+  const typeRoot = scratchDir('visualizer-crew-type-')
+  const liveTypePath = writeCrewCandidate(typeRoot, 'repo-type-live', 'task-type', 'type-id')
+  writeCrewCandidate(typeRoot, 'repo-type-live', 'task-type.archive-2026-09-04T00-00-00-000Z', 'type-id')
+  const liveType = createCrewStateSource({ crewRoot: typeRoot, deps: {
+    readdirSync, readFileSync,
+    statSync: (path, ...args) => { if (path === liveTypePath) { const error = new Error('EACCES: live type'); error.code = 'EACCES'; throw error }; return statSync(path, ...args) },
+  } }).readCrewStates([{ adw_id: 'type-id', repo_slug: 'repo-type-live', task_slug: 'task-type' }]).get('type-id')
+  assert.equal(liveType.archived, null)
+  assert.match(liveType.reason, /task-type candidate could not be typed/)
+  assert.match(liveType.reason, /EACCES/)
+
+  const archiveTypeRoot = scratchDir('visualizer-crew-type-')
+  const archiveTypePath = writeCrewCandidate(archiveTypeRoot, 'repo-type-archive', 'task-type.archive-2026-09-04T00-00-00-000Z', 'type-archive-id')
+  writeCrewCandidate(archiveTypeRoot, 'repo-type-archive', 'task-type', 'type-archive-id')
+  const archiveType = createCrewStateSource({ crewRoot: archiveTypeRoot, deps: {
+    readdirSync, readFileSync,
+    statSync: (path, ...args) => { if (path === archiveTypePath) { const error = new Error('EACCES: archive type'); error.code = 'EACCES'; throw error }; return statSync(path, ...args) },
+  } }).readCrewStates([{ adw_id: 'type-archive-id', repo_slug: 'repo-type-archive', task_slug: 'task-type' }]).get('type-archive-id')
+  assert.equal(archiveType.archived, null)
+  assert.match(archiveType.reason, /archive candidate could not be typed/)
+  assert.match(archiveType.reason, /EACCES/)
+})
+
+test('the crew state source lists the crew root once per call and each repo once', () => {
+  const root = scratchDir('visualizer-crew-budget-')
+  const sessions = []
+  for (const [repo, tasks] of [['repo-one', ['one-a', 'one-b', 'one-c']], ['repo-two', ['two-a', 'two-b', 'two-c']]]) {
+    for (const task of tasks) {
+      const adw_id = `${repo}-${task}`
+      writeCrewCandidate(root, repo, task, adw_id)
+      sessions.push({ adw_id, repo_slug: repo, task_slug: task })
+    }
+  }
+  let listings = 0
+  let markers = 0
+  const source = createCrewStateSource({ crewRoot: root, deps: {
+    readdirSync: (path, ...args) => { listings += 1; return readdirSync(path, ...args) },
+    statSync,
+    readFileSync: (path, ...args) => { markers += 1; return readFileSync(path, ...args) },
+  } })
+  const states = source.readCrewStates(sessions)
+  assert.equal(listings, 3)
+  assert.equal(states.size, 6)
+  assert.equal(markers, 6)
+  for (const session of sessions) assert.equal(states.get(session.adw_id).archived, false)
+})
+
+test('the feed carries the crew state it measured, and says so when it measured none', { skip: sqliteAvailable() ? false : 'node:sqlite unavailable' }, () => {
+  const dir = scratchDir('visualizer-crew-feed-')
+  const ledgerDb = join(dir, 'ledger.db')
+  const adw_id = 'feed-crew-run'
+  const ledger = openLedger({ dbPath: ledgerDb, stderr: { write() {} } })
+  ledger.startSession({ adw_id, repo_slug: 'repo', task_slug: 'task' })
+  ledger.close()
+  const crewRoot = join(dir, 'crew')
+  writeCrewCandidate(crewRoot, 'repo', 'task.archive-2026-09-05T22-15-38-543Z', adw_id)
+  const feed = createLedgerFeed({ ledgerDb, triageDb: join(dir, 'triage.db'), crewRoot })
+  const measured = feed.listRuns().runs.find((run) => run.adw_id === adw_id)
+  assert.equal(measured.crew_state.archived, true)
+  feed.close()
+  const unmeasuredFeed = createLedgerFeed({ ledgerDb, triageDb: join(dir, 'triage-no-root.db') })
+  const unmeasured = unmeasuredFeed.listRuns().runs.find((run) => run.adw_id === adw_id)
+  assert.equal(unmeasured.crew_state, null)
+  assert.match(unmeasured.pending.crew_state, /not measured/)
+  unmeasuredFeed.close()
+})
+
+test('an unmeasured archive instant carries its own reason to the row', { skip: sqliteAvailable() ? false : 'node:sqlite unavailable' }, () => {
+  const reason = 'archive instant was not recorded in the directory name'
+  const session = { adw_id: 'unmeasured-instant', task_slug: 'task', repo_slug: 'repo', status: 'running', started_at: '2026-09-05T20:00:00.000Z', ended_at: null }
+  const shaped = shapeRun(session, [], [], null, {}, Date.parse('2026-09-06T00:00:00.000Z'), { crewState: { archived: true, archived_at: null, reason } })
+  assert.equal(shaped.crew_state.archived_at_absent, reason)
+  const measured = shapeRun(session, [], [], null, {}, Date.parse('2026-09-06T00:00:00.000Z'), { crewState: { archived: true, archived_at: '2026-09-05T22:15:38.543Z', reason: null } })
+  assert.equal(measured.crew_state.archived_at_absent, null)
+
+  const dir = scratchDir('visualizer-crew-instant-')
+  const ledgerDb = join(dir, 'ledger.db')
+  const ledger = openLedger({ dbPath: ledgerDb, stderr: { write() {} } })
+  ledger.startSession({ ...session })
+  ledger.close()
+  const crewRoot = join(dir, 'crew')
+  writeCrewCandidate(crewRoot, 'repo', 'task.archive-latest', session.adw_id)
+  const feed = createLedgerFeed({ ledgerDb, triageDb: join(dir, 'triage.db'), crewRoot })
+  const row = feed.listRuns().runs.find((run) => run.adw_id === session.adw_id)
+  assert.equal(row.crew_state.archived, true)
+  assert.equal(row.crew_state.archived_at, null)
+  assert.equal(row.crew_state.archived_at_absent, 'this lane\'s task directory is archived, but WHEN was not measured: no archive directory carrying this run\'s marker has a parsable instant in its name')
+  feed.close()
+})
+
+test('the contradiction sentence says why the archive time is missing', () => {
+  const reason = 'archive suffix was unparsable'
+  const run = {
+    running: true, status: 'running', phases: [{}], last_heartbeat_at: new Date(Date.parse('2026-09-06T00:00:00.000Z') - 4_000).toISOString(),
+    crew_state: { archived: true, archived_at: null, archived_at_absent: reason },
+  }
+  assert.equal(crewArchive(run).archived_at_absent, reason)
+  assert.match(runActivity(run, Date.parse('2026-09-06T00:00:00.000Z')).why, new RegExp(reason))
+})
+
+test('the feed reads crew state only for rows the ledger still calls running', { skip: sqliteAvailable() ? false : 'node:sqlite unavailable' }, () => {
+  const dir = scratchDir('visualizer-crew-filter-')
+  const ledgerDb = join(dir, 'ledger.db')
+  const runningId = 'feed-running'
+  const settledId = 'feed-settled'
+  const ledger = openLedger({ dbPath: ledgerDb, stderr: { write() {} } })
+  ledger.startSession({ adw_id: runningId, repo_slug: 'repo', task_slug: 'running' })
+  ledger.startSession({ adw_id: settledId, repo_slug: 'repo', task_slug: 'settled' })
+  ledger.endSession({ adw_id: settledId, status: 'ok', ended_at: '2026-09-05T22:10:00.000Z' })
+  ledger.close()
+  const handed = []
+  const source = { readCrewStates(sessions) { handed.push(sessions.map((session) => session.adw_id)); return new Map(sessions.map((session) => [session.adw_id, { archived: false }])) } }
+  const feed = createLedgerFeed({ ledgerDb, triageDb: join(dir, 'triage.db'), crewStateSource: source })
+  const result = feed.listRuns()
+  assert.deepEqual(handed, [[runningId]])
+  assert.equal(result.runs.length, 2)
+  feed.close()
+})
+
+test('a settled row says its crew state was intentionally not read', { skip: sqliteAvailable() ? false : 'node:sqlite unavailable' }, () => {
+  const dir = scratchDir('visualizer-crew-settled-')
+  const ledgerDb = join(dir, 'ledger.db')
+  const settledId = 'feed-settled-reason'
+  const ledger = openLedger({ dbPath: ledgerDb, stderr: { write() {} } })
+  ledger.startSession({ adw_id: settledId, repo_slug: 'repo', task_slug: 'settled' })
+  ledger.endSession({ adw_id: settledId, status: 'ok', ended_at: '2026-09-05T22:10:00.000Z' })
+  ledger.close()
+  const handed = []
+  const source = { readCrewStates(sessions) { handed.push(sessions.map((session) => session.adw_id)); return new Map() } }
+  const feed = createLedgerFeed({ ledgerDb, triageDb: join(dir, 'triage.db'), crewRoot: join(dir, 'crew'), crewStateSource: source })
+  const settled = feed.listRuns().runs.find((run) => run.adw_id === settledId)
+  assert.deepEqual(handed, [[]])
+  assert.equal(settled.crew_state, null)
+  assert.match(settled.pending.crew_state, /already settled.*intentionally not read/i)
+  const withoutRootFeed = createLedgerFeed({ ledgerDb, triageDb: join(dir, 'triage-no-root.db') })
+  const withoutRoot = withoutRootFeed.listRuns().runs.find((run) => run.adw_id === settledId)
+  assert.notEqual(settled.pending.crew_state, withoutRoot.pending.crew_state)
+  withoutRootFeed.close()
+  feed.close()
+})
+
+test('a contradicted lane renders as an open record with no return, never in progress', () => {
+  const now = Date.parse('2026-09-06T00:00:00.000Z')
+  const run = { running: true, status: 'running', phases: [{}], last_heartbeat_at: new Date(now - 4_000).toISOString(), crew_state: { archived: true } }
+  const key = runActivity(run, now).key
+  const journal = { payload: { rows: [{ at: 1000, stage: 'build:r1' }, { at: 1100, assign: 'd1', role: 'builder' }] } }
+  const timeline = { blocks: [{ phase_id: 1, name: 'build', started_at: 1000, ended_at: null, x: 0, width: 1, status: 'running' }] }
+  const trace = factoryStepTrace(journal, timeline, { now: 2000, activity: key })
+  assert.deepEqual(trace.steps[0].handoffs[0].state, { key: 'missing', label: 'No return recorded' })
+  assert.equal(trace.steps[0].handoffs[0].no_return, true)
+  assert.notEqual(trace.steps[0].state.key, 'active')
+  assert.notEqual(trace.steps[0].state.label, 'In progress')
+  const live = factoryStepTrace(journal, timeline, { now: 2000, activity: 'live' })
+  assert.deepEqual(live.steps[0].handoffs[0].state, { key: 'active', label: 'In progress' })
+})
+
+test('the attention vocabulary is shared by App and TaskList', () => {
+  assert.equal(needsAttention('contradicted'), true)
+  for (const key of ['escalated', 'fail', 'aborted', 'silent', 'unverified']) assert.equal(needsAttention(key), true)
+  for (const key of ['live', 'success', 'running', 'settled']) assert.equal(needsAttention(key), false)
+  const app = readFileSync(join(process.cwd(), 'visualizer/web/src/App.svelte'), 'utf8')
+  const taskList = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/TaskList.svelte'), 'utf8')
+  assert.match(app, /import \{[^}]*needsAttention[^}]*\} from '\.\/lib\/fleet\.js'/)
+  assert.match(taskList, /import \{[^}]*needsAttention[^}]*\} from '\.\/fleet\.js'/)
+  for (const source of [app, taskList]) assert.doesNotMatch(source, /'aborted', 'silent', 'unverified'/)
+})
+
+test('the contradiction heading is not the stale heading', () => {
+  const note = openRecordNote('contradicted')
+  assert.match(note, /crew state/i)
+  assert.doesNotMatch(note, /stale|heartbeat/i)
+  assert.equal(openRecordNote('silent'), 'Stale open record')
+  assert.equal(openRecordNote('unverified'), 'Open record not verified')
+  assert.equal(openRecordNote('live'), null)
+  const detail = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/RunDetail.svelte'), 'utf8')
+  assert.ok((detail.match(/openRecordNote\(status\.key\)/g) || []).length >= 2)
+  assert.doesNotMatch(detail, /'Stale open record'/)
+})
+
+test('the metrics strip counts a contradiction without calling it a heartbeat', () => {
+  const strip = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/MetricsStrip.svelte'), 'utf8')
+  assert.match(strip, /activity\.silent \+ activity\.unverified \+ activity\.contradicted/)
+  assert.match(strip, /activity\.contradicted \? ` · \$\{activity\.contradicted\} contradicted`/)
+  assert.match(strip, /activity\.contradicted.*crew state directory is archived/)
+  assert.match(strip, /activity\.contradicted} contradicted/)
+})
+
+test('the topbar and the attention breakdown name a contradiction', () => {
+  const app = readFileSync(join(process.cwd(), 'visualizer/web/src/App.svelte'), 'utf8')
+  assert.match(app, /activity\.contradicted \? `/)
+  assert.match(app, /activity\.silent \|\| activity\.unverified \|\| activity\.contradicted \? 'attention'/)
+  assert.match(app, /contradicted: attentionRows\.filter\(\(row\) => row\.status\.key === 'contradicted'\)/)
+  assert.match(app, /attentionBreakdown\.contradicted \? ` · \$\{attentionBreakdown\.contradicted\} contradicted`/)
 })

@@ -167,6 +167,10 @@ const SEATS_UNMEASURED = 'not recorded for this run — the ledger holds no run_
 const DRIVER_UNOBSERVED = 'not observed — driver liveness is authoritative only from run_observations (TRD §5.5), a table that does not exist yet; it is never inferred from session status'
 const HEARTBEAT_NEVER_BEAT = 'no session or agent heartbeat was recorded for this run — a headless lane that never entered a pane wait carries NULL by construction'
 const HEARTBEAT_SETTLED = 'this run has settled; a seat-wait beat bounds a LIVE driver only, so for a finished run freshness is not a stale measurement but no measurement at all'
+// #953 — whether a run's crew state directory is archived is MEASURED BY THE CALLER; this
+// module opens no file, so a feed that did not read the crew state root leaves the value
+// UNMEASURED and says so. It is never assumed to be un-archived.
+const CREW_STATE_UNMEASURED = "not measured — this feed did not read the crew state root, so whether this run's task directory is archived is unknown; it is never assumed to be un-archived"
 const SETTLEMENT_UNTYPED = 'this run settled before typed run outcomes shipped — sessions.outcome is NULL and a legacy status is never translated into the success|escalated|aborted|failed vocabulary'
 
 // docs/ledger-queries.md "Heartbeat cadence": the rate has ONE owner,
@@ -246,7 +250,7 @@ function dateValue(v) {
 
 export function shapeRun(session, phases = [], agentEvents = [], triageRow = null,
                          probe = {}, now = Date.now(), extras = {}) {
-  const { runConfiguration = null, runSeats = [], agentSessions = [], gateDiscriminations = [], reviewOutcomes = [], acceptDecisions = [], gateResults = [] } = extras || {}
+  const { runConfiguration = null, runSeats = [], agentSessions = [], gateDiscriminations = [], reviewOutcomes = [], acceptDecisions = [], gateResults = [], crewState = null } = extras || {}
   const ended = session.ended_at ?? null
   const start = dateValue(session.started_at)
   const finish = dateValue(ended)
@@ -307,6 +311,8 @@ export function shapeRun(session, phases = [], agentEvents = [], triageRow = nul
     created_at: row.created_at ?? null,
   })
   const seats = runSeats.length ? runSeats.map(shapeSeat) : null
+  const crew = crewState && typeof crewState === 'object' ? crewState : null
+  const crewArchived = crew && typeof crew.archived === 'boolean' ? crew.archived : null
   const settlementState = ended === null ? 'unsettled' : 'settled'
   const settlementOutcome = session.outcome ?? null
   const heartbeatState = settlementState === 'settled' ? 'unmeasured'
@@ -362,6 +368,7 @@ export function shapeRun(session, phases = [], agentEvents = [], triageRow = nul
   const seatsReason = pendingFor('seats', probe, seats)
   if (seatsReason) pending.seats = seatsReason
   pending.driver_state = DRIVER_UNOBSERVED
+  if (crewArchived === null) pending.crew_state = crew?.reason || CREW_STATE_UNMEASURED
   if (heartbeatState === 'unmeasured') {
     pending.heartbeat_state = settlementState === 'settled' ? HEARTBEAT_SETTLED : HEARTBEAT_NEVER_BEAT
   }
@@ -429,7 +436,24 @@ export function shapeRun(session, phases = [], agentEvents = [], triageRow = nul
     reviews,
     accept_decisions: accepts,
     triage: { reviewed_at: triageRow?.reviewed_at ?? null },
-    pending: { ...pending, ...(phaseLanePending ? { phase_lanes: phaseLanePending } : {}) },
+    // #953 — every run carries the key, so the Object.keys parity assertions in
+    // visualizer-shape.test.mjs:61 and visualizer-server.test.mjs:364,:498 stay green. The
+    // VALUE is null when unmeasured, because visualizer-shape.test.mjs:68-79 walks
+    // Object.keys(run.pending) and requires the same-named top-level field to be null — an
+    // object there fails a fenced test this lane must leave unchanged. Measured false and unmeasured
+    // stay distinguishable: false publishes an object, unmeasured publishes null and a
+    // pending reason.
+    // #953 · TL8 — an archive whose INSTANT could not be measured carries its own closed
+    // reason to the API row. `archived_at: null` with nothing beside it is a measured-looking
+    // absence: the operator cannot tell "archived at a time nobody recorded" from a bug.
+    crew_state: crewArchived === null ? null : {
+      archived: crewArchived,
+      archived_at: crewArchived === true ? (crew.archived_at ?? null) : null,
+      archived_at_absent: crewArchived === true && (crew.archived_at ?? null) === null ? (crew.reason || CREW_STATE_UNMEASURED) : null,
+      archive_dir: crewArchived === true ? (crew.archive_dir ?? null) : null,
+      observed_at: crew?.observed_at ?? null,
+    },
+    pending: { ...pending, ...(phaseLanePending ? { phase_lanes: phaseLanePending } : {}) }
   }
 }
 

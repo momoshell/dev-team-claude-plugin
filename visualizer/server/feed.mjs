@@ -4,7 +4,7 @@
 // in its own sidecar because the projection can be rebuilt from JSONL.
 import { createLedgerFeed } from './ledger-feed.mjs'
 
-export function createFeed({ kind = 'ledger', ledgerDb, triageDb } = {}) {
-  if (kind === 'ledger') return createLedgerFeed({ ledgerDb, triageDb })
+export function createFeed({ kind = 'ledger', ledgerDb, triageDb, crewRoot = null } = {}) {
+  if (kind === 'ledger') return createLedgerFeed({ ledgerDb, triageDb, crewRoot })
   throw new Error(`unknown feed kind: ${kind}`)
 }

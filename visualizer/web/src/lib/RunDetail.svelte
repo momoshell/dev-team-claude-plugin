@@ -1,7 +1,7 @@
 <script>
   import { getEvents, getJournal, getReturns } from './api.js'
   import { drainEvents } from './drain.js'
-  import { deriveDisplayStatus, durationCell, gateCell, reviewCell, tokenCell } from './fleet.js'
+  import { deriveDisplayStatus, durationCell, gateCell, openRecordNote, reviewCell, tokenCell } from './fleet.js'
   import { runConfiguration } from './workflow-semantics.js'
   import { crewSummary } from './crew.js'
   import { applyRead, initialJournalState, journalPulse, shouldRead } from './live.js'
@@ -132,8 +132,8 @@
     <article class="usage-summary"><span class="summary-label">Billed token volume</span><div class="usage-head"><strong>{tokens.dashed ? '—' : compact(tokens.value)}</strong>{#if tokens.cacheRate != null}<span class="cache-badge" title="Cache reads ÷ input, cache writes, and cache reads">{percent(tokens.cacheRate)} cache hit</span>{/if}</div>{#if !tokens.dashed}<div class="cache-meter" aria-label={`${percent(tokens.cacheRate)} cache hit`}><i style={`width:${tokens.cacheRate ?? 0}%`}></i></div><div class="usage-breakdown"><span>{compact(tokens.cacheRead)} cache reads</span><span>{compact(tokens.cacheWrite)} cache writes</span><span>{compact(tokens.input)} fresh input</span><span>{compact(tokens.output)} output</span></div>{:else}<small>{tokens.title || 'Not measured for this run'}</small>{/if}</article>
   </section>
 
-  {#if status.key === 'silent' || status.key === 'unverified'}
-    <section class="liveness-note"><span aria-hidden="true">!</span><div><strong>{status.key === 'silent' ? 'Stale open record' : 'Open record not verified'}</strong><p>{status.why} The waterfall below preserves the recorded phase state; it is not evidence that a worker is still alive.</p></div></section>
+  {#if openRecordNote(status.key)}
+    <section class="liveness-note"><span aria-hidden="true">!</span><div><strong>{openRecordNote(status.key)}</strong><p>{status.why} The waterfall below preserves the recorded phase state; it is not evidence that a worker is still alive.</p></div></section>
   {/if}
 
   {#if error}<p class="error-banner">{error}</p>{/if}
@@ -159,7 +159,7 @@
           </details>
         {:else}<p>No seat assignments were recorded.</p>{/each}
       </div>
-      <div class="task-times"><div><span>Started</span><time datetime={started.iso || undefined}><strong>{started.date}</strong><small>{started.time}</small></time></div><div><span>Finished</span>{#if run.running}<strong>{status.key === 'silent' ? 'Stale open record' : status.key === 'unverified' ? 'Not verified' : 'Still running'}</strong>{:else}<time datetime={finished.iso || undefined}><strong>{finished.date}</strong><small>{finished.time}</small></time>{/if}</div></div>
+      <div class="task-times"><div><span>Started</span><time datetime={started.iso || undefined}><strong>{started.date}</strong><small>{started.time}</small></time></div><div><span>Finished</span>{#if run.running}<strong>{openRecordNote(status.key) ?? 'Still running'}</strong>{:else}<time datetime={finished.iso || undefined}><strong>{finished.date}</strong><small>{finished.time}</small></time>{/if}</div></div>
     </aside>
   </div>
 

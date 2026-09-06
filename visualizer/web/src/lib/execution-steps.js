@@ -31,7 +31,10 @@ function assignmentState(assignment, stage, activity = 'live') {
     return { key:status === 'done' || status === 'ok' ? 'returned' : status, label:status === 'done' || status === 'ok' ? 'Returned' : status.replaceAll('_',' ') }
   }
   if (stage.ended_at != null) return { key:'missing', label:'No return recorded' }
-  if (activity === 'silent' || activity === 'settled') return { key:'missing', label:'No return recorded' }
+  // #953 — a contradicted lane is an open record with no return, exactly like a silent one.
+  // An unrecognised key falls through to "In progress" below, which is the claim this issue
+  // exists to remove.
+  if (activity === 'silent' || activity === 'settled' || activity === 'contradicted') return { key:'missing', label:'No return recorded' }
   if (activity === 'unverified') return { key:'unverified', label:'Return unverified' }
   return { key:'active', label:'In progress' }
 }

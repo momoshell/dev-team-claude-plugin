@@ -8,12 +8,12 @@
   let escalation = $derived(fleetEscalationRate(runs, { degraded, envelopes }))
   let tokens = $derived(fleetTokens(runs))
   let activity = $derived(fleetActivity(runs, now))
-  let unverified = $derived(activity.silent + activity.unverified)
+  let unverified = $derived(activity.silent + activity.unverified + activity.contradicted)
   let activityNote = $derived(activity.open
-    ? `${activity.live} live${activity.silent ? ` · ${activity.silent} stale` : ''}${activity.unverified ? ` · ${activity.unverified} unverified` : ''}`
+    ? `${activity.live} live${activity.contradicted ? ` · ${activity.contradicted} contradicted` : ''}${activity.silent ? ` · ${activity.silent} stale` : ''}${activity.unverified ? ` · ${activity.unverified} unverified` : ''}`
     : 'No open records')
   let activityTitle = $derived(unverified
-    ? `${activity.silent ? `${activity.silent} stale heartbeat${activity.silent === 1 ? '' : 's'}` : ''}${activity.silent && activity.unverified ? ' · ' : ''}${activity.unverified ? `${activity.unverified} heartbeat${activity.unverified === 1 ? '' : 's'} unavailable` : ''}. Open the attention view to inspect.`
+    ? `${activity.contradicted ? `${activity.contradicted} lane${activity.contradicted === 1 ? '' : 's'} whose ledger says running while its crew state directory is archived` : ''}${activity.contradicted && (activity.silent || activity.unverified) ? ' · ' : ''}${activity.silent ? `${activity.silent} stale heartbeat${activity.silent === 1 ? '' : 's'}` : ''}${activity.silent && activity.unverified ? ' · ' : ''}${activity.unverified ? `${activity.unverified} heartbeat${activity.unverified === 1 ? '' : 's'} unavailable` : ''}. Open the attention view to inspect.`
     : activity.live
       ? `${activity.live} open record${activity.live === 1 ? '' : 's'} confirmed by a fresh heartbeat.`
       : 'The factory has no open task records.')
@@ -30,7 +30,7 @@
 
 <section class="metrics" aria-label="Factory summary">
   <article><span class="label">Tasks recorded</span><strong>{runs.length}</strong><small>ledger history</small></article>
-  <button type="button" class="metric-card activity-card" class:live={activity.live > 0 && !unverified} class:uncertain={unverified > 0} onclick={onactivity} title={activityTitle} aria-label={`Activity now: ${activity.open} open, ${activity.live} live, ${activity.silent} stale, ${activity.unverified} unverified. View matching tasks.`}><span class="label">Activity now</span><strong>{activity.open}<em>open</em></strong><small><span>{activityNote}</span><b>{unverified ? 'Review' : 'View'} →</b></small></button>
+  <button type="button" class="metric-card activity-card" class:live={activity.live > 0 && !unverified} class:uncertain={unverified > 0} onclick={onactivity} title={activityTitle} aria-label={`Activity now: ${activity.open} open, ${activity.live} live, ${activity.silent} stale, ${activity.contradicted} contradicted, ${activity.unverified} unverified. View matching tasks.`}><span class="label">Activity now</span><strong>{activity.open}<em>open</em></strong><small><span>{activityNote}</span><b>{unverified ? 'Review' : 'View'} →</b></small></button>
   <article class:pending={passRate.percent == null}><span class="label">Completion quality</span><strong>{passRate.percent == null ? '—' : `${passRate.percent}%`}</strong><small>{passRate.percent == null ? passRate.pending : 'successful finishes'}</small></article>
   <article class:pending={duration.ms == null}><span class="label">Typical duration</span><strong>{time(duration.ms)}</strong><small>median completed task</small></article>
   <article class:pending={phases.average == null}><span class="label">Workflow depth</span><strong>{phases.average == null ? '—' : phases.average.toFixed(1)}</strong><small>phases per task</small></article>

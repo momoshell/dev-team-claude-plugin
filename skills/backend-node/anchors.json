@@ -39,7 +39,7 @@
   "crew/drive.mjs:401": "export const DECISIONS = Object.freeze",
   "crew/drive-review.test.mjs:1273": "assert.deepEqual([...DECISIONS], ['bounce', 'bounce-builder', 'bounce-reviewer', 'accept', 'escalate'])",
   "crew/drive-review.test.mjs:1271": "DECISIONS and LIMITS are the frozen public contract",
-  "crew/drive.mjs:559": "ENVELOPE_FIELD_KINDS.includes(field?.kind)",
   "crew/drive-review.test.mjs:1272": "Object.isFrozen(DECISIONS) && Object.isFrozen(LIMITS)",
-  "crew/drive.mjs:553": "if (!shape || typeof shape !== 'object')"
+  "crew/drive.mjs:564": "ENVELOPE_FIELD_KINDS.includes(field?.kind)",
+  "crew/drive.mjs:558": "if (!shape || typeof shape !== 'object')"
 }

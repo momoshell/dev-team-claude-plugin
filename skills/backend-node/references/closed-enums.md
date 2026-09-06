@@ -14,7 +14,7 @@ Exhibit: `scripts/factory/ledger.mjs:3091`.
 actually consult".
 
 Keep the refusal message derived from the same set.
-Exhibit: `crew/drive.mjs:559`.
+Exhibit: `crew/drive.mjs:564`.
 
 Pin the expected members independently in the test.
 Exhibit: `crew/drive-review.test.mjs:1273`.
@@ -46,10 +46,10 @@ shape that keeps the decision observable.
 
 Unknown values should take the existing refusal path rather than being silently
 added to a vocabulary.
-Exhibit: `crew/drive.mjs:559`.
+Exhibit: `crew/drive.mjs:564`.
 
 Empty and null declarations are invalid data, not empty closed enums.
-Exhibit: `crew/drive.mjs:553`.
+Exhibit: `crew/drive.mjs:558`.
 
 Keep a rule's exhibit beside the declaration and beside its drift guard.
 Exhibit: `crew/drive-review.test.mjs:1272` and `:4161`.

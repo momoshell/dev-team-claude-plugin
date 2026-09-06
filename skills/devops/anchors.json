@@ -31,10 +31,10 @@
   "scripts/factory/ledger.mjs:146": "TERMINAL_ACTORS = Object.freeze(['driver', 'lead', 'operator'",
   "scripts/factory/ledger.mjs:5370": "installFinalizer — explicit opt-in only, NEVER installed at import",
   "scripts/factory/ledger.mjs:5396": "terminal_reason: sig, terminal_actor: 'finalizer'",
-  "crew/crew.mjs:2367": "done       -> auto-teardown",
-  "crew/crew.mjs:2125": "for (const signal of Object.keys(SIGNAL_EXIT_CODES))",
-  "crew/crew.mjs:2091": "SIGNAL_EXIT_CODES = Object.freeze({ SIGTERM: 143",
-  "crew/crew.mjs:2922": "every member ran on a surface-less transport",
   "crew/seat-io.mjs:2911": "common git dir from every linked worktree",
-  "crew/drive.mjs:6309": "const slotNap = (ms) =>"
+  "crew/crew.mjs:2371": "done       -> auto-teardown",
+  "crew/crew.mjs:2129": "for (const signal of Object.keys(SIGNAL_EXIT_CODES))",
+  "crew/drive.mjs:6531": "const slotNap = (ms) =>",
+  "crew/crew.mjs:2095": "SIGNAL_EXIT_CODES = Object.freeze({ SIGTERM: 143",
+  "crew/crew.mjs:2926": "every member ran on a surface-less transport"
 }

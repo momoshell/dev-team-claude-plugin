@@ -13,7 +13,7 @@ import { spawnSync } from 'node:child_process'
 import { git, ROOT } from './helpers.mjs'
 import {
   ACCEPTANCE_GATE_BLOCK, BROAD_KEY_HIT_LIMIT, CONVENTIONS_BLOCK, CREATES_MARK, DEFAULT_PROTECTED_PATHS,
-  DIRECTED_BLOCK, DIRECTED_GATE_NOTE, DIRECTED_KEYS, HOSTILE_ENV_BLOCK, LADDER_BANDS, OPTIONAL_REQUEST_KEYS,
+  DISCOVERY_PROGRESS_PREFIX, DIRECTED_BLOCK, DIRECTED_GATE_NOTE, DIRECTED_KEYS, HOSTILE_ENV_BLOCK, LADDER_BANDS, OPTIONAL_REQUEST_KEYS,
   REFUSAL_REASONS, SLOT_MARKER, TIER_NAMES, crossCheckCoupling, readsToAcknowledge,
   discoverTripwires, exportEntries, extractKeys, extractSymbols, gatherFences, gatherProtectedPaths, isTripwireFile, main, symbolIndexFor,
   MUTATION_CONTRACT_BLOCK, PACK_ABSENT_REASONS, PROPOSAL_BLOCK, PROPOSAL_KEYS, profileField, proposeTier,
@@ -796,6 +796,24 @@ test('extractKeys independently finds exports, codes, written paths, and basenam
   ]) assert.ok(keys.includes(key), `${key} missing from ${keys}`)
   assert.ok(!keys.includes('foo'))
   assert.deepEqual(keys, [...keys].sort())
+})
+
+test('quoted-literal extraction remains stable across escaped, multiline, and commented text', () => {
+  const source = [
+    'export const PublicValue = 1',
+    'export function runThing() {}',
+    String.raw`const escaped = 'a\'b'`,
+    String.raw`const continued = 'line\
+next'`,
+    'const template = `template',
+    'literal`',
+    "const output = 'var/cache/result.json'",
+    "// apostrophe inside a comment: 'comment'",
+  ].join('\n')
+  assert.deepEqual(extractKeys(source, 'lib/example.mjs'), [
+    'PublicValue', 'lib/example.mjs', 'result.json', 'runThing', 'var/cache/result.json',
+  ])
+  assert.deepEqual(extractSymbols(source, 'lib/example.mjs'), ['PublicValue', 'runThing'])
 })
 
 test('exported symbols, error codes, and written filenames each find their test', () => {
@@ -2188,7 +2206,8 @@ test('compiler and emitter proposal declarations stay in agreement', () => {
 test('the parser returns a refusal code for an unknown CLI option', () => {
   assert.equal(main(['--bogus']), 2)
   assert.equal(new Set(REFUSAL_REASONS).size, REFUSAL_REASONS.length)
-  assert.equal(REFUSAL_REASONS.length, 24)
+  assert.equal(REFUSAL_REASONS.length, 25)
+  assert.ok(REFUSAL_REASONS.includes('discovery-budget'))
   assert.ok(REFUSAL_REASONS.includes('directed-unknown-key'))
   assert.ok(REFUSAL_REASONS.includes('directed-shape'))
   assert.ok(REFUSAL_REASONS.includes('directed-fence-collision'))
@@ -2207,6 +2226,77 @@ test('the parser returns a refusal code for an unknown CLI option', () => {
 test('the compiler parses cleanly with node --check', () => {
   const result = spawnSync(process.execPath, ['--check', SCRIPT], { encoding: 'utf8' })
   assert.equal(result.status, 0, result.stderr)
+})
+
+test('literal-heavy real discovery completes without modifying its reproducers', () => {
+  const files = ['crew/drive-fixtures.mjs', 'crew/crew.test.mjs']
+  const before = files.map((file) => readFileSync(join(ROOT, file)))
+  const startedAt = Date.now()
+  const where = verifyWhere({ checkout: ROOT, where: files })
+  const discovery = discoverTripwires({ checkout: ROOT, files: where })
+  const elapsed = Date.now() - startedAt
+  assert.ok(Array.isArray(discovery.candidates))
+  assert.ok(elapsed < 30_000, `discovery took ${elapsed}ms`)
+  for (const [index, file] of files.entries()) assert.deepEqual(readFileSync(join(ROOT, file)), before[index], file)
+})
+
+test('discovery budget refuses by name, lane, file, and phase', () => {
+  assert.throws(() => discoverTripwires({
+    checkout: ROOT, files: ['scripts/factory/absence.mjs'], lane: 'lane-x', budgetMs: 0,
+  }), (error) => error.reason === 'discovery-budget'
+    && REFUSAL_REASONS.includes(error.reason)
+    && error.message.includes('lane-x')
+    && error.message.includes('scripts/factory/absence.mjs')
+    && error.message.includes('phase scan'))
+})
+
+test('discovery budget covers the repo-wide grep after the per-file scan', () => {
+  let calls = 0
+  // The prescribed call order is seed, scan check, then the first grep hook.
+  assert.throws(() => discoverTripwires({
+    checkout: ROOT,
+    files: ['scripts/factory/absence.mjs'],
+    lane: 'phase-lane',
+    budgetMs: 1000,
+    now: () => (calls++ < 2 ? 0 : 10_000_000),
+  }), (error) => error.reason === 'discovery-budget'
+    && error.message.includes('phase grep')
+    && error.message.includes('scripts/factory/absence.mjs'))
+})
+
+test('discovery progress is opt-in and the CLI narrates to stderr', () => {
+  const root = fixture('discovery-progress', { citingComment: true })
+  const where = verifyWhere({ checkout: root, where: ['lib/widget.mjs', 'config/thing.yml'] })
+  const lines = []
+  discoverTripwires({ checkout: root, files: where, onProgress: (line) => lines.push(line) })
+  assert.deepEqual(lines, [
+    `${DISCOVERY_PROGRESS_PREFIX} 1/2 config/thing.yml\n`,
+    `${DISCOVERY_PROGRESS_PREFIX} 2/2 lib/widget.mjs\n`,
+  ])
+
+  const written = []
+  const realWrite = process.stderr.write
+  process.stderr.write = (chunk) => { written.push(String(chunk)); return true }
+  try {
+    discoverTripwires({ checkout: root, files: where })
+  } finally {
+    process.stderr.write = realWrite
+  }
+  assert.deepEqual(written, [])
+
+  const fencesPath = put(root, 'progress-fences.json', `${JSON.stringify({
+    lanes: [{ lane: 'own', files: ['lib/widget.mjs'] }],
+  }, null, 2)}\n`)
+  const requestPath = request(root, { where: ['lib/widget.mjs'] }, 'progress-request.json')
+  const cli = run(root, [
+    '--discover-reads', 'own', '--request', requestPath, '--checkout', root, '--fences', fencesPath,
+  ])
+  assert.equal(cli.status, 0, `${cli.stderr}\n${cli.stdout}`)
+  assert.match(cli.stderr, new RegExp(`${DISCOVERY_PROGRESS_PREFIX} 1/1 lib\\/widget\\.mjs`))
+  const records = JSON.parse(cli.stdout)
+  assert.ok(Array.isArray(records))
+  assert.ok(records.length > 0)
+  assert.ok(records.every((record) => typeof record.file === 'string' && typeof record.why === 'string'))
 })
 
 test('direct gatherers refuse a non-git checkout and preserve verified entries', () => {

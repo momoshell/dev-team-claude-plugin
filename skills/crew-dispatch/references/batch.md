@@ -32,6 +32,11 @@ subagent fan-out explicitly on a read-everything sweep and ask for incremental
 findings, because two scouts finished measuring and escalated with the envelope
 unwritten.
 
+**The sequence above prescribes no dry run.** `checkFences`, `crossBatchCollisions`
+and `resolveAdoptions` all run before `createWorktrees`, so a bad register refuses
+before a branch exists; `references/flags.md` records what `--dry-run` is for and
+what a green one does not mean.
+
 ## Parked conditions go stale
 
 **`parked`** names a trigger, and triggers can be met silently, so **`audit the trigger against the code`** before repeating it. **`#291`** had both halves met

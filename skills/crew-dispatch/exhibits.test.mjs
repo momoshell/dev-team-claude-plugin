@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { ROOT } from '../../test/helpers.mjs'
 import { checkAnchors, collectAnchors, laneFence, partitionShifts, pinnedKey, skillDocs } from '../qa-test-writing/anchor-pin.mjs'
 import { PROTECTED_PATHS, resolveProtectedPaths } from '../../crew/protected-paths.mjs'
+import { DRY_RUN_BLIND_SPOT } from '../../scripts/factory/dispatch-batch.mjs'
 
 const HERE = fileURLToPath(new URL('./', import.meta.url))
 const TIER = join(HERE, 'references/tier.md')
@@ -146,5 +147,41 @@ test('each migrated rule has exactly one prose owner', () => {
   }
   for (const phrase of ['send-key', 'tear the lane down before committing']) {
     assert.deepEqual(files.filter((path) => readFileSync(path, 'utf8').includes(phrase)), [], `${phrase} is superseded`)
+  }
+})
+
+// Mutation killed: adding a dry-run step to the numbered recipe must make its absence assertion fail.
+test('the batch recipe prescribes no dry run', () => {
+  const text = readText(join(HERE, 'references/batch.md'))
+  const start = text.indexOf('1. Create one worktree per lane.')
+  const end = text.indexOf('\nParallelise on file-set disjointness', start)
+  assert.notEqual(start, -1, 'the numbered recipe is missing')
+  assert.notEqual(end, -1, 'the recipe terminator is missing')
+  assert.doesNotMatch(text.slice(start, end), /dry[ -]?run/i)
+  assert.ok(text.includes('The sequence above prescribes no dry run'))
+})
+
+// Mutation killed: deleting the dry-run use cases or changing the blind-spot quote must make the doctrine assertion fail.
+test('the flag reference records what a dry run is and is not for', () => {
+  const text = readText(join(HERE, 'references/flags.md'))
+  const sentence = 'A green dry run is not a validated dispatch.'
+  for (const token of [
+    'a register whose paths you do not trust',
+    'a foreign checkout, where creating branches is unwelcome',
+    'the first run after `onboard`',
+    '2026-09-06',
+    'six times',
+    'Six invocations on one day is the whole sample',
+    '`--dry-run --force --no-keep --headless-all --panes`',
+    sentence,
+  ]) assert.ok(text.includes(token), `flags.md must carry ${token}`)
+  assert.ok(DRY_RUN_BLIND_SPOT.includes(sentence))
+})
+
+// Mutation killed: removing the dry-run routing row or critical rule must make the skill route assertion fail.
+test('the dispatch skill routes the dry-run doctrine', () => {
+  const text = readText(join(HERE, 'SKILL.md'))
+  for (const token of ['Deciding whether to dry-run', 'A dry run is not a step', '#961']) {
+    assert.ok(text.includes(token), `SKILL.md must carry ${token}`)
   }
 })

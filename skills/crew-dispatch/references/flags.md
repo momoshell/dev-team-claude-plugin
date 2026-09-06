@@ -99,3 +99,43 @@ copied.
 
 The dispatcher writes a `plan-adopted` journal row with the archive path and a
 sha256 of the adopted plan.
+
+## Batch dispatch: what `--dry-run` is and is not for
+
+A dry run is not a step of the dispatch recipe. On 2026-09-06 it was invoked
+six times and changed no decision once: `external-fence-abandoned`,
+`cross-batch-collision` (twice) and `worktree-exists` all refused in the LIVE
+dispatch, and the three operator fence errors that day were found by lanes, not
+by a dry run. Six invocations on one day is the whole sample — the claim is that
+it caught nothing on the day it was measured, never that it has never caught
+anything.
+
+A green dry run is cheap to mistake for diligence. The flag says so itself, in
+the line it prints last:
+
+> BLIND SPOT — nothing booted, so every check that reads booted state is
+> unreachable from here: fence arrival and the sibling count in a lane
+> crew.json, boot and workspace failures, compiler refusals, and every journal
+> or run outcome. A green dry run is not a validated dispatch.
+
+It cannot see a compiler refusal for a concrete reason: the dry-run branch
+returns before `measureBatchBaseline` and before any lane is compiled at all.
+
+Nor is a dry run what keeps a bad register from leaving branches behind.
+`checkFences` (with `crossBatchCollisions` inside it) and `resolveAdoptions`
+all run before `createWorktrees`, and `resolveAdoptions` says why in its own
+comment: a partial adoption is worse than none, so a refusal there has copied
+nothing anywhere. Every check capable of catching something already fires
+before a worktree exists.
+
+So reach for it only where the branch-creation itself is the thing you are not
+ready for:
+
+- a register whose paths you do not trust, when you want the planned worktrees
+  echoed back before anything is created;
+- a foreign checkout, where creating branches is unwelcome;
+- the first run after `onboard`, before this checkout has been dispatched into
+  once.
+
+Nothing about the flag changed: it is still an accepted boolean flag of
+`dispatch-batch` and still prints exactly what it printed before.

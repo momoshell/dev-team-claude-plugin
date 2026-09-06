@@ -57,12 +57,16 @@ const CODE_EXTENSIONS = Object.freeze(['.js', '.mjs'])
 const ANSI_CSI = /\x1b\[[0-?]*[ -/]*[@-~]/g
 const ERROR_CODE = /^[a-z0-9]+(?:[-:][a-z0-9]+)+$/
 const WRITTEN_PATH = /^[A-Za-z0-9_.\-/]+\.[A-Za-z0-9]+$/
-const QUOTED_LITERAL = /(["'`])((?:\\.|(?!\1)[\s\S])*?)\1/g
+// #967: keep the quoted-literal alternatives disjoint at backslashes to avoid catastrophic backtracking.
+const QUOTED_LITERAL = /(["'`])((?:\\[\s\S]|(?!\1)[^\\])*?)\1/g
 const EXPORTED_DECLARATION = /^export\s+(?:async\s+)?(?:function|const|let|class)\s+([A-Za-z_$][\w$]*)/gm
 const EXPORTED_LIST = /^export\s*\{([^}]*)\}/gm
 const TEST_FILE = /(^|\/)[^/]*\.test\.mjs$/
 const BROAD_KEY_LIMIT = 30
 const BASELINE_TIMEOUT_MS = 300_000
+export const DISCOVERY_BUDGET_MS = 120_000
+export const DISCOVERY_PROGRESS_PREFIX = 'make-brief: discovery scanning'
+export const DISCOVERY_PHASES = Object.freeze(['scan', 'grep', 'classify'])
 
 export const TIER_NAMES = Object.freeze(['mechanical', 'build', 'judge'])
 export const DEFAULT_PROTECTED_PATHS = resolveProtectedPaths()
@@ -121,6 +125,7 @@ const CREATES_PARENT_MISSING = 'creates-parent-missing'
 const DIRECTED_UNKNOWN_KEY = 'directed-unknown-key'
 const DIRECTED_SHAPE = 'directed-shape'
 const DIRECTED_FENCE_COLLISION = 'directed-fence-collision'
+const DISCOVERY_BUDGET = 'discovery-budget'
 
 export const REFUSAL_REASONS = Object.freeze([
   MISSING_LINE,
@@ -147,6 +152,7 @@ export const REFUSAL_REASONS = Object.freeze([
   DIRECTED_UNKNOWN_KEY,
   DIRECTED_SHAPE,
   DIRECTED_FENCE_COLLISION,
+  DISCOVERY_BUDGET,
 ])
 
 export const BROAD_KEY_HIT_LIMIT = BROAD_KEY_LIMIT
@@ -687,7 +693,31 @@ export function isTripwireFile(file) {
   return TEST_FILE.test(file) || file.startsWith('test/')
 }
 
-export function discoverTripwires({ checkout, files }) {
+const noProgress = () => {}
+
+export const stderrProgressSink = (line) => { process.stderr.write(line) }
+
+function emitDiscoveryProgress(sink, index, total, file) {
+  sink(`${DISCOVERY_PROGRESS_PREFIX} ${index}/${total} ${file}\n`)
+}
+
+// One clock for the WHOLE pass, not just the per-file scan: the per-file loop,
+// the repo-wide key grep and the key classification are all checked against it,
+// each naming its phase and the last file the pass touched.
+function discoveryDeadline({ budgetMs, lane, now }) {
+  const startedAt = now()
+  let lastFile = null
+  return {
+    mark(file) { lastFile = file },
+    check(phase) {
+      if (now() - startedAt >= budgetMs) {
+        refuseUsage(`read discovery exceeded its ${budgetMs}ms budget for lane ${lane ?? 'none'} while scanning ${lastFile ?? '(no file scanned)'} in phase ${phase}`, DISCOVERY_BUDGET)
+      }
+    },
+  }
+}
+
+export function discoverTripwires({ checkout, files, lane = null, budgetMs = DISCOVERY_BUDGET_MS, onProgress = noProgress, now = Date.now }) {
   const repoRoot = gitRoot(checkout)
   if (!Array.isArray(files)) refuseUsage('files must be an array', WRONG_TYPE)
   const entries = files.map((entry) => {
@@ -702,7 +732,13 @@ export function discoverTripwires({ checkout, files }) {
   const symbolOwners = new Map()
   const ownerFiles = new Set()
   const allKeys = new Set()
+  const deadline = discoveryDeadline({ budgetMs, lane, now })
+  const scanTotal = sourceFiles.length
+  let scanIndex = 0
   for (const sourceFile of sourceFiles) {
+    scanIndex += 1
+    deadline.mark(sourceFile.file)
+    emitDiscoveryProgress(onProgress, scanIndex, scanTotal, sourceFile.file)
     let source
     try {
       source = readFileSync(sourceFile.absolute, 'utf8')
@@ -721,6 +757,7 @@ export function discoverTripwires({ checkout, files }) {
       if (!symbolOwners.has(symbol)) symbolOwners.set(symbol, new Set())
       symbolOwners.get(symbol).add(sourceFile.file)
     }
+    deadline.check('scan')
   }
 
   // Check 1: seed coupling with each owner's OWN repo path and basename, so a
@@ -737,7 +774,7 @@ export function discoverTripwires({ checkout, files }) {
     }
   }
 
-  const hitsByKey = grepHitsForKeys(repoRoot, [...allKeys]), mentionsByOwner = new Map()
+  const hitsByKey = grepHitsForKeys(repoRoot, [...allKeys], () => deadline.check('grep')), mentionsByOwner = new Map()
   // The owner-path mention is intentionally unbounded: it only narrows the
   // exported-symbol coupling set, never the existing broad-key tripwire set.
   for (const owner of [...ownerFiles].sort()) {
@@ -753,6 +790,7 @@ export function discoverTripwires({ checkout, files }) {
   const coupledMap = new Map()
   const broadKeys = []
   for (const key of [...allKeys].sort()) {
+    deadline.check('classify')
     const hits = hitsByKey.get(key) || []
     // Breadth is measured TWICE because it answers two different questions.
     // For TRIPWIRES it counts every hit, unchanged: a key pinned by 32 test
@@ -1664,7 +1702,7 @@ function keyMatcher(keys) {
   }
 }
 
-function grepHitsForKeys(checkout, keys) {
+function grepHitsForKeys(checkout, keys, onFile = () => {}) {
   // Generated modules can put one `-e` per key past ARG_MAX; scan the tracked
   // files once in-process so a failed exec can never become an empty discovery.
   const wanted = [...new Set(keys.filter((key) => typeof key === 'string' && key.length > 0))]
@@ -1672,6 +1710,7 @@ function grepHitsForKeys(checkout, keys) {
   const hits = new Map(wanted.map((key) => [key, new Set()]))
   const match = keyMatcher(wanted)
   for (const file of trackedFiles(checkout)) {
+    onFile()
     const contents = trackedFileText(checkout, file)
     if (contents === null) continue
     for (const key of match(contents)) hits.get(key).add(file)
@@ -2503,7 +2542,7 @@ function compile(flags) {
   const checkout = gitRoot(flags.checkout || process.cwd())
   const where = verifyWhere({ checkout, where: request.where })
   const creates = verifyCreates({ checkout, creates: request.creates ?? [] })
-  const discovery = discoverTripwires({ checkout, files: where })
+  const discovery = discoverTripwires({ checkout, files: where, lane: flags.lane ?? null, onProgress: stderrProgressSink })
   const profileResult = gatherProfile({
     checkout,
     profilePath: flags.profile,
@@ -2581,7 +2620,7 @@ function discoverReadsOnly(flags) {
   const checkout = gitRoot(flags.checkout || process.cwd())
   const discoverWhere = verifyWhere({ checkout, where: request.where })
   const discoverCreates = verifyCreates({ checkout, creates: request.creates ?? [] })
-  const discovery = discoverTripwires({ checkout, files: discoverWhere })
+  const discovery = discoverTripwires({ checkout, files: discoverWhere, lane, onProgress: stderrProgressSink })
   const fences = gatherFences({ fencesPath: flags.fences, checkout })
   const writeSurface = resolveWriteSurface({ fences, lane, where: discoverWhere, creates: discoverCreates })
   const records = readsToAcknowledge({ discovery, writeSurface })

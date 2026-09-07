@@ -3,9 +3,9 @@
 // It owns the ordered checks between a batch request directory and background
 // crew runs; every failed check is a named refusal and stops the batch.
 
-import { appendFileSync, closeSync, existsSync as fsExistsSync, openSync, readFileSync as fsReadFileSync, readdirSync as fsReaddirSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
-import { basename, dirname, join, resolve } from 'node:path'
-import { homedir } from 'node:os'
+import { appendFileSync, closeSync, existsSync as fsExistsSync, openSync, readFileSync as fsReadFileSync, readdirSync as fsReaddirSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { homedir, tmpdir } from 'node:os'
 import { spawn as childSpawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
@@ -47,6 +47,7 @@ const PLAN_ADOPT_UNREADABLE = 'plan-adopt-unreadable'
 const EXTERNAL_FENCE_STALE = 'external-fence-stale'
 const EXTERNAL_FENCE_ABANDONED = 'external-fence-abandoned'
 const TEST_REACH_UNFENCED = 'test-reach-unfenced'
+const PLAN_ADOPT_GATE_ABSOLUTE_PATH = 'plan-adopt-gate-absolute-path'
 
 export const REFUSAL_REASONS = Object.freeze([
   BATCH_EMPTY,
@@ -80,8 +81,8 @@ export const REFUSAL_REASONS = Object.freeze([
   EXTERNAL_FENCE_STALE,
   EXTERNAL_FENCE_ABANDONED,
   TEST_REACH_UNFENCED,
+  PLAN_ADOPT_GATE_ABSOLUTE_PATH,
 ])
-
 export const CROSS_BATCH_UNKNOWN_PREFIX = 'dispatch-batch: WARNING cross-batch-unknown:'
 export const CROSS_BATCH_BLIND_SPOT = 'BLIND SPOT: a lane booted without --fences declares no surface at all and can be editing anything; a lane whose batch siblings have been reaped records no claim; and a repository whose git dir cannot be measured is not compared. None of those are cleared — they are reported unknown.'
 
@@ -2375,6 +2376,57 @@ export function adoptSourceDir(archive) {
   return basename(archive) === 'task' ? archive : join(archive, 'task')
 }
 
+// #997. A quoted absolute path in a gate is USUALLY DATA -- a fixture constant, an
+// escalation message quoted verbatim, a /tmp scratch dir, /usr/bin/gh. Refusing on any
+// such literal was measured at 10/214 precision over the 301 archived gates: bare '/'
+// hit 58 times and the comment '// gate\n' hit 214, because both begin with a slash.
+// What makes an absolute path the DEFECT is that the gate RESOLVES THE REPOSITORY
+// through it, so only an import specifier or a repo-root assignment is inspected.
+//
+// Location is not the test either. A gate pinned to its OWN checkout is equally
+// vacuous, because scripts/factory/prove-mutations.mjs runs the gate in a fresh
+// temporary worktree -- a pinned gate then measures a tree the mutation was never
+// applied to and cannot kill a single check. So any absolute repo resolution refuses,
+// its own or a predecessor's, and the adopting checkout is irrelevant.
+const GATE_REPO_RESOLUTIONS = Object.freeze([
+  { pattern: /\b(?:import|export)\b[^\n;]*?\bfrom\s*(['"`])([^'"`]*)\1/g, scratchExempt: false },
+  { pattern: /\bimport\s*(['"`])([^'"`]*)\1/g, scratchExempt: false },
+  { pattern: /\bimport\s*\(\s*(['"`])([^'"`]*)\1/g, scratchExempt: false },
+  { pattern: /\b(?:const|let|var)\s+\w*(?:REPO|ROOT|CHECKOUT)\w*\s*=\s*(['"`])([^'"`]*)\1/g, scratchExempt: true },
+])
+
+function absoluteGatePathLines(text) {
+  const lines = textOf(text).split('\n')
+  const tempRoots = [resolve(tmpdir())]
+  try { tempRoots.push(realpathSync(tmpdir())) } catch { /* best effort */ }
+  tempRoots.push('/tmp')
+  const underTemp = (candidate) => tempRoots.some((root) => {
+    const target = resolve(candidate)
+    return target === root || target.startsWith(root + sep)
+  })
+  const hits = []
+  lines.forEach((line, index) => {
+    GATE_REPO_RESOLUTIONS.forEach(({ pattern, scratchExempt }) => {
+      pattern.lastIndex = 0
+      let match
+      while ((match = pattern.exec(line)) !== null) {
+        const candidate = match[2]
+        if (!candidate || !isAbsolute(candidate)) continue
+        // A gate that mints its OWN scratch repository under the system temp dir and
+        // names it CHECKOUT is building a fixture, not pinning the repository under
+        // test. Four of the eight archives this check first flagged were exactly that
+        // (b352/b354/b359-slotdriver, b430-validlane: const CHECKOUT = '/tmp/bNNN-gate-repo').
+        // An IMPORT specifier is never exempt: importing from temp is still a repo
+        // resolution the mutation worktree cannot follow.
+        if (scratchExempt && underTemp(candidate)) continue
+        if (hits.some((hit) => hit.line === index + 1 && hit.path === candidate)) continue
+        hits.push({ line: index + 1, path: candidate })
+      }
+    })
+  })
+  return hits
+}
+
 export function parseAdoptSpec(value) {
   const text = typeof value === 'string' ? value.trim() : ''
   const at = text.indexOf('=')
@@ -2422,7 +2474,7 @@ export function lineageBaseline({ source, combined_bytes, deps } = {}) {
 // Verified BEFORE any worktree is created: a partial adoption is worse than none, so a
 // refusal here has copied nothing anywhere. A --adopt for a lane also carrying an
 // `adopt` request key wins, and the dispatch line says which route was taken.
-export function resolveAdoptions({ lanes, runFlags = {}, deps } = {}) {
+export function resolveAdoptions({ lanes, runFlags = {}, checkout = process.cwd(), deps } = {}) {
   const d = normalDeps(deps)
   const batch = Array.isArray(lanes) ? lanes : []
   const names = new Set(batch.map(laneNameOf))
@@ -2455,13 +2507,25 @@ export function resolveAdoptions({ lanes, runFlags = {}, deps } = {}) {
       }
       revise = text.includes(ADOPT_REVISE_MARKER)
     }
+    const planPath = join(source, 'plan.md')
+    const gatePath = join(source, 'gate.mjs')
+    let planText
+    let gateText
     let plan_bytes
     let gate_bytes
     try {
-      plan_bytes = Buffer.byteLength(textOf(d.readFileSync(join(source, 'plan.md'), 'utf8')), 'utf8')
-      gate_bytes = Buffer.byteLength(textOf(d.readFileSync(join(source, 'gate.mjs'), 'utf8')), 'utf8')
+      planText = textOf(d.readFileSync(planPath, 'utf8'))
+      gateText = textOf(d.readFileSync(gatePath, 'utf8'))
     } catch (err) {
       refuse(`lane ${lane} cannot measure adoption ${archive}: ${err?.message || String(err)}`, PLAN_ADOPT_UNREADABLE)
+    }
+    plan_bytes = Buffer.byteLength(planText, 'utf8')
+    gate_bytes = Buffer.byteLength(gateText, 'utf8')
+    const offending = absoluteGatePathLines(gateText)
+    if (offending.length > 0) {
+      const lines = offending.map(({ line: number }) => number).join(', ')
+      const literals = offending.map(({ path }) => JSON.stringify(path)).join(', ')
+      refuse(`lane ${lane} cannot adopt ${archive}: gate.mjs resolves the repository through absolute path(s) on line(s) ${lines} — an import specifier or repo-root assignment must derive from process.cwd(), because prove-mutations runs the gate in a fresh worktree and a pinned gate can kill no mutation; offending literal(s): ${literals}`, PLAN_ADOPT_GATE_ABSOLUTE_PATH)
     }
     const combined_bytes = plan_bytes + gate_bytes
     const lineage = lineageBaseline({ source, combined_bytes, deps: d })
@@ -2776,7 +2840,7 @@ export async function dispatchBatch({ batchDir, fences, checkout, parentDir, out
   preflightRunOptions({ variant, runFlags, lanes })
   // Before any worktree exists: an archive that does not hold a plan refuses here,
   // having copied nothing.
-  const adoptions = resolveAdoptions({ lanes, runFlags, deps: d })
+  const adoptions = resolveAdoptions({ lanes, runFlags, checkout: root, deps: d })
 
   const waveRaw = runFlags.wave === undefined || runFlags.wave === null ? 1 : runFlags.wave
   const waveText = String(waveRaw).trim()

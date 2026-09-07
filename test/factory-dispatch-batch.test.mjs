@@ -2213,6 +2213,7 @@ async function dispatchFixture({
   // writers; the default recorder is for callers that only observe the write.
   writeFile = null,
   appendFile = null,
+  spawnedOut = null,
 } = {}) {
   const batch = join(root, `dispatch-${label}-${Math.random().toString(36).slice(2)}`)
   const parent = join(root, `dispatch-${label}-parent`)
@@ -2221,6 +2222,10 @@ async function dispatchFixture({
   const authored = Object.fromEntries(names.map((lane) => [lane, requests[lane] || requestFor(lane)]))
   for (const lane of names) put(join(batch, `${lane}${REQUEST_SUFFIX}`), JSON.stringify(authored[lane]))
   const spawned = []
+  const recordSpawn = (call) => {
+    spawned.push(call)
+    if (Array.isArray(spawnedOut)) spawnedOut.push(call)
+  }
   const logs = []
   const wrote = new Map()
   const appended = []
@@ -2262,7 +2267,7 @@ async function dispatchFixture({
     writeFileSync: (path, content) => { wrote.set(String(path), String(content)); if (writeFile) writeFile(path, content) },
     appendFileSync: (path, content) => { appended.push({ path: String(path), content: String(content) }); if (appendFile) appendFile(path, content) },
     spawn: (call) => {
-      spawned.push(call)
+      recordSpawn(call)
       const args = (call.args || []).map(String)
       if (args.includes('merge-base')) return { status: ancestor(args), stdout: '', stderr: '' }
       if (args.includes('rev-parse') && args.includes('HEAD')) {
@@ -2278,7 +2283,7 @@ async function dispatchFixture({
       return result
     },
     ...(spawnAsync ? { spawnAsync: (call) => {
-      spawned.push(call)
+      recordSpawn(call)
       const args = (call.args || []).map(String)
       if (args.includes('--discover-reads')) return typeof discover === 'function' ? discover(args, call) : discover
       return spawnAsync(call)
@@ -2318,6 +2323,7 @@ async function adoptionDispatchFixture({
   briefs = {},
   outcomes = {},
   home = join(root, `adoption-home-${label}-${Math.random().toString(36).slice(2)}`),
+  spawnedOut = null,
 } = {}) {
   return dispatchFixture({
     label,
@@ -2328,6 +2334,7 @@ async function adoptionDispatchFixture({
     briefs,
     outcomes,
     home,
+    spawnedOut,
     // applyAdoption copies through the write seam (#856), so the adoption
     // fixture must land those bytes on disk, not merely record them.
     writeFile: (path, content) => put(path, content),
@@ -3615,6 +3622,126 @@ test('resolveAdoptions measures the adoption and carries the lineage baseline in
   assert.equal(row.combined_bytes, 50)
   assert.equal(row.lineage_baseline_bytes, 10)
   assert.equal(row.lineage_ratio, 5)
+})
+
+test('dispatchBatch refuses quoted absolute adoption paths before worktree creation', async () => {
+  const first = '/Users/example/Dev/dt-predecessor/crew/seat-io.mjs'
+  const second = '/Users/example/Dev/dt-predecessor'
+  const archive = adoptionArchive('absolute-gate', {
+    gate: [`import { seatIo } from '${first}'`, `const OLD_REPO = '${second}'`].join('\n'),
+  })
+  const home = join(root, 'absolute-gate-home')
+  const spawned = []
+  const error = await thrownAsync(() => adoptionDispatchFixture({
+    label: 'absolute-gate', home, spawnedOut: spawned,
+    runFlags: parseCliArgs(['--adopt', `lane-a=${archive}`]),
+  }))
+  assert.equal(error.reason, 'plan-adopt-gate-absolute-path')
+  assert.match(error.message, /gate\.mjs/)
+  assert.match(error.message, /process\.cwd\(\)/)
+  assert.match(error.message, /line\(s\) 1, 2/)
+  assert.equal(error.message.includes(first), true)
+  assert.equal(error.message.includes(second), true)
+  assert.equal(spawned.length, 0)
+  assert.equal(fsExistsSync(join(home, '.crew')), false)
+})
+
+test('resolveAdoptions refuses a gate pinned to its OWN checkout, not only a predecessor', () => {
+  // prove-mutations runs the gate in a fresh temporary worktree, so a gate pinned to
+  // any absolute checkout -- its own included -- can kill no mutation.
+  // A real lane checkout, not a temp path: a repo-root assignment under the system
+  // temp dir is exempt as a scratch fixture (see the sibling test), so the limitation
+  // is stated by the pair rather than hidden.
+  const self = '/Users/example/Dev/dt-self-pinned'
+  const archive = adoptionArchive('self-pinned-gate', {
+    gate: `const REPO = '${self}'\n`,
+  })
+  const error = thrown(() => resolveAdoptions({
+    lanes: [{ lane: 'lane-a', adopt: archive }], checkout: self, runFlags: {},
+  }))
+  assert.equal(error.reason, 'plan-adopt-gate-absolute-path')
+  assert.equal(error.message.includes(self), true)
+})
+
+test('resolveAdoptions admits a gate whose scratch fixture repo lives under system temp', () => {
+  // Measured: 4 of the 8 archives the first predicate flagged were gates minting their
+  // own scratch repository -- const CHECKOUT = '/tmp/bNNN-gate-repo' -- which is a
+  // fixture, not the repository under test. An IMPORT from temp is still refused.
+  const gate = [
+    "const CHECKOUT = '/tmp/b352-gate-repo'",
+    'const REPO = process.cwd()',
+  ].join('\n')
+  const archive = adoptionArchive('scratch-fixture-gate', { gate })
+  const adopted = resolveAdoptions({
+    lanes: [{ lane: 'lane-a', adopt: archive }], checkout: process.cwd(), runFlags: {},
+  }).get('lane-a')
+  assert.equal(adopted?.gate_bytes, Buffer.byteLength(gate, 'utf8'))
+})
+
+test('an IMPORT from system temp is refused even though a repo-root assignment there is exempt', () => {
+  // The scratch exemption is deliberately narrow: it covers a repo-root ASSIGNMENT
+  // only. An import specifier is never exempt, because that is the shape that made a
+  // gate measure the wrong tree (b508-coldledger) and the shape prove-mutations cannot
+  // follow into its temporary worktree.
+  const archive = adoptionArchive('temp-import-gate', {
+    gate: "import { seatIo } from '/tmp/b352-gate-repo/crew/seat-io.mjs'\n",
+  })
+  const error = thrown(() => resolveAdoptions({
+    lanes: [{ lane: 'lane-a', adopt: archive }], checkout: process.cwd(), runFlags: {},
+  }))
+  assert.equal(error.reason, 'plan-adopt-gate-absolute-path')
+})
+
+test('resolveAdoptions admits absolute literals that are not repo resolutions', () => {
+  // The premise 'any quoted absolute literal is unsafe' measured 10/214 precision over
+  // the archived corpus: bare '/' hit 58 times and the comment '// gate' 214 times.
+  const gate = [
+    "const GH = '/usr/bin/gh'",
+    "const SCRATCH = '/tmp/b427-gate-task'",
+    "const SEP = '/'",
+    '// gate',
+    'const REPO = process.cwd()',
+  ].join('\n')
+  const archive = adoptionArchive('data-literals-gate', { gate })
+  const adopted = resolveAdoptions({
+    lanes: [{ lane: 'lane-a', adopt: archive }], checkout: process.cwd(), runFlags: {},
+  }).get('lane-a')
+  assert.equal(adopted?.gate_bytes, Buffer.byteLength(gate, 'utf8'))
+})
+
+test('resolveAdoptions permits process.cwd and join based gate paths', () => {
+  const gate = [
+    "import { join } from 'node:path'",
+    'const REPO = process.cwd()',
+    "const target = join(REPO, 'crew', 'seat-io.mjs')",
+  ].join('\n')
+  const archive = adoptionArchive('portable-gate', { gate })
+  const adopted = resolveAdoptions({
+    lanes: [{ lane: 'lane-a', adopt: archive }],
+    checkout: process.cwd(),
+    runFlags: {},
+  }).get('lane-a')
+  assert.equal(adopted?.gate_bytes, Buffer.byteLength(gate, 'utf8'))
+})
+
+test('resolveAdoptions reads gate.mjs once and measures those same bytes', () => {
+  const gate = 'const REPO = process.cwd()\n'
+  const archive = adoptionArchive('single-gate-read', { gate })
+  const gatePath = join(archive, 'task', 'gate.mjs')
+  let gateReads = 0
+  const adopted = resolveAdoptions({
+    lanes: [{ lane: 'lane-a', adopt: archive }],
+    checkout: process.cwd(),
+    runFlags: {},
+    deps: {
+      readFileSync: (path, encoding) => {
+        if (String(path) === gatePath) gateReads += 1
+        return readFileSync(path, encoding)
+      },
+    },
+  }).get('lane-a')
+  assert.equal(gateReads, 1)
+  assert.equal(adopted?.gate_bytes, Buffer.byteLength(gate, 'utf8'))
 })
 
 test('lineageLine appears on both adoption print surfaces and preserves unmeasured reasons', async () => {

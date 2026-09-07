@@ -2410,7 +2410,10 @@ export function composePrBody(record) {
     if (!summary) return [`The acceptance gate${where} ran; its summary could not be measured.`].concat('')
     const repairs = Number.isFinite(gate.repairs) ? gate.repairs : 0
     const repaired = repairs > 0 ? `, repaired ${repairs} time${repairs === 1 ? '' : 's'}` : ''
-    return [`**${summary.total} gate checks, ${summary.failed} failed, ${summary.errored} errored, discrimination ${gate.discrimination || 'unproven'}**${where}${repaired}.`].concat('')
+    const generation = Number.isSafeInteger(gate.generation) ? gate.generation : null
+    const discrimination = generation === null ? 'unproven' : (gate.discrimination || 'unproven')
+    const measured = generation === null ? '' : ` on generation ${generation}`
+    return [`**${summary.total} gate checks, ${summary.failed} failed, ${summary.errored} errored, discrimination ${discrimination}${measured}**${where}${repaired}.`].concat('')
   })()
   // Unknown is never a zero: an unmeasured count says so rather than reading as green.
   const suite = record?.suite || {}
@@ -4189,6 +4192,8 @@ function runTask(ctx, io, crash) {
   let checkProofBindMeasured = false   // the ALL-OR-NOTHING measurement sentinel: true only after
                                        // bindMutationDeclarations returned every row
   let gateProofFatal = null    // the built tree still carries a mutation: the run must stop
+  let proofTreeWitness = null // the byte witness for the latest settled gate/check generation
+  let proofTreeBuildRound = null
   gateBlock = () => (gateCmd ? { cmd: gateCmd, repairs: gateRepairs, generation: gateGeneration, discrimination: gateDiscrimination ?? 'unproven', reap: { ...gateReapTally }, ...(gateProofNote ? { discrimination_note: gateProofNote } : {}), ...(gateHistory.length ? { replaced: gateHistory } : {}), ...(gateReverified !== null ? { reverified: gateReverified } : {}), ...(checkProofs ? { check_discrimination: checkProofVerdict, check_discriminations: checkProofs } : {}), ...(checkProofNote ? { check_proof_note: checkProofNote } : {}), ...(checkProofBindMeasured && checkProofBinds.some((row) => row.status === 'absent') ? { mutation_bind: bindReport(), mutation_binds: checkProofBinds } : {}) } : null)
   const resetCheckProof = () => {
     checkProofs = null; checkProofOutput = null; checkProofNote = null
@@ -4262,9 +4267,12 @@ function runTask(ctx, io, crash) {
   const proofNote = () => (checkProofVerdict === 'failed'
     ? percheckNote((checkProofs || []).find((row) => row.outcome !== 'killed' && row.outcome !== 'exempt'))
     : gateProofNote)
-  const completeCheckProof = (label) => {
+  const completeCheckProof = (label, options = {}) => {
     checkProofPending = null
     stage(label)
+    const proofMutations = Array.isArray(options.mutations) ? options.mutations : mutations
+    const fresh = options.fresh === true
+    const freshFields = () => (fresh ? { proof: 'fresh', measured_generation: gateGeneration } : {})
     const rows = []
     let survivor = null
     let active = null            // the ONE mutation in flight: {abs, original, writeAttempted}
@@ -4277,7 +4285,7 @@ function runTask(ctx, io, crash) {
       // than lose the build.
       // MUTATION A1: hand this the empty list and no declaration is ever bind-checked — the
       // b381-journalfacts and b384-suiteslot blind spot, restored.
-      const binds = bindMutationDeclarations(mutations, readBuilt)                                   // ANCHOR A1
+      const binds = bindMutationDeclarations(proofMutations, readBuilt)                              // ANCHOR A1
       checkProofBinds = binds.map((row) => ({ ...row, correction: 'none' }))
       // #874 — set ONLY here, and only after every declaration was read: bindMutationDeclarations
       // either returns all rows or throws, so reaching this line is exactly the condition
@@ -4285,13 +4293,13 @@ function runTask(ctx, io, crash) {
       // without it. MUTATION A3 flips the reset above, not this line, because a mutant that never
       // measures anything is silent while one that always claims to have measured is the defect.
       checkProofBindMeasured = true
-      corrections = validateMutationCorrections(builderEnv?.details, binds, mutations, readBuilt)
+      corrections = validateMutationCorrections(builderEnv?.details, binds, proofMutations, readBuilt)
       // MUTATION C1: drop the accepted candidates here and the builder's one authoring moment is
       // discarded — a corrected anchor never reaches the proof and b384's lane escalates as it did.
-      const effective = correctedMutations(mutations, binds, corrections.entries)                    // ANCHOR C1
+      const effective = correctedMutations(proofMutations, binds, corrections.entries)               // ANCHOR C1
       for (const [index, mutation] of effective.entries()) {
         if (mutation.exempt) {
-          rows.push({ check: mutation.check, outcome: 'exempt', match: null, why: mutation.exempt, file: null, summary: null })
+          rows.push({ check: mutation.check, outcome: 'exempt', match: null, why: mutation.exempt, file: null, summary: null, ...freshFields() })
           continue
         }
         const abs = `${ctx.checkout}/${mutation.file}`
@@ -4300,14 +4308,14 @@ function runTask(ctx, io, crash) {
         active.original = original
         if (original === null) {
           rows.push({ check: mutation.check, outcome: 'unapplied', match: null, file: mutation.file, summary: null,
-            why: `${mutation.file} does not exist in the built tree` })
+            why: `${mutation.file} does not exist in the built tree`, ...freshFields() })
           active = null
           continue
         }
         const bound = applyMutationAnchor(original, mutation.find, mutation.replace)
         if (bound.text === null) {
           rows.push({ check: mutation.check, outcome: BINDING_OUTCOME[bound.mode], match: null, file: mutation.file, summary: null,
-            why: bindingWhy(bound.mode, mutation.file) })
+            why: bindingWhy(bound.mode, mutation.file), ...freshFields() })
           active = null
           continue
         }
@@ -4339,7 +4347,7 @@ function runTask(ctx, io, crash) {
               : checkLabelMisdelimited(res.output, mutation.check)
                 ? `the gate went red and DID print ${wantedLine}, but with a delimiter the driver does not read: the label must END THE LINE or be followed by a colon (${wantedLine} or ${JSON.stringify(`${CHECK_FAIL_PREFIX} ${mutation.check}: why`)}) — the print is not missing, its delimiter is wrong`
                 : `the gate went red but printed no ${wantedLine} line, so the check that failed is not the one under proof`)
-        rows.push({ check: mutation.check, outcome: why ? 'survived' : 'killed', match: matchOf(), file: mutation.file, summary, why })
+        rows.push({ check: mutation.check, outcome: why ? 'survived' : 'killed', match: matchOf(), file: mutation.file, summary, why, ...freshFields() })
         // #874 — a corrected anchor that leaves its check green is the BUILDER's refusal, not a
         // gate defect. An UNcorrected survivor is untouched and still indicts the gate.
         if (why) { if (!mutation.corrected) survivor ??= rows[rows.length - 1]; checkProofOutput ??= res.output }
@@ -4368,6 +4376,89 @@ function runTask(ctx, io, crash) {
     settleCheckProof()
     stageComplete()
     return survivor
+  }
+
+  // A proof-tree path is always a concrete file. Directory scope entries are only
+  // prefixes; their descendants enter through changedFiles() at the tree being
+  // observed. Missing cells at comparison time are the absent side of an added
+  // path, while an unreadable cell is deliberately never treated as equal.
+  const concreteProofFiles = (reported = [], entries = scopeFiles) => {
+    const concrete = new Set()
+    for (const entry of Array.isArray(entries) ? entries : []) {
+      if (typeof entry === 'string' && entry !== '' && !entry.endsWith('/')) concrete.add(entry)
+    }
+    for (const file of Array.isArray(reported) ? reported : []) {
+      if (typeof file !== 'string' || file === '' || file.endsWith('/') || !inScope(file)) continue
+      concrete.add(file)
+    }
+    return [...concrete].sort()
+  }
+
+  const readProofCells = (files) => {
+    const cells = new Map()
+    let unreadable = false
+    for (const file of Array.isArray(files) ? files : []) {
+      try {
+        const bytes = io.readFile(`${ctx.checkout}/${file}`)
+        if (bytes === null) cells.set(file, { state: 'absent', bytes: null })
+        else if (typeof bytes === 'string') cells.set(file, { state: 'read', bytes })
+        else {
+          unreadable = true
+          cells.set(file, { state: 'unreadable', bytes: null, why: 'the proof-tree read returned no byte string' })
+        }
+      } catch (err) {
+        unreadable = true
+        cells.set(file, { state: 'unreadable', bytes: null, why: err?.message || String(err) })
+      }
+    }
+    return { cells, unreadable }
+  }
+
+  const captureProofTree = (round) => {
+    let reported
+    let unknown = false
+    try {
+      reported = io.changedFiles()
+      if (!Array.isArray(reported)) unknown = true
+    } catch (err) {
+      reported = []
+      unknown = true
+    }
+    const observed = readProofCells(concreteProofFiles(reported))
+    proofTreeWitness = { generation: gateGeneration, cells: observed.cells, unknown: unknown || observed.unreadable }
+    proofTreeBuildRound = round
+  }
+
+  const mutationTargetFiles = () => [...new Set(mutations
+    .filter((mutation) => mutation && !mutation.exempt && typeof mutation.file === 'string')
+    .map((mutation) => mutation.file))]
+
+  const compareProofTree = () => {
+    if (!proofTreeWitness) return { staleProofFiles: [], unknown: false }
+    let reported
+    let unknown = proofTreeWitness.unknown === true
+    try {
+      reported = io.changedFiles()
+      if (!Array.isArray(reported)) unknown = true
+    } catch (err) {
+      reported = []
+      unknown = true
+    }
+    const files = new Set([...proofTreeWitness.cells.keys(), ...concreteProofFiles(reported)])
+    const current = readProofCells([...files])
+    unknown ||= current.unreadable
+    const staleProofFiles = []
+    for (const file of files) {
+      const before = proofTreeWitness.cells.get(file) ?? { state: 'absent', bytes: null }
+      const after = current.cells.get(file) ?? { state: 'absent', bytes: null }
+      if (before.state === 'unreadable' || after.state === 'unreadable') {
+        staleProofFiles.push(file)
+      } else if (before.state !== after.state || before.bytes !== after.bytes) {
+        staleProofFiles.push(file)
+      }
+    }
+    if (unknown && staleProofFiles.length === 0) staleProofFiles.push(...mutationTargetFiles(), ...files, '(proof-tree-unreadable)')
+    return { staleProofFiles: [...new Set(staleProofFiles)], unknown }
   }
 
   const mutationLabel = (label, index) => `${label}:m${index + 1}`
@@ -4514,6 +4605,76 @@ function runTask(ctx, io, crash) {
       stageComplete()
     }
     return { repaired }
+  }
+
+  // Re-prove only after the byte witness says the shipped tree moved. A changed
+  // mutation target permits selective carry; anything else invalidates the whole
+  // per-check pass because the acceptance command may consume that path.
+  const refreshProofTree = (round = null) => {
+    const comparison = compareProofTree()
+    const staleProofFiles = comparison.staleProofFiles
+    if (staleProofFiles.length > 0) {
+      const previousGeneration = proofTreeWitness?.generation ?? gateGeneration
+      const previousRows = Array.isArray(checkProofs) ? checkProofs : []
+      const targetFiles = new Set(mutationTargetFiles())
+      const targetOnly = !comparison.unknown && staleProofFiles.every((file) => targetFiles.has(file))
+      let selected = targetOnly
+        ? mutations.filter((mutation) => mutation?.exempt || staleProofFiles.includes(mutation?.file))
+        : mutations
+      let carried = targetOnly
+        ? previousRows.filter((row) => {
+          const declaration = mutations.find((mutation) => mutation?.check === row?.check)
+          return declaration && !declaration.exempt && !staleProofFiles.includes(declaration.file)
+            && row.outcome === 'killed'
+        }).map((row) => ({ ...row, proof: 'carried-forward', measured_generation: row.measured_generation ?? previousGeneration }))
+        : []
+
+      gateGeneration = gateGeneration + 1
+      let gateRes = runGate(`gate-fresh:${gateGeneration}`, gateCmd)
+      if (!gateRes?.ok) {
+        gateDiscrimination = 'unproven'
+        gateProofNote = `the acceptance gate was red after proof-tree freshness changed: ${String(gateRes?.output || '').slice(-2000)}`
+        return { ok: false, gateRes }
+      }
+      recordGateProof(`gate-proof:${gateGeneration}`)
+      let settled = settleFailedProof()
+      if (settled.escalation) return { ok: false, escalation: settled.escalation }
+      if (settled.repaired) {
+        selected = mutations
+        carried = []
+        gateRes = runGate(`gate-repair:${gateRepairs}`, gateCmd)
+      }
+      while (gateRes?.ok && checkProofPending === gateGeneration) {
+        completeCheckProof(`gate-proof:${gateGeneration}:checks`, { mutations: selected, fresh: true })
+        if (gateProofFatal) {
+          const fatal = settleFailedProof()
+          if (fatal.escalation) return { ok: false, escalation: fatal.escalation }
+        }
+        if (checkProofDisagreement()) return { ok: false, escalation: escalate('anchor-absent', anchorAbsentWhy(checkProofUnbound)) }
+        if (!gateProofFatal && checkProofVerdict !== 'failed') break
+        settled = settleFailedProof()
+        if (settled.escalation) return { ok: false, escalation: settled.escalation }
+        if (settled.repaired) {
+          selected = mutations
+          carried = []
+          gateRes = runGate(`gate-repair:${gateRepairs}`, gateCmd)
+        }
+      }
+      if (!gateRes?.ok) return { ok: false, gateRes }
+      if (gateDiscrimination !== 'proven' || (mutations.length > 0 && checkProofVerdict !== 'proven')) {
+        return { ok: true, gateRes, unproven: true }
+      }
+      if (mutations.length > 0) {
+        const freshRows = Array.isArray(checkProofs) ? checkProofs : []
+        const freshByCheck = new Map(freshRows.map((row) => [row.check, row]))
+        const carriedByCheck = new Map(carried.map((row) => [row.check, row]))
+        checkProofs = mutations.map((mutation) => freshByCheck.get(mutation.check) || carriedByCheck.get(mutation.check)).filter(Boolean)
+        checkProofVerdict = checkProofs.every((row) => row.outcome === 'killed' || row.outcome === 'exempt') ? 'proven' : checkProofVerdict
+      }
+      captureProofTree(round)
+      return { ok: true, gateRes }
+    }
+    return { ok: true, gateRes: null }
   }
 
   if (gateCmd) {
@@ -5355,7 +5516,7 @@ function runTask(ctx, io, crash) {
       // only because a repair mints a new generation that owes its own pass, and
       // the single gate_repairs budget bounds that to once.
       while (gateRes.ok && checkProofPending === gateGeneration) {
-        completeCheckProof(`gate-proof:${gateGeneration}:checks`)
+        completeCheckProof(`gate-proof:${gateGeneration}:checks`, { fresh: gateGeneration > 1 })
         // #874 — the DIRTY TREE outranks every diagnosis. settleFailedProof's first branch
         // (crew/drive.mjs:3526-3528) refuses to continue while `gateProofFatal` is set, because the
         // built tree still carries the driver's OWN mutation; nothing about the plan matters until
@@ -5388,6 +5549,17 @@ function runTask(ctx, io, crash) {
           return settled.escalation
         }
         if (settled.repaired) gateRes = runGate(`gate-repair:${gateRepairs}`, gateCmd)
+      }
+      if (gateRes.ok && gateDiscrimination === 'proven' && (!mutations.length || checkProofVerdict === 'proven')) {
+        if (!proofTreeWitness) captureProofTree(round)
+        else if (proofTreeBuildRound !== null && proofTreeBuildRound < round) {
+          const refreshed = refreshProofTree(round)
+          if (refreshed.escalation) {
+            stageComplete()
+            return refreshed.escalation
+          }
+          gateRes = refreshed.gateRes || gateRes
+        }
       }
       if (!gateRes.ok) {
         if (finalRound()) {
@@ -5756,6 +5928,17 @@ function runTask(ctx, io, crash) {
     return escalate('build', `no accepted build within ${limits.build_rounds + extraRounds} rounds`)
   }
 
+  // The reviewer can accept only the tree that is about to be committed. This
+  // second call is deliberately after hardening and all review-side mechanisms.
+  if (gateCmd && proofTreeWitness) {
+    const refreshed = refreshProofTree()
+    if (refreshed.escalation) return refreshed.escalation
+    if (!refreshed.ok && refreshed.gateRes) {
+      return escalate('gate', `the acceptance gate is red after the final proof-tree freshness check: ${String(refreshed.gateRes.output || '').slice(-2000)}`)
+    }
+    if (refreshed.ok && refreshed.gateRes) lastGateOutput = refreshed.gateRes.output
+  }
+
   // ---- 3. FINISH: commit, optional rebase, then full suite (code) -------------
   const publishing = ctx.publish && typeof ctx.publish === 'object' ? ctx.publish : null
   let baseSha = null
@@ -5962,6 +6145,7 @@ function runTask(ctx, io, crash) {
         cmd: relativizeCommand(gateNow.cmd, { checkout: ctx.checkout, taskDir: ctx.taskDir }),
         summary: parseGateSummary(lastGateOutput),
         discrimination: gateNow.discrimination ?? '',
+        generation: gateNow.generation ?? null,
         repairs: gateNow.repairs ?? 0,
       } : null,
       review: { verdict: finalReview.verdict === 'pass' ? 'pass' : 'changes-needed', residuals: finalReview.residuals, ...carriedBlock() },

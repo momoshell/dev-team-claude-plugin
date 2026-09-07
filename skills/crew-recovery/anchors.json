@@ -4,7 +4,7 @@
   "crew/seat-io.mjs:1695": "export function recogniseProviderRetry(text) {",
   "scripts/factory/crew-watch.mjs:185": "export function seatLivenessLines(",
   "scripts/factory/make-brief.mjs:856": "function colourNeutralEnv(base = process.env)",
-  "crew/drive.mjs:4265": "const completeCheckProof = (label) => {",
+  "crew/drive.mjs:4270": "const completeCheckProof = (label, options = {}) => {",
   "crew/crew.mjs:2486": "escalation -> NEVER teardown",
   "crew/crew.mjs:3016": "seats.proven !== seats.seats || seats.recorded !== seats.seats",
   "crew/crew.mjs:2907": "const seats = rows.length"

@@ -13,8 +13,6 @@ import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import {
-  shadowExclusion,
-  SHADOW_EXCLUSIONS,
   probeLocalEndpoint,
   loadRoster,
   rosterSeating,
@@ -26,12 +24,8 @@ import {
   defaultDbPath,
 } from './ledger.mjs'
 
-// The vendor rule is crew/crew.mjs:1190's, not a copy: shadowExclusion validates
-// its name against SHADOW_EXCLUSIONS and throws on anything outside it, so a
-// rename there breaks this line rather than silently forking the vocabulary.
-export const VENDOR_COLLISION = shadowExclusion('vendor-collision').reason
 export const EVAL_REFUSALS = Object.freeze([
-  'bench-unreadable', 'bench-sha-mismatch', VENDOR_COLLISION,
+  'bench-unreadable', 'bench-sha-mismatch',
   'no-mechanical-gate', 'production-absent', 'local-endpoint-dead',
 ])
 export { EVAL_ABSENT_REASONS }
@@ -218,11 +212,8 @@ export async function compileBench({ dir, deps = {} } = {}) {
 
   const { judge, candidates: candidateDocument } = source
   const candidates = candidateDocument.candidates
-  for (const candidate of candidates) {
-    if (candidate.provider === judge.vendor) {
-      throw refusal(VENDOR_COLLISION, `candidate ${candidateModel(candidate)} shares judge vendor ${judge.vendor}`)
-    }
-  }
+  // RETIRED (#983): no same-vendor candidate refusal.
+  // No ADR ratifies the rule; a bench whose judge shares a candidate's vendor is now the operator's call, and during a single-provider outage it is the ONLY bench that can run.
 
   const productionModel = rosterProduction(candidateDocument, deps.readRoster)
   const production = candidates.find((candidate) => candidateModel(candidate) === productionModel) ?? null

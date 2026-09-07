@@ -329,17 +329,13 @@ export async function proposeEdit({ rosterText, rosterPath = 'crew/roster.json',
   if (cell === null && role !== 'lead' && role !== 'tech-lead') {
     refusals.push({ code: 'unseat_refused', message: `cannot unseat ${tier}.${role}: crew/crew.mjs:201 resolveTier would not seat it and the tier could not boot a planner/builder/reviewer` })
   }
-  if (tier === 'mechanical' && role === 'lead' && cell !== null) {
-    refusals.push({ code: 'mechanical_lead', message: `mechanical.lead must remain present and exactly null; see crew/roster-refresh.test.mjs:125-128` })
-  }
-
   const loadedSeatSchema = seatSchema || loadSeatSchema()
   const shapeRefusals = validateCell(cell, loadedSeatSchema, `tiers.${tier}.${role}`)
   refusals.push(...shapeRefusals)
   if (!shapeRefusals.length && cell !== null) {
     const modelKey = `${cell.provider}/${cell.id}`
     if (!record(roster.models) || !Object.prototype.hasOwnProperty.call(roster.models, modelKey)) {
-      refusals.push({ code: 'unknown_model', message: `model ${modelKey} is absent from roster.models; see crew/roster-refresh.test.mjs:143-151` })
+      refusals.push({ code: 'unknown_model', message: `model ${modelKey} is absent from roster.models; see assertBandFloors' model-not-in-catalog refusal in crew/crew.mjs` })
     }
   }
   if (!shapeRefusals.length && cell !== null) {
@@ -350,17 +346,9 @@ export async function proposeEdit({ rosterText, rosterPath = 'crew/roster.json',
   if (!shapeRefusals.length) {
     afterRoster = structuredClone(roster)
     afterRoster.tiers[tier][role] = clone(cell)
-    const editedTier = afterRoster.tiers[tier]
-    const reviewer = editedTier?.reviewer
-    const partnerRole = editedTier?.['tech-lead'] ? 'tech-lead' : (editedTier?.planner ? 'planner' : null)
-    const partner = partnerRole ? editedTier[partnerRole] : null
-    if (reviewer && partner && reviewer.provider === partner.provider) {
-      refusals.push({ code: 'cross_vendor', message: `cross-vendor panel invariant failed for ${tier}: reviewer and ${partnerRole} share provider "${reviewer.provider}"; see crew/roster-refresh.test.mjs:134-141 and #206's fused panel` })
-    }
-    const judge = afterRoster.tiers?.judge
-    if (judge?.['tech-lead'] && judge?.planner && judge['tech-lead'].provider === judge.planner.provider) {
-      refusals.push({ code: 'judge_vendor_split', message: `judge tech-lead and planner must use different providers (both use "${judge['tech-lead'].provider}"); see crew/roster-refresh.test.mjs:130-132` })
-    }
+    // RETIRED at source (#983): no cross_vendor and no judge_vendor_split.
+    // No ADR ratifies the rule; nothing at boot enforced it; a hard two-vendor requirement makes every roster illegal during a single-provider outage, measured 2026-09-06 when an Anthropic limit parked six lanes for ~2h44m.
+
   }
 
   if (refusals.length) return { ok: false, refusals, diff: null, before, after: null }

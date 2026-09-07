@@ -83,6 +83,49 @@ async function startInProcess(feed, options) {
 async function stopInProcess(server) {
   if (server?.listening) await new Promise((resolve) => server.close(resolve))
 }
+function serverRosterFixture() {
+  const cell = (provider, id, agent, effort) => ({ provider, id, agent, effort })
+  return {
+    schema_version: 1,
+    updated_at: '2026-08-30',
+    tiers: {
+      mechanical: {
+        lead: null,
+        planner: cell('anthropic', 'claude-opus-5', 'claude', 'medium'),
+        builder: cell('openai', 'gpt-5.6-luna', 'pi', 'max'),
+        reviewer: cell('openai', 'gpt-5.6-sol', 'pi', 'medium'),
+      },
+      build: {
+        lead: cell('anthropic', 'claude-opus-5', 'claude', 'medium'),
+        planner: cell('anthropic', 'claude-opus-5', 'claude', 'medium'),
+        builder: cell('openai', 'gpt-5.6-luna', 'pi', 'max'),
+        reviewer: cell('openai', 'gpt-5.6-sol', 'pi', 'high'),
+      },
+      judge: {
+        lead: cell('anthropic', 'claude-opus-5', 'claude', 'high'),
+        planner: cell('anthropic', 'claude-opus-5', 'claude', 'high'),
+        builder: cell('openai', 'gpt-5.6-luna', 'pi', 'max'),
+        reviewer: cell('anthropic', 'claude-opus-5', 'claude', 'xhigh'),
+        'tech-lead': cell('openai', 'gpt-5.6-sol', 'pi', 'xhigh'),
+      },
+    },
+    models: {
+      'anthropic/claude-opus-5': { cost_in_per_mtok: 5, cost_out_per_mtok: 25, context: 1000000, tags: ['reasoning'], source: 'models.dev', last_verified: '2026-08-13' },
+      'anthropic/claude-sonnet-5': { cost_in_per_mtok: 2, cost_out_per_mtok: 10, context: 1000000, tags: ['reasoning'], source: 'models.dev', last_verified: '2026-08-13' },
+      'anthropic/claude-haiku-4-5': { cost_in_per_mtok: 1, cost_out_per_mtok: 5, context: 200000, tags: ['cheap'], source: 'models.dev', last_verified: '2026-08-13' },
+      'openai/gpt-5.6-sol': { cost_in_per_mtok: 4, cost_out_per_mtok: 20, context: 1050000, tags: ['reasoning'], source: 'models.dev', last_verified: '2026-08-30' },
+      'openai/gpt-5.6-terra': { cost_in_per_mtok: 2, cost_out_per_mtok: 12, context: 1050000, tags: ['review'], source: 'models.dev', last_verified: '2026-08-13' },
+      'openai/gpt-5.6-luna': { cost_in_per_mtok: 0.2, cost_out_per_mtok: 1.2, context: 1050000, tags: ['coding'], source: 'models.dev', last_verified: '2026-08-13' },
+      'anthropic/claude-fable-5': { cost_in_per_mtok: 10, cost_out_per_mtok: 50, context: 1000000, tags: ['override-only'], source: 'models.dev', last_verified: '2026-08-13' },
+    },
+  }
+}
+function serverRosterFixtureFile(prefix = 'visualizer-roster-fixture-') {
+  const dir = scratchDir(prefix)
+  const path = join(dir, 'roster.json')
+  writeFileSync(path, JSON.stringify(serverRosterFixture(), null, 2))
+  return { dir, path }
+}
 function rawStatus(response) {
   return Number((response.text.match(/^HTTP\/1\.1 (\d{3})/) || [])[1] || 0)
 }
@@ -1249,13 +1292,14 @@ test('roster proposals validate, refuse safely, and never write the roster', asy
   const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db'), crewRoot = join(dir, 'crew')
   const { done } = fixture(ledgerDb)
   returnsFixture(crewRoot, done)
-  const rosterPath = join(process.cwd(), 'crew', 'roster.json')
+  const fixtureRoster = serverRosterFixtureFile('visualizer-roster-propose-fixture-')
+  const rosterPath = fixtureRoster.path
   const rosterBefore = digest(rosterPath)
   const crewBefore = treeDigest(crewRoot)
   const roster = JSON.parse(readFileSync(rosterPath, 'utf8'))
   let child, base
   try {
-    ({ child, base } = await startServer(ledgerDb, triageDb, crewRoot))
+    ({ child, base } = await startServer(ledgerDb, triageDb, crewRoot, rosterPath))
     assert.equal((await json(base, '/api/roster/propose')).status, 405)
     assert.equal((await json(base, '/api/roster/propose', { method: 'PUT' })).status, 405)
     assert.equal((await json(base, '/api/roster/propose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{ not json' })).status, 400)
@@ -1267,12 +1311,16 @@ test('roster proposals validate, refuse safely, and never write the roster', asy
     assert.equal(legal.json.ok, true)
     assert.match(legal.json.diff, /^--- a\/crew\/roster\.json$/m)
     assert.match(legal.json.diff, /^\+\+\+ b\/crew\/roster\.json$/m)
-    const cross = await json(base, '/api/roster/propose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ tier: 'build', role: 'reviewer', cell: { provider: 'anthropic', id: 'claude-opus-5', agent: 'claude', effort: 'high' } }) })
-    assert.equal(cross.status, 200)
-    assert.equal(cross.json.ok, false)
-    assert.equal(cross.json.diff, null)
-    assert.match(JSON.stringify(cross.json.refusals), /cross-vendor/)
-    assert.match(JSON.stringify(cross.json.refusals), /planner/)
+    const sameVendor = await json(base, '/api/roster/propose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ tier: 'build', role: 'reviewer', cell: { provider: 'anthropic', id: 'claude-opus-5', agent: 'claude', effort: 'high' } }) })
+    assert.equal(sameVendor.status, 200)
+    assert.equal(sameVendor.json.ok, true)
+    assert.notEqual(sameVendor.json.diff, null)
+    assert.equal(sameVendor.json.refusals.some(({ code }) => code === 'cross_vendor' || code === 'judge_vendor_split'), false)
+    const unknown = await json(base, '/api/roster/propose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ tier: 'build', role: 'reviewer', cell: { provider: 'openai', id: 'gpt-9.9-nope', agent: 'pi', effort: 'high' } }) })
+    assert.equal(unknown.status, 200)
+    assert.equal(unknown.json.ok, false)
+    assert.equal(unknown.json.diff, null)
+    assert.match(JSON.stringify(unknown.json.refusals), /unknown model|unknown_model/i)
     assert.doesNotMatch(JSON.stringify(legal.json), /cost_in_per_mtok|cost_out_per_mtok|usd|spend/i)
     const read = await json(base, '/api/roster')
     assert.equal(read.status, 200)
@@ -1902,13 +1950,14 @@ test('roster ladder routes stage and compose read-only bundles', { skip: SKIP },
   const dir = mkdtempSync(join(tmpdir(), 'visualizer-roster-ladder-'))
   const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')
   fixture(ledgerDb)
-  const rosterPath = join(process.cwd(), 'crew', 'roster.json')
+  const fixtureRoster = serverRosterFixtureFile('visualizer-roster-ladder-fixture-')
+  const rosterPath = fixtureRoster.path
   const roster = JSON.parse(readFileSync(rosterPath, 'utf8'))
   const changedEffort = roster.tiers.build.reviewer.effort === 'high' ? 'max' : 'high'
   const before = digest(rosterPath)
   let child, base
   try {
-    ({ child, base } = await startServer(ledgerDb, triageDb))
+    ({ child, base } = await startServer(ledgerDb, triageDb, null, rosterPath))
     const view = await json(base, '/api/roster/ladder')
     assert.equal(view.status, 200); assert.equal(view.json.degraded, false); assert.ok(view.json.bands.length); assert.ok(view.json.rail.length)
     for (const method of ['POST', 'PUT']) assert.equal((await json(base, '/api/roster/ladder', { method })).status, 405)
@@ -1951,7 +2000,7 @@ test('roster ladder apply updates only the configured local roster for the next 
   const rosterPath = join(dir, 'roster.json')
   const ledgerDb = join(dir, 'ledger.db')
   const sourcePath = join(process.cwd(), 'crew', 'roster.json')
-  writeFileSync(rosterPath, readFileSync(sourcePath))
+  writeFileSync(rosterPath, JSON.stringify(serverRosterFixture(), null, 2))
   fixture(ledgerDb)
   const originalProjectDigest = digest(sourcePath)
   const roster = JSON.parse(readFileSync(rosterPath, 'utf8'))
@@ -1961,21 +2010,22 @@ test('roster ladder apply updates only the configured local roster for the next 
     handles = await startInProcess({}, { rosterPath, ledgerDb })
     assert.equal((await json(handles.base, '/api/roster/ladder/apply')).status, 405)
     assert.equal((await json(handles.base, '/api/roster/ladder/apply', { method:'POST', headers:{ 'content-type':'application/json' }, body:'{}' })).status, 400)
-    const response = await json(handles.base, '/api/roster/ladder/apply', {
+    const vendorApply = await json(handles.base, '/api/roster/ladder/apply', {
       method:'POST', headers:{ 'content-type':'application/json' },
-      body:JSON.stringify({ moves:[{ tier:'build', role:'reviewer', cell:{ ...roster.tiers.build.reviewer, effort } }] }),
+      body:JSON.stringify({ moves:[{ tier:'build', role:'reviewer', cell:{ provider:'anthropic', id:'claude-opus-5', agent:'claude', effort } }] }),
     })
-    assert.equal(response.status, 200)
-    assert.equal(response.json.ok, true)
-    assert.equal(response.json.applied, true)
-    assert.equal(response.json.changed, true)
-    assert.equal(response.json.takes_effect, 'next_new_task')
-    assert.ok(response.json.applied_at)
-    assert.equal(response.json.branch, undefined)
-    assert.equal(response.json.commit_subject, undefined)
+    assert.equal(vendorApply.status, 200)
+    assert.equal(vendorApply.json.ok, true)
+    assert.equal(vendorApply.json.applied, true)
+    assert.equal(vendorApply.json.requires_warning_override, undefined)
+    assert.equal(vendorApply.json.changed, true)
+    assert.equal(vendorApply.json.takes_effect, 'next_new_task')
+    assert.ok(vendorApply.json.applied_at)
+    assert.equal(vendorApply.json.branch, undefined)
+    assert.equal(vendorApply.json.commit_subject, undefined)
     assert.equal(JSON.parse(readFileSync(rosterPath, 'utf8')).tiers.build.reviewer.effort, effort)
 
-    const warningMove = { tier:'judge', role:'reviewer', cell:{ ...roster.tiers.judge['tech-lead'] } }
+    const warningMove = { tier:'build', role:'builder', cell:{ provider:'anthropic', id:'claude-haiku-4-5', agent:'claude', effort:'medium' } }
     const warned = await json(handles.base, '/api/roster/ladder/apply', {
       method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({ moves:[warningMove] }),
     })
@@ -1992,7 +2042,7 @@ test('roster ladder apply updates only the configured local roster for the next 
     assert.equal(overridden.json.policy_ok, false)
     assert.equal(overridden.json.applied, true)
     assert.equal(overridden.json.warnings_overridden, true)
-    assert.equal(JSON.parse(readFileSync(rosterPath, 'utf8')).tiers.judge.reviewer.provider, warningMove.cell.provider)
+    assert.equal(JSON.parse(readFileSync(rosterPath, 'utf8')).tiers.build.builder.provider, warningMove.cell.provider)
     assert.equal(digest(sourcePath), originalProjectDigest)
   } finally {
     if (handles) await stopInProcess(handles.server)

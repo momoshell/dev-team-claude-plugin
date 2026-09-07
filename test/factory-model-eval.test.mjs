@@ -95,7 +95,7 @@ async function refusalFor(options) {
   return { caught, calls }
 }
 
-test('compile refuses unreadable, stale, colliding, zero-gate and absent-production benches before a seat', { skip: SKIP }, async () => {
+test('compile refuses unreadable, stale, zero-gate and absent-production benches before a seat', { skip: SKIP }, async () => {
   const unreadable = scratchDir('factory-model-eval-unreadable-')
   const unreadableResult = await refusalFor({ dir: unreadable })
   assert.equal(unreadableResult.caught instanceof EvalRefusal, true)
@@ -108,12 +108,6 @@ test('compile refuses unreadable, stale, colliding, zero-gate and absent-product
   assert.equal(staleResult.caught.refusal, 'bench-sha-mismatch')
   assert.equal(staleResult.calls.length, 0)
 
-  const collision = writeBench({ judge: { model: 'anthropic/claude-opus-5', vendor: 'anthropic' } })
-  const collisionResult = await refusalFor({ dir: collision.dir })
-  assert.equal(collisionResult.caught instanceof EvalRefusal, true)
-  assert.equal(collisionResult.caught.refusal, 'vendor-collision')
-  assert.equal(collisionResult.calls.length, 0)
-
   const noGate = writeBench()
   const noGateResult = await refusalFor({ dir: noGate.dir, gate: { total: 0, failed: 0, errored: 0 } })
   assert.equal(noGateResult.caught instanceof EvalRefusal, true)
@@ -125,6 +119,22 @@ test('compile refuses unreadable, stale, colliding, zero-gate and absent-product
   assert.equal(noProductionResult.caught instanceof EvalRefusal, true)
   assert.equal(noProductionResult.caught.refusal, 'production-absent')
   assert.equal(noProductionResult.calls.length, 0)
+})
+
+test('a same-vendor judge and candidate compile past the retired vendor position', { skip: SKIP }, async () => {
+  const bench = writeBench({
+    judge: { model: 'anthropic/claude-opus-5', vendor: 'anthropic' },
+    candidates: [CANDIDATE_A, CANDIDATE_B],
+    production: 'anthropic/claude-sonnet-5',
+  })
+  let caught = null
+  try {
+    await compileBench({ dir: bench.dir, deps: depsFor() })
+  } catch (err) {
+    caught = err
+  }
+  assert.equal(caught, null)
+  assert.equal(caught instanceof EvalRefusal, false)
 })
 
 test('RV1-1 readable roster rejects a declared candidate that is not seated', async () => {

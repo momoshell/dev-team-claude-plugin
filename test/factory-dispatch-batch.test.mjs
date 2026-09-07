@@ -75,6 +75,7 @@ import {
   factoryStateRoot,
   laneOutcome,
   main,
+  bootCommand,
   measureBatchBaseline,
   mergeCheckLine,
   normalDeps,
@@ -2705,6 +2706,14 @@ test('relocated baseline cache writes under DEVTEAM_LEDGER_DIR, not home', async
   assert.equal(result.report.lanes.length, 2)
 })
 
+test('bootCommand hands every lane the dispatching checkout roster path', () => {
+  const laneDir = '/tmp/dispatching-lane'
+  const command = bootCommand({ lane: 'lane-a', laneDir, tier: 'build', registerPath: '/tmp/register.json', transport: BOOT_TRANSPORT, seats: {}, runFlags: {} })
+  assert.equal(command.cwd, laneDir)
+  assert.equal(command.args[command.args.indexOf('--roster') + 1], ROSTER_PATH)
+  assert.equal(ROSTER_PATH.startsWith(laneDir), false)
+})
+
 test('memory boot flags are forwarded verbatim and omitted when unset', async () => {
   const result = await dispatchFixture({
     label: 'memory-flags',
@@ -2714,12 +2723,15 @@ test('memory boot flags are forwarded verbatim and omitted when unset', async ()
   const boots = result.spawned.filter(({ args }) => args.includes('boot'))
   assert.equal(boots.length, 2)
   for (const { args } of boots) {
+    assert.equal(args[args.indexOf('--roster') + 1], ROSTER_PATH)
+    assert.equal(args[args.indexOf('--roster') + 1].startsWith(args[args.indexOf('--checkout') + 1]), false)
     for (const [flag, value] of [['--memory-dir', '/tmp/mem'], ['--memory-backend', 'sqlite'], ['--memory-budget-bytes', '4096']]) {
       assert.equal(args[args.indexOf(flag) + 1], value)
     }
   }
   const bare = await dispatchFixture({ label: 'memory-flags-absent', names: ['lane-a'] })
   for (const { args } of bare.spawned.filter(({ args }) => args.includes('boot'))) {
+    assert.equal(args[args.indexOf('--roster') + 1], ROSTER_PATH)
     assert.equal(args.some((arg) => String(arg).startsWith('--memory-')), false)
   }
 })
@@ -4377,7 +4389,7 @@ test('boot argv carries regular seat flags before a declared shortfall waiver', 
   })
   const boot = result.spawned.find(({ args }) => args.includes('boot'))
   assert.ok(boot)
-  const at = boot.args.indexOf('--lane') + 2
+  const at = boot.args.indexOf('--roster') + 2
   assert.deepEqual(boot.args.slice(at, at + 8), [
     '--agent-planner', 'pi', '--model-planner', 'raw-model', '--effort-planner', 'high',
     '--allow-shortfall-planner', 'subagents',
@@ -4484,6 +4496,23 @@ test('boot band-floor refusals are distinct from capability shortfalls', async (
     && error.reason === 'boot-failed')
   assert.equal(seatFloorRefusal(floorStderr), 'band-below-floor')
   assert.equal(seatFloorRefusal(capabilityStderr), null)
+})
+
+test('model-not-in-catalog boot refusals are classified without a retry', async () => {
+  const stderr = 'crew boot refused at crew/roster.json models [model-not-in-catalog]'
+  let boots = 0
+  await assert.rejects(() => dispatchFixture({
+    label: 'boot-model-not-in-catalog',
+    names: ['lane-a'],
+    spawnResult: (args) => {
+      if (args.includes('boot')) { boots += 1; return { status: 1, stdout: '', stderr } }
+      return { status: 0, stdout: '', stderr: '' }
+    },
+  }), (error) => error instanceof BatchRefusal
+    && error.reason === 'seat-floor-conflict'
+    && error.message.includes('[model-not-in-catalog]'))
+  assert.equal(seatFloorRefusal(stderr), 'model-not-in-catalog')
+  assert.equal(boots, 1)
 })
 
 test('a first boot failure tears the lane down, re-boots once, and the lane proceeds', async () => {

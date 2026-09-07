@@ -237,11 +237,12 @@ function memoryFlagArgs(runFlags = {}) {
 // The ratified staffing artifact. A lane may not staff a role its settled tier
 // does not seat, and crew/roster.json is where that is ratified.
 export const ROSTER_PATH = fileURLToPath(new URL('../../crew/roster.json', import.meta.url))
-// Boot's own closed band-floor reason enum (crew/crew.mjs:645). A boot refusal
+// Boot's own closed band-floor reason enum (crew/crew.mjs:770). A boot refusal
 // carrying one of these is a ratified FLOOR refusal, not a generic boot failure,
 // and the dispatcher names it rather than swallowing it as boot-failed.
 export const BAND_FLOOR_REASONS = Object.freeze([
   'ladder-unreadable', 'floor-unratified', 'band-unknown', 'band-below-floor',
+  'model-not-in-catalog',
 ])
 
 // #291 step 3: the compiler computes SHAPE (risk) and STRENGTH (complexity) on two
@@ -1545,7 +1546,7 @@ export function seatRolesUnseated({ seats, tier, deps } = {}) {
   return [...seatMaps(seats).keys()].filter((role) => !Object.hasOwn(tierRoster, role) || tierRoster[role] == null)
 }
 
-// Boot's reasons are a closed enum it renders as `[reason]` (crew/crew.mjs:654);
+// Boot's reasons are a closed enum it renders as `[reason]` (crew/crew.mjs:778);
 // this reads that tag rather than the prose around it — the same posture
 // readsFromRefusal takes with the compiler.
 export function seatFloorRefusal(text) {
@@ -2546,7 +2547,7 @@ function recordIntent({ intent, crewPath, crewDir, lane, deps } = {}) {
   return { intent }
 }
 
-function bootCommand({ lane, laneDir, tier, registerPath, transport, seats, runFlags = {} }) {
+export function bootCommand({ lane, laneDir, tier, registerPath, transport, seats, runFlags = {} }) {
   return {
     file: 'node',
     args: [
@@ -2556,6 +2557,8 @@ function bootCommand({ lane, laneDir, tier, registerPath, transport, seats, runF
       '--tier', tier,
       '--fences', registerPath,
       '--lane', lane,
+      // Snapshot, not live-read: boot copies the bytes once, so an edit made after this dispatch cannot change a running lane.
+      '--roster', ROSTER_PATH,
       ...seatFlagArgs(seats),
       ...shortfallFlagArgs(seats),
       ...memoryFlagArgs(runFlags),

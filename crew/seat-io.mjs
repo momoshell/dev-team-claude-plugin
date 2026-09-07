@@ -3410,7 +3410,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
         }
         if (m.transport !== HEADLESS_TRANSPORT && m.transport !== HEADLESS_RPC_TRANSPORT) {
           const why = m.transport === DEFAULT_TRANSPORT
-            ? 'a pane seat bakes model and effort into its launch command at boot (crew/crew.mjs:265); its reassign: true capability means give a settled seat NEW WORK, never change its cell'
+            ? 'a pane seat bakes model and effort into its launch command at boot (paneCommand in crew/crew.mjs); its reassign: true capability means give a settled seat NEW WORK, never change its cell'
             : `transport ${String(m.transport)} cannot change a seat cell in-session`
           return { applied: false, reason: 'transport', why, from, to: null }
         }

@@ -4,7 +4,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_IMPL_FILE, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, B384_CORRECTED_FIND, B384_CORRECTED_REPLACE, B384_GREEN, B384_MUTATION, B384_RED, B44_LEADLESS_CTX, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_PLAN, CHECK_RUNS, CONVERGE_CTX, CONVERGE_GATE, CONVERGE_PLAN, CTX, CTX_DIRECTED, CTX_REPAIR, DIRECTED_FILES, D_ASK, D_AUTO, ENVELOPE_FIELD_KINDS, EXECUTIONS, FAILURE_UPGRADE, GATE_REAP_CMD_EOF, GATE_REAP_SWEEP_MARKER, GATE_SUMMARY_PREFIX, HARDENING_MARKS, HARDENING_OUTCOMES, HARDENING_REFUSALS, MODIFIER_OUTCOMES, MUTATIONS_MAX, MUTATION_BINDING_FAILURES, MUTATION_OUTCOMES, PARTIAL_REVIEWED, RED, SENSITIVITY_FLOOR, SHAPE_MAJOR_PHASES, SHAPE_ROUNDED_STAGES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, UNIVERSAL_STAGE_HEADS, VALIDATION_LANE_UNLOADABLE, VARIANTS, VARIANT_NAMES, WRITE_SURFACES, applyMutationAnchor, applyPrescriptionLines, b127GatePaths, b127PidAlive, b318Builders, b318SiteA, b376Build, b376DiskProofIo, b376ProofIo, b376Review, b376StageStack, b384Io, b44AssertLeadlessGate, b44GatePlan, bindMutationAnchor, buildEnv, collapseStages, dispositionIo, driveTask, existsSync, fakeIo, gateReapCommand, gateReapFresh, gateReapOriginal, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, hardeningBounceLines, hardeningBriefLines, hardeningDebt, hardeningOf, join, laneFence, leadEnv, mutationChangesTokens, outOfScopeFiles, planEnv, protectedPlanEnv, readFileSync, resumeGreen, resumeRed, reviewConvergeRun, reviewEnv, reviewFindings, rmSync, s843Ctx, s843Io, s843PlanEnv, s843Rows, scopeMatcher, scopedPath, scratchDir, shapeDefect, spawnSync, stageShape, treeDigest, triageEnv, undeclaredStage, validateHardened, validateMutations, validationPlan, validationProbeRun, validationRows,
+  B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_IMPL_FILE, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, B384_CORRECTED_FIND, B384_CORRECTED_REPLACE, B384_GREEN, B384_MUTATION, B384_RED, B384_REFACTORED_BUILDER, B384_REFACTORED_UNCORRECTED_BUILDER, B44_LEADLESS_CTX, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_PLAN, CHECK_RUNS, CONVERGE_CTX, CONVERGE_GATE, CONVERGE_PLAN, CTX, CTX_DIRECTED, CTX_REPAIR, DIRECTED_FILES, D_ASK, D_AUTO, ENVELOPE_FIELD_KINDS, EXECUTIONS, FAILURE_UPGRADE, GATE_REAP_CMD_EOF, GATE_REAP_SWEEP_MARKER, GATE_SUMMARY_PREFIX, HARDENING_MARKS, HARDENING_OUTCOMES, HARDENING_REFUSALS, MODIFIER_OUTCOMES, MUTATIONS_MAX, MUTATION_BINDING_FAILURES, MUTATION_OUTCOMES, PARTIAL_REVIEWED, RED, SENSITIVITY_FLOOR, SHAPE_MAJOR_PHASES, SHAPE_ROUNDED_STAGES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, UNIVERSAL_STAGE_HEADS, VALIDATION_LANE_UNLOADABLE, VARIANTS, VARIANT_NAMES, WRITE_SURFACES, applyMutationAnchor, applyPrescriptionLines, b127GatePaths, b127PidAlive, b318Builders, b318SiteA, b376Build, b376DiskProofIo, b376ProofIo, b376Review, b376StageStack, b384Io, b384RefactoredIo, b44AssertLeadlessGate, b44GatePlan, bindMutationAnchor, buildEnv, collapseStages, dispositionIo, driveTask, existsSync, fakeIo, gateReapCommand, gateReapFresh, gateReapOriginal, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, hardeningBounceLines, hardeningBriefLines, hardeningDebt, hardeningOf, join, laneFence, leadEnv, mutationChangesTokens, outOfScopeFiles, planEnv, protectedPlanEnv, readFileSync, resumeGreen, resumeRed, reviewConvergeRun, reviewEnv, reviewFindings, rmSync, s843Ctx, s843Io, s843PlanEnv, s843Rows, scopeMatcher, scopedPath, scratchDir, shapeDefect, spawnSync, stageShape, treeDigest, triageEnv, undeclaredStage, validateHardened, validateMutations, validationPlan, validationProbeRun, validationRows,
 } from './drive-fixtures.mjs'
 import { CHECK_MATCHES, HARDENING_APPEAL_SHAPE, HARDENING_CLASSES, hardeningAppealLines, hardeningAppealRequest, hardeningClassOf } from './drive.mjs'
 
@@ -878,7 +878,7 @@ test('b385 A1 the bind check reads every declaration before the first checkout w
   const built = 'export const guard = true\n// interposed comment block\nexport const other = false\n'
   const io = fakeIo({
     files: { [CHECK_FILE]: built }, writeThrough: true, cleanRuns: CHECK_CLEAN,
-    envelopes: CHECK_ENVELOPES(mutations), runs: CHECK_RUNS(), changed: ['a.mjs', 'a.test.mjs'], emit: true,
+    envelopes: CHECK_ENVELOPES(mutations), runs: CHECK_RUNS(), changed: ['a.test.mjs'], emit: true,
   })
   const res = driveTask(CTX, io)
   assert.equal(res.status, 'escalation')
@@ -903,7 +903,7 @@ test('a token-different anchor is absent and writes nothing', () => {
     files: { [CHECK_FILE]: CHECK_BUILT }, writeThrough: true,
     cleanRuns: { ...CHECK_CLEAN, 'gate-fixed': { ok: false, output: RED(3) } },
     envelopes: CHECK_ENVELOPES([mutation], { 'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } } }),
-    runs: { ...CHECK_RUNS(), 'gate-fixed:1': { ok: true, output: '' } }, changed: ['a.mjs', 'a.test.mjs'], emit: true,
+    runs: { ...CHECK_RUNS(), 'gate-fixed:1': { ok: true, output: '' } }, changed: ['a.test.mjs'], emit: true,
   })
   driveTask(CTX, io)
   const row = io.calls.emits.find((event) => event.kind === 'check-discrimination').checks[0]
@@ -919,7 +919,7 @@ test('a two-span anchor is ambiguous and writes nothing', () => {
     files: { [CHECK_FILE]: built }, writeThrough: true,
     cleanRuns: { ...CHECK_CLEAN, 'gate-fixed': { ok: false, output: RED(3) } },
     envelopes: CHECK_ENVELOPES([mutation], { 'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } } }),
-    runs: { ...CHECK_RUNS(), 'gate-fixed:1': { ok: true, output: '' } }, changed: ['a.mjs', 'a.test.mjs'], emit: true,
+    runs: { ...CHECK_RUNS(), 'gate-fixed:1': { ok: true, output: '' } }, changed: ['a.test.mjs'], emit: true,
   })
   driveTask(CTX, io)
   const row = io.calls.emits.find((event) => event.kind === 'check-discrimination').checks[0]
@@ -938,7 +938,7 @@ test('a comment-crossing span is anchor-unsafe and writes nothing', () => {
     files: { [CHECK_FILE]: built }, writeThrough: true,
     cleanRuns: { ...CHECK_CLEAN, 'gate-fixed': { ok: false, output: RED(3) } },
     envelopes: CHECK_ENVELOPES([mutation], { 'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } } }),
-    runs: { ...CHECK_RUNS(), 'gate-fixed:1': { ok: true, output: '' } }, changed: ['a.mjs', 'a.test.mjs'], emit: true,
+    runs: { ...CHECK_RUNS(), 'gate-fixed:1': { ok: true, output: '' } }, changed: ['a.test.mjs'], emit: true,
   })
   const res = driveTask(CTX, io)
   const row = io.calls.emits.find((event) => event.kind === 'check-discrimination').checks[0]
@@ -963,7 +963,7 @@ test('a missing file and an unbindable find keep unapplied on the missing file o
       'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
     },
     runs: { 'gate-cmd:1': { ok: false, output: RED(3) }, 'gate-cmd:2': { ok: true, output: '' }, 'gate-fixed:1': { ok: true, output: '' }, 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
-    changed: ['a.mjs'], emit: true,
+    changed: ['a.test.mjs'], emit: true,
   })
   driveTask(CTX, io)
   const rows = io.calls.emits.find((event) => event.kind === 'check-discrimination').checks
@@ -980,7 +980,7 @@ test('binding-failure escalation says BIND while survived keeps did-not-kill wor
       cleanRuns: { ...CHECK_CLEAN, 'gate-fixed': { ok: false, output: RED(3) } },
       envelopes: CHECK_ENVELOPES([mutation], { 'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } } }),
       runs: { ...CHECK_RUNS(), 'gate-cmd:3': mutationRun, 'gate-fixed:1': { ok: true, output: '' } },
-      changed: ['a.mjs', 'a.test.mjs'], emit: true,
+      changed: ['a.test.mjs'], emit: true,
     })
     return driveTask(CTX, io)
   }
@@ -1178,7 +1178,7 @@ test('an anchor-absent mutation is not accepted as proof', () => {
   const io = fakeIo({ files: { [CHECK_FILE]: CHECK_BUILT }, writeThrough: true,
     envelopes: CHECK_ENVELOPES([mutation], { 'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } } }),
     cleanRuns: { 'gate-cmd': { ok: false, output: RED(3) }, 'gate-fixed': { ok: false, output: RED(3) } },
-    runs: { ...CHECK_RUNS(), 'gate-fixed:1': { ok: true, output: '' } }, changed: ['a.mjs', 'a.test.mjs'] })
+    runs: { ...CHECK_RUNS(), 'gate-fixed:1': { ok: true, output: '' } }, changed: ['a.test.mjs'] })
   const res = driveTask(CTX, io)
   assert.equal(res.status, 'escalation')
   assert.equal(res.details.escalation.where, 'anchor-absent')
@@ -1247,46 +1247,120 @@ test('a surviving mutation enters the existing lead gate repair path', () => {
   assert.equal(io.calls.logs.find((line) => line.gate_check_discriminations).gate_check_discriminations[0].why, 'the gate stayed GREEN under the mutation')
 })
 
-test('b385 B1 an unresolved anchor escalates at anchor-absent and never reaches gate custody', () => {
-  const first = b384Io()
-  const firstRes = driveTask(CTX, first)
-  assert.equal(firstRes.status, 'escalation')
-  assert.equal(firstRes.details.escalation.where, 'anchor-absent')
-  assert.match(firstRes.details.escalation.why, /\banchor-absent\b/)
-  assert.equal(first.calls.assign.filter(({ role, note }) => role === 'lead' && ['gate-repair', 'gate-fix'].includes(note)).length, 0)
-  assert.equal(firstRes.details.gate.repairs, 0)
-
-  const interrupted = b384Io({
-    mutations: [CHECK_MUTATION, B384_MUTATION], scope: ['a.mjs', 'crew/drive.mjs'],
-    files: { [CHECK_FILE]: CHECK_BUILT }, throwMutation: true,
+test('A1', () => {
+  const io = b384RefactoredIo({
+    builder: B384_REFACTORED_UNCORRECTED_BUILDER,
+    builder2: B384_REFACTORED_BUILDER,
   })
-  const interruptedRes = driveTask(CTX, interrupted)
-  assert.equal(interruptedRes.status, 'escalation')
-  assert.equal(interruptedRes.details.escalation.where, 'anchor-absent')
-  assert.match(interruptedRes.details.escalation.why, /B2/)
-  assert.equal(interruptedRes.details.gate.repairs, 0)
-  assert.equal(interrupted.calls.assign.filter(({ role, note }) => role === 'lead' && ['gate-repair', 'gate-fix'].includes(note)).length, 0)
-
-  const mixed = b384Io({
-    mutations: [CHECK_MUTATION, B384_MUTATION], scope: ['a.mjs', 'crew/drive.mjs'],
-    files: { [CHECK_FILE]: CHECK_BUILT }, runs: { 'gate-cmd:3': { ok: true, output: B384_GREEN } },
-  })
-  const mixedRes = driveTask(CTX, mixed)
-  assert.equal(mixedRes.status, 'escalation')
-  assert.equal(mixedRes.details.escalation.where, 'anchor-absent')
-  assert.equal(mixedRes.details.gate.repairs, 0)
-  assert.equal(mixed.calls.assign.filter(({ role, note }) => role === 'lead' && ['gate-repair', 'gate-fix'].includes(note)).length, 0)
-  assert.equal(mixedRes.details.gate.check_discrimination, 'failed')
+  const res = driveTask(CTX, io)
+  const brief = io.calls.writes[`${TD}/build-bounce-r1.md`]
+  assert.equal(res.status, 'done')
+  assert.ok(brief)
+  assert.match(brief, /B2/)
+  assert.match(brief, /B3/)
+  assert.match(brief, /near-match: none/)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 2)
+  assert.equal(res.details.stages.includes('lane:r1'), false)
+  assert.ok(res.details.stages.indexOf('scope-gate:r1') < res.details.stages.indexOf('lane:r2'))
 })
 
-test('b385 B2 an unresolved anchor leaves the whole-gate proof proven and the check verdict unbound', () => {
-  const io = b384Io()
+test('B1', () => {
+  const io = b384RefactoredIo({ builder: B384_REFACTORED_BUILDER })
   const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.equal(io.calls.writes[`${TD}/build-bounce-r1.md`], undefined)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 1)
+  assert.equal(res.details.stages.includes('scope-gate:r1'), true)
+  const proof = io.calls.emits.find((event) => event.kind === 'check-discrimination')
+  assert.deepEqual(proof?.checks?.map(({ check, outcome, correction }) => ({ check, outcome, correction })), [
+    { check: 'B2', outcome: 'killed', correction: 'accepted' },
+    { check: 'B3', outcome: 'killed', correction: 'accepted' },
+  ])
+})
+
+test('C1', () => {
+  const io = fakeIo({
+    files: { [CHECK_FILE]: CHECK_BUILT }, writeThrough: true, cleanRuns: CHECK_CLEAN,
+    envelopes: CHECK_ENVELOPES([CHECK_MUTATION]), runs: CHECK_RUNS(), changed: ['a.mjs', 'a.test.mjs'], emit: true,
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.equal(io.calls.writes[`${TD}/build-bounce-r1.md`], undefined)
+  assert.equal(res.details.stages.includes('lane:r1'), true)
+})
+
+test('D1', () => {
+  const io = b384RefactoredIo({
+    builder: B384_REFACTORED_UNCORRECTED_BUILDER,
+    builder2: B384_REFACTORED_BUILDER,
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 2)
+  assert.ok(res.details.stages.includes('scope-gate:r1'))
+  assert.ok(res.details.stages.includes('scope-gate:r2'))
+  assert.equal(res.details.stages.some((stage) => stage === 'escalate:scope'), false)
+  assert.equal(res.details.stages.includes('lane:r2'), true)
+})
+
+test('E1', () => {
+  const find = '// load-bearing export const GUARD = true'
+  const mutation = { check: 'unsafe', file: 'a.mjs', find, replace: 'export const GUARD = false' }
+  const io = fakeIo({
+    files: { [CHECK_FILE]: '// load-bearing\nexport const GUARD = true\n' }, writeThrough: true,
+    cleanRuns: CHECK_CLEAN,
+    runs: { 'gate-cmd:1': { ok: false, output: RED(3) } },
+    envelopes: { 'planner:1': CHECK_PLAN([mutation]), 'builder:1': buildEnv({ details: { ...buildEnv().details, mutation_corrections: [] } }) },
+    changed: ['a.mjs'],
+  })
+  driveTask(CTX, io)
+  const brief = io.calls.writes[`${TD}/build-bounce-r1.md`]
+  assert.ok(brief)
+  assert.match(brief, /unsafe/)
+  assert.ok(brief.includes(`near-match: ${JSON.stringify(find)}`))
+})
+
+test('E2', () => {
+  const mutation = [
+    { check: 'absent', file: 'a.mjs', find: 'missing()', replace: 'missingElse()' },
+    { check: 'ambiguous', file: 'a.mjs', find: 'pick(one, \n two)', replace: 'pick(one)' },
+  ]
+  const io = fakeIo({
+    files: { [CHECK_FILE]: 'const a = pick(one,\n  two)\nconst b = pick(one, two)\n' }, writeThrough: true,
+    cleanRuns: CHECK_CLEAN,
+    runs: { 'gate-cmd:1': { ok: false, output: RED(3) } },
+    envelopes: { 'planner:1': CHECK_PLAN(mutation), 'builder:1': buildEnv({ details: { ...buildEnv().details, mutation_corrections: [] } }) },
+    changed: ['a.mjs'],
+  })
+  driveTask(CTX, io)
+  const brief = io.calls.writes[`${TD}/build-bounce-r1.md`]
+  assert.ok(brief)
+  assert.match(brief, /absent/)
+  assert.match(brief, /ambiguous/)
+  assert.equal((brief.match(/near-match: none/g) || []).length, 2)
+})
+
+test('b385 B1 an unresolved anchor bounces at the scope gate before gate custody', () => {
+  const io = b384RefactoredIo({
+    builder: B384_REFACTORED_UNCORRECTED_BUILDER,
+    builder2: B384_REFACTORED_BUILDER,
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.ok(io.calls.writes[`${TD}/build-bounce-r1.md`])
+  assert.equal(res.details.stages.includes('lane:r1'), false)
+  assert.equal(res.details.gate.repairs, 0)
+})
+
+test('b385 B2 an unresolved anchor writes a conservative near-match scope brief', () => {
+  const io = b384RefactoredIo({ builder: B384_REFACTORED_UNCORRECTED_BUILDER })
+  const res = driveTask(CTX, io)
+  const brief = io.calls.writes[`${TD}/build-bounce-r1.md`]
   assert.equal(res.status, 'escalation')
-  assert.equal(res.details.gate.discrimination, 'proven')
-  assert.equal(res.details.gate.check_discrimination, 'unbound')
-  assert.equal(res.details.gate.mutation_bind.absent, 1)
-  assert.match(res.details.escalation.why, /not a gate defect/)
+  assert.equal(res.details.escalation.where, 'builder')
+  assert.match(brief, /B2/)
+  assert.match(brief, /B3/)
+  assert.match(brief, /near-match: none/)
 })
 
 test('b385 C1 a builder correction that binds once and leaves its check failing is accepted', () => {
@@ -1379,14 +1453,14 @@ test('a known survivor outranks a later interrupted mutation pass', () => {
   const originalRead = io.readFile
   let bReads = 0
   io.readFile = function (path) {
-    // #874 — the FIRST read of b.mjs is the bind preflight and must succeed, so this fixture
-    // still reaches the proof loop with both anchors bound. Every read AFTER it throws, exactly
-    // as before: generation 1 interrupts on the proof-loop read, after check-one has already
-    // survived, and generation 2's own preflight interrupts the same way, leaving it `unproven`
-    // with no survivor — which is what generation 2 recorded before this change too.
+    // #874 — the scope preflight and the per-check bind preflight both need to read b.mjs
+    // before the proof loop can observe check-one's survivor. Every read after those two
+    // throws, exactly as before: generation 1 interrupts on the proof-loop read, after
+    // check-one has already survived, and generation 2's own preflight interrupts the same
+    // way, leaving it `unproven` with no survivor.
     if (path === `${CTX.checkout}/b.mjs`) {
       bReads += 1
-      if (bReads > 1) throw new Error('second read failed')
+      if (bReads > 2) throw new Error('second read failed')
     }
     return originalRead.call(this, path)
   }

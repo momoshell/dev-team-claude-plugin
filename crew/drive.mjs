@@ -4941,7 +4941,7 @@ function runTask(ctx, io, crash) {
   // `returns/` directory at the CHECKOUT ROOT during build:r2 were invisible until
   // build:r3 succeeded; the lane paid for three rounds and then escalated on debris
   // that had existed for three minutes across a round boundary.
-  const scopeGate = (round, finalRound) => {
+  const scopeGate = (round, finalRound, builderDetails) => {
     stage(`scope-gate:r${round}`)
     const changed = io.changedFiles()
     const gateFenceHits = laneFenceHits(changed, ctx.laneFence)
@@ -4957,12 +4957,16 @@ function runTask(ctx, io, crash) {
     // clean. The ask makes the envelope refusal a property of a `returns/*.json` being
     // INSIDE the CHECKOUT, never a property of what the planner happened to fence.
     const debris = changed.filter((f) => ENVELOPE_DEBRIS.test(f))
-    const refusal = scopeRefusal([...new Set([...outOfScopeFiles(changed, inScope), ...debris])])
+    let refusal = scopeRefusal([...new Set([...outOfScopeFiles(changed, inScope), ...debris])])
+    if (refusal.reason === null && builderDetails !== undefined) {
+      refusal = mutationAnchorScopeRefusal(changed, mutations, builderDetails, readBuilt)
+    }
     // MUTATION A4: invert this early return and a round whose tree is entirely in scope
     // starts paying for a gate it does not need.
     if (refusal.reason === null) { stageComplete(); return { ok: true } }              // ANCHOR A4
     io.log(recordRow({ at: io.now(), scope_gate: { round, reason: refusal.reason, envelopes: refusal.envelopes, edits: refusal.edits } }))
-    if (!plans || finalRound()) {
+    const canBounce = plans && !finalRound()
+    if (!canBounce) {
       stageComplete()
       return { escalation: escalate('scope', refusal.why) }
     }
@@ -5223,7 +5227,7 @@ function runTask(ctx, io, crash) {
     builderEnv = env
     stageComplete()
 
-    const scoped = scopeGate(round, finalRound)
+    const scoped = scopeGate(round, finalRound, env.details)
     if (scoped.escalation) return scoped.escalation
     if (scoped.bounce) { buildBrief = scoped.bounce; buildNote = 'scope-fix'; continue }
 
@@ -6029,6 +6033,16 @@ export function bindMutationAnchor(original, find) {
   return { mode: 'normalized', spans }
 }
 
+// A near-match is evidence from the authoritative binder, not a fuzzy guess. Only a
+// unique normalized span can be shown to the builder; exact bindings have no preflight
+// row and ambiguous or absent spans deliberately report no candidate.
+export function mutationAnchorNearMatch(original, find) {
+  const bound = bindMutationAnchor(original, find)
+  if (bound.spans.length !== 1) return null
+  const { start, end } = bound.spans[0]
+  return normalizeAnchor(original.slice(start, end)).text
+}
+
 // `text: null` is the ONE signal that the anchor did not bind. `replace` is inserted
 // VERBATIM into the resolved span — never normalized, never reformatted.
 export function applyMutationAnchor(original, find, replace) {
@@ -6159,6 +6173,55 @@ export function validateMutationCorrections(details, binds, declarations, readFi
     entries.push({ check, file: declaration.file, find: entry.find, replace: entry.replace })
   }
   return { entries, refusals }
+}
+
+// #874 — the completed builder tree is preflighted at the scope gate. Only declarations
+// whose files changed in this build are relevant: an untouched file still belongs to the
+// accepted plan, but its anchor is not evidence that this build invalidated anything.
+export function mutationAnchorScopeRefusal(changed, mutations, details, readFile) {
+  const changedFiles = new Set(Array.isArray(changed) ? changed.filter((file) => typeof file === 'string') : [])
+  const declarations = (Array.isArray(mutations) ? mutations : []).filter((entry) => !entry?.exempt && changedFiles.has(entry?.file))
+  let binds
+  let corrections
+  try {
+    binds = bindMutationDeclarations(declarations, readFile)
+    corrections = validateMutationCorrections(details, binds, declarations, readFile)
+  } catch {
+    // A denied, interrupted or otherwise indeterminate read is not proof of absence.
+    // The gate proof remains the authoritative retry/diagnosis path for that tree.
+    return { reason: null, unresolved: [], envelopes: [], edits: [] }
+  }
+  const corrected = new Set(corrections.entries.map((entry) => entry.check))
+  const unresolved = binds.filter((row) => row.status === 'absent' && !corrected.has(row.check))
+  if (unresolved.length === 0) return { reason: null, unresolved: [], envelopes: [], edits: [] }
+  const byCheck = new Map(declarations.map((entry) => [entry?.check, entry]))
+  const refusalByCheck = new Map()
+  for (const refusal of corrections.refusals) {
+    if (refusal?.check != null && !refusalByCheck.has(refusal.check)) refusalByCheck.set(refusal.check, refusal)
+  }
+  const formatNearMatch = (nearMatch) => nearMatch === null ? 'near-match: none' : `near-match: ${JSON.stringify(nearMatch)}`
+  const decorated = unresolved.map((row) => {
+    const declaration = byCheck.get(row.check)
+    let original = null
+    try { original = readFile(row.file) } catch { /* an indeterminate read has no safe candidate */ }
+    const nearMatch = declaration === undefined ? null : mutationAnchorNearMatch(original, declaration.find)
+    return { ...row, near_match: nearMatch }
+  })
+  const detailsByCheck = new Map(decorated.map((row) => [row.check, row]))
+  const detail = decorated.map((row) => {
+    const refusal = refusalByCheck.get(row.check)
+    const correction = refusal
+      ? `correction refused/${refusal.reason}: ${refusal.why}`
+      : 'correction: none'
+    return `${JSON.stringify(row.check)} in ${row.file} (bind ${row.status}: ${row.why}; ${correction}; ${formatNearMatch(row.near_match)})`
+  }).join('; ')
+  return {
+    reason: 'anchor-absent',
+    unresolved: unresolved.map((row) => detailsByCheck.get(row.check)),
+    why: `anchor-absent: ${decorated.length} changed-file ${decorated.length === 1 ? 'declaration' : 'declarations'} did not bind with an accepted correction: ${detail}`,
+    envelopes: [],
+    edits: [],
+  }
 }
 
 // #874 — the accepted candidates substituted into the declaration list. The plan's `mutations`
@@ -6848,6 +6911,7 @@ export function scopeBounceBrief(round, refusal, scopeFiles, planPath) {
     lines.push("These files are OUTSIDE the plan's scope — revert them or stop touching them:",
       ...refusal.edits.map((f) => `- ${f}`), '')
   }
+  if (refusal.reason === 'anchor-absent') lines.push(refusal.why, '')
   lines.push('In-scope set:', ...scopeFiles.map((f) => `- ${f}`), `Plan: ${planPath}`)
   return lines.join('\n')
 }

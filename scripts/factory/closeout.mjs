@@ -27,6 +27,7 @@ import {
 } from './dispatch-batch.mjs'
 import { journalRowsSinceRunStart, parseSuiteCounts, RUN_START_EVENT } from '../../crew/drive.mjs'
 import { BATCH_DIR_EVENT, batchDirFromBrief } from '../../crew/crew.mjs'
+import { ingestJournal as defaultIngestJournal, openLedger as defaultOpenLedger } from './ledger.mjs'
 
 export const CLOSEOUT_VERBS = Object.freeze(['merge-check', 'reap', 'recover'])
 export const EXIT_OK = 0
@@ -137,6 +138,8 @@ export function normalDeps(deps = {}) {
     newest: deps.newest || newestMtime,
     now: deps.now || (() => Date.now()),
     sleep: deps.sleep || sleepSync,
+    openLedger: deps.openLedger || defaultOpenLedger,
+    ingestJournal: deps.ingestJournal || defaultIngestJournal,
     home: deps.home || homedir(),
     log: deps.log || ((line) => process.stdout.write(`${line}\n`)),
   }
@@ -372,10 +375,46 @@ function runCommand(options, d) {
 
 function turnEconomyUnavailable(reason, extras = {}) { return { measured: false, reason, ...extras } }
 
+export function journalTimestampMs(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string' && value.trim()) {
+    const numeric = Number(value)
+    if (Number.isFinite(numeric)) return numeric
+    const parsed = Date.parse(value)
+    if (Number.isFinite(parsed)) return parsed
+  }
+  return NaN
+}
+
+function reapIdentity({ crewDir, lane, deps }) {
+  const d = normalDeps(deps)
+  const path = join(crewDir, 'ledger', 'run.json')
+  let run
+  try {
+    run = JSON.parse(textOf(d.readFileSync(path, 'utf8')))
+  } catch (error) {
+    throw new Error(`cannot read ledger/run.json for ${lane}: ${error?.message || String(error)}`)
+  }
+  if (!run || typeof run !== 'object' || Array.isArray(run)) {
+    throw new Error(`ledger/run.json for ${lane} is not an object`)
+  }
+  if (typeof run.task_slug === 'string' && run.task_slug.trim() && run.task_slug !== lane) {
+    throw new Error(`ledger/run.json identity does not match lane ${lane}`)
+  }
+  if (typeof run.adw_id !== 'string' || run.adw_id.trim() === '') {
+    throw new Error(`ledger/run.json for ${lane} has no usable adw_id`)
+  }
+  if (typeof run.db_path !== 'string' || run.db_path.trim() === '') {
+    throw new Error(`ledger/run.json for ${lane} has no usable db_path`)
+  }
+  return { adw_id: run.adw_id.trim(), db_path: run.db_path.trim() }
+}
+
 function currentRunWindow({ lane, laneDir, deps }) {
   const d = normalDeps(deps)
   const crewDir = dirname(crewJsonPath({ checkout: laneDir, lane, deps: d }))
   const journalPath = join(crewDir, 'journal.jsonl')
+  const identity = reapIdentity({ crewDir, lane, deps: d })
   let text
   try {
     text = textOf(d.readFileSync(journalPath, 'utf8'))
@@ -392,12 +431,12 @@ function currentRunWindow({ lane, laneDir, deps }) {
     try { row = JSON.parse(line) } catch { continue }
     if (!row || typeof row !== 'object' || Array.isArray(row)) continue
     if (row.event === RUN_START_EVENT) {
-      const at = typeof row.at === 'string' ? row.at : null
-      const timestamp = at === null ? NaN : Date.parse(at)
+      const at = Object.prototype.hasOwnProperty.call(row, 'at') ? row.at : null
+      const timestamp = journalTimestampMs(at)
       if (!Number.isFinite(timestamp)) {
         start = null
         latest = null
-        unusableBoundary = at === null
+        unusableBoundary = at === null || at === undefined
           ? `run-start in ${journalPath} has no usable timestamp`
           : `run-start in ${journalPath} has an unusable timestamp`
         continue
@@ -409,8 +448,7 @@ function currentRunWindow({ lane, laneDir, deps }) {
     }
     if (!start) continue
     if (!Object.prototype.hasOwnProperty.call(row, 'at')) continue
-    const at = typeof row.at === 'string' ? row.at : null
-    const timestamp = at === null ? NaN : Date.parse(at)
+    const timestamp = journalTimestampMs(row.at)
     if (!Number.isFinite(timestamp)) continue
     if (timestamp > latest) latest = timestamp
   }
@@ -422,31 +460,84 @@ function currentRunWindow({ lane, laneDir, deps }) {
   try { until = new Date(untilMs).toISOString() } catch (error) {
     throw new Error(`latest journal timestamp in ${journalPath} cannot form a whole-second boundary: ${error?.message || String(error)}`)
   }
-  return { since: start.at, until }
+  let since
+  try {
+    since = typeof start.at === 'string' && !Number.isFinite(Number(start.at))
+      ? start.at
+      : new Date(start.timestamp).toISOString()
+  } catch (error) {
+    throw new Error(`run-start in ${journalPath} has an unusable timestamp: ${error?.message || String(error)}`)
+  }
+  return { since, until, crewDir, journalPath, identity }
+}
+
+function ingestReadFailure(error) {
+  return {
+    applied: 0,
+    skipped: 0,
+    ignored: 0,
+    failed: 0,
+    complete: false,
+    first_failure: { line: null, reason: error?.code || error?.name || 'ReadError' },
+  }
+}
+
+function safeReapIngest({ journalPath, identity, since, deps }) {
+  const d = normalDeps(deps)
+  let ledger = null
+  try {
+    ledger = d.openLedger({ dbPath: identity.db_path })
+    if (!ledger || ledger.degraded || (typeof ledger.stats === 'function' && ledger.stats().degraded)) {
+      const reason = 'ledger mirror is degraded — journal ingest is unmeasured'
+      return {
+        applied: 0, skipped: 0, ignored: 0, failed: 0, complete: false,
+        first_failure: { line: null, reason }, reason,
+      }
+    }
+    const detail = d.ingestJournal(journalPath, ledger, { adw_id: identity.adw_id, since })
+    if (ledger.degraded || (typeof ledger.stats === 'function' && ledger.stats().degraded)) {
+      const reason = 'ledger mirror is degraded — journal ingest is unmeasured'
+      return {
+        applied: detail?.applied ?? 0,
+        skipped: detail?.skipped ?? 0,
+        ignored: detail?.ignored ?? 0,
+        failed: detail?.failed ?? 0,
+        complete: false,
+        first_failure: detail?.first_failure ?? { line: null, reason }, reason,
+      }
+    }
+    return detail
+  } catch (error) { return { ...ingestReadFailure(error), reason: error?.code || error?.name || 'IngestError' } }
+  finally {
+    try { if (ledger) ledger.close() } catch { /* ingest instrumentation is non-load-bearing */ }
+  }
 }
 
 function reapTurnEconomy({ lane, laneDir, root, deps }) {
   const d = normalDeps(deps)
-  let window
-  try { window = currentRunWindow({ lane, laneDir, deps: d }) } catch (error) {
+  let context
+  try { context = currentRunWindow({ lane, laneDir, deps: d }) } catch (error) {
     return turnEconomyUnavailable(error?.message || String(error))
   }
+  const window = { since: context.since, until: context.until }
+  const ingest = safeReapIngest({ journalPath: context.journalPath, identity: context.identity, deps: d, since: context.since })
   const command = {
     file: 'node',
-    args: [join(root, 'scripts/factory/ledger.mjs'), 'turns', '--since', window.since, '--until', window.until],
+    args: [join(root, 'scripts/factory/ledger.mjs'), 'turns', '--adw-id', context.identity.adw_id, '--since', window.since, '--until', window.until],
     cwd: root,
+    env: { ...process.env, DEVTEAM_LEDGER_DB: context.identity.db_path },
   }
   const result = runCommand(command, d)
-  if (!commandOk(result)) return turnEconomyUnavailable(childFailure(result), { window })
+  if (!commandOk(result)) return turnEconomyUnavailable(childFailure(result), { window, ingest })
   let payload
   try { payload = JSON.parse(textOf(result.stdout).trim()) } catch (error) {
-    return turnEconomyUnavailable(`cannot parse turns readout: ${error?.message || String(error)}`, { window })
+    return turnEconomyUnavailable(`cannot parse turns readout: ${error?.message || String(error)}`, { window, ingest })
   }
   if (!payload || typeof payload !== 'object' || Array.isArray(payload) || payload.schema !== 1) {
-    return turnEconomyUnavailable('turns readout must be exactly one schema-1 JSON object', { window })
+    return turnEconomyUnavailable('turns readout must be exactly one schema-1 JSON object', { window, ingest })
   }
-  if (payload.absent) return { measured: false, reason: payload.absent, window, turn_economy: payload }
-  return { measured: true, window, turn_economy: payload }
+  if (payload.absent) return { measured: false, reason: payload.absent, window, ingest, turn_economy: payload }
+  return { measured: true, window, ingest, turn_economy: payload }
 }
 
 function commandOk(result) {

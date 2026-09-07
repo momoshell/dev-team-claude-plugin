@@ -10,8 +10,9 @@ import {
   utimesSync,
   writeFileSync,
 } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import { basename, dirname, join } from 'node:path'
-import { scratchDir } from './helpers.mjs'
+import { ROOT, scratchDir } from './helpers.mjs'
 import {
   AMBIGUOUS_MARK,
   ARCHIVE_MARK,
@@ -60,14 +61,14 @@ function put(path, text) {
   return path
 }
 
-function answerFor(argv, answers) {
+function answerFor(argv, answers, options = {}) {
   for (const [needle, reply] of answers) {
-    if (argv.includes(needle)) return typeof reply === 'function' ? reply(argv) : reply
+    if (argv.includes(needle)) return typeof reply === 'function' ? reply(argv, options) : reply
   }
   return { status: 0, stdout: '', stderr: '' }
 }
 
-function harness({ home = null, answers = [], newest = () => 1000, now = null, log = null } = {}) {
+function harness({ home = null, answers = [], newest = () => 1000, now = null, log = null, openLedger = null, ingestJournal = null } = {}) {
   const calls = { spawn: [], cp: [], rename: [], rm: [], log: [] }
   let clock = 0
   const deps = normalDeps({
@@ -76,6 +77,8 @@ function harness({ home = null, answers = [], newest = () => 1000, now = null, l
     now: now || (() => { clock += 5; return clock }),
     sleep: () => {},
     newest,
+    ...(openLedger ? { openLedger } : {}),
+    ...(ingestJournal ? { ingestJournal } : {}),
     cpSync: (from, to, options) => calls.cp.push([from, to, options]),
     renameSync: (from, to) => calls.rename.push([from, to]),
     rmSync: (path, options) => calls.rm.push([path, options]),
@@ -83,7 +86,7 @@ function harness({ home = null, answers = [], newest = () => 1000, now = null, l
     spawn: (options) => {
       const argv = [options.file, ...(options.args || [])].join(' ')
       calls.spawn.push({ argv, cwd: options.cwd, file: options.file, args: options.args || [], env: options.env })
-      return answerFor(argv, answers)
+      return answerFor(argv, answers, options)
     },
   })
   return { deps, calls }
@@ -132,14 +135,16 @@ function laneFixture(prefix, { commit = null, envelopeId = 'd3', mutations = 30 
   return { home, checkout, crewDir }
 }
 
-function turnsFixture(prefix, { rows = [], checkoutName = 'dt-main' } = {}) {
+function turnsFixture(prefix, { rows = [], checkoutName = 'dt-main', adwId = `${lane}-adw` } = {}) {
   const home = scratch(prefix)
   const checkout = join(home, checkoutName)
   const crewDir = join(home, '.crew', `dt-${lane}`, lane)
+  const dbPath = join(home, 'sidecar', 'ledger.db')
   mkdirSync(checkout, { recursive: true })
   const text = rows.map((row) => typeof row === 'string' ? row : JSON.stringify(row)).join('\n')
   put(join(crewDir, 'journal.jsonl'), `${text}\n`)
-  return { home, checkout, crewDir }
+  put(join(crewDir, 'ledger', 'run.json'), JSON.stringify({ adw_id: adwId, task_slug: lane, db_path: dbPath }))
+  return { home, checkout, crewDir, adwId, dbPath }
 }
 
 function turnsPayload(overrides = {}) {
@@ -153,6 +158,14 @@ function turnsPayload(overrides = {}) {
     absent: null,
     ...overrides,
   }
+}
+
+function runTurns(fixture, args) {
+  return spawnSync(process.execPath, [join(ROOT, 'scripts/factory/ledger.mjs'), 'turns', ...args], {
+    cwd: ROOT,
+    encoding: 'utf8',
+    env: { ...process.env, DEVTEAM_LEDGER_DB: fixture.dbPath },
+  })
 }
 
 function teardownReply({ seats = { seats: 4, proven: 4, failed: 0, recorded: 4 }, status = 0, archived = '/x.archive-2026-09-04T00-00-00-000Z' } = {}) {
@@ -428,6 +441,87 @@ test('A1 measured turns are emitted before destructive reap steps', () => {
   assert.ok(calls.spawn.findIndex((call) => call.argv.includes('ledger.mjs turns')) < calls.spawn.findIndex((call) => call.argv.includes('worktree remove')))
 })
 
+test('A1 reap ingests census and reports measured lane economy', () => {
+  const start = '2026-09-04T06:04:46.127Z'
+  const censusAt = '2026-09-04T06:04:46.500Z'
+  const fixture = turnsFixture('closeout-reap-ingest-a1-', {
+    rows: [
+      { at: start, event: 'run-start' },
+      { at: censusAt, seat_turn_census: {
+        role: 'builder', dispatch_id: 'd1', transport: 'headless-rpc', turns: 7,
+        tool_calls: 3, distinct_files_read: 2, suite_runs: 1, re_reads: 0,
+      } },
+    ],
+  })
+  const before = runTurns(fixture, ['--adw-id', fixture.adwId, '--since', start, '--until', '2026-09-04T06:04:47.000Z'])
+  assert.equal(before.status, 0, before.stderr)
+  const beforePayload = JSON.parse(before.stdout)
+  assert.equal(beforePayload.dispatches, null)
+  assert.equal(typeof beforePayload.absent, 'string')
+  const { deps } = harness({
+    home: fixture.home,
+    answers: [
+      ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
+      ['ledger.mjs turns', (_argv, options) => spawnSync(process.execPath, [join(ROOT, 'scripts/factory/ledger.mjs'), ...options.args.slice(1)], {
+        cwd: ROOT, env: options.env, encoding: 'utf8',
+      })],
+    ],
+  })
+  const result = reap({ lanes: [lane], checkout: fixture.checkout, deps })
+  const emitted = rows(result)
+  const detail = emitted.find((row) => row.step === 'turns').detail
+  assert.equal(result.code, 0)
+  assert.equal(detail.ingest.applied, 1)
+  assert.equal(detail.ingest.complete, true)
+  assert.equal(detail.measured, true)
+  assert.equal(detail.turn_economy.dispatches, 1)
+  assert.equal(detail.turn_economy.turns, 7)
+  assert.deepEqual({ before: beforePayload.dispatches, after: detail.turn_economy.dispatches }, { before: null, after: 1 })
+  assert.equal(emitted.at(-1).step, 'archive')
+})
+
+test('RV1-1 reap ingestion is bounded to the latest run start', () => {
+  const firstStart = '2026-09-04T06:04:46.127Z'
+  const priorAt = '2026-09-04T06:04:46.500Z'
+  const secondStart = '2026-09-04T06:04:47.127Z'
+  const currentAt = '2026-09-04T06:04:47.500Z'
+  const fixture = turnsFixture('closeout-reap-ingest-rv1-1-', {
+    rows: [
+      { at: firstStart, event: 'run-start' },
+      { at: priorAt, seat_turn_census: {
+        role: 'builder', dispatch_id: 'd-prior-run', transport: 'headless-rpc', turns: 2,
+      } },
+      { at: secondStart, event: 'run-start' },
+      { at: currentAt, seat_turn_census: {
+        role: 'builder', dispatch_id: 'd-current-run', transport: 'headless-rpc', turns: 7,
+      } },
+    ],
+  })
+  const { deps } = harness({
+    home: fixture.home,
+    answers: [
+      ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
+      ['ledger.mjs turns', (_argv, options) => spawnSync(process.execPath, [join(ROOT, 'scripts/factory/ledger.mjs'), ...options.args.slice(1)], {
+        cwd: ROOT, env: options.env, encoding: 'utf8',
+      })],
+    ],
+  })
+  const result = reap({ lanes: [lane], checkout: fixture.checkout, deps })
+  const emitted = rows(result)
+  const detail = emitted.find((row) => row.step === 'turns').detail
+  const wide = runTurns(fixture, ['--adw-id', fixture.adwId, '--since', firstStart, '--until', '2026-09-04T06:04:48.000Z'])
+  assert.equal(result.code, 0)
+  assert.equal(detail.window.since, secondStart)
+  assert.equal(detail.ingest.applied, 1)
+  assert.equal(wide.status, 0, wide.stderr)
+  const widePayload = JSON.parse(wide.stdout)
+  assert.equal(widePayload.dispatches, 1)
+  assert.equal(widePayload.dispatches_measured, 1)
+  assert.equal(widePayload.turns, 7)
+  assert.equal(widePayload.turns_per_dispatch, 7)
+  assert.equal(emitted.at(-1).step, 'archive')
+})
+
 test('A2 every turns rate carries a finite dispatches_measured denominator', () => {
   const payload = turnsPayload({
     dispatches: 3,
@@ -455,6 +549,81 @@ test('A2 every turns rate carries a finite dispatches_measured denominator', () 
     assert.equal(Number.isFinite(holder.turns_per_dispatch), true)
     assert.equal(Number.isFinite(holder.dispatches_measured), true)
   }
+})
+
+test('A5 numeric epoch extends the reap ceiling and is ingested', () => {
+  const start = '2026-09-04T06:04:46.127Z'
+  const numericAt = Date.parse('2026-09-04T06:04:48.900Z')
+  const fixture = turnsFixture('closeout-reap-ingest-a5-', {
+    rows: [
+      { at: start, event: 'run-start' },
+      { at: numericAt, seat_turn_census: {
+        role: 'reviewer', dispatch_id: 'd-numeric', transport: 'headless-json', turns: 11,
+      } },
+    ],
+  })
+  const { deps, calls } = harness({
+    home: fixture.home,
+    answers: [
+      ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
+      ['ledger.mjs turns', (_argv, options) => spawnSync(process.execPath, [join(ROOT, 'scripts/factory/ledger.mjs'), ...options.args.slice(1)], {
+        cwd: ROOT, env: options.env, encoding: 'utf8',
+      })],
+    ],
+  })
+  const result = reap({ lanes: [lane], checkout: fixture.checkout, deps })
+  const emitted = rows(result)
+  const detail = emitted.find((row) => row.step === 'turns').detail
+  const ledgerCall = spawned(calls, 'ledger.mjs turns')[0]
+  assert.equal(result.code, 0)
+  assert.equal(ledgerCall.args[ledgerCall.args.indexOf('--until') + 1], '2026-09-04T06:04:49.000Z')
+  assert.equal(detail.ingest.applied, 1)
+  assert.equal(detail.measured, true)
+  assert.equal(detail.turn_economy.dispatches, 1)
+  assert.equal(detail.turn_economy.turns, 11)
+  assert.equal(emitted.at(-1).step, 'archive')
+})
+
+test('A7 unreadable journal keeps reap successful', () => {
+  const fixture = turnsFixture('closeout-reap-ingest-a7-', {
+    rows: [{ at: '2026-09-04T06:04:46.127Z', event: 'run-start' }],
+  })
+  const { deps } = harness({
+    home: fixture.home,
+    openLedger: () => { throw Object.assign(new Error('journal ledger denied'), { code: 'EACCES' }) },
+    answers: [
+      ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
+      ['ledger.mjs turns', { status: 0, stdout: `${JSON.stringify(turnsPayload())}\n`, stderr: '' }],
+    ],
+  })
+  const result = reap({ lanes: [lane], checkout: fixture.checkout, deps })
+  const emitted = rows(result)
+  const detail = emitted.find((row) => row.step === 'turns').detail
+  assert.equal(result.code, 0)
+  assert.equal(detail.ingest.complete, false)
+  assert.equal(detail.ingest.reason, 'EACCES')
+  assert.equal(emitted.at(-1).step, 'archive')
+})
+
+test('A8 degraded mirror keeps reap successful', () => {
+  const fixture = turnsFixture('closeout-reap-ingest-a8-', {
+    rows: [{ at: '2026-09-04T06:04:46.127Z', event: 'run-start' }],
+  })
+  const reason = 'turns: the ledger mirror is degraded — this window is unanswerable, not empty'
+  const { deps } = harness({
+    home: fixture.home,
+    answers: [
+      ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
+      ['ledger.mjs turns', { status: 1, stdout: '', stderr: reason }],
+    ],
+  })
+  const result = reap({ lanes: [lane], checkout: fixture.checkout, deps })
+  const emitted = rows(result)
+  const detail = emitted.find((row) => row.step === 'turns').detail
+  assert.equal(result.code, 0)
+  assert.equal(detail.measured, false)
+  assert.equal(detail.reason, reason)
+  assert.equal(emitted.at(-1).step, 'archive')
 })
 
 test('B1 degraded turns stay non-load-bearing and later reap steps still run', () => {

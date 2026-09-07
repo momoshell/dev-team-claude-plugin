@@ -727,6 +727,24 @@ export function censusFileOperands(toolName, input) {
   return paths === null ? { paths: [], bash_absent_reason: CENSUS_ABSENT_CAUSES.bash_reader_unparsed } : { paths, bash_absent_reason: null }
 }
 
+// Count the provider's own turn boundaries without consulting the best-effort
+// census reducer. Claude records one boundary for each assistant frame carrying
+// at least one tool_use block; malformed, empty and partial lines contribute
+// nothing. This is deliberately separate from claudeCensus so a telemetry
+// parser failure cannot turn a configured ceiling into an unmeasured pass.
+export function claudeTurnBoundaryCount(text) {
+  let turns = 0
+  for (const line of String(text ?? '').split('\n')) {
+    if (!line.trim()) continue
+    let frame
+    try { frame = JSON.parse(line) } catch { continue }
+    if (frame?.type !== 'assistant') continue
+    const content = Array.isArray(frame.message?.content) ? frame.message.content : []
+    if (content.some((block) => block?.type === 'tool_use')) turns += 1
+  }
+  return turns
+}
+
 export function claudeCensus(text) {
   const byClass = Object.fromEntries(TOOL_CLASSES.map((name) => [name, 0]))
   const inTool = Object.fromEntries(TOOL_CLASSES.map((name) => [name, 0]))
@@ -844,6 +862,45 @@ export function suiteRefusalRow({ role, transport, verdict }) {
   return {
     event: SEAT_SUITE_POLICY_EVENT, role, transport, refusal: SUITE_RUN_REFUSAL,
     command: verdict.command, kind: verdict.kind, gate_path: verdict.gate_path, reason: verdict.reason,
+  }
+}
+
+// A turn ceiling is a strict, measured boundary. Null and non-finite values are
+// unknown, never zero; equality is within the budget.
+export function turnCeilingBreached(turns, budget) {
+  if (!Number.isFinite(turns) || !Number.isFinite(budget)) return false
+  return turns > budget
+}
+
+export function turnCeilingEnvelope({ id, role, returnPath, turns, budget, artifacts = [], rejectedStatus = null }) {
+  const measured = Number.isFinite(turns)
+  return {
+    assignment_id: id,
+    role,
+    status: 'insufficient',
+    summary: measured
+      ? `seat-turn-ceiling: ${role} returned after ${turns} turns against a role budget of ${budget}; the envelope was rejected`
+      : `seat-turn-ceiling: ${role}'s turn census is unavailable; its budget of ${budget} could not be measured; the envelope was rejected`,
+    artifacts: Array.isArray(artifacts) ? artifacts : [],
+    details: {
+      turn_ceiling: { turns: measured ? turns : null, budget, absent_reason: measured ? null : 'turn-boundary-unavailable' },
+      rejected_status: rejectedStatus,
+    },
+  }
+}
+
+export function turnCeilingDetail({ at = Date.now(), role, id, turns, budget, absentReason = null }) {
+  return {
+    at,
+    seat_turn_ceiling: {
+      role,
+      dispatch: id,
+      turns: Number.isFinite(turns) ? turns : null,
+      budget,
+      measured: Number.isFinite(turns),
+      enforced: turnCeilingBreached(turns, budget),
+      absent_reason: absentReason,
+    },
   }
 }
 
@@ -1558,7 +1615,7 @@ function persistCrew(paths, role, patch, deps) {
   }, deps)
 }
 
-export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps = {} }) {
+export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turnCeilings = null, deps = {} }) {
   const spawn = deps.spawn || cpSpawn
   const now = deps.now || (() => Date.now())
   const sleep = deps.sleep || defaultSleep
@@ -1579,6 +1636,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
   const kill = deps.kill || ((pid, signal) => process.kill(pid, signal))
   const uuid = deps.uuid || randomUUID
   const pid = deps.pid ?? process.pid
+  const telemetryParser = deps.parseStream || deps.telemetryParser || (typeof deps.telemetry === 'function' ? deps.telemetry : parseStream)
   const root = join(taskDir || paths.taskDir, 'headless')
   const store = reclaimStore({ dir: root, actor: `headless:${pid}`, deps })
   const runs = new Map()
@@ -1628,10 +1686,15 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
     if (injectedLog) return injectedLog(obj)
     try { write(join(paths.dir, 'journal.jsonl'), `${JSON.stringify(obj)}\n`, { flag: 'a' }) } catch { /* diagnostics only */ }
   }
-  function recordOutcome(run, outcome, stream, exitCode, signal = null) {
+  function recordOutcome(run, outcome, stream, exitCode, signal = null, { includeCensus = true, includePolicy = true } = {}) {
     const degraded = outcome === 'ok-degraded' ? degradedSignals({ exitCode, signal, terminal: stream.terminal }) : null
-    if (run.policy) log(suitePolicyRow({ role: run.role, transport: 'headless-json', counters: suiteCountersFor(run.role), read: run.policyRead !== false }))
-    log({ at: now(), headless_outcome: outcome, exit_code: exitCode, signal, terminal_reason: stream.terminalReason, lines: stream.lines, stream: run.stream, seat_turn_census: censusRow(run, 'headless-json', stream), ...(degraded ? { degraded } : {}), ...(stream.providerFailure ? { provider_failure: stream.providerFailure } : {}) })
+    if (includePolicy && run.policy) log(suitePolicyRow({ role: run.role, transport: 'headless-json', counters: suiteCountersFor(run.role), read: run.policyRead !== false }))
+    log({
+      at: now(), headless_outcome: outcome, exit_code: exitCode, signal,
+      terminal_reason: stream.terminalReason, lines: stream.lines, stream: run.stream,
+      ...(includeCensus ? { seat_turn_census: censusRow(run, 'headless-json', stream) } : {}),
+      ...(degraded ? { degraded } : {}), ...(stream.providerFailure ? { provider_failure: stream.providerFailure } : {}),
+    })
   }
   function graceSpentFor(run) {
     return (fallbacksUsed.get(`${run.role}:${run.id}`) ?? 0) >= FALLBACK_MAX
@@ -1855,7 +1918,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
     try { return readEnvelope(run.returnPath, run.role) }
     catch (err) {
       const exitCode = parseExit(run.exit, read, exists)
-      const stream = parseStream(run.stream, read, exists)
+      const stream = telemetryParser(run.stream, read, exists)
       recordOutcome(run, 'parse-error', stream, exitCode)
       emitUsage(run, stream.usage)
       const condition = capturedCondition(run, read, exists)
@@ -2136,6 +2199,66 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
     try { return { text: String(read(run.stream, 'utf8')), read: true } }
     catch { return { text: '', read: false } }
   }
+  function streamSummary(run) {
+    const observed = readStreamObservation(run)
+    let sawJson = false
+    let terminal = false
+    let terminalReason = null
+    let lines = 0
+    for (const line of observed.text.split('\n')) {
+      if (!line.trim()) continue
+      lines += 1
+      try {
+        const frame = JSON.parse(line)
+        sawJson = true
+        if (frame?.type === 'result') {
+          terminal = true
+          terminalReason = frame.terminal_reason || frame.subtype || null
+        }
+      } catch { /* partial provider bytes are not a terminal parse failure */ }
+    }
+    return {
+      sawJson, terminal, terminalReason, lines, usage: null,
+      budgetRefused: false, providerFailure: null, census: null,
+      census_absent: observed.read ? CENSUS_ABSENT_CAUSES.no_frames : CENSUS_ABSENT_CAUSES.stream_absent,
+    }
+  }
+  function ceilingObservation(run) {
+    const budget = turnCeilings?.[run.role]
+    if (!Number.isFinite(budget)) return null
+    const observed = readStreamObservation(run)
+    if (!observed.read) return { turns: null, budget, absentReason: CENSUS_ABSENT_CAUSES.stream_absent }
+    return { turns: claudeTurnBoundaryCount(observed.text), budget, absentReason: null }
+  }
+  function recordCeilingOutcome(run, returnPath, turns, budget, absentReason = null) {
+    const summary = streamSummary(run)
+    const exitCode = parseExit(run.exit, read, exists)
+    // The terminal decision is its own row. Census parsing is deliberately
+    // deferred until after this row so best-effort telemetry cannot hide it.
+    recordOutcome(run, 'turn-ceiling', summary, exitCode, null, { includeCensus: false, includePolicy: false })
+    let telemetry = null
+    try { telemetry = telemetryParser(run.stream, read, exists) } catch { telemetry = null }
+    if (!telemetry || typeof telemetry !== 'object') telemetry = summary
+    emitUsage(run, telemetry.usage)
+    log(turnCeilingDetail({ at: now(), role: run.role, id: run.id, turns, budget, absentReason }))
+    log({ at: now(), seat_turn_census: censusRow(run, 'headless-json', telemetry) })
+    if (run.policy) log(suitePolicyRow({ role: run.role, transport: 'headless-json', counters: suiteCountersFor(run.role), read: run.policyRead !== false }))
+    return turnCeilingEnvelope({ id: run.id, role: run.role, returnPath, turns, budget, rejectedStatus: null })
+  }
+  function enforceTurnCeilingBeforeEnvelope(run, returnPath, { alreadyEnded = false } = {}) {
+    if (run.ceilingDecision) return run.ceilingDecision.envelope || null
+    const observed = ceilingObservation(run)
+    if (!observed || !turnCeilingBreached(observed.turns, observed.budget)) return null
+    // Latch before termination: a late envelope or policy refusal cannot replace
+    // this measured provider-boundary decision, and the race read cannot journal it twice.
+    run.ceilingDecision = { turns: observed.turns, budget: observed.budget, absentReason: observed.absentReason, envelope: null }
+    if (!alreadyEnded) endDispatch(run, returnPath)
+    const final = ceilingObservation(run)
+    const turns = Number.isFinite(final?.turns) ? final.turns : observed.turns
+    run.ceilingDecision.turns = turns
+    run.ceilingDecision.envelope = recordCeilingOutcome(run, returnPath, turns, observed.budget, final?.absentReason ?? observed.absentReason)
+    return run.ceilingDecision.envelope
+  }
   // Every shell call the stream has recorded so far, adjudicated EXACTLY ONCE by
   // its tool-use id. Returns the first refusal, or null.
   function adjudicateSuiteCalls(run, text) {
@@ -2161,6 +2284,8 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
     return refused
   }
   function enforceBeforeEnvelope(run, returnPath, { alreadyEnded = false } = {}) {
+    const ceiling = enforceTurnCeilingBeforeEnvelope(run, returnPath, { alreadyEnded })
+    if (ceiling) return ceiling
     if (!run.policy) return null
     const observed = readStreamObservation(run)
     run.policyRead = observed.read
@@ -2173,7 +2298,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
       const final = readStreamObservation(run)
       run.policyRead = final.read
       adjudicateSuiteCalls(run, final.text)
-      const stream = parseStream(run.stream, read, exists)
+      const stream = telemetryParser(run.stream, read, exists)
       recordOutcome(run, 'suite-run-not-owned', stream, parseExit(run.exit, read, exists))
       emitUsage(run, stream.usage)
       log(suiteRefusalRow({ role: run.role, transport: 'headless-json', verdict }))
@@ -2187,17 +2312,17 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
       const enforced = enforceBeforeEnvelope(run, returnPath)
       if (enforced) return enforced
       const env = readEnvelopeOrFail(run)
-      if (env) { const exitCode = parseExit(run.exit, read, exists); const stream = parseStream(run.stream, read, exists); const outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: env, timedOut: false, budgetRefused: stream.budgetRefused }); recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); return env }
+      if (env) { const exitCode = parseExit(run.exit, read, exists); const stream = telemetryParser(run.stream, read, exists); const outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: env, timedOut: false, budgetRefused: stream.budgetRefused }); recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); return env }
       const exitCode = parseExit(run.exit, read, exists)
-      if (exitCode !== null) { const stream = parseStream(run.stream, read, exists); const outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: null, timedOut: false, budgetRefused: stream.budgetRefused }); recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); const routed = providerRetryOnFailure(run, returnPath, deadline, stream); if (routed.act === 'retry') return routed.resume(); if (routed.act === 'none' && outcome === 'budget-refused') { const again = reaskOnFallback(run, returnPath, deadline, stream.providerFailure); if (again) return again() } throw providerAnnotated(outcomeError(run, outcome), run, stream) }
+      if (exitCode !== null) { const stream = telemetryParser(run.stream, read, exists); const outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: null, timedOut: false, budgetRefused: stream.budgetRefused }); recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); const routed = providerRetryOnFailure(run, returnPath, deadline, stream); if (routed.act === 'retry') return routed.resume(); if (routed.act === 'none' && outcome === 'budget-refused') { const again = reaskOnFallback(run, returnPath, deadline, stream.providerFailure); if (again) return again() } throw providerAnnotated(outcomeError(run, outcome), run, stream) }
       sleep(WAIT_POLL_MS)
     }
     endDispatch(run, returnPath)
     const racedEnforced = enforceBeforeEnvelope(run, returnPath, { alreadyEnded: true })
     if (racedEnforced) return racedEnforced
     const raced = readEnvelopeOrFail(run)
-    if (raced) { const stream = parseStream(run.stream, read, exists); const exitCode = parseExit(run.exit, read, exists); const outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: raced, timedOut: false, budgetRefused: stream.budgetRefused }); recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); return raced }
-    const exitCode = parseExit(run.exit, read, exists), stream = parseStream(run.stream, read, exists), outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: null, timedOut: true, budgetRefused: stream.budgetRefused })
+    if (raced) { const stream = telemetryParser(run.stream, read, exists); const exitCode = parseExit(run.exit, read, exists); const outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: raced, timedOut: false, budgetRefused: stream.budgetRefused }); recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); return raced }
+    const exitCode = parseExit(run.exit, read, exists), stream = telemetryParser(run.stream, read, exists), outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: null, timedOut: true, budgetRefused: stream.budgetRefused })
     recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); const routed = providerRetryOnFailure(run, returnPath, deadline, stream); if (routed.act === 'retry') return routed.resume(); if (routed.act === 'none' && outcome === 'budget-refused') { const again = reaskOnFallback(run, returnPath, deadline, stream.providerFailure); if (again) return again() } throw providerAnnotated(outcomeError(run, outcome), run, stream)
   }
   return { assign, wait }

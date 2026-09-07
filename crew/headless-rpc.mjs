@@ -919,7 +919,8 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
       const verdict = suiteRunPolicy({
         role: turn.role, command,
         fence: turn.policy.fence || [], gatePath: turn.policy.gatePath || null,
-        ranBefore: counters.allowance_spent, suiteCommand: turn.policy.suiteCommand || null,
+        ranBefore: counters.allowance_spent, suiteRanBefore: counters.suite_allowance_spent,
+        suiteCommand: turn.policy.suiteCommand || null, taskDir: taskDir || paths.taskDir,
       })
       countSuiteDecision(counters, verdict.decision, { kind: verdict.kind, blind: verdict.blind })
       // The FIRST refusal is the decision; a later one never overwrites it.

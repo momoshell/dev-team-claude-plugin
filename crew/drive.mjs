@@ -240,6 +240,13 @@ export function predecessorFindingsClosed(planCheckText, planText) {
 // CENSUS_ABSENT_REASONS (:262) — the driver owns the vocabulary it publishes.
 export const SUITE_RUN_NOT_OWNED = 'suite-run-not-owned'
 
+// A refused suite run BOUNCES the seat (#969). Every other seat-level refusal in
+// this runtime bounces: an out-of-scope write returns as a scope-fix brief, an
+// invalid envelope is re-asked, a gate defect opens the repair valve. This was
+// the one refusal that was terminal. BOUNDED at one, because the point is to
+// tell a seat what it may not run, not to fund a seat that keeps running it.
+export const SUITE_REASK_MAX = 1
+
 // CORRELATION, not merely shape. An envelope is this dispatch's refusal only when
 // it is ADDRESSED to this dispatch: a non-empty outer assignment_id and role, an
 // inner role that EQUALS the outer one, and the producer's marker as a
@@ -272,8 +279,8 @@ function suiteRefusalPreamble(env) {
   return {
     kind: 'suite-run-not-owned',
     lines: [
-      `Your previous dispatch was ENDED: suite-run-not-owned. You ran ${JSON.stringify(refusal.command)}, which your role does not own.`,
-      `The driver's gate-proof stage carries this evidence at ${refusal.gate_path}.`,
+      `Your previous dispatch was REFUSED: suite-run-not-owned. You ran ${JSON.stringify(refusal.command)}, which your role does not own.`,
+      `The driver's gate-proof stage carries this evidence at ${refusal.gate_path}. The same assignment is asked again — do not run that command; run the gate at its absolute path instead.`,
     ],
   }
 }
@@ -3182,7 +3189,7 @@ function runTask(ctx, io, crash) {
     }
   }
 
-  function assignAndWait(role, briefFile, note, { reviewSemantics = true } = {}) {
+  function dispatchOnce(role, briefFile, note, { reviewSemantics = true } = {}) {
     let brief = briefFile
     const pending = pendingEnforcement.get(role)
     if (pending) {
@@ -3243,6 +3250,15 @@ function runTask(ctx, io, crash) {
     }
     io.log(recordRow({ at: io.now(), envelope: id, role, status: env.status }))
     return env
+  }
+
+  function assignAndWait(role, briefFile, note, opts = {}) {
+    for (let attempt = 0; ; attempt += 1) {
+      const env = dispatchOnce(role, briefFile, note, opts)
+      const refusal = suiteRefusalOf(env)
+      if (!refusal) return env
+      if (attempt >= SUITE_REASK_MAX) return env
+    }
   }
 
   // Consult the lead: offer a closed option set, get a decision back.

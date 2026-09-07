@@ -1403,6 +1403,65 @@ function b416RpcStream(f, role, frames) {
   writeFileSync(join(f.paths.taskDir, 'headless-rpc', role, 'stream.jsonl'), `${frames.map((frame) => JSON.stringify(frame)).join('\n')}\n`)
 }
 
+function b502AppendRpcStream(f, role, frames) {
+  writeFileSync(join(f.paths.taskDir, 'headless-rpc', role, 'stream.jsonl'), `${frames.map((frame) => JSON.stringify(frame)).join('\n')}\n`, { flag: 'a' })
+}
+
+function b502RpcFrames(command, id = 'b502-bash') {
+  return [
+    { type: 'turn_start' },
+    { type: 'tool_execution_start', toolCallId: id, toolName: 'bash', args: { command } },
+    { type: 'tool_execution_end', toolCallId: id, toolName: 'bash' },
+    { type: 'turn_end' },
+    { type: 'agent_settled' },
+  ]
+}
+
+test('an own-task probe is admitted on headless rpc from the transports task dir', () => {
+  const f = fixture({ role: 'reviewer' })
+  try {
+    const policy = { suiteCommand: 'npm test', gatePath: '/tmp/b502/gate.mjs', fence: [] }
+    const run = f.io.assign({ role: 'reviewer', briefFile: '/brief.md', policy })
+    b502AppendRpcStream(f, 'reviewer', b502RpcFrames(`node --test ${f.paths.taskDir}/probe.test.mjs`))
+    writeFileSync(run.returnPath, JSON.stringify({ assignment_id: run.id, role: 'reviewer', status: 'done', summary: 'probe run', artifacts: [], details: {} }))
+    assert.equal(f.io.wait(run.returnPath, 60).status, 'done')
+  } finally { f.cleanup() }
+})
+
+test('two declared builder npm test calls across dispatches spend the allowance exactly once', () => {
+  const f = fixture()
+  try {
+    const policy = { suiteCommand: 'npm test', gatePath: '/tmp/b502/gate.mjs', fence: ['crew/'] }
+    const first = f.io.assign({ role: 'builder', briefFile: '/brief.md', policy })
+    b502AppendRpcStream(f, 'builder', b502RpcFrames('npm test', 'b502-npm-1'))
+    writeFileSync(first.returnPath, JSON.stringify({ assignment_id: first.id, role: 'builder', status: 'done', summary: 'first', artifacts: [], details: {} }))
+    assert.equal(f.io.wait(first.returnPath, 60).status, 'done')
+
+    const second = f.io.assign({ role: 'builder', briefFile: '/brief-again.md', policy })
+    b502AppendRpcStream(f, 'builder', b502RpcFrames('npm test', 'b502-npm-2'))
+    writeFileSync(second.returnPath, JSON.stringify({ assignment_id: second.id, role: 'builder', status: 'done', summary: 'second', artifacts: [], details: {} }))
+    const envelope = f.io.wait(second.returnPath, 60)
+    assert.equal(envelope.status, 'insufficient')
+    assert.equal(envelope.details.suite_refusal.command, 'npm test')
+  } finally { f.cleanup() }
+})
+
+test('a refused suite run is still counted in the turn census on headless rpc', () => {
+  const rows = []
+  const f = fixture({ role: 'reviewer', log: (row) => rows.push(row) })
+  try {
+    const policy = { suiteCommand: 'npm test', gatePath: '/tmp/b502/gate.mjs', fence: [] }
+    const run = f.io.assign({ role: 'reviewer', briefFile: '/brief.md', policy })
+    b502AppendRpcStream(f, 'reviewer', b502RpcFrames('node --test /etc/evil.test.mjs', 'b502-census'))
+    writeFileSync(run.returnPath, JSON.stringify({ assignment_id: run.id, role: 'reviewer', status: 'done', summary: 'probe run', artifacts: [], details: {} }))
+    const envelope = f.io.wait(run.returnPath, 60)
+    assert.equal(envelope.status, 'insufficient')
+    const census = rows.find((row) => row.seat_turn_census)?.seat_turn_census
+    assert.equal(census.suite_runs, 1)
+    assert.equal(census.by_class.test, 1)
+  } finally { f.cleanup() }
+})
+
 test('b416 K2/F6 RPC policy records one aggregate and one refusal detail before a reviewer done envelope', () => {
   const rows = []
   const f = fixture({ role: 'reviewer', log: (row) => rows.push(row) })

@@ -4,9 +4,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  ADOPTED_PLAN_HEADING, ADOPT_BLOCK, CENSUS_ROW_ABSENT, CENSUS_TURNS_ABSENT, CENSUS_UNREADABLE, CTX, CTX_DIRECTED, CTX_TL, DIRECTED_FILES, ENVELOPE_REFUSAL_REASONS, FAILURE_UPGRADE, GATE_SUMMARY_PREFIX, GROWTH_DIVERGENCE_FACTOR, LANE_COMMAND_SHAPES, LANE_INPUT_VERDICTS, LANE_PATH_OPTIONS, LANE_VALUE_OPTIONS, LIMITS, NO_TURN_CEILING, PLAN_CHECK_ABSENT, PLAN_CHECK_INVALID, PLAN_CHECK_SEVERITIES, PLAN_CONVERGENCE_REASONS, RED, RUN_START_EVENT, S843_ADDED, S843_D2, S843_DISPATCHED, S843_NARROWED, TD, THREW, TURN_CEILING_REFUSALS, TURN_CEILING_ROLES, VALIDATION_LANE_UNLOADABLE, adoptionSignal, bothExhaustionPointsScenario, buildEnv, carriedPrLines, carriedPreambleLines, carriedResolution, carriedSilenceDefect, checkEnv, composeCommitMessage, divergeThenExhaustPlanScenario, divergenceConsultLines, divergentPlanScenario, driveTask, enforcementPreamble, fakeIo, growthLines, growthRecord, join, laneCommandInputs, laneCommandShape, laneFence, leadEnv, lineageFromJournal, persistentDivergenceScenario, planCheckAcceptIo, planCheckFindings, planCheckFindingsFromText, planConvergence, planEnv, planRevisionRun, planRoundCap, planThenReviewIo, protectedPlanEnv, resolveTurnCeilings, resolveValidationLane, resumeGreen, resumeKeys, resumeRed, reviewConvergeRun, reviewEnv, s843Bullets, s843Ctx, s843Io, s843PlanEnv, suiteRefusalEnv, turnCeilingsRecord, validationPlan, validationProbeOutput, validationProbeRun, laneProbeCommand,
+  ADOPTED_PLAN_HEADING, ADOPT_BLOCK, CENSUS_ROW_ABSENT, CENSUS_TURNS_ABSENT, CENSUS_UNREADABLE, CTX, CTX_DIRECTED, CTX_TL, DIRECTED_FILES, ENVELOPE_REFUSAL_REASONS, FAILURE_UPGRADE, GATE_SUMMARY_PREFIX, GROWTH_DIVERGENCE_FACTOR, LANE_COMMAND_SHAPES, LANE_INPUT_VERDICTS, LANE_PATH_OPTIONS, LANE_VALUE_OPTIONS, LIMITS, NO_TURN_CEILING, PLAN_CHECK_ABSENT, PLAN_CHECK_INVALID, PLAN_CHECK_SEVERITIES, PLAN_CONVERGENCE_REASONS, RED, RUN_START_EVENT, S843_ADDED, S843_D2, S843_DISPATCHED, S843_NARROWED, SUITE_REASK_MAX, TD, THREW, TURN_CEILING_REFUSALS, TURN_CEILING_ROLES, VALIDATION_LANE_UNLOADABLE, adoptionSignal, bothExhaustionPointsScenario, buildEnv, carriedPrLines, carriedPreambleLines, carriedResolution, carriedSilenceDefect, checkEnv, composeCommitMessage, divergeThenExhaustPlanScenario, divergenceConsultLines, divergentPlanScenario, driveTask, enforcementPreamble, fakeIo, growthLines, growthRecord, join, laneCommandInputs, laneCommandShape, laneFence, leadEnv, lineageFromJournal, persistentDivergenceScenario, planCheckAcceptIo, planCheckFindings, planCheckFindingsFromText, planConvergence, planEnv, planRevisionRun, planRoundCap, planThenReviewIo, protectedPlanEnv, resolveTurnCeilings, resolveValidationLane, resumeGreen, resumeKeys, resumeRed, reviewConvergeRun, reviewEnv, s843Bullets, s843Ctx, s843Io, s843PlanEnv, suiteRefusalEnv, turnCeilingsRecord, validationPlan, validationProbeOutput, validationProbeRun, laneProbeCommand,
 } from './drive-fixtures.mjs'
 import { CREATES_ABSENT, PLAN_BOUNCE_UNFUNDED_HEADING, PLAN_SEAT_REFUSED, planBounceUnfundedLines, planCapNote, planExhaustedWhy, planRefusedWhy } from './drive.mjs'
+import { suiteRunPolicy } from './headless.mjs'
 
 test('a lead that answers escalate at the accept re-ask escalates with both reasons', () => {
   const io = planCheckAcceptIo(
@@ -2088,7 +2089,7 @@ test('b485 a plan round ended by a refused seat dispatch names the refusal, not 
   const run = (planner) => {
     const io = fakeIo({
       files: { [CTX.briefFile]: ADOPT_BLOCK, [`${TD}/plan-check.md`]: 'VERDICT: approve\n' },
-      envelopes: { 'planner:1': planner, 'lead:1': leadEnv('escalate') },
+      envelopes: { 'planner:1': planner, 'planner:2': suiteRefusalEnv('planner2', 'planner'), 'lead:1': leadEnv('escalate') },
     })
     return { io, result: driveTask(CTX_TL, io) }
   }
@@ -2100,7 +2101,7 @@ test('b485 a plan round ended by a refused seat dispatch names the refusal, not 
   assert.match(why, new RegExp(PLAN_SEAT_REFUSED))
   assert.match(why, /npm test/)
   assert.match(why, new RegExp(`${TD}/gate\\.mjs`))
-  assert.equal(positive.io.calls.assign.filter(({ role }) => role === 'planner').length, 1)
+  assert.equal(positive.io.calls.assign.filter(({ role }) => role === 'planner').length, 2)
 
   const uncorrelated = suiteRefusalEnv()
   uncorrelated.details.suite_refusal.role = 'reviewer'
@@ -2108,6 +2109,90 @@ test('b485 a plan round ended by a refused seat dispatch names the refusal, not 
   assert.equal(negative.result.details.escalation.where, 'plan')
   assert.doesNotMatch(negative.result.details.escalation.why, new RegExp(PLAN_SEAT_REFUSED))
   assert.equal(negative.io.calls.assign.filter(({ role }) => role === 'planner').length, 1)
+})
+
+test('a refused suite run bounces the seat inside its own round', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': suiteRefusalEnv(), 'planner:2': planEnv(),
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'done')
+  const planners = io.calls.assign.filter(({ role }) => role === 'planner')
+  assert.equal(planners.length, 2)
+  assert.deepEqual(planners[0].policy, { suiteCommand: 'suite-cmd', gatePath: `${TD}/gate.mjs`, fence: [] })
+  assert.deepEqual(planners[1].policy, planners[0].policy)
+  assert.deepEqual(result.details.stages.filter((stage) => /^plan:r\d+$/.test(stage)).length, 1)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'lead').length, 0)
+  assert.match(planners[1].briefFile, /enforcement-planner-r\d+\.md$/)
+  const enforcement = io.calls.writes[planners[1].briefFile]
+  assert.match(enforcement, /npm test/)
+  assert.match(enforcement, new RegExp(`${TD}/gate\\.mjs`))
+  assert.deepEqual(io.calls.logs.filter((row) => row.seat_enforcement).map((row) => row.seat_enforcement.applied), [false, true])
+})
+
+test('the bounce is bounded at one and the spent budget keeps the terminal reason', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': suiteRefusalEnv(), 'planner:2': suiteRefusalEnv('planner2', 'planner'),
+      'lead:1': leadEnv('escalate'),
+    },
+  })
+  const result = driveTask({ ...CTX, limits: { plan_rounds: 1 } }, io)
+  assert.equal(SUITE_REASK_MAX, 1)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'planner').length, SUITE_REASK_MAX + 1)
+  assert.equal(result.status, 'escalation')
+  assert.match(result.details.escalation.why, new RegExp(PLAN_SEAT_REFUSED))
+})
+
+test('a lane with no refused command is unchanged', () => {
+  const io = fakeIo({
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'done')
+  for (const role of ['planner', 'builder', 'reviewer']) assert.equal(io.calls.assign.filter((entry) => entry.role === role).length, 1)
+  assert.equal(Object.keys(io.calls.writes).some((path) => path.includes('enforcement-')), false)
+  assert.deepEqual(result.details.enforcements, [])
+})
+
+test('a bounced builder keeps its accepted fence and the teeth that go with it', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(), 'builder:1': suiteRefusalEnv('builder1', 'builder'), 'builder:2': buildEnv(),
+      'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'done')
+  const builders = io.calls.assign.filter(({ role }) => role === 'builder')
+  assert.equal(builders.length, 2)
+  assert.match(builders[1].briefFile, /enforcement-builder-r\d+\.md$/)
+  for (const dispatch of builders) assert.deepEqual(dispatch.policy.fence, ['a.mjs', 'a.test.mjs'])
+  const outside = suiteRunPolicy({ ...builders[1].policy, role: 'builder', command: 'node --test crew/drive.test.mjs' })
+  const inside = suiteRunPolicy({ ...builders[1].policy, role: 'builder', command: 'node --test a.test.mjs' })
+  assert.equal(outside.decision, 'refuse')
+  assert.equal(inside.decision, 'admit')
+})
+
+test('the drivers assigned policy carries exactly three keys', () => {
+  const io = planCheckAcceptIo()
+  const result = driveTask(CTX_TL, io)
+  assert.equal(result.status, 'done')
+  const expected = { suiteCommand: CTX_TL.suite, gatePath: `${TD}/gate.mjs` }
+  for (const role of ['planner', 'tech-lead', 'reviewer', 'builder']) {
+    const dispatch = io.calls.assign.find((entry) => entry.role === role)
+    assert.ok(dispatch)
+    assert.deepEqual(dispatch.policy, { ...expected, fence: role === 'builder' ? ['a.mjs', 'a.test.mjs'] : [] })
+  }
 })
 
 test('b485 the plan-round cap note and the exhaustion sentence keep their closed contracts', () => {

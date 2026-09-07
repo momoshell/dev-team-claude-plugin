@@ -278,6 +278,30 @@ test('mergeCheck uses one scratch, merges every lane, runs suite and repairs eve
   assert.equal(result.lines.length, MERGE_CHECK_STEPS.length)
 })
 
+test('mergeCheck gives its scratch suite a local ledger directory over an inherited sentinel', () => {
+  const sentinel = join(process.cwd(), 'operator-ledger-sentinel')
+  const previous = process.env.DEVTEAM_LEDGER_DIR
+  process.env.DEVTEAM_LEDGER_DIR = sentinel
+  try {
+    const { deps, calls } = harness({
+      answers: [
+        ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 900, state: 'OPEN', body: '' }), stderr: '' }],
+        ['--test', { status: 0, stdout: '# pass 1\n# fail 0\n# skipped 0\n', stderr: '' }],
+        ['anchor-pin.mjs', { status: 0, stdout: '', stderr: '' }],
+      ],
+    })
+    const result = mergeCheck({ lanes: [lane], checkout: process.cwd(), deps })
+    assert.equal(result.code, 0)
+    const suite = spawned(calls, '--test')[0]
+    assert.ok(suite)
+    assert.equal(suite.env.DEVTEAM_LEDGER_DIR, join(suite.cwd, '.dev-team', 'factory'))
+    assert.notEqual(suite.env.DEVTEAM_LEDGER_DIR, sentinel)
+  } finally {
+    if (previous === undefined) delete process.env.DEVTEAM_LEDGER_DIR
+    else process.env.DEVTEAM_LEDGER_DIR = previous
+  }
+})
+
 test('mergeCheck stops on red suite and removes the scratch worktree', () => {
   const { deps, calls } = harness({
     answers: [
@@ -543,6 +567,36 @@ test('recover continues after a clear seats-null pgrep and stops pre-commit at a
   assert.doesNotMatch(result.report.adopt.command, /UNKNOWN/)
   assert.equal(result.lines.some((row) => row.step === 'rebase'), false)
   assert.equal(spawned(calls, 'dispatch-batch').length, 0)
+})
+
+test('recover gives cold-verify its own ledger directory while warm suite keeps the neutral environment', () => {
+  const fixture = laneFixture('closeout-recover-cold-ledger-', { commit: 'abc123' })
+  const sentinel = join(fixture.home, 'operator-ledger')
+  const previous = process.env.DEVTEAM_LEDGER_DIR
+  process.env.DEVTEAM_LEDGER_DIR = sentinel
+  try {
+    const { deps, calls } = harness({
+      home: fixture.home,
+      answers: [
+        ['crew.mjs teardown', teardownReply()],
+        ['--test', { status: 0, stdout: '# pass 1\n# fail 0\n# skipped 0\n', stderr: '' }],
+      ],
+    })
+    const result = recover({ lane, checkout: fixture.checkout, deps })
+    assert.equal(result.code, 0)
+    const suites = calls.spawn.filter((call) => call.args.includes('--test'))
+    assert.equal(suites.length, 2)
+    const warm = suites.find((call) => call.cwd === fixture.checkout)
+    const cold = suites.find((call) => call.cwd !== fixture.checkout)
+    assert.ok(warm)
+    assert.ok(cold)
+    assert.equal(warm.env.DEVTEAM_LEDGER_DIR, sentinel)
+    assert.equal(cold.env.DEVTEAM_LEDGER_DIR, join(cold.cwd, '.dev-team', 'factory'))
+    assert.notEqual(cold.env.DEVTEAM_LEDGER_DIR, sentinel)
+  } finally {
+    if (previous === undefined) delete process.env.DEVTEAM_LEDGER_DIR
+    else process.env.DEVTEAM_LEDGER_DIR = previous
+  }
 })
 
 test('RV1-1 recover ignores its own pgrep PID in seats-null fallback', () => {

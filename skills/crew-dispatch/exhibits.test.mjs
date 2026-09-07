@@ -61,12 +61,17 @@ test('every crew-dispatch path:line anchor carries what the prose claims', () =>
 })
 
 // Mutation killed: adding a path:line citation to tier.md must fail instead of widening its narrow exemption.
-test("the tier reference's only line anchors are the quoted runtime refusal", () => {
+test('the tier reference carries NO path:line citation', () => {
+  // It used to carry two, both 'crew/crew.mjs:265', quoted from a runtime refusal in
+  // crew/seat-io.mjs. paneCommand moved to crew/crew.mjs:1706 and nothing detected it:
+  // an unpinned path:line is in no manifest key, so --repair-all refuses it by name
+  // ("manifest has no entry") and the citation rotted in an operator-facing message.
+  // The refusal now names the SYMBOL, which cannot drift with line numbers. Zero
+  // anchors is a stricter guard than the two-anchor exemption it replaces.
   const anchors = collectAnchors({ docs: [TIER] })
-  assert.deepEqual(anchors.map(({ key }) => key), ['crew/crew.mjs:265', 'crew/crew.mjs:265'])
+  assert.deepEqual(anchors.map(({ key }) => key), [])
   assert.ok(readText(TIER).includes('`paneCommand`'))
   assert.ok(readText(join(ROOT, 'crew/crew.mjs')).includes('function paneCommand(role, args,'))
-  // tier.md is exempt only because its quoted runtime string is a short, duplicated anchor; this test prevents widening that exemption.
 })
 
 // Mutation killed: removing one routing row must orphan a reference and make this corpus test fail.

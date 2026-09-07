@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
-import { join, relative } from 'node:path'
+import { dirname, join, relative } from 'node:path'
 import { tmpdir } from 'node:os'
 import { ROOT, git, scratchDir } from '../../test/helpers.mjs'
 import { anchorManifestDirs, assertAnchorsPinned, checkAnchors, checkSkillAnchors, citationCarrierTests, collectAnchors, collectNamed, collectRanges, INVERTED_MARK, laneFence, MIN_EXPECTED_LENGTH, partitionShifts, pinnedKey, pinnedLiteralsInTests, repairAnchorsInPlace, repairCli, resolveNamed, rewriteCitations, skillDocs, PINNED_LITERAL_BLIND_SPOT } from './anchor-pin.mjs'
@@ -684,11 +684,22 @@ test('the pinned-literal tripwire names the file that restates a key', () => {
   assert.equal(result.rows.some(({ file }) => file === 'skills/sample/clean.test.mjs'), false)
 })
 
-test('the tripwire ignores the quoted runtime refusal no manifest pins', () => {
-  const cliContract = join(ROOT, 'skills/crew-dispatch/cli-contract.test.mjs')
-  const result = pinnedLiteralsInTests({ root: ROOT, files: ['skills/crew-dispatch/cli-contract.test.mjs'] })
-  assert.deepEqual(result.rows, [])
-  assert.ok(readFileSync(cliContract, 'utf8').includes('crew/crew.mjs' + ':265'))
+test('the tripwire ignores a quoted file-and-line literal no manifest pins', () => {
+  // This used to witness the rule against a REAL stale citation that happened to live
+  // in skills/crew-dispatch/cli-contract.test.mjs. That citation has been removed (it
+  // had drifted by ~1,400 lines inside an operator-facing refusal), which would have
+  // made the guard vacuous while still passing its first assertion. The witness is now
+  // synthetic, so the tripwire is tested on its own terms and does not depend on the
+  // corpus continuing to carry a defect.
+  const root = scratchDir('b517-unpinned-literal-')
+  const rel = 'skills/example/unpinned.test.mjs'
+  const file = join(root, rel)
+  mkdirSync(dirname(file), { recursive: true })
+  writeFileSync(file, "const quoted = 'a refusal naming " + "crew/example.mjs" + ":42 inside a string'\n")
+  writeFileSync(join(root, 'anchors.json'), '{}\n')
+  const result = pinnedLiteralsInTests({ root, files: [rel] })
+  assert.deepEqual(result.rows, [], 'a file-and-line literal in no manifest key is not the tripwire\'s business')
+  assert.ok(readFileSync(file, 'utf8').includes('crew/example.mjs' + ':42'), 'the fixture must still carry the literal it is not flagged for')
 })
 
 test('pinnedKey resolves the live key from the pinned content and refuses anything else', () => {

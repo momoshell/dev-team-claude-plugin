@@ -9,10 +9,14 @@ post-hoc review label.
 
 The pane transport refusal is quoted from the runtime, verbatim:
 
-> `a pane seat bakes model and effort into its launch command at boot (crew/crew.mjs:265); its reassign: true capability means give a settled seat NEW WORK, never change its cell`
+> `a pane seat bakes model and effort into its launch command at boot (paneCommand in crew/crew.mjs); its reassign: true capability means give a settled seat NEW WORK, never change its cell`
 
-The `crew/crew.mjs:265` inside that sentence is a stale in-string anchor. The
-live bake is **`paneCommand`** in `crew/crew.mjs`. A pane cannot change cells
+The refusal names **`paneCommand`** by symbol, not by line. It used to carry a
+line number for `crew/crew.mjs`, which drifted by roughly 1,400 lines and was
+documented here as stale rather than corrected — an unpinned file-and-line
+citation is in no manifest key, so
+`--repair-all` refuses it ("manifest has no entry") and it rots in an
+operator-facing message. A symbol does not drift. A pane cannot change cells
 mid-run, so a protected-path hit on a pane lane must boot with `--tier judge`,
 not ask sensitivity-floor to reseat it later.
 

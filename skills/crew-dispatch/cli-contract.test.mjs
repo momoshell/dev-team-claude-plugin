@@ -86,7 +86,7 @@ test('documented variant keys and context equal the runtime contract', () => {
 })
 
 test('the pane-reseat refusal remains quoted in the tier reference', () => {
-  const sentence = 'a pane seat bakes model and effort into its launch command at boot (crew/crew.mjs:265); its reassign: true capability means give a settled seat NEW WORK, never change its cell'
+  const sentence = 'a pane seat bakes model and effort into its launch command at boot (paneCommand in crew/crew.mjs); its reassign: true capability means give a settled seat NEW WORK, never change its cell'
   assert.ok(readText(TIER).includes(sentence))
   assert.ok(readText(SEAT_IO).includes(sentence))
 })

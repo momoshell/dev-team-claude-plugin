@@ -6656,6 +6656,11 @@ test('b385 F1 a mutation_anchor_absent journal row round-trips to the ledger thr
   assert.deepEqual(MUTATION_ANCHOR_REFUSALS, MUTATION_CORRECTION_REFUSALS)
 })
 
+test('F1', () => {
+  assert.deepEqual(MUTATION_ANCHOR_CORRECTIONS, MUTATION_CORRECTION_OUTCOMES)
+  assert.deepEqual(MUTATION_ANCHOR_REFUSALS, MUTATION_CORRECTION_REFUSALS)
+})
+
 test('b385 F2 the mutation_anchors family publishes declarations_seen beside its count', { skip: SKIP }, () => {
   const dbPath = measuredJournalFactsDb()
   const measured = journalFactsCli(dbPath)

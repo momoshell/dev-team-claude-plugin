@@ -25,7 +25,7 @@ import {
   TEARDOWN_PROVEN,
   teardownVerdict,
 } from './dispatch-batch.mjs'
-import { journalRowsSinceRunStart, parseSuiteCounts } from '../../crew/drive.mjs'
+import { journalRowsSinceRunStart, parseSuiteCounts, RUN_START_EVENT } from '../../crew/drive.mjs'
 import { BATCH_DIR_EVENT, batchDirFromBrief } from '../../crew/crew.mjs'
 
 export const CLOSEOUT_VERBS = Object.freeze(['merge-check', 'reap', 'recover'])
@@ -35,7 +35,7 @@ export const EXIT_USAGE = 2
 export const STEP_EVENT = 'closeout-step'
 export const STEP_OUTCOMES = Object.freeze({ OK: 'ok', REFUSED: 'refused' })
 export const MERGE_CHECK_STEPS = Object.freeze(['pr-open', 'scratch-worktree', 'merge', 'suite', 'anchor-repair', 'report'])
-export const REAP_STEPS = Object.freeze(['pr-merged', 'issues', 'worktree', 'branch', 'prune', 'archive'])
+export const REAP_STEPS = Object.freeze(['pr-merged', 'turns', 'issues', 'worktree', 'branch', 'prune', 'archive'])
 export const RECOVER_STEPS = Object.freeze(['quiet', 'preserve', 'teardown', 'verify', 'closeout'])
 export const QUIET_READS = 2
 export const QUIET_GAP_MS = 10_000
@@ -370,6 +370,85 @@ function runCommand(options, d) {
   try { return d.spawn(options) } catch (error) { return { status: null, error, stdout: '', stderr: '' } }
 }
 
+function turnEconomyUnavailable(reason, extras = {}) { return { measured: false, reason, ...extras } }
+
+function currentRunWindow({ lane, laneDir, deps }) {
+  const d = normalDeps(deps)
+  const crewDir = dirname(crewJsonPath({ checkout: laneDir, lane, deps: d }))
+  const journalPath = join(crewDir, 'journal.jsonl')
+  let text
+  try {
+    text = textOf(d.readFileSync(journalPath, 'utf8'))
+  } catch (error) {
+    throw new Error(`cannot read current-run journal ${journalPath}: ${error?.message || String(error)}`)
+  }
+
+  let start = null
+  let latest = null
+  let unusableBoundary = null
+  for (const line of text.split('\n')) {
+    if (!line.trim()) continue
+    let row
+    try { row = JSON.parse(line) } catch { continue }
+    if (!row || typeof row !== 'object' || Array.isArray(row)) continue
+    if (row.event === RUN_START_EVENT) {
+      const at = typeof row.at === 'string' ? row.at : null
+      const timestamp = at === null ? NaN : Date.parse(at)
+      if (!Number.isFinite(timestamp)) {
+        start = null
+        latest = null
+        unusableBoundary = at === null
+          ? `run-start in ${journalPath} has no usable timestamp`
+          : `run-start in ${journalPath} has an unusable timestamp`
+        continue
+      }
+      start = { at, timestamp }
+      latest = timestamp
+      unusableBoundary = null
+      continue
+    }
+    if (!start) continue
+    if (!Object.prototype.hasOwnProperty.call(row, 'at')) continue
+    const at = typeof row.at === 'string' ? row.at : null
+    const timestamp = at === null ? NaN : Date.parse(at)
+    if (!Number.isFinite(timestamp)) continue
+    if (timestamp > latest) latest = timestamp
+  }
+  if (unusableBoundary) throw new Error(unusableBoundary)
+  if (!start || !Number.isFinite(latest)) throw new Error(`no timestamped ${RUN_START_EVENT} in ${journalPath}`)
+  const untilMs = Math.floor(latest / 1000) * 1000 + 1000
+  if (!Number.isFinite(untilMs)) throw new Error(`latest journal timestamp in ${journalPath} cannot form a whole-second boundary`)
+  let until
+  try { until = new Date(untilMs).toISOString() } catch (error) {
+    throw new Error(`latest journal timestamp in ${journalPath} cannot form a whole-second boundary: ${error?.message || String(error)}`)
+  }
+  return { since: start.at, until }
+}
+
+function reapTurnEconomy({ lane, laneDir, root, deps }) {
+  const d = normalDeps(deps)
+  let window
+  try { window = currentRunWindow({ lane, laneDir, deps: d }) } catch (error) {
+    return turnEconomyUnavailable(error?.message || String(error))
+  }
+  const command = {
+    file: 'node',
+    args: [join(root, 'scripts/factory/ledger.mjs'), 'turns', '--since', window.since, '--until', window.until],
+    cwd: root,
+  }
+  const result = runCommand(command, d)
+  if (!commandOk(result)) return turnEconomyUnavailable(childFailure(result), { window })
+  let payload
+  try { payload = JSON.parse(textOf(result.stdout).trim()) } catch (error) {
+    return turnEconomyUnavailable(`cannot parse turns readout: ${error?.message || String(error)}`, { window })
+  }
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload) || payload.schema !== 1) {
+    return turnEconomyUnavailable('turns readout must be exactly one schema-1 JSON object', { window })
+  }
+  if (payload.absent) return { measured: false, reason: payload.absent, window, turn_economy: payload }
+  return { measured: true, window, turn_economy: payload }
+}
+
 function commandOk(result) {
   return Boolean(result && result.status === 0)
 }
@@ -562,6 +641,11 @@ export function reap({ lanes, checkout, deps } = {}) {
         pr = prView({ lane, checkout: root, deps: d, step: 'pr-merged' })
         if (pr.state !== MERGED_STATE) refuse(`PR for ${lane} is ${JSON.stringify(pr.state)}, expected ${MERGED_STATE}`, CLOSEOUT_REFUSALS.PR_NOT_MERGED, 'pr-merged')
         return { number: pr.number, state: pr.state }
+      },
+      turns: () => {
+        const detail = reapTurnEconomy({ lane, laneDir, root, deps: d })
+        laneReport.turn_economy = detail
+        return detail
       },
       issues: () => {
         // Never infer: a body with neither trailer closes nothing and says so.

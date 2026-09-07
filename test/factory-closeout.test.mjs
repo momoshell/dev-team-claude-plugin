@@ -1,19 +1,17 @@
 import assert from 'node:assert/strict'
-import { after, test } from 'node:test'
+import { test } from 'node:test'
 import {
   existsSync,
   mkdirSync,
-  mkdtempSync as makeTempDir,
   readFileSync,
   readdirSync,
   renameSync,
-  rmSync,
   statSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
+import { scratchDir } from './helpers.mjs'
 import {
   AMBIGUOUS_MARK,
   ARCHIVE_MARK,
@@ -50,13 +48,10 @@ import {
   stripAnsi,
 } from '../scripts/factory/closeout.mjs'
 
-const scratchDirs = new Set()
 const lane = 'b415-closeout'
 
 function scratch(prefix = 'factory-closeout-') {
-  const dir = makeTempDir(join(tmpdir(), prefix))
-  scratchDirs.add(dir)
-  return dir
+  return scratchDir(prefix)
 }
 
 function put(path, text) {
@@ -77,11 +72,7 @@ function harness({ home = null, answers = [], newest = () => 1000, now = null, l
   let clock = 0
   const deps = normalDeps({
     home,
-    mkdtempSync: (prefix) => {
-      const dir = makeTempDir(prefix)
-      scratchDirs.add(dir)
-      return dir
-    },
+    mkdtempSync: (prefix) => scratchDir(basename(prefix), { parent: dirname(prefix) }),
     now: now || (() => { clock += 5; return clock }),
     sleep: () => {},
     newest,
@@ -141,6 +132,29 @@ function laneFixture(prefix, { commit = null, envelopeId = 'd3', mutations = 30 
   return { home, checkout, crewDir }
 }
 
+function turnsFixture(prefix, { rows = [], checkoutName = 'dt-main' } = {}) {
+  const home = scratch(prefix)
+  const checkout = join(home, checkoutName)
+  const crewDir = join(home, '.crew', `dt-${lane}`, lane)
+  mkdirSync(checkout, { recursive: true })
+  const text = rows.map((row) => typeof row === 'string' ? row : JSON.stringify(row)).join('\n')
+  put(join(crewDir, 'journal.jsonl'), `${text}\n`)
+  return { home, checkout, crewDir }
+}
+
+function turnsPayload(overrides = {}) {
+  return {
+    schema: 1,
+    dispatches: 2,
+    dispatches_measured: 2,
+    turns: 20,
+    turns_per_dispatch: 10,
+    by_role_tier: [],
+    absent: null,
+    ...overrides,
+  }
+}
+
 function teardownReply({ seats = { seats: 4, proven: 4, failed: 0, recorded: 4 }, status = 0, archived = '/x.archive-2026-09-04T00-00-00-000Z' } = {}) {
   return { status, stdout: `${JSON.stringify({ archived, seats })}\n`, stderr: '' }
 }
@@ -152,13 +166,6 @@ function spawned(calls, needle) {
 function rows(result) {
   return result.lines.map((row) => typeof row === 'string' ? JSON.parse(row) : row)
 }
-
-after(() => {
-  for (const dir of scratchDirs) {
-    try { rmSync(dir, { recursive: true, force: true }) } catch { /* scratch cleanup */ }
-  }
-  scratchDirs.clear()
-})
 
 test('refsFromPrBody reads both trailer shapes and ignores closing keywords', () => {
   assert.deepEqual(refsFromPrBody('Refs #758, #800\n'), [758, 800])
@@ -390,6 +397,191 @@ test('reap reports both sets by name and never infers a close', () => {
   assert.deepEqual(detail.referenced, [])
   assert.equal(detail.summary, 'closed: none · referenced (left open): none')
   assert.equal(reapIssueSummary({ closed: [806], referenced: [904] }), 'closed: #806 · referenced (left open): #904')
+})
+
+test('A1 measured turns are emitted before destructive reap steps', () => {
+  const payload = turnsPayload({ marker: 'measured-turn-economy' })
+  const fixture = turnsFixture('closeout-reap-turns-measured-', {
+    rows: [
+      { at: '2026-09-04T06:04:46.127Z', event: 'run-start' },
+      { at: '2026-09-04T06:04:46.500Z', event: 'seat-turn-census' },
+    ],
+  })
+  const { deps, calls } = harness({
+    home: fixture.home,
+    answers: [
+      ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
+      ['ledger.mjs turns', { status: 0, stdout: `${JSON.stringify(payload)}\n`, stderr: '' }],
+    ],
+  })
+  const result = reap({ lanes: [lane], checkout: fixture.checkout, deps })
+  const emitted = rows(result)
+  const turns = emitted.find((row) => row.step === 'turns')
+  assert.equal(result.code, 0)
+  assert.equal(turns.outcome, 'ok')
+  assert.deepEqual(turns.detail.turn_economy, payload)
+  assert.deepEqual(result.report.lanes[0].turn_economy, turns.detail)
+  assert.deepEqual(emitted.map((row) => row.step), [...REAP_STEPS])
+  assert.ok(emitted.findIndex((row) => row.step === 'turns') < emitted.findIndex((row) => row.step === 'issues'))
+  assert.ok(emitted.findIndex((row) => row.step === 'turns') < emitted.findIndex((row) => row.step === 'worktree'))
+  assert.ok(calls.spawn.findIndex((call) => call.argv.includes('ledger.mjs turns')) > calls.spawn.findIndex((call) => call.argv.includes('gh pr view')))
+  assert.ok(calls.spawn.findIndex((call) => call.argv.includes('ledger.mjs turns')) < calls.spawn.findIndex((call) => call.argv.includes('worktree remove')))
+})
+
+test('A2 every turns rate carries a finite dispatches_measured denominator', () => {
+  const payload = turnsPayload({
+    dispatches: 3,
+    dispatches_measured: 3,
+    turns: 30,
+    turns_per_dispatch: 10,
+    by_role_tier: [
+      { role: 'planner', tier: 'build', dispatches: 2, dispatches_measured: 2, turns: 20, turns_per_dispatch: 10 },
+      { role: 'reviewer', tier: 'judge', dispatches: 1, dispatches_measured: 1, turns: 10, turns_per_dispatch: 10 },
+    ],
+  })
+  const fixture = turnsFixture('closeout-reap-turns-rates-', {
+    rows: [{ at: '2026-09-04T06:04:46.127Z', event: 'run-start' }],
+  })
+  const { deps } = harness({
+    home: fixture.home,
+    answers: [
+      ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
+      ['ledger.mjs turns', { status: 0, stdout: `${JSON.stringify(payload)}\n`, stderr: '' }],
+    ],
+  })
+  const result = reap({ lanes: [lane], checkout: fixture.checkout, deps })
+  const economy = rows(result).find((row) => row.step === 'turns').detail.turn_economy
+  for (const holder of [economy, ...economy.by_role_tier]) {
+    assert.equal(Number.isFinite(holder.turns_per_dispatch), true)
+    assert.equal(Number.isFinite(holder.dispatches_measured), true)
+  }
+})
+
+test('B1 degraded turns stay non-load-bearing and later reap steps still run', () => {
+  const reason = 'turns: the ledger mirror is degraded — this window is unanswerable, not empty'
+  const fixture = turnsFixture('closeout-reap-turns-degraded-', {
+    rows: [{ at: '2026-09-04T06:04:46.127Z', event: 'run-start' }],
+  })
+  const { deps } = harness({
+    home: fixture.home,
+    answers: [
+      ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
+      ['ledger.mjs turns', { status: 1, stdout: '', stderr: reason }],
+    ],
+  })
+  const result = reap({ lanes: [lane], checkout: fixture.checkout, deps })
+  const emitted = rows(result)
+  const turns = emitted.find((row) => row.step === 'turns')
+  assert.equal(result.code, 0)
+  assert.equal(turns.outcome, 'ok')
+  assert.equal(turns.detail.measured, false)
+  assert.equal(turns.detail.reason, reason)
+  assert.equal(emitted.at(-1).step, 'archive')
+  assert.deepEqual(emitted.map((row) => row.step), [...REAP_STEPS])
+})
+
+test('B2 degraded turns contain no invented numeric count, denominator, or rate', () => {
+  const reason = 'turns: the ledger mirror is degraded — this window is unanswerable, not empty'
+  const fixture = turnsFixture('closeout-reap-turns-degraded-honesty-', {
+    rows: [{ at: '2026-09-04T06:04:46.127Z', event: 'run-start' }],
+  })
+  const { deps } = harness({
+    home: fixture.home,
+    answers: [
+      ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
+      ['ledger.mjs turns', { status: 1, stdout: '', stderr: reason }],
+    ],
+  })
+  const result = reap({ lanes: [lane], checkout: fixture.checkout, deps })
+  const detail = rows(result).find((row) => row.step === 'turns').detail
+  assert.equal(detail.reason, reason)
+  assert.equal(detail.turn_economy, undefined)
+  for (const key of ['dispatches', 'dispatches_measured', 'turns', 'turns_per_dispatch']) {
+    assert.equal(Object.hasOwn(detail, key), false)
+  }
+})
+
+test('C1 empty turns retain absent reason, nulls, and successful reap', () => {
+  const payload = turnsPayload({
+    absent: 'no seat_turn_census rows in this window — no dispatch count was measured, never a measured zero',
+    dispatches: null,
+    dispatches_measured: null,
+    turns: null,
+    turns_per_dispatch: null,
+    by_role_tier: [],
+  })
+  const fixture = turnsFixture('closeout-reap-turns-empty-', {
+    rows: [{ at: '2026-09-04T06:04:46.127Z', event: 'run-start' }],
+  })
+  const { deps } = harness({
+    home: fixture.home,
+    answers: [
+      ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
+      ['ledger.mjs turns', { status: 0, stdout: `${JSON.stringify(payload)}\n`, stderr: '' }],
+    ],
+  })
+  const result = reap({ lanes: [lane], checkout: fixture.checkout, deps })
+  const detail = rows(result).find((row) => row.step === 'turns').detail
+  assert.equal(result.code, 0)
+  assert.equal(detail.measured, false)
+  assert.equal(detail.reason, payload.absent)
+  assert.deepEqual(detail.turn_economy, payload)
+  assert.equal(detail.turn_economy.dispatches, null)
+  assert.equal(detail.turn_economy.dispatches_measured, null)
+  assert.equal(detail.turn_economy.turns_per_dispatch, null)
+  assert.deepEqual(detail.turn_economy.by_role_tier, [])
+})
+
+test('D1 a missing ledger executable is unavailable without refusing reap', () => {
+  const fixture = turnsFixture('closeout-reap-turns-missing-', {
+    rows: [{ at: '2026-09-04T06:04:46.127Z', event: 'run-start' }],
+  })
+  const { deps } = harness({
+    home: fixture.home,
+    answers: [
+      ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
+      ['ledger.mjs turns', () => { throw Object.assign(new Error('spawn ENOENT: ledger.mjs'), { code: 'ENOENT' }) }],
+    ],
+  })
+  const result = reap({ lanes: [lane], checkout: fixture.checkout, deps })
+  const emitted = rows(result)
+  const detail = emitted.find((row) => row.step === 'turns').detail
+  assert.equal(result.code, 0)
+  assert.equal(emitted.at(-1).step, 'archive')
+  assert.equal(detail.measured, false)
+  assert.match(detail.reason, /ENOENT/)
+})
+
+test('E1 turns query uses the latest run start and a ceiling-rounded exclusive until', () => {
+  const latestStart = '2026-09-04T06:04:46.127Z'
+  const fixture = turnsFixture('closeout-reap-turns-window-', {
+    rows: [
+      { at: '2026-09-04T06:00:00.000Z', event: 'run-start' },
+      { at: '2026-09-04T06:00:00.900Z', event: 'old-run-row' },
+      'not json',
+      { at: '2026-09-04T06:04:45.999Z', event: 'old-run-row' },
+      { at: latestStart, event: 'run-start' },
+      { at: '2026-09-04T06:04:46.128Z', event: 'seat-turn-census' },
+      { at: '2026-09-04T06:04:46.777Z', event: 'seat-turn-census' },
+    ],
+  })
+  const payload = turnsPayload()
+  const { deps, calls } = harness({
+    home: fixture.home,
+    answers: [
+      ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
+      ['ledger.mjs turns', { status: 0, stdout: `${JSON.stringify(payload)}\n`, stderr: '' }],
+    ],
+  })
+  const result = reap({ lanes: [lane], checkout: fixture.checkout, deps })
+  const ledgerCalls = spawned(calls, 'ledger.mjs turns')
+  assert.equal(result.code, 0)
+  assert.equal(ledgerCalls.length, 1)
+  const call = ledgerCalls[0]
+  assert.equal(call.args[call.args.indexOf('--since') + 1], latestStart)
+  assert.equal(call.args[call.args.indexOf('--until') + 1], '2026-09-04T06:04:47.000Z')
+  assert.notEqual(call.args[call.args.indexOf('--since') + 1], null)
+  assert.notEqual(call.args[call.args.indexOf('--until') + 1], null)
 })
 
 test('reap refuses an open PR before closing issues or removing anything', () => {
@@ -818,7 +1010,7 @@ test('parseArgs and main use usage, refusal, and success exit codes', () => {
 // Keep imported frozen step definitions exercised as data, not as an export-presence assertion.
 test('verb step tables preserve their ordered contracts', () => {
   assert.deepEqual([...MERGE_CHECK_STEPS], ['pr-open', 'scratch-worktree', 'merge', 'suite', 'anchor-repair', 'report'])
-  assert.deepEqual([...REAP_STEPS], ['pr-merged', 'issues', 'worktree', 'branch', 'prune', 'archive'])
+  assert.deepEqual([...REAP_STEPS], ['pr-merged', 'turns', 'issues', 'worktree', 'branch', 'prune', 'archive'])
   assert.deepEqual([...RECOVER_STEPS], ['quiet', 'preserve', 'teardown', 'verify', 'closeout'])
   assert.equal(stripAnsi('\u001b[31mred\u001b[0m'), 'red')
 })

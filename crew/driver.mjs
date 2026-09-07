@@ -141,6 +141,21 @@ export function assignmentLine({ id, role, briefFile, returnPath, taskDir }) {
 
 // --- assignment delivery and its cost ----------------------------------------
 export const DELIVERY_MODES = Object.freeze(['path', 'inline'])
+// Mirrors the compile-time tool-result ceiling while keeping this runtime module
+// independent from the factory implementation.
+export const ASSIGNMENT_INLINE_BYTE_LIMIT = 50 * 1024
+export const ASSIGNMENT_UNMEASURED_REASONS = Object.freeze(['brief-unreadable'])
+
+export function assignmentDelivery({ briefFile, readFileSync }) {
+  try {
+    const value = readFileSync(briefFile)
+    if (!Buffer.isBuffer(value) && typeof value !== 'string') return { delivery: 'path', briefText: null, brief_bytes: null, unmeasured_reason: 'brief-unreadable' }
+    const briefText = Buffer.isBuffer(value) ? value.toString('utf8') : value
+    const bytes = Buffer.isBuffer(value) ? value.length : Buffer.byteLength(value, 'utf8')
+    if (bytes === 0 || bytes > ASSIGNMENT_INLINE_BYTE_LIMIT) return { delivery: 'path', briefText: null, brief_bytes: bytes, unmeasured_reason: null }
+    return { delivery: 'inline', briefText, brief_bytes: bytes, unmeasured_reason: null }
+  } catch { return { delivery: 'path', briefText: null, brief_bytes: null, unmeasured_reason: 'brief-unreadable' } }
+}
 
 export function assignmentPrompt({ id, role, briefFile, returnPath, taskDir, delivery = 'path', briefText = null }) {
   if (!DELIVERY_MODES.includes(delivery)) {
@@ -155,7 +170,7 @@ export function assignmentPrompt({ id, role, briefFile, returnPath, taskDir, del
   if (typeof briefText !== 'string' || briefText.length === 0) {
     throw new Error('assignmentPrompt: briefText must be a non-empty string')
   }
-  const head = `ASSIGNMENT ${id}: your brief is inlined below, in full — nothing to read first. Task dir: ${taskDir}. Write your ReturnEnvelope to ${returnPath} then print exactly: CREW-DONE ${role} ${id}`
+  const head = `ASSIGNMENT ${id}: your brief body follows below verbatim — do not re-read the brief file; if the brief itself names a plan, a diff or files, read those. Task dir: ${taskDir}. Write your ReturnEnvelope to ${returnPath} then print exactly: CREW-DONE ${role} ${id}`
   // This result is a prompt-delivery seam, not a typed pane line: its rich,
   // multi-line content is deliberately not passed through assertSafeLine.
   return [head, '--- BRIEF BEGINS ---', briefText, '--- BRIEF ENDS ---'].join('\n')

@@ -10,6 +10,7 @@ import {
   carriesOwnSpend, emptyTurnEnvelope, finaliseCensus, foldCensusFrame, foldRpcUsage, headlessRpcIo, isBusyRefusal, newCensus, PROMPT_REFUSAL_RETRIES,
   rpcCensus, rpcCommand, rpcStreamCensus, seatCommandPath, SETTLE_GATE_POLLS, splitFrames, steerFrame, teardownOutcome,
 } from './headless-rpc.mjs'
+import { assignmentLine } from './driver.mjs'
 import { cellFailureKind } from './seat-io.mjs'
 import { CENSUS_ABSENT_CAUSES, SEAT_SUITE_POLICY_EVENT, SUITE_RUN_REFUSAL, SUITE_RUN_UNRECOGNISED } from './headless.mjs'
 import { scratchDir } from '../test/helpers.mjs'
@@ -174,6 +175,71 @@ test('rpcCommand composes a resumable pi invocation', () => {
     assert.equal(bareCommand.args[bareCommand.args.indexOf('--tools') + 1], 'read,bash,edit,write,grep,find,ls')
     assert.equal(bareCommand.args.includes('-e'), false)
   } finally { bareFixture.cleanup() }
+})
+
+test('A3 headless rpc assignment carries the brief body inline', () => {
+  const f = fixture()
+  const briefText = '# RPC inline brief\nKeep this exact body: café 🚀.\n'
+  const briefFile = join(f.paths.taskDir, 'brief.md')
+  writeFileSync(briefFile, briefText)
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile })
+    const prompt = f.writes.find((frame) => frame.type === 'prompt')?.message
+    assert.ok(prompt.includes(briefText))
+    assert.doesNotMatch(prompt, /read your brief at/)
+    assert.equal(run.id, 'd1')
+  } finally { f.cleanup() }
+})
+
+test('B3 headless rpc journals the measured delivery mode per assignment', () => {
+  const logs = []
+  const f = fixture({ log: (row) => logs.push(row) })
+  const briefText = 'measured rpc brief — café 🚀\n'
+  const briefFile = join(f.paths.taskDir, 'brief.md')
+  writeFileSync(briefFile, briefText)
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile })
+    const rows = logs.filter((row) => row.event === 'assignment-delivery')
+    assert.equal(rows.length, 1)
+    assert.deepEqual(rows[0], {
+      at: rows[0].at,
+      event: 'assignment-delivery',
+      role: 'builder',
+      assignment_id: run.id,
+      transport: 'headless-rpc',
+      mode: 'inline',
+      brief_bytes: Buffer.byteLength(briefText, 'utf8'),
+      brief_size_measured: true,
+      brief_size_unmeasured_reason: null,
+    })
+
+    const failedLogs = []
+    const failed = fixture({
+      log: (row) => failedLogs.push(row),
+      writeSync: () => { throw new Error('EPIPE') },
+    })
+    try {
+      assert.throws(() => failed.io.assign({ role: 'builder', briefFile: '/brief.md' }), /EPIPE/)
+      assert.equal(failedLogs.filter((row) => row.event === 'assignment-delivery').length, 0)
+    } finally { failed.cleanup() }
+  } finally { f.cleanup() }
+})
+
+test('C3 headless rpc records an unreadable brief as unmeasured path delivery', () => {
+  const logs = []
+  const f = fixture({ log: (row) => logs.push(row) })
+  const briefFile = join(f.paths.taskDir, 'missing-brief.md')
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile })
+    const prompt = f.writes.find((frame) => frame.type === 'prompt')?.message
+    assert.equal(prompt, assignmentLine({ id: run.id, role: 'builder', briefFile, returnPath: run.returnPath, taskDir: f.paths.taskDir }))
+    const rows = logs.filter((row) => row.event === 'assignment-delivery')
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].mode, 'path')
+    assert.equal(rows[0].brief_bytes, null)
+    assert.equal(rows[0].brief_size_measured, false)
+    assert.equal(rows[0].brief_size_unmeasured_reason, 'brief-unreadable')
+  } finally { f.cleanup() }
 })
 
 test('recorded B6 capture remains LF-framed and carries the boundary events', () => {

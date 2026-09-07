@@ -6,8 +6,8 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { scratchDir } from '../test/helpers.mjs'
 import {
-  assignmentLine, assignmentPrompt, assertSafeLine, briefIngestCommands, confirmDelivery, deliverySentence, pickNeedles, readEventsTail, surfaceProcessTree, sendLine,
-  DELIVERY_CONFIRMED, DELIVERY_MODES, DELIVERY_UNCONFIRMED, DELIVERY_UNKNOWN, DELIVERY_UNKNOWN_REASONS, EVENTS_TAIL_BYTES, SEND_RETRIES, SUBMIT_BLIND_SPOT, SUBMIT_ENTER_ATTEMPTS, SUBMIT_PROOF_WINDOW_MS, SUBMIT_TOTAL_BUDGET_MS,
+  assignmentDelivery, assignmentLine, assignmentPrompt, assertSafeLine, briefIngestCommands, confirmDelivery, deliverySentence, pickNeedles, readEventsTail, surfaceProcessTree, sendLine,
+  ASSIGNMENT_INLINE_BYTE_LIMIT, ASSIGNMENT_UNMEASURED_REASONS, DELIVERY_CONFIRMED, DELIVERY_MODES, DELIVERY_UNCONFIRMED, DELIVERY_UNKNOWN, DELIVERY_UNKNOWN_REASONS, EVENTS_TAIL_BYTES, SEND_RETRIES, SUBMIT_BLIND_SPOT, SUBMIT_ENTER_ATTEMPTS, SUBMIT_PROOF_WINDOW_MS, SUBMIT_TOTAL_BUDGET_MS,
 } from './driver.mjs'
 import { capabilitiesFor as claudeCapabilitiesFor } from './adapters/adapter-claude.mjs'
 import { capabilitiesFor as piCapabilitiesFor } from './adapters/adapter-pi.mjs'
@@ -38,7 +38,7 @@ test('assignmentPrompt path delivery is byte-identical and modes are closed', ()
 test('assignmentPrompt inline delivery carries a multiline brief without its path instruction', () => {
   const briefText = '# Task: inline\n## The ask\nKeep this verbatim.\n'
   const prompt = assignmentPrompt({ ...GOOD, delivery: 'inline', briefText })
-  assert.match(prompt, /^ASSIGNMENT p1: your brief is inlined below, in full — nothing to read first\./)
+  assert.match(prompt, /^ASSIGNMENT p1: your brief body follows below verbatim — do not re-read the brief file; if the brief itself names a plan, a diff or files, read those\./)
   assert.ok(prompt.includes(briefText))
   assert.ok(prompt.includes('--- BRIEF BEGINS ---'))
   assert.ok(prompt.includes('--- BRIEF ENDS ---'))
@@ -51,6 +51,70 @@ test('assignmentPrompt inline delivery carries a multiline brief without its pat
   for (const [field, value] of [['id', '../p1'], ['role', 'plan/ner'], ['taskDir', 'task']]) {
     assert.throws(() => assignmentPrompt({ ...GOOD, delivery: 'inline', briefText, [field]: value }), new RegExp(`assignmentLine: ${field}`))
   }
+})
+
+test('A1 measured bounded brief delivery carries the exact body inline', () => {
+  assert.equal(ASSIGNMENT_INLINE_BYTE_LIMIT, 51_200)
+  assert.deepEqual(ASSIGNMENT_UNMEASURED_REASONS, ['brief-unreadable'])
+  assert.equal(Object.isFrozen(ASSIGNMENT_UNMEASURED_REASONS), true)
+
+  const stringBrief = 's'.repeat(ASSIGNMENT_INLINE_BYTE_LIMIT)
+  const stringReads = []
+  const stringDelivery = assignmentDelivery({
+    briefFile: GOOD.briefFile,
+    readFileSync: (path) => { stringReads.push(path); return stringBrief },
+  })
+  assert.deepEqual(stringDelivery, {
+    delivery: 'inline', briefText: stringBrief, brief_bytes: ASSIGNMENT_INLINE_BYTE_LIMIT, unmeasured_reason: null,
+  })
+  assert.equal(stringReads.length, 1)
+  const stringPrompt = assignmentPrompt({ ...GOOD, ...stringDelivery })
+  assert.ok(stringPrompt.includes(stringBrief))
+  assert.doesNotMatch(stringPrompt, /read your brief at/)
+
+  const multibyteBrief = Buffer.from('🚀'.repeat(ASSIGNMENT_INLINE_BYTE_LIMIT / 4), 'utf8')
+  const bufferReads = []
+  const bufferDelivery = assignmentDelivery({
+    briefFile: GOOD.briefFile,
+    readFileSync: (path) => { bufferReads.push(path); return multibyteBrief },
+  })
+  assert.deepEqual(bufferDelivery, {
+    delivery: 'inline', briefText: multibyteBrief.toString('utf8'), brief_bytes: ASSIGNMENT_INLINE_BYTE_LIMIT, unmeasured_reason: null,
+  })
+  assert.equal(bufferReads.length, 1)
+  const bufferPrompt = assignmentPrompt({ ...GOOD, ...bufferDelivery })
+  assert.ok(bufferPrompt.includes(bufferDelivery.briefText))
+  assert.doesNotMatch(bufferPrompt, /read your brief at/)
+})
+
+test('B1 oversized and empty briefs retain working path delivery', () => {
+  const values = [Buffer.from('x'.repeat(ASSIGNMENT_INLINE_BYTE_LIMIT + 1)), '', Buffer.alloc(0)]
+  for (const value of values) {
+    const delivery = assignmentDelivery({ briefFile: GOOD.briefFile, readFileSync: () => value })
+    assert.equal(delivery.delivery, 'path')
+    assert.equal(delivery.briefText, null)
+    assert.equal(delivery.brief_bytes, Buffer.isBuffer(value) ? value.length : Buffer.byteLength(value, 'utf8'))
+    assert.equal(delivery.unmeasured_reason, null)
+    assert.equal(assignmentPrompt({ ...GOOD, ...delivery }), assignmentLine(GOOD))
+  }
+})
+
+test('C1 path delivery retains every assignmentLine safety assertion', () => {
+  for (const [field, value] of [
+    ['id', 'p 1'],
+    ['role', 'plan/ner'],
+    ['briefFile', 'brief-planner.md'],
+    ['taskDir', 'task'],
+    ['returnPath', 'returns/planner.json'],
+  ]) {
+    assert.throws(() => assignmentPrompt({ ...GOOD, delivery: 'path', [field]: value }), new RegExp(`assignmentLine: ${field}`))
+  }
+})
+
+test('assignmentDelivery fails closed with a closed unmeasured reason', () => {
+  const expected = { delivery: 'path', briefText: null, brief_bytes: null, unmeasured_reason: 'brief-unreadable' }
+  assert.deepEqual(assignmentDelivery({ briefFile: GOOD.briefFile, readFileSync: () => { throw new Error('EPERM') } }), expected)
+  assert.deepEqual(assignmentDelivery({ briefFile: GOOD.briefFile, readFileSync: () => ({ text: 'not a brief' }) }), expected)
 })
 
 test('briefIngestCommands counts rows and finds absolute and basename reads', () => {

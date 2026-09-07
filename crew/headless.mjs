@@ -13,7 +13,7 @@ import { join } from 'node:path'
 import { spawn as cpSpawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 
-import { assignmentLine } from './driver.mjs'
+import { assignmentDelivery, assignmentPrompt } from './driver.mjs'
 import { headlessCommand as defaultHeadlessCommand } from './adapters/adapter-claude.mjs'
 import { reclaimStore, PHASES, VERDICTS, EVIDENCE_KINDS, LIVENESS } from './reclaim.mjs'
 import { readJsonTri } from './json-leaf.mjs'
@@ -1584,7 +1584,8 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
     const returnPath = reask?.returnPath || join(paths.returnsDir, `${id}.${role}.json`)
     if (exists(returnPath)) unlink(returnPath)
     const stream = join(dir, 'stream.jsonl'), stderr = join(dir, 'stderr.log'), exit = join(dir, 'exit'), cmdPath = join(dir, 'cmd.json')
-    const prompt = assignmentLine({ id, role, briefFile, returnPath, taskDir: taskDir || paths.taskDir }) + (note ? `\n${note}` : '')
+    const delivery = assignmentDelivery({ briefFile, readFileSync: read })
+    const prompt = assignmentPrompt({ id, role, briefFile, returnPath, taskDir: taskDir || paths.taskDir, ...delivery }) + (note ? `\n${note}` : '')
     const command = workerCommand(adapterFor(adapters, role), { role, model: member.model, promptFile: join(taskDir || paths.taskDir, `role-${role}.md`), tools: member.tools || undefined, deny: member.deny || undefined, taskDir: taskDir || paths.taskDir, prompt, sessionId, resume: !!member.started, bin, effort: member.effort })
     const args = command.args || []
     const pgid = join(dir, 'pgid')
@@ -1621,6 +1622,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
     notePersist(role, persistCrew(paths, role, { started: true }, crewDeps))
     const run = { role, id, runId, briefFile, note: note ?? null, model: member.model ?? null, sessionId, pid: child.pid, reservation_id: handle.reservation_id, dir, stream, stderr, exit, cmdPath, returnPath, startedAt: now(), policy: policy ?? null, seenToolCalls: new Set() }
     runs.set(returnPath, run)
+    log({ at: now(), event: 'assignment-delivery', role, assignment_id: id, transport: 'headless-json', mode: delivery.delivery, brief_bytes: delivery.brief_bytes, brief_size_measured: delivery.brief_bytes !== null, brief_size_unmeasured_reason: delivery.unmeasured_reason })
     log({ at: now(), event: 'headless-spawn', role, id, run_id: runId, pid: child.pid, dir, returnPath })
     return { id, returnPath }
   }

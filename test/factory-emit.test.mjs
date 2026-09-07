@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { spawn, spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { ROOT, sqliteAvailable } from './helpers.mjs'
+import { ROOT, scratchDir, sqliteAvailable } from './helpers.mjs'
 import { openRun, recordCellFailure, recordPhaseSlotWait, _resetNoticeGuardsForTest, main } from '../scripts/factory/emit.mjs'
 import { openLedger, PAYLOAD_KEYS, NODE_FLOOR } from '../scripts/factory/ledger.mjs'
 import { headlessIo } from '../crew/headless.mjs'
@@ -61,11 +61,12 @@ after(() => {
     `${survivors.length} spawned child process(es) outlived the suite (pids ${survivors.map((c) => c.pid).join(', ')})`)
 })
 
-function runChild(program, { timeout = 15000 } = {}) {
+function runChild(program, { timeout = 15000, env = {} } = {}) {
   return new Promise((resolve) => {
     const child = trackChild(spawn(process.execPath, ['--input-type=module', '-e', program], {
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout,
+      env: { ...process.env, ...env },
     }))
     let stdout = ''
     let stderr = ''
@@ -73,6 +74,67 @@ function runChild(program, { timeout = 15000 } = {}) {
     child.stderr.on('data', (d) => { stderr += d })
     child.on('exit', (code) => resolve({ code, stdout, stderr }))
   })
+}
+
+function b499Sidecar(dbPath) {
+  return {
+    adw_id: '11111111-2222-3333-4444-555555555555',
+    repo_slug: 'b499scope',
+    task_slug: 'gate-b499',
+    db_path: dbPath,
+    jsonl_path: join(dirname(dbPath), 'ledger.jsonl'),
+    created_at: '2026-09-07T00:00:00.000Z',
+    run_started: false,
+    run_ended: false,
+    phase: { name: null, seq: null, phase_id: null, started_at: null },
+    seq: { event: { next: 1, reserved_through: 0 }, phase: { next: 1, reserved_through: 0 } },
+    gate_attempts: {},
+    heartbeats: {},
+    billed: { input: null, output: null, cache_write: null, cache_read: null },
+    stats: { emitted: 0, dropped: 0, lock_giveups: 0, resolution_ambiguous: 0, resolution_missing: 0, payload_keys_dropped: 0 },
+    dispatches: {},
+  }
+}
+
+function writeB499Crew(stateDir, checkout) {
+  writeFileSync(join(stateDir, 'crew.json'), JSON.stringify({
+    schema_version: 3, task: 'b499scope', checkout, roles: ['planner'],
+  }))
+}
+
+async function runB499OpenRun({ home, stateDir, dbPath, allMethods = false }) {
+  const exercise = allMethods
+    ? `
+const calls = [
+  () => e.sidecar(), () => e.startRun(), () => e.recordSeats([{ role: 'planner' }]),
+  () => e.linkRun('run'), () => e.phaseTransition('building'), () => e.reserveSeq('event', 1),
+  () => e.updateSidecar(() => {}), () => e.bumpGateAttempt('gate'), () => e.bumpStat('unknown'),
+  () => e.emit(() => {}), () => e.mapSignalLogEntries([], { levels: ['info'], messageMaxChars: 10 }),
+  () => e.endRun({ status: 'ok' }), () => e.stats(), () => e.statsSnapshot(),
+  () => e.installFinalizer(), () => e.dispose(),
+]
+for (const call of calls) call()
+`
+    : `
+e.startRun()
+e.phaseTransition('building')
+e.endRun({ status: 'ok' })
+e.dispose()
+`
+  const result = await runChild(`
+import { openRun } from ${JSON.stringify(EMIT_MODULE_URL)}
+const e = openRun({ stateDir: ${JSON.stringify(stateDir)}, repoSlug: 'b499scope', taskSlug: 'gate-b499', dbPath: ${JSON.stringify(dbPath)} })
+${exercise}
+process.stdout.write(JSON.stringify({ adw_id: e.adwId, stats: e.stats() }) + '\\n')
+`, { env: { HOME: home, NODE_TEST_CONTEXT: '' } })
+  assert.equal(result.code, 0, result.stderr)
+  return JSON.parse(result.stdout)
+}
+
+function sessionRowsAt(dbPath) {
+  if (!existsSync(dbPath)) return []
+  const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+  try { return ledger.dumpTable('sessions') } finally { ledger.close() }
 }
 
 // ---------------------------------------------------------------------------
@@ -1115,6 +1177,134 @@ test('S6: adopting an existing sidecar prefers ITS db_path/jsonl_path over a dif
   assert.equal(second.adwId, first.adwId)
   assert.equal(second.sidecar().db_path, originalDbPath, 'the adopted sidecar db_path must win over this call\'s differing dbPath')
   assert.ok(lines.length >= 1, 'a detected db_path mismatch must be logged at least once')
+})
+
+// ---------------------------------------------------------------------------
+// #977: scratch checkouts must never reach the operator production ledger
+// ---------------------------------------------------------------------------
+
+test('#977: a scratch checkout with an adopted production target gets an inert emitter and creates no production db', { skip: SKIP }, async () => {
+  const root = scratchDir('b499-emit-')
+  const home = join(root, 'home')
+  const stateDir = join(root, 'crew')
+  const productionDb = join(home, '.dev-team', 'factory', 'ledger.db')
+  const sandboxDb = join(root, 'sandbox.db')
+  mkdirSync(dirname(productionDb), { recursive: true })
+  mkdirSync(join(stateDir, 'ledger'), { recursive: true })
+  writeB499Crew(stateDir, scratchDir('b499-checkout-'))
+  writeFileSync(join(stateDir, 'ledger', 'run.json'), JSON.stringify(b499Sidecar(productionDb)))
+
+  const result = await runB499OpenRun({ home, stateDir, dbPath: sandboxDb })
+  assert.equal(result.adw_id, null)
+  assert.equal(existsSync(productionDb), false, 'a refused run must not create the operator ledger')
+})
+
+test('#977: a scratch checkout explicitly redirected to a sandbox ledger is admitted', { skip: SKIP }, async () => {
+  const root = scratchDir('b499-emit-')
+  const home = join(root, 'home')
+  const stateDir = join(root, 'crew')
+  const sandboxDb = join(root, 'sandbox.db')
+  mkdirSync(stateDir, { recursive: true })
+  writeB499Crew(stateDir, scratchDir('b499-checkout-'))
+
+  const result = await runB499OpenRun({ home, stateDir, dbPath: sandboxDb })
+  assert.notEqual(result.adw_id, null)
+  const rows = sessionRowsAt(sandboxDb)
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].status, 'ok')
+})
+
+test('#977: a real checkout still records in its configured production ledger', { skip: SKIP }, async () => {
+  const root = scratchDir('b499-emit-')
+  const home = join(root, 'home')
+  const stateDir = join(root, 'crew')
+  const productionDb = join(home, '.dev-team', 'factory', 'ledger.db')
+  mkdirSync(dirname(productionDb), { recursive: true })
+  mkdirSync(stateDir, { recursive: true })
+  writeB499Crew(stateDir, ROOT)
+
+  const result = await runB499OpenRun({ home, stateDir, dbPath: productionDb })
+  assert.notEqual(result.adw_id, null)
+  const rows = sessionRowsAt(productionDb)
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].task_slug, 'gate-b499')
+  assert.equal(rows[0].status, 'ok')
+})
+
+test('#977: adoption decides the scratch-checkout refusal against the sidecar target in both directions', { skip: SKIP }, async () => {
+  const root = scratchDir('b499-emit-')
+  const home = join(root, 'home')
+  const productionDb = join(home, '.dev-team', 'factory', 'ledger.db')
+  const sandboxDb = join(root, 'sandbox.db')
+  mkdirSync(dirname(productionDb), { recursive: true })
+
+  const productionSidecarState = join(root, 'production-sidecar')
+  mkdirSync(join(productionSidecarState, 'ledger'), { recursive: true })
+  writeB499Crew(productionSidecarState, scratchDir('b499-checkout-'))
+  writeFileSync(join(productionSidecarState, 'ledger', 'run.json'), JSON.stringify(b499Sidecar(productionDb)))
+  const refused = await runB499OpenRun({ home, stateDir: productionSidecarState, dbPath: sandboxDb })
+  assert.equal(refused.adw_id, null)
+  assert.equal(existsSync(productionDb), false)
+
+  const sandboxSidecarState = join(root, 'sandbox-sidecar')
+  mkdirSync(join(sandboxSidecarState, 'ledger'), { recursive: true })
+  writeB499Crew(sandboxSidecarState, scratchDir('b499-checkout-'))
+  writeFileSync(join(sandboxSidecarState, 'ledger', 'run.json'), JSON.stringify(b499Sidecar(sandboxDb)))
+  const admitted = await runB499OpenRun({ home, stateDir: sandboxSidecarState, dbPath: productionDb })
+  assert.notEqual(admitted.adw_id, null)
+  assert.equal(sessionRowsAt(sandboxDb).length, 1)
+  assert.equal(existsSync(productionDb), false)
+})
+
+test('#977: a symlink alias of the production ledger is refused for a scratch checkout', { skip: SKIP }, async () => {
+  const root = scratchDir('b499-emit-')
+  const home = join(root, 'home')
+  const stateDir = join(root, 'crew')
+  const productionDb = join(home, '.dev-team', 'factory', 'ledger.db')
+  const alias = join(root, 'production-alias.db')
+  mkdirSync(dirname(productionDb), { recursive: true })
+  writeFileSync(productionDb, '')
+  symlinkSync(productionDb, alias)
+  mkdirSync(stateDir, { recursive: true })
+  writeB499Crew(stateDir, scratchDir('b499-checkout-'))
+
+  const result = await runB499OpenRun({ home, stateDir, dbPath: alias })
+  assert.equal(result.adw_id, null)
+  assert.equal(readFileSync(productionDb, 'utf8'), '', 'the alias must not have been opened as SQLite')
+})
+
+test('#977: absent or checkout-less crew metadata is admitted rather than guessed as temporary', { skip: SKIP }, async () => {
+  const root = scratchDir('b499-emit-')
+  const home = join(root, 'home')
+  const productionDb = join(home, '.dev-team', 'factory', 'ledger.db')
+  mkdirSync(dirname(productionDb), { recursive: true })
+
+  const missingCrew = join(root, 'missing-crew')
+  mkdirSync(missingCrew, { recursive: true })
+  const first = await runB499OpenRun({ home, stateDir: missingCrew, dbPath: productionDb })
+  assert.notEqual(first.adw_id, null)
+
+  const checkoutlessCrew = join(root, 'checkoutless-crew')
+  mkdirSync(checkoutlessCrew, { recursive: true })
+  writeFileSync(join(checkoutlessCrew, 'crew.json'), JSON.stringify({ schema_version: 3, task: 'b499scope', roles: ['planner'] }))
+  const second = await runB499OpenRun({ home, stateDir: checkoutlessCrew, dbPath: productionDb })
+  assert.notEqual(second.adw_id, null)
+  assert.equal(sessionRowsAt(productionDb).length, 2)
+})
+
+test('#977: every inert emitter method remains callable after a temporary-checkout refusal', { skip: SKIP }, async () => {
+  const root = scratchDir('b499-emit-')
+  const home = join(root, 'home')
+  const stateDir = join(root, 'crew')
+  const productionDb = join(home, '.dev-team', 'factory', 'ledger.db')
+  mkdirSync(dirname(productionDb), { recursive: true })
+  mkdirSync(stateDir, { recursive: true })
+  writeB499Crew(stateDir, scratchDir('b499-checkout-'))
+
+  const result = await runB499OpenRun({ home, stateDir, dbPath: productionDb, allMethods: true })
+  assert.equal(result.adw_id, null)
+  assert.ok(result.stats.dropped > 0)
+  assert.equal(existsSync(productionDb), false)
 })
 
 // ---------------------------------------------------------------------------

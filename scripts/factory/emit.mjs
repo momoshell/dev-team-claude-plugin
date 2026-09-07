@@ -86,11 +86,12 @@ import {
   writeFileSync, unlinkSync, linkSync, renameSync, readFileSync, chmodSync, statSync, existsSync,
   realpathSync,
 } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join, resolve, sep } from 'node:path'
+import { tmpdir } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import {
-  openLedger, isoMs, SESSION_STATUSES, mkdirpBounded,
+  openLedger, homeDefaultDbPath, isoMs, SESSION_STATUSES, mkdirpBounded,
 } from './ledger.mjs'
 
 // ---------------------------------------------------------------------------
@@ -492,6 +493,55 @@ function buildDegradedEmitter(stderr, reason) {
   }
 }
 
+export const TEMP_CHECKOUT_REFUSAL = 'openRun refuses a run whose checkout resolves under the system temp directory while the write target is the operator production ledger — a session whose checkout is a scratch dir is a defect, not a lane (#977)'
+
+// #977: the operator's ledger carries 20 sub-second, zero-event `success`
+// sessions minted by acceptance gates driving scratch checkouts. Refuse
+// rather than silently redirect: a caller that already redirected its own ledger
+// is KNOWN and is left alone; a scratch checkout aimed at the production ledger
+// is not. Both sides are canonicalised through realpath, because a symlink
+// alias is textually unequal and materially identical (TL4).
+function canonical(path) {
+  try { return realpathSync(path) } catch { /* not created yet */ }
+  try { return join(realpathSync(dirname(path)), basename(path)) } catch { /* parent absent too */ }
+  return resolve(path)
+}
+
+function underSystemTemp(path) {
+  const roots = new Set()
+  const raw = tmpdir()
+  roots.add(resolve(raw))
+  try { roots.add(realpathSync(raw)) } catch { /* best effort */ }
+  const target = canonical(path)
+  for (const root of roots) {
+    if (target === root || target.startsWith(root + sep)) return true
+  }
+  return false
+}
+
+function bootCheckout(stateDir) {
+  try {
+    const value = JSON.parse(readFileSync(join(stateDir, 'crew.json'), 'utf8')).checkout
+    return typeof value === 'string' && value.trim() ? value : null
+  } catch {
+    return null
+  }
+}
+
+function productionLedgerTarget(dbPath) {
+  if (typeof dbPath !== 'string' || !dbPath) return false
+  return canonical(dbPath) === canonical(homeDefaultDbPath())
+}
+
+function tempCheckoutRefusal({ stateDir, dbPath }) {
+  if (typeof stateDir !== 'string' || !stateDir) return null
+  const checkout = bootCheckout(stateDir)
+  if (!checkout) return null
+  if (!underSystemTemp(checkout)) return null
+  if (!productionLedgerTarget(dbPath)) return null
+  return TEMP_CHECKOUT_REFUSAL
+}
+
 // ---------------------------------------------------------------------------
 // openRun — creates or adopts the run sidecar; never throws.
 // ---------------------------------------------------------------------------
@@ -831,6 +881,12 @@ function openRunInner({
     effectiveDbPath = sidecar.db_path
     effectiveJsonlPath = sidecar.jsonl_path || join(dirname(effectiveDbPath), 'ledger.jsonl')
   }
+
+    // #977 · TL4: the ADOPTED sidecar's db_path is authoritative (S6 above), so
+    // the refusal is decided against the path this run will ACTUALLY write —
+    // never against the option the caller passed.
+    const refusalAfterAdopt = tempCheckoutRefusal({ stateDir, dbPath: effectiveDbPath })
+    if (refusalAfterAdopt) throw new Error(refusalAfterAdopt)
 
   // Relays the ledger's OWN degraded-notice stderr line through a
   // module-scoped (not per-openRun) once-guard: two emitters opened by this

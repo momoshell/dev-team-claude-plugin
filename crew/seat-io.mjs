@@ -3267,7 +3267,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
       const path = neutralColdPath(guard, deps.cold || {})
       const add = spawnSync('git', ['-C', checkout, 'worktree', 'add', '--detach', path, 'HEAD'], { encoding: 'utf8' })
       if (add.status !== 0) throw new Error(`runCold: git worktree add failed at ${path}, refusing to report a cold verdict from the checkout this lane built in:\n${add.stderr || add.stdout || ''}`)
-      const res = spawnSync('/bin/sh', ['-c', cmd], { cwd: path, encoding: 'utf8', timeout: 900_000, maxBuffer: RUN_MAX_BUFFER_BYTES, env: colorNeutralEnv(deps.env || process.env) })
+      const res = spawnSync('/bin/sh', ['-c', cmd], { cwd: path, encoding: 'utf8', timeout: 900_000, maxBuffer: RUN_MAX_BUFFER_BYTES, env: { ...colorNeutralEnv(deps.env || process.env), DEVTEAM_LEDGER_DIR: join(path, '.dev-team', 'factory') } })
       let output = `${res.stdout || ''}${res.stderr || ''}`
       if (res.signal) output += `\n[killed by ${res.signal}${res.signal === 'SIGTERM' ? ' — likely the 900s run timeout' : ''}]`
       if (res.error) throw new Error(`runCold: the cold suite could not be spawned in ${path} (kept for inspection): ${res.error.message}`)

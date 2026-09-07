@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { spawn, spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { ROOT, scratchDir, sqliteAvailable } from './helpers.mjs'
+import { ROOT, nonTempCheckout, scratchDir, sqliteAvailable } from './helpers.mjs'
 import { openRun, recordCellFailure, recordPhaseSlotWait, _resetNoticeGuardsForTest, main } from '../scripts/factory/emit.mjs'
 import { openLedger, PAYLOAD_KEYS, NODE_FLOOR } from '../scripts/factory/ledger.mjs'
 import { headlessIo } from '../crew/headless.mjs'
@@ -1221,10 +1221,11 @@ test('#977: a real checkout still records in its configured production ledger', 
   const productionDb = join(home, '.dev-team', 'factory', 'ledger.db')
   mkdirSync(dirname(productionDb), { recursive: true })
   mkdirSync(stateDir, { recursive: true })
-  writeB499Crew(stateDir, ROOT)
+  // #995: never ROOT here -- see nonTempCheckout in test/helpers.mjs.
+  writeB499Crew(stateDir, nonTempCheckout('b499-real-checkout'))
 
   const result = await runB499OpenRun({ home, stateDir, dbPath: productionDb })
-  assert.notEqual(result.adw_id, null)
+  assert.notEqual(result.adw_id, null, 'a checkout outside system temp must not be refused')
   const rows = sessionRowsAt(productionDb)
   assert.equal(rows.length, 1)
   assert.equal(rows[0].task_slug, 'gate-b499')

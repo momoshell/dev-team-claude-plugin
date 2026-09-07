@@ -1,8 +1,8 @@
 // Shared test helpers for the surviving suites.
 import { fileURLToPath } from 'node:url'
-import { dirname, join } from 'node:path'
-import { mkdtempSync, rmSync, readdirSync, statSync, readFileSync, mkdirSync, utimesSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { dirname, join, resolve, sep } from 'node:path'
+import { mkdtempSync, rmSync, readdirSync, statSync, readFileSync, mkdirSync, utimesSync, realpathSync } from 'node:fs'
+import { tmpdir, homedir } from 'node:os'
 import { after } from 'node:test'
 import { createRequire } from 'node:module'
 import { createHash } from 'node:crypto'
@@ -43,6 +43,30 @@ export function scratchDir(prefix = 'crew-test-', { parent = tmpdir() } = {}) {
 }
 
 export const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
+
+// #995: a fixture that needs "a real checkout" must not use ROOT. A cold suite
+// runs from a worktree under tmpdir(), which makes emit.mjs's
+// underSystemTemp(ROOT) true and INVERTS any assertion that a non-throwaway
+// checkout is admitted. That inversion failed one test in every cold suite and
+// killed five lanes (b498, b502, b504, b509, b506) without ever being a defect
+// in the code under test. The refusal reads the checkout as a path string only
+// -- bootCheckout returns it verbatim and canonical() tolerates a path that does
+// not exist -- so a path under the operator home exercises the same branch from
+// any cwd. The precondition is ASSERTED, not assumed: a host whose home is
+// itself under system temp fails loudly here instead of inverting silently.
+export function nonTempCheckout(name = 'crew-real-checkout') {
+  const candidate = join(homedir(), name)
+  const roots = new Set([resolve(tmpdir())])
+  try { roots.add(realpathSync(tmpdir())) } catch { /* best effort */ }
+  const target = resolve(candidate)
+  for (const root of roots) {
+    if (target === root || target.startsWith(root + sep)) {
+      throw new Error(`nonTempCheckout: ${target} is under system temp ${root}; this fixture needs a checkout path outside it`)
+    }
+  }
+  return candidate
+}
+
 
 import { connect } from 'node:net'
 import { spawn } from 'node:child_process'

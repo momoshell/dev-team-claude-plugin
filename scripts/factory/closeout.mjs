@@ -401,18 +401,18 @@ function mergeOne({ lane, scratch, deps }) {
   return { lane, merged: true }
 }
 
-function suiteCommand(cwd) {
+function suiteCommand(cwd, env = colourNeutralEnv()) {
   return {
     file: 'node',
     args: ['--test', '--test-reporter=tap', '--test-timeout=30000', '**/*.test.mjs'],
     cwd,
-    env: colourNeutralEnv(),
+    env,
   }
 }
 
-function runSuite({ cwd, deps, reason = CLOSEOUT_REFUSALS.SUITE_RED, step = 'suite' }) {
+function runSuite({ cwd, deps, env, reason = CLOSEOUT_REFUSALS.SUITE_RED, step = 'suite' }) {
   const d = normalDeps(deps)
-  const result = runCommand(suiteCommand(cwd), d)
+  const result = runCommand(suiteCommand(cwd, env), d)
   const suite = parseSuiteCounts(stripAnsi(textOf(result?.stdout)))
   if (!commandOk(result) || !suite || suite.fail > 0) {
     refuse(`suite failed in ${cwd}: ${suite ? JSON.stringify(suite) : childFailure(result)}`, reason, step)
@@ -453,7 +453,7 @@ export function mergeCheck({ lanes, checkout, deps } = {}) {
       return { merged: batch.length }
     },
     suite: () => {
-      report.suite = runSuite({ cwd: scratch, deps: d })
+      report.suite = runSuite({ cwd: scratch, deps: d, env: { ...colourNeutralEnv(), DEVTEAM_LEDGER_DIR: join(scratch, '.dev-team', 'factory') } })
       return { suite: report.suite }
     },
     'anchor-repair': () => {
@@ -814,7 +814,7 @@ function closeoutHalf({ lane, checkout, crewDir, deps, report }) {
       try {
         const added = runCommand({ file: 'git', args: ['worktree', 'add', '--detach', cold, 'HEAD'], cwd: checkout }, d)
         if (!commandOk(added)) refuse(`cold verification worktree failed: ${childFailure(added)}`, CLOSEOUT_REFUSALS.COLD_VERIFY_FAILED, 'cold-verify')
-        const suite = runSuite({ cwd: cold, deps: d, reason: CLOSEOUT_REFUSALS.COLD_VERIFY_FAILED, step: 'cold-verify' })
+        const suite = runSuite({ cwd: cold, deps: d, env: { ...colourNeutralEnv(), DEVTEAM_LEDGER_DIR: join(cold, '.dev-team', 'factory') }, reason: CLOSEOUT_REFUSALS.COLD_VERIFY_FAILED, step: 'cold-verify' })
         report.cold_suite = suite
         return { suite }
       } finally {

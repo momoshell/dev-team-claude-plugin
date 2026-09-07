@@ -578,6 +578,18 @@ test('runCold runs the command outside the lane checkout and returns its path', 
   })
 })
 
+test('runCold gives the child a cold-local ledger directory over an inherited sentinel', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    const sentinel = join(fixture.root, 'operator-ledger')
+    const command = `${JSON.stringify(process.execPath)} -e "process.stdout.write(process.env.DEVTEAM_LEDGER_DIR || '')"`
+    const result = makeIo(fixture, { env: { ...process.env, DEVTEAM_LEDGER_DIR: sentinel } }).runCold(command)
+    const expected = join(result.path, '.dev-team', 'factory')
+    assert.equal(result.ok, true)
+    assert.equal(String(result.output || '').trim(), expected)
+    assert.notEqual(String(result.output || '').trim(), sentinel)
+  })
+})
+
 test('runCold cuts the checkout at the current HEAD', () => {
   withRepo({ dirty: false }, (fixture) => {
     writeFileSync(join(fixture.checkout, 'cold-marker.txt'), 'marker-ok\n')

@@ -8,7 +8,7 @@ The panel flow is shipped and wired. `panelSeats()` selects the seats
 their findings at `crew/drive.mjs:4641`, `adjudicatePanel()`
 (`crew/escalation-policy.mjs:128`) adjudicates the divergences at
 `crew/drive.mjs:4711`, and the review loop invokes the panel at
-`crew/drive.mjs:5512`. Seat selection no longer refuses a second reviewer for
+`crew/drive.mjs:5516`. Seat selection no longer refuses a second reviewer for
 sharing the partner's vendor; that rule was retired with #983 and no ADR
 ratified it. It shipped in `842ea51` on 2026-08-15, and no capability named for
 verdict fusion exists anywhere in the tree, so no trigger of that name can be

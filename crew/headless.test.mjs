@@ -5,7 +5,7 @@ import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 import {
-  attributeExit, classifyRun, claudeCensus, classifyToolCall, decodeExitStatus, degradedSignals, foldUsage, headlessIo, parseStream,
+  attributeExit, censusFileOperands, classifyRun, claudeCensus, classifyToolCall, decodeExitStatus, degradedSignals, foldUsage, headlessIo, parseStream,
   CENSUS_ABSENT_CAUSES, PROVIDER_FAILURE_KINDS, providerFailureKind, providerResetInstant, providerRetryDecision,
   PROVIDER_BACKOFF_LADDER_MS, PROVIDER_RESET_ABSENT, PROVIDER_RESET_SETTLE_MS, PROVIDER_RETRY_ACTIONS,
   PARK_BEAT_EVENT, PARK_BEAT_MS, PARK_BEAT_SOURCE, PROVIDER_RETRY_MAX, PROVIDER_RETRY_TOTAL_WAIT_MS, recogniseProviderCondition, recogniseSeatRefusal, TOOL_CLASSES, WAIT_POLL_MS,
@@ -2334,6 +2334,92 @@ test("b401 classifyToolCall maps both transports' tool names onto the four close
   assert.equal(classifyToolCall('grep', { pattern: 'needle' }), 'read')
   assert.equal(classifyToolCall('write', { path: 'a.mjs' }), 'edit')
   assert.equal(classifyToolCall('Task', {}), 'other')
+})
+
+function censusUses(uses) {
+  return claudeCensus(JSON.stringify({ type: 'assistant', message: { content: uses } }))
+}
+
+function censusUse(name, input, id) {
+  return { type: 'tool_use', name, input, id }
+}
+
+test('A1 JSON census measures two literal reads through each supported Bash reader', () => {
+  const commands = ['cat one.md', 'head -n 2 two.md', 'tail -n 2 three.md', "sed -n '1,2p' four.md", "awk '{print}' five.md", 'grep -n needle six.md']
+  const uses = [...commands, ...commands].map((command, index) => censusUse('Bash', { command }, `a${index}`))
+  assert.deepEqual(censusFileOperands('Bash', { command: "sed -n '1,2p' four.md" }), { paths: ['four.md'], bash_absent_reason: null })
+  const census = censusUses(uses)
+  assert.equal(census.distinct_files_read, 6)
+  assert.equal(census.re_reads, 6)
+  assert.equal(census.bash_reads_absent_reason, null)
+})
+
+test('B1 JSON census leaves named non-readers neutral', () => {
+  const commands = ['git status', 'node --test crew/headless.test.mjs', 'npm run build', 'mkdir out']
+  const census = censusUses(commands.map((command, index) => censusUse('Bash', { command }, `b${index}`)))
+  assert.equal(census.distinct_files_read, 0)
+  assert.equal(census.re_reads, 0)
+  assert.equal(census.bash_reads_absent_reason, null)
+})
+
+test('C1 JSON census reports Bash-only absence for unsafe reader shapes', () => {
+  const commands = ['cat "$(compute)"', 'cat first.md | head -n 1', 'cat <<EOF\nsecond.md\nEOF']
+  const census = censusUses(commands.map((command, index) => censusUse('Bash', { command }, `c${index}`)))
+  assert.equal(census.distinct_files_read, 0)
+  assert.equal(census.re_reads, 0)
+  assert.equal(census.bash_reads_absent_reason, CENSUS_ABSENT_CAUSES.bash_reader_unparsed)
+})
+
+test('D1 JSON census preserves structured counts beside Bash-only absence', () => {
+  const census = censusUses([
+    censusUse('Read', { path: 'kept.md' }, 'd1'),
+    censusUse('Bash', { command: 'cat "$FILE"' }, 'd2'),
+    censusUse('Read', { path: 'kept.md' }, 'd3'),
+  ])
+  assert.equal(census.distinct_files_read, 1)
+  assert.equal(census.re_reads, 1)
+  assert.equal(census.bash_reads_absent_reason, CENSUS_ABSENT_CAUSES.bash_reader_unparsed)
+})
+
+test('E1 JSON census rejects recursive grep and glob operands', () => {
+  const recursive = censusUses([censusUse('Bash', { command: 'grep -rn needle src' }, 'e1')])
+  const glob = censusUses([censusUse('Bash', { command: 'cat *.md' }, 'e2')])
+  for (const census of [recursive, glob]) {
+    assert.equal(census.distinct_files_read, 0)
+    assert.equal(census.re_reads, 0)
+    assert.equal(census.bash_reads_absent_reason, CENSUS_ABSENT_CAUSES.bash_reader_unparsed)
+  }
+})
+
+test('F1 JSON census shares literal Bash and structured paths', () => {
+  const census = censusUses([
+    censusUse('Bash', { command: 'cat same.md' }, 'f1'),
+    censusUse('Read', { path: 'same.md' }, 'f2'),
+  ])
+  assert.equal(census.distinct_files_read, 1)
+  assert.equal(census.re_reads, 1)
+  assert.equal(census.bash_reads_absent_reason, null)
+})
+
+test('G2 JSON census counts repeated literal Bash reads', () => {
+  const census = censusUses([
+    censusUse('Bash', { command: 'cat json.md' }, 'g1'),
+    censusUse('Bash', { command: 'cat json.md' }, 'g2'),
+  ])
+  assert.equal(census.distinct_files_read, 1)
+  assert.equal(census.re_reads, 1)
+  assert.equal(census.bash_reads_absent_reason, null)
+})
+
+test('H1 JSON census keeps unchanged structured rereads', () => {
+  const census = censusUses([
+    censusUse('Read', { path: 'structured.md' }, 'h1'),
+    censusUse('Read', { path: 'structured.md' }, 'h2'),
+    censusUse('Read', { path: 'structured.md' }, 'h3'),
+  ])
+  assert.equal(census.distinct_files_read, 1)
+  assert.equal(census.re_reads, 2)
+  assert.equal(census.bash_reads_absent_reason, null)
 })
 
 test('b401 census replays the recorded b381 planner stream to 173 turns and 173 tool calls', (t) => {

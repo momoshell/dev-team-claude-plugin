@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { ROOT } from '../../test/helpers.mjs'
 import { checkAnchors, collectAnchors, laneFence, partitionShifts, pinnedKey, skillDocs } from '../qa-test-writing/anchor-pin.mjs'
 import { PROTECTED_PATHS, resolveProtectedPaths } from '../../crew/protected-paths.mjs'
-import { DRY_RUN_BLIND_SPOT } from '../../scripts/factory/dispatch-batch.mjs'
+import { DRY_RUN_BLIND_SPOT, TEST_REACH_BLIND_SPOT } from '../../scripts/factory/dispatch-batch.mjs'
 
 const HERE = fileURLToPath(new URL('./', import.meta.url))
 const TIER = join(HERE, 'references/tier.md')
@@ -133,13 +133,37 @@ test('the warning doctrine carries each measured blind spot and citation rule', 
   const blindSpots = [
     'BLIND SPOT: an unpinned file:line citation is in no manifest key, so neither this check nor the citation-carrier check can find it; a citation the anchor corpus does not pin is still discoverable only by hand',
     'BLIND SPOT: this finds docs carrying a PINNED path:line citation and nothing else. A citation no manifest pins is in no key, and a doc whose exhibit set-compares a documented table against source (skills/crew-recovery/references/escalations.md and the escalate() producers) reddens with every citation in it still correct. Neither is discoverable here; read the exhibits suites of the manifests named above before choosing this fence',
-    'BLIND SPOT: this is a proxy in BOTH directions and names candidates, never proof. A test can assert the changed behaviour through a higher-level entry point without importing the changed file at all, and a computed dynamic import is invisible to a static scan — crew/crew.mjs loads every adapter that way. A test can equally import a fenced file without asserting anything about the part being changed. The literal symbol scan sees only whole-word occurrences of an exported name, is blind to a renamed re-export, and drops any symbol naming more than 8 test files as too broad to be evidence. Read the named files before choosing this fence; an unnamed one is not cleared.',
+    'BLIND SPOT: this is a proxy in BOTH directions and names candidates, never proof. A test can assert the changed behaviour through a higher-level entry point without importing the changed file at all, and a computed path or dynamic import is invisible to a static scan — crew/crew.mjs loads every adapter that way. A test can equally import a fenced file without asserting anything about the part being changed. The literal symbol scan sees only whole-word occurrences of an exported name, is blind to a renamed re-export, and drops any symbol naming more than 8 test files as too broad to be evidence. Read the named files before choosing this fence; an unnamed one is not cleared. An apostrophe or quote inside a // or /* */ comment opens a phantom literal and hides every real path literal after it in that file.',
     'BLIND SPOT: a lane booted without --fences declares no surface at all and can be editing anything; a lane whose batch siblings have been reaped records no claim; and a repository whose git dir cannot be measured is not compared. None of those are cleared — they are reported unknown.',
   ]
   for (const blindSpot of blindSpots) assert.equal(text.split(blindSpot).length - 1, 1, `batch.md must carry one exact blind-spot statement: ${blindSpot.slice(0, 40)}`)
   assert.ok(text.includes('dispatch.warnings.json'))
   assert.ok(text.includes('dispatch-batch: WARNING-SUMMARY'))
   assert.ok(text.includes('report=') && text.includes('doctrine=skills/crew-dispatch/references/batch.md'))
+})
+
+test('test reach constant names the computed path blind spot', () => {
+  assert.ok(TEST_REACH_BLIND_SPOT.includes('a computed path or dynamic import is invisible to a static scan'))
+})
+
+test('batch doctrine mirrors the computed path blind spot', () => {
+  const text = readText(join(HERE, 'references/batch.md'))
+  assert.equal(text.split(TEST_REACH_BLIND_SPOT).length - 1, 1)
+})
+
+test('B1 fixture retains an absolute same-basename collision', () => {
+  const source = readText(join(ROOT, 'test/factory-dispatch-batch.test.mjs'))
+  assert.ok(source.includes("readFileSync('/tmp/crew-task/planner.md', 'utf8')"))
+  assert.equal(source.includes("readFileSync('/tmp/crew-task/role-planner.md', 'utf8')"), false)
+})
+
+// This string is a function of every tracked *.test.mjs file in the repo, not of this skill. If it reddens in your lane, you have added or removed a static quoted path literal naming a tracked file; the fix is to RE-MEASURE and update skills/crew-dispatch/references/batch.md, not to hunt a regression.
+// Re-measure with the shipped collectTestReach over the git ls-files partition (owners = tracked non-*.test.mjs files; tests = tracked *.test.mjs files): node --input-type=module -e "import{execFileSync}from'node:child_process';const{collectTestReach}=await import(process.cwd()+'/scripts/factory/dispatch-batch.mjs'),files=execFileSync('git',['ls-files','-z'],{encoding:'utf8'}).split(String.fromCharCode(0)).filter(Boolean),tests=new Set(files.filter(file=>file.endsWith('.test.mjs'))),nonTests=new Set(files.filter(file=>!tests.has(file))),reach=collectTestReach({checkout:process.cwd()}),rows=[...reach.pathByFile].filter(([file])=>nonTests.has(file)).flatMap(([file,reached])=>[...reached].filter(test=>tests.has(test)).map(test=>[file,test])),contributingTests=new Set(rows.map(([,test])=>test));console.log({tracked:files.length,nonTests:nonTests.size,tests:tests.size,owners:new Set(rows.map(([file])=>file)).size,pairs:rows.length,contributingTests:contributingTests.size})"
+test('batch doctrine records the shipped static path reach measurement', () => {
+  const text = readText(join(HERE, 'references/batch.md'))
+  const measurement = '**156 of 533 tracked non-test files**, comprising **403 distinct (file, test) pairs contributed by 75 of 77 tracked `*.test.mjs` files**'
+  assert.equal(text.split(measurement).length - 1, 1)
+  assert.ok(text.includes('The pristine `HEAD` baseline gives 156 owners and 402 pairs.'))
 })
 
 // Mutation killed: widening the measured shell claim or dropping a zero-count guard must make this test fail.

@@ -744,7 +744,6 @@ const RAW_TEMP_EXEMPT = new Map([
   ['test/factory-lane-watch.test.mjs', frozenTempSites(1)],
   ['test/factory-ledger-floor.test.mjs', frozenTempSites(1)],
   ['test/factory-ledger.test.mjs', frozenTempSites(4)],
-  ['test/factory-make-brief.test.mjs', frozenTempSites(1)],
   ['test/factory-probe-repo.test.mjs', frozenTempSites(1)],
   ['test/factory-reap-stale.test.mjs', frozenTempSites(1)],
   ['test/factory-transcript.test.mjs', frozenTempSites(1)],
@@ -761,6 +760,7 @@ const TEMP_CONVERTED = [
   'crew/pi/extensions/lab.test.mjs',
   'crew/pi/extensions/subagent.test.mjs',
   'test/factory-intake.test.mjs',
+  'test/factory-make-brief.test.mjs',
   'test/helpers.test.mjs',
 ]
 
@@ -785,7 +785,7 @@ test('temp sandbox tripwire — every exemption has a live, load-bearing warrant
     assert.ok(exemption.sites > 0, `exemption ${file} is redundant`)
     total += exemption.sites
   }
-  assert.equal(total, 204)
+  assert.equal(total, 203)
 })
 
 test('temp sandbox tripwire — the detector flags a hand-rolled call and clears a helper call', () => {

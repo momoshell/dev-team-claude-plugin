@@ -4,24 +4,28 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync
 import { join, relative } from 'node:path'
 import { tmpdir } from 'node:os'
 import { ROOT, git, scratchDir } from '../../test/helpers.mjs'
-import { anchorManifestDirs, assertAnchorsPinned, checkAnchors, checkSkillAnchors, citationCarrierTests, collectAnchors, collectRanges, INVERTED_MARK, laneFence, MIN_EXPECTED_LENGTH, partitionShifts, pinnedKey, pinnedLiteralsInTests, repairAnchorsInPlace, repairCli, rewriteCitations, skillDocs, PINNED_LITERAL_BLIND_SPOT } from './anchor-pin.mjs'
+import { anchorManifestDirs, assertAnchorsPinned, checkAnchors, checkSkillAnchors, citationCarrierTests, collectAnchors, collectNamed, collectRanges, INVERTED_MARK, laneFence, MIN_EXPECTED_LENGTH, partitionShifts, pinnedKey, pinnedLiteralsInTests, repairAnchorsInPlace, repairCli, resolveNamed, rewriteCitations, skillDocs, PINNED_LITERAL_BLIND_SPOT } from './anchor-pin.mjs'
 
 const EXPECTED = "KEY = 'anchored-sentinel-value'"
 const RANGE_EXPECTED = "RANGE = 'range-first-sentinel-value'"
 const RANGE_NEXT = "NEXT = 'range-second-sentinel-value'"
 const RANGE_THIRD = "THIRD = 'range-third-sentinel-value'"
 
-function fixture({ source = ['// header', `const ${EXPECTED}`, 'const other = 1', 'export default KEY', ''], line = 2, cite = `crew/sample.mjs:${line}`, manifest = { 'crew/sample.mjs:2': EXPECTED } } = {}) {
+function fixture({ source = ['// header', `const ${EXPECTED}`, 'const other = 1', 'export default KEY', ''], line = 2, cite, named, manifest } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'b177-anchor-pin-'))
   mkdirSync(join(root, 'crew'), { recursive: true })
   writeFileSync(join(root, 'crew/sample.mjs'), source.join('\n'))
   const skillDir = join(root, 'skills/sample')
   mkdirSync(join(skillDir, 'references'), { recursive: true })
   const doc = join(skillDir, 'SKILL.md')
-  writeFileSync(doc, `# sample\n\nExhibit: \`${cite}\`.\n`)
+  const namedKey = typeof named === 'string' ? named : named?.key ?? (named ? `crew/sample.mjs@${named.name || 'sentinel'}` : null)
+  const citation = cite ?? namedKey ?? `crew/sample.mjs:${line}`
+  const expected = typeof named === 'object' && named !== null ? named.expected ?? EXPECTED : EXPECTED
+  const declarations = manifest ?? (namedKey ? { [namedKey]: expected } : { 'crew/sample.mjs:2': EXPECTED })
+  writeFileSync(doc, `# sample\n\nExhibit: \`${citation}\`.\n`)
   const manifestPath = join(skillDir, 'anchors.json')
-  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2))
-  return { root, skillDir, doc, manifestPath, manifest }
+  writeFileSync(manifestPath, JSON.stringify(declarations, null, 2))
+  return { root, skillDir, doc, manifestPath, manifest: declarations, namedKey }
 }
 
 function plainFixture(options = {}) {
@@ -954,4 +958,212 @@ test('processes.md cites the manifest-resolved key', () => {
   const text = readFileSync(join(ROOT, 'skills/devops/references/processes.md'), 'utf8')
   assert.equal(text.split(key).length - 1, 3)
   assert.deepEqual(text.match(/crew\/crew\.mjs:\d+-\d+/g) || [], [])
+})
+
+test('a named citation resolves to the live line after lines are inserted above it', () => {
+  // Mutation killed: resolving a named pin from its old line would leave the citation stale after insertion.
+  const key = 'crew/sample.mjs@named-sentinel'
+  const fx = fixture({ named: { key, expected: EXPECTED } })
+  try {
+    const [citation] = collectNamed({ docs: [fx.doc] })
+    assert.deepEqual(resolveNamed({ root: fx.root, manifest: fx.manifest, citation }), { key, line: 2 })
+    writeFileSync(join(fx.root, 'crew/sample.mjs'), ['// inserted one', '// inserted two', '// inserted three', '// header', `const ${EXPECTED}`, 'const other = 1', 'export default KEY', ''].join('\n'))
+    assert.deepEqual(resolveNamed({ root: fx.root, manifest: fx.manifest, citation }), { key, line: 5 })
+  } finally {
+    dispose(fx)
+  }
+})
+
+test('a named citation whose content is gone is rot, not a shift', () => {
+  // Mutation killed: treating a rotted named pin as a shift would silently accept missing evidence.
+  const key = 'crew/sample.mjs@named-rot'
+  const fx = fixture({ source: ['// header', 'const OTHER = 1', 'export default OTHER', ''], named: { key, expected: EXPECTED } })
+  try {
+    const result = checkAnchors({ root: fx.root, docs: [fx.doc], manifest: fx.manifest })
+    assert.equal(result.named, 1)
+    assert.equal(result.shifted.length, 0)
+    assert.equal(result.failures.length, 1)
+    assert.match(result.failures[0], new RegExp(`${key}: .*rot`))
+  } finally {
+    dispose(fx)
+  }
+})
+
+test('a named citation whose content is on two lines is ambiguous', () => {
+  // Mutation killed: resolving the first duplicate would make a named pin guess between two target lines.
+  const key = 'crew/sample.mjs@named-ambiguous'
+  const fx = fixture({ source: ['// header', `const ${EXPECTED}`, `const twin = "${EXPECTED}"`, 'export default KEY', ''], named: { key, expected: EXPECTED } })
+  try {
+    const result = checkAnchors({ root: fx.root, docs: [fx.doc], manifest: fx.manifest })
+    assert.equal(result.failures.length, 1)
+    assert.match(result.failures[0], new RegExp(`${key}: .*occurs 2 times`))
+    assert.deepEqual(result.shifted, [])
+  } finally {
+    dispose(fx)
+  }
+})
+
+test('a named citation with no manifest entry fails explicitly', () => {
+  // Mutation killed: skipping undeclared named citations would let prose claim an unreviewed pin.
+  const key = 'crew/sample.mjs@named-missing'
+  const fx = fixture({ named: { key, expected: EXPECTED }, manifest: {} })
+  try {
+    const result = checkAnchors({ root: fx.root, docs: [fx.doc], manifest: {} })
+    assert.equal(result.failures.length, 1)
+    assert.match(result.failures[0], new RegExp(`${key}: manifest has no entry`))
+  } finally {
+    dispose(fx)
+  }
+})
+
+test('a named citation is never reported as shifted', () => {
+  // Mutation killed: adding named resolutions to shifted would turn a line-number-free pin into stale-line noise.
+  const key = 'crew/sample.mjs@named-stable'
+  const fx = fixture({ source: ['// inserted one', '// inserted two', '// header', `const ${EXPECTED}`, 'export default KEY', ''], named: { key, expected: EXPECTED } })
+  try {
+    const result = checkAnchors({ root: fx.root, docs: [fx.doc], manifest: fx.manifest })
+    assert.deepEqual(result.failures, [])
+    assert.deepEqual(result.shifted, [])
+    assert.equal(result.named, 1)
+  } finally {
+    dispose(fx)
+  }
+})
+
+test('a manifest key cited only by name is not orphaned in either pass', () => {
+  // Mutation killed: omitting named keys from the cited set would report a valid name as a dead declaration.
+  const key = 'crew/sample.mjs@named-only'
+  const fx = fixture({ named: { key, expected: EXPECTED } })
+  try {
+    assert.deepEqual(checkAnchors({ root: fx.root, docs: [fx.doc], manifest: fx.manifest }), { anchors: 0, failures: [], shifted: [], named: 1 })
+    const repaired = repairAnchorsInPlace({ root: fx.root, skillDir: fx.skillDir, manifestPath: fx.manifestPath })
+    assert.deepEqual(repaired.repairs, [])
+    assert.deepEqual(repaired.refusals, [])
+  } finally {
+    dispose(fx)
+  }
+})
+
+test('repair-all makes no changes for a valid named-only manifest', () => {
+  // Mutation killed: treating a stable named pin as a repair candidate would emit a repair or rewrite bytes.
+  const key = 'crew/sample.mjs@named-repair-noop'
+  const fx = fixture({ named: { key, expected: EXPECTED } })
+  const before = bytes(fx)
+  const output = []
+  try {
+    assert.equal(repairCli(['--repair-all', fx.skillDir, '--root', fx.root], output.push.bind(output)), 0)
+    assert.deepEqual(output, [])
+    assert.equal(bytes(fx), before)
+  } finally {
+    dispose(fx)
+  }
+})
+
+test('assertAnchorsPinned counts named citations in its floor and return value', () => {
+  // Mutation killed: counting only line citations would reject a fully named manifest at its minimum floor.
+  const key = 'crew/sample.mjs@named-counted'
+  const fx = fixture({ named: { key, expected: EXPECTED } })
+  try {
+    assert.equal(assertAnchorsPinned({ root: fx.root, skillDir: fx.skillDir, manifestPath: fx.manifestPath, minAnchors: 1, fence: [], log: () => {} }), 1)
+  } finally {
+    dispose(fx)
+  }
+})
+
+test('collectNamed ignores a path outside ANCHOR_ROOTS', () => {
+  // Mutation killed: accepting an outside-root named path would make unrelated prose participate in pin checks.
+  const fx = fixture({ named: { key: 'foo/bar.mjs@outside', expected: EXPECTED }, manifest: {} })
+  try {
+    assert.deepEqual(collectNamed({ docs: [fx.doc] }), [])
+  } finally {
+    dispose(fx)
+  }
+})
+
+test('a mixed manifest checks clean and repairs only its line key', () => {
+  // Mutation killed: repairing named keys or rewriting their citations would alter a pin with no stale line number.
+  const namedKey = 'crew/sample.mjs@named-mixed'
+  const namedExpected = 'named-mixed-anchor-value'
+  const fx = fixture({
+    source: ['// header', `const ${EXPECTED}`, `const NAMED = '${namedExpected}'`, 'export default KEY', ''],
+    cite: `crew/sample.mjs:2 and ${namedKey}`,
+    named: { key: namedKey, expected: namedExpected },
+    manifest: { 'crew/sample.mjs:2': EXPECTED, [namedKey]: namedExpected },
+  })
+  try {
+    writeFileSync(join(fx.root, 'crew/sample.mjs'), ['// header', '// inserted above', `const ${EXPECTED}`, `const NAMED = '${namedExpected}'`, 'export default KEY', ''].join('\n'))
+    const result = repairAnchorsInPlace({ root: fx.root, skillDir: fx.skillDir, manifestPath: fx.manifestPath })
+    assert.equal(result.repairs.length, 1)
+    assert.deepEqual(result.refusals, [])
+    const manifest = JSON.parse(readFileSync(fx.manifestPath, 'utf8'))
+    assert.equal(manifest['crew/sample.mjs:3'], EXPECTED)
+    assert.equal(manifest[namedKey], namedExpected)
+    const doc = readFileSync(fx.doc, 'utf8')
+    assert.equal(doc.includes('crew/sample.mjs:3'), true)
+    assert.equal(doc.includes(namedKey), true)
+    assert.deepEqual(checkAnchors({ root: fx.root, docs: [fx.doc], manifest }), { anchors: 1, failures: [], shifted: [], named: 1 })
+  } finally {
+    dispose(fx)
+  }
+})
+
+test('checkAnchors preserves its legacy result shape when no named citation exists', () => {
+  // Mutation killed: adding named: 0 would break callers that pin the complete zero-name result shape.
+  const fx = fixture()
+  try {
+    assert.deepEqual(checkAnchors({ root: fx.root, docs: [fx.doc], manifest: fx.manifest }), { anchors: 1, failures: [], shifted: [] })
+    const key = 'crew/sample.mjs@named-shape'
+    writeFileSync(fx.doc, `# sample\n\nExhibit: \`${key}\`.\n`)
+    const namedResult = checkAnchors({ root: fx.root, docs: [fx.doc], manifest: { [key]: EXPECTED } })
+    assert.deepEqual(namedResult, { anchors: 0, failures: [], shifted: [], named: 1 })
+  } finally {
+    dispose(fx)
+  }
+})
+
+test('repair-all valid named pins log nothing and preserve manifest and doc bytes', () => {
+  // Mutation killed: writing a named-only result even without repairs would violate the CLI no-op contract.
+  const key = 'crew/sample.mjs@named-valid-cli'
+  const fx = fixture({ named: { key, expected: EXPECTED } })
+  const before = bytes(fx)
+  const output = []
+  try {
+    assert.equal(repairCli(['--repair-all', fx.skillDir, '--root', fx.root], output.push.bind(output)), 0)
+    assert.deepEqual(output, [])
+    assert.equal(bytes(fx), before)
+  } finally {
+    dispose(fx)
+  }
+})
+
+test('repair-all refuses a rotted named pin without writing', () => {
+  // Mutation killed: accepting named rot in repair would return success while leaving a broken manifest in place.
+  const key = 'crew/sample.mjs@named-rotted-cli'
+  const fx = fixture({ source: ['// header', 'const OTHER = 1', 'export default OTHER', ''], named: { key, expected: EXPECTED } })
+  const before = bytes(fx)
+  const output = []
+  try {
+    assert.equal(repairCli(['--repair-all', fx.skillDir, '--root', fx.root], output.push.bind(output)), 1)
+    assert.equal(output.length, 1)
+    assert.match(output[0], new RegExp(`^refused ${key}: .*content appears nowhere .*rot, not a shift`))
+    assert.equal(bytes(fx), before)
+  } finally {
+    dispose(fx)
+  }
+})
+
+test('repair-all refuses an ambiguous named pin without writing', () => {
+  // Mutation killed: accepting named ambiguity in repair would guess which live line a name identifies.
+  const key = 'crew/sample.mjs@named-ambiguous-cli'
+  const fx = fixture({ source: ['// header', `const ${EXPECTED}`, `const twin = "${EXPECTED}"`, 'export default KEY', ''], named: { key, expected: EXPECTED } })
+  const before = bytes(fx)
+  const output = []
+  try {
+    assert.equal(repairCli(['--repair-all', fx.skillDir, '--root', fx.root], output.push.bind(output)), 1)
+    assert.equal(output.length, 1)
+    assert.match(output[0], new RegExp(`^refused ${key}: .*content occurs 2 times`))
+    assert.equal(bytes(fx), before)
+  } finally {
+    dispose(fx)
+  }
 })

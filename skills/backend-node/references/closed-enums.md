@@ -1,13 +1,13 @@
 # Closed enums are consulted data
 
 Declare a finite vocabulary as data that callers actually consult.
-Exhibit: `scripts/factory/ledger.mjs:405` (`CI_DECISIONS`).
+Exhibit: `scripts/factory/ledger.mjs:410` (`CI_DECISIONS`).
 
 `DECISIONS` is frozen with `Object.freeze` at the export boundary.
 Exhibit: `crew/drive.mjs:401`.
 
 Production code reads `CI_DECISIONS` when it validates a decision.
-Exhibit: `scripts/factory/ledger.mjs:3091`.
+Exhibit: `scripts/factory/ledger.mjs:3151`.
 
 `DECISIONS` is exported and frozen but read by no production code; only
 `crew/drive-review.test.mjs:1271-1273` reads it, so it is not the exhibit for "callers

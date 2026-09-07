@@ -173,6 +173,11 @@ test('the flag reference records what a dry run is and is not for', () => {
     'six times',
     'Six invocations on one day is the whole sample',
     '`--dry-run --force --no-keep --headless-all --panes`',
+    'an absent flag defaults planner to `64` and lead to `32`',
+    'source: default', 'source: flag', 'source: absent',
+    'Pane boots have no implicit ceiling',
+    'Batch forwarding of `--assurance` and every `--max-turns-<role>` value',
+    'deferred waves re-emit the authored values',
     sentence,
   ]) assert.ok(text.includes(token), `flags.md must carry ${token}`)
   assert.ok(DRY_RUN_BLIND_SPOT.includes(sentence))

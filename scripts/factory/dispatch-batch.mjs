@@ -9,7 +9,7 @@ import { homedir } from 'node:os'
 import { spawn as childSpawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
-import { parseDirectedBrief, scopeMatcher, validateScopeEntries as driveValidateScopeEntries, VARIANT_NAMES, VARIANTS } from '../../crew/drive.mjs'
+import { parseDirectedBrief, scopeMatcher, validateScopeEntries as driveValidateScopeEntries, VARIANT_NAMES, VARIANTS, TURN_CEILING_FLAGS } from '../../crew/drive.mjs'
 import { assertHostQuiet, hostLoad, loadPolicy, withSuiteSlot } from '../../crew/host-load.mjs'
 import { protectedHitsIn, resolveProtectedPaths } from '../../crew/protected-paths.mjs'
 import { slug } from '../../crew/slug.mjs'
@@ -159,6 +159,7 @@ export const DISPATCH_ONLY_REQUEST_KEYS = Object.freeze(['tier', 'depends_on', '
 // closing line names, so the three cannot drift apart.
 export const BOOT_TRANSPORT = 'headless-all'
 export const PANE_TRANSPORT = 'panes'
+import { ASSURANCE_ALIASES, ASSURANCE_ALIAS_OF } from '../../crew/assurances.mjs'
 export const COMPILE_REQUEST_SUFFIX = '.compile-request.json'
 
 // #767: five boots were lost to pane-send mechanics on 2026-08-29 (b321 x1, b322 x2,
@@ -228,6 +229,16 @@ export const BOOT_MEMORY_FLAGS = Object.freeze(['memory-dir', 'memory-backend', 
 function memoryFlagArgs(runFlags = {}) {
   const args = []
   for (const flag of BOOT_MEMORY_FLAGS) {
+    const value = runFlags[flag]
+    if (value === undefined || value === null || value === '') continue
+    args.push(`--${flag}`, String(value))
+  }
+  return args
+}
+
+export function turnCeilingFlagArgs(runFlags = {}) {
+  const args = []
+  for (const flag of TURN_CEILING_FLAGS) {
     const value = runFlags[flag]
     if (value === undefined || value === null || value === '') continue
     args.push(`--${flag}`, String(value))
@@ -2106,6 +2117,20 @@ export function tierFloor({ files, extra } = {}) {
   return { hits, forced, floor: forced }
 }
 
+export function resolveRequestedTier({ tier, assurance } = {}) {
+  const tierSupplied = tier !== undefined && tier !== null
+  const assuranceSupplied = assurance !== undefined && assurance !== null
+  if (tierSupplied && assuranceSupplied) {
+    refuse('--tier and --assurance are mutually exclusive; pass exactly one assurance spelling', BATCH_UNREADABLE)
+  }
+  if (!assuranceSupplied) return tier
+  const alias = ASSURANCE_ALIAS_OF[assurance]
+  if (!alias || ASSURANCE_ALIASES[alias] !== assurance) {
+    refuse(`unknown canonical assurance ${JSON.stringify(assurance)}; expected one of ${Object.keys(ASSURANCE_ALIAS_OF).join(', ')}`, BATCH_UNREADABLE)
+  }
+  return alias
+}
+
 export function reconcileTier({ lane, forced, proposed, requested, requestedFrom = 'lane' } = {}) {
   if (forced && requestedFrom !== 'batch' && requested && TIER_NAMES.indexOf(requested) < TIER_NAMES.indexOf(forced)) {
     refuse(`lane ${lane} requested tier ${requested} below protected floor ${forced}`, TIER_FLOOR_CONFLICT)
@@ -2548,13 +2573,15 @@ function recordIntent({ intent, crewPath, crewDir, lane, deps } = {}) {
 }
 
 export function bootCommand({ lane, laneDir, tier, registerPath, transport, seats, runFlags = {} }) {
+  const assurance = runFlags.assurance
+  const tierArgs = assurance ? ['--assurance', ASSURANCE_ALIASES[tier]] : ['--tier', tier]
   return {
     file: 'node',
     args: [
       'crew/crew.mjs', 'boot',
       '--task', lane,
       '--checkout', laneDir,
-      '--tier', tier,
+      ...tierArgs,
       '--fences', registerPath,
       '--lane', lane,
       // Snapshot, not live-read: boot copies the bytes once, so an edit made after this dispatch cannot change a running lane.
@@ -2562,6 +2589,7 @@ export function bootCommand({ lane, laneDir, tier, registerPath, transport, seat
       ...seatFlagArgs(seats),
       ...shortfallFlagArgs(seats),
       ...memoryFlagArgs(runFlags),
+      ...turnCeilingFlagArgs(runFlags),
       // crew.mjs boot knows no --panes flag (KNOWN_FLAGS.boot, crew/crew.mjs:2232):
       // a pane seat is what boot produces WITHOUT --headless-all, so the pane
       // transport is the ABSENCE of this flag, never a flag of its own.
@@ -2709,7 +2737,8 @@ function resumeCommand({ batchDir, fences, checkout, parentDir, outDir, tier, va
   add('checkout', checkout)
   add('parent', parentDir)
   add('out', outDir)
-  add('tier', runFlags.tier ?? tier)
+  if (runFlags.assurance) add('assurance', runFlags.assurance)
+  else add('tier', runFlags.tier ?? tier)
   add('variant', runFlags.variant ?? variant)
   add('baseline', runFlags.baseline)
   for (const spec of Array.isArray(runFlags.adopt) ? runFlags.adopt : (runFlags.adopt ? [runFlags.adopt] : [])) add('adopt', spec)
@@ -2717,6 +2746,7 @@ function resumeCommand({ batchDir, fences, checkout, parentDir, outDir, tier, va
     'plan-rounds', 'build-rounds', 'review-rounds', 'wait-builder', 'wait-planner',
     'wait-reviewer', 'wait-lead', 'wait-tech-lead', 'validation-lane', 'suite',
   ]) add(flag, runFlags[flag])
+  for (const flag of TURN_CEILING_FLAGS) add(flag, runFlags[flag])
   for (const flag of BOOT_MEMORY_FLAGS) add(flag, runFlags[flag])
   for (const flag of Object.keys(runFlags).filter((flag) => Object.values(SEAT_FIELDS)
     .some((prefix) => flag.startsWith(prefix) && flag.length > prefix.length)).sort()) {
@@ -3071,9 +3101,10 @@ export function parseCliArgs(argv) {
   const flags = {}
   const positional = []
   const valueFlags = new Set([
-    'batch', 'fences', 'checkout', 'parent', 'out', 'tier', 'variant', 'wave',
+    'batch', 'fences', 'checkout', 'parent', 'out', 'tier', 'assurance', 'variant', 'wave',
     'plan-rounds', 'build-rounds', 'review-rounds', 'wait-builder', 'wait-planner',
     'wait-reviewer', 'wait-lead', 'wait-tech-lead', 'validation-lane', 'suite', 'baseline',
+    ...TURN_CEILING_FLAGS,
     ...BOOT_MEMORY_FLAGS,
   ])
   const booleanFlags = new Set(['dry-run', 'force', 'no-keep', PANE_TRANSPORT, BOOT_TRANSPORT])
@@ -3117,6 +3148,7 @@ export async function main(argv, deps = {}) {
     const checkout = resolve(typeof flags.checkout === 'string' ? flags.checkout : process.cwd())
     const parentDir = typeof flags.parent === 'string' ? resolve(flags.parent) : dirname(checkout)
     const outDir = typeof flags.out === 'string' ? resolve(flags.out) : join(resolve(flags.batch), 'out')
+    const requestedTier = resolveRequestedTier({ tier: flags.tier, assurance: flags.assurance })
     let register
     try {
       register = readRegister({ fencesPath: flags.fences, checkout, outDir, deps })
@@ -3132,7 +3164,7 @@ export async function main(argv, deps = {}) {
       checkout,
       parentDir,
       outDir,
-      tier: flags.tier,
+      tier: requestedTier,
       variant: flags.variant,
       runFlags: flags,
       deps,

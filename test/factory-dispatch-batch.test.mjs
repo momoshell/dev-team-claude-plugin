@@ -101,6 +101,7 @@ import {
   mergeSeats,
   tierFloor,
   readRegister,
+  resolveRequestedTier,
 } from '../scripts/factory/dispatch-batch.mjs'
 import { parseDirectedBrief } from '../crew/drive.mjs'
 import { laneFenceFor, renderBrief } from '../scripts/factory/make-brief.mjs'
@@ -2714,6 +2715,43 @@ test('bootCommand hands every lane the dispatching checkout roster path', () => 
   assert.equal(ROSTER_PATH.startsWith(laneDir), false)
 })
 
+test('turn-ceiling boot flags are parsed, forwarded verbatim, and omitted when unset', async () => {
+  const expected = {
+    'max-turns-planner': '70', 'max-turns-tech-lead': '71', 'max-turns-builder': '72',
+    'max-turns-reviewer': '73', 'max-turns-lead': '74',
+  }
+  assert.deepEqual(parseCliArgs(Object.entries(expected).flatMap(([flag, value]) => [`--${flag}`, value])), expected)
+  const result = await dispatchFixture({ label: 'turn-ceiling-flags', names: ['lane-a'], runFlags: expected })
+  const boot = result.spawned.find(({ args }) => args.includes('boot'))
+  for (const [flag, value] of Object.entries(expected)) {
+    const index = boot.args.indexOf(`--${flag}`)
+    assert.notEqual(index, -1)
+    assert.equal(boot.args[index + 1], value)
+  }
+  const bare = await dispatchFixture({ label: 'turn-ceiling-flags-absent', names: ['lane-a'] })
+  const bareBoot = bare.spawned.find(({ args }) => args.includes('boot'))
+  for (const flag of Object.keys(expected)) assert.equal(bareBoot.args.includes(`--${flag}`), false)
+})
+
+test('canonical assurance parses, reconciles, and emits without its tier alias', () => {
+  assert.deepEqual(parseCliArgs(['--assurance', 'rigorous']), { assurance: 'rigorous' })
+  assert.equal(resolveRequestedTier({ assurance: 'quick' }), 'mechanical')
+  assert.equal(resolveRequestedTier({ assurance: 'standard' }), 'build')
+  assert.equal(resolveRequestedTier({ assurance: 'rigorous' }), 'judge')
+  const command = bootCommand({
+    lane: 'lane-a', laneDir: '/tmp/dispatching-lane', tier: 'build', registerPath: '/tmp/register.json',
+    transport: BOOT_TRANSPORT, seats: {}, runFlags: { assurance: 'standard' },
+  })
+  const index = command.args.indexOf('--assurance')
+  assert.equal(command.args[index + 1], 'standard')
+  assert.equal(command.args.includes('--tier'), false)
+  const unknown = (() => { try { resolveRequestedTier({ assurance: 'unknown' }) } catch (error) { return error } })()
+  assert.equal(unknown?.reason, 'batch-unreadable')
+  const conflict = (() => { try { resolveRequestedTier({ tier: 'build', assurance: 'standard' }) } catch (error) { return error } })()
+  assert.equal(conflict?.reason, 'batch-unreadable')
+  assert.match(conflict?.message ?? '', /mutually exclusive/)
+})
+
 test('memory boot flags are forwarded verbatim and omitted when unset', async () => {
   const result = await dispatchFixture({
     label: 'memory-flags',
@@ -4709,13 +4747,25 @@ test('resume commands re-emit every batch seat flag', async () => {
     label: 'seat-resume',
     names: ['lane-a', 'lane-b'],
     requests: { 'lane-b': requestFor('lane-b', { depends_on: ['lane-a'] }) },
-    runFlags: { 'agent-planner': 'claude', 'model-planner': 'raw-model', 'allow-shortfall-planner': 'subagents' },
+    batchTier: 'build',
+    runFlags: {
+      assurance: 'standard',
+      'agent-planner': 'claude', 'model-planner': 'raw-model', 'allow-shortfall-planner': 'subagents',
+      'max-turns-planner': '70', 'max-turns-tech-lead': '71', 'max-turns-builder': '72',
+      'max-turns-reviewer': '73', 'max-turns-lead': '74',
+    },
   })
   const deferred = result.logs.find((line) => line.includes('deferred lane=lane-b'))
   assert.ok(deferred)
   assert.match(deferred, /--agent-planner claude/)
   assert.match(deferred, /--model-planner raw-model/)
   assert.match(deferred, /--allow-shortfall-planner subagents/)
+  assert.match(deferred, /--assurance standard/)
+  assert.doesNotMatch(deferred, /--tier /)
+  for (const [flag, value] of Object.entries({
+    'max-turns-planner': '70', 'max-turns-tech-lead': '71', 'max-turns-builder': '72',
+    'max-turns-reviewer': '73', 'max-turns-lead': '74',
+  })) assert.match(deferred, new RegExp(`--${flag} ${value}`))
 })
 
 test('seat vocabulary stays mirrored to crew boot constants', () => {

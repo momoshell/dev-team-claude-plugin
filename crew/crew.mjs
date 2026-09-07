@@ -1790,8 +1790,8 @@ export async function bootCmd(args, deps = {}) {
   } catch (err) {
     throw flagNamedAliasError(err)
   }
-  const turnCeilingsResolved = resolveTurnCeilings(turnCeilingArgs(args))
-  const turnCeilingRecord = turnCeilingsRecord(turnCeilingsResolved)
+  const turnCeilingRaw = turnCeilingArgs(args)
+  const turnCeilingsDefaulted = resolveTurnCeilings(turnCeilingRaw)
   const bootConfigRecord = Object.freeze({ profile: configuration.profile, assurance: configuration.assurance })
   writeAliasDeprecations(configuration)
   const taskSlug = slug(args.task)
@@ -1891,6 +1891,10 @@ export async function bootCmd(args, deps = {}) {
     note: noteRunlessCellFailure })
   const paneRoles = roles.filter((role) => adapters[role].transport === DEFAULT_TRANSPORT)
   const headlessOnly = paneRoles.length === 0
+  const turnCeilingsResolved = headlessOnly
+    ? turnCeilingsDefaulted
+    : resolveTurnCeilings(turnCeilingRaw, { applyDefaults: false })
+  const turnCeilingRecord = turnCeilingsRecord(turnCeilingsResolved, turnCeilingRaw)
   const unmeasurable = paneTurnCeilingRefusals(paneRoles, turnCeilingsResolved)
   if (unmeasurable.length) {
     const named = unmeasurable.map((u) => `${u.role} (--max-turns-${u.role} ${u.budget}, ${u.transport})`).join(', ')

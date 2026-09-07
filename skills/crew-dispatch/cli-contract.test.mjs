@@ -9,6 +9,7 @@ import {
   ROLE_FLAG_PREFIXES,
 } from '../../crew/crew.mjs'
 import { VARIANT_NAMES, VARIANTS } from '../../crew/variants.mjs'
+import { parseCliArgs } from '../../scripts/factory/dispatch-batch.mjs'
 import { ROOT } from '../../test/helpers.mjs'
 
 const HERE = fileURLToPath(new URL('./', import.meta.url))
@@ -57,6 +58,21 @@ test('documented flags are accepted by their named verbs', () => {
 test('documented boot-only flags equal the runtime contract', () => {
   const block = firstJsonBlock(FLAGS)
   assert.deepEqual(block.boot_only, [...BOOT_ONLY_FLAGS])
+})
+
+// Keep this dispatcher contract literal: a production-derived flag array must
+// not make the documentation test vacuous when a new family is omitted.
+test('documented dispatcher assurance and turn-ceiling values are accepted', () => {
+  const argv = [
+    '--assurance', 'standard',
+    '--max-turns-planner', '64', '--max-turns-tech-lead', '65',
+    '--max-turns-builder', '66', '--max-turns-reviewer', '67', '--max-turns-lead', '68',
+  ]
+  assert.deepEqual(parseCliArgs(argv), {
+    assurance: 'standard',
+    'max-turns-planner': '64', 'max-turns-tech-lead': '65',
+    'max-turns-builder': '66', 'max-turns-reviewer': '67', 'max-turns-lead': '68',
+  })
 })
 
 test('documented variant keys and context equal the runtime contract', () => {

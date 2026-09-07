@@ -1639,7 +1639,10 @@ test('run plumbs flagged budgets, records defaults when absent, and preserves dr
         wait: (returnPath) => returnPath === 'planner'
           ? { status: 'insufficient', role: 'planner', summary: 'the brief leaves a gap', artifacts: [], details: {} }
           : { status: 'done', role: 'lead', summary: '', artifacts: [], details: { decision: 'bounce', reason: 'because', guidance: 'close the gap' } },
-        writeFile: () => {}, readFile: () => null, run: () => ({ ok: true, output: '' }),
+        writeFile: () => {}, readFile: () => [
+          JSON.stringify({ seat_turn_census: { dispatch_id: 'planner', role: 'planner', transport: 'headless-json', turns: 1 }, headless_outcome: 'ok' }),
+          JSON.stringify({ seat_turn_census: { dispatch_id: 'lead', role: 'lead', transport: 'headless-json', turns: 1 }, headless_outcome: 'ok' }),
+        ].join('\n'), run: () => ({ ok: true, output: '' }),
         changedFiles: () => [], commit: () => 'abc1234',
         log: (row) => { if (row && typeof row.stage === 'string') stages.push(row.stage) }, now: () => 0,
       }
@@ -7133,14 +7136,14 @@ test('turn-ceiling flags refuse unenforceable panes and persist only when explic
       assert.equal(existsSync(testCrewDir(home, checkout, 'ceiling-pane')), false)
 
       await bootCmd(
-        { task: 'ceiling-headless', checkout, tier: 'build', 'headless-all': true, 'claude-bin': bin, 'max-turns-builder': '40', 'max-turns-planner': '12' },
+        { task: 'ceiling-headless', checkout, tier: 'build', 'headless-all': true, 'claude-bin': bin, 'max-turns-builder': '40', 'max-turns-planner': '12', 'max-turns-lead': '48' },
         { cmux: callCounter(), tree: callCounter(), renameTab: callCounter() },
       )
       const dir = testCrewDir(home, checkout, 'ceiling-headless')
       const crew = JSON.parse(readFileSync(join(dir, 'crew.json'), 'utf8'))
       assert.deepEqual(crew.turn_ceilings, {
-        planner: 12, 'tech-lead': null, builder: 40, reviewer: null, lead: null,
-        source: { planner: 'flag', 'tech-lead': 'absent', builder: 'flag', reviewer: 'absent', lead: 'absent' },
+        planner: 12, 'tech-lead': null, builder: 40, reviewer: null, lead: 48,
+        source: { planner: 'flag', 'tech-lead': 'absent', builder: 'flag', reviewer: 'absent', lead: 'flag' },
       })
       assert.deepEqual(bootRecord(dir).turn_ceilings, crew.turn_ceilings)
       let seen = null
@@ -7157,17 +7160,75 @@ test('turn-ceiling flags refuse unenforceable panes and persist only when explic
       const plainDir = testCrewDir(home, checkout, 'ceiling-plain')
       const plainCrew = JSON.parse(readFileSync(join(plainDir, 'crew.json'), 'utf8'))
       const plainBoot = bootRecord(plainDir)
-      assert.equal(Object.hasOwn(plainCrew, 'turn_ceilings'), false)
-      assert.equal(Object.hasOwn(plainBoot, 'turn_ceilings'), false)
+      const defaultCeilings = {
+        planner: 64, 'tech-lead': null, builder: null, reviewer: null, lead: 32,
+        source: { planner: 'default', 'tech-lead': 'absent', builder: 'absent', reviewer: 'absent', lead: 'default' },
+      }
+      assert.deepEqual(plainCrew.turn_ceilings, defaultCeilings)
+      assert.deepEqual(plainBoot.turn_ceilings, defaultCeilings)
       let plainSeen = null
       runCmd({ task: 'ceiling-plain', checkout, 'brief-file': brief, keep: true }, { drive: (ctx) => { plainSeen = ctx; return done } })
-      assert.equal(Object.hasOwn(plainSeen, 'turnCeilings'), false)
+      assert.deepEqual(plainSeen.turnCeilings, defaultCeilings)
       const plainConfigs = readFileSync(plainSeen.journal, 'utf8').trim().split('\n').map((line) => JSON.parse(line)).filter((row) => row.event === 'run-configuration')
-      assert.equal(Object.hasOwn(plainConfigs[0], 'turn_ceilings'), false)
+      assert.deepEqual(plainConfigs[0].turn_ceilings, defaultCeilings)
     })
   } finally {
     if (previousBin === undefined) delete process.env.CREW_CLAUDE_BIN
     else process.env.CREW_CLAUDE_BIN = previousBin
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+})
+
+test('unflagged pane boot remains admitted and record-free under headless turn-ceiling defaults', async () => {
+  const home = scratchDir('crew-ceiling-pane-plain-home-')
+  const { root: checkoutRoot, checkout } = testCheckout('crew-ceiling-pane-plain-checkout-')
+  const task = 'ceiling-pane-plain'
+  const paneRoles = ['lead', 'planner', 'builder', 'reviewer']
+  const brief = join(home, 'brief.md')
+  const cmux = callCounter()
+  const renameTab = callCounter()
+  let treeCalls = 0
+  const tree = (...args) => {
+    tree.calls.push(args)
+    treeCalls += 1
+    if (treeCalls === 1) return { windows: [] }
+    return { windows: [{ id: 'window-1', workspaces: [{
+      id: 'workspace-1', name: `crew-${task}`,
+      panes: paneRoles.map((role) => ({ id: `pane-${role}`, surfaces: [{ id: `surface-${role}`, name: role }] })),
+    }] }] }
+  }
+  tree.calls = []
+  writeFileSync(join(checkout, 'seed.txt'), 'seed\n')
+  execSync('git init -q && git add -A && git -c user.email=ceiling@fixture -c user.name=ceiling commit -q -m seed', { cwd: checkout })
+  writeFileSync(brief, '# ceiling pane plain test\n')
+  try {
+    await withHome(home, async () => {
+      await bootCmd(
+        { task, checkout, tier: 'build', 'claude-bin': process.execPath },
+        { cmux, tree, renameTab, awaitSeatsReady: () => {} },
+      )
+      const dir = testCrewDir(home, checkout, task)
+      const crew = JSON.parse(readFileSync(join(dir, 'crew.json'), 'utf8'))
+      assert.equal(cmux.calls.length, 1)
+      assert.equal(tree.calls.length, 2)
+      assert.equal(renameTab.calls.length, paneRoles.length)
+      assert.equal(crew.workspace_id, 'workspace-1')
+      assert.equal(Object.hasOwn(crew, 'turn_ceilings'), false)
+      assert.equal(Object.hasOwn(bootRecord(dir), 'turn_ceilings'), false)
+
+      let seen = null
+      const done = { status: 'done', summary: '', artifacts: [], details: { commit: null, stages: [] } }
+      runCmd({ task, checkout, 'brief-file': brief, keep: true }, {
+        awaitSeatsReady: () => {}, seatIo: () => ({ emit: () => {} }),
+        drive: (ctx) => { seen = ctx; return done }, writeTerminalLine: () => {},
+      })
+      assert.equal(Object.hasOwn(seen, 'turnCeilings'), false)
+      const runConfig = readFileSync(seen.journal, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+        .find((row) => row.event === 'run-configuration')
+      assert.equal(Object.hasOwn(runConfig, 'turn_ceilings'), false)
+    })
+  } finally {
     rmSync(home, { recursive: true, force: true })
     rmSync(checkoutRoot, { recursive: true, force: true })
   }

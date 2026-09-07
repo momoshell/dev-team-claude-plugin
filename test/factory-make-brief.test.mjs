@@ -12,12 +12,12 @@ import { dirname, join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { git, ROOT } from './helpers.mjs'
 import {
-  ACCEPTANCE_GATE_BLOCK, BROAD_KEY_HIT_LIMIT, CONVENTIONS_BLOCK, CREATES_MARK, DEFAULT_PROTECTED_PATHS,
+  ACCEPTANCE_GATE_BLOCK, admitBrief, BRIEF_BYTE_LIMIT, BROAD_KEY_HIT_LIMIT, CONVENTIONS_BLOCK, CREATES_MARK, DEFAULT_PROTECTED_PATHS,
   DISCOVERY_PROGRESS_PREFIX, DIRECTED_BLOCK, DIRECTED_GATE_NOTE, DIRECTED_KEYS, HOSTILE_ENV_BLOCK, LADDER_BANDS, OPTIONAL_REQUEST_KEYS,
   REFUSAL_REASONS, SLOT_MARKER, TIER_NAMES, crossCheckCoupling, readsToAcknowledge,
   discoverTripwires, exportEntries, extractKeys, extractSymbols, gatherFences, gatherProtectedPaths, isTripwireFile, main, symbolIndexFor,
   MUTATION_CONTRACT_BLOCK, PACK_ABSENT_REASONS, PROPOSAL_BLOCK, PROPOSAL_KEYS, profileField, proposeTier,
-  readLadderBands, renderBrief, renderProposalBlock, resolveIntent, resolveWriteSurface, SYMBOL_INDEX_ENTRY_LIMIT,
+  measureBrief, readLadderBands, renderBrief, renderProposalBlock, resolveIntent, resolveWriteSurface, SYMBOL_INDEX_ENTRY_LIMIT,
   SYMBOL_INDEX_ABSENT_REASONS, SYMBOL_INDEX_SCAN_LIMIT, testTitleEntries, validateAsk, writePack,
   validateRequest, validateScopeEntries, verifyCreates, verifyWhere,
 } from '../scripts/factory/make-brief.mjs'
@@ -312,7 +312,7 @@ test('pack mode moves boilerplate to sidecars and preserves the inline verdict',
   }
 })
 
-test('packed context indexes exported declarations and fenced test titles with lines', () => {
+test('a packed brief omits symbol-index rows', () => {
   const root = fixture('symbol-index-kinds')
   put(root, 'lib/kinds.mjs', [
     'export const KINDS_CONST = 1',
@@ -340,11 +340,26 @@ test('packed context indexes exported declarations and fenced test titles with l
     '--fences', fencesPath, '--lane', 'own', '--pack', pack,
   ], 'kinds.brief.md')
   const context = section(brief, '## Context pack')
-  assert.ok(context.includes('- lib/kinds.mjs · exports · KINDS_CONST:1, kindsFunction:2, kindsLet:3, KindsClass:4, kindsAlias:6'))
-  assert.ok(context.includes('- test/kinds.test.mjs · test titles · kinds group:2, kinds function:3'))
+  for (const row of ['exports', 'test titles', 'unindexed', 'truncated', 'skipped', 'not indexed', 'not listed', 'further']) {
+    assert.equal(context.includes(row), false, row)
+  }
   const symbols = join(pack, 'kinds.symbols.md')
   assert.equal(existsSync(symbols), true)
   assert.ok(readFileSync(symbols, 'utf8').includes('KINDS_CONST:1'))
+})
+
+test('a packed brief names its symbol sidecar path', () => {
+  const root = fixture('symbol-index-pointer')
+  put(root, 'lib/pointer.mjs', 'export const pointerSymbol = 1\n')
+  git(root, 'add', '-A')
+  const pack = join(root, 'pack')
+  mkdirSync(pack)
+  const { brief } = compile(root, { where: ['lib/pointer.mjs'] }, ['--pack', pack], 'pointer.brief.md')
+  const context = section(brief, '## Context pack')
+  const symbols = join(pack, 'pointer.symbols.md')
+  assert.equal(context.includes(`symbol index: ${symbols} — full static scan; read it once with: cat ${symbols}`), true)
+
+  assert.equal(existsSync(symbols), true)
 })
 
 test('the symbol index records closed absences and does not invent export rows', () => {
@@ -362,14 +377,15 @@ test('the symbol index records closed absences and does not invent export rows',
     '--fences', fencesPath, '--lane', 'own', '--pack', pack,
   ], 'absences.brief.md')
   const context = section(brief, '## Context pack')
+  const sidecar = readFileSync(join(pack, 'absences.symbols.md'), 'utf8')
   assert.deepEqual(new Set(SYMBOL_INDEX_ABSENT_REASONS), new Set(['unreadable', 'not-text']))
-  assert.ok(context.includes('- lib/missing.mjs · unindexed · unreadable'))
-  assert.ok(context.includes('- lib/not-utf8.mjs · unindexed · not-text'))
+  assert.ok(sidecar.includes('- lib/missing.mjs · unindexed · unreadable'))
+  assert.ok(sidecar.includes('- lib/not-utf8.mjs · unindexed · not-text'))
   assert.equal(context.includes('lib/missing.mjs · exports ·'), false)
   assert.equal(context.includes('lib/not-utf8.mjs · exports ·'), false)
 })
 
-test('the inline symbol index is bounded while its sidecar retains the cut entries', () => {
+test('the symbol sidecar retains the full bounded scan', () => {
   const root = fixture('symbol-index-bound')
   const count = SYMBOL_INDEX_ENTRY_LIMIT + 3
   put(root, 'lib/big.mjs', `${Array.from({ length: count }, (_, index) => `export const boundSymbol${String(index).padStart(3, '0')} = ${index}`).join('\n')}\n`)
@@ -378,12 +394,10 @@ test('the inline symbol index is bounded while its sidecar retains the cut entri
   mkdirSync(pack)
   const { brief } = compile(root, { where: ['lib/big.mjs'] }, ['--pack', pack], 'bound.brief.md')
   const context = section(brief, '## Context pack')
-  const row = context.split('\n').find((line) => line.startsWith('- lib/big.mjs · exports · '))
-  assert.ok(row)
-  assert.equal(row.slice('- lib/big.mjs · exports · '.length).split(', ').length, SYMBOL_INDEX_ENTRY_LIMIT)
   const sidecar = join(pack, 'bound.symbols.md')
-  assert.ok(context.includes(`… and 3 more — full index: ${sidecar}`))
+  assert.equal(context.includes('lib/big.mjs · exports ·'), false)
   assert.ok(readFileSync(sidecar, 'utf8').includes('boundSymbol202:203'))
+  assert.equal(readFileSync(sidecar, 'utf8').split('\n').filter((line) => line.startsWith('- lib/big.mjs · exports ·')).length, 1)
 })
 
 test('the inline symbol index shares one per-file budget between exports and test titles', () => {
@@ -406,19 +420,12 @@ test('the inline symbol index shares one per-file budget between exports and tes
     '--fences', fencesPath, '--lane', 'own', '--pack', pack,
   ], 'mixed.brief.md')
   const context = section(brief, '## Context pack')
-  const rows = context.split('\n').filter((line) =>
-    line.startsWith(`- ${file} · exports · `) || line.startsWith(`- ${file} · test titles · `))
-  const listed = rows.flatMap((line) => {
-    const entries = line.slice(line.lastIndexOf(' · ') + 3)
-    return entries.startsWith('not listed —') ? [] : entries.split(', ')
-  })
   const sidecar = join(pack, 'mixed.symbols.md')
-  assert.ok(listed.length <= SYMBOL_INDEX_ENTRY_LIMIT)
-  assert.equal(listed.length, SYMBOL_INDEX_ENTRY_LIMIT)
-  assert.ok(context.includes(`… and 1 more — full index: ${sidecar}`))
-  assert.ok(context.includes(`- ${file} · test titles · not listed — the per-file budget of ${SYMBOL_INDEX_ENTRY_LIMIT} entries was spent`))
-  assert.ok(context.includes(`… and ${titleCount} more — full index: ${sidecar}`))
-  assert.ok(readFileSync(sidecar, 'utf8').includes(`mixed title ${String(titleCount - 1).padStart(3, '0')}:${exportCount + titleCount}`))
+  const sidecarText = readFileSync(sidecar, 'utf8')
+  assert.equal(context.includes(`- ${file} · exports ·`), false)
+  assert.equal(context.includes(`- ${file} · test titles ·`), false)
+  assert.ok(sidecarText.includes(`mixedHelper${String(exportCount - 1).padStart(3, '0')}:${exportCount}`))
+  assert.ok(sidecarText.includes(`mixed title ${String(titleCount - 1).padStart(3, '0')}:${exportCount + titleCount}`))
 })
 
 test('the symbol index scan is capped per file and records what it skipped', () => {
@@ -441,7 +448,7 @@ test('the symbol index scan is capped per file and records what it skipped', () 
   assert.ok(listed)
   assert.equal(listed.slice(prefix.length).split(', ').length, SYMBOL_INDEX_SCAN_LIMIT)
   assert.ok(sidecar.includes(`${file} · exports · 25 not indexed`))
-  assert.match(brief, /25 further exports were not indexed/)
+  assert.doesNotMatch(brief, /25 further exports were not indexed/)
 })
 
 test('indexing a 70k-symbol file stays within a countable byte budget', () => {
@@ -474,6 +481,52 @@ test('a packed no-code fence emits no symbol index', () => {
   const context = section(brief, '## Context pack')
   assert.equal(context.includes('symbol index'), false)
   assert.equal(existsSync(join(pack, 'nocode.symbols.md')), false)
+})
+
+test('an oversized brief refuses with its largest section and byte count', () => {
+  const root = fixture('oversized-brief')
+  const ask = `Please ${'x'.repeat(BRIEF_BYTE_LIMIT)} authored section`
+  const requestPath = request(root, { ask })
+  const outPath = join(root, 'oversized.md')
+  const result = run(root, ['--request', requestPath, '--checkout', root, '--out', outPath])
+  assert.equal(result.status, 2)
+  assert.match(result.stderr, /\[reason: brief-too-large\]/)
+  assert.equal(existsSync(outPath), false)
+  const total = result.stderr.match(/brief candidate is (\d+) bytes/)
+  const largest = result.stderr.match(/largest generated section is ([a-z -]+) at (\d+) bytes/)
+  assert.ok(total)
+  assert.ok(largest)
+  assert.equal(Number(total[1]) > BRIEF_BYTE_LIMIT, true)
+  assert.equal(largest[1], 'the ask')
+  assert.equal(Number(largest[2]) > BRIEF_BYTE_LIMIT, true)
+})
+
+test('an under-limit brief writes the rendered bytes unchanged', () => {
+  const root = fixture('under-limit-brief')
+  const { outPath, brief } = compile(root, {}, [], 'under-limit.md')
+  const sections = [{ name: 'candidate', lines: [brief] }]
+  const measured = measureBrief(brief, sections)
+  assert.equal(measured.status, 'measured')
+  assert.equal(admitBrief(brief, sections), brief)
+  assert.equal(readFileSync(outPath, 'utf8'), brief)
+})
+
+test('the brief byte cap is named and enforced at its exact boundary', () => {
+  const exact = 'x'.repeat(BRIEF_BYTE_LIMIT)
+  const exactSections = [{ name: 'boundary', lines: [exact] }]
+  assert.deepEqual(measureBrief(exact, exactSections), {
+    status: 'measured',
+    bytes: BRIEF_BYTE_LIMIT,
+    largestSection: { name: 'boundary', bytes: BRIEF_BYTE_LIMIT },
+  })
+  assert.equal(admitBrief(exact, exactSections), exact)
+  const above = `${exact}x`
+  assert.throws(() => admitBrief(above, [{ name: 'boundary', lines: [above] }]), (error) => error.reason === 'brief-too-large')
+})
+
+test('an unmeasurable brief size refuses as unmeasured', () => {
+  assert.deepEqual(measureBrief('candidate', null), { status: 'unmeasured', bytes: null, largestSection: null })
+  assert.throws(() => admitBrief('candidate', null), (error) => error.reason === 'brief-size-unmeasured')
 })
 
 test('pack and issue-body flags refuse their missing prerequisites', () => {
@@ -2206,7 +2259,9 @@ test('compiler and emitter proposal declarations stay in agreement', () => {
 test('the parser returns a refusal code for an unknown CLI option', () => {
   assert.equal(main(['--bogus']), 2)
   assert.equal(new Set(REFUSAL_REASONS).size, REFUSAL_REASONS.length)
-  assert.equal(REFUSAL_REASONS.length, 25)
+  assert.equal(REFUSAL_REASONS.length, 27)
+  assert.ok(REFUSAL_REASONS.includes('brief-too-large'))
+  assert.ok(REFUSAL_REASONS.includes('brief-size-unmeasured'))
   assert.ok(REFUSAL_REASONS.includes('discovery-budget'))
   assert.ok(REFUSAL_REASONS.includes('directed-unknown-key'))
   assert.ok(REFUSAL_REASONS.includes('directed-shape'))

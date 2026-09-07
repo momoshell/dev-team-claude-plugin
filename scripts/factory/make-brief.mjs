@@ -97,6 +97,7 @@ const STRENGTH_BY_COMPLEXITY = Object.freeze({
 const MECHANICAL_MAX_SOURCES = 1
 const BUILD_MAX_SOURCES = 4
 const BROAD_TRIPWIRE_FLOOR = 6
+export const BRIEF_BYTE_LIMIT = 50 * 1024
 
 // These are the only refusal reasons this CLI publishes. Keeping the list
 // closed makes a caller able to enumerate every expected refusal without
@@ -126,6 +127,8 @@ const DIRECTED_UNKNOWN_KEY = 'directed-unknown-key'
 const DIRECTED_SHAPE = 'directed-shape'
 const DIRECTED_FENCE_COLLISION = 'directed-fence-collision'
 const DISCOVERY_BUDGET = 'discovery-budget'
+const BRIEF_TOO_LARGE = 'brief-too-large'
+const BRIEF_SIZE_UNMEASURED = 'brief-size-unmeasured'
 
 export const REFUSAL_REASONS = Object.freeze([
   MISSING_LINE,
@@ -153,6 +156,8 @@ export const REFUSAL_REASONS = Object.freeze([
   DIRECTED_SHAPE,
   DIRECTED_FENCE_COLLISION,
   DISCOVERY_BUDGET,
+  BRIEF_TOO_LARGE,
+  BRIEF_SIZE_UNMEASURED,
 ])
 
 export const BROAD_KEY_HIT_LIMIT = BROAD_KEY_LIMIT
@@ -2267,6 +2272,11 @@ function renderConventionsSlot(writeSurface, pack) {
   return renderConventionsPointer(writeSurface, pack)
 }
 
+function renderSymbolPointer(pack) {
+  if (pack?.symbols == null) return []
+  return [`symbol index: ${pack.symbols} — full static scan; read it once with: cat ${pack.symbols}`]
+}
+
 function renderSymbolIndex(pack) {
   const index = Array.isArray(pack.symbolIndex) ? pack.symbolIndex : []
   const symbolRows = []
@@ -2331,7 +2341,7 @@ function renderContextPack(pack) {
     rows.push(`- ${dir}/ · ${entries.join(', ')}${more ? ` (+${more} more)` : ''}`)
   }
   lines.push(...rows)
-  const symbolRows = renderSymbolIndex(pack)
+  const symbolRows = renderSymbolPointer(pack)
   if (symbolRows.length > 0) lines.push(...symbolRows)
   const journal = pack.journal || { path: null, rows: null, copied: 0, truncated: false, reason: NO_JOURNAL_NAMED }
   if (pack.fixture && journal.reason === null) {
@@ -2354,7 +2364,11 @@ function renderValidation(baseline, discovery) {
   return `narrow: ${narrow}\nfull: ${full} · ${basis} ${count}`
 }
 
-export function renderBrief(gathered) {
+function briefSection(name, lines) {
+  return { name, lines }
+}
+
+function renderBriefSections(gathered) {
   const request = gathered.request || gathered
   const where = gathered.where || []
   const creates = gathered.creates || []
@@ -2370,51 +2384,49 @@ export function renderBrief(gathered) {
   const writeSurface = { ...(baseWriteSurface || {}), __discovery: discovery }
   const coupling = gathered.coupling ?? crossCheckCoupling({ discovery, writeSurface, enforce: false })
   const proposal = gathered.proposal ?? proposeTier({ where, discovery })
-  const lines = [
-    `# Task: ${request.ask}`,
-    '## The ask',
-    request.ask,
-    '## Intent',
-    resolveIntent(request),
-    ...directedSection(request.directed ?? null),
-    '## Proposed tier',
-    renderProposedTier(proposal),
-    renderProposalBlock(proposal),
-    '## Where',
-    renderWhere(where, creates),
-    ...renderContextPack(pack),
-    '## Done means',
-    request.done_means,
-    '## Tripwires',
-    renderTripwireSlot(discovery, pack),
-    '## Coupled sources',
-    renderCoupled(coupling),
-    '## Baseline',
-    formatBaseline(baseline, profile, supplied),
-    '## Out of scope',
-    request.out_of_scope,
-    '## Fences',
-    renderFences(fences),
-    '## What the crew decides',
-    SLOT_MARKER,
-    '## Acceptance',
-    `${request.done_means} · Full suite green. · ${SLOT_MARKER}`,
-    '## Acceptance gate',
-    standingBlocks().acceptance,
-    '## Per-check mutations',
-    standingBlocks().mutations,
-    '## Validation lane',
-    renderValidation(baseline, discovery),
-    '## Conventions',
-    renderConventionsSlot(writeSurface, pack),
-    ...(pack == null ? [
-      renderConventions(profile?.conventions),
-      generatedGrep(discovery),
-      standingBlocks().conventions,
-    ] : []),
-    '',
+  const sections = [
+    briefSection('task', [`# Task: ${request.ask}`]),
+    briefSection('the ask', ['## The ask', request.ask]),
+    briefSection('intent', ['## Intent', resolveIntent(request)]),
+    briefSection('proposed tier', ['## Proposed tier', renderProposedTier(proposal), renderProposalBlock(proposal)]),
+    briefSection('where', ['## Where', renderWhere(where, creates)]),
+    ...(pack == null ? [] : [briefSection('context pack', renderContextPack(pack))]),
+    briefSection('done means', ['## Done means', request.done_means]),
+    briefSection('tripwires', ['## Tripwires', renderTripwireSlot(discovery, pack)]),
+    briefSection('coupled sources', ['## Coupled sources', renderCoupled(coupling)]),
+    briefSection('baseline', ['## Baseline', formatBaseline(baseline, profile, supplied)]),
+    briefSection('out of scope', ['## Out of scope', request.out_of_scope]),
+    briefSection('fences', ['## Fences', renderFences(fences)]),
+    briefSection('what the crew decides', ['## What the crew decides', SLOT_MARKER]),
+    briefSection('acceptance', ['## Acceptance', `${request.done_means} · Full suite green. · ${SLOT_MARKER}`]),
+    briefSection('acceptance gate', ['## Acceptance gate', standingBlocks().acceptance]),
+    briefSection('per-check mutations', ['## Per-check mutations', standingBlocks().mutations]),
+    briefSection('validation lane', ['## Validation lane', renderValidation(baseline, discovery)]),
+    briefSection('conventions', [
+      '## Conventions',
+      renderConventionsSlot(writeSurface, pack),
+      ...(pack == null ? [
+        renderConventions(profile?.conventions),
+        generatedGrep(discovery),
+        standingBlocks().conventions,
+      ] : []),
+      '',
+    ]),
   ]
-  const content = lines.join('\n')
+  if (request.directed) {
+    const index = sections.findIndex((section) => section.name === 'intent')
+    sections.splice(index + 1, 0, briefSection('directed plan', directedSection(request.directed)))
+  }
+  return { request, sections }
+}
+
+function sectionsContent(sections) {
+  return sections.flatMap((section) => section.lines).join('\n')
+}
+
+function renderBriefResult(gathered) {
+  const { request, sections } = renderBriefSections(gathered)
+  const content = sectionsContent(sections)
   // A request field may quote a plan; a BARE fence line inside one would hand the
   // driver two blocks and escalate the lane at directed:r1 — the #657 failure itself.
   // Refuse here rather than four seats later.
@@ -2423,6 +2435,54 @@ export function renderBrief(gathered) {
     if (fences !== 1) {
       refuseUsage(`the rendered brief carries ${fences} \`\`\`${DIRECTED_BLOCK} fence lines — exactly one of them is the plan; no request field may carry a bare fence line`, DIRECTED_FENCE_COLLISION)
     }
+  }
+  return { content, sections }
+}
+
+export function renderBrief(gathered) {
+  return renderBriefResult(gathered).content
+}
+
+function unmeasuredBrief() {
+  return { status: 'unmeasured', bytes: null, largestSection: null }
+}
+
+export function measureBrief(content, sections) {
+  if (typeof content !== 'string' || !Array.isArray(sections) || sections.length === 0) return unmeasuredBrief()
+  if (sections.some((section) => !section
+    || typeof section.name !== 'string'
+    || section.name.trim() === ''
+    || !Array.isArray(section.lines)
+    || section.lines.some((line) => typeof line !== 'string'))) {
+    return unmeasuredBrief()
+  }
+  const candidate = sectionsContent(sections)
+  if (candidate !== content) return unmeasuredBrief()
+  const sectionBytes = sections.map((section, index) => Buffer.byteLength(
+    `${section.lines.join('\n')}${index < sections.length - 1 ? '\n' : ''}`,
+    'utf8',
+  ))
+  let largestIndex = 0
+  for (let index = 1; index < sectionBytes.length; index += 1) {
+    if (sectionBytes[index] > sectionBytes[largestIndex]) largestIndex = index
+  }
+  return {
+    status: 'measured',
+    bytes: Buffer.byteLength(content, 'utf8'),
+    largestSection: { name: sections[largestIndex].name, bytes: sectionBytes[largestIndex] },
+  }
+}
+
+export function admitBrief(content, sections) {
+  const measured = measureBrief(content, sections)
+  if (measured.status !== 'measured') {
+    refuseUsage('brief size is unmeasured; the candidate was not admitted', BRIEF_SIZE_UNMEASURED)
+  }
+  if (measured.bytes > BRIEF_BYTE_LIMIT) {
+    refuseUsage(
+      `brief candidate is ${measured.bytes} bytes; limit is ${BRIEF_BYTE_LIMIT} bytes (51,200-byte limit); largest generated section is ${measured.largestSection.name} at ${measured.largestSection.bytes} bytes`,
+      BRIEF_TOO_LARGE,
+    )
   }
   return content
 }
@@ -2587,7 +2647,7 @@ function compile(flags) {
     profile,
     issueBodyPath: flags['issue-body'],
   })
-  const content = renderBrief({
+  const rendered = renderBriefResult({
     request,
     where,
     creates,
@@ -2602,6 +2662,7 @@ function compile(flags) {
     profile,
     pack,
   })
+  const content = admitBrief(rendered.content, rendered.sections)
   writeBrief(content, outPath, flags.force === true)
   return 0
 }

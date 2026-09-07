@@ -2467,6 +2467,186 @@ test('b416 RV1-2 suite policy coverage guards ownership, laundering, and spent p
   })
 })
 
+test('a value option is neutral over the same file list in either form', () => {
+  const gatePath = '/tmp/b502/gate.mjs'
+  const target = 'crew/headless.test.mjs'
+  const fence = [target]
+  const options = [
+    ['--test-name-pattern', 'b485'], ['--test-reporter', 'tap'], ['--test-concurrency', '4'],
+    ['--test-timeout', '30000'], ['--test-skip-pattern', 'slow'], ['--test-shard', '1/2'],
+  ]
+  const base = suiteRunPolicy({ role: 'builder', command: `node --test ${target}`, fence, gatePath, suiteCommand: 'npm test' })
+  assert.equal(recogniseSuiteInvocation(`node --test ${target}`, { gatePath, suiteCommand: 'npm test' }), 'scoped-test')
+  assert.equal(base.decision, 'admit')
+  for (const [flag, value] of options) {
+    for (const command of [`node --test ${flag} ${value} ${target}`, `node --test ${flag}=${value} ${target}`]) {
+      assert.equal(recogniseSuiteInvocation(command, { gatePath, suiteCommand: 'npm test' }), 'scoped-test', command)
+      assert.deepEqual(testTargets(command), [target], command)
+      assert.equal(suiteRunPolicy({ role: 'builder', command, fence, gatePath, suiteCommand: 'npm test' }).decision, 'admit', command)
+    }
+  }
+  const boolean = `node --test --test-only ${target}`
+  assert.equal(recogniseSuiteInvocation(boolean, { gatePath, suiteCommand: 'npm test' }), 'scoped-test')
+  assert.equal(suiteRunPolicy({ role: 'builder', command: boolean, fence, gatePath, suiteCommand: 'npm test' }).decision, 'admit')
+})
+
+test('a value option is not an escape hatch', () => {
+  const gatePath = '/tmp/b502/gate.mjs'
+  const inFence = 'crew/headless.test.mjs'
+  const outOfFence = 'crew/daemon.test.mjs'
+  const options = { role: 'builder', fence: [inFence], gatePath, suiteCommand: 'npm test' }
+  for (const command of ['node --test --test-name-pattern b485', `node --test --test-name-pattern b485 ${outOfFence}`]) {
+    assert.equal(recogniseSuiteInvocation(command, options), command.endsWith(outOfFence) ? 'scoped-test' : 'suite', command)
+    assert.equal(suiteRunPolicy({ ...options, command }).decision, 'refuse', command)
+  }
+  const consumed = `node --test --test-name-pattern ${inFence}`
+  assert.equal(testTargets(consumed), null)
+  assert.equal(recogniseSuiteInvocation(consumed, options), 'suite')
+  assert.equal(suiteRunPolicy({ ...options, command: consumed }).decision, 'refuse')
+})
+
+test('an unsafe option value fails closed in either form', () => {
+  const gatePath = '/tmp/b502/gate.mjs'
+  const target = 'crew/headless.test.mjs'
+  const options = { role: 'builder', fence: [target], gatePath, suiteCommand: 'npm test' }
+  const unsafe = [
+    `node --test --test-reporter ./crew/daemon.mjs ${target}`,
+    `node --test --test-reporter junk ${target}`,
+    `node --test --test-reporter=./crew/daemon.mjs ${target}`,
+    `node --test --test-name-pattern --require=./crew/daemon.mjs ${target}`,
+  ]
+  for (const command of unsafe) {
+    assert.equal(recogniseSuiteInvocation(command, options), 'suite', command)
+    assert.equal(suiteRunPolicy({ ...options, command }).decision, 'refuse', command)
+  }
+})
+
+test('every npm suite spelling and a bare node test are unchanged', () => {
+  const gatePath = '/tmp/b502/gate.mjs'
+  const options = { role: 'builder', fence: ['crew/headless.test.mjs'], gatePath, suiteCommand: 'npm test' }
+  for (const command of ['npm test', 'npm run test:unit', 'npm --silent test', 'node --test']) {
+    assert.equal(recogniseSuiteInvocation(command, options), 'suite', command)
+    const role = command === 'node --test' ? 'builder' : 'reviewer'
+    assert.equal(suiteRunPolicy({ ...options, role, command }).decision, 'refuse', command)
+  }
+})
+
+test('an own-task test is admitted for every role with both allowances spent', () => {
+  const taskDir = '/tmp/b502-lane/task'
+  const command = `node --test ${taskDir}/probe.test.mjs`
+  for (const role of Object.keys(SUITE_RUN_OWNERSHIP)) {
+    const verdict = suiteRunPolicy({ role, command, taskDir, fence: [], gatePath: `${taskDir}/gate.mjs`, suiteCommand: 'npm test', ranBefore: 1, suiteRanBefore: 1 })
+    assert.equal(verdict.kind, 'task-local', role)
+    assert.equal(verdict.decision, 'admit', role)
+  }
+})
+
+test('an own-task test spends neither allowance', () => {
+  const taskDir = '/tmp/b502-lane/task'
+  const command = `node --test ${taskDir}/probe.test.mjs`
+  for (const role of Object.keys(SUITE_RUN_OWNERSHIP)) {
+    const verdict = suiteRunPolicy({ role, command, taskDir, fence: [], gatePath: `${taskDir}/gate.mjs`, suiteCommand: 'npm test' })
+    const counters = countSuiteDecision(suitePolicyCounters(), verdict.decision, { kind: verdict.kind, blind: verdict.blind })
+    assert.equal(counters.allowance_spent, 0, role)
+    assert.equal(counters.suite_allowance_spent, 0, role)
+  }
+  const plannerLocal = suiteRunPolicy({ role: 'planner', command, taskDir, gatePath: `${taskDir}/gate.mjs`, suiteCommand: 'npm test' })
+  const plannerCounters = countSuiteDecision(suitePolicyCounters(), plannerLocal.decision, { kind: plannerLocal.kind, blind: plannerLocal.blind })
+  assert.equal(suiteRunPolicy({ role: 'planner', command: 'npm test', taskDir, gatePath: `${taskDir}/gate.mjs`, suiteCommand: 'npm test', ranBefore: plannerCounters.allowance_spent }).decision, 'admit')
+  const builderLocal = suiteRunPolicy({ role: 'builder', command, taskDir, gatePath: `${taskDir}/gate.mjs`, suiteCommand: 'npm test' })
+  const builderCounters = countSuiteDecision(suitePolicyCounters(), builderLocal.decision, { kind: builderLocal.kind, blind: builderLocal.blind })
+  assert.equal(suiteRunPolicy({ role: 'builder', command: 'npm test', taskDir, gatePath: `${taskDir}/gate.mjs`, suiteCommand: 'npm test', suiteRanBefore: builderCounters.suite_allowance_spent }).decision, 'admit')
+})
+
+test('a sibling task dir, another lane task dir and an outside path stay refused', () => {
+  const taskDir = '/tmp/b502-lane/task'
+  const targets = [`${taskDir}-other/probe.test.mjs`, '/tmp/b502-sibling/task/probe.test.mjs', '/etc/probe.test.mjs']
+  for (const role of Object.keys(SUITE_RUN_OWNERSHIP)) {
+    for (const target of targets) {
+      const verdict = suiteRunPolicy({ role, command: `node --test ${target}`, taskDir, gatePath: `${taskDir}/gate.mjs`, suiteCommand: 'npm test', ranBefore: 1, suiteRanBefore: 1 })
+      assert.equal(verdict.decision, 'refuse', `${role}: ${target}`)
+    }
+  }
+})
+
+test('a traversal out of the task dir is refused', () => {
+  const taskDir = '/tmp/b502-lane/task'
+  for (const target of [`${taskDir}/../checkout/evil.test.mjs`, `${taskDir}/./../../evil.test.mjs`]) {
+    const verdict = suiteRunPolicy({ role: 'builder', command: `node --test ${target}`, taskDir, gatePath: `${taskDir}/gate.mjs`, suiteCommand: 'npm test' })
+    assert.equal(verdict.decision, 'refuse', target)
+  }
+})
+
+test('a command mixing an own-task probe with a repo test is fence checked, not admitted', () => {
+  const taskDir = '/tmp/b502-lane/task'
+  const command = `node --test ${taskDir}/probe.test.mjs crew/headless.test.mjs`
+  const options = { role: 'builder', command, taskDir, fence: [], gatePath: `${taskDir}/gate.mjs`, suiteCommand: 'npm test' }
+  assert.equal(recogniseSuiteInvocation(command, options), 'scoped-test')
+  assert.equal(suiteRunPolicy(options).decision, 'refuse')
+})
+
+test('a gate invocation compounded with an own-task probe is a suite run', () => {
+  const taskDir = '/tmp/b502-lane/task'
+  const command = `node ${taskDir}/gate.mjs && node --test ${taskDir}/probe.test.mjs`
+  for (const role of Object.keys(SUITE_RUN_OWNERSHIP)) {
+    const verdict = suiteRunPolicy({ role, command, taskDir, fence: [], gatePath: `${taskDir}/gate.mjs`, suiteCommand: 'npm test', ranBefore: 1, suiteRanBefore: 1 })
+    assert.equal(recogniseSuiteInvocation(command, { taskDir, gatePath: `${taskDir}/gate.mjs`, suiteCommand: 'npm test' }), 'suite', role)
+    assert.equal(verdict.decision, 'refuse', role)
+  }
+})
+
+test('a policy with no task dir classifies exactly as before', () => {
+  const command = 'node --test /tmp/other-task/probe.test.mjs'
+  assert.equal(testTargets(command), null)
+  assert.equal(recogniseSuiteInvocation(command, { gatePath: '/tmp/b502/gate.mjs', suiteCommand: 'npm test' }), 'suite')
+  assert.equal(suiteRunPolicy({ role: 'builder', command, gatePath: '/tmp/b502/gate.mjs', suiteCommand: 'npm test' }).decision, 'refuse')
+})
+
+test('an own-task probe is admitted end to end on headless json from the transports task dir', () => {
+  const f = b416JsonFixture({ role: 'reviewer', policy: { suiteCommand: 'npm test', gatePath: '/tmp/b502/gate.mjs', fence: [] } })
+  try {
+    assert.equal(Object.hasOwn(f.assigned, 'taskDir'), false)
+    f.writeStream(b416ClaudeStream({ turns: 1, command: `node --test ${f.taskDir}/probe.test.mjs` }))
+    writeFileSync(f.assigned.returnPath, JSON.stringify({ assignment_id: f.assigned.id, role: 'reviewer', status: 'done', summary: 'probe run', artifacts: [], details: {} }))
+    const envelope = f.io.wait(f.assigned.returnPath, 60)
+    assert.equal(envelope.status, 'done')
+    assert.equal(f.rows.filter((row) => row.refusal === SUITE_RUN_REFUSAL).length, 0)
+  } finally { f.cleanup() }
+})
+
+test('two declared builder npm test calls across headless json dispatches spend the allowance exactly once', () => {
+  const gatePath = '/tmp/b502/gate.mjs'
+  const policy = { suiteCommand: 'npm test', gatePath, fence: ['crew/'] }
+  const f = b416JsonFixture({ role: 'builder', policy })
+  try {
+    f.writeStream(b416ClaudeStream({ turns: 1, command: 'npm test' }))
+    writeFileSync(f.assigned.returnPath, JSON.stringify({ assignment_id: f.assigned.id, role: 'builder', status: 'done', summary: 'first', artifacts: [], details: {} }))
+    writeFileSync(join(f.taskDir, 'headless', f.assigned.id, 'exit'), '0')
+    assert.equal(f.io.wait(f.assigned.returnPath, 60).status, 'done')
+
+    const second = f.io.assign({ role: 'builder', briefFile: join(f.taskDir, 'brief-again.md'), policy })
+    f.writeStream(b416ClaudeStream({ turns: 1, command: 'npm test' }), second.id)
+    writeFileSync(second.returnPath, JSON.stringify({ assignment_id: second.id, role: 'builder', status: 'done', summary: 'second', artifacts: [], details: {} }))
+    const envelope = f.io.wait(second.returnPath, 60)
+    assert.equal(envelope.status, 'insufficient')
+    assert.equal(envelope.details.suite_refusal.command, 'npm test')
+  } finally { f.cleanup() }
+})
+
+test('a refused suite run is still counted in the turn census on headless json', () => {
+  const f = b416JsonFixture({ role: 'reviewer', policy: { suiteCommand: 'npm test', gatePath: '/tmp/b502/gate.mjs', fence: [] } })
+  try {
+    const command = 'node --test /etc/evil.test.mjs'
+    f.writeStream(b416ClaudeStream({ turns: 1, command }))
+    writeFileSync(f.assigned.returnPath, JSON.stringify({ assignment_id: f.assigned.id, role: 'reviewer', status: 'done', summary: 'probe run', artifacts: [], details: {} }))
+    const envelope = f.io.wait(f.assigned.returnPath, 60)
+    assert.equal(envelope.status, 'insufficient')
+    const census = f.rows.find((row) => row.seat_turn_census)?.seat_turn_census
+    assert.equal(census.suite_runs, 1)
+    assert.equal(census.by_class.test, 1)
+  } finally { f.cleanup() }
+})
+
 test('b416 RV1-1 planner gates remain admitted after a spent suite allowance', () => {
   const gatePath = '/tmp/b416/standalone-gate.mjs'
   const gate = suiteRunPolicy({ role: 'planner', command: `node ${gatePath}`, ranBefore: 1, gatePath })

@@ -636,7 +636,7 @@ export function countSuiteDecision(counters, decision, { kind = null, blind = fa
   if (decision === 'refuse') counters.refused += 1
   else if (decision === 'admit') counters.admitted += 1
   else counters.unrecognised += 1
-  if (decision === 'admit' && kind !== 'gate') counters.allowance_spent += 1
+  if (decision === 'admit' && kind !== 'gate' && kind !== 'task-local') counters.allowance_spent += 1
   // The builder's ONE full-suite run is charged on its own counter: a fenced
   // scoped test must not spend the allowance its Done condition needs.
   if (decision === 'admit' && kind === 'suite') counters.suite_allowance_spent += 1
@@ -717,6 +717,21 @@ const NODE_SAFE_VALUE_OPTIONS = new Map([
   ['--test-skip-pattern', null],
   ['--test-shard', null],
 ])
+// The SPACE-SEPARATED form of a value option. Node accepts both `--opt=value`
+// and `--opt value`, and only the `=` form was ever read: a bare
+// `--test-name-pattern` missed safeOption's `at < 0` test, testTargets returned
+// null, and a scoped run of ONE in-fence file classified `suite`. It killed
+// b501-suitebounce, and every brief for a day told seats to type it (#992).
+//
+// FAIL-CLOSED on the value: non-empty, and never beginning with `-`. This policy
+// does not model Node's argv parser, so a value that could also read as an option
+// is refused rather than guessed at.
+function safeOptionValue(token, value) {
+  const values = NODE_SAFE_VALUE_OPTIONS.get(token)
+  if (values === undefined) return false
+  if (typeof value !== 'string' || value === '' || value.startsWith('-')) return false
+  return values === null ? true : values.has(value)
+}
 function safeOption(token) {
   if (NODE_SAFE_FLAGS.has(token)) return true
   const at = token.indexOf('=')
@@ -736,6 +751,21 @@ const concreteTestFile = (token) => token.endsWith('.test.mjs')
   && !GLOB_CHARS.test(token)
   && !token.startsWith('/')
   && !token.split('/').some((segment) => segment === '.' || segment === '..')
+
+// The lane's OWN task dir is the one absolute place a seat may run a test: it is
+// outside the checkout, outside every sibling lane's world, and nothing written
+// there can reach a commit. The doctrine says VERIFY rather than take on report.
+//
+// The same validation shape crew/drive.mjs#taskLocalPath already uses: a taskDir
+// prefix that ends at a segment boundary, plus a refusal of `.` and `..`. A bare
+// startsWith would admit the sibling `${taskDir}-other/…`; a missing traversal
+// guard would admit `${taskDir}/../checkout/evil.test.mjs`.
+const TRAVERSAL_SEGMENTS = new Set(['.', '..'])
+const taskLocalTestFile = (token, taskDir) => typeof taskDir === 'string' && taskDir !== ''
+  && token.endsWith('.test.mjs')
+  && !GLOB_CHARS.test(token)
+  && token.startsWith(`${taskDir}/`)
+  && !token.split('/').some((segment) => TRAVERSAL_SEGMENTS.has(segment))
 
 // TOKEN-AWARE detection of a Node test invocation, replacing the raw
 // `/\bnode\s+[^\n]*--test\b/` gate. The executable may be PLAIN (`node`), QUOTED
@@ -771,16 +801,20 @@ function isNodeTestInvocation(text) {
 // Node will execute. Fail-closed over the WHOLE command line, not only the part
 // after `--test`: a preload sits BEFORE it (`node --require=./x.mjs --test a.test.mjs`)
 // and a non-option prefix operand is a script Node runs instead of the tests.
-export function testTargets(command) {
+export function testTargets(command, taskDir = null) {
   const tokens = shellTokens(command)
   if (tokens.length === 0) return null
   const targets = []
-  for (const token of tokens.slice(1)) {
+  const rest = tokens.slice(1)
+  for (let index = 0; index < rest.length; index += 1) {
+    const token = rest[index]
     if (token.startsWith('-')) {
-      if (!safeOption(token)) return null
+      if (safeOption(token)) continue
+      if (!safeOptionValue(token, rest[index + 1])) return null
+      index += 1
       continue
     }
-    if (!concreteTestFile(token)) return null
+    if (!concreteTestFile(token) && !taskLocalTestFile(token, taskDir)) return null
     targets.push(token)
   }
   return targets.length > 0 ? targets : null
@@ -898,14 +932,18 @@ function runsDeclaredSuite(tokens, suiteCommand) {
 // letters appeared. A command is what sits at the command word; everywhere else,
 // those letters are data. Heredoc bodies never reach here at all: recogniseInvocation
 // strips them before segmentation, because a heredoc body is data by construction.
-function recogniseSegment(segment, { suiteCommand, gatePath }) {
+function recogniseSegment(segment, { suiteCommand, gatePath, taskDir = null }) {
   const text = String(segment ?? '')
   const bare = text.split(/\s+/).filter(Boolean)
   if (gatePath && bare.length === 2 && bare[0] === 'node' && bare[1] === gatePath) return 'gate'
   const tokens = commandTokens(executableText(text))
   if (suiteCommand && runsDeclaredSuite(tokens, suiteCommand)) return 'suite'
   if (isNpmTestInvocation(tokens)) return 'suite'
-  if (isNodeTestInvocation(text)) return testTargets(text) ? 'scoped-test' : 'suite'
+  if (isNodeTestInvocation(text)) {
+    const targets = testTargets(text, taskDir)
+    if (targets === null) return 'suite'
+    return targets.every((target) => taskLocalTestFile(target, taskDir)) ? 'task-local' : 'scoped-test'
+  }
   return null
 }
 
@@ -944,9 +982,9 @@ export function stripHeredocBodies(command) {
   return kept.join('\n')
 }
 
-function recogniseInvocation(command, { suiteCommand = null, gatePath = null } = {}) {
+function recogniseInvocation(command, { suiteCommand = null, gatePath = null, taskDir = null } = {}) {
   const segments = splitShellCommands(stripHeredocBodies(command))
-  const kinds = segments.map((segment) => recogniseSegment(segment, { suiteCommand, gatePath }))
+  const kinds = segments.map((segment) => recogniseSegment(segment, { suiteCommand, gatePath, taskDir }))
   if (kinds.every((kind) => kind === null)) return { kind: null, blind: false }
   // An EXPLICIT suite segment refuses first: fail-closed beats honest. But the
   // opaque segment beside it is still a blind spot, and `blind` is how it is
@@ -956,6 +994,7 @@ function recogniseInvocation(command, { suiteCommand = null, gatePath = null } =
   // A recognised neighbour may not LAUNDER an opaque one.
   if (kinds.includes(null)) return { kind: null, blind: false }
   if (kinds.includes('scoped-test')) return { kind: 'scoped-test', blind: false }
+  if (kinds.every((kind) => kind === 'task-local')) return { kind: 'task-local', blind: false }
   if (segments.length === 1 && kinds[0] === 'gate') return { kind: 'gate', blind: false }
   return { kind: 'suite', blind: false }
 }
@@ -974,8 +1013,9 @@ function suiteRefusal(role, command, gatePath, kind) {
 
 function suiteAdmit(why, kind) { return { decision: 'admit', reason: why, kind } }
 
-function decideSuiteRun({ role, command, fence, gatePath, ranBefore, suiteRanBefore, suiteCommand, kind }) {
+function decideSuiteRun({ role, command, fence, gatePath, ranBefore, suiteRanBefore, suiteCommand, taskDir, kind }) {
   if (kind === null) return { decision: 'unrecognised', reason: SUITE_RUN_UNRECOGNISED, role, command, kind: null, gate_path: gatePath }
+  if (kind === 'task-local' && SUITE_RUN_OWNERSHIP[role] !== undefined) return suiteAdmit('task-local', kind)
   if (SUITE_RUN_OWNERSHIP[role] === 'never') return suiteRefusal(role, command, gatePath, kind)
   if (SUITE_RUN_OWNERSHIP[role] === 'once') {
     // A STANDALONE gate run is the planner's charter-required baseline, re-measured
@@ -986,7 +1026,7 @@ function decideSuiteRun({ role, command, fence, gatePath, ranBefore, suiteRanBef
   if (SUITE_RUN_OWNERSHIP[role] === 'fenced') {
     if (kind === 'gate') return suiteAdmit('gate', kind)
     if (kind === 'suite') return suiteRefusal(role, command, gatePath, kind)
-    return fencedScopedTest(command, fence) ? suiteAdmit('fenced-test', kind) : suiteRefusal(role, command, gatePath, kind)
+    return fencedScopedTest(command, fence, taskDir) ? suiteAdmit('fenced-test', kind) : suiteRefusal(role, command, gatePath, kind)
   }
   // `fenced-once` is `fenced` plus the ONE full-suite run the builder's Done
   // condition requires. Every brief in this repo makes `npm test` green a
@@ -1003,7 +1043,7 @@ function decideSuiteRun({ role, command, fence, gatePath, ranBefore, suiteRanBef
       if (!isDeclaredSuiteRun(command, suiteCommand)) return suiteRefusal(role, command, gatePath, kind)
       return suiteRanBefore >= 1 ? suiteRefusal(role, command, gatePath, kind) : suiteAdmit('suite-allowance', kind)
     }
-    return fencedScopedTest(command, fence) ? suiteAdmit('fenced-test', kind) : suiteRefusal(role, command, gatePath, kind)
+    return fencedScopedTest(command, fence, taskDir) ? suiteAdmit('fenced-test', kind) : suiteRefusal(role, command, gatePath, kind)
   }
   return suiteRefusal(role, command, gatePath, kind)
 }
@@ -1025,14 +1065,14 @@ function isDeclaredSuiteRun(command, suiteCommand) {
   return matches.length === 1
 }
 
-function fencedScopedTest(command, fence) {
-  const targets = testTargets(command)
+function fencedScopedTest(command, fence, taskDir) {
+  const targets = testTargets(command, taskDir)
   return targets !== null && targets.every((target) => fenceCovers(fence, target))
 }
 
-export function suiteRunPolicy({ role, command, fence = [], gatePath = null, ranBefore = 0, suiteRanBefore = 0, suiteCommand = null } = {}) {
-  const { kind, blind } = recogniseInvocation(command, { suiteCommand, gatePath })
-  return { ...decideSuiteRun({ role, command, fence, gatePath, ranBefore, suiteRanBefore, suiteCommand, kind }), blind }
+export function suiteRunPolicy({ role, command, fence = [], gatePath = null, ranBefore = 0, suiteRanBefore = 0, suiteCommand = null, taskDir = null } = {}) {
+  const { kind, blind } = recogniseInvocation(command, { suiteCommand, gatePath, taskDir })
+  return { ...decideSuiteRun({ role, command, fence, gatePath, ranBefore, suiteRanBefore, suiteCommand, taskDir, kind }), blind }
 }
 
 // Every shell invocation the claude stream ALREADY recorded, in order, with the
@@ -1886,7 +1926,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
         role: run.role, command: call.command,
         fence: run.policy.fence || [], gatePath: run.policy.gatePath || null,
         ranBefore: counters.allowance_spent, suiteRanBefore: counters.suite_allowance_spent,
-        suiteCommand: run.policy.suiteCommand || null,
+        suiteCommand: run.policy.suiteCommand || null, taskDir: taskDir || paths.taskDir,
       })
       countSuiteDecision(counters, verdict.decision, { kind: verdict.kind, blind: verdict.blind })
       // The FIRST refusal decides the dispatch, and the loop still FINISHES: the

@@ -12,7 +12,7 @@ import {
 } from './headless-rpc.mjs'
 import { assignmentLine } from './driver.mjs'
 import { cellFailureKind } from './seat-io.mjs'
-import { CENSUS_ABSENT_CAUSES, SEAT_SUITE_POLICY_EVENT, SUITE_RUN_REFUSAL, SUITE_RUN_UNRECOGNISED, claudeCensus } from './headless.mjs'
+import { CENSUS_ABSENT_CAUSES, SEAT_SUITE_POLICY_EVENT, SUITE_RUN_REFUSAL, SUITE_RUN_UNRECOGNISED, WAIT_POLL_MS, claudeCensus } from './headless.mjs'
 import { scratchDir } from '../test/helpers.mjs'
 
 // The b200-helperdedup envelope, byte-exact: 1921 bytes, schema-shaped, and
@@ -31,11 +31,17 @@ function fixture(options = {}) {
   const dir = options.dir || mkdtempSync(join(tmpdir(), 'headless-rpc-'))
   const paths = { dir, taskDir: join(dir, 'task'), returnsDir: join(dir, 'returns') }
   mkdirSync(paths.taskDir, { recursive: true }); mkdirSync(paths.returnsDir, { recursive: true })
-  const writes = []; const commands = []; const specs = []; const signals = []
+  const writes = []; const commands = []; const specs = []; const signals = []; let sleepCount = 0
   const kill = (pid, signal) => {
     signals.push([pid, signal])
     if (options.kill) return options.kill(pid, signal)
     if (signal !== 0) writeFileSync(join(paths.taskDir, 'headless-rpc', role, 'exit'), '0')
+  }
+  const appendStream = (text) => (options.writeFileSync || writeFileSync)(join(paths.taskDir, 'headless-rpc', role, 'stream.jsonl'), text, { flag: 'a' })
+  const sleep = (ms) => {
+    sleepCount += 1
+    options.sleep?.(ms)
+    options.onSleep?.({ ms, sleepCount, appendStream })
   }
   const deps = {
     pid: options.pid ?? 700, uuid: options.uuid || (() => 'session-1'),
@@ -43,21 +49,167 @@ function fixture(options = {}) {
     writeSync: options.writeSync || ((_fd, line) => writes.push(JSON.parse(line))), closeSync: () => {}, kill,
     existsSync: options.existsSync || ((path) => existsSync(path) || String(path).endsWith('/cmd.fifo')),
     readdirSync: options.readdirSync || readdirSync,
-    writeFileSync: options.writeFileSync || writeFileSync, readFileSync: options.readFileSync || readFileSync, mkdirSync, log: options.log || (() => {}), sleep: options.sleep || (() => {}),
+    writeFileSync: options.writeFileSync || writeFileSync, readFileSync: options.readFileSync || readFileSync, mkdirSync, log: options.log || (() => {}), sleep,
     ...(options.now ? { now: options.now } : {}),
     ...(options.emit ? { emit: options.emit } : {}),
+    ...(options.telemetry ? { censusReducer: options.telemetry } : {}),
   }
   const crew = options.crew || { checkout: dir, members: { [role]: { model: 'model', transport: 'headless-rpc' } } }
   const adapter = { rpcCommand: (spec) => { specs.push(spec); return rpcCommand(spec) } }
   const adapterEntry = options.adapterEntry || (options.grants ? { adapter, grants: options.grants } : adapter)
-  const io = headlessRpcIo({ crew, paths, taskDir: paths.taskDir, checkout: dir, adapters: { [role]: adapterEntry }, bin: '/bin/pi', deps })
-  return { dir, paths, crew, io, writes, commands, specs, signals, role, cleanup: () => { if (!options.dir) rmSync(dir, { recursive: true, force: true }) } }
+  const io = headlessRpcIo({ crew, paths, taskDir: paths.taskDir, checkout: dir, adapters: { [role]: adapterEntry }, bin: '/bin/pi', turnCeilings: options.turnCeilings, deps })
+  return {
+    dir, paths, crew, io, writes, commands, specs, signals, role, sleepCount: () => sleepCount,
+    writeStream: (text) => writeFileSync(join(paths.taskDir, 'headless-rpc', role, 'stream.jsonl'), text),
+    cleanup: () => { if (!options.dir) rmSync(dir, { recursive: true, force: true }) },
+  }
 }
 
 function settle(f, run, frames = [{ type: 'agent_settled' }]) {
   writeFileSync(join(f.paths.taskDir, 'headless-rpc', 'builder', 'stream.jsonl'), `${frames.map((x) => JSON.stringify(x)).join('\n')}\n`)
   writeFileSync(run.returnPath, JSON.stringify({ assignment_id: run.id, role: 'builder', status: 'done' }))
 }
+
+function recordedRpcBoundaryCapture() {
+  return readFileSync(new URL('../tasks/headless-worker/captures/pi-a1-json-baseline.jsonl', import.meta.url), 'utf8')
+}
+
+function splitRecordedRpcCapture() {
+  const capture = recordedRpcBoundaryCapture()
+  const lines = capture.split('\n')
+  const firstTurnEnd = lines.findIndex((line) => {
+    try { return JSON.parse(line)?.type === 'turn_end' } catch { return false }
+  })
+  assert.ok(firstTurnEnd >= 0)
+  const prefix = `${lines.slice(0, firstTurnEnd + 1).join('\n')}\n`
+  const suffix = lines.slice(firstTurnEnd + 1).join('\n')
+  assert.equal(prefix + suffix, capture)
+  assert.equal(rpcCensus(prefix)[0]?.turns, 1)
+  assert.equal(rpcCensus(capture)[0]?.turns, 2)
+  return { capture, prefix, suffix }
+}
+
+function ordinaryRpcEnvelope(id, role = 'builder') {
+  return { assignment_id: id, role, status: 'done', summary: 'recorded ordinary completion', artifacts: [], details: {} }
+}
+
+function lossyRpcTelemetry(census, frame, at) {
+  if (frame?.type === 'turn_end') return census
+  return foldCensusFrame(census, frame, at)
+}
+
+test('B2 RPC emits exactly one turn-ceiling outcome at its recorded boundary', () => {
+  const { prefix, suffix } = splitRecordedRpcCapture()
+  let clock = 0
+  let appended = false
+  const rows = []
+  const f = fixture({
+    turnCeilings: { builder: 1 }, now: () => clock, sleep: (ms) => { clock += ms },
+    onSleep: ({ appendStream, sleepCount, ms }) => {
+      if (sleepCount !== 1) return
+      assert.equal(ms, WAIT_POLL_MS)
+      appendStream(suffix)
+      appended = true
+    },
+    kill: (_pid, signal) => {
+      if (signal === 0) { const err = new Error('gone'); err.code = 'ESRCH'; throw err }
+      writeFileSync(join(f.paths.taskDir, 'headless-rpc', 'builder', 'exit'), '143')
+    },
+    log: (row) => rows.push(row),
+  })
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    writeFileSync(join(f.paths.taskDir, 'headless-rpc', 'builder', 'stream.jsonl'), prefix)
+    const envelope = f.io.wait(run.returnPath, 600)
+    assert.equal(envelope.status, 'insufficient')
+    assert.equal(envelope.details.turn_ceiling.turns, 2)
+    assert.equal(appended, true)
+    assert.equal(clock, WAIT_POLL_MS)
+    assert.ok(clock < 600_000)
+    assert.equal(f.writes.some((frame) => frame.type === 'abort'), true)
+    assert.equal(rows.filter((row) => row.headless_outcome === 'turn-ceiling').length, 1)
+    const outcome = rows.findIndex((row) => row.headless_outcome === 'turn-ceiling')
+    const census = rows.findIndex((row) => row.seat_turn_census)
+    assert.ok(outcome >= 0 && census > outcome)
+  } finally { f.cleanup() }
+})
+
+test('C2 RPC recorded boundary and census disagreement is decided by the boundary', () => {
+  const capture = recordedRpcBoundaryCapture()
+  const rows = []
+  const f = fixture({
+    turnCeilings: { builder: 1 }, telemetry: lossyRpcTelemetry,
+    log: (row) => rows.push(row),
+  })
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    writeFileSync(join(f.paths.taskDir, 'headless-rpc', 'builder', 'stream.jsonl'), capture)
+    const ordinary = ordinaryRpcEnvelope(run.id)
+    const ordinaryBytes = JSON.stringify(ordinary)
+    writeFileSync(run.returnPath, ordinaryBytes)
+    const envelope = f.io.wait(run.returnPath, 600)
+    assert.equal(envelope.status, 'insufficient')
+    assert.equal(envelope.details.turn_ceiling.turns, 2)
+    assert.notEqual(JSON.stringify(envelope), ordinaryBytes)
+    const census = rows.find((row) => row.seat_turn_census)?.seat_turn_census
+    assert.equal(census?.turns, 0)
+    assert.equal(rows.filter((row) => row.headless_outcome === 'turn-ceiling').length, 1)
+    assert.equal(rows.filter((row) => row.seat_turn_census).length, 1)
+  } finally { f.cleanup() }
+})
+
+test('D1 RPC at and under ceiling is byte-identical', () => {
+  const capture = recordedRpcBoundaryCapture()
+  assert.equal(rpcCensus(capture)[0]?.turns, 2)
+  for (const budget of [2, 3]) {
+    let baselineClock = 0
+    let cappedClock = 0
+    const baselineRows = []
+    const cappedRows = []
+    const baseline = fixture({ now: () => baselineClock, sleep: (ms) => { baselineClock += ms }, log: (row) => baselineRows.push(row) })
+    const capped = fixture({ turnCeilings: { builder: budget }, now: () => cappedClock, sleep: (ms) => { cappedClock += ms }, log: (row) => cappedRows.push(row) })
+    try {
+      const baselineRun = baseline.io.assign({ role: 'builder', briefFile: '/brief.md' })
+      const cappedRun = capped.io.assign({ role: 'builder', briefFile: '/brief.md' })
+      baseline.writeStream(capture); capped.writeStream(capture)
+      const baselineEnvelope = ordinaryRpcEnvelope(baselineRun.id)
+      const cappedEnvelope = ordinaryRpcEnvelope(cappedRun.id)
+      writeFileSync(baselineRun.returnPath, JSON.stringify(baselineEnvelope))
+      writeFileSync(cappedRun.returnPath, JSON.stringify(cappedEnvelope))
+      const baselineResult = baseline.io.wait(baselineRun.returnPath, 600)
+      const cappedResult = capped.io.wait(cappedRun.returnPath, 600)
+      assert.equal(JSON.stringify(cappedResult), JSON.stringify(baselineResult))
+      const baselineOutcome = baselineRows.find((row) => row.rpc_outcome)?.rpc_outcome
+      const cappedOutcome = cappedRows.find((row) => row.rpc_outcome)?.rpc_outcome
+      assert.equal(cappedOutcome, baselineOutcome)
+      assert.equal(capped.signals.length, 0)
+      assert.equal(capped.writes.some((frame) => frame.type === 'abort'), false)
+      assert.equal(cappedRows.some((row) => row.headless_outcome === 'turn-ceiling'), false)
+      assert.equal(cappedRows.some((row) => row.seat_turn_ceiling), false)
+    } finally { baseline.cleanup(); capped.cleanup() }
+  }
+})
+
+test('E1 RPC without a configured ceiling is never pre-empted', () => {
+  let clock = 0
+  const rows = []
+  const f = fixture({ now: () => clock, sleep: (ms) => { clock += ms }, log: (row) => rows.push(row) })
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    const ordinary = ordinaryRpcEnvelope(run.id)
+    const ordinaryBytes = JSON.stringify(ordinary)
+    f.writeStream(recordedRpcBoundaryCapture())
+    writeFileSync(run.returnPath, ordinaryBytes)
+    const envelope = f.io.wait(run.returnPath, 600)
+    assert.equal(JSON.stringify(envelope), ordinaryBytes)
+    assert.equal(envelope.details.turn_ceiling, undefined)
+    assert.equal(f.signals.length, 0)
+    assert.equal(f.writes.some((frame) => frame.type === 'abort'), false)
+    assert.equal(rows.some((row) => row.headless_outcome === 'turn-ceiling'), false)
+    assert.equal(rows.some((row) => row.seat_turn_ceiling), false)
+    assert.equal(rows.find((row) => row.rpc_outcome)?.rpc_outcome, 'ok')
+  } finally { f.cleanup() }
+})
 
 function b360Frames() {
   const frames = [{ type: 'agent_start' }]

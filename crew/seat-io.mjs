@@ -28,6 +28,19 @@ import { modelString as piModelString } from './adapters/adapter-pi.mjs'
 import { hostLoad, loadPolicy } from './host-load.mjs'
 import { compareFingerprints, FINGERPRINT_OUTCOMES, fingerprintTree } from './tree-fingerprint.mjs'
 export const DEFAULT_TRANSPORT = 'pane'
+
+// Persisted turn ceilings carry a `source` object beside the role values. The
+// transport boundary consumes only finite role budgets; malformed or absent
+// records stay unconfigured rather than becoming a zero ceiling.
+export function turnCeilingValues(record) {
+  if (!record || typeof record !== 'object' || Array.isArray(record)) return null
+  const values = {}
+  for (const [role, value] of Object.entries(record)) {
+    if (role !== 'source' && Number.isFinite(value)) values[role] = value
+  }
+  return Object.keys(values).length ? values : null
+}
+
 // The pane transport runs claude interactively with inherited stdio: there is no
 // seat stream to observe, so NOTHING here was measured. Every unmeasured cell is
 // null with a closed reason; a zero would claim this transport looked.
@@ -2138,6 +2151,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
   const transportInstances = new Map()
   const transportArgs = {
     crew, paths, taskDir: paths.taskDir, checkout, adapters, bin: null,
+    turnCeilings: turnCeilingValues(crew?.turn_ceilings),
     deps: {
       log: (obj) => logLine(join(paths.dir, 'journal.jsonl'), obj),
       emit: (event) => { try { io.emit?.(event) } catch { /* never load-bearing */ } },

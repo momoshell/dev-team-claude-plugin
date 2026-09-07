@@ -5,7 +5,7 @@ import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 import {
-  attributeExit, censusFileOperands, classifyRun, claudeCensus, classifyToolCall, decodeExitStatus, degradedSignals, foldUsage, headlessIo, parseStream,
+  attributeExit, censusFileOperands, classifyRun, claudeCensus, claudeTurnBoundaryCount, classifyToolCall, decodeExitStatus, degradedSignals, foldUsage, headlessIo, parseStream,
   CENSUS_ABSENT_CAUSES, PROVIDER_FAILURE_KINDS, providerFailureKind, providerResetInstant, providerRetryDecision,
   PROVIDER_BACKOFF_LADDER_MS, PROVIDER_RESET_ABSENT, PROVIDER_RESET_SETTLE_MS, PROVIDER_RETRY_ACTIONS,
   PARK_BEAT_EVENT, PARK_BEAT_MS, PARK_BEAT_SOURCE, PROVIDER_RETRY_MAX, PROVIDER_RETRY_TOTAL_WAIT_MS, recogniseProviderCondition, recogniseSeatRefusal, TOOL_CLASSES, WAIT_POLL_MS,
@@ -2471,34 +2471,185 @@ function b416ClaudeStream({ turns = 2, command = null } = {}) {
   return `${frames.map((frame) => JSON.stringify(frame)).join('\n')}\n`
 }
 
-function b416JsonFixture({ role = 'builder', policy = null, fallback = null, onSleep = null } = {}) {
+function b416JsonFixture({ role = 'builder', policy = null, fallback = null, onSleep = null, turnCeilings = null, telemetry = null, writeExitOnTerm = false } = {}) {
   const dir = scratchDir('b416-json-')
   const taskDir = join(dir, 'task'); const returnsDir = join(dir, 'returns')
   mkdirSync(taskDir); mkdirSync(returnsDir)
-  const rows = []; const kills = []; const state = { clock: 0 }
+  const rows = []; const kills = []; const state = { clock: 0, sleeps: 0 }
   const crew = { checkout: dir, members: { [role]: { model: 'sonnet', transport: 'headless-json', ...(fallback ? { fallback } : {}) } } }
   const adapter = { headlessCommand: (spec) => ({ bin: '/worker/bin', args: ['-p', spec.prompt], env: {} }) }
+  let assigned = null
   const io = headlessIo({
     crew, paths: { dir, taskDir, returnsDir }, taskDir, checkout: dir,
-    adapters: { [role]: { adapter } }, bin: '/worker/bin',
+    adapters: { [role]: { adapter } }, bin: '/worker/bin', turnCeilings,
     deps: {
+      ...(telemetry ? { parseStream: telemetry } : {}),
       spawn: () => ({ pid: 4242, unref() {} }), uuid: () => 'b416-json-session',
       now: () => state.clock,
       sleep: (ms) => {
         state.clock += ms
-        onSleep?.({ appendStream: (text, id = assigned.id) => writeFileSync(join(taskDir, 'headless', id, 'stream.jsonl'), text, { flag: 'a' }) })
+        state.sleeps += 1
+        onSleep?.({ appendStream: (text, id = assigned.id) => writeFileSync(join(taskDir, 'headless', id, 'stream.jsonl'), text, { flag: 'a' }), clock: state.clock, sleepCount: state.sleeps, ms })
       },
-      kill: (pid, signal) => { kills.push([pid, signal]); const err = new Error('gone'); err.code = 'ESRCH'; throw err },
+      kill: (pid, signal) => {
+        kills.push([pid, signal])
+        if (writeExitOnTerm && signal === 'SIGTERM') {
+          writeFileSync(join(taskDir, 'headless', assigned.id, 'exit'), '143')
+          return
+        }
+        const err = new Error('gone'); err.code = 'ESRCH'; throw err
+      },
       log: (row) => rows.push(row),
     },
   })
-  const assigned = io.assign({ role, briefFile: join(taskDir, 'brief.md'), policy })
+  assigned = io.assign({ role, briefFile: join(taskDir, 'brief.md'), policy })
   return {
     dir, taskDir, returnsDir, crew, io, rows, kills, state, assigned, role,
     writeStream: (text, id = assigned.id) => writeFileSync(join(taskDir, 'headless', id, 'stream.jsonl'), text),
     cleanup: () => rmSync(dir, { recursive: true, force: true }),
   }
 }
+
+function recordedClaudeBoundaryCapture() {
+  return readFileSync(new URL('../tasks/headless-worker/captures/a-baseline.jsonl', import.meta.url), 'utf8')
+}
+
+function splitRecordedClaudeCapture() {
+  const capture = recordedClaudeBoundaryCapture()
+  const lines = capture.split('\n')
+  const firstTool = lines.findIndex((line) => {
+    try {
+      const frame = JSON.parse(line)
+      return frame?.type === 'assistant' && Array.isArray(frame.message?.content) && frame.message.content.some((block) => block?.type === 'tool_use')
+    } catch { return false }
+  })
+  assert.ok(firstTool >= 0)
+  const prefix = `${lines.slice(0, firstTool + 1).join('\n')}\n`
+  const suffix = lines.slice(firstTool + 1).join('\n')
+  assert.equal(prefix + suffix, capture)
+  assert.equal(claudeTurnBoundaryCount(prefix), 1)
+  assert.equal(claudeTurnBoundaryCount(capture), 2)
+  return { capture, prefix, suffix }
+}
+
+function ordinaryJsonEnvelope(id, role = 'builder') {
+  return { assignment_id: id, role, status: 'done', summary: 'recorded ordinary completion', artifacts: [], details: {} }
+}
+
+function lossyClaudeTelemetry(path, read, exists) {
+  const parsed = parseStream(path, read, exists)
+  assert.ok(parsed.census && typeof parsed.census === 'object')
+  return { ...parsed, census: { ...parsed.census, turns: 0 } }
+}
+
+test('A1 JSON stops on the recorded crossing before the wait deadline', () => {
+  const { prefix, suffix } = splitRecordedClaudeCapture()
+  let appended = false
+  const f = b416JsonFixture({
+    turnCeilings: { builder: 1 },
+    onSleep: ({ appendStream, sleepCount, ms }) => {
+      if (sleepCount !== 1) return
+      assert.equal(ms, WAIT_POLL_MS)
+      appendStream(suffix)
+      appended = true
+    },
+  })
+  try {
+    f.writeStream(prefix)
+    const envelope = f.io.wait(f.assigned.returnPath, 60)
+    assert.equal(envelope.status, 'insufficient')
+    assert.equal(appended, true)
+    assert.equal(f.state.sleeps, 3)
+    assert.equal(f.state.clock, WAIT_POLL_MS * 3)
+    assert.ok(f.state.clock < 60_000)
+    assert.ok(f.kills.some(([, signal]) => signal === 'SIGTERM'))
+  } finally { f.cleanup() }
+})
+
+test('B1 JSON emits exactly one turn-ceiling outcome across repeated observation', () => {
+  const f = b416JsonFixture({ turnCeilings: { builder: 1 }, writeExitOnTerm: true })
+  try {
+    const capture = recordedClaudeBoundaryCapture()
+    f.writeStream(capture)
+    const first = f.io.wait(f.assigned.returnPath, 60)
+    const second = f.io.wait(f.assigned.returnPath, 60)
+    assert.equal(first.status, 'insufficient')
+    assert.equal(first.details.turn_ceiling.turns, 2)
+    assert.equal(JSON.stringify(second), JSON.stringify(first))
+    const outcomes = f.rows.filter((row) => row.headless_outcome === 'turn-ceiling')
+    const censuses = f.rows.filter((row) => row.seat_turn_census)
+    assert.equal(outcomes.length, 1)
+    assert.equal(censuses.length, 1)
+    assert.ok(f.rows.indexOf(censuses[0]) > f.rows.indexOf(outcomes[0]))
+  } finally { f.cleanup() }
+})
+
+test('C1 JSON recorded boundary and census disagreement is decided by the boundary', () => {
+  const capture = recordedClaudeBoundaryCapture()
+  const providerBoundary = claudeTurnBoundaryCount(capture)
+  assert.equal(providerBoundary, 2)
+  const f = b416JsonFixture({ turnCeilings: { builder: 1 }, telemetry: lossyClaudeTelemetry })
+  try {
+    f.writeStream(capture)
+    const ordinary = ordinaryJsonEnvelope(f.assigned.id, f.role)
+    const ordinaryBytes = JSON.stringify(ordinary)
+    writeFileSync(f.assigned.returnPath, ordinaryBytes)
+    const streamPath = join(f.taskDir, 'headless', f.assigned.id, 'stream.jsonl')
+    assert.equal(lossyClaudeTelemetry(streamPath, readFileSync, existsSync).census.turns, 0)
+    const envelope = f.io.wait(f.assigned.returnPath, 60)
+    assert.equal(envelope.status, 'insufficient')
+    assert.equal(envelope.details.turn_ceiling.turns, providerBoundary)
+    assert.notEqual(JSON.stringify(envelope), ordinaryBytes)
+    const census = f.rows.find((row) => row.seat_turn_census)?.seat_turn_census
+    assert.equal(census?.turns, 0)
+    const outcome = f.rows.findIndex((row) => row.headless_outcome === 'turn-ceiling')
+    const censusAt = f.rows.findIndex((row) => row.seat_turn_census)
+    assert.ok(outcome >= 0 && censusAt > outcome)
+  } finally { f.cleanup() }
+})
+
+test('D1 JSON at and under ceiling is byte-identical', () => {
+  const capture = recordedClaudeBoundaryCapture()
+  const turns = claudeTurnBoundaryCount(capture)
+  assert.equal(turns, 2)
+  for (const budget of [turns, turns + 1]) {
+    const baseline = b416JsonFixture()
+    const capped = b416JsonFixture({ turnCeilings: { builder: budget } })
+    try {
+      baseline.writeStream(capture); capped.writeStream(capture)
+      const baselineEnvelope = ordinaryJsonEnvelope(baseline.assigned.id, baseline.role)
+      const cappedEnvelope = ordinaryJsonEnvelope(capped.assigned.id, capped.role)
+      writeFileSync(baseline.assigned.returnPath, JSON.stringify(baselineEnvelope))
+      writeFileSync(capped.assigned.returnPath, JSON.stringify(cappedEnvelope))
+      const baselineEnv = baseline.io.wait(baseline.assigned.returnPath, 60)
+      const cappedEnv = capped.io.wait(capped.assigned.returnPath, 60)
+      assert.equal(JSON.stringify(cappedEnv), JSON.stringify(baselineEnv))
+      const baselineOutcome = baseline.rows.find((row) => row.headless_outcome)?.headless_outcome
+      const cappedOutcome = capped.rows.find((row) => row.headless_outcome)?.headless_outcome
+      assert.equal(cappedOutcome, baselineOutcome)
+      assert.equal(capped.kills.length, 0)
+      assert.equal(capped.rows.some((row) => row.headless_outcome === 'turn-ceiling'), false)
+      assert.equal(capped.rows.some((row) => row.seat_turn_ceiling), false)
+    } finally { baseline.cleanup(); capped.cleanup() }
+  }
+})
+
+test('E1 JSON without a configured ceiling is never pre-empted', () => {
+  const f = b416JsonFixture()
+  try {
+    const ordinary = ordinaryJsonEnvelope(f.assigned.id, f.role)
+    const ordinaryBytes = JSON.stringify(ordinary)
+    f.writeStream(recordedClaudeBoundaryCapture())
+    writeFileSync(f.assigned.returnPath, ordinaryBytes)
+    const envelope = f.io.wait(f.assigned.returnPath, 60)
+    assert.equal(JSON.stringify(envelope), ordinaryBytes)
+    assert.equal(envelope.details.turn_ceiling, undefined)
+    assert.equal(f.kills.length, 0)
+    assert.equal(f.rows.some((row) => row.seat_turn_ceiling), false)
+    assert.equal(f.rows.some((row) => row.headless_outcome === 'turn-ceiling'), false)
+    assert.equal(f.rows.filter((row) => row.headless_outcome).length, 1)
+  } finally { f.cleanup() }
+})
 
 test('b416 K1 JSON scanning observes an opaque Bash frame flushed during termination grace', () => {
   const gatePath = '/tmp/b416/gate.mjs'

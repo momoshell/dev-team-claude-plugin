@@ -13,7 +13,7 @@ import { spawn as cpSpawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 
 import { assignmentDelivery, assignmentPrompt } from './driver.mjs'
-import { shq, classifyRun, readEnvelopeOrThrow, updateCrewJson, attributeExit, decodeExitStatus, stderrTail, classifyToolCall, TOOL_CLASSES, CENSUS_ABSENT_CAUSES, censusFileOperands, suitePolicyCounters, countSuiteDecision, suiteRunPolicy, suitePolicyRow, suiteRefusalRow, suiteRefusalEnvelope } from './headless.mjs'
+import { shq, classifyRun, readEnvelopeOrThrow, updateCrewJson, attributeExit, decodeExitStatus, stderrTail, classifyToolCall, TOOL_CLASSES, CENSUS_ABSENT_CAUSES, censusFileOperands, suitePolicyCounters, countSuiteDecision, suiteRunPolicy, suitePolicyRow, suiteRefusalRow, suiteRefusalEnvelope, turnCeilingBreached, turnCeilingEnvelope, turnCeilingDetail } from './headless.mjs'
 import { reclaimStore, PHASES, VERDICTS, EVIDENCE_KINDS, LIVENESS } from './reclaim.mjs'
 import { readJsonTri } from './json-leaf.mjs'
 import { PI_BUILTIN_TOOLS, PI_SUBAGENT_TOOL, translateDeny } from './adapters/adapter-pi.mjs'
@@ -384,7 +384,7 @@ export function emptyTurnEnvelope({ id, role, returnPath }) {
   }
 }
 
-export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, deps = {} }) {
+export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, turnCeilings = null, deps = {} }) {
   const spawn = deps.spawn || cpSpawn
   const open = deps.openSync || fsOpenSync
   const writeFd = deps.writeSync || fsWriteSync
@@ -404,6 +404,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
     Atomics.wait(new Int32Array(sab), 0, 0, ms)
   })
   const pid = deps.pid ?? process.pid
+  const telemetryFold = deps.censusReducer || deps.foldCensusFrame || deps.telemetryReducer || (typeof deps.telemetry === 'function' ? deps.telemetry : foldCensusFrame)
   const injectedLog = deps.log
   const crewDeps = { existsSync: exists, readFileSync: read, writeFileSync: write, renameSync: rename, unlinkSync: unlink, mkdirSync: mkdir, readdirSync: readdir, uuid, now, sleep, pid }
   const emit = deps.emit
@@ -464,27 +465,27 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
     neverLoadBearing(() => {
       const observed = turn.observed || {}
       const noFrames = observed.frames === 0
-      const census = finaliseCensus(observed.census || newCensus())
-      const absentReason = noFrames ? CENSUS_ABSENT_CAUSES.no_frames : census.clock_absent
+      const census = finaliseCensus(observed.census || null)
+      const absentReason = noFrames ? CENSUS_ABSENT_CAUSES.no_frames : (census?.clock_absent ?? CENSUS_ABSENT_CAUSES.stream_absent)
       log({
         at: now(),
         seat_turn_census: {
           role: turn.role,
           dispatch_id: turn.id,
           transport: 'headless-rpc',
-          turns: noFrames ? null : census.turns,
-          tool_calls: noFrames ? null : census.tool_calls,
-          distinct_files_read: noFrames ? null : census.distinct_files_read,
-          suite_runs: noFrames ? null : census.suite_runs,
-          re_reads: noFrames ? null : census.re_reads,
-          by_class: noFrames ? null : census.by_class,
-          in_tool_ms: noFrames ? null : census.in_tool_ms,
-          out_of_tool_ms: noFrames ? null : census.out_of_tool_ms,
-          span_ms: noFrames ? null : census.span_ms,
-          tool_spans_matched: noFrames ? null : census.tool_spans_matched,
-          tool_spans_unmatched: noFrames ? null : census.tool_spans_unmatched,
-          tool_spans_same_poll: noFrames ? null : census.tool_spans_same_poll,
-          bash_reads_absent_reason: noFrames ? null : census.bash_reads_absent_reason,
+          turns: noFrames ? null : census?.turns ?? null,
+          tool_calls: noFrames ? null : census?.tool_calls ?? null,
+          distinct_files_read: noFrames ? null : census?.distinct_files_read ?? null,
+          suite_runs: noFrames ? null : census?.suite_runs ?? null,
+          re_reads: noFrames ? null : census?.re_reads ?? null,
+          by_class: noFrames ? null : census?.by_class ?? null,
+          in_tool_ms: noFrames ? null : census?.in_tool_ms ?? null,
+          out_of_tool_ms: noFrames ? null : census?.out_of_tool_ms ?? null,
+          span_ms: noFrames ? null : census?.span_ms ?? null,
+          tool_spans_matched: noFrames ? null : census?.tool_spans_matched ?? null,
+          tool_spans_unmatched: noFrames ? null : census?.tool_spans_unmatched ?? null,
+          tool_spans_same_poll: noFrames ? null : census?.tool_spans_same_poll ?? null,
+          bash_reads_absent_reason: noFrames ? null : census?.bash_reads_absent_reason ?? null,
           absent_reason: absentReason,
         },
       })
@@ -560,6 +561,12 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
       if (!frame || typeof frame !== 'object') continue
       if (seat.turn) {
         seat.turn.state.sawJson = true
+        // This provider-boundary counter is independent from the best-effort
+        // census reducer: one tool-bearing turn_end is one turn, and a new
+        // turn_start clears the per-turn tool state.
+        if (frame.type === 'turn_start') seat.turn.providerBoundary.calls = 0
+        if (frame.type === 'tool_execution_start') seat.turn.providerBoundary.calls += 1
+        if (frame.type === 'turn_end' && seat.turn.providerBoundary.calls > 0) seat.turn.providerBoundary.turns += 1
         if (frame.type === 'agent_settled') seat.turn.state.settled = true
         // agent_end is only the conversation boundary; it is not completion.
         if (frame.type === 'agent_end') seat.turn.state.ended = true
@@ -591,7 +598,9 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
       // b360 corpse's real last frame is lost again.
       obs.lastType = typeof frame.type === 'string' ? frame.type : null
       obs.lastAt = at
-      foldCensusFrame(obs.census, frame, at)
+      const folded = telemetryFold(obs.census, frame, at)
+      if (folded === null) obs.census = null
+      else if (folded && folded !== obs.census) obs.census = folded
       // MUTATION A2: count agent_start rather than turn_start and the turn
       // index collapses to 1 — "turn 13 of a 10-minute turn" stops being said.
       if (frame.type === 'turn_start') obs.turns += 1
@@ -750,7 +759,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
     seat.readOffset = offset; seat.rest = Buffer.alloc(0); seat.responses.clear()
     const delivery = assignmentDelivery({ briefFile, readFileSync: read })
     const prompt = assignmentPrompt({ id, role, briefFile, returnPath, taskDir: taskDir || paths.taskDir, ...delivery }) + (note ? `\n${note}` : '')
-    const turn = { id, runId, role, returnPath, prompt, retries: 0, offset, usage: null, state: { sawJson: false, settled: false, ended: false }, observed: { frames: 0, turns: 0, lastType: null, lastAt: null, lastTool: null, lastToolAt: null, census: newCensus() }, censusJournalled: false, sentAt: now(), policy: policy ?? null, seenToolCalls: new Set(), policyReported: false, pendingSuiteRefusal: null, enforced: false }
+    const turn = { id, runId, role, returnPath, prompt, retries: 0, offset, usage: null, state: { sawJson: false, settled: false, ended: false }, providerBoundary: { calls: 0, turns: 0 }, observed: { frames: 0, turns: 0, lastType: null, lastAt: null, lastTool: null, lastToolAt: null, census: newCensus() }, censusJournalled: false, sentAt: now(), policy: policy ?? null, seenToolCalls: new Set(), policyReported: false, pendingSuiteRefusal: null, enforced: false, ceilingDecision: null }
     seat.turn = turn
     const promptId = send(seat, { type: 'prompt', message: prompt, id: runId }, 'prompt')
     log({ at: now(), event: 'assignment-delivery', role, assignment_id: id, transport: 'headless-rpc', mode: delivery.delivery, brief_bytes: delivery.brief_bytes, brief_size_measured: delivery.brief_bytes !== null, brief_size_unmeasured_reason: delivery.unmeasured_reason })
@@ -937,9 +946,40 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
   // the same read as a terminal response — or during abort's own polling — is
   // still decided here. `enforced` latches: two call sites, at most one decision.
   function enforceRpcBeforeEnvelope(seat, turn, returnPath, { alreadyEnded = false, discardSeat = false } = {}) {
-    if (!turn || turn.enforced) return null
+    if (!turn) return null
+    if (turn.enforced) return turn.ceilingDecision || null
+    const budget = turnCeilings?.[turn.role]
+    const crossed = Number.isFinite(budget) && turnCeilingBreached(turn.providerBoundary.turns, budget)
     const refusal = turn.pendingSuiteRefusal
-    if (!refusal) return null
+    if (!crossed && !refusal) return null
+    if (crossed) {
+      // The ceiling is stronger than suite policy and any envelope already on
+      // disk. Latch it before abort so late frames cannot replace the decision.
+      turn.enforced = true
+      let evictSeat = alreadyEnded && discardSeat
+      if (!alreadyEnded) {
+        try { abort(turn.role, { settleMs: ABORT_SETTLE_MS }) }
+        catch (err) {
+          log({ at: now(), event: 'rpc-enforcement-abort-failed', role: turn.role, id: turn.id, stage: err?.stage ?? null, error: String(err?.message ?? err) })
+        }
+        const proof = turn.state.settled ? null : proveGroupDead(seat)
+        evictSeat = !!proof && proof.liveness !== LIVENESS.ALIVE
+      }
+      const turns = turn.providerBoundary.turns
+      const envelope = turnCeilingEnvelope({ id: turn.id, role: turn.role, returnPath, turns, budget })
+      turn.ceilingDecision = envelope
+      // Keep the terminal outcome separate from the best-effort census row.
+      log({ at: now(), headless_outcome: 'turn-ceiling', role: turn.role, id: turn.id, turns, budget })
+      emitUsage(turn, seat, turn.usage)
+      log(turnCeilingDetail({ at: now(), role: turn.role, id: turn.id, turns, budget }))
+      journalTurnCensus(turn, seat)
+      finishTurn(seat)
+      if (evictSeat) {
+        try { closeFd(seat.fd) } catch { /* the fd belongs to a group that is gone */ }
+        seats.delete(seat.role)
+      }
+      return envelope
+    }
     turn.enforced = true
     // THE SEAT'S FATE, decided by the SAME rule HEAD's timeout teardown already
     // uses (crew/headless-rpc.mjs:952-965). The decided refusal is retained even

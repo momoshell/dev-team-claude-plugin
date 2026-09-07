@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import {
   COLD_PATH_FALLBACK_ROOTS, COLD_PATH_MIN_SHARED, cellFailureKind, claudeRefusalFrames, claudeTranscriptPaths, coldGuardNames, coldPathCollision, coldPathRoots, coldRootCollision, DESCENDANT_STORE_DIRS, descendantCapture, emitAdapter, HEADLESS_RPC_TRANSPORT, HEADLESS_TRANSPORT, LIVENESS_MISSES_TO_DIE, LIVENESS_PROBE_MS, neutralColdPath, REASK_SETTLE_POLLS, REASK_TIMEOUT_S, SEAT_DIED_STAGE, SEAT_LIVENESS_EVENT, SUBSTRATE_GRACE_MS, paneRetryFrame, piRefusalFrames, piSessionDir, piTranscriptPaths,
-  providerConditionDetail, paneUsageFrames, paneSeatPolicyRow, readEnvelopeFile, reaskDecision, recogniseProviderRetry, saveCrew, seatIo, seatRetryDecision, settleSeatTeardown,
+  providerConditionDetail, paneUsageFrames, paneSeatPolicyRow, readEnvelopeFile, reaskDecision, recogniseProviderRetry, saveCrew, seatIo, seatRetryDecision, settleSeatTeardown, turnCeilingValues,
   SEAT_RETRY_EVENTS, SEAT_RETRY_KINDS, SEAT_RETRY_MAX,
   SEAT_REFUSAL_STAGE, SILENCE_REASK_MS, TRANSCRIPT_STALE_MS, WAIT_POLL_MS, waitForEnvelope, waitState, transcriptGrowth, silenceReaskDecision,
 } from './seat-io.mjs'
@@ -865,6 +865,35 @@ test('a seatless crew remains a measured zero in the transport journal', () => {
     assert.equal(lines.length, 1)
     assert.equal(lines[0].seats, 0)
     assert.deepEqual(Object.keys(lines[0]).sort(), ['at', 'channel', 'declared', 'event', 'init_failed', 'seats', 'transports'])
+  })
+})
+
+test('persisted finite turn ceilings reach JSON and RPC factories while metadata and absence stay inert', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    const seen = []
+    const transport = (name) => ({
+      assign: ({ role }) => ({ id: `d-${name}-${role}`, returnPath: join(fixture.paths.returnsDir, `${name}.${role}.json`) }),
+      wait: () => ({ status: 'done' }),
+    })
+    const crew = {
+      turn_ceilings: { planner: 7, reviewer: 9, source: { planner: 'flag' }, ignored: NaN },
+      members: { planner: { transport: 'headless-json' }, reviewer: { transport: 'headless-rpc' } },
+    }
+    const io = seatIo(crew, fixture.paths, fixture.repoDir, null, null, {}, {
+      resolveWorkerBin: () => '/worker/bin',
+      headlessIo: (args) => { seen.push(['json', args.turnCeilings]); return transport('json') },
+      headlessRpcIo: (args) => { seen.push(['rpc', args.turnCeilings]); return transport('rpc') },
+    })
+    io.assign({ role: 'planner', briefFile: '/brief.md' })
+    io.assign({ role: 'reviewer', briefFile: '/brief.md' })
+    assert.deepEqual(seen, [['json', { planner: 7, reviewer: 9 }], ['rpc', { planner: 7, reviewer: 9 }]])
+
+    const absent = []
+    const noRecord = seatIo({ members: { planner: { transport: 'headless-json' } } }, fixture.paths, fixture.repoDir, null, null, {}, {
+      resolveWorkerBin: () => '/worker/bin', headlessIo: (args) => { absent.push(args.turnCeilings); return transport('absent') },
+    })
+    noRecord.assign({ role: 'planner', briefFile: '/brief.md' })
+    assert.deepEqual(absent, [null])
   })
 })
 

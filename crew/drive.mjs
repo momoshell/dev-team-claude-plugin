@@ -6616,8 +6616,9 @@ export function deferredCreatesBounceLines(round, cmd, rows, planPath) {
     `Plan: ${planPath}`,
   ]
 }
+const VALIDATION_LANE_FORM = 'node --test <file> <file> <file>'
 export function validationLaneWhy(resolved, final) {
-  return `${VALIDATION_LANE_UNLOADABLE}: the plan's validation_lane names ${resolved.refused.length} input(s) node --test cannot run — ${resolved.refused.map((row) => `${row.input} (${row.why})`).join('; ')}${final ? '; on the final plan round there is no revision left to bounce it to' : ''}`
+  return `${VALIDATION_LANE_UNLOADABLE}: the plan's validation_lane names ${resolved.refused.length} input(s) node --test cannot run — ${resolved.refused.map((row) => `${row.input} (${row.why})`).join('; ')}${final ? '; on the final plan round there is no revision left to bounce it to' : ''}. Use one invocation with several explicit files: ${VALIDATION_LANE_FORM}.`
 }
 export function validationLaneBounceLines(round, cmd, resolved, briefFile) {
   return [

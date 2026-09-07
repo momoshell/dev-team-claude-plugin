@@ -55,6 +55,8 @@ trailer — both are worse than filling them in.
              "carve_verdict": "proceed" | "carve",
              "carve_slices": [{ "summary": "...", "files_in_scope": [...] }] }
 
+`details.validation_lane` is ONE command: it must contain no `&&`, `;`, `|`, redirection, or glob, and `node --test` accepts several files as `node --test <file> <file> <file>`.
+
 files_in_scope is the scope GATE: the driver diffs the builder's changes
 against it with git and bounces anything outside. A missing or empty list
 escalates the whole task — the gate cannot be skipped. Paths repo-relative,

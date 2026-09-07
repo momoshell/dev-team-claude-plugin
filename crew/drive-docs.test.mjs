@@ -124,6 +124,15 @@ test('the planner charter tells the planner to grep the changed file’s own pat
   assert.doesNotMatch(discovery, /production/)
 })
 
+test('F1', () => {
+  const charter = readFileSync(new URL('./roles/planner.md', import.meta.url), 'utf8')
+  const sentence = '`details.validation_lane` is ONE command: it must contain no `&&`, `;`, `|`, redirection, or glob, and `node --test` accepts several files as `node --test <file> <file> <file>`.'
+  assert.ok(charter.includes(sentence))
+  for (const token of ['ONE command', '&&', ';', '|', 'redirection', 'glob', 'accepts several files', 'node --test <file> <file> <file>']) {
+    assert.ok(charter.includes(token), token)
+  }
+})
+
 // The file nobody pinned is the file that rotted: tech-lead.md carried the whole
 // plan-check doctrine and no test read a byte of it (#698).
 test('the tech-lead charter documents envelope custody and the residual it cannot type', () => {

@@ -17,6 +17,7 @@ import {
   splitShellCommands, executableText, stripHeredocBodies, commandTokens,
   suitePolicyCounters, countSuiteDecision, suitePolicyReport, SUITE_RUN_OWNERSHIP, SUITE_RUN_OWNERSHIP_KINDS,
 } from './headless.mjs'
+import { assignmentLine, assignmentPrompt } from './driver.mjs'
 import { cellFailureKind, HEADLESS_TRANSPORT, seatIo } from './seat-io.mjs'
 import { DRIVER_GONE_PERIODS, HEARTBEAT_PERIOD_MS } from '../scripts/factory/lane-watch.mjs'
 import { ROOT, scratchDir, startFileWriter } from '../test/helpers.mjs'
@@ -266,6 +267,94 @@ test('budget classification is conjunctive and unreadable streams carry no refus
 test('classifyRun reaches budget-refused only when the caller names evidence', () => {
   assert.equal(classifyRun({ exitCode: 1, terminal: true, sawJson: true, envelope: null, timedOut: false }), 'no-envelope')
   assert.equal(classifyRun({ exitCode: 1, terminal: true, sawJson: true, envelope: null, timedOut: false, budgetRefused: true }), 'budget-refused')
+})
+
+test('RV1-1 inline brief head preserves outward reading guidance', () => {
+  const prompt = assignmentPrompt({
+    id: 'p1', role: 'planner', briefFile: '/task/brief.md', returnPath: '/returns/p.json', taskDir: '/task',
+    delivery: 'inline', briefText: '# body\n',
+  })
+  assert.match(prompt, /^ASSIGNMENT p1: your brief body follows below verbatim — do not re-read the brief file; if the brief itself names a plan, a diff or files, read those\./)
+  assert.doesNotMatch(prompt, /nothing to read first/)
+  assert.ok(prompt.includes('--- BRIEF BEGINS ---'))
+  assert.ok(prompt.includes('--- BRIEF ENDS ---'))
+})
+
+test('A2 headless json assignment carries the brief body inline', () => {
+  const f = fixture()
+  const briefText = '# JSON inline brief\nKeep this exact body: café 🚀.\n'
+  const briefFile = join(f.taskDir, 'brief.md')
+  writeFileSync(briefFile, briefText)
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile })
+    const prompt = f.calls[0].prompt
+    assert.ok(prompt.includes(briefText))
+    assert.doesNotMatch(prompt, /read your brief at/)
+    assert.equal(run.id, 'd1')
+  } finally { f.cleanup() }
+})
+
+test('B2 headless json journals the measured delivery mode per assignment', () => {
+  const logs = []
+  const f = fixture({ log: (row) => logs.push(row) })
+  const briefText = 'measured json brief — café 🚀\n'
+  const briefFile = join(f.taskDir, 'brief.md')
+  writeFileSync(briefFile, briefText)
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile })
+    const rows = logs.filter((row) => row.event === 'assignment-delivery')
+    assert.equal(rows.length, 1)
+    assert.deepEqual(rows[0], {
+      at: rows[0].at,
+      event: 'assignment-delivery',
+      role: 'builder',
+      assignment_id: run.id,
+      transport: 'headless-json',
+      mode: 'inline',
+      brief_bytes: Buffer.byteLength(briefText, 'utf8'),
+      brief_size_measured: true,
+      brief_size_unmeasured_reason: null,
+    })
+
+    const losingLogs = []
+    let losing = null
+    let planted = false
+    losing = timedFixture({
+      log: (row) => losingLogs.push(row),
+      kill: () => true,
+      mkdirSync: (path, options) => {
+        if (!planted && String(path).endsWith('/headless/d2')) {
+          planted = true
+          plantReservation(losing)
+        }
+        return mkdirSync(path, options)
+      },
+    })
+    try {
+      const first = losing.io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
+      writeFileSync(join(losing.taskDir, 'headless', first.id, 'exit'), '0')
+      losingLogs.length = 0
+      assert.throws(() => losing.io.assign({ role: 'builder', briefFile: '/tmp/next.md' }), (err) => err.stage === 'headless-session-busy')
+      assert.equal(losingLogs.filter((row) => row.event === 'assignment-delivery').length, 0)
+    } finally { losing.cleanup() }
+  } finally { f.cleanup() }
+})
+
+test('C2 headless json records an unreadable brief as unmeasured path delivery', () => {
+  const logs = []
+  const f = fixture({ log: (row) => logs.push(row) })
+  const briefFile = join(f.taskDir, 'missing-brief.md')
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile })
+    const prompt = f.calls[0].prompt
+    assert.equal(prompt, assignmentLine({ id: run.id, role: 'builder', briefFile, returnPath: run.returnPath, taskDir: f.taskDir }))
+    const rows = logs.filter((row) => row.event === 'assignment-delivery')
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].mode, 'path')
+    assert.equal(rows[0].brief_bytes, null)
+    assert.equal(rows[0].brief_size_measured, false)
+    assert.equal(rows[0].brief_size_unmeasured_reason, 'brief-unreadable')
+  } finally { f.cleanup() }
 })
 
 test('assign composes through adapter, removes stale envelope, and resumes one session', () => {

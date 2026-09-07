@@ -1488,6 +1488,9 @@ export async function resolveAdapters(roles, args, seats = null, deps = {}) {
       const requires = [...new Set([...(SEAT_DEFAULTS[role].requires || []), ...grants.requires])]
       const bare = adapter.capabilitiesFor({ transport, grants: EMPTY_GRANTS })
       const declared = adapter.capabilitiesFor({ transport, grants })
+      if ((grants.mcp_servers?.length ?? 0) > 0 && declared.mcp_servers !== true) {
+        throw refuse('grant-unsupported', `seat ${role} has MCP server grants but adapter ${name} cannot express mcp_servers — refusing to boot a silently weaker seat`)
+      }
       const effective = effectiveCapabilities({ declared, bare, grants })
       const withheld = Object.keys(CAPABILITY_DELIVERY).filter((cap) => declared[cap] === true && effective[cap] !== true)
       assertCapabilities(role, name, effective, seatShortfalls(role, sourceArgs), requires, { withheld })
@@ -1703,6 +1706,34 @@ function writeRolePrompt(role, taskDir, section = '') {
   return merged
 }
 
+export function mcpConfigDocument(grants = EMPTY_GRANTS) {
+  const mcpServers = {}
+  for (const server of grants?.mcp_servers || []) {
+    if (server.command !== null) {
+      mcpServers[server.name] = { command: server.command.bin, args: [...server.command.args] }
+    } else {
+      mcpServers[server.name] = { type: 'http', url: server.url }
+    }
+  }
+  return { mcpServers }
+}
+
+export function writeMcpConfigs({ taskDir, roles, adapters }, deps = {}) {
+  const mkdir = deps.mkdirSync || mkdirSync
+  const write = deps.writeFileSync || writeFileSync
+  for (const role of roles || []) {
+    const entry = adapters?.[role]
+    const capabilities = entry?.adapter?.capabilitiesFor?.({ transport: entry.transport, grants: entry.grants || EMPTY_GRANTS }) || {}
+    if (capabilities.mcp_servers !== true) continue
+    if (typeof entry.adapter.mcpConfigPath !== 'function') {
+      throw refuse('grant-unsupported', `seat ${role} adapter ${entry.name || '<unknown>'} advertises mcp_servers but has no deterministic mcpConfigPath — refusing to boot a silently weaker seat`)
+    }
+    const path = entry.adapter.mcpConfigPath({ taskDir, role })
+    mkdir(dirname(path), { recursive: true })
+    write(path, JSON.stringify(mcpConfigDocument(entry.grants), null, 2))
+  }
+}
+
 function paneCommand(role, args, { taskDir, bootBrief, adapter, tierSeat, grants = EMPTY_GRANTS, configDir = null, advisorCell = null }) {
   const seat = SEAT_DEFAULTS[role]
   const merged = join(taskDir, `role-${role}.md`)
@@ -1775,6 +1806,7 @@ export async function bootCmd(args, deps = {}) {
     openLedger: openLedgerDep = null, existsSync: existsSyncDep = null,
     loadavg: loadavgDep = null, cpus: cpusDep = null,
     probeEndpoint: probeEndpointDep = null, register: registerDep = null,
+    writeMcpConfigs: writeMcpConfigsDep = writeMcpConfigs,
     awaitSeatsReady: awaitSeatsReadyDep = awaitSeatsReady,
     readRosterFile: readRosterFileDep = readFileSync,
     writeRosterSnapshot: writeRosterSnapshotDep = writeRosterSnapshot,
@@ -1985,6 +2017,10 @@ export async function bootCmd(args, deps = {}) {
   const memory = memoryExtracts(roles, args, taskSlug)
   for (const role of roles) writeRolePrompt(role, paths.taskDir, memory.sections[role] || '')
   const charter = charterBytesRecord(paths.taskDir, roles, memory.sections)
+  // Materialise every register-authoritative Claude MCP set before composing a
+  // command or creating a workspace. A failed write is a boot failure: strict
+  // mode must never fall back to user configuration.
+  writeMcpConfigsDep({ taskDir: paths.taskDir, roles, adapters })
   let workspace = null
   let windowId = null
   const members = {}
@@ -1994,6 +2030,7 @@ export async function bootCmd(args, deps = {}) {
     tools: effectiveTools(role, adapters[role].grants), deny: SEAT_DEFAULTS[role].deny,
     // Persist optional vendor grant shortfalls in the durable crew record.
     vendor_withheld: adapters[role].grants?.vendor_withheld ?? [],
+    mcp_servers: adapters[role].grants?.mcp_servers ?? [],
     ...(seats ? { effort: seats[role].effort, provider: seats[role].provider, id: seats[role].id } : {}),
     ...(seats?.[role]?.fallback ? { fallback: seats[role].fallback } : {}),
   })
@@ -2086,6 +2123,7 @@ export async function bootCmd(args, deps = {}) {
     ...turnCeilingsJournalPatch(turnCeilingRecord),
     models: Object.fromEntries(roles.map((r) => [r, members[r].model])),
     transports: Object.fromEntries(roles.map((r) => [r, members[r].transport])),
+    mcp_servers: Object.fromEntries(roles.map((r) => [r, members[r].mcp_servers])),
     // Persist optional vendor grant shortfalls in the append-only boot event.
     vendor_withheld: Object.fromEntries(roles.map((r) => [r, adapters[r].grants?.vendor_withheld ?? []])),
     charter_bytes: charter.bytes,

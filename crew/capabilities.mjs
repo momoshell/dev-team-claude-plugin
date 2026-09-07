@@ -4,6 +4,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { join, dirname, resolve as resolvePath } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
+import { isDeepStrictEqual } from 'node:util'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
@@ -156,10 +157,32 @@ export function loadCapabilities({ path = CAPABILITIES_PATH, schemaPath = CAPABI
       seen.add(grant?.package)
     }
   }
+  const duplicateMcp = (list, where) => {
+    const seen = new Set()
+    for (const server of list || []) {
+      if (seen.has(server?.name)) {
+        throw refuse('register-invalid', `runtime capability register ${path} declares MCP server name ${JSON.stringify(server.name)} twice under ${where} — a duplicate name makes the grant ambiguous under the runtime-policy rule`)
+      }
+      seen.add(server?.name)
+    }
+  }
+  const validateMcp = (list, where) => {
+    for (const server of list || []) {
+      const hasCommand = server?.command !== null
+      const hasUrl = server?.url !== null
+      if (hasCommand === hasUrl) {
+        throw refuse('register-invalid', `runtime capability register ${path} declares MCP server ${JSON.stringify(server?.name)} under ${where} with exactly one of command or url required — both present or both absent are forbidden under the runtime-policy rule`)
+      }
+    }
+  }
   for (const [role, spec] of Object.entries(value?.roles || {})) {
     duplicate(spec?.vendor_extensions, `roles.${role}`)
+    duplicateMcp(spec?.mcp_servers, `roles.${role}`)
+    validateMcp(spec?.mcp_servers, `roles.${role}`)
     for (const [agent, overlay] of Object.entries(spec?.by_agent || {})) {
       duplicate(overlay?.vendor_extensions, `roles.${role}.by_agent.${agent}`)
+      duplicateMcp(overlay?.mcp_servers, `roles.${role}.by_agent.${agent}`)
+      validateMcp(overlay?.mcp_servers, `roles.${role}.by_agent.${agent}`)
     }
   }
   return deepFreeze(value)
@@ -234,6 +257,12 @@ function mergeAgents(base, overlay) {
   return [...out.values()]
 }
 
+export function mergeMcpServers(base = [], overlay = []) {
+  const out = new Map((base || []).map((server) => [server.name, server]))
+  for (const server of overlay || []) out.set(server.name, server)
+  return [...out.values()]
+}
+
 // #403 — the ADAPTER dimension. A role grant may carry `by_agent`, an overlay
 // keyed by the RESOLVED adapter name (crew/crew.mjs:800), merged OVER the role
 // grant. An adapter with no entry gets the role grant and nothing else, which
@@ -252,6 +281,7 @@ function agentSpec(register, role, agent) {
     skills: [...new Set([...spec.skills, ...(overlay.skills || [])])],
     agents: mergeAgents(spec.agents, overlay.agents || []),
     vendor_extensions: mergeVendor(spec.vendor_extensions || [], overlay.vendor_extensions || []),
+    mcp_servers: mergeMcpServers(spec.mcp_servers || [], overlay.mcp_servers || []),
   }
 }
 
@@ -336,6 +366,13 @@ export function grantsFor(register, role, { root = REGISTER_ROOT, exists = exist
   }
 
   const grantedTools = [...spec.tools, ...vendor.flatMap((one) => one.tools)]
+  const mcp_servers = (spec.mcp_servers || []).map((server) => ({
+    name: server.name,
+    command: server.command === null
+      ? null
+      : { bin: server.command.bin, args: [...server.command.args] },
+    url: server.url,
+  }))
   return deepFreeze({
     tools: grantedTools,
     extensions: [...extensions, ...vendor.flatMap((one) => one.entries)],
@@ -343,6 +380,7 @@ export function grantsFor(register, role, { root = REGISTER_ROOT, exists = exist
     vendor_withheld: vendorWithheld,
     agents, skills,
     advisor: spec.advisor, requires: [...spec.requires],
+    mcp_servers,
   })
 }
 
@@ -392,6 +430,15 @@ export function assertGrantsBacked(role, grants, register, { agent = null, vendo
       throw refuse('unknown-grant', `seat ${role} has unregistered agent grant ${JSON.stringify(agent)}`)
     }
   }
+  for (const server of grants?.mcp_servers || []) {
+    const declared = (spec.mcp_servers || []).find((one) => one.name === server?.name)
+    if (!declared) {
+      throw refuse('unknown-grant', `seat ${role} has unregistered MCP server grant ${JSON.stringify(server?.name)}`)
+    }
+    if (!isDeepStrictEqual(server, declared)) {
+      throw refuse('unknown-grant', `seat ${role} has changed MCP server grant ${JSON.stringify(server?.name)} that is not backed by the register`)
+    }
+  }
   if (grants?.advisor === true && spec.advisor !== true) {
     throw refuse('unknown-grant', `seat ${role} has unregistered advisor grant`)
   }
@@ -399,7 +446,7 @@ export function assertGrantsBacked(role, grants, register, { agent = null, vendo
 }
 
 export const EMPTY_GRANTS = deepFreeze({
-  tools: [], extensions: [], vendor_extensions: [], vendor_withheld: [], agents: [], skills: [], advisor: false, requires: [],
+  tools: [], extensions: [], vendor_extensions: [], vendor_withheld: [], agents: [], skills: [], advisor: false, requires: [], mcp_servers: [],
 })
 
 // A capability the REGISTER hands out, not one the binary simply has. The
@@ -477,6 +524,10 @@ export const CAPABILITY_PROBES = Object.freeze({
     class: 'resolution',
     reason: 'The claim is only that a checkout-relative skill path exists, which grantsFor already verifies during resolution; no role grants a skill today, so there is no additional skill behavior for this checkout to exercise.',
   }),
+  mcp_servers: Object.freeze({
+    class: 'resolution',
+    reason: 'The claim is that each inline MCP server definition is selected from the immutable register, merged by adapter overlay, and resolved without inheriting host configuration.',
+  }),
   'subagents@claude': Object.freeze({
     class: 'vendor-binary',
     reason: 'The claim is that the Claude CLI ships a working Task tool; that executable belongs to the vendor rather than this checkout, so nothing short of spawning a real seat could exercise it.',
@@ -489,7 +540,7 @@ export const CAPABILITY_PROBES = Object.freeze({
 })
 
 export function declaredCapabilities(register, { adapters = CAPABILITY_ADAPTERS } = {}) {
-  const declared = new Set(['extensions', 'agents', 'vendor_extensions', 'skills', 'advisor'])
+  const declared = new Set(['extensions', 'agents', 'vendor_extensions', 'skills', 'advisor', 'mcp_servers'])
   const adapterNames = Array.isArray(adapters)
     ? [...new Set(adapters.map((adapter) => String(adapter)))]
     : []

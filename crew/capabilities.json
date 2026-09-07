@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-08-22",
+  "updated_at": "2026-09-07",
   "roles": {
     "lead": {
       "tools": [],
@@ -8,7 +8,8 @@
       "agents": [],
       "skills": [],
       "advisor": false,
-      "requires": []
+      "requires": [],
+      "mcp_servers": []
     },
     "planner": {
       "tools": ["Task"],
@@ -17,6 +18,7 @@
       "skills": [],
       "advisor": false,
       "requires": ["subagents"],
+      "mcp_servers": [],
       "by_agent": {
         "pi": {
           "extensions": ["crew/pi/extensions/subagent.ts", "crew/pi/extensions/lab.ts"],
@@ -30,7 +32,8 @@
       "agents": [],
       "skills": [],
       "advisor": false,
-      "requires": []
+      "requires": [],
+      "mcp_servers": []
     },
     "reviewer": {
       "tools": ["Task"],
@@ -38,7 +41,8 @@
       "agents": [],
       "skills": [],
       "advisor": false,
-      "requires": []
+      "requires": [],
+      "mcp_servers": []
     },
     "tech-lead": {
       "tools": [],
@@ -46,7 +50,8 @@
       "agents": [],
       "skills": [],
       "advisor": false,
-      "requires": []
+      "requires": [],
+      "mcp_servers": []
     }
   },
   "local_providers": {}

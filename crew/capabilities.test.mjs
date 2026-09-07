@@ -14,7 +14,7 @@ import { seatCommand as piSeatCommand, capabilitiesFor as piCapabilitiesFor, PI_
 import { scratchDir } from '../test/helpers.mjs'
 
 function capabilityRegister(overrides = {}) {
-  const grant = (extra = {}) => ({ tools: [], extensions: [], agents: [], skills: [], advisor: false, requires: [], ...extra })
+  const grant = (extra = {}) => ({ tools: [], extensions: [], agents: [], skills: [], advisor: false, requires: [], mcp_servers: [], ...extra })
   const base = {
     schema_version: 1,
     updated_at: '2026-08-17',
@@ -26,6 +26,80 @@ function capabilityRegister(overrides = {}) {
   }
   return { ...base, ...overrides, roles: { ...base.roles, ...(overrides.roles || {}) } }
 }
+
+test('MCP register definitions are closed and require exactly one command or URL', () => {
+  const schema = JSON.parse(readFileSync(new URL('./capabilities.schema.json', import.meta.url), 'utf8'))
+  const command = { name: 'search', command: { bin: '/opt/mcp-search', args: ['--stdio'] }, url: null }
+  const http = { name: 'remote', command: null, url: 'https://mcp.example.test/api' }
+  const valid = capabilityRegister({ roles: { builder: { ...capabilityRegister().roles.builder, mcp_servers: [command, http] } } })
+  assert.deepEqual(validateCapabilities(schema, valid), [])
+  for (const mutate of [
+    (register) => { register.roles.builder.mcp_servers[0].unexpected = true },
+    (register) => { register.roles.builder.mcp_servers[0].name = 'not valid' },
+    (register) => { register.roles.builder.mcp_servers[0].command.bin = '   ' },
+    (register) => { register.roles.builder.mcp_servers[0].command.args = [1] },
+    (register) => { register.roles.builder.mcp_servers[0].url = 'ftp://mcp.example.test' },
+  ]) {
+    const invalid = JSON.parse(JSON.stringify(valid))
+    mutate(invalid)
+    assert.ok(validateCapabilities(schema, invalid).length > 0)
+    assert.throws(() => loadCapabilities({ register: invalid }), (err) => err.reason === 'register-invalid')
+  }
+  for (const mcp_servers of [
+    [{ name: 'both', command: { bin: '/opt/mcp', args: [] }, url: 'https://mcp.example.test' }],
+    [{ name: 'neither', command: null, url: null }],
+  ]) {
+    const invalid = capabilityRegister({ roles: { builder: { ...capabilityRegister().roles.builder, mcp_servers } } })
+    assert.deepEqual(validateCapabilities(schema, invalid), [])
+    assert.throws(() => loadCapabilities({ register: invalid }), (err) => err.reason === 'register-invalid' && /exactly one/.test(err.message))
+  }
+})
+
+test('MCP adapter overlays replace by name and remain register-backed', () => {
+  const baseServer = { name: 'search', command: { bin: '/opt/base-search', args: [] }, url: null }
+  const overlayServer = { name: 'search', command: null, url: 'https://mcp.example.test/search' }
+  const extraServer = { name: 'metrics', command: { bin: '/opt/metrics', args: ['--stdio'] }, url: null }
+  const base = capabilityRegister()
+  const register = capabilityRegister({ roles: {
+    planner: {
+      ...base.roles.planner,
+      mcp_servers: [baseServer],
+      by_agent: { pi: { mcp_servers: [overlayServer, extraServer] } },
+    },
+  } })
+  const loaded = loadCapabilities({ register })
+  assert.deepEqual(grantsFor(loaded, 'planner').mcp_servers, [baseServer])
+  assert.deepEqual(grantsFor(loaded, 'planner', { agent: 'pi' }).mcp_servers, [overlayServer, extraServer])
+})
+
+test('MCP duplicate names refuse independently at role and overlay boundaries', () => {
+  const base = capabilityRegister()
+  const duplicate = { name: 'search', command: { bin: '/opt/mcp', args: [] }, url: null }
+  const roleDuplicate = capabilityRegister({ roles: {
+    builder: { ...base.roles.builder, mcp_servers: [duplicate, { ...duplicate, command: { bin: '/opt/other', args: [] } }] },
+  } })
+  assert.throws(() => loadCapabilities({ register: roleDuplicate }), (err) => err.reason === 'register-invalid' && /roles\.builder/.test(err.message))
+  const overlayDuplicate = capabilityRegister({ roles: {
+    builder: { ...base.roles.builder, by_agent: { pi: { mcp_servers: [duplicate, duplicate] } } },
+  } })
+  assert.throws(() => loadCapabilities({ register: overlayDuplicate }), (err) => err.reason === 'register-invalid' && /roles\.builder\.by_agent\.pi/.test(err.message))
+})
+
+test('resolved MCP arrays and definitions are frozen, and backing rejects forged values', () => {
+  const server = { name: 'search', command: { bin: '/opt/mcp-search', args: ['--stdio'] }, url: null }
+  const register = capabilityRegister({ roles: { builder: { ...capabilityRegister().roles.builder, mcp_servers: [server] } } })
+  const loaded = loadCapabilities({ register })
+  const grants = grantsFor(loaded, 'builder')
+  assert.equal(Object.isFrozen(EMPTY_GRANTS.mcp_servers), true)
+  assert.equal(Object.isFrozen(grants.mcp_servers), true)
+  assert.equal(Object.isFrozen(grants.mcp_servers[0]), true)
+  assert.equal(Object.isFrozen(grants.mcp_servers[0].command), true)
+  assert.equal(Object.isFrozen(grants.mcp_servers[0].command.args), true)
+  assert.doesNotThrow(() => assertGrantsBacked('builder', grants, loaded))
+  const forged = (mcp) => ({ ...grants, mcp_servers: [mcp] })
+  assert.throws(() => assertGrantsBacked('builder', forged({ ...server, name: 'forged' }), loaded), (err) => err.reason === 'unknown-grant')
+  assert.throws(() => assertGrantsBacked('builder', forged({ ...server, command: { bin: '/opt/changed', args: ['--stdio'] } }), loaded), (err) => err.reason === 'unknown-grant')
+})
 
 function capabilityFixtureRoot() {
   const root = mkdtempSync(join(tmpdir(), 'crew-capability-'))
@@ -109,7 +183,7 @@ test('an adapter without an overlay gets exactly the role-level grant', () => {
   assert.deepEqual(claude, roleLevel)
   assert.deepEqual(claude.extensions, [])
   assert.deepEqual(claude.agents, [])
-  assert.deepEqual(Object.keys(claude), ['tools', 'extensions', 'vendor_extensions', 'vendor_withheld', 'agents', 'skills', 'advisor', 'requires'])
+  assert.deepEqual(Object.keys(claude), ['tools', 'extensions', 'vendor_extensions', 'vendor_withheld', 'agents', 'skills', 'advisor', 'requires', 'mcp_servers'])
 })
 
 test('adapter-scoped grants are backed only when the adapter is named', () => {
@@ -589,7 +663,7 @@ test('capability refusal reasons are closed and EMPTY_GRANTS is frozen', () => {
     () => claudeSeatCommand({ role: 'builder', model: 'sonnet', promptFile: '/tmp/role.md', tools: 'Read', deny: 'Task,Agent', taskDir: '/tmp', bootBrief: 'boot', grants: { tools: [], extensions: ['/tmp/ext.js'], skills: [], agents: [], advisor: false } }),
     (err) => err.reason === 'grant-unsupported' && /grant-unsupported/.test(err.message),
   )
-  assert.deepEqual(EMPTY_GRANTS, { tools: [], extensions: [], vendor_extensions: [], vendor_withheld: [], agents: [], skills: [], advisor: false, requires: [] })
+  assert.deepEqual(EMPTY_GRANTS, { tools: [], extensions: [], vendor_extensions: [], vendor_withheld: [], agents: [], skills: [], advisor: false, requires: [], mcp_servers: [] })
   assert.equal(Object.isFrozen(EMPTY_GRANTS), true)
 })
 
@@ -646,7 +720,7 @@ test('every declared capability is classified with a recorded reason', async () 
 
   const shipped = loadCapabilities()
   const declared = declaredCapabilities(shipped)
-  assert.deepEqual(declared, ['advisor', 'agents', 'extensions', 'skills', 'subagents@claude', 'subagents@pi', 'vendor_extensions'])
+  assert.deepEqual(declared, ['advisor', 'agents', 'extensions', 'mcp_servers', 'skills', 'subagents@claude', 'subagents@pi', 'vendor_extensions'])
   assert.deepEqual(Object.keys(CAPABILITY_PROBES).sort(), declared)
 
   const injected = JSON.parse(readFileSync(new URL('./capabilities.json', import.meta.url), 'utf8'))

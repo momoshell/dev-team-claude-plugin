@@ -10,10 +10,48 @@ import { DEFAULT_TRANSPORT, HEADLESS_TRANSPORTS, ROLE_ORDER, assertCapabilities 
 import { capabilityRefusals, loadSeatSchema, proposeEdit } from '../visualizer/server/roster-edit.mjs'
 import { applyMoves, composeMoves, ladderView, readLadder, readReference, stageMoves } from '../visualizer/server/roster-ladder.mjs'
 
-const rosterPath = join(process.cwd(), 'crew', 'roster.json')
+const shippedRosterPath = join(process.cwd(), 'crew', 'roster.json')
 const schemaPath = join(process.cwd(), 'crew', 'roster.schema.json')
-const rosterText = readFileSync(rosterPath, 'utf8')
+const rosterFixture = () => ({
+  schema_version: 1,
+  updated_at: '2026-08-30',
+  tiers: {
+    mechanical: {
+      lead: null,
+      planner: { provider: 'anthropic', id: 'claude-opus-5', agent: 'claude', effort: 'medium' },
+      builder: { provider: 'openai', id: 'gpt-5.6-luna', agent: 'pi', effort: 'max' },
+      reviewer: { provider: 'openai', id: 'gpt-5.6-sol', agent: 'pi', effort: 'medium' },
+    },
+    build: {
+      lead: { provider: 'anthropic', id: 'claude-opus-5', agent: 'claude', effort: 'medium' },
+      planner: { provider: 'anthropic', id: 'claude-opus-5', agent: 'claude', effort: 'medium' },
+      builder: { provider: 'openai', id: 'gpt-5.6-luna', agent: 'pi', effort: 'max' },
+      reviewer: { provider: 'anthropic', id: 'claude-sonnet-5', agent: 'claude', effort: 'high' },
+    },
+    judge: {
+      lead: { provider: 'anthropic', id: 'claude-opus-5', agent: 'claude', effort: 'high' },
+      planner: { provider: 'anthropic', id: 'claude-opus-5', agent: 'claude', effort: 'high' },
+      builder: { provider: 'openai', id: 'gpt-5.6-luna', agent: 'pi', effort: 'max' },
+      reviewer: { provider: 'anthropic', id: 'claude-opus-5', agent: 'claude', effort: 'xhigh' },
+      'tech-lead': { provider: 'anthropic', id: 'claude-opus-5', agent: 'claude', effort: 'xhigh' },
+    },
+  },
+  models: {
+    'anthropic/claude-opus-5': { cost_in_per_mtok: 5, cost_out_per_mtok: 25, context: 1000000, tags: ['reasoning'], source: 'models.dev', last_verified: '2026-08-13' },
+    'anthropic/claude-sonnet-5': { cost_in_per_mtok: 2, cost_out_per_mtok: 10, context: 1000000, tags: ['reasoning'], source: 'models.dev', last_verified: '2026-08-13' },
+    'anthropic/claude-haiku-4-5': { cost_in_per_mtok: 1, cost_out_per_mtok: 5, context: 200000, tags: ['cheap'], source: 'models.dev', last_verified: '2026-08-13' },
+    'openai/gpt-5.6-sol': { cost_in_per_mtok: 4, cost_out_per_mtok: 20, context: 1050000, tags: ['reasoning'], source: 'models.dev', last_verified: '2026-08-30' },
+    'openai/gpt-5.6-terra': { cost_in_per_mtok: 2, cost_out_per_mtok: 12, context: 1050000, tags: ['review'], source: 'models.dev', last_verified: '2026-08-13' },
+    'openai/gpt-5.6-luna': { cost_in_per_mtok: 0.2, cost_out_per_mtok: 1.2, context: 1050000, tags: ['coding'], source: 'models.dev', last_verified: '2026-08-13' },
+    'anthropic/claude-fable-5': { cost_in_per_mtok: 10, cost_out_per_mtok: 50, context: 1000000, tags: ['override-only'], source: 'models.dev', last_verified: '2026-08-13' },
+  },
+})
+const rosterFixtureText = () => JSON.stringify(rosterFixture(), null, 2)
+const rosterText = rosterFixtureText()
 const roster = JSON.parse(rosterText)
+const rosterDir = scratchDir('roster-edit-fixture-')
+const rosterPath = join(rosterDir, 'roster.json')
+writeFileSync(rosterPath, rosterText)
 const changedBuildReviewerEffort = roster.tiers.build.reviewer.effort === 'high' ? 'max' : 'high'
 const v2Roster = (policy = {}) => ({
   schema_version: 2,
@@ -48,7 +86,7 @@ function ladderRosterView() {
 async function edit(input = {}) {
   return await proposeEdit({
     rosterText,
-    rosterPath: 'crew/roster.json',
+    rosterPath,
     tier: 'build',
     role: 'reviewer',
     cell: { ...roster.tiers.build.reviewer, effort: changedBuildReviewerEffort },
@@ -64,8 +102,10 @@ function assertRefused(result, code) {
 }
 
 test('the runtime roster is byte-exactly canonical JSON', () => {
-  assert.equal(rosterText, JSON.stringify(roster, null, 2))
-  assert.equal(rosterText.endsWith('\n'), false)
+  const shippedText = readFileSync(shippedRosterPath, 'utf8')
+  const shipped = JSON.parse(shippedText)
+  assert.equal(shippedText, JSON.stringify(shipped, null, 2))
+  assert.equal(shippedText.endsWith('\n'), false)
 })
 
 test('a legal edit produces an applyable v2 result', async () => {
@@ -137,10 +177,11 @@ test('unseating a required role is refused', async () => {
   assert.match(message, /resolveTier.*would not seat.*planner\/builder\/reviewer/)
 })
 
-test('mechanical lead cannot be seated', async () => {
-  const message = assertRefused(await edit({ tier: 'mechanical', role: 'lead' }), 'mechanical_lead')
-  assert.match(message, /mechanical\.lead.*null/)
-  assert.match(message, /roster-refresh\.test\.mjs:125-128/)
+test('a seated mechanical lead is admitted', async () => {
+  const result = await edit({ tier: 'mechanical', role: 'lead', cell: roster.tiers.build.lead })
+  assert.equal(result.ok, true)
+  assert.notEqual(result.diff, null)
+  assert.equal(result.refusals.some(({ code }) => code === 'mechanical_lead'), false)
 })
 
 test('cell shape violations name their field', async () => {
@@ -159,24 +200,25 @@ test('an unknown model is refused without exposing its catalog record', async ()
   assert.doesNotMatch(JSON.stringify(await edit({ cell: { provider: 'openai', id: 'gpt-9.9-nope', agent: 'pi', effort: 'high' } })), /cost_in_per_mtok|cost_out_per_mtok|usd|spend/i)
 })
 
-test('cross-vendor pairing is checked when the reviewer changes', async () => {
-  const message = assertRefused(await edit({ cell: { provider: 'anthropic', id: 'claude-opus-5', agent: 'claude', effort: 'high' } }), 'cross_vendor')
-  assert.match(message, /cross-vendor/)
-  assert.match(message, /build/)
-  assert.match(message, /planner/)
-  assert.match(message, /anthropic/)
+test('a same-vendor reviewer/partner pairing is admitted', async () => {
+  const result = await edit({ cell: { provider: 'anthropic', id: 'claude-opus-5', agent: 'claude', effort: 'high' } })
+  assert.equal(result.ok, true)
+  assert.notEqual(result.diff, null)
+  assert.equal(result.refusals.some(({ code }) => code === 'cross_vendor' || code === 'judge_vendor_split'), false)
 })
 
-test('cross-vendor pairing is checked when the planner changes', async () => {
-  const message = assertRefused(await edit({ role: 'planner', cell: { provider: 'openai', id: 'gpt-5.6-luna', agent: 'pi', effort: 'max' } }), 'cross_vendor')
-  assert.match(message, /cross-vendor/)
-  assert.match(message, /planner/)
+test('a same-vendor reviewer/partner pairing is admitted when the planner changes', async () => {
+  const result = await edit({ role: 'planner', cell: { provider: 'anthropic', id: 'claude-sonnet-5', agent: 'claude', effort: 'high' } })
+  assert.equal(result.ok, true)
+  assert.notEqual(result.diff, null)
+  assert.equal(result.refusals.some(({ code }) => code === 'cross_vendor' || code === 'judge_vendor_split'), false)
 })
 
-test('judge keeps tech-lead and planner on different vendors', async () => {
-  const message = assertRefused(await edit({ tier: 'judge', role: 'planner', cell: { provider: 'openai', id: 'gpt-5.6-luna', agent: 'pi', effort: 'max' } }), 'judge_vendor_split')
-  assert.match(message, /tech-lead.*planner/)
-  assert.match(message, /roster-refresh\.test\.mjs:130-132/)
+test('a same-vendor judge tech-lead/planner pairing is admitted', async () => {
+  const result = await edit({ tier: 'judge', role: 'planner', cell: { provider: 'anthropic', id: 'claude-sonnet-5', agent: 'claude', effort: 'high' } })
+  assert.equal(result.ok, true)
+  assert.notEqual(result.diff, null)
+  assert.equal(result.refusals.some(({ code }) => code === 'cross_vendor' || code === 'judge_vendor_split'), false)
 })
 
 test('an unreadable roster refuses before parsing or diffing', async () => {
@@ -322,7 +364,7 @@ test('ladderView keeps ratified drift, measured records and tier rail separate',
 })
 
 async function stageLadder(moves, extra = {}) {
-  return await stageMoves({ rosterText, rosterPath: 'crew/roster.json', readError: null, moves, ladder: ratifiedLadder, readBreaker: () => null, ...extra })
+  return await stageMoves({ rosterText, rosterPath, readError: null, moves, ladder: ratifiedLadder, readBreaker: () => null, ...extra })
 }
 
 test('stageMoves validates all four checks and produces an applyable multi-move diff', async () => {
@@ -344,15 +386,15 @@ test('stageMoves validates all four checks and produces an applyable multi-move 
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
-test('stageMoves names floor, cost and vendor refusals and keeps the diff null', async () => {
+test('stageMoves names floor and cost refusals and reports vendor pairing', async () => {
   const floor = await stageLadder([{ tier: 'build', role: 'builder', cell: { provider: 'anthropic', id: 'claude-haiku-4-5', agent: 'claude', effort: 'medium' } }])
   assert.equal(floor.ok, false); assert.equal(floor.diff, null); assert.equal(floor.checks.find((entry) => entry.check === 'band_floor').ok, false); assert.match(floor.checks.find((entry) => entry.check === 'band_floor').message, /utility.*build.*builder.*claude-haiku-4-5/)
   const cost = await stageLadder([{ tier: 'build', role: 'reviewer', cell: { provider: 'anthropic', id: 'claude-fable-5', agent: 'claude', effort: 'high' } }])
   assert.equal(cost.checks.find((entry) => entry.check === 'cost_ceiling').ok, false); assert.match(cost.checks.find((entry) => entry.check === 'cost_ceiling').message, /25.*build.*reviewer.*claude-fable-5/)
   const vendor = await stageLadder([{ tier: 'build', role: 'reviewer', cell: { provider: 'anthropic', id: 'claude-opus-5', agent: 'claude', effort: 'high' } }])
-  assert.equal(vendor.checks.find((entry) => entry.check === 'vendor_diversity').ok, false); assert.match(vendor.checks.find((entry) => entry.check === 'vendor_diversity').message, /cross-vendor/)
-  assert.equal(vendor.local_apply_allowed, true)
-  assert.match(vendor.local_diff, /^--- a\/crew\/roster\.json/m)
+  assert.equal(vendor.checks.find((entry) => entry.check === 'vendor_diversity').ok, true)
+  assert.match(vendor.checks.find((entry) => entry.check === 'vendor_diversity').message, /reviewer anthropic, planner anthropic/)
+  assert.equal(vendor.ok, true)
 })
 
 test('stageMoves breaker and shape refusals still return every named check', async () => {
@@ -364,7 +406,7 @@ test('stageMoves breaker and shape refusals still return every named check', asy
   assert.ok(shape.refusals.some((refusal) => refusal.code === 'cell_shape')); assert.deepEqual(shape.checks.map((entry) => entry.check), ['band_floor', 'vendor_diversity', 'breaker_state', 'cost_ceiling'])
   assert.equal(shape.local_apply_allowed, false)
   assert.equal(shape.local_diff, null)
-  const degraded = await stageMoves({ rosterText, rosterPath: 'crew/roster.json', moves: [move], ladder: readLadder({ ladderPath: '/tmp/missing-model-ladder.json' }), readBreaker: () => null })
+  const degraded = await stageMoves({ rosterText, rosterPath, moves: [move], ladder: readLadder({ ladderPath: '/tmp/missing-model-ladder.json' }), readBreaker: () => null })
   assert.equal(degraded.checks.find((entry) => entry.check === 'band_floor').ok, false); assert.equal(degraded.checks.find((entry) => entry.check === 'cost_ceiling').ok, false)
 })
 
@@ -375,7 +417,7 @@ test('stageMoves can compose an optional cell:null move without model checks', a
   assert.equal(result.checks.find((entry) => entry.check === 'band_floor').ok, true)
   assert.equal(result.checks.find((entry) => entry.check === 'cost_ceiling').ok, true)
   assert.match(result.diff, /judge/)
-  const degraded = await stageMoves({ rosterText, rosterPath: 'crew/roster.json', moves: [move], ladder: readLadder({ ladderPath: '/tmp/missing-model-ladder-null.json' }), readBreaker: () => null })
+  const degraded = await stageMoves({ rosterText, rosterPath, moves: [move], ladder: readLadder({ ladderPath: '/tmp/missing-model-ladder-null.json' }), readBreaker: () => null })
   assert.equal(degraded.ok, false)
   assert.equal(degraded.diff, null)
   assert.equal(degraded.checks.find((entry) => entry.check === 'band_floor').ok, false)
@@ -385,7 +427,7 @@ test('stageMoves can compose an optional cell:null move without model checks', a
 test('composeMoves returns a deterministic PR-ready bundle and never writes the roster', async () => {
   const before = readFileSync(rosterPath, 'utf8')
   const moves = [{ tier: 'build', role: 'reviewer', cell: { ...roster.tiers.build.reviewer, effort: changedBuildReviewerEffort } }]
-  const result = await composeMoves({ rosterText, rosterPath: 'crew/roster.json', moves, ladder: ratifiedLadder, branchSeed: 'unit-test', readBreaker: () => null })
+  const result = await composeMoves({ rosterText, rosterPath, moves, ladder: ratifiedLadder, branchSeed: 'unit-test', readBreaker: () => null })
   assert.equal(result.ok, true); assert.equal(result.branch, 'roster/ladder-unit-test'); assert.match(result.commit_subject, /^chore\(roster\): reseat/); assert.match(result.patch, /^--- a\/crew\/roster\.json/); assert.equal(readFileSync(rosterPath, 'utf8'), before)
 })
 

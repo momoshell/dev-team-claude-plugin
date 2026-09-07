@@ -1,5 +1,6 @@
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync } from 'node:fs'
 import { execSync, spawn, spawnSync } from 'node:child_process'
 import { tmpdir, homedir } from 'node:os'
@@ -10,7 +11,7 @@ import { TURN_CEILING_FLAGS } from './drive.mjs'
 import { openRun, _resetNoticeGuardsForTest } from '../scripts/factory/emit.mjs'
 import {
   composeLayout, SEAT_DEFAULTS, FANOUT_TOOLS, DEFAULT_ROLES, ROLE_ORDER, transportFor, seatTransport, HEADLESS_TRANSPORTS, assertCapabilities, resolveAdapters, bootAllocation, resolveWorkerBin, docOpenArgs,
-  resolveTier, resolveSeatModels, FALLBACK_REFUSALS, refuseFallback, loadRoster, normalizeRoster, refuseRoster, rosterSeating, serializeRosterV1, serializeRosterV2, ROSTER_REFUSALS, ROSTER_SCHEMA_VERSIONS, loadLadder, assertBandFloors, grantedDefModels, assertDefBandFloors, refuseBandFloor, seatModelKey, bandForMember, bandForRaw, seatBand, LADDER_PATH, BAND_FLOOR_REFUSALS, shadowCandidates, shadowExclusion, shadowPick, shadowPickBoot, SHADOW_EXCLUSIONS, SHADOW_OUTCOMES, SHADOW_ABSENT, seatReadySignal, assertSeats, phaseForStage, emitAdapter,
+  resolveTier, resolveSeatModels, FALLBACK_REFUSALS, refuseFallback, loadRoster, normalizeRoster, refuseRoster, rosterSeating, serializeRosterV1, serializeRosterV2, ROSTER_REFUSALS, ROSTER_SCHEMA_VERSIONS, rosterSourcePath, loadRosterSource, writeRosterSnapshot, rosterSnapshotReader, loadLadder, assertBandFloors, grantedDefModels, assertDefBandFloors, refuseBandFloor, seatModelKey, bandForMember, bandForRaw, seatBand, LADDER_PATH, BAND_FLOOR_REFUSALS, shadowCandidates, shadowExclusion, shadowPick, shadowPickBoot, SHADOW_EXCLUSIONS, SHADOW_OUTCOMES, SHADOW_ABSENT, seatReadySignal, assertSeats, phaseForStage, emitAdapter,
   waitForEnvelope, WAIT_POLL_MS, LIVENESS_PROBE_MS, LIVENESS_MISSES_TO_DIE,
   parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, runExitCode, runOutcome, RUN_EXIT_CODES, RUN_EXIT_UNEXPECTED, RUN_START_EVENT, BATCH_DIR_EVENT, BATCH_DIR_NOT_BATCHED, batchDirFromBrief, readHead, readBranch, teardownDecision, stagesFromJournal, assignmentsFromJournal, RUN_CONFIG_DECLARATIONS, resolveRunConfig, aliasDeprecationLines, persistedRunConfig, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, seatLiveness, awaitSeatsReady, teardownCore, teardownCmd, TEARDOWN_EXIT_SEATLESS, TEARDOWN_EXIT_UNPROVEN, TEARDOWN_ABSENT_CAUSES, teardownAbsentCause, TEARDOWN_DRAIN_MS, TEARDOWN_DRAIN_ERROR_MS, installExitMarker, writeTerminalLine, EXITED_STATUS, SIGNAL_EXIT_CODES, UNCAUGHT_EXIT_CODE, terminalLineSeen,
   UsageError, KNOWN_FLAGS, ROLE_FLAG_PREFIXES, REQUIRED_FLAGS, BOOT_ONLY_FLAGS, assertUsage,
@@ -63,7 +64,45 @@ after(() => {
   rmSync(LEDGER_SANDBOX, { recursive: true, force: true })
 })
 
-const roster = JSON.parse(readFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
+const rosterFixture = () => ({
+  schema_version: 1,
+  updated_at: '2026-08-30',
+  tiers: {
+    mechanical: {
+      lead: null,
+      planner: { provider: 'anthropic', id: 'claude-opus-5', agent: 'claude', effort: 'medium' },
+      builder: { provider: 'openai', id: 'gpt-5.6-luna', agent: 'pi', effort: 'max' },
+      reviewer: { provider: 'openai', id: 'gpt-5.6-sol', agent: 'pi', effort: 'medium' },
+    },
+    build: {
+      lead: { provider: 'anthropic', id: 'claude-opus-5', agent: 'claude', effort: 'medium' },
+      planner: { provider: 'anthropic', id: 'claude-opus-5', agent: 'claude', effort: 'medium' },
+      builder: { provider: 'openai', id: 'gpt-5.6-luna', agent: 'pi', effort: 'max' },
+      reviewer: { provider: 'openai', id: 'gpt-5.6-sol', agent: 'pi', effort: 'high' },
+    },
+    judge: {
+      lead: { provider: 'anthropic', id: 'claude-opus-5', agent: 'claude', effort: 'high' },
+      planner: { provider: 'anthropic', id: 'claude-opus-5', agent: 'claude', effort: 'high' },
+      builder: { provider: 'openai', id: 'gpt-5.6-luna', agent: 'pi', effort: 'max' },
+      reviewer: { provider: 'anthropic', id: 'claude-opus-5', agent: 'claude', effort: 'xhigh' },
+      'tech-lead': {
+        provider: 'openai', id: 'gpt-5.6-sol', agent: 'pi', effort: 'xhigh',
+        fallback: [{ provider: 'anthropic', id: 'claude-opus-5', agent: 'pi', effort: 'xhigh' }],
+      },
+    },
+  },
+  models: {
+    'anthropic/claude-opus-5': { cost_in_per_mtok: 5, cost_out_per_mtok: 25, context: 1000000, tags: ['reasoning', 'tool-call', 'judge'], source: 'models.dev', last_verified: '2026-08-13' },
+    'anthropic/claude-sonnet-5': { cost_in_per_mtok: 2, cost_out_per_mtok: 10, context: 1000000, tags: ['reasoning', 'tool-call', 'workhorse'], source: 'models.dev', last_verified: '2026-08-13' },
+    'anthropic/claude-haiku-4-5': { cost_in_per_mtok: 1, cost_out_per_mtok: 5, context: 200000, tags: ['reasoning', 'tool-call', 'cheap'], source: 'models.dev', last_verified: '2026-08-13' },
+    'openai/gpt-5.6-sol': { cost_in_per_mtok: 4, cost_out_per_mtok: 20, context: 1050000, tags: ['reasoning', 'tool-call', 'vendor-diverse'], source: 'models.dev', last_verified: '2026-08-30' },
+    'openai/gpt-5.6-terra': { cost_in_per_mtok: 2, cost_out_per_mtok: 12, context: 1050000, tags: ['reasoning', 'tool-call', 'first-pass-review'], source: 'models.dev', last_verified: '2026-08-13' },
+    'openai/gpt-5.6-luna': { cost_in_per_mtok: 0.2, cost_out_per_mtok: 1.2, context: 1050000, tags: ['reasoning', 'tool-call', 'cheap', 'coding'], source: 'models.dev', last_verified: '2026-08-13' },
+    'anthropic/claude-fable-5': { cost_in_per_mtok: 10, cost_out_per_mtok: 50, context: 1000000, tags: ['reasoning', 'tool-call', 'frontier', 'override-only'], source: 'models.dev', last_verified: '2026-08-13' },
+  },
+})
+const shippedRoster = () => JSON.parse(readFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
+const roster = rosterFixture()
 const rosterLadder = JSON.parse(readFileSync(new URL('./model-ladder.json', import.meta.url), 'utf8'))
 
 // Focused test-local schema evaluator for the fallback fixtures. The production
@@ -546,10 +585,10 @@ test('seat requirements deliver pi scouts, preserve genuine shortfalls, and reje
   assert.equal(headlessPlanner.planner.transport, 'headless-rpc')
   assert.deepEqual(headlessPlanner.planner.grants.agents, [{ name: 'scout', def: join(process.cwd(), 'crew/pi/agents/scout.json') }])
   assert.equal(headlessPlanner.planner.adapter.capabilitiesFor({ transport: 'headless-rpc', grants: headlessPlanner.planner.grants }).subagents, true)
-  // The reviewer is deliberately NOT subject to this: the roster seats
-  // pi/terra on review at build/mechanical under the ratified review-vendor
-  // rule, so requiring subagents there would make two of three tiers
-  // unbootable. Pinned so a later "symmetry" tidy-up cannot reintroduce it.
+  // The reviewer is deliberately NOT subject to this: its charter names no
+  // fan-out, so the requirement belongs to the CHARTER, not the seat: today's
+  // shipped pi reviewers at build/mechanical lack `subagents`, and requiring it
+  // would make those two tiers unbootable. Pinned against "symmetry" reintroduction.
   const reviewer = await resolveAdapters(['reviewer'], { 'agent-reviewer': 'pi' })
   assert.equal(reviewer.reviewer.name, 'pi')
   const builder = await resolveAdapters(['builder'], { 'agent-builder': 'pi' })
@@ -605,7 +644,7 @@ test('SEAT_DEFAULTS requires subagents for the planner ALONE — the scout-comma
 })
 
 test('every roster tier still boots its seats — the requirement cannot strand a shipped tier', async () => {
-  const roster = JSON.parse(readFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
+  const roster = shippedRoster()
   for (const tier of Object.keys(roster.tiers)) {
     const { roles, seats } = resolveTier(roster, tier, {})
     await assert.doesNotReject(
@@ -3134,11 +3173,14 @@ test('boot wiring places the definition band check before the breaker', () => {
 test('all-headless tier boot makes no cmux calls and records daemon-acceptable seats', async () => {
   const home = mkdtempSync(join(tmpdir(), 'crew-headless-home-'))
   const { root: checkoutRoot, checkout } = testCheckout('crew-headless-checkout-')
+  const rosterDir = scratchDir('crew-headless-roster-')
+  const rosterPath = join(rosterDir, 'roster.json')
+  writeFileSync(rosterPath, JSON.stringify(roster, null, 2))
   const task = 'all-headless'
   const cmux = callCounter(); const tree = callCounter(); const renameTab = callCounter()
   try {
     await withHome(home, () => bootCmd(
-      { task, checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath },
+      { task, checkout, tier: 'build', roster: rosterPath, 'headless-all': true, 'claude-bin': process.execPath },
       { cmux, tree, renameTab },
     ))
     assert.equal(cmux.calls.length, 0)
@@ -4605,6 +4647,192 @@ test('loadRoster normalises v1 and v2 files at the boundary', () => {
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
+test('rosterSourcePath lets a supplied path win while preserving the runtime default', () => {
+  assert.equal(rosterSourcePath({}, '/runtime/crew'), join('/runtime/crew', 'roster.json'))
+  assert.equal(rosterSourcePath({ roster: '/dispatch/crew/roster.json' }, '/runtime/crew'), '/dispatch/crew/roster.json')
+  assert.equal(rosterSourcePath({ roster: '   ' }, '/runtime/crew'), join('/runtime/crew', 'roster.json'))
+})
+
+test('loadRosterSource reads once and derives parsed roster and provenance from the same bytes', () => {
+  const bytesA = Buffer.from(JSON.stringify(rosterFixtures().v1))
+  const bytesB = Buffer.from(JSON.stringify({ ...rosterFixtures().v1, updated_at: 'decoy' }))
+  let reads = 0
+  const source = loadRosterSource('/dispatch/crew/roster.json', { roster: '/dispatch/crew/roster.json' }, {
+    readFile: () => { reads += 1; return reads === 1 ? bytesA : bytesB },
+  })
+  assert.equal(reads, 1)
+  assert.equal(source.roster.updated_at, roster.updated_at)
+  assert.equal(source.record.origin, 'flag')
+  assert.equal(source.record.path, '/dispatch/crew/roster.json')
+  assert.equal(source.record.sha256, createHash('sha256').update(bytesA).digest('hex'))
+  assert.equal(source.record.bytes.equals(bytesA), true)
+})
+
+test('writeRosterSnapshot copies the boot bytes into the state directory', () => {
+  const dir = scratchDir('crew-roster-snapshot-')
+  const bytes = Buffer.from('{"snapshot":true}')
+  const path = writeRosterSnapshot({ dir }, { bytes })
+  assert.equal(path, join(dir, 'roster.snapshot.json'))
+  assert.equal(readFileSync(path).equals(bytes), true)
+})
+
+test('rosterSnapshotReader normalises v1 and v2 snapshots for reseating', () => {
+  const dir = scratchDir('crew-roster-snapshot-reader-')
+  const v1Path = join(dir, 'v1.json')
+  const v2Path = join(dir, 'v2.json')
+  writeFileSync(v1Path, JSON.stringify(rosterFixtures().v1))
+  writeFileSync(v2Path, JSON.stringify(rosterFixtures().v2))
+  for (const [path, expected] of [[v1Path, roster.tiers.judge.planner.id], [v2Path, rosterFixtures().v2.assurances.rigorous.planner.id]]) {
+    const read = rosterSnapshotReader({ roster: { snapshot: path } })
+    const loaded = read()
+    assert.equal(loaded.tiers.judge.planner.id, expected)
+    assert.ok(loaded.tiers.mechanical && loaded.tiers.build)
+  }
+})
+
+test('the --roster boot flag requires a value and is accepted when supplied', () => {
+  assert.doesNotThrow(() => assertUsage('boot', { task: 'roster-flag', roster: '/dispatch/roster.json' }))
+  assert.throws(() => assertUsage('boot', { task: 'roster-flag', roster: true }), /--roster/)
+})
+
+test('a tier boot records the handed roster and byte snapshot provenance', async () => {
+  const home = scratchDir('crew-roster-boot-home-')
+  const { root: checkoutRoot, checkout } = testCheckout('crew-roster-boot-checkout-')
+  const sourceDir = scratchDir('crew-roster-source-')
+  const sourcePath = join(sourceDir, 'roster.json')
+  const bytes = Buffer.from(JSON.stringify(roster, null, 2))
+  writeFileSync(sourcePath, bytes)
+  const task = 'roster-provenance'
+  try {
+    await withHome(home, () => bootCmd({ task, checkout, tier: 'build', roster: sourcePath, 'headless-all': true, 'claude-bin': process.execPath }, { cmux: callCounter(), tree: callCounter(), renameTab: callCounter() }))
+    const dir = testCrewDir(home, checkout, task)
+    const crew = JSON.parse(readFileSync(join(dir, 'crew.json'), 'utf8'))
+    assert.deepEqual(crew.roster, { path: sourcePath, origin: 'flag', sha256: createHash('sha256').update(bytes).digest('hex'), snapshot: join(dir, 'roster.snapshot.json') })
+    assert.equal(readFileSync(crew.roster.snapshot).equals(bytes), true)
+    assert.equal(crew.seats.planner.id, roster.tiers.build.planner.id)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+})
+
+test('pane boot snapshots before cmux and leaves no crew record when snapshotting fails', async () => {
+  const home = scratchDir('crew-roster-order-home-')
+  const { root: checkoutRoot, checkout } = testCheckout('crew-roster-order-checkout-')
+  const sourceDir = scratchDir('crew-roster-order-source-')
+  const sourcePath = join(sourceDir, 'roster.json')
+  writeFileSync(sourcePath, JSON.stringify(roster, null, 2))
+  const failedTask = 'roster-snapshot-fails'
+  const controlTask = 'roster-snapshot-control'
+  const failedCmux = callCounter()
+  const controlCalls = []
+  const controlCmux = (...args) => { controlCalls.push(args); return { ok: false, error: new Error('control stop') } }
+  try {
+    await withHome(home, () => assert.rejects(
+      () => bootCmd({ task: failedTask, checkout, tier: 'build', roster: sourcePath, 'claude-bin': process.execPath }, {
+        cmux: failedCmux, tree: callCounter(), renameTab: callCounter(), writeRosterSnapshot: () => { throw new Error('snapshot stop') },
+      }), /snapshot stop/,
+    ))
+    assert.equal(failedCmux.calls.length, 0)
+    assert.equal(existsSync(join(testCrewDir(home, checkout, failedTask), 'crew.json')), false)
+    await withHome(home, () => assert.rejects(
+      () => bootCmd({ task: controlTask, checkout, tier: 'build', roster: sourcePath, 'claude-bin': process.execPath }, {
+        cmux: controlCmux, tree: callCounter(), renameTab: callCounter(),
+      }), /control stop/,
+    ))
+    assert.ok(controlCalls.length > 0)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+})
+
+test('model-not-in-catalog is closed for canonical cells while pure and raw band checks remain exempt', () => {
+  const ladder = loadLadder()
+  const canonical = { builder: { provider: 'openai', id: 'gpt-5.6-sol' } }
+  assert.throws(
+    () => assertBandFloors(canonical, 'build', ladder, { models: {} }),
+    (err) => err.reason === 'model-not-in-catalog' && err.message.includes('openai/gpt-5.6-sol'),
+  )
+  assert.doesNotThrow(() => assertBandFloors(canonical, 'build', ladder))
+  assert.ok(BAND_FLOOR_REFUSALS.includes('model-not-in-catalog'))
+  const raw = { builder: { provider: null, id: null, model: 'openai-codex/gpt-5.6-sol' } }
+  assert.doesNotThrow(() => assertBandFloors(raw, 'build', ladder, { models: {}, adapters: { builder: { adapter: { modelString: piModelString } } } }))
+})
+
+test('run-path seatIo receives a reader for the boot snapshot rather than the runtime roster', async () => {
+  const home = scratchDir('crew-roster-run-home-')
+  const { root: checkoutRoot, checkout } = testCheckout('crew-roster-run-checkout-')
+  const sourceDir = scratchDir('crew-roster-run-source-')
+  const sourcePath = join(sourceDir, 'roster.json')
+  const runtimePath = join(sourceDir, 'runtime.json')
+  writeFileSync(sourcePath, JSON.stringify(roster, null, 2))
+  const decoy = structuredClone(roster)
+  decoy.tiers.judge.planner = { provider: 'anthropic', id: 'claude-sonnet-5', agent: 'claude', effort: 'high' }
+  writeFileSync(runtimePath, JSON.stringify(decoy, null, 2))
+  const task = 'roster-run-reader'
+  const brief = join(home, 'brief.md')
+  writeFileSync(brief, '# roster run reader\n')
+  let captured = null
+  const done = { status: 'done', summary: '', artifacts: [], details: { commit: null, stages: [] } }
+  try {
+    execSync('git init -q', { cwd: checkout })
+    await withHome(home, () => bootCmd({ task, checkout, tier: 'build', roster: sourcePath, 'headless-all': true, 'claude-bin': process.execPath }, { cmux: callCounter(), tree: callCounter(), renameTab: callCounter() }))
+    writeFileSync(sourcePath, readFileSync(runtimePath))
+    await withHome(home, () => runCmd({ task, checkout, 'brief-file': brief, keep: true }, {
+      awaitSeatsReady: () => {},
+      seatIo: (...args) => { captured = args; return { emit: () => {} } },
+      drive: () => done,
+      writeTerminalLine: () => {},
+    }))
+    assert.equal(typeof captured?.[6]?.readRoster, 'function')
+    assert.equal(captured[6].readRoster().tiers.judge.planner.id, roster.tiers.judge.planner.id)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+})
+
+test('runCmd refuses missing briefs despite injected seatIo and drive', async () => {
+  const home = scratchDir('crew-run-brief-required-home-')
+  const { root: checkoutRoot, checkout } = testCheckout('crew-run-brief-required-checkout-')
+  const rosterPath = join(home, 'roster.json')
+  const task = 'run-brief-required'
+  let seatIoCalls = 0
+  let driveCalls = 0
+  const seams = {
+    awaitSeatsReady: () => {},
+    seatIo: () => {
+      seatIoCalls += 1
+      throw new Error('seatIo reached before the brief guard')
+    },
+    drive: () => { driveCalls += 1; return { status: 'done', summary: '', artifacts: [], details: {} } },
+  }
+  try {
+    writeFileSync(rosterPath, JSON.stringify(roster, null, 2))
+    execSync('git init -q', { cwd: checkout })
+    await withHome(home, () => bootCmd(
+      { task, checkout, tier: 'build', roster: rosterPath, 'headless-all': true, 'claude-bin': process.execPath },
+      { cmux: callCounter(), tree: callCounter(), renameTab: callCounter() },
+    ))
+    await withHome(home, () => {
+      assert.throws(
+        () => runCmd({ task, checkout, keep: true }, seams),
+        /run requires --brief-file <path to the task brief>/,
+      )
+      assert.throws(
+        () => runCmd({ task, checkout, 'brief-file': join(home, 'missing.md'), keep: true }, seams),
+        /brief file not found/,
+      )
+    })
+    assert.equal(seatIoCalls, 0)
+    assert.equal(driveCalls, 0)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+})
+
 test('shadowCandidates reads a raw v2 roster', () => {
   const { v1, v2 } = rosterFixtures()
   const fromV1 = shadowCandidates(v1, 'reviewer')
@@ -4741,7 +4969,7 @@ test('resolveSeatModels: an agent-only override keeps the roster cell and transl
   })
 })
 
-test('resolveSeatModels end to end through the REAL adapters, on the real roster', async () => {
+test('resolveSeatModels end to end through the REAL adapters, on the fixture roster', async () => {
   const claudeMod = await import('./adapters/adapter-claude.mjs')
   const piMod = await import('./adapters/adapter-pi.mjs')
   const { seats } = resolveTier(roster, 'mechanical', {})
@@ -4753,8 +4981,6 @@ test('resolveSeatModels end to end through the REAL adapters, on the real roster
   const out = resolveSeatModels(seats, adapters)
   assert.equal(out.builder.model, 'openai-codex/gpt-5.6-luna')
   assert.equal(out.reviewer.model, 'openai-codex/gpt-5.6-sol')
-  // Tracks the LIVE roster cell (planning floor, ratified 2026-08-13: the
-  // planner seat is opus-grade at EVERY tier — never sonnet/haiku/luna).
   assert.equal(out.planner.model, 'claude-opus-5')
 
   const judge = resolveTier(roster, 'judge', {})
@@ -4954,7 +5180,7 @@ test('a source:"local" roster model is refused from every judge seat at every ra
   }
 })
 
-test('the ratified judge roster is admitted unchanged with the roster model catalog in hand', () => {
+test('a ratified judge roster fixture is admitted unchanged with its own model catalog in hand', () => {
   const { seats } = resolveTier(roster, 'judge', {})
   assert.equal(seatModelKey(seats.lead), 'anthropic/claude-opus-5')
   assert.equal(seatModelKey(seats.planner), 'anthropic/claude-opus-5')
@@ -6557,22 +6783,22 @@ test('shadowPick records a floor-empty no-candidate result without a fallback', 
   assert.match(entry.empty_reason, /band-below-floor/)
 })
 
-test('shadowPick applies the ratified reviewer vendor partner for build and judge', () => {
+test('shadowPick admits a same-vendor reviewer candidate', () => {
   const ladder = loadLadder()
-  const build = resolveTier(roster, 'build', {})
-  const judge = resolveTier(roster, 'judge', {})
-  const buildEntry = shadowPick({ roster, tier: 'build', seats: build.seats, sources: build.sources, ladder, breaker: null }).seats.reviewer
-  const judgeEntry = shadowPick({ roster, tier: 'judge', seats: judge.seats, sources: judge.sources, ladder, breaker: null }).seats.reviewer
-  const buildOpus = buildEntry.candidates.find((candidate) => candidate.provider === 'anthropic')
-  // Look the collision up by VENDOR, never by a model id: the rule is about the
-  // partner's vendor, and pinning an id made this test fail when the roster
-  // reseated build/reviewer off gpt-5.6-terra (2026-08-31) even though the rule
-  // still held. build's partner is the anthropic planner; judge's is the openai
-  // tech-lead, so each tier excludes the OTHER seat's vendor.
-  const judgeSameVendor = judgeEntry.candidates.find((candidate) => candidate.provider === 'openai')
-  assert.equal(buildOpus.excluded_by.reason, 'vendor-collision')
-  assert.equal(judgeSameVendor.excluded_by.reason, 'vendor-collision')
-  assert.equal(judgeEntry.candidates.some((candidate) => candidate.provider === 'anthropic' && !candidate.excluded_by), true)
+  for (const tier of ['build', 'judge']) {
+    const resolved = resolveTier(roster, tier, {})
+    const entry = shadowPick({ roster, tier, seats: resolved.seats, sources: resolved.sources, ladder, breaker: null }).seats.reviewer
+    const partner = resolved.seats['tech-lead'] ?? resolved.seats.planner
+    // The vendor-collision exclusion was retired: candidate eligibility now
+    // follows band, capability, breaker and rate, even when a provider matches.
+    const sameVendor = entry.candidates.find((candidate) => candidate.provider === partner.provider)
+    assert.ok(sameVendor)
+    assert.equal(sameVendor.excluded_by, null)
+    assert.equal(sameVendor.eligible, true)
+    const otherVendor = entry.candidates.find((candidate) => candidate.provider !== partner.provider)
+    assert.ok(otherVendor)
+    assert.equal(otherVendor.eligible, true)
+  }
 })
 
 test('shadowPick excludes open breaker cells and marks absent breaker health as unmeasured', () => {

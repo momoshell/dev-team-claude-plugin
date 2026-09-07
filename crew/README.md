@@ -32,14 +32,14 @@ still win over the one-flag form.
 | `judge` | claude/opus-5, high | claude/opus-5, high | pi/luna, max | claude/opus-5, high | pi/sol, xhigh |
 
 Cells are `<agent>/<model>, <effort>`; `roster.json` is the source of truth
-and this table is a convenience copy of it. Two ratified invariants the tiers
+and this table is a convenience copy of it. One ratified invariant the tiers
 encode: the **planning floor** — the planner seat is opus-grade at *every*
 tier, because the plan is the artifact every downstream stage inherits, so it
-is never the place to save — and the **review-vendor rule** — luna builds at
-every tier, and `judge` keeps opus on review so cross-vendor checking holds
-where the stakes are highest, while `build`/`mechanical` accept the
-same-vendor luna→terra pair with the opus lead as the backstop. A third:
-**luna builds at `max` thinking at every tier** — the builder is the only seat
+is never the place to save.
+
+Seating no longer requires two vendors on review (#983). No ADR ratified that requirement, and nothing at boot ever enforced it. A hard two-vendor requirement makes every roster illegal during a single-provider outage — measured 2026-09-06, when an Anthropic limit parked six lanes for ~2h44m.
+
+A second: **luna builds at `max` thinking at every tier** — the builder is the only seat
 that writes source, its output is what every later stage grades, and the
 ChatGPT-subscription routing makes the upgrade a latency cost rather than a
 billed one. `mechanical` stays cheap through its lead-less seating and its
@@ -53,8 +53,8 @@ experiment**, not a settled invariant — measured over 19 archived runs,
 opus reviewer), so bounce rate cannot say whether more effort helps. The
 keep-or-revert evidence is the durable review outcome — normalized verdict and
 `must_fix` count — that #169 adds to the ledger. `judge` deliberately stays on
-opus review: the review-vendor rule is about correlated blind spots, and effort
-does not fix vendor correlation.
+opus review: that remains a seating preference about correlated blind spots, and
+effort does not fix vendor correlation.
 
 A `--model-<role>` flag on a `--tier` boot is a **raw passthrough that is
 never namespace-translated**: `--model-builder gpt-5.6-luna` on a pi seat
@@ -107,7 +107,7 @@ where judgment lives.
   `accept` over an advisor's independent `escalate` recommendation escalates
   — compounding may only strengthen outcomes toward safety.
 - **Regrant panel**: on a continuation round only, code assigns the seated
-  reviewer and a blind cross-vendor partner, fuses their typed findings, then
+  reviewer and a blind partner seat, fuses their typed findings, then
   sends only structured divergences plus the standing class question to the
   adjudicator. Its `dissents` carry `kind: "panel-divergence"`; the existing
   consult dissent shape (`from`, `recommendation`, `lead_decision`, `consult`)
@@ -168,10 +168,7 @@ the register grants it one: the planner's `by_agent.pi` overlay (#403) adds the
 `--agent-planner pi` boots with no shortfall waiver. A seat whose adapter and
 grant together cannot deliver `subagents` still refuses before a workspace
 exists rather than booting a planner that silently discovers serially. The reviewer does **not** require it: its charter names no fan-out,
-and the roster deliberately seats pi/terra on review at `build`/`mechanical`
-under the review-vendor rule above — the same missing capability is correctly
-fatal for one charter and irrelevant for another, which is why the requirement
-lives on the charter and not on the adapter. A deliberate shortfall override
+and the roster deliberately seats pi/terra on review at `build`/`mechanical`; the same missing capability is correctly fatal for one charter and irrelevant for another, which is why the requirement lives on the charter and not on the adapter. A deliberate shortfall override
 (`--allow-shortfall-<role> <cap>`) boots a refusing seat degraded and records
 the waived capability in the boot journal's `allocation` map as `shortfall`.
 Tool denial remains enforced for every seat, while

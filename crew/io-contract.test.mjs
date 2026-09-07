@@ -121,7 +121,44 @@ function timeoutAttributionFixture({ env = {}, load = 1, cores = 4 } = {}) {
   return events.find((event) => event.kind === 'cell-failure')
 }
 
-const ROSTER = JSON.parse(fsReadFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
+const rosterFixture = () => {
+  const cell = (provider, id, agent, effort, extra = {}) => ({ provider, id, agent, effort, ...extra })
+  return {
+    schema_version: 1,
+    updated_at: '2026-08-30',
+    tiers: {
+      mechanical: {
+        lead: null,
+        planner: cell('anthropic', 'claude-opus-5', 'claude', 'medium'),
+        builder: cell('openai', 'gpt-5.6-luna', 'pi', 'max'),
+        reviewer: cell('openai', 'gpt-5.6-sol', 'pi', 'medium'),
+      },
+      build: {
+        lead: cell('anthropic', 'claude-opus-5', 'claude', 'medium'),
+        planner: cell('anthropic', 'claude-opus-5', 'claude', 'medium'),
+        builder: cell('openai', 'gpt-5.6-luna', 'pi', 'max'),
+        reviewer: cell('openai', 'gpt-5.6-sol', 'pi', 'high'),
+      },
+      judge: {
+        lead: cell('anthropic', 'claude-opus-5', 'claude', 'high'),
+        planner: cell('anthropic', 'claude-opus-5', 'claude', 'high'),
+        builder: cell('openai', 'gpt-5.6-luna', 'pi', 'max'),
+        reviewer: cell('anthropic', 'claude-opus-5', 'claude', 'xhigh'),
+        'tech-lead': cell('openai', 'gpt-5.6-sol', 'pi', 'xhigh', { fallback: [cell('anthropic', 'claude-opus-5', 'pi', 'xhigh')] }),
+      },
+    },
+    models: {
+      'anthropic/claude-haiku-4-5': { cost_in_per_mtok: 1, cost_out_per_mtok: 5 },
+      'anthropic/claude-sonnet-5': { cost_in_per_mtok: 2, cost_out_per_mtok: 10 },
+      'anthropic/claude-opus-5': { cost_in_per_mtok: 5, cost_out_per_mtok: 25 },
+      'openai/gpt-5.6-luna': { cost_in_per_mtok: 0.2, cost_out_per_mtok: 1.2 },
+      'openai/gpt-5.6-terra': { cost_in_per_mtok: 2, cost_out_per_mtok: 12 },
+      'openai/gpt-5.6-sol': { cost_in_per_mtok: 4, cost_out_per_mtok: 20 },
+      'openai/gpt-5.6-fable': { cost_in_per_mtok: 10, cost_out_per_mtok: 50, tags: ['override-only'] },
+    },
+  }
+}
+const ROSTER = rosterFixture()
 
 function makeTierFixture({ role, tier = 'mechanical', transport = 'headless-json', agent, cell, adapter = {}, adapters, readRoster, ...deps } = {}) {
   const source = cell || ROSTER.tiers[tier]?.[role] || ROSTER.tiers.mechanical[role]

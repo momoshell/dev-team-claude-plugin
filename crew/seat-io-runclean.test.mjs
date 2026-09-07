@@ -2156,7 +2156,37 @@ test('seatIo.wait keeps polling an absent return file to its deadline', () => {
   })
 })
 
-const DURABILITY_ROSTER = JSON.parse(readFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
+const rosterFixture = () => ({
+  schema_version: 1,
+  updated_at: '2026-08-30',
+  tiers: {
+    mechanical: {
+      lead: null,
+      planner: { provider: 'anthropic', id: 'claude-opus-5', agent: 'claude', effort: 'medium' },
+      builder: { provider: 'openai', id: 'gpt-5.6-luna', agent: 'pi', effort: 'max' },
+      reviewer: { provider: 'openai', id: 'gpt-5.6-sol', agent: 'pi', effort: 'medium' },
+    },
+    build: {
+      lead: { provider: 'anthropic', id: 'claude-opus-5', agent: 'claude', effort: 'medium' },
+      planner: { provider: 'anthropic', id: 'claude-opus-5', agent: 'claude', effort: 'medium' },
+      builder: { provider: 'openai', id: 'gpt-5.6-luna', agent: 'pi', effort: 'max' },
+      reviewer: { provider: 'openai', id: 'gpt-5.6-sol', agent: 'pi', effort: 'high' },
+    },
+    judge: {
+      lead: { provider: 'anthropic', id: 'claude-opus-5', agent: 'claude', effort: 'high' },
+      planner: { provider: 'anthropic', id: 'claude-opus-5', agent: 'claude', effort: 'high' },
+      builder: { provider: 'openai', id: 'gpt-5.6-luna', agent: 'pi', effort: 'max' },
+      reviewer: { provider: 'anthropic', id: 'claude-opus-5', agent: 'claude', effort: 'xhigh' },
+      'tech-lead': { provider: 'openai', id: 'gpt-5.6-sol', agent: 'pi', effort: 'xhigh' },
+    },
+  },
+  models: {
+    'anthropic/claude-opus-5': { cost_out_per_mtok: 25 },
+    'openai/gpt-5.6-luna': { cost_out_per_mtok: 1.2 },
+    'openai/gpt-5.6-sol': { cost_out_per_mtok: 20 },
+  },
+})
+const DURABILITY_ROSTER = rosterFixture()
 
 function makeCrewJsonSeatFixture({ writeCrew = writeFileSync, logLine, extraDeps = {} } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'crew-json-seat-'))

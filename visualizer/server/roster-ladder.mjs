@@ -387,12 +387,6 @@ function check(checkName, ok, message) {
   return { check: checkName, ok: Boolean(ok), message: String(message || (ok ? `${checkName} passed` : `${checkName} failed`)) }
 }
 
-const LOCAL_POLICY_REFUSALS = new Set(['cross_vendor', 'judge_vendor_split'])
-
-function localBlockingRefusals(refusals) {
-  return (Array.isArray(refusals) ? refusals : []).filter((refusal) => !LOCAL_POLICY_REFUSALS.has(refusal?.code))
-}
-
 function affectedTiers(moves, roster) {
   return [...new Set((Array.isArray(moves) ? moves : [])
     .filter((move) => typeof move?.tier === 'string' && record(roster?.tiers) && Object.prototype.hasOwnProperty.call(roster.tiers, move.tier))
@@ -435,28 +429,19 @@ function bandFloorCheck(moves, ladder) {
     : check('band_floor', true, `all moved seats sit at or above their ratified tier floor in crew/model-ladder.json`)
 }
 
-function vendorDiversityCheck(moves, roster, proposalRefusals) {
-  const refusals = proposalRefusals.filter((refusal) => refusal.code === 'cross_vendor' || refusal.code === 'judge_vendor_split')
-  if (refusals.length) return check('vendor_diversity', false, refusals.map((refusal) => refusal.message).join('; '))
-  const failures = []
+// The name remains only to hold LADDER_CHECKS and the out-of-fence panel (residual iii).
+// No ADR ratifies the rule; a hard two-vendor requirement makes every roster illegal during a single-provider outage, measured 2026-09-06 when an Anthropic limit parked six lanes for ~2h44m.
+function vendorDiversityCheck(moves, roster) {
+  const pairs = []
   for (const tierName of affectedTiers(moves, roster)) {
     const tier = roster.tiers[tierName]
     const reviewer = tier?.reviewer
     const partnerRole = tier?.['tech-lead'] ? 'tech-lead' : (tier?.planner ? 'planner' : null)
     const partner = partnerRole ? tier[partnerRole] : null
-    if (reviewer && partner && reviewer.provider === partner.provider) failures.push(`cross-vendor panel invariant failed for ${tierName}: reviewer and ${partnerRole} share provider "${reviewer.provider}"; see crew/roster-refresh.test.mjs:134-141 and #206's fused panel`)
-    const judge = tierName === 'judge' ? tier : null
-    if (judge?.['tech-lead'] && judge?.planner && judge['tech-lead'].provider === judge.planner.provider) failures.push(`judge tech-lead and planner must use different providers (both use "${judge['tech-lead'].provider}"); see crew/roster-refresh.test.mjs:130-132`)
+    if (reviewer && partner) pairs.push(`${tierName} reviewer/${partnerRole}: reviewer ${reviewer.provider}, ${partnerRole} ${partner.provider}`)
+    if (tierName === 'judge' && tier?.['tech-lead'] && tier?.planner) pairs.push(`judge tech-lead/planner: tech-lead ${tier['tech-lead'].provider}, planner ${tier.planner.provider}`)
   }
-  if (failures.length) return check('vendor_diversity', false, failures.join('; '))
-  const pairs = []
-  for (const tierName of affectedTiers(moves, roster)) {
-    const tier = roster.tiers[tierName]
-    const partnerRole = tier?.['tech-lead'] ? 'tech-lead' : (tier?.planner ? 'planner' : null)
-    if (tier?.reviewer && partnerRole && tier[partnerRole]) pairs.push(`${tierName} reviewer/${partnerRole} stayed cross-vendor`)
-    if (tierName === 'judge' && tier?.['tech-lead'] && tier?.planner) pairs.push('judge tech-lead/planner stayed vendor-diverse')
-  }
-  return check('vendor_diversity', true, pairs.length ? pairs.join('; ') : 'reviewer/partner vendor diversity stayed valid for the staged seats')
+  return check('vendor_diversity', true, pairs.length ? pairs.join('; ') : 'no reviewer/partner pairing was staged')
 }
 
 function costCeilingCheck(moves, roster, ladder) {
@@ -556,12 +541,12 @@ export async function stageMoves({ rosterText, rosterPath = 'crew/roster.json', 
 
   const checks = []
   checks.push(bandFloorCheck(requested, ladder))
-  checks.push(vendorDiversityCheck(requested, candidate, refusals))
+  checks.push(vendorDiversityCheck(requested, candidate))
   const breakerConfig = breaker || { policy: breakerPolicy(), dbPath: undefined }
   checks.push(await breakerStateCheck({ moves: requested, roster: candidate, breaker: breakerConfig, readBreaker }))
   checks.push(costCeilingCheck(requested, parsed.roster, ladder))
   const ok = refusals.length === 0 && checks.every((entry) => entry.ok)
-  const blockingRefusals = localBlockingRefusals(refusals)
+  const blockingRefusals = refusals
   const localApplyAllowed = requested.length > 0 && parsed.roster != null && blockingRefusals.length === 0
   const candidateDiff = localApplyAllowed && afterText != null ? unifiedDiff(rosterText, afterText, { path: 'crew/roster.json' }) : null
   const localCandidateDiff = localApplyAllowed && localAfterText != null ? unifiedDiff(rosterText, localAfterText, { path: 'crew/roster.json' }) : null

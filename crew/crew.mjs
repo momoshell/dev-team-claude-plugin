@@ -39,6 +39,7 @@ import { homedir } from 'node:os'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { execSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 
 import { cmux, tree, sendLine, renameTab, closeSurface, closeWorkspace, logLine } from './driver.mjs'
 import { slug } from './slug.mjs'
@@ -105,10 +106,10 @@ export const HEADLESS_TRANSPORTS = Object.freeze([HEADLESS_TRANSPORT, HEADLESS_R
 // deliberate: its charter is "domain lead + architect + scout-commander", and
 // fan-out discovery IS the third of those. The reviewer's charter — conformance
 // to plan, then correctness, plus gate-defect triage and perspective duty —
-// names no fan-out, and the roster deliberately seats pi/terra on review at
-// `build`/`mechanical` under the ratified review-vendor rule. Requiring it
-// there would make two of three tiers unbootable, which is how this landed the
-// first time (#144).
+// names no fan-out, so the requirement lives on the CHARTER and not on the
+// seat: today's shipped pi reviewers at build/mechanical lack `subagents`, so
+// requiring it there would make those two tiers unbootable, which is how this
+// landed the first time (#144).
 // Every fan-out tool name, in ONE place. Task and Agent spawn subagents;
 // Workflow fans out wider still — a script that spawns many seats at once —
 // and no seat denied the first two was ever denied it. A seat that withholds
@@ -773,6 +774,7 @@ export const BAND_FLOOR_REFUSALS = Object.freeze([
   'band-unknown',      // the seat's model is a member of no ratified band
   'band-below-floor',  // the seat's band ranks below its tier's ratified floor
   'local-model-judge-seat', // a source:"local" roster model in a judge-tier seat, at any band
+  'model-not-in-catalog', // a canonical roster cell whose own catalog key roster.models does not declare
 ])
 
 export function refuseBandFloor(reason, message) {
@@ -840,6 +842,48 @@ function unreadableLadder(path, expected, found, where = '') {
 // shape contract is the artifact's own (visualizer/server/roster-ladder.mjs:64-105):
 // schema version, ratification metadata, non-empty valid bands, unique band
 // names, unique members, and a floor plus a cost ceiling for every tier.
+// The roster boot reads. A --roster path is the DISPATCHING checkout's file,
+// handed in at boot and snapshotted; with no flag this is the runtime's own
+// roster, byte-identically to before (#983).
+export function rosterSourcePath(args, here = HERE) {
+  const flag = typeof args?.roster === 'string' && args.roster.trim() ? resolvePath(args.roster.trim()) : null
+  return flag ?? join(here, 'roster.json')
+}
+
+// ONE read. The bytes that are PARSED are the bytes that are HASHED and the
+// bytes that are SNAPSHOTTED, so an atomic editor replacing the file mid-boot
+// cannot leave crew.json.seats derived from roster A while the provenance
+// records roster B (#983).
+export function loadRosterSource(path, args, { readFile = readFileSync } = {}) {
+  const bytes = readFile(path)
+  const text = typeof bytes === 'string' ? bytes : bytes.toString('utf8')
+  const origin = typeof args?.roster === 'string' && args.roster.trim() ? 'flag' : 'runtime'
+  const roster = normalizeRoster(JSON.parse(text))
+  return { roster, record: { path, origin, sha256: createHash('sha256').update(bytes).digest('hex'), bytes } }
+}
+
+export function writeRosterSnapshot(paths, record, { write = writeFileSync } = {}) {
+  const path = join(paths.dir, 'roster.snapshot.json')
+  write(path, record.bytes)
+  return path
+}
+
+// NORMALIZED, never raw. The visualizer's editor serializes every applied edit
+// as schema v2 (visualizer/server/roster-edit.mjs:367), so a lane's snapshot
+// usually carries assurances.quick/standard/rigorous and NO tiers key — while
+// reseat reads roster.tiers and nextRung knows only the legacy tier names
+// (crew/seat-io.mjs). Raw JSON.parse here boots fine and then makes every
+// later reseat report a missing or exhausted cell (#983).
+//
+// The snapshot goes in the lane's crew STATE dir and NEVER into the lane
+// worktree: writing <laneDir>/crew/roster.json would leave every lane's tree
+// dirty from boot and would carry the operator's arrangement onto the lane
+// branch at commit, which acceptance criterion 16 forbids.
+export function rosterSnapshotReader(crew, { readFile = readFileSync } = {}) {
+  const snapshot = typeof crew?.roster?.snapshot === 'string' ? crew.roster.snapshot : null
+  return () => normalizeRoster(JSON.parse(readFile(snapshot ?? join(HERE, 'roster.json'), 'utf8')))
+}
+
 export function loadLadder({ path = LADDER_PATH, readFile = readFileSync } = {}) {
   let raw
   try { raw = JSON.parse(readFile(path, 'utf8')) } catch (err) {
@@ -967,6 +1011,22 @@ export function assertBandFloors(seats, tier, ladder, { adapters = null, localPr
     if (localEntry?.source === 'local') {
       throw refuseBandFloor('local-model-judge-seat', `seat ${role} expected a hosted model for tier ${tier}, found local model ${member} — ADR-037 decision 2 closes a judge seat to a source "local" model at every band, at crew/roster.json models[].source`)
     }
+    // The roster's own catalog, not the ladder's ratification: a cell can be a
+    // ratified ladder member and still be absent from roster.models, and before
+    // #983 nothing at boot noticed — crew/roster-refresh.test.mjs was the only
+    // guard, and it only ever read the SHIPPED file. SOURCE order matters: the
+    // ADR-037 local-model question is asked first so its reason is never
+    // displaced. Two exemptions, both deliberate. `models` absent is not a
+    // violation: every caller that does not hand a catalog is asking a pure band
+    // question (crew/crew.test.mjs:4892+). And a RAW --model-<role> override is
+    // the adapter's namespace, not the roster's: it carries provider/id null and
+    // `member` is derived from the ratified member seatBand proved (:960-963), so
+    // testing `member` here would refuse a legally resolved override whose
+    // ratified member the catalog does not happen to list. The condition asks
+    // about the CANONICAL cell and nothing else.
+    if (seat?.provider != null && seat?.id != null && models && !Object.hasOwn(models, key)) {
+      throw refuseBandFloor('model-not-in-catalog', `seat ${role} expected its model ${key} to be declared in the roster's own catalog for tier ${tier}, found no models["${key}"], at crew/roster.json models`)
+    }
     if (found === null) {
       throw refuseBandFloor('band-unknown', `seat ${role} expected a model in a ratified band at or above "${floorName}" for tier ${tier}, found ${JSON.stringify(key || null)} proven by no ratified member, at ${ladder.path} bands[].members`)
     }
@@ -1044,7 +1104,7 @@ export const SHADOW_RATE_FLOOR = CELL_RATE_FLOOR
 export const SHADOW_OUTCOMES = Object.freeze(['picked', 'stands', 'abstained', 'no-candidate', 'not-consulted'])
 export const SHADOW_EXCLUSIONS = Object.freeze([
   'band-unknown', 'band-below-floor', 'capability-shortfall',
-  'agent-unresolved', 'breaker-open', 'vendor-collision',
+  'agent-unresolved', 'breaker-open',
 ])
 export const SHADOW_ABSENT = Object.freeze({
   cost: USAGE_ABSENT_CAUSES.pane,
@@ -1152,7 +1212,6 @@ export function shadowPick({ roster, tier, seats, sources = {}, ladder,
       continue
     }
 
-    const partner = seats['tech-lead'] ?? seats.planner
     const candidates = []
     for (const candidate of shadowCandidates(roster, role)) {
       let band = null
@@ -1186,11 +1245,8 @@ export function shadowPick({ roster, tier, seats, sources = {}, ladder,
           excludedBy = shadowExclusion('breaker-open', `${candidate.provider}/${candidate.id}/${candidate.agent}/${candidate.effort} is open in the breaker`)
         }
       }
-      if (excludedBy === null) {
-        if (role === 'reviewer' && partner && candidate.provider === partner.provider) { /* vendor-collision */
-          excludedBy = shadowExclusion('vendor-collision', `reviewer ${candidate.provider}/${candidate.id} shares the vendor of the seated review partner`)
-        }
-      }
+      // RETIRED (#983): no reviewer vendor-collision exclusion.
+      // No ADR ratifies the rule; a hard two-vendor requirement makes every roster illegal during a single-provider outage, measured 2026-09-06 when an Anthropic limit parked six lanes for ~2h44m; the picker now recommends on band, capability, breaker and rate alone.
 
       const row = shadowReviewRow(candidate, role, reviewRows)
       const candidateAbsent = { cost_usd: SHADOW_ABSENT.cost }
@@ -1720,6 +1776,8 @@ export async function bootCmd(args, deps = {}) {
     loadavg: loadavgDep = null, cpus: cpusDep = null,
     probeEndpoint: probeEndpointDep = null, register: registerDep = null,
     awaitSeatsReady: awaitSeatsReadyDep = awaitSeatsReady,
+    readRosterFile: readRosterFileDep = readFileSync,
+    writeRosterSnapshot: writeRosterSnapshotDep = writeRosterSnapshot,
   } = deps
   // Capture the invocation environment before async adapter resolution so the
   // breaker and host-load policies cannot be lost while boot is awaiting imports.
@@ -1740,16 +1798,21 @@ export async function bootCmd(args, deps = {}) {
   const checkout = resolvePath(args.checkout || process.cwd())
   const laneFence = resolveLaneFence(args)
   let roles, tierName = null, tierSeats = null, sources = null, roster = null
+  let rosterRecord = null
   const seatingTier = args.tier !== undefined || args.assurance !== undefined ? assuranceTier(configuration.assurance.effective) : null
   if (seatingTier) {
     if (args.roles) throw new Error('--assurance/--tier and --roles are mutually exclusive: the assurance defines the seating')
     // The roster is the RUNTIME's policy, not the target checkout's. A
     // corrupt/missing roster must name the file and that rule, not throw a
     // bare "Unexpected token".
-    const rosterPath = join(HERE, 'roster.json')
-    try { roster = loadRoster(rosterPath) } catch (err) {
+    const rosterPath = rosterSourcePath(args)
+    try {
+      const source = loadRosterSource(rosterPath, args, { readFile: readRosterFileDep })
+      roster = source.roster
+      rosterRecord = source.record
+    } catch (err) {
       if (err?.reason) throw err
-      throw new Error(`--tier needs the crew runtime's own roster at ${rosterPath} (not the target checkout's): ${err.message}`)
+      throw new Error(`--tier needs a readable roster at ${rosterPath} (the runtime's own, or the one --roster names): ${err.message}`)
     }
     ;({ roles, seats: tierSeats, sources } = resolveTier(roster, String(seatingTier), args))
     tierName = seatingTier
@@ -1908,6 +1971,12 @@ export async function bootCmd(args, deps = {}) {
   mkdirSync(paths.taskDir, { recursive: true })
   mkdirSync(paths.returnsDir, { recursive: true })
 
+  // BEFORE prompts, BEFORE any workspace or seat exists. A snapshot write
+  // that fails must leave no live pane and no crew.json behind — placed near
+  // saveCrew (:2004) instead, a failed write would orphan panes the teardown
+  // could never find (#983).
+  const rosterSnapshot = rosterRecord ? writeRosterSnapshotDep(paths, rosterRecord) : null
+
   const bootBrief = `Crew for task ${taskSlug}. Task dir ${paths.taskDir}. Read your role in the system prompt, reply exactly ready: your-role, then wait.`
   const memory = memoryExtracts(roles, args, taskSlug)
   for (const role of roles) writeRolePrompt(role, paths.taskDir, memory.sections[role] || '')
@@ -1993,6 +2062,7 @@ export async function bootCmd(args, deps = {}) {
     ...(workerBin ? { claude_bin: workerBin } : {}),
     ...(turnCeilingRecord ? { turn_ceilings: turnCeilingRecord } : {}),
     ...(tierName ? { tier: tierName, seats } : {}),
+    ...(rosterRecord ? { roster: { path: rosterRecord.path, origin: rosterRecord.origin, sha256: rosterRecord.sha256, snapshot: rosterSnapshot } } : {}),
     ...(laneFence ? { lane_name: laneFence.lane, lane_fence: laneFence.fence } : {}),
     ...(advisorRecord.granted.length ? { advisor: advisorRecord } : {}),
   }
@@ -2020,6 +2090,7 @@ export async function bootCmd(args, deps = {}) {
     ...(charter.unmeasured ? { charter_unmeasured: charter.unmeasured } : {}),
     ...(workerBin ? { claude_bin: workerBin } : {}),
     ...(tierName ? { tier: tierName, seats } : {}),
+    ...(rosterRecord ? { roster: { path: rosterRecord.path, origin: rosterRecord.origin, sha256: rosterRecord.sha256 } } : {}),
     ...(allocation ? { allocation } : {}),
     ...(breaker ? { breaker } : {}),
     ...(load ? { load } : {}),
@@ -2196,7 +2267,7 @@ export function runCmd(args, deps = {}) {
   // dispatch refuses HERE when the dispatch carries none — before crew state is
   // read and long before a seat is driven.
   assertCtxSources(executionConfiguration.execution.effective, { validationLane })
-  const { drive = driveTask, appendCompletion: appendCompletionDep = appendCompletion, awaitSeatsReady: awaitSeatsReadyDep = awaitSeatsReady, writeTerminalLine: writeTerminalLineDep } = deps
+  const { drive = driveTask, appendCompletion: appendCompletionDep = appendCompletion, awaitSeatsReady: awaitSeatsReadyDep = awaitSeatsReady, writeTerminalLine: writeTerminalLineDep, seatIo: seatIoDep = seatIo } = deps
   const taskSlug = slug(args.task)
   const checkout = resolvePath(args.checkout || process.cwd())
   const paths = pathsFor(taskSlug, checkout)
@@ -2321,7 +2392,7 @@ export function runCmd(args, deps = {}) {
     emitter.startRun()
   } catch { emitter = null }
 
-  const io = seatIo(crew, paths, checkout, emitter, null, args)
+  const io = seatIoDep(crew, paths, checkout, emitter, null, args, { readRoster: rosterSnapshotReader(crew) })
   // A throw out of the driver (member timeout, dead pane, git failure) is an
   // OUTCOME, not a stack trace: it must still produce a task envelope, or a
   // concurrent `crew.mjs wait` spins its full timeout for nothing.
@@ -2953,7 +3024,7 @@ export function parseArgs(argv) {
 }
 
 export const KNOWN_FLAGS = Object.freeze({
-  boot: Object.freeze(['task', 'checkout', 'roles', 'tier', 'fences', 'lane', 'headless', 'headless-rpc', 'headless-all', 'memory-dir', 'memory-backend', 'memory-budget-bytes', 'claude-bin', 'profile', 'assurance', ...TURN_CEILING_FLAGS]),
+  boot: Object.freeze(['task', 'checkout', 'roles', 'tier', 'fences', 'lane', 'headless', 'headless-rpc', 'headless-all', 'memory-dir', 'memory-backend', 'memory-budget-bytes', 'claude-bin', 'profile', 'assurance', 'roster', ...TURN_CEILING_FLAGS]),
   run: Object.freeze(['task', 'checkout', 'brief-file', 'variant', 'execution', 'files-in-scope', 'validation-lane', 'lane', 'plan-rounds', 'build-rounds', 'review-rounds', ...WAIT_FLAGS, 'suite', 'keep', 'claude-bin']),
   handoff: Object.freeze(['task', 'checkout', 'brief-file']),
   wait: Object.freeze(['task', 'checkout', 'timeout-s']),
@@ -2972,7 +3043,7 @@ export const FLAG_VALUE_REFUSAL = 'invalid-flag-value'
 export const FLAG_VALUE_CONTRACT = Object.freeze({
   task: 'value', checkout: 'value', roles: 'value', tier: 'value',
   fences: 'value', lane: 'value', 'brief-file': 'value', variant: 'value',
-  profile: 'value', execution: 'value', assurance: 'value',
+  profile: 'value', execution: 'value', assurance: 'value', roster: 'value',
   'files-in-scope': 'value', 'validation-lane': 'value',
   'plan-rounds': 'value', 'build-rounds': 'value', 'review-rounds': 'value',
   ...Object.fromEntries(WAIT_FLAGS.map((flag) => [flag, 'value'])),

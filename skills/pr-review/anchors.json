@@ -1,7 +1,6 @@
 {
   "crew/escalation-policy.mjs:81": "export function fuseFindings(a, b, options = {}) {",
   "crew/escalation-policy.mjs:128": "export function adjudicatePanel(divergent, details) {",
-  "crew/crew.mjs:1191": "excludedBy = shadowExclusion('vendor-collision'",
   "crew/child.mjs:266": "The daemon's regrant hook is the sole caller that sets continuation:",
   "crew/roles/reviewer.md:47": "\"details\": { \"review_path\": \"<abs>\", \"verdict\": \"pass\"|\"changes-needed\",",
   "crew/roles/reviewer.md:62": "`findings` is optional: omit it and the run behaves exactly as before.",

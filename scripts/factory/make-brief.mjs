@@ -52,8 +52,11 @@ const REQUEST_KEYS = Object.freeze(['ask', 'where', 'done_means', 'out_of_scope'
 // A lane may declare files it will CREATE. The key is OPTIONAL, so every
 // request authored before it existed stays valid, and it is a COMPILER key
 // rather than a dispatch-only one: the compiler is what exempts the path.
-export const OPTIONAL_REQUEST_KEYS = Object.freeze(['creates', 'directed', 'intent'])
+export const OPTIONAL_REQUEST_KEYS = Object.freeze(['creates', 'directed', 'intent', 'premise_optouts'])
 const CODE_EXTENSIONS = Object.freeze(['.js', '.mjs'])
+const PREMISE_FIELDS = Object.freeze(['ask', 'done_means', 'out_of_scope'])
+const PREMISE_CITATION = /(?<![\w./\\-])(?<citation>(?<path>[A-Za-z0-9_@.-]+(?:\/[A-Za-z0-9_@.-]+)*):(?<start>[1-9][0-9]*)(?:-(?<end>[1-9][0-9]*))?)(?![\w/-])/g
+export const PREMISE_UNMEASURED_REASONS = Object.freeze(['no-checkable-claim', 'quote-without-citation', 'citation-without-quote', 'optout-unmatched'])
 const ANSI_CSI = /\x1b\[[0-?]*[ -/]*[@-~]/g
 const ERROR_CODE = /^[a-z0-9]+(?:[-:][a-z0-9]+)+$/
 const WRITTEN_PATH = /^[A-Za-z0-9_.\-/]+\.[A-Za-z0-9]+$/
@@ -129,6 +132,7 @@ const DIRECTED_FENCE_COLLISION = 'directed-fence-collision'
 const DISCOVERY_BUDGET = 'discovery-budget'
 const BRIEF_TOO_LARGE = 'brief-too-large'
 const BRIEF_SIZE_UNMEASURED = 'brief-size-unmeasured'
+const BRIEF_PREMISE_STALE = 'brief-premise-stale'
 
 export const REFUSAL_REASONS = Object.freeze([
   MISSING_LINE,
@@ -158,6 +162,7 @@ export const REFUSAL_REASONS = Object.freeze([
   DISCOVERY_BUDGET,
   BRIEF_TOO_LARGE,
   BRIEF_SIZE_UNMEASURED,
+  BRIEF_PREMISE_STALE,
 ])
 
 export const BROAD_KEY_HIT_LIMIT = BROAD_KEY_LIMIT
@@ -517,6 +522,66 @@ function validateDirected(plan) {
   }
 }
 
+function premiseCitationMatches(value) {
+  return [...String(value).matchAll(new RegExp(PREMISE_CITATION.source, PREMISE_CITATION.flags))]
+    .filter((match) => premisePathShape(match.groups.path))
+}
+
+function parsePremiseCitation(value) {
+  if (typeof value !== 'string') return null
+  const matches = premiseCitationMatches(value)
+  if (matches.length !== 1 || matches[0][0] !== value) return null
+  const match = matches[0]
+  return {
+    citation: match.groups.citation,
+    path: match.groups.path,
+    start: Number(match.groups.start),
+    end: Number(match.groups.end || match.groups.start),
+  }
+}
+
+function premisePathShape(path) {
+  if (typeof path !== 'string'
+    || path.length === 0
+    || path.startsWith('/')
+    || path.includes('\\')) return false
+  const segments = path.split('/')
+  if (segments.some((segment) => segment === '' || segment === '.' || segment === '..')) return false
+  const finalSegment = segments.at(-1)
+  const dot = finalSegment.indexOf('.')
+  return path.includes('/') || (dot > 0 && dot < finalSegment.length - 1)
+}
+
+function validatePremiseOptouts(optouts) {
+  if (!Array.isArray(optouts)) refuseUsage('premise_optouts must be an array', WRONG_TYPE)
+  for (const [index, optout] of optouts.entries()) {
+    if (!optout || typeof optout !== 'object' || Array.isArray(optout)) {
+      refuseUsage(`premise_optouts[${index}] must be an object`, WRONG_TYPE)
+    }
+    const unknown = Object.keys(optout).filter((key) => !['field', 'citation', 'reason', 'nth'].includes(key))
+    if (unknown.length > 0) {
+      refuseUsage(`premise_optouts[${index}] has unknown key: ${unknown[0]}`, UNKNOWN_KEY)
+    }
+    if (typeof optout.field !== 'string') refuseUsage(`premise_optouts[${index}].field must be a string`, WRONG_TYPE)
+    if (!optout.field.trim()) refuseUsage(`premise_optouts[${index}].field must not be blank`, MISSING_LINE)
+    if (!PREMISE_FIELDS.includes(optout.field)) {
+      refuseUsage(`premise_optouts[${index}].field is not one of ${PREMISE_FIELDS.join(', ')}`, WRONG_TYPE)
+    }
+    if (typeof optout.citation !== 'string') refuseUsage(`premise_optouts[${index}].citation must be a string`, WRONG_TYPE)
+    if (!optout.citation.trim()) refuseUsage(`premise_optouts[${index}].citation must not be blank`, MISSING_LINE)
+    const citation = parsePremiseCitation(optout.citation)
+    if (!citation || !premisePathShape(citation.path)) {
+      refuseUsage(`premise_optouts[${index}].citation must be one repo-relative path:line literal`, SCOPE_ENTRY_SHAPE)
+    }
+    if (typeof optout.reason !== 'string') refuseUsage(`premise_optouts[${index}].reason must be a string`, WRONG_TYPE)
+    if (!optout.reason.trim()) refuseUsage(`premise_optouts[${index}].reason must not be blank`, MISSING_LINE)
+    if (Object.prototype.hasOwnProperty.call(optout, 'nth')
+      && (!Number.isInteger(optout.nth) || optout.nth < 1)) {
+      refuseUsage(`premise_optouts[${index}].nth must be an integer >= 1`, WRONG_TYPE)
+    }
+  }
+}
+
 export function validateRequest(request, { taskName } = {}) {
   if (!request || typeof request !== 'object' || Array.isArray(request)) {
     refuseUsage('request must be a JSON object', WRONG_TYPE)
@@ -550,6 +615,7 @@ export function validateRequest(request, { taskName } = {}) {
     if (typeof request.intent !== 'string') refuseUsage('intent must be a string', WRONG_TYPE)
     if (!request.intent.trim()) refuseUsage('intent must not be blank', MISSING_LINE)
   }
+  if (Object.prototype.hasOwnProperty.call(request, 'premise_optouts')) validatePremiseOptouts(request.premise_optouts)
   for (const key of ['done_means', 'out_of_scope']) {
     if (typeof request[key] !== 'string') refuseUsage(`${key} must be a string`, WRONG_TYPE)
     if (!request[key].trim()) refuseUsage(`${key} must not be blank`, MISSING_LINE)
@@ -1764,6 +1830,352 @@ export function gitState({ checkout } = {}) {
   return { sha, clean }
 }
 
+function premiseCitationFromMatch(match) {
+  return {
+    citation: match.groups.citation,
+    path: match.groups.path,
+    start: Number(match.groups.start),
+    end: Number(match.groups.end || match.groups.start),
+  }
+}
+
+function premiseFenceLine(line) {
+  return /^\s*```/.test(String(line).replace(/\r$/, ''))
+}
+
+function premisePhysicalLines(source) {
+  if (typeof source !== 'string' || source.length === 0) return []
+  const lines = source.split('\n')
+  if (lines.at(-1) === '') lines.pop()
+  return lines
+}
+
+// Canonicalisation has one closed four-removal rule: fence delimiters are removed by extraction; remove the first interior line only when it supplied form-(a) binding metadata; dedent each side by its own minimum common leading indentation across nonblank lines; remove one terminal newline.
+export function canonicalisePremiseText(text) {
+  const source = typeof text === 'string' ? text : String(text ?? '')
+  const lines = source.split('\n')
+  const nonblankIndent = lines
+    .filter((line) => line.trim().length > 0)
+    .map((line) => line.match(/^[ \t]*/)[0].length)
+  const indent = nonblankIndent.length > 0 ? Math.min(...nonblankIndent) : 0
+  let canonical = lines.map((line) => line.trim().length > 0 ? line.slice(indent) : line).join('\n')
+  if (canonical.endsWith('\n')) canonical = canonical.slice(0, -1)
+  return canonical
+}
+
+function canonicalisePremiseLines(lines) {
+  let canonical = canonicalisePremiseText(lines.join('\n'))
+  if (lines.length > 1 && lines.at(-1) === '') canonical += '\n'
+  return canonical
+}
+
+function premiseFenceRegions(lines) {
+  const regions = []
+  for (let opener = 0; opener < lines.length; opener += 1) {
+    if (!premiseFenceLine(lines[opener])) continue
+    let closer = opener + 1
+    while (closer < lines.length && !premiseFenceLine(lines[closer])) closer += 1
+    regions.push({ opener, closer, interior: lines.slice(opener + 1, closer) })
+    opener = closer
+  }
+  return regions
+}
+
+function premiseClaimFromMatch(field, match) {
+  return { field, ...premiseCitationFromMatch(match) }
+}
+
+export function extractPremiseClaims(request = {}) {
+  const claims = []
+  for (const field of PREMISE_FIELDS) {
+    const text = typeof request?.[field] === 'string' ? request[field] : ''
+    const lines = text.split('\n')
+    const fieldClaims = []
+    const regions = premiseFenceRegions(lines)
+    const regionAt = new Map(regions.map((region) => [region.opener, region]))
+    const fenced = new Set()
+    const consumed = new Map()
+    for (const region of regions) {
+      for (let line = region.opener; line <= region.closer && line < lines.length; line += 1) fenced.add(line)
+      let binding = null
+      const firstInterior = region.interior[0]
+      if (typeof firstInterior === 'string') {
+        const commentAt = firstInterior.indexOf('//')
+        if (commentAt >= 0) {
+          const commentCitation = premiseCitationMatches(firstInterior.slice(commentAt + 2))[0]
+          if (commentCitation) binding = { ...premiseCitationFromMatch(commentCitation), form: 'comment' }
+        }
+      }
+      if (!binding && region.opener > 0 && !premiseFenceLine(lines[region.opener - 1])) {
+        const preceding = premiseCitationMatches(lines[region.opener - 1])[0]
+        if (preceding) {
+          binding = {
+            ...premiseCitationFromMatch(preceding),
+            form: 'prose',
+            line: region.opener - 1,
+            startIndex: preceding.index,
+            endIndex: preceding.index + preceding[0].length,
+          }
+          if (!consumed.has(binding.line)) consumed.set(binding.line, [])
+          consumed.get(binding.line).push([binding.startIndex, binding.endIndex])
+        }
+      }
+      if (binding) {
+        const quoteLines = binding.form === 'comment' ? region.interior.slice(1) : region.interior
+        fieldClaims.push({
+          kind: 'bound',
+          field,
+          citation: binding.citation,
+          path: binding.path,
+          start: binding.start,
+          end: binding.end,
+          quote: canonicalisePremiseLines(quoteLines),
+          binding: binding.form,
+          order: region.opener,
+          suborder: -1,
+        })
+      } else {
+        fieldClaims.push({
+          kind: 'unbound',
+          field,
+          citation: null,
+          path: null,
+          start: null,
+          end: null,
+          quote: canonicalisePremiseText(region.interior.join('\n')),
+          binding: null,
+          order: region.opener,
+          suborder: -1,
+        })
+      }
+    }
+    for (let line = 0; line < lines.length; line += 1) {
+      if (fenced.has(line) || regionAt.has(line)) continue
+      const skipped = consumed.get(line) || []
+      for (const match of premiseCitationMatches(lines[line])) {
+        if (skipped.some(([start, end]) => match.index >= start && match.index < end)) continue
+        fieldClaims.push({
+          kind: 'standalone',
+          ...premiseClaimFromMatch(field, match),
+          quote: null,
+          binding: null,
+          order: line,
+          suborder: match.index,
+        })
+      }
+    }
+    fieldClaims.sort((a, b) => a.order - b.order || a.suborder - b.suborder)
+    const occurrences = new Map()
+    for (const claim of fieldClaims) {
+      if (!claim.citation) continue
+      const key = `${claim.field}\u0000${claim.citation}`
+      const nth = (occurrences.get(key) || 0) + 1
+      occurrences.set(key, nth)
+      claim.nth = nth
+    }
+    claims.push(...fieldClaims.map((claim) => {
+      delete claim.order
+      delete claim.suborder
+      return claim
+    }))
+  }
+  return claims
+}
+
+function premiseOptoutMatches(optout, claim) {
+  return optout.field === claim.field && optout.citation === claim.citation && (optout.nth ?? 1) === claim.nth
+}
+
+function premiseIdentifierTokens(text) {
+  return [...String(text || '').matchAll(/\b[A-Za-z_$][A-Za-z0-9_$]*\b/g)].map((match) => match[0])
+}
+
+function premiseDifferenceToken(quote, actual) {
+  const quoteTokens = premiseIdentifierTokens(quote)
+  const actualTokens = premiseIdentifierTokens(actual)
+  const quoteSet = new Set(quoteTokens)
+  const actualSet = new Set(actualTokens)
+  return actualTokens.find((token) => !quoteSet.has(token))
+    || quoteTokens.find((token) => !actualSet.has(token))
+    || actualTokens[0]
+    || quoteTokens[0]
+    || ''
+}
+
+function premiseDiagnosticQuote(value) {
+  return `'${String(value ?? '').replaceAll("'", "'\\''")}'`
+}
+
+function premiseMissingBlob(stderr) {
+  return /does not exist in ['\"]?HEAD|exists on disk, but not in ['\"]?HEAD|Not a valid object name HEAD:/i.test(String(stderr || ''))
+}
+
+export function readPremiseBaselineFile(checkout, path) {
+  if (!premisePathShape(path)) refuseUsage(`premise citation path is not repo-relative: ${path}`, SCOPE_ENTRY_SHAPE)
+  let type
+  try {
+    type = spawnSync('git', ['-C', checkout, 'cat-file', '-t', `HEAD:${path}`], {
+      encoding: 'utf8',
+      timeout: 10_000,
+    })
+  } catch {
+    refuseUsage(`cannot read committed premise file: ${path}`, NOT_A_GIT_REPO)
+  }
+  if (type?.status === 128 && !type.error && premiseMissingBlob(type.stderr)) return null
+  if (type?.status !== 0 || type.error || type.signal) {
+    refuseUsage(`cannot read committed premise file: ${path}`, NOT_A_GIT_REPO)
+  }
+  const typeName = String(type.stdout || '').trim()
+  if (!typeName) refuseUsage(`cannot read committed premise file: ${path}`, NOT_A_GIT_REPO)
+  if (typeName !== 'blob') return null
+  let result
+  try {
+    result = spawnSync('git', ['-C', checkout, 'show', `HEAD:${path}`], {
+      encoding: 'utf8',
+      timeout: 10_000,
+    })
+  } catch {
+    refuseUsage(`cannot read committed premise file: ${path}`, NOT_A_GIT_REPO)
+  }
+  if (result?.status === 0 && !result.error && !result.signal) return String(result.stdout || '')
+  refuseUsage(`cannot read committed premise file: ${path}`, NOT_A_GIT_REPO)
+}
+
+function premiseStaleRow(claim, lineCount, actual = null, hint = null) {
+  return { ...claim, status: 'stale', lineCount, actual, hint }
+}
+
+function premiseUnmeasuredRow(claim, reason) {
+  return { ...claim, status: 'unmeasured', reason }
+}
+
+function premiseSyntheticRow() {
+  return { kind: 'synthetic', status: 'unmeasured', citation: null, reason: 'no-checkable-claim' }
+}
+
+export function formatStalePremises(stale) {
+  return stale.map((claim) => {
+    if (claim.kind === 'bound') {
+      const current = claim.actual ?? ''
+      return [
+        `stale bound premise · ${claim.path} · ${claim.citation}`,
+        'quoted bytes:',
+        claim.quote,
+        `current committed range bytes (current line count: ${claim.lineCount}):`,
+        current,
+        `git log -S ${premiseDiagnosticQuote(claim.hint || premiseDifferenceToken(claim.quote, claim.actual || ''))} -- ${premiseDiagnosticQuote(claim.path)}`,
+      ].join('\n')
+    }
+    return `stale standalone premise · ${claim.path} · ${claim.citation} · current line count: ${claim.lineCount}`
+  }).join('\n')
+}
+
+export function verifyPremises(request, checkout) {
+  const claims = extractPremiseClaims(request)
+  const optouts = Array.isArray(request?.premise_optouts) ? request.premise_optouts : []
+  const matchedClaims = new Set()
+  const rows = []
+  const stale = []
+  const unmeasured = []
+  let verified = 0
+  for (const claim of claims) {
+    // Match each declaration against its one exact identity; a declaration is
+    // consumed below, so repeated citations still distinguish their nth value.
+    const optoutIndex = optouts.findIndex((optout, index) => !matchedClaims.has(`optout:${index}`)
+      && !matchedClaims.has(claim)
+      && premiseOptoutMatches(optout, claim))
+    if (optoutIndex >= 0) {
+      matchedClaims.add(`optout:${optoutIndex}`)
+      matchedClaims.add(claim)
+      rows.push({ ...claim, status: 'exempt', reason: optouts[optoutIndex].reason })
+      continue
+    }
+    if (claim.kind === 'unbound') {
+      const row = premiseUnmeasuredRow(claim, 'quote-without-citation')
+      rows.push(row)
+      unmeasured.push(row)
+      continue
+    }
+    if (!premisePathShape(claim.path)) {
+      refuseUsage(`premise citation path is not repo-relative: ${claim.path}`, SCOPE_ENTRY_SHAPE)
+    }
+    const baselineSource = readPremiseBaselineFile(checkout, claim.path)
+    const baselineLines = baselineSource === null ? [] : premisePhysicalLines(baselineSource)
+    const lineCount = baselineLines.length
+    const actual = canonicalisePremiseText(baselineLines.slice(claim.start - 1, claim.end).join('\n'))
+    const committed = claim.end - claim.start + 1 > 1 && baselineLines[claim.end - 1] === '' ? `${actual}\n` : actual
+    const invalidRange = baselineSource === null || claim.start < 1 || claim.end < claim.start || claim.end > lineCount
+    if (invalidRange) {
+      const row = premiseStaleRow(claim, lineCount, committed)
+      rows.push(row)
+      stale.push(row)
+      continue
+    }
+    if (claim.kind === 'standalone') {
+      const row = premiseUnmeasuredRow(claim, 'citation-without-quote')
+      row.lineCount = lineCount
+      rows.push(row)
+      unmeasured.push(row)
+      continue
+    }
+    if (committed === claim.quote) {
+      const row = { ...claim, status: 'verified', lineCount }
+      rows.push(row)
+      verified += 1
+      continue
+    }
+    const row = premiseStaleRow(claim, lineCount, committed, premiseDifferenceToken(claim.quote, committed))
+    rows.push(row)
+    stale.push(row)
+  }
+  for (const [index, optout] of optouts.entries()) {
+    if (matchedClaims.has(`optout:${index}`)) continue
+    const row = { kind: 'unmatched', field: optout.field, citation: optout.citation, status: 'unmatched', reason: 'optout-unmatched', declaration: index }
+    rows.push(row)
+    unmeasured.push(row)
+  }
+  if (claims.length === 0) rows.unshift(premiseSyntheticRow()), unmeasured.unshift(rows[0])
+  return {
+    rows,
+    stale,
+    verified,
+    total: claims.length + optouts.filter((_, index) => !matchedClaims.has(`optout:${index}`)).length,
+    unmeasured,
+  }
+}
+
+const unmeasuredStatus = 'UNMEASURED'
+
+function renderPremiseRow(row) {
+  if (row.kind === 'synthetic') return `${unmeasuredStatus} · premise · ${row.reason}`
+  if (row.status === 'verified') return `verified · premise · ${row.citation}`
+  if (row.status === 'exempt') return `exempt · premise · ${row.citation} · ${row.reason}`
+  if (row.status === 'unmatched') return `optout-unmatched · premise · ${row.citation}`
+  if (row.status === 'stale') return `stale · premise · ${row.citation || row.reason}`
+  return `${unmeasuredStatus} · premise · ${row.citation ? `${row.citation} · ` : ''}${row.reason}`
+}
+
+function syntheticPremiseResult() {
+  const row = premiseSyntheticRow()
+  return { rows: [row], stale: [], verified: 0, total: 0, unmeasured: [row], exempt: 0 }
+}
+
+function renderPremiseCheck(result) {
+  const rows = Array.isArray(result?.rows) && result.rows.length > 0 ? result.rows : syntheticPremiseResult().rows
+  return rows.map(renderPremiseRow).join('\n')
+}
+
+function premiseSummary(result) {
+  const rows = Array.isArray(result?.rows) ? result.rows : []
+  const exempt = rows.filter((row) => row?.status === 'exempt').length
+  const adjudicated = Number(result?.verified || 0) + exempt
+  const total = Number.isInteger(result?.total) ? result.total : 0
+  const first = Array.isArray(result?.unmeasured) ? result.unmeasured[0] : null
+  return first
+    ? `make-brief: premise ${unmeasuredStatus} - ${first.reason} ${adjudicated}/${total}`
+    : `make-brief: premise verified ${adjudicated}/${total}`
+}
+
 export function readSuppliedBaseline(path) {
   let data
   try {
@@ -2377,6 +2789,7 @@ function renderBriefSections(gathered) {
   const supplied = gathered.supplied ?? null
   const profile = gathered.profile || null
   const pack = gathered.pack ?? null
+  const premise = gathered.premise ?? syntheticPremiseResult()
   const fences = Object.prototype.hasOwnProperty.call(gathered, 'fences') ? gathered.fences : null
   const baseWriteSurface = Object.prototype.hasOwnProperty.call(gathered, 'writeSurface')
     ? gathered.writeSurface
@@ -2390,6 +2803,7 @@ function renderBriefSections(gathered) {
     briefSection('intent', ['## Intent', resolveIntent(request)]),
     briefSection('proposed tier', ['## Proposed tier', renderProposedTier(proposal), renderProposalBlock(proposal)]),
     briefSection('where', ['## Where', renderWhere(where, creates)]),
+    briefSection('premise check', ['## Premise check', renderPremiseCheck(premise)]),
     ...(pack == null ? [] : [briefSection('context pack', renderContextPack(pack))]),
     briefSection('done means', ['## Done means', request.done_means]),
     briefSection('tripwires', ['## Tripwires', renderTripwireSlot(discovery, pack)]),
@@ -2600,6 +3014,8 @@ function compile(flags) {
   const request = readRequestFile(flags.request)
   validateRequest(request, { taskName })
   const checkout = gitRoot(flags.checkout || process.cwd())
+  const result = verifyPremises(request, checkout)
+  if (result.stale.length > 0) refuseUsage(formatStalePremises(result.stale), BRIEF_PREMISE_STALE)
   const where = verifyWhere({ checkout, where: request.where })
   const creates = verifyCreates({ checkout, creates: request.creates ?? [] })
   const discovery = discoverTripwires({ checkout, files: where, lane: flags.lane ?? null, onProgress: stderrProgressSink })
@@ -2661,9 +3077,11 @@ function compile(flags) {
     proposal,
     profile,
     pack,
+    premise: result,
   })
   const content = admitBrief(rendered.content, rendered.sections)
   writeBrief(content, outPath, flags.force === true)
+  process.stderr.write(`${premiseSummary(result)}\n`)
   return 0
 }
 

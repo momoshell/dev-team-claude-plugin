@@ -1,25 +1,24 @@
 // test/factory-make-brief.test.mjs — the unskippable, filesystem-only lane for
 // the brief compiler. Every fixture is a staged git checkout in one temporary
 // module root; no live crew tree is read or written.
-import { test, after } from 'node:test'
+import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import {
-  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync,
+  existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync,
 } from 'node:fs'
-import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { spawnSync } from 'node:child_process'
-import { git, ROOT } from './helpers.mjs'
+import { git, ROOT, scratchDir } from './helpers.mjs'
 import {
   ACCEPTANCE_GATE_BLOCK, admitBrief, BRIEF_BYTE_LIMIT, BROAD_KEY_HIT_LIMIT, CONVENTIONS_BLOCK, CREATES_MARK, DEFAULT_PROTECTED_PATHS,
   DISCOVERY_PROGRESS_PREFIX, DIRECTED_BLOCK, DIRECTED_GATE_NOTE, DIRECTED_KEYS, HOSTILE_ENV_BLOCK, LADDER_BANDS, OPTIONAL_REQUEST_KEYS,
-  REFUSAL_REASONS, SLOT_MARKER, TIER_NAMES, crossCheckCoupling, readsToAcknowledge,
+  PREMISE_UNMEASURED_REASONS, REFUSAL_REASONS, SLOT_MARKER, TIER_NAMES, crossCheckCoupling, readsToAcknowledge,
   discoverTripwires, exportEntries, extractKeys, extractSymbols, gatherFences, gatherProtectedPaths, isTripwireFile, main, symbolIndexFor,
   MUTATION_CONTRACT_BLOCK, PACK_ABSENT_REASONS, PROPOSAL_BLOCK, PROPOSAL_KEYS, profileField, proposeTier,
   measureBrief, readLadderBands, renderBrief, renderProposalBlock, resolveIntent, resolveWriteSurface, SYMBOL_INDEX_ENTRY_LIMIT,
   SYMBOL_INDEX_ABSENT_REASONS, SYMBOL_INDEX_SCAN_LIMIT, testTitleEntries, validateAsk, writePack,
-  validateRequest, validateScopeEntries, verifyCreates, verifyWhere,
+  canonicalisePremiseText, validateRequest, validateScopeEntries, verifyCreates, verifyPremises, verifyWhere,
 } from '../scripts/factory/make-brief.mjs'
 import { PROPOSAL_BLOCK as EMIT_PROPOSAL_BLOCK, PROPOSAL_KEYS as EMIT_PROPOSAL_KEYS } from '../scripts/factory/emit.mjs'
 import { defaultProfilePath, probeRepo } from '../scripts/factory/probe-repo.mjs'
@@ -28,10 +27,9 @@ import { PROTECTED_PATHS } from '../crew/protected-paths.mjs'
 import { CTX, buildEnv, driveTask, fakeIo, leadEnv, planEnv, RED, reviewEnv } from '../crew/drive-fixtures.mjs'
 
 const SCRIPT = join(ROOT, 'scripts', 'factory', 'make-brief.mjs')
-const fixtureRoot = mkdtempSync(join(tmpdir(), 'factory-make-brief-'))
+const fixtureRoot = scratchDir('factory-make-brief-')
 const EMPTY_FACTORY = join(fixtureRoot, 'empty-factory')
 mkdirSync(EMPTY_FACTORY)
-after(() => rmSync(fixtureRoot, { recursive: true, force: true }))
 
 let fixtureNumber = 0
 function nextRoot(label) {
@@ -179,6 +177,41 @@ function compileCommitted(fx, extra = []) {
   ])
   assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`)
   return { result, outPath, brief: readFileSync(outPath, 'utf8') }
+}
+
+function premiseFixture(label, source, { testCommand = null, sourcePath = 'lib/widget.mjs' } = {}) {
+  const root = nextRoot(`premise-${label}`)
+  const marker = join(fixtureRoot, `${label}.premise.marker`)
+  rmSync(marker, { force: true })
+  const command = testCommand || `printf ran >> "${marker}"; printf "pass 7\\nfail 0\\n"`
+  put(root, 'package.json', `${JSON.stringify({
+    name: `premise-${label}`, private: true, type: 'module', scripts: { test: command },
+  }, null, 2)}\n`)
+  put(root, sourcePath, source)
+  put(root, 'test/widget.test.mjs', "test('fixture test', () => {})\n")
+  git(root, 'init', '-q', '-b', 'main')
+  git(root, 'config', 'user.email', 'factory@test.invalid')
+  git(root, 'config', 'user.name', 'factory test')
+  git(root, 'add', '-A')
+  git(root, 'commit', '-q', '-m', 'fixture')
+  return { root, marker, sha: git(root, 'rev-parse', 'HEAD').trim() }
+}
+
+function premiseRequest(root, body, name = 'premise.request.json') {
+  return put(root, name, `${JSON.stringify({
+    ask: 'Make the widget behavior honor the cited source bytes.',
+    where: ['lib/widget.mjs'],
+    done_means: 'The widget behavior is correct.',
+    out_of_scope: 'The surrounding dispatch remains unchanged.',
+    ...body,
+  }, null, 2)}\n`)
+}
+
+function runPremise(root, body, outName = 'premise.md', requestName = 'premise.request.json', extra = []) {
+  const requestPath = premiseRequest(root, body, requestName)
+  const outPath = join(root, outName)
+  const result = run(root, ['--request', requestPath, '--checkout', root, '--out', outPath, ...extra])
+  return { result, requestPath, outPath }
 }
 
 function suppliedBaseline(label, value) {
@@ -603,7 +636,7 @@ test('an optional creates declaration compiles, renders after verified paths, an
   ])
   const writeLine = section(brief, '## Conventions').split('\n').find((line) => line.startsWith('files_in_scope'))
   assert.equal(writeLine, 'files_in_scope (expected write surface; basis: authored where paths, no lane fence applied): config/thing.yml, lib/new-widget.mjs, lib/widget.mjs')
-  assert.deepEqual(OPTIONAL_REQUEST_KEYS, ['creates', 'directed', 'intent'])
+  assert.deepEqual(OPTIONAL_REQUEST_KEYS, ['creates', 'directed', 'intent', 'premise_optouts'])
 })
 
 test('creates verifies the opposite existence pair and reuses scope shape checks', () => {
@@ -2215,7 +2248,7 @@ test('shape and strength proposals ship inside the Proposed tier section', () =>
     proposal: proposeTier({ where: [], discovery: { candidates: [], tripwires: [], broadKeys: [] } }),
   })
   assert.deepEqual(brief.match(/^## .+$/gm), [
-    '## The ask', '## Intent', '## Proposed tier', '## Where', '## Done means', '## Tripwires',
+    '## The ask', '## Intent', '## Proposed tier', '## Where', '## Premise check', '## Done means', '## Tripwires',
     '## Coupled sources', '## Baseline', '## Out of scope', '## Fences',
     '## What the crew decides', '## Acceptance', '## Acceptance gate',
     '## Per-check mutations', '## Validation lane', '## Conventions',
@@ -2259,7 +2292,8 @@ test('compiler and emitter proposal declarations stay in agreement', () => {
 test('the parser returns a refusal code for an unknown CLI option', () => {
   assert.equal(main(['--bogus']), 2)
   assert.equal(new Set(REFUSAL_REASONS).size, REFUSAL_REASONS.length)
-  assert.equal(REFUSAL_REASONS.length, 27)
+  assert.equal(REFUSAL_REASONS.length, 28)
+  assert.ok(REFUSAL_REASONS.includes('brief-premise-stale'))
   assert.ok(REFUSAL_REASONS.includes('brief-too-large'))
   assert.ok(REFUSAL_REASONS.includes('brief-size-unmeasured'))
   assert.ok(REFUSAL_REASONS.includes('discovery-budget'))
@@ -2566,6 +2600,303 @@ test('stale acknowledgements refuse before unfenced coupled sources', () => {
   assert.equal(result.status, 2)
   assert.match(result.stderr, /stale-read-ack/)
   assert.doesNotMatch(result.stderr, /coupled-source-unfenced/)
+})
+
+test('A1 stale quoted code refuses before compiler work', () => {
+  const fx = premiseFixture('a1', [
+    ...Array.from({ length: 918 }, () => '// filler'),
+    'const verdict = suiteRunPolicy({',
+    '  role: turn.role, command,',
+    '  fence: turn.policy.fence || [], gatePath: turn.policy.gatePath || null,',
+    '  ranBefore: counters.allowance_spent, suiteRanBefore: counters.suite_allowance_spent,',
+    '})',
+    '',
+  ].join('\n'), { sourcePath: 'crew/headless-rpc.mjs' })
+  const staleAsk = [
+    'The historical code premise from #988 must remain exactly as written.',
+    '```js',
+    '// crew/headless-rpc.mjs:919-922 — passes ranBefore, never suiteRanBefore',
+    'const verdict = suiteRunPolicy({',
+    '  role: turn.role, command,',
+    '  fence: turn.policy.fence || [], gatePath: turn.policy.gatePath || null,',
+    '  ranBefore: counters.allowance_spent, suiteCommand: turn.policy.suiteCommand || null,',
+    '})',
+    '```',
+  ].join('\n')
+  const pack = join(fx.root, 'a1-pack')
+  mkdirSync(pack)
+  const stale = runPremise(fx.root, { ask: staleAsk, where: ['crew/headless-rpc.mjs'] }, 'a1.md', 'a1.request.json', ['--pack', pack])
+  assert.equal(stale.result.status, 2)
+  assert.match(stale.result.stderr, /\[reason: brief-premise-stale\]/)
+  assert.match(stale.result.stderr, /ranBefore: counters\.allowance_spent, suiteCommand: turn\.policy\.suiteCommand \|\| null/)
+  assert.match(stale.result.stderr, /crew\/headless-rpc\.mjs:919-922/)
+  assert.match(stale.result.stderr, /current committed range bytes/)
+  assert.match(stale.result.stderr, /suiteRanBefore/)
+  assert.match(stale.result.stderr, /git log -S 'suiteRanBefore' -- 'crew\/headless-rpc\.mjs'/)
+  assert.equal(existsSync(stale.outPath), false)
+  assert.equal(readdirSync(pack).length, 0)
+  assert.equal(existsSync(fx.marker), false)
+
+  const standalone = runPremise(fx.root, {
+    ask: 'A missing citation is stale: crew/headless-rpc.mjs:999 and missing.mjs:1.',
+    where: ['crew/headless-rpc.mjs'],
+  }, 'a1-standalone.md', 'a1-standalone.request.json')
+  assert.equal(standalone.result.status, 2)
+  assert.match(standalone.result.stderr, /crew\/headless-rpc\.mjs:999.*current line count: 923/)
+  assert.match(standalone.result.stderr, /missing\.mjs:1.*current line count: 0/)
+  assert.equal(existsSync(standalone.outPath), false)
+
+  const unmeasured = runPremise(fx.root, {
+    ask: [
+      'An unbound quote and a resolving citation are deliberately unmeasured.',
+      '```js',
+      'const unbound = true',
+      '```',
+      'The source is present at crew/headless-rpc.mjs:919.',
+    ].join('\n'),
+    where: ['crew/headless-rpc.mjs'],
+  }, 'a1-unmeasured.md', 'a1-unmeasured.request.json')
+  assert.equal(unmeasured.result.status, 0, unmeasured.result.stderr)
+  const report = section(readFileSync(unmeasured.outPath, 'utf8'), '## Premise check')
+  assert.match(report, /^UNMEASURED · premise · quote-without-citation$/m)
+  assert.match(report, /^UNMEASURED · premise · crew\/headless-rpc\.mjs:919 · citation-without-quote$/m)
+})
+
+test('B1 present quoted code compiles unchanged', () => {
+  const source = [
+    'export function measured() {',
+    '  const value = {',
+    '    name: "Alpha",',
+    '    label: "A  B",',
+    '  }',
+    '}',
+    '',
+  ].join('\n')
+  const fx = premiseFixture('b1', source)
+  const quote = [
+    '    const value = {',
+    '      name: "Alpha",',
+    '      label: "A  B",',
+    '    }',
+  ].join('\n')
+  const ask = [
+    'The exact committed source appears at lib/widget.mjs:2-5.',
+    '```js',
+    quote,
+    '```',
+  ].join('\n')
+  const clean = runPremise(fx.root, { ask }, 'b1.md', 'b1.request.json')
+  assert.equal(clean.result.status, 0, clean.result.stderr)
+  const brief = readFileSync(clean.outPath, 'utf8')
+  assert.equal(section(brief, '## Premise check').trim(), 'verified · premise · lib/widget.mjs:2-5')
+  assert.equal(clean.result.stderr.trim().split('\n').at(-1), 'make-brief: premise verified 1/1')
+  assert.equal(section(brief, '## The ask'), ask)
+  assert.equal(section(brief, '## Done means'), 'The widget behavior is correct.')
+  assert.equal(section(brief, '## Out of scope'), 'The surrounding dispatch remains unchanged.')
+  assert.equal(canonicalisePremiseText('  first  \n\n    last\t\n'), 'first  \n\n  last\t')
+
+  const variants = [
+    quote.replace('name: "Alpha",', 'name:"Alpha",'),
+    quote.replace('label: "A  B",', 'label: "A  B",   '),
+    quote.replace('label: "A  B",', 'label:\t"A  B",'),
+    quote.replace('name: "Alpha",', 'name: "alpha",'),
+  ]
+  for (const [index, variant] of variants.entries()) {
+    const changed = runPremise(fx.root, {
+      ask: [
+        'The committed source is lib/widget.mjs:2-5 and must match this formatting exactly.',
+        '```js',
+        variant,
+        '```',
+      ].join('\n'),
+    }, `b1-stale-${index}.md`, `b1-stale-${index}.request.json`)
+    assert.equal(changed.result.status, 2, changed.result.stderr)
+    assert.match(changed.result.stderr, /brief-premise-stale/)
+  }
+
+  const secondLineCitation = runPremise(fx.root, {
+    ask: [
+      'This fence has no first-line binding metadata.',
+      '```js',
+      'const value = {',
+      '// lib/widget.mjs:2',
+      '  value: true',
+      '}',
+      '```',
+    ].join('\n'),
+  }, 'b1-second-line.md', 'b1-second-line.request.json')
+  assert.equal(secondLineCitation.result.status, 0, secondLineCitation.result.stderr)
+  assert.equal(section(readFileSync(secondLineCitation.outPath, 'utf8'), '## Premise check').trim(), 'UNMEASURED · premise · quote-without-citation')
+})
+
+test('C1 moved quoted range reports current baseline bytes', () => {
+  const fx = premiseFixture('c1', [
+    'export function moved() {',
+    '  const current = "moved"',
+    '}',
+    '',
+  ].join('\n'))
+  const stale = runPremise(fx.root, {
+    ask: [
+      'The moved implementation is pinned by this exact historical range.',
+      '```js',
+      '// lib/widget.mjs:2',
+      '  const current = "old"',
+      '```',
+    ].join('\n'),
+  }, 'c1.md', 'c1.request.json')
+  assert.equal(stale.result.status, 2)
+  assert.match(stale.result.stderr, /quoted bytes:\nconst current = "old"/)
+  assert.match(stale.result.stderr, /current committed range bytes[^\n]*\nconst current = "moved"/)
+  assert.doesNotMatch(stale.result.stderr, /not found/)
+
+  const pastEnd = runPremise(fx.root, {
+    ask: 'The range is past EOF at lib/widget.mjs:99-100.',
+  }, 'c1-past-end.md', 'c1-past-end.request.json')
+  assert.equal(pastEnd.result.status, 2)
+  assert.match(pastEnd.result.stderr, /lib\/widget\.mjs:99-100.*current line count: 3/)
+})
+
+test('RV1-1 multi-line premise range ending in blank line stays adjudicable', () => {
+  const fx = premiseFixture('rv1-1', 'a\nb\n\nc\n', { sourcePath: 'f.txt' })
+  const result = runPremise(fx.root, {
+    ask: [
+      'The committed blank-line range is pinned exactly.',
+      '```js',
+      '// f.txt:1-3',
+      'a',
+      'b',
+      '',
+      '```',
+    ].join('\n'),
+    where: ['f.txt'],
+    done_means: 'The measured range is see f.txt:1-3 here.',
+  }, 'rv1-1.md', 'rv1-1.request.json')
+  assert.equal(result.result.status, 0, result.result.stderr)
+  assert.doesNotMatch(result.result.stderr, /TypeError|Assignment to constant variable/)
+  assert.equal(section(readFileSync(result.outPath, 'utf8'), '## Premise check').trim(), [
+    'verified · premise · f.txt:1-3',
+    'UNMEASURED · premise · f.txt:1-3 · citation-without-quote',
+  ].join('\n'))
+})
+
+test('D1 prose-only request is exactly UNMEASURED and never clear', () => {
+  const fx = premiseFixture('d1', 'export const proseOnly = true\n')
+  const result = runPremise(fx.root, {
+    ask: 'This request contains prose only and no source premise claim.',
+  }, 'd1.md', 'd1.request.json')
+  assert.equal(result.result.status, 0, result.result.stderr)
+  const brief = readFileSync(result.outPath, 'utf8')
+  const premise = section(brief, '## Premise check').trim()
+  assert.equal(premise, 'UNMEASURED · premise · no-checkable-claim')
+  assert.equal(result.result.stderr.trim().split('\n').at(-1), 'make-brief: premise UNMEASURED - no-checkable-claim 0/0')
+  assert.deepEqual(PREMISE_UNMEASURED_REASONS, ['no-checkable-claim', 'quote-without-citation', 'citation-without-quote', 'optout-unmatched'])
+  assert.ok(Object.isFrozen(PREMISE_UNMEASURED_REASONS))
+  assert.doesNotMatch(`${premise}\n${result.result.stderr.trim().split('\n').at(-1)}`, /clear|pass|ok|none/i)
+
+  const times = runPremise(fx.root, {
+    ask: 'The daemon reaps at 09:30, the split is 3:1, and source evidence is lib/widget.mjs:1.',
+  }, 'd1-times.md', 'd1-times.request.json')
+  assert.equal(times.result.status, 0, times.result.stderr)
+  assert.equal(section(readFileSync(times.outPath, 'utf8'), '## Premise check').trim(), 'UNMEASURED · premise · lib/widget.mjs:1 · citation-without-quote')
+})
+
+test('E1 omitted nth exempts only the first repeated citation', () => {
+  const fx = premiseFixture('e1', 'export const committed = true\n')
+  const ask = [
+    'Two historical claims intentionally repeat one citation.',
+    '```js',
+    '// lib/widget.mjs:1',
+    '  stale first claim',
+    '```',
+    '```js',
+    '// lib/widget.mjs:1',
+    '  stale second claim',
+    '```',
+  ].join('\n')
+  const rationale = 'illustrative, not a load-bearing quote'
+  const oneOptout = {
+    ask,
+    premise_optouts: [
+      { field: 'ask', citation: 'lib/widget.mjs:99', reason: 'citation-without-quote' },
+      { field: 'ask', citation: 'lib/widget.mjs:1', reason: rationale },
+    ],
+  }
+  const requestPath = premiseRequest(fx.root, oneOptout, 'e1-one.request.json')
+  const requestBody = JSON.parse(readFileSync(requestPath, 'utf8'))
+  const inspected = verifyPremises(requestBody, fx.root)
+  assert.deepEqual(inspected.rows.slice(0, 2).map((row) => row.status), ['exempt', 'stale'])
+  assert.equal(inspected.rows[0].reason, rationale)
+  assert.equal(inspected.rows[2].reason, 'optout-unmatched')
+  assert.equal(inspected.stale.length, 1)
+  const refused = run(fx.root, [
+    '--request', requestPath, '--checkout', fx.root, '--out', join(fx.root, 'e1-one.md'),
+  ])
+  assert.equal(refused.status, 2)
+  assert.match(refused.stderr, /brief-premise-stale/)
+
+  const both = runPremise(fx.root, {
+    ask,
+    premise_optouts: [
+      { field: 'ask', citation: 'lib/widget.mjs:1', reason: rationale },
+      { field: 'ask', citation: 'lib/widget.mjs:1', nth: 2, reason: rationale },
+    ],
+  }, 'e1-both.md', 'e1-both.request.json')
+  assert.equal(both.result.status, 0, both.result.stderr)
+  assert.equal(section(readFileSync(both.outPath, 'utf8'), '## Premise check').trim(), [
+    'exempt · premise · lib/widget.mjs:1 · illustrative, not a load-bearing quote',
+    'exempt · premise · lib/widget.mjs:1 · illustrative, not a load-bearing quote',
+  ].join('\n'))
+  assert.equal(both.result.stderr.trim().split('\n').at(-1), 'make-brief: premise verified 2/2')
+
+  const unmatched = runPremise(fx.root, {
+    ask,
+    premise_optouts: [
+      { field: 'ask', citation: 'lib/widget.mjs:1', reason: rationale },
+      { field: 'ask', citation: 'lib/widget.mjs:1', nth: 2, reason: rationale },
+      { field: 'ask', citation: 'lib/widget.mjs:99', reason: 'citation-without-quote' },
+      { field: 'ask', citation: 'lib/widget.mjs:100', reason: 'optout-unmatched' },
+    ],
+  }, 'e1-unmatched.md', 'e1-unmatched.request.json')
+  assert.equal(unmatched.result.status, 0, unmatched.result.stderr)
+  const unmatchedSection = section(readFileSync(unmatched.outPath, 'utf8'), '## Premise check').trim().split('\n')
+  assert.deepEqual(unmatchedSection.slice(-2), [
+    'optout-unmatched · premise · lib/widget.mjs:99',
+    'optout-unmatched · premise · lib/widget.mjs:100',
+  ])
+  assert.equal(unmatched.result.stderr.trim().split('\n').at(-1), 'make-brief: premise UNMEASURED - optout-unmatched 2/4')
+
+  const base = { ask: 'Make the widget behavior honor the cited source bytes.', where: ['lib/widget.mjs'], done_means: 'The widget behavior is correct.', out_of_scope: 'The surrounding dispatch remains unchanged.' }
+  for (const [value, reason] of [
+    ['not-an-array', 'wrong-type'],
+    [[{ field: 'ask', citation: 'lib/widget.mjs:1', reason: 'quote-without-citation', extra: true }], 'unknown-key'],
+    [[{ field: '', citation: 'lib/widget.mjs:1', reason: 'quote-without-citation' }], 'missing-line'],
+    [[{ field: 'ask', citation: '', reason: 'quote-without-citation' }], 'missing-line'],
+    [[{ field: 'ask', citation: 'lib/widget.mjs:1', reason: '' }], 'missing-line'],
+    [[{ field: 'ask', citation: 'lib/widget.mjs:1', reason: 'quote-without-citation', nth: 0 }], 'wrong-type'],
+    [[{ field: 'ask', citation: '../widget.mjs:1', reason: 'quote-without-citation' }], 'scope-entry-shape'],
+    [[{ field: 'ask', citation: '09:30', reason: 'illustrative, not a load-bearing quote' }], 'scope-entry-shape'],
+  ]) {
+    assert.throws(() => validateRequest({ ...base, premise_optouts: value }, { taskName: 'optout-shape' }), (error) => error.reason === reason)
+  }
+})
+
+test('F1 premise comparison reads committed HEAD not dirty working bytes', () => {
+  const committed = 'export const committed = true\n'
+  const fx = premiseFixture('f1', committed)
+  writeFileSync(join(fx.root, 'lib/widget.mjs'), 'export const dirty = true\n')
+  const result = runPremise(fx.root, {
+    ask: [
+      'The committed source is the premise for this dispatch.',
+      '```js',
+      '// lib/widget.mjs:1',
+      'export const committed = true',
+      '```',
+    ].join('\n'),
+  }, 'f1.md', 'f1.request.json')
+  assert.equal(result.result.status, 0, result.result.stderr)
+  assert.equal(section(readFileSync(result.outPath, 'utf8'), '## Premise check').trim(), 'verified · premise · lib/widget.mjs:1')
+  assert.equal(result.result.stderr.trim().split('\n').at(-1), 'make-brief: premise verified 1/1')
 })
 
 test('b476 F3 the mutation contract warns that a hash in a test name is unmatchable in tap', () => {

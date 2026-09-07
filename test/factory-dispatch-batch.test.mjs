@@ -16,6 +16,7 @@ import {
   BatchRefusal,
   CROSS_BATCH_BLIND_SPOT,
   CROSS_BATCH_UNKNOWN_PREFIX,
+  WARNING_ROWS_UNPERSISTED_PREFIX,
   baseContains,
   baselineCacheRoot,
   batchSeatsFrom,
@@ -654,6 +655,59 @@ function summaryDeps(home, logs) {
 function summaryLines(logs) {
   return logs.filter((line) => line.startsWith('dispatch-batch: WARNING-SUMMARY '))
 }
+
+test('an unwritable report prints every warning row on stdout instead of losing it', () => {
+  // The summary replaced the full listing on stdout, so the rows live only in the report.
+  // An unwritable outDir would otherwise turn N rows into a single count and record them
+  // nowhere at all. The log gets shorter; a row is never LOST.
+  const fixture = summaryFixture('unpersisted')
+  const logs = []
+  const deps = {
+    ...summaryDeps(fixture.home, logs),
+    writeFileSync: () => { const err = new Error('EACCES: permission denied'); err.code = 'EACCES'; throw err },
+  }
+  const report = checkFences({
+    fences: fixture.fences,
+    lanes: fixture.lanes,
+    checkout: fixture.checkout,
+    outDir: join(fixture.checkout, 'unpersisted-out'),
+    deps,
+  })
+  const summary = summaryLines(logs)
+  assert.equal(summary.length > 0, true)
+  assert.match(summary[0], /report=\(report unavailable: EACCES\)/)
+
+  const banner = logs.filter((line) => line.startsWith(WARNING_ROWS_UNPERSISTED_PREFIX))
+  assert.equal(banner.length, 1, 'the operator is told the rows are printed because nothing persisted them')
+
+  // every warning the check produced reaches stdout in full
+  const rowsOnStdout = report.warnings.filter((w) => typeof w.text === 'string' && w.text)
+  assert.equal(rowsOnStdout.length > 0, true, 'the fixture must produce at least one warning')
+  for (const warning of rowsOnStdout) {
+    assert.equal(logs.includes(warning.text), true, `warning kind ${warning.kind} was lost`)
+  }
+  // and the BLIND SPOT text survives with them
+  assert.equal(logs.some((line) => line.includes('BLIND SPOT')), true)
+})
+
+test('a writable report keeps the log short and does NOT print the rows', () => {
+  const fixture = summaryFixture('persisted')
+  const logs = []
+  const outDir = join(fixture.checkout, 'persisted-out')
+  const report = checkFences({
+    fences: fixture.fences, lanes: fixture.lanes, checkout: fixture.checkout, outDir,
+    deps: summaryDeps(fixture.home, logs),
+  })
+  assert.equal(logs.filter((line) => line.startsWith(WARNING_ROWS_UNPERSISTED_PREFIX)).length, 0)
+  // test-reach-override logs in full by design and is excluded; the DEFERRED kinds are
+  // the ones the summary moved off stdout, and those must not reappear when persisted.
+  const deferredKinds = new Set(['citation-carrier', 'test-reach', 'anchor-pin'])
+  const texts = report.warnings.filter((w) => deferredKinds.has(w.kind) && typeof w.text === 'string' && w.text).map((w) => w.text)
+  assert.equal(texts.length > 0, true, 'the fixture must produce at least one deferred warning')
+  for (const text of texts) assert.equal(logs.includes(text), false, 'a persisted row must not also be printed in full')
+  const persisted = JSON.parse(readFileSync(join(outDir, FENCE_REPORT_FILE), 'utf8'))
+  assert.equal(reportRowCount(persisted) > 0, true)
+})
 
 function reportRowCount(report) {
   return report.lanes.reduce((total, lane) => total + lane.anchor_pins.length + lane.citation_carriers.length + lane.test_reach.length, 0) + report.cross_batch_unknown.length

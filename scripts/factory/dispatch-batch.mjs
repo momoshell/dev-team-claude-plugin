@@ -83,6 +83,7 @@ export const REFUSAL_REASONS = Object.freeze([
   TEST_REACH_UNFENCED,
   PLAN_ADOPT_GATE_ABSOLUTE_PATH,
 ])
+export const WARNING_ROWS_UNPERSISTED_PREFIX = 'dispatch-batch: WARNING rows-unpersisted:'
 export const CROSS_BATCH_UNKNOWN_PREFIX = 'dispatch-batch: WARNING cross-batch-unknown:'
 export const CROSS_BATCH_BLIND_SPOT = 'BLIND SPOT: a lane booted without --fences declares no surface at all and can be editing anything; a lane whose batch siblings have been reaped records no claim; and a repository whose git dir cannot be measured is not compared. None of those are cleared — they are reported unknown.'
 
@@ -1430,11 +1431,24 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
     const text = `${CROSS_BATCH_UNKNOWN_PREFIX} the live lane set could not be determined in full (crew root ${crossBatch.root}, state ${crossBatch.state}): ${crossBatch.unknown.map((row) => `${row.lane ?? 'crew-root'} (${row.reason})`).join('; ') || 'none named'}; this batch is NOT cleared against those lanes and this absence is not a clear. ${CROSS_BATCH_BLIND_SPOT}`
     warnings.push({ kind: 'cross-batch-unknown', lane: null, unknown: crossBatch.unknown, text })
   }
+  // The summary line replaced the full listing on stdout, so the ROWS now live only in
+  // the report. If the report could not be written they would exist nowhere at all —
+  // an unwritable outDir would silently turn 36 warning rows into a single count. The
+  // log gets shorter; a row is never LOST. When there is no report, the full text is
+  // printed instead, which is exactly the pre-summary behaviour for that case only.
+  let reportFailed = false
   if (reportPath) {
     const reportError = writeFenceReport({ path: reportPath, lanes: reportLanes, crossBatchUnknown: crossBatch.unknown, deps: d })
-    if (reportError) citation = `(report unavailable: ${reportError?.code || 'write-failed'})`
+    if (reportError) { citation = `(report unavailable: ${reportError?.code || 'write-failed'})`; reportFailed = true }
   }
   for (const renderWarning of deferredWarnings) renderWarning()
+  // Narrow on purpose: a caller that passed NO outDir did not ask for a report, and the
+  // real dispatcher always passes one (main() defaults it to <batch>/out). Only a report
+  // that was requested and could not be WRITTEN loses rows that exist nowhere else.
+  if (reportFailed) {
+    d.log(`${WARNING_ROWS_UNPERSISTED_PREFIX} ${citation} — the rows below are printed in full because they are recorded nowhere else`)
+    for (const warning of warnings) if (typeof warning.text === 'string' && warning.text) d.log(warning.text)
+  }
   for (const state of summaryLanes) {
     d.log(warningSummary({
       lane: state.lane,

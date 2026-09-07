@@ -6,7 +6,7 @@ are written without the leading `--`; role-prefixed names are accepted only on
 
 ```json
 {
-  "boot": ["task", "checkout", "tier", "roles", "fences", "lane", "headless-all", "max-turns-planner", "max-turns-tech-lead", "max-turns-builder", "max-turns-reviewer", "max-turns-lead", "model-reviewer", "effort-reviewer", "agent-reviewer"],
+  "boot": ["task", "checkout", "tier", "assurance", "roles", "fences", "lane", "headless-all", "max-turns-planner", "max-turns-tech-lead", "max-turns-builder", "max-turns-reviewer", "max-turns-lead", "model-reviewer", "effort-reviewer", "agent-reviewer"],
   "run":  ["task", "checkout", "brief-file", "variant", "files-in-scope", "validation-lane", "plan-rounds", "build-rounds", "review-rounds", "wait-planner", "wait-tech-lead", "wait-builder", "wait-reviewer", "wait-lead", "suite", "keep"],
   "boot_only": ["fences", "lane", "max-turns-planner", "max-turns-tech-lead", "max-turns-builder", "max-turns-reviewer", "max-turns-lead"]
 }
@@ -28,8 +28,13 @@ reason `--fences` is: boot persists it into `crew.json` and journals it at
 cannot be raised mid-run. It is spelled out per role rather than
 prefix-matched — the five names are literal members of `KNOWN_FLAGS.boot`, not
 a `ROLE_FLAG_PREFIXES` family, so an unknown role suffix refuses as an unknown
-option instead of being silently accepted. Absent the flag there is no ceiling
-and the journal is byte-identical.
+option instead of being silently accepted. In measurable `headless-all` mode,
+an absent flag defaults planner to `64` and lead to `32`, recorded as
+`source: default`; an authored value wins, including `64` or `32`, and is
+recorded as `source: flag`. Tech-lead, builder, and reviewer remain unbounded
+with `source: absent`. Pane boots have no implicit ceiling because their
+transport emits no census, while an authored pane ceiling still refuses before
+state or cmux effects.
 
 The ceiling is enforced AFTER a seat's envelope returns: over budget, the
 driver journals `seat-turn-ceiling` with the count and the budget and bounces
@@ -42,14 +47,17 @@ assignment to carry the count.
 
 `parseCliArgs` accepts these `dispatch-batch` flags:
 
-- Value flags: `--batch --fences --checkout --parent --out --tier --variant --wave --plan-rounds --build-rounds --review-rounds --wait-builder --wait-planner --wait-reviewer --wait-lead --wait-tech-lead --validation-lane --suite --baseline --memory-dir --memory-backend --memory-budget-bytes`.
+- Value flags: `--batch --fences --checkout --parent --out --tier --assurance --variant --wave --plan-rounds --build-rounds --review-rounds --wait-builder --wait-planner --wait-reviewer --wait-lead --wait-tech-lead --validation-lane --suite --baseline --memory-dir --memory-backend --memory-budget-bytes --max-turns-planner --max-turns-tech-lead --max-turns-builder --max-turns-reviewer --max-turns-lead`.
 - Boolean flags: `--dry-run --force --no-keep --headless-all --panes`.
 - Repeatable: `--adopt`.
 - Prefix-matched per-seat forms: `--agent-<role> --model-<role> --effort-<role> --allow-shortfall-<role>`.
 
 `--batch` and `--fences` are required. Anything else refuses
-`unknown option: --<name>`. `--adopt` is accepted by `dispatch-batch` alone —
-`crew.mjs` and `make-brief.mjs` have no such flag; see the plan-adoption section
+`unknown option: --<name>`. `--assurance` accepts the canonical
+`quick|standard|rigorous` spellings (the legacy `--tier` aliases remain
+accepted), and the two spellings are mutually exclusive. `--adopt` is
+accepted by `dispatch-batch` alone — `crew.mjs` and `make-brief.mjs` have no
+such flag; see the plan-adoption section
 below for its archive contract.
 
 The runtime's misplaced-flag refusal is:
@@ -99,6 +107,10 @@ copied.
 
 The dispatcher writes a `plan-adopted` journal row with the archive path and a
 sha256 of the adopted plan.
+
+Batch forwarding of `--assurance` and every `--max-turns-<role>` value is
+BOOT-only: the options are passed to each lane's boot command, never its run
+command, and deferred waves re-emit the authored values on their resume line.
 
 ## Batch dispatch: what `--dry-run` is and is not for
 

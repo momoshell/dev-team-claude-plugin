@@ -127,16 +127,16 @@ export function waitsRecord(resolved, defaults) {
 }
 
 // --- the per-role turn ceiling (#870) --------------------------------------
-// EXPLICIT-ONLY. There is no default table and no tier derivation: #870's
-// "absent flag -> no ceiling and byte-identical behaviour" is the binding half
-// of its ask, and any default would make an UNFLAGGED run non-identical. The
-// role set is DERIVED from WAIT_ROLES for the reason WAIT_FLAGS is derived from
-// WAITS_S (:56-59) — a role added to the seat table gets its ceiling flag, its
-// refusal reason and its record slot with no second list to keep in sync.
+// Measurable headless boots receive ratified defaults for planner and lead
+// seats. Pane boots opt out because transport emits no census; authored pane
+// ceilings are still refused at boot. The role set is DERIVED from WAIT_ROLES
+// for the reason WAIT_FLAGS is derived from WAITS_S (:56-59) — a role added to
+// the seat table gets its ceiling flag, refusal reason and record slot with no second list to keep in sync.
 export const NO_TURN_CEILING = null
 export const TURN_CEILING_ROLES = WAIT_ROLES
 export const TURN_CEILING_FLAGS = Object.freeze(TURN_CEILING_ROLES.map((role) => `max-turns-${role}`))
 export const TURN_CEILING_REFUSALS = Object.freeze(TURN_CEILING_ROLES.map((role) => `invalid-max-turns-${role}`))
+export const TURN_CEILING_DEFAULTS = Object.freeze({ planner: 64, 'tech-lead': null, builder: null, reviewer: null, lead: 32 })
 export const TURN_CEILING_MIN = 1
 export const TURN_CEILING_MAX = 1000
 
@@ -160,12 +160,12 @@ function resolveTurnCeiling(raw, role) {
   return value
 }
 
-export function resolveTurnCeilings(raw = {}) {
+export function resolveTurnCeilings(raw = {}, { applyDefaults = true } = {}) {
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
     throw refuseTurnCeiling(TURN_CEILING_REFUSALS[0], `turn ceilings must be an object of role -> turns, got ${JSON.stringify(raw)}`)
   }
   const out = {}
-  for (const role of TURN_CEILING_ROLES) out[role] = resolveTurnCeiling(raw[role], role)
+  for (const role of TURN_CEILING_ROLES) { const flagged = resolveTurnCeiling(raw[role], role); out[role] = flagged === NO_TURN_CEILING && applyDefaults ? TURN_CEILING_DEFAULTS[role] : flagged }
   return out
 }
 
@@ -175,12 +175,12 @@ export function turnCeilingArgs(args = {}) {
   return out
 }
 
-export function turnCeilingsRecord(resolved) {
+export function turnCeilingsRecord(resolved, raw = {}) {
   if (TURN_CEILING_ROLES.every((role) => resolved[role] === NO_TURN_CEILING)) return null
   const record = { source: {} }
   for (const role of TURN_CEILING_ROLES) {
-    record[role] = resolved[role]
-    record.source[role] = resolved[role] === NO_TURN_CEILING ? 'absent' : 'flag'
+    const flagged = resolveTurnCeiling(raw[role], role); record[role] = resolved[role]
+    record.source[role] = flagged === NO_TURN_CEILING ? (resolved[role] === NO_TURN_CEILING ? 'absent' : 'default') : 'flag'
   }
   return record
 }

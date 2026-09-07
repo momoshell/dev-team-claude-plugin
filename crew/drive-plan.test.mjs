@@ -4,7 +4,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  ADOPTED_PLAN_HEADING, ADOPT_BLOCK, CENSUS_ROW_ABSENT, CENSUS_TURNS_ABSENT, CENSUS_UNREADABLE, CTX, CTX_DIRECTED, CTX_TL, DIRECTED_FILES, ENVELOPE_REFUSAL_REASONS, FAILURE_UPGRADE, GATE_SUMMARY_PREFIX, GROWTH_DIVERGENCE_FACTOR, LANE_COMMAND_SHAPES, LANE_INPUT_VERDICTS, LANE_PATH_OPTIONS, LANE_VALUE_OPTIONS, LIMITS, NO_TURN_CEILING, PLAN_CHECK_ABSENT, PLAN_CHECK_INVALID, PLAN_CHECK_SEVERITIES, PLAN_CONVERGENCE_REASONS, RED, RUN_START_EVENT, S843_ADDED, S843_D2, S843_DISPATCHED, S843_NARROWED, SUITE_REASK_MAX, TD, THREW, TURN_CEILING_DEFAULTS, TURN_CEILING_REFUSALS, TURN_CEILING_ROLES, VALIDATION_LANE_UNLOADABLE, adoptionSignal, bothExhaustionPointsScenario, buildEnv, carriedPrLines, carriedPreambleLines, carriedResolution, carriedSilenceDefect, checkEnv, composeCommitMessage, divergeThenExhaustPlanScenario, divergenceConsultLines, divergentPlanScenario, driveTask, enforcementPreamble, fakeIo, growthLines, growthRecord, join, laneCommandInputs, laneCommandShape, laneFence, leadEnv, lineageFromJournal, persistentDivergenceScenario, planCheckAcceptIo, planCheckFindings, planCheckFindingsFromText, planConvergence, planEnv, planRevisionRun, planRoundCap, planThenReviewIo, protectedPlanEnv, resolveTurnCeilings, resolveValidationLane, resumeGreen, resumeKeys, resumeRed, reviewConvergeRun, reviewEnv, s843Bullets, s843Ctx, s843Io, s843PlanEnv, suiteRefusalEnv, turnCeilingsRecord, validationPlan, validationProbeOutput, validationProbeRun, laneProbeCommand,
+  ADOPTED_PLAN_HEADING, ADOPT_BLOCK, CENSUS_ROW_ABSENT, CENSUS_TURNS_ABSENT, CENSUS_UNREADABLE, CTX, CTX_DIRECTED, CTX_TL, DIRECTED_FILES, ENVELOPE_REFUSAL_REASONS, FAILURE_UPGRADE, GATE_SUMMARY_PREFIX, GROWTH_DIVERGENCE_FACTOR, LANE_COMMAND_SHAPES, LANE_INPUT_VERDICTS, LANE_PATH_OPTIONS, LANE_VALUE_OPTIONS, LIMITS, NO_TURN_CEILING, PLAN_CHECK_ABSENT, PLAN_CHECK_INVALID, PLAN_CHECK_SEVERITIES, PLAN_CONVERGENCE_REASONS, RED, RUN_START_EVENT, S843_ADDED, S843_D2, S843_DISPATCHED, S843_NARROWED, SUITE_REASK_MAX, TD, THREW, TURN_CEILING_DEFAULTS, TURN_CEILING_REFUSALS, TURN_CEILING_ROLES, VALIDATION_LANE_UNLOADABLE, adoptionSignal, bothExhaustionPointsScenario, buildEnv, carriedPrLines, carriedPreambleLines, carriedResolution, carriedSilenceDefect, checkEnv, composeCommitMessage, divergeThenExhaustPlanScenario, divergenceConsultLines, divergentPlanScenario, driveTask, enforcementPreamble, fakeIo, growthLines, growthRecord, join, laneCommandInputs, laneCommandShape, laneFence, leadEnv, lineageFromJournal, persistentDivergenceScenario, planCheckAcceptIo, planCheckFindings, planCheckFindingsFromText, planConvergence, planEnv, planRevisionRun, planRoundCap, planThenReviewIo, protectedPlanEnv, resolveTurnCeilings, resolveValidationLane, resumeGreen, resumeKeys, resumeRed, reviewConvergeRun, reviewEnv, s843Bullets, s843Ctx, s843Io, s843PlanEnv, suiteRefusalEnv, turnCeilingsRecord, validationPlan, validationProbeOutput, validationProbeRun, validationRows, laneProbeCommand,
 } from './drive-fixtures.mjs'
 import { CREATES_ABSENT, PLAN_BOUNCE_UNFUNDED_HEADING, PLAN_SEAT_REFUSED, planBounceUnfundedLines, planCapNote, planExhaustedWhy, planRefusedWhy } from './drive.mjs'
 import { suiteRunPolicy } from './headless.mjs'
@@ -1507,6 +1507,129 @@ test('resolveValidationLane classifies every input from the probe and refuses wh
   assert.equal(resolved.counts.total, resolved.rows.length)
   assert.ok(resolved.rows.every((row) => LANE_INPUT_VERDICTS.includes(row.verdict)))
   assert.equal(resolved.counts.loadable, 2)
+})
+
+test('A1', () => {
+  const good = 'node --test crew/drive-plan.test.mjs'
+  const cases = [
+    ['shell operator', 'node --test crew/drive-plan.test.mjs && echo malformed'],
+    ['output redirection', 'node --test crew/drive-plan.test.mjs > test-output.txt'],
+    ['unresolved glob', 'node --test **/*.test.mjs'],
+  ]
+  for (const [name, bad] of cases) {
+    const io = fakeIo({
+      envelopes: {
+        'planner:1': validationPlan(bad), 'planner:2': validationPlan(good),
+        'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+      },
+      runs: {
+        ...validationProbeRun(good, { 'crew/drive-plan.test.mjs': 'file' }),
+        [good]: { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+      },
+      changed: ['a.mjs', 'a.test.mjs'],
+    })
+    const result = driveTask({ ...CTX, limits: { plan_rounds: 2 } }, io)
+    const bounce = io.calls.writes[`${TD}/plan-bounce-r1.md`]
+    const rows = validationRows(io).map((entry) => entry.validation_lane_resolved)
+    assert.equal(result.status, 'done', name)
+    assert.deepEqual(io.calls.assign.filter(({ role }) => role === 'planner').map(({ note }) => note), [
+      'plan', VALIDATION_LANE_UNLOADABLE,
+    ], name)
+    assert.equal(typeof bounce, 'string', name)
+    assert.ok(bounce.includes(bad), name)
+    assert.equal(io.calls.run.some(({ cmd }) => cmd === bad), false, name)
+    assert.equal(io.calls.run.some(({ cmd }) => cmd === good), true, name)
+    assert.deepEqual(rows.map(({ refused }) => refused), [[bad.includes('*') ? '**/*.test.mjs' : bad], []], name)
+  }
+})
+
+test('B1', () => {
+  const bad = 'node --test crew/drive-plan.test.mjs > test-output.txt'
+  const io = fakeIo({
+    envelopes: { 'planner:1': validationPlan(bad) },
+    runs: validationProbeRun(bad, { 'crew/drive-plan.test.mjs': 'file' }),
+  })
+  const result = driveTask({ ...CTX, limits: { plan_rounds: 1 } }, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'plan')
+  assert.match(result.details.escalation.why, new RegExp(VALIDATION_LANE_UNLOADABLE))
+  assert.match(result.details.escalation.why, /no revision left to bounce it to/)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 0)
+})
+
+test('C1', () => {
+  const lane = 'node --test crew/drive-plan.test.mjs crew/drive-docs.test.mjs crew/drive-review.test.mjs'
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': validationPlan(lane), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: {
+      ...validationProbeRun(lane, {
+        'crew/drive-plan.test.mjs': 'file',
+        'crew/drive-docs.test.mjs': 'file',
+        'crew/drive-review.test.mjs': 'file',
+      }),
+      [lane]: { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask(CTX, io)
+  const resolved = validationRows(io)[0].validation_lane_resolved
+  assert.equal(result.status, 'done')
+  assert.equal(resolved.total, 3)
+  assert.equal(resolved.loadable, 3)
+  assert.deepEqual(resolved.refused, [])
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'planner').length, 1)
+  assert.equal(io.calls.writes[`${TD}/plan-bounce-r1.md`], undefined)
+  assert.deepEqual(io.calls.run.filter(({ cmd }) => cmd === lane).map(({ cmd }) => cmd), [lane])
+})
+
+test('D1', () => {
+  const canonical = 'node --test <file> <file> <file>'
+  const good = 'node --test crew/drive-plan.test.mjs'
+  const cases = [
+    'node --test crew/drive-plan.test.mjs && echo malformed',
+    'node --test crew/drive-plan.test.mjs > test-output.txt',
+  ]
+  for (const bad of cases) {
+    const io = fakeIo({
+      envelopes: {
+        'planner:1': validationPlan(bad), 'planner:2': validationPlan(good),
+        'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+      },
+      runs: {
+        ...validationProbeRun(good, { 'crew/drive-plan.test.mjs': 'file' }),
+        [good]: { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+      },
+      changed: ['a.mjs', 'a.test.mjs'],
+    })
+    const result = driveTask({ ...CTX, limits: { plan_rounds: 2 } }, io)
+    const bounce = io.calls.writes[`${TD}/plan-bounce-r1.md`]
+    assert.equal(result.status, 'done')
+    assert.ok(bounce.includes(canonical), bad)
+  }
+})
+
+test('E1', () => {
+  const canonical = 'node --test <file> <file> <file>'
+  const bad = 'node --test **/*.test.mjs'
+  const good = 'node --test crew/drive-plan.test.mjs'
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': validationPlan(bad), 'planner:2': validationPlan(good),
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: {
+      ...validationProbeRun(good, { 'crew/drive-plan.test.mjs': 'file' }),
+      [good]: { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask({ ...CTX, limits: { plan_rounds: 2 } }, io)
+  const bounce = io.calls.writes[`${TD}/plan-bounce-r1.md`]
+  assert.equal(result.status, 'done')
+  assert.match(bounce, /does not expand a glob/)
+  assert.ok(bounce.includes(canonical))
 })
 
 // MUTATIONS A1, A2, A4, A6 and A8 — an unloadable planner lane bounces with one closed

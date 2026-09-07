@@ -627,6 +627,8 @@ export const MODIFIER_OUTCOMES = Object.freeze(['applied', 'transport', 'exhaust
 // rather than guarded. Without a tech-lead there is no panel partner; the
 // existing panel-skipped path runs the single-reviewer round.
 export const SECOND_OPINION = 'second-opinion'
+const LEAD_CONTEXT_BRIEF_BYTES = 50 * 1024
+const absentLeadContext = (path, reason) => ({ path, mode: 'path', state: 'absent', bytes: null, reason })
 export const PERSPECTIVE_TARGETS = Object.freeze(['reviewer', 'tech-lead'])
 export const PANEL_PARTNERS = Object.freeze(['tech-lead'])
 // The planner's domain ends at plan acceptance. Post-acceptance, the gate is
@@ -3336,22 +3338,71 @@ function runTask(ctx, io, crash) {
     return second
   }
 
+  const leadContextDelivery = (contextPaths, prefixLines, suffixLines) => {
+    const cells = contextPaths.map((path) => {
+      let source
+      try { source = io.readFile(path) } catch (err) {
+        return absentLeadContext(path, `read failed: ${err?.message ?? String(err)}`)
+      }
+      if (source === null) return absentLeadContext(path, 'source is absent')
+      if (typeof source !== 'string') return absentLeadContext(path, `source is not text (${typeof source})`)
+      if (source.length === 0) return absentLeadContext(path, 'source is empty')
+      return { path, mode: 'inline', state: 'present', bytes: Buffer.byteLength(source, 'utf8'), content: source }
+    })
+    const render = () => {
+      const inline = cells.some((source) => source.mode === 'inline')
+      const fallback = cells.some((source) => source.mode === 'path')
+      const mode = inline ? (fallback ? 'mixed' : 'inline') : 'path-fallback'
+      const contextLines = [`## Context (delivery mode: ${mode})`]
+      for (const source of cells) {
+        if (source.mode === 'inline') {
+          contextLines.push(`Path: ${source.path}`, `Delivery mode: inline (${source.bytes} bytes)`, source.content)
+        } else {
+          contextLines.push(`Delivery mode: path fallback (${source.reason})`, `Path: ${source.path}`)
+        }
+      }
+      return {
+        brief: [...prefixLines, ...contextLines, ...suffixLines].join('\n'),
+        mode,
+        sources: cells.map(({ content, ...source }) => source),
+      }
+    }
+    let delivery = render()
+    while (Buffer.byteLength(delivery.brief, 'utf8') > LEAD_CONTEXT_BRIEF_BYTES && delivery.sources.some((source) => source.mode === 'inline')) {
+      let largest = -1
+      for (let index = 0; index < delivery.sources.length; index += 1) {
+        const source = delivery.sources[index]
+        if (source.mode !== 'inline') continue
+        if (largest < 0 || source.bytes > delivery.sources[largest].bytes) largest = index
+      }
+      cells[largest] = { ...cells[largest], mode: 'path', reason: 'rendered decision brief exceeded 51,200-byte limit' }
+      delivery = render()
+    }
+    return delivery
+  }
+
   function askLead(question, options, contextPaths, { round, targets, label = '' }) {
     const briefPath = art(`decision-${S.consults}${round === 2 ? 'b' : ''}${label ? `-${label}` : ''}.md`)
     const valve = round === 1 && targets.length > 0
       ? [`- ${SECOND_OPINION} (set details.from to one of: ${targets.join(', ')} — code will gather their independent view and re-ask you once)`]
       : []
-    io.writeFile(briefPath, [
+    const optionLines = options.map((option) => `- ${option}`)
+    const replyContract = `Reply with a ReturnEnvelope whose details are {"decision": <option>, "reason": "...", "guidance": "..."${round === 1 ? ', "from": "<role>" when requesting a second opinion' : ''}}.`
+    const prefixLines = [
       `# Decision needed (consult ${S.consults}${round === 2 ? ', final round' : ''})`, '',
       `## Question`, question, '',
       `## Your options (answer with exactly one in details.decision)`,
-      ...options.map((o) => `- ${o}`),
+      ...optionLines,
       ...valve, '',
-      `## Context files (read before deciding)`,
-      ...contextPaths.map((x) => `- ${x}`), '',
-      `Reply with a ReturnEnvelope whose details are {"decision": <option>, "reason": "...", "guidance": "..."${round === 1 ? ', "from": "<role>" when requesting a second opinion' : ''}}.`,
+    ]
+    const suffixLines = [
+      '',
+      replyContract,
       `guidance is REQUIRED when decision is bounce — it becomes the bounce brief's steer.`,
-    ].join('\n'))
+    ]
+    const delivery = leadContextDelivery(contextPaths, prefixLines, suffixLines)
+    io.writeFile(briefPath, delivery.brief)
+    io.log(recordRow({ at: io.now(), lead_consult_context: { brief: briefPath, consult: S.consults, round, mode: delivery.mode, sources: delivery.sources } }))
     const env = assignAndWait('lead', briefPath, label ? `decision-${label}` : round === 2 ? 'decision-final' : 'decision')
     const d = env.details || {}
     // Round 2: a repeat second-opinion passes through raw so consultLead can

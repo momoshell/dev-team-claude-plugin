@@ -74,7 +74,7 @@ test('the plan-check consult names residuals, types, and its unchanged options',
   const brief = io.calls.writes[`${TD}/decision-1.md`]
   assert.match(brief, /details\.residuals/)
   for (const type of RESIDUAL_TYPES) assert.match(brief, new RegExp(type))
-  const optionsBlock = brief.match(/## Your options[\s\S]*?\n\n## Context files/)[0]
+  const optionsBlock = brief.match(/## Your options[\s\S]*?\n\n## Context \(/)[0]
   const options = [...optionsBlock.matchAll(/^- ([^\n]+)/gm)]
     .map(([, option]) => option.replace(/\s+\(.*$/, ''))
   assert.deepEqual(options, ['bounce', 'accept', 'escalate', 'second-opinion'])
@@ -858,6 +858,193 @@ test('fail-closed accept escalation composes with the regrant policy shape', () 
   const verdict = regrantVerdict(result, [{ must_fix: 2 }, { must_fix: 1 }])
   assert.equal(verdict.reasons.find((reason) => reason.condition === 'where-review').ok, true)
   assert.equal(verdict.reasons.find((reason) => reason.condition === 'grant-spent').ok, true)
+})
+
+test('A1', () => {
+  const planPath = `${TD}/plan.md`
+  const checkPath = `${TD}/plan-check.md`
+  const planBody = 'inline plan context body: the plan remains readable.'
+  const checkBody = 'inline plan-check context body: the check remains readable.'
+  const io = planCheckAcceptIo({}, {
+    files: { [planPath]: planBody, [checkPath]: checkBody },
+  })
+  const result = driveTask(CTX_TL, io)
+  const brief = io.calls.writes[`${TD}/decision-1.md`]
+  const row = io.calls.logs.find((entry) => entry.lead_consult_context)?.lead_consult_context
+  assert.equal(result.status, 'done')
+  assert.ok(brief.includes(planBody))
+  assert.ok(brief.includes(checkBody))
+  assert.match(brief, /## Context \(delivery mode: inline\)/)
+  assert.doesNotMatch(brief, /## Context files/)
+  assert.equal(row.mode, 'inline')
+  assert.ok(row.sources.every((source) => !Object.prototype.hasOwnProperty.call(source, 'content')))
+})
+
+test('B1', () => {
+  const planPath = `${TD}/plan.md`
+  const checkPath = `${TD}/plan-check.md`
+  const cases = [
+    {
+      name: 'individual source over the ceiling',
+      values: {
+        [planPath]: `oversized context body\\n${'x'.repeat(52_000)}`,
+        [checkPath]: 'small context body',
+      },
+    },
+    {
+      name: 'aggregate source bodies cross the ceiling',
+      values: {
+        [planPath]: `aggregate first body\\n${'a'.repeat(26_000)}`,
+        [checkPath]: `aggregate second body\\n${'b'.repeat(26_000)}`,
+      },
+    },
+    {
+      name: 'multibyte source crosses the UTF-8 ceiling',
+      values: {
+        [planPath]: `multibyte context body\\n${'界'.repeat(17_000)}`,
+        [checkPath]: 'small multibyte companion',
+      },
+    },
+  ]
+  for (const candidate of cases) {
+    const io = planCheckAcceptIo({}, { files: candidate.values })
+    const result = driveTask(CTX_TL, io)
+    const brief = io.calls.writes[`${TD}/decision-1.md`]
+    const row = io.calls.logs.find((entry) => entry.lead_consult_context)?.lead_consult_context
+    const downgraded = row.sources.filter((source) => source.mode === 'path')
+    const reason = 'rendered decision brief exceeded 51,200-byte limit'
+    assert.equal(result.status, 'done', candidate.name)
+    assert.ok(Buffer.byteLength(brief, 'utf8') <= 51_200, candidate.name)
+    assert.ok(downgraded.length > 0, candidate.name)
+    assert.ok(['mixed', 'path-fallback'].includes(row.mode), candidate.name)
+    assert.ok(Object.values(candidate.values).some((body) => !brief.includes(body)), candidate.name)
+    for (const source of downgraded) {
+      assert.equal(source.reason, reason, candidate.name)
+      assert.ok(brief.includes(`Delivery mode: path fallback (${reason})`), candidate.name)
+      assert.ok(brief.includes(`Path: ${source.path}`), candidate.name)
+    }
+  }
+})
+
+test('C1', () => {
+  const planPath = `${TD}/plan.md`
+  const checkPath = `${TD}/plan-check.md`
+  const malformed = { residuals: [{ id: 'bad-residual', type: 'not-a-residual-type', summary: 'malformed' }] }
+  const io = planCheckAcceptIo(malformed, {
+    leadAnswers: [{ residuals: [PLAN_RESIDUAL] }],
+    files: { [planPath]: 'ordinary plan body', [checkPath]: 'ordinary check body' },
+  })
+  const result = driveTask(CTX_TL, io)
+  const rows = io.calls.logs
+    .filter((entry) => entry.lead_consult_context)
+    .map((entry) => entry.lead_consult_context)
+  assert.equal(result.status, 'done')
+  assert.equal(rows.length, 2)
+  assert.deepEqual(rows.map(({ brief, consult, round, mode }) => ({ brief, consult, round, mode })), [
+    { brief: `${TD}/decision-1.md`, consult: 1, round: 1, mode: 'inline' },
+    { brief: `${TD}/decision-1-reask1.md`, consult: 1, round: 1, mode: 'inline' },
+  ])
+  for (const row of rows) assert.ok(row.sources.every((source) => !Object.prototype.hasOwnProperty.call(source, 'content')))
+})
+
+test('D1', () => {
+  const io = planCheckAcceptIo()
+  driveTask(CTX_TL, io)
+  const brief = io.calls.writes[`${TD}/decision-1.md`]
+  const optionsBlock = brief.match(/(## Your options[\s\S]*?)\n\n## Context \(/)
+  const expected = [
+    '## Your options (answer with exactly one in details.decision)',
+    '- bounce',
+    '- accept',
+    '- escalate',
+    '- second-opinion (set details.from to one of: reviewer, tech-lead — code will gather their independent view and re-ask you once)',
+  ].join('\n')
+  assert.ok(optionsBlock)
+  assert.equal(optionsBlock[1], expected)
+})
+
+test('D2', () => {
+  const io = planCheckAcceptIo()
+  driveTask(CTX_TL, io)
+  const brief = io.calls.writes[`${TD}/decision-1.md`]
+  const expected = 'Reply with a ReturnEnvelope whose details are {"decision": <option>, "reason": "...", "guidance": "...", "from": "<role>" when requesting a second opinion}.'
+  assert.ok(brief.includes(expected))
+})
+
+test('D3', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv({ status: 'insufficient', summary: 'ambiguous brief' }),
+      'lead:1': { status: 'done', role: 'lead', details: { decision: SECOND_OPINION, from: 'reviewer' } },
+      'reviewer:1': { status: 'done', role: 'reviewer', details: { perspective: 'the brief means X; plan for X', recommendation: 'bounce', confidence: 'high' } },
+      'lead:2': leadEnv('bounce', 'plan for X per the reviewer perspective'),
+      'planner:2': planEnv(),
+      'builder:1': buildEnv(), 'reviewer:2': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask(CTX, io)
+  const first = io.calls.writes[`${TD}/decision-1.md`]
+  const final = io.calls.writes[`${TD}/decision-1b.md`]
+  const valve = '- second-opinion (set details.from to one of: reviewer — code will gather their independent view and re-ask you once)'
+  assert.equal(result.status, 'done')
+  assert.ok(first.includes(valve))
+  assert.doesNotMatch(final, /second-opinion \(set details\.from/)
+})
+
+test('E1', () => {
+  const guidance = 'the brief means X not Y; plan for X'
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv({ status: 'insufficient', summary: 'brief ambiguous' }),
+      'lead:1': leadEnv('bounce', guidance),
+      'planner:2': planEnv(),
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask(CTX, io)
+  const decision = io.calls.writes[`${TD}/decision-1.md`]
+  const bounce = io.calls.writes[`${TD}/plan-bounce-r1.md`]
+  assert.equal(result.status, 'done')
+  assert.ok(decision.includes("guidance is REQUIRED when decision is bounce — it becomes the bounce brief's steer."))
+  assert.ok(bounce.includes(guidance))
+})
+
+test('F1', () => {
+  const checkPath = `${TD}/plan-check.md`
+  const cases = [
+    { name: 'thrown read', throw: true, reason: 'read failed: context permission denied' },
+    { name: 'null source', value: null, reason: 'source is absent' },
+    { name: 'non-string source', value: 42, reason: 'source is not text (number)' },
+    { name: 'empty source', value: '', reason: 'source is empty' },
+  ]
+  for (const candidate of cases) {
+    const io = planCheckAcceptIo({}, { files: {} })
+    const originalRead = io.readFile
+    io.readFile = (path) => {
+      if (path === checkPath) {
+        if (candidate.throw) throw new Error('context permission denied')
+        return candidate.value
+      }
+      return originalRead(path)
+    }
+    const result = driveTask(CTX_TL, io)
+    const brief = io.calls.writes[`${TD}/decision-1.md`]
+    const row = io.calls.logs.find((entry) => entry.lead_consult_context)?.lead_consult_context
+    const source = row.sources.find((entry) => entry.path === checkPath)
+    assert.equal(result.status, 'done', candidate.name)
+    assert.equal(row.mode, 'path-fallback', candidate.name)
+    assert.deepEqual({ mode: source.mode, state: source.state, bytes: source.bytes, reason: source.reason }, {
+      mode: 'path', state: 'absent', bytes: null, reason: candidate.reason,
+    }, candidate.name)
+    assert.ok(brief.includes(`Path: ${checkPath}`), candidate.name)
+    assert.ok(brief.includes(`Delivery mode: path fallback (${candidate.reason})`), candidate.name)
+    assert.doesNotMatch(brief, /substituted inline content/, candidate.name)
+    assert.ok(io.calls.assign.some((entry) => entry.role === 'lead'), candidate.name)
+  }
 })
 
 test('second-opinion valve: lead requests reviewer perspective, code gathers it unseeded, lead decides on re-ask', () => {

@@ -29,7 +29,6 @@
   "crew/drive-review.test.mjs:1272": "Object.isFrozen(DECISIONS) && Object.isFrozen(LIMITS)",
   "scripts/factory/reap-stale.mjs:81": "export const REAP_ACCOUNTING = Object.freeze",
   "scripts/factory/ledger.mjs:5740": "function refuseUnknownFlags(verb, flags)",
-  "test/factory-emit.test.mjs:1696": "CLI: emit-cli-unknown-flag-refusal",
   "scripts/factory/ledger.mjs:5710": "const VERB_FLAGS = Object.freeze",
   "scripts/factory/ledger.mjs:5748": "unknown flag --${name}",
   "test/factory-ledger.test.mjs:3596": "payload.until, '2026-08-21T01:00:00.000Z'",
@@ -41,5 +40,6 @@
   "test/factory-ledger.test.mjs:3589": "refused.status, 2, refused.stderr",
   "crew/drive.mjs:408": "export const DECISIONS = Object.freeze",
   "crew/drive.mjs:571": "ENVELOPE_FIELD_KINDS.includes(field?.kind)",
-  "crew/drive.mjs:565": "if (!shape || typeof shape !== 'object')"
+  "crew/drive.mjs:565": "if (!shape || typeof shape !== 'object')",
+  "test/factory-emit.test.mjs:1697": "CLI: emit-cli-unknown-flag-refusal"
 }

@@ -6,7 +6,7 @@ Dispatch a batch in this order, and record what refuses at each boundary:
 2. Boot with **one shared fence register for the whole batch**. Boot writes the
    other lanes' files, so every write lane must be known before any seat boots.
 3. Ask the compiler with `--discover-reads <lane>` for the reads a lane must acknowledge, write those records into the register, and perform a **single compile**. If that compile still refuses, the batch refuses `reads-unresolved` rather than retrying. A hand-authored register with spare acknowledgements remains guarded by **`stale-read-ack`**, while the coupled-source-unfenced refusal names the records discovery returns. A `where` path that does not exist refuses
-   **`missing-path`** (`scripts/factory/make-brief.mjs:116`, `COUPLED_SOURCE_UNFENCED = 'coupled-source-unfenced'`; `scripts/factory/make-brief.mjs:117`, `STALE_READ_ACK = 'stale-read-ack'`). An unreadable adopted plan or gate refuses **`plan-adopt-unreadable`** before anything is copied.
+   **`missing-path`** (`scripts/factory/make-brief.mjs:117`, `COUPLED_SOURCE_UNFENCED = 'coupled-source-unfenced'`; `scripts/factory/make-brief.mjs:118`, `STALE_READ_ACK = 'stale-read-ack'`). An unreadable adopted plan or gate refuses **`plan-adopt-unreadable`** before anything is copied.
 4. Verify through **`validateScopeEntries`** and **`scopeMatcher`** for own-file
    coverage and zero sibling leaks.
 5. Check the protected floor with **`protectedHitsIn`** over
@@ -95,7 +95,7 @@ no moment at which an operator can commit a stub first. A request therefore
 carries an optional `creates` list, verified by the OPPOSITE condition — the
 path must NOT exist and its parent directory must — which refuses
 **`creates-exists`** and **`creates-parent-missing`**
-(`scripts/factory/make-brief.mjs:123`, `CREATES_EXISTS = 'creates-exists'`).
+(`scripts/factory/make-brief.mjs:124`, `CREATES_EXISTS = 'creates-exists'`).
 `missing-path` is untouched: it still refuses every `where` path that is
 absent, because that is the check which catches the commonest brief typo.
 The compiler EXEMPTS and the dispatcher never seeds a stub — a seeded stub

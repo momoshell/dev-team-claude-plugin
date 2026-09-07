@@ -1212,6 +1212,7 @@ const DRIVE_JOURNAL_EXPECTED = Object.freeze([
   ['recordRow', '', 'at no_lead_escalation'],
   ['recordRow', '', 'at perspective_from recommendation consult'],
   ['recordRow', '', 'at dissent'],
+  ['recordRow', '', 'at lead_consult_context'],
   ['recordRow', '', 'at bounce_target_mapped'],
   ['recordRow', '', 'at decision consult round reason'],
   ['recordRow', '', 'at extra_round_granted'],

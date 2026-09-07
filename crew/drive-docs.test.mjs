@@ -129,7 +129,7 @@ test('F1', () => {
   const sentence = '`details.validation_lane` is ONE command: it must contain no `&&`, `;`, `|`, redirection, or glob, and `node --test` accepts several files as `node --test <file> <file> <file>`.'
   assert.ok(charter.includes(sentence))
   for (const token of ['ONE command', '&&', ';', '|', 'redirection', 'glob', 'accepts several files', 'node --test <file> <file> <file>']) {
-    assert.ok(sentence.includes(token), token)
+    assert.ok(charter.includes(token), token)
   }
 })
 

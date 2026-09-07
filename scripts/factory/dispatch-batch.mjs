@@ -283,7 +283,7 @@ export const TEST_REACH_ROW_LIMIT = 12
 export const FENCE_REPORT_FILE = 'dispatch.warnings.json'
 export const SYMBOL_FANOUT_LIMIT = 8
 export const TEST_REACH_WARNING_PREFIX = 'dispatch-batch: WARNING test-reach-unfenced:'
-export const TEST_REACH_BLIND_SPOT = 'BLIND SPOT: this is a proxy in BOTH directions and names candidates, never proof. A test can assert the changed behaviour through a higher-level entry point without importing the changed file at all, and a computed dynamic import is invisible to a static scan — crew/crew.mjs loads every adapter that way. A test can equally import a fenced file without asserting anything about the part being changed. The literal symbol scan sees only whole-word occurrences of an exported name, is blind to a renamed re-export, and drops any symbol naming more than 8 test files as too broad to be evidence. Read the named files before choosing this fence; an unnamed one is not cleared.'
+export const TEST_REACH_BLIND_SPOT = 'BLIND SPOT: this is a proxy in BOTH directions and names candidates, never proof. A test can assert the changed behaviour through a higher-level entry point without importing the changed file at all, and a computed path or dynamic import is invisible to a static scan — crew/crew.mjs loads every adapter that way. A test can equally import a fenced file without asserting anything about the part being changed. The literal symbol scan sees only whole-word occurrences of an exported name, is blind to a renamed re-export, and drops any symbol naming more than 8 test files as too broad to be evidence. Read the named files before choosing this fence; an unnamed one is not cleared. An apostrophe or quote inside a // or /* */ comment opens a phantom literal and hides every real path literal after it in that file.'
 export const WARNING_DOCTRINE = 'skills/crew-dispatch/references/batch.md'
 export const FENCE_BLIND_SPOTS = Object.freeze({
   'anchor-pin': ANCHOR_BLIND_SPOT,
@@ -296,10 +296,12 @@ export const TEST_REACH_REFUSAL_REMEDY = 'the remedy is mechanical — fence the
 export const TEST_REACH_REFUSAL_BLIND_SPOT = 'BLIND SPOT: this refusal is NOT a guarantee and catches ONE class of fence error. It inherits every blind spot of the symbol scan it reads: blind to a renamed re-export, blind to a computed dynamic import, blind to a bare side-effect import that names nothing, and it drops any symbol naming more than 8 test files as too broad. It also cannot see a write target a lane only discovers while planning — of the three fence errors measured on 2026-09-06 it would have caught exactly one (b451-fffgrant); b465-optionalgrant and b472-fleetcontra needed files no pre-plan analysis can name. An unnamed test is not cleared.'
 const CODE_SUFFIX = /\.(?:mjs|js)$/
 const IMPORT_SPECIFIER = /(?:^|[\n;])\s*(?:import|export)[^\n;]*?from\s*['\"]([^'\"]+)['\"]|\bimport\(\s*['\"]([^'\"]+)['\"]\s*\)/g
+const JOIN_LITERAL_CALL = /(?<![\w.$])join\s*\(\s*(?:ROOT|repoRoot)\s*,([\s\S]*?)\)/g
 
 function emptyTestReach() {
   return {
     byFile: new Map(),
+    pathByFile: new Map(),
     tests: new Map(),
     files: [],
     depth: TEST_REACH_DEPTH,
@@ -334,6 +336,118 @@ function importsFrom(source, file, codeFiles) {
   return imported
 }
 
+function decodeStaticLiteral(quote, body) {
+  let decoded = ''
+  for (let index = 0; index < body.length; index += 1) {
+    const char = body[index]
+    if (char !== '\\') {
+      decoded += char
+      continue
+    }
+    const next = body[index + 1]
+    if (next === undefined) return null
+    index += 1
+    if (next === 'x') {
+      const hex = body.slice(index + 1, index + 3)
+      if (/^[0-9a-f]{2}$/i.test(hex)) {
+        decoded += String.fromCharCode(Number.parseInt(hex, 16))
+        index += 2
+      } else decoded += next
+      continue
+    }
+    if (next === 'u') {
+      const braced = body[index + 1] === '{'
+      const end = braced ? body.indexOf('}', index + 2) : index + 5
+      const hex = braced ? body.slice(index + 2, end) : body.slice(index + 1, end + 1)
+      const valid = braced ? end !== -1 && /^[0-9a-f]+$/i.test(hex) : /^[0-9a-f]{4}$/i.test(hex)
+      const codePoint = valid ? Number.parseInt(hex, 16) : null
+      if (codePoint !== null && codePoint <= 0x10ffff) {
+        decoded += String.fromCodePoint(codePoint)
+        index = braced ? end : end
+      } else decoded += next
+      continue
+    }
+    if (next === 'n') decoded += '\n'
+    else if (next === 'r') decoded += '\r'
+    else if (next === 't') decoded += '\t'
+    else if (next === 'b') decoded += '\b'
+    else if (next === 'f') decoded += '\f'
+    else if (next === 'v') decoded += '\v'
+    else if (next === '0') decoded += '\0'
+    else if (next === '\n') { /* a continued literal contributes no character */ }
+    else decoded += next
+  }
+  return decoded
+}
+
+function quotedLiteralAt(source, start) {
+  const quote = source[start]
+  if (quote !== "'" && quote !== '\"') return null
+  let body = ''
+  for (let index = start + 1; index < source.length; index += 1) {
+    const char = source[index]
+    if (char === '\\') {
+      if (index + 1 >= source.length) return null
+      body += char + source[index + 1]
+      index += 1
+      continue
+    }
+    if (char === quote) return { end: index + 1, value: decodeStaticLiteral(quote, body) }
+    body += char
+  }
+  return null
+}
+
+function staticRepoPathLiteral(value, file) {
+  if (typeof value !== 'string' || !/[\\/]/.test(value)) return null
+  const normal = value.replaceAll('\\', '/')
+  if (isAbsolute(normal) || /^[A-Za-z]:[\\/]/.test(normal)) return normal
+  if (normal.startsWith('./') || normal.startsWith('../')) return normaliseRepoPath(join(dirname(file), normal))
+  return normaliseRepoPath(normal)
+}
+
+function pathLiteralsFrom(source, file) {
+  const paths = []
+  if (typeof source !== 'string' || source.length === 0) return paths
+  for (let index = 0; index < source.length; index += 1) {
+    const literal = quotedLiteralAt(source, index)
+    if (!literal) continue
+    const candidate = staticRepoPathLiteral(literal.value, file)
+    if (candidate && !paths.includes(candidate)) paths.push(candidate)
+    index = literal.end - 1
+  }
+  return paths
+}
+
+function joinedLiteralSegments(value) {
+  const segments = []
+  let cursor = 0
+  while (cursor < value.length) {
+    while (/\s/.test(value[cursor] || '')) cursor += 1
+    const literal = quotedLiteralAt(value, cursor)
+    if (!literal || literal.value === null) return null
+    segments.push(literal.value)
+    cursor = literal.end
+    while (/\s/.test(value[cursor] || '')) cursor += 1
+    if (cursor >= value.length) break
+    if (value[cursor] !== ',') return null
+    cursor += 1
+  }
+  return segments.length > 0 ? segments : null
+}
+
+function joinedRepoPathLiterals(source) {
+  const paths = []
+  if (typeof source !== 'string' || source.length === 0) return paths
+  for (const match of source.matchAll(JOIN_LITERAL_CALL)) {
+    const segments = joinedLiteralSegments(match[1])
+    if (!segments) continue
+    const candidate = normaliseRepoPath(join(...segments.map((segment) => segment.replaceAll('\\', '/'))))
+    if (candidate && !paths.includes(candidate)) paths.push(candidate)
+  }
+  return paths
+}
+
 export function collectTestReach({ checkout, deps } = {}) {
   const d = normalDeps(deps)
   const root = typeof checkout === 'string' && checkout.trim() ? checkout : process.cwd()
@@ -352,6 +466,7 @@ export function collectTestReach({ checkout, deps } = {}) {
     .split('\0')
     .map(normaliseRepoPath)
     .filter(Boolean))].sort()
+  const trackedFiles = new Set(files)
   const codeFiles = new Set(files.filter((file) => CODE_SUFFIX.test(file)))
   const sourceByFile = new Map()
   const readSource = (file) => {
@@ -367,6 +482,7 @@ export function collectTestReach({ checkout, deps } = {}) {
     if (codeFiles.has(file) && isTripwireFile(file)) tests.set(file, readSource(file))
   }
   const byFile = new Map()
+  const pathByFile = new Map()
   const importsByFile = new Map()
   const importsFor = (file) => {
     const normal = normaliseRepoPath(file)
@@ -374,6 +490,18 @@ export function collectTestReach({ checkout, deps } = {}) {
     return importsByFile.get(normal)
   }
   for (const [test, source] of tests) {
+    for (const candidate of pathLiteralsFrom(source, test)) {
+      const owner = trackedFiles.has(candidate) ? candidate : null
+      if (!owner) continue
+      if (!pathByFile.has(owner)) pathByFile.set(owner, new Set())
+      pathByFile.get(owner).add(test)
+    }
+    for (const candidate of joinedRepoPathLiterals(source)) {
+      const owner = trackedFiles.has(candidate) ? candidate : null
+      if (!owner) continue
+      if (!pathByFile.has(owner)) pathByFile.set(owner, new Set())
+      pathByFile.get(owner).add(test)
+    }
     const seen = new Map([[test, 0]])
     const pending = [{ file: test, hops: 0, source }]
     while (pending.length > 0) {
@@ -403,7 +531,7 @@ export function collectTestReach({ checkout, deps } = {}) {
     if (!symbolCache.has(normal)) symbolCache.set(normal, extractSymbols(readSource(normal), normal))
     return symbolCache.get(normal)
   }
-  return { byFile, tests, files, depth: TEST_REACH_DEPTH, symbolsFor }
+  return { byFile, pathByFile, tests, files, depth: TEST_REACH_DEPTH, symbolsFor }
 }
 
 function wholeWord(source, symbol) {
@@ -454,6 +582,17 @@ export function testsOutsideFence({ surface, fenceFiles, reach } = {}) {
       }
     }
   }
+  const pathByFile = reach?.pathByFile instanceof Map ? reach.pathByFile : new Map()
+  for (const [ownerValue, reachedTests] of pathByFile) {
+    const owner = normaliseRepoPath(ownerValue)
+    if (!matchesSurface(owner) || !(reachedTests instanceof Set)) continue
+    for (const testValue of reachedTests) {
+      const test = normaliseRepoPath(testValue)
+      if (inFence(test)) continue
+      if (byTest.has(test)) continue
+      byTest.set(test, { test, file: owner, hops: null, how: 'path', symbols: [] })
+    }
+  }
   return [...byTest.values()].sort((a, b) => {
     // Least obvious first: a symbol-only row (hops null) is the coupling an operator will
     // not guess, and nearest-first put it last — b394 lost 29 minutes of a build round to
@@ -491,6 +630,10 @@ export function reachRefusalRows({ rows, surfaceExports } = {}) {
   const exported = new Set((Array.isArray(surfaceExports) ? surfaceExports : []).filter((symbol) => typeof symbol === 'string'))
   const refused = []
   for (const row of (Array.isArray(rows) ? rows : [])) {
+    if (row?.how === 'path') {
+      refused.push({ test: row.test, file: row.file, symbols: [] })
+      continue
+    }
     const directImport = row?.hops === 1 && row?.how === 'import'
     if (!directImport) continue
     const overlap = (Array.isArray(row.symbols) ? row.symbols : []).filter((symbol) => exported.has(symbol))
@@ -501,7 +644,7 @@ export function reachRefusalRows({ rows, surfaceExports } = {}) {
 }
 
 function reachRowText(row) {
-  const hops = row.hops === null ? 'symbol-only' : `hops=${row.hops}`
+  const hops = row.how === 'path' ? 'path-only' : row.hops === null ? 'symbol-only' : `hops=${row.hops}`
   const symbols = row.symbols.length > 0 ? ` symbols=${row.symbols.join(',')}` : ''
   return `${row.test} -> ${row.file} (${hops}, how=${row.how}${symbols})`
 }
@@ -633,11 +776,19 @@ function laneCreatesOf(lane) {
   return []
 }
 
+export function isTestReachOverride(value) {
+  return Boolean(value && typeof value.file === 'string' && value.file.trim() && typeof value.why === 'string' && value.why.trim())
+}
+
+function normaliseTestReachOverride(value) {
+  return { file: normaliseRepoPath(value.file.trim()), why: value.why.trim() }
+}
+
 function laneAllowTestReachOf(lane) {
   const declared = Array.isArray(lane?.[TEST_REACH_OVERRIDE_KEY])
     ? lane[TEST_REACH_OVERRIDE_KEY]
     : Array.isArray(lane?.request?.[TEST_REACH_OVERRIDE_KEY]) ? lane.request[TEST_REACH_OVERRIDE_KEY] : []
-  return declared.filter((file) => typeof file === 'string').map(normaliseRepoPath)
+  return declared.filter(isTestReachOverride).map(normaliseTestReachOverride)
 }
 
 function fenceEntriesOf(fences) {
@@ -718,8 +869,8 @@ function splitDispatchKeys(parsed, requestPath) {
   }
   if (Object.prototype.hasOwnProperty.call(dispatch, TEST_REACH_OVERRIDE_KEY)
       && (!Array.isArray(dispatch[TEST_REACH_OVERRIDE_KEY])
-        || !dispatch[TEST_REACH_OVERRIDE_KEY].every((file) => typeof file === 'string' && file.trim() !== ''))) {
-    refuse(`request ${requestPath} has an invalid ${TEST_REACH_OVERRIDE_KEY}; expected an array of non-empty repo-relative test paths`, BATCH_UNREADABLE)
+        || !dispatch[TEST_REACH_OVERRIDE_KEY].every(isTestReachOverride))) {
+    refuse(`request ${requestPath} has an invalid ${TEST_REACH_OVERRIDE_KEY}; expected an array of records with non-empty file and why strings`, BATCH_UNREADABLE)
   }
   if (Object.prototype.hasOwnProperty.call(dispatch, 'seats')) {
     const defect = seatsDefect(dispatch.seats)
@@ -772,7 +923,7 @@ export function readBatch({ batchDir, deps } = {}) {
       variant: typeof dispatch.variant === 'string' ? dispatch.variant : null,
       seats: dispatch.seats && typeof dispatch.seats === 'object' ? dispatch.seats : null,
       adopt: typeof dispatch.adopt === 'string' ? dispatch.adopt : null,
-      [TEST_REACH_OVERRIDE_KEY]: Array.isArray(dispatch[TEST_REACH_OVERRIDE_KEY]) ? dispatch[TEST_REACH_OVERRIDE_KEY].map(normaliseRepoPath) : [],
+      [TEST_REACH_OVERRIDE_KEY]: Array.isArray(dispatch[TEST_REACH_OVERRIDE_KEY]) ? dispatch[TEST_REACH_OVERRIDE_KEY].map(normaliseTestReachOverride) : [],
       depends_on: Array.isArray(dispatch.depends_on) ? [...new Set(dispatch.depends_on)] : [],
       where: request.where.map(normaliseRepoPath),
       creates: Array.isArray(request.creates) ? request.creates.map(normaliseRepoPath) : [],
@@ -1285,15 +1436,14 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
 
   const pins = collectAnchorPins({ checkout, deps: d })
   const scanRoot = typeof checkout === 'string' && checkout.trim() ? checkout : process.cwd()
-  const fenceHasCode = entries.some((entry) => (Array.isArray(entry.files) ? entry.files : []).some((file) => {
+  const fenceHasSurface = entries.some((entry) => (Array.isArray(entry.files) ? entry.files : []).some((file) => {
     if (typeof file !== 'string') return false
     const path = normaliseRepoPath(file)
-    if (!CODE_SUFFIX.test(path) && !path.endsWith('/')) return false
     try { return d.existsSync(join(scanRoot, ...path.split('/'))) } catch { return false }
   }))
   let reachIndex = null
   const reachFor = () => (reachIndex ??= collectTestReach({ checkout: scanRoot, deps: d }))
-  // Same posture as reachFor: one scan for the whole batch, and only if a lane needs it.
+  // One scan for the whole batch, shared by every existing file and directory surface.
   let carrierIndex = null
   const carriersFor = () => (carrierIndex ??= citationCarriers({ checkout: scanRoot, pins, deps: d }))
   const reportPath = typeof outDir === 'string' && outDir.trim() ? join(outDir, FENCE_REPORT_FILE) : null
@@ -1353,7 +1503,7 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
       })
     }
 
-    const reachRows = fenceHasCode ? testsOutsideFence({ surface: ownSurface, fenceFiles: ownFiles, reach: reachFor() }) : []
+    const reachRows = fenceHasSurface ? testsOutsideFence({ surface: ownSurface, fenceFiles: ownFiles, reach: reachFor() }) : []
     // Classified BEFORE the warning is queued (#960). The warning closes with "not a
     // refusal", and the deferred warnings render at :1313, ahead of any refusal raised
     // after this loop — so listing a row that IS about to refuse would print the
@@ -1361,10 +1511,12 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
     // warning's listing and from nothing else: dispatch.warnings.json still carries every
     // row, so the operator's listing stays complete. An OVERRIDDEN row keeps warning,
     // because it genuinely does not refuse.
-    const surfaceExports = fenceHasCode ? surfaceExportsOf({ surface: ownSurface, reach: reachFor() }) : []
-    const allowed = new Set(laneAllowTestReachOf(lane))
+    const surfaceExports = fenceHasSurface ? surfaceExportsOf({ surface: ownSurface, reach: reachFor() }) : []
+    const allowed = new Map(laneAllowTestReachOf(lane).map(({ file, why }) => [file, why]))
     const candidates = reachRefusalRows({ rows: reachRows, surfaceExports })
-    const overridden = candidates.filter((row) => allowed.has(row.test))
+    const overridden = candidates
+      .filter((row) => allowed.has(row.test))
+      .map((row) => ({ ...row, why: allowed.get(row.test) }))
     const refusedRows = candidates.filter((row) => !allowed.has(row.test))
     const refusedTests = new Set(refusedRows.map(({ test }) => test))
     const warnRows = reachRows.filter((row) => !refusedTests.has(row.test))
@@ -1380,7 +1532,7 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
       })
     }
     if (overridden.length > 0) {
-      const overrideText = `${TEST_REACH_OVERRIDE_PREFIX} lane ${name} declares ${TEST_REACH_OVERRIDE_KEY} for ${overridden.length} reaching test(s) that would otherwise refuse: ${overridden.map(({ test, file, symbols }) => `${test} imports ${file} and names ${symbols.join(', ')}`).join('; ')}; the named row(s) do not trigger ${TEST_REACH_UNFENCED}, the test(s) stay OUTSIDE the lane fence, and no seat may widen its own scope to reach them; this records the override only — every later check can still refuse this batch, so it is not a statement of the lane dispatch outcome.`
+      const overrideText = `${TEST_REACH_OVERRIDE_PREFIX} lane ${name} declares ${TEST_REACH_OVERRIDE_KEY} for ${overridden.length} reaching test(s) that would otherwise refuse: ${overridden.map((row) => `${row.symbols.length === 0 ? `${row.test} reaches ${row.file} through a static path literal (path-only, how=path)` : `${row.test} imports ${row.file} and names ${row.symbols.join(', ')}`}; why=${row.why}`).join('; ')}; the named row(s) do not trigger ${TEST_REACH_UNFENCED}, the test(s) stay OUTSIDE the lane fence, and no seat may widen its own scope to reach them; this records the override only — every later check can still refuse this batch, so it is not a statement of the lane dispatch outcome.`
       warnings.push({ kind: 'test-reach-override', lane: name, rows: overridden, text: overrideText })
       d.log(overrideText)
     }
@@ -1467,7 +1619,9 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
   // refusal can cite a listing the operator already has, and BEFORE the absent check, whose
   // comment claims the last position among register checks and keeps it.
   if (reachRefusals.length > 0) {
-    const detail = reachRefusals.flatMap(({ lane: name, rows }) => rows.map(({ test, file, symbols }) => `lane ${name}: ${test} imports ${file} at one hop and names ${symbols.join(', ')}`)).join('; ')
+    const detail = reachRefusals.flatMap(({ lane: name, rows }) => rows.map((row) => row.symbols.length === 0
+      ? `lane ${name}: ${row.test} reaches ${row.file} through a static path literal (path-only, how=path)`
+      : `lane ${name}: ${row.test} imports ${row.file} at one hop and names ${row.symbols.join(', ')}`)).join('; ')
     const remedy = reachRefusals.map(({ lane: name, rows, files }) => `lane ${name}: ${[...new Set([...files, ...rows.map(({ test }) => test)])].sort().join(', ')}`).join(' | ')
     const remedyText = `${TEST_REACH_REFUSAL_REMEDY} ${remedy}`
     const text = `test(s) outside a lane fence assert the behaviour that lane changes: ${detail}; ${remedyText}; declare ${TEST_REACH_OVERRIDE_KEY} on the lane request to dispatch anyway, and the decision is logged and recorded on ${FENCE_REPORT_FILE}. ${TEST_REACH_REFUSAL_BLIND_SPOT}`

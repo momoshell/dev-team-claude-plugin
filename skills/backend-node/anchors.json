@@ -3,7 +3,6 @@
   "crew/pi/extensions/subagent.test.mjs:173": "imports.every((specifier) => specifier.startsWith('node:'))",
   "crew/pi/extensions/subagent.test.mjs:8": "import * as mod from './subagent.ts'",
   "crew/pi/extensions/subagent.ts:5": "Why .ts: pi loads extensions through jiti",
-  "scripts/factory/reap-stale.mjs:75": "export const REAP_ACCOUNTING = Object.freeze",
   "skills/qa-test-writing/references/absence.md:3": "value nobody measured is recorded as absent",
   "test/factory-intake.test.mjs:1109": "intake.mjs names exactly the two non-node static module imports",
   "test/factory-intake.test.mjs:1112": "assert.equal((uncommented.match(/import\\s*\\(/g) || []).length, 0)",
@@ -41,5 +40,6 @@
   "crew/drive-review.test.mjs:1271": "DECISIONS and LIMITS are the frozen public contract",
   "crew/drive-review.test.mjs:1272": "Object.isFrozen(DECISIONS) && Object.isFrozen(LIMITS)",
   "crew/drive.mjs:564": "ENVELOPE_FIELD_KINDS.includes(field?.kind)",
-  "crew/drive.mjs:558": "if (!shape || typeof shape !== 'object')"
+  "crew/drive.mjs:558": "if (!shape || typeof shape !== 'object')",
+  "scripts/factory/reap-stale.mjs:81": "export const REAP_ACCOUNTING = Object.freeze"
 }

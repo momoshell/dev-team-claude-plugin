@@ -29,7 +29,7 @@ Exhibit: `crew/drive-review.test.mjs:1273`.
 Exhibit: `crew/reclaim.mjs:12`.
 
 `REAP_ACCOUNTING` shows the pattern in a factory script.
-Exhibit: `scripts/factory/reap-stale.mjs:75`.
+Exhibit: `scripts/factory/reap-stale.mjs:81`.
 
 Do not infer closure from an uppercase name or an exported array alone.
 Exhibit: `crew/drive-review.test.mjs:1273`.

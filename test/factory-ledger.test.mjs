@@ -6770,6 +6770,114 @@ test('b381 E1 a journal carrying none of these rows leaves the ledger byte-ident
   } finally { ledger.close() }
 })
 
+test('A2 reap ingests provider failures', { skip: SKIP }, () => {
+  const adwId = 'a2-reap-provider'
+  const ledger = openTestLedger()
+  const journalPath = join(nextDir(), 'journal.jsonl')
+  writeFileSync(journalPath, `${JSON.stringify({
+    at: '2030-01-01T00:00:00.000Z', role: 'builder', id: 'd-provider',
+    headless_outcome: 'budget-refused', provider_failure: { kind: 'rate_limit', status: 429 },
+  })}\n`)
+  try {
+    assert.deepEqual(ingestJournal(journalPath, ledger, { adw_id: adwId }), {
+      applied: 1, skipped: 0, ignored: 0, failed: 0, complete: true, first_failure: null,
+    })
+    assert.deepEqual(ledger.dumpTable('provider_failures').map(({ adw_id, role, dispatch_id, kind, status, outcome }) => ({
+      adw_id, role, dispatch_id, kind, status, outcome,
+    })), [{
+      adw_id: adwId, role: 'builder', dispatch_id: 'd-provider', kind: 'rate_limit', status: 429,
+      outcome: 'budget-refused',
+    }])
+  } finally { ledger.close() }
+})
+
+test('A3 reap ingests boot seats exactly once', { skip: SKIP }, () => {
+  const adwId = 'a3-reap-seats'
+  const at = '2030-01-01T00:00:00.000Z'
+  const seat = (agent, provider, id, model, effort) => ({ agent, provider, id, model, effort })
+  const boot = {
+    at, event: 'boot', roles: ['planner', 'builder', 'reviewer'],
+    seats: {
+      planner: seat('claude', 'anthropic', 'claude-sonnet', 'claude-sonnet', 'high'),
+      builder: seat('pi', 'openai', 'gpt-5', 'openai-codex/gpt-5', 'max'),
+      reviewer: seat('claude', 'anthropic', 'claude-opus', 'claude-opus', 'high'),
+    },
+    transports: { planner: 'pane', builder: 'headless-rpc', reviewer: 'headless-json' },
+    allocation: {
+      planner: { agent: 'roster', model: 'roster', effort: 'roster', transport: 'pane' },
+      builder: { agent: 'override', model: 'roster', effort: 'roster', transport: 'headless-rpc' },
+      reviewer: { agent: 'roster', model: 'roster', effort: 'roster', transport: 'headless-json' },
+    },
+    vendor_withheld: { planner: [], builder: ['subagents'], reviewer: [] },
+  }
+  const ledger = openTestLedger()
+  const journalPath = join(nextDir(), 'journal.jsonl')
+  writeFileSync(journalPath, `${JSON.stringify(boot)}\n`)
+  try {
+    const first = ingestJournal(journalPath, ledger, { adw_id: adwId })
+    const rowsAfterFirst = ledger.dumpTable('run_seats')
+    const second = ingestJournal(journalPath, ledger, { adw_id: adwId })
+    const rowsAfterSecond = ledger.dumpTable('run_seats')
+    assert.equal(first.applied, 3)
+    assert.equal(first.complete, true)
+    assert.equal(second.complete, true)
+    assert.equal(rowsAfterFirst.length, 3)
+    assert.equal(rowsAfterSecond.length, rowsAfterFirst.length)
+    const byRole = Object.fromEntries(rowsAfterSecond.map((row) => [row.role, row]))
+    assert.equal(byRole.planner.source, 'roster')
+    assert.equal(byRole.builder.source, 'operator_override')
+    assert.equal(byRole.builder.policy_state, 'warned')
+    assert.deepEqual(JSON.parse(byRole.builder.warnings_json), ['subagents'])
+    assert.equal(byRole.reviewer.policy_state, 'passed')
+    assert.equal(byRole.builder.model_id, 'gpt-5')
+    assert.equal(byRole.builder.transport, 'headless-rpc')
+  } finally { ledger.close() }
+})
+
+test('A4 turn economy excludes a concurrent sibling lane', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const since = '2030-01-01T00:00:00.000Z'
+  const until = '2030-01-02T00:00:00.000Z'
+  const at = Date.parse(since)
+  ledger.recordSeatTurnCensus({ adw_id: 'a4-lane', role: 'builder', dispatch_id: 'd1', transport: 'headless-rpc', turns: 10, at_ms: at, created_at: since })
+  ledger.recordSeatTurnCensus({ adw_id: 'a4-lane', role: 'reviewer', dispatch_id: 'd2', transport: 'headless-json', turns: null, absent_reason: 'no observable turns', at_ms: at + 1000, created_at: '2030-01-01T00:00:01.000Z' })
+  ledger.recordSeatTurnCensus({ adw_id: 'a4-sibling', role: 'builder', dispatch_id: 'sibling', transport: 'headless-rpc', turns: 99, at_ms: at + 2000, created_at: '2030-01-01T00:00:02.000Z' })
+  try {
+    const facts = ledger.turnEconomy({ since, until, adw_id: 'a4-lane' })
+    assert.equal(facts.dispatches, 2)
+    assert.equal(facts.dispatches_measured, 1)
+    assert.equal(facts.turns, 10)
+    assert.equal(facts.turns_per_dispatch, 10)
+    assert.equal(facts.excluded.rows, 1)
+    assert.deepEqual(facts.by_role_tier.map(({ role, dispatches, dispatches_measured, turns }) => ({ role, dispatches, dispatches_measured, turns })), [
+      { role: 'builder', dispatches: 1, dispatches_measured: 1, turns: 10 },
+      { role: 'reviewer', dispatches: 1, dispatches_measured: 0, turns: null },
+    ])
+  } finally { ledger.close() }
+})
+
+test('A6 malformed journal line reports an unmeasured reason', { skip: SKIP }, () => {
+  const adwId = 'a6-malformed'
+  const valid = { at: '2030-01-01T00:00:01.000Z', seat_turn_census: {
+    role: 'builder', dispatch_id: 'd-later', transport: 'headless-rpc', turns: 3,
+  } }
+  const journalPath = join(nextDir(), 'journal.jsonl')
+  writeFileSync(journalPath, `{not valid json\n${JSON.stringify(valid)}\n`)
+  const ledger = openTestLedger()
+  try {
+    const result = ingestJournal(journalPath, ledger, { adw_id: adwId })
+    assert.deepEqual(result, {
+      applied: 1, skipped: 1, ignored: 0, failed: 0, complete: false,
+      first_failure: { line: 1, reason: 'journal line is not valid JSON' },
+    })
+    assert.equal(ledger.dumpTable('seat_turn_census').length, 1)
+    assert.equal(ledger.dumpTable('seat_turn_census')[0].turns, 3)
+    const facts = ledger.turnEconomy({ since: '2030-01-01T00:00:00.000Z', until: '2030-01-02T00:00:00.000Z', adw_id: adwId })
+    assert.equal(facts.dispatches, 1)
+    assert.equal(facts.turns, 3)
+  } finally { ledger.close() }
+})
+
 test('b401 a journalled seat_turn_census row ingests to a seat_turn_census ledger row', { skip: SKIP }, () => {
   const adwId = 'b401-census'
   const line = JSON.stringify({

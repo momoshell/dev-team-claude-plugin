@@ -1333,6 +1333,7 @@ export const JOURNAL_FACT_KEYS = Object.freeze({
 
 // A crew journal row whose `event` is this value is that fact.
 export const JOURNAL_FACT_EVENTS = Object.freeze({
+  boot: 'boot',
   'seat-timeout-reask': 'recordSeatReask',
   'seat-abort-reask': 'recordSeatReask',
   'plan-adopted': 'recordPlanAdoption',
@@ -4514,7 +4515,7 @@ export function openLedger({
 
   function rateOrNull(n, d) { return n === null || d === null || d === 0 ? null : n / d }
 
-  function turnEconomy({ since = null, until = null } = {}) {
+  function turnEconomy({ since = null, until = null, adw_id = null } = {}) {
     const result = queryRows(`
       WITH scoped AS (
         SELECT c.*, s.tier
@@ -4522,6 +4523,7 @@ export function openLedger({
         LEFT JOIN sessions s ON s.adw_id = c.adw_id
         WHERE (? IS NULL OR COALESCE(c.at_ms, CAST(strftime('%s', c.created_at) AS INTEGER) * 1000) >= CAST(strftime('%s', ?) AS INTEGER) * 1000)
           AND (? IS NULL OR COALESCE(c.at_ms, CAST(strftime('%s', c.created_at) AS INTEGER) * 1000) < CAST(strftime('%s', ?) AS INTEGER) * 1000)
+          AND (? IS NULL OR c.adw_id = ?)
       ), total AS (
         SELECT 0 AS bucket, NULL AS role, NULL AS tier,
           COUNT(*) AS dispatches, COUNT(turns) AS dispatches_measured,
@@ -4550,7 +4552,7 @@ export function openLedger({
       UNION ALL
       SELECT * FROM grouped
       ORDER BY bucket, role, tier
-    `, [since, since, until, until])
+    `, [since, since, until, until, adw_id, adw_id])
     const summary = result.find((row) => row.bucket === 0) || null
     const rows = Number(summary?.dispatches ?? 0)
     const measured = Number(summary?.dispatches_measured ?? 0)
@@ -5393,7 +5395,73 @@ function ingestFailureReason(err) {
   return err instanceof LedgerUsageError ? err.message : (err?.name || 'Error')
 }
 
-export function ingestJournal(journalPath, ledger, { adw_id = null } = {}) {
+function bootSeatArgs(source, role, adwId) {
+  if (typeof role !== 'string' || role.trim() === '') {
+    throw new LedgerUsageError('journal boot role is not a non-blank string')
+  }
+  const seats = source.seats
+  if (!seats || typeof seats !== 'object' || Array.isArray(seats)) {
+    throw new LedgerUsageError('journal boot seats are missing or not an object')
+  }
+  if (!Object.prototype.hasOwnProperty.call(seats, role)) {
+    throw new LedgerUsageError('journal boot seat is missing')
+  }
+  const seat = seats[role]
+  if (!seat || typeof seat !== 'object' || Array.isArray(seat)) {
+    throw new LedgerUsageError('journal boot seat is missing or not an object')
+  }
+  for (const field of ['agent', 'provider', 'id', 'model', 'effort']) {
+    if (!Object.prototype.hasOwnProperty.call(seat, field)) {
+      throw new LedgerUsageError(`journal boot seat is missing field '${field}'`)
+    }
+  }
+  const transports = source.transports
+  const transport = transports && typeof transports === 'object' && !Array.isArray(transports)
+    ? transports[role]
+    : undefined
+  if (typeof transport !== 'string' || transport.trim() === '') {
+    throw new LedgerUsageError('journal boot seat is missing a transport')
+  }
+  const allocation = source.allocation
+  const roleAllocation = allocation && typeof allocation === 'object' && !Array.isArray(allocation)
+    ? allocation[role]
+    : undefined
+  if (roleAllocation !== undefined && (!roleAllocation || typeof roleAllocation !== 'object' || Array.isArray(roleAllocation))) {
+    throw new LedgerUsageError('journal boot allocation is malformed')
+  }
+  const withheld = source.vendor_withheld
+  const warnings = withheld === undefined
+    ? []
+    : withheld && typeof withheld === 'object' && !Array.isArray(withheld) ? withheld[role] ?? [] : null
+  if (!Array.isArray(warnings) || warnings.some((warning) => typeof warning !== 'string')) {
+    throw new LedgerUsageError('journal boot vendor warnings are malformed')
+  }
+  const atMs = epochMsOrNull(source.at)
+  if (source.at !== undefined && atMs === null) {
+    throw new LedgerUsageError('journal boot timestamp is unusable')
+  }
+  const provenance = roleAllocation ? Object.values(roleAllocation) : []
+  const seatSource = provenance.some((value) => value === 'override' || value === 'operator_override')
+    ? 'operator_override'
+    : 'roster'
+  return {
+    adw_id: adwId,
+    role,
+    agent: seat.agent,
+    provider: seat.provider,
+    model_id: seat.id,
+    model: seat.model,
+    effort: seat.effort,
+    transport,
+    source: seatSource,
+    policy_state: warnings.length > 0 ? 'warned' : 'passed',
+    warnings,
+    ...(atMs === null ? {} : { created_at: atMs }),
+  }
+}
+
+export function ingestJournal(journalPath, ledger, { adw_id = null, since = null } = {}) {
+  const sinceMs = since === null || since === undefined ? null : epochMsOrNull(since)
   let content
   try {
     content = readFileSync(journalPath, 'utf8')
@@ -5415,23 +5483,46 @@ export function ingestJournal(journalPath, ledger, { adw_id = null } = {}) {
       parsed = JSON.parse(line)
     } catch {
       skipped += 1
+      firstFailure ??= { line: lineNo, reason: 'journal line is not valid JSON' }
+      continue
+    }
+    const source = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null
+    const rowAtMs = source ? epochMsOrNull(source.at) : null
+    if (Number.isFinite(sinceMs) && (!Number.isFinite(rowAtMs) || rowAtMs < sinceMs)) {
+      ignored += 1
       continue
     }
     let writer = null
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+    if (source) {
       for (const key of Object.keys(JOURNAL_FACT_KEYS)) {
-        if (Object.prototype.hasOwnProperty.call(parsed, key)) {
+        if (Object.prototype.hasOwnProperty.call(source, key)) {
           writer = JOURNAL_FACT_KEYS[key]
           break
         }
       }
-      if (!writer && Object.prototype.hasOwnProperty.call(JOURNAL_FACT_EVENTS, parsed.event)) {
-        writer = JOURNAL_FACT_EVENTS[parsed.event]
+      if (!writer && Object.prototype.hasOwnProperty.call(JOURNAL_FACT_EVENTS, source.event)) {
+        writer = JOURNAL_FACT_EVENTS[source.event]
       }
     }
     if (!writer) { ignored += 1; continue }
+    if (writer === JOURNAL_FACT_EVENTS.boot) {
+      if (!Array.isArray(source.roles)) {
+        ignored += 1
+        continue
+      }
+      for (const role of source.roles) {
+        try {
+          ledger.recordRunSeat(bootSeatArgs(source, role, adw_id))
+          applied += 1
+        } catch (err) {
+          failed += 1
+          firstFailure ??= { line: lineNo, reason: ingestFailureReason(err) }
+        }
+      }
+      continue
+    }
     try {
-      ledger[writer](journalFactArgs(writer, parsed, adw_id))
+      ledger[writer](journalFactArgs(writer, source, adw_id))
       applied += 1
     } catch (err) {
       failed += 1
@@ -5726,7 +5817,7 @@ const VERB_FLAGS = Object.freeze({
   'ci-cycles': new Set(['since', 'until']),
   'intake-sweeps': new Set(['since', 'until']),
   'journal-facts': new Set(['since', 'until']),
-  turns: new Set(['since', 'until']),
+  turns: new Set(['since', 'until', 'adw-id']),
   task: new Set([]),
   request: new Set(['from-brief']),
   'advisor-ab': new Set(['run-dir', 'run-started-at', 'adjudications']),
@@ -6865,10 +6956,15 @@ export function main(argv) {
       if (positional.length > 0) refuse('turns: takes no positional arguments')
       const hasSince = Object.prototype.hasOwnProperty.call(flags, 'since')
       const hasUntil = Object.prototype.hasOwnProperty.call(flags, 'until')
+      const hasAdwId = Object.prototype.hasOwnProperty.call(flags, 'adw-id')
       const since = hasSince ? windowBound(flags.since, 'since', 'turns') : null
       const until = hasUntil ? windowBound(flags.until, 'until', 'turns') : null
+      const adwId = hasAdwId && typeof flags['adw-id'] === 'string' && flags['adw-id'].trim()
+        ? flags['adw-id'].trim()
+        : null
+      if (hasAdwId && adwId === null) refuse('turns: --adw-id must be a nonblank identity')
       if (until != null && since != null && until <= since) refuse('turns: --until must be later than --since')
-      const facts = ledger.turnEconomy({ since, until })
+      const facts = ledger.turnEconomy({ since, until, adw_id: adwId })
       if (ledger.stats().degraded) refuse('turns: the ledger mirror is degraded — this window is unanswerable, not empty')
       stdout.write(`${JSON.stringify({
         schema: 1,

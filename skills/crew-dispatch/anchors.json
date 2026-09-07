@@ -16,5 +16,5 @@
   "scripts/factory/dispatch-batch.mjs:160": "BOOT_TRANSPORT = 'headless-all'",
   "scripts/factory/dispatch-batch.mjs:161": "PANE_TRANSPORT = 'panes'",
   "scripts/factory/make-brief.mjs:1489": "a recorded baseline is a fact about a commit and is never consumed",
-  "crew/drive.mjs:659": "export const GATE_REAP_SHELL = '/bin/bash'"
+  "crew/drive.mjs:666": "export const GATE_REAP_SHELL = '/bin/bash'"
 }

@@ -4,7 +4,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  COMMIT_TRAILER, HONEST_NARRATION, NARRATION_HEADING, NARRATION_RECORD, NARRATION_REFUSALS, NARRATION_REFUSAL_NAMES, NARRATION_STAGE_VOCABULARY, NARRATOR_REGISTER, PUBLISH_REFUSAL_NAMES, RUN_START_EVENT, TD, VARIANTS, applyNarration, bounceDetail, bounceSeatOf, commitIntent, composeCommitMessage, composePrBody, convergeRun, issueTrailers, join, journalRowsSinceRunStart, narrateRecord, narrationDefect, narrationIsRawJson, narrationPrompt, narrationStageDefect, narratorApiRoot, narratorIo, narratorModelId, narratorModelsCommand, planEnv, prAnomalies, readFileSync, refsFromCommitMessage, runPublished, shellArg,
+  COMMIT_TRAILER, CTX, HONEST_NARRATION, NARRATION_HEADING, NARRATION_RECORD, NARRATION_REFUSALS, NARRATION_REFUSAL_NAMES, NARRATION_STAGE_VOCABULARY, NARRATOR_REGISTER, PUBLISH_REFUSAL_NAMES, RUN_START_EVENT, TD, VARIANTS, applyNarration, bounceDetail, bounceSeatOf, buildEnv, commitIntent, composeCommitMessage, composePrBody, convergeRun, driveTask, issueTrailers, join, journalRowsSinceRunStart, narrateRecord, narrationDefect, narrationIsRawJson, narrationPrompt, narrationStageDefect, narratorApiRoot, narratorIo, narratorModelId, narratorModelsCommand, planEnv, prAnomalies, publicationIo, readFileSync, refsFromCommitMessage, reviewEnv, runPublished, shellArg,
 } from './drive-fixtures.mjs'
 
 test('RV1-1 the observe-and-end residual reaches the commit and PR intent verbatim', () => {
@@ -201,6 +201,72 @@ test('an exit-zero malformed PR probe, indeterminate probe, and throwing journal
   assert.ok(throwingRead.io.calls.writes[`${TD}/pr-body.md`])
 })
 
+test('C1 publication names the measured proof generation', () => {
+  const red = `red\nGATE-SUMMARY {"total":3,"failed":3,"errored":0}`
+  const green = `green\nGATE-SUMMARY {"total":3,"failed":0,"errored":0}`
+  const io = publicationIo({
+    envelopes: { 'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }) },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const baseRun = io.run
+  let gateRuns = 0
+  io.run = function (command) {
+    if (String(command).includes('gate-cmd')) {
+      gateRuns += 1
+      return gateRuns === 1 ? { ok: false, output: red } : { ok: true, output: green }
+    }
+    return baseRun.call(this, command)
+  }
+  io.runClean = () => ({ ok: false, output: red })
+  const result = driveTask({ ...CTX, publish: { branch: 'feature/ship' } }, io)
+  assert.equal(result.status, 'done')
+  assert.equal(result.details.gate.generation, 1)
+  const body = io.calls.writes[`${TD}/pr-body.md`]
+  assert.match(body, /discrimination proven on generation 1/)
+  assert.doesNotMatch(body, /discrimination proven\*\* \(gate-cmd\)/)
+
+  const oldRed = `old red\nGATE-SUMMARY {"total":3,"failed":3,"errored":0}`
+  const oldGreen = `old green\nGATE-SUMMARY {"total":3,"failed":0,"errored":0}`
+  const repairedRed = `repaired red\nGATE-SUMMARY {"total":7,"failed":7,"errored":0}`
+  const repairedGreen = `repaired green\nGATE-SUMMARY {"total":7,"failed":0,"errored":0}`
+  const files = { [`${CTX.checkout}/a.mjs`]: 'before rebuild\n' }
+  const changed = Array.from({ length: 8 }, () => ['a.mjs', 'a.test.mjs'])
+  let refreshedIo
+  refreshedIo = publicationIo({
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'old-gate-cmd' } }),
+      'builder:1': buildEnv(),
+      'builder:2': () => { files[`${CTX.checkout}/a.mjs`] = 'after rebuild\n'; return buildEnv() },
+      'reviewer:1': reviewEnv('changes-needed'), 'reviewer:2': reviewEnv('pass'),
+      'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'repaired-gate-cmd' } },
+    },
+  })
+  const readFile = refreshedIo.readFile
+  refreshedIo.readFile = (path) => Object.prototype.hasOwnProperty.call(files, path) ? files[path] : readFile(path)
+  refreshedIo.changedFiles = () => changed.length > 1 ? changed.shift() : changed[0]
+  const refreshedRun = refreshedIo.run
+  let oldGateRuns = 0
+  refreshedIo.run = function (command) {
+    const text = String(command)
+    if (text.includes('old-gate-cmd')) {
+      oldGateRuns += 1
+      return oldGateRuns === 1 ? { ok: false, output: oldRed } : { ok: true, output: oldGreen }
+    }
+    if (text.includes('repaired-gate-cmd')) return { ok: true, output: repairedGreen }
+    return refreshedRun.call(this, command)
+  }
+  const cleanRuns = [oldRed, oldGreen, repairedRed]
+  refreshedIo.runClean = () => ({ ok: false, output: cleanRuns.shift() || repairedRed })
+  const refreshed = driveTask({ ...CTX, limits: { build_rounds: 2, review_rounds: 2 }, publish: { branch: 'feature/ship' } }, refreshedIo)
+  assert.equal(refreshed.status, 'done')
+  assert.equal(refreshed.details.gate.cmd, 'repaired-gate-cmd')
+  assert.equal(refreshed.details.gate.generation, 3)
+  assert.equal(oldGateRuns, 4)
+  const refreshedBody = refreshedIo.calls.writes[`${TD}/pr-body.md`]
+  assert.match(refreshedBody, /7 gate checks, 0 failed, 0 errored, discrimination proven on generation 3\*\* \(repaired-gate-cmd\)/)
+  assert.doesNotMatch(refreshedBody, /3 gate checks, 0 failed, 0 errored.*repaired-gate-cmd/)
+})
+
 test('composePrBody is pure and renders every populated section with its own values', () => {
   const record = {
     issues: ['#679', '#758'], stages: ['commit', 'rebase', 'suite', 'publish', 'done'],
@@ -217,7 +283,7 @@ test('composePrBody is pure and renders every populated section with its own val
   assert.equal(first, [
     'why the lane existed',
     'Closes #806\nRefs #679, #758',
-    '**2 gate checks, 0 failed, 0 errored, discrimination proven** (gate-cmd), repaired 1 time.',
+    '**2 gate checks, 0 failed, 0 errored, discrimination unproven** (gate-cmd), repaired 1 time.',
     'Suite warm 11 pass / 2 fail / 3 skip; cold 13 pass / 4 fail / 5 skip, cold-verified from a fresh checkout.',
     'Review: changes-needed, 1 residual:\n- R1 (cosmetic): leave this note',
     'Changed: crew/drive.mjs',
@@ -233,7 +299,7 @@ test('composePrBody is pure and renders every populated section with its own val
     'Review: not recorded, no residuals',
   ].join('\n\n'))
   for (const token of ['why the lane existed', 'Closes #806', 'Refs #679, #758',
-    '2 gate checks, 0 failed, 0 errored, discrimination proven', '(gate-cmd)', 'repaired 1 time',
+    '2 gate checks, 0 failed, 0 errored, discrimination unproven', '(gate-cmd)', 'repaired 1 time',
     'warm 11 pass / 2 fail / 3 skip', 'cold 13 pass / 4 fail / 5 skip', 'cold-verified from a fresh checkout',
     'Review: changes-needed, 1 residual:', 'R1 (cosmetic): leave this note', 'Changed: crew/drive.mjs',
     'Shape: commit → rebase → suite → publish', '- bounce: retry']) assert.ok(first.includes(token), token)

@@ -1474,6 +1474,204 @@ test('a known survivor outranks a later interrupted mutation pass', () => {
   assert.equal(first.checks[0].outcome, 'survived')
 })
 
+test('A1 review rebuild re-proves before commit', () => {
+  const queue = (witness, current = witness) => [
+    [...witness], [...witness],
+    ...Array.from({ length: 8 }, () => [...current]),
+  ]
+  const added = 'pkg/lib/added.mjs'
+  const deleted = 'pkg/lib/deleted.mjs'
+  const scenarios = [
+    {
+      scope: ['a.mjs'], target: 'a.mjs', changed: queue(['a.mjs']),
+      rebuild: (io, targetPath) => { io.calls.files[targetPath] = `${CHECK_BUILT}// changed\n` },
+    },
+    {
+      scope: ['pkg/lib/'], target: 'pkg/lib/target.mjs', changed: queue(['pkg/lib/target.mjs']),
+      rebuild: (io, targetPath) => { io.calls.files[targetPath] = `${CHECK_BUILT}// changed\n` },
+    },
+    {
+      scope: ['pkg/lib/'], target: 'pkg/lib/target.mjs',
+      changed: queue(['pkg/lib/target.mjs'], ['pkg/lib/target.mjs', added]),
+      rebuild: (io) => { io.calls.files[`${CTX.checkout}/${added}`] = '// added\n' },
+    },
+    {
+      scope: ['pkg/lib/'], target: 'pkg/lib/target.mjs',
+      files: { [`${CTX.checkout}/${deleted}`]: '// deleted\n' },
+      changed: queue(['pkg/lib/target.mjs', deleted]),
+      rebuild: (io) => { delete io.calls.files[`${CTX.checkout}/${deleted}`] },
+    },
+  ]
+  for (const scenario of scenarios) {
+    const mutation = { check: 'changed-target', file: scenario.target, find: 'true', replace: 'false' }
+    const green = `green\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":0,"errored":0}`
+    const red = `FAIL changed-target: caught\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":1,"errored":0}`
+    const targetPath = `${CTX.checkout}/${scenario.target}`
+    const plan = planEnv({ details: { ...planEnv().details, files_in_scope: scenario.scope, gate_cmd: 'gate-cmd', mutations: [mutation] } })
+    let io
+    io = fakeIo({
+      files: { [targetPath]: CHECK_BUILT, ...(scenario.files || {}) }, writeThrough: true,
+      changed: scenario.changed,
+      cleanRuns: { 'gate-cmd': { ok: false, output: RED(3) } },
+      runs: {
+        'gate-cmd:1': { ok: false, output: RED(3) }, 'gate-cmd:2': { ok: true, output: green },
+        'gate-cmd:3': { ok: false, output: red }, 'gate-cmd:4': { ok: true, output: green },
+        'gate-cmd:5': { ok: true, output: green }, 'gate-cmd:6': { ok: false, output: red },
+        'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+      },
+      envelopes: {
+        'planner:1': plan, 'builder:1': buildEnv(),
+        'builder:2': () => { scenario.rebuild(io, targetPath); return buildEnv() },
+        'reviewer:1': reviewEnv('changes-needed'), 'reviewer:2': reviewEnv('pass'),
+      }, emit: true,
+    })
+    const result = driveTask({ ...CTX, limits: { build_rounds: 2, review_rounds: 2 } }, io)
+    assert.equal(result.status, 'done')
+    assert.equal(io.calls.commits.length, 1)
+    assert.equal(io.calls.runClean.length, 2)
+    assert.deepEqual(io.calls.emits.filter(({ kind }) => kind === 'discrimination').map(({ generation }) => generation), [1, 2])
+    assert.deepEqual(io.calls.emits.filter(({ kind }) => kind === 'check-discrimination').map(({ generation }) => generation), [1, 2])
+  }
+})
+
+test('B1 unchanged tree does not pay for a second proof', () => {
+  const queue = (witness, current = witness) => [
+    [...witness], [...witness],
+    ...Array.from({ length: 8 }, () => [...current]),
+  ]
+  const reportedNonTarget = 'pkg/lib/reported-non-target.mjs'
+  const reportedNonTargetBytes = '// before rebuild\n'
+  const scenarios = [
+    {
+      scope: ['a.mjs'], target: 'a.mjs', changed: queue(['a.mjs']),
+      rebuild: (io, targetPath) => { io.calls.files[targetPath] = CHECK_BUILT },
+    },
+    {
+      scope: ['pkg/lib/'], target: 'pkg/lib/target.mjs', changed: queue(['pkg/lib/target.mjs']),
+      rebuild: (io, targetPath) => { io.calls.files[targetPath] = CHECK_BUILT },
+    },
+    {
+      scope: ['pkg/lib/'], target: 'pkg/lib/target.mjs',
+      files: { [`${CTX.checkout}/${reportedNonTarget}`]: reportedNonTargetBytes },
+      changed: queue(['pkg/lib/target.mjs', reportedNonTarget]),
+      rebuild: (io) => { io.calls.files[`${CTX.checkout}/${reportedNonTarget}`] = reportedNonTargetBytes },
+    },
+  ]
+  for (const scenario of scenarios) {
+    const mutation = { check: 'unchanged-target', file: scenario.target, find: 'true', replace: 'false' }
+    const green = `green\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":0,"errored":0}`
+    const red = `FAIL unchanged-target: caught\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":1,"errored":0}`
+    const targetPath = `${CTX.checkout}/${scenario.target}`
+    const plan = planEnv({ details: { ...planEnv().details, files_in_scope: scenario.scope, gate_cmd: 'gate-cmd', mutations: [mutation] } })
+    let io
+    io = fakeIo({
+      files: { [targetPath]: CHECK_BUILT, ...(scenario.files || {}) }, writeThrough: true,
+      changed: scenario.changed,
+      cleanRuns: { 'gate-cmd': { ok: false, output: RED(3) } },
+      runs: {
+        'gate-cmd:1': { ok: false, output: RED(3) }, 'gate-cmd:2': { ok: true, output: green },
+        'gate-cmd:3': { ok: false, output: red }, 'gate-cmd:4': { ok: true, output: green },
+        'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+      },
+      envelopes: {
+        'planner:1': plan, 'builder:1': buildEnv(),
+        'builder:2': () => { scenario.rebuild(io, targetPath); return buildEnv() },
+        'reviewer:1': reviewEnv('changes-needed'), 'reviewer:2': reviewEnv('pass'),
+      }, emit: true,
+    })
+    const result = driveTask({ ...CTX, limits: { build_rounds: 2, review_rounds: 2 } }, io)
+    assert.equal(result.status, 'done')
+    assert.equal(io.calls.commits.length, 1)
+    assert.equal(io.calls.runClean.length, 1)
+    assert.equal(io.calls.run.filter(({ cmd }) => cmd === 'gate-cmd').length, 4)
+    assert.deepEqual(io.calls.emits.filter(({ kind }) => kind === 'discrimination').map(({ generation }) => generation), [1])
+    assert.deepEqual(io.calls.emits.filter(({ kind }) => kind === 'check-discrimination').map(({ generation }) => generation), [1])
+  }
+})
+
+test('D1 untouched checks are carried forward from their measured generation', () => {
+  const green = `green\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":0,"errored":0}`
+  const fail = (check) => ({ ok: false, output: `FAIL ${check}: caught\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":1,"errored":0}` })
+  const runCase = ({ scope, changed, files, mutate, expectCarry }) => {
+    const mutations = [
+      { check: 'first', file: 'a.mjs', find: 'true', replace: 'false' },
+      { check: 'second', file: 'b.mjs', find: 'true', replace: 'false' },
+    ]
+    const plan = planEnv({ details: { ...planEnv().details, files_in_scope: scope, gate_cmd: 'gate-cmd', mutations } })
+    let io
+    io = fakeIo({
+      files, writeThrough: true, changed: Array.from({ length: 12 }, () => changed),
+      cleanRuns: { 'gate-cmd': { ok: false, output: RED(3) } },
+      runs: {
+        'gate-cmd:1': { ok: false, output: RED(3) }, 'gate-cmd:2': { ok: true, output: green },
+        'gate-cmd:3': fail('first'), 'gate-cmd:4': fail('second'),
+        'gate-cmd:5': { ok: true, output: green }, 'gate-cmd:6': { ok: true, output: green },
+        'gate-cmd:7': fail('first'), 'gate-cmd:8': fail('second'),
+        'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+      },
+      envelopes: {
+        'planner:1': plan, 'builder:1': buildEnv(),
+        'builder:2': () => { io.calls.files[`${CTX.checkout}/${mutate.path}`] = mutate.bytes; return buildEnv() },
+        'reviewer:1': reviewEnv('changes-needed'), 'reviewer:2': reviewEnv('pass'),
+      }, emit: true,
+    })
+    const result = driveTask({ ...CTX, limits: { build_rounds: 2, review_rounds: 2 } }, io)
+    assert.equal(result.status, 'done')
+    assert.equal(result.details.gate.generation, 2)
+    const rows = result.details.gate.check_discriminations
+    assert.equal(rows.filter((row) => row.proof === 'carried-forward').length, expectCarry ? 1 : 0)
+    assert.equal(rows.filter((row) => row.proof === 'fresh').length, 2 - (expectCarry ? 1 : 0))
+    if (expectCarry) {
+      const carried = rows.find((row) => row.proof === 'carried-forward')
+      assert.equal(carried.check, 'second')
+      assert.equal(carried.measured_generation, 1)
+      assert.equal(carried.outcome, 'killed')
+      assert.equal(io.calls.writeLog.filter(({ path }) => path === `${CTX.checkout}/b.mjs`).length, 2)
+    } else {
+      assert.equal(io.calls.writeLog.filter(({ path }) => path === `${CTX.checkout}/a.mjs`).length, 4)
+      assert.equal(io.calls.writeLog.filter(({ path }) => path === `${CTX.checkout}/b.mjs`).length, 4)
+    }
+  }
+  runCase({
+    scope: ['a.mjs', 'b.mjs'], changed: ['a.mjs', 'b.mjs'],
+    files: { [`${CTX.checkout}/a.mjs`]: CHECK_BUILT, [`${CTX.checkout}/b.mjs`]: CHECK_BUILT },
+    mutate: { path: 'a.mjs', bytes: `${CHECK_BUILT}// changed\n` }, expectCarry: true,
+  })
+  runCase({
+    scope: ['a.mjs', 'b.mjs', 'gate-helper.mjs'], changed: ['a.mjs', 'b.mjs', 'gate-helper.mjs'],
+    files: { [`${CTX.checkout}/a.mjs`]: CHECK_BUILT, [`${CTX.checkout}/b.mjs`]: CHECK_BUILT, [`${CTX.checkout}/gate-helper.mjs`]: 'helper one\n' },
+    mutate: { path: 'gate-helper.mjs', bytes: 'helper two\n' }, expectCarry: false,
+  })
+})
+
+test('E1 gate repair still re-verifies and re-proves', () => {
+  const green = `green\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":0,"errored":0}`
+  const mutation = { ...CHECK_MUTATION, check: 'repair-check' }
+  const io = fakeIo({
+    files: { [CHECK_FILE]: CHECK_BUILT }, writeThrough: true, changed: Array.from({ length: 10 }, () => ['a.mjs', 'a.test.mjs']),
+    cleanRuns: { 'gate-cmd': { ok: false, output: RED(3) }, 'gate-fixed': { ok: false, output: RED(3) } },
+    runs: {
+      'gate-cmd:1': { ok: false, output: RED(3) }, 'gate-cmd:2': { ok: true, output: green },
+      'gate-cmd:3': { ok: true, output: green }, 'gate-fixed:1': { ok: true, output: green },
+      'gate-fixed:2': { ok: false, output: `FAIL repair-check: caught\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":1,"errored":0}` },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    envelopes: {
+      'planner:1': CHECK_PLAN([mutation]),
+      'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } },
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    }, emit: true,
+  })
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'done')
+  assert.equal(result.details.gate.repairs, 1)
+  assert.equal(result.details.gate.generation, 2)
+  assert.equal(result.details.gate.reverified, true)
+  assert.ok(result.details.stages.includes('gate-reverify:1'))
+  assert.deepEqual(io.calls.emits.filter(({ kind }) => kind === 'discrimination').map(({ generation }) => generation), [1, 2])
+  assert.deepEqual(io.calls.emits.filter(({ kind }) => kind === 'check-discrimination').map(({ generation }) => generation), [1, 2])
+})
+
 test('a mutated gate that errors or omits its summary survives instead of claiming a kill', () => {
   for (const output of [THREW, 'FAIL check-one: red without a summary']) {
     const io = fakeIo({

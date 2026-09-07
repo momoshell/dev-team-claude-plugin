@@ -297,6 +297,26 @@ test('modelString handles null-prototype local provider registers', () => {
   )
 })
 
+test('F1', () => {
+  const shape = {
+    role: 'builder', model: 'sonnet', promptFile: '/tmp/prompt.md', tools: 'Read', deny: 'Task,Agent',
+    taskDir: '/tmp/task', bootBrief: 'boot',
+  }
+  const normal = {
+    tools: [], extensions: [], agents: [], skills: [], advisor: false, requires: [],
+    mcp_servers: [],
+  }
+  const baseline = seatCommand({ ...shape, grants: normal })
+  const withMcp = seatCommand({
+    ...shape,
+    grants: {
+      ...normal,
+      mcp_servers: [{ name: 'search', command: { bin: '/opt/mcp-search', args: [] }, url: null }],
+    },
+  })
+  assert.equal(withMcp, baseline)
+})
+
 test('advisor grant appends only its extension and safely transports its cell', () => {
   const shape = {
     role: 'builder', model: 'sonnet', promptFile: '/tmp/prompt.md', tools: '', deny: '',

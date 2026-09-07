@@ -89,7 +89,8 @@
         "agents",
         "skills",
         "advisor",
-        "requires"
+        "requires",
+        "mcp_servers"
       ],
       "additionalProperties": false,
       "properties": {
@@ -139,6 +140,10 @@
           "type": "array",
           "items": { "$ref": "#/$defs/vendorgrant" }
         },
+        "mcp_servers": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/mcpserver" }
+        },
         "by_agent": {
           "type": "object",
           "additionalProperties": false,
@@ -169,6 +174,44 @@
         "vendor_extensions": {
           "type": "array",
           "items": { "$ref": "#/$defs/vendorgrant" }
+        },
+        "mcp_servers": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/mcpserver" }
+        }
+      }
+    },
+    "mcpserver": {
+      "type": "object",
+      "required": [
+        "name",
+        "command",
+        "url"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9._-]*$"
+        },
+        "command": {
+          "type": ["object", "null"],
+          "properties": {
+            "bin": {
+              "type": "string",
+              "pattern": ".*\\S.*"
+            },
+            "args": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          },
+          "required": ["bin", "args"],
+          "additionalProperties": false
+        },
+        "url": {
+          "type": ["string", "null"],
+          "pattern": "^https?://"
         }
       }
     },

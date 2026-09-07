@@ -10,7 +10,7 @@ import { EVENT_TYPES, PAYLOAD_KEYS, NODE_FLOOR, openLedger, USAGE_ABSENT_CAUSES 
 import { TURN_CEILING_FLAGS } from './drive.mjs'
 import { openRun, _resetNoticeGuardsForTest } from '../scripts/factory/emit.mjs'
 import {
-  composeLayout, SEAT_DEFAULTS, FANOUT_TOOLS, DEFAULT_ROLES, ROLE_ORDER, transportFor, seatTransport, HEADLESS_TRANSPORTS, assertCapabilities, resolveAdapters, bootAllocation, resolveWorkerBin, docOpenArgs,
+  composeLayout, mcpConfigDocument, writeMcpConfigs, SEAT_DEFAULTS, FANOUT_TOOLS, DEFAULT_ROLES, ROLE_ORDER, transportFor, seatTransport, HEADLESS_TRANSPORTS, assertCapabilities, resolveAdapters, bootAllocation, resolveWorkerBin, docOpenArgs,
   resolveTier, resolveSeatModels, FALLBACK_REFUSALS, refuseFallback, loadRoster, normalizeRoster, refuseRoster, rosterSeating, serializeRosterV1, serializeRosterV2, ROSTER_REFUSALS, ROSTER_SCHEMA_VERSIONS, rosterSourcePath, loadRosterSource, writeRosterSnapshot, rosterSnapshotReader, loadLadder, assertBandFloors, grantedDefModels, assertDefBandFloors, refuseBandFloor, seatModelKey, bandForMember, bandForRaw, seatBand, LADDER_PATH, BAND_FLOOR_REFUSALS, shadowCandidates, shadowExclusion, shadowPick, shadowPickBoot, SHADOW_EXCLUSIONS, SHADOW_OUTCOMES, SHADOW_ABSENT, seatReadySignal, assertSeats, phaseForStage, emitAdapter,
   waitForEnvelope, WAIT_POLL_MS, LIVENESS_PROBE_MS, LIVENESS_MISSES_TO_DIE,
   parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, runExitCode, runOutcome, RUN_EXIT_CODES, RUN_EXIT_UNEXPECTED, RUN_START_EVENT, BATCH_DIR_EVENT, BATCH_DIR_NOT_BATCHED, batchDirFromBrief, readHead, readBranch, teardownDecision, stagesFromJournal, assignmentsFromJournal, RUN_CONFIG_DECLARATIONS, resolveRunConfig, aliasDeprecationLines, persistedRunConfig, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, seatLiveness, awaitSeatsReady, teardownCore, teardownCmd, TEARDOWN_EXIT_SEATLESS, TEARDOWN_EXIT_UNPROVEN, TEARDOWN_ABSENT_CAUSES, teardownAbsentCause, TEARDOWN_DRAIN_MS, TEARDOWN_DRAIN_ERROR_MS, installExitMarker, writeTerminalLine, EXITED_STATUS, SIGNAL_EXIT_CODES, UNCAUGHT_EXIT_CODE, terminalLineSeen,
@@ -39,7 +39,7 @@ import {
   limitsCtx, limitsRecord, resolveBuildRounds, resolveLimits, resolvePlanRounds, resolveReviewRounds,
 } from './limits.mjs'
 import { reclaimStore } from './reclaim.mjs'
-import { seatCommand, headlessCommand as claudeHeadlessCommand, capabilitiesFor, modelString as claudeModelString, paneUsageRecords } from './adapters/adapter-claude.mjs'
+import { seatCommand, headlessCommand as claudeHeadlessCommand, capabilitiesFor, modelString as claudeModelString, mcpConfigPath, paneUsageRecords } from './adapters/adapter-claude.mjs'
 import { seatCommand as piSeatCommand, capabilitiesFor as piCapabilitiesFor, modelString as piModelString, translateDeny, PI_BUILTIN_TOOLS } from './adapters/adapter-pi.mjs'
 import {
   cellFailureKind, paneAlive, paneProbe, seatIo, DEFAULT_TRANSPORT, SEAT_REFUSAL_STAGE, SUBSTRATE_GRACE_MS, SUBSTRATE_MISSES_TO_DIE,
@@ -376,7 +376,7 @@ test('adapter-claude.seatCommand pins the pane command with the per-seat usage s
   // Captured from main BEFORE the adapter refactor — do not regenerate this
   // from the new code; it is the compatibility bar, now including the
   // independently derived per-seat usage settings path.
-  const EXPECTED = `env DEVTEAM_WORKER=1 CREW_ROLE=builder CREW_TASK_DIR="/tmp/crew-task" claude --model sonnet --permission-mode bypassPermissions --settings "${CLAUDE_USAGE_SETTINGS}" --allowedTools "Read,Edit,Write,Glob,Grep,Bash" --disallowedTools "Task,Agent" --append-system-prompt-file "/tmp/crew-task/role-builder.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."`
+  const EXPECTED = `env DEVTEAM_WORKER=1 CREW_ROLE=builder CREW_TASK_DIR="/tmp/crew-task" claude --model sonnet --permission-mode bypassPermissions --strict-mcp-config --mcp-config "/tmp/crew-task/mcp/builder.json" --settings "${CLAUDE_USAGE_SETTINGS}" --allowedTools "Read,Edit,Write,Glob,Grep,Bash" --disallowedTools "Task,Agent,mcp__*" --append-system-prompt-file "/tmp/crew-task/role-builder.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."`
   assert.equal(seatCommand(SAMPLE), EXPECTED)
 })
 
@@ -435,13 +435,13 @@ test('the default claude planner pane command is pinned byte for byte across the
   // through adapter-claude's allowedTools() merge. Byte-for-byte, no exceptions.
   assert.equal(
     seatCommand({ ...PIN_SEAT, model: 'opus', grants: pinnedGrants(register, 'claude') }),
-    `env DEVTEAM_WORKER=1 CREW_ROLE=planner CREW_TASK_DIR="/tmp/crew-task" claude --model opus --permission-mode bypassPermissions --settings "${CLAUDE_USAGE_SETTINGS}" --allowedTools "Read,Glob,Grep,Bash,Write,Task" --disallowedTools "Edit,NotebookEdit" --append-system-prompt-file "/tmp/crew-task/role-planner.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."`,
+    `env DEVTEAM_WORKER=1 CREW_ROLE=planner CREW_TASK_DIR="/tmp/crew-task" claude --model opus --permission-mode bypassPermissions --strict-mcp-config --mcp-config "/tmp/crew-task/mcp/planner.json" --settings "${CLAUDE_USAGE_SETTINGS}" --allowedTools "Read,Glob,Grep,Bash,Write,Task" --disallowedTools "Edit,NotebookEdit,mcp__*" --append-system-prompt-file "/tmp/crew-task/role-planner.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."`,
   )
   // UNGRANTED: the same seat with no grants at all composes a DIFFERENT command
   // (no Task), so the granted assertion above is not vacuous.
   assert.equal(
     seatCommand({ ...PIN_SEAT, model: 'opus', grants: EMPTY_GRANTS }),
-    `env DEVTEAM_WORKER=1 CREW_ROLE=planner CREW_TASK_DIR="/tmp/crew-task" claude --model opus --permission-mode bypassPermissions --settings "${CLAUDE_USAGE_SETTINGS}" --allowedTools "Read,Glob,Grep,Bash,Write" --disallowedTools "Edit,NotebookEdit" --append-system-prompt-file "/tmp/crew-task/role-planner.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."`,
+    `env DEVTEAM_WORKER=1 CREW_ROLE=planner CREW_TASK_DIR="/tmp/crew-task" claude --model opus --permission-mode bypassPermissions --strict-mcp-config --mcp-config "/tmp/crew-task/mcp/planner.json" --settings "${CLAUDE_USAGE_SETTINGS}" --allowedTools "Read,Glob,Grep,Bash,Write" --disallowedTools "Edit,NotebookEdit,mcp__*" --append-system-prompt-file "/tmp/crew-task/role-planner.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."`,
   )
   // The load-bearing constraint of #403: the by_agent overlay never reaches the
   // claude planner, so stripping it from the register moves NOTHING.
@@ -468,6 +468,111 @@ test('the granted pi planner pane command is pinned byte for byte so by_agent de
   )
 })
 
+test('A1', () => {
+  const taskDir = scratchDir('crew-mcp-a1-')
+  const config = mcpConfigPath({ taskDir, role: 'builder' })
+  const grants = EMPTY_GRANTS
+  const headless = claudeHeadlessCommand({
+    role: 'builder', model: 'sonnet', promptFile: '/tmp/role-builder.md', tools: 'Read', deny: 'Task,Agent',
+    taskDir, prompt: 'go', sessionId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', bin: '/usr/local/bin/claude', grants,
+  })
+  const pane = seatCommand({
+    role: 'builder', model: 'sonnet', promptFile: '/tmp/role-builder.md', tools: 'Read', deny: 'Task,Agent',
+    taskDir, bootBrief: 'boot', grants,
+  })
+  assert.equal(headless.args.filter((arg) => arg === '--strict-mcp-config').length, 1)
+  assert.equal(headless.args[headless.args.indexOf('--mcp-config') + 1], config)
+  assert.equal((pane.match(/--strict-mcp-config/g) || []).length, 1)
+  assert.equal(pane.includes(`--mcp-config "${config}"`), true)
+  assert.deepEqual(mcpConfigDocument(grants), { mcpServers: {} })
+})
+
+test('B1', () => {
+  const command = { name: 'search', command: { bin: '/opt/mcp-search', args: ['--stdio'] }, url: null }
+  const http = { name: 'remote', command: null, url: 'https://mcp.example.test/api' }
+  assert.deepEqual(mcpConfigDocument({ mcp_servers: [command, http] }), {
+    mcpServers: {
+      search: { command: '/opt/mcp-search', args: ['--stdio'] },
+      remote: { type: 'http', url: 'https://mcp.example.test/api' },
+    },
+  })
+})
+
+test('C1', () => {
+  const taskDir = scratchDir('crew-mcp-c1-')
+  const base = {
+    role: 'builder', model: 'sonnet', promptFile: '/tmp/role-builder.md', tools: 'Read', deny: 'Task,Agent,Task',
+    taskDir, bootBrief: 'boot', prompt: 'go', sessionId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', bin: '/usr/local/bin/claude',
+  }
+  const emptyPane = seatCommand({ ...base })
+  const emptyHeadless = claudeHeadlessCommand({ ...base, grants: EMPTY_GRANTS })
+  assert.match(emptyPane, /--disallowedTools "Task,Agent,mcp__\*"/)
+  assert.equal((emptyPane.match(/mcp__\*/g) || []).length, 1)
+  assert.deepEqual(emptyHeadless.args.slice(emptyHeadless.args.indexOf('--disallowedTools'), emptyHeadless.args.indexOf('--append-system-prompt-file')), ['--disallowedTools', 'Task,Agent,mcp__*'])
+
+  const granted = { mcp_servers: [{ name: 'search', command: { bin: '/opt/mcp-search', args: [] }, url: null }] }
+  const grantedPane = seatCommand({ ...base, grants: granted })
+  const grantedHeadless = claudeHeadlessCommand({ ...base, grants: granted })
+  assert.doesNotMatch(grantedPane, /mcp__\*/)
+  assert.doesNotMatch(grantedHeadless.args.join(' '), /mcp__\*/)
+})
+
+test('D1', async () => {
+  const home = scratchDir('crew-mcp-d1-home-')
+  const { root: checkoutRoot, checkout } = testCheckout('crew-mcp-d1-checkout-')
+  const task = 'mcp-boot-record'
+  const server = { name: 'search', command: { bin: '/opt/mcp-search', args: ['--stdio'] }, url: null }
+  const base = capabilityRegister()
+  const register = capabilityRegister({ roles: {
+    builder: { ...base.roles.builder, mcp_servers: [server] },
+  } })
+  try {
+    await withBreakerEnv({ DEVTEAM_LEDGER_DB: undefined }, () => withHome(home, () => bootCmd(
+      { task, checkout, roles: 'lead,builder', 'headless-all': true, 'claude-bin': process.execPath },
+      { register, awaitSeatsReady: async () => {} },
+    )))
+    const dir = testCrewDir(home, checkout, task)
+    const crew = JSON.parse(readFileSync(join(dir, 'crew.json'), 'utf8'))
+    assert.deepEqual(JSON.parse(readFileSync(join(dir, 'task', 'mcp', 'builder.json'), 'utf8')), {
+      mcpServers: { search: { command: '/opt/mcp-search', args: ['--stdio'] } },
+    })
+    assert.deepEqual(JSON.parse(readFileSync(join(dir, 'task', 'mcp', 'lead.json'), 'utf8')), { mcpServers: {} })
+    assert.deepEqual(crew.members.builder.mcp_servers, [server])
+    assert.deepEqual(crew.members.lead.mcp_servers, [])
+    const boot = bootRecord(dir)
+    assert.deepEqual(boot.mcp_servers, { lead: [], builder: [server] })
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+})
+
+test('E1', async () => {
+  const home = scratchDir('crew-mcp-e1-home-')
+  const { root: checkoutRoot, checkout } = testCheckout('crew-mcp-e1-checkout-')
+  const task = 'mcp-pi-refusal'
+  const server = { name: 'search', command: { bin: '/opt/mcp-search', args: [] }, url: null }
+  const base = capabilityRegister()
+  const register = capabilityRegister({ roles: {
+    builder: { ...base.roles.builder, mcp_servers: [server] },
+  } })
+  let workspaceCalls = 0
+  try {
+    await withHome(home, () => assert.rejects(
+      () => bootCmd(
+        { task, checkout, roles: 'builder', 'agent-builder': 'pi', 'headless-all': true, 'claude-bin': process.execPath },
+        { register, cmux: () => { workspaceCalls += 1 } },
+      ),
+      (err) => err.reason === 'grant-unsupported' && /builder/.test(err.message) && /pi/.test(err.message),
+    ))
+    assert.equal(workspaceCalls, 0)
+    assert.equal(existsSync(join(testCrewDir(home, checkout, task), 'crew.json')), false)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+})
+
 test('every shipped capability profile is exact, complete, and frozen', async () => {
   for (const [role, seat] of Object.entries(SEAT_DEFAULTS)) assert.equal(seat.agent, 'claude', `${role} has no agent`)
   const claudeMod = await import('./adapters/adapter-claude.mjs')
@@ -477,10 +582,10 @@ test('every shipped capability profile is exact, complete, and frozen', async ()
 
   const claudePane = capabilitiesFor({ transport: 'pane' })
   // #131: drive.mjs bounce paths reassign a settled pane seat.
-  assert.deepEqual({ ...claudePane }, { prompt_file: true, tool_deny: true, unattended: true, subagents: true, effort: true, local_provider: false, interjection: 'none', abort: 'none', session_resume: false, durable_cursor: 'none', reassign: true })
+  assert.deepEqual({ ...claudePane }, { prompt_file: true, tool_deny: true, unattended: true, subagents: true, effort: true, local_provider: false, mcp_servers: true, interjection: 'none', abort: 'none', session_resume: false, durable_cursor: 'none', reassign: true })
   assert.ok(Object.isFrozen(claudePane))
   const claudeHeadless = capabilitiesFor({ transport: 'headless-json' })
-  assert.deepEqual({ ...claudeHeadless }, { prompt_file: true, tool_deny: true, unattended: true, subagents: true, effort: true, local_provider: false, interjection: 'turn', abort: 'signal', session_resume: true, durable_cursor: 'none', reassign: false })
+  assert.deepEqual({ ...claudeHeadless }, { prompt_file: true, tool_deny: true, unattended: true, subagents: true, effort: true, local_provider: false, mcp_servers: true, interjection: 'turn', abort: 'signal', session_resume: true, durable_cursor: 'none', reassign: false })
   assert.ok(Object.isFrozen(claudeHeadless))
   const piPane = piCapabilitiesFor({ transport: 'pane' })
   // #131: drive.mjs bounce paths reassign a settled pane seat.
@@ -6150,7 +6255,7 @@ test("a child run with no suite in its spec drives the owner's command", () => {
 // --- capability register ----------------------------------------------------
 
 function capabilityRegister(overrides = {}) {
-  const grant = (extra = {}) => ({ tools: [], extensions: [], agents: [], skills: [], advisor: false, requires: [], ...extra })
+  const grant = (extra = {}) => ({ tools: [], extensions: [], agents: [], skills: [], advisor: false, requires: [], mcp_servers: [], ...extra })
   const base = {
     schema_version: 1,
     updated_at: '2026-08-17',
@@ -6342,24 +6447,30 @@ test('adapter-claude refuses local-provider model and config seams while preserv
   }), refusal)
 })
 
-test('adapter-claude grant tools merge into allowedTools without widening disallowedTools', () => {
-  const grants = { tools: ['mcp__search'], extensions: [], agents: [], skills: [], advisor: false }
+test('adapter-claude inline MCP grants rely on strict config without wildcard denial', () => {
+  const grants = {
+    tools: [], extensions: [], agents: [], skills: [], advisor: false,
+    mcp_servers: [{ name: 'search', command: { bin: '/opt/mcp-search', args: ['--stdio'] }, url: null }],
+  }
   const seat = {
     role: 'builder', model: 'sonnet', promptFile: '/tmp/role-builder.md', tools: 'Read', deny: 'Task,Agent',
     taskDir: '/tmp/task', bootBrief: 'boot', grants,
   }
   const pane = seatCommand(seat)
-  assert.match(pane, /--allowedTools "Read,mcp__search"/)
+  assert.match(pane, /--allowedTools "Read"/)
   assert.match(pane, /--disallowedTools "Task,Agent"/)
-  assert.doesNotMatch(pane, /--disallowedTools "[^"]*mcp__search/)
+  assert.doesNotMatch(pane, /mcp__\*/)
+  assert.match(pane, /--strict-mcp-config/)
+  assert.match(pane, /--mcp-config "\/tmp\/task\/mcp\/builder\.json"/)
 
   const headless = claudeHeadlessCommand({
-    ...seat, prompt: 'go', sessionId: 's1', bin: '/usr/local/bin/claude',
+    ...seat, prompt: 'go', sessionId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', bin: '/usr/local/bin/claude',
   })
   const args = headless.args.join(' ')
-  assert.match(args, /--allowedTools Read,mcp__search/)
+  assert.match(args, /--allowedTools Read/)
   assert.match(args, /--disallowedTools Task,Agent/)
-  assert.doesNotMatch(args, /--disallowedTools [^ ]*mcp__search/)
+  assert.doesNotMatch(args, /mcp__\*/)
+  assert.deepEqual(mcpConfigDocument(grants), { mcpServers: { search: { command: '/opt/mcp-search', args: ['--stdio'] } } })
 })
 
 test('register-backed grants flow into one emitted pi command', () => {

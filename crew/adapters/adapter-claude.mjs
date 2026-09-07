@@ -1,5 +1,5 @@
 import { readFileSync as fsReadFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { isAbsolute, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 export const PANE_USAGE_SETTINGS = fileURLToPath(new URL('./claude-usage.settings.json', import.meta.url))
@@ -27,6 +27,7 @@ const INVARIANT = Object.freeze({
   // The claude CLI takes a full model id and has no checkout-pinned
   // provider-config seam, so a local-provider cell cannot be honoured here.
   local_provider: false,
+  mcp_servers: true,
 })
 
 const PROFILES = Object.freeze({
@@ -62,10 +63,35 @@ export function capabilitiesFor({ transport, grants } = {}) {
   return Object.freeze({ ...INVARIANT, ...p })
 }
 
-const NO_GRANTS = Object.freeze({ tools: [], extensions: [], agents: [], skills: [], advisor: false })
+const NO_GRANTS = Object.freeze({ tools: [], extensions: [], agents: [], skills: [], advisor: false, mcp_servers: [] })
+
+const STRICT_MCP_ARGS = Object.freeze(['--strict-mcp-config'])
+
+export function mcpConfigPath({ taskDir, role } = {}) {
+  if (typeof taskDir !== 'string' || !isAbsolute(taskDir)) {
+    throw new Error(`adapter-claude.mcpConfigPath: taskDir must be an ABSOLUTE path, got ${JSON.stringify(taskDir)}`)
+  }
+  if (typeof role !== 'string' || role.trim() === '') {
+    throw new Error(`adapter-claude.mcpConfigPath: role must be non-blank, got ${JSON.stringify(role)}`)
+  }
+  return join(taskDir, 'mcp', `${role}.json`)
+}
 
 function allowedTools(tools, grants = NO_GRANTS) {
   return [...new Set([...String(tools || '').split(','), ...(grants?.tools || [])].filter(Boolean))].join(',')
+}
+
+function deniedTools(deny, grants = NO_GRANTS) {
+  const names = []
+  const seen = new Set()
+  for (const raw of String(deny || '').split(',')) {
+    const name = raw.trim()
+    if (!name || seen.has(name)) continue
+    seen.add(name)
+    names.push(name)
+  }
+  if ((grants?.mcp_servers?.length ?? 0) === 0) names.push('mcp__*')
+  return [...new Set(names)].join(',')
 }
 
 function assertSupportedGrants(grants = NO_GRANTS) {
@@ -117,9 +143,11 @@ export function headlessCommand({ role, model, promptFile, tools, deny, taskDir,
       '--verbose',
       '--model', model,
       '--permission-mode', 'bypassPermissions',
+      ...STRICT_MCP_ARGS,
+      '--mcp-config', mcpConfigPath({ taskDir, role }),
       ...(effort ? ['--effort', effort] : []),
       '--allowedTools', allowedTools(tools, grants),
-      '--disallowedTools', deny,
+      '--disallowedTools', deniedTools(deny, grants),
       '--append-system-prompt-file', promptFile,
       ...(resume ? ['--resume', sessionId] : ['--session-id', sessionId]),
     ],
@@ -143,10 +171,12 @@ export function seatCommand({ role, model, promptFile, tools, deny, taskDir, boo
   return [
     'env', 'DEVTEAM_WORKER=1', `CREW_ROLE=${role}`, `CREW_TASK_DIR="${taskDir}"`,
     'claude', '--model', model, '--permission-mode', 'bypassPermissions',
+    ...STRICT_MCP_ARGS,
+    '--mcp-config', `"${mcpConfigPath({ taskDir, role })}"`,
     '--settings', `"${PANE_USAGE_SETTINGS}"`,
     ...(effort ? ['--effort', `"${effort}"`] : []),
     '--allowedTools', `"${allowedTools(tools, grants)}"`,
-    '--disallowedTools', `"${deny}"`,
+    '--disallowedTools', `"${deniedTools(deny, grants)}"`,
     '--append-system-prompt-file', `"${promptFile}"`,
     `"${bootBrief}"`,
   ].join(' ')

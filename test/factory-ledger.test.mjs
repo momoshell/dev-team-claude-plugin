@@ -3292,36 +3292,79 @@ test('S11(c): two processes racing to open + migrate the same fresh db both comp
 // ---------------------------------------------------------------------------
 
 // #541: two live emitters on one adw_id lose no record.
-test('#541: two live emitters on one adw_id lose no record', { skip: SKIP, timeout: 15000 }, async () => {
+test('A1: two live emitters on one adw_id lose no record', { skip: SKIP, timeout: 30000 }, async () => {
   const dir = nextDir()
   const dbPath = join(dir, 'ledger.db')
   const jsonlPath = join(dir, 'ledger.jsonl')
   const emitter = join(dir, 'emitter.mjs')
   writeFileSync(emitter, `
     import { openLedger } from ${JSON.stringify(new URL('../scripts/factory/ledger.mjs', import.meta.url).href)}
-    import { existsSync, writeFileSync } from 'node:fs'
-    import { join } from 'node:path'
     const [dbPath, dir, tag] = process.argv.slice(2)
     const ledger = openLedger({ dbPath })
-    writeFileSync(join(dir, 'ready.' + tag), '')
-    const other = tag === 'A' ? 'B' : 'A'
-    const deadline = Date.now() + 10000
-    while (!existsSync(join(dir, 'ready.' + other)) && Date.now() < deadline) {}
+    process.send?.({ type: 'ready', tag })
+    await new Promise((resolve, reject) => {
+      process.once('message', resolve)
+      process.once('disconnect', () => reject(new Error('parent disconnected before release')))
+    })
     for (let i = 0; i < 25; i += 1) {
       ledger.recordEvent({ adw_id: '541-race', type: 'log', payload: { level: 'info', message: tag + ':' + i } })
     }
     ledger.close()
+    process.disconnect?.()
   `)
-  const childA = trackChild(spawn(process.execPath, [emitter, dbPath, dir, 'A'], { stdio: 'ignore' }))
-  const childB = trackChild(spawn(process.execPath, [emitter, dbPath, dir, 'B'], { stdio: 'ignore' }))
+  const rendezvousDelayInput = process.env.CREW_LEDGER_RENDEZVOUS_DELAY_MS
+  const rendezvousDelayMs = rendezvousDelayInput === undefined ? 0 : Number(rendezvousDelayInput)
+  assert.ok(
+    rendezvousDelayInput === undefined
+      || (rendezvousDelayInput.trim() !== ''
+        && Number.isFinite(rendezvousDelayMs)
+        && Number.isInteger(rendezvousDelayMs)
+        && rendezvousDelayMs >= 0),
+    'CREW_LEDGER_RENDEZVOUS_DELAY_MS must be a finite nonnegative integer',
+  )
+  function waitForEmitterReady(child, tag) {
+    return new Promise((resolve, reject) => {
+      const settle = (error = null) => {
+        child.off('message', onMessage)
+        child.off('exit', onExit)
+        if (error) reject(error)
+        else resolve()
+      }
+      const onMessage = (message) => {
+        if (message?.type !== 'ready' || message?.tag !== tag) {
+          settle(new Error(`emitter ${tag} sent malformed readiness IPC`))
+          return
+        }
+        settle()
+      }
+      const onExit = (code, signal) => {
+        settle(new Error(`emitter ${tag} exited before readiness (${code ?? 'null'}, ${signal ?? 'none'})`))
+      }
+      if (child.exitCode !== null) {
+        onExit(child.exitCode, child.signalCode)
+        return
+      }
+      child.on('message', onMessage)
+      child.once('exit', onExit)
+    })
+  }
+  const childA = trackChild(spawn(process.execPath, [emitter, dbPath, dir, 'A'], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'] }))
+  await waitForEmitterReady(childA, 'A')
+  await new Promise((resolve) => setTimeout(resolve, rendezvousDelayMs))
+  const childB = trackChild(spawn(process.execPath, [emitter, dbPath, dir, 'B'], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'] }))
+  await waitForEmitterReady(childB, 'B')
   assert.notEqual(childA.pid, process.pid, 'the emitter must be a REAL second process')
   assert.notEqual(childB.pid, process.pid, 'the emitter must be a REAL second process')
-  const [exitA, exitB] = await Promise.all([
-    new Promise((resolve) => childA.on('exit', (code) => resolve(code))),
-    new Promise((resolve) => childB.on('exit', (code) => resolve(code))),
-  ])
-  assert.equal(exitA, 0, 'emitter A crashed')
-  assert.equal(exitB, 0, 'emitter B crashed')
+  assert.notEqual(childA.pid, childB.pid, 'the emitters must be distinct processes')
+  assert.equal(childA.exitCode, null, 'emitter A exited before release')
+  assert.equal(childB.exitCode, null, 'emitter B exited before release')
+  const exitA = new Promise((resolve) => childA.on('exit', (code) => resolve(code)))
+  const exitB = new Promise((resolve) => childB.on('exit', (code) => resolve(code)))
+  childA.send('release')
+  childB.send('release')
+  const [exitCodeA, exitCodeB] = await Promise.all([exitA, exitB])
+  assert.equal(exitCodeA, 0, 'emitter A crashed')
+  assert.equal(exitCodeB, 0, 'emitter B crashed')
   const jsonlEvents = readFileSync(jsonlPath, 'utf8').split('\n').filter(Boolean)
     .map((line) => JSON.parse(line)).filter((line) => line.kind === 'recordEvent')
   assert.equal(jsonlEvents.length, 50)

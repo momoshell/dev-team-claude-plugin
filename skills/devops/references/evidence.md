@@ -17,7 +17,7 @@ The absolute-path and remote-confirmation requirements are therefore operator-
 session measurements, not local implementation exhibits.
 
 The nearby `gh` calls are read-only queries or seam examples.
-Exhibit: `scripts/factory/intake.mjs:533-535`.
+Exhibit: `scripts/factory/intake.mjs@gh-spawn`.
 
 The `gh issue list` procedure in `gh.md` is prescribed for a real remote check,
 but this checkout does not measure it; local body-file existence is insufficient.
@@ -30,7 +30,7 @@ Keep the rule marked unbacked while retaining its operational cost: a compound
 A whole-tree search found no branch-deletion implementation or note.
 
 The adjacent `deleteBranchOnMerge` token is a probed repository setting only.
-Exhibit: `scripts/factory/probe-repo.mjs:799`.
+Exhibit: `scripts/factory/probe-repo.mjs@delete-branch-on-merge`.
 
 GitHub's behavior that deleting an open lane branch can close its PR is not
 measured by a source or test in this checkout.
@@ -62,7 +62,7 @@ measured fixture covers this probe outcome.
 No dedicated local mutation test isolates an interrupted or EPERM kill after a
 reclaim decision is made.
 
-The pid and pgid guard itself is backed by `scripts/factory/reap-stale.mjs:58-60`,
+The pid and pgid guard itself is backed by `scripts/factory/reap-stale.mjs@pid-guard`,
 but the kill-error accounting rule remains unbacked.
 
 Keep that edge marked unbacked in `processes.md` until a measured fixture pins it.
@@ -73,7 +73,7 @@ A case-insensitive search for `launchd`, `launchctl`, `LaunchAgents`, and plist
 names found no service definition here.
 
 The only hit is an incidental ancestry line in a retired task note.
-Exhibit: `tasks/cmux-mode/spike-findings.md:58`.
+Exhibit: `tasks/cmux-mode/spike-findings.md@ancestry-chain`.
 
 The daemon has no plist, label, or launchd-managed start recipe in this repo.
 

@@ -15,19 +15,19 @@ for a pull request, use the corresponding remote listing before accepting.
 Status: these create-and-list paths are unbacked here; see `evidence.md`.
 
 A compound `cd` can change what a relative `--body-file` means.
-Exhibit in kind: `skills/qa-test-writing/references/tooling.md:89`.
+Exhibit in kind: `skills/qa-test-writing/references/tooling.md@compound-cd-trap`.
 
 Use the process API's `cwd` option instead of embedding a shell `cd`.
-Exhibit: `scripts/factory/intake.mjs:533-535`.
+Exhibit: `scripts/factory/intake.mjs@gh-spawn`.
 
 The intake helper supplies its repository root directly to `spawnSync`.
-Exhibit: `scripts/factory/intake.mjs:533-535`.
+Exhibit: `scripts/factory/intake.mjs@gh-spawn`.
 
 Keep the binary seam injectable through `GH_BIN`.
-Exhibit: `scripts/factory/probe-repo.mjs:739`.
+Exhibit: `scripts/factory/probe-repo.mjs@gh-bin-env`.
 
 A fake binary can then observe argv, cwd, and the body path without the network.
-Exhibit: `scripts/factory/probe-repo.mjs:739`.
+Exhibit: `scripts/factory/probe-repo.mjs@gh-bin-env`.
 
 The pre-skill checkout has no local create or remote-list verification exhibit.
 Register: `evidence.md` records the read-only query and seam boundaries.
@@ -42,10 +42,10 @@ An interrupted command is neither a created issue nor a rejected request.
 Status: this interrupted-path rule is unbacked in the checkout; see `evidence.md`.
 
 If `gh` is unavailable, preserve that as unavailable rather than as API failure.
-Exhibit: `scripts/factory/probe-repo.mjs:746`.
+Exhibit: `scripts/factory/probe-repo.mjs@gh-status-unmeasured`.
 
 If the cwd is missing, refuse before asking the CLI to resolve relative data.
-Exhibit: `scripts/factory/intake.mjs:533-535`.
+Exhibit: `scripts/factory/intake.mjs@gh-spawn`.
 
 Keep body-file construction and post-write confirmation in the same operation.
 Status: the combined operation is unbacked in the checkout; see `evidence.md`.
@@ -53,7 +53,7 @@ Status: the combined operation is unbacked in the checkout; see `evidence.md`.
 The source exhibits cover explicit cwd, GH_BIN, and unavailable-tool handling, not remote creation.
 
 The cost of a relative path is a silently missing or mislocated submission.
-Exhibit in kind: `skills/qa-test-writing/references/tooling.md:89`.
+Exhibit in kind: `skills/qa-test-writing/references/tooling.md@compound-cd-trap`.
 
 The cost of an implicit cwd is a command that succeeds against the wrong repo.
-Exhibit: `scripts/factory/intake.mjs:533-535`.
+Exhibit: `scripts/factory/intake.mjs@gh-spawn`.

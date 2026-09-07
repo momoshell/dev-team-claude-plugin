@@ -8,6 +8,12 @@ export const ANCHOR_ROOTS = Object.freeze(['crew', 'scripts', 'test', 'docs', 's
 export const ANCHOR_PATTERN = '([A-Za-z0-9_.-]+(?:\\/[A-Za-z0-9_.-]+)+\\.(?:mjs|ts|js|json|md|sh|yml)):(\\d+)'
 export const RANGE_PATTERN = `${ANCHOR_PATTERN}-(\\d+)(?!\\d)`
 
+// A NAMED citation carries no line number, so nothing about it can shift and nothing about it
+// can be repaired: the manifest maps `path@name` to the content that identifies the line, and
+// the line is resolved at check time. An `// ANCHOR X` comment in the target needs no extra
+// machinery — declare `ANCHOR X` as that name's content and the strong form is cited. #971
+export const NAMED_PATTERN = '([A-Za-z0-9_.-]+(?:\\/[A-Za-z0-9_.-]+)+\\.(?:mjs|ts|js|json|md|sh|yml))@([a-z0-9][a-z0-9-]*)'
+
 const ANCHOR_RE = new RegExp(ANCHOR_PATTERN, 'g')
 
 export function lineCarries(line, expected) { return line.includes(expected) }
@@ -35,6 +41,18 @@ export function collectAnchors({ docs }) {
     }
   }
   return anchors
+}
+
+export function collectNamed({ docs }) {
+  const named = []
+  for (const doc of docs) {
+    const text = readFileSync(doc, 'utf8')
+    for (const [, rel, name] of text.matchAll(new RegExp(NAMED_PATTERN, 'g'))) {
+      if (!ANCHOR_ROOTS.includes(rel.split('/')[0])) continue
+      named.push({ doc, rel, name, key: `${rel}@${name}` })
+    }
+  }
+  return named
 }
 
 // A range citation has TWO endpoints and only the START is ever a manifest key: the end
@@ -100,12 +118,32 @@ function readTargetLines(root, anchor) {
   }
 }
 
+export function resolveNamed({ root, manifest, citation }) {
+  const { key, rel } = citation
+  const declarations = manifest && typeof manifest === 'object' && !Array.isArray(manifest) ? manifest : {}
+  const { lines, failure } = readTargetLines(root, { rel, key })
+  if (failure) return { key, failure }
+  if (!Object.hasOwn(declarations, key)) return { key, failure: `${key}: manifest has no entry` }
+  const expected = declarations[key]
+  if (typeof expected !== 'string' || expected.trim().length < MIN_EXPECTED_LENGTH) {
+    return { key, failure: `${key}: expected ${display(expected)} must be at least ${MIN_EXPECTED_LENGTH} non-space characters` }
+  }
+  const found = []
+  for (let i = 0; i < lines.length; i += 1) if (lineCarries(lines[i], expected)) found.push(i + 1)
+  if (found.length === 0) return { key, failure: `${key}: content appears nowhere in ${rel}; this is rot, not a shift` }
+  if (found.length > 1) return { key, failure: `${key}: content occurs ${found.length} times in ${rel}; a named anchor must resolve to exactly one line` }
+  const at = found[0]
+  return { key, line: at }
+}
+
 export function checkAnchors({ root, docs, manifest }) {
   let anchors
   let ranges
+  let named
   try {
     anchors = collectAnchors({ docs })
     ranges = collectRanges({ docs })
+    named = collectNamed({ docs })
   } catch (error) {
     return { anchors: 0, failures: [`citation docs could not be read (${error?.code || error?.message || String(error)})`], shifted: [] }
   }
@@ -160,11 +198,23 @@ export function checkAnchors({ root, docs, manifest }) {
     failures.push(failure)
   }
 
+  const namedCitations = named
+  const namedSeen = new Set()
+  for (const citation of namedCitations) {
+    cited.add(citation.key)
+    if (namedSeen.has(citation.key)) continue
+    namedSeen.add(citation.key)
+    const resolved = resolveNamed({ root, manifest: declarations, citation })
+    if (resolved.failure) failures.push(resolved.failure)
+  }
+
   for (const key of Object.keys(declarations)) {
     if (!cited.has(key)) failures.push(`${key}: manifest entry is orphaned (no citation)`)
   }
 
-  return { anchors: anchors.length, failures, shifted }
+  const result = { anchors: anchors.length, failures, shifted }
+  if (namedCitations.length > 0) result.named = namedCitations.length
+  return result
 }
 
 export function checkSkillAnchors({ root, skillDir, manifestPath }) {
@@ -235,8 +285,8 @@ function shiftLine(shift, skillDir, fenced) {
 }
 
 // Returns the anchor COUNT as a primitive. Both callers assert it under
-// node:assert/strict (skills/backend-node/exhibits.test.mjs:52 and
-// skills/devops/exhibits.test.mjs:53) and neither may be edited by the lane that
+// node:assert/strict (skills/backend-node/exhibits.test.mjs and
+// skills/devops/exhibits.test.mjs) and neither may be edited by the lane that
 // made a shift non-fatal, so a boxed or object return would redden two exhibits
 // this lane must leave alone. The shifts are reported two other ways instead:
 // through `log`, so a shift is never SILENT in a suite run, and through
@@ -244,7 +294,8 @@ function shiftLine(shift, skillDir, fenced) {
 export function assertAnchorsPinned({ root, skillDir, manifestPath, minAnchors, log = console.warn, fence }) {
   const result = checkSkillAnchors({ root, skillDir, manifestPath })
   const failures = [...result.failures]
-  if (result.anchors < minAnchors) failures.push(`expected at least ${minAnchors} anchors, found ${result.anchors}`)
+  const total = result.anchors + (result.named ?? 0)
+  if (total < minAnchors) failures.push(`expected at least ${minAnchors} anchors, found ${total}`)
   const measured = fence === undefined ? laneFence({ root }) : { paths: fence, measured: true, reason: null }
   const manifestRel = typeof manifestPath === 'string' && typeof root === 'string' ? relative(root, manifestPath).replaceAll('\\', '/') : null
   const { inFence, outOfFence } = partitionShifts({ shifted: result.shifted, fence: measured.paths, manifest: manifestRel })
@@ -258,7 +309,7 @@ export function assertAnchorsPinned({ root, skillDir, manifestPath, minAnchors, 
     } else log(warning)
   }
   for (const shift of outOfFence) log(shiftLine(shift, skillDir, false))
-  return result.anchors
+  return total
 }
 
 function escapeLiteral(value) { return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') }
@@ -310,9 +361,11 @@ function settleRepairs({ declarations, candidates }) {
 export function repairAnchors({ root, docs, manifest, repairAll = false }) {
   let anchors
   let ranges
+  let named
   try {
     anchors = collectAnchors({ docs })
     ranges = collectRanges({ docs })
+    named = collectNamed({ docs })
   } catch (error) {
     return { anchors: 0, repairs: [], refusals: [`citation docs could not be read (${error?.code || error?.message || String(error)})`], manifest, edits: [] }
   }
@@ -478,6 +531,18 @@ export function repairAnchors({ root, docs, manifest, repairAll = false }) {
     if (nextText === range.text) continue
     rewrites.set(range.text, nextText)
     if (nextStart > nextEnd) refusals.push(invertedRangeFailure({ text: nextText, start: nextStart, end: nextEnd, doc: range.doc }))
+  }
+
+  // A named pin can never be repaired, but it can still ROT or become AMBIGUOUS, and repair has
+  // always refused both (:376-377). Marking it cited without resolving it would make
+  // --repair-all accept a name the exhibits test rejects. #971
+  const namedSeen = new Set()
+  for (const citation of named) {
+    cited.add(citation.key)
+    if (namedSeen.has(citation.key)) continue
+    namedSeen.add(citation.key)
+    const resolved = resolveNamed({ root, manifest: declarations, citation })
+    if (resolved.failure) refusals.push(resolved.failure)
   }
 
   for (const key of Object.keys(declarations)) {

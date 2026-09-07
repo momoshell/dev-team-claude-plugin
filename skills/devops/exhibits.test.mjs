@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { assertAnchorsPinned } from '../qa-test-writing/anchor-pin.mjs'
+import { assertAnchorsPinned, checkSkillAnchors } from '../qa-test-writing/anchor-pin.mjs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -46,9 +46,11 @@ test('daemon paths agree with the default root', () => {
   for (const token of ['.crew', 'daemon.sock', 'daemon.json']) assert.ok(doc.includes(token), `daemon.md must name ${token}`)
 })
 
-// Mutation killed: move any anchored line, or weaken a declared substring to
-// something the target repeats, and this test reddens — the old pin passed
-// while the line said something else entirely (#550).
-test('every devops path:line anchor carries what the prose claims', () => {
-  assert.equal(assertAnchorsPinned({ root: ROOT, skillDir: HERE, manifestPath: join(HERE, 'anchors.json'), minAnchors: 80 }), 80)
+// Mutation killed: drop a named citation, weaken a declared substring to something the target
+// repeats, or let the count stop seeing named citations, and this test reddens — a named anchor
+// resolves to exactly one live line or it is rot (#550, #971).
+test('every devops anchor citation resolves to the line the prose claims', () => {
+  const manifestPath = join(HERE, 'anchors.json')
+  assert.equal(assertAnchorsPinned({ root: ROOT, skillDir: HERE, manifestPath, minAnchors: 80 }), 80)
+  assert.equal(checkSkillAnchors({ root: ROOT, skillDir: HERE, manifestPath }).named, 80)
 })

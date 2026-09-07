@@ -1,19 +1,19 @@
 # Worktree lifecycle
 
 Create a lane through Git's worktree registry, never by copying a directory.
-Exhibit: `crew/arms.mjs:661`.
+Exhibit: `crew/arms.mjs@worktree-add-branch`.
 
 Refuse an existing target before asking Git to create it.
-Exhibit: `crew/arms.mjs:650`.
+Exhibit: `crew/arms.mjs@worktree-exists-refusal`.
 
 The creation command is `git worktree add -b` with an explicit branch and path.
-Exhibit: `crew/arms.mjs:661`.
+Exhibit: `crew/arms.mjs@worktree-add-branch`.
 
 A linked worktree's `.git` is a file, not a directory.
-Exhibit: `scripts/pr-review-window.sh:61-62`.
+Exhibit: `scripts/pr-review-window.sh@linked-worktree-git-file`.
 
 A directory-only `.git` search therefore finds primary checkouts only.
-Exhibit: `scripts/pr-review-window.sh:61-62`.
+Exhibit: `scripts/pr-review-window.sh@linked-worktree-git-file`.
 
 Probe linked status by comparing `--git-dir` with `--git-common-dir`.
 Status: no reachable checkout implementation performs this probe; see `evidence.md`.
@@ -22,34 +22,34 @@ Different values identify a linked checkout in the worker-path probe.
 Status: no reachable checkout implementation performs this probe; see `evidence.md`.
 
 The common Git directory is shared by linked lanes.
-Exhibit: `crew/seat-io.mjs:2911`.
+Exhibit: `crew/seat-io.mjs@common-git-dir`.
 
 Stash entries are consequently not isolated per worktree (#471).
-Exhibit: `crew/seat-io.mjs:2911`.
+Exhibit: `crew/seat-io.mjs@common-git-dir`.
 
 Use `git worktree remove` for teardown so Git unregisters the worktree.
-Exhibit: `skills/qa-test-writing/references/tooling.md:65-66`.
+Exhibit: `skills/qa-test-writing/references/tooling.md@detached-worktree-removal`.
 
 The sibling reference owns scratch-worktree mechanics; this file owns the
 lifecycle consequences for a live lane.
 
 Do not reproduce the node_modules symlink recipe here.
-Exhibit/pointer: `skills/qa-test-writing/references/tooling.md:13-16` for that trap.
+Exhibit/pointer: `skills/qa-test-writing/references/tooling.md@no-node-modules-symlink` for that trap.
 
 This skill adds only the removal and registration half of that shared concern.
 
 A completed run may auto-teardown its workspace.
-Exhibit: `crew/crew.mjs:2371`.
+Exhibit: `crew/crew.mjs@auto-teardown-on-done`.
 
 An escalated run retains its workspace as human-readable context.
-Exhibit: `crew/crew.mjs:2371`.
+Exhibit: `crew/crew.mjs@auto-teardown-on-done`.
 
 An unknown Git probe is not permission to remove a checkout.
 Status: this fail-closed removal rule is unbacked here; see `evidence.md`.
 
 An interrupted `git worktree add` needs its partial result inspected before
 another creation attempt.
-Exhibit: `crew/arms.mjs:661`.
+Exhibit: `crew/arms.mjs@worktree-add-branch`.
 
 The cost of `rm -rf` alone is a leaked registration and later false occupancy.
-Exhibit: `skills/qa-test-writing/references/tooling.md:65-66`.
+Exhibit: `skills/qa-test-writing/references/tooling.md@detached-worktree-removal`.

@@ -12,7 +12,7 @@ import {
 } from './headless-rpc.mjs'
 import { assignmentLine } from './driver.mjs'
 import { cellFailureKind } from './seat-io.mjs'
-import { CENSUS_ABSENT_CAUSES, SEAT_SUITE_POLICY_EVENT, SUITE_RUN_REFUSAL, SUITE_RUN_UNRECOGNISED } from './headless.mjs'
+import { CENSUS_ABSENT_CAUSES, SEAT_SUITE_POLICY_EVENT, SUITE_RUN_REFUSAL, SUITE_RUN_UNRECOGNISED, claudeCensus } from './headless.mjs'
 import { scratchDir } from '../test/helpers.mjs'
 
 // The b200-helperdedup envelope, byte-exact: 1921 bytes, schema-shaped, and
@@ -1418,6 +1418,48 @@ test('RV1-1 RPC census counts distinct paths and re-reads', () => {
   const result = finaliseCensus(census)
   assert.equal(result.distinct_files_read, 2)
   assert.equal(result.re_reads, 1)
+})
+
+test('G1 RPC census measures Bash readers, preserves structured counts, and journals the absence field', () => {
+  const calls = [
+    { name: 'bash', input: { command: 'cat rpc.md' }, id: 'g1' },
+    { name: 'bash', input: { command: 'cat rpc.md' }, id: 'g2' },
+    { name: 'bash', input: { command: 'cat "$FILE"' }, id: 'g3' },
+    { name: 'read', input: { path: 'rpc.md' }, id: 'g4' },
+  ]
+  const rpc = newCensus()
+  calls.forEach((call, index) => {
+    foldCensusFrame(rpc, { type: 'tool_execution_start', toolCallId: call.id, toolName: call.name, args: call.input }, 1000 + index * 10)
+    foldCensusFrame(rpc, { type: 'tool_execution_end', toolCallId: call.id, toolName: call.name }, 1001 + index * 10)
+  })
+  const result = finaliseCensus(rpc)
+  const json = claudeCensus(JSON.stringify({ type: 'assistant', message: { content: calls.map(({ name, input, id }) => ({ type: 'tool_use', name, input, id })) } }))
+  for (const census of [result, json]) {
+    assert.equal(census.distinct_files_read, 1)
+    assert.equal(census.re_reads, 2)
+    assert.equal(census.bash_reads_absent_reason, CENSUS_ABSENT_CAUSES.bash_reader_unparsed)
+  }
+
+  const rows = []
+  const f = fixture({ log: (row) => rows.push(row) })
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    b416RpcStream(f, 'builder', [
+      { type: 'turn_start' },
+      { type: 'tool_execution_start', toolCallId: 'journal-bash', toolName: 'bash', args: { command: 'cat "$FILE"' } },
+      { type: 'tool_execution_end', toolCallId: 'journal-bash', toolName: 'bash' },
+      { type: 'tool_execution_start', toolCallId: 'journal-read', toolName: 'read', args: { path: 'kept.md' } },
+      { type: 'tool_execution_end', toolCallId: 'journal-read', toolName: 'read' },
+      { type: 'turn_end' },
+      { type: 'agent_settled' },
+    ])
+    writeFileSync(run.returnPath, JSON.stringify({ assignment_id: run.id, role: 'builder', status: 'done' }))
+    assert.equal(f.io.wait(run.returnPath, 60).status, 'done')
+    const census = rows.find((row) => row.seat_turn_census)?.seat_turn_census
+    assert.equal(census.distinct_files_read, 1)
+    assert.equal(census.re_reads, 0)
+    assert.equal(census.bash_reads_absent_reason, CENSUS_ABSENT_CAUSES.bash_reader_unparsed)
+  } finally { f.cleanup() }
 })
 
 test('b401 a tool call observed in one poll reports an absent duration and never zero', () => {

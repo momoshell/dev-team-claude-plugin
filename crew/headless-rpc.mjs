@@ -13,7 +13,7 @@ import { spawn as cpSpawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 
 import { assignmentDelivery, assignmentPrompt } from './driver.mjs'
-import { shq, classifyRun, readEnvelopeOrThrow, updateCrewJson, attributeExit, decodeExitStatus, stderrTail, classifyToolCall, TOOL_CLASSES, CENSUS_ABSENT_CAUSES, suitePolicyCounters, countSuiteDecision, suiteRunPolicy, suitePolicyRow, suiteRefusalRow, suiteRefusalEnvelope } from './headless.mjs'
+import { shq, classifyRun, readEnvelopeOrThrow, updateCrewJson, attributeExit, decodeExitStatus, stderrTail, classifyToolCall, TOOL_CLASSES, CENSUS_ABSENT_CAUSES, censusFileOperands, suitePolicyCounters, countSuiteDecision, suiteRunPolicy, suitePolicyRow, suiteRefusalRow, suiteRefusalEnvelope } from './headless.mjs'
 import { reclaimStore, PHASES, VERDICTS, EVIDENCE_KINDS, LIVENESS } from './reclaim.mjs'
 import { readJsonTri } from './json-leaf.mjs'
 import { PI_BUILTIN_TOOLS, PI_SUBAGENT_TOOL, translateDeny } from './adapters/adapter-pi.mjs'
@@ -175,6 +175,7 @@ export function newCensus() {
     suite_runs: 0,
     distinct_files_read: 0,
     re_reads: 0,
+    bash_reads_absent_reason: null,
     tool_spans_matched: 0,
     tool_spans_unmatched: 0,
     tool_spans_same_poll: 0,
@@ -203,11 +204,12 @@ export function foldCensusFrame(census, frame, at) {
     const klass = classifyToolCall(frame.toolName, frame.args)
     census.by_class[klass] += 1
     census.suite_runs = census.by_class.test
-    const path = frame.args?.path ?? frame.args?.file_path ?? frame.args?.notebook_path
-    if (typeof path === 'string' && path.trim() !== '') {
+    const observed = censusFileOperands(frame.toolName, frame.args)
+    for (const path of observed.paths) {
       if (census._files.has(path)) census.re_reads += 1
       else { census._files.add(path); census.distinct_files_read += 1 }
     }
+    if (census.bash_reads_absent_reason === null && observed.bash_absent_reason !== null) census.bash_reads_absent_reason = observed.bash_absent_reason
     if (Number.isFinite(at) && frame.toolCallId != null) {
       census._open[frame.toolCallId] = { at, class: klass }
     } else if (frame.toolCallId == null) {
@@ -482,6 +484,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
           tool_spans_matched: noFrames ? null : census.tool_spans_matched,
           tool_spans_unmatched: noFrames ? null : census.tool_spans_unmatched,
           tool_spans_same_poll: noFrames ? null : census.tool_spans_same_poll,
+          bash_reads_absent_reason: noFrames ? null : census.bash_reads_absent_reason,
           absent_reason: absentReason,
         },
       })

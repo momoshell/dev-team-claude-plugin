@@ -491,6 +491,7 @@ export const CENSUS_ABSENT_CAUSES = Object.freeze({
   no_frames: 'the stream exists but carries no parsable frame',
   replay_no_frame_clock: 'the frames carry no timestamp of their own, so a REPLAY has no clock; only a live wrapper can stamp one',
   same_poll_boundary: "the call's start and end were observed in the SAME wrapper poll, so the wrapper clock bounds the call's duration by the poll interval but does not measure it",
+  bash_reader_unparsed: 'a Bash reader was observed but its literal file operands could not be safely bounded',
 })
 
 function censusTimestamp(value) {
@@ -510,6 +511,222 @@ function censusPath(input) {
   return null
 }
 
+const CENSUS_BASH_READERS = new Set(['cat', 'head', 'tail', 'sed', 'awk', 'grep'])
+
+function censusExecutableBasename(token) {
+  const value = String(token ?? '')
+  const slash = value.lastIndexOf('/')
+  return slash < 0 ? value : value.slice(slash + 1)
+}
+
+function censusUnsafeShell(command) {
+  const source = String(command ?? '')
+  let quote = null
+  for (let index = 0; index < source.length; index += 1) {
+    const ch = source[index]
+    if (quote === "'") {
+      if (ch === "'") quote = null
+      continue
+    }
+    if (quote === '"') {
+      if (ch === '"') { quote = null; continue }
+      if (ch === '$' || ch === '`' || ch === '\\') return true
+      continue
+    }
+    if (ch === "'" || ch === '"') { quote = ch; continue }
+    if (ch === '\\' || ch === '$' || ch === '`' || ch === ';' || ch === '|' || ch === '&' || ch === '<' || ch === '>' || '*?[]{}'.includes(ch)) return true
+    if (ch === '#' && (index === 0 || /\s/.test(source[index - 1]))) return true
+  }
+  return quote !== null
+}
+
+function censusLiteralPath(token) {
+  return typeof token === 'string'
+    && token !== ''
+    && token !== '-'
+    && !token.includes('~')
+    && !GLOB_CHARS.test(token)
+}
+
+function censusCount(token) {
+  return typeof token === 'string' && /^[+-]?\d+$/.test(token)
+}
+
+const CENSUS_CAT_FLAGS = new Set(['A', 'b', 'e', 'E', 'n', 's', 't', 'T', 'v'])
+const CENSUS_CAT_LONG_FLAGS = new Set(['--number', '--number-nonblank', '--squeeze-blank', '--show-all', '--show-nonprinting', '--show-tabs'])
+
+function censusCatPaths(tokens) {
+  const paths = []
+  let endOptions = false
+  for (const token of tokens) {
+    if (!endOptions && token === '--') { endOptions = true; continue }
+    if (!endOptions && token.startsWith('-')) {
+      if (token === '-') return null
+      if (token.startsWith('--')) {
+        if (!CENSUS_CAT_LONG_FLAGS.has(token)) return null
+      } else if (!/^-[A-Za-z]+$/.test(token) || [...token.slice(1)].some((flag) => !CENSUS_CAT_FLAGS.has(flag))) return null
+      continue
+    }
+    if (!censusLiteralPath(token)) return null
+    paths.push(token)
+  }
+  return paths.length > 0 ? paths : null
+}
+
+function censusHeadTailPaths(tokens, executable) {
+  const paths = []
+  const flags = executable === 'tail'
+    ? new Set(['-F', '-f', '-q', '-v', '--follow', '--quiet', '--retry', '--silent', '--verbose'])
+    : new Set(['-q', '-v', '-z', '--quiet', '--silent', '--verbose', '--zero-terminated'])
+  let endOptions = false
+  let countPending = false
+  for (const token of tokens) {
+    if (countPending) {
+      if (!censusCount(token)) return null
+      countPending = false
+      continue
+    }
+    if (!endOptions && token === '--') { endOptions = true; continue }
+    if (!endOptions && token.startsWith('--')) {
+      const equals = token.indexOf('=')
+      const option = equals < 0 ? token : token.slice(0, equals)
+      if (option === '--lines' || option === '--bytes') {
+        if (equals < 0) countPending = true
+        else if (!censusCount(token.slice(equals + 1))) return null
+      } else if (!flags.has(option)) return null
+      continue
+    }
+    if (!endOptions && token.startsWith('-')) {
+      if (token === '-') return null
+      if (/^-[nc][+-]?\d+$/.test(token) || /^-\d+$/.test(token)) continue
+      if (token === '-n' || token === '-c') { countPending = true; continue }
+      if (!/^-?[A-Za-z]+$/.test(token) || [...token.slice(1)].some((flag) => !flags.has(`-${flag}`))) return null
+      continue
+    }
+    if (executable === 'tail' && /^\+\d+$/.test(token)) continue
+    if (!censusLiteralPath(token)) return null
+    paths.push(token)
+  }
+  return countPending || paths.length === 0 ? null : paths
+}
+
+function censusSedPaths(tokens) {
+  if (tokens[0] !== '-n') return null
+  const program = tokens[1]
+  if (typeof program !== 'string' || program === '' || program === '-' || program.startsWith('-')) return null
+  const paths = []
+  let endOptions = false
+  for (const token of tokens.slice(2)) {
+    if (!endOptions && token === '--') { endOptions = true; continue }
+    if (!endOptions && token.startsWith('-')) return null
+    if (!censusLiteralPath(token)) return null
+    paths.push(token)
+  }
+  return paths.length > 0 ? paths : null
+}
+
+function censusAwkPaths(tokens) {
+  const program = tokens[0]
+  if (typeof program !== 'string' || program === '' || program === '-' || program.startsWith('-')) return null
+  const paths = []
+  let endOptions = false
+  for (const token of tokens.slice(1)) {
+    if (!endOptions && token === '--') { endOptions = true; continue }
+    if (!endOptions && token.startsWith('-')) return null
+    if (!censusLiteralPath(token)) return null
+    paths.push(token)
+  }
+  return paths.length > 0 ? paths : null
+}
+
+const CENSUS_GREP_FLAGS = new Set(['a', 'b', 'c', 'E', 'F', 'G', 'H', 'h', 'I', 'i', 'l', 'L', 'n', 'o', 'P', 'q', 's', 'T', 'v', 'w', 'x', 'z'])
+const CENSUS_GREP_LONG_FLAGS = new Set(['--binary-files=text', '--count', '--extended-regexp', '--fixed-strings', '--files-with-matches', '--files-without-match', '--ignore-case', '--line-number', '--no-filename', '--only-matching', '--quiet', '--silent', '--text', '--word-regexp'])
+
+function censusGrepPaths(tokens) {
+  let pattern = null
+  let endOptions = false
+  let recursiveGrep = false
+  const paths = []
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index]
+    if (!endOptions && token === '--') { endOptions = true; continue }
+    if (!endOptions && pattern === null && token.startsWith('--')) {
+      if (token === '--recursive') { recursiveGrep = true; continue }
+      if (token === '--regexp') {
+        pattern = tokens[++index]
+        if (typeof pattern !== 'string' || pattern === '' || pattern === '-') return null
+        continue
+      }
+      if (token.startsWith('--regexp=')) {
+        pattern = token.slice('--regexp='.length)
+        if (pattern === '' || pattern === '-') return null
+        continue
+      }
+      if (!CENSUS_GREP_LONG_FLAGS.has(token)) return null
+      continue
+    }
+    if (!endOptions && pattern === null && token.startsWith('-')) {
+      if (token === '-') return null
+      if (token === '-e') {
+        pattern = tokens[++index]
+        if (typeof pattern !== 'string' || pattern === '' || pattern === '-') return null
+        continue
+      }
+      if (token.startsWith('-e') && token.length > 2) {
+        pattern = token.slice(2)
+        continue
+      }
+      if (!/^-[A-Za-z]+$/.test(token)) return null
+      for (const flag of token.slice(1)) {
+        if (flag === 'r' || flag === 'R') recursiveGrep = true
+        else if (!CENSUS_GREP_FLAGS.has(flag)) return null
+      }
+      continue
+    }
+    if (pattern === null) {
+      if (token === '-') return null
+      pattern = token
+      continue
+    }
+    if (!endOptions && token.startsWith('-')) {
+      if (token === '-r' || token === '-R' || token === '--recursive') recursiveGrep = true
+      else return null
+      continue
+    }
+    if (!censusLiteralPath(token)) return null
+    paths.push(token)
+  }
+  if (recursiveGrep) return null
+  if (pattern === null || paths.length === 0) return null
+  return paths
+}
+
+function censusReaderPaths(executable, tokens) {
+  if (executable === 'cat') return censusCatPaths(tokens)
+  if (executable === 'head' || executable === 'tail') return censusHeadTailPaths(tokens, executable)
+  if (executable === 'sed') return censusSedPaths(tokens)
+  if (executable === 'awk') return censusAwkPaths(tokens)
+  if (executable === 'grep') return censusGrepPaths(tokens)
+  return null
+}
+
+export function censusFileOperands(toolName, input) {
+  const name = typeof toolName === 'string' ? toolName.toLowerCase() : ''
+  const path = censusPath(input)
+  if (name !== 'bash') return { paths: path === null ? [] : [path], bash_absent_reason: null }
+  const command = typeof input?.command === 'string' ? input.command : ''
+  const commandWords = commandTokens(executableText(command))
+  const tokens = shellTokens(command)
+  let commandIndex = 0
+  while (commandIndex < tokens.length && (ASSIGNMENT.test(tokens[commandIndex]) || COMMAND_PREFIXES.has(tokens[commandIndex]))) commandIndex += 1
+  const executable = censusExecutableBasename(tokens[commandIndex] ?? commandWords[0])
+  if (!CENSUS_BASH_READERS.has(executable)) return { paths: [], bash_absent_reason: null }
+  let paths = null
+  const segments = splitShellCommands(stripHeredocBodies(command))
+  if (segments.length === 1 && !censusUnsafeShell(command) && commandIndex < tokens.length) paths = censusReaderPaths(executable, tokens.slice(commandIndex + 1))
+  return paths === null ? { paths: [], bash_absent_reason: CENSUS_ABSENT_CAUSES.bash_reader_unparsed } : { paths, bash_absent_reason: null }
+}
+
 export function claudeCensus(text) {
   const byClass = Object.fromEntries(TOOL_CLASSES.map((name) => [name, 0]))
   const inTool = Object.fromEntries(TOOL_CLASSES.map((name) => [name, 0]))
@@ -520,6 +737,7 @@ export function claudeCensus(text) {
   let reReads = 0
   let matched = 0
   let unmatched = 0
+  let bashReadsAbsentReason = null
   let firstStamp = null
   let lastStamp = null
 
@@ -541,11 +759,12 @@ export function claudeCensus(text) {
         const klass = classifyToolCall(use.name, use.input)
         toolCalls += 1
         byClass[klass] += 1
-        const path = censusPath(use.input)
-        if (path !== null) {
+        const observed = censusFileOperands(use.name, use.input)
+        for (const path of observed.paths) {
           if (files.has(path)) reReads += 1
           else files.add(path)
         }
+        if (bashReadsAbsentReason === null && observed.bash_absent_reason !== null) bashReadsAbsentReason = observed.bash_absent_reason
         if (use.id == null) {
           unmatched += 1
         } else {
@@ -580,6 +799,7 @@ export function claudeCensus(text) {
     suite_runs: byClass.test,
     distinct_files_read: files.size,
     re_reads: reReads,
+    bash_reads_absent_reason: bashReadsAbsentReason,
     tool_spans_matched: matched,
     tool_spans_unmatched: unmatched,
     tool_spans_same_poll: 0,
@@ -1116,6 +1336,7 @@ function censusRow(run, transport, stream) {
       tool_spans_matched: null,
       tool_spans_unmatched: null,
       tool_spans_same_poll: null,
+      bash_reads_absent_reason: null,
       absent_reason: absentReason,
     }
   }
@@ -1135,6 +1356,7 @@ function censusRow(run, transport, stream) {
     tool_spans_matched: census.tool_spans_matched,
     tool_spans_unmatched: census.tool_spans_unmatched,
     tool_spans_same_poll: census.tool_spans_same_poll ?? 0,
+    bash_reads_absent_reason: census.bash_reads_absent_reason ?? null,
     absent_reason: absentReason,
   }
 }

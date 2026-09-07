@@ -1,6 +1,6 @@
 {
   "crew/adapters/adapter-pi.mjs:262": "['--no-skills']",
-  "crew/adapters/adapter-claude.mjs:72": "grants?.skills?.length",
+  "crew/adapters/adapter-claude.mjs:98": "grants?.skills?.length",
   "crew/drive.mjs:4158": "let gateCmd = planEnv.details?.gate_cmd || null",
   "crew/drive.mjs:4016": "if (!ctx.roles.includes('tech-lead')) {",
   "crew/drive.mjs:4032": "const check = assignAndWait('tech-lead', checkBrief, 'plan-check')",

@@ -3,9 +3,9 @@
   "crew/seat-io.mjs:112": "export const TRANSCRIPT_STALE_MS = 900_000",
   "crew/seat-io.mjs:1695": "export function recogniseProviderRetry(text) {",
   "scripts/factory/crew-watch.mjs:185": "export function seatLivenessLines(",
-  "crew/crew.mjs:2448": "escalation -> NEVER teardown",
-  "crew/crew.mjs:2978": "seats.proven !== seats.seats || seats.recorded !== seats.seats",
-  "crew/crew.mjs:2869": "const seats = rows.length",
   "scripts/factory/make-brief.mjs:856": "function colourNeutralEnv(base = process.env)",
-  "crew/drive.mjs:4265": "const completeCheckProof = (label) => {"
+  "crew/drive.mjs:4265": "const completeCheckProof = (label) => {",
+  "crew/crew.mjs:2486": "escalation -> NEVER teardown",
+  "crew/crew.mjs:3016": "seats.proven !== seats.seats || seats.recorded !== seats.seats",
+  "crew/crew.mjs:2907": "const seats = rows.length"
 }

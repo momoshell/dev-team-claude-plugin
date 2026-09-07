@@ -83,6 +83,20 @@ ambiguity stay fatal in the skill's own `exhibits.test.mjs`.
 
 `citation-carrier-unfenced` names every pinned carrier; only an **unpinned** path:line citation — one with no manifest keys — is hand-only.
 
+### Warning doctrine
+
+The **anchor-pin** warning carries this exact blind spot: BLIND SPOT: an unpinned file:line citation is in no manifest key, so neither this check nor the citation-carrier check can find it; a citation the anchor corpus does not pin is still discoverable only by hand
+
+The **citation-carrier** warning carries this exact blind spot: BLIND SPOT: this finds docs carrying a PINNED path:line citation and nothing else. A citation no manifest pins is in no key, and a doc whose exhibit set-compares a documented table against source (skills/crew-recovery/references/escalations.md and the escalate() producers) reddens with every citation in it still correct. Neither is discoverable here; read the exhibits suites of the manifests named above before choosing this fence
+
+The **test-reach** warning carries this exact blind spot: BLIND SPOT: this is a proxy in BOTH directions and names candidates, never proof. A test can assert the changed behaviour through a higher-level entry point without importing the changed file at all, and a computed dynamic import is invisible to a static scan — crew/crew.mjs loads every adapter that way. A test can equally import a fenced file without asserting anything about the part being changed. The literal symbol scan sees only whole-word occurrences of an exported name, is blind to a renamed re-export, and drops any symbol naming more than 8 test files as too broad to be evidence. Read the named files before choosing this fence; an unnamed one is not cleared.
+
+The **cross-batch-unknown** warning carries this exact blind spot: BLIND SPOT: a lane booted without --fences declares no surface at all and can be editing anything; a lane whose batch siblings have been reaped records no claim; and a repository whose git dir cannot be measured is not compared. None of those are cleared — they are reported unknown.
+
+Dispatch warning logs cite this subsection with `dispatch-batch: WARNING-SUMMARY`; each bounded line carries `report=<path-or-unavailable> doctrine=skills/crew-dispatch/references/batch.md`. `dispatch.warnings.json` carries complete warning rows and these exact blind spots, including the report's `blind_spots` map.
+
+For PR carry-through, the doctrine is in `batch.md`, not the out-of-fence `fences.md` named by ask item 4. Final Acceptance supersedes the issue-body dry-run preservation clause, so dry-run warning output intentionally changes to the bounded form.
+
 `plan-scope-outside-fence` refuses a planner's declaration wider than its own fence. A
 fence denies siblings' declared surfaces, not unclaimed paths, so silently narrowing
 `files_in_scope` would make the fence meaningless.

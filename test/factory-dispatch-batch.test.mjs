@@ -16,6 +16,7 @@ import {
   BatchRefusal,
   CROSS_BATCH_BLIND_SPOT,
   CROSS_BATCH_UNKNOWN_PREFIX,
+  WARNING_ROWS_UNPERSISTED_PREFIX,
   baseContains,
   baselineCacheRoot,
   batchSeatsFrom,
@@ -66,6 +67,7 @@ import {
   crossBatchCollisions,
   collectAnchorPins,
   collectTestReach,
+  testsOutsideFence,
   ROLES_ANCHOR_COMPANIONS,
   ROLES_ANCHOR_MANIFEST,
   crewJsonPath,
@@ -626,6 +628,91 @@ function reachCheck({ checkout, fenceFiles, surface = fenceFiles, allow, outDir,
   }
 }
 
+function summaryFixture(name) {
+  const checkout = reachFixture(`summary-${name}`)
+  anchorFixtures(checkout, { one: { 'lib/widget.mjs:1': 'export const widgetValue = 1' } })
+  put(join(checkout, 'skills', 'one', 'references', 'notes.md'), 'Declared at `lib/widget.mjs:1`.\n')
+  const home = join(root, `summary-${name}-home`)
+  crewFixture({ home, repoDir: `dt-summary-${name}`, laneDir: 'unknown-lane', lane: 'unknown-lane', checkout, malformed: true })
+  const fences = [entry('lane-a', ['lib/widget.mjs']), entry('lane-b', ['lib/caller.mjs'])]
+  const lanes = [
+    { lane: 'lane-a', where: ['lib/widget.mjs'], allow_test_reach: fixtureTests(checkout) },
+    { lane: 'lane-b', where: ['lib/caller.mjs'], allow_test_reach: fixtureTests(checkout) },
+  ]
+  return { checkout, home, fences, lanes }
+}
+
+function summaryDeps(home, logs) {
+  return {
+    home,
+    spawn: (options) => options.args?.includes('ls-files')
+      ? spawnSync(options.file, options.args, { cwd: options.cwd, encoding: 'utf8' })
+      : { status: 1, stdout: '', stderr: '' },
+    log: (line) => logs.push(String(line)),
+  }
+}
+
+function summaryLines(logs) {
+  return logs.filter((line) => line.startsWith('dispatch-batch: WARNING-SUMMARY '))
+}
+
+test('an unwritable report prints every warning row on stdout instead of losing it', () => {
+  // The summary replaced the full listing on stdout, so the rows live only in the report.
+  // An unwritable outDir would otherwise turn N rows into a single count and record them
+  // nowhere at all. The log gets shorter; a row is never LOST.
+  const fixture = summaryFixture('unpersisted')
+  const logs = []
+  const deps = {
+    ...summaryDeps(fixture.home, logs),
+    writeFileSync: () => { const err = new Error('EACCES: permission denied'); err.code = 'EACCES'; throw err },
+  }
+  const report = checkFences({
+    fences: fixture.fences,
+    lanes: fixture.lanes,
+    checkout: fixture.checkout,
+    outDir: join(fixture.checkout, 'unpersisted-out'),
+    deps,
+  })
+  const summary = summaryLines(logs)
+  assert.equal(summary.length > 0, true)
+  assert.match(summary[0], /report=\(report unavailable: EACCES\)/)
+
+  const banner = logs.filter((line) => line.startsWith(WARNING_ROWS_UNPERSISTED_PREFIX))
+  assert.equal(banner.length, 1, 'the operator is told the rows are printed because nothing persisted them')
+
+  // every warning the check produced reaches stdout in full
+  const rowsOnStdout = report.warnings.filter((w) => typeof w.text === 'string' && w.text)
+  assert.equal(rowsOnStdout.length > 0, true, 'the fixture must produce at least one warning')
+  for (const warning of rowsOnStdout) {
+    assert.equal(logs.includes(warning.text), true, `warning kind ${warning.kind} was lost`)
+  }
+  // and the BLIND SPOT text survives with them
+  assert.equal(logs.some((line) => line.includes('BLIND SPOT')), true)
+})
+
+test('a writable report keeps the log short and does NOT print the rows', () => {
+  const fixture = summaryFixture('persisted')
+  const logs = []
+  const outDir = join(fixture.checkout, 'persisted-out')
+  const report = checkFences({
+    fences: fixture.fences, lanes: fixture.lanes, checkout: fixture.checkout, outDir,
+    deps: summaryDeps(fixture.home, logs),
+  })
+  assert.equal(logs.filter((line) => line.startsWith(WARNING_ROWS_UNPERSISTED_PREFIX)).length, 0)
+  // test-reach-override logs in full by design and is excluded; the DEFERRED kinds are
+  // the ones the summary moved off stdout, and those must not reappear when persisted.
+  const deferredKinds = new Set(['citation-carrier', 'test-reach', 'anchor-pin'])
+  const texts = report.warnings.filter((w) => deferredKinds.has(w.kind) && typeof w.text === 'string' && w.text).map((w) => w.text)
+  assert.equal(texts.length > 0, true, 'the fixture must produce at least one deferred warning')
+  for (const text of texts) assert.equal(logs.includes(text), false, 'a persisted row must not also be printed in full')
+  const persisted = JSON.parse(readFileSync(join(outDir, FENCE_REPORT_FILE), 'utf8'))
+  assert.equal(reportRowCount(persisted) > 0, true)
+})
+
+function reportRowCount(report) {
+  return report.lanes.reduce((total, lane) => total + lane.anchor_pins.length + lane.citation_carriers.length + lane.test_reach.length, 0) + report.cross_batch_unknown.length
+}
+
 function namedReachFixture(name, files = {}) {
   return reachFixture(name, {
     files: {
@@ -647,6 +734,184 @@ function namedReachFixture(name, files = {}) {
     },
   })
 }
+
+test('A1', async () => {
+  const fixture = summaryFixture('A1')
+  const directLogs = []
+  const outDir = join(fixture.checkout, 'a1-direct-out')
+  const direct = checkFences({
+    fences: fixture.fences,
+    lanes: fixture.lanes,
+    checkout: fixture.checkout,
+    outDir,
+    deps: summaryDeps(fixture.home, directLogs),
+  })
+  const directSummaries = summaryLines(directLogs)
+  assert.equal(directSummaries.length, fixture.lanes.length)
+  assert.deepEqual(directSummaries.map((line) => line.match(/lane=([^ ]+)/)?.[1]), ['lane-a', 'lane-b'])
+  assert.match(directSummaries[0], /refusals=none anchor-pin=1 · citation-carrier=1 · test-reach=2 \(0 actionable\) · cross-batch-unknown=1/)
+  assert.match(directSummaries[1], /refusals=none anchor-pin=0 · citation-carrier=0 · test-reach=2 \(0 actionable\) · cross-batch-unknown=1/)
+  for (const line of directSummaries) {
+    assert.ok(line.includes(join(outDir, FENCE_REPORT_FILE)))
+    assert.ok(line.includes('doctrine=skills/crew-dispatch/references/batch.md'))
+    assert.doesNotMatch(line, /test\/(?:direct|twohop|threehop)\.test\.mjs|lib\/(?:widget|caller)\.mjs|skills\/one\/references\/notes\.md|lib\/widget\.mjs:1/)
+    assert.equal(line.includes('\n'), false)
+    assert.ok(Buffer.byteLength(line, 'utf8') < 600)
+  }
+  assert.equal(direct.warnings.filter(({ kind }) => ['anchor-pin', 'citation-carrier', 'test-reach', 'cross-batch-unknown'].includes(kind)).length, 5)
+
+  const batch = join(fixture.checkout, 'a1-dry-batch')
+  put(join(batch, `lane-a${REQUEST_SUFFIX}`), JSON.stringify({ ...request('measure lane-a', ['lib/widget.mjs']), allow_test_reach: fixture.lanes[0].allow_test_reach }))
+  put(join(batch, `lane-b${REQUEST_SUFFIX}`), JSON.stringify({ ...request('measure lane-b', ['lib/caller.mjs']), allow_test_reach: fixture.lanes[1].allow_test_reach }))
+  const dryLogs = []
+  const dryOut = join(fixture.checkout, 'a1-dry-out')
+  const dry = await dispatchBatch({
+    batchDir: batch,
+    fences: fixture.fences,
+    checkout: fixture.checkout,
+    parentDir: join(fixture.checkout, 'parents'),
+    outDir: dryOut,
+    runFlags: { 'dry-run': true },
+    deps: summaryDeps(fixture.home, dryLogs),
+  })
+  assert.equal(dry.dryRun, true)
+  const drySummaries = summaryLines(dryLogs)
+  assert.equal(drySummaries.length, fixture.lanes.length)
+  assert.ok(drySummaries.every((line) => line.includes(join(dryOut, FENCE_REPORT_FILE))))
+  assert.ok(drySummaries.every((line) => line.includes('doctrine=skills/crew-dispatch/references/batch.md')))
+})
+
+test('B1', () => {
+  const checkout = namedReachFixture('B1', {
+    'crew/reader.mjs': "import { grantsFor } from './adapters/adapter-pi.mjs'\nexport const readerValue = grantsFor()\n",
+    'test/twohop.test.mjs': "import { readerValue } from '../crew/reader.mjs'\nif (!readerValue) throw new Error('x')\n",
+  })
+  const outDir = join(checkout, 'b1-out')
+  const logs = []
+  let error
+  try {
+    checkFences({
+      fences: [entry('lane-a', ['crew/capabilities.mjs', 'crew/adapters/adapter-pi.mjs'])],
+      lanes: [{ lane: 'lane-a', where: ['crew/adapters/adapter-pi.mjs'] }],
+      checkout,
+      outDir,
+      deps: { home: join(root, 'b1-home'), log: (line) => logs.push(String(line)) },
+    })
+  } catch (caught) {
+    error = caught
+  }
+  assert.equal(error?.reason, 'test-reach-unfenced')
+  const persisted = JSON.parse(readFileSync(join(outDir, FENCE_REPORT_FILE), 'utf8'))
+  const expectedRows = testsOutsideFence({
+    surface: ['crew/adapters/adapter-pi.mjs'],
+    fenceFiles: ['crew/capabilities.mjs', 'crew/adapters/adapter-pi.mjs'],
+    reach: collectTestReach({ checkout }),
+  })
+  assert.deepEqual(persisted.lanes[0].test_reach, expectedRows)
+  assert.ok(expectedRows.some((row) => row.test === 'crew/crew.test.mjs' && row.hops === 1))
+  assert.ok(expectedRows.some((row) => row.test === 'test/twohop.test.mjs' && row.hops === 2))
+  const summary = summaryLines(logs)[0]
+  assert.match(summary, /test-reach=2 \(1 actionable\)/)
+  assert.equal(persisted.lanes[0].test_reach.length, expectedRows.length)
+})
+
+test('C1', () => {
+  const checkout = gitFixture()
+  const outDir = join(checkout, 'c1-out')
+  const logs = []
+  const result = checkFences({
+    fences: [entry('lane-a', ['src/owned.mjs'])],
+    lanes: [{ lane: 'lane-a', where: ['src/owned.mjs'] }],
+    checkout,
+    outDir,
+    deps: { home: join(root, 'c1-home'), log: (line) => logs.push(String(line)) },
+  })
+  const report = JSON.parse(readFileSync(join(outDir, FENCE_REPORT_FILE), 'utf8'))
+  const expected = {
+    'anchor-pin': 'BLIND SPOT: an unpinned file:line citation is in no manifest key, so neither this check nor the citation-carrier check can find it; a citation the anchor corpus does not pin is still discoverable only by hand',
+    'citation-carrier': 'BLIND SPOT: this finds docs carrying a PINNED path:line citation and nothing else. A citation no manifest pins is in no key, and a doc whose exhibit set-compares a documented table against source (skills/crew-recovery/references/escalations.md and the escalate() producers) reddens with every citation in it still correct. Neither is discoverable here; read the exhibits suites of the manifests named above before choosing this fence',
+    'test-reach': 'BLIND SPOT: this is a proxy in BOTH directions and names candidates, never proof. A test can assert the changed behaviour through a higher-level entry point without importing the changed file at all, and a computed dynamic import is invisible to a static scan — crew/crew.mjs loads every adapter that way. A test can equally import a fenced file without asserting anything about the part being changed. The literal symbol scan sees only whole-word occurrences of an exported name, is blind to a renamed re-export, and drops any symbol naming more than 8 test files as too broad to be evidence. Read the named files before choosing this fence; an unnamed one is not cleared.',
+    'cross-batch-unknown': 'BLIND SPOT: a lane booted without --fences declares no surface at all and can be editing anything; a lane whose batch siblings have been reaped records no claim; and a repository whose git dir cannot be measured is not compared. None of those are cleared — they are reported unknown.',
+  }
+  assert.deepEqual(report.blind_spots, expected)
+  const text = readFileSync(join(repoRoot, 'skills/crew-dispatch/references/batch.md'), 'utf8')
+  for (const statement of Object.values(expected)) assert.equal(text.split(statement).length - 1, 1)
+  assert.ok(summaryLines(logs).every((line) => line.includes('doctrine=skills/crew-dispatch/references/batch.md')))
+})
+
+test('D1', async () => {
+  const checkout = namedReachFixture('D1')
+  const direct = reachCheck({
+    checkout,
+    fenceFiles: ['crew/capabilities.mjs', 'crew/adapters/adapter-pi.mjs'],
+    surface: ['crew/adapters/adapter-pi.mjs'],
+  })
+  assert.equal(direct.error?.reason, 'test-reach-unfenced')
+  for (const token of ['lane lane-a', 'crew/crew.test.mjs', 'crew/adapters/adapter-pi.mjs', 'grantsFor', 'loadCapabilities', 'assertGrantsBacked', TEST_REACH_REFUSAL_REMEDY, TEST_REACH_REFUSAL_BLIND_SPOT]) assert.ok(direct.error.message.includes(token), `D1 omitted ${token}`)
+  assert.equal(direct.logs.length, 1)
+  assert.match(direct.logs[0], /refusals=test-reach-unfenced/)
+  assert.equal(direct.logs[0].includes('crew/crew.test.mjs'), false)
+
+  const batch = join(checkout, 'd1-dry-batch')
+  put(join(batch, `lane-a${REQUEST_SUFFIX}`), JSON.stringify(request('measure refusal behavior', ['crew/adapters/adapter-pi.mjs'])))
+  const dryLogs = []
+  const dryError = await thrownAsync(() => dispatchBatch({
+    batchDir: batch,
+    fences: [entry('lane-a', ['crew/capabilities.mjs', 'crew/adapters/adapter-pi.mjs'])],
+    checkout,
+    parentDir: join(checkout, 'parents'),
+    outDir: join(checkout, 'd1-dry-out'),
+    runFlags: { 'dry-run': true },
+    deps: summaryDeps(join(root, 'd1-home'), dryLogs),
+  }))
+  assert.equal(dryError.reason, 'test-reach-unfenced')
+  for (const token of ['lane lane-a', 'crew/crew.test.mjs', 'crew/adapters/adapter-pi.mjs', 'grantsFor', TEST_REACH_REFUSAL_REMEDY, TEST_REACH_REFUSAL_BLIND_SPOT]) assert.ok(dryError.message.includes(token), `D1 dry omitted ${token}`)
+  const drySummary = summaryLines(dryLogs)[0]
+  assert.match(drySummary, /refusals=test-reach-unfenced/)
+  assert.equal(drySummary.includes('crew/crew.test.mjs'), false)
+})
+
+test('E1', async () => {
+  const fixture = summaryFixture('E1')
+  const logs = []
+  const outDir = join(fixture.checkout, 'e1-out')
+  const result = checkFences({
+    fences: fixture.fences,
+    lanes: fixture.lanes,
+    checkout: fixture.checkout,
+    outDir,
+    deps: summaryDeps(fixture.home, logs),
+  })
+  const retained = result.warnings
+    .filter(({ kind }) => ['anchor-pin', 'citation-carrier', 'test-reach', 'cross-batch-unknown'].includes(kind))
+    .map(({ text }) => text)
+  const summaries = summaryLines(logs)
+  const before = Buffer.byteLength(retained.join('\n'), 'utf8')
+  const after = Buffer.byteLength(summaries.join('\n'), 'utf8')
+  const report = JSON.parse(readFileSync(join(outDir, FENCE_REPORT_FILE), 'utf8'))
+  assert.equal(reportRowCount(report), 7)
+  assert.ok(after < before)
+  assert.ok(after * 2 < before)
+
+  const batch = join(fixture.checkout, 'e1-dry-batch')
+  put(join(batch, `lane-a${REQUEST_SUFFIX}`), JSON.stringify({ ...request('measure lane-a', ['lib/widget.mjs']), allow_test_reach: fixture.lanes[0].allow_test_reach }))
+  put(join(batch, `lane-b${REQUEST_SUFFIX}`), JSON.stringify({ ...request('measure lane-b', ['lib/caller.mjs']), allow_test_reach: fixture.lanes[1].allow_test_reach }))
+  const dryLogs = []
+  await dispatchBatch({
+    batchDir: batch,
+    fences: fixture.fences,
+    checkout: fixture.checkout,
+    parentDir: join(fixture.checkout, 'parents'),
+    outDir: join(fixture.checkout, 'e1-dry-out'),
+    runFlags: { 'dry-run': true },
+    deps: summaryDeps(fixture.home, dryLogs),
+  })
+  const dryReport = JSON.parse(readFileSync(join(fixture.checkout, 'e1-dry-out', FENCE_REPORT_FILE), 'utf8'))
+  assert.equal(reportRowCount(report), reportRowCount(dryReport))
+  assert.equal(retained.length, 5)
+  assert.equal(summaries.length, 2)
+  console.log(`warning-log-bytes before=${before} after=${after} rows=${reportRowCount(report)}`)
+})
 
 test('checkFences reports direct and two-hop test reach without refusing', () => {
   const checkout = reachFixture('depth')
@@ -750,9 +1015,10 @@ test('a refused row is never first announced as not a refusal, and the rest stil
     outDir,
   })
   assert.equal(mixedRun.error?.reason, 'test-reach-unfenced')
-  const warningText = mixedRun.logs.find((line) => line.startsWith(TEST_REACH_WARNING_PREFIX))
+  const warningText = mixedRun.logs.find((line) => line.startsWith('dispatch-batch: WARNING-SUMMARY '))
   assert.ok(warningText)
-  assert.equal(warningText.includes('test/twohop.test.mjs'), true)
+  assert.match(warningText, /test-reach=2 \(1 actionable\)/)
+  assert.equal(warningText.includes('test/twohop.test.mjs'), false)
   assert.equal(warningText.includes('crew/crew.test.mjs'), false)
   const persisted = JSON.parse(readFileSync(join(outDir, FENCE_REPORT_FILE), 'utf8'))
   assert.deepEqual(persisted.lanes[0].test_reach.map((row) => row.test).sort(), ['crew/crew.test.mjs', 'test/twohop.test.mjs'])
@@ -805,10 +1071,17 @@ test('a batch with no reaching tests writes the fence report it wrote before', (
   assert.equal(result.error, null)
   const expected = JSON.stringify({
     schema_version: 1,
-    lanes: [{ lane: 'lane-a', test_reach: [], citation_carriers: [] }],
+    blind_spots: {
+      'anchor-pin': ANCHOR_BLIND_SPOT,
+      'citation-carrier': CITATION_CARRIER_BLIND_SPOT,
+      'test-reach': TEST_REACH_BLIND_SPOT,
+      'cross-batch-unknown': CROSS_BATCH_BLIND_SPOT,
+    },
+    cross_batch_unknown: [],
+    lanes: [{ lane: 'lane-a', test_reach: [], citation_carriers: [], anchor_pins: [] }],
   }, null, 2) + '\n'
   assert.equal(readFileSync(join(outDir, FENCE_REPORT_FILE), 'utf8'), expected)
-  assert.equal(result.logs.some((line) => line.includes('test-reach')), false)
+  assert.equal(result.logs.some((line) => line.startsWith(TEST_REACH_WARNING_PREFIX)), false)
 })
 
 test('splitDispatchKeys refuses a malformed allow_test_reach', () => {
@@ -997,7 +1270,8 @@ test('an unreadable live crew.json is unknown and warns without refusing', () =>
   assert.ok(warning)
   assert.equal(warning.text.includes(CROSS_BATCH_UNKNOWN_PREFIX), true)
   assert.equal(warning.text.includes(CROSS_BATCH_BLIND_SPOT), true)
-  assert.equal(logs.some((line) => line.includes(CROSS_BATCH_UNKNOWN_PREFIX) && line.includes(CROSS_BATCH_BLIND_SPOT)), true)
+  assert.equal(logs.some((line) => line.startsWith('dispatch-batch: WARNING-SUMMARY ') && line.includes('cross-batch-unknown=1')), true)
+  assert.equal(logs.some((line) => line.includes(CROSS_BATCH_UNKNOWN_PREFIX) && line.includes(CROSS_BATCH_BLIND_SPOT)), false)
 })
 
 test('an unreadable crew root is unknown and does not refuse', () => {
@@ -1231,7 +1505,8 @@ test('dispatchBatch logs cross-batch unknown during dry-run and returns normally
     },
   })
   assert.equal(report.dryRun, true)
-  assert.equal(logs.some((line) => line.startsWith(CROSS_BATCH_UNKNOWN_PREFIX)), true)
+  assert.equal(logs.some((line) => line.startsWith('dispatch-batch: WARNING-SUMMARY ') && line.includes('cross-batch-unknown=1')), true)
+  assert.equal(logs.some((line) => line.startsWith(CROSS_BATCH_UNKNOWN_PREFIX)), false)
   assert.equal(report.fences.crossBatch.cleared, false)
 })
 
@@ -1259,9 +1534,10 @@ test('dispatchBatch logs test reach during dry-run without changing the outcome'
     },
   })
   assert.equal(report.dryRun, true)
-  const warning = logs.find((line) => line.includes(TEST_REACH_WARNING_PREFIX))
+  const warning = logs.find((line) => line.startsWith('dispatch-batch: WARNING-SUMMARY '))
   assert.ok(warning)
-  assert.equal(warning.includes('test/twohop.test.mjs'), true)
+  assert.match(warning, /test-reach=2 \(0 actionable\)/)
+  assert.equal(warning.includes('test/twohop.test.mjs'), false)
   assert.equal(fsExistsSync(join(outDir, FENCE_REPORT_FILE)), true)
 })
 
@@ -1688,10 +1964,12 @@ test('dry-run warns with the anchor prefix and every line key', async () => {
     },
   })
   assert.equal(report.dryRun, true)
-  const warning = logs.find((line) => line.includes(ANCHOR_PIN_WARNING_PREFIX))
+  const warning = logs.find((line) => line.startsWith('dispatch-batch: WARNING-SUMMARY '))
   assert.ok(warning)
-  assert.equal(warning.includes(ANCHOR_PIN_POST_MERGE), true)
-  for (const key of fixture.keys) assert.equal(warning.includes(key), true, `dry-run omitted ${key}`)
+  assert.match(warning, /anchor-pin=10/)
+  assert.equal(warning.includes(ANCHOR_PIN_WARNING_PREFIX), false)
+  assert.equal(warning.includes(ANCHOR_PIN_POST_MERGE), false)
+  for (const key of fixture.keys) assert.equal(warning.includes(key), false, `dry-run emitted ${key}`)
 })
 
 test('two lanes with external manifests warn without refusing', () => {
@@ -4389,13 +4667,12 @@ test('an unflagged no-edges dispatch adds no wave output and reports empty defer
   assert.deepEqual(result.report.unstarted, [])
 
   const dry = await dispatchFixture({ label: 'no-edges-dry-run', runFlags: { 'dry-run': true } })
-  assert.deepEqual(dry.logs, [
-    JSON.stringify({ dispatch: 'dry-run', plans: dry.report.plans }),
-    'dispatch-batch: dry-run lane=lane-a tier=mechanical seats=none seats_from=none',
+  assert.deepEqual(dry.logs.filter((line) => !line.startsWith('dispatch-batch: WARNING-SUMMARY ')), [
+    JSON.stringify({ dispatch: 'dry-run', plans: dry.report.plans }),    'dispatch-batch: dry-run lane=lane-a tier=mechanical seats=none seats_from=none',
     'dispatch-batch: dry-run lane=lane-b tier=mechanical seats=none seats_from=none',
     DRY_RUN_BLIND_SPOT,
   ])
-  assert.equal(dry.logs[0].startsWith('{"dispatch":"dry-run","plans":['), true)
+  assert.equal(dry.logs.filter((line) => !line.startsWith('dispatch-batch: WARNING-SUMMARY '))[0].startsWith('{"dispatch":"dry-run","plans":['), true)
   assert.equal(dry.report.waves.length, 1)
   assert.deepEqual(dry.report.deferred, [])
   assert.deepEqual(dry.report.unstarted, [])

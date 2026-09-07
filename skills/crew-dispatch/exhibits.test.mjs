@@ -128,6 +128,20 @@ test('the batch reference names every refusal the sequence can hit', () => {
   assert.equal(text.includes('prose file:line citations in'), false)
 })
 
+test('the warning doctrine carries each measured blind spot and citation rule', () => {
+  const text = readText(join(HERE, 'references/batch.md'))
+  const blindSpots = [
+    'BLIND SPOT: an unpinned file:line citation is in no manifest key, so neither this check nor the citation-carrier check can find it; a citation the anchor corpus does not pin is still discoverable only by hand',
+    'BLIND SPOT: this finds docs carrying a PINNED path:line citation and nothing else. A citation no manifest pins is in no key, and a doc whose exhibit set-compares a documented table against source (skills/crew-recovery/references/escalations.md and the escalate() producers) reddens with every citation in it still correct. Neither is discoverable here; read the exhibits suites of the manifests named above before choosing this fence',
+    'BLIND SPOT: this is a proxy in BOTH directions and names candidates, never proof. A test can assert the changed behaviour through a higher-level entry point without importing the changed file at all, and a computed dynamic import is invisible to a static scan — crew/crew.mjs loads every adapter that way. A test can equally import a fenced file without asserting anything about the part being changed. The literal symbol scan sees only whole-word occurrences of an exported name, is blind to a renamed re-export, and drops any symbol naming more than 8 test files as too broad to be evidence. Read the named files before choosing this fence; an unnamed one is not cleared.',
+    'BLIND SPOT: a lane booted without --fences declares no surface at all and can be editing anything; a lane whose batch siblings have been reaped records no claim; and a repository whose git dir cannot be measured is not compared. None of those are cleared — they are reported unknown.',
+  ]
+  for (const blindSpot of blindSpots) assert.equal(text.split(blindSpot).length - 1, 1, `batch.md must carry one exact blind-spot statement: ${blindSpot.slice(0, 40)}`)
+  assert.ok(text.includes('dispatch.warnings.json'))
+  assert.ok(text.includes('dispatch-batch: WARNING-SUMMARY'))
+  assert.ok(text.includes('report=') && text.includes('doctrine=skills/crew-dispatch/references/batch.md'))
+})
+
 // Mutation killed: widening the measured shell claim or dropping a zero-count guard must make this test fail.
 test('the shell reference records the measured zero counts and no stronger claim', () => {
   const text = readText(join(HERE, 'references/shell.md'))

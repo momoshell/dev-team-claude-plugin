@@ -83,6 +83,7 @@ export const REFUSAL_REASONS = Object.freeze([
   TEST_REACH_UNFENCED,
   PLAN_ADOPT_GATE_ABSOLUTE_PATH,
 ])
+export const WARNING_ROWS_UNPERSISTED_PREFIX = 'dispatch-batch: WARNING rows-unpersisted:'
 export const CROSS_BATCH_UNKNOWN_PREFIX = 'dispatch-batch: WARNING cross-batch-unknown:'
 export const CROSS_BATCH_BLIND_SPOT = 'BLIND SPOT: a lane booted without --fences declares no surface at all and can be editing anything; a lane whose batch siblings have been reaped records no claim; and a repository whose git dir cannot be measured is not compared. None of those are cleared — they are reported unknown.'
 
@@ -283,6 +284,13 @@ export const FENCE_REPORT_FILE = 'dispatch.warnings.json'
 export const SYMBOL_FANOUT_LIMIT = 8
 export const TEST_REACH_WARNING_PREFIX = 'dispatch-batch: WARNING test-reach-unfenced:'
 export const TEST_REACH_BLIND_SPOT = 'BLIND SPOT: this is a proxy in BOTH directions and names candidates, never proof. A test can assert the changed behaviour through a higher-level entry point without importing the changed file at all, and a computed dynamic import is invisible to a static scan — crew/crew.mjs loads every adapter that way. A test can equally import a fenced file without asserting anything about the part being changed. The literal symbol scan sees only whole-word occurrences of an exported name, is blind to a renamed re-export, and drops any symbol naming more than 8 test files as too broad to be evidence. Read the named files before choosing this fence; an unnamed one is not cleared.'
+export const WARNING_DOCTRINE = 'skills/crew-dispatch/references/batch.md'
+export const FENCE_BLIND_SPOTS = Object.freeze({
+  'anchor-pin': ANCHOR_BLIND_SPOT,
+  'citation-carrier': CITATION_CARRIER_BLIND_SPOT,
+  'test-reach': TEST_REACH_BLIND_SPOT,
+  'cross-batch-unknown': CROSS_BATCH_BLIND_SPOT,
+})
 export const TEST_REACH_OVERRIDE_PREFIX = 'dispatch-batch: test-reach-override:'
 export const TEST_REACH_REFUSAL_REMEDY = 'the remedy is mechanical — fence the named test; the corrected files_in_scope is'
 export const TEST_REACH_REFUSAL_BLIND_SPOT = 'BLIND SPOT: this refusal is NOT a guarantee and catches ONE class of fence error. It inherits every blind spot of the symbol scan it reads: blind to a renamed re-export, blind to a computed dynamic import, blind to a bare side-effect import that names nothing, and it drops any symbol naming more than 8 test files as too broad. It also cannot see a write target a lane only discovers while planning — of the three fence errors measured on 2026-09-06 it would have caught exactly one (b451-fffgrant); b465-optionalgrant and b472-fleetcontra needed files no pre-plan analysis can name. An unnamed test is not cleared.'
@@ -503,15 +511,26 @@ function reportTail(omitted, citation) {
   return `; ${omitted} further row(s) not listed here and carried in full on the report ${citation}`
 }
 
-function writeFenceReport({ path, lanes, deps } = {}) {
+function writeFenceReport({ path, lanes, crossBatchUnknown = [], deps } = {}) {
   const d = normalDeps(deps)
   try {
     d.mkdirSync(dirname(path), { recursive: true })
-    d.writeFileSync(path, JSON.stringify({ schema_version: 1, lanes }, null, 2) + '\n')
+    d.writeFileSync(path, JSON.stringify({
+      schema_version: 1,
+      blind_spots: FENCE_BLIND_SPOTS,
+      cross_batch_unknown: crossBatchUnknown,
+      lanes,
+    }, null, 2) + '\n')
     return null
   } catch (error) {
     return error
   }
+}
+
+function warningSummary({ lane, counts, refusals, citation, warnings }) {
+  const warningEvidence = `report=${citation} doctrine=${WARNING_DOCTRINE}`
+  const refusalNames = Array.isArray(refusals) && refusals.length > 0 ? refusals.join(',') : 'none'
+  return `dispatch-batch: WARNING-SUMMARY lane=${lane} refusals=${refusalNames} anchor-pin=${counts.anchorPin} · citation-carrier=${counts.citationCarrier} · test-reach=${counts.testReach} (${counts.actionable} actionable) · cross-batch-unknown=${counts.crossBatchUnknown} ${warningEvidence}`
 }
 
 export class BatchRefusal extends Error {
@@ -1281,6 +1300,7 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
   let citation = reportPath || '(report unavailable: no-out-dir)'
   const reportLanes = []
   const deferredWarnings = []
+  const summaryLanes = []
   const warnings = []
   const reachRefusals = []
   const perLane = {}
@@ -1313,7 +1333,6 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
         : ''
       const text = `${ANCHOR_PIN_WARNING_PREFIX} lane ${name} writes anchor-pinned file(s) whose pinning manifest is outside its fence: ${detail}; ${ANCHOR_PIN_POST_MERGE}; rot and ambiguity still fail in the skill's own exhibits.test.mjs.${rolesClause} ${ANCHOR_BLIND_SPOT}`
       warnings.push({ kind: 'anchor-pin', lane: name, pins: unfencedPins, text })
-      d.log(text)
     }
 
     // The docs that CITE the lines this lane moves. The post-merge pass rewrites the
@@ -1331,7 +1350,6 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
         const tail = reportTail(omitted, citation)
         const carrierText = `${CITATION_CARRIER_WARNING_PREFIX} lane ${name} moves lines in file(s) cited by ${docs.length} doc(s) outside its fence (listing at most ${CITATION_CARRIER_ROW_LIMIT}): ${listed}${tail}. ${CITATION_CARRIER_POST_MERGE}. Fence these docs if you want them correct at merge time: ${docs.join(', ')}. ${CITATION_CARRIER_BLIND_SPOT}`
         warning.text = carrierText
-        d.log(carrierText)
       })
     }
 
@@ -1359,7 +1377,6 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
         const tail = reportTail(omitted, citation)
         const reachText = `${TEST_REACH_WARNING_PREFIX} lane ${name} changes file(s) reached by ${warnRows.length} test file(s) outside its fence, least obvious first (listing at most ${TEST_REACH_ROW_LIMIT}): ${listed}${tail}; a named test is a file to READ before this fence is chosen, not a refusal. ${TEST_REACH_BLIND_SPOT}`
         warning.text = reachText
-        d.log(reachText)
       })
     }
     if (overridden.length > 0) {
@@ -1369,7 +1386,17 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
     }
     if (refusedRows.length > 0) reachRefusals.push({ lane: name, rows: refusedRows, files: ownFiles })
     const overrideField = overridden.length > 0 ? { test_reach_overrides: overridden } : {}
-    reportLanes.push({ lane: name, test_reach: reachRows, citation_carriers: unfencedCarriers, ...overrideField })
+    reportLanes.push({ lane: name, test_reach: reachRows, citation_carriers: unfencedCarriers, anchor_pins: unfencedPins, ...overrideField })
+    summaryLanes.push({
+      lane: name,
+      counts: {
+        anchorPin: unfencedPins.reduce((total, row) => total + (Array.isArray(row.keys) ? row.keys.length : 0), 0),
+        citationCarrier: unfencedCarriers.length,
+        testReach: reachRows.length,
+        actionable: refusedRows.length,
+      },
+      refusals: refusedRows.length > 0 ? [TEST_REACH_UNFENCED] : [],
+    })
 
     const siblings = []
     for (const sibling of entries) {
@@ -1399,11 +1426,38 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
       siblings,
     }
   }
+  const crossBatch = liveLaneClaims({ checkout: scanRoot, batchNames, deps: d })
+  if (!crossBatch.cleared) {
+    const text = `${CROSS_BATCH_UNKNOWN_PREFIX} the live lane set could not be determined in full (crew root ${crossBatch.root}, state ${crossBatch.state}): ${crossBatch.unknown.map((row) => `${row.lane ?? 'crew-root'} (${row.reason})`).join('; ') || 'none named'}; this batch is NOT cleared against those lanes and this absence is not a clear. ${CROSS_BATCH_BLIND_SPOT}`
+    warnings.push({ kind: 'cross-batch-unknown', lane: null, unknown: crossBatch.unknown, text })
+  }
+  // The summary line replaced the full listing on stdout, so the ROWS now live only in
+  // the report. If the report could not be written they would exist nowhere at all —
+  // an unwritable outDir would silently turn 36 warning rows into a single count. The
+  // log gets shorter; a row is never LOST. When there is no report, the full text is
+  // printed instead, which is exactly the pre-summary behaviour for that case only.
+  let reportFailed = false
   if (reportPath) {
-    const reportError = writeFenceReport({ path: reportPath, lanes: reportLanes, deps: d })
-    if (reportError) citation = `(report unavailable: ${reportError?.code || 'write-failed'})`
+    const reportError = writeFenceReport({ path: reportPath, lanes: reportLanes, crossBatchUnknown: crossBatch.unknown, deps: d })
+    if (reportError) { citation = `(report unavailable: ${reportError?.code || 'write-failed'})`; reportFailed = true }
   }
   for (const renderWarning of deferredWarnings) renderWarning()
+  // Narrow on purpose: a caller that passed NO outDir did not ask for a report, and the
+  // real dispatcher always passes one (main() defaults it to <batch>/out). Only a report
+  // that was requested and could not be WRITTEN loses rows that exist nowhere else.
+  if (reportFailed) {
+    d.log(`${WARNING_ROWS_UNPERSISTED_PREFIX} ${citation} — the rows below are printed in full because they are recorded nowhere else`)
+    for (const warning of warnings) if (typeof warning.text === 'string' && warning.text) d.log(warning.text)
+  }
+  for (const state of summaryLanes) {
+    d.log(warningSummary({
+      lane: state.lane,
+      counts: { ...state.counts, crossBatchUnknown: crossBatch.unknown.length },
+      refusals: state.refusals,
+      citation,
+      warnings,
+    }))
+  }
   // #960. This REFUSES where the surrounding reach scan only warns, and the difference is
   // the conjunction, not the severity: #635 downgraded a heuristic that refused on ANY
   // reach because it falsely blocked three of five lanes in one batch. This one fires only
@@ -1465,16 +1519,10 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
   // three of five lanes in one batch), while a collision here is a FACT read from a live
   // lane's own persisted fence. An UNDETERMINED live set is neither — it warns, and it
   // never reads as "no collision" (#678, #687).
-  const crossBatch = liveLaneClaims({ checkout: scanRoot, batchNames, deps: d })
   const collisions = crossBatchCollisions({ entries, live: crossBatch.live, externals: [...externalNames] })
   if (collisions.length > 0) {
     const detail = collisions.map((row) => `lane ${row.lane} collides with live lane ${row.live} on ${row.files.join(', ')} (crew dir ${row.dir})`).join('; ')
     refuse(`the fence register grants file(s) that a live lane outside this batch already holds: ${detail}; "ONE register, ONE batch" holds only while one batch runs at a time — settle, archive or narrow the named lane, or narrow this register`, CROSS_BATCH_COLLISION)
-  }
-  if (!crossBatch.cleared) {
-    const text = `${CROSS_BATCH_UNKNOWN_PREFIX} the live lane set could not be determined in full (crew root ${crossBatch.root}, state ${crossBatch.state}): ${crossBatch.unknown.map((row) => `${row.lane ?? 'crew-root'} (${row.reason})`).join('; ') || 'none named'}; this batch is NOT cleared against those lanes and this absence is not a clear. ${CROSS_BATCH_BLIND_SPOT}`
-    warnings.push({ kind: 'cross-batch-unknown', lane: null, unknown: crossBatch.unknown, text })
-    d.log(text)
   }
   return { perLane, warnings, crossBatch, externals: externalRows }
 }

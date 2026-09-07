@@ -27,6 +27,7 @@ import {
   SEAT_TEARDOWN_OUTCOMES, GATE_DISCRIMINATION_VERDICTS, MUTATION_ANCHOR_CORRECTIONS, MUTATION_ANCHOR_REFUSALS, CELL_FAILURE_KINDS, CELL_FAILURE_ATTRIBUTIONS,
   RUN_VARIANTS, RUN_VARIANT_MARKERS, STAGE_MARKER_CHUNK, variantFromFirstMessage,
   REQUEST_MAX_CHARS, ADVISOR_AB_INCOMPLETE_REASONS, USAGE_ABSENT_CAUSES, usageAbsentCause,
+  SESSION_SYNTHETIC_REASONS, AGENT_SESSION_ABSENT_REASONS, AGENT_SESSION_ABSENT_REASON_KEYS,
   CELL_RATE_FLOOR, CELL_PRICE_UNITS, REVIEW_VERDICTS,
   PHASE_SLOT_WAIT_KINDS, PHASE_SLOT_WAIT_DEPTH_ABSENT, PHASE_SLOT_WAIT_ABSENT,
   EVAL_ENVELOPE_STATUSES, EVAL_ABSENT_REASONS, EVAL_INCOMPLETE_REASONS, EVAL_PAYLOAD_KEYS,
@@ -343,6 +344,12 @@ function run(args, env = {}) {
 function openTestLedger(extra = {}) {
   const dir = nextDir()
   return openLedger({ dbPath: join(dir, 'ledger.db'), stderr: { write: () => {} }, ...extra })
+}
+
+function openB499Ledger(extra = {}) {
+  const dir = scratchDir('b499-ledger-')
+  const dbPath = join(dir, 'ledger.db')
+  return { dir, dbPath, ledger: openLedger({ dbPath, stderr: { write: () => {} }, ...extra }) }
 }
 
 function seedCellUsage({ tag, provider, model_id, agent = 'claude', model = model_id, effort = 'high', sessions }) {
@@ -4942,11 +4949,11 @@ test('startProcess has no production caller; future wiring must update the retir
   assert.deepEqual(offenders, [], 'update RETIRED_TABLES.processes and docs/ledger-queries.md when wiring startProcess')
 })
 
-test('sessions ends with typed outcomes and starts each row with all six appended fields NULL', { skip: SKIP }, () => {
-  assert.deepEqual(TABLES.sessions.columns.slice(-3).map(({ name }) => name), [
-    'outcome', 'terminal_reason', 'terminal_actor',
+test('sessions ends with typed outcomes and starts each row with all seven appended fields NULL', { skip: SKIP }, () => {
+  assert.deepEqual(TABLES.sessions.columns.slice(-4).map(({ name }) => name), [
+    'outcome', 'terminal_reason', 'terminal_actor', 'synthetic_reason',
   ])
-  assert.equal(TABLES.sessions.columns.at(-4).name, 'proposed_strength')
+  assert.equal(TABLES.sessions.columns.at(-5).name, 'proposed_strength')
   const ledger = openTestLedger()
   ledger.startSession({ adw_id: 'heartbeat-null', repo_slug: 'r', task_slug: 't' })
   const row = ledger.getSession('heartbeat-null')
@@ -4957,6 +4964,305 @@ test('sessions ends with typed outcomes and starts each row with all six appende
   assert.equal(row.outcome, null)
   assert.equal(row.terminal_reason, null)
   assert.equal(row.terminal_actor, null)
+  assert.equal(row.synthetic_reason, null)
+})
+
+test('agent sessions opened without a usage frame name the explicit no_usage_frame absence', { skip: SKIP }, () => {
+  assert.deepEqual(AGENT_SESSION_ABSENT_REASON_KEYS, [AGENT_SESSION_ABSENT_REASONS.no_usage_frame])
+  const { ledger } = openB499Ledger()
+  try {
+    ledger.startSession({ adw_id: 'usage-absent', repo_slug: 'r', task_slug: 't' })
+    ledger.startAgentSession({
+      adw_id: 'usage-absent', dispatch_id: 'd1', role: 'builder', model: 'model',
+      claude_session_id: 'session-1', transcript_path: '/tmp/transcript.jsonl',
+    })
+    const row = ledger.dumpTable('agent_sessions')[0]
+    assert.equal(row.absent_reason, AGENT_SESSION_ABSENT_REASONS.no_usage_frame)
+    for (const field of ['billed_input_tokens', 'billed_output_tokens', 'billed_cache_write_tokens', 'billed_cache_read_tokens']) {
+      assert.equal(row[field], null, `${field} must stay unmeasured until an end usage frame arrives`)
+    }
+  } finally { ledger.close() }
+})
+
+test('endAgentSession clears its named absence and the cleared row replays identically', { skip: SKIP }, () => {
+  const sourceFixture = openB499Ledger()
+  const targetFixture = openB499Ledger()
+  const { ledger: source } = sourceFixture
+  const { ledger: target } = targetFixture
+  try {
+    source.startSession({ adw_id: 'usage-replay', repo_slug: 'r', task_slug: 't' })
+    source.startAgentSession({
+      adw_id: 'usage-replay', dispatch_id: 'd1', role: 'builder', model: 'model',
+      claude_session_id: 'session-1', transcript_path: '/tmp/transcript.jsonl',
+    })
+    source.endAgentSession({
+      adw_id: 'usage-replay', claude_session_id: 'session-1',
+      context_tokens: 10, context_window: 20, raw_read_tokens: 30, raw_written_tokens: 40,
+      billed_input_tokens: 50, billed_output_tokens: 60,
+      billed_cache_write_tokens: 70, billed_cache_read_tokens: 80,
+    })
+    const sourceRow = source.dumpTable('agent_sessions')[0]
+    assert.equal(sourceRow.absent_reason, null)
+    const replay = replayJsonl(source._jsonlPath, target)
+    assert.equal(replay.failed, 0)
+    assert.deepEqual(target.dumpTable('agent_sessions'), [sourceRow])
+  } finally {
+    source.close()
+    target.close()
+  }
+})
+
+test('a pre-#977 sessions and agent_sessions schema gains both provenance columns without backfilling historical rows', { skip: SKIP }, () => {
+  const { DatabaseSync } = require('node:sqlite')
+  const dir = scratchDir('b499-ledger-migration-')
+  const db = new DatabaseSync(join(dir, 'ledger.db'))
+  const oldSessions = TABLES.sessions.columns.filter(({ name }) => name !== 'synthetic_reason')
+  const oldAgentSessions = TABLES.agent_sessions.columns.filter(({ name }) => name !== 'absent_reason')
+  try {
+    db.exec(`CREATE TABLE sessions (${oldSessions.map(({ name, decl }) => `"${name}" ${decl}`).join(', ')})`)
+    db.exec(`CREATE TABLE agent_sessions (${oldAgentSessions.map(({ name, decl }) => `"${name}" ${decl}`).join(', ')})`)
+    const sessionNames = oldSessions.map(({ name }) => name)
+    db.prepare(`INSERT INTO sessions (${sessionNames.join(', ')}) VALUES (${sessionNames.map(() => '?').join(', ')})`).run(
+      ...sessionNames.map((name) => ({
+        adw_id: 'historical-session', repo_slug: 'r', task_slug: 't', started_at: '2024-01-01T00:00:00.000Z',
+        ended_at: '2024-01-01T00:00:01.000Z', status: 'ok', tier: 'build',
+      })[name] ?? null),
+    )
+    const agentNames = oldAgentSessions.map(({ name }) => name)
+    db.prepare(`INSERT INTO agent_sessions (${agentNames.join(', ')}) VALUES (${agentNames.map(() => '?').join(', ')})`).run(
+      ...agentNames.map((name) => ({
+        id: 1, adw_id: 'historical-session', dispatch_id: 'd1', role: 'builder', model: 'model',
+        claude_session_id: 'historical-agent', transcript_path: '/tmp/historical.jsonl',
+        started_at: '2024-01-01T00:00:00.000Z', ended_at: '2024-01-01T00:00:01.000Z',
+      })[name] ?? null),
+    )
+    applyMigrations(db)
+    const session = db.prepare('SELECT * FROM sessions WHERE adw_id = ?').get('historical-session')
+    const agent = db.prepare('SELECT * FROM agent_sessions WHERE id = ?').get(1)
+    assert.equal(session.synthetic_reason, null)
+    assert.equal(agent.absent_reason, null)
+    assert.ok(db.prepare('PRAGMA table_info(sessions)').all().some((row) => row.name === 'synthetic_reason'))
+    assert.ok(db.prepare('PRAGMA table_info(agent_sessions)').all().some((row) => row.name === 'absent_reason'))
+  } finally { db.close() }
+})
+
+test('markSyntheticSession refuses invalid reasons and unknown sessions without writing or echoing caller input', { skip: SKIP }, () => {
+  const { ledger } = openB499Ledger()
+  const offendingReason = 'caller-controlled-secret-reason'
+  const unknownAdwId = 'caller-controlled-unknown-session'
+  try {
+    ledger.startSession({ adw_id: 'known-session', repo_slug: 'r', task_slug: 't' })
+    const before = readFileSync(ledger._jsonlPath, 'utf8')
+    assert.throws(
+      () => ledger.markSyntheticSession({ adw_id: 'known-session', reason: offendingReason }),
+      (err) => err instanceof LedgerUsageError && !err.message.includes(offendingReason),
+    )
+    assert.throws(
+      () => ledger.markSyntheticSession({ adw_id: unknownAdwId, reason: SESSION_SYNTHETIC_REASONS[0] }),
+      (err) => err instanceof LedgerUsageError && !err.message.includes(unknownAdwId),
+    )
+    assert.equal(readFileSync(ledger._jsonlPath, 'utf8'), before)
+    assert.equal(ledger.getSession('known-session').synthetic_reason, null)
+  } finally { ledger.close() }
+})
+
+test('marked sessions disappear from ordinary session readers while forensic reads retain them', { skip: SKIP }, () => {
+  const { ledger } = openB499Ledger()
+  const started = '2024-01-01T00:00:00.000Z'
+  const ended = '2024-01-01T00:00:00.500Z'
+  const window = { since: '2023-12-31T00:00:00.000Z', until: '2024-01-02T00:00:00.000Z' }
+  try {
+    ledger.startSession({ adw_id: 'synthetic-marked', repo_slug: 'r', task_slug: 'marked-task', started_at: started })
+    ledger.endSession({
+      adw_id: 'synthetic-marked', status: 'ok', outcome: 'escalated', terminal_reason: 'gate', terminal_actor: 'operator', ended_at: ended,
+    })
+    ledger.startSession({ adw_id: 'ordinary-short', repo_slug: 'r', task_slug: 'ordinary-task', started_at: started })
+    ledger.endSession({ adw_id: 'ordinary-short', status: 'ok', outcome: 'success', ended_at: ended })
+    ledger.markSyntheticSession({ adw_id: 'synthetic-marked', reason: SESSION_SYNTHETIC_REASONS[0] })
+
+    const ids = (rows) => rows.map((row) => row.adw_id)
+    assert.deepEqual(ids(ledger.listSessions()), ['ordinary-short'])
+    assert.deepEqual(ids(ledger.sessionsFiltered(window)), ['ordinary-short'])
+    assert.deepEqual(ids(ledger.runsStartedWithin(window)), ['ordinary-short'])
+    assert.deepEqual(ids(ledger.gateReviewGap()), ['ordinary-short'])
+    assert.deepEqual(ids(ledger.eligibleTasks()), ['ordinary-short'])
+    assert.deepEqual(ids(ledger.runSet(window)), ['ordinary-short'])
+    assert.deepEqual(ledger.escalations(window), [])
+    assert.equal(ledger.endedRuns(window).reduce((count, row) => count + row.count, 0), 1)
+    assert.equal(ledger.escalationWindow(window).endedRows.reduce((count, row) => count + row.count, 0), 1)
+    assert.equal(ledger.taskReadout('marked-task').adw_id, null)
+    assert.equal(ledger.taskReadout('ordinary-task').session.adw_id, 'ordinary-short')
+
+    assert.equal(ledger.getSession('synthetic-marked').synthetic_reason, SESSION_SYNTHETIC_REASONS[0])
+    assert.deepEqual(ids(ledger.dumpTable('sessions')), ['ordinary-short', 'synthetic-marked'])
+  } finally { ledger.close() }
+})
+
+test('phantomSessions retains both marked and unmarked candidate rows with explicit provenance', { skip: SKIP }, () => {
+  const { ledger } = openB499Ledger()
+  try {
+    for (const [adwId, at] of [['unmarked-phantom', '2024-01-01T00:00:00.000Z'], ['marked-phantom', '2024-01-01T00:00:02.000Z']]) {
+      ledger.startSession({ adw_id: adwId, repo_slug: 'r', task_slug: adwId, started_at: at })
+      ledger.endSession({ adw_id: adwId, status: 'ok', ended_at: at.replace('.000Z', '.500Z') })
+    }
+    ledger.markSyntheticSession({ adw_id: 'marked-phantom', reason: SESSION_SYNTHETIC_REASONS[0] })
+    const rows = ledger.phantomSessions()
+    assert.deepEqual(rows.map(({ adw_id, synthetic_reason, events, phases }) => ({ adw_id, synthetic_reason, events, phases })), [
+      { adw_id: 'unmarked-phantom', synthetic_reason: null, events: 0, phases: 0 },
+      { adw_id: 'marked-phantom', synthetic_reason: SESSION_SYNTHETIC_REASONS[0], events: 0, phases: 0 },
+    ])
+    assert.ok(rows.every((row) => row.duration_ms >= 0 && row.duration_ms < 1000))
+  } finally { ledger.close() }
+})
+
+test('markSyntheticSession is a replay writer exactly once and never a mirror/read verb', () => {
+  assert.equal(WRITERS.filter((name) => name === 'markSyntheticSession').length, 1)
+  assert.equal(UPDATE_ONLY_WRITERS.filter((name) => name === 'markSyntheticSession').length, 1)
+  assert.equal(WRITER_MIRROR_TABLES.markSyntheticSession, undefined)
+  for (const reader of ['listSessions', 'getSession', 'dumpTable', 'phantomSessions']) {
+    assert.equal(WRITERS.includes(reader), false)
+  }
+})
+
+test('phantom-sessions and mark-synthetic CLIs reject malformed invocation and degraded mirrors, then mark a known row', { skip: SKIP }, () => {
+  const dir = scratchDir('b499-ledger-cli-')
+  const dbPath = join(dir, 'ledger.db')
+  const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+  try {
+    ledger.startSession({ adw_id: 'cli-session', repo_slug: 'r', task_slug: 't', started_at: '2024-01-01T00:00:00.000Z' })
+    ledger.endSession({ adw_id: 'cli-session', status: 'ok', ended_at: '2024-01-01T00:00:00.500Z' })
+  } finally { ledger.close() }
+  const jsonlPath = join(dir, 'ledger.jsonl')
+  const before = readFileSync(jsonlPath, 'utf8')
+  const malformed = [
+    ['phantom-sessions', 'unexpected'],
+    ['phantom-sessions', '--unknown'],
+    ['mark-synthetic', 'unexpected', '--adw-id', 'cli-session', '--reason', SESSION_SYNTHETIC_REASONS[0]],
+    ['mark-synthetic', '--adw-id', 'cli-session'],
+    ['mark-synthetic', '--reason', SESSION_SYNTHETIC_REASONS[0]],
+    ['mark-synthetic', '--adw-id', 'cli-session', '--reason', SESSION_SYNTHETIC_REASONS[0], '--unknown'],
+  ]
+  for (const args of malformed) {
+    const result = run(args, { DEVTEAM_LEDGER_DB: dbPath })
+    assert.equal(result.status, 2, `${args.join(' ')} must refuse`)
+  }
+  assert.equal(readFileSync(jsonlPath, 'utf8'), before)
+
+  const marked = run(['mark-synthetic', '--adw-id', 'cli-session', '--reason', SESSION_SYNTHETIC_REASONS[0]], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(marked.status, 0, marked.stderr)
+  assert.deepEqual(JSON.parse(marked.stdout), { schema: 1, marked: 1, adw_id: 'cli-session', reason: SESSION_SYNTHETIC_REASONS[0] })
+  const scan = run(['phantom-sessions'], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(scan.status, 0, scan.stderr)
+  assert.equal(JSON.parse(scan.stdout).rows[0].synthetic_reason, SESSION_SYNTHETIC_REASONS[0])
+
+  const corruptDb = join(scratchDir('b499-ledger-corrupt-'), 'ledger.db')
+  writeFileSync(corruptDb, 'not a sqlite database')
+  for (const args of [
+    ['phantom-sessions'],
+    ['mark-synthetic', '--adw-id', 'cli-session', '--reason', SESSION_SYNTHETIC_REASONS[0]],
+  ]) {
+    const result = run(args, { DEVTEAM_LEDGER_DB: corruptDb })
+    assert.equal(result.status, 2, `${args[0]} must refuse a degraded mirror`)
+  }
+})
+
+test('a synthetic marker survives replay while ordinary target readers still exclude its session', { skip: SKIP }, () => {
+  const sourceFixture = openB499Ledger()
+  const targetFixture = openB499Ledger()
+  const { ledger: source } = sourceFixture
+  const { ledger: target } = targetFixture
+  try {
+    source.startSession({ adw_id: 'replay-synthetic', repo_slug: 'r', task_slug: 'replay-task', started_at: '2024-01-01T00:00:00.000Z' })
+    source.endSession({ adw_id: 'replay-synthetic', status: 'ok', ended_at: '2024-01-01T00:00:00.500Z' })
+    source.markSyntheticSession({ adw_id: 'replay-synthetic', reason: SESSION_SYNTHETIC_REASONS[0] })
+    const replay = replayJsonl(source._jsonlPath, target)
+    assert.equal(replay.failed, 0)
+    assert.equal(target.getSession('replay-synthetic').synthetic_reason, SESSION_SYNTHETIC_REASONS[0])
+    assert.deepEqual(target.listSessions(), [])
+    assert.deepEqual(target.sessionsFiltered(), [])
+    assert.deepEqual(target.runSet({ since: '2023-12-31T00:00:00.000Z' }), [])
+    assert.equal(target.phantomSessions()[0].synthetic_reason, SESSION_SYNTHETIC_REASONS[0])
+  } finally {
+    source.close()
+    target.close()
+  }
+})
+
+test('a read-only legacy mirror without synthetic_reason remains readable through session filters and run sets', { skip: SKIP }, () => {
+  const { DatabaseSync } = require('node:sqlite')
+  const dir = scratchDir('b499-ledger-readonly-')
+  const dbPath = join(dir, 'legacy.db')
+  const db = new DatabaseSync(dbPath)
+  try {
+    db.exec(`
+      CREATE TABLE sessions (
+        adw_id TEXT PRIMARY KEY, repo_slug TEXT, task_slug TEXT,
+        started_at TEXT, ended_at TEXT, status TEXT
+      );
+      CREATE TABLE events (id INTEGER PRIMARY KEY, adw_id TEXT, type TEXT, payload_json TEXT);
+    `)
+    db.prepare('INSERT INTO sessions (adw_id, repo_slug, task_slug, started_at, ended_at, status) VALUES (?, ?, ?, ?, ?, ?)')
+      .run('legacy-session', 'r', 'legacy-task', '2024-01-01T00:00:00.000Z', '2024-01-01T00:00:01.000Z', 'ok')
+  } finally { db.close() }
+  const ledger = openLedger({ dbPath, readOnly: true, stderr: { write: () => {} } })
+  try {
+    assert.equal(ledger.stats().degraded, false)
+    assert.deepEqual(ledger.listSessions().map((row) => row.adw_id), ['legacy-session'])
+    assert.deepEqual(ledger.sessionsFiltered().map((row) => row.adw_id), ['legacy-session'])
+    assert.deepEqual(ledger.runSet({ since: '2023-12-31T00:00:00.000Z' }).map((row) => row.adw_id), ['legacy-session'])
+  } finally { ledger.close() }
+})
+
+test('excludeSynthetic re-probes a legacy read-only handle after the column is added and a row is marked (kills negative latch)', { skip: SKIP }, () => {
+  const { DatabaseSync } = require('node:sqlite')
+  const dir = scratchDir('b499-ledger-negative-latch-')
+  const dbPath = join(dir, 'legacy.db')
+  const db = new DatabaseSync(dbPath)
+  try {
+    db.exec(`
+      CREATE TABLE sessions (
+        adw_id TEXT PRIMARY KEY, repo_slug TEXT, task_slug TEXT,
+        started_at TEXT, ended_at TEXT, status TEXT
+      );
+    `)
+    db.prepare('INSERT INTO sessions (adw_id, repo_slug, task_slug, started_at, ended_at, status) VALUES (?, ?, ?, ?, ?, ?)')
+      .run('late-marked', 'r', 'legacy-task', '2024-01-01T00:00:00.000Z', '2024-01-01T00:00:01.000Z', 'ok')
+  } finally { db.close() }
+
+  const legacy = openLedger({ dbPath, readOnly: true, stderr: { write: () => {} } })
+  const migrator = openLedger({ dbPath, stderr: { write: () => {} } })
+  try {
+    assert.deepEqual(legacy.sessionsFiltered().map((row) => row.adw_id), ['late-marked'], 'the first read must establish the pre-column observation')
+    migrator.markSyntheticSession({ adw_id: 'late-marked', reason: SESSION_SYNTHETIC_REASONS[0] })
+    assert.deepEqual(legacy.sessionsFiltered().map((row) => row.adw_id), [], 'the same handle must learn the column appeared and exclude its marked row')
+    assert.equal(legacy.stats().degraded, false)
+  } finally {
+    legacy.close()
+    migrator.close()
+  }
+})
+
+test('source text wires synthetic exclusion into exactly ten ordinary readers and leaves forensic reads unfiltered', () => {
+  const source = readFileSync(SCRIPT, 'utf8')
+  const block = (name) => {
+    const start = source.indexOf(`  function ${name}(`)
+    assert.notEqual(start, -1, `missing reader ${name}`)
+    const next = source.indexOf('\n  function ', start + 1)
+    return source.slice(start, next === -1 ? source.length : next)
+  }
+  const ordinary = [
+    'listSessions', 'sessionsFiltered', 'runsStartedWithin', 'gateReviewGap', 'escalations',
+    'endedRuns', 'escalationWindow', 'eligibleTasks', 'runSet', 'taskReadout',
+  ]
+  assert.equal(new Set(ordinary).size, 10)
+  for (const name of ordinary) assert.match(block(name), /excludeSynthetic\(/, `${name} must hide explicitly marked rows`)
+  for (const name of ['getSession', 'dumpTable', 'phantomSessions', 'unattributableCellFailures']) {
+    assert.doesNotMatch(block(name), /excludeSynthetic\(/, `${name} must retain its forensic/non-session contract`)
+  }
+  assert.equal((source.match(/excludeSynthetic\(/g) ?? []).length, 12, 'one helper declaration plus eleven ordinary query sites')
+  const task = block('taskReadout')
+  assert.match(task, /SELECT adw_id FROM sessions WHERE adw_id = \?/, 'direct forensic task lookup must remain visible')
+  assert.match(task, /SELECT \* FROM sessions WHERE adw_id = \?/, 'resolved forensic task row must remain visible')
 })
 
 test('openRun records the boot tier and brief proposals, while a blockless brief records null', { skip: SKIP }, () => {

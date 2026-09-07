@@ -135,6 +135,11 @@ export const EVENT_TYPES = Object.freeze([
 
 export const SESSION_STATUSES = Object.freeze(['running', 'ok', 'fail', 'aborted'])
 export const SESSION_OUTCOMES = Object.freeze(['success', 'escalated', 'aborted', 'failed'])
+// #977: a session an acceptance gate minted while driving a scratch checkout.
+// Provenance is RECORDED by the operator, never inferred from shape.
+export const SESSION_SYNTHETIC_REASONS = Object.freeze(['gate_scratch_checkout'])
+const SYNTHETIC_VISIBLE_SQL = 'synthetic_reason IS NULL'
+const SYNTHETIC_LEGACY_SQL = '1 = 1'
 // TRD §3.5 (docs/trd-task-configuration-and-run-state.md:222): where a seat's
 // EFFECTIVE value came from. Closed because provenance is a fact the crew
 // decides, not an open vocabulary a caller may extend: a fifth value would
@@ -552,6 +557,26 @@ export const USAGE_ABSENT_CAUSES = Object.freeze({
   cache_unpriced: 'the catalog entry has input/output rates but does not carry every cache rate required to price all four billed token classes; this row is UNPRICED, never partly priced and never free',
 })
 
+// #972 (d): a seat whose stream carried no usage frame lands NULL billed_*
+// and this reason. An unmeasured cell carries one closed reason, never a zero.
+//
+// RELATED BUT NOT INTERCHANGEABLE: USAGE_ABSENT_CAUSES (:547-565) answers the
+// RUN/WINDOW-level question and its `pane` member means no agent_sessions row
+// exists at all, so no member of it can ever be written ON a row. Its
+// `unbilled_rows` cause is the AGGREGATE CONSEQUENCE of this seat-level
+// reason; the two vocabularies are deliberately separate.
+//
+// KNOWN CONFLATION, stated rather than omitted: a session that never ended —
+// a hard-killed run — also retains `no_usage_frame`. The reason therefore
+// means "no usage frame has been folded into this row", which covers both
+// "the stream carried none" and "nothing ever closed this row".
+// Distinguishing them needs a second member and a writer that knows the
+// difference; neither exists in this fence.
+export const AGENT_SESSION_ABSENT_REASONS = Object.freeze({
+  no_usage_frame: 'no_usage_frame',
+})
+export const AGENT_SESSION_ABSENT_REASON_KEYS = Object.freeze(Object.values(AGENT_SESSION_ABSENT_REASONS))
+
 // transports: an iterable of the transport strings recorded for the run(s).
 export function usageAbsentCause(transports) {
   const seen = [...new Set([...(transports || [])].filter((t) => t != null))]
@@ -631,6 +656,10 @@ export const TABLES = Object.freeze({
       { name: 'outcome', decl: 'TEXT' },
       { name: 'terminal_reason', decl: 'TEXT' },
       { name: 'terminal_actor', decl: 'TEXT' },
+      // #977: NULL means no operator provenance marker was recorded. Existing
+      // rows are never backfilled; an old row without this column is likewise
+      // unmeasured, not a measured synthetic session.
+      { name: 'synthetic_reason', decl: 'TEXT' },
     ],
     unique: [['adw_id']],
     indexes: [],
@@ -823,6 +852,10 @@ export const TABLES = Object.freeze({
       { name: 'billed_cache_write_tokens', decl: 'INTEGER' },
       { name: 'billed_cache_read_tokens', decl: 'INTEGER' },
       { name: 'last_heartbeat_at', decl: 'TEXT' },
+      // #972 (d): NULL on a row that predates this column means unmeasured;
+      // historical rows are never backfilled. New unmeasured rows carry the
+      // closed no_usage_frame reason instead.
+      { name: 'absent_reason', decl: 'TEXT' },
     ],
     unique: [['adw_id', 'claude_session_id']],
     indexes: [],
@@ -1310,7 +1343,7 @@ export const WRITERS = Object.freeze([
   'startSession', 'endSession', 'startPhase', 'endPhase', 'recordEvent',
   'recordEnvelope', 'recordSessionRequest', 'recordRunConfiguration', 'recordRunSeat', 'recordGateResult', 'recordGateDiscrimination',
   'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'recordCiCycle', 'recordCiDispatch', 'recordEvalCell', 'recordIntakeSweep', 'recordIntakeRefusal', 'recordIntakeBrake', 'recordIntakeDispatch', 'recordSeatTeardown', 'recordSeatReclaim', 'recordProviderFailure', 'recordPlanScope', 'recordSeatReask', 'recordAcceptReask', 'recordRpcExitContext', 'recordSeatTurnCensus', 'recordPlanAdoption', 'recordExternalFence', 'recordMutationAnchorBind', 'recordMutationAnchorAbsence', 'recordPhaseSlotWait', 'startProcess', 'endProcess', 'heartbeat',
-  'startAgentSession', 'endAgentSession', 'recordSourceError', 'linkRun',
+  'startAgentSession', 'endAgentSession', 'markSyntheticSession', 'recordSourceError', 'linkRun',
 ])
 
 // Writer → the table its mirror INSERTs a row into. A writer whose mirror only
@@ -1360,7 +1393,7 @@ export const WRITER_MIRROR_TABLES = Object.freeze({
 // Writers whose mirror is an UPDATE of a row another writer created: they add
 // no row, so a JSONL line of one of these kinds is never a missing row.
 export const UPDATE_ONLY_WRITERS = Object.freeze([
-  'recordSessionRequest', 'endSession', 'endPhase', 'endProcess', 'heartbeat', 'endAgentSession',
+  'recordSessionRequest', 'endSession', 'endPhase', 'endProcess', 'heartbeat', 'endAgentSession', 'markSyntheticSession',
 ])
 
 // The doctor readout never repairs: replayJsonl is the deliberate remedy.
@@ -2293,6 +2326,7 @@ export function openLedger({
       // explicit null when the brief carried no proposal.
       proposed_shape: normaliseShortName(input.proposed_shape, 'startSession', 'proposed_shape'),
       proposed_strength: normaliseShortName(input.proposed_strength, 'startSession', 'proposed_strength'),
+      synthetic_reason: null,
     }, stats)
     sessionStatusByAdwId.set(args.adw_id, args.status)
     appendJsonl('startSession', args)
@@ -2391,6 +2425,32 @@ export function openLedger({
         toBindable(args.billed_cost_usd),
         toBindable(args.adw_id),
       )
+    })
+    return args
+  }
+
+  function markSyntheticSession(input = {}) {
+    requireFields(input, ['adw_id', 'reason'], 'markSyntheticSession')
+    requireEnum(input.reason, SESSION_SYNTHETIC_REASONS, 'markSyntheticSession', 'reason')
+    const args = redact({
+      adw_id: input.adw_id,
+      reason: input.reason,
+    }, stats)
+    assertWritable()
+    const conn = ensureDb()
+    if (!conn) refuse('markSyntheticSession: cannot verify the session row')
+    let existing
+    try {
+      existing = conn.prepare('SELECT 1 AS found FROM sessions WHERE adw_id = ?').get(toBindable(args.adw_id))
+    } catch (err) {
+      noteMirrorError(err)
+      refuse('markSyntheticSession: cannot verify the session row')
+    }
+    if (!existing) refuse('markSyntheticSession: no session row matches the requested adw_id')
+    appendJsonl('markSyntheticSession', args)
+    mirror((conn) => {
+      conn.prepare('UPDATE sessions SET synthetic_reason = ? WHERE adw_id = ?')
+        .run(toBindable(args.reason), toBindable(args.adw_id))
     })
     return args
   }
@@ -3611,6 +3671,7 @@ export function openLedger({
       billed_cache_write_tokens: null,
       billed_cache_read_tokens: null,
       last_heartbeat_at: null,
+      absent_reason: AGENT_SESSION_ABSENT_REASONS.no_usage_frame,
     }, stats)
     appendJsonl('startAgentSession', args)
     mirror((conn) => {
@@ -3639,19 +3700,22 @@ export function openLedger({
       billed_output_tokens: input.billed_output_tokens,
       billed_cache_write_tokens: input.billed_cache_write_tokens,
       billed_cache_read_tokens: input.billed_cache_read_tokens,
+      absent_reason: null,
     }, stats)
     appendJsonl('endAgentSession', args)
     mirror((conn) => {
       conn.prepare(`
         UPDATE agent_sessions SET ended_at = ?, context_tokens = ?, context_window = ?,
           raw_read_tokens = ?, raw_written_tokens = ?, billed_input_tokens = ?,
-          billed_output_tokens = ?, billed_cache_write_tokens = ?, billed_cache_read_tokens = ?
+          billed_output_tokens = ?, billed_cache_write_tokens = ?, billed_cache_read_tokens = ?,
+          absent_reason = ?
         WHERE adw_id = ? AND claude_session_id = ?
       `).run(
         toBindable(args.ended_at), toBindable(args.context_tokens), toBindable(args.context_window),
         toBindable(args.raw_read_tokens), toBindable(args.raw_written_tokens),
         toBindable(args.billed_input_tokens), toBindable(args.billed_output_tokens),
         toBindable(args.billed_cache_write_tokens), toBindable(args.billed_cache_read_tokens),
+        toBindable(args.absent_reason),
         toBindable(args.adw_id), toBindable(args.claude_session_id),
       )
     })
@@ -3740,7 +3804,7 @@ export function openLedger({
     const conn = ensureDb()
     if (!conn) return []
     try {
-      return conn.prepare('SELECT * FROM sessions ORDER BY adw_id').all()
+      return conn.prepare(`SELECT * FROM sessions WHERE ${excludeSynthetic()} ORDER BY adw_id`).all()
     } catch {
       return []
     }
@@ -3754,6 +3818,40 @@ export function openLedger({
     } catch {
       return null
     }
+  }
+
+  function phantomSessions() {
+    const rows = queryRows(`
+      WITH session_shapes AS (
+        SELECT s.adw_id, s.repo_slug, s.task_slug, s.started_at, s.ended_at,
+          CAST((julianday(s.ended_at) - julianday(s.started_at)) * 86400000 AS INTEGER) AS duration_ms,
+          s.status, COALESCE(e.events, 0) AS events, COALESCE(p.phases, 0) AS phases,
+          s.synthetic_reason
+        FROM sessions s
+        LEFT JOIN (SELECT adw_id, COUNT(*) AS events FROM events GROUP BY adw_id) e
+          ON e.adw_id = s.adw_id
+        LEFT JOIN (SELECT adw_id, COUNT(*) AS phases FROM phases GROUP BY adw_id) p
+          ON p.adw_id = s.adw_id
+        WHERE s.ended_at IS NOT NULL
+      )
+      SELECT adw_id, repo_slug, task_slug, started_at, ended_at, duration_ms,
+        status, events, phases, synthetic_reason
+      FROM session_shapes
+      WHERE events = 0 AND duration_ms >= 0 AND duration_ms < 1000
+      ORDER BY started_at, adw_id
+    `)
+    return rows.map((row) => ({
+      adw_id: row.adw_id,
+      repo_slug: row.repo_slug,
+      task_slug: row.task_slug,
+      started_at: row.started_at,
+      ended_at: row.ended_at,
+      duration_ms: row.duration_ms,
+      status: row.status,
+      events: row.events,
+      phases: row.phases,
+      synthetic_reason: row.synthetic_reason ?? null,
+    }))
   }
 
   // Polling query serving both live tail and history. `afterRowid` is
@@ -3855,6 +3953,28 @@ export function openLedger({
     return queryRows("SELECT name FROM sqlite_master WHERE type = 'table'").map((row) => row.name)
   }
 
+  // #977 · TL6: the single synthetic-session visibility predicate. EVERY
+  // non-forensic run enumerator and aggregate interpolates it; the forensic
+  // reads deliberately do not, because a marked row must stay findable by name.
+  //
+  // LEGACY-SCHEMA AWARE, and that is load-bearing: applyMigrations runs only
+  // on a WRITABLE open while the visualizer opens the mirror readOnly, so an
+  // older file is read long before any writable process adds the column. On a
+  // schema without it, '1 = 1' is the honest answer: nothing is marked there,
+  // so nothing is hidden. Only the positive observation is latched; an absent
+  // column or a failed probe is point-in-time unknown, never a standing verdict.
+  // This matches visualizer/server/ledger-feed.mjs:138, which latches only
+  // when nothing is missing and re-probes while anything is.
+  let syntheticColumnPresent = false
+  function excludeSynthetic(alias = '') {
+    if (!syntheticColumnPresent) {
+      try {
+        if (queryRows('PRAGMA table_info(sessions)').some((r) => r.name === 'synthetic_reason')) syntheticColumnPresent = true
+      } catch { /* probe unknown: stay legacy-safe and re-probe next call */ }
+    }
+    return syntheticColumnPresent ? `${alias}${SYNTHETIC_VISIBLE_SQL}` : SYNTHETIC_LEGACY_SQL
+  }
+
   function columnNames(table) {
     if (!Object.prototype.hasOwnProperty.call(TABLES, table)) {
       // Never embed the raw (caller-controlled) table name in the message —
@@ -3865,7 +3985,7 @@ export function openLedger({
   }
 
   function sessionsFiltered({ status, since, until } = {}) {
-    const where = [], args = []
+    const where = [excludeSynthetic()], args = []
     if (status) { where.push('status = ?'); args.push(status) }
     if (since) { where.push('started_at >= ?'); args.push(since) }
     if (until) { where.push('started_at < ?'); args.push(until) }
@@ -3876,7 +3996,7 @@ export function openLedger({
     return queryRows(`
       SELECT adw_id, task_slug, repo_slug, status, started_at, ended_at
       FROM sessions
-      WHERE started_at >= ? AND (? IS NULL OR started_at < ?)
+      WHERE ${excludeSynthetic()} AND started_at >= ? AND (? IS NULL OR started_at < ?)
       ORDER BY started_at DESC, adw_id
     `, [since, until, until])
   }
@@ -4069,7 +4189,7 @@ export function openLedger({
            WHERE g.adw_id = s.adw_id AND g.ok = 1 AND COALESCE(g.pristine, 0) = 0) AS green_gate_runs,
         (SELECT COUNT(*) FROM review_outcomes r WHERE r.adw_id = s.adw_id) AS reviews,
         (SELECT MAX(r.must_fix) FROM review_outcomes r WHERE r.adw_id = s.adw_id) AS max_must_fix
-      FROM sessions s ORDER BY s.adw_id
+      FROM sessions s WHERE ${excludeSynthetic('s.')} ORDER BY s.adw_id
     `)
   }
 
@@ -4253,7 +4373,7 @@ export function openLedger({
       SELECT terminal_reason AS cause, terminal_actor AS actor,
         COUNT(*) AS count, MIN(ended_at) AS first_at, MAX(ended_at) AS last_at
       FROM sessions
-      WHERE outcome = 'escalated'
+      WHERE ${excludeSynthetic()} AND outcome = 'escalated'
         AND (? IS NULL OR ended_at >= ?) AND (? IS NULL OR ended_at < ?)
       GROUP BY terminal_reason, terminal_actor
       ORDER BY terminal_reason, terminal_actor
@@ -4270,7 +4390,7 @@ export function openLedger({
     return queryRows(`
       SELECT outcome, COUNT(*) AS count, MIN(ended_at) AS first_at, MAX(ended_at) AS last_at
       FROM sessions
-      WHERE ended_at IS NOT NULL
+      WHERE ${excludeSynthetic()} AND ended_at IS NOT NULL
         AND (? IS NULL OR ended_at >= ?) AND (? IS NULL OR ended_at < ?)
       GROUP BY outcome
       ORDER BY outcome
@@ -4285,7 +4405,7 @@ export function openLedger({
       WITH window_sessions AS (
         SELECT outcome, terminal_reason, terminal_actor, ended_at
         FROM sessions
-        WHERE ended_at IS NOT NULL
+        WHERE ${excludeSynthetic()} AND ended_at IS NOT NULL
           AND (? IS NULL OR ended_at >= ?) AND (? IS NULL OR ended_at < ?)
       ),
       grouped_escalations AS (
@@ -4591,7 +4711,7 @@ export function openLedger({
         (SELECT COUNT(*) FROM gate_discriminations d
            WHERE d.adw_id = s.adw_id AND d.verdict = 'proven'
              AND d.gate_generation = (SELECT MAX(g2.gate_generation) FROM gate_results g2 WHERE g2.adw_id = s.adw_id)) AS proven_active
-      FROM sessions s ORDER BY s.adw_id
+      FROM sessions s WHERE ${excludeSynthetic('s.')} ORDER BY s.adw_id
     `)
   }
 
@@ -4615,7 +4735,7 @@ export function openLedger({
     const rows = queryRows(`
       SELECT s.adw_id, s.task_slug, s.repo_slug, s.status, s.started_at, s.ended_at, ${usageSelect}
       FROM sessions s
-      WHERE s.started_at >= ?${untilClause}
+      WHERE ${excludeSynthetic('s.')} AND s.started_at >= ?${untilClause}
       ORDER BY s.started_at, s.adw_id
     `, params)
     const variants = variantsFor(rows.map((row) => row.adw_id))
@@ -4631,12 +4751,12 @@ export function openLedger({
       ? []
       : queryRows(`
         SELECT DISTINCT adw_id FROM run_links
-        WHERE run_id = ? AND adw_id IN (SELECT adw_id FROM sessions)
+        WHERE run_id = ? AND adw_id IN (SELECT adw_id FROM sessions WHERE ${excludeSynthetic()})
         ORDER BY adw_id
       `, [selector]).map((row) => row.adw_id)
     const slugMatches = byId.length === 1 || runLinks.length > 0
       ? []
-      : queryRows('SELECT adw_id FROM sessions WHERE task_slug = ? ORDER BY adw_id', [selector])
+      : queryRows(`SELECT adw_id FROM sessions WHERE ${excludeSynthetic()} AND task_slug = ? ORDER BY adw_id`, [selector])
         .map((row) => row.adw_id)
     const ambiguousCandidates = runLinks.length > 1
       ? runLinks
@@ -4988,9 +5108,9 @@ export function openLedger({
     get degraded() { return degraded },
     startSession, endSession, recordSessionRequest, recordRunConfiguration, recordRunSeat, startPhase, endPhase, recordEvent, recordEnvelope,
     recordGateResult, recordGateDiscrimination, recordMutationAnchorBind, recordMutationAnchorAbsence, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordEvalCell, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown, recordSeatReclaim, recordProviderFailure, recordPlanScope, recordSeatReask, recordAcceptReask, recordRpcExitContext, recordSeatTurnCensus, recordPlanAdoption, recordExternalFence, recordPhaseSlotWait,
-    startProcess, endProcess, heartbeat, startAgentSession, endAgentSession,
+    startProcess, endProcess, heartbeat, startAgentSession, endAgentSession, markSyntheticSession,
     recordSourceError, linkRun,
-    listSessions, listEvents, getSession, dumpTable, tableNames, columnNames, sessionsFiltered, runsStartedWithin, phasesFor, runConfigurationsFor, runSeatsFor, agentEventsFor, agentSessionsFor, gateDiscriminationsFor, gateResultsFor, reviewOutcomesFor, acceptDecisionsFor, supportsJson1, eventsPage, maxEventId, cellFailureRowsFor, unattributableCellFailures, seatTeardownRowsFor, intakePicks, intakeSweepTotals, intakeCandidateRefusals, intakeCandidatePicks, agentSessionTokenTotals, gateReviewGap, cellFailures, cellReviews, evalCells, cellUsage, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, escalations, endedRuns, escalationWindow, seatReclaims, journalFacts, turnEconomy, eligibleTasks, runSet, transportsFor, taskReadout, jsonlDrift,
+    listSessions, listEvents, getSession, phantomSessions, dumpTable, tableNames, columnNames, sessionsFiltered, runsStartedWithin, phasesFor, runConfigurationsFor, runSeatsFor, agentEventsFor, agentSessionsFor, gateDiscriminationsFor, gateResultsFor, reviewOutcomesFor, acceptDecisionsFor, supportsJson1, eventsPage, maxEventId, cellFailureRowsFor, unattributableCellFailures, seatTeardownRowsFor, intakePicks, intakeSweepTotals, intakeCandidateRefusals, intakeCandidatePicks, agentSessionTokenTotals, gateReviewGap, cellFailures, cellReviews, evalCells, cellUsage, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, escalations, endedRuns, escalationWindow, seatReclaims, journalFacts, turnEconomy, eligibleTasks, runSet, transportsFor, taskReadout, jsonlDrift,
     stats: statsFn,
     captureMirrorErrors,
     readConnection,
@@ -5594,6 +5714,8 @@ const VERB_FLAGS = Object.freeze({
   tail: new Set(['after', 'limit']),
   'gate-review-gap': new Set([]),
   'eligible-tasks': new Set([]),
+  'phantom-sessions': new Set([]),
+  'mark-synthetic': new Set(['adw-id', 'reason']),
   'run-set': new Set(['since', 'until']),
   'cell-failures': new Set(['since', 'until']),
   cells: new Set(['since', 'until', 'prices']),
@@ -6126,7 +6248,7 @@ export function main(argv) {
   try {
     const { verb, positional, flags } = parseArgs(argv)
     if (!verb) {
-      refuse('a verb is required: sessions | phases | tail | procs | gate-review-gap | eligible-tasks | run-set --since <iso> [--until <iso>] | cell-failures [--since <iso>] [--until <iso>] | cells [--since <iso>] [--until <iso>] [--prices <path>] | evals --bench <sha> [--prices <path>] | modifier-attempts [--since <iso>] [--until <iso>] | seat-teardowns [--since <iso>] [--until <iso>] | escalations --since <iso> [--until <iso>] | ci-cycles [--since <iso>] [--until <iso>] | intake-sweeps [--since <iso>] [--until <iso>] | journal-facts [--since <iso>] [--until <iso>] | turns [--since <iso>] [--until <iso>] | task | request <adw_id> --from-brief <path> | advisor-ab --run-dir <dir> --run-started-at <iso|ms> --adjudications <path> <dispatch-id>… | doctor | kill')
+      refuse('a verb is required: sessions | phases | tail | procs | gate-review-gap | eligible-tasks | phantom-sessions | mark-synthetic --adw-id <id> --reason <key> | run-set --since <iso> [--until <iso>] | cell-failures [--since <iso>] [--until <iso>] | cells [--since <iso>] [--until <iso>] [--prices <path>] | evals --bench <sha> [--prices <path>] | modifier-attempts [--since <iso>] [--until <iso>] | seat-teardowns [--since <iso>] [--until <iso>] | escalations --since <iso> [--until <iso>] | ci-cycles [--since <iso>] [--until <iso>] | intake-sweeps [--since <iso>] [--until <iso>] | journal-facts [--since <iso>] [--until <iso>] | turns [--since <iso>] [--until <iso>] | task | request <adw_id> --from-brief <path> | advisor-ab --run-dir <dir> --run-started-at <iso|ms> --adjudications <path> <dispatch-id>… | doctor | kill')
     }
 
     // TEST SEAM: DEVTEAM_LEDGER_FAKE_NODE_VERSION substitutes for
@@ -6254,6 +6376,29 @@ export function main(argv) {
       }
       stdout.write(`${JSON.stringify(payload)}\n`)
       stderr.write(`ledger: ${sessions.length} session(s)\n`)
+      return 0
+    }
+
+    if (verb === 'phantom-sessions') {
+      if (positional.length > 0) refuse('phantom-sessions: takes no positional arguments')
+      const rows = ledger.phantomSessions()
+      if (ledger.stats().degraded) refuse('phantom-sessions: the ledger mirror is degraded — this readout is unanswerable, not empty')
+      const payload = {
+        schema: 1,
+        question: 'Which ended sessions have the measured shape of a phantom lane?',
+        definition: 'a session that ended, recorded zero events and lasted under one second — a candidate shape, never a proof of provenance; synthetic_reason is non-null only for a row an operator marked by name (#977)',
+        reasons: SESSION_SYNTHETIC_REASONS,
+        count: rows.length,
+        rows,
+      }
+      stdout.write(`${JSON.stringify(payload)}\n`)
+      return 0
+    }
+
+    if (verb === 'mark-synthetic') {
+      if (positional.length > 0) refuse('mark-synthetic: takes no positional arguments')
+      const args = ledger.markSyntheticSession({ adw_id: flags['adw-id'], reason: flags.reason })
+      stdout.write(`${JSON.stringify({ schema: 1, marked: 1, adw_id: args.adw_id, reason: args.reason })}\n`)
       return 0
     }
 

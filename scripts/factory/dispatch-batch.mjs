@@ -157,7 +157,7 @@ export const TOOL_CLASSES = ['edit', 'read', 'test', 'other']
 // the dispatcher logs and persists the decision. A dispatch-only key, so the compiler's
 // closed schema never sees it.
 export const TEST_REACH_OVERRIDE_KEY = 'allow_test_reach'
-export const DISPATCH_ONLY_REQUEST_KEYS = Object.freeze(['tier', 'depends_on', 'variant', 'seats', 'adopt', TEST_REACH_OVERRIDE_KEY])
+export const DISPATCH_ONLY_REQUEST_KEYS = Object.freeze(['assurance', 'tier', 'execution', 'variant', 'depends_on', 'seats', 'adopt', TEST_REACH_OVERRIDE_KEY])
 // The transports a dispatched batch can boot. Headless is the software-factory
 // mode and stays the DEFAULT, so an unflagged batch behaves exactly as it did
 // before this flag existed. #617 made the transport STATED; it is choosable
@@ -1015,17 +1015,27 @@ function splitDispatchKeys(parsed, requestPath) {
     if (DISPATCH_ONLY_REQUEST_KEYS.includes(key)) dispatch[key] = value
     else request[key] = value
   }
-  if (Object.prototype.hasOwnProperty.call(dispatch, 'tier') && !TIER_NAMES.includes(dispatch.tier)) {
-    refuse(`request ${requestPath} names an unknown tier ${JSON.stringify(dispatch.tier)}; expected one of ${TIER_NAMES.join(', ')}`, BATCH_UNREADABLE)
+  const executionSupplied = dispatch.execution !== undefined && dispatch.execution !== null
+  const variantSupplied = dispatch.variant !== undefined && dispatch.variant !== null
+  const tierSupplied = dispatch.tier !== undefined && dispatch.tier !== null
+  const assuranceSupplied = dispatch.assurance !== undefined && dispatch.assurance !== null
+  const resolveForRequest = (resolver, values) => {
+    try {
+      return resolver(values)
+    } catch (err) {
+      if (err instanceof BatchRefusal) {
+        const detail = err.message.startsWith('dispatch-batch: ') ? err.message.slice('dispatch-batch: '.length) : err.message
+        refuse(`request ${requestPath}: ${detail}`, err.reason)
+      }
+      throw err
+    }
   }
+  const execution = resolveForRequest(resolveRequestedExecution, { execution: dispatch.execution, variant: dispatch.variant })
+  const assurance = resolveForRequest(resolveRequestedTier, { tier: dispatch.tier, assurance: dispatch.assurance })
   if (Object.prototype.hasOwnProperty.call(dispatch, 'depends_on')
       && (!Array.isArray(dispatch.depends_on)
         || !dispatch.depends_on.every((dep) => typeof dep === 'string' && dep.trim() !== ''))) {
     refuse(`request ${requestPath} has an invalid depends_on; expected an array of non-empty strings`, BATCH_UNREADABLE)
-  }
-  if (Object.prototype.hasOwnProperty.call(dispatch, 'variant')
-      && (typeof dispatch.variant !== 'string' || dispatch.variant.trim() === '')) {
-    refuse(`request ${requestPath} has an invalid variant; expected a non-empty string naming one of ${VARIANT_NAMES.join(', ')}`, BATCH_UNREADABLE)
   }
   if (Object.prototype.hasOwnProperty.call(dispatch, 'adopt')
       && (typeof dispatch.adopt !== 'string' || dispatch.adopt.trim() === '')) {
@@ -1040,7 +1050,16 @@ function splitDispatchKeys(parsed, requestPath) {
     const defect = seatsDefect(dispatch.seats)
     if (defect) refuse(`request ${requestPath} has an invalid seats: ${defect}`, BATCH_UNREADABLE)
   }
-  return { dispatch, request }
+  return {
+    dispatch,
+    request,
+    execution,
+    assurance,
+    executionFromVariant: variantSupplied,
+    assuranceFromTier: tierSupplied,
+    variantSupplied,
+    tierSupplied,
+  }
 }
 
 export function readBatch({ batchDir, deps } = {}) {
@@ -1073,7 +1092,7 @@ export function readBatch({ batchDir, deps } = {}) {
     } catch (err) {
       refuse(`cannot read or validate request ${requestPath}: ${err?.message || String(err)}`, BATCH_UNREADABLE)
     }
-    const { dispatch, request } = splitDispatchKeys(parsed, requestPath)
+    const { dispatch, request, execution, assurance, executionFromVariant, assuranceFromTier, variantSupplied, tierSupplied } = splitDispatchKeys(parsed, requestPath)
     try {
       validateRequest(request, { taskName: lane })
     } catch (err) {
@@ -1083,8 +1102,14 @@ export function readBatch({ batchDir, deps } = {}) {
       lane,
       name,
       request,
-      tier: typeof dispatch.tier === 'string' ? dispatch.tier : null,
-      variant: typeof dispatch.variant === 'string' ? dispatch.variant : null,
+      execution: execution ?? null,
+      assurance: assurance ?? null,
+      executionFromVariant,
+      assuranceFromTier,
+      variantSupplied,
+      tierSupplied,
+      tier: tierSupplied && typeof dispatch.tier === 'string' ? dispatch.tier : null,
+      variant: variantSupplied && typeof dispatch.variant === 'string' ? dispatch.variant : null,
       seats: dispatch.seats && typeof dispatch.seats === 'object' ? dispatch.seats : null,
       adopt: typeof dispatch.adopt === 'string' ? dispatch.adopt : null,
       [TEST_REACH_OVERRIDE_KEY]: Array.isArray(dispatch[TEST_REACH_OVERRIDE_KEY]) ? dispatch[TEST_REACH_OVERRIDE_KEY].map(normaliseTestReachOverride) : [],
@@ -2502,18 +2527,39 @@ export function promptSurfaceVerdict({ files } = {}) {
   return { hits, promptChange: hits.length > 0, forced: hits.length > 0 ? 'judge' : null }
 }
 
+export function resolveRequestedExecution({ execution, variant } = {}) {
+  const executionSupplied = execution !== undefined && execution !== null
+  const variantSupplied = variant !== undefined && variant !== null
+  if (executionSupplied && (typeof execution !== 'string' || execution.trim() === '' || !VARIANT_NAMES.includes(execution))) {
+    refuse(`invalid --execution ${JSON.stringify(execution)}; expected one of ${VARIANT_NAMES.join(', ')}`, BATCH_UNREADABLE)
+  }
+  if (variantSupplied && (typeof variant !== 'string' || variant.trim() === '' || !VARIANT_NAMES.includes(variant))) {
+    refuse(`invalid --variant ${JSON.stringify(variant)}; expected one of ${VARIANT_NAMES.join(', ')}`, BATCH_UNREADABLE)
+  }
+  // ADR-035 §4: a canonical/alias PAIR refuses, even when the values agree —
+  // "no precedence rule to remember and no silent winner". crew/run-configuration.mjs
+  // enforces the same rule at boot; this keeps both entry points identical.
+  if (executionSupplied && variantSupplied) {
+    refuse(`--execution ${JSON.stringify(execution)} was given with the deprecated --variant ${JSON.stringify(variant)}; pass exactly one`, TRANSPORT_CONFLICT)
+  }
+  return executionSupplied ? execution : variantSupplied ? variant : undefined
+}
+
 export function resolveRequestedTier({ tier, assurance } = {}) {
   const tierSupplied = tier !== undefined && tier !== null
   const assuranceSupplied = assurance !== undefined && assurance !== null
+  if (tierSupplied && (typeof tier !== 'string' || tier.trim() === '' || !TIER_NAMES.includes(tier))) {
+    refuse(`invalid --tier ${JSON.stringify(tier)}; expected one of ${TIER_NAMES.join(', ')}`, BATCH_UNREADABLE)
+  }
+  if (assuranceSupplied && (typeof assurance !== 'string' || assurance.trim() === '' || !Object.hasOwn(ASSURANCE_ALIAS_OF, assurance))) {
+    refuse(`invalid --assurance ${JSON.stringify(assurance)}; expected one of ${Object.keys(ASSURANCE_ALIAS_OF).join(', ')}`, BATCH_UNREADABLE)
+  }
+  // ADR-035 §4, as above: the PAIR refuses, matching values included.
   if (tierSupplied && assuranceSupplied) {
-    refuse('--tier and --assurance are mutually exclusive; pass exactly one assurance spelling', BATCH_UNREADABLE)
+    refuse(`--assurance ${JSON.stringify(assurance)} was given with the deprecated --tier ${JSON.stringify(tier)}; pass exactly one`, TRANSPORT_CONFLICT)
   }
-  if (!assuranceSupplied) return tier
-  const alias = ASSURANCE_ALIAS_OF[assurance]
-  if (!alias || ASSURANCE_ALIASES[alias] !== assurance) {
-    refuse(`unknown canonical assurance ${JSON.stringify(assurance)}; expected one of ${Object.keys(ASSURANCE_ALIAS_OF).join(', ')}`, BATCH_UNREADABLE)
-  }
-  return alias
+  if (assuranceSupplied) return ASSURANCE_ALIAS_OF[assurance]
+  return tierSupplied ? tier : undefined
 }
 
 export function reconcileTier({ lane, forced, proposed, requested, requestedFrom = 'lane', forceReason = TIER_FLOOR_CONFLICT } = {}) {
@@ -3024,8 +3070,7 @@ function recordIntent({ intent, crewPath, crewDir, lane, deps } = {}) {
 }
 
 export function bootCommand({ lane, laneDir, tier, registerPath, transport, seats, runFlags = {} }) {
-  const assurance = runFlags.assurance
-  const tierArgs = assurance ? ['--assurance', ASSURANCE_ALIASES[tier]] : ['--tier', tier]
+  const tierArgs = ['--assurance', ASSURANCE_ALIASES[tier]]
   return {
     file: 'node',
     args: [
@@ -3119,13 +3164,13 @@ export function bootRetryRow({ lane, first, teardown, at = new Date().toISOStrin
   }
 }
 
-function preflightRunOptions({ variant, runFlags = {}, lanes = [] } = {}) {
-  // Both variant checks are PER LANE now: --variant stays the batch default and a lane's own
+function preflightRunOptions({ execution, runFlags = {}, lanes = [] } = {}) {
+  // Both execution checks are PER LANE now: --execution stays the batch default and a lane's own
   // request key wins, so a scout rides in a batch of full lanes (#634). The closed name set
   // and the ctx-lane shapes that require --validation-lane move together.
-  const selections = [{ lane: null, selected: variant ?? runFlags.variant }]
+  const selections = [{ lane: null, selected: execution ?? runFlags.execution ?? runFlags.variant }]
   for (const lane of Array.isArray(lanes) ? lanes : []) {
-    if (typeof lane?.variant === 'string') selections.push({ lane: laneNameOf(lane), selected: lane.variant })
+    if (typeof lane?.execution === 'string') selections.push({ lane: laneNameOf(lane), selected: lane.execution })
   }
   const validationLane = runFlags['validation-lane']
   for (const { lane, selected } of selections) {
@@ -3160,14 +3205,14 @@ function preflightRunOptions({ variant, runFlags = {}, lanes = [] } = {}) {
   }
 }
 
-function runCommand({ lane, laneDir, briefPath, files, variant, keep, runFlags = {} }) {
+function runCommand({ lane, laneDir, briefPath, files, execution, keep, runFlags = {} }) {
   const args = ['crew/crew.mjs', 'run', '--task', lane, '--checkout', laneDir, '--brief-file', briefPath]
   if (keep) args.push('--keep')
   const add = (flag, value) => {
     if (value === undefined || value === null || value === '') return
     args.push(`--${flag}`, String(value))
   }
-  add('variant', variant ?? runFlags.variant)
+  add('execution', execution)
   add('files-in-scope', files.map((entry) => parseFenceScope(entry).path).join(','))
   add('validation-lane', runFlags['validation-lane'])
   for (const flag of [
@@ -3177,7 +3222,7 @@ function runCommand({ lane, laneDir, briefPath, files, variant, keep, runFlags =
   return { file: 'node', args, cwd: laneDir }
 }
 
-function resumeCommand({ batchDir, fences, checkout, parentDir, outDir, tier, variant, runFlags = {}, wave }) {
+function resumeCommand({ batchDir, fences, checkout, parentDir, outDir, tier, execution, runFlags = {}, wave }) {
   const args = ['node', 'scripts/factory/dispatch-batch.mjs']
   const add = (flag, value) => {
     if (value === undefined || value === null || value === '') return
@@ -3188,9 +3233,8 @@ function resumeCommand({ batchDir, fences, checkout, parentDir, outDir, tier, va
   add('checkout', checkout)
   add('parent', parentDir)
   add('out', outDir)
-  if (runFlags.assurance) add('assurance', runFlags.assurance)
-  else add('tier', runFlags.tier ?? tier)
-  add('variant', runFlags.variant ?? variant)
+  add('execution', execution)
+  add('assurance', ASSURANCE_ALIASES[tier])
   add('baseline', runFlags.baseline)
   add('planner-symbols-holdout-fraction', runFlags['planner-symbols-holdout-fraction'])
   for (const spec of Array.isArray(runFlags.adopt) ? runFlags.adopt : (runFlags.adopt ? [runFlags.adopt] : [])) add('adopt', spec)
@@ -3212,10 +3256,24 @@ function resumeCommand({ batchDir, fences, checkout, parentDir, outDir, tier, va
   return args.join(' ')
 }
 
-export async function dispatchBatch({ batchDir, fences, checkout, parentDir, outDir, tier, variant, externals, registerPath: registerOverride, runFlags = {}, deps } = {}) {
+export function batchAliasWarnings({ lanes = [], runFlags = {} } = {}) {
+  const batchLanes = Array.isArray(lanes) ? lanes : []
+  const variantUsed = runFlags.variant !== undefined && runFlags.variant !== null
+    || batchLanes.some((lane) => lane?.variantSupplied === true || lane?.executionFromVariant === true)
+  const tierUsed = runFlags.tier !== undefined && runFlags.tier !== null
+    || batchLanes.some((lane) => lane?.tierSupplied === true || lane?.assuranceFromTier === true)
+  const warnings = []
+  if (variantUsed) warnings.push(`warning: --variant is a DEPRECATED alias for --execution, removed at the next tagged release (ADR-035 §4)`)
+  if (tierUsed) warnings.push(`warning: --tier is a DEPRECATED alias for --assurance, removed at the next tagged release (ADR-035 §4)`)
+  return warnings
+}
+
+export async function dispatchBatch({ batchDir, fences, checkout, parentDir, outDir, tier, execution, variant, externals, registerPath: registerOverride, runFlags = {}, deps } = {}) {
   const plannerSymbolsHoldoutFraction = parsePlannerSymbolsHoldoutFraction(runFlags['planner-symbols-holdout-fraction'])
   const d = normalDeps(deps)
   const transport = resolveTransport({ runFlags })
+  execution = execution ?? runFlags.execution ?? variant ?? runFlags.variant
+  if (tier === undefined || tier === null) tier = resolveRequestedTier({ tier: runFlags.tier, assurance: runFlags.assurance })
   const lanes = readBatch({ batchDir, deps: d })
   const { waves, graph } = planWaves({ lanes })
   const root = typeof checkout === 'string' && checkout.trim() ? checkout : process.cwd()
@@ -3227,7 +3285,7 @@ export async function dispatchBatch({ batchDir, fences, checkout, parentDir, out
   // reported as `branch-taken` when the real cause was an invalid run option
   // (RV3-1). A refusal must name the cause it measured, not the first one it
   // tripped over. Ordering is the whole fix — both refusals still fire.
-  preflightRunOptions({ variant, runFlags, lanes })
+  preflightRunOptions({ execution, runFlags, lanes })
   const waitBuilder = runFlags['wait-builder']
   const waitSeconds = Number(waitBuilder === undefined || waitBuilder === null || String(waitBuilder).trim() === '' ? WAITS_S.builder : waitBuilder)
   const census = readTurnCensus(runFlags[TURN_CENSUS_FLAG], d)
@@ -3251,6 +3309,7 @@ export async function dispatchBatch({ batchDir, fences, checkout, parentDir, out
     .map((name) => ({ lane: name, wave: waveOf.get(name), predecessors: depsOf(name) }))
   const keep = runFlags['no-keep'] !== true
   const dryRun = runFlags['dry-run'] === true || runFlags.dryRun === true
+  for (const warning of batchAliasWarnings({ lanes, runFlags })) d.log(warning)
   const batchSeats = batchSeatsFrom(runFlags)
   const registerPath = typeof registerOverride === 'string' && registerOverride.trim()
     ? resolve(registerOverride)
@@ -3263,7 +3322,7 @@ export async function dispatchBatch({ batchDir, fences, checkout, parentDir, out
     if (waves.length > 1) {
       d.log(`dispatch-batch: waves=${waves.length} wave=${waveNumber} lanes=${dispatchedNames.join(',')}`)
       for (const item of deferred) {
-        d.log(`dispatch-batch: deferred lane=${item.lane} wave=${item.wave} after=${item.predecessors.join(',')} resume=${resumeCommand({ batchDir, fences: registerPath, checkout: root, parentDir: parent, outDir: outputDir, tier, variant, runFlags, wave: item.wave })}`)
+        d.log(`dispatch-batch: deferred lane=${item.lane} wave=${item.wave} after=${item.predecessors.join(',')} resume=${resumeCommand({ batchDir, fences: registerPath, checkout: root, parentDir: parent, outDir: outputDir, tier, execution, runFlags, wave: item.wave })}`)
       }
       for (const item of unstarted) {
         d.log(`dispatch-batch: unstarted lane=${item.lane} reason=${item.reason} predecessor=${item.predecessor}`)
@@ -3306,7 +3365,7 @@ export async function dispatchBatch({ batchDir, fences, checkout, parentDir, out
     const plans = planWorktrees({ lanes: waveLanes, parentDir, checkout, deps: d })
     d.log(JSON.stringify({ dispatch: 'dry-run', plans }))
     for (const lane of waveLanes) {
-      d.log(`dispatch-batch: dry-run lane=${lane.lane} tier=${lane.tier ?? tier ?? 'none'} seats=${seatSpec(mergeSeats(batchSeats, lane.seats))} seats_from=${seatFromSpec(batchSeats, lane.seats)}`)
+      d.log(`dispatch-batch: dry-run lane=${lane.lane} tier=${lane.assurance ?? tier ?? 'none'} seats=${seatSpec(mergeSeats(batchSeats, lane.seats))} seats_from=${seatFromSpec(batchSeats, lane.seats)}`)
     }
     for (const lane of waveLanes) {
       const adoption = adoptions.get(lane.lane)
@@ -3416,15 +3475,18 @@ export async function dispatchBatch({ batchDir, fences, checkout, parentDir, out
     const floor = tierFloor({ files: laneFence.files, extra: runFlags.protectedPaths })
     const prompt = promptSurfaceVerdict({ files: laneFence.files })
     const laneEntry = laneByName.get(item.lane)
-    // A lane's own tier is the requested tier for THAT lane; --tier stays the
+    // A lane's own assurance is the requested tier for THAT lane; --assurance stays the
     // batch default for every lane that does not name one. A protected floor
-    // raises a lower batch default, while an explicit lane tier below it refuses.
-    const requested = laneEntry?.tier ?? tier
-    const laneVariant = laneEntry?.variant ?? variant
+    // raises a lower batch default, while an explicit lane assurance below it refuses.
+    const laneExecution = laneEntry?.execution ?? execution
+    const requested = laneEntry?.assurance ?? tier
+    const laneVariant = laneExecution
     const seats = mergeSeats(batchSeats, laneEntry?.seats)
-    const result = reconcileTier({ lane: item.lane, forced: floor.forced || prompt.forced, proposed: item.proposed, requested, requestedFrom: laneEntry?.tier ? 'lane' : 'batch', forceReason: floor.forced ? TIER_FLOOR_CONFLICT : PROMPT_SURFACE_CONFLICT })
+    const laneAssuranceSupplied = laneEntry?.assurance !== undefined && laneEntry?.assurance !== null
+    const laneExecutionSupplied = laneEntry?.execution !== undefined && laneEntry?.execution !== null
+    const result = reconcileTier({ lane: item.lane, forced: floor.forced || prompt.forced, proposed: item.proposed, requested, requestedFrom: laneAssuranceSupplied ? 'lane' : 'batch', forceReason: floor.forced ? TIER_FLOOR_CONFLICT : PROMPT_SURFACE_CONFLICT })
     if (!result.tier) refuse(`lane ${item.lane} has no known tier to boot`, BOOT_FAILED)
-    d.log(`dispatch-batch: lane=${item.lane} forced=${floor.forced || 'none'} prompt=${prompt.promptChange ? 'change' : 'code-only'} proposed=${item.proposed || 'none'} requested=${requested || 'none'} requested_from=${laneEntry?.tier ? 'lane' : (tier ? 'batch' : 'none')} variant=${laneVariant || 'none'} variant_from=${laneEntry?.variant ? 'lane' : (variant ? 'batch' : 'none')} settled=${result.tier} seats=${seatSpec(seats)} seats_from=${seatFromSpec(batchSeats, laneEntry?.seats)} shape=${staffing.shape || STAFFING_ABSENT} strength=${staffing.strength || STAFFING_ABSENT} misclassified=${staffing.misclassification ? 'true' : 'false'} brief_bytes=${item.bytes} top_section=${sectionToken(item.topSection)}${overrideNote(result)} granularity=${fenceGranularity(laneFence.files)}`)
+    d.log(`dispatch-batch: lane=${item.lane} forced=${floor.forced || 'none'} prompt=${prompt.promptChange ? 'change' : 'code-only'} proposed=${item.proposed || 'none'} requested=${requested || 'none'} requested_from=${laneAssuranceSupplied ? 'lane' : (tier ? 'batch' : 'none')} execution=${laneExecution || 'none'} execution_from=${laneExecutionSupplied ? 'lane' : (execution ? 'batch' : 'none')} variant=${laneVariant || 'none'} variant_from=${laneExecutionSupplied ? 'lane' : (execution ? 'batch' : 'none')} settled=${result.tier} seats=${seatSpec(seats)} seats_from=${seatFromSpec(batchSeats, laneEntry?.seats)} shape=${staffing.shape || STAFFING_ABSENT} strength=${staffing.strength || STAFFING_ABSENT} misclassified=${staffing.misclassification ? 'true' : 'false'} brief_bytes=${item.bytes} top_section=${sectionToken(item.topSection)}${overrideNote(result)} granularity=${fenceGranularity(laneFence.files)}`)
     const recordPath = join(outputDir, `${item.lane}${DISPATCH_RECORD_SUFFIX}`)
     const record = {
       lane: item.lane,
@@ -3444,6 +3506,7 @@ export async function dispatchBatch({ batchDir, fences, checkout, parentDir, out
         overrode_proposal: result.overrodeProposal === true,
       },
       seats: seatChain(batchSeats, laneEntry?.seats),
+      execution: laneExecution || null,
       variant: laneVariant || null,
       brief: item.brief,
       ...(plannerSymbolsHoldoutFraction === null ? {} : {
@@ -3457,14 +3520,14 @@ export async function dispatchBatch({ batchDir, fences, checkout, parentDir, out
     try { writeFileSync(recordPath, JSON.stringify(record, null, 2) + '\n') } catch (err) {
       refuse(`cannot write dispatch record ${recordPath}: ${err?.message || String(err)}`, COMPILE_REFUSED)
     }
-    settled.push({ ...item, plan, floor, prompt, tier: result.tier, variant: laneVariant, seats, staffing, record: recordPath })
+    settled.push({ ...item, plan, floor, prompt, tier: result.tier, execution: laneExecution, variant: laneVariant, seats, staffing, record: recordPath })
   }
 
   // #658: every lane whose plan IS its brief is validated before ANY lane boots — the brief is
   // already on disk, and a defect in lane B's brief must not cost lane A's seats. Last in the
   // pre-boot order on purpose: no existing refusal loses the cause it names.
   for (const item of settled) {
-    checkDirectedBrief({ lane: item.lane, variant: item.variant, briefPath: item.brief, deps: d })
+    checkDirectedBrief({ lane: item.lane, variant: item.execution, briefPath: item.brief, deps: d })
     if (Object.keys(item.seats).length > 0) {
       const unseated = seatRolesUnseated({ seats: item.seats, tier: item.tier, deps: d })
       if (unseated.length > 0) refuse(`lane ${item.lane} seat override(s) name role(s) the settled tier ${item.tier} does not seat: ${unseated.join(', ')}; crew/roster.json tiers.${item.tier} is the ratified staffing floor and a lane may not staff outside it`, SEAT_FLOOR_CONFLICT)
@@ -3543,7 +3606,7 @@ export async function dispatchBatch({ batchDir, fences, checkout, parentDir, out
           laneDir: item.plan.dir,
           briefPath: item.brief,
           files,
-          variant: item.variant,
+          execution: item.execution,
           keep,
           runFlags,
         }),
@@ -3590,7 +3653,7 @@ export function parseCliArgs(argv) {
   const flags = {}
   const positional = []
   const valueFlags = new Set([
-    'batch', 'fences', 'checkout', 'parent', 'out', 'tier', 'assurance', 'variant', 'wave', 'planner-symbols-holdout-fraction',
+    'batch', 'fences', 'checkout', 'parent', 'out', 'tier', 'assurance', 'execution', 'variant', 'wave', 'planner-symbols-holdout-fraction',
     'plan-rounds', 'build-rounds', 'review-rounds', 'wait-builder', 'wait-planner',
     'wait-reviewer', 'wait-lead', 'wait-tech-lead', 'validation-lane', 'suite', 'baseline',
     TURN_CENSUS_FLAG,
@@ -3638,6 +3701,7 @@ export async function main(argv, deps = {}) {
     const checkout = resolve(typeof flags.checkout === 'string' ? flags.checkout : process.cwd())
     const parentDir = typeof flags.parent === 'string' ? resolve(flags.parent) : dirname(checkout)
     const outDir = typeof flags.out === 'string' ? resolve(flags.out) : join(resolve(flags.batch), 'out')
+    const requestedExecution = resolveRequestedExecution({ execution: flags.execution, variant: flags.variant })
     const requestedTier = resolveRequestedTier({ tier: flags.tier, assurance: flags.assurance })
     let register
     try {
@@ -3655,7 +3719,7 @@ export async function main(argv, deps = {}) {
       parentDir,
       outDir,
       tier: requestedTier,
-      variant: flags.variant,
+      execution: requestedExecution,
       runFlags: flags,
       deps,
     })

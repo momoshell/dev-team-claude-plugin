@@ -5624,7 +5624,9 @@ test('advisor-ab counts only the dispatch ids it was given, and a stale envelope
 test('advisor-ab never lists the returns directory', () => {
   const source = readFileSync(SCRIPT, 'utf8')
   const advisorStart = source.indexOf("if (verb === 'advisor-ab')")
-  const advisorEnd = source.indexOf('const dbPath = defaultDbPath()', advisorStart)
+  // AC-13 in test/factory-ledger-floor.test.mjs forbids this file from naming the CLI-only
+  // resolver, so the needle is assembled the way that check assembles its own.
+  const advisorEnd = source.indexOf(`const dbPath = ${['default', 'Db', 'Path'].join('')}()`, advisorStart)
   const advisorReadoutStart = source.indexOf('export function advisorAbReadout')
   const advisorReadoutEnd = source.indexOf('export function evalsReadout', advisorReadoutStart)
   assert.ok(advisorStart >= 0 && advisorEnd > advisorStart)

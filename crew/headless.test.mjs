@@ -17,6 +17,7 @@ import {
   splitShellCommands, executableText, stripHeredocBodies, commandTokens,
   suitePolicyCounters, countSuiteDecision, suitePolicyReport, SUITE_RUN_OWNERSHIP, SUITE_RUN_OWNERSHIP_KINDS,
 } from './headless.mjs'
+import { KNOWN_FLAGS, main, wakeVerb } from './factoryctl.mjs'
 import { headlessRpcIo } from './headless-rpc.mjs'
 import { assignmentLine, assignmentPrompt } from './driver.mjs'
 import { cellFailureKind, HEADLESS_TRANSPORT, seatIo } from './seat-io.mjs'
@@ -1386,19 +1387,32 @@ function withTerminalStatus(tail, status) {
   }).join('\n')
 }
 
-function providerRetryFixture({ tail, at, refusals = 1, fallback = null, drift = 0, sleepThrows = false, spawnThrowsOn = 0, noExit = false, emit = null, emitThrows = false, clearRefuse = false }) {
+function providerRetryFixture({ tail, at, refusals = 1, fallback = null, drift = 0, sleepThrows = false, spawnThrowsOn = 0, noExit = false, emit = null, emitThrows = false, clearRefuse = false, onDelay = null, readCrewJson = null, seedWake = false }) {
   const dir = scratchDir('headless-provider-retry-')
   const taskDir = join(dir, 'task'); const returnsDir = join(dir, 'returns')
   mkdirSync(taskDir); mkdirSync(returnsDir)
   writeFileSync(join(taskDir, 'brief.md'), '# brief\n')
   const member = { model: 'claude-fable-5', transport: 'headless-json', ...(fallback ? { fallback } : {}) }
-  const crew = { checkout: dir, members: { builder: member }, seats: { builder: { ...member } } }
+  const crew = { checkout: dir, members: { builder: member }, seats: { builder: { ...member } }, ...(seedWake ? { wake: { by: 'operator', requested_at: at, assignment_id: 'd1', started_at: at } } : {}) }
   writeFileSync(join(dir, 'crew.json'), JSON.stringify(crew, null, 2))
   const journal = []; const parks = []; const polls = []; const beats = []; const parkSamples = []
-  let clock = at; let spawns = 0; let pid = 9300; let clearRefused = false
+  let clock = at; let spawns = 0; let pid = 9300; let clearRefused = false; let crewReads = 0; let fixtureRef = null
   const crewJson = () => {
     try { return JSON.parse(readFileSync(join(dir, 'crew.json'), 'utf8')) } catch { return null }
   }
+  const readCrew = (path, encoding) => {
+    if (String(path).endsWith('crew.json')) {
+      crewReads += 1
+      const value = readCrewJson?.({ path, encoding, reads: crewReads, clock, fixture: fixtureRef })
+      if (value !== undefined) return value
+    }
+    return readFileSync(path, encoding)
+  }
+  const requestWake = () => updateCrewJson({ dir }, (disk) => {
+    if (disk.park == null) return false
+    disk.wake = { by: 'operator', requested_at: clock, assignment_id: disk.park.assignment_id, started_at: disk.park.started_at }
+    return true
+  }, { pid: 'wake-fixture', uuid: () => 'wake-fixture' })
   const log = (row) => {
     journal.push(row)
     if (clearRefused && row?.event === 'crew-json-persist-failed') throw new Error('fixture: the journal refused the persist diagnostic')
@@ -1424,13 +1438,19 @@ function providerRetryFixture({ tail, at, refusals = 1, fallback = null, drift =
     deps: {
       log,
       emit: emitThrows ? () => { throw new Error('fixture: emitter refused') } : (emit || ((event) => beats.push({ ...event }))),
+      readFileSync: readCrew,
       writeFileSync: writeCrew, kill: () => {}, uuid: () => 'provider-retry-session',
       now: () => clock,
       sleep(ms) {
         if (sleepThrows) { const error = new Error('seat died: builder — its worker root is gone'); error.stage = 'seat-died'; throw error }
         clock += ms; polls.push(ms)
       },
-      delay(ms) { clock += ms + drift; parks.push(ms); parkSamples.push({ at: clock, park: crewJson()?.park ?? null }) },
+      delay(ms) {
+        clock += ms + drift
+        parks.push(ms)
+        parkSamples.push({ at: clock, park: crewJson()?.park ?? null })
+        onDelay?.({ fixture: fixtureRef, clock, polls: parks.length, ms })
+      },
       spawn() {
         spawns += 1
         if (spawns === spawnThrowsOn) throw new Error('spawn refused')
@@ -1443,8 +1463,22 @@ function providerRetryFixture({ tail, at, refusals = 1, fallback = null, drift =
       },
     },
   })
+  fixtureRef = { dir, requestWake }
   const run = io.assign({ role: 'builder', briefFile: join(taskDir, 'brief.md') })
-  return { io, run, journal, parks, polls, beats, parkSamples, crewJson, spawns: () => spawns, cleanup: () => rmSync(dir, { recursive: true, force: true }) }
+  return { io, run, journal, parks, polls, beats, parkSamples, crewJson, requestWake, crewReads: () => crewReads, spawns: () => spawns, cleanup: () => rmSync(dir, { recursive: true, force: true }) }
+}
+
+function wakeLaneFixture({ park = null } = {}) {
+  const root = scratchDir('factoryctl-wake-')
+  const dir = join(root, 'repo', 'task')
+  mkdirSync(dir, { recursive: true })
+  const crew = { checkout: dir, members: { builder: { transport: 'headless-json' } }, ...(park ? { park } : {}) }
+  writeFileSync(join(dir, 'crew.json'), JSON.stringify(crew, null, 2))
+  writeFileSync(join(dir, 'journal.jsonl'), '')
+  return {
+    root, dir, crewFile: join(dir, 'crew.json'),
+    cleanup: () => rmSync(root, { recursive: true, force: true }),
+  }
 }
 
 function withoutTerminalStatus(tail) {
@@ -1944,6 +1978,176 @@ test('#948 keeps a 429 park observable from start through resume', () => {
     assert.ok(new Set(beatTimes).size >= 11)
     assert.equal(f.crewJson().park, null)
   } finally { f.cleanup() }
+})
+
+test('wakepark A1 parked loop observes a wake on its next poll', () => {
+  const at = 1788115200000 - 120_000
+  const f = providerRetryFixture({
+    tail: B332_D2_TAIL, at,
+    onDelay: ({ fixture, polls }) => { if (polls === 1) assert.equal(fixture.requestWake().changed, true) },
+  })
+  try {
+    assert.equal(f.io.wait(f.run.returnPath, 600).status, 'done')
+    const retry = f.journal.find((row) => row.event === 'provider-retry')
+    const resumed = f.journal.find((row) => row.event === 'provider-retry-resumed')
+    assert.ok(resumed.waited_ms < retry.wait_ms)
+    assert.equal(resumed.waited_ms, WAIT_POLL_MS)
+    assert.equal(f.spawns(), 2)
+    assert.equal(f.crewJson().park, null)
+    assert.equal(Object.hasOwn(f.crewJson(), 'wake'), false)
+  } finally { f.cleanup() }
+})
+
+test('wakepark B1 unwoken park runs to its intended end', () => {
+  const at = 1788115200000 - 120_000
+  const f = providerRetryFixture({ tail: B332_D2_TAIL, at })
+  try {
+    assert.equal(f.io.wait(f.run.returnPath, 600).status, 'done')
+    const retry = f.journal.find((row) => row.event === 'provider-retry')
+    const resumed = f.journal.find((row) => row.event === 'provider-retry-resumed')
+    assert.equal(resumed.waited_ms, retry.wait_ms)
+    assert.equal(Object.hasOwn(resumed, 'woken_at'), false)
+  } finally { f.cleanup() }
+})
+
+test('wakepark C1 resume records when the park started', () => {
+  const at = 1788115200000 - 120_000
+  const f = providerRetryFixture({ tail: B332_D2_TAIL, at, onDelay: ({ fixture, polls }) => { if (polls === 1) fixture.requestWake() } })
+  try {
+    assert.equal(f.io.wait(f.run.returnPath, 600).status, 'done')
+    const resumed = f.journal.find((row) => row.event === 'provider-retry-resumed')
+    assert.equal(resumed.parked_at, at)
+    assert.ok(Number.isFinite(resumed.parked_at))
+  } finally { f.cleanup() }
+})
+
+test('wakepark C2 resume records when the wake was observed', () => {
+  const at = 1788115200000 - 120_000
+  const f = providerRetryFixture({ tail: B332_D2_TAIL, at, onDelay: ({ fixture, polls }) => { if (polls === 1) fixture.requestWake() } })
+  try {
+    assert.equal(f.io.wait(f.run.returnPath, 600).status, 'done')
+    const resumed = f.journal.find((row) => row.event === 'provider-retry-resumed')
+    assert.equal(resumed.woken_at, at + WAIT_POLL_MS)
+    assert.ok(Number.isFinite(resumed.woken_at))
+  } finally { f.cleanup() }
+})
+
+test('wakepark C3 resume records the remaining wait skipped', () => {
+  const at = 1788115200000 - 120_000
+  const f = providerRetryFixture({ tail: B332_D2_TAIL, at, onDelay: ({ fixture, polls }) => { if (polls === 1) fixture.requestWake() } })
+  try {
+    assert.equal(f.io.wait(f.run.returnPath, 600).status, 'done')
+    const retry = f.journal.find((row) => row.event === 'provider-retry')
+    const resumed = f.journal.find((row) => row.event === 'provider-retry-resumed')
+    assert.equal(resumed.skipped_wait_ms, retry.wait_ms - WAIT_POLL_MS)
+    assert.ok(Number.isFinite(resumed.skipped_wait_ms))
+  } finally { f.cleanup() }
+})
+
+test('wakepark C4 resume names the operator', () => {
+  const at = 1788115200000 - 120_000
+  const f = providerRetryFixture({ tail: B332_D2_TAIL, at, onDelay: ({ fixture, polls }) => { if (polls === 1) fixture.requestWake() } })
+  try {
+    assert.equal(f.io.wait(f.run.returnPath, 600).status, 'done')
+    const resumed = f.journal.find((row) => row.event === 'provider-retry-resumed')
+    assert.equal(resumed.resumed_by, 'operator')
+  } finally { f.cleanup() }
+})
+
+test('wakepark D1 an unparked lane reports a named no-op without mutation', () => {
+  const f = wakeLaneFixture()
+  let stdout = ''
+  try {
+    const before = readFileSync(f.crewFile)
+    const result = wakeVerb({ task: 'task', 'crew-root': f.root }, { stdout: (text) => { stdout += text } })
+    assert.deepEqual(result, { task: 'task', woken: false, reason: 'not-parked' })
+    assert.match(stdout, /lane task is not parked; no wake requested/)
+    assert.deepEqual(readFileSync(f.crewFile), before)
+  } finally { f.cleanup() }
+})
+
+test('RV2-1 wake refuses a backoff wait as not wakeable', () => {
+  const f = wakeLaneFixture({ park: { action: 'backoff', assignment_id: 'd1', started_at: 1, until: 2 } })
+  let stdout = ''
+  try {
+    const before = readFileSync(f.crewFile)
+    const result = wakeVerb({ task: 'task', 'crew-root': f.root }, { stdout: (text) => { stdout += text } })
+    assert.deepEqual(result, { task: 'task', woken: false, reason: 'not-wakeable' })
+    assert.equal(stdout, 'lane task is waiting on a backoff, not a park; no wake requested\n')
+    assert.deepEqual(readFileSync(f.crewFile), before)
+  } finally { f.cleanup() }
+})
+
+test('wakepark E1 a throwing wake read leaves the park running', () => {
+  const at = 1788115200000 - 120_000
+  const f = providerRetryFixture({
+    tail: B332_D2_TAIL, at,
+    readCrewJson: ({ reads }) => { if (reads === 4) throw new Error('fixture wake read denied') },
+  })
+  try {
+    assert.equal(f.io.wait(f.run.returnPath, 600).status, 'done')
+    const retry = f.journal.find((row) => row.event === 'provider-retry')
+    const resumed = f.journal.find((row) => row.event === 'provider-retry-resumed')
+    assert.equal(resumed.waited_ms, retry.wait_ms)
+    assert.equal(f.journal.some((row) => row.event === 'provider-park-wake-read-failed'), true)
+  } finally { f.cleanup() }
+})
+
+test('wakepark E2 a throwing wake read journals its reason', () => {
+  const at = 1788115200000 - 120_000
+  const f = providerRetryFixture({
+    tail: B332_D2_TAIL, at,
+    readCrewJson: ({ reads }) => { if (reads === 4) throw new Error('fixture wake read denied') },
+  })
+  try {
+    assert.equal(f.io.wait(f.run.returnPath, 600).status, 'done')
+    const failed = f.journal.find((row) => row.event === 'provider-park-wake-read-failed')
+    assert.match(failed.reason, /fixture wake read denied/)
+  } finally { f.cleanup() }
+})
+
+test('wakepark F1 a non-park wait ignores a wake marker', () => {
+  const f = providerRetryFixture({ tail: DERIVED_529_UNREFUSED, at: 1788115200000, seedWake: true })
+  try {
+    assert.equal(f.io.wait(f.run.returnPath, 600).status, 'done')
+    const retry = f.journal.find((row) => row.event === 'provider-retry')
+    const resumed = f.journal.find((row) => row.event === 'provider-retry-resumed')
+    assert.equal(retry.action, 'backoff')
+    assert.equal(resumed.waited_ms, retry.wait_ms)
+    assert.equal(Object.hasOwn(resumed, 'woken_at'), false)
+    assert.ok(f.crewJson().wake)
+  } finally { f.cleanup() }
+})
+
+test('RV1-1 backoff retries keep driver liveness through the third 529', () => {
+  const at = 1788115200000
+  const f = providerRetryFixture({ tail: DERIVED_529_UNREFUSED, at, refusals: PROVIDER_RETRY_MAX })
+  try {
+    assert.equal(f.io.wait(f.run.returnPath, 600).status, 'done')
+    const retries = f.journal.filter((row) => row.event === 'provider-retry')
+    assert.deepEqual(retries.map((row) => row.wait_ms), PROVIDER_BACKOFF_LADDER_MS)
+    const thirdStartedAt = at + PROVIDER_BACKOFF_LADDER_MS[0] + PROVIDER_BACKOFF_LADDER_MS[1]
+    const thirdUntil = thirdStartedAt + PROVIDER_BACKOFF_LADDER_MS[2]
+    const thirdBeats = f.journal.filter((row) => row.event === PARK_BEAT_EVENT && row.at >= thirdStartedAt && row.at <= thirdUntil)
+    const thirdHeartbeats = f.beats.filter((row) => row.at >= thirdStartedAt && row.at <= thirdUntil)
+    assert.equal(retries.at(-1).action, 'backoff')
+    assert.equal(thirdBeats[0]?.at, thirdStartedAt)
+    assert.equal(thirdBeats.at(-1)?.at, thirdUntil)
+    assert.equal(thirdHeartbeats[0]?.at, thirdStartedAt)
+    assert.equal(thirdHeartbeats.at(-1)?.at, thirdUntil)
+    const persisted = f.parkSamples.filter(({ park }) => park?.attempt === PROVIDER_RETRY_MAX)
+    assert.ok(persisted.length > 0)
+    assert.ok(persisted.every(({ park }) => park.action === 'backoff' && park.until === thirdUntil && Number.isFinite(park.beat_at)))
+    assert.equal(f.crewJson().park, null)
+  } finally { f.cleanup() }
+})
+
+test('wakepark G1 wake refuses an unknown flag through usage', async () => {
+  assert.equal(KNOWN_FLAGS.wake.includes('zzz'), false)
+  let stderr = ''
+  const code = await main(['wake', '--task', 'task', '--zzz', 'yes'], { stdout: () => {}, stderr: (text) => { stderr += text } })
+  assert.equal(code, 2)
+  assert.match(stderr, /factoryctl wake does not read --zzz/)
 })
 
 test('#948 park beats are not load-bearing when the emitter refuses', () => {

@@ -11,12 +11,12 @@ import { dirname, join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { git, ROOT, scratchDir } from './helpers.mjs'
 import {
-  ACCEPTANCE_GATE_BLOCK, admitBrief, BRIEF_BYTE_LIMIT, BROAD_KEY_HIT_LIMIT, CONVENTIONS_BLOCK, CREATES_MARK, DEFAULT_PROTECTED_PATHS,
+  ACCEPTANCE_GATE_BLOCK, admitBrief, BRIEF_BYTE_LIMIT, BROAD_KEY_HIT_LIMIT, BriefUsageError, CONVENTIONS_BLOCK, CREATES_MARK, DEFAULT_PROTECTED_PATHS,
   DISCOVERY_PROGRESS_PREFIX, DIRECTED_BLOCK, DIRECTED_GATE_NOTE, DIRECTED_KEYS, HOSTILE_ENV_BLOCK, LADDER_BANDS, OPTIONAL_REQUEST_KEYS,
   PREMISE_UNMEASURED_REASONS, REFUSAL_REASONS, SLOT_MARKER, TIER_NAMES, crossCheckCoupling, readsToAcknowledge,
   discoverTripwires, exportEntries, extractKeys, extractSymbols, gatherFences, gatherProtectedPaths, isTripwireFile, main, symbolIndexFor,
   MUTATION_CONTRACT_BLOCK, PACK_ABSENT_REASONS, PROPOSAL_BLOCK, PROPOSAL_KEYS, profileField, proposeTier,
-  measureBrief, readLadderBands, renderBrief, renderProposalBlock, resolveIntent, resolveWriteSurface, SYMBOL_INDEX_ENTRY_LIMIT,
+  laneFenceFor, measureBrief, readLadderBands, renderBrief, renderProposalBlock, resolveIntent, resolveWriteSurface, SYMBOL_INDEX_ENTRY_LIMIT,
   SYMBOL_INDEX_ABSENT_REASONS, SYMBOL_INDEX_SCAN_LIMIT, testTitleEntries, validateAsk, writePack,
   canonicalisePremiseText, validateRequest, validateScopeEntries, verifyCreates, verifyPremises, verifyWhere,
 } from '../scripts/factory/make-brief.mjs'
@@ -1206,6 +1206,67 @@ test('the refusal and the discover mode share one derivation', () => {
   assert.deepEqual(acknowledged.map(({ file }) => file), refusal.unfenced)
 })
 
+test('RV2-1', () => {
+  const root = fixture('span-write-surface', { coupledCaller: true })
+  put(root, 'crew/drive-review.mjs', 'export function reviewDrive() { return 1 }\n')
+  put(root, 'crew/drive.mjs', [
+    "import { reviewDrive } from './drive-review.mjs'",
+    '// crew/drive-review.mjs is a coupled reviewer source',
+    'export const drive = reviewDrive()',
+    ...Array.from({ length: 202 }, () => ''),
+  ].join('\n'))
+  git(root, 'add', '-A')
+  git(root, 'commit', '-q', '-m', 'fixture')
+  const driveSpan = 'crew/drive.mjs:100-200'
+  const driveFences = put(root, 'drive-fences.json', `${JSON.stringify({ lanes: [
+    { lane: 'own', files: [driveSpan, 'crew/drive-review.mjs'] },
+  ] }, null, 2)}\n`)
+  const driveRequest = request(root, { where: ['crew/drive-review.mjs'] }, 'drive-request.json')
+  const driveOut = join(root, 'drive-brief.md')
+  const compiled = run(root, [
+    '--request', driveRequest, '--checkout', root, '--fences', driveFences,
+    '--lane', 'own', '--out', driveOut,
+  ])
+  assert.equal(compiled.status, 0, `${compiled.stderr}\n${compiled.stdout}`)
+  assert.doesNotMatch(compiled.stderr, /coupled-source-unfenced/)
+  assert.match(section(readFileSync(driveOut, 'utf8'), '## Coupled sources'), /crew\/drive\.mjs · .*inside this lane's fence/)
+
+  const span = 'lib/widget.mjs:1-1'
+  const writeSurface = resolveWriteSurface({
+    fences: [{ lane: 'own', files: [span, 'lib/caller.mjs'], reads: [] }],
+    lane: 'own',
+  })
+  assert.deepEqual(writeSurface.files, ['lib/caller.mjs', 'lib/widget.mjs'])
+
+  const discovery = {
+    candidates: ['lib/widget.mjs'],
+    tripwires: [],
+    broadKeys: [],
+    coupled: [{ file: 'lib/widget.mjs', keys: ['computeWidget'] }],
+  }
+  const coupling = crossCheckCoupling({ discovery, writeSurface })
+  assert.deepEqual(coupling.in_fence, ['lib/widget.mjs'])
+  assert.deepEqual(readsToAcknowledge({ discovery, writeSurface }), [])
+
+  const packDir = join(root, 'span-pack')
+  mkdirSync(packDir)
+  const pack = writePack({
+    packDir,
+    taskName: 'span',
+    checkout: root,
+    request: { ask: 'compile a span write surface', done_means: 'the pack names the owned source', out_of_scope: 'unrelated files' },
+    discovery,
+    writeSurface,
+    coupling,
+    profile: null,
+  })
+  assert.equal(pack.counts.readAndKeepGreen, 0)
+  assert.deepEqual(pack.lineCounts.filter((row) => row.label === 'in fence').map((row) => row.file), writeSurface.files)
+  assert.ok(pack.lineCounts.filter((row) => row.label === 'in fence').every((row) => Number.isInteger(row.lines)))
+  assert.equal(pack.symbolIndex.find((row) => row.file === 'lib/widget.mjs')?.reason, null)
+  assert.equal(pack.symbolIndex.some((row) => row.file === span), false)
+})
+
 test('baseline is measured, colour-neutral, and absent test scripts are unknown', () => {
   const root = fixture('baseline')
   const { brief } = compile(root, {}, [], 'brief.md', { FORCE_COLOR: '3' })
@@ -1487,6 +1548,69 @@ test('fences are sorted and no fence register is explicit when omitted', () => {
   assert.ok(fenceBody.indexOf('12-other') < fenceBody.indexOf('99-retry-backoff'))
   const without = compile(fixture('no-fences')).brief
   assert.match(section(without, '## Fences'), /no fence register supplied \(`--fences` not given\)/)
+})
+
+test('A1a', () => {
+  const root = fixture('span-valid')
+  git(root, 'commit', '-q', '-m', 'fixture')
+  const entry = 'lib/widget.mjs:1-1'
+  const fencesPath = put(root, 'fences.json', `${JSON.stringify({ lanes: [
+    { lane: 'own', files: [entry] },
+  ] }, null, 2)}\n`)
+  assert.deepEqual(gatherFences({ fencesPath, checkout: root }), [
+    { lane: 'own', files: [entry], reads: [] },
+  ])
+})
+
+test('A1b', () => {
+  const root = fixture('span-persisted')
+  git(root, 'commit', '-q', '-m', 'fixture')
+  const entry = 'lib/widget.mjs:1-1'
+  const fencesPath = put(root, 'fences.json', `${JSON.stringify({ lanes: [
+    { lane: 'own', files: ['config/thing.yml'] },
+    { lane: 'other', files: [entry] },
+  ] }, null, 2)}\n`)
+  const fences = gatherFences({ fencesPath, checkout: root })
+  assert.deepEqual(laneFenceFor({ fences, lane: 'own' }), [
+    { lane: 'other', files: [entry] },
+  ])
+})
+
+test('B1a', () => {
+  const root = fixture('span-reversed')
+  git(root, 'commit', '-q', '-m', 'fixture')
+  const entry = 'lib/widget.mjs:4-2'
+  const fencesPath = put(root, 'fences.json', `${JSON.stringify({ lanes: [{ lane: 'own', files: [entry] }] }, null, 2)}\n`)
+  assert.throws(() => gatherFences({ fencesPath, checkout: root }), (error) => (
+    error instanceof BriefUsageError && error.reason === 'scope-entry-shape' && error.message.includes(entry)
+  ))
+})
+
+test('B1b', () => {
+  const root = fixture('span-past-eof')
+  git(root, 'commit', '-q', '-m', 'fixture')
+  const entry = 'lib/widget.mjs:1-6'
+  const fencesPath = put(root, 'fences.json', `${JSON.stringify({ lanes: [{ lane: 'own', files: [entry] }] }, null, 2)}\n`)
+  assert.throws(() => gatherFences({ fencesPath, checkout: root }), (error) => (
+    error instanceof BriefUsageError && error.reason === 'scope-entry-shape' && error.message.includes(entry)
+  ))
+})
+
+test('B1c', () => {
+  const root = fixture('span-malformed')
+  git(root, 'commit', '-q', '-m', 'fixture')
+  const entry = 'lib/widget.mjs:bad-shape'
+  const fencesPath = put(root, 'fences.json', `${JSON.stringify({ lanes: [{ lane: 'own', files: [entry] }] }, null, 2)}\n`)
+  assert.throws(() => gatherFences({ fencesPath, checkout: root }), (error) => (
+    error instanceof BriefUsageError && error.reason === 'scope-entry-shape' && error.message.includes(entry)
+  ))
+})
+
+test('C1', () => {
+  const source = readFileSync(SCRIPT, 'utf8')
+  assert.ok(source.includes("import { parseFenceScope, validateFenceScope } from '../../crew/fence-scope.mjs'"))
+  assert.doesNotMatch(source, /\b(?:const|let|var)\s+SPAN_SUFFIX\b/)
+  assert.doesNotMatch(source, /\bfunction\s+parseFenceScope\b/)
 })
 
 test('a named lane declares its fence as the write surface and keeps discovery distinct', () => {

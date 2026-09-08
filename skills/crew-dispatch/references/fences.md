@@ -16,7 +16,7 @@ entry:
   "lanes": [
     {
       "lane": "<lane>",
-      "files": ["skills/crew-dispatch/", "skills/crew-recovery/"],
+      "files": ["skills/crew-dispatch/", "skills/crew-recovery/", "scripts/factory/make-brief.mjs:START-END"],
       "reads": [],
       "external": true
     }
@@ -48,6 +48,17 @@ no longer coupled outside the fence—refuses with `stale-read-ack`.
 A single-lane register can have no coupled sources outside its surface. In that
 case pass one has an empty coupled list and `reads: []` remains correct; do not
 invent acknowledgements merely to make the list non-empty.
+
+A register may narrow a file to one closed `path:START-END` span, for example
+`"scripts/factory/make-brief.mjs:START-END"`. Coordinates come from the lane's base
+commit, and both bounds are positive and inclusive. Reversed, past-EOF, or
+malformed spans refuse by name; a refusal names the lane entry and authored
+scope. A whole path retains its legacy whole-file or trailing-slash directory
+meaning. Two spans on the same file may dispatch together only when their
+inclusive ranges are disjoint. `crew/fence-scope.mjs` is the sole parser and
+intersection authority; do not duplicate its grammar in an operator script.
+`laneFenceFor` transports the authored register string unchanged, including its
+`:START-END` suffix, to the non-own lanes.
 
 ## Consumer-side checks
 

@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url'
 import { parseDirectedBrief, scopeMatcher, validateScopeEntries as driveValidateScopeEntries, VARIANT_NAMES, VARIANTS, TURN_CEILING_FLAGS, WAITS_S } from '../../crew/drive.mjs'
 import { assertHostQuiet, hostLoad, loadPolicy, withSuiteSlot } from '../../crew/host-load.mjs'
 import { protectedHitsIn, resolveProtectedPaths } from '../../crew/protected-paths.mjs'
+import { fenceScopesIntersect, parseFenceScope } from '../../crew/fence-scope.mjs'
 import { slug } from '../../crew/slug.mjs'
 import { LADDER_BANDS, PROPOSAL_BLOCK, TIER_NAMES, extractSymbols, gatherFences, isTripwireFile, validateRequest } from './make-brief.mjs'
 import { archivedLanes, crewRoot, discoverLanes, DRIVER_GONE_PERIODS, HEARTBEAT_PERIOD_MS, laneActive, readJournal } from './lane-watch.mjs'
@@ -879,6 +880,25 @@ function normaliseFence(entry) {
   }
 }
 
+function fenceEntryIntersects(entry, candidates) {
+  const parsed = parseFenceScope(entry)
+  if (parsed.kind === 'invalid') return false
+  const possible = Array.isArray(candidates) ? candidates : []
+  return possible.some((candidate) => {
+    const other = parseFenceScope(candidate)
+    if (other.kind === 'invalid') return false
+    if (other.path.endsWith('/') && scopeMatcher([other.path])(parsed.path)) return true
+    if (parsed.kind === 'span' || other.kind === 'span') return fenceScopesIntersect(parsed, other)
+    return scopeMatcher(possible)(entry)
+  })
+}
+
+function fenceGranularity(files) {
+  return (Array.isArray(files) ? files : []).map((entry) => (
+    parseFenceScope(entry).kind === 'span' ? `span(${entry})` : `whole-file(${entry})`
+  )).join(',')
+}
+
 function textOf(value) {
   if (value == null) return ''
   return typeof value === 'string' ? value : String(value)
@@ -1521,17 +1541,19 @@ export function crossBatchCollisions({ entries, live, externals } = {}) {
   for (const entry of ownEntries) {
     const ownFiles = (Array.isArray(entry?.files) ? entry.files : [])
       .filter((file) => typeof file === 'string').map(normaliseRepoPath)
-    const matchOwn = scopeMatcher(ownFiles)
     for (const current of liveLanes) {
       // An external entry DECLARES that this live lane holds these files, so the pair it
       // names is the intent, never a collision. Every other pair still refuses.
       if (externalNames.has(entry.lane) && entry.lane === current.lane) continue
       const liveFiles = (Array.isArray(current?.files) ? current.files : [])
         .filter((file) => typeof file === 'string').map(normaliseRepoPath)
-      const matchLive = scopeMatcher(liveFiles)
-      const collided = ownFiles.some(matchLive) || liveFiles.some(matchOwn)
+      const collided = ownFiles.some((file) => fenceEntryIntersects(file, liveFiles))
+        || liveFiles.some((file) => fenceEntryIntersects(file, ownFiles))
       if (!collided) continue
-      const files = [...new Set([...ownFiles.filter(matchLive), ...liveFiles.filter(matchOwn)])].sort()
+      const files = [...new Set([
+        ...ownFiles.filter((file) => fenceEntryIntersects(file, liveFiles)),
+        ...liveFiles.filter((file) => fenceEntryIntersects(file, ownFiles)),
+      ])].sort()
       collisions.push({ lane: entry.lane, live: current.lane, dir: current.dir, files })
     }
   }
@@ -1569,8 +1591,14 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
     if (!Array.isArray(entry.files)) {
       refuse(`invalid scope entries for lane ${entry.lane}: files must be an array`, SCOPE_ENTRY_INVALID)
     }
+    const parsed = entry.files.map((file) => parseFenceScope(file))
+    const invalid = parsed.find((scope) => scope.kind === 'invalid')
+    if (invalid) {
+      refuse(`invalid scope entries for lane ${entry.lane}: ${invalid.entry} (${invalid.reason})`, SCOPE_ENTRY_INVALID)
+    }
+    const wholeFiles = parsed.filter((scope) => scope.kind === 'file').map((scope) => scope.path)
     let shapeErrors
-    try { shapeErrors = driveValidateScopeEntries(entry.files) } catch (err) {
+    try { shapeErrors = driveValidateScopeEntries(wholeFiles) } catch (err) {
       refuse(`invalid scope entries for lane ${entry.lane}: ${err?.message || String(err)}`, SCOPE_ENTRY_INVALID)
     }
     if (shapeErrors.length > 0) {
@@ -1581,8 +1609,8 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
   const pins = collectAnchorPins({ checkout, deps: d })
   const scanRoot = typeof checkout === 'string' && checkout.trim() ? checkout : process.cwd()
   const fenceHasSurface = entries.some((entry) => (Array.isArray(entry.files) ? entry.files : []).some((file) => {
-    if (typeof file !== 'string') return false
-    const path = normaliseRepoPath(file)
+    const path = parseFenceScope(file).path
+    if (typeof path !== 'string') return false
     try { return d.existsSync(join(scanRoot, ...path.split('/'))) } catch { return false }
   }))
   let reachIndex = null
@@ -1602,9 +1630,10 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
     const name = laneNameOf(lane)
     const own = byLane.get(name)
     const ownFiles = own.files.map(normaliseRepoPath)
+    const ownPaths = ownFiles.map((file) => parseFenceScope(file).path)
     const ownWhere = laneWhereOf(lane)
     const ownCreates = laneCreatesOf(lane)
-    const matchOwn = scopeMatcher(ownFiles)
+    const matchOwn = scopeMatcher(ownPaths)
     const ownSurface = [...ownWhere, ...ownCreates]
     if (!ownSurface.every(matchOwn)) {
       const outside = ownSurface.filter((path) => !matchOwn(path))
@@ -1618,7 +1647,7 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
     // every pin in one shot, the sweep that cost b217-treefingerprint a lane when done by
     // hand. Rot and ambiguity are still fatal and are still caught where they become
     // facts — the skill's own exhibits.test.mjs — not by a static pre-dispatch guess.
-    const unfencedPins = anchorPinsOutsideFence({ surface: ownSurface, fenceFiles: ownFiles, pins })
+    const unfencedPins = anchorPinsOutsideFence({ surface: ownSurface, fenceFiles: ownPaths, pins })
     if (unfencedPins.length > 0) {
       const detail = unfencedPins.map(({ file, manifest, keys }) => `${file} pinned by ${manifest} at ${keys.join(', ')}`).join('; ')
       const rolesManifestUnfenced = unfencedPins.some(({ manifest }) => manifest === ROLES_ANCHOR_MANIFEST)
@@ -1632,7 +1661,7 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
     // The docs that CITE the lines this lane moves. The post-merge pass rewrites the
     // manifest and its carriers together; this warning names those docs so an operator
     // can fence them when correct line numbers are needed at merge time.
-    const unfencedCarriers = citationCarriersOutsideFence({ surface: ownSurface, fenceFiles: ownFiles, carriers: carriersFor() })
+    const unfencedCarriers = citationCarriersOutsideFence({ surface: ownSurface, fenceFiles: ownPaths, carriers: carriersFor() })
     if (unfencedCarriers.length > 0) {
       const docs = [...new Set(unfencedCarriers.map(({ doc }) => doc))]
       const listed = unfencedCarriers.slice(0, CITATION_CARRIER_ROW_LIMIT)
@@ -1648,7 +1677,7 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
     }
 
     const droppedReachRows = []
-    const reachRows = fenceHasSurface ? testsOutsideFence({ surface: ownSurface, fenceFiles: ownFiles, reach: reachFor(), droppedRows: droppedReachRows }) : []
+    const reachRows = fenceHasSurface ? testsOutsideFence({ surface: ownSurface, fenceFiles: ownPaths, reach: reachFor(), droppedRows: droppedReachRows }) : []
     // Classified BEFORE the warning is queued (#960). The warning closes with "not a
     // refusal", and the deferred warnings render at :1313, ahead of any refusal raised
     // after this loop — so listing a row that IS about to refuse would print the
@@ -1700,11 +1729,12 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
     for (const sibling of entries) {
       if (sibling.lane === name) continue
       const siblingFiles = sibling.files.map(normaliseRepoPath)
-      const matchSibling = scopeMatcher(siblingFiles)
+      const siblingPaths = siblingFiles.map((file) => parseFenceScope(file).path)
+      const matchSibling = scopeMatcher(siblingPaths)
       const inherited = relatedLanes(graph, name, sibling.lane)
-      if (!inherited && ownFiles.some(matchSibling)) {
-        const leaked = ownFiles.filter(matchSibling)
-        refuse(`lane ${name} own fence overlaps sibling ${sibling.lane}: ${leaked.join(', ')}`, SIBLING_LEAK)
+      if (!inherited && ownFiles.some((file) => fenceEntryIntersects(file, siblingFiles))) {
+        const leaked = ownFiles.filter((file) => fenceEntryIntersects(file, siblingFiles))
+        refuse(`lane ${name} own fence overlaps sibling ${sibling.lane}: ${leaked.join(', ')} (sibling fence: ${siblingFiles.join(', ')})`, SIBLING_LEAK)
       }
       // A created path can hide from the fence-vs-fence check above: this lane may
       // own it only through a directory prefix while a sibling owns it literally,
@@ -3138,7 +3168,7 @@ function runCommand({ lane, laneDir, briefPath, files, variant, keep, runFlags =
     args.push(`--${flag}`, String(value))
   }
   add('variant', variant ?? runFlags.variant)
-  add('files-in-scope', files.join(','))
+  add('files-in-scope', files.map((entry) => parseFenceScope(entry).path).join(','))
   add('validation-lane', runFlags['validation-lane'])
   for (const flag of [
     'plan-rounds', 'build-rounds', 'review-rounds', 'wait-builder', 'wait-planner',
@@ -3394,7 +3424,7 @@ export async function dispatchBatch({ batchDir, fences, checkout, parentDir, out
     const seats = mergeSeats(batchSeats, laneEntry?.seats)
     const result = reconcileTier({ lane: item.lane, forced: floor.forced || prompt.forced, proposed: item.proposed, requested, requestedFrom: laneEntry?.tier ? 'lane' : 'batch', forceReason: floor.forced ? TIER_FLOOR_CONFLICT : PROMPT_SURFACE_CONFLICT })
     if (!result.tier) refuse(`lane ${item.lane} has no known tier to boot`, BOOT_FAILED)
-    d.log(`dispatch-batch: lane=${item.lane} forced=${floor.forced || 'none'} prompt=${prompt.promptChange ? 'change' : 'code-only'} proposed=${item.proposed || 'none'} requested=${requested || 'none'} requested_from=${laneEntry?.tier ? 'lane' : (tier ? 'batch' : 'none')} variant=${laneVariant || 'none'} variant_from=${laneEntry?.variant ? 'lane' : (variant ? 'batch' : 'none')} settled=${result.tier} seats=${seatSpec(seats)} seats_from=${seatFromSpec(batchSeats, laneEntry?.seats)} shape=${staffing.shape || STAFFING_ABSENT} strength=${staffing.strength || STAFFING_ABSENT} misclassified=${staffing.misclassification ? 'true' : 'false'} brief_bytes=${item.bytes} top_section=${sectionToken(item.topSection)}${overrideNote(result)}`)
+    d.log(`dispatch-batch: lane=${item.lane} forced=${floor.forced || 'none'} prompt=${prompt.promptChange ? 'change' : 'code-only'} proposed=${item.proposed || 'none'} requested=${requested || 'none'} requested_from=${laneEntry?.tier ? 'lane' : (tier ? 'batch' : 'none')} variant=${laneVariant || 'none'} variant_from=${laneEntry?.variant ? 'lane' : (variant ? 'batch' : 'none')} settled=${result.tier} seats=${seatSpec(seats)} seats_from=${seatFromSpec(batchSeats, laneEntry?.seats)} shape=${staffing.shape || STAFFING_ABSENT} strength=${staffing.strength || STAFFING_ABSENT} misclassified=${staffing.misclassification ? 'true' : 'false'} brief_bytes=${item.bytes} top_section=${sectionToken(item.topSection)}${overrideNote(result)} granularity=${fenceGranularity(laneFence.files)}`)
     const recordPath = join(outputDir, `${item.lane}${DISPATCH_RECORD_SUFFIX}`)
     const record = {
       lane: item.lane,

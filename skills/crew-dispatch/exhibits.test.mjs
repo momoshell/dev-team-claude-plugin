@@ -196,11 +196,11 @@ test('B1 fixture retains an absolute same-basename collision', () => {
 
 // This string is a function of every tracked *.test.mjs file in the repo, not of this skill. If it reddens in your lane, you have added or removed a static quoted path literal naming a tracked file; the fix is to RE-MEASURE and update skills/crew-dispatch/references/batch.md, not to hunt a regression.
 // Re-measure with the shipped collectTestReach over the git ls-files partition (owners = tracked non-*.test.mjs files; tests = tracked *.test.mjs files): node --input-type=module -e "import{execFileSync}from'node:child_process';const{collectTestReach}=await import(process.cwd()+'/scripts/factory/dispatch-batch.mjs'),files=execFileSync('git',['ls-files','-z'],{encoding:'utf8'}).split(String.fromCharCode(0)).filter(Boolean),tests=new Set(files.filter(file=>file.endsWith('.test.mjs'))),nonTests=new Set(files.filter(file=>!tests.has(file))),reach=collectTestReach({checkout:process.cwd()}),rows=[...reach.pathByFile].filter(([file])=>nonTests.has(file)).flatMap(([file,reached])=>[...reached].filter(test=>tests.has(test)).map(test=>[file,test])),contributingTests=new Set(rows.map(([,test])=>test));console.log({tracked:files.length,nonTests:nonTests.size,tests:tests.size,owners:new Set(rows.map(([file])=>file)).size,pairs:rows.length,contributingTests:contributingTests.size})"
-test('batch doctrine records the shipped static path reach measurement', () => {
+test('H1', () => {
   const text = readText(join(HERE, 'references/batch.md'))
-  const measurement = '**156 of 533 tracked non-test files**, comprising **403 distinct (file, test) pairs contributed by 75 of 77 tracked `*.test.mjs` files**'
+  const measurement = '**163 of 540 tracked non-test files**, comprising **422 distinct (file, test) pairs contributed by 81 of 83 tracked `*.test.mjs` files**'
   assert.equal(text.split(measurement).length - 1, 1)
-  assert.ok(text.includes('The pristine `HEAD` baseline gives 156 owners and 402 pairs.'))
+  assert.ok(text.includes('The pristine `HEAD` baseline gives 163 owners and 422 pairs.'))
 })
 
 // Mutation killed: widening the measured shell claim or dropping a zero-count guard must make this test fail.

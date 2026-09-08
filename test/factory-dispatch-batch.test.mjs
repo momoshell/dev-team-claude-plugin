@@ -118,7 +118,7 @@ import {
   resolveRequestedTier,
 } from '../scripts/factory/dispatch-batch.mjs'
 import { parseDirectedBrief, WAITS_S } from '../crew/drive.mjs'
-import { laneFenceFor, renderBrief } from '../scripts/factory/make-brief.mjs'
+import { laneFenceFor, renderBrief, resolveWriteSurface } from '../scripts/factory/make-brief.mjs'
 import { DRIVER_GONE_PERIODS, HEARTBEAT_PERIOD_MS } from '../scripts/factory/lane-watch.mjs'
 import { scratchDir } from './helpers.mjs'
 
@@ -1244,6 +1244,152 @@ test('E1', async () => {
   assert.equal(retained.length, 5)
   assert.equal(summaries.length, 2)
   console.log(`warning-log-bytes before=${before} after=${after} rows=${reportRowCount(report)}`)
+})
+
+test('D1', () => {
+  const checkout = gitFixture()
+  put(join(checkout, 'crew', 'shared.mjs'), `${Array.from({ length: 20 }, (_, index) => `line-${index + 1}`).join('\n')}\n`)
+  assert.doesNotThrow(() => checkFences({
+    fences: [
+      entry('lane-a', ['crew/shared.mjs:1-10']),
+      entry('lane-b', ['crew/shared.mjs:11-20']),
+    ],
+    lanes: [
+      { lane: 'lane-a', where: ['crew/shared.mjs'] },
+      { lane: 'lane-b', where: ['crew/shared.mjs'] },
+    ],
+    checkout,
+    deps: { home: join(root, 'span-disjoint-home'), log: () => {} },
+  }))
+})
+
+test('E1', () => {
+  const checkout = gitFixture()
+  put(join(checkout, 'crew', 'shared.mjs'), `${Array.from({ length: 20 }, (_, index) => `line-${index + 1}`).join('\n')}\n`)
+  const first = 'crew/shared.mjs:1-10'
+  const second = 'crew/shared.mjs:10-20'
+  const error = thrown(() => checkFences({
+    fences: [entry('lane-a', [first]), entry('lane-b', [second])],
+    lanes: [
+      { lane: 'lane-a', where: ['crew/shared.mjs'] },
+      { lane: 'lane-b', where: ['crew/shared.mjs'] },
+    ],
+    checkout,
+    deps: { home: join(root, 'span-overlap-home'), log: () => {} },
+  }))
+  assert.equal(error.reason, 'sibling-leak')
+  for (const token of ['lane-a', 'lane-b', first, second]) assert.ok(error.message.includes(token), `E1 omitted ${token}`)
+})
+
+test('F1a', () => {
+  const checkout = gitFixture()
+  assert.doesNotThrow(() => checkFences({
+    fences: [entry('lane-a', ['src/owned.mjs']), entry('lane-b', ['src/stale.mjs'])],
+    lanes: [
+      { lane: 'lane-a', where: ['src/owned.mjs'] },
+      { lane: 'lane-b', where: ['src/stale.mjs'] },
+    ],
+    checkout,
+    deps: { home: join(root, 'legacy-files-home'), log: () => {} },
+  }))
+  const error = thrown(() => checkFences({
+    fences: [entry('lane-a', ['src/owned.mjs']), entry('lane-b', ['src/owned.mjs'])],
+    lanes: [
+      { lane: 'lane-a', where: ['src/owned.mjs'] },
+      { lane: 'lane-b', where: ['src/owned.mjs'] },
+    ],
+    checkout,
+    deps: { home: join(root, 'legacy-file-overlap-home'), log: () => {} },
+  }))
+  assert.equal(error.reason, 'sibling-leak')
+})
+
+test('F1b', () => {
+  const checkout = gitFixture()
+  assert.doesNotThrow(() => checkFences({
+    fences: [entry('lane-a', ['src/sub/']), entry('lane-b', ['src/other.mjs'])],
+    lanes: [
+      { lane: 'lane-a', where: ['src/sub/'] },
+      { lane: 'lane-b', where: ['src/other.mjs'] },
+    ],
+    checkout,
+    deps: { home: join(root, 'legacy-directory-home'), log: () => {} },
+  }))
+  const error = thrown(() => checkFences({
+    fences: [entry('lane-a', ['src/sub/']), entry('lane-b', ['src/sub/file.mjs'])],
+    lanes: [
+      { lane: 'lane-a', where: ['src/sub/'] },
+      { lane: 'lane-b', where: ['src/sub/file.mjs'] },
+    ],
+    checkout,
+    deps: { home: join(root, 'legacy-directory-overlap-home'), log: () => {} },
+  }))
+  assert.equal(error.reason, 'sibling-leak')
+})
+
+test('G1', async () => {
+  const result = await dispatchFixture({
+    label: 'granularity',
+    names: ['plain', 'span'],
+    fences: [
+      entry('plain', ['crew/owned-plain.mjs']),
+      entry('span', ['crew/owned-span.mjs:1-1']),
+    ],
+  })
+  const lines = result.logs.filter((line) => line.startsWith('dispatch-batch: lane='))
+  assert.ok(lines.some((line) => line.includes('lane=plain') && line.includes('whole-file(crew/owned-plain.mjs)')))
+  assert.ok(lines.some((line) => line.includes('lane=span') && line.includes('span(crew/owned-span.mjs:1-1)')))
+})
+
+test('RV1-1', async () => {
+  const span = 'crew/owned-span.mjs:1-1'
+  const path = 'crew/owned-span.mjs'
+  const result = await dispatchFixture({
+    label: 'span-transport',
+    names: ['span'],
+    fences: [entry('span', [span])],
+  })
+  const run = result.spawned.find(({ args }) => args.includes('crew/crew.mjs') && args.includes('--files-in-scope'))
+  assert.ok(run)
+  const args = run.args.map(String)
+  assert.equal(args[args.indexOf('--files-in-scope') + 1], path)
+
+  const expected = 'files_in_scope (expected write surface; basis: fence register, lane "span"): crew/owned-span.mjs'
+  const gathered = {
+    request: request('transport a span fence without passing its coordinates to crew', [path]),
+    where: [],
+    discovery: { candidates: [path], tripwires: [], broadKeys: [] },
+    writeSurface: resolveWriteSurface({ fences: [entry('span', [span])], lane: 'span' }),
+  }
+  for (const pack of [null, { counts: { readAndKeepGreen: 0 }, conventions: 'span.conventions.md' }]) {
+    const brief = renderBrief({ ...gathered, ...(pack === null ? {} : { pack }) })
+    assert.ok(brief.includes(expected))
+    assert.equal(brief.includes(`${expected}:1-1`), false)
+  }
+})
+
+test('RV1-2', () => {
+  const checkout = gitFixture()
+  const directory = 'scripts/factory/'
+  const span = 'scripts/factory/make-brief.mjs:1-100'
+  const error = thrown(() => checkFences({
+    fences: [entry('lane-a', [directory]), entry('lane-b', [span])],
+    lanes: [
+      { lane: 'lane-a', where: [directory] },
+      { lane: 'lane-b', where: ['scripts/factory/make-brief.mjs'] },
+    ],
+    checkout,
+    deps: { home: join(root, 'directory-span-home'), log: () => {} },
+  }))
+  assert.equal(error.reason, 'sibling-leak')
+  for (const token of ['lane-a', 'lane-b', directory, span]) assert.ok(error.message.includes(token), `RV1-2 omitted ${token}`)
+
+  assert.deepEqual(crossBatchCollisions({
+    entries: [entry('lane-c', [span])],
+    live: [{ lane: 'live-directory', dir: '/tmp/live-directory', files: [directory] }],
+  }), [{
+    lane: 'lane-c', live: 'live-directory', dir: '/tmp/live-directory', files: [span],
+  }])
 })
 
 test('checkFences reports direct and two-hop test reach without refusing', () => {
@@ -4402,7 +4548,7 @@ test('staffing fields append to the existing settled dispatch log line', async (
   assert.equal(line.startsWith(
     'dispatch-batch: lane=lane-a forced=none prompt=code-only proposed=none requested=mechanical requested_from=batch variant=full variant_from=batch settled=mechanical',
   ), true)
-  assert.match(line, / shape=judge strength=workhorse misclassified=false brief_bytes=65 top_section=none$/)
+  assert.match(line, / shape=judge strength=workhorse misclassified=false brief_bytes=65 top_section=none granularity=whole-file\(crew\/owned-lane-a\.mjs\)$/)
 })
 
 async function compileBriefProposal(brief, label) {

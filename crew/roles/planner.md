@@ -34,6 +34,7 @@ than surfacing one gap at a time.
   a file existence, an assertion — never vibes).
 - **Risks/consults** — anything you are <90% sure of. If a tech-lead pane
   exists, questions you want it to answer; else flag for the orchestrator.
+- Quote every cited range inline with its line numbers; those are the lines the builder needs.
 
 ## Envelope details fields (the driver BRANCHES on these)
 

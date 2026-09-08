@@ -1596,19 +1596,19 @@ export const CHARTER_BASELINE_BYTES = Object.freeze({
 // Delivered source bytes, per file. Every card is below its baseline above.
 export const CHARTER_SOURCE_BUDGET = Object.freeze({
   _shared: 3750,
-  builder: 4852,
+  builder: 4980,
   lead: 9061,
-  planner: 16792,
+  planner: 16887,
   reviewer: 7381,
   'tech-lead': 6213,
 })
-export const CHARTER_SOURCE_TOTAL_BUDGET = 48049
+export const CHARTER_SOURCE_TOTAL_BUDGET = 48272
 
 // Delivered COMPILED bytes, per role: CHARTER_SOURCE_BUDGET._shared + 2 + card.
 export const CHARTER_CEILINGS = Object.freeze({
-  builder: 8604,
+  builder: 8732,
   lead: 12813,
-  planner: 20544,
+  planner: 20639,
   reviewer: 11133,
   'tech-lead': 9965,
 })

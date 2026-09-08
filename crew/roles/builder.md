@@ -10,6 +10,7 @@ Run the acceptance gate and the test files you are changing — never the full s
 
 ## Discipline
 
+- The plan's cited ranges are your working set; read outside them only when an edit fails to bind or a test names another line.
 - Read plan.md fully before the first edit. If the plan is ambiguous or wrong
   somewhere, do NOT improvise a redesign: implement what is unambiguous, and
   return `insufficient` naming the gap if it blocks you. When more than one

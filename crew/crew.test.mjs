@@ -41,6 +41,7 @@ import {
 import { reclaimStore } from './reclaim.mjs'
 import { seatCommand, headlessCommand as claudeHeadlessCommand, capabilitiesFor, modelString as claudeModelString, mcpConfigPath, paneUsageRecords } from './adapters/adapter-claude.mjs'
 import { seatCommand as piSeatCommand, capabilitiesFor as piCapabilitiesFor, modelString as piModelString, translateDeny, PI_BUILTIN_TOOLS } from './adapters/adapter-pi.mjs'
+import { rpcCommand } from './headless-rpc.mjs'
 import {
   cellFailureKind, paneAlive, paneProbe, seatIo, DEFAULT_TRANSPORT, SEAT_REFUSAL_STAGE, SUBSTRATE_GRACE_MS, SUBSTRATE_MISSES_TO_DIE,
   VARIANT_STAGE_PHASES, paneTeardownRows, PANE_SETTLE_POLLS, PANE_SETTLE_MS,
@@ -466,6 +467,68 @@ test('the granted pi planner pane command is pinned byte for byte so by_agent de
     piSeatCommand({ ...PIN_SEAT, model: 'openai-codex/gpt-5.6', grants: EMPTY_GRANTS }),
     'env DEVTEAM_WORKER=1 CREW_ROLE=planner CREW_TASK_DIR="/tmp/crew-task" pi --model openai-codex/gpt-5.6 --tools "read,bash,edit,write,grep,find,ls" --exclude-tools "edit" --no-extensions --no-skills --append-system-prompt "/tmp/crew-task/role-planner.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
   )
+})
+
+test('BG1', () => {
+  const register = loadCapabilities()
+  const builderGrants = grantsFor(register, 'builder', { ...PIN_ROOT, agent: 'pi' })
+  assert.doesNotThrow(() => assertGrantsBacked('builder', builderGrants, register, { agent: 'pi' }))
+  const builder = {
+    role: 'builder', model: 'openai-codex/gpt-5.6', promptFile: '/tmp/role-builder.md',
+    tools: SEAT_DEFAULTS.builder.tools, deny: SEAT_DEFAULTS.builder.deny, taskDir: '/tmp/crew-task',
+    bootBrief: PIN_SEAT.bootBrief, grants: builderGrants,
+  }
+  assert.deepEqual(
+    piSeatCommand(builder),
+    'env DEVTEAM_WORKER=1 CREW_ROLE=builder CREW_TASK_DIR="/tmp/crew-task" pi --model openai-codex/gpt-5.6 --tools "read,bash,edit,write,grep,find,ls" --no-extensions -e "/repo/crew/pi/extensions/builderloop.ts" --no-skills --append-system-prompt "/tmp/role-builder.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
+  )
+  assert.equal(piSeatCommand(builder).split(' -e ').length - 1, 1)
+  assert.ok(piSeatCommand(builder).includes('-e "/repo/crew/pi/extensions/builderloop.ts"'))
+  const claudeBuilder = grantsFor(register, 'builder', { ...PIN_ROOT, agent: 'claude' })
+  assert.deepEqual(claudeBuilder.extensions, [])
+  assert.equal(seatCommand({ ...builder, grants: claudeBuilder }).includes('/repo/crew/pi/extensions/builderloop.ts'), false)
+  for (const role of ROLE_ORDER.filter((name) => name !== 'builder')) {
+    const grants = grantsFor(register, role, { ...PIN_ROOT, agent: 'pi' })
+    assert.doesNotThrow(() => assertGrantsBacked(role, grants, register, { agent: 'pi' }))
+    const command = piSeatCommand({
+      ...builder, role, model: 'openai-codex/gpt-5.6', promptFile: `/tmp/role-${role}.md`,
+      tools: SEAT_DEFAULTS[role].tools, deny: SEAT_DEFAULTS[role].deny, grants,
+    })
+    assert.equal(command.includes('/repo/crew/pi/extensions/builderloop.ts'), false)
+  }
+})
+
+test('BG2', () => {
+  const register = loadCapabilities()
+  const builderGrants = grantsFor(register, 'builder', { ...PIN_ROOT, agent: 'pi' })
+  assert.doesNotThrow(() => assertGrantsBacked('builder', builderGrants, register, { agent: 'pi' }))
+  const builder = rpcCommand({
+    bin: '/repo/pi', model: 'openai-codex/gpt-5.6', effort: 'max', sessionDir: '/tmp/crew-task/sessions', sessionId: 'builder',
+    promptFile: '/tmp/role-builder.md', deny: SEAT_DEFAULTS.builder.deny,
+    env: { CREW_ROLE: 'builder', CREW_TASK_DIR: '/tmp/crew-task' }, grants: builderGrants,
+  })
+  assert.deepEqual(builder, {
+    bin: '/repo/pi',
+    args: [
+      '--mode', 'rpc', '--model', 'openai-codex/gpt-5.6', '--thinking', 'max', '--session-dir', '/tmp/crew-task/sessions',
+      '--session-id', 'builder', '--append-system-prompt', '/tmp/role-builder.md',
+      '--tools', 'read,bash,edit,write,grep,find,ls', '--no-context-files', '--no-extensions',
+      '-e', '/repo/crew/pi/extensions/builderloop.ts', '--no-skills',
+    ],
+    env: { CREW_ROLE: 'builder', CREW_TASK_DIR: '/tmp/crew-task' },
+  })
+  assert.equal(builder.args.filter((value) => value === '-e').length, 1)
+  assert.equal(builder.args.includes('/repo/crew/pi/extensions/builderloop.ts'), true)
+  for (const role of ROLE_ORDER.filter((name) => name !== 'builder')) {
+    const grants = grantsFor(register, role, { ...PIN_ROOT, agent: 'pi' })
+    assert.doesNotThrow(() => assertGrantsBacked(role, grants, register, { agent: 'pi' }))
+    const command = rpcCommand({
+      bin: '/repo/pi', model: 'openai-codex/gpt-5.6', effort: 'max', sessionDir: '/tmp/crew-task/sessions', sessionId: role,
+      promptFile: `/tmp/role-${role}.md`, deny: SEAT_DEFAULTS[role].deny,
+      env: { CREW_ROLE: role, CREW_TASK_DIR: '/tmp/crew-task' }, grants,
+    })
+    assert.equal(command.args.includes('/repo/crew/pi/extensions/builderloop.ts'), false)
+  }
 })
 
 test('A1', () => {
@@ -3518,14 +3581,14 @@ test('the charter ceilings and source budgets are the delivered bytes, below the
   assert.equal(Object.isFrozen(CHARTER_SOURCE_BUDGET), true)
   assert.equal(Object.isFrozen(CHARTER_BASELINE_BYTES), true)
   assert.deepEqual(CHARTER_BASELINE_BYTES, { _shared: 3432, builder: 5169, lead: 9378, planner: 16930, reviewer: 7697, 'tech-lead': 6529 })
-  assert.deepEqual(CHARTER_SOURCE_BUDGET, { _shared: 3750, builder: 4980, lead: 9061, planner: 16887, reviewer: 7381, 'tech-lead': 6213 })
-  assert.deepEqual(CHARTER_CEILINGS, { builder: 8732, lead: 12813, planner: 20639, reviewer: 11133, 'tech-lead': 9965 })
+  assert.deepEqual(CHARTER_SOURCE_BUDGET, { _shared: 3750, builder: 5126, lead: 9061, planner: 16887, reviewer: 7381, 'tech-lead': 6213 })
+  assert.deepEqual(CHARTER_CEILINGS, { builder: 8878, lead: 12813, planner: 20639, reviewer: 11133, 'tech-lead': 9965 })
   for (const value of [...Object.values(CHARTER_BASELINE_BYTES), ...Object.values(CHARTER_SOURCE_BUDGET), ...Object.values(CHARTER_CEILINGS)]) assert.equal(Number.isInteger(value), true)
   for (const role of roles) {
     assert.equal(CHARTER_CEILINGS[role], CHARTER_SOURCE_BUDGET._shared + 2 + CHARTER_SOURCE_BUDGET[role])
     assert.ok(CHARTER_SOURCE_BUDGET[role] < CHARTER_BASELINE_BYTES[role])
   }
-  assert.equal(CHARTER_SOURCE_TOTAL_BUDGET, 48272)
+  assert.equal(CHARTER_SOURCE_TOTAL_BUDGET, 48418)
   assert.equal(CHARTER_SOURCE_TOTAL_BUDGET, Object.values(CHARTER_SOURCE_BUDGET).reduce((sum, value) => sum + value, 0))
   assert.ok(CHARTER_SOURCE_TOTAL_BUDGET < 49135)
 
@@ -3542,6 +3605,19 @@ test('the charter ceilings and source budgets are the delivered bytes, below the
     const expected = Buffer.byteLength(`${shared}\n\n${card}`, 'utf8')
     assert.deepEqual(compiled[role], { bytes: expected, reason: null })
     assert.equal(compiled[role].bytes, CHARTER_CEILINGS[role])
+  }
+})
+
+test('BH1', () => {
+  const source = charterFileBytes()
+  const compiled = compiledCharterBytes()
+  assert.deepEqual(charterSourceRefusals(), [])
+  assert.deepEqual(charterBudgetRefusals(), [])
+  assert.doesNotThrow(() => assertCharterBudgets(compiled, source))
+  assert.deepEqual(Object.fromEntries(Object.entries(source).map(([name, entry]) => [name, entry.bytes])), CHARTER_SOURCE_BUDGET)
+  for (const [role, entry] of Object.entries(compiled)) {
+    assert.equal(entry.bytes, CHARTER_CEILINGS[role])
+    assert.ok(CHARTER_SOURCE_BUDGET[role] < CHARTER_BASELINE_BYTES[role])
   }
 })
 

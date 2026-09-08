@@ -10,6 +10,7 @@ Run the acceptance gate and the test files you are changing — never the full s
 
 ## Discipline
 
+- Batch independent reads and edits into one turn. Run the gate at most once before returning; never rerun a command without an intervening edit.
 - The plan's cited ranges are your working set; read outside them only when an edit fails to bind or a test names another line.
 - Read plan.md fully before the first edit. If the plan is ambiguous or wrong
   somewhere, do NOT improvise a redesign: implement what is unambiguous, and

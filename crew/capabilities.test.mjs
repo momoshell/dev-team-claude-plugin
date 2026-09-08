@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, writeFileSync, mkdtempSync, mkdirSync, rmSync, readdirSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync, mkdtempSync, mkdirSync, rmSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join, dirname, resolve as resolvePath } from 'node:path'
 import {
@@ -174,6 +174,22 @@ test('the shipped planner pi overlay resolves its checkout-pinned bundle', () =>
     join(REGISTER_ROOT, 'crew/pi/extensions/lab.ts'),
   ])
   assert.deepEqual(grants.agents, [{ name: 'scout', def: join(REGISTER_ROOT, 'crew/pi/agents/scout.json') }])
+})
+
+test('the shipped builder pi overlay resolves exactly one checkout-pinned extension', () => {
+  const loaded = loadCapabilities()
+  const expected = join(REGISTER_ROOT, 'crew/pi/extensions/builderloop.ts')
+  const pi = grantsFor(loaded, 'builder', { agent: 'pi' })
+  assert.deepEqual(pi.extensions, [expected])
+  assert.equal(existsSync(expected), true)
+  assert.doesNotThrow(() => assertGrantsBacked('builder', pi, loaded, { agent: 'pi' }))
+  const claude = grantsFor(loaded, 'builder', { agent: 'claude' })
+  assert.deepEqual(claude.extensions, [])
+  const forged = { ...pi, extensions: [...pi.extensions, join(REGISTER_ROOT, 'crew/pi/extensions/forged.ts')] }
+  assert.throws(
+    () => assertGrantsBacked('builder', forged, loaded, { agent: 'pi' }),
+    (err) => err.reason === 'unknown-grant',
+  )
 })
 
 test('an adapter without an overlay gets exactly the role-level grant', () => {

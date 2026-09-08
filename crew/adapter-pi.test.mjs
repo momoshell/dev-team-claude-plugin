@@ -242,6 +242,23 @@ test('granted pi seats append deduped activators and checkout-pinned extension, 
   assert.doesNotMatch(command, /--provider/)
 })
 
+test('a passive extension-only grant adds exactly one quoted operand without changing seat posture', () => {
+  const shape = {
+    role: 'builder', model: 'sonnet', promptFile: '/tmp/role-builder.md', tools: 'Read', deny: 'Edit,NotebookEdit',
+    taskDir: '/tmp/task', bootBrief: 'boot',
+  }
+  const grants = { tools: [], extensions: ['/repo/crew/pi/extensions/builderloop.ts'], agents: [], skills: [], advisor: false }
+  const plain = seatCommand({ ...shape, grants: { ...grants, extensions: [] } })
+  const granted = seatCommand({ ...shape, grants })
+  assert.equal(granted.split(' -e ').length - 1, 1)
+  assert.ok(granted.includes('-e "/repo/crew/pi/extensions/builderloop.ts"'))
+  assert.equal(granted.replace(' -e "/repo/crew/pi/extensions/builderloop.ts"', ''), plain)
+  assert.equal(granted.includes('--tools "Read"'), plain.includes('--tools "Read"'))
+  assert.equal(granted.includes('--exclude-tools "edit"'), plain.includes('--exclude-tools "edit"'))
+  assert.equal(granted.includes('--no-skills'), plain.includes('--no-skills'))
+  assert.equal(granted.slice(0, granted.indexOf(' pi ')), plain.slice(0, plain.indexOf(' pi ')))
+})
+
 test('pi extension operands survive every shell-active character through the shell parser', () => {
   const shape = {
     role: 'planner', model: 'sonnet', promptFile: '/tmp/prompt.md', tools: 'Read', deny: '',

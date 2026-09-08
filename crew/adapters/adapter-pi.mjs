@@ -142,11 +142,13 @@ export function translateDeny(deny) {
 // The tool name crew/pi/extensions/subagent.ts registers. Exported so the
 // register-path tests can name it without a literal.
 export const PI_SUBAGENT_TOOL = 'agent'
+export const PI_RETRIEVE_TOOL = 'retrieve'
 
 // The advisor extension a register-granted seat loads. The register grants a
 // BOOLEAN, not a path, so the path is the adapter's own checkout-pinned
 // knowledge — resolved from this file's URL, never from cwd.
 export const PI_ADVISOR_EXTENSION = fileURLToPath(new URL('../pi/extensions/advisor.ts', import.meta.url))
+export const PI_SKELETONREAD_EXTENSION = fileURLToPath(new URL('../pi/extensions/skeletonread.ts', import.meta.url))
 export const PI_ADVISOR_ENV = 'CREW_ADVISOR'
 export const PI_ADVISOR_ENDPOINT_ENV = 'CREW_ADVISOR_ENDPOINT'
 export const PI_ADVISOR_MODEL_ENV = 'CREW_ADVISOR_MODEL'
@@ -232,10 +234,11 @@ export function seatCommand({ role, model, promptFile, tools, deny, taskDir, boo
   // callable. Extension tools are active by default ONLY when --tools is
   // absent (:2003-2007) — this adapter always passes it, so activation is
   // mandatory here, not merely additive.
-  const fanout = (grants?.agents?.length ?? 0) > 0 ? [PI_SUBAGENT_TOOL] : []
-  const activatedTools = [...new Set([...PI_BUILTIN_TOOLS, ...(grants?.tools || []), ...fanout])]
   const advisor = grants?.advisor === true
   const extensions = [...new Set([...(grants?.extensions || []), ...(advisor ? [PI_ADVISOR_EXTENSION] : [])])]
+  const skeletonRead = extensions.includes(PI_SKELETONREAD_EXTENSION) ? [PI_RETRIEVE_TOOL] : []
+  const fanout = (grants?.agents?.length ?? 0) > 0 ? [PI_SUBAGENT_TOOL] : []
+  const activatedTools = [...new Set([...PI_BUILTIN_TOOLS, ...(grants?.tools || []), ...fanout, ...skeletonRead])]
   const skills = grants?.skills || []
   return [
     'env', 'DEVTEAM_WORKER=1', `CREW_ROLE=${role}`, `CREW_TASK_DIR="${taskDir}"`,

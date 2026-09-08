@@ -480,9 +480,9 @@ test('BG1', () => {
   }
   assert.deepEqual(
     piSeatCommand(builder),
-    'env DEVTEAM_WORKER=1 CREW_ROLE=builder CREW_TASK_DIR="/tmp/crew-task" pi --model openai-codex/gpt-5.6 --tools "read,bash,edit,write,grep,find,ls" --no-extensions -e "/repo/crew/pi/extensions/builderloop.ts" -e "/repo/crew/pi/extensions/readgate.ts" --no-skills --append-system-prompt "/tmp/role-builder.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
+    'env DEVTEAM_WORKER=1 CREW_ROLE=builder CREW_TASK_DIR="/tmp/crew-task" pi --model openai-codex/gpt-5.6 --tools "read,bash,edit,write,grep,find,ls" --no-extensions -e "/repo/crew/pi/extensions/builderloop.ts" -e "/repo/crew/pi/extensions/readgate.ts" -e "/repo/crew/pi/extensions/skeletonread.ts" --no-skills --append-system-prompt "/tmp/role-builder.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
   )
-  assert.equal(piSeatCommand(builder).split(' -e ').length - 1, 2)
+  assert.equal(piSeatCommand(builder).split(' -e ').length - 1, 3)
   assert.ok(piSeatCommand(builder).includes('-e "/repo/crew/pi/extensions/builderloop.ts"'))
   assert.ok(piSeatCommand(builder).includes('-e "/repo/crew/pi/extensions/readgate.ts"'))
   const claudeBuilder = grantsFor(register, 'builder', { ...PIN_ROOT, agent: 'claude' })
@@ -524,13 +524,15 @@ test('BG2', () => {
       '--mode', 'rpc', '--model', 'openai-codex/gpt-5.6', '--thinking', 'max', '--session-dir', '/tmp/crew-task/sessions',
       '--session-id', 'builder', '--append-system-prompt', '/tmp/role-builder.md',
       '--tools', 'read,bash,edit,write,grep,find,ls', '--no-context-files', '--no-extensions',
-      '-e', '/repo/crew/pi/extensions/builderloop.ts', '-e', '/repo/crew/pi/extensions/readgate.ts', '--no-skills',
+      '-e', '/repo/crew/pi/extensions/builderloop.ts', '-e', '/repo/crew/pi/extensions/readgate.ts',
+      '-e', '/repo/crew/pi/extensions/skeletonread.ts', '--no-skills',
     ],
     env: { CREW_ROLE: 'builder', CREW_TASK_DIR: '/tmp/crew-task' },
   })
-  assert.equal(builder.args.filter((value) => value === '-e').length, 2)
+  assert.equal(builder.args.filter((value) => value === '-e').length, 3)
   assert.equal(builder.args.includes('/repo/crew/pi/extensions/builderloop.ts'), true)
   assert.equal(builder.args.includes('/repo/crew/pi/extensions/readgate.ts'), true)
+  assert.equal(builder.args.includes('/repo/crew/pi/extensions/skeletonread.ts'), true)
   for (const role of ROLE_ORDER.filter((name) => name !== 'builder')) {
     const grants = grantsFor(register, role, { ...PIN_ROOT, agent: 'pi' })
     assert.doesNotThrow(() => assertGrantsBacked(role, grants, register, { agent: 'pi' }))

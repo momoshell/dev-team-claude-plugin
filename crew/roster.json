@@ -31,9 +31,9 @@
         "effort": "medium"
       },
       "planner": {
-        "provider": "anthropic",
-        "id": "claude-opus-5",
-        "agent": "claude",
+        "provider": "openai",
+        "id": "gpt-5.6-sol",
+        "agent": "pi",
         "effort": "medium"
       },
       "builder": {
@@ -43,9 +43,9 @@
         "effort": "max"
       },
       "reviewer": {
-        "provider": "openai",
-        "id": "gpt-5.6-sol",
-        "agent": "pi",
+        "provider": "anthropic",
+        "id": "claude-opus-5",
+        "agent": "claude",
         "effort": "high"
       }
     },
@@ -57,10 +57,10 @@
         "effort": "high"
       },
       "planner": {
-        "provider": "anthropic",
-        "id": "claude-opus-5",
-        "agent": "claude",
-        "effort": "high"
+        "provider": "openai",
+        "id": "gpt-5.6-sol",
+        "agent": "pi",
+        "effort": "medium"
       },
       "builder": {
         "provider": "openai",
@@ -72,7 +72,7 @@
         "provider": "anthropic",
         "id": "claude-opus-5",
         "agent": "claude",
-        "effort": "xhigh"
+        "effort": "high"
       },
       "tech-lead": {
         "provider": "openai",

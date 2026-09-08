@@ -2538,6 +2538,74 @@ test('extractSymbols is the exported-symbol half and tolerates object input', ()
   assert.deepEqual(extractSymbols("export const PublicValue = 1", 'docs/example.txt'), [])
 })
 
+test('OF1', () => {
+  const rows = exportEntries("export { remoteThing as localThing } from './remote.mjs';\n", 'fixture.mjs')
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].name, 'localThing')
+  assert.equal(rows[0].line, 1)
+  assert.match(rows[0].signature, /from ['\"]\.\/remote\.mjs['\"]/)
+  assert.equal(rows[0].bodySpan, null)
+  assert.deepEqual(rows[0].signatureSpan, { start: 1, end: 1 })
+})
+
+test('MF1', () => {
+  const source = [
+    'const first = () => { return 1 }',
+    'const second = () => { return 2 }',
+    'export {',
+    '  first,',
+    '  second as renamed,',
+    '};',
+  ].join('\n') + '\n'
+  const rows = exportEntries(source, 'fixture.mjs')
+  assert.deepEqual(rows.map(({ name, line }) => ({ name, line })), [
+    { name: 'first', line: 3 }, { name: 'renamed', line: 3 },
+  ])
+  assert.equal(rows[0].signatureSpan.start, 3)
+  assert.equal(rows[0].signatureSpan.end, 6)
+  assert.match(rows[0].signature, /second as renamed/)
+  assert.notDeepEqual(rows[0].signatureSpan, rows[0].bodySpan)
+})
+
+test('NL1', () => {
+  const source = [
+    'function alpha() { return "alpha-body" }',
+    'const beta = () => "beta-body"',
+    'class Gamma { method() { return "gamma-body" } }',
+    'export { alpha, beta as betaAlias, Gamma as GammaAlias };',
+  ].join('\n') + '\n'
+  const rows = exportEntries(source, 'fixture.mjs')
+  assert.deepEqual(rows.map((row) => row.name), ['GammaAlias', 'alpha', 'betaAlias'])
+  assert.equal(rows.find((row) => row.name === 'alpha').bodySpan.start, 1)
+  assert.equal(rows.find((row) => row.name === 'betaAlias').bodySpan.start, 2)
+  assert.equal(rows.find((row) => row.name === 'GammaAlias').bodySpan.start, 3)
+})
+
+test('DF1', () => {
+  const rows = exportEntries('export default function defaultThing() { return 7 }\n', 'fixture.mjs')
+  assert.deepEqual(rows.map(({ name, line }) => ({ name, line })), [{ name: 'default', line: 1 }])
+  assert.equal(rows[0].bodySpan.start, 1)
+  assert.match(rows[0].signature, /export default function defaultThing/)
+})
+
+test('BL1', () => {
+  const source = [
+    'export var unsupportedVar = 1;',
+    "export * from './everything.mjs';",
+    'export interface UnsupportedInterface { value: string }',
+    'export const supportedValue = 2;',
+  ].join('\n') + '\n'
+  const names = exportEntries(source, 'fixture.ts').map((row) => row.name)
+  assert.deepEqual(names, ['supportedValue'])
+})
+
+test('TS1', () => {
+  assert.deepEqual(exportEntries('export const typedValue: number = 1;\n', 'fixture.ts').map(({ name, line }) => ({ name, line })), [
+    { name: 'typedValue', line: 1 },
+  ])
+  assert.deepEqual(exportEntries('export const ignoredValue = 1;\n', 'fixture.txt'), [])
+})
+
 test('real limits discovery names its non-test callers without widening tripwires', () => {
   const where = verifyWhere({ checkout: ROOT, where: ['crew/limits.mjs'] })
   const discovery = discoverTripwires({ checkout: ROOT, files: where })

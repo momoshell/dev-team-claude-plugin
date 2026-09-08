@@ -186,6 +186,7 @@ test('the shipped builder pi overlay resolves its checkout-pinned extensions', (
   const expected = [
     join(REGISTER_ROOT, 'crew/pi/extensions/builderloop.ts'),
     join(REGISTER_ROOT, 'crew/pi/extensions/readgate.ts'),
+    join(REGISTER_ROOT, 'crew/pi/extensions/skeletonread.ts'),
   ]
   const pi = grantsFor(loaded, 'builder', { agent: 'pi' })
   assert.deepEqual(pi.extensions, expected)
@@ -198,6 +199,18 @@ test('the shipped builder pi overlay resolves its checkout-pinned extensions', (
     () => assertGrantsBacked('builder', forged, loaded, { agent: 'pi' }),
     (err) => err.reason === 'unknown-grant',
   )
+})
+
+test('GR1', () => {
+  const loaded = loadCapabilities()
+  const skeleton = join(REGISTER_ROOT, 'crew/pi/extensions/skeletonread.ts')
+  const builder = grantsFor(loaded, 'builder', { agent: 'pi' })
+  assert.ok(builder.extensions.includes(skeleton))
+  assert.equal(existsSync(skeleton), true)
+  assert.doesNotThrow(() => assertGrantsBacked('builder', builder, loaded, { agent: 'pi' }))
+  assert.equal(grantsFor(loaded, 'builder', { agent: 'claude' }).extensions.includes(skeleton), false)
+  assert.equal(grantsFor(loaded, 'planner', { agent: 'pi' }).extensions.includes(skeleton), false)
+  assert.equal(grantsFor(loaded, 'tech-lead', { agent: 'pi' }).extensions.includes(skeleton), false)
 })
 
 test('the shipped tech-lead pi overlay resolves its checkout-pinned read gate only', () => {

@@ -47,6 +47,7 @@ import {
   ProbeUsageError, ProfileRefusal, defaultProfilePath, profileProtectedPaths, readProfile, repoKeyFor, requireField,
 } from './probe-repo.mjs'
 import { resolveProtectedPaths } from '../../crew/protected-paths.mjs'
+import { parseFenceScope, validateFenceScope } from '../../crew/fence-scope.mjs'
 
 const REQUEST_KEYS = Object.freeze(['ask', 'where', 'done_means', 'out_of_scope'])
 export const PACK_OMISSIONS = Object.freeze(['symbols'])
@@ -1072,6 +1073,62 @@ export function gatherBaseline({ checkout, lane = null, laneBasis = null } = {})
   return { lane: selectedLane, pass, fail, status: 'green', reason: null, laneBasis: basis }
 }
 
+function fenceLineCount(text) {
+  const normal = text.replace(/\r\n/g, '\n')
+  if (normal.length === 0) return 0
+  return normal.endsWith('\n') ? normal.slice(0, -1).split('\n').length : normal.split('\n').length
+}
+
+function committedFenceLineCount({ checkout, parsed, entry, context } = {}) {
+  let root
+  try {
+    root = gitRoot(checkout)
+  } catch (error) {
+    refuseUsage(`${context}: fence ${entry} path ${parsed.path} cannot read its committed base blob: ${error?.message || String(error)}`, SCOPE_ENTRY_SHAPE)
+  }
+  const ref = `HEAD:${parsed.path}`
+  let type
+  try {
+    type = spawnSync('git', ['-C', root, 'cat-file', '-t', ref], { encoding: 'utf8', timeout: 10_000 })
+  } catch (error) {
+    refuseUsage(`${context}: fence ${entry} path ${parsed.path} cannot read its committed base blob: ${error?.message || String(error)}`, SCOPE_ENTRY_SHAPE)
+  }
+  if (!type || type.status !== 0 || type.error || type.signal) {
+    const detail = type?.signal ? `interrupted by ${type.signal}` : type?.error?.message || String(type?.stderr || type?.stdout || `exit ${type?.status}`)
+    refuseUsage(`${context}: fence ${entry} path ${parsed.path} cannot read its committed base blob: ${detail}`, SCOPE_ENTRY_SHAPE)
+  }
+  if (String(type.stdout || '').trim() !== 'blob') {
+    refuseUsage(`${context}: fence ${entry} path ${parsed.path} has no committed blob at ${ref}`, SCOPE_ENTRY_SHAPE)
+  }
+  let shown
+  try {
+    shown = spawnSync('git', ['-C', root, 'show', ref], { encoding: 'utf8', timeout: 10_000 })
+  } catch (error) {
+    refuseUsage(`${context}: fence ${entry} path ${parsed.path} cannot read its committed base blob: ${error?.message || String(error)}`, SCOPE_ENTRY_SHAPE)
+  }
+  if (!shown || shown.status !== 0 || shown.error || shown.signal || typeof shown.stdout !== 'string' || shown.stdout.includes('\0')) {
+    const detail = shown?.signal ? `interrupted by ${shown.signal}` : shown?.error?.message || String(shown?.stderr || shown?.stdout || `exit ${shown?.status}`)
+    refuseUsage(`${context}: fence ${entry} path ${parsed.path} cannot read its committed base blob: ${detail}`, SCOPE_ENTRY_SHAPE)
+  }
+  return fenceLineCount(shown.stdout)
+}
+
+function validateRegisterFence({ checkout, entry, context } = {}) {
+  const parsed = parseFenceScope(entry)
+  if (parsed.kind === 'invalid') {
+    refuseUsage(`${context}: fence entry ${entry} is invalid: ${parsed.reason}`, SCOPE_ENTRY_SHAPE)
+  }
+  validateScopeEntries({ checkout, files: [parsed.path], context })
+  if (parsed.kind === 'span') {
+    const lineCount = committedFenceLineCount({ checkout, parsed, entry, context })
+    const validated = validateFenceScope(entry, lineCount)
+    if (validated.reason) {
+      refuseUsage(`${context}: fence entry ${entry} is invalid: ${validated.reason}`, SCOPE_ENTRY_SHAPE)
+    }
+  }
+  return parsed
+}
+
 export function gatherFences({ fencesPath, checkout } = {}) {
   if (fencesPath == null) return null
   let data
@@ -1131,11 +1188,8 @@ export function gatherFences({ fencesPath, checkout } = {}) {
     // caller, is what makes compile and boot agree: both readers of this register
     // go through this function and nothing else. `reads` entries are
     // acknowledgements, never a deny surface, and are deliberately not validated.
-    validateScopeEntries({
-      checkout,
-      files: entry.files,
-      context: `fences.lanes[${index}] (lane "${entry.lane}")`,
-    })
+    const context = `fences.lanes[${index}] (lane "${entry.lane}")`
+    for (const file of entry.files) validateRegisterFence({ checkout, entry: file, context })
     return { lane: entry.lane, files: [...new Set(entry.files)].sort(), reads }
   })
   return lanes.sort((a, b) => a.lane < b.lane ? -1 : a.lane > b.lane ? 1 : 0)
@@ -1214,7 +1268,7 @@ export function resolveWriteSurface({ fences, lane, where = [], creates = [] } =
   }
   const entry = fences.find((candidate) => candidate.lane === lane)
   if (!entry) refuseUsage(`lane is not in the fence register: ${lane}`, UNKNOWN_LANE)
-  const files = [...new Set(entry.files.map((file) => normaliseRepoPath(file)))].sort()
+  const files = [...new Set(entry.files.map((file) => parseFenceScope(file).path))].sort()
   return { lane, basis: 'fences', files, reads: entry.reads || [] }
 }
 

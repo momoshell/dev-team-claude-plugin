@@ -48,8 +48,10 @@ node crew/factoryctl.mjs ls
   the skill owning each procedure: `/dispatch`, `/close-out`, `/status`,
   `/onboard`.
 - **`docs/`** — the live design record: [`docs/adr/`](docs/adr/) is the
-  architecture decision register (**grep it before minting an ADR number**),
-  [`docs/conventions.md`](docs/conventions.md) the cross-cutting conventions.
+  architecture decision register (**grep it before minting an ADR number**);
+  [`docs/decisions-needed.md`](docs/decisions-needed.md) is the open
+  owner-decision register; [`docs/conventions.md`](docs/conventions.md) the
+  cross-cutting conventions.
   [`CLAUDE.md`](CLAUDE.md) is the operating brief a session should read first —
   it carries only the rules that are expensive to rediscover and points at
   everything else.

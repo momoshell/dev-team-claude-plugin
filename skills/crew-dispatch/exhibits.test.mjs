@@ -48,6 +48,18 @@ function markdownFiles(root) {
   return found.sort()
 }
 
+test('PS9', () => {
+  const text = readText(TIER)
+  for (const token of [
+    'PROMPT_SURFACE', 'crew/roles/', 'crew/guidelines/',
+    'ACCEPTANCE_GATE_BLOCK', 'HOSTILE_ENV_BLOCK', 'CONVENTIONS_BLOCK', 'MUTATION_CONTRACT_BLOCK',
+    'prompt-surface-conflict', 'tier-floor-conflict', 'prompt=change', 'prompt=code-only',
+    'BLIND SPOT: path matching cannot see a prompt embedded as a template string in a compiler; the named templateBlocks require human recognition.',
+    'ADR-038', '64–66', '13',
+  ]) assert.ok(text.includes(token), `tier.md must carry ${token}`)
+  assert.ok(text.includes('not a measurement of whether the prompt worked'))
+})
+
 // Mutation killed: changing a cited source line or deleting a citation must make the dispatch pin red.
 test('every crew-dispatch path:line anchor carries what the prose claims', () => {
   const docs = skillDocs(HERE).filter((doc) => doc !== TIER)

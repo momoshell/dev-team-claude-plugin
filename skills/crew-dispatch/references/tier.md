@@ -5,6 +5,25 @@ The protected-path floor is evaluated from the planner's declared
 happens to contain. A protected hit is therefore a seating requirement, not a
 post-hoc review label.
 
+## Prompt-surface rigorous review
+
+The prompt-surface rule is distinct from the protected floor. The exported
+`PROMPT_SURFACE` contract classifies path writes under `crew/roles/` and
+`crew/guidelines/` as prompt changes and names the compiler-owned template
+blocks `ACCEPTANCE_GATE_BLOCK`, `HOSTILE_ENV_BLOCK`, `CONVENTIONS_BLOCK`, and
+`MUTATION_CONTRACT_BLOCK`. A prompt-surface hit forces rigorous review (the
+implementation tier is `judge`); an explicit lower lane tier refuses with the
+distinct `prompt-surface-conflict` reason rather than the protected
+`tier-floor-conflict` reason.
+
+The per-lane dispatch line reports `prompt=change` or `prompt=code-only`
+between `forced=` and `proposed=`. The refusal carries this limitation:
+`BLIND SPOT: path matching cannot see a prompt embedded as a template string in a compiler; the named templateBlocks require human recognition.`
+A lane fence cannot identify which string inside a mixed compiler file changed.
+
+Rigorous prompt review deliberately pays ADR-038's measured **64–66 minutes versus about 13 minutes for standard planning**; the cost is the control, not hidden overhead. This is a planning-cost measurement; it is
+not a measurement of whether the prompt worked.
+
 ## Pane seating
 
 The pane transport refusal is quoted from the runtime, verbatim:

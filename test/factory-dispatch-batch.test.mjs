@@ -33,6 +33,9 @@ import {
   citationCarriers,
   citationCarriersOutsideFence,
   REFUSAL_REASONS,
+  PROMPT_SURFACE,
+  PROMPT_SURFACE_BLIND_SPOT,
+  promptSurfaceVerdict,
   DISPATCH_RECORD_SUFFIX,
   DRY_RUN_BLIND_SPOT,
   EXTERNAL_FENCE_PREFIX,
@@ -2365,6 +2368,111 @@ test('tier floor and reconciliation keep the protected path at judge', () => {
   assert.equal(reconcileTier({ lane: 'lane-a', forced: 'build', proposed: 'judge', requested: null }).tier, 'judge')
 })
 
+test('PS1', () => {
+  const verdict = promptSurfaceVerdict({ files: ['crew/roles/planner.md'] })
+  assert.deepEqual(verdict, {
+    hits: ['crew/roles/planner.md'], promptChange: true, forced: 'judge',
+  })
+  assert.equal(reconcileTier({
+    lane: 'planner', forced: verdict.forced, proposed: 'build', requested: 'mechanical',
+    requestedFrom: 'batch', forceReason: 'prompt-surface-conflict',
+  }).tier, 'judge')
+})
+
+test('PS2', () => {
+  const verdict = promptSurfaceVerdict({ files: ['crew/guidelines/review-do-not-flag.md'] })
+  assert.deepEqual(verdict, {
+    hits: ['crew/guidelines/review-do-not-flag.md'], promptChange: true, forced: 'judge',
+  })
+  assert.equal(reconcileTier({
+    lane: 'guideline', forced: verdict.forced, proposed: 'build', requested: 'mechanical',
+    requestedFrom: 'batch', forceReason: 'prompt-surface-conflict',
+  }).tier, 'judge')
+})
+
+test('PS3', () => {
+  assert.deepEqual(PROMPT_SURFACE, {
+    paths: ['crew/roles/', 'crew/guidelines/'],
+    templateBlocks: ['ACCEPTANCE_GATE_BLOCK', 'HOSTILE_ENV_BLOCK', 'CONVENTIONS_BLOCK', 'MUTATION_CONTRACT_BLOCK'],
+  })
+  assert.equal(Object.isFrozen(PROMPT_SURFACE), true)
+  assert.equal(Object.isFrozen(PROMPT_SURFACE.paths), true)
+  assert.equal(Object.isFrozen(PROMPT_SURFACE.templateBlocks), true)
+})
+
+test('PS4', () => {
+  const prompt = thrown(() => reconcileTier({
+    lane: 'prompt', forced: 'judge', proposed: 'build', requested: 'build', requestedFrom: 'lane',
+    forceReason: 'prompt-surface-conflict',
+  }))
+  const protectedFloor = thrown(() => reconcileTier({
+    lane: 'protected', forced: 'judge', proposed: 'build', requested: 'build', requestedFrom: 'lane',
+  }))
+  assert.equal(prompt.reason, 'prompt-surface-conflict')
+  assert.equal(protectedFloor.reason, 'tier-floor-conflict')
+  assert.notEqual(prompt.reason, protectedFloor.reason)
+  assert.notEqual(prompt.message, protectedFloor.message)
+  assert.match(prompt.message, /prompt surface/)
+  assert.match(prompt.message, /judge/)
+})
+
+test('PS5', () => {
+  const verdict = promptSurfaceVerdict({ files: ['src/owned.mjs'] })
+  assert.deepEqual(verdict, { hits: [], promptChange: false, forced: null })
+  const settled = reconcileTier({
+    lane: 'code-only', forced: verdict.forced, proposed: 'build', requested: 'mechanical', requestedFrom: 'lane',
+  })
+  assert.equal(settled.tier, 'mechanical')
+})
+
+test('PS6', () => {
+  const verdict = promptSurfaceVerdict({ files: ['crew/roles/planner.md'] })
+  let settled
+  assert.doesNotThrow(() => {
+    settled = reconcileTier({
+      lane: 'prompt', forced: verdict.forced, proposed: 'build', requested: 'judge', requestedFrom: 'lane',
+      forceReason: 'prompt-surface-conflict',
+    })
+  })
+  assert.equal(settled.tier, 'judge')
+})
+
+test('PS7', async () => {
+  const prompt = await dispatchFixture({
+    label: 'PS7-prompt',
+    names: ['lane-a'],
+    batchTier: 'mechanical',
+    requests: { 'lane-a': requestFor('lane-a', { where: ['crew/roles/planner.md'] }) },
+    fences: [entry('lane-a', ['crew/roles/planner.md'])],
+  })
+  const control = await dispatchFixture({
+    label: 'PS7-code',
+    names: ['lane-a'],
+    batchTier: 'mechanical',
+    requests: { 'lane-a': requestFor('lane-a', { where: ['src/owned.mjs'] }) },
+    fences: [entry('lane-a', ['src/owned.mjs'])],
+  })
+  const promptLine = prompt.logs.find((line) => line.startsWith('dispatch-batch: lane=lane-a '))
+  const controlLine = control.logs.find((line) => line.startsWith('dispatch-batch: lane=lane-a '))
+  assert.match(promptLine, /forced=none prompt=change proposed=/)
+  assert.match(controlLine, /forced=none prompt=code-only proposed=/)
+  const promptBoot = prompt.spawned.find(({ args }) => args.includes('boot'))
+  assert.equal(promptBoot.args[promptBoot.args.indexOf('--tier') + 1], 'judge')
+  const promptRecord = JSON.parse(readFileSync(join(prompt.out, 'lane-a.dispatch.json'), 'utf8'))
+  assert.deepEqual(promptRecord.prompt_surface, {
+    hits: ['crew/roles/planner.md'], prompt_change: true, forced: 'judge',
+  })
+})
+
+test('PS8', () => {
+  const error = thrown(() => reconcileTier({
+    lane: 'prompt', forced: 'judge', proposed: 'build', requested: 'build', requestedFrom: 'lane',
+    forceReason: 'prompt-surface-conflict',
+  }))
+  assert.equal(error.reason, 'prompt-surface-conflict')
+  assert.ok(error.message.includes(PROMPT_SURFACE_BLIND_SPOT))
+})
+
 test('REFUSAL_REASONS is frozen, unique, and names every reason argument in the source', () => {
   assert.equal(Object.isFrozen(REFUSAL_REASONS), true)
   assert.equal(new Set(REFUSAL_REASONS).size, REFUSAL_REASONS.length)
@@ -3817,7 +3925,7 @@ test('staffing fields append to the existing settled dispatch log line', async (
   const line = result.logs.find((entry) => entry.startsWith('dispatch-batch: lane=lane-a '))
   assert.ok(line)
   assert.equal(line.startsWith(
-    'dispatch-batch: lane=lane-a forced=none proposed=none requested=mechanical requested_from=batch variant=full variant_from=batch settled=mechanical',
+    'dispatch-batch: lane=lane-a forced=none prompt=code-only proposed=none requested=mechanical requested_from=batch variant=full variant_from=batch settled=mechanical',
   ), true)
   assert.match(line, / shape=judge strength=workhorse misclassified=false brief_bytes=65 top_section=none$/)
 })

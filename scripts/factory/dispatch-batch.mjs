@@ -29,6 +29,7 @@ const WORKTREE_FAILED = 'worktree-failed'
 const COMPILE_REFUSED = 'compile-refused'
 const READS_UNRESOLVED = 'reads-unresolved'
 const TIER_FLOOR_CONFLICT = 'tier-floor-conflict'
+const PROMPT_SURFACE_CONFLICT = 'prompt-surface-conflict'
 const BOOT_FAILED = 'boot-failed'
 const FENCE_NOT_ARRIVED = 'fence-not-arrived'
 const FENCE_COUNT_MISMATCH = 'fence-count-mismatch'
@@ -63,6 +64,7 @@ export const REFUSAL_REASONS = Object.freeze([
   COMPILE_REFUSED,
   READS_UNRESOLVED,
   TIER_FLOOR_CONFLICT,
+  PROMPT_SURFACE_CONFLICT,
   BOOT_FAILED,
   FENCE_NOT_ARRIVED,
   FENCE_COUNT_MISMATCH,
@@ -94,6 +96,8 @@ export const EXTERNAL_REGISTER_NAME = 'dispatch.external.fences.json'
 
 export const ROLES_ANCHOR_MANIFEST = 'crew/roles/anchors.json'
 export const ROLES_ANCHOR_COMPANIONS = Object.freeze(['crew/roles/planner.md', 'crew/roles/tech-lead.md'])
+export const PROMPT_SURFACE = Object.freeze({ paths: Object.freeze(['crew/roles/', 'crew/guidelines/']), templateBlocks: Object.freeze(['ACCEPTANCE_GATE_BLOCK', 'HOSTILE_ENV_BLOCK', 'CONVENTIONS_BLOCK', 'MUTATION_CONTRACT_BLOCK']) })
+export const PROMPT_SURFACE_BLIND_SPOT = 'BLIND SPOT: path matching cannot see a prompt embedded as a template string in a compiler; the named templateBlocks require human recognition.'
 
 // The scan reads anchors.json manifests, which are machine-readable. The DOCS that carry
 // those citations are found by citationCarriers below, and its own warning names them, so
@@ -2320,6 +2324,11 @@ export function tierFloor({ files, extra } = {}) {
   return { hits, forced, floor: forced }
 }
 
+export function promptSurfaceVerdict({ files } = {}) {
+  const hits = protectedHitsIn(files, PROMPT_SURFACE.paths)
+  return { hits, promptChange: hits.length > 0, forced: hits.length > 0 ? 'judge' : null }
+}
+
 export function resolveRequestedTier({ tier, assurance } = {}) {
   const tierSupplied = tier !== undefined && tier !== null
   const assuranceSupplied = assurance !== undefined && assurance !== null
@@ -2334,8 +2343,11 @@ export function resolveRequestedTier({ tier, assurance } = {}) {
   return alias
 }
 
-export function reconcileTier({ lane, forced, proposed, requested, requestedFrom = 'lane' } = {}) {
+export function reconcileTier({ lane, forced, proposed, requested, requestedFrom = 'lane', forceReason = TIER_FLOOR_CONFLICT } = {}) {
   if (forced && requestedFrom !== 'batch' && requested && TIER_NAMES.indexOf(requested) < TIER_NAMES.indexOf(forced)) {
+    if (forceReason === PROMPT_SURFACE_CONFLICT) {
+      refuse(`lane ${lane} requested tier ${requested} below prompt surface floor ${forced}; ${PROMPT_SURFACE_BLIND_SPOT}`, PROMPT_SURFACE_CONFLICT)
+    }
     refuse(`lane ${lane} requested tier ${requested} below protected floor ${forced}`, TIER_FLOOR_CONFLICT)
   }
   // #762: an explicit lane tier is the operator's decision. The compiler's
@@ -3214,6 +3226,7 @@ export async function dispatchBatch({ batchDir, fences, checkout, parentDir, out
     const plan = plans.find((candidate) => candidate.lane === item.lane)
     const laneFence = fenceReport.perLane[item.lane]
     const floor = tierFloor({ files: laneFence.files, extra: runFlags.protectedPaths })
+    const prompt = promptSurfaceVerdict({ files: laneFence.files })
     const laneEntry = laneByName.get(item.lane)
     // A lane's own tier is the requested tier for THAT lane; --tier stays the
     // batch default for every lane that does not name one. A protected floor
@@ -3221,15 +3234,20 @@ export async function dispatchBatch({ batchDir, fences, checkout, parentDir, out
     const requested = laneEntry?.tier ?? tier
     const laneVariant = laneEntry?.variant ?? variant
     const seats = mergeSeats(batchSeats, laneEntry?.seats)
-    const result = reconcileTier({ lane: item.lane, forced: floor.forced, proposed: item.proposed, requested, requestedFrom: laneEntry?.tier ? 'lane' : 'batch' })
+    const result = reconcileTier({ lane: item.lane, forced: floor.forced || prompt.forced, proposed: item.proposed, requested, requestedFrom: laneEntry?.tier ? 'lane' : 'batch', forceReason: floor.forced ? TIER_FLOOR_CONFLICT : PROMPT_SURFACE_CONFLICT })
     if (!result.tier) refuse(`lane ${item.lane} has no known tier to boot`, BOOT_FAILED)
-    d.log(`dispatch-batch: lane=${item.lane} forced=${floor.forced || 'none'} proposed=${item.proposed || 'none'} requested=${requested || 'none'} requested_from=${laneEntry?.tier ? 'lane' : (tier ? 'batch' : 'none')} variant=${laneVariant || 'none'} variant_from=${laneEntry?.variant ? 'lane' : (variant ? 'batch' : 'none')} settled=${result.tier} seats=${seatSpec(seats)} seats_from=${seatFromSpec(batchSeats, laneEntry?.seats)} shape=${staffing.shape || STAFFING_ABSENT} strength=${staffing.strength || STAFFING_ABSENT} misclassified=${staffing.misclassification ? 'true' : 'false'} brief_bytes=${item.bytes} top_section=${sectionToken(item.topSection)}${overrideNote(result)}`)
+    d.log(`dispatch-batch: lane=${item.lane} forced=${floor.forced || 'none'} prompt=${prompt.promptChange ? 'change' : 'code-only'} proposed=${item.proposed || 'none'} requested=${requested || 'none'} requested_from=${laneEntry?.tier ? 'lane' : (tier ? 'batch' : 'none')} variant=${laneVariant || 'none'} variant_from=${laneEntry?.variant ? 'lane' : (variant ? 'batch' : 'none')} settled=${result.tier} seats=${seatSpec(seats)} seats_from=${seatFromSpec(batchSeats, laneEntry?.seats)} shape=${staffing.shape || STAFFING_ABSENT} strength=${staffing.strength || STAFFING_ABSENT} misclassified=${staffing.misclassification ? 'true' : 'false'} brief_bytes=${item.bytes} top_section=${sectionToken(item.topSection)}${overrideNote(result)}`)
     const recordPath = join(outputDir, `${item.lane}${DISPATCH_RECORD_SUFFIX}`)
     const record = {
       lane: item.lane,
       shape: staffing.shape,
       strength: staffing.strength,
       misclassification: staffing.misclassification,
+      prompt_surface: {
+        hits: prompt.hits,
+        prompt_change: prompt.promptChange,
+        forced: prompt.forced,
+      },
       tier: {
         forced: floor.forced || null,
         proposed: item.proposed || null,
@@ -3244,7 +3262,7 @@ export async function dispatchBatch({ batchDir, fences, checkout, parentDir, out
     try { writeFileSync(recordPath, JSON.stringify(record, null, 2) + '\n') } catch (err) {
       refuse(`cannot write dispatch record ${recordPath}: ${err?.message || String(err)}`, COMPILE_REFUSED)
     }
-    settled.push({ ...item, plan, floor, tier: result.tier, variant: laneVariant, seats, staffing, record: recordPath })
+    settled.push({ ...item, plan, floor, prompt, tier: result.tier, variant: laneVariant, seats, staffing, record: recordPath })
   }
 
   // #658: every lane whose plan IS its brief is validated before ANY lane boots — the brief is

@@ -124,6 +124,26 @@ test('the planner charter tells the planner to grep the changed file’s own pat
   assert.doesNotMatch(discovery, /production/)
 })
 
+test('A1', () => {
+  const charter = readFileSync(new URL('./roles/planner.md', import.meta.url), 'utf8')
+  const rule = '- Quote every cited range inline with its line numbers; those are the lines the builder needs.'
+  assert.equal(charter.split(rule).length - 1, 1)
+})
+
+test('B1', () => {
+  const charter = readFileSync(new URL('./roles/builder.md', import.meta.url), 'utf8')
+  const rule = "- The plan's cited ranges are your working set; read outside them only when an edit fails to bind or a test names another line."
+  assert.equal(charter.split(rule).length - 1, 1)
+})
+
+test('RV1-1 planner range guidance follows required plan sections', () => {
+  const charter = readFileSync(new URL('./roles/planner.md', import.meta.url), 'utf8')
+  const tail = `- **Risks/consults** — anything you are <90% sure of. If a tech-lead pane
+  exists, questions you want it to answer; else flag for the orchestrator.
+- Quote every cited range inline with its line numbers; those are the lines the builder needs.`
+  assert.equal(charter.split(tail).length - 1, 1)
+})
+
 test('F1', () => {
   const charter = readFileSync(new URL('./roles/planner.md', import.meta.url), 'utf8')
   const sentence = '`details.validation_lane` is ONE command: it must contain no `&&`, `;`, `|`, redirection, or glob, and `node --test` accepts several files as `node --test <file> <file> <file>`.'

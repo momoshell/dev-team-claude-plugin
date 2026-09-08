@@ -4,7 +4,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_IMPL_FILE, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, B384_CORRECTED_FIND, B384_CORRECTED_REPLACE, B384_GREEN, B384_MUTATION, B384_RED, B384_REFACTORED_BUILDER, B384_REFACTORED_UNCORRECTED_BUILDER, B44_LEADLESS_CTX, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_PLAN, CHECK_RUNS, CONVERGE_CTX, CONVERGE_GATE, CONVERGE_PLAN, CTX, CTX_DIRECTED, CTX_REPAIR, DIRECTED_FILES, D_ASK, D_AUTO, ENVELOPE_FIELD_KINDS, EXECUTIONS, FAILURE_UPGRADE, GATE_REAP_CMD_EOF, GATE_REAP_SWEEP_MARKER, GATE_SUMMARY_PREFIX, HARDENING_MARKS, HARDENING_OUTCOMES, HARDENING_REFUSALS, MODIFIER_OUTCOMES, MUTATIONS_MAX, MUTATION_BINDING_FAILURES, MUTATION_OUTCOMES, PARTIAL_REVIEWED, RED, SENSITIVITY_FLOOR, SHAPE_MAJOR_PHASES, SHAPE_ROUNDED_STAGES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, UNIVERSAL_STAGE_HEADS, VALIDATION_LANE_UNLOADABLE, VARIANTS, VARIANT_NAMES, WRITE_SURFACES, applyMutationAnchor, applyPrescriptionLines, b127GatePaths, b127PidAlive, b318Builders, b318SiteA, b376Build, b376DiskProofIo, b376ProofIo, b376Review, b376StageStack, b384Io, b384RefactoredIo, b44AssertLeadlessGate, b44GatePlan, bindMutationAnchor, buildEnv, collapseStages, dispositionIo, driveTask, existsSync, fakeIo, gateReapCommand, gateReapFresh, gateReapOriginal, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, hardeningBounceLines, hardeningBriefLines, hardeningDebt, hardeningOf, join, laneFence, leadEnv, mutationChangesTokens, outOfScopeFiles, planEnv, protectedPlanEnv, readFileSync, resumeGreen, resumeRed, reviewConvergeRun, reviewEnv, reviewFindings, rmSync, s843Ctx, s843Io, s843PlanEnv, s843Rows, scopeMatcher, scopedPath, scratchDir, shapeDefect, spawnSync, stageShape, treeDigest, triageEnv, undeclaredStage, validateHardened, validateMutations, validationPlan, validationProbeRun, validationRows,
+  B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_IMPL_FILE, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, B384_CORRECTED_FIND, B384_CORRECTED_REPLACE, B384_GREEN, B384_MUTATION, B384_RED, B384_REFACTORED_BUILDER, B384_REFACTORED_UNCORRECTED_BUILDER, B44_LEADLESS_CTX, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_PLAN, CHECK_RUNS, CONVERGE_CTX, CONVERGE_GATE, CONVERGE_PLAN, CTX, CTX_DIRECTED, CTX_REPAIR, DIRECTED_FILES, D_ASK, D_AUTO, ENVELOPE_FIELD_KINDS, EXECUTIONS, FAILURE_UPGRADE, GATE_REAP_CMD_EOF, GATE_REAP_SWEEP_MARKER, GATE_SUMMARY_PREFIX, HARDENING_MARKS, HARDENING_OUTCOMES, HARDENING_REFUSALS, MODIFIER_OUTCOMES, MUTATIONS_MAX, MUTATION_BINDING_FAILURES, MUTATION_OUTCOMES, PARTIAL_REVIEWED, RED, SENSITIVITY_FLOOR, SHAPE_MAJOR_PHASES, SHAPE_ROUNDED_STAGES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, UNIVERSAL_STAGE_HEADS, VALIDATION_LANE_UNLOADABLE, VARIANTS, VARIANT_NAMES, WRITE_SURFACES, applyMutationAnchor, applyPrescriptionLines, b127GatePaths, b127PidAlive, b318Builders, b318SiteA, b376Build, b376DiskProofIo, b376ProofIo, b376Review, b376StageStack, b384Io, b384RefactoredIo, b44AssertLeadlessGate, b44GatePlan, bindMutationAnchor, buildEnv, collapseStages, dispositionIo, driveTask, existsSync, fakeIo, fenceBase, fenceDiff, fenceSpan, gateReapCommand, gateReapFresh, gateReapOriginal, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, hardeningBounceLines, hardeningBriefLines, hardeningDebt, hardeningOf, join, laneFence, leadEnv, mutationChangesTokens, outOfScopeFiles, planEnv, protectedPlanEnv, readFileSync, resumeGreen, resumeRed, reviewConvergeRun, reviewEnv, reviewFindings, rmSync, s843Ctx, s843Io, s843PlanEnv, s843Rows, scopeMatcher, scopedPath, scratchDir, shapeDefect, spawnSync, stageShape, treeDigest, triageEnv, undeclaredStage, validateHardened, validateMutations, validationPlan, validationProbeRun, validationRows,
 } from './drive-fixtures.mjs'
 import { CHECK_MATCHES, HARDENING_APPEAL_SHAPE, HARDENING_CLASSES, hardeningAppealLines, hardeningAppealRequest, hardeningClassOf } from './drive.mjs'
 
@@ -20,6 +20,103 @@ test('the scope-gate catches a build that crossed another lane fence', () => {
   assert.match(result.details.escalation.why, /intake-loop/)
   assert.equal(io.calls.run.some(({ cmd }) => cmd === 'lane-cmd' || cmd === 'suite-cmd'), false)
   assert.equal(io.calls.commits.length, 0)
+})
+
+test('E1 own span refuses a changed hunk outside its bounds by name', () => {
+  const file = 'a.mjs'
+  const span = 'a.mjs:1-4'
+  const plan = planEnv({ details: { ...planEnv().details, files_in_scope: [file] } })
+  const base = { head: 'base-sha', laneName: 'own-lane', laneFence: [fenceSpan('own-lane', file, 1, 4)] }
+  const makeIo = (output) => fakeIo({
+    envelopes: {
+      'planner:1': plan,
+      'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(),
+      'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: [file],
+    fenceBases: { 'base-sha:a.mjs': { ok: true, output: fenceBase(4) } },
+    fenceDiffs: { 'a.mjs': { ok: true, output } },
+  })
+
+  const eofIo = makeIo(fenceDiff(file, 4, 0, 5, 1))
+  const eof = driveTask({ ...CTX, ...base }, eofIo)
+  assert.equal(eof.status, 'done')
+  assert.equal(eofIo.calls.run.some(({ cmd }) => cmd === 'lane-cmd'), true)
+  assert.ok(eofIo.calls.fenceDiffs.every((command) => command.includes("'base-sha'")))
+
+  const bofIo = makeIo(fenceDiff(file, 0, 0, 1, 1))
+  const bof = driveTask({ ...CTX, ...base }, bofIo)
+  assert.equal(bof.status, 'escalation')
+  assert.equal(bof.details.escalation.where, 'scope')
+  assert.match(bof.details.escalation.why, /a\.mjs:1-4/)
+  assert.equal(bofIo.calls.run.some(({ cmd }) => cmd === 'lane-cmd' || cmd === 'suite-cmd'), false)
+
+  const modeIo = makeIo(`diff --git a/${file} b/${file}\nold mode 100644\nnew mode 100755\n`)
+  const mode = driveTask({ ...CTX, ...base }, modeIo)
+  assert.equal(mode.status, 'escalation')
+  assert.equal(mode.details.escalation.where, 'scope')
+  assert.match(mode.details.escalation.why, /a\.mjs:1-4/)
+  assert.equal(modeIo.calls.run.some(({ cmd }) => cmd === 'lane-cmd' || cmd === 'suite-cmd'), false)
+})
+
+test('RV1-1 adjacent own span union admits shared-boundary hunks and keeps gaps fenced', () => {
+  const file = 'crew/a.mjs'
+  const plan = planEnv({ details: { ...planEnv().details, files_in_scope: [file] } })
+  const fenceBases = { [`base-sha:${file}`]: { ok: true, output: fenceBase(30) } }
+  const hunk = fenceDiff(file, 11, 4, 11, 4)
+  assert.match(hunk, /@@ -11,4 \+11,4 @@/)
+  const adjacentIo = fakeIo({
+    envelopes: { 'planner:1': plan, 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: [file], fenceBases, fenceDiffs: { [file]: { ok: true, output: hunk } },
+  })
+  const adjacent = driveTask({
+    ...CTX, head: 'base-sha', laneName: 'own-lane',
+    laneFence: [fenceSpan('own-lane', file, 10, 12), fenceSpan('own-lane', file, 13, 15)],
+  }, adjacentIo)
+  assert.equal(adjacent.status, 'done')
+  assert.equal(adjacentIo.calls.run.some(({ cmd }) => cmd === 'lane-cmd'), true)
+
+  const gapIo = fakeIo({
+    envelopes: { 'planner:1': plan, 'builder:1': buildEnv() }, changed: [file],
+    fenceBases, fenceDiffs: { [file]: { ok: true, output: hunk } },
+  })
+  const gap = driveTask({
+    ...CTX, head: 'base-sha', laneName: 'own-lane', limits: { build_rounds: 1 },
+    laneFence: [fenceSpan('own-lane', file, 10, 12), fenceSpan('own-lane', file, 14, 15)],
+  }, gapIo)
+  assert.equal(gap.status, 'escalation')
+  assert.equal(gap.details.escalation.where, 'scope')
+  assert.match(gap.details.escalation.why, /crew\/a\.mjs:10-12/)
+  assert.match(gap.details.escalation.why, /crew\/a\.mjs:14-15/)
+  assert.equal(gapIo.calls.run.some(({ cmd }) => cmd === 'lane-cmd' || cmd === 'suite-cmd'), false)
+})
+
+test('RV1-3 scope gate escalates sibling hunks and unparseable sibling diffs', () => {
+  const file = 'crew/a.mjs'
+  const plan = planEnv({ details: { ...planEnv().details, files_in_scope: [file] } })
+  const laneFence = [fenceSpan('own-lane', file, 21, 25), fenceSpan('lane-b', file, 10, 20)]
+  const ctx = { ...CTX, head: 'base-sha', laneName: 'own-lane', laneFence }
+  const fenceBases = { [`base-sha:${file}`]: { ok: true, output: fenceBase(30) } }
+  const assertSiblingRefusal = (result, io) => {
+    assert.equal(result.status, 'escalation')
+    assert.equal(result.details.escalation.where, 'scope')
+    assert.match(result.details.escalation.why, /lane-b/)
+    assert.match(result.details.escalation.why, /crew\/a\.mjs:10-20/)
+    assert.equal(io.calls.run.some(({ cmd }) => cmd === 'lane-cmd' || cmd === 'suite-cmd'), false)
+  }
+  const intersectIo = fakeIo({
+    envelopes: { 'planner:1': plan, 'builder:1': buildEnv() }, changed: [file], fenceBases,
+    fenceDiffs: { [file]: { ok: true, output: fenceDiff(file, 15, 2, 15, 2) } },
+  })
+  assertSiblingRefusal(driveTask(ctx, intersectIo), intersectIo)
+
+  const noHunkIo = fakeIo({
+    envelopes: { 'planner:1': plan, 'builder:1': buildEnv() }, changed: [file], fenceBases,
+    fenceDiffs: { [file]: { ok: true, output: `diff --git a/${file} b/${file}\nold mode 100644\nnew mode 100755\n` } },
+  })
+  assertSiblingRefusal(driveTask(ctx, noHunkIo), noHunkIo)
 })
 
 test('clean scope does not fire the sensitivity floor or alter the happy-path stages', () => {

@@ -4,8 +4,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  B44_LEADLESS_CTX, CENSUS_ROW_ABSENT, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_RUNS, CONVERGE_CTX, CONVERGE_GATE, CRASH_WHY, CTX, CTX_DIRECTED, CTX_REPAIR, CTX_TL, DEFAULT_VARIANT, DIRECTED_BRIEF_PATH, DIRECTED_BRIEF_TEXT, DIRECTED_FILES, DRIVE_JOURNAL_EXPECTED, D_ASK, D_AUTO, D_GREEN_GATE, D_PATCH_A, D_PATCH_B, D_PATCH_EMPTY_PATH, D_PATCH_MIXED_MODE, D_PATCH_MIXED_RENAME, D_RED_GATE, ENVELOPE_DEBRIS, GATE_CUSTODIAN, GATE_SUMMARY_PREFIX, HEALTHY_RESULT, JOURNAL_CHANNELS, JOURNAL_CHANNEL_NAMES, JUDGE_TIER, MAX_QUESTIONS, MODIFIER_OUTCOMES, PHASE_SLOT_WAIT_EVENT, PROTECTED_PATHS, RED, REPO_ROOT, REVIEWED_CORE_STAGES, S843_ADDED, S843_D2, S843_RUNS, SCOPE_REFUSALS, SEAT_REFUSAL_STAGE, SENSITIVITY_FLOOR, SHAPE_SOURCES, SKILL_NAMES, SUITE_SLOT_PHASES, SUITE_SLOT_PHASE_NAMES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, TRIAGE_SOURCES, TRIAGE_STAGES, TRIAGE_STAGE_HEAD, VARIANTS, VARIANT_NAMES, WAITS_S, WAIT_FLAGS, WAIT_REFUSALS, WAIT_ROLES, WAIT_SECONDS_MAX, WAIT_SECONDS_MIN, ZERO_CAPACITY_LOGS, ZERO_CAPACITY_RESULT, answerBounceLines, assertSeats, b127GatePaths, b127InvokeGate, b318Builders, b318ReviewGrants, b318SiteA, b318SiteB, b44AssertLeadlessGate, b44GateFixIo, b44GatePlan, b44MidRunRepairIo, baselineGateDefect, bothExhaustionPointsScenario, buildEnv, carveRun, checkEnv, checkFailureLine, closeoutIo, convergeIo, convergeRun, crashIo, crashRun, dApplyCommand, dAutoRows, dBuilders, dGitApplies, dLeads, dReviewEnv, deliberateRun, directSlotRun, dispositionIo, divergentPlanScenario, driveJournalSites, driveTask, enforcementPreamble, envelopeDefect, envelopeFieldsPresent, escalationStageRows, exhaustionAcceptIo, existsSync, fakeIo, gateReapCommand, guardedWrite, join, laneFence, laneFenceHits, laneProbeCommand, laneProbeKinds, leadEnv, matchAnswers, mkdirSync, normaliseJournalTimes, operationalRow, osCpus, parseDirectedBrief, parseGateSummary, parseQuestions, parseSuiteCounts, patchTargets, phaseTrace, planEnv, postCommitCrashRun, protectedPlanEnv, protectedReseatRefusal, questionConsultLines, readFileSync, reconEnv, recordRow, refuseWait, replayResumeStages, resolveProtectedPaths, resolveWaits, resumeDoneRows, resumeKeys, resumeStageRows, reviewEnv, rmSync, runChild, runCmd, runCmdFixture, s843Ctx, s843Io, s843PathsIn, s843PlanEnv, scopeBounceBrief, scopeMatcher, scopeRefusal, scratchDir, shapeDefect, shellArg, shellWords, slotCtx, slotFactory, sourcesDefect, spawnSync, stageEnabled, suiteRefusalEnv, throwAutoFixWrites, throwingWaitRun, tmpdir, traceLabels, triageEnv, undeclaredStage, validateScopeEntries, waitsCtx, waitsRecord, writeFileSync,
+  B44_LEADLESS_CTX, CENSUS_ROW_ABSENT, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_RUNS, CONVERGE_CTX, CONVERGE_GATE, CRASH_WHY, CTX, CTX_DIRECTED, CTX_REPAIR, CTX_TL, DEFAULT_VARIANT, DIRECTED_BRIEF_PATH, DIRECTED_BRIEF_TEXT, DIRECTED_FILES, DRIVE_JOURNAL_EXPECTED, D_ASK, D_AUTO, D_GREEN_GATE, D_PATCH_A, D_PATCH_B, D_PATCH_EMPTY_PATH, D_PATCH_MIXED_MODE, D_PATCH_MIXED_RENAME, D_RED_GATE, ENVELOPE_DEBRIS, GATE_CUSTODIAN, GATE_SUMMARY_PREFIX, HEALTHY_RESULT, JOURNAL_CHANNELS, JOURNAL_CHANNEL_NAMES, JUDGE_TIER, MAX_QUESTIONS, MODIFIER_OUTCOMES, PHASE_SLOT_WAIT_EVENT, PROTECTED_PATHS, RED, REPO_ROOT, REVIEWED_CORE_STAGES, S843_ADDED, S843_D2, S843_RUNS, SCOPE_REFUSALS, SEAT_REFUSAL_STAGE, SENSITIVITY_FLOOR, SHAPE_SOURCES, SKILL_NAMES, SUITE_SLOT_PHASES, SUITE_SLOT_PHASE_NAMES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, TRIAGE_SOURCES, TRIAGE_STAGES, TRIAGE_STAGE_HEAD, VARIANTS, VARIANT_NAMES, WAITS_S, WAIT_FLAGS, WAIT_REFUSALS, WAIT_ROLES, WAIT_SECONDS_MAX, WAIT_SECONDS_MIN, ZERO_CAPACITY_LOGS, ZERO_CAPACITY_RESULT, answerBounceLines, assertSeats, b127GatePaths, b127InvokeGate, b318Builders, b318ReviewGrants, b318SiteA, b318SiteB, b44AssertLeadlessGate, b44GateFixIo, b44GatePlan, b44MidRunRepairIo, baselineGateDefect, bothExhaustionPointsScenario, buildEnv, carveRun, checkEnv, checkFailureLine, closeoutIo, convergeIo, convergeRun, crashIo, crashRun, dApplyCommand, dAutoRows, dBuilders, dGitApplies, dLeads, dReviewEnv, deliberateRun, directSlotRun, dispositionIo, divergentPlanScenario, driveJournalSites, driveTask, enforcementPreamble, envelopeDefect, envelopeFieldsPresent, escalationStageRows, exhaustionAcceptIo, existsSync, fakeIo, fenceBase, fenceDiff, fenceSpan, gateReapCommand, guardedWrite, join, laneFence, laneFenceHits, laneProbeCommand, laneProbeKinds, leadEnv, matchAnswers, mkdirSync, normaliseJournalTimes, operationalRow, osCpus, parseDirectedBrief, parseGateSummary, parseQuestions, parseSuiteCounts, patchTargets, phaseTrace, planEnv, postCommitCrashRun, protectedPlanEnv, protectedReseatRefusal, questionConsultLines, readFileSync, reconEnv, recordRow, refuseWait, replayResumeStages, resolveProtectedPaths, resolveWaits, resumeDoneRows, resumeKeys, resumeStageRows, reviewEnv, rmSync, runChild, runCmd, runCmdFixture, s843Ctx, s843Io, s843PathsIn, s843PlanEnv, scopeBounceBrief, scopeMatcher, scopeRefusal, scratchDir, shapeDefect, shellArg, shellWords, slotCtx, slotFactory, sourcesDefect, spawnSync, stageEnabled, suiteRefusalEnv, throwAutoFixWrites, throwingWaitRun, tmpdir, traceLabels, triageEnv, undeclaredStage, validateScopeEntries, waitsCtx, waitsRecord, writeFileSync,
 } from './drive-fixtures.mjs'
+import { fenceScopeOf, fenceScopesIntersect, parseUnifiedZeroHunks, siblingSpanIntersects } from './drive.mjs'
 
 test('a supplied wait budget reaches io.wait and names the seat overdue at that budget', () => {
   const io = fakeIo({ envelopes: { 'planner:1': null } })
@@ -349,6 +350,144 @@ test('an unfenced ctx.laneFence leaves the run exactly as today', () => {
   assert.equal(fenced.status, plain.status)
   assert.deepEqual(fencedIo.calls.run, plainIo.calls.run)
   assert.deepEqual(fencedIo.calls.commits, plainIo.calls.commits)
+})
+
+test('C1b driver fence matching resolves spans through the leaf', () => {
+  assert.deepEqual(fenceScopeOf('src/widget.mjs:4-6'), {
+    kind: 'span', entry: 'src/widget.mjs:4-6', path: 'src/widget.mjs', start: 4, end: 6,
+  })
+  assert.deepEqual(laneFenceHits(['src/widget.mjs:6-8'], [
+    { lane: 'sibling', files: ['src/widget.mjs:4-6'] },
+  ]), [{ entry: 'src/widget.mjs:6-8', lane: 'sibling' }])
+})
+
+test('D1a sibling span denies an intersecting changed hunk', () => {
+  const parsed = parseUnifiedZeroHunks(fenceDiff('src/widget.mjs', 8, 0, 8, 1), 'src/widget.mjs')
+  assert.deepEqual(parsed.hunks, [{ kind: 'span', path: 'src/widget.mjs', start: 8, end: 8 }])
+  assert.equal(siblingSpanIntersects(fenceScopeOf('src/widget.mjs:5-8'), parsed.hunks), true)
+})
+
+test('D1b sibling span admits a wholly disjoint changed hunk', () => {
+  const parsed = parseUnifiedZeroHunks(fenceDiff('src/widget.mjs', 0, 0, 1, 1), 'src/widget.mjs')
+  assert.deepEqual(parsed.hunks, [{ kind: 'span', path: 'src/widget.mjs', start: 0, end: 0 }])
+  assert.equal(siblingSpanIntersects(fenceScopeOf('src/widget.mjs:1-8'), parsed.hunks), false)
+})
+
+test('RV1-2 plan scope rejects sibling overlap and admits disjoint spans', () => {
+  const file = 'crew/a.mjs'
+  const scopedPlan = () => planEnv({ details: { ...planEnv().details, files_in_scope: [file] } })
+  const fenceBases = { [`base-sha:${file}`]: { ok: true, output: fenceBase(30) } }
+  const scopedCtx = (laneFence) => ({ ...CTX, head: 'base-sha', laneName: 'own-lane', laneFence })
+  const overlapFence = [fenceSpan('own-lane', file, 15, 25), fenceSpan('lane-b', file, 10, 20)]
+  const overlapIo = fakeIo({ envelopes: { 'planner:1': scopedPlan() }, fenceBases })
+  const overlap = driveTask(scopedCtx(overlapFence), overlapIo)
+  assert.equal(overlap.status, 'escalation')
+  assert.equal(overlap.details.escalation.where, 'scope')
+  assert.match(overlap.details.escalation.why, /lane-b/)
+  assert.match(overlap.details.escalation.why, /crew\/a\.mjs:10-20/)
+  assert.deepEqual(overlapIo.calls.assign.map(({ role }) => role), ['planner'])
+
+  const noOwnIo = fakeIo({ envelopes: { 'planner:1': scopedPlan() }, fenceBases })
+  const noOwn = driveTask(scopedCtx([fenceSpan('lane-b', file, 10, 20)]), noOwnIo)
+  assert.equal(noOwn.status, 'escalation')
+  assert.equal(noOwn.details.escalation.where, 'scope')
+  assert.match(noOwn.details.escalation.why, /lane-b/)
+  assert.deepEqual(noOwnIo.calls.assign.map(({ role }) => role), ['planner'])
+
+  const disjointIo = fakeIo({
+    envelopes: { 'planner:1': scopedPlan(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: [file], fenceBases,
+    fenceDiffs: { [file]: { ok: true, output: fenceDiff(file, 21, 1, 21, 1) } },
+  })
+  const disjoint = driveTask(scopedCtx([fenceSpan('own-lane', file, 21, 25), fenceSpan('lane-b', file, 10, 20)]), disjointIo)
+  assert.equal(disjoint.status, 'done')
+  assert.equal(disjointIo.calls.run.some(({ cmd }) => cmd === 'lane-cmd'), true)
+})
+
+test('F1a whole file fence keeps legacy denial', () => {
+  assert.equal(fenceScopesIntersect(fenceScopeOf('src/widget.mjs'), fenceScopeOf('src/widget.mjs:40-41')), true)
+  assert.deepEqual(laneFenceHits(['src/widget.mjs'], [{ lane: 'sibling', files: ['src/widget.mjs'] }]), [
+    { entry: 'src/widget.mjs', lane: 'sibling' },
+  ])
+})
+
+test('F1b whole file fence keeps legacy admission', () => {
+  assert.equal(fenceScopesIntersect(fenceScopeOf('src/widget.mjs'), fenceScopeOf('other.mjs:40-41')), false)
+  assert.deepEqual(laneFenceHits(['other.mjs'], [{ lane: 'sibling', files: ['src/widget.mjs'] }]), [])
+})
+
+test('G1a span past base EOF refuses by lane and span', () => {
+  const entry = 'src/widget.mjs:2-3'
+  const io = fakeIo({
+    envelopes: { 'planner:1': planEnv({ details: { ...planEnv().details, files_in_scope: ['src/widget.mjs'] } }) },
+    fenceBases: { 'base-sha:src/widget.mjs': { ok: true, output: fenceBase(2) } },
+  })
+  const result = driveTask({ ...CTX, head: 'base-sha', laneName: 'own-lane', laneFence: [fenceSpan('own-lane', 'src/widget.mjs', 2, 3)] }, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'scope')
+  assert.match(result.details.escalation.why, /own-lane/)
+  assert.match(result.details.escalation.why, new RegExp(entry.replaceAll('.', '\\.')))
+  assert.equal(io.calls.assign.some(({ role }) => role === 'builder'), false)
+})
+
+test('G1b reversed span refuses by lane and span', () => {
+  const entry = 'src/widget.mjs:3-2'
+  const io = fakeIo({
+    envelopes: { 'planner:1': planEnv({ details: { ...planEnv().details, files_in_scope: ['src/widget.mjs'] } }) },
+    fenceBases: { 'base-sha:src/widget.mjs': { ok: true, output: fenceBase(3) } },
+  })
+  const result = driveTask({ ...CTX, head: 'base-sha', laneName: 'own-lane', laneFence: [fenceSpan('own-lane', 'src/widget.mjs', 3, 2)] }, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'scope')
+  assert.match(result.details.escalation.why, /own-lane/)
+  assert.match(result.details.escalation.why, new RegExp(entry.replaceAll('.', '\\.')))
+  assert.equal(io.calls.assign.some(({ role }) => role === 'builder'), false)
+})
+
+test('G1c malformed fence shape refuses by lane and entry', () => {
+  const entry = 'src/widget.mjs:2-3-4'
+  const io = fakeIo({
+    envelopes: { 'planner:1': planEnv({ details: { ...planEnv().details, files_in_scope: ['src/widget.mjs'] } }) },
+  })
+  const result = driveTask({ ...CTX, head: 'base-sha', laneName: 'own-lane', laneFence: [{ lane: 'own-lane', files: [entry] }] }, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'scope')
+  assert.match(result.details.escalation.why, /own-lane/)
+  assert.match(result.details.escalation.why, new RegExp(entry.replaceAll('.', '\\.')))
+  assert.equal(io.calls.fenceShows.length, 0)
+})
+
+test('H1 span validation reads the lane base rather than the working tree', () => {
+  const entry = 'src/widget.mjs:1-3'
+  const details = { ...planEnv().details, files_in_scope: ['src/widget.mjs'] }
+  const run = (fenceBases, extra = {}) => {
+    const io = fakeIo({
+      envelopes: { 'planner:1': planEnv({ details }) },
+      files: { '/tmp/repo/src/widget.mjs': fenceBase(20) },
+      fenceBases,
+    })
+    const result = driveTask({ ...CTX, head: 'base-sha', laneName: 'own-lane', laneFence: [fenceSpan('own-lane', 'src/widget.mjs', 1, 3)], ...extra }, io)
+    assert.equal(result.status, 'escalation')
+    assert.equal(result.details.escalation.where, 'scope')
+    assert.match(result.details.escalation.why, /own-lane/)
+    assert.match(result.details.escalation.why, new RegExp(entry.replaceAll('.', '\\.')))
+    return io
+  }
+  const shorterBase = run({ 'base-sha:src/widget.mjs': { ok: true, output: fenceBase(2) } })
+  assert.deepEqual(shorterBase.calls.fenceShows, ["git show 'base-sha:src/widget.mjs'"])
+  const unreadableBase = run({ 'base-sha:src/widget.mjs': { ok: false, output: fenceBase(20) } })
+  assert.equal(unreadableBase.calls.fenceShows.length, 1)
+  const blankBase = run({}, { head: '   ' })
+  assert.equal(blankBase.calls.fenceShows.length, 0)
+  assert.equal(shorterBase.calls.fenceShows.some((command) => command.includes('main')), false)
+})
+
+test('I1 plan files in scope still reject span grammar', () => {
+  assert.deepEqual(validateScopeEntries(['crew/drive.mjs:1-2']), [{
+    entry: 'crew/drive.mjs:1-2',
+    why: 'line spans are lane-fence entries, not files_in_scope paths',
+  }])
 })
 
 test('the closed variant set lives in the import-free leaf and drive re-exports it', () => {

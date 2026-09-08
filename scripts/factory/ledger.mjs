@@ -135,9 +135,9 @@ export const EVENT_TYPES = Object.freeze([
 
 export const SESSION_STATUSES = Object.freeze(['running', 'ok', 'fail', 'aborted'])
 export const SESSION_OUTCOMES = Object.freeze(['success', 'escalated', 'aborted', 'failed'])
-// #977: a session an acceptance gate minted while driving a scratch checkout.
-// Provenance is RECORDED by the operator, never inferred from shape.
-export const SESSION_SYNTHETIC_REASONS = Object.freeze(['gate_scratch_checkout'])
+// An enum with a member nothing can write is a documented contract nobody can rely on.
+// The synthetic-session enum and writer are retired while the additive
+// `synthetic_reason` column and historical reads remain.
 const SYNTHETIC_VISIBLE_SQL = 'synthetic_reason IS NULL'
 const SYNTHETIC_LEGACY_SQL = '1 = 1'
 // TRD §3.5 (docs/trd-task-configuration-and-run-state.md:222): where a seat's
@@ -1345,7 +1345,7 @@ export const WRITERS = Object.freeze([
   'startSession', 'endSession', 'startPhase', 'endPhase', 'recordEvent',
   'recordEnvelope', 'recordSessionRequest', 'recordRunConfiguration', 'recordRunSeat', 'recordGateResult', 'recordGateDiscrimination',
   'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'recordCiCycle', 'recordCiDispatch', 'recordEvalCell', 'recordIntakeSweep', 'recordIntakeRefusal', 'recordIntakeBrake', 'recordIntakeDispatch', 'recordSeatTeardown', 'recordSeatReclaim', 'recordProviderFailure', 'recordPlanScope', 'recordSeatReask', 'recordAcceptReask', 'recordRpcExitContext', 'recordSeatTurnCensus', 'recordPlanAdoption', 'recordExternalFence', 'recordMutationAnchorBind', 'recordMutationAnchorAbsence', 'recordPhaseSlotWait', 'startProcess', 'endProcess', 'heartbeat',
-  'startAgentSession', 'endAgentSession', 'markSyntheticSession', 'recordSourceError', 'linkRun',
+  'startAgentSession', 'endAgentSession', 'recordSourceError', 'linkRun',
 ])
 
 // Writer → the table its mirror INSERTs a row into. A writer whose mirror only
@@ -1395,7 +1395,7 @@ export const WRITER_MIRROR_TABLES = Object.freeze({
 // Writers whose mirror is an UPDATE of a row another writer created: they add
 // no row, so a JSONL line of one of these kinds is never a missing row.
 export const UPDATE_ONLY_WRITERS = Object.freeze([
-  'recordSessionRequest', 'endSession', 'endPhase', 'endProcess', 'heartbeat', 'endAgentSession', 'markSyntheticSession',
+  'recordSessionRequest', 'endSession', 'endPhase', 'endProcess', 'heartbeat', 'endAgentSession',
 ])
 
 // The doctor readout never repairs: replayJsonl is the deliberate remedy.
@@ -2722,32 +2722,6 @@ export function openLedger({
         toBindable(args.billed_cost_usd),
         toBindable(args.adw_id),
       )
-    })
-    return args
-  }
-
-  function markSyntheticSession(input = {}) {
-    requireFields(input, ['adw_id', 'reason'], 'markSyntheticSession')
-    requireEnum(input.reason, SESSION_SYNTHETIC_REASONS, 'markSyntheticSession', 'reason')
-    const args = redact({
-      adw_id: input.adw_id,
-      reason: input.reason,
-    }, stats)
-    assertWritable()
-    const conn = ensureDb()
-    if (!conn) refuse('markSyntheticSession: cannot verify the session row')
-    let existing
-    try {
-      existing = conn.prepare('SELECT 1 AS found FROM sessions WHERE adw_id = ?').get(toBindable(args.adw_id))
-    } catch (err) {
-      noteMirrorError(err)
-      refuse('markSyntheticSession: cannot verify the session row')
-    }
-    if (!existing) refuse('markSyntheticSession: no session row matches the requested adw_id')
-    appendJsonl('markSyntheticSession', args)
-    mirror((conn) => {
-      conn.prepare('UPDATE sessions SET synthetic_reason = ? WHERE adw_id = ?')
-        .run(toBindable(args.reason), toBindable(args.adw_id))
     })
     return args
   }
@@ -5406,7 +5380,7 @@ export function openLedger({
     get degraded() { return degraded },
     startSession, endSession, recordSessionRequest, recordRunConfiguration, recordRunSeat, startPhase, endPhase, recordEvent, recordEnvelope,
     recordGateResult, recordGateDiscrimination, recordMutationAnchorBind, recordMutationAnchorAbsence, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordEvalCell, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown, recordSeatReclaim, recordProviderFailure, recordPlanScope, recordSeatReask, recordAcceptReask, recordRpcExitContext, recordSeatTurnCensus, recordPlanAdoption, recordExternalFence, recordPhaseSlotWait,
-    startProcess, endProcess, heartbeat, startAgentSession, endAgentSession, markSyntheticSession,
+    startProcess, endProcess, heartbeat, startAgentSession, endAgentSession,
     recordSourceError, linkRun,
     listSessions, listEvents, getSession, phantomSessions, dumpTable, tableNames, columnNames, sessionsFiltered, runsStartedWithin, phasesFor, runConfigurationsFor, runSeatsFor, agentEventsFor, agentSessionsFor, gateDiscriminationsFor, gateResultsFor, reviewOutcomesFor, acceptDecisionsFor, supportsJson1, eventsPage, maxEventId, cellFailureRowsFor, unattributableCellFailures, seatTeardownRowsFor, intakePicks, intakeSweepTotals, intakeCandidateRefusals, intakeCandidatePicks, agentSessionTokenTotals, gateReviewGap, cellFailures, cellReviews, evalCells, cellUsage, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, escalations, endedRuns, escalationWindow, seatReclaims, journalFacts, turnEconomy, turnBreakdown, eligibleTasks, runSet, transportsFor, taskReadout, jsonlDrift,
     stats: statsFn,
@@ -6102,7 +6076,6 @@ const VERB_FLAGS = Object.freeze({
   'gate-review-gap': new Set([]),
   'eligible-tasks': new Set([]),
   'phantom-sessions': new Set([]),
-  'mark-synthetic': new Set(['adw-id', 'reason']),
   'run-set': new Set(['since', 'until']),
   'cell-failures': new Set(['since', 'until']),
   cells: new Set(['since', 'until', 'prices']),
@@ -6635,7 +6608,7 @@ export function main(argv) {
   try {
     const { verb, positional, flags } = parseArgs(argv)
     if (!verb) {
-      refuse('a verb is required: sessions | phases | tail | procs | gate-review-gap | eligible-tasks | phantom-sessions | mark-synthetic --adw-id <id> --reason <key> | run-set --since <iso> [--until <iso>] | cell-failures [--since <iso>] [--until <iso>] | cells [--since <iso>] [--until <iso>] [--prices <path>] | evals --bench <sha> [--prices <path>] | modifier-attempts [--since <iso>] [--until <iso>] | seat-teardowns [--since <iso>] [--until <iso>] | escalations --since <iso> [--until <iso>] | ci-cycles [--since <iso>] [--until <iso>] | intake-sweeps [--since <iso>] [--until <iso>] | journal-facts [--since <iso>] [--until <iso>] | turns [--since <iso>] [--until <iso>] | task | request <adw_id> --from-brief <path> | advisor-ab --run-dir <dir> --run-started-at <iso|ms> --adjudications <path> <dispatch-id>… | doctor | kill')
+      refuse('a verb is required: sessions | phases | tail | procs | gate-review-gap | eligible-tasks | phantom-sessions | run-set --since <iso> [--until <iso>] | cell-failures [--since <iso>] [--until <iso>] | cells [--since <iso>] [--until <iso>] [--prices <path>] | evals --bench <sha> [--prices <path>] | modifier-attempts [--since <iso>] [--until <iso>] | seat-teardowns [--since <iso>] [--until <iso>] | escalations --since <iso> [--until <iso>] | ci-cycles [--since <iso>] [--until <iso>] | intake-sweeps [--since <iso>] [--until <iso>] | journal-facts [--since <iso>] [--until <iso>] | turns [--since <iso>] [--until <iso>] | task | request <adw_id> --from-brief <path> | advisor-ab --run-dir <dir> --run-started-at <iso|ms> --adjudications <path> <dispatch-id>… | doctor | kill')
     }
 
     // TEST SEAM: DEVTEAM_LEDGER_FAKE_NODE_VERSION substitutes for
@@ -6773,19 +6746,12 @@ export function main(argv) {
       const payload = {
         schema: 1,
         question: 'Which ended sessions have the measured shape of a phantom lane?',
-        definition: 'a session that ended, recorded zero events and lasted under one second — a candidate shape, never a proof of provenance; synthetic_reason is non-null only for a row an operator marked by name (#977)',
-        reasons: SESSION_SYNTHETIC_REASONS,
+        definition: 'a session that ended, recorded zero events and lasted under one second — a candidate shape, never a proof of provenance; synthetic_reason is historical persisted provenance rather than a currently writable operator mark',
+        reasons: [],
         count: rows.length,
         rows,
       }
       stdout.write(`${JSON.stringify(payload)}\n`)
-      return 0
-    }
-
-    if (verb === 'mark-synthetic') {
-      if (positional.length > 0) refuse('mark-synthetic: takes no positional arguments')
-      const args = ledger.markSyntheticSession({ adw_id: flags['adw-id'], reason: flags.reason })
-      stdout.write(`${JSON.stringify({ schema: 1, marked: 1, adw_id: args.adw_id, reason: args.reason })}\n`)
       return 0
     }
 

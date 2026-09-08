@@ -2,6 +2,7 @@ import { draftPrBody, draftPrTitle, followUpIssueBody, followUpIssueTitle, gateS
 import { adjudicatePanel, fuseFindings } from './escalation-policy.mjs'
 import { VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT } from './variants.mjs'
 import { protectedHitsIn, resolveProtectedPaths } from './protected-paths.mjs'
+import { parseFenceScope, validateFenceScope, fenceScopesIntersect, fenceScopeContains } from './fence-scope.mjs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { SUITE_SLOT_KIND, SLOT_WAIT_INTERVAL_MS, SLOT_WAIT_CEILING_MS, slotPolicy } from './host-load.mjs'
@@ -431,6 +432,7 @@ export const JUDGE_TIER = 'judge'
 // can never replace or shrink it. crew/roles/ is deliberately absent because
 // charters are pinned by tests already.
 export { PROTECTED_PATHS, resolveProtectedPaths } from './protected-paths.mjs'
+export { parseFenceScope, validateFenceScope, fenceScopesIntersect } from './fence-scope.mjs'
 
 // #251 — blueprint variants: a CLOSED enum of run shapes over this one driver.
 // A variant is DATA this code consults at fixed sites — never a composition
@@ -1904,6 +1906,8 @@ export function validateScopeEntries(entries) {
       why = 'absolute path — paths must be repo-relative, as git status prints them'
     } else if (entry.split('/').some((segment) => segment === '.' || segment === '..')) {
       why = 'must be a plain repo-relative path (no . or .. segments)'
+    } else if (/:\d+-\d+$/.test(entry)) {
+      why = 'line spans are lane-fence entries, not files_in_scope paths'
     } else if (entry.endsWith('/') && entry.split('/').filter(Boolean).length < SCOPE_DIR_MIN_SEGMENTS) {
       why = 'directory prefix is too broad — a top-level directory would authorize most of the tree; name a subdirectory (at least two segments) or list files'
     }
@@ -2135,15 +2139,35 @@ export function protectedHits(entries, extra) {
 }
 
 // A lane fence is a DENY-list and never an allow-list: a path no lane claims is
-// always allowed. The matching rule is protectedHitsIn's, per lane — one matcher,
-// one meaning of "this path is inside that surface".
+// always allowed. Whole-file and directory matching remains protectedHitsIn's;
+// spans add only the grammar leaf's same-path interval decision.
+const fenceScopeOf = (entry) => parseFenceScope(entry)
+
 export function laneFenceHits(entries, laneFence) {
   const hits = []
   for (const record of Array.isArray(laneFence) ? laneFence : []) {
     if (!record || typeof record.lane !== 'string' || !Array.isArray(record.files)) continue
-    for (const entry of protectedHitsIn(entries, record.files)) {
+    const pathEntries = []
+    const spanScopes = []
+    for (const raw of record.files) {
+      const scope = fenceScopeOf(raw)
+      if (scope.kind === 'span') spanScopes.push(scope)
+      else pathEntries.push(raw)
+    }
+    for (const entry of protectedHitsIn(entries, pathEntries)) {
       if (!hits.some((hit) => hit.entry === entry && hit.lane === record.lane)) {
         hits.push({ entry, lane: record.lane })
+      }
+    }
+    for (const scope of spanScopes) {
+      for (const raw of Array.isArray(entries) ? entries : []) {
+        const target = fenceScopeOf(raw)
+        const hit = target.kind === 'span'
+          ? fenceScopesIntersect(target, scope)
+          : target.kind === 'file' && (fenceScopesIntersect(target, scope) || protectedHitsIn([raw], [scope.path]).length > 0)
+        if (hit && !hits.some((item) => item.entry === raw && item.lane === record.lane)) {
+          hits.push({ entry: raw, lane: record.lane })
+        }
       }
     }
   }
@@ -2151,6 +2175,132 @@ export function laneFenceHits(entries, laneFence) {
 }
 
 const fenceBreachList = (hits) => hits.map(({ entry, lane }) => `${entry} is owned by lane ${lane}`).join('; ')
+
+function pathOnlyLaneFence(laneFence, laneName) {
+  return (Array.isArray(laneFence) ? laneFence : [])
+    .filter((record) => record?.lane !== laneName)
+    .map((record) => ({
+      ...record,
+      files: (Array.isArray(record?.files) ? record.files : [])
+        .filter((entry) => fenceScopeOf(entry).kind !== 'span'),
+    }))
+}
+
+function spanPlanFenceHits(scopeFiles, ownScopes, siblingScopes) {
+  const hits = []
+  for (const entry of Array.isArray(scopeFiles) ? scopeFiles : []) {
+    const plan = fenceScopeOf(entry)
+    if (plan.kind !== 'file') continue
+    for (const sibling of siblingScopes) {
+      const pathMatches = plan.path === sibling.path
+        || (plan.path.endsWith('/') && sibling.path.startsWith(plan.path))
+      if (!pathMatches) continue
+      const own = ownScopes.filter((scope) => scope.path === sibling.path)
+      if (own.length > 0 && !own.some((scope) => fenceScopesIntersect(scope, sibling))) continue
+      if (!hits.some((hit) => hit.entry === sibling.entry && hit.lane === sibling.lane)) {
+        hits.push({ entry: sibling.entry, lane: sibling.lane })
+      }
+    }
+  }
+  return hits
+}
+
+function fenceLineCount(text) {
+  const normal = text.replace(/\r\n/g, '\n')
+  if (normal.length === 0) return 0
+  return normal.endsWith('\n') ? normal.slice(0, -1).split('\n').length : normal.split('\n').length
+}
+
+function fenceResolutionFailure(record, entry, reason) {
+  return `lane ${record.lane} fence ${String(entry)} cannot be honored at scope: ${reason}`
+}
+
+function resolveFenceScopes(ctx, io) {
+  const scopes = []
+  for (const record of Array.isArray(ctx?.laneFence) ? ctx.laneFence : []) {
+    if (!record || typeof record.lane !== 'string' || !Array.isArray(record.files)) continue
+    for (const entry of record.files) {
+      const parsed = fenceScopeOf(entry)
+      if (parsed.kind === 'invalid') {
+        return { scopes: [], error: fenceResolutionFailure(record, entry, parsed.reason) }
+      }
+      if (parsed.kind === 'file') continue
+      const scope = parsed
+      if (typeof ctx?.head !== 'string' || !ctx.head.trim()) {
+        return { scopes: [], error: fenceResolutionFailure(record, entry, 'base commit SHA is blank') }
+      }
+      let resolved = null
+      try {
+        const shown = io.run(`git show ${shellArg(`${ctx.head}:${scope.path}`)}`)
+        if (!shown || shown.ok !== true) {
+          return { scopes: [], error: fenceResolutionFailure(record, entry, 'the base blob could not be read') }
+        }
+        if (typeof shown.output !== 'string' || shown.output.includes('\0')) {
+          return { scopes: [], error: fenceResolutionFailure(record, entry, 'the base blob output was unreadable') }
+        }
+        const validated = validateFenceScope(entry, fenceLineCount(shown.output))
+        if (validated.reason) {
+          return { scopes: [], error: fenceResolutionFailure(record, entry, validated.reason) }
+        }
+        resolved = { ...validated, lane: record.lane }
+      } catch (err) {
+        return { scopes: [], error: fenceResolutionFailure(record, entry, `the base blob read was interrupted: ${err?.message ?? String(err)}`) }
+      }
+      scopes.push(resolved)
+    }
+  }
+  return { scopes, error: null }
+}
+
+export function parseUnifiedZeroHunks(output, path) {
+  if (typeof output !== 'string') return { hunks: [], reason: 'diff output was unreadable' }
+  if (typeof path !== 'string' || path.length === 0) return { hunks: [], reason: 'diff path was empty' }
+  const hunks = []
+  for (const line of output.replace(/\r\n/g, '\n').split('\n')) {
+    if (!line.startsWith('@@')) continue
+    const match = /^@@ -(\d+)(?:,(\d+))? \+\d+(?:,\d+)? @@(?:.*)$/.exec(line)
+    if (!match) return { hunks: [], reason: `invalid unified hunk header ${line}` }
+    const oldStart = Number(match[1])
+    const oldCount = match[2] === undefined ? 1 : Number(match[2])
+    const end = oldCount === 0 ? oldStart : oldStart + oldCount - 1
+    if (![oldStart, oldCount, end].every((value) => Number.isSafeInteger(value) && value >= 0)) {
+      return { hunks: [], reason: `unified hunk coordinates are not safe integers: ${line}` }
+    }
+    hunks.push({ kind: 'span', path, start: oldStart, end })
+  }
+  if (hunks.length === 0) return { hunks: [], reason: 'diff output contained no valid unified hunk' }
+  return { hunks, reason: null }
+}
+
+function readFenceDiff(ctx, io, path) {
+  let result
+  try {
+    result = io.run(`git diff --unified=0 ${shellArg(ctx.head)} -- ${shellArg(path)}`)
+  } catch (err) {
+    return { hunks: [], reason: `diff command was interrupted: ${err?.message ?? String(err)}` }
+  }
+  if (!result || result.ok !== true) return { hunks: [], reason: 'diff command returned non-ok' }
+  return parseUnifiedZeroHunks(result.output, path)
+}
+
+function siblingSpanIntersects(scope, hunks) {
+  return hunks.some((hunk) => fenceScopesIntersect(scope, hunk))
+}
+
+export { fenceScopeOf, siblingSpanIntersects }
+
+function mergeFenceScopes(scopes) {
+  const merged = []
+  for (const scope of [...scopes].sort((left, right) => left.start - right.start || left.end - right.end)) {
+    const current = merged.at(-1)
+    if (!current || scope.start > current.end + 1) {
+      merged.push({ ...scope })
+    } else if (scope.end > current.end) {
+      current.end = scope.end
+    }
+  }
+  return merged
+}
 
 export function composeCommitMessage({ task, planEnv, builderEnv }) {
   const firstNonEmptyLine = (value) => String(value || '').split('\n').map((line) => line.trim()).find(Boolean) || ''
@@ -4168,10 +4318,21 @@ function runTask(ctx, io, crash) {
       `files_in_scope carries entries the scope gate cannot honor — fix the plan, not the build: ${scopeErrors.map(({ entry, why }) => `${JSON.stringify(entry)} (${why})`).join('; ')}`,
       planEnv.artifacts || [])
   }
-  const planFenceHits = laneFenceHits(scopeFiles, ctx.laneFence)
-  if (planFenceHits.length > 0) {
+  const fenceResolution = resolveFenceScopes(ctx, io)
+  if (fenceResolution.error) return escalate('scope', fenceResolution.error, planEnv.artifacts || [])
+  const resolvedFenceScopes = fenceResolution.scopes
+  const ownFenceScopes = resolvedFenceScopes.filter((scope) => scope.lane === ctx.laneName)
+  const siblingFenceScopes = resolvedFenceScopes.filter((scope) => scope.lane !== ctx.laneName)
+  const ownSpanScopes = ownFenceScopes.filter((scope) => scope.kind === 'span')
+  const siblingSpanScopes = siblingFenceScopes.filter((scope) => scope.kind === 'span')
+  const planFenceHits = laneFenceHits(scopeFiles, pathOnlyLaneFence(ctx.laneFence, ctx.laneName))
+  const planSpanFenceHits = spanPlanFenceHits(scopeFiles, ownSpanScopes, siblingSpanScopes)
+  const allPlanFenceHits = [...planFenceHits, ...planSpanFenceHits.filter((span) => (
+    !planFenceHits.some((path) => path.entry === span.entry && path.lane === span.lane)
+  ))]
+  if (allPlanFenceHits.length > 0) {
     return escalate('scope',
-      `the plan's files_in_scope crosses another live lane's fence: ${fenceBreachList(planFenceHits)} — this lane never edits another lane's write surface`,
+      `the plan's files_in_scope crosses another live lane's fence: ${fenceBreachList(allPlanFenceHits)} — this lane never edits another lane's write surface`,
       planEnv.artifacts || [])
   }
   acceptedScope = scopeFiles
@@ -5515,11 +5676,46 @@ function runTask(ctx, io, crash) {
   const scopeGate = (round, finalRound, builderDetails) => {
     stage(`scope-gate:r${round}`)
     const changed = io.changedFiles()
-    const gateFenceHits = laneFenceHits(changed, ctx.laneFence)
+    const gateFenceHits = laneFenceHits(changed, pathOnlyLaneFence(ctx.laneFence, ctx.laneName))
     if (gateFenceHits.length > 0) {
       stageComplete()
       return { escalation: escalate('scope',
         `the build crossed another live lane's fence: ${fenceBreachList(gateFenceHits)} — a file a sibling crew owns is never a bounce, it is a human's call`) }
+    }
+
+    const spanPaths = new Set([...ownSpanScopes, ...siblingSpanScopes].map((scope) => scope.path))
+    let siblingSpanFailure = null
+    let ownSpanRefusal = null
+    for (const path of (Array.isArray(changed) ? changed : []).filter((candidate) => spanPaths.has(candidate))) {
+      const pathOwnScopes = ownSpanScopes.filter((scope) => scope.path === path)
+      const pathSiblingScopes = siblingSpanScopes.filter((scope) => scope.path === path)
+      const diff = readFenceDiff(ctx, io, path)
+      if (diff.reason) {
+        if (pathSiblingScopes.length > 0) {
+          siblingSpanFailure = `the changed path ${path} could not be checked against ${fenceBreachList(pathSiblingScopes)}: ${diff.reason}`
+        } else if (pathOwnScopes.length > 0) {
+          ownSpanRefusal = spanScopeRefusal(pathOwnScopes, `the changed path ${path} could not be checked against this lane's span fence: ${diff.reason}`)
+        }
+        break
+      }
+      const siblingHit = pathSiblingScopes.find((scope) => siblingSpanIntersects(scope, diff.hunks))
+      if (siblingHit) {
+        siblingSpanFailure = `the build's changed hunk crosses another live lane's span fence: ${fenceBreachList([siblingHit])} — a file a sibling crew owns is never a bounce, it is a human's call`
+        break
+      }
+      if (pathOwnScopes.length > 0) {
+        const ownScopes = mergeFenceScopes(pathOwnScopes)
+        const hunks = diff.hunks
+        const escaped = hunks.some((hunk) => !ownScopes.some((scope) => fenceScopeContains(scope, hunk)))
+        if (escaped) {
+          ownSpanRefusal = spanScopeRefusal(ownScopes, `the changed hunk on ${path} is outside this lane's span fence; keep the edit inside ${ownScopes.map((scope) => scope.entry).join(', ')}`)
+          break
+        }
+      }
+    }
+    if (siblingSpanFailure) {
+      stageComplete()
+      return { escalation: escalate('scope', siblingSpanFailure) }
     }
     // #846 — protocol debris is classified BEFORE scope subtraction. `outOfScopeFiles`
     // mechanically removes every in-scope path (crew/drive.mjs:1519-1529, and
@@ -5529,13 +5725,14 @@ function runTask(ctx, io, crash) {
     // INSIDE the CHECKOUT, never a property of what the planner happened to fence.
     const debris = changed.filter((f) => ENVELOPE_DEBRIS.test(f))
     let refusal = scopeRefusal([...new Set([...outOfScopeFiles(changed, inScope), ...debris])])
+    if (refusal.reason === null && ownSpanRefusal) refusal = ownSpanRefusal
     if (refusal.reason === null && builderDetails !== undefined) {
       refusal = mutationAnchorScopeRefusal(changed, mutations, builderDetails, readBuilt)
     }
     // MUTATION A4: invert this early return and a round whose tree is entirely in scope
     // starts paying for a gate it does not need.
     if (refusal.reason === null) { stageComplete(); return { ok: true } }              // ANCHOR A4
-    io.log(recordRow({ at: io.now(), scope_gate: { round, reason: refusal.reason, envelopes: refusal.envelopes, edits: refusal.edits } }))
+    io.log(recordRow({ at: io.now(), scope_gate: { round, reason: refusal.reason, envelopes: refusal.envelopes, edits: refusal.edits, ...(refusal.spans ? { spans: refusal.spans } : {}) } }))
     const canBounce = plans && !finalRound()
     if (!canBounce) {
       stageComplete()
@@ -7509,6 +7706,13 @@ export function scopeRefusal(outOfScope) {
   return { reason: 'envelope-and-edits', envelopes, edits, why: `${envelopeWhy}; ${editWhy}` }
 }
 
+function spanScopeRefusal(scopes, why, reason = 'span-out-of-scope') {
+  const spans = (Array.isArray(scopes) ? scopes : [])
+    .map((scope) => scope?.entry)
+    .filter((entry) => typeof entry === 'string' && entry !== '')
+  return { reason, envelopes: [], edits: [], spans, why: spans.length > 0 ? `${why} [${spans.join(', ')}]` : why }
+}
+
 export function scopeBounceBrief(round, refusal, scopeFiles, planPath) {
   const lines = [`# Scope bounce (round ${round})`, '']
   if (refusal.envelopes.length > 0) {
@@ -7519,6 +7723,10 @@ export function scopeBounceBrief(round, refusal, scopeFiles, planPath) {
   if (refusal.edits.length > 0) {
     lines.push("These files are OUTSIDE the plan's scope — revert them or stop touching them:",
       ...refusal.edits.map((f) => `- ${f}`), '')
+  }
+  if (Array.isArray(refusal.spans) && refusal.spans.length > 0) {
+    lines.push('These span fences were not honored; keep every changed hunk inside the original span:',
+      ...refusal.spans.map((entry) => `- ${entry}`), refusal.why, '')
   }
   if (refusal.reason === 'anchor-absent') lines.push(refusal.why, '')
   lines.push('In-scope set:', ...scopeFiles.map((f) => `- ${f}`), `Plan: ${planPath}`)

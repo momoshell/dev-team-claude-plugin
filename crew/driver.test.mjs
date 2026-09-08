@@ -35,6 +35,19 @@ test('assignmentPrompt path delivery is byte-identical and modes are closed', ()
   assert.throws(() => assignmentPrompt({ ...GOOD, delivery: 'other' }), /assignmentPrompt: delivery must be one of path, inline/)
 })
 
+test('F1 assignment delivery template remains byte-identical', () => {
+  const expected = 'ASSIGNMENT p1: read your brief at /Users/x/.crew/demo/task/brief-planner.md. Task dir: /Users/x/.crew/demo/task. Write your ReturnEnvelope to /Users/x/.crew/demo/returns/planner.json then print exactly: CREW-DONE planner p1'
+  assert.equal(assignmentLine(GOOD), expected)
+  const pathDelivery = assignmentDelivery({ briefFile: GOOD.briefFile, readFileSync: () => Buffer.alloc(ASSIGNMENT_INLINE_BYTE_LIMIT + 1) })
+  assert.equal(pathDelivery.delivery, 'path')
+  assert.equal(assignmentPrompt({ ...GOOD, ...pathDelivery }), expected)
+  const inlineDelivery = assignmentDelivery({ briefFile: GOOD.briefFile, readFileSync: () => 'bounded brief' })
+  assert.equal(inlineDelivery.delivery, 'inline')
+  const inlinePrompt = assignmentPrompt({ ...GOOD, ...inlineDelivery })
+  assert.ok(inlinePrompt.includes('bounded brief'))
+  assert.doesNotMatch(inlinePrompt, /read your brief at/)
+})
+
 test('assignmentPrompt inline delivery carries a multiline brief without its path instruction', () => {
   const briefText = '# Task: inline\n## The ask\nKeep this verbatim.\n'
   const prompt = assignmentPrompt({ ...GOOD, delivery: 'inline', briefText })

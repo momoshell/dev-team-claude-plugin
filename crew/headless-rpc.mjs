@@ -19,6 +19,17 @@ import { readJsonTri } from './json-leaf.mjs'
 import { PI_BUILTIN_TOOLS, PI_SUBAGENT_TOOL, translateDeny } from './adapters/adapter-pi.mjs'
 
 export const WAIT_POLL_MS = 5000
+export const PRE_FIRST_TURN_TOLERANCE_MS = WAIT_POLL_MS
+export const PRE_FIRST_TURN_ABSENT_REASONS = Object.freeze({
+  seat_reused: 'seat-reused',
+  clock_resolution: 'clock-resolution',
+  no_first_non_brief_tool: 'no-first-non-brief-tool',
+  no_brief_tool_turns: 'no-brief-tool-turns',
+  envelope_write_time_unobservable: 'envelope-write-time-unobservable',
+  stream_absent: 'stream-absent',
+  no_frames: 'no-frames',
+  computation_failed: 'computation-failed',
+})
 // pi refuses input while compacting, and compaction runs between
 // agent_end and agent_settled. Keep the settle gate bounded by polls rather
 // than wall clock so injected supervisors can drive it deterministically.
@@ -277,6 +288,146 @@ function parsedRpcFrames(text) {
   return frames
 }
 
+const PRE_FIRST_TURN_READ_TOOLS = new Set(['read', 'grep', 'ls', 'find', 'glob', 'notebookread'])
+
+export function isBriefReadToolCall(frame, briefFile) {
+  if (!frame || frame.type !== 'tool_execution_start' || typeof briefFile !== 'string' || briefFile.length === 0) return false
+  const toolName = typeof frame.toolName === 'string' ? frame.toolName.toLowerCase() : ''
+  let observed
+  try { observed = censusFileOperands(toolName, frame.args) } catch { return false }
+  const paths = Array.isArray(observed?.paths) ? observed.paths : []
+  const readClass = PRE_FIRST_TURN_READ_TOOLS.has(toolName) || (toolName === 'bash' && paths.length > 0)
+  if (!readClass) return false
+  const basename = briefFile.split('/').pop()
+  return paths.some((path) => path === briefFile || path === basename)
+}
+
+function positiveDuration(start, end) {
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return null
+  const duration = end - start
+  return Number.isFinite(duration) && duration > 0 ? duration : null
+}
+
+function newPreBoundaryTurn() {
+  return { saw_brief_read: false, saw_non_brief: false, open_brief_reads: new Map(), brief_read_unmeasured: false }
+}
+
+function observePreFirstTurn(turn, frame, at) {
+  const timing = turn?.timing
+  if (!timing || timing.first_non_brief_tool_seen === true) return
+  if (frame.type === 'turn_start') {
+    timing.current_pre_boundary_turn = newPreBoundaryTurn()
+    return
+  }
+  const current = timing.current_pre_boundary_turn || (timing.current_pre_boundary_turn = newPreBoundaryTurn())
+  if (frame.type === 'tool_execution_start') {
+    if (isBriefReadToolCall(frame, timing.brief_file)) {
+      current.saw_brief_read = true
+      if (frame.toolCallId != null && Number.isFinite(at)) current.open_brief_reads.set(frame.toolCallId, at)
+      else current.brief_read_unmeasured = true
+      return
+    }
+    current.saw_non_brief = true
+    timing.first_non_brief_tool_seen = true
+    timing.first_non_brief_tool_at = Number.isFinite(at) ? at : null
+    return
+  }
+  if (frame.type === 'tool_execution_end') {
+    const start = current.open_brief_reads.get(frame.toolCallId)
+    if (!Number.isFinite(start)) return
+    current.open_brief_reads.delete(frame.toolCallId)
+    const duration = positiveDuration(start, at)
+    if (duration === null) current.brief_read_unmeasured = true
+    else {
+      timing.brief_read_ms = (Number.isFinite(timing.brief_read_ms) ? timing.brief_read_ms : 0) + duration
+      timing.brief_read_measured = true
+    }
+    return
+  }
+  if (frame.type === 'turn_end') {
+    if (current.saw_brief_read && !current.saw_non_brief) timing.brief_read_turns += 1
+    timing.current_pre_boundary_turn = newPreBoundaryTurn()
+  }
+}
+
+function absentPreFirstTurn(reason) {
+  return {
+    pre_first_turn_span_ms: null,
+    seat_boot_ms: null,
+    seat_boot_absent_reason: reason,
+    prompt_delivery_ms: null,
+    prompt_delivery_absent_reason: reason,
+    brief_read_turns: null,
+    brief_read_turns_absent_reason: reason,
+    brief_read_ms: null,
+    brief_read_absent_reason: reason,
+    envelope_poll_ms: null,
+    envelope_poll_absent_reason: reason,
+    pre_first_turn_known_sum_ms: null,
+    pre_first_turn_residual_ms: null,
+    pre_first_turn_tolerance_ms: null,
+    pre_first_turn_reconciled: null,
+  }
+}
+
+export function finalisePreFirstTurn(turn) {
+  const timing = turn?.timing || turn?.pre_first_timing || turn || {}
+  const assignmentStartedAt = timing.assignment_started_at ?? timing.assignmentStartedAt ?? turn?.assignmentStartedAt
+  const firstSeen = timing.first_non_brief_tool_seen === true || Number.isFinite(timing.first_non_brief_tool_at) || Number.isFinite(timing.firstNonBriefToolAt)
+  const firstAt = timing.first_non_brief_tool_at ?? timing.firstNonBriefToolAt
+  const spanMs = positiveDuration(assignmentStartedAt, firstAt)
+  const spanAbsentReason = firstSeen ? PRE_FIRST_TURN_ABSENT_REASONS.clock_resolution : PRE_FIRST_TURN_ABSENT_REASONS.no_first_non_brief_tool
+
+  const seatReused = timing.seat_reused === true || timing.seatReused === true
+  const bootMs = seatReused
+    ? null
+    : positiveDuration(
+      timing.seat_boot_started_at ?? timing.seatBootStartedAt,
+      timing.seat_boot_ready_at ?? timing.seatBootReadyAt,
+    )
+  const bootAbsentReason = bootMs === null
+    ? (seatReused ? PRE_FIRST_TURN_ABSENT_REASONS.seat_reused : PRE_FIRST_TURN_ABSENT_REASONS.clock_resolution)
+    : null
+  const promptMs = positiveDuration(
+    timing.prompt_delivery_started_at ?? timing.promptDeliveryStartedAt,
+    timing.prompt_delivery_sent_at ?? timing.promptDeliverySentAt,
+  )
+  const promptAbsentReason = promptMs === null ? PRE_FIRST_TURN_ABSENT_REASONS.clock_resolution : null
+
+  const completedBriefTurns = Number(timing.brief_read_turns ?? timing.briefReadTurns)
+  const briefTurns = Number.isSafeInteger(completedBriefTurns) && completedBriefTurns > 0 ? completedBriefTurns : null
+  const briefTurnsAbsentReason = briefTurns === null
+    ? (firstSeen ? PRE_FIRST_TURN_ABSENT_REASONS.no_brief_tool_turns : spanAbsentReason)
+    : null
+  const candidateBriefMs = timing.brief_read_ms ?? timing.briefReadMs
+  const briefMs = briefTurns !== null && Number.isFinite(candidateBriefMs) && candidateBriefMs > 0 ? candidateBriefMs : null
+  const briefAbsentReason = briefMs === null
+    ? (briefTurns === null ? briefTurnsAbsentReason : PRE_FIRST_TURN_ABSENT_REASONS.clock_resolution)
+    : null
+  const envelopePollMs = null
+  const envelopePollAbsentReason = PRE_FIRST_TURN_ABSENT_REASONS.envelope_write_time_unobservable
+  const measured = [bootMs, promptMs, briefMs].filter((value) => Number.isFinite(value) && value > 0)
+  const knownSumMs = measured.reduce((sum, value) => sum + value, 0)
+  const residualMs = spanMs === null ? null : spanMs - knownSumMs
+  return {
+    pre_first_turn_span_ms: spanMs,
+    seat_boot_ms: bootMs,
+    seat_boot_absent_reason: bootAbsentReason,
+    prompt_delivery_ms: promptMs,
+    prompt_delivery_absent_reason: promptAbsentReason,
+    brief_read_turns: briefTurns,
+    brief_read_turns_absent_reason: briefTurnsAbsentReason,
+    brief_read_ms: briefMs,
+    brief_read_absent_reason: briefAbsentReason,
+    envelope_poll_ms: envelopePollMs,
+    envelope_poll_absent_reason: envelopePollAbsentReason,
+    pre_first_turn_known_sum_ms: spanMs === null ? null : knownSumMs,
+    pre_first_turn_residual_ms: residualMs,
+    pre_first_turn_tolerance_ms: PRE_FIRST_TURN_TOLERANCE_MS,
+    pre_first_turn_reconciled: residualMs === null ? null : Math.abs(residualMs) <= PRE_FIRST_TURN_TOLERANCE_MS,
+  }
+}
+
 function rpcCensusFrames(frames) {
   const segments = []
   const prelude = []
@@ -407,6 +558,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
   })
   const pid = deps.pid ?? process.pid
   const telemetryFold = deps.censusReducer || deps.foldCensusFrame || deps.telemetryReducer || (typeof deps.telemetry === 'function' ? deps.telemetry : foldCensusFrame)
+  const preFirstTurnFinalizer = deps.preFirstTurnFinalizer || deps.finalisePreFirstTurn || finalisePreFirstTurn
   const injectedLog = deps.log
   const crewDeps = { existsSync: exists, readFileSync: read, writeFileSync: write, renameSync: rename, unlinkSync: unlink, mkdirSync: mkdir, readdirSync: readdir, uuid, now, sleep, pid }
   const emit = deps.emit
@@ -453,6 +605,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
     evidencePolicies: { [EVIDENCE_KINDS.PGID]: (_role, marker) => marker?.evidence || null },
   })
   const seats = new Map()
+  const ensureReuse = new WeakMap()
   const pending = new Map()
   let commandSeq = 0
   let settlePolls = 0
@@ -460,6 +613,10 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
   function log(value) {
     if (injectedLog) return injectedLog(value)
     try { write(join(paths.dir, 'journal.jsonl'), `${JSON.stringify(value)}\n`, { flag: 'a' }) } catch { /* diagnostics only */ }
+  }
+  function safeFinalisePreFirstTurn(turn) {
+    try { return preFirstTurnFinalizer(turn) }
+    catch { return absentPreFirstTurn(PRE_FIRST_TURN_ABSENT_REASONS.computation_failed) }
   }
   function journalTurnCensus(turn, seat) {
     if (!turn || turn.censusJournalled) return
@@ -470,6 +627,9 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
       const streamUnreadable = noFrames && seat.lastRead === false
       const census = finaliseCensus(observed.census || null)
       const absentReason = noFrames ? CENSUS_ABSENT_CAUSES.no_frames : (census?.clock_absent ?? CENSUS_ABSENT_CAUSES.stream_absent)
+      const timing = noFrames
+        ? absentPreFirstTurn(streamUnreadable ? PRE_FIRST_TURN_ABSENT_REASONS.stream_absent : PRE_FIRST_TURN_ABSENT_REASONS.no_frames)
+        : safeFinalisePreFirstTurn(turn)
       log({
         at: now(),
         seat_turn_census: {
@@ -493,6 +653,21 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
           tool_spans_same_poll: noFrames ? null : census?.tool_spans_same_poll ?? null,
           bash_reads_absent_reason: noFrames ? null : census?.bash_reads_absent_reason ?? null,
           absent_reason: absentReason,
+          pre_first_turn_span_ms: timing.pre_first_turn_span_ms,
+          seat_boot_ms: noFrames ? null : timing.seat_boot_ms,
+          seat_boot_absent_reason: timing.seat_boot_absent_reason,
+          prompt_delivery_ms: noFrames ? null : timing.prompt_delivery_ms,
+          prompt_delivery_absent_reason: timing.prompt_delivery_absent_reason,
+          brief_read_turns: timing.brief_read_turns,
+          brief_read_turns_absent_reason: timing.brief_read_turns_absent_reason,
+          brief_read_ms: timing.brief_read_ms,
+          brief_read_absent_reason: timing.brief_read_absent_reason,
+          envelope_poll_ms: timing.envelope_poll_ms,
+          envelope_poll_absent_reason: timing.envelope_poll_absent_reason,
+          pre_first_turn_known_sum_ms: timing.pre_first_turn_known_sum_ms,
+          pre_first_turn_residual_ms: timing.pre_first_turn_residual_ms,
+          pre_first_turn_tolerance_ms: timing.pre_first_turn_tolerance_ms,
+          pre_first_turn_reconciled: timing.pre_first_turn_reconciled,
         },
       })
     })
@@ -616,6 +791,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
         obs.lastTool = typeof frame.toolName === 'string' ? frame.toolName : null
         obs.lastToolAt = at
       }
+      observePreFirstTurn(seat.turn, frame, at)
     }
   }
   // EVERY read of the seat's frames is adjudicated here, which is what makes the
@@ -645,7 +821,10 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
     const member = crew.members?.[role]
     if (!member) throw new Error(`role ${role} not seated in this crew`)
     let seat = seats.get(role)
-    if (seat && (!seat.exit || !exists(seat.exit))) return seat
+    if (seat && (!seat.exit || !exists(seat.exit))) {
+      ensureReuse.set(seat, true)
+      return seat
+    }
     if (seat?.fd != null) { try { closeFd(seat.fd) } catch {} }
     if (seat?.handle) { try { store.clear(seat.handle) } catch {} }
     seat = null
@@ -671,6 +850,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
       fd = open(fifo, 'r+')
       seat = { role, dir, stream, stderr, exit, pgid, fifo, cmdPath, fd, pid: marker.marker.pid, sessionId, readOffset: fileSize(stream), rest: Buffer.alloc(0), responses: new Map(), turn: null, settling: null, signalled: false, handle: marker.handle }
       seats.set(role, seat)
+      ensureReuse.set(seat, true)
       return seat
     }
     if (marker.verdict === VERDICTS.UNRESOLVABLE) throw staged('rpc-unresolvable-reservation', `rpc seat ${role} has an unresolvable reservation`, role)
@@ -710,6 +890,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
       saveSession(role, { sessionId, pid: child.pid, startedAt: now(), lastAssignmentId: assignmentId })
       seat = { role, dir, stream, stderr, exit, pgid, fifo, cmdPath, fd, pid: child.pid, sessionId, readOffset: fileSize(stream), rest: Buffer.alloc(0), responses: new Map(), turn: null, settling: null, signalled: false, handle }
       seats.set(role, seat)
+      ensureReuse.set(seat, false)
       return seat
     } catch (err) {
       // A SPAWNING marker is deliberately retained when the child may have
@@ -760,14 +941,19 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
     const id = reask?.id || runId
     const returnPath = reask?.returnPath || join(paths.returnsDir, `${id}.${role}.json`)
     if (exists(returnPath)) unlink(returnPath)
+    const assignmentStartedAt = now()
     const seat = ensureProcess(role, runId)
+    const seatReused = ensureReuse.get(seat) === true
+    const seatBootReadyAt = seatReused ? null : now()
     const offset = fileSize(seat.stream)
     seat.readOffset = offset; seat.rest = Buffer.alloc(0); seat.responses.clear()
+    const promptDeliveryStartedAt = now()
     const delivery = assignmentDelivery({ briefFile, readFileSync: read })
     const prompt = assignmentPrompt({ id, role, briefFile, returnPath, taskDir: taskDir || paths.taskDir, ...delivery }) + (note ? `\n${note}` : '')
-    const turn = { id, runId, role, returnPath, prompt, retries: 0, offset, usage: null, state: { sawJson: false, settled: false, ended: false }, providerBoundary: { calls: 0, turns: 0 }, observed: { frames: 0, turns: 0, lastType: null, lastAt: null, lastTool: null, lastToolAt: null, census: newCensus() }, censusJournalled: false, sentAt: now(), policy: policy ?? null, seenToolCalls: new Set(), policyReported: false, pendingSuiteRefusal: null, enforced: false, ceilingDecision: null }
+    const turn = { id, runId, role, returnPath, prompt, retries: 0, offset, usage: null, state: { sawJson: false, settled: false, ended: false }, providerBoundary: { calls: 0, turns: 0 }, observed: { frames: 0, turns: 0, lastType: null, lastAt: null, lastTool: null, lastToolAt: null, census: newCensus() }, timing: { assignment_started_at: assignmentStartedAt, seat_reused: seatReused, seat_boot_started_at: seatReused ? null : assignmentStartedAt, seat_boot_ready_at: seatBootReadyAt, prompt_delivery_started_at: promptDeliveryStartedAt, prompt_delivery_sent_at: null, brief_file: briefFile, current_pre_boundary_turn: newPreBoundaryTurn(), brief_read_turns: 0, brief_read_ms: 0, brief_read_measured: false, first_non_brief_tool_seen: false, first_non_brief_tool_at: null }, censusJournalled: false, sentAt: now(), policy: policy ?? null, seenToolCalls: new Set(), policyReported: false, pendingSuiteRefusal: null, enforced: false, ceilingDecision: null }
     seat.turn = turn
     const promptId = send(seat, { type: 'prompt', message: prompt, id: runId }, 'prompt')
+    turn.timing.prompt_delivery_sent_at = now()
     log({ at: now(), event: 'assignment-delivery', role, assignment_id: id, transport: 'headless-rpc', mode: delivery.delivery, brief_bytes: delivery.brief_bytes, brief_size_measured: delivery.brief_bytes !== null, brief_size_unmeasured_reason: delivery.unmeasured_reason })
     turn.promptId = promptId
     saveSession(role, { sessionId: seat.sessionId, pid: seat.pid, startedAt: session(role).startedAt || now(), lastAssignmentId: runId })

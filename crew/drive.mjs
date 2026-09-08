@@ -273,6 +273,20 @@ export function suiteRefusalOf(env) {
   return refusal
 }
 
+export function turnCeilingOf(env, budget) {
+  if (!env || typeof env !== 'object' || Array.isArray(env) || env.status !== 'insufficient') return null
+  if (typeof env.assignment_id !== 'string' || env.assignment_id === '') return null
+  if (typeof env.role !== 'string' || env.role === '') return null
+  if (!env.details || typeof env.details !== 'object' || Array.isArray(env.details)) return null
+  const ceiling = env.details.turn_ceiling
+  if (!ceiling || typeof ceiling !== 'object' || Array.isArray(ceiling)) return null
+  if (!Number.isInteger(ceiling.turns) || ceiling.turns < 0) return null
+  if (ceiling.budget !== budget) return null
+  if (ceiling.absent_reason !== null) return null
+  if (!turnCeilingBreached(ceiling.turns, budget)) return null
+  return ceiling
+}
+
 function suiteRefusalPreamble(env) {
   const refusal = suiteRefusalOf(env)
   if (!refusal) return { kind: null, lines: [] }
@@ -3175,6 +3189,7 @@ function runTask(ctx, io, crash) {
     // details no longer carry suite_refusal, and the next brief names the
     // measurement failure instead of the forbidden command.
     if (suiteRefusalOf(env)) return env
+    if (turnCeilingOf(env, budget)) return env
     const observed = observeTurnCensus(censusWindow(), id, role)
     // An explicit RPC no-envelope settlement is not a returned envelope at all:
     // emptyTurnEnvelope PASSES validEnvelope, so only the producer's own outcome

@@ -168,20 +168,28 @@ test('a grant not present in the register refuses to reach an adapter', () => {
 })
 
 test('the shipped planner pi overlay resolves its checkout-pinned bundle', () => {
-  const grants = grantsFor(loadCapabilities(), 'planner', { agent: 'pi' })
-  assert.deepEqual(grants.extensions, [
+  const loaded = loadCapabilities()
+  const expected = [
     join(REGISTER_ROOT, 'crew/pi/extensions/subagent.ts'),
     join(REGISTER_ROOT, 'crew/pi/extensions/lab.ts'),
-  ])
+    join(REGISTER_ROOT, 'crew/pi/extensions/readgate.ts'),
+  ]
+  const grants = grantsFor(loaded, 'planner', { agent: 'pi' })
+  assert.deepEqual(grants.extensions, expected)
+  for (const path of expected) assert.equal(existsSync(path), true)
+  assert.doesNotThrow(() => assertGrantsBacked('planner', grants, loaded, { agent: 'pi' }))
   assert.deepEqual(grants.agents, [{ name: 'scout', def: join(REGISTER_ROOT, 'crew/pi/agents/scout.json') }])
 })
 
-test('the shipped builder pi overlay resolves exactly one checkout-pinned extension', () => {
+test('the shipped builder pi overlay resolves its checkout-pinned extensions', () => {
   const loaded = loadCapabilities()
-  const expected = join(REGISTER_ROOT, 'crew/pi/extensions/builderloop.ts')
+  const expected = [
+    join(REGISTER_ROOT, 'crew/pi/extensions/builderloop.ts'),
+    join(REGISTER_ROOT, 'crew/pi/extensions/readgate.ts'),
+  ]
   const pi = grantsFor(loaded, 'builder', { agent: 'pi' })
-  assert.deepEqual(pi.extensions, [expected])
-  assert.equal(existsSync(expected), true)
+  assert.deepEqual(pi.extensions, expected)
+  for (const path of expected) assert.equal(existsSync(path), true)
   assert.doesNotThrow(() => assertGrantsBacked('builder', pi, loaded, { agent: 'pi' }))
   const claude = grantsFor(loaded, 'builder', { agent: 'claude' })
   assert.deepEqual(claude.extensions, [])
@@ -190,6 +198,28 @@ test('the shipped builder pi overlay resolves exactly one checkout-pinned extens
     () => assertGrantsBacked('builder', forged, loaded, { agent: 'pi' }),
     (err) => err.reason === 'unknown-grant',
   )
+})
+
+test('the shipped tech-lead pi overlay resolves its checkout-pinned read gate only', () => {
+  const loaded = loadCapabilities()
+  const expected = [join(REGISTER_ROOT, 'crew/pi/extensions/readgate.ts')]
+  const pi = grantsFor(loaded, 'tech-lead', { agent: 'pi' })
+  assert.deepEqual(pi.extensions, expected)
+  assert.equal(existsSync(expected[0]), true)
+  assert.doesNotThrow(() => assertGrantsBacked('tech-lead', pi, loaded, { agent: 'pi' }))
+  assert.deepEqual(grantsFor(loaded, 'tech-lead', { agent: 'claude' }).extensions, [])
+})
+
+test('the read gate is absent from lead and reviewer pi and all claude overlays', () => {
+  const loaded = loadCapabilities()
+  for (const role of ['lead', 'reviewer']) {
+    const pi = grantsFor(loaded, role, { agent: 'pi' })
+    assert.equal(pi.extensions.some((path) => path.endsWith('/crew/pi/extensions/readgate.ts')), false)
+  }
+  for (const role of ['planner', 'builder', 'tech-lead']) {
+    const claude = grantsFor(loaded, role, { agent: 'claude' })
+    assert.equal(claude.extensions.some((path) => path.endsWith('/crew/pi/extensions/readgate.ts')), false)
+  }
 })
 
 test('an adapter without an overlay gets exactly the role-level grant', () => {
@@ -785,7 +815,7 @@ test('the pi subagents probe exercises the granted fan-out bundle', async () => 
   assert.equal(argv[argv.indexOf('--tools') + 1].includes('edit'), false)
   assert.equal(argv[argv.indexOf('--tools') + 1].includes('write'), false)
   assert.equal(argv[argv.indexOf('--tools') + 1].includes('bash'), false)
-  assert.deepEqual(finding('extensions-loaded')?.value, ['subagent.ts', 'lab.ts'])
+  assert.deepEqual(finding('extensions-loaded')?.value, ['subagent.ts', 'lab.ts', 'readgate.ts'])
   assert.equal(Object.hasOwn(process.env, 'CREW_PI_AGENTS'), hadAgents)
   assert.equal(process.env.CREW_PI_AGENTS, beforeAgents)
 })

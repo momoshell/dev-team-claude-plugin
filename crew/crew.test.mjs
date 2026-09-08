@@ -460,7 +460,7 @@ test('the granted pi planner pane command is pinned byte for byte so by_agent de
   // CREW_PI_AGENTS allowlist, and the `agent` activator in --tools.
   assert.equal(
     piSeatCommand({ ...PIN_SEAT, model: 'openai-codex/gpt-5.6', grants: pinnedGrants(register, 'pi') }),
-    'env DEVTEAM_WORKER=1 CREW_ROLE=planner CREW_TASK_DIR="/tmp/crew-task" CREW_PI_AGENTS=\'[{"name":"scout","def":"/repo/crew/pi/agents/scout.json"}]\' pi --model openai-codex/gpt-5.6 --tools "read,bash,edit,write,grep,find,ls,Task,agent" --exclude-tools "edit" --no-extensions -e "/repo/crew/pi/extensions/subagent.ts" -e "/repo/crew/pi/extensions/lab.ts" --no-skills --append-system-prompt "/tmp/crew-task/role-planner.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
+    'env DEVTEAM_WORKER=1 CREW_ROLE=planner CREW_TASK_DIR="/tmp/crew-task" CREW_PI_AGENTS=\'[{"name":"scout","def":"/repo/crew/pi/agents/scout.json"}]\' pi --model openai-codex/gpt-5.6 --tools "read,bash,edit,write,grep,find,ls,Task,agent" --exclude-tools "edit" --no-extensions -e "/repo/crew/pi/extensions/subagent.ts" -e "/repo/crew/pi/extensions/lab.ts" -e "/repo/crew/pi/extensions/readgate.ts" --no-skills --append-system-prompt "/tmp/crew-task/role-planner.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
   )
   // Ungranted: the same pi seat with no grants loses exactly the delivery.
   assert.equal(
@@ -480,13 +480,15 @@ test('BG1', () => {
   }
   assert.deepEqual(
     piSeatCommand(builder),
-    'env DEVTEAM_WORKER=1 CREW_ROLE=builder CREW_TASK_DIR="/tmp/crew-task" pi --model openai-codex/gpt-5.6 --tools "read,bash,edit,write,grep,find,ls" --no-extensions -e "/repo/crew/pi/extensions/builderloop.ts" --no-skills --append-system-prompt "/tmp/role-builder.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
+    'env DEVTEAM_WORKER=1 CREW_ROLE=builder CREW_TASK_DIR="/tmp/crew-task" pi --model openai-codex/gpt-5.6 --tools "read,bash,edit,write,grep,find,ls" --no-extensions -e "/repo/crew/pi/extensions/builderloop.ts" -e "/repo/crew/pi/extensions/readgate.ts" --no-skills --append-system-prompt "/tmp/role-builder.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
   )
-  assert.equal(piSeatCommand(builder).split(' -e ').length - 1, 1)
+  assert.equal(piSeatCommand(builder).split(' -e ').length - 1, 2)
   assert.ok(piSeatCommand(builder).includes('-e "/repo/crew/pi/extensions/builderloop.ts"'))
+  assert.ok(piSeatCommand(builder).includes('-e "/repo/crew/pi/extensions/readgate.ts"'))
   const claudeBuilder = grantsFor(register, 'builder', { ...PIN_ROOT, agent: 'claude' })
   assert.deepEqual(claudeBuilder.extensions, [])
   assert.equal(seatCommand({ ...builder, grants: claudeBuilder }).includes('/repo/crew/pi/extensions/builderloop.ts'), false)
+  assert.equal(seatCommand({ ...builder, grants: claudeBuilder }).includes('/repo/crew/pi/extensions/readgate.ts'), false)
   for (const role of ROLE_ORDER.filter((name) => name !== 'builder')) {
     const grants = grantsFor(register, role, { ...PIN_ROOT, agent: 'pi' })
     assert.doesNotThrow(() => assertGrantsBacked(role, grants, register, { agent: 'pi' }))
@@ -495,6 +497,15 @@ test('BG1', () => {
       tools: SEAT_DEFAULTS[role].tools, deny: SEAT_DEFAULTS[role].deny, grants,
     })
     assert.equal(command.includes('/repo/crew/pi/extensions/builderloop.ts'), false)
+    assert.equal(command.includes('/repo/crew/pi/extensions/readgate.ts'), role === 'planner' || role === 'tech-lead')
+  }
+  for (const role of ROLE_ORDER) {
+    const grants = grantsFor(register, role, { ...PIN_ROOT, agent: 'claude' })
+    const command = seatCommand({
+      ...builder, role, model: 'opus', promptFile: `/tmp/role-${role}.md`,
+      tools: SEAT_DEFAULTS[role].tools, deny: SEAT_DEFAULTS[role].deny, grants,
+    })
+    assert.equal(command.includes('/repo/crew/pi/extensions/readgate.ts'), false)
   }
 })
 
@@ -513,12 +524,13 @@ test('BG2', () => {
       '--mode', 'rpc', '--model', 'openai-codex/gpt-5.6', '--thinking', 'max', '--session-dir', '/tmp/crew-task/sessions',
       '--session-id', 'builder', '--append-system-prompt', '/tmp/role-builder.md',
       '--tools', 'read,bash,edit,write,grep,find,ls', '--no-context-files', '--no-extensions',
-      '-e', '/repo/crew/pi/extensions/builderloop.ts', '--no-skills',
+      '-e', '/repo/crew/pi/extensions/builderloop.ts', '-e', '/repo/crew/pi/extensions/readgate.ts', '--no-skills',
     ],
     env: { CREW_ROLE: 'builder', CREW_TASK_DIR: '/tmp/crew-task' },
   })
-  assert.equal(builder.args.filter((value) => value === '-e').length, 1)
+  assert.equal(builder.args.filter((value) => value === '-e').length, 2)
   assert.equal(builder.args.includes('/repo/crew/pi/extensions/builderloop.ts'), true)
+  assert.equal(builder.args.includes('/repo/crew/pi/extensions/readgate.ts'), true)
   for (const role of ROLE_ORDER.filter((name) => name !== 'builder')) {
     const grants = grantsFor(register, role, { ...PIN_ROOT, agent: 'pi' })
     assert.doesNotThrow(() => assertGrantsBacked(role, grants, register, { agent: 'pi' }))
@@ -528,6 +540,7 @@ test('BG2', () => {
       env: { CREW_ROLE: role, CREW_TASK_DIR: '/tmp/crew-task' }, grants,
     })
     assert.equal(command.args.includes('/repo/crew/pi/extensions/builderloop.ts'), false)
+    assert.equal(command.args.includes('/repo/crew/pi/extensions/readgate.ts'), role === 'planner' || role === 'tech-lead')
   }
 })
 
@@ -747,6 +760,7 @@ test('seat requirements deliver pi scouts, preserve genuine shortfalls, and reje
   assert.deepEqual(resolvedPlanner.planner.grants.extensions, [
     join(process.cwd(), 'crew/pi/extensions/subagent.ts'),
     join(process.cwd(), 'crew/pi/extensions/lab.ts'),
+    join(process.cwd(), 'crew/pi/extensions/readgate.ts'),
   ])
   assert.deepEqual(resolvedPlanner.planner.grants.agents, [{ name: 'scout', def: join(process.cwd(), 'crew/pi/agents/scout.json') }])
   const headlessPlanner = await resolveAdapters(['planner'], { 'agent-planner': 'pi', 'headless-rpc': 'planner' })

@@ -3,6 +3,7 @@
 // This extension intentionally has no pi or package dependency so checkout-pinned
 // pi can load it through its erasable TypeScript loader.
 
+import { createHash } from 'node:crypto'
 import { appendFileSync, readFileSync } from 'node:fs'
 import { basename, dirname, join, resolve as resolvePath } from 'node:path'
 
@@ -10,6 +11,13 @@ export const DEFAULT_MAX_LINES = 350
 export const MAX_LINES_ENV = 'CREW_READGATE_MAX_LINES'
 
 const defaultRead = (path) => readFileSync(path, 'utf8')
+const defaultSnapshotFile = (path) => {
+  const raw = readFileSync(path)
+  return {
+    fingerprint: createHash('sha256').update(raw).digest('hex'),
+    lineCount: raw.toString('utf8').split('\n').length,
+  }
+}
 const defaultAppend = (path, text) => appendFileSync(path, text)
 const defaultNow = () => new Date().toISOString()
 const own = (value, key) => Object.prototype.hasOwnProperty.call(value, key)
@@ -202,6 +210,22 @@ function validLineCount(value) {
   return value
 }
 
+function validPositiveInteger(value, label) {
+  if (!Number.isFinite(value) || !Number.isInteger(value) || value <= 0) {
+    throw new Error(`${label} must be a finite positive integer`)
+  }
+  return value
+}
+
+function validSnapshot(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') throw new Error('snapshot returned an invalid result')
+  const lineCount = validLineCount(snapshot.lineCount)
+  if (typeof snapshot.fingerprint !== 'string' || snapshot.fingerprint.length === 0) {
+    throw new Error('snapshot returned an invalid fingerprint')
+  }
+  return { fingerprint: snapshot.fingerprint, lineCount }
+}
+
 function hasCountOption(words) {
   let options = true
   for (let index = 1; index < words.length; index += 1) {
@@ -263,6 +287,10 @@ export function createReadGate(options = {}) {
   const tokenize = input.tokenize || deps.tokenize || defaultTokenize
   const blockedRead = input.blockedRead || deps.blockedRead || defaultBlockedRead
   const resolveFile = input.resolvePath || deps.resolvePath || resolvePath
+  const snapshotFile = input.snapshotFile || deps.snapshotFile || defaultSnapshotFile
+  const readRanges = new Map()
+  const pendingReads = new Map()
+  let currentTurn = 1
 
   const recordFailure = input.recordFailure || deps.recordFailure || ((row) => {
     if (!journalPath) return
@@ -288,6 +316,83 @@ export function createReadGate(options = {}) {
     } catch {}
     try { recordFailure({ read_gate_failure: { reason, tool, target } }) } catch {}
     return undefined
+  }
+
+  function recordTrackerFailure(error, event) {
+    return recordAndAllow(error, event)
+  }
+
+  function normalizeRange(input, lineCount) {
+    const start = own(input, 'offset') ? validPositiveInteger(input.offset, 'offset') : 1
+    const limit = own(input, 'limit') ? validPositiveInteger(input.limit, 'limit') : undefined
+    const end = limit === undefined ? lineCount : Math.min(lineCount, start + limit - 1)
+    return { start, end }
+  }
+
+  function repeatedRead(path, requested, turn) {
+    const displayedPath = String(path)
+    const rangeText = `${requested.start}-${requested.end}`
+    return {
+      block: true,
+      reason: `Refusing repeated read of ${displayedPath}, range ${rangeText}: unchanged content was delivered at turn ${turn}. Use grep with a targeted pattern instead: grep ${JSON.stringify({ pattern: '<target>', path: displayedPath })}`,
+    }
+  }
+
+  function rememberPending(toolCallId, path, requested, resolved, fingerprint, turn) {
+    pendingReads.set(toolCallId, { path, requested, resolved, fingerprint, turn })
+    return undefined
+  }
+
+  function inspectRangedRead(event, ctx) {
+    const input = event?.input || {}
+    const cwd = ctx?.cwd || cwdDefault
+    const resolved = resolveFile(cwd, input.path)
+    const snapshot = validSnapshot(snapshotFile(resolved))
+    const requested = normalizeRange(input, snapshot.lineCount)
+    const fingerprint = snapshot.fingerprint
+    let cover
+    for (const entry of readRanges.get(resolved) || []) {
+      if (entry.fingerprint !== fingerprint) continue
+      if (entry.start <= requested.start && entry.end >= requested.end) {
+        cover = entry
+        break
+      }
+    }
+    if (cover) return repeatedRead(input.path, requested, cover.turn)
+    if (!cover) return rememberPending(event.toolCallId, input.path, requested, resolved, fingerprint, currentTurn)
+    return undefined
+  }
+
+  function onTurnStart(event) {
+    const turnIndex = event?.turnIndex
+    if (!Number.isSafeInteger(turnIndex) || turnIndex < 0) {
+      return recordTrackerFailure(new Error('turn_start returned an invalid turn index'), event)
+    }
+    currentTurn = turnIndex + 1
+    return undefined
+  }
+
+  function onToolResult(event) {
+    try {
+      if (event?.toolName !== 'read') return undefined
+      const pending = pendingReads.get(event.toolCallId)
+      pendingReads.delete(event.toolCallId)
+      if (event?.isError || !pending) return undefined
+      const { resolved } = pending
+      const snapshot = validSnapshot(snapshotFile(resolved))
+      const outputLines = event?.details?.truncation?.outputLines
+      const end = Number.isSafeInteger(outputLines) && outputLines > 0
+        ? Math.min(pending.requested.end, outputLines)
+        : pending.requested.end
+      const delivered = {
+        start: pending.requested.start,
+        end,
+        fingerprint: snapshot.fingerprint,
+        turn: pending.turn,
+      }
+      readRanges.set(resolved, [...(readRanges.get(resolved) || []), delivered])
+      return undefined
+    } catch (error) { return recordTrackerFailure(error, event) }
   }
 
   function configuredMaxLines() {
@@ -317,7 +422,7 @@ export function createReadGate(options = {}) {
       if (event?.toolName === 'grep') return undefined
       const input = event?.input || {}
       if (event?.toolName === 'read') {
-        if (hasRange(input)) return undefined
+        if (hasRange(input)) return inspectRangedRead(event, ctx)
         const maxLines = configuredMaxLines()
         const cwd = ctx?.cwd || cwdDefault
         return inspectPath(input.path, cwd, maxLines)
@@ -342,13 +447,15 @@ export function createReadGate(options = {}) {
     }
   }
 
-  return { onToolCall }
+  return { onToolCall, onToolResult, onTurnStart }
 }
 
 export function attachReadGate(pi, options = {}) {
   const gate = createReadGate(options)
   if (typeof pi?.on !== 'function') throw new Error('read gate extension needs pi.on')
+  pi.on('turn_start', (event) => gate.onTurnStart(event))
   pi.on('tool_call', (event, ctx) => gate.onToolCall(event, ctx))
+  pi.on('tool_result', (event) => gate.onToolResult(event))
   return gate
 }
 

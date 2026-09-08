@@ -99,6 +99,10 @@ import {
   shortfallFlagArgs,
   staffingFromBrief,
   resolveTransport,
+  parsePlannerSymbolsHoldoutFraction,
+  selectPlannerSymbolsArm,
+  PLANNER_SYMBOLS_ARM_EVENT,
+  PLANNER_SYMBOLS_EXPERIMENT,
   ROSTER_PATH,
   seatFloorRefusal,
   seatRolesUnseated,
@@ -2934,6 +2938,7 @@ async function dispatchFixture({
   writeFile = null,
   appendFile = null,
   spawnedOut = null,
+  random = null,
 } = {}) {
   const batch = join(root, `dispatch-${label}-${Math.random().toString(36).slice(2)}`)
   const parent = join(root, `dispatch-${label}-parent`)
@@ -3009,6 +3014,7 @@ async function dispatchFixture({
       return spawnAsync(call)
     } } : {}),
     ...(assertQuiet ? { assertQuiet } : {}),
+    ...(random ? { random } : {}),
     log: (line) => logs.push(String(line)),
   }
   const report = await dispatchBatch({
@@ -3676,6 +3682,98 @@ test('--dry-run plans branch probes but creates no worktree', async () => {
   assert.equal(spawned.some(({ args }) => args.includes('worktree')), false)
 })
 
+test('HoldB1', async () => {
+  const result = await dispatchFixture({
+    label: 'hold-b1',
+    names: ['lane-a'],
+    random: () => { throw new Error('random must not be touched when the flag is absent') },
+  })
+  const compilerCalls = result.spawned.filter(({ args }) => (args || []).some((arg) => String(arg).endsWith('make-brief.mjs')) && (args || []).includes('--request'))
+  const runCalls = result.spawned.filter(({ args }) => (args || []).includes('run'))
+  assert.equal(compilerCalls.filter(({ args }) => (args || []).includes('--out')).length, 1)
+  assert.equal(runCalls.length, 1)
+  assert.equal(compilerCalls.some(({ args }) => (args || []).includes('--pack-omission')), false)
+  assert.equal(result.appended.length, 0)
+  assert.equal(selectPlannerSymbolsArm(null, () => { throw new Error('null arm selector must not draw') }), null)
+  const record = JSON.parse(readFileSync(join(result.out, 'lane-a.dispatch.json'), 'utf8'))
+  assert.equal(Object.hasOwn(record, 'experiment'), false)
+  for (const value of [0, 1, 0.5]) assert.equal(parsePlannerSymbolsHoldoutFraction(value), value)
+  for (const value of ['', 'NaN', 'Infinity', '-0.1', '1.1', ' 0.5', '0.5x']) {
+    assert.throws(() => parsePlannerSymbolsHoldoutFraction(value), BatchRefusal)
+  }
+})
+
+test('HoldB2', async () => {
+  const draws = [0.1, 0.6, 0.9]
+  let randomCalls = 0
+  const result = await dispatchFixture({
+    label: 'hold-b2',
+    names: ['lane-a', 'lane-b', 'lane-c'],
+    runFlags: { 'planner-symbols-holdout-fraction': '0.5' },
+    random: () => draws[randomCalls++],
+  })
+  assert.equal(randomCalls, 3)
+  const compiles = result.spawned.filter(({ args }) => (args || []).some((arg) => String(arg).endsWith('make-brief.mjs')) && (args || []).includes('--out'))
+  assert.equal(compiles.length, 3)
+  const byLane = new Map(compiles.map((call) => [call.args[call.args.indexOf('--lane') + 1], call]))
+  assert.equal(byLane.get('lane-a').args.includes('--pack-omission'), false)
+  assert.equal(byLane.get('lane-b').args[byLane.get('lane-b').args.indexOf('--pack-omission') + 1], 'symbols')
+  assert.equal(byLane.get('lane-c').args[byLane.get('lane-c').args.indexOf('--pack-omission') + 1], 'symbols')
+  const runs = result.spawned.filter(({ args }) => (args || []).includes('run'))
+  assert.equal(runs.length, 3)
+  for (const call of runs) {
+    const lane = call.args[call.args.indexOf('--task') + 1]
+    assert.equal(call.args[call.args.indexOf('--brief-file') + 1], join(result.out, `${lane}.brief.md`))
+  }
+  assert.equal(result.appended.length, 3)
+})
+
+test('HoldB3', async () => {
+  const result = await dispatchFixture({
+    label: 'hold-b3',
+    names: ['lane-a'],
+    runFlags: { 'planner-symbols-holdout-fraction': '1' },
+    random: () => 0.999,
+  })
+  const row = JSON.parse(result.appended[0].content)
+  assert.deepEqual(row, {
+    at: row.at,
+    event: PLANNER_SYMBOLS_ARM_EVENT,
+    role: 'planner',
+    experiment: PLANNER_SYMBOLS_EXPERIMENT,
+    arm: 'control',
+    fraction: 1,
+  })
+  const record = JSON.parse(readFileSync(join(result.out, 'lane-a.dispatch.json'), 'utf8'))
+  assert.deepEqual(record.experiment, { name: PLANNER_SYMBOLS_EXPERIMENT, arm: 'control', fraction: 1 })
+
+  const deferred = await dispatchFixture({
+    label: 'hold-b3-resume',
+    names: ['lane-a', 'lane-b'],
+    requests: { 'lane-b': requestFor('lane-b', { depends_on: ['lane-a'] }) },
+    runFlags: { wave: 2, 'planner-symbols-holdout-fraction': '0.25' },
+  })
+  assert.ok(deferred.logs.some((line) => line.includes('--planner-symbols-holdout-fraction 0.25')), JSON.stringify(deferred.logs))
+})
+
+test('HoldB4', async () => {
+  const trace = []
+  const result = await dispatchFixture({
+    label: 'hold-b4',
+    names: ['lane-a'],
+    runFlags: { 'planner-symbols-holdout-fraction': '0' },
+    random: () => 0,
+    appendFile: () => trace.push('arm'),
+    spawnResult: (args) => {
+      if (args.includes('boot')) trace.push('boot')
+      if (args.includes('run')) trace.push('run')
+      return { status: 0, stdout: '', stderr: '' }
+    },
+  })
+  assert.deepEqual(trace, ['boot', 'arm', 'run'])
+  assert.equal(result.appended.length, 1)
+})
+
 test('a dispatch over a checkout with pinned files unrelated to the batch still dispatches', async () => {
   const checkout = gitFixture()
   const batch = join(checkout, 'pinned-dry-run-batch')
@@ -3713,7 +3811,7 @@ test('briefMeasure reports UTF-8 bytes and the largest section, or null', () => 
 
 test('normalDeps supplies the house-style dependency surface', () => {
   const deps = normalDeps({})
-  assert.deepEqual(Object.keys(deps).sort(), ['appendFileSync', 'assertQuiet', 'env', 'existsSync', 'home', 'log', 'mkdirSync', 'now', 'readFileSync', 'readdirSync', 'sleep', 'slots', 'spawn', 'spawnAsync', 'writeFileSync'])
+  assert.deepEqual(Object.keys(deps).sort(), ['appendFileSync', 'assertQuiet', 'env', 'existsSync', 'home', 'log', 'mkdirSync', 'now', 'random', 'readFileSync', 'readdirSync', 'sleep', 'slots', 'spawn', 'spawnAsync', 'writeFileSync'])
 })
 
 test('compileLane discovers reads once and compiles once', async () => {

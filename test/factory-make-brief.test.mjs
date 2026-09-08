@@ -2948,3 +2948,55 @@ test('b476 RV1 hardening a build verdict on a non-done round leaves the done-pat
   assert.equal(io.calls.assign.filter(({ role, note }) => role === 'reviewer' && note === 'gate-triage').length, 2)
   assert.equal(io.calls.assign.filter(({ role, note }) => role === 'lead' && note === 'gate-repair').length, 1)
 })
+
+// #1059 — the symbols sidecar is the only treatment omission. Keep these
+// fixtures byte-oriented: a treatment that accidentally changes another pack
+// artifact or an inline pointer is not a valid holdout.
+test('HoldA1', () => {
+  const root = fixture('hold-a1')
+  put(root, 'lib/hold-a1.mjs', 'export const holdA1Symbol = 1\n')
+  git(root, 'add', '-A')
+  const pack = join(root, 'pack')
+  mkdirSync(pack)
+  const result = compile(root, { where: ['lib/hold-a1.mjs'] }, ['--pack', pack, '--pack-omission', 'symbols'], 'hold-a1.brief.md')
+  assert.equal(existsSync(join(pack, 'hold-a1.symbols.md')), false)
+  assert.doesNotMatch(result.brief, /symbol index:/)
+})
+
+test('HoldA2', () => {
+  const root = fixture('hold-a2')
+  put(root, 'lib/hold-a2.mjs', 'export const holdA2Symbol = 1\n')
+  git(root, 'add', '-A')
+  const controlPack = join(root, 'control-pack')
+  const treatmentPack = join(root, 'treatment-pack')
+  mkdirSync(controlPack)
+  mkdirSync(treatmentPack)
+  const control = compile(root, { where: ['lib/hold-a2.mjs'] }, ['--pack', controlPack], 'hold-a2.brief.md').brief
+  const controlFiles = Object.fromEntries(readdirSync(controlPack).map((name) => [name, readFileSync(join(controlPack, name), 'utf8')]))
+  const treatment = compile(root, { where: ['lib/hold-a2.mjs'] }, ['--pack', treatmentPack, '--pack-omission', 'symbols', '--force'], 'hold-a2.brief.md').brief
+  for (const name of ['hold-a2.tripwires.txt', 'hold-a2.tripwires.md', 'hold-a2.conventions.md']) {
+    assert.equal(readFileSync(join(controlPack, name), 'utf8'), readFileSync(join(treatmentPack, name), 'utf8'), name)
+  }
+  const stripPointer = (text, packPath) => text.replaceAll(packPath, '<PACK>').replace(/^symbol index: .*\n/gm, '')
+  assert.equal(stripPointer(control, controlPack), stripPointer(treatment, treatmentPack))
+  assert.equal(existsSync(join(treatmentPack, 'hold-a2.symbols.md')), false)
+  assert.ok(controlFiles['hold-a2.symbols.md'])
+})
+
+test('HoldA3', () => {
+  const root = fixture('hold-a3')
+  put(root, 'lib/hold-a3.mjs', 'export const holdA3Symbol = 1\n')
+  git(root, 'add', '-A')
+  const firstPack = join(root, 'first-pack')
+  const secondPack = join(root, 'second-pack')
+  mkdirSync(firstPack)
+  mkdirSync(secondPack)
+  const first = compile(root, { where: ['lib/hold-a3.mjs'] }, ['--pack', firstPack], 'hold-a3.brief.md')
+  const second = compile(root, { where: ['lib/hold-a3.mjs'] }, ['--pack', secondPack, '--force'], 'hold-a3.brief.md')
+  const normalize = (text, packPath) => text.replaceAll(packPath, '<PACK>')
+  assert.equal(normalize(first.brief, firstPack), normalize(second.brief, secondPack))
+  assert.equal(readFileSync(join(firstPack, 'hold-a3.symbols.md'), 'utf8'), readFileSync(join(secondPack, 'hold-a3.symbols.md'), 'utf8'))
+  const bad = run(root, ['--request', request(root), '--checkout', root, '--out', join(root, 'bad.md'), '--pack', firstPack, '--pack-omission', 'rows'])
+  assert.equal(bad.status, 2)
+  assert.match(bad.stderr, /pack-omission/)
+})

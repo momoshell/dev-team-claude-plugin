@@ -49,6 +49,7 @@ import {
 import { resolveProtectedPaths } from '../../crew/protected-paths.mjs'
 
 const REQUEST_KEYS = Object.freeze(['ask', 'where', 'done_means', 'out_of_scope'])
+export const PACK_OMISSIONS = Object.freeze(['symbols'])
 // A lane may declare files it will CREATE. The key is OPTIONAL, so every
 // request authored before it existed stays valid, and it is a COMPILER key
 // rather than a dispatch-only one: the compiler is what exempts the path.
@@ -2597,7 +2598,11 @@ function renderSymbolSidecar(index) {
   return ['symbol index (full static scan):', ...rows].join('\n')
 }
 
-export function writePack({ packDir, taskName, checkout, request, discovery, writeSurface, coupling, profile, issueBodyPath } = {}) {
+export function writePack({ packDir, taskName, checkout, request, discovery, writeSurface, coupling, profile, issueBodyPath, omission = null } = {}) {
+  const packOmission = omission ?? null
+  if (packOmission !== null && !PACK_OMISSIONS.includes(packOmission)) {
+    throw new Error(`unknown pack omission ${JSON.stringify(packOmission)}; expected one of ${PACK_OMISSIONS.join(', ')}`)
+  }
   const directory = resolve(packDir)
   const name = String(taskName || 'brief')
   const paths = {
@@ -2625,7 +2630,7 @@ export function writePack({ packDir, taskName, checkout, request, discovery, wri
   writeFileSync(paths.vocabulary, `${keyList(discovery).join('\n')}\n`)
   writeFileSync(paths.rows, `${renderTripwires(discovery)}\n`)
   writeFileSync(paths.conventions, `${conventionsFile(discovery, writeSurface, profile)}\n`)
-  if (symbolIndex.length > 0) {
+  if (packOmission !== 'symbols' && symbolIndex.length > 0) {
     writeFileSync(paths.symbols, `${renderSymbolSidecar(symbolIndex)}\n`)
   } else {
     paths.symbols = null
@@ -2904,7 +2909,7 @@ export function admitBrief(content, sections) {
 function parseCliArgs(argv) {
   const flags = {}
   const positional = []
-  const valueFlags = new Set(['request', 'checkout', 'out', 'fences', 'protected', 'lane', 'profile', 'baseline', 'measure-baseline', 'discover-reads', 'pack', 'issue-body'])
+  const valueFlags = new Set(['request', 'checkout', 'out', 'fences', 'protected', 'lane', 'profile', 'baseline', 'measure-baseline', 'discover-reads', 'pack', 'issue-body', 'pack-omission'])
   const booleanFlags = new Set(['force', 'require-profile'])
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]
@@ -2966,6 +2971,7 @@ function writeBrief(content, outPath, force) {
 }
 
 function measureOnly(flags) {
+  if (flags['pack-omission'] != null) refuseUsage('--pack-omission requires --pack', MISSING_LINE)
   if (flags.request != null || flags.out != null) {
     refuseUsage('--measure-baseline cannot be combined with --request or --out', MISSING_LINE)
   }
@@ -3000,6 +3006,8 @@ function compile(flags) {
   const outPath = outputPathOrNull(flags.out)
   if (flags.pack != null && outPath == null) refuseUsage('--pack requires --out', MISSING_LINE)
   if (flags['issue-body'] != null && flags.pack == null) refuseUsage('--issue-body requires --pack', MISSING_LINE)
+  if (flags['pack-omission'] != null && flags.pack == null) refuseUsage('--pack-omission requires --pack', MISSING_LINE)
+  if (flags['pack-omission'] != null && !PACK_OMISSIONS.includes(flags['pack-omission'])) refuseUsage(`unknown --pack-omission: ${flags['pack-omission']}`, MISSING_LINE)
   const packPath = flags.pack == null ? null : resolve(flags.pack)
   if (packPath != null) {
     let present = false
@@ -3062,6 +3070,7 @@ function compile(flags) {
     coupling,
     profile,
     issueBodyPath: flags['issue-body'],
+    omission: flags['pack-omission'] ?? null,
   })
   const rendered = renderBriefResult({
     request,

@@ -69,7 +69,7 @@
 // inline.
 
 import {
-  appendFileSync, mkdirSync, chmodSync, existsSync, readFileSync, realpathSync, statSync,
+  appendFileSync, mkdirSync, chmodSync, existsSync, readFileSync, realpathSync, statSync, readdirSync,
 } from 'node:fs'
 import { dirname, join, resolve, parse, sep } from 'node:path'
 import { homedir } from 'node:os'
@@ -345,6 +345,7 @@ export const REVIEW_VERDICTS = Object.freeze(['pass', 'changes-needed'])
 // share over a handful of reviews is not a policy input, and the readout says
 // so rather than leaving the reader to notice the denominator.
 export const CELL_RATE_FLOOR = 12
+export const TURN_TRANSPORTS = Object.freeze(['headless-json', 'headless-rpc', 'pane'])
 export const CELL_PRICE_UNITS = 'USD per 1,000,000 tokens: input and output at cost_in_per_mtok and cost_out_per_mtok, cache reads at cost_cache_read_per_mtok and cache writes at cost_cache_write_per_mtok, all four ratified per model in the same catalog — a model missing either cache rate leaves the whole row unpriced, never partly priced, and a token class even one member session never measured does the same; billed_cache_write_tokens collapses the 1h and 5m write TTLs into one column, so pricing every write at the ratified 1h rate is an explicit lossy convention (#527)'
 export const ADVISOR_AB_VERDICTS = Object.freeze(['overlap', 'no-overlap', 'skipped'])
 export const ADVISOR_AB_INCOMPLETE_REASONS = Object.freeze([
@@ -1622,6 +1623,301 @@ function epochMsOrNull(value) {
     return Number.isFinite(parsed) ? parsed : null
   }
   return null
+}
+
+export function turnRateCell(numerator, denominator) {
+  if (denominator < CELL_RATE_FLOOR) return { numerator, denominator, rate: null, measured: false, reason: `unmeasured: denominator ${denominator} is below sample floor ${CELL_RATE_FLOOR}` }
+  return { numerator, denominator, rate: numerator / denominator, measured: true, reason: null }
+}
+
+function journalReadReason(error) {
+  return error?.code || error?.name || 'ReadError'
+}
+
+function plainObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+function nonBlankString(value) {
+  return typeof value === 'string' && value.trim() !== ''
+}
+
+function validTurnBoot(source) {
+  if (!plainObject(source) || source.event !== 'boot' || !Array.isArray(source.roles)) return null
+  if (source.roles.some((role) => !nonBlankString(role))) return null
+  if (!plainObject(source.seats) || !plainObject(source.transports)) return null
+  const roles = [...new Set(source.roles.map((role) => role.trim()))]
+  for (const role of roles) {
+    const seat = source.seats[role]
+    if (!plainObject(seat)) return null
+    for (const field of ['agent', 'provider', 'id', 'model', 'effort']) {
+      if (!Object.prototype.hasOwnProperty.call(seat, field)) return null
+    }
+    if (!nonBlankString(source.transports[role])) return null
+  }
+  return { roles, seats: source.seats, transports: source.transports }
+}
+
+function turnLineReason(reasons, reason) {
+  reasons[reason] = (reasons[reason] ?? 0) + 1
+}
+
+function turnCellRates(rows) {
+  const measuredRows = rows.filter((row) => Number.isFinite(row.turns))
+  const positiveRows = measuredRows.filter((row) => row.turns > 0)
+  const insufficientWithTurns = positiveRows.filter((row) => row.status === 'insufficient').length
+  const zeroTurn = measuredRows.filter((row) => row.turns === 0).length
+  const overlapRows = measuredRows.filter((row) => {
+    const { turns, status } = row
+    const overlap = turns === 0 && status === 'insufficient'
+    return overlap
+  }).length
+  return {
+    insufficient_with_turns: turnRateCell(insufficientWithTurns, positiveRows.length),
+    zero_turn: turnRateCell(zeroTurn, measuredRows.length),
+    overlap: turnRateCell(overlapRows, measuredRows.length),
+  }
+}
+
+function turnCellOutput(axis, value, rows) {
+  const rates = turnCellRates(rows)
+  const cell = { [axis]: value, ...rates }
+  if ((axis === 'provider' || axis === 'model') && value === null) {
+    for (const name of ['insufficient_with_turns', 'zero_turn', 'overlap']) {
+      cell[name] = {
+        ...cell[name],
+        rate: null,
+        measured: false,
+        reason: `unmeasured: ${axis} is absent; no ${axis} key was guessed`,
+      }
+    }
+  }
+  return cell
+}
+
+export function turnBreakdown({ crewRoot = null, since = null, until = null } = {}) {
+  const root = resolve(typeof crewRoot === 'string' && crewRoot.trim() ? crewRoot : join(homedir(), '.crew'))
+  const sinceMs = since === null || since === undefined ? null : epochMsOrNull(since)
+  const untilMs = until === null || until === undefined ? null : epochMsOrNull(until)
+  const skipped = []
+  const journalPaths = []
+  let journalsRead = 0
+  const skippedLineReasons = Object.create(null)
+  let skippedLines = 0
+  const skipLine = (reason) => {
+    skippedLines += 1
+    turnLineReason(skippedLineReasons, reason)
+  }
+
+  function walk(directory) {
+    let entries
+    try {
+      entries = readdirSync(directory, { withFileTypes: true })
+    } catch (error) {
+      skipped.push({ journal: directory, reason: journalReadReason(error) })
+      return
+    }
+    entries.sort((left, right) => left.name.localeCompare(right.name))
+    for (const entry of entries) {
+      const entryPath = join(directory, entry.name)
+      if (entry.name === 'journal.jsonl') {
+        journalPaths.push(entryPath)
+        continue
+      }
+      if (entry.isDirectory()) walk(entryPath)
+    }
+  }
+  walk(root)
+
+  const joinedRows = []
+  const excluded = []
+  const bootRoles = new Set()
+  let segmentCount = 0
+  for (const journalPath of journalPaths) {
+    let content
+    try {
+      content = readFileSync(journalPath, 'utf8')
+    } catch (error) {
+      skipped.push({ journal: journalPath, reason: journalReadReason(error) })
+      continue
+    }
+    journalsRead += 1
+    const segments = []
+    let segment = null
+    let latestBoot = null
+    const newSegment = () => ({ id: segments.length, boot: latestBoot, census: new Map(), envelopes: new Map() })
+    const activeSegment = () => {
+      if (segment === null) {
+        segment = newSegment()
+        segments.push(segment)
+      }
+      return segment
+    }
+    for (const [index, line] of String(content).split(/\r?\n/).entries()) {
+      if (line === '') continue
+      let source
+      try {
+        source = JSON.parse(line)
+      } catch {
+        skipLine('journal line is not valid JSON')
+        continue
+      }
+      if (!plainObject(source)) {
+        skipLine('journal line is not an object')
+        continue
+      }
+      if (source.event === 'run-start') {
+        segment = newSegment()
+        segments.push(segment)
+        continue
+      }
+      if (source.event === 'boot') {
+        const boot = validTurnBoot(source)
+        if (!boot) {
+          skipLine('boot snapshot is malformed')
+          continue
+        }
+        latestBoot = boot
+        activeSegment().boot = boot
+        continue
+      }
+      if (Object.prototype.hasOwnProperty.call(source, 'seat_turn_census')) {
+        const census = source.seat_turn_census
+        if (!plainObject(census)) {
+          skipLine('seat turn census is malformed')
+          continue
+        }
+        const role = census.role ?? source.role
+        const dispatchId = census.dispatch_id ?? census.id ?? source.dispatch_id ?? source.id
+        if (!nonBlankString(role) || !nonBlankString(dispatchId)) {
+          skipLine('seat turn census identity is malformed')
+          continue
+        }
+        const key = JSON.stringify([dispatchId, role])
+        activeSegment().census.set(key, {
+          role: role.trim(), dispatch_id: dispatchId.trim(), turns: census.turns,
+          at_ms: epochMsOrNull(source.at), line: index + 1,
+        })
+        continue
+      }
+      if (Object.prototype.hasOwnProperty.call(source, 'envelope')) {
+        const dispatchId = source.envelope
+        const role = source.role
+        if (!nonBlankString(role) || !nonBlankString(dispatchId)) {
+          skipLine('envelope identity is malformed')
+          continue
+        }
+        const key = JSON.stringify([dispatchId, role])
+        const status = nonBlankString(source.status) ? source.status : null
+        if (status === null) skipLine('envelope status is malformed')
+        activeSegment().envelopes.set(key, { status, line: index + 1 })
+      }
+    }
+    segmentCount += segments.length
+    for (const current of segments) {
+      for (const role of current.boot?.roles ?? []) bootRoles.add(role)
+    }
+    for (const current of segments) {
+      for (const census of current.census.values()) {
+        const key = JSON.stringify([census.dispatch_id, census.role])
+        const atMs = census.at_ms
+        if (!Number.isFinite(atMs)) {
+          excluded.push({ journal: journalPath, segment: current.id, dispatch_id: census.dispatch_id, role: census.role, reason: 'census timestamp is missing or unusable' })
+          continue
+        }
+        if (sinceMs !== null && Number.isFinite(sinceMs) && atMs < sinceMs) continue
+        if (untilMs !== null && Number.isFinite(untilMs) && atMs >= untilMs) continue
+        if (!current.boot) {
+          excluded.push({ journal: journalPath, segment: current.id, dispatch_id: census.dispatch_id, role: census.role, reason: 'boot snapshot is absent or malformed' })
+          continue
+        }
+        const seat = current.boot.roles.includes(census.role) ? current.boot.seats[census.role] : null
+        const transport = current.boot.roles.includes(census.role) ? current.boot.transports[census.role] : null
+        if (!plainObject(seat) || !nonBlankString(transport)) {
+          excluded.push({ journal: journalPath, segment: current.id, dispatch_id: census.dispatch_id, role: census.role, reason: 'boot seat cell is absent or malformed' })
+          continue
+        }
+        const envelope = current.envelopes.get(key)
+        if (!envelope || !nonBlankString(envelope.status)) {
+          excluded.push({ journal: journalPath, segment: current.id, dispatch_id: census.dispatch_id, role: census.role, reason: 'envelope status is absent or malformed' })
+          continue
+        }
+        if (!Number.isFinite(census.turns)) {
+          excluded.push({ journal: journalPath, segment: current.id, dispatch_id: census.dispatch_id, role: census.role, reason: 'turn count is absent or non-finite' })
+          continue
+        }
+        const provider = nonBlankString(seat.provider) ? seat.provider : null
+        const model = provider !== null && nonBlankString(seat.id) ? `${provider}/${seat.id}` : null
+        joinedRows.push({
+          journal: journalPath, segment: current.id, dispatch_id: census.dispatch_id, role: census.role,
+          at_ms: atMs, turns: census.turns, status: envelope.status, transport: transport.trim(), provider, model,
+        })
+      }
+    }
+  }
+
+  const roleNames = new Set(bootRoles)
+  const fullCells = new Map()
+  const ensureRole = (role) => {
+    roleNames.add(role)
+  }
+  const fullCell = (role, transport, provider, model) => {
+    const cellKey = JSON.stringify([role, transport, provider, model])
+    if (!fullCells.has(cellKey)) fullCells.set(cellKey, { role, transport, provider, model, rows: [] })
+    return fullCells.get(cellKey)
+  }
+  for (const row of joinedRows) {
+    ensureRole(row.role)
+    fullCell(row.role, row.transport, row.provider, row.model).rows.push(row)
+  }
+  for (const role of roleNames) {
+    for (const transport of TURN_TRANSPORTS) fullCell(role, transport, null, null)
+  }
+
+  function axisCells(role, axis) {
+    const cells = new Map()
+    for (const cell of fullCells.values()) {
+      if (cell.role !== role) continue
+      if (axis !== 'transport' && cell.rows.length === 0) continue
+      const value = cell[axis]
+      const key = JSON.stringify([role, value])
+      if (!cells.has(key)) cells.set(key, { value, rows: [] })
+      cells.get(key).rows.push(...cell.rows)
+    }
+    if (axis === 'transport') {
+      for (const transport of TURN_TRANSPORTS) {
+        const key = JSON.stringify([role, transport])
+        if (!cells.has(key)) cells.set(key, { value: transport, rows: [] })
+      }
+    }
+    return [...cells.values()].sort((left, right) => String(left.value ?? '').localeCompare(String(right.value ?? '')))
+  }
+
+  const byRole = [...roleNames].sort().map((role) => ({
+    role,
+    by_transport: axisCells(role, 'transport').map(({ value, rows }) => turnCellOutput('transport', value, rows)),
+    by_provider: axisCells(role, 'provider').map(({ value, rows }) => turnCellOutput('provider', value, rows)),
+    by_model: axisCells(role, 'model').map(({ value, rows }) => turnCellOutput('model', value, rows)),
+  }))
+  const sortedSkippedLineReasons = Object.fromEntries(Object.entries(skippedLineReasons).sort(([left], [right]) => left.localeCompare(right)))
+  return {
+    rate_floor: CELL_RATE_FLOOR,
+    corpus: {
+      crew_root: root,
+      journals_discovered: journalPaths.length,
+      journals_read: journalsRead,
+      segments: segmentCount,
+      dispatches: joinedRows.length,
+      measured_rows: joinedRows.length,
+      excluded_rows: excluded.length,
+      skipped_lines: skippedLines,
+      skipped_line_reasons: sortedSkippedLineReasons,
+      excluded,
+    },
+    skipped_journals: skipped,
+    skipped_lines: { count: skippedLines, reasons: sortedSkippedLineReasons },
+    by_role: byRole,
+  }
 }
 
 function integerOrNull(value, ctx, field) {
@@ -5112,7 +5408,7 @@ export function openLedger({
     recordGateResult, recordGateDiscrimination, recordMutationAnchorBind, recordMutationAnchorAbsence, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordEvalCell, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown, recordSeatReclaim, recordProviderFailure, recordPlanScope, recordSeatReask, recordAcceptReask, recordRpcExitContext, recordSeatTurnCensus, recordPlanAdoption, recordExternalFence, recordPhaseSlotWait,
     startProcess, endProcess, heartbeat, startAgentSession, endAgentSession, markSyntheticSession,
     recordSourceError, linkRun,
-    listSessions, listEvents, getSession, phantomSessions, dumpTable, tableNames, columnNames, sessionsFiltered, runsStartedWithin, phasesFor, runConfigurationsFor, runSeatsFor, agentEventsFor, agentSessionsFor, gateDiscriminationsFor, gateResultsFor, reviewOutcomesFor, acceptDecisionsFor, supportsJson1, eventsPage, maxEventId, cellFailureRowsFor, unattributableCellFailures, seatTeardownRowsFor, intakePicks, intakeSweepTotals, intakeCandidateRefusals, intakeCandidatePicks, agentSessionTokenTotals, gateReviewGap, cellFailures, cellReviews, evalCells, cellUsage, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, escalations, endedRuns, escalationWindow, seatReclaims, journalFacts, turnEconomy, eligibleTasks, runSet, transportsFor, taskReadout, jsonlDrift,
+    listSessions, listEvents, getSession, phantomSessions, dumpTable, tableNames, columnNames, sessionsFiltered, runsStartedWithin, phasesFor, runConfigurationsFor, runSeatsFor, agentEventsFor, agentSessionsFor, gateDiscriminationsFor, gateResultsFor, reviewOutcomesFor, acceptDecisionsFor, supportsJson1, eventsPage, maxEventId, cellFailureRowsFor, unattributableCellFailures, seatTeardownRowsFor, intakePicks, intakeSweepTotals, intakeCandidateRefusals, intakeCandidatePicks, agentSessionTokenTotals, gateReviewGap, cellFailures, cellReviews, evalCells, cellUsage, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, escalations, endedRuns, escalationWindow, seatReclaims, journalFacts, turnEconomy, turnBreakdown, eligibleTasks, runSet, transportsFor, taskReadout, jsonlDrift,
     stats: statsFn,
     captureMirrorErrors,
     readConnection,
@@ -5817,7 +6113,7 @@ const VERB_FLAGS = Object.freeze({
   'ci-cycles': new Set(['since', 'until']),
   'intake-sweeps': new Set(['since', 'until']),
   'journal-facts': new Set(['since', 'until']),
-  turns: new Set(['since', 'until', 'adw-id']),
+  turns: new Set(['since', 'until', 'adw-id', 'crew-root']),
   task: new Set([]),
   request: new Set(['from-brief']),
   'advisor-ab': new Set(['run-dir', 'run-started-at', 'adjudications']),
@@ -6957,15 +7253,29 @@ export function main(argv) {
       const hasSince = Object.prototype.hasOwnProperty.call(flags, 'since')
       const hasUntil = Object.prototype.hasOwnProperty.call(flags, 'until')
       const hasAdwId = Object.prototype.hasOwnProperty.call(flags, 'adw-id')
+      const hasCrewRoot = Object.prototype.hasOwnProperty.call(flags, 'crew-root')
       const since = hasSince ? windowBound(flags.since, 'since', 'turns') : null
       const until = hasUntil ? windowBound(flags.until, 'until', 'turns') : null
       const adwId = hasAdwId && typeof flags['adw-id'] === 'string' && flags['adw-id'].trim()
         ? flags['adw-id'].trim()
         : null
+      const crewRoot = hasCrewRoot && typeof flags['crew-root'] === 'string' && flags['crew-root'].trim()
+        ? flags['crew-root'].trim()
+        : null
       if (hasAdwId && adwId === null) refuse('turns: --adw-id must be a nonblank identity')
+      if (hasCrewRoot && crewRoot === null) refuse('turns: --crew-root must be a nonblank directory')
       if (until != null && since != null && until <= since) refuse('turns: --until must be later than --since')
       const facts = ledger.turnEconomy({ since, until, adw_id: adwId })
       if (ledger.stats().degraded) refuse('turns: the ledger mirror is degraded — this window is unanswerable, not empty')
+      // Closeout reads stay ledger-only. The bounded corpus is additive and is
+      // deliberately not opened for an --adw-id query.
+      const breakdown = adwId === null
+        ? turnBreakdown({ crewRoot: crewRoot ?? join(homedir(), '.crew'), since, until })
+        : null
+      const limitations = [
+        'lanes reaped before the current crew-root state are absent',
+        'Pi turns are observed through the RPC stream rather than a provider transcript',
+      ]
       stdout.write(`${JSON.stringify({
         schema: 1,
         question: 'How many turns and tool calls does a dispatch cost, by role and tier?',
@@ -6974,12 +7284,22 @@ export function main(argv) {
           dispatches_measured: 'the count of rows whose turns value is non-null; this is the denominator of every rate',
           null: 'a null cell with an absent marker is unmeasured, never a measured zero',
           excluded: 'excluded.rows counts the dispatches left out of every rate',
+          insufficient_with_turns: 'insufficient envelopes with turns greater than zero divided by all measured positive-turn rows',
+          zero_turn: 'zero-turn rows divided by all rows with a measured turn count and envelope status',
+          overlap: 'zero-turn rows whose accepted envelope status is insufficient divided by all rows with a measured turn count and envelope status',
+          by_transport: 'effective boot transport cells; every known transport is emitted, including absent cells as unmeasured',
+          by_provider: 'effective boot provider cells; an absent provider is unmeasured rather than guessed',
+          by_model: 'provider/seat.id cells when both are present; an absent key is unmeasured rather than guessed',
+          rate_floor: `a cell denominator below CELL_RATE_FLOOR (${CELL_RATE_FLOOR}) is unmeasured, never a point estimate`,
+          limitations,
         },
         tool_classes: TOOL_CLASSES_LEDGER,
         since,
         until,
         absent: facts.dispatches === null ? 'no seat_turn_census rows in this window — no dispatch count was measured, never a measured zero' : null,
         ...facts,
+        ...(breakdown === null ? {} : breakdown),
+        limitations,
       })}\n`)
       return 0
     }

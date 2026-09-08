@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import { accessSync, constants, readFileSync, realpathSync, statSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { delimiter, dirname, join, basename } from 'node:path'
-import { seatCommand, capabilitiesFor, modelString, translateDeny, PI_BUILTIN_TOOLS, PI_PROVIDERS, PI_ADVISOR_EXTENSION, shellSingleQuote } from './adapters/adapter-pi.mjs'
+import { seatCommand, capabilitiesFor, modelString, translateDeny, PI_BUILTIN_TOOLS, PI_PROVIDERS, PI_ADVISOR_EXTENSION, PI_RETRIEVE_TOOL, PI_SKELETONREAD_EXTENSION, shellSingleQuote } from './adapters/adapter-pi.mjs'
 import { SEAT_DEFAULTS, ROLE_ORDER, assertFanoutCoherent } from './crew.mjs'
 import { childArgs, resolvePiBinary } from './pi/extensions/subagent.ts'
 
@@ -257,6 +257,22 @@ test('a passive extension-only grant adds exactly one quoted operand without cha
   assert.equal(granted.includes('--exclude-tools "edit"'), plain.includes('--exclude-tools "edit"'))
   assert.equal(granted.includes('--no-skills'), plain.includes('--no-skills'))
   assert.equal(granted.slice(0, granted.indexOf(' pi ')), plain.slice(0, plain.indexOf(' pi ')))
+})
+
+test('GA1', () => {
+  const shape = {
+    role: 'builder', model: 'sonnet', promptFile: '/tmp/role-builder.md', tools: 'Read', deny: 'Task,Agent',
+    taskDir: '/tmp/task', bootBrief: 'boot',
+  }
+  const plain = seatCommand({ ...shape, grants: { tools: [], extensions: [], agents: [], skills: [], advisor: false } })
+  const granted = seatCommand({ ...shape, grants: { tools: [], extensions: [PI_SKELETONREAD_EXTENSION], agents: [], skills: [], advisor: false } })
+  assert.match(granted, new RegExp(`--tools "${escapeRegex(PI_BUILTIN_TOOLS.join(','))},${PI_RETRIEVE_TOOL}"`))
+  assert.match(granted, new RegExp(`-e "${escapeRegex(PI_SKELETONREAD_EXTENSION)}"`))
+  const stripped = granted
+    .replace(`,${PI_RETRIEVE_TOOL}`, '')
+    .replace(` -e "${PI_SKELETONREAD_EXTENSION}"`, '')
+  assert.equal(stripped, plain)
+  assert.equal(plain.includes(PI_RETRIEVE_TOOL), false)
 })
 
 test('pi extension operands survive every shell-active character through the shell parser', () => {

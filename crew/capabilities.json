@@ -36,7 +36,7 @@
       "mcp_servers": [],
       "by_agent": {
         "pi": {
-          "extensions": ["crew/pi/extensions/builderloop.ts", "crew/pi/extensions/readgate.ts"]
+          "extensions": ["crew/pi/extensions/builderloop.ts", "crew/pi/extensions/readgate.ts", "crew/pi/extensions/skeletonread.ts"]
         }
       }
     },

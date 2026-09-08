@@ -98,12 +98,13 @@ const CTX = Object.freeze({
 
 // Scripted fake io: `script` maps `${role}:${n-th call}` -> envelope; runs and
 // git are scripted per call. Everything is recorded for assertions.
-function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cleanThrows = false, cold = 'green', showDoc = false, emit = false, files = {}, reseat = null, gh = null, writeThrough = false, throwOn = null, throwWrites = [], seqIds = false, now = () => 0, slots = null } = {}) {
-  const calls = { order: [], trace: [], assign: [], run: [], runClean: [], runCold: [], wrapped: [], sweeps: [], reseat: [], commits: [], writes: {}, writeLog: [], checkoutLog: [], logs: [], showDoc: [], emits: [], gh: [], waits: [], sleeps: [], slotFactories: [], files }
+function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cleanThrows = false, cold = 'green', showDoc = false, emit = false, files = {}, reseat = null, gh = null, writeThrough = false, throwOn = null, throwWrites = [], seqIds = false, now = () => 0, slots = null, diffListing = '', diffHunks = {}, diffReports = [] } = {}) {
+  const calls = { order: [], trace: [], assign: [], run: [], diffRuns: [], diffInventory: [], diffConfigs: [], runClean: [], runCold: [], wrapped: [], sweeps: [], reseat: [], commits: [], writes: {}, writeLog: [], checkoutLog: [], logs: [], showDoc: [], emits: [], gh: [], waits: [], sleeps: [], slotFactories: [], files }
   const counts = {}; let seq = 0
 
   const writeCounts = {}
   const changedQueue = Array.isArray(changed[0]) ? [...changed] : [changed]
+  const diffListingQueue = Array.isArray(diffListing) ? [...diffListing] : null
   const io = {
     calls,
     assign(spec) {
@@ -137,7 +138,27 @@ function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cle
       return null
     },
     run(cmd) {
-      if (String(cmd).includes(GATE_REAP_SWEEP_MARKER)) { calls.sweeps.push(cmd); return { ok: true, output: '' } }
+      const text = String(cmd)
+      if (text.includes('git ls-files -z --cached --others --exclude-standard')) {
+        calls.diffInventory.push(cmd)
+        const index = calls.diffInventory.length - 1
+        const output = typeof diffListing === 'function'
+          ? diffListing(cmd, index)
+          : diffListingQueue ? (diffListingQueue.shift() ?? '') : diffListing
+        return { ok: true, output }
+      }
+      if (text.includes('scripts/factory/prove-mutations.mjs --diff-config')) {
+        calls.diffRuns.push(cmd)
+        calls.diffConfigs.push(cmd)
+        const index = calls.diffConfigs.length - 1
+        return typeof diffReports === 'function' ? diffReports(cmd, index) : diffReports[index] ?? { ok: true, output: '' }
+      }
+      if (text.startsWith('diff --unified=0 ')) {
+        calls.diffRuns.push(cmd)
+        const key = Object.keys(diffHunks).find((candidate) => text.includes(candidate))
+        return diffHunks[key] ?? { ok: false, output: '' }
+      }
+      if (text.includes(GATE_REAP_SWEEP_MARKER)) { calls.sweeps.push(cmd); return { ok: true, output: '' } }
       calls.order.push('run')
       const original = gateReapOriginal(cmd)
       counts[original] = (counts[original] || 0) + 1
@@ -1235,6 +1256,8 @@ const DRIVE_JOURNAL_EXPECTED = Object.freeze([
   ['recordRow', '', 'at gate_discrimination gate_generation gate_summary gate_proof_note'],
   ['recordRow', '', 'at gate_proof_unproven gate_generation'],
   ['recordRow', '', 'at gate_check_proof_unproven gate_generation'],
+  ['recordRow', '', 'at diff_mutation_proof'],
+  ['recordRow', '', 'at kind diff_mutant_judgment'],
   ['recordRow', '', 'at mutation_anchor_bind'],
   ['recordRow', '', 'at mutation_anchor_absent'],
   ['recordRow', '', 'at gate_check_discrimination gate_generation gate_check_discriminations ...(checkProofNote ? { gate_check_proof_note: checkProofNote } : {})'],

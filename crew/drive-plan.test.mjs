@@ -1264,6 +1264,8 @@ test('non-continuation keeps the ordinary assignment and review brief write set 
     `Plan of record: ${TD}/plan.md. Changes are uncommitted in /tmp/repo — read the diff with git.`,
     'Re-run the validation lane yourself: lane-cmd',
     'Write review.md in the task dir. details.verdict must be pass or changes-needed.',
+    '## Diff-mutant findings',
+    '[]',
   ].join('\n'))
 })
 

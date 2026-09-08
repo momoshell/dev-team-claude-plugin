@@ -2090,6 +2090,21 @@ export function scopeMatcher(entries) {
     : repoRelativePath === entry)
 }
 
+// The changed-hunk supplement owns one bounded integer for the whole task. The
+// runner receives this already-resolved value in its closed config and therefore
+// never consults ambient environment state itself.
+export const DIFF_MUTATION_CAP_DEFAULT = 8
+export const DIFF_MUTATION_CAP_MIN = 1
+export const DIFF_MUTATION_CAP_MAX = 64
+export function resolveDiffMutationCap(raw) {
+  if (raw === undefined || raw === null || raw === '') return DIFF_MUTATION_CAP_DEFAULT
+  const text = typeof raw === 'string' ? raw.trim() : String(raw)
+  if (!/^-?\d+$/.test(text)) return DIFF_MUTATION_CAP_DEFAULT
+  const value = Number(text)
+  if (!Number.isFinite(value) || !Number.isInteger(value)) return DIFF_MUTATION_CAP_DEFAULT
+  return Math.min(DIFF_MUTATION_CAP_MAX, Math.max(DIFF_MUTATION_CAP_MIN, value))
+}
+
 // The scope gate's arithmetic, in ONE place: what the tree changed, minus what
 // the shape's write surface allows. The reviewed loop and every envelope shape
 // call it — one implementation, one meaning of "out of scope".
@@ -4444,6 +4459,316 @@ function runTask(ctx, io, crash) {
     proofTreeBuildRound = round
   }
 
+  // ---- changed-hunk supplement (#1029) ---------------------------------------
+  // The baseline is a byte/absence map, not a HEAD diff. It is captured once
+  // after plan acceptance and advanced only after a nonfatal supplement run, so
+  // the second builder round measures only its own delta.
+  const DIFF_MUTATION_SUMMARY_PREFIX = 'DIFF-MUTATION-SUMMARY'
+  const DIFF_LIST_COMMAND = 'git ls-files -z --cached --others --exclude-standard'
+  const diffMutationCap = resolveDiffMutationCap((ctx.env ?? process.env).CREW_DIFF_MUTATION_CAP)
+  let diffRoundBaseline = null
+  let diffMutationSettledGeneration = null
+  let diffMutationReport = null
+  let diffMutationReports = []
+  let diffChangedSnapshot = null
+  let diffBaselineFatal = null
+
+  const diffBytesEqual = (left, right) => {
+    if (left === right) return true
+    if (left === null || right === null || left === undefined || right === undefined) return false
+    const leftBytes = Buffer.isBuffer(left) || left instanceof Uint8Array || typeof left === 'string' ? Buffer.from(left) : null
+    const rightBytes = Buffer.isBuffer(right) || right instanceof Uint8Array || typeof right === 'string' ? Buffer.from(right) : null
+    if (leftBytes && rightBytes) return leftBytes.equals(rightBytes)
+    return String(left) === String(right)
+  }
+  const diffCell = (value) => value === null
+    ? { state: 'absent', bytes: null }
+    : typeof value === 'string' || Buffer.isBuffer(value) || value instanceof Uint8Array
+      ? { state: 'present', bytes: value }
+      : { state: 'unreadable', bytes: null, why: `the inventory read returned ${value === undefined ? 'undefined' : typeof value}, not bytes` }
+  const diffInventoryPaths = (listed, reported = [], includeScopeLiterals = true) => {
+    const paths = new Set()
+    const allowed = (path) => typeof path === 'string' && path !== '' && !path.endsWith('/')
+      && validateScopeEntries([path]).length === 0 && inScope(path)
+    if (includeScopeLiterals) for (const entry of scopeFiles) if (allowed(entry)) paths.add(entry)
+    for (const path of [...(Array.isArray(listed) ? listed : []), ...(Array.isArray(reported) ? reported : [])]) {
+      if (allowed(path)) paths.add(path)
+    }
+    return [...paths].sort()
+  }
+  const readDiffInventory = ({ includeChanged = true, reportedOverride = null, includeScopeLiterals = true } = {}) => {
+    let listing
+    try { listing = io.run(DIFF_LIST_COMMAND) }
+    catch (err) { throw new Error(`diff baseline git inventory failed: ${err?.message ?? String(err)}`) }
+    if (!listing || listing.ok !== true || typeof listing.output !== 'string') {
+      throw new Error(`diff baseline git inventory was unavailable: ${String(listing?.output || '').slice(-1000)}`)
+    }
+    const listed = listing.output.split('\0').filter(Boolean)
+    let reported = []
+    if (includeChanged || reportedOverride !== null) {
+      if (reportedOverride !== null) reported = reportedOverride
+      else {
+        try { reported = io.changedFiles() }
+        catch (err) { throw new Error(`diff current changed-file inventory failed: ${err?.message ?? String(err)}`) }
+      }
+      if (!Array.isArray(reported)) throw new Error('diff current changed-file inventory was not an array')
+      diffChangedSnapshot = reported
+    }
+    const paths = diffInventoryPaths(listed, reported, includeScopeLiterals)
+    const cells = new Map()
+    for (const path of paths) {
+      let value
+      try { value = io.readFile(`${ctx.checkout}/${path}`) }
+      catch (err) { throw new Error(`diff inventory could not read ${path}: ${err?.message ?? String(err)}`) }
+      const cell = diffCell(value)
+      if (cell.state === 'unreadable') throw new Error(`diff inventory could not read ${path}: ${cell.why}`)
+      cells.set(path, cell)
+    }
+    return { paths, cells, complete: true }
+  }
+  const captureDiffBaseline = () => {
+    try { return readDiffInventory({ includeChanged: false, includeScopeLiterals: false }) }
+    catch (err) {
+      diffBaselineFatal = err?.message ?? String(err)
+      return { paths: [], cells: new Map(), complete: false }
+    }
+  }
+  const currentDiffInventory = () => readDiffInventory({ includeChanged: true })
+  const diffCellChanged = (before, after) => before.state !== after.state || !diffBytesEqual(before.bytes, after.bytes)
+  const diffInventoriesEqual = (before, after) => before && after && before.complete === after.complete
+    && JSON.stringify(before.paths) === JSON.stringify(after.paths)
+    && before.paths.every((path) => !diffCellChanged(
+      before.cells.get(path) || { state: 'absent', bytes: null },
+      after.cells.get(path) || { state: 'absent', bytes: null },
+    ))
+  const diffSnapshotName = (round, index, side, path) => {
+    const safe = path.replace(/[^A-Za-z0-9._-]+/g, '_') || 'file'
+    return art(`diff-${round}-${index}-${side}-${safe}`)
+  }
+  const normalizeDiffHeaders = (text, path, before = null, after = null) => String(text || '').split('\n').map((line) => {
+    if (line.startsWith('--- ')) return before?.state === 'absent' ? '--- /dev/null' : `--- a/${path}`
+    if (line.startsWith('+++ ')) return after?.state === 'absent' ? '+++ /dev/null' : `+++ b/${path}`
+    return line
+  }).join('\n')
+  const fallbackDiffHunk = (path, before, after) => {
+    const textOf = (bytes) => {
+      try { return typeof bytes === 'string' ? bytes : Buffer.from(bytes).toString('utf8') }
+      catch { return '' }
+    }
+    const lines = (cell) => cell.state === 'present' ? textOf(cell.bytes).split('\n').filter((line, index, all) => !(index === all.length - 1 && line === '')) : []
+    const oldLines = lines(before)
+    const newLines = lines(after)
+    const header = `@@ -${oldLines.length ? 1 : 0},${oldLines.length} +${newLines.length ? 1 : 0},${newLines.length} @@`
+    return [before.state === 'absent' ? '--- /dev/null' : `--- a/${path}`, after.state === 'absent' ? '+++ /dev/null' : `+++ b/${path}`, header, ...oldLines.map((line) => `-${line}`), ...newLines.map((line) => `+${line}`)].join('\n')
+  }
+  const buildDiffRoundPatch = (round, current) => {
+    if (!diffRoundBaseline || !current) return { patch: '', changed: [], error: 'diff inventory was not captured' }
+    const allPaths = [...new Set([...diffRoundBaseline.paths, ...current.paths])].filter((path) => inScope(path)).sort()
+    const changed = diffRoundBaseline.complete && current.complete
+      ? allPaths.filter((path) => diffCellChanged(
+        diffRoundBaseline.cells.get(path) || { state: 'absent', bytes: null },
+        current.cells.get(path) || { state: 'absent', bytes: null },
+      ))
+      : []
+    const sections = []
+    for (const [index, path] of changed.entries()) {
+      const before = diffRoundBaseline.cells.get(path) || { state: 'absent', bytes: null }
+      const after = current.cells.get(path) || { state: 'absent', bytes: null }
+      const beforePath = diffSnapshotName(round, index, 'before', path)
+      const afterPath = diffSnapshotName(round, index, 'current', path)
+      try {
+        io.writeFile(beforePath, before.state === 'present' ? before.bytes : '')
+        io.writeFile(afterPath, after.state === 'present' ? after.bytes : '')
+      } catch (err) {
+        return { patch: '', changed, error: `diff snapshots could not be written for ${path}: ${err?.message ?? String(err)}` }
+      }
+      let result
+      try {
+        result = io.run(`diff --unified=0 --label ${shellArg(`a/${path}`)} --label ${shellArg(`b/${path}`)} ${shellArg(beforePath)} ${shellArg(afterPath)}`)
+      } catch (err) {
+        return { patch: '', changed, error: `diff hunk command failed for ${path}: ${err?.message ?? String(err)}` }
+      }
+      const output = String(result?.output || '')
+      // `diff` exits 1 for a difference. A quiet result still gets a deterministic
+      // whole-file hunk so a minimal test double (or a platform without diff -U0)
+      // cannot turn a measured changed path into an invented fatal.
+      if (output.length === 0 && diffCellChanged(before, after)) sections.push(`diff --git a/${path} b/${path}\n${fallbackDiffHunk(path, before, after)}`)
+      else if (output.length > 0) {
+        const normalized = normalizeDiffHeaders(output, path, before, after).replace(/\n+$/, '')
+        sections.push(normalized.startsWith('diff --git ') ? normalized : `diff --git a/${path} b/${path}\n${normalized}`)
+      }
+    }
+    return { patch: sections.join('\n'), changed, error: null }
+  }
+  const diffZeroReport = (reason) => ({
+    generation: gateGeneration, cap: diffMutationCap, configured_cap: diffMutationCap,
+    cap_omitted: 0, total_candidates: 0, generated: 0, killed: 0, survived: 0, skipped: 1, omitted: 0,
+    omitted_reason: 'mutants beyond the configured cap are omitted because each mutant runs both the accepted validation lane and gate and large diffs otherwise multiply suite cost; omitted mutants are a blind spot',
+    blind_spot: null, skip_counts: { [reason]: 1 }, mutants: [],
+  })
+  const parseDiffReport = (output) => {
+    const lines = String(output || '').replace(/\x1b\[[0-9;]*m/g, '').trimEnd().split('\n')
+    const final = lines.at(-1)
+    if (!final || !final.startsWith(`${DIFF_MUTATION_SUMMARY_PREFIX} `)) return null
+    try {
+      const report = JSON.parse(final.slice(DIFF_MUTATION_SUMMARY_PREFIX.length + 1))
+      if (!report || typeof report !== 'object') return null
+      const ints = ['generation', 'cap', 'configured_cap', 'cap_omitted', 'total_candidates', 'generated', 'killed', 'survived', 'skipped', 'omitted']
+      if (!ints.every((key) => Number.isInteger(report[key]) && report[key] >= 0)) return null
+      if (report.generation !== gateGeneration || report.cap !== diffMutationCap || report.configured_cap !== diffMutationCap) return null
+      if (report.generated > report.cap || report.killed + report.survived > report.generated || report.cap_omitted !== report.omitted) return null
+      if (!report.skip_counts || typeof report.skip_counts !== 'object' || Array.isArray(report.skip_counts) || !Array.isArray(report.mutants)) return null
+      if (Object.values(report.skip_counts).some((count) => !Number.isInteger(count) || count < 0)) return null
+      const skipTotal = Object.values(report.skip_counts).reduce((total, count) => total + count, 0)
+      if (skipTotal !== report.skipped) return null
+      if (report.mutants.some((mutant) => {
+        if (!mutant || typeof mutant !== 'object' || Array.isArray(mutant)) return true
+        if (!['killed', 'survived', 'skipped'].includes(mutant.outcome)) return true
+        if (mutant.outcome === 'skipped') return typeof mutant.skip_reason !== 'string' || mutant.skip_reason.length === 0
+        if (mutant.outcome === 'killed') return false
+        return typeof mutant.id !== 'string' || mutant.id.length === 0
+          || typeof mutant.path !== 'string' || mutant.path.length === 0
+          || !Number.isInteger(mutant.line) || mutant.line < 1
+          || typeof mutant.operator !== 'string' || typeof mutant.replacement !== 'string'
+      })) return null
+      const executed = report.mutants.filter((mutant) => mutant.outcome === 'killed' || mutant.outcome === 'survived').length
+      if (executed > report.cap || report.mutants.length !== report.killed + report.survived + report.skipped) return null
+      if (report.fatal !== undefined && (!report.fatal || report.fatal.reason !== 'tree-not-restored')) return null
+      return report
+    } catch { return null }
+  }
+  const journalDiffMutation = () => {
+    io.log(recordRow({ at: io.now(), diff_mutation_proof: diffMutationReport }))
+  }
+  const settleDiffMutationProof = (round) => {
+    if (diffMutationSettledGeneration === gateGeneration) return { settled: true, noop: true }
+    if (gateDiscrimination !== 'proven' || (mutations.length > 0 && checkProofVerdict !== 'proven')) return { settled: false, eligible: false }
+    if (diffBaselineFatal) {
+      diffMutationReport = diffZeroReport('tree-not-restored')
+      diffMutationReport.fatal = { reason: 'tree-not-restored', why: diffBaselineFatal }
+      journalDiffMutation()
+      diffMutationReports.push(diffMutationReport)
+      gateProofFatal = `tree-not-restored: ${diffBaselineFatal}`
+      return { settled: false, fatal: gateProofFatal }
+    }
+    let current
+    try { current = currentDiffInventory() }
+    catch (err) {
+      diffMutationReport = diffZeroReport('runner-unavailable')
+      diffMutationReport.skip_counts = { 'runner-unavailable': 1 }
+      diffMutationReport.runner_unavailable = err?.message ?? String(err)
+      journalDiffMutation()
+      diffMutationReports.push(diffMutationReport)
+      gateProofFatal = `tree-not-restored: diff inventory could not be captured: ${err?.message ?? String(err)}`
+      return { settled: false, fatal: gateProofFatal }
+    }
+    const built = buildDiffRoundPatch(round, current)
+    if (built.error) {
+      diffMutationReport = diffZeroReport('runner-unavailable')
+      diffMutationReport.runner_unavailable = built.error
+      journalDiffMutation()
+      diffMutationReports.push(diffMutationReport)
+      gateProofFatal = `tree-not-restored: diff patch could not be produced: ${built.error}`
+      return { settled: false, fatal: gateProofFatal }
+    }
+    const configPath = art(`diff-mutation-${gateGeneration}.json`)
+    const config = {
+      version: 1, checkout: ctx.checkout, patch: built.patch,
+      files_in_scope: scopeFiles, validation_lane: lane, gate_cmd: gateCmd, cap: diffMutationCap, generation: gateGeneration,
+    }
+    try { io.writeFile(configPath, JSON.stringify(config)) }
+    catch (err) {
+      diffMutationReport = diffZeroReport('runner-unavailable')
+      diffMutationReport.runner_unavailable = `diff config could not be written: ${err?.message ?? String(err)}`
+      journalDiffMutation()
+      diffMutationReports.push(diffMutationReport)
+      gateProofFatal = `tree-not-restored: diff config could not be written: ${err?.message ?? String(err)}`
+      return { settled: false, fatal: gateProofFatal }
+    }
+    let runner
+    try {
+      runner = phaseSlot(SUITE_SLOT_PHASES.gate, () => io.run(`node scripts/factory/prove-mutations.mjs --diff-config ${shellArg(configPath)}`))
+    } catch (err) { runner = { ok: false, output: '', error: err?.message ?? String(err) } }
+    const runnerOutput = runner?.output ?? `${runner?.stdout || ''}${runner?.stderr || ''}`
+    diffMutationReport = parseDiffReport(runnerOutput)
+    if (!diffMutationReport) {
+      diffMutationReport = diffZeroReport('runner-unavailable')
+      diffMutationReport.runner_unavailable = typeof runner?.error === 'string'
+        ? runner.error
+        : runner?.error?.message || 'the diff runner emitted no final DIFF-MUTATION-SUMMARY sentinel'
+    }
+    if (diffMutationReport.fatal) {
+      journalDiffMutation()
+      diffMutationReports.push(diffMutationReport)
+      gateProofFatal = `tree-not-restored: ${diffMutationReport.fatal.why || diffMutationReport.fatal.reason || 'diff mutation runner reported checkout contamination'}`
+      return { settled: false, fatal: gateProofFatal }
+    }
+    // A runner-unavailable report is a measured, nonfatal blind spot. Only a
+    // typed contamination report blocks progression; the exact current map is
+    // still the next round's accepted baseline after every nonfatal settlement.
+    let settledCurrent = current
+    try { settledCurrent = readDiffInventory({ includeChanged: false, reportedOverride: diffChangedSnapshot }) }
+    catch (err) {
+      diffMutationReport.fatal = diffFatal(`diff inventory could not be refreshed: ${err?.message ?? String(err)}`)
+      journalDiffMutation()
+      diffMutationReports.push(diffMutationReport)
+      gateProofFatal = `tree-not-restored: diff inventory could not be refreshed: ${err?.message ?? String(err)}`
+      return { settled: false, fatal: gateProofFatal }
+    }
+    if (!diffInventoriesEqual(current, settledCurrent)) {
+      diffMutationReport.fatal = diffFatal(`checkout inventory changed while proving diff generation ${gateGeneration}`)
+      journalDiffMutation()
+      diffMutationReports.push(diffMutationReport)
+      gateProofFatal = `tree-not-restored: ${diffMutationReport.fatal.why}`
+      return { settled: false, fatal: gateProofFatal }
+    }
+    journalDiffMutation()
+    diffMutationReports.push(diffMutationReport)
+    diffRoundBaseline = settledCurrent
+    diffMutationSettledGeneration = gateGeneration
+    return { settled: true, report: diffMutationReport }
+  }
+  const latestDiffReport = () => {
+    const reports = diffMutationReports.filter((report) => report && typeof report === 'object')
+    if (reports.length === 0) return null
+    const latest = reports.at(-1)
+    return { ...latest, mutants: reports.flatMap((report) => Array.isArray(report.mutants) ? report.mutants : []) }
+  }
+  const diffFindingLines = (report) => {
+    if (!report || !Array.isArray(report.mutants)) return []
+    const survivors = report.mutants.filter((mutant) => mutant.outcome === 'survived')
+    if (survivors.length === 0) return ['## Diff-mutant findings', '[]']
+    const bounded = survivors.map((mutant) => ({
+      id: mutant.id, path: mutant.path, line: mutant.line, operator: mutant.operator,
+      replacement: mutant.replacement, validation_lane: mutant.validation_lane ?? lane,
+      gate_cmd: mutant.gate_cmd ?? gateCmd,
+    }))
+    return ['## Diff-mutant findings', JSON.stringify(bounded)]
+  }
+  const diffMutationDisposition = (survivors) => survivors.length > 0 ? 'review' : 'continue'
+  const journalDiffJudgments = (details, report) => {
+    const entries = details?.diff_mutant_judgments
+    if (entries === undefined) return
+    const known = new Map((report?.mutants || []).filter((mutant) => mutant.outcome === 'survived').map((mutant) => [mutant.id, mutant]))
+    const seen = new Set()
+    const rows = Array.isArray(entries) ? entries : [{ id: null, verdict: null, reason: 'diff_mutant_judgments must be an array' }]
+    for (const entry of rows) {
+      const id = typeof entry?.id === 'string' ? entry.id : null
+      const verdict = entry?.verdict
+      const reason = typeof entry?.reason === 'string' ? entry.reason.trim() : ''
+      let why = null
+      if (!id || !known.has(id)) why = 'unknown diff-mutant id'
+      else if (seen.has(id)) why = 'duplicate diff-mutant judgment id'
+      else if (verdict !== 'equivalent') why = 'verdict must be exactly equivalent'
+      else if (reason.length === 0) why = 'judgment reason must be nonblank'
+      else if (reason.length > 1000) why = 'judgment reason exceeds 1000 characters'
+      if (id) seen.add(id)
+      const judgmentOutcome = verdict === 'equivalent' ? 'judgment' : 'rejected'
+      const judgment = { id, verdict: verdict ?? null, reason: reason || null, outcome: why ? 'rejected' : judgmentOutcome, accepted: !why, why }
+      io.log(recordRow({ at: io.now(), kind: 'JUDGMENT', diff_mutant_judgment: judgment }))
+    }
+  }
+
   const mutationTargetFiles = () => [...new Set(mutations
     .filter((mutation) => mutation && !mutation.exempt && typeof mutation.file === 'string')
     .map((mutation) => mutation.file))]
@@ -4565,7 +4890,7 @@ function runTask(ctx, io, crash) {
     let repaired = false
     while (true) {
       if (gateProofFatal) {
-        return { escalation: gateEscalate(`the per-check proof could not restore the built tree: ${gateProofFatal} — the run stops rather than commit the driver's own mutation. Gate: ${gateCmd}`) }
+        return { escalation: gateEscalate(`the proof could not restore the built tree: ${gateProofFatal} — the run stops rather than commit the driver's own mutation. Gate: ${gateCmd}`) }
       }
       // `unproven` is NOT `failed` and never reaches a repair: absence of evidence
       // may not become a new way to lose a build (ADR-030 ratification amendment).
@@ -4686,6 +5011,11 @@ function runTask(ctx, io, crash) {
         checkProofs = mutations.map((mutation) => freshByCheck.get(mutation.check) || carriedByCheck.get(mutation.check)).filter(Boolean)
         checkProofVerdict = checkProofs.every((row) => row.outcome === 'killed' || row.outcome === 'exempt') ? 'proven' : checkProofVerdict
       }
+      const diffSettled = settleDiffMutationProof(round)
+      if (diffSettled.fatal || gateProofFatal) {
+        const fatal = settleFailedProof()
+        if (fatal.escalation) return { ok: false, escalation: fatal.escalation }
+      }
       captureProofTree(round)
       return { ok: true, gateRes }
     }
@@ -4761,6 +5091,20 @@ function runTask(ctx, io, crash) {
     }
     stageComplete()
   }
+
+  // Capture the accepted scope before any builder dispatch. An unreadable
+  // baseline is a typed fatal: treating it as absence would make a later
+  // added file look like a clean round and would defeat the round fence.
+  try { diffRoundBaseline = captureDiffBaseline() }
+  catch (err) {
+    diffBaselineFatal = err?.message ?? String(err)
+    gateProofFatal = `tree-not-restored: diff baseline could not be captured: ${diffBaselineFatal}`
+    return gateEscalate(gateProofFatal)
+  }
+  // A baseline defect is held until the supplement is eligible. Existing declared
+  // proof may remain intentionally unproven (for example after an interrupted
+  // per-check read); that path must preserve its legacy disposition without
+  // turning a non-running optional supplement into a new gate verdict.
 
   // ---- 2. BUILD + mechanical gates + REVIEW ------------------------------------
   let buildBrief = planPath
@@ -5566,8 +5910,17 @@ function runTask(ctx, io, crash) {
         if (settled.repaired) gateRes = runGate(`gate-repair:${gateRepairs}`, gateCmd)
       }
       if (gateRes.ok && gateDiscrimination === 'proven' && (!mutations.length || checkProofVerdict === 'proven')) {
-        if (!proofTreeWitness) captureProofTree(round)
-        else if (proofTreeBuildRound !== null && proofTreeBuildRound < round) {
+        if (!proofTreeWitness) {
+          const diffSettled = settleDiffMutationProof(round)
+          if (diffSettled.fatal || gateProofFatal) {
+            const fatal = settleFailedProof()
+            if (fatal.escalation) {
+              stageComplete()
+              return fatal.escalation
+            }
+          }
+          captureProofTree(round)
+        } else if (proofTreeBuildRound !== null && proofTreeBuildRound < round) {
           const refreshed = refreshProofTree(round)
           if (refreshed.escalation) {
             stageComplete()
@@ -5739,6 +6092,9 @@ function runTask(ctx, io, crash) {
       }
       const roundNo = reviews + 1
       stage(`review:r${roundNo}`)
+      const report = latestDiffReport() || { mutants: [] }
+      const diffMutationFindings = report.mutants.filter((mutant) => mutant.outcome === 'survived')
+      if (diffMutationDisposition(diffMutationFindings) === 'escalate') return escalate('diff-mutation', 'a diff mutant was incorrectly routed as an automatic escalation')
       const revBrief = art(`review-brief-${roundNo}.md`)
       const openCarried = carriedOpen()
       const carriedHead = carriedPreambleLines(openCarried)
@@ -5749,9 +6105,11 @@ function runTask(ctx, io, crash) {
         `Re-run the validation lane yourself: ${lane}`,
         `Write review.md in the task dir. details.verdict must be pass or changes-needed.`,
         ...staleVerdictLines(staleVerdict),
+        ...diffFindingLines(report),
       ].join('\n')
       io.writeFile(revBrief, panelBriefText)
       const review = panel ? panelReview(roundNo, panel) : assignAndWait('reviewer', revBrief, 'review')
+      journalDiffJudgments(review.details, report)
       lastReviewPath = review.details?.review_path || art('review.md')
       const shapeRefusal = reviewShapeDefect(review.details) || carriedSilenceDefect(review.details, openCarried)
       const v = shapeRefusal ? null : verdictOf(review)

@@ -2874,3 +2874,119 @@ test('b433 driver carries policy before acceptance and fences only the accepted 
   assert.deepEqual(builder.policy, { suiteCommand: CTX_TL.suite, gatePath: `${TD}/gate.mjs`, fence: ['a.mjs', 'a.test.mjs'] })
   assert.deepEqual(reviewer.policy, { suiteCommand: CTX_TL.suite, gatePath: `${TD}/gate.mjs`, fence: [] })
 })
+
+const DIFF_REPORT_REASON = 'mutants beyond the configured cap are omitted because each mutant runs both the accepted validation lane and gate and large diffs otherwise multiply suite cost; omitted mutants are a blind spot'
+const diffReport = (mutants = [], over = {}) => ({
+  generation: 1, cap: 8, configured_cap: 8, cap_omitted: 0,
+  total_candidates: mutants.length, generated: mutants.length,
+  killed: mutants.filter((row) => row.outcome === 'killed').length,
+  survived: mutants.filter((row) => row.outcome === 'survived').length,
+  skipped: mutants.filter((row) => row.outcome === 'skipped').length,
+  omitted: 0, omitted_reason: DIFF_REPORT_REASON, blind_spot: null, skip_counts: {}, mutants, ...over,
+})
+const diffSurvivor = { id: 'diff-survivor-1', path: 'a.mjs', line: 1, operator: 'literal', replacement: 'const value = false', validation_lane: 'lane-cmd', gate_cmd: 'gate-cmd', outcome: 'survived' }
+
+function diffDriverIo({ report = diffReport([diffSurvivor]), mutations = [], review = reviewEnv('pass'), target = 'const value = true\n', capEnv = undefined } = {}) {
+  const plan = planEnv({ details: {
+    ...planEnv().details, files_in_scope: ['a.mjs'], gate_cmd: 'gate-cmd', validation_lane: 'lane-cmd', mutations,
+  } })
+  const envelopes = { 'planner:1': plan, 'builder:1': buildEnv(), 'reviewer:1': review }
+  const runs = {
+    'gate-cmd:1': { ok: false, output: 'FAIL baseline\nGATE-SUMMARY {"total":1,"failed":1,"errored":0}' },
+    'gate-cmd:2': { ok: true, output: 'green\nGATE-SUMMARY {"total":1,"failed":0,"errored":0}' },
+    'gate-cmd:3': { ok: false, output: 'FAIL declared: caught\nGATE-SUMMARY {"total":1,"failed":1,"errored":0}' },
+    'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+  }
+  const options = {
+    envelopes, runs, cleanRuns: { 'gate-cmd': { ok: false, output: 'FAIL baseline\nGATE-SUMMARY {"total":1,"failed":1,"errored":0}' },
+    }, files: { [`${CTX.checkout}/a.mjs`]: target }, writeThrough: true,
+    diffListing: 'a.mjs\0', changed: Array.from({ length: 12 }, () => ['a.mjs']),
+    diffReports: report === null ? [{ ok: true, output: '' }] : [{ ok: true, output: `DIFF-MUTATION-SUMMARY ${JSON.stringify(report)}` }],
+  }
+  return fakeIo({ ...options, ...(capEnv === undefined ? {} : { env: { CREW_DIFF_MUTATION_CAP: capEnv } }) })
+}
+
+function legacyDiffRows(io) {
+  const keys = ['gate_discrimination', 'mutation_anchor_bind', 'mutation_anchor_absent', 'gate_check_discrimination']
+  return io.calls.logs.filter((row) => keys.some((key) => Object.hasOwn(row, key))).map((row) => {
+    const key = keys.find((candidate) => Object.hasOwn(row, candidate))
+    return { [key]: row[key] }
+  })
+}
+
+test('B1 green mutant is a typed survivor in the reviewer brief', () => {
+  const io = diffDriverIo({ report: diffReport([diffSurvivor]) })
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'reviewer').length, 1)
+  const brief = io.calls.writes[`${TD}/review-brief-1.md`]
+  const findings = JSON.parse(brief.split('## Diff-mutant findings\n')[1].trim())
+  assert.deepEqual(findings, [{ id: diffSurvivor.id, path: diffSurvivor.path, line: diffSurvivor.line, operator: diffSurvivor.operator, replacement: diffSurvivor.replacement, validation_lane: 'lane-cmd', gate_cmd: 'gate-cmd' }])
+})
+
+test('D1 diff proof leaves declared-anchor proof bytes unchanged', () => {
+  const mutation = { check: 'declared', file: 'a.mjs', find: 'true', replace: 'false' }
+  const noDiff = diffDriverIo({ mutations: [mutation], report: diffReport([]) })
+  const populated = diffDriverIo({ mutations: [mutation], report: diffReport([diffSurvivor]) })
+  const first = driveTask(CTX, noDiff)
+  const second = driveTask(CTX, populated)
+  assert.equal(first.status, 'done')
+  assert.equal(second.status, 'done')
+  assert.deepEqual(legacyDiffRows(noDiff), legacyDiffRows(populated))
+})
+
+test('E1 diff proof journals generated killed survived and skipped reasons', () => {
+  const mixed = diffReport([
+    { id: 'killed', path: 'a.mjs', line: 1, operator: 'literal', outcome: 'killed' },
+    diffSurvivor,
+    { id: 'skipped', path: 'a.mjs', line: 2, operator: null, outcome: 'skipped', skip_reason: 'comment-or-blank' },
+  ], { total_candidates: 3, generated: 2, killed: 1, survived: 1, skipped: 1, skip_counts: { 'comment-or-blank': 1 }, omitted: 2, cap_omitted: 2, blind_spot: DIFF_REPORT_REASON })
+  const io = diffDriverIo({ report: mixed })
+  const result = driveTask(CTX, io)
+  const row = io.calls.logs.find((entry) => entry.diff_mutation_proof)?.diff_mutation_proof
+  assert.equal(result.status, 'done')
+  for (const key of ['generation', 'cap', 'configured_cap', 'cap_omitted', 'total_candidates', 'generated', 'killed', 'survived', 'skipped', 'omitted']) assert.equal(Number.isInteger(row[key]), true)
+  assert.deepEqual(row.skip_counts, { 'comment-or-blank': 1 })
+  assert.equal(row.mutants.length, 3)
+  assert.match(row.blind_spot, /each mutant runs both the accepted validation lane and gate/)
+
+  const zeroIo = diffDriverIo({ report: diffReport([]) })
+  driveTask(CTX, zeroIo)
+  const zero = zeroIo.calls.logs.find((entry) => entry.diff_mutation_proof)?.diff_mutation_proof
+  assert.equal(zero.generated, 0)
+  assert.equal(zero.killed, 0)
+  assert.equal(zero.survived, 0)
+  assert.equal(zero.skipped, 0)
+
+  const unavailableIo = diffDriverIo({ report: null })
+  driveTask(CTX, unavailableIo)
+  const unavailable = unavailableIo.calls.logs.find((entry) => entry.diff_mutation_proof)?.diff_mutation_proof
+  assert.equal(unavailable.skipped, 1)
+  assert.equal(unavailable.skip_counts['runner-unavailable'], 1)
+})
+
+test('G1 equivalent reviewer verdict journals judgment without a kill', () => {
+  const review = reviewEnv('pass')
+  review.details.diff_mutant_judgments = [
+    { id: diffSurvivor.id, verdict: 'equivalent', reason: 'the change is intentionally redundant' },
+    { id: 'unknown', verdict: 'equivalent', reason: 'not a known mutant' },
+    { id: diffSurvivor.id, verdict: 'equivalent', reason: 'duplicate' },
+  ]
+  const io = diffDriverIo({ review })
+  const result = driveTask(CTX, io)
+  const rows = io.calls.logs.filter((entry) => entry.kind === 'JUDGMENT').map((entry) => entry.diff_mutant_judgment)
+  const proof = io.calls.logs.find((entry) => entry.diff_mutation_proof).diff_mutation_proof
+  assert.equal(result.status, 'done')
+  assert.equal(proof.killed, 0)
+  assert.equal(rows[0].outcome, 'judgment')
+  assert.equal(rows[0].verdict, 'equivalent')
+  assert.equal(rows[1].outcome, 'rejected')
+  assert.equal(rows[2].outcome, 'rejected')
+})
+
+test('H1 survivor proceeds to review without automatic escalation', () => {
+  const io = diffDriverIo({ report: diffReport([diffSurvivor]) })
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'reviewer').length, 1)
+})

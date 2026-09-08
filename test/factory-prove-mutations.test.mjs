@@ -510,3 +510,98 @@ test('raw symlink fingerprints detect same-length invalid UTF-8 target tampering
   })
   assert.equal(result.refusal.reason, 'tree-not-restored')
 })
+
+function diffPatch(path, before, after) {
+  const oldLines = before === null ? [] : String(before).replace(/\n$/, '').split('\n')
+  const newLines = after === null ? [] : String(after).replace(/\n$/, '').split('\n')
+  return [
+    `diff --git a/${path} b/${path}`,
+    before === null ? '--- /dev/null' : `--- a/${path}`,
+    after === null ? '+++ /dev/null' : `+++ b/${path}`,
+    `@@ -${oldLines.length ? 1 : 0},${oldLines.length} +${newLines.length ? 1 : 0},${newLines.length} @@`,
+    ...oldLines.map((line) => `-${line}`), ...newLines.map((line) => `+${line}`),
+  ].join('\n')
+}
+
+function diffDeps(results, writes = []) {
+  return {
+    runCommand(command) {
+      results.push(command)
+      return { ok: true, output: '', status: 0, completed: true }
+    },
+    writeFile(abs, bytes) {
+      writes.push(abs)
+      writeFileSync(abs, bytes)
+    },
+  }
+}
+
+test('A1 diff hunk conditional produces an adjudicated flipped mutant', () => {
+  const { root, checkout, file } = fixture()
+  const before = 'if (false) return true\n'
+  const after = 'if (true) return true\n'
+  writeFileSync(file, after)
+  const commands = []
+  const result = mod.runDiffMutationProof({
+    version: 1, checkout, patch: diffPatch('lib/widget.mjs', before, after), files_in_scope: ['lib/'],
+    validation_lane: 'npm run lint -- --color=never', gate_cmd: 'node gate.mjs --strict', cap: 8, generation: 1,
+  }, {
+    ...diffDeps(commands),
+    runCommand(command) {
+      commands.push(command)
+      return command === 'node gate.mjs --strict'
+        ? { ok: false, output: 'FAIL flipped\nGATE-SUMMARY {"total":1,"failed":1,"errored":0}', status: 1, completed: true }
+        : { ok: true, output: 'lane', status: 0, completed: true }
+    },
+  })
+  assert.equal(result.fatal, undefined)
+  const conditional = result.mutants.find((row) => row.operator === 'conditional')
+  assert.ok(conditional)
+  assert.equal(conditional.outcome, 'killed')
+  assert.deepEqual(commands.slice(0, 2), ['npm run lint -- --color=never', 'node gate.mjs --strict'])
+  rmSync(root, { recursive: true, force: true })
+})
+
+test('C1 out-of-fence hunks are skipped and never written', () => {
+  const { root, checkout } = fixture()
+  const outside = join(checkout, 'other/outside.mjs')
+  const linkTarget = join(checkout, 'other/link-target.mjs')
+  mkdirSync(join(checkout, 'other'), { recursive: true })
+  writeFileSync(outside, 'const outside = true\n')
+  writeFileSync(linkTarget, 'const link = true\n')
+  symlinkSync('../other/link-target.mjs', join(checkout, 'lib/link.mjs'))
+  const writes = []
+  const patch = [
+    diffPatch('other/outside.mjs', 'const outside = false\n', 'const outside = true\n'),
+    diffPatch('lib/link.mjs', 'const link = false\n', 'const link = true\n'),
+  ].join('\n')
+  const result = mod.runDiffMutationProof({
+    version: 1, checkout, patch, files_in_scope: ['lib/'], validation_lane: 'lane exact', gate_cmd: 'gate exact', cap: 8, generation: 1,
+  }, { ...diffDeps([], writes) })
+  assert.equal(result.fatal, undefined)
+  assert.equal(writes.some((path) => path === outside), false)
+  assert.ok(result.skip_counts['out-of-scope'] > 0)
+  assert.ok(result.skip_counts['unsafe-target:symlink'] > 0)
+  assert.equal(readFileSync(outside, 'utf8'), 'const outside = true\n')
+  assert.equal(readFileSync(linkTarget, 'utf8'), 'const link = true\n')
+  rmSync(root, { recursive: true, force: true })
+})
+
+test('F1 mutant cap is enforced and prints its blind spot', () => {
+  const { root, checkout, file } = fixture()
+  const before = Array.from({ length: 10 }, (_, index) => `const value${index} = false`).join('\n') + '\n'
+  const after = Array.from({ length: 10 }, (_, index) => `const value${index} = true`).join('\n') + '\n'
+  writeFileSync(file, after)
+  const commands = []
+  const result = mod.runDiffMutationProof({
+    version: 1, checkout, patch: diffPatch('lib/widget.mjs', before, after), files_in_scope: ['lib/'], validation_lane: 'lane', gate_cmd: 'gate', cap: 8, generation: 1,
+  }, { ...diffDeps(commands), runCommand(command) { commands.push(command); return { ok: true, output: '', status: 0, completed: true } } })
+  assert.equal(result.cap, 8)
+  assert.equal(result.generated, 8)
+  assert.equal(result.mutants.length, 8)
+  assert.equal(result.omitted, result.total_candidates - 8)
+  assert.equal(result.cap_omitted, result.omitted)
+  assert.match(result.blind_spot, /each mutant runs both the accepted validation lane and gate/)
+  assert.equal(commands.length, 16)
+  rmSync(root, { recursive: true, force: true })
+})

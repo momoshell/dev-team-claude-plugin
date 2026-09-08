@@ -6,7 +6,7 @@ Dispatch a batch in this order, and record what refuses at each boundary:
 2. Boot with **one shared fence register for the whole batch**. Boot writes the
    other lanes' files, so every write lane must be known before any seat boots.
 3. Ask the compiler with `--discover-reads <lane>` for the reads a lane must acknowledge, write those records into the register, and perform a **single compile**. If that compile still refuses, the batch refuses `reads-unresolved` rather than retrying. A hand-authored register with spare acknowledgements remains guarded by **`stale-read-ack`**, while the coupled-source-unfenced refusal names the records discovery returns. A `where` path that does not exist refuses
-   **`missing-path`** (`scripts/factory/make-brief.mjs:120`, `COUPLED_SOURCE_UNFENCED = 'coupled-source-unfenced'`; `scripts/factory/make-brief.mjs:121`, `STALE_READ_ACK = 'stale-read-ack'`). An unreadable adopted plan or gate refuses **`plan-adopt-unreadable`** before anything is copied. An adopted `gate.mjs` that resolves the repository through an absolute path — an import specifier, or a `REPO`/`ROOT`/`CHECKOUT` assignment — refuses **`plan-adopt-gate-absolute-path`** before copying or worktree creation, because `prove-mutations` runs a gate in a fresh temporary worktree and a pinned gate can kill no mutation. Its own checkout counts, not only a predecessor's. A quoted absolute literal that is merely DATA is admitted: refusing on any such literal measured 10/214 precision over the archived corpus, since bare `/` and the comment `// gate` both begin with a slash. A repo-root assignment under the system temp dir is exempt as a scratch fixture; an import from there is not.
+   **`missing-path`** (`scripts/factory/make-brief.mjs:121`, `COUPLED_SOURCE_UNFENCED = 'coupled-source-unfenced'`; `scripts/factory/make-brief.mjs:122`, `STALE_READ_ACK = 'stale-read-ack'`). An unreadable adopted plan or gate refuses **`plan-adopt-unreadable`** before anything is copied. An adopted `gate.mjs` that resolves the repository through an absolute path — an import specifier, or a `REPO`/`ROOT`/`CHECKOUT` assignment — refuses **`plan-adopt-gate-absolute-path`** before copying or worktree creation, because `prove-mutations` runs a gate in a fresh temporary worktree and a pinned gate can kill no mutation. Its own checkout counts, not only a predecessor's. A quoted absolute literal that is merely DATA is admitted: refusing on any such literal measured 10/214 precision over the archived corpus, since bare `/` and the comment `// gate` both begin with a slash. A repo-root assignment under the system temp dir is exempt as a scratch fixture; an import from there is not.
 4. Verify through **`validateScopeEntries`** and **`scopeMatcher`** for own-file
    coverage and zero sibling leaks.
 5. Check the protected floor with **`protectedHitsIn`** over
@@ -117,7 +117,7 @@ no moment at which an operator can commit a stub first. A request therefore
 carries an optional `creates` list, verified by the OPPOSITE condition — the
 path must NOT exist and its parent directory must — which refuses
 **`creates-exists`** and **`creates-parent-missing`**
-(`scripts/factory/make-brief.mjs:127`, `CREATES_EXISTS = 'creates-exists'`).
+(`scripts/factory/make-brief.mjs:128`, `CREATES_EXISTS = 'creates-exists'`).
 `missing-path` is untouched: it still refuses every `where` path that is
 absent, because that is the check which catches the commonest brief typo.
 The compiler EXEMPTS and the dispatcher never seeds a stub — a seeded stub
@@ -133,8 +133,8 @@ so an unflagged batch is unchanged and behaves exactly as before. The two
 transport names and the refusal are pinned in the dispatcher:
 `BOOT_TRANSPORT = 'headless-all'`, `PANE_TRANSPORT = 'panes'`, and
 `TRANSPORT_CONFLICT = 'transport-conflict'`
-(`scripts/factory/dispatch-batch.mjs:166`,
-`scripts/factory/dispatch-batch.mjs:167`,
+(`scripts/factory/dispatch-batch.mjs:168`,
+`scripts/factory/dispatch-batch.mjs:169`,
 `scripts/factory/dispatch-batch.mjs:21`).
 
 `--headless-all` explicitly selects the factory transport. `--panes` selects

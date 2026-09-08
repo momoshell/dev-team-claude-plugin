@@ -1,20 +1,20 @@
 # Closed enums are consulted data
 
 Declare a finite vocabulary as data that callers actually consult.
-Exhibit: `scripts/factory/ledger.mjs:411` (`CI_DECISIONS`).
+Exhibit: `scripts/factory/ledger.mjs:418` (`CI_DECISIONS`).
 
 `DECISIONS` is frozen with `Object.freeze` at the export boundary.
-Exhibit: `crew/drive.mjs:422`.
+Exhibit: `crew/drive.mjs:423`.
 
 Production code reads `CI_DECISIONS` when it validates a decision.
-Exhibit: `scripts/factory/ledger.mjs:3448`.
+Exhibit: `scripts/factory/ledger.mjs:3498`.
 
 `DECISIONS` is exported and frozen but read by no production code; only
 `crew/drive-review.test.mjs:1458-1460` reads it, so it is not the exhibit for "callers
 actually consult".
 
 Keep the refusal message derived from the same set.
-Exhibit: `crew/drive.mjs:585`.
+Exhibit: `crew/drive.mjs:587`.
 
 Pin the expected members independently in the test.
 Exhibit: `crew/drive-review.test.mjs:1460`.
@@ -46,10 +46,10 @@ shape that keeps the decision observable.
 
 Unknown values should take the existing refusal path rather than being silently
 added to a vocabulary.
-Exhibit: `crew/drive.mjs:585`.
+Exhibit: `crew/drive.mjs:587`.
 
 Empty and null declarations are invalid data, not empty closed enums.
-Exhibit: `crew/drive.mjs:579`.
+Exhibit: `crew/drive.mjs:581`.
 
 Keep a rule's exhibit beside the declaration and beside its drift guard.
 Exhibit: `crew/drive-review.test.mjs:1459` and `:4161`.

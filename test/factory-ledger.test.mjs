@@ -28,7 +28,7 @@ import {
   RUN_VARIANTS, RUN_VARIANT_MARKERS, STAGE_MARKER_CHUNK, variantFromFirstMessage,
   REQUEST_MAX_CHARS, ADVISOR_AB_INCOMPLETE_REASONS, USAGE_ABSENT_CAUSES, usageAbsentCause,
   SESSION_SYNTHETIC_REASONS, AGENT_SESSION_ABSENT_REASONS, AGENT_SESSION_ABSENT_REASON_KEYS,
-  CELL_RATE_FLOOR, CELL_PRICE_UNITS, REVIEW_VERDICTS,
+  CELL_RATE_FLOOR, TURN_TRANSPORTS, CELL_PRICE_UNITS, REVIEW_VERDICTS,
   PHASE_SLOT_WAIT_KINDS, PHASE_SLOT_WAIT_DEPTH_ABSENT, PHASE_SLOT_WAIT_ABSENT,
   EVAL_ENVELOPE_STATUSES, EVAL_ABSENT_REASONS, EVAL_INCOMPLETE_REASONS, EVAL_PAYLOAD_KEYS,
   ingestJournal, ingestExternalFenceRegister,
@@ -5623,7 +5623,13 @@ test('advisor-ab counts only the dispatch ids it was given, and a stale envelope
 
 test('advisor-ab never lists the returns directory', () => {
   const source = readFileSync(SCRIPT, 'utf8')
-  for (const needle of ['readdir', 'opendir', 'globSync']) assert.equal(source.includes(needle), false, needle)
+  const advisorStart = source.indexOf("if (verb === 'advisor-ab')")
+  const advisorEnd = source.indexOf('const dbPath = defaultDbPath()', advisorStart)
+  const advisorReadoutStart = source.indexOf('export function advisorAbReadout')
+  const advisorReadoutEnd = source.indexOf('export function evalsReadout', advisorReadoutStart)
+  assert.ok(advisorStart >= 0 && advisorEnd > advisorStart)
+  assert.ok(advisorReadoutStart >= 0 && advisorReadoutEnd > advisorReadoutStart)
+  assert.doesNotMatch(`${source.slice(advisorStart, advisorEnd)}\n${source.slice(advisorReadoutStart, advisorReadoutEnd)}`, /readdir|opendir|globSync/)
   const fx = advisorAbFixture({
     attest: { d1: ADVISOR_AB_EPOCH + 10, d9: ADVISOR_AB_EPOCH + 30 },
     notes: [advisorNote()],
@@ -6947,28 +6953,178 @@ test('b401 a journalled seat_turn_census row ingests to a seat_turn_census ledge
   } finally { ledger.close() }
 })
 
+function writeTurnsCorpusJournal(root, name, entries, {
+  role = 'builder', transport = 'headless-json', provider = 'anthropic', id = 'claude-sonnet',
+} = {}) {
+  const lane = join(root, name)
+  mkdirSync(lane, { recursive: true })
+  const base = Date.parse('2030-01-01T00:00:00.000Z')
+  const seat = { agent: 'claude', provider, id, model: `${provider}/${id}`, effort: 'high' }
+  const rows = [
+    { at: isoMs(base), event: 'boot', roles: [role], seats: { [role]: seat }, transports: { [role]: transport } },
+    { at: isoMs(base + 1), event: 'run-start' },
+  ]
+  entries.forEach(({ turns, status = 'done' }, index) => {
+    const dispatchId = `${name}-${index}`
+    const censusAt = isoMs(base + 10 + index * 2)
+    rows.push({ at: censusAt, seat_turn_census: { role, dispatch_id: dispatchId, transport, turns } })
+    rows.push({ at: isoMs(base + 11 + index * 2), envelope: dispatchId, role, status })
+  })
+  const journal = join(lane, 'journal.jsonl')
+  writeFileSync(journal, `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`)
+  return journal
+}
+
+function turnsCorpusPayload(root, extra = []) {
+  const result = run(['turns', '--crew-root', root, ...extra])
+  assert.equal(result.status, 0, result.stderr)
+  return JSON.parse(result.stdout)
+}
+
+function builderTurnRole(payload) {
+  const role = payload.by_role.find((entry) => entry.role === 'builder')
+  assert.ok(role)
+  return role
+}
+
+test('RV1-1 turns breakdown carries a boot before run-start into the run segment', () => {
+  const root = scratchDir('turns-corpus-rv1-1-')
+  writeTurnsCorpusJournal(root, 'lane', [{ turns: 4, status: 'insufficient' }])
+  const payload = turnsCorpusPayload(root)
+  const cell = builderTurnRole(payload).by_transport.find((entry) => entry.transport === 'headless-json')
+  assert.ok(cell)
+  assert.equal(payload.corpus.dispatches, 1)
+  assert.equal(payload.corpus.measured_rows, 1)
+  assert.equal(payload.corpus.excluded_rows, 0)
+  assert.deepEqual({ numerator: cell.insufficient_with_turns.numerator, denominator: cell.insufficient_with_turns.denominator }, { numerator: 1, denominator: 1 })
+})
+
+test('RV1-2 turns corpus preserves ledger exclusions beside corpus exclusions', () => {
+  const crewRoot = scratchDir('turns-corpus-rv1-2-')
+  const dbPath = join(nextDir(), 'rv1-2.db')
+  const ledger = openLedger({ dbPath, jsonlPath: join(nextDir(), 'rv1-2.jsonl') })
+  try {
+    ledger.recordSeatTurnCensus({ adw_id: 'rv1-2', role: 'builder', dispatch_id: 'd1', transport: 'headless-rpc', turns: null, absent_reason: 'no observable turns', at_ms: Date.parse('2030-01-01T00:00:00.000Z'), created_at: '2030-01-01T00:00:00.000Z' })
+  } finally { ledger.close() }
+  const result = run(['turns', '--crew-root', crewRoot], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(result.status, 0, result.stderr)
+  const payload = JSON.parse(result.stdout)
+  assert.deepEqual(payload.excluded, {
+    rows: 1,
+    reason: 'a dispatch whose seat journalled no observable turn count is excluded from both terms of every rate',
+  })
+  assert.deepEqual(payload.corpus.excluded, [])
+  assert.equal(payload.corpus.excluded_rows, 0)
+})
+
+test('A1 turns breakdown separates two transports', () => {
+  const root = scratchDir('turns-corpus-a1-')
+  const entries = Array.from({ length: CELL_RATE_FLOOR }, (_, index) => ({ turns: index + 1, status: index < 3 ? 'insufficient' : 'done' }))
+  writeTurnsCorpusJournal(root, 'json', entries, { transport: 'headless-json' })
+  writeTurnsCorpusJournal(root, 'rpc', entries.map((entry, index) => ({ ...entry, status: index < 7 ? 'insufficient' : 'done' })), { transport: 'headless-rpc' })
+  const role = builderTurnRole(turnsCorpusPayload(root))
+  const json = role.by_transport.find((entry) => entry.transport === 'headless-json')
+  const rpc = role.by_transport.find((entry) => entry.transport === 'headless-rpc')
+  assert.deepEqual({ numerator: json.insufficient_with_turns.numerator, denominator: json.insufficient_with_turns.denominator }, { numerator: 3, denominator: CELL_RATE_FLOOR })
+  assert.deepEqual({ numerator: rpc.insufficient_with_turns.numerator, denominator: rpc.insufficient_with_turns.denominator }, { numerator: 7, denominator: CELL_RATE_FLOOR })
+  assert.notEqual(json.insufficient_with_turns.numerator, rpc.insufficient_with_turns.numerator)
+})
+
+test('B1 zero turns and insufficient overlap remain separate', () => {
+  const root = scratchDir('turns-corpus-b1-')
+  writeTurnsCorpusJournal(root, 'lane', [
+    { turns: 4, status: 'insufficient' },
+    { turns: 0, status: 'done' },
+    { turns: 0, status: 'insufficient' },
+  ])
+  const cell = builderTurnRole(turnsCorpusPayload(root)).by_transport.find((entry) => entry.transport === 'headless-json')
+  assert.deepEqual({ numerator: cell.insufficient_with_turns.numerator, denominator: cell.insufficient_with_turns.denominator }, { numerator: 1, denominator: 1 })
+  assert.deepEqual({ numerator: cell.zero_turn.numerator, denominator: cell.zero_turn.denominator }, { numerator: 2, denominator: 3 })
+  assert.deepEqual({ numerator: cell.overlap.numerator, denominator: cell.overlap.denominator }, { numerator: 1, denominator: 3 })
+})
+
+test('C1 every turns rate carries numerator and denominator', () => {
+  const root = scratchDir('turns-corpus-c1-')
+  writeTurnsCorpusJournal(root, 'lane', Array.from({ length: CELL_RATE_FLOOR }, (_, index) => ({ turns: index % 2, status: index % 3 === 0 ? 'insufficient' : 'done' })))
+  const payload = turnsCorpusPayload(root)
+  for (const role of payload.by_role) {
+    for (const axis of ['by_transport', 'by_provider', 'by_model']) {
+      for (const cell of role[axis]) {
+        for (const name of ['insufficient_with_turns', 'zero_turn', 'overlap']) {
+          const rate = cell[name]
+          if (rate.rate === null) continue
+          assert.ok(Number.isFinite(rate.numerator) && Number.isInteger(rate.numerator))
+          assert.ok(Number.isFinite(rate.denominator) && Number.isInteger(rate.denominator))
+        }
+      }
+    }
+  }
+})
+
+test('D1 below-floor turns cell is unmeasured with named floor', () => {
+  const root = scratchDir('turns-corpus-d1-')
+  writeTurnsCorpusJournal(root, 'lane', Array.from({ length: CELL_RATE_FLOOR - 1 }, () => ({ turns: 1, status: 'done' })))
+  const cell = builderTurnRole(turnsCorpusPayload(root)).by_transport.find((entry) => entry.transport === 'headless-json')
+  assert.equal(cell.zero_turn.rate, null)
+  assert.equal(cell.zero_turn.measured, false)
+  assert.equal(cell.zero_turn.denominator, CELL_RATE_FLOOR - 1)
+  assert.match(cell.zero_turn.reason, new RegExp(String(CELL_RATE_FLOOR)))
+})
+
+test('E1 unreadable turns journal is skipped with closed reason', () => {
+  const root = scratchDir('turns-corpus-e1-')
+  writeTurnsCorpusJournal(root, 'readable', [{ turns: 1, status: 'done' }])
+  const unreadable = join(root, 'unreadable', 'journal.jsonl')
+  mkdirSync(unreadable, { recursive: true })
+  const payload = turnsCorpusPayload(root)
+  assert.equal(payload.skipped_journals.filter((entry) => entry.journal === unreadable).length, 1)
+  assert.ok(['EISDIR', 'EPERM', 'EACCES'].includes(payload.skipped_journals.find((entry) => entry.journal === unreadable).reason))
+  const cell = builderTurnRole(payload).by_transport.find((entry) => entry.transport === 'headless-json')
+  assert.equal(cell.zero_turn.numerator, 0)
+  assert.equal(cell.zero_turn.denominator, 1)
+})
+
+test('F1 absent transport is unmeasured instead of zero', () => {
+  const root = scratchDir('turns-corpus-f1-')
+  writeTurnsCorpusJournal(root, 'lane', [{ turns: 1, status: 'done' }], { transport: 'headless-rpc' })
+  const role = builderTurnRole(turnsCorpusPayload(root))
+  assert.deepEqual(role.by_transport.map((entry) => entry.transport).sort(), [...TURN_TRANSPORTS].sort())
+  const absent = role.by_transport.find((entry) => entry.transport === 'headless-json')
+  assert.equal(absent.zero_turn.denominator, 0)
+  assert.equal(absent.zero_turn.rate, null)
+  assert.equal(absent.zero_turn.measured, false)
+  assert.match(absent.zero_turn.reason, new RegExp(String(CELL_RATE_FLOOR)))
+})
+
 test('b401 the turns query publishes its denominator and answers null over an empty window', { skip: SKIP }, () => {
   const emptyDb = join(nextDir(), 'empty.db')
-  const empty = run(['turns', '--since', '2001-01-01T00:00:00.000Z', '--until', '2001-01-02T00:00:00.000Z'], { DEVTEAM_LEDGER_DB: emptyDb })
+  const crewRoot = scratchDir('turns-cli-corpus-empty-')
+  const empty = run(['turns', '--crew-root', crewRoot, '--since', '2001-01-01T00:00:00.000Z', '--until', '2001-01-02T00:00:00.000Z'], { DEVTEAM_LEDGER_DB: emptyDb })
   assert.equal(empty.status, 0, empty.stderr)
   const emptyPayload = JSON.parse(empty.stdout)
   assert.equal(emptyPayload.dispatches, null)
   assert.equal(emptyPayload.turns_per_dispatch, null)
   assert.equal(typeof emptyPayload.absent, 'string')
   assert.ok(Array.isArray(emptyPayload.by_role_tier))
+  assert.equal(emptyPayload.excluded.rows, null)
+  assert.equal(typeof emptyPayload.excluded.reason, 'string')
+  assert.ok(emptyPayload.excluded.reason.length > 0)
+  assert.equal(emptyPayload.rate_floor, CELL_RATE_FLOOR)
+  assert.ok(emptyPayload.definition.limitations.includes('lanes reaped before the current crew-root state are absent'))
+  assert.ok(emptyPayload.definition.limitations.includes('Pi turns are observed through the RPC stream rather than a provider transcript'))
 
   const filledDb = join(nextDir(), 'filled.db')
   const ledger = openLedger({ dbPath: filledDb, jsonlPath: join(nextDir(), 'filled.jsonl') })
   ledger.recordSeatTurnCensus({ adw_id: 'b401-filled', role: 'builder', dispatch_id: 'd1', transport: 'headless-rpc', turns: 10, at_ms: Date.parse('2030-01-01T00:00:00.000Z'), created_at: '2030-01-01T00:00:00.000Z' })
   ledger.recordSeatTurnCensus({ adw_id: 'b401-filled', role: 'builder', dispatch_id: 'd2', transport: 'headless-rpc', turns: 20, at_ms: Date.parse('2030-01-01T00:00:01.000Z'), created_at: '2030-01-01T00:00:01.000Z' })
   ledger.close()
-  const filled = run(['turns', '--since', '2029-12-31T00:00:00.000Z', '--until', '2030-01-02T00:00:00.000Z'], { DEVTEAM_LEDGER_DB: filledDb })
+  const filled = run(['turns', '--crew-root', crewRoot, '--since', '2029-12-31T00:00:00.000Z', '--until', '2030-01-02T00:00:00.000Z'], { DEVTEAM_LEDGER_DB: filledDb })
   assert.equal(filled.status, 0, filled.stderr)
   const filledPayload = JSON.parse(filled.stdout)
   assert.equal(filledPayload.dispatches, 2)
   assert.equal(filledPayload.turns_per_dispatch, 15)
 
-  const typo = run(['turns', '--untill', '2030-01-01T00:00:00.000Z'], { DEVTEAM_LEDGER_DB: emptyDb })
+  const typo = run(['turns', '--crew-root', crewRoot, '--untill', '2030-01-01T00:00:00.000Z'], { DEVTEAM_LEDGER_DB: emptyDb })
   assert.equal(typo.status, 2)
   assert.match(typo.stderr, new RegExp(`turns: unknown flag --${'untill'}`))
 })

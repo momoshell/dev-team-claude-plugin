@@ -2247,6 +2247,11 @@ export function installExitMarker({
   }
 }
 
+export function installRunFinalizers(emitter, { installExitMarkerFn = installExitMarker } = {}) {
+  try { emitter?.installFinalizer() } catch {}
+  installExitMarkerFn()
+}
+
 // The completion event (#687). run.log and the journal stay authoritative for
 // their own purposes; this is ADDITIVE. One line per finishing run, in a log that
 // OUTLIVES the crew dir the run used — because a crew dir is mutable, reusable
@@ -2309,7 +2314,7 @@ export function runCmd(args, deps = {}) {
   // dispatch refuses HERE when the dispatch carries none — before crew state is
   // read and long before a seat is driven.
   assertCtxSources(executionConfiguration.execution.effective, { validationLane })
-  const { drive = driveTask, appendCompletion: appendCompletionDep = appendCompletion, awaitSeatsReady: awaitSeatsReadyDep = awaitSeatsReady, writeTerminalLine: writeTerminalLineDep, seatIo: seatIoDep = seatIo } = deps
+  const { drive = driveTask, appendCompletion: appendCompletionDep = appendCompletion, awaitSeatsReady: awaitSeatsReadyDep = awaitSeatsReady, writeTerminalLine: writeTerminalLineDep, seatIo: seatIoDep = seatIo, openRun: openRunDep = openRun, installRunFinalizers: installRunFinalizersDep } = deps
   const taskSlug = slug(args.task)
   const checkout = resolvePath(args.checkout || process.cwd())
   const paths = pathsFor(taskSlug, checkout)
@@ -2430,9 +2435,10 @@ export function runCmd(args, deps = {}) {
   // or blockless brief still records null proposal fields.
   let emitter = null
   try {
-    emitter = openRun({ stateDir: paths.dir, repoSlug: paths.repo, taskSlug, dbPath: ledgerDbPath(), briefPath: briefFile })
+    emitter = openRunDep({ stateDir: paths.dir, repoSlug: paths.repo, taskSlug, dbPath: ledgerDbPath(), briefPath: briefFile })
     emitter.startRun()
   } catch { emitter = null }
+  installRunFinalizersDep?.(emitter)
 
   const io = seatIoDep(crew, paths, checkout, emitter, null, args, { readRoster: rosterSnapshotReader(crew) })
   // A throw out of the driver (member timeout, dead pane, git failure) is an
@@ -3204,11 +3210,21 @@ if (invokedDirectly) {
   const [verb, ...rest] = process.argv.slice(2)
   const fn = COMMANDS[verb]
   if (!fn) { process.stderr.write(`usage: crew.mjs <${Object.keys(COMMANDS).join('|')}> --task <slug> ...\n`); process.exit(2) }
-  if (verb === 'run') installExitMarker()
+  const markerHandlers = []
+  const recordOn = (event, handler) => { markerHandlers.push([event, handler]); process.on(event, handler) }
+  if (verb === 'run') installExitMarker({ on: recordOn })
+  let runSignalsArmed = false
+  const armRunSignals = (emitter) => {
+    for (const [event, handler] of markerHandlers) process.removeListener(event, handler)
+    markerHandlers.length = 0
+    installRunFinalizers(emitter)
+    runSignalsArmed = true
+  }
   // fn may be async (boot resolves adapters via dynamic import) — a sync
   // try/catch cannot see an async rejection, so a promise result is also
   // routed to `fail` explicitly.
   const fail = (err) => {
+    if (verb === 'run' && !runSignalsArmed) { installExitMarker(); runSignalsArmed = true }
     process.stderr.write(`error: ${err.message}\n`)
     process.stdout.write(`${JSON.stringify({ error: err.message })}\n`)
     process.exit(err?.usage === true ? 2 : 1)
@@ -3216,7 +3232,9 @@ if (invokedDirectly) {
   try {
     const parsed = parseArgs(rest)
     assertUsage(verb, parsed)
-    const r = fn(parsed)
+    const r = verb === 'run'
+      ? fn(parsed, { installRunFinalizers: armRunSignals })
+      : fn(parsed)
     if (r && typeof r.then === 'function') r.catch(fail)
   } catch (err) { fail(err) }
 }

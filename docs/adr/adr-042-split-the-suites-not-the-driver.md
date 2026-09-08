@@ -1,6 +1,6 @@
 # ADR-042 — Split the test suites, not the driver
 
-**Status:** ratified 2026-09-08 · **Issue:** #1033 · **Owner:** operator
+**Status:** ratified 2026-09-08 · **superseded in part 2026-09-09, see Amendment 2 — the suite splits are PARKED** · **Issue:** #1033 · **Owner:** operator
 
 ## Decision
 
@@ -174,6 +174,64 @@ fence-contention relief — measured, three of the six most contended files. #10
 relief without moving a line, and it also unblocks the eight-issue `crew/drive.mjs`
 queue that no split touches. Do #1061 first; these are worth doing after, and are
 not urgent.
+
+## Amendment 2 — 2026-09-09: the suite splits are PARKED, and one ground is refuted
+
+**Owner's decision, 2026-09-09: park #1062, #1063 and #1064.** The decision NOT to split
+`crew/drive.mjs` stands and is unchanged. What is withdrawn is the positive case for
+splitting the three suites.
+
+### The gate-cost ground was never measured, and it is false
+
+This ADR reasoned from lines and cross-cluster edges. Neither is what a big suite costs.
+Measured 2026-09-09 at `92c85d6`, `/usr/bin/time` on `node --test <file>`:
+
+| suite | lines | runtime | tests | s/test |
+|---|---|---|---|---|
+| `test/factory-make-brief.test.mjs` | 3,126 | **32.7 s** | 150 | **0.218** |
+| `test/factory-ledger.test.mjs` | 7,388 | 13.4 s | 342 | 0.039 |
+| `crew/crew.test.mjs` | **7,721** | 9.5 s | 355 | 0.027 |
+| `test/factory-dispatch-batch.test.mjs` | 6,146 | 6.9 s | 278 | 0.025 |
+
+**Runtime does not track size.** The smallest of the four is the slowest, by 8x per test,
+and it is a file this ADR does not target. `b562-fenceregister`'s acceptance gate cost
+**33.5 s** and was essentially all `make-brief.test.mjs`; splitting the three suites named
+here would have saved approximately none of it. Per-test cost, not file size, is the
+lever — raised as its own issue.
+
+### #1061 delivered the relief this ADR was deferring to
+
+The original text says the whole ADR sits behind #1061 because sub-file scopes buy the
+same contention relief without moving a line. **#1061 landed 2026-09-08** (#1076 wave 1,
+#1077 wave 2): a fence entry may now name `path:START-END` in base-commit coordinates, so
+two lanes hold disjoint spans of `crew/crew.test.mjs` today. The scheduling argument is
+spent by its own terms.
+
+### The migration risk grew while the ADR waited
+
+Re-measured 2026-09-09 with the same `seams.mjs`:
+
+| suite | ADR table | now |
+|---|---|---|
+| `test/factory-ledger.test.mjs` | 12 clusters, 9 edges | 14 clusters, **2** edges |
+| `test/factory-dispatch-batch.test.mjs` | 101 clusters, 112 edges | **116 clusters, 122 edges** |
+| `crew/crew.test.mjs` | 134 clusters, 177 edges | **137 clusters, 185 edges** |
+
+`test/factory-ledger.test.mjs` also carries **342 tests against 20 symbols in 14
+clusters**, which confirms Amendment 1's refusal to authorise #1062: a symbol-clustered
+report cannot say where to cut a suite whose tests are mostly symbol-less.
+
+### What still stands, and where the cost actually goes
+
+#1033's premise is unrefuted: **size costs the builder turns**, and on b530 the
+most-touched file was the TEST file. But the instrument aimed at that is #1069's skeleton
+read, not a split — a builder handed a 700-line module still reads it, while a skeleton
+read collapses a 7,700-line one. #1069 is unblocked as of #1077 and carries the
+measurement (#1027 ask 5) that would justify either.
+
+**Re-open the splits only on new evidence**, specifically: a measured builder-turn saving
+attributable to suite size after #1055 and #1069 land, or a verb-level scan that makes
+`test/factory-ledger.test.mjs` cuttable.
 
 ## What this deliberately does not do
 

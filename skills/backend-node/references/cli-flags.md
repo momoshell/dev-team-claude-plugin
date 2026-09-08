@@ -1,17 +1,17 @@
 # Refuse flags a verb does not read
 
 Give every CLI verb an explicit entry in `VERB_FLAGS`.
-Exhibit: `scripts/factory/ledger.mjs:5801`.
+Exhibit: `scripts/factory/ledger.mjs:6097`.
 
 Use `refuseUnknownFlags` as the one vocabulary check.
-Exhibit: `scripts/factory/ledger.mjs:5831`.
+Exhibit: `scripts/factory/ledger.mjs:6127`.
 
 A misspelling must produce a usage refusal instead of a default.
-Exhibit: `scripts/factory/ledger.mjs:5839`.
+Exhibit: `scripts/factory/ledger.mjs:6135`.
 
 The measured failure was `run-set --since X --untill Y` returning an unbounded
 window at exit 0 (#443).
-Exhibit: `scripts/factory/ledger.mjs:5839`.
+Exhibit: `scripts/factory/ledger.mjs:6135`.
 
 Pin the refusal direction in the ledger test.
 Exhibit: `test/factory-ledger.test.mjs:3632`.
@@ -26,13 +26,13 @@ The same refusal shape is mirrored in `scripts/factory/emit.mjs:1504`.
 Exhibit: `scripts/factory/emit.mjs:1504`.
 
 Do not let an unknown option become an omitted bound or a null filter.
-Exhibit: `scripts/factory/ledger.mjs:5839` and `test/factory-ledger.test.mjs:3632`.
+Exhibit: `scripts/factory/ledger.mjs:6135` and `test/factory-ledger.test.mjs:3632`.
 
 An empty vocabulary means a verb accepts no flags; it is not an open parser.
-Exhibit: `scripts/factory/ledger.mjs:5801`.
+Exhibit: `scripts/factory/ledger.mjs:6097`.
 
 An unknown verb must refuse before a flag can acquire accidental meaning.
-Exhibit: `scripts/factory/ledger.mjs:7141`.
+Exhibit: `scripts/factory/ledger.mjs:7461`.
 
 If parsing is interrupted, do not resume with the default window.
 Status: this interrupted-parser edge is unbacked in this checkout; see
@@ -51,10 +51,10 @@ A green happy-path test alone cannot catch the one-letter window regression.
 Exhibit: `test/factory-ledger.test.mjs:3632`.
 
 Keep the exhibit and the accepted vocabulary updated in one change.
-Exhibit: `scripts/factory/ledger.mjs:5801` and `:3383`.
+Exhibit: `scripts/factory/ledger.mjs:6097` and `:3383`.
 
 The cost of ignoring one flag was an apparently successful, unbounded report.
-Exhibit: `scripts/factory/ledger.mjs:5839`.
+Exhibit: `scripts/factory/ledger.mjs:6135`.
 
 Use this rule for each verb even when several verbs share a parser helper.
-Exhibit: `scripts/factory/ledger.mjs:5801`.
+Exhibit: `scripts/factory/ledger.mjs:6097`.

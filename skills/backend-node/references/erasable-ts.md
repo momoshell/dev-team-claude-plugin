@@ -1,6 +1,6 @@
 # TypeScript that both loaders can erase
 
-Read the record first: docs/conventions.md:46 owns this decision; this file owns the checklist.
+Read the record first: docs/conventions.md:47 owns this decision; this file owns the checklist.
 
 Keep `crew/pi/extensions/subagent.ts` erasable-syntax-only.
 Exhibit: `crew/pi/extensions/subagent.ts:5-9`.
@@ -31,7 +31,7 @@ only when loading the module.
 Exhibit: `crew/pi/extensions/subagent.test.mjs:8`.
 
 Node reports unsupported runtime syntax as `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`.
-Exhibit: `docs/conventions.md:46`.
+Exhibit: `docs/conventions.md:47`.
 
 Do not add a construct merely because jiti accepts it in one path.
 Exhibit: `crew/pi/extensions/subagent.ts:5-9`.

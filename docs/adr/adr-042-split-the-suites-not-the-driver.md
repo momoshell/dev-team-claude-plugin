@@ -77,10 +77,11 @@ changes** — the split files inherit the reach of the file they came from.
 One lane per suite, in a quiet window, because these files appear in nearly
 every crew-adjacent fence and a split lane must not race one:
 
-1. `test/factory-ledger.test.mjs` — 12 clusters, 9 edges, 3 pins. Cheapest;
-   do it first as the exhibit.
-2. `test/factory-dispatch-batch.test.mjs` — 101 clusters, 112 edges, 0 pins.
-3. `crew/crew.test.mjs` — 134 clusters, 177 edges, 0 pins. Largest and last.
+1. **`test/factory-dispatch-batch.test.mjs`** — 101 clusters, 112 edges, 0 pins.
+   Do it FIRST as the exhibit.
+2. **`crew/crew.test.mjs`** — 134 clusters, 177 edges, 0 pins.
+3. **`test/factory-ledger.test.mjs`** — 12 clusters, 9 edges, 3 pins. LAST, and
+   only after a verb-level scan: see the ordering amendment below.
 
 Each split preserves every test name and every assertion byte-for-byte; the
 lane's own proof is that the union of the new files runs the same test count
@@ -132,6 +133,47 @@ behind them — before any file division is safe. That is a larger act than this
 ADR decides, it wants its own ADR, and it should follow #1061 rather than block
 on it. Recorded here so a later reader does not mistake "not now" for "not
 ever".
+
+## Amendment 2026-09-08 — differentiated-first, not cheapest-first
+
+**The original ordering was wrong and this corrects it.** It ranked the suites by
+cross-cluster edge count, which measures how *safe* a split is — not whether the
+cluster report can tell you *where to cut*. Those are different questions and the
+first does not answer the second.
+
+Measured on `test/factory-ledger.test.mjs`, the file this ADR originally named
+first:
+
+```
+[13] blocks=319  symbols=[]                    <- 319 of the suite's 342 tests
+[6]  blocks=9    symbols=[escalationCause]
+[3]  blocks=3    symbols=[CELL_RATE_FLOOR]
+[0,1,2,4,5,7,8,9,10,11,12]  blocks=1 each
+```
+
+**319 of 342 top-level tests fall into one symbol-less cluster.** Cutting on
+clusters yields thirteen 1-to-9-test files plus a ~6,000-line remainder, which is
+not a split. The file carries 2 `// ---` section comments for 342 tests, so there
+is no fallback structure either. Its 9 edges still say a split would be *cheap*;
+they say nothing about where the seams are, because these tests reach the ledger
+through the same handful of writers rather than through distinct exports.
+
+`test/factory-dispatch-batch.test.mjs` (101 clusters over 5,418 lines) and
+`crew/crew.test.mjs` (134 over 7,347) have genuinely differentiated
+distributions, so their reports *can* guide a cut. They go first.
+
+**`test/factory-ledger.test.mjs` needs a different basis before it is dispatched
+at all** — a scan that groups its tests by which ledger verb or `WRITERS` entry
+each one drives, which `seams.mjs` does not do today. Until that exists, this ADR
+does not authorise splitting it, and #1062 stays blocked rather than being
+dispatched against an instruction its own instrument cannot satisfy.
+
+**Priority: this whole ADR sits behind #1061.** The suite splits' main benefit is
+fence-contention relief — measured, three of the six most contended files. #1061
+(sub-file fences over the clusters `seams.mjs` already emits) delivers the same
+relief without moving a line, and it also unblocks the eight-issue `crew/drive.mjs`
+queue that no split touches. Do #1061 first; these are worth doing after, and are
+not urgent.
 
 ## What this deliberately does not do
 

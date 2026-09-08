@@ -32,6 +32,8 @@ import {
   PHASE_SLOT_WAIT_KINDS, PHASE_SLOT_WAIT_DEPTH_ABSENT, PHASE_SLOT_WAIT_ABSENT,
   EVAL_ENVELOPE_STATUSES, EVAL_ABSENT_REASONS, EVAL_INCOMPLETE_REASONS, EVAL_PAYLOAD_KEYS,
   ingestJournal, ingestExternalFenceRegister,
+  JOURNAL_FACT_KEYS, JOURNAL_FACT_EVENTS, PLANNER_SYMBOLS_ARMS, PLANNER_SYMBOLS_SAMPLE_FLOOR,
+  PLANNER_SYMBOLS_BOOTSTRAP_RESAMPLES, PLANNER_SYMBOLS_BOOTSTRAP_SEED, bootstrapPercentile,
 } from '../scripts/factory/ledger.mjs'
 import { FAILURE_UPGRADE, MODIFIER_OUTCOMES, SENSITIVITY_FLOOR, VARIANT_NAMES, SUITE_SLOT_PHASE_NAMES, anchorAbsentWhy, MUTATION_CORRECTION_OUTCOMES, MUTATION_CORRECTION_REFUSALS } from '../crew/drive.mjs'
 import { SUBMIT_BLIND_SPOT } from '../crew/driver.mjs'
@@ -7133,6 +7135,240 @@ test('b401 the turns query publishes its denominator and answers null over an em
   const typo = run(['turns', '--crew-root', crewRoot, '--untill', '2030-01-01T00:00:00.000Z'], { DEVTEAM_LEDGER_DB: emptyDb })
   assert.equal(typo.status, 2)
   assert.match(typo.stderr, new RegExp(`turns: unknown flag --${'untill'}`))
+})
+
+function holdoutLedger(label) {
+  const dir = scratchDir(`planner-symbols-${label}-`)
+  const dbPath = join(dir, 'ledger.db')
+  const jsonlPath = join(dir, 'ledger.jsonl')
+  const ledger = openLedger({ dbPath, jsonlPath, stderr: { write: () => {} } })
+  return { dir, dbPath, jsonlPath, ledger }
+}
+
+function addHoldoutLane(ledger, index, {
+  arm = 'control', fraction = 0.5, turns = 1, distinct_files_read = 1, re_reads = 0,
+  review = null, terminal_reason = undefined, roleCensus = null,
+} = {}) {
+  const adwId = `holdout-${index}`
+  const atMs = Date.parse('2030-02-01T00:00:00.000Z') + index * 60_000
+  const createdAt = isoMs(atMs)
+  ledger.recordExperimentArm({
+    adw_id: adwId, role: 'planner', experiment: 'planner-symbols', arm, fraction,
+    at_ms: atMs, created_at: createdAt,
+  })
+  ledger.recordSeatTurnCensus({
+    adw_id: adwId, role: 'planner', dispatch_id: `planner-${index}`, transport: 'headless-json',
+    turns, distinct_files_read, re_reads, at_ms: atMs + 1, created_at: isoMs(atMs + 1),
+  })
+  if (roleCensus) {
+    ledger.recordSeatTurnCensus({
+      adw_id: adwId, role: roleCensus.role || 'builder', dispatch_id: `other-${index}`,
+      transport: 'headless-json', turns: roleCensus.turns ?? 99,
+      distinct_files_read: roleCensus.distinct_files_read ?? 99, re_reads: roleCensus.re_reads ?? 99,
+      at_ms: atMs + 2, created_at: isoMs(atMs + 2),
+    })
+  }
+  if (review !== null) {
+    ledger.recordReviewOutcome({
+      adw_id: adwId, dispatch_id: `review-${index}`, role: 'reviewer', verdict: review,
+      created_at: isoMs(atMs + 3),
+    })
+  }
+  if (terminal_reason !== undefined) {
+    ledger.startSession({ adw_id: adwId, repo_slug: 'holdout', task_slug: adwId, started_at: isoMs(atMs - 1) })
+    ledger.endSession({
+      adw_id: adwId, status: 'fail', outcome: 'failed', terminal_reason,
+      ended_at: isoMs(atMs + 4),
+    })
+  }
+  return adwId
+}
+
+function holdoutRows(report) {
+  assert.deepEqual(report.arms, [...PLANNER_SYMBOLS_ARMS])
+  assert.deepEqual(report.metrics, ['turns', 'distinct_files_read', 're_reads', 'first_round_plan_acceptance'])
+  return report.rows
+}
+
+test('HoldC1', { skip: SKIP }, () => {
+  const source = holdoutLedger('c1-source')
+  try {
+    source.ledger.recordExperimentArm({
+      adw_id: 'c1-replay', role: 'planner', experiment: 'planner-symbols', arm: 'control', fraction: 0.5,
+      at_ms: Date.parse('2030-02-01T00:00:00.000Z'), created_at: '2030-02-01T00:00:00.000Z',
+    })
+    source.ledger.recordExperimentArm({
+      adw_id: 'c1-replay', role: 'planner', experiment: 'planner-symbols', arm: 'control', fraction: 0.5,
+      at_ms: Date.parse('2030-02-01T00:00:00.000Z'), created_at: '2030-02-01T00:00:00.000Z',
+    })
+    assert.equal(source.ledger.dumpTable('experiment_arms').length, 1)
+  } finally { source.ledger.close() }
+  const replay = holdoutLedger('c1-replay')
+  try {
+    const replayed = replayJsonl(source.jsonlPath, replay.ledger)
+    assert.equal(replayed.complete, true)
+    assert.equal(replay.ledger.dumpTable('experiment_arms').length, 1)
+
+    const journalPath = join(replay.dir, 'crew-journal.jsonl')
+    writeFileSync(journalPath, [
+      {
+        at: '2030-02-01T00:01:00.000Z', event: 'experiment-arm', role: 'planner',
+        experiment: 'planner-symbols', arm: 'symbols-omitted', fraction: 0.25,
+      },
+      {
+        adw_id: 'c1-nested', at: '2030-02-01T00:02:00.000Z',
+        experiment_arm: { role: 'planner', experiment: 'planner-symbols', arm: 'control', fraction: 0.25 },
+      },
+    ].map((row) => JSON.stringify(row)).join('\n') + '\n')
+    const ingested = ingestJournal(journalPath, replay.ledger, { adw_id: 'c1-ingested' })
+    assert.equal(ingested.applied, 2)
+    assert.equal(replay.ledger.dumpTable('experiment_arms').find((row) => row.adw_id === 'c1-ingested').role, 'planner')
+    assert.equal(replay.ledger.dumpTable('experiment_arms').find((row) => row.adw_id === 'c1-nested').arm, 'control')
+
+    assert.deepEqual(TABLES.experiment_arms.columns.map(({ name, decl }) => [name, decl]), [
+      ['adw_id', 'TEXT'], ['role', 'TEXT'], ['experiment', 'TEXT'], ['arm', 'TEXT'],
+      ['fraction', 'REAL'], ['at_ms', 'INTEGER'], ['created_at', 'TEXT'],
+    ])
+    assert.deepEqual(TABLES.experiment_arms.unique, [['adw_id', 'role', 'experiment']])
+    assert.equal(WRITERS.includes('recordExperimentArm'), true)
+    assert.equal(WRITER_MIRROR_TABLES.recordExperimentArm, 'experiment_arms')
+    assert.equal(JOURNAL_FACT_EVENTS['experiment-arm'], 'recordExperimentArm')
+    assert.equal(JOURNAL_FACT_KEYS.experiment_arm, 'recordExperimentArm')
+
+    const fixture = holdoutLedger('c1-join')
+    try {
+      for (let index = 0; index < PLANNER_SYMBOLS_SAMPLE_FLOOR; index += 1) {
+        addHoldoutLane(fixture.ledger, index, {
+          turns: 2, distinct_files_read: 3, re_reads: 4,
+          roleCensus: { role: 'builder', turns: 200, distinct_files_read: 200, re_reads: 200 },
+        })
+      }
+      const report = fixture.ledger.plannerSymbolsHoldout()
+      const rows = holdoutRows(report)
+      assert.equal(rows.find((row) => row.arm === 'control' && row.metric === 'turns').mean, 2)
+      assert.equal(rows.find((row) => row.arm === 'control' && row.metric === 'distinct_files_read').mean, 3)
+      assert.equal(rows.find((row) => row.arm === 'control' && row.metric === 're_reads').mean, 4)
+    } finally { fixture.ledger.close() }
+  } finally { replay.ledger.close() }
+})
+
+test('HoldD1', { skip: SKIP }, () => {
+  const fixture = holdoutLedger('d1')
+  try {
+    addHoldoutLane(fixture.ledger, 0, { arm: 'control' })
+    addHoldoutLane(fixture.ledger, 1, { arm: 'symbols-omitted' })
+    const rows = holdoutRows(fixture.ledger.plannerSymbolsHoldout())
+    assert.equal(rows.length, 8)
+    assert.equal(rows.some((row) => row.arm === 'pooled' || row.arm === 'all'), false)
+    assert.deepEqual(rows.map(({ arm, metric }) => `${arm}:${metric}`), [
+      'control:turns', 'control:distinct_files_read', 'control:re_reads', 'control:first_round_plan_acceptance',
+      'symbols-omitted:turns', 'symbols-omitted:distinct_files_read', 'symbols-omitted:re_reads', 'symbols-omitted:first_round_plan_acceptance',
+    ])
+  } finally { fixture.ledger.close() }
+})
+
+test('HoldD2', { skip: SKIP }, () => {
+  const fixture = holdoutLedger('d2')
+  try {
+    addHoldoutLane(fixture.ledger, 0, { arm: 'control' })
+    addHoldoutLane(fixture.ledger, 1, { arm: 'symbols-omitted' })
+    const rows = holdoutRows(fixture.ledger.plannerSymbolsHoldout())
+    for (const row of rows) assert.equal(Number.isInteger(row.n), true)
+    assert.equal(rows.every((row) => !Object.hasOwn(row, 'arm') || PLANNER_SYMBOLS_ARMS.includes(row.arm)), true)
+  } finally { fixture.ledger.close() }
+})
+
+test('HoldE1', { skip: SKIP }, () => {
+  const fixture = holdoutLedger('e1')
+  try {
+    for (let index = 0; index < 19; index += 1) addHoldoutLane(fixture.ledger, index, { arm: 'control', turns: index })
+    const rows = holdoutRows(fixture.ledger.plannerSymbolsHoldout())
+    const turns = rows.find((row) => row.arm === 'control' && row.metric === 'turns')
+    assert.equal(turns.n, 19)
+    assert.equal(turns.status, 'unmeasured')
+    assert.equal(turns.floor, 20)
+    assert.equal(Object.hasOwn(turns, 'mean'), false)
+    assert.equal(Object.hasOwn(turns, 'interval'), false)
+  } finally { fixture.ledger.close() }
+})
+
+test('HoldE2', { skip: SKIP }, () => {
+  const fixture = holdoutLedger('e2')
+  try {
+    for (let index = 0; index < 20; index += 1) addHoldoutLane(fixture.ledger, index, { arm: 'symbols-omitted', turns: 2 })
+    const rows = holdoutRows(fixture.ledger.plannerSymbolsHoldout())
+    const turns = rows.find((row) => row.arm === 'symbols-omitted' && row.metric === 'turns')
+    assert.equal(turns.n, 20)
+    assert.equal(turns.status, 'measured')
+    assert.equal(turns.mean, 2)
+    assert.deepEqual(turns.interval, { low: 2, high: 2, confidence: 0.95 })
+    assert.equal(Object.hasOwn(turns, 'floor'), false)
+  } finally { fixture.ledger.close() }
+})
+
+test('HoldF1', { skip: SKIP }, () => {
+  assert.deepEqual(bootstrapPercentile([0, 0, 0, 0, 10]), { low: 0, high: 6 })
+  assert.deepEqual(bootstrapPercentile([0, 0, 0, 0, 10]), { low: 0, high: 6 })
+  const fixture = holdoutLedger('f1')
+  try {
+    for (let index = 0; index < PLANNER_SYMBOLS_SAMPLE_FLOOR; index += 1) {
+      addHoldoutLane(fixture.ledger, index, { arm: 'control', turns: index === PLANNER_SYMBOLS_SAMPLE_FLOOR - 1 ? 10 : 0 })
+    }
+    const turns = holdoutRows(fixture.ledger.plannerSymbolsHoldout()).find((row) => row.arm === 'control' && row.metric === 'turns')
+    assert.deepEqual(turns.interval, { low: 0, high: 1.5, confidence: 0.95 })
+  } finally { fixture.ledger.close() }
+})
+
+test('HoldF2', { skip: SKIP }, () => {
+  const fixture = holdoutLedger('f2')
+  try {
+    for (let index = 0; index < PLANNER_SYMBOLS_SAMPLE_FLOOR; index += 1) addHoldoutLane(fixture.ledger, index, { arm: 'control', turns: 1 })
+    const report = fixture.ledger.plannerSymbolsHoldout()
+    assert.deepEqual(report.bootstrap, {
+      method: 'percentile-bootstrap', confidence: 0.95, resamples: 10_000, seed: 1059,
+    })
+    const turns = holdoutRows(report).find((row) => row.arm === 'control' && row.metric === 'turns')
+    assert.deepEqual(turns.interval, { low: 1, high: 1, confidence: 0.95 })
+  } finally { fixture.ledger.close() }
+})
+
+test('HoldG1', { skip: SKIP }, () => {
+  const fixture = holdoutLedger('g1')
+  try {
+    for (let index = 0; index < 20; index += 1) {
+      addHoldoutLane(fixture.ledger, index, {
+        arm: 'control', turns: 1, review: index === 0 ? null : 'pass', terminal_reason: index === 0 ? 'boot-failed' : undefined,
+      })
+    }
+    for (let index = 0; index < 20; index += 1) {
+      addHoldoutLane(fixture.ledger, 100 + index, { arm: 'symbols-omitted', turns: 1, review: 'pass' })
+    }
+    const report = fixture.ledger.plannerSymbolsHoldout()
+    const rows = holdoutRows(report)
+    const controlAcceptance = rows.find((row) => row.arm === 'control' && row.metric === 'first_round_plan_acceptance')
+    const treatmentAcceptance = rows.find((row) => row.arm === 'symbols-omitted' && row.metric === 'first_round_plan_acceptance')
+    assert.equal(controlAcceptance.n, 19)
+    assert.equal(controlAcceptance.status, 'unmeasured')
+    assert.equal(treatmentAcceptance.n, 20)
+    assert.equal(treatmentAcceptance.proportion, 1)
+    assert.deepEqual(report.excluded_from_first_round, [{ arm: 'control', reason: 'boot-failed', count: 1 }])
+  } finally { fixture.ledger.close() }
+})
+
+test('HoldG2', { skip: SKIP }, () => {
+  const fixture = holdoutLedger('g2')
+  try {
+    addHoldoutLane(fixture.ledger, 0, { arm: 'control', review: null, terminal_reason: 'seat-refused' })
+    addHoldoutLane(fixture.ledger, 1, { arm: 'control', review: null })
+    addHoldoutLane(fixture.ledger, 2, { arm: 'symbols-omitted', review: null, terminal_reason: 'review-unresolved' })
+    const excluded = fixture.ledger.plannerSymbolsHoldout().excluded_from_first_round
+    assert.deepEqual(excluded, [
+      { arm: 'control', reason: 'seat-refused', count: 1 },
+      { arm: 'control', reason: 'no-review-outcome-recorded', count: 1 },
+      { arm: 'symbols-omitted', reason: 'review-unresolved', count: 1 },
+    ])
+    assert.equal(excluded.every((row) => typeof row.reason === 'string' && row.reason.length > 0), true)
+  } finally { fixture.ledger.close() }
 })
 
 test('b401 the turns query excludes an unmeasured turn count from both terms', { skip: SKIP }, () => {

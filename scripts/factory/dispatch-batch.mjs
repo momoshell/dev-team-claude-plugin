@@ -168,6 +168,10 @@ export const PANE_TRANSPORT = 'panes'
 import { ASSURANCE_ALIASES, ASSURANCE_ALIAS_OF } from '../../crew/assurances.mjs'
 export const COMPILE_REQUEST_SUFFIX = '.compile-request.json'
 
+export const PLANNER_SYMBOLS_ARM_EVENT = 'experiment-arm'
+export const PLANNER_SYMBOLS_EXPERIMENT = 'planner-symbols'
+export const PLANNER_SYMBOLS_ARMS = Object.freeze(['control', 'symbols-omitted'])
+
 // #767: five boots were lost to pane-send mechanics on 2026-08-29 (b321 x1, b322 x2,
 // b325 x2), each with correct work on both sides of the send and each costing a whole
 // dispatch. A lost boot now costs ONE retry: tear the half-booted lane down, re-boot,
@@ -785,9 +789,29 @@ export function normalDeps(deps = {}) {
     // Suite-slot seams (#825): pass-through only. withSuiteSlot owns their
     // defaults, so an absent seam must stay `undefined` rather than become null.
     now: deps.now,
+    random: deps.random || Math.random,
     sleep: deps.sleep,
     slots: deps.slots,
   }
+}
+
+export function parsePlannerSymbolsHoldoutFraction(value) {
+  if (value === undefined || value === null) return null
+  const text = typeof value === 'number' ? String(value) : value
+  if (typeof text !== 'string' || !/^(?:0(?:\.\d+)?|1(?:\.0+)?)$/.test(text)) {
+    refuse(`invalid --planner-symbols-holdout-fraction ${JSON.stringify(value)}; expected a canonical finite number in [0,1]`, BATCH_UNREADABLE)
+  }
+  const fraction = Number(text)
+  if (!Number.isFinite(fraction) || fraction < 0 || fraction > 1) {
+    refuse(`invalid --planner-symbols-holdout-fraction ${JSON.stringify(value)}; expected a canonical finite number in [0,1]`, BATCH_UNREADABLE)
+  }
+  return fraction
+}
+
+export function selectPlannerSymbolsArm(fraction, random = Math.random) {
+  if (fraction === null) return null
+  const draw = random()
+  return draw < fraction ? 'control' : 'symbols-omitted'
 }
 
 function normaliseRepoPath(value) {
@@ -2204,7 +2228,7 @@ export function measureBatchBaseline({ plans, outDir, checkout, heads, deps } = 
   })
 }
 
-function compileCommand({ requestPath, lane, laneDir, registerPath, outDir, baselinePath, issueBodyPath }) {
+function compileCommand({ requestPath, lane, laneDir, registerPath, outDir, baselinePath, issueBodyPath, packOmission = null }) {
   const args = [
     'scripts/factory/make-brief.mjs',
     '--request', requestPath,
@@ -2217,6 +2241,7 @@ function compileCommand({ requestPath, lane, laneDir, registerPath, outDir, base
   ]
   if (typeof baselinePath === 'string' && baselinePath.trim()) args.push('--baseline', baselinePath)
   if (typeof issueBodyPath === 'string' && issueBodyPath.trim()) args.push('--issue-body', issueBodyPath)
+  if (packOmission !== null && packOmission !== undefined) args.push('--pack-omission', packOmission)
   return { file: 'node', args, cwd: laneDir }
 }
 
@@ -2303,7 +2328,7 @@ function issueBodyFor({ requestPath, lane, checkout, outDir, d }) {
   return path
 }
 
-export async function compileLane({ lane, batchDir, requestPath, laneDir, registerPath, outDir, fences, baselinePath, deps } = {}) {
+export async function compileLane({ lane, batchDir, requestPath, laneDir, registerPath, outDir, fences, baselinePath, packOmission = null, deps } = {}) {
   const d = normalDeps(deps)
   const name = laneNameOf(lane)
   const requestDir = resolve(batchDir)
@@ -2338,7 +2363,7 @@ export async function compileLane({ lane, batchDir, requestPath, laneDir, regist
   }
   const issueBodyPath = issueBodyFor({ requestPath: compileRequest, lane: name, checkout, outDir: outputDir, d })
   let result
-  try { result = await d.spawnAsync(compileCommand({ lane: name, requestPath: compileRequest, laneDir: checkout, registerPath: currentRegister, outDir: outputDir, baselinePath, issueBodyPath })) } catch (err) {
+  try { result = await d.spawnAsync(compileCommand({ lane: name, requestPath: compileRequest, laneDir: checkout, registerPath: currentRegister, outDir: outputDir, baselinePath, issueBodyPath, packOmission })) } catch (err) {
     refuse(`compiler could not start for ${name}: ${err?.message || String(err)}`, COMPILE_REFUSED)
   }
   if (!result || result.status !== 0) {
@@ -3060,6 +3085,7 @@ function resumeCommand({ batchDir, fences, checkout, parentDir, outDir, tier, va
   else add('tier', runFlags.tier ?? tier)
   add('variant', runFlags.variant ?? variant)
   add('baseline', runFlags.baseline)
+  add('planner-symbols-holdout-fraction', runFlags['planner-symbols-holdout-fraction'])
   for (const spec of Array.isArray(runFlags.adopt) ? runFlags.adopt : (runFlags.adopt ? [runFlags.adopt] : [])) add('adopt', spec)
   for (const flag of [
     'plan-rounds', 'build-rounds', 'review-rounds', 'wait-builder', 'wait-planner',
@@ -3079,6 +3105,7 @@ function resumeCommand({ batchDir, fences, checkout, parentDir, outDir, tier, va
 }
 
 export async function dispatchBatch({ batchDir, fences, checkout, parentDir, outDir, tier, variant, externals, registerPath: registerOverride, runFlags = {}, deps } = {}) {
+  const plannerSymbolsHoldoutFraction = parsePlannerSymbolsHoldoutFraction(runFlags['planner-symbols-holdout-fraction'])
   const d = normalDeps(deps)
   const transport = resolveTransport({ runFlags })
   const lanes = readBatch({ batchDir, deps: d })
@@ -3238,6 +3265,13 @@ export async function dispatchBatch({ batchDir, fences, checkout, parentDir, out
     return next
   }
 
+  const plannerSymbolsArms = new Map()
+  if (plannerSymbolsHoldoutFraction !== null) {
+    for (const lane of waveLanes) {
+      plannerSymbolsArms.set(lane.lane, selectPlannerSymbolsArm(plannerSymbolsHoldoutFraction, d.random))
+    }
+  }
+
   const startCompile = (plan) => {
     const compile = () => compileLane({
       lane: plan.lane,
@@ -3248,6 +3282,7 @@ export async function dispatchBatch({ batchDir, fences, checkout, parentDir, out
       outDir: outputDir,
       fences,
       baselinePath,
+      packOmission: plannerSymbolsArms.get(plan.lane) === 'symbols-omitted' ? 'symbols' : null,
       deps: d,
     })
     return atRisk(plan) ? runSerialised(compile) : compile()
@@ -3299,6 +3334,13 @@ export async function dispatchBatch({ batchDir, fences, checkout, parentDir, out
       seats: seatChain(batchSeats, laneEntry?.seats),
       variant: laneVariant || null,
       brief: item.brief,
+      ...(plannerSymbolsHoldoutFraction === null ? {} : {
+        experiment: {
+          name: PLANNER_SYMBOLS_EXPERIMENT,
+          arm: plannerSymbolsArms.get(item.lane),
+          fraction: plannerSymbolsHoldoutFraction,
+        },
+      }),
     }
     try { writeFileSync(recordPath, JSON.stringify(record, null, 2) + '\n') } catch (err) {
       refuse(`cannot write dispatch record ${recordPath}: ${err?.message || String(err)}`, COMPILE_REFUSED)
@@ -3366,6 +3408,16 @@ export async function dispatchBatch({ batchDir, fences, checkout, parentDir, out
     const crewDir = dirname(item.crewPath)
     const journal = join(crewDir, 'journal.jsonl')
     const runLog = join(crewDir, 'run.log')
+    const arm = plannerSymbolsArms.get(item.lane)
+    const fraction = plannerSymbolsHoldoutFraction
+    if (arm !== undefined) {
+      const row = { at: new Date().toISOString(), event: PLANNER_SYMBOLS_ARM_EVENT, role: 'planner', experiment: PLANNER_SYMBOLS_EXPERIMENT, arm, fraction }
+      try {
+        d.appendFileSync(journal, `${JSON.stringify(row)}\n`)
+      } catch (err) {
+        d.log(`dispatch-batch: experiment arm journal append failed lane=${item.lane}: ${err?.message || String(err)}`)
+      }
+    }
     const adoption = adoptions.get(item.lane) ?? null
     const applied = applyAdoption({ adoption, crewDir, briefPath: item.brief, deps: d })
     const recorded = recordIntent({ intent: item.intent, crewPath: item.crewPath, crewDir, lane: item.lane, deps: d })
@@ -3426,7 +3478,7 @@ export function parseCliArgs(argv) {
   const flags = {}
   const positional = []
   const valueFlags = new Set([
-    'batch', 'fences', 'checkout', 'parent', 'out', 'tier', 'assurance', 'variant', 'wave',
+    'batch', 'fences', 'checkout', 'parent', 'out', 'tier', 'assurance', 'variant', 'wave', 'planner-symbols-holdout-fraction',
     'plan-rounds', 'build-rounds', 'review-rounds', 'wait-builder', 'wait-planner',
     'wait-reviewer', 'wait-lead', 'wait-tech-lead', 'validation-lane', 'suite', 'baseline',
     ...TURN_CEILING_FLAGS,

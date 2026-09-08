@@ -341,6 +341,13 @@ export const MUTATION_ANCHOR_REFUSALS = Object.freeze([
   'correction-green', 'correction-unproven',
 ])
 export const REVIEW_VERDICTS = Object.freeze(['pass', 'changes-needed'])
+export const PLANNER_SYMBOLS_ARMS = Object.freeze(['control', 'symbols-omitted'])
+export const PLANNER_SYMBOLS_SAMPLE_FLOOR = 20
+export const PLANNER_SYMBOLS_BOOTSTRAP_RESAMPLES = 10_000
+export const PLANNER_SYMBOLS_BOOTSTRAP_SEED = 1059
+const PLANNER_SYMBOLS_METRICS = Object.freeze([
+  'turns', 'distinct_files_read', 're_reads', 'first_round_plan_acceptance',
+])
 // A floor on SAMPLE SIZE, reported beside every rate and never enforced: a
 // share over a handful of reviews is not a policy input, and the readout says
 // so rather than leaving the reader to notice the denominator.
@@ -1315,6 +1322,19 @@ export const TABLES = Object.freeze({
     unique: [['adw_id', 'kind', 'at_ms']],
     indexes: [],
   },
+  experiment_arms: {
+    columns: [
+      { name: 'adw_id', decl: 'TEXT' },
+      { name: 'role', decl: 'TEXT' },
+      { name: 'experiment', decl: 'TEXT' },
+      { name: 'arm', decl: 'TEXT' },
+      { name: 'fraction', decl: 'REAL' },
+      { name: 'at_ms', decl: 'INTEGER' },
+      { name: 'created_at', decl: 'TEXT' },
+    ],
+    unique: [['adw_id', 'role', 'experiment']],
+    indexes: [],
+  },
 })
 
 // The closed set of public writer method names — also the closed set of
@@ -1328,6 +1348,7 @@ export const JOURNAL_FACT_KEYS = Object.freeze({
   accept_reask: 'recordAcceptReask',
   rpc_exit_context: 'recordRpcExitContext',
   seat_turn_census: 'recordSeatTurnCensus',
+  experiment_arm: 'recordExperimentArm',
   mutation_anchor_bind: 'recordMutationAnchorBind',
   mutation_anchor_absent: 'recordMutationAnchorAbsence',
 })
@@ -1339,12 +1360,13 @@ export const JOURNAL_FACT_EVENTS = Object.freeze({
   'seat-abort-reask': 'recordSeatReask',
   'plan-adopted': 'recordPlanAdoption',
   'phase-slot-wait': 'recordPhaseSlotWait',
+  'experiment-arm': 'recordExperimentArm',
 })
 
 export const WRITERS = Object.freeze([
   'startSession', 'endSession', 'startPhase', 'endPhase', 'recordEvent',
   'recordEnvelope', 'recordSessionRequest', 'recordRunConfiguration', 'recordRunSeat', 'recordGateResult', 'recordGateDiscrimination',
-  'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'recordCiCycle', 'recordCiDispatch', 'recordEvalCell', 'recordIntakeSweep', 'recordIntakeRefusal', 'recordIntakeBrake', 'recordIntakeDispatch', 'recordSeatTeardown', 'recordSeatReclaim', 'recordProviderFailure', 'recordPlanScope', 'recordSeatReask', 'recordAcceptReask', 'recordRpcExitContext', 'recordSeatTurnCensus', 'recordPlanAdoption', 'recordExternalFence', 'recordMutationAnchorBind', 'recordMutationAnchorAbsence', 'recordPhaseSlotWait', 'startProcess', 'endProcess', 'heartbeat',
+  'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'recordCiCycle', 'recordCiDispatch', 'recordEvalCell', 'recordIntakeSweep', 'recordIntakeRefusal', 'recordIntakeBrake', 'recordIntakeDispatch', 'recordSeatTeardown', 'recordSeatReclaim', 'recordProviderFailure', 'recordPlanScope', 'recordSeatReask', 'recordAcceptReask', 'recordRpcExitContext', 'recordSeatTurnCensus', 'recordPlanAdoption', 'recordExternalFence', 'recordMutationAnchorBind', 'recordMutationAnchorAbsence', 'recordPhaseSlotWait', 'recordExperimentArm', 'startProcess', 'endProcess', 'heartbeat',
   'startAgentSession', 'endAgentSession', 'recordSourceError', 'linkRun',
 ])
 
@@ -1390,6 +1412,7 @@ export const WRITER_MIRROR_TABLES = Object.freeze({
   startProcess: 'processes',
   startAgentSession: 'agent_sessions',
   recordPhaseSlotWait: 'phase_slot_waits',
+  recordExperimentArm: 'experiment_arms',
 })
 
 // Writers whose mirror is an UPDATE of a row another writer created: they add
@@ -1628,6 +1651,32 @@ function epochMsOrNull(value) {
 export function turnRateCell(numerator, denominator) {
   if (denominator < CELL_RATE_FLOOR) return { numerator, denominator, rate: null, measured: false, reason: `unmeasured: denominator ${denominator} is below sample floor ${CELL_RATE_FLOOR}` }
   return { numerator, denominator, rate: numerator / denominator, measured: true, reason: null }
+}
+
+function deterministicRandom(seed) {
+  let state = (Number.isSafeInteger(seed) ? seed : 0) >>> 0
+  return () => {
+    state ^= state << 13
+    state ^= state >>> 17
+    state ^= state << 5
+    return (state >>> 0) / 0x1_0000_0000
+  }
+}
+
+export function bootstrapPercentile(inputValues, { seed = PLANNER_SYMBOLS_BOOTSTRAP_SEED, resamples = PLANNER_SYMBOLS_BOOTSTRAP_RESAMPLES } = {}) {
+  const values = Array.isArray(inputValues)
+    ? inputValues.filter((value) => typeof value === 'number' && Number.isFinite(value))
+    : []
+  if (values.length === 0 || !Number.isSafeInteger(resamples) || resamples < 1) return { low: null, high: null }
+  const random = deterministicRandom(seed)
+  const means = []
+  for (let index = 0; index < resamples; index += 1) {
+    const sample = Array.from({ length: values.length }, () => values[Math.floor(random() * values.length)])
+    means.push(sample.reduce((total, value) => total + value, 0) / sample.length)
+  }
+  means.sort((left, right) => left - right)
+  const nearestRank = (quantile) => means[Math.max(0, Math.ceil(quantile * means.length) - 1)]
+  return { low: nearestRank(0.025), high: nearestRank(0.975) }
 }
 
 function journalReadReason(error) {
@@ -3292,6 +3341,33 @@ export function openLedger({
       // in the authority and unqueryable in the mirror.
       conn.prepare(`INSERT OR IGNORE INTO phase_slot_waits (${sqlCols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
         .run(...cols.map((c) => toBindable(args[c])))
+    })
+    return args
+  }
+
+  function recordExperimentArm(input = {}) {
+    const role = normaliseShortName(input.role, 'recordExperimentArm', 'role')
+    const experiment = normaliseShortName(input.experiment, 'recordExperimentArm', 'experiment')
+    requireEnum(role, ['planner'], 'recordExperimentArm', 'role')
+    requireEnum(experiment, ['planner-symbols'], 'recordExperimentArm', 'experiment')
+    requireEnum(input.arm, PLANNER_SYMBOLS_ARMS, 'recordExperimentArm', 'arm')
+    if (typeof input.fraction !== 'number' || !Number.isFinite(input.fraction) || input.fraction < 0 || input.fraction > 1) {
+      refuse('recordExperimentArm: field \'fraction\' must be a finite number in [0,1]')
+    }
+    const args = redact({
+      adw_id: input.adw_id ?? null,
+      role,
+      experiment,
+      arm: input.arm,
+      fraction: input.fraction,
+      at_ms: epochMsOrNull(input.at_ms),
+      created_at: isoMs(input.created_at ?? now()),
+    }, stats)
+    appendJsonl('recordExperimentArm', args)
+    mirror((conn) => {
+      const cols = tableColumnNames('experiment_arms')
+      conn.prepare(`INSERT OR IGNORE INTO experiment_arms (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
+        .run(...cols.map((column) => toBindable(args[column])))
     })
     return args
   }
@@ -4975,6 +5051,134 @@ export function openLedger({
     }
   }
 
+  function plannerSymbolsHoldout({ since = null, until = null } = {}) {
+    const sinceMs = since === null || since === undefined ? null : epochMsOrNull(since)
+    const untilMs = until === null || until === undefined ? null : epochMsOrNull(until)
+    const inWindow = (row) => {
+      const atMs = Number.isFinite(row?.at_ms) ? row.at_ms : epochMsOrNull(row?.created_at)
+      return (sinceMs === null || (Number.isFinite(atMs) && atMs >= sinceMs))
+        && (untilMs === null || (Number.isFinite(atMs) && atMs < untilMs))
+    }
+    const allArms = queryRows('SELECT * FROM experiment_arms ORDER BY created_at, adw_id')
+    const arms = allArms.filter(inWindow)
+    const adwIds = [...new Set(arms.map((row) => row.adw_id).filter((value) => typeof value === 'string' && value.trim() !== ''))]
+    const marks = adwIds.map(() => '?').join(',')
+    const censusRows = adwIds.length === 0 ? [] : queryRows(`
+      SELECT census.adw_id, census.role, census.turns, census.distinct_files_read, census.re_reads
+      FROM seat_turn_census census
+      JOIN experiment_arms arms
+        ON census.adw_id = arms.adw_id
+       AND census.role = arms.role
+      WHERE arms.adw_id IN (${marks})
+    `, adwIds)
+    const reviewRows = adwIds.length === 0 ? [] : queryRows(`
+      SELECT adw_id, verdict, created_at, id
+      FROM review_outcomes
+      WHERE adw_id IN (${marks})
+      ORDER BY adw_id, created_at, id
+    `, adwIds)
+    const sessionRows = adwIds.length === 0 ? [] : queryRows(`
+      SELECT adw_id, terminal_reason
+      FROM sessions
+      WHERE adw_id IN (${marks})
+    `, adwIds)
+    const censusByRun = new Map()
+    for (const row of censusRows) {
+      if (!censusByRun.has(row.adw_id)) censusByRun.set(row.adw_id, [])
+      censusByRun.get(row.adw_id).push(row)
+    }
+    const firstReviewByRun = new Map()
+    for (const row of reviewRows) {
+      if (!firstReviewByRun.has(row.adw_id)) firstReviewByRun.set(row.adw_id, row)
+    }
+    const sessionByRun = new Map(sessionRows.map((row) => [row.adw_id, row]))
+    const lanes = arms.map((arm) => {
+      const census = censusByRun.get(arm.adw_id) || []
+      const sumMetric = (metric) => {
+        const values = census
+          .map((row) => row[metric])
+          .filter((value) => typeof value === 'number' && Number.isFinite(value))
+        return values.length === 0 ? null : values.reduce((total, value) => total + value, 0)
+      }
+      const firstReview = firstReviewByRun.get(arm.adw_id) ?? null
+      const session = sessionByRun.get(arm.adw_id) ?? null
+      const exclusionReason = firstReview === null
+        ? (typeof session?.terminal_reason === 'string' && session.terminal_reason.trim() !== ''
+          ? session.terminal_reason
+          : 'no-review-outcome-recorded')
+        : null
+      return {
+        arm: arm.arm,
+        adw_id: arm.adw_id,
+        turns: sumMetric('turns'),
+        distinct_files_read: sumMetric('distinct_files_read'),
+        re_reads: sumMetric('re_reads'),
+        first_review: firstReview,
+        first_round_plan_acceptance: firstReview === null ? null : (firstReview.verdict === 'pass' ? 1 : 0),
+        exclusion_reason: exclusionReason,
+      }
+    })
+    const reviewed = lanes.filter((lane) => lane.first_review !== null)
+    const rows = []
+    for (const arm of PLANNER_SYMBOLS_ARMS) {
+      for (const metric of PLANNER_SYMBOLS_METRICS) {
+        const source = metric === 'first_round_plan_acceptance'
+          ? reviewed
+          : lanes
+        const values = source
+          .filter((lane) => lane.arm === arm && (metric === 'first_round_plan_acceptance' || lane[metric] !== null))
+          .map((lane) => lane[metric])
+        const base = { arm, metric, n: values.length }
+        if (values.length < PLANNER_SYMBOLS_SAMPLE_FLOOR) {
+          rows.push({ ...base, status: 'unmeasured', floor: PLANNER_SYMBOLS_SAMPLE_FLOOR })
+          continue
+        }
+        const estimate = values.reduce((total, value) => total + value, 0) / values.length
+        const interval = bootstrapPercentile(values, {
+          seed: PLANNER_SYMBOLS_BOOTSTRAP_SEED,
+          resamples: PLANNER_SYMBOLS_BOOTSTRAP_RESAMPLES,
+        })
+        rows.push({
+          ...base,
+          status: 'measured',
+          ...(metric === 'first_round_plan_acceptance' ? { proportion: estimate } : { mean: estimate }),
+          interval: { ...interval, confidence: 0.95 },
+        })
+      }
+    }
+    const grouped = new Map()
+    for (const lane of lanes.filter((candidate) => candidate.first_review === null)) {
+      const key = `${lane.arm}\u0000${lane.exclusion_reason}`
+      grouped.set(key, {
+        arm: lane.arm,
+        reason: lane['exclusion_reason'],
+        count: (grouped.get(key)?.count ?? 0) + 1,
+      })
+    }
+    const excluded_from_first_round = []
+    for (const arm of [...PLANNER_SYMBOLS_ARMS]) {
+      for (const entry of grouped.values()) {
+        if (entry.arm !== arm) continue
+        const lane = { arm: entry.arm, exclusion_reason: entry.reason, exclusion_count: entry.count }
+        excluded_from_first_round.push({ arm: lane.arm, reason: lane.exclusion_reason, count: lane.exclusion_count })
+      }
+    }
+    return {
+      experiment: 'planner-symbols',
+      arms: [...PLANNER_SYMBOLS_ARMS],
+      metrics: [...PLANNER_SYMBOLS_METRICS],
+      floor: PLANNER_SYMBOLS_SAMPLE_FLOOR,
+      bootstrap: {
+        method: 'percentile-bootstrap',
+        confidence: 0.95,
+        resamples: PLANNER_SYMBOLS_BOOTSTRAP_RESAMPLES,
+        seed: PLANNER_SYMBOLS_BOOTSTRAP_SEED,
+      },
+      rows,
+      excluded_from_first_round,
+    }
+  }
+
   function eligibleTasks() {
     return queryRows(`
       SELECT s.adw_id, s.task_slug,
@@ -5379,10 +5583,10 @@ export function openLedger({
   const handle = {
     get degraded() { return degraded },
     startSession, endSession, recordSessionRequest, recordRunConfiguration, recordRunSeat, startPhase, endPhase, recordEvent, recordEnvelope,
-    recordGateResult, recordGateDiscrimination, recordMutationAnchorBind, recordMutationAnchorAbsence, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordEvalCell, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown, recordSeatReclaim, recordProviderFailure, recordPlanScope, recordSeatReask, recordAcceptReask, recordRpcExitContext, recordSeatTurnCensus, recordPlanAdoption, recordExternalFence, recordPhaseSlotWait,
+    recordGateResult, recordGateDiscrimination, recordMutationAnchorBind, recordMutationAnchorAbsence, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordEvalCell, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown, recordSeatReclaim, recordProviderFailure, recordPlanScope, recordSeatReask, recordAcceptReask, recordRpcExitContext, recordSeatTurnCensus, recordPlanAdoption, recordExternalFence, recordPhaseSlotWait, recordExperimentArm,
     startProcess, endProcess, heartbeat, startAgentSession, endAgentSession,
     recordSourceError, linkRun,
-    listSessions, listEvents, getSession, phantomSessions, dumpTable, tableNames, columnNames, sessionsFiltered, runsStartedWithin, phasesFor, runConfigurationsFor, runSeatsFor, agentEventsFor, agentSessionsFor, gateDiscriminationsFor, gateResultsFor, reviewOutcomesFor, acceptDecisionsFor, supportsJson1, eventsPage, maxEventId, cellFailureRowsFor, unattributableCellFailures, seatTeardownRowsFor, intakePicks, intakeSweepTotals, intakeCandidateRefusals, intakeCandidatePicks, agentSessionTokenTotals, gateReviewGap, cellFailures, cellReviews, evalCells, cellUsage, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, escalations, endedRuns, escalationWindow, seatReclaims, journalFacts, turnEconomy, turnBreakdown, eligibleTasks, runSet, transportsFor, taskReadout, jsonlDrift,
+    listSessions, listEvents, getSession, phantomSessions, dumpTable, tableNames, columnNames, sessionsFiltered, runsStartedWithin, phasesFor, runConfigurationsFor, runSeatsFor, agentEventsFor, agentSessionsFor, gateDiscriminationsFor, gateResultsFor, reviewOutcomesFor, acceptDecisionsFor, supportsJson1, eventsPage, maxEventId, cellFailureRowsFor, unattributableCellFailures, seatTeardownRowsFor, intakePicks, intakeSweepTotals, intakeCandidateRefusals, intakeCandidatePicks, agentSessionTokenTotals, gateReviewGap, cellFailures, cellReviews, evalCells, cellUsage, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, escalations, endedRuns, escalationWindow, seatReclaims, journalFacts, plannerSymbolsHoldout, turnEconomy, turnBreakdown, eligibleTasks, runSet, transportsFor, taskReadout, jsonlDrift,
     stats: statsFn,
     captureMirrorErrors,
     readConnection,
@@ -5550,6 +5754,18 @@ function journalFactArgs(writer, row, adwId) {
       ...(createdAt === undefined ? {} : { created_at: createdAt }),
     }
   }
+  if (writer === JOURNAL_FACT_KEYS.experiment_arm && Object.prototype.hasOwnProperty.call(source, 'experiment_arm')) {
+    const arm = value('experiment_arm')
+    return {
+      adw_id: rowAdwId,
+      role: arm.role ?? source.role,
+      experiment: arm.experiment,
+      arm: arm.arm,
+      fraction: arm.fraction,
+      at_ms: atMs,
+      ...(createdAt === undefined ? {} : { created_at: createdAt }),
+    }
+  }
   if (writer === JOURNAL_FACT_KEYS.seat_turn_census) {
     const census = value('seat_turn_census')
     return {
@@ -5614,6 +5830,17 @@ function journalFactArgs(writer, row, adwId) {
       ceiling_s: source.ceiling_s ?? null,
       from_run_id: source.from_run_id ?? null,
       to_run_id: source.to_run_id ?? null,
+      at_ms: atMs,
+      ...(createdAt === undefined ? {} : { created_at: createdAt }),
+    }
+  }
+  if (writer === JOURNAL_FACT_EVENTS['experiment-arm']) {
+    return {
+      adw_id: rowAdwId,
+      role: source.role,
+      experiment: source.experiment,
+      arm: source.arm,
+      fraction: source.fraction,
       at_ms: atMs,
       ...(createdAt === undefined ? {} : { created_at: createdAt }),
     }
@@ -6086,6 +6313,7 @@ const VERB_FLAGS = Object.freeze({
   'ci-cycles': new Set(['since', 'until']),
   'intake-sweeps': new Set(['since', 'until']),
   'journal-facts': new Set(['since', 'until']),
+  'planner-symbols-holdout': new Set(['since', 'until']),
   turns: new Set(['since', 'until', 'adw-id', 'crew-root']),
   task: new Set([]),
   request: new Set(['from-brief']),
@@ -7304,6 +7532,31 @@ export function main(argv) {
         since,
         until,
         ...facts,
+      })}\n`)
+      return 0
+    }
+
+    if (verb === 'planner-symbols-holdout') {
+      if (positional.length > 0) refuse('planner-symbols-holdout: takes no positional arguments')
+      const hasSince = Object.prototype.hasOwnProperty.call(flags, 'since')
+      const hasUntil = Object.prototype.hasOwnProperty.call(flags, 'until')
+      const since = hasSince ? windowBound(flags.since, 'since', 'planner-symbols-holdout') : null
+      const until = hasUntil ? windowBound(flags.until, 'until', 'planner-symbols-holdout') : null
+      if (until != null && since != null && until <= since) refuse('planner-symbols-holdout: --until must be later than --since')
+      const report = ledger.plannerSymbolsHoldout({ since, until })
+      if (ledger.stats().degraded) refuse('planner-symbols-holdout: the ledger mirror is degraded — this window is unanswerable, not empty')
+      stdout.write(`${JSON.stringify({
+        schema: 1,
+        question: 'Does omitting the planner symbols sidecar change lane cost or first-round plan acceptance?',
+        definition: {
+          unit: 'one dispatched lane, aggregated from its measured planner census rows',
+          first_round_plan_acceptance: 'the verdict of the chronologically first review outcome over the whole run; runs without a review are excluded from this denominator',
+          excluded_from_first_round: 'lanes with no review outcome, grouped by the session terminal_reason or no-review-outcome-recorded; exclusions are never zeroes',
+          absent: 'unmeasured cells have n below the sample floor and no estimate or interval',
+        },
+        since,
+        until,
+        ...report,
       })}\n`)
       return 0
     }

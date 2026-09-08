@@ -268,6 +268,38 @@ function reachFixture(name, { extraDirect = 0, files = {} } = {}) {
   return checkout
 }
 
+function twoOwnerReachFixture(name, { importer = false } = {}) {
+  const ownerA = ['lib', 'owner-a.mjs'].join('/')
+  const ownerB = ['lib', 'owner-b.mjs'].join('/')
+  const ownerBPath = ['..', 'lib', 'owner-b.mjs'].join('/')
+  const mixedTest = [
+    'const seenAlpha = "alphaName"',
+    'const seenBeta = "betaName"',
+    `const reachedPath = ${JSON.stringify(ownerBPath)}`,
+    'void seenAlpha',
+    'void seenBeta',
+    'void reachedPath',
+    '',
+  ].join('\n')
+  const files = {
+    [ownerA]: 'export const alphaName = 1\nexport const betaName = 2\n',
+    [ownerB]: 'export const bravoName = 3\n',
+    'test/two-owner.test.mjs': mixedTest,
+  }
+  if (importer) {
+    files['test/two-owner-import.test.mjs'] = [
+      `import { alphaName } from ${JSON.stringify(['..', 'lib', 'owner-a.mjs'].join('/'))}`,
+      'const seenBeta = "betaName"',
+      `const reachedPath = ${JSON.stringify(ownerBPath)}`,
+      'void alphaName',
+      'void seenBeta',
+      'void reachedPath',
+      '',
+    ].join('\n')
+  }
+  return reachFixture(`two-owner-${name}`, { files })
+}
+
 function crewFixture({ home, repoDir, laneDir, lane = laneDir, fence = [], checkout, malformed = false, archived = false, stamp = '2026-08-01T00-00-00Z', at = Date.now() }) {
   const directory = archived
     ? join(home, '.crew', repoDir, `${laneDir}.archive-${stamp}`)
@@ -757,8 +789,8 @@ test('A1', async () => {
   const directSummaries = summaryLines(directLogs)
   assert.equal(directSummaries.length, fixture.lanes.length)
   assert.deepEqual(directSummaries.map((line) => line.match(/lane=([^ ]+)/)?.[1]), ['lane-a', 'lane-b'])
-  assert.match(directSummaries[0], /refusals=none anchor-pin=1 · citation-carrier=1 · test-reach=2 \(0 actionable\) · cross-batch-unknown=1/)
-  assert.match(directSummaries[1], /refusals=none anchor-pin=0 · citation-carrier=0 · test-reach=2 \(0 actionable\) · cross-batch-unknown=1/)
+  assert.match(directSummaries[0], /refusals=none anchor-pin=1 · citation-carrier=1 · test-reach=3 · actionable=0 · collapsed=1 · cross-batch-unknown=1/)
+  assert.match(directSummaries[1], /refusals=none anchor-pin=0 · citation-carrier=0 · test-reach=3 · actionable=0 · collapsed=1 · cross-batch-unknown=1/)
   for (const line of directSummaries) {
     assert.ok(line.includes(join(outDir, FENCE_REPORT_FILE)))
     assert.ok(line.includes('doctrine=skills/crew-dispatch/references/batch.md'))
@@ -819,7 +851,7 @@ test('B1', () => {
   assert.ok(expectedRows.some((row) => row.test === 'crew/crew.test.mjs' && row.hops === 1))
   assert.ok(expectedRows.some((row) => row.test === 'test/twohop.test.mjs' && row.hops === 2))
   const summary = summaryLines(logs)[0]
-  assert.match(summary, /test-reach=2 \(1 actionable\)/)
+  assert.match(summary, /test-reach=3 · actionable=2 · collapsed=3/)
   assert.equal(persisted.lanes[0].test_reach.length, expectedRows.length)
 })
 
@@ -913,22 +945,215 @@ test('allow_test_reach requires a why for every test', () => {
   assert.deepEqual(lane[TEST_REACH_OVERRIDE_KEY], [{ file: 'test/direct.test.mjs', why: 'covered by a separate suite' }])
 })
 
-test('path reach preserves import and symbol rows byte for byte', () => {
+test('path reach preserves import, symbol, and path rows byte for byte', () => {
   const checkout = reachFixture('path-preserves', {
     files: {
       'test/import-and-path.test.mjs': "import { widgetShape } from '../lib/widget.mjs'\\nconst path = '../lib/widget.mjs'\\nwidgetShape()\\nvoid path\\n",
       'test/symbol-and-path.test.mjs': "const path = '../lib/widget.mjs'\\nconst seen = 'widgetShape'\\nvoid path\\nif (!seen) throw new Error('x')\\n",
     },
   })
+  const droppedRows = []
   const rows = testsOutsideFence({
-    surface: ['lib/widget.mjs'], fenceFiles: [], reach: collectTestReach({ checkout }),
+    surface: ['lib/widget.mjs'], fenceFiles: [], reach: collectTestReach({ checkout }), droppedRows,
   })
-  assert.deepEqual(rows.find((row) => row.test === 'test/import-and-path.test.mjs'), {
+  assert.deepEqual(rows.find((row) => row.test === 'test/import-and-path.test.mjs' && row.how === 'import'), {
     test: 'test/import-and-path.test.mjs', file: 'lib/widget.mjs', hops: 1, how: 'import', symbols: ['widgetShape'],
   })
-  assert.deepEqual(rows.find((row) => row.test === 'test/symbol-and-path.test.mjs'), {
+  assert.deepEqual(rows.find((row) => row.test === 'test/import-and-path.test.mjs' && row.how === 'path'), {
+    test: 'test/import-and-path.test.mjs', file: 'lib/widget.mjs', hops: null, how: 'path', symbols: [],
+  })
+  assert.deepEqual(rows.find((row) => row.test === 'test/symbol-and-path.test.mjs' && row.how === 'symbol'), {
     test: 'test/symbol-and-path.test.mjs', file: 'lib/widget.mjs', hops: null, how: 'symbol', symbols: ['widgetShape'],
   })
+  assert.deepEqual(rows.find((row) => row.test === 'test/symbol-and-path.test.mjs' && row.how === 'path'), {
+    test: 'test/symbol-and-path.test.mjs', file: 'lib/widget.mjs', hops: null, how: 'path', symbols: [],
+  })
+  assert.deepEqual(droppedRows.filter((row) => row.test === 'test/import-and-path.test.mjs'), [{
+    test: 'test/import-and-path.test.mjs', file: 'lib/widget.mjs', hops: null, how: 'symbol', symbols: ['widgetShape'],
+  }])
+})
+
+test('relative import specifiers are path refusals and doctrine tells operators', () => {
+  const surface = ['lib', 'widget.mjs'].join('/')
+  const testFile = ['test', 'import-specifier.test.mjs'].join('/')
+  const relativeSpecifier = ['..', 'lib', 'widget.mjs'].join('/')
+  const checkout = reachFixture('relative-import-specifier', {
+    files: {
+      [testFile]: [
+        `import { notExportedHere } from ${JSON.stringify(relativeSpecifier)}`,
+        'notExportedHere()',
+        '',
+      ].join('\n'),
+    },
+  })
+  const allowDirect = [{ file: 'test/direct.test.mjs', why: 'the default direct fixture is outside this focused check' }]
+  const rejected = reachCheck({ checkout, fenceFiles: [surface], surface: [surface], allow: allowDirect })
+  assert.equal(rejected.error?.reason, 'test-reach-unfenced')
+  assert.ok(rejected.error?.message.includes(`${testFile} reaches ${surface} through a static path literal (which includes its own import specifier; path-only, how=path)`))
+
+  const rows = testsOutsideFence({ surface: [surface], fenceFiles: [], reach: collectTestReach({ checkout }) })
+    .filter((row) => row.test === testFile)
+  assert.deepEqual(rows.find((row) => row.how === 'import'), {
+    test: testFile, file: surface, hops: 1, how: 'import', symbols: [],
+  })
+  assert.deepEqual(rows.find((row) => row.how === 'path'), {
+    test: testFile, file: surface, hops: null, how: 'path', symbols: [],
+  })
+  assert.deepEqual(reachRefusalRows({ rows, surfaceExports: ['widgetShape'] }), [{
+    test: testFile, file: surface, symbols: [],
+  }])
+
+  const admitted = reachCheck({
+    checkout,
+    fenceFiles: [surface],
+    surface: [surface],
+    allow: [...allowDirect, { file: testFile, why: 'the current refusal list names the import-specifier path fact' }],
+  })
+  assert.equal(admitted.error, null)
+  const override = admitted.logs.find((line) => line.startsWith(TEST_REACH_OVERRIDE_PREFIX))
+  assert.ok(override?.includes(`${testFile} reaches ${surface} through a static path literal (which includes its own import specifier; path-only, how=path)`))
+
+  const source = readFileSync(join(repoRoot, 'scripts', 'factory', 'dispatch-batch.mjs'), 'utf8')
+  assert.ok(source.includes("Every `how === 'path'` row is an\n// unconditional `test-reach-unfenced` refusal."))
+  assert.ok(source.includes("a test's own relative import specifier for a fenced file emits"))
+  assert.equal(source.includes('Every other row stays a warning.'), false)
+  assert.ok(source.includes('Every other import/symbol row\n// stays a warning.'))
+
+  const doctrine = readFileSync(join(repoRoot, 'skills', 'crew-dispatch', 'references', 'batch.md'), 'utf8')
+  assert.ok(doctrine.includes('a test whose own relative import specifier names a fenced file now yields a `path` row and is a hard `test-reach-unfenced` refusal'))
+  assert.ok(doctrine.includes('Compile `allow_test_reach` from the CURRENT `dispatch-batch` run\'s refusal list, not from prior experience of the surface.'))
+  for (const measurement of [
+    '`crew/crew.mjs` 6 -> 15 refused tests',
+    '`crew/drive.mjs` 15 -> 17',
+    '`scripts/factory/dispatch-batch.mjs` 3 -> 4',
+    '`crew/adapters/adapter-pi.mjs` (8 -> 8)',
+    '`crew/host-load.mjs` (1 -> 1)',
+    '`crew/roster.json` (5 -> 5) were unchanged',
+    'measured over those six fence surfaces on this tree',
+  ]) assert.ok(doctrine.includes(measurement), `doctrine omitted ${measurement}`)
+})
+
+test('two-file mixed reach keeps an actionable path fact', () => {
+  const checkout = twoOwnerReachFixture('mixed')
+  const ownerA = ['lib', 'owner-a.mjs'].join('/')
+  const ownerB = ['lib', 'owner-b.mjs'].join('/')
+  const testFile = ['test', 'two-owner.test.mjs'].join('/')
+  const rows = testsOutsideFence({
+    surface: [ownerA, ownerB], fenceFiles: [], reach: collectTestReach({ checkout }),
+  }).filter((row) => row.test === testFile)
+  assert.deepEqual(rows, [
+    { test: testFile, file: ownerA, hops: null, how: 'symbol', symbols: ['alphaName', 'betaName'] },
+    { test: testFile, file: ownerB, hops: null, how: 'path', symbols: [] },
+  ])
+  assert.deepEqual(reachRefusalRows({ rows, surfaceExports: ['alphaName', 'betaName', 'bravoName'] }), [{
+    test: testFile, file: ownerB, symbols: [],
+  }])
+})
+
+test('the path fact names the file reached by path', () => {
+  const checkout = twoOwnerReachFixture('path-owner')
+  const ownerB = ['lib', 'owner-b.mjs'].join('/')
+  const testFile = ['test', 'two-owner.test.mjs'].join('/')
+  const row = testsOutsideFence({
+    surface: [ ['lib', 'owner-a.mjs'].join('/'), ownerB ], fenceFiles: [], reach: collectTestReach({ checkout }),
+  }).find((candidate) => candidate.test === testFile && candidate.how === 'path')
+  assert.deepEqual(row, { test: testFile, file: ownerB, hops: null, how: 'path', symbols: [] })
+})
+
+test('symbol-only reach remains non-actionable', () => {
+  const checkout = twoOwnerReachFixture('symbol-only')
+  const ownerA = ['lib', 'owner-a.mjs'].join('/')
+  const testFile = ['test', 'two-owner.test.mjs'].join('/')
+  const row = testsOutsideFence({
+    surface: [ownerA], fenceFiles: [], reach: collectTestReach({ checkout }),
+  }).find((candidate) => candidate.test === testFile && candidate.how === 'symbol')
+  assert.deepEqual(row, { test: testFile, file: ownerA, hops: null, how: 'symbol', symbols: ['alphaName', 'betaName'] })
+  assert.deepEqual(reachRefusalRows({ rows: [row], surfaceExports: ['alphaName', 'betaName'] }), [])
+})
+
+test('the warning report retains both cross-file facts', () => {
+  const checkout = twoOwnerReachFixture('report')
+  const ownerA = ['lib', 'owner-a.mjs'].join('/')
+  const ownerB = ['lib', 'owner-b.mjs'].join('/')
+  const testFile = ['test', 'two-owner.test.mjs'].join('/')
+  const surface = [ownerA, ownerB]
+  const outDir = join(checkout, 'warnings')
+  checkFences({
+    fences: [entry('lane-a', surface)],
+    lanes: [{ lane: 'lane-a', where: surface, allow_test_reach: fixtureTests(checkout) }],
+    checkout,
+    outDir,
+    deps: { home: root, log: () => {} },
+  })
+  const report = JSON.parse(readFileSync(join(outDir, FENCE_REPORT_FILE), 'utf8'))
+  assert.deepEqual(report.lanes[0].test_reach.filter((row) => row.test === testFile), [
+    { test: testFile, file: ownerA, hops: null, how: 'symbol', symbols: ['alphaName', 'betaName'] },
+    { test: testFile, file: ownerB, hops: null, how: 'path', symbols: [] },
+  ])
+  assert.ok(Array.isArray(report.lanes[0].test_reach_dropped))
+})
+
+test('the report names every collapsed reach row', () => {
+  const checkout = twoOwnerReachFixture('dropped', { importer: true })
+  const ownerA = ['lib', 'owner-a.mjs'].join('/')
+  const importer = ['test', 'two-owner-import.test.mjs'].join('/')
+  const mixed = ['test', 'two-owner.test.mjs'].join('/')
+  const droppedRows = []
+  const rows = testsOutsideFence({
+    surface: [ownerA], fenceFiles: [], reach: collectTestReach({ checkout }), droppedRows,
+  })
+  assert.ok(rows.some((row) => row.test === importer && row.how === 'import'))
+  assert.deepEqual(droppedRows, [
+    { test: importer, file: ownerA, hops: null, how: 'symbol', symbols: ['alphaName'] },
+    { test: importer, file: ownerA, hops: null, how: 'symbol', symbols: ['betaName'] },
+    { test: mixed, file: ownerA, hops: null, how: 'symbol', symbols: ['betaName'] },
+  ])
+
+  const outDir = join(checkout, 'dropped-report')
+  checkFences({
+    fences: [entry('lane-a', [ownerA])],
+    lanes: [{ lane: 'lane-a', where: [ownerA], allow_test_reach: fixtureTests(checkout) }],
+    checkout,
+    outDir,
+    deps: { home: root, log: () => {} },
+  })
+  const report = JSON.parse(readFileSync(join(outDir, FENCE_REPORT_FILE), 'utf8'))
+  assert.deepEqual(report.lanes[0].test_reach_dropped, droppedRows)
+  assert.equal(report.lanes[0].test_reach_dropped.length, 3)
+  for (const row of report.lanes[0].test_reach_dropped) {
+    assert.deepEqual(Object.keys(row).sort(), ['file', 'hops', 'how', 'symbols', 'test'])
+  }
+})
+
+test('summary separates row actionable and collapsed counts', () => {
+  const checkout = twoOwnerReachFixture('summary')
+  const ownerA = ['lib', 'owner-a.mjs'].join('/')
+  const ownerB = ['lib', 'owner-b.mjs'].join('/')
+  const logs = []
+  const outDir = join(checkout, 'summary')
+  assert.throws(() => checkFences({
+    fences: [entry('lane-a', [ownerA, ownerB])],
+    lanes: [{ lane: 'lane-a', where: [ownerA, ownerB] }],
+    checkout,
+    outDir,
+    deps: { home: root, log: (line) => logs.push(String(line)) },
+  }), (error) => error instanceof BatchRefusal && error.reason === 'test-reach-unfenced')
+  assert.ok(logs.some((line) => line.includes('test-reach=2 · actionable=1 · collapsed=1')))
+  const report = JSON.parse(readFileSync(join(outDir, FENCE_REPORT_FILE), 'utf8'))
+  assert.equal(report.lanes[0].test_reach.length, 2)
+  assert.equal(report.lanes[0].test_reach_dropped.length, 1)
+})
+
+test('the ledger floor path reach is actionable on the b542 surface', () => {
+  const ledger = ['scripts', 'factory', 'ledger.mjs'].join('/')
+  const ledgerTest = ['test', 'factory-ledger.test.mjs'].join('/')
+  const floorTest = ['test', 'factory-ledger-floor.test.mjs'].join('/')
+  const reach = collectTestReach({ checkout: repoRoot })
+  const rows = testsOutsideFence({ surface: [ledger, ledgerTest], fenceFiles: [ledger, ledgerTest], reach })
+  const floorPath = rows.find((row) => row.test === floorTest && row.file === ledgerTest && row.how === 'path')
+  assert.deepEqual(floorPath, { test: floorTest, file: ledgerTest, hops: null, how: 'path', symbols: [] })
+  const refusals = reachRefusalRows({ rows, surfaceExports: surfaceExportsOf({ surface: [ledger, ledgerTest], reach }) })
+  assert.ok(refusals.some((row) => row.test === floorTest && row.file === ledgerTest && row.symbols.length === 0))
 })
 
 // The 50, 25, and 27 figures are functions of every tracked *.test.mjs file in the repo, not of this test. If this guard reddens in your lane, you have added or removed an apostrophe inside a comment in some tracked test file and flipped its parity; the fix is to RE-MEASURE and update skills/crew-dispatch/references/batch.md rather than hunt a scanner regression.
@@ -989,7 +1214,7 @@ test('E1', async () => {
   const before = Buffer.byteLength(retained.join('\n'), 'utf8')
   const after = Buffer.byteLength(summaries.join('\n'), 'utf8')
   const report = JSON.parse(readFileSync(join(outDir, FENCE_REPORT_FILE), 'utf8'))
-  assert.equal(reportRowCount(report), 7)
+  assert.equal(reportRowCount(report), 9)
   assert.ok(after < before)
   assert.ok(after * 2 < before)
 
@@ -1017,8 +1242,8 @@ test('checkFences reports direct and two-hop test reach without refusing', () =>
   const checkout = reachFixture('depth')
   const { report, warning, rows } = reachReport(checkout)
   assert.ok(warning)
-  assert.equal(rows.find((row) => row.test === 'test/direct.test.mjs')?.hops, 1)
-  assert.equal(rows.find((row) => row.test === 'test/twohop.test.mjs')?.hops, 2)
+  assert.equal(rows.find((row) => row.test === 'test/direct.test.mjs' && row.how === 'import')?.hops, 1)
+  assert.equal(rows.find((row) => row.test === 'test/twohop.test.mjs' && row.how === 'import')?.hops, 2)
   assert.equal(rows.some((row) => row.test === 'test/threehop.test.mjs'), false)
   assert.equal(TEST_REACH_DEPTH, 2)
   assert.equal(warning.text.includes('test/twohop.test.mjs'), true)
@@ -1077,11 +1302,15 @@ test('test reach still only warns for a symbol-only row, a two-hop row, and an i
   assert.equal(reachRefusalRows({ rows: [twoHopRow], surfaceExports: ['widgetShape'] }).length, 0)
 
   const noOverlapCheckout = reachFixture('warn-no-overlap', {
-    files: { 'test/no-overlap.test.mjs': "import { notExportedHere } from '../lib/widget.mjs'\nnotExportedHere()\n" },
+    files: { 'test/no-overlap.test.mjs': "import { notExportedHere } from '../lib/widget'\nnotExportedHere()\n" },
   })
-  const noOverlapRun = reachCheck({ checkout: noOverlapCheckout, fenceFiles: ['lib/widget.mjs'], surface: ['lib/widget.mjs'], allow: [{ file: 'test/direct.test.mjs', why: 'direct fixture is intentionally outside the fence' }] })
+  const noOverlapRun = reachCheck({ checkout: noOverlapCheckout, fenceFiles: ['lib/widget.mjs'], surface: ['lib/widget.mjs'], allow: [
+    { file: 'test/direct.test.mjs', why: 'direct fixture is intentionally outside the fence' },
+  ] })
   assert.equal(noOverlapRun.error, null)
-  const noOverlapRow = noOverlapRun.report.warnings.find((row) => row.kind === 'test-reach').reach.find((row) => row.test === 'test/no-overlap.test.mjs')
+  const noOverlapRows = noOverlapRun.report.warnings.find((row) => row.kind === 'test-reach').reach.filter((row) => row.test === 'test/no-overlap.test.mjs')
+  const noOverlapRow = noOverlapRows.find((row) => row.how === 'import')
+  assert.equal(noOverlapRows.some((row) => row.how === 'path'), false)
   assert.deepEqual(noOverlapRow.symbols, [])
   assert.equal(reachRefusalRows({ rows: [noOverlapRow], surfaceExports: ['widgetShape'] }).length, 0)
 })
@@ -1117,11 +1346,11 @@ test('a refused row is never first announced as not a refusal, and the rest stil
   assert.equal(mixedRun.error?.reason, 'test-reach-unfenced')
   const warningText = mixedRun.logs.find((line) => line.startsWith('dispatch-batch: WARNING-SUMMARY '))
   assert.ok(warningText)
-  assert.match(warningText, /test-reach=2 \(1 actionable\)/)
+  assert.match(warningText, /test-reach=3 · actionable=2 · collapsed=4/)
   assert.equal(warningText.includes('test/twohop.test.mjs'), false)
   assert.equal(warningText.includes('crew/crew.test.mjs'), false)
   const persisted = JSON.parse(readFileSync(join(outDir, FENCE_REPORT_FILE), 'utf8'))
-  assert.deepEqual(persisted.lanes[0].test_reach.map((row) => row.test).sort(), ['crew/crew.test.mjs', 'test/twohop.test.mjs'])
+  assert.deepEqual(persisted.lanes[0].test_reach.map((row) => row.test).sort(), ['crew/crew.test.mjs', 'crew/crew.test.mjs', 'test/twohop.test.mjs'])
 })
 
 test('test-reach-unfenced precedes the register-superset refusal', () => {
@@ -1158,9 +1387,12 @@ test('allow_test_reach admits a reaching test and the decision is logged and per
   for (const token of ['crew/crew.test.mjs', 'crew/adapters/adapter-pi.mjs', 'grantsFor', 'the test is covered by a higher-level fixture']) assert.equal(line.includes(token), true)
   assert.ok(admitted.report.warnings.find((row) => row.kind === 'test-reach-override'))
   const persisted = JSON.parse(readFileSync(join(outDir, FENCE_REPORT_FILE), 'utf8'))
-  assert.equal(persisted.lanes[0].test_reach_overrides.length, 1)
-  assert.deepEqual(persisted.lanes[0].test_reach_overrides[0], {
+  assert.equal(persisted.lanes[0].test_reach_overrides.length, 2)
+  assert.deepEqual(persisted.lanes[0].test_reach_overrides.find((row) => row.symbols.length > 0), {
     test: 'crew/crew.test.mjs', file: 'crew/adapters/adapter-pi.mjs', symbols: ['assertGrantsBacked', 'grantsFor', 'loadCapabilities'], why: 'the test is covered by a higher-level fixture',
+  })
+  assert.deepEqual(persisted.lanes[0].test_reach_overrides.find((row) => row.symbols.length === 0), {
+    test: 'crew/crew.test.mjs', file: 'crew/adapters/adapter-pi.mjs', symbols: [], why: 'the test is covered by a higher-level fixture',
   })
 })
 
@@ -1180,7 +1412,7 @@ test('a batch with no reaching tests writes the fence report it wrote before', (
       'cross-batch-unknown': CROSS_BATCH_BLIND_SPOT,
     },
     cross_batch_unknown: [],
-    lanes: [{ lane: 'lane-a', test_reach: [], citation_carriers: [], anchor_pins: [] }],
+    lanes: [{ lane: 'lane-a', test_reach: [], test_reach_dropped: [], citation_carriers: [], anchor_pins: [] }],
   }, null, 2) + '\n'
   assert.equal(readFileSync(join(outDir, FENCE_REPORT_FILE), 'utf8'), expected)
   assert.equal(result.logs.some((line) => line.startsWith(TEST_REACH_WARNING_PREFIX)), false)
@@ -1638,7 +1870,7 @@ test('dispatchBatch logs test reach during dry-run without changing the outcome'
   assert.equal(report.dryRun, true)
   const warning = logs.find((line) => line.startsWith('dispatch-batch: WARNING-SUMMARY '))
   assert.ok(warning)
-  assert.match(warning, /test-reach=2 \(0 actionable\)/)
+  assert.match(warning, /test-reach=3 · actionable=0 · collapsed=1/)
   assert.equal(warning.includes('test/twohop.test.mjs'), false)
   assert.equal(fsExistsSync(join(outDir, FENCE_REPORT_FILE)), true)
 })
@@ -1707,16 +1939,16 @@ test('test reach carries every row while warning text caps the listed rows', () 
   const checkout = reachFixture('row-limit', { extraDirect: TEST_REACH_ROW_LIMIT })
   const { warning, rows } = reachReport(checkout)
   assert.ok(warning)
-  assert.equal(rows.length, TEST_REACH_ROW_LIMIT + 2)
+  assert.equal(rows.length, TEST_REACH_ROW_LIMIT * 2 + 3)
   assert.equal(warning.text.includes(`listing at most ${TEST_REACH_ROW_LIMIT}`), true)
-  assert.equal(warning.text.includes('2 further row(s) not listed here and carried in full on the report (report unavailable: no-out-dir)'), true)
+  assert.equal(warning.text.includes(`${rows.length - TEST_REACH_ROW_LIMIT} further row(s) not listed here and carried in full on the report (report unavailable: no-out-dir)`), true)
   assert.equal(rows.filter((row) => row.hops === 1).length, TEST_REACH_ROW_LIMIT + 1)
   assert.equal(rows.find((row) => row.test === 'test/twohop.test.mjs')?.hops, 2)
 })
 
 test('test reach lists symbol-only rows before import rows when truncating', () => {
   const directImports = Object.fromEntries(Array.from({ length: TEST_REACH_ROW_LIMIT }, (_, index) => [
-    `test/direct-value-${String(index).padStart(2, '0')}.test.mjs`, "import { widgetValue } from '../lib/widget.mjs'\nvoid widgetValue\n",
+    `test/z-direct-value-${String(index).padStart(2, '0')}.test.mjs`, "import { widgetValue } from '../lib/widget.mjs'\nvoid widgetValue\n",
   ]))
   const checkout = reachFixture('row-limit-symbol-first', {
     files: {
@@ -1726,8 +1958,11 @@ test('test reach lists symbol-only rows before import rows when truncating', () 
   })
   const { warning, rows } = reachReport(checkout)
   assert.ok(warning)
-  assert.equal(rows[0]?.hops, null)
-  assert.equal(rows[0]?.test, 'test/symbol-only.test.mjs')
+  const symbolIndex = rows.findIndex((row) => row.test === 'test/symbol-only.test.mjs' && row.how === 'symbol')
+  const firstImportIndex = rows.findIndex((row) => row.hops !== null)
+  assert.ok(symbolIndex >= 0)
+  assert.equal(rows[symbolIndex]?.hops, null)
+  assert.ok(symbolIndex < firstImportIndex)
   assert.ok(warning.text.includes('test/symbol-only.test.mjs'))
   const importRows = rows.filter((row) => row.hops !== null).map((row) => row.test)
   assert.ok(importRows.some((file) => !warning.text.includes(file)))

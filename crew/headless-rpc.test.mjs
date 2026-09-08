@@ -74,6 +74,12 @@ function recordedRpcBoundaryCapture() {
   return readFileSync(new URL('../tasks/headless-worker/captures/pi-a1-json-baseline.jsonl', import.meta.url), 'utf8')
 }
 
+// Recorded at ~/.crew/dt-b535-workingset/b535-workingset/task/headless-rpc/builder/stream.jsonl line 4596, b535 builder stream, observed at 2c3a8ff.
+// Line 4597's 6,608-byte `compaction_end` was omitted because its result summary is unrelated and no counted field was touched.
+function recordedB535CompactionFrames() {
+  return '{"type":"compaction_start","reason":"threshold"}\n'
+}
+
 function splitRecordedRpcCapture() {
   const capture = recordedRpcBoundaryCapture()
   const lines = capture.split('\n')
@@ -97,6 +103,112 @@ function lossyRpcTelemetry(census, frame, at) {
   if (frame?.type === 'turn_end') return census
   return foldCensusFrame(census, frame, at)
 }
+
+test('A1 recorded RPC compaction_start counts one and repeated recorded form counts two', () => {
+  const recorded = recordedB535CompactionFrames()
+  assert.equal(rpcCensus(recorded)[0]?.compactions, 1)
+  const twoStarts = recordedRpcBoundaryCapture().replace(
+    '{"type":"agent_settled"}\n',
+    recorded +
+      // the second occurrence is the recorded frame form repeated to pin counting, not a second observed event
+      recorded +
+      '{"type":"agent_settled"}\n',
+  )
+  const rows = []
+  const f = fixture({ dir: scratchDir('rpc-compaction-a1-'), log: (row) => rows.push(row) })
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    f.writeStream(twoStarts)
+    writeFileSync(run.returnPath, JSON.stringify({ assignment_id: run.id, role: 'builder', status: 'done' }))
+    assert.equal(f.io.wait(run.returnPath, 60).status, 'done')
+    const census = rows.find((row) => row.seat_turn_census)?.seat_turn_census
+    assert.equal(census.compactions, 2)
+    assert.equal(census.compaction_frame, 'compaction_start')
+  } finally { f.cleanup() }
+})
+
+test('B1 RPC distinguishes measured zero compactions from a stream with no frames', () => {
+  const framedRows = []
+  const framed = fixture({ dir: scratchDir('rpc-compaction-b1-framed-'), log: (row) => framedRows.push(row) })
+  try {
+    const run = framed.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    b416RpcStream(framed, 'builder', b416RpcFrames('echo no-compaction-start'))
+    writeFileSync(run.returnPath, JSON.stringify({ assignment_id: run.id, role: 'builder', status: 'done' }))
+    assert.equal(framed.io.wait(run.returnPath, 60).status, 'done')
+    const census = framedRows.find((row) => row.seat_turn_census)?.seat_turn_census
+    assert.equal(census.compactions, 0)
+    assert.equal(census.compaction_frame, 'compaction_start')
+    assert.equal(census.compactions_absent_reason, null)
+  } finally { framed.cleanup() }
+
+  const emptyRows = []
+  const empty = fixture({ dir: scratchDir('rpc-compaction-b1-empty-'), log: (row) => emptyRows.push(row) })
+  try {
+    const run = empty.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    writeFileSync(join(empty.paths.taskDir, 'headless-rpc', 'builder', 'stream.jsonl'), '')
+    writeFileSync(run.returnPath, JSON.stringify({ assignment_id: run.id, role: 'builder', status: 'done' }))
+    assert.equal(empty.io.wait(run.returnPath, 60).status, 'done')
+    const census = emptyRows.find((row) => row.seat_turn_census)?.seat_turn_census
+    assert.equal(census.compactions, null)
+    assert.equal(census.compaction_frame, 'compaction_start')
+    assert.equal(census.compactions_absent_reason, CENSUS_ABSENT_CAUSES.no_frames)
+    assert.notEqual(census.compactions, 0)
+  } finally { empty.cleanup() }
+})
+
+test('C1 RPC unreadable stream leaves compactions null with stream absence', () => {
+  const rows = []
+  const f = fixture({
+    dir: scratchDir('rpc-compaction-c1-'),
+    readFileSync: (path, ...args) => {
+      if (String(path).endsWith('/stream.jsonl')) throw Object.assign(new Error('stream denied'), { code: 'EPERM' })
+      return readFileSync(path, ...args)
+    },
+    log: (row) => rows.push(row),
+  })
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    writeFileSync(join(f.paths.taskDir, 'headless-rpc', 'builder', 'stream.jsonl'), '')
+    writeFileSync(run.returnPath, JSON.stringify({ assignment_id: run.id, role: 'builder', status: 'done' }))
+    assert.equal(f.io.wait(run.returnPath, 60).status, 'done')
+    const census = rows.find((row) => row.seat_turn_census)?.seat_turn_census
+    assert.equal(census.compactions, null)
+    assert.equal(census.compaction_frame, 'compaction_start')
+    assert.equal(census.compactions_absent_reason, CENSUS_ABSENT_CAUSES.stream_absent)
+  } finally { f.cleanup() }
+})
+
+test('E1 RPC half compaction fields leave prior census fields byte-identical', () => {
+  const rows = []
+  const f = fixture({ dir: scratchDir('rpc-compaction-e1-'), now: () => 0, log: (row) => rows.push(row) })
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    b416RpcStream(f, 'builder', b416RpcFrames('echo e1'))
+    writeFileSync(run.returnPath, JSON.stringify({ assignment_id: run.id, role: 'builder', status: 'done' }))
+    assert.equal(f.io.wait(run.returnPath, 60).status, 'done')
+    const census = rows.find((row) => row.seat_turn_census)?.seat_turn_census
+    for (const key of ['compactions', 'compaction_frame', 'compactions_absent_reason']) delete census[key]
+    assert.equal(JSON.stringify(census), JSON.stringify({
+      role: 'builder',
+      dispatch_id: 'd1',
+      transport: 'headless-rpc',
+      turns: 1,
+      tool_calls: 1,
+      distinct_files_read: 0,
+      suite_runs: 0,
+      re_reads: 0,
+      by_class: { edit: 0, read: 0, test: 0, other: 1 },
+      in_tool_ms: null,
+      out_of_tool_ms: null,
+      span_ms: 0,
+      tool_spans_matched: 0,
+      tool_spans_unmatched: 0,
+      tool_spans_same_poll: 1,
+      bash_reads_absent_reason: null,
+      absent_reason: CENSUS_ABSENT_CAUSES.same_poll_boundary,
+    }))
+  } finally { f.cleanup() }
+})
 
 test('B2 RPC emits exactly one turn-ceiling outcome at its recorded boundary', () => {
   const { prefix, suffix } = splitRecordedRpcCapture()

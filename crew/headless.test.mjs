@@ -17,6 +17,7 @@ import {
   splitShellCommands, executableText, stripHeredocBodies, commandTokens,
   suitePolicyCounters, countSuiteDecision, suitePolicyReport, SUITE_RUN_OWNERSHIP, SUITE_RUN_OWNERSHIP_KINDS,
 } from './headless.mjs'
+import { headlessRpcIo } from './headless-rpc.mjs'
 import { assignmentLine, assignmentPrompt } from './driver.mjs'
 import { cellFailureKind, HEADLESS_TRANSPORT, seatIo } from './seat-io.mjs'
 import { DRIVER_GONE_PERIODS, HEARTBEAT_PERIOD_MS } from '../scripts/factory/lane-watch.mjs'
@@ -2510,6 +2511,30 @@ function b416JsonFixture({ role = 'builder', policy = null, fallback = null, onS
   }
 }
 
+function e1RpcFixture() {
+  const dir = scratchDir('e1-rpc-')
+  const taskDir = join(dir, 'task'); const returnsDir = join(dir, 'returns')
+  mkdirSync(taskDir); mkdirSync(returnsDir)
+  const rows = []
+  const crew = { checkout: dir, members: { builder: { model: 'sonnet', transport: 'headless-rpc' } } }
+  const io = headlessRpcIo({
+    crew, paths: { dir, taskDir, returnsDir }, taskDir, checkout: dir, adapters: { builder: {} }, bin: '/bin/pi',
+    deps: {
+      pid: 700, uuid: () => 'e1-rpc-session', spawn: () => ({ pid: 701, unref() {} }),
+      openSync: () => 10, writeSync: () => {}, closeSync: () => {},
+      existsSync: (path) => existsSync(path) || String(path).endsWith('/cmd.fifo'),
+      readdirSync, mkdirSync, writeFileSync, readFileSync, now: () => 0, sleep: () => {},
+      log: (row) => rows.push(row),
+    },
+  })
+  const assigned = io.assign({ role: 'builder', briefFile: join(taskDir, 'brief.md') })
+  return {
+    dir, taskDir, returnsDir, io, rows, assigned,
+    writeStream: (text) => writeFileSync(join(taskDir, 'headless-rpc', 'builder', 'stream.jsonl'), text),
+    cleanup: () => rmSync(dir, { recursive: true, force: true }),
+  }
+}
+
 function recordedClaudeBoundaryCapture() {
   return readFileSync(new URL('../tasks/headless-worker/captures/a-baseline.jsonl', import.meta.url), 'utf8')
 }
@@ -2541,6 +2566,99 @@ function lossyClaudeTelemetry(path, read, exists) {
   assert.ok(parsed.census && typeof parsed.census === 'object')
   return { ...parsed, census: { ...parsed.census, turns: 0 } }
 }
+
+test('D1 headless-json reports transport-named unmeasured compactions in both census rows', () => {
+  const normal = b416JsonFixture()
+  try {
+    normal.writeStream(b416ClaudeStream({ turns: 1 }))
+    writeFileSync(normal.assigned.returnPath, JSON.stringify({ assignment_id: normal.assigned.id, role: normal.role, status: 'done' }))
+    assert.equal(normal.io.wait(normal.assigned.returnPath, 60).status, 'done')
+    const census = normal.rows.find((row) => row.seat_turn_census)?.seat_turn_census
+    for (const key of ['compactions', 'compaction_frame', 'compactions_absent_reason']) assert.equal(Object.hasOwn(census, key), true)
+    assert.equal(census.compactions, null)
+    assert.equal(census.compaction_frame, null)
+    assert.equal(census.compactions_absent_reason, CENSUS_ABSENT_CAUSES.headless_json_compactions)
+  } finally { normal.cleanup() }
+
+  const empty = b416JsonFixture()
+  try {
+    empty.writeStream('')
+    writeFileSync(empty.assigned.returnPath, JSON.stringify({ assignment_id: empty.assigned.id, role: empty.role, status: 'done' }))
+    assert.equal(empty.io.wait(empty.assigned.returnPath, 60).status, 'done')
+    const census = empty.rows.find((row) => row.seat_turn_census)?.seat_turn_census
+    for (const key of ['compactions', 'compaction_frame', 'compactions_absent_reason']) assert.equal(Object.hasOwn(census, key), true)
+    assert.equal(census.compactions, null)
+    assert.equal(census.compaction_frame, null)
+    assert.equal(census.compactions_absent_reason, CENSUS_ABSENT_CAUSES.no_frames)
+    assert.notEqual(census.compactions, 0)
+  } finally { empty.cleanup() }
+})
+
+test('E1 compaction fields leave every prior census field byte-identical', () => {
+  const rpc = e1RpcFixture()
+  let rpcCensus
+  try {
+    rpc.writeStream(`${[
+      { type: 'turn_start' },
+      { type: 'tool_execution_start', toolCallId: 'e1-rpc-call', toolName: 'bash', args: { command: 'echo e1' } },
+      { type: 'tool_execution_end', toolCallId: 'e1-rpc-call', toolName: 'bash' },
+      { type: 'turn_end' },
+      { type: 'agent_settled' },
+    ].map((frame) => JSON.stringify(frame)).join('\n')}\n`)
+    writeFileSync(rpc.assigned.returnPath, JSON.stringify({ assignment_id: rpc.assigned.id, role: 'builder', status: 'done' }))
+    assert.equal(rpc.io.wait(rpc.assigned.returnPath, 60).status, 'done')
+    rpcCensus = rpc.rows.find((row) => row.seat_turn_census)?.seat_turn_census
+  } finally { rpc.cleanup() }
+  for (const key of ['compactions', 'compaction_frame', 'compactions_absent_reason']) delete rpcCensus[key]
+  assert.equal(JSON.stringify(rpcCensus), JSON.stringify({
+    role: 'builder',
+    dispatch_id: 'd1',
+    transport: 'headless-rpc',
+    turns: 1,
+    tool_calls: 1,
+    distinct_files_read: 0,
+    suite_runs: 0,
+    re_reads: 0,
+    by_class: { edit: 0, read: 0, test: 0, other: 1 },
+    in_tool_ms: null,
+    out_of_tool_ms: null,
+    span_ms: 0,
+    tool_spans_matched: 0,
+    tool_spans_unmatched: 0,
+    tool_spans_same_poll: 1,
+    bash_reads_absent_reason: null,
+    absent_reason: CENSUS_ABSENT_CAUSES.same_poll_boundary,
+  }))
+
+  const json = b416JsonFixture()
+  let jsonCensus
+  try {
+    json.writeStream(b416ClaudeStream({ turns: 1 }))
+    writeFileSync(json.assigned.returnPath, JSON.stringify({ assignment_id: json.assigned.id, role: json.role, status: 'done' }))
+    assert.equal(json.io.wait(json.assigned.returnPath, 60).status, 'done')
+    jsonCensus = json.rows.find((row) => row.seat_turn_census)?.seat_turn_census
+  } finally { json.cleanup() }
+  for (const key of ['compactions', 'compaction_frame', 'compactions_absent_reason']) delete jsonCensus[key]
+  assert.equal(JSON.stringify(jsonCensus), JSON.stringify({
+    role: 'builder',
+    dispatch_id: 'd1',
+    transport: 'headless-json',
+    turns: 1,
+    tool_calls: 1,
+    distinct_files_read: 1,
+    suite_runs: 0,
+    re_reads: 0,
+    by_class: { edit: 0, read: 1, test: 0, other: 0 },
+    in_tool_ms: null,
+    out_of_tool_ms: null,
+    span_ms: null,
+    tool_spans_matched: 0,
+    tool_spans_unmatched: 1,
+    tool_spans_same_poll: 0,
+    bash_reads_absent_reason: null,
+    absent_reason: CENSUS_ABSENT_CAUSES.replay_no_frame_clock,
+  }))
+})
 
 test('A1 JSON stops on the recorded crossing before the wait deadline', () => {
   const { prefix, suffix } = splitRecordedClaudeCapture()

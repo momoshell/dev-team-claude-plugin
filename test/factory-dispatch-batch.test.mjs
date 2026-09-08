@@ -85,6 +85,7 @@ import {
   TURN_CENSUS_FLAG,
   laneOutcome,
   main,
+  batchAliasWarnings,
   bootCommand,
   measureBatchBaseline,
   mergeCheckLine,
@@ -115,6 +116,7 @@ import {
   mergeSeats,
   tierFloor,
   readRegister,
+  resolveRequestedExecution,
   resolveRequestedTier,
 } from '../scripts/factory/dispatch-batch.mjs'
 import { parseDirectedBrief, WAITS_S } from '../crew/drive.mjs'
@@ -2846,7 +2848,7 @@ test('PS7', async () => {
   assert.match(promptLine, /forced=none prompt=change proposed=/)
   assert.match(controlLine, /forced=none prompt=code-only proposed=/)
   const promptBoot = prompt.spawned.find(({ args }) => args.includes('boot'))
-  assert.equal(promptBoot.args[promptBoot.args.indexOf('--tier') + 1], 'judge')
+  assert.equal(promptBoot.args[promptBoot.args.indexOf('--assurance') + 1], 'rigorous')
   const promptRecord = JSON.parse(readFileSync(join(prompt.out, 'lane-a.dispatch.json'), 'utf8'))
   assert.deepEqual(promptRecord.prompt_surface, {
     hits: ['crew/roles/planner.md'], prompt_change: true, forced: 'judge',
@@ -3281,7 +3283,7 @@ test('TB6', async () => {
   const briefIndex = ordinaryRun.args.indexOf('--brief-file')
   assert.deepEqual(ordinaryRun.args, [
     'crew/crew.mjs', 'run', '--task', 'lane-a', '--checkout', ordinaryRun.args[checkoutIndex + 1],
-    '--brief-file', ordinaryRun.args[briefIndex + 1], '--keep', '--variant', 'full',
+    '--brief-file', ordinaryRun.args[briefIndex + 1], '--keep', '--execution', 'full',
     '--files-in-scope', 'crew/owned-lane-a.mjs',
   ])
 
@@ -3768,9 +3770,179 @@ test('canonical assurance parses, reconciles, and emits without its tier alias',
   assert.equal(command.args.includes('--tier'), false)
   const unknown = (() => { try { resolveRequestedTier({ assurance: 'unknown' }) } catch (error) { return error } })()
   assert.equal(unknown?.reason, 'batch-unreadable')
-  const conflict = (() => { try { resolveRequestedTier({ tier: 'build', assurance: 'standard' }) } catch (error) { return error } })()
-  assert.equal(conflict?.reason, 'batch-unreadable')
-  assert.match(conflict?.message ?? '', /mutually exclusive/)
+  // ADR-035 section 4 refuses the PAIR, matching values included: no precedence
+  // rule to remember and no silent winner. Both arms therefore refuse.
+  const matching = (() => { try { resolveRequestedTier({ tier: 'build', assurance: 'standard' }) } catch (error) { return error } })()
+  assert.equal(matching?.reason, 'transport-conflict')
+  const differing = (() => { try { resolveRequestedTier({ tier: 'build', assurance: 'rigorous' }) } catch (error) { return error } })()
+  assert.equal(differing?.reason, 'transport-conflict')
+  assert.match(differing?.message ?? '', /--assurance/)
+  assert.match(differing?.message ?? '', /--tier/)
+})
+
+test('EX1', async () => {
+  const result = await dispatchFixture({ label: 'EX1', names: ['lane-a'], runFlags: { execution: 'full' } })
+  const run = result.spawned.find(({ args }) => args.includes('run'))
+  assert.ok(run)
+  assert.equal(run.args[run.args.indexOf('--execution') + 1], 'full')
+  assert.equal(run.args.includes('--variant'), false)
+  assert.equal(result.logs.some((line) => line.includes('DEPRECATED alias')), false)
+
+  // The DEFERRED-WAVE RESUME command forwards execution through a SECOND site.
+  // An operator pastes that line verbatim to start wave two, so if it emits the
+  // dated alias the resume refuses the moment ADR-035's window closes. Proven
+  // by hand: mutating only the run-command site left this green.
+  const wave = await dispatchFixture({
+    label: 'EX1-wave', names: ['lane-a', 'lane-b'],
+    requests: { 'lane-b': requestFor('lane-b', { depends_on: ['lane-a'] }) },
+    runFlags: { wave: '1', execution: 'full' },
+  })
+  const resume = wave.logs.find((line) => line.startsWith('dispatch-batch: deferred lane=lane-b '))
+  assert.ok(resume, 'wave one must print a resume command for the deferred lane')
+  assert.ok(resume.includes('--execution full'), 'the resume command must carry the canonical --execution')
+  assert.equal(resume.includes('--variant'), false)
+})
+
+test('EK1', () => {
+  assert.deepEqual(parseCliArgs(['--execution', 'full']), { execution: 'full' })
+  assert.equal(resolveRequestedExecution({ execution: 'full' }), 'full')
+})
+
+test('EK2', async () => {
+  const result = await dispatchFixture({
+    label: 'EK2',
+    names: ['lane-a', 'lane-b'],
+    requests: { 'lane-a': requestFor('lane-a', { execution: 'scout' }) },
+  })
+  const lane = readBatch({ batchDir: result.batch }).find(({ lane: name }) => name === 'lane-a')
+  assert.equal(lane.execution, 'scout')
+  assert.equal(lane.request.execution, undefined)
+  assert.equal(lane.request.variant, undefined)
+  const compileRequests = result.spawned
+    .filter(({ args }) => args.some((arg) => String(arg).endsWith('.compile-request.json')))
+    .map(({ args }) => JSON.parse(readFileSync(args[args.indexOf('--request') + 1], 'utf8')))
+  assert.equal(compileRequests.length, 4)
+  for (const compiled of compileRequests) {
+    for (const key of ['execution', 'variant', 'assurance', 'tier']) assert.equal(Object.hasOwn(compiled, key), false)
+  }
+})
+
+test('VW1', async () => {
+  const result = await dispatchFixture({
+    label: 'VW1',
+    names: ['lane-a'],
+    requests: { 'lane-a': requestFor('lane-a', { variant: 'scout' }) },
+  })
+  const run = result.spawned.find(({ args }) => args.includes('run'))
+  assert.equal(run.args[run.args.indexOf('--execution') + 1], 'scout')
+  assert.equal(run.args.includes('--variant'), false)
+  assert.equal(result.logs.filter((line) => line === 'warning: --variant is a DEPRECATED alias for --execution, removed at the next tagged release (ADR-035 §4)').length, 1)
+})
+
+test('VW2', async () => {
+  const result = await dispatchFixture({
+    label: 'VW2',
+    names: ['lane-a', 'lane-b'],
+    requests: {
+      'lane-a': requestFor('lane-a', { variant: 'scout' }),
+      'lane-b': requestFor('lane-b', { variant: 'full' }),
+    },
+  })
+  assert.equal(result.logs.filter((line) => line === 'warning: --variant is a DEPRECATED alias for --execution, removed at the next tagged release (ADR-035 §4)').length, 1)
+  assert.deepEqual(batchAliasWarnings({ lanes: [{ variantSupplied: true }, { variantSupplied: true }], runFlags: {} }), [
+    'warning: --variant is a DEPRECATED alias for --execution, removed at the next tagged release (ADR-035 §4)',
+  ])
+})
+
+test('XC1', () => {
+  const batch = makeBatch(['lane-a'])
+  put(join(batch, `lane-a${REQUEST_SUFFIX}`), JSON.stringify(requestFor('lane-a', { execution: 'full', variant: 'scout' })))
+  assert.throws(() => readBatch({ batchDir: batch }), (error) => error instanceof BatchRefusal
+    && error.reason === 'transport-conflict'
+    && error.message.includes('--execution')
+    && error.message.includes('--variant'))
+})
+
+test('AS1', async () => {
+  const result = await dispatchFixture({ label: 'AS1', names: ['lane-a'], batchTier: 'build', runFlags: { assurance: 'standard' } })
+  const boot = result.spawned.find(({ args }) => args.includes('boot'))
+  assert.equal(boot.args[boot.args.indexOf('--assurance') + 1], 'standard')
+  assert.equal(boot.args.includes('--tier'), false)
+  assert.equal(result.logs.some((line) => line.includes('DEPRECATED alias')), false)
+})
+
+test('AK1', () => {
+  const batch = makeBatch(['lane-a'])
+  put(join(batch, `lane-a${REQUEST_SUFFIX}`), JSON.stringify(requestFor('lane-a', { assurance: 'standard' })))
+  const [lane] = readBatch({ batchDir: batch })
+  assert.equal(lane.assurance, 'build')
+  assert.equal(lane.tier, null)
+  assert.equal(Object.hasOwn(lane.request, 'assurance'), false)
+  assert.equal(Object.hasOwn(lane.request, 'tier'), false)
+})
+
+test('AC1', () => {
+  const batch = makeBatch(['lane-a'])
+  put(join(batch, `lane-a${REQUEST_SUFFIX}`), JSON.stringify(requestFor('lane-a', { assurance: 'standard', tier: 'mechanical' })))
+  assert.throws(() => readBatch({ batchDir: batch }), (error) => error instanceof BatchRefusal
+    && error.reason === 'transport-conflict'
+    && error.message.includes('--assurance')
+    && error.message.includes('--tier'))
+})
+
+test('EQ1', async () => {
+  const canonical = await dispatchFixture({
+    label: 'EQ1-canonical',
+    names: ['lane-a'],
+    runFlags: { execution: 'full' },
+    requests: { 'lane-a': requestFor('lane-a', { execution: 'scout' }) },
+  })
+  const alias = await dispatchFixture({
+    label: 'EQ1-alias',
+    names: ['lane-a'],
+    runFlags: { execution: 'full' },
+    requests: { 'lane-a': requestFor('lane-a', { variant: 'scout' }) },
+  })
+  const requestBytes = (result) => {
+    const call = result.spawned.find(({ args }) => args.some((arg) => String(arg).endsWith('.compile-request.json')))
+    return readFileSync(call.args[call.args.indexOf('--request') + 1], 'utf8')
+  }
+  assert.equal(requestBytes(canonical), requestBytes(alias))
+  const run = canonical.spawned.find(({ args }) => args.includes('run'))
+  assert.equal(run.args[run.args.indexOf('--execution') + 1], 'scout')
+})
+
+test('AQ1', async () => {
+  const canonical = await dispatchFixture({
+    label: 'AQ1-canonical',
+    names: ['lane-a'],
+    batchTier: 'mechanical',
+    requests: { 'lane-a': requestFor('lane-a', { assurance: 'standard' }) },
+  })
+  const alias = await dispatchFixture({
+    label: 'AQ1-alias',
+    names: ['lane-a'],
+    batchTier: 'mechanical',
+    requests: { 'lane-a': requestFor('lane-a', { tier: 'build' }) },
+  })
+  const requestBytes = (result) => {
+    const call = result.spawned.find(({ args }) => args.some((arg) => String(arg).endsWith('.compile-request.json')))
+    return readFileSync(call.args[call.args.indexOf('--request') + 1], 'utf8')
+  }
+  assert.equal(requestBytes(canonical), requestBytes(alias))
+  const boot = canonical.spawned.find(({ args }) => args.includes('boot'))
+  assert.equal(boot.args[boot.args.indexOf('--assurance') + 1], 'standard')
+})
+
+test('DF1', async () => {
+  const result = await dispatchFixture({ label: 'DF1', names: ['lane-a'] })
+  const compile = result.spawned.find(({ args }) => args.some((arg) => String(arg).endsWith('.compile-request.json')))
+  const actual = readFileSync(compile.args[compile.args.indexOf('--request') + 1], 'utf8')
+  assert.equal(actual, `${JSON.stringify(requestFor('lane-a'), null, 2)}\n`)
+  const run = result.spawned.find(({ args }) => args.includes('run'))
+  assert.equal(run.args[run.args.indexOf('--execution') + 1], 'full')
+  const boot = result.spawned.find(({ args }) => args.includes('boot'))
+  assert.equal(boot.args[boot.args.indexOf('--assurance') + 1], 'quick')
 })
 
 test('memory boot flags are forwarded verbatim and omitted when unset', async () => {
@@ -4546,7 +4718,7 @@ test('staffing fields append to the existing settled dispatch log line', async (
   const line = result.logs.find((entry) => entry.startsWith('dispatch-batch: lane=lane-a '))
   assert.ok(line)
   assert.equal(line.startsWith(
-    'dispatch-batch: lane=lane-a forced=none prompt=code-only proposed=none requested=mechanical requested_from=batch variant=full variant_from=batch settled=mechanical',
+    'dispatch-batch: lane=lane-a forced=none prompt=code-only proposed=none requested=mechanical requested_from=batch execution=full execution_from=batch variant=full variant_from=batch settled=mechanical',
   ), true)
   assert.match(line, / shape=judge strength=workhorse misclassified=false brief_bytes=65 top_section=none granularity=whole-file\(crew\/owned-lane-a\.mjs\)$/)
 })
@@ -4595,9 +4767,9 @@ test('a lane tier seats that lane while a sibling takes the batch default', asyn
   const boots = result.spawned.filter(({ args }) => args.includes('boot'))
   const seated = Object.fromEntries(boots.map((call) => {
     const task = call.args[call.args.indexOf('--task') + 1]
-    return [task, call.args[call.args.indexOf('--tier') + 1]]
+    return [task, call.args[call.args.indexOf('--assurance') + 1]]
   }))
-  assert.deepEqual(seated, { 'lane-a': 'judge', 'lane-b': 'mechanical' })
+  assert.deepEqual(seated, { 'lane-a': 'rigorous', 'lane-b': 'quick' })
   const requested = result.logs.filter((line) => line.startsWith('dispatch-batch: lane='))
   assert.ok(requested.some((line) => line.includes('lane=lane-a') && line.includes('requested=judge requested_from=lane')))
   assert.ok(requested.some((line) => line.includes('lane=lane-b') && line.includes('requested=mechanical requested_from=batch')))
@@ -4614,9 +4786,9 @@ test('a lane tier overrides a higher proposal and says so', async () => {
   const boots = result.spawned.filter(({ args }) => args.includes('boot'))
   const seated = Object.fromEntries(boots.map((call) => {
     const task = call.args[call.args.indexOf('--task') + 1]
-    return [task, call.args[call.args.indexOf('--tier') + 1]]
+    return [task, call.args[call.args.indexOf('--assurance') + 1]]
   }))
-  assert.equal(seated['lane-a'], 'build')
+  assert.equal(seated['lane-a'], 'standard')
   const laneA = result.logs.find((line) => line.startsWith('dispatch-batch: lane=lane-a '))
   const laneB = result.logs.find((line) => line.startsWith('dispatch-batch: lane=lane-b '))
   assert.ok(laneA?.includes('settled=build'))
@@ -5152,7 +5324,7 @@ test('a batch mixes lane variants while preserving the batch default', async () 
   const runs = result.spawned.filter(({ args }) => args.includes('run'))
   const variants = Object.fromEntries(runs.map(({ args }) => {
     const lane = args[args.indexOf('--task') + 1]
-    return [lane, args[args.indexOf('--variant') + 1]]
+    return [lane, args[args.indexOf('--execution') + 1]]
   }))
   assert.deepEqual(variants, { 'lane-a': 'full', 'lane-b': 'scout', 'lane-c': 'full' })
   const settled = result.logs.filter((line) => line.startsWith('dispatch-batch: lane='))
@@ -5166,7 +5338,7 @@ test('lane variants are preflighted by name and ctx lanes require validation', a
     label: 'lane-unknown-variant',
     requests: { 'lane-b': requestFor('lane-b', { variant: 'not-a-variant' }) },
   }), (error) => error instanceof BatchRefusal
-    && error.reason === 'run-failed'
+    && error.reason === 'batch-unreadable'
     && error.message.includes('lane-b')
     && error.message.includes('not-a-variant'))
   await assert.rejects(() => dispatchFixture({
@@ -5183,7 +5355,7 @@ test('lane variants are preflighted by name and ctx lanes require validation', a
     runFlags: { 'validation-lane': 'lane-a' },
   })
   const run = repaired.spawned.find(({ args }) => args.includes('run'))
-  assert.equal(run.args[run.args.indexOf('--variant') + 1], 'repair')
+  assert.equal(run.args[run.args.indexOf('--execution') + 1], 'repair')
 })
 
 test('a directed lane whose brief fails the parser refuses before boot', async () => {
@@ -5257,7 +5429,7 @@ test('a batch without lane variants keeps the full variant on every run', async 
   const runs = result.spawned.filter(({ args }) => args.includes('run'))
   assert.equal(runs.length, 2)
   for (const { args } of runs) {
-    const index = args.indexOf('--variant')
+    const index = args.indexOf('--execution')
     assert.equal(index >= 0, true)
     assert.equal(args[index + 1], 'full')
   }
@@ -5957,7 +6129,7 @@ test('protected-path seat overrides retain a forced judge tier', async () => {
     },
   })
   const boot = result.spawned.find(({ args }) => args.includes('boot'))
-  assert.equal(boot.args[boot.args.indexOf('--tier') + 1], 'judge')
+  assert.equal(boot.args[boot.args.indexOf('--assurance') + 1], 'rigorous')
   const record = JSON.parse(readFileSync(join(result.out, `lane-a${DISPATCH_RECORD_SUFFIX}`), 'utf8'))
   assert.equal(record.tier.forced, 'judge')
   assert.equal(record.tier.settled, 'judge')

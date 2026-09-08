@@ -64,11 +64,13 @@ test('documented boot-only flags equal the runtime contract', () => {
 // not make the documentation test vacuous when a new family is omitted.
 test('documented dispatcher assurance and turn-ceiling values are accepted', () => {
   const argv = [
+    '--execution', 'full',
     '--assurance', 'standard',
     '--max-turns-planner', '64', '--max-turns-tech-lead', '65',
     '--max-turns-builder', '66', '--max-turns-reviewer', '67', '--max-turns-lead', '68',
   ]
   assert.deepEqual(parseCliArgs(argv), {
+    execution: 'full',
     assurance: 'standard',
     'max-turns-planner': '64', 'max-turns-tech-lead': '65',
     'max-turns-builder': '66', 'max-turns-reviewer': '67', 'max-turns-lead': '68',

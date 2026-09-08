@@ -6,8 +6,8 @@ are written without the leading `--`; role-prefixed names are accepted only on
 
 ```json
 {
-  "boot": ["task", "checkout", "tier", "assurance", "roles", "fences", "lane", "headless-all", "max-turns-planner", "max-turns-tech-lead", "max-turns-builder", "max-turns-reviewer", "max-turns-lead", "model-reviewer", "effort-reviewer", "agent-reviewer"],
-  "run":  ["task", "checkout", "brief-file", "variant", "files-in-scope", "validation-lane", "plan-rounds", "build-rounds", "review-rounds", "wait-planner", "wait-tech-lead", "wait-builder", "wait-reviewer", "wait-lead", "suite", "keep"],
+  "boot": ["task", "checkout", "assurance", "tier", "roles", "fences", "lane", "headless-all", "max-turns-planner", "max-turns-tech-lead", "max-turns-builder", "max-turns-reviewer", "max-turns-lead", "model-reviewer", "effort-reviewer", "agent-reviewer"],
+  "run":  ["task", "checkout", "brief-file", "execution", "variant", "files-in-scope", "validation-lane", "plan-rounds", "build-rounds", "review-rounds", "wait-planner", "wait-tech-lead", "wait-builder", "wait-reviewer", "wait-lead", "suite", "keep"],
   "boot_only": ["fences", "lane", "max-turns-planner", "max-turns-tech-lead", "max-turns-builder", "max-turns-reviewer", "max-turns-lead"]
 }
 ```
@@ -47,18 +47,26 @@ assignment to carry the count.
 
 `parseCliArgs` accepts these `dispatch-batch` flags:
 
-- Value flags: `--batch --fences --checkout --parent --out --tier --assurance --variant --wave --plan-rounds --build-rounds --review-rounds --wait-builder --wait-planner --wait-reviewer --wait-lead --wait-tech-lead --validation-lane --suite --baseline --memory-dir --memory-backend --memory-budget-bytes --max-turns-planner --max-turns-tech-lead --max-turns-builder --max-turns-reviewer --max-turns-lead`.
+- Value flags: `--batch --fences --checkout --parent --out --execution --variant --assurance --tier --wave --plan-rounds --build-rounds --review-rounds --wait-builder --wait-planner --wait-reviewer --wait-lead --wait-tech-lead --validation-lane --suite --baseline --memory-dir --memory-backend --memory-budget-bytes --max-turns-planner --max-turns-tech-lead --max-turns-builder --max-turns-reviewer --max-turns-lead`.
 - Boolean flags: `--dry-run --force --no-keep --headless-all --panes`.
 - Repeatable: `--adopt`.
 - Prefix-matched per-seat forms: `--agent-<role> --model-<role> --effort-<role> --allow-shortfall-<role>`.
 
 `--batch` and `--fences` are required. Anything else refuses
-`unknown option: --<name>`. `--assurance` accepts the canonical
-`quick|standard|rigorous` spellings (the legacy `--tier` aliases remain
-accepted), and the two spellings are mutually exclusive. `--adopt` is
-accepted by `dispatch-batch` alone — `crew.mjs` and `make-brief.mjs` have no
-such flag; see the plan-adoption section
-below for its archive contract.
+`unknown option: --<name>`. The canonical `--execution` name selects a run
+shape, while dated `--variant` remains accepted as its alias. `--assurance`
+accepts the canonical `quick|standard|rigorous` spellings, while dated
+`--tier` remains accepted as its alias. Both aliases remain accepted only
+through the next tagged release, and each used alias axis emits one warning
+per batch. Passing a canonical flag together with its alias refuses as
+`transport-conflict` and names both flags, **even when the values agree** —
+ADR-035 §4 wants no precedence rule to remember and no silent winner, and
+`crew/run-configuration.mjs` enforces the identical rule at boot.
+`--adopt` is accepted by `dispatch-batch` alone — `crew.mjs` and
+`make-brief.mjs` have no such flag; see the plan-adoption section below for
+its archive contract.
+
+The corrected operator default is `--execution full --assurance standard`.
 
 The runtime's misplaced-flag refusal is:
 
@@ -73,16 +81,18 @@ run that silently treats an intended fence as absent can drive unfenced
 `{lane: null, source: 'none'}` silently. Therefore pass the fence to boot and
 use the run's `--validation-lane` (or its legal `--lane` meaning) deliberately.
 
-A fenced tier boot supplies both checkout and the fence at boot:
+A fenced assurance boot supplies both checkout and the fence at boot. The
+canonical `--assurance` spelling is forwarded to the boot command:
 
 ```sh
-node crew/crew.mjs boot --task <slug> --checkout <dir> --tier build --fences <fences.json> --lane <lane>
+node crew/crew.mjs boot --task <slug> --checkout <dir> --assurance standard --fences <fences.json> --lane <lane>
 ```
 
-A reviewed run supplies its brief, scope, and validation lane explicitly:
+A reviewed run supplies its brief, scope, and validation lane explicitly. The
+canonical --execution spelling is forwarded to the run command:
 
 ```sh
-node crew/crew.mjs run --task <slug> --checkout <dir> --brief-file <path> --variant directed --files-in-scope skills/crew-dispatch/ --validation-lane <lane> --plan-rounds 1 --build-rounds 1 --review-rounds 1 --suite "npm test"
+node crew/crew.mjs run --task <slug> --checkout <dir> --brief-file <path> --execution directed --files-in-scope skills/crew-dispatch/ --validation-lane <lane> --plan-rounds 1 --build-rounds 1 --review-rounds 1 --suite "npm test"
 ```
 
 Do not move `--fences` into that run line. It is persisted by `boot` into

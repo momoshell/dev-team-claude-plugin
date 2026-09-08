@@ -270,3 +270,23 @@ test('the dispatch skill routes the dry-run doctrine', () => {
     assert.ok(text.includes(token), `SKILL.md must carry ${token}`)
   }
 })
+
+test('DC1', () => {
+  const text = readText(join(HERE, 'references/flags.md'))
+  assert.ok(text.includes('The canonical `--execution` name selects a run'))
+  assert.ok(text.includes('--execution --variant'))
+  assert.ok(text.includes('--assurance --tier'))
+  assert.ok(text.includes('--execution directed'))
+  assert.ok(text.includes('--assurance standard'))
+})
+
+test('DD1', () => {
+  const text = readText(join(HERE, 'references/flags.md'))
+  const sentence = 'Both aliases remain accepted only\nthrough the next tagged release, and each used alias axis emits one warning\nper batch.'
+  assert.equal(text.split(sentence).length - 1, 1)
+  assert.ok(text.includes('`--variant` remains accepted as its alias'))
+  assert.ok(text.includes('`--tier` remains accepted as its alias'))
+  // ADR-035 section 4 refuses the PAIR, matching values included. The doc must say
+  // so verbatim, because a reader who infers a precedence rule will pass both.
+  assert.ok(text.includes('refuses as\n`transport-conflict` and names both flags, **even when the values agree**'))
+})

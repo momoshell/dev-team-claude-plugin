@@ -77,3 +77,14 @@ at **builder** on **no valid envelope within 2400s** while healthy — **Working
 **1890s** elapsed, mid mutation matrix, on top of the **14 files** its brief demanded,
 because it also demanded **six kill-mutations**, each in its own scratch
 checkout. The builder wait is `builder: 2400, reviewer: 1800` (`crew/drive.mjs:52`); a brief or plan asking for N isolated proofs needs roughly N × suite_time added, passed as **`--wait-builder`** on `run`.
+
+When an operator supplies `--turn-census`, the measured arithmetic is
+`latency_ms_per_turn = out_of_tool_ms / turns` and
+`affordable_turns = floor(wait_seconds × 1000 / latency_ms_per_turn)`.
+Across **n=2** lanes, the measured range is **11.9-14.6 seconds/turn**: b549
+measured **5,293,017 ms out of tool / 362 turns** with **5,404,151 ms span**, and
+b552 is the second observation. This is a range, not a default constant; the
+dispatcher computes only from the explicitly named census rows. The b549
+tool-time object is `edit=0, read=10,058, test=80,892, other=20,184 ms; total=111,134 ms`, not a scalar object interpolation.
+
+At a 5,400-second seat wait, one bounded 600-second re-ask makes the real RPC wall bound 6,000 seconds (100 minutes), not the 5,400-second wait alone. RPC uses an immutable per-call deadline, so pane-only one-extension grant callbacks do not extend this RPC wait.

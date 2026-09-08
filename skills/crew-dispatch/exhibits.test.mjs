@@ -109,12 +109,37 @@ test("each lever section carries its own measurement", () => {
     ['## Lever 6', ['5 files', '30 acks', '72KB', '17m', '2 files', '2 acks', '26KB', '9m']],
     ['## Lever 7', ['a recorded baseline is a fact about a commit and is never consumed', pin('a recorded baseline is a fact about a commit and is never consumed'), '4 lanes x 2 passes', '8 identical measurements']],
     ['## Lever 8', ['#584', 'compile once']],
-    ['## Lever 9', ['no valid envelope within 2400s', '1890s', '14 files', 'six kill-mutations', '--wait-builder', pin('builder: 2400, reviewer: 1800')]],
+    ['## Lever 9', [
+      'no valid envelope within 2400s', '1890s', '14 files', 'six kill-mutations', '--wait-builder',
+      pin('builder: 2400, reviewer: 1800'), 'latency_ms_per_turn = out_of_tool_ms / turns',
+      'affordable_turns = floor(wait_seconds × 1000 / latency_ms_per_turn)', '11.9-14.6 seconds/turn',
+      'n=2', 'b549', '5,293,017 ms out of tool / 362 turns', '5,404,151 ms span', 'b552',
+      'range, not a default constant', 'edit=0, read=10,058, test=80,892, other=20,184 ms; total=111,134 ms',
+      'pane-only one-extension grant callbacks do not extend this RPC wait',
+    ]],
   ]
   for (const [heading, tokens] of sections) {
     const body = section(text, heading)
     for (const token of tokens) assert.ok(body.includes(token), `${heading ?? 'baseline'} must carry ${token}`)
   }
+})
+
+test('TB5', () => {
+  const body = section(readText(join(HERE, 'references/convergence.md')), '## Lever 9')
+  for (const token of [
+    'latency_ms_per_turn = out_of_tool_ms / turns',
+    'affordable_turns = floor(wait_seconds × 1000 / latency_ms_per_turn)',
+    '5,293,017 ms out of tool / 362 turns',
+    '5,404,151 ms span',
+    'n=2',
+    '11.9-14.6 seconds/turn',
+    'b549',
+    'b552',
+    'edit=0, read=10,058, test=80,892, other=20,184 ms; total=111,134 ms',
+    'At a 5,400-second seat wait, one bounded 600-second re-ask makes the real RPC wall bound 6,000 seconds (100 minutes), not the 5,400-second wait alone.',
+    'immutable per-call deadline',
+    'pane-only one-extension grant callbacks do not extend this RPC wait',
+  ]) assert.ok(body.includes(token), `Lever 9 must carry ${token}`)
 })
 
 // Mutation killed: substituting an authored floor or adding its profile addition in the wrong document breaks the union contract.

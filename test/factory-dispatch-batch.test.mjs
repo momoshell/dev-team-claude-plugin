@@ -79,6 +79,10 @@ import {
   compileLane,
   dispatchBatch,
   factoryStateRoot,
+  formatTurnBudgetReport,
+  readTurnCensus,
+  turnBudgetReport,
+  TURN_CENSUS_FLAG,
   laneOutcome,
   main,
   bootCommand,
@@ -113,7 +117,7 @@ import {
   readRegister,
   resolveRequestedTier,
 } from '../scripts/factory/dispatch-batch.mjs'
-import { parseDirectedBrief } from '../crew/drive.mjs'
+import { parseDirectedBrief, WAITS_S } from '../crew/drive.mjs'
 import { laneFenceFor, renderBrief } from '../scripts/factory/make-brief.mjs'
 import { DRIVER_GONE_PERIODS, HEARTBEAT_PERIOD_MS } from '../scripts/factory/lane-watch.mjs'
 import { scratchDir } from './helpers.mjs'
@@ -2939,6 +2943,7 @@ async function dispatchFixture({
   appendFile = null,
   spawnedOut = null,
   random = null,
+  timeline = null,
 } = {}) {
   const batch = join(root, `dispatch-${label}-${Math.random().toString(36).slice(2)}`)
   const parent = join(root, `dispatch-${label}-parent`)
@@ -2950,6 +2955,7 @@ async function dispatchFixture({
   const recordSpawn = (call) => {
     spawned.push(call)
     if (Array.isArray(spawnedOut)) spawnedOut.push(call)
+    if (Array.isArray(timeline)) timeline.push({ kind: 'spawn', call })
   }
   const logs = []
   const wrote = new Map()
@@ -3015,7 +3021,11 @@ async function dispatchFixture({
     } } : {}),
     ...(assertQuiet ? { assertQuiet } : {}),
     ...(random ? { random } : {}),
-    log: (line) => logs.push(String(line)),
+    log: (line) => {
+      const text = String(line)
+      logs.push(text)
+      if (Array.isArray(timeline)) timeline.push({ kind: 'log', line: text })
+    },
   }
   const report = await dispatchBatch({
     batchDir: batch,
@@ -3030,6 +3040,138 @@ async function dispatchFixture({
   })
   return { report, spawned, logs, batch, parent, out, fences: laneFences, wrote, appended }
 }
+
+function turnCensusRow({ turns, out_of_tool_ms, span_ms, in_tool_ms = { edit: 1, read: 2, test: 3, other: 4 }, role = 'builder' }) {
+  return { role, turns, out_of_tool_ms, span_ms, in_tool_ms }
+}
+
+test('TB1', async () => {
+  const censusPath = put(join(root, 'turn-census-TB1.jsonl'), `${JSON.stringify({ seat_turn_census: turnCensusRow({ turns: 362, out_of_tool_ms: 5293017, span_ms: 5404151, in_tool_ms: { edit: 0, read: 10058, test: 80892, other: 20184 } }) })}\n`)
+  const timeline = []
+  const result = await dispatchFixture({
+    label: 'TB1', names: ['lane-a'],
+    runFlags: { 'wait-builder': '5400', [TURN_CENSUS_FLAG]: [censusPath] }, timeline,
+  })
+  const line = result.logs.find((entry) => entry.startsWith('dispatch-batch: turn-budget '))
+  assert.match(line, /wait_s=5400/)
+  assert.match(line, /affordable_turns=369/)
+  const budgetIndex = timeline.findIndex((entry) => entry.kind === 'log' && entry.line.startsWith('dispatch-batch: turn-budget '))
+  const workIndex = timeline.findIndex((entry) => entry.kind === 'spawn' && ['worktree', 'boot', 'run'].some((word) => (entry.call.args || []).includes(word)))
+  assert.ok(budgetIndex >= 0)
+  assert.ok(workIndex > budgetIndex)
+})
+
+test('TB2', () => {
+  const emptyPath = put(join(root, 'turn-census-TB2-empty.jsonl'), '')
+  const malformedPath = put(join(root, 'turn-census-TB2-malformed.jsonl'), '{not json\n{"event":"other"}\n')
+  const noBuilderPath = put(join(root, 'turn-census-TB2-no-builder.jsonl'), `${JSON.stringify({ seat_turn_census: turnCensusRow({ role: 'planner', turns: 362, out_of_tool_ms: 5293017, span_ms: 5404151 }) })}\n`)
+  const zeroLatencyPath = put(join(root, 'turn-census-TB2-zero-latency.jsonl'), `${JSON.stringify({ seat_turn_census: turnCensusRow({ turns: 1, out_of_tool_ms: 0, span_ms: 5000, in_tool_ms: { edit: 0, read: 0, test: 5000, other: 0 } }) })}\n`)
+  const cases = [
+    undefined,
+    [join(root, 'turn-census-TB2-missing.jsonl')],
+    [emptyPath],
+    [malformedPath],
+    [noBuilderPath],
+  ]
+  for (const paths of cases) {
+    const source = readTurnCensus(paths)
+    assert.deepEqual(source.rows, [])
+    assert.equal(typeof source.reason, 'string')
+    const report = turnBudgetReport({ waitSeconds: 5400, censusRows: source.rows, reason: source.reason })
+    assert.deepEqual(report, { measured: false, affordable_turns: null, reason: source.reason })
+    const line = formatTurnBudgetReport(report)
+    assert.match(line, /affordable_turns=unmeasured/)
+    assert.match(line, /latency_ms_per_turn=unmeasured/)
+    assert.doesNotMatch(line, /affordable_turns=(?!unmeasured)/)
+    assert.doesNotMatch(line, /latency_ms_per_turn=(?!unmeasured)/)
+    assert.doesNotMatch(line, /5293017|5404151|362/)
+  }
+  const zeroLatencySource = readTurnCensus([zeroLatencyPath])
+  assert.equal(zeroLatencySource.rows.length, 1)
+  const zeroLatencyReport = turnBudgetReport({ waitSeconds: 5400, censusRows: zeroLatencySource.rows, reason: zeroLatencySource.reason })
+  assert.equal(zeroLatencyReport.measured, false)
+  assert.equal(zeroLatencyReport.affordable_turns, null)
+  assert.equal(typeof zeroLatencyReport.reason, 'string')
+  assert.ok(zeroLatencyReport.reason)
+  const zeroLatencyLine = formatTurnBudgetReport(zeroLatencyReport)
+  assert.match(zeroLatencyLine, /affordable_turns=unmeasured/)
+  assert.match(zeroLatencyLine, /latency_ms_per_turn=unmeasured/)
+  assert.doesNotMatch(zeroLatencyLine, /Infinity|affordable_turns=0|latency_ms_per_turn=0/)
+  assert.doesNotMatch(zeroLatencyLine, /0/)
+})
+
+test('TB3', () => {
+  const rows = [
+    turnCensusRow({ turns: 10, out_of_tool_ms: 100, span_ms: 120 }),
+    turnCensusRow({ turns: 20, out_of_tool_ms: 300, span_ms: 330 }),
+  ]
+  const report = turnBudgetReport({ waitSeconds: 5400, censusRows: rows })
+  assert.equal(report.latency_ms_per_turn, 400 / 30)
+  assert.equal(report.n, 2)
+  assert.equal(report.min_latency_ms_per_turn, 10)
+  assert.equal(report.max_latency_ms_per_turn, 15)
+  assert.deepEqual(report.denominator, { out_of_tool_ms: 400, turns: 30, span_ms: 450 })
+  const line = formatTurnBudgetReport(report)
+  assert.match(line, /latency_ms_per_turn=13\.333333333333334/)
+  assert.match(line, /n=2/)
+  assert.match(line, /denominator=out_of_tool_ms:400,turns:30,span_ms:450/)
+})
+
+test('TB4', () => {
+  const report = turnBudgetReport({
+    waitSeconds: 5400,
+    censusRows: [turnCensusRow({ turns: 10, out_of_tool_ms: 100, span_ms: 120, in_tool_ms: { edit: 1, read: 2, test: 3, other: 4 } })],
+  })
+  const line = formatTurnBudgetReport(report)
+  assert.match(line, /in_tool_ms=edit:1,read:2,test:3,other:4,total:10/)
+  assert.doesNotMatch(line, /\[object Object\]/)
+})
+
+test('TB6', async () => {
+  const ordinary = await dispatchFixture({ label: 'TB6-ordinary', names: ['lane-a'] })
+  const ordinaryRun = ordinary.spawned.find(({ args }) => args.includes('run'))
+  assert.ok(ordinaryRun)
+  const checkoutIndex = ordinaryRun.args.indexOf('--checkout')
+  const briefIndex = ordinaryRun.args.indexOf('--brief-file')
+  assert.deepEqual(ordinaryRun.args, [
+    'crew/crew.mjs', 'run', '--task', 'lane-a', '--checkout', ordinaryRun.args[checkoutIndex + 1],
+    '--brief-file', ordinaryRun.args[briefIndex + 1], '--keep', '--variant', 'full',
+    '--files-in-scope', 'crew/owned-lane-a.mjs',
+  ])
+
+  const authored = await dispatchFixture({ label: 'TB6-authored', names: ['lane-a'], runFlags: { 'wait-builder': '5400' } })
+  const authoredRun = authored.spawned.find(({ args }) => args.includes('run'))
+  assert.ok(authoredRun.args.includes('--wait-builder'))
+  assert.equal(authoredRun.args[authoredRun.args.indexOf('--wait-builder') + 1], '5400')
+  assert.equal(authoredRun.args.includes('--wait-planner'), false)
+
+  const emptyWaitCensusPath = put(join(root, 'turn-census-TB6-empty-wait.jsonl'), `${JSON.stringify({ seat_turn_census: turnCensusRow({ turns: 362, out_of_tool_ms: 5293017, span_ms: 5404151, in_tool_ms: { edit: 0, read: 10058, test: 80892, other: 20184 } }) })}\n`)
+  const emptyWaitFlags = parseCliArgs(['--wait-builder', '', `--${TURN_CENSUS_FLAG}`, emptyWaitCensusPath])
+  assert.deepEqual(emptyWaitFlags, { 'wait-builder': '', [TURN_CENSUS_FLAG]: [emptyWaitCensusPath] })
+  const emptyWait = await dispatchFixture({ label: 'TB6-empty-wait', names: ['lane-a'], runFlags: emptyWaitFlags })
+  const emptyWaitLine = emptyWait.logs.find((line) => line.startsWith('dispatch-batch: turn-budget '))
+  const expectedAffordableTurns = Math.floor(WAITS_S.builder * 1000 / (5293017 / 362))
+  assert.equal(expectedAffordableTurns, 164)
+  assert.ok(emptyWaitLine?.includes(`wait_s=${WAITS_S.builder}`))
+  assert.ok(emptyWaitLine?.includes(`affordable_turns=${expectedAffordableTurns}`))
+  assert.equal(emptyWait.spawned.find(({ args }) => args.includes('run')).args.includes('--wait-builder'), false)
+
+  const censusPath = put(join(root, 'turn-census-TB6.jsonl'), `${JSON.stringify({ seat_turn_census: turnCensusRow({ turns: 2, out_of_tool_ms: 20, span_ms: 30 }) })}\n`)
+  const wave = await dispatchFixture({
+    label: 'TB6-wave', names: ['lane-a', 'lane-b'],
+    requests: { 'lane-b': requestFor('lane-b', { depends_on: ['lane-a'] }) },
+    runFlags: { wave: '1', [TURN_CENSUS_FLAG]: [censusPath] },
+  })
+  assert.deepEqual(parseCliArgs([`--${TURN_CENSUS_FLAG}`, 'one.jsonl', `--${TURN_CENSUS_FLAG}`, 'two.jsonl'])[TURN_CENSUS_FLAG], ['one.jsonl', 'two.jsonl'])
+  const resume = wave.logs.find((line) => line.startsWith('dispatch-batch: deferred lane=lane-b '))
+  assert.ok(resume?.includes(`--${TURN_CENSUS_FLAG} ${censusPath}`))
+  const seatCommands = wave.spawned.filter(({ args }) => args.includes('boot') || args.includes('run'))
+  assert.ok(seatCommands.length > 0)
+  for (const command of seatCommands) {
+    assert.equal(command.args.includes(`--${TURN_CENSUS_FLAG}`), false)
+    assert.equal(command.args.includes(censusPath), false)
+  }
+})
 
 function adoptionArchive(label, { plan = '# Archived plan\n', gate = '// Archived gate\n', planCheck = null, journal = null, omit = null } = {}) {
   const archive = join(root, `adoption-archive-${label}-${Math.random().toString(36).slice(2)}`)
@@ -5207,12 +5349,12 @@ test('an unflagged no-edges dispatch adds no wave output and reports empty defer
   assert.deepEqual(result.report.unstarted, [])
 
   const dry = await dispatchFixture({ label: 'no-edges-dry-run', runFlags: { 'dry-run': true } })
-  assert.deepEqual(dry.logs.filter((line) => !line.startsWith('dispatch-batch: WARNING-SUMMARY ')), [
+  assert.deepEqual(dry.logs.filter((line) => !line.startsWith('dispatch-batch: WARNING-SUMMARY ') && !line.startsWith('dispatch-batch: turn-budget ')), [
     JSON.stringify({ dispatch: 'dry-run', plans: dry.report.plans }),    'dispatch-batch: dry-run lane=lane-a tier=mechanical seats=none seats_from=none',
     'dispatch-batch: dry-run lane=lane-b tier=mechanical seats=none seats_from=none',
     DRY_RUN_BLIND_SPOT,
   ])
-  assert.equal(dry.logs.filter((line) => !line.startsWith('dispatch-batch: WARNING-SUMMARY '))[0].startsWith('{"dispatch":"dry-run","plans":['), true)
+  assert.equal(dry.logs.filter((line) => !line.startsWith('dispatch-batch: WARNING-SUMMARY ') && !line.startsWith('dispatch-batch: turn-budget '))[0].startsWith('{"dispatch":"dry-run","plans":['), true)
   assert.equal(dry.report.waves.length, 1)
   assert.deepEqual(dry.report.deferred, [])
   assert.deepEqual(dry.report.unstarted, [])

@@ -2813,7 +2813,20 @@ test('E1 compaction fields leave every prior census field byte-identical', () =>
     assert.equal(rpc.io.wait(rpc.assigned.returnPath, 60).status, 'done')
     rpcCensus = rpc.rows.find((row) => row.seat_turn_census)?.seat_turn_census
   } finally { rpc.cleanup() }
-  for (const key of ['compactions', 'compaction_frame', 'compactions_absent_reason']) delete rpcCensus[key]
+  // #1047's compaction keys, and #1079's pre-first-turn attribution keys, are
+  // ADDITIVE by construction: this tripwire's claim is that every field that
+  // existed BEFORE them is byte-identical, so each new family is deleted here
+  // deliberately rather than folded into the expectation below.
+  for (const key of [
+    'compactions', 'compaction_frame', 'compactions_absent_reason',
+    'pre_first_turn_span_ms', 'seat_boot_ms', 'seat_boot_absent_reason',
+    'prompt_delivery_ms', 'prompt_delivery_absent_reason',
+    'brief_read_turns', 'brief_read_turns_absent_reason',
+    'brief_read_ms', 'brief_read_absent_reason',
+    'envelope_poll_ms', 'envelope_poll_absent_reason',
+    'pre_first_turn_known_sum_ms', 'pre_first_turn_residual_ms',
+    'pre_first_turn_tolerance_ms', 'pre_first_turn_reconciled',
+  ]) delete rpcCensus[key]
   assert.equal(JSON.stringify(rpcCensus), JSON.stringify({
     role: 'builder',
     dispatch_id: 'd1',

@@ -38,6 +38,18 @@ test('the turn-economy rule is stated once and still reaches every seat', () => 
   }
 })
 
+test('BC1', () => {
+  const charter = readFileSync(join(REPO_ROOT, 'crew', 'roles', 'builder.md'), 'utf8')
+  const sentence = 'Run the gate at most once before returning; never rerun a command without an intervening edit.'
+  assert.equal(charter.split(sentence).length - 1, 1)
+})
+
+test('BC2', () => {
+  const charter = readFileSync(join(REPO_ROOT, 'crew', 'roles', 'builder.md'), 'utf8')
+  const sentence = 'Batch independent reads and edits into one turn.'
+  assert.equal(charter.split(sentence).length - 1, 1)
+})
+
 test('the shared charter and validator agree on the findings contract', () => {
   const charter = readFileSync(new URL('./roles/reviewer.md', import.meta.url), 'utf8')
   const start = charter.indexOf('## Envelope details fields')

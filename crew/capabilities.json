@@ -33,7 +33,12 @@
       "skills": [],
       "advisor": false,
       "requires": [],
-      "mcp_servers": []
+      "mcp_servers": [],
+      "by_agent": {
+        "pi": {
+          "extensions": ["crew/pi/extensions/builderloop.ts"]
+        }
+      }
     },
     "reviewer": {
       "tools": ["Task"],

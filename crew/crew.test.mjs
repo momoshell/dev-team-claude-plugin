@@ -1,7 +1,7 @@
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync } from 'node:fs'
+import { readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync, chmodSync } from 'node:fs'
 import { execSync, spawn, spawnSync } from 'node:child_process'
 import { tmpdir, homedir } from 'node:os'
 import { join, basename, dirname } from 'node:path'
@@ -13,7 +13,7 @@ import {
   composeLayout, mcpConfigDocument, writeMcpConfigs, SEAT_DEFAULTS, FANOUT_TOOLS, DEFAULT_ROLES, ROLE_ORDER, transportFor, seatTransport, HEADLESS_TRANSPORTS, assertCapabilities, resolveAdapters, bootAllocation, resolveWorkerBin, docOpenArgs,
   resolveTier, resolveSeatModels, FALLBACK_REFUSALS, refuseFallback, loadRoster, normalizeRoster, refuseRoster, rosterSeating, serializeRosterV1, serializeRosterV2, ROSTER_REFUSALS, ROSTER_SCHEMA_VERSIONS, rosterSourcePath, loadRosterSource, writeRosterSnapshot, rosterSnapshotReader, loadLadder, assertBandFloors, grantedDefModels, assertDefBandFloors, refuseBandFloor, seatModelKey, bandForMember, bandForRaw, seatBand, LADDER_PATH, BAND_FLOOR_REFUSALS, shadowCandidates, shadowExclusion, shadowPick, shadowPickBoot, SHADOW_EXCLUSIONS, SHADOW_OUTCOMES, SHADOW_ABSENT, seatReadySignal, assertSeats, phaseForStage, emitAdapter,
   waitForEnvelope, WAIT_POLL_MS, LIVENESS_PROBE_MS, LIVENESS_MISSES_TO_DIE,
-  parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, runExitCode, runOutcome, RUN_EXIT_CODES, RUN_EXIT_UNEXPECTED, RUN_START_EVENT, BATCH_DIR_EVENT, BATCH_DIR_NOT_BATCHED, batchDirFromBrief, readHead, readBranch, teardownDecision, stagesFromJournal, assignmentsFromJournal, RUN_CONFIG_DECLARATIONS, resolveRunConfig, aliasDeprecationLines, persistedRunConfig, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, seatLiveness, awaitSeatsReady, teardownCore, teardownCmd, TEARDOWN_EXIT_SEATLESS, TEARDOWN_EXIT_UNPROVEN, TEARDOWN_ABSENT_CAUSES, teardownAbsentCause, TEARDOWN_DRAIN_MS, TEARDOWN_DRAIN_ERROR_MS, installExitMarker, writeTerminalLine, EXITED_STATUS, SIGNAL_EXIT_CODES, UNCAUGHT_EXIT_CODE, terminalLineSeen,
+  parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, runExitCode, runOutcome, RUN_EXIT_CODES, RUN_EXIT_UNEXPECTED, RUN_START_EVENT, BATCH_DIR_EVENT, BATCH_DIR_NOT_BATCHED, batchDirFromBrief, readHead, readBranch, teardownDecision, stagesFromJournal, assignmentsFromJournal, RUN_CONFIG_DECLARATIONS, resolveRunConfig, aliasDeprecationLines, persistedRunConfig, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, seatLiveness, awaitSeatsReady, teardownCore, teardownCmd, TEARDOWN_EXIT_SEATLESS, TEARDOWN_EXIT_UNPROVEN, TEARDOWN_ABSENT_CAUSES, teardownAbsentCause, TEARDOWN_DRAIN_MS, TEARDOWN_DRAIN_ERROR_MS, installExitMarker, installRunFinalizers, writeTerminalLine, EXITED_STATUS, SIGNAL_EXIT_CODES, UNCAUGHT_EXIT_CODE, terminalLineSeen,
   UsageError, KNOWN_FLAGS, ROLE_FLAG_PREFIXES, REQUIRED_FLAGS, BOOT_ONLY_FLAGS, assertUsage,
   parseArgs, FLAG_VALUE_REFUSAL, FLAG_VALUE_CONTRACT, BOOLEAN_FLAGS,
   resolveTimeoutS, TIMEOUT_S_REFUSAL, TIMEOUT_S_DEFAULT,
@@ -2318,6 +2318,147 @@ function assertKilledBySigterm(outcome, where) {
   assert.ok(outcome.elapsed < SIGNAL_KILL_BOUND_MS, `${where}: expected death within ${SIGNAL_KILL_BOUND_MS}ms, took ${outcome.elapsed}ms`)
 }
 
+const PROLOGUE_SIGNAL_WINDOW_MS = 500
+const PROLOGUE_POLL_MS = 20
+const PROLOGUE_READY_TIMEOUT_MS = 5000
+const prologueSignalDelay = () => new Promise((resolve) => setTimeout(resolve, PROLOGUE_POLL_MS))
+
+function prologueSignalFixture() {
+  const root = scratchDir('crew-run-prologue-signal-')
+  const home = join(root, 'home')
+  const checkout = join(root, 'checkout')
+  const task = 'run-prologue-signal'
+  const crewDir = join(home, '.crew', basename(checkout), task)
+  const brief = join(root, 'brief.md')
+  const readyPath = join(root, 'prologue-ready')
+  const cmuxPath = join(root, 'cmux')
+  mkdirSync(join(crewDir, 'returns'), { recursive: true })
+  mkdirSync(join(crewDir, 'task'), { recursive: true })
+  mkdirSync(checkout, { recursive: true })
+  execSync('git init -q && git -c user.email=prologue@example.test -c user.name=prologue commit --allow-empty -q -m seed', { cwd: checkout })
+  writeFileSync(brief, '# prologue brief\n')
+  writeFileSync(join(crewDir, 'journal.jsonl'), '')
+  writeFileSync(join(crewDir, 'crew.json'), JSON.stringify({
+    schema_version: 3, task, checkout, tier: 'build',
+    roles: ['planner', 'builder', 'reviewer'],
+    members: Object.fromEntries(['planner', 'builder', 'reviewer'].map((role) => [role, {
+      surface_id: `${role}-surface`, pane_id: null, transport: 'pane', model: 'sonnet', agent: 'claude',
+    }])),
+    task_return: join(crewDir, 'returns', 'task.json'),
+  }))
+  writeFileSync(cmuxPath, `#!/usr/bin/env node
+import { appendFileSync } from 'node:fs'
+if (process.argv[2] === 'read-screen') appendFileSync(process.env.CREW_PROLOGUE_READY, 'ready\\n')
+process.exit(0)
+`)
+  chmodSync(cmuxPath, 0o755)
+  return { root, home, checkout, task, brief, readyPath, cmuxPath }
+}
+
+async function waitForPrologueReady(fixture, child, state) {
+  const deadline = Date.now() + PROLOGUE_READY_TIMEOUT_MS
+  while (!existsSync(fixture.readyPath)) {
+    if (state.error) throw state.error
+    if (state.closed) throw new Error(`run prologue child closed before readiness: ${JSON.stringify(state.closed)}`)
+    if (Date.now() >= deadline) throw new Error('run prologue child never reached awaitSeatsReady')
+    await prologueSignalDelay()
+  }
+}
+
+async function assertPrologueSurvivesSigterm(child, state) {
+  const deadline = Date.now() + PROLOGUE_SIGNAL_WINDOW_MS
+  while (Date.now() < deadline) {
+    assert.equal(state.error, null, 'run prologue child emitted an error after SIGTERM')
+    assert.equal(state.closed, null, 'run prologue child closed during the SIGTERM survival window')
+    assert.equal(child.exitCode, null, 'run prologue child exited during the SIGTERM survival window')
+    assert.equal(child.signalCode, null, 'run prologue child received the default SIGTERM disposition')
+    await prologueSignalDelay()
+  }
+  assert.equal(state.closed, null, 'run prologue child closed during the SIGTERM survival window')
+  assert.equal(child.exitCode, null, 'run prologue child exited during the SIGTERM survival window')
+  assert.equal(child.signalCode, null, 'run prologue child received the default SIGTERM disposition')
+}
+
+function waitForPrologueChildClose(child, state) {
+  if (state.closed) return Promise.resolve(state.closed)
+  return new Promise((resolve) => child.once('close', (code, signal) => resolve({ code, signal })))
+}
+
+function finalizerChildFixture() {
+  const root = scratchDir('crew-run-finalizer-')
+  const stateDir = join(root, 'state')
+  const dbPath = join(root, 'ledger.db')
+  const readyPath = join(root, 'ready.json')
+  const script = join(root, 'run-finalizer-child.mjs')
+  mkdirSync(stateDir, { recursive: true })
+  writeFileSync(script, `import { openRun } from ${JSON.stringify(new URL('../scripts/factory/emit.mjs', import.meta.url).href)}
+import { installRunFinalizers } from ${JSON.stringify(new URL('./crew.mjs', import.meta.url).href)}
+import { writeFileSync, renameSync } from 'node:fs'
+const stateDir = ${JSON.stringify(stateDir)}
+const dbPath = ${JSON.stringify(dbPath)}
+const readyPath = ${JSON.stringify(readyPath)}
+const emitter = openRun({ stateDir, repoSlug: 'crew', taskSlug: 'run-finalizer', dbPath, stderr: { write: () => {} } })
+emitter.startRun()
+installRunFinalizers(emitter)
+writeFileSync(readyPath + '.tmp', JSON.stringify({ adw_id: emitter.adwId }))
+renameSync(readyPath + '.tmp', readyPath)
+setInterval(() => {}, 1000)
+`)
+  return { root, stateDir, dbPath, readyPath, script }
+}
+
+async function runFinalizerChild() {
+  const fixture = finalizerChildFixture()
+  let child
+  let stdout = ''
+  let stderr = ''
+  try {
+    const result = await new Promise((resolve, reject) => {
+      let settled = false
+      let signalled = false
+      const timeout = setTimeout(() => {
+        try { child?.kill('SIGKILL') } catch {}
+        finish(new Error('run finalizer child timed out'), true)
+      }, 15000)
+      const poll = setInterval(() => {
+        if (signalled || !existsSync(fixture.readyPath)) return
+        signalled = true
+        try { child.kill('SIGTERM') } catch (err) { finish(err, true) }
+      }, 10)
+      const finish = (value, failed = false) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timeout)
+        clearInterval(poll)
+        if (failed) reject(value)
+        else resolve(value)
+      }
+      child = spawn(process.execPath, [fixture.script], { stdio: ['ignore', 'pipe', 'pipe'] })
+      child.stdout.on('data', (chunk) => { stdout += String(chunk) })
+      child.stderr.on('data', (chunk) => { stderr += String(chunk) })
+      child.once('error', (err) => finish(err, true))
+      child.once('close', (code, signal) => finish({ code, signal }))
+    })
+    const ready = JSON.parse(readFileSync(fixture.readyPath, 'utf8'))
+    const sidecar = JSON.parse(readFileSync(join(fixture.stateDir, 'ledger', 'run.json'), 'utf8'))
+    const ledger = openLedger({ dbPath: fixture.dbPath, stderr: { write: () => {} } })
+    let sessions
+    try { sessions = ledger.dumpTable('sessions').filter((row) => row.adw_id === sidecar.adw_id) }
+    finally { ledger.close() }
+    const jsonl = readFileSync(join(fixture.root, 'ledger.jsonl'), 'utf8').trim()
+      .split('\n').filter(Boolean).map((line) => JSON.parse(line))
+    return {
+      ...result, stdout, stderr, ready, sidecar, sessions,
+      endRows: jsonl.filter((row) => row.kind === 'endSession' && row.args?.adw_id === sidecar.adw_id),
+    }
+  } finally {
+    if (child && child.exitCode == null && child.signalCode == null) {
+      try { child.kill('SIGKILL') } catch {}
+    }
+    rmSync(fixture.root, { recursive: true, force: true })
+  }
+}
+
 test('the settle path writes the envelope before its teardown and only once', () => {
   const f = childSignalFixture()
   const order = []
@@ -2773,6 +2914,150 @@ test('a real SIGTERM leaves exactly one exit marker on a child stdout', async ()
       try { child.kill('SIGKILL') } catch {}
     }
     rmSync(root, { recursive: true, force: true })
+  }
+})
+
+async function runCmdEmitterProbe() {
+  const home = scratchDir('crew-run-finalizer-seam-home-')
+  const checkoutRoot = scratchDir('crew-run-finalizer-seam-checkout-')
+  const checkout = join(checkoutRoot, 'checkout')
+  const task = 'run-finalizer-seam'
+  const brief = join(home, 'brief.md')
+  const dir = join(home, '.crew', 'checkout', task)
+  mkdirSync(checkout, { recursive: true })
+  mkdirSync(join(dir, 'returns'), { recursive: true })
+  mkdirSync(join(dir, 'task'), { recursive: true })
+  execSync('git init -q && git -c user.email=seam@example.test -c user.name=seam commit --allow-empty -q -m seed', { cwd: checkout })
+  writeFileSync(brief, '# seam brief\\n')
+  writeFileSync(join(dir, 'journal.jsonl'), '')
+  writeFileSync(join(dir, 'crew.json'), JSON.stringify({
+    schema_version: 3, task, checkout, tier: 'build',
+    roles: ['planner', 'builder', 'reviewer'],
+    members: Object.fromEntries(['planner', 'builder', 'reviewer'].map((role) => [role, {
+      surface_id: null, pane_id: null, transport: 'headless-json', model: 'sonnet', agent: 'claude',
+    }])),
+    task_return: join(dir, 'returns', 'task.json'),
+  }))
+  const started = { adwId: 'started-facade', starts: 0, startRun() { this.starts += 1 }, endRun() {} }
+  const replacement = { adwId: 'replacement-facade', starts: 0, startRun() { this.starts += 1 }, endRun() {} }
+  let opened = 0
+  let handed
+  const previousExitCode = process.exitCode
+  try {
+    await withHome(home, () => runCmd({ task, checkout, 'brief-file': brief, keep: true }, {
+      openRun: () => { opened += 1; return opened === 1 ? started : replacement },
+      installRunFinalizers: (emitter) => { handed = emitter },
+      awaitSeatsReady: () => {},
+      seatIo: () => ({}),
+      drive: () => ({ status: 'done', summary: '', artifacts: [], details: {} }),
+      appendCompletion: () => {},
+      writeTerminalLine: () => {},
+    }))
+    return { opened, started, replacement, handed }
+  } finally {
+    process.exitCode = previousExitCode
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+}
+
+test('ZFA1', async () => {
+  const result = await runFinalizerChild()
+  assert.equal(result.sessions.length, 1)
+  assert.notEqual(result.sessions[0].status, 'running')
+  assert.equal(result.endRows.length, 1)
+})
+
+test('ZFR1', async () => {
+  const result = await runFinalizerChild()
+  assert.equal(result.sessions.length, 1)
+  assert.equal(result.sessions[0].terminal_reason, 'SIGTERM')
+})
+
+test('ZFA2', async () => {
+  const result = await runFinalizerChild()
+  assert.equal(result.ready.adw_id, result.sidecar.adw_id)
+  assert.equal(result.sessions.length, 1)
+  assert.equal(result.sessions[0].adw_id, result.sidecar.adw_id)
+  assert.equal(result.sessions[0].terminal_actor, 'finalizer')
+  const seam = await runCmdEmitterProbe()
+  assert.equal(seam.opened, 1)
+  assert.equal(seam.started.starts, 1)
+  assert.strictEqual(seam.handed, seam.started)
+})
+
+test('ZFC1', async () => {
+  const result = await runFinalizerChild()
+  assert.equal(result.stdout, '{"status":"exited","signal":"SIGTERM"}\n')
+})
+
+test('ZFC2', async () => {
+  const result = await runFinalizerChild()
+  assert.equal(result.code, 143)
+  assert.equal(result.signal, null)
+})
+
+test('ZFD1', () => {
+  const calls = []
+  const emitter = { installFinalizer() { calls.push('finalizer'); throw new Error('instrumentation failed') } }
+  assert.doesNotThrow(() => installRunFinalizers(emitter, { installExitMarkerFn: () => calls.push('marker') }))
+  assert.deepEqual(calls, ['finalizer', 'marker'])
+})
+
+test('ZFF1', () => {
+  const home = scratchDir('crew-run-finalizer-fail-home-')
+  const entry = fileURLToPath(new URL('./crew.mjs', import.meta.url))
+  const env = { ...CLI_ENV, HOME: home }
+  try {
+    for (const verb of ['boot', 'handoff', 'wait', 'status', 'teardown']) {
+      const child = spawnSync(process.execPath, [entry, verb, '--bogus'], { cwd: CLI_REPO_ROOT, encoding: 'utf8', env })
+      const output = `${child.stdout || ''}${child.stderr || ''}`
+      assert.equal(child.status, 2, verb)
+      assert.doesNotMatch(output, /\{"status":"exited"/, verb)
+    }
+    const run = spawnSync(process.execPath, [entry, 'run', '--task', 'run-finalizer-failure', '--brief-file', join(home, 'missing.md'), '--bogus'], {
+      cwd: CLI_REPO_ROOT, encoding: 'utf8', env,
+    })
+    const output = `${run.stdout || ''}${run.stderr || ''}`
+    assert.equal(run.status, 2)
+    assert.equal((output.match(/\{"status":"exited"/g) || []).length, 1)
+    assert.match(output, /\{"status":"exited","code":2\}\n/)
+  } finally { rmSync(home, { recursive: true, force: true }) }
+})
+
+test('ZFG1', async () => {
+  const seam = await runCmdEmitterProbe()
+  assert.equal(seam.opened, 1)
+  assert.equal(seam.started.starts, 1)
+  assert.strictEqual(seam.handed, seam.started)
+})
+
+test('RV1-1 run survives SIGTERM while awaitSeatsReady holds the prologue', async () => {
+  const fixture = prologueSignalFixture()
+  let child
+  const state = { closed: null, error: null }
+  try {
+    child = spawn(process.execPath, [fileURLToPath(new URL('./crew.mjs', import.meta.url)), 'run', '--task', fixture.task, '--checkout', fixture.checkout, '--brief-file', fixture.brief, '--keep'], {
+      cwd: CLI_REPO_ROOT,
+      env: { ...CLI_ENV, HOME: fixture.home, CMUX_BIN: fixture.cmuxPath, CREW_PROLOGUE_READY: fixture.readyPath, DEVTEAM_LEDGER_DB: join(fixture.root, 'ledger.db') },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    child.stdout.on('data', () => {})
+    child.stderr.on('data', () => {})
+    child.once('error', (err) => { state.error = err })
+    child.once('close', (code, signal) => { state.closed = { code, signal } })
+    await waitForPrologueReady(fixture, child, state)
+    assert.equal(child.kill('SIGTERM'), true)
+    await assertPrologueSurvivesSigterm(child, state)
+  } finally {
+    if (child?.pid) {
+      const closed = waitForPrologueChildClose(child, state)
+      if (child.exitCode == null && child.signalCode == null) {
+        try { child.kill('SIGKILL') } catch {}
+      }
+      await closed
+    }
+    rmSync(fixture.root, { recursive: true, force: true })
   }
 })
 

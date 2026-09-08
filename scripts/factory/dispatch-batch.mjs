@@ -544,12 +544,46 @@ function wholeWord(source, symbol) {
   return new RegExp(`\\b${escaped}\\b`).test(source)
 }
 
-export function testsOutsideFence({ surface, fenceFiles, reach } = {}) {
+function reachRowKey(row) {
+  return [row.test, row.file, row.how].join('\0')
+}
+
+export function testsOutsideFence({ surface, fenceFiles, reach, droppedRows = [] } = {}) {
   const ownSurface = (Array.isArray(surface) ? surface : []).filter((file) => typeof file === 'string').map(normaliseRepoPath)
   const ownFence = (Array.isArray(fenceFiles) ? fenceFiles : []).filter((file) => typeof file === 'string').map(normaliseRepoPath)
   const matchesSurface = scopeMatcher(ownSurface)
   const inFence = scopeMatcher(ownFence)
-  const byTest = new Map()
+  const byKey = new Map()
+  const retainReachRow = (row, key = reachRowKey(row)) => {
+    const candidate = {
+      test: row.test,
+      file: row.file,
+      hops: row.hops,
+      how: row.how,
+      symbols: Array.isArray(row.symbols) ? [...row.symbols].sort() : [],
+    }
+    const current = byKey.get(key)
+    if (!current) {
+      byKey.set(key, candidate)
+      return
+    }
+    const currentRank = current.hops === null ? TEST_REACH_DEPTH + 1 : current.hops
+    const candidateRank = candidate.hops === null ? TEST_REACH_DEPTH + 1 : candidate.hops
+    const candidateWins = candidateRank < currentRank
+    const retained = candidateWins ? candidate : current
+    const losing = candidateWins ? current : candidate
+    byKey.set(key, {
+      ...retained,
+      symbols: [...new Set([...current.symbols, ...candidate.symbols])].sort(),
+    })
+    if (Array.isArray(droppedRows)) droppedRows.push({
+      test: losing.test,
+      file: losing.file,
+      hops: losing.hops,
+      how: losing.how,
+      symbols: [...losing.symbols],
+    })
+  }
   const byFile = reach?.byFile instanceof Map ? reach.byFile : new Map()
   for (const [fileValue, perTest] of byFile) {
     const file = normaliseRepoPath(fileValue)
@@ -558,10 +592,7 @@ export function testsOutsideFence({ surface, fenceFiles, reach } = {}) {
       const test = normaliseRepoPath(testValue)
       if (inFence(test)) continue
       const hops = Number.isFinite(hopsValue) ? hopsValue : null
-      const row = byTest.get(test)
-      if (!row || row.hops === null || (hops !== null && hops < row.hops)) {
-        byTest.set(test, { test, file, hops, how: 'import', symbols: row ? row.symbols : [] })
-      }
+      retainReachRow({ test, file, hops, how: 'import', symbols: [] })
     }
   }
   const tests = reach?.tests instanceof Map ? reach.tests : new Map()
@@ -580,9 +611,9 @@ export function testsOutsideFence({ surface, fenceFiles, reach } = {}) {
       }
       if (hits.length === 0 || hits.length > SYMBOL_FANOUT_LIMIT) continue
       for (const test of hits) {
-        const row = byTest.get(test) || { test, file: owner, hops: null, how: 'symbol', symbols: [] }
-        if (!row.symbols.includes(symbol)) row.symbols = [...row.symbols, symbol].sort()
-        byTest.set(test, row)
+        const symbolRow = { test, file: owner, hops: null, how: 'symbol', symbols: [symbol] }
+        const importKey = reachRowKey({ test, file: owner, how: 'import' })
+        retainReachRow(symbolRow, byKey.has(importKey) ? importKey : reachRowKey(symbolRow))
       }
     }
   }
@@ -593,17 +624,20 @@ export function testsOutsideFence({ surface, fenceFiles, reach } = {}) {
     for (const testValue of reachedTests) {
       const test = normaliseRepoPath(testValue)
       if (inFence(test)) continue
-      if (byTest.has(test)) continue
-      byTest.set(test, { test, file: owner, hops: null, how: 'path', symbols: [] })
+      const pathRow = { test, file: owner, hops: null, how: 'path', symbols: [] }
+      retainReachRow(pathRow)
     }
   }
-  return [...byTest.values()].sort((a, b) => {
+  return [...byKey.values()].sort((a, b) => {
     // Least obvious first: a symbol-only row (hops null) is the coupling an operator will
     // not guess, and nearest-first put it last — b394 lost 29 minutes of a build round to
     // exactly that row being cut from the listing (#869).
     const left = a.hops === null ? TEST_REACH_DEPTH + 1 : a.hops
     const right = b.hops === null ? TEST_REACH_DEPTH + 1 : b.hops
-    return right - left || (a.test < b.test ? -1 : a.test > b.test ? 1 : 0)
+    return right - left
+      || (a.test < b.test ? -1 : a.test > b.test ? 1 : 0)
+      || (a.file < b.file ? -1 : a.file > b.file ? 1 : 0)
+      || (a.how < b.how ? -1 : a.how > b.how ? 1 : 0)
   })
 }
 
@@ -625,11 +659,16 @@ export function surfaceExportsOf({ surface, reach } = {}) {
   return [...names].sort()
 }
 
-// The narrow shape #960 names, and NOTHING wider. Three conjuncts, each of which #635's
-// measurement says must hold before a heuristic may refuse: the test imports the fenced
-// file DIRECTLY (one hop, not two of re-export), through a REAL import (not the literal
-// symbol scan whose blind spots the warning already documents), and it names at least one
-// symbol the lane's own write surface exports. Every other row stays a warning.
+// #960 names TWO refusal classes, and NOTHING wider. Every `how === 'path'` row is an
+// unconditional `test-reach-unfenced` refusal. `pathLiteralsFrom` scans every quoted
+// literal in a test, so a test's own relative import specifier for a fenced file emits
+// that path fact too.
+// For `how === 'import'` or `how === 'symbol'` rows, the narrow direct-import +
+// surface-export-overlap conjunction is the only other refusal route: the test imports
+// the fenced file DIRECTLY (one hop, not two of re-export), through a REAL import (not
+// the literal symbol scan whose blind spots the warning already documents), and it names
+// at least one symbol the lane's own write surface exports. Every other import/symbol row
+// stays a warning.
 export function reachRefusalRows({ rows, surfaceExports } = {}) {
   const exported = new Set((Array.isArray(surfaceExports) ? surfaceExports : []).filter((symbol) => typeof symbol === 'string'))
   const refused = []
@@ -677,7 +716,7 @@ function writeFenceReport({ path, lanes, crossBatchUnknown = [], deps } = {}) {
 function warningSummary({ lane, counts, refusals, citation, warnings }) {
   const warningEvidence = `report=${citation} doctrine=${WARNING_DOCTRINE}`
   const refusalNames = Array.isArray(refusals) && refusals.length > 0 ? refusals.join(',') : 'none'
-  return `dispatch-batch: WARNING-SUMMARY lane=${lane} refusals=${refusalNames} anchor-pin=${counts.anchorPin} · citation-carrier=${counts.citationCarrier} · test-reach=${counts.testReach} (${counts.actionable} actionable) · cross-batch-unknown=${counts.crossBatchUnknown} ${warningEvidence}`
+  return `dispatch-batch: WARNING-SUMMARY lane=${lane} refusals=${refusalNames} anchor-pin=${counts.anchorPin} · citation-carrier=${counts.citationCarrier} · test-reach=${counts.testReach} · actionable=${counts.actionable} · collapsed=${counts.testReachDropped} · cross-batch-unknown=${counts.crossBatchUnknown} ${warningEvidence}`
 }
 
 export class BatchRefusal extends Error {
@@ -1507,7 +1546,8 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
       })
     }
 
-    const reachRows = fenceHasSurface ? testsOutsideFence({ surface: ownSurface, fenceFiles: ownFiles, reach: reachFor() }) : []
+    const droppedReachRows = []
+    const reachRows = fenceHasSurface ? testsOutsideFence({ surface: ownSurface, fenceFiles: ownFiles, reach: reachFor(), droppedRows: droppedReachRows }) : []
     // Classified BEFORE the warning is queued (#960). The warning closes with "not a
     // refusal", and the deferred warnings render at :1313, ahead of any refusal raised
     // after this loop — so listing a row that IS about to refuse would print the
@@ -1536,13 +1576,13 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
       })
     }
     if (overridden.length > 0) {
-      const overrideText = `${TEST_REACH_OVERRIDE_PREFIX} lane ${name} declares ${TEST_REACH_OVERRIDE_KEY} for ${overridden.length} reaching test(s) that would otherwise refuse: ${overridden.map((row) => `${row.symbols.length === 0 ? `${row.test} reaches ${row.file} through a static path literal (path-only, how=path)` : `${row.test} imports ${row.file} and names ${row.symbols.join(', ')}`}; why=${row.why}`).join('; ')}; the named row(s) do not trigger ${TEST_REACH_UNFENCED}, the test(s) stay OUTSIDE the lane fence, and no seat may widen its own scope to reach them; this records the override only — every later check can still refuse this batch, so it is not a statement of the lane dispatch outcome.`
+      const overrideText = `${TEST_REACH_OVERRIDE_PREFIX} lane ${name} declares ${TEST_REACH_OVERRIDE_KEY} for ${overridden.length} reaching test(s) that would otherwise refuse: ${overridden.map((row) => `${row.symbols.length === 0 ? `${row.test} reaches ${row.file} through a static path literal (which includes its own import specifier; path-only, how=path)` : `${row.test} imports ${row.file} and names ${row.symbols.join(', ')}`}; why=${row.why}`).join('; ')}; the named row(s) do not trigger ${TEST_REACH_UNFENCED}, the test(s) stay OUTSIDE the lane fence, and no seat may widen its own scope to reach them; this records the override only — every later check can still refuse this batch, so it is not a statement of the lane dispatch outcome.`
       warnings.push({ kind: 'test-reach-override', lane: name, rows: overridden, text: overrideText })
       d.log(overrideText)
     }
     if (refusedRows.length > 0) reachRefusals.push({ lane: name, rows: refusedRows, files: ownFiles })
     const overrideField = overridden.length > 0 ? { test_reach_overrides: overridden } : {}
-    reportLanes.push({ lane: name, test_reach: reachRows, citation_carriers: unfencedCarriers, anchor_pins: unfencedPins, ...overrideField })
+    reportLanes.push({ lane: name, test_reach: reachRows, test_reach_dropped: droppedReachRows, citation_carriers: unfencedCarriers, anchor_pins: unfencedPins, ...overrideField })
     summaryLanes.push({
       lane: name,
       counts: {
@@ -1550,6 +1590,7 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
         citationCarrier: unfencedCarriers.length,
         testReach: reachRows.length,
         actionable: refusedRows.length,
+        testReachDropped: droppedReachRows.length,
       },
       refusals: refusedRows.length > 0 ? [TEST_REACH_UNFENCED] : [],
     })
@@ -1624,7 +1665,7 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
   // comment claims the last position among register checks and keeps it.
   if (reachRefusals.length > 0) {
     const detail = reachRefusals.flatMap(({ lane: name, rows }) => rows.map((row) => row.symbols.length === 0
-      ? `lane ${name}: ${row.test} reaches ${row.file} through a static path literal (path-only, how=path)`
+      ? `lane ${name}: ${row.test} reaches ${row.file} through a static path literal (which includes its own import specifier; path-only, how=path)`
       : `lane ${name}: ${row.test} imports ${row.file} at one hop and names ${row.symbols.join(', ')}`)).join('; ')
     const remedy = reachRefusals.map(({ lane: name, rows, files }) => `lane ${name}: ${[...new Set([...files, ...rows.map(({ test }) => test)])].sort().join(', ')}`).join(' | ')
     const remedyText = `${TEST_REACH_REFUSAL_REMEDY} ${remedy}`

@@ -6,7 +6,239 @@ import assert from 'node:assert/strict'
 import {
   B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_IMPL_FILE, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, B384_CORRECTED_FIND, B384_CORRECTED_REPLACE, B384_GREEN, B384_MUTATION, B384_RED, B384_REFACTORED_BUILDER, B384_REFACTORED_UNCORRECTED_BUILDER, B44_LEADLESS_CTX, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_PLAN, CHECK_RUNS, CONVERGE_CTX, CONVERGE_GATE, CONVERGE_PLAN, CTX, CTX_DIRECTED, CTX_REPAIR, DIRECTED_FILES, D_ASK, D_AUTO, ENVELOPE_FIELD_KINDS, EXECUTIONS, FAILURE_UPGRADE, GATE_REAP_CMD_EOF, GATE_REAP_SWEEP_MARKER, GATE_SUMMARY_PREFIX, HARDENING_MARKS, HARDENING_OUTCOMES, HARDENING_REFUSALS, MODIFIER_OUTCOMES, MUTATIONS_MAX, MUTATION_BINDING_FAILURES, MUTATION_OUTCOMES, PARTIAL_REVIEWED, RED, SENSITIVITY_FLOOR, SHAPE_MAJOR_PHASES, SHAPE_ROUNDED_STAGES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, UNIVERSAL_STAGE_HEADS, VALIDATION_LANE_UNLOADABLE, VARIANTS, VARIANT_NAMES, WRITE_SURFACES, applyMutationAnchor, applyPrescriptionLines, b127GatePaths, b127PidAlive, b318Builders, b318SiteA, b376Build, b376DiskProofIo, b376ProofIo, b376Review, b376StageStack, b384Io, b384RefactoredIo, b44AssertLeadlessGate, b44GatePlan, bindMutationAnchor, buildEnv, collapseStages, dispositionIo, driveTask, existsSync, fakeIo, fenceBase, fenceDiff, fenceSpan, gateReapCommand, gateReapFresh, gateReapOriginal, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, hardeningBounceLines, hardeningBriefLines, hardeningDebt, hardeningOf, join, laneFence, leadEnv, mutationChangesTokens, outOfScopeFiles, planEnv, protectedPlanEnv, readFileSync, resumeGreen, resumeRed, reviewConvergeRun, reviewEnv, reviewFindings, rmSync, s843Ctx, s843Io, s843PlanEnv, s843Rows, scopeMatcher, scopedPath, scratchDir, shapeDefect, spawnSync, stageShape, treeDigest, triageEnv, undeclaredStage, validateHardened, validateMutations, validationPlan, validationProbeRun, validationRows,
 } from './drive-fixtures.mjs'
-import { CHECK_MATCHES, HARDENING_APPEAL_SHAPE, HARDENING_CLASSES, hardeningAppealLines, hardeningAppealRequest, hardeningClassOf } from './drive.mjs'
+import { CHECK_MATCHES, HARDENING_APPEAL_SHAPE, HARDENING_CLASSES, hardeningAppealLines, hardeningAppealRequest, hardeningClassOf, mutationProofScope } from './drive.mjs'
+
+const proofScopeMutations = () => [
+  { check: 'first', file: 'a.mjs' },
+  { check: 'second', file: 'b.mjs' },
+]
+
+test('A1 proof scope re-proves only changed mutation files', () => {
+  const mutations = proofScopeMutations()
+  const result = mutationProofScope({
+    mutations,
+    previousRows: [
+      { check: 'first', outcome: 'killed', proof: 'fresh', measured_generation: 4 },
+      { check: 'second', outcome: 'killed', proof: 'fresh', measured_generation: 3 },
+    ],
+    staleProofFiles: ['a.mjs'],
+    generation: 5,
+    previousGeneration: 4,
+  })
+  assert.deepEqual(result.selected.map(({ check }) => check), ['first'])
+  assert.deepEqual(result.carried.map(({ check, proof, measured_generation }) => ({ check, proof, measured_generation })), [
+    { check: 'second', proof: 'carried-forward', measured_generation: 3 },
+  ])
+})
+
+test('B1 carried proof rows stay distinguishable from fresh rows', () => {
+  const mutations = proofScopeMutations()
+  const result = mutationProofScope({
+    mutations,
+    previousRows: [
+      { check: 'first', outcome: 'killed', measured_generation: 1 },
+      { check: 'second', outcome: 'killed', measured_generation: 1 },
+    ],
+    staleProofFiles: ['a.mjs'],
+    generation: 2,
+    previousGeneration: 1,
+  })
+  const fresh = { ...result.selected[0], proof: 'fresh', measured_generation: 2 }
+  assert.equal(result.carried[0].proof, 'carried-forward')
+  assert.equal(fresh.proof, 'fresh')
+  assert.notEqual(result.carried[0].proof, fresh.proof)
+})
+
+test('D1 an unknown proof tree fails closed to all fresh proofs', () => {
+  const result = mutationProofScope({
+    mutations: proofScopeMutations(),
+    previousRows: [
+      { check: 'first', outcome: 'killed', measured_generation: 8 },
+      { check: 'second', outcome: 'killed', measured_generation: 8 },
+    ],
+    generation: 9,
+    previousGeneration: 8,
+    unknown: true,
+  })
+  assert.deepEqual(result.selected.map(({ check }) => check), ['first', 'second'])
+  assert.deepEqual(result.carried, [])
+})
+
+test('E1 the first generation proves every mutation fresh', () => {
+  const result = mutationProofScope({
+    mutations: proofScopeMutations(),
+    previousRows: [
+      { check: 'first', outcome: 'killed', measured_generation: 7 },
+      { check: 'second', outcome: 'killed', measured_generation: 7 },
+    ],
+    generation: 1,
+    previousGeneration: 0,
+  })
+  assert.deepEqual(result.selected.map(({ check }) => check), ['first', 'second'])
+  assert.deepEqual(result.carried, [])
+})
+
+test('F1 a round with no changed mutation file carries every killed proof', () => {
+  const result = mutationProofScope({
+    mutations: proofScopeMutations(),
+    previousRows: [
+      { check: 'first', outcome: 'killed', measured_generation: 4 },
+      { check: 'second', outcome: 'killed', measured_generation: 6 },
+    ],
+    staleProofFiles: [],
+    generation: 7,
+    previousGeneration: 6,
+  })
+  assert.deepEqual(result.selected, [])
+  assert.deepEqual(result.carried.map(({ check, measured_generation }) => ({ check, measured_generation })), [
+    { check: 'first', measured_generation: 4 },
+    { check: 'second', measured_generation: 6 },
+  ])
+})
+
+test('G1 survived and unmeasured mutations are never carried', () => {
+  const result = mutationProofScope({
+    mutations: proofScopeMutations(),
+    previousRows: [
+      { check: 'first', outcome: 'survived', proof: 'fresh', measured_generation: 4 },
+    ],
+    generation: 5,
+    previousGeneration: 4,
+  })
+  assert.deepEqual(result.selected.map(({ check }) => check), ['first', 'second'])
+  assert.deepEqual(result.carried, [])
+})
+
+test('C1 corrected anchors always select a fresh proof', () => {
+  const green = `green\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":0,"errored":0}`
+  const killed = `FAIL check-one: caught\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":1,"errored":0}`
+  const correction = { check: 'check-one', find: 'true', replace: 'false' }
+  const io = fakeIo({
+    files: { [CHECK_FILE]: CHECK_BUILT }, writeThrough: true,
+    cleanRuns: CHECK_CLEAN,
+    changed: Array.from({ length: 12 }, () => ['a.mjs', 'a.test.mjs']),
+    runs: {
+      'gate-cmd:1': { ok: false, output: RED(3) },
+      'gate-cmd:2': { ok: true, output: green },
+      'gate-cmd:3': { ok: false, output: killed },
+      'gate-cmd:4': { ok: true, output: green },
+      'gate-cmd:5': { ok: true, output: green },
+      'gate-cmd:6': { ok: false, output: killed },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    envelopes: {
+      'planner:1': CHECK_PLAN([CHECK_MUTATION]),
+      'builder:1': buildEnv(),
+      'builder:2': buildEnv({ details: { ...buildEnv().details, mutation_corrections: [correction] } }),
+      'reviewer:1': reviewEnv('changes-needed'), 'reviewer:2': reviewEnv('pass'),
+    }, emit: true,
+  })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2, review_rounds: 2 } }, io)
+  assert.equal(result.status, 'done')
+  assert.equal(result.details.gate.generation, 2)
+  assert.ok(result.details.stages.includes('gate-proof:2'))
+  const row = io.calls.logs.find((line) => line.gate_check_discrimination && line.gate_generation === 2)?.gate_check_discriminations?.[0]
+  assert.deepEqual({ check: row.check, proof: row.proof, measured_generation: row.measured_generation }, { check: 'check-one', proof: 'fresh', measured_generation: 2 })
+  assert.equal(io.calls.emits.filter((event) => event.kind === 'gate' && event.name === 'gate-proof:2:checks:m1').length, 1)
+})
+
+test('H1 the journal reports fresh and carried proof rows per generation', () => {
+  const green = `green\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":0,"errored":0}`
+  const fail = (check) => `FAIL ${check}: caught\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":1,"errored":0}`
+  const mutations = [
+    { check: 'first', file: 'a.mjs', find: 'true', replace: 'false' },
+    { check: 'second', file: 'b.mjs', find: 'true', replace: 'false' },
+  ]
+  let io
+  io = fakeIo({
+    files: { [`${CTX.checkout}/a.mjs`]: CHECK_BUILT, [`${CTX.checkout}/b.mjs`]: CHECK_BUILT }, writeThrough: true,
+    cleanRuns: CHECK_CLEAN,
+    changed: Array.from({ length: 12 }, () => ['a.mjs', 'b.mjs']),
+    runs: {
+      'gate-cmd:1': { ok: false, output: RED(3) },
+      'gate-cmd:2': { ok: true, output: green },
+      'gate-cmd:3': { ok: false, output: fail('first') },
+      'gate-cmd:4': { ok: false, output: fail('second') },
+      'gate-cmd:5': { ok: true, output: green },
+      'gate-cmd:6': { ok: true, output: green },
+      'gate-cmd:7': { ok: false, output: fail('first') },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, files_in_scope: ['a.mjs', 'b.mjs'], gate_cmd: 'gate-cmd', mutations } }),
+      'builder:1': buildEnv(),
+      'builder:2': () => { io.calls.files[`${CTX.checkout}/a.mjs`] = `${CHECK_BUILT}// changed\n`; return buildEnv() },
+      'reviewer:1': reviewEnv('changes-needed'), 'reviewer:2': reviewEnv('pass'),
+    }, emit: true,
+  })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2, review_rounds: 2 } }, io)
+  assert.equal(result.status, 'done')
+  const journal = io.calls.logs.find((line) => line.gate_check_discrimination && line.gate_generation === 2)
+  assert.ok(journal)
+  assert.deepEqual(journal.gate_check_discriminations.map(({ check, proof, measured_generation }) => ({ check, proof, measured_generation })), [
+    { check: 'first', proof: 'fresh', measured_generation: 2 },
+    { check: 'second', proof: 'carried-forward', measured_generation: 1 },
+  ])
+  assert.equal(io.calls.emits.filter((event) => event.kind === 'gate' && event.name === 'gate-proof:2:checks:m1').length, 1)
+  assert.equal(io.calls.emits.filter((event) => event.kind === 'gate' && event.name === 'gate-proof:2:checks:m2').length, 0)
+  assert.equal(io.calls.writeLog.filter(({ path }) => path === `${CTX.checkout}/b.mjs`).length, 2)
+})
+
+test('I1 replacement gate proof becomes the next carry authority', () => {
+  const green = `green\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":0,"errored":0}`
+  const fail = (check) => `FAIL ${check}: caught\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":1,"errored":0}`
+  const mutations = [
+    { check: 'first', file: 'a.mjs', find: 'true', replace: 'false' },
+    { check: 'second', file: 'b.mjs', find: 'true', replace: 'false' },
+  ]
+  let io
+  io = fakeIo({
+    files: { [`${CTX.checkout}/a.mjs`]: CHECK_BUILT, [`${CTX.checkout}/b.mjs`]: CHECK_BUILT }, writeThrough: true,
+    cleanRuns: { 'gate-cmd': { ok: false, output: RED(3) }, 'gate-fixed': { ok: false, output: RED(3) } },
+    changed: Array.from({ length: 16 }, () => ['a.mjs', 'b.mjs']),
+    runs: {
+      'gate-cmd:1': { ok: false, output: RED(3) },
+      'gate-cmd:2': { ok: true, output: green },
+      'gate-cmd:3': { ok: true, output: green },
+      'gate-cmd:4': { ok: false, output: fail('second') },
+      'gate-fixed:1': { ok: true, output: green },
+      'gate-fixed:2': { ok: false, output: fail('first') },
+      'gate-fixed:3': { ok: false, output: fail('second') },
+      'gate-fixed:4': { ok: true, output: green },
+      'gate-fixed:5': { ok: true, output: green },
+      'gate-fixed:6': { ok: false, output: fail('first') },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, files_in_scope: ['a.mjs', 'b.mjs'], gate_cmd: 'gate-cmd', mutations } }),
+      'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } },
+      'builder:1': buildEnv(),
+      'builder:2': () => { io.calls.files[`${CTX.checkout}/a.mjs`] = `${CHECK_BUILT}// changed\n`; return buildEnv() },
+      'reviewer:1': reviewEnv('changes-needed'), 'reviewer:2': reviewEnv('pass'),
+    }, emit: true,
+  })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2, review_rounds: 2 } }, io)
+  assert.equal(result.status, 'done')
+  assert.equal(result.details.gate.generation, 3)
+  const gen2 = io.calls.emits.find((event) => event.kind === 'check-discrimination' && event.generation === 2)
+  const gen3 = io.calls.logs.find((line) => line.gate_check_discrimination && line.gate_generation === 3)?.gate_check_discriminations
+  assert.deepEqual(gen2?.checks.map(({ check, proof, measured_generation }) => ({ check, proof, measured_generation })), [
+    { check: 'first', proof: 'fresh', measured_generation: 2 },
+    { check: 'second', proof: 'fresh', measured_generation: 2 },
+  ])
+  assert.deepEqual(gen3?.map(({ check, proof, measured_generation }) => ({ check, proof, measured_generation })), [
+    { check: 'first', proof: 'fresh', measured_generation: 3 },
+    { check: 'second', proof: 'carried-forward', measured_generation: 2 },
+  ])
+  const gen2ProofIndex = io.calls.emits.findIndex((event) => event.kind === 'check-discrimination' && event.generation === 2)
+  const gen3FreshIndex = io.calls.emits.findIndex((event) => event.kind === 'gate' && event.name === 'gate-fresh:3')
+  assert.ok(gen2ProofIndex >= 0 && gen2ProofIndex < gen3FreshIndex)
+  assert.equal(io.calls.emits.filter((event) => event.kind === 'gate' && event.name === 'gate-proof:2:checks:m1').length, 1)
+  assert.equal(io.calls.emits.filter((event) => event.kind === 'gate' && event.name === 'gate-proof:2:checks:m2').length, 1)
+  assert.equal(io.calls.emits.filter((event) => event.kind === 'gate' && event.name === 'gate-proof:3:checks:m1').length, 1)
+  assert.equal(io.calls.emits.filter((event) => event.kind === 'gate' && event.name === 'gate-proof:3:checks:m2').length, 0)
+  assert.equal(io.calls.writeLog.filter(({ path }) => path === `${CTX.checkout}/b.mjs`).length, 4)
+})
 
 test('the scope-gate catches a build that crossed another lane fence', () => {
   const file = 'scripts/factory/intake.mjs'

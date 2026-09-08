@@ -2088,6 +2088,32 @@ export function validateMutations(entries, inScope = () => true) {
   return errors
 }
 
+export function mutationProofScope({
+  mutations = [], previousRows = [], staleProofFiles = [], correctedChecks = [], generation = 1,
+  previousGeneration = generation - 1, unknown = false, forceFresh = false,
+} = {}) {
+  const previousByCheck = new Map((Array.isArray(previousRows) ? previousRows : []).map((row) => [row?.check, row]))
+  const stale = new Set(staleProofFiles instanceof Set ? staleProofFiles : Array.isArray(staleProofFiles) ? staleProofFiles : [])
+  const corrected = new Set(correctedChecks instanceof Set ? correctedChecks : Array.isArray(correctedChecks) ? correctedChecks : [])
+  const scope = { selected: [], carried: [] }
+  for (const mutation of Array.isArray(mutations) ? mutations : []) {
+    const previous = previousByCheck.get(mutation?.check)
+    const firstGeneration = generation <= 1
+    const failClosed = unknown === true
+    const replacementGate = forceFresh === true
+    const fileChanged = stale.has(mutation?.file)
+    const anchorCorrected = corrected.has(mutation?.check)
+    const previouslyKilled = previous?.outcome === 'killed'
+    const carryable = !mutation?.exempt && !firstGeneration && !failClosed && !replacementGate && !fileChanged && !anchorCorrected && previouslyKilled
+    if (carryable) {
+      scope.carried.push({ ...previous, proof: 'carried-forward', measured_generation: previous.measured_generation ?? previousGeneration })
+    } else {
+      scope.selected.push(mutation)
+    }
+  }
+  return scope
+}
+
 export function scopeMatcher(entries) {
   return (repoRelativePath) => entries.some((entry) => entry.endsWith('/')
     ? repoRelativePath.startsWith(entry)
@@ -4462,6 +4488,7 @@ function runTask(ctx, io, crash) {
     checkProofPending = null
     stage(label)
     const proofMutations = Array.isArray(options.mutations) ? options.mutations : mutations
+    const carriedRows = Array.isArray(options.carried) ? options.carried : []
     const fresh = options.fresh === true
     const freshFields = () => (fresh ? { proof: 'fresh', measured_generation: gateGeneration } : {})
     const rows = []
@@ -4554,6 +4581,11 @@ function runTask(ctx, io, crash) {
     checkProofBinds = finalized.binds
     checkProofUnbound = finalized.unresolved
     rows.splice(0, rows.length, ...finalized.rows)
+    if (proofMutations.length !== mutations.length || carriedRows.length > 0) {
+      const freshByCheck = new Map(rows.map((row) => [row.check, row]))
+      const carriedByCheck = new Map(carriedRows.map((row) => [row.check, row]))
+      rows.splice(0, rows.length, ...mutations.map((mutation) => freshByCheck.get(mutation.check) || carriedByCheck.get(mutation.check)).filter(Boolean))
+    }
     checkProofs = rows
     // #733/#874 — three precedences, and each matters. A KNOWN survivor is a gate defect even if
     // the pass was later interrupted. An interrupted pass with no survivor proved nothing and may
@@ -4616,7 +4648,12 @@ function runTask(ctx, io, crash) {
       unknown = true
     }
     const observed = readProofCells(concreteProofFiles(reported))
-    proofTreeWitness = { generation: gateGeneration, cells: observed.cells, unknown: unknown || observed.unreadable }
+    proofTreeWitness = {
+      generation: gateGeneration,
+      cells: observed.cells,
+      unknown: unknown || observed.unreadable,
+      checkProofs: Array.isArray(checkProofs) ? checkProofs.map((row) => ({ ...row })) : [],
+    }
     proofTreeBuildRound = round
   }
 
@@ -4933,6 +4970,11 @@ function runTask(ctx, io, crash) {
   const mutationTargetFiles = () => [...new Set(mutations
     .filter((mutation) => mutation && !mutation.exempt && typeof mutation.file === 'string')
     .map((mutation) => mutation.file))]
+  const proofScopeStaleFiles = (staleProofFiles, unknown = false) => {
+    const stale = Array.isArray(staleProofFiles) ? staleProofFiles : []
+    const targets = new Set(mutationTargetFiles())
+    return unknown || stale.some((file) => !targets.has(file)) ? [...targets] : stale
+  }
 
   const compareProofTree = () => {
     if (!proofTreeWitness) return { staleProofFiles: [], unknown: false }
@@ -5108,29 +5150,38 @@ function runTask(ctx, io, crash) {
     return { repaired }
   }
 
-  // Re-prove only after the byte witness says the shipped tree moved. A changed
-  // mutation target permits selective carry; anything else invalidates the whole
-  // per-check pass because the acceptance command may consume that path.
+  // Re-prove only after the byte witness says the shipped tree moved, or when a
+  // builder correction candidate needs an adjudicated proof despite byte identity.
+  const correctedMutationChecks = () => {
+    const settled = new Set((Array.isArray(checkProofs) ? checkProofs : [])
+      .filter((row) => row?.correction === 'accepted' || row?.correction === 'refused')
+      .map((row) => row.check))
+    return new Set(
+      (Array.isArray(builderEnv?.details?.mutation_corrections) ? builderEnv.details.mutation_corrections : [])
+        .map((correction) => correction?.check)
+        .filter((check) => typeof check === 'string' && !settled.has(check)),
+    )
+  }
   const refreshProofTree = (round = null) => {
     const comparison = compareProofTree()
     const staleProofFiles = comparison.staleProofFiles
-    if (staleProofFiles.length > 0) {
+    const correctedChecks = correctedMutationChecks()
+    if (staleProofFiles.length > 0 || correctedChecks.size > 0) {
       const previousGeneration = proofTreeWitness?.generation ?? gateGeneration
-      const previousRows = Array.isArray(checkProofs) ? checkProofs : []
-      const targetFiles = new Set(mutationTargetFiles())
-      const targetOnly = !comparison.unknown && staleProofFiles.every((file) => targetFiles.has(file))
-      let selected = targetOnly
-        ? mutations.filter((mutation) => mutation?.exempt || staleProofFiles.includes(mutation?.file))
-        : mutations
-      let carried = targetOnly
-        ? previousRows.filter((row) => {
-          const declaration = mutations.find((mutation) => mutation?.check === row?.check)
-          return declaration && !declaration.exempt && !staleProofFiles.includes(declaration.file)
-            && row.outcome === 'killed'
-        }).map((row) => ({ ...row, proof: 'carried-forward', measured_generation: row.measured_generation ?? previousGeneration }))
-        : []
-
+      const previousRows = Array.isArray(proofTreeWitness?.checkProofs) ? proofTreeWitness.checkProofs : []
       gateGeneration = gateGeneration + 1
+      const scope = mutationProofScope({
+        mutations,
+        previousRows,
+        staleProofFiles: proofScopeStaleFiles(staleProofFiles, comparison.unknown),
+        correctedChecks,
+        generation: gateGeneration,
+        previousGeneration,
+        unknown: comparison.unknown,
+        forceFresh: false,
+      })
+      let selected = scope.selected
+      let carried = scope.carried
       let gateRes = runGate(`gate-fresh:${gateGeneration}`, gateCmd)
       if (!gateRes?.ok) {
         gateDiscrimination = 'unproven'
@@ -5146,7 +5197,7 @@ function runTask(ctx, io, crash) {
         gateRes = runGate(`gate-repair:${gateRepairs}`, gateCmd)
       }
       while (gateRes?.ok && checkProofPending === gateGeneration) {
-        completeCheckProof(`gate-proof:${gateGeneration}:checks`, { mutations: selected, fresh: true })
+        completeCheckProof(`gate-proof:${gateGeneration}:checks`, { mutations: selected, carried, fresh: true })
         if (gateProofFatal) {
           const fatal = settleFailedProof()
           if (fatal.escalation) return { ok: false, escalation: fatal.escalation }
@@ -5164,13 +5215,6 @@ function runTask(ctx, io, crash) {
       if (!gateRes?.ok) return { ok: false, gateRes }
       if (gateDiscrimination !== 'proven' || (mutations.length > 0 && checkProofVerdict !== 'proven')) {
         return { ok: true, gateRes, unproven: true }
-      }
-      if (mutations.length > 0) {
-        const freshRows = Array.isArray(checkProofs) ? checkProofs : []
-        const freshByCheck = new Map(freshRows.map((row) => [row.check, row]))
-        const carriedByCheck = new Map(carried.map((row) => [row.check, row]))
-        checkProofs = mutations.map((mutation) => freshByCheck.get(mutation.check) || carriedByCheck.get(mutation.check)).filter(Boolean)
-        checkProofVerdict = checkProofs.every((row) => row.outcome === 'killed' || row.outcome === 'exempt') ? 'proven' : checkProofVerdict
       }
       const diffSettled = settleDiffMutationProof(round)
       if (diffSettled.fatal || gateProofFatal) {
@@ -6072,7 +6116,19 @@ function runTask(ctx, io, crash) {
       // only because a repair mints a new generation that owes its own pass, and
       // the single gate_repairs budget bounds that to once.
       while (gateRes.ok && checkProofPending === gateGeneration) {
-        completeCheckProof(`gate-proof:${gateGeneration}:checks`, { fresh: gateGeneration > 1 })
+        const comparison = compareProofTree()
+        const correctedChecks = correctedMutationChecks()
+        const scope = mutationProofScope({
+          mutations,
+          previousRows: Array.isArray(proofTreeWitness?.checkProofs) ? proofTreeWitness.checkProofs : [],
+          staleProofFiles: proofScopeStaleFiles(comparison.staleProofFiles, comparison.unknown),
+          correctedChecks,
+          generation: gateGeneration,
+          previousGeneration: proofTreeWitness?.generation ?? gateGeneration,
+          unknown: comparison.unknown,
+          forceFresh: gateGeneration !== proofTreeWitness?.generation,
+        })
+        completeCheckProof(`gate-proof:${gateGeneration}:checks`, { mutations: scope.selected, carried: scope.carried, fresh: gateGeneration > 1 })
         // #874 — the DIRTY TREE outranks every diagnosis. settleFailedProof's first branch
         // (crew/drive.mjs:3526-3528) refuses to continue while `gateProofFatal` is set, because the
         // built tree still carries the driver's OWN mutation; nothing about the plan matters until
@@ -6107,7 +6163,7 @@ function runTask(ctx, io, crash) {
         if (settled.repaired) gateRes = runGate(`gate-repair:${gateRepairs}`, gateCmd)
       }
       if (gateRes.ok && gateDiscrimination === 'proven' && (!mutations.length || checkProofVerdict === 'proven')) {
-        if (!proofTreeWitness) {
+        if (!proofTreeWitness || proofTreeWitness.generation < gateGeneration) {
           const diffSettled = settleDiffMutationProof(round)
           if (diffSettled.fatal || gateProofFatal) {
             const fatal = settleFailedProof()

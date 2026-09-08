@@ -70,7 +70,7 @@ not free.
 | 039 | `review_only` is an execution shape with a structured-findings envelope; "no findings" is a measured outcome | **proposed 2026-09-02, never written** | below |
 | 040 | Anchor pins are repaired after the merge, not inside the lane | ratified 2026-09-04 | [full document](adr-040-anchor-pins-repaired-after-merge.md) |
 | 041 | Claims at plan-accept: the accepted plan's scope is the write claim | **proposed 2026-09-06** | [full document](adr-041-claims-at-plan-accept.md) |
-| 042 | Split the test suites, not the driver | **proposed 2026-09-08** | [full document](adr-042-split-the-suites-not-the-driver.md) |
+| 042 | Split the test suites, not the driver | ratified 2026-09-08 | [full document](adr-042-split-the-suites-not-the-driver.md) |
 
 ### The 014–019 tangle, recorded so nobody re-derives it
 

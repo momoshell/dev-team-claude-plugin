@@ -1,6 +1,6 @@
 # ADR-042 — Split the test suites, not the driver
 
-**Status:** proposed 2026-09-08 · **Issue:** #1033 · **Owner:** operator
+**Status:** ratified 2026-09-08 · **Issue:** #1033 · **Owner:** operator
 
 ## Decision
 
@@ -88,10 +88,56 @@ with the same pass/fail as the file it replaced. A split that renames or
 rewrites a test is refused — that is a different change wearing this one's
 clothes.
 
+## Unblocking was evaluated separately, and it is not what a split buys
+
+Ratification added this section, because "which split is cheap" and "what is
+blocking us" are different questions and the first does not answer the second.
+
+Measured across the **18 lanes dispatched on 2026-09-08** (r78–r86), the most
+contended files are `crew/crew.mjs`, `crew/crew.test.mjs`,
+`scripts/factory/dispatch-batch.mjs`, `test/factory-dispatch-batch.test.mjs`,
+`scripts/factory/ledger.mjs` and `test/factory-ledger.test.mjs` — **four
+distinct lanes each**. `crew/drive.mjs` was held by three. So the suite splits
+above do relieve three of the six worst, which is real and is part of why they
+are worth doing.
+
+But `crew/drive.mjs` is where the **queue** is: **#1051, #1021, #1003, #931,
+#905, #903, #879 and #877 — eight issues — all need that one file**, and one
+lane may hold it. #1051 alone costs every judge lane ~27 minutes.
+
+**A split is not the cheapest way to unblock that.** The mutex is a dispatcher
+property: `scopeMatcher` (`crew/drive.mjs:2087-2090`) is `path === entry` or a
+directory prefix, so a fence cannot say *"this lane owns `enforceTurnCeiling`"*.
+**#1061** proposes sub-file scopes over the clusters `seams.mjs` already emits,
+which would unlock much of that queue at no migration cost — the same move
+ADR-040 made when it dissolved the anchor-manifest mutex by changing the rule
+rather than the code. #1061 is sequenced **ahead** of any `drive.mjs` structural
+work.
+
+## The owner's standing direction, recorded
+
+The owner's position at ratification: **every large file should become modules
+with proper boundaries.** This ADR does not contradict that and must not be
+cited as a permanent verdict on `crew/drive.mjs`.
+
+What it says is narrower and worth keeping straight: **`crew/drive.mjs` has no
+clean seams to find today.** 30 clusters at 321 cross-cluster edges each is one
+module with a wide interface, so a *split* — moving existing code across new
+file boundaries — would cut through live coupling and produce layers that
+forward arguments, which is the failure OpenHands' guide names.
+
+Giving it proper boundaries is therefore a **refactor, not a split**: the
+boundaries have to be *created* — narrow interfaces designed, decisions moved
+behind them — before any file division is safe. That is a larger act than this
+ADR decides, it wants its own ADR, and it should follow #1061 rather than block
+on it. Recorded here so a later reader does not mistake "not now" for "not
+ever".
+
 ## What this deliberately does not do
 
 - It does not reduce `crew/drive.mjs`. That file stays 7,522 lines and stays on
-  the floor. Its builder cost is attacked by the turn economy, not by structure.
+  the floor. Its builder cost is attacked by the turn economy, and its
+  concurrency cost by #1061, not by structure.
 - It does not set a line-count target. No file is split because it crossed a
   threshold; the three named files are split because their measured seams are
   clean.

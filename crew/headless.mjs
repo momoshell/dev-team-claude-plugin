@@ -20,6 +20,8 @@ import { readJsonTri } from './json-leaf.mjs'
 
 export const WAIT_POLL_MS = 5000
 
+function parkPending(at, until, wake) { return at < until && wake === null }
+
 // #944 — a plan bounce against a still-live seat session must not end the lane.
 // The GUARD below (ADR-029 §5 c3) is correct and untouched: one live invocation
 // per session. What changes is the RESPONSE to it. A refused concurrent turn at
@@ -1992,9 +1994,34 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turn
     return updateCrewJson(paths, (disk) => { disk.park = state; return true }, crewDeps)
   }
   // Returning false when there is nothing to clear keeps an UNPARKED lane's crew.json
-  // byte-identical: a run that never parks never rewrites the file.
-  function clearPark() {
-    return updateCrewJson(paths, (disk) => { if (disk.park == null) return false; disk.park = null; return true }, crewDeps)
+  // byte-identical: a run that never parks never rewrites the file. A backoff carries
+  // park state only for liveness, so it cannot consume its wake marker on cleanup.
+  function clearPark(clearWake = true) {
+    return updateCrewJson(paths, (disk) => {
+      if (disk.park == null && (!clearWake || !Object.hasOwn(disk, 'wake'))) return false
+      if (disk.park != null) disk.park = null
+      if (clearWake && Object.hasOwn(disk, 'wake')) delete disk.wake
+      return true
+    }, crewDeps)
+  }
+  function wakeReadFailed(state, err) {
+    const reason = String(err?.message ?? err)
+    try { log({ at: now(), event: 'provider-park-wake-read-failed', role: state.role, assignment_id: state.assignment_id, reason, error: reason }) } catch { /* diagnostics only */ }
+    return null
+  }
+  function readParkWake(state) {
+    if (state.action !== 'park') return null
+    const path = crewJsonPath(paths)
+    if (!path) return wakeReadFailed(state, new Error('no-crew-dir'))
+    try {
+      const disk = JSON.parse(String(read(path, 'utf8')))
+      if (!disk || typeof disk !== 'object' || Array.isArray(disk)) throw new Error('malformed')
+      if (disk.wake == null) return null
+      if (typeof disk.wake !== 'object' || Array.isArray(disk.wake)) throw new Error('malformed')
+      if (typeof disk.wake.by !== 'string' || !disk.wake.by.trim() || !Number.isFinite(disk.wake.requested_at) || typeof disk.wake.assignment_id !== 'string' || !Number.isFinite(disk.wake.started_at)) throw new Error('malformed')
+      if (disk.wake.assignment_id !== state.assignment_id || disk.wake.started_at !== state.started_at) return null
+      return disk.wake
+    } catch (err) { return wakeReadFailed(state, err) }
   }
   // [P1] #948 ask 1. This loop runs IN the driver process, so now() at a tick is a
   // MEASURED reading of the driver's own liveness — not a wall clock standing in for
@@ -2020,17 +2047,22 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turn
     const until = startedAt + waitMs
     const state = park ? { ...park, started_at: startedAt, until } : null
     let lastBeat = startedAt
+    let wake = null
+    let wokenAt = null
     if (state) parkBeat(state, startedAt)
     try {
-      while (now() < until) {
+      while (parkPending(now(), until, wake)) {
         delay(Math.min(WAIT_POLL_MS, until - now()))
         const at = now()
+        if (state) wake = readParkWake(state)
         if (state && at - lastBeat >= PARK_BEAT_MS) { lastBeat = at; parkBeat(state, at) }
+        if (state && wake !== null) wokenAt = at
       }
     } finally {
-      if (state) { try { notePersist(state.role, clearPark()) } catch { /* never load-bearing */ } }
+      if (state) { try { notePersist(state.role, clearPark(state.action === 'park')) } catch { /* never load-bearing */ } }
     }
-    return now() - startedAt
+    const waitedMs = now() - startedAt
+    return { waited_ms: waitedMs, started_at: state ? startedAt : null, woken_at: wokenAt, skipped_wait_ms: wokenAt === null ? 0 : Math.max(0, until - wokenAt), wake }
   }
   // A provider failure is not a judgment failure and it is not the seat's fault:
   // route on the kind the stream already carried, act INSIDE the run, and the
@@ -2100,7 +2132,9 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turn
     // SCHEDULED. The park can be long, so the row that says one is starting is
     // written before it, not after — but nothing here is called `resumed` yet.
     log({ at: now(), event: 'provider-retry', ...base, attempt: state.attempts + 1, of: PROVIDER_RETRY_MAX, wait_ms: decision.wait_ms, waited_on: decision.waited_on, reset_at: decision.reset_at, total_waited_ms: state.waited_ms, bound: { attempts: PROVIDER_RETRY_MAX, total_wait_ms: PROVIDER_RETRY_TOTAL_WAIT_MS } })
-    const waitedMs = parkFor(decision.wait_ms, { role: run.role, assignment_id: run.id, kind: failure.kind, status: failure.status, waited_on: decision.waited_on, reset_at: decision.reset_at, attempt: state.attempts + 1, of: PROVIDER_RETRY_MAX })
+    const parkState = { action: decision.action, role: run.role, assignment_id: run.id, kind: failure.kind, status: failure.status, waited_on: decision.waited_on, reset_at: decision.reset_at, attempt: state.attempts + 1, of: PROVIDER_RETRY_MAX }
+    const parkResult = parkFor(decision.wait_ms, parkState)
+    const waitedMs = parkResult.waited_ms
     const totalWaitedMs = state.waited_ms + waitedMs
     // [F6] The measured wait is recorded whatever happens next — it was really
     // spent. The ATTEMPT is not, and must not be: an escalation that reports a
@@ -2133,7 +2167,8 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turn
     // [F6] A replacement worker exists. NOW the attempt is spent and NOW the
     // wait is `resumed`.
     providerRetries.set(key, { attempts: state.attempts + 1, waited_ms: totalWaitedMs })
-    log({ at: now(), event: 'provider-retry-resumed', ...base, attempt: state.attempts + 1, of: PROVIDER_RETRY_MAX, waited_ms: waitedMs, intended_wait_ms: decision.wait_ms, waited_on: decision.waited_on })
+    const wakeFields = parkResult.wake ? { parked_at: parkResult.started_at, woken_at: parkResult.woken_at, skipped_wait_ms: parkResult.skipped_wait_ms, resumed_by: parkResult.wake.by } : {}
+    log({ at: now(), event: 'provider-retry-resumed', ...base, attempt: state.attempts + 1, of: PROVIDER_RETRY_MAX, waited_ms: waitedMs, intended_wait_ms: decision.wait_ms, waited_on: decision.waited_on, ...wakeFields })
     // The deadline moves by the wait TAKEN and by nothing else: the seat gets
     // the working budget it would have had, shifted by the park.
     return { act: 'retry', resume: () => waitUntil(returnPath, deadline + waitedMs) }

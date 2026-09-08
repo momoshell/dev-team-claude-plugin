@@ -7,6 +7,7 @@ import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
 import { splitFrames } from './headless-rpc.mjs'
+import { updateCrewJson } from './headless.mjs'
 import { VARIANTS, VARIANT_NAMES } from './variants.mjs'
 import { TASK_PROFILES } from './task-profiles.mjs'
 import { ASSURANCES, ASSURANCE_ALIASES } from './assurances.mjs'
@@ -47,6 +48,7 @@ export const KNOWN_FLAGS = Object.freeze({
   send: Object.freeze(['root', 'role']),
   pending: Object.freeze(['crew-root', 'repo', 'json']),
   waiting: Object.freeze(['crew-root', 'json', 'resolve', 'expire', 'dry-run']),
+  wake: Object.freeze(['crew-root', 'task']),
 })
 
 // A flag that is CORRECT on crew.mjs and wrong here, so the refusal says what
@@ -453,6 +455,43 @@ export async function attachVerb(args, deps = {}) {
     try { await call('untail', { run }) } catch {}
     try { unsubscribe?.() } catch {}
   }
+}
+
+function requireWakeArgs(args) {
+  if (typeof args?.task !== 'string' || !args.task.trim()) throw new Error('wake requires --task <lane>')
+}
+
+function noWake(task, reason, deps = {}) {
+  const stdout = outputSink(deps.stdout, process.stdout)
+  if (reason === 'not-parked') stdout(`lane ${task} is not parked; no wake requested\n`)
+  else if (reason === 'not-wakeable') stdout(`lane ${task} is waiting on a backoff, not a park; no wake requested\n`)
+  else stdout(`lane ${task} not found; no wake requested\n`)
+  return { task, woken: false, reason }
+}
+
+export function wakeVerb(args, deps = {}) {
+  requireWakeArgs(args)
+  const task = args.task.trim()
+  const root = typeof args['crew-root'] === 'string' && args['crew-root'] ? resolvePath(args['crew-root']) : crewRoot({ home: deps.home })
+  const discover = deps.discoverLanes || deps.lanes || ((laneRoot) => discoverLanes(laneRoot, deps))
+  const lanes = discover(root)
+  const exact = lanes.filter((lane) => lane.id === task)
+  const matches = exact.length ? exact : lanes.filter((lane) => lane.task === task)
+  if (matches.length === 0) return noWake(task, 'not-found', deps)
+  if (matches.length > 1) throw new Error(`wake task ${task} is ambiguous; use the full repo/task lane id`)
+  const lane = matches[0]
+  const result = updateCrewJson({ dir: lane.dir }, (disk) => {
+    const park = disk.park
+    if (park == null || park.action !== 'park') return false
+    disk.wake = { by: 'operator', requested_at: (deps.now || (() => Date.now()))(), assignment_id: park.assignment_id, started_at: park.started_at }
+    return true
+  }, deps)
+  if (!result.ok) throw new Error(`wake failed for lane ${lane.id}: ${result.reason || 'unknown'}`)
+  if (result.changed === false && result.crew?.park?.action === 'backoff') return noWake(task, 'not-wakeable', deps)
+  if (result.changed === false) return noWake(task, 'not-parked', deps)
+  const stdout = outputSink(deps.stdout, process.stdout)
+  stdout(`lane ${task} wake requested\n`)
+  return { task, woken: true, reason: 'wake-requested' }
 }
 
 // --- pending publication (#678): READ-ONLY REGION BEGIN -----------------------
@@ -1016,19 +1055,20 @@ export async function main(argv, deps = {}) {
   catch (err) { stderr(`error: ${err?.message || String(err)}\n`); return 2 }
   const args = parseArgs(argv)
   const verb = args._[0]
-  if (!['run', 'ls', 'attach', 'send', 'pending', 'waiting'].includes(verb)) {
-    stderr('usage: factoryctl <run|ls|attach|send|pending|waiting> ...\n')
+  if (!['run', 'ls', 'attach', 'send', 'pending', 'waiting', 'wake'].includes(verb)) {
+    stderr('usage: factoryctl <run|ls|attach|send|pending|waiting> ...\n       factoryctl wake --task <lane>\n')
     return 2
   }
   // Refuse what the operator typed and this CLI does not read, BEFORE anything is
   // enqueued: a dropped flag used to enqueue an unscoped, unlaned run in silence.
   try { assertUsage(verb, args) }
   catch (err) { stderr(`error: ${err?.message || String(err)}\n`); return 2 }
-  // `pending` and `waiting` read; they never connect to a daemon and never start one.
-  if (verb === 'pending' || verb === 'waiting') {
+  // `pending`, `waiting` and `wake` read; they never connect to a daemon and never start one.
+  if (verb === 'pending' || verb === 'waiting' || verb === 'wake') {
     try {
       if (verb === 'pending') pendingVerb(args, deps)
-      else waitingVerb(args, deps)
+      else if (verb === 'waiting') waitingVerb(args, deps)
+      else wakeVerb(args, deps)
       return 0
     }
     catch (err) { stderr(`error: ${err?.message || String(err)}\n`); return 1 }

@@ -489,9 +489,16 @@ export const CENSUS_ABSENT_CAUSES = Object.freeze({
   pane: 'the pane transport runs claude interactively with inherited stdio and leaves no seat stream to observe, so no count exists at all',
   stream_absent: "the dispatch's stream file was never written or could not be read",
   no_frames: 'the stream exists but carries no parsable frame',
+  headless_json_compactions: 'the headless-json transport emits no compaction signal, so no count exists',
   replay_no_frame_clock: 'the frames carry no timestamp of their own, so a REPLAY has no clock; only a live wrapper can stamp one',
   same_poll_boundary: "the call's start and end were observed in the SAME wrapper poll, so the wrapper clock bounds the call's duration by the poll interval but does not measure it",
   bash_reader_unparsed: 'a Bash reader was observed but its literal file operands could not be safely bounded',
+})
+
+const HEADLESS_JSON_COMPACTION_FIELDS = Object.freeze({
+  compactions: null,
+  compaction_frame: null,
+  compactions_absent_reason: CENSUS_ABSENT_CAUSES.headless_json_compactions,
 })
 
 function censusTimestamp(value) {
@@ -1382,6 +1389,8 @@ function censusRow(run, transport, stream) {
       dispatch_id: run?.id ?? null,
       transport,
       turns: null,
+      ...HEADLESS_JSON_COMPACTION_FIELDS,
+      compactions_absent_reason: absentReason,
       tool_calls: null,
       distinct_files_read: null,
       suite_runs: null,
@@ -1402,6 +1411,7 @@ function censusRow(run, transport, stream) {
     dispatch_id: run?.id ?? null,
     transport,
     turns: census.turns,
+    ...HEADLESS_JSON_COMPACTION_FIELDS,
     tool_calls: census.tool_calls,
     distinct_files_read: census.distinct_files_read,
     suite_runs: census.suite_runs,

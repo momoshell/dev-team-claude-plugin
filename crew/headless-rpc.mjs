@@ -170,6 +170,7 @@ export function foldRpcUsage(frames) {
 export function newCensus() {
   return {
     turns: 0,
+    compactions: 0,
     tool_calls: 0,
     by_class: Object.fromEntries(TOOL_CLASSES.map((name) => [name, 0])),
     suite_runs: 0,
@@ -198,6 +199,7 @@ export function foldCensusFrame(census, frame, at) {
     census._last_at = at
   }
   if (frame.type === 'turn_start') census._calls_this_turn = 0
+  if (frame.type === 'compaction_start') census.compactions += 1
   if (frame.type === 'tool_execution_start') {
     census._calls_this_turn += 1
     census.tool_calls += 1
@@ -465,6 +467,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
     neverLoadBearing(() => {
       const observed = turn.observed || {}
       const noFrames = observed.frames === 0
+      const streamUnreadable = noFrames && seat.lastRead === false
       const census = finaliseCensus(observed.census || null)
       const absentReason = noFrames ? CENSUS_ABSENT_CAUSES.no_frames : (census?.clock_absent ?? CENSUS_ABSENT_CAUSES.stream_absent)
       log({
@@ -474,6 +477,9 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
           dispatch_id: turn.id,
           transport: 'headless-rpc',
           turns: noFrames ? null : census?.turns ?? null,
+          compactions: streamUnreadable ? null : (noFrames ? null : census?.compactions ?? null),
+          compaction_frame: 'compaction_start',
+          compactions_absent_reason: streamUnreadable ? CENSUS_ABSENT_CAUSES.stream_absent : (noFrames ? CENSUS_ABSENT_CAUSES.no_frames : null),
           tool_calls: noFrames ? null : census?.tool_calls ?? null,
           distinct_files_read: noFrames ? null : census?.distinct_files_read ?? null,
           suite_runs: noFrames ? null : census?.suite_runs ?? null,

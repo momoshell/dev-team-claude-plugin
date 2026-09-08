@@ -9,7 +9,7 @@ import { homedir, tmpdir } from 'node:os'
 import { spawn as childSpawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
-import { parseDirectedBrief, scopeMatcher, validateScopeEntries as driveValidateScopeEntries, VARIANT_NAMES, VARIANTS, TURN_CEILING_FLAGS } from '../../crew/drive.mjs'
+import { parseDirectedBrief, scopeMatcher, validateScopeEntries as driveValidateScopeEntries, VARIANT_NAMES, VARIANTS, TURN_CEILING_FLAGS, WAITS_S } from '../../crew/drive.mjs'
 import { assertHostQuiet, hostLoad, loadPolicy, withSuiteSlot } from '../../crew/host-load.mjs'
 import { protectedHitsIn, resolveProtectedPaths } from '../../crew/protected-paths.mjs'
 import { slug } from '../../crew/slug.mjs'
@@ -145,6 +145,8 @@ export const PREDECESSOR_UNSETTLED = 'predecessor-unsettled'
 export const DISPATCH_BASE_REF = 'main'
 
 export const REQUEST_SUFFIX = '.request.json'
+export const TURN_CENSUS_FLAG = 'turn-census'
+export const TOOL_CLASSES = ['edit', 'read', 'test', 'other']
 
 // Keys a lane's request carries for the DISPATCHER, not for the compiler. The
 // compiler's request schema is closed (REQUEST_KEYS, make-brief.mjs:51), so a
@@ -894,6 +896,81 @@ function plainObject(value) {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
   const prototype = Object.getPrototypeOf(value)
   return prototype === Object.prototype || prototype === null
+}
+
+function usableTurnCensus(value) {
+  if (!plainObject(value) || value.role !== 'builder') return false
+  if (!Number.isFinite(value.turns) || value.turns <= 0) return false
+  if (!Number.isFinite(value.out_of_tool_ms) || value.out_of_tool_ms < 0) return false
+  if (!Number.isFinite(value.span_ms) || value.span_ms < 0) return false
+  if (!plainObject(value.in_tool_ms)) return false
+  return TOOL_CLASSES.every((name) => Number.isFinite(value.in_tool_ms[name]) && value.in_tool_ms[name] >= 0)
+}
+
+export function readTurnCensus(paths, deps) {
+  const d = normalDeps(deps)
+  const candidates = Array.isArray(paths) ? paths : typeof paths === 'string' ? [paths] : []
+  if (candidates.length === 0) return { rows: [], reason: 'no --turn-census measurement supplied' }
+  const rows = []
+  let unreadable = false
+  for (const path of candidates) {
+    if (typeof path !== 'string' || path.trim() === '') {
+      unreadable = true
+      continue
+    }
+    let text
+    try { text = textOf(d.readFileSync(path, 'utf8')) } catch {
+      unreadable = true
+      continue
+    }
+    for (const line of text.split('\n')) {
+      const trimmed = line.trim()
+      if (!trimmed) continue
+      let source
+      try { source = JSON.parse(trimmed) } catch { continue }
+      const payload = source && typeof source === 'object' && !Array.isArray(source) ? source.seat_turn_census : null
+      if (usableTurnCensus(payload)) rows.push(payload)
+    }
+  }
+  if (rows.length > 0) return { rows, reason: null }
+  return { rows, reason: unreadable ? 'turn-census-file-unreadable' : 'turn-census-no-usable-builder-census' }
+}
+
+export function turnBudgetReport({ waitSeconds, censusRows, reason } = {}) {
+  censusRows = Array.isArray(censusRows) ? censusRows.filter(usableTurnCensus) : []
+  if (censusRows.length === 0) return { measured: false, affordable_turns: null, reason: reason || 'no --turn-census measurement supplied' }
+  const outOfToolMs = censusRows.reduce((total, row) => total + row.out_of_tool_ms, 0)
+  const turns = censusRows.reduce((total, row) => total + row.turns, 0)
+  const spanMs = censusRows.reduce((total, row) => total + row.span_ms, 0)
+  const inToolMs = Object.fromEntries(TOOL_CLASSES.map((name) => [name, censusRows.reduce((total, row) => total + row.in_tool_ms[name], 0)]))
+  const inToolTotalMs = TOOL_CLASSES.reduce((total, name) => total + inToolMs[name], 0)
+  const latencyMsPerTurn = outOfToolMs / turns
+  if (!(turns > 0) || !(outOfToolMs > 0) || !(Number.isFinite(latencyMsPerTurn) && latencyMsPerTurn > 0)) {
+    return { measured: false, affordable_turns: null, reason: 'census latency denominator is unmeasurable' }
+  }
+  const affordableTurns = Math.floor(waitSeconds * 1000 / latencyMsPerTurn)
+  const perSampleLatencies = censusRows.map((row) => row.out_of_tool_ms / row.turns)
+  return {
+    measured: true,
+    wait_s: waitSeconds,
+    affordable_turns: affordableTurns,
+    latency_ms_per_turn: latencyMsPerTurn,
+    min_latency_ms_per_turn: Math.min(...perSampleLatencies),
+    max_latency_ms_per_turn: Math.max(...perSampleLatencies),
+    n: censusRows.length,
+    denominator: { out_of_tool_ms: outOfToolMs, turns, span_ms: spanMs },
+    in_tool_ms: inToolMs,
+    in_tool_total_ms: inToolTotalMs,
+  }
+}
+
+export function formatTurnBudgetReport(report = {}) {
+  if (!report.measured) {
+    return `dispatch-batch: turn-budget role=builder affordable_turns=unmeasured latency_ms_per_turn=unmeasured reason=${report.reason || 'no --turn-census measurement supplied'}`
+  }
+  const denominator = report.denominator || {}
+  const inToolMs = report.in_tool_ms || {}
+  return `dispatch-batch: turn-budget role=builder wait_s=${report.wait_s} affordable_turns=${report.affordable_turns} latency_ms_per_turn=${report.latency_ms_per_turn} range_ms_per_turn=${report.min_latency_ms_per_turn}..${report.max_latency_ms_per_turn} n=${report.n} denominator=out_of_tool_ms:${denominator.out_of_tool_ms},turns:${denominator.turns},span_ms:${denominator.span_ms} in_tool_ms=edit:${inToolMs.edit},read:${inToolMs.read},test:${inToolMs.test},other:${inToolMs.other},total:${report.in_tool_total_ms}`
 }
 
 export function seatsDefect(value) {
@@ -3087,6 +3164,7 @@ function resumeCommand({ batchDir, fences, checkout, parentDir, outDir, tier, va
   add('baseline', runFlags.baseline)
   add('planner-symbols-holdout-fraction', runFlags['planner-symbols-holdout-fraction'])
   for (const spec of Array.isArray(runFlags.adopt) ? runFlags.adopt : (runFlags.adopt ? [runFlags.adopt] : [])) add('adopt', spec)
+  for (const path of Array.isArray(runFlags[TURN_CENSUS_FLAG]) ? runFlags[TURN_CENSUS_FLAG] : (runFlags[TURN_CENSUS_FLAG] ? [runFlags[TURN_CENSUS_FLAG]] : [])) add(TURN_CENSUS_FLAG, path)
   for (const flag of [
     'plan-rounds', 'build-rounds', 'review-rounds', 'wait-builder', 'wait-planner',
     'wait-reviewer', 'wait-lead', 'wait-tech-lead', 'validation-lane', 'suite',
@@ -3120,6 +3198,10 @@ export async function dispatchBatch({ batchDir, fences, checkout, parentDir, out
   // (RV3-1). A refusal must name the cause it measured, not the first one it
   // tripped over. Ordering is the whole fix — both refusals still fire.
   preflightRunOptions({ variant, runFlags, lanes })
+  const waitBuilder = runFlags['wait-builder']
+  const waitSeconds = Number(waitBuilder === undefined || waitBuilder === null || String(waitBuilder).trim() === '' ? WAITS_S.builder : waitBuilder)
+  const census = readTurnCensus(runFlags[TURN_CENSUS_FLAG], d)
+  d.log(formatTurnBudgetReport(turnBudgetReport({ waitSeconds, censusRows: census.rows, reason: census.reason })))
   // Before any worktree exists: an archive that does not hold a plan refuses here,
   // having copied nothing.
   const adoptions = resolveAdoptions({ lanes, runFlags, checkout: root, deps: d })
@@ -3481,11 +3563,12 @@ export function parseCliArgs(argv) {
     'batch', 'fences', 'checkout', 'parent', 'out', 'tier', 'assurance', 'variant', 'wave', 'planner-symbols-holdout-fraction',
     'plan-rounds', 'build-rounds', 'review-rounds', 'wait-builder', 'wait-planner',
     'wait-reviewer', 'wait-lead', 'wait-tech-lead', 'validation-lane', 'suite', 'baseline',
+    TURN_CENSUS_FLAG,
     ...TURN_CEILING_FLAGS,
     ...BOOT_MEMORY_FLAGS,
   ])
   const booleanFlags = new Set(['dry-run', 'force', 'no-keep', PANE_TRANSPORT, BOOT_TRANSPORT])
-  const repeatableFlags = new Set(['adopt'])
+  const repeatableFlags = new Set(['adopt', TURN_CENSUS_FLAG])
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]
     if (typeof argument !== 'string' || !argument.startsWith('--')) {

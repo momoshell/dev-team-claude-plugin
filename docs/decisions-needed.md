@@ -19,6 +19,9 @@ Line counts here use `split("\n").length`, which is one greater than `wc -l` for
 - **Options:** Set effort per stage; continue setting effort per seat.
 - **Blocked:** #1028 ask 2; changing the roster's shape requires the owner.
 - **Raised:** 2026-09-08 (Effort per stage, not per seat?)
+- **CLOSED 2026-09-09: set effort per stage, shipped neutral, with an operator dial.** The roster gains an optional per-stage effort; **the seat's value is the default fallback** and **no stage override ships**, so every lane is byte-identical until an operator dials one. A dispatch-time dial sets it when wanted.
+- **Why, measured over 1,388 seat assignments in 208 lanes** (`seat_turn_census`, fitting `model_time = overhead + marginal x turns`): the premise in #1028 ask 2 — that a bounce needs less effort than a first build — is **contradicted**. Later rounds cost MORE per turn, not less: builder 12.0 -> 15.3 s/turn, planner 12.4 -> 19.0. Marginal cost is 12-13 s/turn for planner, builder, reviewer and lead alike; the builder at `effort=max` measures 12.3 s/turn (R2 0.90), among the cheapest. **Effort and role are perfectly confounded** — every seat's effort is fixed by role, and no lane has ever run one role at two efforts — so the closest comparison (same model `gpt-5.6-sol`: planner `medium` 36.9 vs tech-lead `xhigh` 43.2 s/turn, n=110) is an **unattributable upper bound of +17%**, not a finding. The decision therefore ships the knob, not a cut: it is what lets #1030's holdout break the confound and answer whether `xhigh` earns its cost.
+- **Not the lever:** the planner's **169 s fixed overhead** x 414 assignments = **19.4 h, 13% of all 146.7 h of seat wall-clock**, which no effort setting can touch. Raised separately.
 
 ## 3. Re-prove after a moved-base rebase (#1021)?
 

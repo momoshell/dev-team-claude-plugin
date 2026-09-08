@@ -141,6 +141,12 @@ test('RS1', async () => {
   assert.match(value, /FIRST_BODY/)
   assert.doesNotMatch(value, /SECOND_BODY/)
   assert.doesNotMatch(value, /export \{/)
+  // The absences above are measurements only if this retrieval CAN produce those
+  // tokens. Retrieving the sibling symbol proves both directions: each body is
+  // reachable, and neither leaks into the other's result.
+  const other = await tool.execute('r', { file: 'src/target.mjs', symbol: 'second' }, null, null, { cwd: f.root })
+  assert.match(other, /SECOND_BODY/)
+  assert.doesNotMatch(other, /FIRST_BODY/)
 })
 
 test('RF1', async () => {

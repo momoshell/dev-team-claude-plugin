@@ -144,6 +144,7 @@ const VACUITY_EXEMPT = new Map([
   ['crew/pi/extensions/subagent.test.mjs', frozenVacuitySites(1, 'flagged', 'audited 2026-08-25: one typeof mod.default presence check on the extension entrypoint; the registration behaviour is pinned by the test below it. Outside this lane\'s fence, so flagged rather than converted')],
   ['crew/reclaim-descendants.test.mjs', frozenVacuitySites(1, 'by-design', 'audited 2026-08-25: L820 asserts the injected sleep is callable and calls it on the next line, which is what makes the record assertion below it mean anything; the presence check is the precondition of a real behavioural step')],
   ['crew/roster-refresh.test.mjs', frozenVacuitySites(1, 'by-design', "audited 2026-08-25: `'lead' in roster.tiers.mechanical` is paired with `equal(..., null)`; `in` is the only way to distinguish an ABSENT key from one whose value is null, which is exactly the claim being made")],
+  ['crew/pi/extensions/skeletonread.test.mjs', frozenVacuitySites(2, 'by-design', "audited 2026-09-09: RS1 retrieves symbol `first`, then symbol `second`, from ONE two-symbol fixture. Each doesNotMatch is paired with a positive match for THE SAME token in the sibling retrieval, so both tokens demonstrably reach the payload and the claim is which symbol body a retrieval carries — the whole point of symbol retrieval")],
   ['test/factory-emit.test.mjs', frozenVacuitySites(1, 'by-design', 'audited 2026-08-25: /no_run/ IS serialised — emit.mjs writes `[reason: ${err.reason}]` to stderr — so the assertion discriminates an unknown_flag refusal from a no_run one. Not the #578 shape: the key really does reach the payload')],
   ['test/factory-make-brief.test.mjs', frozenVacuitySites(1, 'by-design', 'audited 2026-08-25: the doesNotMatch on /BROAD_PIN/ is paired with a positive match for the same token in the Tripwires section of the same brief, so the token demonstrably reaches the payload and the claim is which SECTION carries it')],
   ['test/fixtures.test.mjs', frozenVacuitySites(1, 'by-design', 'audited 2026-08-25: /toLowerCase/ is an absence pin over fixtures.mjs SOURCE text paired with a positive import match — the fixture guard must import the production rule rather than copy it, and the identifier is exactly what a copy would contain')],
@@ -173,7 +174,7 @@ test('presence-only tripwire — every exemption has a live, load-bearing warran
     assert.ok(exemption.sites > 0, `exemption ${file} is redundant`)
     total += exemption.sites
   }
-  assert.equal(total, 22)
+  assert.equal(total, 24)
 })
 
 // The four instances this repo found by hand. Three are FIXED in the tree, so the
@@ -235,5 +236,5 @@ test('presence-only tripwire — the live report distinguishes flagged from by-d
   console.log(`VACUITY-REPORT ${JSON.stringify(report)}`)
   assert.ok(report.flagged > 0, 'a report with nothing flagged is a suspicious result, not a clean bill of health')
   assert.ok(report.by_design > 0, 'a report with nothing permitted by design means the pattern set is too wide')
-  assert.equal(report.sites, 22)
+  assert.equal(report.sites, 24)
 })

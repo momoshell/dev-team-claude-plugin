@@ -6,7 +6,7 @@ import {
   existsSync as fsExistsSync, readFileSync as fsReadFileSync, writeFileSync as fsWriteFileSync,
   unlinkSync as fsUnlinkSync, mkdirSync as fsMkdirSync, readdirSync as fsReaddirSync,
   openSync as fsOpenSync, writeSync as fsWriteSync, closeSync as fsCloseSync,
-  renameSync as fsRenameSync,
+  renameSync as fsRenameSync, statSync as fsStatSync, constants as fsConstants,
 } from 'node:fs'
 import { join } from 'node:path'
 import { spawn as cpSpawn } from 'node:child_process'
@@ -19,6 +19,7 @@ import { readJsonTri } from './json-leaf.mjs'
 import { PI_BUILTIN_TOOLS, piActivatedTools, translateDeny } from './adapters/adapter-pi.mjs'
 
 export const WAIT_POLL_MS = 5000
+export const RPC_PROMPT_DELIVERY_WINDOW_MS = 30_000
 export const PRE_FIRST_TURN_TOLERANCE_MS = WAIT_POLL_MS
 export const PRE_FIRST_TURN_ABSENT_REASONS = Object.freeze({
   seat_reused: 'seat-reused',
@@ -78,6 +79,163 @@ export function splitFrames(buffer) {
     start = nl + 1
   }
   return { lines, rest: input.subarray(start) }
+}
+
+// A corpus read is an observation, not a verdict. Keep failures in a closed
+// vocabulary so an absent or denied lane cannot be mistaken for an empty one.
+export function closedReason(error) {
+  const code = error?.code
+  if (code === 'ENOENT') return 'absent'
+  if (code === 'EACCES' || code === 'EPERM') return 'denied'
+  if (code === 'EINTR') return 'interrupted'
+  if (code === 'EAGAIN' || code === 'EWOULDBLOCK') return 'temporarily-unavailable'
+  return 'unreadable'
+}
+
+function corpusRate(count, denominator) {
+  if (!Number.isFinite(denominator) || denominator <= 0) return null
+  return Number(((count / denominator) * 100).toFixed(2))
+}
+
+function corpusIdNumber(value) {
+  const match = /^d(\d+)$/.exec(String(value ?? ''))
+  if (!match) return null
+  const number = Number(match[1])
+  return Number.isSafeInteger(number) ? number : null
+}
+
+// Read-only archive evidence for the prompt-delivery incident report. The
+// process-level cmd.json and the prior-turn settle row are deliberately broad
+// proxies; this report names candidates and never upgrades either to a loss.
+export function rpcDeliveryCorpusReport(lanePaths, deps = {}) {
+  const read = deps.readFileSync ?? fsReadFileSync
+  const stat = deps.statSync ?? fsStatSync
+  const lanes = Array.isArray(lanePaths) ? lanePaths.map((lane) => String(lane)) : []
+  const unreadable = []
+  const laneResults = []
+  for (const lane of lanes) {
+    let rows
+    try {
+      const raw = read(join(lane, 'journal.jsonl'), 'utf8')
+      if (typeof raw !== 'string' && !Buffer.isBuffer(raw)) throw new TypeError('journal is not text')
+      rows = String(raw).split('\n').flatMap((line) => {
+        if (!line.trim()) return []
+        try {
+          const row = JSON.parse(line)
+          return row && typeof row === 'object' && !Array.isArray(row) ? [row] : []
+        } catch { return [] }
+      })
+    } catch (error) {
+      unreadable.push({ lane, candidates: null, reason: closedReason(error) })
+      continue
+    }
+
+    const assignments = rows.filter((row) => row.channel === 'record' && typeof row.assign === 'string')
+    const deliveries = new Set(rows
+      .filter((row) => row.event === 'assignment-delivery' && row.transport === 'headless-rpc' && typeof row.assignment_id === 'string' && typeof row.role === 'string')
+      .map((row) => `${row.role}\\0${row.assignment_id}`))
+    const rpcAssignments = assignments
+      .filter((row) => typeof row.role === 'string' && deliveries.has(`${row.role}\\0${row.assign}`))
+      .map((row) => ({ ...row, key: `${row.role}\\0${row.assign}` }))
+    const cmdCandidates = new Set()
+    const settleCandidates = new Set()
+    const settleRows = []
+    let cmdStatFailure = null
+    for (const assignment of rpcAssignments) {
+      const cmdPath = join(lane, 'task', 'headless-rpc', assignment.role, 'cmd.json')
+      try {
+        const measured = stat(cmdPath)
+        const mtime = Number(measured?.mtimeMs)
+        if (Number.isFinite(mtime) && Number.isFinite(Number(assignment.at)) && mtime < Number(assignment.at)) cmdCandidates.add(assignment.key)
+      } catch (error) {
+        if (error?.code !== 'ENOENT') { cmdStatFailure = error; break }
+      }
+    }
+    if (cmdStatFailure) {
+      unreadable.push({ lane, candidates: null, reason: closedReason(cmdStatFailure) })
+      continue
+    }
+
+    const lastSettle = new Map()
+    for (const row of rows) {
+      if (row?.rpc_settle_gate && typeof row.rpc_settle_gate.role === 'string') {
+        lastSettle.set(row.rpc_settle_gate.role, row.rpc_settle_gate)
+        continue
+      }
+      if (row.channel !== 'record' || typeof row.assign !== 'string' || typeof row.role !== 'string') continue
+      const gate = lastSettle.get(row.role)
+      lastSettle.delete(row.role)
+      if (!gate || !deliveries.has(`${row.role}\\0${row.assign}`)) continue
+      const gateId = corpusIdNumber(gate.id)
+      const assignmentId = corpusIdNumber(row.assign)
+      if (gateId !== null && assignmentId !== null && gateId < assignmentId) {
+        settleCandidates.add(`${row.role}\\0${row.assign}`)
+        settleRows.push({ role: row.role, id: gate.id, assignment_id: row.assign })
+      }
+    }
+    laneResults.push({
+      lane,
+      assignments: assignments.length,
+      rpcAssignments,
+      cmdCandidates,
+      settleCandidates,
+      settleRows,
+    })
+  }
+
+  const totalAssignments = laneResults.reduce((sum, lane) => sum + lane.assignments, 0)
+  const totalLanes = lanes.length
+  const cmdCandidates = new Set()
+  const settleCandidates = new Set()
+  const unionCandidates = new Set()
+  let cmdLanes = 0
+  let settleLanes = 0
+  let unionLanes = 0
+  let olderSettleRows = 0
+  for (const lane of laneResults) {
+    for (const key of lane.cmdCandidates) cmdCandidates.add(`${lane.lane}\\0${key}`)
+    for (const key of lane.settleCandidates) settleCandidates.add(`${lane.lane}\\0${key}`)
+    lane.settleRows.forEach(() => { olderSettleRows += 1 })
+    if (lane.cmdCandidates.size > 0) cmdLanes += 1
+    if (lane.settleCandidates.size > 0) settleLanes += 1
+    const union = new Set([...lane.cmdCandidates, ...lane.settleCandidates])
+    for (const key of union) unionCandidates.add(`${lane.lane}\\0${key}`)
+    if (union.size > 0) unionLanes += 1
+  }
+  const cmdCount = cmdCandidates.size
+  const settleCount = settleCandidates.size
+  const unionCount = unionCandidates.size
+  return {
+    total_lanes: totalLanes,
+    total_assignments: totalAssignments,
+    rpc_assignments: laneResults.reduce((sum, lane) => sum + lane.rpcAssignments.length, 0),
+    cmd_mtime_predates_assignment: {
+      assignments: cmdCount,
+      assignment_denominator: totalAssignments,
+      rate_percent: corpusRate(cmdCount, totalAssignments),
+      lanes: cmdLanes,
+      lane_denominator: totalLanes,
+      rate_percent_lanes: corpusRate(cmdLanes, totalLanes),
+    },
+    older_settle_gate_candidates: {
+      distinct_assignments: settleCount,
+      settle_rows: olderSettleRows,
+      assignment_denominator: totalAssignments,
+      rate_percent: corpusRate(settleCount, totalAssignments),
+      lanes: settleLanes,
+      lane_denominator: totalLanes,
+      rate_percent_lanes: corpusRate(settleLanes, totalLanes),
+    },
+    either_candidate: {
+      distinct_assignments: unionCount,
+      assignment_denominator: totalAssignments,
+      rate_percent: corpusRate(unionCount, totalAssignments),
+      lanes: unionLanes,
+      lane_denominator: totalLanes,
+      rate_percent_lanes: corpusRate(unionLanes, totalLanes),
+    },
+    unreadable,
+  }
 }
 
 const RPC_NO_GRANTS = Object.freeze({ tools: [], extensions: [], agents: [], skills: [] })
@@ -551,6 +709,9 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
   const kill = deps.kill || ((p, signal) => process.kill(p, signal))
   const uuid = deps.uuid || randomUUID
   const now = deps.now || (() => Date.now())
+  const configuredPromptDeliveryWindow = Number(deps.promptDeliveryWindowMs)
+  const promptDeliveryWindowMs = Number.isFinite(configuredPromptDeliveryWindow) && configuredPromptDeliveryWindow >= 0
+    ? configuredPromptDeliveryWindow : RPC_PROMPT_DELIVERY_WINDOW_MS
   const sleep = deps.sleep || ((ms) => {
     const sab = new SharedArrayBuffer(4)
     Atomics.wait(new Int32Array(sab), 0, 0, ms)
@@ -651,6 +812,8 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
           tool_spans_unmatched: noFrames ? null : census?.tool_spans_unmatched ?? null,
           tool_spans_same_poll: noFrames ? null : census?.tool_spans_same_poll ?? null,
           bash_reads_absent_reason: noFrames ? null : census?.bash_reads_absent_reason ?? null,
+          parked_frames: turn.parked?.frames ?? null,
+          parked_frames_reason: (turn.parked?.frames ?? 0) > 0 ? 'prior-turn-unsettled' : null,
           absent_reason: absentReason,
           pre_first_turn_span_ms: timing.pre_first_turn_span_ms,
           seat_boot_ms: noFrames ? null : timing.seat_boot_ms,
@@ -737,21 +900,64 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
     return out
   }
   function fold(seat, frames) {
+    const attributed = []
     for (const frame of frames) {
       if (!frame || typeof frame !== 'object') continue
-      if (seat.turn) {
-        seat.turn.state.sawJson = true
+      const turn = seat.turn
+      if (turn?.priorUnsettled) {
+        // RV1-1 — `turn_end` is NOT the parked turn's terminus. It brackets ONE
+        // provider turn: :917-920 below increments providerBoundary.turns on it and
+        // the census reducer counts it the same way, and a single builder assignment
+        // in this lane journalled turns:76. A parked predecessor that is still
+        // WORKING emits turn_end seconds later, which would clear the quarantine
+        // while it holds the FIFO, and the delivery window would never fire. Only
+        // `agent_settled` ends a turn; `agent_end` is the conversation boundary and
+        // is not completion (see :922).
+        if (frame.type === 'agent_settled') {
+          turn.priorBoundary = { id: turn.priorTurnId, type: frame.type }
+          turn.priorUnsettled = false
+          turn.parked.frames += 1
+          continue
+        }
+        // RV2-1 — a `response` bearing THIS turn's own prompt id belongs to the new
+        // assignment, not to the parked one. pi answers a prompt it is too busy to
+        // accept within milliseconds, and that reply is the expected frame in this
+        // exact state. Swallowing it means the check at :1502 never sees it,
+        // isBusyRefusal is never consulted, PROMPT_REFUSAL_RETRIES never runs, and
+        // the turn fails as rpc-prompt-undelivered — a transport-error, not a
+        // SEAT_RETRY_KIND — so the lane escalates where it previously recovered.
+        // The discriminator is the id the protocol already carries; nothing is
+        // guessed. It reaches seat.responses AND the attributed array the wait loop
+        // iterates, because RV2-1 names both.
+        if (frame.type === 'response' && frame.id != null && frame.id === turn.promptId) {
+          seat.responses.set(frame.id, frame)
+          pending.delete(frame.id)
+          attributed.push(frame)
+          continue
+        }
+        // RV2-2 — excluding the parked turn's frames from THIS turn's attribution is
+        // correct; discarding them with no trace is not. A parked turn that keeps
+        // working spends real provider tokens, and obs.frames would undercount with
+        // nothing saying so. Count what was parked so the census can NAME it rather
+        // than report a smaller number as if it were the whole. CLAUDE.md: a blind
+        // spot is stated, not omitted.
+        turn.parked.frames += 1
+        continue
+      }
+      attributed.push(frame)
+      if (turn) {
+        turn.state.sawJson = true
         // This provider-boundary counter is independent from the best-effort
         // census reducer: one tool-bearing turn_end is one turn, and a new
         // turn_start clears the per-turn tool state.
-        if (frame.type === 'turn_start') seat.turn.providerBoundary.calls = 0
-        if (frame.type === 'tool_execution_start') seat.turn.providerBoundary.calls += 1
-        if (frame.type === 'turn_end' && seat.turn.providerBoundary.calls > 0) seat.turn.providerBoundary.turns += 1
-        if (frame.type === 'agent_settled') seat.turn.state.settled = true
+        if (frame.type === 'turn_start') turn.providerBoundary.calls = 0
+        if (frame.type === 'tool_execution_start') turn.providerBoundary.calls += 1
+        if (frame.type === 'turn_end' && turn.providerBoundary.calls > 0) turn.providerBoundary.turns += 1
+        if (frame.type === 'agent_settled') turn.state.settled = true
         // agent_end is only the conversation boundary; it is not completion.
-        if (frame.type === 'agent_end') seat.turn.state.ended = true
+        if (frame.type === 'agent_end') turn.state.ended = true
       }
-      if (!seat.turn && seat.settling && frame.type === 'agent_settled') seat.settling.state.settled = true
+      if (!turn && seat.settling && frame.type === 'agent_settled') seat.settling.state.settled = true
       if (frame.type === 'response') {
         if (frame.id != null) {
           seat.responses.set(frame.id, frame)
@@ -759,9 +965,9 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
         }
       }
     }
-    if (seat.turn) seat.turn.usage = addUsage(seat.turn.usage, foldRpcUsage(frames))
-    neverLoadBearing(() => observe(seat, frames))
-    return frames
+    if (seat.turn) seat.turn.usage = addUsage(seat.turn.usage, foldRpcUsage(attributed))
+    neverLoadBearing(() => observe(seat, attributed))
+    return attributed
   }
   // Frame-level observation for the corpse report. pi's rpc frames carry NO
   // timestamp of their own (verified against
@@ -799,10 +1005,64 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
   // been counted. This function COUNTS and RETAINS; it never ends a dispatch.
   // That separation is load-bearing — an adjudicator that enforced would re-enter
   // abort() from inside abort().
+  function acknowledgePrompt(seat, turn) {
+    if (!turn || turn.acknowledged) return true
+    if (turn.priorUnsettled) return false
+    const recorded = session(turn.role).lastAssignmentId ?? null
+    if (recorded === turn.runId) {
+      turn.acknowledged = true
+      return true
+    }
+    try {
+      saveSession(turn.role, { sessionId: seat.sessionId, pid: seat.pid, startedAt: session(turn.role).startedAt || now(), lastAssignmentId: turn.runId })
+      turn.acknowledged = true
+      return true
+    } catch (error) {
+      turn.deliveryFailure ||= {
+        role: turn.role, logical_id: turn.id, run_id: turn.runId,
+        prior_assignment_id: turn.previousAssignmentId ?? null,
+        recorded_assignment_id: recorded,
+        outcome: 'failed-fast', reason: 'session-persist-failed', window_ms: promptDeliveryWindowMs,
+        error: String(error?.code || error?.message || error),
+      }
+      return false
+    }
+  }
+  function promptWriteReason(error) {
+    if (error?.code === 'EAGAIN' || error?.code === 'EWOULDBLOCK') return 'prompt-write-would-block'
+    if (error?.code === 'EPERM' || error?.code === 'EACCES') return 'prompt-write-denied'
+    if (error?.code === 'PARTIAL_WRITE') return 'prompt-write-partial'
+    return 'prompt-write-failed'
+  }
+  function failPromptDelivery(seat, turn, elapsed, reason = null, error = null) {
+    if (!turn) throw staged('rpc-prompt-undelivered', 'rpc prompt was not delivered')
+    const recorded = session(turn.role).lastAssignmentId ?? null
+    turn.deliveryFailure ||= {
+      role: turn.role, logical_id: turn.id, run_id: turn.runId,
+      prior_assignment_id: turn.previousAssignmentId ?? null,
+      recorded_assignment_id: recorded,
+      outcome: 'failed-fast', reason: reason || 'prompt-unacknowledged', window_ms: promptDeliveryWindowMs,
+      ...(error ? { error: String(error?.code || error?.message || error) } : {}),
+    }
+    turn.deliveryFailure.elapsed_ms = elapsed
+    if (!turn.deliveryFailureLogged) {
+      turn.deliveryFailureLogged = true
+      try {
+        if (turn.deliveryFailure) log({ at: now(), event: 'rpc-prompt-delivery', ...turn.deliveryFailure })
+      } catch { /* diagnostics are not load-bearing for the staged failure */ }
+    }
+    emitUsage(turn, seat, turn.usage)
+    journalTurnCensus(turn, seat)
+    finishTurn(seat)
+    const detail = turn.deliveryFailure.error ? `: ${turn.deliveryFailure.error}` : ''
+    throw staged('rpc-prompt-undelivered', `rpc prompt ${turn.runId} for seat ${turn.role} was not delivered (${turn.deliveryFailure.reason})${detail}`, turn.role)
+  }
   function pollSeat(seat) {
+    const turn = seat.turn
     const frames = fold(seat, readFrames(seat))
     if (seat.turn) seat.turn.policyRead = seat.lastRead !== false
     adjudicateRpcFrames(seat.turn, frames)
+    if (frames.length > 0) acknowledgePrompt(seat, turn)
     return frames
   }
   function responseError(role, frame) {
@@ -812,14 +1072,40 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
   function send(seat, obj, command = obj.type || obj.command || 'command') {
     const id = obj.id || commandId(seat.turn, command)
     const value = { ...obj, id }
+    const encoded = Buffer.from(`${JSON.stringify(value)}\n`, 'utf8')
+    let written
+    try {
+      written = writeFd(seat.fd, encoded)
+      if (command === 'prompt' && written !== undefined
+        && (typeof written !== 'number' || written !== encoded.length)) {
+        const error = Object.assign(new Error(`prompt FIFO write was partial (${String(written)} of ${encoded.length} bytes)`), { code: 'PARTIAL_WRITE' })
+        throw error
+      }
+    } catch (error) {
+      pending.delete(id)
+      if (command !== 'prompt') throw error
+      seat.deliveryFailed = true
+      const turn = seat.turn
+      if (turn) {
+        turn.deliveryFailure ||= {
+          role: turn.role, logical_id: turn.id, run_id: turn.runId,
+          prior_assignment_id: turn.previousAssignmentId ?? null,
+          recorded_assignment_id: session(turn.role).lastAssignmentId ?? null,
+          outcome: 'failed-fast', reason: promptWriteReason(error), window_ms: promptDeliveryWindowMs,
+          error: String(error?.code || error?.message || error),
+        }
+        return failPromptDelivery(seat, turn, 0, turn.deliveryFailure.reason, error)
+      }
+      throw staged('rpc-prompt-undelivered', `rpc prompt write failed: ${String(error?.message || error)}`, seat.role)
+    }
     pending.set(id, { command, at: now() })
-    writeFd(seat.fd, `${JSON.stringify(value)}\n`)
     return id
   }
   function ensureProcess(role, assignmentId = 'd0') {
     const member = crew.members?.[role]
     if (!member) throw new Error(`role ${role} not seated in this crew`)
     let seat = seats.get(role)
+    if (seat?.deliveryFailed) throw staged('rpc-session-busy', `rpc seat ${role} refused reuse after an undelivered prompt`, role)
     if (seat && (!seat.exit || !exists(seat.exit))) {
       ensureReuse.set(seat, true)
       return seat
@@ -846,8 +1132,8 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
     let child = null
     if (marker.verdict === VERDICTS.BUSY && marker.marker?.pid) {
       // Adopt a still-running seat rather than opening a second pi session.
-      fd = open(fifo, 'r+')
-      seat = { role, dir, stream, stderr, exit, pgid, fifo, cmdPath, fd, pid: marker.marker.pid, sessionId, readOffset: fileSize(stream), rest: Buffer.alloc(0), responses: new Map(), turn: null, settling: null, signalled: false, handle: marker.handle }
+      fd = open(fifo, fsConstants.O_RDWR | fsConstants.O_NONBLOCK)
+      seat = { role, dir, stream, stderr, exit, pgid, fifo, cmdPath, fd, pid: marker.marker.pid, sessionId, readOffset: fileSize(stream), rest: Buffer.alloc(0), responses: new Map(), turn: null, settling: null, signalled: false, deliveryFailed: false, handle: marker.handle }
       seats.set(role, seat)
       ensureReuse.set(seat, true)
       return seat
@@ -881,13 +1167,13 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
       // materializing a filesystem node, while the real O_RDWR open fails until
       // mkfifo has completed. Keep the retry bounded in either case.
       for (let i = 0; i < FIFO_RETRIES && fd == null; i += 1) {
-        try { fd = open(fifo, 'r+') } catch { sleep(FIFO_RETRY_MS) }
+        try { fd = open(fifo, fsConstants.O_RDWR | fsConstants.O_NONBLOCK) } catch { sleep(FIFO_RETRY_MS) }
       }
       if (fd == null) throw staged('rpc-spawn-failed', `rpc fifo did not appear for seat ${role}`, role)
       member.session_id = sessionId; member.started = true
       notePersist(log, now, role, persistCrew(paths, role, { session_id: sessionId, started: true }, crewDeps))
-      saveSession(role, { sessionId, pid: child.pid, startedAt: now(), lastAssignmentId: assignmentId })
-      seat = { role, dir, stream, stderr, exit, pgid, fifo, cmdPath, fd, pid: child.pid, sessionId, readOffset: fileSize(stream), rest: Buffer.alloc(0), responses: new Map(), turn: null, settling: null, signalled: false, handle }
+      saveSession(role, { sessionId, pid: child.pid, startedAt: now(), ...(old.lastAssignmentId !== undefined ? { lastAssignmentId: old.lastAssignmentId } : {}) })
+      seat = { role, dir, stream, stderr, exit, pgid, fifo, cmdPath, fd, pid: child.pid, sessionId, readOffset: fileSize(stream), rest: Buffer.alloc(0), responses: new Map(), turn: null, settling: null, signalled: false, deliveryFailed: false, handle }
       seats.set(role, seat)
       ensureReuse.set(seat, false)
       return seat
@@ -934,8 +1220,10 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
     const member = crew.members?.[role]
     if (!member) throw new Error(`role ${role} not seated in this crew`)
     let existing = seats.get(role)
+    if (existing?.deliveryFailed) throw staged('rpc-session-busy', `rpc seat ${role} refused reuse after an undelivered prompt`, role)
     if (existing?.turn && !existing.turn.state.settled) throw staged('rpc-session-busy', `rpc seat ${role} already has an in-flight turn`, role)
-    if (existing) awaitSettled(existing)
+    const priorTurnId = existing?.settling?.id ?? null
+    const priorSettled = existing ? awaitSettled(existing) : true
     const runId = nextAssignmentId()
     const id = reask?.id || runId
     const returnPath = reask?.returnPath || join(paths.returnsDir, `${id}.${role}.json`)
@@ -946,16 +1234,20 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
     const seatBootReadyAt = seatReused ? null : now()
     const offset = fileSize(seat.stream)
     seat.readOffset = offset; seat.rest = Buffer.alloc(0); seat.responses.clear()
+    const previousAssignmentId = session(role).lastAssignmentId ?? null
     const promptDeliveryStartedAt = now()
     const delivery = assignmentDelivery({ briefFile, readFileSync: read })
     const prompt = assignmentPrompt({ id, role, briefFile, returnPath, taskDir: taskDir || paths.taskDir, ...delivery }) + (note ? `\n${note}` : '')
-    const turn = { id, runId, role, returnPath, prompt, retries: 0, offset, usage: null, state: { sawJson: false, settled: false, ended: false }, providerBoundary: { calls: 0, turns: 0 }, observed: { frames: 0, turns: 0, lastType: null, lastAt: null, lastTool: null, lastToolAt: null, census: newCensus() }, timing: { assignment_started_at: assignmentStartedAt, seat_reused: seatReused, seat_boot_started_at: seatReused ? null : assignmentStartedAt, seat_boot_ready_at: seatBootReadyAt, prompt_delivery_started_at: promptDeliveryStartedAt, prompt_delivery_sent_at: null, brief_file: briefFile, current_pre_boundary_turn: newPreBoundaryTurn(), brief_read_turns: 0, brief_read_ms: 0, brief_read_measured: false, first_non_brief_tool_seen: false, first_non_brief_tool_at: null }, censusJournalled: false, sentAt: now(), policy: policy ?? null, seenToolCalls: new Set(), policyReported: false, pendingSuiteRefusal: null, enforced: false, ceilingDecision: null }
+    const turn = { id, runId, role, returnPath, prompt, retries: 0, offset, previousAssignmentId, priorUnsettled: !priorSettled, priorTurnId, usage: null, acknowledged: false, deliveryFailure: null, deliveryFailureLogged: false, state: { sawJson: false, settled: false, ended: false }, providerBoundary: { calls: 0, turns: 0 }, parked: { frames: 0 }, observed: { frames: 0, turns: 0, lastType: null, lastAt: null, lastTool: null, lastToolAt: null, census: newCensus() }, timing: { assignment_started_at: assignmentStartedAt, seat_reused: seatReused, seat_boot_started_at: seatReused ? null : assignmentStartedAt, seat_boot_ready_at: seatBootReadyAt, prompt_delivery_started_at: promptDeliveryStartedAt, prompt_delivery_sent_at: null, brief_file: briefFile, current_pre_boundary_turn: newPreBoundaryTurn(), brief_read_turns: 0, brief_read_ms: 0, brief_read_measured: false, first_non_brief_tool_seen: false, first_non_brief_tool_at: null }, censusJournalled: false, sentAt: now(), policy: policy ?? null, seenToolCalls: new Set(), policyReported: false, pendingSuiteRefusal: null, enforced: false, ceilingDecision: null }
+    if (turn.priorUnsettled && seat !== existing) {
+      turn.priorUnsettled = false
+      turn.priorTurnId = null
+    }
     seat.turn = turn
     const promptId = send(seat, { type: 'prompt', message: prompt, id: runId }, 'prompt')
     turn.timing.prompt_delivery_sent_at = now()
     log({ at: now(), event: 'assignment-delivery', role, assignment_id: id, transport: 'headless-rpc', mode: delivery.delivery, brief_bytes: delivery.brief_bytes, brief_size_measured: delivery.brief_bytes !== null, brief_size_unmeasured_reason: delivery.unmeasured_reason })
     turn.promptId = promptId
-    saveSession(role, { sessionId: seat.sessionId, pid: seat.pid, startedAt: session(role).startedAt || now(), lastAssignmentId: runId })
     return { id, returnPath }
   }
   // The envelope is the record, but it is not the seat's readiness: pi may
@@ -1234,6 +1526,10 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
     waitLoop: while (now() < deadline) {
       const { frames, enforced } = pollAndEnforce(seat, turn, returnPath)
       if (enforced) return enforced
+      const acknowledged = session(turn.role).lastAssignmentId === turn.runId
+      const elapsed = Math.max(0, now() - (turn.timing.prompt_delivery_sent_at ?? turn.sentAt))
+      if (turn.deliveryFailure) return failPromptDelivery(seat, turn, elapsed)
+      if (!acknowledged && elapsed >= promptDeliveryWindowMs) return failPromptDelivery(seat, turn, elapsed)
       for (const frame of frames) {
         if (frame?.type === 'response' && frame.command === 'parse' && frame.success === false) {
           emitUsage(turn, seat, turn.usage); journalTurnCensus(turn, seat); finishTurn(seat); throw staged('rpc-parse-error', `rpc parse failed: ${frame.error || 'malformed input'}`, turn.role)
@@ -1297,7 +1593,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
         finishTurn(seat)
         return emptyTurnEnvelope({ id: turn.id, role: turn.role, returnPath })
       }
-      sleep(WAIT_POLL_MS)
+      sleep(!acknowledged ? Math.min(WAIT_POLL_MS, Math.max(1, promptDeliveryWindowMs - elapsed)) : WAIT_POLL_MS)
     }
     // An expired deadline skips the loop entirely, so this may be the FIRST read
     // of the turn's frames. Deciding here is what keeps a command observed in the
@@ -1305,6 +1601,10 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
     // false measured zero.
     const late = pollAndEnforce(seat, turn, returnPath)
     if (late.enforced) return late.enforced
+    const acknowledged = session(turn.role).lastAssignmentId === turn.runId
+    const elapsed = Math.max(0, now() - (turn.timing.prompt_delivery_sent_at ?? turn.sentAt))
+    if (turn.deliveryFailure) return failPromptDelivery(seat, turn, elapsed)
+    if (!acknowledged && elapsed >= promptDeliveryWindowMs) return failPromptDelivery(seat, turn, elapsed)
     const groupBefore = probeGroup(seat)
     abort(turn.role, { settleMs: ABORT_SETTLE_MS })
     const proof = turn.state.settled ? null : proveGroupDead(seat)

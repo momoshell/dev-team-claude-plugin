@@ -2826,6 +2826,7 @@ test('E1 compaction fields leave every prior census field byte-identical', () =>
     'envelope_poll_ms', 'envelope_poll_absent_reason',
     'pre_first_turn_known_sum_ms', 'pre_first_turn_residual_ms',
     'pre_first_turn_tolerance_ms', 'pre_first_turn_reconciled',
+    'parked_frames', 'parked_frames_reason',
   ]) delete rpcCensus[key]
   assert.equal(JSON.stringify(rpcCensus), JSON.stringify({
     role: 'builder',

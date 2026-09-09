@@ -61,6 +61,7 @@ transport stage below reaches an escalation record as a `where`. These are
 | `rpc-command-error` | The RPC transport reported a command error. | Read the command response and transport journal before reassigning. |
 | `rpc-no-envelope` | The RPC turn ended without an envelope. | Inspect the RPC stream and return path for the missing record. |
 | `rpc-parse-error` | The RPC stream could not be parsed. | Preserve the malformed frame and inspect the transport boundary. |
+| `rpc-prompt-undelivered` | The prompt for an RPC assignment was never acknowledged by the seat. | Read `rpc-prompt-delivery` in the journal for the recorded assignment id, then compare it with the seat's `session.json` before assuming the worker is dead. |
 | `rpc-session-busy` | The RPC session was already handling another turn. | Confirm the in-flight assignment's terminal state before retrying. |
 | `rpc-session-not-in-flight` | An RPC operation named no in-flight assignment. | Reconcile the assignment record with the transport's current state. |
 | `rpc-spawn-failed` | The RPC worker could not be spawned. | Read the spawn refusal and verify the configured binary. |

@@ -2956,6 +2956,607 @@ export function driveTask(ctx, io) {
   }
 }
 
+// Lifted decision interfaces (#1100).
+function settleConvergence({ why, where, gateOutput, gateRed = true, ctx, io, lastReview, stages, consults, dissents, grants, growth, modifiers, enforcements, setCommit, builderEnv, planEnv, planPath, journal, inScope, stage, stageComplete, phaseSlot, emit, carriedBlock, gateBlock, acceptDecisionBlock, escalate }) {
+  if (typeof io.createDraftPr !== 'function' || typeof io.createIssue !== 'function') return null
+  if (!builderEnv) return null
+  if (!gateRed && gateOutput == null) return null
+  if (gateRed && baselineGateDefect(gateOutput) !== null) return null
+
+  const parsedGate = parseGateSummary(gateOutput)
+  const gateSummary = {
+    line: gateSummaryLine(gateOutput),
+    output: String(gateOutput || ''),
+    ...(parsedGate || {}),
+  }
+
+  stage('converge:suite')
+  const suiteRes = phaseSlot(SUITE_SLOT_PHASES.warm, () => io.run(ctx.suite))
+  if (!suiteRes.ok) {
+    io.log(recordRow({ at: io.now(), converge_declined: 'suite red' }))
+    emit({ kind: 'converge', action: 'declined', where: 'suite', why: 'suite red' })
+    stageComplete()
+    return null
+  }
+
+  stageComplete()
+  stage('converge:issues')
+  const residuals = residualList({ findings: lastReview?.findings ?? null, gateSummary, gateRed })
+  if (residuals.length === 0) {
+    io.log(recordRow({ at: io.now(), converge_declined: 'no residuals' }))
+    emit({ kind: 'converge', action: 'declined', where: 'residuals', why: 'no residuals to record' })
+    stageComplete()
+    return null
+  }
+  const issues = []
+  for (const residual of residuals) {
+    if (residual.severity !== 'must-fix') continue
+    let filed
+    try {
+      filed = io.createIssue({
+        title: followUpIssueTitle({ task: ctx.task, residual }),
+        body: followUpIssueBody({ task: ctx.task, residual, gateSummary, escalation: { where, why } }),
+      })
+    } catch (err) {
+      const detail = err?.message ?? String(err)
+      io.log(recordRow({ at: io.now(), converge_declined: 'issue filing failed', residual: residual.id, why: detail }))
+      emit({ kind: 'converge', action: 'declined', where: 'issues', residual: residual.id, why: detail })
+      stageComplete()
+      return null
+    }
+    if (!filed || !Number.isInteger(filed.number)) {
+      const detail = `malformed issue result for ${residual.id}`
+      io.log(recordRow({ at: io.now(), converge_declined: 'issue filing failed', residual: residual.id, why: detail }))
+      emit({ kind: 'converge', action: 'declined', where: 'issues', residual: residual.id, why: detail })
+      stageComplete()
+      return null
+    }
+    residual.issue = { number: filed.number, url: filed.url }
+    issues.push({ number: filed.number, url: filed.url })
+    emit({ kind: 'converge', action: 'issue-filed', residual: residual.id, number: filed.number })
+  }
+
+  stageComplete()
+  stage('converge:commit')
+  const message = composeCommitMessage({ task: ctx.task, planEnv, builderEnv })
+  const hasCommitSubject = String(planEnv.details?.commit_subject || '').split('\n').some((line) => line.trim())
+  if (!hasCommitSubject) io.log(recordRow({ at: io.now(), commit_subject: 'fallback-from-plan-summary' }))
+  const committing = io.changedFiles().filter(inScope)
+  const commit = setCommit(io.commit(committing, message))
+  emit({ kind: 'converge', action: 'committed', commit: commit, files: committing.length })
+
+  stageComplete()
+  stage('converge:pr')
+  let pr
+  try {
+    const carriedLines = carriedPrLines(carriedBlock().carried ?? [])
+    pr = io.createDraftPr({
+      title: draftPrTitle({ task: ctx.task }),
+      body: draftPrBody({
+        gateSummary,
+        findings: residuals,
+        escalation: { where, why },
+        roundHistory: [...stages],
+        gateRed,
+      }) + (carriedLines.length > 0 ? `\n${carriedLines.join('\n')}\n` : ''),
+    })
+  } catch (err) {
+    const detail = err?.message ?? String(err)
+    stageComplete()
+    return escalate(
+      'converge-pr',
+      `the work is committed at ${commit} but the draft PR could not be opened: ${detail}`,
+      [],
+      { commit: commit, converge: { pr: null, issues } },
+    )
+  }
+  if (!pr || !Number.isInteger(pr.number) || typeof pr.url !== 'string' || pr.url.length === 0) {
+    const detail = 'malformed draft PR result'
+    stageComplete()
+    return escalate(
+      'converge-pr',
+      `the work is committed at ${commit} but the draft PR could not be opened: ${detail}`,
+      [],
+      { commit: commit, converge: { pr: null, issues } },
+    )
+  }
+
+  stageComplete()
+  stage('converge')
+  emit({ kind: 'converge', action: 'settled', commit: commit, pr: pr.number, issues: issues.length })
+  const result = {
+    status: 'converge',
+    summary: `Task ${ctx.task} converged with residuals: committed ${commit} (${committing.length} files), suite green, ${gateRed ? 'gate red' : 'gate green with unresolved review findings'} — DRAFT PR #${pr.number}, ${issues.length} follow-up issue(s) filed. Merge authority stays human.`,
+    artifacts: [planPath, journal],
+    details: {
+      commit: commit, stages: stages, files_committed: committing, consults: consults,
+      dissents: dissents, accepted_via: null, escalation: { where, why },
+      extra_rounds_granted: grants, growth: growth, modifiers: modifiers, enforcements: enforcements,
+      gate: gateBlock(),
+      ...acceptDecisionBlock(),
+      ...carriedBlock(),
+      converge: {
+        pr: { number: pr.number, url: pr.url }, draft: true, issues, residuals,
+        gate_summary: { line: gateSummary.line, total: gateSummary.total, failed: gateSummary.failed, errored: gateSummary.errored },
+      },
+    },
+  }
+  stageComplete()
+  return result
+}
+
+function renderPlanRevisionBrief({ round, check, taskDir, briefFile, growth }) {
+  const checkPath = check.details?.check_path || `${taskDir}/plan-check.md`
+  return [
+    `# Plan revision (round ${round})`, '',
+    `Revise plan.md per the check at ${checkPath}. Close every must-fix. Original brief: ${briefFile}`,
+    ...applyPrescriptionLines('the plan check'),
+    '',
+    ...growthLines(growth.at(-1)),
+  ].join('\n')
+}
+
+function runPanelReview({ round, panel, io, dissents, setAcceptFindings, setLastReview, planPath, panelBriefText, panelStandingQuestion, art, stage, stageComplete, assignAndWait, carriedOpen, panelLog, panelDegraded, emit }) {
+  let panelBounceFindings = ''
+  stage(`review:panel-r${round}`)
+  const panelInstructions = [
+    '',
+    'You are one of two independent reviewers on a regranted continuation round.',
+    'Report typed findings in details.findings (id, severity from the closed set must-fix|should-fix|consider, location as path:line or path:start-end, summary).',
+    'Return the identical details.verdict shape: verdict must be pass or changes-needed, with must_fix, should_fix, and consider counts.',
+    'A must-fix whose defect class cannot become a mechanical guard may carry "hardening": "ungateable" with a non-empty "hardening_why"; only the reviewer may set it.',
+  ].join('\n')
+  const base = panelBriefText
+  const aBrief = art(`panel-a-brief-${round}.md`)
+  io.writeFile(aBrief, `${base}${panelInstructions}`)
+  let aEnv = assignAndWait('reviewer', aBrief, 'panel-a')
+  const reviewerAVerdict = verdictOf(aEnv)
+  const reviewerAHasFindings = (reviewFindings(aEnv?.details)?.findings?.length || 0) > 0
+  if (!aEnv || aEnv.status !== 'done' || !reviewerAVerdict) {
+    panelDegraded('reviewer')
+    stageComplete()
+    return { review: aEnv, panelBounceFindings: '' }
+  }
+  // #800 R8 — a `pass` carrying a must-fix, or a finding id outside the closed shape,
+  // is refused by SHAPE before the panel can adjudicate it away. No partner, no
+  // adjudicator: reviewer A's envelope goes back to the outer loop unchanged, where
+  // the ordinary refusal consult re-asks that reviewer. `assignAndWait` has already
+  // declined to make it canonical (§1e). The row names the refusal the panel ACTUALLY
+  // saw — a durable record saying `verdict-findings` for a `finding-id` defect is a
+  // record of something that did not happen.
+  const panelRefusal = reviewShapeDefect(aEnv.details)
+  if (panelRefusal) {
+    panelLog({ panel_skipped: panelRefusal.reason })
+    stageComplete()
+    return { review: aEnv, panelBounceFindings: '' }
+  }
+
+  const bBrief = art(`panel-b-brief-${round}.md`)
+  const partnerInstructions = [
+    panelInstructions,
+    '',
+    `For this assignment you are reviewing the diff, not re-doing your seat's work (partner role: ${panel.partner}).`,
+    'Use the identical details.findings (id, severity, location, summary) and details.verdict shape.',
+  ].join('\n')
+  let bEnv
+  try {
+    io.writeFile(bBrief, `${base}${partnerInstructions}`)
+    bEnv = assignAndWait(panel.partner, bBrief, 'panel-b')
+  } catch {
+    panelDegraded(panel.partner)
+    stageComplete()
+    return { review: aEnv, panelBounceFindings: '' }
+  }
+  if (!bEnv || bEnv.status !== 'done' || !verdictOf(bEnv)) {
+    panelDegraded(panel.partner)
+    stageComplete()
+    return { review: aEnv, panelBounceFindings: '' }
+  }
+
+  const findingsOf = (env) => reviewFindings(env?.details)?.findings ?? []
+  const fused = fuseFindings(findingsOf(aEnv), findingsOf(bEnv), {
+    sourceA: 'reviewer', sourceB: panel.partner,
+  })
+  // #800 revision 2 — PANEL-LOCAL ID ALLOCATION. reviewFindings keeps the FIRST valid
+  // entry for an id and drops every later duplicate (crew/drive.mjs:834-838), and the
+  // panel's own array is fed straight back through it by dispositionPlan. The panel
+  // mints the FIXED id `panel-class-${round}`, so a reviewer-origin finding already carrying
+  // that id ERASES the adjudicator's class must-fix — the one finding that says the class
+  // is NOT closed. needsSeat then comes back empty and the run takes the seat-free
+  // re-review shortcut on a class the adjudicator explicitly refused to close. The same
+  // collapse happens when reviewer A and the partner independently mint one id for two
+  // divergent findings; adjudicatePanel keys its decisions on id alone
+  // (crew/escalation-policy.mjs:141).
+  // Allocate in ONE pass, in this order — consensus, divergent, then the synthetic class
+  // finding — keeping the first occurrence UNCHANGED. THE ORDER IS WHAT MAKES REVIEWER A'S
+  // ROUTING SAFE, and it is the whole reason no private id-shadow key is needed: A's
+  // normalized ids are already unique (crew/drive.mjs:834-838); consensus carries A's id
+  // (crew/escalation-policy.mjs:107-114); and `fuseFindings` orders divergences as ALL
+  // unmatched A entries BEFORE all unmatched partner entries (:117-124). So every
+  // reviewer-A id is allocated before any id that could collide with it and is never
+  // reminted. Only a partner id or the synthetic class id can be reminted, and neither
+  // authorizes A's patch. `accepted.get(finding.id)` below is therefore exact.
+  const panelIds = new Set()
+  let panelIdSeq = 0
+  const allocId = (id, source) => {
+    if (!panelIds.has(id)) { panelIds.add(id); return id }
+    let minted = `panel-remint-${++panelIdSeq}`
+    while (panelIds.has(minted)) minted = `panel-remint-${++panelIdSeq}`
+    panelIds.add(minted)
+    panelLog({ panel_id_reminted: { source, from: id, to: minted } })
+    return minted
+  }
+  const allocatedConsensus = fused.consensus.map((finding) => ({ ...finding, id: allocId(finding.id, 'reviewer') }))
+  const allocatedDivergent = fused.divergent.map((finding) => ({ ...finding, id: allocId(finding.id, finding.source) }))
+  const structuredDivergences = allocatedDivergent.map(({ id, source, severity, location, summary }) => ({
+    id, source, severity, location, summary,
+  }))
+  const divergenceLines = structuredDivergences.length > 0
+    ? structuredDivergences.map((entry) => `- ${JSON.stringify(entry)}`)
+    : ['- (none)']
+  const adjBrief = art(`panel-adjudication-${round}.md`)
+  const adjText = [
+    `# Panel adjudication (round ${round})`,
+    '',
+    '## Structured divergences',
+    ...divergenceLines,
+    '',
+    `## Plan of record: ${planPath}`,
+    '',
+    '## Standing class question',
+    panelStandingQuestion,
+    '',
+    '## Required envelope details shape',
+    '{"adjudications":[{"id":"<divergence id>","disposition":"uphold"|"dismiss","reason":"..."}],"class_invariant":"...","closes_class":true|false}',
+  ].join('\n')
+  let adjEnv
+  try {
+    io.writeFile(adjBrief, adjText)
+    adjEnv = assignAndWait(panel.adjudicator, adjBrief, 'panel-adjudication')
+  } catch {
+    panelDegraded(panel.adjudicator)
+    stageComplete()
+    return { review: aEnv, panelBounceFindings: '' }
+  }
+  if (!adjEnv || adjEnv.status !== 'done') {
+    panelDegraded(panel.adjudicator)
+    stageComplete()
+    return { review: aEnv, panelBounceFindings: '' }
+  }
+
+  const adjudicated = adjudicatePanel(allocatedDivergent, adjEnv.details)
+  // #800 R4 — the panel rebuilds findings from the normalized shape, which carries no
+  // patch. A reviewer-origin finding's routing must survive fusion or the panel
+  // silently disables auto-fix and ask-user on exactly the rounds a continuation
+  // needs them. DISMISSED findings are never re-attached: a dismissed finding must
+  // not execute. The map is acceptedRawById, so a rejected entry can no more
+  // authorize a patch here than it can on the ordinary path.
+  const accepted = acceptedRawById(aEnv.details)
+  // #839 — the panel must be able to REFUSE a partner's or an adjudicator's mark,
+  // which means it must first be able to SEE one: a rule that cannot see the thing it
+  // forbids cannot be proven to forbid it. Both sides' raw entries are indexed WITH
+  // their origin; only a reviewer-origin mark is ever reattached. Reviewer A's ids are
+  // never reminted (crew/drive.mjs:3711-3718), so the consensus lookup is exact.
+  const markById = new Map()
+  for (const [origin, env] of [['reviewer', aEnv], [panel.partner, bEnv]]) {
+    for (const [id, raw] of acceptedRawById(env?.details)) {
+      const mark = hardeningOf(raw)
+      if (mark && !markById.has(id)) markById.set(id, { origin, fields: { hardening: mark, hardening_why: raw.hardening_why.trim() } })
+    }
+  }
+  // MUTATION B7c: stop checking the mark's ORIGIN and a partner's or an adjudicator's
+  // ungateable exempts a finding the reviewer never excused.
+  const markOf = (id, origin) => { const m = markById.get(id); return m && m.origin === 'reviewer' && origin === 'reviewer' ? m.fields : {} }   // ANCHOR B7c
+  const withRouting = (finding, origin) => {
+    const raw = origin === 'reviewer' ? accepted.get(finding.id) : null
+    if (!raw) return finding
+    const disposition = dispositionOf(raw)
+    return {
+      ...finding,
+      ...(disposition ? { disposition } : {}),
+      ...(typeof raw.patch === 'string' && raw.patch.trim() !== '' ? { patch: raw.patch } : {}),
+    }
+  }
+  const findings = [
+    ...allocatedConsensus.map(({ id, severity, location, summary }) => ({ ...withRouting({ id, severity, location, summary, reviewer: 'both' }, 'reviewer'), ...markOf(id, 'reviewer') })),
+    ...adjudicated.upheld.map(({ id, severity, location, summary, source }) => ({ ...withRouting({ id, severity, location, summary, reviewer: source }, source), ...markOf(id, source) })),
+  ]
+  if (adjudicated.closesClass !== true && !findings.some((finding) => finding.severity === 'must-fix')) {
+    findings.push({
+      id: allocId(`panel-class-${round}`, 'adjudicator'),
+      severity: 'must-fix',
+      location: null,
+      summary: adjudicated.classInvariant || panelStandingQuestion,
+      reviewer: 'adjudicator',
+    })
+  }
+  panelBounceFindings = findings.map(({ id, severity, location, summary }) => (
+    `- ${id} (${severity}) ${location || '(location unspecified)'} — ${summary || '(no summary)'}`
+  )).join('\n')
+  for (const dismissed of adjudicated.dismissed) {
+    const dissent = {
+      kind: 'panel-divergence',
+      from: dismissed.source,
+      finding_id: dismissed.id,
+      severity: dismissed.severity,
+      location: dismissed.location,
+      summary: dismissed.summary,
+      disposition: 'dismissed',
+      reason: dismissed.reason,
+      round: round,
+    }
+    dissents.push(dissent)
+    panelLog({ dissent })
+    emit({ kind: 'dissent', ...dissent })
+  }
+
+  // An older/valid reviewer envelope may carry a changes-needed verdict
+  // without a surviving typed finding. An empty fusion must not turn that
+  // single-review bounce into a pass merely because the partner was quiet.
+  const verdict = findings.some((finding) => finding.severity === 'must-fix')
+    || (reviewerAVerdict === 'revise' && !reviewerAHasFindings)
+    ? 'changes-needed' : 'pass'
+  const count = (severity) => findings.filter((finding) => finding.severity === severity).length
+  const rawCount = (key) => Number.isInteger(aEnv.details?.[key]) && aEnv.details[key] >= 0 ? aEnv.details[key] : 0
+  const preserveReviewerCounts = reviewerAVerdict === 'revise' && !reviewerAHasFindings
+  const mustFix = Math.max(count('must-fix'), preserveReviewerCounts ? rawCount('must_fix') : 0)
+  const shouldFix = Math.max(count('should-fix'), preserveReviewerCounts ? rawCount('should_fix') : 0)
+  const consider = Math.max(count('consider'), preserveReviewerCounts ? rawCount('consider') : 0)
+  const reviewPath = typeof aEnv.details?.review_path === 'string'
+    ? aEnv.details.review_path : art('review.md')
+  const carriedCleared = carriedResolution(aEnv.details, carriedOpen()).cleared
+  const review = {
+    status: 'done',
+    role: 'reviewer',
+    summary: aEnv.summary || 'panel review complete',
+    artifacts: [
+      ...(Array.isArray(aEnv.artifacts) ? aEnv.artifacts : []),
+      aBrief, bBrief, adjBrief,
+    ],
+    details: {
+      verdict,
+      review_path: reviewPath,
+      must_fix: mustFix,
+      should_fix: shouldFix,
+      consider,
+      findings,
+      ...(carriedCleared.length > 0 ? { carried_cleared: carriedCleared } : {}),
+      panel: {
+        partner: panel.partner,
+        adjudicator: panel.adjudicator,
+        consensus: fused.consensus,
+        divergent: fused.divergent,
+        upheld: adjudicated.upheld,
+        dismissed: adjudicated.dismissed,
+        class_invariant: adjudicated.classInvariant,
+        closes_class: adjudicated.closesClass,
+      },
+    },
+  }
+  // A patch never reaches the canonical accept set or the journal: it lands in every
+  // escalation envelope (crew/drive.mjs:2327). `review.details.findings` — the array
+  // the outer loop routes from — keeps it.
+  const canonicalFindings = findings.map(({ patch, ...rest }) => rest)
+  const outcome = {
+    dispatch: `panel-r${round}`,
+    panel: true,
+    verdict,
+    must_fix: review.details.must_fix,
+    should_fix: review.details.should_fix,
+    consider: review.details.consider,
+    findings: canonicalFindings,
+    sources: ['reviewer', panel.partner],
+    adjudicator: panel.adjudicator,
+    class_invariant: adjudicated.classInvariant,
+    closes_class: adjudicated.closesClass,
+  }
+  panelLog({ review_outcome: outcome })
+  setAcceptFindings(canonicalFindings)
+  setLastReview({
+    verdict,
+    must_fix: review.details.must_fix,
+    should_fix: review.details.should_fix,
+    consider: review.details.consider,
+    findings: canonicalFindings,
+    panel: review.details.panel,
+  })
+  stageComplete()
+  return { review, panelBounceFindings }
+}
+
+function runScopeGate({ round, finalRound, builderDetails, ctx, io, plans, scopeFiles, planPath, ownSpanScopes, siblingSpanScopes, inScope, mutations, readBuilt, art, stage, stageComplete, failureUpgrade, escalate }) {
+  stage(`scope-gate:r${round}`)
+  const changed = io.changedFiles()
+  const gateFenceHits = laneFenceHits(changed, pathOnlyLaneFence(ctx.laneFence, ctx.laneName))
+  if (gateFenceHits.length > 0) {
+    stageComplete()
+    return { escalation: escalate('scope',
+      `the build crossed another live lane's fence: ${fenceBreachList(gateFenceHits)} — a file a sibling crew owns is never a bounce, it is a human's call`) }
+  }
+
+  const spanPaths = new Set([...ownSpanScopes, ...siblingSpanScopes].map((scope) => scope.path))
+  let siblingSpanFailure = null
+  let ownSpanRefusal = null
+  for (const path of (Array.isArray(changed) ? changed : []).filter((candidate) => spanPaths.has(candidate))) {
+    const pathOwnScopes = ownSpanScopes.filter((scope) => scope.path === path)
+    const pathSiblingScopes = siblingSpanScopes.filter((scope) => scope.path === path)
+    const diff = readFenceDiff(ctx, io, path)
+    if (diff.reason) {
+      if (pathSiblingScopes.length > 0) {
+        siblingSpanFailure = `the changed path ${path} could not be checked against ${fenceBreachList(pathSiblingScopes)}: ${diff.reason}`
+      } else if (pathOwnScopes.length > 0) {
+        ownSpanRefusal = spanScopeRefusal(pathOwnScopes, `the changed path ${path} could not be checked against this lane's span fence: ${diff.reason}`)
+      }
+      break
+    }
+    const siblingHit = pathSiblingScopes.find((scope) => siblingSpanIntersects(scope, diff.hunks))
+    if (siblingHit) {
+      siblingSpanFailure = `the build's changed hunk crosses another live lane's span fence: ${fenceBreachList([siblingHit])} — a file a sibling crew owns is never a bounce, it is a human's call`
+      break
+    }
+    if (pathOwnScopes.length > 0) {
+      const ownScopes = mergeFenceScopes(pathOwnScopes)
+      const hunks = diff.hunks
+      const escaped = hunks.some((hunk) => !ownScopes.some((scope) => fenceScopeContains(scope, hunk)))
+      if (escaped) {
+        ownSpanRefusal = spanScopeRefusal(ownScopes, `the changed hunk on ${path} is outside this lane's span fence; keep the edit inside ${ownScopes.map((scope) => scope.entry).join(', ')}`)
+        break
+      }
+    }
+  }
+  if (siblingSpanFailure) {
+    stageComplete()
+    return { escalation: escalate('scope', siblingSpanFailure) }
+  }
+  // #846 — protocol debris is classified BEFORE scope subtraction. `outOfScopeFiles`
+  // mechanically removes every in-scope path (crew/drive.mjs:1519-1529, and
+  // `scopeMatcher` at :1519-1522), so a plan that names `returns/d1.builder.json` in
+  // files_in_scope could write exactly that checkout debris and be told the tree is
+  // clean. The ask makes the envelope refusal a property of a `returns/*.json` being
+  // INSIDE the CHECKOUT, never a property of what the planner happened to fence.
+  const debris = changed.filter((f) => ENVELOPE_DEBRIS.test(f))
+  let refusal = scopeRefusal([...new Set([...outOfScopeFiles(changed, inScope), ...debris])])
+  if (refusal.reason === null && ownSpanRefusal) refusal = ownSpanRefusal
+  if (refusal.reason === null && builderDetails !== undefined) {
+    refusal = mutationAnchorScopeRefusal(changed, mutations, builderDetails, readBuilt)
+  }
+  // MUTATION A4: invert this early return and a round whose tree is entirely in scope
+  // starts paying for a gate it does not need.
+  if (refusal.reason === null) { stageComplete(); return { ok: true } }              // ANCHOR A4
+  io.log(recordRow({ at: io.now(), scope_gate: { round, reason: refusal.reason, envelopes: refusal.envelopes, edits: refusal.edits, ...(refusal.spans ? { spans: refusal.spans } : {}) } }))
+  const canBounce = plans && !finalRound()
+  if (!canBounce) {
+    stageComplete()
+    return { escalation: escalate('scope', refusal.why) }
+  }
+  const b = art(`build-bounce-r${round}.md`)
+  failureUpgrade('scope', 'builder')
+  io.writeFile(b, scopeBounceBrief(round, refusal, scopeFiles, planPath))
+  stageComplete()
+  return { bounce: b }
+}
+
+function proveHardeningEntries({ entries, hardenWitness, ctx, io, hardenRun, dirtyAfterFailure }) {
+  const rows = []
+  let fatal = null
+  const proveEntry = (entry) => {
+    let active = null
+    const row = (outcome, why) => ({ finding: entry.finding, test: entry.test, name: entry.name, outcome, why })
+    try {
+      const W = hardenWitness?.get(entry.test)
+      const S = hardenWitness?.get(entry.file)
+      if (!W || !S) return row('witness-missing', `the review-time witness has no cell for ${!W ? entry.test : entry.file}`)
+      if (W.state === 'unreadable' || S.state === 'unreadable') {
+        const unreadable = W.state === 'unreadable' ? entry.test : entry.file
+        return row('witness-unreadable', `the review-time witness could not read ${unreadable}: ${W.state === 'unreadable' ? W.why : S.why}`)
+      }
+      if (S.state !== 'read') return row('witness-absent', `the declared implementation ${entry.file} did not exist on the review-time tree`)
+      const testAbs = `${ctx.checkout}/${entry.test}`
+      const fileAbs = `${ctx.checkout}/${entry.file}`
+      const cmd = hardenCommand(entry.test, entry.name)
+      const witnessCmd = hardenWitnessCommand(entry.test)   // UNFILTERED: see hardenWitnessCommand
+      const repairedTest = io.readFile(testAbs)
+      if (repairedTest === null) return row('unapplied', `${entry.test} does not exist in the built tree`)
+      let witnessRun = null
+      let witnessCounts = null
+      if (W.state === 'read') {
+        active = { abs: testAbs, original: repairedTest, writeAttempted: false }
+        let witnessResult
+        try {
+          active.writeAttempted = true
+          io.writeFile(testAbs, W.bytes)
+          witnessResult = hardenRun(witnessCmd)
+        } finally { io.writeFile(testAbs, repairedTest) }
+        active = null
+        const out = witnessResult?.output
+        witnessRun = nameVerdict(out, entry.name)
+        witnessCounts = parseSuiteCounts(out)          // aggregate, and ONLY to ask "green and parseable?"
+        // MUTATION B5c: drop this branch and a runtime name that ALREADY EXISTED on the
+        // witnessed tree — interpolated, nested, or carrying a `# SKIP`/`# TODO`
+        // directive, so no contiguous bytes of the witnessed source show it and no
+        // aggregate red marks it — passes as gate growth. The gate never grew.
+        // EVERY non-absent verdict is an existing name: `passed`, `failed`, `skipped`
+        // and `ambiguous` alike.
+        if (witnessRun !== 'absent') return row('name-not-new', `the declared name ${entry.name} already exists in the witnessed ${entry.test}: ${witnessRun}`)   // ANCHOR B5c
+        // Only an exact ABSENT on an otherwise green, parseable run proves the witnessed
+        // source carried no such runtime check. A red or unparseable witnessed-test run
+        // measured nothing and is never read as `new`.
+        if (witnessCounts === null || witnessCounts.fail > 0) return row('unproven', `the witnessed ${entry.test} run was not green and parseable, so the absence of ${entry.name} proves nothing: counts ${JSON.stringify(witnessCounts)}`)
+      }
+      const control = nameVerdict(hardenRun(cmd)?.output, entry.name)
+      if (control === 'absent') return row('name-absent', `the repaired control reported no exact test named ${entry.name}`)
+      if (control === 'ambiguous') return row('name-ambiguous', `the repaired control reported more than one exact test named ${entry.name}`)
+      if (control === 'failed') return row('control-red', `the repaired control left ${entry.name} failing`)
+      if (control === 'skipped') return row('control-skipped', `the repaired control skipped ${entry.name}`)
+      const repairedFile = io.readFile(fileAbs)
+      if (repairedFile === null) return row('unapplied', `${entry.file} does not exist in the built tree`)
+      // #910/#900 — the witnessed pre-repair conjunct belongs to exactly ONE repair
+      // class, and demanding it of the other is what makes an honest coverage repair
+      // unprovable. The arms are exclusive and the class chooses between them.
+      // MUTATION A1: mis-spell the coverage arm and a coverage repair is adjudicated by
+      // the behavioural proof again — the deadlock three finished lanes paid for.
+      if (hardeningClassOf(entry) === 'coverage') {
+        // The claim is NOT taken on trust. A coverage repair asserts the implementation
+        // was ALREADY correct at review time, so the witnessed bytes and the built bytes
+        // must be the same bytes. This is the conjunct that closes the dishonest route:
+        // a builder that REGRESSED the implementation to manufacture a red pre-repair is
+        // refused here by name, and a builder that did not has nothing to gain from
+        // regressing it, because this arm certifies without a red pre-repair at all.
+        // Everything that makes the guard REAL still holds: the name was absent on the
+        // witnessed tree, it passes on the repaired tree, and the declared mutation must
+        // still kill it below.
+        // MUTATION D1: drop the byte-identity conjunct and the coverage arm certifies a
+        // declaration whose implementation changed — the regression route this closes.
+        if (repairedFile !== S.bytes) return row('source-regressed', `source-regressed: the built ${entry.file} is not byte-identical to the review-time witness, so this is not a coverage repair: a coverage repair certifies that the implementation was already correct at review time, and regressing it to buy a red pre-repair is refused`)   // ANCHOR HC2
+      } else {
+        let pre = null
+        active = { abs: fileAbs, original: repairedFile, writeAttempted: false }
+        let preResult
+        try {
+          active.writeAttempted = true
+          io.writeFile(fileAbs, S.bytes)
+          preResult = hardenRun(cmd)
+        } finally { io.writeFile(fileAbs, repairedFile) }
+        active = null
+        pre = nameVerdict(preResult?.output, entry.name)
+        // MUTATION B2: INVERT the witnessed-red predicate — `pre === 'failed'` — and the
+        // conjunct refuses exactly the behavioural proof it exists to accept: a guard that
+        // DID red on the review-time bytes is reported `pre-repair-green`. Inversion, not
+        // `false`: both `pre !== 'failed'` and `false` are false for a valid behavioural
+        // repair, so replacing the condition with `false` changes nothing this check can
+        // observe (R3-1).
+        if (pre !== 'failed') return row('pre-repair-green', `the declared check ${entry.name} does not fail on the witnessed pre-repair ${entry.file}: ${pre}`)   // ANCHOR B5d
+      }
+      const bound = applyMutationAnchor(repairedFile, entry.find, entry.replace)
+      if (bound.text === null) return row(BINDING_OUTCOME[bound.mode], bindingWhy(bound.mode, entry.file))
+      let mut = null
+      active = { abs: fileAbs, original: repairedFile, writeAttempted: false }
+      let mutResult
+      try {
+        active.writeAttempted = true
+        io.writeFile(fileAbs, bound.text)
+        mutResult = hardenRun(cmd)
+      } finally { io.writeFile(fileAbs, repairedFile) }
+      active = null
+      mut = nameVerdict(mutResult?.output, entry.name)
+      // MUTATION B9: drop the exact-name mutant conjunct and ANY red — a syntax error,
+      // an unrelated failing subtest, a file-level failure — certifies a guard that
+      // never ran. This is the aggregate rule the round-1 draft proposed, restored.
+      if (mut !== 'failed') return row('survived', `the declared mutation left ${entry.name} ${mut}`)   // ANCHOR B9
+      return row('killed', null)
+    } catch (err) {
+      const why = err?.message || String(err)
+      fatal = dirtyAfterFailure(active, err)
+      return row('unproven', `the hardening proof was interrupted: ${why}`)
+    }
+  }
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    rows.push(proveEntry(entry))
+    if (fatal) break
+  }
+  return { rows, fatal }
+}
+// runTask span report: before=4039/8440 after=3458/8460
 function runTask(ctx, io, crash) {
   const variant = ctx.variant ?? DEFAULT_VARIANT
   if (!VARIANT_NAMES.includes(variant)) {
@@ -3257,136 +3858,11 @@ function runTask(ctx, io, crash) {
     return gateEscalate(why)
   }
 
+
   // Factory-only terminal: an injected GH seam is the mode switch for this
   // slice. Without both methods every precondition returns before any extra
   // stage, run, log, or event, preserving the interactive path byte-for-byte.
-  const convergeSettle = ({ why, where, gateOutput, gateRed = true }) => {
-    if (typeof io.createDraftPr !== 'function' || typeof io.createIssue !== 'function') return null
-    if (!builderEnv) return null
-    if (!gateRed && gateOutput == null) return null
-    if (gateRed && baselineGateDefect(gateOutput) !== null) return null
 
-    const parsedGate = parseGateSummary(gateOutput)
-    const gateSummary = {
-      line: gateSummaryLine(gateOutput),
-      output: String(gateOutput || ''),
-      ...(parsedGate || {}),
-    }
-
-    stage('converge:suite')
-    const suiteRes = phaseSlot(SUITE_SLOT_PHASES.warm, () => io.run(ctx.suite))
-    if (!suiteRes.ok) {
-      io.log(recordRow({ at: io.now(), converge_declined: 'suite red' }))
-      emit({ kind: 'converge', action: 'declined', where: 'suite', why: 'suite red' })
-      stageComplete()
-      return null
-    }
-
-    stageComplete()
-    stage('converge:issues')
-    const residuals = residualList({ findings: S.lastReview?.findings ?? null, gateSummary, gateRed })
-    if (residuals.length === 0) {
-      io.log(recordRow({ at: io.now(), converge_declined: 'no residuals' }))
-      emit({ kind: 'converge', action: 'declined', where: 'residuals', why: 'no residuals to record' })
-      stageComplete()
-      return null
-    }
-    const issues = []
-    for (const residual of residuals) {
-      if (residual.severity !== 'must-fix') continue
-      let filed
-      try {
-        filed = io.createIssue({
-          title: followUpIssueTitle({ task: ctx.task, residual }),
-          body: followUpIssueBody({ task: ctx.task, residual, gateSummary, escalation: { where, why } }),
-        })
-      } catch (err) {
-        const detail = err?.message ?? String(err)
-        io.log(recordRow({ at: io.now(), converge_declined: 'issue filing failed', residual: residual.id, why: detail }))
-        emit({ kind: 'converge', action: 'declined', where: 'issues', residual: residual.id, why: detail })
-        stageComplete()
-        return null
-      }
-      if (!filed || !Number.isInteger(filed.number)) {
-        const detail = `malformed issue result for ${residual.id}`
-        io.log(recordRow({ at: io.now(), converge_declined: 'issue filing failed', residual: residual.id, why: detail }))
-        emit({ kind: 'converge', action: 'declined', where: 'issues', residual: residual.id, why: detail })
-        stageComplete()
-        return null
-      }
-      residual.issue = { number: filed.number, url: filed.url }
-      issues.push({ number: filed.number, url: filed.url })
-      emit({ kind: 'converge', action: 'issue-filed', residual: residual.id, number: filed.number })
-    }
-
-    stageComplete()
-    stage('converge:commit')
-    const message = composeCommitMessage({ task: ctx.task, planEnv, builderEnv })
-    const hasCommitSubject = String(planEnv.details?.commit_subject || '').split('\n').some((line) => line.trim())
-    if (!hasCommitSubject) io.log(recordRow({ at: io.now(), commit_subject: 'fallback-from-plan-summary' }))
-    const committing = io.changedFiles().filter(inScope)
-    S.commit = io.commit(committing, message)
-    emit({ kind: 'converge', action: 'committed', commit: S.commit, files: committing.length })
-
-    stageComplete()
-    stage('converge:pr')
-    let pr
-    try {
-      const carriedLines = carriedPrLines(carriedBlock().carried ?? [])
-      pr = io.createDraftPr({
-        title: draftPrTitle({ task: ctx.task }),
-        body: draftPrBody({
-          gateSummary,
-          findings: residuals,
-          escalation: { where, why },
-          roundHistory: [...S.stages],
-          gateRed,
-        }) + (carriedLines.length > 0 ? `\n${carriedLines.join('\n')}\n` : ''),
-      })
-    } catch (err) {
-      const detail = err?.message ?? String(err)
-      stageComplete()
-      return escalate(
-        'converge-pr',
-        `the work is committed at ${S.commit} but the draft PR could not be opened: ${detail}`,
-        [],
-        { commit: S.commit, converge: { pr: null, issues } },
-      )
-    }
-    if (!pr || !Number.isInteger(pr.number) || typeof pr.url !== 'string' || pr.url.length === 0) {
-      const detail = 'malformed draft PR result'
-      stageComplete()
-      return escalate(
-        'converge-pr',
-        `the work is committed at ${S.commit} but the draft PR could not be opened: ${detail}`,
-        [],
-        { commit: S.commit, converge: { pr: null, issues } },
-      )
-    }
-
-    stageComplete()
-    stage('converge')
-    emit({ kind: 'converge', action: 'settled', commit: S.commit, pr: pr.number, issues: issues.length })
-    const result = {
-      status: 'converge',
-      summary: `Task ${ctx.task} converged with residuals: committed ${S.commit} (${committing.length} files), suite green, ${gateRed ? 'gate red' : 'gate green with unresolved review findings'} — DRAFT PR #${pr.number}, ${issues.length} follow-up issue(s) filed. Merge authority stays human.`,
-      artifacts: [planPath, journal],
-      details: {
-        commit: S.commit, stages: S.stages, files_committed: committing, consults: S.consults,
-        dissents: S.dissents, accepted_via: null, escalation: { where, why },
-        extra_rounds_granted: S.grants, growth: S.growth, modifiers: S.modifiers, enforcements: S.enforcements,
-        gate: gateBlock(),
-        ...acceptDecisionBlock(),
-        ...carriedBlock(),
-        converge: {
-          pr: { number: pr.number, url: pr.url }, draft: true, issues, residuals,
-          gate_summary: { line: gateSummary.line, total: gateSummary.total, failed: gateSummary.failed, errored: gateSummary.errored },
-        },
-      },
-    }
-    stageComplete()
-    return result
-  }
 
   // POST-RETURN adjudication of the per-role turn ceiling (#870 ASK 1). INERT
   // unless the operator configured a ceiling for THIS role: no ceiling -> no
@@ -4084,16 +4560,7 @@ function runTask(ctx, io, crash) {
     ].join('\n'), ['proceed', 'escalate'], [ctx.briefFile, art('plan.md')])
     if (c.decision === 'escalate') return escalate('plan', c.reason)
   }
-  const planRevisionBrief = (round, check) => {
-    const checkPath = check.details?.check_path || art('plan-check.md')
-    return [
-      `# Plan revision (round ${round})`, '',
-      `Revise plan.md per the check at ${checkPath}. Close every must-fix. Original brief: ${ctx.briefFile}`,
-      ...applyPrescriptionLines('the plan check'),
-      '',
-      ...growthLines(S.growth.at(-1)),
-    ].join('\n')
-  }
+
   for (let round = 1; plans && round <= planRounds(); round += 1) {
     stage(`plan:r${round}`)
     const plannerBrief = art(`planner-assignment-r${round}.md`)
@@ -4465,7 +4932,7 @@ function runTask(ctx, io, crash) {
         if (exhausted) { grant('plan-check', round); extraPlanRounds += 1 }
         const b = art(`plan-bounce-r${round}.md`)
         failureUpgrade('plan', 'planner')
-        io.writeFile(b, planRevisionBrief(round, check))
+        io.writeFile(b, renderPlanRevisionBrief({ round, check, taskDir: ctx.taskDir, briefFile: ctx.briefFile, growth: S.growth }))
         planBrief = b
         planEnv = null
         stageComplete()
@@ -4488,7 +4955,7 @@ function runTask(ctx, io, crash) {
     }
     const b = art(`plan-bounce-r${round}.md`)
     failureUpgrade('plan', 'planner')
-    io.writeFile(b, planRevisionBrief(round, check))
+    io.writeFile(b, renderPlanRevisionBrief({ round, check, taskDir: ctx.taskDir, briefFile: ctx.briefFile, growth: S.growth }))
     planBrief = b
     planEnv = null
     stageComplete()
@@ -5524,273 +5991,7 @@ function runTask(ctx, io, crash) {
     try { io.log(recordRow({ at: io.now(), ...entry })) } catch { /* panel evidence is never load-bearing */ }
   }
   const panelDegraded = (role) => panelLog({ panel_degraded: role })
-  const panelReview = (n, panel) => {
-    panelBounceFindings = ''
-    stage(`review:panel-r${n}`)
-    const panelInstructions = [
-      '',
-      'You are one of two independent reviewers on a regranted continuation round.',
-      'Report typed findings in details.findings (id, severity from the closed set must-fix|should-fix|consider, location as path:line or path:start-end, summary).',
-      'Return the identical details.verdict shape: verdict must be pass or changes-needed, with must_fix, should_fix, and consider counts.',
-      'A must-fix whose defect class cannot become a mechanical guard may carry "hardening": "ungateable" with a non-empty "hardening_why"; only the reviewer may set it.',
-    ].join('\n')
-    const base = panelBriefText
-    const aBrief = art(`panel-a-brief-${n}.md`)
-    io.writeFile(aBrief, `${base}${panelInstructions}`)
-    let aEnv = assignAndWait('reviewer', aBrief, 'panel-a')
-    const reviewerAVerdict = verdictOf(aEnv)
-    const reviewerAHasFindings = (reviewFindings(aEnv?.details)?.findings?.length || 0) > 0
-    if (!aEnv || aEnv.status !== 'done' || !reviewerAVerdict) {
-      panelDegraded('reviewer')
-      stageComplete()
-      return aEnv
-    }
-    // #800 R8 — a `pass` carrying a must-fix, or a finding id outside the closed shape,
-    // is refused by SHAPE before the panel can adjudicate it away. No partner, no
-    // adjudicator: reviewer A's envelope goes back to the outer loop unchanged, where
-    // the ordinary refusal consult re-asks that reviewer. `assignAndWait` has already
-    // declined to make it canonical (§1e). The row names the refusal the panel ACTUALLY
-    // saw — a durable record saying `verdict-findings` for a `finding-id` defect is a
-    // record of something that did not happen.
-    const panelRefusal = reviewShapeDefect(aEnv.details)
-    if (panelRefusal) {
-      panelLog({ panel_skipped: panelRefusal.reason })
-      stageComplete()
-      return aEnv
-    }
 
-    const bBrief = art(`panel-b-brief-${n}.md`)
-    const partnerInstructions = [
-      panelInstructions,
-      '',
-      `For this assignment you are reviewing the diff, not re-doing your seat's work (partner role: ${panel.partner}).`,
-      'Use the identical details.findings (id, severity, location, summary) and details.verdict shape.',
-    ].join('\n')
-    let bEnv
-    try {
-      io.writeFile(bBrief, `${base}${partnerInstructions}`)
-      bEnv = assignAndWait(panel.partner, bBrief, 'panel-b')
-    } catch {
-      panelDegraded(panel.partner)
-      stageComplete()
-      return aEnv
-    }
-    if (!bEnv || bEnv.status !== 'done' || !verdictOf(bEnv)) {
-      panelDegraded(panel.partner)
-      stageComplete()
-      return aEnv
-    }
-
-    const findingsOf = (env) => reviewFindings(env?.details)?.findings ?? []
-    const fused = fuseFindings(findingsOf(aEnv), findingsOf(bEnv), {
-      sourceA: 'reviewer', sourceB: panel.partner,
-    })
-    // #800 revision 2 — PANEL-LOCAL ID ALLOCATION. reviewFindings keeps the FIRST valid
-    // entry for an id and drops every later duplicate (crew/drive.mjs:834-838), and the
-    // panel's own array is fed straight back through it by dispositionPlan. The panel
-    // mints the FIXED id `panel-class-${n}`, so a reviewer-origin finding already carrying
-    // that id ERASES the adjudicator's class must-fix — the one finding that says the class
-    // is NOT closed. needsSeat then comes back empty and the run takes the seat-free
-    // re-review shortcut on a class the adjudicator explicitly refused to close. The same
-    // collapse happens when reviewer A and the partner independently mint one id for two
-    // divergent findings; adjudicatePanel keys its decisions on id alone
-    // (crew/escalation-policy.mjs:141).
-    // Allocate in ONE pass, in this order — consensus, divergent, then the synthetic class
-    // finding — keeping the first occurrence UNCHANGED. THE ORDER IS WHAT MAKES REVIEWER A'S
-    // ROUTING SAFE, and it is the whole reason no private id-shadow key is needed: A's
-    // normalized ids are already unique (crew/drive.mjs:834-838); consensus carries A's id
-    // (crew/escalation-policy.mjs:107-114); and `fuseFindings` orders divergences as ALL
-    // unmatched A entries BEFORE all unmatched partner entries (:117-124). So every
-    // reviewer-A id is allocated before any id that could collide with it and is never
-    // reminted. Only a partner id or the synthetic class id can be reminted, and neither
-    // authorizes A's patch. `accepted.get(finding.id)` below is therefore exact.
-    const panelIds = new Set()
-    let panelIdSeq = 0
-    const allocId = (id, source) => {
-      if (!panelIds.has(id)) { panelIds.add(id); return id }
-      let minted = `panel-remint-${++panelIdSeq}`
-      while (panelIds.has(minted)) minted = `panel-remint-${++panelIdSeq}`
-      panelIds.add(minted)
-      panelLog({ panel_id_reminted: { source, from: id, to: minted } })
-      return minted
-    }
-    const allocatedConsensus = fused.consensus.map((finding) => ({ ...finding, id: allocId(finding.id, 'reviewer') }))
-    const allocatedDivergent = fused.divergent.map((finding) => ({ ...finding, id: allocId(finding.id, finding.source) }))
-    const structuredDivergences = allocatedDivergent.map(({ id, source, severity, location, summary }) => ({
-      id, source, severity, location, summary,
-    }))
-    const divergenceLines = structuredDivergences.length > 0
-      ? structuredDivergences.map((entry) => `- ${JSON.stringify(entry)}`)
-      : ['- (none)']
-    const adjBrief = art(`panel-adjudication-${n}.md`)
-    const adjText = [
-      `# Panel adjudication (round ${n})`,
-      '',
-      '## Structured divergences',
-      ...divergenceLines,
-      '',
-      `## Plan of record: ${planPath}`,
-      '',
-      '## Standing class question',
-      panelStandingQuestion,
-      '',
-      '## Required envelope details shape',
-      '{"adjudications":[{"id":"<divergence id>","disposition":"uphold"|"dismiss","reason":"..."}],"class_invariant":"...","closes_class":true|false}',
-    ].join('\n')
-    let adjEnv
-    try {
-      io.writeFile(adjBrief, adjText)
-      adjEnv = assignAndWait(panel.adjudicator, adjBrief, 'panel-adjudication')
-    } catch {
-      panelDegraded(panel.adjudicator)
-      stageComplete()
-      return aEnv
-    }
-    if (!adjEnv || adjEnv.status !== 'done') {
-      panelDegraded(panel.adjudicator)
-      stageComplete()
-      return aEnv
-    }
-
-    const adjudicated = adjudicatePanel(allocatedDivergent, adjEnv.details)
-    // #800 R4 — the panel rebuilds findings from the normalized shape, which carries no
-    // patch. A reviewer-origin finding's routing must survive fusion or the panel
-    // silently disables auto-fix and ask-user on exactly the rounds a continuation
-    // needs them. DISMISSED findings are never re-attached: a dismissed finding must
-    // not execute. The map is acceptedRawById, so a rejected entry can no more
-    // authorize a patch here than it can on the ordinary path.
-    const accepted = acceptedRawById(aEnv.details)
-    // #839 — the panel must be able to REFUSE a partner's or an adjudicator's mark,
-    // which means it must first be able to SEE one: a rule that cannot see the thing it
-    // forbids cannot be proven to forbid it. Both sides' raw entries are indexed WITH
-    // their origin; only a reviewer-origin mark is ever reattached. Reviewer A's ids are
-    // never reminted (crew/drive.mjs:3711-3718), so the consensus lookup is exact.
-    const markById = new Map()
-    for (const [origin, env] of [['reviewer', aEnv], [panel.partner, bEnv]]) {
-      for (const [id, raw] of acceptedRawById(env?.details)) {
-        const mark = hardeningOf(raw)
-        if (mark && !markById.has(id)) markById.set(id, { origin, fields: { hardening: mark, hardening_why: raw.hardening_why.trim() } })
-      }
-    }
-    // MUTATION B7c: stop checking the mark's ORIGIN and a partner's or an adjudicator's
-    // ungateable exempts a finding the reviewer never excused.
-    const markOf = (id, origin) => { const m = markById.get(id); return m && m.origin === 'reviewer' && origin === 'reviewer' ? m.fields : {} }   // ANCHOR B7c
-    const withRouting = (finding, origin) => {
-      const raw = origin === 'reviewer' ? accepted.get(finding.id) : null
-      if (!raw) return finding
-      const disposition = dispositionOf(raw)
-      return {
-        ...finding,
-        ...(disposition ? { disposition } : {}),
-        ...(typeof raw.patch === 'string' && raw.patch.trim() !== '' ? { patch: raw.patch } : {}),
-      }
-    }
-    const findings = [
-      ...allocatedConsensus.map(({ id, severity, location, summary }) => ({ ...withRouting({ id, severity, location, summary, reviewer: 'both' }, 'reviewer'), ...markOf(id, 'reviewer') })),
-      ...adjudicated.upheld.map(({ id, severity, location, summary, source }) => ({ ...withRouting({ id, severity, location, summary, reviewer: source }, source), ...markOf(id, source) })),
-    ]
-    if (adjudicated.closesClass !== true && !findings.some((finding) => finding.severity === 'must-fix')) {
-      findings.push({
-        id: allocId(`panel-class-${n}`, 'adjudicator'),
-        severity: 'must-fix',
-        location: null,
-        summary: adjudicated.classInvariant || panelStandingQuestion,
-        reviewer: 'adjudicator',
-      })
-    }
-    panelBounceFindings = findings.map(({ id, severity, location, summary }) => (
-      `- ${id} (${severity}) ${location || '(location unspecified)'} — ${summary || '(no summary)'}`
-    )).join('\n')
-    for (const dismissed of adjudicated.dismissed) {
-      const dissent = {
-        kind: 'panel-divergence',
-        from: dismissed.source,
-        finding_id: dismissed.id,
-        severity: dismissed.severity,
-        location: dismissed.location,
-        summary: dismissed.summary,
-        disposition: 'dismissed',
-        reason: dismissed.reason,
-        round: n,
-      }
-      S.dissents.push(dissent)
-      panelLog({ dissent })
-      emit({ kind: 'dissent', ...dissent })
-    }
-
-    // An older/valid reviewer envelope may carry a changes-needed verdict
-    // without a surviving typed finding. An empty fusion must not turn that
-    // single-review bounce into a pass merely because the partner was quiet.
-    const verdict = findings.some((finding) => finding.severity === 'must-fix')
-      || (reviewerAVerdict === 'revise' && !reviewerAHasFindings)
-      ? 'changes-needed' : 'pass'
-    const count = (severity) => findings.filter((finding) => finding.severity === severity).length
-    const rawCount = (key) => Number.isInteger(aEnv.details?.[key]) && aEnv.details[key] >= 0 ? aEnv.details[key] : 0
-    const preserveReviewerCounts = reviewerAVerdict === 'revise' && !reviewerAHasFindings
-    const mustFix = Math.max(count('must-fix'), preserveReviewerCounts ? rawCount('must_fix') : 0)
-    const shouldFix = Math.max(count('should-fix'), preserveReviewerCounts ? rawCount('should_fix') : 0)
-    const consider = Math.max(count('consider'), preserveReviewerCounts ? rawCount('consider') : 0)
-    const reviewPath = typeof aEnv.details?.review_path === 'string'
-      ? aEnv.details.review_path : art('review.md')
-    const carriedCleared = carriedResolution(aEnv.details, carriedOpen()).cleared
-    const review = {
-      status: 'done',
-      role: 'reviewer',
-      summary: aEnv.summary || 'panel review complete',
-      artifacts: [
-        ...(Array.isArray(aEnv.artifacts) ? aEnv.artifacts : []),
-        aBrief, bBrief, adjBrief,
-      ],
-      details: {
-        verdict,
-        review_path: reviewPath,
-        must_fix: mustFix,
-        should_fix: shouldFix,
-        consider,
-        findings,
-        ...(carriedCleared.length > 0 ? { carried_cleared: carriedCleared } : {}),
-        panel: {
-          partner: panel.partner,
-          adjudicator: panel.adjudicator,
-          consensus: fused.consensus,
-          divergent: fused.divergent,
-          upheld: adjudicated.upheld,
-          dismissed: adjudicated.dismissed,
-          class_invariant: adjudicated.classInvariant,
-          closes_class: adjudicated.closesClass,
-        },
-      },
-    }
-    // A patch never reaches the canonical accept set or the journal: it lands in every
-    // escalation envelope (crew/drive.mjs:2327). `review.details.findings` — the array
-    // the outer loop routes from — keeps it.
-    const canonicalFindings = findings.map(({ patch, ...rest }) => rest)
-    const outcome = {
-      dispatch: `panel-r${n}`,
-      panel: true,
-      verdict,
-      must_fix: review.details.must_fix,
-      should_fix: review.details.should_fix,
-      consider: review.details.consider,
-      findings: canonicalFindings,
-      sources: ['reviewer', panel.partner],
-      adjudicator: panel.adjudicator,
-      class_invariant: adjudicated.classInvariant,
-      closes_class: adjudicated.closesClass,
-    }
-    panelLog({ review_outcome: outcome })
-    S.acceptFindings = canonicalFindings
-    S.lastReview = {
-      verdict,
-      must_fix: review.details.must_fix,
-      should_fix: review.details.should_fix,
-      consider: review.details.consider,
-      findings: canonicalFindings,
-      panel: review.details.panel,
-    }
-    stageComplete()
-    return review
-  }
   const reviewBounceBrief = (round, reviewPath) => {
     const panelNote = panelBounceFindings
       ? `\n\nPanel fused findings (close every one):\n${panelBounceFindings}` : ''
@@ -5863,6 +6064,7 @@ function runTask(ctx, io, crash) {
     return { ok: true }
   }
 
+
   // #751 A REVIEWER bounce. The lead ruled the standing verdict STALE against a
   // tree the scope gate, the lane and every configured acceptance gate have already
   // proved, so the reviewer is re-assigned against THAT tree and nothing is rebuilt.
@@ -5885,77 +6087,7 @@ function runTask(ctx, io, crash) {
   // `returns/` directory at the CHECKOUT ROOT during build:r2 were invisible until
   // build:r3 succeeded; the lane paid for three rounds and then escalated on debris
   // that had existed for three minutes across a round boundary.
-  const scopeGate = (round, finalRound, builderDetails) => {
-    stage(`scope-gate:r${round}`)
-    const changed = io.changedFiles()
-    const gateFenceHits = laneFenceHits(changed, pathOnlyLaneFence(ctx.laneFence, ctx.laneName))
-    if (gateFenceHits.length > 0) {
-      stageComplete()
-      return { escalation: escalate('scope',
-        `the build crossed another live lane's fence: ${fenceBreachList(gateFenceHits)} — a file a sibling crew owns is never a bounce, it is a human's call`) }
-    }
 
-    const spanPaths = new Set([...ownSpanScopes, ...siblingSpanScopes].map((scope) => scope.path))
-    let siblingSpanFailure = null
-    let ownSpanRefusal = null
-    for (const path of (Array.isArray(changed) ? changed : []).filter((candidate) => spanPaths.has(candidate))) {
-      const pathOwnScopes = ownSpanScopes.filter((scope) => scope.path === path)
-      const pathSiblingScopes = siblingSpanScopes.filter((scope) => scope.path === path)
-      const diff = readFenceDiff(ctx, io, path)
-      if (diff.reason) {
-        if (pathSiblingScopes.length > 0) {
-          siblingSpanFailure = `the changed path ${path} could not be checked against ${fenceBreachList(pathSiblingScopes)}: ${diff.reason}`
-        } else if (pathOwnScopes.length > 0) {
-          ownSpanRefusal = spanScopeRefusal(pathOwnScopes, `the changed path ${path} could not be checked against this lane's span fence: ${diff.reason}`)
-        }
-        break
-      }
-      const siblingHit = pathSiblingScopes.find((scope) => siblingSpanIntersects(scope, diff.hunks))
-      if (siblingHit) {
-        siblingSpanFailure = `the build's changed hunk crosses another live lane's span fence: ${fenceBreachList([siblingHit])} — a file a sibling crew owns is never a bounce, it is a human's call`
-        break
-      }
-      if (pathOwnScopes.length > 0) {
-        const ownScopes = mergeFenceScopes(pathOwnScopes)
-        const hunks = diff.hunks
-        const escaped = hunks.some((hunk) => !ownScopes.some((scope) => fenceScopeContains(scope, hunk)))
-        if (escaped) {
-          ownSpanRefusal = spanScopeRefusal(ownScopes, `the changed hunk on ${path} is outside this lane's span fence; keep the edit inside ${ownScopes.map((scope) => scope.entry).join(', ')}`)
-          break
-        }
-      }
-    }
-    if (siblingSpanFailure) {
-      stageComplete()
-      return { escalation: escalate('scope', siblingSpanFailure) }
-    }
-    // #846 — protocol debris is classified BEFORE scope subtraction. `outOfScopeFiles`
-    // mechanically removes every in-scope path (crew/drive.mjs:1519-1529, and
-    // `scopeMatcher` at :1519-1522), so a plan that names `returns/d1.builder.json` in
-    // files_in_scope could write exactly that checkout debris and be told the tree is
-    // clean. The ask makes the envelope refusal a property of a `returns/*.json` being
-    // INSIDE the CHECKOUT, never a property of what the planner happened to fence.
-    const debris = changed.filter((f) => ENVELOPE_DEBRIS.test(f))
-    let refusal = scopeRefusal([...new Set([...outOfScopeFiles(changed, inScope), ...debris])])
-    if (refusal.reason === null && ownSpanRefusal) refusal = ownSpanRefusal
-    if (refusal.reason === null && builderDetails !== undefined) {
-      refusal = mutationAnchorScopeRefusal(changed, mutations, builderDetails, readBuilt)
-    }
-    // MUTATION A4: invert this early return and a round whose tree is entirely in scope
-    // starts paying for a gate it does not need.
-    if (refusal.reason === null) { stageComplete(); return { ok: true } }              // ANCHOR A4
-    io.log(recordRow({ at: io.now(), scope_gate: { round, reason: refusal.reason, envelopes: refusal.envelopes, edits: refusal.edits, ...(refusal.spans ? { spans: refusal.spans } : {}) } }))
-    const canBounce = plans && !finalRound()
-    if (!canBounce) {
-      stageComplete()
-      return { escalation: escalate('scope', refusal.why) }
-    }
-    const b = art(`build-bounce-r${round}.md`)
-    failureUpgrade('scope', 'builder')
-    io.writeFile(b, scopeBounceBrief(round, refusal, scopeFiles, planPath))
-    stageComplete()
-    return { bounce: b }
-  }
   // #839 + #910 — ONE predicate for "the debt is closed", so the appeal below and the
   // accept branch can never disagree about what closing it means.
   // MUTATION B5a: narrow this to an outcome nothing produces and no repair, however well
@@ -5964,126 +6096,7 @@ function runTask(ctx, io, crash) {
   // MUTATION B8: route the proof through runGate and each of its invocations becomes
   // a gate_results row, moving the gate-review-gap numerator (#839 (i).
   const hardenRun = (cmd) => io.run(cmd)                                             // ANCHOR B8
-  const proveHardening = (entries) => {
-    const rows = []
-    let fatal = null
-    const proveEntry = (entry) => {
-      let active = null
-      const row = (outcome, why) => ({ finding: entry.finding, test: entry.test, name: entry.name, outcome, why })
-      try {
-        const W = hardenWitness?.get(entry.test)
-        const S = hardenWitness?.get(entry.file)
-        if (!W || !S) return row('witness-missing', `the review-time witness has no cell for ${!W ? entry.test : entry.file}`)
-        if (W.state === 'unreadable' || S.state === 'unreadable') {
-          const unreadable = W.state === 'unreadable' ? entry.test : entry.file
-          return row('witness-unreadable', `the review-time witness could not read ${unreadable}: ${W.state === 'unreadable' ? W.why : S.why}`)
-        }
-        if (S.state !== 'read') return row('witness-absent', `the declared implementation ${entry.file} did not exist on the review-time tree`)
-        const testAbs = `${ctx.checkout}/${entry.test}`
-        const fileAbs = `${ctx.checkout}/${entry.file}`
-        const cmd = hardenCommand(entry.test, entry.name)
-        const witnessCmd = hardenWitnessCommand(entry.test)   // UNFILTERED: see hardenWitnessCommand
-        const repairedTest = io.readFile(testAbs)
-        if (repairedTest === null) return row('unapplied', `${entry.test} does not exist in the built tree`)
-        let witnessRun = null
-        let witnessCounts = null
-        if (W.state === 'read') {
-          active = { abs: testAbs, original: repairedTest, writeAttempted: false }
-          let witnessResult
-          try {
-            active.writeAttempted = true
-            io.writeFile(testAbs, W.bytes)
-            witnessResult = hardenRun(witnessCmd)
-          } finally { io.writeFile(testAbs, repairedTest) }
-          active = null
-          const out = witnessResult?.output
-          witnessRun = nameVerdict(out, entry.name)
-          witnessCounts = parseSuiteCounts(out)          // aggregate, and ONLY to ask "green and parseable?"
-          // MUTATION B5c: drop this branch and a runtime name that ALREADY EXISTED on the
-          // witnessed tree — interpolated, nested, or carrying a `# SKIP`/`# TODO`
-          // directive, so no contiguous bytes of the witnessed source show it and no
-          // aggregate red marks it — passes as gate growth. The gate never grew.
-          // EVERY non-absent verdict is an existing name: `passed`, `failed`, `skipped`
-          // and `ambiguous` alike.
-          if (witnessRun !== 'absent') return row('name-not-new', `the declared name ${entry.name} already exists in the witnessed ${entry.test}: ${witnessRun}`)   // ANCHOR B5c
-          // Only an exact ABSENT on an otherwise green, parseable run proves the witnessed
-          // source carried no such runtime check. A red or unparseable witnessed-test run
-          // measured nothing and is never read as `new`.
-          if (witnessCounts === null || witnessCounts.fail > 0) return row('unproven', `the witnessed ${entry.test} run was not green and parseable, so the absence of ${entry.name} proves nothing: counts ${JSON.stringify(witnessCounts)}`)
-        }
-        const control = nameVerdict(hardenRun(cmd)?.output, entry.name)
-        if (control === 'absent') return row('name-absent', `the repaired control reported no exact test named ${entry.name}`)
-        if (control === 'ambiguous') return row('name-ambiguous', `the repaired control reported more than one exact test named ${entry.name}`)
-        if (control === 'failed') return row('control-red', `the repaired control left ${entry.name} failing`)
-        if (control === 'skipped') return row('control-skipped', `the repaired control skipped ${entry.name}`)
-        const repairedFile = io.readFile(fileAbs)
-        if (repairedFile === null) return row('unapplied', `${entry.file} does not exist in the built tree`)
-        // #910/#900 — the witnessed pre-repair conjunct belongs to exactly ONE repair
-        // class, and demanding it of the other is what makes an honest coverage repair
-        // unprovable. The arms are exclusive and the class chooses between them.
-        // MUTATION A1: mis-spell the coverage arm and a coverage repair is adjudicated by
-        // the behavioural proof again — the deadlock three finished lanes paid for.
-        if (hardeningClassOf(entry) === 'coverage') {
-          // The claim is NOT taken on trust. A coverage repair asserts the implementation
-          // was ALREADY correct at review time, so the witnessed bytes and the built bytes
-          // must be the same bytes. This is the conjunct that closes the dishonest route:
-          // a builder that REGRESSED the implementation to manufacture a red pre-repair is
-          // refused here by name, and a builder that did not has nothing to gain from
-          // regressing it, because this arm certifies without a red pre-repair at all.
-          // Everything that makes the guard REAL still holds: the name was absent on the
-          // witnessed tree, it passes on the repaired tree, and the declared mutation must
-          // still kill it below.
-          // MUTATION D1: drop the byte-identity conjunct and the coverage arm certifies a
-          // declaration whose implementation changed — the regression route this closes.
-          if (repairedFile !== S.bytes) return row('source-regressed', `source-regressed: the built ${entry.file} is not byte-identical to the review-time witness, so this is not a coverage repair: a coverage repair certifies that the implementation was already correct at review time, and regressing it to buy a red pre-repair is refused`)   // ANCHOR HC2
-        } else {
-          let pre = null
-          active = { abs: fileAbs, original: repairedFile, writeAttempted: false }
-          let preResult
-          try {
-            active.writeAttempted = true
-            io.writeFile(fileAbs, S.bytes)
-            preResult = hardenRun(cmd)
-          } finally { io.writeFile(fileAbs, repairedFile) }
-          active = null
-          pre = nameVerdict(preResult?.output, entry.name)
-          // MUTATION B2: INVERT the witnessed-red predicate — `pre === 'failed'` — and the
-          // conjunct refuses exactly the behavioural proof it exists to accept: a guard that
-          // DID red on the review-time bytes is reported `pre-repair-green`. Inversion, not
-          // `false`: both `pre !== 'failed'` and `false` are false for a valid behavioural
-          // repair, so replacing the condition with `false` changes nothing this check can
-          // observe (R3-1).
-          if (pre !== 'failed') return row('pre-repair-green', `the declared check ${entry.name} does not fail on the witnessed pre-repair ${entry.file}: ${pre}`)   // ANCHOR B5d
-        }
-        const bound = applyMutationAnchor(repairedFile, entry.find, entry.replace)
-        if (bound.text === null) return row(BINDING_OUTCOME[bound.mode], bindingWhy(bound.mode, entry.file))
-        let mut = null
-        active = { abs: fileAbs, original: repairedFile, writeAttempted: false }
-        let mutResult
-        try {
-          active.writeAttempted = true
-          io.writeFile(fileAbs, bound.text)
-          mutResult = hardenRun(cmd)
-        } finally { io.writeFile(fileAbs, repairedFile) }
-        active = null
-        mut = nameVerdict(mutResult?.output, entry.name)
-        // MUTATION B9: drop the exact-name mutant conjunct and ANY red — a syntax error,
-        // an unrelated failing subtest, a file-level failure — certifies a guard that
-        // never ran. This is the aggregate rule the round-1 draft proposed, restored.
-        if (mut !== 'failed') return row('survived', `the declared mutation left ${entry.name} ${mut}`)   // ANCHOR B9
-        return row('killed', null)
-      } catch (err) {
-        const why = err?.message || String(err)
-        fatal = dirtyAfterFailure(active, err)
-        return row('unproven', `the hardening proof was interrupted: ${why}`)
-      }
-    }
-    for (const entry of Array.isArray(entries) ? entries : []) {
-      rows.push(proveEntry(entry))
-      if (fatal) break
-    }
-    return { rows, fatal }
-  }
+
   // #958 — the build-defect-vs-gate-defect triage and its single gate repair, lifted
   // out of the gate stage so the SAME valve is reachable from a builder round that did
   // NOT return `done`. It lived inside `if (gateCmd) { stage(`gate:r${round}`) … }`,
@@ -6172,7 +6185,7 @@ function runTask(ctx, io, crash) {
       // MUTATION A1: neutralise this call and a bounced round again reaches no scope
       // gate — the b363-seatreask defect, restored.
       stageComplete()
-      const bounced = scopeGate(round, finalRound)                                    // ANCHOR A1
+      const bounced = runScopeGate({ round, finalRound, builderDetails: undefined, ctx, io, plans, scopeFiles, planPath, ownSpanScopes, siblingSpanScopes, inScope, mutations, readBuilt, art, stage, stageComplete, failureUpgrade, escalate })                                    // ANCHOR A1
       if (bounced.escalation) return bounced.escalation
       if (bounced.bounce) { buildBrief = bounced.bounce; buildNote = 'scope-fix'; continue }
       // MUTATION B1: replace this call with a literal `{}` and a builder that returned
@@ -6207,7 +6220,7 @@ function runTask(ctx, io, crash) {
     builderEnv = env
     stageComplete()
 
-    const scoped = scopeGate(round, finalRound, env.details)
+    const scoped = runScopeGate({ round, finalRound, builderDetails: env.details, ctx, io, plans, scopeFiles, planPath, ownSpanScopes, siblingSpanScopes, inScope, mutations, readBuilt, art, stage, stageComplete, failureUpgrade, escalate })
     if (scoped.escalation) return scoped.escalation
     if (scoped.bounce) { buildBrief = scoped.bounce; buildNote = 'scope-fix'; continue }
 
@@ -6357,7 +6370,7 @@ function runTask(ctx, io, crash) {
             ['bounce', 'escalate'], [planPath, journal],
           )
           if (c.decision !== 'bounce') {
-            const settled = convergeSettle({ why: c.reason, where: 'gate', gateOutput: gateRes.output })
+            const settled = settleConvergence({ why: c.reason, where: 'gate', gateOutput: gateRes.output, ctx, io, lastReview: S.lastReview, stages: S.stages, consults: S.consults, dissents: S.dissents, grants: S.grants, growth: S.growth, modifiers: S.modifiers, enforcements: S.enforcements, setCommit: (value) => { S.commit = value; return value }, builderEnv, planEnv, planPath, journal, inScope, stage, stageComplete, phaseSlot, emit, carriedBlock, gateBlock, acceptDecisionBlock, escalate })
             if (settled) {
               stageComplete()
               return settled
@@ -6388,7 +6401,7 @@ function runTask(ctx, io, crash) {
     if (hardenOwed.owed.length > 0) {
       stage(`lane:harden:r${round}`)
       const { entries, refusals } = validateHardened(builderEnv.details, hardenOwed.owed, inScope)
-      const { rows, fatal } = proveHardening(entries)
+      const { rows, fatal } = proveHardeningEntries({ entries, hardenWitness, ctx, io, hardenRun, dirtyAfterFailure })
       for (const row of rows) logHardened(round, row)
       // #839 — a failed RESTORE is not a repair bounce. `settleFailedProof`
       // (crew/drive.mjs:3490-3492) already refuses to continue when `gateProofFatal` is
@@ -6465,7 +6478,7 @@ function runTask(ctx, io, crash) {
           options, [planPath, lastReviewPath],
         )
         if (c.decision === 'escalate') {
-          const settled = convergeSettle({ why: c.reason, where: 'review', gateOutput: lastGateOutput, gateRed: false })
+          const settled = settleConvergence({ why: c.reason, where: 'review', gateOutput: lastGateOutput, gateRed: false, ctx, io, lastReview: S.lastReview, stages: S.stages, consults: S.consults, dissents: S.dissents, grants: S.grants, growth: S.growth, modifiers: S.modifiers, enforcements: S.enforcements, setCommit: (value) => { S.commit = value; return value }, builderEnv, planEnv, planPath, journal, inScope, stage, stageComplete, phaseSlot, emit, carriedBlock, gateBlock, acceptDecisionBlock, escalate })
           if (settled) {
             stageComplete()
             return settled
@@ -6498,7 +6511,7 @@ function runTask(ctx, io, crash) {
           return escalate('refuted-must-fix', settledAccept.why, [], { accept_decision: settledAccept.record })
         }
         if (!settledAccept.ok) {
-          const settled = convergeSettle({ why: settledAccept.why, where: 'review', gateOutput: lastGateOutput, gateRed: false })
+          const settled = settleConvergence({ why: settledAccept.why, where: 'review', gateOutput: lastGateOutput, gateRed: false, ctx, io, lastReview: S.lastReview, stages: S.stages, consults: S.consults, dissents: S.dissents, grants: S.grants, growth: S.growth, modifiers: S.modifiers, enforcements: S.enforcements, setCommit: (value) => { S.commit = value; return value }, builderEnv, planEnv, planPath, journal, inScope, stage, stageComplete, phaseSlot, emit, carriedBlock, gateBlock, acceptDecisionBlock, escalate })
           if (settled) {
             stageComplete()
             return settled
@@ -6529,7 +6542,14 @@ function runTask(ctx, io, crash) {
         ...diffFindingLines(report),
       ].join('\n')
       io.writeFile(revBrief, panelBriefText)
-      const review = panel ? panelReview(roundNo, panel) : assignAndWait('reviewer', revBrief, 'review')
+      let review
+      if (panel) {
+        const panelResult = runPanelReview({ round: roundNo, panel, io, dissents: S.dissents, setAcceptFindings: (value) => { S.acceptFindings = value }, setLastReview: (value) => { S.lastReview = value }, planPath, panelBriefText, panelStandingQuestion, art, stage, stageComplete, assignAndWait, carriedOpen, panelLog, panelDegraded, emit })
+        panelBounceFindings = panelResult.panelBounceFindings
+        review = panelResult.review
+      } else {
+        review = assignAndWait('reviewer', revBrief, 'review')
+      }
       journalDiffJudgments(review.details, report)
       lastReviewPath = review.details?.review_path || art('review.md')
       const shapeRefusal = reviewShapeDefect(review.details) || carriedSilenceDefect(review.details, openCarried)
@@ -6649,7 +6669,7 @@ function runTask(ctx, io, crash) {
             options, [planPath, lastReviewPath],
           )
           if (c.decision === 'escalate') {
-            const settled = convergeSettle({ why: c.reason, where: 'review', gateOutput: lastGateOutput, gateRed: false })
+            const settled = settleConvergence({ why: c.reason, where: 'review', gateOutput: lastGateOutput, gateRed: false, ctx, io, lastReview: S.lastReview, stages: S.stages, consults: S.consults, dissents: S.dissents, grants: S.grants, growth: S.growth, modifiers: S.modifiers, enforcements: S.enforcements, setCommit: (value) => { S.commit = value; return value }, builderEnv, planEnv, planPath, journal, inScope, stage, stageComplete, phaseSlot, emit, carriedBlock, gateBlock, acceptDecisionBlock, escalate })
             if (settled) {
               stageComplete()
               return settled
@@ -6682,7 +6702,7 @@ function runTask(ctx, io, crash) {
             return escalate('refuted-must-fix', settledAccept.why, [], { accept_decision: settledAccept.record })
           }
           if (!settledAccept.ok) {
-            const settled = convergeSettle({ why: settledAccept.why, where: 'review', gateOutput: lastGateOutput, gateRed: false })
+            const settled = settleConvergence({ why: settledAccept.why, where: 'review', gateOutput: lastGateOutput, gateRed: false, ctx, io, lastReview: S.lastReview, stages: S.stages, consults: S.consults, dissents: S.dissents, grants: S.grants, growth: S.growth, modifiers: S.modifiers, enforcements: S.enforcements, setCommit: (value) => { S.commit = value; return value }, builderEnv, planEnv, planPath, journal, inScope, stage, stageComplete, phaseSlot, emit, carriedBlock, gateBlock, acceptDecisionBlock, escalate })
             if (settled) {
               stageComplete()
               return settled

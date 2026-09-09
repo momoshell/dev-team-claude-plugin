@@ -1244,7 +1244,53 @@ function drivePayloadElements(text, from) {
   return { events: events.join(' '), keys: keys.join(' ') }
 }
 
-function driveJournalSites(text) {
+// Comments are BLANKED, length-preserving, before the scan. String literals are NOT:
+// a template literal carrying `${...}` cannot be skipped without a real parser, and
+// blanking them naively swallowed 17 genuine sinks. A sink quoted inside a string
+// would still be counted — a narrower hole than comments, and stated rather than hidden.
+// b583-driveact1 disguised six real emits as `io.log.call(io, recordRow(...))` and
+// left comments quoting the old calls at the vacated lines; because this scanner
+// reads RAW SOURCE, those comments MATCHED and the inventory counted six comments
+// as if they were code. A guard that can be satisfied by a comment is not a guard.
+function blankComments(source) {
+  let out = ''
+  let mode = null
+  for (let i = 0; i < source.length; i += 1) {
+    const c = source[i], d = source[i + 1]
+    if (mode === null) {
+      if (c === '/' && d === '/') { mode = 'line'; out += '  '; i += 1; continue }
+      if (c === '/' && d === '*') { mode = 'block'; out += '  '; i += 1; continue }
+      out += c; continue
+    }
+    if (mode === 'line') { if (c === '\n') { mode = null; out += '\n' } else out += ' '; continue }
+    if (c === '*' && d === '/') { mode = null; out += '  '; i += 1; continue }
+    out += c === '\n' ? '\n' : ' '
+  }
+  return out
+}
+
+// A real emit wearing a form DRIVE_SINK cannot see: `io.log.call(io, recordRow(...))`
+// or `io['log'](recordRow(...))`. The BARE forwarder `io.log.call(io, row)` carries no
+// row wrapper and stays legal — crew/drive.mjs:3134 is one, by design.
+const NONCANONICAL_SINK = /(?:io\.log\.call\s*\(\s*io\s*,\s*|io\s*\[\s*['"`]log['"`]\s*\]\s*\(\s*)(?:recordRow|operationalRow)\s*\(/g
+
+export function noncanonicalJournalSinks(source) {
+  const text = blankComments(source)
+  NONCANONICAL_SINK.lastIndex = 0
+  const out = []
+  let hit
+  while ((hit = NONCANONICAL_SINK.exec(text)) !== null) {
+    out.push({ line: text.slice(0, hit.index).split('\n').length, form: hit[0].trim() })
+  }
+  return out
+}
+
+function driveJournalSites(rawText) {
+  const disguised = noncanonicalJournalSinks(rawText)
+  if (disguised.length > 0) {
+    throw new Error(`journal sink inventory: ${disguised.length} emit(s) hidden from DRIVE_SINK at line(s) ${disguised.map((d) => d.line).join(', ')} — a wrapped row must be emitted as io.log(...), never through .call or a computed member`)
+  }
+  const text = blankComments(rawText)
   DRIVE_SINK.lastIndex = 0
   const out = []
   let hit
@@ -1263,71 +1309,71 @@ function driveJournalSites(text) {
 }
 
 const DRIVE_JOURNAL_EXPECTED = Object.freeze([
-  ['recordRow', '', 'at modifier'],
-  ['recordRow', '', 'at modifier'],
-  ['recordRow', '', 'at stage_done'],
-  ['recordRow', '', 'at stage'],
-  ['operationalRow', '', 'at gate_reap'],
-  ['recordRow', '', 'at no_lead_escalation'],
-  ['recordRow', '', 'at converge_declined'],
-  ['recordRow', '', 'at converge_declined'],
-  ['recordRow', '', 'at converge_declined residual why'],
-  ['recordRow', '', 'at converge_declined residual why'],
-  ['recordRow', '', 'at commit_subject'],
-  ['recordRow', '', 'at seat_turn_ceiling'],
-  ['recordRow', '', 'at seat_enforcement'],
-  ['recordRow', '', 'at assign role brief'],
-  ['recordRow', '', 'at seat_enforcement'],
-  ['recordRow', '', 'at review_outcome'],
-  ['recordRow', '', 'at review_findings_note'],
-  ['recordRow', '', 'at envelope role status'],
-  ['recordRow', '', 'at no_lead_escalation'],
-  ['recordRow', '', 'at perspective_from recommendation consult'],
-  ['recordRow', '', 'at dissent'],
-  ['recordRow', '', 'at lead_consult_context'],
-  ['recordRow', '', 'at bounce_target_mapped'],
-  ['recordRow', '', 'at decision consult round reason'],
-  ['recordRow', '', 'at extra_round_granted'],
-  ['recordRow', '', 'at accept_reask'],
-  ['recordRow', '', 'at accept_decision'],
-  ['recordRow', '', 'at envelope_accepted'],
-  ['recordRow', '', 'at triage'],
-  ['recordRow', '', 'at directed'],
-  ['recordRow', '', 'at plan_round_cap'],
-  ['recordRow', '', 'at plan_lineage'],
-  ['recordRow', '', 'at member_questions'],
-  ['recordRow', '', 'at question_answers'],
-  ['recordRow', '', 'at plan_scope'],
-  ['recordRow', '', 'at event validation_lane_resolved'],
-  ['recordRow', '', 'at gate_path_rejected'],
-  ['recordRow', '', 'at plan_growth'],
-  ['recordRow', '', 'at plan_round_cap'],
-  ['recordRow', '', 'at carve_verdict'],
-  ['recordRow', '', 'at adversary_trigger'],
-  ['recordRow', '', 'at adversary_unavailable'],
-  ['recordRow', '', 'at plan_converged'],
-  ['recordRow', '', 'at gate_discrimination gate_generation gate_summary gate_proof_note'],
-  ['recordRow', '', 'at gate_proof_unproven gate_generation'],
-  ['recordRow', '', 'at gate_check_proof_unproven gate_generation'],
-  ['recordRow', '', 'at diff_mutation_proof'],
-  ['recordRow', '', 'at kind diff_mutant_judgment'],
-  ['recordRow', '', 'at mutation_anchor_bind'],
-  ['recordRow', '', 'at mutation_anchor_absent'],
-  ['recordRow', '', 'at gate_check_discrimination gate_generation gate_check_discriminations ...(checkProofNote ? { gate_check_proof_note: checkProofNote } : {})'],
-  ['recordRow', '', 'at finding_hardened'],
-  ['recordRow', '', 'at ...entry'],
-  ['recordRow', '', 'at auto_fix'],
-  ['recordRow', '', 'at auto_fix_revalidation'],
-  ['recordRow', '', 'at scope_gate'],
-  ['recordRow', '', 'at member_questions'],
-  ['recordRow', '', 'at question_answers'],
-  ['recordRow', '', 'at review_round'],
-  ['recordRow', '', 'at auto_fix'],
-  ['recordRow', '', 'at commit_subject'],
-  ['recordRow', '', 'at cold_suite'],
-  ['recordRow', '', 'at narration'],
-  ['recordRow', '', 'at published'],
-  ['operationalRow', '', 'at event kind queue_depth waited_ms slotted'],
+  ["recordRow", "", "at converge_declined"],
+  ["recordRow", "", "at converge_declined"],
+  ["recordRow", "", "at converge_declined residual why"],
+  ["recordRow", "", "at converge_declined residual why"],
+  ["recordRow", "", "at commit_subject"],
+  ["recordRow", "", "at scope_gate"],
+  ["recordRow", "", "at modifier"],
+  ["recordRow", "", "at modifier"],
+  ["recordRow", "", "at stage_done"],
+  ["recordRow", "", "at stage"],
+  ["operationalRow", "", "at gate_reap"],
+  ["recordRow", "", "at no_lead_escalation"],
+  ["recordRow", "", "at seat_turn_ceiling"],
+  ["recordRow", "", "at seat_enforcement"],
+  ["recordRow", "", "at assign role brief"],
+  ["recordRow", "", "at seat_enforcement"],
+  ["recordRow", "", "at review_outcome"],
+  ["recordRow", "", "at review_findings_note"],
+  ["recordRow", "", "at envelope role status"],
+  ["recordRow", "", "at no_lead_escalation"],
+  ["recordRow", "", "at perspective_from recommendation consult"],
+  ["recordRow", "", "at dissent"],
+  ["recordRow", "", "at lead_consult_context"],
+  ["recordRow", "", "at bounce_target_mapped"],
+  ["recordRow", "", "at decision consult round reason"],
+  ["recordRow", "", "at extra_round_granted"],
+  ["recordRow", "", "at accept_reask"],
+  ["recordRow", "", "at accept_decision"],
+  ["recordRow", "", "at envelope_accepted"],
+  ["recordRow", "", "at triage"],
+  ["recordRow", "", "at directed"],
+  ["recordRow", "", "at plan_round_cap"],
+  ["recordRow", "", "at plan_lineage"],
+  ["recordRow", "", "at member_questions"],
+  ["recordRow", "", "at question_answers"],
+  ["recordRow", "", "at plan_scope"],
+  ["recordRow", "", "at event validation_lane_resolved"],
+  ["recordRow", "", "at gate_path_rejected"],
+  ["recordRow", "", "at plan_growth"],
+  ["recordRow", "", "at plan_round_cap"],
+  ["recordRow", "", "at carve_verdict"],
+  ["recordRow", "", "at adversary_trigger"],
+  ["recordRow", "", "at adversary_unavailable"],
+  ["recordRow", "", "at plan_converged"],
+  ["recordRow", "", "at gate_discrimination gate_generation gate_summary gate_proof_note"],
+  ["recordRow", "", "at gate_proof_unproven gate_generation"],
+  ["recordRow", "", "at gate_check_proof_unproven gate_generation"],
+  ["recordRow", "", "at diff_mutation_proof"],
+  ["recordRow", "", "at kind diff_mutant_judgment"],
+  ["recordRow", "", "at mutation_anchor_bind"],
+  ["recordRow", "", "at mutation_anchor_absent"],
+  ["recordRow", "", "at gate_check_discrimination gate_generation gate_check_discriminations ...(checkProofNote ? { gate_check_proof_note: checkProofNote } : {})"],
+  ["recordRow", "", "at finding_hardened"],
+  ["recordRow", "", "at ...entry"],
+  ["recordRow", "", "at auto_fix"],
+  ["recordRow", "", "at auto_fix_revalidation"],
+  ["recordRow", "", "at member_questions"],
+  ["recordRow", "", "at question_answers"],
+  ["recordRow", "", "at review_round"],
+  ["recordRow", "", "at auto_fix"],
+  ["recordRow", "", "at commit_subject"],
+  ["recordRow", "", "at cold_suite"],
+  ["recordRow", "", "at narration"],
+  ["recordRow", "", "at published"],
+  ["operationalRow", "", "at event kind queue_depth waited_ms slotted"],
 ])
 
 // ---------------------------------------------------------------------------

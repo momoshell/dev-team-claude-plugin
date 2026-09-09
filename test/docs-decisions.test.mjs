@@ -45,6 +45,11 @@ const expected = [
     question: 'Use ACP via `claude-agent-acp` for the claude seat (#1034)?',
     measurement: 'Verified elsewhere on 2026-09-08 against the `claude-agent-acp` source, which is not in this checkout: its ACP agent implements `requestPermission`.',
   },
+  {
+    heading: '## 7. Let the shadow seat pick seat for real? (amends ADR-032)',
+    question: 'Should the shadow seat pick (#291 L2, already in `crew/crew.mjs`) be promoted from record-only to actually choosing a producing seat at boot, from the roster\'s admissible cells, by task shape and measured availability?',
+    measurement: 'The pick exists and is dark. `SHADOW_OUTCOMES` (`picked / stands / abstained / no-candidate / not-consulted`), `SHADOW_EXCLUSIONS` (`band-unknown / band-below-floor / capability-shortfall / agent-unresolved / breaker-open`) and `SHADOW_ABSENT` are shipped at `crew/crew.mjs:1103-1120`. Both of its inputs are unmeasured: `CREW_BREAKER_THRESHOLD` is unset, so cell health reads *UNMEASURED, never healthy*; `eval_cells` has 0 rows, so pass rate and cost per candidate are absent. The roster seats two agents (`pi`, `claude`) and 7 models, three of which (`fable-5`, `sonnet-5`, `haiku-4-5`) have never been seated in 876 recorded sessions. Today a 429 parks, a 5xx backs off, an auth failure refuses; nothing ever picks a different cell (`PROVIDER_RETRY_ACTIONS`, `crew/headless.mjs:293`).',
+  },
 ]
 
 function parseEntries(markdown) {
@@ -81,7 +86,7 @@ function fixtureFor(entry) {
   ].join('\n')
 }
 
-test('the register has six ordered entries with pinned questions and measurements', () => {
+test('the register has seven ordered entries with pinned questions and measurements', () => {
   const entries = parseEntries(register)
   assert.equal(entries.length, expected.length)
   assert.deepEqual(entries.map((entry) => entry.heading), expected.map((entry) => entry.heading))

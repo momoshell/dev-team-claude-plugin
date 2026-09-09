@@ -11,6 +11,9 @@ Line counts here use `split("\n").length`, which is one greater than `wc -l` for
 - **Options:** Split `crew/drive.mjs` through an ADR-sized migration; keep it intact.
 - **Blocked:** #1033 and the seam report scoped from it; a split also reaches every import, every anchor manifest, every `allow_test_reach` naming the file, and the protected-floor list.
 - **Raised:** 2026-09-08 (Split `crew/drive.mjs`?)
+- **CLOSED 2026-09-08 by [ADR-042](adr/adr-042-split-the-suites-not-the-driver.md):** `crew/drive.mjs` is NOT split. `scripts/factory/seams.mjs` measured **30 clusters at 9,634 cross-cluster edges (321.1 per cluster)**, 28 anchor pins across six manifests and 12 reaching tests — one module with a wide interface, so a split would cut live coupling and produce layers that only forward arguments. #1061's sub-file scopes are sequenced AHEAD of any structural work and unlock the eight-issue driver queue at no migration cost.
+- **Not a permanent verdict, and re-opened only as a different question.** The owner's standing direction is recorded in ADR-042: every large file should become modules with proper boundaries. Giving `crew/drive.mjs` boundaries is a **refactor, not a split** — the narrow interfaces must be CREATED before any file division is safe. That is a larger act, it wants its own ADR, and it follows #1061. Do not re-raise this entry as "split?"; raise the refactor.
+- **Stale-measurement note, 2026-09-09:** this entry said 7,522 lines for a day after it was closed, and the file is now **8,257**. A closed decision keeps its original measurement; the growth is recorded here so a later reader does not mistake the old number for a live one.
 
 ## 2. Effort per stage, not per seat?
 

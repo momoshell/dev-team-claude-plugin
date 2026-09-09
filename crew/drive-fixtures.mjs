@@ -401,8 +401,13 @@ const triageEnv = (over = {}) => ({
 const planEnv = (over = {}) => ({
   status: 'done', role: 'planner', summary: 'planned',
   artifacts: [`${TD}/plan.md`],
-  details: { plan_path: `${TD}/plan.md`, files_in_scope: ['a.mjs', 'a.test.mjs'], validation_lane: 'lane-cmd', consult_questions: [], carve_verdict: 'proceed' },
+  details: { plan_path: `${TD}/plan.md`, files_in_scope: ['a.mjs', 'a.test.mjs'], validation_lane: 'lane-cmd', consult_questions: [], carve_verdict: 'proceed', needs_adversary: false },
   ...over,
+})
+
+const adversarialPlanEnv = (over = {}) => planEnv({
+  ...over,
+  details: { ...planEnv().details, ...(over.details || {}), needs_adversary: true },
 })
 
 const suiteRefusalEnv = (id = 'planner1', role = 'planner') => ({
@@ -465,7 +470,7 @@ function planCheckAcceptIo(details = {}, options = {}) {
   )))
   return fakeIo({
     envelopes: {
-      'planner:1': planEnv(), 'planner:2': planEnv(),
+      'planner:1': adversarialPlanEnv(), 'planner:2': adversarialPlanEnv(),
       'tech-lead:1': checkEnv('revise'), 'tech-lead:2': checkEnv('revise'),
       'lead:1': leadEnv('accept', 'because the latest plan is usable', details),
       ...followUps,
@@ -480,7 +485,7 @@ function planCheckAcceptIo(details = {}, options = {}) {
 function planThenReviewIo(laterDetails, correction = laterDetails) {
   return fakeIo({
     envelopes: {
-      'planner:1': planEnv(), 'planner:2': planEnv(),
+      'planner:1': adversarialPlanEnv(), 'planner:2': adversarialPlanEnv(),
       'tech-lead:1': checkEnv('revise'), 'tech-lead:2': checkEnv('revise'),
       'lead:1': leadEnv('accept', 'record the plan gap', { residuals: [PLAN_RESIDUAL] }),
       'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(),
@@ -494,9 +499,21 @@ function planThenReviewIo(laterDetails, correction = laterDetails) {
   })
 }
 
-const protectedPlanEnv = (files = ['crew/drive.mjs']) => planEnv({
-  details: { ...planEnv().details, files_in_scope: files },
-})
+const protectedProof = (files) => {
+  const file = (Array.isArray(files) ? files : []).find((entry) => typeof entry === 'string' && !entry.endsWith('/'))
+  if (!file) throw new Error('protected proof requires at least one concrete protected file')
+  return {
+    gate_cmd: 'gate-cmd',
+    mutations: [{ check: 'protected-surface', file, find: 'true', replace: 'false' }],
+  }
+}
+
+const protectedPlanEnv = (files = ['crew/drive.mjs'], outcome) => {
+  if (outcome !== 'proved' && outcome !== 'typed-refusal') throw new Error('protectedPlanEnv requires an explicit proved or typed-refusal outcome')
+  const details = { ...planEnv().details, files_in_scope: files }
+  if (outcome === 'proved') Object.assign(details, protectedProof(files))
+  return planEnv({ details })
+}
 
 const protectedReseatRefusal = () => ({ applied: false, reason: 'transport', why: 'pane seat refuses a targeted reseat', from: null })
 
@@ -722,15 +739,15 @@ const divergentPlanScenario = (leadDecision) => {
   io = fakeIo({
     files,
     envelopes: {
-      'planner:1': planEnv({ details }),
+      'planner:1': adversarialPlanEnv({ details }),
       'tech-lead:1': checkEnv('revise'),
       'planner:2': () => {
         io.calls.files[`${TD}/plan.md`] = 'x'.repeat(20)
         io.calls.files[`${TD}/gate.mjs`] = 'x'.repeat(20)
-        return planEnv({ details: { ...details, carve_verdict: 'proceed' } })
+        return adversarialPlanEnv({ details: { ...details, carve_verdict: 'proceed' } })
       },
       'tech-lead:2': checkEnv('revise'),
-      'planner:3': planEnv({ details: { ...details, carve_verdict: 'proceed' } }),
+      'planner:3': adversarialPlanEnv({ details: { ...details, carve_verdict: 'proceed' } }),
       'tech-lead:3': checkEnv('approve'),
       'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
       'lead:1': leadEnv(leadDecision),
@@ -748,21 +765,21 @@ const divergeThenExhaustPlanScenario = () => {
   io = fakeIo({
     files,
     envelopes: {
-      'planner:1': planEnv({ details }),
+      'planner:1': adversarialPlanEnv({ details }),
       'tech-lead:1': checkEnv('revise'),
       'planner:2': () => {
         io.calls.files[`${TD}/plan.md`] = 'x'.repeat(20)
         io.calls.files[`${TD}/gate.mjs`] = 'x'.repeat(20)
-        return planEnv({ details: { ...details, carve_verdict: 'proceed' } })
+        return adversarialPlanEnv({ details: { ...details, carve_verdict: 'proceed' } })
       },
       'tech-lead:2': checkEnv('revise'),
       'planner:3': () => {
         io.calls.files[`${TD}/plan.md`] = 'x'.repeat(10)
         io.calls.files[`${TD}/gate.mjs`] = 'x'.repeat(10)
-        return planEnv({ details: { ...details, carve_verdict: 'proceed' } })
+        return adversarialPlanEnv({ details: { ...details, carve_verdict: 'proceed' } })
       },
       'tech-lead:3': checkEnv('revise'),
-      'planner:4': planEnv({ details: { ...details, carve_verdict: 'proceed' } }),
+      'planner:4': adversarialPlanEnv({ details: { ...details, carve_verdict: 'proceed' } }),
       'tech-lead:4': checkEnv('approve'),
       'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
       'lead:1': leadEnv('bounce'), 'lead:2': leadEnv('bounce'),
@@ -780,12 +797,12 @@ const persistentDivergenceScenario = () => {
   const growingPlan = () => {
     io.calls.files[`${TD}/plan.md`] = 'x'.repeat(20)
     io.calls.files[`${TD}/gate.mjs`] = 'x'.repeat(20)
-    return planEnv({ details: { ...details, carve_verdict: 'proceed' } })
+    return adversarialPlanEnv({ details: { ...details, carve_verdict: 'proceed' } })
   }
   io = fakeIo({
     files,
     envelopes: {
-      'planner:1': planEnv({ details }), 'tech-lead:1': checkEnv('revise'),
+      'planner:1': adversarialPlanEnv({ details }), 'tech-lead:1': checkEnv('revise'),
       'planner:2': growingPlan, 'tech-lead:2': checkEnv('revise'),
       'planner:3': growingPlan, 'tech-lead:3': checkEnv('revise'),
       'planner:4': growingPlan, 'tech-lead:4': checkEnv('revise'),
@@ -803,7 +820,7 @@ const persistentDivergenceScenario = () => {
 const bothExhaustionPointsScenario = (secondReviewLead = null) => {
   const io = fakeIo({
     envelopes: {
-      'planner:1': planEnv(), 'planner:2': planEnv(), 'planner:3': planEnv(),
+      'planner:1': adversarialPlanEnv(), 'planner:2': adversarialPlanEnv(), 'planner:3': adversarialPlanEnv(),
       'tech-lead:1': checkEnv('revise'), 'tech-lead:2': checkEnv('revise'), 'tech-lead:3': checkEnv('approve'),
       'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(), 'builder:4': buildEnv(),
       'reviewer:1': reviewEnv('changes-needed'), 'reviewer:2': reviewEnv('changes-needed'),
@@ -844,7 +861,7 @@ const HEALTHY_RESULT = {
 const planRevisionRun = (revision, over = {}) => {
   const io = fakeIo({
     envelopes: {
-      'planner:1': planEnv(), 'tech-lead:1': checkEnv('revise'),
+      'planner:1': adversarialPlanEnv(), 'tech-lead:1': checkEnv('revise'),
       'planner:2': revision, 'tech-lead:2': checkEnv('approve'),
       'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
     },
@@ -957,12 +974,13 @@ const ZERO_CAPACITY_RESULT = Object.freeze({
 const ZERO_CAPACITY_LOGS = Object.freeze([
   { plan_round_cap: { adopted: false, cap: 2, predecessor_checked: null, reason: 'not-adopted' }, channel: 'record' },
   { stage: 'plan:r1', channel: 'record' },
-  { assign: 'planner1', role: 'planner', brief: '/tmp/brief.md', channel: 'record' },
+  { assign: 'planner1', role: 'planner', brief: '/tmp/fake-task/planner-assignment-r1.md', channel: 'record' },
   { envelope: 'planner1', role: 'planner', status: 'done', channel: 'record' },
   { plan_scope: { round: 1, verdict: 'plan-scope-undispatched', added: [], dropped: [], dispatched: null, planned: 2 }, channel: 'record' },
   { event: 'validation-lane-resolved', validation_lane_resolved: { round: 1, shape: 'opaque', loadable: 0, missing: 0, unreadable: 0, 'unsupported-type': 0, 'unsupported-extension': 0, 'glob-unresolved': 0, refused: [], total: 0 }, channel: 'record' },
   { gate_path_rejected: null, channel: 'record' },
   { plan_growth: { round: 1, plan_bytes: null, gate_bytes: null, plan_delta: null, gate_delta: null, combined_bytes: null, round1_combined_bytes: null, files_in_scope_count: 2, ratio: null, divergent: false }, channel: 'record' },
+  { adversary_trigger: 'none', channel: 'record' },
   { stage_done: 'plan:r1', channel: 'record' },
   { stage: 'build:r1', channel: 'record' },
   { assign: 'builder1', role: 'builder', brief: '/tmp/fake-task/plan.md', channel: 'record' },
@@ -1003,7 +1021,7 @@ const REVIEW_FINDINGS = [
 
 function reviewConvergeIo({ suite = { ok: true, output: '' }, seam = true, gateless = false } = {}) {
   const plan = gateless
-    ? planEnv({ details: { ...CONVERGE_PLAN().details, gate_cmd: undefined } })
+    ? planEnv({ details: { ...CONVERGE_PLAN().details, gate_cmd: undefined, needs_adversary: false } })
     : CONVERGE_PLAN()
   return fakeIo({
     envelopes: {
@@ -1285,6 +1303,7 @@ const DRIVE_JOURNAL_EXPECTED = Object.freeze([
   ['recordRow', '', 'at plan_growth'],
   ['recordRow', '', 'at plan_round_cap'],
   ['recordRow', '', 'at carve_verdict'],
+  ['recordRow', '', 'at adversary_trigger'],
   ['recordRow', '', 'at plan_converged'],
   ['recordRow', '', 'at gate_discrimination gate_generation gate_summary gate_proof_note'],
   ['recordRow', '', 'at gate_proof_unproven gate_generation'],
@@ -1586,7 +1605,7 @@ function dispositionPanelIo({
 } = {}) {
   return fakeIo({
     envelopes: {
-      'planner:1': dPlanEnv(), 'tech-lead:1': checkEnv('approve'),
+      'planner:1': adversarialPlanEnv(), 'tech-lead:1': checkEnv('approve'),
       'builder:1': builder1, 'builder:2': builder2, 'builder:3': builder3,
       'reviewer:1': reviewer1, 'tech-lead:2': partner1, 'lead:1': adjudication1,
       'reviewer:2': reviewer2, 'tech-lead:3': partner2, 'lead:2': adjudication2,
@@ -1698,10 +1717,10 @@ const S843_RUNS = { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: tru
 // every case here. Satisfy it — a floor refusal would confound every escalation read below.
 const s843Reseat = () => ({ applied: true, from: { id: 'build' }, to: { id: 'judge' }, rung: 'mechanical→judge' })
 
-const s843PlanEnv = (files) => planEnv({
+const s843PlanEnv = (files, needsAdversary = false) => planEnv({
   details: {
     plan_path: `${TD}/plan.md`, files_in_scope: Array.isArray(files) ? [...files] : files,
-    validation_lane: 'lane-cmd', consult_questions: [], carve_verdict: 'proceed',
+    validation_lane: 'lane-cmd', consult_questions: [], carve_verdict: 'proceed', needs_adversary: needsAdversary,
   },
 })
 
@@ -1740,7 +1759,7 @@ const s843Bullets = (text, heading) => {
 // ---------------------------------------------------------------------------
 // #915 — planner validation_lane resolution. The probe is scripted through fakeIo's
 // command map: no scratch tree or temp primitive belongs in these tests.
-const validationPlan = (lane) => planEnv({ details: { ...planEnv().details, validation_lane: lane } })
+const validationPlan = (lane, needsAdversary = false) => planEnv({ details: { ...planEnv().details, validation_lane: lane, needs_adversary: needsAdversary } })
 
 const validationProbeOutput = (kinds) => {
   const entries = kinds instanceof Map ? [...kinds.entries()] : Object.entries(kinds)
@@ -1870,5 +1889,5 @@ const b376StageStack = (io) => {
 // it uses. Importing this module also installs the ledger sandbox and its
 // after() cleanup, which are per-process and therefore needed in every file.
 export {
-  ACCEPT_FINDINGS, ACCEPT_FINDINGS_SOFT, ACCEPT_REASKS, ACCEPT_REFUSALS, ADOPTED_PLAN_HEADING, ADOPT_BLOCK, B318_GATED_RUNS, B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_IMPL_FILE, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, B384_BUILT, B384_CORRECTED_FIND, B384_CORRECTED_REPLACE, B384_FILE, B384_GREEN, B384_MUTATION, B384_PLAN, B384_RED, B384_REFACTORED_UNCORRECTED_BUILDER, B384_REFACTORED_BUILDER, B44_LEADLESS_CTX, CARVE_VERDICTS, CENSUS_ABSENT_REASONS, CENSUS_ROW_ABSENT, CENSUS_TURNS_ABSENT, CENSUS_UNREADABLE, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FAIL_PREFIX, CHECK_FILE, CHECK_MUTATION, CHECK_PLAN, CHECK_RUNS, CLOBBER_R2, COMMIT_TRAILER, CONVERGE_CTX, CONVERGE_GATE, CONVERGE_PLAN, CRASH_FINDINGS, CRASH_STAGES, CRASH_WHY, CTX, CTX_DIRECTED, CTX_REPAIR, CTX_TL, DECISIONS, DEFAULT_VARIANT, DIRECTED_BRIEF_PATH, DIRECTED_BRIEF_TEXT, DIRECTED_FILES, DIRECTED_SEATS, DIRECTED_SOURCES, DIRECTED_STAGES, DIRECTED_STAGE_HEAD, DRIVE_JOURNAL_EXPECTED, DRIVE_SINK, D_ASK, D_AUTO, D_CLASS_COLLIDING, D_CLASS_PARTNER, D_COLLISION_CTX, D_DIVERGENT_A, D_DIVERGENT_PARTNER, D_GREEN_GATE, D_HUNK, D_PANEL_CTX, D_PATCH_A, D_PATCH_B, D_PATCH_EMPTY_PATH, D_PATCH_MIXED_MODE, D_PATCH_MIXED_RENAME, D_RED_GATE, ENVELOPE_DEBRIS, ENVELOPE_FIELD_KINDS, ENVELOPE_REFUSAL_REASONS, EXECUTIONS, FAILURE_UPGRADE, FINDING_DISPOSITIONS, FINDING_ID_SHAPE, FINDING_SEVERITIES, GATE_CUSTODIAN, GATE_REAP_CMD_EOF, GATE_REAP_SWEEP_MARKER, GATE_SUMMARY_PREFIX, GROWTH_DIVERGENCE_FACTOR, HARDENING_MARKS, HARDENING_OUTCOMES, HARDENING_REFUSALS, HEALTHY_RESULT, HONEST_NARRATION, JOURNAL_CHANNELS, JOURNAL_CHANNEL_NAMES, JUDGE_TIER, LANE_COMMAND_SHAPES, LANE_INPUT_VERDICTS, LANE_PATH_OPTIONS, LANE_PROBE_KINDS, LANE_VALUE_OPTIONS, LEDGER_SANDBOX, LEDGER_SANDBOX_PREVIOUS, LIMITS, LOADABLE_LANE_EXTENSIONS, MAX_QUESTIONS, MODIFIER_OUTCOMES, MUST_FIX_REFUTATION_FINDINGS, MUTATIONS_MAX, MUTATION_BINDING_FAILURES, MUTATION_BIND_STATUSES, MUTATION_CORRECTION_OUTCOMES, MUTATION_CORRECTION_REFUSALS, MUTATION_OUTCOMES, NAME_VERDICTS, NARRATION_HEADING, NARRATION_MAX_CHARS, NARRATION_RECORD, NARRATION_REFUSALS, NARRATION_REFUSAL_NAMES, NARRATION_STAGE_VOCABULARY, NARRATOR_PROVIDER, NARRATOR_REGISTER, NO_TURN_CEILING, PANEL_ADJUDICATORS, PANEL_PARTNERS, PARTIAL_REVIEWED, PERSPECTIVE_TARGETS, PHASE_SLOT_WAIT_EVENT, PLAN_CHECK_ABSENT, PLAN_CHECK_FINDINGS, PLAN_CHECK_INVALID, PLAN_CHECK_SEVERITIES, PLAN_CLOSED_MARKER, PLAN_CONVERGENCE_REASONS, PLAN_RESIDUAL, PLAN_SCOPE, PLAN_SCOPE_VERDICTS, PREDECESSOR_FINDINGS_CLOSED, PROTECTED_PATHS, PUBLISH_BASE, PUBLISH_COLD_OUTPUT, PUBLISH_REFUSALS, PUBLISH_REFUSAL_NAMES, PUBLISH_WARM_OUTPUT, RED, REFUTATION_CLAIM, REFUTATION_CONVERGE_PLAN, REFUTATION_CONVERGE_RUNS, REFUTATION_EVIDENCE_MAX, REPO_ROOT, RESIDUAL_TYPES, REVIEWED_CORE_STAGES, REVIEW_FINDINGS, REVIEW_GATE_PASS, RUN_START_EVENT, S843_ADDED, S843_D2, S843_DISPATCHED, S843_DROPPED, S843_NARROWED, S843_RUNS, SCOPE_REFUSALS, SEAT_REFUSAL_STAGE, SECOND_OPINION, SENSITIVITY_FLOOR, SHAPE_MAJOR_PHASES, SHAPE_ROUNDED_STAGES, SHAPE_SOURCES, SKILL_NAMES, SUITE_REASK_MAX, SUITE_SLOT_PHASES, SUITE_SLOT_PHASE_NAMES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, TRIAGE_SOURCES, TRIAGE_STAGES, TRIAGE_STAGE_HEAD, TURN_CEILING_REFUSALS, TURN_CEILING_ROLES, TURN_CEILING_DEFAULTS, UNIVERSAL_STAGE_HEADS, VALIDATION_LANE_EVENT, VALIDATION_LANE_UNLOADABLE, VARIANTS, VARIANT_NAMES, WAITS_S, WAIT_FLAGS, WAIT_REFUSALS, WAIT_ROLES, WAIT_SECONDS_MAX, WAIT_SECONDS_MIN, WRITE_SURFACES, ZERO_CAPACITY_LOGS, ZERO_CAPACITY_RESULT, acceptBounceLines, acceptContractLines, acceptedRawById, acceptedViaLabel, adoptionSignal, anchorAbsentWhy, answerBounceLines, applyMutationAnchor, applyNarration, applyPrescriptionLines, askUserLines, assertDriverIdRefusal, assertSeats, b127GatePaths, b127GroupCommand, b127InvokeGate, b127Lines, b127PidAlive, b127Spy, b318Builders, b318GatedPlan, b318Options, b318ReviewGrants, b318SiteA, b318SiteB, b376Build, b376DiskProofIo, b376ProofIo, b376Review, b376StageStack, b384Io, b384RefactoredIo, b44AssertLeadlessGate, b44GateFixIo, b44GatePlan, b44MidRunRepairIo, baselineGateDefect, bindMutationAnchor, bindMutationCorrection, bindMutationDeclarations, bothExhaustionPointsScenario, bounceDetail, bounceSeatOf, bounceTargetOf, buildEnv, carriedPrLines, carriedPreambleLines, carriedResolution, carriedSilenceDefect, carveRun, checkAnchors, checkEnv, checkFailureLine, chmodSync, classCollisionIo, closeoutIo, collapseStages, commitIntent, composeCommitMessage, composePrBody, convergeIo, convergeRun, correctedMutations, crashIo, crashRun, dAdjEnv, dApplyCommand, dAutoRows, dBuilders, dDecisionBrief, dGitApplies, dLeads, dOffers, dPanelOutcomes, dPartnerEnv, dPatchWrite, dPlanEnv, dRemintRows, dReviewEnv, deliberateRun, directSlotRun, dispositionIo, dispositionOf, dispositionPanelIo, dispositionPlan, divergeThenExhaustPlanScenario, divergenceConsultLines, divergentCollisionIo, divergentPlanScenario, driveJournalSites, drivePayloadElements, driveTask, enforcementPreamble, envelopeDefect, envelopeFieldsPresent, escalationStageRows, exhaustionAcceptIo, existsSync, fakeIo, fakePool, fenceBase, fenceDiff, fenceRecord, fenceSpan, finalizeCorrections, findingIdDefect, gateReapCommand, gateReapFresh, gateReapOriginal, gateReapSweepCommand, gateReapVerdict, growthLines, growthRecord, guardedWrite, hardenCommand, hardenWitnessCommand, hardeningBounceLines, hardeningBriefLines, hardeningDebt, hardeningOf, issueTrailers, join, journalRowsSinceRunStart, laneCommandInputs, laneCommandShape, laneFence, laneFenceHits, laneInputExtension, laneProbeCommand, laneProbeKinds, leadEnv, legacyPanelProof, legacyReviewerExemptions, lineageFromJournal, matchAnswers, mkdirSync, mutationChangesTokens, nameVerdict, narrateRecord, narrationDefect, narrationFromResponse, narrationIsRawJson, narrationPrompt, narrationStageDefect, narratorApiRoot, narratorCommand, narratorConfig, narratorIo, narratorModelId, narratorModelsCommand, normaliseJournalTimes, observeTurnCensus, operationalRow, osCpus, outOfScopeFiles, panelSeats, parseDirectedBrief, parseGateSummary, parseQuestions, parseSuiteCounts, partitionShifts, patchTargets, persistentDivergenceScenario, phaseTrace, planAcceptContractLines, planCheckAcceptIo, planCheckFindings, planCheckFindingsFromText, planConvergence, planEnv, planRevisionRun, planRoundCap, planScopeVerdict, planThenReviewIo, postCommitCrashRun, prAnomalies, predecessorFindingsClosed, protectedHits, protectedPlanEnv, protectedReseatRefusal, publicationIo, questionConsultLines, readFileSync, readdirSync, reconEnv, recordFacts, recordRow, refsFromCommitMessage, refuseWait, regrantVerdict, relativizeCommand, replayResumeStages, resolveProtectedPaths, resolveTurnCeilings, resolveValidationLane, resolveWaits, resumeDoneRows, resumeGreen, resumeKeys, resumeRed, resumeStageRows, reviewConvergeIo, reviewConvergeRun, reviewEnv, reviewFindings, reviewOutcome, reviewShapeDefect, rmSync, roundCursor, runChild, runCmd, runCmdFixture, runPublished, s843Bullets, s843Ctx, s843Io, s843PathsIn, s843PlanEnv, s843Reseat, s843Rows, scopeBounceBrief, scopeMatcher, scopeRefusal, scopedPath, scratchDir, shapeDefect, shellArg, shellWords, slotAdmission, slotCtx, slotFactory, sourcesDefect, spawnSync, stageEnabled, stageShape, staleVerdictLines, suiteRefusalEnv, throwAutoFixWrites, throwingWaitRun, tmpdir, traceLabels, traceSubsequence, treeDigest, triageEnv, trimPathToken, turnCeilingBreached, turnCeilingsRecord, twoRoundReviewIo, undeclaredStage, validateAcceptDecision, validateCarve, validateHardened, validateMutationCorrections, validateMutations, validatePlanResiduals, validateScopeEntries, validationLaneBounceLines, validationLaneWhy, validationPlan, validationProbeOutput, validationProbeRun, validationRows, verdictFindingsDefect, waitsCtx, waitsRecord, withPhaseSlot, writeFileSync,
+  ACCEPT_FINDINGS, ACCEPT_FINDINGS_SOFT, ACCEPT_REASKS, ACCEPT_REFUSALS, ADOPTED_PLAN_HEADING, ADOPT_BLOCK, adversarialPlanEnv, B318_GATED_RUNS, B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_IMPL_FILE, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, B384_BUILT, B384_CORRECTED_FIND, B384_CORRECTED_REPLACE, B384_FILE, B384_GREEN, B384_MUTATION, B384_PLAN, B384_RED, B384_REFACTORED_UNCORRECTED_BUILDER, B384_REFACTORED_BUILDER, B44_LEADLESS_CTX, CARVE_VERDICTS, CENSUS_ABSENT_REASONS, CENSUS_ROW_ABSENT, CENSUS_TURNS_ABSENT, CENSUS_UNREADABLE, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FAIL_PREFIX, CHECK_FILE, CHECK_MUTATION, CHECK_PLAN, CHECK_RUNS, CLOBBER_R2, COMMIT_TRAILER, CONVERGE_CTX, CONVERGE_GATE, CONVERGE_PLAN, CRASH_FINDINGS, CRASH_STAGES, CRASH_WHY, CTX, CTX_DIRECTED, CTX_REPAIR, CTX_TL, DECISIONS, DEFAULT_VARIANT, DIRECTED_BRIEF_PATH, DIRECTED_BRIEF_TEXT, DIRECTED_FILES, DIRECTED_SEATS, DIRECTED_SOURCES, DIRECTED_STAGES, DIRECTED_STAGE_HEAD, DRIVE_JOURNAL_EXPECTED, DRIVE_SINK, D_ASK, D_AUTO, D_CLASS_COLLIDING, D_CLASS_PARTNER, D_COLLISION_CTX, D_DIVERGENT_A, D_DIVERGENT_PARTNER, D_GREEN_GATE, D_HUNK, D_PANEL_CTX, D_PATCH_A, D_PATCH_B, D_PATCH_EMPTY_PATH, D_PATCH_MIXED_MODE, D_PATCH_MIXED_RENAME, D_RED_GATE, ENVELOPE_DEBRIS, ENVELOPE_FIELD_KINDS, ENVELOPE_REFUSAL_REASONS, EXECUTIONS, FAILURE_UPGRADE, FINDING_DISPOSITIONS, FINDING_ID_SHAPE, FINDING_SEVERITIES, GATE_CUSTODIAN, GATE_REAP_CMD_EOF, GATE_REAP_SWEEP_MARKER, GATE_SUMMARY_PREFIX, GROWTH_DIVERGENCE_FACTOR, HARDENING_MARKS, HARDENING_OUTCOMES, HARDENING_REFUSALS, HEALTHY_RESULT, HONEST_NARRATION, JOURNAL_CHANNELS, JOURNAL_CHANNEL_NAMES, JUDGE_TIER, LANE_COMMAND_SHAPES, LANE_INPUT_VERDICTS, LANE_PATH_OPTIONS, LANE_PROBE_KINDS, LANE_VALUE_OPTIONS, LEDGER_SANDBOX, LEDGER_SANDBOX_PREVIOUS, LIMITS, LOADABLE_LANE_EXTENSIONS, MAX_QUESTIONS, MODIFIER_OUTCOMES, MUST_FIX_REFUTATION_FINDINGS, MUTATIONS_MAX, MUTATION_BINDING_FAILURES, MUTATION_BIND_STATUSES, MUTATION_CORRECTION_OUTCOMES, MUTATION_CORRECTION_REFUSALS, MUTATION_OUTCOMES, NAME_VERDICTS, NARRATION_HEADING, NARRATION_MAX_CHARS, NARRATION_RECORD, NARRATION_REFUSALS, NARRATION_REFUSAL_NAMES, NARRATION_STAGE_VOCABULARY, NARRATOR_PROVIDER, NARRATOR_REGISTER, NO_TURN_CEILING, PANEL_ADJUDICATORS, PANEL_PARTNERS, PARTIAL_REVIEWED, PERSPECTIVE_TARGETS, PHASE_SLOT_WAIT_EVENT, PLAN_CHECK_ABSENT, PLAN_CHECK_FINDINGS, PLAN_CHECK_INVALID, PLAN_CHECK_SEVERITIES, PLAN_CLOSED_MARKER, PLAN_CONVERGENCE_REASONS, PLAN_RESIDUAL, PLAN_SCOPE, PLAN_SCOPE_VERDICTS, PREDECESSOR_FINDINGS_CLOSED, PROTECTED_PATHS, PUBLISH_BASE, PUBLISH_COLD_OUTPUT, PUBLISH_REFUSALS, PUBLISH_REFUSAL_NAMES, PUBLISH_WARM_OUTPUT, RED, REFUTATION_CLAIM, REFUTATION_CONVERGE_PLAN, REFUTATION_CONVERGE_RUNS, REFUTATION_EVIDENCE_MAX, REPO_ROOT, RESIDUAL_TYPES, REVIEWED_CORE_STAGES, REVIEW_FINDINGS, REVIEW_GATE_PASS, RUN_START_EVENT, S843_ADDED, S843_D2, S843_DISPATCHED, S843_DROPPED, S843_NARROWED, S843_RUNS, SCOPE_REFUSALS, SEAT_REFUSAL_STAGE, SECOND_OPINION, SENSITIVITY_FLOOR, SHAPE_MAJOR_PHASES, SHAPE_ROUNDED_STAGES, SHAPE_SOURCES, SKILL_NAMES, SUITE_REASK_MAX, SUITE_SLOT_PHASES, SUITE_SLOT_PHASE_NAMES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, TRIAGE_SOURCES, TRIAGE_STAGES, TRIAGE_STAGE_HEAD, TURN_CEILING_REFUSALS, TURN_CEILING_ROLES, TURN_CEILING_DEFAULTS, UNIVERSAL_STAGE_HEADS, VALIDATION_LANE_EVENT, VALIDATION_LANE_UNLOADABLE, VARIANTS, VARIANT_NAMES, WAITS_S, WAIT_FLAGS, WAIT_REFUSALS, WAIT_ROLES, WAIT_SECONDS_MAX, WAIT_SECONDS_MIN, WRITE_SURFACES, ZERO_CAPACITY_LOGS, ZERO_CAPACITY_RESULT, acceptBounceLines, acceptContractLines, acceptedRawById, acceptedViaLabel, adoptionSignal, anchorAbsentWhy, answerBounceLines, applyMutationAnchor, applyNarration, applyPrescriptionLines, askUserLines, assertDriverIdRefusal, assertSeats, b127GatePaths, b127GroupCommand, b127InvokeGate, b127Lines, b127PidAlive, b127Spy, b318Builders, b318GatedPlan, b318Options, b318ReviewGrants, b318SiteA, b318SiteB, b376Build, b376DiskProofIo, b376ProofIo, b376Review, b376StageStack, b384Io, b384RefactoredIo, b44AssertLeadlessGate, b44GateFixIo, b44GatePlan, b44MidRunRepairIo, baselineGateDefect, bindMutationAnchor, bindMutationCorrection, bindMutationDeclarations, bothExhaustionPointsScenario, bounceDetail, bounceSeatOf, bounceTargetOf, buildEnv, carriedPrLines, carriedPreambleLines, carriedResolution, carriedSilenceDefect, carveRun, checkAnchors, checkEnv, checkFailureLine, chmodSync, classCollisionIo, closeoutIo, collapseStages, commitIntent, composeCommitMessage, composePrBody, convergeIo, convergeRun, correctedMutations, crashIo, crashRun, dAdjEnv, dApplyCommand, dAutoRows, dBuilders, dDecisionBrief, dGitApplies, dLeads, dOffers, dPanelOutcomes, dPartnerEnv, dPatchWrite, dPlanEnv, dRemintRows, dReviewEnv, deliberateRun, directSlotRun, dispositionIo, dispositionOf, dispositionPanelIo, dispositionPlan, divergeThenExhaustPlanScenario, divergenceConsultLines, divergentCollisionIo, divergentPlanScenario, driveJournalSites, drivePayloadElements, driveTask, enforcementPreamble, envelopeDefect, envelopeFieldsPresent, escalationStageRows, exhaustionAcceptIo, existsSync, fakeIo, fakePool, fenceBase, fenceDiff, fenceRecord, fenceSpan, finalizeCorrections, findingIdDefect, gateReapCommand, gateReapFresh, gateReapOriginal, gateReapSweepCommand, gateReapVerdict, growthLines, growthRecord, guardedWrite, hardenCommand, hardenWitnessCommand, hardeningBounceLines, hardeningBriefLines, hardeningDebt, hardeningOf, issueTrailers, join, journalRowsSinceRunStart, laneCommandInputs, laneCommandShape, laneFence, laneFenceHits, laneInputExtension, laneProbeCommand, laneProbeKinds, leadEnv, legacyPanelProof, legacyReviewerExemptions, lineageFromJournal, matchAnswers, mkdirSync, mutationChangesTokens, nameVerdict, narrateRecord, narrationDefect, narrationFromResponse, narrationIsRawJson, narrationPrompt, narrationStageDefect, narratorApiRoot, narratorCommand, narratorConfig, narratorIo, narratorModelId, narratorModelsCommand, normaliseJournalTimes, observeTurnCensus, operationalRow, osCpus, outOfScopeFiles, panelSeats, parseDirectedBrief, parseGateSummary, parseQuestions, parseSuiteCounts, partitionShifts, patchTargets, persistentDivergenceScenario, phaseTrace, planAcceptContractLines, planCheckAcceptIo, planCheckFindings, planCheckFindingsFromText, planConvergence, planEnv, planRevisionRun, planRoundCap, planScopeVerdict, planThenReviewIo, postCommitCrashRun, prAnomalies, predecessorFindingsClosed, protectedHits, protectedPlanEnv, protectedProof, protectedReseatRefusal, publicationIo, questionConsultLines, readFileSync, readdirSync, reconEnv, recordFacts, recordRow, refsFromCommitMessage, refuseWait, regrantVerdict, relativizeCommand, replayResumeStages, resolveProtectedPaths, resolveTurnCeilings, resolveValidationLane, resolveWaits, resumeDoneRows, resumeGreen, resumeKeys, resumeRed, resumeStageRows, reviewConvergeIo, reviewConvergeRun, reviewEnv, reviewFindings, reviewOutcome, reviewShapeDefect, rmSync, roundCursor, runChild, runCmd, runCmdFixture, runPublished, s843Bullets, s843Ctx, s843Io, s843PathsIn, s843PlanEnv, s843Reseat, s843Rows, scopeBounceBrief, scopeMatcher, scopeRefusal, scopedPath, scratchDir, shapeDefect, shellArg, shellWords, slotAdmission, slotCtx, slotFactory, sourcesDefect, spawnSync, stageEnabled, stageShape, staleVerdictLines, suiteRefusalEnv, throwAutoFixWrites, throwingWaitRun, tmpdir, traceLabels, traceSubsequence, treeDigest, triageEnv, trimPathToken, turnCeilingBreached, turnCeilingsRecord, twoRoundReviewIo, undeclaredStage, validateAcceptDecision, validateCarve, validateHardened, validateMutationCorrections, validateMutations, validatePlanResiduals, validateScopeEntries, validationLaneBounceLines, validationLaneWhy, validationPlan, validationProbeOutput, validationProbeRun, validationRows, verdictFindingsDefect, waitsCtx, waitsRecord, withPhaseSlot, writeFileSync,
 }

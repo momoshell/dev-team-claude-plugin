@@ -4,7 +4,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  ACCEPT_FINDINGS, ACCEPT_FINDINGS_SOFT, ACCEPT_REASKS, ACCEPT_REFUSALS, B318_GATED_RUNS, B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, CENSUS_ABSENT_REASONS, CENSUS_ROW_ABSENT, CENSUS_TURNS_ABSENT, CENSUS_UNREADABLE, CLOBBER_R2, CONVERGE_GATE, CONVERGE_PLAN, CRASH_FINDINGS, CRASH_STAGES, CTX, CTX_REPAIR, CTX_TL, DECISIONS, D_ASK, D_AUTO, D_COLLISION_CTX, D_PANEL_CTX, D_PATCH_A, D_PATCH_B, ENVELOPE_REFUSAL_REASONS, FINDING_DISPOSITIONS, LIMITS, MUST_FIX_REFUTATION_FINDINGS, NAME_VERDICTS, PANEL_ADJUDICATORS, PANEL_PARTNERS, PERSPECTIVE_TARGETS, PLAN_CHECK_FINDINGS, PLAN_RESIDUAL, PLAN_SCOPE, PLAN_SCOPE_VERDICTS, RED, REFUTATION_CLAIM, REFUTATION_CONVERGE_PLAN, REFUTATION_CONVERGE_RUNS, REFUTATION_EVIDENCE_MAX, RESIDUAL_TYPES, REVIEW_FINDINGS, REVIEW_GATE_PASS, S843_ADDED, S843_D2, S843_DISPATCHED, S843_DROPPED, S843_NARROWED, S843_RUNS, SECOND_OPINION, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, VARIANTS, acceptBounceLines, acceptContractLines, acceptedRawById, assertDriverIdRefusal, b127GroupCommand, b127InvokeGate, b127Lines, b127PidAlive, b127Spy, b318Builders, b318GatedPlan, b318Options, b318ReviewGrants, b318SiteA, b318SiteB, b376ProofIo, bounceTargetOf, buildEnv, checkEnv, classCollisionIo, closeoutIo, crashRun, dAdjEnv, dAutoRows, dBuilders, dDecisionBrief, dGitApplies, dLeads, dOffers, dPanelOutcomes, dPartnerEnv, dPatchWrite, dPlanEnv, dRemintRows, dReviewEnv, dispositionIo, dispositionOf, dispositionPanelIo, dispositionPlan, divergentCollisionIo, divergentPlanScenario, driveTask, envelopeDefect, envelopeFieldsPresent, exhaustionAcceptIo, fakeIo, findingIdDefect, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, join, leadEnv, legacyReviewerExemptions, nameVerdict, observeTurnCensus, panelSeats, phaseTrace, planAcceptContractLines, planCheckAcceptIo, planEnv, planRevisionRun, planScopeVerdict, planThenReviewIo, protectedPlanEnv, protectedReseatRefusal, publicationIo, readFileSync, reconEnv, regrantVerdict, resolveValidationLane, reviewConvergeRun, reviewEnv, reviewFindings, reviewOutcome, reviewShapeDefect, rmSync, roundCursor, s843Ctx, s843Io, s843PlanEnv, s843Rows, scratchDir, shapeDefect, slotCtx, slotFactory, spawnSync, staleVerdictLines, triageEnv, turnCeilingBreached, twoRoundReviewIo, validateAcceptDecision, validateCarve, validatePlanResiduals, validateScopeEntries, validationPlan, validationProbeRun, validationRows, verdictFindingsDefect, writeFileSync,
+  ACCEPT_FINDINGS, ACCEPT_FINDINGS_SOFT, ACCEPT_REASKS, adversarialPlanEnv, ACCEPT_REFUSALS, B318_GATED_RUNS, B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, CENSUS_ABSENT_REASONS, CENSUS_ROW_ABSENT, CENSUS_TURNS_ABSENT, CENSUS_UNREADABLE, CLOBBER_R2, CONVERGE_GATE, CONVERGE_PLAN, CRASH_FINDINGS, CRASH_STAGES, CTX, CTX_REPAIR, CTX_TL, DECISIONS, D_ASK, D_AUTO, D_COLLISION_CTX, D_PANEL_CTX, D_PATCH_A, D_PATCH_B, ENVELOPE_REFUSAL_REASONS, FINDING_DISPOSITIONS, LIMITS, MUST_FIX_REFUTATION_FINDINGS, NAME_VERDICTS, PANEL_ADJUDICATORS, PANEL_PARTNERS, PERSPECTIVE_TARGETS, PLAN_CHECK_FINDINGS, PLAN_RESIDUAL, PLAN_SCOPE, PLAN_SCOPE_VERDICTS, RED, REFUTATION_CLAIM, REFUTATION_CONVERGE_PLAN, REFUTATION_CONVERGE_RUNS, REFUTATION_EVIDENCE_MAX, RESIDUAL_TYPES, REVIEW_FINDINGS, REVIEW_GATE_PASS, S843_ADDED, S843_D2, S843_DISPATCHED, S843_DROPPED, S843_NARROWED, S843_RUNS, SECOND_OPINION, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, VARIANTS, acceptBounceLines, acceptContractLines, acceptedRawById, assertDriverIdRefusal, b127GroupCommand, b127InvokeGate, b127Lines, b127PidAlive, b127Spy, b318Builders, b318GatedPlan, b318Options, b318ReviewGrants, b318SiteA, b318SiteB, b376ProofIo, bounceTargetOf, buildEnv, checkEnv, classCollisionIo, closeoutIo, crashRun, dAdjEnv, dAutoRows, dBuilders, dDecisionBrief, dGitApplies, dLeads, dOffers, dPanelOutcomes, dPartnerEnv, dPatchWrite, dPlanEnv, dRemintRows, dReviewEnv, dispositionIo, dispositionOf, dispositionPanelIo, dispositionPlan, divergentCollisionIo, divergentPlanScenario, driveTask, envelopeDefect, envelopeFieldsPresent, exhaustionAcceptIo, fakeIo, findingIdDefect, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, join, leadEnv, legacyReviewerExemptions, nameVerdict, observeTurnCensus, panelSeats, phaseTrace, planAcceptContractLines, planCheckAcceptIo, planEnv, planRevisionRun, planScopeVerdict, planThenReviewIo, protectedPlanEnv, protectedReseatRefusal, publicationIo, readFileSync, reconEnv, regrantVerdict, resolveValidationLane, reviewConvergeRun, reviewEnv, reviewFindings, reviewOutcome, reviewShapeDefect, rmSync, roundCursor, s843Ctx, s843Io, s843PlanEnv, s843Rows, scratchDir, shapeDefect, slotCtx, slotFactory, spawnSync, staleVerdictLines, triageEnv, turnCeilingBreached, twoRoundReviewIo, validateAcceptDecision, validateCarve, validatePlanResiduals, validateScopeEntries, validationPlan, validationProbeRun, validationRows, verdictFindingsDefect, writeFileSync,
 } from './drive-fixtures.mjs'
 
 test('a plan-check accept records the residual the lead named', () => {
@@ -178,7 +178,7 @@ test('a malformed review-exhaustion accept is re-asked with the keyed contract',
 test('a later refused review accept supersedes the plan-check decision on converge', () => {
   const io = fakeIo({
     envelopes: {
-      'planner:1': CONVERGE_PLAN(), 'planner:2': CONVERGE_PLAN(),
+      'planner:1': adversarialPlanEnv({ details: CONVERGE_PLAN().details }), 'planner:2': adversarialPlanEnv({ details: CONVERGE_PLAN().details }),
       'tech-lead:1': checkEnv('revise'), 'tech-lead:2': checkEnv('revise'),
       'lead:1': leadEnv('accept', 'record the plan gap', { residuals: [PLAN_RESIDUAL] }),
       'builder:1': buildEnv(), 'builder:2': buildEnv(),
@@ -411,7 +411,7 @@ test('acceptBounceLines renders hostile entries without throwing and appends the
 test('the crew policy artifacts escalate at plan acceptance exactly like the roster', () => {
   for (const path of ['crew/capabilities.json', 'crew/capabilities.schema.json', 'crew/model-ladder.json', 'crew/roster.json']) {
     const refusingIo = fakeIo({
-      envelopes: { 'planner:1': protectedPlanEnv([path]) },
+      envelopes: { 'planner:1': protectedPlanEnv([path], 'proved') },
       reseat: protectedReseatRefusal,
     })
     const refusal = driveTask(CTX, refusingIo)
@@ -421,8 +421,9 @@ test('the crew policy artifacts escalate at plan acceptance exactly like the ros
     assert.equal(refusingIo.calls.assign.filter(({ role }) => role === 'builder').length, 0)
 
     const applyingIo = fakeIo({
-      envelopes: { 'planner:1': protectedPlanEnv([path]), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
-      runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+      envelopes: { 'planner:1': protectedPlanEnv([path], 'proved'), 'builder:1': buildEnv({ details: { ...buildEnv().details, files_changed: [path] } }), 'reviewer:1': reviewEnv('pass') },
+      runs: { 'gate-cmd:1': { ok: false, output: RED(3) }, 'gate-cmd:2': { ok: true, output: '' }, 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+      files: { [`${CTX.checkout}/${path}`]: 'true' },
       changed: [path],
       reseat: () => ({ applied: true, from: { id: 'build' }, to: { id: 'judge' }, rung: 'mechanical→judge' }),
     })
@@ -1508,7 +1509,7 @@ test('a diverging round leaves bounce, accept and escalate all open', () => {
 
 test('the unexhausted plan path keeps its diagnostics unchanged', () => {
   const io = fakeIo({
-    envelopes: { 'planner:1': planEnv(), 'tech-lead:1': checkEnv('approve'), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    envelopes: { 'planner:1': adversarialPlanEnv(), 'tech-lead:1': checkEnv('approve'), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
     runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
     changed: ['a.mjs', 'a.test.mjs'],
   })
@@ -1552,14 +1553,14 @@ test('validateCarve enforces the closed verdict and first-slice scope contract',
 })
 
 test('a plan revision without carve_verdict escalates before check:r2', () => {
-  const { result } = planRevisionRun(planEnv({ details: { ...planEnv().details, carve_verdict: undefined } }))
+  const { result } = planRevisionRun(adversarialPlanEnv({ details: { ...planEnv().details, carve_verdict: undefined } }))
   assert.equal(result.status, 'escalation')
   assert.equal(result.details.escalation.where, 'plan-carve')
   assert.ok(!result.details.stages.includes('check:r2'))
 })
 
 test('a proceed verdict continues to check:r2', () => {
-  const { result } = planRevisionRun(planEnv({ details: { ...planEnv().details, carve_verdict: 'proceed' } }))
+  const { result } = planRevisionRun(adversarialPlanEnv({ details: { ...planEnv().details, carve_verdict: 'proceed' } }))
   assert.equal(result.status, 'done')
   assert.ok(result.details.stages.includes('check:r2'))
 })
@@ -1568,7 +1569,7 @@ test('round 1 does not require a carve verdict', () => {
   const details = { ...planEnv().details }
   delete details.carve_verdict
   const io = fakeIo({
-    envelopes: { 'planner:1': planEnv({ details }), 'tech-lead:1': checkEnv('approve'), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    envelopes: { 'planner:1': adversarialPlanEnv({ details }), 'tech-lead:1': checkEnv('approve'), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
     runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
     changed: ['a.mjs', 'a.test.mjs'],
   })
@@ -1619,7 +1620,7 @@ test('continuation panel assigns reviewer, partner, and adjudicator with blind b
   const findingsB = [{ id: 'B1', severity: 'must-fix', location: 'a.mjs:12-18', summary: 'only B' }]
   const io = fakeIo({
     envelopes: {
-      'planner:1': planEnv(), 'tech-lead:1': checkEnv('approve'), 'builder:1': buildEnv(),
+      'planner:1': adversarialPlanEnv(), 'tech-lead:1': checkEnv('approve'), 'builder:1': buildEnv(),
       'reviewer:1': reviewEnv('changes-needed', findingsA),
       'tech-lead:2': { status: 'done', role: 'tech-lead', details: { verdict: 'changes-needed', findings: findingsB } },
       'lead:1': { status: 'done', role: 'lead', details: { adjudications: [], class_invariant: 'class', closes_class: true } },
@@ -1642,7 +1643,7 @@ test('continuation panel assigns reviewer, partner, and adjudicator with blind b
 test('panel degradation falls back to reviewer A without escalating', () => {
   const io = fakeIo({
     envelopes: {
-      'planner:1': planEnv(), 'tech-lead:1': checkEnv('approve'), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass', []),
+      'planner:1': adversarialPlanEnv(), 'tech-lead:1': checkEnv('approve'), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass', []),
       // tech-lead:1 is the plan check; tech-lead:2 (the panel partner) is deliberately absent.
     },
     runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
@@ -1657,7 +1658,7 @@ test('panel degradation falls back to reviewer A without escalating', () => {
 test('panel dismissals become panel dissents and are removed from the fused verdict', () => {
   const io = fakeIo({
     envelopes: {
-      'planner:1': planEnv(), 'tech-lead:1': checkEnv('approve'), 'builder:1': buildEnv(),
+      'planner:1': adversarialPlanEnv(), 'tech-lead:1': checkEnv('approve'), 'builder:1': buildEnv(),
       'reviewer:1': reviewEnv('changes-needed', [{ id: 'A1', severity: 'must-fix', location: 'a.mjs:1', summary: 'A only' }]),
       'tech-lead:2': { status: 'done', role: 'tech-lead', details: { verdict: 'pass', findings: [] } },
       'lead:1': { status: 'done', role: 'lead', details: { adjudications: [{ id: 'A1', disposition: 'dismiss', reason: 'not a defect' }], closes_class: true } },
@@ -1680,7 +1681,7 @@ test('an unclosed panel class adds a synthetic must-fix and preserves a review b
   const classGuard = { ...B376_HARDENED, finding: 'panel-class-1', name: 'panel class guard' }
   const io = fakeIo({
     envelopes: {
-      'planner:1': planEnv(), 'tech-lead:1': checkEnv('approve'), 'builder:1': buildEnv(),
+      'planner:1': adversarialPlanEnv(), 'tech-lead:1': checkEnv('approve'), 'builder:1': buildEnv(),
       'reviewer:1': reviewEnv('pass', []),
       'tech-lead:2': { status: 'done', role: 'tech-lead', details: { verdict: 'pass', findings: [] } },
       'lead:1': { status: 'done', role: 'lead', details: { closes_class: false, class_invariant: 'class remains open' } },
@@ -1716,7 +1717,7 @@ test('an unclosed panel class adds a synthetic must-fix and preserves a review b
 test('a changes-needed reviewer without typed findings cannot be upgraded by an empty panel', () => {
   const io = fakeIo({
     envelopes: {
-      'planner:1': planEnv(), 'tech-lead:1': checkEnv('approve'), 'builder:1': buildEnv(),
+      'planner:1': adversarialPlanEnv(), 'tech-lead:1': checkEnv('approve'), 'builder:1': buildEnv(),
       'reviewer:1': reviewEnv('changes-needed'),
       'tech-lead:2': { status: 'done', role: 'tech-lead', details: { verdict: 'changes-needed', findings: [{ id: 'B1', severity: 'should-fix', location: 'a.mjs:2', summary: 'partner note' }] } },
       'lead:1': { status: 'done', role: 'lead', details: { closes_class: true } },
@@ -2062,7 +2063,7 @@ test('consults and reviewer findings carry into an escalation', () => {
 test('panel fused findings are the canonical accept findings', () => {
   const io = fakeIo({
     envelopes: {
-      'planner:1': planEnv(), 'tech-lead:1': checkEnv('approve'), 'builder:1': buildEnv(),
+      'planner:1': adversarialPlanEnv(), 'tech-lead:1': checkEnv('approve'), 'builder:1': buildEnv(),
       'reviewer:1': reviewEnv('changes-needed', [{ id: 'A1', severity: 'must-fix', location: 'a.mjs:1', summary: 'A' }]),
       'tech-lead:2': { status: 'done', role: 'tech-lead', details: { verdict: 'changes-needed', findings: [{ id: 'A1', severity: 'must-fix', location: 'a.mjs:1', summary: 'A' }] } },
       'lead:1': { status: 'done', role: 'lead', details: { adjudications: [], class_invariant: 'class', closes_class: true } },
@@ -2080,7 +2081,7 @@ test('panel fused findings are the canonical accept findings', () => {
 test('nested panel child completes while unfinished review parent does not', () => {
   const io = fakeIo({
     envelopes: {
-      'planner:1': planEnv(), 'tech-lead:1': checkEnv('approve'), 'builder:1': buildEnv(),
+      'planner:1': adversarialPlanEnv(), 'tech-lead:1': checkEnv('approve'), 'builder:1': buildEnv(),
       'reviewer:1': reviewEnv('changes-needed', [{ id: 'A1', severity: 'must-fix', location: 'a.mjs:1', summary: 'A' }]),
       'tech-lead:2': { status: 'done', role: 'tech-lead', details: { verdict: 'changes-needed', findings: [{ id: 'B1', severity: 'must-fix', location: 'a.mjs:2', summary: 'B' }] } },
       'lead:1': { status: 'done', role: 'lead', details: { adjudications: [], closes_class: true } }, 'lead:2': null,
@@ -2190,7 +2191,7 @@ test('a stale re-review brief survives an unreadable in-place re-ask', () => {
 test('plan-check accept residuals survive into the single driver-written publication body', () => {
   const residual = { id: 'PC1-9', type: 'cosmetic', summary: 'phase table remains for the sibling lane' }
   const io = publicationIo({ envelopes: {
-    'planner:1': planEnv(), 'planner:2': planEnv(),
+    'planner:1': adversarialPlanEnv(), 'planner:2': adversarialPlanEnv(),
     'tech-lead:1': checkEnv('revise'), 'tech-lead:2': checkEnv('revise'),
     'lead:1': leadEnv('accept', '', { residuals: [residual] }),
     'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
@@ -2262,7 +2263,7 @@ test('#800 §7b 6 — a refused ask-user finding reaches only the reviewer-refus
 test('#800 §7b 7 — a continuation panel refuses pass must-fix before assigning panel seats', () => {
   const io = fakeIo({
     envelopes: {
-      'planner:1': dPlanEnv(), 'tech-lead:1': checkEnv('approve'), 'builder:1': buildEnv(),
+      'planner:1': adversarialPlanEnv(), 'tech-lead:1': checkEnv('approve'), 'builder:1': buildEnv(),
       'reviewer:1': dReviewEnv('pass', [{ id: 'RV1-1', severity: 'must-fix', location: 'a.mjs:1', summary: 'open' }]),
       'lead:1': leadEnv('escalate'),
     },
@@ -2631,11 +2632,11 @@ test('planScopeVerdict is pure and names all four states', () => {
 
 test('a narrowed plan is accepted and journals what it shed', () => {
   const io = s843Io({
-    'planner:1': s843PlanEnv(S843_NARROWED),
+    'planner:1': s843PlanEnv(S843_NARROWED, true), 'tech-lead:1': checkEnv('approve'),
     'builder:1': buildEnv({ details: { files_changed: ['crew/io-contract.test.mjs'], commit_message: 'feat: the change' } }),
     'reviewer:1': reviewEnv('pass'),
   })
-  const result = driveTask(s843Ctx(), io)
+  const result = driveTask(s843Ctx({ roles: ['lead', 'planner', 'tech-lead', 'builder', 'reviewer'] }), io)
   assert.equal(result.status, 'done')
   const rows = s843Rows(io)
   assert.equal(rows.length, 1)
@@ -2648,14 +2649,14 @@ test('a narrowed plan is accepted and journals what it shed', () => {
 
 test('a matching plan is accepted and journals its identical scope', () => {
   const io = s843Io({
-    'planner:1': s843PlanEnv(S843_DISPATCHED),
+    'planner:1': s843PlanEnv(S843_DISPATCHED, true), 'tech-lead:1': checkEnv('approve'),
     'builder:1': buildEnv({ details: { files_changed: ['crew/io-contract.test.mjs'], commit_message: 'feat: the change' } }),
     'reviewer:1': reviewEnv('pass'),
   })
-  const result = driveTask(s843Ctx(), io)
+  const result = driveTask(s843Ctx({ roles: ['lead', 'planner', 'tech-lead', 'builder', 'reviewer'] }), io)
   assert.equal(result.status, 'done')
   assert.deepEqual(result.details.stages, [
-    'plan:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:pass',
+    'plan:r1', 'check:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:pass',
     'commit', 'suite', 'suite:cold', 'done',
   ])
   const rows = s843Rows(io)

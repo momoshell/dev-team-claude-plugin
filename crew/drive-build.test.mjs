@@ -109,6 +109,32 @@ test('G1 survived and unmeasured mutations are never carried', () => {
   assert.deepEqual(result.carried, [])
 })
 
+test('G2 protected same file mutation is adjudicated killed', () => {
+  const green = `green\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":0,"errored":0}`
+  const killed = `FAIL protected-surface: caught\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":1,"errored":0}`
+  const io = fakeIo({
+    files: { [`${CTX.checkout}/crew/drive.mjs`]: 'true' }, writeThrough: true,
+    cleanRuns: { 'gate-cmd': { ok: false, output: RED(3) } },
+    runs: {
+      'gate-cmd:1': { ok: false, output: RED(3) },
+      'gate-cmd:2': { ok: true, output: green },
+      'gate-cmd:3': { ok: false, output: killed },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    envelopes: {
+      'planner:1': protectedPlanEnv(undefined, 'proved'),
+      'builder:1': buildEnv({ details: { ...buildEnv().details, files_changed: ['crew/drive.mjs'] } }),
+      'reviewer:1': reviewEnv('pass'),
+    },
+    changed: ['crew/drive.mjs'], reseat: () => ({ applied: true }),
+  })
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'done')
+  const row = io.calls.logs.find((entry) => entry.gate_check_discriminations)?.gate_check_discriminations?.find(({ check }) => check === 'protected-surface')
+  assert.equal(row.outcome, 'killed')
+  assert.equal(row.file, 'crew/drive.mjs')
+})
+
 test('C1 corrected anchors always select a fresh proof', () => {
   const green = `green\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":0,"errored":0}`
   const killed = `FAIL check-one: caught\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":1,"errored":0}`
@@ -374,8 +400,9 @@ test('the sensitivity floor has its own budget and does not spend failure-upgrad
     { applied: true, from: { id: 'old' }, to: { id: 'new' }, rung: 'mechanical→build' },
   ]
   const io = fakeIo({
-    envelopes: { 'planner:1': protectedPlanEnv(), 'builder:1': buildEnv(), 'builder:2': buildEnv(), 'reviewer:1': reviewEnv('pass') },
-    runs: { 'lane-cmd:1': { ok: false, output: 'FAIL lane' }, 'lane-cmd:2': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    envelopes: { 'planner:1': protectedPlanEnv(undefined, 'proved'), 'builder:1': buildEnv({ details: { ...buildEnv().details, files_changed: ['crew/drive.mjs'] } }), 'builder:2': buildEnv({ details: { ...buildEnv().details, files_changed: ['crew/drive.mjs'] } }), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'gate-cmd:1': { ok: false, output: RED(3) }, 'gate-cmd:2': { ok: true, output: '' }, 'lane-cmd:1': { ok: false, output: 'FAIL lane' }, 'lane-cmd:2': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    files: { [`${CTX.checkout}/crew/drive.mjs`]: 'true' },
     changed: ['crew/drive.mjs'],
     reseat: () => outcomes.shift(),
   })

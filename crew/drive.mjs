@@ -1047,6 +1047,36 @@ function verdictOf(env) {
 export const FINDING_SEVERITIES = Object.freeze(['must-fix', 'should-fix', 'consider'])
 export const RESIDUAL_TYPES = Object.freeze(['cosmetic', 'correctness-unverified'])
 export const PLAN_CHECK_SEVERITIES = Object.freeze(['blocker', 'major', 'minor'])
+export const ADVERSARY_TRIGGERS = Object.freeze(['operator-force', 'planner-request', 'coverage-absent', 'none'])
+export const ADVERSARY_REFUSALS = Object.freeze(['needs-adversary-type', 'adversary-unavailable'])
+export const ADVERSARY_REFUSAL = Object.freeze({
+  type: ADVERSARY_REFUSALS[0],
+  unavailable: ADVERSARY_REFUSALS[1],
+})
+export function resolveAdversaryTrigger(details, protectedScope, operatorForce = false) {
+  details = details && typeof details === 'object' && !Array.isArray(details) ? details : {}
+  protectedScope = Array.isArray(protectedScope) ? protectedScope.filter((file) => typeof file === 'string') : []
+  // ADR-038 section 2 makes the loop run when the planner DECLARES
+  // needs_adversary. An ABSENT declaration is therefore not a malformation: it
+  // is a planner that did not request an adversary, which is the ordinary case
+  // and the shape every envelope predating this field carries. Refusing it
+  // reddened crew/daemon.test.mjs and crew/crew.test.mjs, which build their own
+  // envelopes. Only a PRESENT non-boolean is a refusal; coverage-absent still
+  // fires independently below, so the floor still fails closed.
+  if (details.needs_adversary !== undefined && typeof details.needs_adversary !== 'boolean') {
+    return { trigger: null, refusal: ADVERSARY_REFUSAL.type }
+  }
+  const plannerRequested = details.needs_adversary === true
+  const provedFiles = new Set((Array.isArray(details.mutations) ? details.mutations : [])
+    .filter((mutation) => mutation && typeof mutation === 'object' && !mutation.exempt && typeof mutation.file === 'string')
+    .map((mutation) => mutation.file))
+  const coverageAbsent = protectedScope.some((file) => file.endsWith('/') || !provedFiles.has(file))
+  const trigger = operatorForce ? ADVERSARY_TRIGGERS[0]
+    : plannerRequested ? ADVERSARY_TRIGGERS[1]
+      : coverageAbsent ? ADVERSARY_TRIGGERS[2]
+        : ADVERSARY_TRIGGERS[3]
+  return { trigger }
+}
 export const PLAN_CONVERGENCE_REASONS = Object.freeze([
   'prior-findings-closed', 'verdict-not-revise', 'findings-absent', 'round-1', 'blocker-present', 'findings-rejected', 'prior-findings-open',
 ])
@@ -4000,6 +4030,8 @@ function runTask(ctx, io, crash) {
   }
   const plans = stageEnabled(shape, 'plan') // does this shape plan, or inherit?
   let planEnv = null
+  let planAdversary = null
+  let adversaryLogged = false
   let laneDeferred = []
   let planBounceWhy = null
   let planBrief = ctx.briefFile
@@ -4050,7 +4082,21 @@ function runTask(ctx, io, crash) {
   }
   for (let round = 1; plans && round <= planRounds(); round += 1) {
     stage(`plan:r${round}`)
-    const env = assignAndWait('planner', planBrief, planNote ?? (round === 1 ? 'plan' : 'plan-revision'))
+    const plannerBrief = art(`planner-assignment-r${round}.md`)
+    try {
+      io.writeFile(plannerBrief, [
+        '# Planner assignment wrapper', '',
+        `Read the current planner brief at ${planBrief}.`,
+        `Planner source brief: ${planBrief}.`,
+        `Original task brief: ${ctx.briefFile}.`,
+        '',
+        'details.needs_adversary must be a boolean: true requests the adversary plan-check round; false does not.',
+      ].join('\n'))
+    } catch (err) {
+      stageComplete()
+      return escalate('plan', `planner assignment wrapper could not be written: ${err?.message || String(err)}`)
+    }
+    const env = assignAndWait('planner', plannerBrief, planNote ?? (round === 1 ? 'plan' : 'plan-revision'))
     planNote = null
     if (env.status !== 'done') {
       const asked = parseQuestions(env.details)
@@ -4104,6 +4150,19 @@ function runTask(ctx, io, crash) {
       stageComplete()
       continue
     }
+    const protectedScope = protectedHits(env.details?.files_in_scope, ctx.protectedPaths)
+    const currentAdversary = resolveAdversaryTrigger(env.details, protectedScope, false)
+    if (currentAdversary.refusal) {
+      stageComplete()
+      return escalate('plan', currentAdversary.refusal, env.artifacts || [])
+    }
+    // RV1-2: re-resolve EVERY round. Latching on the first valid envelope meant
+    // that after the widened-scope or validation-lane bounce below, a round-2
+    // planner-request or coverage-absent was discarded, the plan was accepted
+    // with zero check:rN, and the single journal row attributed the REJECTED
+    // round-1 envelope. The row is emitted once, where the decision is actually
+    // consumed, so it names the trigger of the plan that was accepted.
+    planAdversary = currentAdversary
     // #843 — the dispatched write surface is a CEILING: a replan may NARROW it, never
     // WIDEN it. The triage/repair shape has held this rule since crew/drive.mjs:2972.
     // Checked on EVERY round, not only the accepted one, because a bounce is reachable
@@ -4222,9 +4281,17 @@ function runTask(ctx, io, crash) {
           env.artifacts || [], { carve: { verdict: 'carve', slices: carve.slices, defect: carve.defect } })
       }
     }
-    if (!ctx.roles.includes('tech-lead')) {
+    if (!adversaryLogged) {
+      adversaryLogged = true
+      io.log(recordRow({ at: io.now(), adversary_trigger: planAdversary.trigger }))
+    }
+    if (planAdversary.trigger === 'none') {
       stageComplete()
       break
+    }
+    if (!seatList.includes('tech-lead')) {
+      stageComplete()
+      return escalate('plan', ADVERSARY_REFUSAL.unavailable, env.artifacts || [])
     }
     stage(`check:r${round}`)
     const planPath = env.details?.plan_path || art('plan.md')

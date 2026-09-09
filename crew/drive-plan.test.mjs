@@ -4,10 +4,48 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  ADOPTED_PLAN_HEADING, ADOPT_BLOCK, CENSUS_ROW_ABSENT, CENSUS_TURNS_ABSENT, CENSUS_UNREADABLE, CTX, CTX_DIRECTED, CTX_TL, DIRECTED_FILES, ENVELOPE_REFUSAL_REASONS, FAILURE_UPGRADE, GATE_SUMMARY_PREFIX, GROWTH_DIVERGENCE_FACTOR, LANE_COMMAND_SHAPES, LANE_INPUT_VERDICTS, LANE_PATH_OPTIONS, LANE_VALUE_OPTIONS, LIMITS, NO_TURN_CEILING, PLAN_CHECK_ABSENT, PLAN_CHECK_INVALID, PLAN_CHECK_SEVERITIES, PLAN_CONVERGENCE_REASONS, RED, RUN_START_EVENT, S843_ADDED, S843_D2, S843_DISPATCHED, S843_NARROWED, SUITE_REASK_MAX, TD, THREW, TURN_CEILING_DEFAULTS, TURN_CEILING_REFUSALS, TURN_CEILING_ROLES, VALIDATION_LANE_UNLOADABLE, adoptionSignal, bothExhaustionPointsScenario, buildEnv, carriedPrLines, carriedPreambleLines, carriedResolution, carriedSilenceDefect, checkEnv, composeCommitMessage, divergeThenExhaustPlanScenario, divergenceConsultLines, divergentPlanScenario, driveTask, enforcementPreamble, fakeIo, growthLines, growthRecord, join, laneCommandInputs, laneCommandShape, laneFence, leadEnv, lineageFromJournal, persistentDivergenceScenario, planCheckAcceptIo, planCheckFindings, planCheckFindingsFromText, planConvergence, planEnv, planRevisionRun, planRoundCap, planThenReviewIo, protectedPlanEnv, resolveTurnCeilings, resolveValidationLane, resumeGreen, resumeKeys, resumeRed, reviewConvergeRun, reviewEnv, s843Bullets, s843Ctx, s843Io, s843PlanEnv, suiteRefusalEnv, turnCeilingsRecord, validationPlan, validationProbeOutput, validationProbeRun, validationRows, laneProbeCommand,
+  ADOPTED_PLAN_HEADING, ADOPT_BLOCK, adversarialPlanEnv, CENSUS_ROW_ABSENT, CENSUS_TURNS_ABSENT, CENSUS_UNREADABLE, CTX, CTX_DIRECTED, CTX_TL, DIRECTED_FILES, ENVELOPE_REFUSAL_REASONS, FAILURE_UPGRADE, GATE_SUMMARY_PREFIX, GROWTH_DIVERGENCE_FACTOR, LANE_COMMAND_SHAPES, LANE_INPUT_VERDICTS, LANE_PATH_OPTIONS, LANE_VALUE_OPTIONS, LIMITS, NO_TURN_CEILING, PLAN_CHECK_ABSENT, PLAN_CHECK_INVALID, PLAN_CHECK_SEVERITIES, PLAN_CONVERGENCE_REASONS, RED, RUN_START_EVENT, S843_ADDED, S843_D2, S843_DISPATCHED, S843_NARROWED, SUITE_REASK_MAX, TD, THREW, TURN_CEILING_DEFAULTS, TURN_CEILING_REFUSALS, TURN_CEILING_ROLES, VALIDATION_LANE_UNLOADABLE, adoptionSignal, bothExhaustionPointsScenario, buildEnv, carriedPrLines, carriedPreambleLines, carriedResolution, carriedSilenceDefect, checkEnv, composeCommitMessage, divergeThenExhaustPlanScenario, divergenceConsultLines, divergentPlanScenario, driveTask, enforcementPreamble, fakeIo, growthLines, growthRecord, join, laneCommandInputs, laneCommandShape, laneFence, leadEnv, lineageFromJournal, persistentDivergenceScenario, planCheckAcceptIo, planCheckFindings, planCheckFindingsFromText, planConvergence, planEnv, planRevisionRun, planRoundCap, planThenReviewIo, protectedPlanEnv, resolveTurnCeilings, resolveValidationLane, resumeGreen, resumeKeys, resumeRed, reviewConvergeRun, reviewEnv, s843Bullets, s843Ctx, s843Io, s843PlanEnv, suiteRefusalEnv, turnCeilingsRecord, validationPlan, validationProbeOutput, validationProbeRun, validationRows, laneProbeCommand,
 } from './drive-fixtures.mjs'
 import { CENSUS_ABSENT_REASONS, CENSUS_ELIGIBLE_OUTCOMES, CREATES_ABSENT, PLAN_BOUNCE_UNFUNDED_HEADING, PLAN_SEAT_REFUSED, observeTurnCensus, planBounceUnfundedLines, planCapNote, planExhaustedWhy, planRefusedWhy, turnCeilingOf } from './drive.mjs'
 import { suiteRunPolicy } from './headless.mjs'
+
+test('F1 protected fixture callers choose proof or typed refusal', () => {
+  assert.throws(() => protectedPlanEnv(), /explicit proved or typed-refusal outcome/)
+  const refusal = protectedPlanEnv(['crew/drive.mjs'], 'typed-refusal')
+  assert.equal(refusal.details.gate_cmd, undefined)
+  assert.equal(refusal.details.mutations, undefined)
+  const proof = protectedPlanEnv(['crew/drive.mjs'], 'proved')
+  assert.equal(proof.details.gate_cmd, 'gate-cmd')
+  assert.deepEqual(proof.details.mutations, [{ check: 'protected-surface', file: 'crew/drive.mjs', find: 'true', replace: 'false' }])
+})
+
+test('protected directory typed refusal fails closed without a tech lead', () => {
+  const io = fakeIo({ envelopes: { 'planner:1': protectedPlanEnv(['crew/'], 'typed-refusal') } })
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'plan')
+  assert.equal(result.details.escalation.why, 'adversary-unavailable')
+})
+
+test('H1 planner assignment briefs require the adversary declaration', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': adversarialPlanEnv(), 'tech-lead:1': checkEnv('revise'),
+      'planner:2': adversarialPlanEnv(), 'tech-lead:2': checkEnv('approve'),
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask(CTX_TL, io)
+  assert.equal(result.status, 'done')
+  const planners = io.calls.assign.filter(({ role }) => role === 'planner')
+  assert.deepEqual(planners.map(({ briefFile }) => briefFile), [`${TD}/planner-assignment-r1.md`, `${TD}/planner-assignment-r2.md`])
+  for (const [path, source] of [[planners[0].briefFile, '/tmp/brief.md'], [planners[1].briefFile, `${TD}/plan-bounce-r1.md`]]) {
+    assert.match(io.calls.writes[path], new RegExp(`Read the current planner brief at ${source.replaceAll('/', '\\/')}\\.`))
+    assert.match(io.calls.writes[path], /details\.needs_adversary must be a boolean/)
+  }
+})
 
 test('a lead that answers escalate at the accept re-ask escalates with both reasons', () => {
   const io = planCheckAcceptIo(
@@ -74,8 +112,9 @@ test('a path no lane owns crosses no fence', () => {
 
 test('ctx.protectedPaths extends the sensitivity floor without replacing it', () => {
   const extraIo = fakeIo({
-    envelopes: { 'planner:1': protectedPlanEnv(['db/migrations/']), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
-    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    envelopes: { 'planner:1': protectedPlanEnv(['db/migrations/001.sql'], 'proved'), 'builder:1': buildEnv({ details: { ...buildEnv().details, files_changed: ['db/migrations/001.sql'] } }), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'gate-cmd:1': { ok: false, output: RED(3) }, 'gate-cmd:2': { ok: true, output: '' }, 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    files: { [`${CTX.checkout}/db/migrations/001.sql`]: 'true' },
     changed: ['db/migrations/001.sql'],
     reseat: () => ({ applied: true, from: { id: 'build' }, to: { id: 'judge' }, rung: 'mechanical→judge' }),
   })
@@ -84,8 +123,9 @@ test('ctx.protectedPaths extends the sensitivity floor without replacing it', ()
   assert.equal(extraIo.calls.reseat.length, 1)
 
   const floorIo = fakeIo({
-    envelopes: { 'planner:1': protectedPlanEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
-    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    envelopes: { 'planner:1': protectedPlanEnv(undefined, 'proved'), 'builder:1': buildEnv({ details: { ...buildEnv().details, files_changed: ['crew/drive.mjs'] } }), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'gate-cmd:1': { ok: false, output: RED(3) }, 'gate-cmd:2': { ok: true, output: '' }, 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    files: { [`${CTX.checkout}/crew/drive.mjs`]: 'true' },
     changed: ['crew/drive.mjs'],
     reseat: () => ({ applied: true, from: { id: 'build' }, to: { id: 'judge' }, rung: 'mechanical→judge' }),
   })
@@ -112,8 +152,8 @@ test('directory-prefix scope commits concrete changed paths without a scope boun
 
 test('unsupported scope entries escalate before assigning a builder', () => {
   for (const entry of ['crew/', 'crew/*.mjs']) {
-    const io = fakeIo({ envelopes: { 'planner:1': planEnv({ details: { ...planEnv().details, files_in_scope: [entry, 'a.mjs'] } }) } })
-    const res = driveTask(CTX, io)
+    const io = fakeIo({ envelopes: { 'planner:1': adversarialPlanEnv({ details: { ...planEnv().details, files_in_scope: [entry, 'a.mjs'] } }), 'tech-lead:1': checkEnv('approve') } })
+    const res = driveTask(CTX_TL, io)
     assert.equal(res.status, 'escalation')
     assert.ok(res.details.escalation.why.includes(entry))
     assert.equal(io.calls.assign.filter((a) => a.role === 'builder').length, 0)
@@ -153,8 +193,8 @@ test('a plan bounce spends the failure upgrade for the planner', () => {
 test('the plan-revision brief names the check and says to apply it verbatim', () => {
   const io = fakeIo({
     envelopes: {
-      'planner:1': planEnv(), 'tech-lead:1': checkEnv('revise'),
-      'planner:2': planEnv(), 'tech-lead:2': checkEnv('approve'),
+      'planner:1': adversarialPlanEnv(), 'tech-lead:1': checkEnv('revise'),
+      'planner:2': adversarialPlanEnv(), 'tech-lead:2': checkEnv('approve'),
       'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
     },
     runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
@@ -172,7 +212,7 @@ test('the plan-revision brief names the check and says to apply it verbatim', ()
 test('the granted plan-revision bounce carries the same instruction', () => {
   const io = fakeIo({
     envelopes: {
-      'planner:1': planEnv(), 'planner:2': planEnv(), 'planner:3': planEnv(),
+      'planner:1': adversarialPlanEnv(), 'planner:2': adversarialPlanEnv(), 'planner:3': adversarialPlanEnv(),
       'tech-lead:1': checkEnv('revise'), 'tech-lead:2': checkEnv('revise'), 'tech-lead:3': checkEnv('approve'),
       'lead:1': leadEnv('bounce'), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
     },
@@ -320,8 +360,9 @@ test('#930 an answered planner consult funds the round that reads the answers, o
   const planners = answeredIo.calls.assign.filter(({ role }) => role === 'planner')
   assert.equal(planners.length, 3)
   assert.ok(answered.details.stages.includes('plan:r3'))
-  assert.equal(planners[2].briefFile, `${TD}/plan-bounce-r2.md`)
+  assert.equal(planners[2].briefFile, `${TD}/planner-assignment-r3.md`)
   assert.match(answeredIo.calls.writes[`${TD}/plan-bounce-r2.md`], /ANSWER: distinctive round-2 answer/)
+  assert.match(answeredIo.calls.writes[`${TD}/planner-assignment-r3.md`], /Read the current planner brief at \/tmp\/fake-task\/plan-bounce-r2\.md\./)
   assert.deepEqual(answered.details.extra_rounds_granted, [{ where: 'plan-question', round: 2 }])
   const grants = answeredIo.calls.logs.filter(({ extra_round_granted }) => extra_round_granted?.where === 'plan-question')
   assert.equal(grants.length, 1)
@@ -371,8 +412,8 @@ test('tech-lead seated: revise verdict bounces the plan, approve on r2 proceeds'
   const ctx = { ...CTX, roles: ['lead', 'planner', 'builder', 'reviewer', 'tech-lead'] }
   const io = fakeIo({
     envelopes: {
-      'planner:1': planEnv(), 'tech-lead:1': { status: 'done', details: { verdict: 'revise', check_path: `${TD}/plan-check.md` } },
-      'planner:2': planEnv(), 'tech-lead:2': { status: 'done', details: { verdict: 'approve' } },
+      'planner:1': adversarialPlanEnv(), 'tech-lead:1': { status: 'done', details: { verdict: 'revise', check_path: `${TD}/plan-check.md` } },
+      'planner:2': adversarialPlanEnv(), 'tech-lead:2': { status: 'done', details: { verdict: 'approve' } },
       'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
     },
     runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
@@ -848,7 +889,7 @@ test('a throwing io.emit changes nothing', () => {
 test('plan-check exhaustion can buy one plan round and re-check it', () => {
   const io = fakeIo({
     envelopes: {
-      'planner:1': planEnv(), 'planner:2': planEnv(), 'planner:3': planEnv(),
+      'planner:1': adversarialPlanEnv(), 'planner:2': adversarialPlanEnv(), 'planner:3': adversarialPlanEnv(),
       'tech-lead:1': checkEnv('revise'), 'tech-lead:2': checkEnv('revise'), 'tech-lead:3': checkEnv('approve'),
       'lead:1': leadEnv('bounce'), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
     },
@@ -865,7 +906,7 @@ test('plan-check exhaustion can buy one plan round and re-check it', () => {
 test('plan-check grant cap refuses a second bounce and escalates', () => {
   const io = fakeIo({
     envelopes: {
-      'planner:1': planEnv(), 'planner:2': planEnv(), 'planner:3': planEnv(),
+      'planner:1': adversarialPlanEnv(), 'planner:2': adversarialPlanEnv(), 'planner:3': adversarialPlanEnv(),
       'tech-lead:1': checkEnv('revise'), 'tech-lead:2': checkEnv('revise'), 'tech-lead:3': checkEnv('revise'),
       'lead:1': leadEnv('bounce'), 'lead:2': leadEnv('bounce'),
     },
@@ -1021,14 +1062,14 @@ test('a round below the ratified factor surfaces nothing', () => {
   io = fakeIo({
     files,
     envelopes: {
-      'planner:1': planEnv({ details }), 'tech-lead:1': checkEnv('revise'),
+      'planner:1': adversarialPlanEnv({ details }), 'tech-lead:1': checkEnv('revise'),
       'planner:2': () => {
         io.calls.files[`${TD}/plan.md`] = 'x'.repeat(20)
         io.calls.files[`${TD}/gate.mjs`] = 'x'.repeat(19)
-        return planEnv({ details: { ...details, carve_verdict: 'proceed' } })
+        return adversarialPlanEnv({ details: { ...details, carve_verdict: 'proceed' } })
       },
       'tech-lead:2': checkEnv('revise'),
-      'planner:3': planEnv({ details: { ...details, carve_verdict: 'proceed' } }),
+      'planner:3': adversarialPlanEnv({ details: { ...details, carve_verdict: 'proceed' } }),
       'tech-lead:3': checkEnv('approve'), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
     },
     runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
@@ -1074,15 +1115,15 @@ test('divergent growth is evidence in both the round-2 check and revision briefs
   io = fakeIo({
     files,
     envelopes: {
-      'planner:1': planEnv({ details }),
+      'planner:1': adversarialPlanEnv({ details }),
       'tech-lead:1': checkEnv('revise'),
       'planner:2': () => {
         io.calls.files[`${TD}/plan.md`] = 'x'.repeat(30)
         io.calls.files[`${TD}/gate.mjs`] = 'x'.repeat(30)
-        return planEnv({ details: { ...details, carve_verdict: 'proceed' } })
+        return adversarialPlanEnv({ details: { ...details, carve_verdict: 'proceed' } })
       },
       'tech-lead:2': checkEnv('revise'),
-      'planner:3': planEnv({ details: { ...details, carve_verdict: 'proceed' } }),
+      'planner:3': adversarialPlanEnv({ details: { ...details, carve_verdict: 'proceed' } }),
       'tech-lead:3': checkEnv('approve'),
       'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
       'lead:1': leadEnv('bounce'),
@@ -1110,10 +1151,10 @@ test('round-2 growth below two-times cumulative remains non-divergent', () => {
   io = fakeIo({
     files,
     envelopes: {
-      'planner:1': planEnv({ details }), 'tech-lead:1': checkEnv('revise'),
+      'planner:1': adversarialPlanEnv({ details }), 'tech-lead:1': checkEnv('revise'),
       'planner:2': () => {
         io.calls.files[`${TD}/plan.md`] = 'x'.repeat(20)
-        return planEnv({ details: { ...details, carve_verdict: 'proceed' } })
+        return adversarialPlanEnv({ details: { ...details, carve_verdict: 'proceed' } })
       },
       'tech-lead:2': checkEnv('approve'), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
     },
@@ -1131,7 +1172,7 @@ test('missing plan and unreadable gate are null evidence with the same run outco
   const scenario = (files) => {
     const io = fakeIo({
       files,
-      envelopes: { 'planner:1': planEnv({ details }), 'tech-lead:1': checkEnv('approve'), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+      envelopes: { 'planner:1': adversarialPlanEnv({ details }), 'tech-lead:1': checkEnv('approve'), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
       runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
       changed: ['a.mjs', 'a.test.mjs'],
     })
@@ -1150,7 +1191,7 @@ test('a gate path outside the task dir is rejected and cannot alter the run', ()
   const details = { ...planEnv().details, gate_path: outside }
   const io = fakeIo({
     files: { [`${TD}/plan.md`]: 'x'.repeat(10), [outside]: 'x'.repeat(500) },
-    envelopes: { 'planner:1': planEnv({ details }), 'tech-lead:1': checkEnv('approve'), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    envelopes: { 'planner:1': adversarialPlanEnv({ details }), 'tech-lead:1': checkEnv('approve'), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
     runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
     changed: ['a.mjs', 'a.test.mjs'],
   })
@@ -1166,11 +1207,11 @@ test('a wildly divergent run still reaches commit', () => {
   io = fakeIo({
     files,
     envelopes: {
-      'planner:1': planEnv(), 'tech-lead:1': checkEnv('revise'),
+      'planner:1': adversarialPlanEnv(), 'tech-lead:1': checkEnv('revise'),
       'planner:2': () => {
         io.calls.files[`${TD}/plan.md`] = 'x'.repeat(1000)
         io.calls.files[`${TD}/gate.mjs`] = 'x'.repeat(1000)
-        return planEnv({ details: { ...planEnv().details, gate_path: `${TD}/gate.mjs`, carve_verdict: 'proceed' } })
+        return adversarialPlanEnv({ details: { ...planEnv().details, gate_path: `${TD}/gate.mjs`, carve_verdict: 'proceed' } })
       },
       'tech-lead:2': checkEnv('approve'), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
     },
@@ -1254,11 +1295,12 @@ test('non-continuation keeps the ordinary assignment and review brief write set 
   const result = driveTask({ ...CTX, continuation: false }, io)
   assert.equal(result.status, 'done')
   assert.deepEqual(io.calls.assign.map(({ role, briefFile }) => ({ role, briefFile })), [
-    { role: 'planner', briefFile: '/tmp/brief.md' },
+    { role: 'planner', briefFile: `${TD}/planner-assignment-r1.md` },
     { role: 'builder', briefFile: `${TD}/plan.md` },
     { role: 'reviewer', briefFile: `${TD}/review-brief-1.md` },
   ])
-  assert.deepEqual(Object.keys(io.calls.writes), [`${TD}/review-brief-1.md`])
+  assert.deepEqual(Object.keys(io.calls.writes), [`${TD}/planner-assignment-r1.md`, `${TD}/review-brief-1.md`])
+  assert.match(io.calls.writes[`${TD}/planner-assignment-r1.md`], /Read the current planner brief at \/tmp\/brief\.md\./)
   assert.equal(io.calls.writes[`${TD}/review-brief-1.md`], [
     '# Review (round 1)', '',
     `Plan of record: ${TD}/plan.md. Changes are uncommitted in /tmp/repo — read the diff with git.`,
@@ -1370,24 +1412,27 @@ test('gate attempt high water counts every gate invocation', () => {
 
 test('a widening bounces the planner while a plan round remains', () => {
   const io = s843Io({
-    'planner:1': s843PlanEnv(S843_D2), 'planner:2': s843PlanEnv(S843_NARROWED),
+    'planner:1': s843PlanEnv(S843_D2, true), 'planner:2': s843PlanEnv(S843_NARROWED, true),
+    'tech-lead:1': checkEnv('approve'), 'tech-lead:2': checkEnv('approve'),
     'builder:1': buildEnv({ details: { files_changed: ['crew/io-contract.test.mjs'], commit_message: 'feat: the change' } }),
     'reviewer:1': reviewEnv('pass'),
   })
-  const result = driveTask(s843Ctx({ limits: { plan_rounds: 2, build_rounds: 2, review_rounds: 2 } }), io)
+  const result = driveTask(s843Ctx({ roles: ['lead', 'planner', 'tech-lead', 'builder', 'reviewer'], limits: { plan_rounds: 2, build_rounds: 2, review_rounds: 2 } }), io)
   assert.equal(result.status, 'done')
   const planners = io.calls.assign.filter((a) => a.role === 'planner')
   assert.equal(planners.length, 2)
-  assert.equal(planners[1].briefFile, `${TD}/plan-bounce-r1.md`)
+  assert.equal(planners[1].briefFile, `${TD}/planner-assignment-r2.md`)
+  assert.match(io.calls.writes[`${TD}/planner-assignment-r2.md`], /Read the current planner brief at \/tmp\/fake-task\/plan-bounce-r1\.md\./)
 })
 
 test('the widening bounce reasons its own assignment', () => {
   const io = s843Io({
-    'planner:1': s843PlanEnv(S843_D2), 'planner:2': s843PlanEnv(S843_NARROWED),
+    'planner:1': s843PlanEnv(S843_D2, true), 'planner:2': s843PlanEnv(S843_NARROWED, true),
+    'tech-lead:1': checkEnv('approve'), 'tech-lead:2': checkEnv('approve'),
     'builder:1': buildEnv({ details: { files_changed: ['crew/io-contract.test.mjs'], commit_message: 'feat: the change' } }),
     'reviewer:1': reviewEnv('pass'),
   })
-  driveTask(s843Ctx({ limits: { plan_rounds: 2, build_rounds: 2, review_rounds: 2 } }), io)
+  driveTask(s843Ctx({ roles: ['lead', 'planner', 'tech-lead', 'builder', 'reviewer'], limits: { plan_rounds: 2, build_rounds: 2, review_rounds: 2 } }), io)
   assert.deepEqual(io.calls.assign.filter((a) => a.role === 'planner').map((a) => a.note),
     ['plan', 'plan-scope-widened'])
 })
@@ -1398,9 +1443,9 @@ test('the scope note is spent on one assignment and does not leak', () => {
   // plan-revision again. The source-text pin cannot see this — it only proves the
   // override exists, not that it is cleared.
   const io = s843Io({
-    'planner:1': s843PlanEnv(S843_D2),
-    'planner:2': s843PlanEnv(S843_NARROWED),
-    'planner:3': s843PlanEnv(S843_NARROWED),
+    'planner:1': s843PlanEnv(S843_D2, true),
+    'planner:2': s843PlanEnv(S843_NARROWED, true),
+    'planner:3': s843PlanEnv(S843_NARROWED, true),
     'tech-lead:1': checkEnv('revise'), 'tech-lead:2': checkEnv('approve'),
     'builder:1': buildEnv({ details: { files_changed: ['crew/io-contract.test.mjs'], commit_message: 'feat: the change' } }),
     'reviewer:1': reviewEnv('pass'),
@@ -1543,6 +1588,32 @@ test('A1', () => {
     assert.equal(io.calls.run.some(({ cmd }) => cmd === good), true, name)
     assert.deepEqual(rows.map(({ refused }) => refused), [[bad.includes('*') ? '**/*.test.mjs' : bad], []], name)
   }
+})
+
+// RV1-2 (found at review, fixed by hand): planAdversary latched on the FIRST
+// valid envelope, so a round-2 declaration arriving after the validation-lane
+// bounce was discarded — the plan was accepted with zero check:rN and the single
+// journal row attributed the rejected round-1 envelope. MUTATION: restore the
+// `if (planAdversary === null)` latch and this test goes red on both assertions.
+test('RV1-2 a round-2 needs adversary declaration survives a validation-lane bounce', () => {
+  const bad = 'node --test crew/drive-plan.test.mjs > test-output.txt'
+  const good = 'node --test crew/drive-plan.test.mjs'
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': validationPlan(bad, false), 'planner:2': validationPlan(good, true),
+      'tech-lead:1': checkEnv('approve'), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: {
+      ...validationProbeRun(good, { 'crew/drive-plan.test.mjs': 'file' }),
+      [good]: { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask({ ...CTX_TL, limits: { plan_rounds: 2 } }, io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'tech-lead').length, 1)
+  const rows = io.calls.logs.filter((row) => Object.hasOwn(row, 'adversary_trigger'))
+  assert.deepEqual(rows.map((row) => row.adversary_trigger), ['planner-request'])
 })
 
 test('B1', () => {
@@ -1749,7 +1820,7 @@ test('#945 a plan that never lands names its last validation-lane bounce in the 
   const good = 'node --test crew/drive-plan.test.mjs'
   const recoveredIo = fakeIo({
     envelopes: {
-      'planner:1': validationPlan(bad), 'planner:2': validationPlan(good),
+      'planner:1': validationPlan(bad, true), 'planner:2': validationPlan(good, true),
       'tech-lead:1': checkEnv('revise'), 'lead:1': leadEnv('bounce'),
       'planner:3': planEnv({ status: 'insufficient', summary: 'no plan', artifacts: [], details: {} }),
       'lead:2': leadEnv('bounce'),
@@ -2085,7 +2156,7 @@ test('RV1-1 adopted plan cap drives every live plan-round site', () => {
 
   const approved = fakeIo({
     files: inherited('VERDICT: approve\n'),
-    envelopes: { 'planner:1': planEnv(), 'tech-lead:1': checkEnv('revise'), 'lead:1': leadEnv('escalate') },
+    envelopes: { 'planner:1': adversarialPlanEnv(), 'tech-lead:1': checkEnv('revise'), 'lead:1': leadEnv('escalate') },
   })
   const approvedResult = driveTask(CTX_TL, approved)
   assert.equal(approvedResult.status, 'escalation')
@@ -2099,8 +2170,8 @@ test('RV1-1 adopted plan cap drives every live plan-round site', () => {
   const revised = fakeIo({
     files: inherited('VERDICT: revise\n'),
     envelopes: {
-      'planner:1': planEnv(), 'tech-lead:1': checkEnv('revise'),
-      'planner:2': planEnv(), 'tech-lead:2': checkEnv('revise'), 'lead:1': leadEnv('escalate'),
+      'planner:1': adversarialPlanEnv(), 'tech-lead:1': checkEnv('revise'),
+      'planner:2': adversarialPlanEnv(), 'tech-lead:2': checkEnv('revise'), 'lead:1': leadEnv('escalate'),
     },
   })
   const revisedResult = driveTask(CTX_TL, revised)
@@ -2112,8 +2183,8 @@ test('RV1-1 adopted plan cap drives every live plan-round site', () => {
   const granted = fakeIo({
     files: inherited('VERDICT: approve\n'),
     envelopes: {
-      'planner:1': planEnv(), 'tech-lead:1': checkEnv('revise'), 'lead:1': leadEnv('bounce'),
-      'planner:2': planEnv(), 'tech-lead:2': checkEnv('revise'), 'lead:2': leadEnv('escalate'),
+      'planner:1': adversarialPlanEnv(), 'tech-lead:1': checkEnv('revise'), 'lead:1': leadEnv('bounce'),
+      'planner:2': adversarialPlanEnv(), 'tech-lead:2': checkEnv('revise'), 'lead:2': leadEnv('escalate'),
     },
   })
   const grantedResult = driveTask(CTX_TL, granted)

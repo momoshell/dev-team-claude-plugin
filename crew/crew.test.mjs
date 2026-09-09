@@ -460,13 +460,50 @@ test('the granted pi planner pane command is pinned byte for byte so by_agent de
   // CREW_PI_AGENTS allowlist, and the `agent` activator in --tools.
   assert.equal(
     piSeatCommand({ ...PIN_SEAT, model: 'openai-codex/gpt-5.6', grants: pinnedGrants(register, 'pi') }),
-    'env DEVTEAM_WORKER=1 CREW_ROLE=planner CREW_TASK_DIR="/tmp/crew-task" CREW_PI_AGENTS=\'[{"name":"scout","def":"/repo/crew/pi/agents/scout.json"}]\' pi --model openai-codex/gpt-5.6 --tools "read,bash,edit,write,grep,find,ls,Task,agent" --exclude-tools "edit" --no-extensions -e "/repo/crew/pi/extensions/subagent.ts" -e "/repo/crew/pi/extensions/lab.ts" -e "/repo/crew/pi/extensions/readgate.ts" --no-skills --append-system-prompt "/tmp/crew-task/role-planner.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
+    'env DEVTEAM_WORKER=1 CREW_ROLE=planner CREW_TASK_DIR="/tmp/crew-task" CREW_PI_AGENTS=\'[{"name":"scout","def":"/repo/crew/pi/agents/scout.json"}]\' pi --model openai-codex/gpt-5.6 --tools "read,bash,edit,write,grep,find,ls,Task,agent,lab" --exclude-tools "edit" --no-extensions -e "/repo/crew/pi/extensions/subagent.ts" -e "/repo/crew/pi/extensions/lab.ts" -e "/repo/crew/pi/extensions/readgate.ts" --no-skills --append-system-prompt "/tmp/crew-task/role-planner.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
   )
   // Ungranted: the same pi seat with no grants loses exactly the delivery.
   assert.equal(
     piSeatCommand({ ...PIN_SEAT, model: 'openai-codex/gpt-5.6', grants: EMPTY_GRANTS }),
     'env DEVTEAM_WORKER=1 CREW_ROLE=planner CREW_TASK_DIR="/tmp/crew-task" pi --model openai-codex/gpt-5.6 --tools "read,bash,edit,write,grep,find,ls" --exclude-tools "edit" --no-extensions --no-skills --append-system-prompt "/tmp/crew-task/role-planner.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
   )
+})
+
+test('the shipped planner pi RPC command pins the complete extension-derived tool list', () => {
+  const register = loadCapabilities()
+  const planner = rpcCommand({
+    bin: '/repo/pi', model: 'openai-codex/gpt-5.6', effort: 'medium', sessionDir: '/tmp/crew-task/sessions', sessionId: 'planner',
+    promptFile: '/tmp/crew-task/role-planner.md', deny: SEAT_DEFAULTS.planner.deny,
+    env: { CREW_ROLE: 'planner', CREW_TASK_DIR: '/tmp/crew-task' }, grants: pinnedGrants(register, 'pi'),
+  })
+  assert.deepEqual(planner.args, [
+    '--mode', 'rpc', '--model', 'openai-codex/gpt-5.6', '--thinking', 'medium', '--session-dir', '/tmp/crew-task/sessions',
+    '--session-id', 'planner', '--append-system-prompt', '/tmp/crew-task/role-planner.md',
+    '--tools', 'read,bash,edit,write,grep,find,ls,Task,agent,lab', '--exclude-tools', 'edit',
+    '--no-context-files', '--no-extensions', '-e', '/repo/crew/pi/extensions/subagent.ts', '-e', '/repo/crew/pi/extensions/lab.ts',
+    '-e', '/repo/crew/pi/extensions/readgate.ts', '--no-skills',
+  ])
+})
+
+test('C1P/C1R subagent-only grants preserve the pre-change argv', () => {
+  const grants = {
+    tools: [], extensions: ['/repo/crew/pi/extensions/subagent.ts'],
+    agents: [{ name: 'scout', def: '/repo/crew/pi/agents/scout.json' }], skills: [], advisor: false,
+  }
+  assert.equal(
+    piSeatCommand({ ...PIN_SEAT, model: 'openai-codex/gpt-5.6', grants }),
+    'env DEVTEAM_WORKER=1 CREW_ROLE=planner CREW_TASK_DIR="/tmp/crew-task" CREW_PI_AGENTS=\'[{"name":"scout","def":"/repo/crew/pi/agents/scout.json"}]\' pi --model openai-codex/gpt-5.6 --tools "read,bash,edit,write,grep,find,ls,agent" --exclude-tools "edit" --no-extensions -e "/repo/crew/pi/extensions/subagent.ts" --no-skills --append-system-prompt "/tmp/crew-task/role-planner.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
+  )
+  const rpc = rpcCommand({
+    bin: '/repo/pi', model: 'openai-codex/gpt-5.6', sessionDir: '/tmp/crew-task/sessions', sessionId: 'planner',
+    promptFile: '/tmp/crew-task/role-planner.md', deny: SEAT_DEFAULTS.planner.deny,
+    env: { CREW_ROLE: 'planner', CREW_TASK_DIR: '/tmp/crew-task' }, grants,
+  })
+  assert.deepEqual(rpc.args, [
+    '--mode', 'rpc', '--model', 'openai-codex/gpt-5.6', '--session-dir', '/tmp/crew-task/sessions', '--session-id', 'planner',
+    '--append-system-prompt', '/tmp/crew-task/role-planner.md', '--tools', 'read,bash,edit,write,grep,find,ls,agent',
+    '--exclude-tools', 'edit', '--no-context-files', '--no-extensions', '-e', '/repo/crew/pi/extensions/subagent.ts', '--no-skills',
+  ])
 })
 
 test('BG1', () => {
@@ -480,7 +517,7 @@ test('BG1', () => {
   }
   assert.deepEqual(
     piSeatCommand(builder),
-    'env DEVTEAM_WORKER=1 CREW_ROLE=builder CREW_TASK_DIR="/tmp/crew-task" pi --model openai-codex/gpt-5.6 --tools "read,bash,edit,write,grep,find,ls" --no-extensions -e "/repo/crew/pi/extensions/builderloop.ts" -e "/repo/crew/pi/extensions/readgate.ts" -e "/repo/crew/pi/extensions/skeletonread.ts" --no-skills --append-system-prompt "/tmp/role-builder.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
+    'env DEVTEAM_WORKER=1 CREW_ROLE=builder CREW_TASK_DIR="/tmp/crew-task" pi --model openai-codex/gpt-5.6 --tools "read,bash,edit,write,grep,find,ls,retrieve" --no-extensions -e "/repo/crew/pi/extensions/builderloop.ts" -e "/repo/crew/pi/extensions/readgate.ts" -e "/repo/crew/pi/extensions/skeletonread.ts" --no-skills --append-system-prompt "/tmp/role-builder.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
   )
   assert.equal(piSeatCommand(builder).split(' -e ').length - 1, 3)
   assert.ok(piSeatCommand(builder).includes('-e "/repo/crew/pi/extensions/builderloop.ts"'))
@@ -523,7 +560,7 @@ test('BG2', () => {
     args: [
       '--mode', 'rpc', '--model', 'openai-codex/gpt-5.6', '--thinking', 'max', '--session-dir', '/tmp/crew-task/sessions',
       '--session-id', 'builder', '--append-system-prompt', '/tmp/role-builder.md',
-      '--tools', 'read,bash,edit,write,grep,find,ls', '--no-context-files', '--no-extensions',
+      '--tools', 'read,bash,edit,write,grep,find,ls,retrieve', '--no-context-files', '--no-extensions',
       '-e', '/repo/crew/pi/extensions/builderloop.ts', '-e', '/repo/crew/pi/extensions/readgate.ts',
       '-e', '/repo/crew/pi/extensions/skeletonread.ts', '--no-skills',
     ],
@@ -6648,7 +6685,11 @@ function capabilityRegister(overrides = {}) {
 function capabilityFixtureRoot() {
   const root = mkdtempSync(join(tmpdir(), 'crew-capability-'))
   mkdirSync(join(root, 'crew', 'pi', 'skills'), { recursive: true })
-  writeFileSync(join(root, 'crew', 'pi', 'fanout.js'), '// extension\n')
+  mkdirSync(join(root, 'crew', 'pi', 'extensions'), { recursive: true })
+  writeFileSync(join(root, 'crew', 'pi', 'extensions', 'builderloop.ts'), '// extension\n')
+  // RV1-1: an agents grant is only composable when the extension that REGISTERS
+  // the agent tool is granted too, so the fixture root must carry it.
+  writeFileSync(join(root, 'crew', 'pi', 'extensions', 'subagent.ts'), '// extension\n')
   writeFileSync(join(root, 'crew', 'pi', 'skills', 'scout.md'), '# skill\n')
   writeFileSync(join(root, 'crew', 'pi', 'explore.json'), JSON.stringify({ name: 'Explore', prompt: 'scout' }))
   return root
@@ -6687,11 +6728,14 @@ test('a register-backed pi fan-out bundle resolves to absolute definitions and r
   try {
     const base = capabilityRegister()
     const register = capabilityRegister({ roles: {
-      planner: { ...base.roles.planner, extensions: ['crew/pi/fanout.js'], agents: [{ name: 'Explore', def: 'crew/pi/explore.json' }] },
+      // RV1-1: an agents grant must be backed by the extension that REGISTERS the
+      // agent tool. Granting builderloop.ts alone left fan-out silently dead; it now
+      // refuses at composition time, so this register grants subagent.ts too.
+      planner: { ...base.roles.planner, extensions: ['crew/pi/extensions/builderloop.ts', 'crew/pi/extensions/subagent.ts'], agents: [{ name: 'Explore', def: 'crew/pi/explore.json' }] },
     } })
     const resolved = await resolveAdapters(['planner'], { 'agent-planner': 'pi' }, null, { register, root })
     assert.equal(resolved.planner.name, 'pi')
-    assert.equal(resolved.planner.grants.extensions[0], join(root, 'crew/pi/fanout.js'))
+    assert.equal(resolved.planner.grants.extensions[0], join(root, 'crew/pi/extensions/builderloop.ts'))
     assert.equal(resolved.planner.grants.agents[0].def, join(root, 'crew/pi/explore.json'))
     assert.equal(resolved.planner.grants.agents[0].name, 'Explore')
     assert.equal(resolved.planner.adapter.capabilitiesFor({ transport: 'pane', grants: resolved.planner.grants }).subagents, true)
@@ -6699,7 +6743,7 @@ test('a register-backed pi fan-out bundle resolves to absolute definitions and r
       role: 'planner', model: 'openai-codex/gpt-5.6-luna', promptFile: '/tmp/role-planner.md',
       tools: SEAT_DEFAULTS.planner.tools, deny: SEAT_DEFAULTS.planner.deny, taskDir: '/tmp', bootBrief: 'boot', grants: resolved.planner.grants,
     })
-    assert.ok(command.includes(`-e "${join(root, 'crew/pi/fanout.js')}"`))
+    assert.ok(command.includes(`-e "${join(root, 'crew/pi/extensions/builderloop.ts')}"`))
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
@@ -6855,13 +6899,13 @@ test('register-backed grants flow into one emitted pi command', () => {
   try {
     const register = capabilityRegister({ roles: {
       builder: { ...capabilityRegister().roles.builder,
-        tools: ['task'], extensions: ['crew/pi/fanout.js'], skills: ['crew/pi/skills/scout.md'],
+        tools: ['task'], extensions: ['crew/pi/extensions/builderloop.ts'], skills: ['crew/pi/skills/scout.md'],
       },
     } })
     const grants = grantsFor(register, 'builder', { root })
     const command = piSeatCommand({ ...PI_SAMPLE, grants })
     assert.match(command, /--tools "[^"]*,task"/)
-    assert.ok(command.includes(`-e "${join(root, 'crew/pi/fanout.js')}"`))
+    assert.ok(command.includes(`-e "${join(root, 'crew/pi/extensions/builderloop.ts')}"`))
     assert.ok(command.includes(`--skill "${join(root, 'crew/pi/skills/scout.md')}"`))
     assert.doesNotMatch(command, /--no-skills/)
   } finally { rmSync(root, { recursive: true, force: true }) }
@@ -6931,7 +6975,7 @@ test('a register granting fan-out to a seat whose defaults withhold it refuses a
   const root = capabilityFixtureRoot()
   try {
     const base = capabilityRegister()
-    const bundle = { tools: [], extensions: ['crew/pi/fanout.js'], agents: [{ name: 'Explore', def: 'crew/pi/explore.json' }], skills: [], advisor: false, requires: [] }
+    const bundle = { tools: [], extensions: ['crew/pi/extensions/builderloop.ts'], agents: [{ name: 'Explore', def: 'crew/pi/explore.json' }], skills: [], advisor: false, requires: [] }
     // The contradiction is register-vs-charter, so it refuses on EVERY adapter.
     for (const role of ['lead', 'builder', 'tech-lead']) {
       assert.deepEqual(deniedFanout(role), [...FANOUT_TOOLS])

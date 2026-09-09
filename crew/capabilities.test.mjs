@@ -10,8 +10,34 @@ import {
   refuse, validateCapabilities, vendorRoots,
 } from './capabilities.mjs'
 import { seatCommand as claudeSeatCommand, capabilitiesFor } from './adapters/adapter-claude.mjs'
-import { seatCommand as piSeatCommand, capabilitiesFor as piCapabilitiesFor, PI_SUBAGENT_TOOL, PI_BUILTIN_TOOLS } from './adapters/adapter-pi.mjs'
+import { seatCommand as piSeatCommand, capabilitiesFor as piCapabilitiesFor, PI_FIRST_PARTY_EXTENSION_TOOLS, PI_BUILTIN_TOOLS } from './adapters/adapter-pi.mjs'
 import { scratchDir } from '../test/helpers.mjs'
+
+test('G1T freezes the exhaustive first-party extension declaration table and matches registrars', () => {
+  const expected = {
+    'crew/pi/extensions/advisor.ts': [],
+    'crew/pi/extensions/builderloop.ts': [],
+    'crew/pi/extensions/readgate.ts': [],
+    'crew/pi/extensions/lab.ts': ['lab'],
+    'crew/pi/extensions/skeletonread.ts': ['retrieve'],
+    'crew/pi/extensions/subagent.ts': ['agent'],
+  }
+  assert.deepEqual(PI_FIRST_PARTY_EXTENSION_TOOLS, expected)
+  assert.equal(Object.isFrozen(PI_FIRST_PARTY_EXTENSION_TOOLS), true)
+  for (const value of Object.values(PI_FIRST_PARTY_EXTENSION_TOOLS)) assert.equal(Object.isFrozen(value), true)
+
+  const source = (name) => readFileSync(new URL(`./pi/extensions/${name}.ts`, import.meta.url), 'utf8')
+  const subagent = source('subagent')
+  const skeletonread = source('skeletonread')
+  const lab = source('lab')
+  assert.match(subagent, /AGENT_TOOL_NAME = 'agent'/)
+  assert.match(subagent, /registerTool\(createAgentTool\(\)\)/)
+  assert.match(skeletonread, /RETRIEVE_TOOL_NAME = 'retrieve'/)
+  assert.match(skeletonread, /registerTool\(skeleton\.retrieve\)/)
+  assert.match(lab, /LAB_TOOL_NAME = 'lab'/)
+  assert.match(lab, /registerTool\(createLabTool\(\)\)/)
+  for (const name of ['advisor', 'builderloop', 'readgate']) assert.doesNotMatch(source(name), /registerTool\s*\(/)
+})
 
 function capabilityRegister(overrides = {}) {
   const grant = (extra = {}) => ({ tools: [], extensions: [], agents: [], skills: [], advisor: false, requires: [], mcp_servers: [], ...extra })
@@ -821,7 +847,7 @@ test('the pi subagents probe exercises the granted fan-out bundle', async () => 
 
   const finding = (name) => result.findings.find((one) => one.name === name)
   assert.deepEqual(finding('tool-enum')?.value, ['scout'])
-  assert.equal(finding('registered-tool')?.value, PI_SUBAGENT_TOOL)
+  assert.equal(finding('registered-tool')?.value, PI_FIRST_PARTY_EXTENSION_TOOLS['crew/pi/extensions/subagent.ts'][0])
   const argv = finding('child-args')?.value || []
   assert.equal(argv[argv.indexOf('--tools') + 1], 'read,grep,find,ls')
   assert.equal(argv[argv.indexOf('--exclude-tools') + 1], 'edit,write,bash')

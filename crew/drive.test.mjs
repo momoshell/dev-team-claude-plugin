@@ -4,9 +4,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  B44_LEADLESS_CTX, CENSUS_ROW_ABSENT, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_RUNS, CONVERGE_CTX, CONVERGE_GATE, CRASH_WHY, CTX, CTX_DIRECTED, CTX_REPAIR, CTX_TL, DEFAULT_VARIANT, DIRECTED_BRIEF_PATH, DIRECTED_BRIEF_TEXT, DIRECTED_FILES, DRIVE_JOURNAL_EXPECTED, D_ASK, D_AUTO, D_GREEN_GATE, D_PATCH_A, D_PATCH_B, D_PATCH_EMPTY_PATH, D_PATCH_MIXED_MODE, D_PATCH_MIXED_RENAME, D_RED_GATE, ENVELOPE_DEBRIS, GATE_CUSTODIAN, GATE_SUMMARY_PREFIX, HEALTHY_RESULT, JOURNAL_CHANNELS, JOURNAL_CHANNEL_NAMES, JUDGE_TIER, MAX_QUESTIONS, MODIFIER_OUTCOMES, PHASE_SLOT_WAIT_EVENT, PROTECTED_PATHS, RED, REPO_ROOT, REVIEWED_CORE_STAGES, S843_ADDED, S843_D2, S843_RUNS, SCOPE_REFUSALS, SEAT_REFUSAL_STAGE, SENSITIVITY_FLOOR, SHAPE_SOURCES, SKILL_NAMES, SUITE_SLOT_PHASES, SUITE_SLOT_PHASE_NAMES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, TRIAGE_SOURCES, TRIAGE_STAGES, TRIAGE_STAGE_HEAD, VARIANTS, VARIANT_NAMES, WAITS_S, WAIT_FLAGS, WAIT_REFUSALS, WAIT_ROLES, WAIT_SECONDS_MAX, WAIT_SECONDS_MIN, ZERO_CAPACITY_LOGS, ZERO_CAPACITY_RESULT, answerBounceLines, assertSeats, b127GatePaths, b127InvokeGate, b318Builders, b318ReviewGrants, b318SiteA, b318SiteB, b44AssertLeadlessGate, b44GateFixIo, b44GatePlan, b44MidRunRepairIo, baselineGateDefect, bothExhaustionPointsScenario, buildEnv, carveRun, checkEnv, checkFailureLine, closeoutIo, convergeIo, convergeRun, crashIo, crashRun, dApplyCommand, dAutoRows, dBuilders, dGitApplies, dLeads, dReviewEnv, deliberateRun, directSlotRun, dispositionIo, divergentPlanScenario, driveJournalSites, driveTask, enforcementPreamble, envelopeDefect, envelopeFieldsPresent, escalationStageRows, exhaustionAcceptIo, existsSync, fakeIo, fenceBase, fenceDiff, fenceSpan, gateReapCommand, guardedWrite, join, laneFence, laneFenceHits, laneProbeCommand, laneProbeKinds, leadEnv, matchAnswers, mkdirSync, normaliseJournalTimes, operationalRow, osCpus, parseDirectedBrief, parseGateSummary, parseQuestions, parseSuiteCounts, patchTargets, phaseTrace, planEnv, postCommitCrashRun, protectedPlanEnv, protectedReseatRefusal, questionConsultLines, readFileSync, reconEnv, recordRow, refuseWait, replayResumeStages, resolveProtectedPaths, resolveWaits, resumeDoneRows, resumeKeys, resumeStageRows, reviewEnv, rmSync, runChild, runCmd, runCmdFixture, s843Ctx, s843Io, s843PathsIn, s843PlanEnv, scopeBounceBrief, scopeMatcher, scopeRefusal, scratchDir, shapeDefect, shellArg, shellWords, slotCtx, slotFactory, sourcesDefect, spawnSync, stageEnabled, suiteRefusalEnv, throwAutoFixWrites, throwingWaitRun, tmpdir, traceLabels, triageEnv, undeclaredStage, validateScopeEntries, waitsCtx, waitsRecord, writeFileSync,
+  B44_LEADLESS_CTX, adversarialPlanEnv, CENSUS_ROW_ABSENT, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_RUNS, CONVERGE_CTX, CONVERGE_GATE, CRASH_WHY, CTX, CTX_DIRECTED, CTX_REPAIR, CTX_TL, DEFAULT_VARIANT, DIRECTED_BRIEF_PATH, DIRECTED_BRIEF_TEXT, DIRECTED_FILES, DRIVE_JOURNAL_EXPECTED, D_ASK, D_AUTO, D_GREEN_GATE, D_PATCH_A, D_PATCH_B, D_PATCH_EMPTY_PATH, D_PATCH_MIXED_MODE, D_PATCH_MIXED_RENAME, D_RED_GATE, ENVELOPE_DEBRIS, GATE_CUSTODIAN, GATE_SUMMARY_PREFIX, HEALTHY_RESULT, JOURNAL_CHANNELS, JOURNAL_CHANNEL_NAMES, JUDGE_TIER, MAX_QUESTIONS, MODIFIER_OUTCOMES, PHASE_SLOT_WAIT_EVENT, PROTECTED_PATHS, RED, REPO_ROOT, REVIEWED_CORE_STAGES, S843_ADDED, S843_D2, S843_RUNS, SCOPE_REFUSALS, SEAT_REFUSAL_STAGE, SENSITIVITY_FLOOR, SHAPE_SOURCES, SKILL_NAMES, SUITE_SLOT_PHASES, SUITE_SLOT_PHASE_NAMES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, TRIAGE_SOURCES, TRIAGE_STAGES, TRIAGE_STAGE_HEAD, VARIANTS, VARIANT_NAMES, WAITS_S, WAIT_FLAGS, WAIT_REFUSALS, WAIT_ROLES, WAIT_SECONDS_MAX, WAIT_SECONDS_MIN, ZERO_CAPACITY_LOGS, ZERO_CAPACITY_RESULT, answerBounceLines, assertSeats, b127GatePaths, b127InvokeGate, b318Builders, b318ReviewGrants, b318SiteA, b318SiteB, b44AssertLeadlessGate, b44GateFixIo, b44GatePlan, b44MidRunRepairIo, baselineGateDefect, bothExhaustionPointsScenario, buildEnv, carveRun, checkEnv, checkFailureLine, closeoutIo, convergeIo, convergeRun, crashIo, crashRun, dApplyCommand, dAutoRows, dBuilders, dGitApplies, dLeads, dReviewEnv, deliberateRun, directSlotRun, dispositionIo, divergentPlanScenario, driveJournalSites, driveTask, enforcementPreamble, envelopeDefect, envelopeFieldsPresent, escalationStageRows, exhaustionAcceptIo, existsSync, fakeIo, fenceBase, fenceDiff, fenceSpan, gateReapCommand, guardedWrite, join, laneFence, laneFenceHits, laneProbeCommand, laneProbeKinds, leadEnv, matchAnswers, mkdirSync, normaliseJournalTimes, operationalRow, osCpus, parseDirectedBrief, parseGateSummary, parseQuestions, parseSuiteCounts, patchTargets, phaseTrace, planEnv, postCommitCrashRun, protectedPlanEnv, protectedReseatRefusal, questionConsultLines, readFileSync, reconEnv, recordRow, refuseWait, replayResumeStages, resolveProtectedPaths, resolveWaits, resumeDoneRows, resumeKeys, resumeStageRows, reviewEnv, rmSync, runChild, runCmd, runCmdFixture, s843Ctx, s843Io, s843PathsIn, s843PlanEnv, scopeBounceBrief, scopeMatcher, scopeRefusal, scratchDir, shapeDefect, shellArg, shellWords, slotCtx, slotFactory, sourcesDefect, spawnSync, stageEnabled, suiteRefusalEnv, throwAutoFixWrites, throwingWaitRun, tmpdir, traceLabels, triageEnv, undeclaredStage, validateScopeEntries, waitsCtx, waitsRecord, writeFileSync,
 } from './drive-fixtures.mjs'
-import { fenceScopeOf, fenceScopesIntersect, parseUnifiedZeroHunks, siblingSpanIntersects } from './drive.mjs'
+import { ADVERSARY_REFUSAL, ADVERSARY_REFUSALS, ADVERSARY_TRIGGERS, fenceScopeOf, fenceScopesIntersect, parseUnifiedZeroHunks, resolveAdversaryTrigger, siblingSpanIntersects } from './drive.mjs'
 
 test('a supplied wait budget reaches io.wait and names the seat overdue at that budget', () => {
   const io = fakeIo({ envelopes: { 'planner:1': null } })
@@ -518,9 +518,169 @@ test('a per-repo protected-path list adds to the floor and can never shrink it',
   assert.throws(() => resolveProtectedPaths(['  ']))
 })
 
+test('A1 adversary none skips every plan check stage', () => {
+  const io = fakeIo({
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask(CTX_TL, io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.assign.some(({ role }) => role === 'tech-lead'), false)
+  assert.equal(result.details.stages.some((stage) => stage.startsWith('check:')), false)
+})
+
+test('B1 planner request runs the adversary plan check', () => {
+  const io = fakeIo({
+    envelopes: { 'planner:1': adversarialPlanEnv(), 'tech-lead:1': checkEnv('approve'), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask(CTX_TL, io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'tech-lead').length, 1)
+  assert.ok(result.details.stages.includes('check:r1'))
+})
+
+// B2 was withdrawn by hand after review: the brief asked for an ABSENT
+// declaration to be refused, which contradicts ADR-038 section 2 (the loop runs
+// when the planner DECLARES) and reddened crew/daemon.test.mjs:2094 and
+// crew/crew.test.mjs:6505, both of which build envelopes without the field.
+// This check now pins the corrected rule, and it is the mutation guard for it:
+// restoring the missing-declaration refusal turns this test red.
+test('B2 an absent needs adversary declaration is not a refusal and seats no adversary', () => {
+  const planner = planEnv()
+  delete planner.details.needs_adversary
+  const io = fakeIo({
+    envelopes: { 'planner:1': planner, 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask(CTX_TL, io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'tech-lead').length, 0)
+  assert.equal(io.calls.logs.find((row) => Object.hasOwn(row, 'adversary_trigger')).adversary_trigger, 'none')
+})
+
+test('B3 nonboolean needs adversary declaration is refused', () => {
+  const planner = planEnv({ details: { ...planEnv().details, needs_adversary: 'yes' } })
+  const io = fakeIo({ envelopes: { 'planner:1': planner } })
+  const result = driveTask(CTX_TL, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.why, 'needs-adversary-type')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'tech-lead').length, 0)
+})
+
+test('B4 every revised planner envelope is validated', () => {
+  const planner2 = planEnv({ details: { ...planEnv().details, needs_adversary: 'yes' } })
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': adversarialPlanEnv(), 'tech-lead:1': checkEnv('revise'), 'planner:2': planner2,
+    },
+  })
+  const result = driveTask(CTX_TL, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.why, 'needs-adversary-type')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'tech-lead').length, 1)
+  assert.equal(io.calls.logs.filter((row) => Object.hasOwn(row, 'adversary_trigger')).length, 1)
+})
+
+// PC-05 (prescribed at plan-check, never written; added by hand at closeout).
+// resolveAdversaryTrigger normalises `details` and `mutations` before reading
+// them. validEnvelope does NOT require details, so a done envelope with null
+// details is reachable — and without the normalisation this is a TypeError out
+// of driveTask rather than a typed result, while all twelve gate checks still
+// pass. MUTATION: delete either normalising line and this test throws.
+test('PC-05 malformed planner details resolve to a typed trigger and never throw', () => {
+  for (const details of [null, undefined, 'plan', 42, ['a'], {}]) {
+    const resolved = resolveAdversaryTrigger(details, [])
+    assert.equal(resolved.refusal, undefined, JSON.stringify(details))
+    assert.equal(ADVERSARY_TRIGGERS.includes(resolved.trigger), true, JSON.stringify(details))
+  }
+  for (const mutations of [null, 'all', 7, { file: 'a.mjs' }, [null, 'a', { file: 5 }]]) {
+    const resolved = resolveAdversaryTrigger({ needs_adversary: false, mutations }, ['crew/drive.mjs'])
+    assert.equal(resolved.trigger, 'coverage-absent', JSON.stringify(mutations))
+  }
+  // A protected file IS proved only by a non-exempt mutation naming it.
+  assert.equal(resolveAdversaryTrigger(
+    { needs_adversary: false, mutations: [{ file: 'crew/drive.mjs' }] }, ['crew/drive.mjs'],
+  ).trigger, 'none')
+  assert.equal(resolveAdversaryTrigger(
+    { needs_adversary: false, mutations: [{ file: 'crew/drive.mjs', exempt: true }] }, ['crew/drive.mjs'],
+  ).trigger, 'coverage-absent')
+})
+
+// RV1-4 (review 'consider', closed by hand). Both enums are indexed
+// positionally in drive.mjs, so a reordering is silent. Every other closed enum
+// in this repo is pinned by a test; these were imported by none.
+test('RV1-4 the adversary enums are closed and positionally stable', () => {
+  assert.deepEqual(ADVERSARY_TRIGGERS, ['planner-request', 'coverage-absent', 'none'])
+  assert.deepEqual(ADVERSARY_REFUSALS, ['needs-adversary-type', 'adversary-unavailable'])
+  assert.deepEqual(ADVERSARY_REFUSAL, { type: 'needs-adversary-type', unavailable: 'adversary-unavailable' })
+  assert.equal(Object.isFrozen(ADVERSARY_TRIGGERS), true)
+  assert.equal(Object.isFrozen(ADVERSARY_REFUSALS), true)
+  assert.equal(Object.isFrozen(ADVERSARY_REFUSAL), true)
+  // 'needs-adversary-missing' was withdrawn with gate check B2: an absent
+  // declaration is no longer a refusal, so the member is unreachable.
+  assert.equal(ADVERSARY_REFUSALS.includes('needs-adversary-missing'), false)
+  // ADR-038 Amendment 1: 'operator-force' is not an enum member, because no
+  // caller can write it. Every member below is produced by resolveAdversaryTrigger
+  // on some input, which is what makes this enum closed rather than aspirational.
+  assert.equal(ADVERSARY_TRIGGERS.includes('operator-force'), false)
+  const produced = new Set([
+    resolveAdversaryTrigger({ needs_adversary: true }, []).trigger,
+    resolveAdversaryTrigger({ needs_adversary: false }, ['crew/drive.mjs']).trigger,
+    resolveAdversaryTrigger({ needs_adversary: false }, []).trigger,
+  ])
+  assert.deepEqual([...produced].sort(), [...ADVERSARY_TRIGGERS].sort())
+})
+
+test('C1 uncovered protected scope fails closed to the adversary', () => {
+  const planner = planEnv({ details: { ...planEnv().details, files_in_scope: ['crew/drive.mjs'] } })
+  const io = fakeIo({ envelopes: { 'planner:1': planner, 'tech-lead:1': checkEnv('approve') } })
+  const result = driveTask(CTX_TL, io)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'tech-lead').length, 1)
+  assert.equal(io.calls.logs.find((row) => Object.hasOwn(row, 'adversary_trigger')).adversary_trigger, 'coverage-absent')
+  assert.equal(result.details.escalation.where, 'sensitivity-floor')
+})
+
+test('G1 judge reviewer floor remains unchanged', () => {
+  const io = fakeIo({
+    envelopes: { 'planner:1': protectedPlanEnv(undefined, 'proved') },
+    reseat: protectedReseatRefusal,
+  })
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'sensitivity-floor')
+  assert.equal(io.calls.assign.some(({ role }) => role === 'reviewer'), false)
+})
+
+test('D1 idle tech lead remains seated and unconsulted', () => {
+  const io = fakeIo({
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask(CTX_TL, io)
+  assert.equal(result.status, 'done')
+  assert.ok(CTX_TL.roles.includes('tech-lead'))
+  assert.equal(io.calls.assign.some(({ role }) => role === 'tech-lead'), false)
+})
+
+test('E1 one journal row attributes the adversary trigger', () => {
+  const io = fakeIo({
+    envelopes: { 'planner:1': adversarialPlanEnv(), 'tech-lead:1': checkEnv('approve'), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  driveTask(CTX_TL, io)
+  const rows = io.calls.logs.filter((row) => Object.hasOwn(row, 'adversary_trigger'))
+  assert.deepEqual(rows.map((row) => row.adversary_trigger), ['planner-request'])
+})
+
 test('protected scope plus a refusing reseat escalates before assigning a builder', () => {
   const io = fakeIo({
-    envelopes: { 'planner:1': protectedPlanEnv() },
+    envelopes: { 'planner:1': protectedPlanEnv(undefined, 'proved') },
     reseat: protectedReseatRefusal,
   })
   const res = driveTask(CTX, io)
@@ -535,7 +695,7 @@ test('protected scope plus a refusing reseat escalates before assigning a builde
 test('every refusing sensitivity floor firing records and emits one closed modifier attempt', () => {
   const io = fakeIo({
     emit: true,
-    envelopes: { 'planner:1': protectedPlanEnv() },
+    envelopes: { 'planner:1': protectedPlanEnv(undefined, 'proved') },
     reseat: protectedReseatRefusal,
   })
   const res = driveTask(CTX, io)
@@ -549,8 +709,9 @@ test('every refusing sensitivity floor firing records and emits one closed modif
 
 test('protected scope plus an applied sensitivity floor proceeds with one judge request', () => {
   const io = fakeIo({
-    envelopes: { 'planner:1': protectedPlanEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
-    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    envelopes: { 'planner:1': protectedPlanEnv(undefined, 'proved'), 'builder:1': buildEnv({ details: { ...buildEnv().details, files_changed: ['crew/drive.mjs'] } }), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'gate-cmd:1': { ok: false, output: RED(3) }, 'gate-cmd:2': { ok: true, output: '' }, 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    files: { [`${CTX.checkout}/crew/drive.mjs`]: 'true' },
     changed: ['crew/drive.mjs'],
     reseat: () => ({ applied: true, from: { id: 'build' }, to: { id: 'judge' }, rung: 'mechanical→judge' }),
   })
@@ -562,8 +723,9 @@ test('protected scope plus an applied sensitivity floor proceeds with one judge 
 
 test('an already seated judge reviewer satisfies the sensitivity floor', () => {
   const io = fakeIo({
-    envelopes: { 'planner:1': protectedPlanEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
-    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    envelopes: { 'planner:1': protectedPlanEnv(undefined, 'proved'), 'builder:1': buildEnv({ details: { ...buildEnv().details, files_changed: ['crew/drive.mjs'] } }), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'gate-cmd:1': { ok: false, output: RED(3) }, 'gate-cmd:2': { ok: true, output: '' }, 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    files: { [`${CTX.checkout}/crew/drive.mjs`]: 'true' },
     changed: ['crew/drive.mjs'],
     reseat: () => ({ applied: true, already: true, from: { id: 'judge' }, to: { id: 'judge' }, rung: 'judge→judge' }),
   })
@@ -576,7 +738,7 @@ test('an already seated judge reviewer satisfies the sensitivity floor', () => {
 
 test('sensitivity-floor recording remains non-load-bearing when modifier log and emit fail', () => {
   const input = {
-    envelopes: { 'planner:1': protectedPlanEnv() },
+    envelopes: { 'planner:1': protectedPlanEnv(undefined, 'proved') },
     reseat: protectedReseatRefusal,
   }
   const quietIo = fakeIo(input)
@@ -926,7 +1088,7 @@ test('the per-point bound still holds at each point', () => {
 
 test('a run that exhausts nothing and diverges on nothing is unchanged', () => {
   const io = fakeIo({
-    envelopes: { 'planner:1': planEnv(), 'tech-lead:1': checkEnv('approve'), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    envelopes: { 'planner:1': adversarialPlanEnv(), 'tech-lead:1': checkEnv('approve'), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
     runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
     changed: ['a.mjs', 'a.test.mjs'],
   })
@@ -938,7 +1100,7 @@ test('a run that exhausts nothing and diverges on nothing is unchanged', () => {
 
 test('an omitted gate_path journals an explicit null rejection value', () => {
   const io = fakeIo({
-    envelopes: { 'planner:1': planEnv(), 'tech-lead:1': checkEnv('approve'), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    envelopes: { 'planner:1': adversarialPlanEnv(), 'tech-lead:1': checkEnv('approve'), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
     runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
     changed: ['a.mjs', 'a.test.mjs'],
   })
@@ -1878,7 +2040,7 @@ test('the journal channel vocabulary is closed, exported and additive', () => {
 test('every journal emit site in the driver is inventoried, wrapped and on the right channel', () => {
   const text = readFileSync(new URL('./drive.mjs', import.meta.url), 'utf8')
   const sites = driveJournalSites(text)
-  assert.equal(sites.length, 63)
+  assert.equal(sites.length, 64)
   assert.deepEqual(sites.map(({ wrapper, events, keys }) => [wrapper, events, keys]), DRIVE_JOURNAL_EXPECTED)
   assert.ok(sites.every(({ wrapper }) => wrapper === 'recordRow' || wrapper === 'operationalRow'))
   assert.equal(sites.filter(({ wrapper }) => wrapper === 'operationalRow').length, 2)

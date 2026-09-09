@@ -5,7 +5,7 @@
   "crew/crew.mjs:2492": "escalation -> NEVER teardown",
   "crew/crew.mjs:3022": "seats.proven !== seats.seats || seats.recorded !== seats.seats",
   "crew/crew.mjs:2913": "const seats = rows.length",
-  "scripts/factory/make-brief.mjs:923": "function colourNeutralEnv(base = process.env)",
   "crew/drive.mjs:53": "builder: 2400, reviewer: 1800",
-  "crew/drive.mjs:4461": "const completeCheckProof = (label, options = {}) => {"
+  "scripts/factory/make-brief.mjs:931": "function colourNeutralEnv(base = process.env)",
+  "crew/drive.mjs:4561": "const completeCheckProof = (label, options = {}) => {"
 }

@@ -32,7 +32,7 @@ scenario are considers, not must-fixes.
 Before writing findings, load the do-not-flag guidelines
 (`crew/guidelines/review-do-not-flag.md`) with
 `node .agents/skills/review-procedure/scripts/load-guidelines.mjs`, not a skill:
-the reviewer seat boots `--no-skills` (`crew/adapters/adapter-pi.mjs:265`) and the
+the reviewer seat boots `--no-skills` (`crew/adapters/adapter-pi.mjs:328`) and the
 claude adapter refuses a skill grant (`crew/adapters/adapter-claude.mjs:98-102`), so
 a skill route is one no seat can open.
 Where one of its classes still worries you in this diff, write it as a

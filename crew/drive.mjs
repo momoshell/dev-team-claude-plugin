@@ -137,7 +137,7 @@ export const NO_TURN_CEILING = null
 export const TURN_CEILING_ROLES = WAIT_ROLES
 export const TURN_CEILING_FLAGS = Object.freeze(TURN_CEILING_ROLES.map((role) => `max-turns-${role}`))
 export const TURN_CEILING_REFUSALS = Object.freeze(TURN_CEILING_ROLES.map((role) => `invalid-max-turns-${role}`))
-export const TURN_CEILING_DEFAULTS = Object.freeze({ planner: 64, 'tech-lead': null, builder: null, reviewer: null, lead: 32 })
+export const TURN_CEILING_DEFAULTS = Object.freeze({ planner: 64, 'tech-lead': null, builder: 200, reviewer: 48, lead: 32 })
 export const TURN_CEILING_MIN = 1
 export const TURN_CEILING_MAX = 1000
 

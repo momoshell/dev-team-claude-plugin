@@ -7674,8 +7674,8 @@ test('turn-ceiling flags refuse unenforceable panes and persist only when explic
       const dir = testCrewDir(home, checkout, 'ceiling-headless')
       const crew = JSON.parse(readFileSync(join(dir, 'crew.json'), 'utf8'))
       assert.deepEqual(crew.turn_ceilings, {
-        planner: 12, 'tech-lead': null, builder: 40, reviewer: null, lead: 48,
-        source: { planner: 'flag', 'tech-lead': 'absent', builder: 'flag', reviewer: 'absent', lead: 'flag' },
+        planner: 12, 'tech-lead': null, builder: 40, reviewer: 48, lead: 48,
+        source: { planner: 'flag', 'tech-lead': 'absent', builder: 'flag', reviewer: 'default', lead: 'flag' },
       })
       assert.deepEqual(bootRecord(dir).turn_ceilings, crew.turn_ceilings)
       let seen = null
@@ -7693,8 +7693,8 @@ test('turn-ceiling flags refuse unenforceable panes and persist only when explic
       const plainCrew = JSON.parse(readFileSync(join(plainDir, 'crew.json'), 'utf8'))
       const plainBoot = bootRecord(plainDir)
       const defaultCeilings = {
-        planner: 64, 'tech-lead': null, builder: null, reviewer: null, lead: 32,
-        source: { planner: 'default', 'tech-lead': 'absent', builder: 'absent', reviewer: 'absent', lead: 'default' },
+        planner: 64, 'tech-lead': null, builder: 200, reviewer: 48, lead: 32,
+        source: { planner: 'default', 'tech-lead': 'absent', builder: 'default', reviewer: 'default', lead: 'default' },
       }
       assert.deepEqual(plainCrew.turn_ceilings, defaultCeilings)
       assert.deepEqual(plainBoot.turn_ceilings, defaultCeilings)

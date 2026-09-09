@@ -27,6 +27,7 @@ import { PROTECTED_PATHS } from '../crew/protected-paths.mjs'
 import { CTX, buildEnv, driveTask, fakeIo, leadEnv, planEnv, RED, reviewEnv } from '../crew/drive-fixtures.mjs'
 
 const SCRIPT = join(ROOT, 'scripts', 'factory', 'make-brief.mjs')
+const FAST_FIXTURE_TEST = 'printf "pass 2\\nfail 0\\n"'
 const fixtureRoot = scratchDir('factory-make-brief-')
 const EMPTY_FACTORY = join(fixtureRoot, 'empty-factory')
 mkdirSync(EMPTY_FACTORY)
@@ -294,7 +295,8 @@ test('the four authored lines are carried verbatim and compilation is idempotent
 })
 
 test('pack mode moves boilerplate to sidecars and preserves the inline verdict', () => {
-  const root = fixture('pack-basic', { coupledCaller: true })
+  // Compiler/git/filesystem coverage remains real; only the irrelevant nested baseline suite is replaced.
+  const root = fixture('pack-basic', { coupledCaller: true, scripts: FAST_FIXTURE_TEST })
   const issueBody = 'Issue body line one.\nIssue body line two.'
   const issue = put(root, 'issue-body.md', `${issueBody}\n`)
   const journal = put(root, 'journal.jsonl', '{"event":"plan"}\n{"event":"build"}\n')
@@ -576,7 +578,8 @@ test('pack and issue-body flags refuse their missing prerequisites', () => {
 })
 
 test('every packed absence uses one closed reason and never invents a value', () => {
-  const root = fixture('pack-absence-reasons')
+  // Compiler/git/filesystem coverage remains real; only the irrelevant nested baseline suite is replaced.
+  const root = fixture('pack-absence-reasons', { scripts: FAST_FIXTURE_TEST })
   const issuePath = join(root, 'missing-issue.md')
   const journalPath = join(root, 'missing-journal.jsonl')
   const cases = [
@@ -684,7 +687,8 @@ test('creates refuses symlinked parent segments and classifies a present leaf as
 })
 
 test('creates keeps missing-path strict in both where/creates directions and accepts an empty list', () => {
-  const root = fixture('creates-controls')
+  // Compiler/git/filesystem coverage remains real; only the irrelevant nested baseline suite is replaced.
+  const root = fixture('creates-controls', { scripts: FAST_FIXTURE_TEST })
   const absentInBoth = run(root, [
     '--request', request(root, { where: ['lib/new-widget.mjs'], creates: ['lib/new-widget.mjs'] }), '--checkout', root,
   ])
@@ -1702,7 +1706,8 @@ test('the lane is never inferred from the output filename', () => {
 })
 
 test('scope validation refuses unslashed directories without changing the rendered surface', () => {
-  const root = fixture('scope-surface')
+  // Compiler/git/filesystem coverage remains real; only the irrelevant nested baseline suite is replaced.
+  const root = fixture('scope-surface', { scripts: FAST_FIXTURE_TEST })
   const fencesPath = put(root, 'fences.json', `${JSON.stringify({
     lanes: [
       { lane: 'own', files: ['lib/widget.mjs', 'config'] },
@@ -1970,7 +1975,8 @@ test('the charter and the checklist state the contract the driver enforces', () 
 })
 
 test('out refusal and force overwrite follow the CLI contract', () => {
-  const root = fixture('out-contract')
+  // Compiler/git/filesystem coverage remains real; only the irrelevant nested baseline suite is replaced.
+  const root = fixture('out-contract', { scripts: FAST_FIXTURE_TEST })
   const requestPath = request(root)
   const out = join(root, 'result.md')
   let result = run(root, ['--request', requestPath, '--checkout', root, '--out', out])
@@ -2691,7 +2697,8 @@ test('a coupled fixture can acknowledge a read-only caller verbatim', () => {
 })
 
 test('stale and malformed coupling acknowledgements refuse by input reason', () => {
-  const root = fixture('coupled-bad-reads', { coupledCaller: true })
+  // Compiler/git/filesystem coverage remains real; only the irrelevant nested baseline suite is replaced.
+  const root = fixture('coupled-bad-reads', { coupledCaller: true, scripts: FAST_FIXTURE_TEST })
   const stalePath = put(root, 'stale-fences.json', `${JSON.stringify({
     lanes: [{ lane: 'own', files: ['lib/widget.mjs'], reads: [{ file: 'config/thing.yml', why: 'not a caller' }] }],
   }, null, 2)}\n`)

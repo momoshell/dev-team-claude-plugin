@@ -25,9 +25,6 @@
   "scripts/factory/reap-stale.mjs:81": "export const REAP_ACCOUNTING = Object.freeze",
   "scripts/factory/emit.mjs:1504": "function refuseUnknownFlags(verb, flags)",
   "test/factory-emit.test.mjs:1697": "CLI: emit-cli-unknown-flag-refusal",
-  "crew/drive-review.test.mjs:1460": "assert.deepEqual([...DECISIONS], ['bounce', 'bounce-builder', 'bounce-reviewer', 'accept', 'escalate'])",
-  "crew/drive-review.test.mjs:1458": "DECISIONS and LIMITS are the frozen public contract",
-  "crew/drive-review.test.mjs:1459": "Object.isFrozen(DECISIONS) && Object.isFrozen(LIMITS)",
   "docs/conventions.md:124": "A frozen exported enum's drift guard needs",
   "docs/conventions.md:47": "first TypeScript file on main, and every file under",
   "crew/drive.mjs:423": "export const DECISIONS = Object.freeze",
@@ -41,5 +38,8 @@
   "crew/drive.mjs:587": "ENVELOPE_FIELD_KINDS.includes(field?.kind)",
   "crew/drive.mjs:581": "if (!shape || typeof shape !== 'object')",
   "test/factory-ledger.test.mjs:3636": "unknown flag --untill",
-  "test/factory-ledger.test.mjs:3634": "refused.status, 2, refused.stderr"
+  "test/factory-ledger.test.mjs:3634": "refused.status, 2, refused.stderr",
+  "crew/drive-review.test.mjs:1462": "assert.deepEqual([...DECISIONS], ['bounce', 'bounce-builder', 'bounce-reviewer', 'accept', 'escalate'])",
+  "crew/drive-review.test.mjs:1460": "DECISIONS and LIMITS are the frozen public contract",
+  "crew/drive-review.test.mjs:1461": "Object.isFrozen(DECISIONS) && Object.isFrozen(LIMITS)"
 }

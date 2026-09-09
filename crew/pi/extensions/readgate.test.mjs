@@ -1,5 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { scratchDir } from '../../../test/helpers.mjs'
@@ -10,6 +11,7 @@ function fixture() {
   const taskDir = join(root, 'task')
   mkdirSync(taskDir, { recursive: true })
   const large = join(root, 'large.txt')
+  const ranged = join(root, 'ranged.txt')
   const edge = join(root, 'edge.txt')
   const noNewline = join(root, 'no-newline.txt')
   const quotedPipe = join(root, 'large|name.txt')
@@ -18,6 +20,7 @@ function fixture() {
   const dashName = join(root, '-n')
   const plusName = join(root, '+20')
   writeFileSync(large, 'large\n'.repeat(351))
+  writeFileSync(ranged, Array.from({ length: 700 }, (_, index) => `line-${index + 1}`).join('\n'))
   writeFileSync(edge, 'edge\n'.repeat(350))
   writeFileSync(noNewline, Array.from({ length: 350 }, (_, index) => `line-${index}`).join('\n'))
   writeFileSync(quotedPipe, 'quoted pipe\n'.repeat(351))
@@ -26,7 +29,7 @@ function fixture() {
   writeFileSync(dashName, 'dash\n'.repeat(351))
   writeFileSync(plusName, 'plus\n'.repeat(351))
   writeFileSync(join(root, 'journal.jsonl'), '')
-  return { root, taskDir, large, edge, noNewline, quotedPipe, escapedPipe, spaced, dashName, plusName }
+  return { root, taskDir, large, ranged, edge, noNewline, quotedPipe, escapedPipe, spaced, dashName, plusName }
 }
 
 let nextToolCallId = 0
@@ -272,61 +275,170 @@ test('missing files, injected failures, and throwing recorders always allow', ()
 test('A1', () => {
   const f = fixture()
   const gate = gateFor(f)
-  const outer = { path: f.edge, offset: 10, limit: 20 }
-  assert.equal(call(gate, 'read', outer, f.root, 'a1-outer'), undefined)
-  deliver(gate, 'a1-outer')
+  const first = { path: f.ranged, offset: 180, limit: 251 }
+  assert.equal(call(gate, 'read', first, f.root, 'a1-first'), undefined)
+  deliver(gate, 'a1-first')
 
-  const exact = { path: f.edge, offset: 10, limit: 20 }
-  const contained = { path: f.edge, offset: 15, limit: 5 }
-  for (const input of [exact, contained]) {
-    const before = JSON.stringify(input)
-    const result = call(gate, 'read', input, f.root, `a1-${input.offset}`)
-    assert.equal(result?.block, true)
-    unchanged(input, before)
-  }
+  const sliding = { path: f.ranged, offset: 400, limit: 201 }
+  const before = JSON.stringify(sliding)
+  const result = call(gate, 'read', sliding, f.root, 'a1-sliding')
+  assert.equal(result?.block, true)
+  assert.match(result.reason, /31\/201/)
+  assert.match(result.reason, /431-600/)
+  unchanged(sliding, before)
 })
 
 test('B1', () => {
   const f = fixture()
   const gate = gateFor(f)
-  const input = { path: f.edge, offset: 10, limit: 20 }
-  const before = JSON.stringify(input)
-  assert.equal(call(gate, 'read', input, f.root, 'b1'), undefined)
-  unchanged(input, before)
+  const first = { path: f.ranged, offset: 1, limit: 10 }
+  assert.equal(call(gate, 'read', first, f.root, 'b1-first'), undefined)
+  deliver(gate, 'b1-first')
+
+  const mostlyNew = { path: f.ranged, offset: 10, limit: 91 }
+  const before = JSON.stringify(mostlyNew)
+  assert.equal(call(gate, 'read', mostlyNew, f.root, 'b1-mostly-new'), undefined)
+  unchanged(mostlyNew, before)
 })
 
 test('C1', () => {
   const f = fixture()
   const gate = gateFor(f)
-  const first = { path: f.edge, offset: 10, limit: 20 }
+  const first = { path: f.ranged, offset: 10, limit: 20 }
   assert.equal(call(gate, 'read', first, f.root, 'c1-first'), undefined)
   deliver(gate, 'c1-first')
-  const disjoint = { path: f.edge, offset: 40, limit: 5 }
-  const before = JSON.stringify(disjoint)
-  assert.equal(call(gate, 'read', disjoint, f.root, 'c1-disjoint'), undefined)
-  unchanged(disjoint, before)
+  const contained = { path: f.ranged, offset: 15, limit: 5 }
+  const result = call(gate, 'read', contained, f.root, 'c1-contained')
+  const expected = `Refusing repeated read of ${f.ranged}, range 15-19: unchanged content was delivered at turn 1. Use grep with a targeted pattern instead: grep ${JSON.stringify({ pattern: '<target>', path: f.ranged })}`
+  assert.equal(result?.reason, expected)
 })
 
 test('C2', () => {
   const f = fixture()
   const gate = gateFor(f)
-  const first = { path: f.edge, offset: 10, limit: 20 }
+  const first = { path: f.ranged, offset: 10, limit: 20 }
   assert.equal(call(gate, 'read', first, f.root, 'c2-first'), undefined)
   deliver(gate, 'c2-first')
-  const partial = { path: f.edge, offset: 25, limit: 20 }
+  const partial = { path: f.ranged, offset: 25, limit: 20 }
   const before = JSON.stringify(partial)
-  assert.equal(call(gate, 'read', partial, f.root, 'c2-partial'), undefined)
+  const result = call(gate, 'read', partial, f.root, 'c2-partial')
+  assert.equal(result?.block, true)
+  assert.match(result.reason, /5\/20/)
   unchanged(partial, before)
+})
+
+test('coverage unions deduplicate overlaps and merge adjacent deliveries', () => {
+  const f = fixture()
+  const gate = gateFor(f)
+  const first = { path: f.ranged, offset: 1, limit: 20 }
+  assert.equal(call(gate, 'read', first, f.root, 'union-first'), undefined)
+  deliver(gate, 'union-first')
+  gate.onTurnStart({ type: 'turn_start', turnIndex: 1 })
+  const second = { path: f.ranged, offset: 20, limit: 20 }
+  assert.equal(call(gate, 'read', second, f.root, 'union-second'), undefined)
+  deliver(gate, 'union-second')
+  const overlap = call(gate, 'read', { path: f.ranged, offset: 10, limit: 30 }, f.root, 'union-overlap')
+  assert.equal(overlap?.block, true)
+  assert.match(overlap.reason, /30\/30/)
+  assert.match(overlap.reason, /covering turns 1, 2/)
+
+  gate.onTurnStart({ type: 'turn_start', turnIndex: 2 })
+  const adjacentFirst = { path: f.ranged, offset: 100, limit: 10 }
+  assert.equal(call(gate, 'read', adjacentFirst, f.root, 'adjacent-first'), undefined)
+  deliver(gate, 'adjacent-first')
+  gate.onTurnStart({ type: 'turn_start', turnIndex: 3 })
+  const adjacentSecond = { path: f.ranged, offset: 110, limit: 10 }
+  assert.equal(call(gate, 'read', adjacentSecond, f.root, 'adjacent-second'), undefined)
+  deliver(gate, 'adjacent-second')
+  const adjacent = call(gate, 'read', { path: f.ranged, offset: 105, limit: 15 }, f.root, 'adjacent-union')
+  assert.equal(adjacent?.block, true)
+  assert.match(adjacent.reason, /15\/15/)
+  assert.match(adjacent.reason, /covering turns 3, 4/)
+})
+
+test('disjoint coverage reports each uncovered remainder once', () => {
+  const f = fixture()
+  const gate = gateFor(f)
+  const first = { path: f.ranged, offset: 1, limit: 10 }
+  assert.equal(call(gate, 'read', first, f.root, 'disjoint-first'), undefined)
+  deliver(gate, 'disjoint-first')
+  gate.onTurnStart({ type: 'turn_start', turnIndex: 1 })
+  const second = { path: f.ranged, offset: 30, limit: 10 }
+  assert.equal(call(gate, 'read', second, f.root, 'disjoint-second'), undefined)
+  deliver(gate, 'disjoint-second')
+  const result = call(gate, 'read', { path: f.ranged, offset: 1, limit: 39 }, f.root, 'disjoint-union')
+  assert.equal(result?.block, true)
+  assert.match(result.reason, /20\/39/)
+  assert.match(result.reason, /uncovered ranges 11-29/)
+})
+
+test('empty, past-EOF, and failed deliveries remain admissible', () => {
+  const f = fixture()
+  const gate = gateFor(f)
+  const past = { path: f.ranged, offset: 999, limit: 10 }
+  assert.equal(call(gate, 'read', past, f.root, 'empty-past'), undefined)
+  deliver(gate, 'empty-past')
+  assert.equal(call(gate, 'read', past, f.root, 'empty-past-repeat'), undefined)
+
+  let emptySnapshots = 0
+  const emptyGate = gateFor(f, { deps: { snapshotFile: () => {
+    emptySnapshots += 1
+    return { fingerprint: 'empty', lineCount: 0 }
+  } } })
+  const empty = { path: f.ranged, offset: 1, limit: 1 }
+  assert.equal(call(emptyGate, 'read', empty, f.root, 'empty-file'), undefined)
+  deliver(emptyGate, 'empty-file')
+  assert.equal(call(emptyGate, 'read', empty, f.root, 'empty-file-repeat'), undefined)
+  assert.equal(emptySnapshots, 3)
+
+  const failedGate = gateFor(f)
+  const failed = { path: f.ranged, offset: 1, limit: 10 }
+  assert.equal(call(failedGate, 'read', failed, f.root, 'failed'), undefined)
+  assert.equal(failedGate.onToolResult({ type: 'tool_result', toolName: 'read', toolCallId: 'failed', isError: true, details: {} }), undefined)
+  assert.equal(call(failedGate, 'read', failed, f.root, 'failed-repeat'), undefined)
+})
+
+test('ranged inspection and result failures fail open', () => {
+  const f = fixture()
+  const callRows = []
+  const callGate = gateFor(f, {
+    deps: {
+      snapshotFile: () => { throw new Error('call snapshot boom') },
+      recordFailure: (row) => callRows.push(row),
+    },
+  })
+  const callInput = { path: f.ranged, offset: 10, limit: 20 }
+  assert.equal(call(callGate, 'read', callInput, f.root, 'fail-call'), undefined)
+  assert.equal(callRows.length, 1)
+  assert.match(callRows[0].read_gate_failure.reason, /call snapshot boom/)
+
+  const resultRows = []
+  let snapshots = 0
+  const resultGate = gateFor(f, {
+    deps: {
+      snapshotFile: () => {
+        snapshots += 1
+        if (snapshots > 1) throw new Error('result snapshot boom')
+        return { fingerprint: 'initial', lineCount: 700 }
+      },
+      recordFailure: (row) => resultRows.push(row),
+    },
+  })
+  assert.equal(call(resultGate, 'read', { path: f.ranged, offset: 10, limit: 20 }, f.root, 'fail-result'), undefined)
+  const event = { type: 'tool_result', toolName: 'read', toolCallId: 'fail-result', isError: false, details: {} }
+  assert.doesNotThrow(() => assert.equal(resultGate.onToolResult(event), undefined))
+  assert.equal(resultRows.length, 1)
+  assert.match(resultRows[0].read_gate_failure.reason, /result snapshot boom/)
 })
 
 test('D1', () => {
   const f = fixture()
   const gate = gateFor(f)
-  const first = { path: f.edge, offset: 10, limit: 20 }
+  const first = { path: f.ranged, offset: 10, limit: 20 }
   assert.equal(call(gate, 'read', first, f.root, 'd1-first'), undefined)
   deliver(gate, 'd1-first')
-  writeFileSync(f.edge, `changed\n${'edge\n'.repeat(349)}`)
-  const repeat = { path: f.edge, offset: 10, limit: 20 }
+  writeFileSync(f.ranged, `changed\n${Array.from({ length: 699 }, (_, index) => `line-${index + 1}`).join('\n')}`)
+  const repeat = { path: f.ranged, offset: 10, limit: 20 }
   const before = JSON.stringify(repeat)
   assert.equal(call(gate, 'read', repeat, f.root, 'd1-repeat'), undefined)
   unchanged(repeat, before)
@@ -334,14 +446,52 @@ test('D1', () => {
 
 test('E1', () => {
   const f = fixture()
-  const gate = gateFor(f)
-  const input = { path: f.large }
-  const before = JSON.stringify(input)
-  assert.deepEqual(call(gate, 'read', input, f.root, 'e1'), {
-    block: true,
-    reason: `Refusing whole-file read of ${f.large}: 351 lines exceeds threshold 350. Use a ranged read, for example: read ${JSON.stringify({ path: f.large, offset: 1, limit: 350 })}`,
+  const rows = []
+  const gate = gateFor(f, { deps: { recordFailure: (row) => rows.push(row) } })
+  const first = { path: f.ranged, offset: 10, limit: 20 }
+  assert.equal(call(gate, 'read', first, f.root, 'e1-contained-first'), undefined)
+  deliver(gate, 'e1-contained-first')
+  const contained = call(gate, 'read', { path: f.ranged, offset: 15, limit: 5 }, f.root, 'e1-contained')
+  assert.equal(contained?.block, true)
+
+  gate.onTurnStart({ type: 'turn_start', turnIndex: 1 })
+  const second = { path: f.ranged, offset: 180, limit: 251 }
+  assert.equal(call(gate, 'read', second, f.root, 'e1-slide-first'), undefined)
+  deliver(gate, 'e1-slide-first')
+  gate.onTurnStart({ type: 'turn_start', turnIndex: 2 })
+  const third = { path: f.ranged, offset: 500, limit: 50 }
+  assert.equal(call(gate, 'read', third, f.root, 'e1-slide-second'), undefined)
+  deliver(gate, 'e1-slide-second')
+  const sliding = call(gate, 'read', { path: f.ranged, offset: 400, limit: 201 }, f.root, 'e1-sliding')
+  assert.equal(sliding?.block, true)
+
+  assert.equal(rows.length, 2)
+  const containedRow = rows[0].read_gate_refusal
+  assert.equal(Number.isInteger(containedRow.overlap_delivered), true)
+  assert.equal(Number.isInteger(containedRow.overlap_requested), true)
+  assert.deepEqual(containedRow, {
+    path: f.ranged,
+    range: '15-19',
+    overlap_delivered: 5,
+    overlap_requested: 5,
+    covering_turns: [1],
+    uncovered_ranges: [],
   })
-  unchanged(input, before)
+  const slidingRow = rows[1].read_gate_refusal
+  assert.equal(Number.isInteger(slidingRow.overlap_delivered), true)
+  assert.equal(Number.isInteger(slidingRow.overlap_requested), true)
+  assert.deepEqual(slidingRow.covering_turns, [2, 3])
+  assert.deepEqual(slidingRow.uncovered_ranges, ['431-499', '550-600'])
+  assert.equal(slidingRow.overlap_delivered, 81)
+  assert.equal(slidingRow.overlap_requested, 201)
+
+  const throwing = gateFor(f, { deps: { recordFailure: () => { throw new Error('journal unavailable') } } })
+  assert.equal(call(throwing, 'read', first, f.root, 'e1-throw-first'), undefined)
+  deliver(throwing, 'e1-throw-first')
+  assert.doesNotThrow(() => {
+    const result = call(throwing, 'read', { path: f.ranged, offset: 15, limit: 5 }, f.root, 'e1-throw-contained')
+    assert.equal(result?.block, true)
+  })
 })
 
 test('E2', () => {
@@ -355,11 +505,21 @@ test('E2', () => {
 
 test('F1', () => {
   const f = fixture()
-  const gate = gateFor(f)
-  const input = { pattern: 'edge', path: f.large, extra: { keep: true } }
-  const before = JSON.stringify(input)
-  assert.equal(call(gate, 'grep', input, f.root, 'f1'), undefined)
-  unchanged(input, before)
+  for (const role of ['planner', 'tech-lead']) {
+    const gate = gateFor(f, { role })
+    const allowed = { path: f.edge }
+    const allowedBefore = JSON.stringify(allowed)
+    assert.equal(call(gate, 'read', allowed, f.root, `f1-${role}-350`), undefined)
+    unchanged(allowed, allowedBefore)
+
+    const input = { path: f.large }
+    const before = JSON.stringify(input)
+    assert.deepEqual(call(gate, 'read', input, f.root, `f1-${role}-351`), {
+      block: true,
+      reason: `Refusing whole-file read of ${f.large}: 351 lines exceeds threshold 350. Use a ranged read, for example: read ${JSON.stringify({ path: f.large, offset: 1, limit: 350 })}`,
+    })
+    unchanged(input, before)
+  }
 })
 
 test('F2', () => {
@@ -382,15 +542,17 @@ test('F3', () => {
 
 test('G1', () => {
   const f = fixture()
-  const firstGate = gateFor(f)
-  const first = { path: f.edge, offset: 10, limit: 20 }
-  assert.equal(call(firstGate, 'read', first, f.root, 'g1-first'), undefined)
-  deliver(firstGate, 'g1-first')
-  const secondGate = gateFor(f)
-  const repeat = { path: f.edge, offset: 10, limit: 20 }
-  const before = JSON.stringify(repeat)
-  assert.equal(call(secondGate, 'read', repeat, f.root, 'g1-second'), undefined)
-  unchanged(repeat, before)
+  let snapshots = 0
+  const gate = gateFor(f, { deps: { snapshotFile: () => { snapshots += 1; throw new Error('unexpected snapshot') } } })
+  const grep = { pattern: 'line', path: f.ranged, extra: { keep: true } }
+  const grepBefore = JSON.stringify(grep)
+  assert.equal(call(gate, 'grep', grep, f.root, 'g1-grep'), undefined)
+  unchanged(grep, grepBefore)
+  const retrieve = { path: f.ranged, offset: 1, limit: 20, extra: { keep: true } }
+  const retrieveBefore = JSON.stringify(retrieve)
+  assert.equal(call(gate, 'retrieve', retrieve, f.root, 'g1-retrieve'), undefined)
+  unchanged(retrieve, retrieveBefore)
+  assert.equal(snapshots, 0)
 })
 
 test('G2', () => {
@@ -405,48 +567,37 @@ test('G2', () => {
 })
 
 test('H1', () => {
-  const f = fixture()
-  const callRows = []
-  const callGate = gateFor(f, {
-    deps: {
-      snapshotFile: () => { throw new Error('call snapshot boom') },
-      recordFailure: (row) => callRows.push(row),
-    },
-  })
-  const callInput = { path: f.edge, offset: 10, limit: 20 }
-  const callBefore = JSON.stringify(callInput)
-  assert.equal(call(callGate, 'read', callInput, f.root, 'h1-call'), undefined)
-  unchanged(callInput, callBefore)
-  assert.equal(callRows.length, 1)
-  assert.match(callRows[0].read_gate_failure.reason, /call snapshot boom/)
-
-  const resultRows = []
-  let snapshots = 0
-  const resultGate = gateFor(f, {
-    deps: {
-      snapshotFile: () => {
-        snapshots += 1
-        if (snapshots > 1) throw new Error('result snapshot boom')
-        return { fingerprint: 'initial', lineCount: 350 }
-      },
-      recordFailure: (row) => resultRows.push(row),
-    },
-  })
-  const resultInput = { path: f.edge, offset: 10, limit: 20 }
-  assert.equal(call(resultGate, 'read', resultInput, f.root, 'h1-result'), undefined)
-  const event = {
-    type: 'tool_result',
-    toolName: 'read',
-    toolCallId: 'h1-result',
-    isError: false,
-    details: {},
-    content: [{ type: 'text', text: 'delivered' }],
+  const source = readFileSync(new URL('./readgate.ts', import.meta.url), 'utf8')
+  assert.match(source, /const REPEAT_OVERLAP_THRESHOLD = 0\.15/)
+  assert.match(source, /Measured after landing: 10 sessions, 558 ranged reads; 15% would refuse 192\/558 \(34\.4%\)\./)
+  for (const [threshold, refused, fraction] of [
+    ['5', '210/558', '37.6%'],
+    ['10', '199/558', '35.7%'],
+    ['15', '192/558', '34.4%'],
+    ['20', '183/558', '32.8%'],
+    ['50', '146/558', '26.2%'],
+    ['80', '121/558', '21.7%'],
+    ['90', '104/558', '18.6%'],
+    ['100', '45/558', '8.1%'],
+  ]) {
+    assert.ok(source.includes(`| ${threshold}% | ${refused} | ${fraction} |`), `${threshold}% measurement missing`)
   }
-  const eventBefore = JSON.stringify(event)
-  assert.equal(resultGate.onToolResult(event), undefined)
-  assert.equal(JSON.stringify(event), eventBefore)
-  assert.equal(resultRows.length, 1)
-  assert.match(resultRows[0].read_gate_failure.reason, /result snapshot boom/)
+})
+
+test('RV1-1 keeps H1 threshold measurements checkout-contained', () => {
+  const env = { ...process.env }
+  delete env.NODE_TEST_CONTEXT
+  const result = spawnSync(process.execPath, [
+    '--test',
+    '--test-reporter=tap',
+    '--test-name-pattern=^H1$',
+    new URL('./readgate.test.mjs', import.meta.url).pathname,
+  ], {
+    encoding: 'utf8',
+    env: { ...env, CREW_TASK_DIR: '/nonexistent-task-dir' },
+  })
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
+  assert.match(result.stdout, /^ok \d+ - H1$/m)
 })
 
 test('RV1-1 truncation metadata admits the untruncated tail', () => {

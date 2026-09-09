@@ -1,6 +1,6 @@
 # ADR-042 — Split the test suites, not the driver
 
-**Status:** ratified 2026-09-08 · **superseded in part 2026-09-09, see Amendment 3 — the park is LIFTED and the splits proceed** · **Issue:** #1033 · **Owner:** operator
+**Status:** ratified 2026-09-08 · **superseded in part 2026-09-09, see Amendments 3 and 4 — the park is LIFTED and the source order is aimed at the queue** · **Issue:** #1033 · **Owner:** operator
 
 ## Decision
 
@@ -331,6 +331,86 @@ The four files above it are where the technique is proven at lower cost.
   unbuilt, so the benefit remains unmeasured in both directions. The basis for
   this amendment is the owner's design standard, and it should be cited as that
   rather than as a measured payoff.
+
+## Amendment 4 — 2026-09-09: the source order is aimed at the queue, not at the cheapest seam
+
+**Owner's decision 2026-09-09.** Amendment 3 ordered the source files by edges per
+cluster ascending — cheapest real seam first. That order de-risks the technique
+correctly and **delivers the throughput payoff last**, because the four files
+ahead of `crew/drive.mjs` are not where the queue jams. This amendment keeps one
+cheap exhibit and then aims at the queue.
+
+### Measured: which files actually gate the open board
+
+Over the **54 open non-meta issues** at `da33ea5` — every open issue except the
+split issues, the fence-scope issue, the size census, the epics and the durable
+audit indexes, which name files as subject matter without needing to write them:
+
+| file | open issues gated |
+|---|---|
+| **`crew/drive.mjs`** | **19** |
+| `crew/crew.mjs` | 9 |
+| `scripts/factory/dispatch-batch.mjs` | 5 |
+| `crew/seat-io.mjs` | 5 |
+| `scripts/factory/ledger.mjs` | 4 |
+| `crew/crew.test.mjs` | 3 |
+| `test/factory-dispatch-batch.test.mjs` | ≤2 |
+
+**`crew/drive.mjs` gates 35% of the open board by itself.** The two suites this
+ADR splits gate five issues between them.
+
+### Consequence 1 — the suite splits are not a throughput measure, and must not be sold as one
+
+They remain worth doing, for reasons this ADR already records: a smaller file for
+the builder to read, smaller briefs, fewer reach-exhibit collisions. **They are
+not a parallelism unlock.** #1061's span fences already let two lanes hold
+disjoint spans of `crew/crew.test.mjs` today, so part of even those three issues
+is relief already delivered. Anyone citing the suite splits as the fix for batch
+size is citing the wrong thing.
+
+### Consequence 2 — the unlock is act 1, and it arrives before any file is divided
+
+The 19 issues converge on `runTask` (`crew/drive.mjs:2944-6928`, 3,985 lines under
+ONE top-level declaration), which is why one span per file means one lane. **Once
+those decisions live behind narrow interfaces, span fences begin to work on the
+file** and several lanes can hold disjoint pieces of it — *before* the file is
+ever divided.
+
+So the throughput payoff is the deliverable of **act 1**, not act 2. A `drive.mjs`
+act-1 lane that creates and proves the interfaces, and divides nothing, has
+already bought the unlock. Act 2 may follow at leisure.
+
+### The revised source order
+
+1. **`scripts/factory/dispatch-batch.mjs` act 1 — the technique exhibit.** 7
+   clusters, 762 edges, not on the floor, 3 tests reaching. The smallest and
+   lowest-risk place to establish what an act-1 lane produces: the interface
+   designed in the plan phase, the decisions moved behind it, the suite green,
+   and the file still one file.
+2. **`crew/drive.mjs` act 1 — the unlock.** Straight here once the method is
+   proven. It stays the hardest interface to design and is still the only
+   candidate on the protected floor, so it still runs as a judge lane; what
+   changes is that it no longer waits behind three files that gate nothing.
+3. **`crew/seat-io.mjs`, `scripts/factory/ledger.mjs`, `crew/crew.mjs` — after.**
+   They gate 18 issues between them and are worth doing; they are not worth doing
+   first.
+4. **Act 2 (the division) for any file — last, and only on evidence.** Once act 1
+   has landed on a file, re-measure before dividing it: `seams.mjs` against the
+   post-interface file is a different report from the one that motivated the work.
+
+Amendment 3's two-act rule is unchanged and is what makes this safe: a mechanical
+division along 9,641 cross-cluster edges would still produce layers that forward
+arguments. Nothing here authorises skipping act 1.
+
+### Blind spot
+
+**The issue-to-file mapping is a static scan of issue bodies**, so it counts a
+file an issue merely *cites* the same as one it must write, and it misses a file
+an issue needs but never names. It is a ranking, not a fence plan; the five and
+nineteen are the same instrument, so the comparison holds even where the absolute
+counts do not. The suite-split relief figure (three issues) is the one most
+likely to be understated, since a suite is often unnamed in a body that will
+still need it.
 
 ## What this deliberately does not do
 

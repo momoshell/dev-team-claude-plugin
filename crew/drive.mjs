@@ -4164,7 +4164,42 @@ function runTask(ctx, io, crash) {
       stageComplete()
       continue
     }
-    const protectedScope = protectedHits(env.details?.files_in_scope, ctx.protectedPaths)
+    // The planner's scope is consumed by both adversary resolution and the scope
+    // comparison below. Validate it once, before either consumer can dereference an
+    // entry, and keep the declaration itself unchanged in every refusal.
+    const plannedScope = env.details?.files_in_scope
+    let plannedScopeErrors = []
+    try {
+      if (!Array.isArray(plannedScope)) {
+        plannedScopeErrors = [{ entry: plannedScope, why: 'files_in_scope must be a non-empty array' }]
+      } else if (plannedScope.length === 0) {
+        plannedScopeErrors = [{ entry: plannedScope, why: 'files_in_scope must be a non-empty array' }]
+      } else {
+        plannedScopeErrors = validateScopeEntries(plannedScope)
+      }
+    } catch (err) {
+      plannedScopeErrors = [{ entry: plannedScope, why: `files_in_scope could not be validated: ${err?.message ?? String(err)}` }]
+    }
+    if (plannedScopeErrors.length > 0) {
+      const why = `files_in_scope carries entries the scope gate cannot honor: ${plannedScopeErrors.map(({ entry, why: defect }) => `${displayScopeValue(entry)} (${defect})`).join('; ')}`
+      if (round >= planRounds()) {
+        stageComplete()
+        return escalate('plan', why, env.artifacts || [])
+      }
+      const b = art(`plan-bounce-r${round}.md`)
+      failureUpgrade('plan', 'planner')
+      io.writeFile(b, [
+        `# Plan scope correction (round ${round})`, '', why, '',
+        'Correct the files_in_scope declaration and return it inside the dispatched surface.',
+        `Original brief: ${ctx.briefFile}`,
+      ].join('\n'))
+      planBrief = b
+      planNote = PLAN_SCOPE.malformed
+      planEnv = null
+      stageComplete()
+      continue
+    }
+    const protectedScope = protectedHits(plannedScope, ctx.protectedPaths)
     const currentAdversary = resolveAdversaryTrigger(env.details, protectedScope)
     if (currentAdversary.refusal) {
       stageComplete()
@@ -4177,46 +4212,84 @@ function runTask(ctx, io, crash) {
     // round-1 envelope. The row is emitted once, where the decision is actually
     // consumed, so it names the trigger of the plan that was accepted.
     planAdversary = currentAdversary
-    // #843 — the dispatched write surface is a CEILING: a replan may NARROW it, never
-    // WIDEN it. The triage/repair shape has held this rule since crew/drive.mjs:2972.
-    // Checked on EVERY round, not only the accepted one, because a bounce is reachable
-    // only from inside this loop and the lead's "accept the latest plan anyway" path
-    // would otherwise let a widened envelope through. Measured against
-    // ctx.files_in_scope every round and never against the previous plan: otherwise one
-    // bounce launders the swap it was raised to correct. Placed before the carve check
-    // because the surface promise is a precondition of considering the plan at all, and
-    // a bounce is cheaper than a plan-carve escalation; slices obey the same rule anyway.
-    // The DISPATCHED side is validated by every dispatch path before driveTask sees it;
-    // the PLANNED side is not validated until crew/drive.mjs:3201-3210, AFTER this loop.
-    // scopeMatcher calls entry.endsWith('/') and repoRelativePath.startsWith(entry)
-    // unconditionally, so a planner envelope carrying files_in_scope: [null] would THROW
-    // here and never reach the typed escalate('plan', …) refusal that already exists for
-    // it. So this comparison runs only on a planned scope the scope gate could honor;
-    // anything else bypasses the block untouched and is refused, in one place, below.
-    // Malformed planner output is NOT classified as narrowed, widened or undispatched —
-    // it was never compared, and inventing a verdict for it would be the fabricated
-    // reading the null in `dispatched` exists to avoid.
-    const plannedScope = env.details?.files_in_scope
-    const plannedComparable = Array.isArray(plannedScope) && plannedScope.length > 0
-      && validateScopeEntries(plannedScope).length === 0
-    if (plannedComparable) {
-      const planScope = planScopeVerdict(ctx.files_in_scope, plannedScope)
-      io.log(recordRow({ at: io.now(), plan_scope: { round, ...planScope } }))
-      if (planScope.verdict === PLAN_SCOPE.widened) {
-        const scopeFinal = round >= planRounds()
-        if (scopeFinal) {
-          stageComplete()
-          return escalate(PLAN_SCOPE.widened, planScopeWhy(planScope, true), env.artifacts || [])
-        }
-        const b = art(`plan-bounce-r${round}.md`)
-        failureUpgrade('plan', 'planner') // the kind the other three plan bounces already use
-        io.writeFile(b, planScopeBounceLines(round, planScope, ctx.briefFile, ctx.files_in_scope).join('\n'))
-        planBrief = b
-        planNote = PLAN_SCOPE.widened
-        planEnv = null
-        stageComplete()
-        continue
+    // #843 — compute additions before any Git probe. Exact, narrowed, and dispatched
+    // directory-covered literals stay on the old in-memory path; only genuine literal
+    // additions need a tracking answer. A trailing-slash addition remains widening and
+    // is intentionally not sent through Git.
+    const dispatchedScope = Array.isArray(ctx.files_in_scope) && ctx.files_in_scope.length > 0
+      ? ctx.files_in_scope : []
+    const rawAdded = dispatchedScope.length > 0
+      ? outOfScopeFiles(plannedScope, scopeMatcher(dispatchedScope)) : []
+    const literalAdded = rawAdded.filter((entry) => typeof entry === 'string' && !entry.endsWith('/'))
+    let tracked = null
+    let inventoryWhy = null
+    if (literalAdded.length > 0) {
+      let health = null
+      try {
+        health = io.run('git rev-parse --is-inside-work-tree')
+      } catch (err) {
+        inventoryWhy = `Git scope health probe for ${literalAdded.join(', ')} was interrupted: ${err?.message ?? String(err)}`
       }
+      if (!inventoryWhy && health?.ok !== true) {
+        inventoryWhy = `Git scope health probe for ${literalAdded.join(', ')} was unavailable (ok=${String(health?.ok ?? 'unknown')})`
+      }
+      if (!inventoryWhy) {
+        tracked = new Set()
+        for (const path of literalAdded) {
+          let result = null
+          try {
+            result = io.run(`git ls-files --error-unmatch -- ${shellArg(path)}`)
+          } catch (err) {
+            inventoryWhy = `Git scope inventory probe for ${path} was interrupted: ${err?.message ?? String(err)}`
+            break
+          }
+          if (result?.ok === true) tracked.add(path)
+          else if (result?.ok !== false) {
+            inventoryWhy = `Git scope inventory probe for ${path} was unavailable (ok=${String(result?.ok ?? 'unknown')})`
+            break
+          }
+        }
+      }
+    }
+    if (inventoryWhy) {
+      // The planner brief tells the seat not to change its declaration, so another
+      // round cannot repair this infrastructure refusal. failureUpgrade's one-shot
+      // upgradeSpent budget must not spend the lane's only seat upgrade on checkout I/O.
+      inventoryWhy += '; the declaration was not at fault, no path was guessed untracked, and the checkout probe must be repaired before re-dispatch'
+      stageComplete()
+      return escalate('plan', inventoryWhy, env.artifacts || [])
+    }
+    const planScope = planScopeVerdict(ctx.files_in_scope, plannedScope, tracked)
+    if (planScope.verdict === PLAN_SCOPE.malformed) {
+      const scopeFinal = round >= planRounds()
+      if (scopeFinal) {
+        stageComplete()
+        return escalate(PLAN_SCOPE.malformed, planScopeWhy(planScope, true), env.artifacts || [])
+      }
+      const b = art(`plan-bounce-r${round}.md`)
+      failureUpgrade('plan', 'planner')
+      io.writeFile(b, planScopeMalformedBounceLines(round, planScope, ctx.briefFile, ctx.files_in_scope).join('\n'))
+      planBrief = b
+      planNote = PLAN_SCOPE.malformed
+      planEnv = null
+      stageComplete()
+      continue
+    }
+    io.log(recordRow({ at: io.now(), plan_scope: { round, ...planScope } }))
+    if (planScope.verdict === PLAN_SCOPE.widened) {
+      const scopeFinal = round >= planRounds()
+      if (scopeFinal) {
+        stageComplete()
+        return escalate(PLAN_SCOPE.widened, planScopeWhy(planScope, true), env.artifacts || [])
+      }
+      const b = art(`plan-bounce-r${round}.md`)
+      failureUpgrade('plan', 'planner') // the kind the other three plan bounces already use
+      io.writeFile(b, planScopeBounceLines(round, planScope, ctx.briefFile, ctx.files_in_scope).join('\n'))
+      planBrief = b
+      planNote = PLAN_SCOPE.widened
+      planEnv = null
+      stageComplete()
+      continue
     }
     // #915 — resolve the PLANNER's lane against the tree before accepting the plan. The
     // operator's ctx.lane is deliberately NOT read here: --lane is already the operator's
@@ -7331,26 +7404,130 @@ export const PLAN_SCOPE = Object.freeze({
   same: 'plan-scope-same',
   narrowed: 'plan-scope-narrowed',
   widened: 'plan-scope-widened',
+  malformed: 'plan-scope-malformed',
 })
 export const PLAN_SCOPE_VERDICTS = Object.freeze(Object.values(PLAN_SCOPE))
+
+// Scope corrections are deliberately suggestions only. The path that the planner
+// declared remains the path the driver refuses; accepting a correction here would turn
+// a typo into an unreviewed widening.
+export function levenshtein(left, right) {
+  const a = String(left ?? '')
+  const b = String(right ?? '')
+  let previous = Array.from({ length: b.length + 1 }, (_, index) => index)
+  for (let i = 1; i <= a.length; i += 1) {
+    const current = [i]
+    for (let j = 1; j <= b.length; j += 1) {
+      current[j] = a[i - 1] === b[j - 1]
+        ? previous[j - 1]
+        : Math.min(previous[j - 1] + 1, previous[j] + 1, current[j - 1] + 1)
+    }
+    previous = current
+  }
+  return previous[b.length]
+}
+
+const scopePathParts = (path) => {
+  const slash = path.lastIndexOf('/')
+  return { directory: slash < 0 ? '' : path.slice(0, slash), basename: path.slice(slash + 1) }
+}
+const scopeBasenameStem = (basename) => {
+  const dot = basename.lastIndexOf('.')
+  return dot > 0 ? basename.slice(0, dot) : basename
+}
+const displayScopeValue = (value) => {
+  try {
+    const json = JSON.stringify(value)
+    if (json !== undefined) return json
+  } catch {}
+  try { return String(value) } catch { return '<unprintable>' }
+}
+
+// Return a correction only when one candidate is the unique best match. Directory
+// prefixes are never candidates: they describe a surface, not a file that can repair a
+// misspelled literal. Ranking a matching basename stem before edit distance preserves
+// the useful `.mennials` -> `.mjs` diagnosis while equal-ranked candidates stay silent.
+export function scopeSuggestions(malformed, dispatched) {
+  const candidates = [...new Set((Array.isArray(dispatched) ? dispatched : [])
+    .filter((entry) => typeof entry === 'string' && entry !== '' && !entry.endsWith('/')))]
+  const suggestions = new Map()
+  const entries = [...new Set(Array.isArray(malformed) ? malformed : [])]
+  for (const entry of entries) {
+    if (typeof entry !== 'string' || entry === '' || entry.endsWith('/')) continue
+    const bad = scopePathParts(entry)
+    const ranked = candidates
+      .filter((candidate) => candidate !== entry)
+      .map((candidate) => {
+        const good = scopePathParts(candidate)
+        const stemMatch = scopeBasenameStem(bad.basename) === scopeBasenameStem(good.basename)
+        const distance = levenshtein(bad.basename, good.basename)
+        return { candidate, stemMatch, distance, directory: good.directory }
+      })
+      .filter(({ directory, stemMatch, distance }) => (
+        directory === bad.directory && (stemMatch || distance <= 2)
+      ))
+      .sort((left, right) => Number(right.stemMatch) - Number(left.stemMatch) || left.distance - right.distance)
+    if (ranked.length === 0) continue
+    const best = ranked[0]
+    const ties = ranked.filter((candidate) => candidate.stemMatch === best.stemMatch && candidate.distance === best.distance)
+    if (ties.length === 1) suggestions.set(entry, best.candidate)
+  }
+  return suggestions
+}
+
+const trackedScopePath = (tracked, path) => {
+  if (tracked instanceof Map) return tracked.get(path) === true
+  if (tracked instanceof Set) return tracked.has(path)
+  if (Array.isArray(tracked)) return tracked.includes(path)
+  if (tracked && typeof tracked.has === 'function') {
+    try { return tracked.has(path) === true } catch { return false }
+  }
+  return Boolean(tracked && typeof tracked === 'object' && tracked[path] === true)
+}
+
 // Array-ness and non-emptiness are all this helper judges about `dispatched`; a non-empty
 // MALFORMED array is compared as dispatched, which is outside the production contract —
 // every dispatch path validates the scope with the same leaf before the driver sees it
 // (crew/crew.mjs:427, crew/child.mjs:71, crew/daemon.mjs:105), so a second copy here would
-// be the drift that leaf exists to prevent.
-export function planScopeVerdict(dispatched, planned) {
+// be the drift that leaf exists to prevent. `tracked` is null for the historical pure
+// helper and a Set (or equivalent membership source) only after the plan loop has probed
+// literal additions against Git.
+export function planScopeVerdict(dispatched, planned, tracked = null) {
   const asked = Array.isArray(planned) ? planned : []
-  if (!Array.isArray(dispatched) || dispatched.length === 0) {
-    return { verdict: PLAN_SCOPE.undispatched, added: [], dropped: [], dispatched: null, planned: asked.length }
+  const available = Array.isArray(dispatched) && dispatched.length > 0 ? dispatched : []
+  const compared = available.length > 0
+  const rawAdded = compared ? outOfScopeFiles(asked, scopeMatcher(available)) : []
+  const malformed = tracked === null
+    ? []
+    : rawAdded.filter((entry) => typeof entry === 'string' && !entry.endsWith('/') && !trackedScopePath(tracked, entry))
+  const suggestions = scopeSuggestions(malformed, dispatched)
+  const effective = asked
+  const widening = rawAdded.filter((entry) => !malformed.includes(entry))
+  const dropped = compared ? outOfScopeFiles(available, scopeMatcher(asked)) : []
+  // Widening DOMINATES a simultaneous drop, except that an authoritative untracked
+  // literal is a malformed declaration and gets its own refusal first.
+  const verdict = !compared ? PLAN_SCOPE.undispatched
+    : malformed.length > 0 ? PLAN_SCOPE.malformed
+      : widening.length > 0 ? PLAN_SCOPE.widened
+        : dropped.length > 0 ? PLAN_SCOPE.narrowed : PLAN_SCOPE.same
+  const base = {
+    verdict, added: widening, dropped,
+    dispatched: compared ? available.length : null, planned: asked.length,
   }
-  const added = outOfScopeFiles(asked, scopeMatcher(dispatched))
-  const dropped = outOfScopeFiles(dispatched, scopeMatcher(asked))
-  // Widening DOMINATES a simultaneous drop: b359 both added two modules and shed the two
-  // anchor manifests it was dispatched to repair, and the refusal must name the additions.
-  const verdict = added.length > 0 ? PLAN_SCOPE.widened : dropped.length > 0 ? PLAN_SCOPE.narrowed : PLAN_SCOPE.same
-  return { verdict, added, dropped, dispatched: dispatched.length, planned: asked.length }
+  return tracked === null ? base : { ...base, malformed, suggestions, effective }
 }
 export function planScopeWhy(verdict, final) {
+  if (verdict?.verdict === PLAN_SCOPE.malformed) {
+    const malformed = Array.isArray(verdict.malformed) ? verdict.malformed : []
+    const suggestions = verdict.suggestions instanceof Map ? verdict.suggestions : new Map()
+    const entries = malformed.map((entry) => {
+      const name = typeof entry === 'string' ? entry : displayScopeValue(entry)
+      const correction = suggestions.get(entry)
+      return `${name} is not a tracked path${correction ? `; did you mean ${correction}, which is in your surface?` : ''}`
+    })
+    const detail = entries.length > 0 ? entries.join('; ') : 'the declaration could not be matched to a tracked path'
+    return `the plan declares malformed files_in_scope entries: ${detail}${final ? '; on the final plan round there is no revision left to bounce it to' : ''}`
+  }
   return `the plan widens the dispatched write surface with ${verdict.added.join(', ')} — a lane may narrow the surface it was dispatched with, never widen it${final ? '; on the final plan round there is no revision left to bounce it to' : ''}`
 }
 export function planScopeBounceLines(round, verdict, briefFile, dispatched) {
@@ -7364,6 +7541,16 @@ export function planScopeBounceLines(round, verdict, briefFile, dispatched) {
     'Re-plan INSIDE the dispatched surface. Narrowing it is legal and is recorded, not refused;',
     'if the task genuinely cannot be built inside it, return status insufficient with the gap as',
     'a numbered details.questions entry rather than widening the surface yourself.', '',
+    `Original brief: ${briefFile}`,
+  ]
+}
+export function planScopeMalformedBounceLines(round, verdict, briefFile, dispatched) {
+  return [
+    `# Plan scope correction (round ${round})`, '',
+    planScopeWhy(verdict, false), '',
+    'The declaration above is preserved for your correction; do not substitute a suggestion silently.',
+    'Return the intended tracked literal in files_in_scope, and keep the whole declaration inside this surface:',
+    ...(Array.isArray(dispatched) ? dispatched : []).map((f) => `- ${f}`), '',
     `Original brief: ${briefFile}`,
   ]
 }

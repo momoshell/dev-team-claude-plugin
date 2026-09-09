@@ -4,11 +4,11 @@ One reviewer is the standing posture. A write surface touching the **protected f
 
 The panel flow is shipped and wired. `panelSeats()` selects the seats
 (`crew/drive.mjs:656`), `panelReview()` briefs two reviewers independently
-(`crew/drive.mjs:5433`), `fuseFindings()` (`crew/escalation-policy.mjs:81`) fuses
-their findings at `crew/drive.mjs:5491`, `adjudicatePanel()`
+(`crew/drive.mjs:5527`), `fuseFindings()` (`crew/escalation-policy.mjs:81`) fuses
+their findings at `crew/drive.mjs:5585`, `adjudicatePanel()`
 (`crew/escalation-policy.mjs:128`) adjudicates the divergences at
-`crew/drive.mjs:5561`, and the review loop invokes the panel at
-`crew/drive.mjs:6438`. Seat selection no longer refuses a second reviewer for
+`crew/drive.mjs:5655`, and the review loop invokes the panel at
+`crew/drive.mjs:6532`. Seat selection no longer refuses a second reviewer for
 sharing the partner's vendor; that rule was retired with #983 and no ADR
 ratified it. It shipped in `842ea51` on 2026-08-15, and no capability named for
 verdict fusion exists anywhere in the tree, so no trigger of that name can be
@@ -18,7 +18,7 @@ Two conditions gate it, and both degrade **silently** to the single-reviewer
 path. A round that reviewed alone is not evidence the flow is unbuilt:
 
 - **A regranted continuation.** The panel is formed only when ctx.continuation is
-  true (`crew/drive.mjs:5783`), and the daemon's regrant hook is the sole caller
+  true (`crew/drive.mjs:5877`), and the daemon's regrant hook is the sole caller
   that sets it (`crew/child.mjs:266`). Every first boot reviews with one
   reviewer.
 - **A seated tech-lead.** `panelSeats()` returns null without a seated tech-lead

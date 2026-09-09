@@ -1166,11 +1166,11 @@ test('the ledger floor path reach is actionable on the b542 surface', () => {
   assert.ok(refusals.some((row) => row.test === floorTest && row.file === ledgerTest && row.symbols.length === 0))
 })
 
-// The 50, 25, and 27 figures are functions of every tracked *.test.mjs file in the repo, not of this test. If this guard reddens in your lane, you have added or removed an apostrophe inside a comment in some tracked test file and flipped its parity; the fix is to RE-MEASURE and update skills/crew-dispatch/references/batch.md rather than hunt a scanner regression.
+// The 51, 30, and 30 figures are functions of every tracked *.test.mjs file in the repo, not of this test. If this guard reddens in your lane, you have added or removed an apostrophe inside a comment in some tracked test file and flipped its parity; the fix is to RE-MEASURE and update skills/crew-dispatch/references/batch.md rather than hunt a scanner regression.
 // Re-measure comment-apostrophe exposure with: node --input-type=module -e "import{readFileSync}from\"node:fs\";import{execFileSync}from\"node:child_process\";const files=execFileSync(\"git\",[\"ls-files\",\"-z\"],{encoding:\"utf8\"}).split(String.fromCharCode(0)).filter(file=>file.endsWith(\".test.mjs\")),apostrophes=text=>[...text.matchAll(/\/\/[^\n]*|\/\*[\s\S]*?\*\//g)].reduce((total,comment)=>total+[...comment[0]].filter(char=>char===String.fromCharCode(39)).length,0),measure=textOf=>{const counts=files.map(file=>apostrophes(textOf(file)));return{withApostrophe:counts.filter(Boolean).length,odd:counts.filter(value=>value%2).length}},shipped=measure(file=>readFileSync(file,\"utf8\")),head=measure(file=>execFileSync(\"git\",[\"show\",String.fromCharCode(72,69,65,68,58)+file],{encoding:\"utf8\"}));console.log({filesWithCommentApostrophe:shipped.withApostrophe,shippedOddCommentApostropheFiles:shipped.odd,pristineHEADOddCommentApostropheFiles:head.odd})"
 test('RV2-1 doctrine separates shipped and pristine HEAD odd-comment counts', () => {
   const text = readFileSync(join(repoRoot, 'skills/crew-dispatch/references/batch.md'), 'utf8')
-  const exposure = '50 of 77 tracked `*.test.mjs` files carry at least one apostrophe inside a comment, and 25 of those carry an odd number on the shipped tree (27 at pristine `HEAD`).'
+  const exposure = '51 of 85 tracked `*.test.mjs` files carry at least one apostrophe inside a comment, and 30 of those carry an odd number on the shipped tree (30 at pristine `HEAD`).'
   assert.equal(text.split(exposure).length - 1, 1)
 })
 

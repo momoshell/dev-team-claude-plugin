@@ -20,7 +20,10 @@ test('F1 protected fixture callers choose proof or typed refusal', () => {
 })
 
 test('protected directory typed refusal fails closed without a tech lead', () => {
-  const io = fakeIo({ envelopes: { 'planner:1': protectedPlanEnv(['crew/'], 'typed-refusal') } })
+  // 'docs/adr/' rather than 'crew/': both are protected directories, but a
+  // top-level entry is now refused by validateScopeEntries one step earlier as
+  // too broad, which would shadow the adversary refusal this test is about.
+  const io = fakeIo({ envelopes: { 'planner:1': protectedPlanEnv(['docs/adr/'], 'typed-refusal') } })
   const result = driveTask(CTX, io)
   assert.equal(result.status, 'escalation')
   assert.equal(result.details.escalation.where, 'plan')

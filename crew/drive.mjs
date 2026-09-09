@@ -4181,23 +4181,19 @@ function runTask(ctx, io, crash) {
       plannedScopeErrors = [{ entry: plannedScope, why: `files_in_scope could not be validated: ${err?.message ?? String(err)}` }]
     }
     if (plannedScopeErrors.length > 0) {
+      // PC-6 asked for this guard to run BEFORE resolveAdversaryTrigger reaches
+      // scopeMatcher, and in the same breath to PRESERVE THE EXISTING TYPED PLAN
+      // REFUSAL. A structurally unsupported entry — a glob, a top-level directory,
+      // an absolute path, a null — is not a typo: there is no correction the planner
+      // could be bounced towards, and crew/drive-plan.test.mjs has pinned an immediate
+      // escalation for exactly these shapes since before this issue. So this branch
+      // refuses in one round and never spends failureUpgrade's one-shot budget.
+      // A MISSPELLED but well-formed path is the opposite case and is not seen here at
+      // all: it validates cleanly and is caught below as PLAN_SCOPE.malformed, which
+      // does bounce, because there a correction exists and #1073 is about offering it.
       const why = `files_in_scope carries entries the scope gate cannot honor: ${plannedScopeErrors.map(({ entry, why: defect }) => `${displayScopeValue(entry)} (${defect})`).join('; ')}`
-      if (round >= planRounds()) {
-        stageComplete()
-        return escalate('plan', why, env.artifacts || [])
-      }
-      const b = art(`plan-bounce-r${round}.md`)
-      failureUpgrade('plan', 'planner')
-      io.writeFile(b, [
-        `# Plan scope correction (round ${round})`, '', why, '',
-        'Correct the files_in_scope declaration and return it inside the dispatched surface.',
-        `Original brief: ${ctx.briefFile}`,
-      ].join('\n'))
-      planBrief = b
-      planNote = PLAN_SCOPE.malformed
-      planEnv = null
       stageComplete()
-      continue
+      return escalate('plan', why, env.artifacts || [])
     }
     const protectedScope = protectedHits(plannedScope, ctx.protectedPaths)
     const currentAdversary = resolveAdversaryTrigger(env.details, protectedScope)

@@ -6,6 +6,7 @@ import assert from 'node:assert/strict'
 import {
   ACCEPT_FINDINGS, ACCEPT_FINDINGS_SOFT, ACCEPT_REASKS, adversarialPlanEnv, ACCEPT_REFUSALS, B318_GATED_RUNS, B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, CENSUS_ABSENT_REASONS, CENSUS_ROW_ABSENT, CENSUS_TURNS_ABSENT, CENSUS_UNREADABLE, CLOBBER_R2, CONVERGE_GATE, CONVERGE_PLAN, CRASH_FINDINGS, CRASH_STAGES, CTX, CTX_REPAIR, CTX_TL, DECISIONS, D_ASK, D_AUTO, D_COLLISION_CTX, D_PANEL_CTX, D_PATCH_A, D_PATCH_B, ENVELOPE_REFUSAL_REASONS, FINDING_DISPOSITIONS, LIMITS, MUST_FIX_REFUTATION_FINDINGS, NAME_VERDICTS, PANEL_ADJUDICATORS, PANEL_PARTNERS, PERSPECTIVE_TARGETS, PLAN_CHECK_FINDINGS, PLAN_RESIDUAL, PLAN_SCOPE, PLAN_SCOPE_VERDICTS, RED, REFUTATION_CLAIM, REFUTATION_CONVERGE_PLAN, REFUTATION_CONVERGE_RUNS, REFUTATION_EVIDENCE_MAX, RESIDUAL_TYPES, REVIEW_FINDINGS, REVIEW_GATE_PASS, S843_ADDED, S843_D2, S843_DISPATCHED, S843_DROPPED, S843_NARROWED, S843_RUNS, SECOND_OPINION, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, VARIANTS, acceptBounceLines, acceptContractLines, acceptedRawById, assertDriverIdRefusal, b127GroupCommand, b127InvokeGate, b127Lines, b127PidAlive, b127Spy, b318Builders, b318GatedPlan, b318Options, b318ReviewGrants, b318SiteA, b318SiteB, b376ProofIo, bounceTargetOf, buildEnv, checkEnv, classCollisionIo, closeoutIo, crashRun, dAdjEnv, dAutoRows, dBuilders, dDecisionBrief, dGitApplies, dLeads, dOffers, dPanelOutcomes, dPartnerEnv, dPatchWrite, dPlanEnv, dRemintRows, dReviewEnv, dispositionIo, dispositionOf, dispositionPanelIo, dispositionPlan, divergentCollisionIo, divergentPlanScenario, driveTask, envelopeDefect, envelopeFieldsPresent, exhaustionAcceptIo, fakeIo, findingIdDefect, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, join, leadEnv, legacyReviewerExemptions, nameVerdict, observeTurnCensus, panelSeats, phaseTrace, planAcceptContractLines, planCheckAcceptIo, planEnv, planRevisionRun, planScopeVerdict, planThenReviewIo, protectedPlanEnv, protectedReseatRefusal, publicationIo, readFileSync, reconEnv, regrantVerdict, resolveValidationLane, reviewConvergeRun, reviewEnv, reviewFindings, reviewOutcome, reviewShapeDefect, rmSync, roundCursor, s843Ctx, s843Io, s843PlanEnv, s843Rows, scratchDir, shapeDefect, slotCtx, slotFactory, spawnSync, staleVerdictLines, triageEnv, turnCeilingBreached, twoRoundReviewIo, validateAcceptDecision, validateCarve, validatePlanResiduals, validateScopeEntries, validationPlan, validationProbeRun, validationRows, verdictFindingsDefect, writeFileSync,
 } from './drive-fixtures.mjs'
+import { planScopeWhy, scopeSuggestions } from './drive.mjs'
 
 test('a plan-check accept records the residual the lead named', () => {
   const io = planCheckAcceptIo({ residuals: [PLAN_RESIDUAL] })
@@ -2584,10 +2585,10 @@ test('#800 §7b 48 — continuation panels journal the exact shape refusal they 
   assert.equal(verdictIo.calls.logs.some((row) => row.panel_skipped === 'verdict-findings'), true)
 })
 
-test('planScopeVerdict is pure and names all four states', () => {
+test('planScopeVerdict is pure and names all five states', () => {
   assert.equal(Object.isFrozen(PLAN_SCOPE), true)
   assert.deepEqual(PLAN_SCOPE_VERDICTS, [
-    'plan-scope-undispatched', 'plan-scope-same', 'plan-scope-narrowed', 'plan-scope-widened',
+    'plan-scope-undispatched', 'plan-scope-same', 'plan-scope-narrowed', 'plan-scope-widened', 'plan-scope-malformed',
   ])
   assert.equal(Object.isFrozen(PLAN_SCOPE_VERDICTS), true)
 
@@ -2990,4 +2991,212 @@ test('H1 survivor proceeds to review without automatic escalation', () => {
   const result = driveTask(CTX, io)
   assert.equal(result.status, 'done')
   assert.equal(io.calls.assign.filter(({ role }) => role === 'reviewer').length, 1)
+})
+
+const D3_SCOPE_DISPATCHED = Object.freeze(['crew/drive-fixtures.mjs'])
+const D3_SCOPE_HEALTH = 'git rev-parse --is-inside-work-tree'
+const d3ScopeInventory = (path) => `git ls-files --error-unmatch -- '${path}'`
+const d3ScopeCtx = (dispatched = D3_SCOPE_DISPATCHED, over = {}) => s843Ctx({
+  ...over, files_in_scope: [...dispatched],
+})
+const d3ScopeIo = (dispatched, planned, runs = {}, changed = [dispatched[0]], needsAdversary = false) => fakeIo({
+  envelopes: {
+    'planner:1': s843PlanEnv(planned, needsAdversary),
+    'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+  },
+  runs: { ...S843_RUNS, ...runs }, changed,
+})
+
+test('A1 near miss has its own refusal', () => {
+  const bad = 'crew/drive-fixtures.mennials'
+  const io = d3ScopeIo(D3_SCOPE_DISPATCHED, [bad], {
+    [D3_SCOPE_HEALTH]: { ok: true, output: '' },
+    [d3ScopeInventory(bad)]: { ok: false, output: '' },
+  })
+  const result = driveTask(d3ScopeCtx(), io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, PLAN_SCOPE.malformed)
+  assert.ok(result.details.escalation.why.includes(bad))
+  assert.equal(s843Rows(io).length, 0)
+})
+
+test('B1 malformed refusal names its correction', () => {
+  const bad = 'crew/drive-fixtures.mennials'
+  const candidate = 'crew/drive-fixtures.mjs'
+  const dispatched = [candidate, candidate, 'crew/']
+  const suggestions = scopeSuggestions([bad, bad], dispatched)
+  assert.equal(suggestions.size, 1)
+  assert.equal(suggestions.get(bad), candidate)
+  const tie = scopeSuggestions(['crew/drive-fixture.mjs'], [
+    'crew/drive-fixtures.mjs', 'crew/drive-fixturex.mjs', 'crew/roles/',
+  ])
+  assert.equal(tie.size, 0)
+  const verdict = planScopeVerdict([candidate], [bad], new Set())
+  assert.match(planScopeWhy(verdict, true), /did you mean crew\/drive-fixtures\.mjs, which is in your surface\?/)
+})
+
+test('C1 untracked non near miss is malformed by name', () => {
+  const bad = 'outside-scope-file.mjs'
+  const inventory = d3ScopeInventory(bad)
+  const cases = [
+    { name: 'unmatched', runs: { [D3_SCOPE_HEALTH]: { ok: true, output: '' }, [inventory]: { ok: false, output: '' } } },
+    { name: 'failed health', runs: { [D3_SCOPE_HEALTH]: { ok: false, output: '' } } },
+    { name: 'throwing health', runs: {}, throwAt: D3_SCOPE_HEALTH },
+    { name: 'throwing inventory', runs: { [D3_SCOPE_HEALTH]: { ok: true, output: '' } }, throwAt: inventory },
+  ]
+  for (const scenario of cases) {
+    const io = d3ScopeIo(D3_SCOPE_DISPATCHED, [bad], scenario.runs)
+    if (scenario.throwAt) {
+      const run = io.run.bind(io)
+      io.run = (cmd) => {
+        if (cmd === scenario.throwAt) throw new Error(`${scenario.name} probe`)
+        return run(cmd)
+      }
+    }
+    const result = driveTask(d3ScopeCtx(), io)
+    assert.equal(result.status, 'escalation', scenario.name)
+    assert.equal(result.details.escalation.where, scenario.name === 'unmatched' ? PLAN_SCOPE.malformed : 'plan', scenario.name)
+    assert.ok(result.details.escalation.why.includes(bad), scenario.name)
+    assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 0, scenario.name)
+    assert.equal(s843Rows(io).length, 0, scenario.name)
+  }
+
+  const nonFinalIo = d3ScopeIo(D3_SCOPE_DISPATCHED, [bad])
+  nonFinalIo.reseat = (role, options) => {
+    nonFinalIo.calls.reseat.push({ role, options })
+    return { applied: true, from: { id: 'planner' }, to: { id: 'judge' }, rung: 'mechanical→judge' }
+  }
+  const run = nonFinalIo.run.bind(nonFinalIo)
+  nonFinalIo.run = (cmd) => {
+    if (cmd === D3_SCOPE_HEALTH) throw new Error('non-final health probe')
+    return run(cmd)
+  }
+  const nonFinal = driveTask(d3ScopeCtx(D3_SCOPE_DISPATCHED, {
+    limits: { plan_rounds: 2, build_rounds: 2, review_rounds: 2 },
+  }), nonFinalIo)
+  assert.equal(nonFinal.status, 'escalation')
+  assert.equal(nonFinal.details.escalation.where, 'plan')
+  assert.ok(nonFinal.details.escalation.why.includes(bad))
+  assert.equal(nonFinalIo.calls.assign.filter(({ role }) => role === 'planner').length, 1)
+  assert.equal(Object.hasOwn(nonFinalIo.calls.writes, `${TD}/plan-bounce-r1.md`), false)
+  assert.equal(nonFinalIo.calls.reseat.length, 0)
+  assert.equal(nonFinalIo.calls.logs.some((row) => row.modifier?.kind === 'plan' && row.modifier?.role === 'planner'), false)
+})
+
+test('D1 tracked widening remains byte identical', () => {
+  const tracked = 'crew/drive-review.test.mjs'
+  const runs = {
+    [D3_SCOPE_HEALTH]: { ok: true, output: '' },
+    [d3ScopeInventory(tracked)]: { ok: true, output: '' },
+  }
+  const io = d3ScopeIo(D3_SCOPE_DISPATCHED, [...D3_SCOPE_DISPATCHED, tracked], runs)
+  const result = driveTask(d3ScopeCtx(), io)
+  const expectedWhy = `the plan widens the dispatched write surface with ${tracked} — a lane may narrow the surface it was dispatched with, never widen it; on the final plan round there is no revision left to bounce it to`
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, PLAN_SCOPE.widened)
+  assert.equal(result.details.escalation.why, expectedWhy)
+  assert.deepEqual(s843Rows(io)[0], {
+    round: 1, verdict: PLAN_SCOPE.widened, added: [tracked], dropped: [], dispatched: 1, planned: 2,
+    malformed: [], suggestions: new Map(), effective: [...D3_SCOPE_DISPATCHED, tracked],
+  })
+
+  const prefix = 'crew/new-surface/'
+  const prefixIo = d3ScopeIo(D3_SCOPE_DISPATCHED, [...D3_SCOPE_DISPATCHED, prefix])
+  const prefixResult = driveTask(d3ScopeCtx(), prefixIo)
+  assert.equal(prefixResult.details.escalation.where, PLAN_SCOPE.widened)
+  assert.equal(prefixIo.calls.run.some(({ cmd }) => cmd === D3_SCOPE_HEALTH || cmd.startsWith('git ls-files --error-unmatch --')), false)
+})
+
+test('E1a malformed scope never reaches adversary trigger inputs', () => {
+  const seatedRoles = ['lead', 'planner', 'tech-lead', 'builder', 'reviewer']
+  const controlIo = d3ScopeIo(D3_SCOPE_DISPATCHED, [...D3_SCOPE_DISPATCHED])
+  const control = driveTask(d3ScopeCtx(D3_SCOPE_DISPATCHED, { roles: seatedRoles }), controlIo)
+  assert.equal(control.status, 'done')
+  assert.equal(controlIo.calls.assign.filter(({ role }) => role === 'tech-lead').length, 0)
+
+  const protectedIo = s843Io({
+    'planner:1': s843PlanEnv(['crew/drive.mjs'], false),
+    'tech-lead:1': checkEnv('approve'), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+  }, ['crew/drive.mjs'])
+  const protectedResult = driveTask(s843Ctx({ files_in_scope: ['crew/drive.mjs'], roles: seatedRoles }), protectedIo)
+  assert.equal(protectedResult.status, 'done')
+  assert.equal(protectedIo.calls.assign.filter(({ role }) => role === 'tech-lead').length, 1)
+
+  const malformedIo = d3ScopeIo(D3_SCOPE_DISPATCHED, [null], {}, [D3_SCOPE_DISPATCHED[0]], true)
+  const malformed = driveTask(d3ScopeCtx(D3_SCOPE_DISPATCHED, { roles: seatedRoles }), malformedIo)
+  assert.equal(malformed.status, 'escalation')
+  assert.equal(malformed.details.escalation.where, 'plan')
+  assert.equal(malformedIo.calls.assign.filter(({ role }) => role === 'tech-lead').length, 0)
+  assert.equal(s843Rows(malformedIo).length, 0)
+})
+
+test('E1b malformed scope never reaches scope comparison inputs', () => {
+  const validIo = d3ScopeIo(D3_SCOPE_DISPATCHED, [...D3_SCOPE_DISPATCHED])
+  const valid = driveTask(d3ScopeCtx(), validIo)
+  assert.equal(valid.status, 'done')
+  assert.equal(s843Rows(validIo)[0].verdict, PLAN_SCOPE.same)
+
+  for (const files of [[null], [D3_SCOPE_DISPATCHED[0], 42], [], 'not-an-array', [D3_SCOPE_DISPATCHED[0], '']]) {
+    const io = d3ScopeIo(D3_SCOPE_DISPATCHED, files)
+    const result = driveTask(d3ScopeCtx(), io)
+    assert.equal(result.status, 'escalation', JSON.stringify(files))
+    assert.equal(result.details.escalation.where, 'plan', JSON.stringify(files))
+    assert.match(result.details.escalation.why, /files_in_scope/, JSON.stringify(files))
+    assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 0, JSON.stringify(files))
+    assert.equal(s843Rows(io).length, 0, JSON.stringify(files))
+  }
+})
+
+test('F1 final round malformed scope carries recovery', () => {
+  const bad = 'crew/drive-fixtures.mennials'
+  const candidate = 'crew/drive-fixtures.mjs'
+  const io = d3ScopeIo(D3_SCOPE_DISPATCHED, [bad], {
+    [D3_SCOPE_HEALTH]: { ok: true, output: '' },
+    [d3ScopeInventory(bad)]: { ok: false, output: '' },
+  })
+  const result = driveTask(d3ScopeCtx(), io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, PLAN_SCOPE.malformed)
+  assert.ok(result.details.escalation.why.includes(bad))
+  assert.ok(result.details.escalation.why.includes(`did you mean ${candidate}, which is in your surface?`))
+  assert.equal(s843Rows(io).length, 0)
+})
+
+test('G1 legal exact and narrow scope stays byte identical', () => {
+  const dispatched = ['crew/drive-fixtures.mjs', 'crew/drive-review.test.mjs']
+  const narrowed = ['crew/drive-fixtures.mjs']
+  assert.deepEqual(planScopeVerdict(dispatched, dispatched), {
+    verdict: PLAN_SCOPE.same, added: [], dropped: [], dispatched: 2, planned: 2,
+  })
+  assert.deepEqual(planScopeVerdict(dispatched, narrowed), {
+    verdict: PLAN_SCOPE.narrowed, added: [], dropped: ['crew/drive-review.test.mjs'], dispatched: 2, planned: 1,
+  })
+
+  const exactIo = d3ScopeIo(dispatched, dispatched, {}, [dispatched[0]])
+  const narrowIo = d3ScopeIo(dispatched, narrowed, {}, [dispatched[0]])
+  const exact = driveTask(d3ScopeCtx(dispatched), exactIo)
+  const narrow = driveTask(d3ScopeCtx(dispatched), narrowIo)
+  const legalStages = ['plan:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:pass', 'commit', 'suite', 'suite:cold', 'done']
+  assert.equal(exact.status, 'done')
+  assert.equal(narrow.status, 'done')
+  assert.deepEqual(exact.details.stages, legalStages)
+  assert.deepEqual(narrow.details.stages, legalStages)
+  assert.equal(s843Rows(exactIo)[0].verdict, PLAN_SCOPE.same)
+  assert.equal(s843Rows(narrowIo)[0].verdict, PLAN_SCOPE.narrowed)
+  for (const io of [exactIo, narrowIo]) {
+    assert.equal(io.calls.run.some(({ cmd }) => cmd === D3_SCOPE_HEALTH || cmd.startsWith('git ls-files --error-unmatch --')), false)
+  }
+})
+
+test('H1 correction is suggested and never substituted', () => {
+  const bad = 'crew/drive-fixtures.mennials'
+  const candidate = 'crew/drive-fixtures.mjs'
+  const asked = Object.freeze([bad])
+  const before = [...asked]
+  const verdict = planScopeVerdict([candidate], asked, new Set())
+  assert.equal(verdict.verdict, PLAN_SCOPE.malformed)
+  assert.deepEqual(verdict.effective, before)
+  assert.deepEqual(asked, before)
+  assert.equal(verdict.effective.includes(candidate), false)
+  assert.equal(verdict.suggestions.get(bad), candidate)
 })

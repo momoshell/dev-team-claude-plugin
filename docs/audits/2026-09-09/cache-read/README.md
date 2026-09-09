@@ -53,16 +53,33 @@ which exists for exactly this and has not been run on this question.
 (+37%)**, re-reads per dispatch **32 → 43 (+34%)**, distinct files read flat at
 13 → 14.
 
-**Per-turn context could not be measured.** Only **26 of 878** sessions have a
-matching `seat_turn_census` row in the ledger — the census is written to the lane
-journal and only sometimes mirrored — so joining tokens to turns yields **3
-after-era builder rows**, far below `CELL_RATE_FLOOR` (12). The three that do
-join read 0.24M, 0.13M and 0.21M cache-read per turn. **Three rows is not a
-rate.** Whether the remaining growth is longer context per turn or simply more
-turns is UNMEASURED, and this is the single largest blind spot in this report.
+**Per-turn context IS joinable, and this report's first draft was wrong to say
+otherwise.** The join key is not in the ledger: `~/.crew/completions.jsonl` maps
+each run to its crew dir, and that `run` **is** the `adw_id` on `agent_sessions`
+(267 of 270 runs match). Joining `(adw_id, dispatch_id, role)` against the
+`seat_turn_census` rows in each run's own journal yields **320 of 883 sessions**,
+not the 3 the ledger table alone gives.
 
-`context_tokens` and `context_window` are populated in **0 of 17** after-era
-builder rows, so they cannot answer it either.
+**Median cache-read per turn, before era** — the first per-turn token cost this
+factory has measured:
+
+| role | n | med turns | med cache_read | **med cache_read / turn** |
+|---|---|---|---|---|
+| `planner` | 69 | 29 | 3.089M | **0.119M** |
+| `tech-lead` | 38 | 13 | 1.948M | **0.149M** |
+| `builder` | 66 | 36.5 | 5.356M | **0.154M** |
+| `reviewer` | 60 | 27.5 | 2.116M | **0.074M** |
+| `lead` | 54 | 8.5 | 0.562M | **0.069M** |
+
+**The after era is still unmeasured, but for a different and fixable reason.**
+Every role lands at 4–8 joined rows, below `CELL_RATE_FLOOR` (12) — because
+**119 of 269 runs no longer have a journal on disk**. A reaped lane's crew dir is
+removed, and the census lives in that journal. So the question *"is the builder's
++115% more turns or longer context per turn?"* is answered for the before era and
+not for the after one, and it becomes answerable simply by waiting: the floor is
+reached once ~12 post-gate lanes have been reaped with journals retained, or
+immediately if the census were mirrored into `seat_turn_census` for every session
+rather than the 26 rows it holds today.
 
 **One candidate cause is refuted.** Brief size was suspected — the operator grew
 briefs to carry premise quotes on 09-09. Median compiled brief bytes per day
@@ -111,10 +128,11 @@ full-price input tokens. The lever is reading less, not compressing what is read
 - **The after era is one day**, n=11–24 per role against 110–250 before. Every
   per-cell figure here is fragile and is reported with its n.
 - **This is not a controlled experiment.** Section 2 states why.
-- **Per-turn cost is unmeasurable from the shipped ledger** (section 3). This is
-  a measurement gap in the instrument, not a fact about the builder, and it
-  blocks any future per-turn claim until the census is mirrored for every
-  session.
+- **Per-turn cost is joinable but the after era is under the floor** (section 3).
+  The blocker is journal retention — 119 of 269 runs have no journal on disk —
+  not an unjoinable schema. `seat_turn_census` holds 26 rows against 878
+  sessions; mirroring it for every session would make the join direct and
+  survive reaping.
 - **`sessions` (298 rows) carries the same token columns and zero are
   populated**, so this analysis rests on `agent_sessions` alone; whether that
   undercounts anything is unknown.

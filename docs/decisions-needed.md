@@ -49,6 +49,9 @@ Line counts here use `split("\n").length`, which is one greater than `wc -l` for
 - **Options:** Set a numeric ceiling from the POST-fix distribution; leave the builder ceiling unset.
 - **Blocked:** #1028 ask 1; the decision itself is blocked on #1027 and #1026 landing.
 - **Raised:** 2026-09-08 (The builder turn-ceiling number)
+- **UNBLOCKED 2026-09-09, measurement delivered.** #1027 and #1026 are closed (asks shipped in #1036, #1041, #1055/#1060, #1069). #908 merged as #1024, so a ceiling pre-empts at the turn boundary instead of discarding a finished round. The POST-fix builder distribution, turns per dispatch, from every `seat_turn_census` row after `3783ded` (**n=58**): **p50 24 · p75 63 · p90 115 · p95 155 · max 362.** For the same window the builder's turns per dispatch ROSE 35 → 48 and its median `billed_cache_read_tokens` per session went 6.82M → 14.69M (+115%, #1103) — the reads and runs lanes did not reduce the builder's cost, and the ceiling is now bounding a tail that is growing, not shrinking.
+- **Recommendation (operator, not yet ratified):** set the builder ceiling at **p90 = 115**. It pre-empts ~6 of 58 dispatches — the tail that costs the most; b549 ran to 362 with its gate already green — and touches nothing at the median. The precedent is #993: a planner ceiling of 64 cut it from 23.6 to 6.6 turns. Add a reviewer ceiling of **48** in the same lane as a pure safety net (reviewer after-era p95 36, max 37, n=40; it would have fired zero times this week). Lead is already 32 against a max of 18; tech-lead (max 23) stays null. The ceiling bounds the tail; **#1104** fixes why the tail exists (the re-read refusal cannot fire on a sliding window).
+
 
 ## 6. ACP via `claude-agent-acp` for the claude seat (#1034)
 
@@ -57,3 +60,13 @@ Line counts here use `split("\n").length`, which is one greater than `wc -l` for
 - **Options:** Adopt `claude-agent-acp` for the claude seat; continue the deferral until Grok/Antigravity are added.
 - **Blocked:** The ACP transport choice for the claude seat (#1034); the owner deferred it until Grok/Antigravity are added.
 - **Raised:** 2026-09-08 (ACP via `claude-agent-acp` for the claude seat)
+
+## 7. Let the shadow seat pick seat for real? (amends ADR-032)
+
+- **Question:** Should the shadow seat pick (#291 L2, already in `crew/crew.mjs`) be promoted from record-only to actually choosing a producing seat at boot, from the roster's admissible cells, by task shape and measured availability?
+- **Measurement:** The pick exists and is dark. `SHADOW_OUTCOMES` (`picked / stands / abstained / no-candidate / not-consulted`), `SHADOW_EXCLUSIONS` (`band-unknown / band-below-floor / capability-shortfall / agent-unresolved / breaker-open`) and `SHADOW_ABSENT` are shipped at `crew/crew.mjs:1103-1120`. Both of its inputs are unmeasured: `CREW_BREAKER_THRESHOLD` is unset, so cell health reads *UNMEASURED, never healthy*; `eval_cells` has 0 rows, so pass rate and cost per candidate are absent. The roster seats two agents (`pi`, `claude`) and 7 models, three of which (`fable-5`, `sonnet-5`, `haiku-4-5`) have never been seated in 876 recorded sessions. Today a 429 parks, a 5xx backs off, an auth failure refuses; nothing ever picks a different cell (`PROVIDER_RETRY_ACTIONS`, `crew/headless.mjs:293`).
+- **What ADR-032 ratified (2026-08-16):** the breaker refuses an open cell at boot and does not reroute; a cell is `{provider, id, agent, effort}` and nothing else; chain-walking is *deliberately deferred behind a ratified roster field*. Promoting the pick is exactly that field. It is not a reversal of ADR-032's reasoning — a silent downgrade stays forbidden — it is the deferred half arriving with its evidence.
+- **Options:** Promote the pick so producing seats (planner, builder) float among admissible cells while reviewer and tech-lead floors stay pinned by tier, every pick journalled with its exclusions; keep it record-only and read the would-have-picked as a report.
+- **Blocked:** #1105 (the instruments must be lit first — a pick from unmeasured health is the guess ADR-032 forbids); #1106 (an agent register, so "the agents we have" is data); #781 (shape and strength recorded separately per dispatch, so cost-vs-outcome per cell is measurable). Nothing here is a lane until #1105 lands.
+- **Owner direction, 2026-09-09:** grow the roster — more agents, more models — and select seats by task and by what is available at the moment. This entry is that direction written down as the decision it requires.
+- **Raised:** 2026-09-09 (Let the shadow seat pick seat for real?)

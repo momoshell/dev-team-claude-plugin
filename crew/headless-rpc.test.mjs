@@ -10,6 +10,7 @@ import {
   carriesOwnSpend, emptyTurnEnvelope, finaliseCensus, finalisePreFirstTurn, foldCensusFrame, foldRpcUsage, headlessRpcIo, isBriefReadToolCall, isBusyRefusal, newCensus, PRE_FIRST_TURN_ABSENT_REASONS, PRE_FIRST_TURN_TOLERANCE_MS, PROMPT_REFUSAL_RETRIES,
   rpcCensus, rpcCommand, rpcStreamCensus, seatCommandPath, SETTLE_GATE_POLLS, splitFrames, steerFrame, teardownOutcome,
 } from './headless-rpc.mjs'
+import { seatCommand as piSeatCommand } from './adapters/adapter-pi.mjs'
 import { assignmentLine } from './driver.mjs'
 import { cellFailureKind } from './seat-io.mjs'
 import { CENSUS_ABSENT_CAUSES, SEAT_SUITE_POLICY_EVENT, SUITE_RUN_REFUSAL, SUITE_RUN_UNRECOGNISED, WAIT_POLL_MS, claudeCensus } from './headless.mjs'
@@ -404,6 +405,32 @@ test('splitFrames preserves LF framing and chunk rest', () => {
   assert.equal(splitFrames(Buffer.from('{"x":1}\r\n')).lines[0], '{"x":1}')
 })
 
+// RV1-1 (found at review, closed by hand at closeout). Deriving the allowlist
+// from the extension table dropped the old `fanout` branch, which keyed off
+// grants.agents. A role granting agents WITHOUT the extension that registers the
+// agent tool then booted with CREW_PI_AGENTS populated and no `agent` in --tools:
+// fan-out silently dead, no refusal. MUTATION: delete the agents.length guard in
+// piActivatedTools and both halves of this test go red.
+test('RV1-1 an agents grant with no extension registering the agent tool refuses on both transports', () => {
+  const unbacked = { tools: [], extensions: ['/repo/crew/pi/extensions/builderloop.ts'], agents: [{ name: 'scout', def: '/scout.json' }], skills: [] }
+  const common = { bin: '/bin/pi', model: 'openai-codex/x', sessionDir: '/tmp/s', sessionId: 's1', promptFile: '/tmp/p', deny: '' }
+  assert.throws(
+    () => rpcCommand({ ...common, grants: unbacked }),
+    (error) => error.reason === 'grant-unsupported' && error.diagnosis === 'agent-grant-unbacked' && error.message.includes('subagent.ts'),
+  )
+  assert.throws(
+    () => piSeatCommand({
+      role: 'planner', model: 'openai-codex/x', promptFile: '/tmp/p', tools: '', deny: '',
+      taskDir: '/tmp/task', bootBrief: 'boot', grants: unbacked,
+    }),
+    (error) => error.reason === 'grant-unsupported' && error.diagnosis === 'agent-grant-unbacked',
+  )
+  // The same grant WITH the registering extension composes and activates the tool.
+  const backed = { ...unbacked, extensions: [...unbacked.extensions, '/repo/crew/pi/extensions/subagent.ts'] }
+  const ok = rpcCommand({ ...common, grants: backed })
+  assert.equal(ok.args[ok.args.indexOf('--tools') + 1].split(',').includes('agent'), true)
+})
+
 test('rpcCommand composes a resumable pi invocation', () => {
   const common = { bin: '/bin/pi', model: 'openai-codex/x', effort: 'high', sessionDir: '/tmp/s', sessionId: 's1', resume: true, promptFile: '/tmp/p', deny: 'Edit', env: { X: '1' } }
   const c = rpcCommand(common)
@@ -417,16 +444,29 @@ test('rpcCommand composes a resumable pi invocation', () => {
 
   const grants = {
     tools: ['Task', 'Task'], extensions: ['/ext-a', '/ext-a', '/ext-b'],
-    agents: [{ name: 'scout', def: '/scout.json' }], skills: [],
+    vendor_extensions: [{ package: '@crew-fixture/rpc', tools: [], entries: ['/ext-a', '/ext-b'] }],
+    agents: [], skills: [],
   }
   const granted = rpcCommand({ ...common, grants })
   assert.deepEqual(granted.args, [
     '--mode', 'rpc', '--model', 'openai-codex/x', '--thinking', 'high', '--session-dir', '/tmp/s', '--session', 's1',
-    '--append-system-prompt', '/tmp/p', '--tools', 'read,bash,edit,write,grep,find,ls,Task,agent', '--exclude-tools', 'edit',
+    '--append-system-prompt', '/tmp/p', '--tools', 'read,bash,edit,write,grep,find,ls,Task', '--exclude-tools', 'edit',
     '--no-context-files', '--no-extensions', '-e', '/ext-a', '-e', '/ext-b', '--no-skills',
   ])
   assert.equal(granted.env.X, '1')
-  assert.deepEqual(JSON.parse(granted.env.CREW_PI_AGENTS), [{ name: 'scout', def: '/scout.json' }])
+  assert.equal(Object.hasOwn(granted.env, 'CREW_PI_AGENTS'), false)
+
+  const subagentGrants = {
+    tools: ['Task', 'Task'], extensions: ['/repo/crew/pi/extensions/subagent.ts'],
+    agents: [{ name: 'scout', def: '/scout.json' }], skills: [],
+  }
+  const subagent = rpcCommand({ ...common, grants: subagentGrants })
+  assert.deepEqual(subagent.args, [
+    '--mode', 'rpc', '--model', 'openai-codex/x', '--thinking', 'high', '--session-dir', '/tmp/s', '--session', 's1',
+    '--append-system-prompt', '/tmp/p', '--tools', 'read,bash,edit,write,grep,find,ls,Task,agent', '--exclude-tools', 'edit',
+    '--no-context-files', '--no-extensions', '-e', '/repo/crew/pi/extensions/subagent.ts', '--no-skills',
+  ])
+  assert.deepEqual(JSON.parse(subagent.env.CREW_PI_AGENTS), [{ name: 'scout', def: '/scout.json' }])
 
   const bareGrants = { tools: [], extensions: [], agents: [], skills: [] }
   const bare = rpcCommand({ ...common, grants: bareGrants })
@@ -443,7 +483,9 @@ test('rpcCommand composes a resumable pi invocation', () => {
     wrapped.io.assign({ role: 'builder', briefFile: '/brief.md' })
     assert.deepEqual(wrapped.specs.at(-1).grants, grants)
     const wrappedCommand = JSON.parse(readFileSync(join(wrapped.paths.taskDir, 'headless-rpc', 'builder', 'cmd.json'), 'utf8'))
-    assert.equal(wrappedCommand.args[wrappedCommand.args.indexOf('--tools') + 1].split(',').includes('agent'), true)
+    // no agents granted, so no agent tool — this pins absence for an UNGRANTED seat,
+    // not the silent drop an unbacked grant used to produce (see the RV1-1 test below).
+    assert.equal(wrappedCommand.args[wrappedCommand.args.indexOf('--tools') + 1].split(',').includes('agent'), false)
     assert.deepEqual(wrappedCommand.args.slice(wrappedCommand.args.indexOf('-e'), wrappedCommand.args.indexOf('-e') + 2), ['-e', '/ext-a'])
   } finally { wrapped.cleanup() }
 
@@ -455,6 +497,40 @@ test('rpcCommand composes a resumable pi invocation', () => {
     assert.equal(bareCommand.args[bareCommand.args.indexOf('--tools') + 1], 'read,bash,edit,write,grep,find,ls')
     assert.equal(bareCommand.args.includes('-e'), false)
   } finally { bareFixture.cleanup() }
+})
+
+test('shared RPC activation adds shipped tools, preserves vendor tools, and refuses unknown extensions', () => {
+  const base = {
+    model: 'openai-codex/x', sessionDir: '/tmp/s', sessionId: 's', promptFile: '/tmp/p', deny: '',
+  }
+  const skeleton = rpcCommand({
+    ...base,
+    grants: { tools: [], extensions: ['/repo/crew/pi/extensions/skeletonread.ts'], agents: [], skills: [] },
+  })
+  assert.equal(skeleton.args[skeleton.args.indexOf('--tools') + 1], 'read,bash,edit,write,grep,find,ls,retrieve')
+
+  const planner = rpcCommand({
+    ...base,
+    grants: {
+      tools: ['Task'], extensions: ['/repo/crew/pi/extensions/subagent.ts', '/repo/crew/pi/extensions/lab.ts', '/repo/crew/pi/extensions/readgate.ts'],
+      agents: [{ name: 'scout', def: '/scout.json' }], skills: [],
+    },
+  })
+  assert.equal(planner.args[planner.args.indexOf('--tools') + 1], 'read,bash,edit,write,grep,find,ls,Task,agent,lab')
+
+  const extension = '/vendor/pkg/index.ts'
+  const vendor = rpcCommand({
+    ...base,
+    grants: {
+      tools: ['vendor-tool'], extensions: [extension], agents: [], skills: [],
+      vendor_extensions: [{ package: 'vendor', tools: ['vendor-tool'], entries: [extension] }],
+    },
+  })
+  assert.equal(vendor.args[vendor.args.indexOf('--tools') + 1], 'read,bash,edit,write,grep,find,ls,vendor-tool')
+  assert.throws(
+    () => rpcCommand({ ...base, grants: { tools: [], extensions: ['/repo/crew/pi/extensions/unknown-registering-extension.ts'], agents: [], skills: [] } }),
+    (error) => error.reason === 'grant-unsupported' && error.message.includes('unknown-registering-extension'),
+  )
 })
 
 test('A3 headless rpc assignment carries the brief body inline', () => {

@@ -16,7 +16,7 @@ import { assignmentDelivery, assignmentPrompt } from './driver.mjs'
 import { shq, classifyRun, readEnvelopeOrThrow, updateCrewJson, attributeExit, decodeExitStatus, stderrTail, classifyToolCall, TOOL_CLASSES, CENSUS_ABSENT_CAUSES, censusFileOperands, suitePolicyCounters, countSuiteDecision, suiteRunPolicy, suitePolicyRow, suiteRefusalRow, suiteRefusalEnvelope, turnCeilingBreached, turnCeilingEnvelope, turnCeilingDetail } from './headless.mjs'
 import { reclaimStore, PHASES, VERDICTS, EVIDENCE_KINDS, LIVENESS } from './reclaim.mjs'
 import { readJsonTri } from './json-leaf.mjs'
-import { PI_BUILTIN_TOOLS, PI_SUBAGENT_TOOL, translateDeny } from './adapters/adapter-pi.mjs'
+import { PI_BUILTIN_TOOLS, piActivatedTools, translateDeny } from './adapters/adapter-pi.mjs'
 
 export const WAIT_POLL_MS = 5000
 export const PRE_FIRST_TURN_TOLERANCE_MS = WAIT_POLL_MS
@@ -94,9 +94,8 @@ export function rpcCommand(spec = {}) {
     deny, env = {}, grants = RPC_NO_GRANTS,
   } = spec
   const piDeny = translateDeny(deny)
-  const fanout = (grants?.agents?.length ?? 0) > 0 ? [PI_SUBAGENT_TOOL] : []
-  const activatedTools = [...new Set([...PI_BUILTIN_TOOLS, ...(grants?.tools || []), ...fanout])]
   const extensions = [...new Set(grants?.extensions || [])]
+  const activatedTools = piActivatedTools({ tools: grants?.tools, extensions, vendorExtensions: grants?.vendor_extensions, agents: grants?.agents || [] })
   const skills = grants?.skills || []
   return {
     bin,

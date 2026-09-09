@@ -6,9 +6,12 @@ import assert from 'node:assert/strict'
 import { accessSync, constants, readFileSync, realpathSync, statSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { delimiter, dirname, join, basename } from 'node:path'
-import { seatCommand, capabilitiesFor, modelString, translateDeny, PI_BUILTIN_TOOLS, PI_PROVIDERS, PI_ADVISOR_EXTENSION, PI_RETRIEVE_TOOL, PI_SKELETONREAD_EXTENSION, shellSingleQuote } from './adapters/adapter-pi.mjs'
+import { seatCommand, capabilitiesFor, modelString, translateDeny, piActivatedTools, validatePiExtensionTools, PI_BUILTIN_TOOLS, PI_FIRST_PARTY_EXTENSION_TOOLS, PI_PROVIDERS, PI_ADVISOR_EXTENSION, shellSingleQuote } from './adapters/adapter-pi.mjs'
 import { SEAT_DEFAULTS, ROLE_ORDER, assertFanoutCoherent } from './crew.mjs'
 import { childArgs, resolvePiBinary } from './pi/extensions/subagent.ts'
+
+const SKELETONREAD_EXTENSION = join(process.cwd(), 'crew/pi/extensions/skeletonread.ts')
+const RETRIEVE_TOOL = PI_FIRST_PARTY_EXTENSION_TOOLS['crew/pi/extensions/skeletonread.ts'][0]
 
 const MODELS = ['sonnet', 'anthropic/claude-opus-5', 'openai-codex/gpt-5.6-luna']
 const EFFORTS = [undefined, 'low', 'high', 'xhigh', 'max']
@@ -57,6 +60,109 @@ test('PI_BUILTIN_TOOLS and every seat activator stay pinned to pi\'s complete bu
     count += 1
   }
   assert.ok(count >= ROLE_ORDER.length * MODELS.length * EFFORTS.length, `seat matrix unexpectedly covered only ${count} shapes`)
+})
+
+test('pi extension activation declares tools, preserves passive entries, and refuses unknown or malformed grants', () => {
+  assert.deepEqual(
+    piActivatedTools({
+      extensions: ['/checkout/crew/pi/extensions/custom.ts'],
+      table: { 'crew/pi/extensions/custom.ts': ['custom'] },
+    }),
+    [...PI_BUILTIN_TOOLS, 'custom'],
+  )
+  assert.deepEqual(piActivatedTools({ extensions: ['/repo/crew/pi/extensions/builderloop.ts'] }), PI_BUILTIN_TOOLS)
+
+  assert.throws(
+    () => seatCommand({
+      role: 'planner', model: 'sonnet', promptFile: '/tmp/prompt.md', tools: '', deny: '', taskDir: '/tmp', bootBrief: 'boot',
+      grants: { tools: [], extensions: ['/repo/crew/pi/extensions/unknown-registering-extension.ts'], agents: [], skills: [], advisor: false },
+    }),
+    (error) => error.reason === 'grant-unsupported' && error.message.includes('unknown-registering-extension'),
+  )
+  assert.throws(
+    () => validatePiExtensionTools({ 'crew/pi/extensions/bad-array.ts': 'bad' }),
+    (error) => error.reason === 'grant-unsupported' && error.message.includes('bad-array.ts') && error.message.includes('"bad"'),
+  )
+  assert.throws(
+    () => validatePiExtensionTools({ 'crew/pi/extensions/bad-tool.ts': [42] }),
+    (error) => error.reason === 'grant-unsupported' && error.message.includes('bad-tool.ts') && error.message.includes('42'),
+  )
+  // TL-G1 (must-fix at review, closed by hand at closeout). Before this, the only
+  // two call sites in the repo passed 'bad' and [42], so `tool.trim() === ''` and
+  // the non-object table guard were both VACUOUS: deleting either left the lane
+  // and all 13 gate checks green while a whitespace tool name activated into
+  // --tools, or a null table degraded into an incidental Object.entries TypeError
+  // instead of a typed refusal. MUTATION: drop `|| tool.trim() === ''`, or the
+  // table guard, and one half of this test goes red.
+  for (const blank of ['', ' ', '\t', '\n  ']) {
+    assert.throws(
+      () => validatePiExtensionTools({ 'crew/pi/extensions/blank-tool.ts': [blank] }),
+      (error) => error.reason === 'grant-unsupported' && error.diagnosis === 'malformed-extension-declaration' && error.message.includes('blank-tool.ts'),
+      `blank tool name ${JSON.stringify(blank)} must refuse`,
+    )
+  }
+  for (const table of [null, undefined, 42, 'table', ['crew/pi/extensions/subagent.ts'], true]) {
+    assert.throws(
+      () => validatePiExtensionTools(table),
+      (error) => error.reason === 'grant-unsupported' && error.diagnosis === 'malformed-extension-declaration' && error.message.includes('<table>'),
+      `non-object table ${JSON.stringify(table)} must refuse by name, not throw incidentally`,
+    )
+  }
+  // RV1-2: the diagnosis names the actual cause. Only a genuinely unknown
+  // extension may claim 'unknown-registering-extension'; a declared-but-malformed
+  // one previously reported that same token, and every assertion checking for it
+  // passed on text the interpolated fixture path supplied anyway.
+  assert.throws(
+    () => validatePiExtensionTools({ 'crew/pi/extensions/bad-array.ts': null }),
+    (error) => error.diagnosis === 'malformed-extension-declaration',
+  )
+  assert.throws(
+    () => piActivatedTools({ extensions: ['/repo/crew/pi/extensions/nope.ts'] }),
+    (error) => error.diagnosis === 'unknown-registering-extension',
+  )
+})
+
+test('C1P keeps the subagent-only pane activator byte-compatible', () => {
+  const extension = join(process.cwd(), 'crew/pi/extensions/subagent.ts')
+  const command = seatCommand({
+    role: 'planner', model: 'openai-codex/x', promptFile: '/tmp/prompt.md', tools: '', deny: '', taskDir: '/tmp/task', bootBrief: 'boot',
+    grants: { tools: [], extensions: [extension], agents: [{ name: 'scout', def: '/scout.json' }], skills: [], advisor: false },
+  })
+  assert.equal(command.match(/--tools "([^\"]*)"/)?.[1], `${PI_BUILTIN_TOOLS.join(',')},agent`)
+  assert.match(command, new RegExp(`-e "${escapeRegex(extension)}"`))
+  assert.doesNotMatch(command, /retrieve|,lab(?:"|,)/)
+})
+
+test('E1 and H1 activate shipped pane tools in extension order', () => {
+  const base = {
+    role: 'planner', model: 'openai-codex/x', promptFile: '/tmp/prompt.md', tools: '', deny: '', taskDir: '/tmp/task', bootBrief: 'boot',
+  }
+  const builder = seatCommand({
+    ...base,
+    grants: { tools: [], extensions: ['/repo/crew/pi/extensions/skeletonread.ts'], agents: [], skills: [], advisor: false },
+  })
+  assert.equal(builder.match(/--tools "([^\"]*)"/)?.[1], `${PI_BUILTIN_TOOLS.join(',')},retrieve`)
+  const planner = seatCommand({
+    ...base,
+    grants: {
+      tools: ['Task'], extensions: ['/repo/crew/pi/extensions/subagent.ts', '/repo/crew/pi/extensions/lab.ts', '/repo/crew/pi/extensions/readgate.ts'],
+      agents: [{ name: 'scout', def: '/scout.json' }], skills: [], advisor: false,
+    },
+  })
+  assert.equal(planner.match(/--tools "([^\"]*)"/)?.[1], `${PI_BUILTIN_TOOLS.join(',')},Task,agent,lab`)
+})
+
+test('J1 preserves folded vendor tools and command shape', () => {
+  const extension = '/vendor/pkg/index.ts'
+  const command = seatCommand({
+    role: 'builder', model: 'sonnet', promptFile: '/tmp/prompt.md', tools: '', deny: '', taskDir: '/tmp/task', bootBrief: 'boot',
+    grants: {
+      tools: ['vendor-tool'], extensions: [extension], agents: [], skills: [], advisor: false,
+      vendor_extensions: [{ package: 'vendor', tools: ['vendor-tool'], entries: [extension] }],
+    },
+  })
+  assert.equal(command.match(/--tools "([^\"]*)"/)?.[1], `${PI_BUILTIN_TOOLS.join(',')},vendor-tool`)
+  assert.match(command, /-e "\/vendor\/pkg\/index\.ts"/)
 })
 
 test('PI_BUILTIN_TOOLS matches pi\'s bundle when pi is installed', (t) => {
@@ -228,14 +334,14 @@ test('granted pi seats append deduped activators and checkout-pinned extension, 
   const command = seatCommand({
     ...[...seatShapes()][0],
     grants: {
-      tools: ['read', 'task', 'task'], extensions: ['/checkout/crew/pi/fanout.js'],
+      tools: ['read', 'task', 'task'], extensions: ['/checkout/crew/pi/extensions/builderloop.ts'],
       skills: ['/checkout/crew/pi/skills/scout.md'], agents: [], advisor: false,
     },
     configDir: '/checkout/crew/pi',
   })
   assert.equal(command.match(/(?:^|\s)--tools "([^"]*)"/)?.[1], `${PI_BUILTIN_TOOLS.join(',')},task`)
   assert.match(command, /--no-extensions/)
-  assert.match(command, /-e "\/checkout\/crew\/pi\/fanout\.js"/)
+  assert.match(command, /-e "\/checkout\/crew\/pi\/extensions\/builderloop\.ts"/)
   assert.match(command, /--skill "\/checkout\/crew\/pi\/skills\/scout\.md"/)
   assert.doesNotMatch(command, /--no-skills/)
   assert.match(command, /PI_CODING_AGENT_DIR="\/checkout\/crew\/pi"/)
@@ -265,14 +371,14 @@ test('GA1', () => {
     taskDir: '/tmp/task', bootBrief: 'boot',
   }
   const plain = seatCommand({ ...shape, grants: { tools: [], extensions: [], agents: [], skills: [], advisor: false } })
-  const granted = seatCommand({ ...shape, grants: { tools: [], extensions: [PI_SKELETONREAD_EXTENSION], agents: [], skills: [], advisor: false } })
-  assert.match(granted, new RegExp(`--tools "${escapeRegex(PI_BUILTIN_TOOLS.join(','))},${PI_RETRIEVE_TOOL}"`))
-  assert.match(granted, new RegExp(`-e "${escapeRegex(PI_SKELETONREAD_EXTENSION)}"`))
+  const granted = seatCommand({ ...shape, grants: { tools: [], extensions: [SKELETONREAD_EXTENSION], agents: [], skills: [], advisor: false } })
+  assert.match(granted, new RegExp(`--tools "${escapeRegex(PI_BUILTIN_TOOLS.join(','))},${RETRIEVE_TOOL}"`))
+  assert.match(granted, new RegExp(`-e "${escapeRegex(SKELETONREAD_EXTENSION)}"`))
   const stripped = granted
-    .replace(`,${PI_RETRIEVE_TOOL}`, '')
-    .replace(` -e "${PI_SKELETONREAD_EXTENSION}"`, '')
+    .replace(`,${RETRIEVE_TOOL}`, '')
+    .replace(` -e "${SKELETONREAD_EXTENSION}"`, '')
   assert.equal(stripped, plain)
-  assert.equal(plain.includes(PI_RETRIEVE_TOOL), false)
+  assert.equal(plain.includes(RETRIEVE_TOOL), false)
 })
 
 test('pi extension operands survive every shell-active character through the shell parser', () => {
@@ -294,7 +400,13 @@ test('pi extension operands survive every shell-active character through the she
     return words
   }
   for (const extensions of cases) {
-    const command = seatCommand({ ...shape, grants: { tools: [], extensions, agents: [], skills: [], advisor: false } })
+    const command = seatCommand({
+      ...shape,
+      grants: {
+        tools: [], extensions, agents: [], skills: [], advisor: false,
+        vendor_extensions: [{ package: '@crew-fixture/shell-active', tools: [], entries: extensions }],
+      },
+    })
     const words = shellWords(command)
     const operands = words.filter((word, index) => index > 0 && words[index - 1] === '-e')
     assert.deepEqual(operands, extensions)

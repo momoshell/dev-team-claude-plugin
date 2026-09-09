@@ -139,16 +139,81 @@ export function translateDeny(deny) {
   return out
 }
 
-// The tool name crew/pi/extensions/subagent.ts registers. Exported so the
-// register-path tests can name it without a literal.
-export const PI_SUBAGENT_TOOL = 'agent'
-export const PI_RETRIEVE_TOOL = 'retrieve'
+// RV1-2: the diagnosis is a PARAMETER, not a constant prefix. Hardcoding
+// 'unknown-registering-extension' made a declared-but-malformed extension report
+// the wrong cause, and every assertion that checked for the token passed on text
+// that proved nothing — the D1 fixture path is
+// crew/pi/extensions/unknown-registering-extension.ts, so the token appeared via
+// the interpolated path no matter which refusal fired.
+function piExtensionRefusal(extension, expected, found, diagnosis = 'malformed-extension-declaration') {
+  const error = new Error(`adapter-pi: ${diagnosis} "${extension}": expected ${expected}, found ${found} [grant-unsupported]`)
+  error.reason = 'grant-unsupported'
+  error.diagnosis = diagnosis
+  return error
+}
+
+// The extension whose declaration backs an `agents` grant. Named here, beside
+// the table that keys it, rather than imported from crew/capabilities.mjs — the
+// adapter must not depend on the register to compose a command.
+export const SUBAGENT_EXTENSION = 'crew/pi/extensions/subagent.ts'
+
+export const PI_FIRST_PARTY_EXTENSION_TOOLS = Object.freeze({
+  'crew/pi/extensions/advisor.ts': Object.freeze([]),
+  'crew/pi/extensions/builderloop.ts': Object.freeze([]),
+  'crew/pi/extensions/readgate.ts': Object.freeze([]),
+  'crew/pi/extensions/lab.ts': Object.freeze(['lab']),
+  'crew/pi/extensions/skeletonread.ts': Object.freeze(['retrieve']),
+  'crew/pi/extensions/subagent.ts': Object.freeze(['agent']),
+})
+
+export function validatePiExtensionTools(table) {
+  if (!table || typeof table !== 'object' || Array.isArray(table)) {
+    throw piExtensionRefusal('<table>', 'an object keyed by checkout-relative extension paths', JSON.stringify(table))
+  }
+  for (const [extension, tools] of Object.entries(table)) {
+    if (!Array.isArray(tools)) throw piExtensionRefusal(extension, 'an array of tool names', JSON.stringify(tools))
+    for (const tool of tools) {
+      if (typeof tool !== 'string' || tool.trim() === '') throw piExtensionRefusal(extension, 'a non-blank string tool name', JSON.stringify(tool))
+    }
+  }
+  return table
+}
+
+const normaliseExtensionPath = (extension) => String(extension).replaceAll('\\', '/')
+
+export function piActivatedTools({ tools = [], extensions = [], vendorExtensions = [], agents = [], table = PI_FIRST_PARTY_EXTENSION_TOOLS } = {}) {
+  const validated = validatePiExtensionTools(table)
+  const activated = new Set([...PI_BUILTIN_TOOLS, ...tools])
+  const vendorEntries = new Set(vendorExtensions.flatMap((grant) => grant?.entries || []).map(normaliseExtensionPath))
+  for (const extension of extensions.map(normaliseExtensionPath)) {
+    if (vendorEntries.has(extension)) continue
+    const declaration = Object.keys(validated).find((key) => extension === key || extension.endsWith(`/${key}`))
+    if (!declaration) throw piExtensionRefusal(extension, 'a declared first-party extension', 'missing declaration', 'unknown-registering-extension')
+    for (const tool of validated[declaration]) activated.add(tool)
+  }
+  // RV1-1: deriving the allowlist from the extension TABLE dropped the old
+  // `fanout` branch, which keyed off grants.agents. A role granting agents
+  // without also being granted the extension that REGISTERS the agent tool then
+  // booted with CREW_PI_AGENTS populated and no `agent` in --tools: fan-out
+  // silently dead, no refusal, where it previously worked. An unbacked grant is
+  // refused by name at composition time rather than dropped, which is the same
+  // rule assertGrantsBacked applies to a grant naming something unbacked.
+  const subagentTools = validated[SUBAGENT_EXTENSION] || []
+  if (agents.length > 0 && !subagentTools.every((tool) => activated.has(tool))) {
+    throw piExtensionRefusal(
+      SUBAGENT_EXTENSION,
+      `a granted extension registering ${JSON.stringify(subagentTools)}, because ${agents.length} agent grant(s) are declared`,
+      'no granted extension declares it',
+      'agent-grant-unbacked',
+    )
+  }
+  return [...activated]
+}
 
 // The advisor extension a register-granted seat loads. The register grants a
 // BOOLEAN, not a path, so the path is the adapter's own checkout-pinned
 // knowledge — resolved from this file's URL, never from cwd.
 export const PI_ADVISOR_EXTENSION = fileURLToPath(new URL('../pi/extensions/advisor.ts', import.meta.url))
-export const PI_SKELETONREAD_EXTENSION = fileURLToPath(new URL('../pi/extensions/skeletonread.ts', import.meta.url))
 export const PI_ADVISOR_ENV = 'CREW_ADVISOR'
 export const PI_ADVISOR_ENDPOINT_ENV = 'CREW_ADVISOR_ENDPOINT'
 export const PI_ADVISOR_MODEL_ENV = 'CREW_ADVISOR_MODEL'
@@ -236,9 +301,7 @@ export function seatCommand({ role, model, promptFile, tools, deny, taskDir, boo
   // mandatory here, not merely additive.
   const advisor = grants?.advisor === true
   const extensions = [...new Set([...(grants?.extensions || []), ...(advisor ? [PI_ADVISOR_EXTENSION] : [])])]
-  const skeletonRead = extensions.includes(PI_SKELETONREAD_EXTENSION) ? [PI_RETRIEVE_TOOL] : []
-  const fanout = (grants?.agents?.length ?? 0) > 0 ? [PI_SUBAGENT_TOOL] : []
-  const activatedTools = [...new Set([...PI_BUILTIN_TOOLS, ...(grants?.tools || []), ...fanout, ...skeletonRead])]
+  const activatedTools = piActivatedTools({ tools: grants?.tools, extensions, vendorExtensions: grants?.vendor_extensions, agents: grants?.agents || [] })
   const skills = grants?.skills || []
   return [
     'env', 'DEVTEAM_WORKER=1', `CREW_ROLE=${role}`, `CREW_TASK_DIR="${taskDir}"`,

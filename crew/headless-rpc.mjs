@@ -1069,13 +1069,49 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
     const command = frame.command || 'unknown'
     return staged('rpc-command-error', `rpc command ${JSON.stringify(command)} failed: ${frame.error || 'unknown error'}`, role)
   }
+  // The command FIFO is opened O_RDWR | O_NONBLOCK (:1135), so a single writeSync
+  // transfers at most what currently FITS in the pipe buffer and returns that count —
+  // 8-64 KB depending on the kernel. A prompt is the whole assignment, routinely tens
+  // of kilobytes, so a short write is the NORMAL outcome for a large brief, not a
+  // transport fault. Treating the first short count as fatal killed b576-suitesplit at
+  // build:r1 with elapsed_ms 0 against a 39 KB brief.
+  //
+  // So continue the write from where it stopped, letting the reader drain, and keep the
+  // PROMPT DELIVERY WINDOW as the bound: a reader that never drains still fails by name
+  // inside the same budget rather than hanging. EAGAIN means the buffer is momentarily
+  // full with nothing transferred, which is the same condition seen from the other side.
+  //
+  // A deps-injected writeSync that returns undefined keeps its meaning — the caller
+  // treats undefined as "unmeasured, do not check" — so it is returned untouched
+  // rather than being folded into a byte total it never claimed to report.
+  function writeAllToFifo(seat, encoded) {
+    let offset = 0
+    const deadline = now() + promptDeliveryWindowMs
+    for (;;) {
+      let written
+      try {
+        written = writeFd(seat.fd, encoded, offset, encoded.length - offset)
+      } catch (error) {
+        if (error?.code !== 'EAGAIN' && error?.code !== 'EWOULDBLOCK') throw error
+        if (now() >= deadline) throw error
+        sleep(FIFO_RETRY_MS)
+        continue
+      }
+      if (typeof written !== 'number') return written
+      offset += written
+      if (offset >= encoded.length) return offset
+      if (now() >= deadline) return offset
+      sleep(FIFO_RETRY_MS)
+    }
+  }
+
   function send(seat, obj, command = obj.type || obj.command || 'command') {
     const id = obj.id || commandId(seat.turn, command)
     const value = { ...obj, id }
     const encoded = Buffer.from(`${JSON.stringify(value)}\n`, 'utf8')
     let written
     try {
-      written = writeFd(seat.fd, encoded)
+      written = writeAllToFifo(seat, encoded)
       if (command === 'prompt' && written !== undefined
         && (typeof written !== 'number' || written !== encoded.length)) {
         const error = Object.assign(new Error(`prompt FIFO write was partial (${String(written)} of ${encoded.length} bytes)`), { code: 'PARTIAL_WRITE' })

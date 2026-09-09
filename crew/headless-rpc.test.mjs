@@ -2714,17 +2714,52 @@ test('RPC prompt FIFO accepts undefined legacy writers and requires full numeric
   } finally { f.cleanup() }
 })
 
-test('RPC prompt FIFO partial, EAGAIN, and EPERM writes fail fast', () => {
+test('RPC prompt FIFO stalled, EAGAIN, and EPERM writes fail fast', () => {
+  // A writer that transfers NOTHING is a stall and still fails by name inside the
+  // delivery window. `() => 1` used to be listed here as a partial write; it is not a
+  // stall — it is a writer making progress one byte at a time — and it is asserted
+  // BELOW to succeed instead.
   for (const failure of [
-    () => 1,
+    () => 0,
     () => { const error = new Error('would block'); error.code = 'EAGAIN'; throw error },
     () => { const error = new Error('permission denied'); error.code = 'EPERM'; throw error },
   ]) {
     const rows = []
-    const f = fixture({ writeSync: failure, log: (row) => rows.push(row) })
+    const f = fixture({ writeSync: failure, promptDeliveryWindowMs: 0, log: (row) => rows.push(row) })
     try {
       assert.throws(() => f.io.assign({ role: 'builder', briefFile: '/brief.md' }), (error) => error.stage === 'rpc-prompt-undelivered')
       assert.equal(rows.filter((row) => row.event === 'rpc-prompt-delivery').length, 1)
     } finally { f.cleanup() }
   }
+})
+
+// The command FIFO is opened O_RDWR | O_NONBLOCK, so one writeSync transfers at most
+// what fits in the pipe buffer — 8-64 KB — and a prompt is the whole assignment. A
+// short write is therefore the NORMAL outcome for a large brief, not a fault.
+// b576-suitesplit died at build:r1 with elapsed_ms 0 against a 39 KB brief because the
+// first short count was treated as fatal.
+test('a prompt larger than the pipe buffer is written across several writes', () => {
+  const chunks = []
+  let calls = 0
+  const f = fixture({
+    // Transfer at most 8 KB per call, the smallest buffer the kernel reports here.
+    writeSync: (_fd, buffer, offset = 0, length = buffer.length) => {
+      calls += 1
+      const n = Math.min(length, 8192)
+      chunks.push(buffer.subarray(offset, offset + n).toString('utf8'))
+      return n
+    },
+    sleep: () => {},
+  })
+  try {
+    // assign() composes the prompt itself; `note` is appended verbatim, so it is the
+    // handle for making one as large as a real brief.
+    const note = 'x'.repeat(40_000)
+    const assigned = f.io.assign({ role: 'builder', briefFile: '/brief.md', note })
+    assert.ok(assigned, 'a large prompt must be delivered, not refused')
+    assert.ok(calls > 1, 'a 40 KB prompt must take more than one write')
+    // Every byte arrives, in order, exactly once.
+    const joined = chunks.join('')
+    assert.ok(joined.includes(note), 'the whole prompt must reach the FIFO')
+  } finally { f.cleanup() }
 })

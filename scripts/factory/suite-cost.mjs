@@ -356,7 +356,10 @@ function rowFromMeasurement(suite, measurement) {
     ? value.test_count
     : (Number.isInteger(value.tests) ? value.tests : null)
   const reason = duration === null
-    ? (CLOSED_REASONS.has(value.reason) ? value.reason : (typeof value.reason === 'string' && value.reason ? value.reason : 'not-measured'))
+    // RV1-6: a reason outside the closed set NEVER enters the record verbatim.
+    // Passing an arbitrary string through would put open vocabulary into committed
+    // data, which is the shape 'one closed reason' exists to prevent.
+    ? (CLOSED_REASONS.has(value.reason) ? value.reason : 'not-measured')
     : null
   return {
     suite,
@@ -439,7 +442,7 @@ function buildReport({ tracked, measurements, measuredAt = new Date().toISOStrin
     distribution: summary.distribution,
     slowest_suites: summary.slowest_suites,
     suites: summary.suites,
-    cheaper_tests: cheaperTests,
+    fixture_substitutions: cheaperTests,
   }
 }
 
@@ -649,12 +652,16 @@ const UNREACHED_FAST_BASELINE_PROOF = Object.freeze({
   reason: 'Every case refuses in fence validation or coupling before baseline resolution, so the substituted command is unreachable.',
 })
 const RECORDED_CHEAPER_TESTS = Object.freeze([
-  { title: 'pack mode moves boilerplate to sidecars and preserves the inline verdict', before_seconds: 0.8, after_seconds: 0.56, before_samples_seconds: Object.freeze([0.8, 0.8, 0.83]), after_samples_seconds: Object.freeze([0.56, 0.56, 0.58]), coverage: 'unchanged', mutation: 'killed', explanation: 'Only the incidental baseline command changed; compiler, git, and filesystem coverage remained real.', behavior_proof: KILLED_FAST_BASELINE_PROOF },
-  { title: 'every packed absence uses one closed reason and never invents a value', before_seconds: 0.98, after_seconds: 0.68, before_samples_seconds: Object.freeze([0.98, 0.98, 0.99]), after_samples_seconds: Object.freeze([0.67, 0.68, 0.7]), coverage: 'unchanged', mutation: 'killed', explanation: 'Only the incidental baseline command changed; compiler, git, and filesystem coverage remained real.', behavior_proof: KILLED_FAST_BASELINE_PROOF },
-  { title: 'creates keeps missing-path strict in both where/creates directions and accepts an empty list', before_seconds: 0.62, after_seconds: 0.51, before_samples_seconds: Object.freeze([0.61, 0.62, 0.63]), after_samples_seconds: Object.freeze([0.51, 0.51, 0.51]), coverage: 'unchanged', mutation: 'killed', explanation: 'Only the incidental baseline command changed; compiler, git, and filesystem coverage remained real.', behavior_proof: KILLED_FAST_BASELINE_PROOF },
-  { title: 'scope validation refuses unslashed directories without changing the rendered surface', before_seconds: 0.79, after_seconds: 0.69, before_samples_seconds: Object.freeze([0.78, 0.79, 0.8]), after_samples_seconds: Object.freeze([0.68, 0.69, 0.69]), coverage: 'unchanged', mutation: 'killed', explanation: 'Only the incidental baseline command changed; compiler, git, and filesystem coverage remained real.', behavior_proof: KILLED_FAST_BASELINE_PROOF },
-  { title: 'out refusal and force overwrite follow the CLI contract', before_seconds: 0.97, after_seconds: 0.67, before_samples_seconds: Object.freeze([0.96, 0.97, 0.98]), after_samples_seconds: Object.freeze([0.67, 0.67, 0.67]), coverage: 'unchanged', mutation: 'killed', explanation: 'Only the incidental baseline command changed; compiler, git, and filesystem coverage remained real.', behavior_proof: KILLED_FAST_BASELINE_PROOF },
-  { title: 'stale and malformed coupling acknowledgements refuse by input reason', before_seconds: 0.64, after_seconds: 0.66, before_samples_seconds: Object.freeze([0.64, 0.64, 0.64]), after_samples_seconds: Object.freeze([0.66, 0.66, 0.67]), coverage: 'unchanged', mutation: 'survived', explanation: 'Only the incidental baseline command changed; compiler, git, and filesystem coverage remained real.', behavior_proof: UNREACHED_FAST_BASELINE_PROOF },
+  { title: 'pack mode moves boilerplate to sidecars and preserves the inline verdict', before_seconds: 0.8, after_seconds: 0.56, before_samples_seconds: Object.freeze([0.8, 0.8, 0.83]), after_samples_seconds: Object.freeze([0.56, 0.56, 0.58]), coverage: 'unchanged', mutation: 'killed', faster: true, explanation: 'Only the incidental baseline command changed; compiler, git, and filesystem coverage remained real.', behavior_proof: KILLED_FAST_BASELINE_PROOF },
+  { title: 'every packed absence uses one closed reason and never invents a value', before_seconds: 0.98, after_seconds: 0.68, before_samples_seconds: Object.freeze([0.98, 0.98, 0.99]), after_samples_seconds: Object.freeze([0.67, 0.68, 0.7]), coverage: 'unchanged', mutation: 'killed', faster: true, explanation: 'Only the incidental baseline command changed; compiler, git, and filesystem coverage remained real.', behavior_proof: KILLED_FAST_BASELINE_PROOF },
+  { title: 'creates keeps missing-path strict in both where/creates directions and accepts an empty list', before_seconds: 0.62, after_seconds: 0.51, before_samples_seconds: Object.freeze([0.61, 0.62, 0.63]), after_samples_seconds: Object.freeze([0.51, 0.51, 0.51]), coverage: 'unchanged', mutation: 'killed', faster: true, explanation: 'Only the incidental baseline command changed; compiler, git, and filesystem coverage remained real.', behavior_proof: KILLED_FAST_BASELINE_PROOF },
+  { title: 'scope validation refuses unslashed directories without changing the rendered surface', before_seconds: 0.79, after_seconds: 0.69, before_samples_seconds: Object.freeze([0.78, 0.79, 0.8]), after_samples_seconds: Object.freeze([0.68, 0.69, 0.69]), coverage: 'unchanged', mutation: 'killed', faster: true, explanation: 'Only the incidental baseline command changed; compiler, git, and filesystem coverage remained real.', behavior_proof: KILLED_FAST_BASELINE_PROOF },
+  { title: 'out refusal and force overwrite follow the CLI contract', before_seconds: 0.97, after_seconds: 0.67, before_samples_seconds: Object.freeze([0.96, 0.97, 0.98]), after_samples_seconds: Object.freeze([0.67, 0.67, 0.67]), coverage: 'unchanged', mutation: 'killed', faster: true, explanation: 'Only the incidental baseline command changed; compiler, git, and filesystem coverage remained real.', behavior_proof: KILLED_FAST_BASELINE_PROOF },
+  // RV1-4: this substitution did NOT make the test cheaper — it is 0.02s SLOWER,
+  // and its behaviour proof survived rather than killed. It is recorded because it
+  // was made, not because it paid off; reusing the savings explanation here claimed
+  // a benefit the numbers refuse.
+  { title: 'stale and malformed coupling acknowledgements refuse by input reason', before_seconds: 0.64, after_seconds: 0.66, faster: false, before_samples_seconds: Object.freeze([0.64, 0.64, 0.64]), after_samples_seconds: Object.freeze([0.66, 0.66, 0.67]), coverage: 'unchanged', mutation: 'survived', explanation: 'No saving: the substituted baseline is 0.02s slower than the original and its proof survived, because every case in this test refuses during fence or coupling validation before the substituted command is reachable.', behavior_proof: UNREACHED_FAST_BASELINE_PROOF },
 ])
 
 export const RECORDED_SUITE_COST_REPORT = Object.freeze({
@@ -667,7 +674,7 @@ export const RECORDED_SUITE_COST_REPORT = Object.freeze({
   slowest_suites: RECORDED_SUITE_SUMMARY.slowest_suites,
   suites: RECORDED_SUITE_SUMMARY.suites,
   attribution: RECORDED_MAKE_BRIEF_ATTRIBUTION,
-  cheaper_tests: RECORDED_CHEAPER_TESTS,
+  fixture_substitutions: RECORDED_CHEAPER_TESTS,
 })
 
 function realpathOr(path) {

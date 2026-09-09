@@ -150,6 +150,36 @@ test('unmeasurable suite outcomes stay null with one closed reason', () => {
 // names two or three suites and exceeds 3s at once. Wrong statistic for the
 // question, so no number is published. MUTATION: re-export a ceiling derivation
 // or republish gate_cost and this test goes red.
+// RV1-6 (review 'consider', closed by hand at closeout). rowFromMeasurement passed
+// any non-empty string through as a reason, so open vocabulary could enter the
+// committed record — the shape "one closed reason" exists to prevent. MUTATION:
+// restore the passthrough and this test goes red.
+test('RV1-6 an unmeasured suite carries a CLOSED reason, never open vocabulary', () => {
+  const open = summarizeSuiteCosts({ tracked: ['t/x.test.mjs'], measurements: [{ suite: 't/x.test.mjs', duration_seconds: null, reason: 'because-i-said-so', tests: null }] })
+  assert.equal(open.suites[0].reason, 'not-measured')
+  assert.equal(open.suites[0].duration_seconds, null)
+  const closed = summarizeSuiteCosts({ tracked: ['t/y.test.mjs'], measurements: [{ suite: 't/y.test.mjs', duration_seconds: null, reason: 'timeout', tests: null }] })
+  assert.equal(closed.suites[0].reason, 'timeout')
+})
+
+// RV1-4 (review 'consider', closed by hand). One of the six fixture substitutions
+// is 0.02s SLOWER and its behaviour proof survived; it was filed under a key named
+// cheaper_tests with the savings explanation the five faster rows share, claiming a
+// benefit its own numbers refuse. MUTATION: relabel the slower row faster:true, or
+// give it the shared savings explanation, and this test goes red.
+test('RV1-4 every fixture substitution states truthfully whether it paid off', () => {
+  const rows = RECORDED_SUITE_COST_REPORT.fixture_substitutions
+  assert.equal(Object.hasOwn(RECORDED_SUITE_COST_REPORT, 'cheaper_tests'), false)
+  for (const row of rows) {
+    const median = (values) => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)]
+    const actuallyFaster = median(row.after_samples_seconds) < median(row.before_samples_seconds)
+    assert.equal(row.faster, actuallyFaster, `${row.title} claims faster=${row.faster}`)
+    if (!row.faster) assert.match(row.explanation, /No saving/)
+  }
+  assert.equal(rows.filter((row) => row.faster).length, 5)
+  assert.equal(rows.filter((row) => !row.faster).length, 1)
+})
+
 test('no gate-cost ceiling is published, and the withdrawn derivation is gone', async () => {
   const mod = await import('../scripts/factory/suite-cost.mjs')
   assert.equal(Object.hasOwn(mod, 'deriveGateCostCeiling'), false)
@@ -200,13 +230,16 @@ test('RV1-2 records delivered measurements for construction-time suites', () => 
     'out refusal and force overwrite follow the CLI contract',
     'stale and malformed coupling acknowledgements refuse by input reason',
   ]
-  assert.deepEqual(RECORDED_SUITE_COST_REPORT.cheaper_tests.map(({ title }) => title), names)
+  assert.deepEqual(RECORDED_SUITE_COST_REPORT.fixture_substitutions.map(({ title }) => title), names)
   const observedMutations = ['killed', 'killed', 'killed', 'killed', 'killed', 'survived']
-  for (const [index, proof] of RECORDED_SUITE_COST_REPORT.cheaper_tests.entries()) {
+  for (const [index, proof] of RECORDED_SUITE_COST_REPORT.fixture_substitutions.entries()) {
     assert.equal(proof.coverage, 'unchanged')
     assert.equal(proof.mutation, observedMutations[index])
     assert.equal(proof.behavior_proof?.outcome, observedMutations[index])
-    assert.match(proof.explanation, /incidental baseline command/i)
+    // RV1-4: this used to demand the SAME savings explanation on every row, which
+    // is how the one substitution that got slower kept claiming a benefit. A row
+    // states the shared reason only when it actually paid off.
+    assert.match(proof.explanation, proof.faster ? /incidental baseline command/i : /No saving/)
   }
 })
 

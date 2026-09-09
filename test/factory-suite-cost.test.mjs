@@ -4,7 +4,6 @@ import { join } from 'node:path'
 import { ROOT, scratchDir } from './helpers.mjs'
 import {
   RECORDED_SUITE_COST_REPORT,
-  deriveGateCostCeiling,
   main,
   measureSuite,
   parseTap,
@@ -145,10 +144,16 @@ test('unmeasurable suite outcomes stay null with one closed reason', () => {
   }
 })
 
-test('deriveGateCostCeiling uses deterministic quartiles and the upper Tukey fence', () => {
-  assert.equal(deriveGateCostCeiling([5, 1, 4, 2, 3]), 7)
-  assert.equal(deriveGateCostCeiling([null, NaN, Infinity]), null)
-  assert.equal(deriveGateCostCeiling([]), null)
+// The ceiling derivation was WITHDRAWN at closeout: a Tukey upper fence over the
+// suite population yields 3 seconds on a fully-measured green tree, because the
+// population is dominated by sub-second suites, while a real acceptance gate
+// names two or three suites and exceeds 3s at once. Wrong statistic for the
+// question, so no number is published. MUTATION: re-export a ceiling derivation
+// or republish gate_cost and this test goes red.
+test('no gate-cost ceiling is published, and the withdrawn derivation is gone', async () => {
+  const mod = await import('../scripts/factory/suite-cost.mjs')
+  assert.equal(Object.hasOwn(mod, 'deriveGateCostCeiling'), false)
+  assert.equal(Object.hasOwn(RECORDED_SUITE_COST_REPORT, 'gate_cost'), false)
 })
 
 test('CLI help and unknown options are bounded refusals without running a suite', () => {
@@ -205,19 +210,22 @@ test('RV1-2 records delivered measurements for construction-time suites', () => 
   }
 })
 
-test('the report keeps make-brief counts, retained coverage costs, classifications, and derived ceiling', () => {
+test('the report attributes the dominant cost and claims no unsupported saving', () => {
   const report = RECORDED_SUITE_COST_REPORT
-  assert.equal(report.make_brief.before_seconds, 29.2)
-  assert.equal(report.make_brief.before_test_count, report.make_brief.after_test_count)
-  assert.ok(report.make_brief.after_seconds < report.make_brief.before_seconds)
-  assert.deepEqual(report.make_brief.removed_tests, [])
-  assert.ok(report.make_brief.dominant_tests.some(({ title }) => title === 'indexing a 70k-symbol file stays within a countable byte budget'))
-  assert.ok(report.make_brief.dominant_tests.some(({ title }) => title === 'tracked key discovery retains a tripwire beyond argv limits'))
-  const classifications = new Set(report.make_brief.dominant_tests.flatMap(({ classifications: values }) => values))
+  const a = report.attribution
+  // #1080 ask 1: the attribution is the deliverable — which tests dominate and what they do.
+  assert.equal(a.suite, 'test/factory-make-brief.test.mjs')
+  assert.ok(a.dominant_tests.some(({ title }) => title === 'indexing a 70k-symbol file stays within a countable byte budget'))
+  assert.ok(a.dominant_tests.some(({ title }) => title === 'tracked key discovery retains a tripwire beyond argv limits'))
+  const classifications = new Set(a.dominant_tests.flatMap(({ classifications: values }) => values))
   for (const classification of ['compilation', 'discovery scan', 'real git', 'filesystem fixtures']) assert.ok(classifications.has(classification), classification)
-  assert.ok(report.make_brief.retained_tests.some(({ title }) => title.includes('70k-symbol')))
-  assert.ok(report.make_brief.retained_tests.some(({ title }) => title.includes('literal-heavy real discovery')))
-  const derived = deriveGateCostCeiling(report.suites.map(({ duration_seconds }) => duration_seconds).filter(Number.isFinite))
-  assert.equal(report.gate_cost.ceiling_seconds, derived)
-  assert.match(report.gate_cost.derivation, /acceptance gate is too slow/)
+  // ask 2's finding: the dominant cost is inherent, and each retained test says why.
+  assert.ok(a.retained_tests.every(({ why }) => typeof why === 'string' && why.length > 0))
+  assert.ok(a.retained_tests.some(({ title }) => title.includes('70k-symbol')))
+  // and no saving is claimed, with a closed reason rather than silence.
+  assert.equal(a.saving_claimed, null)
+  assert.equal(a.saving_absent_reason, 'within-sample-noise')
+  assert.deepEqual(a.removed_tests, [])
+  assert.ok(a.samples_seconds.length > 1)
+  assert.equal(Object.hasOwn(report, 'make_brief'), false)
 })

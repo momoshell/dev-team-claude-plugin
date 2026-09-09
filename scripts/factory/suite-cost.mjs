@@ -615,15 +615,30 @@ const RECORDED_SUITE_SUMMARY = summarizeSuiteCosts({
   measurements: RECORDED_SUITE_MEASUREMENTS,
 })
 
-// RECORDED_MAKE_BRIEF is WITHDRAWN at closeout. It recorded before_seconds 29.2
-// against its own three before-samples whose median is 28.84, so the 0.71s saving
-// it claimed was about twice what its denominator supports (0.35s) — and 29.2 was
-// the issue author's single unrepeated sample, not a measurement this lane took.
-// The six fixture substitutions below are REAL and each is still proven to pin
-// what it pinned (checks D1a-f), but the suite-level before/after they add up to
-// is inside sample noise, so no saving is claimed. #1080 ask 2's finding is that
-// the dominant cost is inherent, not recoverable fixture waste; that finding is
-// the deliverable, and retained_tests recorded the reasons.
+// #1080 ask 1 — ATTRIBUTION. Which tests dominate the slowest suite, and what do
+// they actually do. This is a finding, not a saving: no before/after is claimed,
+// because the suite-level difference the six fixture substitutions produce is
+// inside sample noise (the recorded before_seconds 29.2 was the issue's single
+// unrepeated sample; this lane's own three samples median 28.84 against 28.49).
+// The answer to ask 2 is that the dominant cost is INHERENT — each retained test
+// says why it stays expensive — not recoverable fixture waste.
+const RECORDED_MAKE_BRIEF_ATTRIBUTION = Object.freeze({
+  suite: 'test/factory-make-brief.test.mjs',
+  samples_seconds: Object.freeze([28.687606208, 28.839590209, 29.1169855]),
+  test_count: 156,
+  removed_tests: Object.freeze([]),
+  saving_claimed: null,
+  saving_absent_reason: 'within-sample-noise',
+  dominant_tests: Object.freeze([
+    { title: 'context pack records complete source data beyond argv limits', classifications: Object.freeze(['compilation', 'discovery scan', 'filesystem fixtures']) },
+    { title: 'indexing a 70k-symbol file stays within a countable byte budget', classifications: Object.freeze(['compilation', 'discovery scan']) },
+    { title: 'tracked key discovery retains a tripwire beyond argv limits', classifications: Object.freeze(['compilation', 'discovery scan', 'real git', 'filesystem fixtures']) },
+  ]),
+  retained_tests: Object.freeze([
+    { title: 'indexing a 70k-symbol file stays within a countable byte budget', why: '70,000 exported symbols remain the argv-scale and context-completeness coverage cost.' },
+    { title: 'literal-heavy real discovery completes without modifying its reproducers', why: 'The real repository discovery fixture retains both scan and grep timeout phases.' },
+  ]),
+})
 
 const KILLED_FAST_BASELINE_PROOF = Object.freeze({
   outcome: 'killed',
@@ -651,6 +666,7 @@ export const RECORDED_SUITE_COST_REPORT = Object.freeze({
   distribution: RECORDED_SUITE_SUMMARY.distribution,
   slowest_suites: RECORDED_SUITE_SUMMARY.slowest_suites,
   suites: RECORDED_SUITE_SUMMARY.suites,
+  attribution: RECORDED_MAKE_BRIEF_ATTRIBUTION,
   cheaper_tests: RECORDED_CHEAPER_TESTS,
 })
 

@@ -313,7 +313,7 @@ test('the flag reference records what a dry run is and is not for', () => {
     'six times',
     'Six invocations on one day is the whole sample',
     '`--dry-run --force --no-keep --headless-all --panes`',
-    'an absent flag defaults planner to `64` and lead to `32`',
+    'an absent flag defaults planner to `64`, builder to `200`, reviewer to `48` and',
     'source: default', 'source: flag', 'source: absent',
     'Pane boots have no implicit ceiling',
     'Batch forwarding of `--assurance` and every `--max-turns-<role>` value',

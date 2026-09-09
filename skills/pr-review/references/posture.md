@@ -3,12 +3,12 @@
 One reviewer is the standing posture. A write surface touching the **protected floor** boots the lane at the **judge** tier; compute that before dispatch, never after. Judge-tier and protected-floor changes are where a second independent reviewer is worth most; when a panel does form, record any disagreement according to `references/divergence.md`.
 
 The panel flow is shipped and wired. `panelSeats()` selects the seats
-(`crew/drive.mjs:656`), `panelReview()` briefs two reviewers independently
-(`crew/drive.mjs:5527`), `fuseFindings()` (`crew/escalation-policy.mjs:81`) fuses
+(`crew/drive.mjs:656`), `runPanelReview()` briefs two reviewers independently
+(`crew/drive.mjs:3099`), `fuseFindings()` (`crew/escalation-policy.mjs:81`) fuses
 their findings at `crew/drive.mjs:5585`, `adjudicatePanel()`
 (`crew/escalation-policy.mjs:128`) adjudicates the divergences at
 `crew/drive.mjs:5655`, and the review loop invokes the panel at
-`crew/drive.mjs:6532`. Seat selection no longer refuses a second reviewer for
+`crew/drive.mjs:6547`. Seat selection no longer refuses a second reviewer for
 sharing the partner's vendor; that rule was retired with #983 and no ADR
 ratified it. It shipped in `842ea51` on 2026-08-15, and no capability named for
 verdict fusion exists anywhere in the tree, so no trigger of that name can be

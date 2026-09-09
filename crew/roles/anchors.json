@@ -1,7 +1,6 @@
 {
   "crew/adapters/adapter-claude.mjs:98": "grants?.skills?.length",
   "crew/drive.mjs:1037": "function verdictOf(env) {",
-  "crew/adapters/adapter-pi.mjs:265": "['--no-skills']",
   "crew/drive.mjs:4452": "let gateCmd = planEnv.details?.gate_cmd || null",
   "crew/drive.mjs:4295": "if (planAdversary.trigger === 'none') {",
   "crew/drive.mjs:4315": "const check = assignAndWait('tech-lead', checkBrief, 'plan-check')",
@@ -12,5 +11,6 @@
   "crew/drive.mjs:1668": "export function applyPrescriptionLines(source) {",
   "crew/drive.mjs:1864": "export function planAcceptContractLines() {",
   "crew/drive.mjs:3786": "function settleAccept(c, where, contextPaths = []) {",
-  "crew/drive.mjs:3567": "lead requested a second second-opinion"
+  "crew/drive.mjs:3567": "lead requested a second second-opinion",
+  "crew/adapters/adapter-pi.mjs:328": "['--no-skills']"
 }

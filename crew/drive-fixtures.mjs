@@ -1304,6 +1304,7 @@ const DRIVE_JOURNAL_EXPECTED = Object.freeze([
   ['recordRow', '', 'at plan_round_cap'],
   ['recordRow', '', 'at carve_verdict'],
   ['recordRow', '', 'at adversary_trigger'],
+  ['recordRow', '', 'at adversary_unavailable'],
   ['recordRow', '', 'at plan_converged'],
   ['recordRow', '', 'at gate_discrimination gate_generation gate_summary gate_proof_note'],
   ['recordRow', '', 'at gate_proof_unproven gate_generation'],

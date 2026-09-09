@@ -1616,6 +1616,34 @@ test('RV1-2 a round-2 needs adversary declaration survives a validation-lane bou
   assert.deepEqual(rows.map((row) => row.adversary_trigger), ['planner-request'])
 })
 
+// b573-undelivered died on this exact shape: a BUILD lane (no tech-lead seated)
+// whose planner declared needs_adversary. Before ADR-038's trigger landed, a lane
+// with no tech-lead simply skipped the loop; the trigger made an ADVISORY request
+// fatal on a tier that seats no adversary by design, which is stricter than the
+// ADR asks. The planner cannot see the seating. coverage-absent still fails
+// closed — that is the safety case the ADR exists for.
+// MUTATION: escalate on either trigger when unseated, or on neither, and one half
+// of this test goes red.
+test('an unseated adversary is fatal for coverage-absent and advisory for a planner request', () => {
+  const requested = fakeIo({
+    envelopes: { 'planner:1': adversarialPlanEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const advisory = driveTask(CTX, requested)
+  assert.equal(advisory.status, 'done')
+  assert.equal(requested.calls.assign.some(({ role }) => role === 'tech-lead'), false)
+  const row = requested.calls.logs.find((entry) => Object.hasOwn(entry, 'adversary_unavailable'))
+  assert.deepEqual(row.adversary_unavailable, { trigger: 'planner-request', seated: false })
+
+  // 'typed-refusal' leaves the protected file with no killed proof, which is what
+  // makes coverage-absent fire — the safety case, with nobody seated to adjudicate.
+  const uncovered = fakeIo({ envelopes: { 'planner:1': protectedPlanEnv(['crew/drive.mjs'], 'typed-refusal') } })
+  const fatal = driveTask(CTX, uncovered)
+  assert.equal(fatal.status, 'escalation')
+  assert.equal(fatal.details.escalation.why, 'adversary-unavailable')
+})
+
 test('B1', () => {
   const bad = 'node --test crew/drive-plan.test.mjs > test-output.txt'
   const io = fakeIo({

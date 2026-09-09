@@ -1056,6 +1056,13 @@ export const PLAN_CHECK_SEVERITIES = Object.freeze(['blocker', 'major', 'minor']
 // contract). A member no caller can write is the defect #879 records; this enum
 // carries only what something can actually produce. ADR-038 Amendment 1.
 export const ADVERSARY_TRIGGERS = Object.freeze(['planner-request', 'coverage-absent', 'none'])
+// Named, because the members are read by meaning at the seating check below and a
+// positional index there is a silent reordering hazard (b570 RV1-4).
+export const ADVERSARY_TRIGGER = Object.freeze({
+  plannerRequest: ADVERSARY_TRIGGERS[0],
+  coverageAbsent: ADVERSARY_TRIGGERS[1],
+  none: ADVERSARY_TRIGGERS[2],
+})
 export const ADVERSARY_REFUSALS = Object.freeze(['needs-adversary-type', 'adversary-unavailable'])
 export const ADVERSARY_REFUSAL = Object.freeze({
   type: ADVERSARY_REFUSALS[0],
@@ -4297,8 +4304,26 @@ function runTask(ctx, io, crash) {
       break
     }
     if (!seatList.includes('tech-lead')) {
+      // A trigger fired with no adversary seated. Which of the two triggers fired
+      // decides whether that is fatal, and conflating them killed b573-undelivered
+      // — a build lane whose planner merely ASKED for an adversarial round.
+      //
+      // coverage-absent is the safety case this ADR exists for: a protected file
+      // the accepted gate cannot prove, with nobody to adjudicate it. That still
+      // fails closed.
+      //
+      // planner-request is ADVISORY. The planner cannot see the seating, a build
+      // tier seats no tech-lead by design, and the protected floor already forces
+      // judge wherever an adversary is genuinely required. Killing the lane for an
+      // optional request is stricter than ADR-038 asks and stricter than the
+      // pre-trigger behaviour, which simply skipped the loop. Record the fact and
+      // proceed, so the request is visible without being fatal.
       stageComplete()
-      return escalate('plan', ADVERSARY_REFUSAL.unavailable, env.artifacts || [])
+      if (planAdversary.trigger === ADVERSARY_TRIGGER.coverageAbsent) {
+        return escalate('plan', ADVERSARY_REFUSAL.unavailable, env.artifacts || [])
+      }
+      io.log(recordRow({ at: io.now(), adversary_unavailable: { trigger: planAdversary.trigger, seated: false } }))
+      break
     }
     stage(`check:r${round}`)
     const planPath = env.details?.plan_path || art('plan.md')

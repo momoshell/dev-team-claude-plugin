@@ -2040,7 +2040,7 @@ test('the journal channel vocabulary is closed, exported and additive', () => {
 test('every journal emit site in the driver is inventoried, wrapped and on the right channel', () => {
   const text = readFileSync(new URL('./drive.mjs', import.meta.url), 'utf8')
   const sites = driveJournalSites(text)
-  assert.equal(sites.length, 64)
+  assert.equal(sites.length, 65)
   assert.deepEqual(sites.map(({ wrapper, events, keys }) => [wrapper, events, keys]), DRIVE_JOURNAL_EXPECTED)
   assert.ok(sites.every(({ wrapper }) => wrapper === 'recordRow' || wrapper === 'operationalRow'))
   assert.equal(sites.filter(({ wrapper }) => wrapper === 'operationalRow').length, 2)

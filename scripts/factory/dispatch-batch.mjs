@@ -3268,7 +3268,21 @@ export function batchAliasWarnings({ lanes = [], runFlags = {} } = {}) {
   return warnings
 }
 
-export async function dispatchBatch({ batchDir, fences, checkout, parentDir, outDir, tier, execution, variant, externals, registerPath: registerOverride, runFlags = {}, deps } = {}) {
+function prepareDispatchContext(options) {
+  let {
+    batchDir,
+    fences,
+    checkout,
+    parentDir,
+    outDir,
+    tier,
+    execution,
+    variant,
+    externals,
+    registerPath: registerOverride,
+    runFlags = {},
+    deps,
+  } = options
   const plannerSymbolsHoldoutFraction = parsePlannerSymbolsHoldoutFraction(runFlags['planner-symbols-holdout-fraction'])
   const d = normalDeps(deps)
   const transport = resolveTransport({ runFlags })
@@ -3358,7 +3372,7 @@ export async function dispatchBatch({ batchDir, fences, checkout, parentDir, out
         })
       }
       logWaveState()
-      return { lanes: [], plans: [], registerPath, outDir: outputDir, keep, transport, waves, wave: waveNumber, deferred, unstarted }
+      return { kind: 'terminal', result: { lanes: [], plans: [], registerPath, outDir: outputDir, keep, transport, waves, wave: waveNumber, deferred, unstarted } }
     }
   }
   if (dryRun) {
@@ -3372,10 +3386,67 @@ export async function dispatchBatch({ batchDir, fences, checkout, parentDir, out
       if (adoption) d.log(`dispatch-batch: dry-run lane=${lane.lane} adopt=${adoption.archive} source=${adoption.source} findings=${adoption.revise} adopt_from=${adoption.from} ${lineageLine(adoption)}`)
     }
     d.log(DRY_RUN_BLIND_SPOT)
-    return { dryRun: true, plans, lanes: waveLanes, fences: fenceReport, waves, wave: waveNumber, deferred, unstarted }
+    return { kind: 'terminal', result: { dryRun: true, plans, lanes: waveLanes, fences: fenceReport, waves, wave: waveNumber, deferred, unstarted } }
   }
   logWaveState()
   const plans = planWorktrees({ lanes: waveLanes, parentDir, checkout, deps: d })
+
+  return {
+    kind: 'prepared',
+    batchDir,
+    fences,
+    checkout,
+    parentDir,
+    outDir,
+    tier,
+    execution,
+    variant,
+    externals,
+    registerOverride,
+    runFlags,
+    deps,
+    plannerSymbolsHoldoutFraction,
+    d,
+    transport,
+    lanes,
+    waves,
+    graph,
+    root,
+    parent,
+    outputDir,
+    fenceReport,
+    adoptions,
+    waveNumber,
+    dispatchedNames,
+    waveLanes,
+    deferred,
+    keep,
+    dryRun,
+    batchSeats,
+    registerPath,
+    unstarted,
+    plans,
+  }
+}
+
+async function compileDispatchWave(prepared) {
+  const {
+    batchDir,
+    fences,
+    execution,
+    tier,
+    runFlags,
+    d,
+    lanes,
+    waveLanes,
+    fenceReport,
+    root,
+    outputDir,
+    registerPath,
+    batchSeats,
+    plannerSymbolsHoldoutFraction,
+    plans,
+  } = prepared
 
   try { mkdirSync(outputDir, { recursive: true }) } catch (err) {
     refuse(`cannot create dispatch output directory ${outputDir}: ${err?.message || String(err)}`, COMPILE_REFUSED)
@@ -3534,6 +3605,32 @@ export async function dispatchBatch({ batchDir, fences, checkout, parentDir, out
     }
   }
 
+  return { ...prepared, plannerSymbolsArms, settled }
+}
+
+function launchDispatchWave(compiled) {
+  const {
+    d,
+    runFlags,
+    registerPath,
+    transport,
+    lanes,
+    externals,
+    fenceReport,
+    adoptions,
+    keep,
+    root,
+    plannerSymbolsArms,
+    plannerSymbolsHoldoutFraction,
+    settled,
+    plans,
+    outputDir,
+    waves,
+    waveNumber,
+    deferred,
+    unstarted,
+  } = compiled
+
   const arrivals = []
   for (const item of settled) {
     let firstFailure = null
@@ -3646,6 +3743,26 @@ export async function dispatchBatch({ batchDir, fences, checkout, parentDir, out
   }
   d.log(mergeCheckLine(runs.map((item) => item.lane)))
   return { lanes: runs, plans, registerPath, outDir: outputDir, keep, transport, waves, wave: waveNumber, deferred, unstarted }
+}
+
+export async function dispatchBatch({ batchDir, fences, checkout, parentDir, outDir, tier, execution, variant, externals, registerPath: registerOverride, runFlags = {}, deps } = {}) {
+  const prepared = prepareDispatchContext({
+    batchDir,
+    fences,
+    checkout,
+    parentDir,
+    outDir,
+    tier,
+    execution,
+    variant,
+    externals,
+    registerPath: registerOverride,
+    runFlags,
+    deps,
+  })
+  if (prepared.kind === 'terminal') return prepared.result
+  const compiled = await compileDispatchWave(prepared)
+  return launchDispatchWave(compiled)
 }
 
 export function parseCliArgs(argv) {

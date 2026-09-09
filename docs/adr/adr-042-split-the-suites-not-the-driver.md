@@ -1,6 +1,6 @@
 # ADR-042 — Split the test suites, not the driver
 
-**Status:** ratified 2026-09-08 · **superseded in part 2026-09-09, see Amendment 2 — the suite splits are PARKED** · **Issue:** #1033 · **Owner:** operator
+**Status:** ratified 2026-09-08 · **superseded in part 2026-09-09, see Amendment 3 — the park is LIFTED and the splits proceed** · **Issue:** #1033 · **Owner:** operator
 
 ## Decision
 
@@ -232,6 +232,105 @@ measurement (#1027 ask 5) that would justify either.
 **Re-open the splits only on new evidence**, specifically: a measured builder-turn saving
 attributable to suite size after #1055 and #1069 land, or a verb-level scan that makes
 `test/factory-ledger.test.mjs` cuttable.
+
+## Amendment 3 — 2026-09-09: the owner lifts the park; the splits proceed
+
+**Owner's decision, 2026-09-09: split the files. Amendment 2's park of #1062,
+#1063 and #1064 is WITHDRAWN**, and the decision recorded above not to split
+`crew/drive.mjs` is **superseded** — see "the source files" below for the form
+that takes.
+
+This amendment does not claim new evidence for the splits. Amendment 2's
+refutations stand on their own terms: gate cost does not track file size, and
+`seams.mjs` measures how *cheap* a cut is, never how *right*. The owner's
+standing direction recorded at ratification — *every large file should become
+modules with proper boundaries* — is the basis, and it was always the senior
+authority over a snapshot measurement. What follows is sequencing, not a case.
+
+### Re-measured at `3faa3ff`, because the corpus moved
+
+The ADR table above was taken at `d8a201b`. One day later:
+
+| file | ADR table | at `3faa3ff` | test blocks | largest cluster |
+|---|---|---|---|---|
+| `crew/crew.test.mjs` | 134 clusters, 177 edges | **138 clusters, 185 edges** | 358 | 82 (23%) |
+| `test/factory-dispatch-batch.test.mjs` | 101 clusters, 112 edges | **118 clusters, 123 edges** | 290 | 65 (22%) |
+| `test/factory-ledger.test.mjs` | 12 clusters, 9 edges | **14 clusters, 2 edges** | 342 | **319 (93%)** |
+| `crew/drive.mjs` | 30 clusters, 9,634 edges | **32 clusters, 9,641 edges** | — | — |
+
+`crew/drive.mjs` also went from 7,522 to **8,257** lines in that day. **A
+`seams.mjs` row has roughly a one-day shelf life at this repo's rate**, so every
+split lane below re-runs the report against its own base commit and cuts on
+*that*, never on a number quoted from this document.
+
+### The suites: two go now, one is blocked by its instrument
+
+1. **`test/factory-dispatch-batch.test.mjs`** (#1063) — FIRST, as the exhibit.
+   118 clusters, 123 edges, no cluster over 22% of the file.
+2. **`crew/crew.test.mjs`** (#1064) — 138 clusters, 185 edges, largest 23%.
+
+**`test/factory-ledger.test.mjs` (#1062) still cannot be cut on this report, and
+that is an instrument limit rather than a preference.** 319 of its 342 test
+blocks fall in ONE symbol-less cluster; cutting on clusters yields thirteen
+1-to-9-test files beside a ~7,000-line remainder, which is not a split. Amendment
+1 refused it on exactly this ground and the re-measurement confirms it unchanged.
+**The precondition is a verb-level scan** — group each test by which ledger verb
+or `WRITERS` entry it drives — filed as its own instrument lane. #1062 is
+unparked but stays blocked on that scan, and is not dispatched against a report
+its own instrument cannot satisfy.
+
+**Both suite lanes run in a quiet window, one at a time.** These files sit in
+nearly every crew-adjacent fence: at the time of writing, `crew/crew.test.mjs`
+is reached by both live lanes and the other two by `b575-scopetypo`. A split
+lane must not race a lane that reaches the file it is dividing.
+
+The proof obligation from the original text is unchanged and is the thing that
+makes a split safe: **every test name and every assertion is preserved
+byte-for-byte, and the lane's own gate is that the union of the new files runs
+the same test count with the same pass/fail as the file it replaced.** A split
+that renames or rewrites a test is refused — that is a different change wearing
+this one's clothes.
+
+### The source files: boundaries are created, then the file is divided
+
+The measurement that produced "do not split `crew/drive.mjs`" is not withdrawn —
+32 clusters at 9,641 cross-cluster edges is one module with a wide interface, and
+a *mechanical* division along those clusters would cut live coupling and leave
+layers that forward arguments. That failure mode is why this ADR said no, and
+lifting the park does not make it stop being true.
+
+**So the source files are split in two acts, not one.** For each candidate, a
+lane first *creates* the narrow interface — designs it, moves the decisions
+behind it, proves the seam with the suite green — and only then is the file
+divided along the seam it now has. The design is authored in the lane's plan
+phase and judged by the reviewer; it does not need a separate ADR round per
+file, and this amendment is the authority that would otherwise be sought.
+
+Order, by edges per cluster ascending — cheapest real seam first:
+
+| file | lines | clusters | edges | notes |
+|---|---|---|---|---|
+| `scripts/factory/dispatch-batch.mjs` | 3,739 | 7 | 762 | not on the floor, no pins |
+| `crew/seat-io.mjs` | 3,814 | 29 | 873 | not on the floor |
+| `scripts/factory/ledger.mjs` | 7,698 | 24 | 902 | 6 pins, 16 tests reaching |
+| `crew/crew.mjs` | 3,240 | 16 | 2,751 | boot surface |
+| `crew/drive.mjs` | 8,257 | 32 | **9,641** | **LAST**: 28 pins across 6 manifests, 12 reaching tests, protected floor |
+
+`crew/drive.mjs` goes last and not first, despite being the file the queue is
+behind. Its `runTask` spans `:2944-6928` — 3,985 lines under ONE top-level
+declaration — so it is the hardest interface to design, and it is the only
+candidate whose migration runs as a judge lane against the file it is migrating.
+The four files above it are where the technique is proven at lower cost.
+
+### What is still true and should not be forgotten
+
+- **A split does not relieve the eight-issue `crew/drive.mjs` queue by itself**;
+  #1061 measured that those issues converge on `runTask` regardless of file
+  boundaries. Relief comes from the interfaces, not from the division.
+- **Nothing here predicts a builder-turn saving.** #1059's holdout is still
+  unbuilt, so the benefit remains unmeasured in both directions. The basis for
+  this amendment is the owner's design standard, and it should be cited as that
+  rather than as a measured payoff.
 
 ## What this deliberately does not do
 

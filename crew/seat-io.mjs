@@ -1794,8 +1794,11 @@ export function transcriptGrowth(paths, deps = {}) {
   const stat = deps.statSync ?? fsStatSync
   let latest = null
   for (const path of Array.isArray(paths) ? paths : []) {
-    let mtime
-    try { mtime = stat(path).mtimeMs } catch { continue }
+    let measured
+    try { measured = stat(path) } catch { continue }
+    if (!measured || typeof measured !== 'object') continue
+    if (measured.size === 0) continue
+    const mtime = measured.mtimeMs
     if (!Number.isFinite(mtime)) continue
     if (latest === null || mtime > latest) latest = mtime                          // verbatim: mutation A6
   }

@@ -1,14 +1,14 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, chmodSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, chmodSync, rmSync, constants as fsConstants } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { EVIDENCE_KINDS, LIVENESS, reclaimStore } from './reclaim.mjs'
 import {
-  carriesOwnSpend, emptyTurnEnvelope, finaliseCensus, finalisePreFirstTurn, foldCensusFrame, foldRpcUsage, headlessRpcIo, isBriefReadToolCall, isBusyRefusal, newCensus, PRE_FIRST_TURN_ABSENT_REASONS, PRE_FIRST_TURN_TOLERANCE_MS, PROMPT_REFUSAL_RETRIES,
-  rpcCensus, rpcCommand, rpcStreamCensus, seatCommandPath, SETTLE_GATE_POLLS, splitFrames, steerFrame, teardownOutcome,
+  carriesOwnSpend, closedReason, emptyTurnEnvelope, finaliseCensus, finalisePreFirstTurn, foldCensusFrame, foldRpcUsage, headlessRpcIo, isBriefReadToolCall, isBusyRefusal, newCensus, PRE_FIRST_TURN_ABSENT_REASONS, PRE_FIRST_TURN_TOLERANCE_MS, PROMPT_REFUSAL_RETRIES, RPC_PROMPT_DELIVERY_WINDOW_MS,
+  rpcCensus, rpcCommand, rpcDeliveryCorpusReport, rpcStreamCensus, seatCommandPath, SETTLE_GATE_POLLS, splitFrames, steerFrame, teardownOutcome,
 } from './headless-rpc.mjs'
 import { seatCommand as piSeatCommand } from './adapters/adapter-pi.mjs'
 import { assignmentLine } from './driver.mjs'
@@ -47,11 +47,12 @@ function fixture(options = {}) {
   const deps = {
     pid: options.pid ?? 700, uuid: options.uuid || (() => 'session-1'),
     spawn: options.spawn || (() => { commands.push({ kind: 'spawn' }); return { pid: Object.hasOwn(options, 'spawnPid') ? options.spawnPid : 701, unref() {} } }), openSync: options.openSync || (() => 10),
-    writeSync: options.writeSync || ((_fd, line) => writes.push(JSON.parse(line))), closeSync: () => {}, kill,
+    writeSync: options.writeSync || ((_fd, line) => { writes.push(JSON.parse(line)); return undefined }), closeSync: () => {}, kill,
     existsSync: options.existsSync || ((path) => existsSync(path) || String(path).endsWith('/cmd.fifo')),
     readdirSync: options.readdirSync || readdirSync,
     writeFileSync: options.writeFileSync || writeFileSync, readFileSync: options.readFileSync || readFileSync, mkdirSync, log: options.log || (() => {}), sleep,
     ...(options.now ? { now: options.now } : {}),
+    ...(Object.hasOwn(options, 'promptDeliveryWindowMs') ? { promptDeliveryWindowMs: options.promptDeliveryWindowMs } : {}),
     ...(options.emit ? { emit: options.emit } : {}),
     ...(options.telemetry ? { censusReducer: options.telemetry } : {}),
     ...(options.preFirstTurnFinalizer ? { preFirstTurnFinalizer: options.preFirstTurnFinalizer } : {}),
@@ -100,6 +101,107 @@ function splitRecordedRpcCapture() {
 function ordinaryRpcEnvelope(id, role = 'builder') {
   return { assignment_id: id, role, status: 'done', summary: 'recorded ordinary completion', artifacts: [], details: {} }
 }
+
+function assertUnsettledPriorFrameFailsDelivery(frame) {
+  let clock = 0
+  const rows = []
+  const f = fixture({
+    promptDeliveryWindowMs: 100,
+    now: () => clock,
+    sleep: (ms) => { clock += ms },
+    kill: (_pid, signal) => { if (signal === 0) return },
+    log: (row) => rows.push(row),
+  })
+  try {
+    const first = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    const seatDir = join(f.paths.taskDir, 'headless-rpc', 'builder')
+    const stream = join(seatDir, 'stream.jsonl')
+    writeFileSync(join(seatDir, 'pgid'), '701')
+    writeFileSync(stream, JSON.stringify({ type: 'turn_start' }) + '\n')
+    assert.throws(() => f.io.wait(first.returnPath, 0), (error) => error.stage === 'rpc-timeout')
+    const second = f.io.assign({ role: 'builder', briefFile: '/brief-next.md' })
+    const sentAt = clock
+    assert.equal(second.id, 'd2')
+    assert.equal(f.commands.filter((entry) => entry.kind === 'spawn').length, 1)
+    writeFileSync(stream, JSON.stringify(frame) + '\n', { flag: 'a' })
+    assert.throws(() => f.io.wait(second.returnPath, 600), (error) => error.stage === 'rpc-prompt-undelivered')
+    assert.equal(clock - sentAt, 100)
+    assert.equal(JSON.parse(readFileSync(join(f.paths.taskDir, 'headless-rpc', 'builder', 'session.json'))).lastAssignmentId, first.id)
+    assert.deepEqual(rows.find((row) => row.rpc_settle_gate)?.rpc_settle_gate, { role: 'builder', id: first.id, settled: false, polls: SETTLE_GATE_POLLS })
+  } finally { f.cleanup() }
+}
+
+function corpusFixture() {
+  const lanes = ['/corpus/ordinary', '/corpus/denied', '/corpus/absent']
+  const row = (value) => JSON.stringify(value)
+  const lane1 = [
+    { at: 100, assign: 'd1', role: 'builder', channel: 'record' },
+    { at: 101, event: 'assignment-delivery', assignment_id: 'd1', role: 'builder', transport: 'headless-rpc' },
+    { at: 190, rpc_settle_gate: { role: 'builder', id: 'd1', settled: true, polls: 0 } },
+    { at: 200, assign: 'd2', role: 'builder', channel: 'record' },
+    { at: 201, event: 'assignment-delivery', assignment_id: 'd2', role: 'builder', transport: 'headless-rpc' },
+    { at: 290, rpc_settle_gate: { role: 'builder', id: 'd2', settled: true, polls: 0 } },
+    { at: 300, assign: 'd3', role: 'builder', channel: 'record' },
+    { at: 301, event: 'assignment-delivery', assignment_id: 'd3', role: 'builder', transport: 'headless-rpc' },
+    { at: 400, assign: 'd4', role: 'reviewer', channel: 'record' },
+    { at: 401, event: 'assignment-delivery', assignment_id: 'd4', role: 'reviewer', transport: 'headless-rpc' },
+    { at: 402, assign: 'operational-not-record', role: 'reviewer', channel: 'operational' },
+  ]
+  const journals = new Map([
+    [lanes[0], `${lane1.map(row).join('\n')}\nmalformed {\n`],
+  ])
+  const stats = new Map([
+    [join(lanes[0], 'task/headless-rpc/builder/cmd.json'), { mtimeMs: 110 }],
+    [join(lanes[0], 'task/headless-rpc/reviewer/cmd.json'), { mtimeMs: 450 }],
+  ])
+  const denied = Object.assign(new Error('permission denied'), { code: 'EACCES' })
+  const absent = Object.assign(new Error('missing journal'), { code: 'ENOENT' })
+  return {
+    lanes,
+    deps: {
+      readFileSync(path) {
+        if (path === lanes[1] + '/journal.jsonl') throw denied
+        if (path === lanes[2] + '/journal.jsonl') throw absent
+        const lane = path.endsWith('/journal.jsonl') ? path.slice(0, -'/journal.jsonl'.length) : path
+        if (!journals.has(lane)) throw absent
+        return journals.get(lane)
+      },
+      statSync(path) {
+        if (!stats.has(path)) throw Object.assign(new Error('missing cmd'), { code: 'ENOENT' })
+        return stats.get(path)
+      },
+    },
+  }
+}
+
+test('A1 corpus sweep reports candidates over total assignments', () => {
+  const fixtureData = corpusFixture()
+  const report = rpcDeliveryCorpusReport(fixtureData.lanes, fixtureData.deps)
+  assert.equal(report.total_assignments, 4)
+  assert.equal(report.rpc_assignments, 4)
+  assert.equal(report.cmd_mtime_predates_assignment.assignments, 2)
+  assert.equal(report.older_settle_gate_candidates.distinct_assignments, 2)
+  assert.equal(report.either_candidate.distinct_assignments, 2)
+  assert.equal(report.either_candidate.assignment_denominator, 4)
+})
+
+test('A2 corpus sweep reports candidates over total lanes and unreadable names', () => {
+  const fixtureData = corpusFixture()
+  const report = rpcDeliveryCorpusReport(fixtureData.lanes, fixtureData.deps)
+  assert.equal(report.total_lanes, 3)
+  assert.equal(report.either_candidate.lane_denominator, 3)
+  assert.equal(report.either_candidate.lanes, 1)
+  assert.deepEqual(report.unreadable.map((entry) => entry.lane), [fixtureData.lanes[1], fixtureData.lanes[2]])
+})
+
+test('B1 corpus sweep keeps unreadable lanes null with a closed reason', () => {
+  const fixtureData = corpusFixture()
+  const report = rpcDeliveryCorpusReport([fixtureData.lanes[1]], fixtureData.deps)
+  assert.equal(report.total_lanes, 1)
+  assert.equal(report.total_assignments, 0)
+  assert.deepEqual(report.unreadable, [{ lane: fixtureData.lanes[1], candidates: null, reason: closedReason(Object.assign(new Error('permission denied'), { code: 'EACCES' })) }])
+  assert.equal(report.either_candidate.distinct_assignments, 0)
+})
 
 const PRE_FIRST_TIMING_FIELDS = [
   'pre_first_turn_span_ms', 'seat_boot_ms', 'seat_boot_absent_reason',
@@ -222,6 +324,8 @@ test('E1 RPC half compaction fields leave prior census fields byte-identical', (
       tool_spans_unmatched: 0,
       tool_spans_same_poll: 1,
       bash_reads_absent_reason: null,
+      parked_frames: 0,
+      parked_frames_reason: null,
       absent_reason: CENSUS_ABSENT_CAUSES.same_poll_boundary,
     }))
   } finally { f.cleanup() }
@@ -1040,6 +1144,7 @@ test('a denied read stays a re-pollable absence', () => {
   const realRead = readFileSync
   const denied = Object.assign(new Error('permission denied'), { code: 'EACCES' })
   const f = fixture({
+    promptDeliveryWindowMs: 100,
     now: () => clock,
     sleep: (ms) => { clock += ms },
     kill: () => {},
@@ -1050,7 +1155,8 @@ test('a denied read stays a re-pollable absence', () => {
   })
   try {
     const run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
-    assert.throws(() => f.io.wait(run.returnPath, 30), (err) => err.stage === 'rpc-timeout')
+    assert.throws(() => f.io.wait(run.returnPath, 30), (err) => err.stage === 'rpc-prompt-undelivered')
+    assert.equal(clock, 100)
   } finally { f.cleanup() }
 })
 
@@ -1693,7 +1799,7 @@ test("a re-ask's wire id is distinct and session metadata names the physical run
     assert.equal(prompts[0].id, 'd1')
     assert.equal(prompts[1].id, 'd2')
     const saved = JSON.parse(readFileSync(join(r.f.paths.taskDir, 'headless-rpc', 'builder', 'session.json'), 'utf8'))
-    assert.equal(saved.lastAssignmentId, 'd2')
+    assert.equal(saved.lastAssignmentId, 'd1')
   } finally { r.f.cleanup() }
 })
 
@@ -2039,6 +2145,7 @@ test('D1 prior census fields stay byte-identical', () => {
       by_class: { edit: 0, read: 0, test: 0, other: 1 }, in_tool_ms: null,
       out_of_tool_ms: null, span_ms: 0, tool_spans_matched: 0, tool_spans_unmatched: 0,
       tool_spans_same_poll: 1, bash_reads_absent_reason: null,
+      parked_frames: 0, parked_frames_reason: null,
       absent_reason: CENSUS_ABSENT_CAUSES.same_poll_boundary,
     }))
   } finally { f.cleanup() }
@@ -2352,4 +2459,272 @@ test('b416 F8 an RPC abort write fault returns the decided refusal, evicts the d
     assert.equal(f.commands.filter((entry) => entry.kind === 'spawn').length, 2)
     assert.equal(wire.filter((frame) => frame.type === 'prompt').length, 2)
   } finally { f.cleanup() }
+})
+
+test('C1 unacknowledged RPC assignment fails at the delivery window', () => {
+  const runCase = (priorTurn) => {
+    let clock = 0
+    const f = fixture({ promptDeliveryWindowMs: 100, now: () => clock, sleep: (ms) => { clock += ms } })
+    try {
+      let run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+      const stream = join(f.paths.taskDir, 'headless-rpc', 'builder', 'stream.jsonl')
+      if (priorTurn) {
+        writeFileSync(stream, JSON.stringify({ type: 'agent_settled' }) + '\n')
+        writeFileSync(run.returnPath, JSON.stringify(ordinaryRpcEnvelope(run.id)))
+        assert.equal(f.io.wait(run.returnPath, 60).status, 'done')
+        run = f.io.assign({ role: 'builder', briefFile: '/brief-next.md' })
+      } else {
+        writeFileSync(stream, '')
+      }
+      assert.throws(() => f.io.wait(run.returnPath, 600), (error) => error.stage === 'rpc-prompt-undelivered')
+      assert.equal(clock, 100)
+    } finally { f.cleanup() }
+  }
+  runCase(false)
+  runCase(true)
+  assertUnsettledPriorFrameFailsDelivery({ type: 'turn_start' })
+  assertUnsettledPriorFrameFailsDelivery({ type: 'agent_settled' })
+})
+
+test('parked unsettled RPC frames cannot acknowledge a successor', () => {
+  assertUnsettledPriorFrameFailsDelivery({ type: 'turn_start' })
+  assertUnsettledPriorFrameFailsDelivery({ type: 'agent_settled' })
+  assertUnsettledPriorFrameFailsDelivery({ type: 'turn_end' })
+})
+
+// RV1-1 kill-mutation. turn_end brackets ONE provider turn, not the assignment, so
+// a parked predecessor that is still WORKING emits it seconds after its own wait
+// expired. Treating it as the parked turn's terminus releases the quarantine and
+// every LATER frame the predecessor writes is then attributed to the successor.
+//
+// The delivery assertions above cannot see this — RV1-1 said so, and it was right:
+// they write a single frame, so nothing follows the boundary to be misattributed.
+// This case writes frames AFTER the turn_end and counts where they landed.
+test('a parked predecessor that finishes a provider turn stays parked', () => {
+  let clock = 0
+  const rows = []
+  const f = fixture({
+    promptDeliveryWindowMs: 100_000,
+    now: () => clock,
+    sleep: (ms) => { clock += ms },
+    kill: (_pid, signal) => { if (signal === 0) return },
+    log: (row) => rows.push(row),
+  })
+  try {
+    const first = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    const seatDir = join(f.paths.taskDir, 'headless-rpc', 'builder')
+    const stream = join(seatDir, 'stream.jsonl')
+    writeFileSync(join(seatDir, 'pgid'), '701')
+    writeFileSync(stream, JSON.stringify({ type: 'turn_start' }) + '\n')
+    assert.throws(() => f.io.wait(first.returnPath, 0), (error) => error.stage === 'rpc-timeout')
+
+    const second = f.io.assign({ role: 'builder', briefFile: '/brief-next.md' })
+    assert.equal(second.id, 'd2')
+
+    // The predecessor completes a provider turn and KEEPS GOING: four frames, all
+    // of them still its own.
+    const parked = [
+      { type: 'turn_end' },
+      { type: 'turn_start' },
+      { type: 'tool_execution_start', tool: 'Bash' },
+      { type: 'turn_end' },
+    ]
+    writeFileSync(stream, parked.map((frame) => JSON.stringify(frame)).join('\n') + '\n', { flag: 'a' })
+    assert.throws(() => f.io.wait(second.returnPath, 1))
+
+    const census = rows.map((row) => row.seat_turn_census).filter(Boolean).at(-1)
+    assert.ok(census, 'a census row must be journalled')
+    // All four stay parked. Restore turn_end as a terminus and the first frame
+    // releases the quarantine, so only it is counted and the other three are
+    // attributed to the successor instead — this equality is what fails.
+    assert.equal(census.parked_frames, parked.length)
+    // And the successor is not credited with the predecessor's work. It observed NO
+    // frames of its own, so its census is null rather than zero — a null beats a
+    // value nobody measured. Restore turn_end as a terminus and three of the four
+    // frames are attributed here instead, and this reads 1.
+    assert.equal(census.tool_calls, null)
+    assert.equal(census.absent_reason, CENSUS_ABSENT_CAUSES.no_frames)
+  } finally { f.cleanup() }
+})
+
+// RV2-1 + RV2-2 kill-mutation. While a prior turn is parked, pi answers the new
+// prompt it is too busy to accept within milliseconds. That response carries the
+// NEW prompt's own id, so it is the successor's frame and must reach the wait loop:
+// swallowing it means isBusyRefusal is never consulted, PROMPT_REFUSAL_RETRIES
+// never runs, and the turn dies as rpc-prompt-undelivered — a transport-error
+// rather than a retryable kind — so the lane escalates where it used to recover.
+test('a busy refusal for the successor survives a parked predecessor, and the parked frames are named', () => {
+  let clock = 0
+  const rows = []
+  // The delivery window is deliberately GENEROUS here: RV2-1 is about the refusal
+  // being CONSUMED, not about the window being short. pi answers within
+  // milliseconds, well inside any real window, and a narrow one would fail the turn
+  // in the wait loop's window check before the frame loop ever ran.
+  const f = fixture({
+    promptDeliveryWindowMs: 100_000,
+    now: () => clock,
+    sleep: (ms) => { clock += ms },
+    kill: (_pid, signal) => { if (signal === 0) return },
+    log: (row) => rows.push(row),
+  })
+  try {
+    const first = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    const seatDir = join(f.paths.taskDir, 'headless-rpc', 'builder')
+    const stream = join(seatDir, 'stream.jsonl')
+    writeFileSync(join(seatDir, 'pgid'), '701')
+    writeFileSync(stream, JSON.stringify({ type: 'turn_start' }) + '\n')
+    assert.throws(() => f.io.wait(first.returnPath, 0), (error) => error.stage === 'rpc-timeout')
+
+    const second = f.io.assign({ role: 'builder', briefFile: '/brief-next.md' })
+    assert.equal(second.id, 'd2')
+    const promptsBefore = f.writes.filter((frame) => frame.type === 'prompt')
+    const successorPrompt = promptsBefore[promptsBefore.length - 1]
+
+    // The parked predecessor keeps working (turn_end), and pi refuses the
+    // successor's prompt by its own id in the same poll.
+    writeFileSync(stream, `${JSON.stringify({ type: 'turn_end' })}\n${JSON.stringify({
+      type: 'response', id: successorPrompt.id, command: 'prompt', success: false,
+      error: "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
+    })}\n`, { flag: 'a' })
+
+    // The turn still ends without an envelope; what matters is HOW. Swallowing the
+    // refusal kills it as rpc-prompt-undelivered inside the window; consuming it
+    // mints a retry instead.
+    assert.throws(() => f.io.wait(second.returnPath, 600))
+
+    // The refusal was CONSULTED: a retry prompt was minted rather than the turn
+    // dying undelivered. This is the assertion the swallow mutation fails.
+    const promptsAfter = f.writes.filter((frame) => frame.type === 'prompt')
+    assert.ok(promptsAfter.length > promptsBefore.length, 'a busy refusal must mint a retry prompt')
+
+    // RV2-2: the parked frames are excluded from the successor's attribution, and
+    // the census NAMES them rather than reporting a smaller count as the whole.
+    const census = rows.map((row) => row.seat_turn_census).filter(Boolean).at(-1)
+    assert.ok(census, 'a census row must be journalled')
+    assert.ok(census.parked_frames > 0, 'parked frames must be counted, not discarded')
+    assert.equal(census.parked_frames_reason, 'prior-turn-unsettled')
+  } finally { f.cleanup() }
+})
+
+test('D1 stale settle id cannot satisfy a newer RPC assignment', () => {
+  let clock = 0; let appended = false
+  const rows = []
+  const f = fixture({
+    promptDeliveryWindowMs: 100,
+    now: () => clock,
+    sleep: (ms) => { clock += ms },
+    onSleep: ({ ms, appendStream }) => {
+      if (!appended && ms === WAIT_POLL_MS) {
+        appended = true
+        appendStream(JSON.stringify({ type: 'agent_settled' }) + '\n')
+      }
+    },
+    log: (row) => rows.push(row),
+  })
+  try {
+    const first = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    const stream = join(f.paths.taskDir, 'headless-rpc', 'builder', 'stream.jsonl')
+    writeFileSync(stream, JSON.stringify({ type: 'agent_end' }) + '\n')
+    writeFileSync(first.returnPath, JSON.stringify(ordinaryRpcEnvelope(first.id)))
+    assert.equal(f.io.wait(first.returnPath, 60).status, 'done')
+    const second = f.io.assign({ role: 'builder', briefFile: '/brief-next.md' })
+    assert.throws(() => f.io.wait(second.returnPath, 600), (error) => error.stage === 'rpc-prompt-undelivered')
+    assert.deepEqual(rows.find((row) => row.rpc_settle_gate)?.rpc_settle_gate, { role: 'builder', id: 'd1', settled: true, polls: 1 })
+    assert.equal(JSON.parse(readFileSync(join(f.paths.taskDir, 'headless-rpc', 'builder', 'session.json'))).lastAssignmentId, 'd1')
+  } finally { f.cleanup() }
+})
+
+test('F1 acknowledged growing RPC turn is never declared undelivered', () => {
+  let clock = 0; let grew = false
+  const rows = []
+  const f = fixture({
+    promptDeliveryWindowMs: 50,
+    now: () => clock,
+    sleep: (ms) => { clock += ms },
+    onSleep: ({ appendStream }) => {
+      if (grew) return
+      grew = true
+      appendStream(JSON.stringify({ type: 'turn_start' }) + '\n')
+    },
+    kill: () => {},
+    log: (row) => rows.push(row),
+  })
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    assert.throws(() => f.io.wait(run.returnPath, 0.1), (error) => error.stage === 'rpc-timeout')
+    assert.equal(rows.filter((row) => row.event === 'rpc-prompt-delivery').length, 0)
+    assert.ok(clock >= 100)
+  } finally { f.cleanup() }
+})
+
+test('G1 fail-fast prompt delivery remedy is journalled with outcome', () => {
+  let clock = 0
+  const rows = []
+  const f = fixture({ promptDeliveryWindowMs: 100, now: () => clock, sleep: (ms) => { clock += ms }, log: (row) => rows.push(row) })
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    writeFileSync(join(f.paths.taskDir, 'headless-rpc', 'builder', 'stream.jsonl'), '')
+    assert.throws(() => f.io.wait(run.returnPath, 600), (error) => error.stage === 'rpc-prompt-undelivered')
+    const deliveryRows = rows.filter((row) => row.event === 'rpc-prompt-delivery')
+    assert.equal(deliveryRows.length, 1)
+    assert.equal(deliveryRows[0].role, 'builder')
+    assert.equal(deliveryRows[0].logical_id, run.id)
+    assert.equal(deliveryRows[0].run_id, 'd1')
+    assert.equal(deliveryRows[0].prior_assignment_id, null)
+    assert.equal(deliveryRows[0].recorded_assignment_id, null)
+    assert.equal(deliveryRows[0].outcome, 'failed-fast')
+    assert.equal(deliveryRows[0].reason, 'prompt-unacknowledged')
+    assert.equal(deliveryRows[0].window_ms, 100)
+    assert.equal(deliveryRows[0].elapsed_ms, 100)
+  } finally { f.cleanup() }
+})
+
+test('H1 ordinary RPC completion keeps its journal and envelope shape', () => {
+  const rows = []
+  const f = fixture({ log: (row) => rows.push(row) })
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    const envelope = ordinaryRpcEnvelope(run.id)
+    settle(f, run, [{ type: 'agent_settled' }])
+    writeFileSync(run.returnPath, JSON.stringify(envelope))
+    assert.deepEqual(f.io.wait(run.returnPath, 60), envelope)
+    const assignment = rows.find((row) => row.event === 'assignment-delivery')
+    assert.deepEqual({ ...assignment, at: null }, {
+      at: null, event: 'assignment-delivery', role: 'builder', assignment_id: run.id,
+      transport: 'headless-rpc', mode: 'path', brief_bytes: null,
+      brief_size_measured: false, brief_size_unmeasured_reason: 'brief-unreadable',
+    })
+    const outcome = rows.find((row) => row.rpc_outcome)
+    assert.deepEqual({ ...outcome, at: null }, { at: null, rpc_outcome: 'ok', role: 'builder', id: run.id, exit_code: null })
+    assert.equal(rows.some((row) => row.event === 'rpc-prompt-delivery'), false)
+  } finally { f.cleanup() }
+})
+
+test('RPC prompt FIFO accepts undefined legacy writers and requires full numeric writes', () => {
+  const flags = []; const lengths = []
+  const f = fixture({
+    openSync: (_path, value) => { flags.push(value); return 10 },
+    writeSync: (_fd, frame) => { assert.equal(Buffer.isBuffer(frame), true); lengths.push(frame.length); return frame.length },
+  })
+  try {
+    f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    assert.ok(flags.some((value) => value === (fsConstants.O_RDWR | fsConstants.O_NONBLOCK)))
+    assert.equal(lengths.length, 1)
+    assert.ok(lengths[0] > 0)
+  } finally { f.cleanup() }
+})
+
+test('RPC prompt FIFO partial, EAGAIN, and EPERM writes fail fast', () => {
+  for (const failure of [
+    () => 1,
+    () => { const error = new Error('would block'); error.code = 'EAGAIN'; throw error },
+    () => { const error = new Error('permission denied'); error.code = 'EPERM'; throw error },
+  ]) {
+    const rows = []
+    const f = fixture({ writeSync: failure, log: (row) => rows.push(row) })
+    try {
+      assert.throws(() => f.io.assign({ role: 'builder', briefFile: '/brief.md' }), (error) => error.stage === 'rpc-prompt-undelivered')
+      assert.equal(rows.filter((row) => row.event === 'rpc-prompt-delivery').length, 1)
+    } finally { f.cleanup() }
+  }
 })

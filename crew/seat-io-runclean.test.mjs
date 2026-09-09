@@ -2480,6 +2480,16 @@ test('transcriptGrowth chooses the newest readable mtime and refuses to guess', 
   assert.equal(transcriptGrowth(['/x/a.jsonl', '/x/b.jsonl'], { statSync: (path) => ({ mtimeMs: path === '/x/a.jsonl' ? Number.NaN : 5000 }) }), 5000)
 })
 
+test('E1 empty and unreadable transcript growth remains null', () => {
+  assert.equal(transcriptGrowth([], { statSync: () => ({ size: 0, mtimeMs: 123 }) }), null)
+  assert.equal(transcriptGrowth(['/empty.jsonl'], { statSync: () => ({ size: 0, mtimeMs: 987654321 }) }), null)
+  for (const code of ['ENOENT', 'EACCES', 'EPERM']) {
+    assert.equal(transcriptGrowth(['/unreadable.jsonl'], { statSync: () => { throw Object.assign(new Error(code), { code }) } }), null)
+  }
+  assert.equal(transcriptGrowth(['/throwing.jsonl'], { statSync: () => { throw new Error('interrupted stat') } }), null)
+  assert.notEqual(transcriptGrowth(['/nonempty.jsonl'], { statSync: () => ({ size: 1, mtimeMs: 4242 }) }), 0)
+})
+
 test('waitForEnvelope samples transcript growth on each liveness tick without changing the wait', () => {
   const run = (growth) => {
     let clock = 0; let probes = 0; const seen = []; const aliveAt = []

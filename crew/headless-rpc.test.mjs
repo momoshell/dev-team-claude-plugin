@@ -2560,11 +2560,24 @@ test('a busy refusal for the successor survives a parked predecessor, and the pa
   // being CONSUMED, not about the window being short. pi answers within
   // milliseconds, well inside any real window, and a narrow one would fail the turn
   // in the wait loop's window check before the frame loop ever ran.
+  let releasePrior = false
+  let writeSuccessor = false
+  let successor = null
   const f = fixture({
     promptDeliveryWindowMs: 100_000,
     now: () => clock,
     sleep: (ms) => { clock += ms },
     kill: (_pid, signal) => { if (signal === 0) return },
+    onSleep: ({ appendStream }) => {
+      if (releasePrior) {
+        releasePrior = false
+        appendStream(`${JSON.stringify({ type: 'agent_settled' })}\n`)
+        writeSuccessor = true
+      } else if (writeSuccessor && successor) {
+        writeSuccessor = false
+        writeFileSync(successor.returnPath, JSON.stringify(ordinaryRpcEnvelope(successor.id)))
+      }
+    },
     log: (row) => rows.push(row),
   })
   try {
@@ -2576,6 +2589,7 @@ test('a busy refusal for the successor survives a parked predecessor, and the pa
     assert.throws(() => f.io.wait(first.returnPath, 0), (error) => error.stage === 'rpc-timeout')
 
     const second = f.io.assign({ role: 'builder', briefFile: '/brief-next.md' })
+    successor = second
     assert.equal(second.id, 'd2')
     const promptsBefore = f.writes.filter((frame) => frame.type === 'prompt')
     const successorPrompt = promptsBefore[promptsBefore.length - 1]
@@ -2587,10 +2601,9 @@ test('a busy refusal for the successor survives a parked predecessor, and the pa
       error: "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
     })}\n`, { flag: 'a' })
 
-    // The turn still ends without an envelope; what matters is HOW. Swallowing the
-    // refusal kills it as rpc-prompt-undelivered inside the window; consuming it
-    // mints a retry instead.
-    assert.throws(() => f.io.wait(second.returnPath, 600))
+    releasePrior = true
+    const recovered = f.io.wait(second.returnPath, 600)
+    assert.equal(recovered.status, 'done', 'busy refusal must recover the successor turn')
 
     // The refusal was CONSULTED: a retry prompt was minted rather than the turn
     // dying undelivered. This is the assertion the swallow mutation fails.
@@ -2761,5 +2774,184 @@ test('a prompt larger than the pipe buffer is written across several writes', ()
     // Every byte arrives, in order, exactly once.
     const joined = chunks.join('')
     assert.ok(joined.includes(note), 'the whole prompt must reach the FIFO')
+  } finally { f.cleanup() }
+})
+
+test('A1 EAGAIN retries before the shared prompt deadline', () => {
+  let clock = 0
+  let attempts = 0
+  const rows = []
+  const f = fixture({
+    promptDeliveryWindowMs: 200,
+    now: () => clock,
+    sleep: (ms) => { clock += ms },
+    writeSync: () => {
+      attempts += 1
+      const error = new Error('would block')
+      error.code = 'EAGAIN'
+      throw error
+    },
+    log: (row) => rows.push(row),
+  })
+  try {
+    assert.throws(() => f.io.assign({ role: 'builder', briefFile: '/brief.md' }), (error) => error.stage === 'rpc-prompt-undelivered')
+    assert.ok(attempts > 1, 'EAGAIN must retry before the deadline')
+    assert.ok(f.sleepCount() > 0, 'EAGAIN retries must sleep')
+    assert.equal(clock, 200, 'failure must stop at the configured deadline')
+    assert.equal(rows.find((row) => row.event === 'rpc-prompt-delivery')?.reason, 'prompt-write-would-block')
+  } finally { f.cleanup() }
+})
+
+test('B1 prompt write failures report measured elapsed', () => {
+  const window = 200
+  const stalledRows = []
+  let stalledClock = 0
+  const stalled = fixture({
+    promptDeliveryWindowMs: window,
+    now: () => stalledClock,
+    sleep: (ms) => { stalledClock += ms },
+    writeSync: () => {
+      const error = new Error('would block')
+      error.code = 'EAGAIN'
+      throw error
+    },
+    log: (row) => stalledRows.push(row),
+  })
+  try {
+    assert.throws(() => stalled.io.assign({ role: 'builder', briefFile: '/brief.md' }), (error) => error.stage === 'rpc-prompt-undelivered')
+    const row = stalledRows.find((entry) => entry.event === 'rpc-prompt-delivery')
+    assert.equal(row?.reason, 'prompt-write-would-block')
+    assert.equal(row?.elapsed_ms, window)
+  } finally { stalled.cleanup() }
+
+  const immediateRows = []
+  const immediate = fixture({
+    promptDeliveryWindowMs: window,
+    now: () => 0,
+    writeSync: () => {
+      const error = new Error('permission denied')
+      error.code = 'EPERM'
+      throw error
+    },
+    log: (row) => immediateRows.push(row),
+  })
+  try {
+    assert.throws(() => immediate.io.assign({ role: 'builder', briefFile: '/brief.md' }), (error) => error.stage === 'rpc-prompt-undelivered')
+    const row = immediateRows.find((entry) => entry.event === 'rpc-prompt-delivery')
+    assert.equal(row?.reason, 'prompt-write-denied')
+    assert.equal(row?.elapsed_ms, 0)
+  } finally { immediate.cleanup() }
+})
+
+test('C1 prompt write and acknowledgement share one delivery window', () => {
+  let clock = 0
+  const window = 100
+  const rows = []
+  const f = fixture({
+    promptDeliveryWindowMs: window,
+    now: () => clock,
+    writeSync: (_fd, buffer) => {
+      clock += 80
+      return buffer.length
+    },
+    sleep: (ms) => { clock += ms },
+    log: (row) => rows.push(row),
+  })
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    assert.throws(() => f.io.wait(run.returnPath, 600), (error) => error.stage === 'rpc-prompt-undelivered')
+    assert.equal(clock, window, 'write and acknowledgement must share one delivery deadline')
+    assert.equal(rows.find((row) => row.event === 'rpc-prompt-delivery')?.elapsed_ms, window)
+  } finally { f.cleanup() }
+})
+
+test('D1 busy-refusal recovery completes by outcome', () => {
+  let clock = 0
+  let releasePrior = false
+  let writeSuccessor = false
+  let successor = null
+  const rows = []
+  const f = fixture({
+    promptDeliveryWindowMs: 100_000,
+    now: () => clock,
+    sleep: (ms) => { clock += ms },
+    kill: (_pid, signal) => { if (signal === 0) return },
+    onSleep: ({ appendStream }) => {
+      if (releasePrior) {
+        releasePrior = false
+        appendStream(`${JSON.stringify({ type: 'agent_settled' })}\n`)
+        writeSuccessor = true
+      } else if (writeSuccessor && successor) {
+        writeSuccessor = false
+        writeFileSync(successor.returnPath, JSON.stringify(ordinaryRpcEnvelope(successor.id)))
+      }
+    },
+    log: (row) => rows.push(row),
+  })
+  try {
+    const first = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    const seatDir = join(f.paths.taskDir, 'headless-rpc', 'builder')
+    const stream = join(seatDir, 'stream.jsonl')
+    writeFileSync(join(seatDir, 'pgid'), '701')
+    writeFileSync(stream, JSON.stringify({ type: 'turn_start' }) + '\n')
+    assert.throws(() => f.io.wait(first.returnPath, 0), (error) => error.stage === 'rpc-timeout')
+
+    const second = f.io.assign({ role: 'builder', briefFile: '/brief-next.md' })
+    successor = second
+    assert.equal(second.id, 'd2')
+    const promptsBefore = f.writes.filter((frame) => frame.type === 'prompt')
+    const successorPrompt = promptsBefore[promptsBefore.length - 1]
+    writeFileSync(stream, `${JSON.stringify({ type: 'turn_end' })}\n${JSON.stringify({
+      type: 'response', id: successorPrompt.id, command: 'prompt', success: false,
+      error: "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
+    })}\n`, { flag: 'a' })
+
+    releasePrior = true
+    assert.equal(f.io.wait(second.returnPath, 600).status, 'done', 'busy refusal must recover the successor turn')
+    const promptsAfter = f.writes.filter((frame) => frame.type === 'prompt')
+    assert.ok(promptsAfter.length > promptsBefore.length, 'a busy refusal must mint a retry prompt')
+    const census = rows.map((row) => row.seat_turn_census).filter(Boolean).at(-1)
+    assert.ok(census, 'a census row must be journalled')
+    assert.ok(census.parked_frames > 0, 'parked frames must be counted, not discarded')
+    assert.equal(census.parked_frames_reason, 'prior-turn-unsettled')
+  } finally { f.cleanup() }
+})
+
+test('E1 unreadable corpus lanes are excluded from measured rates', () => {
+  const fixtureData = corpusFixture()
+  const report = rpcDeliveryCorpusReport(fixtureData.lanes, fixtureData.deps)
+  assert.equal(report.total_lanes, 3)
+  assert.equal(report.measured_lanes, 1)
+  for (const block of [report.cmd_mtime_predates_assignment, report.older_settle_gate_candidates, report.either_candidate]) {
+    assert.equal(block.measured_lane_denominator, 1)
+    assert.equal(block.rate_percent_lanes, 100)
+  }
+
+  const unreadable = rpcDeliveryCorpusReport([fixtureData.lanes[1]], fixtureData.deps)
+  assert.equal(unreadable.total_lanes, 1)
+  assert.equal(unreadable.measured_lanes, 0)
+  for (const block of [unreadable.cmd_mtime_predates_assignment, unreadable.older_settle_gate_candidates, unreadable.either_candidate]) {
+    assert.equal(block.measured_lane_denominator, 0)
+    assert.equal(block.rate_percent_lanes, null)
+  }
+  assert.deepEqual(unreadable.unreadable, [{ lane: fixtureData.lanes[1], candidates: null, reason: 'denied' }])
+})
+
+test('RV1-1 immediate EPERM writes zero elapsed on a frozen clock', () => {
+  const rows = []
+  const f = fixture({
+    now: () => 0,
+    writeSync: () => {
+      const error = new Error('permission denied')
+      error.code = 'EPERM'
+      throw error
+    },
+    log: (row) => rows.push(row),
+  })
+  try {
+    assert.throws(() => f.io.assign({ role: 'builder', briefFile: '/brief.md' }), (error) => error.stage === 'rpc-prompt-undelivered')
+    const row = rows.find((entry) => entry.event === 'rpc-prompt-delivery')
+    assert.equal(row?.reason, 'prompt-write-denied')
+    assert.equal(row?.elapsed_ms, 0)
   } finally { f.cleanup() }
 })

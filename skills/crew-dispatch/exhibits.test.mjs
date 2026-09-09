@@ -1,12 +1,13 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { ROOT } from '../../test/helpers.mjs'
 import { checkAnchors, collectAnchors, laneFence, partitionShifts, pinnedKey, skillDocs } from '../qa-test-writing/anchor-pin.mjs'
 import { PROTECTED_PATHS, resolveProtectedPaths } from '../../crew/protected-paths.mjs'
-import { DRY_RUN_BLIND_SPOT, TEST_REACH_BLIND_SPOT } from '../../scripts/factory/dispatch-batch.mjs'
+import { DRY_RUN_BLIND_SPOT, TEST_REACH_BLIND_SPOT, collectTestReach } from '../../scripts/factory/dispatch-batch.mjs'
 
 const HERE = fileURLToPath(new URL('./', import.meta.url))
 const TIER = join(HERE, 'references/tier.md')
@@ -20,6 +21,20 @@ function readText(path) {
   const text = readFileSync(path, 'utf8')
   assert.ok(text.length > 0, `${path} is empty`)
   return text
+}
+
+function gitPaths(args) {
+  return execFileSync('git', ['-C', ROOT, ...args], { encoding: 'utf8' }).split('\0').filter(Boolean)
+}
+
+function commentApostropheCensus(files, textOf) {
+  const countInComments = (text) => [...text.matchAll(/\/\/[^\n]*|\/\*[\s\S]*?\*\//g)]
+    .reduce((total, comment) => total + [...comment[0]].filter((char) => char === String.fromCharCode(39)).length, 0)
+  const counts = files.map((file) => countInComments(textOf(file)))
+  return {
+    withApostrophe: counts.filter(Boolean).length,
+    odd: counts.filter((count) => count % 2).length,
+  }
 }
 
 function section(text, heading) {
@@ -198,12 +213,54 @@ test('B1 fixture retains an absolute same-basename collision', () => {
 // Re-measure with the shipped collectTestReach over the git ls-files partition (owners = tracked non-*.test.mjs files; tests = tracked *.test.mjs files): node --input-type=module -e "import{execFileSync}from'node:child_process';const{collectTestReach}=await import(process.cwd()+'/scripts/factory/dispatch-batch.mjs'),files=execFileSync('git',['ls-files','-z'],{encoding:'utf8'}).split(String.fromCharCode(0)).filter(Boolean),tests=new Set(files.filter(file=>file.endsWith('.test.mjs'))),nonTests=new Set(files.filter(file=>!tests.has(file))),reach=collectTestReach({checkout:process.cwd()}),rows=[...reach.pathByFile].filter(([file])=>nonTests.has(file)).flatMap(([file,reached])=>[...reached].filter(test=>tests.has(test)).map(test=>[file,test])),contributingTests=new Set(rows.map(([,test])=>test));console.log({tracked:files.length,nonTests:nonTests.size,tests:tests.size,owners:new Set(rows.map(([file])=>file)).size,pairs:rows.length,contributingTests:contributingTests.size})"
 test('RV1-1 pins the reach doctrine date and pristine pair baseline', () => {
   const text = readText(join(HERE, 'references/batch.md'))
-  const measurement = '**164 of 542 tracked non-test files**, comprising **428 distinct (file, test) pairs contributed by 83 of 85 tracked `*.test.mjs` files**'
+  const measurement = '**160 of 543 tracked non-test files**, comprising **447 distinct (file, test) pairs contributed by 87 of 89 tracked `*.test.mjs` files**'
   const measurementDate = 'On the shipped 2026-09-09 tree'
-  const pristinePairs = 426
+  const pristinePairs = 447
   assert.equal(text.split(measurement).length - 1, 1)
   assert.ok(text.includes(measurementDate))
-  assert.ok(text.includes(`The pristine \`HEAD\` baseline gives 163 owners and ${pristinePairs} pairs.`))
+  assert.ok(text.includes(`The pristine \`HEAD\` baseline gives 160 owners and ${pristinePairs} pairs.`))
+})
+
+test('RV1-1 keeps split fence-carrier prose tied to its current module', () => {
+  const text = readText(join(HERE, 'references', 'batch.md'))
+  const treeFingerprint = ['crew', 'tree-fingerprint.mjs'].join('/')
+  const worktrees = ['skills', 'devops', 'references', 'worktrees.md'].join('/')
+  const fencesSuite = ['test', 'factory-dispatch-batch-fences.test.mjs'].join('/')
+  const retainedSuite = ['test', 'factory-dispatch-batch.test.mjs'].join('/')
+  const fenceSource = readText(join(ROOT, fencesSuite))
+  const retainedSource = readText(join(ROOT, retainedSuite))
+  for (const carrier of [treeFingerprint, worktrees]) {
+    assert.ok(fenceSource.includes(carrier), `${fencesSuite} must carry ${carrier}`)
+    assert.equal(retainedSource.includes(carrier), false, `${retainedSuite} must not carry ${carrier}`)
+  }
+  const guidance = `fencing either \`${treeFingerprint}\` or \`${worktrees}\` now names \`${fencesSuite}\`, whose b220 fixture list carries both surface literals; do not fence \`${retainedSuite}\` for either carrier.`
+  assert.equal(text.split(guidance).length - 1, 1)
+  assert.equal(text.includes('measured at line 2130'), false)
+  const dispatchBatch = ['scripts', 'factory', 'dispatch-batch.mjs'].join('/')
+  const reach = collectTestReach({ checkout: ROOT })
+  assert.equal(reach.pathByFile.get(dispatchBatch)?.size, 8)
+  assert.ok(text.includes(`\`${dispatchBatch}\` 3 -> 8;`))
+})
+
+test('RV1-2 derives shipped reach and comment censuses from git discovery', () => {
+  const files = gitPaths(['ls-files', '-z'])
+  const tests = new Set(files.filter((file) => file.endsWith('.test.mjs')))
+  const nonTests = new Set(files.filter((file) => !tests.has(file)))
+  const reach = collectTestReach({ checkout: ROOT })
+  const rows = [...reach.pathByFile]
+    .filter(([file]) => nonTests.has(file))
+    .flatMap(([file, reached]) => [...reached].filter((testFile) => tests.has(testFile)).map((testFile) => [file, testFile]))
+  const contributingTests = new Set(rows.map(([, testFile]) => testFile))
+  const measurement = `**${new Set(rows.map(([file]) => file)).size} of ${nonTests.size} tracked non-test files**, comprising **${rows.length} distinct (file, test) pairs contributed by ${contributingTests.size} of ${tests.size} tracked \`*.test.mjs\` files**`
+  const text = readText(join(HERE, 'references', 'batch.md'))
+  assert.equal(text.split(measurement).length - 1, 1)
+  const ownSource = readText(fileURLToPath(import.meta.url))
+  assert.ok(ownSource.includes(`const measurement = '${measurement}'`))
+  const current = commentApostropheCensus([...tests], (file) => readText(join(ROOT, file)))
+  const headTests = gitPaths(['ls-tree', '-r', '--name-only', '-z', 'HEAD']).filter((file) => file.endsWith('.test.mjs'))
+  const pristine = commentApostropheCensus(headTests, (file) => execFileSync('git', ['-C', ROOT, 'show', `HEAD:${file}`], { encoding: 'utf8' }))
+  const commentMeasurement = `**${current.withApostrophe} of ${tests.size} tracked \`*.test.mjs\` files** carry at least one apostrophe inside a comment, and **${current.odd} of ${tests.size}** carry an odd number on the shipped tree (**${pristine.odd} of ${headTests.length} at pristine \`HEAD\`**).`
+  assert.equal(text.split(commentMeasurement).length - 1, 1)
 })
 
 // Mutation killed: widening the measured shell claim or dropping a zero-count guard must make this test fail.

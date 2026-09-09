@@ -204,8 +204,12 @@ test('RV1-2 records delivered measurements for construction-time suites', () => 
   assert.ok(RECORDED_SUITE_COST_REPORT.denominator.tests > 0)
   const deliveredRows = new Map(RECORDED_SUITE_COST_REPORT.suites.map((row) => [row.suite, row]))
   for (const [suite, testCount] of [
-    ['test/factory-dispatch-batch.test.mjs', 290],
-    ['test/factory-suite-cost.test.mjs', 9],
+    ['test/factory-dispatch-batch-adoption.test.mjs', 12],
+    ['test/factory-dispatch-batch-cli.test.mjs', 19],
+    ['test/factory-dispatch-batch-fences.test.mjs', 34],
+    ['test/factory-dispatch-batch-refusals.test.mjs', 18],
+    ['test/factory-dispatch-batch.test.mjs', 207],
+    ['test/factory-suite-cost.test.mjs', 11],
   ]) {
     const row = deliveredRows.get(suite)
     assert.equal(row?.reason, null, suite)

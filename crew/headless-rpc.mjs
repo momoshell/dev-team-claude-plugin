@@ -185,6 +185,7 @@ export function rpcDeliveryCorpusReport(lanePaths, deps = {}) {
 
   const totalAssignments = laneResults.reduce((sum, lane) => sum + lane.assignments, 0)
   const totalLanes = lanes.length
+  const measuredLanes = laneResults.length
   const cmdCandidates = new Set()
   const settleCandidates = new Set()
   const unionCandidates = new Set()
@@ -207,6 +208,7 @@ export function rpcDeliveryCorpusReport(lanePaths, deps = {}) {
   const unionCount = unionCandidates.size
   return {
     total_lanes: totalLanes,
+    measured_lanes: measuredLanes,
     total_assignments: totalAssignments,
     rpc_assignments: laneResults.reduce((sum, lane) => sum + lane.rpcAssignments.length, 0),
     cmd_mtime_predates_assignment: {
@@ -214,8 +216,10 @@ export function rpcDeliveryCorpusReport(lanePaths, deps = {}) {
       assignment_denominator: totalAssignments,
       rate_percent: corpusRate(cmdCount, totalAssignments),
       lanes: cmdLanes,
+      // Requested lanes; measured_lane_denominator drives the rate.
       lane_denominator: totalLanes,
-      rate_percent_lanes: corpusRate(cmdLanes, totalLanes),
+      measured_lane_denominator: measuredLanes,
+      rate_percent_lanes: corpusRate(cmdLanes, measuredLanes),
     },
     older_settle_gate_candidates: {
       distinct_assignments: settleCount,
@@ -223,16 +227,20 @@ export function rpcDeliveryCorpusReport(lanePaths, deps = {}) {
       assignment_denominator: totalAssignments,
       rate_percent: corpusRate(settleCount, totalAssignments),
       lanes: settleLanes,
+      // Requested lanes; measured_lane_denominator drives the rate.
       lane_denominator: totalLanes,
-      rate_percent_lanes: corpusRate(settleLanes, totalLanes),
+      measured_lane_denominator: measuredLanes,
+      rate_percent_lanes: corpusRate(settleLanes, measuredLanes),
     },
     either_candidate: {
       distinct_assignments: unionCount,
       assignment_denominator: totalAssignments,
       rate_percent: corpusRate(unionCount, totalAssignments),
       lanes: unionLanes,
+      // Requested lanes; measured_lane_denominator drives the rate.
       lane_denominator: totalLanes,
-      rate_percent_lanes: corpusRate(unionLanes, totalLanes),
+      measured_lane_denominator: measuredLanes,
+      rate_percent_lanes: corpusRate(unionLanes, measuredLanes),
     },
     unreadable,
   }
@@ -1034,6 +1042,9 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
     if (error?.code === 'PARTIAL_WRITE') return 'prompt-write-partial'
     return 'prompt-write-failed'
   }
+  function promptDeliveryElapsed(turn) {
+    return Math.max(0, now() - turn.sentAt)
+  }
   function failPromptDelivery(seat, turn, elapsed, reason = null, error = null) {
     if (!turn) throw staged('rpc-prompt-undelivered', 'rpc prompt was not delivered')
     const recorded = session(turn.role).lastAssignmentId ?? null
@@ -1084,9 +1095,8 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
   // A deps-injected writeSync that returns undefined keeps its meaning — the caller
   // treats undefined as "unmeasured, do not check" — so it is returned untouched
   // rather than being folded into a byte total it never claimed to report.
-  function writeAllToFifo(seat, encoded) {
+  function writeAllToFifo(seat, encoded, deadline) {
     let offset = 0
-    const deadline = now() + promptDeliveryWindowMs
     for (;;) {
       let written
       try {
@@ -1109,9 +1119,13 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
     const id = obj.id || commandId(seat.turn, command)
     const value = { ...obj, id }
     const encoded = Buffer.from(`${JSON.stringify(value)}\n`, 'utf8')
+    const turn = seat.turn
+    const deadline = command === 'prompt' && turn
+      ? turn.sentAt + promptDeliveryWindowMs
+      : now() + promptDeliveryWindowMs
     let written
     try {
-      written = writeAllToFifo(seat, encoded)
+      written = writeAllToFifo(seat, encoded, deadline)
       if (command === 'prompt' && written !== undefined
         && (typeof written !== 'number' || written !== encoded.length)) {
         const error = Object.assign(new Error(`prompt FIFO write was partial (${String(written)} of ${encoded.length} bytes)`), { code: 'PARTIAL_WRITE' })
@@ -1121,7 +1135,6 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
       pending.delete(id)
       if (command !== 'prompt') throw error
       seat.deliveryFailed = true
-      const turn = seat.turn
       if (turn) {
         turn.deliveryFailure ||= {
           role: turn.role, logical_id: turn.id, run_id: turn.runId,
@@ -1130,7 +1143,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
           outcome: 'failed-fast', reason: promptWriteReason(error), window_ms: promptDeliveryWindowMs,
           error: String(error?.code || error?.message || error),
         }
-        return failPromptDelivery(seat, turn, 0, turn.deliveryFailure.reason, error)
+        return failPromptDelivery(seat, turn, promptDeliveryElapsed(turn), turn.deliveryFailure.reason, error)
       }
       throw staged('rpc-prompt-undelivered', `rpc prompt write failed: ${String(error?.message || error)}`, seat.role)
     }
@@ -1230,16 +1243,19 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
     }
     return null
   }
-  function pollUntilSettled(seat, state, polls = SETTLE_GATE_POLLS) {
+  function pollUntil(seat, isSettled, polls = SETTLE_GATE_POLLS) {
     const limit = Math.max(0, Math.trunc(Number(polls) || 0))
     settlePolls = 0
     for (;;) {
       try { pollSeat(seat) } catch { return false }
-      if (state.settled) return true
+      if (isSettled()) return true
       if (settlePolls >= limit) return false
       settlePolls += 1
       try { sleep(WAIT_POLL_MS) } catch { return false }
     }
+  }
+  function pollUntilSettled(seat, state, polls = SETTLE_GATE_POLLS) {
+    return pollUntil(seat, () => state.settled, polls)
   }
   function awaitSettled(seat) {
     const settling = seat.settling
@@ -1563,7 +1579,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
       const { frames, enforced } = pollAndEnforce(seat, turn, returnPath)
       if (enforced) return enforced
       const acknowledged = session(turn.role).lastAssignmentId === turn.runId
-      const elapsed = Math.max(0, now() - (turn.timing.prompt_delivery_sent_at ?? turn.sentAt))
+      const elapsed = promptDeliveryElapsed(turn)
       if (turn.deliveryFailure) return failPromptDelivery(seat, turn, elapsed)
       if (!acknowledged && elapsed >= promptDeliveryWindowMs) return failPromptDelivery(seat, turn, elapsed)
       for (const frame of frames) {
@@ -1574,7 +1590,9 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
           if (isBusyRefusal(frame) && turn.retries < PROMPT_REFUSAL_RETRIES) {
             turn.retries += 1
             seat.responses.delete(frame.id)
-            pollUntilSettled(seat, turn.state)
+            const priorUnsettled = turn.priorUnsettled
+            if (priorUnsettled) pollUntil(seat, () => !turn.priorUnsettled)
+            else pollUntilSettled(seat, turn.state)
             turn.state.settled = false
             turn.state.ended = false
             turn.promptId = send(seat, {
@@ -1638,7 +1656,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
     const late = pollAndEnforce(seat, turn, returnPath)
     if (late.enforced) return late.enforced
     const acknowledged = session(turn.role).lastAssignmentId === turn.runId
-    const elapsed = Math.max(0, now() - (turn.timing.prompt_delivery_sent_at ?? turn.sentAt))
+    const elapsed = promptDeliveryElapsed(turn)
     if (turn.deliveryFailure) return failPromptDelivery(seat, turn, elapsed)
     if (!acknowledged && elapsed >= promptDeliveryWindowMs) return failPromptDelivery(seat, turn, elapsed)
     const groupBefore = probeGroup(seat)

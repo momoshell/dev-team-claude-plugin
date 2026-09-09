@@ -59,7 +59,8 @@ have, and it is post-change.
      accepted plan's gate for mutation coverage of the protected files and
      seats the adversary when coverage is absent. **Fails closed:** no
      coverage → adversary;
-   - the **operator forces it** (`--tier judge` / rigorous, unchanged).
+   - ~~the **operator forces it** (`--tier judge` / rigorous, unchanged).~~
+     **Withdrawn by Amendment 1 — see below.**
 3. **On headless transport the tech-lead seat is declared but idle** until
    one of the triggers fires. Seats spawn per assignment, so an unconsulted
    adversary costs nothing; no boot-time decision is required.
@@ -100,6 +101,42 @@ have, and it is post-change.
 - The ledger gains nothing new: plan-phase durations are already measurable
   from stage rows (that measurement produced the table above), so the claim
   this ADR rests on stays checkable after the change.
+
+## Amendment 1 — two mechanical triggers, not three (2026-09-09)
+
+Built and measured while implementing this ADR (#1051). §2's third trigger, an
+operator force, is **withdrawn**, and `operator-force` is not a member of
+`ADVERSARY_TRIGGERS`.
+
+**Why.** As written, `--tier judge` was the operator force — but this ADR's whole
+point is that judge no longer implies the rounds, so the clause "unchanged" was
+self-contradictory the moment the trigger landed. Replacing it with a real named
+input means a flag on `crew/crew.mjs`, and three facts argued against spending
+one:
+
+- **The safety case is already closed.** `coverageAbsent` fails closed on every
+  protected file in scope that no non-exempt declared mutation names, so a
+  protected touch the gate cannot prove still seats the adversary. That was the
+  concern this ADR was written about; the operator force was convenience on top.
+- **An operator route already exists.** Every planner assignment brief, initial
+  and revision, carries the `details.needs_adversary` contract. An operator who
+  wants the round writes it into the task brief's `done_means`, which is how
+  every other envelope field is steered.
+- **Demand is unmeasured, and structurally so.** The loop ran unconditionally
+  until this change, so no lane has ever had the chance to express a preference
+  for the adversary that neither mechanical trigger would satisfy. Building a
+  flag for it now would be predicting a need rather than measuring one.
+
+So the remaining gap is narrow and stated rather than hidden: a **non-protected**
+lane, whose planner did not declare, whose gate proved coverage, and whose
+operator wants the round anyway, must ask through the brief rather than a flag.
+
+**What this costs, honestly.** The override is advisory where it used to be
+mechanical — a planner may decline to declare, and this repo's own doctrine
+prefers code to model tokens for lifecycle steps. That is the trade accepted
+here, and it is reversible: `resolveAdversaryTrigger` takes the trigger set as a
+closed enum, so adding a forced member later is additive. Revisit the moment an
+operator actually wants the round and cannot get it.
 
 ## Rejected alternatives
 

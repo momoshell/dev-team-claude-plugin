@@ -614,7 +614,7 @@ test('PC-05 malformed planner details resolve to a typed trigger and never throw
 // positionally in drive.mjs, so a reordering is silent. Every other closed enum
 // in this repo is pinned by a test; these were imported by none.
 test('RV1-4 the adversary enums are closed and positionally stable', () => {
-  assert.deepEqual(ADVERSARY_TRIGGERS, ['operator-force', 'planner-request', 'coverage-absent', 'none'])
+  assert.deepEqual(ADVERSARY_TRIGGERS, ['planner-request', 'coverage-absent', 'none'])
   assert.deepEqual(ADVERSARY_REFUSALS, ['needs-adversary-type', 'adversary-unavailable'])
   assert.deepEqual(ADVERSARY_REFUSAL, { type: 'needs-adversary-type', unavailable: 'adversary-unavailable' })
   assert.equal(Object.isFrozen(ADVERSARY_TRIGGERS), true)
@@ -623,6 +623,16 @@ test('RV1-4 the adversary enums are closed and positionally stable', () => {
   // 'needs-adversary-missing' was withdrawn with gate check B2: an absent
   // declaration is no longer a refusal, so the member is unreachable.
   assert.equal(ADVERSARY_REFUSALS.includes('needs-adversary-missing'), false)
+  // ADR-038 Amendment 1: 'operator-force' is not an enum member, because no
+  // caller can write it. Every member below is produced by resolveAdversaryTrigger
+  // on some input, which is what makes this enum closed rather than aspirational.
+  assert.equal(ADVERSARY_TRIGGERS.includes('operator-force'), false)
+  const produced = new Set([
+    resolveAdversaryTrigger({ needs_adversary: true }, []).trigger,
+    resolveAdversaryTrigger({ needs_adversary: false }, ['crew/drive.mjs']).trigger,
+    resolveAdversaryTrigger({ needs_adversary: false }, []).trigger,
+  ])
+  assert.deepEqual([...produced].sort(), [...ADVERSARY_TRIGGERS].sort())
 })
 
 test('C1 uncovered protected scope fails closed to the adversary', () => {

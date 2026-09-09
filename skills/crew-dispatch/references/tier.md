@@ -77,6 +77,17 @@ not stylistic. Over 20 runs, judge tier spent **94%** of its wall clock
 planning against build tier's 33%, so judge is worth it when planning IS the
 deliverable and inflates plan share otherwise.
 
+`judge` no longer implies the plan-check loop. Under ADR-038 the tech-lead is
+seated but idle unless the planner declares `needs_adversary` in its envelope, or
+the accepted plan's gate cannot prove mutation coverage of a protected file it
+touches (which fails closed). ADR-038 Amendment 1 withdrew the third trigger, so
+**there is no flag that forces the adversary round**. An operator who wants it
+asks the way every other envelope field is steered — put it in the task brief's
+`done_means`, e.g. *"return `needs_adversary: true`; this plan needs an
+adversarial round because …"*. Every planner assignment brief, initial and
+revision, already carries the field's contract, and the journal records which
+trigger fired, or `none`, once per lane.
+
 Finally, do not undo the boot decision with an override: `--model-reviewer` or
 `--effort-reviewer` on a judge-tier pane lane changes the cell that
 `resolveTier` sees and re-breaks `sameFloorCell`. Leave the judge-tier pane's

@@ -1047,13 +1047,21 @@ function verdictOf(env) {
 export const FINDING_SEVERITIES = Object.freeze(['must-fix', 'should-fix', 'consider'])
 export const RESIDUAL_TYPES = Object.freeze(['cosmetic', 'correctness-unverified'])
 export const PLAN_CHECK_SEVERITIES = Object.freeze(['blocker', 'major', 'minor'])
-export const ADVERSARY_TRIGGERS = Object.freeze(['operator-force', 'planner-request', 'coverage-absent', 'none'])
+// ADR-038 §2 named three triggers. Only two are mechanical, and the third —
+// an operator force — is deliberately NOT an enum member: it would need a named
+// input on crew/crew.mjs, nothing measured has ever wanted it, and an operator
+// who does want the round asks for it the way every other envelope field is
+// steered, by putting needs_adversary in the task brief's done_means (every
+// planner assignment brief, initial and revision, already carries the field's
+// contract). A member no caller can write is the defect #879 records; this enum
+// carries only what something can actually produce. ADR-038 Amendment 1.
+export const ADVERSARY_TRIGGERS = Object.freeze(['planner-request', 'coverage-absent', 'none'])
 export const ADVERSARY_REFUSALS = Object.freeze(['needs-adversary-type', 'adversary-unavailable'])
 export const ADVERSARY_REFUSAL = Object.freeze({
   type: ADVERSARY_REFUSALS[0],
   unavailable: ADVERSARY_REFUSALS[1],
 })
-export function resolveAdversaryTrigger(details, protectedScope, operatorForce = false) {
+export function resolveAdversaryTrigger(details, protectedScope) {
   details = details && typeof details === 'object' && !Array.isArray(details) ? details : {}
   protectedScope = Array.isArray(protectedScope) ? protectedScope.filter((file) => typeof file === 'string') : []
   // ADR-038 section 2 makes the loop run when the planner DECLARES
@@ -1071,10 +1079,9 @@ export function resolveAdversaryTrigger(details, protectedScope, operatorForce =
     .filter((mutation) => mutation && typeof mutation === 'object' && !mutation.exempt && typeof mutation.file === 'string')
     .map((mutation) => mutation.file))
   const coverageAbsent = protectedScope.some((file) => file.endsWith('/') || !provedFiles.has(file))
-  const trigger = operatorForce ? ADVERSARY_TRIGGERS[0]
-    : plannerRequested ? ADVERSARY_TRIGGERS[1]
-      : coverageAbsent ? ADVERSARY_TRIGGERS[2]
-        : ADVERSARY_TRIGGERS[3]
+  const trigger = plannerRequested ? ADVERSARY_TRIGGERS[0]
+    : coverageAbsent ? ADVERSARY_TRIGGERS[1]
+      : ADVERSARY_TRIGGERS[2]
   return { trigger }
 }
 export const PLAN_CONVERGENCE_REASONS = Object.freeze([
@@ -4151,7 +4158,7 @@ function runTask(ctx, io, crash) {
       continue
     }
     const protectedScope = protectedHits(env.details?.files_in_scope, ctx.protectedPaths)
-    const currentAdversary = resolveAdversaryTrigger(env.details, protectedScope, false)
+    const currentAdversary = resolveAdversaryTrigger(env.details, protectedScope)
     if (currentAdversary.refusal) {
       stageComplete()
       return escalate('plan', currentAdversary.refusal, env.artifacts || [])

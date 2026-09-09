@@ -29,10 +29,11 @@ cannot be raised mid-run. It is spelled out per role rather than
 prefix-matched — the five names are literal members of `KNOWN_FLAGS.boot`, not
 a `ROLE_FLAG_PREFIXES` family, so an unknown role suffix refuses as an unknown
 option instead of being silently accepted. In measurable `headless-all` mode,
-an absent flag defaults planner to `64` and lead to `32`, recorded as
-`source: default`; an authored value wins, including `64` or `32`, and is
-recorded as `source: flag`. Tech-lead, builder, and reviewer remain unbounded
-with `source: absent`. Pane boots have no implicit ceiling because their
+an absent flag defaults planner to `64`, builder to `200`, reviewer to `48` and
+lead to `32`, recorded as `source: default`; an authored value wins, including a
+value equal to the default, and is recorded as `source: flag`. Tech-lead alone
+remains unbounded with `source: absent` — its measured maximum is 23 turns with
+no tail, and an unmeasured ceiling is a guess. Pane boots have no implicit ceiling because their
 transport emits no census, while an authored pane ceiling still refuses before
 state or cmux effects.
 

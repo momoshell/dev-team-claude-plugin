@@ -1901,23 +1901,23 @@ test('b376 A2 a returns json in the checkout is named a misdirected envelope', (
 
 test('turn-ceiling and adopted-plan helpers keep their closed contracts', () => {
   const absent = resolveTurnCeilings({})
-  assert.deepEqual(absent, { planner: 64, 'tech-lead': null, builder: null, reviewer: null, lead: 32 })
+  assert.deepEqual(absent, { planner: 64, 'tech-lead': null, builder: 200, reviewer: 48, lead: 32 })
   assert.deepEqual(absent, TURN_CEILING_DEFAULTS)
   assert.deepEqual(turnCeilingsRecord(absent, {}), {
-    planner: 64, 'tech-lead': null, builder: null, reviewer: null, lead: 32,
-    source: { planner: 'default', 'tech-lead': 'absent', builder: 'absent', reviewer: 'absent', lead: 'default' },
+    planner: 64, 'tech-lead': null, builder: 200, reviewer: 48, lead: 32,
+    source: { planner: 'default', 'tech-lead': 'absent', builder: 'default', reviewer: 'default', lead: 'default' },
   })
   const flagged = resolveTurnCeilings({ planner: '40', builder: 7 })
   assert.equal(flagged.planner, 40)
   assert.equal(flagged.builder, 7)
-  assert.equal(flagged.reviewer, null)
+  assert.equal(flagged.reviewer, 48)
   assert.deepEqual(turnCeilingsRecord(flagged, { planner: '40', builder: 7 }), {
-    planner: 40, 'tech-lead': null, builder: 7, reviewer: null, lead: 32,
-    source: { planner: 'flag', 'tech-lead': 'absent', builder: 'flag', reviewer: 'absent', lead: 'default' },
+    planner: 40, 'tech-lead': null, builder: 7, reviewer: 48, lead: 32,
+    source: { planner: 'flag', 'tech-lead': 'absent', builder: 'flag', reviewer: 'default', lead: 'default' },
   })
   const exact = resolveTurnCeilings({ planner: '64', lead: '32' })
   assert.deepEqual(turnCeilingsRecord(exact, { planner: '64', lead: '32' }).source, {
-    planner: 'flag', 'tech-lead': 'absent', builder: 'absent', reviewer: 'absent', lead: 'flag',
+    planner: 'flag', 'tech-lead': 'absent', builder: 'default', reviewer: 'default', lead: 'flag',
   })
   assert.deepEqual(resolveTurnCeilings({}, { applyDefaults: false }), Object.fromEntries(TURN_CEILING_ROLES.map((role) => [role, NO_TURN_CEILING])))
   for (const raw of [{ planner: 'abc' }, { planner: '0' }, { planner: '-1' }, { planner: '1e9' }, { planner: true }, { planner: 1001 }]) {

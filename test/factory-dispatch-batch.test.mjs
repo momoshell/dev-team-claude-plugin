@@ -27,6 +27,7 @@ import {
   ANCHOR_PIN_POST_MERGE,
   ANCHOR_PIN_WARNING_PREFIX,
   CITATION_CARRIER_BLIND_SPOT,
+  CENSUS_CARRIER_BLIND_SPOT,
   CITATION_CARRIER_POST_MERGE,
   CITATION_CARRIER_ROW_LIMIT,
   CITATION_CARRIER_WARNING_PREFIX,
@@ -525,6 +526,7 @@ test('C1', () => {
     'anchor-pin': 'BLIND SPOT: an unpinned file:line citation is in no manifest key, so neither this check nor the citation-carrier check can find it; a citation the anchor corpus does not pin is still discoverable only by hand',
     'citation-carrier': 'BLIND SPOT: this finds docs carrying a PINNED path:line citation and nothing else. A citation no manifest pins is in no key, and a doc whose exhibit set-compares a documented table against source (skills/crew-recovery/references/escalations.md and the escalate() producers) reddens with every citation in it still correct. Neither is discoverable here; read the exhibits suites of the manifests named above before choosing this fence',
     'test-reach': 'BLIND SPOT: this is a proxy in BOTH directions and names candidates, never proof. A test can assert the changed behaviour through a higher-level entry point without importing the changed file at all, and a computed path or dynamic import is invisible to a static scan — crew/crew.mjs loads every adapter that way. A test can equally import a fenced file without asserting anything about the part being changed. The literal symbol scan sees only whole-word occurrences of an exported name, is blind to a renamed re-export, and drops any symbol naming more than 8 test files as too broad to be evidence. Read the named files before choosing this fence; an unnamed one is not cleared. An apostrophe or quote inside a // or /* */ comment opens a phantom literal and hides every real path literal after it in that file.',
+    'census-carrier': CENSUS_CARRIER_BLIND_SPOT,
     'cross-batch-unknown': 'BLIND SPOT: a lane booted without --fences declares no surface at all and can be editing anything; a lane whose batch siblings have been reaped records no claim; and a repository whose git dir cannot be measured is not compared. None of those are cleared — they are reported unknown.',
   }
   assert.deepEqual(report.blind_spots, expected)
@@ -1020,10 +1022,11 @@ test('a batch with no reaching tests writes the fence report it wrote before', (
       'anchor-pin': ANCHOR_BLIND_SPOT,
       'citation-carrier': CITATION_CARRIER_BLIND_SPOT,
       'test-reach': TEST_REACH_BLIND_SPOT,
+      'census-carrier': CENSUS_CARRIER_BLIND_SPOT,
       'cross-batch-unknown': CROSS_BATCH_BLIND_SPOT,
     },
     cross_batch_unknown: [],
-    lanes: [{ lane: 'lane-a', test_reach: [], test_reach_dropped: [], citation_carriers: [], anchor_pins: [] }],
+    lanes: [{ lane: 'lane-a', test_reach: [], test_reach_dropped: [], citation_carriers: [], anchor_pins: [], census_carriers: [] }],
   }, null, 2) + '\n'
   assert.equal(readFileSync(join(outDir, FENCE_REPORT_FILE), 'utf8'), expected)
   assert.equal(result.logs.some((line) => line.startsWith(TEST_REACH_WARNING_PREFIX)), false)
@@ -1431,8 +1434,10 @@ test('trips-and-dispatches: an unfenced anchor scan returns with the per-lane re
   })
   assert.deepEqual(report.perLane['lane-a'].files, fixture.files)
   assert.deepEqual(report.perLane['lane-a'].where, fixture.files)
-  assert.equal(report.warnings.length, 1)
-  assert.equal(report.warnings[0].text.includes(ANCHOR_PIN_POST_MERGE), true)
+  const anchorWarning = report.warnings.find(({ kind }) => kind === 'anchor-pin')
+  assert.ok(anchorWarning)
+  assert.equal(report.warnings.filter(({ kind }) => kind === 'anchor-pin').length, 1)
+  assert.equal(anchorWarning.text.includes(ANCHOR_PIN_POST_MERGE), true)
 })
 
 test('an anchor warning carries the blind-spot sentence', () => {
@@ -1444,7 +1449,7 @@ test('an anchor warning carries the blind-spot sentence', () => {
     checkout,
     deps: { home: root, log: () => {} },
   })
-  assert.equal(report.warnings[0].text.includes(ANCHOR_BLIND_SPOT), true)
+  assert.equal(report.warnings.find(({ kind }) => kind === 'anchor-pin').text.includes(ANCHOR_BLIND_SPOT), true)
 })
 
 test('dry-run warns with the anchor prefix and every line key', async () => {
@@ -1488,7 +1493,7 @@ test('a lane that owns every pinning manifest is silent', () => {
     checkout,
     deps: { home: root, log: (line) => logs.push(String(line)) },
   })
-  assert.equal(report.warnings.length, 0)
+  assert.equal(report.warnings.filter(({ kind }) => kind === 'anchor-pin').length, 0)
   assert.equal(logs.some((line) => line.includes(ANCHOR_PIN_WARNING_PREFIX)), false)
 })
 

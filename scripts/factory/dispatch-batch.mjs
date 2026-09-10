@@ -295,11 +295,16 @@ export const FENCE_REPORT_FILE = 'dispatch.warnings.json'
 export const SYMBOL_FANOUT_LIMIT = 8
 export const TEST_REACH_WARNING_PREFIX = 'dispatch-batch: WARNING test-reach-unfenced:'
 export const TEST_REACH_BLIND_SPOT = 'BLIND SPOT: this is a proxy in BOTH directions and names candidates, never proof. A test can assert the changed behaviour through a higher-level entry point without importing the changed file at all, and a computed path or dynamic import is invisible to a static scan — crew/crew.mjs loads every adapter that way. A test can equally import a fenced file without asserting anything about the part being changed. The literal symbol scan sees only whole-word occurrences of an exported name, is blind to a renamed re-export, and drops any symbol naming more than 8 test files as too broad to be evidence. Read the named files before choosing this fence; an unnamed one is not cleared. An apostrophe or quote inside a // or /* */ comment opens a phantom literal and hides every real path literal after it in that file.'
+export const CENSUS_CARRIER_FILES = Object.freeze(['skills/crew-dispatch/references/batch.md', 'skills/crew-dispatch/exhibits.test.mjs'])
+export const CENSUS_CARRIER_WARNING_PREFIX = 'dispatch-batch: WARNING census-carrier-unfenced:'
+export const CENSUS_CARRIER_REPAIR = "The lane will OWE this repair and cannot reach it from outside its fence: update batch.md's measurement sentence, exhibits.test.mjs's const measurement, and its const pristinePairs."
+export const CENSUS_CARRIER_BLIND_SPOT = 'BLIND SPOT: this warning fires on the POSSIBILITY that a fenced *.test.mjs edit moves either repository-wide census, not on the fact; dispatch cannot inspect bytes the builder has not written and cannot predict whether either census will move.'
 export const WARNING_DOCTRINE = 'skills/crew-dispatch/references/batch.md'
 export const FENCE_BLIND_SPOTS = Object.freeze({
   'anchor-pin': ANCHOR_BLIND_SPOT,
   'citation-carrier': CITATION_CARRIER_BLIND_SPOT,
   'test-reach': TEST_REACH_BLIND_SPOT,
+  'census-carrier': CENSUS_CARRIER_BLIND_SPOT,
   'cross-batch-unknown': CROSS_BATCH_BLIND_SPOT,
 })
 export const TEST_REACH_OVERRIDE_PREFIX = 'dispatch-batch: test-reach-override:'
@@ -723,7 +728,7 @@ function writeFenceReport({ path, lanes, crossBatchUnknown = [], deps } = {}) {
 function warningSummary({ lane, counts, refusals, citation, warnings }) {
   const warningEvidence = `report=${citation} doctrine=${WARNING_DOCTRINE}`
   const refusalNames = Array.isArray(refusals) && refusals.length > 0 ? refusals.join(',') : 'none'
-  return `dispatch-batch: WARNING-SUMMARY lane=${lane} refusals=${refusalNames} anchor-pin=${counts.anchorPin} · citation-carrier=${counts.citationCarrier} · test-reach=${counts.testReach} · actionable=${counts.actionable} · collapsed=${counts.testReachDropped} · cross-batch-unknown=${counts.crossBatchUnknown} ${warningEvidence}`
+  return `dispatch-batch: WARNING-SUMMARY lane=${lane} refusals=${refusalNames} anchor-pin=${counts.anchorPin} · citation-carrier=${counts.citationCarrier} · test-reach=${counts.testReach} · actionable=${counts.actionable} · collapsed=${counts.testReachDropped} · cross-batch-unknown=${counts.crossBatchUnknown} · census-carrier=${counts.censusCarrier} ${warningEvidence}`
 }
 
 export class BatchRefusal extends Error {
@@ -1659,6 +1664,22 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
     const ownWhere = laneWhereOf(lane)
     const ownCreates = laneCreatesOf(lane)
     const matchOwn = scopeMatcher(ownPaths)
+    const hasTestSurface = ownPaths.some((path) => path.endsWith('.test.mjs'))
+    const missingCensusCarriers = CENSUS_CARRIER_FILES.filter((carrier) => !matchOwn(carrier))
+    const censusExposure = hasTestSurface && missingCensusCarriers.length > 0
+    let censusWarning = null
+    if (censusExposure) {
+      censusWarning = {
+        kind: 'census-carrier',
+        lane: name,
+        carriers: CENSUS_CARRIER_FILES,
+        missing: missingCensusCarriers,
+        repair: CENSUS_CARRIER_REPAIR,
+        blind_spot: CENSUS_CARRIER_BLIND_SPOT,
+        text: `${CENSUS_CARRIER_WARNING_PREFIX} lane ${name} fences a test surface but omits repository-wide census carriers ${CENSUS_CARRIER_FILES.join(', ')}; missing=${missingCensusCarriers.join(', ')}; WARNING, not a refusal. ${CENSUS_CARRIER_REPAIR} ${CENSUS_CARRIER_BLIND_SPOT}`,
+      }
+      warnings.push(censusWarning)
+    }
     const ownSurface = [...ownWhere, ...ownCreates]
     if (!ownSurface.every(matchOwn)) {
       const outside = ownSurface.filter((path) => !matchOwn(path))
@@ -1737,12 +1758,13 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
     }
     if (refusedRows.length > 0) reachRefusals.push({ lane: name, rows: refusedRows, files: ownFiles })
     const overrideField = overridden.length > 0 ? { test_reach_overrides: overridden } : {}
-    reportLanes.push({ lane: name, test_reach: reachRows, test_reach_dropped: droppedReachRows, citation_carriers: unfencedCarriers, anchor_pins: unfencedPins, ...overrideField })
+    reportLanes.push({ lane: name, test_reach: reachRows, test_reach_dropped: droppedReachRows, citation_carriers: unfencedCarriers, anchor_pins: unfencedPins, census_carriers: censusWarning ? [censusWarning] : [], ...overrideField })
     summaryLanes.push({
       lane: name,
       counts: {
         anchorPin: unfencedPins.reduce((total, row) => total + (Array.isArray(row.keys) ? row.keys.length : 0), 0),
         citationCarrier: unfencedCarriers.length,
+        censusCarrier: censusWarning ? 1 : 0,
         testReach: reachRows.length,
         actionable: refusedRows.length,
         testReachDropped: droppedReachRows.length,

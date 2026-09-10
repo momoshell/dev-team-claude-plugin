@@ -11,8 +11,11 @@
 // append may throw — losing the raw record is fatal to the caller), then
 // attempt the database mirror inside a try/catch that never rethrows (a
 // mirror failure only increments stats().mirror_errors). The three writers
-// that allocate a sequence settle their mirror row first, then append the
-// line, so a unique-key refusal can be re-numbered before authority write.
+// that allocate a sequence use the successful automatic path: insert the mirror
+// row, append authority, then commit. A unique-key refusal can be re-numbered
+// before authority write.
+//
+// LIMITATION: concurrent degraded handles have no SQLite arbitration; JSONL lines survive, but duplicate (adw_id, seq) keys can collapse when replayed into the unique mirror.
 //
 // SCOPED FLOOR: this module owns the repository's Node floor (`NODE_FLOOR`,
 // currently `'26.0.0'`). `node:sqlite`, which this module depends on, is
@@ -2034,6 +2037,11 @@ export function isLockedError(err) {
   return !!err && (err.code === 'SQLITE_BUSY' || /database is locked/i.test(msg))
 }
 
+function beginImmediate(conn) {
+  conn.exec('BEGIN IMMEDIATE')
+  return true
+}
+
 // ---------------------------------------------------------------------------
 // Field hygiene / redaction (AC-9)
 // ---------------------------------------------------------------------------
@@ -2251,6 +2259,7 @@ export function openLedger({
   nodeVersion = process.versions.node,
   now = () => Date.now(),
   stderr = process.stderr, readOnly = false,
+  _afterSequenceAllocatedForTest = null,
 } = {}) {
   if (!dbPath) {
     refuse('openLedger requires dbPath')
@@ -2547,15 +2556,17 @@ export function openLedger({
   // shape (what goes to the JSONL and what replayJsonl re-applies), row is the
   // table row. `insert(conn, row)` performs the INSERT OR IGNORE and returns
   // its result. The JSONL line is appended exactly once, after the seq is
-  // settled, whether or not the mirror is reachable. This ordering deliberately
-  // closes the permanent authority loss caused by appending before a refused
-  // unique-key insert; a crash after the committed row but before its line is
-  // a rebuildable mirror-row gap instead.
+  // settled, whether or not the mirror is reachable. The automatic live path
+  // holds one IMMEDIATE transaction across allocation, insert, authority
+  // append, and commit; explicit-sequence idempotency remains outside it.
   function insertSequenced({ jsonlKind, adwId, seqKind, explicitSeq, build, insert }) {
     assertWritable()
     const conn = ensureDb()
     if (!conn) {
       const seq = explicitSeq ?? nextSeq(adwId, seqKind, null)
+      if (explicitSeq === undefined && typeof _afterSequenceAllocatedForTest === 'function') {
+        _afterSequenceAllocatedForTest({ adwId, seqKind, seq, conn: null })
+      }
       const { args } = build(seq)
       appendJsonl(jsonlKind, args)
       if (explicitSeq !== undefined) advanceJsonlSeqFloor(adwId, seqKind, explicitSeq)
@@ -2568,22 +2579,19 @@ export function openLedger({
     let args = null
     let res = null
     let settled = false
-    for (let attempt = 0; attempt < SEQ_COLLISION_RETRY_BUDGET; attempt += 1) {
-      const seq = explicitSeq ?? nextSeq(adwId, seqKind, conn)
-      const built = build(seq)
+
+    // Explicit sequences are idempotent caller input, not allocations. Keep
+    // this path outside the reservation transaction so replay and duplicate
+    // explicit writes retain their historical comparison semantics.
+    if (explicitSeq !== undefined) {
+      const built = build(explicitSeq)
       args = built.args
       try {
         res = insert(conn, built.row)
       } catch (err) {
         noteMirrorError(err)
-        break
       }
-      if (res.changes === 1) {
-        settled = true
-        break
-      }
-      if (res.changes === 0 && explicitSeq === undefined) continue
-      if (res.changes === 0 && explicitSeq !== undefined) {
+      if (res?.changes === 0) {
         let identical = false
         try {
           const selection = compareCols.flatMap((c) => [
@@ -2598,16 +2606,78 @@ export function openLedger({
           // A refused insert with an unreadable incumbent is not provably
           // idempotent; preserve the collision signal rather than guessing.
         }
-        if (!identical) {
-          noteSeqCollision()
+        if (!identical) noteSeqCollision()
+      }
+      appendJsonl(jsonlKind, args)
+      advanceJsonlSeqFloor(adwId, seqKind, explicitSeq)
+      return { args, res }
+    }
+
+    let authorityAppendAttempted = false
+    let authorityAppendError = null
+    const appendAuthorityOnce = () => {
+      if (authorityAppendAttempted) return
+      authorityAppendAttempted = true
+      try {
+        appendJsonl(jsonlKind, args)
+      } catch (err) {
+        authorityAppendError = err
+        throw err
+      }
+    }
+    for (let attempt = 0; attempt < SEQ_COLLISION_RETRY_BUDGET; attempt += 1) {
+      let transactionStarted = false
+      const rollbackIfActive = () => {
+        if (!transactionStarted) return
+        try {
+          conn.exec('ROLLBACK')
+        } catch (err) {
+          noteMirrorError(err)
         }
+        transactionStarted = false
+      }
+      try {
+        transactionStarted = beginImmediate(conn)
+        const seq = explicitSeq ?? nextSeq(adwId, seqKind, conn)
+        if (typeof _afterSequenceAllocatedForTest === 'function') {
+          _afterSequenceAllocatedForTest({ adwId, seqKind, seq, conn })
+        }
+        const built = build(seq)
+        args = built.args
+        res = insert(conn, built.row)
+        if (res.changes === 1) {
+          settled = true
+          appendAuthorityOnce()
+          conn.exec('COMMIT')
+          transactionStarted = false
+          break
+        }
+        if (res.changes === 0) {
+          rollbackIfActive()
+          continue
+        }
+        rollbackIfActive()
+        break
+      } catch (err) {
+        rollbackIfActive()
+        if (authorityAppendError) throw authorityAppendError
+        noteMirrorError(err)
         break
       }
-      break
     }
-    if (!settled && explicitSeq === undefined && res?.changes === 0) noteSeqCollision()
-    appendJsonl(jsonlKind, args)
-    if (explicitSeq !== undefined) advanceJsonlSeqFloor(adwId, seqKind, explicitSeq)
+
+    // A failed reservation may have left args from an earlier refused attempt.
+    // Re-allocate from the live mirror whenever no attempt settled, so this
+    // authority fallback cannot append a stale key already owned by a sibling.
+    if (!settled && !authorityAppendAttempted) {
+      const seq = nextSeq(adwId, seqKind, conn)
+      if (typeof _afterSequenceAllocatedForTest === 'function') {
+        _afterSequenceAllocatedForTest({ adwId, seqKind, seq, conn })
+      }
+      args = build(seq).args
+    }
+    if (!settled && res?.changes === 0) noteSeqCollision()
+    if (!authorityAppendAttempted) appendAuthorityOnce()
     return { args, res }
   }
 

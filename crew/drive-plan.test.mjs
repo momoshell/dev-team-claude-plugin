@@ -1317,6 +1317,10 @@ test('non-continuation keeps the ordinary assignment and review brief write set 
     `Plan of record: ${TD}/plan.md. Changes are uncommitted in /tmp/repo — read the diff with git.`,
     'Re-run the validation lane yourself: lane-cmd',
     'Write review.md in the task dir. details.verdict must be pass or changes-needed.',
+    'A typed finding may carry vacuity_claim "mutation-survived" when a mutation test proves the behavior remains live after the relevant call is removed.',
+    'A typed finding may carry vacuity_claim "source-text-only" when source text proves the behavior is present but no executable witness can prove it.',
+    'Either recognized vacuity_claim requires the marker itself, severity "must-fix", and a disposition other than "no-op"; ordinary observations must omit the marker.',
+    'An explicitly supplied vacuity_claim outside "mutation-survived" and "source-text-only" is refused; do not invent values or rely on natural-language matching.',
     '## Diff-mutant findings',
     '[]',
   ].join('\n'))

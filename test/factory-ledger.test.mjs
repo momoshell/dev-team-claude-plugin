@@ -3293,16 +3293,62 @@ test('S11(c): two processes racing to open + migrate the same fresh db both comp
 // #541: allocate-then-confirm and collapse readout pins
 // ---------------------------------------------------------------------------
 
-// #541: two live emitters on one adw_id lose no record.
-test('A1: two live emitters on one adw_id lose no record', { skip: SKIP, timeout: 30000 }, async () => {
+// #541: the calibrated delay is a measured default; the optional environment
+// override is validated by the same resolver used by the named witnesses.
+const CALIBRATED_RENDEZVOUS_DELAY_MS = 0
+const CALIBRATED_RENDEZVOUS_DELAYS_MS = Object.freeze([0, 1, 2])
+
+function resolveRendezvousDelayMs() {
+  const rendezvousDelayInput = process.env.CREW_LEDGER_RENDEZVOUS_DELAY_MS
+  const rendezvousDelayMs = rendezvousDelayInput === undefined ? CALIBRATED_RENDEZVOUS_DELAY_MS : Number(rendezvousDelayInput)
+  assert.ok(
+    rendezvousDelayInput === undefined
+      || (rendezvousDelayInput.trim() !== ''
+        && Number.isFinite(rendezvousDelayMs)
+        && Number.isInteger(rendezvousDelayMs)
+        && rendezvousDelayMs >= 0),
+    'CREW_LEDGER_RENDEZVOUS_DELAY_MS must be a finite nonnegative integer',
+  )
+  return rendezvousDelayMs
+}
+
+function waitForEmitterReady(child, tag) {
+  return new Promise((resolve, reject) => {
+    const settle = (error = null) => {
+      child.off('message', onMessage)
+      child.off('exit', onExit)
+      if (error) reject(error)
+      else resolve()
+    }
+    const onMessage = (message) => {
+      if (message?.type !== 'ready' || message?.tag !== tag) {
+        settle(new Error(`emitter ${tag} sent malformed readiness IPC`))
+        return
+      }
+      settle()
+    }
+    const onExit = (code, signal) => {
+      settle(new Error(`emitter ${tag} exited before readiness (${code ?? 'null'}, ${signal ?? 'none'})`))
+    }
+    if (child.exitCode !== null) {
+      onExit(child.exitCode, child.signalCode)
+      return
+    }
+    child.on('message', onMessage)
+    child.once('exit', onExit)
+  })
+}
+
+async function runConcurrentEmitterTrial({ delayMs }) {
   const dir = nextDir()
   const dbPath = join(dir, 'ledger.db')
   const jsonlPath = join(dir, 'ledger.jsonl')
   const emitter = join(dir, 'emitter.mjs')
   writeFileSync(emitter, `
     import { openLedger } from ${JSON.stringify(new URL('../scripts/factory/ledger.mjs', import.meta.url).href)}
-    const [dbPath, dir, tag] = process.argv.slice(2)
+    const [dbPath, tag] = process.argv.slice(2)
     const ledger = openLedger({ dbPath })
+    ledger.dumpTable('events')
     process.send?.({ type: 'ready', tag })
     await new Promise((resolve, reject) => {
       process.once('message', resolve)
@@ -3314,71 +3360,367 @@ test('A1: two live emitters on one adw_id lose no record', { skip: SKIP, timeout
     ledger.close()
     process.disconnect?.()
   `)
-  const rendezvousDelayInput = process.env.CREW_LEDGER_RENDEZVOUS_DELAY_MS
-  const rendezvousDelayMs = rendezvousDelayInput === undefined ? 0 : Number(rendezvousDelayInput)
-  assert.ok(
-    rendezvousDelayInput === undefined
-      || (rendezvousDelayInput.trim() !== ''
-        && Number.isFinite(rendezvousDelayMs)
-        && Number.isInteger(rendezvousDelayMs)
-        && rendezvousDelayMs >= 0),
-    'CREW_LEDGER_RENDEZVOUS_DELAY_MS must be a finite nonnegative integer',
-  )
-  function waitForEmitterReady(child, tag) {
-    return new Promise((resolve, reject) => {
-      const settle = (error = null) => {
-        child.off('message', onMessage)
-        child.off('exit', onExit)
-        if (error) reject(error)
-        else resolve()
-      }
-      const onMessage = (message) => {
-        if (message?.type !== 'ready' || message?.tag !== tag) {
-          settle(new Error(`emitter ${tag} sent malformed readiness IPC`))
-          return
-        }
-        settle()
-      }
-      const onExit = (code, signal) => {
-        settle(new Error(`emitter ${tag} exited before readiness (${code ?? 'null'}, ${signal ?? 'none'})`))
-      }
-      if (child.exitCode !== null) {
-        onExit(child.exitCode, child.signalCode)
-        return
-      }
-      child.on('message', onMessage)
-      child.once('exit', onExit)
-    })
+  function childStderr(child) {
+    let text = ''
+    child.stderr.setEncoding('utf8')
+    child.stderr.on('data', (chunk) => { text += chunk })
+    return () => text
   }
-  const childA = trackChild(spawn(process.execPath, [emitter, dbPath, dir, 'A'], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'] }))
+  const childA = trackChild(spawn(process.execPath, [emitter, dbPath, 'A'], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] }))
+  const stderrA = childStderr(childA)
   await waitForEmitterReady(childA, 'A')
-  await new Promise((resolve) => setTimeout(resolve, rendezvousDelayMs))
-  const childB = trackChild(spawn(process.execPath, [emitter, dbPath, dir, 'B'], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'] }))
+  await new Promise((resolve) => setTimeout(resolve, delayMs))
+  const childB = trackChild(spawn(process.execPath, [emitter, dbPath, 'B'], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] }))
+  const stderrB = childStderr(childB)
   await waitForEmitterReady(childB, 'B')
   assert.notEqual(childA.pid, process.pid, 'the emitter must be a REAL second process')
   assert.notEqual(childB.pid, process.pid, 'the emitter must be a REAL second process')
   assert.notEqual(childA.pid, childB.pid, 'the emitters must be distinct processes')
   assert.equal(childA.exitCode, null, 'emitter A exited before release')
   assert.equal(childB.exitCode, null, 'emitter B exited before release')
-  const exitA = new Promise((resolve) => childA.on('exit', (code) => resolve(code)))
-  const exitB = new Promise((resolve) => childB.on('exit', (code) => resolve(code)))
+  const exitA = new Promise((resolve) => childA.once('exit', (code, signal) => resolve({ code, signal })))
+  const exitB = new Promise((resolve) => childB.once('exit', (code, signal) => resolve({ code, signal })))
   childA.send('release')
   childB.send('release')
-  const [exitCodeA, exitCodeB] = await Promise.all([exitA, exitB])
-  assert.equal(exitCodeA, 0, 'emitter A crashed')
-  assert.equal(exitCodeB, 0, 'emitter B crashed')
+  const [exitAInfo, exitBInfo] = await Promise.all([exitA, exitB])
   const jsonlEvents = readFileSync(jsonlPath, 'utf8').split('\n').filter(Boolean)
-    .map((line) => JSON.parse(line)).filter((line) => line.kind === 'recordEvent')
-  assert.equal(jsonlEvents.length, 50)
-  const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+    .map((line) => JSON.parse(line)).filter((line) => line.kind === 'recordEvent' && line.args.adw_id === '541-race')
+  const live = openLedger({ dbPath, stderr: { write: () => {} } })
+  let sqliteCount
   try {
-    assert.equal(ledger.dumpTable('events').filter((row) => row.adw_id === '541-race').length, 50)
+    sqliteCount = live.dumpTable('events').filter((row) => row.adw_id === '541-race').length
+  } finally { live.close() }
+  const rebuilt = openLedger({ dbPath: join(nextDir(), 'rebuilt.db'), stderr: { write: () => {} } })
+  let replayCount
+  try {
+    replayJsonl(jsonlPath, rebuilt)
+    replayCount = rebuilt.dumpTable('events').filter((row) => row.adw_id === '541-race').length
+  } finally { rebuilt.close() }
+  const perTagCounts = Object.fromEntries(['A', 'B'].map((tag) => [
+    tag, jsonlEvents.filter((line) => String(line.args.payload?.message).startsWith(`${tag}:`)).length,
+  ]))
+  let sqliteWasRead = false
+  const trial = {
+    exits: [exitAInfo, exitBInfo],
+    stderr: [stderrA(), stderrB()],
+    perTagCounts,
+    jsonlCount: jsonlEvents.length,
+    replayCount,
+    childPids: [childA.pid, childB.pid],
+    emitterPath: emitter,
+    dbPath,
+    jsonlPath,
+  }
+  Object.defineProperty(trial, 'sqliteCount', {
+    enumerable: true,
+    get() { sqliteWasRead = true; return sqliteCount },
+  })
+  Object.defineProperty(trial, 'sqliteMeasured', {
+    enumerable: false,
+    get() { return sqliteWasRead },
+  })
+  return trial
+}
+
+// #541: two live emitters on one adw_id lose no record.
+test('A1: two live emitters on one adw_id lose no record', { skip: SKIP, timeout: 30000 }, async () => {
+  const trial = await runConcurrentEmitterTrial({ delayMs: resolveRendezvousDelayMs() })
+  assert.deepEqual(trial.perTagCounts, { A: 25, B: 25 })
+  assert.equal(trial.exits[0].code, 0, 'emitter A crashed')
+  assert.equal(trial.exits[1].code, 0, 'emitter B crashed')
+  assert.equal(trial.jsonlCount, 50)
+  assert.equal(trial.sqliteCount, 50)
+  assert.equal(trial.replayCount, 50)
+})
+
+test('B1: concurrent emitter trial measures JSONL and SQLite together', { skip: SKIP, timeout: 30000 }, async () => {
+  const trial = await runConcurrentEmitterTrial({ delayMs: resolveRendezvousDelayMs() })
+  assert.deepEqual({ jsonl: trial.jsonlCount, sqlite: trial.sqliteCount }, { jsonl: 50, sqlite: 50 })
+  assert.equal(trial.sqliteMeasured, true)
+})
+
+test('C1: calibrated concurrent emitter window lands 50 of 50', { skip: SKIP, timeout: 90000 }, async () => {
+  for (const delayMs of CALIBRATED_RENDEZVOUS_DELAYS_MS) {
+    const trial = await runConcurrentEmitterTrial({ delayMs })
+    assert.deepEqual({ jsonl: trial.jsonlCount, sqlite: trial.sqliteCount, replay: trial.replayCount }, {
+      jsonl: 50, sqlite: 50, replay: 50,
+    })
+  }
+})
+
+test('D1: concurrent emitter contract remains two real processes with 25 records each', { skip: SKIP, timeout: 30000 }, async () => {
+  const trial = await runConcurrentEmitterTrial({ delayMs: resolveRendezvousDelayMs() })
+  const fixtureSource = readFileSync(trial.emitterPath, 'utf8')
+  const helperSource = runConcurrentEmitterTrial.toString()
+  assert.match(fixtureSource, /for \(let i = 0; i < 25; i \+= 1\)/)
+  assert.match(helperSource, /childA\.send\('release'\)\s*childB\.send\('release'\)/)
+  assert.doesNotMatch(helperSource, /\b(?:retry|tolerance|skip)\b/i)
+  assert.notEqual(trial.childPids[0], process.pid)
+  assert.notEqual(trial.childPids[1], process.pid)
+  assert.notEqual(trial.childPids[0], trial.childPids[1])
+  assert.deepEqual(trial.perTagCounts, { A: 25, B: 25 })
+  assert.deepEqual({ jsonl: trial.jsonlCount, sqlite: trial.sqliteCount, replay: trial.replayCount }, {
+    jsonl: 50, sqlite: 50, replay: 50,
+  })
+})
+
+test('H1: calibrated ledger checks need no rendezvous environment variable', { skip: SKIP, timeout: 30000 }, async () => {
+  const saved = process.env.CREW_LEDGER_RENDEZVOUS_DELAY_MS
+  delete process.env.CREW_LEDGER_RENDEZVOUS_DELAY_MS
+  try {
+    const rendezvousDelayMs = resolveRendezvousDelayMs()
+    assert.equal(rendezvousDelayMs, CALIBRATED_RENDEZVOUS_DELAY_MS)
+    const trial = await runConcurrentEmitterTrial({ delayMs: rendezvousDelayMs })
+    assert.deepEqual({ jsonl: trial.jsonlCount, sqlite: trial.sqliteCount, replay: trial.replayCount }, {
+      jsonl: 50, sqlite: 50, replay: 50,
+    })
+  } finally {
+    if (saved === undefined) delete process.env.CREW_LEDGER_RENDEZVOUS_DELAY_MS
+    else process.env.CREW_LEDGER_RENDEZVOUS_DELAY_MS = saved
+  }
+})
+
+
+test('E1: synchronized degraded handles expose the replay-collapse bound', { skip: SKIP, timeout: 30000 }, async () => {
+  const dir = nextDir()
+  const dbPath = join(dir, 'ledger.db')
+  const jsonlPath = join(dir, 'ledger.jsonl')
+  const emitter = join(dir, 'degraded-emitter.mjs')
+  writeFileSync(emitter, `
+    import { existsSync, writeFileSync } from 'node:fs'
+    import { openLedger } from ${JSON.stringify(new URL('../scripts/factory/ledger.mjs', import.meta.url).href)}
+    const [dbPath, jsonlPath, readyPath, releasePath, tag] = process.argv.slice(2)
+    const waitCell = new Int32Array(new SharedArrayBuffer(4))
+    const ledger = openLedger({
+      dbPath,
+      jsonlPath,
+      nodeVersion: '20.0.0',
+      _afterSequenceAllocatedForTest: ({ seq }) => {
+        writeFileSync(readyPath, JSON.stringify({ tag, seq }))
+        process.send?.({ type: 'allocated', tag, seq })
+        while (!existsSync(releasePath)) Atomics.wait(waitCell, 0, 0, 5)
+      },
+    })
+    ledger.recordEvent({ adw_id: '541-degraded-race', type: 'log', payload: { level: 'info', message: tag } })
+    ledger.close()
+    process.send?.({ type: 'done', tag })
+    process.disconnect?.()
+  `)
+  const children = ['A', 'B'].map((tag) => {
+    const readyPath = join(dir, `${tag}.ready`)
+    const releasePath = join(dir, `${tag}.release`)
+    const child = trackChild(spawn(process.execPath, [emitter, dbPath, jsonlPath, readyPath, releasePath, tag], {
+      stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+    }))
+    return { tag, child, readyPath, releasePath }
+  })
+  function waitForAllocation({ child, tag }) {
+    return new Promise((resolve, reject) => {
+      const onMessage = (message) => {
+        if (message?.type !== 'allocated' || message?.tag !== tag) {
+          cleanup()
+          reject(new Error(`degraded emitter ${tag} sent malformed allocation IPC`))
+          return
+        }
+        cleanup()
+        resolve(message)
+      }
+      const onExit = (code, signal) => {
+        cleanup()
+        reject(new Error(`degraded emitter ${tag} exited before allocation (${code ?? 'null'}, ${signal ?? 'none'})`))
+      }
+      const cleanup = () => { child.off('message', onMessage); child.off('exit', onExit) }
+      child.on('message', onMessage)
+      child.once('exit', onExit)
+    })
+  }
+  const allocations = await Promise.all(children.map(waitForAllocation))
+  assert.deepEqual(allocations.map(({ tag }) => tag).sort(), ['A', 'B'])
+  assert.ok(children.every(({ readyPath }) => existsSync(readyPath)), 'each degraded writer must leave a ready marker')
+  for (const { releasePath } of children) writeFileSync(releasePath, 'release')
+  const exits = await Promise.all(children.map(({ child }) => new Promise((resolve) => {
+    if (child.exitCode !== null) resolve({ code: child.exitCode, signal: child.signalCode })
+    else child.once('exit', (code, signal) => resolve({ code, signal }))
+  })))
+  assert.deepEqual(exits.map(({ code }) => code), [0, 0])
+  const authorityLines = readFileSync(jsonlPath, 'utf8').split('\n').filter(Boolean).map(JSON.parse)
+    .filter((line) => line.kind === 'recordEvent' && line.args.adw_id === '541-degraded-race')
+  assert.equal(authorityLines.length, 2)
+  assert.equal(new Set(authorityLines.map((line) => `${line.args.adw_id}:${line.args.seq}`)).size, 1)
+  const rebuilt = openLedger({ dbPath: join(nextDir(), 'rebuilt.db'), stderr: { write: () => {} } })
+  let replayRows
+  try {
+    replayJsonl(jsonlPath, rebuilt)
+    replayRows = rebuilt.dumpTable('events').filter((row) => row.adw_id === '541-degraded-race')
+  } finally { rebuilt.close() }
+  assert.equal(replayRows.length, 1)
+  const collapseMeasurement = authorityLines.length - replayRows.length
+  assert.equal(collapseMeasurement, 1)
+})
+
+test('G1: immediate reservation defeats a deterministic allocation competitor', { skip: SKIP, timeout: 30000 }, async () => {
+  const dir = nextDir()
+  const dbPath = join(dir, 'ledger.db')
+  const jsonlPath = join(dir, 'ledger.jsonl')
+  const resultPath = join(dir, 'competitor-results.json')
+  const competitorSource = `
+    const { DatabaseSync } = require('node:sqlite')
+    const [dbPath, adwId, rawSeq] = process.argv.slice(1)
+    let db = null
+    try {
+      db = new DatabaseSync(dbPath)
+      db.exec('PRAGMA busy_timeout = 25')
+      db.prepare('INSERT OR IGNORE INTO events (adw_id, seq, type, phase_id, parent_id, started_at, ended_at, payload_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(adwId, Number(rawSeq), 'log', null, null, null, null, JSON.stringify({ level: 'info', message: 'competitor-payload' }))
+      process.exitCode = 0
+    } catch {
+      process.exitCode = 1
+    } finally {
+      try { db?.close() } catch {}
+    }
+  `
+  const writer = join(dir, 'g1-writer.mjs')
+  writeFileSync(writer, `
+    import { writeFileSync } from 'node:fs'
+    import { spawnSync } from 'node:child_process'
+    import { openLedger } from ${JSON.stringify(new URL('../scripts/factory/ledger.mjs', import.meta.url).href)}
+    const [dbPath, resultPath] = process.argv.slice(2)
+    const competitorSource = ${JSON.stringify(competitorSource)}
+    const competitorResults = []
+    const ledger = openLedger({
+      dbPath,
+      _afterSequenceAllocatedForTest: ({ adwId, seq }) => {
+        const result = spawnSync(process.execPath, ['-e', competitorSource, dbPath, adwId, String(seq)], { encoding: 'utf8' })
+        competitorResults.push({ status: result.status, error: result.error?.code ?? null })
+      },
+    })
+    ledger.recordEvent({ adw_id: '541-g1', type: 'log', payload: { level: 'info', message: 'writer-payload' } })
+    ledger.close()
+    writeFileSync(resultPath, JSON.stringify(competitorResults))
+  `)
+  const child = trackChild(spawn(process.execPath, [writer, dbPath, resultPath], { stdio: ['ignore', 'ignore', 'pipe'] }))
+  let stderr = ''
+  child.stderr.setEncoding('utf8')
+  child.stderr.on('data', (chunk) => { stderr += chunk })
+  const exitInfo = await new Promise((resolve) => child.once('exit', (code, signal) => resolve({ code, signal })))
+  assert.equal(exitInfo.code, 0, `writer process failed: ${stderr}`)
+  assert.doesNotMatch(stderr, /COMMIT|ROLLBACK/i, 'writer must not fail in transaction bookkeeping')
+  const competitorResults = JSON.parse(readFileSync(resultPath, 'utf8'))
+  assert.ok(competitorResults.length >= 1)
+  const authorityLines = readFileSync(jsonlPath, 'utf8').split('\n').filter(Boolean).map(JSON.parse)
+    .filter((line) => line.kind === 'recordEvent' && line.args.adw_id === '541-g1')
+  assert.equal(authorityLines.filter((line) => line.args.payload?.message === 'writer-payload').length, 1)
+  const live = openLedger({ dbPath, stderr: { write: () => {} } })
+  let liveWriterRows
+  try {
+    liveWriterRows = live.dumpTable('events').filter((row) => row.adw_id === '541-g1'
+      && JSON.parse(row.payload_json).message === 'writer-payload')
+  } finally { live.close() }
+  assert.equal(liveWriterRows.length, 1)
+  const rebuilt = openLedger({ dbPath: join(nextDir(), 'rebuilt.db'), stderr: { write: () => {} } })
+  let replayWriterRows
+  try {
+    replayJsonl(jsonlPath, rebuilt)
+    replayWriterRows = rebuilt.dumpTable('events').filter((row) => row.adw_id === '541-g1'
+      && JSON.parse(row.payload_json).message === 'writer-payload')
+  } finally { rebuilt.close() }
+  assert.equal(replayWriterRows.length, 1)
+})
+
+test('RV1-1: failed live reservation re-allocates from the mirror before authority fallback', { skip: SKIP }, () => {
+  const dir = nextDir()
+  const dbPath = join(dir, 'ledger.db')
+  const jsonlPath = join(dir, 'ledger.jsonl')
+  let allocationCount = 0
+  const first = openLedger({
+    dbPath,
+    jsonlPath,
+    stderr: { write: () => {} },
+    _afterSequenceAllocatedForTest: ({ conn }) => {
+      allocationCount += 1
+      if (allocationCount !== 3) return
+      const exec = conn.exec.bind(conn)
+      conn.exec = (sql) => {
+        if (sql === 'BEGIN IMMEDIATE') {
+          throw Object.assign(new Error('forced reservation refusal'), { code: 'SQLITE_BUSY' })
+        }
+        return exec(sql)
+      }
+    },
+  })
+  try {
+    for (let i = 1; i <= 3; i += 1) {
+      first.recordEvent({ adw_id: 'rv1-1-live-fallback', type: 'log', payload: { level: 'info', message: `first-${i}` } })
+    }
+    const sibling = openLedger({ dbPath, jsonlPath, stderr: { write: () => {} } })
+    try {
+      for (let i = 4; i <= 10; i += 1) {
+        sibling.recordEvent({ adw_id: 'rv1-1-live-fallback', type: 'log', payload: { level: 'info', message: `sibling-${i}` } })
+      }
+    } finally { sibling.close() }
+    const fallback = first.recordEvent({
+      adw_id: 'rv1-1-live-fallback', type: 'log', payload: { level: 'info', message: 'fallback' },
+    })
+    assert.equal(fallback.seq, 11)
+    const authority = readFileSync(jsonlPath, 'utf8').split('\n').filter(Boolean).map(JSON.parse)
+      .filter((line) => line.kind === 'recordEvent' && line.args.adw_id === 'rv1-1-live-fallback')
+    assert.equal(authority.length, 11)
+    assert.equal(new Set(authority.map((line) => `${line.args.adw_id}:${line.args.seq}`)).size, 11)
     const rebuilt = openLedger({ dbPath: join(nextDir(), 'rebuilt.db'), stderr: { write: () => {} } })
     try {
       replayJsonl(jsonlPath, rebuilt)
-      assert.equal(rebuilt.dumpTable('events').filter((row) => row.adw_id === '541-race').length, 50)
+      assert.equal(rebuilt.dumpTable('events').filter((row) => row.adw_id === 'rv1-1-live-fallback').length, 11)
     } finally { rebuilt.close() }
-  } finally { ledger.close() }
+  } finally { first.close() }
+})
+
+test('RV2-1: refused attempt re-allocates before authority fallback', { skip: SKIP }, () => {
+  const dir = nextDir()
+  const dbPath = join(dir, 'ledger.db')
+  const jsonlPath = join(dir, 'ledger.jsonl')
+  let firstAttemptReleased = false
+  let siblingCommitted = false
+  const first = openLedger({
+    dbPath,
+    jsonlPath,
+    stderr: { write: () => {} },
+    _afterSequenceAllocatedForTest: ({ adwId, conn }) => {
+      if (firstAttemptReleased) return
+      firstAttemptReleased = true
+      const exec = conn.exec.bind(conn)
+      exec('ROLLBACK')
+      const sibling = openLedger({ dbPath, jsonlPath, stderr: { write: () => {} } })
+      try {
+        sibling.recordEvent({ adw_id: adwId, type: 'log', payload: { level: 'info', message: 'sibling' } })
+        siblingCommitted = true
+      } finally { sibling.close() }
+      conn.exec = (sql) => {
+        if (sql === 'BEGIN IMMEDIATE') {
+          throw Object.assign(new Error('forced second reservation refusal'), { code: 'SQLITE_BUSY' })
+        }
+        if (sql === 'ROLLBACK') return undefined
+        return exec(sql)
+      }
+    },
+  })
+  try {
+    const fallback = first.recordEvent({
+      adw_id: 'rv2-1-live-fallback', type: 'log', payload: { level: 'info', message: 'first' },
+    })
+    assert.equal(firstAttemptReleased, true)
+    assert.equal(siblingCommitted, true)
+    assert.equal(fallback.seq, 2)
+    const authority = readFileSync(jsonlPath, 'utf8').split('\n').filter(Boolean).map(JSON.parse)
+      .filter((line) => line.kind === 'recordEvent' && line.args.adw_id === 'rv2-1-live-fallback')
+    assert.deepEqual(authority.map((line) => line.args.seq), [1, 2])
+    assert.equal(new Set(authority.map((line) => `${line.args.adw_id}:${line.args.seq}`)).size, 2)
+    assert.equal(new Set(authority.map((line) => line.args.payload.message)).size, 2)
+    const rebuilt = openLedger({ dbPath: join(nextDir(), 'rebuilt.db'), stderr: { write: () => {} } })
+    try {
+      replayJsonl(jsonlPath, rebuilt)
+      assert.equal(rebuilt.dumpTable('events').filter((row) => row.adw_id === 'rv2-1-live-fallback').length, 2)
+    } finally { rebuilt.close() }
+  } finally { first.close() }
 })
 
 // #541: a degraded handle's spent sequence numbers are not re-issued.

@@ -155,6 +155,7 @@ const REFUSAL_READING_MAX_MS = 300_000
 
 export const REASK_MAX = 1
 export const REASK_TIMEOUT_S = 600
+export const REASK_GRACE_POLICY = 'charged-shared-slot'
 
 // The closed set of failure kinds ONE bounded re-ask can recover: a wait that
 // ran out (#838) and a worker that vanished MID-TURN leaving a corpse (the
@@ -2785,7 +2786,11 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
       if (env != null) {
         err.message = `${err.message}\n[re-ask recovered: the seat re-emitted a parseable envelope and the run continued]`
         err.reask = { attempted: true, delivered: true, recovered: true }
-        note('recovered')
+        if (reassignable) {
+          note('recovered', { unusable_return_path: returnPath, superseding_return_path: collectPath, grace_slot_policy: REASK_GRACE_POLICY })
+        } else {
+          note('recovered')
+        }
         return { envelope: env, error: err }
       }
       err.message = `${err.message}\n[re-ask attempted: one re-ask was sent to ${role} and the file's bytes never changed within ${window}s]`

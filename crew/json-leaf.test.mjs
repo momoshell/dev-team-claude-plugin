@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { scratchDir } from '../test/helpers.mjs'
 import { JSON_STATES, readJsonAt, readJsonTri } from './json-leaf.mjs'
@@ -72,4 +72,82 @@ test('literal null bytes remain a VALUE in readJsonAt', () => {
   assert.equal(result.raw, 'null')
   assert.equal(result.value, null)
   assert.equal(readJsonTri(path), null)
+})
+
+test('B1 recovered assignment lookup reads the superseding envelope', () => {
+  const dir = scratchDir('json-leaf-recovered-')
+  const canonical = join(dir, 'canonical.json')
+  const successor = join(dir, 'd1.reask.builder.json')
+  const journal = join(dir, 'journal.jsonl')
+  const canonicalRaw = '{"assignment_id":"d1","role":"builder","status":"done","summary":"bad\nline"}'
+  const successorRaw = '{"assignment_id":"d1","role":"builder","status":"done","summary":"recovered"}'
+  writeFileSync(canonical, canonicalRaw)
+  writeFileSync(successor, successorRaw)
+  writeFileSync(journal, `${JSON.stringify({
+    event: 'envelope-reask', outcome: 'recovered', unusable_return_path: canonical, superseding_return_path: successor,
+  })}\n`)
+
+  assert.deepEqual(readJsonAt(canonical), { state: JSON_STATES.UNREADABLE, raw: canonicalRaw, value: null })
+  assert.deepEqual(readJsonAt(canonical, { journalPath: journal }), {
+    state: JSON_STATES.VALUE, raw: successorRaw, value: { assignment_id: 'd1', role: 'builder', status: 'done', summary: 'recovered' },
+  })
+})
+
+test('E1 ordinary assignment lookup is unchanged', () => {
+  const dir = scratchDir('json-leaf-fallback-')
+  const canonical = join(dir, 'canonical.json')
+  const unreadable = join(dir, 'unreadable-journal')
+  const empty = join(dir, 'empty-journal.jsonl')
+  const malformed = join(dir, 'malformed-journal.jsonl')
+  const unrelated = join(dir, 'unrelated-journal.jsonl')
+  const nonRecovered = join(dir, 'non-recovered-journal.jsonl')
+  const canonicalRaw = '{"assignment_id":"d1","role":"builder","status":"done","summary":"ordinary"}'
+  const expected = { state: JSON_STATES.VALUE, raw: canonicalRaw, value: { assignment_id: 'd1', role: 'builder', status: 'done', summary: 'ordinary' } }
+  writeFileSync(canonical, canonicalRaw)
+  mkdirSync(unreadable)
+  writeFileSync(empty, '')
+  writeFileSync(malformed, '{not a journal row\n')
+  writeFileSync(unrelated, `${JSON.stringify({
+    event: 'envelope-reask', outcome: 'recovered', unusable_return_path: join(dir, 'other.json'), superseding_return_path: join(dir, 'fabricated.json'),
+  })}\n`)
+  writeFileSync(nonRecovered, `${JSON.stringify({
+    event: 'envelope-reask', outcome: 'failed', unusable_return_path: canonical, superseding_return_path: join(dir, 'fabricated.json'),
+  })}\n`)
+
+  const scenarios = [
+    {},
+    { journalPath: unreadable },
+    { journalPath: empty },
+    { journalPath: malformed },
+    { journalPath: unrelated },
+    { journalPath: nonRecovered },
+  ]
+  for (const deps of scenarios) {
+    let result
+    assert.doesNotThrow(() => { result = readJsonAt(canonical, deps) })
+    assert.deepEqual(result, expected)
+  }
+})
+
+test('F1 assignment lookup never authors either envelope', () => {
+  const dir = scratchDir('json-leaf-read-only-')
+  const canonical = join(dir, 'canonical.json')
+  const successor = join(dir, 'd1.reask.builder.json')
+  const journal = join(dir, 'journal.jsonl')
+  const canonicalRaw = '{"assignment_id":"d1","role":"builder","status":"done","summary":"bad\nline"}'
+  const successorRaw = '{"assignment_id":"d1","role":"builder","status":"done","summary":"recovered"}'
+  const journalRaw = `${JSON.stringify({
+    event: 'envelope-reask', outcome: 'recovered', unusable_return_path: canonical, superseding_return_path: successor,
+  })}\n`
+  writeFileSync(canonical, canonicalRaw)
+  writeFileSync(successor, successorRaw)
+  writeFileSync(journal, journalRaw)
+  const before = [canonical, successor, journal].map((path) => readFileSync(path))
+
+  const result = readJsonAt(canonical, { journalPath: journal })
+  const after = [canonical, successor, journal].map((path) => readFileSync(path))
+
+  assert.equal(result.state, JSON_STATES.VALUE)
+  assert.equal(result.raw, successorRaw)
+  assert.deepEqual(after, before)
 })

@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import {
   B44_LEADLESS_CTX, adversarialPlanEnv, CENSUS_ROW_ABSENT, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_RUNS, CONVERGE_CTX, CONVERGE_GATE, CRASH_WHY, CTX, CTX_DIRECTED, CTX_REPAIR, CTX_TL, DEFAULT_VARIANT, DIRECTED_BRIEF_PATH, DIRECTED_BRIEF_TEXT, DIRECTED_FILES, DRIVE_JOURNAL_EXPECTED, D_ASK, D_AUTO, D_GREEN_GATE, D_PATCH_A, D_PATCH_B, D_PATCH_EMPTY_PATH, D_PATCH_MIXED_MODE, D_PATCH_MIXED_RENAME, D_RED_GATE, ENVELOPE_DEBRIS, GATE_CUSTODIAN, GATE_SUMMARY_PREFIX, HEALTHY_RESULT, JOURNAL_CHANNELS, JOURNAL_CHANNEL_NAMES, JUDGE_TIER, MAX_QUESTIONS, MODIFIER_OUTCOMES, PHASE_SLOT_WAIT_EVENT, PROTECTED_PATHS, RED, REPO_ROOT, REVIEWED_CORE_STAGES, S843_ADDED, S843_D2, S843_RUNS, SCOPE_REFUSALS, SEAT_REFUSAL_STAGE, SENSITIVITY_FLOOR, SHAPE_SOURCES, SKILL_NAMES, SUITE_SLOT_PHASES, SUITE_SLOT_PHASE_NAMES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, TRIAGE_SOURCES, TRIAGE_STAGES, TRIAGE_STAGE_HEAD, VARIANTS, VARIANT_NAMES, WAITS_S, WAIT_FLAGS, WAIT_REFUSALS, WAIT_ROLES, WAIT_SECONDS_MAX, WAIT_SECONDS_MIN, ZERO_CAPACITY_LOGS, ZERO_CAPACITY_RESULT, answerBounceLines, assertSeats, b127GatePaths, b127InvokeGate, b318Builders, b318ReviewGrants, b318SiteA, b318SiteB, b44AssertLeadlessGate, b44GateFixIo, b44GatePlan, b44MidRunRepairIo, baselineGateDefect, bothExhaustionPointsScenario, buildEnv, carveRun, checkEnv, checkFailureLine, closeoutIo, convergeIo, convergeRun, crashIo, crashRun, dApplyCommand, dAutoRows, dBuilders, dGitApplies, dLeads, dReviewEnv, deliberateRun, directSlotRun, dispositionIo, divergentPlanScenario, driveJournalSites, driveTask, enforcementPreamble, envelopeDefect, envelopeFieldsPresent, escalationStageRows, exhaustionAcceptIo, existsSync, fakeIo, fenceBase, fenceDiff, fenceSpan, gateReapCommand, guardedWrite, join, laneFence, laneFenceHits, laneProbeCommand, laneProbeKinds, leadEnv, matchAnswers, mkdirSync, normaliseJournalTimes, operationalRow, osCpus, parseDirectedBrief, parseGateSummary, parseQuestions, parseSuiteCounts, patchTargets, phaseTrace, planEnv, postCommitCrashRun, protectedPlanEnv, protectedReseatRefusal, questionConsultLines, readFileSync, reconEnv, recordRow, refuseWait, replayResumeStages, resolveProtectedPaths, resolveWaits, resumeDoneRows, resumeKeys, resumeStageRows, reviewEnv, rmSync, runChild, runCmd, runCmdFixture, s843Ctx, s843Io, s843PathsIn, s843PlanEnv, scopeBounceBrief, scopeMatcher, scopeRefusal, scratchDir, shapeDefect, shellArg, shellWords, slotCtx, slotFactory, sourcesDefect, spawnSync, stageEnabled, suiteRefusalEnv, throwAutoFixWrites, throwingWaitRun, tmpdir, traceLabels, triageEnv, undeclaredStage, validateScopeEntries, waitsCtx, waitsRecord, writeFileSync,
 } from './drive-fixtures.mjs'
-import { ADVERSARY_REFUSAL, ADVERSARY_REFUSALS, ADVERSARY_TRIGGERS, fenceScopeOf, fenceScopesIntersect, parseUnifiedZeroHunks, resolveAdversaryTrigger, siblingSpanIntersects } from './drive.mjs'
+import { ADVERSARY_REFUSAL, ADVERSARY_REFUSALS, ADVERSARY_TRIGGERS, SCOPE_ADMISSION_SOURCES, SCOPE_REQUEST_KINDS, SUITE_ADMISSION_MAX, fenceScopeOf, fenceScopesIntersect, parseUnifiedZeroHunks, resolveAdversaryTrigger, scopeAdmissionDecision, scopeRequestOf, siblingSpanIntersects, suiteRedTestFiles } from './drive.mjs'
 
 test('a supplied wait budget reaches io.wait and names the seat overdue at that budget', () => {
   const io = fakeIo({ envelopes: { 'planner:1': null } })
@@ -827,6 +827,309 @@ test('red full suite after review pass escalates and preserves its commit', () =
   assert.equal(io.calls.commits.length, 1)
   assert.equal(res.details.commit, 'abc1234')
   assert.match(res.details.escalation.why, /suite red/i)
+})
+
+test('A1 suite red in unheld files admits scope and bounces once', () => {
+  const red = `FAIL file://${CTX.checkout}/new.test.mjs:3:1\n${GATE_SUMMARY_PREFIX} {"total":1,"failed":1,"errored":0}`
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(), 'builder:1': buildEnv(),
+      'builder:2': buildEnv({ details: { files_changed: ['new.test.mjs'], commit_message: 'repair' } }),
+      'reviewer:1': reviewEnv('pass'), 'reviewer:2': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd:1': { ok: false, output: red }, 'suite-cmd:2': { ok: true, output: 'PASS new.test.mjs' } },
+    changed: [['a.mjs', 'a.test.mjs'], ['new.test.mjs']],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 2)
+  assert.equal(io.calls.logs.filter((row) => row.scope_admission?.source === 'suite-red').length, 1)
+  const row = io.calls.logs.find((entry) => entry.scope_admission?.source === 'suite-red').scope_admission
+  assert.deepEqual(row.files, ['new.test.mjs'])
+  assert.deepEqual(row.evidence, { output: red, commit: 'abc1234', test_files: ['new.test.mjs'] })
+  assert.ok(io.calls.assign.find(({ role, n, policy }) => role === 'builder' && n === 2 && policy.fence.includes('new.test.mjs')))
+  assert.ok(io.calls.writes[`${TD}/suite-red-bounce-r1.md`].includes(red))
+  assert.deepEqual(suiteRedTestFiles(red, CTX.checkout), ['new.test.mjs'])
+})
+
+test('B1 suite red in a held file escalates naming its holder', () => {
+  const red = `FAIL ${CTX.checkout}/held.test.mjs:1:1\nboom`
+  const io = fakeIo({
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: false, output: red } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask({ ...CTX, laneFence: [{ lane: 'sibling', files: ['held.test.mjs'] }] }, io)
+  assert.equal(res.status, 'escalation')
+  assert.equal(res.details.escalation.where, 'suite')
+  assert.match(res.details.escalation.why, /crosses a held scope/)
+  assert.match(res.details.escalation.why, /held\.test\.mjs is owned by lane sibling/)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 1)
+  assert.equal(io.calls.logs.filter((entry) => entry.scope_admission).length, 0)
+})
+
+test('C1 second suite red after widening escalates', () => {
+  const first = `FAIL ${CTX.checkout}/new.test.mjs:1\nfirst`
+  const second = `FAIL ${CTX.checkout}/other.test.mjs:2\nsecond`
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(), 'builder:1': buildEnv(),
+      'builder:2': buildEnv({ details: { files_changed: ['new.test.mjs'], commit_message: 'repair' } }),
+      'reviewer:1': reviewEnv('pass'), 'reviewer:2': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd:1': { ok: false, output: first }, 'suite-cmd:2': { ok: false, output: second } },
+    changed: [['a.mjs', 'a.test.mjs'], ['new.test.mjs']],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'escalation')
+  assert.equal(res.details.escalation.where, 'suite')
+  assert.match(res.details.escalation.why, /widening limit of 1 has been spent/)
+  assert.equal(io.calls.logs.filter((entry) => entry.scope_admission?.source === 'suite-red').length, 1)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 2)
+})
+
+test('D1 builder scope request is admitted and journalled with role and stage', () => {
+  const evidence = { kind: 'builder-request', output: 'generated.mjs is required' }
+  const request = { scope_request: { kind: 'admit-files', files: ['generated.mjs'] }, evidence }
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(),
+      'builder:1': buildEnv({ details: { ...request, files_changed: [] } }),
+      'builder:2': buildEnv({ details: { files_changed: ['generated.mjs'], commit_message: 'repair' } }),
+      'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } }, changed: [],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  const row = io.calls.logs.filter((entry) => entry.scope_admission).map((entry) => entry.scope_admission)
+  assert.equal(row.length, 1)
+  assert.deepEqual(row[0], { source: 'seat-request', files: ['generated.mjs'], evidence, role: 'builder', stage: 'build:r1' })
+  assert.ok(io.calls.assign.find(({ role, n, policy }) => role === 'builder' && n === 2 && policy.fence.includes('generated.mjs')))
+  assert.match(io.calls.writes[`${TD}/build-bounce-r1.md`], /generated\.mjs/)
+})
+
+test('E1 seat scope request for a held file is refused naming its holder', () => {
+  const request = { scope_request: { kind: 'admit-files', files: ['held.mjs'] }, evidence: { kind: 'need', output: 'held.mjs' } }
+  const io = fakeIo({
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv({ details: { ...request, files_changed: [] } }) },
+    runs: { 'lane-cmd': { ok: true, output: '' } }, changed: [],
+  })
+  const res = driveTask({ ...CTX, laneFence: [{ lane: 'sibling', files: ['held.mjs'] }] }, io)
+  assert.equal(res.status, 'escalation')
+  assert.equal(res.details.escalation.where, 'scope')
+  assert.match(res.details.escalation.why, /held\.mjs is owned by lane sibling/)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 1)
+  assert.equal(io.calls.logs.filter((entry) => entry.scope_admission).length, 0)
+})
+
+test('F1 scope request kind is a closed enum', () => {
+  assert.deepEqual(SCOPE_REQUEST_KINDS, ['admit-files'])
+  assert.ok(Object.isFrozen(SCOPE_REQUEST_KINDS))
+  assert.deepEqual(SCOPE_ADMISSION_SOURCES, ['suite-red', 'seat-request'])
+  assert.ok(Object.isFrozen(SCOPE_ADMISSION_SOURCES))
+  assert.equal(SUITE_ADMISSION_MAX, 1)
+  for (const kind of SCOPE_REQUEST_KINDS) {
+    assert.deepEqual(scopeRequestOf({ scope_request: { kind, files: ['requested.mjs'] } }), { kind, files: ['requested.mjs'] })
+  }
+  const unknown = scopeRequestOf({ scope_request: { kind: 'free-text', files: ['requested.mjs'] } })
+  assert.equal(unknown.refusal, 'scope-request')
+  for (const file of ['src/lib/', '*.mjs', '/tmp/requested.mjs', '../requested.mjs', 'requested.mjs:1-2', 42]) {
+    assert.equal(scopeRequestOf({ scope_request: { kind: 'admit-files', files: [file] } }).refusal, 'scope-request')
+  }
+  assert.equal(scopeAdmissionDecision({ source: 'free-text', files: ['requested.mjs'], evidence: {} }).action, 'escalate')
+  assert.equal(scopeRequestOf({ summary: 'scope_request { kind: admit-files, files: [requested.mjs] }', guidance: 'admit requested.mjs' }), null)
+})
+
+test('G1 scope admission requires and journals evidence', () => {
+  assert.equal(scopeAdmissionDecision({ source: 'seat-request', files: ['requested.mjs'], evidence: null, laneFence: [] }).reason, 'evidence')
+  assert.equal(scopeAdmissionDecision({ source: 'seat-request', files: ['requested.mjs'], evidence: [], laneFence: [] }).reason, 'evidence')
+  const evidence = { kind: 'builder-request', output: 'requested.mjs' }
+  const request = { scope_request: { kind: 'admit-files', files: ['requested.mjs'] }, evidence }
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(),
+      'builder:1': buildEnv({ details: { ...request, files_changed: [] } }),
+      'builder:2': buildEnv({ details: { files_changed: ['requested.mjs'], commit_message: 'repair' } }),
+      'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } }, changed: [],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  const row = io.calls.logs.find((entry) => entry.scope_admission)?.scope_admission
+  assert.deepEqual(row.evidence, evidence)
+  assert.equal(row.source, 'seat-request')
+})
+
+test('H1 scope gate rejects writes outside declared plus admitted scope', () => {
+  const request = { scope_request: { kind: 'admit-files', files: ['admitted.mjs'] }, evidence: { kind: 'builder-request', output: 'admitted.mjs' } }
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(),
+      'builder:1': buildEnv({ details: { ...request, files_changed: [] } }),
+      'builder:2': buildEnv({ details: { files_changed: ['admitted.mjs', 'rogue.mjs'], commit_message: 'repair' } }),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' } }, changed: [['admitted.mjs', 'rogue.mjs']],
+  })
+  const res = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  assert.equal(res.status, 'escalation')
+  assert.equal(res.details.escalation.where, 'scope')
+  assert.match(res.details.escalation.why, /rogue\.mjs/)
+  assert.equal(io.calls.logs.filter((entry) => entry.scope_admission).length, 1)
+})
+
+test('I1 lead two-file widening replay admits both unheld files', () => {
+  const request = { scope_request: { kind: 'admit-files', files: ['one.mjs', 'two.mjs'] }, evidence: { kind: 'lead-request', output: 'both files are needed' } }
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(),
+      'builder:1': buildEnv({ status: 'insufficient', summary: 'the build needs a wider test surface', details: {} }),
+      'lead:1': { status: 'done', role: 'lead', summary: 'bounce builder', details: { decision: 'bounce', guidance: 'repair both files', ...request } },
+      'builder:2': buildEnv({ details: { files_changed: ['one.mjs', 'two.mjs'], commit_message: 'repair' } }),
+      'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } }, changed: [],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'lead').length, 1)
+  const next = io.calls.assign.find(({ role, n }) => role === 'builder' && n === 2)
+  assert.ok(next)
+  assert.ok(next.policy.fence.includes('one.mjs'))
+  assert.ok(next.policy.fence.includes('two.mjs'))
+  const row = io.calls.logs.find((entry) => entry.scope_admission)?.scope_admission
+  assert.equal(row.role, 'lead')
+  assert.deepEqual(row.files, ['one.mjs', 'two.mjs'])
+})
+
+test('RV1-1 stack-frame suite paths stay checkout-contained and fenced', () => {
+  const heldFrame = `  at x (${CTX.checkout}/crew/headless.test.mjs:88:5)`
+  const heldFiles = suiteRedTestFiles(heldFrame, CTX.checkout)
+  assert.deepEqual(heldFiles, ['crew/headless.test.mjs'])
+  const held = scopeAdmissionDecision({
+    source: 'suite-red', files: heldFiles, evidence: { output: heldFrame },
+    laneFence: [{ lane: 'sibling', files: ['crew/headless.test.mjs'] }],
+  })
+  assert.equal(held.action, 'escalate')
+  assert.equal(held.reason, 'held')
+  assert.match(held.why, /crew\/headless\.test\.mjs is owned by lane sibling/)
+  const outsideFrame = '  at x (/somewhere/else/crew/headless.test.mjs:1:1)'
+  assert.deepEqual(suiteRedTestFiles(outsideFrame, CTX.checkout), [])
+})
+
+test('RV1-2 final scope admission funds a builder replay', () => {
+  const request = {
+    scope_request: { kind: 'admit-files', files: ['admitted.mjs'] },
+    evidence: { kind: 'builder-request', output: 'admitted.mjs is needed' },
+  }
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(),
+      'builder:1': buildEnv({ status: 'insufficient', summary: 'need guidance', details: {} }),
+      'lead:1': leadEnv('bounce'),
+      'builder:2': buildEnv({ details: { files_changed: ['rogue.mjs'], commit_message: 'rogue edit' } }),
+      'builder:3': buildEnv({ details: { ...request, files_changed: [] } }),
+      'builder:4': buildEnv({ details: { files_changed: ['admitted.mjs'], commit_message: 'repair admitted file' } }),
+      'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: [['a.mjs', 'a.test.mjs'], ['rogue.mjs'], ['admitted.mjs']],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 4)
+  assert.ok(io.calls.assign.find(({ role, n, policy }) => role === 'builder' && n === 4 && policy.fence.includes('admitted.mjs')))
+  assert.equal(io.calls.logs.filter((entry) => entry.scope_admission?.source === 'seat-request').length, 1)
+})
+
+test('RV2-1 seat scope admissions are capped after a final-round replay', () => {
+  const requestFor = (file) => ({
+    scope_request: { kind: 'admit-files', files: [file] },
+    evidence: { kind: 'builder-request', output: `${file} is needed` },
+  })
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(),
+      'builder:1': buildEnv({ status: 'insufficient', summary: 'need guidance', details: {} }),
+      'lead:1': leadEnv('bounce'),
+      'builder:2': buildEnv({ details: { files_changed: ['rogue.mjs'], commit_message: 'rogue edit' } }),
+      'builder:3': buildEnv({ details: { ...requestFor('ask-one.mjs'), files_changed: [] } }),
+      'builder:4': buildEnv({ details: { ...requestFor('ask-two.mjs'), files_changed: [] } }),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' } },
+    changed: [['a.mjs', 'a.test.mjs'], ['rogue.mjs']],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'escalation')
+  assert.equal(res.details.escalation.where, 'scope-request')
+  assert.match(res.details.escalation.why, /seat-request widening limit of 1 has been spent/)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 4)
+  assert.ok(io.calls.assign.find(({ role, n, policy }) => role === 'builder' && n === 4 && policy.fence.includes('ask-one.mjs')))
+  assert.equal(io.calls.logs.filter((entry) => entry.scope_admission?.source === 'seat-request').length, 1)
+})
+
+test('RV2-2 protected paths cannot enter an admitted builder fence', () => {
+  const protectedFile = 'crew/roster.json'
+  assert.ok(PROTECTED_PATHS.includes(protectedFile))
+  const request = {
+    scope_request: { kind: 'admit-files', files: [protectedFile] },
+    evidence: { kind: 'builder-request', output: `${protectedFile} is needed` },
+  }
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(),
+      'builder:1': buildEnv({ details: { ...request, files_changed: [] } }),
+      'builder:2': buildEnv({ details: { files_changed: [protectedFile], commit_message: 'repair protected file' } }),
+      'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: [[protectedFile]],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'escalation')
+  assert.equal(res.details.escalation.where, 'scope-request')
+  assert.match(res.details.escalation.why, /protected paths cannot be admitted: crew\/roster\.json/)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 1)
+  assert.equal(io.calls.logs.filter((entry) => entry.scope_admission).length, 0)
+  assert.equal(io.calls.assign.some(({ role, n, policy }) => role === 'builder' && n === 2 && policy.fence.includes(protectedFile)), false)
+})
+
+test('a seat request already in scope is refused without a no-op admission', () => {
+  const request = {
+    scope_request: { kind: 'admit-files', files: ['a.mjs'] },
+    evidence: { kind: 'builder-request', output: 'a.mjs is needed' },
+  }
+  const io = fakeIo({
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv({ details: { ...request, files_changed: [] } }) },
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'escalation')
+  assert.equal(res.details.escalation.where, 'scope-request')
+  assert.match(res.details.escalation.why, /already in the effective scope: a\.mjs/)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 1)
+  assert.equal(io.calls.logs.filter((entry) => entry.scope_admission).length, 0)
+})
+
+test('a non-done lead scope request cannot mutate effective scope', () => {
+  const request = {
+    scope_request: { kind: 'admit-files', files: ['lead-requested.mjs'] },
+    evidence: { kind: 'lead-request', output: 'lead-requested.mjs is needed' },
+  }
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(),
+      'builder:1': buildEnv({ status: 'insufficient', summary: 'need lead help', details: {} }),
+      'lead:1': { status: 'insufficient', role: 'lead', summary: 'cannot decide', details: { decision: 'bounce', ...request } },
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' } }, changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'escalation')
+  assert.equal(res.details.escalation.where, 'build')
+  assert.match(res.details.escalation.why, /lead returned insufficient\/bounce/)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 1)
+  assert.equal(io.calls.logs.filter((entry) => entry.scope_admission).length, 0)
 })
 
 test('a composed gate wrapper installs no signal trap', () => {
@@ -2048,8 +2351,11 @@ test('the journal channel vocabulary is closed, exported and additive', () => {
 test('every journal emit site in the driver is inventoried, wrapped and on the right channel', () => {
   const text = readFileSync(new URL('./drive.mjs', import.meta.url), 'utf8')
   const sites = driveJournalSites(text)
-  assert.equal(sites.length, 65)
-  assert.deepEqual(sites.map(({ wrapper, events, keys }) => [wrapper, events, keys]), DRIVE_JOURNAL_EXPECTED)
+  const admissionSites = sites.filter(({ keys }) => keys.split(' ').includes('scope_admission'))
+  assert.equal(admissionSites.length, 1)
+  const legacySites = sites.filter(({ keys }) => !keys.split(' ').includes('scope_admission'))
+  assert.equal(legacySites.length, 65)
+  assert.deepEqual(legacySites.map(({ wrapper, events, keys }) => [wrapper, events, keys]), DRIVE_JOURNAL_EXPECTED)
   assert.ok(sites.every(({ wrapper }) => wrapper === 'recordRow' || wrapper === 'operationalRow'))
   assert.equal(sites.filter(({ wrapper }) => wrapper === 'operationalRow').length, 2)
   assert.deepEqual(sites.filter(({ wrapper }) => wrapper === 'operationalRow').map(({ events, keys }) => [events, keys]), [

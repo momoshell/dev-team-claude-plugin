@@ -6,8 +6,16 @@ import assert from 'node:assert/strict'
 import {
   ADOPTED_PLAN_HEADING, ADOPT_BLOCK, adversarialPlanEnv, CENSUS_ROW_ABSENT, CENSUS_TURNS_ABSENT, CENSUS_UNREADABLE, CTX, CTX_DIRECTED, CTX_TL, DIRECTED_FILES, ENVELOPE_REFUSAL_REASONS, FAILURE_UPGRADE, GATE_SUMMARY_PREFIX, GROWTH_DIVERGENCE_FACTOR, LANE_COMMAND_SHAPES, LANE_INPUT_VERDICTS, LANE_PATH_OPTIONS, LANE_VALUE_OPTIONS, LIMITS, NO_TURN_CEILING, PLAN_CHECK_ABSENT, PLAN_CHECK_INVALID, PLAN_CHECK_SEVERITIES, PLAN_CONVERGENCE_REASONS, RED, RUN_START_EVENT, S843_ADDED, S843_D2, S843_DISPATCHED, S843_NARROWED, SUITE_REASK_MAX, TD, THREW, TURN_CEILING_DEFAULTS, TURN_CEILING_REFUSALS, TURN_CEILING_ROLES, VALIDATION_LANE_UNLOADABLE, adoptionSignal, bothExhaustionPointsScenario, buildEnv, carriedPrLines, carriedPreambleLines, carriedResolution, carriedSilenceDefect, checkEnv, composeCommitMessage, divergeThenExhaustPlanScenario, divergenceConsultLines, divergentPlanScenario, driveTask, enforcementPreamble, fakeIo, growthLines, growthRecord, join, laneCommandInputs, laneCommandShape, laneFence, leadEnv, lineageFromJournal, persistentDivergenceScenario, planCheckAcceptIo, planCheckFindings, planCheckFindingsFromText, planConvergence, planEnv, planRevisionRun, planRoundCap, planThenReviewIo, protectedPlanEnv, resolveTurnCeilings, resolveValidationLane, resumeGreen, resumeKeys, resumeRed, reviewConvergeRun, reviewEnv, s843Bullets, s843Ctx, s843Io, s843PlanEnv, suiteRefusalEnv, turnCeilingsRecord, validationPlan, validationProbeOutput, validationProbeRun, validationRows, laneProbeCommand,
 } from './drive-fixtures.mjs'
-import { CENSUS_ABSENT_REASONS, CENSUS_ELIGIBLE_OUTCOMES, CREATES_ABSENT, PLAN_BOUNCE_UNFUNDED_HEADING, PLAN_SEAT_REFUSED, observeTurnCensus, planBounceUnfundedLines, planCapNote, planExhaustedWhy, planRefusedWhy, turnCeilingOf } from './drive.mjs'
+import { CENSUS_ABSENT_REASONS, CENSUS_ELIGIBLE_OUTCOMES, CREATES_ABSENT, PLAN_BOUNCE_UNFUNDED_HEADING, PLAN_SEAT_REFUSED, ZERO_TURN_NON_START, ZERO_TURN_REASK_MAX, observeTurnCensus, planBounceUnfundedLines, planCapNote, planExhaustedWhy, planRefusedWhy, turnCeilingOf, zeroTurnNonStartOf } from './drive.mjs'
 import { suiteRunPolicy } from './headless.mjs'
+
+const zeroTurnEnvelope = (id = 'planner1', role = 'planner', detail = {}) => ({
+  assignment_id: id, role, status: 'insufficient', summary: 'the RPC seat produced no envelope', artifacts: [],
+  details: {
+    degraded: 'rpc-no-envelope', reason: ZERO_TURN_NON_START, turns: 0, tool_calls: 0, absent_reason: null,
+    ...detail,
+  },
+})
 
 test('F1 protected fixture callers choose proof or typed refusal', () => {
   assert.throws(() => protectedPlanEnv(), /explicit proved or typed-refusal outcome/)
@@ -2677,4 +2685,184 @@ test('b485 a lead-granted plan round is named in the cap note, not folded into a
   assert.match(why, /not the 3 requested/)
   assert.match(why, /1 lead-granted round/)
   assert.doesNotMatch(why, /caps the lane at one/)
+})
+
+// MUTATION A1 loosens the exact reason guard; the shape table and stale dispatch
+// prove that producer vocabulary and current-dispatch freshness are separate.
+test('A1 zero-turn non-start predicate validates the complete measured envelope', () => {
+  const valid = zeroTurnEnvelope()
+  assert.deepEqual(zeroTurnNonStartOf(valid), valid.details)
+  assert.deepEqual(enforcementPreamble(valid).recovery, {
+    reason: ZERO_TURN_NON_START, turns: 0, tool_calls: 0, seats: 1, rounds: 0,
+  })
+  const invalid = [
+    ['null outer', () => null], ['array outer', () => []], ['status', (env) => { env.status = 'done' }],
+    ['missing assignment_id', (env) => { delete env.assignment_id }], ['empty assignment_id', (env) => { env.assignment_id = '' }],
+    ['assignment_id kind', (env) => { env.assignment_id = 1 }], ['missing role', (env) => { delete env.role }],
+    ['empty role', (env) => { env.role = '' }], ['role kind', (env) => { env.role = 1 }],
+    ['missing details', (env) => { delete env.details }], ['null details', (env) => { env.details = null }],
+    ['array details', (env) => { env.details = [] }], ['details kind', (env) => { env.details = 'details' }],
+    ['degraded', (env) => { env.details.degraded = 'other' }], ['reason', (env) => { env.details.reason = 'no-envelope' }],
+    ['turns', (env) => { env.details.turns = 1 }], ['tool_calls', (env) => { env.details.tool_calls = 1 }],
+    ['absent_reason', (env) => { env.details.absent_reason = 'census-unavailable' }],
+  ]
+  for (const [label, mutate] of invalid) {
+    const candidate = JSON.parse(JSON.stringify(valid))
+    const shaped = mutate(candidate)
+    assert.equal(zeroTurnNonStartOf(shaped === undefined ? candidate : shaped), null, label)
+  }
+  for (const [label, field, value] of [
+    ['null turns', 'turns', null], ['string turns', 'turns', '0'], ['null tool_calls', 'tool_calls', null],
+    ['string tool_calls', 'tool_calls', '0'], ['missing absent_reason', 'absent_reason', undefined],
+  ]) {
+    const candidate = JSON.parse(JSON.stringify(valid))
+    if (value === undefined) delete candidate.details[field]; else candidate.details[field] = value
+    assert.equal(zeroTurnNonStartOf(candidate), null, label)
+  }
+
+  const stale = zeroTurnEnvelope('stale-planner')
+  const io = fakeIo({ envelopes: { 'planner:1': stale } })
+  const result = driveTask({ ...CTX, turnCeilings: { planner: 40 } }, io)
+  assert.equal(result.status, 'escalation')
+  assert.match(result.details.escalation.why, /planner: no valid envelope/)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'planner').length, 1)
+  assert.equal(io.calls.logs.some((row) => row.seat_enforcement?.kind === ZERO_TURN_NON_START), false)
+})
+
+// MUTATION B1 restores the old shared attempt budget; both mixed orders then lose
+// one of their independent allowances and fail their three-dispatch assertions.
+test('B1 zero-turn non-start re-asks the same seat directly', () => {
+  const run = (envelopes) => {
+    const io = fakeIo({
+      envelopes: { ...envelopes, 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+      runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+      changed: ['a.mjs', 'a.test.mjs'],
+    })
+    return { io, result: driveTask(CTX, io) }
+  }
+  const cases = [
+    ['zero-turn then success', {
+      'planner:1': zeroTurnEnvelope('planner1'), 'planner:2': planEnv(),
+    }, 2],
+    ['suite refusal then zero-turn then success', {
+      'planner:1': suiteRefusalEnv('planner1'), 'planner:2': zeroTurnEnvelope('planner2'), 'planner:3': planEnv(),
+    }, 3],
+    ['zero-turn then suite refusal then success', {
+      'planner:1': zeroTurnEnvelope('planner1'), 'planner:2': suiteRefusalEnv('planner2'), 'planner:3': planEnv(),
+    }, 3],
+  ]
+  for (const [label, envelopes, plannerCount] of cases) {
+    const { io, result } = run(envelopes)
+    assert.equal(result.status, 'done', label)
+    assert.equal(io.calls.assign.filter(({ role }) => role === 'planner').length, plannerCount, label)
+    assert.equal(io.calls.assign.filter(({ role }) => role === 'lead').length, 0, label)
+    assert.equal(result.details.stages.filter((stage) => stage === 'plan:r1').length, 1, label)
+  }
+})
+
+// MUTATION C1 broadens non-start recognition to every insufficient envelope; the
+// judged planner result must still route through lead and back to a new round.
+test('C1 genuine insufficient still consults the lead', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': {
+        assignment_id: 'planner1', role: 'planner', status: 'insufficient', summary: 'turns-positive work needs judgment', artifacts: [],
+        details: { turns: 3, tool_calls: 2 },
+      },
+      'lead:1': leadEnv('bounce', 'retry the plan with the missing judgment'),
+      'planner:2': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'done')
+  assert.deepEqual(io.calls.assign.slice(0, 3).map(({ role }) => role), ['planner', 'lead', 'planner'])
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'lead').length, 1)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'planner').length, 2)
+})
+
+// MUTATION D1 coerces unavailable counters and drops absence validation; this
+// producer envelope must remain judged insufficiency, not a funded direct retry.
+test('D1 unavailable census is not a zero-turn non-start', () => {
+  const unavailable = zeroTurnEnvelope('planner1', 'planner', { turns: null, tool_calls: null, absent_reason: 'census-unavailable' })
+  assert.equal(zeroTurnNonStartOf(unavailable), null)
+  assert.deepEqual(enforcementPreamble(unavailable), { kind: null, lines: [] })
+  const io = fakeIo({ envelopes: { 'planner:1': unavailable } })
+  const result = driveTask({ ...CTX, roles: ['planner', 'builder', 'reviewer'] }, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'planner').length, 1)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'lead').length, 0)
+  assert.equal(io.calls.logs.some((row) => row.seat_enforcement?.kind === ZERO_TURN_NON_START), false)
+})
+
+// MUTATION E1 drops recovery from the applied row; only an issued second seat may
+// carry the measured cost, while the pending row remains a no-cost observation.
+test('E1 zero-turn recovery journals its measured cost', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': zeroTurnEnvelope('planner1'), 'planner:2': planEnv(),
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'done')
+  const planners = io.calls.assign.filter(({ role }) => role === 'planner')
+  const rows = io.calls.logs.filter((row) => row.seat_enforcement)
+  assert.equal(rows.length, 2)
+  const applied = rows.find((row) => row.seat_enforcement.applied)
+  assert.deepEqual(applied.seat_enforcement, {
+    role: 'planner', kind: ZERO_TURN_NON_START, brief: planners[1].briefFile, dispatch: 'planner2', applied: true,
+    recovery: { reason: ZERO_TURN_NON_START, turns: 0, tool_calls: 0, seats: 1, rounds: 0 },
+  })
+  const pending = rows.find((row) => !row.seat_enforcement.applied)
+  assert.equal(Object.hasOwn(pending.seat_enforcement, 'recovery'), false)
+})
+
+// MUTATION F1 disables the zero-turn bound; the second non-start would then buy a
+// third direct planner dispatch instead of falling back to the lead.
+test('F1 zero-turn direct re-ask is bounded at one', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': zeroTurnEnvelope('planner1'), 'planner:2': zeroTurnEnvelope('planner2'),
+      'lead:1': leadEnv('bounce', 'retry the planner from lead guidance'),
+      'planner:3': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'done')
+  const planners = io.calls.assign.filter(({ role }) => role === 'planner')
+  const leadIndex = io.calls.assign.findIndex(({ role }) => role === 'lead')
+  assert.equal(planners.filter((entry) => io.calls.assign.indexOf(entry) < leadIndex).length, 2)
+  assert.equal(planners.length, 3)
+  assert.equal(ZERO_TURN_REASK_MAX, 1)
+  const recoveryRows = io.calls.logs.filter((row) => row.seat_enforcement?.recovery)
+  assert.equal(recoveryRows.length, 1)
+  assert.equal(recoveryRows[0].seat_enforcement.dispatch, 'planner2')
+  assert.equal(io.calls.logs.filter((row) => row.seat_enforcement?.applied).filter((row) => row.seat_enforcement.kind === ZERO_TURN_NON_START).length, 1)
+  assert.equal(planners[2].briefFile, `${TD}/planner-assignment-r2.md`)
+  assert.equal(io.calls.logs.some((row) => row.seat_enforcement?.applied && row.seat_enforcement.dispatch === 'planner3'), false)
+})
+
+// MUTATION G1 removes the named preamble; the generated direct-reask brief must
+// retain both the exact non-start sentence and the direct assignment wording.
+test('G1 zero-turn re-ask brief names the non-start', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': zeroTurnEnvelope('planner1'), 'planner:2': planEnv(),
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'done')
+  const second = io.calls.assign.filter(({ role }) => role === 'planner')[1]
+  const brief = io.calls.writes[second.briefFile]
+  assert.match(brief, /^Your previous dispatch produced no envelope and took no turns \(zero-turn-non-start\)\.$/m)
+  assert.match(brief, /The same assignment is asked directly again/)
 })

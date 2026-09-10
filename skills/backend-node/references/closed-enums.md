@@ -10,20 +10,20 @@ Production code reads `CI_DECISIONS` when it validates a decision.
 Exhibit: `scripts/factory/ledger.mjs:3568`.
 
 `DECISIONS` is exported and frozen but read by no production code; only
-`crew/drive-review.test.mjs:1460-1462` reads it, so it is not the exhibit for "callers
+`crew/drive-review.test.mjs:1463-1465` reads it, so it is not the exhibit for "callers
 actually consult".
 
 Keep the refusal message derived from the same set.
 Exhibit: `crew/drive.mjs:621`.
 
 Pin the expected members independently in the test.
-Exhibit: `crew/drive-review.test.mjs:1462`.
+Exhibit: `crew/drive-review.test.mjs:1465`.
 
 Pin immutability independently with `Object.isFrozen`.
-Exhibit: `crew/drive-review.test.mjs:1461`.
+Exhibit: `crew/drive-review.test.mjs:1464`.
 
 The paired assertions catch value drift and freeze drift.
-Exhibit: `crew/drive-review.test.mjs:1462`.
+Exhibit: `crew/drive-review.test.mjs:1465`.
 
 `PARK_STATES` supplies the same frozen-data pattern elsewhere.
 Exhibit: `crew/reclaim.mjs:12`.
@@ -32,14 +32,14 @@ Exhibit: `crew/reclaim.mjs:12`.
 Exhibit: `scripts/factory/reap-stale.mjs:81`.
 
 Do not infer closure from an uppercase name or an exported array alone.
-Exhibit: `crew/drive-review.test.mjs:1462`.
+Exhibit: `crew/drive-review.test.mjs:1465`.
 
 A mutation that removes the freeze must make the test fail even when members
 are unchanged.
-Exhibit: `crew/drive-review.test.mjs:1461`.
+Exhibit: `crew/drive-review.test.mjs:1464`.
 
 A mutation that adds a member must also make the literal expectation fail.
-Exhibit: `crew/drive-review.test.mjs:1462`.
+Exhibit: `crew/drive-review.test.mjs:1465`.
 
 Read `docs/conventions.md:124` for the repo decision; this file owns the test
 shape that keeps the decision observable.
@@ -52,8 +52,8 @@ Empty and null declarations are invalid data, not empty closed enums.
 Exhibit: `crew/drive.mjs:615`.
 
 Keep a rule's exhibit beside the declaration and beside its drift guard.
-Exhibit: `crew/drive-review.test.mjs:1461` and `:4161`.
+Exhibit: `crew/drive-review.test.mjs:1464` and `:4161`.
 
 The cost of one missing half is a contract that appears closed while remaining
 mutable.
-Exhibit: `crew/drive-review.test.mjs:1462`.
+Exhibit: `crew/drive-review.test.mjs:1465`.

@@ -3335,20 +3335,48 @@ function runPanelReview({ round, panel, io, dissents, setAcceptFindings, setLast
     ['reviewer', acceptedRawById(aEnv.details)],
     [panel.partner, acceptedRawById(bEnv?.details)],
   ])
+  const normalizedByOrigin = new Map([
+    ['reviewer', new Map(findingsOf(aEnv).map((finding) => [finding.id, finding]))],
+    [panel.partner, new Map(findingsOf(bEnv).map((finding) => [finding.id, finding]))],
+  ])
   const claimFor = (origin, id) => acceptedByOrigin.get(origin)?.get(id)?.vacuity_claim
   const attachVacuityClaim = (finding, claim) => {
     if (claim === undefined) return finding
     return { ...finding, vacuity_claim: claim }
   }
-  const attachedConsensus = fused.consensus.map((finding) => {
-    const left = claimFor('reviewer', finding.matched?.reviewer)
-    const right = claimFor(panel.partner, finding.matched?.[panel.partner])
+  const attachedConsensus = []
+  const splitDivergent = []
+  for (const finding of fused.consensus) {
+    const leftId = finding.matched?.reviewer
+    const rightId = finding.matched?.[panel.partner]
+    const left = claimFor('reviewer', leftId)
+    const right = claimFor(panel.partner, rightId)
+    if ((left === undefined) !== (right === undefined)) {
+      for (const [origin, originId, claim] of [
+        ['reviewer', leftId, left],
+        [panel.partner, rightId, right],
+      ]) {
+        const normalized = normalizedByOrigin.get(origin)?.get(originId) || finding
+        splitDivergent.push(attachVacuityClaim({
+          id: originId,
+          originId,
+          source: origin,
+          severity: normalized.severity,
+          location: normalized.location,
+          summary: normalized.summary,
+        }, claim))
+      }
+      continue
+    }
     const claim = left === undefined ? right : right === undefined ? left : left === right ? left : 'conflicting-vacuity-claims'
-    return attachVacuityClaim(finding, claim)
-  })
-  const attachedDivergent = fused.divergent.map((finding) => (
-    attachVacuityClaim(finding, claimFor(finding.source, finding.id))
-  ))
+    attachedConsensus.push(attachVacuityClaim({ ...finding, originId: leftId }, claim))
+  }
+  const attachedDivergent = [
+    ...splitDivergent,
+    ...fused.divergent.map((finding) => (
+      attachVacuityClaim({ ...finding, originId: finding.id }, claimFor(finding.source, finding.id))
+    )),
+  ]
   // #800 revision 2 — PANEL-LOCAL ID ALLOCATION. reviewFindings keeps the FIRST valid
   // entry for an id and drops every later duplicate (crew/drive.mjs:834-838), and the
   // panel's own array is fed straight back through it by dispositionPlan. The panel
@@ -3360,14 +3388,11 @@ function runPanelReview({ round, panel, io, dissents, setAcceptFindings, setLast
   // divergent findings; adjudicatePanel keys its decisions on id alone
   // (crew/escalation-policy.mjs:141).
   // Allocate in ONE pass, in this order — consensus, divergent, then the synthetic class
-  // finding — keeping the first occurrence UNCHANGED. THE ORDER IS WHAT MAKES REVIEWER A'S
-  // ROUTING SAFE, and it is the whole reason no private id-shadow key is needed: A's
-  // normalized ids are already unique (crew/drive.mjs:834-838); consensus carries A's id
-  // (crew/escalation-policy.mjs:107-114); and `fuseFindings` orders divergences as ALL
-  // unmatched A entries BEFORE all unmatched partner entries (:117-124). So every
-  // reviewer-A id is allocated before any id that could collide with it and is never
-  // reminted. Only a partner id or the synthetic class id can be reminted, and neither
-  // authorizes A's patch. `accepted.get(finding.id)` below is therefore exact.
+  // finding — keeping the first occurrence UNCHANGED. The original origin/id pair stays
+  // in `originId` until routing is attached: a partner id may be reminted here, but its
+  // disposition and claim still resolve against the accepted raw entry it came from.
+  // The split prefix means any id, reviewer-A's included, may be reminted. That is safe
+  // because every origin-sensitive lookup in this function keys on originId.
   const panelIds = new Set()
   let panelIdSeq = 0
   const allocId = (id, source) => {
@@ -3378,8 +3403,16 @@ function runPanelReview({ round, panel, io, dissents, setAcceptFindings, setLast
     panelLog({ panel_id_reminted: { source, from: id, to: minted } })
     return minted
   }
-  const allocatedConsensus = attachedConsensus.map((finding) => ({ ...finding, id: allocId(finding.id, 'reviewer') }))
-  const allocatedDivergent = attachedDivergent.map((finding) => ({ ...finding, id: allocId(finding.id, finding.source) }))
+  const allocatedConsensus = attachedConsensus.map((finding) => ({
+    ...finding,
+    originId: finding.originId ?? finding.id,
+    id: allocId(finding.id, 'reviewer'),
+  }))
+  const allocatedDivergent = attachedDivergent.map((finding) => ({
+    ...finding,
+    originId: finding.originId ?? finding.id,
+    id: allocId(finding.id, finding.source),
+  }))
   const structuredDivergences = allocatedDivergent.map(({ id, source, severity, location, summary, vacuity_claim }) => ({
     id, source, severity, location, summary,
     ...(vacuity_claim !== undefined ? { vacuity_claim } : {}),
@@ -3424,40 +3457,40 @@ function runPanelReview({ round, panel, io, dissents, setAcceptFindings, setLast
   // needs them. DISMISSED findings are never re-attached: a dismissed finding must
   // not execute. The map is acceptedRawById, so a rejected entry can no more
   // authorize a patch here than it can on the ordinary path.
-  const accepted = acceptedByOrigin.get('reviewer')
   // #839 — the panel must be able to REFUSE a partner's or an adjudicator's mark,
   // which means it must first be able to SEE one: a rule that cannot see the thing it
   // forbids cannot be proven to forbid it. Both sides' raw entries are indexed WITH
-  // their origin; only a reviewer-origin mark is ever reattached. Reviewer A's ids are
-  // never reminted (crew/drive.mjs:3711-3718), so the consensus lookup is exact.
+  // their origin; only a reviewer-origin mark is ever reattached.
   const markById = new Map()
   for (const [origin, rawById] of acceptedByOrigin) {
+    const marks = new Map()
     for (const [id, raw] of rawById) {
       const mark = hardeningOf(raw)
-      if (mark && !markById.has(id)) markById.set(id, { origin, fields: { hardening: mark, hardening_why: raw.hardening_why.trim() } })
+      if (mark) marks.set(id, { hardening: mark, hardening_why: raw.hardening_why.trim() })
     }
+    markById.set(origin, marks)
   }
   // MUTATION B7c: stop checking the mark's ORIGIN and a partner's or an adjudicator's
   // ungateable exempts a finding the reviewer never excused.
-  const markOf = (id, origin) => { const m = markById.get(id); return m && m.origin === 'reviewer' && origin === 'reviewer' ? m.fields : {} }   // ANCHOR B7c
-  const withRouting = (finding, origin) => {
-    const raw = origin === 'reviewer' ? accepted.get(finding.id) : null
+  const markOf = (id, origin, originId) => origin === 'reviewer' ? markById.get(origin)?.get(originId) ?? {} : {}   // ANCHOR B7c
+  const withRouting = (finding, origin, originId = finding.id) => {
+    const raw = acceptedByOrigin.get(origin)?.get(originId)
     if (!raw) return finding
     const disposition = dispositionOf(raw)
     return {
       ...finding,
       ...(disposition ? { disposition } : {}),
-      ...(typeof raw.patch === 'string' && raw.patch.trim() !== '' ? { patch: raw.patch } : {}),
+      ...(origin === 'reviewer' && typeof raw.patch === 'string' && raw.patch.trim() !== '' ? { patch: raw.patch } : {}),
     }
   }
   const findings = [
-    ...allocatedConsensus.map(({ id, severity, location, summary, vacuity_claim }) => ({
-      ...withRouting({ id, severity, location, summary, reviewer: 'both', ...(vacuity_claim !== undefined ? { vacuity_claim } : {}) }, 'reviewer'),
-      ...markOf(id, 'reviewer'),
+    ...allocatedConsensus.map(({ id, originId, severity, location, summary, vacuity_claim }) => ({
+      ...withRouting({ id, severity, location, summary, reviewer: 'both', ...(vacuity_claim !== undefined ? { vacuity_claim } : {}) }, 'reviewer', originId),
+      ...markOf(id, 'reviewer', originId),
     })),
-    ...adjudicated.upheld.map(({ id, severity, location, summary, source, vacuity_claim }) => ({
-      ...withRouting({ id, severity, location, summary, reviewer: source, ...(vacuity_claim !== undefined ? { vacuity_claim } : {}) }, source),
-      ...markOf(id, source),
+    ...adjudicated.upheld.map(({ id, originId, severity, location, summary, source, vacuity_claim }) => ({
+      ...withRouting({ id, severity, location, summary, reviewer: source, ...(vacuity_claim !== undefined ? { vacuity_claim } : {}) }, source, originId),
+      ...markOf(id, source, originId),
     })),
   ]
   if (adjudicated.closesClass !== true && !findings.some((finding) => finding.severity === 'must-fix')) {
@@ -3506,6 +3539,7 @@ function runPanelReview({ round, panel, io, dissents, setAcceptFindings, setLast
   const reviewPath = typeof aEnv.details?.review_path === 'string'
     ? aEnv.details.review_path : art('review.md')
   const carriedCleared = carriedResolution(aEnv.details, carriedOpen()).cleared
+  const withoutOriginId = ({ originId, ...finding }) => finding
   const review = {
     status: 'done',
     role: 'reviewer',
@@ -3525,10 +3559,10 @@ function runPanelReview({ round, panel, io, dissents, setAcceptFindings, setLast
       panel: {
         partner: panel.partner,
         adjudicator: panel.adjudicator,
-        consensus: allocatedConsensus,
-        divergent: allocatedDivergent,
-        upheld: adjudicated.upheld,
-        dismissed: adjudicated.dismissed,
+        consensus: allocatedConsensus.map(withoutOriginId),
+        divergent: allocatedDivergent.map(withoutOriginId),
+        upheld: adjudicated.upheld.map(withoutOriginId),
+        dismissed: adjudicated.dismissed.map(withoutOriginId),
         class_invariant: adjudicated.classInvariant,
         closes_class: adjudicated.closesClass,
       },

@@ -2538,6 +2538,36 @@ test('#800 §7b 44 — divergent collisions preserve reviewer A ids and route it
   assert.equal(patch.includes('a/a.mjs'), true)
 })
 
+test('RV1-1 reviewer hardening survives a reminted one-sided split', () => {
+  const reviewer = [
+    { id: 'F1', severity: 'must-fix', location: 'a.mjs:1', summary: 'S1', disposition: 'no-op' },
+    {
+      id: 'F2', severity: 'must-fix', location: 'a.mjs:2', summary: 'S2', disposition: 'no-op',
+      hardening: 'ungateable', hardening_why: 'the reviewer exempted this finding before panel reminting',
+    },
+  ]
+  const partner = {
+    id: 'F2', severity: 'must-fix', location: 'a.mjs:1', summary: 'S1',
+    disposition: 'ask-user', vacuity_claim: 'mutation-survived',
+  }
+  const io = dispositionPanelIo({
+    reviewer1: dReviewEnv('changes-needed', reviewer),
+    partner1: dPartnerEnv('changes-needed', [partner]),
+    adjudication2: leadEnv('escalate'),
+  })
+  driveTask(D_PANEL_CTX, io)
+  const outcome = dPanelOutcomes(io)[0]
+  const reminted = outcome.findings.find(({ id, reviewer: origin }) => id === 'panel-remint-1' && origin === 'reviewer')
+  assert.deepEqual(dRemintRows(io), [{ source: 'reviewer', from: 'F2', to: 'panel-remint-1' }])
+  assert.deepEqual(
+    { id: reminted?.id, reviewer: reminted?.reviewer, hardening: reminted?.hardening, hardening_why: reminted?.hardening_why },
+    {
+      id: 'panel-remint-1', reviewer: 'reviewer', hardening: 'ungateable',
+      hardening_why: 'the reviewer exempted this finding before panel reminting',
+    },
+  )
+})
+
 test('#800 §7b 45 — each reminted final id has one auditable remint join', () => {
   const cases = [
     [classCollisionIo(), 'panel-class-1'],
@@ -3250,6 +3280,136 @@ test('b595 C1', () => {
   assert.notEqual(combinedRefusal?.reason, 'vacuity-classification')
 })
 
+test('A1 seat refuses incompatible vacuity routing', () => {
+  const finding = {
+    id: 'B605-A1-no-op-claim', severity: 'must-fix', location: 'a.mjs:1',
+    summary: 'a no-op cannot carry vacuity evidence', disposition: 'no-op', vacuity_claim: 'mutation-survived',
+  }
+  const io = dispositionPanelIo({
+    reviewer1: dReviewEnv('changes-needed', [finding]),
+    partner1: dPartnerEnv('pass', []),
+    adjudication1: leadEnv('bounce'),
+  })
+  const result = driveTask(D_PANEL_CTX, io)
+  const firstLead = io.calls.assign.findIndex(({ role }) => role === 'lead')
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.logs.some((row) => row.review_round?.refused === 'vacuity-classification'), true)
+  assert.equal(io.calls.logs.some((row) => row.panel_skipped === 'vacuity-classification'), true)
+  assert.equal(io.calls.assign.slice(0, firstLead).some(({ note }) => note === 'panel-b' || note === 'panel-adjudication'), false)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'reviewer').length, 2)
+})
+
+test('B1 legal one-sided vacuity panel completes', () => {
+  const reviewer = {
+    id: 'B605-B1-reviewer', severity: 'must-fix', location: 'a.mjs:1',
+    summary: 'reviewer records no actionable vacuity', disposition: 'no-op',
+  }
+  const partner = {
+    id: 'B605-B1-partner', severity: 'must-fix', location: 'a.mjs:1',
+    summary: 'partner records survived behavior', disposition: 'ask-user', vacuity_claim: 'mutation-survived',
+  }
+  const io = dispositionPanelIo({
+    reviewer1: dReviewEnv('changes-needed', [reviewer]),
+    partner1: dPartnerEnv('changes-needed', [partner]),
+    adjudication1: dAdjEnv({ adjudications: [
+      { id: reviewer.id, disposition: 'uphold', reason: 'retain reviewer evidence' },
+      { id: partner.id, disposition: 'uphold', reason: 'retain partner evidence' },
+    ] }),
+  })
+  driveTask(D_PANEL_CTX, io)
+  const outcome = dPanelOutcomes(io)[0]
+  assert.ok(outcome)
+  assert.equal(outcome.panel, true)
+  assert.equal(io.calls.logs.some((row) => row.panel_refused), false)
+  assert.equal(outcome.findings.length, 2)
+})
+
+test('C1 illegal single envelope remains refused', () => {
+  const finding = {
+    id: 'B605-C1-unknown', severity: 'must-fix', location: 'a.mjs:1',
+    summary: 'an unknown vacuity class is not admissible', disposition: 'ask-user', vacuity_claim: 'invented-claim',
+  }
+  const io = dispositionPanelIo({
+    reviewer1: dReviewEnv('changes-needed', [finding]),
+    partner1: dPartnerEnv('pass', []),
+    adjudication1: leadEnv('bounce'),
+  })
+  const result = driveTask(D_PANEL_CTX, io)
+  const firstLead = io.calls.assign.findIndex(({ role }) => role === 'lead')
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.logs.some((row) => row.review_round?.refused === 'vacuity-classification'), true)
+  assert.equal(io.calls.logs.some((row) => row.panel_skipped === 'vacuity-classification'), true)
+  assert.equal(io.calls.assign.slice(0, firstLead).some(({ note }) => note === 'panel-b' || note === 'panel-adjudication'), false)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'reviewer').length, 2)
+})
+
+test('D1 vacuity cannot reach pass as nonblocking', () => {
+  const finding = {
+    id: 'B605-D1-consider-claim', severity: 'consider', location: 'a.mjs:1',
+    summary: 'a nonblocking claim must not pass', disposition: 'ask-user', vacuity_claim: 'source-text-only',
+  }
+  const io = dispositionIo(finding, { verdict: 'pass' })
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(io.calls.logs.some((row) => row.review_round?.refused === 'vacuity-classification'), true)
+  assert.equal(result.details.accepted_via ?? null, null)
+  assert.equal(io.calls.commits.length, 0)
+})
+
+test('E1 conflicting vacuity arm remains discriminating', () => {
+  const reviewer = {
+    id: 'B605-E1-conflict', severity: 'must-fix', location: 'a.mjs:1',
+    summary: 'the vacuity claim needs agreement', disposition: 'auto-fix', patch: D_PATCH_A, vacuity_claim: 'mutation-survived',
+  }
+  const partner = { ...reviewer, vacuity_claim: 'source-text-only' }
+  const io = dispositionPanelIo({
+    reviewer1: dReviewEnv('changes-needed', [reviewer]),
+    partner1: dPartnerEnv('changes-needed', [partner]),
+  })
+  const result = driveTask(D_PANEL_CTX, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(io.calls.assign.some(({ note }) => note === 'panel-adjudication'), true)
+  assert.equal(io.calls.logs.some((row) => row.panel_refused === 'vacuity-classification'), true)
+  assert.equal(io.calls.logs.some((row) => row.review_outcome?.panel), false)
+})
+
+test('F1 finding-id refusal retains precedence', () => {
+  const refusal = reviewShapeDefect({
+    verdict: 'changes-needed',
+    findings: [{
+      id: '../../escape', severity: 'consider', disposition: 'no-op', vacuity_claim: 'source-text-only',
+    }],
+  })
+  assert.equal(refusal?.reason, 'finding-id')
+})
+
+test('G1 fusion preserves each origin disposition', () => {
+  const reviewer = {
+    id: 'B605-G1-reviewer', severity: 'must-fix', location: 'a.mjs:1',
+    summary: 'reviewer records no actionable vacuity', disposition: 'no-op',
+  }
+  const partner = {
+    id: 'B605-G1-partner', severity: 'must-fix', location: 'a.mjs:1',
+    summary: 'partner records survived behavior', disposition: 'ask-user', vacuity_claim: 'mutation-survived',
+  }
+  const io = dispositionPanelIo({
+    reviewer1: dReviewEnv('changes-needed', [reviewer]),
+    partner1: dPartnerEnv('changes-needed', [partner]),
+    adjudication1: dAdjEnv({ adjudications: [
+      { id: reviewer.id, disposition: 'uphold', reason: 'retain reviewer evidence' },
+      { id: partner.id, disposition: 'uphold', reason: 'retain partner evidence' },
+    ] }),
+  })
+  driveTask(D_PANEL_CTX, io)
+  const outcome = dPanelOutcomes(io)[0]
+  assert.ok(outcome)
+  const byOrigin = new Map(outcome.findings.map((finding) => [finding.reviewer, finding]))
+  assert.equal(byOrigin.get('reviewer')?.disposition, 'no-op')
+  assert.equal(byOrigin.get('tech-lead')?.disposition, 'ask-user')
+  assert.equal(byOrigin.get('tech-lead')?.vacuity_claim, 'mutation-survived')
+  assert.equal(outcome.findings.some((finding) => Object.hasOwn(finding, 'originId')), false)
+})
+
 test('b595 D1', () => {
   const finding = { id: 'B595-D1-observation', severity: 'consider', location: 'a.mjs:1', summary: 'harmless observation', disposition: 'no-op' }
   assert.deepEqual(dispositionPlan({ findings: [finding] }), { autoFix: [], askUser: [], needsSeat: [] })
@@ -3279,31 +3439,31 @@ test('b595 E1', () => {
 test('b595 F1', () => {
   const findings = Array.from({ length: 7 }, (_, index) => ({
     id: `B590-${index + 1}`,
-    severity: 'consider',
+    severity: index === 0 ? 'must-fix' : 'consider',
     location: `a.mjs:${index + 1}`,
     summary: `b590 observation ${index + 1}`,
     disposition: 'no-op',
   }))
   const partnerFindings = findings.map((finding, index) => index === 0
-    ? { ...finding, vacuity_claim: 'source-text-only' }
+    ? { ...finding, disposition: 'ask-user', vacuity_claim: 'source-text-only' }
     : { ...finding })
   const io = fakeIo({
     envelopes: {
       'planner:1': adversarialPlanEnv(), 'tech-lead:1': checkEnv('approve'), 'builder:1': buildEnv(),
-      'reviewer:1': dReviewEnv('pass', findings), 'tech-lead:2': dPartnerEnv('pass', partnerFindings),
-      'lead:1': leadEnv('bounce'), 'lead:2': leadEnv('bounce'), 'reviewer:2': reviewEnv('pass'),
+      'reviewer:1': dReviewEnv('changes-needed', findings), 'tech-lead:2': dPartnerEnv('changes-needed', partnerFindings),
+      'lead:1': dAdjEnv(), 'lead:2': leadEnv('escalate'), 'reviewer:2': reviewEnv('pass'),
     },
     runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
     changed: ['a.mjs', 'a.test.mjs'],
   })
   const result = driveTask(D_PANEL_CTX, io)
-  assert.equal(result.status, 'done')
-  assert.equal(io.calls.assign.filter(({ role }) => role === 'reviewer').length, 2)
-  assert.equal(result.details.accept_findings ?? null, null)
-  assert.equal(io.calls.logs.some((row) => row.review_round?.refused === 'vacuity-classification'), true)
-  assert.equal(io.calls.logs.some((row) => row.review_outcome?.panel), false)
-  assert.equal(io.calls.logs.some((row) => row.panel_refused === 'vacuity-classification'), true)
-  assert.equal(io.calls.logs.some((row) => row.panel_degraded === 'tech-lead'), true)
+  assert.equal(result.status, 'escalation')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'reviewer').length, 1)
+  assert.notEqual(result.details.accept_findings ?? null, null)
+  assert.equal(io.calls.logs.some((row) => row.review_round?.refused === 'vacuity-classification'), false)
+  assert.equal(io.calls.logs.some((row) => row.review_outcome?.panel), true)
+  assert.equal(io.calls.logs.some((row) => row.panel_refused), false)
+  assert.equal(io.calls.logs.some((row) => row.panel_degraded === 'tech-lead'), false)
 
   const conflictReviewer = {
     id: 'B595-H1-conflict', severity: 'must-fix', location: 'a.mjs:1',

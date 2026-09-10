@@ -118,6 +118,8 @@ import {
   readRegister,
   resolveRequestedExecution,
   resolveRequestedTier,
+  readDispatchOperatorSpelling,
+  aliasUsageFromDispatchRecords,
 } from '../scripts/factory/dispatch-batch.mjs'
 import { parseDirectedBrief, WAITS_S } from '../crew/drive.mjs'
 import { laneFenceFor, renderBrief, resolveWriteSurface } from '../scripts/factory/make-brief.mjs'
@@ -137,6 +139,10 @@ import {
   adoptionArchive,
   adoptionDispatchFixture,
 } from './factory-dispatch-batch-fences.test.mjs'
+
+function persistedDispatchRecord(result, lane = 'lane-a') {
+  return JSON.parse(readFileSync(join(result.out, `${lane}${DISPATCH_RECORD_SUFFIX}`), 'utf8'))
+}
 
 test('readBatch reads request JSON, normalises where paths, and sorts lanes', () => {
   const batch = makeBatch()
@@ -214,6 +220,93 @@ test('AK1', () => {
   assert.equal(lane.tier, null)
   assert.equal(Object.hasOwn(lane.request, 'assurance'), false)
   assert.equal(Object.hasOwn(lane.request, 'tier'), false)
+})
+
+test('A1', async () => {
+  const result = await dispatchFixture({
+    label: 'operator-spelling-alias',
+    names: ['lane-a'],
+    requests: { 'lane-a': requestFor('lane-a', { variant: 'scout', tier: 'build' }) },
+  })
+  const record = persistedDispatchRecord(result)
+  assert.deepEqual(record.operator_spelling, {
+    execution: { spelling: '--variant', unmeasured_reason: null },
+    assurance: { spelling: '--tier', unmeasured_reason: null },
+  })
+  assert.deepEqual(readDispatchOperatorSpelling(record), record.operator_spelling)
+})
+
+test('B1', async () => {
+  const result = await dispatchFixture({
+    label: 'operator-spelling-canonical',
+    names: ['lane-a'],
+    requests: { 'lane-a': requestFor('lane-a', { execution: 'scout', assurance: 'standard' }) },
+  })
+  const record = persistedDispatchRecord(result)
+  assert.deepEqual(record.operator_spelling, {
+    execution: { spelling: '--execution', unmeasured_reason: null },
+    assurance: { spelling: '--assurance', unmeasured_reason: null },
+  })
+  assert.notDeepEqual(record.operator_spelling, {
+    execution: { spelling: '--variant', unmeasured_reason: null },
+    assurance: { spelling: '--tier', unmeasured_reason: null },
+  })
+})
+
+test('C1', async () => {
+  const result = await dispatchFixture({ label: 'operator-spelling-default', names: ['lane-a'] })
+  const record = persistedDispatchRecord(result)
+  assert.deepEqual(record.operator_spelling, {
+    execution: { spelling: 'dispatcher_default', unmeasured_reason: null },
+    assurance: { spelling: 'dispatcher_default', unmeasured_reason: null },
+  })
+  assert.notDeepEqual(record.operator_spelling, {
+    execution: { spelling: '--variant', unmeasured_reason: null },
+    assurance: { spelling: '--tier', unmeasured_reason: null },
+  })
+  assert.notDeepEqual(record.operator_spelling, {
+    execution: { spelling: '--execution', unmeasured_reason: null },
+    assurance: { spelling: '--assurance', unmeasured_reason: null },
+  })
+})
+
+test('D1', () => {
+  const spelling = readDispatchOperatorSpelling({})
+  for (const axis of ['execution', 'assurance']) {
+    assert.deepEqual(spelling[axis], {
+      spelling: null,
+      unmeasured_reason: 'dispatch_record_predates_operator_spelling',
+    })
+    assert.deepEqual(Object.keys(spelling[axis]), ['spelling', 'unmeasured_reason'])
+  }
+})
+
+test('F1', async () => {
+  const result = await dispatchFixture({
+    label: 'operator-spelling-usage',
+    names: ['lane-a', 'lane-b', 'lane-c'],
+    requests: {
+      'lane-a': requestFor('lane-a', { variant: 'scout', tier: 'build' }),
+      'lane-b': requestFor('lane-b', { execution: 'full', assurance: 'standard' }),
+      'lane-c': requestFor('lane-c'),
+    },
+  })
+  const records = ['lane-a', 'lane-b', 'lane-c'].map((lane) => persistedDispatchRecord(result, lane))
+  assert.deepEqual(aliasUsageFromDispatchRecords(records), {
+    execution: { alias_spelled: 1, total_dispatches: 3, unmeasured_dispatches: 0 },
+    assurance: { alias_spelled: 1, total_dispatches: 3, unmeasured_dispatches: 0 },
+  })
+  for (const axis of ['execution', 'assurance']) {
+    assert.deepEqual(Object.keys(aliasUsageFromDispatchRecords(records)[axis]), [
+      'alias_spelled', 'total_dispatches', 'unmeasured_dispatches',
+    ])
+    assert.equal(Object.hasOwn(aliasUsageFromDispatchRecords(records)[axis], 'rate'), false)
+  }
+
+  assert.deepEqual(aliasUsageFromDispatchRecords([...records, {}]), {
+    execution: { alias_spelled: null, total_dispatches: 4, unmeasured_dispatches: 1 },
+    assurance: { alias_spelled: null, total_dispatches: 4, unmeasured_dispatches: 1 },
+  })
 })
 
 test('parseCliArgs accepts baseline and memory values while preserving refusals', () => {

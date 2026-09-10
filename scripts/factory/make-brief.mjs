@@ -3137,6 +3137,7 @@ export function writePack({ packDir, taskName, checkout, request, discovery, wri
     conventions: join(directory, `${name}.conventions.md`),
     fixture: null,
     symbols: join(directory, `${name}.symbols.md`),
+    coupled: join(directory, `${name}.coupled.md`),
   }
   const issue = issueFor(request, issueBodyPath)
   const journal = journalFor(request, directory, name)
@@ -3160,6 +3161,11 @@ export function writePack({ packDir, taskName, checkout, request, discovery, wri
     writeFileSync(paths.symbols, `${renderSymbolSidecar(symbolIndex)}\n`)
   } else {
     paths.symbols = null
+  }
+  if (packOmission !== 'symbols' && coupling?.coupled?.length > 0) {
+    writeFileSync(paths.coupled, `${renderCoupled(coupling).split('\n').slice(1).join('\n')}\n`)
+  } else {
+    paths.coupled = null
   }
   if (paths.fixture) {
     const rows = journal.rows || []
@@ -3195,6 +3201,17 @@ function renderTripwirePointer(discovery, pack) {
 
 function renderTripwireSlot(discovery, pack) {
   return renderTripwirePointer(discovery, pack)
+}
+
+function renderCoupledPointer(coupling, pack) {
+  if (pack == null || pack.coupled == null) return renderCoupled(coupling)
+  const rule = renderCoupled(coupling).split('\n')[0]
+  const count = Array.isArray(coupling?.coupled) ? coupling.coupled.length : 0
+  return [
+    rule,
+    `coupled sources: ${count} file(s)`,
+    `enumeration: ${pack.coupled} — every coupled file listed in full; read it once with: cat ${pack.coupled}`,
+  ].join('\n')
 }
 
 function renderConventionsPointer(writeSurface, pack) {
@@ -3338,7 +3355,7 @@ function renderBriefSections(gathered) {
     ...(pack == null ? [] : [briefSection('context pack', renderContextPack(pack))]),
     briefSection('done means', ['## Done means', request.done_means]),
     briefSection('tripwires', ['## Tripwires', renderTripwireSlot(discovery, pack)]),
-    briefSection('coupled sources', ['## Coupled sources', renderCoupled(coupling)]),
+    briefSection('coupled sources', ['## Coupled sources', renderCoupledPointer(coupling, pack)]),
     briefSection('baseline', ['## Baseline', formatBaseline(baseline, profile, supplied)]),
     briefSection('out of scope', ['## Out of scope', request.out_of_scope]),
     briefSection('fences', ['## Fences', renderFences(fences)]),

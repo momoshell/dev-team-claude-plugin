@@ -2481,6 +2481,7 @@ test('b433 suite refusal reaches the next brief and survives a configured ceilin
   assert.match(io.calls.writes[second.briefFile], /suite-run-not-owned/)
   assert.equal(io.calls.writes[second.briefFile].includes(`${TD}/gate.mjs`), true)
   assert.equal(result.details.enforcements[0].kind, 'suite-run-not-owned')
+  assert.equal(io.calls.logs.find((row) => row.seat_enforcement?.applied)?.seat_enforcement.dispatch, 'planner2')
   assert.equal(enforcementPreamble({ details: { turn_ceiling: { turns: 7, budget: 5 } } }).kind, 'turn-ceiling')
   assert.equal(enforcementPreamble({ details: { turn_ceiling: { turns: null, budget: 5, absent_reason: CENSUS_ROW_ABSENT } } }).kind, 'turn-ceiling-unmeasured')
 

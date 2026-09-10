@@ -248,6 +248,12 @@ export const SUITE_RUN_NOT_OWNED = 'suite-run-not-owned'
 // tell a seat what it may not run, not to fund a seat that keeps running it.
 export const SUITE_REASK_MAX = 1
 
+// A measured RPC non-start is a driver-owned recovery, distinct from a generic
+// no-envelope settlement. It receives one direct re-ask without importing the
+// transport vocabulary or widening transport retry policy.
+export const ZERO_TURN_NON_START = 'zero-turn-non-start'
+export const ZERO_TURN_REASK_MAX = 1
+
 // CORRELATION, not merely shape. An envelope is this dispatch's refusal only when
 // it is ADDRESSED to this dispatch: a non-empty outer assignment_id and role, an
 // inner role that EQUALS the outer one, and the producer's marker as a
@@ -272,6 +278,23 @@ export function suiteRefusalOf(env) {
   if (typeof refusal.reason !== 'string' || typeof refusal.role !== 'string') return null
   if (!correlatedRefusal(env, refusal)) return null
   return refusal
+}
+
+// Producer shape only: freshness belongs to validEnvelope(), at each dispatch
+// boundary below. Returning the details object mirrors suiteRefusalOf() and lets
+// the preamble carry the measured recovery cost without reading another source.
+export function zeroTurnNonStartOf(env) {
+  if (!env || typeof env !== 'object' || Array.isArray(env) || env.status !== 'insufficient') return null
+  if (typeof env.assignment_id !== 'string' || env.assignment_id === '') return null
+  if (typeof env.role !== 'string' || env.role === '') return null
+  const detail = env.details
+  if (!detail || typeof detail !== 'object' || Array.isArray(detail)) return null
+  if (detail.degraded !== 'rpc-no-envelope') return null
+  if (detail.reason !== ZERO_TURN_NON_START) return null
+  if (detail.turns !== 0) return null
+  if (detail.tool_calls !== 0) return null
+  if (detail.absent_reason !== null) return null
+  return detail
 }
 
 export function turnCeilingOf(env, budget) {
@@ -301,6 +324,17 @@ function suiteRefusalPreamble(env) {
 }
 
 export function enforcementPreamble(env) {
+  const zeroTurn = zeroTurnNonStartOf(env)
+  if (zeroTurn) {
+    return {
+      kind: ZERO_TURN_NON_START,
+      lines: [
+        'Your previous dispatch produced no envelope and took no turns (zero-turn-non-start).',
+        'The same assignment is asked directly again — this recovery does not consume a lead round.',
+      ],
+      recovery: { reason: zeroTurn.reason, turns: zeroTurn.turns, tool_calls: zeroTurn.tool_calls, seats: 1, rounds: 0 },
+    }
+  }
   const ceiling = env?.details?.turn_ceiling
   if (!ceiling || !Number.isFinite(ceiling.budget)) return suiteRefusalPreamble(env)
   // MEASURED and over: the count leads the brief, because #870 asks for the
@@ -3900,6 +3934,7 @@ function runTask(ctx, io, crash) {
     // details no longer carry suite_refusal, and the next brief names the
     // measurement failure instead of the forbidden command.
     if (suiteRefusalOf(env)) return env
+    if (zeroTurnNonStartOf(env)) return env
     if (turnCeilingOf(env, budget)) return env
     const observed = observeTurnCensus(censusWindow(), id, role)
     // An explicit RPC no-envelope settlement is not a returned envelope at all:
@@ -3932,9 +3967,9 @@ function runTask(ctx, io, crash) {
         ...pending.lines, '',
         `Original brief: ${briefFile}`, '',
       ].join('\n'))
-      io.log(recordRow({ at: io.now(), seat_enforcement: { role, kind: pending.kind, brief, applied: true } }))
     }
     const { id, returnPath } = io.assign({ role, briefFile: brief, note, policy: seatPolicy(role) })
+    if (pending) io.log(recordRow({ at: io.now(), seat_enforcement: { role, kind: pending.kind, brief, dispatch: id, applied: true, ...(pending.recovery ? { recovery: pending.recovery } : {}) } }))
     const seq = /^d(\d+)$/.exec(id)?.[1]
     if (seq) S.seqHighWater = Math.max(S.seqHighWater, Number(seq))
     io.log(recordRow({ at: io.now(), assign: id, role, brief }))
@@ -3984,11 +4019,23 @@ function runTask(ctx, io, crash) {
   }
 
   function assignAndWait(role, briefFile, note, opts = {}) {
-    for (let attempt = 0; ; attempt += 1) {
+    let suiteReasks = 0
+    let nonStartReasks = 0
+    for (;;) {
       const env = dispatchOnce(role, briefFile, note, opts)
       const refusal = suiteRefusalOf(env)
-      if (!refusal) return env
-      if (attempt >= SUITE_REASK_MAX) return env
+      const nonStart = zeroTurnNonStartOf(env)
+      if (!refusal && !nonStart) return env
+      if (refusal) {
+        if (suiteReasks >= SUITE_REASK_MAX) return env
+        suiteReasks += 1
+        continue
+      }
+      if (nonStartReasks >= ZERO_TURN_REASK_MAX) {
+        if (pendingEnforcement.get(role)?.kind === ZERO_TURN_NON_START) pendingEnforcement.delete(role)
+        if (nonStartReasks >= ZERO_TURN_REASK_MAX) return env
+      }
+      nonStartReasks += 1
     }
   }
 

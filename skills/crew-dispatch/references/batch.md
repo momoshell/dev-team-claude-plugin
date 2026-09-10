@@ -61,26 +61,54 @@ batch at the first failed check rather than proceeding
 Every refusal above has a name in its exported `REFUSAL_REASONS`; the prose here
 says WHY each check exists, which the script cannot.
 
-`anchor-pin-unfenced` reports; it **does not refuse**. The scan names every
-`anchors.json` pin on a lane's write surface whose manifest is outside its fence —
-the sweep that cost `b217-treefingerprint` a lane when it was done by hand — and
-emits it as a warning in dispatch output and in `--dry-run`, where the fence is
-chosen. It stopped refusing because **#635** made a shifted anchor repairable:
-content found once at a new line is relocated and reported, so a pin outside the
-fence is no longer a scope the lane cannot satisfy, and refusing on it falsely
-blocked three of five lanes in one batch. What is still fatal is **rot** (content
+`anchor-pin-unfenced` is evidence, not an automatic refusal. The scan names every
+`anchors.json` pin on a lane's write surface whose manifest is outside its authored
+fence — the sweep that cost `b217-treefingerprint` a lane when it was done by hand —
+and the dispatcher automatically admits each unheld manifest with source
+`anchor-pin`. A manifest held by an unrelated sibling remains outside the effective
+fence and queues `sibling-leak`; a live holder is named with its directory and files.
+It stopped refusing because **#635** made a shifted anchor repairable: content found
+once at a new line is relocated and reported. What is still fatal is **rot** (content
 nowhere) and **ambiguity** (content more than once), caught by each skill's own
 `exhibits.test.mjs` when they actually happen rather than predicted before the
 lane runs.
 
-A manifest pinning only files the lane does not write is not an obligation on that lane; when the lane writes a pinned file, the lane owes the repair and must fence the pinning manifest before dispatch. The sanctioned fix is the post-merge pass the
+A manifest pinning only files the lane does not write is not an obligation on that lane; when the lane writes a pinned file, dispatch admits the unheld pinning manifest automatically. The sanctioned fix remains the post-merge pass the
 operator runs on `main` after the wave merges:
 `node skills/qa-test-writing/anchor-pin.mjs --repair-all <dir>`. The same pass
 rewrites the citing doc, so citation carriers no longer have to be fenced either.
 A lane that DOES change a manifest still has to leave it consistent, and rot and
 ambiguity stay fatal in the skill's own `exhibits.test.mjs`.
 
-`citation-carrier-unfenced` names every pinned carrier; only an **unpinned** path:line citation — one with no manifest keys — is hand-only.
+`citation-carrier-unfenced` names every pinned carrier; only an **unpinned** path:line citation — one with no manifest keys — is hand-only. Carrier warnings remain evidence and do not widen a fence by themselves.
+
+### Sourced fence admission
+
+The authored register is the scan floor. Every concrete unheld candidate from the
+three scans is admitted to its owning lane's effective fence exactly once, with one
+source: `test-reach`, `anchor-pin`, or `census-carrier`. The admission is written to
+`perLane[name].files`, the effective `dispatch.fences.json` when widening occurred,
+`dispatch.warnings.json`, bounded normal and dry-run output, and the lane journal
+after boot. Admitted paths widen the effective fence, scope gate, and brief, but never
+the assurance floor, so admission cannot change the tier the operator asked for. No
+caller may widen a fence with a bare path; `fence-admission-unsourced`
+refuses a missing or unknown source. An admission records evidence only: it proves
+neither scan completeness nor test intent.
+
+Automatic duplicate admission is first-lane-wins in existing batch order. A later
+unrelated lane scanning the same candidate receives a `fence-admission-arbitrated`
+warning naming the first lane and file, does not widen its own effective fence, and
+continues through dispatch. Related dependency lanes retain their exemption. A
+candidate held by an unrelated same-batch authored register entry or a measured live
+lane is not admitted: held anchor and census candidates stay outside the effective
+fence with their existing warnings, and held test reach retains
+`test-reach-unfenced`. An explicit
+`allow_test_reach` entry always keeps its named test outside the effective fence; a
+held test records its holder context, while an unheld test warns that the operator
+exclusion overrode automatic admission with `override=explicit-exclusion` and
+records the file and reason. Unknown live-lane census remains a warning and is never
+treated as a clear claim.
+
 
 ### Warning doctrine
 
@@ -92,17 +120,17 @@ The **test-reach** warning carries this exact blind spot: BLIND SPOT: this is a 
 
 The **census-carrier** warning carries this exact blind spot: BLIND SPOT: this warning fires on the POSSIBILITY that a fenced *.test.mjs edit moves either repository-wide census, not on the fact; dispatch cannot inspect bytes the builder has not written and cannot predict whether either census will move.
 
-This is a possibility-only trigger: it fires because a fenced `*.test.mjs` edit might move either repository-wide census, not because dispatch has observed a move. Its two carriers are `skills/crew-dispatch/references/batch.md` and `skills/crew-dispatch/exhibits.test.mjs`. This warning-only path follows ADR-040: the lane will OWE the repair, but cannot reach it from outside its fence; the owed, inaccessible repair updates batch.md's measurement sentence, exhibits.test.mjs's `const measurement`, and its `const pristinePairs` after the test edit.
+This is a possibility-only trigger: it fires because a fenced `*.test.mjs` edit might move either repository-wide census, not because dispatch has observed a move. Its two carriers are `skills/crew-dispatch/references/batch.md` and `skills/crew-dispatch/exhibits.test.mjs`. Each concrete missing carrier is admitted with source `census-carrier` when unheld; a measured holder leaves it outside the effective fence and the possibility-only warning remains warning-only. This follows ADR-040: the warning and this exact blind spot remain visible because admission proves neither a census move nor test intent; the owed repair still updates batch.md's measurement sentence, exhibits.test.mjs's `const measurement`, and its `const pristinePairs` after the test edit.
 
 There are two false negatives this warning does not measure. A directory-prefix fence entry such as `test/` or `crew/` is supported, including a lane whose `creates` path is a new tracked test, but the trigger reads only whole-file `*.test.mjs` fence entries. Such a lane emits no census warning even though its directory fence is the broadest test-editing surface in the batch. Conversely, a span-scoped carrier such as `skills/crew-dispatch/exhibits.test.mjs#L1-L50` is scored as reached because `parseFenceScope` strips the span before `matchOwn` checks the carrier, while the owed `const measurement` and `const pristinePairs` repairs in `exhibits.test.mjs` are outside that span and the scope gate will refuse them.
 
 Silence from this check is therefore an UNMEASURED clear, not a measured one: the carrier side, `matchOwn`, honours directory prefixes, while the trigger side does not.
 
-On the shipped 2026-09-09 tree, a fresh `git ls-files` measurement with `collectTestReach` found exact static path reach for **160 of 545 tracked non-test files**, comprising **454 distinct (file, test) pairs contributed by 87 of 89 tracked `*.test.mjs` files**. The pristine `HEAD` baseline gives 160 owners and 454 pairs. The rule resolves decoded slash-bearing literals beginning `./` or `../` against the test file, repository-relative literals against checkout root, and only `join(ROOT, <all-literal segments...>)` or `join(repoRoot, <all-literal segments...>)`; absolute candidates and variable-built joins do not match tracked repository paths. This is the shipped scanner's reach, not proof of test intent; computed paths and computed dynamic imports remain invisible. This figure is pinned by `skills/crew-dispatch/exhibits.test.mjs` and must be re-measured whenever a tracked test file gains or loses a static path literal. The superseded review-time witness literal, **164 of 542 tracked non-test files**, comprising **428 distinct (file, test) pairs contributed by 83 of 85 tracked `*.test.mjs` files**, remains only so the byte-identical pre-repair exhibit can execute while the named dynamic guard proves the replacement; it is not a current census.
+On the shipped 2026-09-09 tree, a fresh `git ls-files` measurement with `collectTestReach` found exact static path reach for **160 of 545 tracked non-test files**, comprising **457 distinct (file, test) pairs contributed by 87 of 89 tracked `*.test.mjs` files**. The pristine `HEAD` baseline gives 160 owners and 457 pairs. The rule resolves decoded slash-bearing literals beginning `./` or `../` against the test file, repository-relative literals against checkout root, and only `join(ROOT, <all-literal segments...>)` or `join(repoRoot, <all-literal segments...>)`; absolute candidates and variable-built joins do not match tracked repository paths. This is the shipped scanner's reach, not proof of test intent; computed paths and computed dynamic imports remain invisible. This figure is pinned by `skills/crew-dispatch/exhibits.test.mjs` and must be re-measured whenever a tracked test file gains or loses a static path literal. The superseded review-time witness literal, **164 of 542 tracked non-test files**, comprising **428 distinct (file, test) pairs contributed by 83 of 85 tracked `*.test.mjs` files**, remains only so the byte-identical pre-repair exhibit can execute while the named dynamic guard proves the replacement; it is not a current census.
 
-The hard breadth is deliberate (#702): a single static quoted path literal anywhere in a test — including one that appears only as fixture data — is a hard `test-reach-unfenced` refusal of the batch, and clearing it costs an `allow_test_reach` `{ file, why }` override. This trades false refusals for missed fences on purpose (#702). Fencing `crew/model-ladder.json` now names `crew/drive-review.test.mjs` and `test/factory-dispatch-batch.test.mjs`; fencing either `crew/tree-fingerprint.mjs` or `skills/devops/references/worktrees.md` now names `test/factory-dispatch-batch-fences.test.mjs`, whose b220 fixture list carries both surface literals; do not fence `test/factory-dispatch-batch.test.mjs` for either carrier. Each of those surfaces previously refused nothing.
+The hard breadth is deliberate (#702): a single static quoted path literal anywhere in a test — including one that appears only as fixture data — is a `test-reach` admission candidate. An unheld candidate is admitted with source `test-reach`; only a measured holder keeps it outside the fence as `test-reach-unfenced`, and a valid `allow_test_reach` `{ file, why }` override applies only to that held row. This trades false refusals for missed fences on purpose (#702), while admission proves neither completeness nor test intent. Fencing `crew/model-ladder.json` now names `crew/drive-review.test.mjs` and `test/factory-dispatch-batch.test.mjs`; fencing either `crew/tree-fingerprint.mjs` or `skills/devops/references/worktrees.md` now names `test/factory-dispatch-batch-fences.test.mjs`, whose b220 fixture list carries both surface literals; do not fence `test/factory-dispatch-batch.test.mjs` for either carrier. Each of those surfaces previously refused nothing.
 
-A reach row is identified by the outside test, the fenced file it reaches, and the reach kind (`import`, `symbol`, or `path`). Path facts are never coalesced with import or symbol facts, so a static path literal remains an independent hard-refusal candidate even when another fact for that test and surface file was found first. Same-key aggregation still retains one deterministic symbol list on the surviving import or symbol row; `dispatch.warnings.json` persists every provisional fact folded by that aggregation in `test_reach_dropped`, and `WARNING-SUMMARY` independently names the surviving row, actionable, and collapsed counts. Because path facts are no longer coalesced with import or symbol facts, a test whose own relative import specifier names a fenced file now yields a `path` row and is a hard `test-reach-unfenced` refusal; before this change, an import or symbol row for that test suppressed it. Compile `allow_test_reach` from the CURRENT `dispatch-batch` run's refusal list, not from prior experience of the surface. The reviewer's table, measured over those six fence surfaces on this tree, found `crew/crew.mjs` 6 -> 15 refused tests, `crew/drive.mjs` 15 -> 17, and `scripts/factory/dispatch-batch.mjs` 3 -> 8; `crew/adapters/adapter-pi.mjs` (8 -> 8), `crew/host-load.mjs` (1 -> 1), and `crew/roster.json` (5 -> 5) were unchanged. The historical pre-split record, `scripts/factory/dispatch-batch.mjs` 3 -> 4, remains only because a byte-identical retained block asserts it; its result is superseded by the post-split row.
+A reach row is identified by the outside test, the fenced file it reaches, and the reach kind (`import`, `symbol`, or `path`). Path facts are never coalesced with import or symbol facts, so a static path literal remains an independent admission candidate even when another fact for that test and surface file was found first. Same-key aggregation still retains one deterministic symbol list on the surviving import or symbol row; `dispatch.warnings.json` persists every provisional fact folded by that aggregation in `test_reach_dropped`, and `WARNING-SUMMARY` independently names the surviving row, actionable, and collapsed counts. Because path facts are no longer coalesced with import or symbol facts, a test whose own relative import specifier names a fenced file now yields a `path` row and an unheld `test-reach` admission; a holder instead retains `test-reach-unfenced`. Compile `allow_test_reach` only for a held test named by the CURRENT `dispatch-batch` run, not from prior experience of the surface. The reviewer's table, measured over those six fence surfaces on this tree, found `crew/crew.mjs` 6 -> 15 refused tests, `crew/drive.mjs` 15 -> 17, and `scripts/factory/dispatch-batch.mjs` 3 -> 8; `crew/adapters/adapter-pi.mjs` (8 -> 8), `crew/host-load.mjs` (1 -> 1), and `crew/roster.json` (5 -> 5) were unchanged. The historical pre-split record, `scripts/factory/dispatch-batch.mjs` 3 -> 4, remains only because a byte-identical retained block asserts it; its result is superseded by the post-split row.
 
 The comment-desynchronisation exposure is a measured lower bound, not a second scanner reach: **55 of 89 tracked `*.test.mjs` files** carry at least one apostrophe inside a comment, and **32 of 89** carry an odd number on the shipped tree (**32 of 89 at pristine `HEAD`**). This figure is pinned by `test/factory-dispatch-batch.test.mjs` and must be re-measured whenever a tracked test file gains or loses an apostrophe inside a comment. The pre-split historical assertion is superseded; it remains only because a byte-identical pinned block asserts it: 51 of 85 tracked `*.test.mjs` files carry at least one apostrophe inside a comment, and 30 of those carry an odd number on the shipped tree (30 at pristine `HEAD`). A comment-stripped read of the same tree finds at least 54 real `(file, test)` pairs the shipped scanner misses (446 vs 403). The comparison is conservative because it does not strip a trailing comment on a line that also contains a string; 446 is a comment-stripped comparison figure, not the scanner's reported reach.
 

@@ -217,6 +217,7 @@ import {
   root,
   compiler,
   put,
+  anchorFixtures,
   request,
   requestFor,
   makeBatch,
@@ -224,27 +225,187 @@ import {
   refusal,
   compilerLane,
   thrownAsync,
+  gitFixture,
   reachCheck,
+  reachFixture,
+  crewFixture,
+  liveHolderFixture,
   namedReachFixture,
   dispatchFixture,
 } from './factory-dispatch-batch-fences.test.mjs'
 
-test('a trailing-slash directory write surface refuses the same reaching test', () => {
+test('D1 admits unheld census carriers', async () => {
+  const fixture = censusFixture('admit-D1', ['test/census.test.mjs'], { withReport: true })
+  assert.equal(fixture.error, null)
+  const admissions = fixture.report.admissions.filter((row) => row.source === 'census-carrier')
+  assert.deepEqual(admissions.map((row) => row.file), [...CENSUS_CARRIER_FILES].sort())
+  assert.deepEqual(fixture.report.perLane['lane-a'].files.slice(-2).sort(), [...CENSUS_CARRIER_FILES].sort())
+  const batch = makeBatch(['census-dry'])
+  put(join(batch, `census-dry${REQUEST_SUFFIX}`), JSON.stringify(request('admit census carriers', ['test/census.test.mjs'])))
+  const logs = []
+  const dry = await dispatchBatch({
+    batchDir: batch,
+    fences: [entry('census-dry', ['test/census.test.mjs'])],
+    checkout: fixture.checkout,
+    parentDir: join(root, 'census-dry-parent'),
+    outDir: join(root, 'census-dry-out'),
+    tier: 'mechanical',
+    runFlags: { 'dry-run': true },
+    deps: { home: join(root, 'census-dry-home'), log: (line) => logs.push(String(line)) },
+  })
+  assert.equal(dry.dryRun, true)
+  assert.equal(dry.fences.admissions.filter((row) => row.source === 'census-carrier').length, 2)
+  assert.equal(logs.filter((line) => line.includes('source=census-carrier')).length, 2)
+})
+
+test('RV1-1 keeps held anchor and census candidates warning-only through a stable witness', () => {
+  const checkout = gitFixture()
+  const source = ['src', 'owned.mjs'].join('/')
+  const censusTest = ['test', 'census.test.mjs'].join('/')
+  const manifest = ['skills', 'example', 'anchors.json'].join('/')
+  const heldCensus = ['skills', 'crew-dispatch', 'references', 'batch.md'].join('/')
+  put(join(checkout, censusTest), 'const census = true\n')
+  anchorFixtures(checkout, { example: { [`${source}:1`]: 'export const OWNED = 1' } })
+  const outDir = join(checkout, 'RV1-1-warning-only-out')
+  const report = checkFences({
+    fences: [entry('lane-a', [manifest, heldCensus]), entry('lane-b', [source, censusTest])],
+    lanes: [
+      { lane: 'lane-a', where: [] },
+      { lane: 'lane-b', where: [source, censusTest] },
+    ],
+    checkout,
+    outDir,
+    deps: { home: join(root, 'RV1-1-warning-only-home'), log: () => {} },
+  })
+  const held = new Set([manifest, heldCensus])
+  assert.equal(report.perLane['lane-b'].files.some((file) => held.has(file)), false)
+  assert.deepEqual(report.admissions.filter(({ file }) => held.has(file)), [])
+  assert.equal(report.warnings.some((row) => row.kind === 'anchor-pin' && row.lane === 'lane-b' && row.pins.some((pin) => pin.manifest === manifest)), true)
+  const censusWarning = report.warnings.find((row) => row.kind === 'census-carrier' && row.lane === 'lane-b')
+  assert.equal(censusWarning?.missing.includes(heldCensus), true)
+  const persisted = JSON.parse(readFileSync(join(outDir, FENCE_REPORT_FILE), 'utf8'))
+  assert.deepEqual((persisted.lanes[1].fence_admissions || []).filter(({ file }) => held.has(file)), [])
+  assert.deepEqual(persisted.lanes[1].anchor_pins.map(({ manifest: path }) => path), [manifest])
+  assert.equal(persisted.lanes[1].census_carriers[0].missing.includes(heldCensus), true)
+})
+
+test('B1 refuses held test reach and names its holder', () => {
+  const candidate = 'crew/crew.test.mjs'
+  const holder = liveHolderFixture('refuse-B1', candidate)
+  const outDir = join(holder.checkout, 'refuse-B1-out')
+  const logs = []
+  let error
+  try {
+    checkFences({
+      fences: [entry('lane-a', ['crew/capabilities.mjs', 'crew/adapters/adapter-pi.mjs'])],
+      lanes: [{ lane: 'lane-a', where: ['crew/adapters/adapter-pi.mjs'] }],
+      checkout: holder.checkout,
+      outDir,
+      deps: { home: holder.home, log: (line) => logs.push(String(line)) },
+    })
+  } catch (caught) { error = caught }
+  assert.equal(error?.reason, 'test-reach-unfenced')
+  assert.ok(error.message.includes(holder.holder))
+  assert.ok(error.message.includes(holder.holderDir))
+  assert.ok(error.message.includes(candidate))
+  const persisted = JSON.parse(readFileSync(join(outDir, FENCE_REPORT_FILE), 'utf8'))
+  assert.equal(Object.hasOwn(persisted.lanes[0], 'fence_admissions'), false)
+  assert.equal(logs.some((line) => line.includes('source=test-reach')), false)
+})
+
+test('F1 preserves allow_test_reach for a held test', () => {
+  const candidate = 'crew/crew.test.mjs'
+  const holder = liveHolderFixture('override-F1', candidate)
+  const outDir = join(holder.checkout, 'override-F1-out')
+  const logs = []
+  const report = checkFences({
+    fences: [entry('lane-a', ['crew/capabilities.mjs', 'crew/adapters/adapter-pi.mjs'])],
+    lanes: [{ lane: 'lane-a', where: ['crew/adapters/adapter-pi.mjs'], allow_test_reach: [{ file: candidate, why: 'held by a measured sibling' }] }],
+    checkout: holder.checkout,
+    outDir,
+    deps: { home: holder.home, log: (line) => logs.push(String(line)) },
+  })
+  assert.equal(report.perLane['lane-a'].files.includes(candidate), false)
+  const overrides = report.perLane['lane-a']
+  const persisted = JSON.parse(readFileSync(join(outDir, FENCE_REPORT_FILE), 'utf8'))
+  const rows = persisted.lanes[0].test_reach_overrides.filter((row) => row.test === candidate)
+  assert.ok(rows.length > 0)
+  assert.ok(rows.every((row) => row.holder.lane === holder.holder && row.holder.dir === holder.holderDir))
+  assert.ok(logs.some((line) => line.startsWith('dispatch-batch: test-reach-override:') && line.includes(holder.holderDir)))
+})
+
+test('RV1-2 recognizes a live external register holder before admission', () => {
+  const candidate = 'crew/host-load.test.mjs'
+  const checkout = reachFixture('rv1-2-external-holder', {
+    files: {
+      'crew/host-load.mjs': 'export const hostLoad = true\n',
+      [candidate]: [
+        "import { hostLoad } from './host-load.mjs'",
+        'void hostLoad',
+        '',
+      ].join('\n'),
+    },
+  })
+  const home = join(root, 'rv1-2-external-home')
+  const parentDir = join(root, 'rv1-2-external-parent')
+  const holderDir = crewFixture({
+    home,
+    repoDir: 'dt-ext-lane',
+    laneDir: 'ext-lane',
+    checkout,
+    fence: [{ lane: 'lane-x', files: ['crew/host-load.mjs'] }],
+  })
+  const fences = [
+    entry('lane-x', ['crew/host-load.mjs']),
+    entry('ext-lane', [candidate]),
+  ]
+  let held
+  try {
+    checkFences({
+      fences,
+      lanes: [{ lane: 'lane-x', where: ['crew/host-load.mjs'] }],
+      checkout,
+      externals: ['ext-lane'],
+      parentDir,
+      deps: { home, log: () => {} },
+    })
+  } catch (caught) { held = caught }
+  assert.equal(held?.reason, 'test-reach-unfenced')
+  assert.ok(held.message.includes('ext-lane'))
+  assert.ok(held.message.includes(holderDir))
+  assert.equal(held.message.includes('own fence overlaps'), false)
+
+  const report = checkFences({
+    fences,
+    lanes: [{
+      lane: 'lane-x',
+      where: ['crew/host-load.mjs'],
+      allow_test_reach: [{ file: candidate, why: 'held by the live external lane' }],
+    }],
+    checkout,
+    externals: ['ext-lane'],
+    parentDir,
+    deps: { home, log: () => {} },
+  })
+  assert.equal(report.perLane['lane-x'].files.includes(candidate), false)
+  const overrides = report.warnings.find((row) => row.kind === 'test-reach-override')?.rows.filter((row) => row.test === candidate) || []
+  assert.ok(overrides.length > 0)
+  assert.ok(overrides.every((row) => row.holder.lane === 'ext-lane' && row.holder.dir === holderDir))
+})
+
+test('a trailing-slash directory write surface admits the same unheld reaching test', () => {
   const checkout = namedReachFixture('refuse-directory')
   const result = reachCheck({
     checkout,
     fenceFiles: ['crew/adapters/'],
     surface: ['crew/adapters/'],
   })
-  assert.ok(result.error instanceof BatchRefusal)
-  assert.equal(result.error.reason, 'test-reach-unfenced')
-  assert.equal(result.error.message.includes('crew/crew.test.mjs'), true)
-  assert.equal(result.error.message.includes('crew/adapters/adapter-pi.mjs'), true)
-  assert.equal(result.error.message.includes('grantsFor'), true)
-  assert.equal(result.error.message.includes('crew/adapters/, crew/crew.test.mjs'), true)
+  assert.equal(result.error, null)
+  assert.ok(result.report.admissions.some((row) => row.source === 'test-reach' && row.file === 'crew/crew.test.mjs'))
+  assert.equal(result.report.perLane['lane-a'].files.includes('crew/crew.test.mjs'), true)
 })
 
-test('test-reach-unfenced precedes the register-superset refusal', () => {
+test('register-superset remains after unheld test-reach admission', () => {
   const checkout = namedReachFixture('precedence')
   const result = reachCheck({
     checkout,
@@ -253,7 +414,7 @@ test('test-reach-unfenced precedes the register-superset refusal', () => {
     extraFences: [entry('lane-ghost', ['docs/ghost.md'])],
   })
   assert.ok(result.error instanceof BatchRefusal)
-  assert.equal(result.error.reason, 'test-reach-unfenced')
+  assert.equal(result.error.reason, 'fence-register-mismatch')
 })
 
 test('malformed depends_on values refuse batch-unreadable at their request path', () => {

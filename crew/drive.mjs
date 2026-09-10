@@ -2283,6 +2283,133 @@ export function laneFenceHits(entries, laneFence) {
 
 const fenceBreachList = (hits) => hits.map(({ entry, lane }) => `${entry} is owned by lane ${lane}`).join('; ')
 
+// Scope widening is deliberately tiny and typed. A request is not an invitation to
+// reinterpret prose: only this closed shape can add literal files to the accepted
+// scope. Suite-red and seat-request widening each have independent task bounds.
+export const SCOPE_ADMISSION_SOURCES = Object.freeze(['suite-red', 'seat-request'])
+export const SCOPE_REQUEST_KINDS = Object.freeze(['admit-files'])
+export const SUITE_ADMISSION_MAX = 1
+export const SEAT_ADMISSION_MAX = 1
+
+const scopeRequestRefusal = (reason, why) => ({
+  kind: 'scope-request-refusal', refusal: 'scope-request', reason, why,
+})
+
+// A typed request is the only seat-origin source. The request object itself has
+// exactly two keys; evidence belongs beside it in details and is checked by the
+// admission decision, so a sentence in summary/guidance/questions can never add a
+// file by accident.
+export function scopeRequestOf(details) {
+  let present = false
+  try {
+    if (!details || typeof details !== 'object' || Array.isArray(details)) return null
+    present = Object.prototype.hasOwnProperty.call(details, 'scope_request')
+    if (!present) return null
+    const raw = details.scope_request
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      return scopeRequestRefusal('scope-request-shape', 'scope_request must be an object with exactly kind and files')
+    }
+    const keys = Reflect.ownKeys(raw)
+    if (keys.length !== 2 || !keys.includes('kind') || !keys.includes('files')) {
+      return scopeRequestRefusal('scope-request-shape', 'scope_request must carry exactly kind and files')
+    }
+    if (!SCOPE_REQUEST_KINDS.includes(raw.kind)) {
+      return scopeRequestRefusal('scope-request-kind', `scope_request.kind must be one of: ${SCOPE_REQUEST_KINDS.join(', ')}`)
+    }
+    if (!Array.isArray(raw.files)) {
+      return scopeRequestRefusal('scope-request-files', 'scope_request.files must be a non-empty array of literal repo-relative files')
+    }
+    if (raw.files.length === 0) {
+      return scopeRequestRefusal('scope-request-empty', 'scope_request.files must not be empty')
+    }
+    const files = [...raw.files]
+    if (new Set(files).size !== files.length) {
+      return scopeRequestRefusal('scope-request-duplicate', 'scope_request.files must not contain duplicate paths')
+    }
+    const errors = validateScopeEntries(files)
+    const invalid = errors.find(({ entry }) => (
+      typeof entry !== 'string' || /^[A-Za-z][A-Za-z0-9+.-]*:/.test(entry)
+    ))
+    const directory = files.find((entry) => typeof entry === 'string' && entry.endsWith('/'))
+    if (errors.length > 0 || invalid || directory) {
+      const detail = errors.map(({ entry, why }) => `${JSON.stringify(entry)} (${why})`).join('; ')
+        || `${JSON.stringify(directory)} (directory prefixes are not admissible scope requests)`
+      return scopeRequestRefusal('scope-request-path', `scope_request.files contains unsupported paths: ${detail}`)
+    }
+    return { kind: raw.kind, files }
+  } catch (err) {
+    return scopeRequestRefusal('scope-request-shape', `scope_request could not be read: ${err?.message ?? String(err)}`)
+  }
+}
+
+// Parse only test-file path tokens that the failing output itself carries. The
+// checkout argument is used to turn file:// and absolute checkout paths into the
+// same repo-relative literal; paths outside it, globs and dot segments are ignored.
+export function suiteRedTestFiles(output, checkout) {
+  if (typeof output !== 'string' || output.trim() === '' || typeof checkout !== 'string' || checkout.trim() === '') return []
+  const root = checkout.replace(/\/+$/, '') || '/'
+  const files = []
+  const seen = new Set()
+  const add = (token) => {
+    let value = String(token || '').replace(/[),;\]}]+$/g, '')
+    value = value.replace(/^[([{]+/, '')
+    value = value.replace(/:(?:\d+)(?::\d+)?$/, '')
+    if (!value.endsWith('.test.mjs')) return
+    let path = value
+    if (/^file:\/\//i.test(path)) {
+      try {
+        const parsed = new URL(path)
+        if (parsed.protocol !== 'file:' || (parsed.hostname && parsed.hostname !== 'localhost')) return
+        path = decodeURIComponent(parsed.pathname)
+      } catch { return }
+    }
+    if (path.startsWith('/')) {
+      const prefix = root === '/' ? '/' : `${root}/`
+      if (path === root) return
+      if (!path.startsWith(prefix)) return
+      path = path.slice(prefix.length)
+    } else {
+      path = path.replace(/^\.\//, '')
+    }
+    if (!path || path.startsWith('/') || path.split('/').some((segment) => segment === '.' || segment === '..')) return
+    if (/[\*?\[\]{}]/.test(path) || !path.endsWith('.test.mjs')) return
+    if (!seen.has(path)) { seen.add(path); files.push(path) }
+  }
+  const tokens = output.match(/[^\s'"`<>]+\.test\.mjs(?::\d+(?::\d+)?)?/g) || []
+  for (const token of tokens) add(token)
+  return files
+}
+
+// Pure policy for either admission source. Every refusal is explicit: unknown
+// source, missing evidence, an occupied sibling fence, a spent widening cap, or a
+// malformed file list can never silently become an effective-scope mutation.
+export function scopeAdmissionDecision({ source, files, evidence, laneFence, suiteWidenings = 0, seatWidenings = 0 } = {}) {
+  if (!SCOPE_ADMISSION_SOURCES.includes(source)) {
+    return { action: 'escalate', reason: 'source', why: `scope admission source is not allowed: ${JSON.stringify(source)}` }
+  }
+  if (!evidence || typeof evidence !== 'object' || Array.isArray(evidence)) {
+    return { action: 'escalate', reason: 'evidence', why: 'scope admission requires a non-array evidence object' }
+  }
+  if (!Array.isArray(files) || files.length === 0) {
+    return { action: 'escalate', reason: 'files', why: 'scope admission requires a non-empty files array' }
+  }
+  const unique = [...new Set(files)]
+  if (unique.some((entry) => typeof entry !== 'string') || validateScopeEntries(unique).length > 0 || unique.some((entry) => typeof entry === 'string' && (entry.endsWith('/') || /^[A-Za-z][A-Za-z0-9+.-]*:/.test(entry)))) {
+    return { action: 'escalate', reason: 'files', why: 'scope admission files must be literal repo-relative paths' }
+  }
+  const hits = laneFenceHits(unique, laneFence)
+  if (hits.length > 0) {
+    return { action: 'escalate', reason: 'held', hits, why: `scope admission refused: ${fenceBreachList(hits)}` }
+  }
+  if (source === 'suite-red' && suiteWidenings >= SUITE_ADMISSION_MAX) {
+    return { action: 'escalate', reason: 'repeat', why: `scope admission refused: the suite-red widening limit of ${SUITE_ADMISSION_MAX} has been spent` }
+  }
+  if (source === 'seat-request' && seatWidenings >= SEAT_ADMISSION_MAX) {
+    return { action: 'escalate', reason: 'repeat', why: `scope admission refused: the seat-request widening limit of ${SEAT_ADMISSION_MAX} has been spent` }
+  }
+  return { action: 'admit', source, files: unique, evidence }
+}
+
 function pathOnlyLaneFence(laneFence, laneName) {
   return (Array.isArray(laneFence) ? laneFence : [])
     .filter((record) => record?.lane !== laneName)
@@ -3668,6 +3795,9 @@ function runTask(ctx, io, crash) {
   // task gate so every refusal can name a useful gate-proof path.
   let acceptedScope = []
   let acceptedGatePath = art('gate.mjs')
+  let admitScope = null
+  let suiteWidenings = 0
+  let seatWidenings = 0
   const seatPolicy = (role) => ({
     suiteCommand: ctx.suite ?? null,
     gatePath: acceptedGatePath,
@@ -4228,10 +4358,42 @@ function runTask(ctx, io, crash) {
     io.log(recordRow({ at: io.now(), lead_consult_context: { brief: briefPath, consult: S.consults, round, mode: delivery.mode, sources: delivery.sources } }))
     const env = assignAndWait('lead', briefPath, label ? `decision-${label}` : round === 2 ? 'decision-final' : 'decision')
     const d = env.details || {}
+    let requestedDecision = null
+    let requestedGuidance = null
+    const hasScopeRequest = d && typeof d === 'object' && !Array.isArray(d)
+      && Object.prototype.hasOwnProperty.call(d, 'scope_request')
+    if (hasScopeRequest && env.status !== 'done') {
+      return { decision: 'escalate', reason: `lead returned ${env.status}/${d.decision ?? 'no decision'} — treating as escalate` }
+    }
+    if (hasScopeRequest) {
+      const request = scopeRequestOf(d)
+      if (!request || request.refusal) {
+        return { decision: 'escalate', reason: `scope-request refused [${request?.reason || 'scope-request-shape'}]: ${request?.why || 'the request could not be read'}` }
+      }
+      requestedDecision = options.includes('bounce-builder') ? 'bounce-builder' : options.includes('bounce') ? 'bounce' : null
+      if (!requestedDecision) {
+        return { decision: 'escalate', reason: 'scope-request refused: this consultation offers no builder bounce' }
+      }
+      if (typeof admitScope !== 'function') {
+        return { decision: 'escalate', reason: 'scope-request refused: no accepted scope exists during this consultation' }
+      }
+      const leadAdmission = admitScope({
+        source: 'seat-request', files: request.files, evidence: d.evidence,
+        role: 'lead', stage: S.stages.at(-1),
+      })
+      if (leadAdmission.reason === 'held') {
+        return { decision: 'escalate', reason: `scope-request refused [held]: ${leadAdmission.why}` }
+      }
+      if (leadAdmission.action === 'admit') {
+        requestedGuidance = `The following files were admitted to the effective scope: ${leadAdmission.files.join(', ')}. ${d.guidance || ''}`.trim()
+      } else {
+        return { decision: 'escalate', reason: `scope-request refused [${leadAdmission.reason || 'scope'}]: ${leadAdmission.why || 'the request was not admitted'}` }
+      }
+    }
     // Round 2: a repeat second-opinion passes through raw so consultLead can
     // name the one-hop bound precisely in its escalation reason.
     if (round === 2 && env.status === 'done' && d.decision === SECOND_OPINION) return { decision: SECOND_OPINION }
-    const decided = bounceTargetOf(d.decision, options)      // #751
+    const decided = requestedDecision || bounceTargetOf(d.decision, options)      // #751
     const allowed = round === 1 && targets.length > 0 ? [...options, SECOND_OPINION] : options
     if (env.status !== 'done' || !allowed.includes(decided)) {
       return { decision: 'escalate', reason: `lead returned ${env.status}/${d.decision ?? 'no decision'} — treating as escalate` }
@@ -4240,7 +4402,7 @@ function runTask(ctx, io, crash) {
     io.log(recordRow({ at: io.now(), decision: decided, consult: S.consults, round, reason: d.reason }))
     emit({ kind: 'decision', decided, why: d.reason || '', consult: S.consults, round })
     return {
-      decision: decided, reason: d.reason || '', guidance: d.guidance || '', from: d.from,
+      decision: decided, reason: d.reason || '', guidance: requestedGuidance || d.guidance || '', from: d.from,
       residuals: d.residuals, refuted: d.refuted, answers: d.answers,
     }
   }
@@ -5063,11 +5225,11 @@ function runTask(ctx, io, crash) {
   if (!planEnv) return escalate('plan', planExhaustedWhy(planRounds(), planBounceWhy))
   const planPath = planEnv.details?.plan_path || art('plan.md')
   if (!docShown) { docShown = true; io.showDoc?.(planPath) }
-  const scopeFiles = planEnv.details?.files_in_scope
-  if (!Array.isArray(scopeFiles) || scopeFiles.length === 0) {
+  const plannedScopeFiles = planEnv.details?.files_in_scope
+  if (!Array.isArray(plannedScopeFiles) || plannedScopeFiles.length === 0) {
     return escalate('plan', 'planner envelope carries no files_in_scope — the scope gate cannot run without it', planEnv.artifacts || [])
   }
-  const scopeErrors = validateScopeEntries(scopeFiles)
+  const scopeErrors = validateScopeEntries(plannedScopeFiles)
   if (scopeErrors.length > 0) {
     return escalate('plan',
       `files_in_scope carries entries the scope gate cannot honor — fix the plan, not the build: ${scopeErrors.map(({ entry, why }) => `${JSON.stringify(entry)} (${why})`).join('; ')}`,
@@ -5080,6 +5242,7 @@ function runTask(ctx, io, crash) {
   const siblingFenceScopes = resolvedFenceScopes.filter((scope) => scope.lane !== ctx.laneName)
   const ownSpanScopes = ownFenceScopes.filter((scope) => scope.kind === 'span')
   const siblingSpanScopes = siblingFenceScopes.filter((scope) => scope.kind === 'span')
+  let scopeFiles = [...planEnv.details.files_in_scope]
   const planFenceHits = laneFenceHits(scopeFiles, pathOnlyLaneFence(ctx.laneFence, ctx.laneName))
   const planSpanFenceHits = spanPlanFenceHits(scopeFiles, ownSpanScopes, siblingSpanScopes)
   const allPlanFenceHits = [...planFenceHits, ...planSpanFenceHits.filter((span) => (
@@ -5091,7 +5254,35 @@ function runTask(ctx, io, crash) {
       planEnv.artifacts || [])
   }
   acceptedScope = scopeFiles
-  const inScope = scopeMatcher(scopeFiles)
+  let inScope = scopeMatcher(scopeFiles)
+  admitScope = ({ source, files, evidence, role = null, stage: requestedStage = null } = {}) => {
+    const decision = scopeAdmissionDecision({
+      source, files, evidence,
+      laneFence: pathOnlyLaneFence(ctx.laneFence, ctx.laneName),
+      suiteWidenings, seatWidenings,
+    })
+    if (decision.action !== 'admit') return decision
+    const additions = decision.files.filter((entry) => !scopeFiles.includes(entry))
+    if (additions.length === 0) {
+      return { action: 'escalate', reason: 'already-scoped', why: `scope admission refused: all ${source} files are already in the effective scope: ${decision.files.join(', ')}` }
+    }
+    const protectedAdditions = protectedHits(additions, ctx.protectedPaths)
+    if (protectedAdditions.length > 0) {
+      return { action: 'escalate', reason: 'protected', why: `scope admission refused: protected paths cannot be admitted: ${protectedAdditions.join(', ')}` }
+    }
+    if (additions.length > 0) {
+      if (source === 'seat-request') seatWidenings += 1
+      scopeFiles = [...scopeFiles, ...additions]
+      acceptedScope = scopeFiles
+      inScope = scopeMatcher(scopeFiles)
+    }
+    const row = {
+      source, files: additions, evidence,
+      ...(source === 'seat-request' ? { role, stage: requestedStage ?? S.stages.at(-1) ?? null } : {}),
+    }
+    io.log(recordRow({ at: io.now(), scope_admission: row }))
+    return { ...decision, files: additions }
+  }
   const lane = planEnv.details?.validation_lane || ctx.lane
   if (!lane) return escalate('plan', 'no validation lane (neither planner envelope nor --lane provided)')
   const floorHits = protectedHits(scopeFiles, ctx.protectedPaths)
@@ -5123,6 +5314,7 @@ function runTask(ctx, io, crash) {
   let gateRepairs = 0
   let failDelimiterRepairs = 0 // one bounded correction that does not spend gateRepairs
   let gateReverified = null // set only when a MID-RUN repair is accepted:
+  let builderEnv = null
   const gateHistory = [] // every replaced gate_cmd, for the human's audit trail
   let gateGeneration = 1
   let gateProvenGeneration = null // the generation whose proof is already recorded
@@ -6128,9 +6320,16 @@ function runTask(ctx, io, crash) {
   // turning a non-running optional supplement into a new gate verdict.
 
   // ---- 2. BUILD + mechanical gates + REVIEW ------------------------------------
-  let buildBrief = planPath
-  let buildNote = 'build'
-  let builderEnv = null
+  // The warm suite is part of a bounded accepted cycle. A first, evidence-backed
+  // red may widen the scope and re-enter this same path once; every later red is
+  // still a terminal suite escalation.
+  let suiteBuildBrief = planPath
+  let suiteBuildNote = 'build'
+  suiteCycle:
+  for (;;) {
+  builderEnv = null
+  let buildBrief = suiteBuildBrief
+  let buildNote = suiteBuildNote
   let reviews = 0
   // The finish block runs ONLY when `accepted` is set — at review:pass or at
   // an explicit lead accept. No bounce, however granted, can fall out of the
@@ -6361,6 +6560,39 @@ function runTask(ctx, io, crash) {
     const finalRound = () => round >= limits.build_rounds + extraRounds
     stage(`build:r${round}`)
     const env = assignAndWait('builder', buildBrief, buildNote)
+    const hasScopeRequest = env.details && typeof env.details === 'object' && !Array.isArray(env.details)
+      && Object.prototype.hasOwnProperty.call(env.details, 'scope_request')
+    if (hasScopeRequest) {
+      const request = scopeRequestOf(env.details)
+      if (!request || request.refusal) {
+        stageComplete()
+        return escalate('scope-request', `scope-request refused [${request?.reason || 'scope-request-shape'}]: ${request?.why || 'the request could not be read'}`, env.artifacts || [])
+      }
+      const requestAdmission = admitScope({
+        source: 'seat-request', files: request.files, evidence: env.details.evidence,
+        role: 'builder', stage: S.stages.at(-1),
+      })
+      if (requestAdmission.reason === 'held') {
+        stageComplete()
+        return escalate('scope', `scope-request refused [held]: ${requestAdmission.why}`, env.artifacts || [])
+      }
+      if (requestAdmission.action === 'admit') {
+        if (finalRound()) extraRounds += 1
+        const b = art(`build-bounce-r${round}.md`)
+        failureUpgrade('scope', 'builder')
+        io.writeFile(b, [
+          `# Scope admission bounce (round ${round})`, '',
+          `The builder's typed scope request was admitted. Continue the build with these files in scope:`,
+          ...requestAdmission.files.map((entry) => `- ${entry}`),
+          '', `Plan: ${planPath}`,
+        ].join('\n'))
+        buildBrief = b; buildNote = 'scope-admission'
+        stageComplete()
+        continue
+      }
+      stageComplete()
+      return escalate('scope-request', `scope-request refused [${requestAdmission.reason || 'scope'}]: ${requestAdmission.why || 'the request was not admitted'}`, env.artifacts || [])
+    }
     if (env.status !== 'done') {
       // #846 — mechanical before judgment, and the round is closed first so the journal
       // still replays as a balanced stack (crew/drive.test.mjs:7375).
@@ -7051,8 +7283,36 @@ function runTask(ctx, io, crash) {
   const suiteRes = phaseSlot(SUITE_SLOT_PHASES.warm, () => io.run(ctx.suite))
   const warmCounts = parseSuiteCounts(suiteRes?.output)
   if (!suiteRes?.ok) {
+    const suiteOutput = String(suiteRes?.output || '')
+    const failureTail = suiteOutput.slice(-4000)
+    const testFiles = suiteRedTestFiles(failureTail, ctx.checkout)
+    const suiteEvidence = { output: suiteOutput, commit: S.commit, test_files: testFiles }
+    const suiteAdmission = admitScope({
+      source: 'suite-red', files: testFiles, evidence: suiteEvidence,
+    })
+    if (suiteAdmission.reason === 'held') {
+      stageComplete()
+      return escalate('suite', `full suite red after acceptance crosses a held scope: ${suiteAdmission.why}\n${suiteOutput.slice(-2000)}`, [], { commit: S.commit, suite_red: suiteEvidence })
+    }
+    if (suiteAdmission.action === 'admit') {
+      suiteWidenings += 1
+      const b = art(`suite-red-bounce-r${reviews + 1}.md`)
+      failureUpgrade('suite', 'builder')
+      io.writeFile(b, [
+        '# Suite-red scope admission bounce', '',
+        `The accepted commit ${S.commit} made the full suite red. The failing output named these unheld test files, which are now admitted to the effective scope:`,
+        ...suiteAdmission.files.map((entry) => `- ${entry}`),
+        '', 'Failure output (verbatim):', suiteOutput,
+        '', `Plan: ${planPath}`,
+        'Repair the implementation and rerun the builder/review/gate/commit cycle. This is the one permitted suite-red widening.',
+      ].join('\n'))
+      suiteBuildBrief = b
+      suiteBuildNote = 'suite-red-fix'
+      stageComplete()
+      continue suiteCycle
+    }
     stageComplete()
-    return escalate('suite', `full suite red after acceptance — this needs eyes:\n${String(suiteRes?.output || '').slice(-2000)}`, [], { commit: S.commit })
+    return escalate('suite', `full suite red after acceptance — no safe unheld test-file admission could be made: ${suiteAdmission.why || 'the failure output was unparseable'}\n${suiteOutput.slice(-2000)}`, [], { commit: S.commit, suite_red: suiteEvidence })
   }
   if (publishing && warmCounts === null) {
     stageComplete()
@@ -7228,6 +7488,7 @@ function runTask(ctx, io, crash) {
   }
   stageComplete()
   return result
+  }
 }
 
 // A declared anchor binds by TOKEN SEQUENCE, not by the bytes a planner typed before

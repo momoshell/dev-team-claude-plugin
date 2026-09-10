@@ -882,10 +882,18 @@ test('a happy path without a gate does not measure runClean', () => {
   assert.equal(io.calls.runClean.length, 0)
 })
 
-test('checkFailureLine requires the intended failure line and a strict delimiter', () => {
+test('B1 gate doctrine states both accepted FAIL label forms', () => {
+  const source = readFileSync(new URL('../skills/qa-test-writing/references/gates.md', import.meta.url), 'utf8')
+  assert.match(source, /A failing check must print `FAIL <label>` ending the line, or `FAIL <label>: <why>`\. Nothing else matches\./)
+  assert.match(source, /strict separator prevents a shorter check label from falsely matching a longer prefix label/)
+})
+
+test('E1 checkFailureLine retains its strict delimiter behavior', () => {
   assert.equal(checkFailureLine(`FAIL check-one: why\n${RED()}`, 'check-one'), true)
   assert.equal(checkFailureLine('  FAIL check-one', 'check-one'), true)
   assert.equal(checkFailureLine('FAIL check-one:', 'check-one'), true)
+  assert.equal(checkFailureLine('FAIL cache', 'cache'), true)
+  assert.equal(checkFailureLine('FAIL cache-v2', 'cache'), false)
   assert.equal(checkFailureLine('FAIL cache:v2: why', 'cache'), false)
   assert.equal(checkFailureLine('FAIL cache:v2: why', 'cache:v2'), true)
   for (const output of ['FAIL check-one extra words', 'FAIL check-one — why', 'FAIL check-one why', 'FAIL check-one warm: reason', 'FAIL check-one:v2: reason', 'FAIL check-one-two: why', 'PASS check-one', 'prose check-one', '']) {
@@ -1767,7 +1775,7 @@ test('the planner is confined to its own stages — no post-acceptance path assi
 test('every gate site assigns the lead, and the repaired gate is still re-proven', () => {
   const source = readFileSync(new URL('./drive.mjs', import.meta.url), 'utf8')
   const sites = [...source.matchAll(/assignAndWait\(\s*([^,]+?)\s*,[^,]+,\s*'(gate-repair|gate-fix)'\s*\)/g)]
-  assert.equal(sites.length, 4)
+  assert.equal(sites.length, 5)
   assert.ok(sites.every(([, role]) => role === 'GATE_CUSTODIAN'))
   const io = b44MidRunRepairIo()
   const result = driveTask(CTX, io)

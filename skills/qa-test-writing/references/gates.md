@@ -22,6 +22,8 @@ executes. It is the task's definition of done, expressed as something that runs.
 4. **Every declared mutation kills its own check.** Name the mutation beside the
    check, and demonstrate it reddens.
 
+A failing check must print `FAIL <label>` ending the line, or `FAIL <label>: <why>`. Nothing else matches. The strict separator prevents a shorter check label from falsely matching a longer prefix label.
+
 ## Mechanics that bite
 
 - **Resolve the repo from `process.cwd()`.** A gate that hard-codes a path runs

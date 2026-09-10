@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import {
   B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_IMPL_FILE, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, B384_CORRECTED_FIND, B384_CORRECTED_REPLACE, B384_GREEN, B384_MUTATION, B384_RED, B384_REFACTORED_BUILDER, B384_REFACTORED_UNCORRECTED_BUILDER, B44_LEADLESS_CTX, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_PLAN, CHECK_RUNS, CONVERGE_CTX, CONVERGE_GATE, CONVERGE_PLAN, CTX, CTX_DIRECTED, CTX_REPAIR, DIRECTED_FILES, D_ASK, D_AUTO, ENVELOPE_FIELD_KINDS, EXECUTIONS, FAILURE_UPGRADE, GATE_REAP_CMD_EOF, GATE_REAP_SWEEP_MARKER, GATE_SUMMARY_PREFIX, HARDENING_MARKS, HARDENING_OUTCOMES, HARDENING_REFUSALS, MODIFIER_OUTCOMES, MUTATIONS_MAX, MUTATION_BINDING_FAILURES, MUTATION_OUTCOMES, PARTIAL_REVIEWED, RED, SENSITIVITY_FLOOR, SHAPE_MAJOR_PHASES, SHAPE_ROUNDED_STAGES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, UNIVERSAL_STAGE_HEADS, VALIDATION_LANE_UNLOADABLE, VARIANTS, VARIANT_NAMES, WRITE_SURFACES, applyMutationAnchor, applyPrescriptionLines, b127GatePaths, b127PidAlive, b318Builders, b318SiteA, b376Build, b376DiskProofIo, b376ProofIo, b376Review, b376StageStack, b384Io, b384RefactoredIo, b44AssertLeadlessGate, b44GatePlan, bindMutationAnchor, buildEnv, collapseStages, dispositionIo, driveTask, existsSync, fakeIo, fenceBase, fenceDiff, fenceSpan, gateReapCommand, gateReapFresh, gateReapOriginal, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, hardeningBounceLines, hardeningBriefLines, hardeningDebt, hardeningOf, join, laneFence, leadEnv, mutationChangesTokens, outOfScopeFiles, planEnv, protectedPlanEnv, readFileSync, resumeGreen, resumeRed, reviewConvergeRun, reviewEnv, reviewFindings, rmSync, s843Ctx, s843Io, s843PlanEnv, s843Rows, scopeMatcher, scopedPath, scratchDir, shapeDefect, spawnSync, stageShape, treeDigest, triageEnv, undeclaredStage, validateHardened, validateMutations, validationPlan, validationProbeRun, validationRows,
 } from './drive-fixtures.mjs'
-import { CHECK_MATCHES, HARDENING_APPEAL_SHAPE, HARDENING_CLASSES, hardeningAppealLines, hardeningAppealRequest, hardeningClassOf, mutationProofScope } from './drive.mjs'
+import { CHECK_MATCHES, HARDENING_APPEAL_SHAPE, HARDENING_CLASSES, LIMITS, hardeningAppealLines, hardeningAppealRequest, hardeningClassOf, mutationProofScope } from './drive.mjs'
 
 const proofScopeMutations = () => [
   { check: 'first', file: 'a.mjs' },
@@ -1399,6 +1399,201 @@ test('validateMutations accepts a mutation and exemption and rejects malformed d
   }
 })
 
+const triagedGateRepairBrief = () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-bad', mutations: [CHECK_MUTATION] } }),
+      'builder:1': buildEnv({ status: 'insufficient', summary: 'the gate is red and I cannot make it green' }),
+      'lead:1': leadEnv('bounce', 'continue to the triage threshold'),
+      'builder:2': buildEnv({ status: 'insufficient', summary: 'the gate is red and I cannot make it green' }),
+      'reviewer:1': { status: 'done', role: 'reviewer', details: { defect: 'gate', reason: 'the gate needs its delimiter doctrine' } },
+      'lead:2': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } },
+    },
+    runs: {
+      'gate-bad:1': { ok: false, output: RED(3) },
+      'gate-bad:2': { ok: false, output: RED(3) },
+      'gate-fixed': { ok: true, output: '' },
+    },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  try { driveTask(CTX, io) } catch { /* the brief is the assertion */ }
+  const brief = io.calls.writes[`${TD}/gate-repair-bounce.md`]
+  assert.equal(typeof brief, 'string')
+  return brief
+}
+
+test('A1 gate-authoring bounce briefs state both accepted FAIL label forms', () => {
+  const rule = /A failing check must print `FAIL <label>` ending the line, or `FAIL <label>: <why>`; nothing else matches\./
+  const planWithMutations = (gate_cmd = 'gate-cmd') => planEnv({ details: { ...planEnv().details, gate_cmd, mutations: [CHECK_MUTATION] } })
+  const green = `green\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":0,"errored":0}`
+  const red = RED(3)
+  const gateEnvelope = { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } }
+  const readBrief = (io, name) => {
+    try { driveTask(CTX, io) } catch { /* the brief is the assertion */ }
+    const brief = io.calls.writes[`${TD}/${name}.md`]
+    assert.equal(typeof brief, 'string')
+    assert.match(brief, rule)
+    assert.match(brief, /FAIL <label>/)
+    assert.match(brief, /FAIL <label>: <why>/)
+  }
+
+  readBrief(fakeIo({
+    files: { [CHECK_FILE]: CHECK_BUILT }, writeThrough: true, cleanRuns: CHECK_CLEAN,
+    envelopes: CHECK_ENVELOPES([CHECK_MUTATION], { 'lead:1': gateEnvelope }),
+    runs: {
+      ...CHECK_RUNS(`FAIL check-one — why\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":1,"errored":0}`),
+      'gate-fixed:1': { ok: true, output: green },
+      'gate-fixed:2': { ok: false, output: `FAIL check-one: why\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":1,"errored":0}` },
+    }, changed: ['a.mjs', 'a.test.mjs'], emit: true,
+  }), 'gate-discrimination-bounce')
+
+  readBrief(fakeIo({
+    envelopes: {
+      'planner:1': planWithMutations(), 'lead:1': gateEnvelope, 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    }, runs: { 'gate-cmd:1': { ok: true, output: 'green at baseline' }, 'gate-fixed:1': { ok: false, output: red } }, changed: ['a.mjs', 'a.test.mjs'],
+  }), 'gate-vacuous-bounce')
+
+  readBrief(fakeIo({
+    envelopes: {
+      'planner:1': planWithMutations(), 'lead:1': gateEnvelope, 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    }, runs: { 'gate-cmd:1': { ok: false, output: 'gate crashed before printing a summary' }, 'gate-fixed:1': { ok: false, output: red } }, changed: ['a.mjs', 'a.test.mjs'],
+  }), 'gate-defect-bounce')
+
+  const triagedBrief = triagedGateRepairBrief()
+  assert.match(triagedBrief, rule)
+  assert.match(triagedBrief, /FAIL <label>/)
+  assert.match(triagedBrief, /FAIL <label>: <why>/)
+})
+
+test('RV1-1 delimiter-only gate repair keeps its assignment on the gate custodian', () => {
+  const source = readFileSync(new URL('./drive.mjs', import.meta.url), 'utf8')
+  assert.match(source, /const rep = assignAndWait\(GATE_CUSTODIAN, b, 'gate-repair'\)\n        if \(!\(rep\.status === 'done' && rep\.details\?\.gate_cmd\)\) \{\n          stageComplete\(\)\n          return \{ escalation: gateEscalate\(`the gate delimiter could not be repaired/)
+  assert.doesNotMatch(source, /const gateRepairNote = 'gate-repair'/)
+})
+
+test('TL2 reviewer-triaged gate repair brief preserves the delimiter doctrine and stable identifiers', () => {
+  const rule = /A failing check must print `FAIL <label>` ending the line, or `FAIL <label>: <why>`; nothing else matches\./
+  const brief = triagedGateRepairBrief()
+  assert.match(brief, rule)
+  assert.match(brief, /KEEP YOUR CHECK IDENTIFIERS STABLE/)
+  assert.match(brief, /declaration is FIXED for the task: check-one\./)
+  assert.equal([...brief.matchAll(new RegExp(rule.source, 'g'))].length, 2)
+})
+
+test('C1 a misdelimited-only repair preserves the discretionary repair budget', () => {
+  const first = { check: 'first', file: 'a.mjs', find: 'true', replace: 'false' }
+  const second = { check: 'C1', file: 'b.mjs', find: 'true', replace: 'false' }
+  const green = `green\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":0,"errored":0}`
+  const killed = (label) => `FAIL ${label}: caught\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":1,"errored":0}`
+  const misdelimited = `FAIL C1 — why\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":1,"errored":0}`
+  const outputs = []
+  const io = fakeIo({
+    files: { [`${CTX.checkout}/a.mjs`]: CHECK_BUILT, [`${CTX.checkout}/b.mjs`]: CHECK_BUILT }, writeThrough: true,
+    cleanRuns: CHECK_CLEAN,
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, files_in_scope: ['a.mjs', 'b.mjs'], gate_cmd: 'gate-cmd', mutations: [first, second] } }),
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+      'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } },
+    },
+    runs: {
+      'gate-cmd:1': { ok: false, output: RED(3) }, 'gate-cmd:2': { ok: true, output: green },
+      'gate-cmd:3': { ok: false, output: killed('first') }, 'gate-cmd:4': { ok: false, output: misdelimited },
+      'gate-fixed:1': { ok: true, output: green }, 'gate-fixed:2': { ok: false, output: killed('first') },
+      'gate-fixed:3': { ok: false, output: `FAIL C1: why\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":1,"errored":0}` },
+    }, changed: ['a.mjs', 'b.mjs'], emit: true,
+  })
+  const originalRun = io.run
+  io.run = function (cmd) {
+    const result = originalRun.call(this, cmd)
+    if (String(cmd).includes('gate-cmd') || String(cmd).includes('gate-fixed')) outputs.push(String(result?.output || ''))
+    return result
+  }
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.equal(res.details.gate.repairs, 0)
+  const proofs = io.calls.emits.filter((event) => event.kind === 'check-discrimination')
+  assert.equal(proofs.length, 2)
+  assert.equal(proofs[0].checks.find(({ check }) => check === 'first').outcome, 'killed')
+  assert.equal(proofs[0].checks.find(({ check }) => check === 'C1').match, 'misdelimited')
+  const terminal = proofs.at(-1).checks
+  assert.deepEqual(terminal.map(({ check, outcome, match, proof, measured_generation }) => ({ check, outcome, match, proof, measured_generation })), [
+    { check: 'first', outcome: 'killed', match: 'matched', proof: 'fresh', measured_generation: 1 },
+    { check: 'C1', outcome: 'killed', match: 'matched', proof: 'fresh', measured_generation: 1 },
+  ])
+  assert.equal(io.calls.emits.filter((event) => event.kind === 'gate' && event.name === 'gate-proof:1:checks:m1').length, 2)
+  assert.equal(io.calls.emits.filter((event) => event.kind === 'gate' && event.name === 'gate-proof:1:checks:m2').length, 2)
+  assert.ok(outputs.some((output) => output.includes('FAIL C1: why')))
+})
+
+test('D1 genuine gate defects retain the one-repair and pristine-run bounds', () => {
+  const mutation = { ...CHECK_MUTATION, check: 'D1' }
+  const green = `green\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":0,"errored":0}`
+  const io = fakeIo({
+    files: { [CHECK_FILE]: CHECK_BUILT }, writeThrough: true,
+    cleanRuns: { 'gate-cmd': { ok: false, output: RED(3) }, 'gate-fixed': { ok: false, output: RED(3) } },
+    envelopes: {
+      'planner:1': CHECK_PLAN([mutation]), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+      'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } },
+    },
+    runs: {
+      'gate-cmd:1': { ok: false, output: RED(3) }, 'gate-cmd:2': { ok: true, output: green },
+      'gate-cmd:3': { ok: true, output: green }, 'gate-fixed:1': { ok: true, output: green },
+      'gate-fixed:2': { ok: false, output: `FAIL other: caught\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":1,"errored":0}` },
+    }, changed: ['a.mjs', 'a.test.mjs'], emit: true,
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(LIMITS.gate_repairs, 1)
+  assert.equal(res.status, 'escalation')
+  assert.equal(res.details.gate.repairs, 1)
+  assert.equal(io.calls.runClean.length, 2)
+  assert.ok(io.calls.runClean.length <= 2)
+  assert.equal(io.calls.assign.filter(({ role, note }) => role === 'lead' && note === 'gate-repair').length, 1)
+  assert.match(res.details.escalation.why, /single gate repair is spent/)
+})
+
+test('F1 a spent discretionary budget cannot preempt an available delimiter repair', () => {
+  const mutation = { ...CHECK_MUTATION, check: 'F1' }
+  const green = `green\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":0,"errored":0}`
+  const misdelimited = `FAIL F1 — why\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":1,"errored":0}`
+  const corrected = `FAIL F1: why\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":1,"errored":0}`
+  const outputs = []
+  const io = fakeIo({
+    files: { [CHECK_FILE]: CHECK_BUILT }, writeThrough: true,
+    cleanRuns: { 'gate-cmd': { ok: false, output: RED(3) }, 'gate-fixed': { ok: false, output: RED(3) } },
+    envelopes: {
+      'planner:1': CHECK_PLAN([mutation]), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+      'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } },
+      'lead:2': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } },
+    },
+    runs: {
+      'gate-cmd:1': { ok: false, output: RED(3) }, 'gate-cmd:2': { ok: true, output: green },
+      'gate-cmd:3': { ok: true, output: green }, 'gate-fixed:1': { ok: true, output: green },
+      'gate-fixed:2': { ok: false, output: misdelimited }, 'gate-fixed:3': { ok: true, output: green },
+      'gate-fixed:4': { ok: false, output: corrected },
+    }, changed: ['a.mjs', 'a.test.mjs'], emit: true,
+  })
+  const originalRun = io.run
+  io.run = function (cmd) {
+    const result = originalRun.call(this, cmd)
+    if (String(cmd).includes('gate-cmd') || String(cmd).includes('gate-fixed')) outputs.push(String(result?.output || ''))
+    return result
+  }
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.equal(res.details.gate.repairs, 1)
+  assert.equal(io.calls.runClean.length, 2)
+  assert.equal(io.calls.assign.filter(({ role, note }) => role === 'lead' && note === 'gate-repair').length, 2)
+  assert.equal(io.calls.writes[`${TD}/gate-discrimination-bounce.md`].includes('F1'), true)
+  assert.ok(io.calls.writes[`${TD}/gate-discrimination-bounce.md`].includes('nothing else matches.'))
+  assert.ok(outputs.includes(misdelimited))
+  assert.ok(outputs.includes(corrected))
+  const final = io.calls.emits.filter((event) => event.kind === 'check-discrimination').at(-1).checks[0]
+  assert.deepEqual({ check: final.check, outcome: final.outcome, match: final.match, proof: final.proof, measured_generation: final.measured_generation }, {
+    check: 'F1', outcome: 'killed', match: 'matched', proof: 'fresh', measured_generation: 2,
+  })
+  assert.equal(res.details.escalation, null)
+})
+
 test('a present-but-misdelimited FAIL label is diagnosed as a delimiter, not an absent print', () => {
   for (const [label, output] of [['C1', 'FAIL C1 — why'], ['check-one', 'FAIL check-one why']]) {
     const mutation = { ...CHECK_MUTATION, check: label }
@@ -1456,11 +1651,16 @@ test('the delimiter diagnosis reaches the escalation record', () => {
   const io = fakeIo({
     files: { [CHECK_FILE]: CHECK_BUILT }, writeThrough: true,
     cleanRuns: { ...CHECK_CLEAN, 'gate-fixed': { ok: false, output: RED(3) } },
-    envelopes: CHECK_ENVELOPES([mutation], { 'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } } }),
+    envelopes: CHECK_ENVELOPES([mutation], {
+      'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } },
+      'lead:2': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } },
+    }),
     runs: {
-      ...CHECK_RUNS(`${output}\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":1,"errored":0}`),
+      ...CHECK_RUNS(`green\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":0,"errored":0}`),
       'gate-fixed:1': { ok: true, output: `green\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":0,"errored":0}` },
       'gate-fixed:2': { ok: false, output: `${output}\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":1,"errored":0}` },
+      'gate-fixed:3': { ok: true, output: `green\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":0,"errored":0}` },
+      'gate-fixed:4': { ok: false, output: `${output}\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":1,"errored":0}` },
     },
     changed: ['a.mjs', 'a.test.mjs'], emit: true,
   })

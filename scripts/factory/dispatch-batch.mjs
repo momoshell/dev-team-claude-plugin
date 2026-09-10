@@ -275,6 +275,12 @@ export const BAND_FLOOR_REASONS = Object.freeze([
 // pair is READ out of the compiler's own ```proposal block — never re-derived here,
 // because a second derivation is a second answer to a question already answered.
 export const DISPATCH_RECORD_SUFFIX = '.dispatch.json'
+const SPELLING_UNMEASURED_REASON = 'dispatch_record_predates_operator_spelling'
+const OPERATOR_SPELLINGS = Object.freeze({
+  execution: Object.freeze(['--execution', '--variant', 'dispatcher_default']),
+  assurance: Object.freeze(['--assurance', '--tier', 'dispatcher_default']),
+})
+const OPERATOR_SPELLING_AXES = Object.freeze(['execution', 'assurance'])
 // Absence is not zero: a brief carrying no proposal block records null, never a
 // stand-in shape. The word the log prints for that null.
 export const STAFFING_ABSENT = 'absent'
@@ -923,6 +929,48 @@ function plainObject(value) {
   return prototype === Object.prototype || prototype === null
 }
 
+function unmeasuredOperatorSpelling() {
+  return { spelling: null, unmeasured_reason: SPELLING_UNMEASURED_REASON }
+}
+
+export function readDispatchOperatorSpelling(record) {
+  const operatorSpelling = plainObject(record) && Object.hasOwn(record, 'operator_spelling') && plainObject(record.operator_spelling)
+    ? record.operator_spelling
+    : null
+  return Object.fromEntries(OPERATOR_SPELLING_AXES.map((axis) => {
+    const cell = operatorSpelling && Object.hasOwn(operatorSpelling, axis) ? operatorSpelling[axis] : null
+    if (!plainObject(cell) || !Object.hasOwn(cell, 'spelling') || !Object.hasOwn(cell, 'unmeasured_reason')) {
+      return [axis, unmeasuredOperatorSpelling()]
+    }
+    const measured = OPERATOR_SPELLINGS[axis].includes(cell.spelling) && cell.unmeasured_reason === null
+    const preField = cell.spelling === null && cell.unmeasured_reason === SPELLING_UNMEASURED_REASON
+    return [axis, measured || preField
+      ? { spelling: cell.spelling, unmeasured_reason: cell.unmeasured_reason }
+      : unmeasuredOperatorSpelling()]
+  }))
+}
+
+export function aliasUsageFromDispatchRecords(records) {
+  const aliases = { execution: '--variant', assurance: '--tier' }
+  const dispatchRecords = Array.isArray(records) ? records : []
+  const usage = {}
+  for (const axis of OPERATOR_SPELLING_AXES) {
+    let aliasSpelled = 0
+    let unmeasuredDispatches = 0
+    for (const record of dispatchRecords) {
+      const cell = readDispatchOperatorSpelling(record)[axis]
+      if (cell.spelling === null) unmeasuredDispatches += 1
+      else if (cell.spelling === aliases[axis]) aliasSpelled += 1
+    }
+    usage[axis] = {
+      alias_spelled: unmeasuredDispatches === 0 ? aliasSpelled : null,
+      total_dispatches: dispatchRecords.length,
+      unmeasured_dispatches: unmeasuredDispatches,
+    }
+  }
+  return usage
+}
+
 function usableTurnCensus(value) {
   if (!plainObject(value) || value.role !== 'builder') return false
   if (!Number.isFinite(value.turns) || value.turns <= 0) return false
@@ -1024,6 +1072,8 @@ function splitDispatchKeys(parsed, requestPath) {
   const variantSupplied = dispatch.variant !== undefined && dispatch.variant !== null
   const tierSupplied = dispatch.tier !== undefined && dispatch.tier !== null
   const assuranceSupplied = dispatch.assurance !== undefined && dispatch.assurance !== null
+  const executionSpelling = variantSupplied ? '--variant' : executionSupplied ? '--execution' : 'dispatcher_default'
+  const assuranceSpelling = tierSupplied ? '--tier' : assuranceSupplied ? '--assurance' : 'dispatcher_default'
   const resolveForRequest = (resolver, values) => {
     try {
       return resolver(values)
@@ -1060,6 +1110,8 @@ function splitDispatchKeys(parsed, requestPath) {
     request,
     execution,
     assurance,
+    executionSpelling,
+    assuranceSpelling,
     executionFromVariant: variantSupplied,
     assuranceFromTier: tierSupplied,
     variantSupplied,
@@ -1097,7 +1149,7 @@ export function readBatch({ batchDir, deps } = {}) {
     } catch (err) {
       refuse(`cannot read or validate request ${requestPath}: ${err?.message || String(err)}`, BATCH_UNREADABLE)
     }
-    const { dispatch, request, execution, assurance, executionFromVariant, assuranceFromTier, variantSupplied, tierSupplied } = splitDispatchKeys(parsed, requestPath)
+    const { dispatch, request, execution, assurance, executionSpelling, assuranceSpelling, executionFromVariant, assuranceFromTier, variantSupplied, tierSupplied } = splitDispatchKeys(parsed, requestPath)
     try {
       validateRequest(request, { taskName: lane })
     } catch (err) {
@@ -1109,6 +1161,8 @@ export function readBatch({ batchDir, deps } = {}) {
       request,
       execution: execution ?? null,
       assurance: assurance ?? null,
+      executionSpelling,
+      assuranceSpelling,
       executionFromVariant,
       assuranceFromTier,
       variantSupplied,
@@ -3290,6 +3344,18 @@ export function batchAliasWarnings({ lanes = [], runFlags = {} } = {}) {
   return warnings
 }
 
+function rawRunFlagSupplied(runFlags, field) {
+  return runFlags !== null && typeof runFlags === 'object'
+    && Object.hasOwn(runFlags, field)
+    && runFlags[field] !== undefined && runFlags[field] !== null
+}
+
+function runFlagSpelling(runFlags, canonicalField, aliasField, canonicalSpelling, aliasSpelling) {
+  return rawRunFlagSupplied(runFlags, aliasField) ? aliasSpelling
+    : rawRunFlagSupplied(runFlags, canonicalField) ? canonicalSpelling
+      : 'dispatcher_default'
+}
+
 function prepareDispatchContext(options) {
   let {
     batchDir,
@@ -3308,6 +3374,8 @@ function prepareDispatchContext(options) {
   const plannerSymbolsHoldoutFraction = parsePlannerSymbolsHoldoutFraction(runFlags['planner-symbols-holdout-fraction'])
   const d = normalDeps(deps)
   const transport = resolveTransport({ runFlags })
+  const batchExecutionSpelling = runFlagSpelling(runFlags, 'execution', 'variant', '--execution', '--variant')
+  const batchAssuranceSpelling = runFlagSpelling(runFlags, 'assurance', 'tier', '--assurance', '--tier')
   execution = execution ?? runFlags.execution ?? variant ?? runFlags.variant
   if (tier === undefined || tier === null) tier = resolveRequestedTier({ tier: runFlags.tier, assurance: runFlags.assurance })
   const lanes = readBatch({ batchDir, deps: d })
@@ -3428,6 +3496,8 @@ function prepareDispatchContext(options) {
     runFlags,
     deps,
     plannerSymbolsHoldoutFraction,
+    batchExecutionSpelling,
+    batchAssuranceSpelling,
     d,
     transport,
     lanes,
@@ -3467,6 +3537,8 @@ async function compileDispatchWave(prepared) {
     registerPath,
     batchSeats,
     plannerSymbolsHoldoutFraction,
+    batchExecutionSpelling,
+    batchAssuranceSpelling,
     plans,
   } = prepared
 
@@ -3577,6 +3649,8 @@ async function compileDispatchWave(prepared) {
     const seats = mergeSeats(batchSeats, laneEntry?.seats)
     const laneAssuranceSupplied = laneEntry?.assurance !== undefined && laneEntry?.assurance !== null
     const laneExecutionSupplied = laneEntry?.execution !== undefined && laneEntry?.execution !== null
+    const laneExecutionSpelling = laneExecutionSupplied ? laneEntry.executionSpelling : batchExecutionSpelling
+    const laneAssuranceSpelling = laneAssuranceSupplied ? laneEntry.assuranceSpelling : batchAssuranceSpelling
     const result = reconcileTier({ lane: item.lane, forced: floor.forced || prompt.forced, proposed: item.proposed, requested, requestedFrom: laneAssuranceSupplied ? 'lane' : 'batch', forceReason: floor.forced ? TIER_FLOOR_CONFLICT : PROMPT_SURFACE_CONFLICT })
     if (!result.tier) refuse(`lane ${item.lane} has no known tier to boot`, BOOT_FAILED)
     d.log(`dispatch-batch: lane=${item.lane} forced=${floor.forced || 'none'} prompt=${prompt.promptChange ? 'change' : 'code-only'} proposed=${item.proposed || 'none'} requested=${requested || 'none'} requested_from=${laneAssuranceSupplied ? 'lane' : (tier ? 'batch' : 'none')} execution=${laneExecution || 'none'} execution_from=${laneExecutionSupplied ? 'lane' : (execution ? 'batch' : 'none')} variant=${laneVariant || 'none'} variant_from=${laneExecutionSupplied ? 'lane' : (execution ? 'batch' : 'none')} settled=${result.tier} seats=${seatSpec(seats)} seats_from=${seatFromSpec(batchSeats, laneEntry?.seats)} shape=${staffing.shape || STAFFING_ABSENT} strength=${staffing.strength || STAFFING_ABSENT} misclassified=${staffing.misclassification ? 'true' : 'false'} brief_bytes=${item.bytes} top_section=${sectionToken(item.topSection)}${overrideNote(result)} granularity=${fenceGranularity(laneFence.files)}`)
@@ -3599,6 +3673,10 @@ async function compileDispatchWave(prepared) {
         overrode_proposal: result.overrodeProposal === true,
       },
       seats: seatChain(batchSeats, laneEntry?.seats),
+      operator_spelling: {
+        execution: { spelling: laneExecutionSpelling, unmeasured_reason: null },
+        assurance: { spelling: laneAssuranceSpelling, unmeasured_reason: null },
+      },
       execution: laneExecution || null,
       variant: laneVariant || null,
       brief: item.brief,

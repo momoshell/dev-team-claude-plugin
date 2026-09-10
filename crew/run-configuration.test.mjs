@@ -241,6 +241,35 @@ test('resolution constants are closed and every resolved source is declared', ()
   }
 })
 
+test('E1', () => {
+  const expected = [
+    'explicit', 'alias', 'profile_recommendation', 'migration_default', 'legacy_missing',
+  ]
+  assert.deepEqual(RESOLUTION_SOURCES, expected)
+  assert.equal(Object.isFrozen(RESOLUTION_SOURCES), true)
+  assert.equal(new Set(RESOLUTION_SOURCES).size, expected.length)
+
+  const canonical = resolve({ execution: 'directed', assurance: 'rigorous' })
+  assert.equal(canonical.execution.source, 'explicit')
+  assert.equal(canonical.assurance.source, 'explicit')
+
+  const alias = resolve({ variant: 'directed', tier: 'build' })
+  assert.equal(alias.execution.source, 'alias')
+  assert.equal(alias.assurance.source, 'alias')
+
+  const recommendation = resolve({ profile: 'implementation' })
+  assert.equal(recommendation.execution.source, 'profile_recommendation')
+  assert.equal(recommendation.assurance.source, 'migration_default')
+
+  const defaults = resolve({})
+  assert.equal(defaults.execution.source, 'migration_default')
+  assert.equal(defaults.assurance.source, 'migration_default')
+
+  const legacy = resolve({ profile: null })
+  assert.equal(legacy.profile.source, 'legacy_missing')
+  for (const axis of [legacy.execution, legacy.assurance]) assert.equal(axis.source, 'migration_default')
+})
+
 test('execution status is derived from injected variant names, not declaration literals', () => {
   const withPendingShape = {
     ...declarations,

@@ -121,6 +121,7 @@ import {
   resolveRequestedTier,
 } from '../scripts/factory/dispatch-batch.mjs'
 import { parseDirectedBrief, WAITS_S } from '../crew/drive.mjs'
+import { partitionShifts } from '../skills/qa-test-writing/anchor-pin.mjs'
 import { laneFenceFor, renderBrief, resolveWriteSurface } from '../scripts/factory/make-brief.mjs'
 import { DRIVER_GONE_PERIODS, HEARTBEAT_PERIOD_MS } from '../scripts/factory/lane-watch.mjs'
 import { scratchDir } from './helpers.mjs'
@@ -1421,6 +1422,70 @@ test('checkFences inherits an overlap only across its declared edge', () => {
   const unrelatedFences = [...fences, entry('lane-c', ['crew/shared.mjs'])]
   const unrelatedGraph = planWaves({ lanes: unrelated }).graph
   refusal(() => checkFences({ fences: unrelatedFences, lanes: unrelated, graph: unrelatedGraph }), 'sibling-leak')
+})
+
+test('D1 distinguishes untouched pins from pinned files the lane writes', () => {
+  assert.ok(ANCHOR_PIN_POST_MERGE.includes('a manifest pinning only files this lane does not write is not an obligation on this lane'))
+  assert.ok(ANCHOR_PIN_POST_MERGE.includes('a lane that writes the pinned file WILL owe the repair'))
+  assert.ok(ANCHOR_PIN_POST_MERGE.includes('cannot reach it until the pinning manifest is added to its fence'))
+  assert.equal(ANCHOR_PIN_POST_MERGE.includes('so a pinning manifest outside this fence is not an obligation on this lane'), false)
+})
+
+test('H1 pins the partitionShifts two-case truth table the doctrine constant claims', () => {
+  const manifest = 'skills/example/anchors.json'
+  const shifted = [{ rel: 'crew/pinned.mjs' }]
+  assert.deepEqual(partitionShifts({
+    shifted,
+    fence: [manifest, shifted[0].rel],
+    manifest,
+  }), { inFence: shifted, outOfFence: [] })
+  assert.deepEqual(partitionShifts({
+    shifted,
+    fence: [shifted[0].rel],
+    manifest,
+  }), { inFence: [], outOfFence: shifted })
+  assert.deepEqual(partitionShifts({
+    shifted,
+    fence: [manifest],
+    manifest,
+  }), { inFence: [], outOfFence: shifted })
+})
+
+test('F1 warns without refusing dispatch', async () => {
+  const checkout = gitFixture()
+  const file = 'crew/owned.mjs'
+  const manifest = ['skills', 'backend-node', 'anchors.json'].join('/')
+  put(join(checkout, ...file.split('/')), 'export const OWNED = 1\n')
+  anchorFixtures(checkout, { 'backend-node': { 'crew/owned.mjs:1': 'export const OWNED = 1' } })
+  const batch = join(checkout, 'f1-batch')
+  const outDir = join(checkout, 'f1-out')
+  mkdirSync(batch)
+  put(join(batch, `lane-a${REQUEST_SUFFIX}`), JSON.stringify(request('measure anchor warning', [file])))
+  let result
+  await assert.doesNotReject(async () => {
+    result = await dispatchBatch({
+      batchDir: batch,
+      fences: [entry('lane-a', [file])],
+      checkout,
+      parentDir: join(checkout, 'f1-parent'),
+      outDir,
+      runFlags: { 'dry-run': true },
+      deps: {
+        home: root,
+        env: { DEVTEAM_LEDGER_DIR: root },
+        existsSync: (path) => String(path).endsWith('anchors.json') ? fsExistsSync(path) : false,
+        spawn: () => ({ status: 1, stdout: '', stderr: '' }),
+        log: () => {},
+      },
+    })
+  })
+  assert.equal(result.dryRun, true)
+  const warning = result.fences.warnings.find(({ kind }) => kind === 'anchor-pin')
+  assert.ok(warning)
+  assert.equal(warning.kind, 'anchor-pin')
+  const persisted = JSON.parse(readFileSync(join(outDir, FENCE_REPORT_FILE), 'utf8'))
+  assert.deepEqual(persisted.lanes[0].anchor_pins, warning.pins)
+  assert.equal(persisted.lanes[0].anchor_pins[0].manifest, manifest)
 })
 
 test('trips-and-dispatches: an unfenced anchor scan returns with the per-lane report intact', () => {

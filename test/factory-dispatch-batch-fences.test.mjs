@@ -2057,6 +2057,72 @@ DIRECT && test('checkFences pins own coverage, register membership, and scope en
   }), 'scope-entry-invalid')
 })
 
+DIRECT && test('A1 warns for a pinned file in the write surface when its manifest is unfenced', () => {
+  const checkout = join(root, 'anchor-warning-a1-checkout')
+  const file = 'crew/owned.mjs'
+  const manifest = 'skills/backend-node/anchors.json'
+  put(join(checkout, ...file.split('/')), 'export const OWNED = 1\n')
+  anchorFixtures(checkout, { 'backend-node': { 'crew/owned.mjs:1': 'export const OWNED = 1' } })
+  const report = checkFences({
+    fences: [entry('lane-a', [file])],
+    lanes: [{ lane: 'lane-a', where: [file] }],
+    checkout,
+    deps: { home: root, log: () => {} },
+  })
+  const warnings = report.warnings.filter(({ kind }) => kind === 'anchor-pin')
+  assert.equal(warnings.length, 1)
+  assert.ok(warnings[0].text.includes(manifest))
+  assert.ok(warnings[0].text.includes('WILL owe the repair'))
+  assert.ok(warnings[0].text.includes('cannot reach it'))
+})
+
+DIRECT && test('B1 stays silent when the pinning manifest is fenced', () => {
+  const checkout = join(root, 'anchor-warning-b1-checkout')
+  const file = 'crew/owned.mjs'
+  const manifest = 'skills/backend-node/anchors.json'
+  put(join(checkout, ...file.split('/')), 'export const OWNED = 1\n')
+  anchorFixtures(checkout, { 'backend-node': { 'crew/owned.mjs:1': 'export const OWNED = 1' } })
+  const report = checkFences({
+    fences: [entry('lane-a', [file, manifest])],
+    lanes: [{ lane: 'lane-a', where: [file] }],
+    checkout,
+    deps: { home: root, log: () => {} },
+  })
+  assert.equal(report.warnings.some(({ kind }) => kind === 'anchor-pin'), false)
+})
+
+DIRECT && test('C1 stays silent when the write surface contains no pinned file', () => {
+  const checkout = join(root, 'anchor-warning-c1-checkout')
+  const file = 'crew/owned.mjs'
+  put(join(checkout, ...file.split('/')), 'export const OWNED = 1\n')
+  const fences = [entry('lane-a', [file])]
+  const lanes = [{ lane: 'lane-a', where: [file] }]
+  const before = checkFences({ fences, lanes, checkout, deps: { home: root, log: () => {} } })
+  anchorFixtures(checkout, { 'backend-node': { 'crew/untouched.mjs:1': 'export const UNTOUCHED = 1' } })
+  const after = checkFences({ fences, lanes, checkout, deps: { home: root, log: () => {} } })
+  assert.equal(before.warnings.some(({ kind }) => kind === 'anchor-pin'), false)
+  assert.equal(after.warnings.some(({ kind }) => kind === 'anchor-pin'), false)
+  assert.deepEqual(after.perLane, before.perLane)
+})
+
+DIRECT && test('G1 replays the b593 crew drive manifest collision', () => {
+  const checkout = gitFixture()
+  const file = 'crew/drive.mjs'
+  const manifest = 'skills/crew-recovery/anchors.json'
+  put(join(checkout, ...file.split('/')), 'export const DRIVE = 1\n')
+  anchorFixtures(checkout, { 'crew-recovery': { 'crew/drive.mjs:1': 'export const DRIVE = 1' } })
+  const report = checkFences({
+    fences: [entry('lane-a', [file])],
+    lanes: [{ lane: 'lane-a', where: [file] }],
+    checkout,
+    deps: { home: root, log: () => {} },
+  })
+  const warning = report.warnings.find(({ kind }) => kind === 'anchor-pin')
+  assert.ok(warning)
+  assert.ok(warning.text.includes(manifest))
+  assert.ok(warning.text.includes('added to its fence'))
+})
+
 DIRECT && test('an anchor warning names both pinned files, all manifests, and every line key', () => {
   const checkout = join(root, 'anchor-warning-details-checkout')
   const fixture = warningFixture(checkout)

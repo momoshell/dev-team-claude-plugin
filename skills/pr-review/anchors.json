@@ -8,7 +8,7 @@
   "crew/roles/reviewer.md:16": "Out-of-plan edits are findings even when harmless.",
   "crew/drive.mjs:2889": "for (const match of narration.matchAll(/[A-Za-z0-9_.-]+\\/[A-Za-z0-9_./-]+/g)) {",
   "crew/drive.mjs:1975": "export function validateScopeEntries(entries) {",
-  "crew/drive.mjs:6700": "const panelResult = runPanelReview({ round: roundNo, panel, io, dissents: S.dissents, setAcceptFindings: (value) => { S.acceptFindings = value }, setLastReview: (value) => { S.lastReview = value }, planPath, panelBriefText, panelStandingQuestion, art, stage, stageComplete, assignAndWait, carriedOpen, panelLog, panelDegraded, emit })",
+  "crew/drive.mjs:6748": "panelResult = runPanelReview({ round: roundNo, panel, io, dissents: S.dissents, setAcceptFindings: (value) => { S.acceptFindings = value }, setLastReview: (value) => { S.lastReview = value }, planPath, panelBriefText, panelStandingQuestion, art, stage, stageComplete, assignAndWait, carriedOpen, panelLog, panelDegraded, emit })",
   "crew/drive.mjs:6212": "const panel = ctx.continuation === true ? panelSeats(seatList) : null",
   "crew/drive.mjs:690": "export function panelSeats(seated) {",
   "crew/drive.mjs:3133": "function runPanelReview({ round, panel, io, dissents, setAcceptFindings, setLastReview, planPath, panelBriefText, panelStandingQuestion, art, stage, stageComplete, assignAndWait, carriedOpen, panelLog, panelDegraded, emit }) {",

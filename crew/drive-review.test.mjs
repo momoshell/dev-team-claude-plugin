@@ -4,9 +4,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  ACCEPT_FINDINGS, ACCEPT_FINDINGS_SOFT, ACCEPT_REASKS, adversarialPlanEnv, ACCEPT_REFUSALS, B318_GATED_RUNS, B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, CENSUS_ABSENT_REASONS, CENSUS_ROW_ABSENT, CENSUS_TURNS_ABSENT, CENSUS_UNREADABLE, CLOBBER_R2, CONVERGE_GATE, CONVERGE_PLAN, CRASH_FINDINGS, CRASH_STAGES, CTX, CTX_REPAIR, CTX_TL, DECISIONS, D_ASK, D_AUTO, D_COLLISION_CTX, D_PANEL_CTX, D_PATCH_A, D_PATCH_B, ENVELOPE_REFUSAL_REASONS, FINDING_DISPOSITIONS, LIMITS, MUST_FIX_REFUTATION_FINDINGS, NAME_VERDICTS, PANEL_ADJUDICATORS, PANEL_PARTNERS, PERSPECTIVE_TARGETS, PLAN_CHECK_FINDINGS, PLAN_RESIDUAL, PLAN_SCOPE, PLAN_SCOPE_VERDICTS, RED, REFUTATION_CLAIM, REFUTATION_CONVERGE_PLAN, REFUTATION_CONVERGE_RUNS, REFUTATION_EVIDENCE_MAX, RESIDUAL_TYPES, REVIEW_FINDINGS, REVIEW_GATE_PASS, S843_ADDED, S843_D2, S843_DISPATCHED, S843_DROPPED, S843_NARROWED, S843_RUNS, SECOND_OPINION, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, VARIANTS, acceptBounceLines, acceptContractLines, acceptedRawById, assertDriverIdRefusal, b127GroupCommand, b127InvokeGate, b127Lines, b127PidAlive, b127Spy, b318Builders, b318GatedPlan, b318Options, b318ReviewGrants, b318SiteA, b318SiteB, b376ProofIo, bounceTargetOf, buildEnv, checkEnv, classCollisionIo, closeoutIo, crashRun, dAdjEnv, dAutoRows, dBuilders, dDecisionBrief, dGitApplies, dLeads, dOffers, dPanelOutcomes, dPartnerEnv, dPatchWrite, dPlanEnv, dRemintRows, dReviewEnv, dispositionIo, dispositionOf, dispositionPanelIo, dispositionPlan, divergentCollisionIo, divergentPlanScenario, driveTask, envelopeDefect, envelopeFieldsPresent, exhaustionAcceptIo, fakeIo, findingIdDefect, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, join, leadEnv, legacyReviewerExemptions, nameVerdict, observeTurnCensus, panelSeats, phaseTrace, planAcceptContractLines, planCheckAcceptIo, planEnv, planRevisionRun, planScopeVerdict, planThenReviewIo, protectedPlanEnv, protectedReseatRefusal, publicationIo, readFileSync, reconEnv, regrantVerdict, resolveValidationLane, reviewConvergeRun, reviewEnv, reviewFindings, reviewOutcome, reviewShapeDefect, rmSync, roundCursor, s843Ctx, s843Io, s843PlanEnv, s843Rows, scratchDir, shapeDefect, slotCtx, slotFactory, spawnSync, staleVerdictLines, triageEnv, turnCeilingBreached, twoRoundReviewIo, validateAcceptDecision, validateCarve, validatePlanResiduals, validateScopeEntries, validationPlan, validationProbeRun, validationRows, verdictFindingsDefect, writeFileSync,
+  ACCEPT_FINDINGS, ACCEPT_FINDINGS_SOFT, ACCEPT_REASKS, adversarialPlanEnv, ACCEPT_REFUSALS, B318_GATED_RUNS, B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, CENSUS_ABSENT_REASONS, CENSUS_ROW_ABSENT, CENSUS_TURNS_ABSENT, CENSUS_UNREADABLE, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_MUTATION, CHECK_RUNS, CLOBBER_R2, CONVERGE_GATE, CONVERGE_PLAN, CRASH_FINDINGS, CRASH_STAGES, CTX, CTX_REPAIR, CTX_TL, DECISIONS, D_ASK, D_AUTO, D_COLLISION_CTX, D_PANEL_CTX, D_PATCH_A, D_PATCH_B, ENVELOPE_REFUSAL_REASONS, FINDING_DISPOSITIONS, LIMITS, MUST_FIX_REFUTATION_FINDINGS, NAME_VERDICTS, PANEL_ADJUDICATORS, PANEL_PARTNERS, PERSPECTIVE_TARGETS, PLAN_CHECK_FINDINGS, PLAN_RESIDUAL, PLAN_SCOPE, PLAN_SCOPE_VERDICTS, RED, REFUTATION_CLAIM, REFUTATION_CONVERGE_PLAN, REFUTATION_CONVERGE_RUNS, REFUTATION_EVIDENCE_MAX, RESIDUAL_TYPES, REVIEW_FINDINGS, REVIEW_GATE_PASS, S843_ADDED, S843_D2, S843_DISPATCHED, S843_DROPPED, S843_NARROWED, S843_RUNS, SECOND_OPINION, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, VARIANTS, acceptBounceLines, acceptContractLines, acceptedRawById, assertDriverIdRefusal, b127GroupCommand, b127InvokeGate, b127Lines, b127PidAlive, b127Spy, b318Builders, b318GatedPlan, b318Options, b318ReviewGrants, b318SiteA, b318SiteB, b376ProofIo, bounceTargetOf, buildEnv, checkEnv, classCollisionIo, closeoutIo, crashRun, dAdjEnv, dAutoRows, dBuilders, dDecisionBrief, dGitApplies, dLeads, dOffers, dPanelOutcomes, dPartnerEnv, dPatchWrite, dPlanEnv, dRemintRows, dReviewEnv, dispositionIo, dispositionOf, dispositionPanelIo, dispositionPlan, divergentCollisionIo, divergentPlanScenario, driveTask, envelopeDefect, envelopeFieldsPresent, exhaustionAcceptIo, fakeIo, findingIdDefect, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, join, leadEnv, legacyReviewerExemptions, nameVerdict, observeTurnCensus, panelSeats, phaseTrace, planAcceptContractLines, planCheckAcceptIo, planEnv, planRevisionRun, planScopeVerdict, planThenReviewIo, protectedPlanEnv, protectedReseatRefusal, publicationIo, readFileSync, reconEnv, regrantVerdict, resolveValidationLane, reviewConvergeRun, reviewEnv, reviewFindings, reviewOutcome, reviewShapeDefect, rmSync, roundCursor, s843Ctx, s843Io, s843PlanEnv, s843Rows, scratchDir, shapeDefect, slotCtx, slotFactory, spawnSync, staleVerdictLines, triageEnv, turnCeilingBreached, twoRoundReviewIo, validateAcceptDecision, validateCarve, validatePlanResiduals, validateScopeEntries, validationPlan, validationProbeRun, validationRows, verdictFindingsDefect, writeFileSync,
 } from './drive-fixtures.mjs'
-import { planScopeWhy, scopeSuggestions } from './drive.mjs'
+import { planScopeWhy, scopeSuggestions, VACUITY_CLAIMS, vacuityFindingDefect } from './drive.mjs'
 
 test('a plan-check accept records the residual the lead named', () => {
   const io = planCheckAcceptIo({ residuals: [PLAN_RESIDUAL] })
@@ -1835,7 +1835,7 @@ test('scout rejects envelopes that do not match its declared shape', () => {
 
 test('the envelope refusal reason set is closed and frozen', () => {
   assert.equal(Object.isFrozen(ENVELOPE_REFUSAL_REASONS), true)
-  assert.deepEqual([...ENVELOPE_REFUSAL_REASONS], ['no-envelope', 'summary', 'artifacts', 'details', 'field-missing', 'field-kind', 'field-item', 'verdict-findings', 'finding-id', 'carried-silent', 'validation-lane-unloadable'])
+  assert.deepEqual([...ENVELOPE_REFUSAL_REASONS], ['no-envelope', 'summary', 'artifacts', 'details', 'field-missing', 'field-kind', 'field-item', 'verdict-findings', 'finding-id', 'vacuity-classification', 'carried-silent', 'validation-lane-unloadable'])
   const malformed = [
     null,
     'not an object',
@@ -3199,4 +3199,150 @@ test('H1 correction is suggested and never substituted', () => {
   assert.deepEqual(asked, before)
   assert.equal(verdict.effective.includes(candidate), false)
   assert.equal(verdict.suggestions.get(bad), candidate)
+})
+
+test('b595 A1', () => {
+  const finding = { id: 'B595-A1-open', severity: 'must-fix', location: 'a.mjs:1', summary: 'open contradiction' }
+  const refusal = verdictFindingsDefect({ verdict: 'pass', must_fix: 1, findings: [finding] })
+  assert.equal(refusal?.reason, 'verdict-findings')
+  assert.match(refusal?.why || '', /B595-A1-open/)
+})
+
+test('b595 B1', () => {
+  const finding = { id: 'B595-B1-open', severity: 'must-fix', location: 'a.mjs:1', summary: 'open contradiction' }
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': dPlanEnv(), 'builder:1': buildEnv(),
+      'reviewer:1': dReviewEnv('pass', [finding]), 'lead:1': leadEnv('bounce'),
+      'reviewer:2': dReviewEnv('pass', []),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'reviewer').length, 2)
+  assert.match(dDecisionBrief(io), /verdict-findings/)
+  assert.match(dDecisionBrief(io), /B595-B1-open/)
+  assert.equal(result.details.escalation, null)
+})
+
+test('b595 C1', () => {
+  assert.deepEqual([...VACUITY_CLAIMS], ['mutation-survived', 'source-text-only'])
+  for (const claim of VACUITY_CLAIMS) {
+    const severity = vacuityFindingDefect({ findings: [{ id: `B595-C1-${claim}`, severity: 'consider', disposition: 'no-op', vacuity_claim: claim }] })
+    assert.equal(severity?.reason, 'vacuity-classification')
+    assert.match(severity?.why || '', new RegExp(`${claim}.*must-fix`))
+    const noOp = vacuityFindingDefect({ findings: [{ id: `B595-C1-no-op-${claim}`, severity: 'must-fix', disposition: 'no-op', vacuity_claim: claim }] })
+    assert.equal(noOp?.reason, 'vacuity-classification')
+    assert.match(noOp?.why || '', new RegExp(`${claim}.*no-op`))
+  }
+  const unknown = reviewShapeDefect({ verdict: 'changes-needed', findings: [{ id: 'B595-C1-unknown', severity: 'must-fix', disposition: 'auto-fix', vacuity_claim: 'invented-claim' }] })
+  assert.equal(unknown?.reason, 'vacuity-classification')
+  assert.match(unknown?.why || '', /B595-C1-unknown/)
+  assert.match(unknown?.why || '', /invented-claim/)
+  const combined = { id: '../../escape', severity: 'consider', disposition: 'no-op', vacuity_claim: 'source-text-only' }
+  const combinedRefusal = reviewShapeDefect({ verdict: 'changes-needed', findings: [combined] })
+  assert.equal(combinedRefusal?.reason, 'finding-id')
+  assert.notEqual(combinedRefusal?.reason, 'vacuity-classification')
+})
+
+test('b595 D1', () => {
+  const finding = { id: 'B595-D1-observation', severity: 'consider', location: 'a.mjs:1', summary: 'harmless observation', disposition: 'no-op' }
+  assert.deepEqual(dispositionPlan({ findings: [finding] }), { autoFix: [], askUser: [], needsSeat: [] })
+  const io = fakeIo({
+    envelopes: { 'planner:1': dPlanEnv(), 'builder:1': buildEnv(), 'reviewer:1': dReviewEnv('pass', [finding]) },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 1)
+  assert.equal(io.calls.assign.some(({ role }) => role === 'lead'), false)
+})
+
+test('b595 E1', () => {
+  const io = fakeIo({
+    envelopes: { 'planner:1': dPlanEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'done')
+  assert.equal(result.details.accept_findings ?? null, null)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'reviewer').length, 1)
+})
+
+test('b595 F1', () => {
+  const findings = Array.from({ length: 7 }, (_, index) => ({
+    id: `B590-${index + 1}`,
+    severity: 'consider',
+    location: `a.mjs:${index + 1}`,
+    summary: `b590 observation ${index + 1}`,
+    disposition: 'no-op',
+  }))
+  const partnerFindings = findings.map((finding, index) => index === 0
+    ? { ...finding, vacuity_claim: 'source-text-only' }
+    : { ...finding })
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': adversarialPlanEnv(), 'tech-lead:1': checkEnv('approve'), 'builder:1': buildEnv(),
+      'reviewer:1': dReviewEnv('pass', findings), 'tech-lead:2': dPartnerEnv('pass', partnerFindings),
+      'lead:1': dAdjEnv(), 'lead:2': leadEnv('bounce'), 'reviewer:2': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask(D_PANEL_CTX, io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'reviewer').length, 2)
+  assert.equal(result.details.accept_findings ?? null, null)
+  assert.equal(io.calls.logs.some((row) => row.review_round?.refused === 'vacuity-classification'), true)
+  assert.equal(io.calls.logs.some((row) => row.review_outcome?.panel), false)
+  assert.equal(io.calls.logs.some((row) => row.panel_skipped === 'vacuity-classification'), true)
+  assert.equal(io.calls.logs.some((row) => row.panel_degraded === 'tech-lead'), true)
+
+  const conflictReviewer = {
+    id: 'B595-H1-conflict', severity: 'must-fix', location: 'a.mjs:1',
+    summary: 'the same vacuity claim needs agreement', vacuity_claim: 'mutation-survived',
+  }
+  const conflictPartner = { ...conflictReviewer, vacuity_claim: 'source-text-only' }
+  const conflictIo = fakeIo({
+    envelopes: {
+      'planner:1': adversarialPlanEnv(), 'tech-lead:1': checkEnv('approve'), 'builder:1': buildEnv(),
+      'reviewer:1': dReviewEnv('changes-needed', [conflictReviewer]),
+      'tech-lead:2': dPartnerEnv('changes-needed', [conflictPartner]), 'lead:1': dAdjEnv(),
+      'lead:2': leadEnv('bounce'), 'reviewer:2': dReviewEnv('pass', []),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const conflictResult = driveTask(D_PANEL_CTX, conflictIo)
+  assert.equal(conflictResult.status, 'done')
+  assert.equal(conflictIo.calls.assign.filter(({ role }) => role === 'reviewer').length, 2)
+  assert.equal(conflictResult.details.accept_findings ?? null, null)
+  assert.equal(conflictIo.calls.logs.some((row) => row.review_round?.refused === 'vacuity-classification'), true)
+  assert.equal(conflictIo.calls.logs.some((row) => row.review_outcome?.panel), false)
+  assert.equal(conflictIo.calls.logs.some((row) => row.panel_skipped === 'vacuity-classification'), true)
+})
+
+test('b595 G1', () => {
+  const falseKill = 'A false kill proves nothing: removing a call while leaving its bookkeeping intact can make the suite red for the bookkeeping, not the removed behavior.'
+  const io = fakeIo({
+    files: { [`${CTX.checkout}/a.mjs`]: CHECK_BUILT }, writeThrough: true,
+    cleanRuns: { ...CHECK_CLEAN, 'gate-fixed': { ok: false, output: RED(3) } },
+    envelopes: CHECK_ENVELOPES([CHECK_MUTATION], {
+      'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } },
+    }),
+    runs: {
+      ...CHECK_RUNS(),
+      'gate-cmd:3': { ok: true, output: 'still green\nGATE-SUMMARY {"total":3,"failed":0,"errored":0}' },
+      'gate-fixed:1': { ok: true, output: 'green\nGATE-SUMMARY {"total":3,"failed":0,"errored":0}' },
+      'gate-fixed:2': { ok: false, output: 'FAIL check-one: caught\nGATE-SUMMARY {"total":3,"failed":1,"errored":0}' },
+    },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'done')
+  assert.ok(io.calls.writes[`${TD}/gate-discrimination-bounce.md`].includes(falseKill))
 })

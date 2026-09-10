@@ -522,7 +522,7 @@ export const LANE_PATH_OPTIONS = Object.freeze(['--import', '--require', '-r', '
 // The CLOSED set of reasons an envelope refusal can name (#427). A refusal is a
 // {reason, why} pair whose reason is one of these; prose stays in `why`.
 export const ENVELOPE_REFUSAL_REASONS = Object.freeze([
-  'no-envelope', 'summary', 'artifacts', 'details', 'field-missing', 'field-kind', 'field-item', 'verdict-findings', 'finding-id', 'carried-silent', VALIDATION_LANE_UNLOADABLE,
+  'no-envelope', 'summary', 'artifacts', 'details', 'field-missing', 'field-kind', 'field-item', 'verdict-findings', 'finding-id', 'vacuity-classification', 'carried-silent', VALIDATION_LANE_UNLOADABLE,
 ])
 export const UNIVERSAL_STAGE_HEADS = Object.freeze(['escalate', 'done'])
 // #251 follow-on — a PARTIAL reviewed shape declares where it gets what a plan
@@ -1079,6 +1079,7 @@ function verdictOf(env) {
 // review.md findings (crew/roles/reviewer.md:19-21). Phase 1 makes it
 // machine-readable; it does not add a fourth.
 export const FINDING_SEVERITIES = Object.freeze(['must-fix', 'should-fix', 'consider'])
+export const VACUITY_CLAIMS = Object.freeze(['mutation-survived', 'source-text-only'])
 export const RESIDUAL_TYPES = Object.freeze(['cosmetic', 'correctness-unverified'])
 export const PLAN_CHECK_SEVERITIES = Object.freeze(['blocker', 'major', 'minor'])
 // ADR-038 §2 named three triggers. Only two are mechanical, and the third —
@@ -1365,7 +1366,9 @@ export function reviewFindings(details) {
       id: entry.id,
       severity: entry.severity,
       location: trimmedOrNull(entry.location),
-      summary: trimmedOrNull(entry.summary), disposition: dispositionOf(entry), ...(mark ? { hardening: mark, hardening_why: entry.hardening_why.trim() } : {}),
+      summary: trimmedOrNull(entry.summary), disposition: dispositionOf(entry),
+      ...(VACUITY_CLAIMS.includes(entry.vacuity_claim) ? { vacuity_claim: entry.vacuity_claim } : {}),
+      ...(mark ? { hardening: mark, hardening_why: entry.hardening_why.trim() } : {}),
     })
   })
   return { findings, rejected }
@@ -3137,6 +3140,8 @@ function runPanelReview({ round, panel, io, dissents, setAcceptFindings, setLast
     '',
     'You are one of two independent reviewers on a regranted continuation round.',
     'Report typed findings in details.findings (id, severity from the closed set must-fix|should-fix|consider, location as path:line or path:start-end, summary).',
+    'A typed finding may carry vacuity_claim "mutation-survived" when a mutation test proves the behavior remains live after the relevant call is removed, or "source-text-only" when source text proves the behavior is present but no executable witness can prove it.',
+    'Either recognized vacuity_claim requires the marker itself, severity "must-fix", and a disposition other than "no-op"; an explicitly supplied unknown value is refused.',
     'Return the identical details.verdict shape: verdict must be pass or changes-needed, with must_fix, should_fix, and consider counts.',
     'A must-fix whose defect class cannot become a mechanical guard may carry "hardening": "ungateable" with a non-empty "hardening_why"; only the reviewer may set it.',
   ].join('\n')
@@ -3191,6 +3196,26 @@ function runPanelReview({ round, panel, io, dissents, setAcceptFindings, setLast
   const fused = fuseFindings(findingsOf(aEnv), findingsOf(bEnv), {
     sourceA: 'reviewer', sourceB: panel.partner,
   })
+  // Vacuity markers belong to the raw accepted origin entries. Reattach them before
+  // allocation because a partner id may be reminted after fusion.
+  const acceptedByOrigin = new Map([
+    ['reviewer', acceptedRawById(aEnv.details)],
+    [panel.partner, acceptedRawById(bEnv?.details)],
+  ])
+  const claimFor = (origin, id) => acceptedByOrigin.get(origin)?.get(id)?.vacuity_claim
+  const attachVacuityClaim = (finding, claim) => {
+    if (claim === undefined) return finding
+    return { ...finding, vacuity_claim: claim }
+  }
+  const attachedConsensus = fused.consensus.map((finding) => {
+    const left = claimFor('reviewer', finding.matched?.reviewer)
+    const right = claimFor(panel.partner, finding.matched?.[panel.partner])
+    const claim = left === undefined ? right : right === undefined ? left : left === right ? left : 'conflicting-vacuity-claims'
+    return attachVacuityClaim(finding, claim)
+  })
+  const attachedDivergent = fused.divergent.map((finding) => (
+    attachVacuityClaim(finding, claimFor(finding.source, finding.id))
+  ))
   // #800 revision 2 — PANEL-LOCAL ID ALLOCATION. reviewFindings keeps the FIRST valid
   // entry for an id and drops every later duplicate (crew/drive.mjs:834-838), and the
   // panel's own array is fed straight back through it by dispositionPlan. The panel
@@ -3220,10 +3245,11 @@ function runPanelReview({ round, panel, io, dissents, setAcceptFindings, setLast
     panelLog({ panel_id_reminted: { source, from: id, to: minted } })
     return minted
   }
-  const allocatedConsensus = fused.consensus.map((finding) => ({ ...finding, id: allocId(finding.id, 'reviewer') }))
-  const allocatedDivergent = fused.divergent.map((finding) => ({ ...finding, id: allocId(finding.id, finding.source) }))
-  const structuredDivergences = allocatedDivergent.map(({ id, source, severity, location, summary }) => ({
+  const allocatedConsensus = attachedConsensus.map((finding) => ({ ...finding, id: allocId(finding.id, 'reviewer') }))
+  const allocatedDivergent = attachedDivergent.map((finding) => ({ ...finding, id: allocId(finding.id, finding.source) }))
+  const structuredDivergences = allocatedDivergent.map(({ id, source, severity, location, summary, vacuity_claim }) => ({
     id, source, severity, location, summary,
+    ...(vacuity_claim !== undefined ? { vacuity_claim } : {}),
   }))
   const divergenceLines = structuredDivergences.length > 0
     ? structuredDivergences.map((entry) => `- ${JSON.stringify(entry)}`)
@@ -3265,15 +3291,15 @@ function runPanelReview({ round, panel, io, dissents, setAcceptFindings, setLast
   // needs them. DISMISSED findings are never re-attached: a dismissed finding must
   // not execute. The map is acceptedRawById, so a rejected entry can no more
   // authorize a patch here than it can on the ordinary path.
-  const accepted = acceptedRawById(aEnv.details)
+  const accepted = acceptedByOrigin.get('reviewer')
   // #839 — the panel must be able to REFUSE a partner's or an adjudicator's mark,
   // which means it must first be able to SEE one: a rule that cannot see the thing it
   // forbids cannot be proven to forbid it. Both sides' raw entries are indexed WITH
   // their origin; only a reviewer-origin mark is ever reattached. Reviewer A's ids are
   // never reminted (crew/drive.mjs:3711-3718), so the consensus lookup is exact.
   const markById = new Map()
-  for (const [origin, env] of [['reviewer', aEnv], [panel.partner, bEnv]]) {
-    for (const [id, raw] of acceptedRawById(env?.details)) {
+  for (const [origin, rawById] of acceptedByOrigin) {
+    for (const [id, raw] of rawById) {
       const mark = hardeningOf(raw)
       if (mark && !markById.has(id)) markById.set(id, { origin, fields: { hardening: mark, hardening_why: raw.hardening_why.trim() } })
     }
@@ -3292,8 +3318,14 @@ function runPanelReview({ round, panel, io, dissents, setAcceptFindings, setLast
     }
   }
   const findings = [
-    ...allocatedConsensus.map(({ id, severity, location, summary }) => ({ ...withRouting({ id, severity, location, summary, reviewer: 'both' }, 'reviewer'), ...markOf(id, 'reviewer') })),
-    ...adjudicated.upheld.map(({ id, severity, location, summary, source }) => ({ ...withRouting({ id, severity, location, summary, reviewer: source }, source), ...markOf(id, source) })),
+    ...allocatedConsensus.map(({ id, severity, location, summary, vacuity_claim }) => ({
+      ...withRouting({ id, severity, location, summary, reviewer: 'both', ...(vacuity_claim !== undefined ? { vacuity_claim } : {}) }, 'reviewer'),
+      ...markOf(id, 'reviewer'),
+    })),
+    ...adjudicated.upheld.map(({ id, severity, location, summary, source, vacuity_claim }) => ({
+      ...withRouting({ id, severity, location, summary, reviewer: source, ...(vacuity_claim !== undefined ? { vacuity_claim } : {}) }, source),
+      ...markOf(id, source),
+    })),
   ]
   if (adjudicated.closesClass !== true && !findings.some((finding) => finding.severity === 'must-fix')) {
     findings.push({
@@ -3358,8 +3390,8 @@ function runPanelReview({ round, panel, io, dissents, setAcceptFindings, setLast
       panel: {
         partner: panel.partner,
         adjudicator: panel.adjudicator,
-        consensus: fused.consensus,
-        divergent: fused.divergent,
+        consensus: allocatedConsensus,
+        divergent: allocatedDivergent,
         upheld: adjudicated.upheld,
         dismissed: adjudicated.dismissed,
         class_invariant: adjudicated.classInvariant,
@@ -3383,6 +3415,12 @@ function runPanelReview({ round, panel, io, dissents, setAcceptFindings, setLast
     adjudicator: panel.adjudicator,
     class_invariant: adjudicated.classInvariant,
     closes_class: adjudicated.closesClass,
+  }
+  const synthesizedShapeRefusal = reviewShapeDefect(review.details)
+  if (synthesizedShapeRefusal) {
+    panelLog({ panel_skipped: synthesizedShapeRefusal.reason })
+    stageComplete()
+    return { review, panelBounceFindings, shapeRefusal: synthesizedShapeRefusal }
   }
   panelLog({ review_outcome: outcome })
   setAcceptFindings(canonicalFindings)
@@ -3603,7 +3641,7 @@ function runTask(ctx, io, crash) {
   }
   const limits = { ...LIMITS, ...(ctx.limits || {}) }
   const waits = { ...WAITS_S, ...(ctx.waits || {}) }
-  const S = { consults: 0, stages: [], commit: null, dissents: [], grants: [], growth: [], modifiers: [], enforcements: [], acceptFindings: null, seqHighWater: 0, planAccept: null, carried: [], carriedCleared: new Set() }
+  const S = { consults: 0, stages: [], commit: null, dissents: [], grants: [], growth: [], modifiers: [], enforcements: [], acceptFindings: null, lastReview: null, seqHighWater: 0, planAccept: null, carried: [], carriedCleared: new Set() }
   const art = (name) => `${ctx.taskDir}/${name}`
   // ONE task-local path validator, used by the suite policy AND by the growth
   // measurement, so there is no weaker second check to drift. A bare
@@ -5716,6 +5754,7 @@ function runTask(ctx, io, crash) {
     `A failing check must print \`${CHECK_FAIL_PREFIX} <check>\` or \`${CHECK_FAIL_PREFIX} <check>: <reason>\` on its own`,
     'line, with the identifier matching /^[A-Za-z0-9][A-Za-z0-9._-]*$/ (no spaces, no colons).',
     'A renamed check cannot be re-declared and reads as a mutation that killed nothing.',
+    'A false kill proves nothing: removing a call while leaving its bookkeeping intact can make the suite red for the bookkeeping, not the removed behavior.',
     // MUTATION F2: rewrite the second of these five lines so it no longer says the tap
     // reporter ESCAPES anything, and the driver stops telling the gate author — in the very
     // brief that asks for a new gate — which character is silently unmatchable.
@@ -6691,13 +6730,22 @@ function runTask(ctx, io, crash) {
         `Plan of record: ${planPath}. Changes are uncommitted in ${ctx.checkout} — read the diff with git.`,
         `Re-run the validation lane yourself: ${lane}`,
         `Write review.md in the task dir. details.verdict must be pass or changes-needed.`,
+        'A typed finding may carry vacuity_claim "mutation-survived" when a mutation test proves the behavior remains live after the relevant call is removed.',
+        'A typed finding may carry vacuity_claim "source-text-only" when source text proves the behavior is present but no executable witness can prove it.',
+        'Either recognized vacuity_claim requires the marker itself, severity "must-fix", and a disposition other than "no-op"; ordinary observations must omit the marker.',
+        'An explicitly supplied vacuity_claim outside "mutation-survived" and "source-text-only" is refused; do not invent values or rely on natural-language matching.',
         ...staleVerdictLines(staleVerdict),
         ...diffFindingLines(report),
       ].join('\n')
       io.writeFile(revBrief, panelBriefText)
       let review
+      let panelResult = null
+      let panelBeforeAcceptFindings = null
+      let panelBeforeLastReview = null
       if (panel) {
-        const panelResult = runPanelReview({ round: roundNo, panel, io, dissents: S.dissents, setAcceptFindings: (value) => { S.acceptFindings = value }, setLastReview: (value) => { S.lastReview = value }, planPath, panelBriefText, panelStandingQuestion, art, stage, stageComplete, assignAndWait, carriedOpen, panelLog, panelDegraded, emit })
+        panelBeforeAcceptFindings = S.acceptFindings
+        panelBeforeLastReview = S.lastReview
+        panelResult = runPanelReview({ round: roundNo, panel, io, dissents: S.dissents, setAcceptFindings: (value) => { S.acceptFindings = value }, setLastReview: (value) => { S.lastReview = value }, planPath, panelBriefText, panelStandingQuestion, art, stage, stageComplete, assignAndWait, carriedOpen, panelLog, panelDegraded, emit })
         panelBounceFindings = panelResult.panelBounceFindings
         review = panelResult.review
       } else {
@@ -6705,7 +6753,11 @@ function runTask(ctx, io, crash) {
       }
       journalDiffJudgments(review.details, report)
       lastReviewPath = review.details?.review_path || art('review.md')
-      const shapeRefusal = reviewShapeDefect(review.details) || carriedSilenceDefect(review.details, openCarried)
+      const shapeRefusal = panelResult?.shapeRefusal || reviewShapeDefect(review.details) || carriedSilenceDefect(review.details, openCarried)
+      if (panel && shapeRefusal) {
+        S.acceptFindings = panelBeforeAcceptFindings
+        S.lastReview = panelBeforeLastReview
+      }
       const v = shapeRefusal ? null : verdictOf(review)
       if (v) finalReview.verdict = v
       if (v) staleVerdict = null
@@ -8063,12 +8115,54 @@ export function findingIdDefect(details) {
   return null
 }
 
+// An explicit vacuity marker is a typed claim, not prose. Its closed vocabulary and
+// routing requirements keep an observation from being laundered into a must-fix.
+export function vacuityFindingDefect(details) {
+  const entries = Array.isArray(details?.findings) ? details.findings : []
+  const shownId = (entry) => {
+    if (typeof entry?.id !== 'string' || entry.id.trim() === '') return '(unnamed)'
+    return entry.id.length > 80 ? `${entry.id.slice(0, 80)}… (${entry.id.length} chars)` : entry.id
+  }
+  const shownValue = (value) => {
+    const bounded = (text) => (text.length > 80 ? `${text.slice(0, 80)}… (${text.length} chars)` : text)
+    try {
+      const json = JSON.stringify(value)
+      if (json !== undefined) return bounded(json)
+    } catch { /* an unprintable marker is still refused below */ }
+    try { return bounded(String(value)) } catch { return '<unprintable>' }
+  }
+  for (const entry of entries) {
+    if (!entry || typeof entry !== 'object') continue
+    if (entry.vacuity_claim === undefined) continue
+    const id = shownId(entry)
+    if (!VACUITY_CLAIMS.includes(entry.vacuity_claim)) {
+      return {
+        reason: 'vacuity-classification',
+        why: `finding ${JSON.stringify(id)} supplied vacuity_claim ${shownValue(entry.vacuity_claim)}, which is not one of ${VACUITY_CLAIMS.map((claim) => JSON.stringify(claim)).join(', ')}`,
+      }
+    }
+    if (entry.severity !== 'must-fix') {
+      return {
+        reason: 'vacuity-classification',
+        why: `finding ${JSON.stringify(id)} claims vacuity_claim ${JSON.stringify(entry.vacuity_claim)} but its severity is ${JSON.stringify(entry.severity)}; vacuity claims require severity \"must-fix\"`,
+      }
+    }
+    if (dispositionOf(entry) === 'no-op') {
+      return {
+        reason: 'vacuity-classification',
+        why: `finding ${JSON.stringify(id)} claims vacuity_claim ${JSON.stringify(entry.vacuity_claim)} but disposition \"no-op\" is not allowed for a vacuity claim`,
+      }
+    }
+  }
+  return null
+}
+
 // The ONE shape gate on a reviewer envelope, so envelopeDefect, assignAndWait,
 // panelReview and the review loop can never disagree about what is refusable.
 // Order is stated, not incidental: the verdict contradiction is the older and more
 // consequential defect, so it is the reason a run reports when both are true.
 export function reviewShapeDefect(details) {
-  return verdictFindingsDefect(details) || findingIdDefect(details)
+  return verdictFindingsDefect(details) || findingIdDefect(details) || vacuityFindingDefect(details)
 }
 
 // #800 ADDENDUM — a guarded write. INSTRUMENTATION IS NEVER LOAD-BEARING and neither

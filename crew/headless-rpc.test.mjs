@@ -13,7 +13,7 @@ import {
 import { seatCommand as piSeatCommand } from './adapters/adapter-pi.mjs'
 import { assignmentLine } from './driver.mjs'
 import { cellFailureKind } from './seat-io.mjs'
-import { CENSUS_ABSENT_CAUSES, SEAT_SUITE_POLICY_EVENT, SUITE_RUN_REFUSAL, SUITE_RUN_UNRECOGNISED, WAIT_POLL_MS, claudeCensus } from './headless.mjs'
+import { CENSUS_ABSENT_CAUSES, NO_ENVELOPE_CENSUS_ABSENT_REASONS, NO_ENVELOPE_REASONS, SEAT_SUITE_POLICY_EVENT, SUITE_RUN_REFUSAL, SUITE_RUN_UNRECOGNISED, WAIT_POLL_MS, claudeCensus, noEnvelopeDetail } from './headless.mjs'
 import { scratchDir } from '../test/helpers.mjs'
 
 // The b200-helperdedup envelope, byte-exact: 1921 bytes, schema-shaped, and
@@ -101,6 +101,25 @@ function splitRecordedRpcCapture() {
 function ordinaryRpcEnvelope(id, role = 'builder') {
   return { assignment_id: id, role, status: 'done', summary: 'recorded ordinary completion', artifacts: [], details: {} }
 }
+
+test('A1/B1/E1 empty RPC synthesis names measured and unavailable no-envelope turns', () => {
+  const base = { id: 'd1', role: 'planner', returnPath: '/returns/d1.planner.json' }
+  const zero = emptyTurnEnvelope({ ...base, census: { turns: 0, tool_calls: 0 } })
+  assert.equal(zero.status, 'insufficient')
+  assert.deepEqual(zero.details, {
+    degraded: 'rpc-no-envelope', reason: NO_ENVELOPE_REASONS.ZERO_TURN_NON_START,
+    turns: 0, tool_calls: 0, absent_reason: null,
+  })
+  const worked = emptyTurnEnvelope({ ...base, census: { turns: 2, tool_calls: 3 } })
+  assert.equal(worked.details.reason, NO_ENVELOPE_REASONS.NO_ENVELOPE)
+  assert.equal(worked.details.reason, noEnvelopeDetail({ turns: 2, tool_calls: 3 }).reason)
+  assert.deepEqual({ turns: worked.details.turns, tool_calls: worked.details.tool_calls }, { turns: 2, tool_calls: 3 })
+  const unavailable = emptyTurnEnvelope(base)
+  assert.deepEqual(unavailable.details, {
+    degraded: 'rpc-no-envelope', reason: NO_ENVELOPE_REASONS.NO_ENVELOPE,
+    turns: null, tool_calls: null, absent_reason: NO_ENVELOPE_CENSUS_ABSENT_REASONS.UNAVAILABLE,
+  })
+})
 
 function assertUnsettledPriorFrameFailsDelivery(frame) {
   let clock = 0
@@ -1119,6 +1138,20 @@ test('an rpc-aborted corpse respawns and resumes the session on its fresh return
   } finally { f.cleanup() }
 })
 
+test('C1 an authored RPC envelope remains byte-identical and gets no synthetic reason', () => {
+  const f = fixture()
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    settle(f, run)
+    const envelope = { assignment_id: run.id, role: 'builder', status: 'insufficient', summary: 'authored', artifacts: [], details: { questions: [] } }
+    const bytes = JSON.stringify(envelope)
+    writeFileSync(run.returnPath, bytes)
+    assert.equal(readFileSync(run.returnPath, 'utf8'), bytes)
+    assert.deepEqual(f.io.wait(run.returnPath, 1), envelope)
+    assert.equal(Object.hasOwn(envelope.details, 'reason'), false)
+  } finally { f.cleanup() }
+})
+
 test('a 1921-byte envelope with a literal newline is UNREADABLE, not a settled no-envelope', () => {
   const f = fixture()
   try {
@@ -1481,6 +1514,27 @@ test('rpc crashed and settled turns emit partial usage without changing stage or
     const env = throwing.f.io.wait(throwing.run.returnPath, 1)
     assert.equal(env.status, 'insufficient')
   } finally { throwing.f.cleanup() }
+})
+
+test('RV1-1 zero-turn RPC journal preserves generic no-envelope driver carve-out', () => {
+  const rows = []; const events = []
+  const f = fixture({ log: (row) => rows.push(row), emit: (event) => events.push(event) })
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    const seat = join(f.paths.taskDir, 'headless-rpc', 'builder')
+    writeFileSync(join(seat, 'stream.jsonl'), `${JSON.stringify({ type: 'agent_settled' })}\n`)
+    const zero = f.io.wait(run.returnPath, 1)
+    assert.equal(zero.status, 'insufficient')
+    assert.equal(zero.details.reason, NO_ENVELOPE_REASONS.ZERO_TURN_NON_START)
+    const outcome = rows.find((row) => row.rpc_outcome)
+    assert.equal(outcome.rpc_outcome, NO_ENVELOPE_REASONS.NO_ENVELOPE)
+    assert.equal(outcome.reason, zero.details.reason)
+    assert.equal(outcome.turns, zero.details.turns)
+    assert.equal(outcome.tool_calls, zero.details.tool_calls)
+    assert.equal(outcome.absent_reason, zero.details.absent_reason)
+    const failure = events.find((event) => event.kind === 'cell-failure')
+    assert.deepEqual({ failure: failure.failure, stage: failure.stage }, { failure: 'no-envelope', stage: 'rpc-no-envelope' })
+  } finally { f.cleanup() }
 })
 
 test('teardown forces an in-flight turn but does not mark a settled seat forced', () => {

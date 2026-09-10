@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 import {
   attributeExit, censusFileOperands, classifyRun, claudeCensus, claudeTurnBoundaryCount, classifyToolCall, decodeExitStatus, degradedSignals, foldUsage, headlessIo, parseStream,
-  CENSUS_ABSENT_CAUSES, PROVIDER_FAILURE_KINDS, providerFailureKind, providerResetInstant, providerRetryDecision,
+  CENSUS_ABSENT_CAUSES, NO_ENVELOPE_CENSUS_ABSENT_REASONS, NO_ENVELOPE_REASONS, noEnvelopeDetail, PROVIDER_FAILURE_KINDS, providerFailureKind, providerResetInstant, providerRetryDecision,
   PROVIDER_BACKOFF_LADDER_MS, PROVIDER_RESET_ABSENT, PROVIDER_RESET_SETTLE_MS, PROVIDER_RETRY_ACTIONS,
   PARK_BEAT_EVENT, PARK_BEAT_MS, PARK_BEAT_SOURCE, PROVIDER_RETRY_MAX, PROVIDER_RETRY_TOTAL_WAIT_MS, recogniseProviderCondition, recogniseSeatRefusal, TOOL_CLASSES, WAIT_POLL_MS,
   SEAT_REFUSALS, SEAT_REFUSAL_ACTIONS, UNCLASSIFIED_REFUSAL, shq, stderrTail, updateCrewJson,
@@ -129,6 +129,42 @@ test('classifyRun keeps all six worker traps distinct', () => {
 
 test('envelope wins over exit and stream evidence', () => {
   assert.equal(classifyRun({ exitCode: 137, terminal: false, sawJson: true, envelope: { status: 'done' }, timedOut: false }), 'ok-degraded')
+})
+
+test('D1 no-envelope vocabularies are frozen, unique, and closed', () => {
+  assert.equal(Object.isFrozen(NO_ENVELOPE_REASONS), true)
+  assert.deepEqual(Object.values(NO_ENVELOPE_REASONS).sort(), ['no-envelope', 'zero-turn-non-start'])
+  assert.equal(new Set(Object.values(NO_ENVELOPE_REASONS)).size, 2)
+  assert.equal(Object.isFrozen(NO_ENVELOPE_CENSUS_ABSENT_REASONS), true)
+  assert.deepEqual(Object.values(NO_ENVELOPE_CENSUS_ABSENT_REASONS), ['census-unavailable'])
+})
+
+test('E1 no-envelope detail keeps unavailable census counts null', () => {
+  assert.deepEqual(noEnvelopeDetail(null), {
+    reason: NO_ENVELOPE_REASONS.NO_ENVELOPE,
+    turns: null,
+    tool_calls: null,
+    absent_reason: NO_ENVELOPE_CENSUS_ABSENT_REASONS.UNAVAILABLE,
+  })
+  assert.deepEqual(noEnvelopeDetail({ turns: 0 }), {
+    reason: NO_ENVELOPE_REASONS.NO_ENVELOPE,
+    turns: null,
+    tool_calls: null,
+    absent_reason: NO_ENVELOPE_CENSUS_ABSENT_REASONS.UNAVAILABLE,
+  })
+})
+
+test('F1 classifyRun shares measured no-envelope reasons and preserves authored envelopes', () => {
+  const zero = noEnvelopeDetail({ turns: 0, tool_calls: 0 })
+  const worked = noEnvelopeDetail({ turns: 2, tool_calls: 3 })
+  assert.equal(zero.reason, NO_ENVELOPE_REASONS.ZERO_TURN_NON_START)
+  assert.equal(classifyRun({ exitCode: 0, terminal: true, sawJson: true, envelope: null, timedOut: false, census: { turns: 0, tool_calls: 0 } }), zero.reason)
+  assert.equal(classifyRun({ exitCode: 0, terminal: true, sawJson: true, envelope: null, timedOut: false, census: { turns: 2, tool_calls: 3 } }), worked.reason)
+  const envelope = { assignment_id: 'd1', role: 'planner', status: 'insufficient', summary: 'authored', artifacts: [], details: { questions: [] } }
+  const before = JSON.stringify(envelope)
+  assert.equal(classifyRun({ exitCode: 0, terminal: true, sawJson: true, envelope, timedOut: false, census: { turns: 0, tool_calls: 0 } }), 'ok')
+  assert.equal(JSON.stringify(envelope), before)
+  assert.equal(Object.hasOwn(envelope.details, 'reason'), false)
 })
 
 test('a healthy run whose exit marker has not been written yet is ok', () => {
@@ -256,10 +292,10 @@ test('real provider refusal tails classify budget-refused from parseStream bytes
 test('budget classification is conjunctive and unreadable streams carry no refusal evidence', () => {
   const apiError = parseStream('/fixture/api-error.jsonl', () => `${JSON.stringify({ type: 'result', terminal_reason: 'api_error' })}\n`, () => true)
   assert.equal(apiError.budgetRefused, false)
-  assert.equal(classifyRun({ ...apiError, exitCode: 1, envelope: null, timedOut: false }), 'no-envelope')
+  assert.equal(classifyRun({ ...apiError, census: null, exitCode: 1, envelope: null, timedOut: false }), NO_ENVELOPE_REASONS.NO_ENVELOPE)
   const synthetic = parseStream('/fixture/synthetic.jsonl', () => `${JSON.stringify({ type: 'assistant', message: { model: '<synthetic>' } })}\n${JSON.stringify({ type: 'result', terminal_reason: 'completed' })}\n`, () => true)
   assert.equal(synthetic.budgetRefused, false)
-  assert.equal(classifyRun({ ...synthetic, exitCode: 0, envelope: null, timedOut: false }), 'no-envelope')
+  assert.equal(classifyRun({ ...synthetic, census: null, exitCode: 0, envelope: null, timedOut: false }), NO_ENVELOPE_REASONS.NO_ENVELOPE)
   const missing = parseStream('/fixture/missing.jsonl', () => '', () => false)
   assert.equal(missing.budgetRefused, false)
   const denied = parseStream('/fixture/denied.jsonl', () => { throw Object.assign(new Error('permission denied'), { code: 'EPERM' }) }, () => true)
@@ -839,6 +875,22 @@ test('a parseable envelope is returned unchanged', () => {
     const envelope = { assignment_id: run.id, role: 'builder', status: 'done', summary: 'ok', details: { keep: true } }
     writeFileSync(run.returnPath, JSON.stringify(envelope))
     assert.deepEqual(f.io.wait(run.returnPath, 1), envelope)
+  } finally { f.cleanup() }
+})
+
+test('headless json records zero-turn non-start while preserving its outward no-envelope stage', () => {
+  const rows = []
+  const f = fixture({ log: (row) => rows.push(row) })
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
+    const runDir = join(f.taskDir, 'headless', run.id)
+    writeFileSync(join(runDir, 'stream.jsonl'), '{"type":"result","terminal_reason":"completed"}\n')
+    writeFileSync(join(runDir, 'exit'), '0')
+    assert.throws(() => f.io.wait(run.returnPath, 1), (error) => error.stage === 'headless-no-envelope')
+    const outcome = rows.find((row) => row.headless_outcome)
+    assert.equal(outcome.headless_outcome, NO_ENVELOPE_REASONS.ZERO_TURN_NON_START)
+    assert.equal(outcome.seat_turn_census.turns, 0)
+    assert.equal(outcome.seat_turn_census.tool_calls, 0)
   } finally { f.cleanup() }
 })
 

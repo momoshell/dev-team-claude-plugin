@@ -13,7 +13,7 @@ import { spawn as cpSpawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 
 import { assignmentDelivery, assignmentPrompt } from './driver.mjs'
-import { shq, classifyRun, readEnvelopeOrThrow, updateCrewJson, attributeExit, decodeExitStatus, stderrTail, classifyToolCall, TOOL_CLASSES, CENSUS_ABSENT_CAUSES, censusFileOperands, suitePolicyCounters, countSuiteDecision, suiteRunPolicy, suitePolicyRow, suiteRefusalRow, suiteRefusalEnvelope, turnCeilingBreached, turnCeilingEnvelope, turnCeilingDetail } from './headless.mjs'
+import { shq, classifyRun, noEnvelopeDetail, readEnvelopeOrThrow, updateCrewJson, attributeExit, decodeExitStatus, stderrTail, classifyToolCall, TOOL_CLASSES, CENSUS_ABSENT_CAUSES, censusFileOperands, suitePolicyCounters, countSuiteDecision, suiteRunPolicy, suitePolicyRow, suiteRefusalRow, suiteRefusalEnvelope, turnCeilingBreached, turnCeilingEnvelope, turnCeilingDetail } from './headless.mjs'
 import { reclaimStore, PHASES, VERDICTS, EVIDENCE_KINDS, LIVENESS } from './reclaim.mjs'
 import { readJsonTri } from './json-leaf.mjs'
 import { PI_BUILTIN_TOOLS, piActivatedTools, translateDeny } from './adapters/adapter-pi.mjs'
@@ -693,12 +693,12 @@ export function isBusyRefusal(frame) {
   return /already processing|streamingBehavior/i.test(String(frame.error ?? ''))
 }
 
-export function emptyTurnEnvelope({ id, role, returnPath }) {
+export function emptyTurnEnvelope({ id, role, returnPath, census = null }) {
   return {
     assignment_id: id, role, status: 'insufficient',
     summary: `seat ${role} settled without writing an envelope to ${returnPath}; the turn produced no usable return`,
     artifacts: [],
-    details: { degraded: 'rpc-no-envelope' },
+    details: { degraded: 'rpc-no-envelope', ...noEnvelopeDetail(census) },
   }
 }
 
@@ -1637,15 +1637,18 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
         throw staged(`rpc-${outcome}`, `rpc ${outcome}: seat ${turn.role} produced no envelope at ${returnPath}`, turn.role)
       }
       if (turn.state.settled) {
-        const detail = `rpc no-envelope: seat ${turn.role} produced no envelope at ${returnPath}`
+        const observed = turn.observed || {}
+        const census = observed.frames === 0 ? null : finaliseCensus(observed.census || null)
+        const detail = noEnvelopeDetail(census)
+        const failureDetail = `rpc no-envelope: seat ${turn.role} produced no envelope at ${returnPath}`
         try {
-          emit?.({ kind: 'cell-failure', role: turn.role, id: turn.id, failure: 'no-envelope', stage: 'rpc-no-envelope', detail })
+          emit?.({ kind: 'cell-failure', role: turn.role, id: turn.id, failure: 'no-envelope', stage: 'rpc-no-envelope', detail: failureDetail })
         } catch { /* ADR-026: instrumentation is never load-bearing */ }
-        try { log({ at: now(), rpc_outcome: 'no-envelope', role: turn.role, id: turn.id, degraded: true }) } catch { /* diagnostics only */ }
+        try { log({ at: now(), rpc_outcome: 'no-envelope', role: turn.role, id: turn.id, degraded: true, ...detail }) } catch { /* diagnostics only */ }
         emitUsage(turn, seat, turn.usage)
         journalTurnCensus(turn, seat)
         finishTurn(seat)
-        return emptyTurnEnvelope({ id: turn.id, role: turn.role, returnPath })
+        return emptyTurnEnvelope({ id: turn.id, role: turn.role, returnPath, census })
       }
       sleep(!acknowledged ? Math.min(WAIT_POLL_MS, Math.max(1, promptDeliveryWindowMs - elapsed)) : WAIT_POLL_MS)
     }

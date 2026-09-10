@@ -16,13 +16,33 @@ import { existsSync as fsExistsSync, readFileSync as fsReadFileSync } from 'node
 
 export const JSON_STATES = Object.freeze({ ABSENT: 'absent', UNREADABLE: 'unreadable', VALUE: 'value' })
 
+export function resolveSupersedingJsonPath(path, deps = {}) {
+  if (!path) return path
+  if (!deps.journalPath) return path
+  const read = deps.readFileSync || fsReadFileSync
+  let journal
+  try { journal = String(read(deps.journalPath, 'utf8')) } catch { return path }
+  if (!journal) return path
+  let successor = path
+  for (const line of journal.split('\n')) {
+    if (!line.trim()) continue
+    let row
+    try { row = JSON.parse(line) } catch { continue }
+    if (row?.event !== 'envelope-reask' || row?.outcome !== 'recovered' || row?.unusable_return_path !== path) continue
+    if (typeof row.superseding_return_path !== 'string' || row.superseding_return_path.trim() === '') continue
+    successor = row.superseding_return_path
+  }
+  return successor
+}
+
 export function readJsonAt(path, deps = {}) {
+  const target = resolveSupersedingJsonPath(path, deps)
   const exists = deps.existsSync || fsExistsSync
   const read = deps.readFileSync || fsReadFileSync
-  if (!path) return { state: JSON_STATES.ABSENT, raw: null, value: null }
-  if (!exists(path)) return { state: JSON_STATES.ABSENT, raw: null, value: null }
+  if (!target) return { state: JSON_STATES.ABSENT, raw: null, value: null }
+  if (!exists(target)) return { state: JSON_STATES.ABSENT, raw: null, value: null }
   let raw
-  try { raw = String(read(path, 'utf8')) } catch { return { state: JSON_STATES.UNREADABLE, raw: null, value: null } }
+  try { raw = String(read(target, 'utf8')) } catch { return { state: JSON_STATES.UNREADABLE, raw: null, value: null } }
   try { return { state: JSON_STATES.VALUE, raw, value: JSON.parse(raw) } }
   catch { return { state: JSON_STATES.UNREADABLE, raw, value: null } }
 }

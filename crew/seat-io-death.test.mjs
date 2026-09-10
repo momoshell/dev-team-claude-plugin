@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { scratchDir } from '../test/helpers.mjs'
@@ -8,6 +8,7 @@ import {
   DESCENDANT_DIR,
   HEADLESS_RPC_TRANSPORT,
   HEADLESS_TRANSPORT,
+  REASK_GRACE_POLICY,
   REASK_TIMEOUT_S,
   SEAT_DIED_STAGE,
   WAIT_POLL_MS,
@@ -205,6 +206,60 @@ function runHeadless({
 function withRun(options, fn) {
   const run = runHeadless(options)
   try { return fn(run) } finally { run.cleanup() }
+}
+
+function runSuccessfulTransportRecovery() {
+  const dir = scratchDir('seat-io-death-recovered-')
+  const taskDir = join(dir, 'task')
+  const returnsDir = join(dir, 'returns')
+  mkdirSync(taskDir)
+  mkdirSync(returnsDir)
+  const canonicalPath = join(returnsDir, `${'d1'}.${ROLE}.json`)
+  const canonicalBytes = '{"assignment_id":"d1","role":"builder","status":"done","summary":"bad\nline"}'
+  const recoveredEnvelope = { assignment_id: 'd1', role: ROLE, status: 'done', summary: 'recovered' }
+  let assignments = 0
+  let secondCollectPath = null
+  const fakeTransport = () => ({
+    assign(spec) {
+      assignments += 1
+      if (assignments === 1) return { id: 'd1', returnPath: canonicalPath }
+      secondCollectPath = spec?.reask?.returnPath ?? null
+      writeFileSync(secondCollectPath, JSON.stringify(recoveredEnvelope))
+      return { id: spec?.reask?.id || 'd1', returnPath: secondCollectPath }
+    },
+    wait(path) {
+      const raw = readFileSync(path, 'utf8')
+      if (path === canonicalPath) {
+        const error = new Error(`unusable envelope at ${path}`)
+        error.stage = 'headless-parse-error'
+        error.role = ROLE
+        error.raw = raw
+        throw error
+      }
+      return JSON.parse(raw)
+    },
+  })
+  const rows = []
+  const deps = {
+    logLine: (_path, row) => rows.push(row),
+    snapshot: () => ({ ok: true, rows: new Map() }),
+    kill: () => {},
+    spawnSync: () => ({ status: 1, stdout: '' }),
+  }
+  const crew = { claude_bin: '/bin/true', members: { [ROLE]: { transport: HEADLESS_TRANSPORT, agent: 'claude', model: 'test-model' } } }
+  const io = seatIo(crew, { dir, taskDir, returnsDir }, dir, null, {}, {}, { ...deps, headlessIo: fakeTransport })
+  const assignment = io.assign({ role: ROLE, briefFile: join(taskDir, 'brief.md') })
+  writeFileSync(assignment.returnPath, canonicalBytes)
+  const canonicalBefore = readFileSync(assignment.returnPath)
+  const envelope = io.wait(assignment.returnPath, BUDGET_S)
+  return {
+    canonicalPath: assignment.returnPath,
+    canonicalBefore,
+    canonicalAfter: readFileSync(assignment.returnPath),
+    secondCollectPath,
+    rows,
+    envelope,
+  }
 }
 
 function runReplacementWait({ transport, current = 'alive', timeoutS = 15, firstWaitMs = 0 } = {}) {
@@ -587,4 +642,27 @@ test('#931 a throwing journal does not turn a suppressed death into a thrown one
     assert.equal(thrown.elapsedMs, run.elapsedMs, 'a throwing journal must not change the wait')
     assert.equal(thrown.elapsedMs, run.budgetMs, 'and the seat must still survive its whole budget')
   })
+})
+
+test('A1 recovered re-ask journals both return paths', () => {
+  const run = runSuccessfulTransportRecovery()
+  const recovered = run.rows.find((row) => row?.event === 'envelope-reask' && row?.outcome === 'recovered')
+  assert.ok(recovered)
+  assert.equal(run.envelope?.summary, 'recovered')
+  assert.equal(recovered.unusable_return_path, run.canonicalPath)
+  assert.equal(recovered.superseding_return_path, run.secondCollectPath)
+})
+
+test('C1 recovery preserves the unusable bytes', () => {
+  const run = runSuccessfulTransportRecovery()
+  assert.equal(existsSync(run.canonicalPath), true)
+  assert.deepEqual(run.canonicalAfter, run.canonicalBefore)
+})
+
+test('D1 recovered re-ask journals the charged shared-slot policy by name', () => {
+  const run = runSuccessfulTransportRecovery()
+  const recovered = run.rows.find((row) => row?.event === 'envelope-reask' && row?.outcome === 'recovered')
+  assert.ok(recovered)
+  assert.equal(recovered.grace_slot_policy, REASK_GRACE_POLICY)
+  assert.equal(REASK_GRACE_POLICY, 'charged-shared-slot')
 })

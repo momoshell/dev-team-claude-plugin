@@ -174,7 +174,7 @@ test('the protected floor is documented as the resolved union', () => {
 // Mutation killed: deleting one refusal token lets a batch skip a compiler or arrival failure.
 test('the batch reference names every refusal the sequence can hit', () => {
   const text = readText(join(HERE, 'references/batch.md'))
-  for (const token of ['coupled-source-unfenced', 'stale-read-ack', 'missing-path', 'validateScopeEntries', 'scopeMatcher', 'protectedHitsIn', 'lane_name', 'lane_fence', 'lane-fence', 'fence=NONE', 'plan-adopt-unreadable', 'externalFenceLiveness', 'ADR-040', '--repair-all', 'citation-carrier-unfenced', 'only an **unpinned** path:line citation']) {
+  for (const token of ['coupled-source-unfenced', 'stale-read-ack', 'missing-path', 'validateScopeEntries', 'scopeMatcher', 'protectedHitsIn', 'lane_name', 'lane_fence', 'lane-fence', 'fence=NONE', 'plan-adopt-unreadable', 'externalFenceLiveness', 'ADR-040', '--repair-all', 'citation-carrier-unfenced', 'fence-admission-unsourced', 'test-reach', 'anchor-pin', 'census-carrier', 'admission cannot change the tier the operator asked for', 'only an **unpinned** path:line citation']) {
     assert.ok(text.includes(token), `batch.md must name ${token}`)
   }
   assert.equal(text.includes('prose file:line citations in'), false)
@@ -196,7 +196,7 @@ test('the warning doctrine carries each measured blind spot and citation rule', 
 
 test('E1 documents the anchor obligation distinction exactly once', () => {
   const text = readText(join(HERE, 'references/batch.md'))
-  const sentence = 'A manifest pinning only files the lane does not write is not an obligation on that lane; when the lane writes a pinned file, the lane owes the repair and must fence the pinning manifest before dispatch.'
+  const sentence = 'A manifest pinning only files the lane does not write is not an obligation on that lane; when the lane writes a pinned file, dispatch admits the unheld pinning manifest automatically.'
   assert.equal(text.split(sentence).length - 1, 1)
   const oldClaim = `a shifted pin whose manifest is outside the lane${String.fromCharCode(39)}s fence is a WARNING and the lane owes nothing.`
   assert.equal(text.replaceAll(/\s+/g, ' ').includes(oldClaim), false)
@@ -221,9 +221,9 @@ test('B1 fixture retains an absolute same-basename collision', () => {
 // Re-measure with the shipped collectTestReach over the git ls-files partition (owners = tracked non-*.test.mjs files; tests = tracked *.test.mjs files): node --input-type=module -e "import{execFileSync}from'node:child_process';const{collectTestReach}=await import(process.cwd()+'/scripts/factory/dispatch-batch.mjs'),files=execFileSync('git',['ls-files','-z'],{encoding:'utf8'}).split(String.fromCharCode(0)).filter(Boolean),tests=new Set(files.filter(file=>file.endsWith('.test.mjs'))),nonTests=new Set(files.filter(file=>!tests.has(file))),reach=collectTestReach({checkout:process.cwd()}),rows=[...reach.pathByFile].filter(([file])=>nonTests.has(file)).flatMap(([file,reached])=>[...reached].filter(test=>tests.has(test)).map(test=>[file,test])),contributingTests=new Set(rows.map(([,test])=>test));console.log({tracked:files.length,nonTests:nonTests.size,tests:tests.size,owners:new Set(rows.map(([file])=>file)).size,pairs:rows.length,contributingTests:contributingTests.size})"
 test('RV1-1 pins the reach doctrine date and pristine pair baseline', () => {
   const text = readText(join(HERE, 'references/batch.md'))
-  const measurement = '**160 of 545 tracked non-test files**, comprising **454 distinct (file, test) pairs contributed by 87 of 89 tracked `*.test.mjs` files**'
+  const measurement = '**160 of 545 tracked non-test files**, comprising **457 distinct (file, test) pairs contributed by 87 of 89 tracked `*.test.mjs` files**'
   const measurementDate = 'On the shipped 2026-09-09 tree'
-  const pristinePairs = 454
+  const pristinePairs = 457
   assert.equal(text.split(measurement).length - 1, 1)
   assert.ok(text.includes(measurementDate))
   assert.ok(text.includes(`The pristine \`HEAD\` baseline gives 160 owners and ${pristinePairs} pairs.`))
@@ -269,6 +269,22 @@ test('RV1-2 derives shipped reach and comment censuses from git discovery', () =
   const pristine = commentApostropheCensus(headTests, (file) => execFileSync('git', ['-C', ROOT, 'show', `HEAD:${file}`], { encoding: 'utf8' }))
   const commentMeasurement = `**${current.withApostrophe} of ${tests.size} tracked \`*.test.mjs\` files** carry at least one apostrophe inside a comment, and **${current.odd} of ${tests.size}** carry an odd number on the shipped tree (**${pristine.odd} of ${headTests.length} at pristine \`HEAD\`**).`
   assert.equal(text.split(commentMeasurement).length - 1, 1)
+})
+
+test('RV2-1 keeps the pristine reach baseline aligned with the shipped census', () => {
+  const files = gitPaths(['ls-files', '-z'])
+  const tests = new Set(files.filter((file) => file.endsWith('.test.mjs')))
+  const nonTests = new Set(files.filter((file) => !tests.has(file)))
+  const reach = collectTestReach({ checkout: ROOT })
+  const rows = [...reach.pathByFile]
+    .filter(([file]) => nonTests.has(file))
+    .flatMap(([file, reached]) => [...reached].filter((testFile) => tests.has(testFile)).map((testFile) => [file, testFile]))
+  const owners = new Set(rows.map(([file]) => file)).size
+  const pairs = rows.length
+  const text = readText(join(HERE, 'references', 'batch.md'))
+  assert.equal(text.split(`The pristine \`HEAD\` baseline gives ${owners} owners and ${pairs} pairs.`).length - 1, 1)
+  const ownSource = readText(fileURLToPath(import.meta.url))
+  assert.equal(ownSource.split(`const pristinePairs = ${pairs}`).length - 1, 1)
 })
 
 // Mutation killed: widening the measured shell claim or dropping a zero-count guard must make this test fail.

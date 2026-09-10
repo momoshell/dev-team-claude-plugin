@@ -49,7 +49,11 @@ const PLAN_ADOPT_UNREADABLE = 'plan-adopt-unreadable'
 const EXTERNAL_FENCE_STALE = 'external-fence-stale'
 const EXTERNAL_FENCE_ABANDONED = 'external-fence-abandoned'
 const TEST_REACH_UNFENCED = 'test-reach-unfenced'
+const FENCE_ADMISSION_UNSOURCED = 'fence-admission-unsourced'
 const PLAN_ADOPT_GATE_ABSOLUTE_PATH = 'plan-adopt-gate-absolute-path'
+
+export const FENCE_ADMISSION_EVENT = 'fence-admitted'
+export const FENCE_ADMISSION_SOURCES = Object.freeze(['test-reach', 'anchor-pin', 'census-carrier'])
 
 export const REFUSAL_REASONS = Object.freeze([
   BATCH_EMPTY,
@@ -84,6 +88,7 @@ export const REFUSAL_REASONS = Object.freeze([
   EXTERNAL_FENCE_STALE,
   EXTERNAL_FENCE_ABANDONED,
   TEST_REACH_UNFENCED,
+  FENCE_ADMISSION_UNSOURCED,
   PLAN_ADOPT_GATE_ABSOLUTE_PATH,
 ])
 export const WARNING_ROWS_UNPERSISTED_PREFIX = 'dispatch-batch: WARNING rows-unpersisted:'
@@ -677,12 +682,12 @@ export function surfaceExportsOf({ surface, reach } = {}) {
   return [...names].sort()
 }
 
-// #960 names TWO refusal classes, and NOTHING wider. Every `how === 'path'` row is an
-// unconditional `test-reach-unfenced` refusal. `pathLiteralsFrom` scans every quoted
-// literal in a test, so a test's own relative import specifier for a fenced file emits
-// that path fact too.
+// #960 names TWO candidate classes, and NOTHING wider. Every `how === 'path'` row is a
+// `test-reach` admission candidate. `pathLiteralsFrom` scans every quoted literal in a
+// test, so a test's own relative import specifier for a fenced file emits that path fact
+// too; an unheld candidate widens the effective fence, while a held candidate refuses.
 // For `how === 'import'` or `how === 'symbol'` rows, the narrow direct-import +
-// surface-export-overlap conjunction is the only other refusal route: the test imports
+// surface-export-overlap conjunction is the only other candidate route: the test imports
 // the fenced file DIRECTLY (one hop, not two of re-export), through a REAL import (not
 // the literal symbol scan whose blind spots the warning already documents), and it names
 // at least one symbol the lane's own write surface exports. Every other import/symbol row
@@ -832,6 +837,15 @@ function normaliseRepoPath(value) {
   const normal = String(value).replaceAll('\\', '/')
   if (normal === './') return '.'
   return normal.startsWith('./') ? normal.slice(2) : normal
+}
+
+export function fenceAdmission({ lane, file, source, holder } = {}) {
+  if (!FENCE_ADMISSION_SOURCES.includes(source)) {
+    refuse(`fence admission for lane ${lane ?? '(unknown)'} and file ${file ?? '(unknown)'} has no allowed source: ${JSON.stringify(source)}`, FENCE_ADMISSION_UNSOURCED)
+  }
+  const row = { lane: laneNameOf(lane), file: normaliseRepoPath(file), source }
+  if (holder) row.holder = holder
+  return row
 }
 
 // A lane whose name cannot be resolved used to become '' and then vanish from every
@@ -1702,6 +1716,51 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
   // One scan for the whole batch, shared by every existing file and directory surface.
   let carrierIndex = null
   const carriersFor = () => (carrierIndex ??= citationCarriers({ checkout: scanRoot, pins, deps: d }))
+  // Measure live claims before admission classification. The returned live set is still
+  // useful when the overall census is unknown: an unknown result is not an empty claim set.
+  const crossBatch = liveLaneClaims({ checkout: scanRoot, batchNames, deps: d })
+  const externalRows = externalFenceLiveness({ externals: [...externalNames], parentDir, deps: d })
+  const abandonedRows = externalRows.filter((row) => row.reason === EXTERNAL_FENCE_ABANDONED)
+  const dead = externalRows.filter((row) => row.live !== true && row.reason !== EXTERNAL_FENCE_ABANDONED)
+  if (dead.length > 0) refuse(`the fence register names external lane(s) that are not live: ${dead.map((row) => `${row.lane} (${row.reason}, crew dir ${row.dir})`).join('; ')}; an external fence denies a surface its lane must still hold`, EXTERNAL_FENCE_STALE)
+  if (abandonedRows.length > 0) refuse(`the fence register names external lane(s) whose driver is gone: ${abandonedRows.map((row) => `${row.lane} (crew dir ${row.dir}, heartbeat age ${row.heartbeat_age_ms}ms, stale after ${row.stale_after_ms}ms)`).join('; ')}; the lane's driver is gone, so the surface is denied by a lane nobody is running`, EXTERNAL_FENCE_ABANDONED)
+  const externalByLane = new Map(externalRows.map((row) => [row.lane, row]))
+  const holderClaims = () => {
+    const claims = []
+    for (const entry of entries) {
+      if (batchNames.has(entry.lane)) {
+        claims.push({ lane: entry.lane, files: entry.files, dir: null })
+        continue
+      }
+      const external = externalByLane.get(entry.lane)
+      if (external?.live === true) claims.push({ lane: entry.lane, files: entry.files, dir: external.dir })
+    }
+    for (const current of Array.isArray(crossBatch.live) ? crossBatch.live : []) {
+      if (batchNames.has(current?.lane)) continue
+      claims.push({ lane: current?.lane, files: current?.files, dir: current?.dir ?? null })
+    }
+    const unique = new Map()
+    for (const claim of claims) {
+      if (typeof claim.lane !== 'string' || claim.lane.trim() === '') continue
+      const files = [...new Set((Array.isArray(claim.files) ? claim.files : [])
+        .filter((file) => typeof file === 'string')
+        .map(normaliseRepoPath))].sort()
+      const key = `${claim.lane}\u0000${claim.dir || ''}`
+      if (!unique.has(key)) unique.set(key, { lane: claim.lane, files, dir: claim.dir })
+    }
+    return [...unique.values()].sort((a, b) => a.lane < b.lane ? -1 : a.lane > b.lane ? 1 : (a.dir || '').localeCompare(b.dir || ''))
+  }
+  const authoredHolders = holderClaims()
+  const holderFor = (lane, file) => {
+    const candidate = normaliseRepoPath(file)
+    const authoredHolder = authoredHolders.find((holder) => {
+      if (holder.lane === lane || (batchNames.has(holder.lane) && relatedLanes(graph, lane, holder.lane))) return false
+      const intersects = holder.files.some((held) => fenceEntryIntersects(candidate, [held]) || fenceEntryIntersects(held, [candidate]))
+      return intersects ? { lane: holder.lane, files: [...holder.files], dir: holder.dir } : false
+    })
+    if (authoredHolder) return authoredHolder
+    return null
+  }
   const reportPath = typeof outDir === 'string' && outDir.trim() ? join(outDir, FENCE_REPORT_FILE) : null
   let citation = reportPath || '(report unavailable: no-out-dir)'
   const reportLanes = []
@@ -1709,11 +1768,45 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
   const summaryLanes = []
   const warnings = []
   const reachRefusals = []
+  const admissionByLane = new Map()
+  const admissionOwners = new Map()
+  const admissionArbitrations = new Map()
+  const arbitrationWarning = ({ lane, file, source, holder }) => {
+    const text = `dispatch-batch: WARNING fence-admission-arbitrated: lane ${lane} scanned ${file} for automatic ${source} admission, but lane ${holder.lane} won first-lane arbitration for ${holder.file}; this lane continues without widening its fence`
+    warnings.push({ kind: 'fence-admission-arbitrated', lane, file, source, holder, text })
+    admissionArbitrations.get(lane)?.push({ lane, file, source, holder, text })
+    d.log(text)
+    return { lane, file, source, holder, text }
+  }
   const perLane = {}
+  const authoredPerLane = {}
   for (const lane of batchLanes) {
     const name = laneNameOf(lane)
     const own = byLane.get(name)
     const ownFiles = own.files.map(normaliseRepoPath)
+    authoredPerLane[name] = { files: [...ownFiles] }
+    const effectiveFiles = [...ownFiles]
+    const laneAdmissions = []
+    const admissionKeys = new Set()
+    admissionByLane.set(name, laneAdmissions)
+    admissionArbitrations.set(name, [])
+    const recordAdmission = (row) => {
+      const key = `${row.lane}\u0000${row.file}\u0000${row.source}`
+      if (admissionKeys.has(key)) return row
+      admissionKeys.add(key)
+      laneAdmissions.push(row)
+      if (!effectiveFiles.includes(row.file)) effectiveFiles.push(row.file)
+      return row
+    }
+    const automaticAdmission = (source, file) => {
+      const row = fenceAdmission({ lane: name, file, source })
+      const admissionOwner = admissionOwners.get(row.file)
+      if (admissionOwner && admissionOwner.lane !== name && !relatedLanes(graph, name, admissionOwner.lane)) {
+        return arbitrationWarning({ lane: name, file: row.file, source, holder: admissionOwner })
+      }
+      if (!admissionOwner) admissionOwners.set(row.file, { lane: name, file: row.file, source })
+      return recordAdmission(row)
+    }
     const ownPaths = ownFiles.map((file) => parseFenceScope(file).path)
     const ownWhere = laneWhereOf(lane)
     const ownCreates = laneCreatesOf(lane)
@@ -1734,6 +1827,12 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
       }
       warnings.push(censusWarning)
     }
+    if (censusExposure) {
+      for (const carrier of missingCensusCarriers) {
+        const holder = holderFor(name, carrier)
+        if (!holder) automaticAdmission('census-carrier', carrier)
+      }
+    }
     const ownSurface = [...ownWhere, ...ownCreates]
     if (!ownSurface.every(matchOwn)) {
       const outside = ownSurface.filter((path) => !matchOwn(path))
@@ -1748,6 +1847,10 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
     // hand. Rot and ambiguity are still fatal and are still caught where they become
     // facts — the skill's own exhibits.test.mjs — not by a static pre-dispatch guess.
     const unfencedPins = anchorPinsOutsideFence({ surface: ownSurface, fenceFiles: ownPaths, pins })
+    for (const pin of unfencedPins) {
+      const holder = holderFor(name, pin.manifest)
+      if (!holder) automaticAdmission('anchor-pin', pin.manifest)
+    }
     if (unfencedPins.length > 0) {
       const detail = unfencedPins.map(({ file, manifest, keys }) => `${file} pinned by ${manifest} at ${keys.join(', ')}`).join('; ')
       const rolesManifestUnfenced = unfencedPins.some(({ manifest }) => manifest === ROLES_ANCHOR_MANIFEST)
@@ -1778,22 +1881,23 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
 
     const droppedReachRows = []
     const reachRows = fenceHasSurface ? testsOutsideFence({ surface: ownSurface, fenceFiles: ownPaths, reach: reachFor(), droppedRows: droppedReachRows }) : []
-    // Classified BEFORE the warning is queued (#960). The warning closes with "not a
-    // refusal", and the deferred warnings render at :1313, ahead of any refusal raised
-    // after this loop — so listing a row that IS about to refuse would print the
-    // contradiction first and the verdict second. Refused rows are subtracted from the
-    // warning's listing and from nothing else: dispatch.warnings.json still carries every
-    // row, so the operator's listing stays complete. An OVERRIDDEN row keeps warning,
-    // because it genuinely does not refuse.
+    // Classify candidates BEFORE the warning is queued (#960), and keep the full reach
+    // listing as evidence even when a held row later refuses. Deferred warnings render at
+    // :1313, ahead of any refusal raised after this loop. dispatch.warnings.json carries
+    // every row, so the operator's listing stays complete; an OVERRIDDEN row keeps its
+    // warning because it genuinely does not refuse.
     const surfaceExports = fenceHasSurface ? surfaceExportsOf({ surface: ownSurface, reach: reachFor() }) : []
     const allowed = new Map(laneAllowTestReachOf(lane).map(({ file, why }) => [file, why]))
     const candidates = reachRefusalRows({ rows: reachRows, surfaceExports })
-    const overridden = candidates
-      .filter((row) => allowed.has(row.test))
-      .map((row) => ({ ...row, why: allowed.get(row.test) }))
-    const refusedRows = candidates.filter((row) => !allowed.has(row.test))
-    const refusedTests = new Set(refusedRows.map(({ test }) => test))
-    const warnRows = reachRows.filter((row) => !refusedTests.has(row.test))
+    const overridden = []
+    const refusedRows = []
+    for (const row of candidates) {
+      const holder = holderFor(name, row.test)
+      if (allowed.has(row.test)) overridden.push({ ...row, why: allowed.get(row.test), holder, admission_override: holder === null })
+      else if (holder) refusedRows.push({ ...row, holder })
+      else automaticAdmission('test-reach', row.test)
+    }
+    const warnRows = reachRows
     if (warnRows.length > 0) {
       const listed = warnRows.slice(0, TEST_REACH_ROW_LIMIT).map(reachRowText).join('; ')
       const omitted = warnRows.length - Math.min(warnRows.length, TEST_REACH_ROW_LIMIT)
@@ -1801,18 +1905,19 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
       warnings.push(warning)
       deferredWarnings.push(() => {
         const tail = reportTail(omitted, citation)
-        const reachText = `${TEST_REACH_WARNING_PREFIX} lane ${name} changes file(s) reached by ${warnRows.length} test file(s) outside its fence, least obvious first (listing at most ${TEST_REACH_ROW_LIMIT}): ${listed}${tail}; a named test is a file to READ before this fence is chosen, not a refusal. ${TEST_REACH_BLIND_SPOT}`
+        const reachText = `${TEST_REACH_WARNING_PREFIX} lane ${name} changes file(s) reached by ${warnRows.length} test file(s) outside its fence, least obvious first (listing at most ${TEST_REACH_ROW_LIMIT}): ${listed}${tail}; an unheld named test is admitted to the effective fence, while a test held by another lane remains a refusal. ${TEST_REACH_BLIND_SPOT}`
         warning.text = reachText
       })
     }
     if (overridden.length > 0) {
-      const overrideText = `${TEST_REACH_OVERRIDE_PREFIX} lane ${name} declares ${TEST_REACH_OVERRIDE_KEY} for ${overridden.length} reaching test(s) that would otherwise refuse: ${overridden.map((row) => `${row.symbols.length === 0 ? `${row.test} reaches ${row.file} through a static path literal (which includes its own import specifier; path-only, how=path)` : `${row.test} imports ${row.file} and names ${row.symbols.join(', ')}`}; why=${row.why}`).join('; ')}; the named row(s) do not trigger ${TEST_REACH_UNFENCED}, the test(s) stay OUTSIDE the lane fence, and no seat may widen its own scope to reach them; this records the override only — every later check can still refuse this batch, so it is not a statement of the lane dispatch outcome.`
+      const overrideText = `${TEST_REACH_OVERRIDE_PREFIX} lane ${name} declares ${TEST_REACH_OVERRIDE_KEY} for ${overridden.length} reaching test(s) that would otherwise refuse: ${overridden.map((row) => `${row.symbols.length === 0 ? `${row.test} reaches ${row.file} through a static path literal (which includes its own import specifier; path-only, how=path)` : `${row.test} imports ${row.file} and names ${row.symbols.join(', ')}`}; why=${row.why}; holder=${row.holder?.lane ?? 'none'} dir=${row.holder?.dir ?? 'unknown'} files=${row.holder?.files?.join(',') ?? 'none'}; override=${row.admission_override ? 'explicit-exclusion' : 'held-test'}${row.admission_override ? `; operator exclusion overrode automatic admission for ${row.test}` : ''}`).join('; ')}; the named row(s) do not trigger ${TEST_REACH_UNFENCED}, the test(s) stay OUTSIDE the lane fence, and no seat may widen its own scope to reach them; this records the override only — every later check can still refuse this batch, so it is not a statement of the lane dispatch outcome.`
       warnings.push({ kind: 'test-reach-override', lane: name, rows: overridden, text: overrideText })
       d.log(overrideText)
     }
     if (refusedRows.length > 0) reachRefusals.push({ lane: name, rows: refusedRows, files: ownFiles })
     const overrideField = overridden.length > 0 ? { test_reach_overrides: overridden } : {}
-    reportLanes.push({ lane: name, test_reach: reachRows, test_reach_dropped: droppedReachRows, citation_carriers: unfencedCarriers, anchor_pins: unfencedPins, census_carriers: censusWarning ? [censusWarning] : [], ...overrideField })
+    const arbitrationField = admissionArbitrations.get(name)?.length > 0 ? { fence_admission_arbitrated: admissionArbitrations.get(name) } : {}
+    reportLanes.push({ lane: name, test_reach: reachRows, test_reach_dropped: droppedReachRows, citation_carriers: unfencedCarriers, anchor_pins: unfencedPins, census_carriers: censusWarning ? [censusWarning] : [], ...(laneAdmissions.length > 0 ? { fence_admissions: laneAdmissions } : {}), ...arbitrationField, ...overrideField })
     summaryLanes.push({
       lane: name,
       counts: {
@@ -1833,8 +1938,8 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
       const siblingPaths = siblingFiles.map((file) => parseFenceScope(file).path)
       const matchSibling = scopeMatcher(siblingPaths)
       const inherited = relatedLanes(graph, name, sibling.lane)
-      if (!inherited && ownFiles.some((file) => fenceEntryIntersects(file, siblingFiles))) {
-        const leaked = ownFiles.filter((file) => fenceEntryIntersects(file, siblingFiles))
+      if (!inherited && effectiveFiles.some((file) => fenceEntryIntersects(file, siblingFiles))) {
+        const leaked = effectiveFiles.filter((file) => fenceEntryIntersects(file, siblingFiles))
         refuse(`lane ${name} own fence overlaps sibling ${sibling.lane}: ${leaked.join(', ')} (sibling fence: ${siblingFiles.join(', ')})`, SIBLING_LEAK)
       }
       // A created path can hide from the fence-vs-fence check above: this lane may
@@ -1848,14 +1953,29 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
     }
     perLane[name] = {
       lane: name,
-      files: ownFiles,
+      files: effectiveFiles,
       where: ownWhere,
       creates: ownCreates,
       reads: Array.isArray(own.reads) ? own.reads : [],
       siblings,
+      ...(laneAdmissions.length > 0 ? { fence_admissions: laneAdmissions } : {}),
+      ...(admissionArbitrations.get(name)?.length > 0 ? { fence_admission_arbitrated: admissionArbitrations.get(name) } : {}),
     }
   }
-  const crossBatch = liveLaneClaims({ checkout: scanRoot, batchNames, deps: d })
+  const admissions = []
+  const compareAdmissions = (a, b) => a.lane < b.lane ? -1 : a.lane > b.lane ? 1 : a.file < b.file ? -1 : a.file > b.file ? 1 : a.source < b.source ? -1 : a.source > b.source ? 1 : 0
+  for (const lane of batchLanes) {
+    const name = laneNameOf(lane)
+    const laneRows = admissionByLane.get(name) || []
+    laneRows.sort(compareAdmissions)
+    admissions.push(...laneRows)
+    const floor = [...(authoredPerLane[name]?.files || (byLane.get(name)?.files || []).map(normaliseRepoPath))]
+    const files = [...floor]
+    for (const row of laneRows) if (!files.includes(row.file)) files.push(row.file)
+    if (perLane[name]) perLane[name].files = files
+  }
+  admissions.sort(compareAdmissions)
+  for (const row of admissions) d.log(`dispatch-batch: ${FENCE_ADMISSION_EVENT} lane=${row.lane} file=${row.file} source=${row.source}`)
   if (!crossBatch.cleared) {
     const text = `${CROSS_BATCH_UNKNOWN_PREFIX} the live lane set could not be determined in full (crew root ${crossBatch.root}, state ${crossBatch.state}): ${crossBatch.unknown.map((row) => `${row.lane ?? 'crew-root'} (${row.reason})`).join('; ') || 'none named'}; this batch is NOT cleared against those lanes and this absence is not a clear. ${CROSS_BATCH_BLIND_SPOT}`
     warnings.push({ kind: 'cross-batch-unknown', lane: null, unknown: crossBatch.unknown, text })
@@ -1896,9 +2016,12 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
   // refusal can cite a listing the operator already has, and BEFORE the absent check, whose
   // comment claims the last position among register checks and keeps it.
   if (reachRefusals.length > 0) {
-    const detail = reachRefusals.flatMap(({ lane: name, rows }) => rows.map((row) => row.symbols.length === 0
-      ? `lane ${name}: ${row.test} reaches ${row.file} through a static path literal (which includes its own import specifier; path-only, how=path)`
-      : `lane ${name}: ${row.test} imports ${row.file} at one hop and names ${row.symbols.join(', ')}`)).join('; ')
+    const detail = reachRefusals.flatMap(({ lane: name, rows }) => rows.map((row) => {
+      const holder = row.holder ? `; holder lane ${row.holder.lane} (crew dir ${row.holder.dir ?? 'unknown'}) files ${row.holder.files.join(', ')}` : ''
+      return row.symbols.length === 0
+        ? `lane ${name}: ${row.test} reaches ${row.file} through a static path literal (which includes its own import specifier; path-only, how=path)${holder}`
+        : `lane ${name}: ${row.test} imports ${row.file} at one hop and names ${row.symbols.join(', ')}${holder}`
+    })).join('; ')
     const remedy = reachRefusals.map(({ lane: name, rows, files }) => `lane ${name}: ${[...new Set([...files, ...rows.map(({ test }) => test)])].sort().join(', ')}`).join(' | ')
     const remedyText = `${TEST_REACH_REFUSAL_REMEDY} ${remedy}`
     const text = `test(s) outside a lane fence assert the behaviour that lane changes: ${detail}; ${remedyText}; declare ${TEST_REACH_OVERRIDE_KEY} on the lane request to dispatch anyway, and the decision is logged and recorded on ${FENCE_REPORT_FILE}. ${TEST_REACH_REFUSAL_BLIND_SPOT}`
@@ -1912,11 +2035,6 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
   // refusal changes the cause it names.
   const absent = entries.map(({ lane }) => lane).filter((name) => !batchNames.has(name) && !externalNames.has(name))
   if (absent.length > 0) refuse(`fence register names lane(s) absent from the batch: ${absent.join(', ')}; the batch carries ${[...batchNames].join(', ') || 'no lanes'}, and a lane's sibling count is derived from batch size, so this register can only refuse at boot as ${FENCE_COUNT_MISMATCH}`, FENCE_REGISTER_MISMATCH)
-  const externalRows = externalFenceLiveness({ externals: [...externalNames], parentDir, deps: d })
-  const abandonedRows = externalRows.filter((row) => row.reason === EXTERNAL_FENCE_ABANDONED)
-  const dead = externalRows.filter((row) => row.live !== true && row.reason !== EXTERNAL_FENCE_ABANDONED)
-  if (dead.length > 0) refuse(`the fence register names external lane(s) that are not live: ${dead.map((row) => `${row.lane} (${row.reason}, crew dir ${row.dir})`).join('; ')}; an external fence denies a surface its lane must still hold`, EXTERNAL_FENCE_STALE)
-  if (abandonedRows.length > 0) refuse(`the fence register names external lane(s) whose driver is gone: ${abandonedRows.map((row) => `${row.lane} (crew dir ${row.dir}, heartbeat age ${row.heartbeat_age_ms}ms, stale after ${row.stale_after_ms}ms)`).join('; ')}; the lane's driver is gone, so the surface is denied by a lane nobody is running`, EXTERNAL_FENCE_ABANDONED)
   for (const row of externalRows) {
     const declared = [...new Set((byLane.get(row.lane)?.files || [])
       .filter((file) => typeof file === 'string')
@@ -1955,7 +2073,11 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
     const detail = collisions.map((row) => `lane ${row.lane} collides with live lane ${row.live} on ${row.files.join(', ')} (crew dir ${row.dir})`).join('; ')
     refuse(`the fence register grants file(s) that a live lane outside this batch already holds: ${detail}; "ONE register, ONE batch" holds only while one batch runs at a time — settle, archive or narrow the named lane, or narrow this register`, CROSS_BATCH_COLLISION)
   }
-  return { perLane, warnings, crossBatch, externals: externalRows }
+  const effectiveFences = entries.map((entry) => ({
+    ...entry,
+    files: perLane[entry.lane]?.files ? [...perLane[entry.lane].files] : [...entry.files],
+  }))
+  return { perLane, authoredPerLane, warnings, crossBatch, externals: externalRows, fences: effectiveFences, admissions }
 }
 
 // A fence denies a SIBLING's declared surface; it never denied an UNCLAIMED path, so a
@@ -3384,6 +3506,8 @@ function prepareDispatchContext(options) {
   const parent = typeof parentDir === 'string' && parentDir.trim() ? parentDir : dirname(resolve(root))
   const outputDir = typeof outDir === 'string' && outDir.trim() ? resolve(outDir) : join(resolve(batchDir), 'out')
   const fenceReport = checkFences({ fences, lanes, graph, checkout, externals, parentDir: parent, outDir: outputDir, deps: d })
+  const hasAdmissions = fenceReport.admissions.length > 0
+  const effectiveFences = hasAdmissions ? fenceReport.fences : fences
   // Preflight BEFORE planWorktrees: planWorktrees probes git for existing
   // branches, so an unsupported --variant reached here after the probe and was
   // reported as `branch-taken` when the real cause was an invalid run option
@@ -3415,11 +3539,21 @@ function prepareDispatchContext(options) {
   const dryRun = runFlags['dry-run'] === true || runFlags.dryRun === true
   for (const warning of batchAliasWarnings({ lanes, runFlags })) d.log(warning)
   const batchSeats = batchSeatsFrom(runFlags)
-  const registerPath = typeof registerOverride === 'string' && registerOverride.trim()
+  const authoredRegisterPath = typeof registerOverride === 'string' && registerOverride.trim()
     ? resolve(registerOverride)
     : typeof runFlags.fences === 'string' && runFlags.fences.trim()
       ? resolve(runFlags.fences)
       : join(outputDir, 'dispatch.fences.json')
+  const registerPath = hasAdmissions ? join(outputDir, 'dispatch.fences.json') : authoredRegisterPath
+  if (dryRun && hasAdmissions) {
+    const data = registerData({ fences: effectiveFences, registerPath, d })
+    try {
+      d.mkdirSync(outputDir, { recursive: true })
+      d.writeFileSync(registerPath, JSON.stringify(data, null, 2) + '\n')
+    } catch (err) {
+      refuse(`cannot write effective dispatch fence register ${registerPath}: ${err?.message || String(err)}`, COMPILE_REFUSED)
+    }
+  }
   const unstarted = []
 
   const logWaveState = () => {
@@ -3467,7 +3601,9 @@ function prepareDispatchContext(options) {
   }
   if (dryRun) {
     const plans = planWorktrees({ lanes: waveLanes, parentDir, checkout, deps: d })
-    d.log(JSON.stringify({ dispatch: 'dry-run', plans }))
+    const dryData = { dispatch: 'dry-run', plans }
+    if (hasAdmissions) dryData.fence_admissions = fenceReport.admissions
+    d.log(JSON.stringify(dryData))
     for (const lane of waveLanes) {
       d.log(`dispatch-batch: dry-run lane=${lane.lane} tier=${lane.assurance ?? tier ?? 'none'} seats=${seatSpec(mergeSeats(batchSeats, lane.seats))} seats_from=${seatFromSpec(batchSeats, lane.seats)}`)
     }
@@ -3476,7 +3612,7 @@ function prepareDispatchContext(options) {
       if (adoption) d.log(`dispatch-batch: dry-run lane=${lane.lane} adopt=${adoption.archive} source=${adoption.source} findings=${adoption.revise} adopt_from=${adoption.from} ${lineageLine(adoption)}`)
     }
     d.log(DRY_RUN_BLIND_SPOT)
-    return { kind: 'terminal', result: { dryRun: true, plans, lanes: waveLanes, fences: fenceReport, waves, wave: waveNumber, deferred, unstarted } }
+    return { kind: 'terminal', result: { dryRun: true, plans, lanes: waveLanes, fences: fenceReport, ...(hasAdmissions ? { registerPath } : {}), waves, wave: waveNumber, deferred, unstarted } }
   }
   logWaveState()
   const plans = planWorktrees({ lanes: waveLanes, parentDir, checkout, deps: d })
@@ -3484,7 +3620,7 @@ function prepareDispatchContext(options) {
   return {
     kind: 'prepared',
     batchDir,
-    fences,
+    fences: effectiveFences,
     checkout,
     parentDir,
     outDir,
@@ -3545,7 +3681,7 @@ async function compileDispatchWave(prepared) {
   try { mkdirSync(outputDir, { recursive: true }) } catch (err) {
     refuse(`cannot create dispatch output directory ${outputDir}: ${err?.message || String(err)}`, COMPILE_REFUSED)
   }
-  if (!runFlags.fences) {
+  if (!runFlags.fences || fenceReport.admissions.length > 0) {
     const data = registerData({ fences, registerPath, d })
     try { writeFileSync(registerPath, JSON.stringify(data, null, 2) + '\n') } catch (err) {
       refuse(`cannot write dispatch fence register ${registerPath}: ${err?.message || String(err)}`, COMPILE_REFUSED)
@@ -3637,8 +3773,10 @@ async function compileDispatchWave(prepared) {
     const staffing = item.staffing || { ...ABSENT_STAFFING }
     const plan = plans.find((candidate) => candidate.lane === item.lane)
     const laneFence = fenceReport.perLane[item.lane]
-    const floor = tierFloor({ files: laneFence.files, extra: runFlags.protectedPaths })
-    const prompt = promptSurfaceVerdict({ files: laneFence.files })
+    const authoredFence = fenceReport.authoredPerLane?.[item.lane]
+    const assuranceFiles = authoredFence?.files || laneFence.files
+    const floor = tierFloor({ files: assuranceFiles, extra: runFlags.protectedPaths })
+    const prompt = promptSurfaceVerdict({ files: assuranceFiles })
     const laneEntry = laneByName.get(item.lane)
     // A lane's own assurance is the requested tier for THAT lane; --assurance stays the
     // batch default for every lane that does not name one. A protected floor
@@ -3771,6 +3909,26 @@ function launchDispatchWave(compiled) {
       refuse(`crew boot under --${PANE_TRANSPORT} produced no workspace for ${item.lane}: crew.json workspace_id is ${JSON.stringify(crew.workspace_id ?? null)}`, BOOT_FAILED)
     }
     const arrival = checkArrival({ crew, lane: item.lane, batchTotal: lanes.length, externals })
+    const journal = join(dirname(path), 'journal.jsonl')
+    const admissionRows = fenceReport.perLane[item.lane]?.fence_admissions || []
+    if (admissionRows.length > 0) {
+      let journalExists = false
+      try { journalExists = d.existsSync(journal) } catch (err) {
+        d.log(`dispatch-batch: ${FENCE_ADMISSION_EVENT} journal probe failed lane=${item.lane}: ${err?.message || String(err)}`)
+      }
+      if (!journalExists) {
+        d.log(`dispatch-batch: ${FENCE_ADMISSION_EVENT} journal unavailable lane=${item.lane} path=${journal}`)
+      } else {
+        for (const admission of admissionRows) {
+          const row = { at: new Date().toISOString(), event: FENCE_ADMISSION_EVENT, lane: item.lane, file: admission.file, source: admission.source }
+          try {
+            d.appendFileSync(journal, `${JSON.stringify(row)}\n`)
+          } catch (err) {
+            d.log(`dispatch-batch: ${FENCE_ADMISSION_EVENT} journal append failed lane=${item.lane} file=${admission.file}: ${err?.message || String(err)}`)
+          }
+        }
+      }
+    }
     arrivals.push({ ...item, crewPath: path, arrival, workspaceId })
   }
 
@@ -3842,7 +4000,7 @@ function launchDispatchWave(compiled) {
     d.log(`dispatch-batch: teardown lane=${item.lane} command=node crew/crew.mjs teardown --task ${item.lane} --checkout ${item.laneDir}`)
   }
   d.log(mergeCheckLine(runs.map((item) => item.lane)))
-  return { lanes: runs, plans, registerPath, outDir: outputDir, keep, transport, waves, wave: waveNumber, deferred, unstarted }
+  return { lanes: runs, plans, registerPath, outDir: outputDir, keep, transport, waves, wave: waveNumber, deferred, unstarted, fences: fenceReport }
 }
 
 export async function dispatchBatch({ batchDir, fences, checkout, parentDir, outDir, tier, execution, variant, externals, registerPath: registerOverride, runFlags = {}, deps } = {}) {

@@ -27,6 +27,10 @@ import {
   ANCHOR_PIN_POST_MERGE,
   ANCHOR_PIN_WARNING_PREFIX,
   CITATION_CARRIER_BLIND_SPOT,
+  CENSUS_CARRIER_BLIND_SPOT,
+  CENSUS_CARRIER_FILES,
+  CENSUS_CARRIER_REPAIR,
+  CENSUS_CARRIER_WARNING_PREFIX,
   CITATION_CARRIER_POST_MERGE,
   CITATION_CARRIER_ROW_LIMIT,
   CITATION_CARRIER_WARNING_PREFIX,
@@ -123,6 +127,91 @@ import { parseDirectedBrief, WAITS_S } from '../crew/drive.mjs'
 import { laneFenceFor, renderBrief, resolveWriteSurface } from '../scripts/factory/make-brief.mjs'
 import { DRIVER_GONE_PERIODS, HEARTBEAT_PERIOD_MS } from '../scripts/factory/lane-watch.mjs'
 import { scratchDir } from './helpers.mjs'
+
+function censusFixture(name, fenceFiles, { withReport = false } = {}) {
+  const checkout = namedReachFixture(`census-${name}`, {
+    'test/census.test.mjs': 'const census = true\nif (!census) throw new Error("unreachable")\n',
+  })
+  const outDir = withReport ? join(checkout, `${name}-out`) : undefined
+  return { checkout, outDir, ...reachCheck({ checkout, fenceFiles, surface: fenceFiles, outDir }) }
+}
+
+test('A1', () => {
+  const fixture = censusFixture('A1', ['test/census.test.mjs'])
+  assert.equal(fixture.error, null)
+  const warnings = fixture.report.warnings.filter(({ kind }) => kind === 'census-carrier')
+  assert.equal(warnings.length, 1)
+  const [warning] = warnings
+  assert.equal(warning.text.startsWith(CENSUS_CARRIER_WARNING_PREFIX), true)
+  for (const carrier of CENSUS_CARRIER_FILES) assert.equal(warning.text.includes(carrier), true)
+  assert.equal(warning.text.includes('WARNING, not a refusal'), true)
+  assert.equal(warning.text.includes('OWE'), true)
+  assert.equal(warning.text.includes('cannot reach'), true)
+  for (const literal of ['batch.md', 'const measurement', 'const pristinePairs']) assert.equal(warning.text.includes(literal), true)
+})
+
+test('B1', () => {
+  const fixture = censusFixture('B1', ['test/census.test.mjs', ...CENSUS_CARRIER_FILES], { withReport: true })
+  assert.equal(fixture.error, null)
+  assert.equal(fixture.report.warnings.some(({ kind }) => kind === 'census-carrier'), false)
+  assert.deepEqual(JSON.parse(readFileSync(join(fixture.outDir, FENCE_REPORT_FILE), 'utf8')).lanes[0].census_carriers, [])
+  const summary = fixture.logs.find((line) => line.startsWith('dispatch-batch: WARNING-SUMMARY '))
+  assert.ok(summary)
+  assert.equal(summary.includes('census-carrier=0'), true)
+})
+
+test('C1', () => {
+  const fixture = censusFixture('C1', ['crew/capabilities.mjs'], { withReport: true })
+  assert.equal(fixture.error, null)
+  assert.equal(fixture.report.warnings.some(({ kind }) => kind === 'census-carrier'), false)
+  assert.deepEqual(JSON.parse(readFileSync(join(fixture.outDir, FENCE_REPORT_FILE), 'utf8')).lanes[0].census_carriers, [])
+  const summary = fixture.logs.find((line) => line.startsWith('dispatch-batch: WARNING-SUMMARY '))
+  assert.ok(summary)
+  assert.equal(summary.includes('census-carrier=0'), true)
+})
+
+test('D1', () => {
+  for (const [index, carrier] of CENSUS_CARRIER_FILES.entries()) {
+    const fenceFiles = ['test/census.test.mjs', carrier]
+    const fixture = censusFixture(`D1-${index}`, fenceFiles)
+    assert.equal(fixture.error, null)
+    const warnings = fixture.report.warnings.filter(({ kind }) => kind === 'census-carrier')
+    assert.equal(warnings.length, 1)
+    const [warning] = warnings
+    const missing = CENSUS_CARRIER_FILES.filter((candidate) => candidate !== carrier)
+    assert.deepEqual(warning.missing, missing)
+    for (const path of CENSUS_CARRIER_FILES) assert.equal(warning.text.includes(path), true)
+  }
+})
+
+test('E1', () => {
+  const fixture = censusFixture('E1', ['test/census.test.mjs'], { withReport: true })
+  assert.equal(fixture.error, null)
+  const warning = fixture.report.warnings.find(({ kind }) => kind === 'census-carrier')
+  const persisted = JSON.parse(readFileSync(join(fixture.outDir, FENCE_REPORT_FILE), 'utf8'))
+  const row = persisted.lanes[0].census_carriers[0]
+  assert.deepEqual(Object.keys(row).sort(), ['blind_spot', 'carriers', 'kind', 'lane', 'missing', 'repair', 'text'])
+  assert.deepEqual(row, {
+    kind: 'census-carrier',
+    lane: 'lane-a',
+    carriers: [...CENSUS_CARRIER_FILES],
+    missing: [...CENSUS_CARRIER_FILES],
+    repair: CENSUS_CARRIER_REPAIR,
+    blind_spot: CENSUS_CARRIER_BLIND_SPOT,
+    text: warning.text,
+  })
+  assert.equal(persisted.blind_spots['census-carrier'], CENSUS_CARRIER_BLIND_SPOT)
+  const doctrine = readFileSync(join(process.cwd(), 'skills/crew-dispatch/references/batch.md'), 'utf8')
+  assert.equal(doctrine.split(CENSUS_CARRIER_BLIND_SPOT).length - 1, 1)
+})
+
+test('F1', () => {
+  let fixture
+  assert.doesNotThrow(() => { fixture = censusFixture('F1', ['test/census.test.mjs']) })
+  assert.equal(fixture.error, null)
+  assert.equal(fixture.report.warnings.some(({ kind }) => kind === 'census-carrier'), true)
+  assert.equal(REFUSAL_REASONS.includes('census-carrier'), false)
+})
 
 import {
   root,

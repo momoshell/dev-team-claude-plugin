@@ -2066,7 +2066,7 @@ DIRECT && test('an anchor warning names both pinned files, all manifests, and ev
     checkout,
     deps: { home: root, log: () => {} },
   })
-  const text = report.warnings[0].text
+  const text = report.warnings.find(({ kind }) => kind === 'anchor-pin').text
   for (const token of [...fixture.files, ...fixture.manifestPaths, ...fixture.keys]) {
     assert.equal(text.includes(token), true, `warning omitted ${token}`)
   }

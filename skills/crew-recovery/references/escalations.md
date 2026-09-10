@@ -9,7 +9,7 @@ investigating.
 | Stage | Meaning | Operator's first move |
 |---|---|---|
 | `escalate:scope` | A changed path crossed the declared surface or a sibling fence. | Stop writes; compare `git status --porcelain -uall` with `files_in_scope` and the lane fence. |
-| `escalate:scope-request` | A seat's typed `scope_request` was not admitted — malformed, unsourced, naming a file a live lane holds, already in scope, protected, or past the widening limit. | Read the refusal reason in the escalation; a `held` file names its holder, and `already-scoped` means the seat asked for what it already had. |
+| `escalate:scope-request` | A seat's typed `scope_request` was not admitted — malformed, unsourced, already in scope, protected, or past the seat-widening limit. A request naming a file a live lane holds escalates as `scope`, not here. | Read the refusal reason in the escalation: `already-scoped` means the seat asked for what it already had, and `protected` names the floor paths that can never be admitted. |
 | `escalate:plan` | No usable plan, scope, lane, or mutation declaration reached acceptance. | Read the planner return and the exact refusal; do not ask the builder to guess. |
 | `escalate:plan-check` | The plan-check seat rejected or could not accept the plan. | Preserve the plan and check return, then identify the rejected contract. |
 | `escalate:plan-carve` | The planner said the surface is too large to build whole or returned an invalid carve. | Keep the slice record and ask the human which slice to dispatch. |

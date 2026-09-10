@@ -127,7 +127,7 @@ export const CITATION_CARRIER_BLIND_SPOT = 'BLIND SPOT: this finds docs carrying
 // pin outside a lane's fence is a fact an operator should SEE, not a batch outcome.
 export const ANCHOR_PIN_WARNING_PREFIX = 'dispatch-batch: WARNING anchor-pin-unfenced:'
 // #882 / ADR-040: external pin repair is an operator-owned post-merge action.
-export const ANCHOR_PIN_POST_MERGE = 'ADR-040: the sanctioned repair is the post-merge pass an operator runs on main after the wave merges — node skills/qa-test-writing/anchor-pin.mjs --repair-all <dir> — so a pinning manifest outside this fence is not an obligation on this lane'
+export const ANCHOR_PIN_POST_MERGE = 'ADR-040: a manifest pinning only files this lane does not write is not an obligation on this lane and is repaired after the wave merges by an operator running on main — node skills/qa-test-writing/anchor-pin.mjs --repair-all <dir>; a lane that writes the pinned file WILL owe the repair and cannot reach it until the pinning manifest is added to its fence'
 // #758: the closing command for a batch. The verb name is a CONSTANT so the line
 // dispatch-batch prints and the verb closeout.mjs implements cannot drift apart.
 export const MERGE_CHECK_COMMAND = 'node scripts/factory/closeout.mjs merge-check'

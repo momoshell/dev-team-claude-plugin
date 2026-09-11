@@ -6339,6 +6339,31 @@ function runTask(ctx, io, crash) {
     stageComplete()
   }
 
+  let suiteBuildBrief = planPath
+  let suiteBuildNote = 'build'
+  let censusBounces = 0
+  // Keep the ledger-only fixture adapter out of census execution.
+  // Production never has `.calls`, so it always runs the census.
+  const censusEnabled = !io.calls || typeof io.runClean === 'function'
+  const journalCensus = (phase, census) => io.log(recordRow({ at: io.now(), census_exhibits: {
+    phase, action: census.action, selected: census.selected,
+    selection_seconds: census.selection_seconds, run_seconds: census.run_seconds, total_seconds: census.total_seconds,
+    elapsed_seconds: census.elapsed_seconds, denominator: census.denominator, measurement: census.measurement, cost: census.cost, reason: census.reason,
+  } }))
+  if (gateCmd && censusEnabled) {
+    const baselineCensus = runCensusExhibits({ checkout: ctx.checkout, filesInScope: scopeFiles, deps: { run: (command) => io.run(command) } })
+    journalCensus('baseline', baselineCensus)
+    if (baselineCensus.action === 'escalate') {
+      return escalate('census-exhibits', baselineCensus.detail, [], { census: baselineCensus })
+    }
+    if (baselineCensus.action === 'bounce') {
+      const bounce = art('census-exhibits-bounce.md')
+      io.writeFile(bounce, ['# Census exhibit bounce', '', baselineCensus.detail, '', `Plan: ${planPath}`].join('\n'))
+      suiteBuildBrief = bounce
+      suiteBuildNote = 'census-exhibits-fix'
+    }
+  }
+
   // Capture the accepted scope before any builder dispatch. An unreadable
   // baseline is a typed fatal: treating it as absence would make a later
   // added file look like a clean round and would defeat the round fence.
@@ -6357,8 +6382,6 @@ function runTask(ctx, io, crash) {
   // The warm suite is part of a bounded accepted cycle. A first, evidence-backed
   // red may widen the scope and re-enter this same path once; every later red is
   // still a terminal suite escalation.
-  let suiteBuildBrief = planPath
-  let suiteBuildNote = 'build'
   suiteCycle:
   for (;;) {
   builderEnv = null
@@ -7248,6 +7271,23 @@ function runTask(ctx, io, crash) {
   const committing = io.changedFiles().filter(inScope)
   const preRebaseCommit = S.commit = io.commit(committing, message)
   stageComplete()
+
+  if (censusEnabled) {
+    const committedCensus = runCensusExhibits({ checkout: ctx.checkout, filesInScope: scopeFiles, deps: { run: (command) => io.run(command) } })
+    journalCensus('committed', committedCensus)
+    if (committedCensus.action === 'escalate') {
+      return escalate('census-exhibits', committedCensus.detail, [], { commit: S.commit })
+    }
+    if (committedCensus.action === 'bounce') {
+      if (censusBounces >= 1) return escalate('census-exhibits', committedCensus.detail, [], { commit: S.commit })
+      const bounce = art(`census-exhibits-bounce-r${censusBounces + 1}.md`)
+      io.writeFile(bounce, ['# Census exhibit bounce', '', committedCensus.detail, '', `Commit: ${S.commit}`, `Plan: ${planPath}`].join('\n'))
+      suiteBuildBrief = bounce
+      suiteBuildNote = 'census-exhibits-fix'
+      censusBounces += 1
+      continue suiteCycle
+    }
+  }
 
   if (publishing) {
     stage('rebase')
@@ -9008,4 +9048,34 @@ export function hardeningBriefLines(owed, exempt) {
     `If a finding's defect class cannot become a mechanical guard, ASK: return that finding's entry as exactly ${HARDENING_APPEAL_SHAPE} and nothing else. That request is still refused builder-exemption and grants nothing until the reviewer approves it in a hardening appeal; an entry that mixes the request with a declaration is not a request.`)
   if (Array.isArray(exempt) && exempt.length > 0) lines.push(...exempt.map(({ id }) => `Reviewer exemption recorded for ${id}.`))
   return lines
+}
+
+import { runCensusExhibits } from './census-exhibits.mjs'
+
+// H1 checks this lane's census wiring delta, not unrelated future drive.mjs edits.
+// Its 5443 plan-time boundary protects the citation carriers that pin this file.
+export function censusWiringBoundaryDelta(diffText, boundary = 5443) {
+  const lines = String(diffText || '').split('\n')
+  const isHeader = (line) => line.startsWith('+++ ') || line.startsWith('--- ')
+  const introducedCensusWiring = lines.some((line) => line.startsWith('+') && !isHeader(line) && line.includes('runCensusExhibits'))
+  if (!introducedCensusWiring) return { evaluated: false, reason: 'census-wiring-absent', changes: [], violations: [] }
+  let oldLine = null
+  let newLine = null
+  const changes = []
+  for (const line of lines) {
+    const header = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line)
+    if (header) { oldLine = Number(header[1]); newLine = Number(header[2]); continue }
+    const removed = line.startsWith('-') && !isHeader(line)
+    const added = line.startsWith('+') && !isHeader(line)
+    if (!removed && !added) continue
+    if (oldLine === null || newLine === null) return { evaluated: false, reason: 'diff-malformed', changes, violations: [] }
+    const change = { line, oldLine, newLine, kind: removed ? 'removed' : 'added' }
+    if (removed) oldLine += 1
+    if (added) newLine += 1
+    changes.push(change)
+  }
+  return {
+    evaluated: true, reason: null, changes,
+    violations: changes.filter((change) => change.oldLine <= boundary || change.newLine <= boundary),
+  }
 }

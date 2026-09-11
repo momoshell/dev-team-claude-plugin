@@ -2626,25 +2626,167 @@ function sectionToken(section) {
   return section == null ? 'none' : String(section).replace(/^## /, '').replaceAll(' ', '_')
 }
 
-function issueNumberFrom(requestPath, d) {
+function emptyIssueBinding() {
+  return { issue: null, source: null, declared: null, prose: null, disagreement: false }
+}
+
+function issueBindingFromRecord(request) {
+  const proseMatch = typeof request?.ask === 'string' ? /#(\d{1,6})\b/.exec(request.ask) : null
+  const prose = proseMatch ? Number(proseMatch[1]) : null
+  let declared = null
+  const doneMeans = typeof request?.done_means === 'string' ? request.done_means : ''
+  for (const declaration of doneMeans.matchAll(/details\.closes\s*=\s*\[([^\]]*)\]/g)) {
+    const firstInteger = /\d+/.exec(declaration[1])
+    if (!firstInteger) continue
+    const value = Number(firstInteger[0])
+    if (Number.isSafeInteger(value)) {
+      declared = value
+      break
+    }
+  }
+  const issue = declared ?? prose
+  const source = declared !== null ? 'declared' : prose !== null ? 'prose' : null
+  return { issue, source, declared, prose, disagreement: declared !== null && prose !== null && declared !== prose }
+}
+
+export function issueBindingFrom(requestPath, deps) {
+  if (plainObject(requestPath)) return issueBindingFromRecord(requestPath)
+  const d = normalDeps(deps)
   let request
-  try { request = JSON.parse(textOf(d.readFileSync(requestPath, 'utf8'))) } catch { return null }
-  const match = typeof request?.ask === 'string' ? /#(\d{1,6})\b/.exec(request.ask) : null
-  return match ? Number(match[1]) : null
+  try { request = JSON.parse(textOf(d.readFileSync(requestPath, 'utf8'))) } catch { return emptyIssueBinding() }
+  if (!plainObject(request)) return emptyIssueBinding()
+  return issueBindingFromRecord(request)
+}
+
+export const requestBindingFrom = issueBindingFrom
+export const requestIssueBinding = issueBindingFrom
+
+function historicalIssueReport(reason) {
+  return {
+    totalRequests: null,
+    withoutDeclaredClose: null,
+    proseWithoutDeclaredClose: null,
+    proseCited: null,
+    disagreements: null,
+    artifactBackedMisbindings: null,
+    reason,
+  }
+}
+
+function historicalArchiveUnreadable() {
+  return {
+    totalRequests: null,
+    withoutDeclaredClose: null,
+    proseWithoutDeclaredClose: null,
+    proseCited: null,
+    disagreements: null,
+    artifactBackedMisbindings: null,
+    reason: 'archive-unreadable',
+  }
+}
+
+function notDirectoryError(error) {
+  return error?.code === 'ENOTDIR' || /not a directory/i.test(textOf(error?.message || error))
+}
+
+function historyEntryName(entry) {
+  if (typeof entry === 'string' && entry.trim() !== '') return entry
+  if (entry && typeof entry.name === 'string' && entry.name.trim() !== '') return entry.name
+  throw new Error('archive entry has no name')
+}
+
+function historyEntryDirectory(entry) {
+  if (typeof entry === 'string') return null
+  if (!entry || typeof entry.isDirectory !== 'function') return null
+  const result = entry.isDirectory()
+  if (typeof result !== 'boolean') throw new Error('archive entry directory state is unknown')
+  return result
+}
+
+export function historicalIssueBindings({ home, deps } = {}) {
+  const d = normalDeps(deps)
+  const archiveRoot = typeof home === 'string' && home.trim() ? home : join(d.home, '.crew')
+  const requestPaths = []
+  const readEntries = (directory) => {
+    const entries = d.readdirSync(directory, { withFileTypes: true })
+    if (!Array.isArray(entries)) throw new Error('archive traversal returned no entries')
+    return entries
+  }
+  const visit = (directory) => {
+    for (const entry of readEntries(directory)) {
+      const name = historyEntryName(entry)
+      const isDirectory = historyEntryDirectory(entry)
+      const child = join(directory, name)
+      if (name.endsWith(REQUEST_SUFFIX)) {
+        if (isDirectory === true) throw new Error('request entry is a directory')
+        requestPaths.push(child)
+        continue
+      }
+      if (isDirectory === false) continue
+      try {
+        visit(child)
+      } catch (error) {
+        if (notDirectoryError(error)) continue
+        throw error
+      }
+    }
+  }
+  try {
+    for (const entry of readEntries(archiveRoot)) {
+      const name = historyEntryName(entry)
+      if (!name.startsWith('batch-')) continue
+      if (historyEntryDirectory(entry) === false) throw new Error('batch entry is not a directory')
+      visit(join(archiveRoot, name))
+    }
+  } catch {
+    return historicalArchiveUnreadable()
+  }
+  if (requestPaths.length === 0) return historicalIssueReport('archive-empty')
+
+  let totalRequests = 0
+  let withoutDeclaredClose = 0
+  let proseWithoutDeclaredClose = 0
+  let proseCited = 0
+  let disagreements = 0
+  let artifactBackedMisbindings = 0
+  try {
+    for (const requestPath of requestPaths.sort()) {
+      const request = JSON.parse(textOf(d.readFileSync(requestPath, 'utf8')))
+      if (!plainObject(request)) throw new Error('archive request is not an object')
+      const binding = issueBindingFromRecord(request)
+      totalRequests += 1
+      if (binding.declared === null) withoutDeclaredClose += 1
+      if (binding.prose !== null) proseCited += 1
+      if (binding.prose !== null && binding.declared === null) proseWithoutDeclaredClose += 1
+      if (binding.disagreement) {
+        disagreements += 1
+        const lane = basename(requestPath, REQUEST_SUFFIX)
+        if (d.existsSync(join(dirname(requestPath), 'out', `${lane}.issue.md`))) artifactBackedMisbindings += 1
+      }
+    }
+  } catch {
+    return historicalArchiveUnreadable()
+  }
+  return { totalRequests, withoutDeclaredClose, proseWithoutDeclaredClose, proseCited, disagreements, artifactBackedMisbindings, reason: null }
 }
 
 function issueBodyFor({ requestPath, lane, checkout, outDir, d }) {
-  const issue = issueNumberFrom(requestPath, d)
+  const binding = issueBindingFrom(requestPath, d)
   const unavailable = (reason) => {
-    try { d.log(`dispatch-batch: issue-body lane=${lane} issue=${issue ?? 'none'} status=unavailable reason=${reason}`) } catch { /* diagnostics never block a smaller brief */ }
+    const source = binding.source === null ? '' : ` source=${binding.source}`
+    try { d.log(`dispatch-batch: issue-body lane=${lane} issue=${binding.issue ?? 'none'}${source} status=unavailable reason=${reason}`) } catch { /* diagnostics never block a smaller brief */ }
     return null
   }
-  if (issue === null) return unavailable('no-issue-cited')
+  const reportDisagreement = () => {
+    try { d.log(`dispatch-batch: issue-binding-disagreement lane=${lane} declared=${binding.declared} prose=${binding.prose}`) } catch { /* diagnostics never block a smaller brief */ }
+  }
+  if (binding.disagreement) reportDisagreement()
+  if (binding.issue === null) return unavailable('no-issue-cited')
   let result
   try {
     result = d.spawn({
       file: 'gh',
-      args: ['issue', 'view', String(issue), '--json', 'body', '--jq', '.body'],
+      args: ['issue', 'view', String(binding.issue), '--json', 'body', '--jq', '.body'],
       cwd: checkout,
     })
   } catch {
@@ -2655,6 +2797,7 @@ function issueBodyFor({ requestPath, lane, checkout, outDir, d }) {
   if (!body.trim()) return unavailable('gh-empty')
   const path = join(outDir, `${lane}.issue.md`)
   try { d.writeFileSync(path, body) } catch { return unavailable('gh-failed') }
+  try { d.log(`dispatch-batch: issue-body lane=${lane} issue=${binding.issue} source=${binding.source} status=available bytes=${Buffer.byteLength(body)}`) } catch { /* diagnostics never block a smaller brief */ }
   return path
 }
 

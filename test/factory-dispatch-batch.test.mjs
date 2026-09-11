@@ -82,6 +82,7 @@ import {
   crewJsonPath,
   briefMeasure,
   compileLane,
+  historicalIssueBindings,
   dispatchBatch,
   factoryStateRoot,
   formatTurnBudgetReport,
@@ -3095,6 +3096,159 @@ test('compileLane discovers reads once and compiles once', async () => {
   assert.deepEqual(JSON.parse(readFileSync(retry, 'utf8')).lanes[0].reads, [{ file: 'crew/x.mjs', why }])
 })
 
+async function runIssueBodyCompile({ label, ask, doneMeans, body = 'Fetched body.\\n' }) {
+  const lane = `lane-${label}`
+  const batch = makeBatch([lane])
+  const authored = request(ask)
+  if (doneMeans !== undefined) authored.done_means = doneMeans
+  const requestPath = put(join(batch, `${lane}${REQUEST_SUFFIX}`), JSON.stringify(authored))
+  const out = join(root, `compile-${label}-out`)
+  const register = put(join(root, `compile-${label}-register.json`), JSON.stringify({ lanes: [entry(lane, ['crew/owned.mjs'], [])] }))
+  const calls = []
+  const writes = new Map()
+  const logs = []
+  const result = await compileLane({
+    lane, batchDir: batch, requestPath, laneDir: root, registerPath: register, outDir: out,
+    fences: [entry(lane, ['crew/owned.mjs'], [])],
+    deps: {
+      spawn: (call) => {
+        calls.push(call)
+        if ((call.args || []).includes('--discover-reads')) return { status: 0, stdout: '[]', stderr: '' }
+        if (call.file === 'gh') return { status: 0, stdout: body, stderr: '' }
+        return { status: 0, stdout: '', stderr: '' }
+      },
+      readFileSync: (path, encoding) => String(path).endsWith('.brief.md') ? briefWithTierAndShape : readFileSync(path, encoding || 'utf8'),
+      writeFileSync: (path, content) => writes.set(String(path), String(content)),
+      log: (line) => logs.push(String(line)),
+    },
+  })
+  return { lane, requestPath, out, calls, writes, logs, result }
+}
+
+test('A1 declared issue wins over prose background', async () => {
+  const fixture = await runIssueBodyCompile({
+    label: 'issue-a1',
+    ask: 'Use the quoted background (#1146, unlanded) only as context.',
+    doneMeans: 'details.closes=[1124] selects the issue context for this lane.',
+    body: 'Declared issue body.\\n',
+  })
+  const gh = fixture.calls.find(({ file }) => file === 'gh')
+  assert.ok(gh)
+  assert.equal(gh.args[2], '1124')
+  const compile = fixture.calls.find(({ args }) => args.includes('--out'))
+  assert.ok(compile)
+  const issueFlag = compile.args.indexOf('--issue-body')
+  assert.notEqual(issueFlag, -1)
+  const issuePath = compile.args[issueFlag + 1]
+  assert.equal(fixture.writes.get(issuePath), 'Declared issue body.\\n')
+})
+
+test('RV1-1 scans later closes declarations after an illustrative placeholder', async () => {
+  const fixture = await runIssueBodyCompile({
+    label: 'issue-rv1-1',
+    ask: 'Use #1146 only as background context.',
+    doneMeans: 'A1 names details.closes=[A] only as a gate label.\nThe actual close is details.closes=[1155].',
+  })
+  const gh = fixture.calls.find(({ file }) => file === 'gh')
+  assert.ok(gh)
+  assert.equal(gh.args[2], '1155')
+  assert.equal(fixture.logs.includes(`dispatch-batch: issue-body lane=${fixture.lane} issue=1155 source=declared status=available bytes=${Buffer.byteLength('Fetched body.\\n')}`), true)
+  assert.equal(fixture.logs.includes(`dispatch-batch: issue-binding-disagreement lane=${fixture.lane} declared=1155 prose=1146`), true)
+})
+
+test('B1 successful issue-body fetch logs issue and bytes', async () => {
+  const body = 'é declared body\\n'
+  const fixture = await runIssueBodyCompile({ label: 'issue-b1', ask: 'Fetch #1124 for this lane.', body })
+  assert.equal(fixture.logs.includes(`dispatch-batch: issue-body lane=${fixture.lane} issue=1124 source=prose status=available bytes=${Buffer.byteLength(body)}`), true)
+})
+
+test('C1a prose fallback still fetches an issue body', async () => {
+  const fixture = await runIssueBodyCompile({ label: 'issue-c1a', ask: 'Fetch #1146 for this lane.', doneMeans: 'No close declaration is present.' })
+  const gh = fixture.calls.find(({ file }) => file === 'gh')
+  assert.ok(gh)
+  assert.equal(gh.args[2], '1146')
+  assert.ok(fixture.calls.find(({ args }) => args.includes('--issue-body')))
+})
+
+test('C1b prose fallback records prose source', async () => {
+  const fixture = await runIssueBodyCompile({ label: 'issue-c1b', ask: 'Fetch #1146 for this lane.', doneMeans: 'details.closes=[] leaves the prose citation in charge.' })
+  assert.equal(fixture.logs.includes(`dispatch-batch: issue-body lane=${fixture.lane} issue=1146 source=prose status=available bytes=${Buffer.byteLength('Fetched body.\\n')}`), true)
+})
+
+test('C2 declared binding records declared source', async () => {
+  const fixture = await runIssueBodyCompile({ label: 'issue-c2', ask: 'The background cites #1146.', doneMeans: 'details.closes=[1124] is the declared issue.' })
+  assert.equal(fixture.logs.includes(`dispatch-batch: issue-body lane=${fixture.lane} issue=1124 source=declared status=available bytes=${Buffer.byteLength('Fetched body.\\n')}`), true)
+})
+
+test('D1 disagreement names declared and prose issues', async () => {
+  const fixture = await runIssueBodyCompile({
+    label: 'issue-d1',
+    ask: 'Use the quoted background (#1146, unlanded) only as context.',
+    doneMeans: 'details.closes=[1124] selects the issue context for this lane.',
+    body: 'Declared issue body.\\n',
+  })
+  assert.equal(fixture.logs.includes(`dispatch-batch: issue-binding-disagreement lane=${fixture.lane} declared=1124 prose=1146`), true)
+  const gh = fixture.calls.find(({ file }) => file === 'gh')
+  assert.ok(gh)
+  assert.equal(gh.args[2], '1124')
+  assert.ok(fixture.calls.find(({ args }) => args.includes('--issue-body')))
+  assert.equal(fixture.result.topSection, 'Proposed tier')
+})
+
+test('E1a historical binding report carries its denominator', () => {
+  const home = scratchDir('factory-issue-history-')
+  const batch = join(home, 'batch-mini')
+  put(join(batch, 'lane-match.request.json'), JSON.stringify({
+    ...request('#100 declared match', ['crew/owned.mjs']),
+    done_means: 'details.closes=[100] declares the matching issue.',
+  }))
+  put(join(batch, 'lane-mismatch.request.json'), JSON.stringify({
+    ...request('Quoted background (#1146, unlanded)'),
+    done_means: 'details.closes=[1124] declares the fetched issue.',
+  }))
+  put(join(batch, 'out', 'lane-mismatch.issue.md'), 'Fetched mismatch artifact.\\n')
+  put(join(batch, 'lane-fallback.request.json'), JSON.stringify(request('Use prose #103 when no close is declared.')))
+  put(join(batch, 'nested', 'batch-archived', 'lane-empty.request.json'), JSON.stringify({
+    ...request('Use prose #104 when closes is empty.'),
+    done_means: 'details.closes=[] leaves prose fallback.',
+  }))
+  const report = historicalIssueBindings({ home, deps: { existsSync: fsExistsSync, readFileSync, readdirSync: fsReaddirSync } })
+  assert.deepEqual(report, {
+    totalRequests: 4,
+    withoutDeclaredClose: 2,
+    proseWithoutDeclaredClose: 2,
+    proseCited: 4,
+    disagreements: 1,
+    artifactBackedMisbindings: 1,
+    reason: null,
+  })
+})
+
+test('E1b unreadable history is null with one reason', () => {
+  const nullCells = {
+    totalRequests: null,
+    withoutDeclaredClose: null,
+    proseWithoutDeclaredClose: null,
+    proseCited: null,
+    disagreements: null,
+    artifactBackedMisbindings: null,
+  }
+  const denied = historicalIssueBindings({
+    home: join(root, 'issue-history-denied'),
+    deps: { readdirSync: () => { const error = new Error('EPERM'); error.code = 'EPERM'; throw error } },
+  })
+  assert.deepEqual(denied, { ...nullCells, reason: 'archive-unreadable' })
+
+  const malformedHome = scratchDir('factory-issue-history-malformed-')
+  put(join(malformedHome, 'batch-bad', 'lane-bad.request.json'), '{')
+  const malformed = historicalIssueBindings({ home: malformedHome })
+  assert.deepEqual(malformed, { ...nullCells, reason: 'archive-unreadable' })
+
+  const emptyHome = scratchDir('factory-issue-history-empty-')
+  const empty = historicalIssueBindings({ home: emptyHome })
+  assert.deepEqual(empty, { ...nullCells, reason: 'archive-empty' })
+})
+
 test('compileLane soft-fails an unavailable issue body without refusing or passing it', async () => {
   const lane = 'lane-gh'
   const batch = makeBatch([lane])
@@ -3127,7 +3281,7 @@ test('compileLane soft-fails an unavailable issue body without refusing or passi
   const gh = calls.find(({ file }) => file === 'gh')
   assert.ok(gh)
   assert.deepEqual(gh.args, ['issue', 'view', '867', '--json', 'body', '--jq', '.body'])
-  assert.deepEqual(logs, ['dispatch-batch: issue-body lane=lane-gh issue=867 status=unavailable reason=gh-failed'])
+  assert.deepEqual(logs, ['dispatch-batch: issue-body lane=lane-gh issue=867 source=prose status=unavailable reason=gh-failed'])
   assert.equal(result.topSection, 'Proposed tier')
 })
 
@@ -3142,6 +3296,7 @@ test('compileLane passes a fetched issue body path only after gh returns content
   const register = put(join(root, 'compile-gh-ok-register.json'), JSON.stringify({ lanes: [entry(lane, ['crew/owned.mjs'], [])] }))
   const calls = []
   const writes = new Map()
+  const logs = []
   const result = await compileLane({
     lane, batchDir: batch, requestPath, laneDir: root, registerPath: register, outDir: out,
     fences: [entry(lane, ['crew/owned.mjs'], [])],
@@ -3154,6 +3309,7 @@ test('compileLane passes a fetched issue body path only after gh returns content
       },
       readFileSync: (path, encoding) => String(path).endsWith('.brief.md') ? briefWithTierAndShape : readFileSync(path, encoding || 'utf8'),
       writeFileSync: (path, content) => writes.set(String(path), String(content)),
+      log: (line) => logs.push(String(line)),
     },
   })
   const compile = calls.find(({ args }) => args.includes('--out'))
@@ -3163,6 +3319,7 @@ test('compileLane passes a fetched issue body path only after gh returns content
   const issuePath = compile.args[issueFlag + 1]
   assert.equal(issuePath, join(out, `${lane}.issue.md`))
   assert.equal(writes.get(issuePath), 'Fetched body.\n')
+  assert.deepEqual(logs, [`dispatch-batch: issue-body lane=${lane} issue=42 source=prose status=available bytes=${Buffer.byteLength('Fetched body.\n')}`])
   assert.equal(result.bytes, Buffer.byteLength(briefWithTierAndShape))
 })
 

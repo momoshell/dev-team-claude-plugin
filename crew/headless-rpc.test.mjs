@@ -1152,23 +1152,50 @@ test('C1 an authored RPC envelope remains byte-identical and gets no synthetic r
   } finally { f.cleanup() }
 })
 
-test('a 1921-byte envelope with a literal newline is UNREADABLE, not a settled no-envelope', () => {
-  const f = fixture()
+test('a repaired RPC envelope continues, journals, and remains byte-identical', () => {
+  const events = []
+  const f = fixture({ log: (row) => events.push(row) })
   try {
     const run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
     settle(f, run)
     const bytes = b200Bytes()
     writeFileSync(run.returnPath, bytes)
-    assert.throws(() => f.io.wait(run.returnPath, 1), (err) => {
-      assert.equal(err.stage, 'rpc-parse-error')
-      assert.equal(cellFailureKind(err), 'unusable-envelope')
-      assert.equal(err.role, 'builder')
-      assert.equal(err.raw, bytes)
+    const before = readFileSync(run.returnPath)
+    const value = f.io.wait(run.returnPath, 1)
+    assert.equal(value.assignment_id, 'd1')
+    assert.equal(value.status, 'done')
+    const repairRows = JSON.parse(readFileSync(join(f.dir, 'journal.jsonl'), 'utf8').trim())
+    assert.equal(repairRows.event, 'envelope-repair')
+    assert.equal(repairRows.outcome, 'repaired')
+    assert.equal(repairRows.escaped_count, 1)
+    const offset = bytes.indexOf('\n', bytes.indexOf('"summary"'))
+    assert.deepEqual(repairRows.escaped_offsets, [offset])
+    assert.equal(events.some((row) => row.rpc_outcome === 'parse-error'), false)
+    assert.equal(readFileSync(run.returnPath).equals(before), true)
+  } finally { f.cleanup() }
+})
+
+test('RV1-1 structurally unreadable RPC envelopes throw parse errors instead of empty-turn summaries', () => {
+  const events = []
+  const f = fixture({ log: (row) => events.push(row) })
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    settle(f, run)
+    const raw = '{"assignment_id":"d1","role":"builder","status":"done","summary":"structurally broken",}'
+    writeFileSync(run.returnPath, raw)
+    const before = readFileSync(run.returnPath)
+    assert.throws(() => f.io.wait(run.returnPath, 1), (error) => {
+      assert.equal(error.stage, 'rpc-parse-error')
+      assert.equal(error.role, 'builder')
+      assert.equal(error.raw, raw)
+      assert.equal(cellFailureKind(error), 'unusable-envelope')
       const lie = emptyTurnEnvelope({ id: run.id, role: 'builder', returnPath: run.returnPath }).summary
-      assert.equal(err.message.includes(lie), false)
+      assert.equal(error.message.includes(lie), false)
       return true
     })
-    assert.equal(readFileSync(run.returnPath, 'utf8'), bytes)
+    assert.equal(events.some((row) => row.rpc_outcome === 'parse-error'), true)
+    assert.equal(events.some((row) => row.rpc_outcome === 'no-envelope'), false)
+    assert.equal(readFileSync(run.returnPath).equals(before), true)
   } finally { f.cleanup() }
 })
 
@@ -1823,7 +1850,7 @@ function rpcReaskFixture() {
   const first = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
   const stream = join(f.paths.taskDir, 'headless-rpc', 'builder', 'stream.jsonl')
   writeFileSync(stream, `${JSON.stringify({ type: 'agent_settled' })}\n`)
-  const malformed = b200Bytes()
+  const malformed = '{"assignment_id":"d1","role":"builder","status":"done","summary":"second","artifacts":[1,]}'
   writeFileSync(first.returnPath, malformed)
   let parseError = null
   try { f.io.wait(first.returnPath, 1) } catch (err) { parseError = err }

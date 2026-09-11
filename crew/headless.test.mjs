@@ -5,7 +5,7 @@ import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 import {
-  attributeExit, censusFileOperands, classifyRun, claudeCensus, claudeTurnBoundaryCount, classifyToolCall, decodeExitStatus, degradedSignals, foldUsage, headlessIo, parseStream,
+  attributeExit, censusFileOperands, classifyRun, claudeCensus, claudeTurnBoundaryCount, classifyToolCall, decodeExitStatus, degradedSignals, foldUsage, headlessIo, parseStream, readEnvelopeOrThrow,
   CENSUS_ABSENT_CAUSES, NO_ENVELOPE_CENSUS_ABSENT_REASONS, NO_ENVELOPE_REASONS, noEnvelopeDetail, PROVIDER_FAILURE_KINDS, providerFailureKind, providerResetInstant, providerRetryDecision,
   PROVIDER_BACKOFF_LADDER_MS, PROVIDER_RESET_ABSENT, PROVIDER_RESET_SETTLE_MS, PROVIDER_RETRY_ACTIONS,
   PARK_BEAT_EVENT, PARK_BEAT_MS, PARK_BEAT_SOURCE, PROVIDER_RETRY_MAX, PROVIDER_RETRY_TOTAL_WAIT_MS, recogniseProviderCondition, recogniseSeatRefusal, TOOL_CLASSES, WAIT_POLL_MS,
@@ -54,6 +54,13 @@ const DERIVED_529_UNREFUSED = DERIVED_529_TAIL
 const B337_D1_AT_READ = Buffer.from("eyJ0eXBlIjoic3lzdGVtIiwic3VidHlwZSI6InRoaW5raW5nX3Rva2VucyIsImVzdGltYXRlZF90b2tlbnMiOjIwMCwiZXN0aW1hdGVkX3Rva2Vuc19kZWx0YSI6MTAwLCJzZXNzaW9uX2lkIjoiZDkyODIyNmQtOGU3ZS00Mzk2LTk1M2QtYmYzMTE0M2NiMTdkIiwidXVpZCI6ImNmMjIxN2Y0LTlmN2EtNDM3ZC1iMGVkLTZlODdkODYyZjIwOCJ9CnsidHlwZSI6InN5c3RlbSIsInN1YnR5cGUiOiJ0aGlua2luZ190b2tlbnMiLCJlc3RpbWF0ZWRfdG9rZW5zIjozNTAsImVzdGltYXRlZF90b2tlbnNfZGVsdGEiOjE1MCwic2Vzc2lvbl9pZCI6ImQ5MjgyMjZkLThlN2UtNDM5Ni05NTNkLWJmMzExNDNjYjE3ZCIsInV1aWQiOiIzOGMzMzMxYi1jY2UxLTQ5MzUtOGJmYi0zM2E0OThkMjgzY2UifQp7InR5cGUiOiJhc3Npc3RhbnQiLCJtZXNzYWdlIjp7Im1vZGVsIjoiY2xhdWRlLW9wdXMtNSIsImlkIjoibXNnXzAxMUNlWlZBeEhiYlZSeFJtTks2YzRZNiIsInR5cGUiOiJtZXNzYWdlIiwicm9sZSI6ImFzc2lzdGFudCIsImNvbnRlbnQiOlt7InR5cGUiOiJ0aGlua2luZyIsInRoaW5raW5nIjoiIiwic2lnbmF0dXJlIjoiQ0FJU3B3Y0twZ0VJRVJnQ0trQWVIbWZQa2tpS2F5L2JNWEkwTHVWaEs0RkZ3Wk0vWUF2S1MrYitoYzVzU2FHc2RxVFBVbnl1MFpZZ0ZsUmU0TmkyUkxkL0xSY1lYOW03NzlncGttMGlNZzFqYkdGMVpHVXRiM0IxY3kwMU9BRkNDSFJvYVc1cmFXNW5XaVJoWVRZNE16VXlOaTAxWW1Sa0xUUmhORE10WVdSaU15MWxORGczWVRJelpURXlOV0p5RUdQb2ZvTHppSzl2bC9DREJ1eDdyT3lJQVFHb0FaeUowdFFHc0FFQ0VneDNWZFBSOUk3c2Y0K3l4TElhREVDOE1JOGd6cVVmQ3hNSTFDSXdJWERUTUVobkhGM3R5TlNUQ0ZFb3IyZXRRN1gwNlV0SDhLcVhudWdHcWVkeHhyN21vdmcrVUFmMjR2Mmh5S1A3S3EwRjFsbkNEOGF3ZktmT2hoTXVsU29mbnpJd00zQm5HdnpHSWMvU1pEVWwvemg2RTVZOVI2cFdQRUE3SUFQVTkwOVZpeVMxWUZDYmRSeTZ5REkxQnNSWC9FSjJvTEpZZ2IyLzlzWE50bk45L1NNK0l5a1YyRzZvcXVScjg4U1VQQ09JdmRlaThqN3pkbUZBcnVxclVqR2pCUGdmTXNsOXZ2YlBwZUhRUm11aVQ1SWIwcjFFK0VrM1k0NVY5NmdiMVJUaGNYdS80SStHNmQ2YlNBWDN0NjFNcnBxd0lzZ3RZMFo3d042WHJaTjc3Vi9tS0dMYnIzc1hFM1RVQW5KRU96ZFpSRlN5U28zQmgvZEtGamZkT21QeFQwK1ZzU200blpub1p4N0NoVFRna0gxT0JtMytIWFo3OTY4Sjg5eVNINHlXaEdVdDYyTHBZNG5LbFhKWE5JSVoyTVVaYi9rRU5wMWMwSmVTTmNTeWlVVEJ3RklrbU9VZXFyb0xReDJqbXdoZndqVGhlN014YkhUQnc4dkcveHN5c01mY3VodWw1NFhDekdLTkhQdExWVXZOM2tZS3VDUW5QRHRnZUpSU2pKOEY3T1V3WEJFK3RYWTZvMVo5UzBicWY2NWlubmt0VTY0WVh0cXVwaWQrR3RLa1U4OVM0ODBldzhUU1VhTnFMR3c4bWJ5VnVCc09tYlg4dDRhbk43WCtBWksxT3liVEFrdDFEV0ZBRnQvdzhDalFZTGNZVzZjSjh0ZmYzSWFJNC9kYndLQ2hVd2JiV1VyWVlrc0hwdVVhWDVkTkp2V29oaWVTekpidzFibzhZMFNFVTBOQ0dReTRIRGdReHp0ZzY2ODhucFdBTEMwYWlMZWZJK3BpVUNURlZMWkxIMlZ1ekFIVEN4Q2ozeXllVnpPYlc0TUtOSnh6ZFRNYmJNUFdwWk1MK3B2VVROU1pyeHhNSDNYSThWU25xbWQ0WTg0NTNVOThQTHdtV0NSUHY3Y3NJa0ZvTUZFcGZvNzFwcVJCaHNqS2NxSyt6NlhyUU1sQjh1aHozbm8wUHRPOGU1TjJ3NGV4eDZsUGpwcFczWUZmcUsyN3NXWDN6YXl6eXo0a3kvdDljeHdFK3hXQm1QUDd2bzYyYi91d1h3QzVlMkQwQTQ5NW44emtMNytTeUozeE1ZdTdKNHVFZU4xVkY0aVRTOXlvSWV4VURGTXg5QVpVS1A1ZUVoZ0IifV0sInN0b3BfcmVhc29uIjpudWxsLCJzdG9wX3NlcXVlbmNlIjpudWxsLCJzdG9wX2RldGFpbHMiOm51bGwsInVzYWdlIjp7ImlucHV0X3Rva2VucyI6MiwiY2FjaGVfY3JlYXRpb25faW5wdXRfdG9rZW5zIjo0NDY2LCJjYWNoZV9yZWFkX2lucHV0X3Rva2VucyI6MjI5MzUwLCJjYWNoZV9jcmVhdGlvbiI6eyJlcGhlbWVyYWxfNW1faW5wdXRfdG9rZW5zIjowLCJlcGhlbWVyYWxfMWhfaW5wdXRfdG9rZW5zIjo0NDY2fSwib3V0cHV0X3Rva2VucyI6Mywic2VydmljZV90aWVyIjoic3RhbmRhcmQiLCJpbmZlcmVuY2VfZ2VvIjoibm90X2F2YWlsYWJsZSJ9LCJkaWFnbm9zdGljcyI6bnVsbCwiY29udGV4dF9tYW5hZ2VtZW50IjpudWxsfSwicGFyZW50X3Rvb2xfdXNlX2lkIjpudWxsLCJzZXNzaW9uX2lkIjoiZDkyODIyNmQtOGU3ZS00Mzk2LTk1M2QtYmYzMTE0M2NiMTdkIiwidXVpZCI6ImEzYjc3MDUyLTFlMzktNGQ1Ni05YmJiLTJiNzljNDk0ZGFiNiIsInRpbWVzdGFtcCI6IjIwMjYtMDgtMzBUMTk6Mjk6MzIuNTcyWiIsInJlcXVlc3RfaWQiOiJyZXFfMDExQ2VaVkF3TW5ReWhvUVVUdFJ6REJqIn0KeyJ0eXBlIjoiYXNzaXN0YW50IiwibWVzc2FnZSI6eyJtb2RlbCI6ImNsYXVkZS1vcHVzLTUiLCJpZCI6Im1zZ18wMTFDZVpWQXhIYmJWUnhSbU5LNmM0WTYiLCJ0eXBlIjoibWVzc2FnZSIsInJvbGUiOiJhc3Npc3RhbnQiLCJjb250ZW50IjpbeyJ0eXBlIjoidG9vbF91c2UiLCJpZCI6InRvb2x1XzAxQ3Rkd2hpM1B2Y0U4d1ZRcWk0VEVHZiIsIm5hbWUiOiJXcml0ZSIsImlucHV0Ijp7ImZpbGVfcGF0aCI6Ii9Vc2Vycy9tb21vc2hlbGwvLmNyZXcvZHQtYjMzNy1mYWxsYmFjay9iMzM3LWZhbGxiYWNrL3JldHVybnMvZDEucGxhbm5lci5qc29uIiwiY29udGVudCI6IntcbiAgXCJhc3NpZ25tZW50X2lkXCI6IFwiZDFcIixcbiAgXCJyb2xlXCI6IFwicGxhbm5lclwiLFxuICBcInN0YXR1c1wiOiBcImRvbmVcIixcbiAgXCJzdW1tYXJ5XCI6IFwiUGxhbiBmb3IgIzc5OSBhdCB0YXNrL3BsYW4ubWQsIHdpdGggYW4gMTEtY2hlY2sgYWNjZXB0YW5jZSBnYXRlIGF0IHRhc2svZ2F0ZS5tanMuIE1lYXN1cmVkIGNvcnJlY3Rpb24gdG8gdGhlIGJyaWVmOiBib3RoIHJlYWwgMjAyNi0wOC0zMCB0YWlscyBjYXJyeSBhIHR5cGU6XFxcInJlc3VsdFxcXCIgbGluZSwgc28gdG9kYXkgdGhleSBjbGFzc2lmeSBgbm8tZW52ZWxvcGVgLCBub3QgYG1hbGZvcm1lZGAg4oCUIHRoZSBuZXcgYnJhbmNoIHByZWNlZGVzIGJvdGguIEl0ZW0gMydzIHJ1bnRpbWUgaGFsZiBsYW5kcyBpbiBjcmV3L2hlYWRsZXNzLm1qcywgbm90IGNyZXcvY3Jldy5tanM6IHRoZSBpbXBvcnQgZGlyZWN0aW9uIGlzIGNyZXcubWpzIC0+IHNlYXQtaW8ubWpzIC0+IGhlYWRsZXNzLXJwYy5tanMgLT4gaGVhZGxlc3MubWpzLCBzbyBoZWFkbGVzcy5tanMgaW1wb3J0aW5nIGNyZXcubWpzIGlzIGEgY3ljbGUsIGFuZCBkcml2ZS5tanMgaXMgZmVuY2VkIHRvIGIzMzY7IGNyZXcubWpzIGtlZXBzIHNlYXQgcmVzb2x1dGlvbiAocGFyc2UsIHZhbGlkYXRlLCB0cmFuc2xhdGUgdGhlIGNoYWluIGJ5IHRoZSBFTlRSWSdzIG93biBhZ2VudCkuIEdhdGUgaXMgUkVEIGF0IGJhc2VsaW5lIGBHQVRFLVNVTU1BUlkge1xcXCJ0b3RhbFxcXCI6MTEsXFxcImZhaWxlZFxcXCI6MTEsXFxcImVycm9yZWRcXFwiOjB9YCAoZXhpdCAxKSwgcHJvdmVkIHRvIGRpc2NyaW1pbmF0ZSBvbiBhIHNjcmF0Y2ggcHJvdG90eXBlIGF0IDExLzAvMCBleGl0IDAsIGFuZCBhbGwgMTEgZGVjbGFyZWQgbXV0YXRpb25zIHdlcmUgYXBwbGllZCBpbiBpc29sYXRpb24gYW5kIGtpbGxlZCB0aGVpciBvd24gY2hlY2suIFRoZSBwcm90b3R5cGUgYWxzbyByYW4gdGhlIGZ1bGwgc3VpdGUgYWdhaW5zdCBhbiBpZGVudGljYWwgdW5wYXRjaGVkIHNjcmF0Y2ggY29weTogdGhlIGZhaWx1cmUgc2V0cyBhcmUgYnl0ZS1pZGVudGljYWwgKDUyIG5vbi1naXQtY2hlY2tvdXQgYXJ0aWZhY3RzIG9uIGJvdGgpLCBzbyB0aGUgZGVzaWduIGludHJvZHVjZXMgbm8gbmV3IGZhaWx1cmUuXCIsXG4gIFwiYXJ0aWZhY3RzXCI6IFtcbiAgICBcIi9Vc2Vycy9tb21vc2hlbGwvLmNyZXcvZHQtYjMzNy1mYWxsYmFjay9iMzM3LWZhbGxiYWNrL3Rhc2svcGxhbi5tZFwiLFxuICAgIFwiL1VzZXJzL21vbW9zaGVsbC8uY3Jldy9kdC1iMzM3LWZhbGxiYWNrL2IzMzctZmFsbGJhY2svdGFzay9nYXRlLm1qc1wiLFxuICAgIFwiL1VzZXJzL21vbW9zaGVsbC8uY3Jldy9kdC1iMzM3LWZhbGxiYWNrL2IzMzctZmFsbGJhY2svdGFzay9nYXRlLWZpeHR1cmVzL2IzMzItZDItdGFpbC5qc29ubFwiLFxuICAgIFwiL1VzZXJzL21vbW9zaGVsbC8uY3Jldy9kdC1iMzM3LWZhbGxiYWNrL2IzMzctZmFsbGJhY2svdGFzay9nYXRlLWZpeHR1cmVzL2IzMzMtZDItdGFpbC5qc29ubFwiLFxuICAgIFwiL1VzZXJzL21vbW9zaGVsbC8uY3Jldy9kdC1iMzM3LWZhbGxiYWNrL2IzMzctZmFsbGJhY2svdGFzay9nYXRlLWZpeHR1cmVzL2FwaS1lcnJvci1uby1zeW50aGV0aWMuanNvbmxcIixcbiAgICBcIi9Vc2Vycy9tb21vc2hlbGwvLmNyZXcvZHQtYjMzNy1mYWxsYmFjay9iMzM3LWZhbGxiYWNrL3Rhc2svZ2F0ZS1maXh0dXJlcy9zeW50aGV0aWMtbm8tYXBpLWVycm9yLmpzb25sXCJcbiAgXSxcbiAgXCJkZXRhaWxzXCI6IHtcbiAgICBcInBsYW5fcGF0aFwiOiBcIi9Vc2Vycy9tb21vc2hlbGwvLmNyZXcvZHQtYjMzNy1mYWxsYmFjay9iMzM3LWZhbGxiYWNrL3Rhc2svcGxhbi5tZFwiLFxuICAgIFwiZmlsZXNfaW5fc2NvcGVcIjogW1xuICAgICAgXCJjcmV3L2NyZXcubWpzXCIsXG4gICAgICBcImNyZXcvY3Jldy50ZXN0Lm1qc1wiLFxuICAgICAgXCJjcmV3L2hlYWRsZXNzLm1qc1wiLFxuICAgICAgXCJjcmV3L2hlYWRsZXNzLnRlc3QubWpzXCIsXG4gICAgICBcImNyZXcvcm9zdGVyLmpzb25cIixcbiAgICAgIFwiY3Jldy9yb3N0ZXIuc2NoZW1hLmpzb25cIixcbiAgICAgIFwidGVzdC9mYWN0b3J5LWxlZGdlci50ZXN0Lm1qc1wiXG4gICAgXSxcbiAgICBcImNvbW1pdF9zdWJqZWN0XCI6IFwiZmVhdChjcmV3KTogY2xhc3NpZnkgYSBwcm92aWRlciBidWRnZXQgcmVmdXNhbCBhbmQgZmFsbCBiYWNrIG9uZSBzZWF0IGNlbGxcIixcbiAgICBcImlzc3Vlc1wiOiBbNzk5XSxcbiAgICBcInZhbGlkYXRpb25fbGFuZVwiOiBcIm5vZGUgLS10ZXN0IC0tdGVzdC10aW1lb3V0PTMwMDAwIFxcXCIqKi8qLnRlc3QubWpzXFxcIlwiLFxuICAgIFwiZ2F0ZV9jbWRcIjogXCJub2RlIC9Vc2Vycy9tb21vc2hlbGwvLmNyZXcvZHQtYjMzNy1mYWxsYmFjay9iMzM3LWZhbGxiYWNrL3Rhc2svZ2F0ZS5tanNcIixcbiAgICBcImdhdGVfcGF0aFwiOiBcIi9Vc2Vycy9tb21vc2hlbGwvLmNyZXcvZHQtYjMzNy1mYWxsYmFjay9iMzM3LWZhbGxiYWNrL3Rhc2svZ2F0ZS5tanNcIixcbiAgICBcImdhdGVfYmFzZWxpbmVfc3VtbWFyeVwiOiBcIkdBVEUtU1VNTUFSWSB7XFxcInRvdGFsXFxcIjoxMSxcXFwiZmFpbGVkXFxcIjoxMSxcXFwiZXJyb3JlZFxcXCI6MH1cIixcbiAgICBcIm11dGF0aW9uc1wiOiBbXG4gICAgICB7IFwiY2hlY2tcIjogXCJBMVwiLCBcImZpbGVcIjogXCJjcmV3L3Jvc3Rlci5zY2hlbWEuanNvblwiLCBcImZpbmRcIjogXCJcXFwibWluSXRlbXNcXFwiOiAxXCIsIFwicmVwbGFjZVwiOiBcIlxcXCJtaW5JdGVtc1xcXCI6IDBcIiB9LFxuICAgICAgeyBcImNoZWNrXCI6IFwiQTJcIiwgXCJmaWxlXCI6IFwiY3Jldy9yb3N0ZXIuanNvblwiLCBcImZpbmRcIjogXCJcXFwiZmFsbGJhY2tcXFwiXCIsIFwicmVwbGFjZVwiOiBcIlxcXCJmYWxsYmFja3NcXFwiXCIgfSxcbiAgICAgIHsgXCJjaGVja1wiOiBcIkEzXCIsIFwiZmlsZVwiOiBcImNyZXcvaGVhZGxlc3MubWpzXCIsIFwiZmluZFwiOiBcImJ1ZGdldFJlZnVzZWQ6IHNhd1N5bnRoZXRpYyAmJiBzYXdBcGlFcnJvclwiLCBcInJlcGxhY2VcIjogXCJidWRnZXRSZWZ1c2VkOiBzYXdTeW50aGV0aWMgJiYgIXNhd0FwaUVycm9yXCIgfSxcbiAgICAgIHsgXCJjaGVja1wiOiBcIkE0XCIsIFwiZmlsZVwiOiBcImNyZXcvaGVhZGxlc3MubWpzXCIsIFwiZmluZFwiOiBcImV2ZW50Lm1lc3NhZ2U/Lm1vZGVsID09PSBTWU5USEVUSUNfTU9ERUxcIiwgXCJyZXBsYWNlXCI6IFwiZXZlbnQubWVzc2FnZT8ubW9kZWwgIT09IFNZTlRIRVRJQ19NT0RFTFwiIH0sXG4gICAgICB7IFwiY2hlY2tcIjogXCJBNVwiLCBcImZpbGVcIjogXCJjcmV3L2hlYWRsZXNzLm1qc1wiLCBcImZpbmRcIjogXCJidWRnZXRSZWZ1c2VkID0gZmFsc2VcIiwgXCJyZXBsYWNlXCI6IFwiYnVkZ2V0UmVmdXNlZCA9IHRydWVcIiB9LFxuICAgICAgeyBcImNoZWNrXCI6IFwiQTZcIiwgXCJmaWxlXCI6IFwiY3Jldy9jcmV3Lm1qc1wiLCBcImZpbmRcIjogXCJhZGFwdGVyRm9yQWdlbnQoYWRhcHRlcnMsIHJvbGUsIGVudHJ5LmFnZW50KVwiLCBcInJlcGxhY2VcIjogXCJhZGFwdGVyRm9yQWdlbnQoYWRhcHRlcnMsIHJvbGUsIHNlYXQuYWdlbnQpXCIgfSxcbiAgICAgIHsgXCJjaGVja1wiOiBcIkE3XCIsIFwiZmlsZVwiOiBcImNyZXcvY3Jldy5tanNcIiwgXCJmaW5kXCI6IFwiZW50cnkucHJvdmlkZXIgPT09IGNlbGwucHJvdmlkZXIgJiYgZW50cnkuaWQgPT09IGNlbGwuaWRcIiwgXCJyZXBsYWNlXCI6IFwiZW50cnkucHJvdmlkZXIgPT09IGNlbGwucHJvdmlkZXIgJiYgZW50cnkuaWQgIT09IGNlbGwuaWRcIiB9LFxuICAgICAgeyBcImNoZWNrXCI6IFwiQThcIiwgXCJmaWxlXCI6IFwiY3Jldy9jcmV3Lm1qc1wiLCBcImZpbmRcIjogXCJjZWxsLmZhbGxiYWNrLmxlbmd0aCA9PT0gMFwiLCBcInJlcGxhY2VcIjogXCJjZWxsLmZhbGxiYWNrLmxlbmd0aCA9PT0gLTFcIiB9LFxuICAgICAgeyBcImNoZWNrXCI6IFwiQTlcIiwgXCJmaWxlXCI6IFwiY3Jldy9jcmV3Lm1qc1wiLCBcImZpbmRcIjogXCJjb25zdCB7IGZhbGxiYWNrLCAuLi5yZXN0IH0gPSBzZWF0XCIsIFwicmVwbGFjZVwiOiBcImNvbnN0IHsgLi4ucmVzdCB9ID0gc2VhdFwiIH0sXG4gICAgICB7IFwiY2hlY2tcIjogXCJBMTBcIiwgXCJmaWxlXCI6IFwiY3Jldy9oZWFkbGVzcy5tanNcIiwgXCJmaW5kXCI6IFwiZXZlbnQ6ICdzZWF0LWZhbGxiYWNrJ1wiLCBcInJlcGxhY2VcIjogXCJldmVudDogJ3NlYXQtZmFsbG92ZXInXCIgfSxcbiAgICAgIHsgXCJjaGVja1wiOiBcIkExMVwiLCBcImZpbGVcIjogXCJjcmV3L2hlYWRsZXNzLm1qc1wiLCBcImZpbmRcIjogXCJGQUxMQkFDS19NQVggPSAxXCIsIFwicmVwbGFjZVwiOiBcIkZBTExCQUNLX01BWCA9IDJcIiB9XG4gICAgXSxcbiAgICBcImNvbnN1bHRfcXVlc3Rpb25zXCI6IFtcbiAgICAgIFwiUjIvUjMgaW4gcGxhbi5tZDogdGhlIHJlY29yZGVkIGV4cGVyaW1lbnQgZmFsbHMgYmFjayBvcGVuYWkvZ3B0LTUuNi1zb2wgKGFnZW50IHBpKSB0byBhbnRocm9waWMvY2xhdWRlLW9wdXMtNSAoYWdlbnQgY2xhdWRlKSwgd2hpY2ggY3Jvc3NlcyBhZ2VudHMgYW5kIGNvbGxhcHNlcyB0aGUganVkZ2UgcGFuZWwncyByZXZpZXdlci90ZWNoLWxlYWQgdmVuZG9yIHNwbGl0IG9uY2UgaXQgZmlyZXMuIEJvdGggYXJlIGRlbGliZXJhdGUgYW5kIG5laXRoZXIgcmVmdXNlcyB0b2RheSDigJQgY29uZmlybSB0aGUgdHJhZGUsIG9yIHNheSB0aGUgZXhwZXJpbWVudCBzaG91bGQgc3RheSBzYW1lLXZlbmRvci5cIixcbiAgICAgIFwiUjQgaW4gcGxhbi5tZDogYSBmYWxsYmFjayByZS1lbnRlcnMgd2FpdCgpIHdpdGggYSBGVUxMIGZyZXNoIHRpbWVvdXRTLCBzbyBvbmUgYXNzaWdubWVudCBjYW4gY29zdCAyeCB0aGUgc2VhdCBidWRnZXQuIENvbmZpcm0gdGhhdCBib3VuZCwgb3Igc2F5IHRoZSByZS1hc2sgc2hvdWxkIGluaGVyaXQgdGhlIHJlbWFpbmluZyBidWRnZXQuXCJcbiAgICBdXG4gIH1cbn1cbiJ9LCJjYWxsZXIiOnsidHlwZSI6ImRpcmVjdCJ9fV0sInN0b3BfcmVhc29uIjpudWxsLCJzdG9wX3NlcXVlbmNlIjpudWxsLCJzdG9wX2RldGFpbHMiOm51bGwsInVzYWdlIjp7ImlucHV0X3Rva2VucyI6MiwiY2FjaGVfY3JlYXRpb25faW5wdXRfdG9rZW5zIjo0NDY2LCJjYWNoZV9yZWFkX2lucHV0X3Rva2VucyI6MjI5MzUwLCJjYWNoZV9jcmVhdGlvbiI6eyJlcGhlbWVyYWxfNW1faW5wdXRfdG9rZW5zIjowLCJlcGhlbWVyYWxfMWhfaW5wdXRfdG9rZW5zIjo0NDY2fSwib3V0cHV0X3Rva2VucyI6Mywic2VydmljZV90aWVyIjoic3RhbmRhcmQiLCJpbmZlcmVuY2VfZ2VvIjoibm90X2F2YWlsYWJsZSJ9LCJkaWFnbm9zdGljcyI6bnVsbCwiY29udGV4dF9tYW5hZ2VtZW50IjpudWxsfSwicGFyZW50X3Rvb2xfdXNlX2lkIjpudWxsLCJzZXNzaW9uX2lkIjoiZDkyODIyNmQtOGU3ZS00Mzk2LTk1M2QtYmYzMTE0M2NiMTdkIiwidXVpZCI6IjU0MDljOWE0LWQwNjgtNDY3Yy05ZTE1LWY3YzJiMzg3YTNiZSIsInRpbWVzdGFtcCI6IjIwMjYtMDgtMzBUMTk6Mjk6NTIuNjM3WiIsInJlcXVlc3RfaWQiOiJyZXFfMDExQ2VaVkF3TW5ReWhvUVVUdFJ6REJqIn0KeyJ0eXBlIjoidXNlciIsIm1lc3NhZ2UiOnsicm9sZSI6InVzZXIiLCJjb250ZW50IjpbeyJ0b29sX3VzZV9pZCI6InRvb2x1XzAxQ3Rkd2hpM1B2Y0U4d1ZRcWk0VEVHZiIsInR5cGUiOiJ0b29sX3Jlc3VsdCIsImNvbnRlbnQiOiJGaWxlIGNyZWF0ZWQgc3VjY2Vzc2Z1bGx5IGF0OiAvVXNlcnMvbW9tb3NoZWxsLy5jcmV3L2R0LWIzMzctZmFsbGJhY2svYjMzNy1mYWxsYmFjay9yZXR1cm5zL2QxLnBsYW5uZXIuanNvbiAoZmlsZSBzdGF0ZSBpcyBjdXJyZW50IGluIHlvdXIgY29udGV4dCDigJQgbm8gbmVlZCB0byBSZWFkIGl0IGJhY2spIn1dfSwicGFyZW50X3Rvb2xfdXNlX2lkIjpudWxsLCJzZXNzaW9uX2lkIjoiZDkyODIyNmQtOGU3ZS00Mzk2LTk1M2QtYmYzMTE0M2NiMTdkIiwidXVpZCI6IjA1YzRiMzc3LWU3ZDAtNDg0NC1iNTc0LTFhZGE3YzM0MzA4YSIsInRpbWVzdGFtcCI6IjIwMjYtMDgtMzBUMTk6Mjk6NTIuNjQwWiIsInRvb2xfdXNlX3Jlc3VsdCI6eyJ0eXBlIjoiY3JlYXRlIiwiZmlsZVBhdGgiOiIvVXNlcnMvbW9tb3NoZWxsLy5jcmV3L2R0LWIzMzctZmFsbGJhY2svYjMzNy1mYWxsYmFjay9yZXR1cm5zL2QxLnBsYW5uZXIuanNvbiIsImNvbnRlbnQiOiJ7XG4gIFwiYXNzaWdubWVudF9pZFwiOiBcImQxXCIsXG4gIFwicm9sZVwiOiBcInBsYW5uZXJcIixcbiAgXCJzdGF0dXNcIjogXCJkb25lXCIsXG4gIFwic3VtbWFyeVwiOiBcIlBsYW4gZm9yICM3OTkgYXQgdGFzay9wbGFuLm1kLCB3aXRoIGFuIDExLWNoZWNrIGFjY2VwdGFuY2UgZ2F0ZSBhdCB0YXNrL2dhdGUubWpzLiBNZWFzdXJlZCBjb3JyZWN0aW9uIHRvIHRoZSBicmllZjogYm90aCByZWFsIDIwMjYtMDgtMzAgdGFpbHMgY2FycnkgYSB0eXBlOlxcXCJyZXN1bHRcXFwiIGxpbmUsIHNvIHRvZGF5IHRoZXkgY2xhc3NpZnkgYG5vLWVudmVsb3BlYCwgbm90IGBtYWxmb3JtZWRgIOKAlCB0aGUgbmV3IGJyYW5jaCBwcmVjZWRlcyBib3RoLiBJdGVtIDMncyBydW50aW1lIGhhbGYgbGFuZHMgaW4gY3Jldy9oZWFkbGVzcy5tanMsIG5vdCBjcmV3L2NyZXcubWpzOiB0aGUgaW1wb3J0IGRpcmVjdGlvbiBpcyBjcmV3Lm1qcyAtPiBzZWF0LWlvLm1qcyAtPiBoZWFkbGVzcy1ycGMubWpzIC0+IGhlYWRsZXNzLm1qcywgc28gaGVhZGxlc3MubWpzIGltcG9ydGluZyBjcmV3Lm1qcyBpcyBhIGN5Y2xlLCBhbmQgZHJpdmUubWpzIGlzIGZlbmNlZCB0byBiMzM2OyBjcmV3Lm1qcyBrZWVwcyBzZWF0IHJlc29sdXRpb24gKHBhcnNlLCB2YWxpZGF0ZSwgdHJhbnNsYXRlIHRoZSBjaGFpbiBieSB0aGUgRU5UUlkncyBvd24gYWdlbnQpLiBHYXRlIGlzIFJFRCBhdCBiYXNlbGluZSBgR0FURS1TVU1NQVJZIHtcXFwidG90YWxcXFwiOjExLFxcXCJmYWlsZWRcXFwiOjExLFxcXCJlcnJvcmVkXFxcIjowfWAgKGV4aXQgMSksIHByb3ZlZCB0byBkaXNjcmltaW5hdGUgb24gYSBzY3JhdGNoIHByb3RvdHlwZSBhdCAxMS8wLzAgZXhpdCAwLCBhbmQgYWxsIDExIGRlY2xhcmVkIG11dGF0aW9ucyB3ZXJlIGFwcGxpZWQgaW4gaXNvbGF0aW9uIGFuZCBraWxsZWQgdGhlaXIgb3duIGNoZWNrLiBUaGUgcHJvdG90eXBlIGFsc28gcmFuIHRoZSBmdWxsIHN1aXRlIGFnYWluc3QgYW4gaWRlbnRpY2FsIHVucGF0Y2hlZCBzY3JhdGNoIGNvcHk6IHRoZSBmYWlsdXJlIHNldHMgYXJlIGJ5dGUtaWRlbnRpY2FsICg1MiBub24tZ2l0LWNoZWNrb3V0IGFydGlmYWN0cyBvbiBib3RoKSwgc28gdGhlIGRlc2lnbiBpbnRyb2R1Y2VzIG5vIG5ldyBmYWlsdXJlLlwiLFxuICBcImFydGlmYWN0c1wiOiBbXG4gICAgXCIvVXNlcnMvbW9tb3NoZWxsLy5jcmV3L2R0LWIzMzctZmFsbGJhY2svYjMzNy1mYWxsYmFjay90YXNrL3BsYW4ubWRcIixcbiAgICBcIi9Vc2Vycy9tb21vc2hlbGwvLmNyZXcvZHQtYjMzNy1mYWxsYmFjay9iMzM3LWZhbGxiYWNrL3Rhc2svZ2F0ZS5tanNcIixcbiAgICBcIi9Vc2Vycy9tb21vc2hlbGwvLmNyZXcvZHQtYjMzNy1mYWxsYmFjay9iMzM3LWZhbGxiYWNrL3Rhc2svZ2F0ZS1maXh0dXJlcy9iMzMyLWQyLXRhaWwuanNvbmxcIixcbiAgICBcIi9Vc2Vycy9tb21vc2hlbGwvLmNyZXcvZHQtYjMzNy1mYWxsYmFjay9iMzM3LWZhbGxiYWNrL3Rhc2svZ2F0ZS1maXh0dXJlcy9iMzMzLWQyLXRhaWwuanNvbmxcIixcbiAgICBcIi9Vc2Vycy9tb21vc2hlbGwvLmNyZXcvZHQtYjMzNy1mYWxsYmFjay9iMzM3LWZhbGxiYWNrL3Rhc2svZ2F0ZS1maXh0dXJlcy9hcGktZXJyb3Itbm8tc3ludGhldGljLmpzb25sXCIsXG4gICAgXCIvVXNlcnMvbW9tb3NoZWxsLy5jcmV3L2R0LWIzMzctZmFsbGJhY2svYjMzNy1mYWxsYmFjay90YXNrL2dhdGUtZml4dHVyZXMvc3ludGhldGljLW5vLWFwaS1lcnJvci5qc29ubFwiXG4gIF0sXG4gIFwiZGV0YWlsc1wiOiB7XG4gICAgXCJwbGFuX3BhdGhcIjogXCIvVXNlcnMvbW9tb3NoZWxsLy5jcmV3L2R0LWIzMzctZmFsbGJhY2svYjMzNy1mYWxsYmFjay90YXNrL3BsYW4ubWRcIixcbiAgICBcImZpbGVzX2luX3Njb3BlXCI6IFtcbiAgICAgIFwiY3Jldy9jcmV3Lm1qc1wiLFxuICAgICAgXCJjcmV3L2NyZXcudGVzdC5tanNcIixcbiAgICAgIFwiY3Jldy9oZWFkbGVzcy5tanNcIixcbiAgICAgIFwiY3Jldy9oZWFkbGVzcy50ZXN0Lm1qc1wiLFxuICAgICAgXCJjcmV3L3Jvc3Rlci5qc29uXCIsXG4gICAgICBcImNyZXcvcm9zdGVyLnNjaGVtYS5qc29uXCIsXG4gICAgICBcInRlc3QvZmFjdG9yeS1sZWRnZXIudGVzdC5tanNcIlxuICAgIF0sXG4gICAgXCJjb21taXRfc3ViamVjdFwiOiBcImZlYXQoY3Jldyk6IGNsYXNzaWZ5IGEgcHJvdmlkZXIgYnVkZ2V0IHJlZnVzYWwgYW5kIGZhbGwgYmFjayBvbmUgc2VhdCBjZWxsXCIsXG4gICAgXCJpc3N1ZXNcIjogWzc5OV0sXG4gICAgXCJ2YWxpZGF0aW9uX2xhbmVcIjogXCJub2RlIC0tdGVzdCAtLXRlc3QtdGltZW91dD0zMDAwMCBcXFwiKiovKi50ZXN0Lm1qc1xcXCJcIixcbiAgICBcImdhdGVfY21kXCI6IFwibm9kZSAvVXNlcnMvbW9tb3NoZWxsLy5jcmV3L2R0LWIzMzctZmFsbGJhY2svYjMzNy1mYWxsYmFjay90YXNrL2dhdGUubWpzXCIsXG4gICAgXCJnYXRlX3BhdGhcIjogXCIvVXNlcnMvbW9tb3NoZWxsLy5jcmV3L2R0LWIzMzctZmFsbGJhY2svYjMzNy1mYWxsYmFjay90YXNrL2dhdGUubWpzXCIsXG4gICAgXCJnYXRlX2Jhc2VsaW5lX3N1bW1hcnlcIjogXCJHQVRFLVNVTU1BUlkge1xcXCJ0b3RhbFxcXCI6MTEsXFxcImZhaWxlZFxcXCI6MTEsXFxcImVycm9yZWRcXFwiOjB9XCIsXG4gICAgXCJtdXRhdGlvbnNcIjogW1xuICAgICAgeyBcImNoZWNrXCI6IFwiQTFcIiwgXCJmaWxlXCI6IFwiY3Jldy9yb3N0ZXIuc2NoZW1hLmpzb25cIiwgXCJmaW5kXCI6IFwiXFxcIm1pbkl0ZW1zXFxcIjogMVwiLCBcInJlcGxhY2VcIjogXCJcXFwibWluSXRlbXNcXFwiOiAwXCIgfSxcbiAgICAgIHsgXCJjaGVja1wiOiBcIkEyXCIsIFwiZmlsZVwiOiBcImNyZXcvcm9zdGVyLmpzb25cIiwgXCJmaW5kXCI6IFwiXFxcImZhbGxiYWNrXFxcIlwiLCBcInJlcGxhY2VcIjogXCJcXFwiZmFsbGJhY2tzXFxcIlwiIH0sXG4gICAgICB7IFwiY2hlY2tcIjogXCJBM1wiLCBcImZpbGVcIjogXCJjcmV3L2hlYWRsZXNzLm1qc1wiLCBcImZpbmRcIjogXCJidWRnZXRSZWZ1c2VkOiBzYXdTeW50aGV0aWMgJiYgc2F3QXBpRXJyb3JcIiwgXCJyZXBsYWNlXCI6IFwiYnVkZ2V0UmVmdXNlZDogc2F3U3ludGhldGljICYmICFzYXdBcGlFcnJvclwiIH0sXG4gICAgICB7IFwiY2hlY2tcIjogXCJBNFwiLCBcImZpbGVcIjogXCJjcmV3L2hlYWRsZXNzLm1qc1wiLCBcImZpbmRcIjogXCJldmVudC5tZXNzYWdlPy5tb2RlbCA9PT0gU1lOVEhFVElDX01PREVMXCIsIFwicmVwbGFjZVwiOiBcImV2ZW50Lm1lc3NhZ2U/Lm1vZGVsICE9PSBTWU5USEVUSUNfTU9ERUxcIiB9LFxuICAgICAgeyBcImNoZWNrXCI6IFwiQTVcIiwgXCJmaWxlXCI6IFwiY3Jldy9oZWFkbGVzcy5tanNcIiwgXCJmaW5kXCI6IFwiYnVkZ2V0UmVmdXNlZCA9IGZhbHNlXCIsIFwicmVwbGFjZVwiOiBcImJ1ZGdldFJlZnVzZWQgPSB0cnVlXCIgfSxcbiAgICAgIHsgXCJjaGVja1wiOiBcIkE2XCIsIFwiZmlsZVwiOiBcImNyZXcvY3Jldy5tanNcIiwgXCJmaW5kXCI6IFwiYWRhcHRlckZvckFnZW50KGFkYXB0ZXJzLCByb2xlLCBlbnRyeS5hZ2VudClcIiwgXCJyZXBsYWNlXCI6IFwiYWRhcHRlckZvckFnZW50KGFkYXB0ZXJzLCByb2xlLCBzZWF0LmFnZW50KVwiIH0sXG4gICAgICB7IFwiY2hlY2tcIjogXCJBN1wiLCBcImZpbGVcIjogXCJjcmV3L2NyZXcubWpzXCIsIFwiZmluZFwiOiBcImVudHJ5LnByb3ZpZGVyID09PSBjZWxsLnByb3ZpZGVyICYmIGVudHJ5LmlkID09PSBjZWxsLmlkXCIsIFwicmVwbGFjZVwiOiBcImVudHJ5LnByb3ZpZGVyID09PSBjZWxsLnByb3ZpZGVyICYmIGVudHJ5LmlkICE9PSBjZWxsLmlkXCIgfSxcbiAgICAgIHsgXCJjaGVja1wiOiBcIkE4XCIsIFwiZmlsZVwiOiBcImNyZXcvY3Jldy5tanNcIiwgXCJmaW5kXCI6IFwiY2VsbC5mYWxsYmFjay5sZW5ndGggPT09IDBcIiwgXCJyZXBsYWNlXCI6IFwiY2VsbC5mYWxsYmFjay5sZW5ndGggPT09IC0xXCIgfSxcbiAgICAgIHsgXCJjaGVja1wiOiBcIkE5XCIsIFwiZmlsZVwiOiBcImNyZXcvY3Jldy5tanNcIiwgXCJmaW5kXCI6IFwiY29uc3QgeyBmYWxsYmFjaywgLi4ucmVzdCB9ID0gc2VhdFwiLCBcInJlcGxhY2VcIjogXCJjb25zdCB7IC4uLnJlc3QgfSA9IHNlYXRcIiB9LFxuICAgICAgeyBcImNoZWNrXCI6IFwiQTEwXCIsIFwiZmlsZVwiOiBcImNyZXcvaGVhZGxlc3MubWpzXCIsIFwiZmluZFwiOiBcImV2ZW50OiAnc2VhdC1mYWxsYmFjaydcIiwgXCJyZXBsYWNlXCI6IFwiZXZlbnQ6ICdzZWF0LWZhbGxvdmVyJ1wiIH0sXG4gICAgICB7IFwiY2hlY2tcIjogXCJBMTFcIiwgXCJmaWxlXCI6IFwiY3Jldy9oZWFkbGVzcy5tanNcIiwgXCJmaW5kXCI6IFwiRkFMTEJBQ0tfTUFYID0gMVwiLCBcInJlcGxhY2VcIjogXCJGQUxMQkFDS19NQVggPSAyXCIgfVxuICAgIF0sXG4gICAgXCJjb25zdWx0X3F1ZXN0aW9uc1wiOiBbXG4gICAgICBcIlIyL1IzIGluIHBsYW4ubWQ6IHRoZSByZWNvcmRlZCBleHBlcmltZW50IGZhbGxzIGJhY2sgb3BlbmFpL2dwdC01LjYtc29sIChhZ2VudCBwaSkgdG8gYW50aHJvcGljL2NsYXVkZS1vcHVzLTUgKGFnZW50IGNsYXVkZSksIHdoaWNoIGNyb3NzZXMgYWdlbnRzIGFuZCBjb2xsYXBzZXMgdGhlIGp1ZGdlIHBhbmVsJ3MgcmV2aWV3ZXIvdGVjaC1sZWFkIHZlbmRvciBzcGxpdCBvbmNlIGl0IGZpcmVzLiBCb3RoIGFyZSBkZWxpYmVyYXRlIGFuZCBuZWl0aGVyIHJlZnVzZXMgdG9kYXkg4oCUIGNvbmZpcm0gdGhlIHRyYWRlLCBvciBzYXkgdGhlIGV4cGVyaW1lbnQgc2hvdWxkIHN0YXkgc2FtZS12ZW5kb3IuXCIsXG4gICAgICBcIlI0IGluIHBsYW4ubWQ6IGEgZmFsbGJhY2sgcmUtZW50ZXJzIHdhaXQoKSB3aXRoIGEgRlVMTCBmcmVzaCB0aW1lb3V0Uywgc28gb25lIGFzc2lnbm1lbnQgY2FuIGNvc3QgMnggdGhlIHNlYXQgYnVkZ2V0LiBDb25maXJtIHRoYXQgYm91bmQsIG9yIHNheSB0aGUgcmUtYXNrIHNob3VsZCBpbmhlcml0IHRoZSByZW1haW5pbmcgYnVkZ2V0LlwiXG4gICAgXVxuICB9XG59XG4iLCJzdHJ1Y3R1cmVkUGF0Y2giOltdLCJvcmlnaW5hbEZpbGUiOm51bGwsInVzZXJNb2RpZmllZCI6ZmFsc2V9fQo=", 'base64').toString('utf8')
 const B337_D1_RESULT = Buffer.from("eyJkdXJhdGlvbl9hcGlfbXMiOjEwNDUwMjIsInN0b3BfcmVhc29uIjoiZW5kX3R1cm4iLCJzZXNzaW9uX2lkIjoiZDkyODIyNmQtOGU3ZS00Mzk2LTk1M2QtYmYzMTE0M2NiMTdkIiwidG90YWxfY29zdF91c2QiOjEwLjE0Nzc0Nzk5OTk5OTk5OCwidXNhZ2UiOnsiaW5wdXRfdG9rZW5zIjoxNTYsImNhY2hlX2NyZWF0aW9uX2lucHV0X3Rva2VucyI6MjI1MTI3LCJjYWNoZV9yZWFkX2lucHV0X3Rva2VucyI6MTE2ODI0NDYsIm91dHB1dF90b2tlbnMiOjgyMTc5LCJvdXRwdXRfdG9rZW5zX2RldGFpbHMiOnsidGhpbmtpbmdfdG9rZW5zIjozNTA2MH0sInNlcnZlcl90b29sX3VzZSI6eyJ3ZWJfc2VhcmNoX3JlcXVlc3RzIjowLCJ3ZWJfZmV0Y2hfcmVxdWVzdHMiOjB9LCJzZXJ2aWNlX3RpZXIiOiJzdGFuZGFyZCIsImNhY2hlX2NyZWF0aW9uIjp7ImVwaGVtZXJhbF8xaF9pbnB1dF90b2tlbnMiOjIyNTEyNywiZXBoZW1lcmFsXzVtX2lucHV0X3Rva2VucyI6MH0sImluZmVyZW5jZV9nZW8iOiJub3RfYXZhaWxhYmxlIiwiaXRlcmF0aW9ucyI6W3siaW5wdXRfdG9rZW5zIjoyLCJvdXRwdXRfdG9rZW5zIjozMzUsImNhY2hlX3JlYWRfaW5wdXRfdG9rZW5zIjoyMzY0NzcsImNhY2hlX2NyZWF0aW9uX2lucHV0X3Rva2VucyI6MzI4LCJjYWNoZV9jcmVhdGlvbiI6eyJlcGhlbWVyYWxfNW1faW5wdXRfdG9rZW5zIjowLCJlcGhlbWVyYWxfMWhfaW5wdXRfdG9rZW5zIjozMjh9LCJ0eXBlIjoibWVzc2FnZSJ9XSwic3BlZWQiOiJzdGFuZGFyZCJ9LCJtb2RlbFVzYWdlIjp7ImNsYXVkZS1vcHVzLTUiOnsiaW5wdXRUb2tlbnMiOjE1Niwib3V0cHV0VG9rZW5zIjo4MjE3OSwiY2FjaGVSZWFkSW5wdXRUb2tlbnMiOjExNjgyNDQ2LCJjYWNoZUNyZWF0aW9uSW5wdXRUb2tlbnMiOjIyNTEyNywid2ViU2VhcmNoUmVxdWVzdHMiOjAsImNvc3RVU0QiOjEwLjE0Nzc0Nzk5OTk5OTk5OCwiY29udGV4dFdpbmRvdyI6MTAwMDAwMCwibWF4T3V0cHV0VG9rZW5zIjo2NDAwMCwiY2Fub25pY2FsTW9kZWwiOiJjbGF1ZGUtb3B1cy01IiwicHJvdmlkZXIiOiJmaXJzdFBhcnR5IiwiY29zdEJhc2lzIjoibGlzdCJ9fSwicGVybWlzc2lvbl9kZW5pYWxzIjpbXSwidGVybWluYWxfcmVhc29uIjoiY29tcGxldGVkIiwiZmFzdF9tb2RlX3N0YXRlIjoib2ZmIiwiZmFzdF9tb2RlX2Rpc2FibGVkX3JlYXNvbiI6InNka19vcHRfaW5fcmVxdWlyZWQiLCJzdWJhZ2VudF9zdGF0cyI6eyJzcGF3bmVkIjowLCJyZXF1ZXN0ZWQiOnsiYmFja2dyb3VuZCI6MCwiZm9yZWdyb3VuZCI6MCwidW5zZXQiOjB9LCJzdGFydGVkX2luX2JhY2tncm91bmQiOjAsIm1heF9kZXB0aCI6MCwic3Bhd25lZF9ieV9zdWJhZ2VudHMiOjAsImNvbXBsZXRlZCI6MCwiZmFpbGVkIjowLCJraWxsZWQiOnsicGFyZW50IjowLCJ1c2VyIjowLCJzeXN0ZW0iOjB9LCJyZWZ1c2VkIjp7ImRlcHRoX2xpbWl0IjowLCJjb25jdXJyZW5jeV9saW1pdCI6MCwiYnVkZ2V0IjowfSwiYnlfdHlwZSI6e319LCJpc19lcnJvciI6ZmFsc2UsIm51bV90dXJucyI6NzgsInN1YnR5cGUiOiJzdWNjZXNzIiwiYXBpX2Vycm9yX3N0YXR1cyI6bnVsbCwicmVzdWx0IjoiUGxhbiBhbmQgZ2F0ZSB3cml0dGVuOyByZXBvIHVudG91Y2hlZCAocGxhbm5lciB3cml0ZXMgbm90aGluZyB0byB0aGUgY2hlY2tvdXQpLlxuXG4tICoqcGxhbi5tZCoqIOKAlCA3IGZlbmNlZCBmaWxlcywgdmVyYmF0aW0gc291cmNlIGZvciBldmVyeSBtdXRhdGlvbiBhbmNob3IuIFR3byBtZWFzdXJlZCBjb3JyZWN0aW9ucyB0byB0aGUgYnJpZWY6IHRoZSByZWFsIHRhaWxzIGNsYXNzaWZ5IGBuby1lbnZlbG9wZWAgdG9kYXkgKG5vdCBgbWFsZm9ybWVkYCwgYSBgdHlwZTpcInJlc3VsdFwiYCBsaW5lIGlzIHByZXNlbnQpLCBhbmQgaXRlbSAzJ3MgcnVudGltZSBoYWxmIG11c3QgbGFuZCBpbiBgY3Jldy9oZWFkbGVzcy5tanNgIOKAlCBgaGVhZGxlc3MubWpzYCBpbXBvcnRpbmcgYGNyZXcubWpzYCBpcyBhIGN5Y2xlIGFuZCBgZHJpdmUubWpzYCBpcyBiMzM2J3MuIGBjcmV3Lm1qc2Aga2VlcHMgc2VhdCByZXNvbHV0aW9uLlxuLSAqKmdhdGUubWpzKiog4oCUIDExIGNoZWNrcywgUkVEIGF0IGJhc2VsaW5lIGBHQVRFLVNVTU1BUlkge1widG90YWxcIjoxMSxcImZhaWxlZFwiOjExLFwiZXJyb3JlZFwiOjB9YCAoZXhpdCAxKSwgcHJvdmVkIGdyZWVuICgxMS8wLzAsIGV4aXQgMCkgb24gYSBzY3JhdGNoIHByb3RvdHlwZSwgYWxsIDExIG11dGF0aW9ucyBraWxsZWQgdGhlaXIgb3duIGNoZWNrLlxuLSBGdWxsIHN1aXRlIHJ1biB0d2ljZSBmcm9tIGlkZW50aWNhbCBzY3JhdGNoIGNvcGllcyAocGF0Y2hlZCB2cyBub3QpOiBmYWlsdXJlIHNldHMgYnl0ZS1pZGVudGljYWwg4oCUIHRoZSBkZXNpZ24gYWRkcyBubyBuZXcgZmFpbHVyZS5cblxuQ1JFVy1ET05FIHBsYW5uZXIgZDEiLCJ0dGZ0X21zIjoxOTk1LCJ0eXBlIjoicmVzdWx0IiwiZHVyYXRpb25fbXMiOjEwODE4NDksInV1aWQiOiJlNDQyNTlmOS1iNDI0LTRmYmItYTAyMS05ZTIzM2Q0MTFkNmIiLCJ0dGZ0X3N0cmVhbV9tcyI6MTI1NSwidGltZV90b19yZXF1ZXN0X21zIjoxNSwicXVldWVkX3R1cm5fY291bnQiOjB9Cg==", 'base64').toString('utf8')
 
+
+// Recorded d6 tech-lead envelope: 2,153 bytes with two raw LF controls in
+// string literals. Kept local so these tests do not depend on an archive path.
+const RECORDED_TECH_LEAD_B64 = 'ewogICJhc3NpZ25tZW50X2lkIjogImQ2IiwKICAicm9sZSI6ICJ0ZWNoLWxlYWQiLAogICJzdGF0dXMiOiAiZG9uZSIsCiAgInN1bW1hcnkiOiAiVGhlIHByaW9yIGZpbmRpbmdzIGFyZSBjbG9zZWQgdW5kZXIgdGhlIGxlYWQncyBleHBsaWNpdCBUTDEgb3ZlcnJpZGUsIGJ1dCB0aGUgcmV2aXNlZCBib290c3RyYXAgYWRkcyBuZXcgdW5wcm92ZWQgcHJlcmVxdWlzaXRlcy4KUG9zdC1jb21taXQgY2Vuc3VzIHJlcGFpciBjYW4gcmUtZW50ZXIgdGhlIG91dGVyIHN1aXRlIGN5Y2xlIHdpdGhvdXQgYSBjYXAuClN0YWdpbmcgYW5kIGNvbW1lbnQgcGFyaXR5IGFyZSBsb2FkLWJlYXJpbmcgeWV0IGFic2VudCBmcm9tIHRoZSBnYXRlLCBhbmQgbWl4ZWQgaW5zaWRlL291dHNpZGUgZmFpbHVyZXMgZG8gbm90IHByb3ZlIG91dHNpZGUgZG9taW5hbmNlLiIsCiAgImFydGlmYWN0cyI6IFsKICAgICIvVXNlcnMvbW9tb3NoZWxsLy5jcmV3L2R0LWI2MTMtY2Vuc3VzbGlzdC9iNjEzLWNlbnN1c2xpc3QvdGFzay9wbGFuLWNoZWNrLm1kIgogIF0sCiAgImRldGFpbHMiOiB7CiAgICAiY2hlY2tfcGF0aCI6ICIvVXNlcnMvbW9tb3NoZWxsLy5jcmV3L2R0LWI2MTMtY2Vuc3VzbGlzdC9iNjEzLWNlbnN1c2xpc3QvdGFzay9wbGFuLWNoZWNrLm1kIiwKICAgICJ2ZXJkaWN0IjogInJldmlzZSIsCiAgICAicHJpb3JfZmluZGluZ3NfY2xvc2VkIjogdHJ1ZSwKICAgICJmaW5kaW5ncyI6IFsKICAgICAgewogICAgICAgICJpZCI6ICJUTDYiLAogICAgICAgICJzZXZlcml0eSI6ICJibG9ja2VyIiwKICAgICAgICAiY29ycmVjdGlvbiI6ICJCb3VuZCBwb3N0LWNvbW1pdCBjZW5zdXMgcmVwYWlyIHRvIG9uZSByZS1lbnRyeSB3aXRoIGFuIGV4cGxpY2l0IGNvdW50ZXIgYW5kIHRlcm1pbmFsIHJlcGVhdCBlc2NhbGF0aW9uLCBhbmQgYWRkIGEgYEIxYyByZXBlYXRlZCBwb3N0LWNvbW1pdCBpbnNpZGUgcmVkIGVzY2FsYXRlcyBhZnRlciBvbmUgcmVwYWlyYCBnYXRlIGNoZWNrIHBsdXMgYSBtdXRhdGlvbiB0aGF0IGRpc2FibGVzIHRoZSByZXBlYXQgZ3VhcmQuIgogICAgICB9LAogICAgICB7CiAgICAgICAgImlkIjogIlRMNyIsCiAgICAgICAgInNldmVyaXR5IjogImJsb2NrZXIiLAogICAgICAgICJjb3JyZWN0aW9uIjogIlR1cm4gdGhlIGxvYWQtYmVhcmluZyBzdGFnaW5nIGluc3RydWN0aW9uIGludG8gYSBnYXRlLXZpc2libGUgYEoxIGNlbnN1cyBtb2R1bGUgaXMgdHJhY2tlZCBiZWZvcmUgY2Vuc3VzIG1lYXN1cmVtZW50YCBjaGVjayB0aGF0IHJ1bnMgYGdpdCBscy1maWxlcyAtLWVycm9yLXVubWF0Y2ggY3Jldy9jZW5zdXMtZXhoaWJpdHMubWpzYCwgd2l0aCBpdHMgb3duIHBhdGggbXV0YXRpb247IHVwZGF0ZSBhbmQgYmFzZWxpbmUtcHJvdmUgdGhlIGZpbmFsIGdhdGUgdG90YWwgaW5zdGVhZCBvZiByZWx5aW5nIG9uIHVub2JzZXJ2YWJsZSBidWlsZGVyIGhpc3RvcnkuIgogICAgICB9LAogICAgICB7CiAgICAgICAgImlkIjogIlRMOCIsCiAgICAgICAgInNldmVyaXR5IjogIm1ham9yIiwKICAgICAgICAiY29ycmVjdGlvbiI6ICJUdXJuIHRoZSBsb2FkLWJlYXJpbmcgY29tbWVudC1wYXJpdHkgaW5zdHJ1Y3Rpb24gaW50byBhIGdhdGUtdmlzaWJsZSBgSjIgZWRpdGVkIHRlc3QgY29tbWVudCBwYXJpdHkgbWF0Y2hlcyBIRUFEYCBjaGVjayB0aGF0IGNvbXBhcmVzIGNvbW1lbnQtYXBvc3Ryb3BoZSBwYXJpdHkgZm9yIGJvdGggZWRpdGVkIHRlc3QgZmlsZXMgYWdhaW5zdCBgZ2l0IHNob3cgSEVBRDo8ZmlsZT5gLCB3aXRoIGl0cyBvd24gY29tcGFyaXNvbiBtdXRhdGlvbi4iCiAgICAgIH0sCiAgICAgIHsKICAgICAgICAiaWQiOiAiVEw5IiwKICAgICAgICAic2V2ZXJpdHkiOiAibWFqb3IiLAogICAgICAgICJjb3JyZWN0aW9uIjogIlJlcXVpcmUgdGhlIEIxYiBmaXh0dXJlIHRvIHJldHVybiBib3RoIGFuIGluc2lkZSBhbmQgYW4gb3V0c2lkZSBmYWlsZWQgY2Vuc3VzIGZpbGUgYW5kIHJlcXVpcmUgdGhlIHBvc3QtY29tbWl0IG91dHNpZGUgYnJhbmNoIHRvIHJ1biBiZWZvcmUgdGhlIGluc2lkZSBicmFuY2gsIHNvIGFueSB1bnJlcGFpcmFibGUgbWVtYmVyIGRvbWluYXRlcyByYXRoZXIgdGhhbiBiZWluZyBoaWRkZW4gYnkgYSByZXBhaXIgYm91bmNlLiIKICAgICAgfQogICAgXQogIH0KfQo='
+const STRUCTURAL_REASK_B64 = 'ewogICJhc3NpZ25tZW50X2lkIjogImQ2IiwKICAicm9sZSI6ICJ0ZWNoLWxlYWQiLAogICJzdGF0dXMiOiAiZG9uZSIsCiAgInN1bW1hcnkiOiAiVGhlIHByaW9yIGZpbmRpbmdzIGFyZSBjbG9zZWQgdW5kZXIgdGhlIGxlYWQncyBleHBsaWNpdCBUTDEgb3ZlcnJpZGUsIGJ1dCB0aGUgcmV2aXNlZCBib290c3RyYXAgYWRkcyBuZXcgdW5wcm92ZWQgcHJlcmVxdWlzaXRlcy5cblBvc3QtY29tbWl0IGNlbnN1cyByZXBhaXIgY2FuIHJlLWVudGVyIHRoZSBvdXRlciBzdWl0ZSBjeWNsZSB3aXRob3V0IGEgY2FwLlxuU3RhZ2luZyBhbmQgY29tbWVudCBwYXJpdHkgYXJlIGxvYWQtYmVhcmluZyB5ZXQgYWJzZW50IGZyb20gdGhlIGdhdGUsIGFuZCBtaXhlZCBpbnNpZGUvb3V0c2lkZSBmYWlsdXJlcyBkbyBub3QgcHJvdmUgb3V0c2lkZSBkb21pbmFuY2UuIiwKICAiYXJ0aWZhY3RzIjogWwogICAgIi9Vc2Vycy9tIG11bHRpbGluZT8iCHUwMDA4CiAgXSwKICAiZGV0YWlscyI6IHt9Cn0='
+const RECORDED_TECH_LEAD = Buffer.from(RECORDED_TECH_LEAD_B64, 'base64').toString('utf8')
+const STRUCTURAL_REASK = Buffer.from(STRUCTURAL_REASK_B64, 'base64').toString('utf8')
 
 // The b200-helperdedup envelope, byte-exact: 1921 bytes, schema-shaped, and
 // unparseable on ONE literal newline inside the `summary` string value.
@@ -113,6 +120,34 @@ function timedFixture(overrides = {}) {
   })
   fixtureRef = f
   return { ...f, clock: () => clock, polls: () => polls }
+}
+
+function directEnvelopeFixture(raw, role = 'tech-lead') {
+  const dir = scratchDir('envelope-repair-')
+  const returnsDir = join(dir, 'returns')
+  mkdirSync(returnsDir)
+  const path = join(returnsDir, `d6.${role}.json`)
+  writeFileSync(path, raw)
+  const writes = []
+  const capture = (journalPath, data, options) => writes.push({ journalPath, data, options })
+  return {
+    dir, path, writes,
+    invoke(options = {}) {
+      return readEnvelopeOrThrow(path, {
+        existsSync, readFileSync, stage: 'headless-parse-error', role,
+        writeFileSync: capture, now: () => 1700000000000, ...options,
+      })
+    },
+    cleanup: () => rmSync(dir, { recursive: true, force: true }),
+  }
+}
+
+function independentlyEscapedRecordedIntent() {
+  const bytes = Buffer.from(RECORDED_TECH_LEAD, 'utf8')
+  return JSON.parse(Buffer.concat([
+    bytes.subarray(0, 212), Buffer.from([0x5c, 0x6e]),
+    bytes.subarray(213, 288), Buffer.from([0x5c, 0x6e]), bytes.subarray(289),
+  ]).toString('utf8'))
 }
 
 test('classifyRun keeps all six worker traps distinct', () => {
@@ -821,21 +856,211 @@ test('wait returns an envelope as soon as it appears', () => {
   } finally { f.cleanup() }
 })
 
-test('a 1921-byte envelope with a literal newline is UNREADABLE, not absent', () => {
+test('A1 a recorded raw-control envelope continues through the JSON transport', () => {
   const f = fixture()
   try {
     const run = f.io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
-    const bytes = b200Bytes()
-    writeFileSync(run.returnPath, bytes)
-    assert.throws(() => f.io.wait(run.returnPath, 1), (err) => {
-      assert.equal(err.stage, 'headless-parse-error')
-      assert.equal(cellFailureKind(err), 'unusable-envelope')
-      assert.equal(err.role, 'builder')
-      assert.equal(err.raw, bytes)
-      assert.equal(err.message.includes('1921 bytes'), true)
+    writeFileSync(run.returnPath, RECORDED_TECH_LEAD)
+    const before = readFileSync(run.returnPath)
+    const value = f.io.wait(run.returnPath, 1)
+    assert.equal(value.assignment_id, 'd6')
+    assert.equal(value.status, 'done')
+    const rows = readFileSync(join(f.dir, 'journal.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse)
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].event, 'envelope-repair')
+    assert.equal(rows[0].outcome, 'repaired')
+    assert.equal(rows[0].escaped_count, 2)
+    assert.deepEqual(rows[0].escaped_offsets, [212, 288])
+    assert.equal(readFileSync(run.returnPath).equals(before), true)
+  } finally { f.cleanup() }
+})
+
+test('B1a a repaired read journals its outcome and count exactly once', () => {
+  const f = directEnvelopeFixture(RECORDED_TECH_LEAD)
+  try {
+    const value = f.invoke({ now: () => 7 })
+    assert.equal(value.assignment_id, 'd6')
+    assert.equal(f.writes.length, 1)
+    const row = JSON.parse(f.writes[0].data)
+    assert.deepEqual(row, {
+      at: 7, event: 'envelope-repair', outcome: 'repaired', role: 'tech-lead',
+      assignment_id: 'd6', return_path: f.path, escaped_count: 2,
+      escaped_offsets: [212, 288],
+    })
+    assert.equal(f.writes[0].journalPath, join(f.dir, 'journal.jsonl'))
+    assert.deepEqual(f.writes[0].options, { flag: 'a' })
+  } finally { f.cleanup() }
+})
+
+// The review found B1b could not tell a UTF-8 byte offset from a UTF-16 code-unit index:
+// everything before its two controls is ASCII, where the two agree. Swapping
+// `Buffer.byteLength(char, 'utf8')` for `char.length` left the gate 7/7 and 339/339 green.
+// This fixture puts multi-byte text BEFORE the control, where the two disagree.
+test('B1b-utf8 a multi-byte prefix reports the BYTE offset, not the code-unit index', () => {
+  const prefix = '\u{1F600}\u6F22'                      // 4-byte emoji + 3-byte CJK = 7 bytes, 3 code units
+  const raw = `{"role":"tech-lead","summary":"${prefix}\nend"}`
+  const control = raw.indexOf('\n')
+  const byteOffset = Buffer.byteLength(raw.slice(0, control), 'utf8')
+  const codeUnitIndex = raw.slice(0, control).length
+  assert.notEqual(byteOffset, codeUnitIndex, 'the fixture must be able to tell the two apart')
+  const f = directEnvelopeFixture(raw)
+  try {
+    const value = f.invoke()
+    assert.equal(value.summary, `${prefix}\nend`)
+    assert.deepEqual(JSON.parse(f.writes[0].data).escaped_offsets, [byteOffset])
+  } finally { f.cleanup() }
+})
+
+// MF1: `readFileSync(path, 'utf8')` substitutes U+FFFD for a malformed byte BEFORE the scanner
+// runs, so an envelope carrying both an encoding defect and an in-string control could parse
+// with a CHANGED value and a false offset. Encoding is a different defect and is refused.
+test('B1d malformed UTF-8 is refused, never repaired into a changed value', () => {
+  const dir = scratchDir('envelope-utf8-')
+  const returnsDir = join(dir, 'returns')
+  mkdirSync(returnsDir)
+  const path = join(returnsDir, 'd6.tech-lead.json')
+  // a lone 0xff byte — not valid UTF-8 — immediately before a raw control character
+  writeFileSync(path, Buffer.concat([
+    Buffer.from('{"role":"tech-lead","summary":"', 'utf8'),
+    Buffer.from([0xff]),
+    Buffer.from('\nend"}', 'utf8'),
+  ]))
+  const writes = []
+  try {
+    assert.throws(() => readEnvelopeOrThrow(path, {
+      existsSync, readFileSync, stage: 'headless-parse-error', role: 'tech-lead',
+      writeFileSync: (...args) => writes.push(args), now: () => 1700000000000,
+    }), /unusable envelope/)
+    assert.deepEqual(writes, [], 'a refused envelope records no repair')
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+// The two-read design had a TOCTOU in both directions. Pinned here so a future reader cannot
+// reintroduce a second read of the path: a rename between the reads must not turn a valid,
+// repairable envelope into a terminal defect.
+test('B1e a rename between reads cannot turn a repairable envelope terminal', () => {
+  const dir = scratchDir('envelope-toctou-')
+  const returnsDir = join(dir, 'returns')
+  mkdirSync(returnsDir)
+  const path = join(returnsDir, 'd6.tech-lead.json')
+  writeFileSync(path, RECORDED_TECH_LEAD)
+  const writes = []
+  let reads = 0
+  try {
+    const value = readEnvelopeOrThrow(path, {
+      existsSync,
+      // every read after the first sees a DIFFERENT file, as a rename would leave behind
+      readFileSync: (target, encoding) => {
+        reads += 1
+        if (reads > 1) return readFileSync(join(returnsDir, 'missing.json'), encoding)
+        return readFileSync(target, encoding)
+      },
+      stage: 'headless-parse-error', role: 'tech-lead',
+      writeFileSync: (...args) => writes.push(args), now: () => 1700000000000,
+    })
+    assert.equal(value.assignment_id, 'd6')
+    assert.equal(reads, 1, 'the envelope is read exactly once; a second read is a TOCTOU')
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('B1b a repaired read records the original UTF-8 byte offsets', () => {
+  const f = directEnvelopeFixture(RECORDED_TECH_LEAD)
+  try {
+    f.invoke()
+    assert.deepEqual(JSON.parse(f.writes[0].data).escaped_offsets, [212, 288])
+  } finally { f.cleanup() }
+})
+
+test('C1 a structural defect keeps the strict parse evidence and raw bytes', () => {
+  const f = directEnvelopeFixture(STRUCTURAL_REASK)
+  const before = readFileSync(f.path)
+  let strictError
+  try { JSON.parse(STRUCTURAL_REASK) } catch (error) { strictError = error }
+  try {
+    assert.throws(() => f.invoke(), (error) => {
+      assert.equal(error.message, `unusable envelope at ${f.path}: the file EXISTED (${STRUCTURAL_REASK.length} bytes) and is not JSON this driver can read: ${strictError.message}`)
+      assert.equal(error.stage, 'headless-parse-error')
+      assert.equal(error.role, 'tech-lead')
+      assert.equal(error.raw, STRUCTURAL_REASK)
       return true
     })
-    assert.equal(readFileSync(run.returnPath, 'utf8'), bytes)
+    assert.equal(f.writes.length, 0)
+    assert.equal(readFileSync(f.path).equals(before), true)
+  } finally { f.cleanup() }
+})
+
+test('D1 a repaired envelope preserves every authored field', () => {
+  const f = directEnvelopeFixture(RECORDED_TECH_LEAD)
+  try {
+    assert.deepEqual(f.invoke(), independentlyEscapedRecordedIntent())
+  } finally { f.cleanup() }
+})
+
+test('E1 strict valid JSON returns unchanged without a repair row', () => {
+  const raw = JSON.stringify({ assignment_id: 'd6', role: 'tech-lead', status: 'done', summary: 'valid' })
+  const f = directEnvelopeFixture(raw)
+  try {
+    assert.deepEqual(f.invoke(), JSON.parse(raw))
+    assert.equal(f.writes.length, 0)
+    assert.equal(readFileSync(f.path, 'utf8'), raw)
+  } finally { f.cleanup() }
+})
+
+test('F1 successful and failed reads leave seat-envelope bytes identical', () => {
+  const repaired = directEnvelopeFixture(RECORDED_TECH_LEAD)
+  const failed = directEnvelopeFixture(STRUCTURAL_REASK)
+  try {
+    const repairedBefore = readFileSync(repaired.path)
+    repaired.invoke()
+    assert.equal(readFileSync(repaired.path).equals(repairedBefore), true)
+    const failedBefore = readFileSync(failed.path)
+    assert.throws(() => failed.invoke())
+    assert.equal(readFileSync(failed.path).equals(failedBefore), true)
+  } finally {
+    repaired.cleanup()
+    failed.cleanup()
+  }
+})
+
+test('scanner boundary table repairs all raw controls inside strings only', () => {
+  const controls = [0x00, 0x08, 0x09, 0x0a, 0x0c, 0x0d, 0x1f]
+  const controlText = controls.map((code) => String.fromCharCode(code)).join('')
+  const marker = '__RAW_CONTROLS__'
+  const markerSummary = ['quote: " and slash: ', '\\\\', marker].join('')
+  const safe = JSON.stringify({ assignment_id: 'boundary', role: 'builder', status: 'done', summary: markerSummary, outside: true }, null, 2)
+  const markerAt = safe.indexOf(marker)
+  const raw = safe.slice(0, markerAt) + controlText + safe.slice(markerAt + marker.length)
+  const expectedOffsets = controls.map((_, index) => Buffer.byteLength(safe.slice(0, markerAt + index), 'utf8'))
+  const f = directEnvelopeFixture(raw, 'builder')
+  try {
+    const value = f.invoke()
+    assert.deepEqual(value, {
+      assignment_id: 'boundary', role: 'builder', status: 'done',
+      summary: ['quote: " and slash: ', '\\\\', controlText].join(''), outside: true,
+    })
+    const row = JSON.parse(f.writes[0].data)
+    assert.equal(row.escaped_count, controls.length)
+    assert.deepEqual(row.escaped_offsets, expectedOffsets)
+    assert.equal(readFileSync(f.path, 'utf8'), raw)
+  } finally { f.cleanup() }
+})
+
+test('B1c ENOSPC repair journal failure retains unusable-envelope evidence', () => {
+  const f = directEnvelopeFixture(RECORDED_TECH_LEAD)
+  const before = readFileSync(f.path)
+  const noSpace = Object.assign(new Error('no space left on device'), { code: 'ENOSPC' })
+  try {
+    assert.throws(() => f.invoke({ writeFileSync: () => { throw noSpace } }), (error) => {
+      assert.match(error.message, /repaired bytes could not be recorded/)
+      assert.equal(error.stage, 'headless-parse-error')
+      assert.equal(error.role, 'tech-lead')
+      assert.equal(error.raw, RECORDED_TECH_LEAD)
+      assert.equal(error.cause, noSpace)
+      assert.equal(error.cause.code, 'ENOSPC')
+      assert.equal(cellFailureKind(error), 'unusable-envelope')
+      return true
+    })
+    assert.equal(readFileSync(f.path).equals(before), true)
   } finally { f.cleanup() }
 })
 
@@ -1692,11 +1917,10 @@ test('a budget fallback marks the escaped error as spent and a first failure doe
   } finally { first.cleanup() }
 })
 
-test('a spent budget fallback marks an unparseable envelope as grace spent', () => {
+test('a spent budget fallback marks a structurally unparseable envelope as grace spent', () => {
   const f = fallbackFixture((n, runDir, returnsDir) => {
     if (n === 1) return writeBudgetRefusal(runDir)
-    writeFileSync(join(returnsDir, 'd1.tech-lead.json'), `{"assignment_id":"d1","role":"tech-lead","status":"done","summary":"second
-try"}`)
+    writeFileSync(join(returnsDir, 'd1.tech-lead.json'), '{"assignment_id":"d1","role":"tech-lead","status":"done","summary":"second","artifacts":[1,]}')
     writeFileSync(join(runDir, 'stream.jsonl'), `${JSON.stringify({ type: 'result', terminal_reason: 'completed', subtype: 'success' })}\n`)
     writeFileSync(join(runDir, 'exit'), '0')
   })

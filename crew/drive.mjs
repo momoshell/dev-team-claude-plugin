@@ -6393,6 +6393,13 @@ function runTask(ctx, io, crash) {
   }
   const censusRoute = (phase, census, allowInsideRepair) => {
     const classified = classifyCensus(census)
+    // An UNMEASURED census names no files, so every file-based branch below would fall through
+    // to "continue" and the ABSENCE of a census would be read as a clear. It is routed first
+    // and by its own reason, never by its (empty) file list.
+    if (census?.verdict === 'unmeasured') {
+      const why = `the ${phase} census could not be measured: ${census.reason ?? 'reason unavailable'}. It made no claim either way, so this is not a clean census.`
+      return { escalation: escalate('census-exhibits', why, [], { census }) }
+    }
     if (classified.outside.length > 0) {
       return { escalation: escalate('census-exhibits', censusWhy(phase, census, classified.outside, classified.inside), [], { census }) }
     }
@@ -6403,11 +6410,11 @@ function runTask(ctx, io, crash) {
     const firstCensus = runCensus('pre-build')
     journalCensus('pre-build', firstCensus)
     const preBuild = censusRoute('pre-build', firstCensus, true)
-    const preBuildOutside = classifyCensus(firstCensus).outside
     const preBuildInside = preBuild.inside || []
-    if (preBuildOutside.length > 0) {
-      return preBuild.escalation
-    }
+    // One route, one decision. A second explicit `outside` test here was redundant —
+    // `censusRoute` has already returned the escalation — so disabling it changed no
+    // behaviour and the mutation declared against it killed nothing.
+    if (preBuild.escalation) return preBuild.escalation
     if (preBuildInside.length > 0) {
       scopeFiles = [...new Set([...scopeFiles, ...preBuildInside])]
       acceptedScope = scopeFiles
@@ -6416,8 +6423,6 @@ function runTask(ctx, io, crash) {
       io.writeFile(bounce, ['# Census exhibit bounce', '', censusWhy('pre-build', firstCensus, [], preBuildInside), '', `Plan: ${planPath}`].join('\n'))
       suiteBuildBrief = bounce
       suiteBuildNote = 'census-exhibits-fix'
-    } else if (preBuild.escalation) {
-      return preBuild.escalation
     }
   }
 
@@ -7397,11 +7402,10 @@ function runTask(ctx, io, crash) {
     const committedCensus = runCensus('post-commit')
     journalCensus('post-commit', committedCensus)
     const postCommit = censusRoute('post-commit', committedCensus, true)
-    const postCommitOutside = classifyCensus(committedCensus).outside
     const postCommitInside = postCommit.inside || []
-    if (postCommitOutside.length > 0) {
-      return postCommit.escalation
-    }
+    // Redundant explicit `outside` test removed for the same reason as the pre-build one:
+    // `censusRoute` already returned the escalation, so this branch killed no behaviour.
+    if (postCommit.escalation) return postCommit.escalation
     if (postCommitInside.length > 0) {
       if (postCommitCensusBounces >= POST_COMMIT_CENSUS_BOUNCE_MAX) {
         return escalate('census-exhibits', censusWhy('post-commit', committedCensus, [], postCommitInside), [], { commit: S.commit, census: committedCensus })

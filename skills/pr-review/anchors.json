@@ -12,6 +12,6 @@
   "crew/drive.mjs:3263": "function runPanelReview({ round, panel, io, dissents, setAcceptFindings, setLastReview, planPath, panelBriefText, panelStandingQuestion, art, stage, stageComplete, assignAndWait, carriedOpen, panelLog, panelDegraded, emit }) {",
   "crew/drive.mjs:3329": "const fused = fuseFindings(findingsOf(aEnv), findingsOf(bEnv), {",
   "crew/drive.mjs:3453": "const adjudicated = adjudicatePanel(allocatedDivergent, adjEnv.details)",
-  "crew/drive.mjs:7103": "        panelResult = runPanelReview({ round: roundNo, panel, io, dissents: S.dissents, setAcceptFindings: (value) => { S.acceptFindings = value }, setLastReview: (value) => { S.lastReview = value }, planPath, panelBriefText, panelStandingQuestion, art, stage, stageComplete, assignAndWait, carriedOpen, panelLog, panelDegraded, emit })",
-  "crew/drive.mjs:6573": "const panel = ctx.continuation === true ? panelSeats(seatList) : null"
+  "crew/drive.mjs:7108": "        panelResult = runPanelReview({ round: roundNo, panel, io, dissents: S.dissents, setAcceptFindings: (value) => { S.acceptFindings = value }, setLastReview: (value) => { S.lastReview = value }, planPath, panelBriefText, panelStandingQuestion, art, stage, stageComplete, assignAndWait, carriedOpen, panelLog, panelDegraded, emit })",
+  "crew/drive.mjs:6578": "const panel = ctx.continuation === true ? panelSeats(seatList) : null"
 }

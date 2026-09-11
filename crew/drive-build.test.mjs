@@ -3982,6 +3982,34 @@ test('G1b first outside census red escalates without builder or commit', () => {
   assert.equal(io.calls.commits.length, 0)
 })
 
+test('M2 an interrupted runner is UNMEASURED, never green', () => {
+  // KILLS: deriving the verdict from failures alone. A runner killed before it emits `not ok`
+  // produced verdict green / action none with a null denominator — the ABSENCE of a census
+  // read as a clear. Unknown is never a guess and never a zero.
+  const result = runCensusExhibits({ checkout: CENSUS_ROOT, filesInScope: ['synthetic/'], deps: censusDeps({
+    sources: { [CENSUS_FILE]: CENSUS_SOURCE },
+    runner: () => ({ ok: false, output: 'TAP version 13\n', signal: 'SIGTERM' }),
+  }) })
+  assert.equal(result.verdict, 'unmeasured')
+  assert.equal(result.action, 'escalate')
+  assert.deepEqual(result.failures, [])
+  assert.equal(result.denominator.tests, null)
+})
+
+test('M1 an unlisted survivor is UNMEASURED and escalates, not green', () => {
+  // KILLS: reporting verdict green / action none for `unlisted-survivor`. The tripwire is the
+  // whole safety argument of the bounded design — a survivor the register never listed means
+  // the census did not cover the checkout, which is not a clean census.
+  const stranger = 'synthetic/unlisted-census.test.mjs'
+  const result = runCensusExhibits({ checkout: CENSUS_ROOT, filesInScope: [], deps: censusDeps({
+    files: [CENSUS_FILE, stranger],
+    sources: { [CENSUS_FILE]: CENSUS_SOURCE, [stranger]: CENSUS_SOURCE },
+  }) })
+  assert.equal(result.reason, 'unlisted-survivor')
+  assert.equal(result.verdict, 'unmeasured')
+  assert.equal(result.action, 'escalate')
+})
+
 test('I1 fixture io without runClean performs no census command', () => {
   const { ctx, io } = censusDriveIo([])
   delete io.runClean

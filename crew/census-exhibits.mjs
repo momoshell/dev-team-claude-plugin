@@ -24,6 +24,20 @@ export const CENSUS_MEASUREMENT_REASONS = Object.freeze([
   'empty-output', 'empty-denominator', 'incomplete-tap', 'malformed-output',
 ])
 
+// A census that could not be COMPLETELY measured makes no claim either way, and reading it as
+// green turns the absence of a census into a clear. These are the reasons that mean unmeasured.
+// The two clock reasons are deliberately NOT here: a clock that failed leaves the pass/fail
+// verdict intact and makes only the DURATION unknown. `empty-denominator` and `empty-selection`
+// are likewise measured facts, not absences.
+export const CENSUS_UNMEASURED_REASONS = Object.freeze(new Set([
+  'inventory-denied', 'inventory-interrupted', 'inventory-unknown', 'inventory-empty', 'inventory-malformed',
+  'candidate-denied', 'candidate-interrupted', 'candidate-unknown', 'candidate-empty',
+  'runner-denied', 'runner-interrupted', 'runner-unknown', 'runner-empty', 'runner-malformed',
+  'unlisted-survivor', 'empty-output', 'incomplete-tap', 'malformed-output',
+]))
+
+export const CENSUS_VERDICTS = Object.freeze(['green', 'red', 'unmeasured'])
+
 const TEST_SUFFIX = '.test.mjs'
 const REGISTERED_FILES = new Set(CENSUS_EXHIBIT_REGISTER.map(({ file }) => file))
 const QUALIFYING_FILES = new Set(CENSUS_QUALIFYING_FILES)
@@ -346,6 +360,12 @@ export function runCensusExhibits({ checkout, filesInScope = [], deps = {} } = {
     result.denominator = { suites: null, tests: null }
     result.reasons = selected.reasons
     result.defects = selected.defects
+    // Same rule on the early return: discovery that failed measured nothing, so the base
+    // `green`/`none` would report a clear that was never taken.
+    if (CENSUS_UNMEASURED_REASONS.has(selected.reason)) {
+      result.verdict = 'unmeasured'
+      result.action = 'escalate'
+    }
     return result
   }
   if (selected.length === 0) {
@@ -447,8 +467,15 @@ export function runCensusExhibits({ checkout, filesInScope = [], deps = {} } = {
     failure.detail = `${failure.file}: ${failure.relation} the lane fence`
   }
   const outside = failures.filter(({ relation: value }) => value === 'OUTSIDE')
-  const action = failures.length === 0 ? 'none' : outside.length > 0 ? 'escalate' : 'bounce'
-  const verdict = failures.length === 0 ? 'green' : 'red'
+  // A failure is the loudest outcome, but an UNMEASURED census is not a green one: a runner
+  // killed before it emitted `not ok`, or a survivor the register never listed, means the
+  // census made no claim at all. Escalating is the only honest route — a bounce would ask a
+  // builder to repair a file nothing accused, and `none` would report a clear nobody measured.
+  const unmeasured = failures.length === 0 && reason !== null && CENSUS_UNMEASURED_REASONS.has(reason)
+  const action = failures.length > 0
+    ? (outside.length > 0 ? 'escalate' : 'bounce')
+    : unmeasured ? 'escalate' : 'none'
+  const verdict = failures.length > 0 ? 'red' : unmeasured ? 'unmeasured' : 'green'
   result.action = action
   result.verdict = verdict
   result.failures = failures

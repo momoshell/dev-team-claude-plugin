@@ -6339,6 +6339,88 @@ function runTask(ctx, io, crash) {
     stageComplete()
   }
 
+  const censusEnabled = !io.calls || typeof io.runClean === 'function'
+  let postCommitCensusBounces = 0
+  let suiteBuildBrief = planPath
+  let suiteBuildNote = 'build'
+  const censusFiles = (census) => {
+    const rows = [
+      ...(Array.isArray(census?.failures) ? census.failures : []),
+      ...(Array.isArray(census?.defects) ? census.defects : []),
+    ]
+    return [...new Set(rows.map((row) => typeof row === 'string' ? row : row?.file).filter((file) => typeof file === 'string' && file.length > 0))]
+  }
+  const classifyCensus = (census) => {
+    const files = censusFiles(census)
+    const censusFence = (Array.isArray(ctx.laneFence) ? ctx.laneFence : []).filter((record) => record?.lane !== ctx.laneName)
+    const held = laneFenceHits(files, censusFence)
+    const protectedFiles = protectedHits(files, ctx.protectedPaths)
+    const dispatched = Array.isArray(ctx.files_in_scope) ? ctx.files_in_scope : []
+    const dispatchedScope = scopeMatcher(dispatched)
+    const heldFiles = new Set(held.map(({ entry }) => entry))
+    const protectedSet = new Set(protectedFiles)
+    const outside = files.filter((file) => !dispatchedScope(file) || heldFiles.has(file) || protectedSet.has(file))
+    const inside = files.filter((file) => !outside.includes(file))
+    return { files, outside, inside, held, protectedFiles }
+  }
+  const censusWhy = (phase, census, outside, inside) => {
+    const rows = [
+      `${phase} census found ${censusFiles(census).length} failed exhibit${censusFiles(census).length === 1 ? '' : 's'}`,
+      ...outside.map((file) => `${file}: OUTSIDE the effective writable scope`),
+      ...inside.map((file) => `${file}: INSIDE the effective writable scope`),
+    ]
+    if (census?.reason) rows.push(`measurement: ${census.reason}`)
+    return rows.join('\n')
+  }
+  const journalCensus = (phase, census) => {
+    try {
+      io.log(recordRow({ at: io.now(), census_exhibits: {
+        phase, action: census?.action ?? 'none', verdict: census?.verdict ?? null,
+        selected: census?.selected ?? [], failures: census?.failures ?? [],
+        selection_ms: census?.selection_ms ?? null, duration_ms: census?.duration_ms ?? null,
+        selection_seconds: census?.selection_seconds ?? null, run_seconds: census?.run_seconds ?? null,
+        total_seconds: census?.total_seconds ?? null, elapsed_seconds: census?.elapsed_seconds ?? null,
+        denominator: census?.denominator ?? { suites: null, tests: null },
+        measurement: census?.measurement ?? null, cost: census?.cost ?? null, reason: census?.reason ?? null,
+      } }))
+    } catch { /* evidence is never load-bearing */ }
+  }
+  const runCensus = (phase) => {
+    let result
+    try { result = io.run('node crew/census-exhibits.mjs') }
+    catch (error) { return decodeCensusResult(null, error) }
+    return decodeCensusResult(result)
+  }
+  const censusRoute = (phase, census, allowInsideRepair) => {
+    const classified = classifyCensus(census)
+    if (classified.outside.length > 0) {
+      return { escalation: escalate('census-exhibits', censusWhy(phase, census, classified.outside, classified.inside), [], { census }) }
+    }
+    if (allowInsideRepair && classified.inside.length > 0) return { inside: classified.inside }
+    return { inside: [] }
+  }
+  if (gateCmd && censusEnabled) {
+    const firstCensus = runCensus('pre-build')
+    journalCensus('pre-build', firstCensus)
+    const preBuild = censusRoute('pre-build', firstCensus, true)
+    const preBuildOutside = classifyCensus(firstCensus).outside
+    const preBuildInside = preBuild.inside || []
+    if (preBuildOutside.length > 0) {
+      return preBuild.escalation
+    }
+    if (preBuildInside.length > 0) {
+      scopeFiles = [...new Set([...scopeFiles, ...preBuildInside])]
+      acceptedScope = scopeFiles
+      inScope = scopeMatcher(scopeFiles)
+      const bounce = art('census-exhibits-bounce.md')
+      io.writeFile(bounce, ['# Census exhibit bounce', '', censusWhy('pre-build', firstCensus, [], preBuildInside), '', `Plan: ${planPath}`].join('\n'))
+      suiteBuildBrief = bounce
+      suiteBuildNote = 'census-exhibits-fix'
+    } else if (preBuild.escalation) {
+      return preBuild.escalation
+    }
+  }
+
   // Capture the accepted scope before any builder dispatch. An unreadable
   // baseline is a typed fatal: treating it as absence would make a later
   // added file look like a clean round and would defeat the round fence.
@@ -6357,8 +6439,6 @@ function runTask(ctx, io, crash) {
   // The warm suite is part of a bounded accepted cycle. A first, evidence-backed
   // red may widen the scope and re-enter this same path once; every later red is
   // still a terminal suite escalation.
-  let suiteBuildBrief = planPath
-  let suiteBuildNote = 'build'
   suiteCycle:
   for (;;) {
   builderEnv = null
@@ -7311,6 +7391,29 @@ function runTask(ctx, io, crash) {
     }
     rebaseMs = io.now() - rebaseStartedAt
     stageComplete()
+  }
+
+  if (censusEnabled) {
+    const committedCensus = runCensus('post-commit')
+    journalCensus('post-commit', committedCensus)
+    const postCommit = censusRoute('post-commit', committedCensus, true)
+    const postCommitOutside = classifyCensus(committedCensus).outside
+    const postCommitInside = postCommit.inside || []
+    if (postCommitOutside.length > 0) {
+      return postCommit.escalation
+    }
+    if (postCommitInside.length > 0) {
+      if (postCommitCensusBounces >= POST_COMMIT_CENSUS_BOUNCE_MAX) {
+        return escalate('census-exhibits', censusWhy('post-commit', committedCensus, [], postCommitInside), [], { commit: S.commit, census: committedCensus })
+      }
+      postCommitCensusBounces += 1
+      const bounce = art(`census-exhibits-bounce-r${postCommitCensusBounces}.md`)
+      io.writeFile(bounce, ['# Census exhibit bounce', '', censusWhy('post-commit', committedCensus, [], postCommitInside), '', `Commit: ${S.commit}`, `Plan: ${planPath}`].join('\n'))
+      suiteBuildBrief = bounce
+      suiteBuildNote = 'census-exhibits-fix'
+      continue suiteCycle
+    }
+    if (postCommit.escalation) return postCommit.escalation
   }
 
   stage('suite')
@@ -9008,4 +9111,42 @@ export function hardeningBriefLines(owed, exempt) {
     `If a finding's defect class cannot become a mechanical guard, ASK: return that finding's entry as exactly ${HARDENING_APPEAL_SHAPE} and nothing else. That request is still refused builder-exemption and grants nothing until the reviewer approves it in a hardening appeal; an entry that mixes the request with a declaration is not a request.`)
   if (Array.isArray(exempt) && exempt.length > 0) lines.push(...exempt.map(({ id }) => `Reviewer exemption recorded for ${id}.`))
   return lines
+}
+
+export const POST_COMMIT_CENSUS_BOUNCE_MAX = 1
+
+function decodeCensusResult(result, error = null) {
+  const output = typeof result === 'string'
+    ? result
+    : typeof result?.output === 'string'
+      ? result.output
+      : typeof result?.stdout === 'string' || typeof result?.stderr === 'string'
+        ? `${result.stdout || ''}${result.stderr || ''}`
+        : ''
+  const lines = output.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+  for (const line of lines.reverse()) {
+    try {
+      const parsed = JSON.parse(line)
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) continue
+      return {
+        action: parsed.action ?? 'none', verdict: parsed.verdict ?? null,
+        selected: Array.isArray(parsed.selected) ? parsed.selected : [],
+        failures: Array.isArray(parsed.failures) ? parsed.failures : [],
+        defects: Array.isArray(parsed.defects) ? parsed.defects : [],
+        detail: parsed.detail ?? null, reason: parsed.reason ?? null,
+        selection_ms: parsed.selection_ms ?? null, duration_ms: parsed.duration_ms ?? null,
+        selection_seconds: parsed.selection_seconds ?? null, run_seconds: parsed.run_seconds ?? null,
+        total_seconds: parsed.total_seconds ?? null, elapsed_seconds: parsed.elapsed_seconds ?? null,
+        denominator: parsed.denominator ?? { suites: null, tests: null },
+        measurement: parsed.measurement ?? null, cost: parsed.cost ?? null,
+      }
+    } catch { /* continue to the next possible JSON record */ }
+  }
+  const reason = error ? 'census-unreadable' : 'census-malformed-output'
+  return {
+    action: 'none', verdict: 'unknown', selected: [], failures: [], defects: [], detail: null, reason,
+    selection_ms: null, duration_ms: null, selection_seconds: null, run_seconds: null,
+    total_seconds: null, elapsed_seconds: null, denominator: { suites: null, tests: null },
+    measurement: null, cost: null,
+  }
 }

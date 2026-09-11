@@ -7,6 +7,7 @@ import {
   B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_IMPL_FILE, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, B384_CORRECTED_FIND, B384_CORRECTED_REPLACE, B384_GREEN, B384_MUTATION, B384_RED, B384_REFACTORED_BUILDER, B384_REFACTORED_UNCORRECTED_BUILDER, B44_LEADLESS_CTX, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_PLAN, CHECK_RUNS, CONVERGE_CTX, CONVERGE_GATE, CONVERGE_PLAN, CTX, CTX_DIRECTED, CTX_REPAIR, DIRECTED_FILES, D_ASK, D_AUTO, ENVELOPE_FIELD_KINDS, EXECUTIONS, FAILURE_UPGRADE, GATE_REAP_CMD_EOF, GATE_REAP_SWEEP_MARKER, GATE_SUMMARY_PREFIX, HARDENING_MARKS, HARDENING_OUTCOMES, HARDENING_REFUSALS, MODIFIER_OUTCOMES, MUTATIONS_MAX, MUTATION_BINDING_FAILURES, MUTATION_OUTCOMES, PARTIAL_REVIEWED, RED, SENSITIVITY_FLOOR, SHAPE_MAJOR_PHASES, SHAPE_ROUNDED_STAGES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, UNIVERSAL_STAGE_HEADS, VALIDATION_LANE_UNLOADABLE, VARIANTS, VARIANT_NAMES, WRITE_SURFACES, applyMutationAnchor, applyPrescriptionLines, b127GatePaths, b127PidAlive, b318Builders, b318SiteA, b376Build, b376DiskProofIo, b376ProofIo, b376Review, b376StageStack, b384Io, b384RefactoredIo, b44AssertLeadlessGate, b44GatePlan, bindMutationAnchor, buildEnv, collapseStages, dispositionIo, driveTask, existsSync, fakeIo, fenceBase, fenceDiff, fenceSpan, gateReapCommand, gateReapFresh, gateReapOriginal, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, hardeningBounceLines, hardeningBriefLines, hardeningDebt, hardeningOf, join, laneFence, leadEnv, mutationChangesTokens, outOfScopeFiles, planEnv, protectedPlanEnv, readFileSync, resumeGreen, resumeRed, reviewConvergeRun, reviewEnv, reviewFindings, rmSync, s843Ctx, s843Io, s843PlanEnv, s843Rows, scopeMatcher, scopedPath, scratchDir, shapeDefect, spawnSync, stageShape, treeDigest, triageEnv, undeclaredStage, validateHardened, validateMutations, validationPlan, validationProbeRun, validationRows,
 } from './drive-fixtures.mjs'
 import { CHECK_MATCHES, HARDENING_APPEAL_SHAPE, HARDENING_CLASSES, LIMITS, hardeningAppealLines, hardeningAppealRequest, hardeningClassOf, mutationProofScope } from './drive.mjs'
+import { CENSUS_QUALIFYING_FILES, runCensusExhibits, selectCensusExhibits } from './census-exhibits.mjs'
 
 const proofScopeMutations = () => [
   { check: 'first', file: 'a.mjs' },
@@ -3694,4 +3695,332 @@ test('b476 F2 the stable-identifier note warns that a hash in a test name is unm
   assert.match(brief, /tap reporter ESCAPES/)
   assert.match(brief, /A1\/B2\/C3/)
   assert.match(brief, /Node v26\.7\.0/)
+})
+
+const CENSUS_ROOT = '/tmp/census-fixture'
+const CENSUS_TOKEN = ['ls', 'files'].join('-')
+const CENSUS_FILE = CENSUS_QUALIFYING_FILES[0]
+const CENSUS_SOURCE = [
+  "import { test } from 'node:test'",
+  "test('fixture', () => {",
+  `  const inventory = '${CENSUS_TOKEN}'`,
+  '  assert.ok(inventory)',
+  '})',
+].join('\n')
+const CENSUS_TAP_GREEN = 'TAP version 13\n1..1\n# tests 1\n# pass 1\n# fail 0\n'
+const CENSUS_TAP_RED = 'TAP version 13\n1..1\n# tests 1\n# pass 0\n# fail 1\n'
+
+function censusInventory(files) {
+  return `${files.join('\0')}\0`
+}
+
+function censusDeps({ files = [CENSUS_FILE], sources = {}, runner = CENSUS_TAP_GREEN, now = (() => { let n = 0; return () => (n += 100) })(), runThrows = null } = {}) {
+  return {
+    now,
+    readFile: (path) => {
+      const file = String(path).replace(`${CENSUS_ROOT}/`, '')
+      if (!Object.prototype.hasOwnProperty.call(sources, file)) {
+        const error = new Error('source denied')
+        error.code = 'ENOENT'
+        throw error
+      }
+      return sources[file]
+    },
+    run: (command) => {
+      if (runThrows && String(command).includes(`${CENSUS_TOKEN} -z`)) throw runThrows
+      if (String(command).includes(`${CENSUS_TOKEN} -z`)) return { ok: true, output: censusInventory(files) }
+      return typeof runner === 'function' ? runner(command) : { ok: true, output: runner }
+    },
+  }
+}
+
+function censusRecord(failures = []) {
+  const files = failures.map((entry) => typeof entry === 'string' ? entry : entry.file)
+  return JSON.stringify({
+    action: files.length > 0 ? 'bounce' : 'none', verdict: files.length > 0 ? 'red' : 'green',
+    selected: [CENSUS_FILE], failures: files.map((file) => ({ file })),
+    denominator: { suites: 1, tests: 1 }, selection_seconds: 0.1, run_seconds: 0.2,
+    total_seconds: 0.3, elapsed_seconds: 0.3, measurement: null, cost: null, reason: null,
+  })
+}
+
+function censusDriveIo(censusOutputs, { ctx = {}, publish = false, changed = ['a.mjs', 'a.test.mjs'], laneFence = [], protectedPaths = [], planFiles = ['a.mjs', 'a.test.mjs'], onCensus = null } = {}) {
+  const baseCtx = {
+    ...CTX,
+    files_in_scope: ['a.mjs', 'a.test.mjs'],
+    ...ctx,
+    laneFence,
+    protectedPaths,
+  }
+  const io = fakeIo({
+    files: { [`${baseCtx.checkout}/a.mjs`]: 'export const a = true\n', [`${baseCtx.checkout}/a.test.mjs`]: CENSUS_SOURCE },
+    cold: publish ? { ok: true, output: CENSUS_TAP_GREEN, path: '/tmp/census-cold', kept: null } : 'green',
+    cleanRuns: { 'gate-cmd': { ok: false, output: RED(1) } },
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', files_in_scope: planFiles } }),
+      'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(),
+      'reviewer:1': reviewEnv('pass'), 'reviewer:2': reviewEnv('pass'), 'reviewer:3': reviewEnv('pass'),
+    },
+    runs: {
+      'gate-cmd:1': { ok: false, output: RED(1) },
+      'gate-cmd:2': { ok: true, output: `green\n${GATE_SUMMARY_PREFIX} {"total":1,"failed":0,"errored":0}` },
+      'gate-cmd': { ok: true, output: `green\n${GATE_SUMMARY_PREFIX} {"total":1,"failed":0,"errored":0}` },
+      'lane-cmd': { ok: true, output: '' },
+      'suite-cmd': { ok: true, output: 'TAP version 13\n1..1\n# tests 1\n# pass 1\n# fail 0\n' },
+    },
+    changed: Array.from({ length: 20 }, () => Array.isArray(changed) ? [...changed] : changed),
+  })
+  const originalRun = io.run
+  let index = 0
+  io.run = function (command) {
+    const text = String(command)
+    if (text === 'node crew/census-exhibits.mjs') {
+      io.calls.run.push({ cmd: text, n: index + 1 })
+      if (typeof onCensus === 'function') onCensus(baseCtx, index)
+      const output = censusOutputs[Math.min(index++, censusOutputs.length - 1)] ?? censusRecord()
+      return { ok: true, output: typeof output === 'string' ? output : JSON.stringify(output) }
+    }
+    if (text.includes('git show') && laneFence.length > 0) return { ok: true, output: fenceBase(20) }
+    if (text.includes('git diff --unified=0') && laneFence.length > 0) return { ok: true, output: fenceDiff('a.test.mjs', 1, 1) }
+    if (publish && text.includes('git fetch origin')) return { ok: true, output: '' }
+    if (publish && text.includes('git rev-parse')) return { ok: true, output: 'abc1234' }
+    if (publish && text.includes('git merge-base')) return { ok: true, output: 'abc1234' }
+    if (publish && text === 'command -v gh') return { ok: true, output: '/usr/bin/gh' }
+    if (publish && text === 'gh auth status') return { ok: true, output: 'logged in' }
+    if (publish && text.includes('gh pr view')) return { ok: false, output: 'no pull requests found' }
+    if (publish && text.includes('git push')) return { ok: true, output: '' }
+    if (publish && text.includes('gh pr create')) return { ok: true, output: ['https:', 'example.invalid/pull/1'].join(String.fromCharCode(47).repeat(2)) }
+    return originalRun.call(this, command)
+  }
+  return { ctx: baseCtx, io }
+}
+
+function gitPaths(args) {
+  const result = spawnSync('git', args, { cwd: process.cwd(), encoding: 'utf8' })
+  const output = String(result.stdout || '')
+  return { status: result.status, paths: (output.includes('\0') ? output.split('\0') : output.split(/\r?\n/)).filter(Boolean) }
+}
+
+function commentParity(text) {
+  const comments = [...String(text).matchAll(/\/\/[^\n]*|\/\*[\s\S]*?\*\//g)]
+  const count = comments.reduce((total, match) => total + [...match[0]].filter((char) => char === String.fromCharCode(39)).length, 0)
+  return count % 2
+}
+
+test('A1 census runs after baseline gate before first builder dispatch', () => {
+  const { ctx, io } = censusDriveIo([censusRecord(), censusRecord()])
+  const originalAssign = io.assign
+  io.assign = function (spec) {
+    if (spec.role === 'builder') assert.equal(io.calls.run.some(({ cmd }) => cmd === 'node crew/census-exhibits.mjs'), true)
+    return originalAssign.call(this, spec)
+  }
+  const result = driveTask(ctx, io)
+  assert.equal(result.status, 'done')
+  const gateDone = io.calls.logs.findIndex((row) => row.stage_done === 'gate-baseline')
+  const census = io.calls.logs.findIndex((row) => row.census_exhibits?.phase === 'pre-build')
+  const builder = io.calls.logs.findIndex((row) => row.assign && row.role === 'builder')
+  assert.ok(gateDone >= 0 && gateDone < census && census < builder)
+  assert.equal(io.calls.assign.find(({ role }) => role === 'builder').note, 'build')
+})
+
+test('B1 census reruns after commit before publish', () => {
+  const { ctx, io } = censusDriveIo([censusRecord(), censusRecord()], { publish: true, ctx: { publish: { branch: 'feature/census' } } })
+  const result = driveTask(ctx, io)
+  assert.equal(result.status, 'done')
+  const commit = io.calls.logs.findIndex((row) => row.stage_done === 'commit')
+  const post = io.calls.logs.findIndex((row) => row.census_exhibits?.phase === 'post-commit')
+  const publish = io.calls.logs.findIndex((row) => row.stage === 'publish')
+  assert.ok(commit >= 0 && commit < post && post < publish)
+  const rows = io.calls.logs.filter((row) => row.census_exhibits).map((row) => row.census_exhibits)
+  assert.equal(rows.length, 2)
+  assert.equal(typeof rows[0].selection_seconds, 'number')
+  assert.equal(typeof rows[1].total_seconds, 'number')
+})
+
+test('B1a post-commit inside red re-enters the build cycle', () => {
+  const { ctx, io } = censusDriveIo([censusRecord(), censusRecord(['a.test.mjs']), censusRecord()])
+  const result = driveTask(ctx, io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 2)
+  assert.equal(io.calls.writes[`${TD}/census-exhibits-bounce-r1.md`] !== undefined, true)
+})
+
+test('B1b post-commit outside red escalates without repair', () => {
+  const outside = 'outside.test.mjs'
+  const { ctx, io } = censusDriveIo([censusRecord(), censusRecord(['a.test.mjs', outside])], { ctx: { files_in_scope: ['a.mjs', 'a.test.mjs'] } })
+  const result = driveTask(ctx, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'census-exhibits')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 1)
+  assert.equal(io.calls.commits.length, 1)
+  assert.match(result.details.escalation.why, /outside\.test\.mjs: OUTSIDE/)
+})
+
+test('B1c repeated post-commit inside red escalates after one repair', () => {
+  const { ctx, io } = censusDriveIo([censusRecord(), censusRecord(['a.test.mjs']), censusRecord(['a.test.mjs'])])
+  const result = driveTask(ctx, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'census-exhibits')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 2)
+  assert.equal(io.calls.commits.length, 2)
+  assert.equal(io.calls.writes[`${TD}/census-exhibits-bounce-r1.md`] !== undefined, true)
+  assert.equal(io.calls.writes[`${TD}/census-exhibits-bounce-r2.md`] !== undefined, false)
+})
+
+test('C1 census prefilter tripwire names an unlisted candidate', () => {
+  const file = 'synthetic/unlisted.test.mjs'
+  const selected = selectCensusExhibits({ checkout: CENSUS_ROOT, deps: censusDeps({
+    files: [CENSUS_FILE, file], sources: { [CENSUS_FILE]: CENSUS_SOURCE, [file]: `const value = '${CENSUS_TOKEN}'\n` },
+  }) })
+  assert.deepEqual(selected, [])
+  assert.deepEqual(selected.survivors, [CENSUS_FILE, file])
+  assert.equal(selected.defects.length, 1)
+  assert.equal(selected.defects[0].file, file)
+  assert.match(selected.defects[0].detail, new RegExp(file))
+})
+
+test('C1b unavailable discovery is null with one closed reason', () => {
+  const blank = runCensusExhibits({ checkout: CENSUS_ROOT, deps: { run: () => ({ ok: true, output: '' }) } })
+  assert.deepEqual(blank.denominator, { suites: null, tests: null })
+  assert.deepEqual(blank.reasons, ['inventory-empty'])
+  const error = new Error('permission denied')
+  error.code = 'EPERM'
+  const denied = runCensusExhibits({ checkout: CENSUS_ROOT, deps: censusDeps({ runThrows: error }) })
+  assert.deepEqual(denied.denominator, { suites: null, tests: null })
+  assert.deepEqual(denied.reasons, ['inventory-denied'])
+})
+
+test('D1a interrupted TAP not ok is red without plan', () => {
+  const result = runCensusExhibits({ checkout: CENSUS_ROOT, filesInScope: ['synthetic/'], deps: censusDeps({
+    files: [CENSUS_FILE], sources: { [CENSUS_FILE]: CENSUS_SOURCE }, runner: 'TAP version 13\nnot ok 1 - interrupted\n',
+  }) })
+  assert.equal(result.verdict, 'red')
+  assert.equal(result.failures.length, 1)
+  assert.equal(result.failures[0].file, CENSUS_FILE)
+  assert.equal(result.failures[0].tests, null)
+})
+
+test('D1b final TAP footer overrides earlier diagnostic', () => {
+  const tap = 'TAP version 13\n# fail 2\n1..1\n# tests 1\n# pass 1\n# fail 0\n'
+  const result = runCensusExhibits({ checkout: CENSUS_ROOT, deps: censusDeps({
+    files: [CENSUS_FILE], sources: { [CENSUS_FILE]: CENSUS_SOURCE }, runner: tap,
+  }) })
+  assert.equal(result.verdict, 'green')
+  assert.deepEqual(result.failures, [])
+  assert.equal(result.denominator.tests, 1)
+})
+
+test('E1a incomplete TAP keeps test denominator null', () => {
+  const tap = 'TAP version 13\n# tests 1\n# pass 1\n# fail 0\n'
+  const result = runCensusExhibits({ checkout: CENSUS_ROOT, deps: censusDeps({
+    files: [CENSUS_FILE], sources: { [CENSUS_FILE]: CENSUS_SOURCE }, runner: tap,
+  }) })
+  assert.equal(result.denominator.tests, null)
+  assert.equal(result.runs[0].tests, null)
+})
+
+test('E1b clock failure preserves measured test count', () => {
+  let calls = 0
+  const now = () => {
+    calls += 1
+    if (calls === 4) throw new Error('clock unavailable')
+    return calls * 100
+  }
+  const result = runCensusExhibits({ checkout: CENSUS_ROOT, deps: censusDeps({
+    files: [CENSUS_FILE], sources: { [CENSUS_FILE]: CENSUS_SOURCE }, runner: CENSUS_TAP_GREEN, now,
+  }) })
+  assert.equal(result.denominator.tests, 1)
+  assert.equal(result.runs[0].tests, 1)
+  assert.equal(result.duration_ms, null)
+})
+
+test('F1a sibling span makes census file outside', () => {
+  const file = 'a.test.mjs'
+  const { ctx, io } = censusDriveIo([censusRecord([{ file }])], {
+    ctx: { files_in_scope: ['a.mjs', file], laneName: 'current', head: 'deadbeef' },
+    changed: ['a.mjs'],
+    onCensus: (current) => { current.laneFence = [{ lane: 'sibling', files: ['a.test.mjs:1-5'] }] },
+  })
+  const result = driveTask(ctx, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'census-exhibits')
+  assert.match(result.details.escalation.why, /a\.test\.mjs: OUTSIDE/)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 0)
+})
+
+test('F1b protected floor makes census file outside', () => {
+  const file = 'protected.test.mjs'
+  const { ctx, io } = censusDriveIo([censusRecord([{ file }])], {
+    ctx: { files_in_scope: ['a.mjs', file] }, planFiles: ['a.mjs', file], changed: ['a.mjs'],
+    onCensus: (current) => { current.protectedPaths = [file] },
+  })
+  const result = driveTask(ctx, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'census-exhibits')
+  assert.match(result.details.escalation.why, /protected\.test\.mjs: OUTSIDE/)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 0)
+})
+
+test('G1a first inside census red bounces with restored builder fence', () => {
+  const { ctx, io } = censusDriveIo([censusRecord(['a.test.mjs']), censusRecord()], {
+    ctx: { files_in_scope: ['a.mjs', 'a.test.mjs'] }, planFiles: ['a.mjs'],
+  })
+  const result = driveTask(ctx, io)
+  assert.equal(result.status, 'done')
+  const builder = io.calls.assign.find(({ role }) => role === 'builder')
+  assert.equal(builder.note, 'census-exhibits-fix')
+  assert.equal(builder.policy.fence.includes('a.test.mjs'), true)
+  assert.equal(io.calls.commits.length, 1)
+})
+
+test('G1b first outside census red escalates without builder or commit', () => {
+  const { ctx, io } = censusDriveIo([censusRecord([{ file: 'outside.test.mjs' }])], { ctx: { files_in_scope: ['a.mjs', 'a.test.mjs'] } })
+  const result = driveTask(ctx, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'census-exhibits')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 0)
+  assert.equal(io.calls.commits.length, 0)
+})
+
+test('I1 fixture io without runClean performs no census command', () => {
+  const { ctx, io } = censusDriveIo([])
+  delete io.runClean
+  const result = driveTask(ctx, io)
+  assert.notEqual(result.status, 'escalation')
+  assert.equal(io.calls.run.filter(({ cmd }) => cmd === 'node crew/census-exhibits.mjs').length, 0)
+})
+
+test('RV1-2 fixture census recorder distinguishes closed and open valves', () => {
+  const closed = censusDriveIo([])
+  delete closed.io.runClean
+  assert.equal(driveTask(closed.ctx, closed.io).status, 'done')
+  assert.equal(closed.io.calls.run.filter(({ cmd }) => cmd === 'node crew/census-exhibits.mjs').length, 0)
+  const open = censusDriveIo([])
+  assert.equal(driveTask(open.ctx, open.io).status, 'done')
+  assert.equal(open.io.calls.run.filter(({ cmd }) => cmd === 'node crew/census-exhibits.mjs').length, 2)
+})
+
+test('J1 census module is tracked before census measurement', () => {
+  const trackedCensusModule = [CENSUS_TOKEN, '--error-unmatch', 'crew/census-exhibits.mjs']
+  const result = gitPaths(trackedCensusModule)
+  assert.equal(result.status, 0)
+  assert.deepEqual(result.paths, ['crew/census-exhibits.mjs'])
+})
+
+test('J2 edited test comment parity matches HEAD', () => {
+  for (const file of ['crew/drive-build.test.mjs', 'skills/crew-dispatch/exhibits.test.mjs']) {
+    const currentParity = commentParity(readFileSync(`${process.cwd()}/${file}`, 'utf8'))
+    const head = spawnSync('git', ['show', `HEAD:${file}`], { cwd: process.cwd(), encoding: 'utf8' })
+    assert.equal(head.status, 0)
+    const headParity = commentParity(head.stdout)
+    assert.equal(currentParity, headParity, file)
+  }
+})
+
+test('RV2-1 keeps the H1 floor check task-local', () => {
+  const testSource = readFileSync(`${process.cwd()}/crew/drive-build.test.mjs`, 'utf8')
+  const retired = ['H1 drive diff changes only below line ', String(5443)].join('')
+  assert.equal(testSource.includes(`test('${retired}'`), false)
+  const driverSource = readFileSync(`${process.cwd()}/crew/drive.mjs`, 'utf8')
+  assert.equal(driverSource.includes("export const CENSUS_UNREADABLE = 'census-unreadable'"), true)
 })

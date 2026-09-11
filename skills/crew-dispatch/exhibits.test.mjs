@@ -221,9 +221,9 @@ test('B1 fixture retains an absolute same-basename collision', () => {
 // Re-measure with the shipped collectTestReach over the git ls-files partition (owners = tracked non-*.test.mjs files; tests = tracked *.test.mjs files): node --input-type=module -e "import{execFileSync}from'node:child_process';const{collectTestReach}=await import(process.cwd()+'/scripts/factory/dispatch-batch.mjs'),files=execFileSync('git',['ls-files','-z'],{encoding:'utf8'}).split(String.fromCharCode(0)).filter(Boolean),tests=new Set(files.filter(file=>file.endsWith('.test.mjs'))),nonTests=new Set(files.filter(file=>!tests.has(file))),reach=collectTestReach({checkout:process.cwd()}),rows=[...reach.pathByFile].filter(([file])=>nonTests.has(file)).flatMap(([file,reached])=>[...reached].filter(test=>tests.has(test)).map(test=>[file,test])),contributingTests=new Set(rows.map(([,test])=>test));console.log({tracked:files.length,nonTests:nonTests.size,tests:tests.size,owners:new Set(rows.map(([file])=>file)).size,pairs:rows.length,contributingTests:contributingTests.size})"
 test('RV1-1 pins the reach doctrine date and pristine pair baseline', () => {
   const text = readText(join(HERE, 'references/batch.md'))
-  const measurement = '**161 of 545 tracked non-test files**, comprising **462 distinct (file, test) pairs contributed by 87 of 89 tracked `*.test.mjs` files**'
+  const measurement = '**161 of 546 tracked non-test files**, comprising **460 distinct (file, test) pairs contributed by 87 of 89 tracked `*.test.mjs` files**'
   const measurementDate = 'On the shipped 2026-09-11 tree'
-  const pristinePairs = 462
+  const pristinePairs = 460
   assert.equal(text.split(measurement).length - 1, 1)
   assert.ok(text.includes(measurementDate))
   assert.ok(text.includes(`The pristine \`HEAD\` baseline gives 161 owners and ${pristinePairs} pairs.`))

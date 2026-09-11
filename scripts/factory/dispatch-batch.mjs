@@ -1704,6 +1704,42 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
     }
   }
 
+  const siblingLeaks = []
+  for (const lane of batchLanes) {
+    const name = laneNameOf(lane)
+    const own = byLane.get(name)
+    const ownFiles = own.files.map(normaliseRepoPath)
+    const ownCreates = laneCreatesOf(lane)
+    for (const sibling of entries) {
+      if (sibling.lane === name) continue
+      const siblingFiles = sibling.files.map(normaliseRepoPath)
+      const siblingPaths = siblingFiles.map((file) => parseFenceScope(file).path)
+      const matchSibling = scopeMatcher(siblingPaths)
+      // Overlap is SYMMETRIC, and `fenceEntryIntersects` only tests the candidate as the
+      // containing directory. A lane owning `docs/sub/` therefore did not intersect a
+      // sibling owning `docs/sub/a.md`, and since externals are never iterated as `own`,
+      // that orientation was the only one that could fire against an external. Test both.
+      const leakedFiles = ownFiles.filter((file) => fenceEntryIntersects(file, siblingFiles)
+        || siblingFiles.some((siblingFile) => fenceEntryIntersects(siblingFile, [file])))
+      if (leakedFiles.length > 0) {
+        siblingLeaks.push({ kind: 'fence', lane: name, sibling: sibling.lane, files: [...new Set(leakedFiles)], siblingFiles })
+      }
+      const leakedCreates = ownCreates.filter(matchSibling)
+      if (leakedCreates.length > 0) {
+        siblingLeaks.push({ kind: 'creates', lane: name, sibling: sibling.lane, files: [...new Set(leakedCreates)], siblingFiles })
+      }
+    }
+  }
+  if (siblingLeaks.length > 0) {
+    const details = siblingLeaks.map((leak) => {
+      const files = leak.files.join(', ')
+      return leak.kind === 'creates'
+        ? `lane ${leak.lane} creates path(s) inside sibling ${leak.sibling}'s fence: ${files} (sibling fence: ${leak.siblingFiles.join(', ')})`
+        : `lane ${leak.lane} own fence overlaps sibling ${leak.sibling}: ${files} (sibling fence: ${leak.siblingFiles.join(', ')})`
+    }).join('; ')
+    refuse(`${details}; sequencing shared-file work requires separate registers, not narrower fences; dispatch each lane as its own single-lane register`, SIBLING_LEAK)
+  }
+
   const pins = collectAnchorPins({ checkout, deps: d })
   const scanRoot = typeof checkout === 'string' && checkout.trim() ? checkout : process.cwd()
   const fenceHasSurface = entries.some((entry) => (Array.isArray(entry.files) ? entry.files : []).some((file) => {
@@ -1935,20 +1971,6 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
     for (const sibling of entries) {
       if (sibling.lane === name) continue
       const siblingFiles = sibling.files.map(normaliseRepoPath)
-      const siblingPaths = siblingFiles.map((file) => parseFenceScope(file).path)
-      const matchSibling = scopeMatcher(siblingPaths)
-      const inherited = relatedLanes(graph, name, sibling.lane)
-      if (!inherited && effectiveFiles.some((file) => fenceEntryIntersects(file, siblingFiles))) {
-        const leaked = effectiveFiles.filter((file) => fenceEntryIntersects(file, siblingFiles))
-        refuse(`lane ${name} own fence overlaps sibling ${sibling.lane}: ${leaked.join(', ')} (sibling fence: ${siblingFiles.join(', ')})`, SIBLING_LEAK)
-      }
-      // A created path can hide from the fence-vs-fence check above: this lane may
-      // own it only through a directory prefix while a sibling owns it literally,
-      // and a register-only sibling is never visited as `name`.
-      const leakedCreates = ownCreates.filter(matchSibling)
-      if (!inherited && leakedCreates.length > 0) {
-        refuse(`lane ${name} creates path(s) inside sibling ${sibling.lane}'s fence: ${leakedCreates.join(', ')}`, SIBLING_LEAK)
-      }
       siblings.push({ lane: sibling.lane, files: siblingFiles })
     }
     perLane[name] = {

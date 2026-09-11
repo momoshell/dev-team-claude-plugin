@@ -99,6 +99,7 @@ import {
   parseCliArgs,
   resolveAdoptions,
   planWaves,
+  relatedLanes,
   planWorktrees,
   readsFromRefusal,
   readBatch,
@@ -125,7 +126,7 @@ import {
   resolveRequestedExecution,
   resolveRequestedTier,
 } from '../scripts/factory/dispatch-batch.mjs'
-import { parseDirectedBrief, WAITS_S } from '../crew/drive.mjs'
+import { laneFenceHits, parseDirectedBrief, WAITS_S } from '../crew/drive.mjs'
 import { partitionShifts } from '../skills/qa-test-writing/anchor-pin.mjs'
 import { laneFenceFor, renderBrief, resolveWriteSurface } from '../scripts/factory/make-brief.mjs'
 import { DRIVER_GONE_PERIODS, HEARTBEAT_PERIOD_MS } from '../scripts/factory/lane-watch.mjs'
@@ -306,6 +307,22 @@ function dispatchRecordFor(fixture, lane = 'lane-a') {
   const path = join(fixture.out, `${lane}${DISPATCH_RECORD_SUFFIX}`)
   assert.ok(fsExistsSync(path))
   return JSON.parse(readFileSync(path, 'utf8'))
+}
+
+function siblingIncidentRegister() {
+  const lanes = [
+    { lane: 'b386-briefpack', where: ['skills/crew-recovery/anchors.json'], depends_on: [] },
+    { lane: 'b391-prreviewtruth', where: ['skills/pr-review/SKILL.md', 'skills/pr-review/anchors.json'], depends_on: [] },
+    { lane: 'b387-turneconomy', where: ['skills/pr-review/SKILL.md', 'skills/pr-review/anchors.json', 'skills/crew-recovery/anchors.json'], depends_on: ['b386-briefpack', 'b391-prreviewtruth'] },
+  ]
+  return {
+    lanes,
+    fences: [
+      entry('b386-briefpack', ['skills/crew-recovery/anchors.json']),
+      entry('b391-prreviewtruth', ['skills/pr-review/SKILL.md', 'skills/pr-review/anchors.json']),
+      entry('b387-turneconomy', ['skills/pr-review/SKILL.md', 'skills/pr-review/anchors.json', 'skills/crew-recovery/anchors.json']),
+    ],
+  }
 }
 
 test('RV1-3 keeps sourced admissions out of assurance floors', async () => {
@@ -1075,6 +1092,36 @@ test('RV1-1', async () => {
   }
 })
 
+// #881 review: overlap is symmetric, `fenceEntryIntersects` was not. Only the candidate was
+// tested as the containing directory, so a lane owning a DIRECTORY did not intersect a
+// sibling owning a FILE inside it. Externals are never iterated as `own`, so against an
+// external sibling that orientation was the only one that could fire — a batch lane could
+// dispatch onto a file a live external register already owned.
+// #881 review: overlap is symmetric, `fenceEntryIntersects` was not — only the CANDIDATE
+// was tested as the containing directory. Between two batch lanes this never showed,
+// because both are iterated as `own` so the file-vs-directory orientation fires anyway.
+// An EXTERNAL is never iterated as `own`, so for a live external sibling the missing
+// orientation was the ONLY one that could fire: a batch lane owning a directory could
+// dispatch straight over a file a live external register already held.
+test('RV1-3 a batch lane owning a directory leaks against a live EXTERNAL owning a file in it', () => {
+  const checkout = gitFixture()
+  const home = join(root, 'symmetric-external-home')
+  const parentDir = join(root, 'symmetric-external-parent')
+  crewFixture({ home, repoDir: 'dt-external-live', laneDir: 'external-live', lane: 'external-live', checkout })
+  const error = thrown(() => checkFences({
+    fences: [entry('lane-a', ['scripts/factory/']), entry('external-live', ['scripts/factory/make-brief.mjs'])],
+    lanes: [{ lane: 'lane-a', where: ['scripts/factory/'] }],
+    checkout,
+    externals: ['external-live'],
+    parentDir,
+    deps: { home, log: () => {} },
+  }))
+  assert.equal(error.reason, 'sibling-leak')
+  for (const token of ['lane-a', 'external-live', 'scripts/factory/']) {
+    assert.ok(error.message.includes(token), `RV1-3 omitted ${token}`)
+  }
+})
+
 test('RV1-2', () => {
   const checkout = gitFixture()
   const directory = 'scripts/factory/'
@@ -1618,22 +1665,181 @@ test('dispatchBatch refuses a register superset before any worktree exists', asy
   assert.equal(spawned.length, 0)
 })
 
-test('checkFences inherits an overlap only across its declared edge', () => {
+test('checkFences refuses an overlap across its declared edge', () => {
   const fences = [entry('lane-a', ['crew/shared.mjs']), entry('lane-b', ['crew/shared.mjs'])]
   const edge = [
     { lane: 'lane-a', where: ['crew/shared.mjs'], depends_on: [] },
     { lane: 'lane-b', where: ['crew/shared.mjs'], depends_on: ['lane-a'] },
   ]
   const { graph } = planWaves({ lanes: edge })
-  assert.doesNotThrow(() => checkFences({ fences, lanes: edge, graph }))
+  refusal(() => checkFences({ fences, lanes: edge, graph }), 'sibling-leak')
   refusal(() => checkFences({ fences, lanes: edge.map((lane) => ({ ...lane, depends_on: [] })) }), 'sibling-leak')
   const unrelated = [
-    ...edge,
-    { lane: 'lane-c', where: ['crew/shared.mjs'], depends_on: [] },
+    { lane: 'lane-a', where: ['crew/owned-a.mjs'], depends_on: [] },
+    { lane: 'lane-b', where: ['crew/owned-b.mjs'], depends_on: [] },
+    { lane: 'lane-c', where: ['crew/owned-a.mjs'], depends_on: [] },
   ]
-  const unrelatedFences = [...fences, entry('lane-c', ['crew/shared.mjs'])]
+  const unrelatedFences = unrelated.map(({ lane, where }) => entry(lane, where))
   const unrelatedGraph = planWaves({ lanes: unrelated }).graph
   refusal(() => checkFences({ fences: unrelatedFences, lanes: unrelated, graph: unrelatedGraph }), 'sibling-leak')
+})
+
+test('sibling leakage reports each attributed path and the single-register remedy', () => {
+  const paths = ['src/one.mjs', 'src/two.mjs', 'src/three.mjs']
+  const lanes = [
+    { lane: 'lane-a', where: paths.slice(0, 2), depends_on: [] },
+    { lane: 'lane-b', where: [paths[0], paths[2]], depends_on: ['lane-a'] },
+    { lane: 'lane-c', where: paths.slice(1), depends_on: [] },
+  ]
+  const fences = lanes.map(({ lane, where }) => entry(lane, where))
+  const graph = planWaves({ lanes }).graph
+  const error = thrown(() => checkFences({ fences, lanes, graph, deps: { readdirSync: () => [], log: () => {} } }))
+  assert.equal(error.reason, 'sibling-leak')
+  for (const path of paths) assert.equal(error.message.includes(path), true, path)
+  assert.match(error.message, /dispatch each lane as its own single-lane register/)
+  assert.match(error.message, /sequencing shared-file work requires separate registers, not narrower fences/)
+})
+
+test('a related created path is refused independently of dependency ordering', () => {
+  const lanes = [
+    { lane: 'lane-a', where: [], creates: ['./skills/one/references/new.md'], depends_on: [] },
+    { lane: 'lane-b', where: [], depends_on: ['lane-a'] },
+  ]
+  const graph = planWaves({ lanes }).graph
+  const error = thrown(() => checkFences({
+    fences: [entry('lane-a', ['skills/one/']), entry('lane-b', ['skills/one/references/new.md'])],
+    lanes,
+    graph,
+    deps: { readdirSync: () => [], log: () => {} },
+  }))
+  assert.equal(error.reason, 'sibling-leak')
+  assert.match(error.message, /skills\/one\/references\/new\.md/)
+})
+
+test('an unrelated directory fence still catches a created path through leakedCreates', () => {
+  const lanes = [
+    { lane: 'lane-a', where: [], creates: ['./skills/one/references/new.md'], depends_on: [] },
+    { lane: 'lane-b', where: [], depends_on: [] },
+  ]
+  const error = thrown(() => checkFences({
+    fences: [entry('lane-a', ['skills/one/']), entry('lane-b', ['skills/one/references/'])],
+    lanes,
+    deps: { readdirSync: () => [], log: () => {} },
+  }))
+  assert.equal(error.reason, 'sibling-leak')
+  assert.match(error.message, /lane lane-a creates path\(s\) inside sibling lane-b's fence/)
+  assert.match(error.message, /skills\/one\/references\/new\.md/)
+})
+
+test('relatedLanes remains transitive, unrelated, and fail-closed', () => {
+  const lanes = [{ lane: 'a' }, { lane: 'b', depends_on: ['a'] }, { lane: 'c', depends_on: ['b'] }, { lane: 'd' }]
+  const graph = planWaves({ lanes }).graph
+  assert.equal(relatedLanes(graph, 'a', 'c'), true)
+  assert.equal(relatedLanes(graph, 'a', 'd'), false)
+  assert.equal(relatedLanes(null, 'a', 'c'), false)
+})
+
+test('related holders still permit automatic anchor admission on disjoint fences', () => {
+  const checkout = gitFixture()
+  const manifest = 'skills/one/anchors.json'
+  anchorFixtures(checkout, { one: { 'src/owned.mjs:1': 'export const OWNED = 1' } })
+  const lanes = [
+    { lane: 'lane-a', where: ['src/owned.mjs'], depends_on: [] },
+    { lane: 'lane-b', where: [manifest], depends_on: ['lane-a'] },
+  ]
+  const graph = planWaves({ lanes }).graph
+  const report = checkFences({
+    fences: [entry('lane-a', ['src/owned.mjs']), entry('lane-b', [manifest])],
+    lanes,
+    graph,
+    checkout,
+    outDir: join(checkout, 'related-holder-out'),
+    deps: { home: join(root, 'related-holder-home'), log: () => {} },
+  })
+  assert.equal(report.admissions.filter((row) => row.lane === 'lane-a' && row.file === manifest && row.source === 'anchor-pin').length, 1)
+  assert.equal(report.warnings.some(({ kind }) => kind === 'fence-admission-arbitrated'), false)
+})
+
+test('related admission owners keep automatic admissions out of arbitration', () => {
+  const checkout = gitFixture()
+  const manifest = 'skills/one/anchors.json'
+  put(join(checkout, 'src', 'second.mjs'), 'export const SECOND = 1\n')
+  anchorFixtures(checkout, { one: {
+    'src/owned.mjs:1': 'export const OWNED = 1',
+    'src/second.mjs:1': 'export const SECOND = 1',
+  } })
+  const lanes = [
+    { lane: 'lane-a', where: ['src/owned.mjs'], depends_on: [] },
+    { lane: 'lane-b', where: ['src/second.mjs'], depends_on: ['lane-a'] },
+  ]
+  const graph = planWaves({ lanes }).graph
+  const report = checkFences({
+    fences: [entry('lane-a', ['src/owned.mjs']), entry('lane-b', ['src/second.mjs'])],
+    lanes,
+    graph,
+    checkout,
+    outDir: join(checkout, 'related-owner-out'),
+    deps: { home: join(root, 'related-owner-home'), log: () => {} },
+  })
+  assert.equal(report.admissions.filter((row) => row.file === manifest && row.source === 'anchor-pin').length, 2)
+  assert.equal(report.warnings.some(({ kind }) => kind === 'fence-admission-arbitrated'), false)
+})
+
+test('the incident register names all runtime-conflicting paths before dispatch', () => {
+  const { lanes, fences } = siblingIncidentRegister()
+  const expected = [...new Set(lanes.flatMap((lane) => laneFenceHits(
+    lane.where,
+    fences.filter((row) => row.lane !== lane.lane),
+  ).map((hit) => hit.entry)))].sort()
+  const graph = planWaves({ lanes }).graph
+  const error = thrown(() => checkFences({ fences, lanes, graph, deps: { readdirSync: () => [], log: () => {} } }))
+  assert.equal(error.reason, 'sibling-leak')
+  assert.deepEqual(expected, [
+    'skills/crew-recovery/anchors.json',
+    'skills/pr-review/SKILL.md',
+    'skills/pr-review/anchors.json',
+  ])
+  for (const path of expected) assert.equal(error.message.includes(path), true, path)
+})
+
+test('dispatchBatch refuses the incident register before any subprocess call', async () => {
+  const { lanes, fences } = siblingIncidentRegister()
+  const requests = Object.fromEntries(lanes.map((lane) => [lane.lane, {
+    ...request(`measure ${lane.lane}`, lane.where),
+    depends_on: lane.depends_on,
+  }]))
+  const spawned = []
+  const error = await thrownAsync(() => dispatchFixture({
+    label: 'incident-preflight',
+    names: lanes.map((lane) => lane.lane),
+    requests,
+    fences,
+    spawnedOut: spawned,
+    spawnResult: () => ({ status: 0, stdout: '', stderr: '' }),
+  }))
+  assert.equal(error.reason, 'sibling-leak')
+  assert.equal(spawned.length, 0)
+  for (const path of ['skills/crew-recovery/anchors.json', 'skills/pr-review/SKILL.md', 'skills/pr-review/anchors.json']) {
+    assert.equal(error.message.includes(path), true, path)
+  }
+})
+
+test('sibling leakage wins before an outside-fence where path or arbitration warning', () => {
+  const lanes = [
+    { lane: 'lane-a', where: ['src/shared.mjs'], depends_on: [] },
+    { lane: 'lane-b', where: ['src/shared.mjs', 'outside/not-owned.mjs'], depends_on: ['lane-a'] },
+  ]
+  const graph = planWaves({ lanes }).graph
+  const logs = []
+  const error = thrown(() => checkFences({
+    fences: [entry('lane-a', ['src/shared.mjs']), entry('lane-b', ['src/shared.mjs'])],
+    lanes,
+    graph,
+    deps: { readdirSync: () => [], log: (line) => logs.push(String(line)) },
+  }))
+  assert.equal(error.reason, 'sibling-leak')
+  assert.equal(logs.some((line) => line.includes('continues')), false)
+  assert.equal(logs.some((line) => line.includes('arbitrated')), false)
 })
 
 test('D1 distinguishes untouched pins from pinned files the lane writes', () => {
@@ -4018,7 +4224,7 @@ test('checkFences refuses declared edges without a measured graph', () => {
     && error.reason === 'graph-unmeasured'
     && error.message.includes('depends_on'))
   const { graph } = planWaves({ lanes })
-  assert.doesNotThrow(() => checkFences({ fences, lanes, graph, checkout: root, deps: { readdirSync: () => [], log: () => {} } }))
+  refusal(() => checkFences({ fences, lanes, graph, checkout: root, deps: { readdirSync: () => [], log: () => {} } }), 'sibling-leak')
   const disjoint = [
     { lane: 'lane-a', where: ['crew/owned-a.mjs'], depends_on: [] },
     { lane: 'lane-b', where: ['crew/owned-b.mjs'], depends_on: [] },

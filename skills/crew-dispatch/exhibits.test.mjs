@@ -221,12 +221,12 @@ test('B1 fixture retains an absolute same-basename collision', () => {
 // Re-measure with the shipped collectTestReach over the git ls-files partition (owners = tracked non-*.test.mjs files; tests = tracked *.test.mjs files): node --input-type=module -e "import{execFileSync}from'node:child_process';const{collectTestReach}=await import(process.cwd()+'/scripts/factory/dispatch-batch.mjs'),files=execFileSync('git',['ls-files','-z'],{encoding:'utf8'}).split(String.fromCharCode(0)).filter(Boolean),tests=new Set(files.filter(file=>file.endsWith('.test.mjs'))),nonTests=new Set(files.filter(file=>!tests.has(file))),reach=collectTestReach({checkout:process.cwd()}),rows=[...reach.pathByFile].filter(([file])=>nonTests.has(file)).flatMap(([file,reached])=>[...reached].filter(test=>tests.has(test)).map(test=>[file,test])),contributingTests=new Set(rows.map(([,test])=>test));console.log({tracked:files.length,nonTests:nonTests.size,tests:tests.size,owners:new Set(rows.map(([file])=>file)).size,pairs:rows.length,contributingTests:contributingTests.size})"
 test('RV1-1 pins the reach doctrine date and pristine pair baseline', () => {
   const text = readText(join(HERE, 'references/batch.md'))
-  const measurement = '**160 of 545 tracked non-test files**, comprising **459 distinct (file, test) pairs contributed by 87 of 89 tracked `*.test.mjs` files**'
-  const measurementDate = 'On the shipped 2026-09-10 tree'
-  const pristinePairs = 459
+  const measurement = '**161 of 545 tracked non-test files**, comprising **462 distinct (file, test) pairs contributed by 87 of 89 tracked `*.test.mjs` files**'
+  const measurementDate = 'On the shipped 2026-09-11 tree'
+  const pristinePairs = 462
   assert.equal(text.split(measurement).length - 1, 1)
   assert.ok(text.includes(measurementDate))
-  assert.ok(text.includes(`The pristine \`HEAD\` baseline gives 160 owners and ${pristinePairs} pairs.`))
+  assert.ok(text.includes(`The pristine \`HEAD\` baseline gives 161 owners and ${pristinePairs} pairs.`))
 })
 
 test('RV1-1 keeps split fence-carrier prose tied to its current module', () => {
@@ -269,6 +269,25 @@ test('RV1-2 derives shipped reach and comment censuses from git discovery', () =
   const pristine = commentApostropheCensus(headTests, (file) => execFileSync('git', ['-C', ROOT, 'show', `HEAD:${file}`], { encoding: 'utf8' }))
   const commentMeasurement = `**${current.withApostrophe} of ${tests.size} tracked \`*.test.mjs\` files** carry at least one apostrophe inside a comment, and **${current.odd} of ${tests.size}** carry an odd number on the shipped tree (**${pristine.odd} of ${headTests.length} at pristine \`HEAD\`**).`
   assert.equal(text.split(commentMeasurement).length - 1, 1)
+})
+
+// #881: the doctrine promised a `depends_on` exemption in THREE places while the code had
+// removed it, and mutating each claim left 258 tests green — operator guidance that
+// recommends building a register the dispatcher now refuses. A corrected sentence with no
+// tripwire is the same defect waiting to recur, so the claim itself is pinned here.
+test('the batch reference never promises a depends_on exemption from sibling-leak', () => {
+  const text = readText(join(HERE, 'references', 'batch.md'))
+  const revoked = [
+    /only a `depends_on` edge exempts/i,
+    /the\s+one exemption that exists/i,
+    /inherited across an edge/i,
+    /is the one exemption/i,
+  ]
+  for (const pattern of revoked) {
+    assert.equal(pattern.test(text), false, `batch.md still promises the exemption #881 removed: ${pattern}`)
+  }
+  // and it must state the rule that replaced them
+  assert.match(text, /no two entries in one register\s+may claim the same file, related or not/i)
 })
 
 test('RV2-1 keeps the pristine reach baseline aligned with the shipped census', () => {

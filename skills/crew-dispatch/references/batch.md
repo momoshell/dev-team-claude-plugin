@@ -48,7 +48,7 @@ one.
 
 A register entry marked `"external": true` names a live lane from ANOTHER batch: it denies every batch lane's write surface, it is not counted in the sibling total `checkArrival` derives, and a stale entry refuses `external-fence-stale` by name.
 
-Fence isolation now spans concurrent batches. The dispatcher verifies that the named lane's crew dir persists that exact lane name and its run has not settled, and the deny set is never derived by scanning `~/.crew`. `sibling-leak` enforcement applies to externals like any other entry: the leak loop iterates every register entry, and only a `depends_on` edge exempts. While the deny SET is never derived by scanning `~/.crew`, external LIVENESS is read from `~/.crew` by `externalFenceLiveness`. It also consults the journal freshness signal: an external lane with no terminal stage whose journal has been silent for `DRIVER_GONE_PERIODS × HEARTBEAT_PERIOD_MS` refuses `external-fence-abandoned`, distinct from `external-fence-stale`; the refusal constants are `EXTERNAL_FENCE_STALE = 'external-fence-stale'` at `scripts/factory/dispatch-batch.mjs:49` and `EXTERNAL_FENCE_ABANDONED = 'external-fence-abandoned'` at `scripts/factory/dispatch-batch.mjs:50`.
+Fence isolation now spans concurrent batches. The dispatcher verifies that the named lane's crew dir persists that exact lane name and its run has not settled, and the deny set is never derived by scanning `~/.crew`. `sibling-leak` enforcement applies to externals like any other entry: the leak loop iterates every register entry, and **no edge exempts** — a `depends_on` edge sequences two lanes, it does not license them to claim the same file (#881). While the deny SET is never derived by scanning `~/.crew`, external LIVENESS is read from `~/.crew` by `externalFenceLiveness`. It also consults the journal freshness signal: an external lane with no terminal stage whose journal has been silent for `DRIVER_GONE_PERIODS × HEARTBEAT_PERIOD_MS` refuses `external-fence-abandoned`, distinct from `external-fence-stale`; the refusal constants are `EXTERNAL_FENCE_STALE = 'external-fence-stale'` at `scripts/factory/dispatch-batch.mjs:49` and `EXTERNAL_FENCE_ABANDONED = 'external-fence-abandoned'` at `scripts/factory/dispatch-batch.mjs:50`.
 
 `run-settled`, `run-complete`, and `run-escalated` are three distinct terminal reasons. The declared file list is compared with the external lane's own `crew.json` sibling claims and a contradiction is reported, not silently cleared. That comparison cannot measure an under-declared external because a lane's own fence is not recorded in its own `crew.json`; an unmeasured heartbeat (`heartbeat_age_ms: null`) is never read as abandoned.
 
@@ -126,7 +126,7 @@ There are two false negatives this warning does not measure. A directory-prefix 
 
 Silence from this check is therefore an UNMEASURED clear, not a measured one: the carrier side, `matchOwn`, honours directory prefixes, while the trigger side does not.
 
-On the shipped 2026-09-10 tree, a fresh `git ls-files` measurement with `collectTestReach` found exact static path reach for **160 of 545 tracked non-test files**, comprising **459 distinct (file, test) pairs contributed by 87 of 89 tracked `*.test.mjs` files**. The pristine `HEAD` baseline gives 160 owners and 459 pairs. The rule resolves decoded slash-bearing literals beginning `./` or `../` against the test file, repository-relative literals against checkout root, and only `join(ROOT, <all-literal segments...>)` or `join(repoRoot, <all-literal segments...>)`; absolute candidates and variable-built joins do not match tracked repository paths. This is the shipped scanner's reach, not proof of test intent; computed paths and computed dynamic imports remain invisible. This figure is pinned by `skills/crew-dispatch/exhibits.test.mjs` and must be re-measured whenever a tracked test file gains or loses a static path literal. The superseded review-time witness literal, **164 of 542 tracked non-test files**, comprising **428 distinct (file, test) pairs contributed by 83 of 85 tracked `*.test.mjs` files**, remains only so the byte-identical pre-repair exhibit can execute while the named dynamic guard proves the replacement; it is not a current census.
+On the shipped 2026-09-11 tree, a fresh `git ls-files` measurement with `collectTestReach` found exact static path reach for **161 of 545 tracked non-test files**, comprising **462 distinct (file, test) pairs contributed by 87 of 89 tracked `*.test.mjs` files**. The pristine `HEAD` baseline gives 161 owners and 462 pairs. The rule resolves decoded slash-bearing literals beginning `./` or `../` against the test file, repository-relative literals against checkout root, and only `join(ROOT, <all-literal segments...>)` or `join(repoRoot, <all-literal segments...>)`; absolute candidates and variable-built joins do not match tracked repository paths. This is the shipped scanner's reach, not proof of test intent; computed paths and computed dynamic imports remain invisible. This figure is pinned by `skills/crew-dispatch/exhibits.test.mjs` and must be re-measured whenever a tracked test file gains or loses a static path literal. The superseded review-time witness literal, **164 of 542 tracked non-test files**, comprising **428 distinct (file, test) pairs contributed by 83 of 85 tracked `*.test.mjs` files**, remains only so the byte-identical pre-repair exhibit can execute while the named dynamic guard proves the replacement; it is not a current census.
 
 The hard breadth is deliberate (#702): a single static quoted path literal anywhere in a test — including one that appears only as fixture data — is a `test-reach` admission candidate. An unheld candidate is admitted with source `test-reach`; only a measured holder keeps it outside the fence as `test-reach-unfenced`, and a valid `allow_test_reach` `{ file, why }` override applies only to that held row. This trades false refusals for missed fences on purpose (#702), while admission proves neither completeness nor test intent. Fencing `crew/model-ladder.json` now names `crew/drive-review.test.mjs` and `test/factory-dispatch-batch.test.mjs`; fencing either `crew/tree-fingerprint.mjs` or `skills/devops/references/worktrees.md` now names `test/factory-dispatch-batch-fences.test.mjs`, whose b220 fixture list carries both surface literals; do not fence `test/factory-dispatch-batch.test.mjs` for either carrier. Each of those surfaces previously refused nothing.
 
@@ -196,8 +196,9 @@ list of file claims and the dispatcher cannot tell the two apart at fence-check 
 `writes` lives in the variant, and the entry is what every sibling is measured against.
 Exempting read-only lanes would let a scout be granted files a build lane owns, and the
 first thing that notices would be the build lane's scope gate. So fence a scout NARROWLY —
-name only what it must read exclusively — or declare a `depends_on` edge, which is the
-one exemption that exists.
+name only what it must read exclusively. A `depends_on` edge does NOT help here: it
+sequences the lanes, and since #881 it exempts nothing from `sibling-leak`. Two lanes that
+must claim the same file are dispatched as two single-lane registers.
 
 ## A declared edge serialises only the waves it names
 
@@ -212,10 +213,12 @@ A dependent lane briefed against work that did not land is
 worse than a lane that never started, so the wave stops and reports its lanes
 unstarted with the predecessor named (`predecessor-escalated`).
 
-Disjointness is **disjoint within a wave**, inherited across an edge: writing
-what your predecessor wrote is the point, while two lanes in one wave are
-never related, so one predicate gives both halves. An unrelated lane gains
-nothing from someone else's edge.
+Disjointness is **batch-wide and unconditional** (#881): no two entries in one register
+may claim the same file, related or not. A `depends_on` edge orders the lanes so a
+dependent's base is fresh; it never licenses a shared claim. Two lanes that genuinely need
+the same file are dispatched as two single-lane registers, which is what the refusal says.
+Pre-flight and the runtime scope gate now encode the same rule — they disagreed before, and
+an operator following the dry run could only discover it by burning a planner round.
 
 A dependent lane compiles in a worktree cut AFTER its predecessor landed, so
 its ground truth, baseline, and tripwires are the moved tree's. Containment is

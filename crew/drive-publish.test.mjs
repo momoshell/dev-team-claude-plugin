@@ -2,11 +2,11 @@
 // lane fencing one driver concern no longer locks every driver test.
 // Shared fixtures, and the ledger sandbox side effect, live in ./drive-fixtures.mjs.
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { git, scratchDir } from '../test/helpers.mjs'
 import { anchorRepairCommand } from './drive.mjs'
 import {
   COMMIT_TRAILER, CTX, HONEST_NARRATION, NARRATION_HEADING, NARRATION_RECORD, NARRATION_REFUSALS, NARRATION_REFUSAL_NAMES, NARRATION_STAGE_VOCABULARY, NARRATOR_REGISTER, PUBLISH_REFUSAL_NAMES, RUN_START_EVENT, TD, VARIANTS, applyNarration, bounceDetail, bounceSeatOf, buildEnv, commitIntent, composeCommitMessage, composePrBody, convergeRun, driveTask, issueTrailers, join, journalRowsSinceRunStart, narrateRecord, narrationDefect, narrationIsRawJson, narrationPrompt, narrationStageDefect, narratorApiRoot, narratorIo, narratorModelId, narratorModelsCommand, planEnv, prAnomalies, publicationIo, readFileSync, refsFromCommitMessage, reviewEnv, runPublished, shellArg,
@@ -725,7 +725,7 @@ test('G1 anchor repair fails closed for command failure and stale post-check row
 })
 
 test('RV2-1 anchor repair child ignores a measured out-of-fence shift', () => {
-  const root = mkdtempSync(`${tmpdir()}/anchor-repair-child-`)
+  const root = scratchDir('anchor-repair-child-')
   const expected = "const shifted = 'uniquely anchored fixture content'"
   const manifest = `${JSON.stringify({ 'scripts/outside.mjs:1': expected }, null, 2)}\n`
   const write = (path, text) => {
@@ -733,29 +733,19 @@ test('RV2-1 anchor repair child ignores a measured out-of-fence shift', () => {
     mkdirSync(dirname(file), { recursive: true })
     writeFileSync(file, text)
   }
-  const git = (...args) => {
-    const result = spawnSync('git', args, { cwd: root, encoding: 'utf8' })
-    assert.equal(result.status, 0, `${args.join(' ')}: ${result.stderr || result.stdout || 'git failed'}`)
-  }
-  try {
-    write('skills/qa-test-writing/anchor-pin.mjs', readFileSync(new URL('../skills/qa-test-writing/anchor-pin.mjs', import.meta.url), 'utf8'))
-    write('skills/outside/anchors.json', manifest)
-    write('skills/outside/SKILL.md', '# Fixture\n\n`scripts/outside.mjs:1`\n')
-    write('scripts/outside.mjs', `// shifted from the cited line\n${expected}\n`)
-    git('init', '-q')
-    git('config', 'user.email', 'anchor@example.invalid')
-    git('config', 'user.name', 'Anchor Fixture')
-    git('add', '.')
-    git('commit', '-q', '-m', 'fixture')
-    git('branch', '-M', 'main')
-    git('checkout', '-q', '-b', 'lane')
-    write('crew/drive.mjs', '// lane-owned change\n')
+  write('skills/qa-test-writing/anchor-pin.mjs', readFileSync(new URL('../skills/qa-test-writing/anchor-pin.mjs', import.meta.url), 'utf8'))
+  write('skills/outside/anchors.json', manifest)
+  write('skills/outside/SKILL.md', '# Fixture\n\n`scripts/outside.mjs:1`\n')
+  write('scripts/outside.mjs', `// shifted from the cited line\n${expected}\n`)
+  git(root, 'init', '-q')
+  git(root, 'add', '.')
+  git(root, 'commit', '-q', '-m', 'fixture')
+  git(root, 'branch', '-M', 'main')
+  git(root, 'checkout', '-q', '-b', 'lane')
+  write('crew/drive.mjs', '// lane-owned change\n')
 
-    const repair = spawnSync('/bin/sh', ['-c', anchorRepairCommand()], { cwd: root, encoding: 'utf8' })
-    assert.equal(repair.status, 0, `${repair.stderr || ''}${repair.stdout || ''}`)
-    assert.equal(repair.stdout, '')
-    assert.equal(readFileSync(`${root}/skills/outside/anchors.json`, 'utf8'), manifest)
-  } finally {
-    rmSync(root, { recursive: true, force: true })
-  }
+  const repair = spawnSync('/bin/sh', ['-c', anchorRepairCommand()], { cwd: root, encoding: 'utf8' })
+  assert.equal(repair.status, 0, `${repair.stderr || ''}${repair.stdout || ''}`)
+  assert.equal(repair.stdout, '')
+  assert.equal(readFileSync(`${root}/skills/outside/anchors.json`, 'utf8'), manifest)
 })

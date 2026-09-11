@@ -1560,6 +1560,16 @@ function repairJsonStringControls(raw) {
   return { raw: repairedRaw, offsets }
 }
 
+// A lossy decode is detectable by re-encoding: valid UTF-8 round-trips byte for byte, and a
+// substituted U+FFFD does not. The raw BYTES are re-read rather than trusted, because the
+// decoded string has already lost the evidence.
+function isValidUtf8(path, readFileSync, decoded) {
+  let bytes
+  try { bytes = readFileSync(path) } catch { return false }
+  if (typeof bytes === 'string') return true   // an io shim that only speaks strings cannot be checked here
+  try { return Buffer.from(decoded, 'utf8').equals(Buffer.from(bytes)) } catch { return false }
+}
+
 function envelopeParseFailure(path, raw, stage, role, error) {
   const parseFailure = new Error(`unusable envelope at ${path}: the file EXISTED (${raw.length} bytes) and is not JSON this driver can read: ${error.message}`)
   parseFailure.stage = stage
@@ -1579,6 +1589,12 @@ export function readEnvelopeOrThrow(path, { existsSync, readFileSync, stage, rol
   try { raw = String(readFileSync(path, 'utf8')) } catch { return null }
   let value
   try { value = JSON.parse(raw) } catch (strictError) {
+    // `readFileSync(path, 'utf8')` LOSSILY decodes: a malformed byte becomes U+FFFD before the
+    // scanner ever runs. Repairing such bytes would change an authored value and report a false
+    // offset — precisely what "the repair authors nothing" promises it cannot do. Encoding is a
+    // different defect from an in-string control, so it is refused, not repaired. Measured 0 of
+    // 2,773 archived envelopes, but reachable, and a value-changing repair is never acceptable.
+    if (!isValidUtf8(path, readFileSync, raw)) throw envelopeParseFailure(path, raw, stage, role, strictError)
     const repaired = repairJsonStringControls(raw)
     if (repaired.offsets.length === 0) throw envelopeParseFailure(path, raw, stage, role, strictError)
     try { value = JSON.parse(repaired.raw) } catch { throw envelopeParseFailure(path, raw, stage, role, strictError) }

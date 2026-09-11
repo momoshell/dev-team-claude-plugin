@@ -892,6 +892,49 @@ test('B1a a repaired read journals its outcome and count exactly once', () => {
   } finally { f.cleanup() }
 })
 
+// The review found B1b could not tell a UTF-8 byte offset from a UTF-16 code-unit index:
+// everything before its two controls is ASCII, where the two agree. Swapping
+// `Buffer.byteLength(char, 'utf8')` for `char.length` left the gate 7/7 and 339/339 green.
+// This fixture puts multi-byte text BEFORE the control, where the two disagree.
+test('B1b-utf8 a multi-byte prefix reports the BYTE offset, not the code-unit index', () => {
+  const prefix = '\u{1F600}\u6F22'                      // 4-byte emoji + 3-byte CJK = 7 bytes, 3 code units
+  const raw = `{"role":"tech-lead","summary":"${prefix}\nend"}`
+  const control = raw.indexOf('\n')
+  const byteOffset = Buffer.byteLength(raw.slice(0, control), 'utf8')
+  const codeUnitIndex = raw.slice(0, control).length
+  assert.notEqual(byteOffset, codeUnitIndex, 'the fixture must be able to tell the two apart')
+  const f = directEnvelopeFixture(raw)
+  try {
+    const value = f.invoke()
+    assert.equal(value.summary, `${prefix}\nend`)
+    assert.deepEqual(JSON.parse(f.writes[0].data).escaped_offsets, [byteOffset])
+  } finally { f.cleanup() }
+})
+
+// MF1: `readFileSync(path, 'utf8')` substitutes U+FFFD for a malformed byte BEFORE the scanner
+// runs, so an envelope carrying both an encoding defect and an in-string control could parse
+// with a CHANGED value and a false offset. Encoding is a different defect and is refused.
+test('B1d malformed UTF-8 is refused, never repaired into a changed value', () => {
+  const dir = scratchDir('envelope-utf8-')
+  const returnsDir = join(dir, 'returns')
+  mkdirSync(returnsDir)
+  const path = join(returnsDir, 'd6.tech-lead.json')
+  // a lone 0xff byte — not valid UTF-8 — immediately before a raw control character
+  writeFileSync(path, Buffer.concat([
+    Buffer.from('{"role":"tech-lead","summary":"', 'utf8'),
+    Buffer.from([0xff]),
+    Buffer.from('\nend"}', 'utf8'),
+  ]))
+  const writes = []
+  try {
+    assert.throws(() => readEnvelopeOrThrow(path, {
+      existsSync, readFileSync, stage: 'headless-parse-error', role: 'tech-lead',
+      writeFileSync: (...args) => writes.push(args), now: () => 1700000000000,
+    }), /unusable envelope/)
+    assert.deepEqual(writes, [], 'a refused envelope records no repair')
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
 test('B1b a repaired read records the original UTF-8 byte offsets', () => {
   const f = directEnvelopeFixture(RECORDED_TECH_LEAD)
   try {

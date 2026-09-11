@@ -2629,6 +2629,177 @@ test('real crew-drive discovery retains crew-child as an exported-symbol caller'
   assert.ok(caller.keys.includes('driveTask'))
 })
 
+test('A1 packed coupled sources point to a complete sidecar', () => {
+  const root = fixture('coupled-pack-a1', { coupledCaller: true, scripts: FAST_FIXTURE_TEST })
+  const fencesPath = put(root, 'fences.json', `${JSON.stringify({
+    lanes: [{ lane: 'own', files: ['lib/widget.mjs', 'lib/caller.mjs'] }],
+  }, null, 2)}\n`)
+  const packDir = join(root, 'a1-pack')
+  mkdirSync(packDir)
+  const { brief } = compile(root, {}, [
+    '--fences', fencesPath, '--lane', 'own', '--pack', packDir,
+  ], 'a1.brief.md')
+  const body = section(brief, '## Coupled sources')
+  const sidecar = join(packDir, 'a1.coupled.md')
+  const pointer = `enumeration: ${sidecar} — every coupled file listed in full; read it once with: cat ${sidecar}`
+  assert.equal(existsSync(sidecar), true)
+  assert.match(body, /coupling rule: a coupled source is a non-test \.js\/.mjs file/)
+  assert.match(body, /coupled sources: 1 file\(s\)/)
+  assert.equal(body.split(pointer).length - 1, 1)
+  assert.doesNotMatch(body, /^- lib\/caller\.mjs/m)
+  assert.match(readFileSync(sidecar, 'utf8'), /^- lib\/caller\.mjs · computeWidget, widget\.mjs · inside this lane's fence\n$/)
+})
+
+test('B1 packed coupled sources retain both inline honesty caveats', () => {
+  const root = fixture('coupled-pack-b1', { coupledCaller: true, scripts: FAST_FIXTURE_TEST })
+  const packDir = join(root, 'b1-pack')
+  mkdirSync(packDir)
+  const { brief } = compile(root, {}, ['--pack', packDir], 'b1.brief.md')
+  const body = section(brief, '## Coupled sources')
+  const sidecar = readFileSync(join(packDir, 'b1.coupled.md'), 'utf8')
+  assert.match(body, /floor, not a proof/)
+  assert.match(body, /dynamic, string-built, or renamed couplings are invisible/)
+  assert.doesNotMatch(sidecar, /floor, not a proof/)
+  assert.doesNotMatch(sidecar, /dynamic, string-built, or renamed couplings are invisible/)
+})
+
+test('C1 unpacked coupled sources retain the legacy bytes', () => {
+  const root = fixture('coupled-legacy-c1', { coupledCaller: true, scripts: FAST_FIXTURE_TEST })
+  const fencesPath = put(root, 'fences.json', `${JSON.stringify({
+    lanes: [{ lane: 'own', files: ['lib/widget.mjs', 'lib/caller.mjs'] }],
+  }, null, 2)}\n`)
+  const { brief } = compile(root, {}, ['--fences', fencesPath, '--lane', 'own'], 'c1.brief.md')
+  const expected = [
+    'coupling rule: a coupled source is a non-test .js/.mjs file that names an exported symbol of a where file and names that file; a key-based grep sees a coupling only when both sides share a named symbol, so this is a floor, not a proof (dynamic, string-built, or renamed couplings are invisible); a non-test code file which only CITES a where/fence path by repo path or basename, for example in a comment, is coupled too, and a citation key over the broad-key limit is reported as broad rather than coupled.',
+    "- lib/caller.mjs · computeWidget, widget.mjs · inside this lane's fence",
+  ].join('\n')
+  assert.equal(section(brief, '## Coupled sources'), expected)
+})
+
+test('D1 pack omission keeps coupled sources inline', () => {
+  const root = fixture('coupled-holdout-d1', { coupledCaller: true, scripts: FAST_FIXTURE_TEST })
+  const fencesPath = put(root, 'fences.json', `${JSON.stringify({
+    lanes: [{ lane: 'own', files: ['lib/widget.mjs', 'lib/caller.mjs'] }],
+  }, null, 2)}\n`)
+  const packDir = join(root, 'd1-pack')
+  mkdirSync(packDir)
+  const { brief } = compile(root, {}, [
+    '--fences', fencesPath, '--lane', 'own', '--pack', packDir, '--pack-omission', 'symbols',
+  ], 'd1.brief.md')
+  const body = section(brief, '## Coupled sources')
+  assert.match(body, /^- lib\/caller\.mjs · computeWidget, widget\.mjs · inside this lane's fence$/m)
+  assert.doesNotMatch(body, /^enumeration:/m)
+  assert.equal(existsSync(join(packDir, 'd1.coupled.md')), false)
+
+  const emptyRoot = fixture('coupled-empty-d1', { scripts: FAST_FIXTURE_TEST })
+  put(emptyRoot, 'lib/empty.mjs', 'export const EMPTY_COUPLING = true\n')
+  git(emptyRoot, 'add', '-A')
+  const emptyPack = join(emptyRoot, 'd1-empty-pack')
+  mkdirSync(emptyPack)
+  const { brief: emptyBrief } = compile(emptyRoot, { where: ['lib/empty.mjs'] }, ['--pack', emptyPack], 'd1-empty.brief.md')
+  const emptyBody = section(emptyBrief, '## Coupled sources')
+  assert.match(emptyBody, /- \(none discovered\)/)
+  assert.doesNotMatch(emptyBody, /^enumeration:/m)
+  assert.equal(existsSync(join(emptyPack, 'd1-empty.coupled.md')), false)
+})
+
+test('E1 coupled sidecar retains every inline enumeration row', () => {
+  const root = fixture('coupled-sidecar-e1', { coupledCaller: true, citingComment: true, scripts: FAST_FIXTURE_TEST })
+  const why = 'citation caller is read-only for this lane'
+  const fencesPath = put(root, 'fences.json', `${JSON.stringify({
+    lanes: [{ lane: 'own', files: ['lib/widget.mjs', 'lib/caller.mjs'], reads: [{ file: 'lib/cites.js', why }] }],
+  }, null, 2)}\n`)
+  const packDir = join(root, 'e1-pack')
+  mkdirSync(packDir)
+  const packed = compile(root, {}, [
+    '--fences', fencesPath, '--lane', 'own', '--pack', packDir,
+  ], 'e1.brief.md')
+  const unpacked = compile(root, {}, ['--fences', fencesPath, '--lane', 'own'], 'e1-unpacked.brief.md')
+  const inlineRows = section(unpacked.brief, '## Coupled sources').split('\n').slice(1)
+  const sidecarLines = readFileSync(join(packDir, 'e1.coupled.md'), 'utf8').split('\n')
+  assert.ok(inlineRows.length >= 2)
+  assert.ok(inlineRows.some((line) => line.includes("inside this lane's fence")))
+  assert.ok(inlineRows.some((line) => line.includes(`acknowledged read-only: ${why}`)))
+  assert.equal(sidecarLines.at(-1), '')
+  assert.deepEqual(sidecarLines.slice(0, -1), inlineRows)
+  assert.doesNotMatch(section(packed.brief, '## Coupled sources'), /^- /m)
+})
+
+test('F1 crew drive fence reports before and after brief bytes', () => {
+  const where = verifyWhere({ checkout: ROOT, where: ['crew/drive.mjs'] })
+  const discovery = discoverTripwires({ checkout: ROOT, files: where })
+  const fencesPath = put(fixtureRoot, 'f1-real-fences.json', `${JSON.stringify({
+    lanes: [{ lane: 'f1', files: ['crew/drive.mjs'] }],
+  }, null, 2)}\n`)
+  const fences = gatherFences({ fencesPath, checkout: ROOT })
+  const writeSurface = resolveWriteSurface({ fences, lane: 'f1', where })
+  const coupling = crossCheckCoupling({ discovery, writeSurface, enforce: false })
+  const request = {
+    ask: 'Measure the packed coupled-source brief for the real drive fence.',
+    done_means: 'The packed brief is smaller while retaining the coupled-source pointer.',
+    out_of_scope: 'The drive implementation and fence register remain unchanged.',
+  }
+  const gathered = {
+    request, where, discovery, coupling,
+    baseline: { lane: null, pass: null, fail: null, status: 'unknown', reason: 'not-gathered' },
+    fences, lane: 'f1', writeSurface,
+  }
+  const packDir = scratchDir('factory-coupled-f1-')
+  const pack = writePack({
+    packDir, taskName: 'f1', checkout: ROOT, request, discovery, writeSurface, coupling, profile: null,
+  })
+  const before = renderBrief({ ...gathered, pack: { ...pack, coupled: null } })
+  const after = renderBrief({ ...gathered, pack })
+  const beforeBytes = Buffer.byteLength(before, 'utf8')
+  const afterBytes = Buffer.byteLength(after, 'utf8')
+  assert.ok(coupling.coupled.length > 0)
+  assert.ok(afterBytes < beforeBytes)
+  assert.ok(beforeBytes - afterBytes > 1_000)
+  console.log(`before brief bytes: ${beforeBytes}; after brief bytes: ${afterBytes}`)
+})
+
+test('packed coupled savings isolate the populated sidecar', () => {
+  const where = verifyWhere({ checkout: ROOT, where: ['crew/drive.mjs'] })
+  const discovery = discoverTripwires({ checkout: ROOT, files: where })
+  const fencesPath = put(fixtureRoot, 'packed-coupled-savings-fences.json', `${JSON.stringify({
+    lanes: [{ lane: 'packed-coupled-savings', files: ['crew/drive.mjs'] }],
+  }, null, 2)}\n`)
+  const fences = gatherFences({ fencesPath, checkout: ROOT })
+  const writeSurface = resolveWriteSurface({ fences, lane: 'packed-coupled-savings', where })
+  const coupling = crossCheckCoupling({ discovery, writeSurface, enforce: false })
+  const request = {
+    ask: 'Measure the packed coupled-source sidecar independently of existing pack savings.',
+    done_means: 'The populated coupled sidecar makes the packed brief smaller.',
+    out_of_scope: 'The drive implementation and fence register remain unchanged.',
+  }
+  const gathered = {
+    request, where, discovery, coupling,
+    baseline: { lane: null, pass: null, fail: null, status: 'unknown', reason: 'not-gathered' },
+    fences, lane: 'packed-coupled-savings', writeSurface,
+  }
+  const packDir = scratchDir('factory-coupled-savings-')
+  const pack = writePack({
+    packDir, taskName: 'packed-coupled-savings', checkout: ROOT, request, discovery, writeSurface, coupling, profile: null,
+  })
+  const before = renderBrief({ ...gathered, pack: { ...pack, coupled: null } })
+  const after = renderBrief({ ...gathered, pack })
+  const beforeBytes = Buffer.byteLength(before, 'utf8')
+  const afterBytes = Buffer.byteLength(after, 'utf8')
+  assert.ok(coupling.coupled.length > 0)
+  assert.ok(afterBytes < beforeBytes)
+  assert.ok(beforeBytes - afterBytes > 1_000)
+
+  const emptyRoot = fixture('packed-coupled-savings-empty', { scripts: FAST_FIXTURE_TEST })
+  put(emptyRoot, 'lib/empty.mjs', 'export const EMPTY_COUPLING = true\n')
+  git(emptyRoot, 'add', '-A')
+  const emptyPack = join(emptyRoot, 'packed-coupled-savings-pack')
+  mkdirSync(emptyPack)
+  const { brief: emptyBrief } = compile(emptyRoot, { where: ['lib/empty.mjs'] }, ['--pack', emptyPack], 'packed-coupled-savings.brief.md')
+  assert.match(section(emptyBrief, '## Coupled sources'), /- \(none discovered\)/)
+  assert.doesNotMatch(section(emptyBrief, '## Coupled sources'), /^enumeration:/m)
+  assert.equal(existsSync(join(emptyPack, 'packed-coupled-savings.coupled.md')), false)
+})
+
 test('coupling refuses an unfenced caller and quiets when every caller is covered', () => {
   const where = verifyWhere({ checkout: ROOT, where: ['crew/limits.mjs'] })
   const discovery = discoverTripwires({ checkout: ROOT, files: where })
@@ -2772,7 +2943,7 @@ test('broad exported keys never become coupled sources', () => {
   assert.doesNotMatch(coupled, /BROAD_PIN/)
 })
 
-test('rendering absent coupling discovery states that it was not checked', () => {
+test('G1 absent coupling discovery retains the not-discovered line', () => {
   const root = fixture('render-absent-coupling')
   const where = verifyWhere({ checkout: root, where: ['lib/widget.mjs'] })
   const brief = renderBrief({
@@ -3148,9 +3319,8 @@ test('b476 RV1 hardening a build verdict on a non-done round leaves the done-pat
   assert.equal(io.calls.assign.filter(({ role, note }) => role === 'lead' && note === 'gate-repair').length, 1)
 })
 
-// #1059 — the symbols sidecar is the only treatment omission. Keep these
-// fixtures byte-oriented: a treatment that accidentally changes another pack
-// artifact or an inline pointer is not a valid holdout.
+// #1059 — the symbols sidecar remains the treatment omission while coupled
+// sources use the same omission escape. Keep the pack artifacts byte-oriented.
 test('HoldA1', () => {
   const root = fixture('hold-a1')
   put(root, 'lib/hold-a1.mjs', 'export const holdA1Symbol = 1\n')
@@ -3178,6 +3348,12 @@ test('HoldA2', () => {
   }
   const stripPointer = (text, packPath) => text.replaceAll(packPath, '<PACK>').replace(/^symbol index: .*\n/gm, '')
   assert.equal(stripPointer(control, controlPack), stripPointer(treatment, treatmentPack))
+  assert.match(control, /- \(none discovered\)/)
+  assert.doesNotMatch(control, /^enumeration:/m)
+  assert.match(treatment, /- \(none discovered\)/)
+  assert.doesNotMatch(treatment, /^enumeration:/m)
+  assert.equal(existsSync(join(treatmentPack, 'hold-a2.coupled.md')), false)
+  assert.equal(existsSync(join(controlPack, 'hold-a2.coupled.md')), false)
   assert.equal(existsSync(join(treatmentPack, 'hold-a2.symbols.md')), false)
   assert.ok(controlFiles['hold-a2.symbols.md'])
 })

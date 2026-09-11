@@ -9,7 +9,7 @@ import {
   writeFileSync as fsWriteFileSync,
   renameSync as fsRenameSync,
 } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { spawn as cpSpawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 
@@ -1523,7 +1523,54 @@ function parseExit(path, readFileSync, existsSync) {
 // second copy. `stage` is the caller's own so cellFailureKind
 // (crew/seat-io.mjs:1059) maps it onto the EXISTING 'unusable-envelope' kind:
 // no new vocabulary, and no repair of the seat's own file.
-export function readEnvelopeOrThrow(path, { existsSync, readFileSync, stage, role = null }) {
+function repairJsonStringControls(raw) {
+  let insideString = false
+  let escaped = false
+  let byteOffset = 0
+  const offsets = []
+  let repairedRaw = ''
+  for (const char of raw) {
+    const code = char.charCodeAt(0)
+    const byteLength = Buffer.byteLength(char, 'utf8')
+    if (!insideString) {
+      repairedRaw += char
+      if (char === '"') insideString = true
+    } else if (escaped) {
+      repairedRaw += char
+      escaped = false
+    } else if (char === '\\') {
+      repairedRaw += char
+      escaped = true
+    } else if (char === '"') {
+      repairedRaw += char
+      insideString = false
+    } else if (code <= 0x1f) {
+      offsets.push(byteOffset)
+      repairedRaw += code === 0x08 ? '\\b'
+        : code === 0x09 ? '\\t'
+          : code === 0x0a ? '\\n'
+            : code === 0x0c ? '\\f'
+              : code === 0x0d ? '\\r'
+                : `\\u00${code.toString(16).padStart(2, '0')}`
+    } else {
+      repairedRaw += char
+    }
+    byteOffset += byteLength
+  }
+  return { raw: repairedRaw, offsets }
+}
+
+function envelopeParseFailure(path, raw, stage, role, error) {
+  const parseFailure = new Error(`unusable envelope at ${path}: the file EXISTED (${raw.length} bytes) and is not JSON this driver can read: ${error.message}`)
+  parseFailure.stage = stage
+  if (role) parseFailure.role = role
+  parseFailure.raw = raw   // reading is not authoring: the exact bytes travel with
+  // the failure so a re-ask can tell "not re-emitted yet" from "re-emitted and
+  // still broken", and nothing ever writes them back.
+  return parseFailure
+}
+
+export function readEnvelopeOrThrow(path, { existsSync, readFileSync, stage, role = null, writeFileSync = fsWriteFileSync, now = Date.now }) {
   if (!path || !existsSync(path)) return null
   let raw
   // A read that loses a race with a rename, or that comes back denied, is an
@@ -1531,14 +1578,25 @@ export function readEnvelopeOrThrow(path, { existsSync, readFileSync, stage, rol
   // actually read and cannot parse are terminal.
   try { raw = String(readFileSync(path, 'utf8')) } catch { return null }
   let value
-  try { value = JSON.parse(raw) } catch (err) {
-    const parseFailure = new Error(`unusable envelope at ${path}: the file EXISTED (${raw.length} bytes) and is not JSON this driver can read: ${err.message}`)
-    parseFailure.stage = stage
-    if (role) parseFailure.role = role
-    parseFailure.raw = raw   // reading is not authoring: the exact bytes travel with
-    // the failure so a re-ask can tell "not re-emitted yet" from "re-emitted and
-    // still broken", and nothing ever writes them back.
-    throw parseFailure
+  try { value = JSON.parse(raw) } catch (strictError) {
+    const repaired = repairJsonStringControls(raw)
+    if (repaired.offsets.length === 0) throw envelopeParseFailure(path, raw, stage, role, strictError)
+    try { value = JSON.parse(repaired.raw) } catch { throw envelopeParseFailure(path, raw, stage, role, strictError) }
+    const row = {
+      at: now(), event: 'envelope-repair', outcome: 'repaired', role,
+      assignment_id: value.assignment_id ?? null, return_path: path,
+      escaped_count: repaired.offsets.length, escaped_offsets: repaired.offsets,
+    }
+    const journalPath = join(dirname(dirname(path)), 'journal.jsonl')
+    try {
+      writeFileSync(journalPath, `${JSON.stringify(row)}\n`, { flag: 'a' })
+    } catch (err) {
+      const journalFailure = new Error(`unusable envelope at ${path}: repaired bytes could not be recorded in ${journalPath}`, { cause: err })
+      journalFailure.stage = stage
+      if (role !== null) journalFailure.role = role
+      journalFailure.raw = raw
+      throw journalFailure
+    }
   }
   return value && typeof value === 'object' ? value : null
 }

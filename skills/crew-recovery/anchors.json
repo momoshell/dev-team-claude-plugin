@@ -7,5 +7,5 @@
   "crew/drive.mjs:53": "builder: 2400, reviewer: 1800",
   "scripts/factory/make-brief.mjs:931": "function colourNeutralEnv(base = process.env)",
   "crew/seat-io.mjs:1709": "export function recogniseProviderRetry(text) {",
-  "crew/drive.mjs:5217": "const completeCheckProof = (label, options = {}) => {"
+  "crew/drive.mjs:5443": "const completeCheckProof = (label, options = {}) => {"
 }

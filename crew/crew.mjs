@@ -3063,10 +3063,13 @@ export function teardownAbsentCause(crew) {
 // replacing the yielding wait with another synchronous nap.
 export const STOP_TERM_GRACE_MS = 1000
 export const STOP_POLL_INTERVAL_MS = 50
-// The only terminal rows an operator stop may supersede: the ledger finalizer's own record of
-// the signal this stop just sent. A closed set, because superseding anything else would let a
-// stop overwrite a genuine outcome.
-export const STOP_SUPERSEDABLE_REASONS = Object.freeze(new Set(['SIGTERM', 'SIGINT']))
+// The ONE terminal row an operator stop may supersede: the ledger finalizer's own record of the
+// signal this stop itself sent. `stopCmd` sends SIGTERM and nothing else, so SIGTERM is the
+// only reason it can have caused. SIGINT was in this set and should not have been — the
+// finalizer arms it too, so a genuine concurrent Ctrl-C could land between the running read
+// and the post-death read and be overwritten as operator-owned. Superseding a row this stop
+// did not cause is indistinguishable from clobbering a real outcome.
+export const STOP_SUPERSEDABLE_REASON = 'SIGTERM'
 
 function stopRefusal(message) {
   throw new UsageError(`crew.mjs stop: refused — ${message}`)
@@ -3260,7 +3263,7 @@ export async function stopCmd(args, deps = {}) {
     // stop sent is superseded. Nothing else is: another actor, or any reason outside the closed
     // set, is a genuine outcome and is left exactly as it stands.
     const supersedesSignalRow = finalSession.terminal_actor === 'finalizer'
-      && STOP_SUPERSEDABLE_REASONS.has(String(finalSession.terminal_reason ?? ''))
+      && String(finalSession.terminal_reason ?? '') === STOP_SUPERSEDABLE_REASON
     if (finalSession.status === 'running' || supersedesSignalRow) {
       try {
         ledger.endSession({ adw_id: adwId, status: 'aborted', outcome: 'aborted', terminal_reason: 'operator-stop', terminal_actor: 'operator' })

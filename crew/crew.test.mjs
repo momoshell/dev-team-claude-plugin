@@ -3122,7 +3122,7 @@ const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
 ledger.startSession({ adw_id: adwId, repo_slug: 'checkout', task_slug: task })
 // A REAL attended run arms the ledger finalizer, so a serviced SIGTERM lands
 // fail/failed/SIGTERM/finalizer on the way out. Closing the ledger instead concealed the
-// collision between that row and the operator's own terminal row — the review's must-fix.
+// collision between that row and the terminal row the operator writes: the review must-fix.
 ledger.installFinalizer({ adw_id: adwId })
 mkdirSync(join(crewDir, 'ledger'), { recursive: true })
 writeFileSync(join(crewDir, 'ledger', 'run.json'), JSON.stringify({ adw_id: adwId, db_path: dbPath }))
@@ -3313,6 +3313,29 @@ test('C1 operator stop settles a real attended run blocked synchronously', { ski
   } finally {
     if (run && run.exitCode === null && run.signalCode === null) { try { run.kill('SIGKILL') } catch {} }
     rmSync(fixture.root, { recursive: true, force: true })
+  }
+})
+
+// A genuine concurrent Ctrl-C is NOT caused by this stop. The finalizer arms SIGINT as well as
+// SIGTERM, so a SIGINT row can land between the running read and the post-death read — while
+// stopCmd sends only SIGTERM. Superseding a row this stop did not cause is indistinguishable
+// from clobbering a real outcome, so only the SIGTERM row is supersedable.
+test('D1b only the finalizer row this stop CAUSED is superseded', async () => {
+  const args = { task: 'unit-stop', pid: '42', checkout: '/checkout' }
+  const finalizerRow = (reason, actor = 'finalizer') => ({ status: 'fail', outcome: 'failed', terminal_reason: reason, terminal_actor: actor })
+
+  // the row this stop caused: superseded
+  const caused = stopUnitFixture({ sessions: [{ status: 'running' }, finalizerRow('SIGTERM'), { status: 'aborted', outcome: 'aborted' }] })
+  await stopCmd(args, caused.deps)
+  assert.equal(caused.calls.ends.length, 1)
+  assert.equal(caused.calls.ends[0].terminal_reason, 'operator-stop')
+  assert.equal(caused.calls.ends[0].terminal_actor, 'operator')
+
+  // rows this stop did NOT cause: preserved, no terminal write at all
+  for (const row of [finalizerRow('SIGINT'), finalizerRow('SIGHUP'), finalizerRow('SIGTERM', 'driver'), { status: 'ok', outcome: 'success', terminal_reason: 'natural-completion', terminal_actor: 'driver' }]) {
+    const untouched = stopUnitFixture({ sessions: [{ status: 'running' }, row] })
+    await stopCmd(args, untouched.deps)
+    assert.deepEqual(untouched.calls.ends, [], `${row.terminal_reason}/${row.terminal_actor} must be preserved`)
   }
 })
 

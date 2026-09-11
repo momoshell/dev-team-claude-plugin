@@ -96,6 +96,13 @@ const CTX = Object.freeze({
   roles: ['lead', 'planner', 'builder', 'reviewer'], lane: null, suite: 'suite-cmd', env: { CREW_SUITE_SLOTS: '0' },
 })
 
+// Every fixture that owns a run map answers the census command the way it answers `gate` and
+// `suite`. The bare `{ok:true, output:''}` default is not a census ANSWER — the driver now
+// correctly reads an unparseable census as UNMEASURED and escalates, so a blank default would
+// escalate every drive fixture that never meant to exercise the census at all. A test that
+// cares about census behaviour stubs the command explicitly.
+export const CENSUS_GREEN_OUTPUT = `${JSON.stringify({ action: 'none', verdict: 'green', selected: [], failures: [], defects: [], detail: null, reason: null, denominator: { suites: 0, tests: 0 } })}\n`
+
 const fenceRecord = (lane, files) => ({ lane, files: Array.isArray(files) ? [...files] : [files] })
 const fenceSpan = (lane, path, start, end) => fenceRecord(lane, `${path}:${start}-${end}`)
 const fenceBase = (lineCount) => `${Array.from({ length: lineCount }, (_, index) => `base-${index + 1}`).join('\n')}\n`
@@ -198,7 +205,13 @@ function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cle
       calls.run.push({ cmd: original, n: counts[original] })
       calls.trace.push(`run:${original}`)
       calls.wrapped.push({ cmd: original, wrapped: cmd, clean: false })
-      const r = runs[`${original}:${counts[original]}`] ?? runs[original] ?? { ok: true, output: '' }
+      // The census command is answered like `gate` and `suite` are: a fixture that does not
+      // stub it still gets a well-formed GREEN record. The default `{ok:true, output:''}` is
+      // not a census answer at all — the driver now (correctly) reads an unparseable census as
+      // UNMEASURED and escalates, so a blank default would escalate every drive fixture that
+      // never meant to exercise the census. A test that cares stubs the command explicitly.
+      const r = runs[`${original}:${counts[original]}`] ?? runs[original]
+        ?? (original.includes('census-exhibits.mjs') ? { ok: true, output: CENSUS_GREEN_OUTPUT } : { ok: true, output: '' })
       return r
     },
     changedFiles() { return changedQueue.length > 1 ? changedQueue.shift() : changedQueue[0] },
@@ -1361,6 +1374,7 @@ const DRIVE_JOURNAL_EXPECTED = Object.freeze([
   ["recordRow", "", "at mutation_anchor_bind"],
   ["recordRow", "", "at mutation_anchor_absent"],
   ["recordRow", "", "at gate_check_discrimination gate_generation gate_check_discriminations ...(checkProofNote ? { gate_check_proof_note: checkProofNote } : {})"],
+  ["recordRow", "", "at census_exhibits"],
   ["recordRow", "", "at finding_hardened"],
   ["recordRow", "", "at ...entry"],
   ["recordRow", "", "at auto_fix"],
@@ -1449,6 +1463,7 @@ function publicationIo(options = {}) {
   const roleCounts = {}
   const defaults = {
     'lane-cmd': { ok: true, output: '' },
+    'node crew/census-exhibits.mjs': { ok: true, output: CENSUS_GREEN_OUTPUT },
     'suite-cmd': () => ({ ok: true, output: warm }),
     'git fetch origin main': { ok: true, output: '' },
     'git rev-parse origin/main': { ok: true, output: 'base1111\n' },

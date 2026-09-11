@@ -5962,7 +5962,10 @@ test('a staged refusal escapes driveTask with provider text intact for child esc
     writeFile: () => {}, log: () => {}, status: () => {}, now: () => 0,
     assign: () => ({ id: 'd1', returnPath: '/tmp/refusal.json' }),
     wait: () => { throw refusal },
-    run: () => {
+    run: (command) => {
+      // a hand-built io has no `.calls`, so the census valve reads it as production and runs
+      // the census; answer it like the gate rather than letting the gate record stand in
+      if (String(command).includes('census-exhibits.mjs')) return { ok: true, output: '{"action":"none","verdict":"green","selected":[],"failures":[],"defects":[],"detail":null,"reason":null,"denominator":{"suites":0,"tests":0}}\n' }
       gateRuns += 1
       return gateRuns === 1
         ? { ok: false, output: 'red\nGATE-SUMMARY {"total":1,"failed":1,"errored":0}' }
@@ -6524,6 +6527,10 @@ test('a real ledger round trip mirrors drive gate verdicts into distinct gate_re
           return counts[cmd] === 1
             ? { ok: false, output: 'baseline\nGATE-SUMMARY {"total":3,"failed":3,"errored":0}' }
             : counts[cmd] === 2 ? { ok: false, output: 'red' } : { ok: true, output: 'green' }
+        }
+        // a hand-built io has no `.calls`, so the census valve reads it as production
+        if (String(cmd).includes('census-exhibits.mjs')) {
+          return { ok: true, output: '{"action":"none","verdict":"green","selected":[],"failures":[],"defects":[],"detail":null,"reason":null,"denominator":{"suites":0,"tests":0}}\n' }
         }
         return { ok: true, output: '' }
       },

@@ -935,6 +935,34 @@ test('B1d malformed UTF-8 is refused, never repaired into a changed value', () =
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
+// The two-read design had a TOCTOU in both directions. Pinned here so a future reader cannot
+// reintroduce a second read of the path: a rename between the reads must not turn a valid,
+// repairable envelope into a terminal defect.
+test('B1e a rename between reads cannot turn a repairable envelope terminal', () => {
+  const dir = scratchDir('envelope-toctou-')
+  const returnsDir = join(dir, 'returns')
+  mkdirSync(returnsDir)
+  const path = join(returnsDir, 'd6.tech-lead.json')
+  writeFileSync(path, RECORDED_TECH_LEAD)
+  const writes = []
+  let reads = 0
+  try {
+    const value = readEnvelopeOrThrow(path, {
+      existsSync,
+      // every read after the first sees a DIFFERENT file, as a rename would leave behind
+      readFileSync: (target, encoding) => {
+        reads += 1
+        if (reads > 1) return readFileSync(join(returnsDir, 'missing.json'), encoding)
+        return readFileSync(target, encoding)
+      },
+      stage: 'headless-parse-error', role: 'tech-lead',
+      writeFileSync: (...args) => writes.push(args), now: () => 1700000000000,
+    })
+    assert.equal(value.assignment_id, 'd6')
+    assert.equal(reads, 1, 'the envelope is read exactly once; a second read is a TOCTOU')
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
 test('B1b a repaired read records the original UTF-8 byte offsets', () => {
   const f = directEnvelopeFixture(RECORDED_TECH_LEAD)
   try {

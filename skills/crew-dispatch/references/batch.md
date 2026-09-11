@@ -168,8 +168,8 @@ so an unflagged batch is unchanged and behaves exactly as before. The two
 transport names and the refusal are pinned in the dispatcher:
 `BOOT_TRANSPORT = 'headless-all'`, `PANE_TRANSPORT = 'panes'`, and
 `TRANSPORT_CONFLICT = 'transport-conflict'`
-(`scripts/factory/dispatch-batch.mjs:169`,
-`scripts/factory/dispatch-batch.mjs:170`,
+(`scripts/factory/dispatch-batch.mjs:174`,
+`scripts/factory/dispatch-batch.mjs:175`,
 `scripts/factory/dispatch-batch.mjs:22`).
 
 `--headless-all` explicitly selects the factory transport. `--panes` selects

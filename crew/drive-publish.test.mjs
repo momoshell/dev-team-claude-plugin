@@ -1,8 +1,13 @@
 // Split from crew/drive.test.mjs (#918 follow-up): one subject per file so a
 // lane fencing one driver concern no longer locks every driver test.
 // Shared fixtures, and the ledger sandbox side effect, live in ./drive-fixtures.mjs.
+import { spawnSync } from 'node:child_process'
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname } from 'node:path'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { anchorRepairCommand } from './drive.mjs'
 import {
   COMMIT_TRAILER, CTX, HONEST_NARRATION, NARRATION_HEADING, NARRATION_RECORD, NARRATION_REFUSALS, NARRATION_REFUSAL_NAMES, NARRATION_STAGE_VOCABULARY, NARRATOR_REGISTER, PUBLISH_REFUSAL_NAMES, RUN_START_EVENT, TD, VARIANTS, applyNarration, bounceDetail, bounceSeatOf, buildEnv, commitIntent, composeCommitMessage, composePrBody, convergeRun, driveTask, issueTrailers, join, journalRowsSinceRunStart, narrateRecord, narrationDefect, narrationIsRawJson, narrationPrompt, narrationStageDefect, narratorApiRoot, narratorIo, narratorModelId, narratorModelsCommand, planEnv, prAnomalies, publicationIo, readFileSync, refsFromCommitMessage, reviewEnv, runPublished, shellArg,
 } from './drive-fixtures.mjs'
@@ -537,4 +542,220 @@ test('an armed run refuses green suites whose publication counts are unmeasured'
 test('refsFromCommitMessage reads the trailer in order, de-duplicates, and stays empty without one', () => {
   assert.deepEqual(refsFromCommitMessage('subject\n\nbody\n\nRefs: #679, #758, #679'), ['#679', '#758'])
   assert.deepEqual(refsFromCommitMessage('subject\n\nbody'), [])
+})
+
+const ANCHOR_REPAIR_PREFIX = 'ANCHOR_REPAIR_ROW '
+const ANCHOR_REPAIR_MANIFEST = 'skills/qa-test-writing/anchors.json'
+const anchorRepairOutput = (row) => `${ANCHOR_REPAIR_PREFIX}${JSON.stringify(row)}\n`
+
+// Publication fixtures intentionally do not touch a live manifest. This local wrapper
+// models the post-rebase child, its generated paths, and the amend while retaining the
+// exported publicationIo journal/head/PR observations.
+function anchorRepairIo({
+  changed: changedBefore = ['a.mjs', 'a.test.mjs'], generated = [ANCHOR_REPAIR_MANIFEST],
+  changedAfterAmend = [], amendedHead = 'amended3333', repairOutput = '', repairResult,
+  repairThrows = null, onRebase = null, onRepair = null, addResult = { ok: true, output: '' }, amendResult = { ok: true, output: '' },
+  ...options
+} = {}) {
+  const io = publicationIo({ ...options, changed: changedBefore })
+  const baseRun = io.run
+  let changedCalls = 0
+  io.calls.anchorRepair = []
+  io.calls.adds = []
+  io.calls.amends = []
+  io.calls.changedFiles = []
+  io.run = function (command) {
+    const text = String(command)
+    if (text.includes('node --input-type=module -e')) {
+      this.calls.anchorRepair.push(text)
+      this.calls.order.push('anchor-repair')
+      if (repairThrows) throw new Error(repairThrows === true ? 'anchor repair interrupted' : String(repairThrows))
+      if (typeof onRepair === 'function') return onRepair(this.state, text)
+      if (typeof repairResult === 'function') return repairResult(this.state, text)
+      return repairResult ?? { ok: true, output: typeof repairOutput === 'function' ? repairOutput(this.state, text) : repairOutput }
+    }
+    if (text.startsWith('git add -- ')) {
+      this.calls.adds.push(text)
+      this.calls.order.push('git-add')
+      return addResult
+    }
+    if (text === 'git commit -q --amend --no-edit') {
+      this.calls.amends.push(text)
+      this.calls.order.push('amend')
+      this.state.head = amendedHead
+      return amendResult
+    }
+    const result = baseRun.call(this, command)
+    if (text === 'git rebase origin/main' && typeof onRebase === 'function') onRebase(this.state)
+    return result
+  }
+  io.changedFiles = function () {
+    changedCalls += 1
+    const paths = changedCalls <= 2 ? changedBefore : changedCalls === 3 ? generated : changedAfterAmend
+    this.calls.changedFiles.push({ n: changedCalls, paths: [...paths] })
+    return [...paths]
+  }
+  // publicationIo has no census runner by default; exposing this method enables the
+  // driver's real post-commit census branch without changing the shared fixture.
+  io.runClean = () => ({ ok: true, output: '' })
+  return io
+}
+
+const anchorRepairRun = (io, over = {}) => driveTask({ ...CTX, task: 'anchor-repair-task', publish: { branch: 'feature/ship' }, ...over }, io)
+
+const noPublicationAfterRepair = (io) => {
+  assert.equal(io.calls.run.some((command) => command === 'suite-cmd'), false)
+  assert.equal(io.calls.run.some((command) => command.startsWith('git push')), false)
+  assert.equal(io.calls.run.some((command) => command.startsWith('gh pr create')), false)
+}
+
+test('A1 anchor repair shifts a pin after census and amends the one lane commit', () => {
+  const row = { manifest: ANCHOR_REPAIR_MANIFEST, relocations: [{ pin: 'crew/drive.mjs:7328', old_line: 7328, new_line: 7341 }], refusals: [] }
+  const io = anchorRepairIo({ repairOutput: anchorRepairOutput(row), amendedHead: 'amended3333', generated: [ANCHOR_REPAIR_MANIFEST, 'skills/qa-test-writing/references/citations.md'] })
+  const result = anchorRepairRun(io)
+  assert.equal(result.status, 'done')
+  const repairAt = io.calls.order.indexOf('anchor-repair')
+  const censusAt = io.calls.order.findIndex((event) => event.startsWith('run:node crew/census-exhibits.mjs'))
+  const rebaseAt = io.calls.order.indexOf('run:git rebase origin/main')
+  const suiteAt = io.calls.order.indexOf('run:suite-cmd')
+  assert.ok(rebaseAt < repairAt)
+  assert.ok(censusAt < repairAt)
+  assert.ok(repairAt < suiteAt)
+  assert.deepEqual(io.calls.commits.length, 1)
+  assert.deepEqual(io.calls.amends.length, 1)
+  assert.equal(result.details.commit, 'amended3333')
+  assert.equal(io.calls.suiteHead, 'amended3333')
+  assert.equal(io.calls.coldHead, 'amended3333')
+  assert.deepEqual(result.details.files_committed, ['a.mjs', 'a.test.mjs', ANCHOR_REPAIR_MANIFEST, 'skills/qa-test-writing/references/citations.md'])
+})
+
+test('B1 anchor repair journals and publishes every manifest pin relocation value', () => {
+  const row = {
+    manifest: ANCHOR_REPAIR_MANIFEST,
+    relocations: [
+      { pin: 'crew/drive.mjs:7328', old_line: 7328, new_line: 7341 },
+      { pin: 'crew/drive.mjs:7334', old_line: 7334, new_line: 7347 },
+    ],
+    refusals: [],
+  }
+  const io = anchorRepairIo({ repairOutput: anchorRepairOutput(row), amendedHead: 'amended4444' })
+  const result = anchorRepairRun(io)
+  assert.equal(result.status, 'done')
+  const journal = io.calls.logs.find((entry) => entry.anchor_repair)
+  assert.ok(journal)
+  assert.equal(journal.anchor_repair.manifest, row.manifest)
+  assert.deepEqual(journal.anchor_repair.relocations, row.relocations)
+  const body = io.calls.writes[`${TD}/pr-body.md`]
+  assert.ok(body.includes(row.manifest))
+  for (const relocation of row.relocations) {
+    for (const value of [relocation.pin, String(relocation.old_line), String(relocation.new_line)]) assert.ok(body.includes(value), value)
+  }
+})
+
+test('C1 anchor repair refuses rot before suite, push, or PR', () => {
+  const row = { manifest: ANCHOR_REPAIR_MANIFEST, relocations: [], refusals: [{ kind: 'rot', detail: 'crew/drive.mjs:7328 content appears nowhere' }] }
+  const io = anchorRepairIo({ repairOutput: anchorRepairOutput(row) })
+  const result = anchorRepairRun(io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'anchor-repair')
+  assert.match(result.details.escalation.why, /ROT/)
+  noPublicationAfterRepair(io)
+})
+
+test('D1 anchor repair refuses ambiguity before suite, push, or PR', () => {
+  const row = { manifest: ANCHOR_REPAIR_MANIFEST, relocations: [], refusals: [{ kind: 'ambiguity', detail: 'crew/drive.mjs:7328 content occurs 2 times' }] }
+  const io = anchorRepairIo({ repairOutput: anchorRepairOutput(row) })
+  const result = anchorRepairRun(io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'anchor-repair')
+  assert.match(result.details.escalation.why, /AMBIGUITY/)
+  noPublicationAfterRepair(io)
+})
+
+test('E1 anchor repair leaves a clean empty sweep byte-stable', () => {
+  const io = anchorRepairIo({ repairOutput: '' })
+  const result = anchorRepairRun(io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.logs.some((entry) => entry.anchor_repair), false)
+  assert.equal(io.calls.adds.length, 0)
+  assert.equal(io.calls.amends.length, 0)
+  assert.equal(io.calls.commits.length, 1)
+  assert.equal(result.details.commit, io.state.post)
+  assert.equal(io.state.head, io.state.post)
+  const body = io.calls.writes[`${TD}/pr-body.md`]
+  assert.doesNotMatch(body, /anchor-repair/)
+  assert.equal(io.calls.changedFiles.length, 2)
+})
+
+test('F1 anchor repair observes only post-rebase fixture bytes and runs before suite', () => {
+  const row = { manifest: ANCHOR_REPAIR_MANIFEST, relocations: [{ pin: 'crew/drive.mjs:7400', old_line: 7400, new_line: 7412 }], refusals: [] }
+  let observed = null
+  const io = anchorRepairIo({
+    repairOutput: (state) => {
+      observed = { bytes: state.fixtureBytes, pin: state.pinLocation, head: state.head }
+      return anchorRepairOutput(row)
+    },
+    onRebase: (state) => { state.fixtureBytes = 'post-rebase-bytes'; state.pinLocation = 7412 },
+    amendedHead: 'amended5555',
+  })
+  const result = anchorRepairRun(io)
+  assert.equal(result.status, 'done')
+  assert.deepEqual(observed, { bytes: 'post-rebase-bytes', pin: 7412, head: io.state.post })
+  const repairAt = io.calls.order.indexOf('anchor-repair')
+  const rebaseAt = io.calls.order.indexOf('run:git rebase origin/main')
+  const censusAt = io.calls.order.findIndex((event) => event.startsWith('run:node crew/census-exhibits.mjs'))
+  const suiteAt = io.calls.order.indexOf('run:suite-cmd')
+  assert.ok(rebaseAt < repairAt)
+  assert.ok(censusAt < repairAt)
+  assert.ok(repairAt < suiteAt)
+})
+
+test('G1 anchor repair fails closed for command failure and stale post-check rows', () => {
+  const cases = [
+    { repairThrows: 'EPERM from repair child' },
+    { repairResult: { ok: true, output: anchorRepairOutput({ manifest: ANCHOR_REPAIR_MANIFEST, relocations: [], refusals: [{ kind: 'stale', detail: 'post-check still shifted' }] }) } },
+  ]
+  for (const options of cases) {
+    const io = anchorRepairIo(options)
+    const result = anchorRepairRun(io)
+    assert.equal(result.status, 'escalation')
+    assert.equal(result.details.escalation.where, 'anchor-repair')
+    noPublicationAfterRepair(io)
+  }
+})
+
+test('RV2-1 anchor repair child ignores a measured out-of-fence shift', () => {
+  const root = mkdtempSync(`${tmpdir()}/anchor-repair-child-`)
+  const expected = "const shifted = 'uniquely anchored fixture content'"
+  const manifest = `${JSON.stringify({ 'scripts/outside.mjs:1': expected }, null, 2)}\n`
+  const write = (path, text) => {
+    const file = `${root}/${path}`
+    mkdirSync(dirname(file), { recursive: true })
+    writeFileSync(file, text)
+  }
+  const git = (...args) => {
+    const result = spawnSync('git', args, { cwd: root, encoding: 'utf8' })
+    assert.equal(result.status, 0, `${args.join(' ')}: ${result.stderr || result.stdout || 'git failed'}`)
+  }
+  try {
+    write('skills/qa-test-writing/anchor-pin.mjs', readFileSync(new URL('../skills/qa-test-writing/anchor-pin.mjs', import.meta.url), 'utf8'))
+    write('skills/outside/anchors.json', manifest)
+    write('skills/outside/SKILL.md', '# Fixture\n\n`scripts/outside.mjs:1`\n')
+    write('scripts/outside.mjs', `// shifted from the cited line\n${expected}\n`)
+    git('init', '-q')
+    git('config', 'user.email', 'anchor@example.invalid')
+    git('config', 'user.name', 'Anchor Fixture')
+    git('add', '.')
+    git('commit', '-q', '-m', 'fixture')
+    git('branch', '-M', 'main')
+    git('checkout', '-q', '-b', 'lane')
+    write('crew/drive.mjs', '// lane-owned change\n')
+
+    const repair = spawnSync('/bin/sh', ['-c', anchorRepairCommand()], { cwd: root, encoding: 'utf8' })
+    assert.equal(repair.status, 0, `${repair.stderr || ''}${repair.stdout || ''}`)
+    assert.equal(repair.stdout, '')
+    assert.equal(readFileSync(`${root}/skills/outside/anchors.json`, 'utf8'), manifest)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
 })

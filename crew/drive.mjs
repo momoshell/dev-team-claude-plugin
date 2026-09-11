@@ -7325,12 +7325,14 @@ function runTask(ctx, io, crash) {
   let rebaseMs = 0
   let coldSuite
   let published = null
+  let anchorRepair = () => runLaneAnchorRepair(io)
+  const anchorRepairAnomalies = []
   stage('commit')
   const message = composeCommitMessage({ task: ctx.task, planEnv, builderEnv })
   const subject = String(message).split('\n')[0]
   const hasCommitSubject = String(planEnv.details?.commit_subject || '').split('\n').some((line) => line.trim())
   if (!hasCommitSubject) io.log(recordRow({ at: io.now(), commit_subject: 'fallback-from-plan-summary' }))
-  const committing = io.changedFiles().filter(inScope)
+  let committing = io.changedFiles().filter(inScope)
   const preRebaseCommit = S.commit = io.commit(committing, message)
   stageComplete()
 
@@ -7418,6 +7420,48 @@ function runTask(ctx, io, crash) {
       continue suiteCycle
     }
     if (postCommit.escalation) return postCommit.escalation
+  }
+
+  anchorRepair = typeof anchorRepair === 'function' ? anchorRepair() : anchorRepair
+  if (!anchorRepair || !Array.isArray(anchorRepair.rows) || !Array.isArray(anchorRepair.refusalKinds)) return escalate('anchor-repair', 'the anchor repair sweep returned no structured result')
+  if (anchorRepair.refusalKinds.includes('rot')) return escalate('anchor-repair', `anchor repair refused ROT: ${anchorRepair.why || 'content was found nowhere'}`)
+  if (anchorRepair.refusalKinds.includes('ambiguity')) return escalate('anchor-repair', `anchor repair refused AMBIGUITY: ${anchorRepair.why || 'content was found more than once'}`)
+  if (!anchorRepair.ok || anchorRepair.refusalKinds.includes('stale') || anchorRepair.refusalKinds.includes('error')) return escalate('anchor-repair', `anchor repair did not settle: ${anchorRepair.why || 'the sweep was not proven clean'}`)
+  const anchorRepairRows = anchorRepair.rows.filter((row) => Array.isArray(row.relocations) && row.relocations.length > 0)
+  const anchorRelocations = anchorRepairRows.flatMap((row) => row.relocations)
+  if (anchorRelocations.length > 0) {
+    try {
+      for (const row of anchorRepairRows) io.log
+        (recordRow({ at: io.now(), anchor_repair: row }))
+    } catch (err) {
+      return escalate('anchor-repair', `the anchor repair journal could not record the relocation: ${err?.message ?? String(err)}`)
+    }
+    let generated
+    try { generated = io.changedFiles() } catch (err) { return escalate('anchor-repair', `the anchor repair changed-file census failed: ${err?.message ?? String(err)}`) }
+    if (!Array.isArray(generated) || generated.length === 0 || generated.some((path) => typeof path !== 'string' || path.length === 0)) return escalate('anchor-repair', 'the anchor repair reported relocations but no non-empty generated paths')
+    let added
+    try { added = io.run(`git add -- ${generated.map((path) => shellArg(path)).join(' ')}`) } catch (err) { added = { ok: false, output: err?.message ?? String(err) } }
+    if (!added?.ok) return escalate('anchor-repair', `the anchor repair generated files could not be staged${added?.output ? `: ${String(added.output).slice(-2000)}` : ''}`)
+    let amended
+    try { amended = io.run('git commit -q --amend --no-edit') } catch (err) { amended = { ok: false, output: err?.message ?? String(err) } }
+    if (!amended?.ok) return escalate('anchor-repair', `the existing lane commit could not be amended${amended?.output ? `: ${String(amended.output).slice(-2000)}` : ''}`)
+    let amendedHead
+    try {
+      const head = io.run('git rev-parse HEAD')
+      const output = String(head?.output || '').trim()
+      if (!head?.ok || !output) return escalate('anchor-repair', 'the amended lane commit head could not be proven')
+      amendedHead = output
+    } catch (err) { return escalate('anchor-repair', `the amended lane commit head probe failed: ${err?.message ?? String(err)}`) }
+    let cleanAfter
+    try { cleanAfter = io.changedFiles() } catch (err) { return escalate('anchor-repair', `the checkout cleanliness after anchor repair could not be proven: ${err?.message ?? String(err)}`) }
+    if (!Array.isArray(cleanAfter) || cleanAfter.length > 0) return escalate('anchor-repair', `the checkout remained dirty after the anchor repair amend${cleanAfter?.length ? `: ${cleanAfter.join(', ')}` : ''}`)
+    S.commit = amendedHead
+    committing.push(...generated)
+    for (const row of anchorRepairRows) {
+      for (const relocation of row.relocations) {
+        anchorRepairAnomalies.push({ kind: 'anchor-repair', detail: `manifest ${row.manifest}, pin ${relocation.pin}, old line ${relocation.old_line}, new line ${relocation.new_line}` })
+      }
+    }
   }
 
   stage('suite')
@@ -7579,7 +7623,7 @@ function runTask(ctx, io, crash) {
       } : null,
       review: { verdict: finalReview.verdict === 'pass' ? 'pass' : 'changes-needed', residuals: finalReview.residuals, ...carriedBlock() },
       suite: { warm: warmCounts, cold: coldSuite.counts, cold_verified: coldSuite.counts !== null },
-      anomalies: prAnomalies(journalRowsSinceRunStart(journalText)),
+      anomalies: [...prAnomalies(journalRowsSinceRunStart(journalText)), ...anchorRepairAnomalies],
     }
     let registerText = ''
     try { registerText = String(io.readFile(`${ctx.checkout}/crew/capabilities.json`) || '') } catch { /* narration is never load-bearing */ }
@@ -9158,4 +9202,173 @@ function decodeCensusResult(result, error = null) {
     total_seconds: null, elapsed_seconds: null, denominator: { suites: null, tests: null },
     measurement: null, cost: null,
   }
+}
+
+// #b618 — repair runs in the checkout after rebase and the post-commit census. Keep the
+// child source in one shell-quoted `-e` argument: the command is authored by the driver,
+// while all manifest discovery and writes stay in the checkout that `io.run` owns.
+export const ANCHOR_REPAIR_ROW_PREFIX = 'ANCHOR_REPAIR_ROW '
+export const ANCHOR_REPAIR_REFUSAL_KINDS = Object.freeze(['rot', 'ambiguity', 'stale', 'error'])
+
+export function anchorRepairCommand() {
+  const child = [
+    "import { join, relative } from 'node:path'",
+    "import { anchorManifestDirs, laneFence, repairAnchorsInPlace, checkSkillAnchors } from './skills/qa-test-writing/anchor-pin.mjs'",
+    'const root = process.cwd()',
+    `const prefix = ${JSON.stringify(ANCHOR_REPAIR_ROW_PREFIX)}`,
+    "const textOf = (value) => typeof value === 'string' ? value : JSON.stringify(value)",
+    "const kindOf = (detail, postWrite = false) => {",
+    "  if (postWrite) return 'stale'",
+    "  const text = String(detail || '')",
+    "  if (/\\b(?:appears|found)\\s+nowhere\\b|\\bnowhere\\s+in\\b/i.test(text)) return 'rot'",
+    "  if (/\\b(?:occurs\\s+\\d+\\s+times|found\\s+more\\s+than\\s+once|more\\s+than\\s+once)\\b/i.test(text)) return 'ambiguity'",
+    "  return 'error'",
+    '}',
+    'const refusal = (kind, detail) => ({ kind, detail: String(detail || kind) })',
+    'const emit = (manifest, relocations, refusals) => {',
+    '  if (relocations.length > 0 || refusals.length > 0) console.log(prefix + JSON.stringify({ manifest, relocations, refusals }))',
+    '}',
+    'let failed = false',
+    'let dirs',
+    'try { dirs = anchorManifestDirs(root) } catch (error) {',
+    "  const detail = `manifest discovery failed: ${error?.message || String(error)}`",
+    "  emit('(root)', [], [refusal('error', detail)])",
+    '  failed = true',
+    '  dirs = []',
+    '}',
+    'for (const skillDir of dirs) {',
+    "  const manifestPath = join(skillDir, 'anchors.json')",
+    "  const manifest = relative(root, manifestPath).replaceAll('\\\\', '/')",
+    '  let repairFence',
+    '  try { repairFence = laneFence({ root }) } catch { repairFence = { paths: [], measured: false } }',
+    '  if (!repairFence || !Array.isArray(repairFence.paths) || typeof repairFence.measured !== "boolean") repairFence = { paths: [], measured: false }',
+    '  const repairPaths = new Set(repairFence.paths)',
+    '  let repaired',
+    '  try { repaired = repairAnchorsInPlace({ root, skillDir, manifestPath, repairAll: false }) } catch (error) {',
+    "    const detail = `repair command failed for ${manifest}: ${error?.message || String(error)}`",
+    "    emit(manifest, [], [refusal('error', detail)])",
+    '    failed = true',
+    '    continue',
+    '  }',
+    '  if (!repaired || !Array.isArray(repaired.repairs) || !Array.isArray(repaired.refusals)) {',
+    "    emit(manifest, [], [refusal('error', `malformed repair result for ${manifest}`)])",
+    '    failed = true',
+    '    continue',
+    '  }',
+    '  let relocations',
+    '  try {',
+    "    if (repaired.repairs.some((repair) => !repair || typeof repair.key !== 'string' || !Number.isInteger(repair.from) || !Number.isInteger(repair.to))) throw new Error('repair row is malformed')",
+    '    relocations = repaired.repairs.map((repair) => ({ pin: repair.key, old_line: repair.from, new_line: repair.to }))',
+    '  } catch (error) {',
+    "    emit(manifest, [], [refusal('error', `malformed relocation for ${manifest}: ${error?.message || String(error)}`)])",
+    '    failed = true',
+    '    continue',
+    '  }',
+    '  const refusals = repaired.refusals.map((detail) => refusal(kindOf(detail), textOf(detail)))',
+    '  let checked',
+    '  try { checked = checkSkillAnchors({ root, skillDir, manifestPath }) } catch (error) {',
+    "    refusals.push(refusal(relocations.length > 0 ? 'stale' : 'error', `post-check failed for ${manifest}: ${error?.message || String(error)}`))",
+    '    failed = true',
+    '    emit(manifest, relocations, refusals)',
+    '    continue',
+    '  }',
+    '  if (!checked || !Array.isArray(checked.failures) || !Array.isArray(checked.shifted)) {',
+    "    refusals.push(refusal(relocations.length > 0 ? 'stale' : 'error', `malformed post-check for ${manifest}`))",
+    '    failed = true',
+    '    emit(manifest, relocations, refusals)',
+    '    continue',
+    '  }',
+    '  let inFenceShifts',
+    '  try {',
+    '    if (checked.shifted.some((shift) => !shift || typeof shift.rel !== "string")) throw new Error("post-check shift is malformed")',
+    '    inFenceShifts = repairFence.measured ? checked.shifted.filter((shift) => repairPaths.has(shift.rel)) : checked.shifted',
+    '  } catch (error) {',
+    "    refusals.push(refusal('error', `malformed post-check shifts for ${manifest}: ${error?.message || String(error)}`))",
+    '    failed = true',
+    '    emit(manifest, relocations, refusals)',
+    '    continue',
+    '  }',
+    '  if (checked.failures.length > 0 || inFenceShifts.length > 0) {',
+    '    if (relocations.length > 0) {',
+    '      for (const detail of [...checked.failures, ...inFenceShifts.map((shift) => `${shift.key || shift.rel || manifest}: line ${shift.to || shift.line || "?"} remains shifted`)]) refusals.push(refusal(\'stale\', detail))',
+    '    } else if (repaired.refusals.length === 0) {',
+    '      for (const detail of checked.failures) refusals.push(refusal(kindOf(detail), detail))',
+    '      for (const shift of inFenceShifts) refusals.push(refusal(\'stale\', `${shift.key || shift.rel || manifest}: line ${shift.to || shift.line || "?"} remains shifted`))',
+    '    }',
+    '    failed = true',
+    '  }',
+    '  if (refusals.length > 0) failed = true',
+    '  emit(manifest, relocations, refusals)',
+    '}',
+    'if (failed) process.exitCode = 1',
+  ].join('\n')
+  return `node --input-type=module -e ${shellArg(child)}`
+}
+
+function anchorRepairOutput(result) {
+  if (typeof result?.output === 'string') return result.output
+  if (typeof result?.stdout === 'string' || typeof result?.stderr === 'string') return `${result.stdout || ''}${result.stderr || ''}`
+  return ''
+}
+
+export function parseAnchorRepairResult(result) {
+  const output = anchorRepairOutput(result)
+  const rows = []
+  const refusalKinds = []
+  const errors = []
+  const addKind = (kind) => { if (!refusalKinds.includes(kind)) refusalKinds.push(kind) }
+  const lines = output.split(/\r?\n/)
+  for (const line of lines) {
+    const text = line.trim()
+    if (!text.startsWith(ANCHOR_REPAIR_ROW_PREFIX)) continue
+    const payload = text.slice(ANCHOR_REPAIR_ROW_PREFIX.length).trim()
+    let row
+    try { row = JSON.parse(payload) } catch (error) {
+      errors.push(`malformed ${ANCHOR_REPAIR_ROW_PREFIX.trim()} row: ${error?.message || String(error)}`)
+      addKind('error')
+      continue
+    }
+    const validRow = row && typeof row === 'object' && !Array.isArray(row)
+      && typeof row.manifest === 'string' && row.manifest.length > 0
+      && Array.isArray(row.relocations) && Array.isArray(row.refusals)
+      && (row.relocations.length > 0 || row.refusals.length > 0)
+    if (!validRow) {
+      errors.push('malformed anchor repair row shape')
+      addKind('error')
+      continue
+    }
+    const validRelocations = row.relocations.every((relocation) => relocation && typeof relocation.pin === 'string' && relocation.pin.length > 0
+      && Number.isInteger(relocation.old_line) && relocation.old_line > 0
+      && Number.isInteger(relocation.new_line) && relocation.new_line > 0)
+    const validRefusals = row.refusals.every((refusal) => refusal && ANCHOR_REPAIR_REFUSAL_KINDS.includes(refusal.kind) && typeof refusal.detail === 'string')
+    if (!validRelocations || !validRefusals) {
+      errors.push(`malformed anchor repair row for ${row.manifest}`)
+      addKind('error')
+      continue
+    }
+    rows.push(row)
+    for (const refusal of row.refusals) addKind(refusal.kind)
+  }
+  if (result?.ok !== true && rows.every((row) => row.refusals.length === 0)) {
+    errors.push('anchor repair command failed without structured refusal evidence')
+    addKind('error')
+  }
+  const details = [
+    ...errors,
+    ...rows.flatMap((row) => row.refusals.map((refusal) => `${row.manifest}: ${refusal.detail}`)),
+  ].filter(Boolean)
+  const ok = result?.ok === true && errors.length === 0 && refusalKinds.length === 0
+  return { ok, rows, refusalKinds, why: details.length > 0 ? details.join('; ') : null }
+}
+
+export function runLaneAnchorRepair(io) {
+  // The ledger-only test adapter has no checkout runner; keeping that adapter inert
+  // preserves its pre-repair call trace while the production io and publication fixture
+  // both expose the runner needed to observe the rebased checkout.
+  if (io?.calls && typeof io.runClean !== 'function') return { ok: true, rows: [], refusalKinds: [], why: null }
+  let result
+  try { result = io.run(anchorRepairCommand()) } catch (error) {
+    result = { ok: false, output: `anchor repair command threw: ${error?.message || String(error)}` }
+  }
+  return parseAnchorRepairResult(result)
 }

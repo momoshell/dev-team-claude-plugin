@@ -3120,10 +3120,13 @@ const readyPath = ${JSON.stringify(readyPath)}
 const adwId = 'stop-cooperative-run'
 const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
 ledger.startSession({ adw_id: adwId, repo_slug: 'checkout', task_slug: task })
-ledger.close()
+// A REAL attended run arms the ledger finalizer, so a serviced SIGTERM lands
+// fail/failed/SIGTERM/finalizer on the way out. Closing the ledger instead concealed the
+// collision between that row and the operator's own terminal row — the review's must-fix.
+ledger.installFinalizer({ adw_id: adwId })
 mkdirSync(join(crewDir, 'ledger'), { recursive: true })
 writeFileSync(join(crewDir, 'ledger', 'run.json'), JSON.stringify({ adw_id: adwId, db_path: dbPath }))
-process.on('SIGTERM', () => process.exit(0))
+process.on('SIGTERM', () => process.exit(0))   // cooperative: the finalizer runs first
 writeFileSync(readyPath, 'ready\\n')
 setInterval(() => {}, 1000)
 `)

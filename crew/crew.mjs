@@ -3063,6 +3063,10 @@ export function teardownAbsentCause(crew) {
 // replacing the yielding wait with another synchronous nap.
 export const STOP_TERM_GRACE_MS = 1000
 export const STOP_POLL_INTERVAL_MS = 50
+// The only terminal rows an operator stop may supersede: the ledger finalizer's own record of
+// the signal this stop just sent. A closed set, because superseding anything else would let a
+// stop overwrite a genuine outcome.
+export const STOP_SUPERSEDABLE_REASONS = Object.freeze(new Set(['SIGTERM', 'SIGINT']))
 
 function stopRefusal(message) {
   throw new UsageError(`crew.mjs stop: refused — ${message}`)
@@ -3248,7 +3252,16 @@ export async function stopCmd(args, deps = {}) {
     let finalSession
     try { finalSession = ledger?.getSession?.(sidecar.adw_id) } catch (err) { stopRefusal(`could not re-read session ${sidecar.adw_id} (${err.message})`) }
     if (!finalSession) stopRefusal(`session ${sidecar.adw_id} disappeared before settlement`)
-    if (finalSession.status === 'running') {
+    // An operator stop OWNS the terminal row for the run it stopped. Two ways to arrive here:
+    // the session is still `running` (nothing serviced the signal), or SIGTERM WAS serviced and
+    // the ledger finalizer already wrote fail/failed/SIGTERM/finalizer on the way out. The
+    // second is the cooperative path working as designed, and recording a deliberate operator
+    // stop as a FAILURE misattributes it — so the finalizer's own record of the signal this
+    // stop sent is superseded. Nothing else is: another actor, or any reason outside the closed
+    // set, is a genuine outcome and is left exactly as it stands.
+    const supersedesSignalRow = finalSession.terminal_actor === 'finalizer'
+      && STOP_SUPERSEDABLE_REASONS.has(String(finalSession.terminal_reason ?? ''))
+    if (finalSession.status === 'running' || supersedesSignalRow) {
       try {
         ledger.endSession({ adw_id: adwId, status: 'aborted', outcome: 'aborted', terminal_reason: 'operator-stop', terminal_actor: 'operator' })
       } catch (err) { stopRefusal(`could not settle session ${sidecar.adw_id} (${err.message})`) }

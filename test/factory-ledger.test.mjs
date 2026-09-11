@@ -22,6 +22,7 @@ import { ROOT, scratchDir, sqliteAvailable } from './helpers.mjs'
 const NONCE_PREFIX = 'devteam-done-'
 import {
   openLedger, mkdirpBounded, replayJsonl, isoMs, TABLES, MIGRATIONS, applyMigrations, NODE_FLOOR,
+  DRIVER_GONE_THRESHOLD_MS, SESSION_STATUS_ABSENT, projectSessions,
   SESSION_STATUSES, SESSION_OUTCOMES, SEAT_VALUE_SOURCES, TERMINAL_ACTORS, ESCALATION_CAUSES, escalationCause, TERM_TO_KILL_MS, WRITERS, WRITER_MIRROR_TABLES, UPDATE_ONLY_WRITERS, DRIFT_REMEDY, DRIFT_COLLAPSE_REMEDY, LedgerUsageError,
   MODIFIER_KINDS, MODIFIER_ATTEMPT_OUTCOMES, INTAKE_DISPATCH_OUTCOMES,
   SEAT_TEARDOWN_OUTCOMES, GATE_DISCRIMINATION_VERDICTS, MUTATION_ANCHOR_CORRECTIONS, MUTATION_ANCHOR_REFUSALS, CELL_FAILURE_KINDS, CELL_FAILURE_ATTRIBUTIONS,
@@ -3195,14 +3196,14 @@ test('endSession COALESCE: a later endSession({status}) call with no spend figur
 // S6: a signal arriving AFTER the run's own clean endSession(ok, spend)
 // must be a no-op over the finalizer — not overwrite status to 'fail' nor
 // NULL out the already-recorded spend figures via an unconditional UPDATE.
-test('S6: the finalizer never overwrites an already-completed session or clobbers its recorded spend', { skip: SKIP, timeout: 15000 }, async () => {
+test('B1 finalizer preserves an already terminal session', { skip: SKIP, timeout: 15000 }, async () => {
   const dir = nextDir()
   const dbPath = join(dir, 'ledger.db')
   const program = `
     const { openLedger } = await import(${JSON.stringify(new URL('../scripts/factory/ledger.mjs', import.meta.url).href)});
     const ledger = openLedger({ dbPath: ${JSON.stringify(dbPath)} });
     ledger.startSession({ adw_id: 'sig-2', repo_slug: 'r', task_slug: 't' });
-    ledger.endSession({ adw_id: 'sig-2', status: 'ok', billed_input_tokens: 111, billed_cost_usd: 4.56 });
+    ledger.endSession({ adw_id: 'sig-2', status: 'ok', outcome: 'success', terminal_reason: 'natural-completion', terminal_actor: 'driver', billed_input_tokens: 111, billed_cost_usd: 4.56 });
     ledger.installFinalizer({ adw_id: 'sig-2' });
     setInterval(() => {}, 1000);
   `
@@ -3236,8 +3237,71 @@ test('S6: the finalizer never overwrites an already-completed session or clobber
   const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
   const session = ledger.getSession('sig-2')
   assert.equal(session.status, 'ok', 'the finalizer must not overwrite an already-ok session as fail')
+  assert.equal(session.outcome, 'success', 'the finalizer must not overwrite an already-recorded outcome')
+  assert.equal(session.terminal_reason, 'natural-completion', 'the finalizer must not overwrite an already-recorded reason')
+  assert.equal(session.terminal_actor, 'driver', 'the finalizer must not overwrite an already-recorded actor')
   assert.equal(session.billed_input_tokens, 111, 'the finalizer must not clobber already-recorded spend')
   assert.equal(session.billed_cost_usd, 4.56, 'the finalizer must not clobber already-recorded spend')
+})
+
+test('projectSessions marks only measured stale unterminated rows unknown at the threshold', () => {
+  assert.equal(DRIVER_GONE_THRESHOLD_MS, 60_000)
+  assert.equal(Object.isFrozen(SESSION_STATUS_ABSENT), true)
+  const now = Date.parse('2026-09-11T12:00:00.000Z')
+  const before = [
+    { adw_id: 'fresh', status: 'running', ended_at: null, last_heartbeat_at: isoMs(now - DRIVER_GONE_THRESHOLD_MS + 1) },
+    { adw_id: 'stale', status: 'running', ended_at: null, last_heartbeat_at: isoMs(now - DRIVER_GONE_THRESHOLD_MS) },
+    { adw_id: 'terminal', status: 'ok', ended_at: isoMs(now - 1), last_heartbeat_at: isoMs(now - 2 * DRIVER_GONE_THRESHOLD_MS) },
+    { adw_id: 'missing-heartbeat', status: 'running', ended_at: null, last_heartbeat_at: null },
+    { adw_id: 'invalid-heartbeat', status: 'running', ended_at: null, last_heartbeat_at: 'not-a-timestamp' },
+  ]
+  const projected = projectSessions(before, { now })
+  assert.equal(projected[0].status, 'running')
+  assert.equal(projected[1].status, null)
+  assert.equal(projected[1].status_absent_reason, SESSION_STATUS_ABSENT.driver_gone)
+  assert.equal(projected[1].heartbeat_age_ms, DRIVER_GONE_THRESHOLD_MS)
+  assert.equal(projected[1].stale_after_ms, DRIVER_GONE_THRESHOLD_MS)
+  assert.equal(projected[2].status, 'ok')
+  assert.equal(projected[3].status, 'running')
+  assert.equal(projected[4].status, 'running')
+  assert.equal(projected[1].ended_at, null)
+  assert.equal(projected[1].outcome, undefined)
+  assert.notStrictEqual(projected[1], before[1])
+  assert.equal(before[1].status, 'running')
+})
+
+test('E1 sessions names a stale unterminated run as unknown', { skip: SKIP }, () => {
+  const dir = nextDir()
+  const dbPath = join(dir, 'ledger.db')
+  const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+  const staleAt = Date.now() - DRIVER_GONE_THRESHOLD_MS
+  ledger.startSession({ adw_id: '682c0155', repo_slug: 'r', task_slug: 'b609-siblingleak' })
+  ledger.heartbeat({ adw_id: '682c0155', target: 'session', at: staleAt })
+  ledger.startSession({ adw_id: 'fresh-control', repo_slug: 'r', task_slug: 'fresh-control' })
+  ledger.heartbeat({ adw_id: 'fresh-control', target: 'session', at: Date.now() })
+  ledger.startSession({ adw_id: 'terminal-control', repo_slug: 'r', task_slug: 'terminal-control' })
+  ledger.endSession({ adw_id: 'terminal-control', status: 'ok', outcome: 'success', terminal_reason: 'natural-completion', terminal_actor: 'driver' })
+  ledger.close()
+
+  const result = run(['sessions'], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(result.status, 0)
+  const payload = JSON.parse(result.stdout)
+  const stale = payload.sessions.find((row) => row.adw_id === '682c0155')
+  const fresh = payload.sessions.find((row) => row.adw_id === 'fresh-control')
+  const terminal = payload.sessions.find((row) => row.adw_id === 'terminal-control')
+  assert.equal(stale.status, null)
+  assert.equal(stale.status_absent_reason, SESSION_STATUS_ABSENT.driver_gone)
+  assert.ok(stale.heartbeat_age_ms >= DRIVER_GONE_THRESHOLD_MS)
+  assert.equal(stale.stale_after_ms, DRIVER_GONE_THRESHOLD_MS)
+  assert.equal(stale.ended_at, null)
+  assert.equal(stale.outcome, null)
+  assert.equal(stale.terminal_reason, null)
+  assert.equal(stale.terminal_actor, null)
+  assert.equal(fresh.status, 'running')
+  assert.equal(terminal.status, 'ok')
+  assert.equal(terminal.outcome, 'success')
+  assert.equal(terminal.terminal_reason, 'natural-completion')
+  assert.equal(terminal.terminal_actor, 'driver')
 })
 
 // ---------------------------------------------------------------------------

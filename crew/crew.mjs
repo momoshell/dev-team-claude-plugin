@@ -28,17 +28,18 @@
 //   crew.mjs handoff --task <slug> --brief-file <path> # hand the task to the LEAD
 //   crew.mjs wait  --task <slug> [--timeout-s N]       # await the LEAD's envelope
 //   crew.mjs status --task <slug>
+//   crew.mjs stop --task <slug> --pid <driver-pid> [--checkout <dir>]
 //   crew.mjs teardown --task <slug>
 // Each verb refuses a flag it does not read with exit 2; --fences is boot-only,
 // and a bare --lane on run is the round validation lane.
 import {
   appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync, readdirSync, writeSync,
 } from 'node:fs'
-import { join, dirname, basename, resolve as resolvePath } from 'node:path'
+import { join, dirname, basename, isAbsolute, resolve as resolvePath } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
-import { execSync } from 'node:child_process'
+import { execSync, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 
 import { cmux, tree, sendLine, renameTab, closeSurface, closeWorkspace, logLine } from './driver.mjs'
@@ -3056,6 +3057,237 @@ export function teardownAbsentCause(crew) {
     : TEARDOWN_ABSENT_CAUSES.surface_unrecorded
 }
 
+// A separate operator process owns signal escalation because a signal handler in
+// the attended driver cannot dispatch while that driver is inside Atomics.wait.
+// The short grace is intentionally exported so tests can pin the policy without
+// replacing the yielding wait with another synchronous nap.
+export const STOP_TERM_GRACE_MS = 1000
+export const STOP_POLL_INTERVAL_MS = 50
+// The ONE terminal row an operator stop may supersede: the ledger finalizer's own record of the
+// signal this stop itself sent. `stopCmd` sends SIGTERM and nothing else, so SIGTERM is the
+// only reason it can have caused. SIGINT was in this set and should not have been — the
+// finalizer arms it too, so a genuine concurrent Ctrl-C could land between the running read
+// and the post-death read and be overwritten as operator-owned. Superseding a row this stop
+// did not cause is indistinguishable from clobbering a real outcome.
+export const STOP_SUPERSEDABLE_REASON = 'SIGTERM'
+
+function stopRefusal(message) {
+  throw new UsageError(`crew.mjs stop: refused — ${message}`)
+}
+
+function stopCommandWords(command) {
+  const words = []
+  let word = ''
+  let quote = null
+  let escaped = false
+  for (const char of String(command || '')) {
+    if (escaped) { word += char; escaped = false; continue }
+    if (char === '\\' && quote !== "'") { escaped = true; continue }
+    if (quote) {
+      if (char === quote) quote = null
+      else word += char
+      continue
+    }
+    if (char === "'" || char === '"') { quote = char; continue }
+    if (/\s/.test(char)) {
+      if (word) { words.push(word); word = '' }
+      continue
+    }
+    word += char
+  }
+  if (quote || escaped) return null
+  if (word) words.push(word)
+  return words
+}
+
+function stopCommandOption(words, flag) {
+  let value = null
+  for (let index = 0; index < words.length; index += 1) {
+    if (words[index] !== flag) continue
+    const next = words[index + 1]
+    if (value !== null || !next || next.startsWith('--')) return null
+    value = next
+  }
+  return value
+}
+
+function stopCommandIsRun(command, { checkout, taskSlug }) {
+  const words = stopCommandWords(command)
+  if (!words) return false
+  const entry = resolvePath(join(checkout, 'crew', 'crew.mjs'))
+  for (let index = 0; index < words.length - 2; index += 1) {
+    if (words[index + 1] !== 'run') continue
+    const runWords = words.slice(index + 2)
+    const commandCheckoutWord = stopCommandOption(runWords, '--checkout')
+    const commandTask = stopCommandOption(runWords, '--task')
+    if (commandTask !== taskSlug) continue
+    const hasCommandCheckout = runWords.includes('--checkout')
+    let commandCheckout = null
+    if (hasCommandCheckout) {
+      if (!commandCheckoutWord || !isAbsolute(commandCheckoutWord)) continue
+      try { commandCheckout = resolvePath(commandCheckoutWord) } catch { continue }
+      if (commandCheckout !== checkout) continue
+    }
+    let candidate
+    try {
+      if (isAbsolute(words[index])) candidate = resolvePath(words[index])
+      else if (commandCheckout) candidate = resolvePath(commandCheckout, words[index])
+      else continue
+    } catch { continue }
+    if (candidate === entry) return true
+  }
+  return false
+}
+
+function stopLiveCommand(pid, deps = {}) {
+  const injected = deps.psCommand || deps.livePsCommand
+  if (injected) {
+    try {
+      const result = injected(pid)
+      const output = typeof result === 'string' ? result : result?.stdout
+      return typeof output === 'string' && output.trim() ? output.trim() : null
+    } catch { return null }
+  }
+  const spawnFn = deps.spawnSync || spawnSync
+  try {
+    const result = spawnFn('ps', ['-ww', '-p', String(pid), '-o', 'command='], { encoding: 'utf8' })
+    if (result?.status !== 0) return null
+    const output = String(result.stdout || '').trim()
+    return output || null
+  } catch { return null }
+}
+
+function stopAlive(pid, deps = {}) {
+  const injected = deps.isAlive
+  if (injected) {
+    try {
+      const result = injected(pid)
+      return result === true || result === false ? result : null
+    } catch { return null }
+  }
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (err) {
+    return err?.code === 'ESRCH' ? false : null
+  }
+}
+
+async function stopWaitForDeath(pid, deps = {}) {
+  const delay = deps.delay || deps.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)))
+  const grace = Number.isFinite(Number(deps.deathGraceMs)) && Number(deps.deathGraceMs) >= 0
+    ? Number(deps.deathGraceMs)
+    : STOP_TERM_GRACE_MS
+  const interval = Number.isFinite(Number(deps.pollIntervalMs)) && Number(deps.pollIntervalMs) > 0
+    ? Number(deps.pollIntervalMs)
+    : STOP_POLL_INTERVAL_MS
+  let waited = 0
+  while (waited < grace) {
+    const alive = stopAlive(pid, deps)
+    if (alive === false) return true
+    if (alive !== true) return false
+    const wait = Math.min(interval, grace - waited)
+    await delay(wait)
+    waited += wait
+  }
+  return stopAlive(pid, deps) === false
+}
+
+function stopReadSidecar(paths, deps = {}) {
+  const path = join(paths.dir, 'ledger', 'run.json')
+  const exists = deps.existsSync || existsSync
+  const read = deps.readFileSync || readFileSync
+  if (!exists(path)) stopRefusal(`no run sidecar found at ${path}`)
+  let raw
+  try { raw = read(path, 'utf8') } catch (err) { stopRefusal(`could not read run sidecar at ${path} (${err.code || err.message})`) }
+  let sidecar
+  try { sidecar = JSON.parse(String(raw)) } catch { stopRefusal(`run sidecar at ${path} is not valid JSON`) }
+  if (!sidecar || typeof sidecar !== 'object' || Array.isArray(sidecar)) stopRefusal(`run sidecar at ${path} is not an object`)
+  if (typeof sidecar.adw_id !== 'string' || !sidecar.adw_id.trim()) stopRefusal(`run sidecar at ${path} has no adw_id`)
+  if (typeof sidecar.db_path !== 'string' || !sidecar.db_path.trim()) stopRefusal(`run sidecar at ${path} has no db_path`)
+  return sidecar
+}
+
+export async function stopCmd(args, deps = {}) {
+  let taskSlug
+  try { taskSlug = slug(args.task) } catch (err) { stopRefusal(err.message) }
+  const checkout = resolvePath(args.checkout || process.cwd())
+  const pathFn = deps.pathsFor || pathsFor
+  const paths = pathFn(taskSlug, checkout)
+  const load = deps.loadCrew || loadCrew
+  const sameCheckout = deps.assertSameCheckout || assertSameCheckout
+  let crew
+  try {
+    crew = load(paths)
+    if (!crew || typeof crew !== 'object' || Array.isArray(crew)) throw new Error('crew sidecar is not an object')
+    sameCheckout(crew, checkout)
+  } catch (err) {
+    stopRefusal(err.message)
+  }
+  const sidecar = stopReadSidecar(paths, deps)
+  const adwId = sidecar.adw_id
+  const openLedger = deps.openLedger || realOpenLedger
+  let ledger
+  try { ledger = openLedger({ dbPath: sidecar.db_path }) } catch (err) { stopRefusal(`could not open the run ledger (${err.message})`) }
+  try {
+    let session
+    try { session = ledger?.getSession?.(sidecar.adw_id) } catch (err) { stopRefusal(`could not read session ${sidecar.adw_id} (${err.message})`) }
+    if (!session || session.status !== 'running') stopRefusal(`session ${sidecar.adw_id} is absent or not running`)
+
+    const pidNum = Number(args.pid)
+    if (!Number.isInteger(pidNum) || pidNum <= 1) stopRefusal('pid must be an integer > 1')
+    if (pidNum === process.pid || pidNum === process.ppid) stopRefusal('pid matches this process or its parent')
+    const processKill = deps.processKill || ((pid, signal) => process.kill(pid, signal))
+    const command = stopLiveCommand(pidNum, deps)
+    if (!command || !stopCommandIsRun(command, { checkout, taskSlug })) stopRefusal('live process is not this checkout\'s crew.mjs run for the requested task')
+
+    try { processKill(pidNum, 'SIGTERM') } catch (err) { stopRefusal(`could not send SIGTERM (${err.code || err.message})`) }
+    let sigkillRequired = false
+    if (!(await stopWaitForDeath(pidNum, deps))) {
+      const recheckCommand = stopLiveCommand(pidNum, deps)
+      if (!recheckCommand || recheckCommand !== command) stopRefusal('abandoned before SIGKILL — live command changed or disappeared on re-check')
+      if (stopAlive(pidNum, deps) !== true) stopRefusal('abandoned before SIGKILL — liveness was not proven on re-check')
+      try { processKill(pidNum, 'SIGKILL') } catch (err) { stopRefusal(`could not send SIGKILL (${err.code || err.message})`) }
+      sigkillRequired = true
+      if (!(await stopWaitForDeath(pidNum, deps))) stopRefusal('could not positively observe process death after SIGKILL')
+    }
+
+    let finalSession
+    try { finalSession = ledger?.getSession?.(sidecar.adw_id) } catch (err) { stopRefusal(`could not re-read session ${sidecar.adw_id} (${err.message})`) }
+    if (!finalSession) stopRefusal(`session ${sidecar.adw_id} disappeared before settlement`)
+    // An operator stop OWNS the terminal row for the run it stopped. Two ways to arrive here:
+    // the session is still `running` (nothing serviced the signal), or SIGTERM WAS serviced and
+    // the ledger finalizer already wrote fail/failed/SIGTERM/finalizer on the way out. The
+    // second is the cooperative path working as designed, and recording a deliberate operator
+    // stop as a FAILURE misattributes it — so the finalizer's own record of the signal this
+    // stop sent is superseded. Nothing else is: another actor, or any reason outside the closed
+    // set, is a genuine outcome and is left exactly as it stands.
+    const supersedesSignalRow = finalSession.terminal_actor === 'finalizer'
+      && String(finalSession.terminal_reason ?? '') === STOP_SUPERSEDABLE_REASON
+    if (finalSession.status === 'running' || supersedesSignalRow) {
+      try {
+        ledger.endSession({ adw_id: adwId, status: 'aborted', outcome: 'aborted', terminal_reason: 'operator-stop', terminal_actor: 'operator' })
+      } catch (err) { stopRefusal(`could not settle session ${sidecar.adw_id} (${err.message})`) }
+      finalSession = ledger.getSession(sidecar.adw_id)
+      if (!finalSession || finalSession.status !== 'aborted' || finalSession.outcome !== 'aborted') stopRefusal(`session ${sidecar.adw_id} did not settle as aborted`)
+    }
+    const result = {
+      adw_id: sidecar.adw_id,
+      pid: pidNum,
+      status: finalSession.status ?? null,
+      outcome: finalSession.outcome ?? null,
+      terminal_reason: finalSession.terminal_reason ?? null,
+      terminal_actor: finalSession.terminal_actor ?? null,
+      sigkill_required: sigkillRequired,
+    }
+    const stdout = deps.stdout || process.stdout
+    stdout.write(`${JSON.stringify(result)}\n`)
+    return result
+  } finally {
+    try { ledger?.close?.() } catch { /* closing is best effort after the decision */ }
+  }
+}
+
 export class UsageError extends Error { constructor(message) { super(message); this.name = 'UsageError'; this.usage = true } }
 
 // A --flag followed by another --flag (or by nothing) is a BOOLEAN true —
@@ -3077,6 +3309,7 @@ export const KNOWN_FLAGS = Object.freeze({
   handoff: Object.freeze(['task', 'checkout', 'brief-file']),
   wait: Object.freeze(['task', 'checkout', 'timeout-s']),
   status: Object.freeze(['task', 'checkout']),
+  stop: Object.freeze(['task', 'pid', 'checkout']),
   teardown: Object.freeze(['task', 'checkout']),
 })
 // Every flag on every verb declares whether it CARRIES A VALUE or MEANS TRUE.
@@ -3096,7 +3329,7 @@ export const FLAG_VALUE_CONTRACT = Object.freeze({
   'plan-rounds': 'value', 'build-rounds': 'value', 'review-rounds': 'value',
   ...Object.fromEntries(WAIT_FLAGS.map((flag) => [flag, 'value'])),
   ...Object.fromEntries(TURN_CEILING_FLAGS.map((flag) => [flag, 'value'])),
-  suite: 'value', 'claude-bin': 'value', 'timeout-s': 'value',
+  suite: 'value', 'claude-bin': 'value', 'timeout-s': 'value', pid: 'value',
   'memory-dir': 'value', 'memory-backend': 'value', 'memory-budget-bytes': 'value',
   // --headless and --headless-rpc take a comma-separated ROLE LIST; bare, they
   // degrade to an empty list (:470-474) — a silent no-op, not a boolean.
@@ -3121,6 +3354,7 @@ export const REQUIRED_FLAGS = Object.freeze({
   handoff: Object.freeze(['task', 'brief-file']),
   wait: Object.freeze(['task']),
   status: Object.freeze(['task']),
+  stop: Object.freeze(['task', 'pid']),
   teardown: Object.freeze(['task']),
 })
 export const BOOT_ONLY_FLAGS = Object.freeze(['fences', 'lane', ...TURN_CEILING_FLAGS])
@@ -3204,7 +3438,7 @@ export function packageSuite({ path = SUITE_OWNER_PATH, readFile = readFileSync 
   return suite.trim()
 }
 
-const COMMANDS = { boot: bootCmd, run: runCmd, handoff: handoffCmd, wait: waitCmd, status: statusCmd, teardown: teardownCmd }
+const COMMANDS = { boot: bootCmd, run: runCmd, handoff: handoffCmd, wait: waitCmd, status: statusCmd, stop: stopCmd, teardown: teardownCmd }
 const invokedDirectly = process.argv[1] && resolvePath(process.argv[1]) === fileURLToPath(import.meta.url)
 if (invokedDirectly) {
   const [verb, ...rest] = process.argv.slice(2)

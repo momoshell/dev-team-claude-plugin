@@ -34,6 +34,8 @@ export const CENSUS_UNMEASURED_REASONS = Object.freeze(new Set([
   'candidate-denied', 'candidate-interrupted', 'candidate-unknown', 'candidate-empty',
   'runner-denied', 'runner-interrupted', 'runner-unknown', 'runner-empty', 'runner-malformed',
   'unlisted-survivor', 'empty-output', 'incomplete-tap', 'malformed-output',
+  // reached only through the driver's decode of this command's output, never emitted here
+  'census-unreadable', 'census-malformed-output',
 ]))
 
 export const CENSUS_VERDICTS = Object.freeze(['green', 'red', 'unmeasured'])

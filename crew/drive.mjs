@@ -9146,9 +9146,14 @@ function decodeCensusResult(result, error = null) {
       }
     } catch { /* continue to the next possible JSON record */ }
   }
+  // A census whose output could not be read or parsed measured NOTHING, and it reaches the
+  // driver by a different path than the module's own unmeasured reasons. It used the word
+  // `unknown` while `censusRoute` intercepts `unmeasured`, so both phases read an absent
+  // census as a clear — the exact defect the module-side fix closed, surviving one layer up.
+  // One vocabulary, one route.
   const reason = error ? 'census-unreadable' : 'census-malformed-output'
   return {
-    action: 'none', verdict: 'unknown', selected: [], failures: [], defects: [], detail: null, reason,
+    action: 'escalate', verdict: 'unmeasured', selected: [], failures: [], defects: [], detail: null, reason,
     selection_ms: null, duration_ms: null, selection_seconds: null, run_seconds: null,
     total_seconds: null, elapsed_seconds: null, denominator: { suites: null, tests: null },
     measurement: null, cost: null,

@@ -4010,6 +4010,27 @@ test('M1 an unlisted survivor is UNMEASURED and escalates, not green', () => {
   assert.equal(result.action, 'escalate')
 })
 
+// The module-side unmeasured fix did not reach the DRIVER boundary: `decodeCensusResult`
+// returned the word `unknown` while `censusRoute` intercepts `unmeasured`, so a census whose
+// output could not be parsed — or whose command threw — still read as a clear and both phases
+// dispatched a builder and committed. One vocabulary, one route.
+test('M3b a census the driver cannot decode is UNMEASURED and escalates', () => {
+  for (const [label, answer] of [
+    ['malformed output', () => ({ ok: true, output: 'not a census record at all' })],
+    ['command threw', () => { throw new Error('spawn failed') }],
+  ]) {
+    const { ctx, io } = censusDriveIo([censusRecord()])
+    const originalRun = io.run
+    io.run = function (cmd) {
+      if (String(cmd).includes('census-exhibits.mjs')) return answer()
+      return originalRun.call(this, cmd)
+    }
+    const result = driveTask(ctx, io)
+    assert.equal(result.status, 'escalation', label)
+    assert.equal(result.details.escalation.where, 'census-exhibits', label)
+  }
+})
+
 test('I1 fixture io without runClean performs no census command', () => {
   const { ctx, io } = censusDriveIo([])
   delete io.runClean

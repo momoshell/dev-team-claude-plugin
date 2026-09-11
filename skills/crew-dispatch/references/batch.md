@@ -48,7 +48,7 @@ one.
 
 A register entry marked `"external": true` names a live lane from ANOTHER batch: it denies every batch lane's write surface, it is not counted in the sibling total `checkArrival` derives, and a stale entry refuses `external-fence-stale` by name.
 
-Fence isolation now spans concurrent batches. The dispatcher verifies that the named lane's crew dir persists that exact lane name and its run has not settled, and the deny set is never derived by scanning `~/.crew`. `sibling-leak` enforcement applies to externals like any other entry: the leak loop iterates every register entry, and only a `depends_on` edge exempts. While the deny SET is never derived by scanning `~/.crew`, external LIVENESS is read from `~/.crew` by `externalFenceLiveness`. It also consults the journal freshness signal: an external lane with no terminal stage whose journal has been silent for `DRIVER_GONE_PERIODS × HEARTBEAT_PERIOD_MS` refuses `external-fence-abandoned`, distinct from `external-fence-stale`; the refusal constants are `EXTERNAL_FENCE_STALE = 'external-fence-stale'` at `scripts/factory/dispatch-batch.mjs:49` and `EXTERNAL_FENCE_ABANDONED = 'external-fence-abandoned'` at `scripts/factory/dispatch-batch.mjs:50`.
+Fence isolation now spans concurrent batches. The dispatcher verifies that the named lane's crew dir persists that exact lane name and its run has not settled, and the deny set is never derived by scanning `~/.crew`. `sibling-leak` enforcement applies to externals like any other entry: the leak loop iterates every register entry, and sibling overlaps remain illegal even when a `depends_on` edge relates the lanes. Dispatch each overlapping lane as one single-lane register per lane instead of narrowing either fence. While the deny SET is never derived by scanning `~/.crew`, external LIVENESS is read from `~/.crew` by `externalFenceLiveness`. It also consults the journal freshness signal: an external lane with no terminal stage whose journal has been silent for `DRIVER_GONE_PERIODS × HEARTBEAT_PERIOD_MS` refuses `external-fence-abandoned`, distinct from `external-fence-stale`; the refusal constants are `EXTERNAL_FENCE_STALE = 'external-fence-stale'` at `scripts/factory/dispatch-batch.mjs:49` and `EXTERNAL_FENCE_ABANDONED = 'external-fence-abandoned'` at `scripts/factory/dispatch-batch.mjs:50`.
 
 `run-settled`, `run-complete`, and `run-escalated` are three distinct terminal reasons. The declared file list is compared with the external lane's own `crew.json` sibling claims and a contradiction is reported, not silently cleared. That comparison cannot measure an under-declared external because a lane's own fence is not recorded in its own `crew.json`; an unmeasured heartbeat (`heartbeat_age_ms: null`) is never read as abandoned.
 
@@ -98,8 +98,8 @@ neither scan completeness nor test intent.
 Automatic duplicate admission is first-lane-wins in existing batch order. A later
 unrelated lane scanning the same candidate receives a `fence-admission-arbitrated`
 warning naming the first lane and file, does not widen its own effective fence, and
-continues through dispatch. Related dependency lanes retain their exemption. A
-candidate held by an unrelated same-batch authored register entry or a measured live
+continues through dispatch. Related dependency lanes retain their admission-arbitration
+exemption; that does not clear a sibling overlap. A candidate held by an unrelated same-batch authored register entry or a measured live
 lane is not admitted: held anchor and census candidates stay outside the effective
 fence with their existing warnings, and held test reach retains
 `test-reach-unfenced`. An explicit
@@ -196,8 +196,8 @@ list of file claims and the dispatcher cannot tell the two apart at fence-check 
 `writes` lives in the variant, and the entry is what every sibling is measured against.
 Exempting read-only lanes would let a scout be granted files a build lane owns, and the
 first thing that notices would be the build lane's scope gate. So fence a scout NARROWLY —
-name only what it must read exclusively — or declare a `depends_on` edge, which is the
-one exemption that exists.
+name only what it must read exclusively — and do not rely on a `depends_on` edge to
+clear an overlap.
 
 ## A declared edge serialises only the waves it names
 

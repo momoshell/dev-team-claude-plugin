@@ -1780,6 +1780,7 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
   }
   const perLane = {}
   const authoredPerLane = {}
+  const siblingLeaks = []
   for (const lane of batchLanes) {
     const name = laneNameOf(lane)
     const own = byLane.get(name)
@@ -1937,18 +1938,15 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
       const siblingFiles = sibling.files.map(normaliseRepoPath)
       const siblingPaths = siblingFiles.map((file) => parseFenceScope(file).path)
       const matchSibling = scopeMatcher(siblingPaths)
-      const inherited = relatedLanes(graph, name, sibling.lane)
-      if (!inherited && effectiveFiles.some((file) => fenceEntryIntersects(file, siblingFiles))) {
+      if (effectiveFiles.some((file) => fenceEntryIntersects(file, siblingFiles))) {
         const leaked = effectiveFiles.filter((file) => fenceEntryIntersects(file, siblingFiles))
-        refuse(`lane ${name} own fence overlaps sibling ${sibling.lane}: ${leaked.join(', ')} (sibling fence: ${siblingFiles.join(', ')})`, SIBLING_LEAK)
+        if (leaked.length > 0) siblingLeaks.push({ lane: name, sibling: sibling.lane, kind: 'own-fence', files: leaked, siblingFiles })
       }
       // A created path can hide from the fence-vs-fence check above: this lane may
       // own it only through a directory prefix while a sibling owns it literally,
       // and a register-only sibling is never visited as `name`.
       const leakedCreates = ownCreates.filter(matchSibling)
-      if (!inherited && leakedCreates.length > 0) {
-        refuse(`lane ${name} creates path(s) inside sibling ${sibling.lane}'s fence: ${leakedCreates.join(', ')}`, SIBLING_LEAK)
-      }
+      if (leakedCreates.length > 0) siblingLeaks.push({ lane: name, sibling: sibling.lane, kind: 'creates', files: leakedCreates, siblingFiles })
       siblings.push({ lane: sibling.lane, files: siblingFiles })
     }
     perLane[name] = {
@@ -1962,6 +1960,14 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
       ...(admissionArbitrations.get(name)?.length > 0 ? { fence_admission_arbitrated: admissionArbitrations.get(name) } : {}),
     }
   }
+  const sharedFiles = [...new Set(siblingLeaks.flatMap(({ files }) => files))].sort()
+  const collisionDetails = siblingLeaks.map(({ lane, sibling, kind, files, siblingFiles }) => {
+    const listedFiles = [...new Set(files)].sort().join(', ')
+    if (kind === 'creates') return `lane ${lane} creates path(s) inside sibling ${sibling}'s fence: ${listedFiles}`
+    const listedSiblingFiles = [...new Set(siblingFiles)].sort().join(', ')
+    return `lane ${lane} own fence overlaps sibling ${sibling}: ${listedFiles} (sibling fence: ${listedSiblingFiles})`
+  }).sort().join('; ')
+  if (siblingLeaks.length > 0) refuse(`sibling fence overlap claims shared files: ${sharedFiles.join(', ')}; ${collisionDetails}; dispatch each overlapping lane as one single-lane register per lane instead of narrowing either fence`, SIBLING_LEAK)
   const admissions = []
   const compareAdmissions = (a, b) => a.lane < b.lane ? -1 : a.lane > b.lane ? 1 : a.file < b.file ? -1 : a.file > b.file ? 1 : a.source < b.source ? -1 : a.source > b.source ? 1 : 0
   for (const lane of batchLanes) {

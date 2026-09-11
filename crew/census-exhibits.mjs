@@ -317,20 +317,26 @@ function hasUnscopedSeparator(raw) {
 function unscopedInventory(raw, literals) {
   const argumentList = String(raw).match(/\[[\s\S]*?\]/)?.[0]
   const text = (argumentList ? literalsIn(argumentList) : literals).join(' ')
-  const match = text.match(/\bls-files\b([\s\S]*)$/)
+  const match = text.match(/\b(ls-files|ls-tree)\b([\s\S]*)$/)
   if (!match) return false
-  return match[1].trim().split(/\s+/).filter(Boolean).every((token) => token.startsWith('-'))
+  const rest = match[2].trim().split(/\s+/).filter(Boolean)
+  // `ls-files` takes only options once `--` is excluded (hasUnscopedSeparator does that).
+  // `ls-tree` additionally REQUIRES a tree-ish (`HEAD`, a ref, a sha), which restricts
+  // nothing about which paths are listed — so exactly one bare token is still checkout-wide.
+  const bare = rest.filter((token) => !token.startsWith('-'))
+  return match[1] === 'ls-tree' ? bare.length <= 1 : bare.length === 0
 }
 
 function inventoryCall(call, helperDefs) {
   if (!call) return false
   const literals = literalsIn(call.raw)
   if (hasUnscopedSeparator(call.raw) || !unscopedInventory(call.raw, literals)) return false
+  const namesInventory = (values) => values.includes('ls-files') || values.includes('ls-tree')
   if (['execFileSync', 'execSync', 'spawnSync'].includes(call.name)) {
-    return literals[0] === 'git' && literals.includes('ls-files')
+    return literals[0] === 'git' && namesInventory(literals)
   }
-  if (call.name === 'run') return /\bgit\b[\s\S]*\bls-files\b/.test(literals.join(' '))
-  if (call.name === 'git') return literals.includes('ls-files')
+  if (call.name === 'run') return /\bgit\b[\s\S]*\b(?:ls-files|ls-tree)\b/.test(literals.join(' '))
+  if (call.name === 'git') return namesInventory(literals)
   const helper = helperDefs.get(call.name)
   if (!helper) return false
   const helperCalls = callsOf(helper.raw)
@@ -339,7 +345,7 @@ function inventoryCall(call, helperDefs) {
     const values = literalsIn(candidate.raw)
     return values[0] === 'git' || candidate.name === 'run' || candidate.name === 'git'
   })
-  return transport && literals.includes('ls-files')
+  return transport && namesInventory(literals)
 }
 
 function carrierReadable(raw) {
@@ -512,7 +518,7 @@ function discover({ checkout, deps = {} } = {}) {
 
 export const CENSUS_EXHIBIT_PREDICATES = Object.freeze({
   trackedTest: (file) => typeof file === 'string' && file.endsWith(TEST_SUFFIX),
-  checkoutWideInventory: (source) => typeof source === 'string' && /(?:execFileSync|execSync|spawnSync|git|run)\s*\(/.test(source) && /ls-files/.test(source) && !/--\s*['"`]/.test(source),
+  checkoutWideInventory: (source) => typeof source === 'string' && /(?:execFileSync|execSync|spawnSync|git|run)\s*\(/.test(source) && /ls-files|ls-tree/.test(source) && !/--\s*['"`]/.test(source),
   trackedPartition: (source) => typeof source === 'string' && /\.filter\s*\(/.test(source) && /test\.mjs/.test(source),
   computedMeasurement: (source) => typeof source === 'string' && /(?:measurement|measured|owners|pairs|count|total)/i.test(source) && /(?:\.size|\.length|reduce|flatMap|map)/.test(source),
   mutableCarrier: (source) => typeof source === 'string' && /(?:readText|readFileSync|readFile)\s*\(/.test(source) && !/import\.meta\.url/.test(source),
@@ -575,7 +581,10 @@ export function runCensusExhibits({ checkout, filesInScope = [], deps = {} } = {
     denominator: { suites: selected.length, tests: 0 }, measurement: null, cost: null,
     reason: discoveryReason || (selectionSeconds === null ? 'selection-clock-unavailable' : null),
   }
-  if (discoveryReason || selected.length === 0) return { ...base, reason: discoveryReason || 'empty-selection' }
+  // Discovery failed, so NOTHING about this checkout was measured — not the suite count either.
+  // A fabricated 0 would read as "measured, and there are none". Unknown is never a zero.
+  if (discoveryReason) return { ...base, denominator: { suites: null, tests: null }, reason: discoveryReason }
+  if (selected.length === 0) return { ...base, denominator: { suites: 0, tests: null }, reason: 'empty-selection' }
   const run = typeof deps.run === 'function' ? deps.run : (command) => {
     try {
       return { ok: true, output: execFileSync('/bin/sh', ['-c', command], { cwd: checkout, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }) }
@@ -599,8 +608,15 @@ export function runCensusExhibits({ checkout, filesInScope = [], deps = {} } = {
     if (!parsed.valid) { reason ||= 'runner-malformed'; continue }
     if (!parsed.output) { reason ||= 'runner-empty'; continue }
     const count = testCount(parsed.output)
-    if (count === null) { reason ||= 'malformed-output' }
-    else tests += count
+    if (count === null) {
+      // The output is not TAP, so the runner never reported on this exhibit: a timeout, a
+      // spawn refusal or a truncated stream. That is INFRASTRUCTURE, and instrumentation is
+      // never load-bearing — recording it as a census failure would send an operator to
+      // re-measure a carrier that was never actually checked.
+      reason ||= 'malformed-output'
+      continue
+    }
+    tests += count
     if (!parsed.ok) failures.push({ file: exhibit.file, ...failureDetail(exhibit.file, filesInScope) })
   }
   const runEnded = clockValue(now)
@@ -617,6 +633,8 @@ export function runCensusExhibits({ checkout, filesInScope = [], deps = {} } = {
         total_seconds: totalSeconds,
         numerator_seconds: totalSeconds,
         denominator_seconds: CENSUS_FULL_SUITE_SECONDS,
+        denominator_measured: false,
+        denominator_source: 'asserted-constant',
         percentage: Number(((totalSeconds / CENSUS_FULL_SUITE_SECONDS) * 100).toFixed(2)),
       }
     : null
@@ -628,7 +646,9 @@ export function runCensusExhibits({ checkout, filesInScope = [], deps = {} } = {
     selection_seconds: selectionSeconds, run_seconds: runSeconds, total_seconds: totalSeconds, elapsed_seconds: totalSeconds, denominator, measurement,
     cost: measurement ? {
       selection_seconds: measurement.selection_seconds, run_seconds: measurement.run_seconds, total_seconds: measurement.total_seconds,
-      subset_seconds: measurement.numerator_seconds, full_suite_seconds: measurement.denominator_seconds, percentage: measurement.percentage,
+      subset_seconds: measurement.numerator_seconds, full_suite_seconds: measurement.denominator_seconds,
+      full_suite_seconds_measured: measurement.denominator_measured, full_suite_seconds_source: measurement.denominator_source,
+      percentage: measurement.percentage,
     } : null,
     reason,
   }

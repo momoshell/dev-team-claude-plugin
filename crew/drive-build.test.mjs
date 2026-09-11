@@ -3881,6 +3881,11 @@ test('E2 repeated post-commit in-fence census red escalates after one bounce', (
 test('F1 out-of-fence census red escalates with the file named', () => {
   const file = 'outside.test.mjs'
   const io = censusDriveIo([censusRed])
+  const originalReadFile = io.readFile
+  io.readFile = function (path) {
+    if (String(path).endsWith(`/${file}`)) return censusFixtureSource
+    return originalReadFile.call(this, path)
+  }
   const originalRun = io.run
   io.run = function (command) {
     const text = String(command)
@@ -3917,11 +3922,13 @@ test('G1 runner executes only selected census exhibits and reports cost denomina
   assert.equal(result.elapsed_seconds, 0.257)
   assert.deepEqual(result.measurement, {
     selection_seconds: 0.1, run_seconds: 0.157, total_seconds: 0.257,
-    numerator_seconds: 0.257, denominator_seconds: 52, percentage: 0.49,
+    numerator_seconds: 0.257, denominator_seconds: 52,
+    denominator_measured: false, denominator_source: 'asserted-constant', percentage: 0.49,
   })
   assert.deepEqual(result.cost, {
     selection_seconds: 0.1, run_seconds: 0.157, total_seconds: 0.257,
-    subset_seconds: 0.257, full_suite_seconds: 52, percentage: 0.49,
+    subset_seconds: 0.257, full_suite_seconds: 52,
+    full_suite_seconds_measured: false, full_suite_seconds_source: 'asserted-constant', percentage: 0.49,
   })
   const command = commands.find((entry) => entry.includes('--test-reporter=tap'))
   assert.equal(typeof command, 'string')
@@ -3942,8 +3949,113 @@ test('census wall clock records selection and execution separately', () => {
   }, { selection_seconds: 0.2, run_seconds: 0.457, total_seconds: 0.657, elapsed_seconds: 0.657 })
   assert.deepEqual(result.measurement, {
     selection_seconds: 0.2, run_seconds: 0.457, total_seconds: 0.657,
-    numerator_seconds: 0.657, denominator_seconds: 52, percentage: 1.26,
+    numerator_seconds: 0.657, denominator_seconds: 52,
+    denominator_measured: false, denominator_source: 'asserted-constant', percentage: 1.26,
   })
+})
+
+// ---- review fixes (PR #1152, out-of-band adversarial review) ------------------------
+// Each of the five below pins a defect found AFTER the seat reviewer returned pass, and
+// each names the mutation it kills. They are the reason the review was run at all.
+
+const censusLsTreeSource = censusFixtureSource
+  .replace("execFileSync('git', ['ls-files', '-z']", "execFileSync('git', ['ls-tree', '-r', '--name-only', '-z', 'HEAD']")
+
+test('S1 a checkout-wide census derived from ls-tree is selected like one derived from ls-files', () => {
+  // KILLS: narrowing the inventory predicate back to `ls-files` only. A qualifying ls-tree
+  // census suite would then be invisible to both census runs and surface only at `suite`.
+  const file = 'synthetic/lstree.test.mjs'
+  const result = selectCensusExhibits({ checkout: censusFixtureCheckout, deps: censusDeps({
+    files: [file], sources: { [file]: censusLsTreeSource },
+  }) })
+  assert.deepEqual(result.map((exhibit) => exhibit.file), [file])
+  assert.equal(result.reason, null)
+})
+
+test('S1 a PATH-SCOPED ls-tree read is still not a checkout-wide census', () => {
+  // KILLS: widening the ls-tree arm so far that a scoped listing counts. `ls-tree` legitimately
+  // carries ONE tree-ish; a second bare token is a pathspec and restricts what is listed.
+  const file = 'synthetic/scoped.test.mjs'
+  const scoped = censusFixtureSource
+    .replace("execFileSync('git', ['ls-files', '-z']", "execFileSync('git', ['ls-tree', '-r', '--name-only', '-z', 'HEAD', 'crew']")
+  const result = selectCensusExhibits({ checkout: censusFixtureCheckout, deps: censusDeps({
+    files: [file], sources: { [file]: scoped },
+  }) })
+  assert.deepEqual(result.map((exhibit) => exhibit.file), [])
+})
+
+test('S2 a file the plan did not name but dispatch admitted is INSIDE the fence', () => {
+  // KILLS: classifying against the plan's narrowed files_in_scope instead of the effective
+  // dispatched fence. A plan may narrow; the lane may still repair anything dispatch admitted,
+  // so reporting an admitted file OUTSIDE sends an operator work the lane could have done.
+  const file = 'outside.test.mjs'
+  const io = censusDriveIo([censusRed, censusGreen])
+  const originalReadFile = io.readFile
+  io.readFile = function (path) {
+    if (String(path).endsWith(`/${file}`)) return censusFixtureSource
+    return originalReadFile.call(this, path)
+  }
+  const originalRun = io.run
+  const relations = []
+  let censusRuns = 0
+  io.run = function (command) {
+    const text = String(command)
+    if (text.includes(`git -C '${CTX.checkout}' ls-files -z`)) return { ok: true, output: `${file}\0` }
+    // Red once, then repaired: an ADMITTED file's red must be a bounce the builder can answer.
+    if (text.includes('--test-reporter=tap') && text.includes(`'${file}'`)) return censusRuns++ === 0 ? censusRed : censusGreen
+    return originalRun.call(this, command)
+  }
+  const originalWriteFile = io.writeFile
+  io.writeFile = function (path, content) {
+    if (String(path).includes('census-exhibits-bounce')) relations.push(String(content))
+    return originalWriteFile.call(this, path, content)
+  }
+  // The plan narrows to a.mjs/a.test.mjs; dispatch admitted `outside.test.mjs` as well.
+  const admitted = Object.freeze({ ...CTX, files_in_scope: ['a.mjs', 'a.test.mjs', file] })
+  const result = driveTask(admitted, io)
+  assert.notEqual(result.details?.escalation?.where, 'census-exhibits')
+  assert.equal(relations.length > 0, true)
+  assert.match(relations[0], /outside\.test\.mjs: INSIDE the lane fence/)
+})
+
+test('S3 a runner whose output is not TAP reports infrastructure, never a census failure', () => {
+  // KILLS: pushing a failed exhibit for any non-OK result with output. A Seat IO timeout or a
+  // spawn refusal would then read as a stale census carrier and send an operator to re-measure
+  // a carrier that was never actually checked. Instrumentation is never load-bearing.
+  const file = 'synthetic/census.test.mjs'
+  for (const output of ['seat-io: timed out after 900s', 'spawn /bin/sh EACCES']) {
+    const result = runCensusExhibits({ checkout: censusFixtureCheckout, filesInScope: [], deps: censusDeps({
+      files: [file], sources: { [file]: censusFixtureSource }, outputs: [{ ok: false, output }],
+    }) })
+    assert.equal(result.action, 'none', output)
+    assert.deepEqual(result.failures, [], output)
+    assert.equal(result.reason, 'malformed-output', output)
+    assert.equal(result.denominator.tests, null, output)
+  }
+})
+
+test('S4 a ledger that throws on the census row does not decide the lane', () => {
+  // KILLS: calling io.log directly from journalCensus. Instrumentation is never load-bearing —
+  // the emitter facade over the ledger never throws into the caller.
+  const io = censusDriveIo([censusGreen, censusGreen])
+  const originalLog = io.log
+  io.log = function (row) {
+    if (row && Object.prototype.hasOwnProperty.call(row, 'census_exhibits')) throw new Error('ledger unavailable')
+    return originalLog.call(this, row)
+  }
+  const result = driveTask(CTX, io)
+  assert.notEqual(result.status, 'escalation')
+})
+
+test('S5 an inventory that could not be measured reports null denominators, never zero', () => {
+  // KILLS: fabricating {suites: 0, tests: 0} when discovery failed. A zero reads as "measured,
+  // and there are none". Unknown is never a guess and never a zero.
+  const result = runCensusExhibits({ checkout: censusFixtureCheckout, filesInScope: [], deps: {
+    run: () => ({ ok: false, output: 'fatal: not a git repository' }),
+  } })
+  assert.equal(result.action, 'none')
+  assert.equal(result.reason, 'inventory-unknown')
+  assert.deepEqual(result.denominator, { suites: null, tests: null })
 })
 
 test('census boundary delta skips unrelated deltas and counts blank changed lines', () => {

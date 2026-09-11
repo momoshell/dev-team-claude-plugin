@@ -6342,16 +6342,39 @@ function runTask(ctx, io, crash) {
   let suiteBuildBrief = planPath
   let suiteBuildNote = 'build'
   let censusBounces = 0
+  // A plan may legally NARROW its files_in_scope, but the lane may still repair anything the
+  // dispatcher put in its fence — including paths admitted at dispatch that the plan never
+  // named. Asking the narrowed scope reports an admitted file as OUTSIDE and sends the lane
+  // to an operator for work it was authorised to do itself.
+  const censusFence = () => {
+    const dispatched = Array.isArray(ctx.files_in_scope) ? ctx.files_in_scope : []
+    return [...new Set([...dispatched, ...scopeFiles])]
+  }
   // Keep the ledger-only fixture adapter out of census execution.
   // Production never has `.calls`, so it always runs the census.
   const censusEnabled = !io.calls || typeof io.runClean === 'function'
-  const journalCensus = (phase, census) => io.log(recordRow({ at: io.now(), census_exhibits: {
+  // Without a reader, discovery shells out once per tracked test file — measured at 9.4 s of a
+  // 10.7 s census on this checkout, so selection cost more than the suite it selects.
+  const censusDeps = {
+    run: (command) => io.run(command),
+    readFile: typeof io.readFile === 'function'
+      ? (file) => {
+          const text = io.readFile(file)
+          if (typeof text !== 'string') { const error = new Error('candidate read failed'); error.code = 'ENOENT'; throw error }
+          return text
+        }
+      : undefined,
+  }
+  // Instrumentation is never load-bearing: a ledger that cannot take this row must not
+  // decide the lane. Mirrors the emitter facade's guarantee for every other measurement row.
+  const journalCensus = (phase, census) => { try { journalCensusRow(phase, census) } catch { /* a census row never throws into the driver */ } }
+  const journalCensusRow = (phase, census) => io.log(recordRow({ at: io.now(), census_exhibits: {
     phase, action: census.action, selected: census.selected,
     selection_seconds: census.selection_seconds, run_seconds: census.run_seconds, total_seconds: census.total_seconds,
     elapsed_seconds: census.elapsed_seconds, denominator: census.denominator, measurement: census.measurement, cost: census.cost, reason: census.reason,
   } }))
   if (gateCmd && censusEnabled) {
-    const baselineCensus = runCensusExhibits({ checkout: ctx.checkout, filesInScope: scopeFiles, deps: { run: (command) => io.run(command) } })
+    const baselineCensus = runCensusExhibits({ checkout: ctx.checkout, filesInScope: censusFence(), deps: censusDeps })
     journalCensus('baseline', baselineCensus)
     if (baselineCensus.action === 'escalate') {
       return escalate('census-exhibits', baselineCensus.detail, [], { census: baselineCensus })
@@ -7273,7 +7296,7 @@ function runTask(ctx, io, crash) {
   stageComplete()
 
   if (censusEnabled) {
-    const committedCensus = runCensusExhibits({ checkout: ctx.checkout, filesInScope: scopeFiles, deps: { run: (command) => io.run(command) } })
+    const committedCensus = runCensusExhibits({ checkout: ctx.checkout, filesInScope: censusFence(), deps: censusDeps })
     journalCensus('committed', committedCensus)
     if (committedCensus.action === 'escalate') {
       return escalate('census-exhibits', committedCensus.detail, [], { commit: S.commit })

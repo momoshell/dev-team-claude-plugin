@@ -3188,10 +3188,23 @@ async function invokeRun(fixture) {
   return child
 }
 
-async function readStopSession(fixture) {
+// `invokeRun` waits for the SIDECAR FILE, which the child writes before it has
+// necessarily landed its ledger session row. Reading once therefore races that
+// write: under load the row is absent and the caller gets null. Measured on
+// 2026-09-11 — this test passed warm and failed once cold, at 1451ms, with
+// three other lanes competing for the machine, and the cold checkout replayed
+// GREEN afterwards. The wait is bounded and the assertions are unchanged; a row
+// that never arrives still returns null and still fails the caller.
+async function readStopSession(fixture, { until = (session) => session != null, timeoutMs = 10_000 } = {}) {
   const sidecar = JSON.parse(readFileSync(fixture.sidecar, 'utf8'))
-  const ledger = openLedger({ dbPath: sidecar.db_path, stderr: { write: () => {} } })
-  try { return ledger.getSession(sidecar.adw_id) } finally { ledger.close() }
+  const deadline = Date.now() + timeoutMs
+  let session = null
+  for (;;) {
+    const ledger = openLedger({ dbPath: sidecar.db_path, stderr: { write: () => {} } })
+    try { session = ledger.getSession(sidecar.adw_id) } finally { ledger.close() }
+    if (until(session) || Date.now() >= deadline) return session
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
 }
 
 function stopUnitFixture({ sidecar = { adw_id: 'unit-run', db_path: '/tmp/unit-ledger.db' }, command = '/checkout/crew/crew.mjs run --task unit-stop', sessions = [{ status: 'running' }], alive = [false], processKill = null, psCommand = null, deathGraceMs = 0 } = {}) {
@@ -3289,7 +3302,7 @@ test('C1 operator stop settles a real attended run blocked synchronously', { ski
     assert.equal(run.exitCode === null && run.signalCode === null, false)
     const closed = await childClose(run)
     assert.equal(closed.signal, 'SIGKILL')
-    const session = await readStopSession(fixture)
+    const session = await readStopSession(fixture, { until: (row) => row != null && row.status !== 'running' })
     assert.equal(session.status, 'aborted')
     assert.equal(session.outcome, 'aborted')
     assert.equal(session.terminal_reason, 'operator-stop')
@@ -3319,7 +3332,7 @@ test('D1 operator stop records the closed operator outcome', { skip: !nodeMeetsL
       status: 'aborted', outcome: 'aborted', terminal_reason: 'operator-stop', terminal_actor: 'operator',
     })
     await childClose(run)
-    const session = await readStopSession(fixture)
+    const session = await readStopSession(fixture, { until: (row) => row != null && row.status !== 'running' })
     assert.equal(session.status, 'aborted')
     assert.equal(session.outcome, 'aborted')
     assert.equal(session.terminal_reason, 'operator-stop')

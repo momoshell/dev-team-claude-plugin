@@ -6342,19 +6342,31 @@ function runTask(ctx, io, crash) {
   let suiteBuildBrief = planPath
   let suiteBuildNote = 'build'
   let censusBounces = 0
-  // A plan may legally NARROW its files_in_scope, but the lane may still repair anything the
-  // dispatcher put in its fence — including paths admitted at dispatch that the plan never
-  // named. Asking the narrowed scope reports an admitted file as OUTSIDE and sends the lane
-  // to an operator for work it was authorised to do itself.
+  // What the census means by INSIDE is "this lane could repair it", so it must be the
+  // EFFECTIVE WRITABLE scope — neither of the two obvious shortcuts is that.
+  //
+  // The plan's narrowed `files_in_scope` alone is too NARROW: a path the dispatcher admitted
+  // but the plan never named reads OUTSIDE, and the lane is sent to an operator for a repair
+  // it was authorised to make.
+  //
+  // The union with the dispatched fence alone is too WIDE: it ignores the live sibling fence
+  // and the protected floor, so a path the scope gate would refuse reads INSIDE and the lane
+  // bounces into a repair that can never land. Subtract both.
   const censusFence = () => {
     const dispatched = Array.isArray(ctx.files_in_scope) ? ctx.files_in_scope : []
-    return [...new Set([...dispatched, ...scopeFiles])]
+    const candidates = [...new Set([...dispatched, ...scopeFiles])]
+    const siblingFence = pathOnlyLaneFence(ctx.laneFence, ctx.laneName)
+    return candidates.filter((entry) => laneFenceHits([entry], siblingFence).length === 0
+      && protectedHits([entry]).length === 0)
   }
   // Keep the ledger-only fixture adapter out of census execution.
   // Production never has `.calls`, so it always runs the census.
   const censusEnabled = !io.calls || typeof io.runClean === 'function'
-  // Without a reader, discovery shells out once per tracked test file — measured at 9.4 s of a
-  // 10.7 s census on this checkout, so selection cost more than the suite it selects.
+  // Discovery otherwise shells out once per tracked test file. MEASURED on this checkout: that
+  // is NOT what the time goes on — selection is 9.729 s without a reader and 9.346 s with one,
+  // a 0.38 s difference inside noise. The 9.3 s is source ANALYSIS of 89 tracked test files,
+  // several over 150 KB. The reader is kept because it removes 89 subprocess spawns, not
+  // because it is faster; the selection cost itself is unaddressed and is filed separately.
   const censusDeps = {
     run: (command) => io.run(command),
     readFile: typeof io.readFile === 'function'

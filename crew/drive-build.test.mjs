@@ -3894,10 +3894,22 @@ test('F1 out-of-fence census red escalates with the file named', () => {
     if (text.includes('--test-reporter=tap')) return censusRed
     return originalRun.call(this, command)
   }
+  const bounces = []
+  const originalWriteFile = io.writeFile
+  io.writeFile = function (path, content) {
+    if (String(path).includes('census-exhibits-bounce')) bounces.push(String(path))
+    return originalWriteFile.call(this, path, content)
+  }
   const result = driveTask(CTX, io)
   assert.equal(result.status, 'escalation')
   assert.equal(result.details.escalation.where, 'census-exhibits')
   assert.match(result.details.escalation.why, /outside\.test\.mjs/)
+  assert.match(result.details.escalation.why, /OUTSIDE the lane fence/)
+  // It must escalate on the FIRST census, not arrive here via the repeated-red guard after
+  // builder cycles: an out-of-fence red is unrepairable, so a bounce is never written and
+  // nothing is ever committed.
+  assert.deepEqual(bounces, [])
+  assert.equal(result.details.commit ?? null, null)
 })
 
 test('G1 runner executes only selected census exhibits and reports cost denominator', () => {
@@ -4013,7 +4025,10 @@ test('S2 a file the plan did not name but dispatch admitted is INSIDE the fence'
   // The plan narrows to a.mjs/a.test.mjs; dispatch admitted `outside.test.mjs` as well.
   const admitted = Object.freeze({ ...CTX, files_in_scope: ['a.mjs', 'a.test.mjs', file] })
   const result = driveTask(admitted, io)
-  assert.notEqual(result.details?.escalation?.where, 'census-exhibits')
+  // Not merely "not a CENSUS escalation": an admitted file classified INSIDE must actually be
+  // repairable, so the lane must reach done without escalating anywhere — including `scope`.
+  assert.equal(result.details?.escalation ?? null, null)
+  assert.equal(result.status, 'done')
   assert.equal(relations.length > 0, true)
   assert.match(relations[0], /outside\.test\.mjs: INSIDE the lane fence/)
 })
@@ -4056,6 +4071,94 @@ test('S5 an inventory that could not be measured reports null denominators, neve
   assert.equal(result.action, 'none')
   assert.equal(result.reason, 'inventory-unknown')
   assert.deepEqual(result.denominator, { suites: null, tests: null })
+})
+
+// ---- second review round: defects found in the FIRST hand-written fix -----------------
+
+test('S6 a path-scoped tree-ish is not a checkout-wide census even as one bare token', () => {
+  // KILLS: `bare.length <= 1` treating any single bare token as an unrestricted tree-ish.
+  // `HEAD:crew` is one token and lists that subtree ALONE — measured 102 paths against 635
+  // for `HEAD` — so it is scoped and must not qualify.
+  const file = 'synthetic/subtree.test.mjs'
+  const scoped = censusFixtureSource
+    .replace("execFileSync('git', ['ls-files', '-z']", "execFileSync('git', ['ls-tree', '-r', '--name-only', '-z', 'HEAD:crew']")
+  const result = selectCensusExhibits({ checkout: censusFixtureCheckout, deps: censusDeps({
+    files: [file], sources: { [file]: scoped },
+  }) })
+  assert.deepEqual(result.map((exhibit) => exhibit.file), [])
+})
+
+test('S7 an argument list that is not wholly literal cannot be judged checkout-wide', () => {
+  // KILLS: counting only the literal tokens. A variable may carry a pathspec, so a scoped
+  // read would score as checkout-wide. Unknown is not a pass.
+  const file = 'synthetic/dynamic.test.mjs'
+  const dynamic = censusFixtureSource
+    .replace("execFileSync('git', ['ls-files', '-z']", "execFileSync('git', ['ls-files', '-z', dynamicPath]")
+  const result = selectCensusExhibits({ checkout: censusFixtureCheckout, deps: censusDeps({
+    files: [file], sources: { [file]: dynamic },
+  }) })
+  assert.deepEqual(result.map((exhibit) => exhibit.file), [])
+})
+
+test('S8 a TAP red whose footer never arrived is still a census failure', () => {
+  // KILLS: skipping the failure push whenever testCount is null. A census test can emit
+  // `not ok` and then be interrupted before `1..N`; swallowing that turns a must-catch red
+  // into a pass, which is worse than the infrastructure noise the skip was added to remove.
+  const file = 'synthetic/census.test.mjs'
+  const result = runCensusExhibits({ checkout: censusFixtureCheckout, filesInScope: ['synthetic/'], deps: censusDeps({
+    files: [file], sources: { [file]: censusFixtureSource },
+    outputs: [{ ok: false, output: 'TAP version 13\nnot ok 1 - connected census\n' }],
+  }) })
+  assert.equal(result.action, 'bounce')
+  assert.equal(result.failures.length, 1)
+  assert.equal(result.failures[0].file, file)
+})
+
+test('S9 a runner that was denied measures no tests and reports no zero', () => {
+  // KILLS: narrowing the null denominator to the empty/malformed reasons only. A runner
+  // denial after a successful discovery measured nothing, so a tally of 0 is fabricated.
+  const file = 'synthetic/census.test.mjs'
+  const result = runCensusExhibits({ checkout: censusFixtureCheckout, filesInScope: [], deps: {
+    ...censusDeps({ files: [file], sources: { [file]: censusFixtureSource } }),
+    run: (command) => {
+      if (String(command).includes('ls-files -z')) return { ok: true, output: `${file}\0` }
+      const error = new Error('spawn denied'); error.code = 'EACCES'; throw error
+    },
+  } })
+  assert.equal(result.denominator.tests, null)
+  assert.equal(result.reason, 'runner-denied')
+})
+
+test('S10 a dispatched path a SIBLING lane holds is OUTSIDE, not INSIDE', () => {
+  // KILLS: unioning the dispatched fence with the plan scope and stopping there. The union
+  // alone ignores the live sibling fence and the protected floor, so a path the scope gate
+  // would refuse reads INSIDE and the lane bounces into a repair that can never land — the
+  // exact inverse of the defect the union was added to fix.
+  const file = 'outside.test.mjs'
+  const io = censusDriveIo([censusRed])
+  const originalReadFile = io.readFile
+  io.readFile = function (path) {
+    if (String(path).endsWith(`/${file}`)) return censusFixtureSource
+    return originalReadFile.call(this, path)
+  }
+  const originalRun = io.run
+  io.run = function (command) {
+    const text = String(command)
+    if (text.includes(`git -C '${CTX.checkout}' ls-files -z`)) return { ok: true, output: `${file}\0` }
+    if (text.includes('--test-reporter=tap') && text.includes(`'${file}'`)) return censusRed
+    return originalRun.call(this, command)
+  }
+  // Dispatch admitted the file, AND a live sibling lane holds it. It is not writable here.
+  const held = Object.freeze({
+    ...CTX,
+    files_in_scope: ['a.mjs', 'a.test.mjs', file],
+    laneName: 't1',
+    laneFence: [{ lane: 'sibling-lane', files: [file] }],
+  })
+  const result = driveTask(held, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'census-exhibits')
+  assert.match(result.details.escalation.why, /OUTSIDE the lane fence/)
 })
 
 test('census boundary delta skips unrelated deltas and counts blank changed lines', () => {

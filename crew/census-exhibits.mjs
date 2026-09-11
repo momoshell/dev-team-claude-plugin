@@ -321,15 +321,31 @@ function unscopedInventory(raw, literals) {
   if (!match) return false
   const rest = match[2].trim().split(/\s+/).filter(Boolean)
   // `ls-files` takes only options once `--` is excluded (hasUnscopedSeparator does that).
-  // `ls-tree` additionally REQUIRES a tree-ish (`HEAD`, a ref, a sha), which restricts
-  // nothing about which paths are listed — so exactly one bare token is still checkout-wide.
+  // `ls-tree` additionally REQUIRES a tree-ish, which restricts nothing about WHICH paths are
+  // listed — but only when the tree-ish is bare. `HEAD:crew` is one token and lists that
+  // subtree alone: measured 102 paths against 635 for `HEAD`. A tree-ish carrying a `:` is
+  // therefore scoped, not checkout-wide.
   const bare = rest.filter((token) => !token.startsWith('-'))
+  if (bare.some((token) => token.includes(':'))) return false
   return match[1] === 'ls-tree' ? bare.length <= 1 : bare.length === 0
+}
+
+// A call whose argument list is not wholly literal cannot be judged: a variable may carry a
+// pathspec, and counting only the literals would score a scoped read as checkout-wide. An
+// unreadable argument list is UNKNOWN, and unknown is not a pass.
+function argumentsAllLiteral(raw) {
+  const argumentList = String(raw).match(/\[[\s\S]*?\]/)?.[0]
+  if (!argumentList) return true
+  const inner = argumentList.slice(1, -1).trim()
+  if (inner === '') return true
+  const { tokens } = scanSource(inner)
+  return tokens.every((token) => token.type === 'string' || token.value === ',' || token.type === 'punctuation')
 }
 
 function inventoryCall(call, helperDefs) {
   if (!call) return false
   const literals = literalsIn(call.raw)
+  if (!argumentsAllLiteral(call.raw)) return false
   if (hasUnscopedSeparator(call.raw) || !unscopedInventory(call.raw, literals)) return false
   const namesInventory = (values) => values.includes('ls-files') || values.includes('ls-tree')
   if (['execFileSync', 'execSync', 'spawnSync'].includes(call.name)) {
@@ -547,6 +563,15 @@ function elapsedSeconds(start, end) {
   return Number.isFinite(delta) && delta >= 0 ? delta / 1000 : null
 }
 
+// TAP reports a failure on a `not ok` line or a non-zero `# fail` footer. Either is definitive
+// evidence of a red regardless of whether the run reached its plan line.
+function tapFailureEvidence(output) {
+  const text = String(output)
+  if (/^not ok\b/m.test(text)) return true
+  const fail = text.match(/^#\s+fail\s+(\d+)\s*$/m)
+  return fail ? Number(fail[1]) > 0 : false
+}
+
 function testCount(output) {
   const match = String(output).match(/^#\s+tests\s+(\d+)\s*$/m) || String(output).match(/^1\.\.(\d+)\s*$/m)
   return match ? Number(match[1]) : null
@@ -608,16 +633,19 @@ export function runCensusExhibits({ checkout, filesInScope = [], deps = {} } = {
     if (!parsed.valid) { reason ||= 'runner-malformed'; continue }
     if (!parsed.output) { reason ||= 'runner-empty'; continue }
     const count = testCount(parsed.output)
-    if (count === null) {
-      // The output is not TAP, so the runner never reported on this exhibit: a timeout, a
-      // spawn refusal or a truncated stream. That is INFRASTRUCTURE, and instrumentation is
-      // never load-bearing — recording it as a census failure would send an operator to
-      // re-measure a carrier that was never actually checked.
+    const failed = tapFailureEvidence(parsed.output)
+    if (count === null && !failed) {
+      // No TAP footer AND no failure evidence: the runner never reported on this exhibit — a
+      // timeout, a spawn refusal, a truncated stream. That is INFRASTRUCTURE, and
+      // instrumentation is never load-bearing, so it is not recorded as a census failure.
+      // A missing footer ALONE proves nothing: a census test can emit `not ok` and then be
+      // interrupted before `1..N`, and swallowing that turns a must-catch red into a pass.
       reason ||= 'malformed-output'
       continue
     }
-    tests += count
-    if (!parsed.ok) failures.push({ file: exhibit.file, ...failureDetail(exhibit.file, filesInScope) })
+    if (count === null) reason ||= 'malformed-output'
+    else tests += count
+    if (!parsed.ok || failed) failures.push({ file: exhibit.file, ...failureDetail(exhibit.file, filesInScope) })
   }
   const runEnded = clockValue(now)
   const runSeconds = elapsedSeconds(runStarted, runEnded)
@@ -625,7 +653,9 @@ export function runCensusExhibits({ checkout, filesInScope = [], deps = {} } = {
   if (selectionSeconds === null && !reason) reason = 'selection-clock-unavailable'
   if (runSeconds === null && !reason) reason = 'clock-unavailable'
   if (tests === 0 && !reason) reason = 'empty-denominator'
-  const denominator = { suites: selected.length, tests: reason === 'runner-empty' || reason === 'runner-malformed' || reason === 'malformed-output' ? null : tests }
+  // Any reason at all means the run did not complete over every selected suite, so the test
+  // count is a partial tally and not a measurement. Unknown is never a guess and never a zero.
+  const denominator = { suites: selected.length, tests: reason === null ? tests : null }
   const measurement = reason === null && totalSeconds !== null
     ? {
         selection_seconds: selectionSeconds,

@@ -1715,7 +1715,12 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
       const siblingFiles = sibling.files.map(normaliseRepoPath)
       const siblingPaths = siblingFiles.map((file) => parseFenceScope(file).path)
       const matchSibling = scopeMatcher(siblingPaths)
-      const leakedFiles = ownFiles.filter((file) => fenceEntryIntersects(file, siblingFiles))
+      // Overlap is SYMMETRIC, and `fenceEntryIntersects` only tests the candidate as the
+      // containing directory. A lane owning `docs/sub/` therefore did not intersect a
+      // sibling owning `docs/sub/a.md`, and since externals are never iterated as `own`,
+      // that orientation was the only one that could fire against an external. Test both.
+      const leakedFiles = ownFiles.filter((file) => fenceEntryIntersects(file, siblingFiles)
+        || siblingFiles.some((siblingFile) => fenceEntryIntersects(siblingFile, [file])))
       if (leakedFiles.length > 0) {
         siblingLeaks.push({ kind: 'fence', lane: name, sibling: sibling.lane, files: [...new Set(leakedFiles)], siblingFiles })
       }

@@ -1092,6 +1092,36 @@ test('RV1-1', async () => {
   }
 })
 
+// #881 review: overlap is symmetric, `fenceEntryIntersects` was not. Only the candidate was
+// tested as the containing directory, so a lane owning a DIRECTORY did not intersect a
+// sibling owning a FILE inside it. Externals are never iterated as `own`, so against an
+// external sibling that orientation was the only one that could fire — a batch lane could
+// dispatch onto a file a live external register already owned.
+// #881 review: overlap is symmetric, `fenceEntryIntersects` was not — only the CANDIDATE
+// was tested as the containing directory. Between two batch lanes this never showed,
+// because both are iterated as `own` so the file-vs-directory orientation fires anyway.
+// An EXTERNAL is never iterated as `own`, so for a live external sibling the missing
+// orientation was the ONLY one that could fire: a batch lane owning a directory could
+// dispatch straight over a file a live external register already held.
+test('RV1-3 a batch lane owning a directory leaks against a live EXTERNAL owning a file in it', () => {
+  const checkout = gitFixture()
+  const home = join(root, 'symmetric-external-home')
+  const parentDir = join(root, 'symmetric-external-parent')
+  crewFixture({ home, repoDir: 'dt-external-live', laneDir: 'external-live', lane: 'external-live', checkout })
+  const error = thrown(() => checkFences({
+    fences: [entry('lane-a', ['scripts/factory/']), entry('external-live', ['scripts/factory/make-brief.mjs'])],
+    lanes: [{ lane: 'lane-a', where: ['scripts/factory/'] }],
+    checkout,
+    externals: ['external-live'],
+    parentDir,
+    deps: { home, log: () => {} },
+  }))
+  assert.equal(error.reason, 'sibling-leak')
+  for (const token of ['lane-a', 'external-live', 'scripts/factory/']) {
+    assert.ok(error.message.includes(token), `RV1-3 omitted ${token}`)
+  }
+})
+
 test('RV1-2', () => {
   const checkout = gitFixture()
   const directory = 'scripts/factory/'

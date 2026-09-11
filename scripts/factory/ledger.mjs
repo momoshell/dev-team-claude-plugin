@@ -124,6 +124,14 @@ export function mkdirpBounded(dir, mode = 0o700) {
 export const LEDGER_VERSION = 1
 export const NODE_FLOOR = '26.0.0'
 export const TERM_TO_KILL_MS = 5000
+// The ledger has no journal input with which to derive a run-specific wait
+// budget. Keep the same fixed two-heartbeat floor as lane-watch (30s × 2),
+// and call the resulting classification unknown rather than inventing a
+// terminal outcome when a driver has gone silent without an endSession row.
+export const DRIVER_GONE_THRESHOLD_MS = 60_000
+export const SESSION_STATUS_ABSENT = Object.freeze({
+  driver_gone: 'driver-gone-without-terminal-row',
+})
 export const TOOL_CLASSES_LEDGER = Object.freeze(['edit', 'read', 'test', 'other'])
 
 // A refused (changes === 0) mirror insert means another process owns that seq;
@@ -138,6 +146,29 @@ export const EVENT_TYPES = Object.freeze([
 
 export const SESSION_STATUSES = Object.freeze(['running', 'ok', 'fail', 'aborted'])
 export const SESSION_OUTCOMES = Object.freeze(['success', 'escalated', 'aborted', 'failed'])
+
+// Pure readout projection for the sessions-only CLI. It copies every row and
+// changes only a running, unterminated row whose measured heartbeat is at or
+// beyond the fixed driver-gone floor. Fresh, terminal, and invalid-heartbeat
+// rows retain their stored status and fields exactly; no database write occurs.
+export function projectSessions(rows, { now = Date.now(), thresholdMs = DRIVER_GONE_THRESHOLD_MS } = {}) {
+  const observedAt = epochMsOrNull(now)
+  const staleAfter = Number.isFinite(Number(thresholdMs)) && Number(thresholdMs) >= 0
+    ? Number(thresholdMs)
+    : DRIVER_GONE_THRESHOLD_MS
+  const source = Array.isArray(rows) ? rows : []
+  if (observedAt === null) return source.map((session) => (session && typeof session === 'object' ? { ...session } : session))
+  return source.map((session) => {
+    if (!session || typeof session !== 'object' || Array.isArray(session)) return session
+    if (session.status !== 'running' || session.ended_at != null) return { ...session }
+    const heartbeatAt = epochMsOrNull(session.last_heartbeat_at)
+    if (heartbeatAt === null) return { ...session }
+    const age = observedAt - heartbeatAt
+    if (!Number.isFinite(age) || age < staleAfter) return { ...session }
+    return { ...session, status: null, status_absent_reason: SESSION_STATUS_ABSENT.driver_gone,
+      heartbeat_age_ms: age, stale_after_ms: staleAfter }
+  })
+}
 // An enum with a member nothing can write is a documented contract nobody can rely on.
 // The synthetic-session enum and writer are retired while the additive
 // `synthetic_reason` column and historical reads remain.
@@ -7017,7 +7048,7 @@ export function main(argv) {
     const ledger = openLedger({ dbPath, nodeVersion, stderr })
 
     if (verb === 'sessions') {
-      const sessions = ledger.listSessions()
+      const sessions = projectSessions(ledger.listSessions())
       const s = ledger.stats()
       const payload = {
         schema: 1,

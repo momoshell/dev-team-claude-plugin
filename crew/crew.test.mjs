@@ -1,7 +1,7 @@
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync, chmodSync } from 'node:fs'
+import { readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync, chmodSync, symlinkSync, cpSync, realpathSync } from 'node:fs'
 import { execSync, spawn, spawnSync } from 'node:child_process'
 import { tmpdir, homedir } from 'node:os'
 import { join, basename, dirname } from 'node:path'
@@ -13,7 +13,7 @@ import {
   composeLayout, mcpConfigDocument, writeMcpConfigs, SEAT_DEFAULTS, FANOUT_TOOLS, DEFAULT_ROLES, ROLE_ORDER, transportFor, seatTransport, HEADLESS_TRANSPORTS, assertCapabilities, resolveAdapters, bootAllocation, resolveWorkerBin, docOpenArgs,
   resolveTier, resolveSeatModels, FALLBACK_REFUSALS, refuseFallback, loadRoster, normalizeRoster, refuseRoster, rosterSeating, serializeRosterV1, serializeRosterV2, ROSTER_REFUSALS, ROSTER_SCHEMA_VERSIONS, rosterSourcePath, loadRosterSource, writeRosterSnapshot, rosterSnapshotReader, loadLadder, assertBandFloors, grantedDefModels, assertDefBandFloors, refuseBandFloor, seatModelKey, bandForMember, bandForRaw, seatBand, LADDER_PATH, BAND_FLOOR_REFUSALS, shadowCandidates, shadowExclusion, shadowPick, shadowPickBoot, SHADOW_EXCLUSIONS, SHADOW_OUTCOMES, SHADOW_ABSENT, seatReadySignal, assertSeats, phaseForStage, emitAdapter,
   waitForEnvelope, WAIT_POLL_MS, LIVENESS_PROBE_MS, LIVENESS_MISSES_TO_DIE,
-  parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, runExitCode, runOutcome, RUN_EXIT_CODES, RUN_EXIT_UNEXPECTED, RUN_START_EVENT, BATCH_DIR_EVENT, BATCH_DIR_NOT_BATCHED, batchDirFromBrief, readHead, readBranch, teardownDecision, stagesFromJournal, assignmentsFromJournal, RUN_CONFIG_DECLARATIONS, resolveRunConfig, aliasDeprecationLines, persistedRunConfig, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, seatLiveness, awaitSeatsReady, teardownCore, teardownCmd, TEARDOWN_EXIT_SEATLESS, TEARDOWN_EXIT_UNPROVEN, TEARDOWN_ABSENT_CAUSES, teardownAbsentCause, TEARDOWN_DRAIN_MS, TEARDOWN_DRAIN_ERROR_MS, installExitMarker, installRunFinalizers, writeTerminalLine, EXITED_STATUS, SIGNAL_EXIT_CODES, UNCAUGHT_EXIT_CODE, terminalLineSeen,
+  parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, stopCmd, runExitCode, runOutcome, RUN_EXIT_CODES, RUN_EXIT_UNEXPECTED, RUN_START_EVENT, BATCH_DIR_EVENT, BATCH_DIR_NOT_BATCHED, batchDirFromBrief, readHead, readBranch, teardownDecision, stagesFromJournal, assignmentsFromJournal, RUN_CONFIG_DECLARATIONS, resolveRunConfig, aliasDeprecationLines, persistedRunConfig, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, seatLiveness, awaitSeatsReady, teardownCore, teardownCmd, TEARDOWN_EXIT_SEATLESS, TEARDOWN_EXIT_UNPROVEN, TEARDOWN_ABSENT_CAUSES, teardownAbsentCause, TEARDOWN_DRAIN_MS, TEARDOWN_DRAIN_ERROR_MS, installExitMarker, installRunFinalizers, writeTerminalLine, EXITED_STATUS, SIGNAL_EXIT_CODES, UNCAUGHT_EXIT_CODE, terminalLineSeen,
   UsageError, KNOWN_FLAGS, ROLE_FLAG_PREFIXES, REQUIRED_FLAGS, BOOT_ONLY_FLAGS, assertUsage,
   parseArgs, FLAG_VALUE_REFUSAL, FLAG_VALUE_CONTRACT, BOOLEAN_FLAGS,
   resolveTimeoutS, TIMEOUT_S_REFUSAL, TIMEOUT_S_DEFAULT,
@@ -3069,6 +3069,265 @@ test('ZFG1', async () => {
   assert.equal(seam.opened, 1)
   assert.equal(seam.started.starts, 1)
   assert.strictEqual(seam.handed, seam.started)
+})
+
+test('A1 attended run arms its own ledger finalizer', async () => {
+  const seam = await runCmdEmitterProbe()
+  assert.equal(seam.opened, 1)
+  assert.equal(seam.started.starts, 1)
+  assert.strictEqual(seam.handed, seam.started)
+  assert.equal(seam.handed.adwId, seam.started.adwId)
+})
+
+function stopRunFixture({ task, cooperative = false } = {}) {
+  const root = scratchDir(`crew-stop-${task || 'run'}-`)
+  const home = join(root, 'home')
+  const checkoutRoot = join(root, 'checkout')
+  const dbPath = join(root, 'ledger.db')
+  const brief = join(root, 'brief.md')
+  const cmuxPath = join(root, 'cmux')
+  const workerBin = join(root, 'claude')
+  const readyPath = join(root, 'ready')
+  mkdirSync(checkoutRoot, { recursive: true })
+  const checkout = realpathSync(checkoutRoot)
+  const entry = join(checkout, 'crew', 'crew.mjs')
+  const crewDir = join(home, '.crew', basename(checkout), task)
+  mkdirSync(join(crewDir, 'returns'), { recursive: true })
+  mkdirSync(join(crewDir, 'task'), { recursive: true })
+  writeFileSync(brief, '# stop brief\n')
+  const roles = ['planner', 'builder', 'reviewer']
+  writeFileSync(join(crewDir, 'crew.json'), JSON.stringify({
+    schema_version: 3, task, checkout, tier: 'build', roles,
+    members: Object.fromEntries(roles.map((role) => [role, {
+      surface_id: `${role}-surface`, pane_id: null, transport: 'pane', model: 'sonnet', agent: 'claude',
+    }])),
+    task_return: join(crewDir, 'returns', 'task.json'),
+  }))
+  writeFileSync(join(crewDir, 'journal.jsonl'), '')
+  writeFileSync(workerBin, '#!/bin/sh\nexit 0\n')
+  chmodSync(workerBin, 0o755)
+  if (cooperative) {
+    mkdirSync(join(checkout, 'crew'), { recursive: true })
+    const ledgerUrl = new URL('../scripts/factory/ledger.mjs', import.meta.url).href
+    writeFileSync(entry, `import { openLedger } from ${JSON.stringify(ledgerUrl)}
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+const dbPath = ${JSON.stringify(dbPath)}
+const task = ${JSON.stringify(task)}
+const checkout = ${JSON.stringify(checkout)}
+const crewDir = ${JSON.stringify(crewDir)}
+const readyPath = ${JSON.stringify(readyPath)}
+const adwId = 'stop-cooperative-run'
+const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+ledger.startSession({ adw_id: adwId, repo_slug: 'checkout', task_slug: task })
+ledger.close()
+mkdirSync(join(crewDir, 'ledger'), { recursive: true })
+writeFileSync(join(crewDir, 'ledger', 'run.json'), JSON.stringify({ adw_id: adwId, db_path: dbPath }))
+process.on('SIGTERM', () => process.exit(0))
+writeFileSync(readyPath, 'ready\\n')
+setInterval(() => {}, 1000)
+`)
+  } else {
+    cpSync(join(CLI_REPO_ROOT, 'crew'), join(checkout, 'crew'), { recursive: true })
+    symlinkSync(join(CLI_REPO_ROOT, 'scripts'), join(checkout, 'scripts'), 'dir')
+    symlinkSync(join(CLI_REPO_ROOT, 'package.json'), join(checkout, 'package.json'))
+    writeFileSync(cmuxPath, `#!/usr/bin/env node
+const argv = process.argv.slice(2)
+if (argv[0] === 'read-screen') {
+  const surface = argv[argv.indexOf('--surface') + 1] || ''
+  process.stdout.write('ready: ' + surface.replace(/-surface$/, '') + '\\n')
+}
+`)
+    chmodSync(cmuxPath, 0o755)
+  }
+  execSync('git init -q && git config user.email stop@example.test && git config user.name stop && git add . && git commit -qm seed', { cwd: checkout })
+  return { root, home, checkout, task, crewDir, dbPath, brief, cmuxPath, workerBin, entry, readyPath, sidecar: join(crewDir, 'ledger', 'run.json') }
+}
+
+function childClose(child) {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve({ code: child.exitCode, signal: child.signalCode })
+  return new Promise((resolve, reject) => {
+    child.once('error', reject)
+    child.once('close', (code, signal) => resolve({ code, signal }))
+  })
+}
+
+async function waitForStopFixtureFile(fixture, child, path, timeoutMs = 10_000) {
+  const deadline = Date.now() + timeoutMs
+  while (!existsSync(path)) {
+    if (child.exitCode !== null || child.signalCode !== null) throw new Error(`stop fixture exited before ${path}: stdout=${child._stopStdout || ''} stderr=${child._stopStderr || ''} code=${child.exitCode} signal=${child.signalCode}`)
+    if (Date.now() >= deadline) throw new Error(`stop fixture never wrote ${path}`)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+}
+
+async function invokeStop(fixture, pid) {
+  const child = spawn(process.execPath, [fileURLToPath(new URL('./crew.mjs', import.meta.url)), 'stop', '--task', fixture.task, '--pid', String(pid), '--checkout', fixture.checkout], {
+    cwd: CLI_REPO_ROOT,
+    env: { ...CLI_ENV, HOME: fixture.home, DEVTEAM_LEDGER_DB: fixture.dbPath, CREW_CLAUDE_BIN: fixture.workerBin },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  let stdout = '', stderr = ''
+  child.stdout.on('data', (chunk) => { stdout += String(chunk) })
+  child.stderr.on('data', (chunk) => { stderr += String(chunk) })
+  const result = await childClose(child)
+  return { ...result, stdout, stderr }
+}
+
+async function invokeRun(fixture) {
+  const child = spawn(process.execPath, [fixture.entry, 'run', '--task', fixture.task, '--checkout', fixture.checkout, '--brief-file', fixture.brief, '--keep'], {
+    cwd: fixture.checkout,
+    env: { ...CLI_ENV, HOME: fixture.home, CMUX_BIN: fixture.cmuxPath, DEVTEAM_LEDGER_DB: fixture.dbPath, CREW_CLAUDE_BIN: fixture.workerBin },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  child._stopStdout = ''
+  child.stdout.on('data', (chunk) => { child._stopStdout += String(chunk) })
+  child._stopStderr = ''
+  child.stderr.on('data', (chunk) => { child._stopStderr += String(chunk) })
+  await waitForStopFixtureFile(fixture, child, fixture.sidecar)
+  return child
+}
+
+async function readStopSession(fixture) {
+  const sidecar = JSON.parse(readFileSync(fixture.sidecar, 'utf8'))
+  const ledger = openLedger({ dbPath: sidecar.db_path, stderr: { write: () => {} } })
+  try { return ledger.getSession(sidecar.adw_id) } finally { ledger.close() }
+}
+
+function stopUnitFixture({ sidecar = { adw_id: 'unit-run', db_path: '/tmp/unit-ledger.db' }, command = '/checkout/crew/crew.mjs run --task unit-stop', sessions = [{ status: 'running' }], alive = [false], processKill = null, psCommand = null, deathGraceMs = 0 } = {}) {
+  const calls = { opened: 0, closed: 0, gets: 0, kills: [], ends: [], output: '' }
+  let index = 0
+  const ledger = {
+    getSession: () => sessions[Math.min(index++, sessions.length - 1)],
+    endSession: (payload) => { calls.ends.push(payload) },
+    close: () => { calls.closed += 1 },
+  }
+  const deps = {
+    pathsFor: () => ({ dir: '/state' }),
+    loadCrew: () => ({ checkout: '/checkout' }),
+    existsSync: () => true,
+    readFileSync: () => JSON.stringify(sidecar),
+    openLedger: () => { calls.opened += 1; return ledger },
+    psCommand: () => (typeof psCommand === 'function' ? psCommand() : command),
+    isAlive: () => alive.length ? alive.shift() : true,
+    processKill: (pid, signal) => {
+      calls.kills.push([pid, signal])
+      if (processKill) return processKill(pid, signal)
+    },
+    delay: async () => {},
+    deathGraceMs,
+    stdout: { write: (text) => { calls.output += String(text) } },
+  }
+  return { calls, ledger, deps }
+}
+
+test('stopCmd closes its ledger and refuses unsafe identities without terminal writes', async () => {
+  const args = { task: 'unit-stop', pid: '42', checkout: '/checkout' }
+  const malformed = stopUnitFixture()
+  malformed.deps.readFileSync = () => '{'
+  malformed.deps.openLedger = () => { throw new Error('must not open malformed sidecar') }
+  await assert.rejects(() => stopCmd(args, malformed.deps), (err) => err instanceof UsageError && /^crew\.mjs stop: refused/.test(err.message))
+  assert.equal(malformed.calls.opened, 0)
+  assert.equal(malformed.calls.closed, 0)
+
+  for (const [label, fixture] of [
+    ['invalid pid', stopUnitFixture()],
+    ['command mismatch', stopUnitFixture({ command: '/other/crew.mjs run --task unit-stop' })],
+    ['TERM EPERM', stopUnitFixture({ processKill: () => { throw Object.assign(new Error('denied'), { code: 'EPERM' }) } })],
+    ['unknown liveness', stopUnitFixture({ alive: [null, null, null] })],
+    ['PID reuse', stopUnitFixture({ alive: [true], psCommand: (() => { let n = 0; return () => n++ === 0 ? '/checkout/crew/crew.mjs run --task unit-stop' : '/checkout/crew/crew.mjs run --task other' })() })],
+  ]) {
+    const localArgs = { ...args, pid: label === 'invalid pid' ? 'not-an-integer' : '42' }
+    await assert.rejects(() => stopCmd(localArgs, fixture.deps), (err) => err instanceof UsageError && /^crew\.mjs stop: refused/.test(err.message), label)
+    assert.equal(fixture.calls.ends.length, 0, label)
+    assert.equal(fixture.calls.closed, 1, label)
+  }
+
+  const terminal = stopUnitFixture({ sessions: [{ status: 'running' }, { status: 'ok', outcome: 'success' }] })
+  const result = await stopCmd(args, terminal.deps)
+  assert.equal(result.status, 'ok')
+  assert.equal(terminal.calls.ends.length, 0)
+  assert.equal(terminal.calls.closed, 1)
+})
+
+test('RV1-1 stopCmd anchors dispatch-batch relative entry to declared checkout', async () => {
+  const args = { task: 'unit-stop', pid: '42', checkout: '/checkout' }
+  const matching = stopUnitFixture({
+    command: 'node crew/crew.mjs run --task unit-stop --checkout /checkout --brief-file /tmp/unit-stop.md --keep',
+    sessions: [
+      { status: 'running' },
+      { status: 'running' },
+      { status: 'aborted', outcome: 'aborted', terminal_reason: 'operator-stop', terminal_actor: 'operator' },
+    ],
+  })
+  const result = await stopCmd(args, matching.deps)
+  assert.equal(result.status, 'aborted')
+  assert.deepEqual(matching.calls.kills, [[42, 'SIGTERM']])
+  assert.deepEqual(matching.calls.ends, [{ adw_id: 'unit-run', status: 'aborted', outcome: 'aborted', terminal_reason: 'operator-stop', terminal_actor: 'operator' }])
+
+  const foreign = stopUnitFixture({
+    command: 'node crew/crew.mjs run --task unit-stop --checkout /other-checkout --brief-file /tmp/unit-stop.md --keep',
+  })
+  await assert.rejects(() => stopCmd(args, foreign.deps), (err) => err instanceof UsageError && /^crew\.mjs stop: refused/.test(err.message))
+  assert.deepEqual(foreign.calls.kills, [])
+  assert.deepEqual(foreign.calls.ends, [])
+  assert.equal(foreign.calls.closed, 1)
+})
+
+test('C1 operator stop settles a real attended run blocked synchronously', { skip: !nodeMeetsLedgerFloor, timeout: 30_000 }, async () => {
+  const fixture = stopRunFixture({ task: 'stop-blocked-sync' })
+  let run
+  try {
+    run = await invokeRun(fixture)
+    const before = await readStopSession(fixture)
+    assert.equal(before.status, 'running')
+    const stopped = await invokeStop(fixture, run.pid)
+    assert.equal(stopped.code, 0, stopped.stderr)
+    const result = JSON.parse(stopped.stdout)
+    assert.equal(result.sigkill_required, true, JSON.stringify({ stopped, result }))
+    assert.equal(result.status, 'aborted')
+    assert.equal(run.exitCode === null && run.signalCode === null, false)
+    const closed = await childClose(run)
+    assert.equal(closed.signal, 'SIGKILL')
+    const session = await readStopSession(fixture)
+    assert.equal(session.status, 'aborted')
+    assert.equal(session.outcome, 'aborted')
+    assert.equal(session.terminal_reason, 'operator-stop')
+    assert.equal(session.terminal_actor, 'operator')
+  } finally {
+    if (run && run.exitCode === null && run.signalCode === null) { try { run.kill('SIGKILL') } catch {} }
+    rmSync(fixture.root, { recursive: true, force: true })
+  }
+})
+
+test('D1 operator stop records the closed operator outcome', { skip: !nodeMeetsLedgerFloor, timeout: 15_000 }, async () => {
+  const fixture = stopRunFixture({ task: 'stop-cooperative', cooperative: true })
+  let run
+  try {
+    run = spawn(process.execPath, [fixture.entry, 'run', '--task', fixture.task, '--checkout', fixture.checkout], {
+      cwd: fixture.checkout,
+      env: { ...CLI_ENV, HOME: fixture.home, DEVTEAM_LEDGER_DB: fixture.dbPath, CREW_CLAUDE_BIN: fixture.workerBin },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    run.stdout.on('data', () => {})
+    run.stderr.on('data', () => {})
+    await waitForStopFixtureFile(fixture, run, fixture.readyPath)
+    const stopped = await invokeStop(fixture, run.pid)
+    assert.equal(stopped.code, 0, stopped.stderr)
+    const result = JSON.parse(stopped.stdout)
+    assert.deepEqual({ status: result.status, outcome: result.outcome, terminal_reason: result.terminal_reason, terminal_actor: result.terminal_actor }, {
+      status: 'aborted', outcome: 'aborted', terminal_reason: 'operator-stop', terminal_actor: 'operator',
+    })
+    await childClose(run)
+    const session = await readStopSession(fixture)
+    assert.equal(session.status, 'aborted')
+    assert.equal(session.outcome, 'aborted')
+    assert.equal(session.terminal_reason, 'operator-stop')
+    assert.equal(session.terminal_actor, 'operator')
+  } finally {
+    if (run && run.exitCode === null && run.signalCode === null) { try { run.kill('SIGKILL') } catch {} }
+    rmSync(fixture.root, { recursive: true, force: true })
+  }
 })
 
 test('RV1-1 run survives SIGTERM while awaitSeatsReady holds the prologue', async () => {

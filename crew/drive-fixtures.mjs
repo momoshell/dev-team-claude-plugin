@@ -1361,6 +1361,7 @@ const DRIVE_JOURNAL_EXPECTED = Object.freeze([
   ["recordRow", "", "at mutation_anchor_bind"],
   ["recordRow", "", "at mutation_anchor_absent"],
   ["recordRow", "", "at gate_check_discrimination gate_generation gate_check_discriminations ...(checkProofNote ? { gate_check_proof_note: checkProofNote } : {})"],
+  ["recordRow", "", "at census_exhibits"],
   ["recordRow", "", "at finding_hardened"],
   ["recordRow", "", "at ...entry"],
   ["recordRow", "", "at auto_fix"],

@@ -2,27 +2,34 @@
 
 Dispatch a batch in this order, and record what refuses at each boundary:
 
+A fence is each lane's own write surface for its scope gate and brief; it is never a lock.
+
 1. Create one worktree per lane.
-2. Boot with **one shared fence register for the whole batch**. Boot writes the
-   other lanes' files, so every write lane must be known before any seat boots.
-3. Ask the compiler with `--discover-reads <lane>` for the reads a lane must acknowledge, write those records into the register, and perform a **single compile**. If that compile still refuses, the batch refuses `reads-unresolved` rather than retrying. A hand-authored register with spare acknowledgements remains guarded by **`stale-read-ack`**, while the coupled-source-unfenced refusal names the records discovery returns. A `where` path that does not exist refuses
+2. Compile with **one authored fence register for the whole batch**. Each entry
+   defines only that lane's own write surface for scope checks and brief generation;
+   worktrees isolate concurrent writes, so overlapping surfaces are allowed.
+3. Keep the complete effective register available through compilation and brief
+   generation; a lane-specific runtime register is written only after compilation.
+4. Ask the compiler with `--discover-reads <lane>` for the reads a lane must acknowledge, write those records into the register, and perform a **single compile**. If that compile still refuses, the batch refuses `reads-unresolved` rather than retrying. A hand-authored register with spare acknowledgements remains guarded by **`stale-read-ack`**, while the coupled-source-unfenced refusal names the records discovery returns. A `where` path that does not exist refuses
    **`missing-path`** (`scripts/factory/make-brief.mjs:129`, `COUPLED_SOURCE_UNFENCED = 'coupled-source-unfenced'`; `scripts/factory/make-brief.mjs:130`, `STALE_READ_ACK = 'stale-read-ack'`). An unreadable adopted plan or gate refuses **`plan-adopt-unreadable`** before anything is copied. An adopted `gate.mjs` that resolves the repository through an absolute path — an import specifier, or a `REPO`/`ROOT`/`CHECKOUT` assignment — refuses **`plan-adopt-gate-absolute-path`** before copying or worktree creation, because `prove-mutations` runs a gate in a fresh temporary worktree and a pinned gate can kill no mutation. Its own checkout counts, not only a predecessor's. A quoted absolute literal that is merely DATA is admitted: refusing on any such literal measured 10/214 precision over the archived corpus, since bare `/` and the comment `// gate` both begin with a slash. A repo-root assignment under the system temp dir is exempt as a scratch fixture; an import from there is not.
-4. Verify through **`validateScopeEntries`** and **`scopeMatcher`** for own-file
-   coverage and zero sibling leaks.
-5. Check the protected floor with **`protectedHitsIn`** over
+5. Verify through **`validateScopeEntries`** and **`scopeMatcher`** for each
+   lane's own-file coverage. Overlap is not a refusal: rebase reconciles shared
+   edits after isolated worktrees are merged.
+6. Check the protected floor with **`protectedHitsIn`** over
    **`resolveProtectedPaths`** (`crew/protected-paths.mjs:24`, `export function resolveProtectedPaths(extra)`); the floor evidence is in
    `references/tier.md`.
-6. Boot the lanes, then background `run`.
-7. Check **arrival, not parsing**: `crew.json` carries `lane_name` for the own
-   lane and `lane_fence` for siblings (`batch total minus one` batch siblings
-   plus `one entry per external` fence); `checkArrival` counts only non-external
-   members against `batchTotal - 1` and separately requires each external to be
-   present. The journal carries the `lane-fence` event. **`fence=NONE`** in a write lane means
-   a boot-only flag went to the wrong verb.
+7. After compilation, boot each lane with a generated register containing only
+   that lane's effective entry. Runtime `lane_fence` is always empty, and the
+   unchanged `lane-fence` journal event reports `lanes: 0, files: 0`; then
+   background `run`.
+8. Check **arrival, not parsing**: `crew.json` carries the own `lane_name` and
+   an empty `lane_fence`; `checkArrival` refuses any runtime entries. The journal
+   carries the unchanged `lane-fence` event with `lanes: 0, files: 0`.
+   **`fence=NONE`** in a write lane means a boot-only flag went to the wrong verb.
 
-Parallelise on file-set disjointness, never on workspace count. The batch's
-compiles run in parallel; only a baseline fallback is serialised behind the
-host-load guard, and the baseline is cached by commit and command, so a
+Parallelise through isolated worktrees, not by requiring file-set disjointness.
+The batch's compiles run in parallel; only a baseline fallback is serialised behind
+the host-load guard, and the baseline is cached by commit and command, so a
 compile no longer implies a suite run. Never nest a waiter inside another
 background call. Arm the watcher on the run log: `run`
 emits exactly one terminal `{"status":…}` line, while a pid is only a proxy.
@@ -32,10 +39,10 @@ subagent fan-out explicitly on a read-everything sweep and ask for incremental
 findings, because two scouts finished measuring and escalated with the envelope
 unwritten.
 
-**The sequence above prescribes no dry run.** `checkFences`, `crossBatchCollisions`
-and `resolveAdoptions` all run before `createWorktrees`, so a bad register refuses
-before a branch exists; `references/flags.md` records what `--dry-run` is for and
-what a green one does not mean.
+**The sequence above prescribes no dry run.** `checkFences` and `resolveAdoptions`
+run before `createWorktrees`, so a bad register refuses before a branch exists;
+`references/flags.md` records what `--dry-run` is for and what a green one does
+not mean.
 
 ## Parked conditions go stale
 
@@ -44,20 +51,22 @@ and **`#379`** had two of three; a body stale about its trigger is stale about
 its steps too. Verify every clause you are about to brief, not just the blocking
 one.
 
-## A fence carried in from another batch
+## Runtime state and historical vocabulary
 
-A register entry marked `"external": true` names a live lane from ANOTHER batch: it denies every batch lane's write surface, it is not counted in the sibling total `checkArrival` derives, and a stale entry refuses `external-fence-stale` by name.
+A lane's worktree is its concurrent-write isolation boundary. Compiles use the
+complete authored register and preserve each lane's own effective surface; boot
+writes a lane-specific register so runtime state cannot advertise another lane's
+scope. `crew.json` therefore records the lane name and `lane_fence: []`, and the
+unchanged journal event reports `lanes: 0, files: 0`.
 
-Fence isolation now spans concurrent batches. The dispatcher verifies that the named lane's crew dir persists that exact lane name and its run has not settled, and the deny set is never derived by scanning `~/.crew`. `sibling-leak` enforcement applies to externals like any other entry: the leak loop iterates every register entry, and **no edge exempts** — a `depends_on` edge sequences two lanes, it does not license them to claim the same file (#881). While the deny SET is never derived by scanning `~/.crew`, external LIVENESS is read from `~/.crew` by `externalFenceLiveness`. It also consults the journal freshness signal: an external lane with no terminal stage whose journal has been silent for `DRIVER_GONE_PERIODS × HEARTBEAT_PERIOD_MS` refuses `external-fence-abandoned`, distinct from `external-fence-stale`; the refusal constants are `EXTERNAL_FENCE_STALE = 'external-fence-stale'` at `scripts/factory/dispatch-batch.mjs:49` and `EXTERNAL_FENCE_ABANDONED = 'external-fence-abandoned'` at `scripts/factory/dispatch-batch.mjs:50`.
-
-`run-settled`, `run-complete`, and `run-escalated` are three distinct terminal reasons. The declared file list is compared with the external lane's own `crew.json` sibling claims and a contradiction is reported, not silently cleared. That comparison cannot measure an under-declared external because a lane's own fence is not recorded in its own `crew.json`; an unmeasured heartbeat (`heartbeat_age_ms: null`) is never read as abandoned.
+Retired by ADR-043: `external`, `externalFenceLiveness`, `crossBatchCollisions`, `cross-batch-unknown`, `sibling-leak`, `external-fence-stale`, and `external-fence-abandoned` remain decodable only as historical journal vocabulary; an authored register entry carrying the marker refuses `external-fence-retired`.
 
 ## The executable form
 
 `scripts/factory/dispatch-batch.mjs` is this sequence as code: one entry point
 over a batch directory of request JSONs and a fence register, refusing the
 batch at the first failed check rather than proceeding
-(`scripts/factory/dispatch-batch.mjs:35`, `FENCE_NOT_ARRIVED = 'fence-not-arrived'`).
+(`scripts/factory/dispatch-batch.mjs:33`, `FENCE_NOT_ARRIVED = 'fence-not-arrived'`).
 Every refusal above has a name in its exported `REFUSAL_REASONS`; the prose here
 says WHY each check exists, which the script cannot.
 
@@ -65,13 +74,13 @@ says WHY each check exists, which the script cannot.
 `anchors.json` pin on a lane's write surface whose manifest is outside its authored
 fence — the sweep that cost `b217-treefingerprint` a lane when it was done by hand —
 and the dispatcher automatically admits each unheld manifest with source
-`anchor-pin`. A manifest held by an unrelated sibling remains outside the effective
-fence and queues `sibling-leak`; a live holder is named with its directory and files.
-It stopped refusing because **#635** made a shifted anchor repairable: content found
-once at a new line is relocated and reported. What is still fatal is **rot** (content
-nowhere) and **ambiguity** (content more than once), caught by each skill's own
-`exhibits.test.mjs` when they actually happen rather than predicted before the
-lane runs.
+`anchor-pin`. An authored holder can keep a duplicate automatic admission out of
+the later lane's effective surface, while concurrent write overlap itself remains
+allowed. It stopped refusing because **#635** made a shifted anchor repairable:
+content found once at a new line is relocated and reported. What is still fatal is
+**rot** (content nowhere) and **ambiguity** (content more than once), caught by each
+skill's own `exhibits.test.mjs` when they actually happen rather than predicted
+before the lane runs.
 
 A manifest pinning only files the lane does not write is not an obligation on that lane; when the lane writes a pinned file, dispatch admits the unheld pinning manifest automatically. The sanctioned fix remains the post-merge pass the
 operator runs on `main` after the wave merges:
@@ -98,16 +107,14 @@ neither scan completeness nor test intent.
 Automatic duplicate admission is first-lane-wins in existing batch order. A later
 unrelated lane scanning the same candidate receives a `fence-admission-arbitrated`
 warning naming the first lane and file, does not widen its own effective fence, and
-continues through dispatch. Related dependency lanes retain their exemption. A
-candidate held by an unrelated same-batch authored register entry or a measured live
-lane is not admitted: held anchor and census candidates stay outside the effective
+continues through dispatch. Related dependency lanes can each retain their own
+automatic admission. A candidate held by an unrelated same-batch authored register
+entry is not admitted: held anchor and census candidates stay outside the effective
 fence with their existing warnings, and held test reach retains
-`test-reach-unfenced`. An explicit
-`allow_test_reach` entry always keeps its named test outside the effective fence; a
-held test records its holder context, while an unheld test warns that the operator
-exclusion overrode automatic admission with `override=explicit-exclusion` and
-records the file and reason. Unknown live-lane census remains a warning and is never
-treated as a clear claim.
+`test-reach-unfenced`. An explicit `allow_test_reach` entry always keeps its named
+test outside the effective fence; a held test records its authored-holder context,
+while an unheld test warns that the operator exclusion overrode automatic admission
+with `override=explicit-exclusion` and records the file and reason.
 
 
 ### Warning doctrine
@@ -152,15 +159,13 @@ A reach row is identified by the outside test, the fenced file it reaches, and t
 
 The comment-desynchronisation exposure is a measured lower bound, not a second scanner reach. It scans tracked `*.test.mjs` files for apostrophes inside comments and records whether each file has any apostrophe and whether its total is odd, for both the shipped and pristine `HEAD` trees. An apostrophe inside a test comment can hide path literals from the scanner, so this exposure describes a risk rather than a reach result. Re-measure the scanner exposure when a tracked test file gains or loses an apostrophe inside a comment. A comment-stripped read can expose real `(file, test)` pairs the shipped scanner misses. The comparison is conservative because it does not strip a trailing comment on a line that also contains a string; any observed comparison belongs to the run that produced it, not to this doctrine.
 
-The **cross-batch-unknown** warning carries this exact blind spot: BLIND SPOT: a lane booted without --fences declares no surface at all and can be editing anything; a lane whose batch siblings have been reaped records no claim; and a repository whose git dir cannot be measured is not compared. None of those are cleared — they are reported unknown.
-
 Dispatch warning logs cite this subsection with `dispatch-batch: WARNING-SUMMARY`; each bounded line carries `report=<path-or-unavailable> doctrine=skills/crew-dispatch/references/batch.md`. `dispatch.warnings.json` carries complete warning rows and these exact blind spots, including the report's `blind_spots` map.
 
 For PR carry-through, the doctrine is in `batch.md`, not the out-of-fence `fences.md` named by ask item 4. Final Acceptance supersedes the issue-body dry-run preservation clause, so dry-run warning output intentionally changes to the bounded form.
 
-`plan-scope-outside-fence` refuses a planner's declaration wider than its own fence. A
-fence denies siblings' declared surfaces, not unclaimed paths, so silently narrowing
-`files_in_scope` would make the fence meaningless.
+`plan-scope-outside-fence` refuses a planner's declaration wider than its own fence.
+A fence bounds its own lane's declared surface, so silently narrowing
+`files_in_scope` would make that fence meaningless.
 
 ## A lane can declare what it will create
 
@@ -176,8 +181,7 @@ absent, because that is the check which catches the commonest brief typo.
 The compiler EXEMPTS and the dispatcher never seeds a stub — a seeded stub
 would satisfy `missing-path` for whatever path was mistyped, making a typo
 indistinguishable from an intent. A created path is still part of the lane's
-write surface: it must sit inside the lane's own fence (**`where-outside-fence`**)
-and outside every sibling's (**`sibling-leak`**).
+write surface: it must sit inside that lane's own fence (**`where-outside-fence`**).
 
 ## A dispatched batch lets the caller choose its transport
 
@@ -186,9 +190,9 @@ so an unflagged batch is unchanged and behaves exactly as before. The two
 transport names and the refusal are pinned in the dispatcher:
 `BOOT_TRANSPORT = 'headless-all'`, `PANE_TRANSPORT = 'panes'`, and
 `TRANSPORT_CONFLICT = 'transport-conflict'`
-(`scripts/factory/dispatch-batch.mjs:174`,
-`scripts/factory/dispatch-batch.mjs:175`,
-`scripts/factory/dispatch-batch.mjs:22`).
+(`scripts/factory/dispatch-batch.mjs:160`,
+`scripts/factory/dispatch-batch.mjs:161`,
+`scripts/factory/dispatch-batch.mjs:21`).
 
 `--headless-all` explicitly selects the factory transport. `--panes` selects
 pane mode by the ABSENCE of `--headless-all`, because `crew.mjs boot` knows no
@@ -208,40 +212,34 @@ to the crew dir, journal and run log.
 dispatch-only: it is split off before the compiler's closed schema sees the request,
 exactly as `tier` and `depends_on` are.
 
-**A scout's fence entry participates in sibling-leak, unchanged.** A `writes: 'none'`
-lane writes nothing, so its entry is really its READ surface — but the register is one
-list of file claims and the dispatcher cannot tell the two apart at fence-check time:
-`writes` lives in the variant, and the entry is what every sibling is measured against.
-Exempting read-only lanes would let a scout be granted files a build lane owns, and the
-first thing that notices would be the build lane's scope gate. So fence a scout NARROWLY —
-name only what it must read exclusively. A `depends_on` edge does NOT help here: it
-sequences the lanes, and since #881 it exempts nothing from `sibling-leak`. Two lanes that
-must claim the same file are dispatched as two single-lane registers.
+A `writes: 'none'` scout still declares the files it reads, while a build lane
+declares the files it writes. Keep each entry to that lane's own scope and let the
+worktrees isolate simultaneous edits; a shared path is resolved when branches are
+rebased and merged. A `depends_on` edge controls wave order only and does not change
+the own-surface meaning of either entry.
 
 ## A declared edge serialises only the waves it names
 
 A **wave** is a topological level of the declared graph. The operator authors
 an edge in the request; it is never inferred, because an inferred ordering is
 one nobody can audit. Unknown names and cycles refuse by name: **dependency-unknown**
-and **dependency-cycle** are the reasons pinned by `scripts/factory/dispatch-batch.mjs:39`
-and `scripts/factory/dispatch-batch.mjs:38`.
+and **dependency-cycle** are the reasons pinned by `scripts/factory/dispatch-batch.mjs:37`
+and `scripts/factory/dispatch-batch.mjs:36`.
 
 A wave runs only after every predecessor reached `done`, **never on an `escalation`**.
 A dependent lane briefed against work that did not land is
 worse than a lane that never started, so the wave stops and reports its lanes
 unstarted with the predecessor named (`predecessor-escalated`).
 
-Disjointness is **batch-wide and unconditional** (#881): no two entries in one register
-may claim the same file, related or not. A `depends_on` edge orders the lanes so a
-dependent's base is fresh; it never licenses a shared claim. Two lanes that genuinely need
-the same file are dispatched as two single-lane registers, which is what the refusal says.
-Pre-flight and the runtime scope gate now encode the same rule — they disagreed before, and
-an operator following the dry run could only discover it by burning a planner round.
+The register records each lane's own surface; overlap is **allowed** because
+worktrees isolate concurrent writes (#881). A `depends_on` edge orders the lanes so a
+dependent's base is fresh, but it does not turn the register into a lock. Rebase
+and merge reconcile shared edits after the wave.
 
 A dependent lane compiles in a worktree cut AFTER its predecessor landed, so
 its ground truth, baseline, and tripwires are the moved tree's. Containment is
 probed; a base that does not carry the predecessor's commit refuses
-**dependent-base-stale** (`scripts/factory/dispatch-batch.mjs:40`) rather than
+**dependent-base-stale** (`scripts/factory/dispatch-batch.mjs:38`) rather than
 compiling against a stale tree.
 
 Each wave is one invocation (`--wave`), because `run` is backgrounded and this

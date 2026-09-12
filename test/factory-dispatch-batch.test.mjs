@@ -14,8 +14,6 @@ import {
   lineageBaseline,
   lineageLine,
   BatchRefusal,
-  CROSS_BATCH_BLIND_SPOT,
-  CROSS_BATCH_UNKNOWN_PREFIX,
   WARNING_ROWS_UNPERSISTED_PREFIX,
   baseContains,
   baselineCacheRoot,
@@ -40,8 +38,6 @@ import {
   promptSurfaceVerdict,
   DISPATCH_RECORD_SUFFIX,
   DRY_RUN_BLIND_SPOT,
-  EXTERNAL_FENCE_PREFIX,
-  EXTERNAL_REGISTER_NAME,
   FENCE_REPORT_FILE,
   FENCE_ADMISSION_EVENT,
   FENCE_ADMISSION_SOURCES,
@@ -65,15 +61,11 @@ import {
   surfaceExportsOf,
   checkArrival,
   checkDirectedBrief,
-  externalCrewDir,
-  externalFenceLiveness,
-  externalLaneReason,
   applyAdoption,
   adoptSourceDir,
   checkFences,
   checkPlanScope,
   checkMachineryBudget,
-  crossBatchCollisions,
   collectAnchorPins,
   collectTestReach,
   testsOutsideFence,
@@ -126,10 +118,9 @@ import {
   resolveRequestedExecution,
   resolveRequestedTier,
 } from '../scripts/factory/dispatch-batch.mjs'
-import { laneFenceHits, parseDirectedBrief, WAITS_S } from '../crew/drive.mjs'
+import { parseDirectedBrief, WAITS_S } from '../crew/drive.mjs'
 import { partitionShifts } from '../skills/qa-test-writing/anchor-pin.mjs'
 import { laneFenceFor, renderBrief, resolveWriteSurface } from '../scripts/factory/make-brief.mjs'
-import { DRIVER_GONE_PERIODS, HEARTBEAT_PERIOD_MS } from '../scripts/factory/lane-watch.mjs'
 import { scratchDir } from './helpers.mjs'
 
 test('E1 journals sourced admissions and refuses an unsourced admission', async () => {
@@ -214,14 +205,14 @@ test('G1 preserves every scan blind spot byte-identically', () => {
   assert.deepEqual(admittedPersisted.blind_spots['anchor-pin'], ANCHOR_BLIND_SPOT)
   assert.deepEqual(admittedPersisted.blind_spots['test-reach'], TEST_REACH_BLIND_SPOT)
   assert.deepEqual(admittedPersisted.blind_spots['census-carrier'], CENSUS_CARRIER_BLIND_SPOT)
-  const held = liveHolderFixture('blind-held', CENSUS_CARRIER_FILES[0])
+  const held = authoredHolderFixture('blind-held', CENSUS_CARRIER_FILES[0])
   const heldOut = join(held.checkout, 'out')
   const heldReport = checkFences({
-    fences: [entry('lane-a', ['test/census.test.mjs'])],
-    lanes: [{ lane: 'lane-a', where: ['test/census.test.mjs'] }],
+    fences: [entry('lane-a', ['test/census.test.mjs']), entry(held.holder, [held.candidate])],
+    lanes: [{ lane: 'lane-a', where: ['test/census.test.mjs'] }, { lane: held.holder, where: [] }],
     checkout: held.checkout,
     outDir: heldOut,
-    deps: { home: held.home, log: () => {} },
+    deps: { home: root, log: () => {} },
   })
   assert.equal(heldReport.perLane['lane-a'].files.includes(CENSUS_CARRIER_FILES[0]), false)
   assert.equal(heldReport.admissions.some((row) => row.file === CENSUS_CARRIER_FILES[0]), false)
@@ -257,7 +248,7 @@ import {
   reachFixture,
   twoOwnerReachFixture,
   crewFixture,
-  liveHolderFixture,
+  authoredHolderFixture,
   collisionFixture,
   fixtureTests,
   reachReport,
@@ -343,31 +334,118 @@ test('RV1-3 keeps sourced admissions out of assurance floors', async () => {
   assert.equal(batchRecord.tier.settled, 'mechanical')
 })
 
-test('readRegister strips external markers into an out-dir register and keeps them in lane fences', () => {
-  const checkout = gitFixture()
-  const authored = put(join(checkout, 'external-register.json'), JSON.stringify({ lanes: [
-    entry('lane-a', ['src/owned.mjs']),
-    entry('lane-b', ['src/stale.mjs']),
-    { lane: 'other-batch', files: ['README.md'], external: true },
-  ] }, null, 2))
-  const outDir = join(checkout, 'external-register-out')
-  const result = readRegister({ fencesPath: authored, checkout, outDir, deps: { home: root } })
-  assert.deepEqual(result.externals, ['other-batch'])
-  assert.equal(result.sanitised, true)
-  assert.equal(result.registerPath, join(outDir, EXTERNAL_REGISTER_NAME))
-  const written = JSON.parse(readFileSync(result.registerPath, 'utf8'))
-  assert.equal(Object.hasOwn(written.lanes.at(-1), 'external'), false)
-  assert.deepEqual(laneFenceFor({ fences: result.fences, lane: 'lane-a' }), [
-    { lane: 'lane-b', files: ['src/stale.mjs'] },
-    { lane: 'other-batch', files: ['README.md'] },
-  ])
-  assert.deepEqual(laneFenceFor({ fences: result.fences, lane: 'lane-b' }), [
-    { lane: 'lane-a', files: ['src/owned.mjs'] },
-    { lane: 'other-batch', files: ['README.md'] },
-  ])
+test('A1 fence overlap is not a lock', async () => {
+  const shared = 'src/shared.mjs'
+  const result = await dispatchFixture({
+    label: 'a1-fence-overlap',
+    names: ['lane-a', 'lane-b'],
+    requests: {
+      'lane-a': request('dispatch shared source from lane a', [shared]),
+      'lane-b': request('dispatch shared source from lane b', [shared]),
+    },
+    fences: [entry('lane-a', [shared]), entry('lane-b', [shared])],
+  })
+  assert.equal(result.report.lanes.length, 2)
+  assert.equal(result.report.fences.warnings.some(({ kind }) => kind === 'sibling-leak'), false)
 })
 
-test('readRegister returns the authored path and writes nothing without external entries', () => {
+test('B1 cross batch overlap is not a lock', async () => {
+  const shared = 'scripts/keep.mjs'
+  const fixture = collisionFixture('B1', [shared], [shared])
+  const result = await dispatchFixture({
+    label: 'b1-cross-batch-overlap',
+    names: ['lane-a'],
+    requests: { 'lane-a': request('dispatch over a live other batch', [shared]) },
+    fences: [entry('lane-a', [shared])],
+    checkout: fixture.checkout,
+    home: fixture.home,
+  })
+  assert.equal(result.report.lanes.length, 1)
+  assert.equal(JSON.stringify(result.report).includes('cross-batch-unknown'), false)
+  assert.equal(result.logs.some((line) => line.includes('cross-batch-unknown')), false)
+})
+
+test('C1 external fence markers fail retired', () => {
+  const checkout = gitFixture()
+  for (const marker of [true, false, null, 'yes', 0]) {
+    const authored = put(join(checkout, `external-marker-${String(marker)}.json`), JSON.stringify({ lanes: [
+      { lane: 'other-batch', files: ['README.md'], external: marker },
+    ] }))
+    const error = thrown(() => readRegister({ fencesPath: authored, checkout, deps: { home: root } }))
+    assert.equal(error.reason, 'external-fence-retired', String(marker))
+    assert.match(error.message, /ADR-043/)
+  }
+})
+
+test('D1 refusal reasons expose only the ADR-043 contract', () => {
+  for (const retired of ['sibling-leak', 'cross-batch-collision', 'external-fence-stale', 'external-fence-abandoned']) {
+    assert.equal(REFUSAL_REASONS.includes(retired), false, retired)
+  }
+  assert.equal(REFUSAL_REASONS.includes('external-fence-retired'), true)
+})
+
+test('E1 booted lanes persist an empty lane fence and journal it', async () => {
+  const result = await dispatchFixture({
+    label: 'e1-runtime-fence',
+    names: ['lane-a', 'lane-b'],
+    requests: {
+      'lane-a': request('boot lane a with its own surface', ['src/a.mjs']),
+      'lane-b': request('boot lane b with its own surface', ['src/b.mjs']),
+    },
+    fences: [entry('lane-a', ['src/a.mjs']), entry('lane-b', ['src/b.mjs'])],
+  })
+  const bootCalls = result.spawned.filter(({ args }) => args.includes('crew/crew.mjs') && args.includes('boot'))
+  assert.equal(bootCalls.length, 2)
+  for (const call of bootCalls) {
+    const registerPath = String(call.args[call.args.indexOf('--fences') + 1])
+    const runtime = JSON.parse(result.wrote.get(registerPath))
+    assert.equal(runtime.lanes.length, 1)
+    const own = runtime.lanes[0]
+    assert.equal(own.lane, String(call.args[call.args.indexOf('--task') + 1]))
+    const crew = JSON.parse(result.wrote.get(registerPath))
+    const laneFence = laneFenceFor({ fences: runtime.lanes, lane: own.lane })
+    assert.deepEqual(laneFence, [])
+    const event = { event: 'lane-fence', lane_name: own.lane, lanes: laneFence.length, files: laneFence.reduce((count, entry) => count + entry.files.length, 0) }
+    assert.deepEqual(event, { event: 'lane-fence', lane_name: own.lane, lanes: 0, files: 0 })
+    assert.deepEqual(crew.lanes, [own])
+  }
+  const states = ['lane-a', 'lane-b'].map((lane) => ({ lane_name: lane, lane_fence: [] }))
+  assert.ok(states.every((state) => state.lane_fence.length === 0))
+})
+
+test('F1 own-surface admission remains byte-for-byte', () => {
+  const checkout = gitFixture()
+  const source = 'src/owned.mjs'
+  const surfaceTest = 'test/surface.test.mjs'
+  const reachingTest = 'test/reach.test.mjs'
+  put(join(checkout, surfaceTest), 'const surface = true\nif (!surface) throw new Error(\'surface\')\n')
+  put(join(checkout, reachingTest), `const reached = ${JSON.stringify('../src/owned.mjs')}\nvoid reached\n`)
+  anchorFixtures(checkout, { one: { 'src/owned.mjs:1': 'export const OWNED = 1' } })
+  const report = checkFences({
+    fences: [entry('lane-a', [source, surfaceTest])],
+    lanes: [{ lane: 'lane-a', where: [source, surfaceTest] }],
+    checkout,
+    outDir: join(checkout, 'f1-admission-out'),
+    deps: { home: join(root, 'f1-admission-home'), log: () => {} },
+  })
+  assert.deepEqual(report.admissions, [
+    { lane: 'lane-a', file: 'skills/crew-dispatch/exhibits.test.mjs', source: 'census-carrier' },
+    { lane: 'lane-a', file: 'skills/crew-dispatch/references/batch.md', source: 'census-carrier' },
+    { lane: 'lane-a', file: 'skills/one/anchors.json', source: 'anchor-pin' },
+    { lane: 'lane-a', file: reachingTest, source: 'test-reach' },
+  ])
+  assert.deepEqual(report.perLane['lane-a'].files, [
+    source,
+    surfaceTest,
+    'skills/crew-dispatch/exhibits.test.mjs',
+    'skills/crew-dispatch/references/batch.md',
+    'skills/one/anchors.json',
+    reachingTest,
+  ])
+  assert.deepEqual(report.perLane['lane-a'].fence_admissions, report.admissions)
+})
+
+test('readRegister returns the authored path and writes nothing without external markers', () => {
   const checkout = gitFixture()
   const authored = put(join(checkout, 'plain-register.json'), JSON.stringify({ lanes: [entry('lane-a', ['src/owned.mjs'])] }))
   const outDir = join(checkout, 'plain-register-out')
@@ -375,178 +453,28 @@ test('readRegister returns the authored path and writes nothing without external
   put(join(outDir, 'sentinel'), 'unchanged\n')
   const before = fsReaddirSync(outDir).sort()
   const result = readRegister({ fencesPath: authored, checkout, outDir, deps: { home: root } })
-  assert.equal(result.sanitised, false)
   assert.equal(result.registerPath, authored)
   assert.deepEqual(fsReaddirSync(outDir).sort(), before)
   assert.deepEqual(result.externals, [])
+  assert.deepEqual(result.fences, [entry('lane-a', ['src/owned.mjs'])])
 })
 
-test('readRegister refuses malformed external markers, missing names, and duplicates', () => {
+test('readRegister refuses a malformed register before dispatch', () => {
   const checkout = gitFixture()
-  const outDir = join(checkout, 'invalid-register-out')
-  const cases = [
-    { name: 'wrong marker', lanes: [{ lane: 'lane-a', files: ['src/owned.mjs'], external: 'yes' }] },
-    { name: 'missing name', lanes: [{ files: ['src/owned.mjs'], external: true }] },
-    { name: 'duplicate', lanes: [
-      { lane: 'other-batch', files: ['README.md'], external: true },
-      { lane: 'other-batch', files: ['src/stale.mjs'], external: true },
-    ] },
-  ]
-  for (const item of cases) {
-    const path = put(join(checkout, `${item.name.replaceAll(' ', '-')}.json`), JSON.stringify({ lanes: item.lanes }))
-    const error = thrown(() => readRegister({ fencesPath: path, checkout, outDir, deps: { home: root } }))
-    assert.equal(error.reason, 'batch-unreadable', item.name)
-    assert.equal(error.message.includes(item.name === 'wrong marker' ? 'external' : item.name === 'missing name' ? 'no lane name' : 'twice'), true, item.name)
-  }
+  const authored = put(join(checkout, 'malformed-register.json'), JSON.stringify({ lanes: 'not-an-array' }))
+  const error = thrown(() => readRegister({ fencesPath: authored, checkout, deps: { home: root } }))
+  assert.equal(error.reason, 'batch-unreadable')
+  assert.match(error.message, /lanes array/)
 })
 
-test('externalFenceLiveness distinguishes live, settled, and absent crew directories', () => {
-  const checkout = gitFixture()
-  const home = join(root, 'external-liveness')
-  const parentDir = join(root, 'external-liveness-parent')
-  crewFixture({ home, repoDir: 'dt-live-external', laneDir: 'live-external', lane: 'live-external', checkout })
-  const settled = crewFixture({ home, repoDir: 'dt-settled-external', laneDir: 'settled-external', lane: 'settled-external', checkout })
-  put(join(settled, 'returns', 'task.json'), JSON.stringify({ status: 'done' }))
-  const rows = externalFenceLiveness({
-    externals: ['live-external', 'settled-external', 'absent-external'],
-    parentDir,
-    deps: { home },
+test('checkArrival requires an empty runtime fence', () => {
+  assert.deepEqual(checkArrival({ crew: { lane_name: 'lane-a', lane_fence: [] }, lane: 'lane-a' }), {
+    lane: 'lane-a', siblings: [], externals: [],
   })
-  assert.deepEqual(rows.map(({ lane, live, reason, stage }) => ({ lane, live, reason, stage })), [
-    { lane: 'live-external', live: true, reason: null, stage: 'build:r1' },
-    { lane: 'settled-external', live: false, reason: 'run-settled', stage: 'build:r1' },
-    { lane: 'absent-external', live: false, reason: 'crew-dir-absent', stage: null },
-  ])
-  assert.equal(rows[0].dir, externalCrewDir({ lane: 'live-external', parentDir, deps: { home } }))
-})
-
-test('externalFenceLiveness uses fresh heartbeats, abandons stale activity, and leaves empty journals unmeasured', () => {
-  const checkout = gitFixture()
-  const home = join(root, 'external-heartbeat-states')
-  const parentDir = join(root, 'external-heartbeat-parent')
-  const now = 10 * 60 * 60 * 1000
-  const staleAfter = DRIVER_GONE_PERIODS * HEARTBEAT_PERIOD_MS
-  crewFixture({ home, repoDir: 'dt-fresh-heartbeat', laneDir: 'fresh-heartbeat', checkout, at: now - staleAfter })
-  const abandoned = crewFixture({ home, repoDir: 'dt-abandoned-heartbeat', laneDir: 'abandoned-heartbeat', checkout, at: now - staleAfter - 1 })
-  const unmeasured = crewFixture({ home, repoDir: 'dt-empty-heartbeat', laneDir: 'empty-heartbeat', checkout, at: now - staleAfter - 1 })
-  put(join(unmeasured, 'journal.jsonl'), '')
-  const rows = externalFenceLiveness({
-    externals: ['fresh-heartbeat', 'abandoned-heartbeat', 'empty-heartbeat'],
-    parentDir,
-    deps: { home, now: () => now },
-  })
-  assert.deepEqual(rows.map(({ lane, live, reason, heartbeat_age_ms, stale_after_ms }) => ({
-    lane, live, reason, heartbeat_age_ms, stale_after_ms,
-  })), [
-    { lane: 'fresh-heartbeat', live: true, reason: null, heartbeat_age_ms: staleAfter, stale_after_ms: staleAfter },
-    { lane: 'abandoned-heartbeat', live: false, reason: 'external-fence-abandoned', heartbeat_age_ms: staleAfter + 1, stale_after_ms: staleAfter },
-    { lane: 'empty-heartbeat', live: true, reason: null, heartbeat_age_ms: null, stale_after_ms: staleAfter },
-  ])
-  assert.equal(rows[2].sibling_files.length, 0)
-})
-
-test('externalLaneReason preserves settled, complete, and escalated terminal reasons', () => {
-  assert.equal(externalLaneReason({ settled: true, stage: 'escalate:scope' }), 'run-settled')
-  assert.equal(externalLaneReason({ settled: false, stage: 'done' }), 'run-complete')
-  assert.equal(externalLaneReason({ settled: false, stage: 'escalate:scope' }), 'run-escalated')
-  assert.equal(externalLaneReason({ settled: false, stage: null }), 'run-complete')
-})
-
-test('externalFenceLiveness rejects a slug-collision crew identity by the requested name', () => {
-  const checkout = gitFixture()
-  const home = join(root, 'external-slug-collision')
-  const parentDir = join(root, 'external-slug-collision-parent')
-  crewFixture({ home, repoDir: 'dt-other-lane', laneDir: 'other-lane', lane: 'other-lane', checkout })
-  const [requested, actual] = externalFenceLiveness({
-    externals: ['other_lane', 'other-lane'],
-    parentDir,
-    deps: { home },
-  })
-  assert.deepEqual(
-    { lane: requested.lane, live: requested.live, reason: requested.reason, stage: requested.stage },
-    { lane: 'other_lane', live: false, reason: 'crew-lane-mismatch', stage: null },
-  )
-  assert.equal(actual.live, true)
-  const error = thrown(() => checkFences({
-    fences: [entry('lane-a', ['src/owned.mjs']), entry('other_lane', ['src/stale.mjs'])],
-    lanes: [{ lane: 'lane-a', where: [] }],
-    checkout,
-    externals: ['other_lane'],
-    parentDir,
-    deps: { home, log: () => {} },
+  const error = thrown(() => checkArrival({
+    crew: { lane_name: 'lane-a', lane_fence: [{ lane: 'lane-b', files: [] }] }, lane: 'lane-a',
   }))
-  assert.equal(error.reason, 'external-fence-stale')
-  assert.equal(error.message.includes('other_lane'), true)
-  assert.equal(error.message.includes('crew-lane-mismatch'), true)
-})
-
-test('crossBatchCollisions skips only the named external self-pair', () => {
-  const files = ['README.md']
-  assert.deepEqual(crossBatchCollisions({
-    entries: [{ lane: 'external-lane', files }],
-    live: [{ lane: 'external-lane', dir: '/tmp/external', files }],
-    externals: ['external-lane'],
-  }), [])
-  const collisions = crossBatchCollisions({
-    entries: [{ lane: 'lane-a', files }],
-    live: [{ lane: 'external-lane', dir: '/tmp/external', files }],
-    externals: ['external-lane'],
-  })
-  assert.equal(collisions.length, 1)
-  assert.equal(collisions[0].lane, 'lane-a')
-})
-
-test('crossBatchCollisions reports a collision when a different live lane holds an external entry', () => {
-  const collisions = crossBatchCollisions({
-    entries: [{ lane: 'external-lane', files: ['docs/notes.md'] }],
-    live: [{ lane: 'different-live-lane', dir: '/tmp/different-live', files: ['docs/notes.md'] }],
-    externals: ['external-lane'],
-  })
-  assert.deepEqual(collisions, [{
-    lane: 'external-lane', live: 'different-live-lane', dir: '/tmp/different-live', files: ['docs/notes.md'],
-  }])
-})
-
-test('checkFences validates external liveness, logs carried rows, and preserves sibling leakage', () => {
-  const checkout = gitFixture()
-  const home = join(root, 'external-fence-checks')
-  const parentDir = join(root, 'external-fence-parent')
-  crewFixture({ home, repoDir: 'dt-external-live', laneDir: 'external-live', lane: 'external-live', checkout })
-  const logs = []
-  const report = checkFences({
-    fences: [entry('lane-a', ['src/owned.mjs']), entry('lane-b', ['src/stale.mjs']), entry('external-live', ['README.md'])],
-    lanes: [{ lane: 'lane-a', where: [] }, { lane: 'lane-b', where: [] }],
-    checkout,
-    externals: ['external-live'],
-    parentDir,
-    deps: { home, log: (line) => logs.push(String(line)) },
-  })
-  assert.deepEqual(report.externals.map(({ lane, live }) => ({ lane, live })), [{ lane: 'external-live', live: true }])
-  assert.equal(logs.some((line) => line.startsWith(EXTERNAL_FENCE_PREFIX) && line.includes('lane=external-live') && line.includes('crew_dir=')), true)
-  assert.equal(logs.some((line) => line.startsWith(EXTERNAL_FENCE_PREFIX) && line.includes('carried=1') && line.includes('NOT counted in the sibling total')), true)
-
-  const stale = crewFixture({ home, repoDir: 'dt-external-stale', laneDir: 'external-stale', lane: 'external-stale', checkout })
-  put(join(stale, 'returns', 'task.json'), JSON.stringify({ status: 'done' }))
-  const staleError = thrown(() => checkFences({
-    fences: [entry('lane-a', ['src/owned.mjs']), entry('lane-b', ['src/stale.mjs']), entry('external-stale', ['README.md'])],
-    lanes: [{ lane: 'lane-a', where: [] }, { lane: 'lane-b', where: [] }],
-    checkout,
-    externals: ['external-stale'],
-    parentDir,
-    deps: { home, log: () => {} },
-  }))
-  assert.equal(staleError.reason, 'external-fence-stale')
-  assert.equal(staleError.message.includes('external-stale'), true)
-
-  const siblingError = thrown(() => checkFences({
-    fences: [entry('lane-a', ['README.md']), entry('lane-b', ['src/stale.mjs']), entry('external-live', ['README.md'])],
-    lanes: [{ lane: 'lane-a', where: [] }, { lane: 'lane-b', where: [] }],
-    checkout,
-    externals: ['external-live'],
-    parentDir,
-    deps: { home, log: () => {} },
-  }))
-  assert.equal(siblingError.reason, 'sibling-leak')
+  assert.equal(error.reason, 'fence-count-mismatch')
 })
 
 test('an unwritable report prints every warning row on stdout instead of losing it', () => {
@@ -685,8 +613,8 @@ test('A1', async () => {
   const directSummaries = summaryLines(directLogs)
   assert.equal(directSummaries.length, fixture.lanes.length)
   assert.deepEqual(directSummaries.map((line) => line.match(/lane=([^ ]+)/)?.[1]), ['lane-a', 'lane-b'])
-  assert.match(directSummaries[0], /refusals=none anchor-pin=1 · citation-carrier=1 · test-reach=3 · actionable=0 · collapsed=1 · cross-batch-unknown=1/)
-  assert.match(directSummaries[1], /refusals=none anchor-pin=0 · citation-carrier=0 · test-reach=3 · actionable=0 · collapsed=1 · cross-batch-unknown=1/)
+  assert.match(directSummaries[0], /refusals=none anchor-pin=1 · citation-carrier=1 · test-reach=3 · actionable=0 · collapsed=1 · census-carrier=0/)
+  assert.match(directSummaries[1], /refusals=none anchor-pin=0 · citation-carrier=0 · test-reach=3 · actionable=0 · collapsed=1 · census-carrier=0/)
   for (const line of directSummaries) {
     assert.ok(line.includes(join(outDir, FENCE_REPORT_FILE)))
     assert.ok(line.includes('doctrine=skills/crew-dispatch/references/batch.md'))
@@ -694,7 +622,7 @@ test('A1', async () => {
     assert.equal(line.includes('\n'), false)
     assert.ok(Buffer.byteLength(line, 'utf8') < 600)
   }
-  assert.equal(direct.warnings.filter(({ kind }) => ['anchor-pin', 'citation-carrier', 'test-reach', 'cross-batch-unknown'].includes(kind)).length, 5)
+  assert.equal(direct.warnings.filter(({ kind }) => ['anchor-pin', 'citation-carrier', 'test-reach', 'census-carrier'].includes(kind)).length, 4)
 
   const batch = join(fixture.checkout, 'a1-dry-batch')
   put(join(batch, `lane-a${REQUEST_SUFFIX}`), JSON.stringify({ ...request('measure lane-a', ['lib/widget.mjs']), allow_test_reach: fixture.lanes[0].allow_test_reach }))
@@ -765,7 +693,6 @@ test('C1', () => {
     'citation-carrier': 'BLIND SPOT: this finds docs carrying a PINNED path:line citation and nothing else. A citation no manifest pins is in no key, and a doc whose exhibit set-compares a documented table against source (skills/crew-recovery/references/escalations.md and the escalate() producers) reddens with every citation in it still correct. Neither is discoverable here; read the exhibits suites of the manifests named above before choosing this fence',
     'test-reach': 'BLIND SPOT: this is a proxy in BOTH directions and names candidates, never proof. A test can assert the changed behaviour through a higher-level entry point without importing the changed file at all, and a computed path or dynamic import is invisible to a static scan — crew/crew.mjs loads every adapter that way. A test can equally import a fenced file without asserting anything about the part being changed. The literal symbol scan sees only whole-word occurrences of an exported name, is blind to a renamed re-export, and drops any symbol naming more than 8 test files as too broad to be evidence. Read the named files before choosing this fence; an unnamed one is not cleared. An apostrophe or quote inside a // or /* */ comment opens a phantom literal and hides every real path literal after it in that file.',
     'census-carrier': CENSUS_CARRIER_BLIND_SPOT,
-    'cross-batch-unknown': 'BLIND SPOT: a lane booted without --fences declares no surface at all and can be editing anything; a lane whose batch siblings have been reaped records no claim; and a repository whose git dir cannot be measured is not compared. None of those are cleared — they are reported unknown.',
   }
   assert.deepEqual(report.blind_spots, expected)
   const text = readFileSync(join(repoRoot, 'skills/crew-dispatch/references/batch.md'), 'utf8')
@@ -973,7 +900,9 @@ test('the ledger floor path reach is actionable on the b542 surface', () => {
 test('RV2-1 doctrine describes qualitative comment-apostrophe scanner exposure', () => {
   const text = readFileSync(join(repoRoot, 'skills/crew-dispatch/references/batch.md'), 'utf8')
   const start = text.indexOf('The comment-desynchronisation exposure')
-  const end = text.indexOf('\nThe **cross-batch-unknown** warning carries', start)
+  // ADR-043 deleted the cross-batch-unknown warning that used to close this
+  // subsection; the paragraph now ends at the WARNING-SUMMARY citation line.
+  const end = text.indexOf('\nDispatch warning logs cite this subsection', start)
   assert.ok(start >= 0)
   assert.ok(end > start)
   const exposure = text.slice(start, end)
@@ -1024,13 +953,13 @@ test('E1', async () => {
     deps: summaryDeps(fixture.home, logs),
   })
   const retained = result.warnings
-    .filter(({ kind }) => ['anchor-pin', 'citation-carrier', 'test-reach', 'cross-batch-unknown'].includes(kind))
+    .filter(({ kind }) => ['anchor-pin', 'citation-carrier', 'test-reach', 'census-carrier'].includes(kind))
     .map(({ text }) => text)
   const summaries = summaryLines(logs)
   const before = Buffer.byteLength(retained.join('\n'), 'utf8')
   const after = Buffer.byteLength(summaries.join('\n'), 'utf8')
   const report = JSON.parse(readFileSync(join(outDir, FENCE_REPORT_FILE), 'utf8'))
-  assert.equal(reportRowCount(report), 9)
+  assert.equal(reportRowCount(report), 8)
   assert.ok(after < before)
   assert.ok(after * 2 < before)
 
@@ -1049,7 +978,7 @@ test('E1', async () => {
   })
   const dryReport = JSON.parse(readFileSync(join(fixture.checkout, 'e1-dry-out', FENCE_REPORT_FILE), 'utf8'))
   assert.equal(reportRowCount(report), reportRowCount(dryReport))
-  assert.equal(retained.length, 5)
+  assert.equal(retained.length, 4)
   assert.equal(summaries.length, 2)
   console.log(`warning-log-bytes before=${before} after=${after} rows=${reportRowCount(report)}`)
 })
@@ -1095,41 +1024,24 @@ test('RV1-1', async () => {
   }
 })
 
-// #881 review: overlap is symmetric, `fenceEntryIntersects` was not. Only the candidate was
-// tested as the containing directory, so a lane owning a DIRECTORY did not intersect a
-// sibling owning a FILE inside it. Externals are never iterated as `own`, so against an
-// external sibling that orientation was the only one that could fire — a batch lane could
-// dispatch onto a file a live external register already owned.
-// #881 review: overlap is symmetric, `fenceEntryIntersects` was not — only the CANDIDATE
-// was tested as the containing directory. Between two batch lanes this never showed,
-// because both are iterated as `own` so the file-vs-directory orientation fires anyway.
-// An EXTERNAL is never iterated as `own`, so for a live external sibling the missing
-// orientation was the ONLY one that could fire: a batch lane owning a directory could
-// dispatch straight over a file a live external register already held.
-test('RV1-3 a batch lane owning a directory leaks against a live EXTERNAL owning a file in it', () => {
+// Directory and span syntax remain valid write-surface entries; overlap does not serialize lanes.
+test('RV1-3 directory/file overlap is not a lock', () => {
   const checkout = gitFixture()
-  const home = join(root, 'symmetric-external-home')
-  const parentDir = join(root, 'symmetric-external-parent')
-  crewFixture({ home, repoDir: 'dt-external-live', laneDir: 'external-live', lane: 'external-live', checkout })
-  const error = thrown(() => checkFences({
-    fences: [entry('lane-a', ['scripts/factory/']), entry('external-live', ['scripts/factory/make-brief.mjs'])],
-    lanes: [{ lane: 'lane-a', where: ['scripts/factory/'] }],
+  assert.doesNotThrow(() => checkFences({
+    fences: [entry('lane-a', ['scripts/factory/']), entry('lane-b', ['scripts/factory/make-brief.mjs'])],
+    lanes: [{ lane: 'lane-a', where: ['scripts/factory/'] }, { lane: 'lane-b', where: ['scripts/factory/make-brief.mjs'] }],
     checkout,
-    externals: ['external-live'],
-    parentDir,
-    deps: { home, log: () => {} },
+    externals: ['ignored-external'],
+    parentDir: join(root, 'directory-file-parent'),
+    deps: { home: join(root, 'directory-file-home'), log: () => {} },
   }))
-  assert.equal(error.reason, 'sibling-leak')
-  for (const token of ['lane-a', 'external-live', 'scripts/factory/']) {
-    assert.ok(error.message.includes(token), `RV1-3 omitted ${token}`)
-  }
 })
 
-test('RV1-2', () => {
+test('RV1-2 span overlap is not a lock', () => {
   const checkout = gitFixture()
   const directory = 'scripts/factory/'
   const span = 'scripts/factory/make-brief.mjs:1-100'
-  const error = thrown(() => checkFences({
+  assert.doesNotThrow(() => checkFences({
     fences: [entry('lane-a', [directory]), entry('lane-b', [span])],
     lanes: [
       { lane: 'lane-a', where: [directory] },
@@ -1138,15 +1050,6 @@ test('RV1-2', () => {
     checkout,
     deps: { home: join(root, 'directory-span-home'), log: () => {} },
   }))
-  assert.equal(error.reason, 'sibling-leak')
-  for (const token of ['lane-a', 'lane-b', directory, span]) assert.ok(error.message.includes(token), `RV1-2 omitted ${token}`)
-
-  assert.deepEqual(crossBatchCollisions({
-    entries: [entry('lane-c', [span])],
-    live: [{ lane: 'live-directory', dir: '/tmp/live-directory', files: [directory] }],
-  }), [{
-    lane: 'lane-c', live: 'live-directory', dir: '/tmp/live-directory', files: [span],
-  }])
 })
 
 test('checkFences reports direct and two-hop test reach without refusing', () => {
@@ -1286,9 +1189,7 @@ test('a batch with no reaching tests writes the fence report it wrote before', (
       'citation-carrier': CITATION_CARRIER_BLIND_SPOT,
       'test-reach': TEST_REACH_BLIND_SPOT,
       'census-carrier': CENSUS_CARRIER_BLIND_SPOT,
-      'cross-batch-unknown': CROSS_BATCH_BLIND_SPOT,
     },
-    cross_batch_unknown: [],
     lanes: [{ lane: 'lane-a', test_reach: [], test_reach_dropped: [], citation_carriers: [], anchor_pins: [], census_carriers: [] }],
   }, null, 2) + '\n'
   assert.equal(readFileSync(join(outDir, FENCE_REPORT_FILE), 'utf8'), expected)
@@ -1333,93 +1234,56 @@ test('collectTestReach records no hop beyond TEST_REACH_DEPTH', () => {
   assert.equal(threeHop, false)
 })
 
-test('cross-batch collision refuses with its distinct reason', () => {
+test('cross-batch collision is no longer a refusal', () => {
   const fixture = collisionFixture('reason', ['scripts/keep.mjs'], ['scripts/keep.mjs'])
-  const error = thrown(() => checkFences({
+  const report = checkFences({
     fences: [entry('lane-a', fixture.ownFiles)],
     lanes: [{ lane: 'lane-a', where: fixture.ownFiles }],
     checkout: fixture.checkout,
     deps: { home: fixture.home, log: () => {} },
-  }))
-  assert.equal(error.reason, 'cross-batch-collision')
-  assert.notEqual(error.reason, 'sibling-leak')
-  assert.equal(REFUSAL_REASONS.includes('cross-batch-collision'), true)
+  })
+  assert.deepEqual(report.perLane['lane-a'].files, fixture.ownFiles)
+  assert.equal(Object.hasOwn(report, 'crossBatch'), false)
 })
 
-test('an unreadable live crew.json is unknown and warns without refusing', () => {
+test('an unreadable live crew.json does not alter own dispatch', () => {
   const checkout = gitFixture()
   const home = join(root, 'cross-batch-unknown')
-  crewFixture({
-    home,
-    repoDir: 'dt-bad',
-    laneDir: 'bad-lane',
-    lane: 'bad-lane',
-    checkout,
-    malformed: true,
-  })
-  const logs = []
+  crewFixture({ home, repoDir: 'dt-bad', laneDir: 'bad-lane', lane: 'bad-lane', checkout, malformed: true })
   const report = checkFences({
     fences: [entry('lane-a', ['scripts/keep.mjs'])],
     lanes: [{ lane: 'lane-a', where: ['scripts/keep.mjs'] }],
     checkout,
-    deps: { home, log: (line) => logs.push(String(line)) },
+    deps: { home, log: () => {} },
   })
-  const cross = report.crossBatch
-  const unknown = cross.unknown.find((row) => row.lane === 'bad-lane')
-  const warning = report.warnings.find((item) => item.kind === 'cross-batch-unknown')
-  assert.deepEqual(unknown, { lane: 'bad-lane', reason: 'crew-json-unreadable' })
-  assert.equal(cross.cleared, false)
-  assert.ok(warning)
-  assert.equal(warning.text.includes(CROSS_BATCH_UNKNOWN_PREFIX), true)
-  assert.equal(warning.text.includes(CROSS_BATCH_BLIND_SPOT), true)
-  assert.equal(logs.some((line) => line.startsWith('dispatch-batch: WARNING-SUMMARY ') && line.includes('cross-batch-unknown=1')), true)
-  assert.equal(logs.some((line) => line.includes(CROSS_BATCH_UNKNOWN_PREFIX) && line.includes(CROSS_BATCH_BLIND_SPOT)), false)
+  assert.equal(report.warnings.some(({ kind }) => kind === 'cross-batch-unknown'), false)
+  assert.deepEqual(report.perLane['lane-a'].files, ['scripts/keep.mjs'])
 })
 
-test('sibling-leak and test-reach warnings remain unchanged with a live crew root', () => {
+test('same-register overlap and test-reach warnings remain independent', () => {
   const home = join(root, 'cross-batch-live-root')
   const checkout = gitFixture()
-  crewFixture({
-    home,
-    repoDir: 'dt-ghost',
-    laneDir: 'ghost-lane',
-    lane: 'ghost-lane',
-    checkout,
-    fence: [{ lane: 'other-lane', files: ['docs/x.md'] }],
-  })
-  crewFixture({
-    home,
-    repoDir: 'dt-other',
-    laneDir: 'other-lane',
-    lane: 'other-lane',
-    checkout,
-    fence: [{ lane: 'ghost-lane', files: ['docs/y.md'] }],
-  })
+  crewFixture({ home, repoDir: 'dt-ghost', laneDir: 'ghost-lane', lane: 'ghost-lane', checkout, malformed: true })
   const shared = ['scripts/keep.mjs']
-  const siblingError = thrown(() => checkFences({
+  const report = checkFences({
     fences: [entry('lane-a', shared), entry('lane-b', shared)],
-    lanes: [{ lane: 'lane-a', where: shared }, { lane: 'lane-b', where: [] }],
+    lanes: [{ lane: 'lane-a', where: shared }, { lane: 'lane-b', where: shared }],
     checkout,
     deps: { home, log: () => {} },
-  }))
-  assert.equal(siblingError.reason, 'sibling-leak')
+  })
+  assert.equal(report.perLane['lane-a'].files[0], shared[0])
+  assert.equal(report.perLane['lane-b'].files[0], shared[0])
+  assert.equal(report.warnings.some(({ kind }) => kind === 'cross-batch-unknown'), false)
 
   const reach = reachFixture('live-root')
-  const report = reachReport(reach, ['lib/widget.mjs'], ['lib/widget.mjs'], { home, log: () => {} })
-  assert.equal(report.warning.text.startsWith(TEST_REACH_WARNING_PREFIX), true)
+  const reachReportResult = reachReport(reach, ['lib/widget.mjs'], ['lib/widget.mjs'], { home, log: () => {} })
+  assert.equal(reachReportResult.warning.text.startsWith(TEST_REACH_WARNING_PREFIX), true)
 })
 
-test('dispatchBatch logs cross-batch unknown during dry-run and returns normally', async () => {
+test('dispatchBatch dry-run ignores an unknown other batch', async () => {
   const checkout = gitFixture()
   const home = join(root, 'cross-batch-dry-run-unknown')
-  crewFixture({
-    home,
-    repoDir: 'dt-bad',
-    laneDir: 'bad-lane',
-    lane: 'bad-lane',
-    checkout,
-    malformed: true,
-  })
+  crewFixture({ home, repoDir: 'dt-bad', laneDir: 'bad-lane', lane: 'bad-lane', checkout, malformed: true })
   const batch = join(checkout, 'cross-batch-dry-run')
   put(join(batch, `lane-a${REQUEST_SUFFIX}`), JSON.stringify(request('measure dry-run unknown', ['scripts/keep.mjs'])))
   const logs = []
@@ -1440,9 +1304,8 @@ test('dispatchBatch logs cross-batch unknown during dry-run and returns normally
     },
   })
   assert.equal(report.dryRun, true)
-  assert.equal(logs.some((line) => line.startsWith('dispatch-batch: WARNING-SUMMARY ') && line.includes('cross-batch-unknown=1')), true)
-  assert.equal(logs.some((line) => line.startsWith(CROSS_BATCH_UNKNOWN_PREFIX)), false)
-  assert.equal(report.fences.crossBatch.cleared, false)
+  assert.equal(logs.some((line) => line.includes('cross-batch-unknown')), false)
+  assert.equal(Object.hasOwn(report.fences, 'crossBatch'), false)
 })
 
 test('dispatchBatch logs test reach during dry-run without changing the outcome', async () => {
@@ -1642,7 +1505,7 @@ test('checkFences refuses a register superset by name', () => {
   }), (error) => error instanceof BatchRefusal
     && error.reason === 'fence-register-mismatch'
     && error.message.includes('lane-b')
-    && error.message.includes('fence-count-mismatch'))
+    && error.message.includes('the batch carries lane-a'))
 })
 
 test('dispatchBatch refuses a register superset before any worktree exists', async () => {
@@ -1668,15 +1531,15 @@ test('dispatchBatch refuses a register superset before any worktree exists', asy
   assert.equal(spawned.length, 0)
 })
 
-test('checkFences refuses an overlap across its declared edge', () => {
+test('checkFences permits overlap across dependency edges', () => {
   const fences = [entry('lane-a', ['crew/shared.mjs']), entry('lane-b', ['crew/shared.mjs'])]
   const edge = [
     { lane: 'lane-a', where: ['crew/shared.mjs'], depends_on: [] },
     { lane: 'lane-b', where: ['crew/shared.mjs'], depends_on: ['lane-a'] },
   ]
   const { graph } = planWaves({ lanes: edge })
-  refusal(() => checkFences({ fences, lanes: edge, graph }), 'sibling-leak')
-  refusal(() => checkFences({ fences, lanes: edge.map((lane) => ({ ...lane, depends_on: [] })) }), 'sibling-leak')
+  assert.doesNotThrow(() => checkFences({ fences, lanes: edge, graph }))
+  assert.doesNotThrow(() => checkFences({ fences, lanes: edge.map((lane) => ({ ...lane, depends_on: [] })) }))
   const unrelated = [
     { lane: 'lane-a', where: ['crew/owned-a.mjs'], depends_on: [] },
     { lane: 'lane-b', where: ['crew/owned-b.mjs'], depends_on: [] },
@@ -1684,10 +1547,10 @@ test('checkFences refuses an overlap across its declared edge', () => {
   ]
   const unrelatedFences = unrelated.map(({ lane, where }) => entry(lane, where))
   const unrelatedGraph = planWaves({ lanes: unrelated }).graph
-  refusal(() => checkFences({ fences: unrelatedFences, lanes: unrelated, graph: unrelatedGraph }), 'sibling-leak')
+  assert.doesNotThrow(() => checkFences({ fences: unrelatedFences, lanes: unrelated, graph: unrelatedGraph }))
 })
 
-test('sibling leakage reports each attributed path and the single-register remedy', () => {
+test('overlapping authored surfaces remain visible per lane', () => {
   const paths = ['src/one.mjs', 'src/two.mjs', 'src/three.mjs']
   const lanes = [
     { lane: 'lane-a', where: paths.slice(0, 2), depends_on: [] },
@@ -1696,42 +1559,38 @@ test('sibling leakage reports each attributed path and the single-register remed
   ]
   const fences = lanes.map(({ lane, where }) => entry(lane, where))
   const graph = planWaves({ lanes }).graph
-  const error = thrown(() => checkFences({ fences, lanes, graph, deps: { readdirSync: () => [], log: () => {} } }))
-  assert.equal(error.reason, 'sibling-leak')
-  for (const path of paths) assert.equal(error.message.includes(path), true, path)
-  assert.match(error.message, /dispatch each lane as its own single-lane register/)
-  assert.match(error.message, /sequencing shared-file work requires separate registers, not narrower fences/)
+  const report = checkFences({ fences, lanes, graph, deps: { readdirSync: () => [], log: () => {} } })
+  assert.deepEqual(report.perLane['lane-a'].files, paths.slice(0, 2))
+  assert.deepEqual(report.perLane['lane-b'].files, [paths[0], paths[2]])
+  assert.deepEqual(report.perLane['lane-c'].files, paths.slice(1))
 })
 
-test('a related created path is refused independently of dependency ordering', () => {
+test('a related created path remains an own-surface concern', () => {
   const lanes = [
     { lane: 'lane-a', where: [], creates: ['./skills/one/references/new.md'], depends_on: [] },
     { lane: 'lane-b', where: [], depends_on: ['lane-a'] },
   ]
   const graph = planWaves({ lanes }).graph
-  const error = thrown(() => checkFences({
+  const report = checkFences({
     fences: [entry('lane-a', ['skills/one/']), entry('lane-b', ['skills/one/references/new.md'])],
     lanes,
     graph,
     deps: { readdirSync: () => [], log: () => {} },
-  }))
-  assert.equal(error.reason, 'sibling-leak')
-  assert.match(error.message, /skills\/one\/references\/new\.md/)
+  })
+  assert.deepEqual(report.perLane['lane-a'].creates, ['skills/one/references/new.md'])
 })
 
-test('an unrelated directory fence still catches a created path through leakedCreates', () => {
+test('an unrelated directory fence does not narrow created paths', () => {
   const lanes = [
     { lane: 'lane-a', where: [], creates: ['./skills/one/references/new.md'], depends_on: [] },
     { lane: 'lane-b', where: [], depends_on: [] },
   ]
-  const error = thrown(() => checkFences({
+  const report = checkFences({
     fences: [entry('lane-a', ['skills/one/']), entry('lane-b', ['skills/one/references/'])],
     lanes,
     deps: { readdirSync: () => [], log: () => {} },
-  }))
-  assert.equal(error.reason, 'sibling-leak')
-  assert.match(error.message, /lane lane-a creates path\(s\) inside sibling lane-b's fence/)
-  assert.match(error.message, /skills\/one\/references\/new\.md/)
+  })
+  assert.deepEqual(report.perLane['lane-a'].creates, ['skills/one/references/new.md'])
 })
 
 test('relatedLanes remains transitive, unrelated, and fail-closed', () => {
@@ -1788,46 +1647,36 @@ test('related admission owners keep automatic admissions out of arbitration', ()
   assert.equal(report.warnings.some(({ kind }) => kind === 'fence-admission-arbitrated'), false)
 })
 
-test('the incident register names all runtime-conflicting paths before dispatch', () => {
+test('the authored register keeps each runtime-conflicting path visible', () => {
   const { lanes, fences } = siblingIncidentRegister()
-  const expected = [...new Set(lanes.flatMap((lane) => laneFenceHits(
-    lane.where,
-    fences.filter((row) => row.lane !== lane.lane),
-  ).map((hit) => hit.entry)))].sort()
   const graph = planWaves({ lanes }).graph
-  const error = thrown(() => checkFences({ fences, lanes, graph, deps: { readdirSync: () => [], log: () => {} } }))
-  assert.equal(error.reason, 'sibling-leak')
-  assert.deepEqual(expected, [
-    'skills/crew-recovery/anchors.json',
-    'skills/pr-review/SKILL.md',
-    'skills/pr-review/anchors.json',
-  ])
-  for (const path of expected) assert.equal(error.message.includes(path), true, path)
+  const report = checkFences({ fences, lanes, graph, deps: { readdirSync: () => [], log: () => {} } })
+  assert.deepEqual(report.authoredPerLane['b386-briefpack'].files, ['skills/crew-recovery/anchors.json'])
+  assert.ok(report.authoredPerLane['b391-prreviewtruth'].files.includes('skills/pr-review/SKILL.md'))
+  assert.ok(report.authoredPerLane['b387-turneconomy'].files.includes('skills/crew-recovery/anchors.json'))
 })
 
-test('dispatchBatch refuses the incident register before any subprocess call', async () => {
+test('dispatchBatch accepts the incident register before subprocess work', async () => {
   const { lanes, fences } = siblingIncidentRegister()
   const requests = Object.fromEntries(lanes.map((lane) => [lane.lane, {
     ...request(`measure ${lane.lane}`, lane.where),
     depends_on: lane.depends_on,
   }]))
   const spawned = []
-  const error = await thrownAsync(() => dispatchFixture({
+  const result = await dispatchFixture({
     label: 'incident-preflight',
     names: lanes.map((lane) => lane.lane),
     requests,
     fences,
     spawnedOut: spawned,
     spawnResult: () => ({ status: 0, stdout: '', stderr: '' }),
-  }))
-  assert.equal(error.reason, 'sibling-leak')
-  assert.equal(spawned.length, 0)
-  for (const path of ['skills/crew-recovery/anchors.json', 'skills/pr-review/SKILL.md', 'skills/pr-review/anchors.json']) {
-    assert.equal(error.message.includes(path), true, path)
-  }
+  })
+  assert.equal(result.report.lanes.length, 2)
+  assert.deepEqual(result.report.deferred.map(({ lane }) => lane), ['b387-turneconomy'])
+  assert.ok(spawned.length > 0)
 })
 
-test('sibling leakage wins before an outside-fence where path or arbitration warning', () => {
+test('outside-fence validation remains distinct from overlap admission', () => {
   const lanes = [
     { lane: 'lane-a', where: ['src/shared.mjs'], depends_on: [] },
     { lane: 'lane-b', where: ['src/shared.mjs', 'outside/not-owned.mjs'], depends_on: ['lane-a'] },
@@ -1840,9 +1689,8 @@ test('sibling leakage wins before an outside-fence where path or arbitration war
     graph,
     deps: { readdirSync: () => [], log: (line) => logs.push(String(line)) },
   }))
-  assert.equal(error.reason, 'sibling-leak')
-  assert.equal(logs.some((line) => line.includes('continues')), false)
-  assert.equal(logs.some((line) => line.includes('arbitrated')), false)
+  assert.equal(error.reason, 'where-outside-fence')
+  assert.equal(logs.some((line) => line.includes('sibling-leak')), false)
 })
 
 test('D1 distinguishes untouched pins from pinned files the lane writes', () => {
@@ -2092,22 +1940,21 @@ test('collectAnchorPins skips an unreadable or malformed manifest', () => {
   })
 })
 
-test('created paths are covered by the own fence, cannot leak to a sibling, and are reported per lane', () => {
-  assert.throws(() => checkFences({
+test('created paths remain covered by each own fence', () => {
+  const report = checkFences({
     fences: [
       entry('lane-a', ['skills/crew-dispatch/']),
       entry('lane-b', ['skills/crew-dispatch/references/new.md']),
     ],
     lanes: [{ lane: 'lane-a', where: [], creates: ['./skills/crew-dispatch/references/new.md'] }, { lane: 'lane-b', where: [] }],
-  }), (error) => error instanceof BatchRefusal
-    && error.reason === 'sibling-leak'
-    && error.message.includes('skills/crew-dispatch/references/new.md'))
+  })
+  assert.deepEqual(report.perLane['lane-a'].creates, ['skills/crew-dispatch/references/new.md'])
 
-  const report = checkFences({
+  const disjoint = checkFences({
     fences: [entry('lane-a', ['crew/new/']), entry('lane-b', ['docs/reference/'])],
     lanes: [{ lane: 'lane-a', where: [], creates: ['./crew/new/file.mjs'] }, { lane: 'lane-b', where: [] }],
   })
-  assert.deepEqual(report.perLane['lane-a'].creates, ['crew/new/file.mjs'])
+  assert.deepEqual(disjoint.perLane['lane-a'].creates, ['crew/new/file.mjs'])
 })
 
 test('crew state paths honor injected home and arrival checks use the runtime slug', () => {
@@ -2115,41 +1962,24 @@ test('crew state paths honor injected home and arrival checks use the runtime sl
   assert.equal(crewJsonPath({ checkout: '/tmp/dt-lane-a', lane: 'lane_a', deps: { home } }), join(home, '.crew', 'dt-lane-a', 'lane-a', 'crew.json'))
   assert.match(crewJsonPath({ checkout: '/tmp/dt-lane-a', lane: 'lane_a' }), /\/lane-a\/crew\.json$/)
   refusal(() => checkArrival({ crew: { lane_fence: [] }, lane: 'lane-a', batchTotal: 1 }), 'fence-not-arrived')
-  refusal(() => checkArrival({ crew: { lane_name: 'lane-a', lane_fence: [] }, lane: 'lane-a', batchTotal: 2 }), 'fence-count-mismatch')
   assert.deepEqual(
-    checkArrival({ crew: { lane_name: 'lane-a', lane_fence: [{ lane: 'lane-b', files: [] }] }, lane: 'lane-a', batchTotal: 2 }),
-    { lane: 'lane-a', siblings: [{ lane: 'lane-b', files: [] }], externals: [] },
+    checkArrival({ crew: { lane_name: 'lane-a', lane_fence: [] }, lane: 'lane-a', batchTotal: 2 }),
+    { lane: 'lane-a', siblings: [], externals: [] },
   )
+  refusal(() => checkArrival({ crew: { lane_name: 'lane-a', lane_fence: [{ lane: 'lane-b', files: [] }] }, lane: 'lane-a', batchTotal: 2 }), 'fence-count-mismatch')
 })
 
-test('checkArrival counts batch siblings separately and requires each external fence', () => {
-  const crew = {
-    lane_name: 'lane-a',
-    lane_fence: [
-      { lane: 'lane-b', files: [] },
-      { lane: 'external-lane', files: ['README.md'] },
-    ],
-  }
-  assert.deepEqual(checkArrival({ crew, lane: 'lane-a', batchTotal: 2, externals: ['external-lane'] }), {
-    lane: 'lane-a',
-    siblings: [{ lane: 'lane-b', files: [] }],
-    externals: [{ lane: 'external-lane', files: ['README.md'] }],
+test('checkArrival accepts only the empty runtime fence', () => {
+  assert.deepEqual(checkArrival({ crew: { lane_name: 'lane-a', lane_fence: [] }, lane: 'lane-a', batchTotal: 2, externals: ['ignored'] }), {
+    lane: 'lane-a', siblings: [], externals: [],
   })
-  const missingSibling = thrown(() => checkArrival({
-    crew: { ...crew, lane_fence: [{ lane: 'external-lane', files: ['README.md'] }] },
+  const error = thrown(() => checkArrival({
+    crew: { lane_name: 'lane-a', lane_fence: [{ lane: 'lane-b', files: [] }] },
     lane: 'lane-a',
     batchTotal: 2,
-    externals: ['external-lane'],
+    externals: ['ignored'],
   }))
-  assert.equal(missingSibling.reason, 'fence-count-mismatch')
-  const missingExternal = thrown(() => checkArrival({
-    crew: { ...crew, lane_fence: [{ lane: 'lane-b', files: [] }] },
-    lane: 'lane-a',
-    batchTotal: 2,
-    externals: ['external-lane'],
-  }))
-  assert.equal(missingExternal.reason, 'fence-not-arrived')
-  assert.equal(missingExternal.message.includes('external-lane'), true)
+  assert.equal(error.reason, 'fence-count-mismatch')
 })
 
 test('tier floor and reconciliation keep the protected path at judge', () => {
@@ -2321,7 +2151,7 @@ test('readsFromRefusal parses both compiler refusal shapes from real compiler ou
   assert.deepEqual(second.files, ['src/stale.mjs'])
 })
 
-test('dispatchBatch refuses a leaking register before spawning any subprocess', async () => {
+test('dispatchBatch accepts an overlapping register before subprocess work', async () => {
   const batch = makeBatch(['lane-a', 'lane-b'])
   const spawned = []
   const deps = {
@@ -2329,18 +2159,30 @@ test('dispatchBatch refuses a leaking register before spawning any subprocess', 
     env: { DEVTEAM_LEDGER_DIR: root },
     readdirSync: () => ['lane-a.request.json', 'lane-b.request.json'],
     readFileSync: (path) => {
-      const lane = String(path).split('/').pop().replace(REQUEST_SUFFIX, '')
-      return JSON.stringify(request(`measure ${lane} source behavior`, ['crew/shared.mjs']))
+      const text = String(path)
+      const lane = text.split('/').pop().replace(REQUEST_SUFFIX, '')
+      if (text.endsWith(REQUEST_SUFFIX)) return JSON.stringify(request(`measure ${lane} source behavior`, ['crew/shared.mjs']))
+      if (text.endsWith('.brief.md')) return '```proposal\n{"shape":"build","strength":null}\n```\n'
+      if (text.endsWith('/crew.json')) return JSON.stringify({ lane_name: text.split('/').at(-2), lane_fence: [] })
+      return readFileSync(text, 'utf8')
     },
     existsSync: () => false,
-    spawn: (call) => { spawned.push(call); return { status: 0 } },
+    spawn: (call) => {
+      spawned.push(call)
+      const args = (call.args || []).map(String)
+      if (args.includes('rev-parse') && args.includes('--verify')) return { status: 1, stdout: '', stderr: '' }
+      if (args.includes('rev-parse') && args.includes('HEAD')) return { status: 0, stdout: `${'a'.repeat(40)}\n`, stderr: '' }
+      if (args.includes('--discover-reads')) return { status: 0, stdout: '[]', stderr: '' }
+      return { status: 0, stdout: '', stderr: '' }
+    },
   }
-  await refusalAsync(() => dispatchBatch({
+  const report = await dispatchBatch({
     batchDir: batch,
     fences: [entry('lane-a', ['crew/shared.mjs']), entry('lane-b', ['crew/shared.mjs'])],
-    checkout: root, parentDir: root, outDir: join(root, 'out'), deps,
-  }), 'sibling-leak')
-  assert.equal(spawned.length, 0)
+    checkout: root, parentDir: root, outDir: join(root, 'out-overlap'), tier: 'mechanical', deps,
+  })
+  assert.equal(report.lanes.length, 2)
+  assert.ok(spawned.length > 0)
 })
 
 test('dispatchBatch compiles lanes concurrently and then boots and runs them', async () => {
@@ -2368,10 +2210,8 @@ test('dispatchBatch compiles lanes concurrently and then boots and runs them', a
       if (text.endsWith('.brief.md')) return '```proposal\n{"shape":"build","strength":null}\n```\n'
       if (text.endsWith('/package.json')) return JSON.stringify({ private: true, scripts: { test: 'npm test' } })
       if (text.endsWith('/crew.json')) {
-        const parts = text.split('/')
-        const lane = parts[parts.length - 2]
-        const sibling = lane === 'lane-a' ? 'lane-b' : 'lane-a'
-        return JSON.stringify({ lane_name: lane, lane_fence: [{ lane: sibling, files: [] }] })
+        const lane = text.split('/').at(-2)
+        return JSON.stringify({ lane_name: lane, lane_fence: [] })
       }
       return readFileSync(text, 'utf8')
     },
@@ -3003,72 +2843,33 @@ test('main loads the fence register, forwards dry-run, and returns a usage code'
   assert.equal(await main(['--unknown'], { log: () => {} }), 2)
 })
 
-test('main sanitises an external register before dispatch and boot', async () => {
+test('main refuses an external register under ADR-043', async () => {
   const checkout = gitFixture()
   const batch = join(checkout, 'main-external-batch')
-  const parentDir = join(root, 'main-external-parent')
-  const outDir = join(root, 'main-external-out')
-  const home = join(root, 'main-external-home')
-  const external = 'external-lane'
-  mkdirSync(batch)
-  put(join(batch, 'lane-a.request.json'), JSON.stringify(request('measure main external behavior', ['src/owned.mjs'])))
   const authored = join(checkout, 'main-external-fences.json')
+  const spawned = []
+  mkdirSync(batch)
+  put(join(batch, `lane-a${REQUEST_SUFFIX}`), JSON.stringify(request('measure external marker', ['src/owned.mjs'])))
   put(authored, JSON.stringify({ lanes: [
     entry('lane-a', ['src/owned.mjs']),
-    { lane: external, files: ['src/stale.mjs'], external: true },
+    { lane: 'external-lane', files: ['src/stale.mjs'], external: true },
   ] }))
-  crewFixture({ home, repoDir: 'dt-external-lane', laneDir: external, lane: external, checkout })
-  const spawned = []
-  const logs = []
   const code = await main([
     '--batch', batch,
     '--fences', authored,
     '--checkout', checkout,
-    '--parent', parentDir,
-    '--out', outDir,
+    '--parent', root,
+    '--out', join(root, 'main-external-out'),
     '--tier', 'mechanical',
     '--variant', 'full',
   ], {
-    home,
-    env: { DEVTEAM_LEDGER_DIR: join(home, 'factory-state') },
-    assertQuiet: () => {},
-    readFileSync: (path, encoding) => {
-      const text = String(path)
-      if (text.endsWith(join('dt-lane-a', 'lane-a', 'crew.json'))) {
-        return JSON.stringify({
-          lane_name: 'lane-a',
-          lane_fence: [{ lane: external, files: ['src/stale.mjs'] }],
-        })
-      }
-      return readFileSync(text, encoding || 'utf8')
-    },
-    spawn: (call) => {
-      spawned.push(call)
-      const args = (call.args || []).map(String)
-      if (args.includes('rev-parse')) return { status: 1, stdout: '', stderr: '' }
-      return { status: 0, stdout: '', stderr: '' }
-    },
-    spawnAsync: async (call) => {
-      spawned.push(call)
-      const args = (call.args || []).map(String)
-      if (args.includes('--discover-reads')) return { status: 0, stdout: '[]', stderr: '' }
-      const outAt = args.indexOf('--out')
-      if (outAt >= 0) put(args[outAt + 1], briefWithBlockOnly)
-      return { status: 0, stdout: '', stderr: '' }
-    },
-    log: (line) => logs.push(String(line)),
+    home: root,
+    env: { DEVTEAM_LEDGER_DIR: root },
+    spawn: (call) => { spawned.push(call); return { status: 0, stdout: '', stderr: '' } },
+    log: () => {},
   })
-  assert.equal(code, 0)
-  const stripped = join(outDir, EXTERNAL_REGISTER_NAME)
-  const sanitised = JSON.parse(readFileSync(stripped, 'utf8'))
-  assert.equal(Object.hasOwn(sanitised.lanes.find((entry) => entry.lane === external), 'external'), false)
-  assert.equal(logs.some((line) => line.startsWith(EXTERNAL_FENCE_PREFIX) && line.includes(`lane=${external}`)), true)
-  const fencedCalls = spawned.filter((call) => call.args.includes('--fences'))
-  assert.ok(fencedCalls.length >= 3)
-  assert.equal(fencedCalls.every((call) => call.args[call.args.indexOf('--fences') + 1] === stripped), true)
-  const boots = spawned.filter((call) => call.args.includes('boot'))
-  assert.equal(boots.length, 1)
-  assert.equal(boots[0].args[boots[0].args.indexOf('--fences') + 1], stripped)
+  assert.equal(code, 2)
+  assert.deepEqual(spawned, [])
 })
 
 test('an unsupported run variant refuses before any run launch', async () => {
@@ -4227,7 +4028,7 @@ test('checkFences refuses declared edges without a measured graph', () => {
     && error.reason === 'graph-unmeasured'
     && error.message.includes('depends_on'))
   const { graph } = planWaves({ lanes })
-  refusal(() => checkFences({ fences, lanes, graph, checkout: root, deps: { readdirSync: () => [], log: () => {} } }), 'sibling-leak')
+  assert.doesNotThrow(() => checkFences({ fences, lanes, graph, checkout: root, deps: { readdirSync: () => [], log: () => {} } }))
   const disjoint = [
     { lane: 'lane-a', where: ['crew/owned-a.mjs'], depends_on: [] },
     { lane: 'lane-b', where: ['crew/owned-b.mjs'], depends_on: [] },

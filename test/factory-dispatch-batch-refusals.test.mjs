@@ -14,8 +14,6 @@ import {
   lineageBaseline,
   lineageLine,
   BatchRefusal,
-  CROSS_BATCH_BLIND_SPOT,
-  CROSS_BATCH_UNKNOWN_PREFIX,
   WARNING_ROWS_UNPERSISTED_PREFIX,
   baseContains,
   baselineCacheRoot,
@@ -42,8 +40,6 @@ import {
   promptSurfaceVerdict,
   DISPATCH_RECORD_SUFFIX,
   DRY_RUN_BLIND_SPOT,
-  EXTERNAL_FENCE_PREFIX,
-  EXTERNAL_REGISTER_NAME,
   FENCE_REPORT_FILE,
   DISPATCH_ONLY_REQUEST_KEYS,
   MISCLASSIFIED_PREFIX,
@@ -64,15 +60,11 @@ import {
   surfaceExportsOf,
   checkArrival,
   checkDirectedBrief,
-  externalCrewDir,
-  externalFenceLiveness,
-  externalLaneReason,
   applyAdoption,
   adoptSourceDir,
   checkFences,
   checkPlanScope,
   checkMachineryBudget,
-  crossBatchCollisions,
   collectAnchorPins,
   collectTestReach,
   testsOutsideFence,
@@ -125,7 +117,6 @@ import {
 } from '../scripts/factory/dispatch-batch.mjs'
 import { parseDirectedBrief, WAITS_S } from '../crew/drive.mjs'
 import { laneFenceFor, renderBrief, resolveWriteSurface } from '../scripts/factory/make-brief.mjs'
-import { DRIVER_GONE_PERIODS, HEARTBEAT_PERIOD_MS } from '../scripts/factory/lane-watch.mjs'
 import { scratchDir } from './helpers.mjs'
 
 function censusFixture(name, fenceFiles, { withReport = false } = {}) {
@@ -232,7 +223,7 @@ import {
   reachCheck,
   reachFixture,
   crewFixture,
-  liveHolderFixture,
+  authoredHolderFixture,
   namedReachFixture,
   dispatchFixture,
 } from './factory-dispatch-batch-fences.test.mjs'
@@ -294,22 +285,28 @@ test('RV1-1 keeps held anchor and census candidates warning-only through a stabl
 
 test('B1 refuses held test reach and names its holder', () => {
   const candidate = 'crew/crew.test.mjs'
-  const holder = liveHolderFixture('refuse-B1', candidate)
+  const holder = authoredHolderFixture('refuse-B1', candidate)
   const outDir = join(holder.checkout, 'refuse-B1-out')
   const logs = []
   let error
   try {
     checkFences({
-      fences: [entry('lane-a', ['crew/capabilities.mjs', 'crew/adapters/adapter-pi.mjs'])],
-      lanes: [{ lane: 'lane-a', where: ['crew/adapters/adapter-pi.mjs'] }],
+      fences: [
+        entry('lane-a', ['crew/capabilities.mjs', 'crew/adapters/adapter-pi.mjs']),
+        entry(holder.holder, [candidate]),
+      ],
+      lanes: [
+        { lane: 'lane-a', where: ['crew/adapters/adapter-pi.mjs'] },
+        { lane: holder.holder, where: [] },
+      ],
       checkout: holder.checkout,
       outDir,
-      deps: { home: holder.home, log: (line) => logs.push(String(line)) },
+      deps: { home: root, log: (line) => logs.push(String(line)) },
     })
   } catch (caught) { error = caught }
   assert.equal(error?.reason, 'test-reach-unfenced')
   assert.ok(error.message.includes(holder.holder))
-  assert.ok(error.message.includes(holder.holderDir))
+  assert.ok(error.message.includes('crew dir unknown'))
   assert.ok(error.message.includes(candidate))
   const persisted = JSON.parse(readFileSync(join(outDir, FENCE_REPORT_FILE), 'utf8'))
   assert.equal(Object.hasOwn(persisted.lanes[0], 'fence_admissions'), false)
@@ -318,28 +315,34 @@ test('B1 refuses held test reach and names its holder', () => {
 
 test('F1 preserves allow_test_reach for a held test', () => {
   const candidate = 'crew/crew.test.mjs'
-  const holder = liveHolderFixture('override-F1', candidate)
+  const holder = authoredHolderFixture('override-F1', candidate)
   const outDir = join(holder.checkout, 'override-F1-out')
   const logs = []
   const report = checkFences({
-    fences: [entry('lane-a', ['crew/capabilities.mjs', 'crew/adapters/adapter-pi.mjs'])],
-    lanes: [{ lane: 'lane-a', where: ['crew/adapters/adapter-pi.mjs'], allow_test_reach: [{ file: candidate, why: 'held by a measured sibling' }] }],
+    fences: [
+      entry('lane-a', ['crew/capabilities.mjs', 'crew/adapters/adapter-pi.mjs']),
+      entry(holder.holder, [candidate]),
+    ],
+    lanes: [
+      { lane: 'lane-a', where: ['crew/adapters/adapter-pi.mjs'], allow_test_reach: [{ file: candidate, why: 'held by a measured sibling' }] },
+      { lane: holder.holder, where: [] },
+    ],
     checkout: holder.checkout,
     outDir,
-    deps: { home: holder.home, log: (line) => logs.push(String(line)) },
+    deps: { home: root, log: (line) => logs.push(String(line)) },
   })
   assert.equal(report.perLane['lane-a'].files.includes(candidate), false)
   const overrides = report.perLane['lane-a']
   const persisted = JSON.parse(readFileSync(join(outDir, FENCE_REPORT_FILE), 'utf8'))
   const rows = persisted.lanes[0].test_reach_overrides.filter((row) => row.test === candidate)
   assert.ok(rows.length > 0)
-  assert.ok(rows.every((row) => row.holder.lane === holder.holder && row.holder.dir === holder.holderDir))
-  assert.ok(logs.some((line) => line.startsWith('dispatch-batch: test-reach-override:') && line.includes(holder.holderDir)))
+  assert.ok(rows.every((row) => row.holder.lane === holder.holder && row.holder.dir === null))
+  assert.ok(logs.some((line) => line.startsWith('dispatch-batch: test-reach-override:') && line.includes('dir=unknown')))
 })
 
-test('RV1-2 recognizes a live external register holder before admission', () => {
+test('RV1-2 keeps own admission independent of a foreign crew fixture', () => {
   const candidate = 'crew/host-load.test.mjs'
-  const checkout = reachFixture('rv1-2-external-holder', {
+  const checkout = reachFixture('rv1-2-foreign-holder', {
     files: {
       'crew/host-load.mjs': 'export const hostLoad = true\n',
       [candidate]: [
@@ -349,51 +352,25 @@ test('RV1-2 recognizes a live external register holder before admission', () => 
       ].join('\n'),
     },
   })
-  const home = join(root, 'rv1-2-external-home')
-  const parentDir = join(root, 'rv1-2-external-parent')
-  const holderDir = crewFixture({
+  const home = join(root, 'rv1-2-foreign-home')
+  crewFixture({
     home,
     repoDir: 'dt-ext-lane',
     laneDir: 'ext-lane',
     checkout,
     fence: [{ lane: 'lane-x', files: ['crew/host-load.mjs'] }],
   })
-  const fences = [
-    entry('lane-x', ['crew/host-load.mjs']),
-    entry('ext-lane', [candidate]),
-  ]
-  let held
-  try {
-    checkFences({
-      fences,
-      lanes: [{ lane: 'lane-x', where: ['crew/host-load.mjs'] }],
-      checkout,
-      externals: ['ext-lane'],
-      parentDir,
-      deps: { home, log: () => {} },
-    })
-  } catch (caught) { held = caught }
-  assert.equal(held?.reason, 'test-reach-unfenced')
-  assert.ok(held.message.includes('ext-lane'))
-  assert.ok(held.message.includes(holderDir))
-  assert.equal(held.message.includes('own fence overlaps'), false)
-
   const report = checkFences({
-    fences,
-    lanes: [{
-      lane: 'lane-x',
-      where: ['crew/host-load.mjs'],
-      allow_test_reach: [{ file: candidate, why: 'held by the live external lane' }],
-    }],
+    fences: [entry('lane-x', ['crew/host-load.mjs'])],
+    lanes: [{ lane: 'lane-x', where: ['crew/host-load.mjs'] }],
     checkout,
     externals: ['ext-lane'],
-    parentDir,
+    parentDir: join(root, 'rv1-2-foreign-parent'),
     deps: { home, log: () => {} },
   })
-  assert.equal(report.perLane['lane-x'].files.includes(candidate), false)
-  const overrides = report.warnings.find((row) => row.kind === 'test-reach-override')?.rows.filter((row) => row.test === candidate) || []
-  assert.ok(overrides.length > 0)
-  assert.ok(overrides.every((row) => row.holder.lane === 'ext-lane' && row.holder.dir === holderDir))
+  assert.deepEqual(report.admissions, [{ lane: 'lane-x', file: candidate, source: 'test-reach' }])
+  assert.equal(report.perLane['lane-x'].files.includes(candidate), true)
+  assert.equal(report.warnings.some(({ kind }) => kind === 'fence-admission-arbitrated'), false)
 })
 
 test('a trailing-slash directory write surface admits the same unheld reaching test', () => {

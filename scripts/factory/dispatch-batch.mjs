@@ -15,7 +15,6 @@ import { protectedHitsIn, resolveProtectedPaths } from '../../crew/protected-pat
 import { fenceScopesIntersect, parseFenceScope } from '../../crew/fence-scope.mjs'
 import { slug } from '../../crew/slug.mjs'
 import { LADDER_BANDS, PROPOSAL_BLOCK, TIER_NAMES, extractSymbols, gatherFences, isTripwireFile, validateRequest } from './make-brief.mjs'
-import { archivedLanes, crewRoot, discoverLanes, DRIVER_GONE_PERIODS, HEARTBEAT_PERIOD_MS, laneActive, readJournal } from './lane-watch.mjs'
 
 const BATCH_EMPTY = 'batch-empty'
 const BATCH_UNREADABLE = 'batch-unreadable'
@@ -23,7 +22,6 @@ const TRANSPORT_CONFLICT = 'transport-conflict'
 const LANE_UNFENCED = 'lane-unfenced'
 const SCOPE_ENTRY_INVALID = 'scope-entry-invalid'
 const WHERE_OUTSIDE_FENCE = 'where-outside-fence'
-const SIBLING_LEAK = 'sibling-leak'
 const WORKTREE_EXISTS = 'worktree-exists'
 const BRANCH_TAKEN = 'branch-taken'
 const WORKTREE_FAILED = 'worktree-failed'
@@ -44,10 +42,8 @@ const LANE_SHAPE_INVALID = 'lane-shape-invalid'
 const FENCE_REGISTER_MISMATCH = 'fence-register-mismatch'
 const DIRECTED_BRIEF_INVALID = 'directed-brief-invalid'
 const SEAT_FLOOR_CONFLICT = 'seat-floor-conflict'
-const CROSS_BATCH_COLLISION = 'cross-batch-collision'
+const EXTERNAL_FENCE_RETIRED = 'external-fence-retired'
 const PLAN_ADOPT_UNREADABLE = 'plan-adopt-unreadable'
-const EXTERNAL_FENCE_STALE = 'external-fence-stale'
-const EXTERNAL_FENCE_ABANDONED = 'external-fence-abandoned'
 const TEST_REACH_UNFENCED = 'test-reach-unfenced'
 const FENCE_ADMISSION_UNSOURCED = 'fence-admission-unsourced'
 const PLAN_ADOPT_GATE_ABSOLUTE_PATH = 'plan-adopt-gate-absolute-path'
@@ -62,7 +58,6 @@ export const REFUSAL_REASONS = Object.freeze([
   LANE_UNFENCED,
   SCOPE_ENTRY_INVALID,
   WHERE_OUTSIDE_FENCE,
-  SIBLING_LEAK,
   WORKTREE_EXISTS,
   BRANCH_TAKEN,
   WORKTREE_FAILED,
@@ -83,22 +78,13 @@ export const REFUSAL_REASONS = Object.freeze([
   FENCE_REGISTER_MISMATCH,
   DIRECTED_BRIEF_INVALID,
   SEAT_FLOOR_CONFLICT,
-  CROSS_BATCH_COLLISION,
+  EXTERNAL_FENCE_RETIRED,
   PLAN_ADOPT_UNREADABLE,
-  EXTERNAL_FENCE_STALE,
-  EXTERNAL_FENCE_ABANDONED,
   TEST_REACH_UNFENCED,
   FENCE_ADMISSION_UNSOURCED,
   PLAN_ADOPT_GATE_ABSOLUTE_PATH,
 ])
 export const WARNING_ROWS_UNPERSISTED_PREFIX = 'dispatch-batch: WARNING rows-unpersisted:'
-export const CROSS_BATCH_UNKNOWN_PREFIX = 'dispatch-batch: WARNING cross-batch-unknown:'
-export const CROSS_BATCH_BLIND_SPOT = 'BLIND SPOT: a lane booted without --fences declares no surface at all and can be editing anything; a lane whose batch siblings have been reaped records no claim; and a repository whose git dir cannot be measured is not compared. None of those are cleared — they are reported unknown.'
-
-// A fence carried in from another batch is not a sibling: the operator must see WHICH
-// live lane it came from and that it was never counted in the arrival total checkArrival derives (#845).
-export const EXTERNAL_FENCE_PREFIX = 'dispatch-batch: external-fence'
-export const EXTERNAL_REGISTER_NAME = 'dispatch.external.fences.json'
 
 export const ROLES_ANCHOR_MANIFEST = 'crew/roles/anchors.json'
 export const ROLES_ANCHOR_COMPANIONS = Object.freeze(['crew/roles/planner.md', 'crew/roles/tech-lead.md'])
@@ -316,7 +302,6 @@ export const FENCE_BLIND_SPOTS = Object.freeze({
   'citation-carrier': CITATION_CARRIER_BLIND_SPOT,
   'test-reach': TEST_REACH_BLIND_SPOT,
   'census-carrier': CENSUS_CARRIER_BLIND_SPOT,
-  'cross-batch-unknown': CROSS_BATCH_BLIND_SPOT,
 })
 export const TEST_REACH_OVERRIDE_PREFIX = 'dispatch-batch: test-reach-override:'
 export const TEST_REACH_REFUSAL_REMEDY = 'the remedy is mechanical — fence the named test; the corrected files_in_scope is'
@@ -720,14 +705,13 @@ function reportTail(omitted, citation) {
   return `; ${omitted} further row(s) not listed here and carried in full on the report ${citation}`
 }
 
-function writeFenceReport({ path, lanes, crossBatchUnknown = [], deps } = {}) {
+function writeFenceReport({ path, lanes, deps } = {}) {
   const d = normalDeps(deps)
   try {
     d.mkdirSync(dirname(path), { recursive: true })
     d.writeFileSync(path, JSON.stringify({
       schema_version: 1,
       blind_spots: FENCE_BLIND_SPOTS,
-      cross_batch_unknown: crossBatchUnknown,
       lanes,
     }, null, 2) + '\n')
     return null
@@ -739,7 +723,7 @@ function writeFenceReport({ path, lanes, crossBatchUnknown = [], deps } = {}) {
 function warningSummary({ lane, counts, refusals, citation, warnings }) {
   const warningEvidence = `report=${citation} doctrine=${WARNING_DOCTRINE}`
   const refusalNames = Array.isArray(refusals) && refusals.length > 0 ? refusals.join(',') : 'none'
-  return `dispatch-batch: WARNING-SUMMARY lane=${lane} refusals=${refusalNames} anchor-pin=${counts.anchorPin} · citation-carrier=${counts.citationCarrier} · test-reach=${counts.testReach} · actionable=${counts.actionable} · collapsed=${counts.testReachDropped} · cross-batch-unknown=${counts.crossBatchUnknown} · census-carrier=${counts.censusCarrier} ${warningEvidence}`
+  return `dispatch-batch: WARNING-SUMMARY lane=${lane} refusals=${refusalNames} anchor-pin=${counts.anchorPin} · citation-carrier=${counts.citationCarrier} · test-reach=${counts.testReach} · actionable=${counts.actionable} · collapsed=${counts.testReachDropped} · census-carrier=${counts.censusCarrier} ${warningEvidence}`
 }
 
 export class BatchRefusal extends Error {
@@ -1394,281 +1378,15 @@ export function anchorPinsOutsideFence({ surface, fenceFiles, pins } = {}) {
   return found
 }
 
-function repoCommonDir(checkout, d) {
-  if (typeof checkout !== 'string' || checkout.trim() === '') return null
-  const target = resolve(checkout)
-  let result
-  try {
-    result = d.spawn({
-      file: 'git',
-      args: ['-C', target, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
-      cwd: target,
-    })
-  } catch {
-    return null
-  }
-  if (!result || result.error || result.signal || result.status !== 0) return null
-  const output = textOf(result.stdout).trim()
-  if (!output) return null
-  try { return resolve(output) } catch { return null }
-}
-
-function readCrewClaim(lane, d) {
-  try {
-    const parsed = JSON.parse(d.readFileSync(join(lane.dir, 'crew.json'), 'utf8'))
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { parsed: null, unreadable: true }
-    return { parsed, unreadable: false }
-  } catch {
-    return { parsed: null, unreadable: true }
-  }
-}
-
-function claimFor(parsed) {
-  return {
-    lane: typeof parsed?.lane_name === 'string' ? parsed.lane_name : null,
-    checkout: typeof parsed?.checkout === 'string' ? parsed.checkout : null,
-  }
-}
-
-export function liveLaneClaims({ checkout, batchNames, deps } = {}) {
-  const d = normalDeps(deps)
-  const root = crewRoot({ home: d.home })
-  let rootExists
-  try { rootExists = d.existsSync(root) } catch {
-    return { state: 'unreadable', root, live: [], own: [], foreign: [], unknown: [{ lane: null, reason: 'crew-root-unreadable' }], cleared: false }
-  }
-  if (!rootExists) return { state: 'absent', root, live: [], own: [], foreign: [], unknown: [], cleared: true }
-  try {
-    d.readdirSync(root)
-  } catch {
-    return { state: 'unreadable', root, live: [], own: [], foreign: [], unknown: [{ lane: null, reason: 'crew-root-unreadable' }], cleared: false }
-  }
-  const walkErrors = new Set()
-  const walkDeps = {
-    existsSync: (path) => {
-      try { return d.existsSync(path) } catch (err) {
-        walkErrors.add(String(path))
-        throw err
-      }
-    },
-    readFileSync: d.readFileSync,
-    readdirSync: (path, options) => {
-      try { return d.readdirSync(path, options) } catch (err) {
-        walkErrors.add(String(path))
-        throw err
-      }
-    },
-  }
-  let liveLanes = []
-  try { liveLanes = discoverLanes(root, walkDeps) } catch { /* the wrapper records a partial walk */ }
-  const activeLanes = liveLanes.filter((lane) => laneActive(lane, readJournal(lane.journal, walkDeps)))
-  const unknown = []
-  const records = activeLanes.map((lane) => {
-    const crew = readCrewClaim(lane, d)
-    return { lane, crew, claim: crew.unreadable ? null : claimFor(crew.parsed), repo: null }
-  })
-  const measured = records.filter(({ crew }) => !crew.unreadable)
-  const dispatchRepo = activeLanes.length > 0 ? repoCommonDir(checkout, d) : null
-  for (const record of measured) record.repo = repoCommonDir(record.claim.checkout, d)
-
-  const noteUnknown = (lane, reason) => unknown.push({ lane, reason })
-  const own = []
-  const foreign = []
-  const live = []
-  batchNames = batchNames instanceof Set ? batchNames : new Set(Array.isArray(batchNames) ? batchNames : [])
-  const sameRepo = (record) => record.repo && dispatchRepo && record.repo === dispatchRepo
-  const nonOwn = records.filter((record) => !record.crew.unreadable
-    && sameRepo(record)
-    && !batchNames.has(record.claim.lane))
-
-  const claims = new Map()
-  if (nonOwn.length > 0) {
-    const allLanes = [...liveLanes, ...archivedLanes(root, walkDeps)]
-    const byDir = new Map(records.map((record) => [record.lane.dir, record.crew]))
-    const sourceRepos = new Map(records.map((record) => [record.lane.dir, record.repo]))
-    const candidateNames = new Set(nonOwn.map((record) => record.claim.lane).filter((name) => typeof name === 'string' && name.trim() !== ''))
-    const candidateSiblings = new Map()
-    for (const record of nonOwn) {
-      if (!candidateSiblings.has(record.claim.lane)) candidateSiblings.set(record.claim.lane, new Set())
-      const siblings = candidateSiblings.get(record.claim.lane)
-      const fences = Array.isArray(record.crew.parsed?.lane_fence) ? record.crew.parsed.lane_fence : []
-      for (const entry of fences) {
-        if (typeof entry?.lane === 'string' && entry.lane.trim() !== '') siblings.add(entry.lane)
-      }
-    }
-    for (const lane of allLanes) {
-      const source = byDir.get(lane.dir) || readCrewClaim(lane, d)
-      if (source.unreadable) continue
-      const sourceClaim = claimFor(source.parsed)
-      const fences = Array.isArray(source.parsed?.lane_fence) ? source.parsed.lane_fence : []
-      const relevant = fences.filter((entry) => typeof entry?.lane === 'string'
-        && entry.lane.trim() !== '' && candidateNames.has(entry.lane)
-        && candidateSiblings.get(entry.lane)?.has(sourceClaim.lane) && Array.isArray(entry.files))
-      if (relevant.length === 0) continue
-      let sourceRepo
-      if (sourceRepos.has(lane.dir)) {
-        sourceRepo = sourceRepos.get(lane.dir)
-      } else {
-        sourceRepo = repoCommonDir(sourceClaim.checkout, d)
-        sourceRepos.set(lane.dir, sourceRepo)
-      }
-      if (!sourceRepo || !dispatchRepo || sourceRepo !== dispatchRepo) continue
-      for (const entry of relevant) {
-        if (!claims.has(entry.lane)) claims.set(entry.lane, new Set())
-        const files = claims.get(entry.lane)
-        for (const file of entry.files) {
-          if (typeof file === 'string') files.add(normaliseRepoPath(file))
-        }
-      }
-    }
-  }
-
-  for (const path of walkErrors) noteUnknown(null, 'crew-walk-incomplete')
-
-  for (const record of records) {
-    const lane = record.lane
-    const claim = record.claim || { lane: null, checkout: null }
-    if (record.crew.unreadable) {
-      noteUnknown(lane.task, 'crew-json-unreadable')
-      continue
-    }
-    if (!record.repo || !dispatchRepo) {
-      noteUnknown(lane.task, 'repo-unmeasured')
-      continue
-    }
-    if (record.repo !== dispatchRepo) {
-      foreign.push(lane.task)
-      continue
-    }
-    if (batchNames.has(claim.lane)) {
-      own.push(claim.lane)
-      continue
-    }
-    const files = claims.get(claim.lane)
-    if (!files) {
-      noteUnknown(lane.task, 'claim-unrecorded')
-      continue
-    }
-    live.push({ lane: claim.lane, dir: lane.dir, files: [...files].sort() })
-  }
-  const state = 'read'
-  const cleared = state === 'read' && unknown.length === 0
-  return { state, root, live, own, foreign, unknown, cleared }
-}
-
-export function externalCrewDir({ lane, parentDir, deps } = {}) {
-  const d = normalDeps(deps)
-  const parent = typeof parentDir === 'string' && parentDir.trim() ? parentDir : process.cwd()
-  return join(crewRoot({ home: d.home }), slug(basename(join(parent, `dt-${lane}`))), slug(lane))
-}
-
-export function externalLaneReason({ settled, stage }) {
-  if (settled) return 'run-settled'
-  if (typeof stage === 'string' && stage.startsWith('escalate:')) return 'run-escalated'
-  return 'run-complete'
-}
-
-export function externalFenceLiveness({ externals, parentDir, deps } = {}) {
-  const d = normalDeps(deps)
-  return (Array.isArray(externals) ? externals : []).map((lane) => {
-    const dir = externalCrewDir({ lane, parentDir, deps: d })
-    const crewPath = join(dir, 'crew.json')
-    let crewExists
-    try { crewExists = d.existsSync(crewPath) } catch {
-      return {
-        lane, dir, live: false, reason: 'crew-json-unreadable', stage: null,
-        heartbeat_age_ms: null, stale_after_ms: null, sibling_files: null,
-      }
-    }
-    if (!crewExists) {
-      return {
-        lane, dir, live: false, reason: 'crew-dir-absent', stage: null,
-        heartbeat_age_ms: null, stale_after_ms: null, sibling_files: null,
-      }
-    }
-    let crew
-    try { crew = JSON.parse(d.readFileSync(crewPath, 'utf8')) } catch {
-      return {
-        lane, dir, live: false, reason: 'crew-json-unreadable', stage: null,
-        heartbeat_age_ms: null, stale_after_ms: null, sibling_files: null,
-      }
-    }
-    if (crew?.lane_name !== lane) {
-      return {
-        lane, dir, live: false, reason: 'crew-lane-mismatch', stage: null,
-        heartbeat_age_ms: null, stale_after_ms: null, sibling_files: null,
-      }
-    }
-    let settled
-    try { settled = d.existsSync(join(dir, 'returns', 'task.json')) } catch {
-      return {
-        lane, dir, live: false, reason: 'crew-json-unreadable', stage: null,
-        heartbeat_age_ms: null, stale_after_ms: null, sibling_files: null,
-      }
-    }
-    const journal = readJournal(join(dir, 'journal.jsonl'), d)
-    const stage = journal.lastStage ?? null
-    const live = laneActive({ settled }, journal)
-    let nowMs
-    try { nowMs = typeof d.now === 'function' ? d.now() : Date.now() } catch { nowMs = null }
-    const staleAfterMs = DRIVER_GONE_PERIODS * HEARTBEAT_PERIOD_MS
-    const age = journal.lastActivityAt === null || !Number.isFinite(nowMs) ? null : nowMs - journal.lastActivityAt
-    const abandoned = live && age !== null && age > staleAfterMs
-    const siblingFiles = [...new Set((Array.isArray(crew.lane_fence) ? crew.lane_fence : [])
-      .flatMap((entry) => Array.isArray(entry?.files) ? entry.files : [])
-      .filter((file) => typeof file === 'string')
-      .map(normaliseRepoPath))].sort()
-    return {
-      lane,
-      dir,
-      live: live && !abandoned,
-      reason: live ? (abandoned ? EXTERNAL_FENCE_ABANDONED : null) : externalLaneReason({ settled, stage }),
-      stage,
-      heartbeat_age_ms: age,
-      stale_after_ms: staleAfterMs,
-      sibling_files: siblingFiles,
-    }
-  })
-}
-
-export function crossBatchCollisions({ entries, live, externals } = {}) {
-  const collisions = []
-  const ownEntries = Array.isArray(entries) ? entries : []
-  const liveLanes = Array.isArray(live) ? live : []
-  const externalNames = new Set(Array.isArray(externals) ? externals : [])
-  for (const entry of ownEntries) {
-    const ownFiles = (Array.isArray(entry?.files) ? entry.files : [])
-      .filter((file) => typeof file === 'string').map(normaliseRepoPath)
-    for (const current of liveLanes) {
-      // An external entry DECLARES that this live lane holds these files, so the pair it
-      // names is the intent, never a collision. Every other pair still refuses.
-      if (externalNames.has(entry.lane) && entry.lane === current.lane) continue
-      const liveFiles = (Array.isArray(current?.files) ? current.files : [])
-        .filter((file) => typeof file === 'string').map(normaliseRepoPath)
-      const collided = ownFiles.some((file) => fenceEntryIntersects(file, liveFiles))
-        || liveFiles.some((file) => fenceEntryIntersects(file, ownFiles))
-      if (!collided) continue
-      const files = [...new Set([
-        ...ownFiles.filter((file) => fenceEntryIntersects(file, liveFiles)),
-        ...liveFiles.filter((file) => fenceEntryIntersects(file, ownFiles)),
-      ])].sort()
-      collisions.push({ lane: entry.lane, live: current.lane, dir: current.dir, files })
-    }
-  }
-  return collisions
-}
-
-export function checkFences({ fences, lanes, graph, checkout, externals, parentDir, outDir, deps } = {}) {
+export function checkFences({ fences, lanes, graph, checkout, outDir, deps } = {}) {
   const d = normalDeps(deps)
   const entries = fenceEntriesOf(fences).map(normaliseFence)
   const batchLanes = Array.isArray(lanes) ? lanes : []
   const byLane = new Map(entries.map((entry) => [entry.lane, entry]))
-  const externalNames = new Set((Array.isArray(externals) ? externals : []).filter((name) => typeof name === 'string' && name.trim() !== ''))
 
   // An absent graph is UNMEASURED edges, not "no edges": relatedLanes reads false for every
   // pair, so an exemption this register does carry is reported as a sibling-leak that does
-  // not exist. That false premise cost b224-fencechecks a lane at plan:r1 (#634). With no
-  // edge declared anywhere the graph is irrelevant and the answer is unchanged.
+  // not exist. With no edge declared anywhere the graph is irrelevant and the answer is unchanged.
   const declaredEdges = batchLanes.some((lane) => Array.isArray(lane?.depends_on) && lane.depends_on.length > 0)
   const hasGraph = Boolean(graph && graph.ancestors instanceof Map)
   if (declaredEdges && !hasGraph) refuse(`checkFences cannot judge sibling-leak for a batch that declares depends_on edges without the graph that carries them; pass the graph planWaves returns`, GRAPH_UNMEASURED)
@@ -1676,8 +1394,6 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
   // Check the register's membership before inspecting its shapes: a batch lane
   // can never fall through to an implicit, unfenced write surface.
   const batchNames = new Set(batchLanes.map(laneNameOf))
-  const claimedBoth = [...batchNames].filter((name) => externalNames.has(name))
-  if (claimedBoth.length > 0) refuse(`fence register marks batch lane(s) external: ${claimedBoth.join(', ')}; an external entry names a lane from ANOTHER batch`, FENCE_REGISTER_MISMATCH)
   for (const lane of batchLanes) {
     const name = laneNameOf(lane)
     if (!byLane.has(name)) refuse(`lane is not in the fence register: ${name}`, LANE_UNFENCED)
@@ -1704,42 +1420,6 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
     }
   }
 
-  const siblingLeaks = []
-  for (const lane of batchLanes) {
-    const name = laneNameOf(lane)
-    const own = byLane.get(name)
-    const ownFiles = own.files.map(normaliseRepoPath)
-    const ownCreates = laneCreatesOf(lane)
-    for (const sibling of entries) {
-      if (sibling.lane === name) continue
-      const siblingFiles = sibling.files.map(normaliseRepoPath)
-      const siblingPaths = siblingFiles.map((file) => parseFenceScope(file).path)
-      const matchSibling = scopeMatcher(siblingPaths)
-      // Overlap is SYMMETRIC, and `fenceEntryIntersects` only tests the candidate as the
-      // containing directory. A lane owning `docs/sub/` therefore did not intersect a
-      // sibling owning `docs/sub/a.md`, and since externals are never iterated as `own`,
-      // that orientation was the only one that could fire against an external. Test both.
-      const leakedFiles = ownFiles.filter((file) => fenceEntryIntersects(file, siblingFiles)
-        || siblingFiles.some((siblingFile) => fenceEntryIntersects(siblingFile, [file])))
-      if (leakedFiles.length > 0) {
-        siblingLeaks.push({ kind: 'fence', lane: name, sibling: sibling.lane, files: [...new Set(leakedFiles)], siblingFiles })
-      }
-      const leakedCreates = ownCreates.filter(matchSibling)
-      if (leakedCreates.length > 0) {
-        siblingLeaks.push({ kind: 'creates', lane: name, sibling: sibling.lane, files: [...new Set(leakedCreates)], siblingFiles })
-      }
-    }
-  }
-  if (siblingLeaks.length > 0) {
-    const details = siblingLeaks.map((leak) => {
-      const files = leak.files.join(', ')
-      return leak.kind === 'creates'
-        ? `lane ${leak.lane} creates path(s) inside sibling ${leak.sibling}'s fence: ${files} (sibling fence: ${leak.siblingFiles.join(', ')})`
-        : `lane ${leak.lane} own fence overlaps sibling ${leak.sibling}: ${files} (sibling fence: ${leak.siblingFiles.join(', ')})`
-    }).join('; ')
-    refuse(`${details}; sequencing shared-file work requires separate registers, not narrower fences; dispatch each lane as its own single-lane register`, SIBLING_LEAK)
-  }
-
   const pins = collectAnchorPins({ checkout, deps: d })
   const scanRoot = typeof checkout === 'string' && checkout.trim() ? checkout : process.cwd()
   const fenceHasSurface = entries.some((entry) => (Array.isArray(entry.files) ? entry.files : []).some((file) => {
@@ -1752,41 +1432,14 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
   // One scan for the whole batch, shared by every existing file and directory surface.
   let carrierIndex = null
   const carriersFor = () => (carrierIndex ??= citationCarriers({ checkout: scanRoot, pins, deps: d }))
-  // Measure live claims before admission classification. The returned live set is still
-  // useful when the overall census is unknown: an unknown result is not an empty claim set.
-  const crossBatch = liveLaneClaims({ checkout: scanRoot, batchNames, deps: d })
-  const externalRows = externalFenceLiveness({ externals: [...externalNames], parentDir, deps: d })
-  const abandonedRows = externalRows.filter((row) => row.reason === EXTERNAL_FENCE_ABANDONED)
-  const dead = externalRows.filter((row) => row.live !== true && row.reason !== EXTERNAL_FENCE_ABANDONED)
-  if (dead.length > 0) refuse(`the fence register names external lane(s) that are not live: ${dead.map((row) => `${row.lane} (${row.reason}, crew dir ${row.dir})`).join('; ')}; an external fence denies a surface its lane must still hold`, EXTERNAL_FENCE_STALE)
-  if (abandonedRows.length > 0) refuse(`the fence register names external lane(s) whose driver is gone: ${abandonedRows.map((row) => `${row.lane} (crew dir ${row.dir}, heartbeat age ${row.heartbeat_age_ms}ms, stale after ${row.stale_after_ms}ms)`).join('; ')}; the lane's driver is gone, so the surface is denied by a lane nobody is running`, EXTERNAL_FENCE_ABANDONED)
-  const externalByLane = new Map(externalRows.map((row) => [row.lane, row]))
-  const holderClaims = () => {
-    const claims = []
-    for (const entry of entries) {
-      if (batchNames.has(entry.lane)) {
-        claims.push({ lane: entry.lane, files: entry.files, dir: null })
-        continue
-      }
-      const external = externalByLane.get(entry.lane)
-      if (external?.live === true) claims.push({ lane: entry.lane, files: entry.files, dir: external.dir })
-    }
-    for (const current of Array.isArray(crossBatch.live) ? crossBatch.live : []) {
-      if (batchNames.has(current?.lane)) continue
-      claims.push({ lane: current?.lane, files: current?.files, dir: current?.dir ?? null })
-    }
-    const unique = new Map()
-    for (const claim of claims) {
-      if (typeof claim.lane !== 'string' || claim.lane.trim() === '') continue
-      const files = [...new Set((Array.isArray(claim.files) ? claim.files : [])
-        .filter((file) => typeof file === 'string')
-        .map(normaliseRepoPath))].sort()
-      const key = `${claim.lane}\u0000${claim.dir || ''}`
-      if (!unique.has(key)) unique.set(key, { lane: claim.lane, files, dir: claim.dir })
-    }
-    return [...unique.values()].sort((a, b) => a.lane < b.lane ? -1 : a.lane > b.lane ? 1 : (a.dir || '').localeCompare(b.dir || ''))
-  }
-  const authoredHolders = holderClaims()
+  // Admission arbitration reads only the authored register. Runtime state in another
+  // worktree is deliberately outside this preflight contract: worktrees isolate writes,
+  // and any overlap is reconciled when the branches are rebased.
+  const authoredHolders = entries.map((entry) => ({
+    lane: entry.lane,
+    files: [...(Array.isArray(entry.files) ? entry.files : [])].map(normaliseRepoPath),
+    dir: null,
+  }))
   const holderFor = (lane, file) => {
     const candidate = normaliseRepoPath(file)
     const authoredHolder = authoredHolders.find((holder) => {
@@ -1998,10 +1651,6 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
   }
   admissions.sort(compareAdmissions)
   for (const row of admissions) d.log(`dispatch-batch: ${FENCE_ADMISSION_EVENT} lane=${row.lane} file=${row.file} source=${row.source}`)
-  if (!crossBatch.cleared) {
-    const text = `${CROSS_BATCH_UNKNOWN_PREFIX} the live lane set could not be determined in full (crew root ${crossBatch.root}, state ${crossBatch.state}): ${crossBatch.unknown.map((row) => `${row.lane ?? 'crew-root'} (${row.reason})`).join('; ') || 'none named'}; this batch is NOT cleared against those lanes and this absence is not a clear. ${CROSS_BATCH_BLIND_SPOT}`
-    warnings.push({ kind: 'cross-batch-unknown', lane: null, unknown: crossBatch.unknown, text })
-  }
   // The summary line replaced the full listing on stdout, so the ROWS now live only in
   // the report. If the report could not be written they would exist nowhere at all —
   // an unwritable outDir would silently turn 36 warning rows into a single count. The
@@ -2009,7 +1658,7 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
   // printed instead, which is exactly the pre-summary behaviour for that case only.
   let reportFailed = false
   if (reportPath) {
-    const reportError = writeFenceReport({ path: reportPath, lanes: reportLanes, crossBatchUnknown: crossBatch.unknown, deps: d })
+    const reportError = writeFenceReport({ path: reportPath, lanes: reportLanes, deps: d })
     if (reportError) { citation = `(report unavailable: ${reportError?.code || 'write-failed'})`; reportFailed = true }
   }
   for (const renderWarning of deferredWarnings) renderWarning()
@@ -2023,7 +1672,7 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
   for (const state of summaryLanes) {
     d.log(warningSummary({
       lane: state.lane,
-      counts: { ...state.counts, crossBatchUnknown: crossBatch.unknown.length },
+      counts: state.counts,
       refusals: state.refusals,
       citation,
       warnings,
@@ -2049,57 +1698,18 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
     const text = `test(s) outside a lane fence assert the behaviour that lane changes: ${detail}; ${remedyText}; declare ${TEST_REACH_OVERRIDE_KEY} on the lane request to dispatch anyway, and the decision is logged and recorded on ${FENCE_REPORT_FILE}. ${TEST_REACH_REFUSAL_BLIND_SPOT}`
     refuse(text, TEST_REACH_UNFENCED)
   }
-  // The other half of the invariant the membership loop above measures (#658): a register may
-  // not be a SUPERSET of the batch it is dispatched with. A lane's sibling count is DERIVED
-  // from batch size, so such a register can only ever be caught at boot, as
-  // fence-count-mismatch, after every seat has been paid for. Both halves are decidable from
-  // these two inputs with nothing booted. This check runs LAST on purpose: no existing
-  // refusal changes the cause it names.
-  const absent = entries.map(({ lane }) => lane).filter((name) => !batchNames.has(name) && !externalNames.has(name))
-  if (absent.length > 0) refuse(`fence register names lane(s) absent from the batch: ${absent.join(', ')}; the batch carries ${[...batchNames].join(', ') || 'no lanes'}, and a lane's sibling count is derived from batch size, so this register can only refuse at boot as ${FENCE_COUNT_MISMATCH}`, FENCE_REGISTER_MISMATCH)
-  for (const row of externalRows) {
-    const declared = [...new Set((byLane.get(row.lane)?.files || [])
-      .filter((file) => typeof file === 'string')
-      .map(normaliseRepoPath))].sort()
-    const claimed = row.sibling_files === null
-      ? null
-      : [...new Set((row.sibling_files || [])
-        .filter((file) => typeof file === 'string')
-        .map(normaliseRepoPath))].sort()
-    const matchClaimed = scopeMatcher(claimed || [])
-    const overlap = declared.filter(matchClaimed)
-    const fenceCompare = !claimed || claimed.length === 0
-      ? 'unmeasured'
-      : overlap.length > 0 ? 'mismatch' : 'clear'
-    d.log(`${EXTERNAL_FENCE_PREFIX} lane=${row.lane} crew_dir=${row.dir} stage=${row.stage ?? 'none'} files=${declared.join(',')} fence_compare=${fenceCompare}`)
-    if (overlap.length > 0) {
-      const mismatchText = `${EXTERNAL_FENCE_PREFIX} lane=${row.lane} crew_dir=${row.dir} mismatch declared=${declared.join(',') || 'none'} claimed=${claimed.join(',')} files=${overlap.join(',')}; blind spot: a lane's own fence is not recorded in its own crew.json, so only a file another lane demonstrably owns can be contradicted — an under-declared external is not measured.`
-      warnings.push({ kind: 'external-fence-mismatch', lane: row.lane, declared, claimed, files: overlap, text: mismatchText })
-      d.log(mismatchText)
-    }
-  }
-  if (externalRows.length > 0) {
-    d.log(`${EXTERNAL_FENCE_PREFIX} carried=${externalRows.length} lanes=${externalRows.map((row) => row.lane).join(',')} — carried in from lanes outside this batch; they deny every batch lane's write surface and are NOT counted in the sibling total checkArrival derives`)
-  }
-  // Every check above reads only the register and the batch in hand; this one reads LIVE
-  // state OUTSIDE both. A cause an operator can fix from the register alone is named first
-  // and is never masked by one that depends on what else happens to be running.
-  //
-  // This REFUSES where the test-reach scan only warns, and the difference is not severity:
-  // the reach scan is a static proxy (#635 measured a heuristic refusal falsely blocking
-  // three of five lanes in one batch), while a collision here is a FACT read from a live
-  // lane's own persisted fence. An UNDETERMINED live set is neither — it warns, and it
-  // never reads as "no collision" (#678, #687).
-  const collisions = crossBatchCollisions({ entries, live: crossBatch.live, externals: [...externalNames] })
-  if (collisions.length > 0) {
-    const detail = collisions.map((row) => `lane ${row.lane} collides with live lane ${row.live} on ${row.files.join(', ')} (crew dir ${row.dir})`).join('; ')
-    refuse(`the fence register grants file(s) that a live lane outside this batch already holds: ${detail}; "ONE register, ONE batch" holds only while one batch runs at a time — settle, archive or narrow the named lane, or narrow this register`, CROSS_BATCH_COLLISION)
-  }
+  // The other half of the membership invariant (#658): a register may not be a
+  // SUPERSET of the batch it is dispatched with. Lane-specific runtime registers
+  // intentionally contain no non-own entries, so this is decided from the authored
+  // register and batch before anything boots. This check runs LAST on purpose: no
+  // existing refusal changes the cause it names.
+  const absent = entries.map(({ lane }) => lane).filter((name) => !batchNames.has(name))
+  if (absent.length > 0) refuse(`fence register names lane(s) absent from the batch: ${absent.join(', ')}; the batch carries ${[...batchNames].join(', ') || 'no lanes'}`, FENCE_REGISTER_MISMATCH)
   const effectiveFences = entries.map((entry) => ({
     ...entry,
     files: perLane[entry.lane]?.files ? [...perLane[entry.lane].files] : [...entry.files],
   }))
-  return { perLane, authoredPerLane, warnings, crossBatch, externals: externalRows, fences: effectiveFences, admissions }
+  return { perLane, authoredPerLane, warnings, fences: effectiveFences, admissions }
 }
 
 // A fence denies a SIBLING's declared surface; it never denied an UNCLAIMED path, so a
@@ -2265,11 +1875,10 @@ export function readsFromRefusal(stderr) {
   return { reason: STALE_READ_ACK, files: parse(stalePrefix, staleAt, ',', false) }
 }
 
-// `gatherFences` refuses unknown entry keys, including `external`, so strip the marker
-// before compile and boot (`scripts/factory/make-brief.mjs:935`). The entry stays inside
-// `lanes` because `laneFenceFor` hands every non-own register entry to each lane
-// (`scripts/factory/make-brief.mjs:1060`).
-export function readRegister({ fencesPath, checkout, outDir, deps } = {}) {
+// External fence markers are retired at the authored-register boundary by ADR-043.
+// Keep the register bytes untouched for every accepted batch; compilation and boot
+// receive the same authored surface (boot narrows it later to one lane).
+export function readRegister({ fencesPath, checkout, deps } = {}) {
   const d = normalDeps(deps)
   const authored = resolve(fencesPath)
   let raw
@@ -2279,35 +1888,14 @@ export function readRegister({ fencesPath, checkout, outDir, deps } = {}) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw) || !Array.isArray(raw.lanes)) {
     refuse(`fence register ${authored} must be an object carrying a lanes array`, BATCH_UNREADABLE)
   }
-  const externals = []
-  const lanes = raw.lanes.map((entry, index) => {
+  raw.lanes.map((entry, index) => {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
       refuse(`fence register ${authored} lanes[${index}] must be an object`, BATCH_UNREADABLE)
     }
-    if (!Object.hasOwn(entry, 'external')) return entry
-    if (entry.external !== true) {
-      refuse(`fence register ${authored} lanes[${index}] external must be true or absent, found ${JSON.stringify(entry.external)}`, BATCH_UNREADABLE)
-    }
-    if (typeof entry.lane !== 'string' || entry.lane.trim() === '') {
-      refuse(`fence register ${authored} lanes[${index}] marks an external entry with no lane name`, BATCH_UNREADABLE)
-    }
-    if (externals.includes(entry.lane)) refuse(`fence register ${authored} names external lane ${entry.lane} twice`, BATCH_UNREADABLE)
-    externals.push(entry.lane)
-    const copy = { ...entry }
-    delete copy.external
-    return copy
+    if (Object.hasOwn(entry, 'external')) refuse('fence register external entries are retired by ADR-043', EXTERNAL_FENCE_RETIRED)
+    return entry
   })
-  if (externals.length === 0) {
-    return { fences: gatherFences({ fencesPath: authored, checkout }), externals: [], registerPath: authored, sanitised: false }
-  }
-  const target = join(resolve(outDir), EXTERNAL_REGISTER_NAME)
-  try {
-    mkdirSync(resolve(outDir), { recursive: true })
-    writeFileSync(target, JSON.stringify({ ...raw, lanes }, null, 2) + '\n')
-  } catch (err) {
-    refuse(`cannot write the external-stripped fence register ${target}: ${err?.message || String(err)}`, BATCH_UNREADABLE)
-  }
-  return { fences: gatherFences({ fencesPath: target, checkout }), externals: [...externals].sort(), registerPath: target, sanitised: true }
+  return { fences: gatherFences({ fencesPath: authored, checkout }), externals: [], registerPath: authored }
 }
 
 function registerData({ fences, registerPath, d }) {
@@ -2336,6 +1924,28 @@ function writeUpdatedRegister({ data, lane, reads, outDir, d }) {
   const path = join(outDir, `${lane}.fences.json`)
   try { writeFileSync(path, JSON.stringify(copy, null, 2) + '\n') } catch (err) {
     refuse(`cannot write compiler retry fence register ${path}: ${err?.message || String(err)}`, READS_UNRESOLVED)
+  }
+  return path
+}
+
+function writeRuntimeRegister({ entry, lane, outDir, d }) {
+  if (!entry || typeof entry !== 'object' || entry.lane !== lane) {
+    refuse(`effective fence register has no lane ${lane} for runtime boot`, COMPILE_REFUSED)
+  }
+  const own = {
+    lane,
+    files: [...(Array.isArray(entry.files) ? entry.files : [])],
+    ...(Array.isArray(entry.reads) ? { reads: entry.reads.map((read) => ({ ...read })) } : {}),
+  }
+  const data = {
+    lanes: [own],
+  }
+  const path = join(outDir, `${lane}.runtime.fences.json`)
+  try {
+    d.mkdirSync(outDir, { recursive: true })
+    d.writeFileSync(path, JSON.stringify(data, null, 2) + '\n')
+  } catch (err) {
+    refuse(`cannot write runtime fence register ${path}: ${err?.message || String(err)}`, COMPILE_REFUSED)
   }
   return path
 }
@@ -2950,7 +2560,7 @@ function overrideNote(result) {
   return result.overrodeProposal ? ` overrode proposal ${result.proposed} with lane tier ${result.tier}` : ''
 }
 
-export function checkArrival({ crew, lane, batchTotal, externals } = {}) {
+export function checkArrival({ crew, lane } = {}) {
   const state = crew && typeof crew === 'object' ? crew : {}
   if (state.lane_name !== lane) {
     refuse(`crew lane_name is ${JSON.stringify(state.lane_name)}, expected ${lane}`, FENCE_NOT_ARRIVED)
@@ -2958,17 +2568,10 @@ export function checkArrival({ crew, lane, batchTotal, externals } = {}) {
   if (!Array.isArray(state.lane_fence)) {
     refuse(`crew lane_fence is missing or not an array for ${lane}`, FENCE_NOT_ARRIVED)
   }
-  const externalNames = new Set((Array.isArray(externals) ? externals : []).filter((name) => typeof name === 'string' && name.trim() !== ''))
-  const fence = state.lane_fence
-  const members = fence.filter((entry) => !externalNames.has(entry?.lane))
-  if (members.length !== batchTotal - 1) {
-    refuse(`crew lane_fence for ${lane} names ${members.length} batch sibling(s) besides ${externalNames.size} external fence(s), expected ${batchTotal - 1}`, FENCE_COUNT_MISMATCH)
+  if (state.lane_fence.length !== 0) {
+    refuse(`crew lane_fence for ${lane} has ${state.lane_fence.length} entry(s), expected 0`, FENCE_COUNT_MISMATCH)
   }
-  const missing = [...externalNames].filter((name) => !fence.some((entry) => entry?.lane === name))
-  if (missing.length > 0) {
-    refuse(`crew lane_fence for ${lane} does not carry external fence(s): ${missing.join(', ')}`, FENCE_NOT_ARRIVED)
-  }
-  return { lane, siblings: members, externals: fence.filter((entry) => externalNames.has(entry?.lane)) }
+  return { lane, siblings: [], externals: [] }
 }
 
 export function crewJsonPath({ checkout, lane, deps } = {}) {
@@ -3472,7 +3075,8 @@ function teardownCommand({ lane, laneDir }) {
 function bootOnce({ item, registerPath, transport, runFlags, deps }) {
   const d = normalDeps(deps)
   let result
-  try { result = d.spawn(bootCommand({ lane: item.lane, laneDir: item.plan.dir, tier: item.tier, registerPath, transport, seats: item.seats, runFlags })) } catch (err) {
+  const laneRegisterPath = item.runtimeRegisterPath || registerPath
+  try { result = d.spawn(bootCommand({ lane: item.lane, laneDir: item.plan.dir, tier: item.tier, registerPath: laneRegisterPath, transport, seats: item.seats, runFlags })) } catch (err) {
     return { ok: false, result: null, floorReason: null, why: err?.message || String(err) }
   }
   if (result && result.status === 0) return { ok: true, result, floorReason: null, why: null }
@@ -3653,7 +3257,6 @@ function prepareDispatchContext(options) {
     tier,
     execution,
     variant,
-    externals,
     registerPath: registerOverride,
     runFlags = {},
     deps,
@@ -3670,7 +3273,7 @@ function prepareDispatchContext(options) {
   const root = typeof checkout === 'string' && checkout.trim() ? checkout : process.cwd()
   const parent = typeof parentDir === 'string' && parentDir.trim() ? parentDir : dirname(resolve(root))
   const outputDir = typeof outDir === 'string' && outDir.trim() ? resolve(outDir) : join(resolve(batchDir), 'out')
-  const fenceReport = checkFences({ fences, lanes, graph, checkout, externals, parentDir: parent, outDir: outputDir, deps: d })
+  const fenceReport = checkFences({ fences, lanes, graph, checkout, outDir: outputDir, deps: d })
   const hasAdmissions = fenceReport.admissions.length > 0
   const effectiveFences = hasAdmissions ? fenceReport.fences : fences
   // Preflight BEFORE planWorktrees: planWorktrees probes git for existing
@@ -3792,7 +3395,6 @@ function prepareDispatchContext(options) {
     tier,
     execution,
     variant,
-    externals,
     registerOverride,
     runFlags,
     deps,
@@ -3994,7 +3596,13 @@ async function compileDispatchWave(prepared) {
     try { writeFileSync(recordPath, JSON.stringify(record, null, 2) + '\n') } catch (err) {
       refuse(`cannot write dispatch record ${recordPath}: ${err?.message || String(err)}`, COMPILE_REFUSED)
     }
-    settled.push({ ...item, plan, floor, prompt, tier: result.tier, execution: laneExecution, variant: laneVariant, seats, staffing, record: recordPath })
+    const runtimeRegisterPath = writeRuntimeRegister({
+      entry: fenceReport.fences.find((candidate) => candidate?.lane === item.lane),
+      lane: item.lane,
+      outDir: outputDir,
+      d,
+    })
+    settled.push({ ...item, plan, floor, prompt, tier: result.tier, execution: laneExecution, variant: laneVariant, seats, staffing, record: recordPath, runtimeRegisterPath })
   }
 
   // #658: every lane whose plan IS its brief is validated before ANY lane boots — the brief is
@@ -4018,7 +3626,6 @@ function launchDispatchWave(compiled) {
     registerPath,
     transport,
     lanes,
-    externals,
     fenceReport,
     adoptions,
     keep,
@@ -4073,7 +3680,7 @@ function launchDispatchWave(compiled) {
     if (transport === PANE_TRANSPORT && !workspaceId) {
       refuse(`crew boot under --${PANE_TRANSPORT} produced no workspace for ${item.lane}: crew.json workspace_id is ${JSON.stringify(crew.workspace_id ?? null)}`, BOOT_FAILED)
     }
-    const arrival = checkArrival({ crew, lane: item.lane, batchTotal: lanes.length, externals })
+    const arrival = checkArrival({ crew, lane: item.lane })
     const journal = join(dirname(path), 'journal.jsonl')
     const admissionRows = fenceReport.perLane[item.lane]?.fence_admissions || []
     if (admissionRows.length > 0) {
@@ -4168,7 +3775,7 @@ function launchDispatchWave(compiled) {
   return { lanes: runs, plans, registerPath, outDir: outputDir, keep, transport, waves, wave: waveNumber, deferred, unstarted, fences: fenceReport }
 }
 
-export async function dispatchBatch({ batchDir, fences, checkout, parentDir, outDir, tier, execution, variant, externals, registerPath: registerOverride, runFlags = {}, deps } = {}) {
+export async function dispatchBatch({ batchDir, fences, checkout, parentDir, outDir, tier, execution, variant, registerPath: registerOverride, runFlags = {}, deps } = {}) {
   const prepared = prepareDispatchContext({
     batchDir,
     fences,
@@ -4178,7 +3785,6 @@ export async function dispatchBatch({ batchDir, fences, checkout, parentDir, out
     tier,
     execution,
     variant,
-    externals,
     registerPath: registerOverride,
     runFlags,
     deps,
@@ -4253,8 +3859,7 @@ export async function main(argv, deps = {}) {
     await dispatchBatch({
       batchDir: resolve(flags.batch),
       fences: register.fences,
-      externals: register.externals,
-      registerPath: register.sanitised ? register.registerPath : undefined,
+      registerPath: undefined,
       checkout,
       parentDir,
       outDir,

@@ -126,9 +126,9 @@ command, and deferred waves re-emit the authored values on their resume line.
 ## Batch dispatch: what `--dry-run` is and is not for
 
 A dry run is not a step of the dispatch recipe. On 2026-09-06 it was invoked
-six times and changed no decision once: `external-fence-abandoned`,
-`cross-batch-collision` (twice) and `worktree-exists` all refused in the LIVE
-dispatch, and the three operator fence errors that day were found by lanes, not
+six times and changed no decision once: `worktree-exists` and two refusals ADR-043
+has since retired (`external-fence-abandoned`, `cross-batch-collision`) all fired
+in the LIVE dispatch, and the three operator fence errors that day were found by lanes, not
 by a dry run. Six invocations on one day is the whole sample — the claim is that
 it caught nothing on the day it was measured, never that it has never caught
 anything.
@@ -145,7 +145,7 @@ It cannot see a compiler refusal for a concrete reason: the dry-run branch
 returns before `measureBatchBaseline` and before any lane is compiled at all.
 
 Nor is a dry run what keeps a bad register from leaving branches behind.
-`checkFences` (with `crossBatchCollisions` inside it) and `resolveAdoptions`
+`checkFences` and `resolveAdoptions`
 all run before `createWorktrees`, and `resolveAdoptions` says why in its own
 comment: a partial adoption is worse than none, so a refusal there has copied
 nothing anywhere. Every check capable of catching something already fires

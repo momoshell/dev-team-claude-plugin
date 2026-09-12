@@ -4785,6 +4785,14 @@ function runTask(ctx, io, crash) {
     })
   }
 
+  function escalatePlanScopeRequest(why, extraArtifacts = [], extraDetails = {}) {
+    return escalationResult({
+      where: 'plan-scope-request', why, question: escalationQuestion('scope-request'),
+      summary: `Task ${ctx.task} needs a human: ${why}`,
+      commit: null, artifacts: extraArtifacts, extraDetails, terminal: true,
+    })
+  }
+
   function escalateReversion(paths) {
     const why = builderReversionWhy(paths)
     return escalationResult({
@@ -5129,6 +5137,8 @@ function runTask(ctx, io, crash) {
   let extraPlanRounds = 0
   let prescribedPlanApplicationUsed = false
   let prescribedPlanApplications = 0
+  let planWideningAdjudications = 0
+  let planScopeBaseline = Array.isArray(ctx.files_in_scope) ? [...ctx.files_in_scope] : []
   let divergenceConsulted = false
   const readOrNull = (path) => { try { const text = io.readFile(path); return typeof text === 'string' ? text : null } catch { return null } }
   let dispatchAdmissions = null
@@ -5185,6 +5195,9 @@ function runTask(ctx, io, crash) {
         '`LANE_VALUE_OPTIONS` (for values such as `--test-timeout`) and `LANE_PATH_OPTIONS` (for paths such as `--import`) are supported.',
         'An environment value belongs in the test as a declared constant, with the variable as an optional override.',
         'details.needs_adversary must be a boolean: true requests the adversary plan-check round; false does not.',
+        `For one bounded plan-time scope widening only, widen details.files_in_scope with tracked literal files and set details.scope_request to exactly { kind: 'admit-files', files: [...] } using the added files.`,
+        `Set details.evidence.reasons to exactly one { file, reason } object per added file; reason must be one of: ${PLAN_SCOPE_WIDEN_REASONS.join(', ')}.`,
+        'There is one plan-time scope-widening adjudication per lane; protected paths and paths held by another live lane never admit.',
       ].join('\n'))
     } catch (err) {
       stageComplete()
@@ -5292,8 +5305,7 @@ function runTask(ctx, io, crash) {
     // directory-covered literals stay on the old in-memory path; only genuine literal
     // additions need a tracking answer. A trailing-slash addition remains widening and
     // is intentionally not sent through Git.
-    const dispatchedScope = Array.isArray(ctx.files_in_scope) && ctx.files_in_scope.length > 0
-      ? ctx.files_in_scope : []
+    const dispatchedScope = planScopeBaseline.length > 0 ? planScopeBaseline : []
     const rawAdded = dispatchedScope.length > 0
       ? outOfScopeFiles(plannedScope, scopeMatcher(dispatchedScope)) : []
     const literalAdded = rawAdded.filter((entry) => typeof entry === 'string' && !entry.endsWith('/'))
@@ -5335,7 +5347,7 @@ function runTask(ctx, io, crash) {
       stageComplete()
       return escalate('plan', inventoryWhy, env.artifacts || [])
     }
-    const planScope = planScopeVerdict(ctx.files_in_scope, plannedScope, tracked)
+    const planScope = planScopeVerdict(planScopeBaseline, plannedScope, tracked)
     if (planScope.verdict === PLAN_SCOPE.malformed) {
       const scopeFinal = round >= planRounds()
       if (scopeFinal) {
@@ -5357,19 +5369,42 @@ function runTask(ctx, io, crash) {
       ...(inheritedScope.preserved.length > 0 ? { preserved_admissions: inheritedScope.preserved } : {}),
     } }))
     if (planScope.verdict === PLAN_SCOPE.widened) {
-      const scopeFinal = round >= planRounds()
-      if (scopeFinal) {
+      const hasScopeRequest = env.details && typeof env.details === 'object' && !Array.isArray(env.details)
+        && Object.prototype.hasOwnProperty.call(env.details, 'scope_request')
+      if (hasScopeRequest) {
+        const request = scopeRequestOf(env.details)
+        const wideningDecision = planScopeWideningDecision({
+          request,
+          added: planScope.added,
+          reasons: env.details?.evidence?.reasons,
+          protectedPaths: ctx.protectedPaths,
+          laneFence: (Array.isArray(ctx.laneFence) ? ctx.laneFence : []).filter((record) => record?.lane !== ctx.laneName),
+          planWideningAdjudications,
+        })
+        planWideningAdjudications += 1
+        if (wideningDecision.action === 'admit') {
+          planScopeBaseline = [...new Set([...planScopeBaseline, ...wideningDecision.files])]
+          logScopeAdmission({ source: 'plan-request', files: wideningDecision.files, evidence: { reasons: wideningDecision.reasons } })
+        } else {
+          stageComplete()
+          const metadata = wideningDecision.hits ? { files: escalationFiles(wideningDecision.hits) } : {}
+          return escalatePlanScopeRequest(`plan scope request refused [${wideningDecision.reason}]: ${wideningDecision.why}`, env.artifacts || [], metadata)
+        }
+      } else {
+        const scopeFinal = round >= planRounds()
+        if (scopeFinal) {
+          stageComplete()
+          return escalate(PLAN_SCOPE.widened, planScopeWhy(planScope, true), env.artifacts || [])
+        }
+        const b = art(`plan-bounce-r${round}.md`)
+        failureUpgrade('plan', 'planner') // the kind the other three plan bounces already use
+        io.writeFile(b, planScopeBounceLines(round, planScope, ctx.briefFile, ctx.files_in_scope).join('\n'))
+        planBrief = b
+        planNote = PLAN_SCOPE.widened
+        planEnv = null
         stageComplete()
-        return escalate(PLAN_SCOPE.widened, planScopeWhy(planScope, true), env.artifacts || [])
+        continue
       }
-      const b = art(`plan-bounce-r${round}.md`)
-      failureUpgrade('plan', 'planner') // the kind the other three plan bounces already use
-      io.writeFile(b, planScopeBounceLines(round, planScope, ctx.briefFile, ctx.files_in_scope).join('\n'))
-      planBrief = b
-      planNote = PLAN_SCOPE.widened
-      planEnv = null
-      stageComplete()
-      continue
     }
     // #915 — resolve the PLANNER's lane against the tree before accepting the plan. The
     // operator's ctx.lane is deliberately NOT read here: --lane is already the operator's
@@ -8796,6 +8831,10 @@ export const PLAN_SCOPE = Object.freeze({
   malformed: 'plan-scope-malformed',
 })
 export const PLAN_SCOPE_VERDICTS = Object.freeze(Object.values(PLAN_SCOPE))
+export const PLAN_SCOPE_WIDEN_REASONS = Object.freeze(['behavior-doc', 'shared-fixture', 'coherent-module', 'external-constant'])
+export const PLAN_SCOPE_WIDEN_MAX = 1
+export const PLAN_SCOPE_WIDEN_REFUSALS = Object.freeze(['shape', 'files', 'reason', 'protected', 'held', 'repeat'])
+export const PLAN_SCOPE_WIDEN_REFUSAL_NAMES = PLAN_SCOPE_WIDEN_REFUSALS
 
 // Scope corrections are deliberately suggestions only. The path that the planner
 // declared remains the path the driver refuses; accepting a correction here would turn
@@ -8904,6 +8943,72 @@ export function planScopeVerdict(dispatched, planned, tracked = null) {
     dispatched: compared ? available.length : null, planned: asked.length,
   }
   return tracked === null ? base : { ...base, malformed, suggestions, effective }
+}
+
+const planScopeWideningRefusal = (reason, why, extra = {}) => ({ action: 'escalate', reason, why, ...extra })
+
+export function planScopeWideningDecision(options = {}) {
+  const input = options && typeof options === 'object' && !Array.isArray(options) ? options : {}
+  const { request = null, added = [], reasons, protectedPaths, laneFence = [], planWideningAdjudications: requestedAdjudications, adjudications } = input
+  const planWideningAdjudications = requestedAdjudications ?? adjudications ?? 0
+  try {
+    if (request === null || request === undefined) return { action: 'skip' }
+    if (!request || typeof request !== 'object' || Array.isArray(request) || request.refusal) {
+      return planScopeWideningRefusal('shape', request?.why || 'scope_request must be a parsed admit-files request')
+    }
+    const additions = Array.isArray(added) ? [...added] : []
+    if (additions.length === 0 || new Set(additions).size !== additions.length
+      || additions.some((entry) => typeof entry !== 'string' || entry.endsWith('/') || validateScopeEntries([entry]).length > 0)) {
+      return planScopeWideningRefusal('files', 'plan scope widening requires non-empty tracked literal additions')
+    }
+    const requestFiles = Array.isArray(request.files) ? request.files : []
+    if (requestFiles.length !== additions.length || new Set(requestFiles).size !== requestFiles.length
+      || requestFiles.some((entry) => !additions.includes(entry)) || additions.some((entry) => !requestFiles.includes(entry))) {
+      return planScopeWideningRefusal('files', 'scope_request.files must set-equal planScope.added')
+    }
+    const planProtectedAdditions = protectedHits(additions, protectedPaths)
+    if (planProtectedAdditions.length > 0) {
+      return planScopeWideningRefusal('protected', `protected paths cannot be admitted: ${planProtectedAdditions.join(', ')}`, { files: planProtectedAdditions })
+    }
+    const planHeldAdditions = laneFenceHits(additions, laneFence)
+    if (planHeldAdditions.length > 0) {
+      return planScopeWideningRefusal('held', `paths are held by another live lane: ${planHeldAdditions.map(({ entry, lane }) => `${entry} is owned by lane ${lane}`).join('; ')}`, { hits: planHeldAdditions })
+    }
+    if (planWideningAdjudications >= PLAN_SCOPE_WIDEN_MAX) {
+      return planScopeWideningRefusal('repeat', `the plan-time widening limit of ${PLAN_SCOPE_WIDEN_MAX} adjudication is spent`)
+    }
+    if (!Array.isArray(reasons) || reasons.length !== additions.length) {
+      return planScopeWideningRefusal('reason', 'details.evidence.reasons must contain exactly one mapping per added file')
+    }
+    const seen = new Set()
+    const normalized = []
+    for (const entry of reasons) {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry) || Reflect.ownKeys(entry).length !== 2
+        || !Reflect.ownKeys(entry).includes('file') || !Reflect.ownKeys(entry).includes('reason')) {
+        return planScopeWideningRefusal('reason', 'each evidence.reasons entry must be exactly { file, reason }')
+      }
+      const { file, reason } = entry
+      if (typeof file !== 'string' || !additions.includes(file) || seen.has(file)) {
+        return planScopeWideningRefusal('reason', 'evidence.reasons must map each added file exactly once')
+      }
+      if (!PLAN_SCOPE_WIDEN_REASONS.includes(reason)) {
+        return planScopeWideningRefusal('reason', `evidence.reasons contains an unknown reason ${JSON.stringify(reason)}`)
+      }
+      seen.add(file)
+      normalized.push({ file, reason })
+    }
+    if (seen.size !== additions.length) {
+      return planScopeWideningRefusal('reason', 'evidence.reasons must map each added file exactly once')
+    }
+    const reasonsByFile = new Map(normalized.map((entry) => [entry.file, entry.reason]))
+    return {
+      action: 'admit',
+      files: additions,
+      reasons: additions.map((file) => ({ file, reason: reasonsByFile.get(file) })),
+    }
+  } catch (err) {
+    return planScopeWideningRefusal('shape', `plan scope widening request could not be read: ${err?.message ?? String(err)}`)
+  }
 }
 export function planScopeWhy(verdict, final) {
   if (verdict?.verdict === PLAN_SCOPE.malformed) {

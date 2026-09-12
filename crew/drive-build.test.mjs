@@ -4280,6 +4280,322 @@ test('RV1-2 fixture census recorder distinguishes closed and open valves', () =>
   assert.equal(open.io.calls.run.filter(({ cmd }) => cmd === 'node crew/census-exhibits.mjs').length, 2)
 })
 
+test('A1 admitted-only post-commit repair carries discrimination without escalation', () => {
+  const [carrier] = CENSUS_CARRIER_FILES
+  const fixture = censusDriveIo([censusRecord(), censusRecord([carrier]), censusRecord()], {
+    changed() {
+      const censusRuns = this.calls.run.filter(({ cmd }) => cmd === 'node crew/census-exhibits.mjs').length
+      return censusRuns >= 2 ? [carrier] : ['a.mjs', 'a.test.mjs']
+    },
+  })
+  const result = driveTask(fixture.ctx, fixture.io)
+  assert.equal(result.status, 'done')
+  assert.equal(result.details.gate.check_discrimination, undefined)
+  assert.equal(result.details.gate.repairs, 0)
+  assert.equal(result.details.gate.generation, 2)
+  assert.equal(fixture.io.calls.runClean.length, 1)
+  assert.equal(result.details.stages.some((stage) => String(stage).startsWith('gate-fresh:')), false)
+  assert.deepEqual(fixture.io.calls.logs.filter((row) => row.gate_discrimination).map(({ gate_generation }) => gate_generation), [1])
+  assert.equal(fixture.io.calls.emits.filter(({ kind }) => kind === 'check-discrimination').length, 0)
+  assert.equal(fixture.io.calls.logs.filter((row) => row.gate_check_discrimination).length, 0)
+  assert.deepEqual(fixture.io.calls.logs.filter((row) => row.gate_discrimination_carry).map((row) => row.gate_discrimination_carry), [
+    { proof: 'carried-forward', generation: 2, measured_generation: 1, files: [carrier] },
+  ])
+})
+
+test('B1 chained admitted-only carries journal original measured generation', () => {
+  const [carrierOne, carrierTwo] = CENSUS_CARRIER_FILES
+  const suiteFile = 'suite-admitted.test.mjs'
+  const mutation = { check: 'B1-carried', file: 'a.mjs', find: 'true', replace: 'false' }
+  const green = `green\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":0,"errored":0}`
+  const killed = `FAIL B1-carried: caught\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":1,"errored":0}`
+  const suiteRed = `FAIL file://${CTX.checkout}/${suiteFile}:1:1\nrepair the admitted suite file`
+  const plan = planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations: [mutation] } })
+  const fixture = censusDriveIo([censusRecord(), censusRecord([carrierOne]), censusRecord(), censusRecord()], {
+    envelopes: { 'planner:1': plan },
+    suiteResults: [{ ok: false, output: suiteRed }, { ok: true, output: CENSUS_TAP_GREEN }],
+    suiteRuns: {
+      'gate-cmd:1': { ok: false, output: RED(3) },
+      'gate-cmd:2': { ok: true, output: green },
+      'gate-cmd:3': { ok: false, output: killed },
+    },
+    changed() {
+      const censusRuns = this.calls.run.filter(({ cmd }) => cmd === 'node crew/census-exhibits.mjs').length
+      const suiteRuns = this.calls.run.filter(({ cmd }) => cmd === 'suite-cmd').length
+      if (censusRuns >= 3 && suiteRuns >= 1) return [suiteFile]
+      if (censusRuns >= 2) return [carrierOne, carrierTwo]
+      return ['a.mjs', 'a.test.mjs']
+    },
+  })
+  const result = driveTask(fixture.ctx, fixture.io)
+  assert.equal(result.status, 'done')
+  const carries = fixture.io.calls.logs.filter((row) => row.gate_discrimination_carry).map((row) => row.gate_discrimination_carry)
+  assert.deepEqual(carries, [
+    { proof: 'carried-forward', generation: 2, measured_generation: 1, files: [carrierOne, carrierTwo] },
+    { proof: 'carried-forward', generation: 3, measured_generation: 1, files: [suiteFile] },
+  ])
+  const carriedRows = fixture.io.calls.logs
+    .filter((row) => row.gate_check_discrimination && row.gate_generation > 1)
+    .flatMap((row) => row.gate_check_discriminations || [])
+  assert.deepEqual(carriedRows.map(({ check, proof, measured_generation }) => ({ check, proof, measured_generation })), [
+    { check: 'B1-carried', proof: 'carried-forward', measured_generation: 1 },
+    { check: 'B1-carried', proof: 'carried-forward', measured_generation: 1 },
+  ])
+  assert.equal(fixture.io.calls.logs.filter((entry) => entry.mutation_anchor_bind?.generation > 1).length, 0)
+  const diffGenerations = fixture.io.calls.logs.filter((row) => row.diff_mutation_proof).map((row) => row.diff_mutation_proof.generation)
+  assert.deepEqual(diffGenerations.slice(-2), [2, 3])
+})
+
+test('RV1-2 carried check proofs never record a fresh bind measurement', () => {
+  const [carrier] = CENSUS_CARRIER_FILES
+  const mutation = { check: 'RV1-2-carried', file: 'a.mjs', find: 'true', replace: 'false' }
+  const green = `green\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":0,"errored":0}`
+  const killed = `FAIL RV1-2-carried: caught\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":1,"errored":0}`
+  const plan = planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations: [mutation] } })
+  const fixture = censusDriveIo([censusRecord(), censusRecord([carrier]), censusRecord()], {
+    envelopes: { 'planner:1': plan },
+    suiteRuns: {
+      'gate-cmd:1': { ok: false, output: RED(3) },
+      'gate-cmd:2': { ok: true, output: green },
+      'gate-cmd:3': { ok: false, output: killed },
+    },
+    changed() {
+      const censusRuns = this.calls.run.filter(({ cmd }) => cmd === 'node crew/census-exhibits.mjs').length
+      return censusRuns >= 2 ? [carrier] : ['a.mjs', 'a.test.mjs']
+    },
+  })
+  const result = driveTask(fixture.ctx, fixture.io)
+  assert.equal(result.status, 'done')
+  assert.deepEqual(
+    fixture.io.calls.logs
+      .filter((entry) => entry.mutation_anchor_bind?.generation > 1)
+      .map((entry) => entry.mutation_anchor_bind.generation),
+    [],
+  )
+})
+
+test('C1 planned directory descendant absent from witness re-runs discrimination', () => {
+  const witnessFile = 'pkg/lib/witness.mjs'
+  const deletedFile = 'pkg/lib/deleted.mjs'
+  const io = fakeIo({
+    files: { [`${CTX.checkout}/${witnessFile}`]: 'witness\n' }, writeThrough: true, emit: true,
+    cleanRuns: { 'gate-cmd': { ok: false, output: RED(3) } },
+    runs: {
+      'gate-cmd:1': { ok: false, output: RED(3) },
+      'gate-cmd:2': { ok: true, output: '' },
+      'gate-cmd': { ok: true, output: '' },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, files_in_scope: ['pkg/lib/'], gate_cmd: 'gate-cmd' } }),
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    }, changed: [witnessFile],
+  })
+  const originalChangedFiles = io.changedFiles
+  io.changedFiles = function () {
+    const hasReviewer = this.calls.assign.some(({ role }) => role === 'reviewer')
+    return hasReviewer ? [deletedFile] : originalChangedFiles.call(this)
+  }
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.runClean.length, 2)
+  assert.equal(io.calls.emits.filter(({ kind, name }) => kind === 'gate' && name === 'gate-fresh:2').length, 1)
+  assert.deepEqual(io.calls.emits.filter(({ kind }) => kind === 'discrimination').map(({ generation }) => generation), [1, 2])
+})
+
+test('D1 admitted-only carry does not spend gate repairs', () => {
+  const [carrier] = CENSUS_CARRIER_FILES
+  const green = `green\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":0,"errored":0}`
+  const fixture = censusDriveIo([censusRecord(), censusRecord([carrier]), censusRecord()], {
+    envelopes: {
+      'reviewer:1': { status: 'done', role: 'reviewer', details: { defect: 'gate', reason: 'the gate is defective' } },
+      'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } },
+    },
+    cleanRuns: { 'gate-cmd': { ok: false, output: RED(3) }, 'gate-fixed': { ok: false, output: RED(3) } },
+    suiteRuns: {
+      'gate-cmd:1': { ok: false, output: RED(3) },
+      'gate-cmd:2': { ok: false, output: RED(3) },
+      'gate-cmd:3': { ok: false, output: RED(3) },
+      'gate-fixed:1': { ok: true, output: green },
+    },
+    changed() {
+      const censusRuns = this.calls.run.filter(({ cmd }) => cmd === 'node crew/census-exhibits.mjs').length
+      return censusRuns >= 2 ? [carrier] : ['a.mjs', 'a.test.mjs']
+    },
+  })
+  const originalClean = fixture.io.runClean
+  fixture.io.runClean = function (cmd) {
+    if (String(cmd).includes('gate-fixed')) return { ok: false, output: RED(3) }
+    return originalClean.call(this, cmd)
+  }
+  const result = driveTask(fixture.ctx, fixture.io)
+  assert.equal(result.status, 'done')
+  assert.equal(result.details.gate.repairs, 1)
+  assert.equal(result.details.gate.generation, 3)
+  assert.equal(result.details.stages.some((stage) => String(stage).startsWith('gate-fresh:')), false)
+})
+
+test('E1 genuinely vacuous gate remains blocked before publication', () => {
+  const io = fakeIo({
+    cleanRuns: { 'gate-cmd': { ok: true, output: 'green pristine' } }, emit: true,
+    runs: {
+      'gate-cmd:1': { ok: false, output: RED(3) }, 'gate-cmd:2': { ok: true, output: '' },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    }, changed: ['a.mjs', 'a.test.mjs'],
+    envelopes: { 'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+  })
+  const result = driveTask({ ...CTX, roles: ['planner', 'builder', 'reviewer'] }, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'gate')
+  assert.equal(io.calls.commits.length, 0)
+  assert.equal(io.calls.runClean.length, 1)
+})
+
+test('F1 admission round changing a declared target forces fresh discrimination', () => {
+  const [carrier] = CENSUS_CARRIER_FILES
+  const target = 'pkg/lib/target.mjs'
+  const witness = 'pkg/lib/other.mjs'
+  const mutation = { check: 'F1-target', file: target, find: 'true', replace: 'false' }
+  const green = `green\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":0,"errored":0}`
+  const killed = `FAIL F1-target: caught\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":1,"errored":0}`
+  const plan = planEnv({ details: { ...planEnv().details, files_in_scope: ['pkg/lib/'], gate_cmd: 'gate-cmd', mutations: [mutation] } })
+  const fixture = censusDriveIo([censusRecord(), censusRecord([carrier]), censusRecord()], {
+    ctx: { files_in_scope: ['pkg/lib/'] }, planFiles: ['pkg/lib/'],
+    envelopes: {
+      'planner:1': plan,
+      'builder:2': () => { fixture.io.calls.files[`${CTX.checkout}/${target}`] = `${CHECK_BUILT}// changed\n`; return buildEnv() },
+    },
+    suiteRuns: {
+      'gate-cmd:1': { ok: false, output: RED(3) }, 'gate-cmd:2': { ok: true, output: green },
+      'gate-cmd:3': { ok: false, output: killed }, 'gate-cmd:6': { ok: false, output: killed },
+    },
+    changed() {
+      const censusRuns = this.calls.run.filter(({ cmd }) => cmd === 'node crew/census-exhibits.mjs').length
+      return censusRuns >= 2 ? [carrier, target] : [witness]
+    },
+  })
+  fixture.io.calls.files[`${CTX.checkout}/${target}`] = CHECK_BUILT
+  fixture.io.calls.files[`${CTX.checkout}/${witness}`] = 'other\n'
+  const result = driveTask(fixture.ctx, fixture.io)
+  assert.equal(result.status, 'done')
+  assert.equal(result.details.gate.generation, 2)
+  assert.equal(result.details.stages.includes('gate-proof:2'), true)
+  assert.equal(fixture.io.calls.logs.filter((entry) => entry.gate_discrimination_carry).length, 0)
+  const row = fixture.io.calls.logs.find((entry) => entry.gate_check_discrimination && entry.gate_generation === 2)?.gate_check_discriminations?.find(({ check }) => check === 'F1-target')
+  assert.equal(row.proof, 'fresh')
+  assert.equal(row.measured_generation, 2)
+  const admission = fixture.io.calls.logs.find((entry) => entry.scope_admission?.source === 'census-bounce')?.scope_admission
+  assert.ok(admission.files.includes(carrier))
+  assert.equal(admission.files.includes(target), false)
+})
+
+test('F2 file admitted before witness capture forces fresh discrimination', () => {
+  const admitted = 'pkg/lib/admitted.mjs'
+  const fixture = censusDriveIo([censusRecord(), censusRecord([admitted]), censusRecord()], {
+    envelopes: {
+      'builder:1': buildEnv({ details: {
+        ...buildEnv().details,
+        scope_request: { kind: 'admit-files', files: [admitted] },
+        evidence: { kind: 'builder-request', output: 'the admitted file is required' },
+      } }),
+      'builder:3': () => { fixture.io.calls.files[`${CTX.checkout}/${admitted}`] = 'changed\n'; return buildEnv() },
+    },
+    changed() {
+      const censusRuns = this.calls.run.filter(({ cmd }) => cmd === 'node crew/census-exhibits.mjs').length
+      return censusRuns >= 2 ? [admitted] : ['a.mjs', 'a.test.mjs']
+    },
+  })
+  const admittedPath = `${CTX.checkout}/${admitted}`
+  fixture.io.calls.files[admittedPath] = 'before\n'
+  const result = driveTask(fixture.ctx, fixture.io)
+  assert.equal(result.status, 'done')
+  assert.equal(result.details.gate.generation, 2)
+  assert.equal(result.details.stages.includes('gate-proof:2'), true)
+  assert.equal(fixture.io.calls.logs.filter((entry) => entry.gate_discrimination_carry).length, 0)
+})
+
+test('reported-only proof inventory validates entries and never inserts exact scope literals', () => {
+  const source = readFileSync(`${process.cwd()}/crew/drive.mjs`, 'utf8')
+  const start = source.indexOf('  const compareProofTree = () => {')
+  const end = source.indexOf('  const mutationLabel =', start)
+  const compare = source.slice(start, end)
+  assert.match(compare, /const changedProofFiles = \[\]/)
+  assert.match(compare, /if \(!validReportedFile\(file\)\) \{\n        unknown = true/)
+  assert.match(compare, /const files = new Set\(\[\.\.\.proofTreeWitness\.cells\.keys\(\), \.\.\.changedProofFiles\]\)/)
+  assert.doesNotMatch(compare, /concreteProofFiles\(reported\)/)
+})
+
+test('malformed reported entries set unknown and force fresh proof', () => {
+  const io = fakeIo({
+    cleanRuns: { 'gate-cmd': { ok: false, output: RED(3) } }, emit: true,
+    runs: {
+      'gate-cmd:1': { ok: false, output: RED(3) }, 'gate-cmd:2': { ok: true, output: '' }, 'gate-cmd': { ok: true, output: '' },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    }, changed: ['a.mjs'],
+    envelopes: { 'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+  })
+  const originalChangedFiles = io.changedFiles
+  io.changedFiles = function () {
+    return this.calls.assign.some(({ role }) => role === 'reviewer')
+      ? ['', null, './a.mjs', '../a.mjs', 'pkg/']
+      : originalChangedFiles.call(this)
+  }
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.runClean.length, 2)
+  assert.equal(io.calls.emits.filter(({ kind, name }) => kind === 'gate' && name === 'gate-fresh:2').length, 1)
+})
+
+test('stale witness bytes with an incomplete report take fresh proof', () => {
+  const file = `${CTX.checkout}/a.mjs`
+  const io = fakeIo({
+    files: { [file]: 'before\n' }, writeThrough: true, emit: true,
+    cleanRuns: { 'gate-cmd': { ok: false, output: RED(3) } },
+    runs: {
+      'gate-cmd:1': { ok: false, output: RED(3) }, 'gate-cmd:2': { ok: true, output: '' }, 'gate-cmd': { ok: true, output: '' },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    }, changed: ['a.mjs'],
+    envelopes: { 'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+  })
+  const originalChangedFiles = io.changedFiles
+  const originalAssign = io.assign
+  io.assign = function (spec) {
+    const assigned = originalAssign.call(this, spec)
+    if (spec.role === 'reviewer') io.calls.files[file] = 'after\n'
+    return assigned
+  }
+  io.changedFiles = function () {
+    return this.calls.assign.some(({ role }) => role === 'reviewer') ? [] : originalChangedFiles.call(this)
+  }
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.emits.filter(({ kind, name }) => kind === 'gate' && name === 'gate-fresh:2').length, 1)
+})
+
+test('selected exemptions pass through completeCheckProof during an admitted-only carry', () => {
+  const [carrier] = CENSUS_CARRIER_FILES
+  const mutation = { check: 'carried-check', file: 'a.mjs', find: 'true', replace: 'false' }
+  const exemption = { check: 'carried-exempt', exempt: 'not applicable' }
+  const killed = `FAIL carried-check: caught\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":1,"errored":0}`
+  const plan = planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations: [exemption, mutation] } })
+  const fixture = censusDriveIo([censusRecord(), censusRecord([carrier]), censusRecord()], {
+    envelopes: { 'planner:1': plan },
+    suiteRuns: { 'gate-cmd:3': { ok: false, output: killed } },
+    changed() {
+      const censusRuns = this.calls.run.filter(({ cmd }) => cmd === 'node crew/census-exhibits.mjs').length
+      return censusRuns >= 2 ? [carrier] : ['a.mjs', 'a.test.mjs']
+    },
+  })
+  const result = driveTask(fixture.ctx, fixture.io)
+  assert.equal(result.status, 'done')
+  assert.equal(result.details.stages.some((stage) => String(stage).startsWith('gate-fresh:')), false)
+  const carried = fixture.io.calls.logs.find((entry) => entry.gate_check_discrimination && entry.gate_generation === 2)?.gate_check_discriminations
+  assert.deepEqual(carried.map(({ check, outcome, proof, measured_generation }) => ({ check, outcome, proof, measured_generation })), [
+    { check: 'carried-exempt', outcome: 'exempt', proof: undefined, measured_generation: undefined },
+    { check: 'carried-check', outcome: 'killed', proof: 'carried-forward', measured_generation: 1 },
+  ])
+  assert.deepEqual(fixture.io.calls.logs.filter((entry) => entry.mutation_anchor_bind?.generation === 2).map((entry) => entry.mutation_anchor_bind.declared), [0])})
+
 test('J1 census module is tracked before census measurement', () => {
   const trackedCensusModule = [CENSUS_TOKEN, '--error-unmatch', 'crew/census-exhibits.mjs']
   const result = gitPaths(trackedCensusModule)

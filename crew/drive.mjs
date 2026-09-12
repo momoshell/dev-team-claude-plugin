@@ -7536,7 +7536,14 @@ function runTask(ctx, io, crash) {
       }
       S.commit = postRebaseHead
     }
-    const postCommitParent = probe('git rev-parse HEAD^')
+    // #1176 used `git rev-parse HEAD^`, which is the base only for a SINGLE-commit
+    // lane. A lane that committed twice — a harden round, an anchor repair, a
+    // suite-red bounce — has its own first commit as HEAD^, so the guard fired on
+    // correct work and killed it (b640, b642, 2026-09-12). The merge base is the
+    // question actually being asked: does HEAD descend from the rebase base, whatever
+    // the commit count. The soft reset below then collapses every lane commit into the
+    // index, which is what re-proving the lane's whole diff against the new parent means.
+    const postCommitParent = probe(`git merge-base HEAD ${base}`)
     if (!postCommitParent || postCommitParent !== baseSha) {
       stageComplete()
       return escalate('rebase', `the verified direct parent did not match the rebase base: expected ${baseSha}, found ${postCommitParent || '(unavailable)'}`, [], { commit: S.commit })

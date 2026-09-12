@@ -1469,11 +1469,16 @@ function publicationIo(options = {}) {
     'suite-cmd': () => ({ ok: true, output: warm }),
     'git fetch origin main': { ok: true, output: '' },
     'git rev-parse origin/main': { ok: true, output: 'base1111\n' },
-    'git merge-base HEAD origin/main': { ok: true, output: 'older000\n' },
+    // Stateful, because a real rebase MOVES the merge base: before it, HEAD and the
+    // base share an older ancestor (that difference is what `rebased` is derived from);
+    // after it, the base IS the merge base. A static value made the post-rebase parent
+    // check unverifiable and hid that `HEAD^` only ever worked for a one-commit lane.
+    'git merge-base HEAD origin/main': (s) => ({ ok: true, output: `${s.head === s.post ? 'base1111' : 'older000'}\n` }),
     'git rebase origin/main': (s) => { s.head = s.post; return { ok: true, output: '' } },
     'git diff --name-only --diff-filter=U': { ok: true, output: '' },
     'git rebase --abort': (s) => { s.head = s.pre; return { ok: true, output: '' } },
-    // A single-commit lane replayed onto the base: its parent IS the base.
+    // Retained so a lane still probing HEAD^ resolves; the driver now asks
+    // `git merge-base` instead, which is correct for any commit count.
     'git rev-parse HEAD^': { ok: true, output: 'base1111\n' },
     'git rev-parse HEAD': (s) => ({ ok: true, output: `${s.head}\n` }),
     'command -v gh': { ok: true, output: '/usr/bin/gh\n' },

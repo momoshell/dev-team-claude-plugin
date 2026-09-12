@@ -4010,8 +4010,9 @@ test('E1 held census repair member escalates before a builder bounce', () => {
 
 // E1 covers a held FAILING carrier. The pair is admitted as a unit, so the OTHER member —
 // which did not fail — is also about to be written, and a sibling holding IT must refuse too.
-// Without this case the second holder guard is vacuous: the review found the two guards
-// subsumed one another, and partitioning them is only half the repair.
+// RV2-1 already exercises an unfailed sibling-held carrier; E1b is not a previously absent
+// fixture, it is a stable dedicated title for the case, added because partitioning the guards
+// alone left guard 2 with nothing of its own to fail on in this file.
 test('E1b a held UNFAILED pair member escalates before a builder bounce', () => {
   const [failing, unfailed] = CENSUS_CARRIER_FILES
   const { ctx, io } = censusDriveIo([censusRecord(), censusRecord([failing])], {

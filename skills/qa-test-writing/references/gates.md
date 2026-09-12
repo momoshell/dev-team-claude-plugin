@@ -31,6 +31,8 @@ A failing check must print `FAIL <label>` ending the line, or `FAIL <label>: <wh
 
 - **Never assert the checkout is clean.** The gate runs mid-work by design.
 
+- **Require no bespoke environment.** Every check must pass with no bespoke environment, because that is how `npm test` and CI run it.
+
 - **Strip ANSI before parsing.** If the gate shells out to the suite, the
   harness may export `FORCE_COLOR`, which beats `NO_COLOR`, and `node --test`'s
   summary becomes unparseable — a green gate reads as red (#240). See

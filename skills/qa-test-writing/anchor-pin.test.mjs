@@ -1,8 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join, relative } from 'node:path'
-import { tmpdir } from 'node:os'
 import { ROOT, git, scratchDir } from '../../test/helpers.mjs'
 import { anchorManifestDirs, assertAnchorsPinned, checkAnchors, checkSkillAnchors, citationCarrierTests, collectAnchors, collectNamed, collectRanges, INVERTED_MARK, laneFence, MIN_EXPECTED_LENGTH, partitionShifts, pinnedKey, pinnedLiteralsInTests, repairAnchorsInPlace, repairCli, resolveNamed, rewriteCitations, skillDocs, PINNED_LITERAL_BLIND_SPOT } from './anchor-pin.mjs'
 
@@ -10,9 +9,11 @@ const EXPECTED = "KEY = 'anchored-sentinel-value'"
 const RANGE_EXPECTED = "RANGE = 'range-first-sentinel-value'"
 const RANGE_NEXT = "NEXT = 'range-second-sentinel-value'"
 const RANGE_THIRD = "THIRD = 'range-third-sentinel-value'"
+const EXPECTED_A = "const A = 'anchor-a-distinctive-value'"
+const EXPECTED_B = "const B = 'anchor-b-distinctive-value'"
 
 function fixture({ source = ['// header', `const ${EXPECTED}`, 'const other = 1', 'export default KEY', ''], line = 2, cite, named, manifest } = {}) {
-  const root = mkdtempSync(join(tmpdir(), 'b177-anchor-pin-'))
+  const root = scratchDir('b177-anchor-pin-')
   mkdirSync(join(root, 'crew'), { recursive: true })
   writeFileSync(join(root, 'crew/sample.mjs'), source.join('\n'))
   const skillDir = join(root, 'skills/sample')
@@ -49,6 +50,45 @@ function bytes(fx) {
   return `${readFileSync(fx.manifestPath, 'utf8')}\0${readFileSync(fx.doc, 'utf8')}`
 }
 
+function contractSkill(root, entries, citations = Object.keys(entries)) {
+  const skillDir = join(root, 'skills/sample')
+  mkdirSync(skillDir, { recursive: true })
+  const doc = join(skillDir, 'SKILL.md')
+  const manifestPath = join(skillDir, 'anchors.json')
+  writeFileSync(doc, `# sample\n\n${citations.map((key) => `Exhibit: \`${key}\`.`).join('\n')}\n`)
+  writeFileSync(manifestPath, `${JSON.stringify(entries, null, 2)}\n`)
+  return { root, skillDir, doc, manifestPath }
+}
+
+function authoritativeFixture(prefix) {
+  const root = scratchDir(prefix)
+  mkdirSync(join(root, 'scripts'), { recursive: true })
+  git(root, 'init', '--quiet')
+  git(root, 'symbolic-ref', 'HEAD', 'refs/heads/main')
+  writeFileSync(join(root, 'scripts/a.mjs'), `${EXPECTED_A}\n`)
+  writeFileSync(join(root, 'scripts/b.mjs'), `${EXPECTED_B}\n`)
+  const fx = contractSkill(root, { 'scripts/a.mjs:1': EXPECTED_A, 'scripts/b.mjs:1': EXPECTED_B })
+  git(root, 'add', '.')
+  git(root, 'commit', '--quiet', '-m', 'base')
+  git(root, 'checkout', '--quiet', '-b', 'upstream')
+  writeFileSync(join(root, 'scripts/b.mjs'), `// upstream shift\n${EXPECTED_B}\n`)
+  git(root, 'add', 'scripts/b.mjs')
+  git(root, 'commit', '--quiet', '-m', 'upstream moves b')
+  git(root, 'update-ref', 'refs/remotes/origin/main', 'HEAD')
+  git(root, 'checkout', '--quiet', '-b', 'lane')
+  writeFileSync(join(root, 'scripts/a.mjs'), `// lane shift\n${EXPECTED_A}\n`)
+  git(root, 'add', 'scripts/a.mjs')
+  git(root, 'commit', '--quiet', '-m', 'lane moves a')
+  return { ...fx, root: realpathSync(root) }
+}
+
+function shiftedContractFixture(prefix) {
+  const root = scratchDir(prefix)
+  mkdirSync(join(root, 'scripts'), { recursive: true })
+  writeFileSync(join(root, 'scripts/a.mjs'), `// shifted\n${EXPECTED_A}\n`)
+  return contractSkill(root, { 'scripts/a.mjs:1': EXPECTED_A })
+}
+
 test('skillDocs finds the markdown of a directory that is not a skill', () => {
   // Mutation killed: removing the plain-directory fallback would silently return no docs.
   const plain = plainFixture()
@@ -68,8 +108,8 @@ test('the CLI repairs a plain directory whose pin moved by one line', () => {
   const fx = plainFixture({ source })
   const output = []
   try {
-    assert.equal(repairCli(['--repair', fx.plainDir, '--root', fx.root], output.push.bind(output)), 0)
-    assert.ok(output.includes('repaired crew/sample.mjs:2 -> crew/sample.mjs:3'))
+    assert.equal(repairCli(['--repair-all', fx.plainDir, '--root', fx.root], output.push.bind(output)), 0)
+    assert.deepEqual(output, ['ANCHOR_REPAIR_ROW {"manifest":"plain/anchors.json","pin":"crew/sample.mjs:2","old_line":2,"new_line":3,"base":null}'])
     const manifest = JSON.parse(readFileSync(fx.manifestPath, 'utf8'))
     const doc = readFileSync(fx.doc, 'utf8')
     assert.equal(manifest['crew/sample.mjs:3'], EXPECTED)
@@ -87,7 +127,7 @@ test('a plain directory refuses rot exactly as a skill does', () => {
   const output = []
   const before = bytes(fx)
   try {
-    assert.equal(repairCli(['--repair', fx.plainDir, '--root', fx.root], output.push.bind(output)), 1)
+    assert.equal(repairCli(['--repair-all', fx.plainDir, '--root', fx.root], output.push.bind(output)), 1)
     assert.match(output.join('\n'), /rot, not a shift/)
     assert.equal(bytes(fx), before)
   } finally {
@@ -102,7 +142,7 @@ test('a plain directory refuses ambiguity exactly as a skill does', () => {
   const output = []
   const before = bytes(fx)
   try {
-    assert.equal(repairCli(['--repair', fx.plainDir, '--root', fx.root], output.push.bind(output)), 1)
+    assert.equal(repairCli(['--repair-all', fx.plainDir, '--root', fx.root], output.push.bind(output)), 1)
     assert.match(output.join('\n'), /refuses to guess/)
     assert.equal(bytes(fx), before)
   } finally {
@@ -318,7 +358,7 @@ test('repair moves a drifted anchor to the line the content now occupies', () =>
   const source = ['// header', '// inserted before the declaration', `const ${EXPECTED}`, 'const other = 1', 'export default KEY', '']
   const fx = fixture({ source })
   try {
-    const result = repairAnchorsInPlace({ root: fx.root, skillDir: fx.skillDir, manifestPath: fx.manifestPath })
+    const result = repairAnchorsInPlace({ root: fx.root, skillDir: fx.skillDir, manifestPath: fx.manifestPath, repairAll: true })
     const manifest = JSON.parse(readFileSync(fx.manifestPath, 'utf8'))
     const doc = readFileSync(fx.doc, 'utf8')
     assert.equal(result.repairs.length, 1)
@@ -339,7 +379,7 @@ test('repair refuses content that occurs more than once', () => {
   const fx = fixture({ source, cite: 'crew/sample.mjs:3', manifest: { 'crew/sample.mjs:3': 'const duplicated-sentinel = 1' } })
   const before = bytes(fx)
   try {
-    const result = repairAnchorsInPlace({ root: fx.root, skillDir: fx.skillDir, manifestPath: fx.manifestPath })
+    const result = repairAnchorsInPlace({ root: fx.root, skillDir: fx.skillDir, manifestPath: fx.manifestPath, repairAll: true })
     assert.match(result.refusals.join('\n'), /refuses to guess/)
     assert.deepEqual(result.repairs, [])
     assert.equal(bytes(fx), before)
@@ -353,7 +393,7 @@ test('repair refuses content that appears nowhere', () => {
   const fx = fixture({ manifest: { 'crew/sample.mjs:2': 'a-sentinel-that-is-absent-entirely' } })
   const before = bytes(fx)
   try {
-    const result = repairAnchorsInPlace({ root: fx.root, skillDir: fx.skillDir, manifestPath: fx.manifestPath })
+    const result = repairAnchorsInPlace({ root: fx.root, skillDir: fx.skillDir, manifestPath: fx.manifestPath, repairAll: true })
     assert.match(result.refusals.join('\n'), /rot, not a shift/)
     assert.deepEqual(result.repairs, [])
     assert.equal(bytes(fx), before)
@@ -366,7 +406,7 @@ test('repair refuses a target it cannot read', () => {
   // Mutation killed: dropping the unreadable-target refusal reports a missing target as clean.
   const fx = fixture({ cite: 'crew/missing.mjs:2', manifest: { 'crew/missing.mjs:2': EXPECTED } })
   try {
-    const result = repairAnchorsInPlace({ root: fx.root, skillDir: fx.skillDir, manifestPath: fx.manifestPath })
+    const result = repairAnchorsInPlace({ root: fx.root, skillDir: fx.skillDir, manifestPath: fx.manifestPath, repairAll: true })
     assert.match(result.refusals.join('\n'), /target file is missing/)
     assert.deepEqual(result.repairs, [])
   } finally {
@@ -379,7 +419,7 @@ test('repair is a no-op when nothing moved', () => {
   const fx = fixture()
   const before = bytes(fx)
   try {
-    const result = repairAnchorsInPlace({ root: fx.root, skillDir: fx.skillDir, manifestPath: fx.manifestPath })
+    const result = repairAnchorsInPlace({ root: fx.root, skillDir: fx.skillDir, manifestPath: fx.manifestPath, repairAll: true })
     assert.deepEqual(result.repairs, [])
     assert.deepEqual(result.refusals, [])
     assert.equal(bytes(fx), before)
@@ -393,10 +433,10 @@ test('repair is idempotent when it runs twice', () => {
   const source = ['// header', '// inserted before the declaration', `const ${EXPECTED}`, 'const other = 1', 'export default KEY', '']
   const fx = fixture({ source })
   try {
-    const first = repairAnchorsInPlace({ root: fx.root, skillDir: fx.skillDir, manifestPath: fx.manifestPath })
+    const first = repairAnchorsInPlace({ root: fx.root, skillDir: fx.skillDir, manifestPath: fx.manifestPath, repairAll: true })
     assert.equal(first.repairs.length, 1)
     const afterFirst = bytes(fx)
-    const second = repairAnchorsInPlace({ root: fx.root, skillDir: fx.skillDir, manifestPath: fx.manifestPath })
+    const second = repairAnchorsInPlace({ root: fx.root, skillDir: fx.skillDir, manifestPath: fx.manifestPath, repairAll: true })
     assert.deepEqual(second.repairs, [])
     assert.deepEqual(second.refusals, [])
     assert.equal(bytes(fx), afterFirst)
@@ -411,11 +451,11 @@ test('the CLI repairs a skill directory and exits non-zero on refusal', () => {
   const fx = fixture({ source })
   const output = []
   try {
-    assert.equal(repairCli(['--repair', fx.skillDir, '--root', fx.root], output.push.bind(output)), 0)
+    assert.equal(repairCli(['--repair-all', fx.skillDir, '--root', fx.root], output.push.bind(output)), 0)
     writeFileSync(join(fx.root, 'crew/sample.mjs'), ['const duplicated-sentinel = 1', 'const duplicated-sentinel = 1', '// tail', ''].join('\n'))
     writeFileSync(fx.doc, '# sample\n\nExhibit: `crew/sample.mjs:3`.\n')
     writeFileSync(fx.manifestPath, JSON.stringify({ 'crew/sample.mjs:3': 'const duplicated-sentinel = 1' }, null, 2))
-    assert.equal(repairCli(['--repair', fx.skillDir, '--root', fx.root], output.push.bind(output)), 1)
+    assert.equal(repairCli(['--repair-all', fx.skillDir, '--root', fx.root], output.push.bind(output)), 1)
     assert.equal(repairCli([], output.push.bind(output)), 2)
     assert.equal(repairCli(['--repair', fx.skillDir, '--root'], output.push.bind(output)), 2)
   } finally {
@@ -462,7 +502,7 @@ test('repair vacates a line before another anchor claims it', () => {
     'crew/sample.mjs:5': "const BETA = 'anchor-beta-value'",
   }, null, 2))
   try {
-    const result = repairAnchorsInPlace({ root, skillDir, manifestPath })
+    const result = repairAnchorsInPlace({ root, skillDir, manifestPath, repairAll: true })
     assert.deepEqual(result.refusals, [])
     assert.equal(result.repairs.length, 2)
     const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
@@ -548,6 +588,7 @@ test('an unmeasurable lane fence is empty and warns rather than throwing', () =>
     const measured = laneFence({ root: fx.root })
     assert.deepEqual(measured.paths, [])
     assert.equal(measured.measured, false)
+    assert.equal(measured.base, 'origin/main')
     assert.ok(measured.reason)
     assert.equal(assertAnchorsPinned({ root: fx.root, skillDir: fx.skillDir, manifestPath: fx.manifestPath, minAnchors: 1, log: (line) => captured.push(line) }), 1)
     assert.ok(captured.some((line) => line.includes('anchor fence unmeasured')))
@@ -572,11 +613,12 @@ test('laneFence excludes main-only paths after a lane forks', () => {
   writeFileSync(join(root, 'crew/sample.mjs'), "// main advanced\nconst MAIN_ONLY = 'base'\n")
   git(root, 'add', 'crew/sample.mjs')
   git(root, 'commit', '--quiet', '-m', 'main only')
+  git(root, 'update-ref', 'refs/remotes/origin/main', 'HEAD')
   git(root, 'checkout', '--quiet', 'lane')
   writeFileSync(join(root, 'skills/lane-note.md'), 'this lane owns this file\n')
   const repoRoot = realpathSync(root)
   const result = laneFence({ root: repoRoot })
-  assert.deepEqual(result, { paths: ['skills/lane-note.md'], measured: true, reason: null })
+  assert.deepEqual(result, { paths: ['skills/lane-note.md'], measured: true, reason: null, base: 'origin/main' })
   assert.equal(result.paths.includes('crew/sample.mjs'), false)
 })
 
@@ -595,6 +637,7 @@ test('repair CLI leaves a committed out-of-fence shift untouched', () => {
   writeFileSync(manifestPath, JSON.stringify({ 'crew/sample.mjs:1': EXPECTED }, null, 2))
   git(root, 'add', '.')
   git(root, 'commit', '--quiet', '-m', 'stale external pin')
+  git(root, 'update-ref', 'refs/remotes/origin/main', 'HEAD')
   git(root, 'checkout', '--quiet', '-b', 'lane')
   writeFileSync(join(root, 'skills/lane-note.md'), 'this lane owns this file\n')
   const repoRoot = realpathSync(root)
@@ -630,15 +673,16 @@ test('repair-all CLI repairs a committed shift on clean main', () => {
   writeFileSync(manifestPath, JSON.stringify({ 'crew/sample.mjs:1': EXPECTED }, null, 2))
   git(root, 'add', '.')
   git(root, 'commit', '--quiet', '-m', 'committed shift')
+  git(root, 'update-ref', 'refs/remotes/origin/main', 'HEAD')
   const repoRoot = realpathSync(root)
-  assert.deepEqual(laneFence({ root: repoRoot }), { paths: [], measured: true, reason: null })
+  assert.deepEqual(laneFence({ root: repoRoot }), { paths: [], measured: true, reason: null, base: 'origin/main' })
   const warnings = []
   assert.equal(assertAnchorsPinned({ root: repoRoot, skillDir, manifestPath, minAnchors: 1, log: warnings.push.bind(warnings) }), 1)
   assert.equal(warnings.length, 1)
   assert.match(warnings[0], /--repair-all/)
   const output = []
   assert.equal(repairCli(['--repair-all', skillDir, '--root', repoRoot], output.push.bind(output)), 0)
-  assert.deepEqual(output, ['repaired crew/sample.mjs:1 -> crew/sample.mjs:2'])
+  assert.deepEqual(output, ['ANCHOR_REPAIR_ROW {"manifest":"skills/sample/anchors.json","pin":"crew/sample.mjs:1","old_line":1,"new_line":2,"base":null}'])
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
   assert.equal(manifest['crew/sample.mjs:2'], EXPECTED)
   assert.equal(Object.hasOwn(manifest, 'crew/sample.mjs:1'), false)
@@ -748,7 +792,7 @@ test('a range whose endpoints are both manifest keys has both repaired', () => {
   })
   try {
     writeFileSync(join(fx.root, 'crew/sample.mjs'), ['// header', '// inserted above', `const ${RANGE_EXPECTED}`, `const ${RANGE_NEXT}`, 'export default KEY', ''].join('\n'))
-    const result = repairAnchorsInPlace({ root: fx.root, skillDir: fx.skillDir, manifestPath: fx.manifestPath })
+    const result = repairAnchorsInPlace({ root: fx.root, skillDir: fx.skillDir, manifestPath: fx.manifestPath, repairAll: true })
     const manifest = JSON.parse(readFileSync(fx.manifestPath, 'utf8'))
     const doc = readFileSync(fx.doc, 'utf8')
     assert.deepEqual(result.refusals, [])
@@ -772,7 +816,7 @@ test('a manifest-pinned range end with an unpinned start is red in BOTH passes',
   })
   try {
     const checked = checkAnchors({ root: fx.root, docs: [fx.doc], manifest: fx.manifest })
-    const repaired = repairAnchorsInPlace({ root: fx.root, skillDir: fx.skillDir, manifestPath: fx.manifestPath })
+    const repaired = repairAnchorsInPlace({ root: fx.root, skillDir: fx.skillDir, manifestPath: fx.manifestPath, repairAll: true })
     assert.ok(checked.failures.includes(`${anchorKey(2)}: manifest has no entry`))
     assert.ok(repaired.refusals.includes(`${anchorKey(2)}: manifest has no entry`))
     assert.ok(repaired.refusals.includes(`${anchorKey(3)}: manifest entry is orphaned (no citation)`))
@@ -828,7 +872,7 @@ test('a rotted endpoint withholds its whole range', () => {
   const before = bytes(fx)
   try {
     writeFileSync(join(fx.root, 'crew/sample.mjs'), ['// header', '// inserted above', '// second inserted', `const ${RANGE_EXPECTED}`].join('\n'))
-    const result = repairAnchorsInPlace({ root: fx.root, skillDir: fx.skillDir, manifestPath: fx.manifestPath })
+    const result = repairAnchorsInPlace({ root: fx.root, skillDir: fx.skillDir, manifestPath: fx.manifestPath, repairAll: true })
     assert.deepEqual(result.repairs, [])
     assert.equal(bytes(fx), before)
     assert.ok(result.refusals.some((refusal) => refusal.includes(anchorKey(3)) && refusal.includes('rot, not a shift')))
@@ -848,7 +892,7 @@ test('a collision-pending endpoint withholds its whole range', () => {
   const before = bytes(fx)
   try {
     writeFileSync(join(fx.root, 'crew/sample.mjs'), ['// header', 'const spacer = 1', `const ${RANGE_THIRD}`, `const ${RANGE_EXPECTED}`, `const ${RANGE_NEXT}`, ''].join('\n'))
-    const result = repairAnchorsInPlace({ root: fx.root, skillDir: fx.skillDir, manifestPath: fx.manifestPath })
+    const result = repairAnchorsInPlace({ root: fx.root, skillDir: fx.skillDir, manifestPath: fx.manifestPath, repairAll: true })
     assert.deepEqual(result.repairs, [])
     assert.equal(bytes(fx), before)
     assert.ok(result.refusals.some((refusal) => refusal.includes('already declared by another anchor')))
@@ -881,7 +925,7 @@ test('a range whose end is in no manifest refuses by name and freezes the start 
   try {
     writeFileSync(join(fx.root, 'crew/sample.mjs'), ['// header', '// inserted above', `const ${RANGE_EXPECTED}`, 'export default KEY'].join('\n'))
     const output = []
-    const code = repairCli(['--repair', fx.skillDir, '--root', fx.root], output.push.bind(output))
+    const code = repairCli(['--repair-all', fx.skillDir, '--root', fx.root], output.push.bind(output))
     assert.equal(code, 1)
     assert.equal(readFileSync(fx.manifestPath, 'utf8'), before.manifest)
     assert.equal(readFileSync(fx.doc, 'utf8'), before.skill)
@@ -910,7 +954,7 @@ test('the repair pass refuses an inverted range', () => {
   const fx = fixture({ source: ['// header', `const ${RANGE_EXPECTED}`, 'export default KEY'], cite: invertedCitation(), manifest: {} })
   const output = []
   try {
-    assert.equal(repairCli(['--repair', fx.skillDir, '--root', fx.root], output.push.bind(output)), 1)
+    assert.equal(repairCli(['--repair-all', fx.skillDir, '--root', fx.root], output.push.bind(output)), 1)
     assert.ok(output.some((line) => line.includes(invertedCitation()) && line.includes(INVERTED_MARK)))
   } finally {
     dispose(fx)
@@ -923,7 +967,7 @@ test('a blocked range stays silent while nothing has drifted', () => {
   const before = bytes(fx)
   const output = []
   try {
-    assert.equal(repairCli(['--repair', fx.skillDir, '--root', fx.root], output.push.bind(output)), 0)
+    assert.equal(repairCli(['--repair-all', fx.skillDir, '--root', fx.root], output.push.bind(output)), 0)
     assert.deepEqual(output, [])
     assert.equal(bytes(fx), before)
   } finally {
@@ -941,7 +985,7 @@ test('a repaired pair that inverts is written truthfully and reported', () => {
   try {
     writeFileSync(join(fx.root, 'crew/sample.mjs'), ['// header', `const ${RANGE_NEXT}`, 'const spacer = 1', `const ${RANGE_EXPECTED}`, 'export default KEY', ''].join('\n'))
     const output = []
-    assert.equal(repairCli(['--repair', fx.skillDir, '--root', fx.root], output.push.bind(output)), 1)
+    assert.equal(repairCli(['--repair-all', fx.skillDir, '--root', fx.root], output.push.bind(output)), 1)
     assert.ok(output.some((line) => line.includes(rangeCitation(4, 2)) && line.includes(INVERTED_MARK)))
     assert.equal(readFileSync(fx.doc, 'utf8').includes(rangeCitation(4, 2)), true)
     const manifest = JSON.parse(readFileSync(fx.manifestPath, 'utf8'))
@@ -1047,7 +1091,7 @@ test('a manifest key cited only by name is not orphaned in either pass', () => {
   const fx = fixture({ named: { key, expected: EXPECTED } })
   try {
     assert.deepEqual(checkAnchors({ root: fx.root, docs: [fx.doc], manifest: fx.manifest }), { anchors: 0, failures: [], shifted: [], named: 1 })
-    const repaired = repairAnchorsInPlace({ root: fx.root, skillDir: fx.skillDir, manifestPath: fx.manifestPath })
+    const repaired = repairAnchorsInPlace({ root: fx.root, skillDir: fx.skillDir, manifestPath: fx.manifestPath, repairAll: true })
     assert.deepEqual(repaired.repairs, [])
     assert.deepEqual(repaired.refusals, [])
   } finally {
@@ -1103,7 +1147,7 @@ test('a mixed manifest checks clean and repairs only its line key', () => {
   })
   try {
     writeFileSync(join(fx.root, 'crew/sample.mjs'), ['// header', '// inserted above', `const ${EXPECTED}`, `const NAMED = '${namedExpected}'`, 'export default KEY', ''].join('\n'))
-    const result = repairAnchorsInPlace({ root: fx.root, skillDir: fx.skillDir, manifestPath: fx.manifestPath })
+    const result = repairAnchorsInPlace({ root: fx.root, skillDir: fx.skillDir, manifestPath: fx.manifestPath, repairAll: true })
     assert.equal(result.repairs.length, 1)
     assert.deepEqual(result.refusals, [])
     const manifest = JSON.parse(readFileSync(fx.manifestPath, 'utf8'))
@@ -1176,5 +1220,117 @@ test('repair-all refuses an ambiguous named pin without writing', () => {
     assert.equal(bytes(fx), before)
   } finally {
     dispose(fx)
+  }
+})
+
+test('A1', () => {
+  const fx = authoritativeFixture('b619-anchor-test-a1-')
+  try {
+    const output = []
+    assert.equal(repairCli(['--repair', fx.skillDir, '--root', fx.root], output.push.bind(output)), 0)
+    const next = JSON.parse(readFileSync(fx.manifestPath, 'utf8'))
+    assert.equal(next['scripts/a.mjs:2'], EXPECTED_A)
+    assert.equal(next['scripts/b.mjs:1'], EXPECTED_B)
+    assert.equal(Object.hasOwn(next, 'scripts/b.mjs:2'), false)
+    assert.match(readFileSync(fx.doc, 'utf8'), /scripts\/b\.mjs:1/)
+  } finally {
+    rmSync(fx.root, { recursive: true, force: true })
+  }
+})
+
+test('B1', () => {
+  const fx = shiftedContractFixture('b619-anchor-test-b1-')
+  try {
+    const repoRoot = realpathSync(fx.root)
+    git(repoRoot, 'init', '--quiet')
+    git(repoRoot, 'symbolic-ref', 'HEAD', 'refs/heads/main')
+    git(repoRoot, 'add', '.')
+    git(repoRoot, 'commit', '--quiet', '-m', 'stale pin without remote base')
+    const before = bytes(fx)
+    const output = []
+    assert.equal(repairCli(['--repair', fx.skillDir, '--root', repoRoot], output.push.bind(output)), 1)
+    assert.deepEqual(output, ['refused anchor repair fence unmeasured (no merge base with origin/main)'])
+    assert.equal(bytes(fx), before)
+  } finally {
+    rmSync(fx.root, { recursive: true, force: true })
+  }
+})
+
+test('C1', () => {
+  const fx = authoritativeFixture('b619-anchor-test-c1-')
+  try {
+    const output = []
+    assert.equal(repairCli(['--repair', fx.skillDir, '--root', fx.root], output.push.bind(output)), 0)
+    const row = output.find((line) => line.startsWith('ANCHOR_REPAIR_ROW '))
+    assert.ok(row, output.join('\n'))
+    assert.equal(JSON.parse(row.slice('ANCHOR_REPAIR_ROW '.length)).base, 'origin/main')
+  } finally {
+    rmSync(fx.root, { recursive: true, force: true })
+  }
+})
+
+test('D1', () => {
+  const fx = shiftedContractFixture('b619-anchor-test-d1-')
+  try {
+    const output = []
+    assert.equal(repairCli(['--repair-all', fx.skillDir, '--root', fx.root], output.push.bind(output)), 0)
+    const next = JSON.parse(readFileSync(fx.manifestPath, 'utf8'))
+    assert.equal(next['scripts/a.mjs:2'], EXPECTED_A)
+    assert.equal(output[0].endsWith('"base":null}'), true)
+  } finally {
+    rmSync(fx.root, { recursive: true, force: true })
+  }
+})
+
+test('E1', () => {
+  const fx = authoritativeFixture('b619-anchor-test-e1-')
+  try {
+    const output = []
+    assert.equal(repairCli(['--repair', fx.skillDir, '--root', fx.root], output.push.bind(output)), 0)
+    const row = output.find((line) => line.startsWith('ANCHOR_REPAIR_ROW '))
+    assert.ok(row, output.join('\n'))
+    assert.deepEqual(JSON.parse(row.slice('ANCHOR_REPAIR_ROW '.length)), {
+      manifest: 'skills/sample/anchors.json',
+      pin: 'scripts/a.mjs:1',
+      old_line: 1,
+      new_line: 2,
+      base: 'origin/main',
+    })
+  } finally {
+    rmSync(fx.root, { recursive: true, force: true })
+  }
+})
+
+test('F1.rot', () => {
+  const root = scratchDir('b619-anchor-test-f1-rot-')
+  mkdirSync(join(root, 'scripts'), { recursive: true })
+  writeFileSync(join(root, 'scripts/a.mjs'), "const OTHER = 'not-the-anchor'\n")
+  const fx = contractSkill(root, { 'scripts/a.mjs:1': EXPECTED_A })
+  const before = bytes(fx)
+  try {
+    const output = []
+    assert.equal(repairCli(['--repair-all', fx.skillDir, '--root', fx.root], output.push.bind(output)), 1)
+    assert.equal(output.length, 1)
+    assert.match(output[0], /rot, not a shift/)
+    assert.equal(bytes(fx), before)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('F1.ambiguity', () => {
+  const root = scratchDir('b619-anchor-test-f1-ambiguity-')
+  mkdirSync(join(root, 'scripts'), { recursive: true })
+  writeFileSync(join(root, 'scripts/a.mjs'), `${EXPECTED_A}\n${EXPECTED_A}\n`)
+  const fx = contractSkill(root, { 'scripts/a.mjs:3': EXPECTED_A }, ['scripts/a.mjs:3'])
+  const before = bytes(fx)
+  try {
+    const output = []
+    assert.equal(repairCli(['--repair-all', fx.skillDir, '--root', fx.root], output.push.bind(output)), 1)
+    assert.equal(output.length, 1)
+    assert.match(output[0], /refuses to guess/)
+    assert.equal(bytes(fx), before)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
   }
 })

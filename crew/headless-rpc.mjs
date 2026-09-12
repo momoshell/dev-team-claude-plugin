@@ -455,16 +455,39 @@ function parsedRpcFrames(text) {
 
 const PRE_FIRST_TURN_READ_TOOLS = new Set(['read', 'grep', 'ls', 'find', 'glob', 'notebookread'])
 
+export function briefReadCandidates(briefFile, briefText) {
+  const candidates = new Set()
+  if (typeof briefFile === 'string' && briefFile.length > 0) candidates.add(briefFile)
+  if (typeof briefText !== 'string') return candidates
+  for (const line of briefText.split(/\r?\n/)) {
+    const match = /^Planner source brief: (.+)\.$/.exec(line)
+    if (match && match[1].startsWith('/')) candidates.add(match[1])
+  }
+  return candidates
+}
+
+function candidatePaths(value) {
+  if (typeof value === 'string') return value.length > 0 ? [value] : []
+  if (Array.isArray(value)) return value
+  if (value instanceof Set) return [...value]
+  return []
+}
+
 export function isBriefReadToolCall(frame, briefFile) {
-  if (!frame || frame.type !== 'tool_execution_start' || typeof briefFile !== 'string' || briefFile.length === 0) return false
+  if (!frame || frame.type !== 'tool_execution_start') return false
+  const candidates = candidatePaths(briefFile).filter((candidate) => typeof candidate === 'string' && candidate.length > 0)
+  if (candidates.length === 0) return false
   const toolName = typeof frame.toolName === 'string' ? frame.toolName.toLowerCase() : ''
   let observed
   try { observed = censusFileOperands(toolName, frame.args) } catch { return false }
   const paths = Array.isArray(observed?.paths) ? observed.paths : []
   const readClass = PRE_FIRST_TURN_READ_TOOLS.has(toolName) || (toolName === 'bash' && paths.length > 0)
   if (!readClass) return false
-  const basename = briefFile.split('/').pop()
-  return paths.some((path) => path === briefFile || path === basename)
+  const names = new Set(candidates.flatMap((candidate) => {
+    const basename = candidate.split('/').pop()
+    return basename ? [candidate, basename] : [candidate]
+  }))
+  return paths.some((path) => names.has(path))
 }
 
 function positiveDuration(start, end) {
@@ -474,7 +497,7 @@ function positiveDuration(start, end) {
 }
 
 function newPreBoundaryTurn() {
-  return { saw_brief_read: false, saw_non_brief: false, open_brief_reads: new Map(), brief_read_unmeasured: false }
+  return { saw_brief_read: false, saw_non_brief: false, brief_turn_counted: false }
 }
 
 function observePreFirstTurn(turn, frame, at) {
@@ -486,31 +509,32 @@ function observePreFirstTurn(turn, frame, at) {
   }
   const current = timing.current_pre_boundary_turn || (timing.current_pre_boundary_turn = newPreBoundaryTurn())
   if (frame.type === 'tool_execution_start') {
-    if (isBriefReadToolCall(frame, timing.brief_file)) {
+    if (isBriefReadToolCall(frame, timing.brief_read_candidates || timing.brief_file)) {
       current.saw_brief_read = true
-      if (frame.toolCallId != null && Number.isFinite(at)) current.open_brief_reads.set(frame.toolCallId, at)
-      else current.brief_read_unmeasured = true
+      timing.brief_read_seen = true
       return
     }
     current.saw_non_brief = true
+    if (current.saw_brief_read && !current.brief_turn_counted) {
+      timing.brief_read_turns += 1
+      current.brief_turn_counted = true
+    }
     timing.first_non_brief_tool_seen = true
     timing.first_non_brief_tool_at = Number.isFinite(at) ? at : null
-    return
-  }
-  if (frame.type === 'tool_execution_end') {
-    const start = current.open_brief_reads.get(frame.toolCallId)
-    if (!Number.isFinite(start)) return
-    current.open_brief_reads.delete(frame.toolCallId)
-    const duration = positiveDuration(start, at)
-    if (duration === null) current.brief_read_unmeasured = true
-    else {
-      timing.brief_read_ms = (Number.isFinite(timing.brief_read_ms) ? timing.brief_read_ms : 0) + duration
-      timing.brief_read_measured = true
+    if (timing.brief_read_seen === true) {
+      const duration = positiveDuration(timing.prompt_delivery_sent_at, timing.first_non_brief_tool_at)
+      if (duration !== null) {
+        timing.brief_read_ms = duration
+        timing.brief_read_measured = true
+      }
     }
     return
   }
   if (frame.type === 'turn_end') {
-    if (current.saw_brief_read && !current.saw_non_brief) timing.brief_read_turns += 1
+    if (current.saw_brief_read && !current.saw_non_brief && !current.brief_turn_counted) {
+      timing.brief_read_turns += 1
+      current.brief_turn_counted = true
+    }
     timing.current_pre_boundary_turn = newPreBoundaryTurn()
   }
 }
@@ -528,6 +552,7 @@ function absentPreFirstTurn(reason) {
     brief_read_absent_reason: reason,
     envelope_poll_ms: null,
     envelope_poll_absent_reason: reason,
+    pre_first_turn_missing_components: null,
     pre_first_turn_known_sum_ms: null,
     pre_first_turn_residual_ms: null,
     pre_first_turn_tolerance_ms: null,
@@ -561,20 +586,26 @@ export function finalisePreFirstTurn(turn) {
 
   const completedBriefTurns = Number(timing.brief_read_turns ?? timing.briefReadTurns)
   const briefTurns = Number.isSafeInteger(completedBriefTurns) && completedBriefTurns > 0 ? completedBriefTurns : null
+  const candidateBriefMs = timing.brief_read_ms ?? timing.briefReadMs
+  const briefReadSeen = timing.brief_read_seen === true
+    || briefTurns !== null
+    || (Number.isFinite(candidateBriefMs) && candidateBriefMs > 0)
   const briefTurnsAbsentReason = briefTurns === null
     ? (firstSeen ? PRE_FIRST_TURN_ABSENT_REASONS.no_brief_tool_turns : spanAbsentReason)
     : null
-  const candidateBriefMs = timing.brief_read_ms ?? timing.briefReadMs
   const briefMs = briefTurns !== null && Number.isFinite(candidateBriefMs) && candidateBriefMs > 0 ? candidateBriefMs : null
   const briefAbsentReason = briefMs === null
-    ? (briefTurns === null ? briefTurnsAbsentReason : PRE_FIRST_TURN_ABSENT_REASONS.clock_resolution)
+    ? (briefReadSeen ? PRE_FIRST_TURN_ABSENT_REASONS.clock_resolution : briefTurnsAbsentReason)
     : null
   const envelopePollMs = null
   const envelopePollAbsentReason = PRE_FIRST_TURN_ABSENT_REASONS.envelope_write_time_unobservable
+  const missingComponents = []
+  if (spanMs === null && spanAbsentReason === PRE_FIRST_TURN_ABSENT_REASONS.no_first_non_brief_tool) missingComponents.push('pre_first_turn_span_ms')
+  if (briefMs === null && briefAbsentReason !== PRE_FIRST_TURN_ABSENT_REASONS.clock_resolution) missingComponents.push('brief_read_ms')
   const measured = [bootMs, promptMs, briefMs].filter((value) => Number.isFinite(value) && value > 0)
   const knownSumMs = measured.reduce((sum, value) => sum + value, 0)
   const residualMs = spanMs === null ? null : spanMs - knownSumMs
-  return {
+  const result = {
     pre_first_turn_span_ms: spanMs,
     seat_boot_ms: bootMs,
     seat_boot_absent_reason: bootAbsentReason,
@@ -586,11 +617,14 @@ export function finalisePreFirstTurn(turn) {
     brief_read_absent_reason: briefAbsentReason,
     envelope_poll_ms: envelopePollMs,
     envelope_poll_absent_reason: envelopePollAbsentReason,
+    pre_first_turn_missing_components: missingComponents,
     pre_first_turn_known_sum_ms: spanMs === null ? null : knownSumMs,
     pre_first_turn_residual_ms: residualMs,
     pre_first_turn_tolerance_ms: PRE_FIRST_TURN_TOLERANCE_MS,
-    pre_first_turn_reconciled: residualMs === null ? null : Math.abs(residualMs) <= PRE_FIRST_TURN_TOLERANCE_MS,
+    pre_first_turn_reconciled: missingComponents.length > 0 ? null : Math.abs(residualMs) <= PRE_FIRST_TURN_TOLERANCE_MS,
   }
+  if (residualMs === null) result.pre_first_turn_reconciled = null
+  return result
 }
 
 function rpcCensusFrames(frames) {
@@ -838,6 +872,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
           pre_first_turn_residual_ms: timing.pre_first_turn_residual_ms,
           pre_first_turn_tolerance_ms: timing.pre_first_turn_tolerance_ms,
           pre_first_turn_reconciled: timing.pre_first_turn_reconciled,
+          pre_first_turn_missing_components: timing.pre_first_turn_missing_components,
         },
       })
     })
@@ -1289,8 +1324,9 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
     const previousAssignmentId = session(role).lastAssignmentId ?? null
     const promptDeliveryStartedAt = now()
     const delivery = assignmentDelivery({ briefFile, readFileSync: read })
+    const briefCandidates = briefReadCandidates(briefFile, delivery.briefText)
     const prompt = assignmentPrompt({ id, role, briefFile, returnPath, taskDir: taskDir || paths.taskDir, ...delivery }) + (note ? `\n${note}` : '')
-    const turn = { id, runId, role, returnPath, prompt, retries: 0, offset, previousAssignmentId, priorUnsettled: !priorSettled, priorTurnId, usage: null, acknowledged: false, deliveryFailure: null, deliveryFailureLogged: false, state: { sawJson: false, settled: false, ended: false }, providerBoundary: { calls: 0, turns: 0 }, parked: { frames: 0 }, observed: { frames: 0, turns: 0, lastType: null, lastAt: null, lastTool: null, lastToolAt: null, census: newCensus() }, timing: { assignment_started_at: assignmentStartedAt, seat_reused: seatReused, seat_boot_started_at: seatReused ? null : assignmentStartedAt, seat_boot_ready_at: seatBootReadyAt, prompt_delivery_started_at: promptDeliveryStartedAt, prompt_delivery_sent_at: null, brief_file: briefFile, current_pre_boundary_turn: newPreBoundaryTurn(), brief_read_turns: 0, brief_read_ms: 0, brief_read_measured: false, first_non_brief_tool_seen: false, first_non_brief_tool_at: null }, censusJournalled: false, sentAt: now(), policy: policy ?? null, seenToolCalls: new Set(), policyReported: false, pendingSuiteRefusal: null, enforced: false, ceilingDecision: null }
+    const turn = { id, runId, role, returnPath, prompt, retries: 0, offset, previousAssignmentId, priorUnsettled: !priorSettled, priorTurnId, usage: null, acknowledged: false, deliveryFailure: null, deliveryFailureLogged: false, state: { sawJson: false, settled: false, ended: false }, providerBoundary: { calls: 0, turns: 0 }, parked: { frames: 0 }, observed: { frames: 0, turns: 0, lastType: null, lastAt: null, lastTool: null, lastToolAt: null, census: newCensus() }, timing: { assignment_started_at: assignmentStartedAt, seat_reused: seatReused, seat_boot_started_at: seatReused ? null : assignmentStartedAt, seat_boot_ready_at: seatBootReadyAt, prompt_delivery_started_at: promptDeliveryStartedAt, prompt_delivery_sent_at: null, brief_file: briefFile, brief_read_candidates: briefCandidates, current_pre_boundary_turn: newPreBoundaryTurn(), brief_read_seen: false, brief_read_turns: 0, brief_read_ms: null, brief_read_measured: false, first_non_brief_tool_seen: false, first_non_brief_tool_at: null }, censusJournalled: false, sentAt: now(), policy: policy ?? null, seenToolCalls: new Set(), policyReported: false, pendingSuiteRefusal: null, enforced: false, ceilingDecision: null }
     if (turn.priorUnsettled && seat !== existing) {
       turn.priorUnsettled = false
       turn.priorTurnId = null

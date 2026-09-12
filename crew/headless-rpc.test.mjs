@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { EVIDENCE_KINDS, LIVENESS, reclaimStore } from './reclaim.mjs'
 import {
-  carriesOwnSpend, closedReason, emptyTurnEnvelope, finaliseCensus, finalisePreFirstTurn, foldCensusFrame, foldRpcUsage, headlessRpcIo, isBriefReadToolCall, isBusyRefusal, newCensus, PRE_FIRST_TURN_ABSENT_REASONS, PRE_FIRST_TURN_TOLERANCE_MS, PROMPT_REFUSAL_RETRIES, RPC_PROMPT_DELIVERY_WINDOW_MS,
+  briefReadCandidates, carriesOwnSpend, closedReason, emptyTurnEnvelope, finaliseCensus, finalisePreFirstTurn, foldCensusFrame, foldRpcUsage, headlessRpcIo, isBriefReadToolCall, isBusyRefusal, newCensus, PRE_FIRST_TURN_ABSENT_REASONS, PRE_FIRST_TURN_TOLERANCE_MS, PROMPT_REFUSAL_RETRIES, RPC_PROMPT_DELIVERY_WINDOW_MS,
   rpcCensus, rpcCommand, rpcDeliveryCorpusReport, rpcStreamCensus, seatCommandPath, SETTLE_GATE_POLLS, splitFrames, steerFrame, teardownOutcome,
 } from './headless-rpc.mjs'
 import { seatCommand as piSeatCommand } from './adapters/adapter-pi.mjs'
@@ -75,6 +75,24 @@ function settle(f, run, frames = [{ type: 'agent_settled' }]) {
 
 function recordedRpcBoundaryCapture() {
   return readFileSync(new URL('../tasks/headless-worker/captures/pi-a1-json-baseline.jsonl', import.meta.url), 'utf8')
+}
+
+const RECORDED_B634_PLANNER_STREAM = '/Users/momoshell/.crew/dt-b634-refusalenum/b634-refusalenum/task/headless-rpc/planner/stream.jsonl'
+
+function recordedB634PlannerStream() {
+  if (!existsSync(RECORDED_B634_PLANNER_STREAM)) return null
+  return readFileSync(RECORDED_B634_PLANNER_STREAM, 'utf8')
+}
+
+function plannerWrapperText(sourceBrief, originalBrief = sourceBrief) {
+  return [
+    '# Planner assignment wrapper', '',
+    `Read the current planner brief at ${sourceBrief}.`,
+    `Planner source brief: ${sourceBrief}.`,
+    `Original task brief: ${originalBrief}.`,
+    '',
+    'details.needs_adversary must be a boolean: true requests the adversary plan-check round; false does not.',
+  ].join('\n')
 }
 
 // Recorded at ~/.crew/dt-b535-workingset/b535-workingset/task/headless-rpc/builder/stream.jsonl line 4596, b535 builder stream, observed at 2c3a8ff.
@@ -226,8 +244,8 @@ const PRE_FIRST_TIMING_FIELDS = [
   'pre_first_turn_span_ms', 'seat_boot_ms', 'seat_boot_absent_reason',
   'prompt_delivery_ms', 'prompt_delivery_absent_reason', 'brief_read_turns',
   'brief_read_turns_absent_reason', 'brief_read_ms', 'brief_read_absent_reason',
-  'envelope_poll_ms', 'envelope_poll_absent_reason', 'pre_first_turn_known_sum_ms',
-  'pre_first_turn_residual_ms', 'pre_first_turn_tolerance_ms', 'pre_first_turn_reconciled',
+  'envelope_poll_ms', 'envelope_poll_absent_reason', 'pre_first_turn_missing_components',
+  'pre_first_turn_known_sum_ms', 'pre_first_turn_residual_ms', 'pre_first_turn_tolerance_ms', 'pre_first_turn_reconciled',
 ]
 
 function withoutPreFirstTiming(row) {
@@ -2113,7 +2131,74 @@ test('A1 pre-first-turn census carries named component schema', () => {
   } finally { f.cleanup() }
 })
 
-test('RV1-1 cold RPC assignment measures wired boot and prompt timing', () => {
+test('A1 recorded planner stream resolves wrapper source brief and measures its pre-boundary interval', (t) => {
+  const capture = recordedB634PlannerStream()
+  if (capture === null) {
+    t.skip(`host-capture-unavailable: ${RECORDED_B634_PLANNER_STREAM}`)
+    return
+  }
+  const sourceRead = capture.split('\n').flatMap((line) => {
+    try { return [JSON.parse(line)] } catch { return [] }
+  }).find((frame) => frame?.type === 'tool_execution_start' && frame.toolName === 'read' && typeof frame.args?.path === 'string')
+  assert.ok(sourceRead, 'recorded planner source read must be present')
+  const sourceBrief = sourceRead.args.path
+  let clock = 0
+  const rows = []
+  const f = fixture({ role: 'planner', dir: scratchDir('rpc-pre-first-recorded-a1-'), now: () => { clock += 1; return clock }, log: (row) => rows.push(row) })
+  const wrapperFile = join(f.dir, 'planner-wrapper.md')
+  const wrapperText = plannerWrapperText(sourceBrief)
+  writeFileSync(wrapperFile, wrapperText)
+  try {
+    const run = f.io.assign({ role: 'planner', briefFile: wrapperFile })
+    const prompt = f.writes.find((frame) => frame.type === 'prompt')?.message
+    assert.ok(prompt.includes(wrapperText), 'the real planner wrapper is delivered unchanged')
+    assert.deepEqual([...briefReadCandidates(wrapperFile, wrapperText)], [wrapperFile, sourceBrief])
+    assert.deepEqual([...briefReadCandidates(wrapperFile, 'Original task brief: /not-the-source.md.')], [wrapperFile])
+    assert.equal(isBriefReadToolCall(sourceRead, new Set([wrapperFile, sourceBrief])), true)
+    assert.equal(isBriefReadToolCall(sourceRead, wrapperFile), false)
+    f.writeStream(capture)
+    writeFileSync(run.returnPath, JSON.stringify(ordinaryRpcEnvelope(run.id, 'planner')))
+    assert.equal(f.io.wait(run.returnPath, 1).status, 'done')
+    const census = rows.find((row) => row.seat_turn_census)?.seat_turn_census
+    assert.ok(census, 'recorded planner stream must produce a census row')
+    assert.ok(census.brief_read_ms > 0)
+    assert.ok(census.brief_read_turns > 0)
+    assert.equal(census.brief_read_turns, 1)
+    assert.equal(census.envelope_poll_ms, null)
+    assert.equal(census.envelope_poll_absent_reason, PRE_FIRST_TURN_ABSENT_REASONS.envelope_write_time_unobservable)
+  } finally { f.cleanup() }
+})
+
+test('C1 recorded post-fix reconciliation reports its fraction and denominator', (t) => {
+  const capture = recordedB634PlannerStream()
+  if (capture === null) {
+    t.skip(`host-capture-unavailable: ${RECORDED_B634_PLANNER_STREAM}`)
+    return
+  }
+  const sourceRead = capture.split('\n').flatMap((line) => {
+    try { return [JSON.parse(line)] } catch { return [] }
+  }).find((frame) => frame?.type === 'tool_execution_start' && frame.toolName === 'read' && typeof frame.args?.path === 'string')
+  assert.ok(sourceRead, 'recorded planner source read must be present')
+  let clock = 0
+  const rows = []
+  const f = fixture({ role: 'planner', dir: scratchDir('rpc-pre-first-recorded-c1-'), now: () => { clock += 1; return clock }, log: (row) => rows.push(row) })
+  const wrapperFile = join(f.dir, 'planner-wrapper.md')
+  writeFileSync(wrapperFile, plannerWrapperText(sourceRead.args.path))
+  try {
+    const run = f.io.assign({ role: 'planner', briefFile: wrapperFile })
+    f.writeStream(capture)
+    writeFileSync(run.returnPath, JSON.stringify(ordinaryRpcEnvelope(run.id, 'planner')))
+    assert.equal(f.io.wait(run.returnPath, 1).status, 'done')
+    const censuses = rows.filter((row) => row.seat_turn_census).map((row) => row.seat_turn_census)
+    const denominator = censuses.filter((census) => census.pre_first_turn_reconciled !== null).length
+    const numerator = censuses.filter((census) => census.pre_first_turn_reconciled === true).length
+    const fraction = `${numerator}/${denominator}`
+    console.log(`recorded post-fix reconciliation: ${fraction}`)
+    assert.equal(fraction, '1/1')
+  } finally { f.cleanup() }
+})
+
+test('F1a seat boot timing remains measured', () => {
   let clock = 0
   const rows = []
   const f = fixture({
@@ -2140,7 +2225,30 @@ test('RV1-1 cold RPC assignment measures wired boot and prompt timing', () => {
   } finally { f.cleanup() }
 })
 
-test('B1 unbounded timing is null with closed reason and never zero', () => {
+test('F1b prompt delivery timing remains measured', () => {
+  let clock = 0
+  const rows = []
+  const f = fixture({
+    dir: scratchDir('rpc-pre-first-f1b-'),
+    now: () => { clock += 10; return clock },
+    log: (row) => rows.push(row),
+  })
+  const briefFile = join(f.dir, 'brief.md')
+  writeFileSync(briefFile, 'review guard\n')
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile })
+    b416RpcStream(f, 'builder', preFirstFrames(briefFile))
+    writeFileSync(run.returnPath, JSON.stringify(ordinaryRpcEnvelope(run.id)))
+    assert.equal(f.io.wait(run.returnPath, 60).status, 'done')
+
+    const census = rows.find((row) => row.seat_turn_census)?.seat_turn_census
+    assert.equal(typeof census.prompt_delivery_ms, 'number')
+    assert.ok(census.prompt_delivery_ms > 0)
+    assert.equal(census.prompt_delivery_absent_reason, null)
+  } finally { f.cleanup() }
+})
+
+test('B1 envelope polling is explicitly unobservable on RPC', () => {
   let clock = 0
   const rows = []
   const f = fixture({ dir: scratchDir('rpc-pre-first-b1-'), now: () => clock, log: (row) => rows.push(row) })
@@ -2152,6 +2260,8 @@ test('B1 unbounded timing is null with closed reason and never zero', () => {
     assert.equal(f.io.wait(run.returnPath, 1).status, 'done')
     const census = rows.find((row) => row.seat_turn_census)?.seat_turn_census
     assert.equal(census.brief_read_turns, 1)
+    assert.equal(census.envelope_poll_ms, null)
+    assert.equal(census.envelope_poll_absent_reason, PRE_FIRST_TURN_ABSENT_REASONS.envelope_write_time_unobservable)
     for (const key of ['pre_first_turn_span_ms', 'seat_boot_ms', 'prompt_delivery_ms', 'brief_read_ms', 'envelope_poll_ms']) {
       assert.notEqual(census[key], 0, `${key} must not report zero`)
     }
@@ -2210,6 +2320,23 @@ test('C1res reconciliation mismatch remains a named residual', () => {
   assert.equal(census.pre_first_turn_known_sum_ms + census.pre_first_turn_residual_ms, census.pre_first_turn_span_ms)
 })
 
+test('D1 missing component list prevents a false reconciliation', () => {
+  let clock = 0
+  const rows = []
+  const f = fixture({ dir: scratchDir('rpc-pre-first-d1-missing-'), now: () => { clock += 10; return clock }, log: (row) => rows.push(row) })
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    b416RpcStream(f, 'builder', b416RpcFrames('echo d1-missing'))
+    writeFileSync(run.returnPath, JSON.stringify(ordinaryRpcEnvelope(run.id)))
+    assert.equal(f.io.wait(run.returnPath, 1).status, 'done')
+    const census = rows.find((row) => row.seat_turn_census)?.seat_turn_census
+    assert.deepEqual(census.pre_first_turn_missing_components, ['brief_read_ms'])
+    assert.equal(census.brief_read_ms, null)
+    assert.equal(census.brief_read_absent_reason, PRE_FIRST_TURN_ABSENT_REASONS.no_brief_tool_turns)
+    assert.equal(census.pre_first_turn_reconciled, null)
+  } finally { f.cleanup() }
+})
+
 test('D1 prior census fields stay byte-identical', () => {
   const rows = []
   const f = fixture({ dir: scratchDir('rpc-pre-first-d1-'), now: () => 0, log: (row) => rows.push(row) })
@@ -2230,6 +2357,24 @@ test('D1 prior census fields stay byte-identical', () => {
       absent_reason: CENSUS_ABSENT_CAUSES.same_poll_boundary,
     }))
   } finally { f.cleanup() }
+})
+
+test('E1 unmeasured zero-duration components stay null', () => {
+  const frozen = finalisePreFirstTurn(manualPreFirstTiming({
+    seat_boot_ready_at: 0,
+    prompt_delivery_sent_at: 20,
+    brief_read_ms: 0,
+    first_non_brief_tool_at: 100,
+  }))
+  assert.equal(frozen.pre_first_turn_span_ms, 100)
+  assert.equal(frozen.seat_boot_ms, null)
+  assert.equal(frozen.prompt_delivery_ms, null)
+  assert.equal(frozen.brief_read_ms, null)
+  assert.equal(frozen.envelope_poll_ms, null)
+  assert.deepEqual(frozen.pre_first_turn_missing_components, [])
+  assert.equal(frozen.pre_first_turn_reconciled, true)
+  assert.equal(frozen.envelope_poll_absent_reason, PRE_FIRST_TURN_ABSENT_REASONS.envelope_write_time_unobservable)
+  for (const key of ['pre_first_turn_span_ms', 'seat_boot_ms', 'prompt_delivery_ms', 'brief_read_ms', 'envelope_poll_ms']) assert.notEqual(frozen[key], 0, key)
 })
 
 test('E1 absent or unreadable streams keep absent row and null timings', () => {
@@ -2326,7 +2471,8 @@ test('H1 reconciliation tolerance is exported and reported', () => {
     assert.equal(f.io.wait(run.returnPath, 1).status, 'done')
     const row = rows.find((entry) => entry.seat_turn_census)?.seat_turn_census
     assert.equal(row.pre_first_turn_tolerance_ms, PRE_FIRST_TURN_TOLERANCE_MS)
-    assert.equal(row.pre_first_turn_reconciled, Math.abs(row.pre_first_turn_residual_ms) <= row.pre_first_turn_tolerance_ms)
+    assert.equal(row.pre_first_turn_missing_components[0], 'brief_read_ms')
+    assert.equal(row.pre_first_turn_reconciled, null)
   } finally { f.cleanup() }
 })
 

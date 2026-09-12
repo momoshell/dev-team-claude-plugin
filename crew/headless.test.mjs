@@ -3100,6 +3100,7 @@ test('E1 compaction fields leave every prior census field byte-identical', () =>
     'brief_read_turns', 'brief_read_turns_absent_reason',
     'brief_read_ms', 'brief_read_absent_reason',
     'envelope_poll_ms', 'envelope_poll_absent_reason',
+    'pre_first_turn_missing_components',
     'pre_first_turn_known_sum_ms', 'pre_first_turn_residual_ms',
     'pre_first_turn_tolerance_ms', 'pre_first_turn_reconciled',
     'parked_frames', 'parked_frames_reason',

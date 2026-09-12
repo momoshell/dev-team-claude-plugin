@@ -2641,6 +2641,46 @@ export function journalRowsSinceRunStart(text) {
   return rows
 }
 
+export function dispatchAdmissionsFromJournal(text, laneName, dispatched) {
+  if (typeof laneName !== 'string' || laneName.trim() === '') return []
+  const inherited = Array.isArray(dispatched) ? dispatched.filter((entry) => typeof entry === 'string') : []
+  const covered = scopeMatcher(inherited)
+  const admissions = []
+  const byFile = new Map()
+  for (const line of String(text || '').split('\n')) {
+    if (!line.trim()) continue
+    let row
+    try { row = JSON.parse(line) } catch { continue }
+    if (row?.event !== 'fence-admitted' || row?.lane !== laneName) continue
+    const file = row?.file
+    if (typeof file !== 'string' || file.trim() === '' || !covered(file)) continue
+    const source = typeof row?.source === 'string' ? row.source.trim() : ''
+    if (source === '') continue
+    const existing = byFile.get(file)
+    if (!existing) {
+      const admission = { file, sources: [source] }
+      byFile.set(file, admission)
+      admissions.push(admission)
+      continue
+    }
+    const sources = existing.sources
+    if (!sources.includes(source)) sources.push(source)
+  }
+  return admissions
+}
+
+export function inheritedPlanScope(dispatched, planned, admissions = []) {
+  if (admissions.length === 0) return { effective: planned, preserved: [] }
+  const inherited = Array.isArray(dispatched) ? dispatched.filter((entry) => typeof entry === 'string') : []
+  const authored = Array.isArray(planned) ? planned.filter((entry) => typeof entry === 'string') : []
+  const dispatchedMatch = scopeMatcher(inherited)
+  const plannedMatch = scopeMatcher(authored)
+  const preserved = admissions.filter(({ file }) => dispatchedMatch(file) && !plannedMatch(file))
+  const effective = [...authored]
+  for (const { file } of preserved) if (!effective.includes(file)) effective.push(file)
+  return { effective, preserved }
+}
+
 // A lead bounce decision is EITHER `bounce-<seat>` or the bare `bounce` a consult
 // offering ['bounce','escalate'] records (askLead writes `decision: decided`). The row
 // carried `${decision}: ${reason}` and composePrBody prefixed the kind again, so #791's
@@ -4801,9 +4841,11 @@ function runTask(ctx, io, crash) {
       }
       scope = asked
     }
+    const triageScope = inheritedPlanScope(inherited, scope, readDispatchAdmissions())
     io.log(recordRow({ at: io.now(), triage: {
       variant, seat: 'planner', scope_source: shape.sources.scope, lane_source: shape.sources.lane,
       gate_source: shape.sources.gate, inherited: inherited.length, scope: scope.length,
+      ...(triageScope.preserved.length > 0 ? { preserved_admissions: triageScope.preserved } : {}),
     } }))
     stageComplete()
     return { plan: {
@@ -4861,6 +4903,15 @@ function runTask(ctx, io, crash) {
   let extraPlanRounds = 0
   let divergenceConsulted = false
   const readOrNull = (path) => { try { const text = io.readFile(path); return typeof text === 'string' ? text : null } catch { return null } }
+  let dispatchAdmissions = null
+  const readDispatchAdmissions = () => {
+    if (dispatchAdmissions === null) {
+      dispatchAdmissions = typeof ctx.laneName !== 'string' || ctx.laneName.trim() === '' || !Array.isArray(ctx.files_in_scope) || ctx.files_in_scope.length === 0
+        ? []
+        : dispatchAdmissionsFromJournal(readOrNull(journal), ctx.laneName, ctx.files_in_scope)
+    }
+    return dispatchAdmissions
+  }
   const probeLane = (inputs) => {
     let res = null
     try { res = io.run(laneProbeCommand(inputs)) } catch { return new Map() }
@@ -5071,7 +5122,11 @@ function runTask(ctx, io, crash) {
       stageComplete()
       continue
     }
-    io.log(recordRow({ at: io.now(), plan_scope: { round, ...planScope } }))
+    const inheritedScope = inheritedPlanScope(ctx.files_in_scope, plannedScope, readDispatchAdmissions())
+    io.log(recordRow({ at: io.now(), plan_scope: {
+      round, ...planScope,
+      ...(inheritedScope.preserved.length > 0 ? { preserved_admissions: inheritedScope.preserved } : {}),
+    } }))
     if (planScope.verdict === PLAN_SCOPE.widened) {
       const scopeFinal = round >= planRounds()
       if (scopeFinal) {
@@ -5314,6 +5369,7 @@ function runTask(ctx, io, crash) {
       `files_in_scope carries entries the scope gate cannot honor — fix the plan, not the build: ${scopeErrors.map(({ entry, why }) => `${JSON.stringify(entry)} (${why})`).join('; ')}`,
       planEnv.artifacts || [])
   }
+  readDispatchAdmissions()
   const fenceResolution = resolveFenceScopes(ctx, io)
   if (fenceResolution.error) return escalate('scope', fenceResolution.error, planEnv.artifacts || [], {}, { files: [] })
   const resolvedFenceScopes = fenceResolution.scopes
@@ -5321,7 +5377,11 @@ function runTask(ctx, io, crash) {
   const siblingFenceScopes = resolvedFenceScopes.filter((scope) => scope.lane !== ctx.laneName)
   let ownSpanScopes = ownFenceScopes.filter((scope) => scope.kind === 'span')
   const siblingSpanScopes = siblingFenceScopes.filter((scope) => scope.kind === 'span')
-  let scopeFiles = [...planEnv.details.files_in_scope]
+  const plannerAuthoredScope = planEnv.role === 'planner'
+  const acceptedInheritedScope = plannerAuthoredScope
+    ? inheritedPlanScope(ctx.files_in_scope, planEnv.details.files_in_scope, dispatchAdmissions)
+    : { effective: planEnv.details.files_in_scope, preserved: [] }
+  let scopeFiles = [...acceptedInheritedScope.effective]
   const planFenceHits = laneFenceHits(scopeFiles, pathOnlyLaneFence(ctx.laneFence, ctx.laneName))
   const planSpanFenceHits = spanPlanFenceHits(scopeFiles, ownSpanScopes, siblingSpanScopes)
   const allPlanFenceHits = [...planFenceHits, ...planSpanFenceHits.filter((span) => (

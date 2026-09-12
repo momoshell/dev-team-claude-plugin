@@ -5,9 +5,9 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import {
-  ADOPTED_PLAN_HEADING, ADOPT_BLOCK, adversarialPlanEnv, CENSUS_ROW_ABSENT, CENSUS_TURNS_ABSENT, CENSUS_UNREADABLE, CTX, CTX_DIRECTED, CTX_TL, DIRECTED_FILES, ENVELOPE_REFUSAL_REASONS, FAILURE_UPGRADE, GATE_SUMMARY_PREFIX, GROWTH_DIVERGENCE_FACTOR, LANE_COMMAND_SHAPES, LANE_INPUT_VERDICTS, LANE_PATH_OPTIONS, LANE_VALUE_OPTIONS, LIMITS, NO_TURN_CEILING, PLAN_CHECK_ABSENT, PLAN_CHECK_INVALID, PLAN_CHECK_SEVERITIES, PLAN_CONVERGENCE_REASONS, RED, RUN_START_EVENT, S843_ADDED, S843_D2, S843_DISPATCHED, S843_NARROWED, SUITE_REASK_MAX, TD, THREW, TURN_CEILING_DEFAULTS, TURN_CEILING_REFUSALS, TURN_CEILING_ROLES, VALIDATION_LANE_UNLOADABLE, adoptionSignal, bothExhaustionPointsScenario, buildEnv, carriedPrLines, carriedPreambleLines, carriedResolution, carriedSilenceDefect, checkEnv, composeCommitMessage, divergeThenExhaustPlanScenario, divergenceConsultLines, divergentPlanScenario, driveTask, enforcementPreamble, fakeIo, growthLines, growthRecord, join, laneCommandInputs, laneCommandShape, laneFence, leadEnv, lineageFromJournal, persistentDivergenceScenario, planCheckAcceptIo, planCheckFindings, planCheckFindingsFromText, planConvergence, planEnv, planRevisionRun, planRoundCap, planThenReviewIo, protectedPlanEnv, resolveTurnCeilings, resolveValidationLane, resumeGreen, resumeKeys, resumeRed, reviewConvergeRun, reviewEnv, s843Bullets, s843Ctx, s843Io, s843PlanEnv, suiteRefusalEnv, turnCeilingsRecord, validationPlan, validationProbeOutput, validationProbeRun, validationRows, laneProbeCommand,
+  ADOPTED_PLAN_HEADING, ADOPT_BLOCK, adversarialPlanEnv, CENSUS_ROW_ABSENT, CENSUS_TURNS_ABSENT, CENSUS_UNREADABLE, CTX, CTX_DIRECTED, CTX_TL, DIRECTED_FILES, ENVELOPE_REFUSAL_REASONS, FAILURE_UPGRADE, GATE_SUMMARY_PREFIX, GROWTH_DIVERGENCE_FACTOR, LANE_COMMAND_SHAPES, LANE_INPUT_VERDICTS, LANE_PATH_OPTIONS, LANE_VALUE_OPTIONS, LIMITS, NO_TURN_CEILING, PLAN_CHECK_ABSENT, PLAN_CHECK_INVALID, PLAN_CHECK_SEVERITIES, PLAN_CONVERGENCE_REASONS, RED, RUN_START_EVENT, S843_ADDED, S843_D2, S843_DISPATCHED, S843_NARROWED, SUITE_REASK_MAX, TD, THREW, TRIAGE_NOTE, TURN_CEILING_DEFAULTS, TURN_CEILING_REFUSALS, TURN_CEILING_ROLES, VALIDATION_LANE_UNLOADABLE, adoptionSignal, bothExhaustionPointsScenario, buildEnv, carriedPrLines, carriedPreambleLines, carriedResolution, carriedSilenceDefect, checkEnv, composeCommitMessage, divergeThenExhaustPlanScenario, divergenceConsultLines, divergentPlanScenario, driveTask, enforcementPreamble, fakeIo, growthLines, growthRecord, join, laneCommandInputs, laneCommandShape, laneFence, leadEnv, lineageFromJournal, persistentDivergenceScenario, planCheckAcceptIo, planCheckFindings, planCheckFindingsFromText, planConvergence, planEnv, planRevisionRun, planRoundCap, planThenReviewIo, protectedPlanEnv, resolveTurnCeilings, resolveValidationLane, resumeGreen, resumeKeys, resumeRed, reviewConvergeRun, reviewEnv, s843Bullets, s843Ctx, s843Io, s843PlanEnv, suiteRefusalEnv, turnCeilingsRecord, triageEnv, validationPlan, validationProbeOutput, validationProbeRun, validationRows, laneProbeCommand,
 } from './drive-fixtures.mjs'
-import { CENSUS_ABSENT_REASONS, CENSUS_ELIGIBLE_OUTCOMES, CREATES_ABSENT, PLAN_BOUNCE_UNFUNDED_HEADING, PLAN_SEAT_REFUSED, ZERO_TURN_NON_START, ZERO_TURN_REASK_MAX, observeTurnCensus, planBounceUnfundedLines, planCapNote, planExhaustedWhy, planRefusedWhy, turnCeilingOf, zeroTurnNonStartOf } from './drive.mjs'
+import { CENSUS_ABSENT_REASONS, CENSUS_ELIGIBLE_OUTCOMES, CREATES_ABSENT, PLAN_BOUNCE_UNFUNDED_HEADING, PLAN_SEAT_REFUSED, ZERO_TURN_NON_START, ZERO_TURN_REASK_MAX, dispatchAdmissionsFromJournal, inheritedPlanScope, observeTurnCensus, planBounceUnfundedLines, planCapNote, planExhaustedWhy, planRefusedWhy, turnCeilingOf, zeroTurnNonStartOf } from './drive.mjs'
 import { suiteRunPolicy } from './headless.mjs'
 
 const zeroTurnEnvelope = (id = 'planner1', role = 'planner', detail = {}) => ({
@@ -16,6 +16,34 @@ const zeroTurnEnvelope = (id = 'planner1', role = 'planner', detail = {}) => ({
     degraded: 'rpc-no-envelope', reason: ZERO_TURN_NON_START, turns: 0, tool_calls: 0, absent_reason: null,
     ...detail,
   },
+})
+
+const B624_LANE = 'b624'
+const B624_CARRIERS = Object.freeze([
+  'skills/crew-dispatch/exhibits.test.mjs',
+  'skills/crew-dispatch/references/batch.md',
+])
+const B624_PLANNED = Object.freeze(Array.from({ length: 6 }, (_, index) => `b624/planned-${index + 1}.mjs`))
+const B624_INHERITED = Object.freeze([
+  ...B624_PLANNED,
+  ...B624_CARRIERS,
+  ...Array.from({ length: 23 }, (_, index) => `b624/inherited-${index + 1}.mjs`),
+])
+const B624_JOURNAL = `${TD}/journal.jsonl`
+const b624Journal = (rows = B624_CARRIERS.map((file) => ({ event: 'fence-admitted', lane: B624_LANE, file, source: 'census-carrier' }))) => rows.map((row) => JSON.stringify(row)).join('\n')
+const b624Context = (over = {}) => ({
+  ...CTX, lane: 'lane-cmd', laneName: B624_LANE, journal: B624_JOURNAL,
+  files_in_scope: [...B624_INHERITED], ...over,
+})
+const b624Plan = (files = B624_PLANNED, over = {}) => planEnv({
+  ...over,
+  details: { ...planEnv().details, ...(over.details || {}), files_in_scope: [...files] },
+})
+const b624Io = ({ envelopes = {}, journal = b624Journal(), changed = [...B624_PLANNED.slice(0, 2)], files = {} } = {}) => fakeIo({
+  envelopes,
+  runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+  changed,
+  files: { [B624_JOURNAL]: journal, ...files },
 })
 
 test('F1 protected fixture callers choose proof or typed refusal', () => {
@@ -2945,4 +2973,172 @@ test('G1 zero-turn re-ask brief names the non-start', () => {
   const brief = io.calls.writes[second.briefFile]
   assert.match(brief, /^Your previous dispatch produced no envelope and took no turns \(zero-turn-non-start\)\.$/m)
   assert.match(brief, /The same assignment is asked directly again/)
+})
+
+test('A1 sourced dispatch admissions survive planner narrowing in full and triage runs', () => {
+  const fullIo = b624Io({
+    envelopes: {
+      'planner:1': b624Plan(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+  })
+  const full = driveTask(b624Context(), fullIo)
+  assert.equal(full.status, 'done')
+  const fullBuilder = fullIo.calls.assign.find(({ role }) => role === 'builder')
+  assert.deepEqual(fullBuilder.policy.fence, [...B624_PLANNED, ...B624_CARRIERS])
+
+  const triageIo = b624Io({
+    files: { [TRIAGE_NOTE]: '# Triage\n\nrepair the carriers\n' },
+    envelopes: {
+      'planner:1': triageEnv({ details: { plan_path: TRIAGE_NOTE, files_in_scope: [...B624_PLANNED] } }),
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+  })
+  const triage = driveTask(b624Context({ variant: 'repair' }), triageIo)
+  assert.equal(triage.status, 'done')
+  const triageBuilder = triageIo.calls.assign.find(({ role }) => role === 'builder')
+  assert.deepEqual(triageBuilder.policy.fence, [...B624_PLANNED, ...B624_CARRIERS])
+})
+
+test('B1 unsourced and foreign admissions do not preserve authored drops', () => {
+  const [missing, blank, foreign] = B624_INHERITED.slice(-3)
+  const journal = b624Journal([
+    { event: 'fence-admitted', lane: B624_LANE, file: missing },
+    { event: 'fence-admitted', lane: B624_LANE, file: blank, source: '   ' },
+    { event: 'fence-admitted', lane: 'other-lane', file: foreign, source: 'test-reach' },
+  ])
+  const admissions = dispatchAdmissionsFromJournal(journal, B624_LANE, B624_INHERITED)
+  assert.deepEqual(admissions, [])
+  assert.deepEqual(inheritedPlanScope(B624_INHERITED, B624_PLANNED, admissions), { effective: B624_PLANNED, preserved: [] })
+
+  const io = b624Io({ journal, envelopes: { 'planner:1': b624Plan(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') } })
+  const result = driveTask(b624Context(), io)
+  assert.equal(result.status, 'done')
+  const builder = io.calls.assign.find(({ role }) => role === 'builder')
+  assert.deepEqual(builder.policy.fence, [...B624_PLANNED])
+  assert.equal(builder.policy.fence.includes(missing), false)
+  assert.equal(builder.policy.fence.includes(blank), false)
+  assert.equal(builder.policy.fence.includes(foreign), false)
+})
+
+test('C1 widening beyond inherited scope keeps the exact refusal', () => {
+  const io = fakeIo({ envelopes: { 'planner:1': planEnv() } })
+  const result = driveTask({ ...CTX, limits: { plan_rounds: 1 }, files_in_scope: ['a.mjs'] }, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'plan-scope-widened')
+  assert.equal(result.details.escalation.why, 'the plan widens the dispatched write surface with a.test.mjs — a lane may narrow the surface it was dispatched with, never widen it; on the final plan round there is no revision left to bounce it to')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 0)
+})
+
+test('D1 ordinary plan preservation records every dispatch source', () => {
+  const file = B624_CARRIERS[0]
+  const journal = b624Journal([
+    { event: 'fence-admitted', lane: B624_LANE, file, source: 'census-carrier' },
+    { event: 'fence-admitted', lane: B624_LANE, file, source: 'test-reach' },
+    { event: 'fence-admitted', lane: B624_LANE, file, source: 'census-carrier' },
+  ])
+  const io = b624Io({ journal, envelopes: { 'planner:1': b624Plan(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') } })
+  const result = driveTask(b624Context(), io)
+  assert.equal(result.status, 'done')
+  const row = io.calls.logs.find((entry) => entry.plan_scope)?.plan_scope
+  assert.deepEqual(row.preserved_admissions, [{ file, sources: ['census-carrier', 'test-reach'] }])
+})
+
+test('D2 triage preservation records its dispatch source', () => {
+  const file = B624_CARRIERS[0]
+  const journal = b624Journal([{ event: 'fence-admitted', lane: B624_LANE, file, source: 'census-carrier' }])
+  const io = b624Io({
+    journal,
+    files: { [TRIAGE_NOTE]: '# Triage\n\nrepair the carrier\n' },
+    envelopes: {
+      'planner:1': triageEnv({ details: { plan_path: TRIAGE_NOTE, files_in_scope: [...B624_PLANNED] } }),
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+  })
+  const result = driveTask(b624Context({ variant: 'repair' }), io)
+  assert.equal(result.status, 'done')
+  const row = io.calls.logs.find((entry) => entry.triage)?.triage
+  assert.deepEqual(row.preserved_admissions, [{ file, sources: ['census-carrier'] }])
+})
+
+test('E1 the scope gate adjudicates preserved and authored entries alike', () => {
+  const carrier = B624_CARRIERS[0]
+  const authored = B624_INHERITED.at(-1)
+  const journal = b624Journal([{ event: 'fence-admitted', lane: B624_LANE, file: carrier, source: 'census-carrier' }])
+  const acceptedIo = b624Io({
+    journal,
+    changed: [carrier],
+    envelopes: {
+      'planner:1': b624Plan(),
+      'builder:1': buildEnv({ details: { files_changed: [carrier], commit_message: 'feat: carrier' } }),
+      'reviewer:1': reviewEnv('pass'),
+    },
+  })
+  const accepted = driveTask(b624Context(), acceptedIo)
+  assert.equal(accepted.status, 'done')
+  assert.ok(acceptedIo.calls.assign.find(({ role, policy }) => role === 'builder' && policy.fence.includes(carrier)))
+
+  const refusedIo = b624Io({
+    journal,
+    changed: [carrier, authored],
+    envelopes: {
+      'planner:1': b624Plan(),
+      'builder:1': buildEnv({ details: { files_changed: [carrier, authored], commit_message: 'feat: authored drop' } }),
+    },
+  })
+  const refused = driveTask(b624Context({ limits: { build_rounds: 1 } }), refusedIo)
+  assert.equal(refused.status, 'escalation')
+  assert.equal(refused.details.escalation.where, 'scope')
+  assert.match(refused.details.escalation.why, new RegExp(authored.replaceAll('/', '\\/')))
+})
+
+test('F1 no sourced admissions preserve legacy bytes', () => {
+  const noRows = dispatchAdmissionsFromJournal('', B624_LANE, B624_INHERITED)
+  assert.deepEqual(noRows, [])
+  const effective = inheritedPlanScope(B624_INHERITED, B624_PLANNED, noRows)
+  assert.strictEqual(effective.effective, B624_PLANNED)
+  assert.deepEqual(effective, { effective: B624_PLANNED, preserved: [] })
+
+  const io = b624Io({ journal: '', envelopes: { 'planner:1': b624Plan(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') } })
+  const result = driveTask(b624Context(), io)
+  assert.equal(result.status, 'done')
+  const row = io.calls.logs.find((entry) => entry.plan_scope)
+  assert.deepEqual(row, {
+    at: 0,
+    plan_scope: { round: 1, verdict: 'plan-scope-narrowed', added: [], dropped: [...B624_INHERITED.slice(6)], dispatched: 31, planned: 6 },
+    channel: 'record',
+  })
+
+  const triageIo = b624Io({
+    journal: '',
+    files: { [TRIAGE_NOTE]: '# Triage\n\nlegacy\n' },
+    envelopes: { 'planner:1': triageEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+  })
+  const triage = driveTask(b624Context({ variant: 'repair' }), triageIo)
+  assert.equal(triage.status, 'done')
+  const triageRow = triageIo.calls.logs.find((entry) => entry.triage)
+  assert.deepEqual(triageRow, {
+    at: 0,
+    triage: { variant: 'repair', seat: 'planner', scope_source: 'inherited', lane_source: 'ctx', gate_source: 'none', inherited: 31, scope: 31 },
+    channel: 'record',
+  })
+})
+
+test('G1 directed scope remains brief-authored despite journal admissions', () => {
+  const carrier = B624_CARRIERS[0]
+  const red = `${GATE_SUMMARY_PREFIX} {"total":2,"failed":2,"errored":0}`
+  const green = `${GATE_SUMMARY_PREFIX} {"total":2,"failed":0,"errored":0}`
+  const io = fakeIo({
+    files: { ...DIRECTED_FILES, [B624_JOURNAL]: b624Journal([{ event: 'fence-admitted', lane: B624_LANE, file: carrier, source: 'census-carrier' }]) },
+    envelopes: { 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: {
+      'directed-gate:1': { ok: false, output: red }, 'directed-gate': { ok: true, output: green },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    cleanRuns: { 'directed-gate': { ok: false, output: red } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask({ ...CTX_DIRECTED, laneName: B624_LANE, journal: B624_JOURNAL, files_in_scope: ['a.mjs', 'a.test.mjs', carrier] }, io)
+  assert.equal(result.status, 'done')
+  const builder = io.calls.assign.find(({ role }) => role === 'builder')
+  assert.deepEqual(builder.policy.fence, ['a.mjs', 'a.test.mjs'])
 })

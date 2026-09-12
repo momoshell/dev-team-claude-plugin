@@ -4,8 +4,174 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  COMMIT_TRAILER, CTX, HONEST_NARRATION, NARRATION_HEADING, NARRATION_RECORD, NARRATION_REFUSALS, NARRATION_REFUSAL_NAMES, NARRATION_STAGE_VOCABULARY, NARRATOR_REGISTER, PUBLISH_REFUSAL_NAMES, RUN_START_EVENT, TD, VARIANTS, applyNarration, bounceDetail, bounceSeatOf, buildEnv, commitIntent, composeCommitMessage, composePrBody, convergeRun, driveTask, issueTrailers, join, journalRowsSinceRunStart, narrateRecord, narrationDefect, narrationIsRawJson, narrationPrompt, narrationStageDefect, narratorApiRoot, narratorIo, narratorModelId, narratorModelsCommand, planEnv, prAnomalies, publicationIo, readFileSync, refsFromCommitMessage, reviewEnv, runPublished, shellArg,
+  COMMIT_TRAILER, CTX, HONEST_NARRATION, NARRATION_HEADING, NARRATION_RECORD, NARRATION_REFUSALS, NARRATION_REFUSAL_NAMES, NARRATION_STAGE_VOCABULARY, NARRATOR_REGISTER, PUBLISH_REFUSAL_NAMES, RUN_START_EVENT, TD, VARIANTS, applyNarration, bounceDetail, bounceSeatOf, buildEnv, commitIntent, composeCommitMessage, composePrBody, convergeRun, driveTask, issueTrailers, join, journalRowsSinceRunStart, narrateRecord, narrationDefect, narrationIsRawJson, narrationPrompt, narrationStageDefect, narratorApiRoot, narratorIo, narratorModelId, narratorModelsCommand, planEnv, prAnomalies, publicationIo, readFileSync, refsFromCommitMessage, reviewEnv, shellArg,
 } from './drive-fixtures.mjs'
+
+function installParentProbe(io, parent = { ok: true, output: 'base1111\n' }) {
+  const baseRun = io.run
+  io.run = function (command) {
+    if (String(command) === 'git rev-parse HEAD^') {
+      baseRun.call(this, command)
+      return typeof parent === 'function' ? parent(this.state, command) : parent
+    }
+    return baseRun.call(this, command)
+  }
+  return io
+}
+
+function runPublished(options = {}) {
+  const branch = options.branch === undefined ? 'feature/ship' : options.branch
+  const ctx = {
+    ...CTX, task: options.task || 'published-task', taskDir: options.taskDir || TD,
+    journal: options.journal || `${options.taskDir || TD}/journal.jsonl`,
+    ...(options.ctx || {}), publish: options.publish === undefined ? { branch } : options.publish,
+  }
+  const io = installParentProbe(publicationIo(options), options.commands?.['git rev-parse HEAD^'])
+  let result
+  try { result = driveTask(ctx, io) } catch (error) { return { ctx, io, error } }
+  return { ctx, io, result }
+}
+
+const REBASE_PARENT = 'base1111'
+const REBASE_RED = 'red\nGATE-SUMMARY {"total":3,"failed":3,"errored":0}'
+const REBASE_GREEN = 'green\nGATE-SUMMARY {"total":3,"failed":0,"errored":0}'
+const REBASE_MUTATIONS = [
+  { check: 'M1', file: 'a.mjs', find: 'TASK-A', replace: 'MUT-A' },
+  { check: 'M2', file: 'a.test.mjs', find: 'TASK-B', replace: 'MUT-B' },
+]
+
+function rebaseIo(options = {}) {
+  const moved = options.moved !== false
+  const postHead = options.postHead || 'rebased3333'
+  const parent = options.parent === undefined ? REBASE_PARENT : options.parent
+  const mutations = options.mutations || REBASE_MUTATIONS
+  const io = publicationIo({
+    changed: ['a.mjs', 'a.test.mjs'],
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations, commit_subject: 'feat: rebase proof' } }),
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    commands: {
+      'git rev-parse origin/main': { ok: true, output: `${REBASE_PARENT}\n` },
+      'git merge-base HEAD origin/main': { ok: true, output: `${moved ? 'older000' : REBASE_PARENT}\n` },
+    },
+  })
+  io.state.phase = 'initial'
+  io.state.commitCount = 0
+  io.state.resetCommand = null
+  io.state.rebaseHead = postHead
+  const taskA = `${CTX.checkout}/a.mjs`
+  const taskB = `${CTX.checkout}/a.test.mjs`
+  const initialBytes = { [taskA]: 'TASK-A\n', [taskB]: 'TASK-B\n' }
+  const postRebaseBytes = { [taskA]: 'POST-REBASE TASK-A\n', [taskB]: 'POST-REBASE TASK-B\n' }
+  io.state.worktreeBytes = { ...initialBytes }
+  io.state.indexBytes = { ...initialBytes }
+  io.state.recoveryCommit = options.recoveryCommit || 'recovery4444'
+  io.state.recommit = options.recommit || 'recommitted5555'
+  io.state.runCleanCalls = []
+  io.calls.runClean = io.state.runCleanCalls
+  const parentProbe = options.parentResult === undefined
+    ? (typeof parent === 'object' ? () => parent : () => ({ ok: true, output: `${parent}\n` }))
+    : options.parentResult
+  installParentProbe(io, parentProbe)
+  const baseRun = io.run
+  let phaseGateRuns = 0
+  const mutationRed = (index) => {
+    const mutation = mutations[Math.max(0, Math.min(index, mutations.length - 1))]
+    return { ok: false, output: `FAIL ${mutation?.check || 'M1'}: caught\n${REBASE_RED}` }
+  }
+  io.run = function (command) {
+    const text = String(command)
+    if (text === 'git rebase origin/main') {
+      const result = baseRun.call(this, command)
+      this.state.phase = 'rebased'
+      this.state.head = postHead
+      this.state.worktreeBytes = { ...postRebaseBytes }
+      this.state.indexBytes = { ...postRebaseBytes }
+      phaseGateRuns = 0
+      return result
+    }
+    if (text.startsWith('git reset --')) {
+      baseRun.call(this, command)
+      this.state.resetCommand = text
+      if (options.reset === 'throw') throw new Error('reset denied')
+      if (options.reset === 'return') return { ok: false, output: 'reset denied' }
+      if (text.includes('--hard')) {
+        this.state.phase = 'hard-reset'
+        this.state.indexBytes = {}
+        this.state.worktreeBytes = {}
+        return { ok: true, output: '' }
+      }
+      this.state.phase = 'reset'
+      this.state.head = REBASE_PARENT
+      phaseGateRuns = 0
+      return { ok: true, output: '' }
+    }
+    if (text.includes('gate-cmd')) {
+      baseRun.call(this, command)
+      phaseGateRuns += 1
+      if (this.state.phase === 'initial') {
+        if (phaseGateRuns === 1) return { ok: false, output: REBASE_RED }
+        if (phaseGateRuns === 2) return { ok: true, output: REBASE_GREEN }
+        return mutationRed(phaseGateRuns - 3)
+      }
+      if (this.state.phase === 'reset') {
+        if (phaseGateRuns === 1) return options.postProof === 'red' ? { ok: false, output: REBASE_RED } : { ok: true, output: REBASE_GREEN }
+        return mutationRed(phaseGateRuns - 2)
+      }
+      if (this.state.phase === 'rebased') return options.postProof === 'red' ? { ok: false, output: REBASE_RED } : { ok: true, output: REBASE_GREEN }
+    }
+    return baseRun.call(this, command)
+  }
+  const baseRead = io.readFile
+  io.readFile = function (path) {
+    if (Object.prototype.hasOwnProperty.call(this.state.worktreeBytes, path)) return this.state.worktreeBytes[path]
+    return baseRead.call(this, path)
+  }
+  const baseWrite = io.writeFile
+  io.writeFile = function (path, content) {
+    if (Object.prototype.hasOwnProperty.call(this.state.worktreeBytes, path)) {
+      this.state.worktreeBytes[path] = content
+      this.calls.writes[path] = content
+      this.calls.order.push(`write:${path}`)
+      return
+    }
+    return baseWrite.call(this, path, content)
+  }
+  io.commit = function (files, message) {
+    this.state.commitCount += 1
+    this.calls.order.push('commit')
+    this.calls.commits.push({ files, message })
+    if (this.state.commitCount === 1) {
+      this.state.head = this.state.recoveryCommit
+      return this.state.recoveryCommit
+    }
+    if (options.recommit === 'throw') throw new Error('recommit denied')
+    if (options.recommit === 'blank') return ''
+    this.state.head = this.state.recommit
+    return this.state.recommit
+  }
+  io.runClean = function (command) {
+    this.state.runCleanCalls.push({ command, phase: this.state.phase, index: { ...this.state.indexBytes }, worktree: { ...this.state.worktreeBytes } })
+    if (options.postProof === 'unproven' && this.state.phase === 'reset') return { ok: true, output: REBASE_GREEN }
+    if (this.state.phase === 'rebased') return { ok: true, output: REBASE_GREEN }
+    return { ok: false, output: REBASE_RED }
+  }
+  const baseLog = io.log
+  io.log = function (row) {
+    if (options.proofThrow && this.state.phase === 'reset' && row?.gate_discrimination !== undefined) throw new Error('post-rebase proof exploded')
+    if (Array.isArray(row?.gate_check_discriminations) && row.gate_check_discriminations.some((entry) => entry?.proof === 'fresh')) this.calls.order.push('fresh-proof-row')
+    if (row?.gate_proof_parent) this.calls.order.push('proof-parent-row')
+    return baseLog.call(this, row)
+  }
+  return io
+}
+
+function runRebase(options = {}) {
+  const io = rebaseIo(options)
+  const result = driveTask({ ...CTX, publish: { branch: 'feature/ship' } }, io)
+  return { io, result }
+}
 
 test('RV1-1 the observe-and-end residual reaches the commit and PR intent verbatim', () => {
   const residual = "The lane observes and ends a forbidden suite invocation only after it starts; it does not return a tool result to the seat, so #904's tool-result contract remains correctness-unverified."
@@ -89,6 +255,7 @@ test('stateful moved and unmoved bases prove the exact rebase policy', () => {
     commands: {
       'git rev-parse origin/main': { ok: true, output: 'same1111\n' },
       'git merge-base HEAD origin/main': { ok: true, output: 'same1111\n' },
+      'git rev-parse HEAD^': { ok: true, output: 'same1111\n' },
     },
   })
   assert.equal(unmoved.result.status, 'done')
@@ -204,10 +371,10 @@ test('an exit-zero malformed PR probe, indeterminate probe, and throwing journal
 test('C1 publication names the measured proof generation', () => {
   const red = `red\nGATE-SUMMARY {"total":3,"failed":3,"errored":0}`
   const green = `green\nGATE-SUMMARY {"total":3,"failed":0,"errored":0}`
-  const io = publicationIo({
+  const io = installParentProbe(publicationIo({
     envelopes: { 'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }) },
     changed: ['a.mjs', 'a.test.mjs'],
-  })
+  }))
   const baseRun = io.run
   let gateRuns = 0
   io.run = function (command) {
@@ -220,9 +387,9 @@ test('C1 publication names the measured proof generation', () => {
   io.runClean = () => ({ ok: false, output: red })
   const result = driveTask({ ...CTX, publish: { branch: 'feature/ship' } }, io)
   assert.equal(result.status, 'done')
-  assert.equal(result.details.gate.generation, 1)
+  assert.equal(result.details.gate.generation, 2)
   const body = io.calls.writes[`${TD}/pr-body.md`]
-  assert.match(body, /discrimination proven on generation 1/)
+  assert.match(body, /discrimination proven on generation 2/)
   assert.doesNotMatch(body, /discrimination proven\*\* \(gate-cmd\)/)
 
   const oldRed = `old red\nGATE-SUMMARY {"total":3,"failed":3,"errored":0}`
@@ -232,7 +399,7 @@ test('C1 publication names the measured proof generation', () => {
   const files = { [`${CTX.checkout}/a.mjs`]: 'before rebuild\n' }
   const changed = Array.from({ length: 8 }, () => ['a.mjs', 'a.test.mjs'])
   let refreshedIo
-  refreshedIo = publicationIo({
+  refreshedIo = installParentProbe(publicationIo({
     envelopes: {
       'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'old-gate-cmd' } }),
       'builder:1': buildEnv(),
@@ -240,7 +407,7 @@ test('C1 publication names the measured proof generation', () => {
       'reviewer:1': reviewEnv('changes-needed'), 'reviewer:2': reviewEnv('pass'),
       'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'repaired-gate-cmd' } },
     },
-  })
+  }))
   const readFile = refreshedIo.readFile
   refreshedIo.readFile = (path) => Object.prototype.hasOwnProperty.call(files, path) ? files[path] : readFile(path)
   refreshedIo.changedFiles = () => changed.length > 1 ? changed.shift() : changed[0]
@@ -260,10 +427,10 @@ test('C1 publication names the measured proof generation', () => {
   const refreshed = driveTask({ ...CTX, limits: { build_rounds: 2, review_rounds: 2 }, publish: { branch: 'feature/ship' } }, refreshedIo)
   assert.equal(refreshed.status, 'done')
   assert.equal(refreshed.details.gate.cmd, 'repaired-gate-cmd')
-  assert.equal(refreshed.details.gate.generation, 3)
+  assert.equal(refreshed.details.gate.generation, 4)
   assert.equal(oldGateRuns, 4)
   const refreshedBody = refreshedIo.calls.writes[`${TD}/pr-body.md`]
-  assert.match(refreshedBody, /7 gate checks, 0 failed, 0 errored, discrimination proven on generation 3\*\* \(repaired-gate-cmd\)/)
+  assert.match(refreshedBody, /7 gate checks, 0 failed, 0 errored, discrimination proven on generation 4\*\* \(repaired-gate-cmd\)/)
   assert.doesNotMatch(refreshedBody, /3 gate checks, 0 failed, 0 errored.*repaired-gate-cmd/)
 })
 
@@ -537,4 +704,151 @@ test('an armed run refuses green suites whose publication counts are unmeasured'
 test('refsFromCommitMessage reads the trailer in order, de-duplicates, and stays empty without one', () => {
   assert.deepEqual(refsFromCommitMessage('subject\n\nbody\n\nRefs: #679, #758, #679'), ['#679', '#758'])
   assert.deepEqual(refsFromCommitMessage('subject\n\nbody'), [])
+})
+
+test('A1 moved-base soft reset re-proves every mutation before warm suite', () => {
+  const { io, result } = runRebase()
+  assert.equal(result.status, 'done')
+  assert.equal(REBASE_MUTATIONS.length >= 2, true)
+  assert.equal(io.state.resetCommand, 'git reset --soft base1111')
+  assert.equal(io.calls.commits.length, 2)
+  const freshRows = io.calls.logs.flatMap((row) => row.gate_check_discriminations || [])
+    .filter((row) => row.proof === 'fresh')
+  assert.equal(freshRows.length, REBASE_MUTATIONS.length)
+  assert.ok(freshRows.every((row) => row.measured_generation > 1))
+  const suiteIndex = io.calls.order.indexOf('run:suite-cmd')
+  const freshIndexes = io.calls.order.map((entry, index) => entry === 'fresh-proof-row' ? index : -1).filter((index) => index >= 0)
+  assert.ok(freshIndexes.length > 0)
+  assert.ok(freshIndexes.every((index) => index < suiteIndex))
+  assert.equal(io.calls.order.filter((entry) => entry === 'commit').length, 2)
+})
+
+test('B1 unmoved base performs no extra proof', () => {
+  const { io, result } = runRebase({ moved: false })
+  assert.equal(result.status, 'done')
+  assert.equal(io.state.resetCommand, null)
+  assert.equal(io.calls.commits.length, 1)
+  const proofRows = io.calls.logs.filter((row) => row.gate_check_discriminations)
+  assert.equal(proofRows.length, 1)
+  const parentRow = io.calls.logs.find((row) => row.gate_proof_parent)
+  assert.equal(parentRow.gate_proof_parent, 'base1111')
+  assert.equal(parentRow.gate_generation, 1)
+  assert.equal(io.calls.run.some((command) => command.startsWith('git reset ')), false)
+  assert.equal(io.calls.order.includes('fresh-proof-row'), false)
+})
+
+test('C1 red post-rebase proof escalates before publication', () => {
+  for (const postProof of ['red', 'unproven']) {
+    const { io, result } = runRebase({ postProof })
+    assert.equal(result.status, 'escalation', postProof)
+    assert.equal(result.details.escalation.where, 'rebase', postProof)
+    assert.equal(result.details.commit, io.state.rebaseHead, postProof)
+    assert.equal(io.calls.commits.length, 1, postProof)
+    assert.equal(io.calls.run.some((command) => command === 'suite-cmd'), false, postProof)
+    assert.equal(io.calls.run.some((command) => command.startsWith('git push')), false, postProof)
+    assert.equal(io.calls.logs.some((row) => row.published), false, postProof)
+    assert.equal(io.calls.logs.some((row) => row.gate_proof_parent), false, postProof)
+  }
+})
+
+test('C2 soft-reset failure escalates before proof', () => {
+  for (const reset of ['return', 'throw']) {
+    const { io, result } = runRebase({ reset })
+    assert.equal(result.status, 'escalation', reset)
+    assert.equal(result.details.escalation.where, 'rebase', reset)
+    assert.equal(result.details.commit, io.state.rebaseHead, reset)
+    assert.equal(io.calls.commits.length, 1, reset)
+    assert.equal(io.state.runCleanCalls.length, 1, reset)
+    assert.equal(io.calls.order.includes('fresh-proof-row'), false, reset)
+    assert.equal(io.calls.logs.some((row) => row.gate_proof_parent), false, reset)
+  }
+})
+
+test('C3 thrown post-rebase proof escalates before recommit', () => {
+  const { io, result } = runRebase({ proofThrow: true })
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'rebase')
+  assert.match(result.details.escalation.why, /post-rebase proof threw/)
+  assert.equal(result.details.commit, io.state.rebaseHead)
+  assert.equal(io.calls.commits.length, 1)
+  assert.equal(io.calls.run.some((command) => command === 'suite-cmd'), false)
+  assert.equal(io.calls.logs.some((row) => row.gate_proof_parent), false)
+})
+
+test('C4 recommit failure escalates before publication', () => {
+  for (const recommit of ['throw', 'blank']) {
+    const { io, result } = runRebase({ recommit })
+    assert.equal(result.status, 'escalation', recommit)
+    assert.equal(result.details.escalation.where, 'rebase', recommit)
+    assert.equal(result.details.commit, io.state.rebaseHead, recommit)
+    assert.equal(io.calls.commits.length, 2, recommit)
+    assert.equal(io.calls.run.some((command) => command === 'suite-cmd'), false, recommit)
+    assert.equal(io.calls.run.some((command) => command.startsWith('git push')), false, recommit)
+    assert.equal(io.calls.logs.some((row) => row.published), false, recommit)
+  }
+})
+
+test('D1 interrupted uncommit window retains staged tree and recovery commit', () => {
+  const { io, result } = runRebase({ proofThrow: true })
+  const taskPath = `${CTX.checkout}/a.mjs`
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.commit, io.state.rebaseHead)
+  assert.equal(io.state.resetCommand, 'git reset --soft base1111')
+  assert.equal(io.state.indexBytes[taskPath], 'POST-REBASE TASK-A\n')
+  assert.equal(io.state.worktreeBytes[taskPath], 'POST-REBASE TASK-A\n')
+  const hard = { ...io.state.indexBytes }
+  delete hard[taskPath]
+  assert.equal(hard[taskPath], undefined)
+})
+
+test('E1 proof-parent journal and base_sha sinks name verified parent', () => {
+  for (const moved of [true, false]) {
+    const { io, result } = runRebase({ moved })
+    assert.equal(result.status, 'done', moved ? 'moved' : 'unmoved')
+    const parentRow = io.calls.logs.find((row) => row.gate_proof_parent)
+    const publishedRow = io.calls.logs.find((row) => row.published)
+    assert.equal(parentRow.gate_proof_parent, REBASE_PARENT)
+    assert.equal(publishedRow.published.base_sha, REBASE_PARENT)
+    assert.equal(result.details.pr.base_sha, REBASE_PARENT)
+    assert.equal(result.details.gate?.proof_parent, undefined)
+  }
+})
+
+test('E2 direct-parent validation rejects blank mismatch and dropped replay', () => {
+  const cases = [
+    { parent: { ok: true, output: '' } },
+    { parent: 'other9999' },
+    { postHead: REBASE_PARENT, parentResult: (state) => ({ ok: true, output: `${state.head === REBASE_PARENT ? 'root0000' : REBASE_PARENT}\n` }) },
+  ]
+  for (const options of cases) {
+    const { io, result } = runRebase(options)
+    assert.equal(result.status, 'escalation')
+    assert.equal(result.details.escalation.where, 'rebase')
+    assert.equal(result.details.commit, io.state.rebaseHead)
+    assert.equal(io.state.resetCommand, null)
+    assert.equal(io.calls.logs.some((row) => row.gate_proof_parent), false)
+    assert.equal(io.calls.logs.some((row) => row.published), false)
+    assert.equal(io.calls.run.some((command) => command === 'suite-cmd'), false)
+  }
+})
+
+test('F1 existing rebase escalation text remains exact', () => {
+  const fetch = runPublished({ commands: { 'git fetch origin main': { ok: false, output: 'network down' } } })
+  assert.equal(fetch.result.details.escalation.why, 'the fetch of origin/main failed: network down')
+  const base = runPublished({ commands: { 'git rev-parse origin/main': { ok: true, output: '' } } })
+  assert.equal(base.result.details.escalation.why, 'the rebase probe git rev-parse origin/main failed or returned blank output')
+  const merge = runPublished({ commands: { 'git merge-base HEAD origin/main': { ok: true, output: '' } } })
+  assert.equal(merge.result.details.escalation.why, 'the rebase probe git merge-base HEAD origin/main failed or returned blank output')
+  const proven = runPublished({ commands: {
+    'git rebase origin/main': (state) => { state.head = 'mid3333'; return { ok: false, output: 'rebase failed' } },
+    'git diff --name-only --diff-filter=U': { ok: true, output: 'a.mjs\n' },
+    'git rebase --abort': (state) => { state.head = state.pre; return { ok: true, output: '' } },
+  } })
+  assert.equal(proven.result.details.escalation.why, 'the rebase onto origin/main failed with conflicts in a.mjs; restoration proven at HEAD pre1111')
+  const unproven = runPublished({ commands: {
+    'git rebase origin/main': (state) => { state.head = 'mid3333'; return { ok: false, output: 'rebase failed' } },
+    'git diff --name-only --diff-filter=U': { ok: true, output: 'a.mjs\n' },
+    'git rebase --abort': { ok: false, output: 'abort failed' },
+  } })
+  assert.equal(unproven.result.details.escalation.why, 'the rebase onto origin/main failed with conflicts in a.mjs; restoration is UNPROVEN — HEAD found after abort: mid3333')
 })

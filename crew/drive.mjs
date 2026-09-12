@@ -7402,6 +7402,52 @@ function runTask(ctx, io, crash) {
       }
       S.commit = postRebaseHead
     }
+    const postCommitParent = probe('git rev-parse HEAD^')
+    if (!postCommitParent || postCommitParent !== baseSha) {
+      stageComplete()
+      return escalate('rebase', `the verified direct parent did not match the rebase base: expected ${baseSha}, found ${postCommitParent || '(unavailable)'}`, [], { commit: S.commit })
+    }
+    if (rebased && gateCmd && proofTreeWitness) {
+      const recoveryCommit = S.commit
+      let resetResult
+      try { resetResult = io.run(`git reset --soft ${postCommitParent}`) }
+      catch (err) { resetResult = { ok: false, output: err?.message ?? String(err) } }
+      if (!resetResult?.ok) {
+        stageComplete()
+        return escalate('rebase', `the soft reset to ${postCommitParent} failed${resetResult?.output ? `: ${String(resetResult.output).slice(-2000)}` : ''}`, [], { commit: recoveryCommit })
+      }
+      proofTreeWitness = { ...proofTreeWitness, unknown: true }
+      let postRebaseProof
+      let postRebaseProofThrown = null
+      try {
+        postRebaseProof = refreshProofTree()
+      } catch (err) {
+        postRebaseProofThrown = err
+      }
+      if (postRebaseProofThrown !== null) {
+        stageComplete()
+        return escalate('rebase', `the post-rebase proof threw: ${postRebaseProofThrown?.message ?? String(postRebaseProofThrown)}`, [], { commit: recoveryCommit })
+      }
+      const postRebaseProofFailed = postRebaseProof.escalation || !postRebaseProof.ok || postRebaseProof.unproven
+      if (postRebaseProofFailed) {
+        const proofOutput = postRebaseProof.gateRes?.output
+        const proofWhy = postRebaseProof.escalation?.details?.escalation?.why || (proofOutput ? String(proofOutput).slice(-2000) : '')
+        stageComplete()
+        return escalate('rebase', `the post-rebase proof failed${proofWhy ? `: ${proofWhy}` : ''}`, [], { commit: recoveryCommit })
+      }
+      let recommittedCommit = null
+      try { recommittedCommit = io.commit(committing, message) }
+      catch { recommittedCommit = null }
+      if (!recommittedCommit) {
+        stageComplete()
+        return escalate('rebase', `the post-rebase recommit failed after recovery commit ${recoveryCommit}`, [], { commit: recoveryCommit })
+      }
+      S.commit = recommittedCommit
+      if (postRebaseProof.gateRes) lastGateOutput = postRebaseProof.gateRes.output
+    }
+    if (gateCmd && proofTreeWitness) {
+      io.log(recordRow({ at: io.now(), gate_proof_parent: postCommitParent, gate_generation: gateGeneration }))
+    }
     rebaseMs = io.now() - rebaseStartedAt
     stageComplete()
   }

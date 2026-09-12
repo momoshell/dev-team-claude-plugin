@@ -7483,11 +7483,20 @@ function runTask(ctx, io, crash) {
       suiteWidenings += 1
       const b = art(`suite-red-bounce-r${reviews + 1}.md`)
       failureUpgrade('suite', 'builder')
+      const suiteLines = suiteOutput.split(/\r?\n/)
+      const retained = new Set()
+      for (const [index, line] of suiteLines.entries()) {
+        if (!line.includes('✖') && !/^\s*(?:FAIL\b|not ok\b)/.test(line)) continue
+        for (let candidate = Math.max(0, index - 2); candidate <= Math.min(suiteLines.length - 1, index + 2); candidate += 1) retained.add(candidate)
+      }
+      const retainedIndexes = [...retained].sort((a, b) => a - b)
+      const failureExcerpt = { text: retainedIndexes.map((index) => suiteLines[index]).join('\n'), totalLines: suiteLines.length, elidedLines: suiteLines.length - retainedIndexes.length }
       io.writeFile(b, [
         '# Suite-red scope admission bounce', '',
         `The accepted commit ${S.commit} made the full suite red. The failing output named these unheld test files, which are now admitted to the effective scope:`,
         ...suiteAdmission.files.map((entry) => `- ${entry}`),
-        '', 'Failure output (verbatim):', suiteOutput,
+        '', 'Failure excerpts (all failing lines with 2 lines of context):', failureExcerpt.text,
+        `Elided ${failureExcerpt.elidedLines} of ${failureExcerpt.totalLines} suite output lines; full output remains in ${journal}.`,
         '', `Plan: ${planPath}`,
         'Repair the implementation and rerun the builder/review/gate/commit cycle. This is the one permitted suite-red widening.',
       ].join('\n'))

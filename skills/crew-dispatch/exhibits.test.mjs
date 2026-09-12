@@ -176,12 +176,22 @@ test('the protected floor is documented as the resolved union', () => {
   assert.equal(fences.includes('package-lock.json'), false)
 })
 
-// Mutation killed: deleting one refusal token lets a batch skip a compiler or arrival failure.
-test('the batch reference names every refusal the sequence can hit', () => {
+// Mutation killed: restoring lock or live-claim prose must make this doctrine test fail.
+test('G1 batch doctrine describes own write surfaces', () => {
   const text = readText(join(HERE, 'references/batch.md'))
-  for (const token of ['coupled-source-unfenced', 'stale-read-ack', 'missing-path', 'validateScopeEntries', 'scopeMatcher', 'protectedHitsIn', 'lane_name', 'lane_fence', 'lane-fence', 'fence=NONE', 'plan-adopt-unreadable', 'externalFenceLiveness', 'ADR-040', '--repair-all', 'citation-carrier-unfenced', 'fence-admission-unsourced', 'test-reach', 'anchor-pin', 'census-carrier', 'admission cannot change the tier the operator asked for', 'only an **unpinned** path:line citation']) {
-    assert.ok(text.includes(token), `batch.md must name ${token}`)
-  }
+  const doctrine = "A fence is each lane's own write surface for its scope gate and brief; it is never a lock."
+  assert.equal(text.split(doctrine).length - 1, 1)
+  assert.ok(text.includes('lane_fence` is always empty'))
+  assert.ok(text.includes('lanes: 0, files: 0'))
+  assert.equal(text.split('Retired by ADR-043:').length - 1, 1)
+  assert.ok(text.includes('`external`'))
+  for (const liveDescription of [
+    'Fence isolation now spans concurrent batches',
+    'external LIVENESS is read',
+    'deny set is never derived',
+    'fence entry participates in',
+    'no two entries in one register',
+  ]) assert.equal(text.includes(liveDescription), false, `batch.md must omit retired live behavior: ${liveDescription}`)
   assert.equal(text.includes('prose file:line citations in'), false)
 })
 
@@ -191,9 +201,10 @@ test('C1 E1 span reach doctrine records the measured choice', () => {
     'BLIND SPOT: an unpinned file:line citation is in no manifest key, so neither this check nor the citation-carrier check can find it; a citation the anchor corpus does not pin is still discoverable only by hand',
     'BLIND SPOT: this finds docs carrying a PINNED path:line citation and nothing else. A citation no manifest pins is in no key, and a doc whose exhibit set-compares a documented table against source (skills/crew-recovery/references/escalations.md and the escalate() producers) reddens with every citation in it still correct. Neither is discoverable here; read the exhibits suites of the manifests named above before choosing this fence',
     'BLIND SPOT: this is a proxy in BOTH directions and names candidates, never proof. A test can assert the changed behaviour through a higher-level entry point without importing the changed file at all, and a computed path or dynamic import is invisible to a static scan — crew/crew.mjs loads every adapter that way. A test can equally import a fenced file without asserting anything about the part being changed. The literal symbol scan sees only whole-word occurrences of an exported name, is blind to a renamed re-export, and drops any symbol naming more than 8 test files as too broad to be evidence. Read the named files before choosing this fence; an unnamed one is not cleared. An apostrophe or quote inside a // or /* */ comment opens a phantom literal and hides every real path literal after it in that file.',
-    'BLIND SPOT: a lane booted without --fences declares no surface at all and can be editing anything; a lane whose batch siblings have been reaped records no claim; and a repository whose git dir cannot be measured is not compared. None of those are cleared — they are reported unknown.',
   ]
   for (const blindSpot of blindSpots) assert.equal(text.split(blindSpot).length - 1, 1, `batch.md must carry one exact blind-spot statement: ${blindSpot.slice(0, 40)}`)
+  assert.equal(text.split('cross-batch-unknown').length - 1, 1)
+  assert.ok(text.includes('Retired by ADR-043:'))
   assert.ok(text.includes('dispatch.warnings.json'))
   assert.ok(text.includes('dispatch-batch: WARNING-SUMMARY'))
   assert.ok(text.includes('report=') && text.includes('doctrine=skills/crew-dispatch/references/batch.md'))
@@ -271,23 +282,12 @@ test('RV1-2 derives shipped reach shape from git discovery', () => {
   assert.ok(shipped.contributingTests <= shipped.tests)
 })
 
-// #881: the doctrine promised a `depends_on` exemption in THREE places while the code had
-// removed it, and mutating each claim left 258 tests green — operator guidance that
-// recommends building a register the dispatcher now refuses. A corrected sentence with no
-// tripwire is the same defect waiting to recur, so the claim itself is pinned here.
-test('the batch reference never promises a depends_on exemption from sibling-leak', () => {
+// ADR-043 keeps dependency ordering distinct from write-surface locking.
+test('the batch reference makes depends_on sequencing distinct from locking', () => {
   const text = readText(join(HERE, 'references', 'batch.md'))
-  const revoked = [
-    /only a `depends_on` edge exempts/i,
-    /the\s+one exemption that exists/i,
-    /inherited across an edge/i,
-    /is the one exemption/i,
-  ]
-  for (const pattern of revoked) {
-    assert.equal(pattern.test(text), false, `batch.md still promises the exemption #881 removed: ${pattern}`)
-  }
-  // and it must state the rule that replaced them
-  assert.match(text, /no two entries in one register\s+may claim the same file, related or not/i)
+  assert.ok(text.includes('A `depends_on` edge controls wave order only and does not change'))
+  assert.match(text, /The register records each lane's own surface; overlap is \*\*allowed\*\* because\s+worktrees isolate concurrent writes/i)
+  assert.equal(text.includes('no two entries in one register'), false)
 })
 
 test('RV2-1 computes pristine reach shape and comparison deltas', () => {
@@ -350,7 +350,7 @@ test('each migrated rule has exactly one prose owner', () => {
 test('the batch recipe prescribes no dry run', () => {
   const text = readText(join(HERE, 'references/batch.md'))
   const start = text.indexOf('1. Create one worktree per lane.')
-  const end = text.indexOf('\nParallelise on file-set disjointness', start)
+  const end = text.indexOf('\nParallelise through isolated worktrees', start)
   assert.notEqual(start, -1, 'the numbered recipe is missing')
   assert.notEqual(end, -1, 'the recipe terminator is missing')
   assert.doesNotMatch(text.slice(start, end), /dry[ -]?run/i)

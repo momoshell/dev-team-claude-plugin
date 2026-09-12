@@ -7,9 +7,7 @@ not yet a register the driver can safely consume.
 ## Two-pass compile
 
 Start with a register whose lane has the intended `files` and an empty reads
-list. `make-brief` accepts and ignores an `external: true` marker, so this same
-two-pass compile recipe also works unchanged on a register carrying an external
-entry:
+list:
 
 ```json
 {
@@ -17,17 +15,17 @@ entry:
     {
       "lane": "<lane>",
       "files": ["skills/crew-dispatch/", "skills/crew-recovery/", "scripts/factory/make-brief.mjs:START-END"],
-      "reads": [],
-      "external": true
+      "reads": []
     }
   ]
 }
 ```
 
-`gatherFences` accepts exactly `lane`, `files`, `reads` and `external`; an
-`external: false` marker is refused, not ignored. `make-brief` drops the marker
-after validating it, while `dispatch-batch` harvests it for the external-fence
-checks.
+`gatherFences` accepts exactly `lane`, `files` and `reads`. **ADR-043 retired the
+`external` marker along with the whole collision half of the fence** — a fence is
+this lane's own write surface for its scope gate and brief, never a lock on
+another lane. Dispatch one lane per register; overlap is expected and is resolved
+at `rebase`.
 
 Compile pass one with the current factory CLI:
 

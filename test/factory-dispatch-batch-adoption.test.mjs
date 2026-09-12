@@ -14,8 +14,6 @@ import {
   lineageBaseline,
   lineageLine,
   BatchRefusal,
-  CROSS_BATCH_BLIND_SPOT,
-  CROSS_BATCH_UNKNOWN_PREFIX,
   WARNING_ROWS_UNPERSISTED_PREFIX,
   baseContains,
   baselineCacheRoot,
@@ -38,8 +36,6 @@ import {
   promptSurfaceVerdict,
   DISPATCH_RECORD_SUFFIX,
   DRY_RUN_BLIND_SPOT,
-  EXTERNAL_FENCE_PREFIX,
-  EXTERNAL_REGISTER_NAME,
   FENCE_REPORT_FILE,
   DISPATCH_ONLY_REQUEST_KEYS,
   MISCLASSIFIED_PREFIX,
@@ -60,15 +56,11 @@ import {
   surfaceExportsOf,
   checkArrival,
   checkDirectedBrief,
-  externalCrewDir,
-  externalFenceLiveness,
-  externalLaneReason,
   applyAdoption,
   adoptSourceDir,
   checkFences,
   checkPlanScope,
   checkMachineryBudget,
-  crossBatchCollisions,
   collectAnchorPins,
   collectTestReach,
   testsOutsideFence,
@@ -121,7 +113,6 @@ import {
 } from '../scripts/factory/dispatch-batch.mjs'
 import { parseDirectedBrief, WAITS_S } from '../crew/drive.mjs'
 import { laneFenceFor, renderBrief, resolveWriteSurface } from '../scripts/factory/make-brief.mjs'
-import { DRIVER_GONE_PERIODS, HEARTBEAT_PERIOD_MS } from '../scripts/factory/lane-watch.mjs'
 import { scratchDir } from './helpers.mjs'
 
 import {

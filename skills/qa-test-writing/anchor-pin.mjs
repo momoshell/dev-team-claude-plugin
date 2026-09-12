@@ -280,17 +280,20 @@ export function laneFence({ root, base = 'origin/main', run = defaultRun } = {})
   const invoke = (args) => {
     try { return run(args, root) } catch { return null }
   }
-  if (typeof root !== 'string' || root.length === 0) return { paths: [], measured: false, reason: 'git root could not be measured', base }
+  if (typeof root !== 'string' || root.length === 0) return { paths: [], measured: false, reason: 'git root could not be measured', base, baseCommit: null }
   const top = invoke(['rev-parse', '--show-toplevel'])
-  if (top === null) return { paths: [], measured: false, reason: 'git root could not be measured', base }
+  if (top === null) return { paths: [], measured: false, reason: 'git root could not be measured', base, baseCommit: null }
   const gitRoot = typeof top === 'string' ? top.trim() : ''
-  // `/var` and `/private/var` name the same directory on macOS. Comparing the raw strings
-  // refused a legitimate repository by spelling alone; compare what git itself resolves.
-  const canonical = (value) => {
-    const resolved = invoke(['rev-parse', '--show-toplevel'])
-    return typeof value === 'string' ? value.replace(/^\/private\//, '/') : value
+  // `/var` and `/private/var` name the same directory on macOS, and comparing raw strings
+  // refused a legitimate repository by spelling alone. Resolve both through the filesystem
+  // rather than rewriting the string: blindly stripping a leading `/private/` would make two
+  // genuinely DIFFERENT roots compare equal on a host where `/private` is not that alias,
+  // admitting a repair in the wrong repository — far worse than the refusal it fixes.
+  const sameDirectory = (a, b) => {
+    if (a === b) return true
+    try { return realpathSync(a) === realpathSync(b) } catch { return false }
   }
-  if (canonical(gitRoot) !== canonical(root)) return { paths: [], measured: false, reason: `git root is ${gitRoot || 'unknown'}, expected ${root}`, base, baseCommit: null }
+  if (!sameDirectory(gitRoot, root)) return { paths: [], measured: false, reason: `git root is ${gitRoot || 'unknown'}, expected ${root}`, base, baseCommit: null }
   const merge = invoke(['merge-base', 'HEAD', base])
   if (typeof merge !== 'string' || merge.trim() === '') return { paths: [], measured: false, reason: `no merge base with ${base}`, base, baseCommit: null }
   const mergeBase = merge.trim()
@@ -382,10 +385,10 @@ function settleRepairs({ declarations, candidates }) {
   return { repairs, pending }
 }
 
-export function repairAnchors({ root, docs, manifest, repairAll = false }) {
+export function repairAnchors({ root, docs, manifest, repairAll = false, base }) {
   const repairFence = repairAll
-    ? { paths: [], measured: true, reason: null, base: null }
-    : laneFence({ root })
+    ? { paths: [], measured: true, reason: null, base: null, baseCommit: null }
+    : laneFence({ root, ...(base === undefined ? {} : { base }) })
   const repairPaths = new Set(repairFence.paths)
   let anchors
   let ranges
@@ -597,14 +600,14 @@ export function repairAnchors({ root, docs, manifest, repairAll = false }) {
   return { anchors: anchors.length, repairs, refusals, manifest: next, edits, fence: repairFence }
 }
 
-export function repairAnchorsInPlace({ root, skillDir, manifestPath, repairAll = false }) {
+export function repairAnchorsInPlace({ root, skillDir, manifestPath, repairAll = false, base }) {
   let manifest
   try {
     manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
   } catch (error) {
     return { anchors: 0, repairs: [], refusals: [`could not read anchor manifest ${manifestPath}: ${error?.message || String(error)}`], manifest: {}, edits: [] }
   }
-  const result = repairAnchors({ root, docs: skillDocs(skillDir), manifest, repairAll })
+  const result = repairAnchors({ root, docs: skillDocs(skillDir), manifest, repairAll, base })
   if (result.repairs.length > 0) {
     writeFileSync(manifestPath, `${JSON.stringify(result.manifest, null, 2)}\n`)
     for (const edit of result.edits) writeFileSync(edit.doc, edit.text)
@@ -616,7 +619,13 @@ export function repairCli(argv, log = console.log) {
   let skillDir = null
   let repairAll = false
   let root = process.cwd()
+  // The caller may KNOW this lane's branch point — the driver records a resolved HEAD at
+  // run-start and arm worktrees are cut from a resolved pin — and a known commit beats any
+  // ref this tool could guess at. Absent, it falls back to the default remote-tracking ref
+  // with the honesty limits stated on `laneFence`.
+  let base
   for (let i = 0; i < argv.length; i += 1) {
+    if (argv[i] === '--base') { base = argv[i + 1]; i += 1; continue }
     if (argv[i] === '--repair' || argv[i] === '--repair-all') {
       skillDir = argv[i + 1]
       repairAll = argv[i] === '--repair-all'
@@ -632,7 +641,7 @@ export function repairCli(argv, log = console.log) {
     return 2
   }
   const manifestPath = join(skillDir, 'anchors.json')
-  const result = repairAnchorsInPlace({ root, skillDir, manifestPath, repairAll })
+  const result = repairAnchorsInPlace({ root, skillDir, manifestPath, repairAll, base })
   for (const repair of result.repairs) {
     const row = {
       manifest: rootRelativePath(root, manifestPath),
@@ -640,6 +649,7 @@ export function repairCli(argv, log = console.log) {
       old_line: repair.from,
       new_line: repair.to,
       base: result.fence.base,
+      base_commit: result.fence.baseCommit ?? null,
     }
     log(`ANCHOR_REPAIR_ROW ${JSON.stringify(row)}`)
   }

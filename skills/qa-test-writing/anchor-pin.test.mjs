@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join, relative } from 'node:path'
 import { ROOT, git, scratchDir } from '../../test/helpers.mjs'
-import { anchorManifestDirs, assertAnchorsPinned, checkAnchors, checkSkillAnchors, citationCarrierTests, collectAnchors, collectNamed, collectRanges, INVERTED_MARK, laneFence, MIN_EXPECTED_LENGTH, partitionShifts, pinnedKey, pinnedLiteralsInTests, repairAnchorsInPlace, repairCli, resolveNamed, rewriteCitations, skillDocs, PINNED_LITERAL_BLIND_SPOT } from './anchor-pin.mjs'
+import { anchorManifestDirs, assertAnchorsPinned, checkAnchors, checkSkillAnchors, citationCarrierTests, collectAnchors, collectNamed, collectRanges, INVERTED_MARK, laneFence, MIN_EXPECTED_LENGTH, partitionShifts, pinnedKey, pinnedLiteralsInTests, repairAnchors, repairAnchorsInPlace, repairCli, resolveNamed, rewriteCitations, skillDocs, PINNED_LITERAL_BLIND_SPOT } from './anchor-pin.mjs'
 
 const EXPECTED = "KEY = 'anchored-sentinel-value'"
 const RANGE_EXPECTED = "RANGE = 'range-first-sentinel-value'"
@@ -109,7 +109,7 @@ test('the CLI repairs a plain directory whose pin moved by one line', () => {
   const output = []
   try {
     assert.equal(repairCli(['--repair-all', fx.plainDir, '--root', fx.root], output.push.bind(output)), 0)
-    assert.deepEqual(output, ['ANCHOR_REPAIR_ROW {"manifest":"plain/anchors.json","pin":"crew/sample.mjs:2","old_line":2,"new_line":3,"base":null}'])
+    assert.deepEqual(output, ['ANCHOR_REPAIR_ROW {"manifest":"plain/anchors.json","pin":"crew/sample.mjs:2","old_line":2,"new_line":3,"base":null,"base_commit":null}'])
     const manifest = JSON.parse(readFileSync(fx.manifestPath, 'utf8'))
     const doc = readFileSync(fx.doc, 'utf8')
     assert.equal(manifest['crew/sample.mjs:3'], EXPECTED)
@@ -446,7 +446,7 @@ test('repair is idempotent when it runs twice', () => {
 })
 
 test('the CLI repairs a skill directory and exits non-zero on refusal', () => {
-  // Mutation killed: changing repairCli's clean, refusal, or usage status breaks this in-process contract.
+  // Mutation killed: changing repairClis clean, refusal, or usage status breaks this in-process contract.
   const source = ['// header', '// inserted before the declaration', `const ${EXPECTED}`, 'const other = 1', 'export default KEY', '']
   const fx = fixture({ source })
   const output = []
@@ -532,7 +532,7 @@ test('b384: an in-fence shift is a hard failure', () => {
 })
 
 test('a shift whose pinning manifest is outside the fence warns instead of failing (#882)', () => {
-  // Mutation killed: refusing an external-manifest shift would make drift outside this lane's ownership block the suite.
+  // Mutation killed: refusing an external-manifest shift would make drift outside this lanes ownership block the suite.
   const source = ['// header', '// inserted before the declaration', `const ${EXPECTED}`, 'const other = 1', 'export default KEY', '']
   const fx = fixture({ source })
   const captured = []
@@ -580,7 +580,7 @@ test('partitionShifts preserves the omitted-manifest split and routes external m
 })
 
 test('an unmeasurable lane fence is empty and warns rather than throwing', () => {
-  // Mutation killed: guessing a scratch directory's fence would turn an unmeasured blind spot into a false hard failure.
+  // Mutation killed: guessing a scratch directorys fence would turn an unmeasured blind spot into a false hard failure.
   const source = ['// header', '// inserted before the declaration', `const ${EXPECTED}`, 'const other = 1', 'export default KEY', '']
   const fx = fixture({ source })
   const captured = []
@@ -603,6 +603,100 @@ test('an unmeasurable lane fence is empty and warns rather than throwing', () =>
 // remote-tracking ref reproduces the same thing. Neither is detectable locally. What the fence
 // CAN do is name the commit it actually measured against, so a caller who knows the true
 // branch point can pass it and an auditor can check afterwards.
+// MF1: reporting a bad base afterwards does not PREVENT an over-wide repair. The caller often
+// knows the true branch point — the driver records a resolved HEAD at run-start and arm
+// worktrees are cut from a resolved pin — so `--base` threads that known commit all the way to
+// the fence. A lane branched from `release` while `origin/main` lagged is the shape that
+// repaired an untouched upstream file.
+// G2 exercises laneFence directly; this covers the PLUMBING, which is the actual MF1 fix.
+// `--base` must reach the fence through repairCli -> repairAnchorsInPlace -> repairAnchors.
+test('G3 --base reaches the fence through the whole CLI chain', () => {
+  const root = scratchDir('base-threading-')
+  mkdirSync(join(root, 'scripts'), { recursive: true })
+  git(root, 'init', '--quiet')
+  git(root, 'symbolic-ref', 'HEAD', 'refs/heads/main')
+  writeFileSync(join(root, 'scripts/a.mjs'), 'const A = 1\n')
+  writeFileSync(join(root, 'scripts/b.mjs'), 'const B = 1\n')
+  git(root, 'add', '.'); git(root, 'commit', '--quiet', '-m', 'base')
+  // an origin/main that LAGS — ignoring the callers base falls back to this and widens
+  git(root, 'update-ref', 'refs/remotes/origin/main', 'HEAD')
+  git(root, 'checkout', '--quiet', '-b', 'release')
+  writeFileSync(join(root, 'scripts/b.mjs'), '// moved\nconst B = 1\n')
+  git(root, 'add', '.'); git(root, 'commit', '--quiet', '-m', 'release moves B')
+  const releaseSha = git(root, 'rev-parse', 'HEAD').trim()
+  git(root, 'checkout', '--quiet', '-b', 'lane')
+  writeFileSync(join(root, 'scripts/a.mjs'), '// moved\nconst A = 1\n')
+  git(root, 'add', '.'); git(root, 'commit', '--quiet', '-m', 'lane moves A')
+  const fx = contractSkill(root, { 'scripts/a.mjs:1': EXPECTED_A, 'scripts/b.mjs:1': EXPECTED_B })
+  try {
+    // Told the TRUE branch point, b is OUT of fence: its stale pin is refused, not rewritten.
+    // That refusal is the safety property, and it exits 1.
+    const output = []
+    const code = repairCli(['--repair', fx.skillDir, '--root', fx.root, '--base', releaseSha], output.push.bind(output))
+    const rows = output.filter((line) => line.startsWith('ANCHOR_REPAIR_ROW ')).map((line) => JSON.parse(line.slice('ANCHOR_REPAIR_ROW '.length)))
+    assert.equal(code, 1, output.join('\n'))
+    assert.equal(rows.some((row) => row.pin === 'scripts/b.mjs:1'), false, 'an upstream file must not be rewritten')
+    assert.ok(output.some((line) => line.startsWith('refused') && line.includes('scripts/b.mjs')), output.join('\n'))
+    for (const row of rows) assert.equal(row.base_commit, releaseSha, 'the row names the supplied commit')
+
+    // and assert the THREADING directly: the fence repairAnchors used must be the one the
+    // caller asked for. Inferring it from exit codes did not discriminate — ignoring `base`
+    // still produced a refusal, for a different reason — so the plumbing is checked at the
+    // seam. A lagging origin/main sits in this fixture precisely so the two differ.
+    const threaded = repairAnchors({
+      root: fx.root, docs: skillDocs(fx.skillDir),
+      manifest: JSON.parse(readFileSync(fx.manifestPath, 'utf8')), base: releaseSha,
+    })
+    assert.equal(threaded.fence.baseCommit, releaseSha, 'repairAnchors measured against the supplied base')
+    assert.equal(threaded.fence.paths.includes('scripts/b.mjs'), false, 'the upstream file is outside the supplied fence')
+
+    // The contrast — that GUESSING a base widens the fence — is pinned by G2 against
+    // `laneFence` directly. Re-running the CLI here would measure a fixture this call has
+    // already mutated, so it is not repeated.
+  } finally { rmSync(fx.root, { recursive: true, force: true }) }
+})
+
+// MF2: the contract is baseCommit on EVERY return, including the two early ones.
+test('G4 every unmeasured return carries a null base commit', () => {
+  for (const [label, fence] of [
+    ['invalid root', laneFence({ root: '' })],
+    ['unreadable root', laneFence({ root: '/nonexistent-root-for-anchor-pin' })],
+  ]) {
+    assert.equal(fence.measured, false, label)
+    assert.equal('baseCommit' in fence, true, `${label} omits baseCommit entirely`)
+    assert.equal(fence.baseCommit, null, label)
+  }
+})
+
+test('G2 a caller-supplied base confines the repair to the lane own work', () => {
+  const root = scratchDir('supplied-base-')
+  mkdirSync(join(root, 'scripts'), { recursive: true })
+  git(root, 'init', '--quiet')
+  git(root, 'symbolic-ref', 'HEAD', 'refs/heads/main')
+  writeFileSync(join(root, 'scripts/a.mjs'), 'const A = 1\n')
+  writeFileSync(join(root, 'scripts/b.mjs'), 'const B = 1\n')
+  git(root, 'add', '.'); git(root, 'commit', '--quiet', '-m', 'base')
+  // release advances B; the lane is cut from release and touches only A
+  git(root, 'checkout', '--quiet', '-b', 'release')
+  writeFileSync(join(root, 'scripts/b.mjs'), '// moved\nconst B = 1\n')
+  git(root, 'add', '.'); git(root, 'commit', '--quiet', '-m', 'release moves B')
+  const releaseSha = git(root, 'rev-parse', 'HEAD').trim()
+  git(root, 'checkout', '--quiet', '-b', 'lane')
+  writeFileSync(join(root, 'scripts/a.mjs'), '// moved\nconst A = 1\n')
+  git(root, 'add', '.'); git(root, 'commit', '--quiet', '-m', 'lane moves A')
+
+  // told the TRUE branch point, the fence names only the lane own file
+  const supplied = laneFence({ root, base: releaseSha })
+  assert.equal(supplied.measured, true)
+  assert.equal(supplied.baseCommit, releaseSha)
+  assert.deepEqual(supplied.paths, ['scripts/a.mjs'])
+
+  // left to guess at `main`, it is WIDER — this is the defect a known base avoids, and it is
+  // pinned here so the difference cannot silently disappear
+  const guessed = laneFence({ root, base: 'main' })
+  assert.equal(guessed.paths.includes('scripts/b.mjs'), true, 'guessing a base over-widens the fence')
+})
+
 test('G1 the fence names the commit it measured against, not just the symbolic ref', () => {
   const root = scratchDir('base-commit-')
   mkdirSync(join(root, 'skills'), { recursive: true })
@@ -692,7 +786,7 @@ test('repair CLI leaves a committed out-of-fence shift untouched', () => {
 })
 
 test('repair-all CLI repairs a committed shift on clean main', () => {
-  // Mutation killed: dropping repair-all's fence override leaves a committed main shift unrepaired.
+  // Mutation killed: dropping repair-alls fence override leaves a committed main shift unrepaired.
   const root = scratchDir('b383-anchor-repair-all-')
   const skillDir = join(root, 'skills/sample')
   const doc = join(skillDir, 'SKILL.md')
@@ -717,7 +811,7 @@ test('repair-all CLI repairs a committed shift on clean main', () => {
   assert.match(warnings[0], /--repair-all/)
   const output = []
   assert.equal(repairCli(['--repair-all', skillDir, '--root', repoRoot], output.push.bind(output)), 0)
-  assert.deepEqual(output, ['ANCHOR_REPAIR_ROW {"manifest":"skills/sample/anchors.json","pin":"crew/sample.mjs:1","old_line":1,"new_line":2,"base":null}'])
+  assert.deepEqual(output, ['ANCHOR_REPAIR_ROW {"manifest":"skills/sample/anchors.json","pin":"crew/sample.mjs:1","old_line":1,"new_line":2,"base":null,"base_commit":null}'])
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
   assert.equal(manifest['crew/sample.mjs:2'], EXPECTED)
   assert.equal(Object.hasOwn(manifest, 'crew/sample.mjs:1'), false)
@@ -819,7 +913,7 @@ function anchorKey(line) { return `${'crew/sample.mjs'}:${line}` }
 function rangeCitation(start, end) { return `${'crew/sample.mjs'}:${start}-${end}` }
 
 test('a range whose endpoints are both manifest keys has both repaired', () => {
-  // Mutation killed: omitting the range rewrite leaves the citation's end stale after both pins move.
+  // Mutation killed: omitting the range rewrite leaves the citations end stale after both pins move.
   const fx = fixture({
     source: ['// header', `const ${RANGE_EXPECTED}`, `const ${RANGE_NEXT}`, 'export default KEY', ''],
     cite: rangeCitation(2, 3),
@@ -1011,7 +1105,7 @@ test('a blocked range stays silent while nothing has drifted', () => {
 })
 
 test('a repaired pair that inverts is written truthfully and reported', () => {
-  // Mutation killed: straightening a repaired inverted pair would hide the source's true endpoint order.
+  // Mutation killed: straightening a repaired inverted pair would hide the sources true endpoint order.
   const fx = fixture({
     source: ['// header', `const ${RANGE_EXPECTED}`, `const ${RANGE_NEXT}`, 'const spacer = 1', 'export default KEY', ''],
     cite: rangeCitation(2, 3),
@@ -1311,7 +1405,7 @@ test('D1', () => {
     assert.equal(repairCli(['--repair-all', fx.skillDir, '--root', fx.root], output.push.bind(output)), 0)
     const next = JSON.parse(readFileSync(fx.manifestPath, 'utf8'))
     assert.equal(next['scripts/a.mjs:2'], EXPECTED_A)
-    assert.equal(output[0].endsWith('"base":null}'), true)
+    assert.equal(output[0].endsWith('"base":null,"base_commit":null}'), true)
   } finally {
     rmSync(fx.root, { recursive: true, force: true })
   }
@@ -1324,12 +1418,17 @@ test('E1', () => {
     assert.equal(repairCli(['--repair', fx.skillDir, '--root', fx.root], output.push.bind(output)), 0)
     const row = output.find((line) => line.startsWith('ANCHOR_REPAIR_ROW '))
     assert.ok(row, output.join('\n'))
-    assert.deepEqual(JSON.parse(row.slice('ANCHOR_REPAIR_ROW '.length)), {
+    const parsed = JSON.parse(row.slice('ANCHOR_REPAIR_ROW '.length))
+    // the row names the COMMIT the repair was measured against, not only the symbolic ref,
+    // so an over-wide repair can be audited after the fact. It is a per-run sha.
+    assert.match(String(parsed.base_commit), /^[0-9a-f]{40}$/, 'the audit row names its base commit')
+    assert.deepEqual({ ...parsed, base_commit: undefined }, {
       manifest: 'skills/sample/anchors.json',
       pin: 'scripts/a.mjs:1',
       old_line: 1,
       new_line: 2,
       base: 'origin/main',
+      base_commit: undefined,
     })
   } finally {
     rmSync(fx.root, { recursive: true, force: true })

@@ -4861,6 +4861,9 @@ function runTask(ctx, io, crash) {
         `Planner source brief: ${planBrief}.`,
         `Original task brief: ${ctx.briefFile}.`,
         '',
+        'details.validation_lane must be ONE invocation whose executable is `node`, with explicit files: no environment prefix, shell operator, or second command.',
+        '`LANE_VALUE_OPTIONS` (for values such as `--test-timeout`) and `LANE_PATH_OPTIONS` (for paths such as `--import`) are supported.',
+        'An environment value belongs in the test as a declared constant, with the variable as an optional override.',
         'details.needs_adversary must be a boolean: true requests the adversary plan-check round; false does not.',
       ].join('\n'))
     } catch (err) {

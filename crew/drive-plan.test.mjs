@@ -3,6 +3,7 @@
 // Shared fixtures, and the ledger sandbox side effect, live in ./drive-fixtures.mjs.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import {
   ADOPTED_PLAN_HEADING, ADOPT_BLOCK, adversarialPlanEnv, CENSUS_ROW_ABSENT, CENSUS_TURNS_ABSENT, CENSUS_UNREADABLE, CTX, CTX_DIRECTED, CTX_TL, DIRECTED_FILES, ENVELOPE_REFUSAL_REASONS, FAILURE_UPGRADE, GATE_SUMMARY_PREFIX, GROWTH_DIVERGENCE_FACTOR, LANE_COMMAND_SHAPES, LANE_INPUT_VERDICTS, LANE_PATH_OPTIONS, LANE_VALUE_OPTIONS, LIMITS, NO_TURN_CEILING, PLAN_CHECK_ABSENT, PLAN_CHECK_INVALID, PLAN_CHECK_SEVERITIES, PLAN_CONVERGENCE_REASONS, RED, RUN_START_EVENT, S843_ADDED, S843_D2, S843_DISPATCHED, S843_NARROWED, SUITE_REASK_MAX, TD, THREW, TURN_CEILING_DEFAULTS, TURN_CEILING_REFUSALS, TURN_CEILING_ROLES, VALIDATION_LANE_UNLOADABLE, adoptionSignal, bothExhaustionPointsScenario, buildEnv, carriedPrLines, carriedPreambleLines, carriedResolution, carriedSilenceDefect, checkEnv, composeCommitMessage, divergeThenExhaustPlanScenario, divergenceConsultLines, divergentPlanScenario, driveTask, enforcementPreamble, fakeIo, growthLines, growthRecord, join, laneCommandInputs, laneCommandShape, laneFence, leadEnv, lineageFromJournal, persistentDivergenceScenario, planCheckAcceptIo, planCheckFindings, planCheckFindingsFromText, planConvergence, planEnv, planRevisionRun, planRoundCap, planThenReviewIo, protectedPlanEnv, resolveTurnCeilings, resolveValidationLane, resumeGreen, resumeKeys, resumeRed, reviewConvergeRun, reviewEnv, s843Bullets, s843Ctx, s843Io, s843PlanEnv, suiteRefusalEnv, turnCeilingsRecord, validationPlan, validationProbeOutput, validationProbeRun, validationRows, laneProbeCommand,
 } from './drive-fixtures.mjs'
@@ -38,6 +39,25 @@ test('protected directory typed refusal fails closed without a tech lead', () =>
   assert.equal(result.details.escalation.why, 'adversary-unavailable')
 })
 
+const plannerWrapper = () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': adversarialPlanEnv(), 'tech-lead:1': checkEnv('revise'),
+      'planner:2': adversarialPlanEnv(), 'tech-lead:2': checkEnv('approve'),
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask(CTX_TL, io)
+  assert.equal(result.status, 'done')
+  const planner = io.calls.assign.find(({ role }) => role === 'planner')
+  assert.ok(planner)
+  const wrapper = io.calls.writes[planner.briefFile]
+  assert.equal(typeof wrapper, 'string')
+  return wrapper
+}
+
 test('H1 planner assignment briefs require the adversary declaration', () => {
   const io = fakeIo({
     envelopes: {
@@ -56,6 +76,56 @@ test('H1 planner assignment briefs require the adversary declaration', () => {
     assert.match(io.calls.writes[path], new RegExp(`Read the current planner brief at ${source.replaceAll('/', '\\/')}\\.`))
     assert.match(io.calls.writes[path], /details\.needs_adversary must be a boolean/)
   }
+})
+
+test('planner wrapper states executable and command boundaries', () => {
+  const wrapper = plannerWrapper()
+  assert.match(wrapper, /details\.validation_lane must be ONE invocation whose executable is `node`, with explicit files: no environment prefix, shell operator, or second command\./)
+})
+
+test('planner wrapper names accepted validation-lane option tables', () => {
+  const wrapper = plannerWrapper()
+  assert.match(wrapper, /`LANE_VALUE_OPTIONS` \(for values such as `--test-timeout`\) and `LANE_PATH_OPTIONS` \(for paths such as `--import`\) are supported\./)
+})
+
+test('planner wrapper directs environment defaults into tests', () => {
+  const wrapper = plannerWrapper()
+  assert.match(wrapper, /An environment value belongs in the test as a declared constant, with the variable as an optional override\./)
+})
+
+test('gate doctrine requires environment-independent checks', () => {
+  const gates = readFileSync(new URL('../skills/qa-test-writing/references/gates.md', import.meta.url), 'utf8')
+  assert.match(gates, /- \*\*Require no bespoke environment\.\*\* Every check must pass with no bespoke environment, because that is how `npm test` and CI run it\./)
+})
+
+test('validation lane keeps env prefixes refused and path options loadable', () => {
+  const envLane = 'env X=0 node --test a.test.mjs'
+  assert.equal(laneCommandShape(envLane).shape, 'unparsable')
+
+  const finalIo = fakeIo({
+    envelopes: { 'planner:1': validationPlan(envLane) },
+    runs: validationProbeRun(envLane, { 'a.test.mjs': 'file' }),
+  })
+  const final = driveTask({ ...CTX, limits: { plan_rounds: 1 } }, finalIo)
+  assert.equal(final.status, 'escalation')
+  assert.equal(final.details.escalation.where, 'plan')
+  assert.match(final.details.escalation.why, new RegExp(VALIDATION_LANE_UNLOADABLE))
+  assert.match(final.details.escalation.why, /no revision left to bounce it to/)
+
+  const valid = resolveValidationLane('node --test --import x.mjs a.test.mjs', (inputs) => {
+    assert.deepEqual(inputs, ['x.mjs', 'a.test.mjs'])
+    return new Map([['x.mjs', 'file'], ['a.test.mjs', 'file']])
+  })
+  assert.deepEqual(valid.rows.map(({ input, verdict }) => [input, verdict]), [
+    ['x.mjs', 'loadable'], ['a.test.mjs', 'loadable'],
+  ])
+  assert.deepEqual(valid.refused, [])
+})
+
+test('planner wrapper preserves brief pointer and adversary declaration', () => {
+  const wrapper = plannerWrapper()
+  assert.match(wrapper, /Read the current planner brief at/)
+  assert.match(wrapper, /details\.needs_adversary must be a boolean: true requests the adversary plan-check round; false does not\./)
 })
 
 test('a lead that answers escalate at the accept re-ask escalates with both reasons', () => {

@@ -1187,6 +1187,13 @@ export const PLAN_CONVERGENCE_REASONS = Object.freeze([
   'prior-findings-closed', 'verdict-not-revise', 'findings-absent', 'round-1', 'blocker-present', 'findings-rejected', 'prior-findings-open',
 ])
 
+const PRESCRIBED_PLAN_EDIT = /^(?:Split .+ into .+|Make .+ (?:supersede|choose) .+|Add (?:a|an|the|`[^`]+`) .+|Change .+ to .+|Replace .+ with .+|Define .+ (?:from|as) .+|Extend .+ with .+|Special-case `[^`]+` .+|Do not [a-z][a-z-]* .+|After .+, call .+)$/
+
+export function prescribedPlanCorrection(correction) {
+  if (typeof correction !== 'string') return false
+  return PRESCRIBED_PLAN_EDIT.test(correction.trim())
+}
+
 export function planCheckFindings(details) {
   if (!Array.isArray(details?.findings)) return null
   const findings = []
@@ -5120,6 +5127,8 @@ function runTask(ctx, io, crash) {
   // the plan-check bounces keep the 'plan-revision' note they have always carried (#843).
   let planNote = null
   let extraPlanRounds = 0
+  let prescribedPlanApplicationUsed = false
+  let prescribedPlanApplications = 0
   let divergenceConsulted = false
   const readOrNull = (path) => { try { const text = io.readFile(path); return typeof text === 'string' ? text : null } catch { return null } }
   let dispatchAdmissions = null
@@ -5147,6 +5156,7 @@ function runTask(ctx, io, crash) {
   // planCapNote({ … }) from `predecessorChecked` onward, so a text-anchored mutation
   // aimed at that call would rewrite this cap too. Do not collapse it to shorthand.
   const planRounds = () => planRoundCap({ limits, adopted: adoption.adopted, predecessorChecked, extraPlanRounds: extraPlanRounds })
+  const planAttempts = () => planRounds() + prescribedPlanApplications
   io.log(recordRow({ at: io.now(), plan_round_cap: {
     adopted: adoption.adopted, predecessor_checked: predecessorChecked,
     reason: adoption.reason, cap: planRounds(),
@@ -5161,7 +5171,7 @@ function runTask(ctx, io, crash) {
     if (c.decision === 'escalate') return escalate('plan', c.reason)
   }
 
-  for (let round = 1; plans && round <= planRounds(); round += 1) {
+  for (let round = 1; plans && round <= planAttempts(); round += 1) {
     stage(`plan:r${round}`)
     const plannerBrief = art(`planner-assignment-r${round}.md`)
     try {
@@ -5516,10 +5526,33 @@ function runTask(ctx, io, crash) {
       if (divergenceReady) divergenceConsulted = true
       const fundable = !exhausted || canGrant('plan-check')
       const bounceOnly = convergence.blocker || round < 2
-      if (bounceOnly && !fundable) {
+      const prescribedBlockers = currentPlanFindings?.findings
+        .filter(({ severity }) => severity === 'blocker')
+        .map(({ id, correction }) => ({ id, correction })) || []
+      const prescribedApplication = convergence.reason === 'blocker-present'
+        && prescribedBlockers.length > 0
+        && prescribedBlockers.every(({ correction }) => prescribedPlanCorrection(correction))
+      const escalatePlanBlocker = () => {
         stageComplete()
         stageComplete()
         return escalate('plan-check', `the plan check returned a BLOCKER, or a finding malformed enough to be one, or is still at round 1, on round ${round}, and no plan round remains to bounce it — neither is ever accepted`, [], {}, { finding_ids: planFindingIds })
+      }
+      if (bounceOnly && !fundable) {
+        if (prescribedApplication) {
+          if (prescribedPlanApplicationUsed) return escalatePlanBlocker()
+          prescribedPlanApplicationUsed = true
+          prescribedPlanApplications += 1
+          io.log(recordRow({ at: io.now(), plan_prescription_applied: { round, findings: prescribedBlockers.map(({ id, correction }) => ({ id, correction })) } }))
+          const b = art(`plan-bounce-r${round}.md`)
+          failureUpgrade('plan', 'planner')
+          io.writeFile(b, renderPlanRevisionBrief({ round, check, taskDir: ctx.taskDir, briefFile: ctx.briefFile, growth: S.growth }))
+          planBrief = b
+          planEnv = null
+          stageComplete()
+          stageComplete()
+          continue
+        }
+        return escalatePlanBlocker()
       }
       const options = fundable ? (bounceOnly ? ['bounce', 'escalate'] : ['bounce', 'accept', 'escalate']) : ['accept', 'escalate']
       const c = consultLead(

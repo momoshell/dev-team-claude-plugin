@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs'
 import {
   ADOPTED_PLAN_HEADING, ADOPT_BLOCK, adversarialPlanEnv, CENSUS_ROW_ABSENT, CENSUS_TURNS_ABSENT, CENSUS_UNREADABLE, CTX, CTX_DIRECTED, CTX_TL, DIRECTED_FILES, ENVELOPE_REFUSAL_REASONS, FAILURE_UPGRADE, GATE_SUMMARY_PREFIX, GROWTH_DIVERGENCE_FACTOR, LANE_COMMAND_SHAPES, LANE_INPUT_VERDICTS, LANE_PATH_OPTIONS, LANE_VALUE_OPTIONS, LIMITS, NO_TURN_CEILING, PLAN_CHECK_ABSENT, PLAN_CHECK_INVALID, PLAN_CHECK_SEVERITIES, PLAN_CONVERGENCE_REASONS, RED, RUN_START_EVENT, S843_ADDED, S843_D2, S843_DISPATCHED, S843_NARROWED, SUITE_REASK_MAX, TD, THREW, TRIAGE_NOTE, TURN_CEILING_DEFAULTS, TURN_CEILING_REFUSALS, TURN_CEILING_ROLES, VALIDATION_LANE_UNLOADABLE, adoptionSignal, bothExhaustionPointsScenario, buildEnv, carriedPrLines, carriedPreambleLines, carriedResolution, carriedSilenceDefect, checkEnv, composeCommitMessage, divergeThenExhaustPlanScenario, divergenceConsultLines, divergentPlanScenario, driveTask, enforcementPreamble, fakeIo, growthLines, growthRecord, join, laneCommandInputs, laneCommandShape, laneFence, leadEnv, lineageFromJournal, persistentDivergenceScenario, planCheckAcceptIo, planCheckFindings, planCheckFindingsFromText, planConvergence, planEnv, planRevisionRun, planRoundCap, planThenReviewIo, protectedPlanEnv, resolveTurnCeilings, resolveValidationLane, resumeGreen, resumeKeys, resumeRed, reviewConvergeRun, reviewEnv, s843Bullets, s843Ctx, s843Io, s843PlanEnv, suiteRefusalEnv, turnCeilingsRecord, triageEnv, validationPlan, validationProbeOutput, validationProbeRun, validationRows, laneProbeCommand,
 } from './drive-fixtures.mjs'
-import { CENSUS_ABSENT_REASONS, CENSUS_ELIGIBLE_OUTCOMES, CREATES_ABSENT, PLAN_BOUNCE_UNFUNDED_HEADING, PLAN_SEAT_REFUSED, ZERO_TURN_NON_START, ZERO_TURN_REASK_MAX, dispatchAdmissionsFromJournal, inheritedPlanScope, observeTurnCensus, planBounceUnfundedLines, planCapNote, planExhaustedWhy, planRefusedWhy, turnCeilingOf, zeroTurnNonStartOf } from './drive.mjs'
+import { CENSUS_ABSENT_REASONS, CENSUS_ELIGIBLE_OUTCOMES, CREATES_ABSENT, PLAN_BOUNCE_UNFUNDED_HEADING, PLAN_SEAT_REFUSED, ZERO_TURN_NON_START, ZERO_TURN_REASK_MAX, dispatchAdmissionsFromJournal, inheritedPlanScope, observeTurnCensus, planBounceUnfundedLines, planCapNote, planExhaustedWhy, planRefusedWhy, prescribedPlanCorrection, turnCeilingOf, zeroTurnNonStartOf } from './drive.mjs'
 import { suiteRunPolicy } from './headless.mjs'
 
 const zeroTurnEnvelope = (id = 'planner1', role = 'planner', detail = {}) => ({
@@ -993,6 +993,287 @@ test('a throwing io.emit changes nothing', () => {
   assert.deepEqual(noisy, plain)
   assert.deepEqual(noisyIo.calls.run, plainIo.calls.run)
   assert.deepEqual(noisyIo.calls.runClean, plainIo.calls.runClean)
+})
+
+const prescribedCheck = (findings, verdict = 'revise') => ({
+  status: 'done', role: 'tech-lead', summary: 'checked',
+  details: { verdict, check_path: `${TD}/plan-check.md`, findings },
+})
+
+const prescriptionEscalation = (round) => `the plan check returned a BLOCKER, or a finding malformed enough to be one, or is still at round 1, on round ${round}, and no plan round remains to bounce it — neither is ever accepted`
+const grantSpentPlanContext = { ...CTX_TL, limits: { plan_rounds: 2 } }
+const planCheckGrant = [{ where: 'plan-check', round: 2 }]
+
+// MUTATION A1-G1: the named source anchors must each change the corresponding gate title's behavior.
+test('A1 prescribed final-round blocker gets one correction application', () => {
+  const finding = { id: 'PC-A1', severity: 'blocker', correction: 'Split the plan into checked sections' }
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': adversarialPlanEnv(), 'tech-lead:1': prescribedCheck([]),
+      'planner:2': adversarialPlanEnv(), 'tech-lead:2': prescribedCheck([finding]),
+      'planner:3': adversarialPlanEnv(), 'tech-lead:3': prescribedCheck([finding]),
+      'planner:4': adversarialPlanEnv(), 'tech-lead:4': checkEnv('approve'),
+      'lead:1': leadEnv('bounce'), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask(grantSpentPlanContext, io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'planner').length, 4)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'tech-lead').length, 4)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'lead').length, 1)
+  assert.deepEqual(result.details.extra_rounds_granted, planCheckGrant)
+  assert.deepEqual(io.calls.logs.filter(({ plan_prescription_applied }) => plan_prescription_applied).map(({ plan_prescription_applied }) => plan_prescription_applied), [
+    { round: 3, findings: [{ id: finding.id, correction: finding.correction }] },
+  ])
+})
+
+test('B1 passing prescribed re-check reaches done', () => {
+  const finding = { id: 'PC-B1', severity: 'blocker', correction: 'Make the revision choose the current plan' }
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': adversarialPlanEnv(), 'tech-lead:1': prescribedCheck([]),
+      'planner:2': adversarialPlanEnv(), 'tech-lead:2': prescribedCheck([finding]),
+      'planner:3': adversarialPlanEnv(), 'tech-lead:3': prescribedCheck([finding]),
+      'planner:4': adversarialPlanEnv(), 'tech-lead:4': checkEnv('approve'),
+      'lead:1': leadEnv('bounce'), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask(grantSpentPlanContext, io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'planner').length, 4)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'tech-lead').length, 4)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'lead').length, 1)
+  assert.deepEqual(result.details.extra_rounds_granted, planCheckGrant)
+  assert.equal(io.calls.logs.filter(({ plan_prescription_applied }) => plan_prescription_applied).length, 1)
+})
+
+test('C1 persistent blocker re-check escalates with the frozen text', () => {
+  const finding = { id: 'PC-C1', severity: 'blocker', correction: 'Add a blocker to the final check' }
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': adversarialPlanEnv(), 'tech-lead:1': prescribedCheck([]),
+      'planner:2': adversarialPlanEnv(), 'tech-lead:2': prescribedCheck([finding]),
+      'planner:3': adversarialPlanEnv(), 'tech-lead:3': prescribedCheck([finding]),
+      'planner:4': adversarialPlanEnv(), 'tech-lead:4': prescribedCheck([finding]),
+      'lead:1': leadEnv('bounce'),
+    },
+  })
+  const result = driveTask(grantSpentPlanContext, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'plan-check')
+  assert.equal(result.details.escalation.why, prescriptionEscalation(4))
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'planner').length, 4)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'tech-lead').length, 4)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'lead').length, 1)
+  assert.deepEqual(result.details.extra_rounds_granted, planCheckGrant)
+  assert.equal(io.calls.logs.filter(({ plan_prescription_applied }) => plan_prescription_applied).length, 1)
+})
+
+test('D1 descriptive blocker correction keeps the frozen escalation', () => {
+  const grantFinding = { id: 'PC-D-GRANT', severity: 'blocker', correction: 'Change the first exhausted check to bounce' }
+  const cases = [
+    [{ id: 'PC-D1', severity: 'blocker', correction: 'the plan is wrong' }],
+    [
+      { id: 'PC-D2', severity: 'blocker', correction: 'Change the plan to close the blocker' },
+      { id: 'PC-D2', severity: 'blocker', correction: 'duplicate finding' },
+    ],
+    [
+      { id: 'PC-D3', severity: 'blocker', correction: 'Change the loop to use the revised cap' },
+      { id: 'PC-D4', severity: 'blocker', correction: 'the acceptance criteria contradict the brief' },
+    ],
+  ]
+  for (const findings of cases) {
+    const io = fakeIo({
+      envelopes: {
+        'planner:1': adversarialPlanEnv(), 'tech-lead:1': prescribedCheck([]),
+        'planner:2': adversarialPlanEnv(), 'tech-lead:2': prescribedCheck([grantFinding]),
+        'planner:3': adversarialPlanEnv(), 'tech-lead:3': prescribedCheck(findings),
+        'planner:4': adversarialPlanEnv(), 'tech-lead:4': checkEnv('approve'),
+        'lead:1': leadEnv('bounce'), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+      },
+      runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+      changed: ['a.mjs', 'a.test.mjs'],
+    })
+    const result = driveTask(grantSpentPlanContext, io)
+    assert.equal(result.status, 'escalation')
+    assert.equal(result.details.escalation.where, 'plan-check')
+    assert.equal(result.details.escalation.why, prescriptionEscalation(3))
+    assert.equal(io.calls.assign.filter(({ role }) => role === 'planner').length, 3)
+    assert.equal(io.calls.assign.filter(({ role }) => role === 'tech-lead').length, 3)
+    assert.equal(io.calls.assign.filter(({ role }) => role === 'lead').length, 1)
+    assert.deepEqual(result.details.extra_rounds_granted, planCheckGrant)
+    assert.equal(io.calls.logs.filter(({ plan_prescription_applied }) => plan_prescription_applied).length, 0)
+  }
+})
+
+test('E1 prescribed correction application is bounded to one', () => {
+  const finding = { id: 'PC-E1', severity: 'blocker', correction: 'Replace the old branch with the prescribed path' }
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': adversarialPlanEnv(), 'tech-lead:1': prescribedCheck([]),
+      'planner:2': adversarialPlanEnv(), 'tech-lead:2': prescribedCheck([finding]),
+      'planner:3': adversarialPlanEnv(), 'tech-lead:3': prescribedCheck([finding]),
+      'planner:4': adversarialPlanEnv(), 'tech-lead:4': prescribedCheck([finding]),
+      'lead:1': leadEnv('bounce'),
+    },
+  })
+  const result = driveTask(grantSpentPlanContext, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.why, prescriptionEscalation(4))
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'planner').length, 4)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'tech-lead').length, 4)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'lead').length, 1)
+  assert.deepEqual(result.details.extra_rounds_granted, planCheckGrant)
+  assert.equal(io.calls.logs.filter(({ plan_prescription_applied }) => plan_prescription_applied).length, 1)
+})
+
+test('F1 prescribed correction application journals id and correction once', () => {
+  const grantFinding = { id: 'PC-F-GRANT', severity: 'blocker', correction: 'Extend the check with the grant route' }
+  const findings = [
+    { id: 'PC-F1', severity: 'blocker', correction: 'Define the boundary from the checked findings' },
+    { id: 'PC-F2', severity: 'blocker', correction: 'After the planner returns, call the checker' },
+    { id: 'PC-F3', severity: 'major', correction: 'this non-blocker is not applied' },
+  ]
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': adversarialPlanEnv(), 'tech-lead:1': prescribedCheck([]),
+      'planner:2': adversarialPlanEnv(), 'tech-lead:2': prescribedCheck([grantFinding]),
+      'planner:3': adversarialPlanEnv(), 'tech-lead:3': prescribedCheck(findings),
+      'planner:4': adversarialPlanEnv(), 'tech-lead:4': checkEnv('approve'),
+      'lead:1': leadEnv('bounce'), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask(grantSpentPlanContext, io)
+  assert.equal(result.status, 'done')
+  assert.deepEqual(result.details.extra_rounds_granted, planCheckGrant)
+  const rows = io.calls.logs.filter(({ plan_prescription_applied }) => plan_prescription_applied).map(({ plan_prescription_applied }) => plan_prescription_applied)
+  assert.deepEqual(rows, [{ round: 3, findings: findings.slice(0, 2).map(({ id, correction }) => ({ id, correction })) }])
+})
+
+// MUTATION TL4: replace `prescribedPlanApplications += 1` with `prescribedPlanApplications += 0`.
+test('TL4 default grant-spent prescription reaches the fourth check', () => {
+  const finding = { id: 'PC-TL4', severity: 'blocker', correction: 'Split the final plan into verified sections' }
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': adversarialPlanEnv(), 'tech-lead:1': prescribedCheck([]),
+      'planner:2': adversarialPlanEnv(), 'tech-lead:2': prescribedCheck([finding]),
+      'planner:3': adversarialPlanEnv(), 'tech-lead:3': prescribedCheck([finding]),
+      'planner:4': adversarialPlanEnv(), 'tech-lead:4': checkEnv('approve'),
+      'lead:1': leadEnv('bounce'), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask(grantSpentPlanContext, io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'planner').length, 4)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'tech-lead').length, 4)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'lead').length, 1)
+  assert.deepEqual(result.details.extra_rounds_granted, planCheckGrant)
+  assert.deepEqual(io.calls.logs.filter(({ plan_prescription_applied }) => plan_prescription_applied).map(({ plan_prescription_applied }) => plan_prescription_applied), [
+    { round: 3, findings: [{ id: finding.id, correction: finding.correction }] },
+  ])
+})
+
+// MUTATION RV1-1: replace `prescribedBlockers.every` with `prescribedBlockers.some`.
+test('RV1-1 mixed valid blockers keep frozen plan-check escalation', () => {
+  const grantFinding = { id: 'PC-RV-GRANT', severity: 'blocker', correction: 'Extend the plan with the grant route' }
+  const mixedFindings = [
+    { id: 'PC-RV1', severity: 'blocker', correction: 'Change the loop to use the revised cap' },
+    { id: 'PC-RV2', severity: 'blocker', correction: 'the acceptance criteria contradict the brief' },
+  ]
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': adversarialPlanEnv(), 'tech-lead:1': prescribedCheck([]),
+      'planner:2': adversarialPlanEnv(), 'tech-lead:2': prescribedCheck([grantFinding]),
+      'planner:3': adversarialPlanEnv(), 'tech-lead:3': prescribedCheck(mixedFindings),
+      'planner:4': adversarialPlanEnv(), 'tech-lead:4': checkEnv('approve'),
+      'lead:1': leadEnv('bounce'), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask(grantSpentPlanContext, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'plan-check')
+  assert.equal(result.details.escalation.why, prescriptionEscalation(3))
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'planner').length, 3)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'tech-lead').length, 3)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'lead').length, 1)
+  assert.deepEqual(result.details.extra_rounds_granted, planCheckGrant)
+  assert.equal(io.calls.logs.filter(({ plan_prescription_applied }) => plan_prescription_applied).length, 0)
+})
+
+test('prescribed plan correction grammar is narrow and anchored', () => {
+  const positives = [
+    'Split the plan into checked sections',
+    'Make the revision supersede the stale plan',
+    'Make the checker choose the current plan',
+    'Add a blocker to the final check',
+    'Change the loop to use the revised cap',
+    'Replace the old branch with the prescribed path',
+    'Define the helper from the validated findings',
+    'Define the contract as a final-round rule',
+    'Extend the journal with the applied corrections',
+    'Special-case `plan-check` when it is final',
+    'Do not re-derive the prescribed edit',
+    'After the planner returns, call the checker',
+  ]
+  for (const correction of positives) assert.equal(prescribedPlanCorrection(correction), true, correction)
+  const negatives = [
+    'Describe how to Split the plan into checked sections',
+    'Explain why Make the revision supersede the stale plan',
+    'Document Change the loop to use the revised cap',
+    'Review Replace the old branch with the prescribed path',
+    'Make targets are stale',
+    'Change detection fails',
+    'Replace handling is absent',
+    '', '   ', null, 42,
+  ]
+  for (const correction of negatives) assert.equal(prescribedPlanCorrection(correction), false, String(correction))
+  assert.equal(prescribedPlanCorrection('Re-author the plan section'), false)
+  assert.equal(prescribedPlanCorrection('Evaluate the plan section'), false)
+  assert.equal(prescribedPlanCorrection('Rewrite the plan section'), false)
+})
+
+test('G1 funded plan-check behavior remains unchanged', () => {
+  const gatePath = `${TD}/gate.mjs`
+  const details = { ...planEnv().details, gate_path: gatePath }
+  const finding = { id: 'PC-G1', severity: 'blocker', correction: 'Extend the plan with the prescribed blocker' }
+  let io
+  io = fakeIo({
+    files: { [`${TD}/plan.md`]: 'x'.repeat(10), [gatePath]: 'x'.repeat(10) },
+    envelopes: {
+      'planner:1': adversarialPlanEnv({ details }),
+      'tech-lead:1': prescribedCheck([]),
+      'planner:2': () => {
+        io.calls.files[`${TD}/plan.md`] = 'x'.repeat(20)
+        io.calls.files[gatePath] = 'x'.repeat(20)
+        return adversarialPlanEnv({ details: { ...details, carve_verdict: 'proceed' } })
+      },
+      'tech-lead:2': prescribedCheck([finding]),
+      'planner:3': adversarialPlanEnv({ details: { ...details, carve_verdict: 'proceed' } }),
+      'tech-lead:3': checkEnv('approve'),
+      'lead:1': leadEnv('bounce'),
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask({ ...CTX_TL, limits: { plan_rounds: 3 } }, io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'lead').length, 1)
+  assert.deepEqual(io.calls.assign.filter(({ role }) => role === 'planner').map(({ note }) => note), ['plan', 'plan-revision', 'plan-revision'])
+  assert.deepEqual(io.calls.assign.filter(({ role }) => role === 'tech-lead').map(({ note }) => note), ['plan-check', 'plan-check', 'plan-check'])
+  assert.equal(typeof io.calls.writes[`${TD}/plan-bounce-r2.md`], 'string')
+  assert.deepEqual(result.details.extra_rounds_granted, [])
+  assert.equal(io.calls.logs.filter(({ plan_prescription_applied }) => plan_prescription_applied).length, 0)
 })
 
 test('plan-check exhaustion can buy one plan round and re-check it', () => {

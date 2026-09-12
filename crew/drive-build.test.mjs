@@ -284,6 +284,45 @@ test('the scope-gate catches a build that crossed another lane fence', () => {
   assert.equal(io.calls.commits.length, 0)
 })
 
+test('F1 widened files remain governed by the ordinary scope gate', () => {
+  const admitted = 'synthetic/admitted.mjs'
+  const request = { scope_request: { kind: 'admit-files', files: [admitted] }, evidence: { reasons: [{ file: admitted, reason: 'coherent-module' }] } }
+  const plan = planEnv({ details: { ...planEnv().details, files_in_scope: ['a.mjs', 'a.test.mjs', admitted], ...request } })
+  const acceptedIo = fakeIo({
+    envelopes: {
+      'planner:1': plan,
+      'builder:1': buildEnv({ details: { files_changed: [admitted], commit_message: 'feat: admitted' } }),
+      'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: [admitted],
+  })
+  const accepted = driveTask({ ...CTX, files_in_scope: ['a.mjs', 'a.test.mjs'] }, acceptedIo)
+  assert.equal(accepted.status, 'done')
+  const acceptedBuilder = acceptedIo.calls.assign.find(({ role }) => role === 'builder')
+  assert.ok(acceptedBuilder.policy.fence.includes(admitted))
+  assert.equal(acceptedIo.calls.run.some(({ cmd }) => cmd === 'lane-cmd'), true)
+  assert.equal(acceptedIo.calls.commits.length, 1)
+
+  const rogue = 'synthetic/not-admitted.mjs'
+  const refusedIo = fakeIo({
+    envelopes: {
+      'planner:1': plan,
+      'builder:1': buildEnv({ details: { files_changed: [rogue], commit_message: 'feat: rogue' } }),
+    },
+    changed: [rogue],
+  })
+  const refused = driveTask({ ...CTX, files_in_scope: ['a.mjs', 'a.test.mjs'], limits: { build_rounds: 1 } }, refusedIo)
+  assert.equal(refused.status, 'escalation')
+  assert.equal(refused.details.escalation.where, 'scope')
+  assert.match(refused.details.escalation.why, /not-admitted\.mjs/)
+  assert.equal(refusedIo.calls.run.some(({ cmd }) => cmd === 'lane-cmd' || cmd === 'suite-cmd'), false)
+  assert.equal(refusedIo.calls.commits.length, 0)
+  const refusedBuilder = refusedIo.calls.assign.find(({ role }) => role === 'builder')
+  assert.ok(refusedBuilder.policy.fence.includes(admitted))
+  assert.equal(refusedBuilder.policy.fence.includes(rogue), false)
+})
+
 test('E1 own span refuses a changed hunk outside its bounds by name', () => {
   const file = 'a.mjs'
   const span = 'a.mjs:1-4'

@@ -7,7 +7,30 @@ import { readFileSync } from 'node:fs'
 import {
   ADOPTED_PLAN_HEADING, ADOPT_BLOCK, adversarialPlanEnv, CENSUS_ROW_ABSENT, CENSUS_TURNS_ABSENT, CENSUS_UNREADABLE, CTX, CTX_DIRECTED, CTX_TL, DIRECTED_FILES, ENVELOPE_REFUSAL_REASONS, FAILURE_UPGRADE, GATE_SUMMARY_PREFIX, GROWTH_DIVERGENCE_FACTOR, LANE_COMMAND_SHAPES, LANE_INPUT_VERDICTS, LANE_PATH_OPTIONS, LANE_VALUE_OPTIONS, LIMITS, NO_TURN_CEILING, PLAN_CHECK_ABSENT, PLAN_CHECK_INVALID, PLAN_CHECK_SEVERITIES, PLAN_CONVERGENCE_REASONS, RED, RUN_START_EVENT, S843_ADDED, S843_D2, S843_DISPATCHED, S843_NARROWED, SUITE_REASK_MAX, TD, THREW, TRIAGE_NOTE, TURN_CEILING_DEFAULTS, TURN_CEILING_REFUSALS, TURN_CEILING_ROLES, VALIDATION_LANE_UNLOADABLE, adoptionSignal, bothExhaustionPointsScenario, buildEnv, carriedPrLines, carriedPreambleLines, carriedResolution, carriedSilenceDefect, checkEnv, composeCommitMessage, divergeThenExhaustPlanScenario, divergenceConsultLines, divergentPlanScenario, driveTask, enforcementPreamble, fakeIo, growthLines, growthRecord, join, laneCommandInputs, laneCommandShape, laneFence, leadEnv, lineageFromJournal, persistentDivergenceScenario, planCheckAcceptIo, planCheckFindings, planCheckFindingsFromText, planConvergence, planEnv, planRevisionRun, planRoundCap, planThenReviewIo, protectedPlanEnv, resolveTurnCeilings, resolveValidationLane, resumeGreen, resumeKeys, resumeRed, reviewConvergeRun, reviewEnv, s843Bullets, s843Ctx, s843Io, s843PlanEnv, suiteRefusalEnv, turnCeilingsRecord, triageEnv, validationPlan, validationProbeOutput, validationProbeRun, validationRows, laneProbeCommand,
 } from './drive-fixtures.mjs'
-import { CENSUS_ABSENT_REASONS, CENSUS_ELIGIBLE_OUTCOMES, CREATES_ABSENT, PLAN_BOUNCE_UNFUNDED_HEADING, PLAN_SEAT_REFUSED, ZERO_TURN_NON_START, ZERO_TURN_REASK_MAX, dispatchAdmissionsFromJournal, inheritedPlanScope, observeTurnCensus, planBounceUnfundedLines, planCapNote, planExhaustedWhy, planRefusedWhy, prescribedPlanCorrection, turnCeilingOf, zeroTurnNonStartOf } from './drive.mjs'
+import {
+  CENSUS_ABSENT_REASONS,
+  CENSUS_ELIGIBLE_OUTCOMES,
+  CREATES_ABSENT,
+  PLAN_BOUNCE_UNFUNDED_HEADING,
+  PLAN_SCOPE_WIDEN_MAX,
+  PLAN_SCOPE_WIDEN_REASONS,
+  PLAN_SCOPE_WIDEN_REFUSALS,
+  PLAN_SEAT_REFUSED,
+  ZERO_TURN_NON_START,
+  ZERO_TURN_REASK_MAX,
+  dispatchAdmissionsFromJournal,
+  inheritedPlanScope,
+  observeTurnCensus,
+  planBounceUnfundedLines,
+  planCapNote,
+  planExhaustedWhy,
+  planRefusedWhy,
+  planScopeWideningDecision,
+  prescribedPlanCorrection,
+  scopeRequestOf,
+  turnCeilingOf,
+  zeroTurnNonStartOf,
+} from './drive.mjs'
 import { suiteRunPolicy } from './headless.mjs'
 
 const zeroTurnEnvelope = (id = 'planner1', role = 'planner', detail = {}) => ({
@@ -16,6 +39,23 @@ const zeroTurnEnvelope = (id = 'planner1', role = 'planner', detail = {}) => ({
     degraded: 'rpc-no-envelope', reason: ZERO_TURN_NON_START, turns: 0, tool_calls: 0, absent_reason: null,
     ...detail,
   },
+})
+
+const wideningRequest = (files) => ({ kind: 'admit-files', files: [...files] })
+const wideningReasons = (files, reason = 'coherent-module') => files.map((file) => ({ file, reason }))
+const wideningPlan = (files, requestFiles, reason = 'coherent-module', over = {}) => planEnv({
+  ...over,
+  details: {
+    ...planEnv().details,
+    ...(over.details || {}),
+    files_in_scope: [...files],
+    scope_request: wideningRequest(requestFiles),
+    evidence: { reasons: wideningReasons(requestFiles, reason) },
+  },
+})
+const wideningPolicy = ({ added = [], requestFiles = added, reasons = wideningReasons(requestFiles), protectedPaths = [], laneFence = [], planWideningAdjudications = 0 } = {}) => planScopeWideningDecision({
+  request: { kind: 'admit-files', files: [...requestFiles] }, added: [...added], reasons,
+  protectedPaths, laneFence, planWideningAdjudications,
 })
 
 const B624_LANE = 'b624'
@@ -150,10 +190,173 @@ test('validation lane keeps env prefixes refused and path options loadable', () 
   assert.deepEqual(valid.refused, [])
 })
 
-test('planner wrapper preserves brief pointer and adversary declaration', () => {
+test('RV1-3 planner wrapper preserves widening request contract', () => {
   const wrapper = plannerWrapper()
   assert.match(wrapper, /Read the current planner brief at/)
   assert.match(wrapper, /details\.needs_adversary must be a boolean: true requests the adversary plan-check round; false does not\./)
+  assert.match(wrapper, /For one bounded plan-time scope widening only, widen details\.files_in_scope with tracked literal files and set details\.scope_request to exactly \{ kind: 'admit-files', files: \[\.\.\.\] \} using the added files\./)
+  assert.match(wrapper, /Set details\.evidence\.reasons to exactly one \{ file, reason \} object per added file;/)
+  assert.match(wrapper, /reason must be one of: behavior-doc, shared-fixture, coherent-module, external-constant\./)
+  assert.match(wrapper, /There is one plan-time scope-widening adjudication per lane; protected paths and paths held by another live lane never admit\./)
+})
+
+test('A1 plan-time widening admits an unheld closed-reason request', () => {
+  const added = 'fixtures/plan-request.mjs'
+  const planner = wideningPlan(['a.mjs', 'a.test.mjs', added], [added], 'shared-fixture')
+  const io = fakeIo({
+    envelopes: { 'planner:1': planner, 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask({ ...CTX, files_in_scope: ['a.mjs', 'a.test.mjs'] }, io)
+  assert.equal(result.status, 'done')
+  const builder = io.calls.assign.find(({ role }) => role === 'builder')
+  assert.ok(builder)
+  assert.ok(builder.policy.fence.includes(added))
+  assert.equal(result.details.escalation, null)
+  const admissions = io.calls.logs.filter((entry) => entry.scope_admission).map((entry) => entry.scope_admission)
+  assert.equal(admissions.length, 1)
+  assert.deepEqual(admissions[0], {
+    source: 'plan-request', files: [added], evidence: { reasons: [{ file: added, reason: 'shared-fixture' }] },
+  })
+})
+
+test('RV1-1 plan-time protected widening keeps the protected floor at admission', () => {
+  const initialScope = ['a.mjs', 'a.test.mjs']
+  const cases = [
+    ['crew/drive.mjs', {}],
+    ['docs/adr/plan-scope-widening.md', {}],
+    ['synthetic/context-protected.mjs', { protectedPaths: ['synthetic/context-protected.mjs'] }],
+  ]
+  for (const [file, context] of cases) {
+    const planner = wideningPlan([...initialScope, file], [file], 'coherent-module')
+    const io = fakeIo({
+      envelopes: { 'planner:1': planner, 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+      runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+      changed: [...initialScope],
+    })
+    const result = driveTask({ ...CTX, ...context, files_in_scope: initialScope }, io)
+    assert.equal(result.status, 'escalation', file)
+    assert.equal(result.details.escalation.where, 'plan-scope-request', file)
+    assert.match(result.details.escalation.why, /\[protected\]/, file)
+    assert.equal(io.calls.logs.filter((entry) => entry.scope_admission).length, 0, file)
+    assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 0, file)
+  }
+})
+
+test('B1 all four recorded widening classes are admitted', () => {
+  const cases = [
+    ['docs/behavior-correction.md', 'behavior-doc'],
+    ['fixtures/shared-correction.mjs', 'shared-fixture'],
+    ['crew/coherent-carrier.mjs', 'coherent-module'],
+    ['crew/external-constant.mjs', 'external-constant'],
+  ]
+  assert.deepEqual(PLAN_SCOPE_WIDEN_REASONS, cases.map(([, reason]) => reason))
+  assert.equal(PLAN_SCOPE_WIDEN_MAX, 1)
+  for (const [file, reason] of cases) {
+    const decision = wideningPolicy({ added: [file], requestFiles: [file], reasons: [{ file, reason }] })
+    assert.deepEqual(decision, { action: 'admit', files: [file], reasons: [{ file, reason }] })
+  }
+})
+
+test('C1 protected-floor widening is refused regardless of reason', () => {
+  const file = 'synthetic/protected.mjs'
+  for (const reason of PLAN_SCOPE_WIDEN_REASONS) {
+    const decision = wideningPolicy({ added: [file], requestFiles: [file], reasons: [{ file, reason }], protectedPaths: [file] })
+    assert.equal(decision.action, 'escalate')
+    assert.equal(decision.reason, 'protected')
+    assert.ok(decision.why.includes(file))
+  }
+})
+
+test('D1 widening onto another live lane is refused', () => {
+  const pathCase = wideningPolicy({
+    added: ['held/path.mjs'], requestFiles: ['held/path.mjs'],
+    laneFence: [{ lane: 'sibling', files: ['held/path.mjs'] }],
+  })
+  assert.equal(pathCase.action, 'escalate')
+  assert.equal(pathCase.reason, 'held')
+  assert.deepEqual(pathCase.hits, [{ entry: 'held/path.mjs', lane: 'sibling' }])
+
+  const spanCase = wideningPolicy({
+    added: ['held/span.mjs'], requestFiles: ['held/span.mjs'],
+    laneFence: [{ lane: 'span-sibling', files: ['held/span.mjs:1-4'] }],
+  })
+  assert.equal(spanCase.action, 'escalate')
+  assert.equal(spanCase.reason, 'held')
+  assert.equal(spanCase.hits[0].lane, 'span-sibling')
+})
+
+test('E1 absent and unknown widening reasons refuse by closed name', () => {
+  const file = 'synthetic/reason.mjs'
+  const base = { added: [file], requestFiles: [file] }
+  assert.deepEqual(scopeRequestOf({ summary: 'no typed request' }), null)
+  assert.equal(wideningPolicy({ ...base, reasons: null }).reason, 'reason')
+  assert.equal(wideningPolicy({ ...base, reasons: [{ file, reason: 'coherent-module' }, { file, reason: 'shared-fixture' }] }).reason, 'reason')
+  assert.equal(wideningPolicy({ ...base, requestFiles: ['unrelated.mjs'] }).reason, 'files')
+  assert.equal(wideningPolicy({ ...base, reasons: [{ file, reason: 'free-form prose' }] }).reason, 'reason')
+  assert.ok(PLAN_SCOPE_WIDEN_REFUSALS.includes('shape'))
+  assert.ok(PLAN_SCOPE_WIDEN_REFUSALS.includes('files'))
+  assert.ok(PLAN_SCOPE_WIDEN_REFUSALS.includes('reason'))
+  const malformed = planScopeWideningDecision({
+    request: scopeRequestOf({ scope_request: { kind: 'wrong', files: [file] } }),
+    added: [file], reasons: [{ file, reason: 'coherent-module' }],
+  })
+  assert.equal(malformed.reason, 'shape')
+})
+
+test('G1 one plan-time widening adjudication is the lane maximum', () => {
+  const first = 'synthetic/first.mjs'
+  const second = 'synthetic/second.mjs'
+  const firstPlan = wideningPlan(['a.mjs', 'a.test.mjs', first], [first], 'coherent-module', { details: { needs_adversary: true } })
+  const secondPlan = wideningPlan(['a.mjs', 'a.test.mjs', first, second], [second], 'external-constant', { details: { needs_adversary: true } })
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': firstPlan, 'tech-lead:1': checkEnv('revise'), 'planner:2': secondPlan,
+      'tech-lead:2': checkEnv('approve'), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask({ ...CTX_TL, files_in_scope: ['a.mjs', 'a.test.mjs'] }, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'plan-scope-request')
+  assert.match(result.details.escalation.why, /repeat/)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'planner').length, 2)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'tech-lead').length, 1)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 0)
+  assert.equal(io.calls.logs.filter((entry) => entry.scope_admission).length, 1)
+  assert.deepEqual(result.details.extra_rounds_granted, [])
+  assert.equal(result.details.stages.includes('check:r2'), false)
+})
+
+test('H1 no-widening plans preserve legacy behavior byte-for-byte', () => {
+  const sameCtx = { ...CTX, files_in_scope: ['a.mjs', 'a.test.mjs'] }
+  const sameIo = fakeIo({
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const same = driveTask(sameCtx, sameIo)
+  assert.equal(same.status, 'done')
+  assert.deepEqual(same.details.stages, ['plan:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:pass', 'commit', 'suite', 'suite:cold', 'done'])
+  assert.equal(sameIo.calls.logs.find((entry) => entry.plan_scope)?.plan_scope.verdict, 'plan-scope-same')
+
+  const narrowedIo = fakeIo({
+    envelopes: { 'planner:1': planEnv({ details: { ...planEnv().details, files_in_scope: ['a.mjs'] } }), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs'],
+  })
+  const narrowed = driveTask(sameCtx, narrowedIo)
+  assert.equal(narrowed.status, 'done')
+  assert.equal(narrowedIo.calls.logs.find((entry) => entry.plan_scope)?.plan_scope.verdict, 'plan-scope-narrowed')
+
+  const legacyIo = fakeIo({ envelopes: { 'planner:1': planEnv() } })
+  const legacy = driveTask({ ...CTX, limits: { plan_rounds: 1 }, files_in_scope: ['a.mjs'] }, legacyIo)
+  assert.equal(legacy.status, 'escalation')
+  assert.equal(legacy.details.escalation.where, 'plan-scope-widened')
+  assert.equal(legacy.details.escalation.why, 'the plan widens the dispatched write surface with a.test.mjs — a lane may narrow the surface it was dispatched with, never widen it; on the final plan round there is no revision left to bounce it to')
+  assert.equal(legacyIo.calls.writes[`${TD}/plan-bounce-r1.md`], undefined)
 })
 
 test('a lead that answers escalate at the accept re-ask escalates with both reasons', () => {

@@ -77,7 +77,7 @@ procedure; `/dispatch` names it.
 - **Fence the tests that ASSERT what the lane changes** (#702). A fence that
   omits the test guarding the changed behaviour is an operator error, and it
   costs the lane a full boot.
-- Fences within a batch must be **mutually disjoint**.
+- **A fence is a lane's own write surface, never a lock** (ADR-043). Lanes may overlap on files; worktrees isolate them and `rebase` resolves them. Dispatch one lane per register.
 - Verify a fence **arrived** in `crew.json` and `journal.jsonl` — not merely
   that it parsed.
 - Rebase onto `main` before opening the PR.

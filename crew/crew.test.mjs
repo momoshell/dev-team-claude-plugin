@@ -5984,6 +5984,34 @@ const ladderWithLocalAt = (band) => {
   return loadLadder({ path: '/injected/b375-model-ladder.json', readFile: () => JSON.stringify(clone) })
 }
 
+test('shipped llama-swap models resolve through pi, remain basement-only, and stay unseated', () => {
+  const shipped = shippedRoster()
+  const register = loadCapabilities()
+  const ladder = loadLadder()
+  const basement = rosterLadder.bands.find((band) => band.band === 'basement')
+  const localKeys = ['llama-swap/qwen3.8-27b', 'llama-swap/gpt-oss-20b', 'llama-swap/gemma4-31b']
+  const basis = 'Basement placement for llama-swap models is an assertion because no reference score exists.'
+
+  assert.equal(Object.keys(register.local_providers).length, 1)
+  assert.equal(register.local_providers['llama-swap'].pi_provider, 'llama-swap')
+  assert.equal(basement.membership_basis, basis)
+  for (const key of localKeys) {
+    const [provider, id] = key.split('/')
+    assert.equal(piModelString({ provider, id, localProviders: register.local_providers }), key)
+    assert.equal(shipped.models[key].source, 'local')
+    for (const band of rosterLadder.bands) assert.equal(band.members.includes(key), band.band === 'basement')
+    assert.throws(
+      () => assertBandFloors({ builder: { provider, id, model: null } }, 'judge', ladder, { models: shipped.models }),
+      (err) => err.reason === 'local-model-judge-seat' && err.message.includes(key),
+    )
+  }
+  for (const seats of Object.values(shipped.tiers)) {
+    for (const seat of Object.values(seats)) {
+      if (seat) assert.equal(localKeys.includes(`${seat.provider}/${seat.id}`), false)
+    }
+  }
+})
+
 test('a source:"local" roster model is refused from every judge seat at every ratified band', () => {
   const bands = ['frontier', 'workhorse', 'utility', 'basement']
   const roles = ['lead', 'planner', 'builder', 'reviewer', 'tech-lead']
@@ -7082,6 +7110,23 @@ test('checkout-pinned local providers require live endpoints and expose their se
     await assert.rejects(
       () => resolveAdapters(['builder'], {}, seats, { register: missing, root, probeEndpoint: async () => true }),
       (err) => err.reason === 'local-settings-missing' && /no-settings/.test(err.message),
+    )
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('G1 local provider boot refuses an unreachable base_url by name', async () => {
+  const root = capabilityFixtureRoot()
+  try {
+    const settings = join(root, 'crew/pi/settings.json')
+    writeFileSync(settings, '{}\n')
+    const register = capabilityRegister({ local_providers: {
+      'llama-swap': { settings: 'crew/pi/settings.json', pi_provider: 'llama-swap', base_url: 'http://192.0.2.1:9/v1' },
+    } })
+    const seats = { builder: { agent: 'pi', effort: 'max', provider: 'llama-swap', id: 'qwen3.8-27b', model: null } }
+    const unreachableProbe = async () => false
+    await assert.rejects(
+      () => resolveAdapters(['builder'], {}, seats, { register, root, probeEndpoint: unreachableProbe }),
+      (err) => err.reason === 'local-endpoint-dead' && err.message.includes('http://192.0.2.1:9/v1'),
     )
   } finally { rmSync(root, { recursive: true, force: true }) }
 })

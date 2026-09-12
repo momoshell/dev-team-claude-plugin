@@ -36,10 +36,10 @@
   "scripts/factory/ledger.mjs:6429": "function refuseUnknownFlags(verb, flags)",
   "scripts/factory/ledger.mjs:6399": "const VERB_FLAGS = Object.freeze",
   "scripts/factory/ledger.mjs:6437": "unknown flag --${name}",
-  "test/factory-ledger.test.mjs:4040": "refused.status, 2, refused.stderr",
-  "test/factory-ledger.test.mjs:4047": "payload.until, '2026-08-21T01:00:00.000Z'",
   "scripts/factory/ledger.mjs:7781": "unknown verb: ${verb}",
   "scripts/factory/ledger.mjs:452": "export const CI_DECISIONS = Object.freeze",
   "scripts/factory/ledger.mjs:3599": "requireEnum(input.decision, CI_DECISIONS",
-  "test/factory-ledger.test.mjs:4042": "unknown flag --untill"
+  "test/factory-ledger.test.mjs:4053": "refused.status, 2, refused.stderr",
+  "test/factory-ledger.test.mjs:4060": "payload.until, '2026-08-21T01:00:00.000Z'",
+  "test/factory-ledger.test.mjs:4055": "unknown flag --untill"
 }

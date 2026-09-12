@@ -1988,18 +1988,31 @@ test('every roster model carries its ratified cache rates and their provenance',
     'openai/gpt-5.6-sol': { read: 0.4, write: 0 },
     'openai/gpt-5.6-terra': { read: 0.2, write: 0 },
     'openai/gpt-5.6-luna': { read: 0.02, write: 0 },
+    'llama-swap/qwen3.8-27b': { read: 0, write: 0 },
+    'llama-swap/gpt-oss-20b': { read: 0, write: 0 },
+    'llama-swap/gemma4-31b': { read: 0, write: 0 },
   }
   const expectedSources = {
     anthropic: "anthropic published prompt-caching multipliers applied to this entry's own cost_in_per_mtok: cache read 0.10x, 1h-TTL cache write 2.00x. billed_cache_write_tokens collapses the 1h and 5m TTLs into one column, so pricing every cache write at the 1h rate is an explicit lossy convention, not a reconstruction of any session's TTL; 1h is the ratified one because this task's acceptance figures require it and because both sampled b168-paneusage claude-opus-5 pane seats used only 1h writes.",
     openai: "openai published prompt-caching rates applied to this entry's own cost_in_per_mtok: cached input 0.10x, and cache writes are not charged, so cost_cache_write_per_mtok is a published 0.00x rate rather than an absent one.",
+    'llama-swap/qwen3.8-27b': 'llama-swap local serving has a published 0 rate rather than an absent one for llama-swap/qwen3.8-27b cache reads and writes.',
+    'llama-swap/gpt-oss-20b': 'llama-swap local serving has a published 0 rate rather than an absent one for llama-swap/gpt-oss-20b cache reads and writes.',
+    'llama-swap/gemma4-31b': 'llama-swap local serving has a published 0 rate rather than an absent one for llama-swap/gemma4-31b cache reads and writes.',
   }
   assert.deepEqual(Object.keys(roster.models).sort(), Object.keys(expectedRates).sort())
   for (const [key, expected] of Object.entries(expectedRates)) {
     const model = roster.models[key]
     assert.deepEqual({ read: model.cost_cache_read_per_mtok, write: model.cost_cache_write_per_mtok }, expected)
-    assert.ok(Math.abs(model.cost_cache_read_per_mtok - model.cost_in_per_mtok * 0.10) <= 1e-12)
+    if (key.startsWith('llama-swap/')) {
+      assert.equal(model.cost_in_per_mtok, 0)
+      assert.equal(model.cost_out_per_mtok, 0)
+      assert.equal(model.cost_cache_read_per_mtok, 0)
+      assert.equal(model.cost_cache_write_per_mtok, 0)
+    } else {
+      assert.ok(Math.abs(model.cost_cache_read_per_mtok - model.cost_in_per_mtok * 0.10) <= 1e-12)
+    }
     const vendor = key.slice(0, key.indexOf('/'))
-    assert.equal(model.cache_rate_source, expectedSources[vendor])
+    assert.equal(model.cache_rate_source, expectedSources[key] || expectedSources[vendor])
   }
 })
 

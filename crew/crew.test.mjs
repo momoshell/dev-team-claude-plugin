@@ -23,7 +23,7 @@ import {
   effectiveTools, ADVISOR_CONFIG_VERSION, ADVISOR_BOOT_REFUSALS, SAFE_MODEL, classifyAdvisorCell,
   advisorBootRecord, advisorJournalRecord, advisorEndpointOrigin, assertAdvisorCellLive,
   advisorManifest, assertAdvisorManifest, packageSuite, SUITE_OWNER_PATH, SUITE_REFUSAL,
-  PANE_TURN_CEILING_UNMEASURED, paneTurnCeilingRefusals,
+  PANE_TURN_CEILING_UNMEASURED, paneTurnCeilingRefusals, resumeCmd, validateResumeState, RESUME_REFUSALS, RESUME_REFUSAL_NAMES, refuseResume,
 } from './crew.mjs'
 import {
   runChild, specExecution, resolveValidationLane as resolveChildValidationLane,
@@ -33,7 +33,7 @@ import { daemon, resolveRunConfig as resolveDaemonRunConfig, RUN_CONFIG_DECLARAT
 import { resolveRunConfig as resolveFactoryRunConfig, RUN_CONFIG_DECLARATIONS as FACTORY_RUN_CONFIG_DECLARATIONS, completionLogPath, parseArgs as parseFactoryArgs, runVerb } from './factoryctl.mjs'
 import { TASK_PROFILES } from './task-profiles.mjs'
 import { ASSURANCES, ASSURANCE_ALIASES, ASSURANCE_ALIAS_OF } from './assurances.mjs'
-import { driveTask, LIMITS, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, PROTECTED_PATHS, validateScopeEntries } from './drive.mjs'
+import { driveTask, LIMITS, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, PROTECTED_PATHS, validateScopeEntries, resumeWorktreeSha256 } from './drive.mjs'
 import {
   LIMIT_REFUSALS, PLAN_ROUNDS_MAX, BUILD_ROUNDS_MAX, REVIEW_ROUNDS_MAX,
   limitsCtx, limitsRecord, resolveBuildRounds, resolveLimits, resolvePlanRounds, resolveReviewRounds,
@@ -8083,6 +8083,222 @@ test('turn-ceiling flags refuse unenforceable panes and persist only when explic
     rmSync(home, { recursive: true, force: true })
     rmSync(checkoutRoot, { recursive: true, force: true })
   }
+})
+
+function resumeValidationFixture(prefix = 'crew-resume-validation-') {
+  const root = scratchDir(prefix)
+  const checkout = join(root, 'checkout')
+  const taskDir = join(root, 'task')
+  mkdirSync(checkout, { recursive: true })
+  mkdirSync(taskDir, { recursive: true })
+  for (const args of [['init', '-q'], ['config', 'user.email', 'crew@example.invalid'], ['config', 'user.name', 'crew tests']]) execSync('git ' + args.join(' '), { cwd: checkout })
+  const source = 'resume-control\n'
+  writeFileSync(join(checkout, 'a.mjs'), source)
+  execSync('git add a.mjs && git commit -qm base', { cwd: checkout })
+  const head = execSync('git rev-parse HEAD', { cwd: checkout, encoding: 'utf8' }).trim()
+  const index = execSync('git write-tree', { cwd: checkout, encoding: 'utf8' }).trim()
+  const file = { path: 'a.mjs', state: 'present', bytes: `file:-:${createHash('sha256').update(source).digest('hex')}` }
+  const gatePath = join(taskDir, 'gate.mjs')
+  const planPath = join(taskDir, 'plan.md')
+  const reviewPath = join(taskDir, 'review.md')
+  for (const path of [gatePath, planPath, reviewPath]) writeFileSync(path, `${basename(path)}\n`)
+  const returns = {
+    planner: { status: 'done', role: 'planner', summary: 'plan', artifacts: [planPath], details: { plan_path: planPath } },
+    builder: { status: 'done', role: 'builder', summary: 'build', artifacts: [], details: {} },
+    reviewer: { status: 'done', role: 'reviewer', summary: 'review', artifacts: [reviewPath], details: { review_path: reviewPath } },
+  }
+  const checkpoint = {
+    version: 1, kind: 'suite', frozen_where: 'suite', head_oid: head,
+    tree: { index_oid: index, files: [file], worktree_sha256: resumeWorktreeSha256([file]) },
+    accepted_scope: ['a.mjs'], returns,
+    decision: { accepted_via: 'review pass', verdict: 'pass', residuals: [], carried_findings: [], accept_findings: [], accept_decision: { where: 'review', outcome: 'accepted', residuals: [] }, panel_contributors: ['reviewer'] },
+    commit: { oid: head, pending: false, files: ['a.mjs'], message: 'feat: resume', subject: 'feat: resume' },
+    proof: { gate_cmd: 'node gate.mjs', gate_path: gatePath, summary: { total: 1, failed: 0, errored: 0 }, discrimination: 'proven', generation: 1, repairs: 0 },
+    suite: { cmd: 'npm test', warm: null, cold: null }, publish: { branch: null, base: null }, prior_stages: ['review:r1', 'gate'],
+  }
+  return { root, checkout, taskDir, head, checkpoint, envelope: { status: 'escalation', details: { escalation: { where: 'suite' }, resume_checkpoint: checkpoint } } }
+}
+
+test('B1 resume refuses a moved worktree without side effects', () => {
+  const fixture = resumeValidationFixture('crew-resume-b1-')
+  try {
+    const admitted = { ...fixture.checkpoint, head_oid: fixture.head.slice(0, 8) }
+    assert.equal(validateResumeState({ args: {}, checkout: fixture.checkout, taskDir: fixture.taskDir, envelope: { ...fixture.envelope, details: { ...fixture.envelope.details, resume_checkpoint: admitted } } }), admitted)
+    execSync('git commit --allow-empty -qm moved', { cwd: fixture.checkout })
+    assert.throws(() => validateResumeState({ args: {}, checkout: fixture.checkout, taskDir: fixture.taskDir, envelope: fixture.envelope }), (error) => error.reason === RESUME_REFUSALS.worktreeMoved)
+    execSync(`git reset --hard ${fixture.head}`, { cwd: fixture.checkout, stdio: 'ignore' })
+    writeFileSync(join(fixture.checkout, 'a.mjs'), 'same HEAD, different bytes\n')
+    assert.throws(() => validateResumeState({ args: {}, checkout: fixture.checkout, taskDir: fixture.taskDir, envelope: fixture.envelope }), (error) => error.reason === RESUME_REFUSALS.fingerprintMismatch)
+  } finally { rmSync(fixture.root, { recursive: true, force: true }) }
+})
+
+test('C1 resume refuses a missing gate artifact by closed name', () => {
+  const fixture = resumeValidationFixture('crew-resume-c1-')
+  try {
+    rmSync(fixture.checkpoint.proof.gate_path)
+    assert.throws(() => validateResumeState({ args: {}, checkout: fixture.checkout, taskDir: fixture.taskDir, envelope: fixture.envelope }), (error) => error.reason === RESUME_REFUSALS.artifactMissing)
+  } finally { rmSync(fixture.root, { recursive: true, force: true }) }
+})
+
+test('RVR1-1 resume admits accepted multi-file tracked and untracked pre-commit worktree', () => {
+  const entry = (path, bytes) => ({ path, state: 'present', bytes: `file:-:${createHash('sha256').update(bytes).digest('hex')}` })
+  const envelopeFor = (checkpoint) => ({ status: 'escalation', details: { escalation: { where: 'gate' }, resume_checkpoint: checkpoint } })
+  const tracked = resumeValidationFixture('crew-resume-rvr1-1-tracked-')
+  try {
+    writeFileSync(join(tracked.checkout, 'b.mjs'), 'baseline b\n')
+    execSync('git add b.mjs && git commit -qm second-base', { cwd: tracked.checkout })
+    const head = execSync('git rev-parse HEAD', { cwd: tracked.checkout, encoding: 'utf8' }).trim()
+    const index = execSync('git write-tree', { cwd: tracked.checkout, encoding: 'utf8' }).trim()
+    const changed = { 'a.mjs': 'tracked a\n', 'b.mjs': 'tracked b\n' }
+    for (const [path, bytes] of Object.entries(changed)) writeFileSync(join(tracked.checkout, path), bytes)
+    const files = Object.entries(changed).map(([path, bytes]) => entry(path, bytes))
+    Object.assign(tracked.checkpoint, {
+      kind: 'gate', frozen_where: 'gate', head_oid: head, accepted_scope: Object.keys(changed),
+      tree: { index_oid: index, files, worktree_sha256: resumeWorktreeSha256(files) },
+      commit: { oid: null, pending: true, files: Object.keys(changed), message: 'feat: precommit', subject: 'feat: precommit' },
+      prior_stages: ['review:r1', 'gate'],
+    })
+    assert.equal(validateResumeState({ args: {}, checkout: tracked.checkout, taskDir: tracked.taskDir, envelope: envelopeFor(tracked.checkpoint) }), tracked.checkpoint)
+  } finally { rmSync(tracked.root, { recursive: true, force: true }) }
+
+  const untracked = resumeValidationFixture('crew-resume-rvr1-1-untracked-')
+  try {
+    const path = 'new.mjs'; const bytes = 'untracked accepted file\n'; const file = entry(path, bytes)
+    writeFileSync(join(untracked.checkout, path), bytes)
+    Object.assign(untracked.checkpoint, {
+      kind: 'gate', frozen_where: 'gate', accepted_scope: [path],
+      tree: { index_oid: execSync('git write-tree', { cwd: untracked.checkout, encoding: 'utf8' }).trim(), files: [file], worktree_sha256: resumeWorktreeSha256([file]) },
+      commit: { oid: null, pending: true, files: [path], message: 'feat: precommit', subject: 'feat: precommit' },
+      prior_stages: ['review:r1', 'gate'],
+    })
+    assert.equal(validateResumeState({ args: {}, checkout: untracked.checkout, taskDir: untracked.taskDir, envelope: envelopeFor(untracked.checkpoint) }), untracked.checkpoint)
+  } finally { rmSync(untracked.root, { recursive: true, force: true }) }
+})
+
+test('F1 resume refusal vocabulary is frozen and rejects free form reasons', () => {
+  assert.equal(Object.isFrozen(RESUME_REFUSALS), true)
+  assert.equal(Object.isFrozen(RESUME_REFUSAL_NAMES), true)
+  assert.equal(RESUME_REFUSAL_NAMES.length, 12)
+  assert.deepEqual(RESUME_REFUSAL_NAMES, ['envelope-missing', 'envelope-unreadable', 'not-escalation', 'state-missing', 'unsupported-checkpoint', 'oid-unresolved', 'worktree-moved', 'fingerprint-mismatch', 'artifact-missing', 'artifact-unreadable', 'suite-mismatch', 'unexpected-dirty'])
+  assert.throws(() => refuseResume('free-form'), /unknown resume refusal: free-form/)
+})
+
+function resumeCommandFixture(prefix = 'crew-resume-command-') {
+  const root = scratchDir(prefix)
+  const home = join(root, 'home')
+  const checkout = join(root, 'checkout')
+  const task = 'resume-refusal'
+  const dir = join(home, '.crew', basename(checkout), task)
+  const taskDir = join(dir, 'task')
+  const returnsDir = join(dir, 'returns')
+  mkdirSync(checkout, { recursive: true }); mkdirSync(taskDir, { recursive: true }); mkdirSync(returnsDir, { recursive: true })
+  execSync('git init -q && git config user.email crew@example.invalid && git config user.name crew', { cwd: checkout })
+  const source = 'checkpoint source\n'
+  writeFileSync(join(checkout, 'a.mjs'), source)
+  execSync('git add a.mjs && git commit -qm base', { cwd: checkout })
+  const head = execSync('git rev-parse HEAD', { cwd: checkout, encoding: 'utf8' }).trim()
+  const index = execSync('git write-tree', { cwd: checkout, encoding: 'utf8' }).trim()
+  const gatePath = join(taskDir, 'gate.mjs'); const planPath = join(taskDir, 'plan.md'); const reviewPath = join(taskDir, 'review.md')
+  for (const path of [gatePath, planPath, reviewPath]) writeFileSync(path, `${basename(path)}\n`)
+  const file = { path: 'a.mjs', state: 'present', bytes: `file:-:${createHash('sha256').update(source).digest('hex')}` }
+  const checkpoint = {
+    version: 1, kind: 'suite', frozen_where: 'suite', head_oid: head,
+    tree: { index_oid: index, files: [file], worktree_sha256: resumeWorktreeSha256([file]) }, accepted_scope: ['a.mjs'],
+    returns: {
+      planner: { status: 'done', role: 'planner', summary: 'plan', artifacts: [planPath], details: { plan_path: planPath } },
+      builder: { status: 'done', role: 'builder', summary: 'build', artifacts: [], details: {} },
+      reviewer: { status: 'done', role: 'reviewer', summary: 'review', artifacts: [reviewPath], details: { review_path: reviewPath } },
+    },
+    decision: { accepted_via: 'review pass', verdict: 'pass', residuals: [], carried_findings: [], accept_findings: [], accept_decision: { where: 'review', outcome: 'accepted', residuals: [] }, panel_contributors: ['reviewer'] },
+    commit: { oid: head, pending: false, files: ['a.mjs'], message: 'feat: resume', subject: 'feat: resume' },
+    proof: { gate_cmd: 'node gate.mjs', gate_path: gatePath, summary: { total: 1, failed: 0, errored: 0 }, discrimination: 'proven', generation: 1, repairs: 0 },
+    suite: { cmd: 'node --test custom-suite.mjs', warm: null, cold: null }, publish: { branch: null, base: null }, prior_stages: ['review:r1', 'commit'],
+  }
+  const taskReturn = join(returnsDir, 'task.json'); const journal = join(dir, 'journal.jsonl')
+  writeFileSync(join(dir, 'crew.json'), JSON.stringify({ task, checkout, roles: [], members: {}, task_return: taskReturn }))
+  writeFileSync(journal, '{"event":"prior"}\n')
+  const setEnvelope = (value) => writeFileSync(taskReturn, typeof value === 'string' ? value : JSON.stringify(value))
+  const envelope = () => ({ status: 'escalation', summary: 'paused', artifacts: [], details: { escalation: { where: 'suite' }, resume_checkpoint: checkpoint } })
+  setEnvelope(envelope())
+  return { root, home, checkout, task, dir, taskDir, taskReturn, journal, checkpoint, gatePath, setEnvelope, envelope }
+}
+
+function assertResumeRefusal(fixture, reason, args = {}) {
+  const beforeEnvelope = existsSync(fixture.taskReturn) ? readFileSync(fixture.taskReturn, 'utf8') : null
+  const beforeJournal = readFileSync(fixture.journal, 'utf8')
+  const previousHome = process.env.HOME
+  let effects = 0
+  process.env.HOME = fixture.home
+  try {
+    assert.throws(() => resumeCmd({ task: fixture.task, checkout: fixture.checkout, keep: true, ...args }, {
+      openRun: () => { effects += 1; return { startRun() {}, endRun() {} } },
+      seatIo: () => { effects += 1; return {} },
+      resume: () => { effects += 1; return { status: 'done', details: {} } },
+      writeTerminalLine: () => { effects += 1 },
+    }), (error) => error.reason === reason)
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome
+  }
+  assert.equal(effects, 0, reason)
+  assert.equal(readFileSync(fixture.journal, 'utf8'), beforeJournal, reason)
+  if (beforeEnvelope === null) assert.equal(existsSync(fixture.taskReturn), false, reason)
+  else assert.equal(readFileSync(fixture.taskReturn, 'utf8'), beforeEnvelope, reason)
+}
+
+test('resume refusal matrix is closed and fails before any side effect', () => {
+  const cases = [
+    [RESUME_REFUSALS.envelopeMissing, (f) => rmSync(f.taskReturn)],
+    [RESUME_REFUSALS.envelopeUnreadable, (f) => f.setEnvelope('{')],
+    [RESUME_REFUSALS.notEscalation, (f) => f.setEnvelope({ status: 'done' })],
+    [RESUME_REFUSALS.stateMissing, (f) => f.setEnvelope({ status: 'escalation', details: { escalation: { where: 'suite' } } })],
+    [RESUME_REFUSALS.unsupportedCheckpoint, (f) => { f.checkpoint.version = 2; f.setEnvelope(f.envelope()) }],
+    [RESUME_REFUSALS.oidUnresolved, (f) => { f.checkpoint.head_oid = 'deadbeef'; f.setEnvelope(f.envelope()) }],
+    [RESUME_REFUSALS.worktreeMoved, (f) => execSync('git commit --allow-empty -qm moved', { cwd: f.checkout })],
+    [RESUME_REFUSALS.fingerprintMismatch, (f) => writeFileSync(join(f.checkout, 'a.mjs'), 'changed bytes\n')],
+    [RESUME_REFUSALS.artifactMissing, (f) => rmSync(f.gatePath)],
+    [RESUME_REFUSALS.artifactUnreadable, (f) => writeFileSync(f.gatePath, '')],
+    [RESUME_REFUSALS.suiteMismatch, () => {}, { suite: 'node --test a-different-suite.mjs' }],
+    [RESUME_REFUSALS.unexpectedDirty, (f) => writeFileSync(join(f.checkout, 'unexpected.mjs'), 'untracked\n')],
+  ]
+  for (const [reason, prepare, args] of cases) {
+    const fixture = resumeCommandFixture(`crew-resume-${reason}-`)
+    try { prepare(fixture); assertResumeRefusal(fixture, reason, args) }
+    finally { rmSync(fixture.root, { recursive: true, force: true }) }
+  }
+})
+
+test('resume admits the persisted custom suite and refuses only a byte-different override', () => {
+  const fixture = resumeCommandFixture('crew-resume-custom-suite-')
+  try {
+    assert.equal(validateResumeState({ args: {}, checkout: fixture.checkout, taskDir: fixture.taskDir, envelope: fixture.envelope() }).suite.cmd, 'node --test custom-suite.mjs')
+    assert.throws(() => validateResumeState({ args: { suite: 'node --test other.mjs' }, checkout: fixture.checkout, taskDir: fixture.taskDir, envelope: fixture.envelope() }), (error) => error.reason === RESUME_REFUSALS.suiteMismatch)
+  } finally { rmSync(fixture.root, { recursive: true, force: true }) }
+})
+
+test('D1 direct CLI run still starts at planning rather than resuming', () => {
+  const root = scratchDir('crew-resume-d1-')
+  const home = join(root, 'home')
+  const checkout = join(root, 'checkout')
+  const task = 'resume-d1'
+  mkdirSync(checkout, { recursive: true }); mkdirSync(home, { recursive: true })
+  execSync('git init -q && git config user.email crew@example.invalid && git config user.name crew && git commit --allow-empty -qm base', { cwd: checkout })
+  const dir = join(home, '.crew', basename(checkout), task)
+  mkdirSync(join(dir, 'returns'), { recursive: true })
+  const taskReturn = join(dir, 'returns', 'task.json')
+  writeFileSync(join(dir, 'crew.json'), JSON.stringify({ task, checkout, roles: ['planner', 'builder', 'reviewer'], members: { planner: { transport: 'unsupported-test-transport' }, builder: { transport: 'headless-json' }, reviewer: { transport: 'headless-json' } }, task_return: taskReturn }))
+  writeFileSync(taskReturn, JSON.stringify({ status: 'escalation', details: {} }))
+  const brief = join(root, 'brief.md')
+  writeFileSync(brief, '# direct run witness\n')
+  const entry = fileURLToPath(new URL('./crew.mjs', import.meta.url))
+  const child = spawnSync(process.execPath, [entry, 'run', '--task', task, '--checkout', checkout, '--brief-file', brief], { cwd: ROOT, encoding: 'utf8', env: { ...CLI_ENV, HOME: home } })
+  const output = `${child.stdout || ''}${child.stderr || ''}`
+  try {
+    assert.notEqual(child.status, 0)
+    assert.notEqual(child.status, 0)
+    const rows = readFileSync(join(dir, 'journal.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+    assert.equal(rows.some((row) => row.stage === 'plan:r1'), true)
+    assert.equal(rows.some((row) => row.event === 'resume-start'), false)
+  } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
 test('unflagged pane boot remains admitted and record-free under headless turn-ceiling defaults', async () => {

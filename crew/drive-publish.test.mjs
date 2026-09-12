@@ -4,9 +4,80 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  COMMIT_TRAILER, CTX, HONEST_NARRATION, NARRATION_HEADING, NARRATION_RECORD, NARRATION_REFUSALS, NARRATION_REFUSAL_NAMES, NARRATION_STAGE_VOCABULARY, NARRATOR_REGISTER, PUBLISH_REFUSAL_NAMES, RUN_START_EVENT, TD, VARIANTS, applyNarration, bounceDetail, bounceSeatOf, buildEnv, commitIntent, composeCommitMessage, composePrBody, convergeRun, driveTask, issueTrailers, join, journalRowsSinceRunStart, narrateRecord, narrationDefect, narrationIsRawJson, narrationPrompt, narrationStageDefect, narratorApiRoot, narratorIo, narratorModelId, narratorModelsCommand, planEnv, prAnomalies, publicationIo, readFileSync, refsFromCommitMessage, reviewEnv, shellArg,
+  COMMIT_TRAILER, CTX, HONEST_NARRATION, NARRATION_HEADING, NARRATION_RECORD, NARRATION_REFUSALS, NARRATION_REFUSAL_NAMES, NARRATION_STAGE_VOCABULARY, NARRATOR_REGISTER, PUBLISH_REFUSAL_NAMES, RUN_START_EVENT, TD, VARIANTS, applyNarration, bounceDetail, bounceSeatOf, buildEnv, commitIntent, composeCommitMessage, composePrBody, convergeRun, driveTask, fakeIo, issueTrailers, join, journalRowsSinceRunStart, narrateRecord, narrationDefect, narrationIsRawJson, narrationPrompt, narrationStageDefect, narratorApiRoot, narratorIo, narratorModelId, narratorModelsCommand, planEnv, prAnomalies, publicationIo, readFileSync, refsFromCommitMessage, reviewEnv, shellArg,
 } from './drive-fixtures.mjs'
-import { anchorConflictMechanical, canonicalAnchorManifest, canonicalCitationDoc, lineNumberOnlyAnchorResolution, rebaseConflictRoute } from './drive.mjs'
+import { anchorConflictMechanical, canonicalAnchorManifest, canonicalCitationDoc, lineNumberOnlyAnchorResolution, rebaseConflictRoute, resumeTask, resumeWorktreeSha256 } from './drive.mjs'
+
+function resumeCheckpointFixture(overrides = {}) {
+  const file = { path: 'a.mjs', state: 'present', bytes: 'file:-:' + 'a'.repeat(64) }
+  const returns = {
+    planner: { status: 'done', role: 'planner', artifacts: [], details: {} },
+    builder: { status: 'done', role: 'builder', artifacts: [], details: {} },
+    reviewer: { status: 'done', role: 'reviewer', artifacts: [], details: {} },
+  }
+  const base = {
+    version: 1, kind: 'rebase', frozen_where: 'rebase', head_oid: 'pre1111',
+    tree: { index_oid: 'tree1111', files: [file], worktree_sha256: resumeWorktreeSha256([file]) },
+    accepted_scope: ['a.mjs'], returns,
+    decision: { accepted_via: 'review pass', verdict: 'pass', residuals: [], carried_findings: [], accept_findings: [], accept_decision: { where: 'review', outcome: 'accepted', residuals: [] }, panel_contributors: ['reviewer'] },
+    commit: { oid: 'pre1111', pending: false, files: ['a.mjs'], message: 'feat: resume\n\nCloses #42', subject: 'feat: resume' },
+    proof: { gate_cmd: 'gate-cmd', gate_path: `${TD}/gate.mjs`, summary: { total: 3, failed: 0, errored: 0 }, discrimination: 'proven', generation: 1, repairs: 0 },
+    suite: { cmd: 'suite-cmd', warm: null, cold: null }, publish: { branch: null, base: 'main' }, prior_stages: ['review:r1', 'commit', 'rebase'],
+  }
+  return { ...base, ...overrides, tree: { ...base.tree, ...(overrides.tree || {}) }, decision: { ...base.decision, ...(overrides.decision || {}) }, commit: { ...base.commit, ...(overrides.commit || {}) }, proof: { ...base.proof, ...(overrides.proof || {}) }, suite: { ...base.suite, ...(overrides.suite || {}) }, publish: { ...base.publish, ...(overrides.publish || {}) } }
+}
+
+test('A1 resume retries frozen rebase without restarting plan or build and reaches done', () => {
+  const checkpoint = resumeCheckpointFixture()
+  const io = fakeIo({ runs: {
+    'git fetch origin main': { ok: true, output: '' },
+    'git rev-parse origin/main': { ok: true, output: 'base1111\n' },
+    'git merge-base HEAD origin/main': { ok: true, output: 'base1111\n' },
+    'git rev-parse HEAD': { ok: true, output: 'pre1111\n' },
+    'suite-cmd': { ok: true, output: '# pass 1\\n# fail 0\\n' },
+  } })
+  const result = resumeTask({ ...CTX, task: 'resume-rebase', publish: { branch: null }, files_in_scope: ['a.mjs'] }, io, checkpoint)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.assign.length, 0)
+  assert.equal(io.calls.runCold.length, 1)
+})
+
+test('RVR1-2 gate resume preserves typed gate escalation when pending commit fails', () => {
+  const gateCheckpoint = (commit) => resumeCheckpointFixture({
+    kind: 'gate', frozen_where: 'gate', publish: { branch: null, base: null }, prior_stages: ['review:r1', 'gate'],
+    commit: { oid: null, pending: true, files: ['a.mjs'], message: 'feat: pending resume', subject: 'feat: pending resume' },
+    ...commit,
+  })
+  const assertTypedGate = (checkpoint, commit, why) => {
+    const io = fakeIo()
+    io.commit = commit
+    const result = resumeTask({ ...CTX, task: 'resume-commit-fail', publish: { branch: null }, files_in_scope: ['a.mjs'] }, io, checkpoint)
+    assert.equal(result.status, 'escalation')
+    assert.equal(result.details.escalation.where, 'gate')
+    assert.match(result.details.escalation.why, why)
+    assert.equal(result.details.resume_checkpoint, checkpoint)
+    assert.equal(io.calls.assign.length, 0)
+  }
+  assertTypedGate(gateCheckpoint(), () => { throw new Error('pre-commit hook rejected') }, /resumed commit failed: pre-commit hook rejected/)
+  assertTypedGate(gateCheckpoint(), () => '', /resumed commit returned no readable oid/)
+  assertTypedGate(gateCheckpoint({ commit: { oid: null, pending: false, files: ['a.mjs'], message: 'feat: pending resume', subject: 'feat: pending resume' } }), () => { throw new Error('must not commit') }, /resumed path has no committed oid/)
+  assertTypedGate({ version: 0 }, () => { throw new Error('must not commit') }, /resume checkpoint is unusable/)
+})
+
+test('E1 resume remeasures gate before commit suite and publish', () => {
+  const checkpoint = resumeCheckpointFixture({ kind: 'publish', frozen_where: 'publish', publish: { branch: 'feature/ship', base: 'main' } })
+  const io = publicationIo()
+  const result = resumeTask({ ...CTX, task: 'resume-publish', publish: { branch: 'feature/ship' }, files_in_scope: ['a.mjs'] }, io, checkpoint)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.assign?.length || 0, 0)
+  assert.ok(io.calls.run.some((command) => command.includes('gate-cmd')), 'resume must invoke the canonical gate')
+  const gateIndex = io.calls.order.findIndex((entry) => entry.includes('gate-cmd'))
+  const suiteIndex = io.calls.order.findIndex((entry) => entry === 'run:suite-cmd')
+  const coldIndex = io.calls.order.indexOf('runCold')
+  const pushIndex = io.calls.order.findIndex((entry) => entry.includes('git push -u origin'))
+  assert.ok(gateIndex >= 0 && gateIndex < suiteIndex && suiteIndex < coldIndex && coldIndex < pushIndex)
+  assert.match(io.calls.writes[`${TD}/pr-body.md`], /Closes #42/)
+})
 
 function installParentProbe(io, parent = { ok: true, output: 'base1111\n' }) {
   const baseRun = io.run

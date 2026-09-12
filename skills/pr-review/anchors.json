@@ -6,12 +6,12 @@
   "crew/roles/reviewer.md:62": "`findings` is optional: omit it and the run behaves exactly as before.",
   "crew/roles/reviewer.md:14": "2. Judge two separate questions, in order:",
   "crew/roles/reviewer.md:16": "Out-of-plan edits are findings even when harmless.",
-  "crew/drive.mjs:690": "export function panelSeats(seated) {",
-  "crew/drive.mjs:1978": "export function validateScopeEntries(entries) {",
-  "crew/drive.mjs:3190": "for (const match of narration.matchAll(/[A-Za-z0-9_.-]+\\/[A-Za-z0-9_./-]+/g)) {",
-  "crew/drive.mjs:7427": "        panelResult = runPanelReview({ round: roundNo, panel, io, dissents: S.dissents, setAcceptFindings: (value) => { S.acceptFindings = value }, setLastReview: (value) => { S.lastReview = value }, planPath, panelBriefText, panelStandingQuestion, art, stage, stageComplete, assignAndWait, carriedOpen, panelLog, panelDegraded, emit })",
-  "crew/drive.mjs:6897": "const panel = ctx.continuation === true ? panelSeats(seatList) : null",
-  "crew/drive.mjs:3434": "function runPanelReview({ round, panel, io, dissents, setAcceptFindings, setLastReview, planPath, panelBriefText, panelStandingQuestion, art, stage, stageComplete, assignAndWait, carriedOpen, panelLog, panelDegraded, emit }) {",
-  "crew/drive.mjs:3500": "const fused = fuseFindings(findingsOf(aEnv), findingsOf(bEnv), {",
-  "crew/drive.mjs:3624": "const adjudicated = adjudicatePanel(allocatedDivergent, adjEnv.details)"
+  "crew/drive.mjs:3191": "for (const match of narration.matchAll(/[A-Za-z0-9_.-]+\\/[A-Za-z0-9_./-]+/g)) {",
+  "crew/drive.mjs:1979": "export function validateScopeEntries(entries) {",
+  "crew/drive.mjs:7506": "        panelResult = runPanelReview({ round: roundNo, panel, io, dissents: S.dissents, setAcceptFindings: (value) => { S.acceptFindings = value }, setLastReview: (value) => { S.lastReview = value }, planPath, panelBriefText, panelStandingQuestion, art, stage, stageComplete, assignAndWait, carriedOpen, panelLog, panelDegraded, emit })",
+  "crew/drive.mjs:6964": "const panel = ctx.continuation === true ? panelSeats(seatList) : null",
+  "crew/drive.mjs:691": "export function panelSeats(seated) {",
+  "crew/drive.mjs:3438": "function runPanelReview({ round, panel, io, dissents, setAcceptFindings, setLastReview, planPath, panelBriefText, panelStandingQuestion, art, stage, stageComplete, assignAndWait, carriedOpen, panelLog, panelDegraded, emit }) {",
+  "crew/drive.mjs:3504": "const fused = fuseFindings(findingsOf(aEnv), findingsOf(bEnv), {",
+  "crew/drive.mjs:3628": "const adjudicated = adjudicatePanel(allocatedDivergent, adjEnv.details)"
 }

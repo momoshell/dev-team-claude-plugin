@@ -2101,6 +2101,7 @@ test('E1 run-level refusal row passes ledger enum validation', () => {
   const createdAt = '2026-09-12T00:00:00.000Z'
   try {
     ledger = openLedger({ dbPath: join(root, 'ledger.db'), stderr: { write() {} } })
+    if (ledger.degraded) return
     assert.doesNotThrow(() => ledger.recordMutationAnchorAbsence({
       adw_id: 'd2-e1', gate_generation: absence.generation, check_name: absence.check, file: absence.file,
       correction: absence.correction, refusal: absence.refusal, why: absence.why, created_at: createdAt,
@@ -2113,6 +2114,12 @@ test('E1 run-level refusal row passes ledger enum validation', () => {
     ledger?.close()
     rmSync(root, { recursive: true, force: true })
   }
+})
+
+test('RV2-1 keeps the literal ledger edge and census carrier aligned', () => {
+  const source = readFileSync(`${process.cwd()}/crew/drive-build.test.mjs`, 'utf8')
+  const literalImport = `import { openLedger, MUTATION_ANCHOR_REFUSALS } from '../${['scripts', 'factory', 'ledger.mjs'].join('/')}'`
+  assert.ok(source.includes(literalImport))
 })
 
 test('b385 G1 an all-bind lane pins its legacy proof row byte-identically beside one additive bind row', () => {

@@ -7824,12 +7824,12 @@ function runTask(ctx, io, crash) {
           const restoredHead = probe('git rev-parse HEAD')
           if (!aborted?.ok || !restoredHead || restoredHead !== preRebaseCommit) {
             const found = restoredHead || '(unavailable)'
-            return { escalation: escalate('rebase', `the rebase onto ${base} failed${conflictDetail}; restoration is UNPROVEN — HEAD found after abort: ${found}`, [], { commit: S.commit }) }
+            return { escalation: escalate('rebase', `the rebase onto ${base} failed${conflictDetail}; restoration is UNPROVEN — HEAD found after abort: ${found}`, [], { commit: S.commit }, { files: escalationFiles(conflicted), base, commit: S.commit }) }
           }
           if (!evidenceMeasured) {
             return { escalation: escalate('rebase', conflicted.length
               ? `the rebase onto ${base} failed with conflicts in ${conflicted.join(', ')}; restoration proven at HEAD ${restoredHead}`
-              : `the rebase onto ${base} failed`, [], { commit: S.commit }) }
+              : `the rebase onto ${base} failed`, [], { commit: S.commit }, { files: escalationFiles(conflicted), base, commit: S.commit }) }
           }
           const route = routeOverride || rebaseConflictRoute({ mechanical: false, bounces: rebaseConflictBounces, buildRounds: limits.build_rounds })
           if (route === 'escalate') {
@@ -7872,7 +7872,7 @@ function runTask(ctx, io, crash) {
           const settled = restoreConflict(false, 'conflict evidence was empty or unmeasurable')
           if (settled.escalation) { stageComplete(); return settled.escalation }
           stageComplete()
-          return escalate('rebase', `the rebase onto ${base} failed${conflictDetail}`, [], { commit: S.commit })
+          return escalate('rebase', `the rebase onto ${base} failed${conflictDetail}`, [], { commit: S.commit }, { files: escalationFiles(conflicted), base, commit: S.commit })
         }
         const classifiedMechanical = anchorConflictMechanical(conflicted)
         const classifiedRoute = rebaseConflictRoute({ mechanical: classifiedMechanical, bounces: rebaseConflictBounces, buildRounds: limits.build_rounds })
@@ -7891,7 +7891,7 @@ function runTask(ctx, io, crash) {
             continue suiteCycle
           }
           stageComplete()
-          return escalate('rebase', `the rebase onto ${base} failed${conflictDetail}`, [], { commit: S.commit })
+          return escalate('rebase', `the rebase onto ${base} failed${conflictDetail}`, [], { commit: S.commit }, { files: escalationFiles(conflicted), base, commit: S.commit })
         }
       }
       const postRebaseHead = probe('git rev-parse HEAD')

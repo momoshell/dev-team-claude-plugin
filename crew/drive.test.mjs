@@ -6,7 +6,8 @@ import assert from 'node:assert/strict'
 import {
   B44_LEADLESS_CTX, adversarialPlanEnv, CENSUS_ROW_ABSENT, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_RUNS, CONVERGE_CTX, CONVERGE_GATE, CRASH_WHY, CTX, CTX_DIRECTED, CTX_REPAIR, CTX_TL, DEFAULT_VARIANT, DIRECTED_BRIEF_PATH, DIRECTED_BRIEF_TEXT, DIRECTED_FILES, DRIVE_JOURNAL_EXPECTED, D_ASK, D_AUTO, D_GREEN_GATE, D_PATCH_A, D_PATCH_B, D_PATCH_EMPTY_PATH, D_PATCH_MIXED_MODE, D_PATCH_MIXED_RENAME, D_RED_GATE, ENVELOPE_DEBRIS, GATE_CUSTODIAN, GATE_SUMMARY_PREFIX, HEALTHY_RESULT, JOURNAL_CHANNELS, JOURNAL_CHANNEL_NAMES, JUDGE_TIER, MAX_QUESTIONS, MODIFIER_OUTCOMES, PHASE_SLOT_WAIT_EVENT, PROTECTED_PATHS, RED, REPO_ROOT, REVIEWED_CORE_STAGES, S843_ADDED, S843_D2, S843_RUNS, SCOPE_REFUSALS, SEAT_REFUSAL_STAGE, SENSITIVITY_FLOOR, SHAPE_SOURCES, SKILL_NAMES, SUITE_SLOT_PHASES, SUITE_SLOT_PHASE_NAMES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, TRIAGE_SOURCES, TRIAGE_STAGES, TRIAGE_STAGE_HEAD, VARIANTS, VARIANT_NAMES, WAITS_S, WAIT_FLAGS, WAIT_REFUSALS, WAIT_ROLES, WAIT_SECONDS_MAX, WAIT_SECONDS_MIN, ZERO_CAPACITY_LOGS, ZERO_CAPACITY_RESULT, answerBounceLines, assertSeats, b127GatePaths, b127InvokeGate, b318Builders, b318ReviewGrants, b318SiteA, b318SiteB, b44AssertLeadlessGate, b44GateFixIo, b44GatePlan, b44MidRunRepairIo, baselineGateDefect, bothExhaustionPointsScenario, buildEnv, carveRun, checkEnv, checkFailureLine, closeoutIo, convergeIo, convergeRun, crashIo, crashRun, dApplyCommand, dAutoRows, dBuilders, dGitApplies, dLeads, dReviewEnv, deliberateRun, directSlotRun, dispositionIo, divergentPlanScenario, driveJournalSites, driveTask, enforcementPreamble, envelopeDefect, envelopeFieldsPresent, escalationStageRows, exhaustionAcceptIo, existsSync, fakeIo, fenceBase, fenceDiff, fenceSpan, gateReapCommand, guardedWrite, join, laneFence, laneFenceHits, laneProbeCommand, laneProbeKinds, leadEnv, matchAnswers, mkdirSync, normaliseJournalTimes, operationalRow, osCpus, parseDirectedBrief, parseGateSummary, parseQuestions, parseSuiteCounts, patchTargets, phaseTrace, planEnv, postCommitCrashRun, protectedPlanEnv, protectedReseatRefusal, questionConsultLines, readFileSync, reconEnv, recordRow, refuseWait, replayResumeStages, resolveProtectedPaths, resolveWaits, resumeDoneRows, resumeKeys, resumeStageRows, reviewEnv, rmSync, runChild, runCmd, runCmdFixture, s843Ctx, s843Io, s843PathsIn, s843PlanEnv, scopeBounceBrief, scopeMatcher, scopeRefusal, scratchDir, shapeDefect, shellArg, shellWords, slotCtx, slotFactory, sourcesDefect, spawnSync, stageEnabled, suiteRefusalEnv, throwAutoFixWrites, throwingWaitRun, tmpdir, traceLabels, triageEnv, undeclaredStage, validateScopeEntries, waitsCtx, waitsRecord, writeFileSync,
 } from './drive-fixtures.mjs'
-import { ADVERSARY_REFUSAL, ADVERSARY_REFUSALS, ADVERSARY_TRIGGERS, SCOPE_ADMISSION_SOURCES, SCOPE_REQUEST_KINDS, SUITE_ADMISSION_MAX, fenceScopeOf, fenceScopesIntersect, parseUnifiedZeroHunks, resolveAdversaryTrigger, scopeAdmissionDecision, scopeRequestOf, siblingSpanIntersects, suiteRedTestFiles } from './drive.mjs'
+import { ADVERSARY_REFUSAL, ADVERSARY_REFUSALS, ADVERSARY_TRIGGERS, CENSUS_CARRIER_FILES as RUNTIME_CENSUS_CARRIER_FILES, SCOPE_ADMISSION_SOURCES, SCOPE_REQUEST_KINDS, SEAT_ADMISSION_MAX as RUNTIME_SEAT_ADMISSION_MAX, SUITE_ADMISSION_MAX as RUNTIME_SUITE_ADMISSION_MAX, fenceScopeOf, fenceScopesIntersect, parseUnifiedZeroHunks, resolveAdversaryTrigger, scopeAdmissionDecision, scopeRequestOf, siblingSpanIntersects, suiteRedTestFiles } from './drive.mjs'
+import { CENSUS_CARRIER_FILES as DISPATCH_CENSUS_CARRIER_FILES } from '../scripts/factory/dispatch-batch.mjs'
 
 test('a supplied wait budget reaches io.wait and names the seat overdue at that budget', () => {
   const io = fakeIo({ envelopes: { 'planner:1': null } })
@@ -888,6 +889,35 @@ test('C1 second suite red after widening escalates', () => {
   assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 2)
 })
 
+test('B1 ordinary suite scope admission budget remains one', () => {
+  assert.equal(RUNTIME_SUITE_ADMISSION_MAX, 1)
+  const evidence = { kind: 'suite-red', output: 'first suite failure' }
+  const first = scopeAdmissionDecision({ source: 'suite-red', files: ['suite-one.test.mjs'], evidence, laneFence: [] })
+  const second = scopeAdmissionDecision({ source: 'suite-red', files: ['suite-two.test.mjs'], evidence, laneFence: [], suiteWidenings: RUNTIME_SUITE_ADMISSION_MAX })
+  assert.equal(first.action, 'admit')
+  assert.equal(second.action, 'escalate')
+  assert.equal(second.reason, 'repeat')
+})
+
+test('B1-seat seat scope admission budget remains one', () => {
+  assert.equal(RUNTIME_SEAT_ADMISSION_MAX, 1)
+  const evidence = { kind: 'seat-request', output: 'first seat request' }
+  const first = scopeAdmissionDecision({ source: 'seat-request', files: ['seat-one.mjs'], evidence, laneFence: [] })
+  const second = scopeAdmissionDecision({ source: 'seat-request', files: ['seat-two.mjs'], evidence, laneFence: [], seatWidenings: RUNTIME_SEAT_ADMISSION_MAX })
+  assert.equal(first.action, 'admit')
+  assert.equal(second.action, 'escalate')
+  assert.equal(second.reason, 'repeat')
+})
+
+test('C1 census repair coupling is one declared existing-file unit', () => {
+  assert.equal(Object.isFrozen(RUNTIME_CENSUS_CARRIER_FILES), true)
+  assert.equal(Object.isFrozen(DISPATCH_CENSUS_CARRIER_FILES), true)
+  assert.deepEqual([...RUNTIME_CENSUS_CARRIER_FILES].sort(), [...DISPATCH_CENSUS_CARRIER_FILES].sort())
+  assert.equal(RUNTIME_CENSUS_CARRIER_FILES.length, 2)
+  assert.equal(new Set(RUNTIME_CENSUS_CARRIER_FILES).size, 2)
+  for (const file of RUNTIME_CENSUS_CARRIER_FILES) assert.equal(existsSync(join(REPO_ROOT, file)), true, file)
+})
+
 test('D1 builder scope request is admitted and journalled with role and stage', () => {
   const evidence = { kind: 'builder-request', output: 'generated.mjs is required' }
   const request = { scope_request: { kind: 'admit-files', files: ['generated.mjs'] }, evidence }
@@ -928,7 +958,7 @@ test('F1 scope request kind is a closed enum', () => {
   assert.ok(Object.isFrozen(SCOPE_REQUEST_KINDS))
   assert.deepEqual(SCOPE_ADMISSION_SOURCES, ['suite-red', 'seat-request'])
   assert.ok(Object.isFrozen(SCOPE_ADMISSION_SOURCES))
-  assert.equal(SUITE_ADMISSION_MAX, 1)
+  assert.equal(RUNTIME_SUITE_ADMISSION_MAX, 1)
   for (const kind of SCOPE_REQUEST_KINDS) {
     assert.deepEqual(scopeRequestOf({ scope_request: { kind, files: ['requested.mjs'] } }), { kind, files: ['requested.mjs'] })
   }

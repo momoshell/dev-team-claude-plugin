@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import {
   B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_IMPL_FILE, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, B384_CORRECTED_FIND, B384_CORRECTED_REPLACE, B384_GREEN, B384_MUTATION, B384_RED, B384_REFACTORED_BUILDER, B384_REFACTORED_UNCORRECTED_BUILDER, B44_LEADLESS_CTX, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_PLAN, CHECK_RUNS, CONVERGE_CTX, CONVERGE_GATE, CONVERGE_PLAN, CTX, CTX_DIRECTED, CTX_REPAIR, DIRECTED_FILES, D_ASK, D_AUTO, ENVELOPE_FIELD_KINDS, EXECUTIONS, FAILURE_UPGRADE, GATE_REAP_CMD_EOF, GATE_REAP_SWEEP_MARKER, GATE_SUMMARY_PREFIX, HARDENING_MARKS, HARDENING_OUTCOMES, HARDENING_REFUSALS, MODIFIER_OUTCOMES, MUTATIONS_MAX, MUTATION_BINDING_FAILURES, MUTATION_OUTCOMES, PARTIAL_REVIEWED, RED, SENSITIVITY_FLOOR, SHAPE_MAJOR_PHASES, SHAPE_ROUNDED_STAGES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, UNIVERSAL_STAGE_HEADS, VALIDATION_LANE_UNLOADABLE, VARIANTS, VARIANT_NAMES, WRITE_SURFACES, applyMutationAnchor, applyPrescriptionLines, b127GatePaths, b127PidAlive, b318Builders, b318SiteA, b376Build, b376DiskProofIo, b376ProofIo, b376Review, b376StageStack, b384Io, b384RefactoredIo, b44AssertLeadlessGate, b44GatePlan, bindMutationAnchor, buildEnv, collapseStages, dispositionIo, driveTask, existsSync, fakeIo, fenceBase, fenceDiff, fenceSpan, gateReapCommand, gateReapFresh, gateReapOriginal, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, hardeningBounceLines, hardeningBriefLines, hardeningDebt, hardeningOf, join, laneFence, leadEnv, mutationChangesTokens, outOfScopeFiles, planEnv, protectedPlanEnv, readFileSync, resumeGreen, resumeRed, reviewConvergeRun, reviewEnv, reviewFindings, rmSync, s843Ctx, s843Io, s843PlanEnv, s843Rows, scopeMatcher, scopedPath, scratchDir, shapeDefect, spawnSync, stageShape, treeDigest, triageEnv, undeclaredStage, validateHardened, validateMutations, validationPlan, validationProbeRun, validationRows,
 } from './drive-fixtures.mjs'
-import { CHECK_MATCHES, HARDENING_APPEAL_SHAPE, HARDENING_CLASSES, LIMITS, hardeningAppealLines, hardeningAppealRequest, hardeningClassOf, mutationProofScope } from './drive.mjs'
+import { CENSUS_CARRIER_FILES, CHECK_MATCHES, HARDENING_APPEAL_SHAPE, HARDENING_CLASSES, LIMITS, hardeningAppealLines, hardeningAppealRequest, hardeningClassOf, mutationProofScope } from './drive.mjs'
 import { CENSUS_QUALIFYING_FILES, runCensusExhibits, selectCensusExhibits } from './census-exhibits.mjs'
 
 const proofScopeMutations = () => [
@@ -3744,7 +3744,7 @@ function censusRecord(failures = []) {
   })
 }
 
-function censusDriveIo(censusOutputs, { ctx = {}, publish = false, changed = ['a.mjs', 'a.test.mjs'], laneFence = [], protectedPaths = [], planFiles = ['a.mjs', 'a.test.mjs'], onCensus = null } = {}) {
+function censusDriveIo(censusOutputs, { ctx = {}, publish = false, changed = ['a.mjs', 'a.test.mjs'], laneFence = [], protectedPaths = [], planFiles = ['a.mjs', 'a.test.mjs'], onCensus = null, envelopes = {}, suiteResults = [], suiteRuns = {}, fenceBases = {}, fenceDiffs = {}, spanDiffs = {} } = {}) {
   const baseCtx = {
     ...CTX,
     files_in_scope: ['a.mjs', 'a.test.mjs'],
@@ -3760,6 +3760,7 @@ function censusDriveIo(censusOutputs, { ctx = {}, publish = false, changed = ['a
       'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', files_in_scope: planFiles } }),
       'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(),
       'reviewer:1': reviewEnv('pass'), 'reviewer:2': reviewEnv('pass'), 'reviewer:3': reviewEnv('pass'),
+      ...envelopes,
     },
     runs: {
       'gate-cmd:1': { ok: false, output: RED(1) },
@@ -3767,8 +3768,13 @@ function censusDriveIo(censusOutputs, { ctx = {}, publish = false, changed = ['a
       'gate-cmd': { ok: true, output: `green\n${GATE_SUMMARY_PREFIX} {"total":1,"failed":0,"errored":0}` },
       'lane-cmd': { ok: true, output: '' },
       'suite-cmd': { ok: true, output: 'TAP version 13\n1..1\n# tests 1\n# pass 1\n# fail 0\n' },
+      ...Object.fromEntries((Array.isArray(suiteResults) ? suiteResults : []).map((result, index) => [`suite-cmd:${index + 1}`, result])),
+      ...suiteRuns,
     },
-    changed: Array.from({ length: 20 }, () => Array.isArray(changed) ? [...changed] : changed),
+    changed: typeof changed === 'function' ? [] : Array.isArray(changed) && Array.isArray(changed[0])
+      ? changed.map((entry) => Array.isArray(entry) ? [...entry] : entry)
+      : Array.from({ length: 20 }, () => Array.isArray(changed) ? [...changed] : changed),
+    fenceBases, fenceDiffs, spanDiffs,
   })
   const originalRun = io.run
   let index = 0
@@ -3780,8 +3786,15 @@ function censusDriveIo(censusOutputs, { ctx = {}, publish = false, changed = ['a
       const output = censusOutputs[Math.min(index++, censusOutputs.length - 1)] ?? censusRecord()
       return { ok: true, output: typeof output === 'string' ? output : JSON.stringify(output) }
     }
-    if (text.includes('git show') && laneFence.length > 0) return { ok: true, output: fenceBase(20) }
-    if (text.includes('git diff --unified=0') && laneFence.length > 0) return { ok: true, output: fenceDiff('a.test.mjs', 1, 1) }
+    if (text.includes('git show') && laneFence.length > 0) {
+      const key = Object.keys(fenceBases).find((candidate) => text.includes(candidate))
+      return key === undefined ? { ok: true, output: fenceBase(20) } : fenceBases[key]
+    }
+    if (text.includes('git diff --unified=0') && laneFence.length > 0) {
+      const scripts = { ...fenceDiffs, ...spanDiffs }
+      const key = Object.keys(scripts).find((candidate) => text.includes(candidate))
+      return key === undefined ? { ok: true, output: fenceDiff('a.test.mjs', 1, 1) } : scripts[key]
+    }
     if (publish && text.includes('git fetch origin')) return { ok: true, output: '' }
     if (publish && text.includes('git rev-parse')) return { ok: true, output: 'abc1234' }
     if (publish && text.includes('git merge-base')) return { ok: true, output: 'abc1234' }
@@ -3791,6 +3804,9 @@ function censusDriveIo(censusOutputs, { ctx = {}, publish = false, changed = ['a
     if (publish && text.includes('git push')) return { ok: true, output: '' }
     if (publish && text.includes('gh pr create')) return { ok: true, output: ['https:', 'example.invalid/pull/1'].join(String.fromCharCode(47).repeat(2)) }
     return originalRun.call(this, command)
+  }
+  if (typeof changed === 'function') {
+    io.changedFiles = function () { return changed.call(this) }
   }
   return { ctx: baseCtx, io }
 }
@@ -3865,6 +3881,203 @@ test('B1c repeated post-commit inside red escalates after one repair', () => {
   assert.equal(io.calls.commits.length, 2)
   assert.equal(io.calls.writes[`${TD}/census-exhibits-bounce-r1.md`] !== undefined, true)
   assert.equal(io.calls.writes[`${TD}/census-exhibits-bounce-r2.md`] !== undefined, false)
+})
+
+test('A1 census bounce admits the declared repair unit after both ordinary budgets are spent', () => {
+  const [carrierOne, carrierTwo] = CENSUS_CARRIER_FILES
+  const seatRequest = {
+    scope_request: { kind: 'admit-files', files: ['seat-repair.mjs'] },
+    evidence: { kind: 'builder-request', output: 'seat-repair.mjs is needed' },
+  }
+  const suiteRed = `FAIL file://${CTX.checkout}/ordinary-suite.test.mjs:1:1\nordinary suite repair is needed`
+  const { ctx, io } = censusDriveIo([
+    censusRecord(), censusRecord(), censusRecord([carrierOne]), censusRecord(),
+  ], {
+    envelopes: {
+      'builder:1': buildEnv({ details: { ...seatRequest, files_changed: [] } }),
+      'builder:2': buildEnv({ details: { files_changed: ['seat-repair.mjs'], commit_message: 'seat repair' } }),
+      'builder:3': buildEnv({ details: { files_changed: ['ordinary-suite.test.mjs'], commit_message: 'suite repair' } }),
+      'builder:4': buildEnv({ details: { files_changed: [carrierOne, carrierTwo], commit_message: 'census repair' } }),
+    },
+    suiteResults: [
+      { ok: false, output: suiteRed },
+      { ok: true, output: CENSUS_TAP_GREEN },
+    ],
+    changed() {
+      const censusRuns = this.calls.run.filter(({ cmd }) => cmd === 'node crew/census-exhibits.mjs').length
+      const suiteRuns = this.calls.run.filter(({ cmd }) => cmd === 'suite-cmd').length
+      if (censusRuns >= 3) return [carrierOne, carrierTwo]
+      if (suiteRuns >= 1) return ['ordinary-suite.test.mjs']
+      return ['seat-repair.mjs']
+    },
+  })
+  const result = driveTask(ctx, io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 4)
+  const admissions = io.calls.logs.filter((row) => row.scope_admission).map((row) => row.scope_admission)
+  assert.deepEqual(admissions.map(({ source }) => source), ['seat-request', 'suite-red', 'census-bounce'])
+  assert.deepEqual(admissions.find(({ source }) => source === 'census-bounce').files, [carrierOne, carrierTwo])
+  assert.equal(io.calls.writes[`${TD}/census-exhibits-bounce-r1.md`] !== undefined, true)
+})
+
+test('A1-span census bounce supersedes only the admitted carrier own span', () => {
+  const [pairedCarrier, carrier] = CENSUS_CARRIER_FILES
+  const sibling = 'sibling.mjs'
+  const nonCarrier = 'non-carrier.mjs'
+  const laneFence = [
+    { lane: 'current', files: [`${carrier}:253-266`, `${nonCarrier}:1-5`] },
+    { lane: 'sibling', files: [`${sibling}:1-5`] },
+  ]
+  const fixture = (changedAfterBounce, { ctx: extraCtx = {}, ...extra } = {}) => censusDriveIo([
+    censusRecord(), censusRecord([carrier]), censusRecord(),
+  ], {
+    laneFence,
+    ctx: { laneName: 'current', head: 'base-sha', ...extraCtx },
+    changed: [['a.mjs'], ['a.mjs'], changedAfterBounce, changedAfterBounce],
+    fenceBases: {
+      [`base-sha:${carrier}`]: { ok: true, output: fenceBase(300) },
+      [`base-sha:${nonCarrier}`]: { ok: true, output: fenceBase(20) },
+      [`base-sha:${sibling}`]: { ok: true, output: fenceBase(20) },
+    },
+    fenceDiffs: {
+      [carrier]: { ok: true, output: fenceDiff(carrier, 249, 1) },
+      [nonCarrier]: { ok: true, output: fenceDiff(nonCarrier, 10, 1) },
+      [sibling]: { ok: true, output: fenceDiff(sibling, 3, 1) },
+    },
+    ...extra,
+  })
+  const outsideOwnSpan = fixture([carrier])
+  const passed = driveTask(outsideOwnSpan.ctx, outsideOwnSpan.io)
+  assert.equal(passed.status, 'done')
+  assert.ok(outsideOwnSpan.io.calls.assign.find(({ role, n, policy }) => role === 'builder' && n === 2 && policy.fence.includes(carrier)))
+  assert.ok(outsideOwnSpan.io.calls.writes[`${TD}/census-exhibits-bounce-r1.md`].includes(`${carrier}: OUTSIDE the effective writable scope`))
+
+  const siblingEdit = fixture([carrier, sibling])
+  const refused = driveTask(siblingEdit.ctx, siblingEdit.io)
+  assert.equal(refused.status, 'escalation')
+  assert.equal(refused.details.escalation.where, 'scope')
+  assert.match(refused.details.escalation.why, /sibling\.mjs.*lane sibling/)
+
+  const scopedFiles = ['a.mjs', 'a.test.mjs', pairedCarrier, carrier, nonCarrier]
+  const alreadyScoped = fixture([carrier], { ctx: { files_in_scope: scopedFiles }, planFiles: scopedFiles })
+  const scoped = driveTask(alreadyScoped.ctx, alreadyScoped.io)
+  assert.equal(scoped.status, 'done')
+  assert.deepEqual(alreadyScoped.io.calls.assign.find(({ role, n }) => role === 'builder' && n === 2).policy.fence, scopedFiles)
+  assert.equal(alreadyScoped.io.calls.logs.filter((row) => row.scope_admission?.source === 'census-bounce').length, 0)
+  assert.ok(alreadyScoped.io.calls.writes[`${TD}/census-exhibits-bounce-r1.md`].includes(`${carrier}: INSIDE the effective writable scope`))
+
+  const nonCarrierEdit = fixture([carrier, nonCarrier], {
+    ctx: { files_in_scope: scopedFiles, limits: { build_rounds: 2 } },
+    planFiles: scopedFiles,
+  })
+  const refusedOwn = driveTask(nonCarrierEdit.ctx, nonCarrierEdit.io)
+  assert.equal(refusedOwn.status, 'escalation')
+  assert.equal(refusedOwn.details.escalation.where, 'scope')
+  assert.match(refusedOwn.details.escalation.why, /non-carrier\.mjs.*outside this lane's span fence/)
+})
+
+test('D1 census bounce adds only missing members of the repair unit', () => {
+  const [carrierOne, carrierTwo] = CENSUS_CARRIER_FILES
+  const { ctx, io } = censusDriveIo([censusRecord(), censusRecord([carrierOne]), censusRecord()], {
+    ctx: { files_in_scope: ['a.mjs', 'a.test.mjs', carrierOne] },
+    planFiles: ['a.mjs', 'a.test.mjs', carrierOne],
+    changed: [['a.mjs', 'a.test.mjs'], ['a.mjs', 'a.test.mjs'], [carrierTwo], [carrierTwo]],
+    envelopes: {
+      'builder:2': buildEnv({ details: { files_changed: [carrierTwo], commit_message: 'missing carrier repair' } }),
+    },
+  })
+  const result = driveTask(ctx, io)
+  assert.equal(result.status, 'done')
+  const admissions = io.calls.logs.filter((row) => row.scope_admission).map((row) => row.scope_admission)
+  assert.equal(admissions.length, 1)
+  assert.deepEqual(admissions[0].files, [carrierTwo])
+  assert.ok(io.calls.assign.find(({ role, n, policy }) => role === 'builder' && n === 2 && policy.fence.includes(carrierOne) && policy.fence.includes(carrierTwo)))
+})
+
+test('E1 held census repair member escalates before a builder bounce', () => {
+  const [heldCarrier] = CENSUS_CARRIER_FILES
+  const { ctx, io } = censusDriveIo([censusRecord(), censusRecord(CENSUS_CARRIER_FILES)], {
+    laneFence: [{ lane: 'sibling', files: [heldCarrier] }],
+  })
+  const result = driveTask(ctx, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'census-exhibits')
+  assert.ok(result.details.escalation.why.includes(`${heldCarrier} is owned by lane sibling`))
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 1)
+  assert.equal(io.calls.writes[`${TD}/census-exhibits-bounce-r1.md`] !== undefined, false)
+  assert.equal(io.calls.logs.filter((row) => row.scope_admission?.source === 'census-bounce').length, 0)
+})
+
+test('RV1-1 census repair refuses a sibling span holder before side effects', () => {
+  const [, heldCarrier] = CENSUS_CARRIER_FILES
+  const { ctx, io } = censusDriveIo([censusRecord(), censusRecord([heldCarrier])], {
+    laneFence: [{ lane: 'sibling', files: [`${heldCarrier}:200-260`] }],
+    ctx: { laneName: 'current', head: 'base-sha' },
+    fenceBases: { [`base-sha:${heldCarrier}`]: { ok: true, output: fenceBase(300) } },
+  })
+  const result = driveTask(ctx, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'census-exhibits')
+  assert.ok(result.details.escalation.why.includes(heldCarrier))
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 1)
+  assert.equal(io.calls.logs.filter((row) => row.scope_admission?.source === 'census-bounce').length, 0)
+  assert.equal(io.calls.writes[`${TD}/census-exhibits-bounce-r1.md`] !== undefined, false)
+})
+
+test('RV2-1 census repair refuses an unfailed sibling-held carrier before side effects', () => {
+  const [failedCarrier] = CENSUS_QUALIFYING_FILES
+  const heldCarrier = CENSUS_CARRIER_FILES.find((file) => file !== failedCarrier)
+  const { ctx, io } = censusDriveIo([censusRecord(), censusRecord([failedCarrier])], {
+    laneFence: [{ lane: 'sibling', files: [heldCarrier] }],
+  })
+  const result = driveTask(ctx, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'census-exhibits')
+  assert.ok(result.details.escalation.why.includes(`${heldCarrier} is owned by lane sibling`))
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 1)
+  assert.equal(io.calls.logs.filter((row) => row.scope_admission?.source === 'census-bounce').length, 0)
+  assert.equal(io.calls.writes[`${TD}/census-exhibits-bounce-r1.md`] !== undefined, false)
+})
+
+test('unmeasured carrier-naming defects escalate before repair admission', () => {
+  const [carrier] = CENSUS_CARRIER_FILES
+  const unmeasured = {
+    action: 'escalate', verdict: 'unmeasured', failures: [], defects: [{ file: carrier }], reason: 'unlisted-survivor',
+  }
+  const { ctx, io } = censusDriveIo([unmeasured])
+  const result = driveTask(ctx, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'census-exhibits')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 0)
+  assert.equal(io.calls.logs.filter((row) => row.scope_admission?.source === 'census-bounce').length, 0)
+  assert.equal(io.calls.writes[`${TD}/census-exhibits-bounce-r1.md`] !== undefined, false)
+})
+
+test('mixed carrier and unrelated-outside census failures escalate before mutation', () => {
+  const [carrier] = CENSUS_CARRIER_FILES
+  const outside = 'unrelated-outside.mjs'
+  const { ctx, io } = censusDriveIo([censusRecord(), censusRecord([carrier, outside])])
+  const result = driveTask(ctx, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'census-exhibits')
+  assert.match(result.details.escalation.why, /unrelated-outside\.mjs: OUTSIDE/)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 1)
+  assert.equal(io.calls.logs.filter((row) => row.scope_admission?.source === 'census-bounce').length, 0)
+  assert.equal(io.calls.writes[`${TD}/census-exhibits-bounce-r1.md`] !== undefined, false)
+})
+
+test('protected missing census repair members escalate before admission', () => {
+  const [, protectedCarrier] = CENSUS_CARRIER_FILES
+  const { ctx, io } = censusDriveIo([censusRecord(), censusRecord(CENSUS_CARRIER_FILES)], {
+    protectedPaths: [protectedCarrier],
+  })
+  const result = driveTask(ctx, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'census-exhibits')
+  assert.match(result.details.escalation.why, /protected paths cannot be admitted/)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 1)
+  assert.equal(io.calls.logs.filter((row) => row.scope_admission?.source === 'census-bounce').length, 0)
+  assert.equal(io.calls.writes[`${TD}/census-exhibits-bounce-r1.md`] !== undefined, false)
 })
 
 test('C1 census prefilter tripwire names an unlisted candidate', () => {

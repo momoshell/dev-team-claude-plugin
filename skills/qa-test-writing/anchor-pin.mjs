@@ -1,5 +1,5 @@
 // Content pins for prose citations; see references/citations.md and vacuity.md's detector-key section.
-import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import { execFileSync } from 'node:child_process'
 
@@ -254,27 +254,54 @@ function outputPaths(output) {
   return output.split(/\r?\n/).filter((path) => path !== '')
 }
 
+function rootRelativePath(root, target) {
+  let canonicalRoot = root
+  let canonicalTarget = target
+  try { canonicalRoot = realpathSync(root) } catch {}
+  try { canonicalTarget = realpathSync(target) } catch {}
+  return relative(canonicalRoot, canonicalTarget).replaceAll('\\', '/')
+}
+
 // The lane's own fence, measured: the paths this branch changed against its merge
 // base plus anything dirty or untracked. Unmeasurable (no git, no base branch, a
 // scratch fixture root) yields an EMPTY fence and a stated reason - a blind spot is
 // named, never guessed at.
-export function laneFence({ root, base = 'main', run = defaultRun } = {}) {
+//
+// BLIND SPOT, stated rather than implied: NO LOCAL CHECK CAN PROVE A BASE IS FRESH OR
+// THAT IT IS THIS LANE'S ACTUAL BRANCH POINT. A remote-tracking ref is only as current as
+// the last fetch, and a lane branched from something other than `base` gets a merge base
+// that is an ancestor of both - so the diff, and therefore the fence, is WIDER than the
+// lane's own work. This function cannot detect either case without the network, and it
+// does not pretend to: it reports the RESOLVED COMMIT it used, so a caller who knows the
+// lane's true branch point can pass it explicitly and an auditor can check afterwards
+// which commit a repair was measured against. `measured: true` means "this diff was taken
+// against the commit named in `baseCommit`", never "that commit is the right one".
+export function laneFence({ root, base = 'origin/main', run = defaultRun } = {}) {
   const invoke = (args) => {
     try { return run(args, root) } catch { return null }
   }
-  if (typeof root !== 'string' || root.length === 0) return { paths: [], measured: false, reason: 'git root could not be measured' }
+  if (typeof root !== 'string' || root.length === 0) return { paths: [], measured: false, reason: 'git root could not be measured', base, baseCommit: null }
   const top = invoke(['rev-parse', '--show-toplevel'])
-  if (top === null) return { paths: [], measured: false, reason: 'git root could not be measured' }
+  if (top === null) return { paths: [], measured: false, reason: 'git root could not be measured', base, baseCommit: null }
   const gitRoot = typeof top === 'string' ? top.trim() : ''
-  if (gitRoot !== root) return { paths: [], measured: false, reason: `git root is ${gitRoot || 'unknown'}, expected ${root}` }
+  // `/var` and `/private/var` name the same directory on macOS, and comparing raw strings
+  // refused a legitimate repository by spelling alone. Resolve both through the filesystem
+  // rather than rewriting the string: blindly stripping a leading `/private/` would make two
+  // genuinely DIFFERENT roots compare equal on a host where `/private` is not that alias,
+  // admitting a repair in the wrong repository — far worse than the refusal it fixes.
+  const sameDirectory = (a, b) => {
+    if (a === b) return true
+    try { return realpathSync(a) === realpathSync(b) } catch { return false }
+  }
+  if (!sameDirectory(gitRoot, root)) return { paths: [], measured: false, reason: `git root is ${gitRoot || 'unknown'}, expected ${root}`, base, baseCommit: null }
   const merge = invoke(['merge-base', 'HEAD', base])
-  if (typeof merge !== 'string' || merge.trim() === '') return { paths: [], measured: false, reason: `no merge base with ${base}` }
+  if (typeof merge !== 'string' || merge.trim() === '') return { paths: [], measured: false, reason: `no merge base with ${base}`, base, baseCommit: null }
   const mergeBase = merge.trim()
   const changed = outputPaths(invoke(['diff', '--name-only', mergeBase]))
-  if (changed === null) return { paths: [], measured: false, reason: 'changed paths could not be measured' }
+  if (changed === null) return { paths: [], measured: false, reason: 'changed paths could not be measured', base, baseCommit: mergeBase }
   const untracked = outputPaths(invoke(['ls-files', '--others', '--exclude-standard']))
-  if (untracked === null) return { paths: [], measured: false, reason: 'untracked paths could not be measured' }
-  return { paths: [...new Set([...changed, ...untracked])], measured: true, reason: null }
+  if (untracked === null) return { paths: [], measured: false, reason: 'untracked paths could not be measured', base, baseCommit: mergeBase }
+  return { paths: [...new Set([...changed, ...untracked])], measured: true, reason: null, base, baseCommit: mergeBase }
 }
 
 function shiftLine(shift, skillDir, fenced) {
@@ -358,7 +385,11 @@ function settleRepairs({ declarations, candidates }) {
   return { repairs, pending }
 }
 
-export function repairAnchors({ root, docs, manifest, repairAll = false }) {
+export function repairAnchors({ root, docs, manifest, repairAll = false, base }) {
+  const repairFence = repairAll
+    ? { paths: [], measured: true, reason: null, base: null, baseCommit: null }
+    : laneFence({ root, ...(base === undefined ? {} : { base }) })
+  const repairPaths = new Set(repairFence.paths)
   let anchors
   let ranges
   let named
@@ -367,7 +398,7 @@ export function repairAnchors({ root, docs, manifest, repairAll = false }) {
     ranges = collectRanges({ docs })
     named = collectNamed({ docs })
   } catch (error) {
-    return { anchors: 0, repairs: [], refusals: [`citation docs could not be read (${error?.code || error?.message || String(error)})`], manifest, edits: [] }
+    return { anchors: 0, repairs: [], refusals: [`citation docs could not be read (${error?.code || error?.message || String(error)})`], manifest, edits: [], fence: repairFence }
   }
   const declarations = manifest && typeof manifest === 'object' && !Array.isArray(manifest) ? manifest : {}
   const cited = new Set(anchors.map(({ key }) => key))
@@ -375,8 +406,6 @@ export function repairAnchors({ root, docs, manifest, repairAll = false }) {
   const repairs = []
   const rewrites = new Map()
   const seen = new Set()
-  const repairFence = laneFence({ root })
-  const repairPaths = new Set(repairFence.paths)
 
   const invertedRefused = new Set()
   const invertedRefusals = []
@@ -430,10 +459,12 @@ export function repairAnchors({ root, docs, manifest, repairAll = false }) {
     if (found.length > 1) { state.set(anchor.key, { kind: 'refused', why: `${anchor.key}: content occurs ${found.length} times in ${anchor.rel}; a repair refuses to guess` }); continue }
     const nextLine = found[0]
     if (nextLine === anchor.line) { state.set(anchor.key, { kind: 'stable' }); continue }
-    if (!repairAll && repairFence.measured && !repairPaths.has(anchor.rel)) { state.set(anchor.key, { kind: 'gated' }); continue }
+    if (!repairAll && (!repairFence.measured || !repairPaths.has(anchor.rel))) { state.set(anchor.key, { kind: 'gated' }); continue }
     if (frozenKeys.has(anchor.key)) { state.set(anchor.key, { kind: 'frozen', why: frozenKeys.get(anchor.key) }); continue }
     state.set(anchor.key, { kind: 'moving', rel: anchor.rel, from: anchor.line, to: nextLine, nextKey: `${anchor.rel}:${nextLine}`, expected })
   }
+
+  if (!repairAll && !repairFence.measured) refusals.push(`anchor repair fence unmeasured (${repairFence.reason})`)
 
   // Refusals are emitted in ENDPOINT order, which is the order this loop used before, so an
   // existing fixture's refusal list keeps the position it has always had.
@@ -566,17 +597,17 @@ export function repairAnchors({ root, docs, manifest, repairAll = false }) {
     if (rewritten !== text) edits.push({ doc, text: rewritten })
   }
 
-  return { anchors: anchors.length, repairs, refusals, manifest: next, edits }
+  return { anchors: anchors.length, repairs, refusals, manifest: next, edits, fence: repairFence }
 }
 
-export function repairAnchorsInPlace({ root, skillDir, manifestPath, repairAll = false }) {
+export function repairAnchorsInPlace({ root, skillDir, manifestPath, repairAll = false, base }) {
   let manifest
   try {
     manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
   } catch (error) {
     return { anchors: 0, repairs: [], refusals: [`could not read anchor manifest ${manifestPath}: ${error?.message || String(error)}`], manifest: {}, edits: [] }
   }
-  const result = repairAnchors({ root, docs: skillDocs(skillDir), manifest, repairAll })
+  const result = repairAnchors({ root, docs: skillDocs(skillDir), manifest, repairAll, base })
   if (result.repairs.length > 0) {
     writeFileSync(manifestPath, `${JSON.stringify(result.manifest, null, 2)}\n`)
     for (const edit of result.edits) writeFileSync(edit.doc, edit.text)
@@ -588,7 +619,13 @@ export function repairCli(argv, log = console.log) {
   let skillDir = null
   let repairAll = false
   let root = process.cwd()
+  // The caller may KNOW this lane's branch point — the driver records a resolved HEAD at
+  // run-start and arm worktrees are cut from a resolved pin — and a known commit beats any
+  // ref this tool could guess at. Absent, it falls back to the default remote-tracking ref
+  // with the honesty limits stated on `laneFence`.
+  let base
   for (let i = 0; i < argv.length; i += 1) {
+    if (argv[i] === '--base') { base = argv[i + 1]; i += 1; continue }
     if (argv[i] === '--repair' || argv[i] === '--repair-all') {
       skillDir = argv[i + 1]
       repairAll = argv[i] === '--repair-all'
@@ -603,8 +640,19 @@ export function repairCli(argv, log = console.log) {
     log('usage: node skills/qa-test-writing/anchor-pin.mjs (--repair | --repair-all) <dir> [--root <root>]')
     return 2
   }
-  const result = repairAnchorsInPlace({ root, skillDir, manifestPath: join(skillDir, 'anchors.json'), repairAll })
-  for (const repair of result.repairs) log(`repaired ${repair.key} -> ${repair.nextKey}`)
+  const manifestPath = join(skillDir, 'anchors.json')
+  const result = repairAnchorsInPlace({ root, skillDir, manifestPath, repairAll, base })
+  for (const repair of result.repairs) {
+    const row = {
+      manifest: rootRelativePath(root, manifestPath),
+      pin: repair.key,
+      old_line: repair.from,
+      new_line: repair.to,
+      base: result.fence.base,
+      base_commit: result.fence.baseCommit ?? null,
+    }
+    log(`ANCHOR_REPAIR_ROW ${JSON.stringify(row)}`)
+  }
   for (const refusal of result.refusals) log(`refused ${refusal}`)
   return result.refusals.length > 0 ? 1 : 0
 }

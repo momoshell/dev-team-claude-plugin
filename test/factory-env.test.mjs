@@ -737,7 +737,6 @@ const RAW_TEMP_EXEMPT = new Map([
   ['crew/reclaim.test.mjs', frozenTempSites(1)],
   ['crew/roster-refresh.test.mjs', frozenTempSites(1)],
   ['crew/seat-io-runclean.test.mjs', frozenTempSites(4)],
-  ['skills/qa-test-writing/anchor-pin.test.mjs', frozenTempSites(1)],
   ['test/factory-crew-watch.test.mjs', frozenTempSites(1)],
   ['test/factory-emit-floor.test.mjs', frozenTempSites(2)],
   ['test/factory-emit.test.mjs', frozenTempSites(3)],
@@ -785,7 +784,7 @@ test('temp sandbox tripwire — every exemption has a live, load-bearing warrant
     assert.ok(exemption.sites > 0, `exemption ${file} is redundant`)
     total += exemption.sites
   }
-  assert.equal(total, 203)
+  assert.equal(total, 202)
 })
 
 test('temp sandbox tripwire — the detector flags a hand-rolled call and clears a helper call', () => {

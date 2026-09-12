@@ -4166,6 +4166,15 @@ function runTask(ctx, io, crash) {
     }
   }
 
+  // This tuple is separate because ENVELOPE_REFUSAL_REASONS belongs to the
+  // stricter envelopeDefect contract.
+  const ANTI_REPLAY_REFUSAL_REASONS = Object.freeze(['assignment-id-mismatch', 'role-mismatch', 'status-kind'])
+  function antiReplayRefusalReason(env, role, id) {
+    if (env?.assignment_id !== undefined && env.assignment_id !== id) return ANTI_REPLAY_REFUSAL_REASONS[0]
+    if (env?.role !== undefined && env.role !== role) return ANTI_REPLAY_REFUSAL_REASONS[1]
+    return ANTI_REPLAY_REFUSAL_REASONS[2]
+  }
+
   function dispatchOnce(role, briefFile, note, { reviewSemantics = true } = {}) {
     let brief = briefFile
     const pending = pendingEnforcement.get(role)
@@ -4221,7 +4230,12 @@ function runTask(ctx, io, crash) {
     if (!validEnvelope(env, role, id)) {
       // env == null was already recorded by io.wait as a 'timeout'; this branch
       // is the seat that DID answer, with something the driver cannot use.
-      if (env != null) emit({ kind: 'cell-failure', role, id, failure: 'unusable-envelope', stage: null, detail: `envelope at ${returnPath} failed the shape or anti-replay check` })
+      if (env != null) {
+        emit({ kind: 'cell-failure', role, id, failure: 'unusable-envelope', stage: null, detail: `envelope at ${returnPath} failed the shape or anti-replay check` })
+        const reason = antiReplayRefusalReason(env, role, id)
+        io.log(recordRow({ at: io.now(), envelope_refused: { role, dispatch: id, reason, found_assignment_id: env?.assignment_id ?? null, expected_assignment_id: id, path: returnPath } }))
+        throw fail(role, `an envelope exists at ${returnPath} but was refused: ${reason}`)
+      }
       const diagnosis = env == null ? io.waitDiagnosis?.(returnPath) : null       // verbatim: mutation A9
       throw fail(role, `no valid envelope at ${returnPath} within ${waits[role]}s${diagnosis?.text ? ` — ${diagnosis.text}` : ''}`)
     }

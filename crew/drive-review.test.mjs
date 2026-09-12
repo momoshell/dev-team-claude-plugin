@@ -9,7 +9,7 @@ import {
 } from './drive-fixtures.mjs'
 import { planScopeWhy, scopeSuggestions, VACUITY_CLAIMS, vacuityFindingDefect } from './drive.mjs'
 import { ROOT as REPO_ROOT } from '../test/helpers.mjs'
-import { checkSkillAnchors } from '../skills/qa-test-writing/anchor-pin.mjs'
+import { checkSkillAnchors, laneFence, partitionShifts } from '../skills/qa-test-writing/anchor-pin.mjs'
 
 test('a plan-check accept records the residual the lead named', () => {
   const io = planCheckAcceptIo({ residuals: [PLAN_RESIDUAL] })
@@ -3577,7 +3577,9 @@ test('b600 N1', () => {
   const skillDir = join(REPO_ROOT, 'skills/pr-review')
   const result = checkSkillAnchors({ root: REPO_ROOT, skillDir, manifestPath: join(skillDir, 'anchors.json') })
   assert.deepEqual(result.failures, [])
-  assert.deepEqual(result.shifted, [])
+  const { inFence, outOfFence } = partitionShifts({ shifted: result.shifted, fence: laneFence({ root: REPO_ROOT }).paths, manifest: 'skills/pr-review/anchors.json' })
+  for (const shift of outOfFence) console.warn(`shifted ${shift.key} -> line ${shift.to}; repair after this lane merges, on main with: node skills/qa-test-writing/anchor-pin.mjs --repair-all skills/pr-review`)
+  assert.deepEqual(inFence, [], 'a shift this lane can repair here must be repaired, not tolerated')
 })
 
 test('b600 O1', () => {

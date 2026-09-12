@@ -7,12 +7,19 @@ import { ROOT } from './helpers.mjs'
 
 const REGISTER = 'docs/decisions-needed.md'
 const README = 'README.md'
+const CLAUDE = 'CLAUDE.md'
 const FIELDS = ['question', 'measurement', 'options', 'blocked', 'raised']
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/
 
 const read = (relativePath) => readFileSync(join(ROOT, relativePath), 'utf8')
 const register = read(REGISTER)
 const readme = read(README)
+const claude = read(CLAUDE)
+
+const VISUALIZER_COMMAND = 'npm run viz:build     # release-time check: operator runs it on main before tagging'
+const VISUALIZER_POLICY = "`npm test` is the lane gate. `npm run viz:build` is a RELEASE-TIME check the\noperator runs on main before tagging; it is never a lane's done-means."
+const OLD_VISUALIZER_COMMAND = 'npm run viz:build     # the visualizer must build; it is part of the release gate'
+const OLD_VISUALIZER_POLICY = '`npm test` and `npm run viz:build` are the two release gates. Both must pass\nbefore anything lands.'
 
 const expected = [
   {
@@ -86,6 +93,16 @@ function fixtureFor(entry) {
   ].join('\n')
 }
 
+function visualizerGateErrors(markdown) {
+  const errors = []
+  if (!markdown.includes(VISUALIZER_COMMAND)) errors.push('missing corrected visualizer command')
+  if (!markdown.includes(VISUALIZER_POLICY)) errors.push('missing corrected visualizer policy')
+  if ((markdown.match(/viz:build/g) ?? []).length !== 2) errors.push('expected exactly two viz:build occurrences')
+  if (markdown.includes('part of the release gate')) errors.push('contains the old release-gate command claim')
+  if (markdown.includes('are the two release gates')) errors.push('contains the old release-gate paragraph claim')
+  return errors
+}
+
 test('the register has seven ordered entries with pinned questions and measurements', () => {
   const entries = parseEntries(register)
   assert.equal(entries.length, expected.length)
@@ -147,4 +164,14 @@ test('entry fields do not mark a decision closed', () => {
 
 test('README exposes the open owner-decision register', () => {
   assert.ok(readme.includes('[`docs/decisions-needed.md`](docs/decisions-needed.md)'))
+})
+
+test("A1/B1: visualizer build is a release-time check, not a lane gate", () => {
+  assert.deepEqual(visualizerGateErrors(claude), [])
+
+  const oldClaude = claude
+    .replace(VISUALIZER_COMMAND, OLD_VISUALIZER_COMMAND)
+    .replace(VISUALIZER_POLICY, OLD_VISUALIZER_POLICY)
+  const oldErrors = visualizerGateErrors(oldClaude)
+  assert.notDeepEqual(oldErrors, [])
 })

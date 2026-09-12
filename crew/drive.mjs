@@ -5936,9 +5936,20 @@ function runTask(ctx, io, crash) {
   }
 
   const compareProofTree = () => {
-    if (!proofTreeWitness) return { staleProofFiles: [], unknown: false }
+    if (!proofTreeWitness) return { staleProofFiles: [], changedProofFiles: [], unknown: false }
     let reported
     let unknown = proofTreeWitness.unknown === true
+    const changedProofFiles = []
+    const validReportedFile = (file) => typeof file === 'string'
+      && file.length > 0
+      && !file.startsWith('/')
+      && !file.startsWith('\\')
+      && !/^[A-Za-z]:[\\/]/.test(file)
+      && !file.endsWith('/')
+      && !/[\\\\\0\r\n]/.test(file)
+      && !file.split('/').some((segment) => segment === '' || segment === '.' || segment === '..')
+      && join(...file.split('/')) === file
+      && validateScopeEntries([file]).length === 0
     try {
       reported = io.changedFiles()
       if (!Array.isArray(reported)) unknown = true
@@ -5946,7 +5957,14 @@ function runTask(ctx, io, crash) {
       reported = []
       unknown = true
     }
-    const files = new Set([...proofTreeWitness.cells.keys(), ...concreteProofFiles(reported)])
+    for (const file of Array.isArray(reported) ? reported : []) {
+      if (!validReportedFile(file)) {
+        unknown = true
+        continue
+      }
+      if (!changedProofFiles.includes(file)) changedProofFiles.push(file)
+    }
+    const files = new Set([...proofTreeWitness.cells.keys(), ...changedProofFiles])
     const current = readProofCells([...files])
     unknown ||= current.unreadable
     const staleProofFiles = []
@@ -5960,7 +5978,7 @@ function runTask(ctx, io, crash) {
       }
     }
     if (unknown && staleProofFiles.length === 0) staleProofFiles.push(...mutationTargetFiles(), ...files, '(proof-tree-unreadable)')
-    return { staleProofFiles: [...new Set(staleProofFiles)], unknown }
+    return { staleProofFiles: [...new Set(staleProofFiles)], changedProofFiles, unknown }
   }
 
   const mutationLabel = (label, index) => `${label}:m${index + 1}`
@@ -6201,10 +6219,73 @@ function runTask(ctx, io, crash) {
   const refreshProofTree = (round = null) => {
     const comparison = compareProofTree()
     const staleProofFiles = comparison.staleProofFiles
+    const changedProofFiles = comparison.changedProofFiles
     const correctedChecks = correctedMutationChecks()
-    if (staleProofFiles.length > 0 || correctedChecks.size > 0) {
-      const previousGeneration = proofTreeWitness?.generation ?? gateGeneration
-      const previousRows = Array.isArray(proofTreeWitness?.checkProofs) ? proofTreeWitness.checkProofs : []
+    const previousGeneration = proofTreeWitness?.generation ?? gateGeneration
+    const previousMeasuredGeneration = proofTreeWitness?.measured_generation ?? proofTreeWitness?.generation
+    const previousRows = Array.isArray(proofTreeWitness?.checkProofs) ? proofTreeWitness.checkProofs : []
+    const mutationTargets = new Set(mutationTargetFiles())
+    const plannedScope = scopeMatcher(Array.isArray(planEnv?.details?.files_in_scope) ? planEnv.details.files_in_scope : [])
+    const carryCandidate = changedProofFiles.length > 0 && changedProofFiles.every(file => inScope(file) && (!plannedScope(file) || mutationTargets.has(file) || proofTreeWitness.cells.has(file)))
+    const noChangedMutationTarget = changedProofFiles.every((file) => !mutationTargets.has(file))
+    const noChangedPriorWitness = changedProofFiles.every((file) => !proofTreeWitness.cells.has(file))
+    let carryableAdmissionProof = carryCandidate
+      && noChangedMutationTarget
+      && noChangedPriorWitness
+      && comparison.unknown === false
+      && correctedChecks.size === 0
+      && staleProofFiles.every((file) => changedProofFiles.includes(file))
+      && gateDiscrimination === 'proven' && (mutations.length === 0 || checkProofVerdict === 'proven')
+    let carryScope = null
+    if (carryableAdmissionProof === true) {
+      const scope = mutationProofScope({
+        mutations,
+        previousRows,
+        staleProofFiles: [],
+        correctedChecks,
+        generation: gateGeneration + 1,
+        previousGeneration,
+        unknown: comparison.unknown,
+        forceFresh: false,
+      })
+      if (scope.selected.some((mutation) => !mutation?.exempt)) carryableAdmissionProof = false
+      else carryScope = scope
+    }
+    const carryGateProof = (previousMeasuredGeneration, changedProofFiles) => {
+      gateDiscrimination = 'proven'
+      gateProvenGeneration = gateGeneration
+      gateProofNote = null
+      io.log(recordRow({ at: io.now(), gate_discrimination_carry: {
+        proof: 'carried-forward', generation: gateGeneration, measured_generation: previousMeasuredGeneration, files: changedProofFiles,
+      } }))
+    }
+    if (carryableAdmissionProof) {
+      if (carryScope) {
+        gateGeneration = gateGeneration + 1
+        resetCheckProof()
+        carryGateProof(previousMeasuredGeneration, changedProofFiles)
+        if (mutations.length > 0) {
+          if (carryScope.selected.length > 0) {
+            completeCheckProof(`gate-proof:${gateGeneration}:checks`, { mutations: carryScope.selected, carried: carryScope.carried })
+          } else {
+            checkProofs = carryScope.carried
+            checkProofVerdict = 'proven'
+            checkProofPending = null
+            settleCheckProof()
+          }
+        }
+        const diffSettled = settleDiffMutationProof(round)
+        if (diffSettled.fatal || gateProofFatal) {
+          const fatal = settleFailedProof()
+          if (fatal.escalation) return { ok: false, escalation: fatal.escalation }
+        }
+        captureProofTree(round)
+        proofTreeWitness.measured_generation = previousMeasuredGeneration
+        return { ok: true, gateRes: null }
+      }
+    }
+    const unwitnessedChangedFile = !carryableAdmissionProof && changedProofFiles.some((file) => !proofTreeWitness.cells.has(file))
+    if (staleProofFiles.length > 0 || correctedChecks.size > 0 || unwitnessedChangedFile) {
       gateGeneration = gateGeneration + 1
       const scope = mutationProofScope({
         mutations,
@@ -6214,7 +6295,7 @@ function runTask(ctx, io, crash) {
         generation: gateGeneration,
         previousGeneration,
         unknown: comparison.unknown,
-        forceFresh: false,
+        forceFresh: unwitnessedChangedFile,
       })
       let selected = scope.selected
       let carried = scope.carried

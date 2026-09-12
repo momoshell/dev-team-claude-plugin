@@ -2,10 +2,10 @@
   "scripts/factory/crew-watch.mjs:185": "export function seatLivenessLines(",
   "crew/seat-io.mjs:125": "export const TRANSCRIPT_STALE_MS = 900_000",
   "scripts/factory/make-brief.mjs:931": "function colourNeutralEnv(base = process.env)",
-  "crew/crew.mjs:2493": "escalation -> NEVER teardown",
-  "crew/crew.mjs:3023": "seats.proven !== seats.seats || seats.recorded !== seats.seats",
-  "crew/crew.mjs:2914": "const seats = rows.length",
-  "crew/drive.mjs:54": "builder: 2400, reviewer: 1800",
+  "crew/crew.mjs:2630": "escalation -> NEVER teardown",
+  "crew/crew.mjs:3261": "seats.proven !== seats.seats || seats.recorded !== seats.seats",
+  "crew/crew.mjs:3152": "const seats = rows.length",
+  "crew/drive.mjs:55": "builder: 2400, reviewer: 1800",
   "crew/seat-io.mjs:1710": "export function recogniseProviderRetry(text) {",
-  "crew/drive.mjs:5836": "const completeCheckProof = (label, options = {}) => {"
+  "crew/drive.mjs:6276": "const completeCheckProof = (label, options = {}) => {"
 }

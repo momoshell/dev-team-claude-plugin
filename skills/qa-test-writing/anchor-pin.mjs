@@ -385,6 +385,12 @@ function settleRepairs({ declarations, candidates }) {
   return { repairs, pending }
 }
 
+const REPAIR_REASONS = Object.freeze({ rot: 'rot', ambiguous: 'ambiguous', excludedByScope: 'excluded-by-scope' })
+
+function classifiedRepairRefusal(key, reason, detail) {
+  return `${key}: ${reason}: ${detail}`
+}
+
 export function repairAnchors({ root, docs, manifest, repairAll = false, base }) {
   const repairFence = repairAll
     ? { paths: [], measured: true, reason: null, base: null, baseCommit: null }
@@ -455,11 +461,17 @@ export function repairAnchors({ root, docs, manifest, repairAll = false, base })
     }
     const found = []
     for (let i = 0; i < lines.length; i += 1) if (lineCarries(lines[i], expected)) found.push(i + 1)
-    if (found.length === 0) { state.set(anchor.key, { kind: 'refused', why: `${anchor.key}: content appears nowhere in ${anchor.rel}; this is rot, not a shift` }); continue }
-    if (found.length > 1) { state.set(anchor.key, { kind: 'refused', why: `${anchor.key}: content occurs ${found.length} times in ${anchor.rel}; a repair refuses to guess` }); continue }
+    if (found.length === 0) { state.set(anchor.key, { kind: 'refused', why: classifiedRepairRefusal(anchor.key, REPAIR_REASONS.rot, `content appears nowhere in ${anchor.rel}; this is rot, not a shift`) }); continue }
+    if (found.length > 1) { state.set(anchor.key, { kind: 'refused', why: classifiedRepairRefusal(anchor.key, REPAIR_REASONS.ambiguous, `content occurs ${found.length} times in ${anchor.rel}; a repair refuses to guess`) }); continue }
     const nextLine = found[0]
     if (nextLine === anchor.line) { state.set(anchor.key, { kind: 'stable' }); continue }
-    if (!repairAll && (!repairFence.measured || !repairPaths.has(anchor.rel))) { state.set(anchor.key, { kind: 'gated' }); continue }
+    if (!repairAll && (!repairFence.measured || !repairPaths.has(anchor.rel))) {
+      const detail = repairFence.measured
+        ? `target path ${anchor.rel} is omitted from the measured repair fence`
+        : `repair fence is unmeasured (${repairFence.reason})`
+      state.set(anchor.key, { kind: 'gated', why: classifiedRepairRefusal(anchor.key, REPAIR_REASONS.excludedByScope, detail) })
+      continue
+    }
     if (frozenKeys.has(anchor.key)) { state.set(anchor.key, { kind: 'frozen', why: frozenKeys.get(anchor.key) }); continue }
     state.set(anchor.key, { kind: 'moving', rel: anchor.rel, from: anchor.line, to: nextLine, nextKey: `${anchor.rel}:${nextLine}`, expected })
   }
@@ -472,6 +484,7 @@ export function repairAnchors({ root, docs, manifest, repairAll = false, base })
   for (const [, entry] of state) {
     if (entry.kind === 'refused') refusals.push(entry.why)
     else if (entry.kind === 'frozen' && !frozenSeen.has(entry.why)) { frozenSeen.add(entry.why); refusals.push(entry.why) }
+    else if (entry.kind === 'gated') refusals.push(entry.why)
   }
 
   // PHASE 2 - connected components over both-pinned ranges. An edge joins a range's two

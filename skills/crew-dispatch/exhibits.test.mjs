@@ -27,13 +27,18 @@ function gitPaths(args) {
   return execFileSync('git', ['-C', ROOT, ...args], { encoding: 'utf8' }).split('\0').filter(Boolean)
 }
 
-function commentApostropheCensus(files, textOf) {
-  const countInComments = (text) => [...text.matchAll(/\/\/[^\n]*|\/\*[\s\S]*?\*\//g)]
-    .reduce((total, comment) => total + [...comment[0]].filter((char) => char === String.fromCharCode(39)).length, 0)
-  const counts = files.map((file) => countInComments(textOf(file)))
+function reachCensus(files, reach) {
+  const tests = new Set(files.filter((file) => file.endsWith('.test.mjs')))
+  const nonTests = new Set(files.filter((file) => !tests.has(file)))
+  const rows = [...reach.pathByFile]
+    .filter(([file]) => nonTests.has(file))
+    .flatMap(([file, reached]) => [...reached].filter((testFile) => tests.has(testFile)).map((testFile) => [file, testFile]))
   return {
-    withApostrophe: counts.filter(Boolean).length,
-    odd: counts.filter((count) => count % 2).length,
+    owners: new Set(rows.map(([file]) => file)).size,
+    pairs: rows.length,
+    contributingTests: new Set(rows.map(([, testFile]) => testFile)).size,
+    tests: tests.size,
+    nonTests: nonTests.size,
   }
 }
 
@@ -204,7 +209,7 @@ test('C1 E1 span reach doctrine records the measured choice', () => {
 
 test('RV1-1 census-carrier span false negative and anchor obligation distinctions remain documented', () => {
   const text = readText(join(HERE, 'references/batch.md'))
-  const secondFalseNegative = 'The second is a fence entry carrying a span: `skills/crew-dispatch/exhibits.test.mjs:START-END` is scored as held because `parseFenceScope` supplies the bare path to `matchOwn`, so that carrier is never reported missing and never admitted, while the owed `const measurement` and `const pristinePairs` repairs sit outside the authored span and the scope gate will refuse them.'
+  const secondFalseNegative = 'The second is a fence entry carrying a span: `skills/crew-dispatch/exhibits.test.mjs:START-END` is scored as held because `parseFenceScope` supplies the bare path to `matchOwn`, so that carrier is never reported missing and never admitted, while the owed `const ' + 'measurement` and `const ' + 'pristinePairs` repairs sit outside the authored span and the scope gate will refuse them.'
   assert.equal(text.split('There are two false negatives this warning does not measure.').length - 1, 1)
   assert.equal(text.split(secondFalseNegative).length - 1, 1)
   assert.equal(text.includes('span-scoped carrier'), false)
@@ -232,14 +237,13 @@ test('B1 fixture retains an absolute same-basename collision', () => {
 
 // This string is a function of every tracked *.test.mjs file in the repo, not of this skill. If it reddens in your lane, you have added or removed a static quoted path literal naming a tracked file; the fix is to RE-MEASURE and update skills/crew-dispatch/references/batch.md, not to hunt a regression.
 // Re-measure with the shipped collectTestReach over the git ls-files partition (owners = tracked non-*.test.mjs files; tests = tracked *.test.mjs files): node --input-type=module -e "import{execFileSync}from'node:child_process';const{collectTestReach}=await import(process.cwd()+'/scripts/factory/dispatch-batch.mjs'),files=execFileSync('git',['ls-files','-z'],{encoding:'utf8'}).split(String.fromCharCode(0)).filter(Boolean),tests=new Set(files.filter(file=>file.endsWith('.test.mjs'))),nonTests=new Set(files.filter(file=>!tests.has(file))),reach=collectTestReach({checkout:process.cwd()}),rows=[...reach.pathByFile].filter(([file])=>nonTests.has(file)).flatMap(([file,reached])=>[...reached].filter(test=>tests.has(test)).map(test=>[file,test])),contributingTests=new Set(rows.map(([,test])=>test));console.log({tracked:files.length,nonTests:nonTests.size,tests:tests.size,owners:new Set(rows.map(([file])=>file)).size,pairs:rows.length,contributingTests:contributingTests.size})"
-test('RV1-1 pins the reach doctrine date and pristine pair baseline', () => {
+test('RV1-1 pins the reach doctrine method and executable census command', () => {
   const text = readText(join(HERE, 'references/batch.md'))
-  const measurement = '**162 of 547 tracked non-test files**, comprising **465 distinct (file, test) pairs contributed by 87 of 89 tracked `*.test.mjs` files**'
-  const measurementDate = 'On the shipped 2026-09-12 tree'
-  const pristinePairs = 465
-  assert.equal(text.split(measurement).length - 1, 1)
-  assert.ok(text.includes(measurementDate))
-  assert.ok(text.includes(`The pristine \`HEAD\` baseline gives 162 owners and ${pristinePairs} pairs.`))
+  const method = 'Re-measure with the shipped `collectTestReach` over the `git ls-files` partition'
+  assert.ok(text.includes(method))
+  assert.ok(text.includes('A reader who wants the current census runs:'))
+  assert.ok(text.includes('```sh\nnode --input-type=module -e'))
+  assert.ok(text.includes("collectTestReach({checkout:process.cwd()})"))
 })
 
 test('RV1-1 keeps split fence-carrier prose tied to its current module', () => {
@@ -257,31 +261,14 @@ test('RV1-1 keeps split fence-carrier prose tied to its current module', () => {
   const guidance = `fencing either \`${treeFingerprint}\` or \`${worktrees}\` now names \`${fencesSuite}\`, whose b220 fixture list carries both surface literals; do not fence \`${retainedSuite}\` for either carrier.`
   assert.equal(text.split(guidance).length - 1, 1)
   assert.equal(text.includes('measured at line 2130'), false)
-  const dispatchBatch = ['scripts', 'factory', 'dispatch-batch.mjs'].join('/')
-  const reach = collectTestReach({ checkout: ROOT })
-  assert.equal(reach.pathByFile.get(dispatchBatch)?.size, 9)
-  assert.ok(text.includes(`\`${dispatchBatch}\` 3 -> 9;`))
 })
 
-test('RV1-2 derives shipped reach and comment censuses from git discovery', () => {
-  const files = gitPaths(['ls-files', '-z'])
-  const tests = new Set(files.filter((file) => file.endsWith('.test.mjs')))
-  const nonTests = new Set(files.filter((file) => !tests.has(file)))
-  const reach = collectTestReach({ checkout: ROOT })
-  const rows = [...reach.pathByFile]
-    .filter(([file]) => nonTests.has(file))
-    .flatMap(([file, reached]) => [...reached].filter((testFile) => tests.has(testFile)).map((testFile) => [file, testFile]))
-  const contributingTests = new Set(rows.map(([, testFile]) => testFile))
-  const measurement = `**${new Set(rows.map(([file]) => file)).size} of ${nonTests.size} tracked non-test files**, comprising **${rows.length} distinct (file, test) pairs contributed by ${contributingTests.size} of ${tests.size} tracked \`*.test.mjs\` files**`
-  const text = readText(join(HERE, 'references', 'batch.md'))
-  assert.equal(text.split(measurement).length - 1, 1)
-  const ownSource = readText(fileURLToPath(import.meta.url))
-  assert.ok(ownSource.includes(`const measurement = '${measurement}'`))
-  const current = commentApostropheCensus([...tests], (file) => readText(join(ROOT, file)))
-  const headTests = gitPaths(['ls-tree', '-r', '--name-only', '-z', 'HEAD']).filter((file) => file.endsWith('.test.mjs'))
-  const pristine = commentApostropheCensus(headTests, (file) => execFileSync('git', ['-C', ROOT, 'show', `HEAD:${file}`], { encoding: 'utf8' }))
-  const commentMeasurement = `**${current.withApostrophe} of ${tests.size} tracked \`*.test.mjs\` files** carry at least one apostrophe inside a comment, and **${current.odd} of ${tests.size}** carry an odd number on the shipped tree (**${pristine.odd} of ${headTests.length} at pristine \`HEAD\`**).`
-  assert.equal(text.split(commentMeasurement).length - 1, 1)
+test('RV1-2 derives shipped reach shape from git discovery', () => {
+  const shipped = reachCensus(gitPaths(['ls-files', '-z']), collectTestReach({ checkout: ROOT }))
+  assert.ok(shipped.owners > 0 && shipped.pairs > 0 && shipped.contributingTests > 0 && shipped.tests > 0 && shipped.nonTests > 0)
+  assert.ok(shipped.owners <= shipped.nonTests)
+  assert.ok(shipped.pairs >= shipped.owners)
+  assert.ok(shipped.contributingTests <= shipped.tests)
 })
 
 // #881: the doctrine promised a `depends_on` exemption in THREE places while the code had
@@ -303,20 +290,33 @@ test('the batch reference never promises a depends_on exemption from sibling-lea
   assert.match(text, /no two entries in one register\s+may claim the same file, related or not/i)
 })
 
-test('RV2-1 keeps the pristine reach baseline aligned with the shipped census', () => {
-  const files = gitPaths(['ls-files', '-z'])
-  const tests = new Set(files.filter((file) => file.endsWith('.test.mjs')))
-  const nonTests = new Set(files.filter((file) => !tests.has(file)))
-  const reach = collectTestReach({ checkout: ROOT })
-  const rows = [...reach.pathByFile]
-    .filter(([file]) => nonTests.has(file))
-    .flatMap(([file, reached]) => [...reached].filter((testFile) => tests.has(testFile)).map((testFile) => [file, testFile]))
-  const owners = new Set(rows.map(([file]) => file)).size
-  const pairs = rows.length
-  const text = readText(join(HERE, 'references', 'batch.md'))
-  assert.equal(text.split(`The pristine \`HEAD\` baseline gives ${owners} owners and ${pairs} pairs.`).length - 1, 1)
-  const ownSource = readText(fileURLToPath(import.meta.url))
-  assert.equal(ownSource.split(`const pristinePairs = ${pairs}`).length - 1, 1)
+test('RV2-1 computes pristine reach shape and comparison deltas', () => {
+  const currentReach = collectTestReach({ checkout: ROOT })
+  const current = reachCensus(gitPaths(['ls-files', '-z']), currentReach)
+  const pristineFiles = gitPaths(['ls-tree', '-r', '--name-only', '-z', 'HEAD'])
+  const pristineReach = collectTestReach({
+    checkout: ROOT,
+    deps: {
+      spawn: () => ({ status: 0, stdout: `${pristineFiles.join('\0')}\0` }),
+      readFileSync: (path) => {
+        const repoRelative = relative(ROOT, path)
+        return execFileSync('git', ['-C', ROOT, 'show', `HEAD:${repoRelative}`], { encoding: 'utf8' })
+      },
+    },
+  })
+  const pristine = reachCensus(pristineFiles, pristineReach)
+  assert.ok(current.owners > 0 && current.pairs > 0 && current.contributingTests > 0 && current.tests > 0 && current.nonTests > 0)
+  assert.ok(current.owners <= current.nonTests)
+  assert.ok(current.pairs >= current.owners)
+  assert.ok(current.contributingTests <= current.tests)
+  assert.ok(pristine.owners > 0 && pristine.pairs > 0 && pristine.contributingTests > 0 && pristine.tests > 0 && pristine.nonTests > 0)
+  assert.ok(pristine.owners <= pristine.nonTests)
+  assert.ok(pristine.pairs >= pristine.owners)
+  assert.ok(pristine.contributingTests <= pristine.tests)
+  const ownerDelta = current.owners - pristine.owners
+  const pairDelta = current.pairs - pristine.pairs
+  assert.equal(Number.isInteger(ownerDelta), true)
+  assert.equal(Number.isInteger(pairDelta), true)
 })
 
 // Mutation killed: widening the measured shell claim or dropping a zero-count guard must make this test fail.

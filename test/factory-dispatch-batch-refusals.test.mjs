@@ -145,9 +145,12 @@ test('A1', () => {
   assert.equal(warning.text.startsWith(CENSUS_CARRIER_WARNING_PREFIX), true)
   for (const carrier of CENSUS_CARRIER_FILES) assert.equal(warning.text.includes(carrier), true)
   assert.equal(warning.text.includes('WARNING, not a refusal'), true)
-  assert.equal(warning.text.includes('OWE'), true)
-  assert.equal(warning.text.includes('cannot reach'), true)
-  for (const literal of ['batch.md', 'const measurement', 'const pristinePairs']) assert.equal(warning.text.includes(literal), true)
+  // The census is derived, not stated (this change), so the warning must say no
+  // repair is owed rather than ordering the operator to update a deleted constant.
+  assert.equal(warning.text.includes('No repair is OWEd'), true)
+  assert.equal(warning.text.includes('DERIVED from git discovery'), true)
+  assert.equal(/const (measurement|pristinePairs)/.test(warning.text), false)
+  for (const literal of ['batch.md', 're-measure']) assert.equal(warning.text.includes(literal), true)
 })
 
 test('B1', () => {

@@ -4204,7 +4204,7 @@ function runTask(ctx, io, crash) {
   const art = (name) => `${ctx.taskDir}/${name}`
   // These gate cells are initialised before the resume branch so its canonical
   // gate and the ordinary escalation composer have the same state vocabulary.
-  let gateCmd = null
+  let activeGateCmd = null
   let gateRepairs = 0
   let failDelimiterRepairs = 0
   let gateReverified = null
@@ -4255,7 +4255,7 @@ function runTask(ctx, io, crash) {
   // from ctx so decision briefs and escalation artifacts never cite a 404.
   const journal = ctx.journal || art('journal.jsonl')
   let gateBlock = () => null
-  gateBlock = () => (gateCmd ? { cmd: gateCmd, repairs: gateRepairs, generation: gateGeneration, discrimination: gateDiscrimination ?? 'unproven', reap: { ...gateReapTally }, ...(gateProofNote ? { discrimination_note: gateProofNote } : {}), ...(gateHistory.length ? { replaced: gateHistory } : {}) } : null)
+  gateBlock = () => (activeGateCmd ? { cmd: activeGateCmd, repairs: gateRepairs, generation: gateGeneration, discrimination: gateDiscrimination ?? 'unproven', reap: { ...gateReapTally }, ...(gateProofNote ? { discrimination_note: gateProofNote } : {}), ...(gateHistory.length ? { replaced: gateHistory } : {}) } : null)
   // One shape for every terminal, under the details key this driver already uses
   // for a typed accept (crew/drive.mjs:3246,3255,3322,3331): a plan-check accept
   // that recorded something is in the run's record wherever the run ends, and a
@@ -4913,7 +4913,7 @@ function runTask(ctx, io, crash) {
   const resumeSnapshotFor = (details) => {
     const frozenWhere = resumeTerminalWhere(details)
     const kind = resumeCheckpointFamily(frozenWhere)
-    if (!kind || !gateCmd) return null
+    if (!kind || !activeGateCmd) return null
     if (!Object.values(S.returns).every((env) => env?.status === 'done')) return null
     const claimedFiles = Array.isArray(details.files_committed) && details.files_committed.length > 0
       ? [...details.files_committed]
@@ -4944,7 +4944,7 @@ function runTask(ctx, io, crash) {
         message: S.commitMessage || '', subject: S.commitSubject || '',
       },
       proof: {
-        gate_cmd: gateCmd, gate_path: acceptedGatePath,
+        gate_cmd: activeGateCmd, gate_path: acceptedGatePath,
         summary: parseGateSummary(lastGateOutput) || details.gate?.summary || {},
         discrimination: details.gate?.discrimination || gateDiscrimination || 'unproven',
         generation: Number.isInteger(details.gate?.generation) ? details.gate.generation : gateGeneration,
@@ -5224,7 +5224,8 @@ function runTask(ctx, io, crash) {
       })
     }
 
-    gateCmd = checkpoint.proof.gate_cmd
+    const gateCmd = checkpoint.proof.gate_cmd
+    activeGateCmd = gateCmd
     gateRepairs = checkpoint.proof.repairs
     gateGeneration = checkpoint.proof.generation
     gateDiscrimination = checkpoint.proof.discrimination
@@ -6159,7 +6160,8 @@ function runTask(ctx, io, crash) {
     }
   }
   acceptedGatePath = taskLocalPath(planEnv.details?.gate_path) ?? art('gate.mjs')
-  gateCmd = planEnv.details?.gate_cmd || null
+  let gateCmd = planEnv.details?.gate_cmd || null
+  activeGateCmd = gateCmd
   const declared = planEnv.details?.mutations
   const mutations = declared == null ? [] : declared
   if (declared != null) {
@@ -6860,6 +6862,7 @@ function runTask(ctx, io, crash) {
   const acceptRepairedGate = (cmd, label) => {
     gateHistory.push(gateCmd)
     gateCmd = cmd
+    activeGateCmd = gateCmd
     gateGeneration += 1
     recordGateProof(label)
     gateReverified = gateDiscrimination === 'proven'
@@ -6872,6 +6875,7 @@ function runTask(ctx, io, crash) {
   const acceptDelimiterRepairedGate = (cmd) => {
     gateHistory.push(gateCmd)
     gateCmd = cmd
+    activeGateCmd = gateCmd
     const generation = gateGeneration
     resetCheckProof()
     gateDiscrimination = 'proven'
@@ -7179,6 +7183,7 @@ function runTask(ctx, io, crash) {
       }
       gateHistory.push(gateCmd)
       gateCmd = env2.details.gate_cmd
+      activeGateCmd = gateCmd
       const re = runGate('gate-baseline:recheck', gateCmd)
       if (re.ok) {
         stageComplete()
@@ -7215,6 +7220,7 @@ function runTask(ctx, io, crash) {
         }
         gateHistory.push(gateCmd)
         gateCmd = env3.details.gate_cmd
+        activeGateCmd = gateCmd
         const re = runGate('gate-baseline:recheck', gateCmd)
         if (re.ok) {
           stageComplete()

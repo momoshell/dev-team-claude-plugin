@@ -12,7 +12,7 @@
   "scripts/factory/dispatch-batch.mjs:161": "PANE_TRANSPORT = 'panes'",
   "scripts/factory/dispatch-batch.mjs:36": "DEPENDENCY_CYCLE = 'dependency-cycle'",
   "crew/drive.test.mjs:1241": "'/path/that/does/not/exist'",
-  "crew/drive.mjs:29": "plan_rounds: 2, // planner attempts",
-  "crew/drive.mjs:54": "builder: 2400, reviewer: 1800",
-  "crew/drive.mjs:737": "export const GATE_REAP_SHELL = '/bin/bash'"
+  "crew/drive.mjs:30": "plan_rounds: 2, // planner attempts",
+  "crew/drive.mjs:55": "builder: 2400, reviewer: 1800",
+  "crew/drive.mjs:738": "export const GATE_REAP_SHELL = '/bin/bash'"
 }

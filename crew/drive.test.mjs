@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import {
   B44_LEADLESS_CTX, adversarialPlanEnv, CENSUS_ROW_ABSENT, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_RUNS, CONVERGE_CTX, CONVERGE_GATE, CRASH_WHY, CTX, CTX_DIRECTED, CTX_REPAIR, CTX_TL, DEFAULT_VARIANT, DIRECTED_BRIEF_PATH, DIRECTED_BRIEF_TEXT, DIRECTED_FILES, DRIVE_JOURNAL_EXPECTED, D_ASK, D_AUTO, D_GREEN_GATE, D_PATCH_A, D_PATCH_B, D_PATCH_EMPTY_PATH, D_PATCH_MIXED_MODE, D_PATCH_MIXED_RENAME, D_RED_GATE, ENVELOPE_DEBRIS, GATE_CUSTODIAN, GATE_SUMMARY_PREFIX, HEALTHY_RESULT, JOURNAL_CHANNELS, JOURNAL_CHANNEL_NAMES, JUDGE_TIER, MAX_QUESTIONS, MODIFIER_OUTCOMES, PHASE_SLOT_WAIT_EVENT, PROTECTED_PATHS, RED, REPO_ROOT, REVIEWED_CORE_STAGES, S843_ADDED, S843_D2, S843_RUNS, SCOPE_REFUSALS, SEAT_REFUSAL_STAGE, SENSITIVITY_FLOOR, SHAPE_SOURCES, SKILL_NAMES, SUITE_SLOT_PHASES, SUITE_SLOT_PHASE_NAMES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, TRIAGE_SOURCES, TRIAGE_STAGES, TRIAGE_STAGE_HEAD, VARIANTS, VARIANT_NAMES, WAITS_S, WAIT_FLAGS, WAIT_REFUSALS, WAIT_ROLES, WAIT_SECONDS_MAX, WAIT_SECONDS_MIN, ZERO_CAPACITY_LOGS, ZERO_CAPACITY_RESULT, answerBounceLines, assertSeats, b127GatePaths, b127InvokeGate, b318Builders, b318ReviewGrants, b318SiteA, b318SiteB, b44AssertLeadlessGate, b44GateFixIo, b44GatePlan, b44MidRunRepairIo, baselineGateDefect, bothExhaustionPointsScenario, buildEnv, carveRun, checkEnv, checkFailureLine, closeoutIo, convergeIo, convergeRun, crashIo, crashRun, dApplyCommand, dAutoRows, dBuilders, dGitApplies, dLeads, dReviewEnv, deliberateRun, directSlotRun, dispositionIo, divergentPlanScenario, driveJournalSites, driveTask, enforcementPreamble, envelopeDefect, envelopeFieldsPresent, escalationStageRows, exhaustionAcceptIo, existsSync, fakeIo, fenceBase, fenceDiff, fenceSpan, gateReapCommand, guardedWrite, join, laneFence, laneFenceHits, laneProbeCommand, laneProbeKinds, leadEnv, matchAnswers, mkdirSync, normaliseJournalTimes, operationalRow, osCpus, parseDirectedBrief, parseGateSummary, parseQuestions, parseSuiteCounts, patchTargets, phaseTrace, planEnv, postCommitCrashRun, protectedPlanEnv, protectedReseatRefusal, questionConsultLines, readFileSync, reconEnv, recordRow, refuseWait, replayResumeStages, resolveProtectedPaths, resolveWaits, resumeDoneRows, resumeKeys, resumeStageRows, reviewEnv, rmSync, runChild, runCmd, runCmdFixture, s843Ctx, s843Io, s843PathsIn, s843PlanEnv, scopeBounceBrief, scopeMatcher, scopeRefusal, scratchDir, shapeDefect, shellArg, shellWords, slotCtx, slotFactory, sourcesDefect, spawnSync, stageEnabled, suiteRefusalEnv, throwAutoFixWrites, throwingWaitRun, tmpdir, traceLabels, triageEnv, undeclaredStage, validateScopeEntries, waitsCtx, waitsRecord, writeFileSync,
 } from './drive-fixtures.mjs'
-import { ADVERSARY_REFUSAL, ADVERSARY_REFUSALS, ADVERSARY_TRIGGERS, CENSUS_CARRIER_FILES as RUNTIME_CENSUS_CARRIER_FILES, SCOPE_ADMISSION_SOURCES, SCOPE_REQUEST_KINDS, SEAT_ADMISSION_MAX as RUNTIME_SEAT_ADMISSION_MAX, SUITE_ADMISSION_MAX as RUNTIME_SUITE_ADMISSION_MAX, fenceScopeOf, fenceScopesIntersect, parseUnifiedZeroHunks, resolveAdversaryTrigger, scopeAdmissionDecision, scopeRequestOf, siblingSpanIntersects, suiteRedTestFiles } from './drive.mjs'
+import { ADVERSARY_REFUSAL, ADVERSARY_REFUSALS, ADVERSARY_TRIGGERS, CENSUS_CARRIER_FILES as RUNTIME_CENSUS_CARRIER_FILES, SCOPE_ADMISSION_SOURCES, SCOPE_REQUEST_KINDS, SEAT_ADMISSION_MAX as RUNTIME_SEAT_ADMISSION_MAX, SUITE_ADMISSION_MAX as RUNTIME_SUITE_ADMISSION_MAX, fenceScopeOf, fenceScopesIntersect, parseUnifiedZeroHunks, resolveAdversaryTrigger, scopeAdmissionDecision, scopeRequestOf, siblingSpanIntersects, suiteRedTestFiles, RESUME_CHECKPOINT_VERSION, RESUME_CHECKPOINT_FAMILIES, resumeCheckpointDefect, resumeTask, resumeWorktreeSha256 } from './drive.mjs'
 import { CENSUS_CARRIER_FILES as DISPATCH_CENSUS_CARRIER_FILES } from '../scripts/factory/dispatch-batch.mjs'
 
 test('a supplied wait budget reaches io.wait and names the seat overdue at that budget', () => {
@@ -3086,6 +3086,136 @@ test('RV1-1 producer slots survive every envelope route', () => {
   for (const { producer, files, run } of scopeSlotFixtures()) {
     assertChoiceEscalation(run(), 'scope', { files }, producer)
   }
+})
+
+const RESUME_TEST_FILE = Object.freeze({ path: 'a.mjs', state: 'present', bytes: `file:-:${'a'.repeat(64)}` })
+const RESUME_TEST_TREE = Object.freeze({ files: [RESUME_TEST_FILE], worktree_sha256: resumeWorktreeSha256([RESUME_TEST_FILE]) })
+
+function resumeCheckpointForTest(overrides = {}) {
+  const kind = overrides.kind || 'suite'
+  const base = {
+    version: RESUME_CHECKPOINT_VERSION, kind, frozen_where: overrides.frozen_where || kind, head_oid: 'abc1234',
+    tree: { index_oid: 'tree1234', ...RESUME_TEST_TREE }, accepted_scope: ['a.mjs'],
+    returns: {
+      planner: { status: 'done', role: 'planner', artifacts: [], details: {} },
+      builder: { status: 'done', role: 'builder', artifacts: [], details: {} },
+      reviewer: { status: 'done', role: 'reviewer', artifacts: [], details: {} },
+    },
+    decision: { accepted_via: 'review pass', verdict: 'pass', residuals: [], carried_findings: [], accept_findings: [], accept_decision: { where: 'review', outcome: 'accepted', residuals: [] }, panel_contributors: ['reviewer'] },
+    commit: { oid: 'abc1234', pending: false, files: ['a.mjs'], message: 'feat: resume\n\nCloses #42', subject: 'feat: resume' },
+    proof: { gate_cmd: 'gate-cmd', gate_path: `${TD}/gate.mjs`, summary: { total: 1, failed: 0, errored: 0 }, discrimination: 'proven', generation: 1, repairs: 0 },
+    suite: { cmd: 'custom-suite', warm: null, cold: null }, publish: { branch: null, base: null }, prior_stages: ['review:r1', 'commit'],
+  }
+  return {
+    ...base, ...overrides,
+    tree: { ...base.tree, ...(overrides.tree || {}) },
+    returns: overrides.returns || base.returns,
+    decision: { ...base.decision, ...(overrides.decision || {}) },
+    commit: { ...base.commit, ...(overrides.commit || {}) },
+    proof: { ...base.proof, ...(overrides.proof || {}) },
+    suite: { ...base.suite, ...(overrides.suite || {}) },
+    publish: { ...base.publish, ...(overrides.publish || {}) },
+  }
+}
+
+const RESUME_CHECKPOINT_KEYS = ['version', 'kind', 'frozen_where', 'head_oid', 'tree', 'accepted_scope', 'returns', 'decision', 'commit', 'proof', 'suite', 'publish', 'prior_stages']
+
+test('resume checkpoint schema is complete for every supported terminal family', () => {
+  assert.deepEqual(RESUME_CHECKPOINT_FAMILIES, ['gate', 'rebase', 'suite', 'publish'])
+  for (const [kind, frozenWhere] of [['gate', 'gate'], ['rebase', 'rebase'], ['suite', 'suite'], ['suite', 'cold-suite'], ['publish', 'publish']]) {
+    const checkpoint = resumeCheckpointForTest({ kind, frozen_where: frozenWhere, suite: { cmd: 'node --test custom-suite.mjs' } })
+    assert.deepEqual(Object.keys(checkpoint), RESUME_CHECKPOINT_KEYS)
+    assert.deepEqual(Object.keys(checkpoint.tree), ['index_oid', 'files', 'worktree_sha256'])
+    assert.deepEqual(Object.keys(checkpoint.decision), ['accepted_via', 'verdict', 'residuals', 'carried_findings', 'accept_findings', 'accept_decision', 'panel_contributors'])
+    assert.deepEqual(Object.keys(checkpoint.proof), ['gate_cmd', 'gate_path', 'summary', 'discrimination', 'generation', 'repairs'])
+    assert.equal(resumeCheckpointDefect(checkpoint), null, `${kind}/${frozenWhere}`)
+  }
+  const incompleteDecision = resumeCheckpointForTest()
+  incompleteDecision.decision = {}
+  assert.match(resumeCheckpointDefect(incompleteDecision), /decision is incomplete/)
+  assert.match(resumeCheckpointDefect(resumeCheckpointForTest({ tree: { index_oid: 'tree1234', files: [], worktree_sha256: RESUME_TEST_TREE.worktree_sha256 } })), /tree files do not match accepted scope/)
+})
+
+test('a cold-suite escalation persists the measured checkpoint and its custom suite', () => {
+  const plan = planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } })
+  const io = fakeIo({
+    envelopes: { 'planner:1': plan, 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: {
+      'lane-cmd': { ok: true, output: '' },
+      'gate-cmd:1': { ok: false, output: `${GATE_SUMMARY_PREFIX} {"total":1,"failed":1,"errored":0}` },
+      'gate-cmd:2': { ok: true, output: `${GATE_SUMMARY_PREFIX} {"total":1,"failed":0,"errored":0}` },
+      'gate-cmd': { ok: true, output: `${GATE_SUMMARY_PREFIX} {"total":1,"failed":0,"errored":0}` },
+      'custom-suite': { ok: true, output: '# pass 1\n# fail 0\n' },
+      'git write-tree': { ok: true, output: 'tree1234\n' },
+    },
+    cleanRuns: { 'gate-cmd': { ok: false, output: `${GATE_SUMMARY_PREFIX} {"total":1,"failed":1,"errored":0}` } },
+    cold: { ok: false, path: '/cold/resume', kept: '/cold/resume', output: 'cold red' },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  io.fingerprintTree = () => ({ measured: true, entries: {
+    'a.mjs': RESUME_TEST_FILE.bytes,
+    'a.test.mjs': `file:-:${'b'.repeat(64)}`,
+  } })
+  const result = driveTask({ ...CTX, suite: 'custom-suite', head: 'abc1234' }, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'cold-suite')
+  const checkpoint = result.details.resume_checkpoint
+  assert.ok(checkpoint)
+  assert.equal(checkpoint.kind, 'suite')
+  assert.equal(checkpoint.frozen_where, 'cold-suite')
+  assert.equal(checkpoint.suite.cmd, 'custom-suite')
+  assert.equal(checkpoint.tree.worktree_sha256, resumeWorktreeSha256(checkpoint.tree.files))
+  assert.equal(resumeCheckpointDefect(checkpoint), null)
+})
+
+test('resume reruns canonical gate, warm and cold slots without assigning seats', () => {
+  const checkpoint = resumeCheckpointForTest({ frozen_where: 'cold-suite' })
+  const io = fakeIo({
+    runs: { 'gate-cmd': { ok: true, output: `${GATE_SUMMARY_PREFIX} {"total":2,"failed":0,"errored":0}` }, 'custom-suite': { ok: true, output: '# pass 2\n# fail 0\n' } },
+    slots: slotFactory({ refusals: [1, 1, 1] }),
+  })
+  const result = resumeTask({ ...CTX, task: 'resume-slots', suite: 'ignored-suite', files_in_scope: ['a.mjs'], env: { CREW_SUITE_SLOTS: '1' } }, io, checkpoint)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.assign.length, 0)
+  assert.equal(io.calls.run.some(({ cmd }) => cmd === 'gate-cmd'), true)
+  assert.equal(io.calls.run.some(({ cmd }) => cmd === 'custom-suite'), true)
+  assert.deepEqual(io.calls.runCold.map(({ cmd }) => cmd), ['custom-suite'])
+  const waits = io.calls.logs.filter((row) => row.event === PHASE_SLOT_WAIT_EVENT)
+  assert.deepEqual(waits.map((row) => row.kind).sort(), [SUITE_SLOT_PHASES.gate, SUITE_SLOT_PHASES.warm, SUITE_SLOT_PHASES.cold].sort())
+})
+
+test('cold resume failures retain a suite checkpoint and never restart seats', () => {
+  for (const [label, cold] of [['red', { ok: false, path: '/cold', kept: '/cold', output: 'red' }], ['unavailable', null]]) {
+    const checkpoint = resumeCheckpointForTest({ frozen_where: 'cold-suite' })
+    const io = fakeIo({ runs: { 'gate-cmd': { ok: true, output: `${GATE_SUMMARY_PREFIX} {"total":1,"failed":0,"errored":0}` }, 'custom-suite': { ok: true, output: '# pass 1\n# fail 0\n' } }, cold })
+    const result = resumeTask({ ...CTX, task: `resume-cold-${label}`, files_in_scope: ['a.mjs'] }, io, checkpoint)
+    assert.equal(result.status, 'escalation')
+    assert.equal(result.details.escalation.where, 'cold-suite')
+    assert.equal(result.details.resume_checkpoint, checkpoint)
+    assert.equal(io.calls.assign.length, 0)
+    assert.equal(io.calls.run.some(({ cmd }) => cmd === 'gate-cmd'), true)
+    assert.equal(io.calls.run.some(({ cmd }) => cmd === 'custom-suite'), true)
+  }
+})
+
+test('resumed census failure uses the ordinary escalation carrier before suite or publication', () => {
+  const checkpoint = resumeCheckpointForTest({ kind: 'publish', frozen_where: 'publish', publish: { branch: 'feature/resume', base: 'main' } })
+  const io = fakeIo({
+    runs: {
+      'gate-cmd': { ok: true, output: `${GATE_SUMMARY_PREFIX} {"total":1,"failed":0,"errored":0}` },
+      'node crew/census-exhibits.mjs': { ok: true, output: '{"action":"repair","verdict":"red","failures":["a.mjs"],"reason":"repair required"}\n' },
+    },
+  })
+  const ordinary = driveTask(CTX, fakeIo({ envelopes: { 'planner:1': null } }))
+  const result = resumeTask({ ...CTX, task: 'resume-census', files_in_scope: ['a.mjs'] }, io, checkpoint)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'census-exhibits')
+  for (const key of ['stages', 'dissents', 'extra_rounds_granted', 'growth', 'modifiers', 'enforcements', 'gate', 'cursor', 'head']) assert.ok(Object.hasOwn(result.details, key))
+  assert.ok(Object.keys(result.details).length >= Object.keys(ordinary.details).length)
+  assert.equal(result.details.resume_checkpoint, checkpoint)
+  assert.equal(io.calls.assign.length, 0)
+  assert.equal(io.calls.run.some(({ cmd }) => cmd === 'custom-suite' || cmd.startsWith('git push ')), false)
+  assert.equal(io.calls.runCold.length, 0)
 })
 
 test('E1', () => {

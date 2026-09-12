@@ -33,7 +33,7 @@
 // Each verb refuses a flag it does not read with exit 2; --fences is boot-only,
 // and a bare --lane on run is the round validation lane.
 import {
-  appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync, readdirSync, writeSync,
+  appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync, readdirSync, writeSync, lstatSync, readlinkSync,
 } from 'node:fs'
 import { join, dirname, basename, isAbsolute, resolve as resolvePath } from 'node:path'
 import { homedir } from 'node:os'
@@ -45,7 +45,7 @@ import { createHash } from 'node:crypto'
 import { cmux, tree, sendLine, renameTab, closeSurface, closeWorkspace, logLine } from './driver.mjs'
 import { slug } from './slug.mjs'
 import { FINGERPRINT_FILE, fingerprintWithheld, recordTreeFingerprint } from './tree-fingerprint.mjs'
-import { driveTask, LIMITS, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, validateScopeEntries, WAITS_S, WAIT_FLAGS, resolveWaits, waitsCtx, waitsRecord, TURN_CEILING_FLAGS, NO_TURN_CEILING, resolveTurnCeilings, turnCeilingArgs, turnCeilingsRecord, turnCeilingsJournalPatch, RUN_START_EVENT } from './drive.mjs'
+import { driveTask, resumeTask, resumeCheckpointDefect, resumeCheckpointFamily, resumeWorktreeSha256, RESUME_CHECKPOINT_VERSION, RESUME_CHECKPOINT_FAMILIES, LIMITS, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, validateScopeEntries, WAITS_S, WAIT_FLAGS, resolveWaits, waitsCtx, waitsRecord, TURN_CEILING_FLAGS, NO_TURN_CEILING, resolveTurnCeilings, turnCeilingArgs, turnCeilingsRecord, turnCeilingsJournalPatch, RUN_START_EVENT } from './drive.mjs'
 import { TASK_PROFILES } from './task-profiles.mjs'
 import { ASSURANCES, ASSURANCE_ALIASES, ASSURANCE_ALIAS_OF, canonicalAssurance } from './assurances.mjs'
 import { loadRoster, normalizeRoster, refuseRoster, rosterSeating, serializeRosterV1, serializeRosterV2, ROSTER_REFUSALS, ROSTER_SCHEMA_VERSIONS } from './roster.mjs'
@@ -2288,6 +2288,143 @@ export function teardownDecision({ status, variant, published, keep }) {
   return 'teardown'
 }
 
+function resumeEnvelope(paths) {
+  const path = join(paths.returnsDir, 'task.json')
+  if (!existsSync(path)) refuseResume(RESUME_REFUSALS.envelopeMissing, path)
+  let envelope
+  try { envelope = JSON.parse(readFileSync(path, 'utf8')) }
+  catch (error) { refuseResume(RESUME_REFUSALS.envelopeUnreadable, `${path}: ${error?.message ?? String(error)}`) }
+  if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope) || envelope.status !== 'escalation') {
+    refuseResume(RESUME_REFUSALS.notEscalation, `${path} is not an escalation envelope`)
+  }
+  return { path, envelope }
+}
+
+function resumeUnexpectedDirty(checkout, acceptedScope, exec = execSync) {
+  const changed = new Set()
+  const tracked = resumeGitText(checkout, 'git diff --name-only HEAD --', exec)
+  if (tracked === null) return null
+  for (const path of tracked.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)) changed.add(path)
+  const untracked = resumeGitText(checkout, 'git ls-files -z --others --exclude-standard', exec)
+  if (untracked === null) return null
+  for (const path of untracked.split('\0').map((line) => line.trim()).filter(Boolean)) changed.add(path)
+  const accepted = new Set(acceptedScope)
+  return [...changed].filter((path) => !accepted.has(path)).sort()
+}
+
+export function validateResumeState({ args = {}, checkout, taskDir, envelope, deps = {} } = {}) {
+  const refuse = (reason, message) => refuseResume(reason, message)
+  const fsDeps = { existsSync: deps.existsSync || existsSync, readFileSync: deps.readFileSync || readFileSync, lstatSync: deps.lstatSync || lstatSync, readlinkSync: deps.readlinkSync || readlinkSync }
+  const exec = deps.execSync || execSync
+  const checkpoint = envelope?.details?.resume_checkpoint
+  if (!checkpoint || typeof checkpoint !== 'object' || Array.isArray(checkpoint)) refuse(RESUME_REFUSALS.stateMissing, 'escalation envelope carries no complete resume checkpoint')
+  const defect = resumeCheckpointDefect(checkpoint)
+  if (defect) {
+    const unsupported = checkpoint.version !== RESUME_CHECKPOINT_VERSION || !RESUME_CHECKPOINT_FAMILIES.includes(checkpoint.kind)
+    refuse(unsupported ? RESUME_REFUSALS.unsupportedCheckpoint : RESUME_REFUSALS.stateMissing, defect)
+  }
+  const frozenWhere = envelope.details?.escalation?.where
+  if (resumeCheckpointFamily(frozenWhere) !== checkpoint.kind || checkpoint.frozen_where !== frozenWhere) refuse(RESUME_REFUSALS.stateMissing, 'checkpoint terminal family does not match the escalation envelope')
+  if (args.suite !== undefined && args.suite !== checkpoint.suite.cmd) refuse(RESUME_REFUSALS.suiteMismatch, 'explicit --suite differs from the persisted suite command')
+
+  const gatePath = resumeArtifactPath(checkpoint.proof.gate_path, { checkout, taskDir })
+  if (!gatePath) refuse(RESUME_REFUSALS.stateMissing, 'checkpoint gate path is absent')
+  if (!existsSync(gatePath)) refuseResume(RESUME_REFUSALS.artifactMissing, gatePath)
+  try {
+    const gateBytes = fsDeps.readFileSync(gatePath)
+    if (gateBytes.length === 0) refuse(RESUME_REFUSALS.artifactUnreadable, gatePath)
+  } catch (error) { refuse(RESUME_REFUSALS.artifactUnreadable, `${gatePath}: ${error?.message ?? String(error)}`) }
+  const artifactDefect = validateResumeArtifacts(checkpoint, { checkout, taskDir, ...fsDeps })
+  if (artifactDefect) refuse(artifactDefect.reason, artifactDefect.message)
+
+  const expectedHead = resumeCommitOid(checkout, checkpoint.head_oid, 'commit', exec)
+  const currentHead = resumeCommitOid(checkout, 'HEAD', 'commit', exec)
+  if (!expectedHead || !currentHead) refuse(RESUME_REFUSALS.oidUnresolved, 'checkpoint or current HEAD oid could not be resolved')
+  if (currentHead !== expectedHead) refuse(RESUME_REFUSALS.worktreeMoved, 'checkout HEAD moved after the checkpoint')
+
+  const expectedIndex = resumeCommitOid(checkout, checkpoint.tree.index_oid, 'tree', exec)
+  const currentIndexRaw = resumeGitLine(checkout, 'git write-tree', exec)
+  const currentIndex = resumeCommitOid(checkout, currentIndexRaw, 'tree', exec)
+  if (!expectedIndex || !currentIndex) refuse(RESUME_REFUSALS.oidUnresolved, 'checkpoint or current index oid could not be resolved')
+  if (currentIndex !== expectedIndex) refuse(RESUME_REFUSALS.unexpectedDirty, 'checkout index differs from the checkpoint')
+
+  const dirty = resumeUnexpectedDirty(checkout, checkpoint.accepted_scope, exec)
+  if (dirty === null) refuse(RESUME_REFUSALS.oidUnresolved, 'checkout change probes could not be read')
+  if (dirty.length > 0) refuse(RESUME_REFUSALS.unexpectedDirty, `unexpected checkout changes: ${dirty.join(', ')}`)
+
+  const currentTree = resumeCurrentTree(checkout, checkpoint, fsDeps)
+  if (!currentTree) refuse(RESUME_REFUSALS.stateMissing, 'checkpoint tree files are unreadable')
+  if (currentTree.error) refuse(RESUME_REFUSALS.artifactUnreadable, currentTree.error.message)
+  if (currentTree.worktree_sha256 !== checkpoint.tree.worktree_sha256) refuseResume(RESUME_REFUSALS.fingerprintMismatch, 'worktree bytes changed')
+  return checkpoint
+}
+
+function replaceTaskEnvelope(path, result) {
+  const temporary = `${path}.resume.tmp-${process.pid}`
+  writeFileSync(temporary, JSON.stringify(result, null, 2))
+  try { renameSync(temporary, path) }
+  catch (error) {
+    try { unlinkSync(temporary) } catch { /* the original envelope remains authoritative */ }
+    throw error
+  }
+  return path
+}
+
+export function resumeCmd(args, deps = {}) {
+  const taskSlug = slug(args.task)
+  const checkout = resolvePath(args.checkout || process.cwd())
+  const paths = pathsFor(taskSlug, checkout)
+  const { envelope, path: taskReturn } = resumeEnvelope(paths)
+  let crew
+  try { crew = loadCrew(paths) }
+  catch (error) { refuseResume(RESUME_REFUSALS.stateMissing, error?.message ?? String(error)) }
+  try { assertSameCheckout(crew, checkout) }
+  catch (error) { refuseResume(RESUME_REFUSALS.stateMissing, error?.message ?? String(error)) }
+  const checkpoint = validateResumeState({ args, checkout, taskDir: paths.taskDir, envelope })
+  const journal = join(paths.dir, 'journal.jsonl')
+  const variant = crew.run_configuration?.execution?.effective || DEFAULT_VARIANT
+  const emitterFactory = deps.openRun || openRun
+  let emitter = null
+  try {
+    emitter = emitterFactory({ stateDir: paths.dir, repoSlug: paths.repo, taskSlug, dbPath: ledgerDbPath() })
+    emitter.startRun()
+  } catch { emitter = null }
+  logLine(journal, { at: new Date().toISOString(), event: 'resume-start', head: checkpoint.head_oid, kind: checkpoint.kind, frozen_where: checkpoint.frozen_where })
+  const seatIoDep = deps.seatIo || seatIo
+  const io = seatIoDep(crew, paths, checkout, emitter, null, args, { readRoster: rosterSnapshotReader(crew) })
+  const ctx = {
+    task: taskSlug, taskDir: paths.taskDir, checkout, journal,
+    head: checkpoint.head_oid, roles: crew.roles, variant,
+    lane: null, suite: checkpoint.suite.cmd,
+    publish: { branch: checkpoint.publish.branch },
+    files_in_scope: checkpoint.accepted_scope,
+    resume_checkpoint: checkpoint,
+  }
+  const drive = deps.resume || deps.drive || resumeTask
+  let result
+  try { result = drive(ctx, io, checkpoint) }
+  catch (error) {
+    result = { status: 'escalation', summary: `Task ${taskSlug} needs a human: resume driver crashed (${error?.message ?? String(error)})`, artifacts: [journal], details: { stages: [], commit: checkpoint.commit.oid ?? null, dissents: [], escalation: { where: 'resume', why: error?.message ?? String(error) }, resume_checkpoint: checkpoint } }
+  }
+  replaceTaskEnvelope(taskReturn, result)
+  settleSeatTeardown(io)
+  try { emitter?.endRun(runOutcome(result)) } catch { /* instrumentation is never load-bearing */ }
+  const lifecycle = teardownDecision({ status: result.status, variant, published: Boolean(result.details?.pr), keep: Boolean(args.keep) })
+  let archived = null
+  if (lifecycle === 'teardown') {
+    try { archived = teardownCore(paths, crew, { io }).archived } catch (error) {
+      process.stderr.write(`warning: teardown/archive failed (${error.message}) — crew dir left at ${paths.dir}\\n`)
+    }
+  }
+  const finalTaskReturn = archived ? taskReturn.replace(paths.dir, archived) : taskReturn
+  try {
+    appendCompletion({ task: taskSlug, run: emitter?.adwId ?? null, outcome: result.status, commit: result.details?.commit ?? null, checkout, crewDir: paths.dir, archived, taskReturn: finalTaskReturn, at: new Date().toISOString() })
+  } catch (error) { completionWarning(error, taskSlug) }
+  writeTerminalLine({ status: result.status, commit: result.details?.commit ?? null, task_return: finalTaskReturn, archived }, deps.writeTerminalLine)
+  process.exitCode = runExitCode(result)
+  return result
+}
+
 export function runCmd(args, deps = {}) {
   // Refuse an unknown shape BEFORE any state is read, spawned or written —
   // the same posture as boot's assertCellsClosed and mixed-transport guards.
@@ -2553,6 +2690,107 @@ export function readBranch(checkout, deps = {}) {
   return !branch || branch === 'HEAD' ? null : branch
 }
 
+export const RESUME_REFUSALS = Object.freeze({
+  envelopeMissing: 'envelope-missing',
+  envelopeUnreadable: 'envelope-unreadable',
+  notEscalation: 'not-escalation',
+  stateMissing: 'state-missing',
+  unsupportedCheckpoint: 'unsupported-checkpoint',
+  oidUnresolved: 'oid-unresolved',
+  worktreeMoved: 'worktree-moved',
+  fingerprintMismatch: 'fingerprint-mismatch',
+  artifactMissing: 'artifact-missing',
+  artifactUnreadable: 'artifact-unreadable',
+  suiteMismatch: 'suite-mismatch',
+  unexpectedDirty: 'unexpected-dirty',
+})
+export const RESUME_REFUSAL_NAMES = Object.freeze(Object.values(RESUME_REFUSALS))
+
+export function refuseResume(reason, message = reason) {
+  if (!RESUME_REFUSAL_NAMES.includes(reason)) throw new Error(`unknown resume refusal: ${reason}`)
+  throw Object.assign(new Error(`${message} [${reason}]`), { reason })
+}
+
+const RESUME_OID_SHAPE = /^[0-9a-f]{4,64}$/i
+function resumeGitText(checkout, command, exec = execSync) {
+  try { return String(exec(command, { cwd: checkout, encoding: 'utf8' })) } catch { return null }
+}
+
+function resumeGitLine(checkout, command, exec = execSync) {
+  const output = resumeGitText(checkout, command, exec)
+  if (output === null) return null
+  const line = output.trim()
+  return line || null
+}
+
+function resumeCommitOid(checkout, value, kind = 'commit', exec = execSync) {
+  if (typeof value !== 'string') return null
+  const token = value.trim()
+  if (token !== 'HEAD' && !RESUME_OID_SHAPE.test(token)) return null
+  return resumeGitLine(checkout, `git rev-parse --verify ${token}^{${kind}}`, exec)
+}
+
+function resumeNodeValue(checkout, path, deps = {}) {
+  const read = deps.readFileSync || readFileSync
+  const lstat = deps.lstatSync || lstatSync
+  const readlink = deps.readlinkSync || readlinkSync
+  const full = resolvePath(checkout, path)
+  let stat
+  try { stat = lstat(full) }
+  catch (error) {
+    if (error?.code === 'ENOENT') return { path, state: 'deleted', bytes: null }
+    return { error }
+  }
+  if (stat.isSymbolicLink()) {
+    try { return { path, state: 'present', bytes: `symlink:${createHash('sha256').update(readlink(full)).digest('hex')}` } }
+    catch (error) { return { error } }
+  }
+  if (!stat.isFile()) return { error: new Error(`unsupported worktree node at ${path}`) }
+  try {
+    const bytes = read(full)
+    const digest = createHash('sha256').update(bytes).digest('hex')
+    return { path, state: bytes.length === 0 ? 'empty' : 'present', bytes: `file:${(stat.mode & 0o111) !== 0 ? 'x' : '-'}:${digest}` }
+  } catch (error) { return { error } }
+}
+
+function resumeCurrentTree(checkout, checkpoint, deps = {}) {
+  const files = []
+  for (const entry of checkpoint.tree.files) {
+    if (!entry || typeof entry !== 'object' || typeof entry.path !== 'string' || !entry.path || entry.path.startsWith('/') || entry.path.split('/').some((part) => part === '.' || part === '..')) return null
+    const current = resumeNodeValue(checkout, entry.path, deps)
+    if (current.error) return { error: current.error }
+    files.push(current)
+  }
+  return { worktree_sha256: resumeWorktreeSha256(files), files }
+}
+
+function resumeArtifactPath(path, { checkout, taskDir }) {
+  if (typeof path !== 'string' || !path.trim()) return null
+  if (isAbsolute(path)) return path
+  if (path.startsWith(`${taskDir}/`)) return path
+  return resolvePath(checkout, path)
+}
+
+function validateResumeArtifacts(checkpoint, { checkout, taskDir, existsSync: exists = existsSync, readFileSync: read = readFileSync }) {
+  const paths = new Set()
+  for (const role of ['planner', 'builder', 'reviewer']) {
+    const returned = checkpoint.returns[role]
+    if (returned.status !== 'done' || returned.role !== role) return { reason: RESUME_REFUSALS.stateMissing, message: `${role} accepted return is incomplete` }
+    if (Array.isArray(returned.artifacts)) for (const artifact of returned.artifacts) paths.add(artifact)
+    for (const key of ['plan_path', 'gate_path', 'review_path']) if (returned.details && returned.details[key]) paths.add(returned.details[key])
+  }
+  for (const raw of paths) {
+    const path = resumeArtifactPath(raw, { checkout, taskDir })
+    if (!path) return { reason: RESUME_REFUSALS.stateMissing, message: 'accepted artifact path is absent' }
+    if (!exists(path)) return { reason: RESUME_REFUSALS.artifactMissing, message: path }
+    try {
+      const bytes = read(path)
+      if (bytes.length === 0) return { reason: RESUME_REFUSALS.artifactUnreadable, message: path }
+    } catch (error) { return { reason: RESUME_REFUSALS.artifactUnreadable, message: `${path}: ${error?.message ?? String(error)}` } }
+  }
+  return null
+}
+
 // The stage list a crashed run's envelope carries. The driver's `S` dies with
 // the throw, so the stages are read back from the journal this run already
 // wrote: stage() logs one `{ stage: <label> }` row per entry (crew/drive.mjs)
@@ -2568,7 +2806,7 @@ export function stagesFromJournal(path, deps = {}) {
     if (!line.trim()) continue
     let row
     try { row = JSON.parse(line) } catch { continue }
-    if (row?.event === RUN_START_EVENT) { stages.length = 0; continue }
+    if (row?.event === RUN_START_EVENT || row?.event === 'resume-start') { stages.length = 0; continue }
     if (typeof row?.stage === 'string') stages.push(row.stage)
   }
   return stages
@@ -3306,6 +3544,7 @@ export function parseArgs(argv) {
 export const KNOWN_FLAGS = Object.freeze({
   boot: Object.freeze(['task', 'checkout', 'roles', 'tier', 'fences', 'lane', 'headless', 'headless-rpc', 'headless-all', 'memory-dir', 'memory-backend', 'memory-budget-bytes', 'claude-bin', 'profile', 'assurance', 'roster', ...TURN_CEILING_FLAGS]),
   run: Object.freeze(['task', 'checkout', 'brief-file', 'variant', 'execution', 'files-in-scope', 'validation-lane', 'lane', 'plan-rounds', 'build-rounds', 'review-rounds', ...WAIT_FLAGS, 'suite', 'keep', 'claude-bin']),
+  resume: Object.freeze(['task', 'checkout', 'suite', 'keep']),
   handoff: Object.freeze(['task', 'checkout', 'brief-file']),
   wait: Object.freeze(['task', 'checkout', 'timeout-s']),
   status: Object.freeze(['task', 'checkout']),
@@ -3356,6 +3595,7 @@ export const REQUIRED_FLAGS = Object.freeze({
   status: Object.freeze(['task']),
   stop: Object.freeze(['task', 'pid']),
   teardown: Object.freeze(['task']),
+  resume: Object.freeze(['task']),
 })
 export const BOOT_ONLY_FLAGS = Object.freeze(['fences', 'lane', ...TURN_CEILING_FLAGS])
 // The boot/transport boundary OWNS this refusal, so the constant is declared and
@@ -3438,7 +3678,7 @@ export function packageSuite({ path = SUITE_OWNER_PATH, readFile = readFileSync 
   return suite.trim()
 }
 
-const COMMANDS = { boot: bootCmd, run: runCmd, handoff: handoffCmd, wait: waitCmd, status: statusCmd, stop: stopCmd, teardown: teardownCmd }
+const COMMANDS = { boot: bootCmd, run: runCmd, resume: resumeCmd, handoff: handoffCmd, wait: waitCmd, status: statusCmd, stop: stopCmd, teardown: teardownCmd }
 const invokedDirectly = process.argv[1] && resolvePath(process.argv[1]) === fileURLToPath(import.meta.url)
 if (invokedDirectly) {
   const [verb, ...rest] = process.argv.slice(2)
@@ -3446,7 +3686,7 @@ if (invokedDirectly) {
   if (!fn) { process.stderr.write(`usage: crew.mjs <${Object.keys(COMMANDS).join('|')}> --task <slug> ...\n`); process.exit(2) }
   const markerHandlers = []
   const recordOn = (event, handler) => { markerHandlers.push([event, handler]); process.on(event, handler) }
-  if (verb === 'run') installExitMarker({ on: recordOn })
+  if (verb === 'run' || verb === 'resume') installExitMarker({ on: recordOn })
   let runSignalsArmed = false
   const armRunSignals = (emitter) => {
     for (const [event, handler] of markerHandlers) process.removeListener(event, handler)
@@ -3458,7 +3698,7 @@ if (invokedDirectly) {
   // try/catch cannot see an async rejection, so a promise result is also
   // routed to `fail` explicitly.
   const fail = (err) => {
-    if (verb === 'run' && !runSignalsArmed) { installExitMarker(); runSignalsArmed = true }
+    if ((verb === 'run' || verb === 'resume') && !runSignalsArmed) { installExitMarker(); runSignalsArmed = true }
     process.stderr.write(`error: ${err.message}\n`)
     process.stdout.write(`${JSON.stringify({ error: err.message })}\n`)
     process.exit(err?.usage === true ? 2 : 1)
@@ -3466,7 +3706,7 @@ if (invokedDirectly) {
   try {
     const parsed = parseArgs(rest)
     assertUsage(verb, parsed)
-    const r = verb === 'run'
+    const r = (verb === 'run' || verb === 'resume')
       ? fn(parsed, { installRunFinalizers: armRunSignals })
       : fn(parsed)
     if (r && typeof r.then === 'function') r.catch(fail)

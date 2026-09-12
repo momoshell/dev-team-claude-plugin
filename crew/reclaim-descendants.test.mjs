@@ -827,8 +827,9 @@ test('slice-1 settle vocabulary and both entrypoint calls remain source-visible'
   const crew = readFileSync(new URL('./crew.mjs', import.meta.url), 'utf8')
   const child = readFileSync(new URL('./child.mjs', import.meta.url), 'utf8')
   assert.equal(seatIoSrc.split('seat-teardown-sweep').length - 1, 1)
-  assert.equal(crew.split('settleSeatTeardown(io)').length - 1, 1)
+  assert.equal(crew.split('settleSeatTeardown(io)').length - 1, 2)
   assert.equal(child.split('settleSeatTeardown(io)').length - 1, 1)
+  assert.doesNotMatch(crew, /settleResumeSeats/)
 })
 
 // ---------------------------------------------------------------------------

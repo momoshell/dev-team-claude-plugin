@@ -5,6 +5,7 @@ import { protectedHitsIn, resolveProtectedPaths } from './protected-paths.mjs'
 import { parseFenceScope, validateFenceScope, fenceScopesIntersect, fenceScopeContains } from './fence-scope.mjs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { createHash } from 'node:crypto'
 import { SUITE_SLOT_KIND, SLOT_WAIT_INTERVAL_MS, SLOT_WAIT_CEILING_MS, slotPolicy } from './host-load.mjs'
 import { slotStore } from './reclaim.mjs'
 import { compareFingerprints, FINGERPRINT_OUTCOMES } from './tree-fingerprint.mjs'
@@ -3291,6 +3292,126 @@ export function applyNarration(record, narrated) {
   return { ...record, narrative: text }
 }
 
+// --- persisted post-build checkpoints -----------------------------------------
+export const RESUME_CHECKPOINT_VERSION = 1
+export const RESUME_CHECKPOINT_FAMILIES = Object.freeze(['gate', 'rebase', 'suite', 'publish'])
+
+export function resumeCheckpointFamily(where) {
+  if (where === 'cold-suite') return 'suite'
+  return RESUME_CHECKPOINT_FAMILIES.includes(where) ? where : null
+}
+
+function resumeSha256(value) {
+  return createHash('sha256').update(value).digest('hex')
+}
+
+export function resumeWorktreeSha256(files) {
+  const normalized = (Array.isArray(files) ? files : []).map((entry) => ({
+    path: entry?.path ?? null, state: entry?.state ?? null, bytes: entry?.bytes ?? null,
+  })).sort((a, b) => String(a.path).localeCompare(String(b.path)))
+  return resumeSha256(JSON.stringify(normalized))
+}
+
+export function resumeCheckpointDefect(checkpoint) {
+  if (!checkpoint || typeof checkpoint !== 'object' || Array.isArray(checkpoint)) return 'checkpoint is absent or not an object'
+  if (checkpoint.version !== RESUME_CHECKPOINT_VERSION) return 'unsupported checkpoint version'
+  if (!RESUME_CHECKPOINT_FAMILIES.includes(checkpoint.kind)) return 'unsupported checkpoint family'
+  if (typeof checkpoint.frozen_where !== 'string' || resumeCheckpointFamily(checkpoint.frozen_where) !== checkpoint.kind) return 'checkpoint family does not match frozen terminal'
+  if (typeof checkpoint.head_oid !== 'string' || !checkpoint.head_oid.trim()) return 'checkpoint HEAD oid is absent'
+  const tree = checkpoint.tree
+  if (!tree || typeof tree !== 'object' || Array.isArray(tree)) return 'checkpoint tree is absent'
+  if (typeof tree.index_oid !== 'string' || !tree.index_oid.trim()) return 'checkpoint index oid is absent'
+  if (!Array.isArray(tree.files)) return 'checkpoint tree files are absent'
+  if (typeof tree.worktree_sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(tree.worktree_sha256)) return 'checkpoint worktree fingerprint is absent'
+  if (!Array.isArray(checkpoint.accepted_scope) || checkpoint.accepted_scope.length === 0 || checkpoint.accepted_scope.some((path) => typeof path !== 'string' || !path || path.startsWith('/') || path.split('/').some((part) => part === '.' || part === '..'))) return 'checkpoint accepted scope is invalid'
+  const scope = [...checkpoint.accepted_scope].sort()
+  if (new Set(scope).size !== scope.length) return 'checkpoint accepted scope contains duplicates'
+  if (tree.files.length !== scope.length) return 'checkpoint tree files do not match accepted scope'
+  const treePaths = tree.files.map((entry) => entry?.path)
+  if (treePaths.some((path) => typeof path !== 'string' || !path || path.startsWith('/') || path.split('/').some((part) => part === '.' || part === '..')) || new Set(treePaths).size !== treePaths.length || [...treePaths].sort().some((path, index) => path !== scope[index])) return 'checkpoint tree files do not match accepted scope'
+  const emptyDigest = resumeSha256(Buffer.alloc(0))
+  for (const entry of tree.files) {
+    if (!['present', 'empty', 'deleted'].includes(entry?.state)) return 'checkpoint tree file state is invalid'
+    if (entry.state === 'deleted' && entry.bytes !== null) return 'checkpoint deleted file carries bytes'
+    if (entry.state !== 'deleted' && typeof entry.bytes !== 'string' || entry.state !== 'deleted' && !entry.bytes) return 'checkpoint file bytes are absent'
+    if (entry.state === 'empty' && entry.bytes !== `file:-:${emptyDigest}` && entry.bytes !== `file:x:${emptyDigest}`) return 'checkpoint empty file bytes are invalid'
+  }
+  const returns = checkpoint.returns
+  if (!returns || typeof returns !== 'object' || Array.isArray(returns)) return 'checkpoint accepted returns are absent'
+  for (const role of ['planner', 'builder', 'reviewer']) if (!returns[role] || typeof returns[role] !== 'object' || Array.isArray(returns[role])) return `checkpoint ${role} return is absent`
+  const decision = checkpoint.decision
+  if (!decision || typeof decision !== 'object' || Array.isArray(decision)) return 'checkpoint decision is absent'
+  if (typeof decision.accepted_via !== 'string' || typeof decision.verdict !== 'string' || !Array.isArray(decision.residuals) || !Array.isArray(decision.carried_findings) || !Array.isArray(decision.accept_findings) || !decision.accept_decision || typeof decision.accept_decision !== 'object' || !Array.isArray(decision.panel_contributors)) return 'checkpoint decision is incomplete'
+  const commit = checkpoint.commit
+  if (!commit || typeof commit !== 'object' || Array.isArray(commit) || typeof commit.pending !== 'boolean' || !Array.isArray(commit.files) || typeof commit.message !== 'string' || typeof commit.subject !== 'string' || (commit.oid !== null && (typeof commit.oid !== 'string' || !commit.oid.trim()))) return 'checkpoint commit is incomplete'
+  const proof = checkpoint.proof
+  if (!proof || typeof proof !== 'object' || Array.isArray(proof) || typeof proof.gate_cmd !== 'string' || !proof.gate_cmd.trim() || typeof proof.gate_path !== 'string' || !proof.gate_path.trim() || proof.summary === undefined || typeof proof.discrimination !== 'string' || !Number.isInteger(proof.generation) || !Number.isInteger(proof.repairs)) return 'checkpoint gate proof is incomplete'
+  const suite = checkpoint.suite
+  if (!suite || typeof suite !== 'object' || Array.isArray(suite) || typeof suite.cmd !== 'string' || !suite.cmd.trim()) return 'checkpoint suite command is absent'
+  const publish = checkpoint.publish
+  if (!publish || typeof publish !== 'object' || Array.isArray(publish) || (publish.branch !== null && typeof publish.branch !== 'string') || (publish.base !== null && typeof publish.base !== 'string')) return 'checkpoint publication state is incomplete'
+  if (!Array.isArray(checkpoint.prior_stages)) return 'checkpoint prior stages are absent'
+  return null
+}
+
+function resumeEntriesFromWitness(witness, paths) {
+  if (!witness?.measured || !witness.entries || typeof witness.entries !== 'object') return null
+  const emptyDigest = resumeSha256(Buffer.alloc(0))
+  return paths.map((path) => {
+    const value = witness.entries[path]
+    if (value === undefined) return { path, state: 'deleted', bytes: null }
+    if (typeof value !== 'string' || value.length === 0) return { path, state: value === '' ? 'empty' : 'present', bytes: value || null }
+    const fileDigest = /^file:[^:]+:([a-f0-9]{64})$/.exec(value)?.[1]
+    return { path, state: fileDigest === emptyDigest ? 'empty' : 'present', bytes: value }
+  })
+}
+
+function captureResumeCheckpoint(result, ctx, io) {
+  const source = ctx.resume_checkpoint_source || ctx.resume_snapshot || result?.details?.resume_snapshot || result?.__resumeSnapshot
+  if (!source || typeof source !== 'object' || Array.isArray(source)) return null
+  const terminal = result?.details?.escalation?.where
+  const where = resumeCheckpointFamily(terminal) ? terminal : source.frozen_where
+  const kind = resumeCheckpointFamily(where)
+  if (!kind) return null
+  const paths = [...new Set(Array.isArray(source.accepted_scope) ? source.accepted_scope : (Array.isArray(result?.details?.files_committed) ? result.details.files_committed : []))].sort()
+  if (paths.length === 0 || typeof io?.fingerprintTree !== 'function') return null
+  let witness
+  try { witness = io.fingerprintTree(ctx.checkout) } catch { return null }
+  const files = resumeEntriesFromWitness(witness, paths)
+  if (!files) return null
+  let indexOid = source.tree?.index_oid
+  if (!indexOid && typeof io.indexOid === 'function') {
+    try { indexOid = io.indexOid() } catch { indexOid = null }
+  }
+  if (!indexOid && typeof io.run === 'function') {
+    try {
+      const index = io.run('git write-tree')
+      indexOid = index?.ok && typeof index.output === 'string' ? index.output.trim() : null
+    } catch { indexOid = null }
+  }
+  if (!indexOid || typeof indexOid !== 'string' || !indexOid.trim()) return null
+  const tree = { index_oid: indexOid.trim(), files, worktree_sha256: resumeWorktreeSha256(files) }
+  const checkpoint = {
+    version: RESUME_CHECKPOINT_VERSION, kind, frozen_where: where,
+    head_oid: source.head_oid || ctx.head || null, tree,
+    accepted_scope: paths,
+    returns: source.returns, decision: source.decision,
+    commit: source.commit, proof: { ...source.proof, gate_cmd: source.proof?.gate_cmd || source.gate_cmd, gate_path: source.proof?.gate_path || `${ctx.taskDir}/gate.mjs` },
+    suite: { ...source.suite, cmd: source.suite?.cmd || ctx.suite },
+    publish: source.publish || { branch: ctx.publish?.branch ?? null, base: typeof ctx.publish?.branch === 'string' && ctx.publish.branch.trim() ? PUBLISH_BASE : null },
+    prior_stages: Array.isArray(source.prior_stages) ? [...source.prior_stages] : (result?.details?.stages || []),
+  }
+  return resumeCheckpointDefect(checkpoint) ? null : checkpoint
+}
+
+function attachResumeCheckpoint(result, ctx, io) {
+  if (!result || !result.details || typeof result.details !== 'object') return result
+  if (ctx?.resume_checkpoint && !result.details.resume_checkpoint) return { ...result, details: { ...result.details, resume_checkpoint: ctx.resume_checkpoint } }
+  if (result.details.resume_checkpoint) return result
+  const checkpoint = captureResumeCheckpoint(result, ctx, io)
+  return checkpoint ? { ...result, details: { ...result.details, resume_checkpoint: checkpoint } } : result
+}
+
 // --- the driver ----------------------------------------------------------------
 // ctx: { task, briefFile, taskDir, checkout, roles: [..seated roles..],
 //        lane: <fallback validation command|null>, suite: <full-suite command>,
@@ -3346,7 +3467,8 @@ const BUILDER_REVERSION_UNMEASURABLE = 'fingerprint-unmeasurable'
 export function driveTask(ctx, io) {
   const crash = { envelope: null }
   try {
-    return runTask(ctx, io, crash)
+    const result = runTask(ctx, io, crash)
+    return attachResumeCheckpoint(result, ctx, io)
   } catch (err) {
     if (err && CRASH_ESCAPE_STAGES.includes(err.stage)) throw err
     // A throw before the recorder is armed is a CALLER contract violation — an
@@ -3354,8 +3476,12 @@ export function driveTask(ctx, io) {
     // no journal rows, nothing to resume. It keeps throwing exactly as today.
     if (!crash.envelope) throw err
     // A recorder that cannot record must not replace the crash it was recording.
-    try { return crash.envelope(err) } catch { throw err }
+    try { return attachResumeCheckpoint(crash.envelope(err), ctx, io) } catch { throw err }
   }
+}
+
+export function resumeTask(ctx, io, checkpoint) {
+  return driveTask({ ...ctx, resume_checkpoint: checkpoint }, io)
 }
 
 // Lifted decision interfaces (#1100).
@@ -4074,8 +4200,31 @@ function runTask(ctx, io, crash) {
   }
   const limits = { ...LIMITS, ...(ctx.limits || {}) }
   const waits = { ...WAITS_S, ...(ctx.waits || {}) }
-  const S = { consults: 0, stages: [], commit: null, dissents: [], grants: [], growth: [], modifiers: [], enforcements: [], acceptFindings: null, lastReview: null, seqHighWater: 0, planAccept: null, carried: [], carriedCleared: new Set() }
+  const S = { consults: 0, stages: [], commit: null, dissents: [], grants: [], growth: [], modifiers: [], enforcements: [], acceptFindings: null, lastReview: null, seqHighWater: 0, planAccept: null, carried: [], carriedCleared: new Set(), returns: { planner: null, builder: null, reviewer: null }, commitMessage: null, commitSubject: null, panelContributors: [] }
   const art = (name) => `${ctx.taskDir}/${name}`
+  // These gate cells are initialised before the resume branch so its canonical
+  // gate and the ordinary escalation composer have the same state vocabulary.
+  let activeGateCmd = null
+  let gateRepairs = 0
+  let failDelimiterRepairs = 0
+  let gateReverified = null
+  let gateGeneration = 1
+  let gateDiscrimination = null
+  let gateProofNote = null
+  let gateProofOutput = null
+  let checkProofs = null
+  let checkProofOutput = null
+  let checkProofNote = null
+  let checkProofVerdict = null
+  let checkProofPending = null
+  let checkProofBinds = []
+  let checkProofUnbound = []
+  let checkProofUnlabelledRefusals = []
+  let checkProofBindMeasured = false
+  let gateProofFatal = null
+  let proofTreeWitness = null
+  let proofTreeBuildRound = null
+  let gateHistory = []
   // ONE task-local path validator, used by the suite policy AND by the growth
   // measurement, so there is no weaker second check to drift. A bare
   // `startsWith(taskDir)` accepts `${ctx.taskDir}/../checkout/evil.mjs`; rejecting
@@ -4106,6 +4255,7 @@ function runTask(ctx, io, crash) {
   // from ctx so decision briefs and escalation artifacts never cite a 404.
   const journal = ctx.journal || art('journal.jsonl')
   let gateBlock = () => null
+  gateBlock = () => (activeGateCmd ? { cmd: activeGateCmd, repairs: gateRepairs, generation: gateGeneration, discrimination: gateDiscrimination ?? 'unproven', reap: { ...gateReapTally }, ...(gateProofNote ? { discrimination_note: gateProofNote } : {}), ...(gateHistory.length ? { replaced: gateHistory } : {}) } : null)
   // One shape for every terminal, under the details key this driver already uses
   // for a typed accept (crew/drive.mjs:3246,3255,3322,3331): a plan-check accept
   // that recorded something is in the run's record wherever the run ends, and a
@@ -4276,6 +4426,8 @@ function runTask(ctx, io, crash) {
     })
   }
   let lastGateOutput = null
+  let resumeWarmCounts = null
+  let resumeColdSuite = null
   const finalReview = { verdict: null, residuals: [] }
   const gateReapTally = { invocations: 0, 'already-dead': 0, proven: 0, failed: 0, unproven: 0 }
   // `runner` is an io METHOD, so it must be invoked as one: `seatIo.runClean`
@@ -4518,6 +4670,7 @@ function runTask(ctx, io, crash) {
       throw error
     }
     io.log(recordRow({ at: io.now(), envelope: id, role, status: env.status }))
+    if (Object.hasOwn(S.returns, role) && env.status === 'done') S.returns[role] = env
     return env
   }
 
@@ -4747,6 +4900,74 @@ function runTask(ctx, io, crash) {
     io.log(recordRow({ at: io.now(), extra_round_granted: { where, round, consult: S.consults } }))
   }
 
+  const resumeTerminalWhere = (details) => {
+    const direct = details?.escalation?.where
+    if (resumeCheckpointFamily(direct)) return direct
+    if (S.stages.includes('publish')) return 'publish'
+    if (S.stages.includes('suite:cold')) return 'cold-suite'
+    if (S.stages.includes('suite') || S.commit) return 'suite'
+    if (S.stages.includes('rebase')) return 'rebase'
+    if (S.stages.some((label) => label === 'gate' || label.startsWith('gate:'))) return 'gate'
+    return null
+  }
+  const resumeSnapshotFor = (details) => {
+    const frozenWhere = resumeTerminalWhere(details)
+    const kind = resumeCheckpointFamily(frozenWhere)
+    if (!kind || !activeGateCmd) return null
+    if (!Object.values(S.returns).every((env) => env?.status === 'done')) return null
+    const claimedFiles = Array.isArray(details.files_committed) && details.files_committed.length > 0
+      ? [...details.files_committed]
+      : (acceptedScope.length > 0 ? [...acceptedScope] : (Array.isArray(ctx.files_in_scope) ? [...ctx.files_in_scope] : []))
+    let concreteFiles = null
+    if (claimedFiles.some((path) => typeof path === 'string' && path.endsWith('/')) && typeof io.changedFiles === 'function') {
+      try { concreteFiles = [...new Set((io.changedFiles() || []).filter((path) => inScope(path)))].sort() } catch { concreteFiles = [] }
+    }
+    const snapshotFiles = concreteFiles || claimedFiles
+    const panel = finalReview.panel || S.lastReview?.panel || null
+    const panelContributors = panel && typeof panel === 'object'
+      ? ['reviewer', panel.partner, panel.adjudicator].filter((value, index, values) => typeof value === 'string' && value.trim() && values.indexOf(value) === index)
+      : [typeof details.accepted_via === 'string' && details.accepted_via.startsWith('lead accepted') ? 'lead' : 'reviewer']
+    return {
+      returns: S.returns,
+      decision: {
+        accepted_via: typeof details.accepted_via === 'string' ? details.accepted_via : 'review pass',
+        verdict: finalReview.verdict || (details.accepted_via === 'review pass' ? 'pass' : 'changes-needed'),
+        residuals: Array.isArray(details.accept_decision?.residuals) ? details.accept_decision.residuals : [...finalReview.residuals],
+        carried_findings: S.carried.map((finding) => ({ ...finding })),
+        accept_findings: Array.isArray(details.accept_findings) ? details.accept_findings : [],
+        accept_decision: details.accept_decision && typeof details.accept_decision === 'object' ? details.accept_decision : { where: 'review', outcome: 'accepted', verdict: finalReview.verdict || 'pass', residuals: [...finalReview.residuals], findings: Array.isArray(S.acceptFindings) ? [...S.acceptFindings] : [] },
+        panel_contributors: panelContributors,
+      },
+      commit: {
+        oid: details.commit ?? null, pending: details.commit == null,
+        files: snapshotFiles,
+        message: S.commitMessage || '', subject: S.commitSubject || '',
+      },
+      proof: {
+        gate_cmd: activeGateCmd, gate_path: acceptedGatePath,
+        summary: parseGateSummary(lastGateOutput) || details.gate?.summary || {},
+        discrimination: details.gate?.discrimination || gateDiscrimination || 'unproven',
+        generation: Number.isInteger(details.gate?.generation) ? details.gate.generation : gateGeneration,
+        repairs: Number.isInteger(details.gate?.repairs) ? details.gate.repairs : gateRepairs,
+      },
+      suite: { cmd: ctx.suite, warm: resumeWarmCounts, cold: resumeColdSuite?.counts ?? details.cold_suite?.counts ?? null },
+      publish: { branch: ctx.publish?.branch ?? null, base: typeof ctx.publish?.branch === 'string' && ctx.publish.branch.trim() ? PUBLISH_BASE : null },
+      accepted_scope: snapshotFiles,
+      prior_stages: Array.isArray(details.stages) ? [...details.stages] : [...S.stages],
+      head_oid: typeof details.commit === 'string' && details.commit.trim() ? details.commit : (details.head || ctx.head || null),
+      version: RESUME_CHECKPOINT_VERSION,
+      kind,
+      frozen_where: frozenWhere,
+    }
+  }
+  const markResume = (result, details) => {
+    if (result?.status !== 'escalation') return result
+    const snapshot = resumeSnapshotFor(details)
+    if (!snapshot) return result
+    try { Object.defineProperty(result, '__resumeSnapshot', { value: snapshot, enumerable: false }) } catch { /* capture is additive */ }
+    return result
+  }
+
   // The ONE composer for an escalation's 14-key `details`. The two exits differ
   // only in their explicit inputs. `terminal` decides whether a DELIBERATE
   // terminal stage is recorded: escalate() records `escalate:<where>` and completes
@@ -4774,6 +4995,7 @@ function runTask(ctx, io, crash) {
       ...extraDetails,
     }
     const result = { status: 'escalation', summary, artifacts: [journal, ...artifacts], details }
+    markResume(result, details)
     if (terminal) stageComplete()
     return result
   }
@@ -4991,6 +5213,223 @@ function runTask(ctx, io, crash) {
     }
     stageComplete()
     return result
+  }
+  const runResumeTail = (checkpoint, resumeCtx, resumeIo) => {
+    const malformed = resumeCheckpointDefect(checkpoint)
+    if (malformed) {
+      return escalationResult({
+        where: 'gate', why: `resume checkpoint is unusable: ${malformed}`,
+        question: escalationQuestion('gate', {}), summary: `Task ${resumeCtx.task} needs a human: resume checkpoint is unusable: ${malformed}`,
+        commit: checkpoint?.commit?.oid ?? null, extraDetails: { resume_checkpoint: checkpoint }, terminal: true,
+      })
+    }
+
+    const gateCmd = checkpoint.proof.gate_cmd
+    activeGateCmd = gateCmd
+    gateRepairs = checkpoint.proof.repairs
+    gateGeneration = checkpoint.proof.generation
+    gateDiscrimination = checkpoint.proof.discrimination
+    gateProofNote = null
+    gateHistory = []
+    S.stages = Array.isArray(checkpoint.prior_stages) ? [...checkpoint.prior_stages] : []
+    S.acceptFindings = checkpoint.decision.accept_findings
+    S.planAccept = checkpoint.decision.accept_decision
+    S.commit = checkpoint.commit.oid
+    const priorCommit = checkpoint.commit.oid
+    let commitOid = checkpoint.commit.oid
+    let resumeGateResult = null
+    let warmCounts = checkpoint.suite.warm ?? null
+    let coldSuite = checkpoint.suite.cold ?? null
+    let published = null
+
+    const resumeEscalate = (where, why, extraDetails = {}, commit = commitOid) => escalationResult({
+      where, why, question: escalationQuestion(where, {}), summary: `Task ${resumeCtx.task} needs a human: ${why}`,
+      commit: commit ?? null, extraDetails: { ...extraDetails, resume_checkpoint: checkpoint }, terminal: true,
+    })
+    const probe = (command) => {
+      try {
+        const result = resumeIo.run(command)
+        const output = String(result?.output || '').trim()
+        return result?.ok && output ? output : null
+      } catch { return null }
+    }
+    const runCensus = () => {
+      try { return decodeCensusResult(resumeIo.run('node crew/census-exhibits.mjs')) }
+      catch (error) { return decodeCensusResult(null, error) }
+    }
+    const runWarmSuite = () => {
+      stage('suite')
+      const result = phaseSlot(SUITE_SLOT_PHASES.warm, () => resumeIo.run(checkpoint.suite.cmd))
+      warmCounts = parseSuiteCounts(result?.output)
+      if (!result?.ok) {
+        stageComplete()
+        return resumeEscalate('suite', `full suite red during resume${result?.output ? `: ${String(result.output).slice(-2000)}` : ''}`, { suite: { warm: warmCounts, cold: coldSuite } })
+      }
+      stageComplete()
+      return null
+    }
+
+    // A gate checkpoint is the only pending-commit recovery. The gate is always
+    // fresh: persisted green output is evidence, not permission to skip the run.
+    if (checkpoint.kind === 'gate' || checkpoint.kind === 'suite' || checkpoint.kind === 'publish') {
+      stage('gate')
+      const gateResult = runGate('resume', gateCmd)
+      resumeGateResult = gateResult
+      lastGateOutput = gateResult?.output ?? null
+      if (!gateResult?.ok) {
+        stageComplete()
+        return resumeEscalate('gate', `the resumed acceptance gate is red${gateResult?.output ? `: ${String(gateResult.output).slice(-2000)}` : ''}`, { gate: gateBlock() }, priorCommit)
+      }
+      stageComplete()
+    }
+
+    if (checkpoint.kind === 'gate' && checkpoint.commit.pending) {
+      stage('commit')
+      try { commitOid = S.commit = resumeIo.commit(checkpoint.commit.files, checkpoint.commit.message) }
+      catch (error) { commitOid = null; stageComplete(); return resumeEscalate('gate', `the resumed commit failed: ${error?.message ?? String(error)}`, {}, priorCommit) }
+      if (typeof commitOid !== 'string' || !commitOid.trim()) {
+        stageComplete()
+        return resumeEscalate('gate', 'the resumed commit returned no readable oid', {}, priorCommit)
+      }
+      stageComplete()
+    }
+
+    const needsRebase = checkpoint.kind === 'rebase' || (checkpoint.kind === 'gate' && checkpoint.publish.base !== null)
+    if (needsRebase) {
+      stage('rebase')
+      const baseName = checkpoint.publish.base || PUBLISH_BASE
+      const base = `origin/${baseName}`
+      let fetched
+      try { fetched = resumeIo.run(`git fetch origin ${baseName}`) }
+      catch (error) { fetched = { ok: false, output: error?.message ?? String(error) } }
+      if (!fetched?.ok) { stageComplete(); return resumeEscalate('rebase', `the fetch of ${base} failed${fetched?.output ? `: ${String(fetched.output).slice(-2000)}` : ''}`) }
+      const baseSha = probe(`git rev-parse ${base}`)
+      const mergeBase = probe(`git merge-base HEAD ${base}`)
+      if (!baseSha || !mergeBase) { stageComplete(); return resumeEscalate('rebase', `the rebase probe for ${base} failed or returned blank output`) }
+      let rebased = false
+      if (baseSha !== mergeBase) {
+        let rebasedResult
+        try { rebasedResult = resumeIo.run(`git rebase ${base}`) }
+        catch (error) { rebasedResult = { ok: false, output: error?.message ?? String(error) } }
+        if (!rebasedResult?.ok) { stageComplete(); return resumeEscalate('rebase', `the rebase onto ${base} failed${rebasedResult?.output ? `: ${String(rebasedResult.output).slice(-2000)}` : ''}`) }
+        rebased = true
+      }
+      const headAfter = probe('git rev-parse HEAD')
+      if (!headAfter) { stageComplete(); return resumeEscalate('rebase', 'the resumed rebase completed but HEAD could not be read') }
+      commitOid = S.commit = headAfter
+      stageComplete()
+      // Kept in the local result for the publication body; the checkpoint itself
+      // remains byte-for-byte the authority supplied by the validator.
+      void rebased
+    }
+
+    if (!commitOid || typeof commitOid !== 'string' || !commitOid.trim()) return resumeEscalate('gate', 'the resumed path has no committed oid')
+
+    const census = runCensus()
+    if (census.verdict !== 'green' || (Array.isArray(census.failures) && census.failures.length > 0)) {
+      return resumeEscalate('census-exhibits', `the post-commit census could not prove a clean committed tree: ${census.reason || census.verdict || 'non-green'}`, { census })
+    }
+
+    const warmFailure = runWarmSuite()
+    if (warmFailure) return warmFailure
+
+    stage('suite:cold')
+    if (typeof resumeIo.runCold !== 'function') {
+      coldSuite = { verdict: 'unavailable', why: 'this io provides no runCold, so no cold checkout could be cut' }
+    } else {
+      try {
+        const names = [...new Set([resumeCtx.laneName, resumeCtx.task].filter((name) => typeof name === 'string' && name.trim()))]
+        const cold = phaseSlot(SUITE_SLOT_PHASES.cold, () => resumeIo.runCold(checkpoint.suite.cmd, names))
+        coldSuite = cold?.ok
+          ? { verdict: 'green', path: cold.path, counts: parseSuiteCounts(cold.output) }
+          : { verdict: 'red', path: cold?.path, kept: cold?.kept, output: String(cold?.output || '').slice(-2000) }
+      } catch (error) { coldSuite = { verdict: 'unproven', why: error?.message ?? String(error) } }
+    }
+    stageComplete()
+    if (coldSuite.verdict !== 'green') {
+      const why = coldSuite.verdict === 'red'
+        ? `the resumed full suite is green in this checkout and red from ${coldSuite.path || '(unknown checkout)'}: ${coldSuite.output || ''}`
+        : `the resumed cold verification produced no verdict (${coldSuite.verdict}): ${coldSuite.why || 'reason unavailable'}`
+      return resumeEscalate('cold-suite', why, { cold_suite: coldSuite })
+    }
+
+    const publishBranch = checkpoint.publish.branch
+    const shouldPublish = typeof publishBranch === 'string' && publishBranch.trim() !== ''
+    if (shouldPublish) {
+      stage('publish')
+      const baseName = checkpoint.publish.base || PUBLISH_BASE
+      const refusePublish = (reason, detail) => {
+        stageComplete()
+        return resumeEscalate('publish', `publish refused (${reason}): ${detail}`, { publish: { refused: reason } })
+      }
+      if (publishBranch === baseName) return refusePublish(PUBLISH_REFUSALS.branchMain, `the checkout branch is ${baseName}`)
+      let ghMissing
+      try { ghMissing = resumeIo.run('command -v gh') } catch (error) { ghMissing = { ok: false, output: error?.message ?? String(error) } }
+      if (!ghMissing?.ok) return refusePublish(PUBLISH_REFUSALS.ghMissing, 'the gh executable is not available')
+      let ghAuth
+      try { ghAuth = resumeIo.run('gh auth status') } catch (error) { ghAuth = { ok: false, output: error?.message ?? String(error) } }
+      if (!ghAuth?.ok) return refusePublish(PUBLISH_REFUSALS.ghAuth, 'gh authentication is unavailable')
+      let prProbe
+      const view = `gh pr view ${shellArg(publishBranch)} --json number,url,headRefOid,baseRefName,headRefName`
+      try { prProbe = resumeIo.run(view) } catch (error) { prProbe = { ok: false, output: error?.message ?? String(error) } }
+      if (prProbe?.ok) {
+        let existing = null
+        try { existing = JSON.parse(String(prProbe.output || '')) } catch { existing = null }
+        if (existing && existing.headRefOid === commitOid && existing.baseRefName === baseName && existing.headRefName === publishBranch) {
+          published = { url: existing.url, number: existing.number, head: publishBranch, base_sha: checkpoint.publish.base_sha ?? null }
+          stageComplete()
+        } else {
+          return refusePublish(PUBLISH_REFUSALS.prExists, 'an existing pull request did not match the checkpoint branch, base, and head oid')
+        }
+      } else {
+        const probeOutput = String(prProbe?.output || '')
+        if (!/no pull requests found/i.test(probeOutput)) return refusePublish(PUBLISH_REFUSALS.prCheck, `the existing pull request probe was indeterminate: ${probeOutput.slice(-2000)}`)
+        let pushed
+        try { pushed = resumeIo.run(`git push -u origin ${shellArg(publishBranch)}`) }
+        catch (error) { pushed = { ok: false, output: error?.message ?? String(error) } }
+        if (!pushed?.ok) return refusePublish(PUBLISH_REFUSALS.pushRejected, `the branch push was rejected${pushed?.output ? `: ${String(pushed.output).slice(-2000)}` : ''}`)
+        const bodyRecord = {
+          intent: commitIntent(checkpoint.commit.message),
+          closes: issueTrailers(checkpoint.commit.message).closes,
+          issues: issueTrailers(checkpoint.commit.message).refs,
+          stages: [...S.stages], cursor: roundCursor(S.stages), files: [...checkpoint.commit.files],
+          gate: { cmd: relativizeCommand(gateCmd, { checkout: resumeCtx.checkout, taskDir: resumeCtx.taskDir }), summary: resumeGateResult ? parseGateSummary(resumeGateResult.output) : checkpoint.proof.summary, discrimination: resumeGateResult ? (parseGateSummary(resumeGateResult.output) ? 'proven' : 'unproven') : checkpoint.proof.discrimination, generation: gateGeneration, repairs: gateRepairs },
+          review: { verdict: checkpoint.decision.verdict, residuals: checkpoint.decision.residuals, carried: checkpoint.decision.carried_findings },
+          suite: { warm: warmCounts, cold: coldSuite.counts, cold_verified: coldSuite.counts !== null }, anomalies: [],
+        }
+        const bodyPath = art('pr-body.md')
+        let created
+        try {
+          resumeIo.writeFile(bodyPath, composePrBody(bodyRecord))
+          created = resumeIo.run(`gh pr create --base ${shellArg(baseName)} --head ${shellArg(publishBranch)} --title ${shellArg(checkpoint.commit.subject)} --body-file ${shellArg(bodyPath)}`)
+        } catch (error) { created = { ok: false, output: error?.message ?? String(error) } }
+        const urlMatch = String(created?.output || '').match(/https:\/\/[^\s]+\/pull\/(\d+)/)
+        if (!created?.ok || !urlMatch) return refusePublish(PUBLISH_REFUSALS.prCreate, `gh pr create did not return a pull request URL${created?.output ? `: ${String(created.output).slice(-2000)}` : ''}`)
+        published = { url: urlMatch[0], number: Number(urlMatch[1]), head: publishBranch, base_sha: checkpoint.publish.base_sha ?? null }
+        stageComplete()
+      }
+    }
+
+    stage('done')
+    const result = {
+      status: 'done', summary: `Task ${resumeCtx.task} resumed from ${checkpoint.frozen_where}: committed ${commitOid}, suite green, cold-verified from ${coldSuite.path || '(fresh checkout)'}.`,
+      artifacts: [resumeCtx.journal, checkpoint.proof.gate_path],
+      details: {
+        commit: commitOid, stages: S.stages, files_committed: checkpoint.commit.files, consults: 0,
+        dissents: S.dissents, accepted_via: checkpoint.decision.accepted_via, escalation: null,
+        ...(published ? { pr: published } : {}), cold_suite: coldSuite, gate: gateBlock(),
+        accept_findings: checkpoint.decision.accept_findings, accept_decision: checkpoint.decision.accept_decision,
+        resume_checkpoint: checkpoint,
+      },
+    }
+    stageComplete()
+    return result
+  }
+
+  if (ctx.resume_checkpoint) {
+    const checkpoint = ctx.resume_checkpoint
+    const resume = runResumeTail(checkpoint, ctx, io)
+    return resume
   }
   if (shape.execution === 'envelope') return driveEnvelopeShape()
   const driveTriageRound = () => {
@@ -5722,6 +6161,7 @@ function runTask(ctx, io, crash) {
   }
   acceptedGatePath = taskLocalPath(planEnv.details?.gate_path) ?? art('gate.mjs')
   let gateCmd = planEnv.details?.gate_cmd || null
+  activeGateCmd = gateCmd
   const declared = planEnv.details?.mutations
   const mutations = declared == null ? [] : declared
   if (declared != null) {
@@ -5737,29 +6177,29 @@ function runTask(ctx, io, crash) {
         planEnv.artifacts || [])
     }
   }
-  let gateRepairs = 0
-  let failDelimiterRepairs = 0 // one bounded correction that does not spend gateRepairs
-  let gateReverified = null // set only when a MID-RUN repair is accepted:
+  gateRepairs = 0
+  failDelimiterRepairs = 0 // one bounded correction that does not spend gateRepairs
+  gateReverified = null // set only when a MID-RUN repair is accepted:
   let builderEnv = null
-  const gateHistory = [] // every replaced gate_cmd, for the human's audit trail
-  let gateGeneration = 1
+  gateHistory = [] // every replaced gate_cmd, for the human's audit trail
+  gateGeneration = 1
   let gateProvenGeneration = null // the generation whose proof is already recorded
-  let gateDiscrimination = null   // 'proven' | 'failed' | 'unproven'
-  let gateProofNote = null        // operator-facing detail, set only on a contained throw
-  let gateProofOutput = null
-  let checkProofs = null       // rows for the CURRENT generation, non-null once its pass completed
-  let checkProofOutput = null  // the mutated run of the first check that was not killed
-  let checkProofNote = null    // a CONTAINED io failure during the pass (never loses a build)
-  let checkProofVerdict = null // 'proven' | 'failed' | 'unbound' | 'unproven' | null — the PER-CHECK
-  let checkProofPending = null // the generation that OWES a per-check pass, awaiting an observed green
-  let checkProofBinds = []     // #874 — the bind report's rows, one per declared ANCHOR, terminal
-  let checkProofUnbound = []   // the unresolved disagreements, taken from that report
-  let checkProofUnlabelledRefusals = [] // unattributed correction refusals for the current generation
-  let checkProofBindMeasured = false   // the ALL-OR-NOTHING measurement sentinel: true only after
-                                       // bindMutationDeclarations returned every row
-  let gateProofFatal = null    // the built tree still carries a mutation: the run must stop
-  let proofTreeWitness = null // the byte witness for the latest settled gate/check generation
-  let proofTreeBuildRound = null
+  gateDiscrimination = null   // 'proven' | 'failed' | 'unproven'
+  gateProofNote = null        // operator-facing detail, set only on a contained throw
+  gateProofOutput = null
+  checkProofs = null       // rows for the CURRENT generation, non-null once its pass completed
+  checkProofOutput = null  // the mutated run of the first check that was not killed
+  checkProofNote = null    // a CONTAINED io failure during the pass (never loses a build)
+  checkProofVerdict = null // 'proven' | 'failed' | 'unbound' | 'unproven' | null — the PER-CHECK
+  checkProofPending = null // the generation that OWES a per-check pass, awaiting an observed green
+  checkProofBinds = []     // #874 — the bind report's rows, one per declared ANCHOR, terminal
+  checkProofUnbound = []   // the unresolved disagreements, taken from that report
+  checkProofUnlabelledRefusals = [] // unattributed correction refusals for the current generation
+  checkProofBindMeasured = false   // the ALL-OR-NOTHING measurement sentinel: true only after
+                                   // bindMutationDeclarations returned every row
+  gateProofFatal = null    // the built tree still carries a mutation: the run must stop
+  proofTreeWitness = null // the byte witness for the latest settled gate/check generation
+  proofTreeBuildRound = null
   gateBlock = () => (gateCmd ? { cmd: gateCmd, repairs: gateRepairs, generation: gateGeneration, discrimination: gateDiscrimination ?? 'unproven', reap: { ...gateReapTally }, ...(gateProofNote ? { discrimination_note: gateProofNote } : {}), ...(gateHistory.length ? { replaced: gateHistory } : {}), ...(gateReverified !== null ? { reverified: gateReverified } : {}), ...(checkProofs ? { check_discrimination: checkProofVerdict, check_discriminations: checkProofs } : {}), ...(checkProofNote ? { check_proof_note: checkProofNote } : {}), ...(checkProofBindMeasured && checkProofBinds.some((row) => row.status === 'absent') ? { mutation_bind: bindReport(), mutation_binds: checkProofBinds } : {}) } : null)
   const resetCheckProof = () => {
     checkProofs = null; checkProofOutput = null; checkProofNote = null
@@ -6422,6 +6862,7 @@ function runTask(ctx, io, crash) {
   const acceptRepairedGate = (cmd, label) => {
     gateHistory.push(gateCmd)
     gateCmd = cmd
+    activeGateCmd = gateCmd
     gateGeneration += 1
     recordGateProof(label)
     gateReverified = gateDiscrimination === 'proven'
@@ -6434,6 +6875,7 @@ function runTask(ctx, io, crash) {
   const acceptDelimiterRepairedGate = (cmd) => {
     gateHistory.push(gateCmd)
     gateCmd = cmd
+    activeGateCmd = gateCmd
     const generation = gateGeneration
     resetCheckProof()
     gateDiscrimination = 'proven'
@@ -6741,6 +7183,7 @@ function runTask(ctx, io, crash) {
       }
       gateHistory.push(gateCmd)
       gateCmd = env2.details.gate_cmd
+      activeGateCmd = gateCmd
       const re = runGate('gate-baseline:recheck', gateCmd)
       if (re.ok) {
         stageComplete()
@@ -6777,6 +7220,7 @@ function runTask(ctx, io, crash) {
         }
         gateHistory.push(gateCmd)
         gateCmd = env3.details.gate_cmd
+        activeGateCmd = gateCmd
         const re = runGate('gate-baseline:recheck', gateCmd)
         if (re.ok) {
           stageComplete()
@@ -7613,6 +8057,7 @@ function runTask(ctx, io, crash) {
       } else {
         review = assignAndWait('reviewer', revBrief, 'review')
       }
+      if (review?.status === 'done' && review?.role === 'reviewer') S.returns.reviewer = review
       journalDiffJudgments(review.details, report)
       lastReviewPath = review.details?.review_path || art('review.md')
       const shapeRefusal = panelResult?.shapeRefusal || reviewShapeDefect(review.details) || carriedSilenceDefect(review.details, openCarried)
@@ -7830,6 +8275,8 @@ function runTask(ctx, io, crash) {
   stage('commit')
   const message = composeCommitMessage({ task: ctx.task, planEnv, builderEnv })
   const subject = String(message).split('\n')[0]
+  S.commitMessage = message
+  S.commitSubject = subject
   const hasCommitSubject = String(planEnv.details?.commit_subject || '').split('\n').some((line) => line.trim())
   if (!hasCommitSubject) io.log(recordRow({ at: io.now(), commit_subject: 'fallback-from-plan-summary' }))
   const committing = io.changedFiles().filter(inScope)
@@ -8205,6 +8652,7 @@ function runTask(ctx, io, crash) {
   stage('suite')
   const suiteRes = phaseSlot(SUITE_SLOT_PHASES.warm, () => io.run(ctx.suite))
   const warmCounts = parseSuiteCounts(suiteRes?.output)
+  resumeWarmCounts = warmCounts
   if (!suiteRes?.ok) {
     const suiteOutput = String(suiteRes?.output || '')
     const failureTail = suiteOutput.slice(-4000)
@@ -8296,8 +8744,10 @@ function runTask(ctx, io, crash) {
       coldSuite = cold.ok
         ? { verdict: 'green', path: cold.path, counts: parseSuiteCounts(cold.output) }
         : { verdict: 'red', path: cold.path, kept: cold.kept, output: String(cold.output || '').slice(-2000) }
+      resumeColdSuite = coldSuite
     } catch (err) {
       coldSuite = { verdict: 'unproven', why: err.message }
+      resumeColdSuite = coldSuite
     }
   }
   io.log(recordRow({ at: io.now(), cold_suite: coldSuite }))
@@ -8418,6 +8868,7 @@ function runTask(ctx, io, crash) {
       ...carriedBlock(),
     },
   }
+  markResume(result, result.details)
   stageComplete()
   return result
   }

@@ -1,5 +1,5 @@
 import { draftPrBody, draftPrTitle, followUpIssueBody, followUpIssueTitle, gateSummaryLine, residualList } from './converge.mjs'
-import { adjudicatePanel, fuseFindings } from './escalation-policy.mjs'
+import { adjudicatePanel, fuseFindings, escalationQuestion, crashEscalationQuestion } from './escalation-policy.mjs'
 import { VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT } from './variants.mjs'
 import { protectedHitsIn, resolveProtectedPaths } from './protected-paths.mjs'
 import { parseFenceScope, validateFenceScope, fenceScopesIntersect, fenceScopeContains } from './fence-scope.mjs'
@@ -2250,6 +2250,23 @@ export function protectedHits(entries, extra) {
 // spans add only the grammar leaf's same-path interval decision.
 const fenceScopeOf = (entry) => parseFenceScope(entry)
 
+function escalationFiles(values) {
+  const files = []
+  const add = (value) => {
+    let candidate = value
+    if (candidate && typeof candidate === 'object' && !Array.isArray(candidate)) {
+      candidate = candidate.path ?? candidate.file ?? candidate.entry
+    }
+    if (typeof candidate !== 'string' || candidate === '') return
+    const parsed = fenceScopeOf(candidate)
+    const path = parsed.kind === 'file' || parsed.kind === 'span' ? parsed.path : candidate
+    if (typeof path !== 'string' || path === '' || path.endsWith('/') || validateScopeEntries([path]).length > 0) return
+    if (!files.includes(path)) files.push(path)
+  }
+  for (const value of Array.isArray(values) ? values : []) add(value)
+  return files
+}
+
 export function laneFenceHits(entries, laneFence) {
   const hits = []
   for (const record of Array.isArray(laneFence) ? laneFence : []) {
@@ -3613,11 +3630,12 @@ function runScopeGate({ round, finalRound, builderDetails, ctx, io, plans, scope
   if (gateFenceHits.length > 0) {
     stageComplete()
     return { escalation: escalate('scope',
-      `the build crossed another live lane's fence: ${fenceBreachList(gateFenceHits)} — a file a sibling crew owns is never a bounce, it is a human's call`) }
+      `the build crossed another live lane's fence: ${fenceBreachList(gateFenceHits)} — a file a sibling crew owns is never a bounce, it is a human's call`, [], {}, { files: escalationFiles(gateFenceHits) }) }
   }
 
   const spanPaths = new Set([...ownSpanScopes, ...siblingSpanScopes].map((scope) => scope.path))
   let siblingSpanFailure = null
+  let siblingSpanFailureFiles = []
   let ownSpanRefusal = null
   for (const path of (Array.isArray(changed) ? changed : []).filter((candidate) => spanPaths.has(candidate))) {
     const pathOwnScopes = ownSpanScopes.filter((scope) => scope.path === path)
@@ -3626,6 +3644,7 @@ function runScopeGate({ round, finalRound, builderDetails, ctx, io, plans, scope
     if (diff.reason) {
       if (pathSiblingScopes.length > 0) {
         siblingSpanFailure = `the changed path ${path} could not be checked against ${fenceBreachList(pathSiblingScopes)}: ${diff.reason}`
+        siblingSpanFailureFiles = [path]
       } else if (pathOwnScopes.length > 0) {
         ownSpanRefusal = spanScopeRefusal(pathOwnScopes, `the changed path ${path} could not be checked against this lane's span fence: ${diff.reason}`)
       }
@@ -3634,6 +3653,7 @@ function runScopeGate({ round, finalRound, builderDetails, ctx, io, plans, scope
     const siblingHit = pathSiblingScopes.find((scope) => siblingSpanIntersects(scope, diff.hunks))
     if (siblingHit) {
       siblingSpanFailure = `the build's changed hunk crosses another live lane's span fence: ${fenceBreachList([siblingHit])} — a file a sibling crew owns is never a bounce, it is a human's call`
+      siblingSpanFailureFiles = [path]
       break
     }
     if (pathOwnScopes.length > 0) {
@@ -3648,7 +3668,7 @@ function runScopeGate({ round, finalRound, builderDetails, ctx, io, plans, scope
   }
   if (siblingSpanFailure) {
     stageComplete()
-    return { escalation: escalate('scope', siblingSpanFailure) }
+    return { escalation: escalate('scope', siblingSpanFailure, [], {}, { files: escalationFiles(siblingSpanFailureFiles) }) }
   }
   // #846 — protocol debris is classified BEFORE scope subtraction. `outOfScopeFiles`
   // mechanically removes every in-scope path (crew/drive.mjs:1519-1529, and
@@ -3669,7 +3689,9 @@ function runScopeGate({ round, finalRound, builderDetails, ctx, io, plans, scope
   const canBounce = plans && !finalRound()
   if (!canBounce) {
     stageComplete()
-    return { escalation: escalate('scope', refusal.why) }
+    return { escalation: escalate('scope', refusal.why, [], {}, { files: escalationFiles([
+      ...(refusal.envelopes || []), ...(refusal.edits || []), ...(refusal.spans || []),
+    ]) }) }
   }
   const b = art(`build-bounce-r${round}.md`)
   failureUpgrade('scope', 'builder')
@@ -3998,9 +4020,11 @@ function runTask(ctx, io, crash) {
     // deliberately empty message, where crew/crew.mjs:1848 records '' and its
     // summary records `()`; crew/drive.mjs:1866 already uses `??` for the same job.
     const crashWhy = err?.message ?? String(err)
+    const crashStage = err?.stage || 'driver'
     return escalationResult({
-      where: err?.stage || 'driver',
+      where: crashStage,
       why: crashWhy,
+      question: crashEscalationQuestion(crashStage, { stage: crashStage, ...(err?.returnPath ? { return_path: err.returnPath } : {}) }),
       summary: `Task ${ctx.task} needs a human: the driver crashed (${crashWhy})`,
       commit: S.commit ?? null,
       // A crash adds NO key of its own. The two exits' key sets are compared as
@@ -4237,7 +4261,9 @@ function runTask(ctx, io, crash) {
         throw fail(role, `an envelope exists at ${returnPath} but was refused: ${reason}`)
       }
       const diagnosis = env == null ? io.waitDiagnosis?.(returnPath) : null       // verbatim: mutation A9
-      throw fail(role, `no valid envelope at ${returnPath} within ${waits[role]}s${diagnosis?.text ? ` — ${diagnosis.text}` : ''}`)
+      const error = fail(role, `no valid envelope at ${returnPath} within ${waits[role]}s${diagnosis?.text ? ` — ${diagnosis.text}` : ''}`)
+      error.returnPath = returnPath
+      throw error
     }
     io.log(recordRow({ at: io.now(), envelope: id, role, status: env.status }))
     return env
@@ -4479,10 +4505,10 @@ function runTask(ctx, io, crash) {
   // is a fabricated absence that reads as measured (#297). The post-commit
   // `converge-pr` escalations (crew/drive.mjs:1868,1878) keep overriding it through
   // extraDetails, which is why that spread stays LAST (crew/drive.test.mjs:5200).
-  function escalationResult({ where, why, summary, commit, artifacts = [], extraDetails = {}, terminal }) {
+  function escalationResult({ where, why, question, summary, commit, artifacts = [], extraDetails = {}, terminal }) {
     if (terminal) stage(`escalate:${where}`)
     const details = {
-      stages: S.stages, escalation: { where, why }, commit, dissents: S.dissents,
+      stages: S.stages, escalation: { where, why, question }, commit, dissents: S.dissents,
       extra_rounds_granted: S.grants, growth: S.growth, modifiers: S.modifiers, enforcements: S.enforcements,
       gate: gateBlock(),
       ...acceptDecisionBlock(),
@@ -4500,9 +4526,9 @@ function runTask(ctx, io, crash) {
     return result
   }
 
-  function escalate(where, why, extraArtifacts = [], extraDetails = {}) {
+  function escalate(where, why, extraArtifacts = [], extraDetails = {}, resolutionSlots = {}) {
     return escalationResult({
-      where, why, summary: `Task ${ctx.task} needs a human: ${why}`,
+      where, why, question: escalationQuestion(where, resolutionSlots), summary: `Task ${ctx.task} needs a human: ${why}`,
       commit: null, artifacts: extraArtifacts, extraDetails, terminal: true,
     })
   }
@@ -4661,7 +4687,7 @@ function runTask(ctx, io, crash) {
         stageComplete()
         return escalate('scope',
           `a ${variant} run writes nothing, but the tree carries ${outOfScope.length} changed file(s): ${outOfScope.join(', ')}`,
-          env?.artifacts || [])
+          env?.artifacts || [], {}, { files: escalationFiles(outOfScope) })
       }
     }
     stageComplete()
@@ -5187,10 +5213,12 @@ function runTask(ctx, io, crash) {
       stageComplete()
       break
     }
+    const currentPlanFindings = planCheckFindings(check.details)
+    const planFindingIds = currentPlanFindings?.findings.map((finding) => finding.id) || []
     const convergence = planConvergence({
       verdict: v,
       round,
-      findings: planCheckFindings(check.details),
+      findings: currentPlanFindings,
       priorClosed: check.details?.prior_findings_closed === true,
     })
     if (convergence.converged) {
@@ -5217,7 +5245,7 @@ function runTask(ctx, io, crash) {
       if (bounceOnly && !fundable) {
         stageComplete()
         stageComplete()
-        return escalate('plan-check', `the plan check returned a BLOCKER, or a finding malformed enough to be one, or is still at round 1, on round ${round}, and no plan round remains to bounce it — neither is ever accepted`)
+        return escalate('plan-check', `the plan check returned a BLOCKER, or a finding malformed enough to be one, or is still at round 1, on round ${round}, and no plan round remains to bounce it — neither is ever accepted`, [], {}, { finding_ids: planFindingIds })
       }
       const options = fundable ? (bounceOnly ? ['bounce', 'escalate'] : ['bounce', 'accept', 'escalate']) : ['accept', 'escalate']
       const c = consultLead(
@@ -5233,7 +5261,7 @@ function runTask(ctx, io, crash) {
       if (c.decision === 'escalate') {
         stageComplete()
         stageComplete()
-        return escalate('plan-check', c.reason)
+        return escalate('plan-check', c.reason, [], {}, { finding_ids: planFindingIds })
       }
       if (c.decision === 'bounce') {
         if (exhausted) { grant('plan-check', round); extraPlanRounds += 1 }
@@ -5253,7 +5281,7 @@ function runTask(ctx, io, crash) {
       if (!settledPlan.ok) {
         stageComplete()
         stageComplete()
-        return escalate('plan-check', settledPlan.why)
+        return escalate('plan-check', settledPlan.why, [], {}, { finding_ids: planFindingIds })
       }
       finalReview.residuals = settledPlan.record.residuals || []
       stageComplete()
@@ -5287,7 +5315,7 @@ function runTask(ctx, io, crash) {
       planEnv.artifacts || [])
   }
   const fenceResolution = resolveFenceScopes(ctx, io)
-  if (fenceResolution.error) return escalate('scope', fenceResolution.error, planEnv.artifacts || [])
+  if (fenceResolution.error) return escalate('scope', fenceResolution.error, planEnv.artifacts || [], {}, { files: [] })
   const resolvedFenceScopes = fenceResolution.scopes
   const ownFenceScopes = resolvedFenceScopes.filter((scope) => scope.lane === ctx.laneName)
   const siblingFenceScopes = resolvedFenceScopes.filter((scope) => scope.lane !== ctx.laneName)
@@ -5302,7 +5330,7 @@ function runTask(ctx, io, crash) {
   if (allPlanFenceHits.length > 0) {
     return escalate('scope',
       `the plan's files_in_scope crosses another live lane's fence: ${fenceBreachList(allPlanFenceHits)} — this lane never edits another lane's write surface`,
-      planEnv.artifacts || [])
+      planEnv.artifacts || [], {}, { files: escalationFiles(allPlanFenceHits) })
   }
   acceptedScope = scopeFiles
   let inScope = scopeMatcher(scopeFiles)
@@ -6656,7 +6684,7 @@ function runTask(ctx, io, crash) {
     const record = (outcome, why) => io.log(recordRow({ at: io.now(), auto_fix_revalidation: { round: roundNo, applied, outcome, why } }))
     const failed = (kind, what, detail) => {
       record(kind, what)
-      return { ok: false, kind, brief: [
+      return { ok: false, kind, files: kind === 'scope' ? escalationFiles(outside) : [], brief: [
         `# Auto-fix revalidation bounce (round ${roundNo})`, '',
         `The driver applied the reviewer's auto-fix patch(es) — ${applied.join(', ')} — and re-ran the code-owned checks. ${what}`,
         '', detail,
@@ -6807,7 +6835,7 @@ function runTask(ctx, io, crash) {
       })
       if (requestAdmission.reason === 'held') {
         stageComplete()
-        return escalate('scope', `scope-request refused [held]: ${requestAdmission.why}`, env.artifacts || [])
+        return escalate('scope', `scope-request refused [held]: ${requestAdmission.why}`, env.artifacts || [], {}, { files: escalationFiles(requestAdmission.hits || []) })
       }
       if (requestAdmission.action === 'admit') {
         if (finalRound()) extraRounds += 1
@@ -7287,7 +7315,7 @@ function runTask(ctx, io, crash) {
         const c = consultLead(askUserLines(disposed.askUser).join('\n'), askOptions, [planPath, lastReviewPath], { exclude: 'reviewer' })
         if (c.decision !== 'bounce-builder') {
           stageComplete()
-          return escalate('review-unresolved', c.reason, [], { ask_user: disposed.askUser.map(({ id }) => id) })
+          return escalate('review-unresolved', c.reason, [], { ask_user: disposed.askUser.map(({ id }) => id) }, { finding_ids: disposed.askUser.map(({ id }) => id) })
         }
         if (lastAsk) { grant('review', round); extraRounds += 1; extraReviews += 1 }
         // A review carrying BOTH dispositions still gets its auto-fix applied: the
@@ -7330,7 +7358,7 @@ function runTask(ctx, io, crash) {
             )
             if (c.decision !== 'bounce-builder') {
               stageComplete()
-              return escalate(revalidated.kind, c.reason)
+              return escalate(revalidated.kind, c.reason, [], {}, { files: revalidated.files || [] })
             }
             grant('review', round); extraRounds += 1; extraReviews += 1
           }
@@ -7457,7 +7485,7 @@ function runTask(ctx, io, crash) {
     catch (err) { fetched = { ok: false, output: err?.message ?? String(err) } }
     if (!fetched?.ok) {
       stageComplete()
-      return escalate('rebase', `the fetch of ${base} failed${fetched?.output ? `: ${String(fetched.output).slice(-2000)}` : ''}`, [], { commit: S.commit })
+      return escalate('rebase', `the fetch of ${base} failed${fetched?.output ? `: ${String(fetched.output).slice(-2000)}` : ''}`, [], { commit: S.commit }, { files: [], base, commit: S.commit })
     }
     const probe = (command) => {
       let result
@@ -7468,12 +7496,12 @@ function runTask(ctx, io, crash) {
     baseSha = probe(`git rev-parse ${base}`)
     if (!baseSha) {
       stageComplete()
-      return escalate('rebase', `the rebase probe git rev-parse ${base} failed or returned blank output`, [], { commit: S.commit })
+      return escalate('rebase', `the rebase probe git rev-parse ${base} failed or returned blank output`, [], { commit: S.commit }, { files: [], base, commit: S.commit })
     }
     const mergeBase = probe(`git merge-base HEAD ${base}`)
     if (!mergeBase) {
       stageComplete()
-      return escalate('rebase', `the rebase probe git merge-base HEAD ${base} failed or returned blank output`, [], { commit: S.commit })
+      return escalate('rebase', `the rebase probe git merge-base HEAD ${base} failed or returned blank output`, [], { commit: S.commit }, { files: [], base, commit: S.commit })
     }
     rebased = baseSha !== mergeBase
     if (rebased) {
@@ -7494,17 +7522,17 @@ function runTask(ctx, io, crash) {
         if (!aborted?.ok || !restoredHead || restoredHead !== preRebaseCommit) {
           const found = restoredHead || '(unavailable)'
           stageComplete()
-          return escalate('rebase', `the rebase onto ${base} failed${conflictDetail}; restoration is UNPROVEN — HEAD found after abort: ${found}`, [], { commit: S.commit })
+          return escalate('rebase', `the rebase onto ${base} failed${conflictDetail}; restoration is UNPROVEN — HEAD found after abort: ${found}`, [], { commit: S.commit }, { files: escalationFiles(conflicted), base, commit: S.commit })
         }
         stageComplete()
         return escalate('rebase', conflicted.length
           ? `the rebase onto ${base} failed with conflicts in ${conflicted.join(', ')}; restoration proven at HEAD ${restoredHead}`
-          : `the rebase onto ${base} failed`, [], { commit: S.commit })
+          : `the rebase onto ${base} failed`, [], { commit: S.commit }, { files: escalationFiles(conflicted), base, commit: S.commit })
       }
       const postRebaseHead = probe('git rev-parse HEAD')
       if (!postRebaseHead) {
         stageComplete()
-        return escalate('rebase', 'the rebase succeeded but git rev-parse HEAD failed or returned blank output', [], { commit: S.commit })
+        return escalate('rebase', 'the rebase succeeded but git rev-parse HEAD failed or returned blank output', [], { commit: S.commit }, { files: [], base, commit: S.commit })
       }
       S.commit = postRebaseHead
     }

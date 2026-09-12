@@ -2272,7 +2272,16 @@ test('T2 — gate payload and attempt count', () => {
 
 test('T4 — the preserved crash values', () => {
   const { envelope } = crashRun()
-  assert.deepEqual(envelope.details.escalation, { where: 'builder', why: CRASH_WHY })
+  assert.deepEqual(envelope.details.escalation, {
+    where: 'builder',
+    why: CRASH_WHY,
+    question: {
+      type: 'free-text',
+      prompt: 'What should happen next after this driver crash?',
+      reason: 'A crash stage is open-ended and does not map to the deliberate escalation catalog.',
+      slots: { stage: 'builder', return_path: 'builder:3' },
+    },
+  })
   assert.equal(envelope.summary, `Task t1 needs a human: the driver crashed (${CRASH_WHY})`)
 })
 
@@ -2314,7 +2323,16 @@ test('T8 — journal stage rows', () => {
 
 test('T9 — the deliberate exit is unchanged', () => {
   const { envelope, io } = deliberateRun()
-  assert.deepEqual(envelope.details.escalation, { where: 'plan', why: 'no accepted plan within 2 rounds' })
+  assert.deepEqual(envelope.details.escalation, {
+    where: 'plan',
+    why: 'no accepted plan within 2 rounds',
+    question: {
+      type: 'free-text',
+      prompt: 'What should happen next when plan preparation cannot proceed?',
+      reason: 'heterogeneous failures at plan do not map to an existing closed recovery verb.',
+      slots: {},
+    },
+  })
   assert.equal(envelope.summary, 'Task t1 needs a human: no accepted plan within 2 rounds')
   assert.deepEqual(Object.keys(envelope.details).sort(), resumeKeys.slice().sort())
   assert.deepEqual(envelope.details.stages, ['plan:r1', 'plan:r2', 'escalate:plan'])
@@ -2896,4 +2914,188 @@ test('b433 suite refusal reaches the next brief and survives a configured ceilin
   assert.equal(ceilingResult.details.enforcements.some((entry) => entry.kind === 'suite-run-not-owned'), true)
   assert.equal(ceilingResult.details.enforcements.some((entry) => entry.kind === 'turn-ceiling-unmeasured'), true)
   assert.match(ceiling.calls.writes[ceiling.calls.assign.find((entry) => entry.role === 'planner' && entry.n === 2).briefFile], /suite-run-not-owned/)
+})
+
+const CHOICE_OPTIONS = Object.freeze({
+  scope: ['widen-fence-to', 'split-lane', 'park'],
+  'plan-check': ['adopt-and-continue', 're-dispatch', 'park'],
+  'review-unresolved': ['adopt-and-continue', 're-dispatch', 'park'],
+  rebase: ['resolve-and-continue', 'park'],
+})
+
+function assertChoiceEscalation(result, where, slots, label = where) {
+  assert.equal(result.status, 'escalation', `${label} must reach an escalation envelope`)
+  assert.equal(result.details.escalation.where, where, `${label} must preserve its where`)
+  const question = result.details.escalation.question
+  assert.ok(question, `${label} must materialize a question`)
+  assert.equal(question.type, 'single-choice', `${label} must retain its question type`)
+  assert.deepEqual(question.options, CHOICE_OPTIONS[where], `${label} must retain its closed options`)
+  assert.deepEqual(question.slots, slots, `${label} must carry its producer-known slots`)
+  assert.equal(Object.isFrozen(question), true, `${label} question must be frozen`)
+  assert.equal(Object.isFrozen(question.slots), true, `${label} slots must be frozen`)
+}
+
+function rebaseSlotFixture(runs) {
+  return driveTask({ ...CTX, publish: { branch: 'feature/slot-coverage' } }, fakeIo({
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs,
+    changed: ['a.mjs', 'a.test.mjs'],
+  }))
+}
+
+function scopeSlotFixtures() {
+  const planFenceFile = 'crew/slot-plan-fence.mjs'
+  const gateFenceFile = 'slot-gate-fence.mjs'
+  const siblingSpanFile = 'slot-sibling-span.mjs'
+  const scopeRefusalFile = 'slot-outside.mjs'
+  const scoutWriteFile = 'slot-scout-write.mjs'
+  const heldRequestFile = 'slot-held-request.mjs'
+  const autoFixFile = 'slot-auto-fix-outside.mjs'
+  return [
+    {
+      producer: 'plan-fence', files: [planFenceFile],
+      run: () => driveTask({
+        ...CTX, head: 'base-sha', laneName: 'own-lane',
+        laneFence: [fenceSpan('own-lane', planFenceFile, 15, 25), fenceSpan('lane-b', planFenceFile, 10, 20)],
+      }, fakeIo({
+        envelopes: { 'planner:1': planEnv({ details: { ...planEnv().details, files_in_scope: [planFenceFile] } }) },
+        fenceBases: { [`base-sha:${planFenceFile}`]: { ok: true, output: fenceBase(30) } },
+      })),
+    },
+    {
+      producer: 'gate-fence', files: [gateFenceFile],
+      run: () => driveTask({ ...CTX, laneFence: [{ lane: 'sibling', files: [gateFenceFile] }] }, fakeIo({
+        envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv() },
+        changed: [gateFenceFile],
+      })),
+    },
+    {
+      producer: 'sibling-span', files: [siblingSpanFile],
+      run: () => driveTask({
+        ...CTX, head: 'base-sha', laneName: 'own-lane', laneFence: [fenceSpan('sibling', siblingSpanFile, 3, 5)],
+      }, fakeIo({
+        envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv() },
+        changed: [siblingSpanFile],
+        fenceBases: { [`base-sha:${siblingSpanFile}`]: { ok: true, output: fenceBase(10) } },
+        fenceDiffs: { [siblingSpanFile]: { ok: true, output: fenceDiff(siblingSpanFile, 3, 1, 3, 1) } },
+      })),
+    },
+    {
+      producer: 'scope-refusal', files: [scopeRefusalFile],
+      run: () => driveTask({ ...CTX, limits: { build_rounds: 1 } }, fakeIo({
+        envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv() },
+        changed: ['a.mjs', scopeRefusalFile],
+      })),
+    },
+    {
+      producer: 'scout-zero-write', files: [scoutWriteFile],
+      run: () => driveTask({ ...CTX, variant: 'scout' }, fakeIo({
+        envelopes: { 'planner:1': reconEnv() },
+        changed: [scoutWriteFile],
+      })),
+    },
+    {
+      producer: 'held-scope-request', files: [heldRequestFile],
+      run: () => {
+        const request = { scope_request: { kind: 'admit-files', files: [heldRequestFile] }, evidence: { kind: 'need', output: heldRequestFile } }
+        return driveTask({ ...CTX, laneFence: [{ lane: 'sibling', files: [heldRequestFile] }] }, fakeIo({
+          envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv({ details: { ...request, files_changed: [] } }) },
+          changed: [],
+        }))
+      },
+    },
+    {
+      producer: 'auto-fix-scope', files: [autoFixFile],
+      run: () => driveTask({ ...CTX, limits: { build_rounds: 1 } }, dispositionIo(D_AUTO, {
+        changed: [['a.mjs', 'a.test.mjs'], ['a.mjs', autoFixFile], ['a.mjs', 'a.test.mjs']],
+      })),
+    },
+  ]
+}
+
+test('C1', () => {
+  const scope = scopeSlotFixtures().find(({ producer }) => producer === 'gate-fence')
+  assert.ok(scope)
+  const planCheckIo = fakeIo({
+    envelopes: {
+      'planner:1': adversarialPlanEnv(),
+      'tech-lead:1': { status: 'done', role: 'tech-lead', details: {
+        verdict: 'revise', check_path: `${TD}/plan-check.md`,
+        findings: [{ id: 'PC-1', severity: 'major', correction: 'make the check executable' }],
+      } },
+      'lead:1': leadEnv('escalate'),
+    },
+  })
+  const planCheck = driveTask({ ...CTX_TL, limits: { ...CTX_TL.limits, plan_rounds: 1 } }, planCheckIo)
+
+  const reviewIo = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(), 'builder:1': buildEnv(),
+      'reviewer:1': reviewEnv('changes-needed', [{ id: 'RV-1', severity: 'must-fix', location: 'a.mjs:1', summary: 'human decision', disposition: 'ask-user', hardening: 'ungateable', hardening_why: 'not mechanically expressible' }]),
+      'lead:1': leadEnv('escalate'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const unresolved = driveTask({ ...CTX, limits: { ...CTX.limits, build_rounds: 1, review_rounds: 1 } }, reviewIo)
+
+  const rebase = rebaseSlotFixture({ 'git fetch origin main': { ok: false, output: 'fetch failed' } })
+  for (const [label, result, where, slots] of [
+    [scope.producer, scope.run(), 'scope', { files: scope.files }],
+    ['plan-check', planCheck, 'plan-check', { finding_ids: ['PC-1'] }],
+    ['review-unresolved', unresolved, 'review-unresolved', { finding_ids: ['RV-1'] }],
+    ['rebase-fetch', rebase, 'rebase', { files: [], base: 'origin/main', commit: 'abc1234' }],
+  ]) assertChoiceEscalation(result, where, slots, label)
+
+  const crash = crashRun().envelope
+  assert.equal(crash.details.escalation.question.type, 'free-text')
+  assert.deepEqual(crash.details.escalation.question.slots, { stage: 'builder', return_path: 'builder:3' })
+})
+
+test('RV1-1 producer slots survive every envelope route', () => {
+  const rebaseBase = {
+    'git fetch origin main': { ok: true, output: '' },
+    'git rev-parse origin/main': { ok: true, output: 'base111\n' },
+    'git merge-base HEAD origin/main': { ok: true, output: 'older000\n' },
+  }
+  const commonSlots = { files: [], base: 'origin/main', commit: 'abc1234' }
+  const rebaseCases = [
+    ['fetch', { 'git fetch origin main': { ok: false, output: 'fetch failed' } }, commonSlots],
+    ['base-probe', { ...rebaseBase, 'git rev-parse origin/main': { ok: false, output: '' } }, commonSlots],
+    ['merge-base-probe', { ...rebaseBase, 'git merge-base HEAD origin/main': { ok: false, output: '' } }, commonSlots],
+    ['conflict', {
+      ...rebaseBase, 'git rebase origin/main': { ok: false, output: 'conflict' },
+      'git diff --name-only --diff-filter=U': { ok: true, output: 'conflict.mjs\n' },
+      'git rebase --abort': { ok: true, output: '' }, 'git rev-parse HEAD': { ok: true, output: 'abc1234\n' },
+    }, { files: ['conflict.mjs'], base: 'origin/main', commit: 'abc1234' }],
+    ['unproven-restoration', {
+      ...rebaseBase, 'git rebase origin/main': { ok: false, output: 'conflict' },
+      'git rebase --abort': { ok: false, output: '' }, 'git rev-parse HEAD': { ok: true, output: 'abc1234\n' },
+    }, commonSlots],
+    ['post-rebase-head', {
+      ...rebaseBase, 'git rebase origin/main': { ok: true, output: '' },
+      'git rev-parse HEAD': { ok: false, output: '' },
+    }, commonSlots],
+  ]
+  for (const [producer, runs, slots] of rebaseCases) {
+    assertChoiceEscalation(rebaseSlotFixture(runs), 'rebase', slots, `rebase:${producer}`)
+  }
+  for (const { producer, files, run } of scopeSlotFixtures()) {
+    assertChoiceEscalation(run(), 'scope', { files }, producer)
+  }
+})
+
+test('E1', () => {
+  const file = 'crew/a.mjs'
+  const io = fakeIo({
+    envelopes: { 'planner:1': planEnv({ details: { ...planEnv().details, files_in_scope: [file] } }) },
+    fenceBases: { [`base-sha:${file}`]: { ok: true, output: fenceBase(30) } },
+  })
+  const result = driveTask({ ...CTX, head: 'base-sha', laneName: 'own-lane', laneFence: [fenceSpan('own-lane', file, 15, 25), fenceSpan('lane-b', file, 10, 20)] }, io)
+  const why = `the plan's files_in_scope crosses another live lane's fence: ${file}:10-20 is owned by lane lane-b — this lane never edits another lane's write surface`
+  assert.equal(result.details.escalation.where, 'scope')
+  assert.equal(result.details.escalation.why, why)
+  assert.equal(result.summary, `Task ${CTX.task} needs a human: ${why}`)
+  assert.deepEqual(result.details.stages.at(-1), 'escalate:scope')
+  assert.deepEqual(result.details.escalation.question.slots, { files: [file] })
 })

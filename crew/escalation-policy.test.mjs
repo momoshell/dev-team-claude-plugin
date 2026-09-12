@@ -1,8 +1,11 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import {
   REGRANT_CONDITIONS, regrantVerdict, continuationBrief,
   parseLocation, fuseFindings, adjudicatePanel,
+  ESCALATION_QUESTION_TYPES, ESCALATION_QUESTIONS, ESCALATION_WHERE,
+  validateEscalationQuestions, escalationQuestion, resolutionDefect,
 } from './escalation-policy.mjs'
 
 const LEAD_WHY = 'I cannot accept this as a livable residual. The whole point of the slice is a gate that refuses when spend is unknown (plan decision 3); RV3-1 is that gate quietly reading zero forever on Node 22 — a user who configures a ceiling believes it is on when it is not, which is precisely the unbounded-burn failure #39 exists to prevent. So it is must-fix-now, not should-fix-later, and \'accept\' is the wrong instrument. Nor can I bounce: build rounds are exhausted, and this is the third round in a row surfacing the same class of defect (r1: interactive-only measurement; r2: Node 20 absent-db reads zero; r3: Node 22 requireable-but-below-floor reads zero) — the crew keeps closing the instance and missing the class, which is the escalation trigger. The call to spend beyond the allotted rounds, or to ship a knowingly non-enforcing ceiling, belongs to the orchestrator.'
@@ -180,4 +183,89 @@ test('empty findings and null branch/commit are rendered deterministically', () 
   assert.doesNotMatch(brief, /^Base commit:/m)
   assert.equal(brief.endsWith('\n'), true)
   assert.equal(brief.endsWith('\n\n'), false)
+})
+
+test('A1', () => {
+  const source = readFileSync(new URL('./drive.mjs', import.meta.url), 'utf8')
+  const reachable = []
+  const dynamic = []
+  const boundary = source.indexOf('  const driveTriageRound = () => {')
+  const directedBoundary = source.indexOf('  const driveDirectedRound = () => {')
+  for (const match of source.matchAll(/\bescalate\s*\(/g)) {
+    const before = source.slice(Math.max(0, match.index - 80), match.index)
+    const lineStart = source.lastIndexOf('\n', match.index) + 1
+    if (source.slice(lineStart, match.index).includes('//')) continue
+    if (/function\s+$/.test(before) || /escalationResult/.test(before)) continue
+    let cursor = match.index + match[0].length
+    while (/\s/.test(source[cursor] || '')) cursor += 1
+    if (source[cursor] === "'") {
+      const end = source.indexOf("'", cursor + 1)
+      reachable.push(source.slice(cursor + 1, end))
+      continue
+    }
+    const newline = source.indexOf('\n', cursor)
+    const line = source.slice(cursor, newline < 0 ? source.length : newline).trim()
+    if (line.startsWith('variant')) {
+      dynamic.push('variant')
+      reachable.push(match.index < boundary ? 'scout' : match.index >= directedBoundary ? 'directed' : 'unknown-dynamic')
+    } else if (line.startsWith('PLAN_SCOPE.malformed')) {
+      dynamic.push('PLAN_SCOPE.malformed')
+      reachable.push('plan-scope-malformed')
+    } else if (line.startsWith('PLAN_SCOPE.widened')) {
+      dynamic.push('PLAN_SCOPE.widened')
+      reachable.push('plan-scope-widened')
+    } else if (line.startsWith('revalidated.kind')) {
+      dynamic.push('revalidated.kind')
+      reachable.push(...['scope', 'lane', 'gate'])
+    } else {
+      assert.fail(`unrecognized dynamic escalation where: ${line}`)
+    }
+  }
+  assert.deepEqual([...new Set(reachable)].sort(), Object.keys(ESCALATION_QUESTIONS).sort())
+  assert.deepEqual(dynamic.sort(), ['PLAN_SCOPE.malformed', 'PLAN_SCOPE.widened', 'revalidated.kind', 'variant', 'variant', 'variant', 'variant'].sort())
+  for (const forbidden of ['full', 'repair', 'plan-scope-undispatched', 'plan-scope-same', 'plan-scope-narrowed']) {
+    assert.equal(Object.hasOwn(ESCALATION_QUESTIONS, forbidden), false)
+  }
+  const missing = { ...ESCALATION_QUESTIONS }
+  delete missing.scope
+  assert.ok(validateEscalationQuestions(missing).some((defect) => defect.includes('scope') && defect.includes('missing')))
+})
+
+test('B1', () => {
+  assert.deepEqual(ESCALATION_QUESTION_TYPES, ['single-choice', 'free-text'])
+  assert.equal(Object.isFrozen(ESCALATION_QUESTION_TYPES), true)
+  assert.equal(Object.isFrozen(ESCALATION_QUESTIONS), true)
+  assert.equal(Object.isFrozen(ESCALATION_WHERE), true)
+  for (const where of ESCALATION_WHERE) {
+    const question = ESCALATION_QUESTIONS[where]
+    assert.equal(Object.isFrozen(question), true)
+    if (question.options !== undefined) assert.equal(Object.isFrozen(question.options), true)
+    if (question.slots !== undefined) assert.equal(Object.isFrozen(question.slots), true)
+    assert.ok(ESCALATION_QUESTION_TYPES.includes(question.type))
+  }
+  assert.deepEqual(ESCALATION_QUESTIONS.scope.options, ['widen-fence-to', 'split-lane', 'park'])
+  assert.deepEqual(ESCALATION_QUESTIONS['plan-check'].options, ['adopt-and-continue', 're-dispatch', 'park'])
+  assert.deepEqual(ESCALATION_QUESTIONS['review-unresolved'].options, ['adopt-and-continue', 're-dispatch', 'park'])
+  assert.deepEqual(ESCALATION_QUESTIONS.rebase.options, ['resolve-and-continue', 'park'])
+  for (const answer of [null, [], {}, { type: 'single-choice', value: 'park', extra: true }]) {
+    assert.notEqual(resolutionDefect('scope', answer), null)
+  }
+  assert.notEqual(resolutionDefect('scope', { type: 'free-text', value: 'park' }), null)
+  assert.notEqual(resolutionDefect('scope', { type: 'single-choice', value: 'not-declared' }), null)
+  assert.notEqual(resolutionDefect('scope', { type: 'single-choice', value: '' }), null)
+  assert.notEqual(resolutionDefect('missing', { type: 'free-text', value: 'answer' }), null)
+  assert.equal(resolutionDefect('scope', { type: 'single-choice', value: 'park' }), null)
+  assert.equal(resolutionDefect('plan', { type: 'free-text', value: 'continue after review' }), null)
+})
+
+test('D1', () => {
+  for (const [where, question] of Object.entries(ESCALATION_QUESTIONS)) {
+    if (question.type !== 'free-text') continue
+    assert.equal(typeof question.reason, 'string')
+    assert.ok(question.reason.trim())
+    assert.equal(Object.hasOwn(question, 'options'), false)
+    const materialized = escalationQuestion(where)
+    assert.equal(materialized.options, undefined)
+    assert.equal(resolutionDefect(where, { type: 'free-text', value: 'human guidance' }), null)
+  }
 })

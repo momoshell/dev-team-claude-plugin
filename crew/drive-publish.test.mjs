@@ -53,7 +53,16 @@ function rebaseIo(options = {}) {
     },
     commands: {
       'git rev-parse origin/main': { ok: true, output: `${REBASE_PARENT}\n` },
-      'git merge-base HEAD origin/main': { ok: true, output: `${moved ? 'older000' : REBASE_PARENT}\n` },
+      // Stateful: a real rebase MOVES the merge base. Before it, a moved base shares an
+      // older ancestor (that gap is what `rebased` is derived from); after it, the base
+      // IS the merge base. A static value here is what let `HEAD^` pass as the parent
+      // check while only ever being correct for a one-commit lane.
+      'git merge-base HEAD origin/main': (s) => ({
+        ok: true,
+        output: `${moved && s.head !== postHead ? 'older000' : REBASE_PARENT}\n`,
+      }),
+      // A caller's overrides win, so a case can inject a wrong POST-rebase merge base.
+      ...(options.commands || {}),
     },
   })
   io.state.phase = 'initial'
@@ -815,10 +824,20 @@ test('E1 proof-parent journal and base_sha sinks name verified parent', () => {
 })
 
 test('E2 direct-parent validation rejects blank mismatch and dropped replay', () => {
+  // The driver verifies the parent with `git merge-base`, so these inject there. Each
+  // case is pre-rebase-correct (`older000`, which is what makes `rebased` true) and
+  // wrong only AFTER the replay — a blank, a mismatch, and a base that never moved.
+  const badMergeBase = (after) => ({
+    commands: {
+      'git merge-base HEAD origin/main': (state) => (state.head === state.post
+        ? after
+        : { ok: true, output: 'older000\n' }),
+    },
+  })
   const cases = [
-    { parent: { ok: true, output: '' } },
-    { parent: 'other9999' },
-    { postHead: REBASE_PARENT, parentResult: (state) => ({ ok: true, output: `${state.head === REBASE_PARENT ? 'root0000' : REBASE_PARENT}\n` }) },
+    badMergeBase({ ok: true, output: '' }),
+    badMergeBase({ ok: true, output: 'other9999\n' }),
+    badMergeBase({ ok: false, output: 'fatal: no merge base\n' }),
   ]
   for (const options of cases) {
     const { io, result } = runRebase(options)
@@ -830,6 +849,21 @@ test('E2 direct-parent validation rejects blank mismatch and dropped replay', ()
     assert.equal(io.calls.logs.some((row) => row.published), false)
     assert.equal(io.calls.run.some((command) => command === 'suite-cmd'), false)
   }
+})
+
+test('E3 a MULTI-commit lane rebases and re-proves, because HEAD^ is not the base', () => {
+  // b640 and b642 died here on 2026-09-12: both had two commits, so `git rev-parse HEAD^`
+  // returned the lane's OWN first commit and the parent guard escalated correct, gate-green
+  // work. `git merge-base` answers the question actually being asked at any commit count.
+  const { io, result } = runRebase({
+    commands: {
+      // HEAD^ is the lane's own earlier commit, exactly as it is for a real two-commit lane.
+      'git rev-parse HEAD^': { ok: true, output: 'lanecommit1\n' },
+    },
+  })
+  assert.equal(result.status, 'done')
+  assert.equal(io.state.resetCommand, `git reset --soft ${REBASE_PARENT}`)
+  assert.equal(io.calls.logs.some((row) => row.gate_proof_parent === REBASE_PARENT), true)
 })
 
 test('F1 existing rebase escalation text remains exact', () => {

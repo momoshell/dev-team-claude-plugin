@@ -7,6 +7,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { SUITE_SLOT_KIND, SLOT_WAIT_INTERVAL_MS, SLOT_WAIT_CEILING_MS, slotPolicy } from './host-load.mjs'
 import { slotStore } from './reclaim.mjs'
+import { compareFingerprints, FINGERPRINT_OUTCOMES } from './tree-fingerprint.mjs'
 
 // crew/drive.mjs — the deterministic task-loop driver (crew v3).
 //
@@ -3305,6 +3306,7 @@ export function applyNarration(record, narrated) {
 //                                            // than report a verdict it could not take
 //        reseat(role, {reason}) -> closed result // OPTIONAL, never load-bearing
 //        changedFiles() -> [repo-relative..], // git status --porcelain paths
+//        fingerprintTree(path) -> typed measured/unmeasurable tree witness, // OPTIONAL
 //        commit(files, message) -> hash,
 //        log(obj) -> void,                    // journal line (code-owned)
 //        slots({dir, kind, capacity}) -> {acquire, release}  // OPTIONAL: the suite-slot pool; absent => crew/reclaim.mjs slotStore
@@ -3322,6 +3324,8 @@ export function applyNarration(record, narrated) {
 // crew/crew.test.mjs:3888 pins that the identical error object escapes with its
 // provider text intact. Module-private: nothing outside this file branches on it.
 const CRASH_ESCAPE_STAGES = Object.freeze(['seat-refused'])
+const BUILDER_REVERSION_REASON = 'builder-reversion'
+const BUILDER_REVERSION_UNMEASURABLE = 'fingerprint-unmeasurable'
 
 // ONE `details` shape for both of this driver's exits. A deliberate escalation and
 // a CRASH are both outcomes of the same run, and the crash is the one an operator
@@ -3833,7 +3837,15 @@ function runPanelReview({ round, panel, io, dissents, setAcceptFindings, setLast
   return { review, panelBounceFindings }
 }
 
-function runScopeGate({ round, finalRound, builderDetails, ctx, io, plans, scopeFiles, planPath, ownSpanScopes, siblingSpanScopes, inScope, mutations, readBuilt, art, stage, stageComplete, failureUpgrade, escalate }) {
+function logScopeGate(io, at, scopeGate) {
+  io.log(recordRow({ at, scope_gate: scopeGate }))
+}
+
+function builderReversionWhy(paths) {
+  return `builder edits reverted to the pre-build baseline: ${paths.join(', ')}; the workspace is retained for human inspection`
+}
+
+function runScopeGate({ round, finalRound, builderDetails, builderObservation, forgetOrderedRemovals, ctx, io, plans, scopeFiles, planPath, ownSpanScopes, siblingSpanScopes, inScope, mutations, readBuilt, art, stage, stageComplete, failureUpgrade, escalate, escalateReversion }) {
   stage(`scope-gate:r${round}`)
   const changed = io.changedFiles()
   const gateFenceHits = laneFenceHits(changed, pathOnlyLaneFence(ctx.laneFence, ctx.laneName))
@@ -3892,10 +3904,21 @@ function runScopeGate({ round, finalRound, builderDetails, ctx, io, plans, scope
   if (refusal.reason === null && builderDetails !== undefined) {
     refusal = mutationAnchorScopeRefusal(changed, mutations, builderDetails, readBuilt)
   }
+  const reversion = builderObservation?.reversion ?? null
+  const scopeGate = {
+    round, reason: refusal.reason, envelopes: refusal.envelopes, edits: refusal.edits,
+    ...(refusal.spans ? { spans: refusal.spans } : {}),
+    ...(reversion ? { reversion } : {}),
+  }
+  if (reversion) logScopeGate(io, io.now(), scopeGate)
+  if (Array.isArray(reversion?.paths) && reversion.paths.length > 0) {
+    stageComplete()
+    return { escalation: escalateReversion(reversion.paths) }
+  }
   // MUTATION A4: invert this early return and a round whose tree is entirely in scope
   // starts paying for a gate it does not need.
   if (refusal.reason === null) { stageComplete(); return { ok: true } }              // ANCHOR A4
-  io.log(recordRow({ at: io.now(), scope_gate: { round, reason: refusal.reason, envelopes: refusal.envelopes, edits: refusal.edits, ...(refusal.spans ? { spans: refusal.spans } : {}) } }))
+  if (!reversion) logScopeGate(io, io.now(), scopeGate)
   const canBounce = plans && !finalRound()
   if (!canBounce) {
     stageComplete()
@@ -3906,6 +3929,7 @@ function runScopeGate({ round, finalRound, builderDetails, ctx, io, plans, scope
   const b = art(`build-bounce-r${round}.md`)
   failureUpgrade('scope', 'builder')
   io.writeFile(b, scopeBounceBrief(round, refusal, scopeFiles, planPath))
+  forgetOrderedRemovals([...(refusal.envelopes || []), ...(refusal.edits || []), ...(refusal.paths || [])])
   stageComplete()
   return { bounce: b }
 }
@@ -4751,6 +4775,20 @@ function runTask(ctx, io, crash) {
     return escalationResult({
       where, why, question: escalationQuestion(where, resolutionSlots), summary: `Task ${ctx.task} needs a human: ${why}`,
       commit: null, artifacts: extraArtifacts, extraDetails, terminal: true,
+    })
+  }
+
+  function escalateReversion(paths) {
+    const why = builderReversionWhy(paths)
+    return escalationResult({
+      where: 'reversion', why,
+      question: {
+        type: 'free-text',
+        prompt: 'What should happen next when builder edits revert to the pre-build baseline?',
+        reason: 'builder reversion is terminal and the workspace is retained for human inspection',
+      },
+      summary: `Task ${ctx.task} needs a human: ${why}`,
+      commit: S.commit ?? null, terminal: true,
     })
   }
 
@@ -6799,6 +6837,35 @@ function runTask(ctx, io, crash) {
   // The warm suite is part of a bounded accepted cycle. A first, evidence-backed
   // red may widen the scope and re-enter this same path once; every later red is
   // still a terminal suite escalation.
+  const builderFingerprintState = (() => {
+    if (typeof io.fingerprintTree !== 'function') return { supported: false, readBuilderBaseline: () => null }
+    const builderFingerprintBaseline = io.fingerprintTree(ctx.checkout)
+    const readBuilderBaseline = () => builderFingerprintBaseline
+    return { supported: true, readBuilderBaseline }
+  })()
+  const builderFingerprintSupported = builderFingerprintState.supported
+  const readBuilderBaseline = builderFingerprintState.readBuilderBaseline
+  let previousChanges = new Set()
+  const forgetOrderedRemovals = (paths) => { for (const path of paths) previousChanges.delete(path) }
+  const observeBuilderEndpoint = () => {
+    if (!builderFingerprintSupported) return { reversion: null }
+    const currentFingerprint = io.fingerprintTree(ctx.checkout)
+    const comparison = compareFingerprints(readBuilderBaseline(), currentFingerprint)
+    if (comparison.outcome === FINGERPRINT_OUTCOMES.unmeasurable) {
+      return { reversion: { paths: null, reason: BUILDER_REVERSION_UNMEASURABLE, cause: comparison.cause, detail: comparison.detail } }
+    }
+    const currentChanges = new Set([
+      ...(comparison.added || []), ...(comparison.removed || []), ...(comparison.modified || []),
+    ])
+    const reverted = [...previousChanges].filter((path) => !currentChanges.has(path))
+    previousChanges = currentChanges
+    return {
+      reversion: reverted.length > 0
+        ? { reason: BUILDER_REVERSION_REASON, disposition: 'escalate', paths: reverted }
+        : null,
+    }
+  }
+
   suiteCycle:
   for (;;) {
   builderEnv = null
@@ -7034,9 +7101,21 @@ function runTask(ctx, io, crash) {
     const finalRound = () => round >= limits.build_rounds + extraRounds
     stage(`build:r${round}`)
     const env = assignAndWait('builder', buildBrief, buildNote)
+    const builderObservation = observeBuilderEndpoint()
     const hasScopeRequest = env.details && typeof env.details === 'object' && !Array.isArray(env.details)
       && Object.prototype.hasOwnProperty.call(env.details, 'scope_request')
     if (hasScopeRequest) {
+      if (builderObservation.reversion) {
+        const emptyScope = scopeRefusal([])
+        logScopeGate(io, io.now(), {
+          round, reason: emptyScope.reason, envelopes: emptyScope.envelopes, edits: emptyScope.edits,
+          reversion: builderObservation.reversion,
+        })
+        if (Array.isArray(builderObservation.reversion.paths) && builderObservation.reversion.paths.length > 0) {
+          stageComplete()
+          return escalateReversion(builderObservation.reversion.paths)
+        }
+      }
       const request = scopeRequestOf(env.details)
       if (!request || request.refusal) {
         stageComplete()
@@ -7073,7 +7152,7 @@ function runTask(ctx, io, crash) {
       // MUTATION A1: neutralise this call and a bounced round again reaches no scope
       // gate — the b363-seatreask defect, restored.
       stageComplete()
-      const bounced = runScopeGate({ round, finalRound, builderDetails: undefined, ctx, io, plans, scopeFiles, planPath, ownSpanScopes, siblingSpanScopes, inScope, mutations, readBuilt, art, stage, stageComplete, failureUpgrade, escalate })                                    // ANCHOR A1
+      const bounced = runScopeGate({ round, finalRound, builderDetails: undefined, builderObservation, forgetOrderedRemovals, ctx, io, plans, scopeFiles, planPath, ownSpanScopes, siblingSpanScopes, inScope, mutations, readBuilt, art, stage, stageComplete, failureUpgrade, escalate, escalateReversion })                                    // ANCHOR A1
       if (bounced.escalation) return bounced.escalation
       if (bounced.bounce) { buildBrief = bounced.bounce; buildNote = 'scope-fix'; continue }
       // MUTATION B1: replace this call with a literal `{}` and a builder that returned
@@ -7108,7 +7187,7 @@ function runTask(ctx, io, crash) {
     builderEnv = env
     stageComplete()
 
-    const scoped = runScopeGate({ round, finalRound, builderDetails: env.details, ctx, io, plans, scopeFiles, planPath, ownSpanScopes, siblingSpanScopes, inScope, mutations, readBuilt, art, stage, stageComplete, failureUpgrade, escalate })
+    const scoped = runScopeGate({ round, finalRound, builderDetails: env.details, builderObservation, forgetOrderedRemovals, ctx, io, plans, scopeFiles, planPath, ownSpanScopes, siblingSpanScopes, inScope, mutations, readBuilt, art, stage, stageComplete, failureUpgrade, escalate, escalateReversion })
     if (scoped.escalation) return scoped.escalation
     if (scoped.bounce) { buildBrief = scoped.bounce; buildNote = 'scope-fix'; continue }
 
@@ -9368,10 +9447,13 @@ export function scopeRefusal(outOfScope) {
 }
 
 function spanScopeRefusal(scopes, why, reason = 'span-out-of-scope') {
+  const paths = [...new Set((Array.isArray(scopes) ? scopes : [])
+    .map((scope) => scope?.path)
+    .filter((path) => typeof path === 'string' && path !== ''))]
   const spans = (Array.isArray(scopes) ? scopes : [])
     .map((scope) => scope?.entry)
     .filter((entry) => typeof entry === 'string' && entry !== '')
-  return { reason, envelopes: [], edits: [], spans, why: spans.length > 0 ? `${why} [${spans.join(', ')}]` : why }
+  return { reason, envelopes: [], edits: [], paths, spans, why: spans.length > 0 ? `${why} [${spans.join(', ')}]` : why }
 }
 
 export function scopeBounceBrief(round, refusal, scopeFiles, planPath) {

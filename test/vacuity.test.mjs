@@ -139,7 +139,7 @@ function vacuityScannedFiles() {
 const VACUITY_VERDICTS = Object.freeze(['by-design', 'flagged'])
 
 const AUDITED_VACUITY_LINES = Object.freeze({
-  'crew/io-contract.test.mjs': Object.freeze(["assert.equal(typeof io.runClean, 'function')", "assert.equal(typeof received.deps.emit, 'function')", "assert.equal(typeof io.reseat, 'function')", "assert.equal(typeof io.teardown, 'function')"]),
+  'crew/io-contract.test.mjs': Object.freeze(["assert.equal(typeof io.fingerprintTree, 'function')", "assert.equal(typeof io.runClean, 'function')", "assert.equal(typeof received.deps.emit, 'function')", "assert.equal(typeof io.reseat, 'function')", "assert.equal(typeof io.teardown, 'function')"]),
   'crew/memory.test.mjs': Object.freeze(["assert.equal(typeof memory.openMemory, 'function')", "assert.equal(typeof memory.renderSection, 'function')", "assert.equal(typeof memory.BACKENDS.markdown, 'function')", "assert.equal(typeof handle.context, 'function')", "assert.equal(typeof handle.propose, 'function')", "assert.equal(typeof handle.reconcile, 'function')", "assert.equal(typeof handle.gc, 'function')"]),
   'crew/pi/extensions/advisor.test.mjs': Object.freeze(["assert.doesNotMatch(source, /registerTool/)", "assert.equal(typeof advisor.default, 'function')"]),
   'crew/pi/extensions/lab.test.mjs': Object.freeze(["assert.equal(typeof mod.default, 'function')"]),
@@ -172,7 +172,7 @@ function frozenVacuitySites(auditedIdentities, verdict, rationale, { tombstone =
 }
 
 const VACUITY_EXEMPT = new Map([
-  ['crew/io-contract.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['crew/io-contract.test.mjs'], 'flagged', 'audited 2026-09-09: method-presence sites are preconditions for the behavioral calls at crew/io-contract.test.mjs:621, crew/io-contract.test.mjs:684, crew/io-contract.test.mjs:693, and crew/io-contract.test.mjs:694. Outside this lane\'s fence, so flagged rather than converted')],
+  ['crew/io-contract.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['crew/io-contract.test.mjs'], 'flagged', 'audited 2026-09-09: method-presence sites are preconditions for the behavioral calls at crew/io-contract.test.mjs:465, crew/io-contract.test.mjs:633, crew/io-contract.test.mjs:696, and crew/io-contract.test.mjs:705. Outside this lane\'s fence, so flagged rather than converted')],
   ['crew/memory.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['crew/memory.test.mjs'], 'flagged', 'audited 2026-09-09: namespace and handle method-presence sites are preconditions for the memory behavior at crew/memory.test.mjs:264, crew/memory.test.mjs:265, crew/memory.test.mjs:266, crew/memory.test.mjs:270, crew/memory.test.mjs:271, crew/memory.test.mjs:272, and crew/memory.test.mjs:273. Outside this lane\'s fence, so flagged rather than converted')],
   ['crew/pi/extensions/advisor.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['crew/pi/extensions/advisor.test.mjs'], 'flagged', 'audited 2026-09-09: the source absence pin is an import firewall at crew/pi/extensions/advisor.test.mjs:76, while the entrypoint presence site at crew/pi/extensions/advisor.test.mjs:78 remains a flagged export-presence candidate. Outside this lane\'s fence, so flagged rather than converted')],
   ['crew/pi/extensions/lab.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['crew/pi/extensions/lab.test.mjs'], 'flagged', 'audited 2026-09-09: the extension entrypoint presence site is at crew/pi/extensions/lab.test.mjs:206; registration behavior is pinned by the test below it. Outside this lane\'s fence, so flagged rather than converted')],
@@ -201,7 +201,7 @@ const VACUITY_EXEMPT = new Map([
 ])
 
 const VACUITY_SOURCE_SHA256 = Object.freeze({
-  'crew/io-contract.test.mjs': '3e5b74241baa3eefe17ef9e9c999eb964b84f7df0a18219bd16c706153fc4be1',
+  'crew/io-contract.test.mjs': 'b007ea222c33dbefc00c1a0dbca17cda7910839ba469df045c0dd8dfa780ccd2',
   'crew/memory.test.mjs': '8a2c6044f7412a8a8f2b958f97d7a570f9a8ac05af5382d78c0209918889586a',
   'crew/pi/extensions/advisor.test.mjs': '71a2af74e36eda055b7ce4f58ab17ef02e54d37103fa1e32cf14181e51eca7d4',
   'crew/pi/extensions/lab.test.mjs': 'aa1c9a34bd88efeb3679b738a75d933e44a4f42df16d34e7366505cb1abee553',
@@ -299,8 +299,8 @@ test('B1', () => {
     }
     total += file === SKELETONREAD_FILE ? exemption.sites : exemption.auditedIdentities.length
   }
-  assert.equal(sharedTotal, 21)
-  assert.equal(total, 23)
+  assert.equal(sharedTotal, 22)
+  assert.equal(total, 24)
 })
 
 test('C1', () => {
@@ -435,5 +435,5 @@ test('presence-only tripwire — the live report distinguishes flagged from by-d
   console.log(`VACUITY-REPORT ${JSON.stringify(report)}`)
   assert.ok(report.flagged > 0, 'a report with nothing flagged is a suspicious result, not a clean bill of health')
   assert.ok(report.by_design > 0, 'a report with nothing permitted by design means the pattern set is too wide')
-  assert.equal(report.sites, 23)
+  assert.equal(report.sites, 24)
 })

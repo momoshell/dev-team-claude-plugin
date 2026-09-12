@@ -13,7 +13,7 @@ import { WAIT_POLL_MS } from './seat-io.mjs'
 import { parseGateSummary } from './drive.mjs'
 import { assignmentLine } from './driver.mjs'
 
-const REQUIRED = ['assign', 'wait', 'writeFile', 'readFile', 'run', 'changedFiles', 'commit', 'log', 'now']
+const REQUIRED = ['assign', 'wait', 'writeFile', 'readFile', 'run', 'changedFiles', 'fingerprintTree', 'commit', 'log', 'now']
 const OPTIONAL = ['runClean', 'status', 'showDoc', 'emit', 'reseat', 'teardown']
 const FAULT = process.env.CREW_IO_CONTRACT_FAULT || ''
 
@@ -453,6 +453,18 @@ test('seatIo runClean tags every push uniquely', () => {
 test('seatIo changedFiles parses NUL porcelain and both rename paths', () => {
   const f = makeSeatIo()
   assert.deepEqual(f.io.changedFiles(), ['changed.txt', 'renamed.txt', 'old.txt'])
+})
+
+test('outer seatIo exposes fingerprintTree and preserves injected unmeasured results', () => {
+  const paths = dirs()
+  const unmeasured = { measured: false, checkout: paths.dir, at: 7, cause: 'injected', detail: 'permission denied' }
+  let received = null
+  const io = seatIo({ members: {} }, paths, paths.dir, null, null, {}, {
+    fingerprintTree: (checkout) => { received = checkout; return unmeasured },
+  })
+  assert.equal(typeof io.fingerprintTree, 'function')
+  assert.strictEqual(io.fingerprintTree(paths.dir), unmeasured)
+  assert.equal(received, paths.dir)
 })
 
 test('seatIo commit stages changed files and returns the short hash', () => {

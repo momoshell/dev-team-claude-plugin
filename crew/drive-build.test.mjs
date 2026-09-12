@@ -4900,3 +4900,251 @@ test('Q1 phase-slot queue wait is excluded from measured gate duration', () => {
   assert.equal(gate.gate_run_ms, 7)
   assert.equal(gate.gate_run_ms_absent_reason, null)
 })
+
+const builderFingerprint = (entries = {}) => ({
+  measured: true, checkout: CTX.checkout, at: 0, head: 'builder-head', entries,
+})
+
+const scriptBuilderFingerprints = (io, snapshots) => {
+  let index = 0
+  let calls = 0
+  io.fingerprintTree = () => {
+    calls += 1
+    return snapshots[Math.min(index++, snapshots.length - 1)]
+  }
+  return () => calls
+}
+
+test('A1 builder reversion witness detects a path returning to baseline', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(),
+      'builder:1': { status: 'insufficient', role: 'builder', summary: 'retry', artifacts: [], details: {} },
+      'lead:1': leadEnv('bounce'), 'builder:2': buildEnv(),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: [['a.mjs'], ['a.mjs', 'a.test.mjs']],
+  })
+  const count = scriptBuilderFingerprints(io, [
+    builderFingerprint(), builderFingerprint({ 'round-one.mjs': 'file' }), builderFingerprint(),
+  ])
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'reversion')
+  assert.match(result.details.escalation.why, /round-one\.mjs/)
+  assert.match(result.details.escalation.why, /workspace is retained/)
+  assert.equal(count(), 3)
+  assert.deepEqual(io.calls.logs.filter((row) => row.scope_gate).map((row) => row.scope_gate.reversion?.paths), [['round-one.mjs']])
+})
+
+test('B1 builder reversion witness keeps one baseline across retries', () => {
+  const request = {
+    scope_request: { kind: 'admit-files', files: ['requested.mjs'] },
+    evidence: { kind: 'builder-request', output: 'requested.mjs is required' },
+  }
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(),
+      'builder:1': buildEnv({ details: { ...request, files_changed: ['requested.mjs'] } }),
+      'builder:2': buildEnv(),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs'],
+  })
+  const originalChangedFiles = io.changedFiles
+  let changedCalls = 0
+  io.changedFiles = function () { changedCalls += 1; return originalChangedFiles.call(this) }
+  const count = scriptBuilderFingerprints(io, [
+    builderFingerprint(), builderFingerprint({ 'round-one.mjs': 'file' }), builderFingerprint(),
+  ])
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'reversion')
+  assert.equal(count(), 3)
+  assert.equal(changedCalls, 1)
+  assert.deepEqual(io.calls.logs.filter((row) => row.scope_gate).map((row) => row.scope_gate), [{
+    round: 2, reason: null, envelopes: [], edits: [],
+    reversion: { reason: 'builder-reversion', disposition: 'escalate', paths: ['round-one.mjs'] },
+  }])
+  io.changedFiles = originalChangedFiles
+})
+
+test('B1 builder reversion witness keeps one baseline across post-commit repair cycles', () => {
+  const suiteRed = `FAIL file://${CTX.checkout}/later.test.mjs:1:1\nlater repair is needed`
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(), 'builder:1': buildEnv(), 'builder:2': buildEnv(),
+      'reviewer:1': reviewEnv('pass'),
+    },
+    runs: {
+      'lane-cmd': { ok: true, output: '' },
+      'suite-cmd:1': { ok: false, output: suiteRed },
+      'suite-cmd:2': { ok: true, output: '' },
+    },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const count = scriptBuilderFingerprints(io, [
+    builderFingerprint(), builderFingerprint({ 'round-one.mjs': 'file' }), builderFingerprint(),
+  ])
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'reversion')
+  assert.equal(io.calls.commits.length, 1)
+  assert.equal(count(), 3)
+  assert.deepEqual(io.calls.logs.filter((row) => row.scope_gate).at(-1)?.scope_gate.reversion?.paths, ['round-one.mjs'])
+})
+
+test('C1 builder reversion witness ignores a genuinely unchanged file', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(),
+      'builder:1': { status: 'insufficient', role: 'builder', summary: 'retry', artifacts: [], details: {} },
+      'lead:1': leadEnv('bounce'), 'builder:2': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: [['a.mjs'], ['a.mjs', 'a.test.mjs']],
+  })
+  const count = scriptBuilderFingerprints(io, [
+    builderFingerprint(), builderFingerprint({ 'unchanged.mjs': 'file' }), builderFingerprint({ 'unchanged.mjs': 'file' }),
+  ])
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  assert.equal(result.status, 'done')
+  assert.equal(count(), 3)
+  assert.equal(io.calls.logs.some((row) => row.scope_gate?.reversion), false)
+})
+
+test('D1 builder reversion witness preserves out-of-scope refusal behavior and text', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(), 'builder:1': buildEnv(), 'builder:2': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: [['rogue.mjs'], ['a.mjs', 'a.test.mjs']],
+  })
+  scriptBuilderFingerprints(io, [
+    builderFingerprint(), builderFingerprint({ 'rogue.mjs': 'file' }), builderFingerprint({ 'rogue.mjs': 'file' }),
+  ])
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  assert.equal(result.status, 'done')
+  const scope = io.calls.logs.find((row) => row.scope_gate)?.scope_gate
+  assert.deepEqual(scope, { round: 1, reason: 'out-of-scope-edits', envelopes: [], edits: ['rogue.mjs'] })
+  const bounce = Object.values(io.calls.writes).find((body) => body.includes('OUTSIDE the plan\'s scope'))
+  assert.ok(bounce)
+  assert.match(bounce, /These files are OUTSIDE the plan's scope — revert them or stop touching them:/)
+  assert.equal(scope.reversion, undefined)
+})
+
+test('RV1-1 scope bounce compliance does not trigger reversion', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(), 'builder:1': buildEnv(), 'builder:2': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: [['rogue.mjs'], ['a.mjs', 'a.test.mjs']],
+  })
+  scriptBuilderFingerprints(io, [
+    builderFingerprint(), builderFingerprint({ 'rogue.mjs': 'file' }),
+    builderFingerprint({ 'a.mjs': 'file', 'a.test.mjs': 'file' }),
+  ])
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  assert.equal(result.status, 'done')
+  assert.notEqual(result.details?.escalation?.where, 'reversion')
+})
+
+test('RV2-1 span bounce compliance does not trigger reversion', () => {
+  const file = 'x.mjs'
+  const plan = planEnv({
+    details: { ...planEnv().details, files_in_scope: [file, 'a.mjs', 'a.test.mjs'] },
+  })
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': plan, 'builder:1': buildEnv(), 'builder:2': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: [[file], ['a.mjs', 'a.test.mjs']],
+    fenceBases: { [`base-sha:${file}`]: { ok: true, output: fenceBase(30) } },
+    fenceDiffs: { [file]: { ok: true, output: fenceDiff(file, 900, 4, 900, 4) } },
+  })
+  scriptBuilderFingerprints(io, [
+    builderFingerprint(), builderFingerprint({ [file]: 'file' }),
+    builderFingerprint({ 'a.mjs': 'file', 'a.test.mjs': 'file' }),
+  ])
+  const result = driveTask({
+    ...CTX, head: 'base-sha', laneName: 'own-lane', limits: { build_rounds: 2 },
+    laneFence: [fenceSpan('own-lane', file, 10, 20)],
+  }, io)
+  assert.equal(result.status, 'done')
+  assert.notEqual(result.details?.escalation?.where, 'reversion')
+})
+
+test('E1 builder reversion disposition is an escalation with a closed journal reason', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(),
+      'builder:1': { status: 'insufficient', role: 'builder', summary: 'retry', artifacts: [], details: {} },
+      'lead:1': leadEnv('bounce'), 'builder:2': buildEnv(),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: [['a.mjs'], ['rogue.mjs']],
+  })
+  scriptBuilderFingerprints(io, [
+    builderFingerprint(), builderFingerprint({ 'round-one.mjs': 'file' }), builderFingerprint({ 'rogue.mjs': 'file' }),
+  ])
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'reversion')
+  assert.match(result.details.escalation.why, /round-one\.mjs/)
+  assert.match(result.details.escalation.why, /workspace is retained/)
+  assert.equal(io.calls.commits.length, 0)
+  assert.deepEqual(io.calls.logs.filter((row) => row.scope_gate).map((row) => row.scope_gate), [{
+    round: 2, reason: 'out-of-scope-edits', envelopes: [], edits: ['rogue.mjs'],
+    reversion: { reason: 'builder-reversion', disposition: 'escalate', paths: ['round-one.mjs'] },
+  }])
+  assert.equal(Object.keys(io.calls.writes).some((path) => path.includes('build-bounce-r2')), false)
+})
+
+test('F1 builder reversion witness records an unmeasurable fingerprint as null with a reason', () => {
+  const baselineIo = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(),
+      'builder:1': { status: 'insufficient', role: 'builder', summary: 'retry', artifacts: [], details: {} },
+      'lead:1': leadEnv('bounce'), 'builder:2': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: [['a.mjs'], ['a.mjs', 'a.test.mjs']],
+  })
+  scriptBuilderFingerprints(baselineIo, [
+    { measured: false, checkout: CTX.checkout, at: 0, cause: 'baseline-denied', detail: 'EPERM' },
+    builderFingerprint({ 'round-one.mjs': 'file' }), builderFingerprint(),
+  ])
+  const baselineResult = driveTask({ ...CTX, limits: { build_rounds: 2 } }, baselineIo)
+  assert.equal(baselineResult.status, 'done')
+  const baselineRow = baselineIo.calls.logs.find((row) => row.scope_gate?.reversion)?.scope_gate.reversion
+  assert.deepEqual(baselineRow, { paths: null, reason: 'fingerprint-unmeasurable', cause: 'baseline-denied', detail: 'EPERM' })
+  assert.equal(baselineIo.calls.logs.some((row) => row.scope_gate?.reversion?.paths?.length === 0), false)
+
+  const currentIo = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(),
+      'builder:1': { status: 'insufficient', role: 'builder', summary: 'retry', artifacts: [], details: {} },
+      'lead:1': leadEnv('bounce'),
+      'builder:2': { status: 'insufficient', role: 'builder', summary: 'retry again', artifacts: [], details: {} },
+      'lead:2': leadEnv('bounce'), 'builder:3': buildEnv(),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: [['a.mjs'], ['a.mjs'], ['a.mjs', 'a.test.mjs']],
+  })
+  const currentCount = scriptBuilderFingerprints(currentIo, [
+    builderFingerprint(), builderFingerprint({ 'round-one.mjs': 'file' }),
+    { measured: false, checkout: CTX.checkout, at: 0, cause: 'current-interrupted', detail: 'partial snapshot' },
+    builderFingerprint(),
+  ])
+  const currentResult = driveTask({ ...CTX, limits: { build_rounds: 3 } }, currentIo)
+  assert.equal(currentResult.status, 'escalation')
+  assert.equal(currentResult.details.escalation.where, 'reversion')
+  assert.equal(currentCount(), 4)
+  const currentUnknown = currentIo.calls.logs.find((row) => row.scope_gate?.reversion?.cause === 'current-interrupted')?.scope_gate.reversion
+  assert.deepEqual(currentUnknown, { paths: null, reason: 'fingerprint-unmeasurable', cause: 'current-interrupted', detail: 'partial snapshot' })
+  assert.deepEqual(currentIo.calls.logs.filter((row) => row.scope_gate?.reversion?.paths).at(-1)?.scope_gate.reversion.paths, ['round-one.mjs'])
+  assert.equal(currentIo.calls.commits.length, 0)
+})

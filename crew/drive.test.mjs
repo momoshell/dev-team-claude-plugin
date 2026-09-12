@@ -830,8 +830,21 @@ test('red full suite after review pass escalates and preserves its commit', () =
   assert.match(res.details.escalation.why, /suite red/i)
 })
 
-test('A1 suite red in unheld files admits scope and bounces once', () => {
-  const red = `FAIL file://${CTX.checkout}/new.test.mjs:3:1\n${GATE_SUMMARY_PREFIX} {"total":1,"failed":1,"errored":0}`
+test('E1 suite red in unheld files admits scope and bounces once', () => {
+  const failureIndexes = [2610, 2620, 4480]
+  const suiteLines = []
+  for (let index = 0; index < 4500; index += 1) {
+    if (index === failureIndexes[0]) suiteLines.push('✖ EARLY_FAILURE expected alpha, found beta')
+    else if (index === failureIndexes[1]) suiteLines.push('FAIL MID_FAILURE expected epsilon, found zeta')
+    else if (index === failureIndexes[2]) suiteLines.push(`not ok LATE_FAILURE file://${CTX.checkout}/new.test.mjs:9:2 expected gamma, found delta`)
+    else suiteLines.push(`✔ CONTEXT_${String(index).padStart(4, '0')} passing test ${'p'.repeat(92)}`)
+  }
+  const red = suiteLines.join('\n')
+  const retained = new Set()
+  for (const index of failureIndexes) {
+    for (let candidate = Math.max(0, index - 2); candidate <= Math.min(suiteLines.length - 1, index + 2); candidate += 1) retained.add(candidate)
+  }
+  const retainedIndexes = [...retained].sort((a, b) => a - b)
   const io = fakeIo({
     envelopes: {
       'planner:1': planEnv(), 'builder:1': buildEnv(),
@@ -843,18 +856,26 @@ test('A1 suite red in unheld files admits scope and bounces once', () => {
   })
   const res = driveTask(CTX, io)
   assert.equal(res.status, 'done')
+  assert.equal(Buffer.byteLength(red) >= 450000, true)
+  assert.equal(suiteLines.length, 4500)
+  assert.equal(retainedIndexes.length, 15)
   assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 2)
   assert.equal(io.calls.logs.filter((row) => row.scope_admission?.source === 'suite-red').length, 1)
   const row = io.calls.logs.find((entry) => entry.scope_admission?.source === 'suite-red').scope_admission
   assert.deepEqual(row.files, ['new.test.mjs'])
   assert.deepEqual(row.evidence, { output: red, commit: 'abc1234', test_files: ['new.test.mjs'] })
   assert.ok(io.calls.assign.find(({ role, n, policy }) => role === 'builder' && n === 2 && policy.fence.includes('new.test.mjs')))
-  assert.ok(io.calls.writes[`${TD}/suite-red-bounce-r1.md`].includes(red))
+  const bounce = io.calls.writes[`${TD}/suite-red-bounce-r1.md`]
+  assert.equal(Buffer.byteLength(bounce) < 20000, true)
+  for (const index of retainedIndexes) assert.ok(bounce.includes(suiteLines[index]), `missing retained suite line ${index}`)
+  assert.equal(bounce.includes(suiteLines[100]), false)
+  assert.ok(bounce.includes('Failure excerpts (all failing lines with 2 lines of context):'))
+  assert.ok(bounce.includes(`Elided 4485 of 4500 suite output lines; full output remains in ${TD}/journal.jsonl.`))
   assert.deepEqual(suiteRedTestFiles(red, CTX.checkout), ['new.test.mjs'])
 })
 
 test('B1 suite red in a held file escalates naming its holder', () => {
-  const red = `FAIL ${CTX.checkout}/held.test.mjs:1:1\nboom`
+  const red = `${'held-prefix\n'.repeat(300)}FAIL ${CTX.checkout}/held.test.mjs:1:1\nheld-end`
   const io = fakeIo({
     envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
     runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: false, output: red } },
@@ -862,10 +883,27 @@ test('B1 suite red in a held file escalates naming its holder', () => {
   })
   const res = driveTask({ ...CTX, laneFence: [{ lane: 'sibling', files: ['held.test.mjs'] }] }, io)
   assert.equal(res.status, 'escalation')
+  assert.equal(Buffer.byteLength(red) > 3000, true)
   assert.equal(res.details.escalation.where, 'suite')
-  assert.match(res.details.escalation.why, /crosses a held scope/)
-  assert.match(res.details.escalation.why, /held\.test\.mjs is owned by lane sibling/)
+  const expected = `full suite red after acceptance crosses a held scope: scope admission refused: held.test.mjs is owned by lane sibling\n${red.slice(-2000)}`
+  assert.equal(res.details.escalation.why, expected)
   assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 1)
+  assert.equal(io.calls.logs.filter((entry) => entry.scope_admission).length, 0)
+})
+
+test('D1 suite red with no safe admission escalates exact trailing output', () => {
+  const output = `${'unparseable-suite-noise\n'.repeat(180)}unsafe-end`
+  const io = fakeIo({
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: false, output } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'escalation')
+  assert.equal(Buffer.byteLength(output) > 3000, true)
+  assert.equal(res.details.escalation.where, 'suite')
+  const expected = `full suite red after acceptance — no safe unheld test-file admission could be made: scope admission requires a non-empty files array\n${output.slice(-2000)}`
+  assert.equal(res.details.escalation.why, expected)
   assert.equal(io.calls.logs.filter((entry) => entry.scope_admission).length, 0)
 })
 

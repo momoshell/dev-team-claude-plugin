@@ -345,6 +345,36 @@ test('capability register validation is closed, non-vacuous, and enforced at loa
   assert.equal(Object.isFrozen(loaded.roles.planner), true)
 })
 
+test('the shipped local provider register is schema-valid, committed, and closed', () => {
+  const schema = JSON.parse(readFileSync(new URL('./capabilities.schema.json', import.meta.url), 'utf8'))
+  const shipped = JSON.parse(readFileSync(new URL('./capabilities.json', import.meta.url), 'utf8'))
+  const providers = shipped.local_providers
+  assert.deepEqual(Object.keys(providers), ['llama-swap'])
+  assert.deepEqual(Object.keys(providers['llama-swap']).sort(), ['base_url', 'pi_provider', 'settings'])
+  assert.deepEqual(providers['llama-swap'], {
+    settings: 'crew/pi/settings.json',
+    pi_provider: 'llama-swap',
+    base_url: 'http://10.112.20.20:8080/v1',
+  })
+  assert.deepEqual(validateCapabilities(schema, shipped), [])
+
+  const settingsPath = join(REGISTER_ROOT, providers['llama-swap'].settings)
+  assert.equal(existsSync(settingsPath), true)
+  const settings = JSON.parse(readFileSync(settingsPath, 'utf8'))
+  assert.equal(settings && typeof settings === 'object' && !Array.isArray(settings), true)
+  assert.deepEqual(settings, {})
+
+  for (const field of ['settings', 'pi_provider', 'base_url']) {
+    const malformed = JSON.parse(JSON.stringify(shipped))
+    delete malformed.local_providers['llama-swap'][field]
+    assert.throws(
+      () => loadCapabilities({ register: malformed }),
+      (err) => err.reason === 'register-invalid',
+      `missing local provider field ${field} must refuse`,
+    )
+  }
+})
+
 test('grantsFor fails closed for missing paths and invalid definitions, and resolves valid grants', () => {
   const root = capabilityFixtureRoot()
   try {

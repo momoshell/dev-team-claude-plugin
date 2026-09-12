@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-09-07",
+  "updated_at": "2026-09-12",
   "roles": {
     "lead": {
       "tools": [],
@@ -64,5 +64,11 @@
       }
     }
   },
-  "local_providers": {}
+  "local_providers": {
+    "llama-swap": {
+      "settings": "crew/pi/settings.json",
+      "pi_provider": "llama-swap",
+      "base_url": "http://10.112.20.20:8080/v1"
+    }
+  }
 }

@@ -296,7 +296,29 @@ test('readRosterModels refuses a record with no numeric cost', () => {
 
 test('readRosterModels accepts the shipped roster', () => {
   const models = readRosterModels(roster, 'crew/roster.json')
-  assert.equal(Object.keys(models).length, 7)
+  assert.equal(Object.keys(models).length, 10)
+})
+
+test('synthetic catalog leaves every shipped llama-swap model under cannot confirm', () => {
+  const localKeys = ['llama-swap/qwen3.8-27b', 'llama-swap/gpt-oss-20b', 'llama-swap/gemma4-31b']
+  const before = Object.fromEntries(localKeys.map((key) => [key, fixtureRecord(0, 0, 131072)]))
+  const after = normalizeCatalog({ 'llama-swap': { models: {} } }, ['llama-swap'])
+  const diff = diffModels(before, after)
+  const report = renderReport(diff, {
+    generatedAt: 'now',
+    rosterUpdatedAt: '2026-09-12',
+    seatedCount: localKeys.length,
+  })
+  const sectionStart = report.indexOf('## Seated models the catalog cannot confirm — unverifiable (3)')
+  assert.ok(sectionStart >= 0)
+  const unverifiable = report.slice(sectionStart)
+  assert.match(report, /## Seated models confirmed by the catalog \(0 of 3\)/)
+  assert.doesNotMatch(report, /## Seated models confirmed by the catalog \(3 of 3\)/)
+  assert.doesNotMatch(report, /No changes vs crew\/roster\.json\./)
+  assert.doesNotMatch(unverifiable, /confirmed|unchanged/)
+  for (const key of localKeys) {
+    assert.ok(unverifiable.includes(`- ${key}: no catalog entry; roster values unverified (cost_in=0 cost_out=0 context=131072)`), key)
+  }
 })
 
 test('a seated model with no catalog entry is reported as unverifiable, not as unchanged', () => {

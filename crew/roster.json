@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-08-30",
+  "updated_at": "2026-09-12",
   "tiers": {
     "mechanical": {
       "lead": null,
@@ -197,6 +197,48 @@
       ],
       "source": "models.dev",
       "last_verified": "2026-08-13"
+    },
+    "llama-swap/qwen3.8-27b": {
+      "cost_in_per_mtok": 0,
+      "cost_out_per_mtok": 0,
+      "cost_cache_read_per_mtok": 0,
+      "cost_cache_write_per_mtok": 0,
+      "cache_rate_source": "llama-swap local serving has a published 0 rate rather than an absent one for llama-swap/qwen3.8-27b cache reads and writes.",
+      "context": 131072,
+      "tags": [
+        "reasoning",
+        "trivial-reply-reasoning-cost:21-completion-tokens"
+      ],
+      "source": "local",
+      "last_verified": "2026-09-12"
+    },
+    "llama-swap/gpt-oss-20b": {
+      "cost_in_per_mtok": 0,
+      "cost_out_per_mtok": 0,
+      "cost_cache_read_per_mtok": 0,
+      "cost_cache_write_per_mtok": 0,
+      "cache_rate_source": "llama-swap local serving has a published 0 rate rather than an absent one for llama-swap/gpt-oss-20b cache reads and writes.",
+      "context": 131072,
+      "tags": [
+        "reasoning",
+        "trivial-reply-reasoning-cost:36-completion-tokens"
+      ],
+      "source": "local",
+      "last_verified": "2026-09-12"
+    },
+    "llama-swap/gemma4-31b": {
+      "cost_in_per_mtok": 0,
+      "cost_out_per_mtok": 0,
+      "cost_cache_read_per_mtok": 0,
+      "cost_cache_write_per_mtok": 0,
+      "cache_rate_source": "llama-swap local serving has a published 0 rate rather than an absent one for llama-swap/gemma4-31b cache reads and writes.",
+      "context": 131072,
+      "tags": [
+        "reasoning",
+        "trivial-reply-reasoning-cost:46-completion-tokens"
+      ],
+      "source": "local",
+      "last_verified": "2026-09-12"
     }
   }
 }

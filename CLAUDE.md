@@ -20,14 +20,14 @@ charters and contracts.
 
 ```bash
 npm test              # node --test over **/*.test.mjs — gates every commit
-npm run viz:build     # the visualizer must build; it is part of the release gate
+npm run viz:build     # release-time check: operator runs it on main before tagging
 npm run viz:serve     # local visualizer, reads .env.local
 npm run crew:watch    # lane state
 npm run crew:reap     # stale-descendant sweep
 ```
 
-`npm test` and `npm run viz:build` are the two release gates. Both must pass
-before anything lands.
+`npm test` is the lane gate. `npm run viz:build` is a RELEASE-TIME check the
+operator runs on main before tagging; it is never a lane's done-means.
 
 ## Rules that are easy to get wrong
 

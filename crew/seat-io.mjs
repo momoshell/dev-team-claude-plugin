@@ -3581,6 +3581,9 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
         return { applied: false, reason: 'transport', why: `io.reseat failed: ${err?.message ?? err}`, from, to: null }
       }
     },
+    fingerprintTree(path) {
+      return treeWitness(path)
+    },
     changedFiles() {
       // -z: NUL-delimited, no quoting of paths with spaces; -uall: untracked
       // files individually, never a collapsed '?? dir/'. Rename/copy entries

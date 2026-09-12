@@ -6,6 +6,7 @@ import assert from 'node:assert/strict'
 import {
   COMMIT_TRAILER, CTX, HONEST_NARRATION, NARRATION_HEADING, NARRATION_RECORD, NARRATION_REFUSALS, NARRATION_REFUSAL_NAMES, NARRATION_STAGE_VOCABULARY, NARRATOR_REGISTER, PUBLISH_REFUSAL_NAMES, RUN_START_EVENT, TD, VARIANTS, applyNarration, bounceDetail, bounceSeatOf, buildEnv, commitIntent, composeCommitMessage, composePrBody, convergeRun, driveTask, issueTrailers, join, journalRowsSinceRunStart, narrateRecord, narrationDefect, narrationIsRawJson, narrationPrompt, narrationStageDefect, narratorApiRoot, narratorIo, narratorModelId, narratorModelsCommand, planEnv, prAnomalies, publicationIo, readFileSync, refsFromCommitMessage, reviewEnv, shellArg,
 } from './drive-fixtures.mjs'
+import { anchorConflictMechanical, canonicalAnchorManifest, canonicalCitationDoc, lineNumberOnlyAnchorResolution, rebaseConflictRoute } from './drive.mjs'
 
 function installParentProbe(io, parent = { ok: true, output: 'base1111\n' }) {
   const baseRun = io.run
@@ -45,10 +46,12 @@ function rebaseIo(options = {}) {
   const postHead = options.postHead || 'rebased3333'
   const parent = options.parent === undefined ? REBASE_PARENT : options.parent
   const mutations = options.mutations || REBASE_MUTATIONS
+  const changed = options.changed || ['a.mjs', 'a.test.mjs']
+  const scope = options.scope || changed
   const io = publicationIo({
-    changed: ['a.mjs', 'a.test.mjs'],
+    changed,
     envelopes: {
-      'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations, commit_subject: 'feat: rebase proof' } }),
+      'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations, files_in_scope: scope, commit_subject: 'feat: rebase proof' } }),
       'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
     },
     commands: {
@@ -181,6 +184,370 @@ function runRebase(options = {}) {
   const result = driveTask({ ...CTX, publish: { branch: 'feature/ship' } }, io)
   return { io, result }
 }
+
+const ANCHOR_MANIFEST = 'crew/roles/anchors.json'
+const ANCHOR_SKILL = 'crew/roles/SKILL.md'
+const ANCHOR_SOURCE = 'crew/source.mjs'
+const anchorManifest = (entries) => `${JSON.stringify(entries, null, 2)}\n`
+const anchorHunk = (paths) => paths.map((path) => [
+  `diff --cc ${path}`,
+  `--- a/${path}`,
+  `+++ b/${path}`,
+  '@@ -1 +1 @@',
+  '-base-side',
+  '+lane-side',
+].join('\n')).join('\n') + '\n'
+
+// Publication-only rebase seam. The shared publicationIo remains unchanged: this local
+// adapter models the index stages and carrier filesystem needed by A1-H1.
+function anchorPublicationIo({ specs = [], scope, limits = {}, gate = null, envelopes = {}, carriers = {}, tracked, ordinary = [], ignored = [], reset = null } = {}) {
+  const first = specs[0] || {
+    paths: [ANCHOR_MANIFEST],
+    stage2: { [ANCHOR_MANIFEST]: anchorManifest({ [`${ANCHOR_SOURCE}:10`]: 'anchor-value' }) },
+    stage3: { [ANCHOR_MANIFEST]: anchorManifest({ [`${ANCHOR_SOURCE}:12`]: 'anchor-value' }) },
+    hunk: anchorHunk([ANCHOR_MANIFEST]),
+  }
+  const effectiveScope = scope || [...new Set(specs.flatMap((spec) => spec?.paths || []))]
+  const allCarriers = { ...carriers }
+  for (const spec of specs) for (const path of spec?.paths || []) {
+    if (path.endsWith('/anchors.json') && allCarriers[path] === undefined) allCarriers[path] = spec.stage2?.[path] || ''
+  }
+  const baseTracked = tracked || Object.keys(allCarriers)
+  const initialBytes = { ...allCarriers }
+  const io = publicationIo({
+    changed: effectiveScope,
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, files_in_scope: effectiveScope, ...(gate?.details || {}) } }),
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'), ...envelopes,
+    },
+  })
+  io.calls.assign = []
+  const baseAssign = io.assign
+  io.assign = function (spec) {
+    const assigned = baseAssign.call(this, spec)
+    this.calls.assign.push({ ...spec, id: assigned.id, returnPath: assigned.returnPath })
+    return assigned
+  }
+  io.state.rebaseCount = 0
+  io.state.abortCount = 0
+  io.state.resetCommand = null
+  io.state.resolverCalls = []
+  io.state.addCommands = []
+  io.state.continueCount = 0
+  io.state.checkoutBytes = null
+  const absoluteBytes = (bytes) => Object.fromEntries(Object.entries(bytes).map(([path, value]) => [`${CTX.checkout}/${path}`, value]))
+  io.state.worktreeBytes = absoluteBytes(initialBytes)
+  io.state.indexBytes = absoluteBytes(initialBytes)
+  io.state.initialBytes = absoluteBytes(initialBytes)
+  io.state.currentSpec = null
+  const baseRun = io.run
+  const response = (value, fallback = { ok: true, output: '' }) => typeof value === 'function' ? value(io.state) : (value === undefined ? fallback : value)
+  const pathsFromStageCommand = (text) => {
+    const match = text.match(/^git show ':(2|3):(.+)'$/)
+    return match ? { stage: Number(match[1]), path: match[2] } : null
+  }
+  io.run = function (command) {
+    const text = String(command)
+    const record = (value) => { baseRun.call(this, command); return value }
+    if (text === 'git rebase origin/main') {
+      baseRun.call(this, command)
+      const spec = specs[this.state.rebaseCount] || null
+      this.state.rebaseCount += 1
+      this.state.currentSpec = spec
+      if (spec) {
+        this.state.phase = 'conflicted'
+        this.state.head = `mid${this.state.rebaseCount}3333`
+        this.state.worktreeBytes = { ...absoluteBytes(initialBytes), ...absoluteBytes(spec.worktree || {}) }
+        this.state.indexBytes = { ...this.state.worktreeBytes }
+        return { ok: false, output: spec.rebaseOutput || 'rebase failed' }
+      }
+      this.state.phase = 'rebased'
+      this.state.head = this.state.post
+      return { ok: true, output: '' }
+    }
+    if (text === 'git diff --name-only --diff-filter=U') return record({ ok: true, output: (this.state.currentSpec?.paths || []).join('\n') + (this.state.currentSpec?.paths?.length ? '\n' : '') })
+    const stage = pathsFromStageCommand(text)
+    if (stage) {
+      const value = this.state.currentSpec?.[stage.stage === 2 ? 'stage2' : 'stage3']?.[stage.path]
+      return record(typeof value === 'string' ? { ok: true, output: value } : { ok: false, output: '' })
+    }
+    if (text.startsWith('git diff --cc -- ')) return record({ ok: true, output: this.state.currentSpec?.hunk || '' })
+    if (text.startsWith('git ls-files -z --cached --')) return record({ ok: true, output: [...new Set(baseTracked)].join('\0') + (baseTracked.length ? '\0' : '') })
+    if (text.startsWith('git ls-files -z --others --ignored --')) return record({ ok: true, output: ignored.join('\0') + (ignored.length ? '\0' : '') })
+    if (text.startsWith('git ls-files -z --others --exclude-standard --')) return record({ ok: true, output: ordinary.join('\0') + (ordinary.length ? '\0' : '') })
+    if (text.startsWith('git checkout --ours -- ')) {
+      const spec = this.state.currentSpec || first
+      this.state.checkoutBytes = {}
+      for (const path of spec.paths || []) {
+        const bytes = spec.stage2?.[path]
+        if (typeof bytes === 'string') { this.state.worktreeBytes[`${CTX.checkout}/${path}`] = bytes; this.state.checkoutBytes[path] = bytes }
+      }
+      return record(response(spec.checkoutResult))
+    }
+    if (text.startsWith('node skills/qa-test-writing/anchor-pin.mjs --repair-all ')) {
+      this.state.resolverCalls.push(text)
+      const spec = this.state.currentSpec || first
+      const result = record(response(spec.resolverResult))
+      if (typeof spec.resolver === 'function') spec.resolver(this.state)
+      return result
+    }
+    if (text.startsWith('git add -- ')) {
+      this.state.addCommands.push(text)
+      return record(response(this.state.currentSpec?.addResult))
+    }
+    if (text === 'git -c core.editor=true rebase --continue') {
+      this.state.continueCount += 1
+      const result = record(response(this.state.currentSpec?.continueResult))
+      if (result?.ok) { this.state.phase = 'rebased'; this.state.head = this.state.post }
+      return result
+    }
+    if (text === 'git rebase --abort') {
+      this.state.abortCount += 1
+      const result = record(response(this.state.currentSpec?.abortResult))
+      if (result?.ok) {
+        this.state.phase = 'initial'; this.state.head = this.state.pre
+        this.state.worktreeBytes = { ...this.state.initialBytes }
+        this.state.indexBytes = { ...this.state.initialBytes }
+      }
+      return result
+    }
+    if (text.startsWith('git reset --soft ')) {
+      this.state.resetCommand = text
+      const result = record(response(reset || this.state.currentSpec?.resetResult))
+      if (result?.ok) { this.state.phase = 'reset'; this.state.head = text.slice('git reset --soft '.length) }
+      return result
+    }
+    return baseRun.call(this, command)
+  }
+  const baseRead = io.readFile
+  io.readFile = function (path) {
+    if (Object.prototype.hasOwnProperty.call(this.state.worktreeBytes, path)) return this.state.worktreeBytes[path]
+    return baseRead.call(this, path)
+  }
+  return io
+}
+
+function runAnchorPublication(options = {}) {
+  const io = anchorPublicationIo(options)
+  const ctx = {
+    ...CTX,
+    limits: options.limits || {},
+    ...(options.ctx || {}),
+    publish: { branch: 'feature/ship' },
+  }
+  let result
+  try { result = driveTask(ctx, io) } catch (error) { return { io, ctx, error } }
+  return { io, ctx, result }
+}
+
+function mechanicalProofRun() {
+  const stage2 = anchorManifest({ [`${ANCHOR_SOURCE}:10`]: 'anchor-value' })
+  const stage3 = anchorManifest({ [`${ANCHOR_SOURCE}:12`]: 'anchor-value' })
+  const io = rebaseIo({ changed: ['a.mjs', 'a.test.mjs', ANCHOR_MANIFEST], scope: ['a.mjs', 'a.test.mjs', ANCHOR_MANIFEST] })
+  const anchorPath = `${CTX.checkout}/${ANCHOR_MANIFEST}`
+  io.state.worktreeBytes[anchorPath] = stage3
+  io.state.indexBytes[anchorPath] = stage3
+  io.state.resolverCalls = []
+  io.state.addCommands = []
+  io.state.continueCount = 0
+  let conflicted = false
+  const baseRun = io.run
+  io.run = function (command) {
+    const text = String(command)
+    const record = (value) => { baseRun.call(this, command); return value }
+    if (text === 'git diff --name-only --diff-filter=U') return record({ ok: true, output: conflicted ? `${ANCHOR_MANIFEST}\n` : '' })
+    const stageMatch = text.match(/^git show ':(2|3):(.+)'$/)
+    if (stageMatch && stageMatch[2] === ANCHOR_MANIFEST) return record({ ok: true, output: stageMatch[1] === '2' ? stage2 : stage3 })
+    if (text.startsWith('git diff --cc -- ')) return record({ ok: true, output: anchorHunk([ANCHOR_MANIFEST]) })
+    if (text.startsWith('git ls-files -z --cached --')) return record({ ok: true, output: `${ANCHOR_MANIFEST}\0` })
+    if (text.startsWith('git ls-files -z --others --')) return record({ ok: true, output: '' })
+    if (text.startsWith('git checkout --ours -- ')) {
+      this.state.checkoutBytes = stage2
+      this.state.worktreeBytes[anchorPath] = stage2
+      return record({ ok: true, output: '' })
+    }
+    if (text.startsWith('node skills/qa-test-writing/anchor-pin.mjs --repair-all ')) {
+      this.state.resolverCalls.push(text)
+      this.state.worktreeBytes[anchorPath] = stage2
+      return record({ ok: true, output: '' })
+    }
+    if (text.startsWith('git add -- ')) { this.state.addCommands.push(text); return record({ ok: true, output: '' }) }
+    if (text === 'git -c core.editor=true rebase --continue') {
+      this.state.continueCount += 1
+      const result = record({ ok: true, output: '' })
+      this.state.phase = 'rebased'; this.state.head = this.state.rebaseHead
+      return result
+    }
+    if (text === 'git rebase origin/main' && !conflicted) {
+      const result = baseRun.call(this, command)
+      conflicted = true
+      this.state.phase = 'rebased'
+      this.state.head = this.state.rebaseHead
+      this.state.worktreeBytes[anchorPath] = stage2
+      this.state.indexBytes[anchorPath] = stage2
+      return { ok: false, output: 'rebase failed' }
+    }
+    return baseRun.call(this, command)
+  }
+  const result = driveTask({ ...CTX, publish: { branch: 'feature/ship' } }, io)
+  return { io, result }
+}
+
+test('RV1-0 anchor conflict predicates preserve duplicate keys and only line citations', () => {
+  assert.equal(anchorConflictMechanical([ANCHOR_MANIFEST, 'crew/roles/references/a.md']), true)
+  assert.equal(anchorConflictMechanical([ANCHOR_MANIFEST, 'crew/other.mjs']), false)
+  assert.equal(anchorConflictMechanical([ANCHOR_MANIFEST, 'crew/roles/references/a.md', 'crew/roles/README.md']), false)
+  assert.deepEqual(canonicalAnchorManifest('{"note:12":"keep","crew/source.jsx:20":"b","crew/source.jsx:10":"a"}'), [
+    ['crew/source.jsx', 'a'], ['crew/source.jsx', 'b'], ['note:12', 'keep'],
+  ])
+  assert.deepEqual(canonicalAnchorManifest('{"crew/source.mjs:20":"b","crew/source.mjs:10":"a"}'), [
+    ['crew/source.mjs', 'a'], ['crew/source.mjs', 'b'],
+  ])
+  assert.equal(canonicalCitationDoc('crew/source.mjs:20-22 value 20'), 'crew/source.mjs:<line>-<line> value 20')
+  assert.equal(lineNumberOnlyAnchorResolution([{ path: ANCHOR_MANIFEST,
+    stage2: anchorManifest({ [`${ANCHOR_SOURCE}:10`]: 'anchor-value' }),
+    stage3: anchorManifest({ [`${ANCHOR_SOURCE}:12`]: 'anchor-value' }),
+    repaired: anchorManifest({ [`${ANCHOR_SOURCE}:11`]: 'anchor-value' }),
+  }]), true)
+  assert.equal(rebaseConflictRoute({ mechanical: true, bounces: 99, buildRounds: 1 }), 'mechanical')
+  assert.equal(rebaseConflictRoute({ mechanical: false, bounces: 0, buildRounds: 2 }), 'bounce')
+  assert.equal(rebaseConflictRoute({ mechanical: false, bounces: 1, buildRounds: 2 }), 'escalate')
+})
+
+test('A1 mechanical anchor conflict resolves and continues', () => {
+  const stage2 = anchorManifest({ [`${ANCHOR_SOURCE}:10`]: 'anchor-value' })
+  const stage3 = anchorManifest({ [`${ANCHOR_SOURCE}:12`]: 'anchor-value' })
+  const { io, result } = runAnchorPublication({ specs: [{
+    paths: [ANCHOR_MANIFEST], stage2: { [ANCHOR_MANIFEST]: stage2 }, stage3: { [ANCHOR_MANIFEST]: stage3 },
+    hunk: anchorHunk([ANCHOR_MANIFEST]), resolver: (state) => { state.worktreeBytes[`${CTX.checkout}/${ANCHOR_MANIFEST}`] = stage2 },
+  }], scope: [ANCHOR_MANIFEST] })
+  assert.equal(result.status, 'done')
+  assert.equal(io.state.checkoutBytes[ANCHOR_MANIFEST], stage2)
+  assert.equal(io.state.resolverCalls.length, 1)
+  assert.equal(io.state.abortCount, 0)
+  assert.equal(io.state.continueCount, 1)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 1)
+  const stageRead = io.calls.order.findIndex((entry) => entry === `run:git show ':2:${ANCHOR_MANIFEST}'`)
+  const resolverRun = io.calls.order.findIndex((entry) => entry.startsWith('run:node skills/qa-test-writing/anchor-pin.mjs --repair-all'))
+  assert.ok(stageRead >= 0 && resolverRun > stageRead)
+  assert.equal(io.state.addCommands.length, 1)
+  assert.match(io.state.addCommands[0], /git add -- 'crew\/roles\/anchors\.json'/)
+  assert.doesNotMatch(io.state.addCommands[0], /'crew\/roles'\s*$/)
+})
+
+test('B1 semantic rebase conflict bounces to builder', () => {
+  const path = 'src/semantic.mjs'
+  const spec = { paths: [path], stage2: { [path]: 'base\n' }, stage3: { [path]: 'lane\n' }, hunk: anchorHunk([path]) }
+  const { io, result } = runAnchorPublication({ specs: [spec], scope: [path], limits: { build_rounds: 2 }, envelopes: {
+    'builder:2': buildEnv(), 'reviewer:2': reviewEnv('pass'),
+  } })
+  assert.equal(result.status, 'done')
+  const bounce = io.calls.writes[`${TD}/rebase-conflict-bounce-r1.md`]
+  assert.match(bounce, new RegExp(path.replaceAll('.', '\\.') ))
+  assert.match(bounce, /diff --cc src\/semantic\.mjs/)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 2)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder')[1].note, 'rebase-conflict-fix')
+  assert.equal(io.state.resetCommand, 'git reset --soft base1111')
+  assert.equal(io.state.abortCount, 1)
+})
+
+test('C1 exhausted rebase bounce budget escalates with paths', () => {
+  const firstPath = 'src/first.mjs'
+  const secondPath = 'src/second.mjs'
+  const make = (path) => ({ paths: [path], stage2: { [path]: 'base\n' }, stage3: { [path]: 'lane\n' }, hunk: anchorHunk([path]) })
+  const second = { paths: [firstPath, secondPath], stage2: { [firstPath]: 'base-first\n', [secondPath]: 'base-second\n' }, stage3: { [firstPath]: 'lane-first\n', [secondPath]: 'lane-second\n' }, hunk: anchorHunk([firstPath, secondPath]) }
+  const { io, result } = runAnchorPublication({ specs: [make(firstPath), second], scope: [firstPath, secondPath], limits: { build_rounds: 2 }, envelopes: {
+    'builder:2': buildEnv(), 'reviewer:2': reviewEnv('pass'),
+  } })
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'rebase')
+  assert.match(result.details.escalation.why, new RegExp(firstPath.replaceAll('.', '\\.') ))
+  assert.match(result.details.escalation.why, new RegExp(secondPath.replaceAll('.', '\\.') ))
+  assert.match(result.details.escalation.why, /limits\.build_rounds budget is exhausted/)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 2)
+  assert.equal(io.state.abortCount, 2)
+  assert.equal(io.state.resetCommand, 'git reset --soft base1111')
+})
+
+test('D1 unproven abort restoration keeps exact escalation', () => {
+  const run = runPublished({ ctx: { limits: { build_rounds: 2 } }, commands: {
+    'git rebase origin/main': (state) => { state.head = 'mid3333'; return { ok: false, output: 'rebase failed' } },
+    'git diff --name-only --diff-filter=U': { ok: true, output: 'a.mjs\n' },
+    'git rebase --abort': { ok: false, output: 'abort failed' },
+    'git rev-parse HEAD': { ok: true, output: 'mid3333\n' },
+  } })
+  assert.equal(run.result.status, 'escalation')
+  assert.equal(run.result.details.escalation.why, 'the rebase onto origin/main failed with conflicts in a.mjs; restoration is UNPROVEN — HEAD found after abort: mid3333')
+  assert.equal(Object.keys(run.io.calls.writes).some((path) => path.includes('rebase-conflict-bounce')), false)
+})
+
+test('E1 resolved conflict enters existing post-rebase proof', () => {
+  const { io, result } = mechanicalProofRun()
+  assert.equal(result.status, 'done')
+  assert.equal(io.state.resolverCalls.length, 1)
+  const freshRows = io.calls.logs.flatMap((row) => row.gate_check_discriminations || [])
+    .filter((row) => row.proof === 'fresh')
+  assert.equal(freshRows.length, REBASE_MUTATIONS.length)
+  assert.ok(freshRows.every((row) => row.measured_generation > 1))
+  const suiteIndex = io.calls.order.indexOf('run:suite-cmd')
+  const freshIndexes = io.calls.order.map((entry, index) => entry === 'fresh-proof-row' ? index : -1).filter((index) => index >= 0)
+  assert.ok(freshIndexes.length > 0)
+  assert.ok(freshIndexes.every((index) => index < suiteIndex))
+})
+
+test('F1 clean rebase adds neither bounce nor proof', () => {
+  const { io, result } = runRebase({ moved: false })
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.run.some((command) => command === 'git rebase origin/main'), false)
+  assert.equal(io.calls.run.some((command) => command.includes('anchor-pin.mjs --repair-all')), false)
+  assert.equal(io.calls.run.some((command) => command === 'git rebase --abort'), false)
+  assert.equal(io.calls.run.some((command) => command.startsWith('git reset --')), false)
+  assert.equal(io.calls.order.some((entry) => entry === 'fresh-proof-row'), false)
+  assert.equal(Object.keys(io.calls.writes).some((path) => path.includes('rebase-conflict-bounce')), false)
+})
+
+test('G1 content conflict in anchor paths falls through to builder', () => {
+  const stage2 = anchorManifest({ [`${ANCHOR_SOURCE}:10`]: 'first-value', [`${ANCHOR_SOURCE}:20`]: 'second-value' })
+  const stage3 = anchorManifest({ [`${ANCHOR_SOURCE}:11`]: 'first-value', [`${ANCHOR_SOURCE}:21`]: 'second-value' })
+  const changed = anchorManifest({ [`${ANCHOR_SOURCE}:10`]: 'CHANGED-value', [`${ANCHOR_SOURCE}:20`]: 'second-value' })
+  const { io, result } = runAnchorPublication({ specs: [{
+    paths: [ANCHOR_MANIFEST], stage2: { [ANCHOR_MANIFEST]: stage2 }, stage3: { [ANCHOR_MANIFEST]: stage3 },
+    hunk: anchorHunk([ANCHOR_MANIFEST]), resolver: (state) => { state.worktreeBytes[`${CTX.checkout}/${ANCHOR_MANIFEST}`] = changed },
+    // These successful commands make the condition-only content mutant reach explicit
+    // staging/continuation; the baseline must reject before either command.
+    addResult: { ok: true, output: 'mutant staged' }, continueResult: { ok: true, output: 'mutant continued' },
+  }], scope: [ANCHOR_MANIFEST], limits: { build_rounds: 2 }, envelopes: {
+    'builder:2': buildEnv(), 'reviewer:2': reviewEnv('pass'),
+  } })
+  assert.equal(result.status, 'done')
+  assert.equal(io.state.resolverCalls.length, 1)
+  assert.equal(io.state.abortCount, 1)
+  assert.equal(io.state.continueCount, 0)
+  assert.equal(io.state.addCommands.length, 0)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 2)
+  const bounce = io.calls.writes[`${TD}/rebase-conflict-bounce-r1.md`]
+  assert.match(bounce, /crew\/roles\/anchors\.json/)
+  assert.match(bounce, /diff --cc crew\/roles\/anchors\.json/)
+})
+
+test('H1 unsafe resolver writes restore and bounce', () => {
+  const stage2 = anchorManifest({ [`${ANCHOR_SOURCE}:10`]: 'anchor-value' })
+  const stage3 = anchorManifest({ [`${ANCHOR_SOURCE}:12`]: 'anchor-value' })
+  const beforeSkill = `See ${ANCHOR_SOURCE}:10.\n`
+  const afterSkill = `See ${ANCHOR_SOURCE}:99.\n`
+  const { io, result } = runAnchorPublication({ specs: [{
+    paths: [ANCHOR_MANIFEST], stage2: { [ANCHOR_MANIFEST]: stage2 }, stage3: { [ANCHOR_MANIFEST]: stage3 },
+    hunk: anchorHunk([ANCHOR_MANIFEST]), resolver: (state) => { state.worktreeBytes[`${CTX.checkout}/${ANCHOR_SKILL}`] = afterSkill },
+  }], scope: [ANCHOR_MANIFEST], carriers: { [ANCHOR_MANIFEST]: stage3, [ANCHOR_SKILL]: beforeSkill }, tracked: [ANCHOR_MANIFEST, ANCHOR_SKILL], limits: { build_rounds: 2 }, envelopes: {
+    'builder:2': buildEnv(), 'reviewer:2': reviewEnv('pass'),
+  } })
+  assert.equal(result.status, 'done')
+  assert.equal(io.state.abortCount, 1)
+  assert.equal(io.state.continueCount, 0)
+  assert.equal(io.state.worktreeBytes[`${CTX.checkout}/${ANCHOR_SKILL}`], beforeSkill)
+  assert.equal(io.state.addCommands.some((command) => command.includes(ANCHOR_SKILL)), false)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 2)
+})
 
 test('RV1-1 the observe-and-end residual reaches the commit and PR intent verbatim', () => {
   const residual = "The lane observes and ends a forbidden suite invocation only after it starts; it does not return a tool result to the seat, so #904's tool-result contract remains correctness-unverified."

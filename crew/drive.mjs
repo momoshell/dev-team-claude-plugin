@@ -2629,6 +2629,120 @@ export function shellArg(value) {
   return `'${String(value ?? '').replaceAll("'", "'\"'\"'")}'`
 }
 
+// Publication rebases can safely repair a conflict only when every path is one of the
+// resolver's carriers for a manifest directory. This is intentionally a path predicate:
+// the index bytes and resolver writes are checked separately below.
+const ANCHOR_MANIFEST_PATH = /^(.*)\/anchors\.json$/
+const CITATION_FILE_PATH = /^[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+\.md$/
+const safeRelativePath = (path) => typeof path === 'string'
+  && path.length > 0
+  && !path.startsWith('/')
+  && !path.split('/').some((part) => part === '' || part === '.' || part === '..')
+const manifestDirectory = (path) => {
+  if (!safeRelativePath(path)) return null
+  const match = ANCHOR_MANIFEST_PATH.exec(path)
+  return match?.[1] || null
+}
+const directCitation = (path, directory) => path === `${directory}/SKILL.md`
+  || (path.startsWith(`${directory}/`) && path.slice(`${directory}/`.length).endsWith('.md') && !path.slice(`${directory}/`.length).includes('/'))
+const referenceCitation = (path, directory) => {
+  if (!path.startsWith(`${directory}/references/`)) return false
+  const rest = path.slice(`${directory}/references/`.length)
+  return rest.endsWith('.md') && !rest.includes('/')
+}
+
+export function anchorConflictMechanical(conflicted) {
+  const paths = Array.isArray(conflicted) ? conflicted : []
+  if (paths.length === 0 || paths.some((path) => !safeRelativePath(path))) return false
+  const directories = new Set(paths.map(manifestDirectory).filter(Boolean))
+  if (directories.size === 0) return false
+  const references = new Set(paths.map((path) => {
+    if (!CITATION_FILE_PATH.test(path)) return null
+    const marker = '/references/'
+    const at = path.indexOf(marker)
+    return at > 0 ? path.slice(0, at) : null
+  }).filter(Boolean))
+  return paths.every((path) => manifestDirectory(path) !== null
+    || (CITATION_FILE_PATH.test(path) && [...directories].some((directory) => references.has(directory)
+      ? path === `${directory}/SKILL.md` || referenceCitation(path, directory)
+      : directCitation(path, directory))))
+}
+
+// A manifest is an object whose keys carry line numbers. Canonicalization removes only
+// those terminal numbers and sorts the resulting ENTRY SEQUENCE. It never uses an object
+// keyed by the normalized path: two lines in one source file are distinct evidence.
+const ANCHOR_LINE_KEY = /^[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+:\d+$/
+const manifestKeyWithoutLine = (key) => typeof key === 'string' && ANCHOR_LINE_KEY.test(key) ? key.replace(/:\d+$/, '') : key
+const canonicalValue = (value) => {
+  try {
+    const json = JSON.stringify(value)
+    return json === undefined ? String(value) : json
+  } catch {
+    return String(value)
+  }
+}
+const compareCanonicalText = (left, right) => left < right ? -1 : left > right ? 1 : 0
+
+export function canonicalAnchorManifest(input) {
+  let manifest
+  try { manifest = typeof input === 'string' ? JSON.parse(input) : input } catch { return null }
+  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) return null
+  return Object.entries(manifest)
+    .map(([key, value]) => [manifestKeyWithoutLine(key), value])
+    .sort((left, right) => compareCanonicalText(String(left[0]), String(right[0]))
+      || compareCanonicalText(canonicalValue(left[1]), canonicalValue(right[1])))
+}
+
+// Citation normalization has the same narrow grammar as anchor-pin's scanner. Range
+// endpoints are both fields; no other number in prose, code or an unrelated path moves.
+const CITATION_PATH_PATTERN = '([A-Za-z0-9_.-]+(?:\\/[A-Za-z0-9_.-]+)+\\.(?:mjs|ts|js|json|md|sh|yml))'
+const CITATION_RANGE_RE = new RegExp(`(${CITATION_PATH_PATTERN}):(\\d+)-(\\d+)(?!\\d)`, 'g')
+const CITATION_LINE_RE = new RegExp(`(${CITATION_PATH_PATTERN}):(\\d+)(?!-\\d)`, 'g')
+const CITATION_ROOTS = new Set(['crew', 'scripts', 'test', 'docs', 'skills', 'visualizer', 'tasks', '.github'])
+const recognizedCitationPath = (path) => CITATION_ROOTS.has(path.split('/')[0])
+
+export function canonicalCitationDoc(input) {
+  if (typeof input !== 'string') return null
+  return input
+    .replace(CITATION_RANGE_RE, (match, path) => recognizedCitationPath(path) ? `${path}:<line>-<line>` : match)
+    .replace(CITATION_LINE_RE, (match, path) => recognizedCitationPath(path) ? `${path}:<line>` : match)
+}
+
+const canonicalAnchorContent = (path, bytes) => {
+  if (typeof bytes !== 'string') return null
+  if (manifestDirectory(path) !== null) return canonicalAnchorManifest(bytes)
+  if (CITATION_FILE_PATH.test(path)) return canonicalCitationDoc(bytes)
+  return null
+}
+const canonicalEqual = (left, right) => {
+  try { return JSON.stringify(left) === JSON.stringify(right) } catch { return false }
+}
+
+// `stages` carries one repaired path and both index sides for every conflict. A repaired
+// anchor is accepted only when each side agrees after line-number-only normalization.
+export function lineNumberOnlyAnchorResolution(stages) {
+  if (!Array.isArray(stages) || stages.length === 0) return false
+  return stages.every((entry) => {
+    const row = Array.isArray(entry)
+      ? { path: entry[0], repaired: entry[1], stage2: entry[2], stage3: entry[3] }
+      : entry
+    const repaired = canonicalAnchorContent(row?.path, row?.repaired)
+    const stage2 = canonicalAnchorContent(row?.path, row?.stage2)
+    const stage3 = canonicalAnchorContent(row?.path, row?.stage3)
+    return repaired !== null && stage2 !== null && stage3 !== null
+      && canonicalEqual(repaired, stage2) && canonicalEqual(repaired, stage3)
+  })
+}
+
+export const isAnchorMechanicalConflict = anchorConflictMechanical
+export const canonicalizeAnchorManifest = canonicalAnchorManifest
+export const canonicalizeCitationDoc = canonicalCitationDoc
+
+export function rebaseConflictRoute({ mechanical, bounces, buildRounds }) {
+  if (mechanical) return 'mechanical'
+  return bounces < Math.max(0, buildRounds - 1) ? 'bounce' : 'escalate'
+}
+
 export function journalRowsSinceRunStart(text) {
   const rows = []
   for (const line of String(text || '').split('\n')) {
@@ -6538,6 +6652,9 @@ function runTask(ctx, io, crash) {
 
   const censusEnabled = !io.calls || typeof io.runClean === 'function'
   let postCommitCensusBounces = 0
+  // This counter belongs to the whole accepted lane, not to suiteCycle: a proven
+  // abort may re-enter that cycle, but it must not mint a fresh rebase budget.
+  let rebaseConflictBounces = 0
   let suiteBuildBrief = planPath
   let suiteBuildNote = 'build'
   const censusFiles = (census) => {
@@ -7574,20 +7691,208 @@ function runTask(ctx, io, crash) {
           conflicted = String(io.run('git diff --name-only --diff-filter=U')?.output || '')
             .split('\n').map((line) => line.trim()).filter(Boolean)
         } catch { conflicted = [] }
-        let aborted
-        try { aborted = io.run('git rebase --abort') }
-        catch { aborted = { ok: false, output: '' } }
-        const restoredHead = probe('git rev-parse HEAD')
         const conflictDetail = conflicted.length ? ` with conflicts in ${conflicted.join(', ')}` : ''
-        if (!aborted?.ok || !restoredHead || restoredHead !== preRebaseCommit) {
-          const found = restoredHead || '(unavailable)'
-          stageComplete()
-          return escalate('rebase', `the rebase onto ${base} failed${conflictDetail}; restoration is UNPROVEN — HEAD found after abort: ${found}`, [], { commit: S.commit }, { files: escalationFiles(conflicted), base, commit: S.commit })
+
+        // Capture both index stages and the combined hunk BEFORE aborting. The index is
+        // the only place that can still prove whether a conflict was line-number churn;
+        // after --abort these blobs and hunks are gone.
+        const stageBytes = new Map()
+        let evidenceMeasured = conflicted.length > 0
+        for (const path of conflicted) {
+          for (const number of [2, 3]) {
+            let shown
+            try { shown = io.run(`git show ${shellArg(`:${number}:${path}`)}`) } catch { shown = null }
+            const bytes = shown?.ok === true && typeof shown.output === 'string' ? shown.output : null
+            stageBytes.set(`${number}:${path}`, bytes)
+            if (bytes === null) evidenceMeasured = false
+          }
         }
-        stageComplete()
-        return escalate('rebase', conflicted.length
-          ? `the rebase onto ${base} failed with conflicts in ${conflicted.join(', ')}; restoration proven at HEAD ${restoredHead}`
-          : `the rebase onto ${base} failed`, [], { commit: S.commit }, { files: escalationFiles(conflicted), base, commit: S.commit })
+        let conflictHunks = null
+        if (conflicted.length > 0) {
+          let hunks
+          try { hunks = io.run(`git diff --cc -- ${conflicted.map((path) => shellArg(path)).join(' ')}`) } catch { hunks = null }
+          conflictHunks = hunks?.ok === true && typeof hunks.output === 'string' ? hunks.output : null
+          if (!conflictHunks || !conflictHunks.trim()) evidenceMeasured = false
+        }
+
+        // The resolver's complete carrier set is proved tracked before the CLI runs.
+        // `--cached`, ordinary `--others`, and ignored `--others` are separate Git
+        // queries because --ignored changes the meaning of --others rather than adding
+        // a third category to one listing.
+        const carrierInventory = (directories) => {
+          const quoted = [...directories].sort().map((directory) => shellArg(directory)).join(' ')
+          const list = (command) => {
+            let result
+            try { result = io.run(command) } catch { return null }
+            if (result?.ok !== true || typeof result.output !== 'string') return null
+            return result.output.split('\0').filter((path) => path.length > 0)
+          }
+          const tracked = list(`git ls-files -z --cached -- ${quoted}`)
+          const ordinary = list(`git ls-files -z --others --exclude-standard -- ${quoted}`)
+          const ignored = list(`git ls-files -z --others --ignored --exclude-standard -- ${quoted}`)
+          if (!tracked || !ordinary || !ignored) return { ok: false, why: 'anchor resolver carrier inventory was unreadable' }
+          const all = new Set([...tracked, ...ordinary, ...ignored])
+          const trackedSet = new Set(tracked)
+          const carriers = new Set()
+          for (const directory of directories) {
+            const manifest = `${directory}/anchors.json`
+            if (!all.has(manifest)) return { ok: false, why: `anchor manifest ${manifest} was not found` }
+            carriers.add(manifest)
+            const skill = `${directory}/SKILL.md`
+            const refs = [...all].filter((path) => referenceCitation(path, directory))
+            if (all.has(skill)) carriers.add(skill)
+            if (refs.length > 0) {
+              for (const path of refs) carriers.add(path)
+            } else if (!all.has(skill)) {
+              for (const path of all) if (directCitation(path, directory)) carriers.add(path)
+            }
+          }
+          const untracked = [...carriers].filter((path) => !trackedSet.has(path)).sort()
+          if (untracked.length > 0) return { ok: false, why: `anchor resolver carrier is not tracked: ${untracked.join(', ')}` }
+          return { ok: true, carriers: [...carriers].sort(), tracked: trackedSet }
+        }
+
+        const anchorResolution = () => {
+          if (!evidenceMeasured || !anchorConflictMechanical(conflicted)) return { ok: false, why: 'conflict is not mechanically anchor-resolvable' }
+          if (conflicted.some((path) => !inScope(path))) return { ok: false, why: 'anchor conflict path is outside the accepted scope' }
+          const stagesReadable = conflicted.every((path) => canonicalAnchorContent(path, stageBytes.get(`2:${path}`)) !== null
+            && canonicalAnchorContent(path, stageBytes.get(`3:${path}`)) !== null)
+          if (!stagesReadable) return { ok: false, why: 'anchor conflict stages were malformed or unreadable' }
+          const directories = new Set(conflicted.map(manifestDirectory).filter(Boolean))
+          const inventory = carrierInventory(directories)
+          if (!inventory.ok) return inventory
+          const checkout = `git checkout --ours -- ${conflicted.map((path) => shellArg(path)).join(' ')}`
+          let checkedOut
+          try { checkedOut = io.run(checkout) } catch (err) { checkedOut = { ok: false, output: err?.message ?? String(err) } }
+          if (checkedOut?.ok !== true) return { ok: false, why: `taking the rebase incoming side failed${checkedOut?.output ? `: ${String(checkedOut.output).slice(-1000)}` : ''}` }
+          const before = new Map()
+          for (const path of inventory.carriers) {
+            let bytes
+            try { bytes = io.readFile(`${ctx.checkout}/${path}`) } catch (err) { return { ok: false, why: `anchor resolver carrier ${path} could not be read before repair: ${err?.message ?? String(err)}` } }
+            if (typeof bytes !== 'string') return { ok: false, why: `anchor resolver carrier ${path} could not be read before repair` }
+            before.set(path, bytes)
+          }
+          for (const directory of [...directories].sort()) {
+            const command = `node skills/qa-test-writing/anchor-pin.mjs --repair-all ${shellArg(directory)} --root ${shellArg(ctx.checkout)}`
+            let resolved
+            try { resolved = io.run(command) } catch (err) { resolved = { ok: false, output: err?.message ?? String(err) } }
+            const refusalOutput = /^\s*refused\b/m.test(String(resolved?.output || ''))
+            if (resolved?.ok !== true || (Array.isArray(resolved?.refusals) && resolved.refusals.length > 0) || refusalOutput) {
+              return { ok: false, why: `anchor resolver refused${resolved?.output ? `: ${String(resolved.output).slice(-2000)}` : ''}` }
+            }
+          }
+          const after = new Map()
+          for (const path of inventory.carriers) {
+            let bytes
+            try { bytes = io.readFile(`${ctx.checkout}/${path}`) } catch (err) { return { ok: false, why: `anchor resolver carrier ${path} could not be read after repair: ${err?.message ?? String(err)}` } }
+            after.set(path, typeof bytes === 'string' ? bytes : null)
+          }
+          const changed = inventory.carriers.filter((path) => before.get(path) !== after.get(path)).sort()
+          const recognized = new Set(inventory.carriers)
+          const resolverWritesSafe = changed.every((path) => inScope(path) && recognized.has(path))
+          if (!resolverWritesSafe) return { ok: false, why: 'anchor resolver write set is unsafe' }
+          const stages = conflicted.map((path) => ({
+            path, stage2: stageBytes.get(`2:${path}`), stage3: stageBytes.get(`3:${path}`), repaired: after.get(path),
+          }))
+          if (!lineNumberOnlyAnchorResolution(stages)) return { ok: false, why: 'anchor conflict changes content' }
+          const conflictedSet = new Set(conflicted)
+          for (const path of changed) {
+            if (conflictedSet.has(path)) continue
+            const beforeForm = canonicalAnchorContent(path, before.get(path))
+            const afterForm = canonicalAnchorContent(path, after.get(path))
+            if (beforeForm === null || afterForm === null || !canonicalEqual(beforeForm, afterForm)) {
+              return { ok: false, why: `anchor resolver changed content in ${path}` }
+            }
+          }
+          const verified = [...new Set([...conflicted, ...changed])].sort()
+          if (verified.length === 0) return { ok: false, why: 'anchor resolver produced no verified paths' }
+          let added
+          try { added = io.run(`git add -- ${verified.map((path) => shellArg(path)).join(' ')}`) } catch (err) { added = { ok: false, output: err?.message ?? String(err) } }
+          if (added?.ok !== true) return { ok: false, why: `staging the resolved anchor paths failed${added?.output ? `: ${String(added.output).slice(-1000)}` : ''}` }
+          let continued
+          try { continued = io.run('git -c core.editor=true rebase --continue') } catch (err) { continued = { ok: false, output: err?.message ?? String(err) } }
+          if (continued?.ok !== true) return { ok: false, why: `continuing the resolved rebase failed${continued?.output ? `: ${String(continued.output).slice(-1000)}` : ''}` }
+          return { ok: true }
+        }
+
+        // Every failed recovery reaches this one abort path. No write-back is attempted:
+        // the existing abort/HEAD proof is the sole restoration mechanism.
+        const restoreConflict = (mechanical, why, routeOverride = null) => {
+          let aborted
+          try { aborted = io.run('git rebase --abort') }
+          catch (err) { aborted = { ok: false, output: err?.message ?? String(err) } }
+          const restoredHead = probe('git rev-parse HEAD')
+          if (!aborted?.ok || !restoredHead || restoredHead !== preRebaseCommit) {
+            const found = restoredHead || '(unavailable)'
+            return { escalation: escalate('rebase', `the rebase onto ${base} failed${conflictDetail}; restoration is UNPROVEN — HEAD found after abort: ${found}`, [], { commit: S.commit }, { files: escalationFiles(conflicted), base, commit: S.commit }) }
+          }
+          if (!evidenceMeasured) {
+            return { escalation: escalate('rebase', conflicted.length
+              ? `the rebase onto ${base} failed with conflicts in ${conflicted.join(', ')}; restoration proven at HEAD ${restoredHead}`
+              : `the rebase onto ${base} failed`, [], { commit: S.commit }, { files: escalationFiles(conflicted), base, commit: S.commit }) }
+          }
+          const route = routeOverride || rebaseConflictRoute({ mechanical: false, bounces: rebaseConflictBounces, buildRounds: limits.build_rounds })
+          if (route === 'escalate') {
+            return { escalation: escalate('rebase', `the rebase onto ${base} failed with conflicts in ${conflicted.join(', ')}; restoration proven at HEAD ${restoredHead}; the limits.build_rounds budget is exhausted`, [], { commit: S.commit }) }
+          }
+          const restoredParent = probe('git rev-parse HEAD^')
+          if (!restoredParent) {
+            return { escalation: escalate('rebase', `the rebase onto ${base} failed with conflicts in ${conflicted.join(', ')}; restoration proven at HEAD ${restoredHead}, but the recovery commit ${S.commit} has no readable parent for the bounded builder bounce`, [], { commit: S.commit }) }
+          }
+          let reset
+          try { reset = io.run(`git reset --soft ${restoredParent}`) } catch (err) { reset = { ok: false, output: err?.message ?? String(err) } }
+          if (!reset?.ok) {
+            return { escalation: escalate('rebase', `the rebase onto ${base} failed with conflicts in ${conflicted.join(', ')}; restoration proven at HEAD ${restoredHead}, but the soft reset to ${restoredParent} failed${reset?.output ? `: ${String(reset.output).slice(-1000)}` : ''}`, [], { commit: S.commit }) }
+          }
+          const bounceNumber = rebaseConflictBounces + 1
+          const bounce = art(`rebase-conflict-bounce-r${bounceNumber}.md`)
+          const hunkText = conflictHunks || '(conflict hunks unavailable)'
+          try {
+            io.writeFile(bounce, [
+              `# Rebase conflict bounce (round ${bounceNumber})`, '',
+              `The rebase onto ${base} failed after the accepted commit ${S.commit}. Restoration was proven at HEAD ${restoredHead}.`,
+              `Recovery route: ${mechanical ? 'mechanical anchor repair was refused' : (why || 'the conflict requires builder reconciliation')}.`,
+              '', 'Conflicted paths:', ...conflicted.map((path) => `- ${path}`),
+              '', 'Combined conflict hunks (captured before abort):', hunkText,
+              '', `Plan: ${planPath}`,
+              'Reconcile these paths, then rerun the builder/review/gate/commit cycle.',
+            ].join('\n'))
+          } catch (err) {
+            return { escalation: escalate('rebase', `the rebase conflict was restored, but the builder bounce artifact could not be written: ${err?.message ?? String(err)}`, [], { commit: S.commit }) }
+          }
+          rebaseConflictBounces = bounceNumber
+          suiteBuildBrief = bounce
+          suiteBuildNote = 'rebase-conflict-fix'
+          return { bounce: true }
+        }
+
+        // Evidence with no measurable stage/hunk is intentionally not routed to a blind
+        // builder bounce. Otherwise a truncated conflict probe could spend build budget.
+        if (!evidenceMeasured) {
+          const settled = restoreConflict(false, 'conflict evidence was empty or unmeasurable')
+          if (settled.escalation) { stageComplete(); return settled.escalation }
+          stageComplete()
+          return escalate('rebase', `the rebase onto ${base} failed${conflictDetail}`, [], { commit: S.commit }, { files: escalationFiles(conflicted), base, commit: S.commit })
+        }
+        const classifiedMechanical = anchorConflictMechanical(conflicted)
+        const classifiedRoute = rebaseConflictRoute({ mechanical: classifiedMechanical, bounces: rebaseConflictBounces, buildRounds: limits.build_rounds })
+        const mechanical = classifiedRoute === 'mechanical'
+          ? anchorResolution()
+          : { ok: false, why: classifiedMechanical ? 'mechanical anchor recovery route was unavailable' : 'conflict is not mechanically anchor-resolvable' }
+        if (mechanical.ok) {
+          // A successful continue rejoins the existing postRebaseHead/direct-parent/
+          // refreshProofTree path below. No second proof is introduced here.
+        } else {
+          const routeOverride = classifiedMechanical && classifiedRoute !== 'mechanical' ? classifiedRoute : null
+          const settled = restoreConflict(classifiedMechanical, mechanical.why, routeOverride)
+          if (settled.escalation) { stageComplete(); return settled.escalation }
+          if (settled.bounce) {
+            stageComplete()
+            continue suiteCycle
+          }
+          stageComplete()
+          return escalate('rebase', `the rebase onto ${base} failed${conflictDetail}`, [], { commit: S.commit }, { files: escalationFiles(conflicted), base, commit: S.commit })
+        }
       }
       const postRebaseHead = probe('git rev-parse HEAD')
       if (!postRebaseHead) {

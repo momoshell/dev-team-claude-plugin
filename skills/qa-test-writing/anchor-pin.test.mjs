@@ -598,6 +598,38 @@ test('an unmeasurable lane fence is empty and warns rather than throwing', () =>
   }
 })
 
+// The review proved a lane branched from something OTHER than the base ref gets a merge base
+// that is an ancestor of both, so its fence is WIDER than its own work — and that a stale
+// remote-tracking ref reproduces the same thing. Neither is detectable locally. What the fence
+// CAN do is name the commit it actually measured against, so a caller who knows the true
+// branch point can pass it and an auditor can check afterwards.
+test('G1 the fence names the commit it measured against, not just the symbolic ref', () => {
+  const root = scratchDir('base-commit-')
+  mkdirSync(join(root, 'skills'), { recursive: true })
+  git(root, 'init', '--quiet')
+  git(root, 'symbolic-ref', 'HEAD', 'refs/heads/main')
+  writeFileSync(join(root, 'skills/base.md'), 'base\n')
+  git(root, 'add', '.')
+  git(root, 'commit', '--quiet', '-m', 'base')
+  const baseSha = git(root, 'rev-parse', 'HEAD').trim()
+  git(root, 'checkout', '--quiet', '-b', 'lane')
+  writeFileSync(join(root, 'skills/lane.md'), 'lane\n')
+  git(root, 'add', '.')
+  git(root, 'commit', '--quiet', '-m', 'lane')
+
+  // an explicit base is honoured, and the RESOLVED COMMIT is reported
+  const fence = laneFence({ root, base: 'main' })
+  assert.equal(fence.measured, true)
+  assert.equal(fence.baseCommit, baseSha, 'the resolved commit is reported, not only the ref name')
+  assert.deepEqual(fence.paths, ['skills/lane.md'])
+
+  // an unresolvable base still refuses by name AND reports no commit
+  const missing = laneFence({ root, base: 'origin/does-not-exist' })
+  assert.equal(missing.measured, false)
+  assert.equal(missing.baseCommit, null)
+  assert.match(missing.reason, /no merge base with origin\/does-not-exist/)
+})
+
 test('laneFence excludes main-only paths after a lane forks', () => {
   // Mutation killed: diffing against the main tip reports an upstream-only path as lane-owned.
   const root = scratchDir('b383-lane-fence-')
@@ -618,7 +650,8 @@ test('laneFence excludes main-only paths after a lane forks', () => {
   writeFileSync(join(root, 'skills/lane-note.md'), 'this lane owns this file\n')
   const repoRoot = realpathSync(root)
   const result = laneFence({ root: repoRoot })
-  assert.deepEqual(result, { paths: ['skills/lane-note.md'], measured: true, reason: null, base: 'origin/main' })
+  assert.match(String(result.baseCommit), /^[0-9a-f]{40}$/, 'the fence reports the commit it measured against')
+  assert.deepEqual({ ...result, baseCommit: undefined }, { paths: ['skills/lane-note.md'], measured: true, reason: null, base: 'origin/main', baseCommit: undefined })
   assert.equal(result.paths.includes('crew/sample.mjs'), false)
 })
 
@@ -675,7 +708,9 @@ test('repair-all CLI repairs a committed shift on clean main', () => {
   git(root, 'commit', '--quiet', '-m', 'committed shift')
   git(root, 'update-ref', 'refs/remotes/origin/main', 'HEAD')
   const repoRoot = realpathSync(root)
-  assert.deepEqual(laneFence({ root: repoRoot }), { paths: [], measured: true, reason: null, base: 'origin/main' })
+  const cleanFence = laneFence({ root: repoRoot })
+  assert.match(String(cleanFence.baseCommit), /^[0-9a-f]{40}$/, 'the fence reports the commit it measured against')
+  assert.deepEqual({ ...cleanFence, baseCommit: undefined }, { paths: [], measured: true, reason: null, base: 'origin/main', baseCommit: undefined })
   const warnings = []
   assert.equal(assertAnchorsPinned({ root: repoRoot, skillDir, manifestPath, minAnchors: 1, log: warnings.push.bind(warnings) }), 1)
   assert.equal(warnings.length, 1)

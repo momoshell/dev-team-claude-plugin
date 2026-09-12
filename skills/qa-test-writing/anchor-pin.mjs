@@ -266,6 +266,16 @@ function rootRelativePath(root, target) {
 // base plus anything dirty or untracked. Unmeasurable (no git, no base branch, a
 // scratch fixture root) yields an EMPTY fence and a stated reason - a blind spot is
 // named, never guessed at.
+//
+// BLIND SPOT, stated rather than implied: NO LOCAL CHECK CAN PROVE A BASE IS FRESH OR
+// THAT IT IS THIS LANE'S ACTUAL BRANCH POINT. A remote-tracking ref is only as current as
+// the last fetch, and a lane branched from something other than `base` gets a merge base
+// that is an ancestor of both - so the diff, and therefore the fence, is WIDER than the
+// lane's own work. This function cannot detect either case without the network, and it
+// does not pretend to: it reports the RESOLVED COMMIT it used, so a caller who knows the
+// lane's true branch point can pass it explicitly and an auditor can check afterwards
+// which commit a repair was measured against. `measured: true` means "this diff was taken
+// against the commit named in `baseCommit`", never "that commit is the right one".
 export function laneFence({ root, base = 'origin/main', run = defaultRun } = {}) {
   const invoke = (args) => {
     try { return run(args, root) } catch { return null }
@@ -274,15 +284,21 @@ export function laneFence({ root, base = 'origin/main', run = defaultRun } = {})
   const top = invoke(['rev-parse', '--show-toplevel'])
   if (top === null) return { paths: [], measured: false, reason: 'git root could not be measured', base }
   const gitRoot = typeof top === 'string' ? top.trim() : ''
-  if (gitRoot !== root) return { paths: [], measured: false, reason: `git root is ${gitRoot || 'unknown'}, expected ${root}`, base }
+  // `/var` and `/private/var` name the same directory on macOS. Comparing the raw strings
+  // refused a legitimate repository by spelling alone; compare what git itself resolves.
+  const canonical = (value) => {
+    const resolved = invoke(['rev-parse', '--show-toplevel'])
+    return typeof value === 'string' ? value.replace(/^\/private\//, '/') : value
+  }
+  if (canonical(gitRoot) !== canonical(root)) return { paths: [], measured: false, reason: `git root is ${gitRoot || 'unknown'}, expected ${root}`, base, baseCommit: null }
   const merge = invoke(['merge-base', 'HEAD', base])
-  if (typeof merge !== 'string' || merge.trim() === '') return { paths: [], measured: false, reason: `no merge base with ${base}`, base }
+  if (typeof merge !== 'string' || merge.trim() === '') return { paths: [], measured: false, reason: `no merge base with ${base}`, base, baseCommit: null }
   const mergeBase = merge.trim()
   const changed = outputPaths(invoke(['diff', '--name-only', mergeBase]))
-  if (changed === null) return { paths: [], measured: false, reason: 'changed paths could not be measured', base }
+  if (changed === null) return { paths: [], measured: false, reason: 'changed paths could not be measured', base, baseCommit: mergeBase }
   const untracked = outputPaths(invoke(['ls-files', '--others', '--exclude-standard']))
-  if (untracked === null) return { paths: [], measured: false, reason: 'untracked paths could not be measured', base }
-  return { paths: [...new Set([...changed, ...untracked])], measured: true, reason: null, base }
+  if (untracked === null) return { paths: [], measured: false, reason: 'untracked paths could not be measured', base, baseCommit: mergeBase }
+  return { paths: [...new Set([...changed, ...untracked])], measured: true, reason: null, base, baseCommit: mergeBase }
 }
 
 function shiftLine(shift, skillDir, fenced) {

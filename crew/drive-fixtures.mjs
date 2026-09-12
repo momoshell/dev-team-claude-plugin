@@ -1384,6 +1384,7 @@ const DRIVE_JOURNAL_EXPECTED = Object.freeze([
   ["recordRow", "", "at review_round"],
   ["recordRow", "", "at auto_fix"],
   ["recordRow", "", "at commit_subject"],
+  ["recordRow", "", "at gate_proof_parent gate_generation"],
   ["recordRow", "", "at cold_suite"],
   ["recordRow", "", "at narration"],
   ["recordRow", "", "at published"],
@@ -1471,6 +1472,8 @@ function publicationIo(options = {}) {
     'git rebase origin/main': (s) => { s.head = s.post; return { ok: true, output: '' } },
     'git diff --name-only --diff-filter=U': { ok: true, output: '' },
     'git rebase --abort': (s) => { s.head = s.pre; return { ok: true, output: '' } },
+    // A single-commit lane replayed onto the base: its parent IS the base.
+    'git rev-parse HEAD^': { ok: true, output: 'base1111\n' },
     'git rev-parse HEAD': (s) => ({ ok: true, output: `${s.head}\n` }),
     'command -v gh': { ok: true, output: '/usr/bin/gh\n' },
     'gh auth status': { ok: true, output: 'logged in\n' },
@@ -1482,7 +1485,12 @@ function publicationIo(options = {}) {
   const envelopes = {
     'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'), ...envelopeOverrides,
   }
-  const findCommand = (command) => Object.keys(commands).find((key) => command === key || command.startsWith(key))
+  // EXACT match wins before any prefix match. `startsWith` alone makes
+  // `git rev-parse HEAD^` resolve to the `git rev-parse HEAD` entry and hand back
+  // the lane's own head as its parent, which is never true of a real rebase
+  // (#1021, b627). A more specific key must never be shadowed by a shorter one.
+  const findCommand = (command) => Object.keys(commands).find((key) => command === key)
+    ?? Object.keys(commands).find((key) => command.startsWith(key))
   const response = (command) => {
     const key = findCommand(command)
     if (!key) return { ok: true, output: '' }

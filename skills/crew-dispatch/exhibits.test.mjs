@@ -180,7 +180,7 @@ test('the batch reference names every refusal the sequence can hit', () => {
   assert.equal(text.includes('prose file:line citations in'), false)
 })
 
-test('the warning doctrine carries each measured blind spot and citation rule', () => {
+test('C1 E1 span reach doctrine records the measured choice', () => {
   const text = readText(join(HERE, 'references/batch.md'))
   const blindSpots = [
     'BLIND SPOT: an unpinned file:line citation is in no manifest key, so neither this check nor the citation-carrier check can find it; a citation the anchor corpus does not pin is still discoverable only by hand',
@@ -192,15 +192,28 @@ test('the warning doctrine carries each measured blind spot and citation rule', 
   assert.ok(text.includes('dispatch.warnings.json'))
   assert.ok(text.includes('dispatch-batch: WARNING-SUMMARY'))
   assert.ok(text.includes('report=') && text.includes('doctrine=skills/crew-dispatch/references/batch.md'))
+  const measuredFact = 'Measured fact: test reach is scored against the whole carrier path, so a span fence does not buy parallelism when another lane holds a test that reaches that file.'
+  assert.equal(text.split(measuredFact).length - 1, 1)
+  for (const row of [
+    '| 1 | `null` | `static-path-has-no-line-information` |',
+    '| 2 | `null` | `not-measured-option-not-selected` |',
+    '| 3 | `test-reach-unfenced` | `selected-whole-file-reach` |',
+  ]) assert.equal(text.split(row).length - 1, 1)
+  assert.equal(text.includes('span-scoped carrier'), false)
 })
 
-test('E1 documents the anchor obligation distinction exactly once', () => {
+test('RV1-1 census-carrier span false negative and anchor obligation distinctions remain documented', () => {
   const text = readText(join(HERE, 'references/batch.md'))
+  const secondFalseNegative = 'The second is a fence entry carrying a span: `skills/crew-dispatch/exhibits.test.mjs:START-END` is scored as held because `parseFenceScope` supplies the bare path to `matchOwn`, so that carrier is never reported missing and never admitted, while the owed `const measurement` and `const pristinePairs` repairs sit outside the authored span and the scope gate will refuse them.'
+  assert.equal(text.split('There are two false negatives this warning does not measure.').length - 1, 1)
+  assert.equal(text.split(secondFalseNegative).length - 1, 1)
+  assert.equal(text.includes('span-scoped carrier'), false)
   const sentence = 'A manifest pinning only files the lane does not write is not an obligation on that lane; when the lane writes a pinned file, dispatch admits the unheld pinning manifest automatically.'
   assert.equal(text.split(sentence).length - 1, 1)
   const oldClaim = `a shifted pin whose manifest is outside the lane${String.fromCharCode(39)}s fence is a WARNING and the lane owes nothing.`
   assert.equal(text.replaceAll(/\s+/g, ' ').includes(oldClaim), false)
 })
+
 
 test('test reach constant names the computed path blind spot', () => {
   assert.ok(TEST_REACH_BLIND_SPOT.includes('a computed path or dynamic import is invisible to a static scan'))

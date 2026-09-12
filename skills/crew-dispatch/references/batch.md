@@ -122,7 +122,15 @@ The **census-carrier** warning carries this exact blind spot: BLIND SPOT: this w
 
 This is a possibility-only trigger: it fires because a fenced `*.test.mjs` edit might move either repository-wide census, not because dispatch has observed a move. Its two carriers are `skills/crew-dispatch/references/batch.md` and `skills/crew-dispatch/exhibits.test.mjs`. Each concrete missing carrier is admitted with source `census-carrier` when unheld; a measured holder leaves it outside the effective fence and the possibility-only warning remains warning-only. This follows ADR-040: the warning and this exact blind spot remain visible because admission proves neither a census move nor test intent; the owed repair still updates batch.md's measurement sentence, exhibits.test.mjs's `const measurement`, and its `const pristinePairs` after the test edit.
 
-There are two false negatives this warning does not measure. A directory-prefix fence entry such as `test/` or `crew/` is supported, including a lane whose `creates` path is a new tracked test, but the trigger reads only whole-file `*.test.mjs` fence entries. Such a lane emits no census warning even though its directory fence is the broadest test-editing surface in the batch. Conversely, a span-scoped carrier such as `skills/crew-dispatch/exhibits.test.mjs#L1-L50` is scored as reached because `parseFenceScope` strips the span before `matchOwn` checks the carrier, while the owed `const measurement` and `const pristinePairs` repairs in `exhibits.test.mjs` are outside that span and the scope gate will refuse them.
+There are two false negatives this warning does not measure. A directory-prefix fence entry such as `test/` or `crew/` is supported, including a lane whose `creates` path is a new tracked test, but the trigger reads only whole-file `*.test.mjs` fence entries. Such a lane emits no census warning even though its directory fence is the broadest test-editing surface in the batch. The second is a fence entry carrying a span: `skills/crew-dispatch/exhibits.test.mjs:START-END` is scored as held because `parseFenceScope` supplies the bare path to `matchOwn`, so that carrier is never reported missing and never admitted, while the owed `const measurement` and `const pristinePairs` repairs sit outside the authored span and the scope gate will refuse them.
+
+Measured fact: test reach is scored against the whole carrier path, so a span fence does not buy parallelism when another lane holds a test that reaches that file. A fence such as `skills/crew-dispatch/exhibits.test.mjs:START-END` is parsed by `parseFenceScope`, which supplies the bare path to `matchOwn` for reach matching; the authored `path:START-END` spans remain in the refusal remedy. This is intentional option 3 behavior — selected whole-file reach, not a blind spot.
+
+| Option | Result | Closed reason |
+| --- | --- | --- |
+| 1 | `null` | `static-path-has-no-line-information` |
+| 2 | `null` | `not-measured-option-not-selected` |
+| 3 | `test-reach-unfenced` | `selected-whole-file-reach` |
 
 Silence from this check is therefore an UNMEASURED clear, not a measured one: the carrier side, `matchOwn`, honours directory prefixes, while the trigger side does not.
 

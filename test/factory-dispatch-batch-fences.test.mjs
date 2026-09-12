@@ -1909,7 +1909,7 @@ DIRECT && test('the path fact names the file reached by path', () => {
   assert.deepEqual(row, { test: testFile, file: ownerB, hops: null, how: 'path', symbols: [] })
 })
 
-DIRECT && test('D1', () => {
+DIRECT && test('A1 D1 span reach remains whole-file while write spans stay disjoint', () => {
   const checkout = gitFixture()
   put(join(checkout, 'crew', 'shared.mjs'), `${Array.from({ length: 20 }, (_, index) => `line-${index + 1}`).join('\n')}\n`)
   assert.doesNotThrow(() => checkFences({
@@ -1924,9 +1924,33 @@ DIRECT && test('D1', () => {
     checkout,
     deps: { home: join(root, 'span-disjoint-home'), log: () => {} },
   }))
+
+  const first = 'crew/shared.mjs:1-10'
+  const second = 'crew/shared.mjs:11-20'
+  for (const [lane, file] of [['lane-a', 'lane-a.test.mjs'], ['lane-b', 'lane-b.test.mjs']]) {
+    put(join(checkout, 'test', file), "import '../crew/shared.mjs'\n")
+    const added = spawnSync('git', ['-C', checkout, 'add', `test/${file}`], { encoding: 'utf8' })
+    assert.equal(added.status, 0, added.stderr)
+  }
+  const addedSource = spawnSync('git', ['-C', checkout, 'add', 'crew/shared.mjs'], { encoding: 'utf8' })
+  assert.equal(addedSource.status, 0, addedSource.stderr)
+  const error = thrown(() => checkFences({
+    fences: [
+      entry('lane-a', [first, 'test/lane-a.test.mjs']),
+      entry('lane-b', [second, 'test/lane-b.test.mjs']),
+    ],
+    lanes: [
+      { lane: 'lane-a', where: ['crew/shared.mjs'] },
+      { lane: 'lane-b', where: ['crew/shared.mjs'] },
+    ],
+    checkout,
+    deps: { home: join(root, 'span-reach-home'), log: () => {} },
+  }))
+  assert.equal(error.reason, 'test-reach-unfenced')
+  for (const span of [first, second]) assert.ok(error.message.includes(span), `A1 omitted ${span}`)
 })
 
-DIRECT && test('E1', () => {
+DIRECT && test('B1 overlapping write spans still refuse', () => {
   const checkout = gitFixture()
   put(join(checkout, 'crew', 'shared.mjs'), `${Array.from({ length: 20 }, (_, index) => `line-${index + 1}`).join('\n')}\n`)
   const first = 'crew/shared.mjs:1-10'
@@ -1941,7 +1965,7 @@ DIRECT && test('E1', () => {
     deps: { home: join(root, 'span-overlap-home'), log: () => {} },
   }))
   assert.equal(error.reason, 'sibling-leak')
-  for (const token of ['lane-a', 'lane-b', first, second]) assert.ok(error.message.includes(token), `E1 omitted ${token}`)
+  for (const token of ['lane-a', 'lane-b', first, second]) assert.ok(error.message.includes(token), `B1 omitted ${token}`)
 })
 
 DIRECT && test('F1a', () => {

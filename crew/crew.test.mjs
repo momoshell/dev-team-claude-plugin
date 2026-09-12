@@ -5105,6 +5105,23 @@ test('seatIo status and showDoc make no cmux calls without a workspace and statu
   } finally { rmSync(parent, { recursive: true, force: true }) }
 })
 
+test('seatIo gateNow uses an injected clock and a finite default monotonic clock', () => {
+  const parent = scratchDir('crew-gate-clock-')
+  const paths = { dir: parent, taskDir: parent, returnsDir: join(parent, 'returns') }
+  mkdirSync(paths.returnsDir, { recursive: true })
+  try {
+    const injected = seatIo({ workspace_id: null, window_id: null, members: {} }, paths, parent, null, null, {}, { gateNow: () => 17 })
+    assert.equal(injected.gateNow(), 17)
+    const fallback = seatIo({ workspace_id: null, window_id: null, members: {} }, paths, parent, null, null, {}, {})
+    const first = fallback.gateNow()
+    const second = fallback.gateNow()
+    assert.equal(Number.isFinite(first), true)
+    assert.equal(Number.isFinite(second), true)
+    assert.ok(first > 0)
+    assert.ok(second >= first)
+  } finally { rmSync(parent, { recursive: true, force: true }) }
+})
+
 test('seatIo wait reports a dead substrate as a host transport failure and journals it', () => {
   const parent = mkdtempSync(join(tmpdir(), 'crew-substrate-wait-'))
   const paths = { dir: parent, taskDir: parent, returnsDir: join(parent, 'returns') }
@@ -6620,6 +6637,7 @@ test('emitAdapter maps drive events to closed ledger vocabulary with explicit se
   assert.deepEqual(calls.gates[0], {
     adw_id: 'adw-test', phase_id: null, gate_name: 'gate:r1', attempt: 1, ok: false,
     checks: [{ total: 3, failed: 3, errored: 0 }], violations: [], gate_generation: null, pristine: false,
+    gate_run_ms: undefined, gate_run_ms_absent_reason: undefined,
   })
   assert.equal(calls.events.filter((event) => event.type === 'log').length, 2)
   assert.ok(calls.events.some((event) => event.type === 'log' && event.payload.level === 'warn'))
@@ -6714,7 +6732,7 @@ test('emitAdapter routes discrimination triples, review outcomes, and typed acce
   }
   const adapter = emitAdapter(emitter)
   adapter({ kind: 'stage', label: 'build:r1' })
-  adapter({ kind: 'gate', name: 'gate:r1', attempt: 1, ok: true, generation: 2, pristine: true, summary: { total: 5, failed: 0, errored: 0 } })
+  adapter({ kind: 'gate', name: 'gate:r1', attempt: 1, ok: true, generation: 2, pristine: true, gate_run_ms: 7, gate_run_ms_absent_reason: null, summary: { total: 5, failed: 0, errored: 0 } })
   adapter({ kind: 'discrimination', generation: 2, verdict: 'proven', summary: { total: 5, failed: 5, errored: 0 }, note: 'proof' })
   adapter({ kind: 'envelope', id: 'reviewer1', role: 'reviewer', status: 'done', review: { verdict: 'changes-needed', must_fix: 2, should_fix: 1, consider: 0 } })
   adapter({ kind: 'envelope', id: 'builder1', role: 'builder', status: 'done' })
@@ -6727,6 +6745,7 @@ test('emitAdapter routes discrimination triples, review outcomes, and typed acce
   assert.deepEqual(calls.gates[0], {
     adw_id: 'adw-outcomes', phase_id: 9, gate_name: 'gate:r1', attempt: 1, ok: true,
     checks: [{ total: 5, failed: 0, errored: 0 }], violations: [], gate_generation: 2, pristine: true,
+    gate_run_ms: 7, gate_run_ms_absent_reason: null,
   })
   assert.deepEqual(calls.discriminations[0], {
     adw_id: 'adw-outcomes', phase_id: 9, gate_generation: 2, verdict: 'proven',
@@ -6828,6 +6847,7 @@ test('a real ledger round trip mirrors drive gate verdicts into distinct gate_re
     emitter.startRun()
     const adapter = emitAdapter(emitter)
     const counts = {}
+    let gateClock = 0
     const envelopes = {
       'planner:1': {
         status: 'done', role: 'planner', details: {
@@ -6850,9 +6870,11 @@ test('a real ledger round trip mirrors drive gate verdicts into distinct gate_re
       run(cmd) {
         counts[cmd] = (counts[cmd] || 0) + 1
         if (cmd === 'gate-cmd') {
-          return counts[cmd] === 1
+          const result = counts[cmd] === 1
             ? { ok: false, output: 'baseline\nGATE-SUMMARY {"total":3,"failed":3,"errored":0}' }
             : counts[cmd] === 2 ? { ok: false, output: 'red' } : { ok: true, output: 'green' }
+          gateClock += 7
+          return result
         }
         // a hand-built io has no `.calls`, so the census valve reads it as production
         if (String(cmd).includes('census-exhibits.mjs')) {
@@ -6864,7 +6886,7 @@ test('a real ledger round trip mirrors drive gate verdicts into distinct gate_re
       runCold() { return { ok: true, output: '', path: '/zz/aa11bb', kept: null } },
       changedFiles() { return ['a.mjs'] },
       commit() { return 'abc1234' },
-      log() {}, status() {}, now() { return 0 },
+      log() {}, status() {}, now() { return 0 }, gateNow() { return gateClock },
     }
     const ctx = {
       task: 'gate-task', briefFile: '/tmp/brief.md', taskDir: '/tmp/gate-task', checkout: '/tmp/repo',
@@ -6877,6 +6899,7 @@ test('a real ledger round trip mirrors drive gate verdicts into distinct gate_re
     const rows = ledger.dumpTable('gate_results').filter((row) => row.adw_id === emitter.adwId)
     assert.equal(rows.length, 3)
     assert.equal(new Set(rows.map((row) => `${row.gate_name}:${row.attempt}`)).size, 3)
+    assert.ok(rows.every((row) => row.gate_run_ms === 7 && row.gate_run_ms_absent_reason === null))
     assert.equal(emitter.stats().dropped, 0)
     ledger.close()
   } finally {

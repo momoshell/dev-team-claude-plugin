@@ -9,6 +9,8 @@ import {
 import { CENSUS_CARRIER_FILES, CHECK_MATCHES, HARDENING_APPEAL_SHAPE, HARDENING_CLASSES, LIMITS, hardeningAppealLines, hardeningAppealRequest, hardeningClassOf, mutationProofScope } from './drive.mjs'
 import { openLedger, MUTATION_ANCHOR_REFUSALS } from '../scripts/factory/ledger.mjs'
 import { CENSUS_QUALIFYING_FILES, runCensusExhibits, selectCensusExhibits } from './census-exhibits.mjs'
+import { emitAdapter } from './seat-io.mjs'
+import { GATE_RUN_MS_ABSENT_REASONS, gateRunTiming } from './drive.mjs'
 
 const proofScopeMutations = () => [
   { check: 'first', file: 'a.mjs' },
@@ -4771,4 +4773,130 @@ test('RV2-1 keeps the H1 floor check task-local', () => {
   assert.equal(testSource.includes(`test('${retired}'`), false)
   const driverSource = readFileSync(`${process.cwd()}/crew/drive.mjs`, 'utf8')
   assert.equal(driverSource.includes("export const CENSUS_UNREADABLE = 'census-unreadable'"), true)
+})
+
+test('A1 measured gate duration survives drive, adapter, and a real ledger query', () => {
+  const dir = scratchDir('drive-gate-timing-')
+  const adwId = 'drive-gate-timing'
+  const ledger = openLedger({ dbPath: join(dir, 'ledger.db'), stderr: { write: () => {} } })
+  ledger.startSession({ adw_id: adwId, repo_slug: 'repo', task_slug: 'timing' })
+  let sequence = 0
+  const emitter = {
+    adwId,
+    phaseTransition: () => ({ phase_id: 1 }),
+    emit: (fn) => fn(ledger, () => ++sequence),
+  }
+  const adapter = emitAdapter(emitter)
+  const io = fakeIo({
+    emit: (event) => adapter(event),
+    envelopes: { 'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }), 'builder:1': buildEnv(), 'builder:2': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: {
+      'gate-cmd:1': { ok: false, output: RED(3) }, 'gate-cmd:2': { ok: false, output: RED(3) }, 'gate-cmd:3': { ok: true, output: '' },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  let clock = 100
+  io.gateNow = () => clock
+  const run = io.run.bind(io)
+  io.run = (command) => {
+    const result = run(command)
+    if (gateReapOriginal(command) === 'gate-cmd') clock += 7
+    return result
+  }
+  try {
+    const result = driveTask({ ...CTX, env: { ...CTX.env, CREW_SUITE_SLOTS: '0' } }, io)
+    assert.equal(result.status, 'done')
+    const rows = ledger.gateResultsFor([adwId])
+    assert.ok(rows.length >= 1)
+    assert.ok(rows.every((row) => row.gate_run_ms === 7 && row.gate_run_ms_absent_reason === null))
+  } finally {
+    ledger.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('B1 null gate clock samples are unmeasured', () => {
+  assert.deepEqual(gateRunTiming(null, 7), { gate_run_ms: null, gate_run_ms_absent_reason: GATE_RUN_MS_ABSENT_REASONS[0] })
+})
+
+test('B2 invalid gate clock samples are unmeasured', () => {
+  assert.deepEqual(gateRunTiming(Number.NaN, 7), { gate_run_ms: null, gate_run_ms_absent_reason: GATE_RUN_MS_ABSENT_REASONS[1] })
+})
+
+test('B3 regressed gate clock samples are unmeasured', () => {
+  assert.deepEqual(gateRunTiming(7, 6), { gate_run_ms: null, gate_run_ms_absent_reason: GATE_RUN_MS_ABSENT_REASONS[2] })
+})
+
+test('B4 zero-resolution gate clock samples are unmeasured', () => {
+  assert.deepEqual(gateRunTiming(7, 7), { gate_run_ms: null, gate_run_ms_absent_reason: GATE_RUN_MS_ABSENT_REASONS[3] })
+})
+
+test('B5 clockless production gate persists clock-unavailable', () => {
+  const dir = scratchDir('drive-gate-clockless-')
+  const adwId = 'drive-gate-clockless'
+  const ledger = openLedger({ dbPath: join(dir, 'ledger.db'), stderr: { write: () => {} } })
+  ledger.startSession({ adw_id: adwId, repo_slug: 'repo', task_slug: 'timing' })
+  let sequence = 0
+  const emitter = {
+    adwId,
+    phaseTransition: () => ({ phase_id: 1 }),
+    emit: (fn) => fn(ledger, () => ++sequence),
+  }
+  const adapter = emitAdapter(emitter)
+  const io = fakeIo({
+    emit: (event) => adapter(event),
+    envelopes: { 'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }), 'builder:1': buildEnv(), 'builder:2': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: {
+      'gate-cmd:1': { ok: false, output: RED(3) }, 'gate-cmd:2': { ok: false, output: RED(3) }, 'gate-cmd:3': { ok: true, output: '' },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  try {
+    assert.equal(Object.hasOwn(io, 'gateNow'), false)
+    const result = driveTask({ ...CTX, env: { ...CTX.env, CREW_SUITE_SLOTS: '0' } }, io)
+    assert.equal(result.status, 'done')
+    const rows = ledger.gateResultsFor([adwId])
+    assert.ok(rows.length >= 1)
+    assert.ok(rows.every((row) => row.gate_run_ms === null && row.gate_run_ms_absent_reason === 'clock-unavailable'))
+  } finally {
+    ledger.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('Q1 phase-slot queue wait is excluded from measured gate duration', () => {
+  let clock = 0
+  const io = fakeIo({
+    emit: true,
+    slots: () => {
+      let refused = true
+      return {
+        acquire: () => refused ? (refused = false, { depth: 1, handle: null }) : { depth: 0, handle: { id: 'slot' } },
+        release: () => {},
+      }
+    },
+    envelopes: { 'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: {
+      'gate-cmd:1': { ok: false, output: RED(3) }, 'gate-cmd:2': { ok: true, output: '' },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  io.gateNow = () => clock
+  io.sleep = (ms) => { io.calls.sleeps.push(ms); clock += 100 }
+  const run = io.run.bind(io)
+  io.run = (command) => {
+    const result = run(command)
+    if (gateReapOriginal(command) === 'gate-cmd') clock += 7
+    return result
+  }
+  const result = driveTask({ ...CTX, env: { ...CTX.env, CREW_SUITE_SLOTS: '1' } }, io)
+  assert.equal(result.status, 'done')
+  assert.ok(io.calls.sleeps.length >= 1)
+  assert.ok(io.calls.logs.some((row) => row.event === 'phase-slot-wait' && row.queue_depth === 1))
+  const gate = io.calls.emits.find((event) => event.kind === 'gate')
+  assert.equal(gate.gate_run_ms, 7)
+  assert.equal(gate.gate_run_ms_absent_reason, null)
 })

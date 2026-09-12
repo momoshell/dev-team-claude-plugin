@@ -1342,6 +1342,7 @@ export function emitAdapter(emitter, crew = null) {
         gate_name: String(event.name ?? 'gate'), attempt: event.attempt, ok: !!event.ok,
         checks: event.summary ? [event.summary] : [], violations: [],
         gate_generation: event.generation ?? null, pristine: !!event.pristine,
+        gate_run_ms: event.gate_run_ms, gate_run_ms_absent_reason: event.gate_run_ms_absent_reason,
       }))
     } else if (event.kind === 'discrimination') {
       emitter.emit((handle) => handle.recordGateDiscrimination({
@@ -3641,6 +3642,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
     },
     log(obj) { logLine(join(paths.dir, 'journal.jsonl'), obj) },
     now() { return now() },
+    gateNow() { return typeof deps.gateNow === 'function' ? deps.gateNow() : Number(process.hrtime.bigint()) / 1e6 },
   }
   if (emitter) io.emit = emitAdapter(emitter, crew)
   return io

@@ -22,7 +22,9 @@ import { tmpdir } from 'node:os'
 import { join, sep } from 'node:path'
 import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
-import { applyMutationAnchor, baselineGateDefect, checkFailureLine, parseGateSummary, scopeMatcher, validateMutations } from '../../crew/drive.mjs'
+import { applyMutationAnchor, baselineGateDefect, checkFailureLine, DIFF_RUNNER_UNAVAILABLE_CAUSES, parseGateSummary, scopeMatcher, validateMutations } from '../../crew/drive.mjs'
+
+export { DIFF_RUNNER_UNAVAILABLE_CAUSES }
 
 export const GATE_SUMMARY_PREFIX = 'GATE-SUMMARY'
 export const PROOF_REFUSALS = Object.freeze({
@@ -426,7 +428,7 @@ const diffPathReason = (path) => {
   return null
 }
 
-function diffSkip({ path = null, reason, line = null, candidate = null } = {}) {
+function diffSkip({ path = null, reason, line = null, candidate = null, cause = null } = {}) {
   return {
     outcome: 'skipped',
     id: candidate?.id ?? null,
@@ -437,6 +439,7 @@ function diffSkip({ path = null, reason, line = null, candidate = null } = {}) {
     replacement: candidate?.replacement ?? null,
     skip_reason: reason,
     why: reason,
+    ...(cause ? { runner_unavailable_cause: cause } : {}),
   }
 }
 
@@ -811,21 +814,26 @@ function samePathSet(a, b) {
   return JSON.stringify(a) === JSON.stringify(b)
 }
 
-function normalizeDiffCommandResult(result) {
-  if (!result || typeof result !== 'object') return { available: false, why: 'runner-unavailable' }
-  if (result.error || result.signal || result.completed === false || result.status === null) return { available: false, why: 'runner-unavailable' }
-  if (typeof result.ok !== 'boolean') return { available: false, why: 'runner-unavailable' }
-  if (Number.isInteger(result.status) && ((result.status === 0) !== result.ok)) return { available: false, why: 'runner-unavailable' }
+export function diffRunnerUnavailable(cause) {
+  if (!DIFF_RUNNER_UNAVAILABLE_CAUSES.includes(cause)) throw new Error(`unknown diff runner-unavailable cause ${JSON.stringify(cause)}`)
+  return { available: false, why: 'runner-unavailable', cause }
+}
+
+export function normalizeDiffCommandResult(result) {
+  if (!result || typeof result !== 'object') return diffRunnerUnavailable('result-not-object')
+  if (result.error || result.signal || result.completed === false || result.status === null) return diffRunnerUnavailable('result-incomplete')
+  if (typeof result.ok !== 'boolean') return diffRunnerUnavailable('ok-missing')
+  if (Number.isInteger(result.status) && ((result.status === 0) !== result.ok)) return diffRunnerUnavailable('status-ok-mismatch')
   return { available: true, ok: result.ok, output: String(result.output || '') }
 }
 
-function runDiffCommand(d, command, checkout) {
+export function runDiffCommand(d, command, checkout) {
   try {
     return normalizeDiffCommandResult(d.runCommand(command, checkout, {
       timeout: DIFF_RUN_TIMEOUT_MS,
       env: colourNeutralEnv(process.env),
     }))
-  } catch { return { available: false, why: 'runner-unavailable' } }
+  } catch { return diffRunnerUnavailable('runner-threw') }
 }
 
 function diffFatal(why, beforeDigest = null, afterDigest = null) {
@@ -929,6 +937,7 @@ export function runDiffMutationProof(config, deps = {}) {
     let gateResult = null
     let restoreFailure = null
     let runtimeSkip = null
+    let runtimeSkipCause = null
     try {
       if (!inScope(candidate.path)) { runtimeSkip = 'out-of-scope' }
       const guardWrite = runtimeSkip ? { ok: false, reason: runtimeSkip } : diffTargetGuard(config, candidate, d, canonicalCheckout)
@@ -945,7 +954,11 @@ export function runDiffMutationProof(config, deps = {}) {
             d.writeFile(guardWrite.abs, reapplied.bytes)
             validationResult = runDiffCommand(d, config.validation_lane, config.checkout)
             gateResult = runDiffCommand(d, config.gate_cmd, config.checkout)
-            if (!validationResult.available || !gateResult.available) runtimeSkip = 'runner-unavailable'
+            const firstUnavailable = !validationResult.available ? validationResult : !gateResult.available ? gateResult : null
+            if (firstUnavailable) {
+              runtimeSkip = firstUnavailable.why
+              runtimeSkipCause = firstUnavailable.cause
+            }
           }
         }
       }
@@ -976,7 +989,7 @@ export function runDiffMutationProof(config, deps = {}) {
       fatal = diffFatal(why, before.digest, after?.digest ?? null)
       break
     }
-    if (runtimeSkip) { records.push(diffSkip({ candidate, reason: runtimeSkip })); continue }
+    if (runtimeSkip) { records.push(diffSkip({ candidate, reason: runtimeSkip, cause: runtimeSkipCause })); continue }
     const outcome = validationResult.ok && gateResult.ok ? 'survived' : 'killed'
     records.push({
       ...candidate, outcome,
@@ -1071,11 +1084,15 @@ export async function main(argv, deps = {}) {
       if (!report) {
         try { report = runDiffMutationProof(config, d) }
         catch (err) {
-          report = countDiffReport([], 0, 0, config, 0, null, [diffSkip({ reason: 'runner-unavailable' })])
+          report = countDiffReport([], 0, 0, config, 0, null, [diffSkip({ reason: 'runner-unavailable', cause: 'runner-threw' })])
           report.runner_unavailable = err?.message ?? String(err)
         }
       }
     }
+    const reportPath = flags.diffConfig.endsWith('.json')
+      ? flags.diffConfig.replace(/\.json$/, '.report.json')
+      : `${flags.diffConfig}.report.json`
+    d.writeFile(reportPath, `${JSON.stringify(report)}\n`)
     d.stdout(`${DIFF_MUTATION_SUMMARY_PREFIX} ${JSON.stringify(report)}\n`)
     return report.fatal?.reason === 'config-invalid' || report.fatal?.reason === 'config-absent' || report.fatal?.reason === 'config-unreadable' ? 2 : report.fatal ? 1 : 0
   }

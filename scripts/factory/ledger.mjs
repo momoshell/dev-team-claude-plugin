@@ -802,6 +802,8 @@ export const TABLES = Object.freeze({
       { name: 'created_at', decl: 'TEXT' },
       { name: 'gate_generation', decl: 'INTEGER' },
       { name: 'pristine', decl: 'INTEGER' },
+      { name: 'gate_run_ms', decl: 'REAL' },
+      { name: 'gate_run_ms_absent_reason', decl: 'TEXT' },
     ],
     unique: [['adw_id', 'gate_name', 'attempt']],
     indexes: [],
@@ -3130,6 +3132,8 @@ export function openLedger({
       created_at: isoMs(input.created_at ?? now()),
       gate_generation: input.gate_generation ?? null,
       pristine: input.pristine == null ? null : !!input.pristine,
+      gate_run_ms: input.gate_run_ms ?? null,
+      gate_run_ms_absent_reason: input.gate_run_ms_absent_reason ?? null,
     }, stats)
     appendJsonl('recordGateResult', args)
     mirror((conn) => {
@@ -4495,7 +4499,7 @@ export function openLedger({
     const ids = [...new Set((adwIds || []).filter(Boolean))]
     if (!ids.length) return []
     const marks = ids.map(() => '?').join(',')
-    return queryRows(`SELECT adw_id, phase_id, gate_name, attempt, ok, checks_json, gate_generation, pristine, created_at FROM gate_results WHERE adw_id IN (${marks}) ORDER BY adw_id, gate_generation, attempt`, ids)
+    return queryRows(`SELECT adw_id, phase_id, gate_name, attempt, ok, checks_json, gate_generation, pristine, gate_run_ms, gate_run_ms_absent_reason, created_at FROM gate_results WHERE adw_id IN (${marks}) ORDER BY adw_id, gate_generation, attempt`, ids)
   }
 
   function reviewOutcomesFor(adwIds) {

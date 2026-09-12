@@ -7805,3 +7805,42 @@ test('b401 the turns query excludes an unmeasured turn count from both terms', {
     assert.ok(facts.excluded.reason.length > 0)
   } finally { ledger.close() }
 })
+
+test('gate timing fields round-trip through JSONL replay and gateResultsFor', { skip: SKIP }, () => {
+  const source = openTestLedger()
+  const target = openTestLedger()
+  try {
+    source.recordGateResult({ adw_id: 'gate-timing', phase_id: null, gate_name: 'measured', attempt: 1, ok: true, checks: [], violations: [], gate_generation: 1, pristine: false, gate_run_ms: 7, gate_run_ms_absent_reason: null })
+    source.recordGateResult({ adw_id: 'gate-timing', phase_id: null, gate_name: 'unmeasured', attempt: 1, ok: true, checks: [], violations: [], gate_generation: 1, pristine: false, gate_run_ms: null, gate_run_ms_absent_reason: 'clock-unavailable' })
+    const applied = replayJsonl(source._jsonlPath, target)
+    assert.ok(applied.applied >= 2)
+    const rows = target.gateResultsFor(['gate-timing'])
+    assert.deepEqual(rows.map((row) => ({ gate_name: row.gate_name, gate_run_ms: row.gate_run_ms, gate_run_ms_absent_reason: row.gate_run_ms_absent_reason })), [
+      { gate_name: 'measured', gate_run_ms: 7, gate_run_ms_absent_reason: null },
+      { gate_name: 'unmeasured', gate_run_ms: null, gate_run_ms_absent_reason: 'clock-unavailable' },
+    ])
+  } finally {
+    source.close()
+    target.close()
+  }
+})
+
+test('G1 a populated legacy gate_results table migrates with NULL timing fields', { skip: SKIP }, () => {
+  const dbPath = join(nextDir(), 'legacy-gate.db')
+  const { DatabaseSync } = require('node:sqlite')
+  const db = new DatabaseSync(dbPath)
+  db.exec(`CREATE TABLE gate_results (
+    id INTEGER PRIMARY KEY, adw_id TEXT, phase_id INTEGER, gate_name TEXT, attempt INTEGER,
+    ok INTEGER, checks_json TEXT, violations_json TEXT, created_at TEXT, gate_generation INTEGER, pristine INTEGER,
+    UNIQUE (adw_id, gate_name, attempt)
+  )`)
+  db.prepare('INSERT INTO gate_results (adw_id, gate_name, attempt, ok, checks_json, violations_json, created_at, gate_generation, pristine) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+    .run('legacy-gate', 'gate', 1, 1, '[]', '[]', '2030-01-01T00:00:00.000Z', 1, 0)
+  db.close()
+  const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+  try {
+    const row = ledger.gateResultsFor(['legacy-gate'])[0]
+    assert.equal(row.gate_run_ms, null)
+    assert.equal(row.gate_run_ms_absent_reason, null)
+  } finally { ledger.close() }
+})

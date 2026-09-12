@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync,
 import { join } from 'node:path'
 import { scratchDir, git } from './helpers.mjs'
 import * as mod from '../scripts/factory/prove-mutations.mjs'
+import { parseDiffMutationReport } from '../crew/drive.mjs'
 
 const WIDGET = [
   'export function widget(mode) {',
@@ -604,4 +605,78 @@ test('F1 mutant cap is enforced and prints its blind spot', () => {
   assert.match(result.blind_spot, /each mutant runs both the accepted validation lane and gate/)
   assert.equal(commands.length, 16)
   rmSync(root, { recursive: true, force: true })
+})
+
+test('C1a-e diff runner failures retain five closed causes and stable why', () => {
+  const cases = [
+    [null, 'result-not-object'],
+    [{ error: { code: 'ETIMEDOUT' } }, 'result-incomplete'],
+    [{ ok: 'yes' }, 'ok-missing'],
+    [{ ok: false, status: 0 }, 'status-ok-mismatch'],
+  ]
+  for (const [result, cause] of cases) assert.deepEqual(mod.normalizeDiffCommandResult(result), { available: false, why: 'runner-unavailable', cause })
+  assert.deepEqual(mod.runDiffCommand({ runCommand: () => ({ ok: false, status: null, completed: false }) }, 'lane', '/tmp'), { available: false, why: 'runner-unavailable', cause: 'result-incomplete' })
+  assert.deepEqual(mod.runDiffCommand({ runCommand: () => { throw new Error('interrupted') } }, 'lane', '/tmp'), { available: false, why: 'runner-unavailable', cause: 'runner-threw' })
+})
+
+test('D1 diff runner causes are frozen and reject unknown values', () => {
+  assert.deepEqual([...mod.DIFF_RUNNER_UNAVAILABLE_CAUSES], ['result-not-object', 'result-incomplete', 'ok-missing', 'status-ok-mismatch', 'runner-threw'])
+  assert.equal(Object.isFrozen(mod.DIFF_RUNNER_UNAVAILABLE_CAUSES), true)
+  assert.throws(() => mod.diffRunnerUnavailable('unknown-cause'), /unknown diff runner-unavailable cause/)
+})
+
+test('E1 a non-empty diff serializes the runner cause on a skipped mutant', () => {
+  const { root, checkout, file } = fixture()
+  const before = WIDGET
+  const after = WIDGET.replace(FIND, REPLACE)
+  writeFileSync(file, after)
+  const result = mod.runDiffMutationProof({
+    version: 1, checkout, patch: diffPatch('lib/widget.mjs', before, after), files_in_scope: ['lib/'], validation_lane: 'lane', gate_cmd: 'gate', cap: 8, generation: 1,
+  }, { runCommand: () => null, writeFile: (path, bytes) => writeFileSync(path, bytes) })
+  const skipped = result.mutants.find((row) => row.outcome === 'skipped')
+  assert.ok(skipped)
+  assert.equal(skipped.skip_reason, 'runner-unavailable')
+  assert.equal(skipped.why, 'runner-unavailable')
+  assert.equal(skipped.runner_unavailable_cause, 'result-not-object')
+  rmSync(root, { recursive: true, force: true })
+})
+
+test('E2 diff config input stays byte-identical while the sibling report is written', async () => {
+  const { root, checkout, file } = fixture()
+  const before = WIDGET
+  const after = WIDGET.replace(FIND, REPLACE)
+  writeFileSync(file, after)
+  const configPath = join(root, 'diff-mutation-1.json')
+  const reportPath = join(root, 'diff-mutation-1.report.json')
+  const config = { version: 1, checkout, patch: diffPatch('lib/widget.mjs', before, after), files_in_scope: ['lib/'], validation_lane: 'lane', gate_cmd: 'gate', cap: 8, generation: 1 }
+  const input = `${JSON.stringify(config)}\n`
+  writeFileSync(configPath, input)
+  const reports = new Map()
+  const output = []
+  const code = await mod.main(['--diff-config', configPath], {
+    readFile: (path) => path === configPath ? input : null,
+    writeFile: (path, bytes) => path === reportPath ? reports.set(path, String(bytes)) : writeFileSync(path, bytes),
+    runCommand: () => null,
+    stdout: (text) => output.push(text), stderr: () => {},
+  })
+  assert.equal(code, 0)
+  assert.equal(readFileSync(configPath, 'utf8'), input)
+  assert.ok(reports.has(reportPath))
+  const report = JSON.parse(reports.get(reportPath))
+  assert.equal(report.mutants.find((row) => row.outcome === 'skipped').runner_unavailable_cause, 'result-not-object')
+  assert.match(output.join(''), /^DIFF-MUTATION-SUMMARY /)
+  rmSync(root, { recursive: true, force: true })
+})
+
+test('E3 the driver parser rejects missing and unknown runner causes', () => {
+  const base = {
+    generation: 1, cap: 1, configured_cap: 1, cap_omitted: 0, total_candidates: 1, generated: 1,
+    killed: 0, survived: 0, skipped: 1, omitted: 0, skip_counts: { 'runner-unavailable': 1 },
+  }
+  for (const mutant of [
+    { outcome: 'skipped', skip_reason: 'runner-unavailable', why: 'runner-unavailable' },
+    { outcome: 'skipped', skip_reason: 'runner-unavailable', why: 'runner-unavailable', runner_unavailable_cause: 'not-closed' },
+  ]) {
+    assert.equal(parseDiffMutationReport(`DIFF-MUTATION-SUMMARY ${JSON.stringify({ ...base, mutants: [mutant] })}`, { generation: 1, cap: 1 }), null)
+  }
 })

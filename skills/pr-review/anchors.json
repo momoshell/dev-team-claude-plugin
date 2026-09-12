@@ -7,11 +7,11 @@
   "crew/roles/reviewer.md:14": "2. Judge two separate questions, in order:",
   "crew/roles/reviewer.md:16": "Out-of-plan edits are findings even when harmless.",
   "crew/drive.mjs:691": "export function panelSeats(seated) {",
-  "crew/drive.mjs:3247": "for (const match of narration.matchAll(/[A-Za-z0-9_.-]+\\/[A-Za-z0-9_./-]+/g)) {",
-  "crew/drive.mjs:2035": "export function validateScopeEntries(entries) {",
-  "crew/drive.mjs:7542": "        panelResult = runPanelReview({ round: roundNo, panel, io, dissents: S.dissents, setAcceptFindings: (value) => { S.acceptFindings = value }, setLastReview: (value) => { S.lastReview = value }, planPath, panelBriefText, panelStandingQuestion, art, stage, stageComplete, assignAndWait, carriedOpen, panelLog, panelDegraded, emit })",
-  "crew/drive.mjs:7000": "const panel = ctx.continuation === true ? panelSeats(seatList) : null",
-  "crew/drive.mjs:3494": "function runPanelReview({ round, panel, io, dissents, setAcceptFindings, setLastReview, planPath, panelBriefText, panelStandingQuestion, art, stage, stageComplete, assignAndWait, carriedOpen, panelLog, panelDegraded, emit }) {",
-  "crew/drive.mjs:3560": "const fused = fuseFindings(findingsOf(aEnv), findingsOf(bEnv), {",
-  "crew/drive.mjs:3684": "const adjudicated = adjudicatePanel(allocatedDivergent, adjEnv.details)"
+  "crew/drive.mjs:3254": "for (const match of narration.matchAll(/[A-Za-z0-9_.-]+\\/[A-Za-z0-9_./-]+/g)) {",
+  "crew/drive.mjs:2042": "export function validateScopeEntries(entries) {",
+  "crew/drive.mjs:7610": "        panelResult = runPanelReview({ round: roundNo, panel, io, dissents: S.dissents, setAcceptFindings: (value) => { S.acceptFindings = value }, setLastReview: (value) => { S.lastReview = value }, planPath, panelBriefText, panelStandingQuestion, art, stage, stageComplete, assignAndWait, carriedOpen, panelLog, panelDegraded, emit })",
+  "crew/drive.mjs:7068": "const panel = ctx.continuation === true ? panelSeats(seatList) : null",
+  "crew/drive.mjs:3501": "function runPanelReview({ round, panel, io, dissents, setAcceptFindings, setLastReview, planPath, panelBriefText, panelStandingQuestion, art, stage, stageComplete, assignAndWait, carriedOpen, panelLog, panelDegraded, emit }) {",
+  "crew/drive.mjs:3567": "const fused = fuseFindings(findingsOf(aEnv), findingsOf(bEnv), {",
+  "crew/drive.mjs:3691": "const adjudicated = adjudicatePanel(allocatedDivergent, adjEnv.details)"
 }

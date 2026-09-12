@@ -702,6 +702,24 @@ export function panelSeats(seated) {
 // exited non-zero" — which a wholly broken gate also does. `errored` counts
 // checks that threw before they could adjudicate anything.
 export const GATE_SUMMARY_PREFIX = 'GATE-SUMMARY'
+export const DIFF_MUTATION_SUMMARY_PREFIX = 'DIFF-MUTATION-SUMMARY'
+export const GATE_RUN_MS_ABSENT_REASONS = Object.freeze(['clock-unavailable', 'clock-invalid', 'clock-regressed', 'clock-resolution'])
+export const DIFF_RUNNER_UNAVAILABLE_CAUSES = Object.freeze(['result-not-object', 'result-incomplete', 'ok-missing', 'status-ok-mismatch', 'runner-threw'])
+
+export function gateRunUnmeasured(reason) {
+  if (!GATE_RUN_MS_ABSENT_REASONS.includes(reason)) throw new Error(`unknown gate timing absence reason ${JSON.stringify(reason)}`)
+  return { gate_run_ms: null, gate_run_ms_absent_reason: reason }
+}
+
+export function gateRunTiming(startedAt, endedAt) {
+  if (startedAt === null || endedAt === null) return gateRunUnmeasured('clock-unavailable')
+  if (!Number.isFinite(startedAt) || !Number.isFinite(endedAt)) return gateRunUnmeasured('clock-invalid')
+  const delta = endedAt - startedAt
+  if (!Number.isFinite(delta)) return gateRunUnmeasured(GATE_RUN_MS_ABSENT_REASONS[1])
+  if (delta < 0) return gateRunUnmeasured('clock-regressed')
+  if (delta === 0) return gateRunUnmeasured('clock-resolution')
+  return { gate_run_ms: delta, gate_run_ms_absent_reason: null }
+}
 
 export const GATE_REAP_OUTCOMES = Object.freeze(['already-dead', 'proven', 'failed', 'unproven'])
 export const GATE_REAP_CMD_EOF = '__CREW_GATE_CMD_EOF__'
@@ -987,6 +1005,44 @@ export function baselineGateDefect(output) {
   if (summary.errored > 0) return `${summary.errored} of ${summary.total} checks THREW instead of adjudicating — a gate that cannot run cannot be red for the right reason`
   if (summary.failed === 0) return `the summary reports 0 failed checks, which contradicts the non-zero exit`
   return null
+}
+
+export function parseDiffMutationReport(output, { generation, cap } = {}) {
+  const lines = String(output || '').replace(/\x1b\[[0-9;]*m/g, '').trimEnd().split('\n')
+  const final = lines.at(-1)
+  if (!final || !final.startsWith(`${DIFF_MUTATION_SUMMARY_PREFIX} `)) return null
+  try {
+    const report = JSON.parse(final.slice(DIFF_MUTATION_SUMMARY_PREFIX.length + 1))
+    if (!report || typeof report !== 'object') return null
+    const ints = ['generation', 'cap', 'configured_cap', 'cap_omitted', 'total_candidates', 'generated', 'killed', 'survived', 'skipped', 'omitted']
+    if (!ints.every((key) => Number.isInteger(report[key]) && report[key] >= 0)) return null
+    if (report.generation !== generation || report.cap !== cap || report.configured_cap !== cap) return null
+    if (report.generated > report.cap || report.killed + report.survived > report.generated || report.cap_omitted !== report.omitted) return null
+    if (!report.skip_counts || typeof report.skip_counts !== 'object' || Array.isArray(report.skip_counts) || !Array.isArray(report.mutants)) return null
+    if (Object.values(report.skip_counts).some((count) => !Number.isInteger(count) || count < 0)) return null
+    const skipTotal = Object.values(report.skip_counts).reduce((total, count) => total + count, 0)
+    if (skipTotal !== report.skipped) return null
+    if (report.mutants.some((mutant) => {
+      if (!mutant || typeof mutant !== 'object' || Array.isArray(mutant)) return true
+      if (!['killed', 'survived', 'skipped'].includes(mutant.outcome)) return true
+      if (mutant.outcome === 'skipped') {
+        if (typeof mutant.skip_reason !== 'string' || mutant.skip_reason.length === 0) return true
+        if (mutant.skip_reason === 'runner-unavailable') {
+          if (!DIFF_RUNNER_UNAVAILABLE_CAUSES.includes(mutant.runner_unavailable_cause)) return true
+        } else if (Object.hasOwn(mutant, 'runner_unavailable_cause')) return true
+        return false
+      }
+      if (mutant.outcome === 'killed') return false
+      return typeof mutant.id !== 'string' || mutant.id.length === 0
+        || typeof mutant.path !== 'string' || mutant.path.length === 0
+        || !Number.isInteger(mutant.line) || mutant.line < 1
+        || typeof mutant.operator !== 'string' || typeof mutant.replacement !== 'string'
+    })) return null
+    const executed = report.mutants.filter((mutant) => mutant.outcome === 'killed' || mutant.outcome === 'survived').length
+    if (executed > report.cap || report.mutants.length !== report.killed + report.survived + report.skipped) return null
+    if (report.fatal !== undefined && (!report.fatal || report.fatal.reason !== 'tree-not-restored')) return null
+    return report
+  } catch { return null }
 }
 
 function fail(stage, msg) {
@@ -4227,9 +4283,19 @@ function runTask(ctx, io, crash) {
     // Same predicate as the wrapper: an adapter that cannot execute the composed
     // program must not be handed the sweep either.
     const wrappable = io.calls || typeof io.runClean === 'function'
+    const readGateClock = () => {
+      try { return typeof io.gateNow === 'function' ? io.gateNow() : null }
+      catch { return null }
+    }
+    let gateStartedAt = null
+    let gateEndedAt = null
     let res
     try {
-      res = phaseSlot(SUITE_SLOT_PHASES.gate, () => runner.call(io, wrappable ? wrapped : cmd))
+      res = phaseSlot(SUITE_SLOT_PHASES.gate, () => {
+        gateStartedAt = readGateClock()
+        try { return runner.call(io, wrappable ? wrapped : cmd) }
+        finally { gateEndedAt = readGateClock() }
+      })
     } finally {
       // Always io.run, never `runner`: runClean would stash a second time. This
       // is the only reap that survives a runner timeout, which kills the wrapper
@@ -4238,6 +4304,7 @@ function runTask(ctx, io, crash) {
         try { io.run(gateReapSweepCommand(reapPaths)) } catch { /* an unswept group reads unproven */ }
       }
     }
+    const gateTiming = gateRunTiming(gateStartedAt, gateEndedAt)
     let reap
     try { reap = gateReapVerdict(gateReapFresh(reportCleared, io.readFile(reapPaths.report))) }
     catch { reap = gateReapVerdict(null) } // a read that threw measured nothing
@@ -4248,7 +4315,7 @@ function runTask(ctx, io, crash) {
     if (reap.outcome !== 'already-dead') {
       io.log(operationalRow({ at: io.now(), gate_reap: { name, attempt: gateAttempt, ...reap } }))
     }
-    emit({ kind: 'gate', name, attempt: gateAttempt, ok: !!res.ok, cmd, summary: parseGateSummary(res.output), generation: gateGeneration, pristine, reap })
+    emit({ kind: 'gate', name, attempt: gateAttempt, ok: !!res.ok, cmd, summary: parseGateSummary(res.output), generation: gateGeneration, pristine, gate_run_ms: gateTiming.gate_run_ms, gate_run_ms_absent_reason: gateTiming.gate_run_ms_absent_reason, reap })
     return res
   }
   // Attention fires ONLY where the gate loop stops being self-correcting:
@@ -5838,7 +5905,6 @@ function runTask(ctx, io, crash) {
   // The baseline is a byte/absence map, not a HEAD diff. It is captured once
   // after plan acceptance and advanced only after a nonfatal supplement run, so
   // the second builder round measures only its own delta.
-  const DIFF_MUTATION_SUMMARY_PREFIX = 'DIFF-MUTATION-SUMMARY'
   const DIFF_LIST_COMMAND = 'git ls-files -z --cached --others --exclude-standard'
   const diffMutationCap = resolveDiffMutationCap((ctx.env ?? process.env).CREW_DIFF_MUTATION_CAP)
   let diffRoundBaseline = null
@@ -5981,37 +6047,7 @@ function runTask(ctx, io, crash) {
     omitted_reason: 'mutants beyond the configured cap are omitted because each mutant runs both the accepted validation lane and gate and large diffs otherwise multiply suite cost; omitted mutants are a blind spot',
     blind_spot: null, skip_counts: { [reason]: 1 }, mutants: [],
   })
-  const parseDiffReport = (output) => {
-    const lines = String(output || '').replace(/\x1b\[[0-9;]*m/g, '').trimEnd().split('\n')
-    const final = lines.at(-1)
-    if (!final || !final.startsWith(`${DIFF_MUTATION_SUMMARY_PREFIX} `)) return null
-    try {
-      const report = JSON.parse(final.slice(DIFF_MUTATION_SUMMARY_PREFIX.length + 1))
-      if (!report || typeof report !== 'object') return null
-      const ints = ['generation', 'cap', 'configured_cap', 'cap_omitted', 'total_candidates', 'generated', 'killed', 'survived', 'skipped', 'omitted']
-      if (!ints.every((key) => Number.isInteger(report[key]) && report[key] >= 0)) return null
-      if (report.generation !== gateGeneration || report.cap !== diffMutationCap || report.configured_cap !== diffMutationCap) return null
-      if (report.generated > report.cap || report.killed + report.survived > report.generated || report.cap_omitted !== report.omitted) return null
-      if (!report.skip_counts || typeof report.skip_counts !== 'object' || Array.isArray(report.skip_counts) || !Array.isArray(report.mutants)) return null
-      if (Object.values(report.skip_counts).some((count) => !Number.isInteger(count) || count < 0)) return null
-      const skipTotal = Object.values(report.skip_counts).reduce((total, count) => total + count, 0)
-      if (skipTotal !== report.skipped) return null
-      if (report.mutants.some((mutant) => {
-        if (!mutant || typeof mutant !== 'object' || Array.isArray(mutant)) return true
-        if (!['killed', 'survived', 'skipped'].includes(mutant.outcome)) return true
-        if (mutant.outcome === 'skipped') return typeof mutant.skip_reason !== 'string' || mutant.skip_reason.length === 0
-        if (mutant.outcome === 'killed') return false
-        return typeof mutant.id !== 'string' || mutant.id.length === 0
-          || typeof mutant.path !== 'string' || mutant.path.length === 0
-          || !Number.isInteger(mutant.line) || mutant.line < 1
-          || typeof mutant.operator !== 'string' || typeof mutant.replacement !== 'string'
-      })) return null
-      const executed = report.mutants.filter((mutant) => mutant.outcome === 'killed' || mutant.outcome === 'survived').length
-      if (executed > report.cap || report.mutants.length !== report.killed + report.survived + report.skipped) return null
-      if (report.fatal !== undefined && (!report.fatal || report.fatal.reason !== 'tree-not-restored')) return null
-      return report
-    } catch { return null }
-  }
+  const parseDiffReport = (output) => parseDiffMutationReport(output, { generation: gateGeneration, cap: diffMutationCap })
   const journalDiffMutation = () => {
     io.log(recordRow({ at: io.now(), diff_mutation_proof: diffMutationReport }))
   }

@@ -3829,7 +3829,7 @@ function runTask(ctx, io, crash) {
   // task gate so every refusal can name a useful gate-proof path.
   let acceptedScope = []
   let acceptedGatePath = art('gate.mjs')
-  let admitScope = null
+  let admitScope = null; const logScopeAdmission = (row) => io.log(recordRow({ at: io.now(), scope_admission: row }))
   let suiteWidenings = 0
   let seatWidenings = 0
   const seatPolicy = (role) => ({
@@ -5274,7 +5274,7 @@ function runTask(ctx, io, crash) {
   const resolvedFenceScopes = fenceResolution.scopes
   const ownFenceScopes = resolvedFenceScopes.filter((scope) => scope.lane === ctx.laneName)
   const siblingFenceScopes = resolvedFenceScopes.filter((scope) => scope.lane !== ctx.laneName)
-  const ownSpanScopes = ownFenceScopes.filter((scope) => scope.kind === 'span')
+  let ownSpanScopes = ownFenceScopes.filter((scope) => scope.kind === 'span')
   const siblingSpanScopes = siblingFenceScopes.filter((scope) => scope.kind === 'span')
   let scopeFiles = [...planEnv.details.files_in_scope]
   const planFenceHits = laneFenceHits(scopeFiles, pathOnlyLaneFence(ctx.laneFence, ctx.laneName))
@@ -5314,7 +5314,7 @@ function runTask(ctx, io, crash) {
       source, files: additions, evidence,
       ...(source === 'seat-request' ? { role, stage: requestedStage ?? S.stages.at(-1) ?? null } : {}),
     }
-    io.log(recordRow({ at: io.now(), scope_admission: row }))
+    logScopeAdmission(row)
     return { ...decision, files: additions }
   }
   const lane = planEnv.details?.validation_lane || ctx.lane
@@ -6344,19 +6344,16 @@ function runTask(ctx, io, crash) {
   let suiteBuildBrief = planPath
   let suiteBuildNote = 'build'
   const censusFiles = (census) => {
-    const rows = [
-      ...(Array.isArray(census?.failures) ? census.failures : []),
-      ...(Array.isArray(census?.defects) ? census.defects : []),
-    ]
+    const rows = Array.isArray(census?.failures) ? census.failures : []
     return [...new Set(rows.map((row) => typeof row === 'string' ? row : row?.file).filter((file) => typeof file === 'string' && file.length > 0))]
   }
-  const classifyCensus = (census) => {
+  const classifyCensus = (census, effectiveScope = null) => {
     const files = censusFiles(census)
     const censusFence = (Array.isArray(ctx.laneFence) ? ctx.laneFence : []).filter((record) => record?.lane !== ctx.laneName)
     const held = laneFenceHits(files, censusFence)
     const protectedFiles = protectedHits(files, ctx.protectedPaths)
     const dispatched = Array.isArray(ctx.files_in_scope) ? ctx.files_in_scope : []
-    const dispatchedScope = scopeMatcher(dispatched)
+    const dispatchedScope = effectiveScope || scopeMatcher(dispatched)
     const heldFiles = new Set(held.map(({ entry }) => entry))
     const protectedSet = new Set(protectedFiles)
     const outside = files.filter((file) => !dispatchedScope(file) || heldFiles.has(file) || protectedSet.has(file))
@@ -6391,14 +6388,22 @@ function runTask(ctx, io, crash) {
     catch (error) { return decodeCensusResult(null, error) }
     return decodeCensusResult(result)
   }
-  const censusRoute = (phase, census, allowInsideRepair) => {
-    const classified = classifyCensus(census)
+  const censusRoute = (phase, census, allowInsideRepair, allowCarrierRepair = false) => {
     // An UNMEASURED census names no files, so every file-based branch below would fall through
     // to "continue" and the ABSENCE of a census would be read as a clear. It is routed first
     // and by its own reason, never by its (empty) file list.
     if (census?.verdict === 'unmeasured') {
       const why = `the ${phase} census could not be measured: ${census.reason ?? 'reason unavailable'}. It made no claim either way, so this is not a clean census.`
       return { escalation: escalate('census-exhibits', why, [], { census }) }
+    }
+    const classified = classifyCensus(census, phase === 'post-commit' ? inScope : null)
+    if (allowCarrierRepair) {
+      const declared = new Set(CENSUS_CARRIER_FILES)
+      const undeclaredOutside = classified.outside.filter((file) => !declared.has(file))
+      if (undeclaredOutside.length > 0) {
+        return { escalation: escalate('census-exhibits', censusWhy(phase, census, undeclaredOutside, classified.inside), [], { census }) }
+      }
+      if (censusFiles(census).some((file) => declared.has(file))) return { repair: true, outside: classified.outside, inside: classified.inside, held: classified.held }
     }
     if (classified.outside.length > 0) {
       return { escalation: escalate('census-exhibits', censusWhy(phase, census, classified.outside, classified.inside), [], { census }) }
@@ -7401,11 +7406,50 @@ function runTask(ctx, io, crash) {
   if (censusEnabled) {
     const committedCensus = runCensus('post-commit')
     journalCensus('post-commit', committedCensus)
-    const postCommit = censusRoute('post-commit', committedCensus, true)
+    const postCommit = censusRoute('post-commit', committedCensus, true, true)
     const postCommitInside = postCommit.inside || []
+    const postCommitOutside = postCommit.outside || []
     // Redundant explicit `outside` test removed for the same reason as the pre-build one:
     // `censusRoute` already returned the escalation, so this branch killed no behaviour.
     if (postCommit.escalation) return postCommit.escalation
+    if (postCommit.repair) {
+      const repairFiles = [...CENSUS_CARRIER_FILES]
+      const repairEscalation = (repairHeld, artifacts) => escalate('census-exhibits', `post-commit census repair crosses a held scope: ${fenceBreachList(repairHeld)}`, artifacts, { commit: S.commit, census: committedCensus })
+      if (postCommitCensusBounces >= POST_COMMIT_CENSUS_BOUNCE_MAX) {
+        return escalate('census-exhibits', censusWhy('post-commit', committedCensus, postCommitOutside, postCommitInside), [], { commit: S.commit, census: committedCensus })
+      }
+      // TWO DISJOINT holder checks, not one subsuming the other. Every failing file in this
+      // branch is a declared carrier (every failing REPAIR FILE is — the branch may still
+      // contain an undeclared failure already inside scope), so a guard over ALL carriers
+      // strictly contains a guard
+      // over the failing ones — which made the first check vacuous: disabling it changed
+      // nothing, because the second caught the same rows. Partitioned so each guard owns a set
+      // the other cannot see, and each is therefore independently killable.
+      const repairHeld = postCommit.held
+      if (repairHeld.length > 0) return repairEscalation(repairHeld, [])
+      const failedCarriers = new Set(censusFiles(committedCensus))
+      const unfailedPair = repairFiles.filter((file) => !failedCarriers.has(file))
+      const repairUnitHeld = laneFenceHits(unfailedPair, (Array.isArray(ctx.laneFence) ? ctx.laneFence : []).filter((record) => record?.lane !== ctx.laneName))
+      if (repairUnitHeld.length > 0) return repairEscalation(repairUnitHeld, [])
+      const additions = repairFiles.filter((file) => !inScope(file))
+      const spanSupersedes = repairFiles.filter((file) => !additions.includes(file))
+      const repairProtected = protectedHits(additions, ctx.protectedPaths)
+      if (repairProtected.length > 0) {
+        return escalate('census-exhibits', `post-commit census repair refused: protected paths cannot be admitted: ${repairProtected.join(', ')}`, [], { commit: S.commit, census: committedCensus })
+      }
+      scopeFiles = [...scopeFiles, ...additions]
+      acceptedScope = scopeFiles
+      inScope = scopeMatcher(scopeFiles)
+      ownSpanScopes = ownSpanScopes.filter((scope) => !additions.includes(scope.path))
+      ownSpanScopes = ownSpanScopes.filter((scope) => !spanSupersedes.includes(scope.path))
+      if (additions.length > 0) logScopeAdmission({ source: 'census-bounce', files: additions, evidence: committedCensus })
+      postCommitCensusBounces += 1
+      const bounce = art(`census-exhibits-bounce-r${postCommitCensusBounces}.md`)
+      io.writeFile(bounce, ['# Census exhibit bounce', '', censusWhy('post-commit', committedCensus, postCommitOutside, postCommitInside), '', `Commit: ${S.commit}`, `Plan: ${planPath}`].join('\n'))
+      suiteBuildBrief = bounce
+      suiteBuildNote = 'census-exhibits-fix'
+      continue suiteCycle
+    }
     if (postCommitInside.length > 0) {
       if (postCommitCensusBounces >= POST_COMMIT_CENSUS_BOUNCE_MAX) {
         return escalate('census-exhibits', censusWhy('post-commit', committedCensus, [], postCommitInside), [], { commit: S.commit, census: committedCensus })
@@ -9118,6 +9162,7 @@ export function hardeningBriefLines(owed, exempt) {
 }
 
 export const POST_COMMIT_CENSUS_BOUNCE_MAX = 1
+export const CENSUS_CARRIER_FILES = Object.freeze(['skills/crew-dispatch/references/batch.md', 'skills/crew-dispatch/exhibits.test.mjs'])
 
 function decodeCensusResult(result, error = null) {
   const output = typeof result === 'string'

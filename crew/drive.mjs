@@ -5379,6 +5379,7 @@ function runTask(ctx, io, crash) {
   let checkProofPending = null // the generation that OWES a per-check pass, awaiting an observed green
   let checkProofBinds = []     // #874 — the bind report's rows, one per declared ANCHOR, terminal
   let checkProofUnbound = []   // the unresolved disagreements, taken from that report
+  let checkProofUnlabelledRefusals = [] // unattributed correction refusals for the current generation
   let checkProofBindMeasured = false   // the ALL-OR-NOTHING measurement sentinel: true only after
                                        // bindMutationDeclarations returned every row
   let gateProofFatal = null    // the built tree still carries a mutation: the run must stop
@@ -5388,7 +5389,7 @@ function runTask(ctx, io, crash) {
   const resetCheckProof = () => {
     checkProofs = null; checkProofOutput = null; checkProofNote = null
     checkProofVerdict = null; checkProofPending = null
-    checkProofBinds = []; checkProofUnbound = []; checkProofBindMeasured = false   // ANCHOR A3
+    checkProofBinds = []; checkProofUnbound = []; checkProofUnlabelledRefusals = []; checkProofBindMeasured = false   // ANCHOR A3
   }
   // #874 — the driver's io stays the only file authority; the exported binder takes repo-relative
   // paths and this resolves them, exactly as the mutation loop already does.
@@ -5553,6 +5554,7 @@ function runTask(ctx, io, crash) {
     const finalized = finalizeCorrections(checkProofBinds, corrections, rows)
     checkProofBinds = finalized.binds
     checkProofUnbound = finalized.unresolved
+    checkProofUnlabelledRefusals = finalized.unlabelledRefusals
     rows.splice(0, rows.length, ...finalized.rows)
     if (proofMutations.length !== mutations.length || carriedRows.length > 0) {
       const freshByCheck = new Map(rows.map((row) => [row.check, row]))
@@ -6050,10 +6052,19 @@ function runTask(ctx, io, crash) {
     // NEITHER key: the ledger window stays unmeasured rather than recording a zero denominator,
     // and journalFactFamily's own absent reason is then the honest answer for that window.
     if (checkProofBindMeasured) io.log(recordRow({ at: io.now(), mutation_anchor_bind: bindReport() }))
-    for (const bind of (checkProofBindMeasured ? checkProofBinds : []).filter((row) => row.status === 'absent')) {
+    const absenceRows = [
+      ...(checkProofBindMeasured ? checkProofBinds.filter((row) => row.status === 'absent').map((bind) => ({
+        generation: gateGeneration, check: bind.check, file: bind.file, correction: bind.correction,
+        refusal: bind.correction_refusal ?? null, why: bind.why,
+      })) : []),
+      ...checkProofUnlabelledRefusals.map((refusal) => ({
+        generation: gateGeneration, check: null, file: null, correction: 'refused', refusal: refusal.reason, why: refusal.why,
+      })),
+    ]
+    for (const absence of absenceRows) {
       // #874 (3) — one row per disagreement, EITHER WAY: the check, the file and the TERMINAL
       // correction state, so a human amending a fixed envelope has every fact the amendment needs.
-      io.log(recordRow({ at: io.now(), mutation_anchor_absent: { generation: gateGeneration, check: bind.check, file: bind.file, correction: bind.correction, refusal: bind.correction_refusal ?? null, why: bind.why } }))
+      io.log(recordRow({ at: io.now(), mutation_anchor_absent: absence }))
     }
     io.log(recordRow({ at: io.now(), gate_check_discrimination: checkProofVerdict, gate_generation: gateGeneration,
       gate_check_discriminations: checkProofs, ...(checkProofNote ? { gate_check_proof_note: checkProofNote } : {}) }))
@@ -8117,6 +8128,7 @@ export function finalizeCorrections(binds, corrections, rows) {
   for (const refusal of corrections?.refusals || []) {
     if (refusal?.check != null && !staticRefusal.has(refusal.check)) staticRefusal.set(refusal.check, refusal.reason)
   }
+  const unlabelledRefusals = (corrections?.refusals || []).filter((refusal) => refusal?.check == null)
   const outcomeOf = (check) => proofRows.find((row) => row.check === check)?.outcome ?? null
   const terminal = (check) => {
     if (candidates.has(check)) {
@@ -8147,7 +8159,7 @@ export function finalizeCorrections(binds, corrections, rows) {
   // reached vanishes from the routing decision — proof rows carry no `status`, so the filter
   // matches nothing and the lane continues as `unproven`, exactly as before #874.
   const unresolved = finalBinds.filter((row) => row.status === 'absent' && row.correction !== 'accepted')   // ANCHOR B3
-  return { binds: finalBinds, rows: finalRows, unresolved }
+  return { binds: finalBinds, rows: finalRows, unresolved, unlabelledRefusals }
 }
 
 // #874 (1)(2) — the operator-facing sentence for a plan/build disagreement, and the one place that

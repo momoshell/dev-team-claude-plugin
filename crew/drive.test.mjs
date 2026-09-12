@@ -790,20 +790,44 @@ test('lead timeout (no envelope) on a consult throws toward escalation, never si
   assert.match(res.details.escalation.why, /lead: no valid envelope/)
 })
 
-test('an arrived but invalid envelope emits unusable-envelope before the driver escalates', () => {
-  const io = fakeIo({ emit: true, envelopes: { 'planner:1': { status: 'done', role: 'not-planner' } } })
+test('a present stale or mis-addressed envelope emits one refusal and terminates at its dispatch', () => {
+  const io = fakeIo({ emit: true, envelopes: { 'planner:1': planEnv({ assignment_id: 'stale-planner' }) } })
   const res = driveTask(CTX, io)
   assert.equal(res.status, 'escalation')
-  assert.match(res.details.escalation.why, /planner: no valid envelope/)
+  assert.equal(res.details.escalation.where, 'planner')
+  assert.equal(res.details.escalation.why, 'planner: an envelope exists at planner:1 but was refused: assignment-id-mismatch')
+  assert.doesNotMatch(res.details.escalation.why, /no valid envelope/)
+  assert.deepEqual(io.calls.assign.map(({ role }) => role), ['planner'])
+  const refusalRows = io.calls.logs.filter((row) => Object.hasOwn(row, 'envelope_refused'))
+  assert.equal(refusalRows.length, 1)
+  assert.deepEqual(refusalRows[0].envelope_refused, {
+    role: 'planner', dispatch: 'planner1', reason: 'assignment-id-mismatch',
+    found_assignment_id: 'stale-planner', expected_assignment_id: 'planner1', path: 'planner:1',
+  })
   assert.ok(io.calls.emits.some((event) => event.kind === 'cell-failure' && event.failure === 'unusable-envelope'))
+
+  for (const [label, envelope, reason] of [
+    ['assignment mismatch wins over role mismatch', planEnv({ assignment_id: 'stale-planner', role: 'not-planner' }), 'assignment-id-mismatch'],
+    ['role mismatch alone', planEnv({ role: 'not-planner' }), 'role-mismatch'],
+    ['non-string status', planEnv({ status: null }), 'status-kind'],
+  ]) {
+    const caseIo = fakeIo({ envelopes: { 'planner:1': envelope } })
+    const result = driveTask(CTX, caseIo)
+    assert.equal(result.status, 'escalation', label)
+    assert.equal(result.details.escalation.why, `planner: an envelope exists at planner:1 but was refused: ${reason}`, label)
+    const rows = caseIo.calls.logs.filter((row) => Object.hasOwn(row, 'envelope_refused'))
+    assert.equal(rows.length, 1, label)
+    assert.equal(rows[0].envelope_refused.reason, reason, label)
+  }
 })
 
 test('a null envelope is not double-counted by the driver', () => {
   const io = fakeIo({ emit: true, envelopes: { 'planner:1': null } })
   const res = driveTask(CTX, io)
   assert.equal(res.status, 'escalation')
-  assert.match(res.details.escalation.why, /planner: no valid envelope/)
+  assert.equal(res.details.escalation.why, 'planner: no valid envelope at planner:1 within 1800s')
   assert.equal(io.calls.emits.filter((event) => event.kind === 'cell-failure').length, 0)
+  assert.equal(io.calls.logs.filter((row) => Object.hasOwn(row, 'envelope_refused')).length, 0)
 })
 
 test('empty refutation evidence fails closed to review escalation', () => {
@@ -1396,7 +1420,7 @@ test('an envelope with a MISMATCHED assignment_id is rejected (stale-file replay
   })
   const res = driveTask(CTX, io)
   assert.equal(res.status, 'escalation')
-  assert.match(res.details.escalation.why, /planner: no valid envelope/)
+  assert.equal(res.details.escalation.why, 'planner: an envelope exists at planner:1 but was refused: assignment-id-mismatch')
 })
 
 test('escalation artifacts and exhaustion briefs cite the REAL journal path from ctx', () => {
@@ -2228,7 +2252,7 @@ test('waitDiagnosis is not consulted when an envelope is present but shape-inval
   io.waitDiagnosis = () => { consulted += 1; return { state: 'stale', text: 'should not appear' } }
   const res = driveTask(CTX, io)
   assert.equal(res.status, 'escalation')
-  assert.match(res.details.escalation.why, /planner: no valid envelope at planner:1 within 1800s$/)
+  assert.equal(res.details.escalation.why, 'planner: an envelope exists at planner:1 but was refused: status-kind')
   assert.equal(consulted, 0)
 })
 
@@ -2421,7 +2445,10 @@ test('every journal emit site in the driver is inventoried, wrapped and on the r
   const sites = driveJournalSites(text)
   const admissionSites = sites.filter(({ keys }) => keys.split(' ').includes('scope_admission'))
   assert.equal(admissionSites.length, 1)
-  const legacySites = sites.filter(({ keys }) => !keys.split(' ').includes('scope_admission'))
+  const refusalSites = sites.filter(({ keys }) => keys.split(' ').includes('envelope_refused'))
+  assert.equal(refusalSites.length, 1)
+  assert.equal(refusalSites[0].wrapper, 'recordRow')
+  const legacySites = sites.filter(({ keys }) => !keys.split(' ').includes('scope_admission') && !keys.split(' ').includes('envelope_refused'))
   assert.equal(legacySites.length, 68)
   assert.deepEqual(legacySites.map(({ wrapper, events, keys }) => [wrapper, events, keys]), DRIVE_JOURNAL_EXPECTED)
   assert.ok(sites.every(({ wrapper }) => wrapper === 'recordRow' || wrapper === 'operationalRow'))

@@ -21,10 +21,10 @@ Run no tests. The gate proof and the suite result are already journalled; read t
 3. Put the planner's consult_questions inside `plan-check.md`, each with a
    recommendation and the reasoning; the driver reads no `answers` field from a
    tech-lead envelope, so an answer written anywhere else is dropped
-   (`crew/drive.mjs:5131` gates the whole plan check on the adversary trigger,
-   `crew/drive.mjs:5169` is the assignment, and the path consumes
+   (`crew/drive.mjs:5145` gates the whole plan check on the adversary trigger,
+   `crew/drive.mjs:5183` is the assignment, and the path consumes
    `check.details?.check_path` (`crew/drive.mjs:3253`) and the verdict
-   (`crew/drive.mjs:5170`), nothing more).
+   (`crew/drive.mjs:5184`), nothing more).
 4. Write `plan-check.md` in the task dir: verdict line first
    (`VERDICT: approve` | `VERDICT: revise`), then findings by severity with
    file:line evidence. A revise names EXACTLY what must change — never
@@ -47,8 +47,8 @@ that it could not put one there, and spent the run's escalation saying so.
 
 - **The planner's envelope is not yours.** `details.mutations` and
   `files_in_scope` are planner-owned and **frozen at acceptance**: the driver
-  binds them once, from the accepted plan envelope (`crew/drive.mjs:5335`,
-  `crew/drive.mjs:5336`), and the planner is never assigned again. For a
+  binds them once, from the accepted plan envelope (`crew/drive.mjs:5349`,
+  `crew/drive.mjs:5350`), and the planner is never assigned again. For a
   judgement field the plan is a contract, and it is **not amendable after
   acceptance**. Nothing you write extends it.
 - **Your one lever is a prescribing revise.** A `VERDICT: revise` that
@@ -65,14 +65,14 @@ that it could not put one there, and spent the run's escalation saying so.
 ### The refusal path, so nobody has to re-derive it
 
 A residual typed `correctness-unverified` is **code-refused** into escalation by
-`settleAccept` (`crew/drive.mjs:4559`) and lands at the same human an escalation
+`settleAccept` (`crew/drive.mjs:4573`) and lands at the same human an escalation
 would have reached. Recording it is still right: that is a fact about the FIELD,
 not a way to route around the human.
 
 You **cannot type a residual at all**. Your envelope contract is `check_path` and
 `verdict`, nothing else — `verdictOf` (`crew/drive.mjs:1071`) reads only
 `details.verdict`, and the residual field is carried on the **lead's** consult
-decision (`crew/drive.mjs:4308`). A residual in a tech-lead envelope is read by
+decision (`crew/drive.mjs:4322`). A residual in a tech-lead envelope is read by
 nothing.
 
 ## Envelope details fields

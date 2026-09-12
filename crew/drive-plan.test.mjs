@@ -2798,7 +2798,13 @@ test('A1 zero-turn non-start predicate validates the complete measured envelope'
   const io = fakeIo({ envelopes: { 'planner:1': stale } })
   const result = driveTask({ ...CTX, turnCeilings: { planner: 40 } }, io)
   assert.equal(result.status, 'escalation')
-  assert.match(result.details.escalation.why, /planner: no valid envelope/)
+  assert.equal(result.details.escalation.why, 'planner: an envelope exists at planner:1 but was refused: assignment-id-mismatch')
+  const refusalRows = io.calls.logs.filter((row) => Object.hasOwn(row, 'envelope_refused'))
+  assert.equal(refusalRows.length, 1)
+  assert.deepEqual(refusalRows[0].envelope_refused, {
+    role: 'planner', dispatch: 'planner1', reason: 'assignment-id-mismatch',
+    found_assignment_id: 'stale-planner', expected_assignment_id: 'planner1', path: 'planner:1',
+  })
   assert.equal(io.calls.assign.filter(({ role }) => role === 'planner').length, 1)
   assert.equal(io.calls.logs.some((row) => row.seat_enforcement?.kind === ZERO_TURN_NON_START), false)
 })

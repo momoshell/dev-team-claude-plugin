@@ -4008,6 +4008,23 @@ test('E1 held census repair member escalates before a builder bounce', () => {
   assert.equal(io.calls.logs.filter((row) => row.scope_admission?.source === 'census-bounce').length, 0)
 })
 
+// E1 covers a held FAILING carrier. The pair is admitted as a unit, so the OTHER member —
+// which did not fail — is also about to be written, and a sibling holding IT must refuse too.
+// Without this case the second holder guard is vacuous: the review found the two guards
+// subsumed one another, and partitioning them is only half the repair.
+test('E1b a held UNFAILED pair member escalates before a builder bounce', () => {
+  const [failing, unfailed] = CENSUS_CARRIER_FILES
+  const { ctx, io } = censusDriveIo([censusRecord(), censusRecord([failing])], {
+    laneFence: [{ lane: 'sibling', files: [unfailed] }],
+  })
+  const result = driveTask(ctx, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'census-exhibits')
+  assert.ok(result.details.escalation.why.includes(`${unfailed} is owned by lane sibling`))
+  assert.equal(io.calls.writes[`${TD}/census-exhibits-bounce-r1.md`] !== undefined, false)
+  assert.equal(io.calls.logs.filter((row) => row.scope_admission?.source === 'census-bounce').length, 0)
+})
+
 test('RV1-1 census repair refuses a sibling span holder before side effects', () => {
   const [, heldCarrier] = CENSUS_CARRIER_FILES
   const { ctx, io } = censusDriveIo([censusRecord(), censusRecord([heldCarrier])], {

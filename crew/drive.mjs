@@ -7418,9 +7418,16 @@ function runTask(ctx, io, crash) {
       if (postCommitCensusBounces >= POST_COMMIT_CENSUS_BOUNCE_MAX) {
         return escalate('census-exhibits', censusWhy('post-commit', committedCensus, postCommitOutside, postCommitInside), [], { commit: S.commit, census: committedCensus })
       }
+      // TWO DISJOINT holder checks, not one subsuming the other. Every failing file in this
+      // branch is a declared carrier, so a guard over ALL carriers strictly contains a guard
+      // over the failing ones — which made the first check vacuous: disabling it changed
+      // nothing, because the second caught the same rows. Partitioned so each guard owns a set
+      // the other cannot see, and each is therefore independently killable.
       const repairHeld = postCommit.held
       if (repairHeld.length > 0) return repairEscalation(repairHeld, [])
-      const repairUnitHeld = laneFenceHits(repairFiles, (Array.isArray(ctx.laneFence) ? ctx.laneFence : []).filter((record) => record?.lane !== ctx.laneName))
+      const failedCarriers = new Set(censusFiles(committedCensus))
+      const unfailedPair = repairFiles.filter((file) => !failedCarriers.has(file))
+      const repairUnitHeld = laneFenceHits(unfailedPair, (Array.isArray(ctx.laneFence) ? ctx.laneFence : []).filter((record) => record?.lane !== ctx.laneName))
       if (repairUnitHeld.length > 0) return repairEscalation(repairUnitHeld, [])
       const additions = repairFiles.filter((file) => !inScope(file))
       const spanSupersedes = repairFiles.filter((file) => !additions.includes(file))

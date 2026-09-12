@@ -849,15 +849,11 @@ test('relative import specifiers are path refusals and doctrine tells operators'
   const doctrine = readFileSync(join(repoRoot, 'skills', 'crew-dispatch', 'references', 'batch.md'), 'utf8')
   assert.ok(doctrine.includes('a test whose own relative import specifier names a fenced file now yields a `path` row'))
   assert.ok(doctrine.includes('Compile `allow_test_reach` only for a held test named by the CURRENT `dispatch-batch` run'))
-  for (const measurement of [
-    '`crew/crew.mjs` 6 -> 15 refused tests',
-    '`crew/drive.mjs` 15 -> 17',
-    '`scripts/factory/dispatch-batch.mjs` 3 -> 4',
-    '`crew/adapters/adapter-pi.mjs` (8 -> 8)',
-    '`crew/host-load.mjs` (1 -> 1)',
-    '`crew/roster.json` (5 -> 5) were unchanged',
-    'measured over those six fence surfaces on this tree',
-  ]) assert.ok(doctrine.includes(measurement), `doctrine omitted ${measurement}`)
+  for (const sentence of [
+    "A reviewer's table can compare how many refused tests each fenced surface names",
+    'Treat such comparisons as run-specific diagnostics rather than a durable baseline.',
+    'A historical pre-split record is superseded by the post-split rows',
+  ]) assert.ok(doctrine.includes(sentence), `doctrine omitted ${sentence}`)
 })
 
 test('two-file mixed reach keeps an actionable path fact', () => {
@@ -974,10 +970,17 @@ test('the ledger floor path reach is actionable on the b542 surface', () => {
   assert.ok(refusals.some((row) => row.test === floorTest && row.file === ledgerTest && row.symbols.length === 0))
 })
 
-test('RV2-1 doctrine separates shipped and pristine HEAD odd-comment counts', () => {
+test('RV2-1 doctrine describes qualitative comment-apostrophe scanner exposure', () => {
   const text = readFileSync(join(repoRoot, 'skills/crew-dispatch/references/batch.md'), 'utf8')
-  const exposure = '51 of 85 tracked `*.test.mjs` files carry at least one apostrophe inside a comment, and 30 of those carry an odd number on the shipped tree (30 at pristine `HEAD`).'
-  assert.equal(text.split(exposure).length - 1, 1)
+  const start = text.indexOf('The comment-desynchronisation exposure')
+  const end = text.indexOf('\nThe **cross-batch-unknown** warning carries', start)
+  assert.ok(start >= 0)
+  assert.ok(end > start)
+  const exposure = text.slice(start, end)
+  assert.ok(exposure.includes('apostrophe inside a test comment can hide path literals'))
+  assert.doesNotMatch(exposure, /\b\d+ of \d+\b/)
+  assert.doesNotMatch(exposure, /\b\d+\s*->\s*\d+\b/)
+  assert.doesNotMatch(exposure, /\b\d+\s+vs\s+\d+\b/)
 })
 
 test('D1 admits direct test reach and dry-run preserves the effective fence', async () => {

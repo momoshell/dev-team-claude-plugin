@@ -4899,6 +4899,8 @@ test('Q1 phase-slot queue wait is excluded from measured gate duration', () => {
   const gate = io.calls.emits.find((event) => event.kind === 'gate')
   assert.equal(gate.gate_run_ms, 7)
   assert.equal(gate.gate_run_ms_absent_reason, null)
+})
+
 const builderFingerprint = (entries = {}) => ({
   measured: true, checkout: CTX.checkout, at: 0, head: 'builder-head', entries,
 })

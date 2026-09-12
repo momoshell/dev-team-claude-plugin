@@ -7,7 +7,7 @@ Exhibit: `scripts/factory/ledger.mjs:452` (`CI_DECISIONS`).
 Exhibit: `crew/drive.mjs:458`.
 
 Production code reads `CI_DECISIONS` when it validates a decision.
-Exhibit: `scripts/factory/ledger.mjs:3599`.
+Exhibit: `scripts/factory/ledger.mjs:3603`.
 
 `DECISIONS` is exported and frozen but read by no production code; only
 `crew/drive-review.test.mjs:1463-1465` reads it, so it is not the exhibit for "callers

@@ -4,9 +4,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_IMPL_FILE, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, B384_CORRECTED_FIND, B384_CORRECTED_REPLACE, B384_GREEN, B384_MUTATION, B384_RED, B384_REFACTORED_BUILDER, B384_REFACTORED_UNCORRECTED_BUILDER, B44_LEADLESS_CTX, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_PLAN, CHECK_RUNS, CONVERGE_CTX, CONVERGE_GATE, CONVERGE_PLAN, CTX, CTX_DIRECTED, CTX_REPAIR, DIRECTED_FILES, D_ASK, D_AUTO, ENVELOPE_FIELD_KINDS, EXECUTIONS, FAILURE_UPGRADE, GATE_REAP_CMD_EOF, GATE_REAP_SWEEP_MARKER, GATE_SUMMARY_PREFIX, HARDENING_MARKS, HARDENING_OUTCOMES, HARDENING_REFUSALS, MODIFIER_OUTCOMES, MUTATIONS_MAX, MUTATION_BINDING_FAILURES, MUTATION_OUTCOMES, PARTIAL_REVIEWED, RED, SENSITIVITY_FLOOR, SHAPE_MAJOR_PHASES, SHAPE_ROUNDED_STAGES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, UNIVERSAL_STAGE_HEADS, VALIDATION_LANE_UNLOADABLE, VARIANTS, VARIANT_NAMES, WRITE_SURFACES, applyMutationAnchor, applyPrescriptionLines, b127GatePaths, b127PidAlive, b318Builders, b318SiteA, b376Build, b376DiskProofIo, b376ProofIo, b376Review, b376StageStack, b384Io, b384RefactoredIo, b44AssertLeadlessGate, b44GatePlan, bindMutationAnchor, buildEnv, collapseStages, dispositionIo, driveTask, existsSync, fakeIo, fenceBase, fenceDiff, fenceSpan, gateReapCommand, gateReapFresh, gateReapOriginal, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, hardeningBounceLines, hardeningBriefLines, hardeningDebt, hardeningOf, join, laneFence, leadEnv, mutationChangesTokens, outOfScopeFiles, planEnv, protectedPlanEnv, readFileSync, resumeGreen, resumeRed, reviewConvergeRun, reviewEnv, reviewFindings, rmSync, s843Ctx, s843Io, s843PlanEnv, s843Rows, scopeMatcher, scopedPath, scratchDir, shapeDefect, spawnSync, stageShape, treeDigest, triageEnv, undeclaredStage, validateHardened, validateMutations, validationPlan, validationProbeRun, validationRows,
+  B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_IMPL_FILE, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, B384_CORRECTED_FIND, B384_CORRECTED_REPLACE, B384_GREEN, B384_MUTATION, B384_RED, B384_REFACTORED_BUILDER, B384_REFACTORED_UNCORRECTED_BUILDER, B44_LEADLESS_CTX, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_PLAN, CHECK_RUNS, CONVERGE_CTX, CONVERGE_GATE, CONVERGE_PLAN, CTX, CTX_DIRECTED, CTX_REPAIR, DIRECTED_FILES, D_ASK, D_AUTO, ENVELOPE_FIELD_KINDS, EXECUTIONS, FAILURE_UPGRADE, GATE_REAP_CMD_EOF, GATE_REAP_SWEEP_MARKER, GATE_SUMMARY_PREFIX, HARDENING_MARKS, HARDENING_OUTCOMES, HARDENING_REFUSALS, MODIFIER_OUTCOMES, MUTATIONS_MAX, MUTATION_BINDING_FAILURES, MUTATION_CORRECTION_REFUSALS, MUTATION_OUTCOMES, PARTIAL_REVIEWED, RED, SENSITIVITY_FLOOR, SHAPE_MAJOR_PHASES, SHAPE_ROUNDED_STAGES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, UNIVERSAL_STAGE_HEADS, VALIDATION_LANE_UNLOADABLE, VARIANTS, VARIANT_NAMES, WRITE_SURFACES, applyMutationAnchor, applyPrescriptionLines, b127GatePaths, b127PidAlive, b318Builders, b318SiteA, b376Build, b376DiskProofIo, b376ProofIo, b376Review, b376StageStack, b384Io, b384RefactoredIo, b44AssertLeadlessGate, b44GatePlan, bindMutationAnchor, buildEnv, collapseStages, dispositionIo, driveTask, existsSync, fakeIo, fenceBase, fenceDiff, fenceSpan, gateReapCommand, gateReapFresh, gateReapOriginal, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, hardeningBounceLines, hardeningBriefLines, hardeningDebt, hardeningOf, join, laneFence, leadEnv, mutationChangesTokens, outOfScopeFiles, planEnv, protectedPlanEnv, readFileSync, resumeGreen, resumeRed, reviewConvergeRun, reviewEnv, reviewFindings, rmSync, s843Ctx, s843Io, s843PlanEnv, s843Rows, scopeMatcher, scopedPath, scratchDir, shapeDefect, spawnSync, stageShape, treeDigest, triageEnv, undeclaredStage, validateHardened, validateMutations, validationPlan, validationProbeRun, validationRows,
 } from './drive-fixtures.mjs'
 import { CENSUS_CARRIER_FILES, CHECK_MATCHES, HARDENING_APPEAL_SHAPE, HARDENING_CLASSES, LIMITS, hardeningAppealLines, hardeningAppealRequest, hardeningClassOf, mutationProofScope } from './drive.mjs'
+import { openLedger, MUTATION_ANCHOR_REFUSALS } from '../scripts/factory/ledger.mjs'
 import { CENSUS_QUALIFYING_FILES, runCensusExhibits, selectCensusExhibits } from './census-exhibits.mjs'
 
 const proofScopeMutations = () => [
@@ -1968,6 +1969,150 @@ test('b385 D3 a correction that survives or never adjudicates is refused and esc
   assert.equal(throwBind.corrected, 0)
   assert.equal(thrown.details.gate.repairs, 0)
   assert.equal(throwIo.calls.assign.filter(({ role, note }) => role === 'lead' && ['gate-repair', 'gate-fix'].includes(note)).length, 0)
+})
+
+const runMutationCorrectionCase = ({ mutation = CHECK_MUTATION, correction, built = CHECK_BUILT, runs = {}, changed = ['a.mjs', 'a.test.mjs'], throwMutation = false } = {}) => {
+  const file = `${CTX.checkout}/${mutation.file}`
+  const details = { ...buildEnv().details, mutation_corrections: correction }
+  const io = fakeIo({
+    files: { [file]: built }, writeThrough: true, cleanRuns: CHECK_CLEAN,
+    envelopes: CHECK_ENVELOPES([mutation], { 'builder:1': buildEnv({ details }) }),
+    runs: { ...CHECK_RUNS(), ...runs }, changed, emit: true,
+  })
+  if (throwMutation) {
+    const originalRun = io.run
+    let gateCalls = 0
+    io.run = function (cmd) {
+      if (!String(cmd).includes(GATE_REAP_SWEEP_MARKER) && gateReapOriginal(cmd) === 'gate-cmd') {
+        gateCalls += 1
+        if (gateCalls === 3) throw new Error('mutation gate exploded')
+      }
+      return originalRun.call(this, cmd)
+    }
+  }
+  return { res: driveTask(CTX, io), io }
+}
+
+const mutationAbsenceRows = (io) => io.calls.logs.filter((line) => line.mutation_anchor_absent).map((line) => line.mutation_anchor_absent)
+const mutationProofRows = (io) => io.calls.logs.flatMap((line) => Array.isArray(line.gate_check_discriminations) ? line.gate_check_discriminations : [])
+
+const correctionRed = (check) => `FAIL ${check}: caught\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":1,"errored":0}`
+const correctionGreen = `green\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":0,"errored":0}`
+
+test('A1 not-an-array refusal is journaled once without a declaration', () => {
+  const { res, io } = runMutationCorrectionCase({ correction: 'not-an-array' })
+  assert.equal(res.status, 'done')
+  assert.deepEqual(mutationAbsenceRows(io), [{
+    generation: 1, check: null, file: null, correction: 'refused',
+    refusal: 'not-an-array', why: 'details.mutation_corrections must be an array of corrections',
+  }])
+  assert.deepEqual(mutationProofRows(io), [{
+    check: 'check-one', outcome: 'killed', match: 'matched', file: 'a.mjs',
+    summary: { total: 3, failed: 1, errored: 0 }, why: null,
+  }])
+  const bind = io.calls.logs.find((line) => line.mutation_anchor_bind)?.mutation_anchor_bind
+  assert.deepEqual(bind?.checks, [{ check: 'check-one', file: 'a.mjs', status: 'exact' }])
+  assert.equal(Object.hasOwn(mutationProofRows(io)[0], 'correction_refusal'), false)
+})
+
+test('A2 unlabelled unknown-check refusal is journaled once without a declaration', () => {
+  const { res, io } = runMutationCorrectionCase({ correction: [null] })
+  assert.equal(res.status, 'done')
+  assert.deepEqual(mutationAbsenceRows(io), [{
+    generation: 1, check: null, file: null, correction: 'refused',
+    refusal: 'unknown-check', why: 'the correction names (no check) but the plan declared no mutation with that label',
+  }])
+  assert.deepEqual(mutationProofRows(io), [{
+    check: 'check-one', outcome: 'killed', match: 'matched', file: 'a.mjs',
+    summary: { total: 3, failed: 1, errored: 0 }, why: null,
+  }])
+  const bind = io.calls.logs.find((line) => line.mutation_anchor_bind)?.mutation_anchor_bind
+  assert.deepEqual(bind?.checks, [{ check: 'check-one', file: 'a.mjs', status: 'exact' }])
+  assert.equal(Object.hasOwn(mutationProofRows(io)[0], 'correction_refusal'), false)
+})
+
+test('B1 labelled correction refusal keeps its existing journal row', () => {
+  const mutation = { ...CHECK_MUTATION, check: 'labelled' }
+  const why = 'the declared find text is nowhere in the built a.mjs, exactly or whitespace-normalized'
+  const { res, io } = runMutationCorrectionCase({
+    mutation, built: 'export const guard = false\n', changed: ['a.test.mjs'],
+    correction: [{ check: 'labelled', find: '', replace: 'x' }],
+  })
+  assert.equal(res.status, 'escalation')
+  assert.equal(res.details.escalation.where, 'anchor-absent')
+  assert.deepEqual(mutationAbsenceRows(io), [{
+    generation: 1, check: 'labelled', file: 'a.mjs', correction: 'refused', refusal: 'correction-shape', why,
+  }])
+  assert.deepEqual(mutationProofRows(io), [{
+    check: 'labelled', outcome: 'anchor-absent', match: null, file: 'a.mjs', summary: null, why,
+    correction: 'refused', correction_refusal: 'correction-shape',
+  }])
+})
+
+test('C1 every frozen correction refusal has a journal producer', () => {
+  const twice = 'const a = pick(one, two)\nconst b = pick(one, two)\n'
+  const cases = [
+    { reason: 'not-an-array', correction: 'not-an-array', mutation: { ...CHECK_MUTATION, check: 'not-array' }, built: CHECK_BUILT },
+    { reason: 'unknown-check', correction: [null], mutation: { ...CHECK_MUTATION, check: 'unknown-check' }, built: CHECK_BUILT },
+    { reason: 'duplicate-check', correction: [
+      { check: 'duplicate', find: 'false', replace: 'true' }, { check: 'duplicate', find: 'false', replace: 'true' },
+    ], mutation: { ...CHECK_MUTATION, check: 'duplicate' }, built: 'export const guard = false\n', changed: ['a.test.mjs'] },
+    { reason: 'correction-not-absent', correction: [{ check: 'not-absent', find: 'false', replace: 'true' }], mutation: { ...CHECK_MUTATION, check: 'not-absent' }, runs: { 'gate-cmd:3': { ok: false, output: correctionRed('not-absent') } } },
+    { reason: 'correction-shape', correction: [{ check: 'shape', find: '', replace: 'x' }], mutation: { ...CHECK_MUTATION, check: 'shape' }, built: 'export const guard = false\n', changed: ['a.test.mjs'] },
+    { reason: 'correction-absent', correction: [{ check: 'absent', find: 'missing()', replace: 'other()' }], mutation: { ...CHECK_MUTATION, check: 'absent' }, built: 'export const guard = false\n', changed: ['a.test.mjs'] },
+    { reason: 'correction-ambiguous', correction: [{ check: 'ambiguous', find: 'pick(one, two)', replace: 'pick(other)' }], mutation: { check: 'ambiguous', file: 'a.mjs', find: 'target()', replace: 'other()' }, built: twice, changed: ['a.test.mjs'] },
+    { reason: 'correction-green', correction: [{ check: 'green', find: 'false', replace: 'true' }], mutation: { check: 'green', file: 'a.mjs', find: 'target()', replace: 'other()' }, built: 'export const guard = false\n', runs: { 'gate-cmd:3': { ok: true, output: correctionGreen } }, changed: ['a.test.mjs'] },
+    { reason: 'correction-unproven', correction: [{ check: 'unproven', find: 'false', replace: 'true' }], mutation: { check: 'unproven', file: 'a.mjs', find: 'target()', replace: 'other()' }, built: 'export const guard = false\n', changed: ['a.test.mjs'], throwMutation: true },
+  ]
+  const produced = new Set()
+  for (const scenario of cases) {
+    const { io } = runMutationCorrectionCase(scenario)
+    const absence = mutationAbsenceRows(io)
+    const proof = mutationProofRows(io)
+    for (const row of absence) if (row.refusal) produced.add(row.refusal)
+    for (const row of proof) if (row.correction_refusal) produced.add(row.correction_refusal)
+    assert.equal(produced.has(scenario.reason), true, `missing journal producer for ${scenario.reason}`)
+    if (scenario.reason === 'duplicate-check') assert.equal(absence.filter((row) => row.refusal === scenario.reason).length, 1)
+  }
+  assert.equal(Object.isFrozen(MUTATION_CORRECTION_REFUSALS), true)
+  assert.deepEqual(MUTATION_ANCHOR_REFUSALS, MUTATION_CORRECTION_REFUSALS)
+  assert.deepEqual([...produced].sort(), [...MUTATION_CORRECTION_REFUSALS].sort())
+})
+
+test('D1 unlabelled refusals do not change the declaration denominator', () => {
+  const baseline = runMutationCorrectionCase({ correction: undefined })
+  const malformed = runMutationCorrectionCase({ correction: 'not-an-array' })
+  const baselineBind = baseline.io.calls.logs.find((line) => line.mutation_anchor_bind)?.mutation_anchor_bind
+  const malformedBind = malformed.io.calls.logs.find((line) => line.mutation_anchor_bind)?.mutation_anchor_bind
+  assert.deepEqual(malformedBind, baselineBind)
+  assert.deepEqual({ declared: malformedBind?.declared, checks: malformedBind?.checks }, {
+    declared: 1, checks: [{ check: 'check-one', file: 'a.mjs', status: 'exact' }],
+  })
+  assert.deepEqual(mutationProofRows(malformed.io), mutationProofRows(baseline.io))
+  assert.equal(mutationAbsenceRows(malformed.io).length, 1)
+})
+
+test('E1 run-level refusal row passes ledger enum validation', () => {
+  const { io } = runMutationCorrectionCase({ correction: 'not-an-array' })
+  const [absence] = mutationAbsenceRows(io)
+  assert.ok(absence)
+  const root = scratchDir('drive-run-level-refusal-')
+  let ledger = null
+  const createdAt = '2026-09-12T00:00:00.000Z'
+  try {
+    ledger = openLedger({ dbPath: join(root, 'ledger.db'), stderr: { write() {} } })
+    assert.doesNotThrow(() => ledger.recordMutationAnchorAbsence({
+      adw_id: 'd2-e1', gate_generation: absence.generation, check_name: absence.check, file: absence.file,
+      correction: absence.correction, refusal: absence.refusal, why: absence.why, created_at: createdAt,
+    }))
+    assert.deepEqual(ledger.dumpTable('mutation_anchor_absences').map((row) => ({ ...row })), [{
+      adw_id: 'd2-e1', gate_generation: absence.generation, check_name: null, file: null,
+      correction: 'refused', refusal: 'not-an-array', why: absence.why, at_ms: null, created_at: createdAt,
+    }])
+  } finally {
+    ledger?.close()
+    rmSync(root, { recursive: true, force: true })
+  }
 })
 
 test('b385 G1 an all-bind lane pins its legacy proof row byte-identically beside one additive bind row', () => {

@@ -4134,7 +4134,7 @@ function builderReversionWhy(paths) {
   return `builder edits reverted to the pre-build baseline: ${paths.join(', ')}; the workspace is retained for human inspection`
 }
 
-function runScopeGate({ round, finalRound, builderDetails, builderObservation, forgetOrderedRemovals, ctx, io, plans, scopeFiles, planPath, ownSpanScopes, siblingSpanScopes, inScope, mutations, readBuilt, art, stage, stageComplete, failureUpgrade, escalate, escalateReversion }) {
+function runScopeGate({ round, finalRound, builderDetails, builderObservation, acceptBuilderBaseline, hasAcceptanceGate, ctx, io, plans, scopeFiles, planPath, ownSpanScopes, siblingSpanScopes, inScope, mutations, readBuilt, art, stage, stageComplete, failureUpgrade, escalate, escalateReversion }) {
   stage(`scope-gate:r${round}`)
   const changed = io.changedFiles()
   const gateFenceHits = laneFenceHits(changed, pathOnlyLaneFence(ctx.laneFence, ctx.laneName))
@@ -4194,20 +4194,26 @@ function runScopeGate({ round, finalRound, builderDetails, builderObservation, f
     refusal = mutationAnchorScopeRefusal(changed, mutations, builderDetails, readBuilt)
   }
   const reversion = builderObservation?.reversion ?? null
+  const repair = builderObservation?.repair ?? null
   const scopeGate = {
     round, reason: refusal.reason, envelopes: refusal.envelopes, edits: refusal.edits,
     ...(refusal.spans ? { spans: refusal.spans } : {}),
     ...(reversion ? { reversion } : {}),
+    ...(repair ? { repair } : {}),
   }
-  if (reversion) logScopeGate(io, io.now(), scopeGate)
+  if (reversion || repair) logScopeGate(io, io.now(), scopeGate)
   if (Array.isArray(reversion?.paths) && reversion.paths.length > 0) {
+    if (refusal.reason === null && hasAcceptanceGate) {
+      stageComplete()
+      return { ok: true, pendingReversion: reversion }
+    }
     stageComplete()
     return { escalation: escalateReversion(reversion.paths) }
   }
   // MUTATION A4: invert this early return and a round whose tree is entirely in scope
   // starts paying for a gate it does not need.
   if (refusal.reason === null) { stageComplete(); return { ok: true } }              // ANCHOR A4
-  if (!reversion) logScopeGate(io, io.now(), scopeGate)
+  if (!reversion && !repair) logScopeGate(io, io.now(), scopeGate)
   const canBounce = plans && !finalRound()
   if (!canBounce) {
     stageComplete()
@@ -4218,7 +4224,7 @@ function runScopeGate({ round, finalRound, builderDetails, builderObservation, f
   const b = art(`build-bounce-r${round}.md`)
   failureUpgrade('scope', 'builder')
   io.writeFile(b, scopeBounceBrief(round, refusal, scopeFiles, planPath))
-  forgetOrderedRemovals([...(refusal.envelopes || []), ...(refusal.edits || []), ...(refusal.paths || [])])
+  acceptBuilderBaseline(builderObservation.fingerprint)
   stageComplete()
   return { bounce: b }
 }
@@ -4585,6 +4591,23 @@ function runTask(ctx, io, crash) {
   let resumeWarmCounts = null
   let resumeColdSuite = null
   const finalReview = { verdict: null, residuals: [] }
+  const upsertReversionResidual = (residuals, suspicion) => {
+    const existing = Array.isArray(residuals) ? residuals : []
+    const prior = existing.find((entry) => entry?.id === 'builder-reversion')
+    const paths = [...new Set(Array.isArray(suspicion?.paths)
+      ? suspicion.paths.filter((path) => typeof path === 'string') : [])].sort()
+    const detector = paths.length > 0
+      ? { id: 'builder-reversion', type: 'correctness-unverified', summary: builderReversionWhy(paths), paths }
+      : prior
+    return [...existing.filter((entry) => entry?.id !== 'builder-reversion'), ...(detector ? [detector] : [])]
+  }
+  const finalReviewBlock = (finalReview) => finalReview.residuals.length === 0 ? {} : {
+    review: {
+      verdict: finalReview.verdict === 'pass' ? 'pass' : 'changes-needed',
+      residuals: [...finalReview.residuals],
+    },
+  }
+  let pendingReversion = null
   const gateReapTally = { invocations: 0, 'already-dead': 0, proven: 0, failed: 0, unproven: 0 }
   // `runner` is an io METHOD, so it must be invoked as one: `seatIo.runClean`
   // calls `this.run(cmd)` (crew/seat-io.mjs:241,245), and passing it detached
@@ -7554,30 +7577,57 @@ function runTask(ctx, io, crash) {
   // red may widen the scope and re-enter this same path once; every later red is
   // still a terminal suite escalation.
   const builderFingerprintState = (() => {
-    if (typeof io.fingerprintTree !== 'function') return { supported: false, readBuilderBaseline: () => null }
-    const builderFingerprintBaseline = io.fingerprintTree(ctx.checkout)
-    const readBuilderBaseline = () => builderFingerprintBaseline
-    return { supported: true, readBuilderBaseline }
+    if (typeof io.fingerprintTree !== 'function') return { supported: false, fingerprint: null }
+    return { supported: true, fingerprint: io.fingerprintTree(ctx.checkout) }
   })()
   const builderFingerprintSupported = builderFingerprintState.supported
-  const readBuilderBaseline = builderFingerprintState.readBuilderBaseline
+  let builderFingerprintBaseline = builderFingerprintState.fingerprint
   let previousChanges = new Set()
-  const forgetOrderedRemovals = (paths) => { for (const path of paths) previousChanges.delete(path) }
+  const readBuilderBaseline = () => builderFingerprintBaseline
+  const acceptBuilderBaseline = (fingerprint) => {
+    if (!fingerprint?.measured) return
+    builderFingerprintBaseline = fingerprint
+    previousChanges.clear()
+  }
+  const anchorRepairCyclePaths = (reverted, readBuilt) => {
+    const repaired = new Set()
+    for (const manifest of Array.isArray(reverted) ? reverted : []) {
+      if (manifestDirectory(manifest) === null) continue
+      let bytes
+      try { bytes = readBuilt(manifest) } catch { continue }
+      let parsed
+      try { parsed = JSON.parse(bytes) } catch { continue }
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) continue
+      const cited = Object.keys(parsed)
+        .filter((key) => ANCHOR_LINE_KEY.test(key))
+        .map(manifestKeyWithoutLine)
+        .filter((path) => reverted.includes(path))
+      if (cited.length === 0) continue
+      repaired.add(manifest)
+      for (const path of cited) repaired.add(path)
+    }
+    return repaired
+  }
   const observeBuilderEndpoint = () => {
-    if (!builderFingerprintSupported) return { reversion: null }
+    if (!builderFingerprintSupported) return { fingerprint: null, reversion: null, repair: null }
     const currentFingerprint = io.fingerprintTree(ctx.checkout)
     const comparison = compareFingerprints(readBuilderBaseline(), currentFingerprint)
     if (comparison.outcome === FINGERPRINT_OUTCOMES.unmeasurable) {
-      return { reversion: { paths: null, reason: BUILDER_REVERSION_UNMEASURABLE, cause: comparison.cause, detail: comparison.detail } }
+      return { fingerprint: currentFingerprint, reversion: { paths: null, reason: BUILDER_REVERSION_UNMEASURABLE, cause: comparison.cause, detail: comparison.detail }, repair: null }
     }
     const currentChanges = new Set([
       ...(comparison.added || []), ...(comparison.removed || []), ...(comparison.modified || []),
     ])
     const reverted = [...previousChanges].filter((path) => !currentChanges.has(path))
     previousChanges = currentChanges
+    const repaired = anchorRepairCyclePaths(reverted, readBuilt)
+    const sortedPaths = [...repaired].sort()
+    const suspected = reverted.filter((path) => !repaired.has(path)).sort()
     return {
-      reversion: reverted.length > 0
-        ? { reason: BUILDER_REVERSION_REASON, disposition: 'escalate', paths: reverted }
+      fingerprint: currentFingerprint,
+      repair: sortedPaths.length > 0 ? { reason: 'anchor-repair-cycle', paths: sortedPaths } : null,
+      reversion: suspected.length > 0
+        ? { reason: BUILDER_REVERSION_REASON, disposition: 'escalate', paths: suspected }
         : null,
     }
   }
@@ -7821,13 +7871,14 @@ function runTask(ctx, io, crash) {
     const hasScopeRequest = env.details && typeof env.details === 'object' && !Array.isArray(env.details)
       && Object.prototype.hasOwnProperty.call(env.details, 'scope_request')
     if (hasScopeRequest) {
-      if (builderObservation.reversion) {
+      if (builderObservation.reversion || builderObservation.repair) {
         const emptyScope = scopeRefusal([])
         logScopeGate(io, io.now(), {
           round, reason: emptyScope.reason, envelopes: emptyScope.envelopes, edits: emptyScope.edits,
-          reversion: builderObservation.reversion,
+          ...(builderObservation.reversion ? { reversion: builderObservation.reversion } : {}),
+          ...(builderObservation.repair ? { repair: builderObservation.repair } : {}),
         })
-        if (Array.isArray(builderObservation.reversion.paths) && builderObservation.reversion.paths.length > 0) {
+        if (Array.isArray(builderObservation.reversion?.paths) && builderObservation.reversion.paths.length > 0) {
           stageComplete()
           return escalateReversion(builderObservation.reversion.paths)
         }
@@ -7868,8 +7919,9 @@ function runTask(ctx, io, crash) {
       // MUTATION A1: neutralise this call and a bounced round again reaches no scope
       // gate — the b363-seatreask defect, restored.
       stageComplete()
-      const bounced = runScopeGate({ round, finalRound, builderDetails: undefined, builderObservation, forgetOrderedRemovals, ctx, io, plans, scopeFiles, planPath, ownSpanScopes, siblingSpanScopes, inScope, mutations, readBuilt, art, stage, stageComplete, failureUpgrade, escalate, escalateReversion })                                    // ANCHOR A1
+      const bounced = runScopeGate({ round, finalRound, builderDetails: undefined, builderObservation, acceptBuilderBaseline, hasAcceptanceGate: Boolean(gateCmd), ctx, io, plans, scopeFiles, planPath, ownSpanScopes, siblingSpanScopes, inScope, mutations, readBuilt, art, stage, stageComplete, failureUpgrade, escalate, escalateReversion })                                    // ANCHOR A1
       if (bounced.escalation) return bounced.escalation
+      if (bounced.pendingReversion) pendingReversion = bounced.pendingReversion
       if (bounced.bounce) { buildBrief = bounced.bounce; buildNote = 'scope-fix'; continue }
       // MUTATION B1: replace this call with a literal `{}` and a builder that returned
       // `insufficient` at the triage threshold never runs the gate, so the round reaches the
@@ -7903,8 +7955,9 @@ function runTask(ctx, io, crash) {
     builderEnv = env
     stageComplete()
 
-    const scoped = runScopeGate({ round, finalRound, builderDetails: env.details, builderObservation, forgetOrderedRemovals, ctx, io, plans, scopeFiles, planPath, ownSpanScopes, siblingSpanScopes, inScope, mutations, readBuilt, art, stage, stageComplete, failureUpgrade, escalate, escalateReversion })
+    const scoped = runScopeGate({ round, finalRound, builderDetails: env.details, builderObservation, acceptBuilderBaseline, hasAcceptanceGate: Boolean(gateCmd), ctx, io, plans, scopeFiles, planPath, ownSpanScopes, siblingSpanScopes, inScope, mutations, readBuilt, art, stage, stageComplete, failureUpgrade, escalate, escalateReversion })
     if (scoped.escalation) return scoped.escalation
+    if (scoped.pendingReversion) pendingReversion = scoped.pendingReversion
     if (scoped.bounce) { buildBrief = scoped.bounce; buildNote = 'scope-fix'; continue }
 
     // Gate B (mechanical): the validation lane, run by code.
@@ -8090,6 +8143,10 @@ function runTask(ctx, io, crash) {
         continue
       }
       lastGateOutput = gateRes.output
+      if (gateRes.ok) {
+        finalReview.residuals = upsertReversionResidual(finalReview.residuals, pendingReversion)
+        pendingReversion = null
+      }
       stageComplete()
     }
 
@@ -8221,7 +8278,7 @@ function runTask(ctx, io, crash) {
           stageComplete()
           return escalate('review', settledAccept.why, [], { accept_decision: settledAccept.record })
         }
-        finalReview.residuals = settledAccept.record.residuals || []
+        finalReview.residuals = upsertReversionResidual(settledAccept.record.residuals || [], finalReview.residuals.find((residual) => residual?.id === 'builder-reversion'))
         accepted = acceptedViaLabel(settledAccept.record)
         stageComplete()
         break build
@@ -8426,7 +8483,7 @@ function runTask(ctx, io, crash) {
             stageComplete()
             return escalate('review', settledAccept.why, [], { accept_decision: settledAccept.record })
           }
-          finalReview.residuals = settledAccept.record.residuals || []
+          finalReview.residuals = upsertReversionResidual(settledAccept.record.residuals || [], finalReview.residuals.find((residual) => residual?.id === 'builder-reversion'))
           accepted = acceptedViaLabel(settledAccept.record)
           stageComplete()
           break build
@@ -9101,6 +9158,7 @@ function runTask(ctx, io, crash) {
       gate: gateBlock(),
       ...acceptDecisionBlock(),
       ...carriedBlock(),
+      ...finalReviewBlock(finalReview),
     },
   }
   markResume(result, result.details)

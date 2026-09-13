@@ -222,7 +222,7 @@ test('A1', () => {
     }
   }
   assert.deepEqual([...new Set(reachable)].sort(), Object.keys(ESCALATION_QUESTIONS).sort())
-  assert.deepEqual(dynamic.sort(), ['PLAN_SCOPE.malformed', 'PLAN_SCOPE.widened', 'revalidated.kind', 'variant', 'variant', 'variant', 'variant'].sort())
+  assert.deepEqual(dynamic.sort(), ['PLAN_SCOPE.malformed', 'PLAN_SCOPE.widened', 'revalidated.kind', 'variant', 'variant', 'variant', 'variant', 'variant'].sort())
   for (const forbidden of ['full', 'repair', 'plan-scope-undispatched', 'plan-scope-same', 'plan-scope-narrowed']) {
     assert.equal(Object.hasOwn(ESCALATION_QUESTIONS, forbidden), false)
   }

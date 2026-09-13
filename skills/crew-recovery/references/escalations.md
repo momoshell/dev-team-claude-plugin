@@ -52,6 +52,7 @@ transport stage below reaches an escalation record as a `where`. These are
 
 | Stage | Meaning | Operator's first move |
 |---|---|---|
+| `envelope-refusal` | A seat's envelope failed an anti-replay identity check and was refused. The summary carries the operands — which field, its expected value and the value found — so an ABSENT identity reads differently from a genuinely mismatched one. | Read the operands first. `found=undefined` means the seat never named that field, which is not a replay; a real value that differs is. Eight lanes were lost to this before the two were distinguishable (#1227), every one with its work complete on disk. |
 | `headless-no-envelope` | A headless turn ended without a usable envelope. | Read the transport outcome and the seat's stream before deciding whether to retry. |
 | `headless-parse-error` | The headless stream could not be parsed. | Preserve the malformed frame evidence and inspect the transport record. |
 | `headless-session-busy` | A headless session was still occupied by another turn. | Confirm the prior turn settled before assigning again. |

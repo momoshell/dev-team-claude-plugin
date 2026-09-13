@@ -3758,6 +3758,24 @@ test('C1 review_only reuses the scout zero-write scope gate', () => {
   }
 })
 
+test('RV1-1 review_only preserves zero-write proof before handled envelope refusal', () => {
+  const env = reviewEnvelope()
+  delete env.run_id
+  const io = strictReviewIo(env, { changed: ['crew/drive.mjs'] })
+  let changedCalls = 0
+  const changedFiles = io.changedFiles.bind(io)
+  io.changedFiles = () => {
+    changedCalls += 1
+    return changedFiles()
+  }
+  const result = driveTask(REVIEW_CTX, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'scope')
+  assert.match(result.details.escalation.why, /crew\/drive\.mjs/)
+  assert.deepEqual(result.details.stages, ['review_only:r1', 'scope-gate:r1', 'escalate:scope'])
+  assert.equal(changedCalls, 1)
+})
+
 test('D1 review_only requires every structured finding field', () => {
   for (const key of Object.keys(REVIEW_FINDING)) {
     const env = reviewEnvelope({ findings: [{ ...REVIEW_FINDING }] })

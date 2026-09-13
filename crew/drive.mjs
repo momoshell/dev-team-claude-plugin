@@ -313,12 +313,68 @@ export function turnCeilingOf(env, budget) {
   return ceiling
 }
 
+// The RPC transport's no-envelope fallback is a correlated carrier, not a
+// member-authored ReturnEnvelope. Its detail tuple is closed by the producer;
+// accepting only the complete tuple prevents a lookalike from acquiring the
+// current run identity during normalization.
+function transportNoEnvelopeCarrier(env) {
+  if (!env || typeof env !== 'object' || Array.isArray(env)) return false
+  if (typeof env.assignment_id !== 'string' || env.assignment_id === '') return false
+  if (typeof env.role !== 'string' || env.role === '') return false
+  if (env.run_id !== undefined || env.status !== 'insufficient') return false
+  if (!Array.isArray(env.artifacts) || env.artifacts.length !== 0) return false
+  const detail = env.details
+  if (!detail || typeof detail !== 'object' || Array.isArray(detail)) return false
+  if (detail.degraded !== 'rpc-no-envelope') return false
+  const measured = Number.isSafeInteger(detail.turns) && detail.turns >= 0
+    && Number.isSafeInteger(detail.tool_calls) && detail.tool_calls >= 0
+  const zeroTurn = detail.reason === ZERO_TURN_NON_START
+    && detail.turns === 0 && detail.tool_calls === 0 && detail.absent_reason === null
+  const measuredNonzero = detail.reason === RPC_NO_ENVELOPE_OUTCOME
+    && measured && (detail.turns !== 0 || detail.tool_calls !== 0) && detail.absent_reason === null
+  const unavailable = detail.reason === RPC_NO_ENVELOPE_OUTCOME
+    && detail.turns === null && detail.tool_calls === null && detail.absent_reason === 'census-unavailable'
+  return zeroTurn || measuredNonzero || unavailable
+}
+
 function normalizeRuntimeEnvelope(env, role, id, runId, budget) {
   if (runId === undefined || !env || typeof env !== 'object' || env.run_id !== undefined) return env
   if (env.assignment_id !== id || env.role !== role) return env
   const ceilingBudget = Number.isFinite(budget) ? budget : env.details?.turn_ceiling?.budget
-  if (!suiteRefusalOf(env) && !zeroTurnNonStartOf(env) && !turnCeilingOf(env, ceilingBudget)) return env
+  if (suiteRefusalOf(env) || turnCeilingOf(env, ceilingBudget)) return { ...env, run_id: runId }
+  if (!transportNoEnvelopeCarrier(env)) return env
   return { ...env, run_id: runId }
+}
+
+const HANDLED_ENVELOPE_REFUSAL = Symbol('handled-envelope-refusal')
+
+function handledEnvelopeRefusal({ role, id, runId, returnPath, comparison }) {
+  const envelope = {
+    ...(runId === undefined ? {} : { run_id: runId }),
+    assignment_id: id,
+    role,
+    status: 'insufficient',
+    summary: `envelope-refusal: ${comparison.reason}; expected ${comparison.field}=${JSON.stringify(comparison.expected)}, found ${comparison.field}=${JSON.stringify(comparison.found)}; stage=envelope-refusal`,
+    artifacts: [],
+    details: {
+      envelope_refusal: {
+        stage: 'envelope-refusal', path: returnPath, reason: comparison.reason,
+        field: comparison.field,
+        expected: comparison.expected,
+        found: comparison.found,
+      },
+    },
+  }
+  Object.defineProperty(envelope, HANDLED_ENVELOPE_REFUSAL, { value: true })
+  return envelope
+}
+
+function handledEnvelopeRefusalOf(env) {
+  return env?.[HANDLED_ENVELOPE_REFUSAL] === true ? env.details?.envelope_refusal : null
+}
+
+function handledEnvelopeRefusalWhy(env) {
+  return handledEnvelopeRefusalOf(env) ? env.summary : null
 }
 
 function suiteRefusalPreamble(env) {
@@ -534,6 +590,7 @@ export const LANE_PATH_OPTIONS = Object.freeze(['--import', '--require', '-r', '
 export const ENVELOPE_REFUSAL_REASONS = Object.freeze([
   'no-envelope', 'summary', 'artifacts', 'details', 'field-missing', 'field-kind', 'field-item', 'verdict-findings', 'finding-id', 'vacuity-classification', 'carried-silent', VALIDATION_LANE_UNLOADABLE,
 ])
+export const ANTI_REPLAY_REFUSAL_REASONS = Object.freeze(['assignment-id-mismatch', 'role-mismatch', 'run-mismatch', 'status-kind'])
 export const UNIVERSAL_STAGE_HEADS = Object.freeze(['escalate', 'done'])
 // #251 follow-on — a PARTIAL reviewed shape declares where it gets what a plan
 // round would have produced. Closed per key, and only values this driver
@@ -4809,20 +4866,23 @@ function runTask(ctx, io, crash) {
     }
   }
 
-  // This tuple is separate because ENVELOPE_REFUSAL_REASONS belongs to the
-  // stricter envelopeDefect contract.
-  const ANTI_REPLAY_REFUSAL_REASONS = Object.freeze(['assignment-id-mismatch', 'role-mismatch', 'run-mismatch', 'status-kind'])
-  function antiReplayRefusalReason(env, role, id, runId, { strictIdentity = false } = {}) {
-    if (strictIdentity
+  function antiReplayComparison(env, role, id, runId, { strictIdentity = false } = {}) {
+    if (env == null) return null
+    const found = (field) => env?.[field] ?? null
+    const assignmentMismatch = strictIdentity
       ? (typeof env?.assignment_id !== 'string' || env.assignment_id !== id)
-      : (env?.assignment_id !== undefined && env.assignment_id !== id)) return ANTI_REPLAY_REFUSAL_REASONS[0]
-    if (strictIdentity
+      : (env?.assignment_id !== undefined && env.assignment_id !== id)
+    if (assignmentMismatch) return { reason: ANTI_REPLAY_REFUSAL_REASONS[0], field: 'assignment_id', expected: id, found: found('assignment_id') }
+    const roleMismatch = strictIdentity
       ? (typeof env?.role !== 'string' || env.role !== role)
-      : (env?.role !== undefined && env.role !== role)) return ANTI_REPLAY_REFUSAL_REASONS[1]
+      : (env?.role !== undefined && env.role !== role)
+    if (roleMismatch) return { reason: ANTI_REPLAY_REFUSAL_REASONS[1], field: 'role', expected: role, found: found('role') }
+    const runMismatch = runId !== undefined && env?.run_id !== runId
     if (strictIdentity
-      ? (typeof env?.run_id !== 'string' || !env.run_id.trim() || (runId !== undefined && env.run_id !== runId))
-      : (runId !== undefined && env?.run_id !== runId)) return ANTI_REPLAY_REFUSAL_REASONS[2]
-    return ANTI_REPLAY_REFUSAL_REASONS[3]
+      ? (typeof env?.run_id !== 'string' || !env.run_id.trim() || runMismatch)
+      : runMismatch) return { reason: ANTI_REPLAY_REFUSAL_REASONS[2], field: 'run_id', expected: runId ?? null, found: found('run_id') }
+    if (typeof env?.status !== 'string') return { reason: ANTI_REPLAY_REFUSAL_REASONS[3], field: 'status', expected: 'string', found: found('status') }
+    return null
   }
 
   function dispatchOnce(role, briefFile, note, { reviewSemantics = true, strictIdentity = shape.strict_identity === true, briefBuilder = null } = {}) {
@@ -4852,10 +4912,26 @@ function runTask(ctx, io, crash) {
     io.log(recordRow({ at: io.now(), assign: id, role, brief }))
     emit({ kind: 'assign', id, role, brief })
     const received = io.wait(returnPath, waits[role] || 1200)
-    const env = enforceTurnCeiling(role, id, normalizeRuntimeEnvelope(received, role, id, dispatchRunId, ctx.turnCeilings?.[role]), dispatchRunId)
-    // Anti-replay FIRST: a stale or mis-addressed envelope is not evidence, and
-    // recording enforcement from one would put a false fact in the terminal record
-    // before the validation below rejects it.
+    const normalized = normalizeRuntimeEnvelope(received, role, id, dispatchRunId, ctx.turnCeilings?.[role])
+    const comparison = antiReplayComparison(normalized, role, id, dispatchRunId, { strictIdentity })
+    if (comparison) {
+      emit({
+        kind: 'cell-failure', role, id, failure: 'unusable-envelope', stage: 'envelope-refusal',
+        detail: `envelope at ${returnPath} was refused: ${comparison.reason}; expected ${comparison.field}=${JSON.stringify(comparison.expected)}, found ${comparison.field}=${JSON.stringify(comparison.found)}`,
+      })
+      io.log(recordRow({ at: io.now(), envelope_refused: {
+        role, dispatch: id, reason: comparison.reason,
+        field: comparison.field, expected: comparison.expected, found: comparison.found,
+        found_assignment_id: normalized?.assignment_id ?? null,
+        expected_assignment_id: id, path: returnPath,
+        ...(dispatchRunId === undefined && normalized?.run_id === undefined ? {} : {
+          found_run_id: normalized?.run_id ?? null, expected_run_id: dispatchRunId ?? null,
+        }),
+      } }))
+      emit({ kind: 'envelope', id, role, status: 'insufficient' })
+      return handledEnvelopeRefusal({ role, id, runId: dispatchRunId, returnPath, comparison })
+    }
+    const env = enforceTurnCeiling(role, id, normalized, dispatchRunId)
     const enforcement = validEnvelope(env, role, id, dispatchRunId, { strictIdentity }) ? enforcementPreamble(env) : { kind: null, lines: [] }
     if (enforcement.lines.length > 0) {
       pendingEnforcement.set(role, enforcement)
@@ -4885,22 +4961,10 @@ function runTask(ctx, io, crash) {
     if (review?.findings_report && (review.findings_report.count_mismatch.length || review.findings_report.rejected.length)) {
       io.log(recordRow({ at: io.now(), review_findings_note: { dispatch: id, ...review.findings_report } }))
     }
-    if (!validEnvelope(env, role, id, dispatchRunId, { strictIdentity })) {
-      // env == null was already recorded by io.wait as a 'timeout'; this branch
-      // is the seat that DID answer, with something the driver cannot use.
-      if (env != null) {
-        emit({ kind: 'cell-failure', role, id, failure: 'unusable-envelope', stage: null, detail: `envelope at ${returnPath} failed the shape or anti-replay check` })
-        const reason = antiReplayRefusalReason(env, role, id, dispatchRunId, { strictIdentity })
-        io.log(recordRow({ at: io.now(), envelope_refused: {
-          role, dispatch: id, reason, found_assignment_id: env?.assignment_id ?? null,
-          expected_assignment_id: id, path: returnPath,
-          ...(dispatchRunId === undefined && env?.run_id === undefined ? {} : {
-            found_run_id: env?.run_id ?? null, expected_run_id: dispatchRunId ?? null,
-          }),
-        } }))
-        throw fail(role, `an envelope exists at ${returnPath} but was refused: ${reason}`)
-      }
-      const diagnosis = env == null ? io.waitDiagnosis?.(returnPath) : null       // verbatim: mutation A9
+    if (normalized == null) {
+      // A null envelope was already recorded by io.wait as a 'timeout'; this branch
+      // is the seat that did not answer at all.
+      const diagnosis = received == null ? io.waitDiagnosis?.(returnPath) : null       // verbatim: mutation A9
       const error = fail(role, `no valid envelope at ${returnPath} within ${waits[role]}s${diagnosis?.text ? ` — ${diagnosis.text}` : ''}`)
       error.returnPath = returnPath
       throw error
@@ -5072,6 +5136,8 @@ function runTask(ctx, io, crash) {
     io.writeFile(briefPath, delivery.brief)
     io.log(recordRow({ at: io.now(), lead_consult_context: { brief: briefPath, consult: S.consults, round, mode: delivery.mode, sources: delivery.sources } }))
     const env = assignAndWait('lead', briefPath, label ? `decision-${label}` : round === 2 ? 'decision-final' : 'decision')
+    const refusalWhy = handledEnvelopeRefusalWhy(env)
+    if (refusalWhy) return { decision: 'escalate', reason: refusalWhy }
     const d = env.details || {}
     let requestedDecision = null
     let requestedGuidance = null
@@ -5444,6 +5510,8 @@ function runTask(ctx, io, crash) {
       }
     }
     stageComplete()
+    const refusalWhy = handledEnvelopeRefusalWhy(env)
+    if (refusalWhy) return escalate(variant, refusalWhy, env.artifacts || [])
     if (seatFailure) return escalate(variant, `the ${seat} seat failed: ${seatFailure.message}`)
     if (env.status !== 'done') {
       return escalate(variant, `the ${seat} seat returned status=${env.status}: ${env.summary || ''}`, env.artifacts || [])
@@ -5733,6 +5801,11 @@ function runTask(ctx, io, crash) {
       '  details.commit_subject / details.issues: optional',
     ].join('\n'))
     const env = assignAndWait('planner', briefPath, 'triage')
+    const refusalWhy = handledEnvelopeRefusalWhy(env)
+    if (refusalWhy) {
+      stageComplete()
+      return { stop: escalate('triage', refusalWhy, env.artifacts || []) }
+    }
     if (env.status !== 'done') {
       stageComplete()
       return { stop: escalate('triage', `the triage seat returned status=${env.status}: ${env.summary || ''} — a ${variant} run's triage is bounded to one round, so there is no revision to bounce it to`, env.artifacts || []) }
@@ -5906,6 +5979,11 @@ function runTask(ctx, io, crash) {
     }
     const env = assignAndWait('planner', plannerBrief, planNote ?? (round === 1 ? 'plan' : 'plan-revision'))
     planNote = null
+    const refusalWhy = handledEnvelopeRefusalWhy(env)
+    if (refusalWhy) {
+      stageComplete()
+      return escalate('plan', refusalWhy, env.artifacts || [])
+    }
     if (env.status !== 'done') {
       const asked = parseQuestions(env.details)
       const questions = asked?.questions ?? []
@@ -7902,6 +7980,11 @@ function runTask(ctx, io, crash) {
     const finalRound = () => round >= limits.build_rounds + extraRounds
     stage(`build:r${round}`)
     const env = assignAndWait('builder', buildBrief, buildNote)
+    const refusalWhy = handledEnvelopeRefusalWhy(env)
+    if (refusalWhy) {
+      stageComplete()
+      return escalate('build', refusalWhy, env.artifacts || [])
+    }
     const builderObservation = observeBuilderEndpoint()
     const hasScopeRequest = env.details && typeof env.details === 'object' && !Array.isArray(env.details)
       && Object.prototype.hasOwnProperty.call(env.details, 'scope_request')
@@ -8352,6 +8435,11 @@ function runTask(ctx, io, crash) {
         review = panelResult.review
       } else {
         review = assignAndWait('reviewer', revBrief, 'review')
+      }
+      const refusalWhy = handledEnvelopeRefusalWhy(review)
+      if (refusalWhy) {
+        stageComplete()
+        return escalate('review', refusalWhy, review.artifacts || [])
       }
       if (review?.status === 'done' && review?.role === 'reviewer') S.returns.reviewer = review
       journalDiffJudgments(review.details, report)

@@ -2941,7 +2941,7 @@ test('RV1-2 unmeasured turn census is rejected at every driver seam', () => {
     }
     const result = driveTask({ ...CTX, turnCeilings: { planner: 40 } }, io)
     assert.equal(result.status, 'escalation', label)
-    assert.equal(result.details.escalation.where, 'planner', label)
+    assert.equal(result.details.escalation.where, label === 'no envelope' ? 'planner' : 'plan', label)
     assert.equal(ceilingRow(io, 'planner1'), undefined, label)
     assert.equal(journalReads, 0, label)
     assert.equal(Object.keys(io.calls.writes).some((path) => path.includes('enforcement-planner-')), false, label)
@@ -3307,14 +3307,16 @@ test('A1 zero-turn non-start predicate validates the complete measured envelope'
   }
 
   const stale = zeroTurnEnvelope('stale-planner')
-  const io = fakeIo({ envelopes: { 'planner:1': stale } })
+  const io = fakeIo({ envelopes: { 'planner:1': stale, 'lead:1': leadEnv('escalate') } })
   const result = driveTask({ ...CTX, turnCeilings: { planner: 40 } }, io)
   assert.equal(result.status, 'escalation')
-  assert.equal(result.details.escalation.why, 'planner: an envelope exists at planner:1 but was refused: assignment-id-mismatch')
+  assert.equal(result.details.escalation.where, 'plan')
+  assert.match(result.details.escalation.why, /envelope-refusal: assignment-id-mismatch/)
   const refusalRows = io.calls.logs.filter((row) => Object.hasOwn(row, 'envelope_refused'))
   assert.equal(refusalRows.length, 1)
   assert.deepEqual(refusalRows[0].envelope_refused, {
     role: 'planner', dispatch: 'planner1', reason: 'assignment-id-mismatch',
+    field: 'assignment_id', expected: 'planner1', found: 'stale-planner',
     found_assignment_id: 'stale-planner', expected_assignment_id: 'planner1', path: 'planner:1',
   })
   assert.equal(io.calls.assign.filter(({ role }) => role === 'planner').length, 1)

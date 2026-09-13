@@ -8,6 +8,7 @@ import {
 } from './drive-fixtures.mjs'
 import { ADVERSARY_REFUSAL, ADVERSARY_REFUSALS, ADVERSARY_TRIGGERS, CENSUS_CARRIER_FILES as RUNTIME_CENSUS_CARRIER_FILES, SCOPE_ADMISSION_SOURCES, SCOPE_REQUEST_KINDS, SEAT_ADMISSION_MAX as RUNTIME_SEAT_ADMISSION_MAX, SUITE_ADMISSION_MAX as RUNTIME_SUITE_ADMISSION_MAX, fenceScopeOf, fenceScopesIntersect, parseUnifiedZeroHunks, resolveAdversaryTrigger, scopeAdmissionDecision, scopeRequestOf, siblingSpanIntersects, suiteRedTestFiles, RESUME_CHECKPOINT_VERSION, RESUME_CHECKPOINT_FAMILIES, resumeCheckpointDefect, resumeTask, resumeWorktreeSha256 } from './drive.mjs'
 import { CENSUS_CARRIER_FILES as DISPATCH_CENSUS_CARRIER_FILES } from '../scripts/factory/dispatch-batch.mjs'
+import { ANTI_REPLAY_REFUSAL_REASONS } from './drive.mjs'
 
 test('a supplied wait budget reaches io.wait and names the seat overdue at that budget', () => {
   const io = fakeIo({ envelopes: { 'planner:1': null } })
@@ -791,31 +792,231 @@ test('lead timeout (no envelope) on a consult throws toward escalation, never si
 })
 
 test('a present stale or mis-addressed envelope emits one refusal and terminates at its dispatch', () => {
-  const io = fakeIo({ emit: true, envelopes: { 'planner:1': planEnv({ assignment_id: 'stale-planner' }) } })
+  const io = fakeIo({ emit: true, envelopes: { 'planner:1': planEnv({ assignment_id: 'stale-planner' }), 'lead:1': leadEnv('escalate') } })
   const res = driveTask(CTX, io)
   assert.equal(res.status, 'escalation')
-  assert.equal(res.details.escalation.where, 'planner')
-  assert.equal(res.details.escalation.why, 'planner: an envelope exists at planner:1 but was refused: assignment-id-mismatch')
+  assert.equal(res.details.escalation.where, 'plan')
+  assert.match(res.details.escalation.why, /envelope-refusal: assignment-id-mismatch/)
   assert.doesNotMatch(res.details.escalation.why, /no valid envelope/)
-  assert.deepEqual(io.calls.assign.map(({ role }) => role), ['planner'])
+  assert.doesNotMatch(res.summary, /the driver crashed/)
   const refusalRows = io.calls.logs.filter((row) => Object.hasOwn(row, 'envelope_refused'))
   assert.equal(refusalRows.length, 1)
   assert.deepEqual(refusalRows[0].envelope_refused, {
     role: 'planner', dispatch: 'planner1', reason: 'assignment-id-mismatch',
+    field: 'assignment_id', expected: 'planner1', found: 'stale-planner',
     found_assignment_id: 'stale-planner', expected_assignment_id: 'planner1', path: 'planner:1',
   })
-  assert.ok(io.calls.emits.some((event) => event.kind === 'cell-failure' && event.failure === 'unusable-envelope'))
+  assert.ok(io.calls.emits.some((event) => event.kind === 'cell-failure' && event.failure === 'unusable-envelope' && event.stage === 'envelope-refusal'))
+  assert.deepEqual(io.calls.emits.filter((event) => event.kind === 'envelope' && event.id === 'planner1'), [
+    { kind: 'envelope', id: 'planner1', role: 'planner', status: 'insufficient' },
+  ])
 
   for (const [label, envelope, reason] of [
     ['assignment mismatch wins over role mismatch', planEnv({ assignment_id: 'stale-planner', role: 'not-planner' }), 'assignment-id-mismatch'],
     ['role mismatch alone', planEnv({ role: 'not-planner' }), 'role-mismatch'],
     ['non-string status', planEnv({ status: null }), 'status-kind'],
   ]) {
-    const caseIo = fakeIo({ envelopes: { 'planner:1': envelope } })
+    const caseIo = fakeIo({ emit: true, envelopes: { 'planner:1': envelope, 'lead:1': leadEnv('escalate') } })
     const result = driveTask(CTX, caseIo)
     assert.equal(result.status, 'escalation', label)
-    assert.equal(result.details.escalation.why, `planner: an envelope exists at planner:1 but was refused: ${reason}`, label)
+    assert.equal(result.details.escalation.where, 'plan', label)
+    assert.match(result.details.escalation.why, new RegExp(`envelope-refusal: ${reason}`), label)
+    assert.doesNotMatch(result.summary, /the driver crashed/, label)
     const rows = caseIo.calls.logs.filter((row) => Object.hasOwn(row, 'envelope_refused'))
+    assert.equal(rows.length, 1, label)
+    assert.equal(rows[0].envelope_refused.reason, reason, label)
+  }
+})
+
+function identityFixture(envelope, { variant = 'scout', role = 'planner', runId = 'run-1', id = 'd1' } = {}) {
+  const io = fakeIo({ emit: true })
+  const assign = io.assign.bind(io)
+  io.assign = function (spec) {
+    const assigned = assign(spec)
+    return { ...assigned, id, returnPath: `/tmp/returns/${runId}/${id}.${role}.json` }
+  }
+  io.wait = () => envelope
+  return { io, ctx: { ...CTX, variant, run_id: runId, roles: [role], seatedRoles: [role] } }
+}
+
+function rpcNoEnvelope(detail, over = {}) {
+  return {
+    assignment_id: 'd1', role: 'planner', status: 'insufficient', summary: 'rpc fallback', artifacts: [],
+    details: { degraded: 'rpc-no-envelope', ...detail }, ...over,
+  }
+}
+
+test('A1 handled anti-replay refusal', () => {
+  const cases = [
+    ['plan', CTX, 'planner', () => fakeIo({
+      emit: true, envelopes: { 'planner:1': planEnv({ assignment_id: 'stale-planner' }), 'lead:1': leadEnv('escalate') },
+    })],
+    ['build', CTX_DIRECTED, 'builder', () => fakeIo({
+      emit: true, files: DIRECTED_FILES,
+      envelopes: { 'builder:1': buildEnv({ assignment_id: 'stale-builder' }), 'lead:1': leadEnv('escalate') },
+      runs: { 'directed-gate': { ok: false, output: RED() } },
+    })],
+    ['reviewer', CTX, 'reviewer', () => fakeIo({
+      emit: true,
+      envelopes: {
+        'planner:1': planEnv(), 'builder:1': buildEnv(),
+        'reviewer:1': { ...reviewEnv('pass'), assignment_id: 'stale-reviewer' }, 'reviewer:2': reviewEnv('pass'),
+      },
+      runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+      changed: ['a.mjs', 'a.test.mjs'],
+    })],
+    ['review-only', { ...CTX, variant: 'review_only', roles: ['reviewer'], seatedRoles: ['reviewer'] }, 'reviewer', () => fakeIo({
+      emit: true, envelopes: { 'reviewer:1': reviewEnv('pass') },
+    })],
+    ['verify-only', { ...CTX, variant: 'verify_only', roles: ['reviewer'], seatedRoles: ['reviewer'] }, 'reviewer', () => fakeIo({
+      emit: true, envelopes: { 'reviewer:1': reviewEnv('pass') },
+    })],
+  ]
+  for (const [label, ctx, role, makeIo] of cases) {
+    const io = makeIo()
+    const result = driveTask(ctx, io)
+    const refusalRows = io.calls.logs.filter((row) => Object.hasOwn(row, 'envelope_refused'))
+    assert.equal(refusalRows.length, 1, label)
+    assert.equal(io.calls.emits.filter((event) => event.kind === 'cell-failure').length, 1, label)
+    assert.equal(io.calls.emits.find((event) => event.kind === 'cell-failure').stage, 'envelope-refusal', label)
+    assert.doesNotMatch(result.summary, /the driver crashed/, label)
+    assert.doesNotMatch(result.details.escalation?.why || '', /the driver crashed/, label)
+    if (result.details.escalation) assert.notEqual(result.details.escalation.where, role, label)
+    const dispatch = io.calls.assign.find((entry) => entry.role === role)
+    const terminal = io.calls.emits.filter((event) => event.kind === 'envelope' && event.id === `${role}1`)
+    assert.deepEqual(terminal, [{ kind: 'envelope', id: `${role}1`, role, status: 'insufficient' }], label)
+    assert.equal(Object.hasOwn(terminal[0], 'review'), false, label)
+    assert.equal(dispatch?.role, role, label)
+  }
+})
+
+test('B1 refusal record reports found operand', () => {
+  const cases = [
+    ['assignment_id', { assignment_id: 'd-old', role: 'planner', run_id: 'run-1', status: 'done' }, 'd-old'],
+    ['role', { assignment_id: 'd1', role: 'reviewer', run_id: 'run-1', status: 'done' }, 'reviewer'],
+    ['run_id', { assignment_id: 'd1', role: 'planner', run_id: 'run-old', status: 'done' }, 'run-old'],
+    ['status', { assignment_id: 'd1', role: 'planner', run_id: 'run-1', status: null }, null],
+  ]
+  for (const [field, envelope, found] of cases) {
+    const { io } = identityFixture(envelope)
+    driveTask({ ...CTX, variant: 'scout', run_id: 'run-1', roles: ['planner'], seatedRoles: ['planner'] }, io)
+    const row = io.calls.logs.find((entry) => entry.envelope_refused)?.envelope_refused
+    assert.equal(row?.field, field, field)
+    assert.deepEqual(row?.found, found, field)
+  }
+})
+
+test('B2 refusal record reports expected operand', () => {
+  const cases = [
+    ['assignment_id', { assignment_id: 'd-old', role: 'planner', run_id: 'run-1', status: 'done' }, 'd1'],
+    ['role', { assignment_id: 'd1', role: 'reviewer', run_id: 'run-1', status: 'done' }, 'planner'],
+    ['run_id', { assignment_id: 'd1', role: 'planner', run_id: 'run-old', status: 'done' }, 'run-1'],
+    ['status', { assignment_id: 'd1', role: 'planner', run_id: 'run-1', status: null }, 'string'],
+  ]
+  for (const [field, envelope, expected] of cases) {
+    const { io } = identityFixture(envelope)
+    driveTask({ ...CTX, variant: 'scout', run_id: 'run-1', roles: ['planner'], seatedRoles: ['planner'] }, io)
+    const row = io.calls.logs.find((entry) => entry.envelope_refused)?.envelope_refused
+    assert.equal(row?.field, field, field)
+    assert.deepEqual(row?.expected, expected, field)
+    assert.equal(row?.found_assignment_id, envelope.assignment_id, field)
+    assert.equal(row?.expected_assignment_id, 'd1', field)
+  }
+})
+
+test('C1 genuine replay remains refused as run-mismatch', () => {
+  const foreign = {
+    assignment_id: 'd1', role: 'reviewer', run_id: 'run-old', status: 'done', summary: 'foreign review',
+    artifacts: ['/tmp/foreign-review.md'], details: {
+      base: 'base', head: 'head', outcome: 'findings',
+      findings: [{ id: 'foreign', severity: 'must-fix', location: 'a.mjs:1', summary: 'foreign finding', evidence: 'foreign evidence', disposition: 'ask-user' }],
+    },
+  }
+  const { io, ctx } = identityFixture(foreign, { variant: 'review_only', role: 'reviewer' })
+  const result = driveTask(ctx, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(io.calls.logs.filter((row) => row.review_outcome).length, 0)
+  assert.equal(io.calls.logs.filter((row) => row.review_findings_note).length, 0)
+  assert.equal(result.details.accept_findings, null)
+  assert.equal(io.calls.logs.filter((row) => row.envelope_refused).length, 1)
+  assert.equal(io.calls.logs.find((row) => row.envelope_refused).envelope_refused.reason, 'run-mismatch')
+  assert.deepEqual(io.calls.emits.filter((event) => event.kind === 'envelope'), [{ kind: 'envelope', id: 'd1', role: 'reviewer', status: 'insufficient' }])
+})
+
+test('D1 anti-replay refusal reasons remain a frozen closed four', () => {
+  assert.equal(Object.isFrozen(ANTI_REPLAY_REFUSAL_REASONS), true)
+  assert.deepEqual([...ANTI_REPLAY_REFUSAL_REASONS], ['assignment-id-mismatch', 'role-mismatch', 'run-mismatch', 'status-kind'])
+})
+
+test('E1 transposed run id is diagnosable from refusal output', () => {
+  const { io, ctx } = identityFixture({ assignment_id: 'd1', role: 'planner', run_id: 'run-ba', status: 'done' }, { runId: 'run-ab' })
+  const result = driveTask(ctx, io)
+  const row = io.calls.logs.find((entry) => entry.envelope_refused)?.envelope_refused
+  assert.equal(row.reason, 'run-mismatch')
+  assert.equal(row.expected, 'run-ab')
+  assert.equal(row.found, 'run-ba')
+  assert.match(result.summary, /run-ab/)
+  assert.match(result.summary, /run-ba/)
+})
+
+test('F1 complete transport rpc-no-envelope carrier is admitted', () => {
+  for (const detail of [
+    { reason: 'zero-turn-non-start', turns: 0, tool_calls: 0, absent_reason: null },
+    { reason: 'no-envelope', turns: 4, tool_calls: 0, absent_reason: null },
+    { reason: 'no-envelope', turns: null, tool_calls: null, absent_reason: 'census-unavailable' },
+  ]) {
+    const { io, ctx } = identityFixture(rpcNoEnvelope(detail))
+    const result = driveTask(ctx, io)
+    assert.equal(result.status, 'escalation')
+    assert.equal(result.details.escalation.where, 'scout')
+    assert.equal(io.calls.logs.filter((row) => row.envelope_refused).length, 0)
+    assert.match(result.details.escalation.why, /rpc fallback/)
+  }
+})
+
+test('G1 matching top-level run id is admitted', () => {
+  const { io, ctx } = identityFixture({ ...reconEnv(), assignment_id: 'd1', role: 'planner', run_id: 'run-1' })
+  const result = driveTask(ctx, io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.logs.filter((row) => row.envelope_refused).length, 0)
+  assert.doesNotMatch(result.summary, /run-mismatch/)
+})
+
+test('H1 strict identity refusal precedes turn ceiling', () => {
+  const envelope = { role: 'reviewer', run_id: 'run-1', status: 'done', summary: 'review', artifacts: [], details: {} }
+  const { io, ctx } = identityFixture(envelope, { variant: 'review_only', role: 'reviewer' })
+  const result = driveTask({ ...ctx, turnCeilings: { reviewer: 1 } }, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'envelope')
+  assert.equal(io.calls.logs.filter((row) => row.envelope_refused).length, 1)
+  assert.equal(io.calls.logs.filter((row) => row.seat_turn_ceiling).length, 0)
+  assert.equal(io.calls.logs.find((row) => row.envelope_refused).envelope_refused.reason, 'assignment-id-mismatch')
+})
+
+test('I1 handled refusal emits a sanitized lifecycle close', () => {
+  const { io, ctx } = identityFixture({ assignment_id: 'stale', role: 'planner', status: 'done', summary: 'stale', artifacts: [], details: {} })
+  const result = driveTask(ctx, io)
+  assert.equal(result.status, 'escalation')
+  assert.deepEqual(io.calls.emits.filter((event) => event.kind === 'envelope'), [{ kind: 'envelope', id: 'd1', role: 'planner', status: 'insufficient' }])
+  assert.equal(Object.hasOwn(io.calls.emits.find((event) => event.kind === 'envelope'), 'review'), false)
+})
+
+test('K1 malformed transport rpc-no-envelope lookalikes remain refused', () => {
+  const cases = [
+    ['done status', rpcNoEnvelope({ reason: 'zero-turn-non-start', turns: 0, tool_calls: 0, absent_reason: null }, { status: 'done' }), 'run-mismatch'],
+    ['nonempty artifacts', rpcNoEnvelope({ reason: 'zero-turn-non-start', turns: 0, tool_calls: 0, absent_reason: null }, { artifacts: ['/tmp/not-empty'] }), 'run-mismatch'],
+    ['malformed reason', rpcNoEnvelope({ reason: 'other', turns: 0, tool_calls: 0, absent_reason: null }), 'run-mismatch'],
+    ['malformed census', rpcNoEnvelope({ reason: 'no-envelope', turns: '4', tool_calls: 0, absent_reason: null }), 'run-mismatch'],
+    ['malformed absence', rpcNoEnvelope({ reason: 'no-envelope', turns: null, tool_calls: null, absent_reason: null }), 'run-mismatch'],
+    ['assignment precedence', rpcNoEnvelope({ reason: 'zero-turn-non-start', turns: 0, tool_calls: 0, absent_reason: null }, { assignment_id: 'other' }), 'assignment-id-mismatch'],
+    ['role precedence', rpcNoEnvelope({ reason: 'zero-turn-non-start', turns: 0, tool_calls: 0, absent_reason: null }, { role: 'other' }), 'role-mismatch'],
+    ['foreign run', rpcNoEnvelope({ reason: 'zero-turn-non-start', turns: 0, tool_calls: 0, absent_reason: null }, { run_id: 'run-old' }), 'run-mismatch'],
+  ]
+  for (const [label, envelope, reason] of cases) {
+    const { io, ctx } = identityFixture(envelope)
+    const result = driveTask(ctx, io)
+    const rows = io.calls.logs.filter((entry) => entry.envelope_refused)
+    assert.equal(result.status, 'escalation', label)
     assert.equal(rows.length, 1, label)
     assert.equal(rows[0].envelope_refused.reason, reason, label)
   }
@@ -1416,11 +1617,12 @@ test('an io without showDoc drives an identical loop (the additive pin)', () => 
 
 test('an envelope with a MISMATCHED assignment_id is rejected (stale-file replay guard)', () => {
   const io = fakeIo({
-    envelopes: { 'planner:1': planEnv({ assignment_id: 'd9-from-a-previous-run' }) },
+    envelopes: { 'planner:1': planEnv({ assignment_id: 'd9-from-a-previous-run' }), 'lead:1': leadEnv('escalate') },
   })
   const res = driveTask(CTX, io)
   assert.equal(res.status, 'escalation')
-  assert.equal(res.details.escalation.why, 'planner: an envelope exists at planner:1 but was refused: assignment-id-mismatch')
+  assert.equal(res.details.escalation.where, 'plan')
+  assert.match(res.details.escalation.why, /envelope-refusal: assignment-id-mismatch/)
 })
 
 test('escalation artifacts and exhaustion briefs cite the REAL journal path from ctx', () => {
@@ -2247,12 +2449,13 @@ test('an io without waitDiagnosis preserves the plain missing-envelope escalatio
 })
 
 test('waitDiagnosis is not consulted when an envelope is present but shape-invalid', () => {
-  const io = fakeIo({ envelopes: { 'planner:1': {} } })
+  const io = fakeIo({ envelopes: { 'planner:1': {}, 'lead:1': leadEnv('escalate') } })
   let consulted = 0
   io.waitDiagnosis = () => { consulted += 1; return { state: 'stale', text: 'should not appear' } }
   const res = driveTask(CTX, io)
   assert.equal(res.status, 'escalation')
-  assert.equal(res.details.escalation.why, 'planner: an envelope exists at planner:1 but was refused: status-kind')
+  assert.equal(res.details.escalation.where, 'plan')
+  assert.match(res.details.escalation.why, /envelope-refusal: status-kind/)
   assert.equal(consulted, 0)
 })
 

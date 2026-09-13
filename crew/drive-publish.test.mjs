@@ -3,8 +3,9 @@
 // Shared fixtures, and the ledger sandbox side effect, live in ./drive-fixtures.mjs.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { chmodSync, mkdirSync, renameSync, rmSync, statSync, symlinkSync } from 'node:fs'
 import {
-  COMMIT_TRAILER, CTX, HONEST_NARRATION, NARRATION_HEADING, NARRATION_RECORD, NARRATION_REFUSALS, NARRATION_REFUSAL_NAMES, NARRATION_STAGE_VOCABULARY, NARRATOR_REGISTER, PUBLISH_REFUSAL_NAMES, RUN_START_EVENT, TD, VARIANTS, applyNarration, bounceDetail, bounceSeatOf, buildEnv, commitIntent, composeCommitMessage, composePrBody, convergeRun, driveTask, fakeIo, issueTrailers, join, journalRowsSinceRunStart, narrateRecord, narrationDefect, narrationIsRawJson, narrationPrompt, narrationStageDefect, narratorApiRoot, narratorIo, narratorModelId, narratorModelsCommand, planEnv, prAnomalies, publicationIo, readFileSync, refsFromCommitMessage, reviewEnv, shellArg,
+  COMMIT_TRAILER, CTX, HONEST_NARRATION, NARRATION_HEADING, NARRATION_RECORD, NARRATION_REFUSALS, NARRATION_REFUSAL_NAMES, NARRATION_STAGE_VOCABULARY, NARRATOR_REGISTER, PUBLISH_REFUSAL_NAMES, RUN_START_EVENT, TD, VARIANTS, applyNarration, bounceDetail, bounceSeatOf, buildEnv, commitIntent, composeCommitMessage, composePrBody, convergeRun, driveTask, existsSync, fakeIo, issueTrailers, join, journalRowsSinceRunStart, narrateRecord, narrationDefect, narrationIsRawJson, narrationPrompt, narrationStageDefect, narratorApiRoot, narratorIo, narratorModelId, narratorModelsCommand, planEnv, prAnomalies, publicationIo, readFileSync, readdirSync, refsFromCommitMessage, reviewEnv, scratchDir, shellArg, spawnSync, writeFileSync,
 } from './drive-fixtures.mjs'
 import { anchorConflictMechanical, canonicalAnchorManifest, canonicalCitationDoc, lineNumberOnlyAnchorResolution, rebaseConflictRoute, resumeTask, resumeWorktreeSha256 } from './drive.mjs'
 
@@ -98,7 +99,7 @@ function runPublished(options = {}) {
     journal: options.journal || `${options.taskDir || TD}/journal.jsonl`,
     ...(options.ctx || {}), publish: options.publish === undefined ? { branch } : options.publish,
   }
-  const io = installParentProbe(publicationIo(options), options.commands?.['git rev-parse HEAD^'])
+  const io = installParentProbe(publicationIo({ ...options, branch }), options.commands?.['git rev-parse HEAD^'])
   let result
   try { result = driveTask(ctx, io) } catch (error) { return { ctx, io, error } }
   return { ctx, io, result }
@@ -336,7 +337,10 @@ function anchorPublicationIo({ specs = [], scope, limits = {}, gate = null, enve
       this.state.head = this.state.post
       return { ok: true, output: '' }
     }
-    if (text === 'git diff --name-only --diff-filter=U') return record({ ok: true, output: (this.state.currentSpec?.paths || []).join('\n') + (this.state.currentSpec?.paths?.length ? '\n' : '') })
+    if (text === 'git diff --name-only --diff-filter=U') {
+      const paths = this.state.phase === 'initial' ? [] : (this.state.currentSpec?.paths || [])
+      return record({ ok: true, output: paths.join('\n') + (paths.length ? '\n' : '') })
+    }
     const stage = pathsFromStageCommand(text)
     if (stage) {
       const value = this.state.currentSpec?.[stage.stage === 2 ? 'stage2' : 'stage3']?.[stage.path]
@@ -409,6 +413,168 @@ function runAnchorPublication(options = {}) {
   let result
   try { result = driveTask(ctx, io) } catch (error) { return { io, ctx, error } }
   return { io, ctx, result }
+}
+
+function realCleanAbortFacts() {
+  const checkout = scratchDir('b665-restoreproof-')
+  const git = (...args) => {
+    const result = spawnSync('git', args, { cwd: checkout, encoding: 'utf8' })
+    assert.equal(result.status, 0, `git ${args.join(' ')} failed: ${result.stderr || result.stdout}`)
+    return result
+  }
+  git('init', '--quiet')
+  git('config', 'user.email', 'crew@example.test')
+  git('config', 'user.name', 'Crew Test')
+  writeFileSync(join(checkout, 'a.mjs'), 'export const lane = true\n')
+  git('add', 'a.mjs')
+  git('commit', '--quiet', '-m', 'lane')
+  git('branch', '-M', 'feature/ship')
+  const head = git('rev-parse', 'HEAD').stdout.trim()
+  const branch = git('symbolic-ref', '--quiet', '--short', 'HEAD').stdout.trim()
+  const rawPaths = {
+    'rebase-merge': git('rev-parse', '--git-path', 'rebase-merge').stdout.trim(),
+    'rebase-apply': git('rev-parse', '--git-path', 'rebase-apply').stdout.trim(),
+  }
+  const paths = Object.fromEntries(Object.entries(rawPaths).map(([name, path]) => [
+    name, path.startsWith('/') ? path : join(checkout, path),
+  ]))
+  for (const path of Object.values(paths)) {
+    assert.equal(existsSync(path), false)
+    assert.doesNotThrow(() => readdirSync(join(path, '..')))
+  }
+  const abort = spawnSync('git', ['rebase', '--abort'], { cwd: checkout, encoding: 'utf8' })
+  assert.equal(abort.status, 128)
+  assert.equal(git('rev-parse', 'HEAD').stdout.trim(), head)
+  assert.equal(git('status', '--porcelain', '-uall').stdout, '')
+  return { checkout, head, branch, paths, abortStatus: abort.status, status: '' }
+}
+
+function conflictCommands({ abortResult = { ok: true, output: '' }, restoredHead = null, statusResult = { ok: true, output: '' }, unmergedAfterAbort = '', headResult = null, unmergedResult = null } = {}) {
+  let attempts = 0
+  return {
+    'git rebase origin/main': (state) => {
+      attempts += 1
+      if (attempts === 1) {
+        state.head = 'mid3333'
+        state.phase = 'conflicted'
+        return { ok: false, output: 'rebase failed' }
+      }
+      state.head = state.post
+      state.phase = 'rebased'
+      return { ok: true, output: '' }
+    },
+    'git diff --name-only --diff-filter=U': (state) => {
+      const result = state.restored && unmergedResult !== null
+        ? (typeof unmergedResult === 'function' ? unmergedResult(state) : unmergedResult)
+        : { ok: true, output: state.restored ? unmergedAfterAbort : 'a.mjs\n' }
+      state.lastUnmergedProbe = result
+      return result
+    },
+    "git show ':2:a.mjs'": { ok: true, output: 'base\n' },
+    "git show ':3:a.mjs'": { ok: true, output: 'lane\n' },
+    "git diff --cc -- 'a.mjs'": { ok: true, output: 'diff --cc a.mjs\n' },
+    'git rebase --abort': (state) => {
+      state.restored = true
+      state.head = state.pre
+      const result = typeof abortResult === 'function' ? abortResult(state) : abortResult
+      state.abortObserved = result
+      return result
+    },
+    'git rev-parse HEAD': (state) => {
+      if (headResult !== null) {
+        const result = typeof headResult === 'function' ? headResult(state) : headResult
+        state.lastHeadProbe = result?.ok === true && typeof result.output === 'string' ? result.output.trim() : null
+        return result
+      }
+      const output = restoredHead || state.head
+      state.lastHeadProbe = output
+      return { ok: true, output: `${output}\n` }
+    },
+    'git status --porcelain -uall': (state) => {
+      const result = typeof statusResult === 'function' ? statusResult(state) : statusResult
+      state.lastStatusProbe = result
+      return result
+    },
+  }
+}
+
+function recordedRebaseStateRun(facts) {
+  return runPublished({
+    branch: facts.branch,
+    initialHead: facts.head,
+    ctx: { limits: { build_rounds: 1 } },
+    gitPaths: facts.paths,
+    rebasePathProbes: {
+      'rebase-merge': { ok: true, output: '' },
+      'rebase-apply': { ok: true, output: '' },
+    },
+    commands: conflictCommands({ abortResult: { ok: false, status: facts.abortStatus, output: 'no rebase in progress' }, restoredHead: facts.head }),
+  })
+}
+
+function assertRecordedRebaseStateFailures(run, facts) {
+  const commands = Object.entries(facts.paths).map(([name, path]) => {
+    const command = run.io.calls.run.find((entry) => entry.startsWith(`${shellArg(process.execPath)} -e `)
+      && entry.endsWith(` ${shellArg(path)}`))
+    assert.ok(command, `a recorded command must target ${name}`)
+    return { name, path, command }
+  })
+  const replay = (command) => spawnSync('/bin/sh', ['-c', command], { cwd: facts.checkout, encoding: 'utf8' })
+  for (const { name, path, command } of commands) {
+    const absent = replay(command)
+    assert.equal(absent.status, 0, `${name} absence must prove an absent path with a readable parent`)
+    assert.equal(absent.stdout, '', `${name} absence must print no stdout`)
+    assert.equal(absent.stderr, '', `${name} absence must print no stderr`)
+
+    try {
+      mkdirSync(path, { recursive: true })
+      const present = replay(command)
+      assert.ok(Number.isInteger(present.status) && present.status !== 0, `${name} directory must fail the recorded probe`)
+    } finally {
+      rmSync(path, { recursive: true, force: true })
+    }
+
+    try {
+      symlinkSync(join(facts.checkout, 'missing-target'), path)
+      const dangling = replay(command)
+      assert.ok(Number.isInteger(dangling.status) && dangling.status !== 0, `${name} dangling symlink must fail the recorded probe`)
+    } finally {
+      rmSync(path, { force: true })
+    }
+
+    const parent = join(path, '..')
+    const backup = join(facts.checkout, `.b665-rebase-parent-backup-${name}`)
+    let moved = false
+    rmSync(backup, { recursive: true, force: true })
+    try {
+      renameSync(parent, backup)
+      moved = true
+      writeFileSync(parent, 'not a directory\\n')
+      const nonDirectoryParent = replay(command)
+      assert.ok(Number.isInteger(nonDirectoryParent.status) && nonDirectoryParent.status !== 0, `${name} non-directory parent must fail the recorded probe`)
+    } finally {
+      if (moved) {
+        rmSync(parent, { recursive: true, force: true })
+        renameSync(backup, parent)
+      }
+    }
+
+    if (process.getuid?.() === 0) {
+      // Root bypasses directory permission bits; this unreadable-parent witness is unmeasured.
+      console.log(`F1 ${name} unreadable-parent witness was not measured on this run: uid 0 bypasses directory permission bits`)
+    } else {
+      const originalMode = statSync(parent).mode
+      try {
+        assert.equal(existsSync(path), false, `${name} target must stay absent for the execute-only parent witness`)
+        chmodSync(parent, 0o111)
+        const executeOnlyParent = replay(command)
+        assert.ok(Number.isInteger(executeOnlyParent.status) && executeOnlyParent.status !== 0, `${name} execute-only parent must fail the recorded probe`)
+      } finally {
+        chmodSync(parent, originalMode)
+      }
+    }
+    assert.doesNotThrow(() => readdirSync(parent))
+  }
 }
 
 function mechanicalProofRun() {
@@ -538,6 +704,151 @@ test('C1 exhausted rebase bounce budget escalates with paths', () => {
   assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 2)
   assert.equal(io.state.abortCount, 2)
   assert.equal(io.state.resetCommand, 'git reset --soft base1111')
+})
+
+const RESTORE_DIAGNOSIS = 'aborted.ok was false while HEAD, branch, cleanliness, rebase-state absence, and conflict absence proved restoration'
+
+// #1199 — restoration is a worktree fact, not the status of a no-op abort.
+test('A1 restored clean lane bypasses unproven escalation', () => {
+  const facts = realCleanAbortFacts()
+  const run = runPublished({
+    branch: facts.branch,
+    initialHead: facts.head,
+    ctx: { limits: { build_rounds: 1 } },
+    gitPaths: facts.paths,
+    rebasePathProbes: {
+      'rebase-merge': { ok: true, output: '' },
+      'rebase-apply': { ok: true, output: '' },
+    },
+    commands: conflictCommands({
+      abortResult: { ok: false, status: facts.abortStatus, output: 'no rebase in progress' },
+      restoredHead: facts.head,
+    }),
+  })
+  assert.equal(run.result.status, 'escalation')
+  assert.doesNotMatch(run.result.details.escalation.why, /UNPROVEN/)
+  assert.match(run.result.details.escalation.why, new RegExp(`restoration proven at HEAD ${facts.head}`))
+  const capturedCommitSha = run.io.calls.commits[0].sha
+  assert.equal(capturedCommitSha, facts.head)
+  assert.equal(capturedCommitSha, run.io.state.lastHeadProbe)
+  assert.equal(run.io.state.abortObserved.ok, false)
+  assert.equal(run.io.state.abortObserved.status, 128)
+  assert.equal(facts.abortStatus, 128)
+  assert.equal(facts.status, '')
+  assert.equal(run.io.state.lastStatusProbe.output, facts.status)
+  assert.equal(run.io.state.lastUnmergedProbe.output, '')
+  assert.ok(run.io.calls.run.includes('git symbolic-ref --quiet --short HEAD'))
+  assert.ok(run.io.calls.run.includes('git status --porcelain -uall'))
+  assert.ok(run.io.calls.run.includes('git rev-parse --git-path rebase-merge'))
+  assert.ok(run.io.calls.run.includes('git rev-parse --git-path rebase-apply'))
+  assert.ok(run.io.calls.run.some((command) => command.startsWith(`${shellArg(process.execPath)} -e `)))
+})
+
+test('B1 restored lane reaches conflict builder bounce', () => {
+  const path = 'src/restore.mjs'
+  const { io, result } = runAnchorPublication({ specs: [{
+    paths: [path], stage2: { [path]: 'base\n' }, stage3: { [path]: 'lane\n' }, hunk: anchorHunk([path]),
+  }], scope: [path], limits: { build_rounds: 2 }, envelopes: {
+    'builder:2': buildEnv(), 'reviewer:2': reviewEnv('pass'),
+  } })
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 2)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder')[1].note, 'rebase-conflict-fix')
+  assert.match(io.calls.writes[`${TD}/rebase-conflict-bounce-r1.md`], /Restoration was proven/)
+})
+
+test('C1 failed restoration preserves exact unproven escalation', () => {
+  const expected = 'the rebase onto origin/main failed with conflicts in a.mjs; restoration is UNPROVEN — HEAD found after abort: mid3333'
+  const cases = [
+    ['dirty status', { statusResult: { ok: true, output: ' M a.mjs\n' } }],
+    // F1 executes filesystem states; these model their common non-ok io.run refusal.
+    ['present rebase state', { rebasePathProbes: { 'rebase-merge': { ok: false, output: 'present' } } }],
+    ['symlink rebase state', { rebasePathProbes: { 'rebase-merge': { ok: false, output: 'symlink' } } }],
+    ['non-ENOENT rebase error', { rebasePathProbes: { 'rebase-merge': { ok: false, output: 'ENOTDIR' } } }],
+    ['unreadable rebase parent', { rebasePathProbes: { 'rebase-merge': { ok: false, output: 'EACCES' } } }],
+    ['thrown absence command', { rebasePathProbes: { 'rebase-merge': () => { throw new Error('probe interrupted') } } }],
+    ['non-ok absence command', { rebasePathProbes: { 'rebase-merge': { ok: false, output: '' } } }],
+    ['non-string absence command', { rebasePathProbes: { 'rebase-merge': { ok: true, output: 42 } } }],
+    ['detached branch', { branchResult: { ok: true, output: '' } }],
+    ['wrong branch', { branchResult: { ok: true, output: 'other\n' } }],
+    ['non-ok status', { statusResult: { ok: false, output: '' } }],
+    ['non-string status', { statusResult: { ok: true, output: 42 } }],
+    ['thrown status', { statusResult: () => { throw new Error('status interrupted') } }],
+    ['remaining unmerged paths', { unmergedAfterAbort: 'a.mjs\n' }],
+    ['non-ok conflict probe', { unmergedResult: { ok: false, output: '' } }],
+    ['non-string conflict probe', { unmergedResult: { ok: true, output: 42 } }],
+    ['thrown conflict probe', { unmergedResult: () => { throw new Error('conflict probe interrupted') } }],
+    ['thrown Git-path probe', { commands: { 'git rev-parse --git-path rebase-merge': () => { throw new Error('path interrupted') } } }],
+    ['non-ok Git-path probe', { commands: { 'git rev-parse --git-path rebase-merge': { ok: false, output: '' } } }],
+    ['non-string Git-path probe', { commands: { 'git rev-parse --git-path rebase-merge': { ok: true, output: 42 } } }],
+  ]
+  for (const [label, options] of cases) {
+    const run = runPublished({
+      ctx: { limits: { build_rounds: 2 } },
+      envelopes: { 'builder:2': buildEnv(), 'reviewer:2': reviewEnv('pass') },
+      rebasePathProbes: {
+        'rebase-merge': { ok: true, output: '' },
+        'rebase-apply': { ok: true, output: '' },
+        ...(options.rebasePathProbes || {}),
+      },
+      branchResult: options.branchResult,
+      commands: {
+        ...conflictCommands({
+          abortResult: { ok: true, output: '' },
+          restoredHead: 'mid3333',
+          statusResult: options.statusResult || { ok: true, output: '' },
+          unmergedAfterAbort: options.unmergedAfterAbort || '',
+          unmergedResult: options.unmergedResult,
+        }),
+        ...(options.commands || {}),
+      },
+    })
+    assert.equal(run.result.status, 'escalation', label)
+    assert.equal(run.result.details.escalation.why, expected, label)
+    assert.equal(Object.keys(run.io.calls.writes).some((path) => path.includes('rebase-conflict-bounce')), false, label)
+  }
+})
+
+test('D1 multi commit lane proves restoration', () => {
+  const commands = {
+    ...conflictCommands({ abortResult: { ok: true, output: '' } }),
+    // This is the lane's own earlier commit, not the merge base used for replay.
+    'git rev-parse HEAD^': { ok: true, output: 'lanecommit1\n' },
+  }
+  const run = runPublished({
+    ctx: { limits: { build_rounds: 2 } },
+    envelopes: { 'builder:2': buildEnv(), 'reviewer:2': reviewEnv('pass') },
+    commands,
+  })
+  assert.equal(run.result.status, 'done')
+  assert.ok(run.io.calls.run.includes('git reset --soft lanecommit1'))
+  assert.doesNotMatch(run.io.calls.logs.map((row) => JSON.stringify(row)).join('\n'), /UNPROVEN/)
+})
+
+test('E1 abort status diagnosis is recorded', () => {
+  const run = runPublished({
+    ctx: { limits: { build_rounds: 2 } },
+    envelopes: { 'builder:2': buildEnv(), 'reviewer:2': reviewEnv('pass') },
+    commands: conflictCommands({ abortResult: { ok: false, output: 'no rebase in progress' } }),
+  })
+  assert.equal(run.result.status, 'done')
+  const rows = run.io.calls.logs.filter((row) => row.rebase_restore_diagnosis)
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].rebase_restore_diagnosis, RESTORE_DIAGNOSIS)
+  const bounce = run.io.calls.writes[`${TD}/rebase-conflict-bounce-r1.md`]
+  assert.ok(bounce.includes(`Diagnosis: ${RESTORE_DIAGNOSIS}.`))
+})
+
+test('F1 replays recorded rebase-state probe against filesystem states', () => {
+  const facts = realCleanAbortFacts()
+  const run = recordedRebaseStateRun(facts)
+  assert.ok(run.io.calls.run.some((command) => command.startsWith(`${shellArg(process.execPath)} -e `)))
+  assertRecordedRebaseStateFailures(run, facts)
+})
+
+test('RV1-1 execute-only parent rejects the recorded rebase-state probe', () => {
+  const facts = realCleanAbortFacts()
+  assertRecordedRebaseStateFailures(recordedRebaseStateRun(facts), facts)
 })
 
 test('D1 unproven abort restoration keeps exact escalation', () => {
@@ -1313,7 +1624,7 @@ test('F1 existing rebase escalation text remains exact', () => {
   assert.equal(merge.result.details.escalation.why, 'the rebase probe git merge-base HEAD origin/main failed or returned blank output')
   const proven = runPublished({ commands: {
     'git rebase origin/main': (state) => { state.head = 'mid3333'; return { ok: false, output: 'rebase failed' } },
-    'git diff --name-only --diff-filter=U': { ok: true, output: 'a.mjs\n' },
+    'git diff --name-only --diff-filter=U': (state) => ({ ok: true, output: state.head === state.pre ? '' : 'a.mjs\n' }),
     'git rebase --abort': (state) => { state.head = state.pre; return { ok: true, output: '' } },
   } })
   assert.equal(proven.result.details.escalation.why, 'the rebase onto origin/main failed with conflicts in a.mjs; restoration proven at HEAD pre1111')

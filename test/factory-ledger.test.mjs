@@ -1273,7 +1273,7 @@ test('eval_cells round-trip through JSONL and expose one bench-keyed reader', { 
   try {
     source.recordEvalCell(row)
     assert.deepEqual(source.evalCells({ bench: row.bench }).map(({ id, ...cell }) => cell), [{
-      ...row, judge_findings: '["f1","f2"]',
+      ...row, judge_findings: '["f1","f2"]', error_text: null,
     }])
     const replay = replayJsonl(source._jsonlPath, target)
     assert.deepEqual(replay, { applied: 1, skipped: 0, failed: 0, complete: true, first_failure: null })
@@ -1309,7 +1309,7 @@ test('recordEvalCell refuses closed-enum drift and never records asserts for an 
     )
     assert.deepEqual(ledger.dumpTable('eval_cells'), [])
     assert.deepEqual([...EVAL_ENVELOPE_STATUSES], ['received', 'absent'])
-    assert.deepEqual([...EVAL_ABSENT_REASONS], ['no-envelope', 'seat-refused', 'gate-not-run', 'judge-not-briefed'])
+    assert.deepEqual([...EVAL_ABSENT_REASONS], ['no-envelope', 'boot-failed', 'boot-unreadable', 'assignment-failed', 'wait-failed', 'wait-empty', 'seat-runner-failed', 'gate-not-run', 'judge-not-briefed'])
   } finally { ledger.close() }
 })
 

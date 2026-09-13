@@ -4,15 +4,17 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { join } from 'node:path'
-import { writeFileSync, mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { ROOT, scratchDir, sqliteAvailable } from './helpers.mjs'
 import {
   benchSha,
   compileBench,
   runBench,
+  defaultRunSeat,
+  EVAL_SEAT_FAILURE_REASONS,
   EvalRefusal,
 } from '../scripts/factory/model-eval.mjs'
-import { EVAL_ABSENT_REASONS } from '../scripts/factory/ledger.mjs'
+import { EVAL_ABSENT_REASONS, evalsReadout } from '../scripts/factory/ledger.mjs'
 
 const SQLITE = sqliteAvailable()
 const SKIP = SQLITE ? false : 'node:sqlite unavailable below the shared floor'
@@ -76,6 +78,76 @@ function depsFor({
       }
     },
   }
+}
+
+function runnerFixture({
+  bootStatus = 0,
+  bootOutput = null,
+  bootStderr = '',
+  assign = null,
+  wait = null,
+  resolveAdapters = null,
+  seatIo = null,
+} = {}) {
+  const stateDir = scratchDir('factory-model-eval-state-')
+  const worktree = scratchDir('factory-model-eval-worktree-')
+  mkdirSync(stateDir, { recursive: true })
+  mkdirSync(worktree, { recursive: true })
+  writeFileSync(join(worktree, 'candidate-only-artifact.txt'), 'disposable candidate artifact\n')
+  const crewJson = join(stateDir, 'crew.json')
+  const role = 'builder'
+  const candidate = CANDIDATE_A
+  const events = { assigns: [], waits: [], teardowns: 0, removals: [] }
+  const validBootOutput = JSON.stringify({ crew_json: crewJson })
+  const commandResult = (args) => {
+    if (args.includes('boot')) {
+      writeFileSync(crewJson, JSON.stringify({
+        schema_version: 3,
+        task: 'model-eval-fixture',
+        checkout: worktree,
+        roles: [role],
+        members: {
+          [role]: {
+            transport: 'headless-rpc', agent: candidate.agent,
+            model: `${candidate.provider}/${candidate.id}`, effort: candidate.effort,
+          },
+        },
+        task_return: join(stateDir, 'returns', 'task.json'),
+      }))
+      return {
+        result: { status: bootStatus, stdout: bootOutput ?? validBootOutput, stderr: bootStderr },
+        parsed: bootOutput === null ? (bootStatus === 0 ? { crew_json: crewJson } : null) : undefined,
+        output: `${bootOutput ?? validBootOutput}\n${bootStderr}`,
+      }
+    }
+    return { result: { status: 0, stdout: '', stderr: '' }, parsed: null, output: '\n' }
+  }
+  const io = seatIo || {
+    assign(spec) {
+      events.assigns.push(spec)
+      if (assign) return assign(spec)
+      return { id: 'd1', returnPath: join(stateDir, 'returns', 'd1.builder.json') }
+    },
+    wait(returnPath, timeoutS) {
+      events.waits.push({ returnPath, timeoutS })
+      if (wait) return wait(returnPath, timeoutS)
+      return { status: 'done', summary: 'terminal fixture', artifacts: [] }
+    },
+    teardown() { events.teardowns += 1 },
+  }
+  const deps = {
+    commandResult,
+    makeWorktree: () => worktree,
+    removeWorktree: (_source, path) => {
+      events.removals.push(path)
+      if (path === worktree) rmSync(path, { recursive: true, force: true })
+      return { removed: path === worktree, why: path === worktree ? null : 'fixture refused to remove the source checkout' }
+    },
+    resolveAdapters: resolveAdapters || (async () => ({ [role]: { name: candidate.agent, transport: 'headless-rpc', adapter: {} } })),
+    seatIo: () => io,
+    readFile: readFileSync,
+  }
+  return { deps, events, worktree: () => worktree, stateDir, crewJson }
 }
 
 async function refusalFor(options) {
@@ -259,4 +331,169 @@ test('a failed local endpoint refuses before runSeat', async () => {
   assert.equal(result.caught instanceof EvalRefusal, true)
   assert.equal(result.caught.refusal, 'local-endpoint-dead')
   assert.equal(result.calls.length, 0)
+})
+
+test('A1 production candidate reaches headless-rpc assign/wait and mechanical judge measurement', async () => {
+  const bench = writeBench({ candidates: [CANDIDATE_A], production: `${CANDIDATE_A.provider}/${CANDIDATE_A.id}` })
+  const fixture = runnerFixture()
+  const rows = []
+  const deps = {
+    ...fixture.deps,
+    readRoster: null,
+    ledger: { recordEvalCell: async (row) => { rows.push(row); return row } },
+    runGate: async (spec) => {
+      if (spec.envelope) {
+        assert.equal(spec.envelope.status, 'done')
+        assert.equal(spec.cwd, fixture.worktree())
+      }
+      return { total: 2, failed: 0, errored: 0 }
+    },
+    runJudge: async (spec) => {
+      assert.equal(spec.envelope.status, 'done')
+      assert.equal(spec.dir, fixture.worktree())
+      return { findings: ['mechanical-pass'] }
+    },
+  }
+  await runBench({ dir: bench.dir, deps })
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].production, 1)
+  assert.deepEqual({ asserts_declared: rows[0].asserts_declared, asserts_passed: rows[0].asserts_passed }, { asserts_declared: 2, asserts_passed: 2 })
+  assert.deepEqual(rows[0].judge_findings, ['mechanical-pass'])
+  assert.equal(rows[0].error_text, null)
+  assert.equal(fixture.events.assigns.length, 1)
+  assert.equal(fixture.events.waits[0].timeoutS, 24 * 60 * 60)
+  assert.equal(fixture.events.teardowns, 1)
+})
+
+test('B1 each headless seat failure stage has its distinct closed reason', async () => {
+  const bench = writeBench({ candidates: [CANDIDATE_A], production: `${CANDIDATE_A.provider}/${CANDIDATE_A.id}` })
+  const run = async (options) => {
+    const fixture = runnerFixture(options)
+    const seat = await defaultRunSeat({
+      task: '# failure fixture', candidate: CANDIDATE_A, role: 'builder', bench: 'b1', dir: bench.dir, deps: fixture.deps,
+    })
+    await seat.cleanup()
+    return seat
+  }
+  const cases = [
+    [EVAL_SEAT_FAILURE_REASONS.boot_exit, { bootStatus: 1, bootOutput: 'boot exited with diagnostic' }],
+    [EVAL_SEAT_FAILURE_REASONS.boot_parse, { bootOutput: 'boot output was not JSON' }],
+    [EVAL_SEAT_FAILURE_REASONS.assignment, { assign: () => { throw new Error('assignment exception') } }],
+    [EVAL_SEAT_FAILURE_REASONS.wait_error, { wait: () => { throw new Error('wait exception') } }],
+    [EVAL_SEAT_FAILURE_REASONS.wait_empty, { wait: () => null }],
+    [EVAL_SEAT_FAILURE_REASONS.runner, { resolveAdapters: async () => { throw new Error('adapter construction exception') } }],
+  ]
+  const observed = []
+  for (const [reason, options] of cases) {
+    const seat = await run(options)
+    observed.push(seat.absent_reason)
+    assert.equal(seat.absent_reason, reason)
+    assert.equal(EVAL_ABSENT_REASONS.includes(seat.absent_reason), true)
+    assert.equal(typeof seat.error, 'string')
+    assert.ok(seat.error.length > 0)
+  }
+  assert.equal(new Set(observed).size, cases.length)
+})
+
+test('C1 command output and exceptions survive in the ledger input and readout rows', async () => {
+  const bench = writeBench({ candidates: [CANDIDATE_A], production: `${CANDIDATE_A.provider}/${CANDIDATE_A.id}` })
+  const fixture = runnerFixture({ bootStatus: 9, bootOutput: 'boot stdout diagnostic', bootStderr: 'boot stderr diagnostic' })
+  const rows = []
+  const deps = {
+    ...fixture.deps,
+    readRoster: null,
+    ledger: { recordEvalCell: async (row) => { rows.push(row); return row } },
+    runGate: async () => ({ total: 1, failed: 0, errored: 0 }),
+  }
+  await runBench({ dir: bench.dir, deps })
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].absent_reason, EVAL_SEAT_FAILURE_REASONS.boot_exit)
+  assert.match(rows[0].error_text, /boot stdout diagnostic/)
+  assert.match(rows[0].error_text, /boot stderr diagnostic/)
+  const readout = evalsReadout({ bench: rows[0].bench, cells: rows, catalog: { models: {} }, priceSourcePath: 'fixture-prices.json' })
+  assert.equal(readout.rows.length, 1)
+  assert.equal(readout.rows[0].error_text, rows[0].error_text)
+})
+
+test('D1 candidate artifacts stay in the disposable worktree through judge, then source bytes and status remain unchanged', async () => {
+  const bench = writeBench({ candidates: [CANDIDATE_A], production: `${CANDIDATE_A.provider}/${CANDIDATE_A.id}` })
+  const fixture = runnerFixture()
+  const sourceFile = join(ROOT, 'scripts/factory/model-eval.mjs')
+  const sourceBytesBefore = readFileSync(sourceFile)
+  const sourceWitness = join(ROOT, '.model-eval-source-witness')
+  const sourceStatusBefore = existsSync(sourceWitness)
+  let gateSawArtifact = false
+  let judgeSawArtifact = false
+  const artifact = () => join(fixture.worktree(), 'candidate-only-artifact.txt')
+  const rows = []
+  const deps = {
+    ...fixture.deps,
+    readRoster: null,
+    ledger: { recordEvalCell: async (row) => { rows.push(row); return row } },
+    runGate: async (spec) => {
+      if (spec.envelope) {
+        gateSawArtifact = existsSync(artifact())
+        assert.equal(spec.cwd, fixture.worktree())
+      }
+      return { total: 1, failed: 0, errored: 0 }
+    },
+    runJudge: async (spec) => {
+      judgeSawArtifact = existsSync(artifact())
+      assert.equal(spec.dir, fixture.worktree())
+      return { findings: [] }
+    },
+  }
+  await runBench({ dir: bench.dir, deps })
+  assert.equal(gateSawArtifact, true)
+  assert.equal(judgeSawArtifact, true)
+  assert.equal(existsSync(fixture.worktree()), false)
+  assert.deepEqual(readFileSync(sourceFile), sourceBytesBefore)
+  assert.equal(existsSync(sourceWitness), sourceStatusBefore)
+  assert.equal(rows.length, 1)
+})
+
+test('E1 absent envelopes retain null assertions, findings, USD, and an explicit reason', async () => {
+  const bench = writeBench({ candidates: [CANDIDATE_A], production: `${CANDIDATE_A.provider}/${CANDIDATE_A.id}` })
+  const rows = []
+  let gateCalls = 0
+  let judgeCalls = 0
+  const deps = depsFor({ rows, readRoster: null })
+  deps.runSeat = async () => ({ envelope: null, absent_reason: EVAL_SEAT_FAILURE_REASONS.wait_empty, error: 'wait returned no envelope', duration_ms: null, usage: null })
+  deps.runGate = async () => { gateCalls += 1; return { total: 1, failed: 0, errored: 0 } }
+  deps.runJudge = async () => { judgeCalls += 1; return { findings: ['should-not-run'] } }
+  await runBench({ dir: bench.dir, deps })
+  assert.equal(rows.length, 1)
+  const row = rows[0]
+  assert.equal(row.asserts_declared, null)
+  assert.equal(row.asserts_passed, null)
+  assert.equal(row.judge_findings, null)
+  assert.equal(row.billed_input_tokens, null)
+  assert.equal(row.billed_output_tokens, null)
+  assert.equal(row.billed_cache_read_tokens, null)
+  assert.equal(row.billed_cache_write_tokens, null)
+  assert.equal(row.absent_reason, 'wait-empty')
+  assert.equal(row.error_text, 'wait returned no envelope')
+  const readout = evalsReadout({ bench: row.bench, cells: rows, catalog: { models: {} }, priceSourcePath: 'empty-prices.json' })
+  const emitted = readout.rows[0]
+  assert.equal(emitted.asserts, null)
+  assert.equal(emitted.judge_findings, null)
+  assert.equal(emitted.usd, null)
+  assert.equal(emitted.error_text, row.error_text)
+  assert.equal(emitted.absent.envelope, 'wait-empty')
+  assert.equal(readout.usd_total, null)
+  assert.equal(readout.ratifiable, false)
+  assert.equal(gateCalls, 1)
+  assert.equal(judgeCalls, 0)
+})
+
+test('F1 eval absence vocabularies are frozen, exact, and admit every runner reason', () => {
+  const expected = [
+    'no-envelope', 'boot-failed', 'boot-unreadable', 'assignment-failed', 'wait-failed', 'wait-empty', 'seat-runner-failed', 'gate-not-run', 'judge-not-briefed',
+  ]
+  assert.equal(Object.isFrozen(EVAL_ABSENT_REASONS), true)
+  assert.equal(Object.isFrozen(EVAL_SEAT_FAILURE_REASONS), true)
+  assert.deepEqual([...EVAL_ABSENT_REASONS], expected)
+  assert.deepEqual(Object.keys(EVAL_SEAT_FAILURE_REASONS), ['boot_exit', 'boot_parse', 'assignment', 'wait_error', 'wait_empty', 'runner'])
+  for (const reason of Object.values(EVAL_SEAT_FAILURE_REASONS)) assert.equal(EVAL_ABSENT_REASONS.includes(reason), true)
+  assert.equal(EVAL_ABSENT_REASONS.includes('seat-refused'), false)
 })

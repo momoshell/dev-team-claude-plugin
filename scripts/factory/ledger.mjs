@@ -392,9 +392,7 @@ export const ADVISOR_AB_INCOMPLETE_REASONS = Object.freeze([
 // docs/advisor-ab-protocol.md), never silently enforced here.
 export const ADVISOR_AB_DISPATCH_FLOOR = 12
 export const EVAL_ENVELOPE_STATUSES = Object.freeze(['received', 'absent'])
-export const EVAL_ABSENT_REASONS = Object.freeze([
-  'no-envelope', 'seat-refused', 'gate-not-run', 'judge-not-briefed',
-])
+export const EVAL_ABSENT_REASONS = Object.freeze(['no-envelope', 'boot-failed', 'boot-unreadable', 'assignment-failed', 'wait-failed', 'wait-empty', 'seat-runner-failed', 'gate-not-run', 'judge-not-briefed'])
 export const EVAL_INCOMPLETE_REASONS = Object.freeze([
   'no-cells', 'envelope-absent', 'gate-not-run', 'judge-absent',
   'usd-unpriced', 'production-absent',
@@ -1031,6 +1029,7 @@ export const TABLES = Object.freeze({
       { name: 'task_sha', decl: 'TEXT' },
       { name: 'envelope_status', decl: 'TEXT' },
       { name: 'absent_reason', decl: 'TEXT' },
+      { name: 'error_text', decl: 'TEXT' },
       { name: 'asserts_declared', decl: 'INTEGER' },
       { name: 'asserts_passed', decl: 'INTEGER' },
       { name: 'judge_findings', decl: 'TEXT' },
@@ -3757,6 +3756,7 @@ export function openLedger({
       task_sha: input.task_sha ?? null,
       envelope_status: input.envelope_status,
       absent_reason: input.absent_reason ?? null,
+      error_text: input.error_text ?? null,
       asserts_declared: input.asserts_declared ?? null,
       asserts_passed: input.asserts_passed ?? null,
       judge_findings: judgeFindings,
@@ -6926,6 +6926,7 @@ export function evalsReadout({ bench, cells = [], catalog, priceSourcePath } = {
         model_id: cell.model_id,
         agent: cell.agent,
         effort: cell.effort,
+        error_text: cell.error_text ?? null,
         production: cell.production,
         asserts,
         judge_findings: judgeFindings,

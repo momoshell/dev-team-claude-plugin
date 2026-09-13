@@ -4,10 +4,12 @@
 // only written after each candidate has reached a measured terminal shape.
 
 import {
+  mkdtempSync,
   readFileSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
@@ -16,7 +18,9 @@ import {
   probeLocalEndpoint,
   loadRoster,
   rosterSeating,
+  resolveAdapters,
 } from '../../crew/crew.mjs'
+import { seatIo, settleSeatTeardown } from '../../crew/seat-io.mjs'
 import { GATE_SUMMARY_PREFIX, parseGateSummary } from '../../crew/drive.mjs'
 import {
   EVAL_ABSENT_REASONS,
@@ -28,6 +32,7 @@ export const EVAL_REFUSALS = Object.freeze([
   'bench-unreadable', 'bench-sha-mismatch',
   'no-mechanical-gate', 'production-absent', 'local-endpoint-dead',
 ])
+export const EVAL_SEAT_FAILURE_REASONS = Object.freeze({ boot_exit: 'boot-failed', boot_parse: 'boot-unreadable', assignment: 'assignment-failed', wait_error: 'wait-failed', wait_empty: 'wait-empty', runner: 'seat-runner-failed' })
 export { EVAL_ABSENT_REASONS }
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -292,45 +297,54 @@ export async function runBench({ dir, deps = {} } = {}) {
         dir: resolve(dir),
       })
     } catch (err) {
-      seat = { envelope: null, absent_reason: 'seat-refused', duration_ms: null, error: err?.message || String(err) }
+      seat = { envelope: null, absent_reason: EVAL_SEAT_FAILURE_REASONS.runner, duration_ms: null, error: err?.message || String(err) }
     }
     seat ||= { envelope: null }
     const absentReason = seat.envelope == null ? (seat.absent_reason ?? 'no-envelope') : null
     let recordReason = absentReason
     let gate = null
     let judgeFindings = null
-    if (absentReason === null) {
-      try {
-        gate = summarizeRunGate(await deps.runGate({
-          path: bench.gate_path,
-          gate_path: bench.gate_path,
-          dir: seat.workdir ?? resolve(dir),
-          cwd: seat.workdir ?? resolve(dir),
-          candidate,
-          bench: bench.sha,
-          envelope: seat.envelope,
-          task: handed,
-        }))
-        if (gate === null) recordReason = recordReason ?? 'gate-not-run'
-      } catch {
-        recordReason = recordReason ?? 'gate-not-run'
-      }
-      if (recordReason === null) {
+    try {
+      if (absentReason === null) {
         try {
-          const judged = await deps.runJudge({
-            judge: bench.judge,
-            envelope: seat.envelope,
-            gate,
-            task: handed,
+          gate = summarizeRunGate(await deps.runGate({
+            path: bench.gate_path,
+            gate_path: bench.gate_path,
+            dir: seat.workdir ?? resolve(dir),
+            cwd: seat.workdir ?? resolve(dir),
             candidate,
             bench: bench.sha,
-            dir: resolve(dir),
-          })
-          judgeFindings = findingsFromJudge(judged)
-          if (judgeFindings === null) recordReason = recordReason ?? 'judge-not-briefed'
+            envelope: seat.envelope,
+            task: handed,
+          }))
+          if (gate === null) recordReason = recordReason ?? 'gate-not-run'
         } catch {
-          recordReason = recordReason ?? 'judge-not-briefed'
+          recordReason = recordReason ?? 'gate-not-run'
         }
+        if (recordReason === null) {
+          try {
+            const judged = await deps.runJudge({
+              judge: bench.judge,
+              envelope: seat.envelope,
+              gate,
+              task: handed,
+              candidate,
+              bench: bench.sha,
+              dir: seat.workdir ?? resolve(dir),
+            })
+            judgeFindings = findingsFromJudge(judged)
+            if (judgeFindings === null) recordReason = recordReason ?? 'judge-not-briefed'
+          } catch {
+            recordReason = recordReason ?? 'judge-not-briefed'
+          }
+        }
+      }
+    } finally {
+      try {
+        const cleanupResult = await seat.cleanup?.()
+        if (cleanupResult?.removed === false && seat.error == null) seat.error = cleanupResult.why || 'worktree cleanup did not prove removal'
+      } catch (err) {
+        if (seat.error == null) seat.error = errorText(err)
       }
     }
     const asserts = absentReason === null ? gateAsserts(gate) : { declared: null, passed: null }
@@ -347,6 +361,7 @@ export async function runBench({ dir, deps = {} } = {}) {
       task_sha: taskSha,
       envelope_status: seat.envelope == null ? 'absent' : 'received',
       absent_reason: recordReason,
+      error_text: seat.error ?? null,
       asserts_declared: asserts.declared,
       asserts_passed: asserts.passed,
       judge_findings: seat.envelope == null ? null : judgeFindings,
@@ -374,8 +389,8 @@ function parseJsonOutput(output) {
   return null
 }
 
-function commandResult(args, { cwd = process.cwd(), timeout = 0 } = {}) {
-  const result = spawnSync(process.execPath, args, {
+function commandResult(args, { cwd = process.cwd(), timeout = 0, spawn = spawnSync } = {}) {
+  const result = spawn(process.execPath, args, {
     cwd,
     encoding: 'utf8',
     env: process.env,
@@ -384,47 +399,192 @@ function commandResult(args, { cwd = process.cwd(), timeout = 0 } = {}) {
   })
   return {
     result,
-    parsed: parseJsonOutput(result.stdout),
-    output: `${String(result.stdout || '')}\n${String(result.stderr || '')}`,
+    parsed: parseJsonOutput(result?.stdout),
+    output: `${String(result?.stdout || '')}\n${String(result?.stderr || '')}`,
   }
 }
 
-function defaultRunSeat({ task, candidate, role, bench, dir, briefFile = null }) {
-  const root = resolve(dir || process.cwd())
-  const taskFile = briefFile || join(root, 'task.md')
-  const taskSlug = `model-eval-${String(bench).slice(0, 16)}-${role}-${candidate.provider}-${candidate.id}`
-    .replace(/[^A-Za-z0-9._-]+/g, '-').slice(0, 120)
-  const checkout = process.cwd()
-  const bootArgs = [
-    CREW, 'boot', '--task', taskSlug, '--checkout', checkout, '--roles', role,
-    `--model-${role}`, candidateModel(candidate),
-    `--agent-${role}`, candidate.agent,
-    `--effort-${role}`, candidate.effort,
-    '--headless-all',
-  ]
-  const started = Date.now()
-  const boot = commandResult(bootArgs, { cwd: checkout })
-  if (boot.result.status !== 0 || !boot.parsed) {
-    return { envelope: null, absent_reason: 'seat-refused', duration_ms: Date.now() - started }
+function normaliseCommandResult(value) {
+  const source = value && typeof value === 'object' && !Array.isArray(value)
+    ? value
+    : { output: value == null ? '' : String(value) }
+  const result = source.result && typeof source.result === 'object' && !Array.isArray(source.result)
+    ? source.result
+    : source
+  const stdout = result?.stdout ?? source.stdout ?? ''
+  const stderr = result?.stderr ?? source.stderr ?? ''
+  const output = typeof source.output === 'string' ? source.output : `${String(stdout)}\n${String(stderr)}`
+  return {
+    result: result && typeof result === 'object' ? result : { status: null },
+    parsed: source.parsed === undefined ? parseJsonOutput(stdout || output) : source.parsed,
+    output,
   }
-  const handoff = commandResult([
-    CREW, 'handoff', '--task', taskSlug, '--checkout', checkout, '--brief-file', taskFile,
-  ], { cwd: checkout })
-  if (handoff.result.status !== 0) {
-    return { envelope: null, absent_reason: 'seat-refused', duration_ms: Date.now() - started }
+}
+
+function errorText(value, fallback = 'unknown failure') {
+  if (typeof value === 'string' && value.trim()) return value
+  if (value && typeof value === 'object' && typeof value.message === 'string' && value.message.trim()) return value.message
+  const text = String(value ?? '').trim()
+  return text || fallback
+}
+
+function commandFailureText(command, fallback) {
+  const output = String(command?.output || '').trim()
+  if (output) return output
+  return errorText(command?.result?.error, fallback)
+}
+
+function makeWorktreeDefault(checkout, { spawn = spawnSync, mkdtemp = mkdtempSync, tempRoot = tmpdir() } = {}) {
+  const dir = join(mkdtemp(join(tempRoot, 'model-eval-')), 'tree')
+  const result = spawn('git', ['-C', checkout, 'worktree', 'add', '--detach', dir, 'HEAD'], { encoding: 'utf8' })
+  if (result?.error || result?.status !== 0) {
+    throw new Error(`model-eval: git worktree add --detach failed at ${dir}, refusing to run a candidate in the live checkout:\n${String(result?.stderr || result?.stdout || result?.error?.message || '')}`)
   }
-  const waited = commandResult([
-    CREW, 'wait', '--task', taskSlug, '--checkout', checkout,
-  ], { cwd: checkout, timeout: 24 * 60 * 60 * 1000 })
-  if (waited.parsed && typeof waited.parsed.status === 'string' && waited.parsed.status !== 'still-running') {
-    return {
-      envelope: waited.parsed,
-      workdir: checkout,
-      duration_ms: Date.now() - started,
-      usage: null,
+  return dir
+}
+
+function removeWorktreeDefault(checkout, dir, { spawn = spawnSync } = {}) {
+  const result = spawn('git', ['-C', checkout, 'worktree', 'remove', '--force', dir], { encoding: 'utf8' })
+  if (result?.status === 0) return { removed: true, why: null, workdir: dir }
+  return { removed: false, why: String(result?.stderr || result?.stdout || result?.error?.message || `git worktree remove exited ${String(result?.status)}`), workdir: dir }
+}
+
+function worktreeCleanup(sourceCheckout, checkout, removeWorktree) {
+  let settled = false
+  let result = null
+  const finish = (value) => {
+    if (value && typeof value === 'object') return { ...value, workdir: value.workdir ?? checkout }
+    if (value === true) return { removed: true, why: null, workdir: checkout }
+    return { removed: false, why: value === false ? 'worktree removal returned false' : 'worktree removal returned no result', workdir: checkout }
+  }
+  return () => {
+    if (settled) return result
+    settled = true
+    try {
+      const removed = removeWorktree(sourceCheckout, checkout)
+      if (removed && typeof removed.then === 'function') {
+        result = removed.then(finish)
+        return result
+      }
+      result = finish(removed)
+      return result
+    } catch (err) {
+      result = { removed: false, why: errorText(err), workdir: checkout }
+      return result
     }
   }
-  return { envelope: null, absent_reason: 'no-envelope', duration_ms: Date.now() - started }
+}
+
+export async function defaultRunSeat({ task, candidate, role, bench, dir, briefFile = null, deps = {} }) {
+  const root = resolve(dir || process.cwd())
+  const taskFile = briefFile ? resolve(root, String(briefFile)) : join(root, 'task.md')
+  const taskSlug = `model-eval-${String(bench).slice(0, 16)}-${role}-${candidate.provider}-${candidate.id}`
+    .replace(/[^A-Za-z0-9._-]+/g, '-').slice(0, 120)
+  const now = deps.now || (() => Date.now())
+  const started = now()
+  if (typeof deps.commandResult !== 'function') deps = { ...deps, commandResult: (args, options) => commandResult(args, { ...options, spawn: deps.spawnSync || spawnSync }) }
+  if (typeof deps.makeWorktree !== 'function') deps = { ...deps, makeWorktree: (sourceCheckout) => makeWorktreeDefault(sourceCheckout, { spawn: deps.spawnSync || spawnSync, mkdtemp: deps.mkdtemp || mkdtempSync, tempRoot: deps.tempRoot || tmpdir() }) }
+  if (typeof deps.removeWorktree !== 'function') deps = { ...deps, removeWorktree: (sourceCheckout, checkout) => removeWorktreeDefault(sourceCheckout, checkout, { spawn: deps.spawnSync || spawnSync }) }
+  if (typeof deps.resolveAdapters !== 'function') deps = { ...deps, resolveAdapters }
+  if (typeof deps.seatIo !== 'function') deps = { ...deps, seatIo }
+  if (typeof deps.settleSeatTeardown !== 'function') deps = { ...deps, settleSeatTeardown }
+  if (typeof deps.readFile !== 'function') deps = { ...deps, readFile: readFileSync }
+
+  const checkout = deps.makeWorktree(process.cwd())
+  if (!NON_BLANK(checkout)) throw new Error('model-eval: worktree helper returned no checkout')
+  const cleanup = worktreeCleanup(process.cwd(), checkout, deps.removeWorktree)
+  const failure = (reason, detail) => ({
+    envelope: null,
+    absent_reason: reason,
+    duration_ms: Math.max(0, now() - started),
+    error: errorText(detail),
+    workdir: checkout,
+    cleanup,
+  })
+  let io = null
+  try {
+    const bootArgs = [
+      CREW, 'boot', '--task', taskSlug, '--checkout', checkout, '--roles', role,
+      `--model-${role}`, candidateModel(candidate),
+      `--agent-${role}`, candidate.agent,
+      `--effort-${role}`, candidate.effort,
+      '--headless-all',
+    ]
+    let boot
+    try {
+      boot = normaliseCommandResult(await deps.commandResult(bootArgs, { cwd: checkout }))
+    } catch (err) {
+      return failure(EVAL_SEAT_FAILURE_REASONS.boot_exit, err)
+    }
+    if (boot.result?.error || boot.result?.status !== 0) {
+      return failure(EVAL_SEAT_FAILURE_REASONS.boot_exit, commandFailureText(boot, 'crew boot did not complete'))
+    }
+    if (!boot.parsed || typeof boot.parsed !== 'object' || Array.isArray(boot.parsed) || !NON_BLANK(boot.parsed.crew_json)) {
+      return failure(EVAL_SEAT_FAILURE_REASONS.boot_parse, commandFailureText(boot, 'crew boot output did not include a readable crew_json path'))
+    }
+
+    const crewJson = resolve(checkout, String(boot.parsed.crew_json))
+    let crew
+    try {
+      const raw = await deps.readFile(crewJson, 'utf8')
+      crew = raw && typeof raw === 'object' && !Buffer.isBuffer(raw) ? raw : JSON.parse(String(raw))
+    } catch (err) {
+      return failure(EVAL_SEAT_FAILURE_REASONS.boot_parse, err)
+    }
+    const member = crew?.members?.[role]
+    if (!crew || typeof crew !== 'object' || Array.isArray(crew) || !member || !['headless-json', 'headless-rpc'].includes(member.transport)) {
+      return failure(EVAL_SEAT_FAILURE_REASONS.boot_parse, 'crew.json did not describe a headless member for the requested role')
+    }
+    const stateDir = dirname(crewJson)
+    const taskDir = NON_BLANK(boot.parsed.task_dir)
+      ? resolve(checkout, String(boot.parsed.task_dir))
+      : join(stateDir, 'task')
+    const paths = {
+      dir: stateDir,
+      taskDir,
+      returnsDir: join(stateDir, 'returns'),
+    }
+    const adapterArgs = {
+      [`model-${role}`]: member.model || candidateModel(candidate),
+      [`agent-${role}`]: member.agent || candidate.agent,
+      [`effort-${role}`]: member.effort || candidate.effort,
+      ...(member.transport === 'headless-rpc' ? { 'headless-rpc': role } : { headless: role }),
+    }
+    const adapters = await deps.resolveAdapters([role], adapterArgs)
+    io = await deps.seatIo(crew, paths, checkout, null, adapters, adapterArgs, deps.seatIoDeps || {})
+    if (!io || typeof io !== 'object') throw new Error('model-eval: seat I/O factory returned no I/O object')
+
+    let returnPath = null
+    try {
+      const assignment = io.assign({ role, briefFile: taskFile })
+      if (!assignment || !NON_BLANK(assignment.returnPath)) throw new Error('seat I/O assignment returned no return path')
+      returnPath = assignment.returnPath
+    } catch (err) {
+      return failure(EVAL_SEAT_FAILURE_REASONS.assignment, err)
+    }
+
+    let waited
+    try {
+      waited = await io.wait(returnPath, 24 * 60 * 60)
+    } catch (err) {
+      return failure(EVAL_SEAT_FAILURE_REASONS.wait_error, err)
+    }
+    if (!waited || typeof waited !== 'object' || Array.isArray(waited) || typeof waited.status !== 'string' || waited.status === 'still-running') {
+      return failure(EVAL_SEAT_FAILURE_REASONS.wait_empty, 'seat I/O wait returned no terminal envelope')
+    }
+    return {
+      envelope: waited,
+      adw_id: waited.adw_id ?? null,
+      workdir: checkout,
+      duration_ms: Math.max(0, now() - started),
+      usage: waited.usage ?? null,
+      cleanup,
+    }
+  } catch (err) {
+    return failure(EVAL_SEAT_FAILURE_REASONS.runner, err)
+  } finally {
+    try { deps.settleSeatTeardown(io) } catch { /* seat teardown is best-effort; the worktree remains isolated until runBench cleanup */ }
+  }
 }
 
 function defaultRunGate({ path, gate_path, dir, cwd }) {
@@ -437,7 +597,7 @@ function defaultRunGate({ path, gate_path, dir, cwd }) {
   return gateSummary(`${String(result.stdout || '')}\n${String(result.stderr || '')}`)
 }
 
-async function defaultRunJudge({ judge, envelope, gate, task, bench, dir }) {
+async function defaultRunJudge({ judge, envelope, gate, task, bench, dir, deps = {} }) {
   // The judge uses the same seat transport seam as a candidate, but its model
   // is intentionally not added to the candidate cells. Brief it with the
   // candidate's actual envelope and gate result; an unreadable judge response
@@ -447,8 +607,11 @@ async function defaultRunJudge({ judge, envelope, gate, task, bench, dir }) {
   const id = slash < 0 ? judge?.model : String(judge.model).slice(slash + 1)
   const root = resolve(dir || process.cwd())
   const briefFile = join(root, `.model-eval-${String(bench)}-judge.md`)
+  const writeFile = deps.writeFile || writeFileSync
+  const unlinkFile = deps.unlinkFile || unlinkSync
+  let seat = null
   try {
-    writeFileSync(briefFile, [
+    await writeFile(briefFile, [
       '# Model evaluation judge',
       '',
       'Evaluate the candidate response against the bench task and mechanical gate.',
@@ -463,33 +626,54 @@ async function defaultRunJudge({ judge, envelope, gate, task, bench, dir }) {
       JSON.stringify(gate),
       '',
     ].join('\n'))
-    const seat = await defaultRunSeat({
+    seat = await defaultRunSeat({
       task, candidate: { provider, id, agent: judge?.agent ?? (provider === 'openai' ? 'pi' : 'claude'), effort: judge?.effort ?? 'medium' },
-      role: 'reviewer', bench: `${bench}-judge`, dir, briefFile,
+      role: 'reviewer', bench: `${bench}-judge`, dir, briefFile, deps,
     })
     const findings = findingsFromJudge(seat?.envelope)
     return findings === null ? null : { findings }
   } catch {
     return null
   } finally {
-    try { unlinkSync(briefFile) } catch { /* a failed cleanup is not a finding */ }
+    try { await seat?.cleanup?.() } catch { /* a failed worktree removal remains isolated and is not a finding */ }
+    try { await unlinkFile(briefFile) } catch { /* a failed cleanup is not a finding */ }
   }
 }
 
 export function normalDeps(deps = {}) {
   const source = deps && typeof deps === 'object' && !Array.isArray(deps) ? deps : {}
   const defaultReadRoster = () => rosterSeating(loadRoster(ROSTER))
+  const runtime = {
+    ...source,
+    commandResult: source.commandResult ?? ((args, options) => commandResult(args, { ...options, spawn: source.spawnSync || spawnSync })),
+    makeWorktree: source.makeWorktree ?? ((checkout) => makeWorktreeDefault(checkout, { spawn: source.spawnSync || spawnSync, mkdtemp: source.mkdtemp || mkdtempSync, tempRoot: source.tempRoot || tmpdir() })),
+    removeWorktree: source.removeWorktree ?? ((checkout, dir) => removeWorktreeDefault(checkout, dir, { spawn: source.spawnSync || spawnSync })),
+    resolveAdapters: source.resolveAdapters ?? resolveAdapters,
+    seatIo: source.seatIo ?? seatIo,
+    settleSeatTeardown: source.settleSeatTeardown ?? settleSeatTeardown,
+    readFile: source.readFile ?? source.readFileSync ?? readFileSync,
+    writeFile: source.writeFile ?? writeFileSync,
+    unlinkFile: source.unlinkFile ?? unlinkSync,
+    now: source.now ?? (() => Date.now()),
+  }
   return {
-    runSeat: source.runSeat ?? defaultRunSeat,
+    runSeat: source.runSeat ?? ((spec) => defaultRunSeat({ ...spec, deps: runtime })),
     runGate: source.runGate ?? defaultRunGate,
-    runJudge: source.runJudge ?? defaultRunJudge,
+    runJudge: source.runJudge ?? ((spec) => defaultRunJudge({ ...spec, deps: runtime })),
     probe: async (url) => {
       try { return await (source.probe ?? probeLocalEndpoint)(url) } catch { return false }
     },
     readRoster: source.readRoster === null ? null : (source.readRoster ?? defaultReadRoster),
     ledger: source.ledger === undefined ? null : source.ledger,
     openLedger: source.openLedger ?? (() => openLedger({ dbPath: defaultDbPath() })),
-    now: source.now ?? (() => Date.now()),
+    now: runtime.now,
+    commandResult: runtime.commandResult,
+    makeWorktree: runtime.makeWorktree,
+    removeWorktree: runtime.removeWorktree,
+    resolveAdapters: runtime.resolveAdapters,
+    seatIo: runtime.seatIo,
+    settleSeatTeardown: runtime.settleSeatTeardown,
+    readFile: runtime.readFile,
   }
 }
 

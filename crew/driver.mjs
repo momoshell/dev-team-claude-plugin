@@ -68,7 +68,7 @@ export function locate(t, id) {
 // REPORT whether the submit could be proved. This module never clears the input
 // box and never throws on an unproved submit. Assignment lines obey the
 // allowlist charset; content travels in files, never in the line.
-const SAFE_LINE_RE = /^[A-Za-z0-9 _.,:;=/@'+-]+$/
+const SAFE_LINE_RE = /^[A-Za-z0-9 _.,:;=/@'+\"-]+$/
 const SAFE_PATH_RE = /^\/[A-Za-z0-9._/-]+$/
 const SEND_SETTLE_MS = 250
 const SEND_VERIFY_WINDOW_MS = 3000
@@ -138,7 +138,7 @@ function runTokenFromReturnPath(returnPath) {
 
 function runIdentityInstruction(returnPath) {
   const token = runTokenFromReturnPath(returnPath)
-  return token ? ` Echo exactly run_id=${token} in your ReturnEnvelope.` : ''
+  return token ? ` Add top-level JSON field "run_id":"${token}" to your ReturnEnvelope.` : ''
 }
 
 // The line is long, and its length is what made #759 visible — but it is NOT

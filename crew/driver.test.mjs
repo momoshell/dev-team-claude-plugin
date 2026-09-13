@@ -48,10 +48,10 @@ test('F1 assignment delivery template remains byte-identical', () => {
   assert.doesNotMatch(inlinePrompt, /read your brief at/)
 })
 
-test('scoped assignment prompts echo their validated run token', () => {
+test('J1 scoped assignment requires the exact top-level run_id field', () => {
   const scoped = { ...GOOD, returnPath: '/Users/x/.crew/demo/returns/run-1/d1.planner.json' }
-  assert.match(assignmentLine(scoped), /Write your ReturnEnvelope to .*d1\.planner\.json Echo exactly run_id=run-1 in your ReturnEnvelope\. then print exactly/)
-  assert.match(assignmentPrompt({ ...scoped, delivery: 'inline', briefText: 'brief' }), /Echo exactly run_id=run-1/)
+  assert.match(assignmentLine(scoped), /Write your ReturnEnvelope to .*d1\.planner\.json Add top-level JSON field "run_id":"run-1" to your ReturnEnvelope\. then print exactly/)
+  assert.match(assignmentPrompt({ ...scoped, delivery: 'inline', briefText: 'brief' }), /Add top-level JSON field "run_id":"run-1" to your ReturnEnvelope\./)
 })
 
 test('flat and hostile return paths do not fabricate a run token', () => {
@@ -61,8 +61,8 @@ test('flat and hostile return paths do not fabricate a run token', () => {
     '/Users/x/.crew/demo/returns/../d1.planner.json',
     '/Users/x/.crew/demo/returns/run-1/nested/d1.planner.json',
   ]) {
-    assert.doesNotMatch(assignmentLine({ ...GOOD, returnPath }), /Echo exactly run_id=/)
-    assert.doesNotMatch(assignmentPrompt({ ...GOOD, returnPath, delivery: 'inline', briefText: 'brief' }), /Echo exactly run_id=/)
+    assert.doesNotMatch(assignmentLine({ ...GOOD, returnPath }), /Add top-level JSON field "run_id":/)
+    assert.doesNotMatch(assignmentPrompt({ ...GOOD, returnPath, delivery: 'inline', briefText: 'brief' }), /Add top-level JSON field "run_id":/)
   }
 })
 

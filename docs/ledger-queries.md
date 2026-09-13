@@ -74,13 +74,15 @@ node scripts/factory/ledger.mjs turns --since <iso> --until <iso>
 
 The denominator is `dispatches` (with `dispatches_measured` as the denominator for rates); a null cell with an `absent` marker is unmeasured, never a measured zero. The `seat_turn_census` table records the five counters (`turns`, `tool_calls`, `distinct_files_read`, `suite_runs`, `re_reads`), the four closed classes (`edit`, `read`, `test`, `other`), and the closed absence vocabulary for pane, stream, frame, replay-clock, and same-poll observations.
 
-The ledger declares **34 tables** plus SQLite's own `sqlite_sequence`. `run_configurations` and `run_seats` are populated only for runs booted after canonical configuration and effective-seat recording shipped; older runs deliberately have no row. The eleven journal-fact tables — `provider_failures`, `plan_scope_changes`, `seat_reasks`, `accept_reasks`, `rpc_exit_contexts`, `seat_turn_census`, `plan_adoptions`, `external_fences`, `mutation_anchor_binds`, `mutation_anchor_absences`, and `phase_slot_waits` — are populated only for records ingested after this lane; older journal and dispatch-register rows are never backfilled. `envelopes` and `processes` are retired by declaration. The empty CI/intake tables remain unreached writers, not measured zeros.
+The ledger declares **35 tables** plus SQLite's own `sqlite_sequence`. `run_configurations` and `run_seats` are populated only for runs booted after canonical configuration and effective-seat recording shipped; older runs deliberately have no row. The eleven journal-fact tables — `provider_failures`, `plan_scope_changes`, `seat_reasks`, `accept_reasks`, `rpc_exit_contexts`, `seat_turn_census`, `plan_adoptions`, `external_fences`, `mutation_anchor_binds`, `mutation_anchor_absences`, and `phase_slot_waits` — are populated only for records ingested after this lane; older journal and dispatch-register rows are never backfilled. `envelopes` and `processes` are retired by declaration. The empty CI/intake tables remain unreached writers, not measured zeros.
 
 ## Typed run outcomes
 
 `sessions.outcome` records the typed terminal result (`success`, `escalated`, `aborted`, or `failed`); `sessions.terminal_reason` records the measured cause or signal name; and `sessions.terminal_actor` records the actor that ended the run. NULL in any of these columns means the fact was not measured, never a measured zero, and no historical row is backfilled by inference. `sessions.status` keeps its old meaning and enum (`running`, `ok`, `fail`, or `aborted`), so an escalation remains legacy `aborted` while its typed outcome is `escalated`. The `task` readout carries `absent.outcome` for a row without a typed outcome.
 
 The closed escalation-cause vocabulary is `transport`, `budget`, `plan-build-disagreement`, `brief-contradiction`, `gate-defect`, `review-unresolved`, `infrastructure`, `seat-lost`, `seat-timeout`, `seat-aborted`, `plan-rounds-exhausted`, `envelope-unusable`, `envelope-absent`, `build-rounds-exhausted`, with `unclassified` for a `{where, why}` pair no rule classifies. The three seat-failure causes are separate on purpose, because they imply different operator actions: a timeout is the driver's own wait ceiling (raise a budget), a lost seat is a worker the driver found dead by probe (investigate a kill), and an aborted seat is a worker that exited mid-stream (retry a transient). envelope-absent is a seat that settled and wrote nothing, while envelope-unusable is output the driver cannot read as an envelope; both classify identically on the pane and headless transports. build-rounds-exhausted is the build loop's round cap, the twin of plan-rounds-exhausted.
+
+Model escalation triage is record-only: `escalation_proposals` stores one optional labeled cause, proposing model, bounded evidence, and creation time per run. It is deliberately separate from the measured session outcome; a proposal never changes the measured terminal fields and is not a ratification. A human must compare the proposal with the durable record and ratify any conclusion explicitly. Asks 2 and 3 (wedge digest and report narration) are deferred and may reuse this durable-record and injected-transport seam.
 
 ## Retired tables
 
@@ -403,7 +405,7 @@ Therefore a recipe may be run while a batch is live. The operator must still dis
 
 ### Recipe E — every escalation, where and why
 
-`returns/task.json` is the record: `details.escalation` is a `{where, why}` struct and `details.stages[]` ends in `escalate:<where>`. The ledger now knows the typed cause and actor through `sessions.terminal_reason` / `sessions.terminal_actor`; this duckdb recipe remains the `why`-text record.
+`returns/task.json` is the record: `details.escalation` is a `{where, why}` struct and `details.stages[]` ends in `escalate:<where>`. The ledger knows the measured cause and actor through `sessions.terminal_reason` / `sessions.terminal_actor`; this duckdb recipe remains the `why`-text record. The optional record-only consumer reads that durable return, journal, bounded headless stream tails, observations, and session row, then sends only the record to an injected or OpenAI-compatible transport.
 
 ```sh
 duckdb -csv -c "
@@ -422,7 +424,19 @@ left join (select adw_id, count(*) n from phases where name='escalation' group b
   using(adw_id)
 where s.task_slug not in ('x','daemon80','unfenced-child','fence-scope','fence-plan','daemon-null-lane')
 group by 1;"
+
+# The measured outcome stays beside the optional model label. A missing
+# proposal is not a measured absence, and the first proposal wins.
+sqlite3 ledger.db "
+select s.adw_id, s.terminal_reason, s.terminal_actor,
+       p.proposed_cause, p.proposed_by, p.proposed_evidence, p.created_at
+from sessions s
+left join escalation_proposals p using(adw_id)
+where s.task_slug not in ('x','daemon80','unfenced-child','fence-scope','fence-plan','daemon-null-lane')
+order by s.ended_at desc;"
 ```
+
+The standalone `scripts/factory/escalation-triage.mjs <absolute-crew-dir>` is an optional consumer: an absent or dead endpoint, an unset model, malformed response, denied/interrupted/empty durable input, or an already measured cause is a named no-op and records nothing. It accepts only a closed proposed cause plus bounded evidence. Duplicate invocations leave the first `escalation_proposals` row unchanged; no lane execution path imports or awaits it. Proposal rows are advisory until a human ratifies them.
 
 Recorded output, run 2026-08-25T14:54:25Z on duckdb v1.5.5 (the first query returned 77 rows; condensed by `where`):
 

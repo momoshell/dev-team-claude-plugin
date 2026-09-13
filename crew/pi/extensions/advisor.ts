@@ -7,7 +7,7 @@
 // The file therefore uses only erasable syntax and node:-only imports.
 //
 // Why zero-dep: pi is not a dependency of this checkout. Keeping the extension
-// self-contained makes its closed configuration and loopback boundary testable
+// self-contained makes its closed configuration and endpoint boundary testable
 // by this repository without importing pi's private runtime.
 //
 // Both event handlers are ordinary functions returning undefined. A note is
@@ -542,8 +542,7 @@ export function classifyAdvisorCell({ endpoint, model } = {}) {
   const authority = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/([^\/?#]*)/.exec(endpoint)?.[1] || ''
   const hostText = authority.includes('@') ? authority.slice(authority.lastIndexOf('@') + 1) : authority
   const rawHost = hostText.startsWith('[') ? hostText.slice(0, hostText.indexOf(']') + 1) : hostText.split(':')[0]
-  if (!['http:', 'https:'].includes(parsed.protocol)
-    || !['127.0.0.1', 'localhost', '[::1]'].includes(rawHost.toLowerCase())) {
+  if (!['http:', 'https:'].includes(parsed.protocol) || rawHost === '') {
     return { reason: 'endpoint-not-local' }
   }
   if (parsed.username || parsed.password) return { reason: 'endpoint-credentials' }

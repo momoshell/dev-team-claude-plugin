@@ -184,8 +184,8 @@ export const SLOT_MARKER = 'UNFILLED SLOT'
 // (scripts/factory/emit.mjs) rather than importing this module; the two
 // declarations are pinned equal by test/factory-make-brief.test.mjs.
 export const PROPOSAL_BLOCK = 'proposal'
-export const PROPOSAL_KEYS = Object.freeze(['shape', 'strength'])
-
+export const PROPOSAL_KEYS = Object.freeze(['recommended_assurance', 'recommended_model_band', 'minimum_assurance'])
+export const PROPOSAL_V2_KEYS = PROPOSAL_KEYS
 // #657: a `directed` lane's PLAN IS ITS BRIEF, and until now the compiler had no
 // home for one — the only free-text field rendered exactly once was `out_of_scope`,
 // so b248 dispatched with its plan smuggled into the section that says what the lane
@@ -1497,7 +1497,7 @@ function proposeStrength(complexityTier, signals, ladderBands) {
 // The three absence cases propose NEITHER and say why, rather than defaulting.
 function absentProposal(reasons, signals) {
   return {
-    tier: null, shape: null, strength: null,
+    tier: null, shape: null, strength: null, recommendedAssurance: null, recommendedModelBand: null, minimumAssurance: null,
     reasons, shapeReasons: [...reasons], strengthReasons: [...reasons], signals,
     misclassification: null,
   }
@@ -1613,7 +1613,7 @@ export function proposeTier({ where, discovery, protectedPaths = DEFAULT_PROTECT
   const { shape, reasons: shapeReasons } = proposeShape(signals.protectedHits)
   const { strength, reasons: strengthReasons } = proposeStrength(complexityTier, signals, ladderBands)
   return {
-    tier, shape, strength, reasons, shapeReasons, strengthReasons, signals,
+    tier, shape, strength, ...proposalRecommendationFields(shape, strength, signals.protectedHits), reasons, shapeReasons, strengthReasons, signals,
     misclassification: noteMisclassification(shape, strength, complexityTier),
   }
 }
@@ -1641,6 +1641,14 @@ function formatCountBasis(profileBaseline, supplied) {
     return `${rendered} (profile records passed ${value.passed}, not used)`
   }
   return `${rendered} (profile records a ratified baseline, not used)`
+}
+
+function proposalRecommendationFields(shape, strength, protectedHits) {
+  return {
+    recommendedAssurance: { mechanical: 'quick', build: 'standard', judge: 'rigorous' }[shape] ?? null,
+    recommendedModelBand: strength,
+    minimumAssurance: protectedHits.length > 0 ? 'rigorous' : null,
+  }
 }
 
 function normaliseSourceInput(source, filePath = '') {
@@ -2862,6 +2870,15 @@ export function renderProposedTier(proposal) {
     && proposal.misclassification.startsWith(MISCLASSIFIED_PREFIX)
     ? proposal.misclassification
     : null
+  const recommendedAssurance = proposal && ['quick', 'standard', 'rigorous'].includes(proposal.recommendedAssurance)
+    ? proposal.recommendedAssurance
+    : null
+  const recommendedModelBand = proposal && LADDER_BANDS.includes(proposal.recommendedModelBand)
+    ? proposal.recommendedModelBand
+    : null
+  const minimumAssurance = proposal && ['quick', 'standard', 'rigorous'].includes(proposal.minimumAssurance)
+    ? proposal.minimumAssurance
+    : null
   return [
     'PROPOSAL ONLY — compiled from mechanical signals. The orchestrator confirms',
     'or overrides this at boot; the compiler never decides the tier.',
@@ -2874,6 +2891,9 @@ export function renderProposedTier(proposal) {
     `proposed strength: ${strength || 'no proposal'}`,
     'because (complexity signals):',
     ...(strengthReasons.length ? strengthReasons.map((reason) => `- ${reason}`) : ['- no complexity signals were available']),
+    `recommended assurance: ${recommendedAssurance || 'no proposal'}`,
+    `recommended model band: ${recommendedModelBand || 'no proposal'}`,
+    `minimum assurance: ${minimumAssurance || 'none'}`,
     ...(misclassification ? [misclassification] : []),
   ].join('\n')
 }
@@ -2883,9 +2903,10 @@ export function renderProposedTier(proposal) {
 // uses, so an absent or unratified proposal renders explicit JSON null rather
 // than a guess, and the bytes are a pure function of the proposal object.
 export function renderProposalBlock(proposal) {
-  const shape = proposal && TIER_NAMES.includes(proposal.shape) ? proposal.shape : null
-  const strength = proposal && LADDER_BANDS.includes(proposal.strength) ? proposal.strength : null
-  return ['```' + PROPOSAL_BLOCK, JSON.stringify({ shape, strength }, null, 2), '```'].join('\n')
+  const recommended_assurance = proposal && ['quick', 'standard', 'rigorous'].includes(proposal.recommendedAssurance) ? proposal.recommendedAssurance : null
+  const recommended_model_band = proposal && LADDER_BANDS.includes(proposal.recommendedModelBand) ? proposal.recommendedModelBand : null
+  const minimum_assurance = proposal && ['quick', 'standard', 'rigorous'].includes(proposal.minimumAssurance) ? proposal.minimumAssurance : null
+  return ['```' + PROPOSAL_BLOCK, JSON.stringify({ recommended_assurance, recommended_model_band, minimum_assurance }, null, 2), '```'].join('\n')
 }
 
 // The plan renders in EXACTLY ONE place. `ask` and `done_means` each render twice on

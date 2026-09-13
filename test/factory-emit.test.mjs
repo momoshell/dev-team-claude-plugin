@@ -13,7 +13,7 @@ import { join, dirname } from 'node:path'
 import { spawn, spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { ROOT, nonTempCheckout, scratchDir, sqliteAvailable } from './helpers.mjs'
-import { openRun, recordCellFailure, recordPhaseSlotWait, _resetNoticeGuardsForTest, main } from '../scripts/factory/emit.mjs'
+import { openRun, parseProposalBrief, recordCellFailure, recordPhaseSlotWait, _resetNoticeGuardsForTest, main } from '../scripts/factory/emit.mjs'
 import { openLedger, PAYLOAD_KEYS, NODE_FLOOR } from '../scripts/factory/ledger.mjs'
 import { headlessIo } from '../crew/headless.mjs'
 
@@ -59,6 +59,32 @@ after(() => {
   }
   assert.equal(survivors.length, 0,
     `${survivors.length} spawned child process(es) outlived the suite (pids ${survivors.map((c) => c.pid).join(', ')})`)
+})
+
+test('proposal-v2 J1', () => {
+  const v2 = ['```proposal', JSON.stringify({
+    recommended_assurance: 'standard',
+    recommended_model_band: 'workhorse',
+    minimum_assurance: null,
+  }, null, 2), '```'].join('\n')
+  const parsed = parseProposalBrief(v2)
+  assert.equal(parsed.defect, null)
+  assert.equal(parsed.absent, false)
+  assert.equal(parsed.recommended_assurance, 'standard')
+  assert.equal(parsed.recommended_model_band, 'workhorse')
+  assert.equal(parsed.minimum_assurance, null)
+  assert.equal(parsed.shape, null)
+  assert.equal(parsed.strength, null)
+
+  const malformed = parseProposalBrief('```proposal\n{not-json}\n```')
+  assert.notEqual(malformed.defect, null)
+  const mixed = parseProposalBrief(['```proposal', JSON.stringify({
+    recommended_assurance: 'quick',
+    recommended_model_band: 'utility',
+    minimum_assurance: null,
+    shape: 'mechanical',
+  }), '```'].join('\n'))
+  assert.notEqual(mixed.defect, null)
 })
 
 function runChild(program, { timeout = 15000, env = {} } = {}) {

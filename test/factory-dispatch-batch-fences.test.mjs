@@ -1211,23 +1211,6 @@ function directBaseline({ label, sha = 'a'.repeat(40), capacity = '1', cachedFor
 
 
 
-async function compileBriefProposal(brief, label) {
-  const batch = makeBatch(['lane-a'])
-  const out = join(root, `proposal-${label}-out`)
-  const register = join(root, `proposal-${label}-register.json`)
-  put(register, JSON.stringify({ lanes: [entry('lane-a', ['crew/owned.mjs'], [])] }))
-  const result = await compileLane({
-    lane: 'lane-a', batchDir: batch, laneDir: root, registerPath: register, outDir: out,
-    fences: [entry('lane-a', ['crew/owned.mjs'], [])],
-    deps: {
-      spawn: (call) => call.args.includes('--discover-reads')
-        ? { status: 0, stdout: '[]', stderr: '' }
-        : { status: 0, stdout: '', stderr: '' },
-      readFileSync: (path) => String(path).endsWith('.brief.md') ? brief : readFileSync(path, 'utf8'),
-    },
-  })
-  return result.proposed
-}
 
 
 
@@ -1498,7 +1481,6 @@ export {
   basenameOf,
   cachePath,
   directBaseline,
-  compileBriefProposal,
   carrierCheckout,
 }
 

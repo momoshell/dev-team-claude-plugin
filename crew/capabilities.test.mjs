@@ -226,6 +226,56 @@ test('D1 a local seat provider is included in the seat provider set', () => {
   assert.deepEqual(seatableLocalProviderNames(register), ['distinctive-seat'])
 })
 
+test('A1 stale narrator local provider is refused by its closed reason', () => {
+  const entry = {
+    settings: 'crew/pi/settings.json', pi_provider: 'local-pi',
+    base_url: 'http://127.0.0.1:11434/v1', model: 'Qwen/Qwen3-Coder:latest',
+  }
+  const register = capabilityRegister({ local_providers: { narrator: entry } })
+  assert.throws(() => loadCapabilities({ register }), (err) => err.reason === 'local-provider-reserved')
+})
+
+test('B1 stale narrator refusal names its top-level declaration path', () => {
+  const entry = {
+    settings: 'crew/pi/settings.json', pi_provider: 'local-pi',
+    base_url: 'http://127.0.0.1:11434/v1', model: 'Qwen/Qwen3-Coder:latest',
+  }
+  const register = capabilityRegister({ local_providers: { narrator: entry } })
+  assert.throws(
+    () => loadCapabilities({ register }),
+    (err) => err.reason === 'local-provider-reserved' && /\$\.narrator/.test(err.message),
+  )
+})
+
+test('C1 reserved non-seat provider refusal is schema-derived', () => {
+  const entry = {
+    settings: 'crew/pi/settings.json', pi_provider: 'local-pi',
+    base_url: 'http://127.0.0.1:11434/v1', model: 'Qwen/Qwen3-Coder:latest',
+  }
+  const schema = structuredClone(JSON.parse(readFileSync(new URL('./capabilities.schema.json', import.meta.url), 'utf8')))
+  schema.properties.metrics = { ...schema.properties.narrator }
+  const schemaRoot = scratchDir('crew-capabilities-c1-')
+  const schemaPath = join(schemaRoot, 'capabilities.schema.json')
+  writeFileSync(schemaPath, JSON.stringify(schema))
+  try {
+    const register = capabilityRegister({ metrics: entry, local_providers: { metrics: entry } })
+    assert.throws(
+      () => loadCapabilities({ register, schemaPath }),
+      (err) => err.reason === 'local-provider-reserved' && /\$\.metrics/.test(err.message),
+    )
+  } finally { rmSync(schemaRoot, { recursive: true, force: true }) }
+})
+
+test('D1 genuine local seat provider remains admitted', () => {
+  const entry = {
+    settings: 'crew/pi/settings.json', pi_provider: 'local-pi',
+    base_url: 'http://127.0.0.1:11434/v1', model: 'Qwen/Qwen3-Coder:latest',
+  }
+  const loaded = loadCapabilities({ register: capabilityRegister({ local_providers: { 'distinctive-seat': entry } }) })
+  assert.equal(seatableLocalProviderNames(loaded).includes('distinctive-seat'), true)
+  assert.equal(loaded.coding_agents.pi.providers.includes('distinctive-seat'), true)
+})
+
 test('B1T coding agent transports derive from shipped adapters', () => {
   const shipped = loadCapabilities()
   const transports = ['pane', 'headless-json', 'headless-rpc']
@@ -926,7 +976,7 @@ test('claude refuses a vendor grant while pi composes the same resolved grant', 
 
 test('capability refusal reasons are closed and EMPTY_GRANTS is frozen', () => {
   assert.equal(Object.isFrozen(CAPABILITY_REFUSALS), true)
-  assert.deepEqual([...CAPABILITY_REFUSALS], ['register-invalid', 'capability-shortfall', 'unknown-grant', 'grant-unsupported', 'extension-missing', 'unknown-skill', 'agent-def-invalid', 'local-settings-missing', 'local-endpoint-dead', 'grant-contradicts-deny', 'vendor-extension-missing', 'agent-unresolved', 'agent-provider-unsupported'])
+  assert.deepEqual([...CAPABILITY_REFUSALS], ['register-invalid', 'capability-shortfall', 'unknown-grant', 'grant-unsupported', 'extension-missing', 'unknown-skill', 'agent-def-invalid', 'local-settings-missing', 'local-endpoint-dead', 'grant-contradicts-deny', 'vendor-extension-missing', 'agent-unresolved', 'agent-provider-unsupported', 'local-provider-reserved'])
   assert.throws(() => refuse('not-a-capability-reason', 'bad'))
   assert.throws(
     () => claudeSeatCommand({ role: 'builder', model: 'sonnet', promptFile: '/tmp/role.md', tools: 'Read', deny: 'Task,Agent', taskDir: '/tmp', bootBrief: 'boot', grants: { tools: [], extensions: ['/tmp/ext.js'], skills: [], agents: [], advisor: false } }),

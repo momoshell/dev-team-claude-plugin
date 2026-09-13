@@ -208,7 +208,7 @@ test('RV1-2 records delivered measurements for construction-time suites', () => 
     ['test/factory-dispatch-batch-cli.test.mjs', 19],
     ['test/factory-dispatch-batch-fences.test.mjs', 34],
     ['test/factory-dispatch-batch-refusals.test.mjs', 18],
-    ['test/factory-dispatch-batch.test.mjs', 207],
+    ['test/factory-dispatch-batch.test.mjs', 213],
     ['test/factory-suite-cost.test.mjs', 11],
   ]) {
     const row = deliveredRows.get(suite)

@@ -552,7 +552,7 @@ const RECORDED_SUITE_SAMPLES = Object.freeze([
   ["test/factory-dispatch-batch-cli.test.mjs",0.11996929201483726,19,null],
   ["test/factory-dispatch-batch-fences.test.mjs",2.697305082976818,34,null],
   ["test/factory-dispatch-batch-refusals.test.mjs",0.20276887500286103,18,null],
-  ["test/factory-dispatch-batch.test.mjs",4.4359370000064375,207,null],
+  ["test/factory-dispatch-batch.test.mjs",4.4359370000064375,213,null],
   ["test/factory-emit-floor.test.mjs",0.10204679200053215,4,null],
   ["test/factory-emit.test.mjs",15.1104446670115,77,null],
   ["test/factory-env.test.mjs",0.7040766670107842,30,null],

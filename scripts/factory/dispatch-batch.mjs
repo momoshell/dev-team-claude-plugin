@@ -15,7 +15,7 @@ import { assertHostQuiet, hostLoad, loadPolicy, withSuiteSlot } from '../../crew
 import { protectedHitsIn, resolveProtectedPaths } from '../../crew/protected-paths.mjs'
 import { fenceScopesIntersect, parseFenceScope } from '../../crew/fence-scope.mjs'
 import { slug } from '../../crew/slug.mjs'
-import { LADDER_BANDS, PROPOSAL_BLOCK, TIER_NAMES, extractSymbols, gatherFences, isTripwireFile, validateRequest } from './make-brief.mjs'
+import { LADDER_BANDS, PROPOSAL_BLOCK, PROPOSAL_V2_KEYS, TIER_NAMES, extractSymbols, gatherFences, isTripwireFile, validateRequest } from './make-brief.mjs'
 
 const BATCH_EMPTY = 'batch-empty'
 const BATCH_UNREADABLE = 'batch-unreadable'
@@ -261,11 +261,11 @@ export const BAND_FLOOR_REASONS = Object.freeze([
   'model-not-in-catalog',
 ])
 
-// #291 step 3: the compiler computes SHAPE (risk) and STRENGTH (complexity) on two
-// axes and the dispatcher recorded only the collapsed tier word, so no operator and
-// no later ledger query could join a matrix cell to its cost or its outcome. The
-// pair is READ out of the compiler's own ```proposal block — never re-derived here,
-// because a second derivation is a second answer to a question already answered.
+// #291 step 3: the compiler computes risk and complexity on two axes and the
+// dispatcher records both v2 recommendation fields without turning either into an
+// execution decision. The pair is READ out of the compiler's own ```proposal block —
+// never re-derived here, because a second derivation is a second answer to a question
+// already answered.
 export const DISPATCH_RECORD_SUFFIX = '.dispatch.json'
 const SPELLING_UNMEASURED_REASON = 'dispatch_record_predates_operator_spelling'
 const OPERATOR_SPELLINGS = Object.freeze({
@@ -280,6 +280,10 @@ export const STAFFING_ABSENT = 'absent'
 // not touch. test/factory-dispatch-batch.test.mjs pins the two surfaces together.
 export const MISCLASSIFIED_PREFIX = 'misclassified · shape mechanical has no reinforced column'
 const ABSENT_STAFFING = Object.freeze({ shape: null, strength: null, misclassification: null })
+const ASSURANCE_NAMES = Object.freeze(['quick', 'standard', 'rigorous'])
+const ASSURANCE_TO_TIER = Object.freeze({ quick: 'mechanical', standard: 'build', rigorous: 'judge' })
+const TIER_TO_ASSURANCE = Object.freeze({ mechanical: 'quick', build: 'standard', judge: 'rigorous' })
+const LEGACY_PROPOSAL_KEYS = Object.freeze(['shape', 'strength'])
 
 // A dry run reports success in the same tone a fully validated dispatch would, and an
 // operator read that as validation, split a batch and dispatched it twice (#658). Nothing has
@@ -1951,16 +1955,87 @@ function writeRuntimeRegister({ entry, lane, outDir, d }) {
   return path
 }
 
-// The compiler proposes a tier on ONE line and renders the proposal block from
-// the other two axes: PROPOSAL_KEYS is ['shape', 'strength'] (make-brief.mjs:148)
-// and the block never carries a tier at all. Shape is the RISK axis and shares
-// the mechanical|build|judge vocabulary with tier, so reading it through
-// TIER_NAMES passed the membership guard on the wrong axis and seated every
-// lane at its shape. The line anchor keeps a phrase quoted mid-sentence in the
-// ask from outranking the compiler's own line.
-function proposalFromBrief(text) {
-  const match = /^proposed tier:\s*(mechanical|build|judge)\b/im.exec(text)
-  return match ? match[1].toLowerCase() : null
+function absentProposal(misclassification = null) {
+  return {
+    source: null,
+    recommendedAssurance: null,
+    recommendedAssuranceCanonical: null,
+    recommendedModelBand: null,
+    minimumAssurance: null,
+    minimumAssuranceCanonical: null,
+    legacyProposal: null,
+    staffing: { ...ABSENT_STAFFING, misclassification },
+  }
+}
+
+function validProposalValue(value, values) {
+  if (value === null) return null
+  return typeof value === 'string' && values.includes(value) ? value : undefined
+}
+
+// One total parser owns the proposal fence. V2 is authoritative for recommendation
+// and minimum fields; the old shape/strength object is observational migration input
+// only. A missing, malformed, mixed, or ambiguous fence is absent rather than guessed.
+export function proposalFromBrief(text) {
+  if (typeof text !== 'string' || !text.trim()) return absentProposal()
+  const lines = text.split('\n')
+  const misclassification = lines.map((line) => line.trim())
+    .find((line) => line.startsWith(MISCLASSIFIED_PREFIX)) || null
+  const fence = '```' + PROPOSAL_BLOCK
+  const blocks = []
+  for (let i = 0; i < lines.length; i += 1) {
+    if (lines[i].trim() !== fence) continue
+    const end = lines.findIndex((line, j) => j > i && line.trim() === '```')
+    if (end < 0) return absentProposal(misclassification)
+    blocks.push(lines.slice(i + 1, end).join('\n'))
+    i = end
+  }
+  if (blocks.length !== 1) return absentProposal(misclassification)
+  let parsed
+  try { parsed = JSON.parse(blocks[0]) } catch { return absentProposal(misclassification) }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return absentProposal(misclassification)
+
+  const keys = Object.keys(parsed)
+  const hasExactly = (expected) => keys.length === expected.length && expected.every((key) => keys.includes(key))
+  if (hasExactly(PROPOSAL_V2_KEYS)) {
+    const recommendedAssuranceCanonical = validProposalValue(parsed.recommended_assurance, ASSURANCE_NAMES)
+    const recommendedModelBand = validProposalValue(parsed.recommended_model_band, LADDER_BANDS)
+    const minimumAssuranceCanonical = validProposalValue(parsed.minimum_assurance, ASSURANCE_NAMES)
+    if (recommendedAssuranceCanonical === undefined
+      || recommendedModelBand === undefined
+      || minimumAssuranceCanonical === undefined) {
+      return absentProposal(misclassification)
+    }
+    return {
+      source: 'proposal',
+      recommendedAssurance: recommendedAssuranceCanonical === null ? null : ASSURANCE_TO_TIER[recommendedAssuranceCanonical],
+      recommendedAssuranceCanonical,
+      recommendedModelBand,
+      minimumAssurance: minimumAssuranceCanonical === null ? null : ASSURANCE_TO_TIER[minimumAssuranceCanonical],
+      minimumAssuranceCanonical,
+      legacyProposal: null,
+      staffing: { ...ABSENT_STAFFING, misclassification },
+    }
+  }
+
+  if (hasExactly(LEGACY_PROPOSAL_KEYS)) {
+    const shape = validProposalValue(parsed.shape, TIER_NAMES)
+    const strength = validProposalValue(parsed.strength, LADDER_BANDS)
+    if (shape === undefined || strength === undefined) return absentProposal(misclassification)
+    const compilerTier = /^proposed tier:\s*(mechanical|build|judge)\b/im.exec(text)?.[1]?.toLowerCase() ?? null
+    return {
+      source: 'legacy_proposal',
+      recommendedAssurance: null,
+      recommendedAssuranceCanonical: null,
+      recommendedModelBand: null,
+      minimumAssurance: null,
+      minimumAssuranceCanonical: null,
+      legacyProposal: { ...parsed, tier: compilerTier },
+      staffing: { shape, strength, misclassification },
+    }
+  }
+
+  return absentProposal(misclassification)
 }
 
 const INTENT_EVENT = 'lane-intent'
@@ -2007,32 +2082,10 @@ function intentFromBrief(text) {
   return body.trim() || null
 }
 
-// Reads what the compiler already decided. The misclassification is a bare line in
-// the brief, not part of the block, so it is matched independently: a brief may
-// report one with or without a readable block.
+// Compatibility staffing fields are observational only and are parsed by the same
+// total proposal parser; v2 blocks deliberately carry no staffing shape or strength.
 export function staffingFromBrief(text) {
-  if (typeof text !== 'string' || !text.trim()) return { ...ABSENT_STAFFING }
-  const lines = text.split('\n')
-  const misclassification = lines.map((line) => line.trim())
-    .find((line) => line.startsWith(MISCLASSIFIED_PREFIX)) || null
-  const fence = '```' + PROPOSAL_BLOCK
-  const blocks = []
-  for (let i = 0; i < lines.length; i += 1) {
-    if (lines[i].trim() !== fence) continue
-    const end = lines.findIndex((line, j) => j > i && line.trim() === '```')
-    if (end < 0) break
-    blocks.push(lines.slice(i + 1, end).join('\n'))
-    i = end
-  }
-  if (blocks.length !== 1) return { ...ABSENT_STAFFING, misclassification }
-  let parsed
-  try { parsed = JSON.parse(blocks[0]) } catch { return { ...ABSENT_STAFFING, misclassification } }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    return { ...ABSENT_STAFFING, misclassification }
-  }
-  const shape = TIER_NAMES.includes(parsed.shape) ? parsed.shape : null
-  const strength = LADDER_BANDS.includes(parsed.strength) ? parsed.strength : null
-  return { shape, strength, misclassification }
+  return proposalFromBrief(text).staffing
 }
 
 export const BASELINE_CACHE_DIRNAME = 'baselines'
@@ -2486,7 +2539,8 @@ export async function compileLane({ lane, batchDir, requestPath, laneDir, regist
     refuse(`compiler produced no readable brief for ${name}: ${err?.message || String(err)}`, COMPILE_REFUSED)
   }
   const measured = briefMeasure(brief)
-  return { lane: name, brief: briefPath, registerPath: currentRegister, proposed: proposalFromBrief(brief), staffing: staffingFromBrief(brief), intent: intentFromBrief(brief), bytes: measured.bytes, topSection: measured.topSection }
+  const proposal = proposalFromBrief(brief)
+  return { lane: name, brief: briefPath, registerPath: currentRegister, proposal, staffing: proposal.staffing, intent: intentFromBrief(brief), bytes: measured.bytes, topSection: measured.topSection }
 }
 
 export function tierFloor({ files, extra } = {}) {
@@ -2536,29 +2590,29 @@ export function resolveRequestedTier({ tier, assurance } = {}) {
   return tierSupplied ? tier : undefined
 }
 
-export function reconcileTier({ lane, forced, proposed, requested, requestedFrom = 'lane', forceReason = TIER_FLOOR_CONFLICT } = {}) {
+export function reconcileTier({ lane, forced, recommended, requested, requestedFrom = 'lane', forceReason = TIER_FLOOR_CONFLICT } = {}) {
   if (forced && requestedFrom !== 'batch' && requested && TIER_NAMES.indexOf(requested) < TIER_NAMES.indexOf(forced)) {
     if (forceReason === PROMPT_SURFACE_CONFLICT) {
       refuse(`lane ${lane} requested tier ${requested} below prompt surface floor ${forced}; ${PROMPT_SURFACE_BLIND_SPOT}`, PROMPT_SURFACE_CONFLICT)
     }
     refuse(`lane ${lane} requested tier ${requested} below protected floor ${forced}`, TIER_FLOOR_CONFLICT)
   }
-  // #762: an explicit lane tier is the operator's decision. The compiler's
-  // proposal advises and never raises it; only the protected floor does.
-  const laneChoice = requestedFrom === 'lane' && TIER_NAMES.includes(requested)
-  const candidates = laneChoice ? [forced, requested] : [forced, proposed, requested]
+  const candidates = [forced, requested, requested == null ? recommended : null]
   const known = candidates.filter((tier) => TIER_NAMES.includes(tier))
   const tier = known.length === 0
     ? null
     : known.reduce((best, candidate) => TIER_NAMES.indexOf(candidate) > TIER_NAMES.indexOf(best) ? candidate : best)
-  const overrodeProposal = laneChoice && TIER_NAMES.includes(proposed) && TIER_NAMES.indexOf(proposed) > TIER_NAMES.indexOf(tier)
-  return { lane, tier, forced, proposed, requested, overrodeProposal }
+  const warning = requested != null
+    && TIER_NAMES.includes(recommended)
+    && TIER_NAMES.includes(requested)
+    && TIER_NAMES.indexOf(recommended) > TIER_NAMES.indexOf(requested)
+    ? `requested ${requested} below recommendation ${TIER_TO_ASSURANCE[recommended] || recommended}; request retained`
+    : null
+  return { lane, tier, forced, recommended, requested, warning }
 }
 
-// The override is printed, not merely recorded: an operator reading the dispatch
-// line must see that the lane's own tier beat a higher proposal (#762).
-function overrideNote(result) {
-  return result.overrodeProposal ? ` overrode proposal ${result.proposed} with lane tier ${result.tier}` : ''
+function recommendationNote(result) {
+  return result.warning ? ` warning=${result.warning}` : ''
 }
 
 export function checkArrival({ crew, lane } = {}) {
@@ -3565,12 +3619,25 @@ async function compileDispatchWave(prepared) {
     const laneExecutionSupplied = laneEntry?.execution !== undefined && laneEntry?.execution !== null
     const laneExecutionSpelling = laneExecutionSupplied ? laneEntry.executionSpelling : batchExecutionSpelling
     const laneAssuranceSpelling = laneAssuranceSupplied ? laneEntry.assuranceSpelling : batchAssuranceSpelling
-    const result = reconcileTier({ lane: item.lane, forced: floor.forced || prompt.forced, proposed: item.proposed, requested, requestedFrom: laneAssuranceSupplied ? 'lane' : 'batch', forceReason: floor.forced ? TIER_FLOOR_CONFLICT : PROMPT_SURFACE_CONFLICT })
+    const minimum = floor.forced || prompt.forced || item.proposal.minimumAssurance
+    const result = reconcileTier({
+      lane: item.lane,
+      forced: minimum,
+      recommended: item.proposal.recommendedAssurance,
+      requested,
+      requestedFrom: laneAssuranceSupplied ? 'lane' : 'batch',
+      forceReason: floor.forced ? TIER_FLOOR_CONFLICT : PROMPT_SURFACE_CONFLICT,
+    })
     if (!result.tier) refuse(`lane ${item.lane} has no known tier to boot`, BOOT_FAILED)
-    d.log(`dispatch-batch: lane=${item.lane} forced=${floor.forced || 'none'} prompt=${prompt.promptChange ? 'change' : 'code-only'} proposed=${item.proposed || 'none'} requested=${requested || 'none'} requested_from=${laneAssuranceSupplied ? 'lane' : (tier ? 'batch' : 'none')} execution=${laneExecution || 'none'} execution_from=${laneExecutionSupplied ? 'lane' : (execution ? 'batch' : 'none')} variant=${laneVariant || 'none'} variant_from=${laneExecutionSupplied ? 'lane' : (execution ? 'batch' : 'none')} settled=${result.tier} seats=${seatSpec(seats)} seats_from=${seatFromSpec(batchSeats, laneEntry?.seats)} shape=${staffing.shape || STAFFING_ABSENT} strength=${staffing.strength || STAFFING_ABSENT} misclassified=${staffing.misclassification ? 'true' : 'false'} brief_bytes=${item.bytes} top_section=${sectionToken(item.topSection)}${overrideNote(result)} granularity=${fenceGranularity(laneFence.files)}`)
+    d.log(`dispatch-batch: lane=${item.lane} forced=${minimum || 'none'} prompt=${prompt.promptChange ? 'change' : 'code-only'} recommended=${item.proposal.recommendedAssurance || 'none'} requested=${requested || 'none'} requested_from=${laneAssuranceSupplied ? 'lane' : (tier ? 'batch' : 'none')} execution=${laneExecution || 'none'} execution_from=${laneExecutionSupplied ? 'lane' : (execution ? 'batch' : 'none')} variant=${laneVariant || 'none'} variant_from=${laneExecutionSupplied ? 'lane' : (execution ? 'batch' : 'none')} settled=${result.tier} seats=${seatSpec(seats)} seats_from=${seatFromSpec(batchSeats, laneEntry?.seats)} shape=${staffing.shape || STAFFING_ABSENT} strength=${staffing.strength || STAFFING_ABSENT} misclassified=${staffing.misclassification ? 'true' : 'false'} brief_bytes=${item.bytes} top_section=${sectionToken(item.topSection)}${recommendationNote(result)} granularity=${fenceGranularity(laneFence.files)}`)
     const recordPath = join(outputDir, `${item.lane}${DISPATCH_RECORD_SUFFIX}`)
     const record = {
       lane: item.lane,
+      proposal_source: item.proposal.source,
+      recommended_assurance: item.proposal.recommendedAssuranceCanonical,
+      recommended_model_band: item.proposal.recommendedModelBand,
+      minimum_assurance: item.proposal.minimumAssuranceCanonical,
+      legacy_proposal: item.proposal.legacyProposal,
       shape: staffing.shape,
       strength: staffing.strength,
       misclassification: staffing.misclassification,
@@ -3580,11 +3647,13 @@ async function compileDispatchWave(prepared) {
         forced: prompt.forced,
       },
       tier: {
-        forced: floor.forced || null,
-        proposed: item.proposed || null,
+        forced: minimum || null,
+        minimum: minimum || null,
+        recommended: result.recommended || null,
         requested: requested || null,
         settled: result.tier,
-        overrode_proposal: result.overrodeProposal === true,
+        force_reason: floor.forced ? TIER_FLOOR_CONFLICT : prompt.forced ? PROMPT_SURFACE_CONFLICT : null,
+        recommendation_warning: result.warning,
       },
       seats: seatChain(batchSeats, laneEntry?.seats),
       operator_spelling: {

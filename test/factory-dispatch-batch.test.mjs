@@ -36,6 +36,7 @@ import {
   PROMPT_SURFACE,
   PROMPT_SURFACE_BLIND_SPOT,
   promptSurfaceVerdict,
+  proposalFromBrief,
   DISPATCH_RECORD_SUFFIX,
   DRY_RUN_BLIND_SPOT,
   FENCE_REPORT_FILE,
@@ -269,6 +270,24 @@ import {
   compileBriefProposal,
   carrierCheckout,
 } from './factory-dispatch-batch-fences.test.mjs'
+
+function v2Brief({ recommendedAssurance = 'quick', recommendedModelBand = 'utility', minimumAssurance = null } = {}) {
+  return ['## Proposed tier', 'PROPOSAL ONLY — v2 recommendation', '```proposal', JSON.stringify({
+    recommended_assurance: recommendedAssurance,
+    recommended_model_band: recommendedModelBand,
+    minimum_assurance: minimumAssurance,
+  }, null, 2), '```'].join('\n')
+}
+
+function legacyProposalBrief({ tier = null, shape = 'mechanical', strength = 'utility' } = {}) {
+  return [
+    '## Proposed tier',
+    ...(tier ? [`proposed tier: ${tier}`] : []),
+    '```proposal',
+    JSON.stringify({ shape, strength }, null, 2),
+    '```',
+  ].join('\n')
+}
 
 async function admittedAnchorAssuranceFixture(label, { laneAssurance = null, batchAssurance = null } = {}) {
   const adapter = 'crew/adapters/adapter-pi.mjs'
@@ -1987,19 +2006,19 @@ test('tier floor and reconciliation keep the protected path at judge', () => {
     hits: ['crew/drive.mjs'], forced: 'judge', floor: 'judge',
   })
   assert.equal(tierFloor({ files: ['skills/crew-dispatch/references/batch.md'] }).forced, null)
-  refusal(() => reconcileTier({ lane: 'lane-a', forced: 'judge', proposed: 'build', requested: 'build' }), 'tier-floor-conflict')
-  assert.equal(reconcileTier({ lane: 'lane-a', forced: null, proposed: 'build', requested: 'judge' }).tier, 'judge')
-  assert.equal(reconcileTier({ lane: 'lane-a', forced: null, proposed: null, requested: null }).tier, null)
-  const laneOverride = reconcileTier({ lane: 'lane-a', forced: null, proposed: 'judge', requested: 'build', requestedFrom: 'lane' })
-  assert.equal(laneOverride.tier, 'build')
-  assert.equal(laneOverride.overrodeProposal, true)
-  refusal(() => reconcileTier({ lane: 'lane-a', forced: 'judge', proposed: null, requested: 'build', requestedFrom: 'lane' }), 'tier-floor-conflict')
-  refusal(() => reconcileTier({ lane: 'lane-a', forced: 'build', proposed: 'judge', requested: 'mechanical', requestedFrom: 'lane' }), 'tier-floor-conflict')
-  assert.equal(reconcileTier({ lane: 'lane-a', forced: 'build', proposed: 'judge', requested: 'build', requestedFrom: 'lane' }).tier, 'build')
-  const batchDefault = reconcileTier({ lane: 'lane-a', forced: null, proposed: 'judge', requested: 'build', requestedFrom: 'batch' })
-  assert.equal(batchDefault.tier, 'judge')
-  assert.equal(batchDefault.overrodeProposal, false)
-  assert.equal(reconcileTier({ lane: 'lane-a', forced: 'build', proposed: 'judge', requested: null }).tier, 'judge')
+  refusal(() => reconcileTier({ lane: 'lane-a', forced: 'judge', recommended: 'build', requested: 'build' }), 'tier-floor-conflict')
+  assert.equal(reconcileTier({ lane: 'lane-a', forced: null, recommended: 'build', requested: 'judge' }).tier, 'judge')
+  assert.equal(reconcileTier({ lane: 'lane-a', forced: null, recommended: null, requested: null }).tier, null)
+  const laneRequest = reconcileTier({ lane: 'lane-a', forced: null, recommended: 'judge', requested: 'build', requestedFrom: 'lane' })
+  assert.equal(laneRequest.tier, 'build')
+  assert.ok(laneRequest.warning)
+  refusal(() => reconcileTier({ lane: 'lane-a', forced: 'judge', recommended: null, requested: 'build', requestedFrom: 'lane' }), 'tier-floor-conflict')
+  refusal(() => reconcileTier({ lane: 'lane-a', forced: 'build', recommended: 'judge', requested: 'mechanical', requestedFrom: 'lane' }), 'tier-floor-conflict')
+  assert.equal(reconcileTier({ lane: 'lane-a', forced: 'build', recommended: 'judge', requested: 'build', requestedFrom: 'lane' }).tier, 'build')
+  const batchDefault = reconcileTier({ lane: 'lane-a', forced: null, recommended: 'judge', requested: 'build', requestedFrom: 'batch' })
+  assert.equal(batchDefault.tier, 'build')
+  assert.ok(batchDefault.warning)
+  assert.equal(reconcileTier({ lane: 'lane-a', forced: 'build', recommended: 'judge', requested: null }).tier, 'judge')
 })
 
 test('PS1', () => {
@@ -2008,7 +2027,7 @@ test('PS1', () => {
     hits: ['crew/roles/planner.md'], promptChange: true, forced: 'judge',
   })
   assert.equal(reconcileTier({
-    lane: 'planner', forced: verdict.forced, proposed: 'build', requested: 'mechanical',
+    lane: 'planner', forced: verdict.forced, recommended: 'build', requested: 'mechanical',
     requestedFrom: 'batch', forceReason: 'prompt-surface-conflict',
   }).tier, 'judge')
 })
@@ -2019,7 +2038,7 @@ test('PS2', () => {
     hits: ['crew/guidelines/review-do-not-flag.md'], promptChange: true, forced: 'judge',
   })
   assert.equal(reconcileTier({
-    lane: 'guideline', forced: verdict.forced, proposed: 'build', requested: 'mechanical',
+    lane: 'guideline', forced: verdict.forced, recommended: 'build', requested: 'mechanical',
     requestedFrom: 'batch', forceReason: 'prompt-surface-conflict',
   }).tier, 'judge')
 })
@@ -2036,11 +2055,11 @@ test('PS3', () => {
 
 test('PS4', () => {
   const prompt = thrown(() => reconcileTier({
-    lane: 'prompt', forced: 'judge', proposed: 'build', requested: 'build', requestedFrom: 'lane',
+    lane: 'prompt', forced: 'judge', recommended: 'build', requested: 'build', requestedFrom: 'lane',
     forceReason: 'prompt-surface-conflict',
   }))
   const protectedFloor = thrown(() => reconcileTier({
-    lane: 'protected', forced: 'judge', proposed: 'build', requested: 'build', requestedFrom: 'lane',
+    lane: 'protected', forced: 'judge', recommended: 'build', requested: 'build', requestedFrom: 'lane',
   }))
   assert.equal(prompt.reason, 'prompt-surface-conflict')
   assert.equal(protectedFloor.reason, 'tier-floor-conflict')
@@ -2054,7 +2073,7 @@ test('PS5', () => {
   const verdict = promptSurfaceVerdict({ files: ['src/owned.mjs'] })
   assert.deepEqual(verdict, { hits: [], promptChange: false, forced: null })
   const settled = reconcileTier({
-    lane: 'code-only', forced: verdict.forced, proposed: 'build', requested: 'mechanical', requestedFrom: 'lane',
+    lane: 'code-only', forced: verdict.forced, recommended: 'build', requested: 'mechanical', requestedFrom: 'lane',
   })
   assert.equal(settled.tier, 'mechanical')
 })
@@ -2064,7 +2083,7 @@ test('PS6', () => {
   let settled
   assert.doesNotThrow(() => {
     settled = reconcileTier({
-      lane: 'prompt', forced: verdict.forced, proposed: 'build', requested: 'judge', requestedFrom: 'lane',
+      lane: 'prompt', forced: verdict.forced, recommended: 'build', requested: 'judge', requestedFrom: 'lane',
       forceReason: 'prompt-surface-conflict',
     })
   })
@@ -2088,8 +2107,8 @@ test('PS7', async () => {
   })
   const promptLine = prompt.logs.find((line) => line.startsWith('dispatch-batch: lane=lane-a '))
   const controlLine = control.logs.find((line) => line.startsWith('dispatch-batch: lane=lane-a '))
-  assert.match(promptLine, /forced=none prompt=change proposed=/)
-  assert.match(controlLine, /forced=none prompt=code-only proposed=/)
+  assert.match(promptLine, /forced=judge prompt=change recommended=/)
+  assert.match(controlLine, /forced=none prompt=code-only recommended=/)
   const promptBoot = prompt.spawned.find(({ args }) => args.includes('boot'))
   assert.equal(promptBoot.args[promptBoot.args.indexOf('--assurance') + 1], 'rigorous')
   const promptRecord = JSON.parse(readFileSync(join(prompt.out, 'lane-a.dispatch.json'), 'utf8'))
@@ -2100,11 +2119,144 @@ test('PS7', async () => {
 
 test('PS8', () => {
   const error = thrown(() => reconcileTier({
-    lane: 'prompt', forced: 'judge', proposed: 'build', requested: 'build', requestedFrom: 'lane',
+    lane: 'prompt', forced: 'judge', recommended: 'build', requested: 'build', requestedFrom: 'lane',
     forceReason: 'prompt-surface-conflict',
   }))
   assert.equal(error.reason, 'prompt-surface-conflict')
   assert.ok(error.message.includes(PROMPT_SURFACE_BLIND_SPOT))
+})
+
+test('proposal-v2 A1', async () => {
+  const result = await dispatchFixture({
+    label: 'proposal-v2-a1',
+    names: ['lane-a'],
+    batchTier: null,
+    requests: { 'lane-a': requestFor('lane-a', { assurance: 'standard' }) },
+    brief: v2Brief({ recommendedAssurance: 'rigorous', recommendedModelBand: 'frontier' }),
+  })
+  const record = JSON.parse(readFileSync(join(result.out, 'lane-a.dispatch.json'), 'utf8'))
+  const line = result.logs.find((value) => value.startsWith('dispatch-batch: lane=lane-a '))
+  assert.equal(record.proposal_source, 'proposal')
+  assert.equal(record.recommended_assurance, 'rigorous')
+  assert.equal(record.recommended_model_band, 'frontier')
+  assert.equal(record.minimum_assurance, null)
+  assert.equal(record.tier.requested, 'build')
+  assert.equal(record.tier.settled, 'build')
+  assert.equal(record.tier.recommendation_warning, 'requested build below recommendation rigorous; request retained')
+  assert.match(line, /recommended=judge/)
+  assert.match(line, /warning=requested build below recommendation rigorous; request retained/)
+  const boot = result.spawned.find(({ args }) => args.includes('boot'))
+  assert.equal(boot.args[boot.args.indexOf('--assurance') + 1], 'standard')
+})
+
+test('proposal-v2 B1', () => {
+  const parsed = proposalFromBrief(v2Brief({ recommendedAssurance: 'quick', recommendedModelBand: 'utility', minimumAssurance: 'rigorous' }))
+  assert.equal(parsed.source, 'proposal')
+  assert.equal(parsed.minimumAssurance, 'judge')
+  const batch = reconcileTier({
+    lane: 'protected', forced: parsed.minimumAssurance, recommended: parsed.recommendedAssurance,
+    requested: 'standard', requestedFrom: 'batch', forceReason: 'tier-floor-conflict',
+  })
+  assert.equal(batch.tier, 'judge')
+  const lane = thrown(() => reconcileTier({
+    lane: 'protected', forced: parsed.minimumAssurance, recommended: parsed.recommendedAssurance,
+    requested: 'standard', requestedFrom: 'lane', forceReason: 'tier-floor-conflict',
+  }))
+  assert.equal(lane.reason, 'tier-floor-conflict')
+})
+
+test('proposal-v2 C1', async () => {
+  const result = await dispatchFixture({
+    label: 'proposal-v2-c1',
+    names: ['lane-a'],
+    batchTier: 'mechanical',
+    requests: { 'lane-a': requestFor('lane-a', { where: ['crew/roles/planner.md'] }) },
+    fences: [entry('lane-a', ['crew/roles/planner.md'])],
+    brief: v2Brief({ recommendedAssurance: 'quick', recommendedModelBand: 'utility', minimumAssurance: null }),
+  })
+  const record = JSON.parse(readFileSync(join(result.out, 'lane-a.dispatch.json'), 'utf8'))
+  const line = result.logs.find((value) => value.startsWith('dispatch-batch: lane=lane-a '))
+  assert.deepEqual(record.prompt_surface, {
+    hits: ['crew/roles/planner.md'], prompt_change: true, forced: 'judge',
+  })
+  assert.equal(record.minimum_assurance, null)
+  assert.equal(record.tier.minimum, 'judge')
+  assert.equal(record.tier.forced, 'judge')
+  assert.equal(record.tier.force_reason, 'prompt-surface-conflict')
+  assert.equal(record.tier.settled, 'judge')
+  assert.match(line, /forced=judge prompt=change recommended=mechanical/)
+  const refusalError = thrown(() => reconcileTier({
+    lane: 'prompt', forced: 'judge', recommended: 'build', requested: 'build', requestedFrom: 'lane',
+    forceReason: 'prompt-surface-conflict',
+  }))
+  assert.equal(refusalError.reason, 'prompt-surface-conflict')
+  assert.notEqual(refusalError.reason, 'tier-floor-conflict')
+})
+
+test('proposal-v2 D1', async () => {
+  const archive = adoptionArchive('proposal-v2-d1')
+  const result = await adoptionDispatchFixture({
+    label: 'proposal-v2-d1',
+    names: ['lane-a'],
+    requests: { 'lane-a': requestFor('lane-a', { adopt: archive, assurance: 'standard' }) },
+    brief: v2Brief({ recommendedAssurance: 'rigorous', recommendedModelBand: 'frontier' }),
+  })
+  const record = JSON.parse(readFileSync(join(result.out, 'lane-a.dispatch.json'), 'utf8'))
+  const boot = result.spawned.find(({ args }) => args.includes('boot'))
+  const line = result.logs.find((value) => value.startsWith('dispatch-batch: lane=lane-a '))
+  assert.equal(record.tier.requested, 'build')
+  assert.equal(record.tier.settled, 'build')
+  assert.equal(record.tier.recommendation_warning, 'requested build below recommendation rigorous; request retained')
+  assert.equal(boot.args[boot.args.indexOf('--assurance') + 1], 'standard')
+  assert.equal(boot.args.includes('tech-lead'), false)
+  assert.equal(line.includes('settled=judge'), false)
+})
+
+test('proposal-v2 F1', async () => {
+  const result = await dispatchFixture({
+    label: 'proposal-v2-f1',
+    names: ['lane-a'],
+    batchTier: 'mechanical',
+    brief: legacyProposalBrief({ tier: 'judge', shape: 'judge', strength: 'frontier' }),
+  })
+  const record = JSON.parse(readFileSync(join(result.out, 'lane-a.dispatch.json'), 'utf8'))
+  assert.equal(record.proposal_source, 'legacy_proposal')
+  assert.deepEqual(record.legacy_proposal, { shape: 'judge', strength: 'frontier', tier: 'judge' })
+  assert.equal(record.recommended_assurance, null)
+  assert.equal(record.recommended_model_band, null)
+  assert.equal(record.minimum_assurance, null)
+  assert.equal(record.tier.recommended, null)
+  assert.equal(record.tier.settled, 'mechanical')
+})
+
+test('proposal-v2 F2', async () => {
+  const legacy = proposalFromBrief(legacyProposalBrief({ tier: 'judge', shape: 'judge', strength: 'frontier' }))
+  assert.equal(legacy.source, 'legacy_proposal')
+  assert.equal(legacy.recommendedAssurance, null)
+  assert.equal(legacy.minimumAssurance, null)
+  assert.equal(legacy.recommendedModelBand, null)
+  assert.deepEqual(legacy.staffing, { shape: 'judge', strength: 'frontier', misclassification: null })
+  assert.equal(reconcileTier({ lane: 'legacy', forced: null, recommended: legacy.recommendedAssurance, requested: null }).tier, null)
+
+  const result = await dispatchFixture({
+    label: 'proposal-v2-f2',
+    names: ['lane-a'],
+    batchTier: null,
+    brief: v2Brief({ recommendedAssurance: 'standard', recommendedModelBand: 'workhorse' }),
+  })
+  const record = JSON.parse(readFileSync(join(result.out, 'lane-a.dispatch.json'), 'utf8'))
+  assert.equal(record.tier.settled, 'build')
+  assert.equal(record.tier.recommendation_warning, null)
+  assert.equal(record.shape, null)
+  assert.equal(record.strength, null)
+  const boot = result.spawned.find(({ args }) => args.includes('boot'))
+  assert.equal(boot.args[boot.args.indexOf('--assurance') + 1], 'standard')
+
+  const legacyFailure = await thrownAsync(() => dispatchFixture({
+    label: 'proposal-v2-f2-legacy', names: ['lane-a'], batchTier: null,
+    brief: legacyProposalBrief({ tier: 'judge', shape: 'judge', strength: 'frontier' }),
+  }))
+  assert.equal(legacyFailure.reason, 'boot-failed')
 })
 
 test('REFUSAL_REASONS is frozen, unique, and names every reason argument in the source', () => {
@@ -3100,7 +3252,8 @@ test('compileLane discovers reads once and compiles once', async () => {
   assert.equal(calls[1].args.includes('--out'), true)
   assert.equal(calls[1].args.includes('--pack'), true)
   assert.equal(calls[1].args[calls[1].args.indexOf('--pack') + 1], out)
-  assert.equal(result.proposed, 'build')
+  assert.equal(result.proposal.source, 'legacy_proposal')
+  assert.equal(result.proposal.recommendedAssurance, null)
   const retry = calls[1].args[calls[1].args.indexOf('--fences') + 1]
   assert.notEqual(retry, register)
   assert.deepEqual(JSON.parse(readFileSync(retry, 'utf8')).lanes[0].reads, [{ file: 'crew/x.mjs', why }])
@@ -3551,8 +3704,9 @@ test('staffing pair comes from a real compiled brief proposal block', async () =
   const end = lines.findIndex((line, index) => index > start && line.trim() === '```')
   assert.notEqual(end, -1)
   const expected = JSON.parse(lines.slice(start + 1, end).join('\n'))
-  assert.ok(expected.shape)
-  assert.ok(expected.strength)
+  assert.ok(expected.recommended_assurance)
+  assert.ok(expected.recommended_model_band)
+  assert.equal(expected.minimum_assurance, null)
   const result = await compileLane({
     lane: 'lane-a', batchDir: batch, laneDir: checkout, registerPath,
     outDir: join(root, 'staffing-real-compile-out'), fences: [entry('lane-a', ['src/owned.mjs', 'src/coupled.mjs'], [])],
@@ -3563,10 +3717,12 @@ test('staffing pair comes from a real compiled brief proposal block', async () =
       readFileSync: (path, encoding) => String(path).endsWith('.brief.md') ? brief : readFileSync(path, encoding || 'utf8'),
     },
   })
-  assert.equal(result.staffing.shape, expected.shape)
-  assert.equal(result.staffing.strength, expected.strength)
-  assert.notEqual(result.staffing.shape, null)
-  assert.notEqual(result.staffing.strength, null)
+  assert.equal(result.proposal.source, 'proposal')
+  assert.equal(result.proposal.recommendedAssuranceCanonical, expected.recommended_assurance)
+  assert.equal(result.proposal.recommendedModelBand, expected.recommended_model_band)
+  assert.equal(result.proposal.minimumAssuranceCanonical, expected.minimum_assurance)
+  assert.equal(result.staffing.shape, null)
+  assert.equal(result.staffing.strength, null)
 })
 
 test('dispatch records shape and strength for each lane', async () => {
@@ -3673,17 +3829,23 @@ test('staffing fields append to the existing settled dispatch log line', async (
   const line = result.logs.find((entry) => entry.startsWith('dispatch-batch: lane=lane-a '))
   assert.ok(line)
   assert.equal(line.startsWith(
-    'dispatch-batch: lane=lane-a forced=none prompt=code-only proposed=none requested=mechanical requested_from=batch execution=full execution_from=batch variant=full variant_from=batch settled=mechanical',
+    'dispatch-batch: lane=lane-a forced=none prompt=code-only recommended=none requested=mechanical requested_from=batch execution=full execution_from=batch variant=full variant_from=batch settled=mechanical',
   ), true)
   assert.match(line, / shape=judge strength=workhorse misclassified=false brief_bytes=65 top_section=none granularity=whole-file\(crew\/owned-lane-a\.mjs\)$/)
 })
 
-test('a proposal block without a tier line never supplies the seating tier', async () => {
-  assert.equal(await compileBriefProposal(briefWithBlockOnly, 'block-only'), null)
+test('a legacy proposal block without a tier line remains recommendation-free', async () => {
+  const parsed = proposalFromBrief(briefWithBlockOnly)
+  assert.equal(parsed.source, 'legacy_proposal')
+  assert.equal(parsed.recommendedAssurance, null)
+  assert.equal(parsed.legacyProposal.tier, null)
 })
 
-test('a mid-sentence proposed tier quote does not outrank the compiler line', async () => {
-  assert.equal(await compileBriefProposal(briefWithQuotedTier, 'quoted-tier'), 'build')
+test('a mid-sentence proposed tier quote does not create a legacy compiler tier', async () => {
+  const parsed = proposalFromBrief(briefWithQuotedTier)
+  assert.equal(parsed.source, 'legacy_proposal')
+  assert.equal(parsed.legacyProposal.tier, 'build')
+  assert.equal(parsed.recommendedAssurance, null)
 })
 
 test('a lane tier seats that lane while a sibling takes the batch default', async () => {
@@ -3709,7 +3871,7 @@ test('a lane tier overrides a higher proposal and says so', async () => {
     names: ['lane-a', 'lane-b'],
     batchTier: 'mechanical',
     requests: { 'lane-a': requestFor('lane-a', { tier: 'build' }) },
-    brief: staffingBrief({ shape: 'mechanical', strength: 'workhorse', tier: 'judge' }),
+    brief: v2Brief({ recommendedAssurance: 'rigorous', recommendedModelBand: 'frontier' }),
   })
   const boots = result.spawned.filter(({ args }) => args.includes('boot'))
   const seated = Object.fromEntries(boots.map((call) => {
@@ -3720,14 +3882,14 @@ test('a lane tier overrides a higher proposal and says so', async () => {
   const laneA = result.logs.find((line) => line.startsWith('dispatch-batch: lane=lane-a '))
   const laneB = result.logs.find((line) => line.startsWith('dispatch-batch: lane=lane-b '))
   assert.ok(laneA?.includes('settled=build'))
-  assert.ok(laneA?.includes('overrode proposal judge with lane tier build'))
-  assert.ok(laneB?.includes('settled=judge'))
-  assert.equal(laneB?.includes('overrode proposal'), false)
+  assert.ok(laneA?.includes('warning=requested build below recommendation rigorous; request retained'))
+  assert.ok(laneB?.includes('settled=mechanical'))
+  assert.ok(laneB?.includes('warning=requested mechanical below recommendation rigorous; request retained'))
   const laneARecord = JSON.parse(readFileSync(join(result.out, 'lane-a.dispatch.json'), 'utf8'))
   const laneBRecord = JSON.parse(readFileSync(join(result.out, 'lane-b.dispatch.json'), 'utf8'))
-  assert.equal(laneARecord.tier.overrode_proposal, true)
-  assert.equal(laneARecord.tier.proposed, 'judge')
-  assert.equal(laneBRecord.tier.overrode_proposal, false)
+  assert.equal(laneARecord.tier.recommendation_warning, 'requested build below recommendation rigorous; request retained')
+  assert.equal(laneARecord.tier.recommended, 'judge')
+  assert.equal(laneBRecord.tier.recommendation_warning, 'requested mechanical below recommendation rigorous; request retained')
 })
 
 test('the compiler receives exactly the four schema request keys', async () => {

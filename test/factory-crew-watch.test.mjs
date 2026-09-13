@@ -744,7 +744,7 @@ test('#948 boundedReport renders a fresh standing park', () => {
   assert.equal(report.lines[0], `[parked] stage=build:r1 age=5s status=active driver=parked until=${new Date(NOW + 660_000).toISOString()} heartbeat=5s`)
 })
 
-test('#948 judges a parked driver against the canonical floor despite a long seat wait', () => {
+test('#948 keeps a driver unconfirmed when only its heartbeat is overdue', () => {
   const root = world()
   const lane = crewLane(root, {
     task: 'parked-waits',
@@ -754,24 +754,22 @@ test('#948 judges a parked driver against the canonical floor despite a long sea
     ],
   })
   const age = 612_000
-  writePark(lane, standingPark(age))
   const report = boundedReport({
     root, names: ['parked-waits'], now: NOW,
     deps: deps(NOW, { readSession: () => ({ ended_at: null, last_heartbeat_at: new Date(NOW - age).toISOString() }) }),
   })
-  assert.equal(report.lines[0], `[parked-waits] stage=build:r1 age=5s status=active driver=driver-gone until=${new Date(NOW + 660_000).toISOString()} heartbeat=612s why=parked-driver-gone`)
+  assert.equal(report.lines[0], '[parked-waits] stage=build:r1 age=5s status=active driver=unknown heartbeat=612s')
 })
 
-test('#948 reports a dead parked driver without a waits line', () => {
+test('#948 keeps a driver unconfirmed without a waits line', () => {
   const root = world()
   const lane = crewLane(root, { task: 'parked-default' })
   const age = 612_000
-  writePark(lane, standingPark(age))
   const report = boundedReport({
     root, names: ['parked-default'], now: NOW,
     deps: deps(NOW, { readSession: () => ({ ended_at: null, last_heartbeat_at: new Date(NOW - age).toISOString() }) }),
   })
-  assert.equal(report.lines[0], `[parked-default] stage=build:r1 age=5s status=active driver=driver-gone until=${new Date(NOW + 660_000).toISOString()} heartbeat=612s why=parked-driver-gone`)
+  assert.equal(report.lines[0], '[parked-default] stage=build:r1 age=5s status=active driver=unknown heartbeat=612s')
 })
 
 test('#948 lets a fresher running ledger heartbeat suppress an old park', () => {
@@ -808,14 +806,14 @@ test('#948 parkReadout returns null for absent, malformed, unmeasured, and exite
   assert.equal(parkReadout({ park }, { state: 'exited', heartbeat_age_ms: 5_000 }, NOW), null)
 })
 
-test('boundedReport reports driver-gone and heartbeat age for a stale heartbeat', () => {
+test('boundedReport reports unknown and heartbeat age for an overdue heartbeat', () => {
   const root = world()
   seedLane(root, { task: 'driver-gone', journalLines: [{ at: NOW - 5_000, stage: 'build:r1' }] })
   const report = boundedReport({
     root, names: ['driver-gone'], now: NOW,
     deps: deps(NOW, { readSession: () => ({ ended_at: null, last_heartbeat_at: new Date(NOW - 61_000).toISOString() }) }),
   })
-  assert.equal(report.lines[0], '[driver-gone] stage=build:r1 age=5s status=active driver=driver-gone heartbeat=61s')
+  assert.equal(report.lines[0], '[driver-gone] stage=build:r1 age=5s status=active driver=unknown heartbeat=61s')
 })
 
 test('boundedReport reports unknown rather than running when the session is unreadable', () => {

@@ -22,7 +22,7 @@ import { ROOT, scratchDir, sqliteAvailable } from './helpers.mjs'
 const NONCE_PREFIX = 'devteam-done-'
 import {
   openLedger, mkdirpBounded, replayJsonl, isoMs, TABLES, MIGRATIONS, applyMigrations, NODE_FLOOR,
-  DRIVER_GONE_THRESHOLD_MS, SESSION_STATUS_ABSENT, projectSessions,
+  DRIVER_GONE_THRESHOLD_MS, SESSION_STATUS_ABSENT, projectSessions, DRIVER_STATES, RUN_OBSERVATION_SOURCES, RUN_OBSERVATION_COLUMNS, RUN_OBSERVATION_WRITE_VERB,
   SESSION_STATUSES, SESSION_OUTCOMES, SEAT_VALUE_SOURCES, TERMINAL_ACTORS, ESCALATION_CAUSES, escalationCause, TERM_TO_KILL_MS, WRITERS, WRITER_MIRROR_TABLES, UPDATE_ONLY_WRITERS, DRIFT_REMEDY, DRIFT_COLLAPSE_REMEDY, LedgerUsageError,
   MODIFIER_KINDS, MODIFIER_ATTEMPT_OUTCOMES, INTAKE_DISPATCH_OUTCOMES,
   SEAT_TEARDOWN_OUTCOMES, GATE_DISCRIMINATION_VERDICTS, MUTATION_ANCHOR_CORRECTIONS, MUTATION_ANCHOR_REFUSALS, CELL_FAILURE_KINDS, CELL_FAILURE_ATTRIBUTIONS,
@@ -3257,33 +3257,76 @@ test('B1 finalizer preserves an already terminal session', { skip: SKIP, timeout
   assert.equal(session.billed_cost_usd, 4.56, 'the finalizer must not clobber already-recorded spend')
 })
 
-test('projectSessions marks only measured stale unterminated rows unknown at the threshold', () => {
+test('A1: run observations have the complete six-field schema', { skip: SKIP }, () => {
+  assert.deepEqual([...RUN_OBSERVATION_COLUMNS], ['observed_at', 'observer', 'driver_state', 'source', 'reason_code', 'detail'])
+  const ledger = openTestLedger()
+  const replayed = openTestLedger()
+  try {
+    const names = ledger.columnNames('run_observations')
+    assert.ok(names.includes('adw_id'))
+    for (const field of RUN_OBSERVATION_COLUMNS) assert.ok(names.includes(field), `${field} is required`)
+    ledger.recordRunObservation({
+      adw_id: 'observation-schema', observed_at: '2026-09-11T12:00:00.000Z', observer: 'test',
+      driver_state: 'unknown', source: 'heartbeat', reason_code: 'heartbeat-unmeasured', detail: { measured: false },
+    })
+    const result = replayJsonl(ledger._jsonlPath, replayed)
+    assert.equal(result.complete, true)
+    assert.deepEqual(replayed.runObservationsFor(['observation-schema']).map(({ id, ...row }) => row), [{
+      adw_id: 'observation-schema', observed_at: '2026-09-11T12:00:00.000Z', observer: 'test',
+      driver_state: 'unknown', source: 'heartbeat', reason_code: 'heartbeat-unmeasured', detail: '{"measured":false}',
+    }])
+  } finally { ledger.close(); replayed.close() }
+})
+
+test('A2: run observations append instead of updating', { skip: SKIP }, () => {
+  assert.equal(RUN_OBSERVATION_WRITE_VERB, 'INSERT')
+  const ledger = openTestLedger()
+  try {
+    const first = { adw_id: 'observation-append', observer: 'watch', driver_state: 'alive', source: 'process_group', reason_code: 'pid-alive' }
+    ledger.recordRunObservation({ ...first, observed_at: '2026-09-11T12:00:00.000Z', detail: 'first evidence' })
+    ledger.recordRunObservation({ ...first, observed_at: '2026-09-11T12:00:01.000Z', driver_state: 'gone', reason_code: 'pid-gone', detail: 'second evidence' })
+    const rows = ledger.runObservationsFor(['observation-append'])
+    assert.equal(rows.length, 2)
+    assert.deepEqual(rows.map((row) => row.detail), ['first evidence', 'second evidence'])
+    assert.ok(rows[1].id > rows[0].id)
+    assert.equal(UPDATE_ONLY_WRITERS.includes('recordRunObservation'), false)
+    assert.equal(WRITER_MIRROR_TABLES.recordRunObservation, 'run_observations')
+  } finally { ledger.close() }
+})
+
+test('B1: driver state is a closed three-value enum', { skip: SKIP }, () => {
+  assert.deepEqual([...DRIVER_STATES], ['alive', 'gone', 'unknown'])
+  assert.deepEqual([...RUN_OBSERVATION_SOURCES], ['daemon', 'process_group', 'cmux', 'heartbeat'])
+  const ledger = openTestLedger()
+  try {
+    assert.throws(() => ledger.recordRunObservation({
+      adw_id: 'closed-observation', observed_at: '2026-09-11T12:00:00.000Z', observer: 'test',
+      driver_state: 'indeterminate', source: 'heartbeat', reason_code: 'bad-state', detail: 'invalid',
+    }))
+  } finally { ledger.close() }
+})
+
+test('C1: an old heartbeat never changes settlement', () => {
   assert.equal(DRIVER_GONE_THRESHOLD_MS, 60_000)
   assert.equal(Object.isFrozen(SESSION_STATUS_ABSENT), true)
   const now = Date.parse('2026-09-11T12:00:00.000Z')
   const before = [
-    { adw_id: 'fresh', status: 'running', ended_at: null, last_heartbeat_at: isoMs(now - DRIVER_GONE_THRESHOLD_MS + 1) },
-    { adw_id: 'stale', status: 'running', ended_at: null, last_heartbeat_at: isoMs(now - DRIVER_GONE_THRESHOLD_MS) },
-    { adw_id: 'terminal', status: 'ok', ended_at: isoMs(now - 1), last_heartbeat_at: isoMs(now - 2 * DRIVER_GONE_THRESHOLD_MS) },
+    { adw_id: 'fresh', status: 'running', ended_at: null, outcome: null, terminal_reason: null, last_heartbeat_at: isoMs(now - DRIVER_GONE_THRESHOLD_MS + 1) },
+    { adw_id: 'stale', status: 'running', ended_at: null, outcome: null, terminal_reason: null, last_heartbeat_at: isoMs(now - DRIVER_GONE_THRESHOLD_MS) },
+    { adw_id: 'terminal', status: 'ok', ended_at: isoMs(now - 1), outcome: 'success', terminal_reason: 'natural-completion', last_heartbeat_at: isoMs(now - 2 * DRIVER_GONE_THRESHOLD_MS) },
     { adw_id: 'missing-heartbeat', status: 'running', ended_at: null, last_heartbeat_at: null },
     { adw_id: 'invalid-heartbeat', status: 'running', ended_at: null, last_heartbeat_at: 'not-a-timestamp' },
   ]
   const projected = projectSessions(before, { now })
-  assert.equal(projected[0].status, 'running')
-  assert.equal(projected[1].status, null)
-  assert.equal(projected[1].status_absent_reason, SESSION_STATUS_ABSENT.driver_gone)
-  assert.equal(projected[1].heartbeat_age_ms, DRIVER_GONE_THRESHOLD_MS)
-  assert.equal(projected[1].stale_after_ms, DRIVER_GONE_THRESHOLD_MS)
-  assert.equal(projected[2].status, 'ok')
-  assert.equal(projected[3].status, 'running')
-  assert.equal(projected[4].status, 'running')
-  assert.equal(projected[1].ended_at, null)
-  assert.equal(projected[1].outcome, undefined)
+  assert.deepEqual(projected, before)
   assert.notStrictEqual(projected[1], before[1])
-  assert.equal(before[1].status, 'running')
+  assert.equal(projected[1].status, 'running')
+  assert.equal(projected[1].ended_at, null)
+  assert.equal(projected[1].outcome, null)
+  assert.equal(projected[1].terminal_reason, null)
 })
 
-test('E1 sessions names a stale unterminated run as unknown', { skip: SKIP }, () => {
+test('sessions preserve a stale heartbeat as a running settlement', { skip: SKIP }, () => {
   const dir = nextDir()
   const dbPath = join(dir, 'ledger.db')
   const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
@@ -3302,10 +3345,8 @@ test('E1 sessions names a stale unterminated run as unknown', { skip: SKIP }, ()
   const stale = payload.sessions.find((row) => row.adw_id === '682c0155')
   const fresh = payload.sessions.find((row) => row.adw_id === 'fresh-control')
   const terminal = payload.sessions.find((row) => row.adw_id === 'terminal-control')
-  assert.equal(stale.status, null)
-  assert.equal(stale.status_absent_reason, SESSION_STATUS_ABSENT.driver_gone)
-  assert.ok(stale.heartbeat_age_ms >= DRIVER_GONE_THRESHOLD_MS)
-  assert.equal(stale.stale_after_ms, DRIVER_GONE_THRESHOLD_MS)
+  assert.equal(stale.status, 'running')
+  assert.equal(Object.hasOwn(stale, 'status_absent_reason'), false)
   assert.equal(stale.ended_at, null)
   assert.equal(stale.outcome, null)
   assert.equal(stale.terminal_reason, null)

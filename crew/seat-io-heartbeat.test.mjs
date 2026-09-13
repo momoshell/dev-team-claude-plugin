@@ -225,7 +225,7 @@ test('headlessStreamPaths reads headless-json run dirs and the headless-rpc seat
   } }), [])
 })
 
-test('driverState reaches driver-gone for a stalled headless lane and stays running for a beating one', () => {
+test('driverState keeps an overdue headless heartbeat unknown and a fresh beat alive', () => {
   const now = 1_700_500_000_000
   const lane = { name: 'headless-lane', task: 'headless-lane', settled: false, transport: HEADLESS_TRANSPORT }
   const journal = { lastStage: 'build:r1', stages: ['build:r1'], notes: [] }
@@ -240,16 +240,11 @@ test('driverState reaches driver-gone for a stalled headless lane and stays runn
     terminal: null,
     session: { ended_at: null, last_heartbeat_at: now - 1_000 },
   })
-  assert.deepEqual(stalled, {
-    state: DRIVER_GONE,
-    heartbeat_age_ms: DRIVER_GONE_PERIODS * HEARTBEAT_PERIOD_MS + 1,
-    stale_after_ms: DRIVER_GONE_PERIODS * HEARTBEAT_PERIOD_MS,
-    threshold_origin: 'default',
-  })
-  assert.deepEqual(beating, {
-    state: DRIVER_RUNNING,
-    heartbeat_age_ms: 1_000,
-    stale_after_ms: DRIVER_GONE_PERIODS * HEARTBEAT_PERIOD_MS,
-    threshold_origin: 'default',
-  })
+  assert.equal(stalled.state, 'unknown')
+  assert.equal(stalled.heartbeat_state, 'overdue')
+  assert.equal(stalled.heartbeat_age_ms, DRIVER_GONE_PERIODS * HEARTBEAT_PERIOD_MS + 1)
+  assert.equal(stalled.stale_after_ms, DRIVER_GONE_PERIODS * HEARTBEAT_PERIOD_MS)
+  assert.equal(beating.state, DRIVER_RUNNING)
+  assert.equal(beating.heartbeat_state, 'fresh')
+  assert.equal(beating.heartbeat_age_ms, 1_000)
 })

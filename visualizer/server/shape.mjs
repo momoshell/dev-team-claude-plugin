@@ -164,7 +164,7 @@ function sumBilled(rows, column, fallback) {
 const TIER_UNMEASURED = "not measured — this run's session row records no tier: it was booted with explicit --roles rather than --tier, or it predates the sessions.tier column and is never backfilled; intake_dispatches records tier by issue, not by run"
 const CONFIGURATION_UNMEASURED = 'not recorded for this run — it predates canonical run-configuration recording or its boot record did not carry this axis; the visualizer does not infer configuration from phases or seats'
 const SEATS_UNMEASURED = 'not recorded for this run — the ledger holds no run_seats rows for it, so what actually sat in each role was never measured; an empty list would assert this run had no seats, which is a different claim'
-const DRIVER_UNOBSERVED = 'not observed — driver liveness is authoritative only from run_observations (TRD §5.5), a table that does not exist yet; it is never inferred from session status'
+const DRIVER_UNOBSERVED = 'not observed — no authoritative run_observations row was measured for this run; driver liveness is never inferred from session status'
 const HEARTBEAT_NEVER_BEAT = 'no session or agent heartbeat was recorded for this run — a headless lane that never entered a pane wait carries NULL by construction'
 const HEARTBEAT_SETTLED = 'this run has settled; a seat-wait beat bounds a LIVE driver only, so for a finished run freshness is not a stale measurement but no measurement at all'
 // #953 — whether a run's crew state directory is archived is MEASURED BY THE CALLER; this
@@ -242,6 +242,11 @@ export function shapeGateChecks(gateResults = []) {
   })
 }
 
+function shellQuote(value) {
+  const text = String(value ?? '')
+  return /^[A-Za-z0-9_./-]+$/.test(text) ? text : `'${text.replaceAll("'", "'\\''")}'`
+}
+
 function dateValue(v) {
   if (v == null) return null
   const n = Date.parse(v)
@@ -250,7 +255,7 @@ function dateValue(v) {
 
 export function shapeRun(session, phases = [], agentEvents = [], triageRow = null,
                          probe = {}, now = Date.now(), extras = {}) {
-  const { runConfiguration = null, runSeats = [], agentSessions = [], gateDiscriminations = [], reviewOutcomes = [], acceptDecisions = [], gateResults = [], crewState = null } = extras || {}
+  const { runConfiguration = null, runSeats = [], runObservations: suppliedObservations = [], agentSessions = [], gateDiscriminations = [], reviewOutcomes = [], acceptDecisions = [], gateResults = [], crewState = null } = extras || {}
   const ended = session.ended_at ?? null
   const start = dateValue(session.started_at)
   const finish = dateValue(ended)
@@ -315,6 +320,25 @@ export function shapeRun(session, phases = [], agentEvents = [], triageRow = nul
   const crewArchived = crew && typeof crew.archived === 'boolean' ? crew.archived : null
   const settlementState = ended === null ? 'unsettled' : 'settled'
   const settlementOutcome = session.outcome ?? null
+  const validObservationStates = new Set(['alive', 'gone', 'unknown'])
+  const validObservationSources = new Set(['daemon', 'process_group', 'cmux', 'heartbeat'])
+  const runObservations = (Array.isArray(suppliedObservations) ? suppliedObservations : [])
+    .filter((row) => row && typeof row === 'object' && validObservationStates.has(row.driver_state) && validObservationSources.has(row.source))
+    .sort((a, b) => {
+      const left = dateValue(a.observed_at), right = dateValue(b.observed_at)
+      if (left != null && right != null && left !== right) return left - right
+      return Number(a.id ?? 0) - Number(b.id ?? 0)
+    })
+  const latestObservation = runObservations.at(-1) ?? null
+  const measuredDriverState = latestObservation?.driver_state ?? 'unknown'
+  const measuredObservation = latestObservation ? {
+    observed_at: latestObservation.observed_at ?? null,
+    observer: latestObservation.observer ?? null,
+    driver_state: latestObservation.driver_state,
+    source: latestObservation.source,
+    reason_code: latestObservation.reason_code ?? null,
+    detail: latestObservation.detail ?? null,
+  } : null
   const heartbeatState = settlementState === 'settled' ? 'unmeasured'
     : heartbeat_age_ms === null
       ? 'unmeasured'
@@ -367,7 +391,7 @@ export function shapeRun(session, phases = [], agentEvents = [], triageRow = nul
   pending.written_tokens = pendingFor('written_tokens', probe, metrics.written_tokens)
   const seatsReason = pendingFor('seats', probe, seats)
   if (seatsReason) pending.seats = seatsReason
-  pending.driver_state = DRIVER_UNOBSERVED
+  if (!measuredObservation) pending.driver_state = DRIVER_UNOBSERVED
   if (crewArchived === null) pending.crew_state = crew?.reason || CREW_STATE_UNMEASURED
   if (heartbeatState === 'unmeasured') {
     pending.heartbeat_state = settlementState === 'settled' ? HEARTBEAT_SETTLED : HEARTBEAT_NEVER_BEAT
@@ -406,10 +430,14 @@ export function shapeRun(session, phases = [], agentEvents = [], triageRow = nul
     },
     runtime: {
       // TRD §5.5's Driver dimension is alive|gone|unknown, and its authority is
-      // run_observations. Until that table exists the only honest value is
-      // `unknown`, carried with pending.driver_state saying why.
-      driver_state: 'unknown',
-      observed_at: null,
+      // run_observations. Missing or invalid rows remain `unknown`, carried
+      // with pending.driver_state saying why.
+      driver_state: measuredDriverState,
+      observed_at: measuredObservation?.observed_at ?? null,
+      observer: measuredObservation?.observer ?? null,
+      source: latestObservation?.source ?? null,
+      reason_code: measuredObservation?.reason_code ?? null,
+      detail: measuredObservation?.detail ?? null,
       heartbeat_state: heartbeatState,
       heartbeat_threshold_ms: HEARTBEAT_OVERDUE_MS,
       heartbeat_threshold_origin: 'default',
@@ -423,6 +451,10 @@ export function shapeRun(session, phases = [], agentEvents = [], triageRow = nul
     assurance,
     last_heartbeat_at,
     heartbeat_age_ms,
+    observation: measuredObservation,
+    reconciliation_command: settlementState === 'unsettled'
+      ? `node scripts/factory/closeout.mjs reconcile ${shellQuote(session.task_slug)} --dry-run`
+      : null,
     started_at: session.started_at ?? null,
     ended_at: ended,
     duration_ms: duration,

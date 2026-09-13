@@ -11,6 +11,8 @@ import {
   driverGone,
   driverGoneThresholdMs,
   driverState,
+  observeDriver,
+  probeDriverIdentity,
   DRIVER_EXITED,
   DRIVER_RUNNING,
   DRIVER_GONE_PERIODS,
@@ -96,6 +98,12 @@ function pass(root, extra = {}) {
     deps: { ...QUIET, ...(extra.deps || {}) },
     ...extra.opts,
   })
+}
+
+function processError(code) {
+  const error = new Error(code)
+  error.code = code
+  return error
 }
 
 function journalObjects(path) {
@@ -438,38 +446,40 @@ test('laneActive keeps terminal and settled lanes out of driver liveness', () =>
   for (const [name, lane, journal, expected] of cases) assert.equal(laneActive(lane, journal), expected, name)
 })
 
-test('driverGone requires an active unended session, no terminal line and a stale beat', () => {
+test('driverGone requires a current process-group probe, never a stale heartbeat', () => {
   const root = world()
   const seeded = seedLane(root, { task: 'driver-gone', journalLines: [{ at: NOW - 5_000, stage: 'build:r1' }] })
   const lane = { ...seeded, id: 'dt-demo/driver-gone', repo: 'dt-demo', task: 'driver-gone', settled: false }
   const journal = readJournal(lane.journal)
   const stale = { session: { ended_at: null, last_heartbeat_at: iso(61_000) }, terminal: null, now: NOW }
-  assert.equal(driverGone(lane, journal, stale), true)
-  for (const [name, ledger] of [
-    ['ended', { ...stale, session: { ...stale.session, ended_at: iso(1_000) } }],
-    ['fresh', { ...stale, session: { ended_at: null, last_heartbeat_at: iso(5_000) } }],
-    ['terminal', { ...stale, terminal: 'exited' }],
-  ]) assert.equal(driverGone(lane, journal, ledger), false, name)
-
-  const settled = { ...lane, settled: true }
-  assert.equal(driverGone(settled, journal, stale), false)
-  assert.equal(driverGone(lane, { ...journal, lastStage: 'done' }, stale), false)
+  assert.equal(driverGone(lane, journal, stale), false)
+  writeFileSync(join(lane.dir, 'run.pid'), '4242\n')
+  assert.equal(driverGone(lane, journal, stale, { kill: () => { throw processError('ESRCH') } }), true)
+  assert.equal(driverGone(lane, journal, stale, { kill: () => {} }), false)
+  assert.equal(driverGone({ ...lane, settled: true }, journal, stale, { kill: () => { throw processError('ESRCH') } }), false)
+  assert.equal(driverGone(lane, { ...journal, lastStage: 'done' }, stale, { kill: () => { throw processError('ESRCH') } }), false)
 })
 
-test('driverState distinguishes unknown, running and driver-gone with measured age', () => {
+test('driverState keeps heartbeat freshness separate from process identity', () => {
   const root = world()
   const seeded = seedLane(root, { task: 'driver-state', journalLines: [{ at: NOW - 5_000, stage: 'build:r1' }] })
   const lane = { ...seeded, id: 'dt-demo/driver-state', repo: 'dt-demo', task: 'driver-state', settled: false }
   const journal = readJournal(lane.journal)
   const threshold = DRIVER_GONE_PERIODS * HEARTBEAT_PERIOD_MS
-  const defaults = { stale_after_ms: threshold, threshold_origin: 'default' }
-  assert.deepEqual(driverState(lane, journal, { session: null, terminal: null, now: NOW }), { state: 'unknown', heartbeat_age_ms: null, ...defaults })
-  assert.deepEqual(driverState(lane, journal, { session: null, terminal: 'exited', now: NOW }), { state: DRIVER_EXITED, heartbeat_age_ms: null, ...defaults })
-  assert.deepEqual(driverState(lane, journal, { session: { ended_at: null, last_heartbeat_at: null }, terminal: null, now: NOW }), { state: 'unknown', heartbeat_age_ms: null, ...defaults })
-  assert.deepEqual(driverState(lane, journal, { session: { ended_at: null, last_heartbeat_at: iso(5_000) }, terminal: null, now: NOW }), { state: 'running', heartbeat_age_ms: 5_000, ...defaults })
-  assert.deepEqual(driverState(lane, journal, { session: { ended_at: null, last_heartbeat_at: iso(61_000) }, terminal: null, now: NOW }), { state: 'driver-gone', heartbeat_age_ms: 61_000, ...defaults })
-  assert.deepEqual(driverState(lane, journal, { session: { ended_at: null, last_heartbeat_at: iso(61_000) }, terminal: 'exited', now: NOW }), { state: DRIVER_EXITED, heartbeat_age_ms: 61_000, ...defaults })
-  assert.deepEqual(driverState(lane, journal, { session: { ended_at: null, last_heartbeat_at: null }, terminal: 'exited', now: NOW }), { state: DRIVER_EXITED, heartbeat_age_ms: null, ...defaults })
+  const unknown = driverState(lane, journal, { session: null, terminal: null, now: NOW })
+  assert.equal(unknown.state, 'unknown')
+  assert.equal(unknown.heartbeat_state, 'unmeasured')
+  assert.equal(unknown.stale_after_ms, threshold)
+  const terminal = driverState(lane, journal, { session: null, terminal: 'exited', now: NOW })
+  assert.equal(terminal.state, DRIVER_EXITED)
+  assert.equal(terminal.source, 'daemon')
+  const fresh = driverState(lane, journal, { session: { ended_at: null, last_heartbeat_at: iso(5_000) }, terminal: null, now: NOW })
+  assert.equal(fresh.state, DRIVER_RUNNING)
+  assert.equal(fresh.heartbeat_state, 'fresh')
+  const overdue = driverState(lane, journal, { session: { ended_at: null, last_heartbeat_at: iso(61_000) }, terminal: null, now: NOW })
+  assert.equal(overdue.state, 'unknown')
+  assert.equal(overdue.heartbeat_state, 'overdue')
+  assert.equal(overdue.heartbeat_age_ms, 61_000)
 })
 
 test('seat wait ceilings and driver-gone thresholds use recorded waits with a default floor', () => {
@@ -486,7 +496,7 @@ test('seat wait ceilings and driver-gone thresholds use recorded waits with a de
   const running = driverState(waits.lane, waits.journal, {
     now: NOW,
     terminal: null,
-    session: { ended_at: null, last_heartbeat_at: NOW - 60_000 },
+    session: { ended_at: null, last_heartbeat_at: NOW - 5_000 },
   })
   assert.equal(running.state, DRIVER_RUNNING)
   assert.equal(running.stale_after_ms, 2_460_000)
@@ -494,14 +504,14 @@ test('seat wait ceilings and driver-gone thresholds use recorded waits with a de
   assert.deepEqual(waits.journal.waits, WAITS_LINE)
 })
 
-test('a run with recorded waits stays running at the floor and trips past its own threshold', () => {
+test('a run with recorded waits marks an overdue heartbeat unknown without inferring death', () => {
   const { journal, lane } = readLane([{ at: iso(3_600_000), stage: 'build:r1' }, WAITS_LINE])
   const threshold = driverGoneThresholdMs(journal).ms
   const atFloor = { now: NOW, terminal: null, session: { ended_at: null, last_heartbeat_at: NOW - (DRIVER_GONE_PERIODS * HEARTBEAT_PERIOD_MS) } }
-  assert.equal(driverState(lane, journal, atFloor).state, DRIVER_RUNNING)
+  assert.equal(driverState(lane, journal, atFloor).state, 'unknown')
   const beyond = { now: NOW, terminal: null, session: { ended_at: null, last_heartbeat_at: NOW - threshold - 1 } }
-  assert.equal(driverState(lane, journal, beyond).state, 'driver-gone')
-  assert.equal(driverGone(lane, journal, beyond), true)
+  assert.equal(driverState(lane, journal, beyond).state, 'unknown')
+  assert.equal(driverGone(lane, journal, beyond), false)
 })
 
 test('readJournal replays liveness observations and growth alone controls activity', () => {
@@ -524,21 +534,22 @@ test('readJournal replays liveness observations and growth alone controls activi
   assert.equal(busy.journal.lastActivityAt, NOW - 10_000)
 })
 
-test('watchPass reports a driver-gone threshold derived from the waits line', () => {
+test('watchPass reports a process-proven driver-gone threshold derived from the waits line', () => {
   const root = world()
   const lane = seedLane(root, {
     task: 'scaled-driver-gone-note',
     journalLines: [{ at: NOW - 3_600_000, stage: 'build:r1' }, WAITS_LINE],
     artifacts: [{ name: 'plan.md', ageS: 800 }],
   })
-  const result = pass(root, { deps: { readSession: () => ({ ended_at: null, last_heartbeat_at: iso(2_460_001) }) } })
+  writeFileSync(join(lane.dir, 'run.pid'), '4242\n')
+  const result = pass(root, { deps: { readSession: () => ({ ended_at: null, last_heartbeat_at: iso(2_460_001) }), kill: () => { throw processError('ESRCH') } } })
   const note = result.notes.find((entry) => entry.note === 'driver-gone')
   assert.equal(note.threshold_s, 2_460)
   assert.equal(note.threshold_origin, 'waits')
   assert.equal(notesFor(lane.journal, 'driver-gone')[0].threshold_s, 2_460)
 })
 
-test('a headless lane reaches driver-gone only after two heartbeat periods', () => {
+test('a headless lane with an overdue heartbeat remains unknown until an identity probe proves gone', () => {
   const root = world()
   const seeded = seedLane(root, {
     task: 'headless-driver-gone',
@@ -547,16 +558,9 @@ test('a headless lane reaches driver-gone only after two heartbeat periods', () 
   const lane = { ...seeded, id: 'dt-demo/headless-driver-gone', repo: 'dt-demo', task: 'headless-driver-gone', transport: 'headless-json', settled: false }
   const journal = readJournal(lane.journal)
   const threshold = DRIVER_GONE_PERIODS * HEARTBEAT_PERIOD_MS
-  assert.equal(driverGone(lane, journal, {
-    now: NOW,
-    terminal: null,
-    session: { ended_at: null, last_heartbeat_at: NOW - threshold - 1 },
-  }), true)
-  assert.equal(driverGone(lane, journal, {
-    now: NOW,
-    terminal: null,
-    session: { ended_at: null, last_heartbeat_at: NOW - threshold + 1 },
-  }), false)
+  const overdue = { now: NOW, terminal: null, session: { ended_at: null, last_heartbeat_at: NOW - threshold - 1 } }
+  assert.equal(driverGone(lane, journal, overdue), false)
+  assert.equal(driverState(lane, journal, overdue).heartbeat_state, 'overdue')
 })
 
 test('a headless lane with no measured heartbeat stays unknown and never driver-gone', () => {
@@ -568,10 +572,10 @@ test('a headless lane with no measured heartbeat stays unknown and never driver-
   const lane = { ...seeded, id: 'dt-demo/headless-unmeasured', repo: 'dt-demo', task: 'headless-unmeasured', transport: 'headless-json', settled: false }
   const journal = readJournal(lane.journal)
   const ledger = { now: NOW, terminal: null, session: { ended_at: null, last_heartbeat_at: null } }
-  assert.deepEqual(driverState(lane, journal, ledger), {
-    state: 'unknown', heartbeat_age_ms: null,
-    stale_after_ms: DRIVER_GONE_PERIODS * HEARTBEAT_PERIOD_MS, threshold_origin: 'default',
-  })
+  const state = driverState(lane, journal, ledger)
+  assert.equal(state.state, 'unknown')
+  assert.equal(state.heartbeat_state, 'unmeasured')
+  assert.equal(state.stale_after_ms, DRIVER_GONE_PERIODS * HEARTBEAT_PERIOD_MS)
   assert.equal(driverGone(lane, journal, ledger), false)
 })
 
@@ -590,19 +594,20 @@ test('runLogTerminal reads a bounded tail and treats absent, empty and unparseab
   assert.equal(runLogTerminal(lane), null)
 })
 
-test('watchPass records and deduplicates a driver-gone note instead of silent-lane', () => {
+test('watchPass records and deduplicates a process-proven driver-gone note instead of silent-lane', () => {
   const root = world()
   const lane = seedLane(root, {
     task: 'driver-gone-note',
     journalLines: [{ at: NOW - 700_000, stage: 'build:r1' }],
     artifacts: [{ name: 'plan.md', ageS: 800 }],
   })
+  writeFileSync(join(lane.dir, 'run.pid'), '4242\n')
   const readSession = () => ({ ended_at: null, last_heartbeat_at: iso(61_000) })
-  const first = pass(root, { deps: { readSession } })
+  const first = pass(root, { deps: { readSession, kill: () => { throw processError('ESRCH') } } })
   assert.equal(first.notes.filter((note) => note.note === 'driver-gone').length, 1)
   assert.equal(first.notes.filter((note) => note.note === 'silent-lane').length, 0)
   assert.equal(first.notes.find((note) => note.note === 'driver-gone').heartbeat_age_s, 61)
-  const second = pass(root, { deps: { readSession } })
+  const second = pass(root, { deps: { readSession, kill: () => { throw processError('ESRCH') } } })
   assert.deepEqual(second.notes, [])
 
   const terminalRoot = world()
@@ -624,6 +629,46 @@ test('watchPass records and deduplicates a driver-gone note instead of silent-la
   writeFileSync(join(unreadableLane.dir, 'run.log'), `${JSON.stringify({ status: 'exited', signal: 'SIGTERM' })}\n`)
   const unreadablePass = pass(unreadableRoot, { deps: { readSession: () => null } })
   assert.deepEqual(unreadablePass.notes, [])
+})
+
+test('RV1-2: process-proven gone notes preserve an unmeasured heartbeat as null', () => {
+  const root = world()
+  const lane = seedLane(root, {
+    task: 'driver-gone-unmeasured-heartbeat',
+    journalLines: [{ at: NOW - 700_000, stage: 'build:r1' }],
+    artifacts: [{ name: 'plan.md', ageS: 800 }],
+  })
+  writeFileSync(join(lane.dir, 'run.pid'), '4242\n')
+  const result = pass(root, {
+    deps: {
+      readSession: () => ({ ended_at: null, last_heartbeat_at: null }),
+      kill: () => { throw processError('ESRCH') },
+    },
+  })
+  const note = result.notes.find((entry) => entry.note === 'driver-gone')
+  assert.equal(note.heartbeat_age_s, null)
+  assert.equal(note.heartbeat_age_reason, 'unmeasured')
+})
+
+test('B2: opaque process probes remain unknown', () => {
+  const root = world()
+  const seeded = seedLane(root, { task: 'opaque-probe', journalLines: [{ at: NOW - 5_000, stage: 'build:r1' }] })
+  const lane = { ...seeded, id: 'dt-demo/opaque-probe', repo: 'dt-demo', task: 'opaque-probe', settled: false }
+  const journal = readJournal(lane.journal)
+  const missing = probeDriverIdentity(lane)
+  assert.equal(missing.driver_state, 'unknown')
+  assert.equal(missing.source, 'process_group')
+  writeFileSync(join(lane.dir, 'run.pid'), 'not-a-pid\n')
+  assert.equal(probeDriverIdentity(lane).driver_state, 'unknown')
+  writeFileSync(join(lane.dir, 'run.pid'), '4242\n')
+  const opaque = probeDriverIdentity(lane, { kill: () => { throw processError('EIO') } })
+  assert.deepEqual(opaque, { driver_state: 'unknown', source: 'process_group', reason_code: 'probe-error', detail: { pid: 4242, error: 'EIO' } })
+  assert.equal(probeDriverIdentity(lane, { kill: () => { throw processError('EPERM') } }).driver_state, 'alive')
+  assert.equal(probeDriverIdentity(lane, { kill: () => { throw processError('ESRCH') } }).driver_state, 'gone')
+  const observed = observeDriver(lane, journal, { now: NOW, terminal: null, session: { ended_at: null, last_heartbeat_at: iso(61_000) } }, { kill: () => { throw processError('EIO') } })
+  assert.equal(observed.driver_state, 'unknown')
+  assert.equal(observed.source, 'heartbeat')
+  assert.equal(observed.heartbeat_state, 'overdue')
 })
 
 test('heartbeat period is re-exported from seat-io and pinned in the ledger query doc', () => {

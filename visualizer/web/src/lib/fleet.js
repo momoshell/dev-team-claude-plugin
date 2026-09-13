@@ -63,6 +63,21 @@ export function deriveStatus(run = {}, taskEnvelope = null) {
   return { key: 'unknown', word: 'status not recorded', tone: 'quiet', where: null, why: null }
 }
 
+export function driverObservation(run = {}) {
+  const runtime = run?.runtime && typeof run.runtime === 'object' ? run.runtime : {}
+  const state = ['alive', 'gone', 'unknown'].includes(runtime.driver_state) ? runtime.driver_state : 'unknown'
+  const source = typeof runtime.source === 'string' && runtime.source.trim() ? runtime.source : null
+  const reason_code = typeof runtime.reason_code === 'string' && runtime.reason_code.trim() ? runtime.reason_code : null
+  return {
+    state,
+    source,
+    reason_code,
+    observed_at: runtime.observed_at ?? null,
+    measured: source !== null,
+    text: source === null ? 'not observed' : `${state} · ${source}`,
+  }
+}
+
 function conciseAge(milliseconds) {
   const seconds = Math.max(0, Math.round(milliseconds / 1000))
   if (seconds < 60) return `${seconds}s`
@@ -88,50 +103,45 @@ export function crewArchive(run = {}) {
 }
 
 export function runActivity(run = {}, now = Date.now()) {
-  if (!run?.running) return { key: 'settled', live: false, attention: false, heartbeat: heartbeatCell(run, now) }
+  const driver = driverObservation(run)
+  if (!run?.running) return { key: 'settled', live: false, attention: false, heartbeat: heartbeatCell(run, now), driver }
   const heartbeat = heartbeatCell(run, now)
   // #953 — the ledger and the crew state dir disagree. Report the disagreement; do not pick
   // a side. This sits AFTER the settled return, so settlement is read from the ledger and
   // never from the crew dir, and it answers only on a MEASURED archived === true.
-  //
-  // TL7 — the key is its OWN token and never 'silent'. Every consumer translates 'silent'
-  // into "stale heartbeat", and this lane's heartbeat can be seconds old; that translation
-  // would be a measurement nobody made. execution-steps.js is taught the key in §3.7, so
-  // PhaseGantt keeps rendering "No return recorded" instead of falling through to
-  // "In progress".
   const archive = crewArchive(run)
   if (archive.archived === true) {
     const ledgerSide = run?.started_at ? `started ${run.started_at}` : 'started at a time the ledger did not record'
     const archiveSide = archive.archived_at ? `archived ${archive.archived_at}` : `archived at a time this feed could not measure (${archive.archived_at_absent || 'no reason was recorded for the absence'})`
     return {
-      key: 'contradicted', live: false, attention: true, heartbeat,
+      key: 'contradicted', live: false, attention: true, heartbeat, driver,
       word: 'contradicted · ledger running, crew state archived', tone: 'serious',
       why: `The ledger row still says running (${ledgerSide}), but this lane's crew state directory is archived (${archiveSide}). The two sides disagree; neither is guessed away. This run is not live, not merely stale, and not settled.`,
     }
   }
-  if (heartbeat.dashed) {
-    return {
-      key: 'unverified', live: false, attention: true, heartbeat,
-      word: 'running · heartbeat unavailable', tone: 'serious',
-      why: 'The ledger says this session is running, but this feed does not provide a heartbeat, so live activity cannot be verified.',
-    }
+  // New shaped rows always carry runtime. Their activity comes only from the
+  // cited observation; heartbeat age stays a separate freshness display.
+  if (run?.runtime && typeof run.runtime === 'object') {
+    if (!driver.measured) return { key: 'unverified', live: false, attention: true, heartbeat, driver, word: 'unsettled · runtime unconfirmed', tone: 'serious', why: 'The ledger remains unsettled, but no authoritative driver observation was recorded.' }
+    if (driver.state === 'gone') return { key: 'gone', live: false, attention: true, heartbeat, driver, word: `driver gone · ${driver.source}`, tone: 'serious', why: `The latest ${driver.source} observation recorded the driver as gone.` }
+    if (driver.state === 'alive') return { key: 'live', live: true, attention: false, heartbeat, driver, word: `live · ${driver.source}`, tone: 'busy', why: null }
+    return { key: 'unverified', live: false, attention: true, heartbeat, driver, word: `runtime unknown · ${driver.source}`, tone: 'serious', why: `The latest ${driver.source} observation could not determine driver state.` }
   }
+  // Historical pre-runtime objects retain the legacy heartbeat-only activity
+  // readout. They are never produced by shapeRun after observations shipped.
+  if (heartbeat.dashed) return { key: 'unverified', live: false, attention: true, heartbeat, driver, word: 'running · heartbeat unavailable', tone: 'serious', why: 'The ledger says this session is running, but this feed does not provide a heartbeat, so live activity cannot be verified.' }
   if (heartbeat.stale) {
     const quietFor = conciseAge(heartbeat.age_ms)
-    return {
-      key: 'silent', live: false, attention: true, heartbeat,
-      word: `stale · heartbeat ${quietFor} ago`, tone: 'serious',
-      why: `The session still says running, but its last heartbeat was ${quietFor} ago.`,
-    }
+    return { key: 'silent', live: false, attention: true, heartbeat, driver, word: `stale · heartbeat ${quietFor} ago`, tone: 'serious', why: `The session still says running, but its last heartbeat was ${quietFor} ago.` }
   }
-  return { key: 'live', live: true, attention: false, heartbeat, word: 'live', tone: 'busy', why: null }
+  return { key: 'live', live: true, attention: false, heartbeat, driver, word: 'live', tone: 'busy', why: null }
 }
 
 // #953 · TL7 — ONE list of the status keys that mean an operator must look at this run. It
 // was hard-coded in App.svelte:52 and TaskList.svelte:25,:57, which is exactly how a key
 // minted in this module reaches neither. Those two consumers ask this predicate; the
 // fleetView rail selects the key directly and is not a caller.
-export const ATTENTION_KEYS = Object.freeze(['escalated', 'fail', 'aborted', 'silent', 'unverified', 'contradicted'])
+export const ATTENTION_KEYS = Object.freeze(['escalated', 'fail', 'aborted', 'silent', 'unverified', 'gone', 'contradicted'])
 export function needsAttention(statusKey) { return ATTENTION_KEYS.includes(statusKey) }
 
 // #953 · TL7 — the heading an operator reads for an open record that is not live, keyed by
@@ -142,11 +152,37 @@ const OPEN_RECORD_NOTES = Object.freeze({
   silent: 'Stale open record',
   unverified: 'Open record not verified',
   contradicted: 'Ledger running · crew state archived',
+  gone: 'Driver observed gone',
 })
 export function openRecordNote(statusKey) { return OPEN_RECORD_NOTES[statusKey] ?? null }
 
+export function runtimeActivity(runs = []) {
+  const activity = { unsettled: 0, observed: 0, gone: 0, unmeasured: 0 }
+  for (const run of Array.isArray(runs) ? runs : []) {
+    const unsettled = run?.settlement?.state ? run.settlement.state === 'unsettled' : run?.running === true
+    if (!unsettled) continue
+    activity.unsettled += 1
+    const observation = driverObservation(run)
+    if (observation.measured) {
+      activity.observed += 1
+      if (observation.state === 'gone') activity.gone += 1
+    } else activity.unmeasured += 1
+  }
+  if (activity.unsettled > 0 && activity.observed === 0) activity.summary = `${activity.unsettled} unsettled · runtime unconfirmed`
+  else if (activity.unsettled === 0) activity.summary = 'No unsettled runs'
+  else activity.summary = `${activity.unsettled} unsettled · ${activity.observed} runtime observed`
+  return activity
+}
+
+export function runtimeActivitySummary(runs = []) {
+  const activity = runtimeActivity(runs)
+  if (activity.unsettled > 0 && activity.observed === 0) return `${activity.unsettled} unsettled · runtime unconfirmed`
+  if (activity.unsettled === 0) return 'No unsettled runs'
+  return `${activity.unsettled} unsettled · ${activity.observed} runtime observed`
+}
+
 export function fleetActivity(runs = [], now = Date.now()) {
-  const summary = { live: 0, silent: 0, contradicted: 0, unverified: 0, open: 0 }
+  const summary = { live: 0, silent: 0, contradicted: 0, unverified: 0, gone: 0, open: 0 }
   for (const run of Array.isArray(runs) ? runs : []) {
     const activity = runActivity(run, now)
     if (activity.key === 'live') summary.live += 1
@@ -155,6 +191,7 @@ export function fleetActivity(runs = [], now = Date.now()) {
     // every consumer that counts `silent` calls the row a stale heartbeat.
     if (activity.key === 'contradicted') summary.contradicted += 1
     if (activity.key === 'unverified') summary.unverified += 1
+    if (activity.key === 'gone') summary.gone += 1
     if (run?.running) summary.open += 1
   }
   return summary
@@ -164,10 +201,10 @@ export function deriveDisplayStatus(run = {}, taskEnvelope = null, now = Date.no
   const recorded = deriveStatus(run, taskEnvelope)
   if (!['running', 'queued'].includes(recorded.key)) return recorded
   const activity = runActivity(run, now)
-  if (activity.key === 'silent' || activity.key === 'unverified' || activity.key === 'contradicted') {
+  if (activity.key === 'silent' || activity.key === 'unverified' || activity.key === 'gone' || activity.key === 'contradicted') {
     // #953 — a contradicted row's evidence is the crew state directory, not the heartbeat;
     // `where` was hard-coded to 'heartbeat' and that would now be a false attribution.
-    return { key: activity.key, word: activity.word, tone: activity.tone, where: activity.key === 'contradicted' ? 'crew state' : 'heartbeat', why: activity.why }
+    return { key: activity.key, word: activity.word, tone: activity.tone, where: activity.key === 'contradicted' ? 'crew state' : activity.key === 'silent' ? 'heartbeat' : 'runtime observation', why: activity.why }
   }
   return recorded
 }
@@ -305,6 +342,7 @@ function visibleRows(runs, envelopes, now, filters) {
       tokens: tokenCell(run),
       cost: costCell(run),
       heartbeat: heartbeatCell(run, now),
+      driver: driverObservation(run),
       slot_wait: slotWaitCell(run),
       activity: runActivity(run, now),
     }
@@ -324,12 +362,14 @@ export function fleetView(runs, { envelopes = new Map(), now = Date.now(), filte
     .map((row) => ({ ...row, why: row.status.why }))
   const contradicted = rows.filter((row) => row.activity.key === 'contradicted')
     .map((row) => ({ ...row, why: row.activity.why }))
+  const gone = rows.filter((row) => row.activity.key === 'gone')
+    .map((row) => ({ ...row, why: row.activity.why }))
   // The rail composition keeps an escalated contradicted lane from appearing on the rail
   // twice; with no contradicted run present this list is byte-identical to today's. The
   // contradicted clause is the ONLY clause that can rank a non-escalated lane archived seconds ago whose heartbeat is still fresh.
   const silent = rows.filter((row) => row.status.key === 'running' && row.heartbeat.stale && row.activity.key !== 'contradicted' && row.status.key !== 'escalated')
     .map((row) => ({ ...row, why: row.heartbeat.text }))
-  return { rows, rail: [...escalated, ...contradicted.filter((row) => row.status.key !== 'escalated'), ...silent], hidden, shown: rows.length }
+  return { rows, rail: [...escalated, ...contradicted.filter((row) => row.status.key !== 'escalated'), ...gone.filter((row) => row.status.key !== 'escalated'), ...silent], hidden, shown: rows.length }
 }
 
 export function escalationProbeTargets(rows = []) {

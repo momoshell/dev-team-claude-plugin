@@ -4,7 +4,7 @@ import { mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync }
 import { join } from 'node:path'
 import { PANEL_REFRESH_MS, PANEL_STALE_AFTER_MS, acceptRows, brakePanel, cellHealthPanel, fleetCost, fleetEscalationRate, fleetMedianDuration, fleetPassRate, fleetPhasesPerRun, fleetTokens, findingRows, gateChips, intakeCandidateRows, intakePanel, reviewRows, rosterEditForm, rosterPanel, panelAgeLabel, panelReadLoop, readFreshness, rosterProposal, runSetPanel, teardownPanel } from '../visualizer/web/src/lib/panels.js'
 import { parseHash, formatHash } from '../visualizer/web/src/lib/route.js'
-import { absenceMark, costCell, createSemaphore, crewArchive, deriveDisplayStatus, deriveStatus, escalationProbeTargets, fleetActivity, fleetView, gateCell, heartbeatCell, needsAttention, openRecordNote, reviewCell, runActivity, slotWaitCell, tokenCell } from '../visualizer/web/src/lib/fleet.js'
+import { absenceMark, costCell, createSemaphore, crewArchive, deriveDisplayStatus, deriveStatus, escalationProbeTargets, fleetActivity, fleetView, gateCell, heartbeatCell, needsAttention, openRecordNote, reviewCell, runActivity, runtimeActivitySummary, slotWaitCell, tokenCell } from '../visualizer/web/src/lib/fleet.js'
 import { ROLE_ORDER, acceptEvidence, bounceArrows, gateMarkers, gateProofStory, laneRows, phaseFilterId, phasePanel, renderMarkdown } from '../visualizer/web/src/lib/trace.js'
 import { eventStory, eventStreamSummary } from '../visualizer/web/src/lib/event-story.js'
 import { assignmentPath, envelopeFacts, envelopeGroups, envelopeOverview, envelopeSections, trajectoryRowStory, trajectorySummary } from '../visualizer/web/src/lib/diagnostic-story.js'
@@ -189,9 +189,11 @@ test('the metrics strip renders the sessions derivations and derives nothing', (
   }
   assert.match(strip, /let \{ runs = \[\], envelopes = null, degraded = false, now = Date\.now\(\), onactivity = \(\) => \{\} \} = \$props\(\)/)
   for (const needle of ['Activity now', 'open', 'live', 'unverified', 'onactivity']) assert.match(strip, new RegExp(needle))
-  for (const pattern of [/runs\.filter\(/, /runs\.reduce\(/, /runs\.map\(/, /\.sort\(/]) {
+  for (const pattern of [/runs\.reduce\(/, /runs\.map\(/, /\.sort\(/]) {
     assert.doesNotMatch(strip, pattern)
   }
+  assert.match(strip, /runtimeActivity\(runs\)/)
+  assert.match(app, /runtimeActivitySummary\(runs\)/)
   assert.match(app, /feedDegraded = result\?\.degraded === true/)
   const mounts = app.match(/<MetricsStrip[^>]*>/g) || []
   assert.equal(mounts.length, 2)
@@ -752,7 +754,27 @@ test('running records require a fresh heartbeat before the UI calls them live', 
   assert.equal(runActivity(stale, now).word, 'stale · heartbeat 1h 2m ago')
   assert.equal(runActivity(unverified, now).key, 'unverified')
   assert.equal(deriveDisplayStatus(stale, null, now).key, 'silent')
-  assert.deepEqual(fleetActivity([fresh, stale, unverified], now), { live: 1, silent: 1, contradicted: 0, unverified: 1, open: 3 })
+  assert.deepEqual(fleetActivity([fresh, stale, unverified], now), { live: 1, silent: 1, contradicted: 0, unverified: 1, gone: 0, open: 3 })
+})
+
+test('K1: the top bar calls an unobserved run unsettled and runtime unconfirmed', () => {
+  const stale = {
+    running: true, settlement: { state: 'unsettled' },
+    runtime: { driver_state: 'unknown', source: null },
+    last_heartbeat_at: '2024-01-01T00:00:00.000Z',
+  }
+  assert.equal(runtimeActivitySummary([stale]), '1 unsettled · runtime unconfirmed')
+  const activity = runActivity(stale, Date.parse('2024-01-01T12:00:00.000Z'))
+  assert.equal(activity.key, 'unverified')
+  assert.equal(activity.word, 'unsettled · runtime unconfirmed')
+  assert.equal(activity.heartbeat.stale, true)
+})
+
+test('L1: the visualizer only copies the reconciliation command', () => {
+  const detail = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/RunDetail.svelte'), 'utf8')
+  assert.match(detail, /Copy reconciliation command/)
+  assert.match(detail, /await navigator\.clipboard\.writeText\(run\.reconciliation_command\)/)
+  assert.doesNotMatch(detail, /fetch\(run\.reconciliation_command\)/)
 })
 
 test('fleet view pins escalations and silent runs and probes only non-green slugged runs', () => {
@@ -1499,7 +1521,7 @@ test('fleetActivity counts contradictions without changing its denominator', () 
   const now = Date.parse('2026-09-06T00:00:00.000Z')
   const fresh = { running: true, status: 'running', phases: [{}], last_heartbeat_at: new Date(now - 4_000).toISOString(), crew_state: { archived: true } }
   const stale = { running: true, status: 'running', phases: [{}], last_heartbeat_at: new Date(now - 91_000).toISOString(), crew_state: { archived: false } }
-  assert.deepEqual(fleetActivity([fresh, stale], now), { live: 0, silent: 1, contradicted: 1, unverified: 0, open: 2 })
+  assert.deepEqual(fleetActivity([fresh, stale], now), { live: 0, silent: 1, contradicted: 1, unverified: 0, gone: 0, open: 2 })
 })
 
 test('shapeRun reports the crew state it was handed and never guesses', () => {

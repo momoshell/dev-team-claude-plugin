@@ -10,7 +10,7 @@ import {
   utimesSync,
   writeFileSync,
 } from 'node:fs'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { basename, dirname, join } from 'node:path'
 import { ROOT, scratchDir } from './helpers.mjs'
 import {
@@ -44,10 +44,12 @@ import {
   quietRefusalDetail,
   reap,
   reapIssueSummary,
+  reconcile,
   recover,
   refsFromPrBody,
   stripAnsi,
 } from '../scripts/factory/closeout.mjs'
+import { openLedger } from '../scripts/factory/ledger.mjs'
 
 const lane = 'b415-closeout'
 
@@ -90,6 +92,69 @@ function harness({ home = null, answers = [], newest = () => 1000, now = null, l
     },
   })
   return { deps, calls }
+}
+
+function reconciliationFixture(prefix, { task = 'reconcile-lane', taskEnvelope = null, seatEnvelope = { status: 'done' } } = {}) {
+  const root = scratch(prefix)
+  const checkout = join(root, 'dt-reconcile')
+  const crewDir = join(root, '.crew', 'dt-reconcile', task)
+  const returnsRoot = join(crewDir, 'returns')
+  const runId = `${task}-run`
+  const returnsDir = join(returnsRoot, runId)
+  const dbPath = join(root, 'ledger.db')
+  mkdirSync(checkout, { recursive: true })
+  mkdirSync(returnsDir, { recursive: true })
+  if (taskEnvelope !== null) writeFileSync(join(returnsDir, 'task.json'), JSON.stringify(taskEnvelope))
+  if (seatEnvelope !== null) writeFileSync(join(returnsDir, 'd1.builder.json'), JSON.stringify(seatEnvelope))
+  writeFileSync(join(crewDir, 'journal.jsonl'), `${JSON.stringify({ event: 'run-start', run_id: runId, task_return: join('returns', runId, 'task.json') })}\n`)
+  const adwId = `${task}-adw`
+  const ledger = openLedger({ dbPath, stderr: { write() {} } })
+  let jsonlPath
+  try {
+    ledger.startSession({ adw_id: adwId, repo_slug: basename(checkout), task_slug: task })
+    jsonlPath = ledger._jsonlPath
+  } finally { ledger.close() }
+  return { root, checkout, crewDir, returnsRoot, returnsDir, runId, dbPath, jsonlPath, adwId, task }
+}
+
+function childExit(child) {
+  if (!child || child.exitCode !== null || child.signalCode !== null) return Promise.resolve()
+  return new Promise((resolve) => child.once('exit', resolve))
+}
+
+function readyChild() {
+  const child = spawn(process.execPath, ['-e', "process.stdout.write('ready\\n'); setInterval(() => {}, 1000)"], { stdio: ['ignore', 'pipe', 'ignore'] })
+  return new Promise((resolve, reject) => {
+    let output = ''
+    const timer = setTimeout(() => reject(new Error('real child did not become ready')), 5000)
+    child.once('error', (error) => { clearTimeout(timer); reject(error) })
+    child.once('exit', (code, signal) => { clearTimeout(timer); reject(new Error(`real child exited before ready (${code}/${signal})`)) })
+    child.stdout.on('data', (chunk) => {
+      output += String(chunk)
+      if (!output.includes('ready')) return
+      clearTimeout(timer)
+      resolve(child)
+    })
+  })
+}
+
+async function stopChild(child) {
+  if (!child || child.exitCode !== null || child.signalCode !== null) return
+  const exited = childExit(child)
+  try { child.kill('SIGTERM') } catch {}
+  await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 3000))])
+  if (child.exitCode === null && child.signalCode === null) {
+    try { child.kill('SIGKILL') } catch {}
+    await childExit(child)
+  }
+}
+
+function goneIdentity() {
+  return { driver_state: 'gone', source: 'process_group', reason_code: 'pid-gone', detail: { pid: 4242, error: 'ESRCH' } }
+}
+
+function reconciliationDeps(log = []) {
+  return { now: () => Date.parse('2026-09-11T12:00:00.000Z'), log: (line) => log.push(line) }
 }
 
 function laneFixture(prefix, { commit = null, envelopeId = 'd3', mutations = 30 } = {}) {
@@ -1160,6 +1225,118 @@ test('all emitted step rows carry JSON, finite durations, and the refused row is
   }
   const refusedAt = result.lines.findIndex((row) => row.outcome === STEP_OUTCOMES.REFUSED)
   assert.equal(refusedAt, result.lines.length - 1)
+})
+
+test('E1: reconciliation refuses a live real child', { timeout: 10000 }, async () => {
+  const fixture = reconciliationFixture('closeout-reconcile-live-')
+  let child = null
+  try {
+    child = await readyChild()
+    writeFileSync(join(fixture.crewDir, 'run.pid'), `${child.pid}\n`)
+    const result = reconcile({ lane: fixture.task, checkout: fixture.checkout, crewDir: fixture.crewDir, dbPath: fixture.dbPath, deps: reconciliationDeps([]) })
+    assert.equal(result.code, 1)
+    assert.equal(result.refusal.reason, CLOSEOUT_REFUSALS.RECONCILE_DRIVER_ALIVE)
+    assert.equal(child.exitCode, null)
+    const ledger = openLedger({ dbPath: fixture.dbPath, stderr: { write() {} } })
+    try { assert.equal(ledger.getSession(fixture.adwId).ended_at, null) } finally { ledger.close() }
+  } finally { await stopChild(child) }
+})
+
+test('F1: reconciliation refuses an unmeasured real child exhibit', { timeout: 10000 }, async () => {
+  const fixture = reconciliationFixture('closeout-reconcile-unmeasured-')
+  let child = null
+  try {
+    child = await readyChild()
+    const result = reconcile({ lane: fixture.task, checkout: fixture.checkout, crewDir: fixture.crewDir, dbPath: fixture.dbPath, deps: reconciliationDeps([]) })
+    assert.equal(result.code, 1)
+    assert.equal(result.refusal.reason, CLOSEOUT_REFUSALS.RECONCILE_IDENTITY_UNKNOWN)
+    assert.equal(child.exitCode, null)
+    const ledger = openLedger({ dbPath: fixture.dbPath, stderr: { write() {} } })
+    try { assert.equal(ledger.getSession(fixture.adwId).ended_at, null) } finally { ledger.close() }
+  } finally { await stopChild(child) }
+})
+
+test('G1: reconciliation preserves a terminal envelope outcome', () => {
+  const fixture = reconciliationFixture('closeout-reconcile-envelope-')
+  writeFileSync(join(fixture.returnsDir, 'task.json'), JSON.stringify({ status: 'done', outcome: 'success' }))
+  const result = reconcile({
+    lane: fixture.task, checkout: fixture.checkout, crewDir: fixture.crewDir, dbPath: fixture.dbPath,
+    deps: { ...reconciliationDeps([]), probeDriverIdentity: goneIdentity },
+  })
+  assert.equal(result.code, 1)
+  assert.equal(result.refusal.reason, CLOSEOUT_REFUSALS.RECONCILE_TERMINAL_ENVELOPE)
+  const ledger = openLedger({ dbPath: fixture.dbPath, stderr: { write() {} } })
+  try {
+    assert.equal(ledger.getSession(fixture.adwId).status, 'running')
+    assert.deepEqual(ledger.runObservationsFor([fixture.adwId]), [])
+  } finally { ledger.close() }
+})
+
+test('RV1-1: reconciliation accepts a run-scoped return directory with only seat envelopes', () => {
+  const fixture = reconciliationFixture('closeout-reconcile-run-scoped-', { taskEnvelope: null, seatEnvelope: null })
+  writeFileSync(join(fixture.returnsDir, 'd1.builder.json'), JSON.stringify({ status: 'done' }))
+  const result = reconcile({
+    lane: fixture.task, checkout: fixture.checkout, crewDir: fixture.crewDir, dbPath: fixture.dbPath, dryRun: true,
+    deps: { ...reconciliationDeps([]), probeDriverIdentity: goneIdentity },
+  })
+  assert.equal(result.code, 0)
+  assert.equal(result.report.result, 'would-reconcile')
+  assert.equal(result.report.envelope.state, 'none')
+  assert.equal(result.report.envelope.task_return, join(fixture.returnsDir, 'task.json'))
+  assert.deepEqual(result.report.envelope.files, ['d1.builder.json'])
+})
+
+test('H1: dry run prints evidence and writes nothing', () => {
+  const fixture = reconciliationFixture('closeout-reconcile-dry-run-')
+  const beforeDb = readFileSync(fixture.dbPath)
+  const beforeJsonl = readFileSync(fixture.jsonlPath)
+  const lines = []
+  const result = reconcile({
+    lane: fixture.task, checkout: fixture.checkout, crewDir: fixture.crewDir, dbPath: fixture.dbPath, dryRun: true,
+    deps: { ...reconciliationDeps(lines), probeDriverIdentity: goneIdentity },
+  })
+  assert.equal(result.code, 0)
+  assert.equal(result.report.result, 'would-reconcile')
+  assert.equal(result.report.identity.driver_state, 'gone')
+  assert.equal(result.report.source, 'process_group')
+  assert.equal(result.report.reason, 'pid-gone')
+  assert.equal(result.report.observed_at, '2026-09-11T12:00:00.000Z')
+  assert.deepEqual(result.report.proposed_terminal_result, {
+    status: 'aborted', outcome: 'aborted', terminal_reason: 'driver-gone-without-terminal-envelope', terminal_actor: 'operator',
+  })
+  assert.equal(lines.length, 1)
+  assert.deepEqual(readFileSync(fixture.dbPath), beforeDb)
+  assert.deepEqual(readFileSync(fixture.jsonlPath), beforeJsonl)
+})
+
+test('I1: reconciliation records actor reason observation and terminal event', { timeout: 10000 }, async () => {
+  const fixture = reconciliationFixture('closeout-reconcile-positive-')
+  let child = null
+  try {
+    child = await readyChild()
+    writeFileSync(join(fixture.crewDir, 'run.pid'), `${child.pid}\n`)
+    child.kill('SIGTERM')
+    await childExit(child)
+    const result = reconcile({
+      lane: fixture.task, checkout: fixture.checkout, crewDir: fixture.crewDir, dbPath: fixture.dbPath,
+      reason: 'operator-proven-gone', deps: reconciliationDeps([]),
+    })
+    assert.equal(result.code, 0)
+    const ledger = openLedger({ dbPath: fixture.dbPath, stderr: { write() {} } })
+    try {
+      const session = ledger.getSession(fixture.adwId)
+      const observations = ledger.runObservationsFor([fixture.adwId])
+      assert.equal(session.status, 'aborted')
+      assert.equal(session.outcome, 'aborted')
+      assert.equal(session.terminal_actor, 'operator')
+      assert.equal(session.terminal_reason, 'operator-proven-gone')
+      assert.ok(session.ended_at)
+      assert.equal(observations.length, 1)
+      assert.equal(observations[0].driver_state, 'gone')
+      assert.equal(observations[0].source, 'process_group')
+      assert.equal(observations[0].reason_code, 'pid-gone')
+    } finally { ledger.close() }
+  } finally { await stopChild(child) }
 })
 
 test('parseArgs and main use usage, refusal, and success exit codes', () => {

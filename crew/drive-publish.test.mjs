@@ -8,6 +8,7 @@ import {
   COMMIT_TRAILER, CTX, HONEST_NARRATION, NARRATION_HEADING, NARRATION_RECORD, NARRATION_REFUSALS, NARRATION_REFUSAL_NAMES, NARRATION_STAGE_VOCABULARY, NARRATOR_REGISTER, PUBLISH_REFUSAL_NAMES, RUN_START_EVENT, TD, VARIANTS, applyNarration, bounceDetail, bounceSeatOf, buildEnv, commitIntent, composeCommitMessage, composePrBody, convergeRun, driveTask, existsSync, fakeIo, issueTrailers, join, journalRowsSinceRunStart, narrateRecord, narrationDefect, narrationIsRawJson, narrationPrompt, narrationStageDefect, narratorApiRoot, narratorIo, narratorModelId, narratorModelsCommand, planEnv, prAnomalies, publicationIo, readFileSync, readdirSync, refsFromCommitMessage, reviewEnv, scratchDir, shellArg, spawnSync, writeFileSync,
 } from './drive-fixtures.mjs'
 import { anchorConflictMechanical, canonicalAnchorManifest, canonicalCitationDoc, lineNumberOnlyAnchorResolution, rebaseConflictRoute, resumeTask, resumeWorktreeSha256 } from './drive.mjs'
+import { git, gitResult } from '../test/helpers.mjs'
 
 function resumeCheckpointFixture(overrides = {}) {
   const file = { path: 'a.mjs', state: 'present', bytes: 'file:-:' + 'a'.repeat(64) }
@@ -417,23 +418,18 @@ function runAnchorPublication(options = {}) {
 
 function realCleanAbortFacts() {
   const checkout = scratchDir('b665-restoreproof-')
-  const git = (...args) => {
-    const result = spawnSync('git', args, { cwd: checkout, encoding: 'utf8' })
-    assert.equal(result.status, 0, `git ${args.join(' ')} failed: ${result.stderr || result.stdout}`)
-    return result
-  }
-  git('init', '--quiet')
-  git('config', 'user.email', 'crew@example.test')
-  git('config', 'user.name', 'Crew Test')
+  git(checkout, 'init', '--quiet')
+  git(checkout, 'config', 'user.email', 'crew@example.test')
+  git(checkout, 'config', 'user.name', 'Crew Test')
   writeFileSync(join(checkout, 'a.mjs'), 'export const lane = true\n')
-  git('add', 'a.mjs')
-  git('commit', '--quiet', '-m', 'lane')
-  git('branch', '-M', 'feature/ship')
-  const head = git('rev-parse', 'HEAD').stdout.trim()
-  const branch = git('symbolic-ref', '--quiet', '--short', 'HEAD').stdout.trim()
+  git(checkout, 'add', 'a.mjs')
+  git(checkout, 'commit', '--quiet', '-m', 'lane')
+  git(checkout, 'branch', '-M', 'feature/ship')
+  const head = git(checkout, 'rev-parse', 'HEAD').trim()
+  const branch = git(checkout, 'symbolic-ref', '--quiet', '--short', 'HEAD').trim()
   const rawPaths = {
-    'rebase-merge': git('rev-parse', '--git-path', 'rebase-merge').stdout.trim(),
-    'rebase-apply': git('rev-parse', '--git-path', 'rebase-apply').stdout.trim(),
+    'rebase-merge': git(checkout, 'rev-parse', '--git-path', 'rebase-merge').trim(),
+    'rebase-apply': git(checkout, 'rev-parse', '--git-path', 'rebase-apply').trim(),
   }
   const paths = Object.fromEntries(Object.entries(rawPaths).map(([name, path]) => [
     name, path.startsWith('/') ? path : join(checkout, path),
@@ -442,10 +438,10 @@ function realCleanAbortFacts() {
     assert.equal(existsSync(path), false)
     assert.doesNotThrow(() => readdirSync(join(path, '..')))
   }
-  const abort = spawnSync('git', ['rebase', '--abort'], { cwd: checkout, encoding: 'utf8' })
+  const abort = gitResult(checkout, 'rebase', '--abort')
   assert.equal(abort.status, 128)
-  assert.equal(git('rev-parse', 'HEAD').stdout.trim(), head)
-  assert.equal(git('status', '--porcelain', '-uall').stdout, '')
+  assert.equal(git(checkout, 'rev-parse', 'HEAD').trim(), head)
+  assert.equal(git(checkout, 'status', '--porcelain', '-uall'), '')
   return { checkout, head, branch, paths, abortStatus: abort.status, status: '' }
 }
 

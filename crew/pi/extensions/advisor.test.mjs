@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'nod
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import * as advisor from './advisor.ts'
-
+import { ADVISOR_BOOT_REFUSALS as bootAdvisorRefusals, classifyAdvisorCell as bootClassifyAdvisorCell } from '../../crew.mjs'
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'advisor-test-'))
   const taskDir = join(root, 'task')
@@ -68,7 +68,7 @@ function fetcher(reply = { class: 'edge-path', severity: 'medium', claim: 'the r
   return fn
 }
 
-test('advisor module is node-only, erasable, and exposes no callable registration surface', () => {
+test('E1 advisor module is node-only, erasable, and exposes no callable registration surface', () => {
   const source = readFileSync(new URL('./advisor.ts', import.meta.url), 'utf8')
   const imports = [...source.matchAll(/^import[\s\S]*?from\s+["']([^"']+)["']/gm)].map((match) => match[1])
   assert.ok(imports.length > 0)
@@ -78,11 +78,59 @@ test('advisor module is node-only, erasable, and exposes no callable registratio
   assert.equal(typeof advisor.default, 'function')
 })
 
-test('classifier is loopback-only and canonicalizes accepted cells', () => {
-  assert.deepEqual(advisor.classifyAdvisorCell({ endpoint: '', model: 'x' }), { reason: 'endpoint-unset' })
-  assert.deepEqual(advisor.classifyAdvisorCell({ endpoint: 'http://127.0.0.1.evil/v1', model: 'x' }), { reason: 'endpoint-not-local' })
-  assert.deepEqual(advisor.classifyAdvisorCell({ endpoint: 'http://u:p@127.0.0.1/v1', model: 'x' }), { reason: 'endpoint-credentials' })
-  assert.deepEqual(advisor.classifyAdvisorCell({ endpoint: 'http://127.0.0.1/v1', model: 'qwen3-coder' }), { endpoint: 'http://127.0.0.1/v1', model: 'qwen3-coder' })
+const sharedAdvisorCells = Object.freeze([
+  { endpoint: 'http://127.0.0.1:11434/v1', model: 'qwen3-coder' },
+  { endpoint: 'http://10.112.20.20:8080/v1', model: 'qwen3-coder' },
+  { endpoint: 'http://[::1]:11434/v1', model: 'qwen3-coder' },
+  { endpoint: 'https://desktop2.lan/v1', model: 'qwen3-coder' },
+  { endpoint: 'ftp://10.112.20.20:8080/v1', model: 'qwen3-coder' },
+  { endpoint: 'http://u:p@10.112.20.20:8080/v1', model: 'qwen3-coder' },
+  { endpoint: 'http:///v1', model: 'qwen3-coder' },
+  { endpoint: 'http://10.112.20.20:8080/v1', model: '' },
+  { endpoint: 'http://10.112.20.20:8080/v1', model: 'not safe' },
+  { endpoint: '', model: 'qwen3-coder' },
+])
+
+test('A1 extension admits the canonical LAN endpoint/model cell', () => {
+  assert.deepEqual(advisor.classifyAdvisorCell(sharedAdvisorCells[1]), {
+    endpoint: 'http://10.112.20.20:8080/v1', model: 'qwen3-coder',
+  })
+})
+
+test('B1 extension retains exact refusal reasons for invalid cells', () => {
+  const refusals = [
+    [sharedAdvisorCells[4], { reason: 'endpoint-not-local' }],
+    [sharedAdvisorCells[5], { reason: 'endpoint-credentials' }],
+    [sharedAdvisorCells[6], { reason: 'endpoint-not-local' }],
+    [sharedAdvisorCells[7], { reason: 'model-unset' }],
+    [sharedAdvisorCells[8], { reason: 'model-unsafe' }],
+    [sharedAdvisorCells[9], { reason: 'endpoint-unset' }],
+  ]
+  for (const [cell, expected] of refusals) assert.deepEqual(advisor.classifyAdvisorCell(cell), expected)
+})
+
+test('RV1-1 extension classifies an unset endpoint as endpoint-unset', () => {
+  assert.deepEqual(advisor.classifyAdvisorCell(sharedAdvisorCells[9]), { reason: 'endpoint-unset' })
+})
+
+test('C1 extension and boot classifiers agree across the shared input table', () => {
+  const extensionVerdicts = sharedAdvisorCells.map((cell) => advisor.classifyAdvisorCell(cell))
+  const bootVerdicts = sharedAdvisorCells.map((cell) => bootClassifyAdvisorCell(cell))
+  assert.deepEqual(extensionVerdicts, bootVerdicts)
+})
+
+test('D1 extension and boot refusal vocabularies retain exact frozen ordered values', () => {
+  assert.equal(Object.isFrozen(advisor.UNAVAILABLE_REASONS), true)
+  assert.deepEqual(advisor.UNAVAILABLE_REASONS, [
+    'role-unsupported', 'endpoint-unset', 'endpoint-not-local',
+    'endpoint-credentials', 'model-unset', 'model-unsafe', 'endpoint-dead',
+  ])
+  assert.equal(Object.isFrozen(bootAdvisorRefusals), true)
+  assert.deepEqual(bootAdvisorRefusals, [
+    'role-unsupported', 'adapter-unsupported', 'transport-unsupported',
+    'endpoint-unset', 'endpoint-not-local', 'endpoint-credentials',
+    'model-unset', 'model-unsafe', 'endpoint-dead',
+  ])
 })
 
 test('attach is default-off, refuses wrong roles, and journals before handlers', async () => {

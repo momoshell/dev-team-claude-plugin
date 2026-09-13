@@ -44,7 +44,7 @@ import { seatCommand, headlessCommand as claudeHeadlessCommand, capabilitiesFor,
 import { seatCommand as piSeatCommand, capabilitiesFor as piCapabilitiesFor, modelString as piModelString, translateDeny, PI_BUILTIN_TOOLS } from './adapters/adapter-pi.mjs'
 import { rpcCommand } from './headless-rpc.mjs'
 import {
-  cellFailureKind, paneAlive, paneProbe, seatIo, DEFAULT_TRANSPORT, SEAT_REFUSAL_STAGE, SUBSTRATE_GRACE_MS, SUBSTRATE_MISSES_TO_DIE,
+  cellFailureKind, paneAlive, paneProbe, seatIo, DEFAULT_TRANSPORT, HEADLESS_TRANSPORT, SEAT_REFUSAL_STAGE, SUBSTRATE_GRACE_MS, SUBSTRATE_MISSES_TO_DIE,
   VARIANT_STAGE_PHASES, paneTeardownRows, PANE_SETTLE_POLLS, PANE_SETTLE_MS,
 } from './seat-io.mjs'
 import { testCheckout } from '../test/fixtures.mjs'
@@ -7946,6 +7946,73 @@ test('#809 a dead LAN advisor endpoint refuses the boot naming host and port, ne
   await assertAdvisorCellLive({ record, adapters, taskSlug: 't',
     probeEndpoint: async () => { liveProbes += 1; return true }, note: () => { throw new Error('no cell failure is recorded on the accepting path') } })
   assert.equal(liveProbes, 1)
+})
+
+test('H1 planner advisor grant is admitted at boot', async () => {
+  const endpoint = 'http://127.0.0.1:11434/v1'
+  const env = { CREW_ADVISOR_ENDPOINT: endpoint, CREW_ADVISOR_MODEL: 'qwen3-coder' }
+  const record = advisorBootRecord({
+    adapters: { planner: { grants: { advisor: true } } }, env,
+  })
+  const adapters = { planner: { name: 'pi', transport: DEFAULT_TRANSPORT, grants: { advisor: true } } }
+  let probes = 0
+  await assertAdvisorCellLive({ record, adapters,
+    probeEndpoint: async (url) => { probes += 1; assert.equal(url, endpoint); return true },
+    note: () => { throw new Error('no refusal note belongs on the accepting path') },
+  })
+  assert.equal(probes, 1)
+})
+
+test('J1 boot retains adapter and transport refusals', async () => {
+  const env = { CREW_ADVISOR_ENDPOINT: 'http://127.0.0.1:11434/v1', CREW_ADVISOR_MODEL: 'qwen3-coder' }
+  const record = advisorBootRecord({
+    adapters: { planner: { grants: { advisor: true } } }, env,
+  })
+  let probes = 0
+  await assert.rejects(
+    () => assertAdvisorCellLive({ record,
+      adapters: { planner: { name: 'claude', transport: DEFAULT_TRANSPORT, grants: { advisor: true } } },
+      probeEndpoint: async () => { probes += 1; return true },
+    }),
+    (err) => { assert.equal(err.reason, 'adapter-unsupported'); return true },
+  )
+  assert.equal(probes, 0)
+  await assert.rejects(
+    () => assertAdvisorCellLive({ record,
+      adapters: { planner: { name: 'pi', transport: HEADLESS_TRANSPORT, grants: { advisor: true } } },
+      probeEndpoint: async () => { probes += 1; return true },
+    }),
+    (err) => { assert.equal(err.reason, 'transport-unsupported'); return true },
+  )
+  assert.equal(probes, 0)
+})
+
+test('RV1-1 advisor vacuity pin stays synchronized', () => {
+  const advisorTest = join(ROOT, 'crew', 'pi', 'extensions', 'advisor.test.mjs')
+  const vacuityTest = join(ROOT, 'test', 'vacuity.test.mjs')
+  const source = readFileSync(advisorTest, 'utf8')
+  const vacuity = readFileSync(vacuityTest, 'utf8')
+  const digest = createHash('sha256').update(source).digest('hex')
+  const sourceAbsenceIdentity = `assert.does${'Not'}Match(source, /registerTool/)`
+  const entrypointIdentity = `assert.equal(${'typeof'} advisor.default, 'function')`
+  const sourceLines = source.split('\n')
+  const sourceAbsenceLine = sourceLines.findIndex((line) => line.trim() === sourceAbsenceIdentity) + 1
+  const entrypointLine = sourceLines.findIndex((line) => line.trim() === entrypointIdentity) + 1
+  assert.ok(sourceAbsenceLine > 0)
+  assert.ok(entrypointLine > 0)
+  assert.ok(vacuity.includes(`'crew/pi/extensions/advisor.test.mjs': '${digest}'`))
+  assert.ok(vacuity.includes(`crew/pi/extensions/advisor.test.mjs:${sourceAbsenceLine}`))
+  assert.ok(vacuity.includes(`crew/pi/extensions/advisor.test.mjs:${entrypointLine}`))
+})
+
+test('RV2-1 emitTier0 remains journal-only', () => {
+  const source = readFileSync(join(ROOT, 'crew', 'pi', 'extensions', 'advisor.ts'), 'utf8')
+  const start = source.indexOf('  function emitTier0(')
+  const end = source.indexOf('\n  function queue(', start)
+  assert.ok(start >= 0 && end > start)
+  const tierZero = source.slice(start, end)
+  assert.match(tierZero, /notes\.push\(payload\)\n    return true/)
+  assert.doesNotMatch(tierZero, /\bsend(?:\?\.|\s*\()/)
 })
 
 test('shadowCandidates deduplicates roster cells and retains their tiers', () => {

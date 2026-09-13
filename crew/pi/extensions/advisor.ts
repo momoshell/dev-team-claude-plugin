@@ -40,7 +40,7 @@ export const ADVISOR_ENDPOINT_ENV = 'CREW_ADVISOR_ENDPOINT'
 export const ADVISOR_MODEL_ENV = 'CREW_ADVISOR_MODEL'
 export const ADVISOR_MESSAGE_TYPE = 'crew-advisor'
 export const TRIPWIRE_MANIFEST_FILE = 'advisor-manifest.json'
-export const ADVISED_ROLE = 'builder'
+export const ADVISED_ROLES = Object.freeze(new Set(['builder', 'planner']))
 
 export const SCOPE_BREACH = 'scope-breach'
 export const TRIPWIRE_TOUCH = 'tripwire-touch'
@@ -89,7 +89,7 @@ export const JUDGMENT_ERROR_CODES = Object.freeze([
 ])
 export const SUPPRESSION_CODES = Object.freeze(['duplicate', 'content-free', 'one-per-update'])
 
-const DEFAULT_ROLE = ADVISED_ROLE
+const DEFAULT_ROLE = 'builder'
 const DEFAULT_NOW = () => new Date().toISOString()
 const DEFAULT_READ = (path, encoding) => readFileSync(path, encoding)
 const DEFAULT_APPEND = (path, text) => appendFileSync(path, text)
@@ -618,14 +618,17 @@ function requestUrl(endpoint) {
   return `${String(endpoint).replace(/\/+$/, '')}/chat/completions`
 }
 
-function systemPrompt() {
-  return 'Review the builder delta for exactly two judgment classes: edge-path (checklist B1: answer EPERM, unknown, interrupted, and empty paths) and over-claim (checklist B2: record no verdict stronger than what was measured). Return JSON with class, severity, claim, and evidence.'
+export const BUILDER_SYSTEM_PROMPT = 'Review the builder delta for exactly two judgment classes: edge-path (checklist B1: answer EPERM, unknown, interrupted, and empty paths) and over-claim (checklist B2: record no verdict stronger than what was measured). Return JSON with class, severity, claim, and evidence.'
+export const PLANNER_SYSTEM_PROMPT = 'Review the planner delta for exactly two judgment classes: edge-path (a plan or gate omits or mishandles a required boundary, failure case, or acceptance path) and over-claim (a Ground truth citation that does not hold at the ref where the plan was written). Return JSON with class, severity, claim, and evidence.'
+
+function systemPrompt(role) {
+  return role === 'planner' ? PLANNER_SYSTEM_PROMPT : BUILDER_SYSTEM_PROMPT
 }
 
-function noteTextForTier0(kind, target, signature) {
+function noteTextForTier0(kind, target, signature, role) {
   if (kind === REPEATED_FAILURE) return `Repeated validation failure at ${target || 'an unknown location'}: ${signature || 'the same failure signature recurred'}`
-  if (kind === SCOPE_BREACH) return `The builder touched ${target || 'an unknown path'} outside the declared scope.`
-  if (kind === TRIPWIRE_TOUCH) return `The builder touched the declared tripwire ${target || 'an unknown path'}.`
+  if (kind === SCOPE_BREACH) return `The ${role} seat touched ${target || 'an unknown path'} outside the declared scope.`
+  if (kind === TRIPWIRE_TOUCH) return `The ${role} seat touched the declared tripwire ${target || 'an unknown path'}.`
   return 'The repository growth crossed the measured divergence threshold.'
 }
 
@@ -726,6 +729,19 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     return boundTarget(repoRelative(cwd, raw) || normalizePath(raw || ''))
   }
 
+  function deltaPath(path) {
+    const repoPath = repoRelative(cwd, path)
+    if (repoPath) return repoPath
+    if (role !== 'planner' || !taskDir || typeof path !== 'string' || !path) return ''
+    let taskPath
+    try {
+      const root = resolve(String(taskDir))
+      taskPath = normalizePath(relative(root, resolve(cwd, path)))
+    } catch { return '' }
+    if (taskPath === 'plan.md' || taskPath === 'gate.mjs') return `task/${taskPath}`
+    return ''
+  }
+
   function emitTier0({ kind, target, targetKind, signature, trigger = 'predicate' }) {
     const cleanTarget = boundTarget(target || '')
     const key = `${kind}\0${cleanTarget}`
@@ -793,7 +809,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
   function editDelta(input) {
     const path = inputPath(input)
     if (!path) return ''
-    const repoPath = repoRelative(cwd, path)
+    const repoPath = deltaPath(path)
     if (!repoPath) return ''
     const absolute = resolve(cwd, path)
     const content = safeRead(readFile, absolute)
@@ -807,7 +823,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
 
   function writeDelta(input) {
     const path = inputPath(input)
-    const repoPath = repoRelative(cwd, path)
+    const repoPath = deltaPath(path)
     if (!repoPath) return ''
     const absolute = resolve(cwd, path)
     const content = safeRead(readFile, absolute)
@@ -817,7 +833,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
 
   function readDelta(event) {
     const path = inputPath(event?.input)
-    const repoPath = repoRelative(cwd, path)
+    const repoPath = deltaPath(path)
     if (!repoPath) return ''
     const text = contentOf(event) || safeRead(readFile, resolve(cwd, path)) || ''
     return excerptText({ path: repoPath, content: text, line: Number(event?.input?.offset ?? 1) || 1 })
@@ -959,7 +975,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     const body = JSON.stringify({
       model: String(env?.[ADVISOR_MODEL_ENV] || ''), temperature: 0, stream: false,
       messages: [
-        { role: 'system', content: systemPrompt() },
+        { role: 'system', content: systemPrompt(role) },
         { role: 'user', content: JSON.stringify({ trigger, delta: captured.snapshot }) },
       ],
     })
@@ -1047,12 +1063,12 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
 }
 
 export async function attachAdvisor(pi, { env = process.env, deps = {} } = {}) {
-  if (env?.[ADVISOR_GRANT_ENV] !== '1') return
   const role = String(env?.CREW_ROLE || '')
   const appendFile = deps.appendFile || DEFAULT_APPEND
   const taskDir = deps.taskDir || env?.CREW_TASK_DIR || ''
   const journalPath = journalPathFrom(taskDir)
   const now = deps.now || DEFAULT_NOW
+  if (env?.[ADVISOR_GRANT_ENV] !== '1') return
   const unavailable = (reason) => {
     const payload = { role, reason, config_version: ADVISOR_CONFIG_VERSION }
     appendLine({ appendFile, journalPath, row: rowWithRole({ at: atOf(now), payloadKey: 'advisor_unavailable', payload, role }) })
@@ -1060,7 +1076,7 @@ export async function attachAdvisor(pi, { env = process.env, deps = {} } = {}) {
     error.reason = reason
     throw error
   }
-  if (role !== ADVISED_ROLE) return unavailable('role-unsupported')
+  if (!ADVISED_ROLES.has(role)) return unavailable('role-unsupported')
   const cell = classifyAdvisorCell(advisorCell(env))
   if (cell.reason) return unavailable(cell.reason)
   let live = false

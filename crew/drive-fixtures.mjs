@@ -1385,6 +1385,7 @@ const DRIVE_JOURNAL_EXPECTED = Object.freeze([
   ["recordRow", "", "at review_round"],
   ["recordRow", "", "at auto_fix"],
   ["recordRow", "", "at commit_subject"],
+  ["recordRow", "", "at rebase_restore_diagnosis"],
   ["recordRow", "", "at gate_proof_parent gate_generation"],
   ["recordRow", "", "at cold_suite"],
   ["recordRow", "", "at narration"],
@@ -1456,10 +1457,12 @@ function publicationIo(options = {}) {
     commands: commandOverrides = {}, envelopes: envelopeOverrides = {}, changed = ['a.mjs', 'a.test.mjs'],
     warm = PUBLISH_WARM_OUTPUT, coldOutput = PUBLISH_COLD_OUTPUT, coldResult, journal = `${TD}/journal.jsonl`,
     journalText: initialJournal = JSON.stringify({ event: RUN_START_EVENT }) + '\n', readFileThrows = false,
-    capabilities = null,
+    capabilities = null, branch = 'feature/ship', branchResult = { ok: true, output: `${branch}\n` },
+    statusResult = { ok: true, output: '' }, gitPaths = {}, rebasePathProbes = {}, initialHead = null,
   } = options
   const calls = { run: [], runCold: [], commits: [], logs: [], writes: {}, order: [], suiteHead: null, coldHead: null }
-  const state = { pre: 'pre1111', head: 'pre1111', post: 'post2222' }
+  const startingHead = typeof initialHead === 'string' && initialHead.trim() ? initialHead.trim() : 'pre1111'
+  const state = { pre: startingHead, head: startingHead, post: 'post2222' }
   let journalText = initialJournal
   let clock = 0
   const roleCounts = {}
@@ -1477,6 +1480,10 @@ function publicationIo(options = {}) {
     'git rebase origin/main': (s) => { s.head = s.post; return { ok: true, output: '' } },
     'git diff --name-only --diff-filter=U': { ok: true, output: '' },
     'git rebase --abort': (s) => { s.head = s.pre; return { ok: true, output: '' } },
+    'git symbolic-ref --quiet --short HEAD': branchResult,
+    'git status --porcelain -uall': statusResult,
+    'git rev-parse --git-path rebase-merge': { ok: true, output: `${gitPaths['rebase-merge'] || `${TD}/rebase-merge`}\n` },
+    'git rev-parse --git-path rebase-apply': { ok: true, output: `${gitPaths['rebase-apply'] || `${TD}/rebase-apply`}\n` },
     // Retained so a lane still probing HEAD^ resolves; the driver now asks
     // `git merge-base` instead, which is correct for any commit count.
     'git rev-parse HEAD^': { ok: true, output: 'base1111\n' },
@@ -1525,6 +1532,17 @@ function publicationIo(options = {}) {
       const text = String(command)
       calls.run.push(text); calls.order.push(`run:${text}`)
       if (text === 'suite-cmd') calls.suiteHead = state.head
+      const rebasePath = Object.entries({
+        'rebase-merge': gitPaths['rebase-merge'] || `${TD}/rebase-merge`,
+        'rebase-apply': gitPaths['rebase-apply'] || `${TD}/rebase-apply`,
+      }).find(([, path]) => text.endsWith(` ${shellArg(path)}`))
+      if (rebasePath) {
+        const override = Object.keys(commands).find((key) => text === key || text.startsWith(key))
+        if (override) return response(text)
+        const value = rebasePathProbes[rebasePath[0]]
+        if (typeof value === 'function') return value(state, text)
+        return value === undefined ? { ok: true, output: '' } : value
+      }
       return response(text)
     },
     runCold(command, names) {
@@ -1534,7 +1552,11 @@ function publicationIo(options = {}) {
       return { ok: true, output: coldOutput, path: '/cold/checkout', kept: null }
     },
     changedFiles() { return [...changed] },
-    commit(files, message) { calls.commits.push({ files, message }); calls.order.push('commit'); state.head = state.pre; return state.pre },
+    commit(files, message) {
+      const sha = state.pre
+      calls.commits.push({ files, message, sha }); calls.order.push('commit'); state.head = sha
+      return sha
+    },
     log(row) { calls.logs.push(row); journalText += `${JSON.stringify(row)}\n` },
     now() { clock += 10; return clock },
   }

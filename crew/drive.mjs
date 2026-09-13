@@ -8467,13 +8467,43 @@ function runTask(ctx, io, crash) {
         }
 
         // Every failed recovery reaches this one abort path. No write-back is attempted:
-        // the existing abort/HEAD proof is the sole restoration mechanism.
+        // post-abort observations independently prove whether the checkout was restored.
         const restoreConflict = (mechanical, why, routeOverride = null) => {
           let aborted
           try { aborted = io.run('git rebase --abort') }
           catch (err) { aborted = { ok: false, output: err?.message ?? String(err) } }
-          const restoredHead = probe('git rev-parse HEAD')
-          if (!aborted?.ok || !restoredHead || restoredHead !== preRebaseCommit) {
+          const checkedOutput = (command) => {
+            let result
+            try { result = io.run(command) } catch { return null }
+            if (result?.ok !== true || typeof result.output !== 'string') return null
+            return result.output.trim()
+          }
+          const expectedBranch = typeof publishing?.branch === 'string' && publishing.branch.trim()
+            ? publishing.branch.trim()
+            : null
+          const restoredHead = checkedOutput('git rev-parse HEAD')
+          const restoredBranch = checkedOutput('git symbolic-ref --quiet --short HEAD') || ''
+          const cleanAfterAbort = checkedOutput('git status --porcelain -uall') === ''
+          const noConflictsAfterAbort = checkedOutput('git diff --name-only --diff-filter=U') === ''
+          const absenceScript = [
+            "const { lstatSync, statSync, readdirSync } = require('node:fs')",
+            "const { dirname } = require('node:path')",
+            "const target = process.argv[1]",
+            "try { lstatSync(target); process.exitCode = 1 } catch (error) { if (error?.code !== 'ENOENT') process.exitCode = 1; else { try { const parent = dirname(target); if (statSync(parent).isDirectory()) { readdirSync(parent); process.exitCode = 0 } else process.exitCode = 1 } catch { process.exitCode = 1 } } }",
+          ].join(';')
+          const rebasePathAbsent = (path) => {
+            if (!path) return false
+            return checkedOutput(`${shellArg(process.execPath)} -e ${shellArg(absenceScript)} ${shellArg(path)}`) === ''
+          }
+          const rebaseMergePath = checkedOutput('git rev-parse --git-path rebase-merge')
+          const rebaseApplyPath = checkedOutput('git rev-parse --git-path rebase-apply')
+          const noRebaseInProgress = rebasePathAbsent(rebaseMergePath) && rebasePathAbsent(rebaseApplyPath)
+          const restorationProven = Boolean(restoredHead && restoredBranch === expectedBranch && cleanAfterAbort && noRebaseInProgress && noConflictsAfterAbort)
+          const abortDiagnosis = !aborted?.ok && restorationProven ? 'aborted.ok was false while HEAD, branch, cleanliness, rebase-state absence, and conflict absence proved restoration' : null
+          if (abortDiagnosis !== null) {
+            io.log(recordRow({ at: io.now(), rebase_restore_diagnosis: abortDiagnosis }))
+          }
+          if (!restorationProven) {
             const found = restoredHead || '(unavailable)'
             return { escalation: escalate('rebase', `the rebase onto ${base} failed${conflictDetail}; restoration is UNPROVEN — HEAD found after abort: ${found}`, [], { commit: S.commit }, { files: escalationFiles(conflicted), base, commit: S.commit }) }
           }
@@ -8502,6 +8532,7 @@ function runTask(ctx, io, crash) {
             io.writeFile(bounce, [
               `# Rebase conflict bounce (round ${bounceNumber})`, '',
               `The rebase onto ${base} failed after the accepted commit ${S.commit}. Restoration was proven at HEAD ${restoredHead}.`,
+              ...(abortDiagnosis ? [`Diagnosis: ${abortDiagnosis}.`] : []),
               `Recovery route: ${mechanical ? 'mechanical anchor repair was refused' : (why || 'the conflict requires builder reconciliation')}.`,
               '', 'Conflicted paths:', ...conflicted.map((path) => `- ${path}`),
               '', 'Combined conflict hunks (captured before abort):', hunkText,

@@ -197,6 +197,7 @@ export const ADVISOR_BOOT_REFUSALS = Object.freeze([
   'endpoint-unset', 'endpoint-not-local', 'endpoint-credentials',
   'model-unset', 'model-unsafe', 'endpoint-dead',
 ])
+const ADVISED_ROLES = Object.freeze(new Set(['builder', 'planner']))
 export const SAFE_MODEL = /^[A-Za-z0-9][A-Za-z0-9._:\/-]{0,127}$/
 
 export function classifyAdvisorCell({ endpoint, model } = {}) {
@@ -283,7 +284,7 @@ function advisorRefusal(reason, role, record) {
       ? 'use a pane transport'
       : reason.startsWith('endpoint-') || reason.startsWith('model-')
         ? `point CREW_ADVISOR_ENDPOINT at an http(s) endpoint reachable from this machine (this boot reached for ${where}) and CREW_ADVISOR_MODEL at a safe model id`
-        : 'use a register-granted builder advisor seat'
+        : 'use a register-granted builder or planner advisor seat'
   return Object.assign(new Error(`advisor seat ${role} refuses to boot: ${reason} — ${fix}`), {
     reason, code: 'advisor-refusal', role, stage: reason === 'endpoint-dead' ? 'advisor-preflight' : undefined,
   })
@@ -292,7 +293,7 @@ function advisorRefusal(reason, role, record) {
 export async function assertAdvisorCellLive({ record, adapters = {}, taskSlug, probeEndpoint = probeLocalEndpoint, note = noteRunlessCellFailure } = {}) {
   if (!record?.granted?.length) return
   for (const role of record.granted) {
-    if (role !== 'builder') throw advisorRefusal('role-unsupported', role, record)
+    if (!ADVISED_ROLES.has(role)) throw advisorRefusal('role-unsupported', role, record)
     const adapter = adapters[role]
     if (adapter?.name !== 'pi') throw advisorRefusal('adapter-unsupported', role, record)
     if (adapter?.transport !== DEFAULT_TRANSPORT) throw advisorRefusal('transport-unsupported', role, record)

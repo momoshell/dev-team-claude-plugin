@@ -1,12 +1,15 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { mkdirSync, readFileSync, writeFileSync, rmSync, existsSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import * as advisor from './advisor.ts'
-import { ADVISOR_BOOT_REFUSALS as bootAdvisorRefusals, classifyAdvisorCell as bootClassifyAdvisorCell } from '../../crew.mjs'
+import {
+  ADVISOR_BOOT_REFUSALS as bootAdvisorRefusals, classifyAdvisorCell as bootClassifyAdvisorCell,
+  DEFAULT_TRANSPORT, advisorBootRecord, assertAdvisorCellLive,
+} from '../../crew.mjs'
+import { scratchDir } from '../../../test/helpers.mjs'
 function fixture() {
-  const root = mkdtempSync(join(tmpdir(), 'advisor-test-'))
+  const root = scratchDir('advisor-test-')
   const taskDir = join(root, 'task')
   const returns = join(root, 'returns')
   const tree = join(root, 'tree')
@@ -137,7 +140,7 @@ test('attach is default-off, refuses wrong roles, and journals before handlers',
   const off = pi(); await advisor.attachAdvisor(off, { env: { CREW_ROLE: 'builder' }, deps: { appendFile: () => { throw new Error('must stay inert') } } })
   assert.equal(off.handlers.length, 0)
   const refused = sink(); const wrong = pi()
-  await assert.rejects(() => advisor.attachAdvisor(wrong, { env: env({ CREW_ROLE: 'planner' }), deps: refused }), /role-unsupported/)
+  await assert.rejects(() => advisor.attachAdvisor(wrong, { env: env({ CREW_ROLE: 'lead' }), deps: refused }), /role-unsupported/)
   assert.equal(wrong.handlers.length, 0)
 
   const live = sink(); const order = []; const p = pi()
@@ -317,4 +320,206 @@ test('every delta source is redacted before it is stored, sent or frozen', async
   } finally {
     rmSync(cleanFixture.root, { recursive: true, force: true })
   }
+})
+
+test('A1 planner seat with grant is advised', async () => {
+  const f = fixture(); const journal = sink(); const p = pi(); const fetchFn = fetcher()
+  await advisor.attachAdvisor(p, { env: env({ CREW_ROLE: 'planner', CREW_TASK_DIR: f.taskDir }), deps: {
+    ...journal, taskDir: f.taskDir, fetchFn,
+  } })
+  assert.deepEqual(p.handlers.map(([event]) => event).sort(), ['tool_call', 'tool_result'])
+  assert.equal(journal.rows.some((row) => row.advisor_boot?.role === 'planner'), true)
+  assert.equal(fetchFn.posts.length, 0)
+})
+
+test('B1 lead seat remains role-unsupported', async () => {
+  const f = fixture(); const journal = sink(); const p = pi(); let probes = 0
+  await assert.rejects(
+    () => advisor.attachAdvisor(p, { env: env({ CREW_ROLE: 'lead', CREW_TASK_DIR: f.taskDir }), deps: {
+      ...journal, taskDir: f.taskDir, fetchFn: async () => { probes += 1; return { status: 200 } },
+    } }),
+    (err) => { assert.equal(err.reason, 'role-unsupported'); return true },
+  )
+  assert.equal(probes, 0)
+  assert.equal(p.handlers.length, 0)
+  assert.equal(journal.rows[0]?.advisor_unavailable?.reason, 'role-unsupported')
+})
+
+test('C1 no-write seats remain role-unsupported', async () => {
+  for (const role of ['tech-lead', 'reviewer']) {
+    const f = fixture(); const journal = sink(); const p = pi(); let probes = 0
+    await assert.rejects(
+      () => advisor.attachAdvisor(p, { env: env({ CREW_ROLE: role, CREW_TASK_DIR: f.taskDir }), deps: {
+        ...journal, taskDir: f.taskDir, fetchFn: async () => { probes += 1; return { status: 200 } },
+      } }),
+      (err) => { assert.equal(err.reason, 'role-unsupported'); return true },
+    )
+    assert.equal(probes, 0)
+    assert.equal(p.handlers.length, 0)
+    assert.equal(journal.rows[0]?.advisor_unavailable?.reason, 'role-unsupported')
+  }
+})
+
+test('D1 builder advisor behavior remains byte-identical', async () => {
+  const f = fixture(); const journal = sink(); const fetchFn = fetcher({
+    class: 'edge-path', severity: 'medium', claim: 'the builder path answers EPERM', evidence: ['lib/widget.mjs:1'],
+  })
+  const a = advisor.createAdvisor({ env: env({ CREW_TASK_DIR: f.taskDir }), deps: {
+    cwd: f.tree, taskDir: f.taskDir, appendFile: journal.appendFile,
+    readFile: (path) => readFileSync(path, 'utf8'), fileMtime: () => 2, fetchFn,
+  } })
+  const editInput = { path: join(f.tree, 'lib', 'widget.mjs'), edits: [{ oldText: 'a', newText: 'a' }] }
+  a.onToolCall(call('edit', 'edit', editInput), {})
+  a.onToolResult(result('edit', 'edit', editInput, 'ok'), {})
+  const failureInput = { command: 'npm test' }
+  for (const id of ['failure-1', 'failure-2']) {
+    a.onToolCall(call(id, 'bash', failureInput), {})
+    a.onToolResult(result(id, 'bash', failureInput, 'not ok 1 - broken (4ms)', true), {})
+  }
+  await a.settled()
+  assert.equal(fetchFn.posts.length, 1)
+  const expectedBody = JSON.stringify({
+    model: 'qwen3-coder', temperature: 0, stream: false,
+    messages: [
+      { role: 'system', content: 'Review the builder delta for exactly two judgment classes: edge-path (checklist B1: answer EPERM, unknown, interrupted, and empty paths) and over-claim (checklist B2: record no verdict stronger than what was measured). Return JSON with class, severity, claim, and evidence.' },
+      { role: 'user', content: JSON.stringify({
+        trigger: 'tier0-note',
+        delta: [
+          { text: 'lib/widget.mjs:1: a\nlib/widget.mjs:2: b\nlib/widget.mjs:3: c\nlib/widget.mjs:4: ', anchors: ['lib/widget.mjs:1', 'lib/widget.mjs:2', 'lib/widget.mjs:3', 'lib/widget.mjs:4'] },
+          { text: 'broken', anchors: [] },
+          { text: 'broken', anchors: [] },
+        ],
+      }) },
+    ],
+  })
+  assert.equal(fetchFn.posts[0].body, expectedBody)
+  assert.deepEqual(advisor.TIER0_KINDS, [
+    'scope-breach', 'tripwire-touch', 'repeated-failure', 'growth-divergence',
+  ])
+})
+
+test('E1 unset grant has a live no-journaling witness', async () => {
+  for (const role of ['builder', 'planner', 'lead', 'tech-lead', 'reviewer']) {
+    const f = fixture(); const p = pi(); let appends = 0; let probes = 0
+    const values = env({ CREW_ROLE: role, CREW_TASK_DIR: f.taskDir }); delete values.CREW_ADVISOR
+    await advisor.attachAdvisor(p, { env: values, deps: {
+      taskDir: f.taskDir,
+      appendFile: () => { appends += 1 },
+      fetchFn: async () => { probes += 1; return { status: 200 } },
+    } })
+    assert.equal(appends, 0, role)
+    assert.equal(probes, 0, role)
+    assert.equal(p.handlers.length, 0, role)
+  }
+})
+
+test('F1 advisor refusal and judgment vocabularies remain frozen', () => {
+  assert.equal(Object.isFrozen(advisor.UNAVAILABLE_REASONS), true)
+  assert.deepEqual(advisor.UNAVAILABLE_REASONS, [
+    'role-unsupported', 'endpoint-unset', 'endpoint-not-local',
+    'endpoint-credentials', 'model-unset', 'model-unsafe', 'endpoint-dead',
+  ])
+  assert.equal(Object.isFrozen(advisor.JUDGMENT_CLASSES), true)
+  assert.deepEqual(advisor.JUDGMENT_CLASSES, ['edge-path', 'over-claim'])
+  assert.equal(Object.isFrozen(bootAdvisorRefusals), true)
+  assert.deepEqual(bootAdvisorRefusals, [
+    'role-unsupported', 'adapter-unsupported', 'transport-unsupported',
+    'endpoint-unset', 'endpoint-not-local', 'endpoint-credentials',
+    'model-unset', 'model-unsafe', 'endpoint-dead',
+  ])
+})
+
+test('G1 boot-admitted planner receives plan and gate judgment context', async () => {
+  const f = fixture()
+  assert.equal(existsSync(join(f.taskDir, advisor.TRIPWIRE_MANIFEST_FILE)), true)
+  assert.equal(existsSync(join(f.root, 'returns')), true)
+  const endpoint = 'http://127.0.0.1:11434/v1'
+  const plannerEnv = env({ CREW_ROLE: 'planner', CREW_TASK_DIR: f.taskDir })
+  const bootAdapters = { planner: { name: 'pi', transport: DEFAULT_TRANSPORT, grants: { advisor: true } } }
+  const record = advisorBootRecord({ adapters: bootAdapters, env: plannerEnv })
+  let probes = 0
+  await assertAdvisorCellLive({ record, adapters: bootAdapters,
+    probeEndpoint: async () => { probes += 1; return true },
+    note: () => { throw new Error('planner boot should be admitted') },
+  })
+  assert.equal(probes, 1)
+
+  const planPath = join(f.taskDir, 'plan.md')
+  const gatePath = join(f.taskDir, 'gate.mjs')
+  writeFileSync(planPath, '# Plan\n- handle empty output\n')
+  writeFileSync(gatePath, 'export const gate = true\n')
+  writeFileSync(join(f.taskDir, 'private.md'), 'must not be sent\n')
+  const journal = sink(); const fetchFn = fetcher({
+    class: 'edge-path', severity: 'medium', claim: 'the plan covers the boundary', evidence: ['task/plan.md:1'],
+  })
+  const a = advisor.createAdvisor({ env: plannerEnv, deps: {
+    cwd: f.tree, taskDir: f.taskDir, appendFile: journal.appendFile,
+    readFile: (path) => readFileSync(path, 'utf8'), fileMtime: () => 2, fetchFn,
+  } })
+  const planInput = { path: planPath, content: readFileSync(planPath, 'utf8') }
+  a.onToolResult(result('plan', 'write', planInput, 'ok'), {})
+  const gateInput = { path: gatePath, edits: [{ oldText: 'x', newText: readFileSync(gatePath, 'utf8') }] }
+  a.onToolResult(result('gate', 'edit', gateInput, 'ok'), {})
+  for (const [id, path] of [
+    ['private', join(f.taskDir, 'private.md')],
+    ['nested', join(f.taskDir, 'nested', 'plan.md')],
+    ['escape', join(f.taskDir, '..', 'escape.md')],
+  ]) {
+    a.onToolResult(result(id, 'read', { path, offset: 1 }, 'not planner context'), {})
+  }
+  const failureInput = { command: 'npm test' }
+  for (const id of ['planner-failure-1', 'planner-failure-2']) {
+    a.onToolCall(call(id, 'bash', failureInput), {})
+    a.onToolResult(result(id, 'bash', failureInput, 'not ok 1 - planner failure (4ms)', true), {})
+  }
+  await a.settled()
+  assert.equal(fetchFn.posts.length, 1)
+  const request = JSON.parse(fetchFn.posts[0].body)
+  assert.equal(request.messages[0].content, advisor.PLANNER_SYSTEM_PROMPT)
+  const user = JSON.parse(request.messages[1].content)
+  const labels = [...new Set(user.delta.flatMap((entry) => String(entry.text).split('\n')
+    .map((line) => /^([^:]+(?:\/[^:]+)*):\d+: /.exec(line)?.[1]).filter(Boolean)))]
+  assert.deepEqual(labels.sort(), ['task/gate.mjs', 'task/plan.md'])
+  assert.equal(user.delta.some((entry) => String(entry.text).includes('private.md')), false)
+  assert.equal(user.delta.some((entry) => String(entry.text).includes('escape.md')), false)
+})
+
+test('I1 extension and boot role gates agree', async () => {
+  const roles = ['builder', 'planner', 'lead', 'tech-lead', 'reviewer']
+  const expected = [true, true, false, false, false]
+  const extension = []
+  const boot = []
+  for (const role of roles) {
+    const f = fixture(); const p = pi(); const journal = sink(); const values = env({ CREW_ROLE: role, CREW_TASK_DIR: f.taskDir })
+    try {
+      await advisor.attachAdvisor(p, { env: values, deps: {
+        ...journal, taskDir: f.taskDir, fetchFn: async () => ({ status: 200 }),
+      } })
+      extension.push(true)
+    } catch (error) {
+      assert.equal(error.reason, 'role-unsupported')
+      extension.push(false)
+    }
+    const adapters = { [role]: { name: 'pi', transport: DEFAULT_TRANSPORT, grants: { advisor: true } } }
+    const record = advisorBootRecord({ adapters, env: values })
+    try {
+      await assertAdvisorCellLive({ record, adapters, probeEndpoint: async () => true })
+      boot.push(true)
+    } catch (error) {
+      assert.equal(error.reason, 'role-unsupported')
+      boot.push(false)
+    }
+  }
+  assert.deepEqual(extension, expected)
+  assert.deepEqual(boot, expected)
+  assert.deepEqual(extension, boot)
+})
+
+test('K1 planner edge-path gloss fits plan and gate', () => {
+  assert.equal(advisor.BUILDER_SYSTEM_PROMPT, 'Review the builder delta for exactly two judgment classes: edge-path (checklist B1: answer EPERM, unknown, interrupted, and empty paths) and over-claim (checklist B2: record no verdict stronger than what was measured). Return JSON with class, severity, claim, and evidence.')
+  assert.equal(advisor.PLANNER_SYSTEM_PROMPT, 'Review the planner delta for exactly two judgment classes: edge-path (a plan or gate omits or mishandles a required boundary, failure case, or acceptance path) and over-claim (a Ground truth citation that does not hold at the ref where the plan was written). Return JSON with class, severity, claim, and evidence.')
+  assert.match(advisor.PLANNER_SYSTEM_PROMPT, /plan or gate omits or mishandles a required boundary, failure case, or acceptance path/)
+  assert.match(advisor.PLANNER_SYSTEM_PROMPT, /Ground truth citation that does not hold at the ref where the plan was written/)
+  assert.doesNotMatch(advisor.PLANNER_SYSTEM_PROMPT, /EPERM, unknown, interrupted, and empty paths/)
+  assert.deepEqual(advisor.JUDGMENT_CLASSES, ['edge-path', 'over-claim'])
 })

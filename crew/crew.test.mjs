@@ -19,6 +19,7 @@ import {
   resolveTimeoutS, TIMEOUT_S_REFUSAL, TIMEOUT_S_DEFAULT,
   BOOT_DESCENDANT_REFUSALS, descendantRefusal, refuseStaleDescendants,
   MEMORY_ROLES, memoryConfig, CHARTER_BASELINE_BYTES, CHARTER_SOURCE_BUDGET, CHARTER_SOURCE_TOTAL_BUDGET, CHARTER_CEILINGS, CHARTER_BUDGET_REFUSAL, CHARTER_UNMEASURED_CAUSES, charterFileBytes, compiledCharterBytes, charterBudgetRefusals, charterSourceRefusals, assertCharterBudgets, charterBytesRecord, CAPABILITY_REFUSALS, loadCapabilities,
+  agentRegisterEntry, assertAgentProvider, assertAgentTransport, assertAgentRefusals,
   grantsFor, assertGrantsBacked, assertFanoutCoherent, deniedFanout, EMPTY_GRANTS, probeLocalEndpoint,
   effectiveTools, ADVISOR_CONFIG_VERSION, ADVISOR_BOOT_REFUSALS, SAFE_MODEL, classifyAdvisorCell,
   advisorBootRecord, advisorJournalRecord, advisorEndpointOrigin, assertAdvisorCellLive,
@@ -790,7 +791,12 @@ test('resolveAdapters tags a refusal with the role and roster cell it rejected',
 test('resolveAdapters boots headless claude and refuses the unshipped pi pair', async () => {
   const r = await resolveAdapters(['builder'], { headless: 'builder' })
   assert.equal(r.builder.transport, 'headless-json')
-  await assert.rejects(() => resolveAdapters(['builder'], { headless: 'builder', 'agent-builder': 'pi' }), /adapter-pi.*headless-json/)
+  await assert.rejects(
+    () => resolveAdapters(['builder'], { headless: 'builder', 'agent-builder': 'pi' }),
+    (err) => err.reason === 'capability-shortfall'
+      && /headless-json/.test(err.message)
+      && /coding_agents\.pi\.transports/.test(err.message),
+  )
 })
 
 test('seat requirements deliver pi scouts, preserve genuine shortfalls, and reject malformed overrides', async () => {
@@ -7034,8 +7040,17 @@ function capabilityRegister(overrides = {}) {
       reviewer: grant(), 'tech-lead': grant(),
     },
     local_providers: {},
+    coding_agents: {
+      pi: { providers: ['openai', 'anthropic', 'llama-swap'], transports: ['pane', 'headless-rpc'], adapter: 'crew/adapters/adapter-pi.mjs', refuses: ['mcp_servers'] },
+      claude: { providers: ['anthropic'], transports: ['pane', 'headless-json'], adapter: 'crew/adapters/adapter-claude.mjs', refuses: ['extensions', 'skills', 'local_provider'] },
+    },
   }
-  return { ...base, ...overrides, roles: { ...base.roles, ...(overrides.roles || {}) } }
+  const local_providers = { ...base.local_providers, ...(overrides.local_providers || {}) }
+  const coding_agents = { ...base.coding_agents, ...(overrides.coding_agents || {}) }
+  if (!overrides.coding_agents?.pi && Object.keys(local_providers).length) {
+    coding_agents.pi = { ...coding_agents.pi, providers: [...new Set([...coding_agents.pi.providers, ...Object.keys(local_providers)])] }
+  }
+  return { ...base, ...overrides, local_providers, coding_agents, roles: { ...base.roles, ...(overrides.roles || {}) } }
 }
 
 function capabilityFixtureRoot() {
@@ -7051,6 +7066,318 @@ function capabilityFixtureRoot() {
   return root
 }
 
+const admissionSeat = ({ agent = 'claude', provider = 'anthropic', id = 'claude-opus-5', fallback } = {}) => ({
+  agent, provider, id, effort: 'medium', model: null, ...(fallback ? { fallback } : {}),
+})
+
+const admissionRegistry = ({ local = false, claudeProviders = null, piProviders = null, roles = {} } = {}) => {
+  const base = capabilityRegister()
+  const local_providers = local
+    ? { 'local-pi': { settings: 'crew/pi/settings.json', pi_provider: 'local-pi', base_url: 'http://127.0.0.1:11434/v1' } }
+    : {}
+  const coding_agents = {
+    ...base.coding_agents,
+    pi: { ...base.coding_agents.pi, ...(piProviders ? { providers: piProviders } : {}) },
+    claude: { ...base.coding_agents.claude, ...(claudeProviders ? { providers: claudeProviders } : {}) },
+  }
+  return capabilityRegister({ local_providers, coding_agents, roles })
+}
+
+test('C1 unsupported primary roster pair refuses before boot state exists', async () => {
+  const seen = []
+  const probed = []
+  const seat = admissionSeat({ agent: 'claude', provider: 'openai', id: 'gpt-5.6-luna' })
+  await assert.rejects(
+    () => resolveAdapters(['builder'], {}, { builder: seat }, {
+      register: capabilityRegister(),
+      exists: (path) => { seen.push(path); return existsSync(path) },
+      probeEndpoint: async (url) => { probed.push(url); return true },
+    }),
+    (err) => err.reason === 'agent-provider-unsupported'
+      && /seat builder/.test(err.message)
+      && /coding_agents\.claude\.providers/.test(err.message),
+  )
+  assert.deepEqual(seen, [])
+  assert.deepEqual(probed, [])
+})
+
+test('C1F unsupported fallback roster pair refuses before boot state exists', async () => {
+  const seen = []
+  const probed = []
+  const seat = admissionSeat({
+    agent: 'claude', provider: 'anthropic', id: 'claude-opus-5',
+    fallback: [{ agent: 'claude', provider: 'openai', id: 'gpt-5.6-luna', effort: 'medium' }],
+  })
+  await assert.rejects(
+    () => resolveAdapters(['builder'], {}, { builder: seat }, {
+      register: capabilityRegister(),
+      exists: (path) => { seen.push(path); return existsSync(path) },
+      probeEndpoint: async (url) => { probed.push(url); return true },
+    }),
+    (err) => err.reason === 'agent-provider-unsupported'
+      && /seat builder/.test(err.message)
+      && /coding_agents\.claude\.providers/.test(err.message)
+      && /openai/.test(err.message),
+  )
+  assert.deepEqual(seen, [])
+  assert.deepEqual(probed, [])
+})
+
+test('C1O raw model override discards its roster fallback admission checks', async () => {
+  const seen = []
+  const seat = {
+    agent: 'claude', provider: 'openai', id: 'ignored-by-override', model: 'raw-claude-model', effort: 'medium',
+    fallback: [{ agent: 'claude', provider: 'openai', id: 'gpt-5.6-luna', effort: 'medium' }],
+  }
+  await assert.doesNotReject(
+    () => resolveAdapters(['builder'], {}, { builder: seat }, {
+      register: capabilityRegister(),
+      exists: (path) => { seen.push(path); return existsSync(path) },
+      probeEndpoint: async () => { throw new Error('raw override must not probe a fallback') },
+    }),
+  )
+  assert.equal(seen.some((path) => /adapters\/adapter-claude/.test(path)), true)
+})
+
+test('C1R declared grant shortfalls refuse before adapter import', async () => {
+  const server = { name: 'search', command: { bin: '/opt/mcp-search', args: [] }, url: null }
+  const cases = [
+    { label: 'extension', agent: 'claude', grant: { extensions: ['crew/pi/extensions/builderloop.ts'] } },
+    { label: 'skill', agent: 'claude', grant: { skills: ['crew/pi/skills/scout.md'] } },
+    { label: 'MCP', agent: 'pi', grant: { by_agent: { pi: { mcp_servers: [server] } } } },
+  ]
+  for (const { agent, grant } of cases) {
+    const root = capabilityFixtureRoot()
+    try {
+      const base = capabilityRegister()
+      const role = { ...base.roles.builder, ...grant }
+      const register = capabilityRegister({ roles: { builder: role } })
+      const seat = admissionSeat({ agent, provider: agent === 'pi' ? 'openai' : 'anthropic', id: agent === 'pi' ? 'gpt-5.6-luna' : 'claude-opus-5' })
+      const seen = []
+      await assert.rejects(
+        () => resolveAdapters(['builder'], {}, { builder: seat }, {
+          register, root,
+          exists: (path) => { seen.push(path); return existsSync(path) },
+          probeEndpoint: async () => { throw new Error('must not probe') },
+        }),
+        (err) => err.reason === 'grant-unsupported'
+          && /coding_agents\.(claude|pi)\.refuses/.test(err.message),
+      )
+      assert.equal(seen.some((path) => /adapters\/adapter-/.test(path)), false)
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  }
+})
+
+test('C1RLP primary local-provider shortfall refuses before adapter import', async () => {
+  const base = admissionRegistry({ local: true, claudeProviders: ['anthropic', 'local-pi'] })
+  const seat = admissionSeat({ agent: 'claude', provider: 'local-pi', id: 'qwen3-coder' })
+  const seen = []
+  const probed = []
+  await assert.rejects(
+    () => resolveAdapters(['builder'], {}, { builder: seat }, {
+      register: base,
+      exists: (path) => { seen.push(path); return existsSync(path) },
+      probeEndpoint: async (url) => { probed.push(url); return true },
+    }),
+    (err) => err.reason === 'grant-unsupported'
+      && /coding_agents\.claude\.refuses/.test(err.message)
+      && /primary cell provider "local-pi"/.test(err.message)
+      && !/fallback cell provider "local-pi"/.test(err.message),
+  )
+  assert.equal(seen.some((path) => /adapters\/adapter-/.test(path)), false)
+  assert.deepEqual(probed, [])
+})
+
+test('C1RLF fallback local-provider shortfall refuses before adapter import', async () => {
+  const register = admissionRegistry({ local: true, claudeProviders: ['anthropic', 'local-pi'] })
+  const seat = admissionSeat({
+    agent: 'claude', provider: 'anthropic', id: 'claude-opus-5',
+    fallback: [{ agent: 'claude', provider: 'local-pi', id: 'qwen3-coder', effort: 'medium' }],
+  })
+  const seen = []
+  const probed = []
+  await assert.rejects(
+    () => resolveAdapters(['builder'], {}, { builder: seat }, {
+      register,
+      exists: (path) => { seen.push(path); return existsSync(path) },
+      probeEndpoint: async (url) => { probed.push(url); return true },
+    }),
+    (err) => err.reason === 'grant-unsupported'
+      && /coding_agents\.claude\.refuses/.test(err.message)
+      && /fallback cell provider "local-pi"/.test(err.message)
+      && !/primary cell provider "local-pi"/.test(err.message),
+  )
+  assert.equal(seen.some((path) => /adapters\/adapter-/.test(path)), false)
+  assert.deepEqual(probed, [])
+})
+
+test('G1M primary adapter model disagreement refuses', async () => {
+  const base = capabilityRegister()
+  const register = capabilityRegister({ coding_agents: {
+    pi: { ...base.coding_agents.pi, providers: ['openai', 'anthropic', 'llama-swap', 'google'] },
+  } })
+  const seat = admissionSeat({ agent: 'pi', provider: 'google', id: 'gemini-3-pro' })
+  await assert.rejects(
+    () => resolveAdapters(['builder'], { 'agent-builder': 'pi' }, { builder: seat }, { register }),
+    (err) => err.reason === 'agent-provider-unsupported'
+      && /google/.test(err.message) && /coding_agents\.pi\.providers/.test(err.message),
+  )
+})
+
+test('G1MF fallback adapter model disagreement refuses', async () => {
+  const base = capabilityRegister()
+  const register = capabilityRegister({ coding_agents: {
+    pi: { ...base.coding_agents.pi, providers: ['openai', 'anthropic', 'llama-swap', 'google'] },
+  } })
+  const seat = admissionSeat({
+    agent: 'pi', provider: 'openai', id: 'gpt-5.6-luna',
+    fallback: [{ agent: 'pi', provider: 'google', id: 'gemini-3-pro', effort: 'medium' }],
+  })
+  await assert.rejects(
+    () => resolveAdapters(['builder'], { 'agent-builder': 'pi' }, { builder: seat }, { register }),
+    (err) => err.reason === 'agent-provider-unsupported'
+      && /google/.test(err.message) && /coding_agents\.pi\.providers/.test(err.message),
+  )
+})
+
+function assertAdapterPathMismatch(agent, adapter) {
+  const base = capabilityRegister()
+  const register = capabilityRegister({ coding_agents: {
+    [agent]: { ...base.coding_agents[agent], adapter },
+  } })
+  assert.throws(
+    () => loadCapabilities({ register }),
+    (err) => err.reason === 'register-invalid'
+      && err.message.includes(`coding_agents.${agent}.adapter`),
+  )
+}
+
+test('G1A adapter path disagreement refuses', () => {
+  assertAdapterPathMismatch('pi', 'crew/adapters/adapter-claude.mjs')
+})
+
+test('RV1-1 loader rejects coding-agent adapter key/path drift', () => {
+  assertAdapterPathMismatch('claude', 'crew/adapters/adapter-pi.mjs')
+})
+
+test('G1T adapter transport disagreement refuses', async () => {
+  const base = capabilityRegister()
+  const register = capabilityRegister({ coding_agents: {
+    pi: { ...base.coding_agents.pi, transports: ['pane'] },
+  } })
+  const seat = admissionSeat({ agent: 'pi', provider: 'openai', id: 'gpt-5.6-luna' })
+  await assert.rejects(
+    () => resolveAdapters(['builder'], { 'agent-builder': 'pi', 'headless-rpc': 'builder' }, { builder: seat }, { register }),
+    (err) => err.reason === 'capability-shortfall' && /coding_agents\.pi\.transports/.test(err.message),
+  )
+})
+
+function shadowAdmission({ candidate, registry = loadCapabilities(), transport = 'pane', ladder = loadLadder(), root = ROOT } = {}) {
+  const rosterFor = { schema_version: 1, tiers: { build: { builder: candidate } } }
+  const seen = []
+  return {
+    roster: rosterFor,
+    seats: rosterFor.tiers.build,
+    sources: { builder: { model: 'roster' } },
+    adapters: { builder: { transport } },
+    registry, ladder, root, seen,
+    existsSync: (path) => { seen.push(path); return existsSync(path) },
+  }
+}
+
+test('G1TR inverse transport drift is a closed register-invalid refusal', async () => {
+  const base = capabilityRegister()
+  const register = capabilityRegister({ coding_agents: {
+    claude: { ...base.coding_agents.claude, transports: ['pane', 'headless-json', 'headless-rpc'] },
+  } })
+  const seat = admissionSeat({ agent: 'claude', provider: 'anthropic', id: 'claude-opus-5' })
+  await assert.rejects(
+    () => resolveAdapters(['builder'], { 'headless-rpc': 'builder' }, { builder: seat }, { register }),
+    (err) => err.reason === 'register-invalid'
+      && /adapter refusal/.test(err.message)
+      && /coding_agents\.claude\.transports/.test(err.message)
+      && /headless-rpc/.test(err.message),
+  )
+})
+
+test('RV1-1/RV1-2 shadow fit admits a shipped roster candidate through post-import checks', async () => {
+  const candidate = { provider: 'openai', id: 'gpt-5.6-luna', agent: 'pi', effort: 'max' }
+  const input = shadowAdmission({ candidate })
+  const record = await shadowPickBoot({ ...input, dbPath: join(tmpdir(), 'shadow-rv1-admit-no-ledger.db') })
+  assert.equal(record.seats.builder.candidates[0].excluded_by, null)
+})
+
+test('H1A shadow missing agent exclusion names the register entry', async () => {
+  const candidate = { provider: 'openai', id: 'gpt-5.6-luna', agent: 'missing-shadow-agent', effort: 'max' }
+  const input = shadowAdmission({ candidate })
+  const record = await shadowPickBoot({ ...input, dbPath: join(tmpdir(), 'shadow-h1a-no-ledger.db') })
+  const result = record.seats.builder.candidates[0]
+  assert.equal(result.excluded_by.reason, 'agent-unresolved')
+  assert.match(result.excluded_by.detail, /coding_agents\.missing-shadow-agent/)
+  assert.equal(input.seen.some((path) => /adapters\/adapter-missing-shadow-agent/.test(path)), false)
+})
+
+test('H1P shadow provider exclusion names the register entry', async () => {
+  const candidate = { provider: 'openai', id: 'gpt-5.6-luna', agent: 'claude', effort: 'max' }
+  const input = shadowAdmission({ candidate })
+  const record = await shadowPickBoot({ ...input, dbPath: join(tmpdir(), 'shadow-h1p-no-ledger.db') })
+  const result = record.seats.builder.candidates[0]
+  assert.equal(result.excluded_by.reason, 'capability-shortfall')
+  assert.match(result.excluded_by.detail, /coding_agents\.claude\.providers/)
+  assert.equal(input.seen.some((path) => /adapters\/adapter-claude/.test(path)), false)
+})
+
+test('H1T shadow transport exclusion names the register entry', async () => {
+  const candidate = { provider: 'openai', id: 'gpt-5.6-luna', agent: 'pi', effort: 'max' }
+  const input = shadowAdmission({ candidate, transport: 'headless-json' })
+  const record = await shadowPickBoot({ ...input, dbPath: join(tmpdir(), 'shadow-h1t-no-ledger.db') })
+  const result = record.seats.builder.candidates[0]
+  assert.equal(result.excluded_by.reason, 'capability-shortfall')
+  assert.match(result.excluded_by.detail, /coding_agents\.pi\.transports/)
+  assert.equal(input.seen.some((path) => /adapters\/adapter-pi/.test(path)), false)
+})
+
+test('H1RG shadow grant capability refusal names the register entry', async () => {
+  const server = { name: 'search', command: { bin: '/opt/mcp-search', args: [] }, url: null }
+  const cases = [
+    { agent: 'claude', provider: 'anthropic', id: 'claude-opus-5', extension: 'crew/pi/extensions/builderloop.ts' },
+    { agent: 'claude', provider: 'anthropic', id: 'claude-opus-5', skill: 'crew/pi/skills/scout.md' },
+    { agent: 'pi', provider: 'openai', id: 'gpt-5.6-luna', mcp_servers: [server] },
+  ]
+  for (const grant of cases) {
+    const root = capabilityFixtureRoot()
+    try {
+      const base = capabilityRegister()
+      const register = capabilityRegister({ roles: {
+        builder: { ...base.roles.builder, ...(grant.extension ? { extensions: [grant.extension] } : {}), ...(grant.skill ? { skills: [grant.skill] } : {}), ...(grant.mcp_servers ? { mcp_servers: grant.mcp_servers } : {}) },
+      } })
+      const candidate = { provider: grant.provider, id: grant.id, agent: grant.agent, effort: 'max' }
+      const input = shadowAdmission({ candidate, registry: loadCapabilities({ register }), root })
+      const record = await shadowPickBoot({ ...input, dbPath: join(tmpdir(), 'shadow-h1rg-no-ledger.db') })
+      const result = record.seats.builder.candidates[0]
+      assert.equal(result.excluded_by.reason, 'capability-shortfall')
+      assert.match(result.excluded_by.detail, /coding_agents\.(claude|pi)\.refuses/)
+      assert.equal(input.seen.some((path) => /adapters\/adapter-(claude|pi)/.test(path)), false)
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  }
+})
+
+test('H1RL shadow local-provider refusal names the register entry', async () => {
+  const raw = JSON.parse(readFileSync(new URL('./capabilities.json', import.meta.url), 'utf8'))
+  raw.coding_agents.claude.providers.push('llama-swap')
+  const registry = loadCapabilities({ register: raw })
+  const ladder = loadLadder()
+  ladder.members = new Map(ladder.members)
+  ladder.members.set('llama-swap/qwen3.8-27b', 'utility')
+  const candidate = { provider: 'llama-swap', id: 'qwen3.8-27b', agent: 'claude', effort: 'max' }
+  const input = shadowAdmission({ candidate, registry, ladder })
+  const record = await shadowPickBoot({ ...input, dbPath: join(tmpdir(), 'shadow-h1rl-no-ledger.db') })
+  const result = record.seats.builder.candidates[0]
+  assert.equal(result.excluded_by.reason, 'capability-shortfall')
+  assert.match(result.excluded_by.detail, /coding_agents\.claude\.refuses/)
+  assert.equal(input.seen.some((path) => /adapters\/adapter-claude/.test(path)), false)
+})
+
 test('a charter requirement unmet by adapter and register refuses to boot from the closed reason set', async () => {
   const root = capabilityFixtureRoot()
   try {
@@ -7058,7 +7385,8 @@ test('a charter requirement unmet by adapter and register refuses to boot from t
     // neighbour a few tests down (crew/crew.test.mjs:4459).
     const CLOSED_REASONS = ['register-invalid', 'capability-shortfall', 'unknown-grant', 'grant-unsupported',
       'extension-missing', 'unknown-skill', 'agent-def-invalid', 'local-settings-missing',
-      'local-endpoint-dead', 'grant-contradicts-deny', 'vendor-extension-missing']
+      'local-endpoint-dead', 'grant-contradicts-deny', 'vendor-extension-missing',
+      'agent-unresolved', 'agent-provider-unsupported']
     await assert.rejects(
       () => resolveAdapters(['planner'], { 'agent-planner': 'pi' }, null, { register: capabilityRegister(), root }),
       (err) => {
@@ -7193,6 +7521,9 @@ test('resolveAdapters refuses a claude-seated local-provider cell before any sea
       local_providers: {
         'local-pi': { settings: 'crew/pi/settings.json', pi_provider: 'local-pi', base_url: 'http://127.0.0.1:11434/v1' },
       },
+      coding_agents: {
+        claude: { ...base.coding_agents.claude, providers: ['anthropic', 'local-pi'] },
+      },
       // A grant path nothing else in the fixture carries: if the resolver ever
       // reaches the NEXT seat, this path is the unambiguous evidence.
       roles: { planner: { ...base.roles.planner, requires: [], extensions: ['crew/pi/planner-marker.js'] } },
@@ -7210,15 +7541,12 @@ test('resolveAdapters refuses a claude-seated local-provider cell before any sea
         exists: (p) => { seen.push(p); return existsSync(p) },
       }),
       (err) => err.reason === 'grant-unsupported'
-        && /builder/.test(err.message) && /local-pi/.test(err.message) && /claude/.test(err.message),
+        && /builder/.test(err.message) && /claude/.test(err.message) && /local-pi/.test(err.message),
     )
-    // The endpoint was proven LIVE first, so this is the capability refusal and
-    // not a masked local-endpoint-dead, and the spies are wired to a real read.
-    assert.deepEqual(probed, ['http://127.0.0.1:11434/v1'])
-    assert.ok(seen.includes(settings))
-    // "before any seat spawns": the refusal short-circuits the resolution, so
-    // NOTHING was read for the next seat, let alone spawned for it.
-    assert.deepEqual(seen.filter((p) => p.includes('planner-marker')), [])
+    // The register refusal is consumed before endpoint probing or adapter
+    // resolution, so neither side effect is reached.
+    assert.deepEqual(probed, [])
+    assert.deepEqual(seen, [])
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
@@ -7340,7 +7668,7 @@ test('withheld register grants refuse planners with the closed capability-shortf
     await assertWithheld({}, base)
     await assertWithheld({}, agentsOnly)
     await assertWithheld({ 'agent-planner': 'pi' }, agentsOnly)
-    assert.deepEqual([...CAPABILITY_REFUSALS], ['register-invalid', 'capability-shortfall', 'unknown-grant', 'grant-unsupported', 'extension-missing', 'unknown-skill', 'agent-def-invalid', 'local-settings-missing', 'local-endpoint-dead', 'grant-contradicts-deny', 'vendor-extension-missing'])
+    assert.deepEqual([...CAPABILITY_REFUSALS], ['register-invalid', 'capability-shortfall', 'unknown-grant', 'grant-unsupported', 'extension-missing', 'unknown-skill', 'agent-def-invalid', 'local-settings-missing', 'local-endpoint-dead', 'grant-contradicts-deny', 'vendor-extension-missing', 'agent-unresolved', 'agent-provider-unsupported'])
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 

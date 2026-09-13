@@ -6,11 +6,12 @@ import { isAbsolute, join, dirname, resolve as resolvePath } from 'node:path'
 import {
   CAPABILITY_ADAPTERS, CAPABILITY_CLASSES, CAPABILITY_DELIVERY, CAPABILITY_PROBES,
   CAPABILITY_REFUSALS, EMPTY_GRANTS, REGISTER_ROOT, ACP_TRANSPORT_PROFILE, assertGrantsBacked,
+  agentRegisterEntry, assertAgentProvider, assertAgentTransport, assertAgentAdapter, assertAgentRefusals,
   declaredCapabilities, effectiveCapabilities, grantsFor, loadCapabilities, probeCapability,
   refuse, validateCapabilities, vendorRoots,
 } from './capabilities.mjs'
 import { seatCommand as claudeSeatCommand, capabilitiesFor } from './adapters/adapter-claude.mjs'
-import { seatCommand as piSeatCommand, capabilitiesFor as piCapabilitiesFor, PI_FIRST_PARTY_EXTENSION_TOOLS, PI_BUILTIN_TOOLS } from './adapters/adapter-pi.mjs'
+import { seatCommand as piSeatCommand, capabilitiesFor as piCapabilitiesFor, PI_FIRST_PARTY_EXTENSION_TOOLS, PI_BUILTIN_TOOLS, PI_PROVIDERS } from './adapters/adapter-pi.mjs'
 import { scratchDir } from '../test/helpers.mjs'
 
 test('G1T freezes the exhaustive first-party extension declaration table and matches registrars', () => {
@@ -49,8 +50,17 @@ function capabilityRegister(overrides = {}) {
       reviewer: grant(), 'tech-lead': grant(),
     },
     local_providers: {},
+    coding_agents: {
+      pi: { providers: ['openai', 'anthropic', 'llama-swap'], transports: ['pane', 'headless-rpc'], adapter: 'crew/adapters/adapter-pi.mjs', refuses: ['mcp_servers'] },
+      claude: { providers: ['anthropic'], transports: ['pane', 'headless-json'], adapter: 'crew/adapters/adapter-claude.mjs', refuses: ['extensions', 'skills', 'local_provider'] },
+    },
   }
-  return { ...base, ...overrides, roles: { ...base.roles, ...(overrides.roles || {}) } }
+  const local_providers = { ...base.local_providers, ...(overrides.local_providers || {}) }
+  const coding_agents = { ...base.coding_agents, ...(overrides.coding_agents || {}) }
+  if (!overrides.coding_agents?.pi && Object.keys(local_providers).length) {
+    coding_agents.pi = { ...coding_agents.pi, providers: [...new Set([...coding_agents.pi.providers, ...Object.keys(local_providers)])] }
+  }
+  return { ...base, ...overrides, local_providers, coding_agents, roles: { ...base.roles, ...(overrides.roles || {}) } }
 }
 
 test('MCP register definitions are closed and require exactly one command or URL', () => {
@@ -125,6 +135,118 @@ test('resolved MCP arrays and definitions are frozen, and backing rejects forged
   const forged = (mcp) => ({ ...grants, mcp_servers: [mcp] })
   assert.throws(() => assertGrantsBacked('builder', forged({ ...server, name: 'forged' }), loaded), (err) => err.reason === 'unknown-grant')
   assert.throws(() => assertGrantsBacked('builder', forged({ ...server, command: { bin: '/opt/changed', args: ['--stdio'] } }), loaded), (err) => err.reason === 'unknown-grant')
+})
+
+test('A1 coding agent register validates as a closed schema', () => {
+  const schema = JSON.parse(readFileSync(new URL('./capabilities.schema.json', import.meta.url), 'utf8'))
+  const shipped = JSON.parse(readFileSync(new URL('./capabilities.json', import.meta.url), 'utf8'))
+  assert.deepEqual(validateCapabilities(schema, shipped), [])
+  for (const mutate of [
+    (value) => { delete value.coding_agents.pi.providers },
+    (value) => { value.coding_agents.pi.providers = [] },
+    (value) => { value.coding_agents.pi.transports = ['unknown'] },
+    (value) => { value.coding_agents.pi.refuses = ['unknown'] },
+    (value) => { value.coding_agents.pi.extra = true },
+    (value) => { delete value.coding_agents.pi.adapter },
+    (value) => { delete value.coding_agents },
+  ]) {
+    const invalid = structuredClone(shipped)
+    mutate(invalid)
+    assert.ok(validateCapabilities(schema, invalid).length > 0)
+    assert.throws(() => loadCapabilities({ register: invalid }), (err) => err.reason === 'register-invalid')
+  }
+})
+
+test('coding agent duplicate inventory values refuse at their register paths', () => {
+  const shipped = JSON.parse(readFileSync(new URL('./capabilities.json', import.meta.url), 'utf8'))
+  for (const mutate of [
+    (value) => { value.coding_agents.pi.providers.push('openai') },
+    (value) => { value.coding_agents.pi.transports.push('pane') },
+    (value) => { value.coding_agents.pi.refuses.push('mcp_servers') },
+  ]) {
+    const invalid = structuredClone(shipped)
+    mutate(invalid)
+    assert.deepEqual(validateCapabilities(JSON.parse(readFileSync(new URL('./capabilities.schema.json', import.meta.url), 'utf8')), invalid), [])
+    assert.throws(() => loadCapabilities({ register: invalid }), (err) => err.reason === 'register-invalid' && /coding_agents\.pi/.test(err.message))
+  }
+})
+
+test('B1A coding agent names and adapter paths derive from shipped adapters', () => {
+  const shipped = loadCapabilities()
+  const names = readdirSync(join(REGISTER_ROOT, 'crew', 'adapters'))
+    .filter((file) => /^adapter-.+\.mjs$/.test(file))
+    .map((file) => file.slice('adapter-'.length, -'.mjs'.length))
+    .sort()
+  assert.deepEqual(Object.keys(shipped.coding_agents).sort(), names)
+  for (const name of names) assert.equal(shipped.coding_agents[name].adapter, `crew/adapters/adapter-${name}.mjs`)
+  assert.doesNotThrow(() => assertAgentAdapter(shipped, 'pi', '/checkout/crew/adapters/adapter-pi.mjs', { role: 'builder' }))
+  assert.throws(() => assertAgentAdapter(shipped, 'pi', 'crew/adapters/adapter-claude.mjs', { role: 'builder' }), (err) => err.reason === 'register-invalid' && /coding_agents\.pi\.adapter/.test(err.message))
+})
+
+test('B1P coding agent providers derive from shipped adapters and roster cells', () => {
+  const shipped = loadCapabilities()
+  const roster = JSON.parse(readFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
+  const piProviders = [...Object.keys(PI_PROVIDERS), ...Object.keys(shipped.local_providers)]
+  const claudeProviders = new Set()
+  const visit = (cell) => {
+    if (!cell || typeof cell !== 'object') return
+    if (cell.agent === 'claude') claudeProviders.add(cell.provider)
+    for (const fallback of cell.fallback || []) visit(fallback)
+  }
+  for (const cells of Object.values(roster.tiers || {})) {
+    for (const cell of Object.values(cells || {})) visit(cell)
+  }
+  assert.deepEqual(shipped.coding_agents.pi.providers, piProviders)
+  assert.deepEqual(shipped.coding_agents.claude.providers, [...claudeProviders])
+  assert.equal(capabilitiesFor({ transport: 'pane' }).local_provider, false)
+})
+
+test('B1T coding agent transports derive from shipped adapters', () => {
+  const shipped = loadCapabilities()
+  const transports = ['pane', 'headless-json', 'headless-rpc']
+  const supported = (adapter) => transports.filter((transport) => {
+    try { adapter({ transport }); return true } catch { return false }
+  })
+  assert.deepEqual(shipped.coding_agents.pi.transports, supported(piCapabilitiesFor))
+  assert.deepEqual(shipped.coding_agents.claude.transports, supported(capabilitiesFor))
+})
+
+test('D1P llama-swap is declared for pi', () => {
+  const shipped = loadCapabilities()
+  assert.equal(shipped.coding_agents.pi.providers.includes('llama-swap'), true)
+  assert.equal(Object.hasOwn(shipped.local_providers, 'llama-swap'), true)
+})
+
+test('D1C llama-swap is not declared for claude', () => {
+  assert.equal(loadCapabilities().coding_agents.claude.providers.includes('llama-swap'), false)
+})
+
+test('E1 subagent grant agents retain their existing meaning', () => {
+  const shipped = loadCapabilities()
+  assert.deepEqual(shipped.roles.planner.by_agent.pi.agents, [{ name: 'scout', def: 'crew/pi/agents/scout.json' }])
+  assert.deepEqual(shipped.roles.planner.by_agent.pi.agents[0], { name: 'scout', def: 'crew/pi/agents/scout.json' })
+})
+
+test('F1A unknown coding agent refuses by closed name', () => {
+  assert.throws(
+    () => agentRegisterEntry(loadCapabilities(), 'missing', { role: 'builder' }),
+    (err) => err.reason === 'agent-unresolved' && /seat builder/.test(err.message) && /coding_agents\.missing/.test(err.message),
+  )
+})
+
+test('F1O prototype coding agent name refuses by closed name', () => {
+  assert.throws(
+    () => agentRegisterEntry(loadCapabilities(), 'constructor', { role: 'builder' }),
+    (err) => err.reason === 'agent-unresolved' && /constructor/.test(err.message) && /coding_agents\.constructor/.test(err.message),
+  )
+})
+
+test('F1P unknown coding agent provider refuses by closed name', () => {
+  assert.throws(
+    () => assertAgentProvider(loadCapabilities(), 'pi', 'google', { role: 'builder' }),
+    (err) => err.reason === 'agent-provider-unsupported' && /seat builder/.test(err.message) && /coding_agents\.pi\.providers/.test(err.message),
+  )
+  assert.doesNotThrow(() => assertAgentProvider(loadCapabilities(), 'pi', 'openai', { role: 'builder' }))
 })
 
 function capabilityFixtureRoot() {
@@ -772,7 +894,7 @@ test('claude refuses a vendor grant while pi composes the same resolved grant', 
 
 test('capability refusal reasons are closed and EMPTY_GRANTS is frozen', () => {
   assert.equal(Object.isFrozen(CAPABILITY_REFUSALS), true)
-  assert.deepEqual([...CAPABILITY_REFUSALS], ['register-invalid', 'capability-shortfall', 'unknown-grant', 'grant-unsupported', 'extension-missing', 'unknown-skill', 'agent-def-invalid', 'local-settings-missing', 'local-endpoint-dead', 'grant-contradicts-deny', 'vendor-extension-missing'])
+  assert.deepEqual([...CAPABILITY_REFUSALS], ['register-invalid', 'capability-shortfall', 'unknown-grant', 'grant-unsupported', 'extension-missing', 'unknown-skill', 'agent-def-invalid', 'local-settings-missing', 'local-endpoint-dead', 'grant-contradicts-deny', 'vendor-extension-missing', 'agent-unresolved', 'agent-provider-unsupported'])
   assert.throws(() => refuse('not-a-capability-reason', 'bad'))
   assert.throws(
     () => claudeSeatCommand({ role: 'builder', model: 'sonnet', promptFile: '/tmp/role.md', tools: 'Read', deny: 'Task,Agent', taskDir: '/tmp', bootBrief: 'boot', grants: { tools: [], extensions: ['/tmp/ext.js'], skills: [], agents: [], advisor: false } }),
@@ -940,6 +1062,34 @@ test('the pi subagents probe goes red when the register stops being true', async
   assert.equal(Object.hasOwn(CAPABILITY_PROBES, 'subagents@pi'), true)
   const plannerProbe = await probeCapability('subagents@pi', { register: builderClaim })
   assert.equal(plannerProbe.ok, true)
+})
+
+test('B1R coding agent refusals derive from shipped adapters', () => {
+  const shipped = loadCapabilities()
+  const piPane = piCapabilitiesFor({ transport: 'pane' })
+  assert.equal(Object.hasOwn(piPane, 'mcp_servers'), false)
+  assert.deepEqual(shipped.coding_agents.pi.refuses, ['mcp_servers'])
+
+  const seat = { role: 'builder', model: 'model', promptFile: '/tmp/role.md', tools: 'Read', deny: '', taskDir: '/tmp', bootBrief: 'boot' }
+  const adapterRefusals = []
+  for (const [dimension, grants] of [
+    ['extensions', { ...EMPTY_GRANTS, extensions: ['/tmp/ext'] }],
+    ['skills', { ...EMPTY_GRANTS, skills: ['/tmp/skill'] }],
+    ['local_provider', { ...seat, configDir: '/tmp/config' }],
+  ]) {
+    try {
+      claudeSeatCommand(dimension === 'local_provider' ? grants : { ...seat, grants })
+    } catch (err) {
+      if (err.reason === 'grant-unsupported') adapterRefusals.push(dimension)
+    }
+  }
+  assert.deepEqual(adapterRefusals, ['extensions', 'skills', 'local_provider'])
+  assert.equal(capabilitiesFor({ transport: 'pane' }).local_provider, false)
+  assert.deepEqual(shipped.coding_agents.claude.refuses, adapterRefusals)
+  assert.throws(
+    () => assertAgentRefusals(shipped, 'claude', adapterRefusals, { role: 'builder' }),
+    (err) => err.reason === 'grant-unsupported' && /coding_agents\.claude\.refuses/.test(err.message),
+  )
 })
 
 // A vendor grant carries its OWN tool names and they are backed against the

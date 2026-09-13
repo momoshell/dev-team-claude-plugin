@@ -3314,7 +3314,10 @@ export const PUBLISH_BASE = 'main'
 // model is sent VERBATIM, and only its ABSENCE falls back to resolving the served model
 // from `<root>/models`. `pi_provider` is pi's namespace, never a served model name.
 export const NARRATOR_PROVIDER = 'narrator'
-export const NARRATION_TIMEOUT_SECONDS = 30
+export const NARRATION_CONNECT_TIMEOUT_SECONDS = 10
+export const NARRATION_MIN_BYTES_PER_SECOND = 1
+export const NARRATION_STALL_SECONDS = 60
+export const NARRATION_BACKSTOP_SECONDS = 300
 const SAFE_NARRATOR_MODEL = /^[A-Za-z0-9][A-Za-z0-9._:\/-]{0,127}$/
 export const NARRATION_HEADING = '## Narrative (local model)'
 export const NARRATION_MAX_CHARS = 1200
@@ -3323,6 +3326,7 @@ export const NARRATION_REFUSALS = Object.freeze({
   endpointUnsafe: 'narrator-endpoint-unsafe',
   unreachable: 'narrator-unreachable',
   timeout: 'narrator-timeout',
+  stall: 'narrator-stall',
   unreadable: 'narrator-unreadable',
   empty: 'narration-empty',
   tooLong: 'narration-too-long',
@@ -3828,13 +3832,30 @@ export function narrationPrompt(record) {
 }
 
 export function narratorCommand({ root, model, prompt }) {
-  const payload = JSON.stringify({ model, stream: false, messages: [{ role: 'user', content: prompt }] })
-  return `curl -sS --max-time ${NARRATION_TIMEOUT_SECONDS} -X POST ${shellArg(`${root}/chat/completions`)} -H ${shellArg('content-type: application/json')} --data-binary ${shellArg(payload)}`
+  const payload = JSON.stringify({ model, stream: true, messages: [{ role: 'user', content: prompt }] })
+  return `curl -sS --connect-timeout ${NARRATION_CONNECT_TIMEOUT_SECONDS} --speed-limit ${NARRATION_MIN_BYTES_PER_SECOND} --speed-time ${NARRATION_STALL_SECONDS} --max-time ${NARRATION_BACKSTOP_SECONDS} -X POST ${shellArg(`${root}/chat/completions`)} -H ${shellArg('content-type: application/json')} --data-binary ${shellArg(payload)}`
 }
 
 export function narrationFromResponse(output) {
+  const text = String(output ?? '')
   let parsed
-  try { parsed = JSON.parse(String(output ?? '')) } catch { return null }
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    const chunks = []
+    let dataLine = false
+    for (const line of text.split(/\r?\n/)) {
+      if (!line.startsWith('data:')) continue
+      dataLine = true
+      const data = line.slice('data:'.length).trim()
+      if (data === '[DONE]') continue
+      let event
+      try { event = JSON.parse(data) } catch { return null }
+      const content = event?.choices?.[0]?.delta?.content
+      if (typeof content === 'string') chunks.push(content)
+    }
+    return dataLine ? chunks.join('').trim() : null
+  }
   const content = parsed?.choices?.[0]?.message?.content
   return typeof content === 'string' ? content.trim() : null
 }
@@ -3954,7 +3975,10 @@ function narrationDuration(startedAt, endedAt) {
 // cannot turn an accepted response into a timeout.
 function narrationTransportRefusal(result) {
   const evidence = `${String(result?.output ?? '')}\n${String(result?.threw ?? '')}`
-  return evidence.includes('curl: (28)') ? NARRATION_REFUSALS.timeout : NARRATION_REFUSALS.unreachable
+  if (!evidence.includes('curl: (28)')) return NARRATION_REFUSALS.unreachable
+  return /Operation too slow|Less than\s+[\d.]+\s+bytes\/sec/.test(evidence)
+    ? NARRATION_REFUSALS.stall
+    : NARRATION_REFUSALS.timeout
 }
 
 export function narrateRecord({ record, registerText, io } = {}) {

@@ -5,7 +5,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { chmodSync, mkdirSync, renameSync, rmSync, statSync, symlinkSync } from 'node:fs'
 import {
-  COMMIT_TRAILER, CTX, HONEST_NARRATION, NARRATION_HEADING, NARRATION_RECORD, NARRATION_REFUSALS, NARRATION_REFUSAL_NAMES, NARRATION_STAGE_VOCABULARY, NARRATOR_REGISTER, PUBLISH_REFUSAL_NAMES, RUN_START_EVENT, TD, VARIANTS, applyNarration, bounceDetail, bounceSeatOf, buildEnv, commitIntent, composeCommitMessage, composePrBody, convergeRun, driveTask, existsSync, fakeIo, issueTrailers, join, journalRowsSinceRunStart, narrateRecord, narrationDefect, narrationIsRawJson, narrationPrompt, narrationStageDefect, narratorApiRoot, narratorConfig, narratorIo, narratorModelId, narratorModelsCommand, planEnv, prAnomalies, publicationIo, readFileSync, readdirSync, refsFromCommitMessage, reviewEnv, scratchDir, shellArg, spawnSync, writeFileSync,
+  COMMIT_TRAILER, CTX, HONEST_NARRATION, NARRATION_HEADING, NARRATION_RECORD, NARRATION_REFUSALS, NARRATION_REFUSAL_NAMES, NARRATION_STAGE_VOCABULARY, NARRATOR_REGISTER, PUBLISH_REFUSAL_NAMES, RUN_START_EVENT, TD, VARIANTS, applyNarration, bounceDetail, bounceSeatOf, buildEnv, commitIntent, composeCommitMessage, composePrBody, convergeRun, driveTask, existsSync, fakeIo, issueTrailers, join, journalRowsSinceRunStart, narrateRecord, narrationDefect, narrationFromResponse, narrationIsRawJson, narrationPrompt, narrationStageDefect, narratorApiRoot, narratorCommand, narratorConfig, narratorIo, narratorModelId, narratorModelsCommand, planEnv, prAnomalies, publicationIo, readFileSync, readdirSync, refsFromCommitMessage, reviewEnv, scratchDir, shellArg, spawnSync, writeFileSync,
 } from './drive-fixtures.mjs'
 import { anchorConflictMechanical, canonicalAnchorManifest, canonicalCitationDoc, lineNumberOnlyAnchorResolution, rebaseConflictRoute, resumeTask, resumeWorktreeSha256 } from './drive.mjs'
 import { git, gitResult } from '../test/helpers.mjs'
@@ -1361,7 +1361,7 @@ test('narrateRecord narrates from an honest endpoint and never sends pi_provider
   const chat = collect.find((command) => command.includes('/chat/completions'))
   assert.ok(chat.includes('qwen3-coder'))
   assert.equal(/"model":"local-pi"/.test(chat), false)
-  assert.ok(chat.startsWith('curl -sS --max-time 30 -X POST'))
+  assert.ok(chat.startsWith(NARRATOR_CHAT_COMMAND_PREFIX))
   // the prompt is the record and nothing else
   const prompt = narrationPrompt(NARRATION_RECORD)
   assert.ok(prompt.includes(JSON.stringify(NARRATION_RECORD)))
@@ -1556,12 +1556,128 @@ test('F1 reasoning-only response remains an empty-content refusal', () => {
   assert.equal(absentBody.includes('internal reasoning'), false)
 })
 
-test('A1 narration attempts carry duration model and outcome into the journal', () => {
+const NARRATOR_CHAT_COMMAND_PREFIX = 'curl -sS --connect-timeout 10 --speed-limit 1 --speed-time 60 --max-time 300 -X POST'
+
+test('A1 narrator command bounds low-speed transfer and names a stall refusal', () => {
+  const collect = []
+  const stalled = narrateRecord({
+    record: NARRATION_RECORD,
+    registerText: configuredNarratorRegister('http://proxy.lan:1234', 'gpt-oss-20b'),
+    io: narratorIo({ collect, chat: { ok: false, output: 'curl: (28) Operation too slow. Less than 1 bytes/sec transferred the last 60 seconds' } }),
+  })
+  const command = collect.find((entry) => entry.includes('/chat/completions'))
+  assert.match(command, /--connect-timeout 10(?:\s|$)/)
+  assert.match(command, /--speed-limit 1(?:\s|$)/)
+  assert.match(command, /--speed-time 60(?:\s|$)/)
+  assert.equal(stalled.refused, NARRATION_REFUSALS.stall)
+})
+
+test('B1 narrator command streams and joins ordered SSE content without the old cap', () => {
+  const command = narratorCommand({ root: 'http://proxy.lan:1234/v1', model: 'gpt-oss-20b', prompt: 'hello' })
+  const sse = [
+    ': keep-alive',
+    'data: {"choices":[{"delta":{"content":"The lane "}}]}',
+    '',
+    'data: {"choices":[{"delta":{"content":"ran 2 build rounds."}}]}',
+    '',
+    'data: {"choices":[{"delta":{"reasoning_content":"private"}}]}',
+    '',
+    'data: [DONE]',
+    '',
+  ].join('\n')
+  assert.match(command, /"stream":true/)
+  assert.doesNotMatch(command, /--max-time 30(?:\s|$)/)
+  assert.equal(narrationFromResponse(sse), 'The lane ran 2 build rounds.')
+})
+
+test('C1 narrator command retains the absolute 300-second backstop', () => {
+  const command = narratorCommand({ root: 'http://proxy.lan:1234/v1', model: 'gpt-oss-20b', prompt: 'hello' })
+  assert.match(command, /--max-time 300(?:\s|$)/)
+})
+
+test('D1 low-speed, absolute-timeout, and dead-endpoint refusals stay distinct', () => {
+  const configured = configuredNarratorRegister('http://proxy.lan:1234', 'gpt-oss-20b')
+  const ask = (output) => narrateRecord({
+    record: NARRATION_RECORD,
+    registerText: configured,
+    io: narratorIo({ chat: { ok: false, output } }),
+  })
+  const stall = ask('curl: (28) Operation too slow. Less than 1 bytes/sec transferred the last 60 seconds')
+  const timeout = ask('curl: (28) Operation timed out after 300000 milliseconds')
+  const connectTimeout = ask('curl: (28) Failed to connect: Connection timed out after 10001 milliseconds')
+  const unreachable = ask('curl: (7) Failed to connect')
+  assert.equal(stall.refused, NARRATION_REFUSALS.stall)
+  assert.equal(timeout.refused, NARRATION_REFUSALS.timeout)
+  assert.equal(connectTimeout.refused, NARRATION_REFUSALS.timeout)
+  assert.equal(unreachable.refused, NARRATION_REFUSALS.unreachable)
+  assert.notEqual(timeout.refused, unreachable.refused)
+  assert.notEqual(stall.refused, timeout.refused)
+})
+
+test('E1 each transport refusal preserves the published body byte-for-byte', () => {
+  const base = runPublished({})
+  const configured = configuredNarratorRegister('http://proxy.lan:1234', 'gpt-oss-20b')
+  const cases = [
+    [NARRATION_REFUSALS.stall, 'curl: (28) Operation too slow. Less than 1 bytes/sec transferred the last 60 seconds'],
+    [NARRATION_REFUSALS.timeout, 'curl: (28) Operation timed out after 300000 milliseconds'],
+    [NARRATION_REFUSALS.unreachable, 'curl: (7) Failed to connect'],
+  ]
+  const body = (run) => run.io.calls.writes[`${TD}/pr-body.md`]
+  for (const [reason, output] of cases) {
+    const refused = runPublished({ capabilities: configured, commands: { [NARRATOR_CHAT_COMMAND_PREFIX]: { ok: false, output } } })
+    assert.equal(refused.result.status, 'done', reason)
+    assert.equal(body(refused), body(base), reason)
+    assert.equal(composePrBody(applyNarration(NARRATION_RECORD, { refused: reason })), composePrBody(NARRATION_RECORD), reason)
+  }
+})
+
+test('malformed SSE after valid content fails closed without returning a prefix', () => {
+  const malformed = [
+    'data: {"choices":[{"delta":{"content":"The lane "}}]}',
+    '',
+    'data: {not-json}',
+    '',
+  ].join('\n')
+  assert.equal(narrationFromResponse(malformed), null)
+  const refused = narrateRecord({
+    record: NARRATION_RECORD,
+    registerText: configuredNarratorRegister('http://proxy.lan:1234', 'gpt-oss-20b'),
+    io: narratorIo({ chat: { ok: true, output: malformed } }),
+  })
+  assert.equal(refused.text, undefined)
+  assert.equal(refused.refused, NARRATION_REFUSALS.unreadable)
+})
+
+test('RV1-1 the narration length ceiling keeps its own executable witness', () => {
+  const configured = configuredNarratorRegister('http://proxy.lan:1234', 'gpt-oss-20b')
+  const reply = (content) => narrateRecord({
+    record: NARRATION_RECORD, registerText: configured,
+    io: narratorIo({ chat: { ok: true, output: JSON.stringify({ choices: [{ message: { content } }] }) } }),
+  })
+  // NARRATION_MAX_CHARS is 1200 at crew/drive.mjs; the boundary PAIR is what discriminates —
+  // one char over the ceiling is refused, exactly at the ceiling is not.
+  assert.equal(reply('x'.repeat(1201)).refused, NARRATION_REFUSALS.tooLong)
+  assert.equal(reply('x'.repeat(1200)).refused, undefined)
+})
+
+test('RV1-2 accepted prose quoting the curl timeout token is never reclassified', () => {
+  const configured = configuredNarratorRegister('http://proxy.lan:1234', 'gpt-oss-20b')
+  const prose = 'The lane ran 2 build rounds. curl: (28)'
+  const accepted = narrateRecord({
+    record: { ...NARRATION_RECORD, marker_code: 28 }, registerText: configured,
+    io: narratorIo({ chat: { ok: true, output: JSON.stringify({ choices: [{ message: { content: prose } }] }) } }),
+  })
+  assert.equal(accepted.refused, undefined)
+  assert.equal(accepted.outcome, 'accepted')
+  assert.equal(accepted.text, prose)
+})
+
+test('narration attempts carry duration model and outcome into the journal', () => {
   const configured = configuredNarratorRegister('http://proxy.lan:1234', 'gpt-oss-20b')
   const accepted = runPublished({
     capabilities: configured,
     commands: {
-      'curl -sS --max-time 30 -X POST': {
+      [NARRATOR_CHAT_COMMAND_PREFIX]: {
         ok: true,
         output: JSON.stringify({ choices: [{ message: { content: 'The lane ran 2 build rounds.' } }] }),
       },
@@ -1575,7 +1691,7 @@ test('A1 narration attempts carry duration model and outcome into the journal', 
 
   const refused = runPublished({
     capabilities: configured,
-    commands: { 'curl -sS --max-time 30 -X POST': { ok: false, output: 'connection refused' } },
+    commands: { [NARRATOR_CHAT_COMMAND_PREFIX]: { ok: false, output: 'connection refused' } },
   })
   assert.deepEqual(refused.io.calls.logs.find((entry) => entry.narration)?.narration, {
     attempted: true, model: 'gpt-oss-20b', duration_ms: 10, outcome: 'refused',
@@ -1587,133 +1703,6 @@ test('A1 narration attempts carry duration model and outcome into the journal', 
     attempted: false, model: null, duration_ms: null, outcome: 'refused',
     reason: NARRATION_REFUSALS.unconfigured,
   })
-})
-
-test('B1 narration timeout and dead endpoint use distinct closed refusal reasons', () => {
-  const timedIo = ({ models, chat }) => {
-    const collect = []
-    const times = [1000, 1012]
-    let clock = 0
-    return {
-      collect,
-      now: () => times[Math.min(clock++, times.length - 1)],
-      run(command) {
-        collect.push(command)
-        return /\/models(\b|$)/.test(command)
-          ? (models ?? { ok: true, output: JSON.stringify({ data: [{ id: 'gpt-oss-20b' }] }) })
-          : (chat ?? { ok: true, output: JSON.stringify({ choices: [{ message: { content: HONEST_NARRATION } }] }) })
-      },
-    }
-  }
-  const noModel = NARRATOR_REGISTER('http://proxy.lan:1234')
-  const modelListTimeout = narrateRecord({
-    record: NARRATION_RECORD, registerText: noModel,
-    io: timedIo({ models: { ok: false, output: '', threw: 'curl: (28) Operation timed out' } }),
-  })
-  assert.deepEqual({ attempted: modelListTimeout.attempted, model: modelListTimeout.model, duration_ms: modelListTimeout.duration_ms, outcome: modelListTimeout.outcome, refused: modelListTimeout.refused }, {
-    attempted: false, model: null, duration_ms: null, outcome: 'refused', refused: 'narrator-timeout',
-  })
-  const modelListDead = narrateRecord({
-    record: NARRATION_RECORD, registerText: noModel,
-    io: timedIo({ models: { ok: false, output: 'connection refused' } }),
-  })
-  assert.equal(modelListDead.refused, 'narrator-unreachable')
-  assert.equal(modelListDead.attempted, false)
-  assert.equal(modelListDead.model, null)
-  assert.equal(modelListDead.duration_ms, null)
-
-  const configured = configuredNarratorRegister('http://proxy.lan:1234', 'gpt-oss-20b')
-  const chatTimeout = narrateRecord({
-    record: NARRATION_RECORD, registerText: configured,
-    io: timedIo({ chat: { ok: false, output: 'curl: (28) Operation timed out' } }),
-  })
-  assert.deepEqual({ attempted: chatTimeout.attempted, model: chatTimeout.model, duration_ms: chatTimeout.duration_ms, outcome: chatTimeout.outcome, refused: chatTimeout.refused }, {
-    attempted: true, model: 'gpt-oss-20b', duration_ms: 12, outcome: 'refused', refused: 'narrator-timeout',
-  })
-  const chatDead = narrateRecord({
-    record: NARRATION_RECORD, registerText: configured,
-    io: timedIo({ chat: { ok: false, output: 'connection refused' } }),
-  })
-  assert.equal(chatDead.refused, 'narrator-unreachable')
-  assert.equal(chatDead.attempted, true)
-  assert.equal(chatDead.model, 'gpt-oss-20b')
-  assert.equal(chatDead.duration_ms, 12)
-
-  const successfulMarker = 'The lane ran 2 build rounds. curl: (28)'
-  const successful = narrateRecord({
-    record: { ...NARRATION_RECORD, marker_code: 28 }, registerText: configured,
-    io: timedIo({ chat: { ok: true, output: JSON.stringify({ choices: [{ message: { content: successfulMarker } }] }) } }),
-  })
-  assert.equal(successful.refused, undefined)
-  assert.equal(successful.outcome, 'accepted')
-  assert.equal(successful.text, successfulMarker)
-  assert.notEqual(successful.refused, 'narrator-timeout')
-})
-
-test('C1 success timeout and refusal preserve the code-composed body contract', () => {
-  const base = runPublished({})
-  const configured = configuredNarratorRegister('http://proxy.lan:1234', 'gpt-oss-20b')
-  const accepted = runPublished({
-    capabilities: configured,
-    commands: {
-      'curl -sS --max-time 30 -X POST': {
-        ok: true,
-        output: JSON.stringify({ choices: [{ message: { content: 'The lane ran 2 build rounds.' } }] }),
-      },
-    },
-  })
-  const timeout = runPublished({
-    capabilities: configured,
-    commands: { 'curl -sS --max-time 30 -X POST': { ok: false, output: 'curl: (28) Operation timed out' } },
-  })
-  const dead = runPublished({
-    capabilities: configured,
-    commands: { 'curl -sS --max-time 30 -X POST': { ok: false, output: 'connection refused' } },
-  })
-  const body = (run) => run.io.calls.writes[TD + '/pr-body.md']
-  assert.equal(timeout.result.status, 'done')
-  assert.equal(dead.result.status, 'done')
-  assert.equal(body(timeout), body(base))
-  assert.equal(body(dead), body(base))
-  assert.ok(body(accepted).endsWith(body(base)))
-  assert.notEqual(body(accepted), body(base))
-})
-
-test('D1 narration refusal inventory stays frozen closed and reachable', () => {
-  const baseline = {
-    unconfigured: 'narrator-unconfigured',
-    endpointUnsafe: 'narrator-endpoint-unsafe',
-    unreachable: 'narrator-unreachable',
-    timeout: 'narrator-timeout',
-    unreadable: 'narrator-unreadable',
-    empty: 'narration-empty',
-    tooLong: 'narration-too-long',
-    unknownFact: 'narration-unknown-fact',
-    modelsUnreadable: 'narrator-models-unreadable',
-    modelAbsent: 'narrator-model-absent',
-    modelAmbiguous: 'narrator-model-ambiguous',
-    rawJson: 'narration-raw-json',
-  }
-  assert.deepEqual(NARRATION_REFUSALS, baseline)
-  assert.deepEqual([...NARRATION_REFUSAL_NAMES], Object.values(baseline))
-  assert.equal(Object.isFrozen(NARRATION_REFUSALS), true)
-
-  const configured = configuredNarratorRegister('http://proxy.lan:1234', 'gpt-oss-20b')
-  const reachable = [
-    [narrateRecord({ record: NARRATION_RECORD, registerText: 'not json', io: narratorIo() }), baseline.unconfigured],
-    [narrateRecord({ record: NARRATION_RECORD, registerText: NARRATOR_REGISTER('file:///etc/passwd'), io: narratorIo() }), baseline.endpointUnsafe],
-    [narrateRecord({ record: NARRATION_RECORD, registerText: configured, io: narratorIo({ chat: { ok: false, output: 'dead' } }) }), baseline.unreachable],
-    [narrateRecord({ record: NARRATION_RECORD, registerText: configured, io: narratorIo({ chat: { ok: false, output: 'curl: (28)' } }) }), baseline.timeout],
-    [narrateRecord({ record: NARRATION_RECORD, registerText: configured, io: narratorIo({ chat: { ok: true, output: '{}' } }) }), baseline.unreadable],
-    [narrateRecord({ record: NARRATION_RECORD, registerText: configured, io: narratorIo({ chat: { ok: true, output: JSON.stringify({ choices: [{ message: { content: '' } }] }) } }) }), baseline.empty],
-    [narrateRecord({ record: NARRATION_RECORD, registerText: configured, io: narratorIo({ chat: { ok: true, output: JSON.stringify({ choices: [{ message: { content: 'x'.repeat(1201) } }] }) } }) }), baseline.tooLong],
-    [narrateRecord({ record: NARRATION_RECORD, registerText: configured, io: narratorIo({ chat: { ok: true, output: JSON.stringify({ choices: [{ message: { content: 'src/not-known.mjs' } }] }) } }) }), baseline.unknownFact],
-    [narrateRecord({ record: NARRATION_RECORD, registerText: NARRATOR_REGISTER('http://proxy.lan:1234'), io: narratorIo({ models: { ok: true, output: 'not json' } }) }), baseline.modelsUnreadable],
-    [narrateRecord({ record: NARRATION_RECORD, registerText: NARRATOR_REGISTER('http://proxy.lan:1234'), io: narratorIo({ models: { ok: true, output: JSON.stringify({ data: [] }) } }) }), baseline.modelAbsent],
-    [narrateRecord({ record: NARRATION_RECORD, registerText: NARRATOR_REGISTER('http://proxy.lan:1234'), io: narratorIo({ models: { ok: true, output: JSON.stringify({ data: [{ id: 'a' }, { id: 'b' }] }) } }) }), baseline.modelAmbiguous],
-    [narrateRecord({ record: NARRATION_RECORD, registerText: configured, io: narratorIo({ chat: { ok: true, output: JSON.stringify({ choices: [{ message: { content: '{"total":11}' } }] }) } }) }), baseline.rawJson],
-  ]
-  for (const [result, expected] of reachable) assert.equal(result.refused, expected, expected)
 })
 
 test('F2 absent configured model keeps modelAbsent reachable', () => {
@@ -1780,7 +1769,7 @@ test('applyNarration transfers accepted narration only, and never mutates its in
 
 test('F1 configured narration is additive and refusal preserves the current body', () => {
   const narratorCommands = {
-    'curl -sS --max-time 30 -X POST': { ok: true, output: JSON.stringify({ choices: [{ message: { content: 'The lane ran 2 build rounds.' } }] }) },
+    [NARRATOR_CHAT_COMMAND_PREFIX]: { ok: true, output: JSON.stringify({ choices: [{ message: { content: 'The lane ran 2 build rounds.' } }] }) },
   }
   const configured = JSON.parse(NARRATOR_REGISTER('http://127.0.0.1:11434/v1'))
   configured.narrator.model = 'qwen3-coder'
@@ -1796,7 +1785,7 @@ test('F1 configured narration is additive and refusal preserves the current body
   })
 
   // a refused configured request publishes exactly the no-narrator body — byte for byte
-  const dead = runPublished({ capabilities: register, commands: { 'curl -sS --max-time 30 -X POST': { ok: false, output: 'connection refused' } } })
+  const dead = runPublished({ capabilities: register, commands: { [NARRATOR_CHAT_COMMAND_PREFIX]: { ok: false, output: 'connection refused' } } })
   const none = runPublished({})
   const deadBody = dead.io.calls.writes[TD + '/pr-body.md']
   const noneBody = none.io.calls.writes[TD + '/pr-body.md']

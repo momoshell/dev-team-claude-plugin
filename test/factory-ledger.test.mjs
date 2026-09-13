@@ -4655,15 +4655,22 @@ test('run variant registers stay equal to the driver enum and marker values', { 
   assert.deepEqual([...new Set(Object.values(RUN_VARIANT_MARKERS))].sort(), [...RUN_VARIANTS].sort())
 })
 
-test('I1 ledger classifies review_only runs as measured', { skip: SKIP }, () => {
+test('I1 ledger classifies review_only and verify_only runs as measured', { skip: SKIP }, () => {
   assert.equal(variantFromFirstMessage('review_only:r1'), 'review_only')
+  assert.equal(variantFromFirstMessage('verify_only:r1'), 'verify_only')
   const ledger = openTestLedger()
   seedRun(ledger, 'variant-task-review-only', RUNSET_SINCE)
   ledger.recordEvent({ adw_id: 'variant-task-review-only', type: 'log', payload: { level: 'info', message: 'review_only:r1' } })
   ledger.recordEvent({ adw_id: 'variant-task-review-only', type: 'log', payload: { level: 'info', message: 'scope-gate:r1' } })
-  const readout = ledger.taskReadout('variant-task-review-only')
-  assert.equal(readout.variant, 'review_only')
-  assert.equal('variant' in readout.absent, false)
+  const reviewReadout = ledger.taskReadout('variant-task-review-only')
+  assert.equal(reviewReadout.variant, 'review_only')
+  assert.equal('variant' in reviewReadout.absent, false)
+  seedRun(ledger, 'variant-task-verify-only', RUNSET_SINCE)
+  ledger.recordEvent({ adw_id: 'variant-task-verify-only', type: 'log', payload: { level: 'info', message: 'verify_only:r1' } })
+  ledger.recordEvent({ adw_id: 'variant-task-verify-only', type: 'log', payload: { level: 'info', message: 'scope-gate:r1' } })
+  const verifyReadout = ledger.taskReadout('variant-task-verify-only')
+  assert.equal(verifyReadout.variant, 'verify_only')
+  assert.equal('variant' in verifyReadout.absent, false)
 })
 
 test('taskReadout derives full and scout from their first stage markers', { skip: SKIP }, () => {
@@ -4702,6 +4709,7 @@ test('variantFromFirstMessage recognizes only complete shape markers', { skip: S
   assert.equal(variantFromFirstMessage('plan:r1'), 'full')
   assert.equal(variantFromFirstMessage('scout:r1'), 'scout')
   assert.equal(variantFromFirstMessage('repair:r1'), 'repair')
+  assert.equal(variantFromFirstMessage('verify_only:r1'), 'verify_only')
   for (const value of ['plan', '', null, undefined, 42, 'attention:gate plan:r1']) {
     assert.equal(variantFromFirstMessage(value), null, JSON.stringify(value))
   }

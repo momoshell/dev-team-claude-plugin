@@ -10,7 +10,8 @@ missing lane from the checkout.
   "scout":    { "trigger": "a read-only question",          "ctx": [] },
   "review_only": { "trigger": "a declared base/head code review", "ctx": [] },
   "repair":   { "trigger": "CI red",                        "ctx": ["--validation-lane"] },
-  "directed": { "trigger": "an orchestrator-authored plan", "ctx": ["--validation-lane"] }
+  "directed": { "trigger": "an orchestrator-authored plan", "ctx": ["--validation-lane"] },
+  "verify_only": { "trigger": "a declared behavior to verify", "ctx": [] }
 }
 ```
 
@@ -19,6 +20,7 @@ missing lane from the checkout.
 | `full` | There is a diagnosed defect and the crew must plan, check, build, gate, review, and converge. | The requested tier's seats. | `planned`. | No declared `sources` context is required. |
 | `scout` | The question is read-only reconnaissance. | The `planner` seat only. | `none`. | Boot `--roles lead,planner` with no `--tier` and no fence (`--fences` or `--lane`). |
 | `review_only` | A declared base/head change set needs a structured code review. | The `reviewer` seat only; an optional tech-lead may be booted for rigorous assurance. | `none`. | Read-only validation; no checkout writes. |
+| `verify_only` | A declared behavior needs independent verification evidence. | The `reviewer` seat only. | `none`. | Read-only validation; no lane context and no checkout writes. |
 | `repair` | CI is red and the failing run already supplies the bounded scope and validation lane. | The requested tier's seats. | `planned`. | Inherited scope plus `--validation-lane`; its lane source is `ctx`. |
 | `directed` | An orchestrator-authored plan already declares the gate and write surface. | `builder` and `reviewer`. | `planned`. | The brief supplies scope and gate; `--validation-lane` supplies the `ctx` lane. |
 
@@ -29,6 +31,8 @@ the failing scope and lane into one bounded fix. A `directed` run treats the
 brief as the plan and never asks a seat to author a gate it did not receive.
 
 A `review_only` run is an envelope run: it returns the declared base/head identity, a closed outcome, and structured findings (or an explicitly measured no-findings empty list). The driver accepts it only with the unchanged zero-write scope proof; there is no commit.
+
+A `verify_only` run is an envelope run for reviewer-only verification: it returns complete target, assumption, product-verdict, check-matrix, environment, and blocker evidence. It has no lane context, writes nothing to the checkout, and accepts ephemeral build/test artifacts only while checks run; those artifacts must be removed before return so the final checkout is clean.
 
 A minimal scout boot is executable as:
 

@@ -47,6 +47,42 @@ function strictReviewIo(envelope, { changed = [] } = {}) {
   return io
 }
 
+const VERIFY_RUN_ID = 'run-verify-784'
+const VERIFY_CTX = Object.freeze({ ...CTX, variant: 'verify_only', run_id: VERIFY_RUN_ID, roles: ['reviewer'], seatedRoles: ['reviewer'] })
+const VERIFY_TARGETS = Object.freeze([{ id: 'target-1', target: 'the declared behavior' }])
+const VERIFY_ASSUMPTIONS = Object.freeze([{ name: 'runtime', assumption: 'the supported runtime is available' }])
+const VERIFY_ENVIRONMENT = Object.freeze([{ name: 'runtime', observed: 'node test runtime' }])
+
+function verificationEnvelope({ assignment_id = 'd1', run_id = VERIFY_RUN_ID, role = 'reviewer', details = {} } = {}) {
+  return {
+    assignment_id, run_id, role, status: 'done', summary: 'verification complete', artifacts: [`${TD}/verification.md`],
+    details: {
+      verification_targets: [...VERIFY_TARGETS],
+      environment_assumptions: [...VERIFY_ASSUMPTIONS],
+      product_verdict: 'passing',
+      check_matrix: [{ id: 'target-1', status: 'passed', command: 'node --test', result: 'ok', evidence: 'captured test output' }],
+      environment: [...VERIFY_ENVIRONMENT],
+      environmental_blockers: [],
+      ...details,
+    },
+  }
+}
+
+function strictVerifyIo(envelope, { changed = [] } = {}) {
+  const io = fakeIo({ changed })
+  const assign = io.assign.bind(io)
+  io.assign = function (spec) {
+    const assigned = assign(spec)
+    const id = `d${this.calls.assign.length}`
+    return { ...assigned, id, returnPath: `/crew/returns/${VERIFY_RUN_ID}/${id}.json` }
+  }
+  io.wait = function (returnPath, timeoutS) {
+    this.calls.waits.push({ returnPath, timeoutS })
+    return typeof envelope === 'function' ? envelope(returnPath) : envelope
+  }
+  return io
+}
+
 test('a plan-check accept records the residual the lead named', () => {
   const io = planCheckAcceptIo({ residuals: [PLAN_RESIDUAL] })
   const result = driveTask(CTX_TL, io)
@@ -3841,4 +3877,178 @@ test('RV1-2 envelope enforcement brief survives generated identity refresh', () 
   const applied = io.calls.logs.find((row) => row.seat_enforcement?.applied)?.seat_enforcement
   assert.equal(applied.brief, reviewerAssignments[1].briefFile)
   assert.equal(applied.dispatch, 'd2')
+})
+
+test('A1 verify_only declares the reviewer seat and envelope lifecycle', () => {
+  assert.equal(Object.keys(VARIANTS).at(-1), 'verify_only')
+  assert.deepEqual(VARIANTS.verify_only.required_seats, ['reviewer'])
+  assert.deepEqual(VARIANTS.verify_only.stages, ['verify_only', 'scope-gate', 'envelope-accept'])
+  assert.equal(shapeDefect(VARIANTS.verify_only, 'verify_only'), null)
+  const io = strictVerifyIo(verificationEnvelope())
+  const result = driveTask({ ...VERIFY_CTX, roles: ['reviewer', 'tech-lead'], seatedRoles: ['reviewer', 'tech-lead'] }, io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'reviewer').length, 1)
+  assert.equal(io.calls.assign.some(({ role }) => role === 'tech-lead'), false)
+  assert.deepEqual(result.details.stages, ['verify_only:r1', 'scope-gate:r1', 'envelope-accept', 'done'])
+})
+
+test('B1 verify_only refuses missing verification declarations', () => {
+  for (const field of ['verification_targets', 'environment_assumptions']) {
+    for (const mode of ['omitted', 'empty']) {
+      const env = verificationEnvelope()
+      if (mode === 'omitted') delete env.details[field]
+      else env.details[field] = []
+      const result = driveTask(VERIFY_CTX, strictVerifyIo(env))
+      assert.equal(result.status, 'escalation', `${field} ${mode}`)
+      assert.equal(result.details.escalation.where, 'envelope', `${field} ${mode}`)
+      assert.match(result.details.escalation.why, /\[(?:field-missing|field-kind)\]/, `${field} ${mode}`)
+    }
+  }
+})
+
+test('C1 verify_only reuses the scout and review_only zero-write proof', () => {
+  const scout = driveTask({ ...CTX, variant: 'scout' }, fakeIo({ envelopes: { 'planner:1': reconEnv() }, changed: ['src/write.mjs'] }))
+  const review = driveTask(REVIEW_CTX, strictReviewIo(reviewEnvelope(), { changed: ['src/write.mjs'] }))
+  const verify = driveTask(VERIFY_CTX, strictVerifyIo(verificationEnvelope(), { changed: ['src/write.mjs'] }))
+  for (const result of [scout, review, verify]) {
+    assert.equal(result.status, 'escalation')
+    assert.equal(result.details.escalation.where, 'scope')
+    assert.ok(result.details.stages.includes('scope-gate:r1'))
+  }
+})
+
+test('D1 verify_only records every declared check exactly once', () => {
+  const targets = [{ id: 'target-a', target: 'first behavior' }, { id: 'target-b', target: 'second behavior' }]
+  const matrix = (ids) => ids.map((id) => ({ id, status: 'passed', command: 'node --test', result: 'ok', evidence: `evidence for ${id}` }))
+  const valid = verificationEnvelope({ details: { verification_targets: targets, check_matrix: matrix(['target-a', 'target-b']) } })
+  assert.equal(envelopeDefect(valid, VARIANTS.verify_only, { taskDir: TD }), null)
+  for (const ids of [['target-a', 'target-a'], ['target-a'], ['target-a', 'target-c']]) {
+    const defect = envelopeDefect(verificationEnvelope({ details: { verification_targets: targets, check_matrix: matrix(ids) } }), VARIANTS.verify_only, { taskDir: TD })
+    assert.equal(defect.reason, 'field-item', JSON.stringify(ids))
+    assert.equal(ENVELOPE_REFUSAL_REASONS.includes(defect.reason), true)
+  }
+  const duplicateTargets = verificationEnvelope({ details: { verification_targets: [targets[0], targets[0]], check_matrix: matrix(['target-a', 'target-b']) } })
+  const duplicateDefect = envelopeDefect(duplicateTargets, VARIANTS.verify_only, { taskDir: TD })
+  assert.equal(duplicateDefect.reason, 'field-item')
+  assert.equal(ENVELOPE_REFUSAL_REASONS.includes(duplicateDefect.reason), true)
+})
+
+test('D2 verify_only closes check statuses', () => {
+  for (const status of ['passed', 'failed', 'blocked', 'not run']) {
+    const blockers = status === 'blocked' || status === 'not run'
+      ? [{ target: 'target-1', reason: `${status} environment blocker` }]
+      : []
+    const env = verificationEnvelope({ details: {
+      check_matrix: [{ id: 'target-1', status, command: 'node --test', result: `${status} result`, evidence: `${status} evidence` }],
+      environmental_blockers: blockers,
+    } })
+    const io = strictVerifyIo(env)
+    const result = driveTask(VERIFY_CTX, io)
+    assert.equal(result.status, 'done', status)
+    assert.deepEqual(result.details.envelope.values.check_matrix, env.details.check_matrix, status)
+    assert.deepEqual(result.details.envelope.values.environmental_blockers, blockers, status)
+  }
+  const outside = verificationEnvelope({ details: {
+    check_matrix: [{ id: 'target-1', status: 'unknown', command: 'node --test', result: 'unknown', evidence: 'indeterminate' }],
+  } })
+  const rejected = driveTask(VERIFY_CTX, strictVerifyIo(outside))
+  assert.equal(rejected.status, 'escalation')
+  assert.equal(rejected.details.escalation.where, 'envelope')
+  assert.match(rejected.details.escalation.why, /\[field-item\]/)
+})
+
+test('E1 verify_only accepts a complete failing product verdict', () => {
+  const env = verificationEnvelope({ details: { product_verdict: 'failing' } })
+  const io = strictVerifyIo(env)
+  const result = driveTask(VERIFY_CTX, io)
+  assert.equal(result.status, 'done')
+  assert.equal(result.details.envelope.values.product_verdict, 'failing')
+  assert.equal(io.calls.commits.length, 0)
+})
+
+test('F1 verify_only refuses an incomplete check matrix', () => {
+  const env = verificationEnvelope({ details: { check_matrix: [] } })
+  const defect = envelopeDefect(env, VARIANTS.verify_only, { taskDir: TD })
+  assert.equal(VARIANTS.verify_only.envelope_fields.find((field) => field.name === 'check_matrix').covers.field, 'verification_targets')
+  assert.equal(defect.reason, 'field-item')
+  assert.equal(ENVELOPE_REFUSAL_REASONS.includes(defect.reason), true)
+})
+
+test('RV1-1 verify_only brief requires a row for every verification target', () => {
+  const io = strictVerifyIo(verificationEnvelope())
+  const result = driveTask(VERIFY_CTX, io)
+  const brief = io.calls.writes[`${TD}/verify_only-brief.md`]
+  assert.equal(result.status, 'done')
+  assert.equal(brief.includes('details.check_matrix: an array of records with a non-empty id and a non-empty status and a non-empty command and a non-empty result and a non-empty evidence; exactly one record for each details.verification_targets.id, so an empty array is refused whenever that field carries records; status is one of passed | failed | blocked | not run'), true)
+})
+
+test('G1 verify_only preserves command evidence', () => {
+  const env = verificationEnvelope()
+  delete env.details.check_matrix[0].command
+  const defect = envelopeDefect(env, VARIANTS.verify_only, { taskDir: TD })
+  assert.equal(defect.reason, 'field-item')
+  assert.equal(ENVELOPE_REFUSAL_REASONS.includes(defect.reason), true)
+})
+
+test('G2 verify_only preserves result evidence', () => {
+  const env = verificationEnvelope()
+  delete env.details.check_matrix[0].result
+  const defect = envelopeDefect(env, VARIANTS.verify_only, { taskDir: TD })
+  assert.equal(defect.reason, 'field-item')
+  assert.equal(ENVELOPE_REFUSAL_REASONS.includes(defect.reason), true)
+})
+
+test('G3 verify_only preserves environmental blockers', () => {
+  const blockers = [{ target: 'target-1', reason: 'the runtime was unavailable' }]
+  const env = verificationEnvelope({ details: { environmental_blockers: blockers } })
+  const io = strictVerifyIo(env)
+  const result = driveTask(VERIFY_CTX, io)
+  assert.equal(result.status, 'done')
+  assert.deepEqual(result.details.envelope.values.environmental_blockers, blockers)
+})
+
+test('H1 qa_verification requires an environment record', () => {
+  const missing = verificationEnvelope()
+  delete missing.details.environment
+  const omitted = driveTask(VERIFY_CTX, strictVerifyIo(missing))
+  assert.equal(omitted.status, 'escalation')
+  assert.equal(omitted.details.escalation.where, 'envelope')
+  assert.match(omitted.details.escalation.why, /\[field-missing\]/)
+
+  const empty = verificationEnvelope({ details: { environment: [] } })
+  const emptyResult = driveTask(VERIFY_CTX, strictVerifyIo(empty))
+  assert.equal(emptyResult.status, 'escalation')
+  assert.match(emptyResult.details.escalation.why, /\[field-kind\]/)
+})
+
+test('J1 review_only declaration remains byte-identical', () => {
+  const expected = {
+    execution: 'envelope',
+    required_seats: ['reviewer'],
+    stages: ['review_only', 'scope-gate', 'envelope-accept'],
+    writes: 'none',
+    accepted_by: 'structured envelope plus zero-write proof; no commit',
+    strict_identity: true,
+    report_values: true,
+    envelope_fields: [
+      { name: 'base', kind: 'text' }, { name: 'head', kind: 'text' },
+      { name: 'outcome', kind: 'text', values: ['findings', 'no-findings'] },
+      {
+        name: 'findings', kind: 'records', allow_empty: true,
+        item_fields: ['id', 'severity', 'location', 'summary', 'evidence', 'disposition'],
+        item_values: { severity: ['must-fix', 'should-fix', 'consider'], disposition: ['auto-fix', 'ask-user', 'no-op'] },
+        item_patterns: { id: '^[A-Za-z0-9_-]{1,64}$' },
+        cardinality: { discriminator: 'outcome', empty: 'no-findings', nonempty: 'findings' },
+      },
+    ],
+    assignment: 'Review the returned base/head identity and the declared change set as a read-only code review. This assignment supersedes the ordinary reviewer deliverable: do not create, edit, delete, checkout, or commit anything in the checkout. Read-only validation is permitted. Return the complete structured envelope with non-empty base and head, outcome findings or no-findings, and findings records containing id, severity, location, summary, evidence, and disposition; findings must be empty exactly when outcome is no-findings and non-empty when outcome is findings.',
+  }
+  assert.equal(JSON.stringify(VARIANTS.review_only), JSON.stringify(expected))
+})
+
+test('J2 review_only stages remain byte-identical', () => {
+  const io = strictReviewIo(reviewEnvelope())
+  const result = driveTask(REVIEW_CTX, io)
+  assert.deepEqual(VARIANTS.review_only.stages, ['review_only', 'scope-gate', 'envelope-accept'])
+  assert.deepEqual(result.details.stages, ['review_only:r1', 'scope-gate:r1', 'envelope-accept', 'done'])
 })

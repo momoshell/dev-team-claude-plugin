@@ -27,7 +27,7 @@ const SHAPE_STATUS = Object.freeze({
   scout: 'existing',
   repair: 'existing',
   review_only: 'existing',
-  verify_only: 'declared-pending',
+  verify_only: 'existing',
 })
 const ALIAS_PAIRS = Object.freeze([
   ['mechanical', 'quick'], ['build', 'standard'], ['judge', 'rigorous'],

@@ -81,6 +81,29 @@ export const VARIANTS = Object.freeze({
     assignment: null,
     sources: Object.freeze({ scope: 'brief', lane: 'ctx', gate: 'brief' }),
   }),
+  verify_only: Object.freeze({
+    execution: 'envelope',
+    required_seats: Object.freeze(['reviewer']),
+    stages: Object.freeze(['verify_only', 'scope-gate', 'envelope-accept']),
+    writes: 'none',
+    accepted_by: 'complete structured verification report plus zero-write proof; no commit, regardless of product verdict',
+    strict_identity: true,
+    report_values: true,
+    envelope_fields: Object.freeze([
+      Object.freeze({ name: 'verification_targets', kind: 'records', item_fields: Object.freeze(['id', 'target']) }),
+      Object.freeze({ name: 'environment_assumptions', kind: 'records', item_fields: Object.freeze(['name', 'assumption']) }),
+      Object.freeze({ name: 'product_verdict', kind: 'text', values: Object.freeze(['passing', 'failing']) }),
+      Object.freeze({
+        name: 'check_matrix', kind: 'records', allow_empty: true,
+        item_fields: Object.freeze(['id', 'status', 'command', 'result', 'evidence']),
+        item_values: Object.freeze({ status: Object.freeze(['passed', 'failed', 'blocked', 'not run']) }),
+        covers: Object.freeze({ field: 'verification_targets', key: 'id' }),
+      }),
+      Object.freeze({ name: 'environment', kind: 'records', item_fields: Object.freeze(['name', 'observed']) }),
+      Object.freeze({ name: 'environmental_blockers', kind: 'records', allow_empty: true, item_fields: Object.freeze(['target', 'reason']) }),
+    ]),
+    assignment: 'Read-only verification. Return a complete structured verification report with details.verification_targets as non-empty records with id,target; details.environment_assumptions as non-empty records with name,assumption; details.product_verdict as passing or failing; details.check_matrix as records with id,status,command,result,evidence and one row for each verification target; details.environment as non-empty records with name,observed; and details.environmental_blockers as records with target,reason. Ephemeral build/test artifacts may exist only while checks run and must be removed before return; the final checkout must be clean. No tester role is introduced.',
+  }),
 })
 export const VARIANT_NAMES = Object.freeze(Object.keys(VARIANTS))
 export const DEFAULT_VARIANT = 'full'

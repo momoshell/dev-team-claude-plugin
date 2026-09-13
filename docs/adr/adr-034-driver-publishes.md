@@ -65,7 +65,7 @@ builder wrote into it publishes as written. That is a fact about the builder pro
 not about the driver composition.
 
 Amended 2026-08-31 (#806, TRD `docs/trd-local-models.md` §2 U6): when
-`crew/capabilities.json`'s `local_providers` register carries a `narrator` entry, the
+`crew/capabilities.json`'s top-level `narrator` declaration is present, the
 driver asks that local endpoint for a short narrative composed from the **record
 only** — never the diff, never the checkout — and prepends it under a
 `## Narrative (local model)` heading. The endpoint is one OpenAI API root — a

@@ -7392,7 +7392,7 @@ test('a charter requirement unmet by adapter and register refuses to boot from t
     const CLOSED_REASONS = ['register-invalid', 'capability-shortfall', 'unknown-grant', 'grant-unsupported',
       'extension-missing', 'unknown-skill', 'agent-def-invalid', 'local-settings-missing',
       'local-endpoint-dead', 'grant-contradicts-deny', 'vendor-extension-missing',
-      'agent-unresolved', 'agent-provider-unsupported']
+      'agent-unresolved', 'agent-provider-unsupported', 'local-provider-reserved']
     await assert.rejects(
       () => resolveAdapters(['planner'], { 'agent-planner': 'pi' }, null, { register: capabilityRegister(), root }),
       (err) => {
@@ -7674,7 +7674,7 @@ test('withheld register grants refuse planners with the closed capability-shortf
     await assertWithheld({}, base)
     await assertWithheld({}, agentsOnly)
     await assertWithheld({ 'agent-planner': 'pi' }, agentsOnly)
-    assert.deepEqual([...CAPABILITY_REFUSALS], ['register-invalid', 'capability-shortfall', 'unknown-grant', 'grant-unsupported', 'extension-missing', 'unknown-skill', 'agent-def-invalid', 'local-settings-missing', 'local-endpoint-dead', 'grant-contradicts-deny', 'vendor-extension-missing', 'agent-unresolved', 'agent-provider-unsupported'])
+    assert.deepEqual([...CAPABILITY_REFUSALS], ['register-invalid', 'capability-shortfall', 'unknown-grant', 'grant-unsupported', 'extension-missing', 'unknown-skill', 'agent-def-invalid', 'local-settings-missing', 'local-endpoint-dead', 'grant-contradicts-deny', 'vendor-extension-missing', 'agent-unresolved', 'agent-provider-unsupported', 'local-provider-reserved'])
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 

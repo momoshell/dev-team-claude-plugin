@@ -12,7 +12,7 @@ export const CAPABILITY_REFUSALS = Object.freeze([
   'register-invalid', 'capability-shortfall', 'unknown-grant', 'grant-unsupported',
   'extension-missing', 'unknown-skill', 'agent-def-invalid', 'local-settings-missing',
   'local-endpoint-dead', 'grant-contradicts-deny', 'vendor-extension-missing',
-  'agent-unresolved', 'agent-provider-unsupported',
+  'agent-unresolved', 'agent-provider-unsupported', 'local-provider-reserved',
 ])
 const CAPABILITIES_PATH = join(HERE, 'capabilities.json')
 const CAPABILITIES_SCHEMA_PATH = join(HERE, 'capabilities.schema.json')
@@ -117,6 +117,15 @@ function cloneJson(value) {
   return JSON.parse(JSON.stringify(value))
 }
 
+function reservedNonSeatProviderKeys(schema) {
+  const localProvider = schema?.properties?.local_providers?.patternProperties?.['^[a-z0-9-]+$']
+  const providerRef = localProvider?.$ref
+  if (!providerRef) return new Set()
+  return new Set(Object.entries(schema?.properties || {})
+    .filter(([key, declaration]) => key !== 'local_providers' && declaration?.$ref === providerRef)
+    .map(([key]) => key))
+}
+
 // The register is runtime policy: grant paths resolve against this checkout,
 // not the target checkout. The shipped file carries the role-level claude Task
 // fan-out grant and, adapter-scoped under the planner's by_agent.pi overlay,
@@ -148,6 +157,13 @@ export function loadCapabilities({ path = CAPABILITIES_PATH, schemaPath = CAPABI
   const errors = validateCapabilities(schema, value)
   if (errors.length) {
     throw refuse('register-invalid', `runtime capability register ${path} failed schema validation under the runtime-policy rule: ${errors.slice(0, 3).join('; ')}`)
+  }
+  const reservedNonSeatProviders = reservedNonSeatProviderKeys(schema)
+  for (const key of Object.keys(value.local_providers || {})) {
+    const isReservedNonSeatProvider = reservedNonSeatProviders.has(key)
+    if (!isReservedNonSeatProvider) continue
+    const currentDeclarationPath = `$.${key}`
+    throw refuse('local-provider-reserved', `runtime capability register ${path} declares ${JSON.stringify(key)} as a reserved non-seat provider under local_providers — move the declaration to ${currentDeclarationPath} under the runtime-policy rule`)
   }
   const duplicate = (list, where) => {
     const seen = new Set()

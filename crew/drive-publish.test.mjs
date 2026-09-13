@@ -1297,6 +1297,33 @@ test('issueTrailers separates closing keywords from references and an undeclared
   assert.equal(closing, 'fix(crew): subject\n\nbody text\n\nCloses: #806\n\nRefs: #679')
 })
 
+test('E1 ADR-034 names the top-level narrator declaration', () => {
+  const adr = readFileSync(new URL('../docs/adr/adr-034-driver-publishes.md', import.meta.url), 'utf8')
+  assert.match(adr, /`crew\/capabilities\.json`'s top-level `narrator` declaration is present, the/)
+  assert.doesNotMatch(adr, /local_providers.*narrator|narrator.*local_providers/)
+})
+
+test('E2 TRD U6 names the top-level narrator declaration', () => {
+  const trd = readFileSync(new URL('../docs/trd-local-models.md', import.meta.url), 'utf8')
+  const u6 = trd.split('\n').find((line) => line.startsWith('| U6 |')) || ''
+  assert.match(u6, /`composePrBody` \+ root `narrator`/)
+  assert.equal(u6.includes('local_providers'), false)
+})
+
+test('RV1-1 TRD U6 stale-location guard remains vacuity-safe', () => {
+  const trd = readFileSync(new URL('../docs/trd-local-models.md', import.meta.url), 'utf8')
+  const u6 = trd.split('\n').find((line) => line.startsWith('| U6 |')) || ''
+  assert.equal(u6.includes('`composePrBody` + root `narrator`'), true)
+  assert.equal(u6.includes('local_providers'), false)
+})
+
+test('E3 TRD L4 names the top-level narrator declaration', () => {
+  const trd = readFileSync(new URL('../docs/trd-local-models.md', import.meta.url), 'utf8')
+  const l4 = trd.split('\n').find((line) => line.startsWith('- **L4')) || ''
+  assert.match(l4, /when the top-level `narrator` declaration is configured/)
+  assert.doesNotMatch(l4, /local_providers|narrator.*local_providers|local_providers.*narrator/)
+})
+
 test('narratorApiRoot normalises every base_url spelling to exactly one API root', () => {
   assert.equal(narratorApiRoot('http://127.0.0.1:11434/v1'), 'http://127.0.0.1:11434/v1')
   assert.equal(narratorApiRoot('http://127.0.0.1:11434/v1/'), 'http://127.0.0.1:11434/v1')
@@ -1339,6 +1366,21 @@ test('narrateRecord narrates from an honest endpoint and never sends pi_provider
   const prompt = narrationPrompt(NARRATION_RECORD)
   assert.ok(prompt.includes(JSON.stringify(NARRATION_RECORD)))
   assert.ok(prompt.includes('you have not seen the diff or the checkout'))
+})
+
+test('F1 top-level narrator declaration still enables narration', () => {
+  const register = NARRATOR_REGISTER('http://127.0.0.1:11434/v1')
+  const parsed = JSON.parse(register)
+  assert.deepEqual(Object.keys(parsed), ['narrator'])
+  const accepted = narrateRecord({ record: NARRATION_RECORD, registerText: register, io: narratorIo() })
+  assert.equal(accepted.refused, undefined)
+  assert.equal(accepted.text, HONEST_NARRATION)
+})
+
+test('G1 refused narration preserves the code-composed body byte-identically', () => {
+  const record = NARRATION_RECORD
+  const refusal = { refused: NARRATION_REFUSALS.unreachable }
+  assert.equal(composePrBody(applyNarration(record, refusal)), composePrBody(record))
 })
 
 test('every narration failure is a named refusal and never a throw', () => {

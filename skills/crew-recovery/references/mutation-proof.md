@@ -24,8 +24,18 @@ The declarations for a hand proof come from
 `returns/d1.planner.json` → `details.mutations`, never from `plan.md`. The
 planner's return carries the machine-applied `{check, file, find, replace}`
 records; plan prose explains intent but is not the source the driver applies.
-For each record, copy the committed tree if an independent experiment is
-needed, apply the literal replacement, and run only the named gate check.
+An optional builder return may be supplied separately; its
+`details.mutation_corrections` records are re-bound against the checkout and
+validated with the driver's shared static shape, declared-check, absent-original-
+anchor, and unique-corrected-bind rules. Every statically valid correction is
+honored by this independent prover, whose own mutation run is the adjudication;
+the builder record does not carry the driver's finalized `checkProofs` and is
+never described as driver-accepted. A supplied correction that is refused (for
+example `correction-absent` or `correction-ambiguous`) is a terminal refusal
+before baseline or mutation execution, with no silent planner fallback. A check
+without a correction keeps its planner declaration. For each selected record,
+copy the committed tree if an independent experiment is needed, apply the
+literal replacement, and run only the named gate check.
 
 A mutation kills its check only when the output matches the driver's
 `checkFailureLine` rule: a bare `FAIL <check>` line or `FAIL <check>:` followed
@@ -71,10 +81,20 @@ a hand loop — the loop above has been got wrong by hand, confidently:
 
 ```sh
 node scripts/factory/prove-mutations.mjs --envelope <lane>/returns/d1.planner.json \
+  --builder-envelope <lane>/returns/<builder-return>.json \
   --checkout <lane checkout> --gate 'node <lane>/task/gate.mjs'
 ```
 
-It reads `details.mutations` in both the `check` and the `id` spelling, refuses
+`--builder-envelope` is optional; omit it when no builder correction record is
+available. It reads `details.mutations` in both the `check` and the `id` spelling,
+then independently validates and honors statically valid builder corrections as
+re-provable candidates—not as in-lane acceptance. A refused supplied correction
+such as `correction-absent` or `correction-ambiguous` stops the proof before its
+baseline and mutations, rather than falling back to the planner anchor. Every
+human per-check row exposes `anchor=planner-declaration` or
+`anchor=builder-correction (standalone validation)`; JSON rows carry the same
+raw provenance values (`planner-declaration` or `builder-correction`). It
+refuses
 `declarations-invalid` before it runs anything when an entry cannot be read, refuses
 `baseline-not-green` unless the unmutated scratch tree exits 0 AND prints a readable
 summary of checks that actually ran, cuts one detached worktree per declaration,

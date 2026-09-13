@@ -52,6 +52,20 @@ function sequence(...results) {
   return (...args) => results[Math.min(index++, results.length - 1)](...args)
 }
 
+function plannerEnvelope(declarations = [DECL]) {
+  return { details: { mutations: declarations, gate_cmd: 'stub' } }
+}
+
+function builderEnvelope(corrections) {
+  return { details: { mutation_corrections: corrections } }
+}
+
+function commitBuilt(checkout, relative, file, text) {
+  writeFileSync(file, text)
+  git(checkout, 'add', relative)
+  git(checkout, 'commit', '-q', '-m', 'built')
+}
+
 function noOutput() {
   return { stdout: () => {}, stderr: () => {} }
 }
@@ -165,6 +179,159 @@ test('a green mutation is survived and not counted as killed', () => {
   assert.match(mod.formatReport(result).join('\n'), /SURVIVED/)
 })
 
+test('A1 corrected anchor resolution uses the builder correction', () => {
+  const { root, checkout, file } = fixture()
+  const correctedFind = "const alpha = 'built'"
+  const built = WIDGET.replace(FIND, correctedFind)
+  commitBuilt(checkout, 'lib/widget.mjs', file, built)
+  const planner = plannerEnvelope()
+  const resolved = mod.resolveDeclarations(planner, builderEnvelope([
+    { check: 'X1', find: correctedFind, replace: "const alpha = 'corrected'" },
+  ]), (path) => path === DECL.file ? readFileSync(file, 'utf8') : null)
+  assert.equal(mod.bindOccurrences(built, FIND), 0)
+  assert.equal(mod.bindOccurrences(built, correctedFind), 1)
+  assert.equal(resolved.refusals.length, 0)
+  assert.equal(resolved.declarations[0].find, correctedFind)
+  assert.equal(resolved.declarations[0].provenance, 'builder-correction')
+  const result = mod.proveMutations({
+    checkout, declarations: resolved.declarations, invalid: resolved.refusals, gateCmd: 'stub',
+    deps: { runGate: sequence(() => GREEN, () => RED) },
+  })
+  assert.equal(result.refusal, null)
+  assert.deepEqual(result.rows.map((row) => row.outcome), ['killed'])
+  assert.equal(result.rows[0].check, 'X1')
+  assert.equal(result.rows[0].provenance, 'builder-correction')
+  assert.equal(result.counts.bindFail, 0)
+  removeKept(result)
+  rmSync(root, { recursive: true, force: true })
+})
+
+test('B1 proof rows name builder and planner anchor provenance', () => {
+  const { root, checkout, file } = fixture()
+  const correctedFind = "const alpha = 'built'"
+  const second = { check: 'X2', file: 'lib/other.mjs', find: 'export const other = 1', replace: 'export const other = 2' }
+  const built = WIDGET.replace(FIND, correctedFind)
+  commitBuilt(checkout, 'lib/widget.mjs', file, built)
+  const resolved = mod.resolveDeclarations(
+    plannerEnvelope([DECL, second]),
+    builderEnvelope([{ check: 'X1', find: correctedFind, replace: "const alpha = 'corrected'" }]),
+    (path) => path === DECL.file ? readFileSync(file, 'utf8') : path === second.file ? OTHER : null,
+  )
+  assert.deepEqual(resolved.declarations.map((row) => row.provenance), ['builder-correction', 'planner-declaration'])
+  let runs = 0
+  const result = mod.proveMutations({
+    checkout, declarations: resolved.declarations, invalid: resolved.refusals, gateCmd: 'stub',
+    deps: {
+      runGate: () => {
+        runs += 1
+        if (runs === 1) return GREEN
+        const check = runs === 2 ? 'X1' : 'X2'
+        return { ok: false, output: `FAIL ${check}\nGATE-SUMMARY {"total":1,"failed":1,"errored":0}` }
+      },
+    },
+  })
+  const jsonRows = JSON.parse(JSON.stringify(result)).rows
+  assert.deepEqual(jsonRows.map((row) => row.provenance), ['builder-correction', 'planner-declaration'])
+  const human = mod.formatReport(result).join('\n')
+  assert.match(human, /anchor=builder-correction \(standalone validation\)/)
+  assert.match(human, /anchor=planner-declaration/)
+  removeKept(result)
+  rmSync(root, { recursive: true, force: true })
+})
+
+test('C1 declarations without corrections retain the planner anchor', () => {
+  const { root, checkout, file } = fixture()
+  const resolved = mod.resolveDeclarations(plannerEnvelope(), undefined, () => { throw new Error('no builder read expected') })
+  assert.equal(resolved.refusals.length, 0)
+  assert.equal(resolved.declarations[0].find, FIND)
+  assert.equal(resolved.declarations[0].replace, REPLACE)
+  assert.equal(resolved.declarations[0].provenance, 'planner-declaration')
+  let runs = 0
+  let mutated = null
+  const result = mod.proveMutations({
+    checkout, declarations: resolved.declarations, invalid: resolved.refusals, gateCmd: 'stub',
+    deps: {
+      runGate: (cmd, cwd) => {
+        if (runs++ === 0) return GREEN
+        mutated = readFileSync(join(cwd, DECL.file), 'utf8')
+        return RED
+      },
+    },
+  })
+  assert.equal(result.refusal, null)
+  assert.equal(result.rows[0].outcome, 'killed')
+  assert.equal(result.rows[0].provenance, 'planner-declaration')
+  assert.ok(mutated.includes(REPLACE))
+  assert.doesNotMatch(mod.formatReport(result).join('\n'), /builder-correction/)
+  removeKept(result)
+  rmSync(root, { recursive: true, force: true })
+})
+
+test('D1 stale and ambiguous corrections refuse without planner fallback', () => {
+  const cases = [
+    { reason: 'correction-absent', correctedFind: 'const alpha = \'missing-correction\'', built: WIDGET.replace(FIND, "const alpha = 'built'") },
+    { reason: 'correction-ambiguous', correctedFind: "const alpha = 'built'", built: "const alpha = 'built'\nconst alpha = 'built'\n" },
+  ]
+  for (const scenario of cases) {
+    const { root, checkout, file } = fixture()
+    writeFileSync(file, scenario.built)
+    const resolved = mod.resolveDeclarations(
+      plannerEnvelope(),
+      builderEnvelope([{ check: 'X1', find: scenario.correctedFind, replace: "const alpha = 'corrected'" }]),
+      (path) => path === DECL.file ? readFileSync(file, 'utf8') : null,
+    )
+    assert.deepEqual(resolved.declarations, [])
+    assert.equal(resolved.refusals.length, 1)
+    assert.equal(resolved.refusals[0].reason, scenario.reason)
+    let runs = 0
+    const result = mod.proveMutations({
+      checkout, declarations: resolved.declarations, invalid: resolved.refusals, gateCmd: 'stub',
+      deps: { runGate: () => { runs += 1; return GREEN } },
+    })
+    assert.equal(result.refusal.reason, scenario.reason)
+    assert.equal(result.counts.declared, 0)
+    assert.equal(result.rows.length, 0)
+    assert.equal(runs, 0)
+    assert.match(mod.formatReport(result, resolved.refusals).join('\n'), new RegExp(scenario.reason))
+    removeKept(result)
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('E1 per-check output distinguishes BIND-FAIL from SURVIVED', () => {
+  const { root, checkout } = fixture()
+  const zero = { check: 'X2', file: 'lib/widget.mjs', find: 'not-present-9f3a', replace: 'beta' }
+  const result = mod.proveMutations({
+    checkout, declarations: [zero, DECL], gateCmd: 'stub',
+    deps: { runGate: sequence(() => GREEN, () => GREEN) },
+  })
+  assert.deepEqual(result.rows.map((row) => row.outcome), ['bind-fail', 'survived'])
+  const rows = mod.formatReport(result).slice(0, 2)
+  assert.match(rows[0], /^X2 BIND-FAIL\(0\)/)
+  assert.match(rows[1], /X1 SURVIVED/)
+  assert.doesNotMatch(rows[0], /SURVIVED/)
+  assert.doesNotMatch(rows[1], /BIND-FAIL/)
+  removeKept(result)
+  rmSync(root, { recursive: true, force: true })
+})
+
+test('E2 summary output distinguishes bind-fail from survived', () => {
+  const { root, checkout } = fixture()
+  const zero = { check: 'X2', file: 'lib/widget.mjs', find: 'not-present-9f3a', replace: 'beta' }
+  const result = mod.proveMutations({
+    checkout, declarations: [zero, DECL], gateCmd: 'stub',
+    deps: { runGate: sequence(() => GREEN, () => GREEN) },
+  })
+  assert.equal(result.counts.bindFail, 1)
+  assert.equal(result.counts.survived, 1)
+  assert.equal(result.counts.killed, 0)
+  const summary = mod.formatReport(result).at(-1)
+  assert.match(summary, /survived 1/)
+  assert.match(summary, /bind-fail 1/)
+  removeKept(result)
+  rmSync(root, { recursive: true, force: true })
+})
+
 // Mutation killed: parsing coloured output raw makes a coloured FAIL line look like a survivor.
 test('coloured FAIL and GATE-SUMMARY output still adjudicate a kill', () => {
   const { checkout } = fixture()
@@ -263,6 +430,80 @@ test('parseArgs has closed usage reasons and main returns 2 for missing inputs',
   assert.equal(await mod.main(['--envelope', '/bad'], { ...noOutput(), readFile: () => '{not-json' }), 2)
   const envelope = JSON.stringify({ details: { mutations: [] } })
   assert.equal(await mod.main(['--envelope', '/no-gate'], { ...noOutput(), readFile: () => envelope }), 2)
+})
+
+test('builder envelope CLI is optional, exclusive, and fails closed', async () => {
+  const { root, checkout } = fixture()
+  const plannerPath = join(root, 'planner.json')
+  const builderPath = join(root, 'builder.json')
+  const plannerRaw = JSON.stringify(plannerEnvelope())
+  const builderRaw = JSON.stringify(builderEnvelope([]))
+  assert.ok(mod.USAGE.includes('--builder-envelope <path>'))
+  assert.throws(() => mod.parseArgs(['--builder-envelope', builderPath]), (error) => error.reason === 'builder-envelope-without-envelope')
+  assert.throws(() => mod.parseArgs(['--diff-config', '/diff.json', '--builder-envelope', builderPath]), (error) => error.reason === 'mutually-exclusive')
+
+  let gateRuns = 0
+  const absentErrors = []
+  const absentCode = await mod.main(['--envelope', plannerPath, '--builder-envelope', builderPath, '--checkout', checkout, '--gate', 'stub'], {
+    readFile: (path) => path === plannerPath ? plannerRaw : null,
+    runGate: () => { gateRuns += 1; return GREEN },
+    stdout: () => {}, stderr: (text) => absentErrors.push(text),
+  })
+  assert.equal(absentCode, 2)
+  assert.equal(gateRuns, 0)
+  assert.match(absentErrors.join(''), /builder-envelope-absent/)
+
+  const malformedErrors = []
+  const malformedCode = await mod.main(['--envelope', plannerPath, '--builder-envelope', builderPath, '--checkout', checkout, '--gate', 'stub'], {
+    readFile: (path) => path === plannerPath ? plannerRaw : '{not-json',
+    runGate: () => { gateRuns += 1; return GREEN },
+    stdout: () => {}, stderr: (text) => malformedErrors.push(text),
+  })
+  assert.equal(malformedCode, 2)
+  assert.equal(gateRuns, 0)
+  assert.match(malformedErrors.join(''), /builder-envelope-unreadable/)
+
+  const corrected = fixture()
+  const correctedPlannerPath = join(corrected.root, 'planner.json')
+  const correctedBuilderPath = join(corrected.root, 'builder.json')
+  const correctedFind = "const alpha = 'built'"
+  commitBuilt(corrected.checkout, 'lib/widget.mjs', corrected.file, WIDGET.replace(FIND, correctedFind))
+  const correctedOutput = []
+  let correctedRuns = 0
+  const correctedCode = await mod.main(['--envelope', correctedPlannerPath, '--builder-envelope', correctedBuilderPath, '--checkout', corrected.checkout, '--gate', 'stub', '--json'], {
+    readFile: (path) => path === correctedPlannerPath
+      ? JSON.stringify(plannerEnvelope())
+      : path === correctedBuilderPath
+        ? JSON.stringify(builderEnvelope([{ check: 'X1', find: correctedFind, replace: "const alpha = 'corrected'" }]))
+        : readFileSync(path, 'utf8'),
+    runGate: () => correctedRuns++ === 0 ? GREEN : RED,
+    stdout: (text) => correctedOutput.push(text), stderr: () => {},
+  })
+  assert.equal(correctedCode, 0)
+  assert.equal(JSON.parse(correctedOutput.join('')).rows[0].provenance, 'builder-correction')
+  rmSync(corrected.root, { recursive: true, force: true })
+
+  const jsonOutput = []
+  let jsonRuns = 0
+  const jsonCode = await mod.main(['--envelope', plannerPath, '--builder-envelope', builderPath, '--checkout', checkout, '--gate', 'stub', '--json'], {
+    readFile: (path) => path === plannerPath ? plannerRaw : path === builderPath ? builderRaw : readFileSync(path, 'utf8'),
+    runGate: () => jsonRuns++ === 0 ? GREEN : RED,
+    stdout: (text) => jsonOutput.push(text), stderr: () => {},
+  })
+  assert.equal(jsonCode, 0)
+  assert.equal(jsonRuns, 2)
+  assert.equal(JSON.parse(jsonOutput.join('')).rows[0].provenance, 'planner-declaration')
+
+  const humanOutput = []
+  let humanRuns = 0
+  const compatibilityCode = await mod.main(['--envelope', plannerPath, '--checkout', checkout, '--gate', 'stub'], {
+    readFile: (path) => path === plannerPath ? plannerRaw : readFileSync(path, 'utf8'),
+    runGate: () => humanRuns++ === 0 ? GREEN : RED,
+    stdout: (text) => humanOutput.push(text), stderr: () => {},
+  })
+  assert.equal(compatibilityCode, 0)
+  assert.match(humanOutput.join(''), /anchor=planner-declaration/)
+  rmSync(root, { recursive: true, force: true })
 })
 
 // Mutation killed: passing the ambient FORCE_COLOR through overrides NO_COLOR and corrupts gate parsing.

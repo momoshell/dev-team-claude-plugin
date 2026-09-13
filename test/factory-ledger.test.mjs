@@ -23,7 +23,7 @@ const NONCE_PREFIX = 'devteam-done-'
 import {
   openLedger, mkdirpBounded, replayJsonl, isoMs, TABLES, MIGRATIONS, applyMigrations, NODE_FLOOR,
   DRIVER_GONE_THRESHOLD_MS, SESSION_STATUS_ABSENT, projectSessions, DRIVER_STATES, RUN_OBSERVATION_SOURCES, RUN_OBSERVATION_COLUMNS, RUN_OBSERVATION_WRITE_VERB,
-  SESSION_STATUSES, SESSION_OUTCOMES, SEAT_VALUE_SOURCES, TERMINAL_ACTORS, ESCALATION_CAUSES, escalationCause, TERM_TO_KILL_MS, WRITERS, WRITER_MIRROR_TABLES, UPDATE_ONLY_WRITERS, DRIFT_REMEDY, DRIFT_COLLAPSE_REMEDY, LedgerUsageError,
+  SESSION_STATUSES, SESSION_OUTCOMES, SEAT_VALUE_SOURCES, TERMINAL_ACTORS, ESCALATION_CAUSES, ESCALATION_CAUSE_UNCLASSIFIED, escalationCause, TERM_TO_KILL_MS, WRITERS, WRITER_MIRROR_TABLES, UPDATE_ONLY_WRITERS, DRIFT_REMEDY, DRIFT_COLLAPSE_REMEDY, LedgerUsageError,
   MODIFIER_KINDS, MODIFIER_ATTEMPT_OUTCOMES, INTAKE_DISPATCH_OUTCOMES,
   SEAT_TEARDOWN_OUTCOMES, GATE_DISCRIMINATION_VERDICTS, MUTATION_ANCHOR_CORRECTIONS, MUTATION_ANCHOR_REFUSALS, CELL_FAILURE_KINDS, CELL_FAILURE_ATTRIBUTIONS,
   RUN_VARIANTS, RUN_VARIANT_MARKERS, STAGE_MARKER_CHUNK, variantFromFirstMessage,
@@ -49,6 +49,12 @@ import { modelString as piModelString } from '../crew/adapters/adapter-pi.mjs'
 import {
   _resetNoticeGuardsForTest, openRun, parseProposalBrief,
 } from '../scripts/factory/emit.mjs'
+import {
+  loadDurableEscalationRecord,
+  proposalFromResponse,
+  proposalPrompt,
+  triageEscalation,
+} from '../scripts/factory/escalation-triage.mjs'
 
 const SCRIPT = join(ROOT, 'scripts', 'factory', 'ledger.mjs')
 // AC-13 (both test files never reference the CLI-only default-db-path
@@ -5944,7 +5950,7 @@ test('ledger query docs pin typed outcomes, run seats, closed vocabularies, and 
   for (const source of ['roster', 'profile_recommendation', 'operator_override', 'reseat']) {
     assert.ok(docs.includes(`\`${source}\``), `docs missing ${source}`)
   }
-  assert.match(docs, /\*\*34 tables\*\*/)
+  assert.match(docs, /\*\*35 tables\*\*/)
   assert.ok(docs.includes('`phase_slot_waits`'))
   assert.ok(docs.includes('Recipe M'))
   assert.match(docs, /FROM\s+run_seats/i)
@@ -8002,5 +8008,282 @@ test('G1 a populated legacy gate_results table migrates with NULL timing fields'
     const row = ledger.gateResultsFor(['legacy-gate'])[0]
     assert.equal(row.gate_run_ms, null)
     assert.equal(row.gate_run_ms_absent_reason, null)
+  } finally { ledger.close() }
+})
+
+const TRIAGE_MODEL = 'triage-model-exact'
+
+function makeTriageFixture({ id, ledger, where = 'mystery', why = 'the run stopped without a rule', streamEvidence = 'stream evidence', returnMarker = `${id}-return` } = {}) {
+  const dir = scratchDir(`escalation-${id}-`)
+  mkdirSync(join(dir, 'returns'), { recursive: true })
+  mkdirSync(join(dir, 'task', 'headless', 'd1'), { recursive: true })
+  writeFileSync(join(dir, 'returns', 'task.json'), JSON.stringify({
+    assignment_id: id,
+    status: 'escalation',
+    summary: returnMarker,
+    details: { escalation: { where, why } },
+  }))
+  writeFileSync(join(dir, 'journal.jsonl'), [
+    { event: 'run-start', run_id: id, task: id },
+    { event: 'escalation-evidence', detail: `${id}-journal-marker` },
+  ].map((row) => JSON.stringify(row)).join('\n') + '\n')
+  writeFileSync(join(dir, 'task', 'headless', 'd1', 'stream.jsonl'), [
+    { type: 'assistant', text: streamEvidence },
+    { type: 'result', terminal_reason: 'budget-exhausted', detail: streamEvidence },
+  ].map((row) => JSON.stringify(row)).join('\n') + '\n')
+  ledger.startSession({ adw_id: id, repo_slug: 'test', task_slug: id })
+  ledger.endSession({
+    adw_id: id, status: 'fail', outcome: 'escalated', terminal_reason: ESCALATION_CAUSE_UNCLASSIFIED,
+    terminal_actor: 'driver',
+  })
+  return dir
+}
+
+function triageLedger(prefix = 'triage-ledger-') {
+  const dir = scratchDir(prefix)
+  const ledger = openLedger({ dbPath: join(dir, 'ledger.db'), stderr: { write() {} } })
+  return { dir, ledger }
+}
+
+function triageResponse(cause = 'budget', evidence = 'measured budget exhaustion in the durable stream tail') {
+  return { ok: true, status: 200, json: async () => ({ proposed_cause: cause, evidence }) }
+}
+
+test('A1 escalation proposal remains separate from measured outcome', { skip: SKIP }, async (t) => {
+  const { dir, ledger } = triageLedger()
+  const id = 'a1-run'
+  try {
+    const crewDir = makeTriageFixture({ id, ledger })
+    const durableRecord = loadDurableEscalationRecord({ crewDir, ledger })
+    const measuredBefore = JSON.stringify(ledger.getSession(id))
+    const result = await triageEscalation({ durableRecord, endpoint: 'http://triage.test/v1', model: TRIAGE_MODEL, ledger }, {
+      request: async () => triageResponse('budget', 'budget evidence'),
+    })
+    assert.deepEqual(result, { recorded: true, reason: 'recorded' })
+    assert.equal(JSON.stringify(ledger.getSession(id)), measuredBefore)
+    assert.equal(ledger.getSession(id).terminal_reason, ESCALATION_CAUSE_UNCLASSIFIED)
+    const proposal = ledger.escalationProposalFor(id)
+    assert.deepEqual({ ...proposal }, {
+      adw_id: id, proposed_cause: 'budget', proposed_by: TRIAGE_MODEL,
+      proposed_evidence: 'budget evidence', created_at: proposal.created_at,
+    })
+    assert.equal(ledger.getSession(id).proposed_cause, undefined)
+    assert.equal(UPDATE_ONLY_WRITERS.includes('recordEscalationProposal'), false)
+    assert.equal(WRITER_MIRROR_TABLES.recordEscalationProposal, 'escalation_proposals')
+    const drift = ledger.jsonlDrift()
+    const proposalDrift = drift.writers.find((writer) => writer.writer === 'recordEscalationProposal')
+    assert.equal(proposalDrift?.drift, 0)
+    assert.equal(proposalDrift?.rows_present, 1)
+
+    const unavailable = openLedger({
+      dbPath: join(dir, 'unavailable.db'),
+      jsonlPath: join(dir, 'unavailable.jsonl'),
+      nodeVersion: '0.0.0',
+      stderr: { write() {} },
+    })
+    try {
+      unavailable.startSession({ adw_id: 'a1-mirror-unavailable', repo_slug: 'test', task_slug: 'unavailable' })
+      unavailable.endSession({
+        adw_id: 'a1-mirror-unavailable', status: 'fail', outcome: 'escalated',
+        terminal_reason: ESCALATION_CAUSE_UNCLASSIFIED, terminal_actor: 'driver',
+      })
+      assert.deepEqual(unavailable.recordEscalationProposal({
+        adw_id: 'a1-mirror-unavailable', proposed_cause: 'budget', proposed_by: TRIAGE_MODEL, proposed_evidence: 'unavailable mirror',
+      }), { recorded: false, reason: 'mirror-unavailable' })
+    } finally { unavailable.close() }
+
+    const duplicateRecord = loadDurableEscalationRecord({ crewDir, ledger })
+    let duplicateCalls = 0
+    const duplicate = await triageEscalation({ durableRecord: duplicateRecord, endpoint: 'http://triage.test', model: TRIAGE_MODEL, ledger }, {
+      request: async () => { duplicateCalls += 1; return triageResponse('infrastructure', 'must not replace first proposal') },
+    })
+    assert.deepEqual(duplicate, { recorded: false, reason: 'already-proposed' })
+    assert.equal(duplicateCalls, 0)
+    assert.equal(ledger.escalationProposalFor(id).proposed_cause, 'budget')
+
+    const replayed = openLedger({ dbPath: join(dir, 'replay.db'), stderr: { write() {} } })
+    try {
+      const replay = replayJsonl(ledger._jsonlPath, replayed)
+      assert.equal(replay.failed, 0)
+      assert.equal(replayed.escalationProposalFor(id).proposed_cause, 'budget')
+      assert.equal(replayed.getSession(id).terminal_reason, ESCALATION_CAUSE_UNCLASSIFIED)
+    } finally { replayed.close() }
+    await t.test('proposal writer is classified as an insert mirror', () => {
+      assert.equal(WRITER_MIRROR_TABLES.recordEscalationProposal, 'escalation_proposals')
+    })
+  } finally { ledger.close() }
+})
+
+test('B1 escalation proposal records its proposing model', { skip: SKIP }, async () => {
+  const { ledger } = triageLedger()
+  const id = 'b1-run'
+  try {
+    const crewDir = makeTriageFixture({ id, ledger })
+    const durableRecord = loadDurableEscalationRecord({ crewDir, ledger })
+    const exactModel = 'local/triage-model-2026'
+    const result = await triageEscalation({ durableRecord, endpoint: 'http://triage.test', model: exactModel, ledger }, {
+      request: async () => triageResponse('infrastructure', 'model provenance evidence'),
+    })
+    assert.equal(result.recorded, true)
+    assert.equal(ledger.escalationProposalFor(id).proposed_by, exactModel)
+  } finally { ledger.close() }
+})
+
+test('C1 escalation triage degradation is an inert no-op', { skip: SKIP }, async () => {
+  const { ledger } = triageLedger()
+  const cases = [
+    { id: 'c1-missing', endpoint: undefined, request: async () => { throw new Error('must not call') }, reason: 'endpoint-unconfigured' },
+    { id: 'c1-dead', endpoint: 'http://dead.test', request: async () => ({ ok: false, status: 503 }), reason: 'endpoint-failed' },
+    { id: 'c1-throw', endpoint: 'http://throw.test', request: async () => { throw Object.assign(new Error('EPERM'), { code: 'EPERM' }) }, reason: 'endpoint-failed' },
+  ]
+  try {
+    const edgeDir = makeTriageFixture({ id: 'c1-edge', ledger })
+    writeFileSync(join(edgeDir, 'task', 'headless', 'd1', 'stream.jsonl'), '')
+    mkdirSync(join(edgeDir, 'task', 'headless', 'd2'), { recursive: true })
+    writeFileSync(join(edgeDir, 'task', 'headless', 'd2', 'stream.jsonl'), '{"torn":')
+    const edgeRecord = loadDurableEscalationRecord({ crewDir: edgeDir, ledger })
+    assert.ok(edgeRecord.diagnostics.some(({ reason }) => reason === 'stream-d1-empty'))
+    assert.ok(edgeRecord.diagnostics.some(({ reason }) => reason === 'stream-d2-torn-final'))
+    for (const code of ['ENOENT', 'EPERM', 'EINTR']) {
+      const interrupted = loadDurableEscalationRecord({ crewDir: edgeDir, ledger }, {
+        readFileSync: () => { throw Object.assign(new Error(code), { code }) },
+        readdirSync: () => { throw Object.assign(new Error(code), { code }) },
+      })
+      assert.ok(interrupted.diagnostics.some((entry) => entry.code === code))
+    }
+
+    const malformedDir = makeTriageFixture({ id: 'c1-malformed', ledger })
+    const malformedRecord = loadDurableEscalationRecord({ crewDir: malformedDir, ledger })
+    let writerCalls = 0
+    const originalWriter = ledger.recordEscalationProposal
+    ledger.recordEscalationProposal = (...args) => { writerCalls += 1; return originalWriter(...args) }
+    const malformed = await triageEscalation({ durableRecord: malformedRecord, endpoint: 'http://malformed.test', model: TRIAGE_MODEL, ledger }, {
+      request: async () => ({ ok: true, status: 200, json: async () => '{not-json' }),
+    })
+    assert.deepEqual(malformed, { recorded: false, reason: 'response-invalid' })
+
+    for (const item of cases) {
+      const crewDir = makeTriageFixture({ id: item.id, ledger })
+      const durableRecord = loadDurableEscalationRecord({ crewDir, ledger })
+      let calls = 0
+      const callerSentinel = { progress: 'before' }
+      let result
+      await assert.doesNotReject(async () => {
+        const pending = triageEscalation({ durableRecord, endpoint: item.endpoint, model: TRIAGE_MODEL, ledger }, {
+          request: async (...args) => { calls += 1; return item.request(...args) },
+        })
+        callerSentinel.progress = 'after'
+        result = await pending
+      })
+      assert.equal(callerSentinel.progress, 'after')
+      assert.deepEqual(result, { recorded: false, reason: item.reason })
+      assert.equal(calls, item.endpoint ? 1 : 0)
+      assert.equal(writerCalls, 0)
+      assert.equal(ledger.escalationProposalFor(item.id), null)
+    }
+  } finally { ledger.close() }
+})
+
+test('D1 b332 and b333 durable records propose budget', { skip: SKIP }, async () => {
+  const { ledger } = triageLedger()
+  try {
+    for (const id of ['b332', 'b333']) {
+      const crewDir = makeTriageFixture({
+        id,
+        ledger,
+        streamEvidence: `${id}: local model budget exhaustion evidence`,
+        returnMarker: `${id}-durable-return`,
+      })
+      const durableRecord = loadDurableEscalationRecord({ crewDir, ledger })
+      assert.equal(escalationCause(durableRecord.escalation).cause, ESCALATION_CAUSE_UNCLASSIFIED)
+      assert.match(JSON.stringify(durableRecord.streams), new RegExp(`${id}: local model budget exhaustion evidence`))
+      const result = await triageEscalation({ durableRecord, endpoint: 'http://triage.test', model: TRIAGE_MODEL, ledger }, {
+        request: async () => triageResponse('budget', `${id} budget evidence`),
+      })
+      assert.deepEqual(result, { recorded: true, reason: 'recorded' })
+      assert.equal(ledger.escalationProposalFor(id).proposed_cause, 'budget')
+      assert.equal(ledger.getSession(id).terminal_reason, ESCALATION_CAUSE_UNCLASSIFIED)
+    }
+  } finally { ledger.close() }
+})
+
+test('E1 measured escalation receives no proposal', { skip: SKIP }, async () => {
+  const { ledger } = triageLedger()
+  const id = 'e1-run'
+  try {
+    const crewDir = makeTriageFixture({ id, ledger, where: 'gate', why: 'the gate failed' })
+    const durableRecord = loadDurableEscalationRecord({ crewDir, ledger })
+    let calls = 0
+    const result = await triageEscalation({ durableRecord, endpoint: 'http://triage.test', model: TRIAGE_MODEL, ledger }, {
+      request: async () => { calls += 1; return triageResponse('budget', 'must not be used') },
+    })
+    assert.deepEqual(result, { recorded: false, reason: 'already-classified' })
+    assert.equal(calls, 0)
+    assert.equal(ledger.getSession(id).terminal_reason, ESCALATION_CAUSE_UNCLASSIFIED)
+    assert.equal(ledger.escalationProposalFor(id), null)
+  } finally { ledger.close() }
+})
+
+test('F1 escalation proposal rejects an unknown cause', { skip: SKIP }, async () => {
+  const { ledger } = triageLedger()
+  const id = 'f1-run'
+  try {
+    const crewDir = makeTriageFixture({ id, ledger })
+    const durableRecord = loadDurableEscalationRecord({ crewDir, ledger })
+    const result = await triageEscalation({ durableRecord, endpoint: 'http://triage.test', model: TRIAGE_MODEL, ledger }, {
+      request: async () => triageResponse('this is not a ledger cause', 'free text evidence'),
+    })
+    assert.deepEqual(result, { recorded: false, reason: 'proposal-cause-invalid' })
+    assert.deepEqual(proposalFromResponse(JSON.stringify({ proposed_cause: 'free text', evidence: 'x' })), {
+      recorded: false, reason: 'proposal-cause-invalid',
+    })
+    assert.equal(ledger.escalationProposalFor(id), null)
+  } finally { ledger.close() }
+})
+
+test('G1 escalation triage sends only durable record evidence', { skip: SKIP }, async () => {
+  const { ledger } = triageLedger()
+  const id = 'g1-run'
+  const checkoutTrap = 'CHECKOUT_SENTINEL_MUST_NOT_REACH_MODEL'
+  const diffTrap = 'DIFF_SENTINEL_MUST_NOT_REACH_MODEL'
+  try {
+    const crewDir = makeTriageFixture({
+      id,
+      ledger,
+      streamEvidence: `${id}-stream-marker budget exhaustion`,
+      returnMarker: `${id}-return-marker`,
+    })
+    const checkout = { readCheckout: () => { throw new Error(checkoutTrap) }, readDiff: () => { throw new Error(diffTrap) } }
+    ledger.recordRunObservation({
+      adw_id: id,
+      observed_at: '2026-01-01T00:00:00.000Z',
+      observer: 'g1', driver_state: 'gone', source: 'process_group', reason_code: 'budget',
+      detail: 'g1-observation-marker',
+    })
+    const durableRecord = loadDurableEscalationRecord({ crewDir, ledger }, checkout)
+    const prompt = proposalPrompt(durableRecord)
+    assert.ok(Buffer.byteLength(prompt, 'utf8') <= 64 * 1024)
+    let requestUrl = null
+    let requestOptions = null
+    const result = await triageEscalation({ durableRecord, endpoint: 'http://triage.test/v1/', model: TRIAGE_MODEL, ledger }, {
+      request: async (url, options) => {
+        requestUrl = url
+        requestOptions = options
+        return triageResponse('budget', 'é'.repeat(2048))
+      },
+    })
+    assert.deepEqual(result, { recorded: true, reason: 'recorded' })
+    assert.equal(requestUrl, 'http://triage.test/v1/chat/completions')
+    const sent = JSON.parse(requestOptions.body)
+    const content = sent.messages[0].content
+    assert.match(content, /g1-run-return-marker/)
+    assert.match(content, /g1-run-journal-marker/)
+    assert.match(content, /g1-observation-marker/)
+    assert.match(content, /g1-run-stream-marker budget exhaustion/)
+    assert.doesNotMatch(content, new RegExp(checkoutTrap))
+    assert.doesNotMatch(content, new RegExp(diffTrap))
+    assert.doesNotMatch(content, /process\\.cwd\\(\\)/)
+    assert.ok(Buffer.byteLength(ledger.escalationProposalFor(id).proposed_evidence, 'utf8') <= 2 * 1024)
+    assert.equal(readFileSync(join(crewDir, 'returns', 'task.json'), 'utf8').includes(checkoutTrap), false)
   } finally { ledger.close() }
 })

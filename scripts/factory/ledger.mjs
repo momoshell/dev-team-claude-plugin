@@ -318,6 +318,7 @@ export function escalationCause(input = {}) {
 }
 export const REQUEST_SOURCES = Object.freeze(['dispatch', 'brief-file'])
 export const REQUEST_MAX_CHARS = 2000
+export const PROPOSED_EVIDENCE_MAX_CHARS = 2000
 export const RETIRED_TABLES = Object.freeze({
   envelopes: 'Retired: never wired since the legacy runtime was retired (81dee7c, 0.2.0); its one writer was scripts/cmux/dispatch.mjs closeCmd. crew/seat-io.mjs mirrors envelope facts into events / review_outcomes instead, and the visualizer reads envelopes from returns/ archive files. The table and recordEnvelope stay declared because the schema fence is additive-only and replayJsonl depends on the closed WRITERS set. A zero row count is retired, never nothing happened.',
   processes: 'Retired: never held a row in any production ledger — startProcess has no caller outside scripts/factory/ledger.mjs itself and its own tests (#405), so `ledger procs <adw_id>` returns [] for every run. The table, startProcess and endProcess stay declared because the schema fence is additive-only and replayJsonl depends on the closed WRITERS set. A zero row count is retired, never nothing happened.',
@@ -690,6 +691,17 @@ export const TABLES = Object.freeze({
       // rows are never backfilled; an old row without this column is likewise
       // unmeasured, not a measured synthetic session.
       { name: 'synthetic_reason', decl: 'TEXT' },
+    ],
+    unique: [['adw_id']],
+    indexes: [],
+  },
+  escalation_proposals: {
+    columns: [
+      { name: 'adw_id', decl: 'TEXT PRIMARY KEY' },
+      { name: 'proposed_cause', decl: 'TEXT' },
+      { name: 'proposed_by', decl: 'TEXT' },
+      { name: 'proposed_evidence', decl: 'TEXT' },
+      { name: 'created_at', decl: 'TEXT' },
     ],
     unique: [['adw_id']],
     indexes: [],
@@ -1417,7 +1429,7 @@ export const JOURNAL_FACT_EVENTS = Object.freeze({
 })
 
 export const WRITERS = Object.freeze([
-  'startSession', 'endSession', 'startPhase', 'endPhase', 'recordEvent',
+  'startSession', 'endSession', 'recordEscalationProposal', 'startPhase', 'endPhase', 'recordEvent',
   'recordEnvelope', 'recordSessionRequest', 'recordRunConfiguration', 'recordRunSeat', 'recordRunObservation', 'recordGateResult', 'recordGateDiscrimination',
   'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'recordCiCycle', 'recordCiDispatch', 'recordEvalCell', 'recordIntakeSweep', 'recordIntakeRefusal', 'recordIntakeBrake', 'recordIntakeDispatch', 'recordSeatTeardown', 'recordSeatReclaim', 'recordProviderFailure', 'recordPlanScope', 'recordSeatReask', 'recordAcceptReask', 'recordRpcExitContext', 'recordSeatTurnCensus', 'recordPlanAdoption', 'recordExternalFence', 'recordMutationAnchorBind', 'recordMutationAnchorAbsence', 'recordPhaseSlotWait', 'recordExperimentArm', 'recordNarrationMeasurement', 'startProcess', 'endProcess', 'heartbeat',
   'startAgentSession', 'endAgentSession', 'recordSourceError', 'linkRun',
@@ -1430,6 +1442,7 @@ export const WRITERS = Object.freeze([
 // never restated here — it is read from TABLES.
 export const WRITER_MIRROR_TABLES = Object.freeze({
   startSession: 'sessions',
+  recordEscalationProposal: 'escalation_proposals',
   recordRunConfiguration: 'run_configurations',
   recordRunObservation: 'run_observations',
   recordRunSeat: 'run_seats',
@@ -1642,6 +1655,13 @@ function normaliseRequestText(value, ctx) {
     refuse(`${ctx}: request must be a non-blank string`)
   }
   return boundText(value.trim(), REQUEST_MAX_CHARS)
+}
+
+function normaliseProposalEvidence(value, ctx) {
+  if (typeof value !== 'string' || value.trim() === '') {
+    refuse(`${ctx}: proposed_evidence must be a non-blank string`)
+  }
+  return boundText(value.trim(), PROPOSED_EVIDENCE_MAX_CHARS)
 }
 
 // The one shape a millisecond-ISO timestamp may have. BOTH paths of isoMs test
@@ -2803,6 +2823,42 @@ export function openLedger({
         .run(...tableColumnNames('sessions').map((c) => toBindable(args[c])))
     })
     return args
+  }
+
+  function recordEscalationProposal(input = {}) {
+    requireFields(input, ['adw_id', 'proposed_cause', 'proposed_by', 'proposed_evidence'], 'recordEscalationProposal')
+    requireEnum(input.proposed_cause, ESCALATION_CAUSES, 'recordEscalationProposal', 'proposed_cause')
+    const args = redact({
+      adw_id: input.adw_id,
+      proposed_cause: input.proposed_cause,
+      proposed_by: normaliseShortName(input.proposed_by, 'recordEscalationProposal', 'proposed_by'),
+      proposed_evidence: normaliseProposalEvidence(input.proposed_evidence, 'recordEscalationProposal'),
+      created_at: isoMs(input.created_at ?? now()),
+    }, stats)
+    if (typeof args.adw_id !== 'string' || args.adw_id.trim() === ''
+      || typeof args.proposed_by !== 'string' || args.proposed_by.trim() === ''
+      || typeof args.proposed_evidence !== 'string' || args.proposed_evidence.trim() === '') {
+      refuse('recordEscalationProposal: required proposal fields were redacted')
+    }
+    appendJsonl('recordEscalationProposal', args)
+    let changes = 0
+    let mirrorChecked = false
+    mirror((conn) => {
+      const result = conn.prepare('INSERT OR IGNORE INTO escalation_proposals (adw_id, proposed_cause, proposed_by, proposed_evidence, created_at) SELECT ?, ?, ?, ?, ? FROM sessions WHERE adw_id = ? AND (terminal_reason IS NULL OR terminal_reason = ?)').run(args.adw_id, args.proposed_cause, args.proposed_by, args.proposed_evidence, args.created_at, args.adw_id, ESCALATION_CAUSE_UNCLASSIFIED)
+      changes = Number(result?.changes ?? 0)
+      mirrorChecked = true
+    })
+    if (changes === 1) return { recorded: true, reason: 'recorded' }
+    let session = null
+    try { session = getSession(args.adw_id) } catch { session = null }
+    if (session && session.terminal_reason != null && session.terminal_reason !== ESCALATION_CAUSE_UNCLASSIFIED) {
+      return { recorded: false, reason: 'already-classified' }
+    }
+    let current = null
+    try { current = escalationProposalFor(args.adw_id) } catch { current = null }
+    if (current) return { recorded: false, reason: 'already-proposed' }
+    if (!session) return { recorded: false, reason: mirrorChecked ? 'session-missing' : 'mirror-unavailable' }
+    return { recorded: false, reason: 'mirror-unavailable' }
   }
 
   function recordSessionRequest(input = {}) {
@@ -4360,6 +4416,16 @@ export function openLedger({
     }
   }
 
+  function escalationProposalFor(adwId) {
+    const conn = ensureDb()
+    if (!conn || typeof adwId !== 'string' || adwId.trim() === '') return null
+    try {
+      return conn.prepare('SELECT * FROM escalation_proposals WHERE adw_id = ?').get(adwId) ?? null
+    } catch {
+      return null
+    }
+  }
+
   function phantomSessions() {
     const rows = queryRows(`
       WITH session_shapes AS (
@@ -5792,7 +5858,8 @@ export function openLedger({
 
   const handle = {
     get degraded() { return degraded },
-    startSession, endSession, recordSessionRequest, recordRunConfiguration, recordRunSeat, recordRunObservation, startPhase, endPhase, recordEvent, recordEnvelope,
+    startSession, endSession, recordEscalationProposal, recordSessionRequest, recordRunConfiguration, recordRunSeat, recordRunObservation, startPhase, endPhase, recordEvent, recordEnvelope,
+    escalationProposalFor,
     recordGateResult, recordGateDiscrimination, recordMutationAnchorBind, recordMutationAnchorAbsence, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordEvalCell, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown, recordSeatReclaim, recordProviderFailure, recordPlanScope, recordSeatReask, recordAcceptReask, recordRpcExitContext, recordSeatTurnCensus, recordPlanAdoption, recordExternalFence, recordPhaseSlotWait, recordExperimentArm, recordNarrationMeasurement,
     startProcess, endProcess, heartbeat, startAgentSession, endAgentSession,
     recordSourceError, linkRun,

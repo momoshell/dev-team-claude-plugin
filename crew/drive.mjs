@@ -2665,6 +2665,459 @@ export function suiteRedTestFiles(output, checkout) {
   return files
 }
 
+export const POST_COMMIT_FROZEN_REPAIR_MAX = 1
+export const FROZEN_INVENTORY_FILE = 'test/vacuity.test.mjs'
+export const FROZEN_FACTORY_ENV_FILE = 'test/factory-env.test.mjs'
+const FROZEN_INVENTORY_REFUSALS = Object.freeze(['logic', 'identity', 'unmeasured', 'boundary'])
+
+function frozenInventoryBytes(value) {
+  if (typeof value === 'string') return value
+  if (Buffer.isBuffer(value) || value instanceof Uint8Array) return Buffer.from(value).toString('utf8')
+  return null
+}
+
+function frozenSkipLiteral(source, start) {
+  const quote = source[start]
+  if (quote === '/' && source[start + 1] === '/') {
+    const end = source.indexOf('\n', start + 2)
+    return end < 0 ? source.length : end
+  }
+  if (quote === '/' && source[start + 1] === '*') {
+    const end = source.indexOf('*/', start + 2)
+    return end < 0 ? -1 : end + 2
+  }
+  if (quote === '`') {
+    for (let index = start + 1; index < source.length; index += 1) {
+      if (source[index] === '\\') { index += 1; continue }
+      if (source[index] === '`') return index + 1
+    }
+    return -1
+  }
+  for (let index = start + 1; index < source.length; index += 1) {
+    if (source[index] === '\\') { index += 1; continue }
+    if (source[index] === quote) return index + 1
+    if (source[index] === '\n' || source[index] === '\r') return -1
+  }
+  return -1
+}
+
+function frozenRegexStart(source, index) {
+  if (source[index] !== '/' || source[index + 1] === '/' || source[index + 1] === '*') return false
+  let previous = index - 1
+  while (previous >= 0 && /\s/.test(source[previous])) previous -= 1
+  return previous < 0 || /[([{=,:;!&|?]/.test(source[previous])
+}
+
+function frozenSkipRegex(source, start) {
+  let inClass = false
+  for (let index = start + 1; index < source.length; index += 1) {
+    const character = source[index]
+    if (character === '\\') { index += 1; continue }
+    if (character === '[') { inClass = true; continue }
+    if (character === ']' && inClass) { inClass = false; continue }
+    if (character === '/' && !inClass) {
+      index += 1
+      while (index < source.length && /[A-Za-z]/.test(source[index])) index += 1
+      return index
+    }
+    if (character === '\n' || character === '\r') return -1
+  }
+  return -1
+}
+
+function frozenBalancedSpan(source, start, open, close) {
+  if (typeof source !== 'string' || source[start] !== open) return null
+  const stack = []
+  const pairs = new Map([['(', ')'], ['[', ']'], ['{', '}']])
+  for (let index = start; index < source.length; index += 1) {
+    const character = source[index]
+    if (character === '\'' || character === '"' || character === '`') {
+      const next = frozenSkipLiteral(source, index)
+      if (next < 0) return null
+      index = next - 1
+      continue
+    }
+    if (character === '/' && (source[index + 1] === '/' || source[index + 1] === '*')) {
+      const next = frozenSkipLiteral(source, index)
+      if (next < 0) return null
+      index = next - 1
+      continue
+    }
+    if (frozenRegexStart(source, index)) {
+      const next = frozenSkipRegex(source, index)
+      if (next < 0) return null
+      index = next - 1
+      continue
+    }
+    if (pairs.has(character)) stack.push(character)
+    else if (character === ')' || character === ']' || character === '}') {
+      if (stack.length === 0 || pairs.get(stack.at(-1)) !== character) return null
+      stack.pop()
+      if (stack.length === 0) return { start, end: index + 1 }
+    }
+  }
+  return null
+}
+
+function frozenCommentMask(source) {
+  let output = ''
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index]
+    if (character === '/' && source[index + 1] === '/') {
+      output += '  '; index += 1
+      while (index + 1 < source.length && source[index + 1] !== '\n') { output += ' '; index += 1 }
+      continue
+    }
+    if (character === '/' && source[index + 1] === '*') {
+      output += '  '; index += 1
+      let closed = false
+      while (index + 1 < source.length) {
+        index += 1
+        if (source[index] === '*' && source[index + 1] === '/') { output += '  '; index += 1; closed = true; break }
+        output += source[index] === '\n' ? '\n' : ' '
+      }
+      if (!closed) return null
+      continue
+    }
+    output += character
+  }
+  return output
+}
+
+function frozenTopLevelParts(source, start, end) {
+  const parts = []
+  let cursor = start
+  const stack = []
+  const pairs = new Map([['(', ')'], ['[', ']'], ['{', '}']])
+  const masked = frozenCommentMask(source.slice(start, end))
+  if (masked === null) return null
+  for (let offset = 0; offset < masked.length; offset += 1) {
+    const character = masked[offset]
+    const absolute = start + offset
+    if (character === '\'' || character === '"' || character === '`') {
+      const next = frozenSkipLiteral(masked, offset)
+      if (next < 0) return null
+      offset = next - 1
+      continue
+    }
+    if (frozenRegexStart(masked, offset)) {
+      const next = frozenSkipRegex(masked, offset)
+      if (next < 0) return null
+      offset = next - 1
+      continue
+    }
+    if (pairs.has(character)) stack.push(character)
+    else if (character === ')' || character === ']' || character === '}') {
+      if (stack.length === 0 || pairs.get(stack.at(-1)) !== character) return null
+      stack.pop()
+    } else if (character === ',' && stack.length === 0) {
+      parts.push({ start: cursor, end: absolute })
+      cursor = absolute + 1
+    }
+  }
+  if (stack.length > 0) return null
+  parts.push({ start: cursor, end })
+  return parts
+}
+
+function frozenDeclaration(source, pattern, open) {
+  const masked = frozenCommentMask(source)
+  if (masked === null) return { error: 'unterminated comment' }
+  const matches = [...masked.matchAll(pattern)]
+  if (matches.length !== 1) return { error: matches.length === 0 ? 'required declaration is missing' : 'required declaration is duplicated' }
+  const start = masked.indexOf(open, matches[0].index)
+  if (start < 0) return { error: 'required declaration has no balanced body' }
+  const body = frozenBalancedSpan(source, start, open, open === '{' ? '}' : ']')
+  if (!body) return { error: 'required declaration is unterminated or unbalanced' }
+  return { body, match: matches[0] }
+}
+
+function frozenQuotedValue(source, span) {
+  const raw = source.slice(span.start, span.end).trim()
+  if (raw.length < 2 || !['\'', '"'].includes(raw[0]) || raw.at(-1) !== raw[0]) return null
+  const end = frozenSkipLiteral(raw, 0)
+  if (end !== raw.length) return null
+  return { raw, value: raw.slice(1, -1), start: span.start + source.slice(span.start, span.end).indexOf(raw) + 1, end: span.end - 1 }
+}
+
+function frozenObjectProperties(source, body) {
+  const parts = frozenTopLevelParts(source, body.start + 1, body.end - 1)
+  if (parts === null) return { error: 'object body is malformed' }
+  const values = new Map()
+  for (const part of parts) {
+    const code = source.slice(part.start, part.end).trim()
+    if (!code) continue
+    const offset = source.slice(part.start, part.end).search(/\S/)
+    const keyMatch = /^(['"])([^'"\\]+)\1\s*:/.exec(code)
+    if (!keyMatch) return { error: 'object property is malformed' }
+    const key = keyMatch[2]
+    if (values.has(key)) return { error: `object property ${key} is duplicated` }
+    const colon = code.indexOf(':', keyMatch[0].length - 1)
+    const valueRaw = code.slice(colon + 1).trim()
+    const valueStart = part.start + offset + colon + 1 + code.slice(colon + 1).search(/\S/)
+    const valueEnd = part.end - (source.slice(part.start, part.end).match(/\s*$/)?.[0].length || 0)
+    const quoted = frozenQuotedValue(source, { start: valueStart, end: valueEnd })
+    values.set(key, { key, value: quoted?.value ?? null, raw: quoted?.raw ?? valueRaw, valueSpan: quoted ? { start: quoted.start, end: quoted.end } : null, span: part })
+  }
+  return { values }
+}
+
+function frozenArrayValue(source, rawStart, rawEnd) {
+  const masked = frozenCommentMask(source)
+  if (masked === null) return null
+  let start = rawStart
+  while (start < rawEnd && /\s/.test(masked[start])) start += 1
+  if (masked.slice(start, start + 'Object.freeze('.length) !== 'Object.freeze(') return null
+  let arrayStart = start + 'Object.freeze('.length
+  while (arrayStart < rawEnd && /\s/.test(masked[arrayStart])) arrayStart += 1
+  const array = frozenBalancedSpan(source, arrayStart, '[', ']')
+  if (!array || array.end > rawEnd) return null
+  const parts = frozenTopLevelParts(source, array.start + 1, array.end - 1)
+  if (parts === null) return null
+  const entries = []
+  for (const part of parts) {
+    const code = source.slice(part.start, part.end).trim()
+    if (!code) continue
+    const quoted = frozenQuotedValue(source, part)
+    if (!quoted) return null
+    entries.push(quoted.value)
+  }
+  return { array, entries }
+}
+
+function frozenAuditSource(source) {
+  const declaration = frozenDeclaration(source, /\bconst\s+AUDITED_VACUITY_LINES\s*=\s*Object\.freeze\s*\(\s*\{/g, '{')
+  if (declaration.error) return declaration
+  const properties = frozenObjectProperties(source, declaration.body)
+  if (properties.error) return properties
+  const entries = new Map()
+  for (const [key, property] of properties.values) {
+    const array = frozenArrayValue(source, property.span.start + source.slice(property.span.start, property.span.end).indexOf('Object.freeze'), property.span.end)
+    if (!array) return { error: `audited identity ${key} is malformed` }
+    entries.set(key, { ...property, entries: array.entries })
+  }
+  return { body: declaration.body, entries }
+}
+
+function frozenDigestSource(source) {
+  const declaration = frozenDeclaration(source, /\bconst\s+VACUITY_SOURCE_SHA256\s*=\s*Object\.freeze\s*\(\s*\{/g, '{')
+  if (declaration.error) return declaration
+  const properties = frozenObjectProperties(source, declaration.body)
+  if (properties.error) return properties
+  for (const property of properties.values.values()) {
+    if (!property.value || !/^[0-9a-f]{64}$/.test(property.value) || !property.valueSpan) return { error: 'digest property is not a lowercase 64-hex value' }
+  }
+  return { body: declaration.body, entries: properties.values }
+}
+
+function frozenCallArguments(source, callStart, callEnd) {
+  const parts = frozenTopLevelParts(source, callStart + 1, callEnd - 1)
+  if (parts === null) return null
+  return parts.filter((part) => source.slice(part.start, part.end).trim() !== '')
+}
+
+function frozenExemptSource(source) {
+  const declaration = frozenDeclaration(source, /\bconst\s+VACUITY_EXEMPT\s*=\s*new\s+Map\s*\(\s*\[/g, '[')
+  if (declaration.error) return declaration
+  const parts = frozenTopLevelParts(source, declaration.body.start + 1, declaration.body.end - 1)
+  if (parts === null) return { error: 'exemption map is malformed' }
+  const entries = new Map()
+  let callCount = 0
+  for (const part of parts) {
+    const code = source.slice(part.start, part.end).trim()
+    if (!code) continue
+    const tupleStart = code.indexOf('[')
+    const tuple = tupleStart < 0 ? null : frozenBalancedSpan(source, part.start + source.slice(part.start, part.end).indexOf('[', 0), '[', ']')
+    if (!tuple) return { error: 'exemption map entry is malformed' }
+    const tupleParts = frozenTopLevelParts(source, tuple.start + 1, tuple.end - 1)
+    if (tupleParts === null || tupleParts.length < 2) return { error: 'exemption map entry is malformed' }
+    const key = frozenQuotedValue(source, tupleParts[0])
+    if (!key) return { error: 'exemption map key is malformed' }
+    if (entries.has(key.value)) return { error: `exemption ${key.value} is duplicated` }
+    const valueStart = tupleParts[1].start
+    const valueCode = source.slice(valueStart, tupleParts[1].end)
+    const callOffset = valueCode.indexOf('frozenVacuitySites')
+    let call = null
+    let rationale = null
+    let identity = null
+    if (callOffset >= 0) {
+      callCount += 1
+      const absoluteCall = valueStart + callOffset
+      const open = source.indexOf('(', absoluteCall + 'frozenVacuitySites'.length)
+      call = open < 0 ? null : frozenBalancedSpan(source, open, '(', ')')
+      if (!call) return { error: `exemption ${key.value} call is unterminated` }
+      const args = frozenCallArguments(source, call.start, call.end)
+      if (!args || args.length < 3) return { error: `exemption ${key.value} call is missing arguments` }
+      const first = source.slice(args[0].start, args[0].end).trim()
+      if (!/^AUDITED_VACUITY_LINES\s*\[/.test(first)) return { error: `exemption ${key.value} identity source is malformed` }
+      identity = first
+      rationale = frozenQuotedValue(source, args[2])
+      if (!rationale) return { error: `exemption ${key.value} rationale is malformed` }
+    }
+    entries.set(key.value, { key: key.value, tuple, call, identity, rationale, valueSpan: tupleParts[1] })
+  }
+  if (callCount === 0) return { error: 'exemption map has no frozenVacuitySites declarations' }
+  return { body: declaration.body, entries }
+}
+
+function frozenMaskSpans(source, spans) {
+  const sorted = [...spans].filter((span) => span && Number.isInteger(span.start) && Number.isInteger(span.end)).sort((a, b) => a.start - b.start)
+  let out = ''
+  let cursor = 0
+  for (const span of sorted) {
+    if (span.start < cursor || span.end < span.start || span.end > source.length) return null
+    out += source.slice(cursor, span.start) + '\u0000'
+    cursor = span.end
+  }
+  return out + source.slice(cursor)
+}
+
+function frozenCitationNormalise(value) {
+  return String(value).replace(/([A-Za-z0-9_./-]+\.mjs):(\d+)/g, '$1:<line>')
+}
+
+function frozenCitationShape(value) {
+  const citations = [...String(value).matchAll(/([A-Za-z0-9_./-]+\.mjs):(\d+)/g)]
+  return citations.every(([, file, line]) => file.startsWith('commands/') || file.startsWith('crew/') || file.startsWith('scripts/') || file.startsWith('skills/') || file.startsWith('test/') || file.startsWith('visualizer/'))
+}
+
+function frozenFactoryMap(source) {
+  const declaration = frozenDeclaration(source, /\bconst\s+RAW_TEMP_EXEMPT\s*=\s*new\s+Map\s*\(\s*\[/g, '[')
+  if (declaration.error) return declaration
+  const parts = frozenTopLevelParts(source, declaration.body.start + 1, declaration.body.end - 1)
+  if (parts === null) return { error: 'raw temp exemption map is malformed' }
+  const entries = new Map()
+  for (const part of parts) {
+    const code = source.slice(part.start, part.end).trim()
+    if (!code) continue
+    const tupleStart = source.indexOf('[', part.start)
+    const tuple = frozenBalancedSpan(source, tupleStart, '[', ']')
+    if (!tuple) return { error: 'raw temp exemption entry is malformed' }
+    const tupleParts = frozenTopLevelParts(source, tuple.start + 1, tuple.end - 1)
+    if (!tupleParts || tupleParts.length < 2) return { error: 'raw temp exemption entry is malformed' }
+    const key = frozenQuotedValue(source, tupleParts[0])
+    const count = /^\s*frozenTempSites\s*\(\s*(\d+)\s*\)/.exec(source.slice(tupleParts[1].start, tupleParts[1].end))
+    if (!key || !count || entries.has(key.value)) return { error: 'raw temp exemption entry is malformed or duplicated' }
+    entries.set(key.value, Number(count[1]))
+  }
+  return { body: declaration.body, entries }
+}
+
+function frozenFactoryTotal(source) {
+  const match = /assert\.equal\(\s*total\s*,\s*(\d+)\s*\)/.exec(source)
+  return match ? Number(match[1]) : null
+}
+
+function frozenIdentityDiff(before, after) {
+  if (before.audit.body && after.audit.body && before.source.slice(before.audit.body.start, before.audit.body.end) !== after.source.slice(after.audit.body.start, after.audit.body.end)) return true
+  const auditKeys = [...before.audit.entries.keys()]
+  if (JSON.stringify(auditKeys) !== JSON.stringify([...after.audit.entries.keys()])) return true
+  for (const key of auditKeys) {
+    if (JSON.stringify(before.audit.entries.get(key).entries) !== JSON.stringify(after.audit.entries.get(key).entries)) return true
+  }
+  const beforeExempt = before.exempt
+  const afterExempt = after.exempt
+  if (JSON.stringify([...beforeExempt.entries.keys()]) !== JSON.stringify([...afterExempt.entries.keys()])) return true
+  for (const key of beforeExempt.entries.keys()) {
+    if (beforeExempt.entries.get(key).identity !== afterExempt.entries.get(key).identity) return true
+  }
+  return false
+}
+
+function frozenRationaleChanges(before, after) {
+  const changes = []
+  for (const key of before.exempt.entries.keys()) {
+    const left = before.exempt.entries.get(key)
+    const right = after.exempt.entries.get(key)
+    if (!left?.rationale || !right?.rationale) continue
+    if (left.rationale.raw === right.rationale.raw) continue
+    if (!frozenCitationShape(left.rationale.value) || !frozenCitationShape(right.rationale.value)) return null
+    if (frozenCitationNormalise(left.rationale.value) !== frozenCitationNormalise(right.rationale.value)) return null
+    changes.push({ kind: 'audit-rationale', file: key, before: left.rationale.value, after: right.rationale.value })
+  }
+  return changes
+}
+
+function frozenDigestChanges(before, after) {
+  const changes = []
+  for (const key of before.digest.entries.keys()) {
+    const left = before.digest.entries.get(key)
+    const right = after.digest.entries.get(key)
+    if (!right || left.value !== right.value) {
+      if (!right || !/^[0-9a-f]{64}$/.test(right.value || '')) return null
+      changes.push({ kind: 'source-sha256', file: key, before: left.value, after: right.value })
+    }
+  }
+  return changes
+}
+
+function frozenAllowedSourceDelta(before, after, digestChanges, rationaleChanges) {
+  const spansBefore = [
+    ...before.digest.entries.values().map((entry) => entry.valueSpan),
+    ...before.exempt.entries.values().map((entry) => entry.rationale?.value ? { start: entry.rationale.start, end: entry.rationale.end } : null),
+  ]
+  const spansAfter = [
+    ...after.digest.entries.values().map((entry) => entry.valueSpan),
+    ...after.exempt.entries.values().map((entry) => entry.rationale?.value ? { start: entry.rationale.start, end: entry.rationale.end } : null),
+  ]
+  const left = frozenMaskSpans(before.source, spansBefore)
+  const right = frozenMaskSpans(after.source, spansAfter)
+  return left !== null && right !== null && left === right && (digestChanges.length + rationaleChanges.length > 0)
+}
+
+function frozenFactoryIdentityChange(before, after) {
+  const leftKeys = [...before.entries.keys()]
+  const rightKeys = [...after.entries.keys()]
+  if (JSON.stringify(leftKeys) !== JSON.stringify(rightKeys)) return true
+  for (const key of leftKeys) if (before.entries.get(key) !== after.entries.get(key)) return true
+  return frozenFactoryTotal(before.source) !== frozenFactoryTotal(after.source)
+}
+
+function frozenResult(action, reason, why, changes = []) {
+  return { action, reason, why, changes }
+}
+
+export function classifyFrozenInventoryDelta(file, committed, current) {
+  const beforeSource = frozenInventoryBytes(committed)
+  const afterSource = frozenInventoryBytes(current)
+  if (!beforeSource || !afterSource) return frozenResult('refuse', 'unmeasured', 'the committed or current source is unreadable or empty')
+  const recognized = file === FROZEN_INVENTORY_FILE || file === FROZEN_FACTORY_ENV_FILE
+  let identityChanged = false
+  let logicChanged = !recognized
+  let changes = []
+  if (recognized && file === FROZEN_FACTORY_ENV_FILE) {
+    const before = frozenFactoryMap(beforeSource)
+    const after = frozenFactoryMap(afterSource)
+    if (before.error || after.error) logicChanged = true
+    else {
+      before.source = beforeSource; after.source = afterSource
+      identityChanged = frozenFactoryIdentityChange(before, after)
+      logicChanged = !identityChanged
+    }
+  } else if (recognized) {
+    const before = { source: beforeSource, audit: frozenAuditSource(beforeSource), digest: frozenDigestSource(beforeSource), exempt: frozenExemptSource(beforeSource) }
+    const after = { source: afterSource, audit: frozenAuditSource(afterSource), digest: frozenDigestSource(afterSource), exempt: frozenExemptSource(afterSource) }
+    if (before.audit.error || before.digest.error || before.exempt.error || after.audit.error || after.digest.error || after.exempt.error) {
+      return frozenResult('refuse', 'unmeasured', `vacuity source declarations are malformed: ${before.audit.error || before.digest.error || before.exempt.error || after.audit.error || after.digest.error || after.exempt.error}`)
+    }
+    identityChanged = frozenIdentityDiff(before, after)
+    const digestChanges = frozenDigestChanges(before, after)
+    const rationaleChanges = frozenRationaleChanges(before, after)
+    changes = [...(digestChanges || []), ...(rationaleChanges || [])]
+    logicChanged = !identityChanged && (digestChanges === null || rationaleChanges === null || !frozenAllowedSourceDelta(before, after, digestChanges || [], rationaleChanges || []))
+  }
+  if (logicChanged) return refusal('logic')
+  if (identityChanged) return refusal('identity')
+  return frozenResult('repair', null, 'only approved digest values and audit-rationale line citations changed', changes)
+
+  function refusal(reason) {
+    return frozenResult('refuse', reason, `the frozen inventory delta was refused as ${reason}`)
+  }
+}
+
+export const frozenInventoryClassifier = classifyFrozenInventoryDelta
+export const classifyFrozenInventory = classifyFrozenInventoryDelta
+
 // Pure policy for either admission source. Every refusal is explicit: unknown
 // source, missing evidence, an occupied sibling fence, a spent widening cap, or a
 // malformed file list can never silently become an effective-scope mutation.
@@ -4226,9 +4679,21 @@ function builderReversionWhy(paths) {
   return `builder edits reverted to the pre-build baseline: ${paths.join(', ')}; the workspace is retained for human inspection`
 }
 
-function runScopeGate({ round, finalRound, builderDetails, builderObservation, acceptBuilderBaseline, hasAcceptanceGate, ctx, io, plans, scopeFiles, planPath, ownSpanScopes, siblingSpanScopes, inScope, mutations, readBuilt, art, stage, stageComplete, failureUpgrade, escalate, escalateReversion }) {
+function runScopeGate({ round, finalRound, builderDetails, builderObservation, acceptBuilderBaseline, hasAcceptanceGate, ctx, io, plans, scopeFiles, planPath, ownSpanScopes, siblingSpanScopes, inScope, mutations, readBuilt, art, stage, stageComplete, failureUpgrade, escalate, escalateReversion, frozenVerifier = null }) {
   stage(`scope-gate:r${round}`)
-  const changed = io.changedFiles()
+  let changed
+  try { changed = io.changedFiles() }
+  catch (err) {
+    if (typeof frozenVerifier === 'function') {
+      stageComplete()
+      return { escalation: frozenVerifier(null, err)?.escalation || escalate('suite', `the pending frozen inventory repair could not read changed files: ${err?.message ?? String(err)}`) }
+    }
+    throw err
+  }
+  if (typeof frozenVerifier === 'function') {
+    const frozen = frozenVerifier(changed)
+    if (frozen?.escalation) { stageComplete(); return frozen }
+  }
   const gateFenceHits = laneFenceHits(changed, pathOnlyLaneFence(ctx.laneFence, ctx.laneName))
   if (gateFenceHits.length > 0) {
     stageComplete()
@@ -4455,6 +4920,9 @@ function runTask(ctx, io, crash) {
   const limits = { ...LIMITS, ...(ctx.limits || {}) }
   const waits = { ...WAITS_S, ...(ctx.waits || {}) }
   const S = { consults: 0, stages: [], commit: null, dissents: [], grants: [], growth: [], modifiers: [], enforcements: [], acceptFindings: null, lastReview: null, seqHighWater: 0, planAccept: null, carried: [], carriedCleared: new Set(), returns: { planner: null, builder: null, reviewer: null }, commitMessage: null, commitSubject: null, panelContributors: [] }
+  let postCommitFrozenRepairs = 0
+  const frozenInventoryReports = []
+  let pendingFrozenInventory = null
   const art = (name) => `${ctx.taskDir}/${name}`
   // These gate cells are initialised before the resume branch so its canonical
   // gate and the ordinary escalation composer have the same state vocabulary.
@@ -5286,6 +5754,7 @@ function runTask(ctx, io, crash) {
       stages: S.stages, escalation: { where, why, question }, commit, dissents: S.dissents,
       extra_rounds_granted: S.grants, growth: S.growth, modifiers: S.modifiers, enforcements: S.enforcements,
       gate: gateBlock(),
+      ...(frozenInventoryReports.length > 0 ? { frozen_inventory_repairs: frozenInventoryReports.map((report) => ({ ...report })) } : {}),
       ...acceptDecisionBlock(),
       ...carriedBlock(),
       seq_high_water: S.seqHighWater,
@@ -7745,6 +8214,73 @@ function runTask(ctx, io, crash) {
     }
   }
 
+  const frozenRepairRefusal = (reason, detail = null) => ({
+    action: 'refuse', reason,
+    why: reason === 'boundary'
+      ? `frozen inventory repair refused at the held/protected boundary: ${(detail || []).map((entry) => entry.why || entry.path || String(entry)).join('; ')}`
+      : `frozen inventory repair refused (${reason}): ${detail || 'the requested delta is not an approved data-only refresh'}`,
+    ...(reason === 'boundary' ? { boundaryRefusals: detail || [] } : {}),
+  })
+  const frozenRepairPreflight = (testFiles) => {
+    const files = [...new Set(Array.isArray(testFiles) ? testFiles : [])]
+    const siblingFence = (Array.isArray(ctx.laneFence) ? ctx.laneFence : []).filter((record) => record?.lane !== ctx.laneName)
+    const boundaryRefusals = [
+      ...laneFenceHits(files, siblingFence).map((hit) => ({ kind: 'held', path: hit.entry, lane: hit.lane, why: `${hit.entry} is owned by lane ${hit.lane}` })),
+      ...protectedHits(files, ctx.protectedPaths).map((path) => ({ kind: 'protected', path, why: `${path} is protected and cannot be repaired` })),
+    ]
+    if (boundaryRefusals.length > 0) return refusal('boundary', boundaryRefusals)
+    if (postCommitFrozenRepairs >= POST_COMMIT_FROZEN_REPAIR_MAX) return frozenRepairRefusal('repeat', `the one frozen inventory repair attempt is already spent`)
+    if (files.length === 0) return frozenRepairRefusal('unmeasured', 'the suite output named no test files')
+    const committed = new Map()
+    for (const file of files) {
+      let bytes
+      try { bytes = io.readFile(`${ctx.checkout}/${file}`) }
+      catch (err) { return frozenRepairRefusal('unmeasured', `${file} could not be snapshotted: ${err?.message ?? String(err)}`) }
+      if (typeof bytes !== 'string' || bytes.length === 0) return frozenRepairRefusal('unmeasured', `${file} was absent, unreadable, or empty at the committed boundary`)
+      committed.set(file, bytes)
+    }
+    return { action: 'repair', reason: null, files, committed }
+
+    function refusal(reason, detail) {
+      return frozenRepairRefusal(reason, detail)
+    }
+  }
+  const verifyPendingFrozenRepair = (changed, interrupted = null) => {
+    if (!pendingFrozenInventory) return {}
+    const pendingFailure = (reason, why) => ({ escalation: escalate('suite', `the pending frozen inventory repair could not be verified (${reason}): ${why}`, [], { commit: S.commit }) })
+    if (interrupted) return pendingFailure('unmeasured', `changed-file inventory was interrupted: ${interrupted?.message ?? String(interrupted)}`)
+    if (!Array.isArray(changed)) return pendingFailure('unmeasured', 'changed-file inventory was not an array')
+    const names = [...new Set(changed)]
+    if (names.some((file) => typeof file !== 'string' || !pendingFrozenInventory.files.includes(file))) {
+      return pendingFailure('boundary', `the cumulative dirty set contains an unrelated file: ${names.filter((file) => typeof file !== 'string' || !pendingFrozenInventory.files.includes(file)).join(', ')}`)
+    }
+    const missing = pendingFrozenInventory.files.filter((file) => !names.includes(file))
+    if (missing.length > 0) return pendingFailure('unmeasured', `the cumulative dirty set omitted snapshotted failing file(s): ${missing.join(', ')}`)
+    const verified = []
+    for (const file of pendingFrozenInventory.files) {
+      let current
+      try { current = io.readFile(`${ctx.checkout}/${file}`) }
+      catch (err) { return pendingFailure('unmeasured', `${file} could not be read: ${err?.message ?? String(err)}`) }
+      const result = classifyFrozenInventoryDelta(file, pendingFrozenInventory.committed.get(file), current)
+      if (result.action !== 'repair') return pendingFailure(result.reason || 'logic', `${file}: ${result.why}`)
+      verified.push({ file, changes: result.changes })
+    }
+    return {
+      ok: true,
+      report: {
+        attempt: pendingFrozenInventory.attempt,
+        committed: pendingFrozenInventory.commit,
+        files: verified,
+        source: FROZEN_INVENTORY_FILE,
+        approved: ['VACUITY_SOURCE_SHA256 values', 'VACUITY_EXEMPT frozenVacuitySites rationale citations'],
+      },
+    }
+  }
+  const recordFrozenInventoryRepair = (report) => {
+    frozenInventoryReports.push(report)
+    io.log(recordRow({ at: io.now(), frozen_inventory_repair: report }))
+  }
+
   suiteCycle:
   for (;;) {
   builderEnv = null
@@ -8037,7 +8573,7 @@ function runTask(ctx, io, crash) {
       // MUTATION A1: neutralise this call and a bounced round again reaches no scope
       // gate — the b363-seatreask defect, restored.
       stageComplete()
-      const bounced = runScopeGate({ round, finalRound, builderDetails: undefined, builderObservation, acceptBuilderBaseline, hasAcceptanceGate: Boolean(gateCmd), ctx, io, plans, scopeFiles, planPath, ownSpanScopes, siblingSpanScopes, inScope, mutations, readBuilt, art, stage, stageComplete, failureUpgrade, escalate, escalateReversion })                                    // ANCHOR A1
+      const bounced = runScopeGate({ round, finalRound, builderDetails: undefined, builderObservation, acceptBuilderBaseline, hasAcceptanceGate: Boolean(gateCmd), ctx, io, plans, scopeFiles, planPath, ownSpanScopes, siblingSpanScopes, inScope, mutations, readBuilt, art, stage, stageComplete, failureUpgrade, escalate, escalateReversion, frozenVerifier: pendingFrozenInventory ? verifyPendingFrozenRepair : null })                                    // ANCHOR A1
       if (bounced.escalation) return bounced.escalation
       if (bounced.pendingReversion) pendingReversion = bounced.pendingReversion
       if (bounced.bounce) { buildBrief = bounced.bounce; buildNote = 'scope-fix'; continue }
@@ -8073,7 +8609,7 @@ function runTask(ctx, io, crash) {
     builderEnv = env
     stageComplete()
 
-    const scoped = runScopeGate({ round, finalRound, builderDetails: env.details, builderObservation, acceptBuilderBaseline, hasAcceptanceGate: Boolean(gateCmd), ctx, io, plans, scopeFiles, planPath, ownSpanScopes, siblingSpanScopes, inScope, mutations, readBuilt, art, stage, stageComplete, failureUpgrade, escalate, escalateReversion })
+    const scoped = runScopeGate({ round, finalRound, builderDetails: env.details, builderObservation, acceptBuilderBaseline, hasAcceptanceGate: Boolean(gateCmd), ctx, io, plans, scopeFiles, planPath, ownSpanScopes, siblingSpanScopes, inScope, mutations, readBuilt, art, stage, stageComplete, failureUpgrade, escalate, escalateReversion, frozenVerifier: pendingFrozenInventory ? verifyPendingFrozenRepair : null })
     if (scoped.escalation) return scoped.escalation
     if (scoped.pendingReversion) pendingReversion = scoped.pendingReversion
     if (scoped.bounce) { buildBrief = scoped.bounce; buildNote = 'scope-fix'; continue }
@@ -8663,8 +9199,32 @@ function runTask(ctx, io, crash) {
   S.commitSubject = subject
   const hasCommitSubject = String(planEnv.details?.commit_subject || '').split('\n').some((line) => line.trim())
   if (!hasCommitSubject) io.log(recordRow({ at: io.now(), commit_subject: 'fallback-from-plan-summary' }))
-  const committing = io.changedFiles().filter(inScope)
-  const preRebaseCommit = S.commit = io.commit(committing, message)
+  let commitChanged = null
+  let report = null
+  if (pendingFrozenInventory) {
+    try { commitChanged = io.changedFiles() }
+    catch (err) {
+      stageComplete()
+      return escalate('suite', `the pending frozen inventory repair could not verify its final dirty set: ${err?.message ?? String(err)}`, [], { commit: S.commit })
+    }
+    const finalFrozen = verifyPendingFrozenRepair(commitChanged)
+    if (!finalFrozen.ok) {
+      stageComplete()
+      return finalFrozen.escalation
+    }
+    report = finalFrozen.report
+  }
+  const committing = (commitChanged || io.changedFiles()).filter(inScope)
+  const preRebaseCommit = io.commit(committing, message)
+  if (pendingFrozenInventory && !preRebaseCommit) {
+    stageComplete()
+    return escalate('suite', 'the frozen inventory repair commit returned no commit id; the repair was not recorded', [], { commit: S.commit })
+  }
+  S.commit = preRebaseCommit
+  if (pendingFrozenInventory) {
+    recordFrozenInventoryRepair(report)
+    pendingFrozenInventory = null
+  }
   stageComplete()
 
   if (publishing) {
@@ -9073,6 +9633,38 @@ function runTask(ctx, io, crash) {
     const failureTail = suiteOutput.slice(-4000)
     const testFiles = suiteRedTestFiles(failureTail, ctx.checkout)
     const suiteEvidence = { output: suiteOutput, commit: S.commit, test_files: testFiles }
+    const frozenFiles = testFiles.filter((file) => file === FROZEN_INVENTORY_FILE || file === FROZEN_FACTORY_ENV_FILE)
+    const outsideScope = frozenFiles.filter((file) => !inScope(file))
+    if (frozenFiles.length > 0 && outsideScope.length === 0) {
+      const frozenRepair = frozenRepairPreflight(frozenFiles)
+      if (frozenRepair.action === 'repair') {
+        pendingFrozenInventory = {
+          files: frozenRepair.files,
+          committed: frozenRepair.committed,
+          attempt: postCommitFrozenRepairs + 1,
+          commit: S.commit,
+        }
+        postCommitFrozenRepairs += 1
+        const b = art('frozen-inventory-bounce-r1.md')
+        failureUpgrade('suite', 'builder')
+        io.writeFile(b, [
+          '# Frozen inventory repair bounce', '',
+          `The accepted commit ${S.commit} made the full suite red in ${FROZEN_INVENTORY_FILE}. This bounded repair may change data only in the two approved source containers:`,
+          '- property values inside const VACUITY_SOURCE_SHA256 = Object.freeze({ ... })',
+          '- the third rationale argument of frozenVacuitySites(AUDITED_VACUITY_LINES[...], verdict, rationale, ...) inside const VACUITY_EXEMPT = new Map([ ... ])',
+          '',
+          `Failing test file(s): ${frozenRepair.files.join(', ')}`,
+          'Refusals remain terminal: logic, identity, unmeasured, boundary, and repeat changes are not repairable.',
+          '', `Plan: ${planPath}`, `Commit: ${S.commit}`,
+        ].join('\n'))
+        suiteBuildBrief = b
+        suiteBuildNote = 'frozen-inventory-fix'
+        stageComplete()
+        continue suiteCycle
+      }
+      stageComplete()
+      return escalate('suite', `${frozenRepair.why}\n${suiteOutput.slice(-2000)}`, [], { commit: S.commit, suite_red: suiteEvidence })
+    }
     const suiteAdmission = admitScope({
       source: 'suite-red', files: testFiles, evidence: suiteEvidence,
     })
@@ -9284,6 +9876,7 @@ function runTask(ctx, io, crash) {
       cold_suite: coldSuite,   // the COLD verdict, never folded into the lane's own suite result
       extra_rounds_granted: S.grants, growth: S.growth, modifiers: S.modifiers, enforcements: S.enforcements,
       gate: gateBlock(),
+      ...(frozenInventoryReports.length > 0 ? { frozen_inventory_repairs: frozenInventoryReports.map((report) => ({ ...report })) } : {}),
       ...acceptDecisionBlock(),
       ...carriedBlock(),
       ...finalReviewBlock(finalReview),

@@ -117,7 +117,7 @@ const fenceDiff = (path, oldStart, oldCount = 1, newStart = oldStart, newCount =
 
 // Scripted fake io: `script` maps `${role}:${n-th call}` -> envelope; runs and
 // git are scripted per call. Everything is recorded for assertions.
-function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cleanThrows = false, cold = 'green', showDoc = false, emit = false, files = {}, reseat = null, gh = null, writeThrough = false, throwOn = null, throwWrites = [], seqIds = false, now = () => 0, slots = null, diffListing = '', diffHunks = {}, diffReports = [], fenceBases = {}, fenceDiffs = {}, baseBlobs = {}, spanDiffs = {} } = {}) {
+function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cleanThrows = false, cold = 'green', showDoc = false, emit = false, files = {}, reseat = null, gh = null, writeThrough = false, throwOn = null, throwWrites = [], seqIds = false, now = () => 0, slots = null, diffListing = '', diffHunks = {}, diffReports = [], fenceBases = {}, fenceDiffs = {}, baseBlobs = {}, spanDiffs = {}, onRun = null, onCommit = null, commitResults = null } = {}) {
   const calls = { order: [], trace: [], assign: [], run: [], diffRuns: [], fenceShows: [], fenceDiffs: [], diffInventory: [], diffConfigs: [], runClean: [], runCold: [], wrapped: [], sweeps: [], reseat: [], commits: [], writes: {}, writeLog: [], checkoutLog: [], logs: [], showDoc: [], emits: [], gh: [], waits: [], sleeps: [], slotFactories: [], files }
   const counts = {}; let seq = 0
 
@@ -212,10 +212,19 @@ function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cle
       // never meant to exercise the census. A test that cares stubs the command explicitly.
       const r = runs[`${original}:${counts[original]}`] ?? runs[original]
         ?? (original.includes('census-exhibits.mjs') ? { ok: true, output: CENSUS_GREEN_OUTPUT } : { ok: true, output: '' })
-      return r
+      if (typeof onRun === 'function') onRun(text, original, counts[original], calls)
+      return typeof r === 'function' ? r(text, counts[original], calls) : r
     },
-    changedFiles() { return changedQueue.length > 1 ? changedQueue.shift() : changedQueue[0] },
-    commit(files, message) { calls.order.push('commit'); calls.commits.push({ files, message }); return 'abc1234' },
+    changedFiles() {
+      const value = changedQueue.length > 1 ? changedQueue.shift() : changedQueue[0]
+      return typeof value === 'function' ? value(calls) : value
+    },
+    commit(files, message) {
+      calls.order.push('commit'); calls.commits.push({ files, message })
+      if (typeof onCommit === 'function') onCommit(files, message, calls)
+      if (Array.isArray(commitResults)) return commitResults[calls.commits.length - 1] ?? null
+      return 'abc1234'
+    },
     status(label) { (calls.status ||= []).push(label) },
     log(obj) { calls.logs.push(obj) },
     now() { return now() },
@@ -1376,6 +1385,7 @@ const DRIVE_JOURNAL_EXPECTED = Object.freeze([
   ["recordRow", "", "at gate_check_discrimination gate_generation gate_check_discriminations ...(checkProofNote ? { gate_check_proof_note: checkProofNote } : {})"],
   ["recordRow", "", "at gate_discrimination_carry"],
   ["recordRow", "", "at census_exhibits"],
+  ["recordRow", "", "at frozen_inventory_repair"],
   ["recordRow", "", "at finding_hardened"],
   ["recordRow", "", "at ...entry"],
   ["recordRow", "", "at auto_fix"],

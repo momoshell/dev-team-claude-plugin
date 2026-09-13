@@ -1138,3 +1138,60 @@ test('a vendor tool also listed under tools is refused as a redundant declaratio
   const plain = vendorRegister({ role: 'builder' })
   assert.deepEqual(grantsFor(loadCapabilities({ register: plain }), 'builder', { root: fixture.scratch, vendorRoots: [fixture.root], agent: 'pi' }).tools, ['ffgrep', 'fffind'])
 })
+
+test('G1 local provider schema remains closed', () => {
+  const schema = JSON.parse(readFileSync(new URL('./capabilities.schema.json', import.meta.url), 'utf8'))
+  const localProvider = schema.properties.local_providers.patternProperties['^[a-z0-9-]+$']
+  const valid = capabilityRegister({ local_providers: {
+    narrator: {
+      settings: 'crew/pi/settings.json', pi_provider: 'local-pi',
+      base_url: 'http://127.0.0.1:11434/v1', model: 'Qwen/Qwen3-Coder:latest',
+    },
+  } })
+  assert.equal(localProvider.additionalProperties, false)
+  assert.deepEqual(validateCapabilities(schema, valid), [])
+  assert.doesNotThrow(() => loadCapabilities({ register: valid }))
+
+  const invalid = structuredClone(valid)
+  invalid.local_providers.narrator.unexpected = true
+  assert.ok(validateCapabilities(schema, invalid).length > 0)
+  assert.throws(() => loadCapabilities({ register: invalid }), (err) => err.reason === 'register-invalid')
+})
+
+test('G2 local provider schema still requires settings pi_provider and base_url', () => {
+  const schema = JSON.parse(readFileSync(new URL('./capabilities.schema.json', import.meta.url), 'utf8'))
+  const localProvider = schema.properties.local_providers.patternProperties['^[a-z0-9-]+$']
+  assert.deepEqual(localProvider.required, ['settings', 'pi_provider', 'base_url'])
+  assert.equal(localProvider.properties.model.type, 'string')
+
+  const baseEntry = {
+    settings: 'crew/pi/settings.json', pi_provider: 'local-pi',
+    base_url: 'http://127.0.0.1:11434/v1', model: 'Qwen/Qwen3-Coder:latest',
+  }
+  const registerFor = (entry) => capabilityRegister({ local_providers: { narrator: entry } })
+  const complete = registerFor(baseEntry)
+  assert.deepEqual(validateCapabilities(schema, complete), [])
+  assert.doesNotThrow(() => loadCapabilities({ register: complete }))
+
+  for (const field of ['settings', 'pi_provider', 'base_url']) {
+    const malformed = structuredClone(complete)
+    delete malformed.local_providers.narrator[field]
+    assert.ok(validateCapabilities(schema, malformed).length > 0, `missing ${field} must fail validation`)
+    assert.throws(() => loadCapabilities({ register: malformed }), (err) => err.reason === 'register-invalid', `missing ${field} must refuse at load`)
+  }
+
+  for (const model of ['A', 'Z'.repeat(128), 'A/B:C_1-2.3']) {
+    const valid = registerFor({ ...baseEntry, model })
+    assert.deepEqual(validateCapabilities(schema, valid), [], `safe model ${model}`)
+    assert.doesNotThrow(() => loadCapabilities({ register: valid }), `safe model ${model}`)
+  }
+  for (const model of [null, '', '!model', ' model', 'model;echo pwn', 'm' + 'a'.repeat(128)]) {
+    const invalid = registerFor({ ...baseEntry, model })
+    assert.ok(validateCapabilities(schema, invalid).length > 0, `unsafe model ${JSON.stringify(model)} must fail validation`)
+    assert.throws(() => loadCapabilities({ register: invalid }), (err) => err.reason === 'register-invalid', `unsafe model ${JSON.stringify(model)} must refuse`)
+  }
+
+  const absent = registerFor({ ...baseEntry })
+  delete absent.local_providers.narrator.model
+  assert.deepEqual(validateCapabilities(schema, absent), [])
+})

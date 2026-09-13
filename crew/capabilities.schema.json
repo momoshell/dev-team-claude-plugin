@@ -79,6 +79,10 @@
             "base_url": {
               "type": "string",
               "pattern": "^https?://"
+            },
+            "model": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:\/-]{0,127}$"
             }
           }
         }

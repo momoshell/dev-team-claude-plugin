@@ -13,6 +13,7 @@ import {
 import { seatCommand as claudeSeatCommand, capabilitiesFor } from './adapters/adapter-claude.mjs'
 import { seatCommand as piSeatCommand, capabilitiesFor as piCapabilitiesFor, PI_FIRST_PARTY_EXTENSION_TOOLS, PI_BUILTIN_TOOLS, PI_PROVIDERS } from './adapters/adapter-pi.mjs'
 import { scratchDir } from '../test/helpers.mjs'
+import { NARRATION_TIMEOUT_SECONDS, narratorCommand } from './drive.mjs'
 
 test('G1T freezes the exhaustive first-party extension declaration table and matches registrars', () => {
   const expected = {
@@ -1230,6 +1231,17 @@ test('unexpected root capability declarations remain closed outside seatability 
   const invalid = capabilityRegister({ narrator: entry, unexpected_root: entry })
   assert.ok(validateCapabilities(schema, invalid).length > 0)
   assert.throws(() => loadCapabilities({ register: invalid }), (err) => err.reason === 'register-invalid')
+})
+
+test('E1 narrator model description and command share the measured 30 second budget', () => {
+  const schema = JSON.parse(readFileSync(new URL('./capabilities.schema.json', import.meta.url), 'utf8'))
+  const description = schema.$defs.localprovider.properties.model.description
+  assert.equal(NARRATION_TIMEOUT_SECONDS, 30)
+  assert.match(description, new RegExp(`\\b${NARRATION_TIMEOUT_SECONDS}-second\\b`))
+  assert.match(description, /cold model loading occurs inside it/)
+  const command = narratorCommand({ root: 'http://127.0.0.1:11434/v1', model: 'gpt-oss-20b', prompt: 'hello' })
+  assert.match(command, new RegExp(`--max-time ${NARRATION_TIMEOUT_SECONDS}(?:\\s|$)`))
+  assert.match(command, /curl -sS --max-time 30 -X POST/)
 })
 
 test('G1 local provider schema remains closed', () => {

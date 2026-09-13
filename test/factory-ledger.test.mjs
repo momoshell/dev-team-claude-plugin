@@ -31,6 +31,7 @@ import {
   AGENT_SESSION_ABSENT_REASONS, AGENT_SESSION_ABSENT_REASON_KEYS,
   CELL_RATE_FLOOR, TURN_TRANSPORTS, CELL_PRICE_UNITS, REVIEW_VERDICTS,
   PHASE_SLOT_WAIT_KINDS, PHASE_SLOT_WAIT_DEPTH_ABSENT, PHASE_SLOT_WAIT_ABSENT,
+  NARRATION_OUTCOMES,
   EVAL_ENVELOPE_STATUSES, EVAL_ABSENT_REASONS, EVAL_INCOMPLETE_REASONS, EVAL_PAYLOAD_KEYS,
   ingestJournal, ingestExternalFenceRegister,
   JOURNAL_FACT_KEYS, JOURNAL_FACT_EVENTS, PLANNER_SYMBOLS_ARMS, PLANNER_SYMBOLS_SAMPLE_FLOOR,
@@ -6876,6 +6877,105 @@ function journalFactsCli(dbPath, flags = []) {
   assert.equal(result.status, 0, result.stderr)
   return JSON.parse(result.stdout)
 }
+
+test('A1 narration measurements round-trip from journal to queryable ledger', { skip: SKIP }, () => {
+  assert.deepEqual(NARRATION_OUTCOMES, ['accepted', 'refused'])
+  assert.equal(WRITERS.includes('recordNarrationMeasurement'), true)
+  assert.equal(WRITER_MIRROR_TABLES.recordNarrationMeasurement, 'narration_measurements')
+  assert.equal(UPDATE_ONLY_WRITERS.includes('recordNarrationMeasurement'), false)
+  assert.equal(JOURNAL_FACT_KEYS.narration, 'recordNarrationMeasurement')
+  assert.deepEqual(TABLES.narration_measurements.columns.map(({ name }) => name), [
+    'adw_id', 'attempted', 'model', 'duration_ms', 'outcome', 'reason', 'created_at',
+  ])
+  assert.deepEqual(TABLES.narration_measurements.unique, [['adw_id']])
+
+  const rows = [
+    {
+      adw_id: 'b683-accepted', at: '2026-09-13T12:00:00.001Z',
+      narration: { attempted: true, model: 'gpt-oss-20b', duration_ms: 6600, outcome: 'accepted', reason: null },
+    },
+    {
+      adw_id: 'b683-timeout', at: '2026-09-13T12:00:00.002Z',
+      narration: { attempted: true, model: 'qwen3.8-27b', duration_ms: 30000, outcome: 'refused', reason: 'narrator-timeout' },
+    },
+    {
+      adw_id: 'b683-dead', at: '2026-09-13T12:00:00.003Z',
+      narration: { attempted: true, model: 'gemma4-31b', duration_ms: 12, outcome: 'refused', reason: 'narrator-unreachable' },
+    },
+    {
+      adw_id: 'b683-pre', at: '2026-09-13T12:00:00.004Z',
+      narration: { attempted: false, model: null, duration_ms: null, outcome: 'refused', reason: 'narrator-unconfigured' },
+    },
+  ]
+  const authorityPath = join(nextDir(), 'narration-authority.jsonl')
+  const ledger = openTestLedger({ jsonlPath: authorityPath })
+  let originalRows
+  let originalFacts
+  try {
+    const journalPath = join(nextDir(), 'narration-journal.jsonl')
+    writeFileSync(journalPath, `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`)
+    assert.deepEqual(ingestJournal(journalPath, ledger), {
+      applied: 4, skipped: 0, ignored: 0, failed: 0, complete: true, first_failure: null,
+    })
+    originalRows = ledger.dumpTable('narration_measurements').map((row) => ({ ...row }))
+    assert.deepEqual(originalRows, [
+      { adw_id: 'b683-accepted', attempted: 1, model: 'gpt-oss-20b', duration_ms: 6600, outcome: 'accepted', reason: null, created_at: '2026-09-13T12:00:00.001Z' },
+      { adw_id: 'b683-dead', attempted: 1, model: 'gemma4-31b', duration_ms: 12, outcome: 'refused', reason: 'narrator-unreachable', created_at: '2026-09-13T12:00:00.003Z' },
+      { adw_id: 'b683-pre', attempted: 0, model: null, duration_ms: null, outcome: 'refused', reason: 'narrator-unconfigured', created_at: '2026-09-13T12:00:00.004Z' },
+      { adw_id: 'b683-timeout', attempted: 1, model: 'qwen3.8-27b', duration_ms: 30000, outcome: 'refused', reason: 'narrator-timeout', created_at: '2026-09-13T12:00:00.002Z' },
+    ])
+    originalFacts = ledger.journalFacts({}).narration_measurements
+    assert.deepEqual(originalFacts, {
+      measured: true, measurements: 4, count: 4,
+      outcomes: { accepted: 1, refused: 3 },
+      reasons: { 'narrator-timeout': 1, 'narrator-unreachable': 1, 'narrator-unconfigured': 1 },
+      models: { 'gemma4-31b': 1, 'gpt-oss-20b': 1, 'qwen3.8-27b': 1 },
+      duration_ms: 36612, absent: null,
+    })
+  } finally { ledger.close() }
+
+  const replayDir = nextDir()
+  const replayDbPath = join(replayDir, 'replay.db')
+  const replay = openLedger({ dbPath: replayDbPath, jsonlPath: join(replayDir, 'replay.jsonl'), stderr: { write: () => {} } })
+  try {
+    assert.deepEqual(replayJsonl(authorityPath, replay), {
+      applied: 4, skipped: 0, failed: 0, complete: true, first_failure: null,
+    })
+    assert.deepEqual(replay.dumpTable('narration_measurements').map((row) => ({ ...row })), originalRows)
+    assert.deepEqual(replay.journalFacts({}).narration_measurements, originalFacts)
+  } finally { replay.close() }
+  assert.deepEqual(journalFactsCli(replayDbPath).narration_measurements, originalFacts)
+
+  const malformedPath = join(nextDir(), 'malformed-narration.jsonl')
+  const malformed = [
+    { adw_id: 'b683-missing-model', narration: { attempted: true, duration_ms: 1, outcome: 'accepted' } },
+    { adw_id: 'b683-missing-duration', narration: { attempted: true, model: 'gpt-oss-20b', outcome: 'accepted' } },
+    { adw_id: 'b683-missing-outcome', narration: { attempted: true, model: 'gpt-oss-20b', duration_ms: 1 } },
+  ]
+  writeFileSync(malformedPath, `${malformed.map((row) => JSON.stringify(row)).join('\n')}\n`)
+  const malformedLedger = openTestLedger()
+  try {
+    const result = ingestJournal(malformedPath, malformedLedger)
+    assert.equal(result.applied, 0)
+    assert.equal(result.failed, 3)
+    assert.equal(result.complete, false)
+    assert.equal(malformedLedger.dumpTable('narration_measurements').length, 0)
+  } finally { malformedLedger.close() }
+
+  const { DatabaseSync } = require('node:sqlite')
+  const migrationPath = join(nextDir(), 'migration.db')
+  const migrationDb = new DatabaseSync(migrationPath)
+  try {
+    const narrationStart = MIGRATIONS.findIndex((stmt) => /CREATE TABLE IF NOT EXISTS "narration_measurements"/.test(stmt))
+    assert.ok(narrationStart > 0)
+    applyMigrations(migrationDb, MIGRATIONS.slice(0, narrationStart))
+    assert.deepEqual(migrationDb.prepare('PRAGMA table_info(narration_measurements)').all(), [])
+    applyMigrations(migrationDb)
+    assert.deepEqual(migrationDb.prepare('PRAGMA table_info(narration_measurements)').all().map((row) => row.name), [
+      'adw_id', 'attempted', 'model', 'duration_ms', 'outcome', 'reason', 'created_at',
+    ])
+  } finally { migrationDb.close() }
+})
 
 test('b395 T1 the recorded phase-slot-wait row round-trips journal to ledger to query', { skip: SKIP }, () => {
   const adwId = 'b395-t1'

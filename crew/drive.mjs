@@ -2804,6 +2804,7 @@ export const PUBLISH_BASE = 'main'
 // model is sent VERBATIM, and only its ABSENCE falls back to resolving the served model
 // from `<root>/models`. `pi_provider` is pi's namespace, never a served model name.
 export const NARRATOR_PROVIDER = 'narrator'
+export const NARRATION_TIMEOUT_SECONDS = 30
 const SAFE_NARRATOR_MODEL = /^[A-Za-z0-9][A-Za-z0-9._:\/-]{0,127}$/
 export const NARRATION_HEADING = '## Narrative (local model)'
 export const NARRATION_MAX_CHARS = 1200
@@ -2811,6 +2812,7 @@ export const NARRATION_REFUSALS = Object.freeze({
   unconfigured: 'narrator-unconfigured',
   endpointUnsafe: 'narrator-endpoint-unsafe',
   unreachable: 'narrator-unreachable',
+  timeout: 'narrator-timeout',
   unreadable: 'narrator-unreadable',
   empty: 'narration-empty',
   tooLong: 'narration-too-long',
@@ -3317,7 +3319,7 @@ export function narrationPrompt(record) {
 
 export function narratorCommand({ root, model, prompt }) {
   const payload = JSON.stringify({ model, stream: false, messages: [{ role: 'user', content: prompt }] })
-  return `curl -sS --max-time 30 -X POST ${shellArg(`${root}/chat/completions`)} -H ${shellArg('content-type: application/json')} --data-binary ${shellArg(payload)}`
+  return `curl -sS --max-time ${NARRATION_TIMEOUT_SECONDS} -X POST ${shellArg(`${root}/chat/completions`)} -H ${shellArg('content-type: application/json')} --data-binary ${shellArg(payload)}`
 }
 
 export function narrationFromResponse(output) {
@@ -3415,28 +3417,61 @@ export function narrationDefect(text, record) {
   return null
 }
 
+function narrationPreChatRefusal(refused, extra = {}) {
+  return { refused, attempted: false, model: null, duration_ms: null, outcome: 'refused', ...extra }
+}
+
+function narrationAttemptRefusal(refused, model, duration_ms, extra = {}) {
+  return { refused, attempted: true, model, duration_ms, outcome: 'refused', ...extra }
+}
+
+function narrationClock(io) {
+  try {
+    const value = io?.now?.()
+    if (Number.isFinite(value)) return value
+  } catch { /* the fallback clock is still enough to keep narration optional */ }
+  return Date.now()
+}
+
+function narrationDuration(startedAt, endedAt) {
+  const elapsed = endedAt - startedAt
+  return Number.isFinite(elapsed) ? Math.max(0, Math.round(elapsed)) : 0
+}
+
+// A failed curl's combined diagnostics are the strongest transport evidence
+// available from io.run: exit status is intentionally not inferred from stdout.
+// Successful output is never inspected here, so prose containing curl's token
+// cannot turn an accepted response into a timeout.
+function narrationTransportRefusal(result) {
+  const evidence = `${String(result?.output ?? '')}\n${String(result?.threw ?? '')}`
+  return evidence.includes('curl: (28)') ? NARRATION_REFUSALS.timeout : NARRATION_REFUSALS.unreachable
+}
+
 export function narrateRecord({ record, registerText, io } = {}) {
   const config = narratorConfig(registerText)
-  if (config.refused) return { refused: config.refused }
+  if (config.refused) return narrationPreChatRefusal(config.refused)
   const ask = (command) => {
     try { return io?.run?.(command) } catch (err) { return { ok: false, threw: String(err?.message || err) } }
   }
   let model = config.model
   if (model === undefined) {
     const listed = ask(narratorModelsCommand(config.root))
-    if (!listed?.ok) return { refused: NARRATION_REFUSALS.unreachable, why: listed?.threw }
+    if (listed?.ok !== true) return narrationPreChatRefusal(narrationTransportRefusal(listed), { why: listed?.threw })
     const resolved = narratorModelId(listed.output)
-    if (resolved.refused) return { refused: resolved.refused, why: resolved.why }
+    if (resolved.refused) return narrationPreChatRefusal(resolved.refused, { why: resolved.why })
     model = resolved.id
   }
-  const chat = ask(narratorCommand({ root: config.root, model, prompt: narrationPrompt(record) }))
-  if (!chat?.ok) return { refused: NARRATION_REFUSALS.unreachable, why: chat?.threw }
+  const chatCommand = narratorCommand({ root: config.root, model, prompt: narrationPrompt(record) })
+  const startedAt = narrationClock(io)
+  const chat = ask(chatCommand)
+  const duration_ms = narrationDuration(startedAt, narrationClock(io))
+  if (chat?.ok !== true) return narrationAttemptRefusal(narrationTransportRefusal(chat), model, duration_ms, { why: chat?.threw })
   const text = narrationFromResponse(chat.output)
-  if (text === null) return { refused: NARRATION_REFUSALS.unreadable }
-  if (text === '') return { refused: NARRATION_REFUSALS.empty }
+  if (text === null) return narrationAttemptRefusal(NARRATION_REFUSALS.unreadable, model, duration_ms)
+  if (text === '') return narrationAttemptRefusal(NARRATION_REFUSALS.empty, model, duration_ms)
   const defect = narrationDefect(text, record)
-  if (defect) return { refused: defect }
-  return { text, model }
+  if (defect) return narrationAttemptRefusal(defect, model, duration_ms)
+  return { text, model, attempted: true, duration_ms, outcome: 'accepted' }
 }
 
 // The publish wiring, as a pure function so it can be gated: ONLY accepted narration
@@ -9119,9 +9154,14 @@ function runTask(ctx, io, crash) {
     const narrated = narrateRecord({ record, registerText, io })
     const bodyRecord = applyNarration(record, narrated)
     try {
-      io.log(recordRow({ at: io.now(), narration: bodyRecord.narrative
-        ? { outcome: 'accepted', chars: bodyRecord.narrative.length, model: narrated.model ?? null }
-        : { outcome: 'refused', reason: narrated.refused ?? null } }))
+      io.log(recordRow({ at: io.now(), narration: {
+        attempted: narrated.attempted ?? false,
+        duration_ms: narrated.duration_ms ?? null,
+        model: narrated.model ?? null,
+        outcome: bodyRecord.narrative ? 'accepted' : 'refused',
+        reason: bodyRecord.narrative ? null : narrated.refused ?? null,
+        ...(bodyRecord.narrative ? { chars: bodyRecord.narrative.length } : {}),
+      } }))
     } catch { /* instrumentation is never load-bearing */ }
     const prCreateStartedAt = io.now()
     let created

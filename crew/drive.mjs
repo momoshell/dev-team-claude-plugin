@@ -2763,11 +2763,13 @@ export const RUN_START_EVENT = 'run-start'
 // #679 — the driver publishes. The base is fixed by the ratified design.
 export const PUBLISH_BASE = 'main'
 // #806 (TRD docs/trd-local-models.md §2 U6, §4 L4) — the reserved `local_providers`
-// key that turns narration on. crew/capabilities.schema.json:50-71 declares every
-// provider entry `additionalProperties: false`, so a narrator carries no extra keys:
-// the KEY is the switch, `base_url` is the endpoint, and the served model is RESOLVED
-// from `<root>/models` — `pi_provider` is pi's namespace, never a served model name.
+// key that turns narration on: the KEY is the switch and `base_url` names the endpoint.
+// crew/capabilities.schema.json:60-91 declares the entry `additionalProperties: false`
+// around a CLOSED property set that now includes an OPTIONAL `model`: a safe configured
+// model is sent VERBATIM, and only its ABSENCE falls back to resolving the served model
+// from `<root>/models`. `pi_provider` is pi's namespace, never a served model name.
 export const NARRATOR_PROVIDER = 'narrator'
+const SAFE_NARRATOR_MODEL = /^[A-Za-z0-9][A-Za-z0-9._:\/-]{0,127}$/
 export const NARRATION_HEADING = '## Narrative (local model)'
 export const NARRATION_MAX_CHARS = 1200
 export const NARRATION_REFUSALS = Object.freeze({
@@ -3236,9 +3238,12 @@ export function narratorConfig(registerText) {
   try { parsed = new URL(raw) } catch { return { refused: NARRATION_REFUSALS.endpointUnsafe } }
   if (!['http:', 'https:'].includes(parsed.protocol)) return { refused: NARRATION_REFUSALS.endpointUnsafe }
   if (parsed.username || parsed.password) return { refused: NARRATION_REFUSALS.endpointUnsafe }
+  const model = entry.model
+  if (model !== undefined && typeof model !== 'string') return { refused: NARRATION_REFUSALS.unconfigured }
+  if (model !== undefined && !SAFE_NARRATOR_MODEL.test(model)) return { refused: NARRATION_REFUSALS.unconfigured }
   // `pi_provider` is NOT a model name — it is pi's namespace. The served model is
-  // resolved from the endpoint below, so nothing here guesses one.
-  return { root: narratorApiRoot(raw) }
+  // resolved from the endpoint below when no model is configured.
+  return { root: narratorApiRoot(raw), model }
 }
 
 export function narratorModelsCommand(root) {
@@ -3284,7 +3289,7 @@ export function narrationFromResponse(output) {
   let parsed
   try { parsed = JSON.parse(String(output ?? '')) } catch { return null }
   const content = parsed?.choices?.[0]?.message?.content
-  return typeof content === 'string' && content.trim() ? content.trim() : null
+  return typeof content === 'string' ? content.trim() : null
 }
 
 // A path token at the end of a sentence carries the full stop; `.` is legal INSIDE a
@@ -3381,17 +3386,22 @@ export function narrateRecord({ record, registerText, io } = {}) {
   const ask = (command) => {
     try { return io?.run?.(command) } catch (err) { return { ok: false, threw: String(err?.message || err) } }
   }
-  const listed = ask(narratorModelsCommand(config.root))
-  if (!listed?.ok) return { refused: NARRATION_REFUSALS.unreachable, why: listed?.threw }
-  const model = narratorModelId(listed.output)
-  if (model.refused) return { refused: model.refused, why: model.why }
-  const chat = ask(narratorCommand({ root: config.root, model: model.id, prompt: narrationPrompt(record) }))
+  let model = config.model
+  if (model === undefined) {
+    const listed = ask(narratorModelsCommand(config.root))
+    if (!listed?.ok) return { refused: NARRATION_REFUSALS.unreachable, why: listed?.threw }
+    const resolved = narratorModelId(listed.output)
+    if (resolved.refused) return { refused: resolved.refused, why: resolved.why }
+    model = resolved.id
+  }
+  const chat = ask(narratorCommand({ root: config.root, model, prompt: narrationPrompt(record) }))
   if (!chat?.ok) return { refused: NARRATION_REFUSALS.unreachable, why: chat?.threw }
   const text = narrationFromResponse(chat.output)
-  if (!text) return { refused: NARRATION_REFUSALS.unreadable }
+  if (text === null) return { refused: NARRATION_REFUSALS.unreadable }
+  if (text === '') return { refused: NARRATION_REFUSALS.empty }
   const defect = narrationDefect(text, record)
   if (defect) return { refused: defect }
-  return { text, model: model.id }
+  return { text, model }
 }
 
 // The publish wiring, as a pure function so it can be gated: ONLY accepted narration

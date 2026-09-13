@@ -1368,6 +1368,155 @@ test('every narration failure is a named refusal and never a throw', () => {
   assert.equal(narrateRecord({ record: NARRATION_RECORD, registerText: NARRATOR_REGISTER('http://u:p@desk.lan:1234'), io: narratorIo() }).refused, NARRATION_REFUSALS.endpointUnsafe)
 })
 
+function configuredNarratorRegister(baseUrl, model) {
+  const register = JSON.parse(NARRATOR_REGISTER(baseUrl))
+  register.local_providers.narrator.model = model
+  return JSON.stringify(register)
+}
+
+test('PC5 narrator contract documents configured model selection', () => {
+  const source = readFileSync(new URL('./drive.mjs', import.meta.url), 'utf8')
+  const contract = [
+    '// #806 (TRD docs/trd-local-models.md §2 U6, §4 L4) — the reserved `local_providers`',
+    '// key that turns narration on: the KEY is the switch and `base_url` names the endpoint.',
+    '// crew/capabilities.schema.json:60-91 declares the entry `additionalProperties: false`',
+    '// around a CLOSED property set that now includes an OPTIONAL `model`: a safe configured',
+    '// model is sent VERBATIM, and only its ABSENCE falls back to resolving the served model',
+    "// from `<root>/models`. `pi_provider` is pi's namespace, never a served model name.",
+  ].join('\n')
+  assert.equal(source.includes(contract), true)
+  assert.equal(source.includes('crew/capabilities.schema.json:50-71'), false)
+})
+
+test('A1 configured model bypasses discovery and narrates through a three-model proxy', () => {
+  const configured = 'Qwen/Qwen3-Coder:latest'
+  const collect = []
+  const accepted = narrateRecord({
+    record: NARRATION_RECORD,
+    registerText: configuredNarratorRegister('http://proxy.lan:1234', configured),
+    io: narratorIo({
+      collect,
+      models: { ok: true, output: JSON.stringify({ data: [{ id: 'model-one' }, { id: 'model-two' }, { id: 'model-three' }] }) },
+    }),
+  })
+  const modelCalls = collect.filter((command) => /\/models(\b|$)/.test(command))
+  const chatCalls = collect.filter((command) => command.includes('/chat/completions'))
+  assert.equal(modelCalls.length, 0)
+  assert.equal(chatCalls.length, 1)
+  assert.equal(accepted.refused, undefined)
+  assert.equal(accepted.text, HONEST_NARRATION)
+  assert.equal(accepted.model, configured)
+  assert.equal(chatCalls[0].includes(`"model":"${configured}"`), true)
+})
+
+test('B1 absent model still refuses an ambiguous multi-model endpoint', () => {
+  const collect = []
+  const refused = narrateRecord({
+    record: NARRATION_RECORD,
+    registerText: NARRATOR_REGISTER('http://proxy.lan:1234'),
+    io: narratorIo({
+      collect,
+      models: { ok: true, output: JSON.stringify({ data: [{ id: 'model-one' }, { id: 'model-two' }] }) },
+    }),
+  })
+  assert.equal(refused.refused, NARRATION_REFUSALS.modelAmbiguous)
+  assert.equal(collect.filter((command) => /\/models(\b|$)/.test(command)).length, 1)
+  assert.equal(collect.filter((command) => command.includes('/chat/completions')).length, 0)
+})
+
+test('C1 absent model still narrates with a single resolved endpoint model', () => {
+  const resolved = 'served-model:2026'
+  const collect = []
+  const accepted = narrateRecord({
+    record: NARRATION_RECORD,
+    registerText: NARRATOR_REGISTER('http://proxy.lan:1234'),
+    io: narratorIo({
+      collect,
+      models: { ok: true, output: JSON.stringify({ data: [{ id: resolved }] }) },
+    }),
+  })
+  assert.equal(collect.length, 2)
+  assert.equal(collect[0].includes('/models'), true)
+  assert.equal(collect[1].includes('/chat/completions'), true)
+  assert.equal(accepted.refused, undefined)
+  assert.equal(accepted.model, resolved)
+  assert.equal(collect[1].includes(`"model":"${resolved}"`), true)
+  assert.equal(collect[1].includes('"model":"local-pi"'), false)
+})
+
+test('D1 unsafe configured model is refused before any transport call', () => {
+  const unsafe = [null, 7, {}, [], '', '!model', ' model', 'model;echo pwn', 'm' + 'a'.repeat(128)]
+  for (const model of unsafe) {
+    const collect = []
+    const refused = narrateRecord({
+      record: NARRATION_RECORD,
+      registerText: configuredNarratorRegister('http://proxy.lan:1234', model),
+      io: narratorIo({ collect }),
+    })
+    assert.equal(refused.refused, NARRATION_REFUSALS.unconfigured, JSON.stringify(model))
+    assert.equal(collect.length, 0, JSON.stringify(model))
+  }
+
+  for (const model of ['A', 'Z'.repeat(128), 'A/B:C_1-2.3']) {
+    const collect = []
+    const accepted = narrateRecord({
+      record: NARRATION_RECORD,
+      registerText: configuredNarratorRegister('http://proxy.lan:1234', model),
+      io: narratorIo({ collect }),
+    })
+    const chat = collect.find((command) => command.includes('/chat/completions'))
+    assert.equal(accepted.refused, undefined, model)
+    assert.equal(accepted.model, model, model)
+    assert.equal(chat.includes(`"model":"${model}"`), true, model)
+  }
+})
+
+test('E1 empty content with reasoning content refuses narration-empty and publishes no section', () => {
+  const narrated = narrateRecord({
+    record: NARRATION_RECORD,
+    registerText: configuredNarratorRegister('http://proxy.lan:1234', 'Qwen/Qwen3-Coder:latest'),
+    io: narratorIo({ chat: {
+      ok: true,
+      output: JSON.stringify({ choices: [{ message: { reasoning_content: 'internal reasoning', content: '' } }] }),
+    } }),
+  })
+  assert.equal(narrated.refused, NARRATION_REFUSALS.empty)
+  assert.equal(narrated.text, undefined)
+  const published = composePrBody(applyNarration(NARRATION_RECORD, narrated))
+  assert.equal(published.includes(NARRATION_HEADING), false)
+})
+
+test('F1 narration refusals remain the exact frozen closed set', () => {
+  const baseline = {
+    unconfigured: 'narrator-unconfigured',
+    endpointUnsafe: 'narrator-endpoint-unsafe',
+    unreachable: 'narrator-unreachable',
+    unreadable: 'narrator-unreadable',
+    empty: 'narration-empty',
+    tooLong: 'narration-too-long',
+    unknownFact: 'narration-unknown-fact',
+    modelsUnreadable: 'narrator-models-unreadable',
+    modelAbsent: 'narrator-model-absent',
+    modelAmbiguous: 'narrator-model-ambiguous',
+    rawJson: 'narration-raw-json',
+  }
+  assert.deepEqual(NARRATION_REFUSALS, baseline)
+  assert.deepEqual([...NARRATION_REFUSAL_NAMES], Object.values(baseline))
+  assert.equal(Object.isFrozen(NARRATION_REFUSALS), true)
+})
+
+test('F2 absent configured model keeps modelAbsent reachable', () => {
+  const collect = []
+  const refused = narrateRecord({
+    record: NARRATION_RECORD,
+    registerText: NARRATOR_REGISTER('http://proxy.lan:1234'),
+    io: narratorIo({ collect, models: { ok: true, output: JSON.stringify({ data: [] }) } }),
+  })
+  assert.equal(refused.refused, NARRATION_REFUSALS.modelAbsent)
+  assert.equal(collect.filter((command) => /\/models(\b|$)/.test(command)).length, 1)
+  assert.equal(collect.filter((command) => command.includes('/chat/completions')).length, 0)
+})
+
 test('the narration stage guard refuses an unknown token and an absent plain stage head', () => {
   const record = { stages: ['plan:r1', 'build:r1', 'lane:r1', 'review:r1', 'commit', 'publish'] }
   // (a) an unknown colon-shaped token

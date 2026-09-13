@@ -2431,6 +2431,14 @@ test('proposal-v2 E1', () => {
   assert.equal(proposal.minimumAssurance, null)
   assert.equal(Object.hasOwn(proposal, 'model'), false)
   assert.equal(Object.hasOwn(proposal, 'seat'), false)
+  // An unratified minimum must RENDER as null, not be backfilled from the
+  // recommendation: the key-set check above passes either way, so without this
+  // the E1 mutation survives.
+  assert.deepEqual(JSON.parse(renderProposalBlock(proposal).split('\n').slice(1, -1).join('\n')), {
+    recommended_assurance: 'quick',
+    recommended_model_band: 'workhorse',
+    minimum_assurance: null,
+  })
 
   const protectedProposal = proposalFor(1, ['lib/source-0.mjs'])
   assert.equal(protectedProposal.recommendedAssurance, 'standard')

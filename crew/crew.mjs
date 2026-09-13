@@ -1639,6 +1639,18 @@ export async function resolveAdapters(roles, args, seats = null, deps = {}) {
         if (!pathExists(exists, settingsPath)) {
           throw pathMessage('local-settings-missing', role, `local provider ${provider} settings`, 'an existing checkout-relative path', 'missing', settingsPath)
         }
+        configDir = dirname(settingsPath)
+        const modelsPath = join(configDir, 'models.json')
+        let models
+        try { models = JSON.parse(String(readFile(modelsPath, 'utf8'))) } catch { models = null }
+        const piProvider = localProvider.pi_provider
+        const declared = models?.providers
+          && typeof models.providers === 'object'
+          && !Array.isArray(models.providers)
+          && Object.hasOwn(models.providers, piProvider)
+        if (!declared) {
+          throw refuse('local-provider-undeclared', `seat ${role} local provider ${provider} expected ${modelsPath} to declare pi provider ${piProvider} at providers.${piProvider}`)
+        }
         let live = false
         try { live = await probeEndpoint(localProvider.base_url) } catch { live = false }
         if (!live) {
@@ -1648,7 +1660,6 @@ export async function resolveAdapters(roles, args, seats = null, deps = {}) {
         if (capabilities.local_provider !== true) {
           throw refuse('grant-unsupported', `seat ${role} local provider ${provider} is not supported by adapter ${name} — refusing to boot a silently weaker seat`)
         }
-        configDir = dirname(settingsPath)
       }
 
       for (const grant of grants.agents || []) {

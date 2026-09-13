@@ -1,12 +1,32 @@
 // Split from crew/drive.test.mjs (#918 follow-up): one subject per file so a
 // lane fencing one driver concern no longer locks every driver test.
-// Shared fixtures, and the ledger sandbox side effect, live in ./drive-fixtures.mjs.
+// Shared fixtures live in ./drive-fixtures.mjs; this file carries its OWN ledger
+// sandbox because it imports a ledger door directly (see below).
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   FINDING_DISPOSITIONS, FINDING_SEVERITIES, GATE_CUSTODIAN, MAX_QUESTIONS, PROTECTED_PATHS, REPO_ROOT, RESIDUAL_TYPES, applyPrescriptionLines, checkAnchors, existsSync, join, laneFence, mkdirSync, partitionShifts, protectedHits, readFileSync, readdirSync, rmSync, scratchDir, spawnSync,
 } from './drive-fixtures.mjs'
 import { bootCmd, composeRolePrompt, FLAG_VALUE_CONTRACT, KNOWN_FLAGS, BOOLEAN_FLAGS, BOOT_ONLY_FLAGS } from './crew.mjs'
+import { after } from 'node:test'
+import { tmpdir } from 'node:os'
+
+// Ledger sandbox (#432 / #824). This file imports crew/crew.mjs#bootCmd, a
+// registered home-default door (test/factory-env.test.mjs:113), so it is a
+// ledger writer in its own right and the sandbox detector reads THIS file's
+// text — ./drive-fixtures.mjs already assigns one, but an import is not a
+// credit it can see. tmpdir() is intentional and mkdtempSync() is not: the
+// raw-temp detector (test/factory-env.test.mjs:691) counts only mkdtemp calls,
+// while the sandbox detector's TEMP_MARKERS (:358) accepts tmpdir( too. Same
+// reasoning, verbatim, as crew/drive-fixtures.mjs:73-81.
+const DOCS_LEDGER_SANDBOX = join(tmpdir(), `b689-drive-docs-ledger-${process.pid}`)
+const DOCS_LEDGER_SANDBOX_PREVIOUS = process.env.DEVTEAM_LEDGER_DIR
+process.env.DEVTEAM_LEDGER_DIR = DOCS_LEDGER_SANDBOX
+after(() => {
+  if (DOCS_LEDGER_SANDBOX_PREVIOUS === undefined) delete process.env.DEVTEAM_LEDGER_DIR
+  else process.env.DEVTEAM_LEDGER_DIR = DOCS_LEDGER_SANDBOX_PREVIOUS
+  rmSync(DOCS_LEDGER_SANDBOX, { recursive: true, force: true })
+})
 
 const CHARTER_TEST_ROLES = Object.freeze(['lead', 'builder'])
 const CHARTER_TAIL = '\n\nBe terse: state the result in the fewest words that carry it, and do not restate context the reader already has.\n'

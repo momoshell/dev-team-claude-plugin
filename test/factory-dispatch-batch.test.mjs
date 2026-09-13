@@ -3746,12 +3746,18 @@ test('the compiler receives exactly the four schema request keys', async () => {
   }
 })
 
+const legacyLiveOutcomePath = (path) => {
+  const text = String(path)
+  return text.endsWith('/lane-a') || text.endsWith('returns/task.json')
+}
+
 test('a dispatched depends_on lane still compiles with exactly the schema keys', async () => {
   const result = await dispatchFixture({
     label: 'depends-on-request',
     requests: { 'lane-b': requestFor('lane-b', { depends_on: ['lane-a'] }) },
     runFlags: { wave: '2' },
     outcomes: { 'lane-a': { status: 'done', details: { commit: 'a'.repeat(40) } } },
+    existsProbe: legacyLiveOutcomePath,
   })
   const compiles = result.spawned.filter(({ args }) => args.some((arg) => String(arg).endsWith('make-brief.mjs')))
   assert.equal(compiles.length, 2)
@@ -4158,6 +4164,7 @@ test('wave two stops behind escalation or an unsettled predecessor', async () =>
     requests: { 'lane-b': requestFor('lane-b', { depends_on: ['lane-a'] }) },
     runFlags: { wave: '2' },
     outcomes: { 'lane-a': { status: 'escalation', details: {} } },
+    existsProbe: legacyLiveOutcomePath,
   })
   assert.equal(escalated.spawned.filter(({ args }) => args.includes('boot')).length, 0)
   assert.deepEqual(escalated.report.unstarted, [{ lane: 'lane-b', reason: 'predecessor-escalated', predecessor: 'lane-a' }])
@@ -4192,14 +4199,15 @@ test('an unflagged no-edges dispatch adds no wave output and reports empty defer
 
 test('laneOutcome reads live and newest archived envelopes defensively', () => {
   const laneDir = '/tmp/dt-lane-a'
-  const live = join(dirname(crewJsonPath({ checkout: laneDir, lane: 'lane-a' })), 'returns', 'task.json')
-  const archiveNew = join(dirname(dirname(dirname(live))), 'lane-a.archive-new', 'returns', 'task.json')
+  const crewDir = dirname(crewJsonPath({ checkout: laneDir, lane: 'lane-a' }))
+  const live = join(crewDir, 'returns', 'task.json')
+  const archiveNew = join(dirname(crewDir), 'lane-a.archive-999', 'returns', 'task.json')
   const outcome = laneOutcome({
     lane: 'lane-a',
     laneDir,
     deps: {
-      existsSync: (path) => path === live ? false : path === archiveNew,
-      readdirSync: () => ['lane-a.archive-old', 'lane-a.archive-new'],
+      existsSync: (path) => path === archiveNew,
+      readdirSync: () => ['lane-a.archive-001', 'lane-a.archive-999'],
       readFileSync: () => JSON.stringify({ status: 'done', details: { commit: 'a'.repeat(40) } }),
     },
   })
@@ -4208,11 +4216,73 @@ test('laneOutcome reads live and newest archived envelopes defensively', () => {
   assert.equal(outcome.path, archiveNew)
 
   const unreadable = laneOutcome({ lane: 'lane-a', laneDir, deps: {
-    existsSync: (path) => path === live,
+    existsSync: (path) => path === crewDir || path === live,
     readFileSync: () => { throw Object.assign(new Error('denied'), { code: 'EPERM' }) },
     readdirSync: () => { throw Object.assign(new Error('denied'), { code: 'EPERM' }) },
   } })
   assert.deepEqual(unreadable, { status: null, commit: null, path: live })
+})
+
+test('laneOutcome honors live and newest run boundaries over stale archives', () => {
+  const home = '/tmp/returns-batch-home'
+  const laneDir = '/tmp/returns-batch-lane'
+  const lane = 'lane-a'
+  const crewDir = dirname(crewJsonPath({ checkout: laneDir, lane, deps: { home } }))
+  const parent = dirname(crewDir)
+  const liveJournal = join(crewDir, 'journal.jsonl')
+  const liveTask = join(crewDir, 'returns', 'run-live', 'task.json')
+  const oldDir = join(parent, 'lane-a.archive-001')
+  const oldJournal = join(oldDir, 'journal.jsonl')
+  const oldTask = join(oldDir, 'returns', 'task.json')
+  const newDir = join(parent, 'lane-a.archive-999')
+  const newJournal = join(newDir, 'journal.jsonl')
+  const newTask = join(newDir, 'returns', 'run-new', 'task.json')
+  const newAttempt = join(newDir, 'returns', 'run-new', 'task.a2.json')
+  const boundary = (runId, taskReturn) => `${JSON.stringify({ event: 'run-start', run_id: runId, task_return: taskReturn })}\n`
+  const files = {
+    [liveJournal]: boundary('run-live', 'returns/run-live/task.json'),
+    [oldJournal]: `${JSON.stringify({ event: 'run-start', task_return: 'returns/task.json' })}\n`,
+    [oldTask]: JSON.stringify({ status: 'done', details: { commit: 'a'.repeat(40) } }),
+  }
+  const present = new Set([crewDir, oldTask])
+  const deps = {
+    home,
+    existsSync: (path) => present.has(path),
+    readFileSync: (path) => {
+      if (!Object.hasOwn(files, path)) throw Object.assign(new Error('missing'), { code: 'ENOENT' })
+      return files[path]
+    },
+    readdirSync: () => ['lane-a.archive-001', 'lane-a.archive-999'],
+  }
+
+  assert.deepEqual(laneOutcome({ lane, laneDir, deps }), { status: null, commit: null, path: null })
+
+  present.delete(crewDir)
+  files[newJournal] = boundary('run-new', 'returns/run-new/task.json')
+  files[newTask] = JSON.stringify({ status: 'done', details: { commit: 'b'.repeat(40) } })
+  present.add(newTask)
+  assert.deepEqual(laneOutcome({ lane, laneDir, deps }), { status: 'done', commit: 'b'.repeat(40), path: newTask })
+
+  present.delete(newTask)
+  assert.deepEqual(laneOutcome({ lane, laneDir, deps }), { status: null, commit: null, path: null })
+
+  files[newTask] = '{'
+  present.add(newTask)
+  assert.deepEqual(laneOutcome({ lane, laneDir, deps }), { status: null, commit: null, path: newTask })
+
+  present.add(crewDir)
+  files[liveJournal] = boundary('run-live', 'returns/run-live/task.a2.json')
+  const liveAttempt = join(crewDir, 'returns', 'run-live', 'task.a2.json')
+  files[liveTask] = JSON.stringify({ status: 'done', details: { commit: 'c'.repeat(40) } })
+  files[liveAttempt] = JSON.stringify({ status: 'done', details: { commit: 'd'.repeat(40) } })
+  present.add(liveTask); present.add(liveAttempt)
+  assert.deepEqual(laneOutcome({ lane, laneDir, deps }), { status: 'done', commit: 'd'.repeat(40), path: liveAttempt })
+
+  present.delete(crewDir)
+  files[newJournal] = boundary('run-new', 'returns/run-new/task.a2.json')
+  files[newAttempt] = JSON.stringify({ status: 'done', details: { commit: 'e'.repeat(40) } })
+  present.add(newAttempt)
+  assert.deepEqual(laneOutcome({ lane, laneDir, deps }), { status: 'done', commit: 'e'.repeat(40), path: newAttempt })
 })
 
 test('baseContains treats only a measured zero probe as containment', () => {

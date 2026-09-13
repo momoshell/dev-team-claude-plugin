@@ -110,6 +110,7 @@ const SAFE_TOKEN_RE = /^[A-Za-z0-9._-]+$/
 // are not, and they are the ones that turn into traversal when a caller joins an
 // id or role into a filesystem path.
 const DOTS_ONLY_RE = /^\.+$/
+const SAFE_RUN_TOKEN_RE = /^[A-Za-z0-9._-]{1,64}$/
 
 function assertToken(name, value) {
   if (typeof value !== 'string' || !SAFE_TOKEN_RE.test(value) || DOTS_ONLY_RE.test(value)) {
@@ -123,6 +124,23 @@ function assertPathValue(name, value) {
   }
 }
 
+function runTokenFromReturnPath(returnPath) {
+  if (typeof returnPath !== 'string' || !returnPath.startsWith('/')) return null
+  const segments = returnPath.split('/')
+  const returns = segments.lastIndexOf('returns')
+  if (returns < 1 || returns + 3 !== segments.length) return null
+  const token = segments[returns + 1]
+  const file = segments[returns + 2]
+  if (typeof token !== 'string' || !SAFE_RUN_TOKEN_RE.test(token) || DOTS_ONLY_RE.test(token)) return null
+  if (typeof file !== 'string' || !/^[A-Za-z0-9._-]+\.json$/.test(file)) return null
+  return token
+}
+
+function runIdentityInstruction(returnPath) {
+  const token = runTokenFromReturnPath(returnPath)
+  return token ? ` Echo exactly run_id=${token} in your ReturnEnvelope.` : ''
+}
+
 // The line is long, and its length is what made #759 visible — but it is NOT
 // shortened. Restating the return path as `<taskDir>/returns/<basename>` would
 // make a seat DERIVE a path it must be given, and dropping any field breaks the
@@ -134,7 +152,11 @@ export function assignmentLine({ id, role, briefFile, returnPath, taskDir }) {
   assertPathValue('briefFile', briefFile)
   assertPathValue('taskDir', taskDir)
   assertPathValue('returnPath', returnPath)
-  const line = `ASSIGNMENT ${id}: read your brief at ${briefFile}. Task dir: ${taskDir}. Write your ReturnEnvelope to ${returnPath} then print exactly: CREW-DONE ${role} ${id}`
+  // Legacy flat paths retain this exact template: ASSIGNMENT ${id}: read your brief at ${briefFile}. Task dir: ${taskDir}. Write your ReturnEnvelope to ${returnPath} then print exactly: CREW-DONE ${role} ${id}
+  const base = `ASSIGNMENT ${id}: read your brief at ${briefFile}. Task dir: ${taskDir}. Write your ReturnEnvelope to ${returnPath} then print exactly: CREW-DONE ${role} ${id}`
+  const line = runIdentityInstruction(returnPath)
+    ? base.replace(' then print exactly:', `${runIdentityInstruction(returnPath)} then print exactly:`)
+    : base
   assertSafeLine(line)
   return line
 }
@@ -170,7 +192,7 @@ export function assignmentPrompt({ id, role, briefFile, returnPath, taskDir, del
   if (typeof briefText !== 'string' || briefText.length === 0) {
     throw new Error('assignmentPrompt: briefText must be a non-empty string')
   }
-  const head = `ASSIGNMENT ${id}: your brief body follows below verbatim — do not re-read the brief file; if the brief itself names a plan, a diff or files, read those. Task dir: ${taskDir}. Write your ReturnEnvelope to ${returnPath} then print exactly: CREW-DONE ${role} ${id}`
+  const head = `ASSIGNMENT ${id}: your brief body follows below verbatim — do not re-read the brief file; if the brief itself names a plan, a diff or files, read those. Task dir: ${taskDir}. Write your ReturnEnvelope to ${returnPath}${runIdentityInstruction(returnPath)} then print exactly: CREW-DONE ${role} ${id}`
   // This result is a prompt-delivery seam, not a typed pane line: its rich,
   // multi-line content is deliberately not passed through assertSafeLine.
   return [head, '--- BRIEF BEGINS ---', briefText, '--- BRIEF ENDS ---'].join('\n')

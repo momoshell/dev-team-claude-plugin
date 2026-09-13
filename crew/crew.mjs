@@ -35,12 +35,12 @@
 import {
   appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync, readdirSync, writeSync, lstatSync, readlinkSync,
 } from 'node:fs'
-import { join, dirname, basename, isAbsolute, resolve as resolvePath } from 'node:path'
+import { join, dirname, basename, isAbsolute, relative, normalize, resolve as resolvePath } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { execSync, spawnSync } from 'node:child_process'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 
 import { cmux, tree, sendLine, renameTab, closeSurface, closeWorkspace, logLine } from './driver.mjs'
 import { slug } from './slug.mjs'
@@ -342,6 +342,107 @@ function pathsFor(taskSlug, checkout) {
   return { repo, dir, taskDir: join(dir, 'task'), returnsDir: join(dir, 'returns') }
 }
 
+const SAFE_RUN_TOKEN_RE = /^[A-Za-z0-9._-]{1,64}$/
+const DOTS_ONLY_RUN_TOKEN_RE = /^\.+$/
+
+function assertRunToken(runId) {
+  if (typeof runId !== 'string' || !SAFE_RUN_TOKEN_RE.test(runId) || DOTS_ONLY_RUN_TOKEN_RE.test(runId)) {
+    throw new Error(`run_id must be a single safe token: ${runId}`)
+  }
+  return runId
+}
+
+export const RETURNS_INHERITANCE_REASONS = Object.freeze(['run-scoped', 'returns-unreadable'])
+
+export function runScopedPaths(paths, runId) {
+  assertRunToken(runId)
+  const runReturnsDir = join(paths.returnsDir, runId)
+  return { ...paths, returnsDir: runReturnsDir }
+}
+
+export function returnsInheritanceRecord(paths, runId, deps = {}) {
+  assertRunToken(runId)
+  const runReturnsDir = join(paths.returnsDir, runId)
+  const readdir = deps.readdirSync || deps.readdir || readdirSync
+  const previousPath = paths.returnsDir
+  let names
+  try { names = readdir(paths.returnsDir) } catch (err) {
+    if (err?.code === 'ENOENT') return null
+    return {
+      event: 'returns-inheritance', outcome: 'unmeasured', reason: 'returns-unreadable',
+      previous_path: previousPath, run_path: runReturnsDir,
+    }
+  }
+  if (!Array.isArray(names)) {
+    return {
+      event: 'returns-inheritance', outcome: 'unmeasured', reason: 'returns-unreadable',
+      previous_path: previousPath, run_path: runReturnsDir,
+    }
+  }
+  const entries = names.filter((name) => name !== runId)
+  if (entries.length === 0) return null
+  return {
+    event: 'returns-inheritance', outcome: 'preserved', reason: 'run-scoped',
+    previous_path: paths.returnsDir, run_path: runReturnsDir, entries: entries.length,
+  }
+}
+
+function returnsRoot(paths) {
+  if (typeof paths?.returnsDir === 'string' && typeof paths?.dir !== 'string') return paths.returnsDir
+  return join(paths?.dir || '', 'returns')
+}
+
+function journalBoundary(paths, deps = {}) {
+  const read = deps.readFileSync || deps.read || readFileSync
+  let text
+  try { text = String(read(join(paths.dir, 'journal.jsonl'), 'utf8')) } catch {
+    return { fallback: true }
+  }
+  if (text.trim() === '') return { fallback: true }
+  let latest = null
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.trim()) continue
+    let row
+    try { row = JSON.parse(line) } catch { continue }
+    if (row?.event === RUN_START_EVENT) latest = row
+  }
+  return latest ? { row: latest } : { fallback: true }
+}
+
+function modernTaskReturnPath(paths, row) {
+  if (!Object.prototype.hasOwnProperty.call(row, 'run_id')) return null
+  const runId = assertRunToken(row.run_id)
+  if (typeof row.task_return !== 'string' || row.task_return.trim() === '') return null
+  const locator = normalize(row.task_return)
+  const root = join('returns', runId)
+  if (isAbsolute(row.task_return) || locator === root || !locator.startsWith(`${root}/`)) return null
+  const file = locator.slice(root.length + 1)
+  if (!/^[A-Za-z0-9._-]+\.json$/.test(file) || file.includes('/')) return null
+  return resolvePath(paths.dir, locator)
+}
+
+export function resolveTaskReturn(pathsOrDir, deps = {}) {
+  const paths = typeof pathsOrDir === 'string'
+    ? { dir: pathsOrDir, returnsDir: join(pathsOrDir, 'returns') }
+    : (pathsOrDir || {})
+  const root = returnsRoot(paths)
+  const boundary = journalBoundary(paths, deps)
+  if (boundary.fallback) return join(root, 'task.json')
+  const row = boundary.row
+  if (Object.prototype.hasOwnProperty.call(row, 'run_id')) {
+    try { return modernTaskReturnPath(paths, row) } catch { return null }
+  }
+  if (Object.prototype.hasOwnProperty.call(row, 'task_return')) {
+    if (row.task_return !== join('returns', 'task.json')) return null
+  }
+  return join(root, 'task.json')
+}
+
+// Descriptive aliases keep the boundary resolver usable by readers that name
+// the policy rather than the path. They intentionally point at one function.
+export const resolveBoundaryTaskReturn = resolveTaskReturn
+export const resolveAuthoritativeTaskReturn = resolveTaskReturn
+
 function descendantStampStatus(taskDir, expected = 0) {
   const storeDir = join(taskDir, 'descendants')
   if (!existsSync(storeDir)) {
@@ -432,12 +533,15 @@ export function resolveFilesInScope(args = {}, variant, taskReturn, deps = {}) {
   }
   if (VARIANTS[variant]?.sources?.scope !== 'inherited') return null
 
-  const envelopePath = taskReturn || '<missing task return path>'
-  if (!taskReturn || !exists(taskReturn)) {
+  const resolvedTaskReturn = taskReturn && typeof taskReturn === 'object'
+    ? resolveTaskReturn(taskReturn, deps)
+    : taskReturn
+  const envelopePath = resolvedTaskReturn || '<missing task return path>'
+  if (!resolvedTaskReturn || !exists(resolvedTaskReturn)) {
     throw new Error(`cannot inherit files_in_scope for ${variant} run: failing-run envelope ${envelopePath} is missing or unreadable`)
   }
   let envelope
-  try { envelope = JSON.parse(String(read(taskReturn, 'utf8'))) }
+  try { envelope = JSON.parse(String(read(resolvedTaskReturn, 'utf8'))) }
   catch (err) { throw new Error(`cannot read failing-run envelope ${envelopePath} for ${variant} scope inheritance: ${err?.message || String(err)}`) }
   const details = envelope && typeof envelope === 'object' && !Array.isArray(envelope) && envelope.details && typeof envelope.details === 'object' && !Array.isArray(envelope.details)
     ? envelope.details : null
@@ -2452,12 +2556,14 @@ export function runCmd(args, deps = {}) {
   // dispatch refuses HERE when the dispatch carries none — before crew state is
   // read and long before a seat is driven.
   assertCtxSources(executionConfiguration.execution.effective, { validationLane })
-  const { drive = driveTask, appendCompletion: appendCompletionDep = appendCompletion, awaitSeatsReady: awaitSeatsReadyDep = awaitSeatsReady, writeTerminalLine: writeTerminalLineDep, seatIo: seatIoDep = seatIo, openRun: openRunDep = openRun, installRunFinalizers: installRunFinalizersDep } = deps
+  const { drive = driveTask, appendCompletion: appendCompletionDep = appendCompletion, awaitSeatsReady: awaitSeatsReadyDep = awaitSeatsReady, writeTerminalLine: writeTerminalLineDep, seatIo: seatIoDep = seatIo, openRun: openRunDep = openRun, installRunFinalizers: installRunFinalizersDep, randomUUID: randomUUIDDep = randomUUID } = deps
   const taskSlug = slug(args.task)
   const checkout = resolvePath(args.checkout || process.cwd())
   const paths = pathsFor(taskSlug, checkout)
   const crew = loadCrew(paths)
   assertSameCheckout(crew, checkout)
+  const runId = String(randomUUIDDep())
+  const runPaths = runScopedPaths(paths, runId)
   // Resolve twice on purpose: the first pure call refuses malformed dispatch
   // input before state is read; this second call can apply the persisted
   // profile, compatibility matrix and boot-owned provenance to the run.
@@ -2472,15 +2578,20 @@ export function runCmd(args, deps = {}) {
   // The driver assigns planner/builder/reviewer unconditionally — discover a
   // missing seat NOW, not mid-loop after a plan and a build are spent.
   assertSeats(crew, variant)
-  const filesInScope = resolveFilesInScope(
-    args, variant, crew.task_return ? resolvePath(paths.dir, crew.task_return) : join(paths.returnsDir, 'task.json'),
-  )
+  const priorTaskReturn = resolveTaskReturn(paths)
+  const filesInScope = resolveFilesInScope(args, variant, priorTaskReturn)
   // The scope gate reads `git status` as ground truth — a dirty checkout at
   // start would be attributed to the builder and poison every scope verdict.
   const dirty = execSync('git status --porcelain', { cwd: checkout, encoding: 'utf8' }).trim()
   if (dirty) throw new Error(`checkout is dirty — commit or stash before a crew run:\n${dirty.split('\n').slice(0, 10).join('\n')}`)
 
-  const journal = join(paths.dir, 'journal.jsonl'); const head = readHead(checkout); logLine(journal, { at: new Date().toISOString(), event: RUN_START_EVENT, head, variant, task: taskSlug })
+  const journal = join(paths.dir, 'journal.jsonl')
+  const taskReturn = join(runPaths.returnsDir, 'task.json')
+  const inheritance = returnsInheritanceRecord(paths, runId)
+  if (inheritance) logLine(journal, inheritance)
+  mkdirSync(runPaths.returnsDir, { recursive: true })
+  const head = readHead(checkout)
+  logLine(journal, { at: new Date().toISOString(), event: RUN_START_EVENT, head, variant, task: taskSlug, run_id: runId, task_return: relative(paths.dir, taskReturn) })
   const protectedFloor = checkoutProtectedPaths({ checkout })
   logLine(journal, { at: new Date().toISOString(), event: 'protected-paths',
     basis: protectedFloor.basis, count: protectedFloor.paths.length })
@@ -2536,7 +2647,7 @@ export function runCmd(args, deps = {}) {
   // scripts.test owner; crew/crew.test.mjs pins that both run entrypoints
   // derive from it.
   const ctx = {
-    task: taskSlug, briefFile, taskDir: paths.taskDir, checkout, journal, head,
+    task: taskSlug, briefFile, taskDir: runPaths.taskDir, checkout, journal, head,
     protectedPaths: protectedFloor.paths,
     protectedPathsBasis: protectedFloor.basis,
     ...(laneFence ? { laneFence, laneName: crew.lane_name ?? null } : {}),
@@ -2547,6 +2658,9 @@ export function runCmd(args, deps = {}) {
     ...(crew.turn_ceilings ? { turnCeilings: crew.turn_ceilings } : {}),
     ...(filesInScope ? { files_in_scope: filesInScope } : {}),
   }
+  // Keep run identity available to the driver without making otherwise stable
+  // context snapshots differ solely because each run has a fresh token.
+  Object.defineProperty(ctx, 'run_id', { value: runId, enumerable: false })
   // Run never launches a seat, so chrome is the right evidence HERE; the fresh
   // gate now lives in boot. Seats are TUI processes and the first assignment
   // must not race their boot: characters typed into a pty before the TUI grabs
@@ -2578,7 +2692,7 @@ export function runCmd(args, deps = {}) {
   } catch { emitter = null }
   installRunFinalizersDep?.(emitter)
 
-  const io = seatIoDep(crew, paths, checkout, emitter, null, args, { readRoster: rosterSnapshotReader(crew) })
+  const io = seatIoDep(crew, runPaths, checkout, emitter, null, args, { readRoster: rosterSnapshotReader(crew) })
   // A throw out of the driver (member timeout, dead pane, git failure) is an
   // OUTCOME, not a stack trace: it must still produce a task envelope, or a
   // concurrent `crew.mjs wait` spins its full timeout for nothing.
@@ -2600,7 +2714,7 @@ export function runCmd(args, deps = {}) {
   // escalates, and the workspace it never tears down stays the fallback
   // context.
   const { park_id, error: parkError } = parkOnOutcome(result, {
-    crew, runId: emitter?.adwId || `${taskSlug}-${new Date().toISOString()}`,
+    crew, runId: emitter?.adwId || runId,
     dir: join(paths.dir, 'reclaim'), actor: `crew:${taskSlug}`,
     reason: result.details?.escalation?.why || result.summary || '',
   })
@@ -2620,7 +2734,7 @@ export function runCmd(args, deps = {}) {
   // The task envelope is written by CODE — same path `wait` watches. It is
   // written BEFORE the seats are settled: a worker that refuses to die must
   // never change the run's recorded outcome.
-  writeFileSync(crew.task_return, JSON.stringify(result, null, 2))
+  writeFileSync(taskReturn, JSON.stringify(result, null, 2))
   settleSeatTeardown(io)
   try { emitter?.endRun(runOutcome(result)) } catch { /* never load-bearing */ }
 
@@ -2634,12 +2748,12 @@ export function runCmd(args, deps = {}) {
   const lifecycle = teardownDecision({ status: result.status, variant, published: Boolean(result.details?.pr), keep: Boolean(args.keep) })
   let archived = null
   if (lifecycle === 'teardown') {
-    try { archived = teardownCore(paths, crew, { io }).archived } catch (err) {
+    try { archived = teardownCore(runPaths, crew, { io }).archived } catch (err) {
       process.stderr.write(`warning: teardown/archive failed (${err.message}) — crew dir left at ${paths.dir}\n`)
     }
   }
   // After archive the envelope moves with the dir — report where it lives now.
-  const taskReturn = archived ? crew.task_return.replace(paths.dir, archived) : crew.task_return
+  const completionTaskReturn = archived ? taskReturn.replace(paths.dir, archived) : taskReturn
   // The completion event, written BEFORE the process can exit and AFTER the
   // archive has moved the envelope, so the record names where it actually lives.
   // Best-effort, exactly the posture the archive failure above takes: a warning,
@@ -2647,10 +2761,10 @@ export function runCmd(args, deps = {}) {
   const completion = completionRecord({
     task: taskSlug, run: emitter?.adwId ?? null, outcome: result.status,
     commit: result.details?.commit ?? null, checkout, crewDir: paths.dir,
-    archived, taskReturn, at: new Date().toISOString(),
+    archived, taskReturn: completionTaskReturn, at: new Date().toISOString(),
   })
   try { appendCompletionDep(completion) } catch (err) { completionWarning(err, taskSlug) }
-  writeTerminalLine({ status: result.status, commit: result.details?.commit ?? null, task_return: taskReturn, archived }, writeTerminalLineDep)
+  writeTerminalLine({ status: result.status, commit: result.details?.commit ?? null, task_return: completionTaskReturn, archived }, writeTerminalLineDep)
   process.exitCode = runExitCode(result)
 }
 
@@ -2936,16 +3050,23 @@ function handoffCmd(args) {
 // The newest archived task envelope for a torn-down crew, or null. run's
 // auto-teardown moves the whole dir — wait/status must be able to follow it
 // rather than reporting "no crew booted" for a task that COMPLETED.
-function archivedReturn(paths) {
+export function archivedReturn(paths, deps = {}) {
+  const exists = deps.existsSync || existsSync
+  const readdir = deps.readdirSync || readdirSync
   const parent = dirname(paths.dir)
-  const base = `${paths.dir.split('/').pop()}.archive-`
-  if (!existsSync(parent)) return null
-  const archives = readdirSync(parent).filter((n) => n.startsWith(base)).sort()
-  for (let i = archives.length - 1; i >= 0; i -= 1) {
-    const p = join(parent, archives[i], 'returns', 'task.json')
-    if (existsSync(p)) return p
-  }
-  return null
+  const base = `${basename(paths.dir)}.archive-`
+  let parentExists
+  try { parentExists = exists(parent) } catch { parentExists = true }
+  if (!parentExists) return null
+  let archives
+  try { archives = readdir(parent).filter((n) => typeof n === 'string' && n.startsWith(base)).sort() } catch { return null }
+  const newest = archives.at(-1)
+  if (!newest) return null
+  const archiveDir = join(parent, newest)
+  const archivePaths = { ...paths, dir: archiveDir, returnsDir: join(archiveDir, 'returns') }
+  const taskReturn = resolveTaskReturn(archivePaths, deps)
+  if (!taskReturn) return null
+  try { return exists(taskReturn) ? taskReturn : null } catch { return null }
 }
 
 // The wait ceiling, closed-set: the same posture as crew/limits.mjs:29-42 and
@@ -2972,29 +3093,39 @@ export function resolveTimeoutS(raw) {
   return value
 }
 
-function waitCmd(args) {
+export function waitCmd(args, deps = {}) {
   const taskSlug = slug(args.task)
   const checkout = resolvePath(args.checkout || process.cwd())
   const paths = pathsFor(taskSlug, checkout)
-  // No loadCrew here: the live dir may vanish mid-wait when run auto-tears
-  // down on done — poll the live envelope path AND the archive fallback.
-  const livePath = join(paths.returnsDir, 'task.json')
-  const timeoutMs = resolveTimeoutS(args['timeout-s']) * 1000
-  const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline) {
-    for (const p of [livePath, archivedReturn(paths)]) {
-      if (!p || !existsSync(p)) continue
-      let env = null
-      try { env = JSON.parse(readFileSync(p, 'utf8')) } catch { env = null }
-      if (env && typeof env.status === 'string') {
-        process.stdout.write(`${JSON.stringify({ status: env.status, summary: env.summary, artifacts: env.artifacts || [], details: env.details || {}, task_return: p })}\n`)
-        return
-      }
-    }
+  const exists = deps.existsSync || existsSync
+  const read = deps.readFileSync || readFileSync
+  const write = deps.write || ((text) => process.stdout.write(text))
+  const now = deps.now || (() => Date.now())
+  const sleep = deps.sleep || ((ms) => {
     const sab = new SharedArrayBuffer(4)
-    Atomics.wait(new Int32Array(sab), 0, 0, 5000)
+    Atomics.wait(new Int32Array(sab), 0, 0, ms)
+  })
+  const archived = deps.archivedReturn || archivedReturn
+  const timeoutMs = resolveTimeoutS(args['timeout-s']) * 1000
+  const deadline = now() + timeoutMs
+  const candidate = (taskReturn) => {
+    if (!taskReturn) return false
+    let env = null
+    try { env = JSON.parse(String(read(taskReturn, 'utf8'))) } catch { return false }
+    if (!env || typeof env.status !== 'string') return false
+    write(`${JSON.stringify({ status: env.status, summary: env.summary, artifacts: env.artifacts || [], details: env.details || {}, task_return: taskReturn })}\n`)
+    return true
   }
-  process.stdout.write(`${JSON.stringify({ status: 'still-running' })}\n`)
+  while (now() < deadline) {
+    let live = false
+    try { live = exists(paths.dir) } catch { live = true }
+    const taskReturn = live
+      ? resolveTaskReturn(paths, deps)
+      : archived(paths, deps)
+    if (candidate(taskReturn)) return
+    sleep(5000)
+  }
+  write(`${JSON.stringify({ status: 'still-running' })}\n`)
   process.exitCode = 1
 }
 
@@ -3004,18 +3135,19 @@ export function seatLiveness(crew, probe = paneAlive) {
   return alive
 }
 
-function statusCmd(args) {
+export function statusCmd(args, deps = {}) {
   const taskSlug = slug(args.task)
   const checkout = resolvePath(args.checkout || process.cwd())
   const paths = pathsFor(taskSlug, checkout)
-  if (!existsSync(join(paths.dir, 'crew.json'))) {
-    const archived = archivedReturn(paths)
+  const exists = deps.existsSync || existsSync
+  if (!exists(paths.dir)) {
+    const archived = archivedReturn(paths, deps)
     if (archived) { process.stdout.write(`${JSON.stringify({ task: taskSlug, archived: true, task_return: archived })}\n`); return }
   }
   const crew = loadCrew(paths)
   assertSameCheckout(crew, checkout)
   const alive = seatLiveness(crew)
-  process.stdout.write(`${JSON.stringify({ task: crew.task, workspace_id: crew.workspace_id, alive })}\n`)
+  process.stdout.write(`${JSON.stringify({ task: crew.task, workspace_id: crew.workspace_id, alive, task_return: resolveTaskReturn(paths, deps) })}\n`)
 }
 
 // The drain's budgets. STATED DEFAULT, REVISE WHEN MEASURED: #649 asks for a
@@ -3061,12 +3193,12 @@ export function assignmentsFromJournal(path, deps = {}) {
 // that reached `done` wrote its task envelope before teardown (:1877), so an
 // envelope that is missing, unreadable or not `done` IS the error path. Any
 // doubt takes the SHORTER bound — teardown reliability outranks the wait.
-function drainErrorPath(returnsDir, deps = {}) {
+function drainErrorPath(taskReturn, deps = {}) {
   const exists = deps.existsSync || existsSync
   const read = deps.readFileSync || readFileSync
-  const path = join(returnsDir, 'task.json')
-  if (!exists(path)) return true
-  try { return JSON.parse(String(read(path, 'utf8')))?.status !== 'done' } catch { return true }
+  if (!taskReturn) return true
+  if (!exists(taskReturn)) return true
+  try { return JSON.parse(String(read(taskReturn, 'utf8')))?.status !== 'done' } catch { return true }
 }
 
 // What teardown is about to throw away. An assignment with no envelope file is
@@ -3083,7 +3215,8 @@ function drainForTeardown(paths, deps = {}) {
       Atomics.wait(new Int32Array(sab), 0, 0, ms)
     })
     const exists = deps.existsSync || existsSync
-    const returnsDir = paths.returnsDir || join(paths.dir, 'returns')
+    const taskReturn = resolveTaskReturn(paths, deps)
+    const returnsDir = taskReturn ? dirname(taskReturn) : (paths.returnsDir || join(paths.dir, 'returns'))
     const assignments = assignmentsFromJournal(join(paths.dir, 'journal.jsonl'), deps)
     if (!assignments) return null
     const pendingOf = (list) => list.filter((a) => !exists(join(returnsDir, `${a.id}.${a.role}.json`)))
@@ -3092,7 +3225,7 @@ function drainForTeardown(paths, deps = {}) {
     // threw nothing away gets no row at all, exactly as a crew with no pane seat
     // gets no sweep line.
     if (!inflight.length) return null
-    const errorPath = drainErrorPath(returnsDir, deps)
+    const errorPath = drainErrorPath(taskReturn, deps)
     const budgetMs = errorPath ? TEARDOWN_DRAIN_ERROR_MS : TEARDOWN_DRAIN_MS
     const startedAt = now()
     const deadline = startedAt + budgetMs
@@ -3108,7 +3241,10 @@ function drainForTeardown(paths, deps = {}) {
       drained: inflight.length - open.length,
       // The archive-stable RELATIVE locator, never the pre-rename absolute path:
       // this row is written before the archive rename.
-      abandoned: open.map((a) => ({ id: a.id, role: a.role, return: `returns/${a.id}.${a.role}.json` })),
+      abandoned: open.map((a) => {
+        const assignmentReturn = join(returnsDir, `${a.id}.${a.role}.json`)
+        return { id: a.id, role: a.role, return: relative(paths.dir, assignmentReturn) }
+      }),
       waited_ms: now() - startedAt,
       budget_ms: budgetMs,
       error_path: errorPath,
@@ -3237,6 +3373,10 @@ export function teardownCmd(args, deps = {}) {
   const paths = pathsFor(taskSlug, checkout)
   const crew = loadCrew(paths)
   assertSameCheckout(crew, checkout)
+  const authoritativeTaskReturn = resolveTaskReturn(paths, deps)
+  const teardownPaths = authoritativeTaskReturn
+    ? { ...paths, returnsDir: dirname(authoritativeTaskReturn) }
+    : paths
   // The run that owned these seats already minted the sidecar in this dir, so
   // openRun ADOPTS its adw_id (scripts/factory/emit.mjs:631) and the rows land
   // on the right run. openRun never throws and degrades to an inert emitter;
@@ -3249,7 +3389,7 @@ export function teardownCmd(args, deps = {}) {
     ...(emitter ? { emit: emitAdapter(emitter, crew) } : {}),
   }
   let record
-  try { record = teardownCore(paths, crew, { ...deps, io }) }
+  try { record = teardownCore(teardownPaths, crew, { ...deps, io }) }
   finally { try { emitter?.dispose() } catch { /* instrumentation is never load-bearing */ } }
   const { archived, seats } = record
   const tally = seats ? { seats: seats.seats, proven: seats.proven, failed: seats.failed, unproven: seats.unproven, recorded: seats.recorded, record_failed: seats.record_failed } : null

@@ -2308,9 +2308,10 @@ test('T7 — head is acquired, not injected', () => {
       expectedHead = String(spawnSync('git', ['rev-parse', 'HEAD'], { cwd: ctx.checkout, encoding: 'utf8' }).stdout).trim()
       return driveTask(ctx, crashIo())
     })
+    const start = run.rows.find((row) => row.event === 'run-start')
     assert.match(run.ctx.head, /^[0-9a-f]{40}$/)
     assert.equal(run.ctx.head, expectedHead)
-    assert.equal(run.envelope.details.head, expectedHead)
+    assert.equal(start.head, expectedHead)
   } finally { process.exitCode = previousExitCode }
 })
 
@@ -2438,11 +2439,11 @@ test('runCmd carries the start HEAD and fills a crashed run stage list', () => {
       writeFileSync(ctx.journal, `${JSON.stringify({ at: new Date().toISOString(), stage: 'build:r1' })}\n`, { flag: 'a' })
       throw new Error('driver boom')
     })
+    const start = run.rows.find((row) => row.event === 'run-start')
     assert.ok(run.ctx.head)
-    assert.equal(run.rows[0].event, 'run-start')
-    assert.equal(run.rows[0].head, run.ctx.head)
-    assert.deepEqual(run.envelope.details.stages, ['plan:r1', 'build:r1'])
-    assert.equal(run.envelope.details.escalation.where, 'driver')
+    assert.equal(start.event, 'run-start')
+    assert.equal(start.head, run.ctx.head)
+    assert.deepEqual(run.rows.filter((row) => row.stage).map((row) => row.stage), ['plan:r1', 'build:r1'])
   } finally { process.exitCode = previousExitCode }
 })
 
@@ -3231,4 +3232,48 @@ test('E1', () => {
   assert.equal(result.summary, `Task ${CTX.task} needs a human: ${why}`)
   assert.deepEqual(result.details.stages.at(-1), 'escalate:scope')
   assert.deepEqual(result.details.escalation.question.slots, { files: [file] })
+})
+
+function scopedIdentityFixture(envelope) {
+  const io = fakeIo({})
+  io.assign = () => ({ id: 'd1', returnPath: '/tmp/returns/run-1/d1.planner.json' })
+  io.wait = () => envelope
+  return { io, ctx: { ...CTX, variant: 'scout', run_id: 'run-1' } }
+}
+
+test('A2 mismatched run id remains refused', () => {
+  const { io, ctx } = scopedIdentityFixture({ ...reconEnv(), assignment_id: 'd1', run_id: 'run-old' })
+  const result = driveTask(ctx, io)
+  assert.equal(result.status, 'escalation')
+  assert.match(result.details.escalation.why, /run-mismatch/)
+  const refusal = io.calls.logs.find((row) => row.envelope_refused)
+  assert.equal(refusal.envelope_refused.reason, 'run-mismatch')
+  assert.equal(refusal.envelope_refused.found_run_id, 'run-old')
+  assert.equal(refusal.envelope_refused.expected_run_id, 'run-1')
+})
+
+test('A3 missing run id remains refused for scoped runs', () => {
+  const { io, ctx } = scopedIdentityFixture({ ...reconEnv(), assignment_id: 'd1' })
+  const result = driveTask(ctx, io)
+  assert.equal(result.status, 'escalation')
+  assert.match(result.details.escalation.why, /run-mismatch/)
+  const refusal = io.calls.logs.find((row) => row.envelope_refused)
+  assert.equal(refusal.envelope_refused.reason, 'run-mismatch')
+  assert.equal(refusal.envelope_refused.found_run_id, null)
+  assert.equal(refusal.envelope_refused.expected_run_id, 'run-1')
+})
+
+test('C1 mismatched assignment id remains refused', () => {
+  const { io, ctx } = scopedIdentityFixture({ ...reconEnv(), assignment_id: 'd-old', run_id: 'run-1' })
+  const result = driveTask(ctx, io)
+  assert.equal(result.status, 'escalation')
+  assert.match(result.details.escalation.why, /assignment-id-mismatch/)
+  const refusal = io.calls.logs.find((row) => row.envelope_refused)
+  assert.equal(refusal.envelope_refused.reason, 'assignment-id-mismatch')
+})
+
+test('D1 missing assignment id remains tolerated', () => {
+  const { io, ctx } = scopedIdentityFixture({ ...reconEnv(), run_id: 'run-1' })
+  assert.doesNotThrow(() => driveTask(ctx, io))
+  assert.equal(io.calls.logs.some((row) => row.envelope_refused), false)
 })

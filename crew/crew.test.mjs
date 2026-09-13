@@ -13,7 +13,7 @@ import {
   composeLayout, mcpConfigDocument, writeMcpConfigs, SEAT_DEFAULTS, FANOUT_TOOLS, DEFAULT_ROLES, ROLE_ORDER, transportFor, seatTransport, HEADLESS_TRANSPORTS, assertCapabilities, resolveAdapters, bootAllocation, resolveWorkerBin, docOpenArgs,
   resolveTier, resolveSeatModels, FALLBACK_REFUSALS, refuseFallback, loadRoster, normalizeRoster, refuseRoster, rosterSeating, serializeRosterV1, serializeRosterV2, ROSTER_REFUSALS, ROSTER_SCHEMA_VERSIONS, rosterSourcePath, loadRosterSource, writeRosterSnapshot, rosterSnapshotReader, loadLadder, assertBandFloors, grantedDefModels, assertDefBandFloors, refuseBandFloor, seatModelKey, bandForMember, bandForRaw, seatBand, LADDER_PATH, BAND_FLOOR_REFUSALS, shadowCandidates, shadowExclusion, shadowPick, shadowPickBoot, SHADOW_EXCLUSIONS, SHADOW_OUTCOMES, SHADOW_ABSENT, seatReadySignal, assertSeats, phaseForStage, emitAdapter,
   waitForEnvelope, WAIT_POLL_MS, LIVENESS_PROBE_MS, LIVENESS_MISSES_TO_DIE,
-  parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, stopCmd, runExitCode, runOutcome, RUN_EXIT_CODES, RUN_EXIT_UNEXPECTED, RUN_START_EVENT, BATCH_DIR_EVENT, BATCH_DIR_NOT_BATCHED, batchDirFromBrief, readHead, readBranch, teardownDecision, stagesFromJournal, assignmentsFromJournal, RUN_CONFIG_DECLARATIONS, resolveRunConfig, aliasDeprecationLines, persistedRunConfig, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, seatLiveness, awaitSeatsReady, teardownCore, teardownCmd, TEARDOWN_EXIT_SEATLESS, TEARDOWN_EXIT_UNPROVEN, TEARDOWN_ABSENT_CAUSES, teardownAbsentCause, TEARDOWN_DRAIN_MS, TEARDOWN_DRAIN_ERROR_MS, installExitMarker, installRunFinalizers, writeTerminalLine, EXITED_STATUS, SIGNAL_EXIT_CODES, UNCAUGHT_EXIT_CODE, terminalLineSeen,
+  parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, stopCmd, runExitCode, runOutcome, RUN_EXIT_CODES, RUN_EXIT_UNEXPECTED, RUN_START_EVENT, BATCH_DIR_EVENT, BATCH_DIR_NOT_BATCHED, batchDirFromBrief, readHead, readBranch, teardownDecision, stagesFromJournal, assignmentsFromJournal, RUN_CONFIG_DECLARATIONS, resolveRunConfig, aliasDeprecationLines, persistedRunConfig, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, seatLiveness, awaitSeatsReady, teardownCore, teardownCmd, TEARDOWN_EXIT_SEATLESS, TEARDOWN_EXIT_UNPROVEN, TEARDOWN_ABSENT_CAUSES, teardownAbsentCause, TEARDOWN_DRAIN_MS, TEARDOWN_DRAIN_ERROR_MS, installExitMarker, installRunFinalizers, writeTerminalLine, EXITED_STATUS, SIGNAL_EXIT_CODES, UNCAUGHT_EXIT_CODE, terminalLineSeen, runScopedPaths, returnsInheritanceRecord, RETURNS_INHERITANCE_REASONS, resolveTaskReturn, archivedReturn,
   UsageError, KNOWN_FLAGS, ROLE_FLAG_PREFIXES, REQUIRED_FLAGS, BOOT_ONLY_FLAGS, assertUsage,
   parseArgs, FLAG_VALUE_REFUSAL, FLAG_VALUE_CONTRACT, BOOLEAN_FLAGS,
   resolveTimeoutS, TIMEOUT_S_REFUSAL, TIMEOUT_S_DEFAULT,
@@ -8353,4 +8353,121 @@ test('unflagged pane boot remains admitted and record-free under headless turn-c
     rmSync(home, { recursive: true, force: true })
     rmSync(checkoutRoot, { recursive: true, force: true })
   }
+})
+
+async function scopedReturnFixture() {
+  const home = scratchDir('crew-return-scope-home-')
+  const { root: checkoutRoot, checkout } = testCheckout('crew-return-scope-checkout-')
+  const task = 'return-scope'
+  const brief = join(home, 'brief.md')
+  writeFileSync(brief, '# return scope brief\\n')
+  execSync('git init -q', { cwd: checkout })
+  const previousExitCode = process.exitCode
+  const previousWrite = process.stdout.write
+  const paths = []
+  const ids = ['run-a', 'run-b']
+  let output = ''
+  try {
+    process.stdout.write = (chunk) => { output += String(chunk); return true }
+    await withHome(home, async () => {
+      await bootCmd(
+        { task, checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath },
+        { cmux: callCounter(), tree: callCounter(), renameTab: callCounter() },
+      )
+      const done = { status: 'done', summary: '', artifacts: [], details: { commit: null, stages: [] } }
+      const run = () => runCmd({ task, checkout, 'brief-file': brief, keep: true }, {
+        randomUUID: () => ids.shift(), awaitSeatsReady: () => {}, writeTerminalLine: () => {}, appendCompletion: () => {},
+        seatIo: (_crew, scoped) => { paths.push(scoped); return { emit: () => {}, log: () => {} } },
+        drive: () => done,
+      })
+      run(); run()
+    })
+    const dir = testCrewDir(home, checkout, task)
+    const rows = readFileSync(join(dir, 'journal.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line))
+    return { home, checkoutRoot, dir, paths, rows }
+  } finally {
+    process.stdout.write = previousWrite
+    process.exitCode = previousExitCode
+  }
+}
+
+test('A1 redispatch isolates same-id late returns by run token', async () => {
+  const fixture = await scopedReturnFixture()
+  try {
+    assert.equal(fixture.paths.length, 2)
+    assert.notEqual(fixture.paths[0].returnsDir, fixture.paths[1].returnsDir)
+    const late = join(fixture.paths[0].returnsDir, 'd1.builder.json')
+    const current = join(fixture.paths[1].returnsDir, 'd1.builder.json')
+    mkdirSync(fixture.paths[0].returnsDir, { recursive: true })
+    mkdirSync(fixture.paths[1].returnsDir, { recursive: true })
+    writeFileSync(late, JSON.stringify({ assignment_id: 'd1', role: 'builder', status: 'done' }))
+    assert.equal(existsSync(current), false)
+    assert.ok(fixture.rows.filter((row) => row.event === RUN_START_EVENT).every((row) => row.run_id))
+  } finally { rmSync(fixture.home, { recursive: true, force: true }); rmSync(fixture.checkoutRoot, { recursive: true, force: true }) }
+})
+
+test('B1 previous returns remain recoverable at the journalled path', () => {
+  const paths = { dir: '/tmp/crew-return-b1', taskDir: '/tmp/crew-return-b1/task', returnsDir: '/tmp/crew-return-b1/returns' }
+  const row = returnsInheritanceRecord(paths, 'run-new', { readdirSync: () => ['run-old'] })
+  assert.equal(row.previous_path, paths.returnsDir)
+  assert.equal(row.run_path, join(paths.returnsDir, 'run-new'))
+})
+
+test('E1 clean first run has no inheritance side effect', () => {
+  const paths = { dir: '/tmp/crew-return-e1', taskDir: '/tmp/crew-return-e1/task', returnsDir: '/tmp/crew-return-e1/returns' }
+  assert.equal(returnsInheritanceRecord(paths, 'run-clean', { readdirSync: () => [] }), null)
+  assert.deepEqual(runScopedPaths(paths, 'run-clean').returnsDir, join(paths.returnsDir, 'run-clean'))
+})
+
+test('F1 inherited returns are journalled once with a closed reason', async () => {
+  const fixture = await scopedReturnFixture()
+  try {
+    const rows = fixture.rows.filter((row) => row.event === 'returns-inheritance')
+    assert.equal(rows.length, 1)
+    assert.ok(RETURNS_INHERITANCE_REASONS.includes(rows[0].reason))
+    assert.equal(rows[0].outcome, 'preserved')
+  } finally { rmSync(fixture.home, { recursive: true, force: true }); rmSync(fixture.checkoutRoot, { recursive: true, force: true }) }
+})
+
+test('F2 inheritance reason uses the closed vocabulary', () => {
+  const paths = { dir: '/tmp/crew-return-f2', taskDir: '/tmp/crew-return-f2/task', returnsDir: '/tmp/crew-return-f2/returns' }
+  const preserved = returnsInheritanceRecord(paths, 'run-f2', { readdirSync: () => ['old-run'] })
+  const unreadable = returnsInheritanceRecord(paths, 'run-f2', { readdirSync: () => { throw Object.assign(new Error('denied'), { code: 'EPERM' }) } })
+  assert.ok(RETURNS_INHERITANCE_REASONS.includes(preserved.reason))
+  assert.ok(RETURNS_INHERITANCE_REASONS.includes(unreadable.reason))
+})
+
+test('boundary resolver makes the latest scoped path exclusive in live and archive views', () => {
+  const dir = '/tmp/crew-return-boundary'
+  const paths = { dir, taskDir: join(dir, 'task'), returnsDir: join(dir, 'returns') }
+  const journal = join(dir, 'journal.jsonl')
+  let journalText = `${JSON.stringify({ event: RUN_START_EVENT, run_id: 'run-one', task_return: 'returns/run-one/task.json' })}\n${JSON.stringify({ event: RUN_START_EVENT, run_id: 'run-two', task_return: 'returns/run-two/task.a2.json' })}\n`
+  const read = (path) => {
+    if (path === journal) return journalText
+    throw Object.assign(new Error('missing'), { code: 'ENOENT' })
+  }
+  assert.equal(resolveTaskReturn(paths, { readFileSync: read }), join(paths.returnsDir, 'run-two', 'task.a2.json'))
+  journalText = `${JSON.stringify({ event: RUN_START_EVENT, run_id: 'run-two', task_return: 'returns/task.json' })}\n`
+  assert.equal(resolveTaskReturn(paths, { readFileSync: read }), null)
+  journalText = `${JSON.stringify({ event: RUN_START_EVENT, task_return: 'returns/task.json' })}\n`
+  assert.equal(resolveTaskReturn(paths, { readFileSync: read }), join(paths.returnsDir, 'task.json'))
+
+  const parent = dirname(dir)
+  const oldDir = join(parent, 'crew-return-boundary.archive-001')
+  const newestDir = join(parent, 'crew-return-boundary.archive-999')
+  const oldTask = join(oldDir, 'returns', 'task.json')
+  const newestTask = join(newestDir, 'returns', 'run-new', 'task.json')
+  const archiveJournals = {
+    [join(oldDir, 'journal.jsonl')]: `${JSON.stringify({ event: RUN_START_EVENT, task_return: 'returns/task.json' })}\n`,
+    [join(newestDir, 'journal.jsonl')]: `${JSON.stringify({ event: RUN_START_EVENT, run_id: 'run-new', task_return: 'returns/run-new/task.json' })}\n`,
+  }
+  const present = new Set([parent, oldTask])
+  const archiveDeps = {
+    existsSync: (path) => present.has(path),
+    readdirSync: () => ['crew-return-boundary.archive-001', 'crew-return-boundary.archive-999'],
+    readFileSync: (path) => archiveJournals[path],
+  }
+  assert.equal(archivedReturn(paths, archiveDeps), null)
+  present.add(newestTask)
+  assert.equal(archivedReturn(paths, archiveDeps), newestTask)
 })

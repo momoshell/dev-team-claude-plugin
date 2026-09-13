@@ -132,9 +132,11 @@ function fixture({ roles = ['planner', 'builder', 'reviewer'], transport = 'head
   }
 }
 
-const returnFor = (f, runId, attempt = 1) => attempt <= 1
-  ? join(f.returnsDir, `${runId}.task.json`)
-  : join(f.returnsDir, `${runId}.task.a${attempt}.json`)
+function returnFor(f, runId, attempt = 1) {
+  const runDir = join(f.returnsDir, runId)
+  mkdirSync(runDir, { recursive: true })
+  return attempt <= 1 ? join(runDir, 'task.json') : join(runDir, `task.a${attempt}.json`)
+}
 
 function protectedProfile(factoryRoot, checkout, cell) {
   const repoKey = repoKeyFor({ checkout })
@@ -597,7 +599,7 @@ test('a tier enqueue refuses a missing brief file, task, or checkout', async () 
 
 test('run_id rejects path traversal and slash characters before admission', async () => {
   await each(async (f) => {
-    for (const run_id of ['../escape', 'with/slash']) {
+    for (const run_id of ['.', '..', '...', '../escape', 'with/slash']) {
       assert.throws(() => f.d.enqueue({ crew_dir: f.crewDir, run_id }), (err) => {
         assert.equal(err.code, 'invalid-spec')
         assert.match(err.message, /A-Za-z0-9/)
@@ -731,18 +733,14 @@ test('over the limit, enqueue queues instead of forking', async () => {
   }, { concurrency: 1 })
 })
 
-test('a crew dir holding an envelope refuses before admission', async () => {
+test('a default scoped enqueue ignores an old flat envelope', async () => {
   await each(async (f) => {
     writeFileSync(f.taskReturn, JSON.stringify({ status: 'done' }))
-    assert.throws(() => f.d.enqueue({ crew_dir: f.crewDir }), (err) => {
-      assert.equal(err.code, 'crew-settled')
-      assert.match(err.message, new RegExp(f.crewDir.replace(/[.*+?^${}()|[\\]\\]/g, '\\\\$&')))
-      assert.match(err.message, /boot/i)
-      return true
-    })
-    assert.equal(f.forks.length, 0)
-    assert.equal(existsSync(join(f.root, 'runs.jsonl')), false)
-    assert.deepEqual(f.d.list(), [])
+    const result = f.d.enqueue({ crew_dir: f.crewDir })
+    assert.equal(f.forks.length, 1)
+    assert.equal(existsSync(join(f.root, 'runs.jsonl')), true)
+    assert.equal(f.d.list().length, 1)
+    assert.equal(JSON.parse(f.forks[0][1][1]).task_return, returnFor(f, result.run_id))
   })
 })
 
@@ -765,47 +763,38 @@ test('a settled daemon crew dir admits a second run without losing the first env
   })
 })
 
-test('a well-known task_return override cannot surrender the first run on re-enqueue', async () => {
+test('a settled legacy flat run does not block a new scoped enqueue', async () => {
   const f = fixture()
-  let next
   try {
     const first = f.d.enqueue({ crew_dir: f.crewDir, run_id: 'mirror-owner', task_return: 'returns/task.json' }).run_id
     writeFileSync(f.taskReturn, JSON.stringify({ status: 'done', summary: 'first' }))
     f.d.poll()
     assert.equal(f.d.result({ run: first }).envelope.summary, 'first')
-    assert.throws(() => f.d.enqueue({ crew_dir: f.crewDir, run_id: 'second' }), (err) => err.code === 'crew-settled')
-
-    await f.d.stop()
-    next = daemon({ root: f.root, deps: f.deps })
-    assert.throws(() => next.enqueue({ crew_dir: f.crewDir, run_id: 'after-restart' }), (err) => err.code === 'crew-settled')
-  } finally {
-    await f.d.stop()
-    await next?.stop()
-    f.cleanup()
-  }
+    const second = f.d.enqueue({ crew_dir: f.crewDir, run_id: 'second' })
+    assert.equal(JSON.parse(f.forks.at(-1)[1][1]).task_return, returnFor(f, second.run_id))
+  } finally { await f.d.stop(); f.cleanup() }
 })
 
-test('a symlink alias of the mirror cannot claim separate return ownership', async () => {
+test('a legacy alias settlement does not own a new scoped return path', async () => {
   await each(async (f) => {
     symlinkSync('task.json', join(f.returnsDir, 'alias.json'))
     const first = f.d.enqueue({ crew_dir: f.crewDir, run_id: 'alias-owner', task_return: 'returns/alias.json' }).run_id
     writeFileSync(join(f.returnsDir, 'alias.json'), JSON.stringify({ status: 'done', summary: 'first' }))
     f.d.poll()
     assert.equal(f.d.result({ run: first }).envelope.summary, 'first')
-    assert.throws(() => f.d.enqueue({ crew_dir: f.crewDir, run_id: 'alias-second' }), (err) => err.code === 'crew-settled')
+    const second = f.d.enqueue({ crew_dir: f.crewDir, run_id: 'alias-second' })
+    assert.equal(JSON.parse(f.forks.at(-1)[1][1]).task_return, returnFor(f, second.run_id))
   })
 })
 
-test('crew-settled refusal carries its code over the socket', async () => {
+test('a socket enqueue ignores an old flat envelope for a new scoped run', async () => {
   const f = fixture()
   try {
     await f.d.start()
     writeFileSync(f.taskReturn, JSON.stringify({ status: 'done' }))
     const frame = jsonFrame((await request(f.d.socketPath, `${JSON.stringify({ id: 'settled', cmd: 'enqueue', params: { crew_dir: f.crewDir } })}\n`))[0])
-    assert.equal(frame.ok, false)
-    assert.equal(frame.error.code, 'crew-settled')
-    assert.match(frame.error.message, /boot/i)
-    assert.equal(f.forks.length, 0)
+    assert.equal(frame.ok, true)
+    assert.equal(f.forks.length, 1)
   } finally { await f.d.stop(); f.cleanup() }
 })
 
@@ -836,7 +825,7 @@ test('a queued run that acquires an envelope settles instead of forking', async 
     f.d.enqueue({ crew_dir: f.crewDir })
     const queued = f.d.enqueue({ crew_dir: secondCrew.crewDir }).run_id
     const first = f.d.list().find((row) => row.crew_dir === f.crewDir).run_id
-    writeFileSync(join(secondCrew.returnsDir, `${queued}.task.json`), JSON.stringify({ status: 'done' }))
+    writeFileSync(returnFor(secondCrew, queued), JSON.stringify({ status: 'done' }))
     writeFileSync(returnFor(f, first), JSON.stringify({ status: 'done' }))
     f.d.poll()
     assert.equal(f.forks.length, 1)
@@ -1845,7 +1834,7 @@ test('the child publishes the envelope by rename', () => {
     assert.equal(writes.filter((path) => path === own).length, 0)
     assert.equal(writes.filter((path) => path === f.taskReturn).length, 0)
     assert.equal(renames.filter((path) => path === own).length, 1)
-    assert.equal(renames.filter((path) => path === f.taskReturn).length, 1)
+    assert.equal(renames.filter((path) => path === f.taskReturn).length, 0)
   } finally { f.cleanup() }
 })
 
@@ -2453,11 +2442,12 @@ test('runChild gives a task_return override precedence over crew.json', () => {
   const f = fixture(); const override = join(f.returnsDir, 'override.json')
   try {
     runChild({ crew_dir: f.crewDir, task_return: override, task: 'x' }, { driveTask: () => ({ status: 'done' }), seatIo: () => ({}), preflight: false })
-    assert.equal(JSON.parse(readFileSync(override, 'utf8')).status, 'done'); assert.equal(JSON.parse(readFileSync(f.taskReturn, 'utf8')).status, 'done')
+    assert.equal(JSON.parse(readFileSync(override, 'utf8')).status, 'done')
+    assert.equal(existsSync(f.taskReturn), false)
   } finally { f.cleanup() }
 })
 
-test('runChild mirrors per-run envelopes and writes the well-known path only once', () => {
+test('runChild publishes only its selected task return', () => {
   const f = fixture()
   try {
     const own = join(f.returnsDir, 'r1.task.json')
@@ -2468,9 +2458,10 @@ test('runChild mirrors per-run envelopes and writes the well-known path only onc
       renameSync: (from, to) => { renames.push(String(to)); return renameSync(from, to) },
     })
     assert.equal(result.status, 'done')
-    assert.deepEqual(JSON.parse(readFileSync(own, 'utf8')), JSON.parse(readFileSync(f.taskReturn, 'utf8')))
+    assert.equal(JSON.parse(readFileSync(own, 'utf8')).status, 'done')
+    assert.equal(existsSync(f.taskReturn), false)
     assert.equal(renames.filter((path) => path === own).length, 1)
-    assert.equal(renames.filter((path) => path === f.taskReturn).length, 1)
+    assert.equal(renames.filter((path) => path === f.taskReturn).length, 0)
   } finally { f.cleanup() }
 
   const wellKnown = fixture()
@@ -2483,6 +2474,51 @@ test('runChild mirrors per-run envelopes and writes the well-known path only onc
     })
     assert.equal(renames.filter((path) => path === wellKnown.taskReturn).length, 1)
   } finally { wellKnown.cleanup() }
+})
+
+test('runChild gives a modern daemon run one scoped task and assignment namespace', () => {
+  const f = fixture()
+  const runId = 'child-scoped-run'
+  const taskReturn = returnFor(f, runId)
+  let ctx = null
+  let paths = null
+  try {
+    runChild({ crew_dir: f.crewDir, task: 'scoped-child', run_id: runId, task_return: taskReturn }, {
+      preflight: false,
+      driveTask: (value) => { ctx = value; return { status: 'done', summary: 'scoped' } },
+      seatIo: (_crew, value) => { paths = value; return {} },
+    })
+    assert.equal(ctx.run_id, runId)
+    assert.equal(paths.returnsDir, join(f.returnsDir, runId))
+    assert.equal(JSON.parse(readFileSync(taskReturn, 'utf8')).status, 'done')
+    assert.equal(existsSync(f.taskReturn), false)
+    const rows = readFileSync(join(f.crewDir, 'journal.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
+    assert.deepEqual(rows.filter((row) => row.event === 'run-start').map((row) => ({ run_id: row.run_id, task_return: row.task_return })), [
+      { run_id: runId, task_return: `returns/${runId}/task.json` },
+    ])
+    assert.equal(rows.filter((row) => row.event === 'returns-inheritance').length, 0)
+  } finally { f.cleanup() }
+})
+
+test('runChild records a fresh boundary for a regrant attempt without repeated inheritance', () => {
+  const f = fixture()
+  const runId = 'child-regrant-run'
+  const first = returnFor(f, runId)
+  const second = returnFor(f, runId, 2)
+  try {
+    for (const taskReturn of [first, second]) {
+      runChild({ crew_dir: f.crewDir, task: 'scoped-child', run_id: runId, task_return: taskReturn }, {
+        preflight: false,
+        driveTask: () => ({ status: 'done', summary: 'scoped' }),
+        seatIo: () => ({}),
+      })
+    }
+    const rows = readFileSync(join(f.crewDir, 'journal.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
+    assert.deepEqual(rows.filter((row) => row.event === 'run-start').map((row) => row.task_return), [
+      `returns/${runId}/task.json`, `returns/${runId}/task.a2.json`,
+    ])
+    assert.equal(rows.filter((row) => row.event === 'returns-inheritance').length, 0)
+  } finally { f.cleanup() }
 })
 
 // Provenance: the b357-slotdriver and b360-planadopt envelopes are replayed
@@ -2824,7 +2860,7 @@ test('two runChild calls against one crew dir append links to the adopted sideca
     for (const runId of [first, second]) {
       runChild({
         crew_dir: f.crewDir, task: `child-${runId}`, checkout: f.dir,
-        task_return: join(f.returnsDir, `${runId}.task.json`), ledger_db: dbPath, run_id: runId,
+        task_return: returnFor(f, runId), ledger_db: dbPath, run_id: runId,
       }, {
         preflight: false,
         driveTask: () => ({ status: 'done', summary: runId }),

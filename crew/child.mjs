@@ -7,9 +7,11 @@ import {
   existsSync as fsExistsSync,
   mkdirSync as fsMkdirSync,
   renameSync as fsRenameSync,
+  appendFileSync as fsAppendFileSync,
+  readdirSync as fsReaddirSync,
 } from 'node:fs'
 import { execSync as cpExecSync } from 'node:child_process'
-import { basename, join, resolve as resolvePath } from 'node:path'
+import { basename, dirname, join, normalize, relative, resolve as resolvePath } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
@@ -19,7 +21,7 @@ import { seatIo as defaultSeatIo, settleSeatTeardown } from './seat-io.mjs'
 import { openRun } from '../scripts/factory/emit.mjs'
 import { checkoutProtectedPaths } from '../scripts/factory/probe-repo.mjs'
 import { paneSeat, isObject } from './daemon.mjs'
-import { runOutcome } from './crew.mjs'
+import { runOutcome, runScopedPaths, returnsInheritanceRecord, RUN_START_EVENT } from './crew.mjs'
 import { slugOrNull } from './slug.mjs'
 
 const SELF_PATH = fileURLToPath(import.meta.url)
@@ -136,6 +138,65 @@ function ledgerSidecarDbPath(crewDir, exists, read) {
   } catch { return null }
 }
 
+function journalRows(path, read) {
+  let text
+  try { text = String(read(path, 'utf8')) } catch { return [] }
+  const rows = []
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.trim()) continue
+    try {
+      const row = JSON.parse(line)
+      if (row && typeof row === 'object' && !Array.isArray(row)) rows.push(row)
+    } catch { /* a partial append is not a boundary */ }
+  }
+  return rows
+}
+
+function appendJournalRow(path, row, append) {
+  append(path, `${JSON.stringify(row)}\n`, { flag: 'a' })
+}
+
+function scopedTaskReturn(crewDir, returnsDir, runId, taskReturn) {
+  const locator = relative(crewDir, taskReturn)
+  const expected = join('returns', runId)
+  const normalized = normalize(locator)
+  if (normalized === expected || !normalized.startsWith(`${expected}/`)) return false
+  const file = normalized.slice(expected.length + 1)
+  return /^[A-Za-z0-9._-]+\.json$/.test(file) && !file.includes('/')
+}
+
+function legacyTaskReturn(crewDir, taskReturn) {
+  const locator = relative(crewDir, taskReturn)
+  if (!locator.startsWith('returns/') || locator.includes('/../')) return false
+  const file = locator.slice('returns/'.length)
+  return /^[A-Za-z0-9._-]+\.json$/.test(file) && !file.includes('/')
+}
+
+function legacyBoundaryAllowed(crewDir, taskReturn) {
+  return taskReturn === join(crewDir, 'returns', 'task.json')
+}
+
+function appendInheritanceOnce({ journal, paths, runId, read, append, readdir }) {
+  const runPath = join(paths.returnsDir, runId)
+  if (journalRows(journal, read).some((row) => row.event === 'returns-inheritance' && row.run_path === runPath)) return
+  const inheritance = returnsInheritanceRecord(paths, runId, { readdirSync: readdir })
+  if (inheritance) appendJournalRow(journal, inheritance, append)
+}
+
+function appendRunStartOnce({ journal, crewDir, task, runId, taskReturn, hasRunId, read, append }) {
+  const taskLocator = relative(crewDir, taskReturn)
+  const rows = journalRows(journal, read)
+  if (rows.some((row) => row.event === RUN_START_EVENT
+    && row.run_id === (hasRunId ? runId : undefined)
+    && row.task_return === taskLocator)) return
+  const row = {
+    at: new Date().toISOString(), event: RUN_START_EVENT, task,
+    task_return: taskLocator,
+    ...(hasRunId ? { run_id: runId } : {}),
+  }
+  appendJournalRow(journal, row, append)
+}
+
 export function runChild(argv, injected = {}) {
   const spec = childArguments(argv)
   const read = injected.readFileSync || fsReadFileSync
@@ -143,6 +204,8 @@ export function runChild(argv, injected = {}) {
   const existsChild = injected.existsSync || fsExistsSync
   const mkdir = injected.mkdirSync || fsMkdirSync
   const rename = injected.renameSync || fsRenameSync
+  const append = injected.appendJournal || injected.appendFileSync || fsAppendFileSync
+  const readdir = injected.readdirSync || injected.readdir || fsReaddirSync
   const exec = injected.execSync || cpExecSync
   // Same seam as read/write/exec: the protected-paths probe is the first thing
   // the run does after seatIo, and a test that cannot get inside it cannot prove
@@ -164,13 +227,38 @@ export function runChild(argv, injected = {}) {
   try { crew = JSON.parse(String(read(crewPath, 'utf8'))) } catch (err) { throw new Error(`cannot read crew.json at ${crewPath}: ${err.message}`) }
   const roles = crew.roles || Object.keys(crew.members || {})
   const taskDir = join(crewDir, 'task')
-  const returnsDir = join(crewDir, 'returns')
-  const taskReturn = resolvePath(crewDir, spec.task_return || crew.task_return || join('returns', 'task.json'))
+  const parentReturnsDir = join(crewDir, 'returns')
+  const hasRunId = Object.prototype.hasOwnProperty.call(spec, 'run_id') && spec.run_id !== undefined
+  const explicitTaskReturn = Object.prototype.hasOwnProperty.call(spec, 'task_return') ? spec.task_return : undefined
+  const basePaths = { dir: crewDir, taskDir, returnsDir: parentReturnsDir }
+  // Validate the token before deriving its namespace. An explicitly supplied
+  // legacy flat path remains a compatibility escape hatch even when a daemon
+  // record also carries its run id; it deliberately keeps ctx legacy-shaped.
+  let validatedRunPaths = null
+  if (hasRunId) validatedRunPaths = runScopedPaths(basePaths, spec.run_id)
+  let taskReturn = resolvePath(crewDir, explicitTaskReturn || crew.task_return || join('returns', 'task.json'))
+  const explicitLegacyFlat = explicitTaskReturn !== undefined && legacyBoundaryAllowed(crewDir, taskReturn)
+  const hasModernRunId = hasRunId && !explicitLegacyFlat
+  let runPaths
+  if (hasModernRunId) {
+    runPaths = validatedRunPaths
+    taskReturn = explicitTaskReturn === undefined ? join(runPaths.returnsDir, 'task.json') : taskReturn
+    if (!scopedTaskReturn(crewDir, runPaths.returnsDir, spec.run_id, taskReturn)) {
+      throw new Error(`task_return ${taskReturn} is outside returns/${spec.run_id}/`)
+    }
+  } else {
+    runPaths = { ...basePaths, returnsDir: dirname(taskReturn) }
+    if (!legacyTaskReturn(crewDir, taskReturn)) {
+      throw new Error(`legacy child task_return must be ${join(crewDir, 'returns', 'task.json')}`)
+    }
+  }
   const checkout = resolvePath(spec.checkout || crew.checkout || process.cwd())
   const briefFile = spec.brief_file || spec.briefFile
+  const journal = join(crewDir, 'journal.jsonl')
   const ctx = {
     task: spec.task || crew.task, briefFile: briefFile ? resolvePath(briefFile) : null,
-    taskDir, checkout, journal: join(crewDir, 'journal.jsonl'),
+    taskDir, checkout, journal,
+    ...(hasModernRunId ? { run_id: spec.run_id } : {}),
     roles: roles.filter((role) => role !== 'lead'),
     continuation: spec.continuation === true,
     seatedRoles: [...roles],
@@ -207,10 +295,6 @@ export function runChild(argv, injected = {}) {
     settled = true
     result = value
     publish(taskReturn, JSON.stringify(result, null, 2))
-    const mirror = join(returnsDir, 'task.json')
-    if (taskReturn !== mirror) {
-      try { publish(mirror, JSON.stringify(result, null, 2)) } catch { /* the run's own envelope is the record; the mirror is a convenience for wait/status/visualizer */ }
-    }
     settleSeatTeardown(io)
     try { emitter?.endRun(runOutcome(result)) } catch { /* never load-bearing */ }
     return result
@@ -269,7 +353,13 @@ export function runChild(argv, injected = {}) {
         if (dirty) throw new Error(`checkout is dirty — commit or stash before a crew run:\n${dirty.split('\n').slice(0, 10).join('\n')}`)
       }
     }
-    mkdir(taskDir, { recursive: true }); mkdir(returnsDir, { recursive: true })
+    if (hasModernRunId) {
+      appendInheritanceOnce({ journal, paths: basePaths, runId: spec.run_id, read, append, readdir })
+    }
+    if (hasModernRunId || legacyBoundaryAllowed(crewDir, taskReturn)) {
+      appendRunStartOnce({ journal, crewDir, task: ctx.task, runId: hasModernRunId ? spec.run_id : undefined, taskReturn, hasRunId: hasModernRunId, read, append })
+    }
+    mkdir(taskDir, { recursive: true }); mkdir(runPaths.returnsDir, { recursive: true })
     const seatIo = injected.seatIo || defaultSeatIo
     const driveTask = injected.driveTask || defaultDriveTask
     const noCmux = injected.seatIoDeps || {
@@ -313,7 +403,7 @@ export function runChild(argv, injected = {}) {
       err.stage = 'ledger-sidecar'
       result = failure(err)
     } else {
-      io = seatIo(crew, { dir: crewDir, taskDir, returnsDir }, checkout, emitter, injected.adapters || null, spec, noCmux)
+      io = seatIo(crew, runPaths, checkout, emitter, injected.adapters || null, spec, noCmux)
       const protectedFloor = probeProtectedPaths({ checkout })
       ctx.protectedPaths = protectedFloor.paths
       ctx.protectedPathsBasis = protectedFloor.basis

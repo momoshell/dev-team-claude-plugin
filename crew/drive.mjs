@@ -646,6 +646,19 @@ export function envelopeFieldMetadataDefect(field, envelopeFields = []) {
   if (hasOwn(field, 'allow_empty') && typeof field.allow_empty !== 'boolean') {
     return `envelope field ${JSON.stringify(field.name)}.allow_empty must be boolean`
   }
+  if (hasOwn(field, 'covers')) {
+    if (kind !== 'records') return `envelope field ${JSON.stringify(field.name)} may declare covers only on records`
+    const covers = field.covers
+    if (!covers || typeof covers !== 'object' || Array.isArray(covers)) return `envelope field ${JSON.stringify(field.name)}.covers must be an object`
+    if (typeof covers.field !== 'string' || !covers.field || covers.field === field.name) return `envelope field ${JSON.stringify(field.name)}.covers.field must name another records field`
+    const covered = envelopeFields.find((candidate) => candidate?.name === covers.field)
+    if (!covered) return `envelope field ${JSON.stringify(field.name)}.covers.field ${JSON.stringify(covers.field)} is not declared`
+    if (covered.kind !== 'records') return `envelope field ${JSON.stringify(field.name)}.covers.field ${JSON.stringify(covers.field)} must be records`
+    if (typeof covers.key !== 'string' || !covers.key) return `envelope field ${JSON.stringify(field.name)}.covers.key must name an item field`
+    if (!itemFields.includes(covers.key) || !Array.isArray(covered.item_fields) || !covered.item_fields.includes(covers.key)) {
+      return `envelope field ${JSON.stringify(field.name)}.covers.key ${JSON.stringify(covers.key)} must be required by both records fields`
+    }
+  }
   if (kind === 'records' && (!Array.isArray(field.item_fields) || itemFields.some((name) => typeof name !== 'string' || !name) || new Set(itemFields).size !== itemFields.length)) {
     return `envelope field ${JSON.stringify(field.name)}.item_fields must be unique non-empty strings`
   }
@@ -1156,6 +1169,27 @@ function validEnvelope(env, role, id, runId, { strictIdentity = false } = {}) {
     && (runId === undefined || env.run_id === runId)
 }
 
+function recordKeys(records, key) {
+  if (!Array.isArray(records)) return null
+  const keys = []
+  for (const record of records) {
+    if (!record || typeof record !== 'object' || Array.isArray(record)) return null
+    const value = record[key]
+    if (typeof value !== 'string' || !value.trim() || keys.includes(value)) return null
+    keys.push(value)
+  }
+  return keys
+}
+
+export function sameRecordKeys(left, right, key) {
+  if (typeof key !== 'string' || !key) return false
+  const leftKeys = recordKeys(left, key)
+  const rightKeys = recordKeys(right, key)
+  if (!leftKeys || !rightKeys || leftKeys.length !== rightKeys.length) return false
+  const rightSet = new Set(rightKeys)
+  return leftKeys.every((value) => rightSet.has(value))
+}
+
 // What accepts an envelope-shape run: the SHAPE of what came back. Deliberately
 // stricter than validEnvelope (:124), which only guards against a stale or
 // mis-addressed file. The required fields and their kinds come from the shape's
@@ -1214,6 +1248,7 @@ export function envelopeDefect(env, shape, { taskDir } = {}) {
         }
       }
     }
+    if (field.covers && !sameRecordKeys(value, env.details[field.covers.field], field.covers.key)) return refuse('field-item', `details.${field.name} must contain exactly one record for each ${field.covers.field}.${field.covers.key}`)
   }
   return reviewShapeDefect(env.details)
 }
@@ -5144,7 +5179,7 @@ function runTask(ctx, io, crash) {
   }
 
   function escalate(where, why, extraArtifacts = [], extraDetails = {}, resolutionSlots = {}) {
-    const escalationWhere = where === 'review_only' ? 'envelope' : where
+    const escalationWhere = where === 'review_only' || where === 'verify_only' ? 'envelope' : where
     return escalationResult({
       where: escalationWhere, why, question: escalationQuestion(escalationWhere, resolutionSlots), summary: `Task ${ctx.task} needs a human: ${why}`,
       commit: null, artifacts: extraArtifacts, extraDetails, terminal: true,
@@ -5314,9 +5349,11 @@ function runTask(ctx, io, crash) {
         }
         if (!f.allow_empty) return `  details.${f.name}: a non-empty array of records, each with a non-empty ${f.item_fields.join(' and a non-empty ')}`
         const cardinality = f.cardinality
-        const empty = cardinality
-          ? `; empty is allowed only when details.${cardinality.discriminator} is ${JSON.stringify(cardinality.empty)}, and non-empty requires ${JSON.stringify(cardinality.nonempty)}`
-          : '; empty is allowed'
+        const empty = f.covers
+          ? `; exactly one record for each details.${f.covers.field}.${f.covers.key}, so an empty array is refused whenever that field carries records`
+          : cardinality
+            ? `; empty is allowed only when details.${cardinality.discriminator} is ${JSON.stringify(cardinality.empty)}, and non-empty requires ${JSON.stringify(cardinality.nonempty)}`
+            : '; empty is allowed'
         const constraints = Object.entries(f.item_values || {}).map(([key, values]) => `${key} is one of ${values.join(' | ')}`)
           .concat(Object.entries(f.item_patterns || {}).map(([key, source]) => `${key} matches ${JSON.stringify(source)}`))
         return `  details.${f.name}: an array of records with a non-empty ${f.item_fields.join(' and a non-empty ')}${empty}${constraints.length ? `; ${constraints.join('; ')}` : ''}`

@@ -84,7 +84,7 @@ test('bug-fix repair records the inherited-scope execution condition', () => {
   assert.equal(TASK_PROFILES.bug_fix.execution_conditions.repair, 'a failing run supplies inherited scope')
 })
 
-test('the compatibility matrix names only verify_only as pending beside variants', () => {
+test('the compatibility matrix names verify_only as an existing variant', () => {
   const profileShapes = new Set()
   for (const profile of Object.values(TASK_PROFILES)) {
     profileShapes.add(profile.recommended_execution)
@@ -95,7 +95,7 @@ test('the compatibility matrix names only verify_only as pending beside variants
   assert.equal(profileShapes.has('review_only'), true)
   assert.equal(profileShapes.has('verify_only'), true)
   assert.equal(VARIANT_NAMES.includes('review_only'), true)
-  assert.equal(VARIANT_NAMES.includes('verify_only'), false)
+  assert.equal(VARIANT_NAMES.includes('verify_only'), true)
   const source = sourceText()
   assert.equal(source.includes('EXECUTION_SHAPES'), false)
   assert.equal(source.includes('executionStatus'), false)

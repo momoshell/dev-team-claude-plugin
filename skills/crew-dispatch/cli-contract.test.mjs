@@ -87,6 +87,13 @@ test('documented variant keys and context equal the runtime contract', () => {
   }
 })
 
+test('verify_only documentation pins reviewer-only no-write clean-tree execution', () => {
+  const text = readText(VARIANTS_DOC)
+  assert.match(text, /\| `verify_only` \| .*\| The `reviewer` seat only\./)
+  assert.match(text, /no lane context and no checkout writes/)
+  assert.match(text, /ephemeral build\/test artifacts only while checks run; those artifacts must be removed before return so the final checkout is clean/)
+})
+
 test('the pane-reseat refusal remains quoted in the tier reference', () => {
   const sentence = 'a pane seat bakes model and effort into its launch command at boot (paneCommand in crew/crew.mjs); its reassign: true capability means give a settled seat NEW WORK, never change its cell'
   assert.ok(readText(TIER).includes(sentence))

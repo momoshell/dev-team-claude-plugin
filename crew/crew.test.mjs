@@ -6568,8 +6568,10 @@ test('assertSeats reads declared envelope seats and keeps the lead rule', () => 
   assert.doesNotThrow(() => assertSeats(plannerOnlyCrew, 'scout'))
   const reviewerOnlyCrew = { roles: ['reviewer'], members: { reviewer: {} } }
   assert.doesNotThrow(() => assertSeats(reviewerOnlyCrew, 'review_only'))
+  assert.doesNotThrow(() => assertSeats(reviewerOnlyCrew, 'verify_only'))
   assert.doesNotThrow(() => assertSeats({ roles: ['reviewer', 'tech-lead'], members: { reviewer: {}, 'tech-lead': {} } }, 'review_only'))
   assert.throws(() => assertSeats({ roles: ['tech-lead'], members: { 'tech-lead': {} } }, 'review_only'), /requires a reviewer seat/)
+  assert.throws(() => assertSeats({ roles: ['tech-lead'], members: { 'tech-lead': {} } }, 'verify_only'), /requires a reviewer seat/)
   assert.throws(() => assertSeats(plannerOnlyCrew, 'full'), /requires a builder seat/)
   assert.throws(() => assertSeats({ roles: ['lead', 'planner'], members: { planner: {} } }, 'scout'), /requires a lead seat/)
   assert.throws(() => assertSeats(plannerOnlyCrew), /requires a builder seat/)
@@ -6587,7 +6589,7 @@ test('ROLE_ORDER is key-identical to SEAT_DEFAULTS — one truth for seating ord
 
 test('phaseForStage maps every driver stage and defaults unknown labels to build', () => {
   const table = {
-    'plan:r1': 'planning', 'check:r1': 'planning', 'scout:r1': 'planning', 'review_only:r1': 'planning', 'repair:r1': 'planning', 'envelope-accept': 'finish',
+    'plan:r1': 'planning', 'check:r1': 'planning', 'scout:r1': 'planning', 'review_only:r1': 'planning', 'verify_only:r1': 'planning', 'repair:r1': 'planning', 'envelope-accept': 'finish',
     'gate-baseline': 'build', 'gate-repair:1': 'build',
     'gate-reverify:1': 'build', 'scope-gate:r1': 'build', 'lane:r1': 'build', 'gate:r1': 'build',
     'review:pass': 'review', suite: 'finish', commit: 'finish', rebase: 'finish', publish: 'publish', done: 'done', 'escalate:lane': 'escalation',

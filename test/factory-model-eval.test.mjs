@@ -372,7 +372,6 @@ test('B1 each headless seat failure stage has its distinct closed reason', async
     const seat = await defaultRunSeat({
       task: '# failure fixture', candidate: CANDIDATE_A, role: 'builder', bench: 'b1', dir: bench.dir, deps: fixture.deps,
     })
-    assert.equal(typeof seat.cleanup, 'function')
     await seat.cleanup()
     return seat
   }

@@ -61,36 +61,42 @@
       "type": "object",
       "patternProperties": {
         "^[a-z0-9-]+$": {
-          "type": "object",
-          "required": [
-            "settings",
-            "pi_provider",
-            "base_url"
-          ],
-          "additionalProperties": false,
-          "properties": {
-            "settings": {
-              "$ref": "#/$defs/relpath"
-            },
-            "pi_provider": {
-              "type": "string",
-              "pattern": "^[a-z0-9-]+$"
-            },
-            "base_url": {
-              "type": "string",
-              "pattern": "^https?://"
-            },
-            "model": {
-              "type": "string",
-              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:\/-]{0,127}$"
-            }
-          }
+          "$ref": "#/$defs/localprovider"
         }
       },
       "additionalProperties": false
+    },
+    "narrator": {
+      "$ref": "#/$defs/localprovider"
     }
   },
   "$defs": {
+    "localprovider": {
+      "type": "object",
+      "required": [
+        "settings",
+        "pi_provider",
+        "base_url"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "settings": {
+          "$ref": "#/$defs/relpath"
+        },
+        "pi_provider": {
+          "type": "string",
+          "pattern": "^[a-z0-9-]+$"
+        },
+        "base_url": {
+          "type": "string",
+          "pattern": "^https?://"
+        },
+        "model": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:\/-]{0,127}$"
+        }
+      }
+    },
     "codingagent": {
       "type": "object",
       "required": [

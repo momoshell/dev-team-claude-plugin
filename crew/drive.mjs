@@ -2797,9 +2797,9 @@ export const RUN_START_EVENT = 'run-start'
 
 // #679 — the driver publishes. The base is fixed by the ratified design.
 export const PUBLISH_BASE = 'main'
-// #806 (TRD docs/trd-local-models.md §2 U6, §4 L4) — the reserved `local_providers`
-// key that turns narration on: the KEY is the switch and `base_url` names the endpoint.
-// crew/capabilities.schema.json:60-91 declares the entry `additionalProperties: false`
+// #806 (TRD docs/trd-local-models.md §2 U6, §4 L4) — the optional top-level `narrator`
+// declaration that turns narration on: the KEY is the switch and `base_url` names the endpoint.
+// crew/capabilities.schema.json defines `properties.narrator` and `$defs.localprovider`
 // around a CLOSED property set that now includes an OPTIONAL `model`: a safe configured
 // model is sent VERBATIM, and only its ABSENCE falls back to resolving the served model
 // from `<root>/models`. `pi_provider` is pi's namespace, never a served model name.
@@ -3266,7 +3266,7 @@ export function narratorApiRoot(baseUrl) {
 export function narratorConfig(registerText) {
   let register = null
   try { register = JSON.parse(String(registerText ?? '')) } catch { return { refused: NARRATION_REFUSALS.unconfigured } }
-  const entry = register?.local_providers?.[NARRATOR_PROVIDER]
+  const entry = register?.[NARRATOR_PROVIDER]
   if (!entry || typeof entry !== 'object') return { refused: NARRATION_REFUSALS.unconfigured }
   const raw = String(entry.base_url ?? '')
   let parsed

@@ -8,7 +8,7 @@ import {
   CAPABILITY_REFUSALS, EMPTY_GRANTS, REGISTER_ROOT, ACP_TRANSPORT_PROFILE, assertGrantsBacked,
   agentRegisterEntry, assertAgentProvider, assertAgentTransport, assertAgentAdapter, assertAgentRefusals,
   declaredCapabilities, effectiveCapabilities, grantsFor, loadCapabilities, probeCapability,
-  refuse, validateCapabilities, vendorRoots,
+  refuse, seatableLocalProviderNames, validateCapabilities, vendorRoots,
 } from './capabilities.mjs'
 import { seatCommand as claudeSeatCommand, capabilitiesFor } from './adapters/adapter-claude.mjs'
 import { seatCommand as piSeatCommand, capabilitiesFor as piCapabilitiesFor, PI_FIRST_PARTY_EXTENSION_TOOLS, PI_BUILTIN_TOOLS, PI_PROVIDERS } from './adapters/adapter-pi.mjs'
@@ -186,7 +186,7 @@ test('B1A coding agent names and adapter paths derive from shipped adapters', ()
 test('B1P coding agent providers derive from shipped adapters and roster cells', () => {
   const shipped = loadCapabilities()
   const roster = JSON.parse(readFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
-  const piProviders = [...Object.keys(PI_PROVIDERS), ...Object.keys(shipped.local_providers)]
+  const piProviders = [...Object.keys(PI_PROVIDERS), ...seatableLocalProviderNames(shipped)]
   const claudeProviders = new Set()
   const visit = (cell) => {
     if (!cell || typeof cell !== 'object') return
@@ -199,6 +199,31 @@ test('B1P coding agent providers derive from shipped adapters and roster cells',
   assert.deepEqual(shipped.coding_agents.pi.providers, piProviders)
   assert.deepEqual(shipped.coding_agents.claude.providers, [...claudeProviders])
   assert.equal(capabilitiesFor({ transport: 'pane' }).local_provider, false)
+})
+
+test('B1 narrator is not a provider pi can seat', () => {
+  const shipped = loadCapabilities()
+  const piProviders = [...Object.keys(PI_PROVIDERS), ...seatableLocalProviderNames(shipped)]
+  assert.equal(piProviders.includes('narrator'), false)
+  assert.equal(shipped.coding_agents.pi.providers.includes('narrator'), false)
+})
+
+test('C1 every non-seat root declaration stays outside the seat provider set', () => {
+  const entry = {
+    settings: 'crew/pi/settings.json', pi_provider: 'local-pi',
+    base_url: 'http://127.0.0.1:11434/v1', model: 'Qwen/Qwen3-Coder:latest',
+  }
+  const register = capabilityRegister({ narrator: entry, metrics: entry })
+  assert.deepEqual(seatableLocalProviderNames(register), [])
+})
+
+test('D1 a local seat provider is included in the seat provider set', () => {
+  const entry = {
+    settings: 'crew/pi/settings.json', pi_provider: 'local-pi',
+    base_url: 'http://127.0.0.1:11434/v1', model: 'Qwen/Qwen3-Coder:latest',
+  }
+  const register = capabilityRegister({ local_providers: { 'distinctive-seat': entry } })
+  assert.deepEqual(seatableLocalProviderNames(register), ['distinctive-seat'])
 })
 
 test('B1T coding agent transports derive from shipped adapters', () => {
@@ -467,11 +492,18 @@ test('capability register validation is closed, non-vacuous, and enforced at loa
   assert.equal(Object.isFrozen(loaded.roles.planner), true)
 })
 
-test('the shipped local provider register is schema-valid, committed, and closed', () => {
+test('E1 the local provider frozen inventory rejects an unexpected provider', () => {
   const schema = JSON.parse(readFileSync(new URL('./capabilities.schema.json', import.meta.url), 'utf8'))
   const shipped = JSON.parse(readFileSync(new URL('./capabilities.json', import.meta.url), 'utf8'))
   const providers = shipped.local_providers
   assert.deepEqual(Object.keys(providers), ['llama-swap'])
+  assert.deepEqual(Object.keys(shipped.narrator).sort(), ['base_url', 'model', 'pi_provider', 'settings'])
+  assert.deepEqual(shipped.narrator, {
+    settings: 'crew/pi/settings.json',
+    pi_provider: 'llama-swap',
+    base_url: 'http://10.112.20.20:8080/v1',
+    model: 'gpt-oss-20b',
+  })
   assert.deepEqual(Object.keys(providers['llama-swap']).sort(), ['base_url', 'pi_provider', 'settings'])
   assert.deepEqual(providers['llama-swap'], {
     settings: 'crew/pi/settings.json',
@@ -1139,28 +1171,49 @@ test('a vendor tool also listed under tools is refused as a redundant declaratio
   assert.deepEqual(grantsFor(loadCapabilities({ register: plain }), 'builder', { root: fixture.scratch, vendorRoots: [fixture.root], agent: 'pi' }).tools, ['ffgrep', 'fffind'])
 })
 
-test('G1 local provider schema remains closed', () => {
+test('unexpected root capability declarations remain closed outside seatability checks', () => {
   const schema = JSON.parse(readFileSync(new URL('./capabilities.schema.json', import.meta.url), 'utf8'))
-  const localProvider = schema.properties.local_providers.patternProperties['^[a-z0-9-]+$']
-  const valid = capabilityRegister({ local_providers: {
-    narrator: {
-      settings: 'crew/pi/settings.json', pi_provider: 'local-pi',
-      base_url: 'http://127.0.0.1:11434/v1', model: 'Qwen/Qwen3-Coder:latest',
-    },
-  } })
-  assert.equal(localProvider.additionalProperties, false)
-  assert.deepEqual(validateCapabilities(schema, valid), [])
-  assert.doesNotThrow(() => loadCapabilities({ register: valid }))
-
-  const invalid = structuredClone(valid)
-  invalid.local_providers.narrator.unexpected = true
+  const entry = {
+    settings: 'crew/pi/settings.json', pi_provider: 'local-pi',
+    base_url: 'http://127.0.0.1:11434/v1', model: 'Qwen/Qwen3-Coder:latest',
+  }
+  const invalid = capabilityRegister({ narrator: entry, unexpected_root: entry })
   assert.ok(validateCapabilities(schema, invalid).length > 0)
   assert.throws(() => loadCapabilities({ register: invalid }), (err) => err.reason === 'register-invalid')
 })
 
+test('G1 local provider schema remains closed', () => {
+  const schema = JSON.parse(readFileSync(new URL('./capabilities.schema.json', import.meta.url), 'utf8'))
+  const localProviderRef = schema.properties.local_providers.patternProperties['^[a-z0-9-]+$']
+  const localProvider = schema.$defs.localprovider
+  const expectedRef = { $ref: '#/$defs/localprovider' }
+  assert.deepEqual(localProviderRef, expectedRef)
+  assert.deepEqual(schema.properties.narrator, expectedRef)
+  const entry = {
+    settings: 'crew/pi/settings.json', pi_provider: 'local-pi',
+    base_url: 'http://127.0.0.1:11434/v1', model: 'Qwen/Qwen3-Coder:latest',
+  }
+  const narratorRegister = capabilityRegister({ narrator: entry })
+  const seatRegister = capabilityRegister({ local_providers: { 'generic-seat': entry } })
+  assert.equal(localProvider.additionalProperties, false)
+  assert.deepEqual(validateCapabilities(schema, narratorRegister), [])
+  assert.deepEqual(validateCapabilities(schema, seatRegister), [])
+  assert.doesNotThrow(() => loadCapabilities({ register: narratorRegister }))
+  assert.doesNotThrow(() => loadCapabilities({ register: seatRegister }))
+
+  const invalidNarrator = structuredClone(narratorRegister)
+  invalidNarrator.narrator.unexpected = true
+  assert.ok(validateCapabilities(schema, invalidNarrator).length > 0)
+  assert.throws(() => loadCapabilities({ register: invalidNarrator }), (err) => err.reason === 'register-invalid')
+  const invalidSeat = structuredClone(seatRegister)
+  invalidSeat.local_providers['generic-seat'].unexpected = true
+  assert.ok(validateCapabilities(schema, invalidSeat).length > 0)
+  assert.throws(() => loadCapabilities({ register: invalidSeat }), (err) => err.reason === 'register-invalid')
+})
+
 test('G2 local provider schema still requires settings pi_provider and base_url', () => {
   const schema = JSON.parse(readFileSync(new URL('./capabilities.schema.json', import.meta.url), 'utf8'))
-  const localProvider = schema.properties.local_providers.patternProperties['^[a-z0-9-]+$']
+  const localProvider = schema.$defs.localprovider
   assert.deepEqual(localProvider.required, ['settings', 'pi_provider', 'base_url'])
   assert.equal(localProvider.properties.model.type, 'string')
 
@@ -1168,14 +1221,17 @@ test('G2 local provider schema still requires settings pi_provider and base_url'
     settings: 'crew/pi/settings.json', pi_provider: 'local-pi',
     base_url: 'http://127.0.0.1:11434/v1', model: 'Qwen/Qwen3-Coder:latest',
   }
-  const registerFor = (entry) => capabilityRegister({ local_providers: { narrator: entry } })
+  const registerFor = (entry) => capabilityRegister({ narrator: entry })
   const complete = registerFor(baseEntry)
   assert.deepEqual(validateCapabilities(schema, complete), [])
   assert.doesNotThrow(() => loadCapabilities({ register: complete }))
+  const genericSeat = capabilityRegister({ local_providers: { 'generic-seat': baseEntry } })
+  assert.deepEqual(validateCapabilities(schema, genericSeat), [])
+  assert.doesNotThrow(() => loadCapabilities({ register: genericSeat }))
 
   for (const field of ['settings', 'pi_provider', 'base_url']) {
     const malformed = structuredClone(complete)
-    delete malformed.local_providers.narrator[field]
+    delete malformed.narrator[field]
     assert.ok(validateCapabilities(schema, malformed).length > 0, `missing ${field} must fail validation`)
     assert.throws(() => loadCapabilities({ register: malformed }), (err) => err.reason === 'register-invalid', `missing ${field} must refuse at load`)
   }
@@ -1192,6 +1248,6 @@ test('G2 local provider schema still requires settings pi_provider and base_url'
   }
 
   const absent = registerFor({ ...baseEntry })
-  delete absent.local_providers.narrator.model
+  delete absent.narrator.model
   assert.deepEqual(validateCapabilities(schema, absent), [])
 })

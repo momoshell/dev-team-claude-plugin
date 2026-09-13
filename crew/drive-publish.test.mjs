@@ -5,7 +5,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { chmodSync, mkdirSync, renameSync, rmSync, statSync, symlinkSync } from 'node:fs'
 import {
-  COMMIT_TRAILER, CTX, HONEST_NARRATION, NARRATION_HEADING, NARRATION_RECORD, NARRATION_REFUSALS, NARRATION_REFUSAL_NAMES, NARRATION_STAGE_VOCABULARY, NARRATOR_REGISTER, PUBLISH_REFUSAL_NAMES, RUN_START_EVENT, TD, VARIANTS, applyNarration, bounceDetail, bounceSeatOf, buildEnv, commitIntent, composeCommitMessage, composePrBody, convergeRun, driveTask, existsSync, fakeIo, issueTrailers, join, journalRowsSinceRunStart, narrateRecord, narrationDefect, narrationIsRawJson, narrationPrompt, narrationStageDefect, narratorApiRoot, narratorIo, narratorModelId, narratorModelsCommand, planEnv, prAnomalies, publicationIo, readFileSync, readdirSync, refsFromCommitMessage, reviewEnv, scratchDir, shellArg, spawnSync, writeFileSync,
+  COMMIT_TRAILER, CTX, HONEST_NARRATION, NARRATION_HEADING, NARRATION_RECORD, NARRATION_REFUSALS, NARRATION_REFUSAL_NAMES, NARRATION_STAGE_VOCABULARY, NARRATOR_REGISTER, PUBLISH_REFUSAL_NAMES, RUN_START_EVENT, TD, VARIANTS, applyNarration, bounceDetail, bounceSeatOf, buildEnv, commitIntent, composeCommitMessage, composePrBody, convergeRun, driveTask, existsSync, fakeIo, issueTrailers, join, journalRowsSinceRunStart, narrateRecord, narrationDefect, narrationIsRawJson, narrationPrompt, narrationStageDefect, narratorApiRoot, narratorConfig, narratorIo, narratorModelId, narratorModelsCommand, planEnv, prAnomalies, publicationIo, readFileSync, readdirSync, refsFromCommitMessage, reviewEnv, scratchDir, shellArg, spawnSync, writeFileSync,
 } from './drive-fixtures.mjs'
 import { anchorConflictMechanical, canonicalAnchorManifest, canonicalCitationDoc, lineNumberOnlyAnchorResolution, rebaseConflictRoute, resumeTask, resumeWorktreeSha256 } from './drive.mjs'
 import { git, gitResult } from '../test/helpers.mjs'
@@ -1370,16 +1370,16 @@ test('every narration failure is a named refusal and never a throw', () => {
 
 function configuredNarratorRegister(baseUrl, model) {
   const register = JSON.parse(NARRATOR_REGISTER(baseUrl))
-  register.local_providers.narrator.model = model
+  register.narrator.model = model
   return JSON.stringify(register)
 }
 
 test('PC5 narrator contract documents configured model selection', () => {
   const source = readFileSync(new URL('./drive.mjs', import.meta.url), 'utf8')
   const contract = [
-    '// #806 (TRD docs/trd-local-models.md §2 U6, §4 L4) — the reserved `local_providers`',
-    '// key that turns narration on: the KEY is the switch and `base_url` names the endpoint.',
-    '// crew/capabilities.schema.json:60-91 declares the entry `additionalProperties: false`',
+    '// #806 (TRD docs/trd-local-models.md §2 U6, §4 L4) — the optional top-level `narrator`',
+    '// declaration that turns narration on: the KEY is the switch and `base_url` names the endpoint.',
+    '// crew/capabilities.schema.json defines `properties.narrator` and `$defs.localprovider`',
     '// around a CLOSED property set that now includes an OPTIONAL `model`: a safe configured',
     '// model is sent VERBATIM, and only its ABSENCE falls back to resolving the served model',
     "// from `<root>/models`. `pi_provider` is pi's namespace, never a served model name.",
@@ -1388,12 +1388,16 @@ test('PC5 narrator contract documents configured model selection', () => {
   assert.equal(source.includes('crew/capabilities.schema.json:50-71'), false)
 })
 
-test('A1 configured model bypasses discovery and narrates through a three-model proxy', () => {
-  const configured = 'Qwen/Qwen3-Coder:latest'
+test('A1 narrator declaration is admitted and supplies the configured model', () => {
+  const shippedText = readFileSync(new URL('./capabilities.json', import.meta.url), 'utf8')
+  const shipped = JSON.parse(shippedText)
+  const config = narratorConfig(shippedText)
+  assert.equal(shipped.narrator.model, 'gpt-oss-20b')
+  assert.deepEqual(config, { root: 'http://10.112.20.20:8080/v1', model: 'gpt-oss-20b' })
   const collect = []
   const accepted = narrateRecord({
     record: NARRATION_RECORD,
-    registerText: configuredNarratorRegister('http://proxy.lan:1234', configured),
+    registerText: shippedText,
     io: narratorIo({
       collect,
       models: { ok: true, output: JSON.stringify({ data: [{ id: 'model-one' }, { id: 'model-two' }, { id: 'model-three' }] }) },
@@ -1405,8 +1409,8 @@ test('A1 configured model bypasses discovery and narrates through a three-model 
   assert.equal(chatCalls.length, 1)
   assert.equal(accepted.refused, undefined)
   assert.equal(accepted.text, HONEST_NARRATION)
-  assert.equal(accepted.model, configured)
-  assert.equal(chatCalls[0].includes(`"model":"${configured}"`), true)
+  assert.equal(accepted.model, 'gpt-oss-20b')
+  assert.equal(chatCalls[0].includes('"model":"gpt-oss-20b"'), true)
 })
 
 test('B1 absent model still refuses an ambiguous multi-model endpoint', () => {
@@ -1567,12 +1571,13 @@ test('applyNarration transfers accepted narration only, and never mutates its in
   assert.equal(applyNarration(record, { text: '  ' + HONEST_NARRATION + '  ' }).narrative, HONEST_NARRATION)
 })
 
-test('a published run prepends the local narrative and leaves the code-composed facts byte-identical', () => {
+test('F1 configured narration is additive and refusal preserves the current body', () => {
   const narratorCommands = {
-    'curl -sS --max-time 15': { ok: true, output: JSON.stringify({ data: [{ id: 'qwen3-coder' }] }) },
     'curl -sS --max-time 30 -X POST': { ok: true, output: JSON.stringify({ choices: [{ message: { content: 'The lane ran 2 build rounds.' } }] }) },
   }
-  const register = NARRATOR_REGISTER('http://127.0.0.1:11434/v1')
+  const configured = JSON.parse(NARRATOR_REGISTER('http://127.0.0.1:11434/v1'))
+  configured.narrator.model = 'qwen3-coder'
+  const register = JSON.stringify(configured)
   const narrated = runPublished({ capabilities: register, commands: narratorCommands })
   assert.equal(narrated.result.status, 'done')
   const narratedBody = narrated.io.calls.writes[TD + '/pr-body.md']
@@ -1580,8 +1585,8 @@ test('a published run prepends the local narrative and leaves the code-composed 
   const row = narrated.io.calls.logs.find((entry) => entry.narration)
   assert.deepEqual(row.narration, { outcome: 'accepted', chars: 'The lane ran 2 build rounds.'.length, model: 'qwen3-coder' })
 
-  // a dead endpoint publishes exactly the no-narrator body — byte for byte
-  const dead = runPublished({ capabilities: register, commands: { 'curl -sS --max-time 15': { ok: false, output: 'connection refused' } } })
+  // a refused configured request publishes exactly the no-narrator body — byte for byte
+  const dead = runPublished({ capabilities: register, commands: { 'curl -sS --max-time 30 -X POST': { ok: false, output: 'connection refused' } } })
   const none = runPublished({})
   const deadBody = dead.io.calls.writes[TD + '/pr-body.md']
   const noneBody = none.io.calls.writes[TD + '/pr-body.md']

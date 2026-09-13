@@ -84,5 +84,11 @@
       "pi_provider": "llama-swap",
       "base_url": "http://10.112.20.20:8080/v1"
     }
+  },
+  "narrator": {
+    "settings": "crew/pi/settings.json",
+    "pi_provider": "llama-swap",
+    "base_url": "http://10.112.20.20:8080/v1",
+    "model": "gpt-oss-20b"
   }
 }

@@ -313,6 +313,14 @@ export function turnCeilingOf(env, budget) {
   return ceiling
 }
 
+function normalizeRuntimeEnvelope(env, role, id, runId, budget) {
+  if (runId === undefined || !env || typeof env !== 'object' || env.run_id !== undefined) return env
+  if (env.assignment_id !== id || env.role !== role) return env
+  const ceilingBudget = Number.isFinite(budget) ? budget : env.details?.turn_ceiling?.budget
+  if (!suiteRefusalOf(env) && !zeroTurnNonStartOf(env) && !turnCeilingOf(env, ceilingBudget)) return env
+  return { ...env, run_id: runId }
+}
+
 function suiteRefusalPreamble(env) {
   const refusal = suiteRefusalOf(env)
   if (!refusal) return { kind: null, lines: [] }
@@ -1057,11 +1065,12 @@ function fail(stage, msg) {
 // The assignment_id check is anti-replay: a stale file from an earlier run
 // (crash, escalation) must never satisfy a fresh assignment. Missing is
 // tolerated (the shape contract is prompt-borne); a MISMATCH never is.
-function validEnvelope(env, role, id) {
+function validEnvelope(env, role, id, runId) {
   return env && typeof env === 'object'
     && typeof env.status === 'string'
     && (env.role === undefined || env.role === role)
     && (env.assignment_id === undefined || env.assignment_id === id)
+    && (runId === undefined || env.run_id === runId)
 }
 
 // What accepts an envelope-shape run: the SHAPE of what came back. Deliberately
@@ -4555,7 +4564,7 @@ function runTask(ctx, io, crash) {
     if (typeof text !== 'string') throw new Error('the turn census journal could not be read')
     return text
   }
-  function enforceTurnCeiling(role, id, env) {
+  function enforceTurnCeiling(role, id, env, runId = ctx.run_id) {
     const budget = ctx.turnCeilings?.[role]
     if (!Number.isFinite(budget)) return env
     // The EXISTING anti-replay and shape guard runs FIRST, before any journal
@@ -4563,7 +4572,7 @@ function runTask(ctx, io, crash) {
     // unusable-envelope failure this driver already has
     // (crew/drive.mjs:2595-2603); manufacturing this dispatch's assignment_id
     // around it would launder exactly the replay validEnvelope exists to refuse.
-    if (!validEnvelope(env, role, id)) return env
+    if (!validEnvelope(env, role, id, runId)) return env
     // A suite refusal has ALREADY rejected and ended this dispatch, and it is the
     // stronger fact: it names the forbidden command and the gate-proof path. A
     // refusal can never carry an ELIGIBLE census — its outcome is
@@ -4585,6 +4594,7 @@ function runTask(ctx, io, crash) {
     io.log(recordRow({ at: io.now(), seat_turn_ceiling: { role, dispatch: id, turns: observed.turns, budget, measured, enforced: breached, absent_reason: observed.absent } }))
     if (!breached && measured) return env
     return {
+      ...(runId === undefined ? {} : { run_id: runId }),
       assignment_id: id, role, status: 'insufficient',
       summary: measured
         ? `${SEAT_TURN_CEILING_EVENT}: ${role} returned after ${observed.turns} turns against a role budget of ${budget}; the envelope was rejected`
@@ -4596,11 +4606,12 @@ function runTask(ctx, io, crash) {
 
   // This tuple is separate because ENVELOPE_REFUSAL_REASONS belongs to the
   // stricter envelopeDefect contract.
-  const ANTI_REPLAY_REFUSAL_REASONS = Object.freeze(['assignment-id-mismatch', 'role-mismatch', 'status-kind'])
-  function antiReplayRefusalReason(env, role, id) {
+  const ANTI_REPLAY_REFUSAL_REASONS = Object.freeze(['assignment-id-mismatch', 'role-mismatch', 'run-mismatch', 'status-kind'])
+  function antiReplayRefusalReason(env, role, id, runId) {
     if (env?.assignment_id !== undefined && env.assignment_id !== id) return ANTI_REPLAY_REFUSAL_REASONS[0]
     if (env?.role !== undefined && env.role !== role) return ANTI_REPLAY_REFUSAL_REASONS[1]
-    return ANTI_REPLAY_REFUSAL_REASONS[2]
+    if (runId !== undefined && env?.run_id !== runId) return ANTI_REPLAY_REFUSAL_REASONS[2]
+    return ANTI_REPLAY_REFUSAL_REASONS[3]
   }
 
   function dispatchOnce(role, briefFile, note, { reviewSemantics = true } = {}) {
@@ -4617,16 +4628,20 @@ function runTask(ctx, io, crash) {
       ].join('\n'))
     }
     const { id, returnPath } = io.assign({ role, briefFile: brief, note, policy: seatPolicy(role) })
+    const dispatchRunId = typeof ctx.run_id === 'string' && /\/returns\/[^/]+\/[^/]+\.json$/.test(String(returnPath))
+      ? ctx.run_id
+      : undefined
     if (pending) io.log(recordRow({ at: io.now(), seat_enforcement: { role, kind: pending.kind, brief, dispatch: id, applied: true, ...(pending.recovery ? { recovery: pending.recovery } : {}) } }))
     const seq = /^d(\d+)$/.exec(id)?.[1]
     if (seq) S.seqHighWater = Math.max(S.seqHighWater, Number(seq))
     io.log(recordRow({ at: io.now(), assign: id, role, brief }))
     emit({ kind: 'assign', id, role, brief })
-    const env = enforceTurnCeiling(role, id, io.wait(returnPath, waits[role] || 1200))
+    const received = io.wait(returnPath, waits[role] || 1200)
+    const env = enforceTurnCeiling(role, id, normalizeRuntimeEnvelope(received, role, id, dispatchRunId, ctx.turnCeilings?.[role]), dispatchRunId)
     // Anti-replay FIRST: a stale or mis-addressed envelope is not evidence, and
     // recording enforcement from one would put a false fact in the terminal record
     // before the validation below rejects it.
-    const enforcement = validEnvelope(env, role, id) ? enforcementPreamble(env) : { kind: null, lines: [] }
+    const enforcement = validEnvelope(env, role, id, dispatchRunId) ? enforcementPreamble(env) : { kind: null, lines: [] }
     if (enforcement.lines.length > 0) {
       pendingEnforcement.set(role, enforcement)
       S.enforcements.push({ role, id, kind: enforcement.kind, lines: enforcement.lines })
@@ -4655,13 +4670,19 @@ function runTask(ctx, io, crash) {
     if (review?.findings_report && (review.findings_report.count_mismatch.length || review.findings_report.rejected.length)) {
       io.log(recordRow({ at: io.now(), review_findings_note: { dispatch: id, ...review.findings_report } }))
     }
-    if (!validEnvelope(env, role, id)) {
+    if (!validEnvelope(env, role, id, dispatchRunId)) {
       // env == null was already recorded by io.wait as a 'timeout'; this branch
       // is the seat that DID answer, with something the driver cannot use.
       if (env != null) {
         emit({ kind: 'cell-failure', role, id, failure: 'unusable-envelope', stage: null, detail: `envelope at ${returnPath} failed the shape or anti-replay check` })
-        const reason = antiReplayRefusalReason(env, role, id)
-        io.log(recordRow({ at: io.now(), envelope_refused: { role, dispatch: id, reason, found_assignment_id: env?.assignment_id ?? null, expected_assignment_id: id, path: returnPath } }))
+        const reason = antiReplayRefusalReason(env, role, id, dispatchRunId)
+        io.log(recordRow({ at: io.now(), envelope_refused: {
+          role, dispatch: id, reason, found_assignment_id: env?.assignment_id ?? null,
+          expected_assignment_id: id, path: returnPath,
+          ...(dispatchRunId === undefined && env?.run_id === undefined ? {} : {
+            found_run_id: env?.run_id ?? null, expected_run_id: dispatchRunId ?? null,
+          }),
+        } }))
         throw fail(role, `an envelope exists at ${returnPath} but was refused: ${reason}`)
       }
       const diagnosis = env == null ? io.waitDiagnosis?.(returnPath) : null       // verbatim: mutation A9

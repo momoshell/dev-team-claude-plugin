@@ -870,13 +870,15 @@ async function dispatchFixture({
   const wrote = new Map()
   const appended = []
   const laneFences = fences || names.map((lane) => entry(lane, [`crew/owned-${lane}.mjs`]))
+  const defaultOutcomeExists = (path) => {
+    const text = String(path)
+    if (text.endsWith('returns/task.json')) return Object.hasOwn(outcomes, laneFromOutcomePath(text))
+    return text.includes('/.crew/') && !text.includes('/returns/') && Object.hasOwn(outcomes, basenameOf(text))
+  }
   const deps = {
     home,
     env: { DEVTEAM_LEDGER_DIR: join(home, 'factory-state') },
-    existsSync: (path) => existsProbe
-      ? existsProbe(path)
-      : String(path).endsWith('returns/task.json')
-        && Object.hasOwn(outcomes, laneFromOutcomePath(String(path))),
+    existsSync: (path) => existsProbe ? existsProbe(path) : defaultOutcomeExists(path),
     readdirSync: (path, options) => {
       if (String(path) === batch) return names.map((lane) => `${lane}${REQUEST_SUFFIX}`)
       if (readdir) return readdir(path, options)

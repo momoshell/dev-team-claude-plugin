@@ -48,6 +48,24 @@ test('F1 assignment delivery template remains byte-identical', () => {
   assert.doesNotMatch(inlinePrompt, /read your brief at/)
 })
 
+test('scoped assignment prompts echo their validated run token', () => {
+  const scoped = { ...GOOD, returnPath: '/Users/x/.crew/demo/returns/run-1/d1.planner.json' }
+  assert.match(assignmentLine(scoped), /Write your ReturnEnvelope to .*d1\.planner\.json Echo exactly run_id=run-1 in your ReturnEnvelope\. then print exactly/)
+  assert.match(assignmentPrompt({ ...scoped, delivery: 'inline', briefText: 'brief' }), /Echo exactly run_id=run-1/)
+})
+
+test('flat and hostile return paths do not fabricate a run token', () => {
+  for (const returnPath of [
+    GOOD.returnPath,
+    '/Users/x/.crew/demo/returns/.../d1.planner.json',
+    '/Users/x/.crew/demo/returns/../d1.planner.json',
+    '/Users/x/.crew/demo/returns/run-1/nested/d1.planner.json',
+  ]) {
+    assert.doesNotMatch(assignmentLine({ ...GOOD, returnPath }), /Echo exactly run_id=/)
+    assert.doesNotMatch(assignmentPrompt({ ...GOOD, returnPath, delivery: 'inline', briefText: 'brief' }), /Echo exactly run_id=/)
+  }
+})
+
 test('assignmentPrompt inline delivery carries a multiline brief without its path instruction', () => {
   const briefText = '# Task: inline\n## The ask\nKeep this verbatim.\n'
   const prompt = assignmentPrompt({ ...GOOD, delivery: 'inline', briefText })

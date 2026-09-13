@@ -2,7 +2,7 @@ import { after, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
 import { daemon } from './daemon.mjs'
 import {
@@ -105,7 +105,11 @@ async function enqueue(f, crewDir = f.crewDir) {
   return { result, runId: JSON.parse(result.stdout).run_id }
 }
 
-function returnFor(f, runId, crewDir = f.crewDir) { return join(crewDir, 'returns', `${runId}.task.json`) }
+function returnFor(f, runId, crewDir = f.crewDir) {
+  const returnsDir = join(crewDir, 'returns', runId)
+  mkdirSync(returnsDir, { recursive: true })
+  return join(returnsDir, 'task.json')
+}
 
 function pendingLane(root, name, text, { task = name, archived = false, settled = true } = {}) {
   const dir = join(root, name)
@@ -1063,6 +1067,19 @@ test('waiting reads escalation detail, run id and time from the completion recor
     checkout, state: 'waiting', resolutions: ['repair', 'plan-rounds', 'park'], reason: null,
     preserved: null, archived: null, action: null, source: 'completion-log',
   })
+})
+
+test('waiting reads escalation detail from a scoped completion task_return', () => {
+  const root = scratchDir('factoryctl-waiting-scoped-')
+  const crewDir = join(root, 'crew')
+  const taskReturn = join(crewDir, 'returns', 'run-scoped', 'task.json')
+  mkdirSync(dirname(taskReturn), { recursive: true })
+  writeFileSync(taskReturn, JSON.stringify({ details: { escalation: { where: 'scope', why: 'scoped evidence' } } }))
+  writeWaitingLog(root, [waitingRecord({ crew_dir: crewDir, task_return: taskReturn })])
+  const { output } = runWaiting(root)
+  assert.equal(output.rows[0].where, 'scope')
+  assert.equal(output.rows[0].why, 'scoped evidence')
+  assert.equal(output.rows[0].state, 'waiting')
 })
 
 test('47h is waiting and 49h is expired with a faked clock', () => {

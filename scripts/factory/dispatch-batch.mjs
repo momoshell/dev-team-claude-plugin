@@ -10,6 +10,7 @@ import { spawn as childSpawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { parseDirectedBrief, scopeMatcher, validateScopeEntries as driveValidateScopeEntries, VARIANT_NAMES, VARIANTS, TURN_CEILING_FLAGS, WAITS_S } from '../../crew/drive.mjs'
+import { resolveTaskReturn } from '../../crew/crew.mjs'
 import { assertHostQuiet, hostLoad, loadPolicy, withSuiteSlot } from '../../crew/host-load.mjs'
 import { protectedHitsIn, resolveProtectedPaths } from '../../crew/protected-paths.mjs'
 import { fenceScopesIntersect, parseFenceScope } from '../../crew/fence-scope.mjs'
@@ -2603,28 +2604,36 @@ function outcomeFromPath(path, d) {
 export function laneOutcome({ lane, laneDir, deps } = {}) {
   const d = normalDeps(deps)
   const crewDir = dirname(crewJsonPath({ checkout: laneDir, lane, deps: d }))
-  const livePath = join(crewDir, 'returns', 'task.json')
-  const live = outcomeFromPath(livePath, d)
-  if (live.found) return live.outcome
+  const empty = { status: null, commit: null, path: null }
+  const basePaths = { dir: crewDir, returnsDir: join(crewDir, 'returns') }
+  let live = false
+  try { live = d.existsSync(crewDir) } catch { live = true }
+  if (live) {
+    const livePath = resolveTaskReturn(basePaths, d)
+    if (!livePath) return empty
+    const result = outcomeFromPath(livePath, d)
+    return result.found ? result.outcome : empty
+  }
 
   const parent = dirname(crewDir)
   const base = `${basename(crewDir)}.archive-`
   let names
   try { names = d.readdirSync(parent) } catch {
-    return { status: null, commit: null, path: null }
+    return empty
   }
-  if (!Array.isArray(names)) return { status: null, commit: null, path: null }
+  if (!Array.isArray(names)) return empty
   const archives = names
     .map((name) => typeof name === 'string' ? name : name?.name)
     .filter((name) => typeof name === 'string' && name.startsWith(base))
     .sort()
-    .reverse()
-  for (const archive of archives) {
-    const path = join(parent, archive, 'returns', 'task.json')
-    const result = outcomeFromPath(path, d)
-    if (result.found) return result.outcome
-  }
-  return { status: null, commit: null, path: null }
+  const newest = archives.at(-1)
+  if (!newest) return empty
+  const archiveDir = join(parent, newest)
+  const archivePaths = { dir: archiveDir, returnsDir: join(archiveDir, 'returns') }
+  const archivePath = resolveTaskReturn(archivePaths, d)
+  if (!archivePath) return empty
+  const result = outcomeFromPath(archivePath, d)
+  return result.found ? result.outcome : empty
 }
 
 export function baseContains({ commit, base, checkout, deps } = {}) {

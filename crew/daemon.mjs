@@ -14,7 +14,7 @@ import {
   closeSync as fsCloseSync,
   statSync as fsStatSync,
 } from 'node:fs'
-import { basename, dirname, join, resolve as resolvePath } from 'node:path'
+import { basename, dirname, join, relative, normalize, resolve as resolvePath } from 'node:path'
 import { homedir } from 'node:os'
 import { createRequire } from 'node:module'
 import { fork as cpFork, spawnSync as cpSpawnSync } from 'node:child_process'
@@ -423,7 +423,20 @@ function absoluteChildPath(root, value) {
 }
 
 const RUN_ID_OK = /^[A-Za-z0-9._-]{1,64}$/
-function runReturnPath(crewDir, runId) { return join(crewDir, 'returns', `${runId}.task.json`) }
+const RUN_ID_DOTS_ONLY = /^\.+$/
+function runIdSafe(runId) { return RUN_ID_OK.test(runId) && !RUN_ID_DOTS_ONLY.test(runId) }
+function runReturnPath(crewDir, runId) { return join(crewDir, 'returns', runId, 'task.json') }
+function taskReturnInNamespace(crewDir, runId, taskReturn) {
+  const locator = normalize(relative(crewDir, taskReturn))
+  if (locator.startsWith('returns/')) {
+    const legacyFile = locator.slice('returns/'.length)
+    if (/^[A-Za-z0-9._-]+\.json$/.test(legacyFile)) return true
+  }
+  const prefix = `returns/${runId}/`
+  if (!locator.startsWith(prefix)) return false
+  const file = locator.slice(prefix.length)
+  return /^[A-Za-z0-9._-]+\.json$/.test(file) && !file.includes('/')
+}
 function attemptPath(base, attempt) {
   if (attempt <= 1) return base
   return base.endsWith('.json')
@@ -1255,7 +1268,7 @@ export function daemon(options = {}) {
     if (hasDir && hasSeating) throw runError('invalid-spec', 'enqueue takes crew_dir or assurance/tier, never both')
     if (!hasDir && !hasSeating) throw runError('invalid-spec', 'enqueue requires crew_dir or assurance/tier')
     const runId = String(spec.run_id || uuid())
-    if (!RUN_ID_OK.test(runId)) throw runError('invalid-spec', 'run_id must match /^[A-Za-z0-9._-]{1,64}$/')
+    if (!runIdSafe(runId)) throw runError('invalid-spec', 'run_id must match /^[A-Za-z0-9._-]{1,64}$/ and may not consist only of dots')
     let crewDir
     let crew
     let persisted = null
@@ -1283,23 +1296,21 @@ export function daemon(options = {}) {
     const active = [...runs.values()].find((run) => run.crew_dir === crewDir && !SETTLED_LIFECYCLES.includes(run.lifecycle))
     if (active) throw runError('run-active', `run ${active.run_id} is already active for ${crewDir}`)
     if (runs.has(runId)) throw runError('run-active', `run ${runId} already exists`)
-    const taskReturn = spec.task_return
+    const explicitTaskReturn = spec.task_return !== undefined
+    if (explicitTaskReturn && (typeof spec.task_return !== 'string' || spec.task_return.trim() === '')) {
+      throw runError('invalid-spec', 'task_return must be a non-empty path when supplied')
+    }
+    const taskReturn = explicitTaskReturn
       ? absoluteChildPath(crewDir, spec.task_return)
       : runReturnPath(crewDir, runId)
-    const wellKnown = join(crewDir, 'returns', 'task.json')
-    const settled = jsonAt(wellKnown, exists, read)
-    const ownsIt = [...runs.values()].some((run) => run.crew_dir === crewDir
-      && run.lifecycle === 'settled'
-      && !sameFile(run.task_return, wellKnown)
-      && !!jsonAt(run.task_return, exists, read))
-    if (settled && !ownsIt) {
-      throw runError('crew-settled', `crew dir ${crewDir} already holds a terminal envelope`
-        + ` (status ${JSON.stringify(settled.status ?? null)}) at ${wellKnown}`
-        + ' — this envelope is not run-addressed; boot a fresh crew, or let this daemon\'s own settled run own it')
+    if (!taskReturn || (explicitTaskReturn && !taskReturnInNamespace(crewDir, runId, taskReturn))) {
+      throw runError('invalid-spec', 'task_return must be the legacy returns/task.json or a JSON path under returns/<run_id>/')
     }
     if (exists(taskReturn)) {
       throw runError('crew-settled', `return path ${taskReturn} is already occupied`
-        + ' — a reused run id cannot overwrite an existing run-addressed envelope')
+        + (explicitTaskReturn
+          ? ' — an explicit legacy task_return cannot overwrite an existing envelope'
+          : ' — a reused run id cannot overwrite an existing run-addressed envelope'))
     }
     const identity = hasSeating ? tierIdentity(spec) : null
     const record = {

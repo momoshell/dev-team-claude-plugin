@@ -22,7 +22,7 @@ import { tmpdir } from 'node:os'
 import { join, sep } from 'node:path'
 import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
-import { applyMutationAnchor, baselineGateDefect, checkFailureLine, DIFF_RUNNER_UNAVAILABLE_CAUSES, parseGateSummary, scopeMatcher, validateMutations } from '../../crew/drive.mjs'
+import { applyMutationAnchor, baselineGateDefect, bindMutationDeclarations, checkFailureLine, DIFF_RUNNER_UNAVAILABLE_CAUSES, parseGateSummary, scopeMatcher, validateMutationCorrections, validateMutations } from '../../crew/drive.mjs'
 
 export { DIFF_RUNNER_UNAVAILABLE_CAUSES }
 
@@ -36,7 +36,7 @@ export const PROOF_REFUSALS = Object.freeze({
 })
 export const PROOF_OUTCOMES = Object.freeze(['killed', 'survived', 'bind-fail', 'unapplied', 'exempt', 'errored'])
 export const RUN_MAX_BUFFER_BYTES = 64 * 1024 * 1024
-export const USAGE = 'usage: node scripts/factory/prove-mutations.mjs --envelope <lane>/returns/d1.planner.json [--checkout <dir>] [--gate <command>] [--json] | --diff-config <task-local-json>'
+export const USAGE = 'usage: node scripts/factory/prove-mutations.mjs --envelope <lane>/returns/d1.planner.json [--builder-envelope <path>] [--checkout <dir>] [--gate <command>] [--json] | --diff-config <task-local-json>'
 
 export class ProveUsageError extends Error {
   constructor(message, reason = 'usage') {
@@ -209,6 +209,32 @@ export function readDeclarations(envelope) {
   return { declarations, refusals }
 }
 
+function correctionRefusal(refusal) {
+  const reason = refusal?.reason || 'correction-refused'
+  return { check: refusal?.check ?? null, reason, why: `${reason}: ${refusal?.why || 'the correction was refused'}` }
+}
+
+export function resolveDeclarations(plannerEnvelope, builderEnvelope, readFile) {
+  const planner = readDeclarations(plannerEnvelope)
+  const plannerDeclarations = planner.declarations.map((declaration) => ({ ...declaration, provenance: 'planner-declaration' }))
+  const recorded = builderEnvelope?.details?.mutation_corrections
+  if (builderEnvelope === undefined || builderEnvelope === null || recorded === undefined || (Array.isArray(recorded) && recorded.length === 0)) return { declarations: plannerDeclarations, refusals: planner.refusals }
+  let corrections
+  try {
+    const binds = bindMutationDeclarations(planner.declarations, readFile)
+    corrections = validateMutationCorrections(builderEnvelope?.details, binds, planner.declarations, readFile)
+  } catch (err) {
+    corrections = { entries: [], refusals: [{ check: null, reason: 'builder-tree-unreadable', why: `the built tree could not be read for correction validation: ${err?.message ?? String(err)}` }] }
+  }
+  if (corrections.refusals.length > 0) return { declarations: [], refusals: corrections.refusals.map(correctionRefusal) };
+  const byCheck = new Map(corrections.entries.map((entry) => [entry.check, entry]))
+  return { declarations: planner.declarations.map((declaration) => {
+    const correction = byCheck.get(declaration.check)
+    if (correction === undefined) return { ...declaration, provenance: 'planner-declaration' };
+    return { ...declaration, find: correction.find, replace: correction.replace, corrected: true, provenance: 'builder-correction' };
+  }), refusals: planner.refusals }
+}
+
 function bytesDigest(bytes) {
   return createHash('sha256').update(bytes).digest('hex')
 }
@@ -291,16 +317,20 @@ export function adjudicate(output, check, ok) {
   return `the gate went red but printed no "FAIL ${check}" line, so the check that failed is not the one under proof`
 }
 
+function mutationProvenance(mutation) {
+  return mutation?.provenance ?? 'planner-declaration'
+}
+
 function unappliedRow(mutation, where) {
-  return { check: mutation.check, outcome: 'unapplied', file: mutation.file, summary: null, why: `${mutation.file} does not exist in ${where}` }
+  return { check: mutation.check, outcome: 'unapplied', file: mutation.file, provenance: mutationProvenance(mutation), summary: null, why: `${mutation.file} does not exist in ${where}` }
 }
 
 function bindFailRow(mutation, hits) {
-  return { check: mutation.check, outcome: 'bind-fail', file: mutation.file, summary: null, why: `${bindLabel(hits)} the declared find text occurs ${hits} times in ${mutation.file}, so it names no single span to mutate` }
+  return { check: mutation.check, outcome: 'bind-fail', file: mutation.file, provenance: mutationProvenance(mutation), summary: null, why: `${bindLabel(hits)} the declared find text occurs ${hits} times in ${mutation.file}, so it names no single span to mutate` }
 }
 
 function erroredRow(mutation, err) {
-  return { check: mutation.check, outcome: 'errored', file: mutation.file, summary: null, why: err?.message || String(err) }
+  return { check: mutation.check, outcome: 'errored', file: mutation.file, provenance: mutationProvenance(mutation), summary: null, why: err?.message || String(err) }
 }
 
 // ONE mutation, in a tree the caller owns. The restore is in a `finally` because the
@@ -322,7 +352,7 @@ export function proveOne({ dir, mutation, gateCmd, deps = {} }) {
   const summary = parseGateSummary(output)
   const why = adjudicate(output, mutation.check, res.ok)
   const outcome = why ? 'survived' : 'killed'
-  return { check: mutation.check, outcome, file: mutation.file, summary, why }
+  return { check: mutation.check, outcome, file: mutation.file, provenance: mutationProvenance(mutation), summary, why }
 }
 
 export function countRows(rows, declarations) {
@@ -348,7 +378,10 @@ export function proveMutations({ checkout, declarations = [], invalid = [], gate
   // TERMINAL, and before any worktree or gate: an envelope the reader could not
   // fully read is not a proof of the part it could. Reporting "1 of 1 killed" after
   // silently dropping a second declaration is the shape this refusal removes.
-  if (invalid.length > 0) return done({ reason: PROOF_REFUSALS.DECLARATIONS_INVALID, why: `${invalid.length} of ${invalid.length + declarations.length} declarations could not be read: ${invalid.map((entry) => `${JSON.stringify(entry.check ?? null)} — ${entry.why}`).join('; ')}` })
+  if (invalid.length > 0) {
+    const namedReason = invalid.find((entry) => typeof entry?.reason === 'string')?.reason
+    return done({ reason: namedReason || PROOF_REFUSALS.DECLARATIONS_INVALID, why: `${invalid.length} of ${invalid.length + declarations.length} declarations could not be read: ${invalid.map((entry) => `${JSON.stringify(entry.check ?? null)} — ${entry.why}`).join('; ')}` })
+  }
   if (declarations.length === 0) return done({ reason: PROOF_REFUSALS.NO_DECLARATIONS, why: 'the envelope declared no usable mutation, so there is nothing to prove' })
   const dirty = d.dirtyPaths(checkout)
   if (dirty.length > 0) return done({ reason: PROOF_REFUSALS.TREE_UNCOMMITTED, why: `a detached worktree carries only committed bytes, and these checkout paths are uncommitted: ${dirty.join(', ')}` })
@@ -363,7 +396,7 @@ export function proveMutations({ checkout, declarations = [], invalid = [], gate
   const baselineDefect = baselineNotGreen(baseline)
   if (baselineDefect) return done({ reason: PROOF_REFUSALS.BASELINE_NOT_GREEN, why: `${baselineDefect}:\n${stripAnsi(baseline.output).slice(-2000)}` })
   for (const mutation of declarations) {
-    if (mutation.exempt) { rows.push({ check: mutation.check, outcome: 'exempt', file: null, summary: null, why: mutation.exempt }); continue }
+    if (mutation.exempt) { rows.push({ check: mutation.check, outcome: 'exempt', file: null, provenance: mutationProvenance(mutation), summary: null, why: mutation.exempt }); continue }
     let dir = null
     try {
       dir = d.makeWorktree(checkout, head)
@@ -1006,19 +1039,24 @@ export function runDiffMutationProof(config, deps = {}) {
 }
 export const proveDiffMutations = runDiffMutationProof
 
+function anchorLabel(row) {
+  return row?.provenance === 'builder-correction' ? 'builder-correction (standalone validation)' : row?.provenance ?? 'planner-declaration'
+}
+
 function rowLine(row) {
-  if (row.outcome === 'killed') return `${row.check} killed (${row.summary?.failed ?? '?'}f/${row.summary?.errored ?? '?'}e) ${row.file}`
-  if (row.outcome === 'survived') return `${row.check} SURVIVED ${row.file}: ${row.why}`
-  if (row.outcome === 'bind-fail') return `${row.check} ${row.why}`
-  if (row.outcome === 'exempt') return `${row.check} exempt: ${row.why}`
-  return `${row.check} ${row.outcome.toUpperCase()} ${row.file ?? ''}: ${row.why}`
+  const anchor = `anchor=${anchorLabel(row)}`
+  if (row.outcome === 'killed') return `${row.check} killed (${row.summary?.failed ?? '?'}f/${row.summary?.errored ?? '?'}e) ${row.file} ${anchor}`
+  if (row.outcome === 'survived') return `${row.check} SURVIVED ${row.file} ${anchor}: ${row.why}`
+  if (row.outcome === 'bind-fail') return `${row.check} ${row.why} ${anchor}`
+  if (row.outcome === 'exempt') return `${row.check} exempt ${anchor}: ${row.why}`
+  return `${row.check} ${row.outcome.toUpperCase()} ${row.file ?? ''} ${anchor}: ${row.why}`
 }
 
 export function formatReport(result, invalid = []) {
   const lines = []
   const counts = result?.counts || {}
   for (const row of result?.rows || []) lines.push(rowLine(row))
-  for (const entry of invalid) lines.push(`UNREADABLE ${JSON.stringify(entry.check ?? null)}: ${entry.why}`)
+  for (const entry of invalid) lines.push(`UNREADABLE ${JSON.stringify(entry.check ?? null)}${entry.reason ? ` [reason: ${entry.reason}]` : ''}: ${entry.why}`)
   if (result?.refusal) lines.push(`REFUSED ${result.refusal.reason}: ${result.refusal.why}`)
   for (const dir of result?.kept || []) lines.push(`KEPT ${dir}: the scratch worktree could not be removed, so nothing here is a clean measurement`)
   lines.push(`declared ${counts.declared} · unreadable ${invalid.length} · bound ${counts.bound} · killed ${counts.killed} · survived ${counts.survived} · bind-fail ${counts.bindFail} · unapplied ${counts.unapplied} · errored ${counts.errored} · exempt ${counts.exempt}`)
@@ -1026,8 +1064,8 @@ export function formatReport(result, invalid = []) {
 }
 
 export function parseArgs(argv) {
-  const flags = { envelope: null, diffConfig: null, checkout: process.cwd(), gate: null, json: false, help: false }
-  const seen = { envelope: false, diffConfig: false, checkout: false, gate: false, json: false }
+  const flags = { envelope: null, builderEnvelope: null, diffConfig: null, checkout: process.cwd(), gate: null, json: false, help: false }
+  const seen = { envelope: false, builderEnvelope: false, diffConfig: false, checkout: false, gate: false, json: false }
   const rest = [...argv]
   while (rest.length > 0) {
     const arg = rest.shift()
@@ -1039,14 +1077,16 @@ export function parseArgs(argv) {
       return next
     }
     if (arg === '--envelope') { flags.envelope = value(); seen.envelope = true; continue }
+    if (arg === '--builder-envelope') { flags.builderEnvelope = value(); seen.builderEnvelope = true; continue }
     if (arg === '--diff-config') { flags.diffConfig = value(); seen.diffConfig = true; continue }
     if (arg === '--checkout') { flags.checkout = value(); seen.checkout = true; continue }
     if (arg === '--gate') { flags.gate = value(); seen.gate = true; continue }
     throw new ProveUsageError(`prove: unknown argument ${JSON.stringify(arg)}`, 'unknown-flag')
   }
-  if (seen.diffConfig && (seen.envelope || seen.checkout || seen.gate || seen.json)) {
-    throw new ProveUsageError('prove: --diff-config is mutually exclusive with --envelope, --checkout, --gate, and --json', 'mutually-exclusive')
+  if (seen.diffConfig && (seen.envelope || seen.builderEnvelope || seen.checkout || seen.gate || seen.json)) {
+    throw new ProveUsageError('prove: --diff-config is mutually exclusive with --envelope, --builder-envelope, --checkout, --gate, and --json', 'mutually-exclusive')
   }
+  if (!flags.help && seen.builderEnvelope && !seen.envelope) throw new ProveUsageError('prove: --builder-envelope requires --envelope', 'builder-envelope-without-envelope')
   if (!flags.help && flags.envelope === null && flags.diffConfig === null) throw new ProveUsageError('prove: --envelope is required', 'missing-envelope')
   return flags
 }
@@ -1105,8 +1145,38 @@ export async function main(argv, deps = {}) {
     d.stderr(`prove: ${flags.envelope} is not JSON [reason: envelope-unreadable]: ${err.message}\n`)
     return 2
   }
-  const { declarations, refusals } = readDeclarations(envelope)
-  for (const refusal of refusals) d.stderr(`prove: unreadable declaration ${JSON.stringify(refusal.check)}: ${refusal.why}\n`)
+  let builderEnvelope = null
+  if (flags.builderEnvelope !== null) {
+    let builderRaw = null
+    try { builderRaw = d.readFile(flags.builderEnvelope) } catch (err) {
+      d.stderr(`prove: could not read builder envelope ${flags.builderEnvelope} [reason: builder-envelope-unreadable]: ${err?.message ?? String(err)}\n`)
+      return 2
+    }
+    if (builderRaw === null) {
+      d.stderr(`prove: no builder envelope at ${flags.builderEnvelope} [reason: builder-envelope-absent]\n`)
+      return 2
+    }
+    try {
+      builderEnvelope = JSON.parse(builderRaw)
+    } catch (err) {
+      d.stderr(`prove: ${flags.builderEnvelope} is not JSON [reason: builder-envelope-unreadable]: ${err.message}\n`)
+      return 2
+    }
+    if (builderEnvelope === null || typeof builderEnvelope !== 'object' || Array.isArray(builderEnvelope)) {
+      d.stderr(`prove: ${flags.builderEnvelope} is not a builder envelope object [reason: builder-envelope-unreadable]\n`)
+      return 2
+    }
+  }
+  let resolved
+  try {
+    const readBuilt = (file) => d.readFile(join(flags.checkout, file))
+    resolved = resolveDeclarations(envelope, builderEnvelope, readBuilt)
+  } catch (err) {
+    d.stderr(`prove: could not resolve declarations with the builder envelope [reason: builder-envelope-unreadable]: ${err?.message ?? String(err)}\n`)
+    return 2
+  }
+  const { declarations, refusals } = resolved
+  for (const refusal of refusals) d.stderr(`prove: unreadable declaration ${JSON.stringify(refusal.check)}${refusal.reason ? ` [reason: ${refusal.reason}]` : ''}: ${refusal.why}\n`)
   const gateCmd = flags.gate || envelope?.details?.gate_cmd || null
   if (!gateCmd) { d.stderr('prove: no gate command — pass --gate or declare details.gate_cmd [reason: gate-absent]\n'); return 2 }
   const result = proveMutations({ checkout: flags.checkout, declarations, invalid: refusals, gateCmd, deps: d })

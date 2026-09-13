@@ -12,6 +12,7 @@ export const CAPABILITY_REFUSALS = Object.freeze([
   'register-invalid', 'capability-shortfall', 'unknown-grant', 'grant-unsupported',
   'extension-missing', 'unknown-skill', 'agent-def-invalid', 'local-settings-missing',
   'local-endpoint-dead', 'grant-contradicts-deny', 'vendor-extension-missing',
+  'agent-unresolved', 'agent-provider-unsupported',
 ])
 const CAPABILITIES_PATH = join(HERE, 'capabilities.json')
 const CAPABILITIES_SCHEMA_PATH = join(HERE, 'capabilities.schema.json')
@@ -185,6 +186,23 @@ export function loadCapabilities({ path = CAPABILITIES_PATH, schemaPath = CAPABI
       validateMcp(overlay?.mcp_servers, `roles.${role}.by_agent.${agent}`)
     }
   }
+  const duplicateAgentValues = (list, path, label) => {
+    const seen = new Set()
+    for (const value of list || []) {
+      if (seen.has(value)) throw refuse('register-invalid', `runtime capability register ${path} declares coding agent ${label} ${JSON.stringify(value)} twice — duplicate values make the inventory ambiguous under the runtime-policy rule`)
+      seen.add(value)
+    }
+  }
+  for (const [agent, entry] of Object.entries(value?.coding_agents || {})) {
+    const base = `coding_agents.${agent}`
+    duplicateAgentValues(entry.providers, `${base}.providers`, 'provider')
+    duplicateAgentValues(entry.transports, `${base}.transports`, 'transport')
+    duplicateAgentValues(entry.refuses, `${base}.refuses`, 'refusal')
+    const expectedAdapter = `crew/adapters/adapter-${agent}.mjs`
+    if (entry.adapter !== expectedAdapter) {
+      throw refuse('register-invalid', `runtime capability register ${path} expects coding agent ${agent} adapter ${JSON.stringify(expectedAdapter)}, found ${JSON.stringify(entry.adapter)}, at ${base}.adapter — adapter key and path must agree under the runtime-policy rule`)
+    }
+  }
   return deepFreeze(value)
 }
 
@@ -198,6 +216,41 @@ export function pathExists(exists, path) {
 
 export function pathMessage(reason, seat, kind, expected, found, path) {
   return refuse(reason, `seat ${seat} ${kind} expected ${expected}, found ${found}, at ${path}`)
+}
+
+export function agentRegisterEntry(register, agent, { role = 'unknown' } = {}) {
+  const entry = register?.coding_agents && Object.hasOwn(register.coding_agents, agent) ? register.coding_agents[agent] : null
+  if (!entry) throw refuse('agent-unresolved', `seat ${role} expected coding agent ${JSON.stringify(agent)}, found no entry, at coding_agents.${agent}`)
+  return entry
+}
+
+export function assertAgentProvider(register, agent, provider, { role = 'unknown' } = {}) {
+  const entry = agentRegisterEntry(register, agent, { role })
+  if (!entry.providers.includes(provider)) throw refuse('agent-provider-unsupported', `seat ${role} expected coding agent ${agent} to drive provider ${JSON.stringify(provider)}, found ${JSON.stringify(entry.providers)}, at coding_agents.${agent}.providers`)
+  return entry
+}
+
+export function assertAgentTransport(register, agent, transport, { role = 'unknown' } = {}) {
+  const entry = agentRegisterEntry(register, agent, { role })
+  if (!entry.transports.includes(transport)) throw refuse('capability-shortfall', `seat ${role} expected coding agent ${agent} to use transport ${JSON.stringify(transport)}, found ${JSON.stringify(entry.transports)}, at coding_agents.${agent}.transports`)
+  return entry
+}
+
+export function assertAgentAdapter(register, agent, adapterPath, { role = 'unknown' } = {}) {
+  const entry = agentRegisterEntry(register, agent, { role })
+  const expected = String(entry.adapter).replaceAll('\\', '/')
+  const found = String(adapterPath).replaceAll('\\', '/')
+  const matches = found === expected || found.endsWith(`/${expected}`)
+  if (!matches) throw refuse('register-invalid', `seat ${role} expected coding agent ${agent} adapter ${JSON.stringify(expected)}, found ${JSON.stringify(adapterPath)}, at coding_agents.${agent}.adapter`)
+  return entry
+}
+
+export function assertAgentRefusals(register, agent, activeDimensions, { role = 'unknown' } = {}) {
+  const entry = agentRegisterEntry(register, agent, { role })
+  const active = Array.isArray(activeDimensions) ? activeDimensions : []
+  const refused = active.filter((dimension) => entry.refuses.includes(dimension))
+  if (refused.length) throw refuse('grant-unsupported', `seat ${role} expected coding agent ${agent} to express active dimensions ${JSON.stringify(active)}, found refused ${JSON.stringify(refused)}, at coding_agents.${agent}.refuses`)
+  return entry
 }
 
 // A vendor extension lives in HOST state, so the register names the PACKAGE

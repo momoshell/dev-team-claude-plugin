@@ -73,11 +73,23 @@ import {
 import {
   CAPABILITY_DELIVERY, EMPTY_GRANTS, assertGrantsBacked, effectiveCapabilities, grantsFor,
   loadCapabilities, refuse, REGISTER_ROOT, resolvedGrantPath, pathExists, pathMessage,
+  agentRegisterEntry, assertAgentProvider, assertAgentTransport, assertAgentAdapter, assertAgentRefusals as assertRegisteredAgentRefusals,
 } from './capabilities.mjs'
-export { CAPABILITY_DELIVERY, CAPABILITY_REFUSALS, EMPTY_GRANTS, assertGrantsBacked, effectiveCapabilities, grantsFor, loadCapabilities, refuse, validateCapabilities } from './capabilities.mjs'
+export { CAPABILITY_DELIVERY, CAPABILITY_REFUSALS, EMPTY_GRANTS, assertGrantsBacked, effectiveCapabilities, grantsFor, loadCapabilities, refuse, validateCapabilities,
+  agentRegisterEntry, assertAgentProvider, assertAgentTransport, assertAgentAdapter, assertAgentRefusals,
+} from './capabilities.mjs'
 import { completionLogPath } from './factoryctl.mjs'
 import { hostLoad, loadPolicy, assertHostQuiet } from './host-load.mjs'
 export { LOAD_ENV, hostLoad, loadPolicy, assertHostQuiet } from './host-load.mjs'
+
+// Cell position is resolver context, while the register helper stays reusable for
+// non-seat admissions such as shadow picks.
+function assertAgentRefusals(register, agent, activeDimensions, { role = 'unknown', provider = null, cell = null } = {}) {
+  const refusalRole = typeof provider === 'string' && typeof cell === 'string'
+    ? `${role} ${cell} cell provider ${JSON.stringify(provider)}`
+    : role
+  return assertRegisteredAgentRefusals(register, agent, activeDimensions, { role: refusalRole })
+}
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROLES_DIR = join(HERE, 'roles')
@@ -697,6 +709,21 @@ export function assertCapabilities(role, agentName, capabilities, allowed = [], 
     err.reason = 'capability-shortfall'
     throw err
   }
+}
+
+export function assertAgentModelAgreement(adapter, registry, agent, provider, id, { role = 'unknown' } = {}) {
+  const entry = agentRegisterEntry(registry, agent, { role })
+  if (typeof adapter?.modelString !== 'function') return entry
+  let model
+  try {
+    model = adapter.modelString({ provider, id, localProviders: registry?.local_providers })
+  } catch (err) {
+    throw refuse('agent-provider-unsupported', `seat ${role} expected coding agent ${agent} to agree on provider/id ${JSON.stringify(`${provider}/${id}`)}, found adapter rejection ${err?.message || String(err)}, at coding_agents.${agent}.providers`)
+  }
+  if (typeof model !== 'string' || model.trim() === '') {
+    throw refuse('agent-provider-unsupported', `seat ${role} expected coding agent ${agent} to agree on provider/id ${JSON.stringify(`${provider}/${id}`)}, found adapter model ${JSON.stringify(model)}, at coding_agents.${agent}.providers`)
+  }
+  return entry
 }
 
 export function seatShortfalls(role, args = {}) {
@@ -1433,42 +1460,68 @@ export async function shadowPickBoot({ roster, tier, seats, sources,
   root = REGISTER_ROOT, pick = shadowPick }) {
   try {
     const candidateAdapters = new Map()
-    const agentNames = new Set()
+    const capabilityFit = (role, candidate) => {
+      try {
+        const inventory = agentRegisterEntry(registry, candidate.agent, { role })
+        const transport = adapters?.[role]?.transport ?? DEFAULT_TRANSPORT
+        if (!inventory.providers.includes(candidate.provider)) {
+          return { ok: false, reason: 'capability-shortfall', detail: `seat ${role} expected coding agent ${candidate.agent} to drive provider ${JSON.stringify(candidate.provider)}, found ${JSON.stringify(inventory.providers)}, at coding_agents.${candidate.agent}.providers` }
+        }
+        if (!inventory.transports.includes(transport)) {
+          return { ok: false, reason: 'capability-shortfall', detail: `seat ${role} expected coding agent ${candidate.agent} to use transport ${JSON.stringify(transport)}, found ${JSON.stringify(inventory.transports)}, at coding_agents.${candidate.agent}.transports` }
+        }
+        const grants = grantsFor(registry, role, { root, exists: existsSyncDep, agent: candidate.agent })
+        assertGrantsBacked(role, grants, registry, { agent: candidate.agent, root, exists: existsSyncDep })
+        const shadowGrantDimensions = ['extensions', 'skills', 'mcp_servers'].filter((key) => (grants[key]?.length ?? 0) > 0)
+        const shadowLocalDimensions = Object.hasOwn(registry.local_providers, candidate.provider) ? ['local_provider'] : []
+        assertAgentRefusals(registry, candidate.agent, [...shadowGrantDimensions, ...shadowLocalDimensions], { role })
+        const loaded = candidateAdapters.get(candidate.agent)
+        if (!loaded) return { ok: true, pendingAdapter: true }
+        if (!loaded.adapter) {
+          return { ok: false, reason: 'agent-unresolved', detail: loaded.detail || `agent adapter ${candidate.agent} could not be resolved` }
+        }
+
+        const adapter = loaded.adapter
+        const relativeAdapterPath = `crew/adapters/adapter-${candidate.agent}.mjs`
+        assertAgentAdapter(registry, candidate.agent, relativeAdapterPath, { role })
+        assertAgentTransport(registry, candidate.agent, transport, { role })
+        let bare
+        let declared
+        try {
+          bare = adapter.capabilitiesFor({ transport, grants: EMPTY_GRANTS })
+          declared = adapter.capabilitiesFor({ transport, grants })
+        } catch (err) {
+          throw refuse('register-invalid', `seat ${role} expected coding agent ${candidate.agent} adapter ${JSON.stringify(relativeAdapterPath)} to support transport ${JSON.stringify(transport)}, found adapter refusal ${err?.message || String(err)}, at coding_agents.${candidate.agent}.transports`)
+        }
+        assertAgentModelAgreement(adapter, registry, candidate.agent, candidate.provider, candidate.id, { role })
+        const requires = [...new Set([...(SEAT_DEFAULTS[role].requires || []), ...(grants.requires || [])])]
+        const effective = effectiveCapabilities({ declared, bare, grants })
+        const withheld = Object.keys(CAPABILITY_DELIVERY).filter((cap) => declared[cap] === true && effective[cap] !== true)
+        assertCapabilities(role, candidate.agent, effective, [], requires, { withheld })
+        return { ok: true }
+      } catch (err) {
+        return { ok: false, reason: err?.reason === 'agent-unresolved' ? 'agent-unresolved' : 'capability-shortfall', detail: err?.message || String(err) }
+      }
+    }
+
+    const pendingAgents = new Set()
     for (const [role] of Object.entries(seats || {})) {
       if (sources?.[role]?.model === 'override') continue
-      for (const candidate of shadowCandidates(roster, role)) agentNames.add(candidate.agent)
+      for (const candidate of shadowCandidates(roster, role)) {
+        const fit = capabilityFit(role, candidate)
+        if (fit?.ok && fit.pendingAdapter) pendingAgents.add(candidate.agent)
+      }
     }
-    for (const name of agentNames) {
+    for (const name of pendingAgents) {
       const file = join(HERE, 'adapters', `adapter-${name}.mjs`)
       try {
-        if (!existsSyncDep(file)) {
+        if (!pathExists(existsSyncDep, file)) {
           candidateAdapters.set(name, { adapter: null, detail: `agent adapter ${name} does not resolve at ${file}` })
           continue
         }
         candidateAdapters.set(name, { adapter: await import(pathToFileURL(file).href), detail: null })
       } catch (err) {
         candidateAdapters.set(name, { adapter: null, detail: `agent adapter ${name} could not be resolved: ${err?.message || String(err)}` })
-      }
-    }
-
-    const capabilityFit = (role, candidate) => {
-      const loaded = candidateAdapters.get(candidate.agent)
-      if (!loaded?.adapter) {
-        return { ok: false, reason: 'agent-unresolved', detail: loaded?.detail || `agent adapter ${candidate.agent} could not be resolved` }
-      }
-      try {
-        const adapter = loaded.adapter
-        const transport = adapters?.[role]?.transport ?? DEFAULT_TRANSPORT
-        const grants = grantsFor(registry, role, { root, exists: existsSyncDep, agent: candidate.agent })
-        const requires = [...new Set([...(SEAT_DEFAULTS[role].requires || []), ...(grants.requires || [])])]
-        const bare = adapter.capabilitiesFor({ transport, grants: EMPTY_GRANTS })
-        const declared = adapter.capabilitiesFor({ transport, grants })
-        const effective = effectiveCapabilities({ declared, bare, grants })
-        const withheld = Object.keys(CAPABILITY_DELIVERY).filter((cap) => declared[cap] === true && effective[cap] !== true)
-        assertCapabilities(role, candidate.agent, effective, [], requires, { withheld })
-        return { ok: true }
-      } catch (err) {
-        return { ok: false, reason: 'capability-shortfall', detail: err?.message || String(err) }
       }
     }
 
@@ -1532,20 +1585,53 @@ export async function resolveAdapters(roles, args, seats = null, deps = {}) {
   const probeEndpoint = deps.probeEndpoint || probeLocalEndpoint
   for (const role of roles) {
     try {
-      const name = String(seats?.[role]?.agent || seatAgent(role, sourceArgs))
+      const seat = seats?.[role]
+      const name = String(seat?.agent || seatAgent(role, sourceArgs))
       if (!/^[a-z0-9][a-z0-9-]*$/.test(name)) throw new Error(`invalid agent adapter name "${name}" for seat ${role}`)
+      const grants = grantsFor(registry, role, { root, exists, agent: name })
+      assertGrantsBacked(role, grants, registry, { agent: name })
+      assertFanoutCoherent(role, grants)
+      const activeGrantDimensions = ['extensions', 'skills', 'mcp_servers'].filter((key) => (grants[key]?.length ?? 0) > 0)
+      const dimensionsForProvider = (provider) => [
+        ...activeGrantDimensions,
+        ...(Object.hasOwn(registry.local_providers, provider) ? ['local_provider'] : []),
+      ]
+      const rosterFallbacks = seat && !seat.model ? (seat.fallback || []) : []
+      if (activeGrantDimensions.length) assertAgentRefusals(registry, name, activeGrantDimensions, { role })
+      if (seat && !seat.model) assertAgentProvider(registry, name, seat.provider, { role })
+      for (const fallback of rosterFallbacks) assertAgentProvider(registry, name, fallback.provider, { role })
+      if (seat && !seat.model) assertAgentRefusals(registry, name, dimensionsForProvider(seat.provider), { role, provider: seat.provider, cell: 'primary' })
+      for (const fallback of rosterFallbacks) assertAgentRefusals(registry, name, dimensionsForProvider(fallback.provider), { role, provider: fallback.provider, cell: 'fallback' })
+
       const file = join(HERE, 'adapters', `adapter-${name}.mjs`)
-      if (!existsSync(file)) throw new Error(`unknown agent adapter "${name}" for seat ${role}: no such adapter file ${file}`)
+      if (!pathExists(exists, file)) throw new Error(`unknown agent adapter "${name}" for seat ${role}: no such adapter file ${file}`)
       const adapter = await import(pathToFileURL(file).href)
       if (typeof adapter.seatCommand !== 'function') throw new Error(`agent adapter "${name}" for seat ${role} (${file}) does not export a seatCommand function`)
       if (typeof adapter.capabilitiesFor !== 'function') throw new Error(`agent adapter "${name}" for seat ${role} (${file}) does not export a capabilitiesFor function`)
       const transport = seatTransport({ role, args: sourceArgs, adapter, agentName: name })
-      const grants = grantsFor(registry, role, { root, exists, agent: name })
-      assertGrantsBacked(role, grants, registry, { agent: name })
-      assertFanoutCoherent(role, grants)
+      const relativeAdapterPath = `crew/adapters/adapter-${name}.mjs`
+      // Do not re-add an adapter assertion here: loadCapabilities owns adapter-path
+      // agreement at crew/capabilities.mjs:201-203. This path remains only for the
+      // transport-refusal text below.
+      assertAgentTransport(registry, name, transport, { role })
+      let transportCapabilities
+      try {
+        transportCapabilities = adapter.capabilitiesFor({ transport, grants })
+      } catch (err) {
+        throw refuse('register-invalid', `seat ${role} expected coding agent ${name} adapter ${JSON.stringify(relativeAdapterPath)} to support transport ${JSON.stringify(transport)}, found adapter refusal ${err?.message || String(err)}, at coding_agents.${name}.transports`)
+      }
+      let bare
+      try {
+        bare = adapter.capabilitiesFor({ transport, grants: EMPTY_GRANTS })
+      } catch (err) {
+        throw refuse('register-invalid', `seat ${role} expected coding agent ${name} adapter ${JSON.stringify(relativeAdapterPath)} to support transport ${JSON.stringify(transport)}, found adapter refusal ${err?.message || String(err)}, at coding_agents.${name}.transports`)
+      }
+      const declared = transportCapabilities
+      if (seat && !seat.model) assertAgentModelAgreement(adapter, registry, name, seat.provider, seat.id, { role })
+      for (const fallback of rosterFallbacks) assertAgentModelAgreement(adapter, registry, name, fallback.provider, fallback.id, { role })
 
       let configDir = null
-      const provider = seats?.[role]?.provider
+      const provider = seat?.provider
       const localProvider = provider && Object.hasOwn(registry.local_providers, provider) ? registry.local_providers[provider] : null
       if (localProvider) {
         const settingsPath = resolvedGrantPath(root, localProvider.settings)
@@ -1557,7 +1643,7 @@ export async function resolveAdapters(roles, args, seats = null, deps = {}) {
         if (!live) {
           throw refuse('local-endpoint-dead', `seat ${role} local provider ${provider} endpoint ${localProvider.base_url} is unavailable — refusing to boot a dead local-provider cell`)
         }
-        const capabilities = adapter.capabilitiesFor({ transport })
+        const capabilities = transportCapabilities
         if (capabilities.local_provider !== true) {
           throw refuse('grant-unsupported', `seat ${role} local provider ${provider} is not supported by adapter ${name} — refusing to boot a silently weaker seat`)
         }
@@ -1585,14 +1671,12 @@ export async function resolveAdapters(roles, args, seats = null, deps = {}) {
         if (!defLive) {
           throw refuse('local-endpoint-dead', `seat ${role} agent definition ${grant.name} local provider ${defProvider} endpoint ${defLocal.base_url} is unavailable — refusing to boot a dead local-provider cell`)
         }
-        if (adapter.capabilitiesFor({ transport }).local_provider !== true) {
+        if (transportCapabilities.local_provider !== true) {
           throw refuse('grant-unsupported', `seat ${role} agent definition ${grant.name} local provider ${defProvider} is not supported by adapter ${name} — refusing to boot a silently weaker seat`)
         }
       }
 
       const requires = [...new Set([...(SEAT_DEFAULTS[role].requires || []), ...grants.requires])]
-      const bare = adapter.capabilitiesFor({ transport, grants: EMPTY_GRANTS })
-      const declared = adapter.capabilitiesFor({ transport, grants })
       if ((grants.mcp_servers?.length ?? 0) > 0 && declared.mcp_servers !== true) {
         throw refuse('grant-unsupported', `seat ${role} has MCP server grants but adapter ${name} cannot express mcp_servers — refusing to boot a silently weaker seat`)
       }

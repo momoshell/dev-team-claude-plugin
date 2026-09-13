@@ -1,6 +1,20 @@
 {
   "schema_version": 1,
   "updated_at": "2026-09-12",
+  "coding_agents": {
+    "pi": {
+      "providers": ["openai", "anthropic", "llama-swap"],
+      "transports": ["pane", "headless-rpc"],
+      "adapter": "crew/adapters/adapter-pi.mjs",
+      "refuses": ["mcp_servers"]
+    },
+    "claude": {
+      "providers": ["anthropic"],
+      "transports": ["pane", "headless-json"],
+      "adapter": "crew/adapters/adapter-claude.mjs",
+      "refuses": ["extensions", "skills", "local_provider"]
+    }
+  },
   "roles": {
     "lead": {
       "tools": [],

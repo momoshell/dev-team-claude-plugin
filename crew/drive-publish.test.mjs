@@ -1530,6 +1530,30 @@ test('F1 reasoning-only response remains an empty-content refusal', () => {
   assert.equal(narrated.text, undefined)
   const published = composePrBody(applyNarration(NARRATION_RECORD, narrated))
   assert.equal(published.includes(NARRATION_HEADING), false)
+
+  // `content` ABSENT, not merely empty. The fixture above pins `content: ''`,
+  // which a `content ?? reasoning_content` fallback leaves untouched — `??` only
+  // fires on null/undefined — so that case alone cannot discriminate the fallback
+  // this check exists to forbid. A served model that omits `content` entirely is
+  // the shape that would otherwise put private reasoning into a PR body, and the
+  // measured llama-swap models all emit reasoning_content beside content.
+  //
+  // The refusal differs by design and the distinction is kept: an absent field is
+  // an UNREADABLE response, an empty string is EMPTY narration. What matters to
+  // this check is identical either way — the reasoning text never reaches the body.
+  const absent = narrateRecord({
+    record: NARRATION_RECORD,
+    registerText: configuredNarratorRegister('http://proxy.lan:1234', 'Qwen/Qwen3-Coder:latest'),
+    io: narratorIo({ chat: {
+      ok: true,
+      output: JSON.stringify({ choices: [{ message: { reasoning_content: 'internal reasoning' } }] }),
+    } }),
+  })
+  assert.equal(absent.refused, NARRATION_REFUSALS.unreadable)
+  assert.equal(absent.text, undefined)
+  const absentBody = composePrBody(applyNarration(NARRATION_RECORD, absent))
+  assert.equal(absentBody.includes(NARRATION_HEADING), false)
+  assert.equal(absentBody.includes('internal reasoning'), false)
 })
 
 test('A1 narration attempts carry duration model and outcome into the journal', () => {

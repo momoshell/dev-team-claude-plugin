@@ -749,9 +749,9 @@ test('laneFence excludes main-only paths after a lane forks', () => {
   assert.equal(result.paths.includes('crew/sample.mjs'), false)
 })
 
-test('repair CLI leaves a committed out-of-fence shift untouched', () => {
+test('repair CLI reports a committed out-of-fence shift', () => {
   // Mutation killed: ignoring the measured repair fence rewrites a pin whose target is outside the lane.
-  const root = scratchDir('b383-anchor-repair-fence-')
+  const root = scratchDir('anchor-repair-fence-')
   const skillDir = join(root, 'skills/sample')
   const doc = join(skillDir, 'SKILL.md')
   const manifestPath = join(skillDir, 'anchors.json')
@@ -775,14 +775,37 @@ test('repair CLI leaves a committed out-of-fence shift untouched', () => {
   const beforeManifest = readFileSync(manifestPath, 'utf8')
   const beforeDoc = readFileSync(doc, 'utf8')
   const output = []
-  assert.equal(repairCli(['--repair', skillDir, '--root', repoRoot], output.push.bind(output)), 0)
-  assert.deepEqual(output, [])
+  assert.equal(repairCli(['--repair', skillDir, '--root', repoRoot], output.push.bind(output)), 1)
+  assert.equal(output.filter((line) => line.startsWith('ANCHOR_REPAIR_ROW ')).length, 0)
+  const refusals = output.filter((line) => line.startsWith('refused crew/sample.mjs:1:'))
+  assert.equal(refusals.length, 1)
+  assert.match(refusals[0], /excluded-by-scope/)
+  assert.match(refusals[0], /omitted from the measured repair fence/)
   assert.equal(readFileSync(manifestPath, 'utf8'), beforeManifest)
   assert.equal(readFileSync(doc, 'utf8'), beforeDoc)
   assert.deepEqual(
     checkAnchors({ root: repoRoot, docs: [doc], manifest: JSON.parse(readFileSync(manifestPath, 'utf8')) }),
     { anchors: 1, failures: [], shifted: [{ key: 'crew/sample.mjs:1', rel: 'crew/sample.mjs', from: 1, to: 2, nextKey: 'crew/sample.mjs:2' }] },
   )
+})
+
+test('repair CLI reports a stale shift when its fence is unmeasured', () => {
+  const fx = shiftedContractFixture('anchor-repair-unmeasured-')
+  const before = bytes(fx)
+  const output = []
+  try {
+    assert.equal(repairCli(['--repair', fx.skillDir, '--root', fx.root], output.push.bind(output)), 1)
+    assert.equal(output.filter((line) => line.startsWith('ANCHOR_REPAIR_ROW ')).length, 0)
+    const refusals = output.filter((line) => line.startsWith('refused scripts/a.mjs:1:'))
+    assert.equal(refusals.length, 1)
+    assert.match(refusals[0], /excluded-by-scope/)
+    assert.match(refusals[0], /repair fence is unmeasured/)
+    assert.match(refusals[0], /git root could not be measured/)
+    assert.equal(output.includes('refused anchor repair fence unmeasured (git root could not be measured)'), true)
+    assert.equal(bytes(fx), before)
+  } finally {
+    dispose(fx)
+  }
 })
 
 test('repair-all CLI repairs a committed shift on clean main', () => {
@@ -1353,118 +1376,163 @@ test('repair-all refuses an ambiguous named pin without writing', () => {
 })
 
 test('A1', () => {
-  const fx = authoritativeFixture('b619-anchor-test-a1-')
+  const root = scratchDir('anchor-test-a1-')
+  mkdirSync(join(root, 'scripts'), { recursive: true })
+  const declarations = {}
+  for (let index = 1; index <= 4; index += 1) {
+    const expected = `const RECORDED_${index} = 'distinctive-rebase-pin-${index}'`
+    declarations[`scripts/recorded-${index}.mjs:1`] = expected
+    writeFileSync(join(root, 'scripts', `recorded-${index}.mjs`), `// moved after rebase\n${expected}\n`)
+  }
+  const fx = contractSkill(root, declarations)
   try {
+    // The empty/unmeasurable repository fence is deliberately irrelevant: --repair-all bypasses laneFence,
+    // so all four unique stale pins relocate instead of making A1 depend on base membership.
+    assert.equal(laneFence({ root: fx.root }).measured, false)
     const output = []
-    assert.equal(repairCli(['--repair', fx.skillDir, '--root', fx.root], output.push.bind(output)), 0)
+    assert.equal(repairCli(['--repair-all', fx.skillDir, '--root', fx.root], output.push.bind(output)), 0)
+    const rows = output.filter((line) => line.startsWith('ANCHOR_REPAIR_ROW ')).map((line) => JSON.parse(line.slice('ANCHOR_REPAIR_ROW '.length)))
+    assert.equal(rows.length, 4)
+    for (const row of rows) {
+      assert.equal(row.base, null)
+      assert.equal(row.base_commit, null)
+      assert.equal(Object.hasOwn(row, 'paths'), false)
+    }
     const next = JSON.parse(readFileSync(fx.manifestPath, 'utf8'))
-    assert.equal(next['scripts/a.mjs:2'], EXPECTED_A)
-    assert.equal(next['scripts/b.mjs:1'], EXPECTED_B)
-    assert.equal(Object.hasOwn(next, 'scripts/b.mjs:2'), false)
-    assert.match(readFileSync(fx.doc, 'utf8'), /scripts\/b\.mjs:1/)
+    const doc = readFileSync(fx.doc, 'utf8')
+    for (let index = 1; index <= 4; index += 1) {
+      const oldKey = `scripts/recorded-${index}.mjs:1`
+      const newKey = `scripts/recorded-${index}.mjs:2`
+      assert.equal(next[newKey], declarations[oldKey])
+      assert.equal(Object.hasOwn(next, oldKey), false)
+      assert.equal(doc.includes(newKey), true)
+      assert.equal(doc.includes(oldKey), false)
+    }
   } finally {
-    rmSync(fx.root, { recursive: true, force: true })
+    rmSync(root, { recursive: true, force: true })
   }
 })
 
 test('B1', () => {
-  const fx = shiftedContractFixture('b619-anchor-test-b1-')
+  const expected = "const DUPLICATE = 'distinctive-ambiguous-pin'"
+  const root = scratchDir('anchor-test-b1-')
+  mkdirSync(join(root, 'scripts'), { recursive: true })
+  writeFileSync(join(root, 'scripts/a.mjs'), `${expected}\n${expected}\n`)
+  const fx = contractSkill(root, { 'scripts/a.mjs:3': expected }, ['scripts/a.mjs:3'])
+  const before = bytes(fx)
   try {
-    const repoRoot = realpathSync(fx.root)
-    git(repoRoot, 'init', '--quiet')
-    git(repoRoot, 'symbolic-ref', 'HEAD', 'refs/heads/main')
-    git(repoRoot, 'add', '.')
-    git(repoRoot, 'commit', '--quiet', '-m', 'stale pin without remote base')
-    const before = bytes(fx)
     const output = []
-    assert.equal(repairCli(['--repair', fx.skillDir, '--root', repoRoot], output.push.bind(output)), 1)
-    assert.deepEqual(output, ['refused anchor repair fence unmeasured (no merge base with origin/main)'])
+    assert.equal(repairCli(['--repair-all', fx.skillDir, '--root', fx.root], output.push.bind(output)), 1)
+    assert.equal(output.filter((line) => line.startsWith('ANCHOR_REPAIR_ROW ')).length, 0)
+    assert.equal(output.length, 1)
+    assert.match(output[0], /^refused scripts\/a\.mjs:3: ambiguous:/)
     assert.equal(bytes(fx), before)
   } finally {
-    rmSync(fx.root, { recursive: true, force: true })
+    rmSync(root, { recursive: true, force: true })
   }
 })
 
 test('C1', () => {
-  const fx = authoritativeFixture('b619-anchor-test-c1-')
+  const expected = "const MISSING = 'distinctive-rotted-pin'"
+  const root = scratchDir('anchor-test-c1-')
+  mkdirSync(join(root, 'scripts'), { recursive: true })
+  writeFileSync(join(root, 'scripts/a.mjs'), "const OTHER = 'not-the-pin'\n")
+  const fx = contractSkill(root, { 'scripts/a.mjs:1': expected })
+  const before = bytes(fx)
   try {
     const output = []
-    assert.equal(repairCli(['--repair', fx.skillDir, '--root', fx.root], output.push.bind(output)), 0)
-    const row = output.find((line) => line.startsWith('ANCHOR_REPAIR_ROW '))
-    assert.ok(row, output.join('\n'))
-    assert.equal(JSON.parse(row.slice('ANCHOR_REPAIR_ROW '.length)).base, 'origin/main')
+    assert.equal(repairCli(['--repair-all', fx.skillDir, '--root', fx.root], output.push.bind(output)), 1)
+    assert.equal(output.filter((line) => line.startsWith('ANCHOR_REPAIR_ROW ')).length, 0)
+    assert.equal(output.length, 1)
+    assert.match(output[0], /^refused scripts\/a\.mjs:1: rot:/)
+    assert.equal(bytes(fx), before)
   } finally {
-    rmSync(fx.root, { recursive: true, force: true })
+    rmSync(root, { recursive: true, force: true })
   }
 })
 
 test('D1', () => {
-  const fx = shiftedContractFixture('b619-anchor-test-d1-')
+  const reasons = ['rot', 'ambiguous', 'excluded-by-scope']
+  const keyedReason = (output, key) => {
+    const rows = output.filter((line) => line.startsWith(`refused ${key}:`))
+    assert.equal(rows.length, 1, `${key} must have exactly one key-bearing refusal`)
+    const matches = reasons.filter((reason) => rows[0].includes(`: ${reason}:`))
+    assert.equal(matches.length, 1, `${key} must have exactly one closed-vocabulary reason`)
+    return rows[0]
+  }
+
+  const measured = authoritativeFixture('anchor-test-d1-measured-')
+  try {
+    const bPath = join(measured.root, 'scripts/b.mjs')
+    const beforeB = readFileSync(bPath, 'utf8')
+    const output = []
+    assert.equal(repairCli(['--repair', measured.skillDir, '--root', measured.root], output.push.bind(output)), 1)
+    const rows = output.filter((line) => line.startsWith('ANCHOR_REPAIR_ROW ')).map((line) => JSON.parse(line.slice('ANCHOR_REPAIR_ROW '.length)))
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].pin, 'scripts/a.mjs:1')
+    const refusal = keyedReason(output, 'scripts/b.mjs:1')
+    assert.match(refusal, /excluded-by-scope/)
+    assert.match(refusal, /omitted from the measured repair fence/)
+    assert.equal(readFileSync(bPath, 'utf8'), beforeB)
+    const next = JSON.parse(readFileSync(measured.manifestPath, 'utf8'))
+    assert.equal(next['scripts/b.mjs:1'], EXPECTED_B)
+    assert.match(readFileSync(measured.doc, 'utf8'), /scripts\/b\.mjs:1/)
+  } finally {
+    rmSync(measured.root, { recursive: true, force: true })
+  }
+
+  const root = scratchDir('anchor-test-d1-unmeasured-')
+  mkdirSync(join(root, 'scripts'), { recursive: true })
+  const scoped = "const SCOPED = 'distinctive-out-of-scope-pin'"
+  const ambiguous = "const AMBIGUOUS = 'distinctive-ambiguous-pin'"
+  writeFileSync(join(root, 'scripts/a.mjs'), `// moved\n${scoped}\n`)
+  writeFileSync(join(root, 'scripts/b.mjs'), "const OTHER = 'not-the-pin'\n")
+  writeFileSync(join(root, 'scripts/c.mjs'), `${ambiguous}\n${ambiguous}\n`)
+  const unmeasured = contractSkill(root, {
+    'scripts/a.mjs:1': scoped,
+    'scripts/b.mjs:1': "const MISSING = 'distinctive-rotted-pin'",
+    'scripts/c.mjs:3': ambiguous,
+  })
+  const before = bytes(unmeasured)
   try {
     const output = []
-    assert.equal(repairCli(['--repair-all', fx.skillDir, '--root', fx.root], output.push.bind(output)), 0)
-    const next = JSON.parse(readFileSync(fx.manifestPath, 'utf8'))
-    assert.equal(next['scripts/a.mjs:2'], EXPECTED_A)
-    assert.equal(output[0].endsWith('"base":null,"base_commit":null}'), true)
+    assert.equal(repairCli(['--repair', unmeasured.skillDir, '--root', unmeasured.root], output.push.bind(output)), 1)
+    assert.equal(output.filter((line) => line.startsWith('ANCHOR_REPAIR_ROW ')).length, 0)
+    assert.match(keyedReason(output, 'scripts/a.mjs:1'), /repair fence is unmeasured/)
+    assert.match(keyedReason(output, 'scripts/b.mjs:1'), /rot/)
+    assert.match(keyedReason(output, 'scripts/c.mjs:3'), /ambiguous/)
+    assert.equal(bytes(unmeasured), before)
   } finally {
-    rmSync(fx.root, { recursive: true, force: true })
+    rmSync(root, { recursive: true, force: true })
   }
 })
 
 test('E1', () => {
-  const fx = authoritativeFixture('b619-anchor-test-e1-')
-  try {
-    const output = []
-    assert.equal(repairCli(['--repair', fx.skillDir, '--root', fx.root], output.push.bind(output)), 0)
-    const row = output.find((line) => line.startsWith('ANCHOR_REPAIR_ROW '))
-    assert.ok(row, output.join('\n'))
-    const parsed = JSON.parse(row.slice('ANCHOR_REPAIR_ROW '.length))
-    // the row names the COMMIT the repair was measured against, not only the symbolic ref,
-    // so an over-wide repair can be audited after the fact. It is a per-run sha.
-    assert.match(String(parsed.base_commit), /^[0-9a-f]{40}$/, 'the audit row names its base commit')
-    assert.deepEqual({ ...parsed, base_commit: undefined }, {
-      manifest: 'skills/sample/anchors.json',
-      pin: 'scripts/a.mjs:1',
-      old_line: 1,
-      new_line: 2,
-      base: 'origin/main',
-      base_commit: undefined,
-    })
-  } finally {
-    rmSync(fx.root, { recursive: true, force: true })
-  }
-})
-
-test('F1.rot', () => {
-  const root = scratchDir('b619-anchor-test-f1-rot-')
-  mkdirSync(join(root, 'scripts'), { recursive: true })
-  writeFileSync(join(root, 'scripts/a.mjs'), "const OTHER = 'not-the-anchor'\n")
-  const fx = contractSkill(root, { 'scripts/a.mjs:1': EXPECTED_A })
+  const fx = fixture()
   const before = bytes(fx)
   try {
     const output = []
-    assert.equal(repairCli(['--repair-all', fx.skillDir, '--root', fx.root], output.push.bind(output)), 1)
-    assert.equal(output.length, 1)
-    assert.match(output[0], /rot, not a shift/)
+    assert.equal(repairCli(['--repair-all', fx.skillDir, '--root', fx.root], output.push.bind(output)), 0)
+    assert.deepEqual(output, [])
+    assert.equal(output.some((line) => line.startsWith('ANCHOR_REPAIR_ROW ') || line.startsWith('refused ')), false)
     assert.equal(bytes(fx), before)
   } finally {
-    rmSync(root, { recursive: true, force: true })
+    dispose(fx)
   }
 })
 
-test('F1.ambiguity', () => {
-  const root = scratchDir('b619-anchor-test-f1-ambiguity-')
-  mkdirSync(join(root, 'scripts'), { recursive: true })
-  writeFileSync(join(root, 'scripts/a.mjs'), `${EXPECTED_A}\n${EXPECTED_A}\n`)
-  const fx = contractSkill(root, { 'scripts/a.mjs:3': EXPECTED_A }, ['scripts/a.mjs:3'])
-  const before = bytes(fx)
-  try {
-    const output = []
-    assert.equal(repairCli(['--repair-all', fx.skillDir, '--root', fx.root], output.push.bind(output)), 1)
-    assert.equal(output.length, 1)
-    assert.match(output[0], /refuses to guess/)
-    assert.equal(bytes(fx), before)
-  } finally {
-    rmSync(root, { recursive: true, force: true })
-  }
+test('F1', () => {
+  const source = readFileSync(join(ROOT, 'skills/qa-test-writing/anchor-pin.mjs'), 'utf8')
+  const blindSpot = [
+    '// BLIND SPOT, stated rather than implied: NO LOCAL CHECK CAN PROVE A BASE IS FRESH OR',
+    '// THAT IT IS THIS LANE\'S ACTUAL BRANCH POINT. A remote-tracking ref is only as current as',
+    '// the last fetch, and a lane branched from something other than `base` gets a merge base',
+    '// that is an ancestor of both - so the diff, and therefore the fence, is WIDER than the',
+    '// lane\'s own work. This function cannot detect either case without the network, and it',
+    '// does not pretend to: it reports the RESOLVED COMMIT it used, so a caller who knows the',
+    '// lane\'s true branch point can pass it explicitly and an auditor can check afterwards',
+    '// which commit a repair was measured against. `measured: true` means "this diff was taken',
+    '// against the commit named in `baseCommit`", never "that commit is the right one".',
+  ].join('\n')
+  assert.equal(source.includes(blindSpot), true)
 })

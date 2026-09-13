@@ -11,6 +11,42 @@ import { planScopeWhy, scopeSuggestions, VACUITY_CLAIMS, vacuityFindingDefect } 
 import { ROOT as REPO_ROOT } from '../test/helpers.mjs'
 import { checkSkillAnchors, laneFence, partitionShifts } from '../skills/qa-test-writing/anchor-pin.mjs'
 
+const REVIEW_RUN_ID = 'run-review-783'
+const REVIEW_CTX = Object.freeze({ ...CTX, variant: 'review_only', run_id: REVIEW_RUN_ID, roles: ['reviewer'], seatedRoles: ['reviewer'] })
+const REVIEW_FINDING = Object.freeze({
+  id: 'finding-1', severity: 'should-fix', location: 'src/example.mjs:12',
+  summary: 'the reviewed change needs a follow-up', evidence: 'the changed branch is not covered', disposition: 'ask-user',
+})
+
+function reviewEnvelope({ outcome = 'findings', findings = [REVIEW_FINDING], assignment_id = 'd1', run_id = REVIEW_RUN_ID, role = 'reviewer', details = {} } = {}) {
+  return {
+    assignment_id, run_id, role, status: 'done', summary: 'review complete', artifacts: [`${TD}/review.md`],
+    details: { base: 'base-sha', head: 'head-sha', outcome, findings, ...details },
+  }
+}
+
+function zeroTurnReviewEnvelope(assignment_id = 'd1') {
+  return {
+    assignment_id, run_id: REVIEW_RUN_ID, role: 'reviewer', status: 'insufficient', summary: 'the RPC seat produced no envelope', artifacts: [],
+    details: { degraded: 'rpc-no-envelope', reason: 'zero-turn-non-start', turns: 0, tool_calls: 0, absent_reason: null },
+  }
+}
+
+function strictReviewIo(envelope, { changed = [] } = {}) {
+  const io = fakeIo({ changed })
+  const assign = io.assign.bind(io)
+  io.assign = function (spec) {
+    const assigned = assign(spec)
+    const id = `d${this.calls.assign.length}`
+    return { ...assigned, id, returnPath: `/crew/returns/${REVIEW_RUN_ID}/${id}.json` }
+  }
+  io.wait = function (returnPath, timeoutS) {
+    this.calls.waits.push({ returnPath, timeoutS })
+    return typeof envelope === 'function' ? envelope(returnPath) : envelope
+  }
+  return io
+}
+
 test('a plan-check accept records the residual the lead named', () => {
   const io = planCheckAcceptIo({ residuals: [PLAN_RESIDUAL] })
   const result = driveTask(CTX_TL, io)
@@ -3638,4 +3674,171 @@ test('b600 P1', () => {
   }])
   assert.equal(dPanelOutcomes(io).length, 1)
   assert.equal(io.calls.logs.filter((row) => row.dissent?.kind === 'panel-divergence').length, 1)
+})
+
+test('A1 review_only declares the reviewer seat and optional rigorous tech lead', () => {
+  assert.equal(Object.keys(VARIANTS).includes('review_only'), true)
+  assert.deepEqual(VARIANTS.review_only.required_seats, ['reviewer'])
+  assert.equal(shapeDefect(VARIANTS.review_only, 'review_only'), null)
+  const io = strictReviewIo(reviewEnvelope())
+  const result = driveTask({ ...REVIEW_CTX, roles: ['reviewer', 'tech-lead'], seatedRoles: ['reviewer', 'tech-lead'] }, io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'reviewer').length, 1)
+  assert.equal(io.calls.assign.some(({ role }) => role === 'tech-lead'), false)
+  assert.deepEqual(result.details.stages, ['review_only:r1', 'scope-gate:r1', 'envelope-accept', 'done'])
+  assert.equal(result.details.stages.some((stage) => stage.startsWith('commit') || (stage.startsWith('review') && !stage.startsWith('review_only'))), false)
+})
+
+test('B1 review_only refuses an envelope without declared base and head', () => {
+  for (const field of ['base', 'head']) {
+    const env = reviewEnvelope()
+    delete env.details[field]
+    const result = driveTask(REVIEW_CTX, strictReviewIo(env))
+    assert.equal(result.status, 'escalation')
+    assert.equal(result.details.escalation.where, 'envelope')
+    assert.match(result.details.escalation.why, /\[field-missing\]/)
+  }
+})
+
+test('B2 review_only requires exact dispatch and reviewer transport identity', () => {
+  for (const [field, reason] of [['assignment_id', 'assignment-id-mismatch'], ['run_id', 'run-mismatch'], ['role', 'role-mismatch']]) {
+    const env = reviewEnvelope()
+    delete env[field]
+    const result = driveTask(REVIEW_CTX, strictReviewIo(env))
+    assert.equal(result.status, 'escalation')
+    assert.match(result.details.escalation.why, new RegExp(reason))
+  }
+  const scout = driveTask({ ...CTX, variant: 'scout' }, fakeIo({ envelopes: { 'planner:1': reconEnv() }, changed: [] }))
+  assert.equal(scout.status, 'done')
+})
+
+test('C1 review_only reuses the scout zero-write scope gate', () => {
+  const scout = driveTask({ ...CTX, variant: 'scout' }, fakeIo({ envelopes: { 'planner:1': reconEnv() }, changed: ['src/write.mjs'] }))
+  const review = driveTask(REVIEW_CTX, strictReviewIo(reviewEnvelope(), { changed: ['src/write.mjs'] }))
+  for (const result of [scout, review]) {
+    assert.equal(result.status, 'escalation')
+    assert.equal(result.details.escalation.where, 'scope')
+    assert.ok(result.details.stages.includes('scope-gate:r1'))
+  }
+})
+
+test('D1 review_only requires every structured finding field', () => {
+  for (const key of Object.keys(REVIEW_FINDING)) {
+    const env = reviewEnvelope({ findings: [{ ...REVIEW_FINDING }] })
+    delete env.details.findings[0][key]
+    const defect = envelopeDefect(env, VARIANTS.review_only, { taskDir: TD })
+    assert.equal(defect.reason, 'field-item', key)
+  }
+  for (const [key, value] of [['severity', 'urgent'], ['disposition', 'later'], ['id', 'not valid']]) {
+    const env = reviewEnvelope({ findings: [{ ...REVIEW_FINDING, [key]: value }] })
+    const defect = envelopeDefect(env, VARIANTS.review_only, { taskDir: TD })
+    assert.equal(defect.reason, 'field-item', key)
+  }
+})
+
+test('D2 envelope declaration metadata fails closed', () => {
+  const withField = (name, change) => ({
+    ...VARIANTS.review_only,
+    envelope_fields: VARIANTS.review_only.envelope_fields.map((field) => field.name === name ? change(field) : field),
+  })
+  const withFindings = (change) => withField('findings', (field) => change({
+    ...field,
+    item_fields: [...field.item_fields],
+    item_values: Object.fromEntries(Object.entries(field.item_values).map(([key, values]) => [key, [...values]])),
+    item_patterns: { ...field.item_patterns }, cardinality: { ...field.cardinality },
+  }))
+  const malformed = [
+    withFindings((field) => ({ ...field, cardinality: { ...field.cardinality, discriminator: 'missing' } })),
+    withFindings((field) => ({ ...field, cardinality: { ...field.cardinality, discriminator: 'findings' } })),
+    withFindings((field) => ({ ...field, cardinality: { ...field.cardinality, empty: 'unknown' } })),
+    withFindings((field) => ({ ...field, item_values: { ...field.item_values, unknown: Object.freeze(['x']) } })),
+    withFindings((field) => ({ ...field, item_patterns: { ...field.item_patterns, id: '[' } })),
+    withFindings((field) => ({ ...field, allow_empty: 'yes' })),
+    withField('outcome', (field) => ({ ...field, allow_empty: true })),
+    withFindings((field) => ({ ...field, item_values: { ...field.item_values, severity: ['must-fix'] } })),
+    withFindings((field) => ({ ...field, item_values: { ...field.item_values, severity: Object.freeze([]) } })),
+  ]
+  for (const shape of malformed) assert.equal(typeof shapeDefect(shape, 'review_only'), 'string')
+})
+
+test('E1 review_only round-trips no-findings as a measured outcome', () => {
+  const populatedIo = strictReviewIo(reviewEnvelope())
+  const populated = driveTask(REVIEW_CTX, populatedIo)
+  const populatedAccepted = populatedIo.calls.logs.find((row) => row.envelope_accepted).envelope_accepted
+  assert.equal(populated.status, 'done')
+  assert.deepEqual(populatedAccepted.values, populated.details.envelope.values)
+  assert.deepEqual(populated.details.envelope.values, reviewEnvelope().details)
+
+  const noneIo = strictReviewIo(reviewEnvelope({ outcome: 'no-findings', findings: [] }))
+  const none = driveTask(REVIEW_CTX, noneIo)
+  const noneAccepted = noneIo.calls.logs.find((row) => row.envelope_accepted).envelope_accepted
+  assert.equal(none.status, 'done')
+  assert.deepEqual(noneAccepted.values, none.details.envelope.values)
+  assert.deepEqual(none.details.envelope.values, { base: 'base-sha', head: 'head-sha', outcome: 'no-findings', findings: [] })
+  const mismatch = reviewEnvelope({ outcome: 'findings', findings: [] })
+  assert.equal(envelopeDefect(mismatch, VARIANTS.review_only, { taskDir: TD }).reason, 'field-item')
+
+  const brief = noneIo.calls.writes[`${TD}/review_only-brief.md`]
+  assert.match(brief, /assignment_id="d1".*run_id="run-review-783".*role="reviewer"/)
+  assert.match(brief, /empty is allowed only when details\.outcome is "no-findings"/)
+  assert.match(brief, /severity is one of must-fix \| should-fix \| consider/)
+  assert.equal(brief.includes('id matches "^[A-Za-z0-9_-]{1,64}$"'), true)
+  const scoutIo = fakeIo({ envelopes: { 'planner:1': reconEnv() }, changed: [] })
+  driveTask({ ...CTX, variant: 'scout' }, scoutIo)
+  assert.match(scoutIo.calls.writes[`${TD}/scout-brief.md`], /a non-empty array of records/)
+  assert.doesNotMatch(scoutIo.calls.writes[`${TD}/scout-brief.md`], /empty is allowed/)
+})
+
+test('F1 review_only accepts envelope plus zero-write proof without a commit', () => {
+  const io = strictReviewIo(reviewEnvelope())
+  const result = driveTask(REVIEW_CTX, io)
+  assert.equal(result.status, 'done')
+  assert.equal(VARIANTS.review_only.accepted_by, 'structured envelope plus zero-write proof; no commit')
+  assert.equal(io.calls.commits.length, 0)
+  assert.equal(result.details.commit, null)
+})
+
+test('G1 code review evidence acceptance requires identity and structured verdict', () => {
+  const missingBase = reviewEnvelope()
+  delete missingBase.details.base
+  const missingOutcome = reviewEnvelope()
+  delete missingOutcome.details.outcome
+  const missingFindings = reviewEnvelope()
+  delete missingFindings.details.findings
+  for (const env of [missingBase, missingOutcome, missingFindings]) {
+    const result = driveTask(REVIEW_CTX, strictReviewIo(env))
+    assert.equal(result.status, 'escalation')
+    assert.equal(result.details.stages.includes('envelope-accept'), false)
+  }
+})
+
+test('RV1-1 review_only normalizes only its envelope failure route', () => {
+  const scout = driveTask({ ...CTX, variant: 'scout' }, fakeIo({ envelopes: { 'planner:1': null }, changed: [] }))
+  assert.equal(scout.status, 'escalation')
+  assert.equal(scout.details.escalation.where, 'scout')
+  assert.deepEqual(scout.details.stages, ['scout:r1', 'scope-gate:r1', 'escalate:scout'])
+
+  const review = driveTask(REVIEW_CTX, strictReviewIo(null))
+  assert.equal(review.status, 'escalation')
+  assert.equal(review.details.escalation.where, 'envelope')
+  assert.deepEqual(review.details.stages, ['review_only:r1', 'scope-gate:r1', 'escalate:envelope'])
+})
+
+test('RV1-2 envelope enforcement brief survives generated identity refresh', () => {
+  const io = strictReviewIo((returnPath) => (
+    returnPath.endsWith('/d1.json') ? zeroTurnReviewEnvelope() : reviewEnvelope({ assignment_id: 'd2' })
+  ))
+  const result = driveTask(REVIEW_CTX, io)
+  const reviewerAssignments = io.calls.assign.filter(({ role }) => role === 'reviewer')
+  assert.equal(result.status, 'done')
+  assert.equal(reviewerAssignments.length, 2)
+  assert.match(reviewerAssignments[1].briefFile, new RegExp(`^${TD}/enforcement-reviewer-r\\d+\\.md$`))
+  const recoveryBrief = io.calls.writes[reviewerAssignments[1].briefFile]
+  assert.match(recoveryBrief, /^Your previous dispatch produced no envelope and took no turns \(zero-turn-non-start\)\.$/m)
+  assert.match(recoveryBrief, /The same assignment is asked directly again/)
+  assert.match(recoveryBrief, new RegExp(`Original brief: ${TD}/review_only-brief\\.md`))
+  assert.match(io.calls.writes[`${TD}/review_only-brief.md`], /assignment_id="d2".*run_id="run-review-783".*role="reviewer"/)
+  const applied = io.calls.logs.find((row) => row.seat_enforcement?.applied)?.seat_enforcement
+  assert.equal(applied.brief, reviewerAssignments[1].briefFile)
+  assert.equal(applied.dispatch, 'd2')
 })

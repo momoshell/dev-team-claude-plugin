@@ -10,6 +10,37 @@ import {
 import { anchorConflictMechanical, canonicalAnchorManifest, canonicalCitationDoc, lineNumberOnlyAnchorResolution, rebaseConflictRoute, resumeTask, resumeWorktreeSha256 } from './drive.mjs'
 import { git, gitResult } from '../test/helpers.mjs'
 
+const REVIEW_ENVELOPE_SCHEMA = `{
+  "assignment_id": "string (exact current dispatch id)",
+  "run_id": "string (exact current run id)",
+  "role": "reviewer",
+  "status": "done",
+  "summary": "string (non-empty)",
+  "artifacts": ["absolute task-directory path", "..."],
+  "details": {
+    "base": "string (non-empty)",
+    "head": "string (non-empty)",
+    "outcome": "findings | no-findings",
+    "findings": [
+      {
+        "id": "string matching ^[A-Za-z0-9_-]{1,64}$",
+        "severity": "must-fix | should-fix | consider",
+        "location": "string (non-empty)",
+        "summary": "string (non-empty)",
+        "evidence": "string (non-empty)",
+        "disposition": "auto-fix | ask-user | no-op"
+      }
+    ]
+  }
+}`
+const REVIEW_ENVELOPE_INTENT = ['Envelope schema proposed for ADR', '', '```json', REVIEW_ENVELOPE_SCHEMA, '```'].join('\n')
+
+test('H1 PR body preserves the proposed review envelope schema verbatim', () => {
+  const body = composePrBody({ intent: REVIEW_ENVELOPE_INTENT })
+  assert.equal(body.slice(0, REVIEW_ENVELOPE_INTENT.length), REVIEW_ENVELOPE_INTENT)
+  assert.equal(body.includes(REVIEW_ENVELOPE_SCHEMA), true)
+})
+
 function resumeCheckpointFixture(overrides = {}) {
   const file = { path: 'a.mjs', state: 'present', bytes: 'file:-:' + 'a'.repeat(64) }
   const returns = {

@@ -2863,7 +2863,7 @@ test('a directed run seats no planner, opens with directed:r1, and proves its ga
 
 test('declarations remain frozen and observed behaviour stays within their closed vocabulary', () => {
   assert.equal(Object.isFrozen(VARIANTS), true)
-  assert.deepEqual(VARIANT_NAMES, ['full', 'scout', 'repair', 'directed'])
+  assert.deepEqual(VARIANT_NAMES, ['full', 'scout', 'review_only', 'repair', 'directed'])
   assert.equal(VARIANTS.full.required_seats, 'tier')
   assert.match(VARIANTS.full.accepted_by, /review.*pass/)
   assert.match(VARIANTS.full.accepted_by, /lead accept/)

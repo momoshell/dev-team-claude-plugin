@@ -1,7 +1,7 @@
 # Escalation stages
 
 An escalation is a durable stage, not a verdict that the whole lane is dead.
-The tokens below are the stages emitted by `crew/drive.mjs`; the four
+The tokens below are the stages emitted by `crew/drive.mjs`; the five
 variant-named tokens come from the closed `VARIANTS` set. Match the exact token
 in the journal before choosing a move, and preserve the state directory while
 investigating.
@@ -30,6 +30,7 @@ investigating.
 | `escalate:scout` | The read-only scout envelope or scope check failed. | Read the scout return and confirm that it made no checkout writes. |
 | `escalate:repair` | The bounded repair shape returned a failed or malformed seat outcome. | Preserve the inherited failure context and triage note; do not widen repair scope. |
 | `escalate:directed` | The orchestrator-authored directed brief is not buildable as supplied. | Validate its one directed block, gate command, and write surface before editing. |
+| `escalate:review_only` | The read-only `review_only` shape could not return a structured review. The driver reports this stage as `envelope`: `crew/drive.mjs` maps `review_only` onto `envelope` before escalating, so this row documents the variant, not a token you will read in a journal. | Read the review envelope and confirm the run made no checkout writes. "No findings" is a measured outcome, so an absent or empty envelope is the failure — never a clean review. |
 | `escalate:harden` | The post-review hardening round did not settle. | Read the hardening bounce and the builder's last envelope before re-dispatching. |
 | `escalate:review-unresolved` | Review rounds ended with findings neither accepted nor refuted. | Preserve every finding and rebuttal; a human chooses the disposition. |
 | `escalate:rebase` | The lane could not rebase onto its base branch. | Inspect the conflict in the worktree; never force-push a lane branch. |

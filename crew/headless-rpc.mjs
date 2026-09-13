@@ -252,17 +252,18 @@ const RPC_NO_GRANTS = Object.freeze({ tools: [], extensions: [], agents: [], ski
 // gates extension tools, so activating `agent` is mandatory rather than
 // decorative. Unlike the pane, this path passes an argv array and a spawn env
 // object, so it needs no shell quoting. The pane composes a shell string and
-// must quote its values. There is no advisor mirror, no configDir mirror, and
-// skills are mirrored only as explicit paths; discovery stays off.
+// must quote its values. The adapter configDir is mirrored in the spawn environment; skills are
+// mirrored only as explicit paths; discovery stays off.
 export function rpcCommand(spec = {}) {
   const {
     bin = 'pi', model, effort, sessionDir, sessionId, resume, promptFile,
-    deny, env = {}, grants = RPC_NO_GRANTS,
+    deny, env = {}, grants = RPC_NO_GRANTS, configDir,
   } = spec
   const piDeny = translateDeny(deny)
   const extensions = [...new Set(grants?.extensions || [])]
   const activatedTools = piActivatedTools({ tools: grants?.tools, extensions, vendorExtensions: grants?.vendor_extensions, agents: grants?.agents || [] })
   const skills = grants?.skills || []
+  const configEnv = configDir !== null && configDir !== undefined ? { PI_CODING_AGENT_DIR: configDir } : {}
   return {
     bin,
     args: [
@@ -279,6 +280,7 @@ export function rpcCommand(spec = {}) {
     ],
     env: {
       ...env,
+      ...configEnv,
       ...(grants?.agents?.length
         ? { CREW_PI_AGENTS: JSON.stringify(grants.agents.map(({ name, def }) => ({ name, def }))) }
         : {}),
@@ -1231,6 +1233,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
       sessionId, resume, promptFile: join(taskDir || paths.taskDir, `role-${role}.md`),
       deny: member.deny, bin: bin || 'pi', taskDir: taskDir || paths.taskDir,
       grants: adapters?.[role]?.grants,
+      configDir: adapters?.[role]?.configDir,
       env: { ...process.env, DEVTEAM_WORKER: '1', CREW_ROLE: role, CREW_TASK_DIR: taskDir || paths.taskDir },
     })
     const args = command.args || []

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { appendFileSync as fsAppendFileSync, existsSync as fsExistsSync, mkdirSync, readFileSync, readdirSync as fsReaddirSync, writeFileSync } from 'node:fs'
+import { appendFileSync as fsAppendFileSync, existsSync as fsExistsSync, mkdirSync, readFileSync, readdirSync as fsReaddirSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
@@ -106,9 +106,15 @@ import {
   staffingFromBrief,
   resolveTransport,
   parsePlannerSymbolsHoldoutFraction,
+  parseCharterTerseHoldoutFraction,
+  parseBriefTripwiresHoldoutFraction,
   selectPlannerSymbolsArm,
+  selectCharterTerseArm,
+  selectBriefTripwiresArm,
   PLANNER_SYMBOLS_ARM_EVENT,
   PLANNER_SYMBOLS_EXPERIMENT,
+  CHARTER_TERSE_EXPERIMENT,
+  BRIEF_TRIPWIRES_EXPERIMENT,
   ROSTER_PATH,
   seatFloorRefusal,
   seatRolesUnseated,
@@ -123,7 +129,7 @@ import {
 } from '../scripts/factory/dispatch-batch.mjs'
 import { parseDirectedBrief, WAITS_S } from '../crew/drive.mjs'
 import { partitionShifts } from '../skills/qa-test-writing/anchor-pin.mjs'
-import { laneFenceFor, renderBrief, resolveWriteSurface } from '../scripts/factory/make-brief.mjs'
+import { crossCheckCoupling, discoverTripwires, laneFenceFor, renderBrief, resolveWriteSurface, verifyWhere, writePack } from '../scripts/factory/make-brief.mjs'
 import { scratchDir } from './helpers.mjs'
 
 test('E1 journals sourced admissions and refuses an unsourced admission', async () => {
@@ -3201,6 +3207,299 @@ test('--dry-run plans branch probes but creates no worktree', async () => {
   })
   assert.equal(report.dryRun, true)
   assert.equal(spawned.some(({ args }) => args.includes('worktree')), false)
+})
+
+test('new holdout parsers and selectors use closed canonical values', () => {
+  for (const [parse, values] of [
+    [parseCharterTerseHoldoutFraction, [0, 1, 0.5]],
+    [parseBriefTripwiresHoldoutFraction, [0, 1, 0.5]],
+  ]) {
+    for (const value of values) assert.equal(parse(value), value)
+    for (const value of ['', 'NaN', 'Infinity', '-0.1', '1.1', ' 0.5', '0.5x']) {
+      assert.throws(() => parse(value), (error) => error instanceof BatchRefusal && error.reason === 'batch-unreadable')
+    }
+    assert.equal(parse(null), null)
+  }
+  assert.equal(selectCharterTerseArm(0.5, () => 0.1), 'control')
+  assert.equal(selectCharterTerseArm(0.5, () => 0.9), 'terse-tail')
+  assert.equal(selectBriefTripwiresArm(0.5, () => 0.1), 'control')
+  assert.equal(selectBriefTripwiresArm(0.5, () => 0.9), 'tripwires-omitted')
+})
+
+test('multi-experiment enrollment draws in fixed order and records plural metadata and rows', async () => {
+  const draws = [0.1, 0.9]
+  let calls = 0
+  const result = await dispatchFixture({
+    label: 'multi-experiment-order', names: ['lane-a'],
+    runFlags: { 'planner-symbols-holdout-fraction': '0.5', 'charter-terse-holdout-fraction': '0.5' },
+    random: () => draws[calls++],
+  })
+  assert.equal(calls, 2)
+  const record = JSON.parse(readFileSync(join(result.out, 'lane-a.dispatch.json'), 'utf8'))
+  assert.deepEqual(record.experiments, [
+    { name: PLANNER_SYMBOLS_EXPERIMENT, arm: 'control', fraction: 0.5 },
+    { name: CHARTER_TERSE_EXPERIMENT, arm: 'terse-tail', fraction: 0.5 },
+  ])
+  assert.deepEqual(result.appended.map(({ content }) => {
+    const row = JSON.parse(content)
+    return { event: row.event, role: row.role, experiment: row.experiment, arm: row.arm, fraction: row.fraction }
+  }), [
+    { event: PLANNER_SYMBOLS_ARM_EVENT, role: 'planner', experiment: PLANNER_SYMBOLS_EXPERIMENT, arm: 'control', fraction: 0.5 },
+    { event: PLANNER_SYMBOLS_ARM_EVENT, role: 'planner', experiment: CHARTER_TERSE_EXPERIMENT, arm: 'terse-tail', fraction: 0.5 },
+  ])
+})
+
+test('pack experiments refuse simultaneous planner-symbols and brief-tripwires enrollment before draws', async () => {
+  let calls = 0
+  await assert.rejects(() => dispatchFixture({
+    label: 'pack-experiment-conflict', names: ['lane-a'],
+    runFlags: { 'planner-symbols-holdout-fraction': '0.5', 'brief-tripwires-holdout-fraction': '0.5' },
+    random: () => { calls += 1; throw new Error('draw must not run') },
+  }), (error) => error instanceof BatchRefusal
+    && error.reason === 'batch-unreadable'
+    && error.message.includes('--planner-symbols-holdout-fraction')
+    && error.message.includes('--brief-tripwires-holdout-fraction'))
+  assert.equal(calls, 0)
+})
+
+test('brief-tripwires treatment selects the scalar tripwires pack omission', async () => {
+  const result = await dispatchFixture({
+    label: 'tripwires-omission', names: ['lane-a'],
+    runFlags: { 'brief-tripwires-holdout-fraction': '0' },
+    random: () => 0.9,
+  })
+  const compile = result.spawned.find(({ args }) => args.includes('--out'))
+  assert.equal(compile.args[compile.args.indexOf('--pack-omission') + 1], 'tripwires')
+})
+
+test('D2', async () => {
+  const result = await dispatchFixture({
+    label: 'd2-live-symbols', names: ['lane-a'],
+    runFlags: { 'planner-symbols-holdout-fraction': '0' },
+    random: () => 0.9,
+  })
+  const compile = result.spawned.find(({ args }) => args.includes('--out'))
+  assert.equal(compile.args[compile.args.indexOf('--pack-omission') + 1], 'symbols')
+})
+
+test('D3', async () => {
+  const result = await dispatchFixture({
+    label: 'd3-live-record', names: ['lane-a'],
+    runFlags: { 'planner-symbols-holdout-fraction': '1' },
+    random: () => 0.9,
+  })
+  const record = JSON.parse(readFileSync(join(result.out, 'lane-a.dispatch.json'), 'utf8'))
+  assert.deepEqual(record.experiment, { name: PLANNER_SYMBOLS_EXPERIMENT, arm: 'control', fraction: 1 })
+})
+
+test('D4', async () => {
+  const result = await dispatchFixture({
+    label: 'd4-live-journal', names: ['lane-a'],
+    runFlags: { 'planner-symbols-holdout-fraction': '1' },
+    random: () => 0.9,
+  })
+  const row = JSON.parse(result.appended[0].content)
+  assert.deepEqual(row, {
+    at: row.at,
+    event: PLANNER_SYMBOLS_ARM_EVENT,
+    role: 'planner',
+    experiment: PLANNER_SYMBOLS_EXPERIMENT,
+    arm: 'control',
+    fraction: 1,
+  })
+})
+
+test('E3', async () => {
+  const result = await dispatchFixture({
+    label: 'e3-live-charter-treatment', names: ['lane-a'],
+    runFlags: { 'charter-terse-holdout-fraction': '0' },
+    random: () => 0.9,
+  })
+  const boot = result.spawned.find(({ args }) => args.includes('boot'))
+  const index = boot.args.indexOf('--charter-arm')
+  assert.equal(index >= 0, true)
+  assert.deepEqual(boot.args.slice(index, index + 2), ['--charter-arm', 'terse-tail'])
+  assert.equal(boot.args.filter((arg) => arg === '--charter-arm').length, 1)
+})
+
+test('E4', async () => {
+  const result = await dispatchFixture({
+    label: 'e4-live-charter-control', names: ['lane-a'],
+    runFlags: { 'charter-terse-holdout-fraction': '1' },
+    random: () => 0.9,
+  })
+  const boot = result.spawned.find(({ args }) => args.includes('boot'))
+  assert.equal(boot.args.includes('--charter-arm'), false)
+  const record = JSON.parse(readFileSync(join(result.out, 'lane-a.dispatch.json'), 'utf8'))
+  assert.deepEqual(record.experiments, [{ name: CHARTER_TERSE_EXPERIMENT, arm: 'control', fraction: 1 }])
+})
+
+test('unenrolled paths omit plural experiment metadata and charter control adds no boot argv', async () => {
+  const plain = await dispatchFixture({ label: 'experiment-unenrolled', names: ['lane-a'] })
+  const plainRecord = JSON.parse(readFileSync(join(plain.out, 'lane-a.dispatch.json'), 'utf8'))
+  assert.equal(Object.hasOwn(plainRecord, 'experiment'), false)
+  assert.equal(Object.hasOwn(plainRecord, 'experiments'), false)
+  assert.equal(plain.spawned.find(({ args }) => args.includes('boot')).args.includes('--charter-arm'), false)
+  const control = await dispatchFixture({
+    label: 'experiment-charter-control', names: ['lane-a'],
+    runFlags: { 'charter-terse-holdout-fraction': '1' }, random: () => 0,
+  })
+  const controlRecord = JSON.parse(readFileSync(join(control.out, 'lane-a.dispatch.json'), 'utf8'))
+  assert.deepEqual(controlRecord.experiments, [{ name: CHARTER_TERSE_EXPERIMENT, arm: 'control', fraction: 1 }])
+  assert.equal(control.spawned.find(({ args }) => args.includes('boot')).args.includes('--charter-arm'), false)
+})
+
+test('H1 tripwires treatment omits vocabulary from every delivered artifact', () => {
+  const dir = scratchDir('dispatch-pack-pair-')
+  try {
+    const checkout = join(dir, 'checkout')
+    const probe = 'probe/widget.mjs'
+    mkdirSync(join(checkout, 'probe'), { recursive: true })
+    writeFileSync(join(checkout, probe), "export function b682ProbeWidget() { return 'b682-probe-widget' }\nexport const B682_PROBE_TOKEN = 'b682-probe-token'\n")
+    writeFileSync(join(checkout, 'probe', 'consumer.mjs'), "// consumes probe/widget.mjs\nimport { b682ProbeWidget } from './widget.mjs'\nexport const consumed = b682ProbeWidget()\n")
+    writeFileSync(join(checkout, 'probe', 'widget.test.mjs'), "import assert from 'node:assert/strict'\nimport { test } from 'node:test'\nimport { B682_PROBE_TOKEN, b682ProbeWidget } from './widget.mjs'\ntest('b682 probe widget', () => {\n  assert.equal(b682ProbeWidget(), 'b682-probe-widget')\n  assert.equal(B682_PROBE_TOKEN, 'b682-probe-token')\n})\n")
+    writeFileSync(join(checkout, 'package.json'), '{"name":"b682-probe","scripts":{"test":"node --test probe/widget.test.mjs"}}\n')
+    for (const gitArgs of [['-C', checkout, 'init', '-q', '.'], ['-C', checkout, 'add', '-A']]) {
+      const result = spawnSync('git', gitArgs, { encoding: 'utf8' })
+      assert.equal(result.status, 0, `git ${gitArgs.join(' ')}: ${result.stderr || result.error?.message || 'no status'}`)
+    }
+
+    const controlDir = join(dir, 'control')
+    const treatmentDir = join(dir, 'treatment')
+    mkdirSync(controlDir)
+    mkdirSync(treatmentDir)
+    writeFileSync(join(treatmentDir, 'probe.tripwires.txt'), 'stale vocabulary\n')
+    writeFileSync(join(treatmentDir, 'probe.tripwires.md'), 'stale rows\n')
+    const journalPath = join(dir, 'distinctive.jsonl')
+    writeFileSync(journalPath, '{"event":"distinctive-tripwire-fixture"}\n')
+    const request = {
+      ask: `Preserve distinctive pack artifacts from ${journalPath}.`,
+      done_means: 'Only tripwire artifacts are omitted.', out_of_scope: 'Everything else.',
+    }
+    const where = verifyWhere({ checkout, where: [probe] })
+    const discovery = discoverTripwires({ checkout, files: where })
+    const fences = [{ lane: 'probe', files: [probe] }]
+    const writeSurface = resolveWriteSurface({ fences, lane: 'probe', where })
+    const coupling = crossCheckCoupling({ discovery, writeSurface, enforce: false })
+    assert.ok(Array.isArray(discovery.tripwires) && discovery.tripwires.length > 0, 'fixture must discover a tripwire')
+    assert.ok(Array.isArray(coupling.coupled) && coupling.coupled.length > 0, 'fixture must discover a coupled source')
+    const args = { taskName: 'probe', checkout, request, discovery, writeSurface, coupling, profile: null }
+    const control = writePack({ ...args, packDir: controlDir })
+    const treatment = writePack({ ...args, packDir: treatmentDir, omission: 'tripwires' })
+    assert.equal(control.vocabulary !== null && control.rows !== null, true)
+    assert.equal(treatment.vocabulary, null)
+    assert.equal(treatment.rows, null)
+    assert.equal(fsExistsSync(join(treatmentDir, 'probe.tripwires.txt')), false)
+    assert.equal(fsExistsSync(join(treatmentDir, 'probe.tripwires.md')), false)
+    const gathered = {
+      request, where, discovery, coupling, writeSurface, fences, lane: 'probe',
+      baseline: { lane: null, pass: null, fail: null, status: 'unknown', reason: 'not-gathered' },
+    }
+    const controlBrief = renderBrief({ ...gathered, pack: control })
+    const treatmentBrief = renderBrief({ ...gathered, pack: treatment })
+    assert.match(treatmentBrief, /^tripwires: omitted by brief-tripwires experiment$/m)
+    assert.equal(treatmentBrief.includes('.tripwires.txt'), false)
+    assert.equal(treatmentBrief.includes('.tripwires.md'), false)
+    assert.equal(/vocabulary: null|rows: null/.test(treatmentBrief), false)
+    const vocabulary = readFileSync(control.vocabulary, 'utf8').trim().split('\n').filter(Boolean)
+    const disclosure = `grep -rn "${vocabulary.join('\\|')}" crew/ test/ scripts/ docs/`
+    const treatmentArtifacts = [['brief', treatmentBrief]]
+    for (const [name, path] of Object.entries(treatment)) {
+      if (typeof path !== 'string' || !fsExistsSync(path)) continue
+      treatmentArtifacts.push([name, readFileSync(path, 'utf8')])
+    }
+    assert.equal(treatmentArtifacts.some(([, text]) => text.includes(disclosure)), false)
+    for (const { file } of discovery.tripwires) assert.equal(treatmentBrief.includes(file), false)
+    assert.ok(controlBrief.includes(control.vocabulary))
+    assert.ok(controlBrief.includes(control.rows))
+    for (const key of ['conventions', 'fixture', 'symbols', 'coupled']) {
+      assert.ok(control[key] && treatment[key], `${key} should remain present`)
+      assert.deepEqual(readFileSync(control[key]), readFileSync(treatment[key]), `${key} should remain byte-identical`)
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('RV1-1 omits tripwire files from treatment validation lane', () => {
+  const discovery = {
+    candidates: ['probe/secret.test.mjs'],
+    tripwires: [{ file: 'probe/secret.test.mjs', keys: ['B682_SECRET'] }],
+    broadKeys: [],
+    keys: ['B682_SECRET'],
+  }
+  const gathered = {
+    request: {
+      ask: 'Keep tripwire details withheld.',
+      done_means: 'Tripwire files stay hidden in treatment.',
+      out_of_scope: 'No unrelated changes.',
+    },
+    where: [],
+    discovery,
+    coupling: { coupled: [] },
+    writeSurface: { files: [], basis: 'fences', lane: 'probe' },
+    fences: [],
+    baseline: { lane: null, pass: null, fail: null, status: 'unknown', reason: 'not-gathered' },
+  }
+  const pack = {
+    conventions: '/tmp/probe.conventions.md',
+    fixture: null,
+    symbols: null,
+    coupled: null,
+    counts: { readAndKeepGreen: 0 },
+    issue: { number: null, body: null, reason: 'no-issue-cited' },
+    lineCounts: [],
+    tree: [],
+    journal: { reason: 'no-journal-named' },
+  }
+  const control = renderBrief({ ...gathered, pack: { ...pack, vocabulary: '/tmp/probe.tripwires.txt', rows: '/tmp/probe.tripwires.md' } })
+  const treatment = renderBrief({ ...gathered, pack: { ...pack, vocabulary: null, rows: null } })
+  const validationSection = (brief) => {
+    const section = brief.split('## Validation lane\n')[1]?.split('\n## Conventions')[0]
+    assert.ok(section, 'brief must include a validation lane section')
+    return section
+  }
+  const controlValidation = validationSection(control)
+  const treatmentValidation = validationSection(treatment)
+  assert.match(treatmentValidation, /^narrow: tripwires omitted by brief-tripwires experiment$/m)
+  for (const { file } of discovery.tripwires) {
+    assert.equal(controlValidation.includes(file), true, `control validation lane must name ${file}`)
+    assert.equal(treatmentValidation.includes(file), false, `treatment validation lane must not name ${file}`)
+  }
+})
+
+test('RV1-1 ordinary packed conventions pointer does not promise the removed grep', () => {
+  const conventions = '/tmp/probe.conventions.md'
+  const brief = renderBrief({
+    request: {
+      ask: 'Keep the packed conventions pointer honest.',
+      done_means: 'The pointer names only delivered sidecar contents.',
+      out_of_scope: 'No unrelated changes.',
+    },
+    where: [],
+    discovery: { candidates: [], tripwires: [], broadKeys: [], keys: [] },
+    coupling: { coupled: [] },
+    writeSurface: { files: [], basis: 'fences', lane: 'probe' },
+    fences: [],
+    baseline: { lane: null, pass: null, fail: null, status: 'unknown', reason: 'not-gathered' },
+    pack: {
+      conventions,
+      vocabulary: '/tmp/probe.tripwires.txt',
+      rows: '/tmp/probe.tripwires.md',
+      fixture: null,
+      symbols: null,
+      coupled: null,
+      counts: { readAndKeepGreen: 0 },
+      issue: { number: null, body: null, reason: 'no-issue-cited' },
+      lineCounts: [],
+      tree: [],
+      journal: { reason: 'no-journal-named' },
+    },
+  })
+  const section = brief.split('## Conventions\n')[1]?.split('\n## ')[0]
+  assert.ok(section, 'brief must include a conventions section')
+  assert.ok(section.includes(`conventions: ${conventions} — the read-and-keep-green surface (0 file(s)), the conventions of record and the standing factory conventions; read it once with: cat ${conventions}`))
+  assert.doesNotMatch(section, /declare-every-hit grep/)
 })
 
 test('HoldB1', async () => {

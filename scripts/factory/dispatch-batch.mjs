@@ -168,6 +168,10 @@ export const COMPILE_REQUEST_SUFFIX = '.compile-request.json'
 export const PLANNER_SYMBOLS_ARM_EVENT = 'experiment-arm'
 export const PLANNER_SYMBOLS_EXPERIMENT = 'planner-symbols'
 export const PLANNER_SYMBOLS_ARMS = Object.freeze(['control', 'symbols-omitted'])
+export const CHARTER_TERSE_EXPERIMENT = 'charter-terse'
+export const CHARTER_TERSE_ARMS = Object.freeze(['control', 'terse-tail'])
+export const BRIEF_TRIPWIRES_EXPERIMENT = 'brief-tripwires'
+export const BRIEF_TRIPWIRES_ARMS = Object.freeze(['control', 'tripwires-omitted'])
 
 // #767: five boots were lost to pane-send mechanics on 2026-08-29 (b321 x1, b322 x2,
 // b325 x2), each with correct work on both sides of the send and each costing a whole
@@ -832,6 +836,39 @@ export function selectPlannerSymbolsArm(fraction, random = Math.random) {
   if (fraction === null) return null
   const draw = random()
   return draw < fraction ? 'control' : 'symbols-omitted'
+}
+
+function parseAdditionalHoldoutFraction(value, flag) {
+  if (value === undefined || value === null) return null
+  const text = typeof value === 'number' ? String(value) : value
+  if (typeof text !== 'string' || !/^(?:0(?:\.\d+)?|1(?:\.0+)?)$/.test(text)) {
+    refuse(`invalid ${flag} ${JSON.stringify(value)}; expected a canonical finite number in [0,1]`, BATCH_UNREADABLE)
+  }
+  const fraction = Number(text)
+  if (!Number.isFinite(fraction) || fraction < 0 || fraction > 1) {
+    refuse(`invalid ${flag} ${JSON.stringify(value)}; expected a canonical finite number in [0,1]`, BATCH_UNREADABLE)
+  }
+  return fraction
+}
+
+export function parseCharterTerseHoldoutFraction(value) {
+  return parseAdditionalHoldoutFraction(value, '--charter-terse-holdout-fraction')
+}
+
+export function parseBriefTripwiresHoldoutFraction(value) {
+  return parseAdditionalHoldoutFraction(value, '--brief-tripwires-holdout-fraction')
+}
+
+export function selectCharterTerseArm(fraction, random = Math.random) {
+  if (fraction === null) return null
+  const draw = random()
+  return draw < fraction ? 'control' : 'terse-tail'
+}
+
+export function selectBriefTripwiresArm(fraction, random = Math.random) {
+  if (fraction === null) return null
+  const draw = random()
+  return draw < fraction ? 'control' : 'tripwires-omitted'
 }
 
 function normaliseRepoPath(value) {
@@ -3130,7 +3167,7 @@ function recordIntent({ intent, crewPath, crewDir, lane, deps } = {}) {
   return { intent }
 }
 
-export function bootCommand({ lane, laneDir, tier, registerPath, transport, seats, runFlags = {} }) {
+export function bootCommand({ lane, laneDir, tier, registerPath, transport, seats, runFlags = {}, charterArm = 'control' }) {
   const tierArgs = ['--assurance', ASSURANCE_ALIASES[tier]]
   return {
     file: 'node',
@@ -3147,6 +3184,7 @@ export function bootCommand({ lane, laneDir, tier, registerPath, transport, seat
       ...shortfallFlagArgs(seats),
       ...memoryFlagArgs(runFlags),
       ...turnCeilingFlagArgs(runFlags),
+      ...(charterArm === 'terse-tail' ? ['--charter-arm', 'terse-tail'] : []),
       // crew.mjs boot knows no --panes flag (KNOWN_FLAGS.boot, crew/crew.mjs:2232):
       // a pane seat is what boot produces WITHOUT --headless-all, so the pane
       // transport is the ABSENCE of this flag, never a flag of its own.
@@ -3171,7 +3209,7 @@ function bootOnce({ item, registerPath, transport, runFlags, deps }) {
   const d = normalDeps(deps)
   let result
   const laneRegisterPath = item.runtimeRegisterPath || registerPath
-  try { result = d.spawn(bootCommand({ lane: item.lane, laneDir: item.plan.dir, tier: item.tier, registerPath: laneRegisterPath, transport, seats: item.seats, runFlags })) } catch (err) {
+  try { result = d.spawn(bootCommand({ lane: item.lane, laneDir: item.plan.dir, tier: item.tier, registerPath: laneRegisterPath, transport, seats: item.seats, runFlags, charterArm: item.charterArm })) } catch (err) {
     return { ok: false, result: null, floorReason: null, why: err?.message || String(err) }
   }
   if (result && result.status === 0) return { ok: true, result, floorReason: null, why: null }
@@ -3299,6 +3337,8 @@ function resumeCommand({ batchDir, fences, checkout, parentDir, outDir, tier, ex
   add('assurance', ASSURANCE_ALIASES[tier])
   add('baseline', runFlags.baseline)
   add('planner-symbols-holdout-fraction', runFlags['planner-symbols-holdout-fraction'])
+  add('charter-terse-holdout-fraction', runFlags['charter-terse-holdout-fraction'])
+  add('brief-tripwires-holdout-fraction', runFlags['brief-tripwires-holdout-fraction'])
   for (const spec of Array.isArray(runFlags.adopt) ? runFlags.adopt : (runFlags.adopt ? [runFlags.adopt] : [])) add('adopt', spec)
   for (const path of Array.isArray(runFlags[TURN_CENSUS_FLAG]) ? runFlags[TURN_CENSUS_FLAG] : (runFlags[TURN_CENSUS_FLAG] ? [runFlags[TURN_CENSUS_FLAG]] : [])) add(TURN_CENSUS_FLAG, path)
   for (const flag of [
@@ -3357,6 +3397,11 @@ function prepareDispatchContext(options) {
     deps,
   } = options
   const plannerSymbolsHoldoutFraction = parsePlannerSymbolsHoldoutFraction(runFlags['planner-symbols-holdout-fraction'])
+  const charterTerseHoldoutFraction = parseCharterTerseHoldoutFraction(runFlags['charter-terse-holdout-fraction'])
+  const briefTripwiresHoldoutFraction = parseBriefTripwiresHoldoutFraction(runFlags['brief-tripwires-holdout-fraction'])
+  if (plannerSymbolsHoldoutFraction !== null && briefTripwiresHoldoutFraction !== null) {
+    refuse('cannot combine --planner-symbols-holdout-fraction with --brief-tripwires-holdout-fraction because pack omission is scalar', BATCH_UNREADABLE)
+  }
   const d = normalDeps(deps)
   const transport = resolveTransport({ runFlags })
   const batchExecutionSpelling = runFlagSpelling(runFlags, 'execution', 'variant', '--execution', '--variant')
@@ -3494,6 +3539,8 @@ function prepareDispatchContext(options) {
     runFlags,
     deps,
     plannerSymbolsHoldoutFraction,
+    charterTerseHoldoutFraction,
+    briefTripwiresHoldoutFraction,
     batchExecutionSpelling,
     batchAssuranceSpelling,
     d,
@@ -3535,6 +3582,8 @@ async function compileDispatchWave(prepared) {
     registerPath,
     batchSeats,
     plannerSymbolsHoldoutFraction,
+    charterTerseHoldoutFraction,
+    briefTripwiresHoldoutFraction,
     batchExecutionSpelling,
     batchAssuranceSpelling,
     plans,
@@ -3600,10 +3649,27 @@ async function compileDispatchWave(prepared) {
   }
 
   const plannerSymbolsArms = new Map()
-  if (plannerSymbolsHoldoutFraction !== null) {
-    for (const lane of waveLanes) {
-      plannerSymbolsArms.set(lane.lane, selectPlannerSymbolsArm(plannerSymbolsHoldoutFraction, d.random))
+  const charterTerseArms = new Map()
+  const briefTripwiresArms = new Map()
+  const experimentEnrollments = new Map()
+  for (const lane of waveLanes) {
+    const enrollments = []
+    if (plannerSymbolsHoldoutFraction !== null) {
+      const arm = selectPlannerSymbolsArm(plannerSymbolsHoldoutFraction, d.random)
+      plannerSymbolsArms.set(lane.lane, arm)
+      enrollments.push({ name: PLANNER_SYMBOLS_EXPERIMENT, arm, fraction: plannerSymbolsHoldoutFraction })
     }
+    if (charterTerseHoldoutFraction !== null) {
+      const arm = selectCharterTerseArm(charterTerseHoldoutFraction, d.random)
+      charterTerseArms.set(lane.lane, arm)
+      enrollments.push({ name: CHARTER_TERSE_EXPERIMENT, arm, fraction: charterTerseHoldoutFraction })
+    }
+    if (briefTripwiresHoldoutFraction !== null) {
+      const arm = selectBriefTripwiresArm(briefTripwiresHoldoutFraction, d.random)
+      briefTripwiresArms.set(lane.lane, arm)
+      enrollments.push({ name: BRIEF_TRIPWIRES_EXPERIMENT, arm, fraction: briefTripwiresHoldoutFraction })
+    }
+    experimentEnrollments.set(lane.lane, enrollments)
   }
 
   const startCompile = (plan) => {
@@ -3616,7 +3682,9 @@ async function compileDispatchWave(prepared) {
       outDir: outputDir,
       fences,
       baselinePath,
-      packOmission: plannerSymbolsArms.get(plan.lane) === 'symbols-omitted' ? 'symbols' : null,
+      packOmission: plannerSymbolsArms.get(plan.lane) === 'symbols-omitted' ? 'symbols'
+        : briefTripwiresArms.get(plan.lane) === 'tripwires-omitted' ? 'tripwires'
+          : null,
       deps: d,
     })
     return atRisk(plan) ? runSerialised(compile) : compile()
@@ -3640,6 +3708,8 @@ async function compileDispatchWave(prepared) {
     const floor = tierFloor({ files: assuranceFiles, extra: runFlags.protectedPaths })
     const prompt = promptSurfaceVerdict({ files: assuranceFiles })
     const laneEntry = laneByName.get(item.lane)
+    const enrollments = experimentEnrollments.get(item.lane) || []
+    const charterArm = charterTerseArms.get(item.lane) || 'control'
     // A lane's own assurance is the requested tier for THAT lane; --assurance stays the
     // batch default for every lane that does not name one. A protected floor
     // raises a lower batch default, while an explicit lane assurance below it refuses.
@@ -3709,6 +3779,7 @@ async function compileDispatchWave(prepared) {
           fraction: plannerSymbolsHoldoutFraction,
         },
       }),
+      ...(enrollments.length > 0 ? { experiments: enrollments } : {}),
     }
     try { writeFileSync(recordPath, JSON.stringify(record, null, 2) + '\n') } catch (err) {
       refuse(`cannot write dispatch record ${recordPath}: ${err?.message || String(err)}`, COMPILE_REFUSED)
@@ -3719,7 +3790,7 @@ async function compileDispatchWave(prepared) {
       outDir: outputDir,
       d,
     })
-    settled.push({ ...item, plan, floor, prompt, tier: result.tier, execution: laneExecution, variant: laneVariant, seats, staffing, record: recordPath, runtimeRegisterPath })
+    settled.push({ ...item, plan, floor, prompt, tier: result.tier, execution: laneExecution, variant: laneVariant, seats, staffing, charterArm, enrollments, record: recordPath, runtimeRegisterPath })
   }
 
   // #658: every lane whose plan IS its brief is validated before ANY lane boots — the brief is
@@ -3747,8 +3818,6 @@ function launchDispatchWave(compiled) {
     adoptions,
     keep,
     root,
-    plannerSymbolsArms,
-    plannerSymbolsHoldoutFraction,
     settled,
     plans,
     outputDir,
@@ -3827,10 +3896,8 @@ function launchDispatchWave(compiled) {
     const crewDir = dirname(item.crewPath)
     const journal = join(crewDir, 'journal.jsonl')
     const runLog = join(crewDir, 'run.log')
-    const arm = plannerSymbolsArms.get(item.lane)
-    const fraction = plannerSymbolsHoldoutFraction
-    if (arm !== undefined) {
-      const row = { at: new Date().toISOString(), event: PLANNER_SYMBOLS_ARM_EVENT, role: 'planner', experiment: PLANNER_SYMBOLS_EXPERIMENT, arm, fraction }
+    for (const enrollment of item.enrollments || []) {
+      const row = { at: new Date().toISOString(), event: PLANNER_SYMBOLS_ARM_EVENT, role: 'planner', experiment: enrollment.name, arm: enrollment.arm, fraction: enrollment.fraction }
       try {
         d.appendFileSync(journal, `${JSON.stringify(row)}\n`)
       } catch (err) {
@@ -3916,7 +3983,7 @@ export function parseCliArgs(argv) {
   const flags = {}
   const positional = []
   const valueFlags = new Set([
-    'batch', 'fences', 'checkout', 'parent', 'out', 'tier', 'assurance', 'execution', 'variant', 'wave', 'planner-symbols-holdout-fraction',
+    'batch', 'fences', 'checkout', 'parent', 'out', 'tier', 'assurance', 'execution', 'variant', 'wave', 'planner-symbols-holdout-fraction', 'charter-terse-holdout-fraction', 'brief-tripwires-holdout-fraction',
     'plan-rounds', 'build-rounds', 'review-rounds', 'wait-builder', 'wait-planner',
     'wait-reviewer', 'wait-lead', 'wait-tech-lead', 'validation-lane', 'suite', 'baseline',
     TURN_CENSUS_FLAG,

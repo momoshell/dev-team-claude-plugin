@@ -155,6 +155,9 @@ export const MEMORY_ROLES = Object.freeze(['lead', 'planner'])
 // Must stay key-identical to SEAT_DEFAULTS (pinned by a test).
 export const ROLE_ORDER = Object.freeze(['lead', 'planner', 'builder', 'reviewer', 'tech-lead'])
 
+const CHARTER_ARMS = Object.freeze(['control', 'terse-tail'])
+const CHARTER_TERSE_TAIL = '\n\nBe terse: state the result in the fewest words that carry it, and do not restate context the reader already has.\n'
+
 // Every FANOUT_TOOLS name this role's seat default withholds. The deny string
 // IS the seat's charter boundary, so this is the register-vs-charter comparison
 // the boot refusal below makes.
@@ -1883,7 +1886,12 @@ export function charterBytesRecord(taskDir, roles, sections = {}, deps = {}) {
   return { bytes, base, memory_bytes, ...(Object.keys(unmeasured).length ? { unmeasured } : {}) }
 }
 
-function writeRolePrompt(role, taskDir, section = '') {
+export function composeRolePrompt(shared, card, section = '', charterArm = 'control') {
+  const control = `${shared}\n\n${card}${section ? `\n\n${section}` : ''}`
+  return charterArm === 'terse-tail' ? `${control}${CHARTER_TERSE_TAIL}` : control
+}
+
+function writeRolePrompt(role, taskDir, section = '', charterArm = 'control') {
   const seat = SEAT_DEFAULTS[role]
   // --append-system-prompt-file is LAST-WINS, not cumulative (verified against
   // claude 2.1.229): passing shared + role as two flags silently drops shared.
@@ -1892,7 +1900,7 @@ function writeRolePrompt(role, taskDir, section = '') {
   const merged = join(taskDir, `role-${role}.md`)
   const shared = readFileSync(SHARED_PROMPT, 'utf8')
   const card = readFileSync(join(ROLES_DIR, seat.prompt), 'utf8')
-  writeFileSync(merged, `${shared}\n\n${card}${section ? `\n\n${section}` : ''}`)
+  writeFileSync(merged, composeRolePrompt(shared, card, section, charterArm))
   return merged
 }
 
@@ -2004,6 +2012,10 @@ export async function bootCmd(args, deps = {}) {
   // Capture the invocation environment before async adapter resolution so the
   // breaker and host-load policies cannot be lost while boot is awaiting imports.
   const bootEnv = { ...process.env }
+  const charterArm = args['charter-arm'] ?? 'control'
+  if (!CHARTER_ARMS.includes(charterArm)) {
+    throw new Error(`invalid --charter-arm ${JSON.stringify(charterArm)}; expected one of ${CHARTER_ARMS.join('|')}`)
+  }
   // TRD §4.4: boot owns profile and assurance; execution belongs to run, so
   // boot deliberately neither resolves nor persists the execution axis here.
   let configuration
@@ -2205,7 +2217,7 @@ export async function bootCmd(args, deps = {}) {
 
   const bootBrief = `Crew for task ${taskSlug}. Task dir ${paths.taskDir}. Read your role in the system prompt, reply exactly ready: your-role, then wait.`
   const memory = memoryExtracts(roles, args, taskSlug)
-  for (const role of roles) writeRolePrompt(role, paths.taskDir, memory.sections[role] || '')
+  for (const role of roles) writeRolePrompt(role, paths.taskDir, memory.sections[role] || '', charterArm)
   const charter = charterBytesRecord(paths.taskDir, roles, memory.sections)
   // Materialise every register-authoritative Claude MCP set before composing a
   // command or creating a workspace. A failed write is a boot failure: strict
@@ -3767,7 +3779,7 @@ export function parseArgs(argv) {
 }
 
 export const KNOWN_FLAGS = Object.freeze({
-  boot: Object.freeze(['task', 'checkout', 'roles', 'tier', 'fences', 'lane', 'headless', 'headless-rpc', 'headless-all', 'memory-dir', 'memory-backend', 'memory-budget-bytes', 'claude-bin', 'profile', 'assurance', 'roster', ...TURN_CEILING_FLAGS]),
+  boot: Object.freeze(['task', 'checkout', 'roles', 'tier', 'fences', 'lane', 'headless', 'headless-rpc', 'headless-all', 'memory-dir', 'memory-backend', 'memory-budget-bytes', 'claude-bin', 'profile', 'assurance', 'roster', 'charter-arm', ...TURN_CEILING_FLAGS]),
   run: Object.freeze(['task', 'checkout', 'brief-file', 'variant', 'execution', 'files-in-scope', 'validation-lane', 'lane', 'plan-rounds', 'build-rounds', 'review-rounds', ...WAIT_FLAGS, 'suite', 'keep', 'claude-bin']),
   resume: Object.freeze(['task', 'checkout', 'suite', 'keep']),
   handoff: Object.freeze(['task', 'checkout', 'brief-file']),
@@ -3788,7 +3800,7 @@ export const FLAG_VALUE_REFUSAL = 'invalid-flag-value'
 export const FLAG_VALUE_CONTRACT = Object.freeze({
   task: 'value', checkout: 'value', roles: 'value', tier: 'value',
   fences: 'value', lane: 'value', 'brief-file': 'value', variant: 'value',
-  profile: 'value', execution: 'value', assurance: 'value', roster: 'value',
+  profile: 'value', execution: 'value', assurance: 'value', roster: 'value', 'charter-arm': 'value',
   'files-in-scope': 'value', 'validation-lane': 'value',
   'plan-rounds': 'value', 'build-rounds': 'value', 'review-rounds': 'value',
   ...Object.fromEntries(WAIT_FLAGS.map((flag) => [flag, 'value'])),

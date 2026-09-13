@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url'
 import { ROOT } from './helpers.mjs'
 import {
   openLedger, EVENT_TYPES, LedgerUsageError, WRITERS, NODE_FLOOR, isLockedError,
+  PLANNER_SYMBOLS_ARMS, CHARTER_TERSE_ARMS, BRIEF_TRIPWIRES_ARMS, EXPERIMENT_REGISTRY,
 } from '../scripts/factory/ledger.mjs'
 
 const SCRIPT = join(ROOT, 'scripts', 'factory', 'ledger.mjs')
@@ -93,6 +94,44 @@ function degradedHandle(extra = {}) {
     ...extra,
   })
 }
+
+test('A1 records the charter-terse treatment through the closed registry', () => {
+  const ledger = degradedHandle()
+  const row = ledger.recordExperimentArm({
+    adw_id: 'charter-a1', role: 'planner', experiment: 'charter-terse', arm: 'terse-tail',
+    fraction: 0.1, at_ms: 1, created_at: '2030-01-01T00:00:00.000Z',
+  })
+  assert.equal(row.experiment, 'charter-terse')
+  assert.equal(row.arm, 'terse-tail')
+})
+
+test('B1 rejects a charter-terse arm outside its closed enum', () => {
+  const ledger = degradedHandle()
+  assert.throws(() => ledger.recordExperimentArm({
+    adw_id: 'charter-b1', role: 'planner', experiment: 'charter-terse', arm: 'free-text',
+    fraction: 0.1,
+  }), /recordExperimentArm: field 'arm' must be one of control\\|terse-tail/)
+})
+
+test('C1 rejects an unknown experiment before arm lookup', () => {
+  const ledger = degradedHandle()
+  assert.throws(() => ledger.recordExperimentArm({
+    adw_id: 'charter-c1', role: 'planner', experiment: 'unknown-experiment', arm: 'control',
+    fraction: 0.1,
+  }), /recordExperimentArm: field 'experiment' must be one of/)
+})
+
+test('D1 pins the frozen experiment registry and planner-symbols identity', () => {
+  assert.deepEqual(PLANNER_SYMBOLS_ARMS, ['control', 'symbols-omitted'])
+  assert.deepEqual(CHARTER_TERSE_ARMS, ['control', 'terse-tail'])
+  assert.deepEqual(BRIEF_TRIPWIRES_ARMS, ['control', 'tripwires-omitted'])
+  assert.deepEqual(Object.keys(EXPERIMENT_REGISTRY), ['planner-symbols', 'charter-terse', 'brief-tripwires'])
+  assert.equal(EXPERIMENT_REGISTRY['planner-symbols'], PLANNER_SYMBOLS_ARMS)
+  assert.equal(Object.isFrozen(PLANNER_SYMBOLS_ARMS), true)
+  assert.equal(Object.isFrozen(CHARTER_TERSE_ARMS), true)
+  assert.equal(Object.isFrozen(BRIEF_TRIPWIRES_ARMS), true)
+  assert.equal(Object.isFrozen(EXPERIMENT_REGISTRY), true)
+})
 
 // --- AC-2: closed event enum -----------------------------------------------
 

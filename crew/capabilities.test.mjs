@@ -13,7 +13,7 @@ import {
 import { seatCommand as claudeSeatCommand, capabilitiesFor } from './adapters/adapter-claude.mjs'
 import { seatCommand as piSeatCommand, capabilitiesFor as piCapabilitiesFor, PI_FIRST_PARTY_EXTENSION_TOOLS, PI_BUILTIN_TOOLS, PI_PROVIDERS } from './adapters/adapter-pi.mjs'
 import { scratchDir } from '../test/helpers.mjs'
-import { NARRATION_TIMEOUT_SECONDS, narratorCommand } from './drive.mjs'
+import { NARRATION_BACKSTOP_SECONDS, NARRATION_CONNECT_TIMEOUT_SECONDS, NARRATION_MIN_BYTES_PER_SECOND, NARRATION_STALL_SECONDS, narratorCommand } from './drive.mjs'
 
 test('G1T freezes the exhaustive first-party extension declaration table and matches registrars', () => {
   const expected = {
@@ -1233,15 +1233,22 @@ test('unexpected root capability declarations remain closed outside seatability 
   assert.throws(() => loadCapabilities({ register: invalid }), (err) => err.reason === 'register-invalid')
 })
 
-test('E1 narrator model description and command share the measured 30 second budget', () => {
+test('F1 narrator model description and command share the measured streaming policy', () => {
   const schema = JSON.parse(readFileSync(new URL('./capabilities.schema.json', import.meta.url), 'utf8'))
   const description = schema.$defs.localprovider.properties.model.description
-  assert.equal(NARRATION_TIMEOUT_SECONDS, 30)
-  assert.match(description, new RegExp(`\\b${NARRATION_TIMEOUT_SECONDS}-second\\b`))
-  assert.match(description, /cold model loading occurs inside it/)
+  assert.deepEqual({ connect: NARRATION_CONNECT_TIMEOUT_SECONDS, minimum: NARRATION_MIN_BYTES_PER_SECOND, stall: NARRATION_STALL_SECONDS, backstop: NARRATION_BACKSTOP_SECONDS }, {
+    connect: 10, minimum: 1, stall: 60, backstop: 300,
+  })
+  for (const phrase of [
+    /streams completion progress/, /1 byte per second/, /60 seconds/, /10-second connection timeout/, /300-second absolute backstop/,
+    /28\.345s/, /29\.305s/, /6\.6s/, /12\.6s/, /35\.2s warm \/ 44\.0s cold/, /continued progress rather than total duration governs acceptance/,
+  ]) assert.match(description, phrase)
+  assert.doesNotMatch(description, /30-second wall|cold model loading occurs inside it/)
   const command = narratorCommand({ root: 'http://127.0.0.1:11434/v1', model: 'gpt-oss-20b', prompt: 'hello' })
-  assert.match(command, new RegExp(`--max-time ${NARRATION_TIMEOUT_SECONDS}(?:\\s|$)`))
-  assert.match(command, /curl -sS --max-time 30 -X POST/)
+  for (const [flag, value] of [['--connect-timeout', NARRATION_CONNECT_TIMEOUT_SECONDS], ['--speed-limit', NARRATION_MIN_BYTES_PER_SECOND], ['--speed-time', NARRATION_STALL_SECONDS], ['--max-time', NARRATION_BACKSTOP_SECONDS]]) {
+    assert.match(command, new RegExp(`${flag} ${value}(?:\\s|$)`))
+  }
+  assert.match(command, /"stream":true/)
 })
 
 test('G1 local provider schema remains closed', () => {

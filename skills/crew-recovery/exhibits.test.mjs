@@ -168,3 +168,11 @@ test('mutation proof preserves first and mutates in a detached worktree', () => 
   }
   assert.equal(text.includes('git archive HEAD | tar -x'), false)
 })
+
+// Mutation killed: removing the bounded frozen-pin route from the existing suite row leaves the operator without its refusal contract.
+test('H1 suite escalation documentation names the bounded frozen-pin repair', () => {
+  const text = readText(join(HERE, 'references/escalations.md'))
+  const sentence = 'An already-scoped frozen pin gets one data-only post-commit repair; identity, logic, held-scope, protected-path, and repeat repairs still refuse.'
+  assert.equal(text.split(sentence).length - 1, 1)
+  assert.match(text, /Compare the repair journal row and envelope report\./)
+})

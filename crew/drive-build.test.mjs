@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import {
   B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_IMPL_FILE, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, B384_CORRECTED_FIND, B384_CORRECTED_REPLACE, B384_GREEN, B384_MUTATION, B384_RED, B384_REFACTORED_BUILDER, B384_REFACTORED_UNCORRECTED_BUILDER, B44_LEADLESS_CTX, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_PLAN, CHECK_RUNS, CONVERGE_CTX, CONVERGE_GATE, CONVERGE_PLAN, CTX, CTX_DIRECTED, CTX_REPAIR, DIRECTED_FILES, D_ASK, D_AUTO, ENVELOPE_FIELD_KINDS, EXECUTIONS, FAILURE_UPGRADE, GATE_REAP_CMD_EOF, GATE_REAP_SWEEP_MARKER, GATE_SUMMARY_PREFIX, HARDENING_MARKS, HARDENING_OUTCOMES, HARDENING_REFUSALS, MODIFIER_OUTCOMES, MUTATIONS_MAX, MUTATION_BINDING_FAILURES, MUTATION_CORRECTION_REFUSALS, MUTATION_OUTCOMES, PARTIAL_REVIEWED, RED, SENSITIVITY_FLOOR, SHAPE_MAJOR_PHASES, SHAPE_ROUNDED_STAGES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, UNIVERSAL_STAGE_HEADS, VALIDATION_LANE_UNLOADABLE, VARIANTS, VARIANT_NAMES, WRITE_SURFACES, applyMutationAnchor, applyPrescriptionLines, b127GatePaths, b127PidAlive, b318Builders, b318SiteA, b376Build, b376DiskProofIo, b376ProofIo, b376Review, b376StageStack, b384Io, b384RefactoredIo, b44AssertLeadlessGate, b44GatePlan, bindMutationAnchor, buildEnv, collapseStages, dispositionIo, driveTask, existsSync, fakeIo, fenceBase, fenceDiff, fenceSpan, gateReapCommand, gateReapFresh, gateReapOriginal, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, hardeningBounceLines, hardeningBriefLines, hardeningDebt, hardeningOf, join, laneFence, leadEnv, mutationChangesTokens, outOfScopeFiles, planEnv, protectedPlanEnv, readFileSync, resumeGreen, resumeRed, reviewConvergeRun, reviewEnv, reviewFindings, rmSync, s843Ctx, s843Io, s843PlanEnv, s843Rows, scopeMatcher, scopedPath, scratchDir, shapeDefect, spawnSync, stageShape, treeDigest, triageEnv, undeclaredStage, validateHardened, validateMutations, validationPlan, validationProbeRun, validationRows,
 } from './drive-fixtures.mjs'
-import { CENSUS_CARRIER_FILES, CHECK_MATCHES, HARDENING_APPEAL_SHAPE, HARDENING_CLASSES, LIMITS, hardeningAppealLines, hardeningAppealRequest, hardeningClassOf, mutationProofScope } from './drive.mjs'
+import { CENSUS_CARRIER_FILES, CHECK_MATCHES, FROZEN_FACTORY_ENV_FILE, FROZEN_INVENTORY_FILE, HARDENING_APPEAL_SHAPE, HARDENING_CLASSES, LIMITS, POST_COMMIT_FROZEN_REPAIR_MAX, classifyFrozenInventoryDelta, hardeningAppealLines, hardeningAppealRequest, hardeningClassOf, mutationProofScope } from './drive.mjs'
 import { openLedger, MUTATION_ANCHOR_REFUSALS } from '../scripts/factory/ledger.mjs'
 import { CENSUS_QUALIFYING_FILES, runCensusExhibits, selectCensusExhibits } from './census-exhibits.mjs'
 import { emitAdapter } from './seat-io.mjs'
@@ -16,6 +16,63 @@ const proofScopeMutations = () => [
   { check: 'first', file: 'a.mjs' },
   { check: 'second', file: 'b.mjs' },
 ]
+
+const frozenSourcePair = () => {
+  const current = readFileSync(FROZEN_INVENTORY_FILE, 'utf8')
+  const committed = current
+    .replace('test/visualizer-server.test.mjs:1672', 'test/visualizer-server.test.mjs:1649')
+    .replace('0ffdacdc5f084cb66b620ae9cd84c2b237f752f7c308803e8ea478b02a64d172', '1ffdacdc5f084cb66b620ae9cd84c2b237f752f7c308803e8ea478b02a64d172')
+  return { committed, current }
+}
+const frozenAuditedIdentity = (source, member) => source.split('\n').find((line) => line.includes(member)).match(/"([^"]+)"/)[1]
+
+const frozenPlan = () => planEnv({ details: { ...planEnv().details, files_in_scope: ['a.mjs', FROZEN_INVENTORY_FILE] } })
+const frozenRed = () => ({ ok: false, output: `not ok 1 - ${CTX.checkout}/${FROZEN_INVENTORY_FILE}:203\nnot ok 2 - ${CTX.checkout}/test/visualizer-server.test.mjs:365` })
+const frozenGreen = () => ({ ok: true, output: 'ok 1 - vacuity' })
+
+function frozenCycleIo({ suite = [frozenRed(), frozenGreen()], builder2 = null, builder3 = null, reviewer1 = reviewEnv('pass'), reviewer2 = reviewEnv('pass'), reviewer3 = reviewEnv('pass'), runs = {}, changed = null, ctx = {}, laneFence = undefined, protectedPaths = undefined, onSuite = null, onRun = null, commitResults = null, census = false } = {}) {
+  const { committed, current } = frozenSourcePair()
+  const frozenPath = `${CTX.checkout}/${FROZEN_INVENTORY_FILE}`
+  let io
+  const files = { [frozenPath]: committed }
+  const suiteRuns = Object.fromEntries(suite.map((result, index) => [`suite-cmd:${index + 1}`, result]))
+  const envelopes = {
+    'planner:1': frozenPlan(),
+    'builder:1': buildEnv(),
+    'builder:2': () => { if (builder2) builder2(files, frozenPath, current); return buildEnv() },
+    'builder:3': () => { if (builder3) builder3(files, frozenPath, current); return buildEnv() },
+    'reviewer:1': reviewer1,
+    'reviewer:2': reviewer2,
+    'reviewer:3': reviewer3,
+  }
+  io = fakeIo({
+    files,
+    envelopes,
+    runs: { 'lane-cmd': { ok: true, output: '' }, ...suiteRuns, ...runs },
+    changed: changed || [['a.mjs'], ['a.mjs'], [FROZEN_INVENTORY_FILE], [FROZEN_INVENTORY_FILE], [FROZEN_INVENTORY_FILE], [FROZEN_INVENTORY_FILE]],
+    commitResults,
+    ...(onRun ? { onRun } : {}),
+    ...(census ? { cleanRuns: {} } : {}),
+  })
+  const dynamic = { ...CTX, ...ctx }
+  if (laneFence !== undefined || protectedPaths !== undefined || onSuite) {
+    let activeFence = []
+    let activeProtected = []
+    Object.defineProperty(dynamic, 'laneFence', { configurable: true, get: () => activeFence })
+    Object.defineProperty(dynamic, 'protectedPaths', { configurable: true, get: () => activeProtected })
+    const activate = onSuite || ((hooks) => {
+      hooks.setFence(laneFence === undefined ? [] : laneFence)
+      hooks.setProtected(protectedPaths === undefined ? [] : protectedPaths)
+    })
+    const baseRun = io.run
+    io.run = (command) => {
+      const result = baseRun(command)
+      if (String(command) === CTX.suite || String(command) === 'suite-cmd') activate({ setFence: (value) => { activeFence = value }, setProtected: (value) => { activeProtected = value }, files, frozenPath })
+      return result
+    }
+  }
+  return { io, ctx: dynamic, files, frozenPath, committed, current }
+}
 
 test('A1 proof scope re-proves only changed mutation files', () => {
   const mutations = proofScopeMutations()
@@ -5415,4 +5472,221 @@ test('F1 builder reversion witness records an unmeasurable fingerprint as null w
   assert.deepEqual(currentUnknown, { paths: null, reason: 'fingerprint-unmeasurable', cause: 'current-interrupted', detail: 'partial snapshot' })
   assert.deepEqual(currentIo.calls.logs.filter((row) => row.scope_gate?.reversion?.paths).at(-1)?.scope_gate.reversion.paths, ['round-one.mjs'])
   assert.equal(currentIo.calls.commits.length, 0)
+})
+
+test('A1 moved frozen pins receive one post-commit repair and proceed', () => {
+  const fixture = frozenCycleIo({
+    builder2: (files, path, current) => { files[path] = current },
+  })
+  const result = driveTask(Object.assign(fixture.ctx, { limits: { build_rounds: 2 } }), fixture.io)
+  assert.equal(result.status, 'done')
+  assert.equal(fixture.io.calls.assign.filter(({ role }) => role === 'builder').length, 2)
+  assert.equal(fixture.io.calls.assign.filter(({ role }) => role === 'reviewer').length, 2)
+  assert.equal(fixture.io.calls.commits.length, 2)
+  assert.equal(fixture.io.calls.assign.find(({ role, note }) => role === 'builder' && note === 'frozen-inventory-fix')?.note, 'frozen-inventory-fix')
+  assert.equal(result.details.frozen_inventory_repairs.length, 1)
+  assert.deepEqual(result.details.frozen_inventory_repairs, fixture.io.calls.logs.filter((row) => row.frozen_inventory_repair).map((row) => row.frozen_inventory_repair))
+  assert.equal(result.details.frozen_inventory_repairs[0].files.length, 1)
+  assert.deepEqual(result.details.frozen_inventory_repairs[0].files.map(({ file }) => file), [FROZEN_INVENTORY_FILE])
+  assert.equal(result.details.frozen_inventory_repairs[0].files[0].changes.length, 2)
+})
+
+test('B2 frozen inventory repair permits only one re-entry', () => {
+  const fixture = frozenCycleIo({
+    suite: [frozenRed(), frozenRed()],
+    builder2: (files, path, current) => { files[path] = current },
+  })
+  const result = driveTask(Object.assign(fixture.ctx, { limits: { build_rounds: 2 } }), fixture.io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'suite')
+  assert.match(result.details.escalation.why, /one frozen inventory repair attempt is already spent/)
+  assert.equal(fixture.io.calls.assign.filter(({ role }) => role === 'builder').length, 2)
+  assert.equal(fixture.io.calls.commits.length, 2)
+  assert.equal(result.details.frozen_inventory_repairs.length, 1)
+  assert.equal(POST_COMMIT_FROZEN_REPAIR_MAX, 1)
+})
+
+test('C1 frozen inventory repair refuses detector regex and warranty logic edits', () => {
+  const source = readFileSync(FROZEN_INVENTORY_FILE, 'utf8')
+  const digest = '0ffdacdc5f084cb66b620ae9cd84c2b237f752f7c308803e8ea478b02a64d172'
+  const replacementDigest = '1ffdacdc5f084cb66b620ae9cd84c2b237f752f7c308803e8ea478b02a64d172'
+  const contexts = [
+    ['arbitrary string', `${source}\nconst decoyText = "test/decoy.mjs:17 ${digest}"\n`],
+    ['regex', `${source}\nconst decoyRegex = /test\\/decoy.mjs:17/\n`],
+    ['detector/helper body', `${source}\nfunction decoyDetector() { return "test/decoy.mjs:17 ${digest}" }\n`],
+    ['string-fed detector', `${source}\nconst detectorInput = 'test/decoy.mjs:17'\n`],
+    ['warranty function', source.replace('return current.every(({ identity }) => audited.has(identity))', "return current.every(({ identity }) => audited.has(identity)) // test/decoy.mjs:17")],
+    ['readable unknown schema', `${source}\nconst unknownSchema = Object.freeze({ path: 'test/decoy.mjs:17', digest: '${replacementDigest}' })\n`],
+  ]
+  for (const [label, current] of contexts) {
+    const result = classifyFrozenInventoryDelta(FROZEN_INVENTORY_FILE, source, current)
+    assert.equal(result.action, 'refuse', label)
+    assert.equal(result.reason, 'logic', label)
+  }
+  const decoy = classifyFrozenInventoryDelta('test/decoy.mjs', source, source.replace(digest, replacementDigest).replace('test/visualizer-server.test.mjs:1672', 'test/visualizer-server.test.mjs:1649'))
+  assert.equal(decoy.action, 'refuse')
+  assert.equal(decoy.reason, 'logic')
+  assert.match(decoy.why, /refused as logic/)
+  for (const malformed of [
+    source.replace('const VACUITY_SOURCE_SHA256', 'const VACUITY_SOURCE_SHA256_MISSING'),
+    source.replace('const VACUITY_EXEMPT', 'const VACUITY_EXEMPT_MISSING'),
+    source.slice(0, source.indexOf('const VACUITY_EXEMPT')),
+  ]) {
+    assert.equal(classifyFrozenInventoryDelta(FROZEN_INVENTORY_FILE, source, malformed).reason, 'unmeasured')
+  }
+})
+
+test('D1 frozen inventory repair refuses audited identity changes', () => {
+  const source = readFileSync(FROZEN_INVENTORY_FILE, 'utf8')
+  const identity = frozenAuditedIdentity(source, 'io.fingerprintTree')
+  const identityChanges = [
+    source.replace(identity, `${identity} /* test/decoy.mjs:17 */`),
+    source.replace(identity, `${identity} 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef`),
+    source.replace(identity, `${identity}, 'added-identity.mjs:17'`),
+    source.replace(`"${identity}",`, ''),
+    source.replace(identity, "assert.equal(typeof io.fingerprintTree, 'changed')"),
+  ]
+  for (const current of identityChanges) {
+    const result = classifyFrozenInventoryDelta(FROZEN_INVENTORY_FILE, source, current)
+    assert.equal(result.action, 'refuse')
+    assert.equal(result.reason, 'identity')
+  }
+  const factory = readFileSync(FROZEN_FACTORY_ENV_FILE, 'utf8')
+  const factoryEntry = "['crew/arms.test.mjs', frozenTempSites(1)],"
+  for (const current of [
+    factory.replace(factoryEntry, ''),
+    factory.replace('assert.equal(total, 201)', 'assert.equal(total, 200)'),
+    factory.replace('frozenTempSites(1)', 'frozenTempSites(0)'),
+  ]) {
+    const result = classifyFrozenInventoryDelta(FROZEN_FACTORY_ENV_FILE, factory, current)
+    assert.equal(result.action, 'refuse')
+    assert.equal(result.reason, 'identity')
+  }
+})
+
+test('E1 frozen inventory repair refuses held and protected paths', () => {
+  const cases = [
+    ['held file', { laneFence: [{ lane: 'sibling', files: [FROZEN_INVENTORY_FILE] }] }],
+    ['held span', { laneFence: [{ lane: 'sibling', files: [`${FROZEN_INVENTORY_FILE}:1-9999`] }] }],
+    ['protected path', { protectedPaths: ['test/'], onSuite: ({ setProtected }) => setProtected(['test/']) }],
+  ]
+  for (const [label, options] of cases) {
+    const fixture = frozenCycleIo({ ...options })
+    const result = driveTask(Object.assign(fixture.ctx, { limits: { build_rounds: 2 } }), fixture.io)
+    assert.equal(result.status, 'escalation', label)
+    assert.equal(result.details.escalation.where, 'suite', label)
+    assert.match(result.details.escalation.why, /boundary|protected|held/, label)
+    assert.equal(fixture.io.calls.assign.filter(({ role }) => role === 'builder').length, 1, label)
+    assert.equal(fixture.io.calls.commits.length, 1, label)
+    assert.equal(fixture.io.calls.writes[`${TD}/frozen-inventory-bounce-r1.md`], undefined, label)
+  }
+})
+
+test('F1 frozen inventory repair is journaled and returned on the envelope', () => {
+  const fixture = frozenCycleIo({
+    builder2: (files, path, current) => { files[path] = current },
+  })
+  const result = driveTask(Object.assign(fixture.ctx, { limits: { build_rounds: 2 } }), fixture.io)
+  const journal = fixture.io.calls.logs.filter((row) => row.frozen_inventory_repair).map((row) => row.frozen_inventory_repair)
+  assert.equal(result.status, 'done')
+  assert.equal(journal.length, 1)
+  assert.deepEqual(result.details.frozen_inventory_repairs, journal)
+  assert.equal(fixture.io.calls.writes[`${TD}/frozen-inventory-bounce-r1.md`].includes('VACUITY_SOURCE_SHA256'), true)
+  assert.equal(fixture.io.calls.writes[`${TD}/frozen-inventory-bounce-r1.md`].includes('VACUITY_EXEMPT'), true)
+
+  const failed = frozenCycleIo({
+    builder2: (files, path, current) => { files[path] = current },
+    commitResults: ['abc1234', null],
+  })
+  const failedResult = driveTask(Object.assign(failed.ctx, { limits: { build_rounds: 2 } }), failed.io)
+  assert.equal(failedResult.status, 'escalation')
+  assert.equal(failedResult.details.escalation.where, 'suite')
+  assert.equal(failed.io.calls.logs.some((row) => row.frozen_inventory_repair), false)
+  assert.equal(failedResult.details.frozen_inventory_repairs, undefined)
+})
+
+test('frozen repair keeps pending verification across review bounce and reviewer auto-fix', () => {
+  const source = readFileSync(FROZEN_INVENTORY_FILE, 'utf8')
+  const identity = frozenAuditedIdentity(source, 'io.fingerprintTree')
+  const autoFinding = { ...D_AUTO, patch: D_AUTO.patch }
+  const scenarios = [
+    ['review-bounced builder edit', {
+      reviewer1: reviewEnv('changes-needed', []),
+      builder3: (files, path, current) => { files[path] = `${current}\nconst reviewBounceLogic = 'test/decoy.mjs:17'\n` },
+      changed: [['a.mjs'], ['a.mjs'], [FROZEN_INVENTORY_FILE], [FROZEN_INVENTORY_FILE], [FROZEN_INVENTORY_FILE]],
+    }],
+    ['reviewer auto-fix identity edit', {
+      reviewer1: reviewEnv('changes-needed', [autoFinding]),
+      onRun: (text, original, _count, calls) => { if (original.startsWith('git apply ')) calls.files[`${CTX.checkout}/${FROZEN_INVENTORY_FILE}`] = source.replace(identity, `${identity} /* auto-fix identity */`) },
+      changed: [['a.mjs'], ['a.mjs'], [FROZEN_INVENTORY_FILE], [FROZEN_INVENTORY_FILE], [FROZEN_INVENTORY_FILE]],
+    }],
+    ['reviewer auto-fix logic edit', {
+      reviewer1: reviewEnv('changes-needed', [autoFinding]),
+      onRun: (text, original, _count, calls) => { if (original.startsWith('git apply ')) calls.files[`${CTX.checkout}/${FROZEN_INVENTORY_FILE}`] = `${source}\nconst autoFixLogic = 'test/decoy.mjs:17'\n` },
+      changed: [['a.mjs'], ['a.mjs'], [FROZEN_INVENTORY_FILE], [FROZEN_INVENTORY_FILE], [FROZEN_INVENTORY_FILE]],
+    }],
+    ['reviewer auto-fix unrelated edit', {
+      reviewer1: reviewEnv('changes-needed', [autoFinding]),
+      onRun: (text, original, _count, calls) => { if (original.startsWith('git apply ')) calls.files[`${CTX.checkout}/test/auto-fix-rogue.mjs`] = 'unrelated\n' },
+      changed: [['a.mjs'], ['a.mjs'], [FROZEN_INVENTORY_FILE], [FROZEN_INVENTORY_FILE], [FROZEN_INVENTORY_FILE, 'test/auto-fix-rogue.mjs']],
+    }],
+  ]
+  for (const [label, options] of scenarios) {
+    const fixture = frozenCycleIo({ ...options, suite: [frozenRed(), frozenGreen()] })
+    const result = driveTask(Object.assign(fixture.ctx, { limits: { build_rounds: 3 } }), fixture.io)
+    assert.equal(result.status, 'escalation', label)
+    assert.equal(result.details.escalation.where, 'suite', label)
+    assert.equal(fixture.io.calls.commits.length, 1, label)
+    assert.equal(fixture.io.calls.logs.some((row) => row.frozen_inventory_repair), false, label)
+    assert.equal(result.details.frozen_inventory_repairs, undefined, label)
+  }
+})
+
+test('RV1-1 ordinary scope inventory failure remains a driver crash', () => {
+  for (const [label, builder] of [
+    ['completed build', buildEnv()],
+    ['bounced build', buildEnv({ status: 'insufficient', summary: 'needs guidance' })],
+  ]) {
+    const io = fakeIo({
+      envelopes: { 'planner:1': planEnv(), 'builder:1': builder },
+      changed: () => { throw new Error('scope inventory unavailable') },
+    })
+    const result = driveTask(CTX, io)
+    assert.equal(result.status, 'escalation', label)
+    assert.equal(result.details.escalation.where, 'driver', label)
+    assert.equal(result.details.escalation.why, 'scope inventory unavailable', label)
+    assert.deepEqual(result.details.stages, ['plan:r1', 'build:r1', 'scope-gate:r1'], label)
+  }
+})
+
+test('G1 census post-commit repair keeps its bound and refusals', () => {
+  const greenCensus = JSON.stringify({ action: 'none', verdict: 'green', selected: [], failures: [], defects: [], detail: null, reason: null, denominator: { suites: 0, tests: 0 } })
+  const redCensus = JSON.stringify({ action: 'repair', verdict: 'red', selected: [CENSUS_CARRIER_FILES[0]], failures: [{ file: CENSUS_CARRIER_FILES[0] }], defects: [], detail: null, reason: null, denominator: { suites: 1, tests: 1 } })
+  const censusFixture = frozenCycleIo({
+    census: true,
+    builder2: (files, path, current) => { files[path] = current },
+    runs: {
+      'node crew/census-exhibits.mjs:1': { ok: true, output: greenCensus },
+      'node crew/census-exhibits.mjs:2': { ok: true, output: redCensus },
+      'node crew/census-exhibits.mjs:3': { ok: true, output: greenCensus },
+    },
+    suite: [frozenRed(), frozenGreen()],
+    changed: [['a.mjs'], ['a.mjs'], [FROZEN_INVENTORY_FILE], [FROZEN_INVENTORY_FILE], [...CENSUS_CARRIER_FILES], [...CENSUS_CARRIER_FILES]],
+  })
+  const result = driveTask(Object.assign(censusFixture.ctx, { limits: { build_rounds: 3 } }), censusFixture.io)
+  assert.equal(result.status, 'done')
+  assert.equal(censusFixture.io.calls.logs.filter((row) => row.census_exhibits).length, 3)
+  assert.equal(result.details.frozen_inventory_repairs.length, 1)
+  assert.equal(censusFixture.io.calls.commits.length, 3)
+
+  const ordinary = frozenCycleIo({
+    builder2: (files, path, current) => { files[path] = current },
+    suite: [frozenRed(), { ok: false, output: `not ok 1 - ${CTX.checkout}/test/other.test.mjs:1` }, frozenRed()],
+    changed: [['a.mjs'], ['a.mjs'], [FROZEN_INVENTORY_FILE], [FROZEN_INVENTORY_FILE], ['test/other.test.mjs'], ['test/other.test.mjs']],
+  })
+  const ordinaryResult = driveTask(Object.assign(ordinary.ctx, { limits: { build_rounds: 3 } }), ordinary.io)
+  assert.equal(ordinaryResult.status, 'escalation')
+  assert.equal(ordinaryResult.details.escalation.where, 'suite')
+  assert.match(ordinaryResult.details.escalation.why, /spent|frozen inventory repair/)
+  assert.equal(ordinary.io.calls.commits.length, 3)
 })

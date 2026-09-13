@@ -1579,8 +1579,8 @@ function runPublished(options = {}) {
 // ---------------------------------------------------------------------------
 // #806 — the published body leads with meaning, and record-only narration.
 // ---------------------------------------------------------------------------
-const NARRATOR_REGISTER = (base_url) => JSON.stringify({ local_providers: {
-  narrator: { settings: 'crew/pi/settings.json', pi_provider: 'local-pi', base_url },
+const NARRATOR_REGISTER = (base_url) => JSON.stringify({ narrator: {
+  settings: 'crew/pi/settings.json', pi_provider: 'local-pi', base_url,
 } })
 
 const HONEST_NARRATION = 'The lane took 2 build rounds and 11 gate checks, changing crew/drive.mjs at stage review:r1.'

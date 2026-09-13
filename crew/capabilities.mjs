@@ -206,6 +206,10 @@ export function loadCapabilities({ path = CAPABILITIES_PATH, schemaPath = CAPABI
   return deepFreeze(value)
 }
 
+export function seatableLocalProviderNames(register) {
+  return Object.keys(register?.local_providers ?? {})
+}
+
 export function resolvedGrantPath(root, relativePath) {
   return resolvePath(join(resolvePath(root), relativePath))
 }

@@ -722,6 +722,14 @@ function frozenTempSites(sites) {
 //   test/factory-ci-*.test.mjs (2 sites and 1 site, 3 subtracted from the total
 //     below) — retired by this lane (#535); named by glob because no live citation
 //     of those modules may survive this commit
+//
+// Retired 2026-09-13 by lane b674-advisorseats (#1206). The file still exists, but
+// its last raw temp call site is gone — the lane rewrote those tests onto
+// `scratchDir` from test/helpers.mjs — so the exemption has nothing left to freeze
+// and its exact-equality warranty (rawTempSites === sites) correctly refuses to
+// hold at 0:
+//   crew/pi/extensions/advisor.test.mjs (1 site, 1 subtracted from the total below)
+//     — a retirement earned by conversion, not by deletion
 const RAW_TEMP_EXEMPT = new Map([
   ['crew/arms.test.mjs', frozenTempSites(1)],
   ['crew/capabilities.test.mjs', frozenTempSites(1)],
@@ -732,7 +740,6 @@ const RAW_TEMP_EXEMPT = new Map([
   ['crew/headless-rpc.test.mjs', frozenTempSites(3)],
   ['crew/headless.test.mjs', frozenTempSites(3)],
   ['crew/memory.test.mjs', frozenTempSites(20)],
-  ['crew/pi/extensions/advisor.test.mjs', frozenTempSites(1)],
   ['crew/reclaim-descendants.test.mjs', frozenTempSites(4)],
   ['crew/reclaim.test.mjs', frozenTempSites(1)],
   ['crew/roster-refresh.test.mjs', frozenTempSites(1)],
@@ -784,7 +791,7 @@ test('temp sandbox tripwire — every exemption has a live, load-bearing warrant
     assert.ok(exemption.sites > 0, `exemption ${file} is redundant`)
     total += exemption.sites
   }
-  assert.equal(total, 202)
+  assert.equal(total, 201)
 })
 
 test('temp sandbox tripwire — the detector flags a hand-rolled call and clears a helper call', () => {

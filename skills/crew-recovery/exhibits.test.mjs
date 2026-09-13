@@ -30,7 +30,11 @@ test("escalations.md's driver table equals the escalate() producers", () => {
   for (const name of VARIANT_NAMES) emitted.add(name)
   emitted.add(PLAN_SCOPE.widened)
   emitted.add('driver')
-  const documented = new Set([...readText(join(HERE, 'references/escalations.md')).matchAll(/^\|\s*`escalate:([a-z][a-z0-9-]*)`\s*\|/gm)].map((match) => match[1]))
+  // The underscore is load-bearing: VARIANT_NAMES are added to `emitted` verbatim,
+  // and `review_only` (with `verify_only` to follow) is the first variant whose name
+  // is not a single lowercase word. Without `_` here the doc side can never match its
+  // row, so the equality is UNSATISFIABLE for such a variant rather than merely red.
+  const documented = new Set([...readText(join(HERE, 'references/escalations.md')).matchAll(/^\|\s*`escalate:([a-z][a-z0-9_-]*)`\s*\|/gm)].map((match) => match[1]))
   assert.deepEqual([...documented].sort(), [...emitted].sort())
 })
 

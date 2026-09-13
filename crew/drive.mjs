@@ -615,6 +615,74 @@ export function undeclaredStage(shape, label) {
   return `stage ${JSON.stringify(label)} is not declared by this shape (declared: ${(shape?.stages || []).join(', ')})`
 }
 
+function hasOwn(object, key) {
+  return object !== null && typeof object === 'object' && Object.prototype.hasOwnProperty.call(object, key)
+}
+
+function frozenStringArrayDefect(value, label) {
+  if (!Array.isArray(value) || !Object.isFrozen(value) || value.length === 0) {
+    return `${label} must be a frozen non-empty string array`
+  }
+  if (value.some((item) => typeof item !== 'string' || !item)) return `${label} must contain only non-empty strings`
+  if (new Set(value).size !== value.length) return `${label} must contain unique strings`
+  return null
+}
+
+// Metadata is trusted declaration data, not member input. Keep its vocabulary
+// closed here so envelopeDefect can remain a pure consumer of a declaration.
+export function envelopeFieldMetadataDefect(field, envelopeFields = []) {
+  if (!field || typeof field !== 'object' || Array.isArray(field)) return 'envelope field must be an object'
+  const kind = field.kind
+  const itemFields = Array.isArray(field.item_fields) ? field.item_fields : []
+  const itemSet = new Set(itemFields)
+  if (hasOwn(field, 'values')) {
+    if (kind !== 'text') return `envelope field ${JSON.stringify(field.name)} may declare values only on text`
+    const defect = frozenStringArrayDefect(field.values, `envelope field ${JSON.stringify(field.name)}.values`)
+    if (defect) return defect
+  }
+  for (const key of ['allow_empty', 'item_values', 'item_patterns', 'cardinality']) {
+    if (hasOwn(field, key) && kind !== 'records') return `envelope field ${JSON.stringify(field.name)} may declare ${key} only on records`
+  }
+  if (hasOwn(field, 'allow_empty') && typeof field.allow_empty !== 'boolean') {
+    return `envelope field ${JSON.stringify(field.name)}.allow_empty must be boolean`
+  }
+  if (kind === 'records' && (!Array.isArray(field.item_fields) || itemFields.some((name) => typeof name !== 'string' || !name) || new Set(itemFields).size !== itemFields.length)) {
+    return `envelope field ${JSON.stringify(field.name)}.item_fields must be unique non-empty strings`
+  }
+  for (const [key, values] of Object.entries(field.item_values || {})) {
+    if (!itemSet.has(key)) return `envelope field ${JSON.stringify(field.name)}.item_values names undeclared item field ${JSON.stringify(key)}`
+    const defect = frozenStringArrayDefect(values, `envelope field ${JSON.stringify(field.name)}.item_values.${key}`)
+    if (defect) return defect
+  }
+  if (hasOwn(field, 'item_values') && (!field.item_values || typeof field.item_values !== 'object' || Array.isArray(field.item_values))) {
+    return `envelope field ${JSON.stringify(field.name)}.item_values must be an object`
+  }
+  for (const [key, source] of Object.entries(field.item_patterns || {})) {
+    if (!itemSet.has(key)) return `envelope field ${JSON.stringify(field.name)}.item_patterns names undeclared item field ${JSON.stringify(key)}`
+    if (typeof source !== 'string') return `envelope field ${JSON.stringify(field.name)}.item_patterns.${key} must be a regex source`
+    try { new RegExp(source) } catch { return `envelope field ${JSON.stringify(field.name)}.item_patterns.${key} is not a valid regex` }
+  }
+  if (hasOwn(field, 'item_patterns') && (!field.item_patterns || typeof field.item_patterns !== 'object' || Array.isArray(field.item_patterns))) {
+    return `envelope field ${JSON.stringify(field.name)}.item_patterns must be an object`
+  }
+  if (hasOwn(field, 'cardinality')) {
+    const cardinality = field.cardinality
+    if (!cardinality || typeof cardinality !== 'object' || Array.isArray(cardinality)) return `envelope field ${JSON.stringify(field.name)}.cardinality must be an object`
+    const { discriminator, empty, nonempty } = cardinality
+    if (typeof discriminator !== 'string' || !discriminator) return `envelope field ${JSON.stringify(field.name)}.cardinality.discriminator must name a text field`
+    const discriminatorField = envelopeFields.find((candidate) => candidate?.name === discriminator)
+    if (!discriminatorField) return `envelope field ${JSON.stringify(field.name)}.cardinality discriminator ${JSON.stringify(discriminator)} is not declared`
+    if (discriminatorField.kind !== 'text') return `envelope field ${JSON.stringify(field.name)}.cardinality discriminator ${JSON.stringify(discriminator)} must be text`
+    if (typeof empty !== 'string' || !empty || typeof nonempty !== 'string' || !nonempty || empty === nonempty) {
+      return `envelope field ${JSON.stringify(field.name)}.cardinality must name distinct empty and nonempty values`
+    }
+    if (!Array.isArray(discriminatorField.values) || !discriminatorField.values.includes(empty) || !discriminatorField.values.includes(nonempty)) {
+      return `envelope field ${JSON.stringify(field.name)}.cardinality values must belong to the discriminator's closed values`
+    }
+  }
+  return null
+}
+
 // Can this driver honour the declaration at all? A shape it cannot execute is
 // REFUSED with a reason — never silently run as something else. This is what
 // stops a future `quality`/`document` entry from falling through the whole
@@ -627,8 +695,17 @@ export function shapeDefect(shape, variantName) {
   if (!WRITE_SURFACES.includes(shape.writes)) return `writes must be one of ${WRITE_SURFACES.join(', ')}`
   if (typeof shape.accepted_by !== 'string' || !shape.accepted_by.trim()) return 'accepted_by must say what accepts this shape'
   if (!Array.isArray(shape.stages) || shape.stages.length === 0) return 'stages must declare the heads this shape emits'
-  for (const field of shape.envelope_fields || []) {
+  if (!Array.isArray(shape.envelope_fields)) return 'envelope_fields must be an array'
+  for (const key of ['strict_identity', 'report_values']) {
+    if (hasOwn(shape, key) && typeof shape[key] !== 'boolean') return `${key} must be boolean`
+  }
+  const fieldNames = new Set()
+  for (const field of shape.envelope_fields) {
     if (!ENVELOPE_FIELD_KINDS.includes(field?.kind)) return `envelope field ${JSON.stringify(field?.name)} must declare a kind in ${ENVELOPE_FIELD_KINDS.join(', ')}`
+    if (typeof field.name !== 'string' || !field.name || fieldNames.has(field.name)) return 'envelope fields must have unique non-empty names'
+    fieldNames.add(field.name)
+    const metadataDefect = envelopeFieldMetadataDefect(field, shape.envelope_fields)
+    if (metadataDefect) return metadataDefect
   }
   if (shape.execution === 'reviewed') {
     const missing = VARIANTS.full.stages.filter((head) => !shape.stages.includes(head))
@@ -1064,11 +1141,17 @@ function fail(stage, msg) {
 // --- envelope shape checks (never trust a member's file blindly) -------------
 // The assignment_id check is anti-replay: a stale file from an earlier run
 // (crash, escalation) must never satisfy a fresh assignment. Missing is
-// tolerated (the shape contract is prompt-borne); a MISMATCH never is.
-function validEnvelope(env, role, id, runId) {
-  return env && typeof env === 'object'
-    && typeof env.status === 'string'
-    && (env.role === undefined || env.role === role)
+// tolerated (the shape contract is prompt-borne); a MISMATCH never is. Strict
+// identity is opted into by an envelope declaration, leaving scout tolerant.
+function validEnvelope(env, role, id, runId, { strictIdentity = false } = {}) {
+  if (!env || typeof env !== 'object' || typeof env.status !== 'string') return false
+  if (strictIdentity) {
+    return typeof env.assignment_id === 'string' && env.assignment_id === id
+      && typeof env.role === 'string' && env.role === role
+      && typeof env.run_id === 'string' && env.run_id.trim().length > 0
+      && (runId === undefined || env.run_id === runId)
+  }
+  return (env.role === undefined || env.role === role)
     && (env.assignment_id === undefined || env.assignment_id === id)
     && (runId === undefined || env.run_id === runId)
 }
@@ -1098,18 +1181,37 @@ export function envelopeDefect(env, shape, { taskDir } = {}) {
     const value = env.details[field.name]
     if (field.kind === 'text') {
       if (!text(value)) return refuse('field-kind', `details.${field.name} must be a non-empty string`)
+      if (Array.isArray(field.values) && !field.values.includes(value)) {
+        return refuse('field-kind', `details.${field.name} must be one of ${field.values.join(', ')}`)
+      }
       continue
     }
     // 'records'
     // MUTATION A3: refuse a non-array records field as 'field-item' and a wrong-KIND
     // refusal becomes indistinguishable from a bad record inside a good array.
-    if (!Array.isArray(value) || value.length === 0) return refuse('field-kind', `details.${field.name} must be a non-empty array`)
+    if (!Array.isArray(value)) return refuse('field-kind', `details.${field.name} must be an array`)
+    if (value.length === 0 && field.allow_empty !== true) return refuse('field-kind', `details.${field.name} must be a non-empty array`)
+    if (field.cardinality) {
+      const discriminator = env.details[field.cardinality.discriminator]
+      const expected = value.length === 0 ? field.cardinality.empty : field.cardinality.nonempty
+      if (discriminator !== expected) {
+        return refuse('field-item', `details.${field.name} may be empty only when details.${field.cardinality.discriminator} is ${JSON.stringify(field.cardinality.empty)}, and non-empty only when it is ${JSON.stringify(field.cardinality.nonempty)}`)
+      }
+    }
     for (const item of value) {
       if (!item || typeof item !== 'object' || Array.isArray(item)) return refuse('field-item', `every details.${field.name} entry must be an object`)
       // MUTATION A4: append an undeclared 'id' to the required item fields and a
       // well-formed envelope is over-refused.
       for (const key of field.item_fields || []) {
         if (!text(item[key])) return refuse('field-item', `every details.${field.name} entry needs a non-empty ${key}`)
+        if (field.item_values?.[key] && !field.item_values[key].includes(item[key])) {
+          return refuse('field-item', `details.${field.name}.${key} must be one of ${field.item_values[key].join(', ')}`)
+        }
+        if (field.item_patterns?.[key]) {
+          let matches = false
+          try { matches = new RegExp(field.item_patterns[key]).test(item[key]) } catch { matches = false }
+          if (!matches) return refuse('field-item', `details.${field.name}.${key} does not match ${JSON.stringify(field.item_patterns[key])}`)
+        }
       }
     }
   }
@@ -4607,14 +4709,20 @@ function runTask(ctx, io, crash) {
   // This tuple is separate because ENVELOPE_REFUSAL_REASONS belongs to the
   // stricter envelopeDefect contract.
   const ANTI_REPLAY_REFUSAL_REASONS = Object.freeze(['assignment-id-mismatch', 'role-mismatch', 'run-mismatch', 'status-kind'])
-  function antiReplayRefusalReason(env, role, id, runId) {
-    if (env?.assignment_id !== undefined && env.assignment_id !== id) return ANTI_REPLAY_REFUSAL_REASONS[0]
-    if (env?.role !== undefined && env.role !== role) return ANTI_REPLAY_REFUSAL_REASONS[1]
-    if (runId !== undefined && env?.run_id !== runId) return ANTI_REPLAY_REFUSAL_REASONS[2]
+  function antiReplayRefusalReason(env, role, id, runId, { strictIdentity = false } = {}) {
+    if (strictIdentity
+      ? (typeof env?.assignment_id !== 'string' || env.assignment_id !== id)
+      : (env?.assignment_id !== undefined && env.assignment_id !== id)) return ANTI_REPLAY_REFUSAL_REASONS[0]
+    if (strictIdentity
+      ? (typeof env?.role !== 'string' || env.role !== role)
+      : (env?.role !== undefined && env.role !== role)) return ANTI_REPLAY_REFUSAL_REASONS[1]
+    if (strictIdentity
+      ? (typeof env?.run_id !== 'string' || !env.run_id.trim() || (runId !== undefined && env.run_id !== runId))
+      : (runId !== undefined && env?.run_id !== runId)) return ANTI_REPLAY_REFUSAL_REASONS[2]
     return ANTI_REPLAY_REFUSAL_REASONS[3]
   }
 
-  function dispatchOnce(role, briefFile, note, { reviewSemantics = true } = {}) {
+  function dispatchOnce(role, briefFile, note, { reviewSemantics = true, strictIdentity = shape.strict_identity === true, briefBuilder = null } = {}) {
     let brief = briefFile
     const pending = pendingEnforcement.get(role)
     if (pending) {
@@ -4634,6 +4742,10 @@ function runTask(ctx, io, crash) {
     if (pending) io.log(recordRow({ at: io.now(), seat_enforcement: { role, kind: pending.kind, brief, dispatch: id, applied: true, ...(pending.recovery ? { recovery: pending.recovery } : {}) } }))
     const seq = /^d(\d+)$/.exec(id)?.[1]
     if (seq) S.seqHighWater = Math.max(S.seqHighWater, Number(seq))
+    if (typeof briefBuilder === 'function') {
+      const generated = briefBuilder({ id, role, runId: dispatchRunId })
+      if (typeof generated === 'string' && generated) io.writeFile(briefFile, generated)
+    }
     io.log(recordRow({ at: io.now(), assign: id, role, brief }))
     emit({ kind: 'assign', id, role, brief })
     const received = io.wait(returnPath, waits[role] || 1200)
@@ -4641,7 +4753,7 @@ function runTask(ctx, io, crash) {
     // Anti-replay FIRST: a stale or mis-addressed envelope is not evidence, and
     // recording enforcement from one would put a false fact in the terminal record
     // before the validation below rejects it.
-    const enforcement = validEnvelope(env, role, id, dispatchRunId) ? enforcementPreamble(env) : { kind: null, lines: [] }
+    const enforcement = validEnvelope(env, role, id, dispatchRunId, { strictIdentity }) ? enforcementPreamble(env) : { kind: null, lines: [] }
     if (enforcement.lines.length > 0) {
       pendingEnforcement.set(role, enforcement)
       S.enforcements.push({ role, id, kind: enforcement.kind, lines: enforcement.lines })
@@ -4670,12 +4782,12 @@ function runTask(ctx, io, crash) {
     if (review?.findings_report && (review.findings_report.count_mismatch.length || review.findings_report.rejected.length)) {
       io.log(recordRow({ at: io.now(), review_findings_note: { dispatch: id, ...review.findings_report } }))
     }
-    if (!validEnvelope(env, role, id, dispatchRunId)) {
+    if (!validEnvelope(env, role, id, dispatchRunId, { strictIdentity })) {
       // env == null was already recorded by io.wait as a 'timeout'; this branch
       // is the seat that DID answer, with something the driver cannot use.
       if (env != null) {
         emit({ kind: 'cell-failure', role, id, failure: 'unusable-envelope', stage: null, detail: `envelope at ${returnPath} failed the shape or anti-replay check` })
-        const reason = antiReplayRefusalReason(env, role, id, dispatchRunId)
+        const reason = antiReplayRefusalReason(env, role, id, dispatchRunId, { strictIdentity })
         io.log(recordRow({ at: io.now(), envelope_refused: {
           role, dispatch: id, reason, found_assignment_id: env?.assignment_id ?? null,
           expected_assignment_id: id, path: returnPath,
@@ -5022,8 +5134,9 @@ function runTask(ctx, io, crash) {
   }
 
   function escalate(where, why, extraArtifacts = [], extraDetails = {}, resolutionSlots = {}) {
+    const escalationWhere = where === 'review_only' ? 'envelope' : where
     return escalationResult({
-      where, why, question: escalationQuestion(where, resolutionSlots), summary: `Task ${ctx.task} needs a human: ${why}`,
+      where: escalationWhere, why, question: escalationQuestion(escalationWhere, resolutionSlots), summary: `Task ${ctx.task} needs a human: ${why}`,
       commit: null, artifacts: extraArtifacts, extraDetails, terminal: true,
     })
   }
@@ -5165,7 +5278,7 @@ function runTask(ctx, io, crash) {
     stage(`${variant}:r1`)
     // The brief is a FILE, not a note: the pane transport discards `note`
     // (crew/seat-io.mjs:417) and the seat's charter would otherwise apply.
-    io.writeFile(briefPath, [
+    const briefText = ({ id = null, runId = null } = {}) => [
       `# ${variant} assignment`, '',
       shape.assignment, '',
       "This assignment SUPERSEDES your charter's usual deliverable for this run.",
@@ -5175,20 +5288,38 @@ function runTask(ctx, io, crash) {
       ...(shape.writes === 'none' ? ['',
         'You may not create, edit or delete anything in the checkout. The driver checks',
         'mechanically that this run changed zero files, and stops the run if it did not.'] : []),
+      ...(shape.strict_identity ? [
+        `Transport identity is exact: assignment_id=${JSON.stringify(id ?? '<dispatch id>')}, run_id=${JSON.stringify(runId ?? '<current run id>')}, role=${JSON.stringify(seat)}.`,
+      ] : []),
       '',
       'What accepts this assignment is the SHAPE OF YOUR ENVELOPE — there is no',
       'acceptance gate, no verdict and no commit. Return:',
       '  status: "done"',
       '  summary: a non-empty sentence',
       `  artifacts: absolute paths you wrote, every one inside ${ctx.taskDir}`,
-      ...shape.envelope_fields.map((f) => (f.kind === 'records'
-        ? `  details.${f.name}: a non-empty array of records, each with a non-empty ${f.item_fields.join(' and a non-empty ')}`
-        : `  details.${f.name}: a non-empty string`)),
-    ].join('\n'))
+      ...shape.envelope_fields.map((f) => {
+        if (f.kind !== 'records') {
+          const values = Array.isArray(f.values) ? `; exactly one of ${f.values.join(' | ')}` : ''
+          return `  details.${f.name}: a non-empty string${values}`
+        }
+        if (!f.allow_empty) return `  details.${f.name}: a non-empty array of records, each with a non-empty ${f.item_fields.join(' and a non-empty ')}`
+        const cardinality = f.cardinality
+        const empty = cardinality
+          ? `; empty is allowed only when details.${cardinality.discriminator} is ${JSON.stringify(cardinality.empty)}, and non-empty requires ${JSON.stringify(cardinality.nonempty)}`
+          : '; empty is allowed'
+        const constraints = Object.entries(f.item_values || {}).map(([key, values]) => `${key} is one of ${values.join(' | ')}`)
+          .concat(Object.entries(f.item_patterns || {}).map(([key, source]) => `${key} matches ${JSON.stringify(source)}`))
+        return `  details.${f.name}: an array of records with a non-empty ${f.item_fields.join(' and a non-empty ')}${empty}${constraints.length ? `; ${constraints.join('; ')}` : ''}`
+      }),
+    ].join('\n')
+    io.writeFile(briefPath, briefText())
     let env = null
     let seatFailure = null
     try {
-      env = assignAndWait(seat, briefPath, variant)
+      env = assignAndWait(seat, briefPath, variant, {
+        strictIdentity: shape.strict_identity === true,
+        briefBuilder: ({ id, runId }) => briefText({ id, runId }),
+      })
     } catch (err) {
       // assignAndWait THROWS on a timeout or an unusable envelope. The zero-write
       // proof is this shape's whole product, so it is taken BEFORE the failure is
@@ -5218,7 +5349,12 @@ function runTask(ctx, io, crash) {
     }
     stage('envelope-accept')
     const observedFields = envelopeFieldsPresent(env, shape)
-    io.log(recordRow({ at: io.now(), envelope_accepted: { variant, seat, files_changed: 0, fields: observedFields } }))
+    const reportedValues = shape.report_values
+      ? Object.fromEntries(shape.envelope_fields.map((field) => [field.name, env.details[field.name]]))
+      : null
+    const accepted = { variant, seat, files_changed: 0, fields: observedFields }
+    if (shape.report_values) accepted.values = reportedValues
+    io.log(recordRow({ at: io.now(), envelope_accepted: accepted }))
     stageComplete()
     stage('done')
     const result = {
@@ -5229,7 +5365,7 @@ function runTask(ctx, io, crash) {
         variant, commit: null, stages: S.stages, files_committed: [], consults: S.consults,
         dissents: S.dissents, accepted_via: shape.accepted_by, escalation: null,
         extra_rounds_granted: S.grants, growth: S.growth, modifiers: S.modifiers, enforcements: S.enforcements, gate: null,
-        envelope: { seat, fields: observedFields, files_changed: 0 },
+        envelope: { seat, fields: observedFields, files_changed: 0, ...(shape.report_values ? { values: { ...reportedValues } } : {}) },
       },
     }
     stageComplete()

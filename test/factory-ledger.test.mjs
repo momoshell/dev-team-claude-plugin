@@ -4655,6 +4655,17 @@ test('run variant registers stay equal to the driver enum and marker values', { 
   assert.deepEqual([...new Set(Object.values(RUN_VARIANT_MARKERS))].sort(), [...RUN_VARIANTS].sort())
 })
 
+test('I1 ledger classifies review_only runs as measured', { skip: SKIP }, () => {
+  assert.equal(variantFromFirstMessage('review_only:r1'), 'review_only')
+  const ledger = openTestLedger()
+  seedRun(ledger, 'variant-task-review-only', RUNSET_SINCE)
+  ledger.recordEvent({ adw_id: 'variant-task-review-only', type: 'log', payload: { level: 'info', message: 'review_only:r1' } })
+  ledger.recordEvent({ adw_id: 'variant-task-review-only', type: 'log', payload: { level: 'info', message: 'scope-gate:r1' } })
+  const readout = ledger.taskReadout('variant-task-review-only')
+  assert.equal(readout.variant, 'review_only')
+  assert.equal('variant' in readout.absent, false)
+})
+
 test('taskReadout derives full and scout from their first stage markers', { skip: SKIP }, () => {
   const ledger = openTestLedger()
   seedRun(ledger, 'variant-task-full', RUNSET_SINCE)

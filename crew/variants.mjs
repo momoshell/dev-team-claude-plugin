@@ -27,6 +27,30 @@ export const VARIANTS = Object.freeze({
     ]),
     assignment: 'Read-only recon. Answer the brief from the code and the checkout, write your notes into the task dir, and change nothing.',
   }),
+  review_only: Object.freeze({
+    execution: 'envelope',
+    required_seats: Object.freeze(['reviewer']),
+    stages: Object.freeze(['review_only', 'scope-gate', 'envelope-accept']),
+    writes: 'none',
+    accepted_by: 'structured envelope plus zero-write proof; no commit',
+    strict_identity: true,
+    report_values: true,
+    envelope_fields: Object.freeze([
+      Object.freeze({ name: 'base', kind: 'text' }), Object.freeze({ name: 'head', kind: 'text' }),
+      Object.freeze({ name: 'outcome', kind: 'text', values: Object.freeze(['findings', 'no-findings']) }),
+      Object.freeze({
+        name: 'findings', kind: 'records', allow_empty: true,
+        item_fields: Object.freeze(['id', 'severity', 'location', 'summary', 'evidence', 'disposition']),
+        item_values: Object.freeze({
+          severity: Object.freeze(['must-fix', 'should-fix', 'consider']),
+          disposition: Object.freeze(['auto-fix', 'ask-user', 'no-op']),
+        }),
+        item_patterns: Object.freeze({ id: '^[A-Za-z0-9_-]{1,64}$' }),
+        cardinality: Object.freeze({ discriminator: 'outcome', empty: 'no-findings', nonempty: 'findings' }),
+      }),
+    ]),
+    assignment: 'Review the returned base/head identity and the declared change set as a read-only code review. This assignment supersedes the ordinary reviewer deliverable: do not create, edit, delete, checkout, or commit anything in the checkout. Read-only validation is permitted. Return the complete structured envelope with non-empty base and head, outcome findings or no-findings, and findings records containing id, severity, location, summary, evidence, and disposition; findings must be empty exactly when outcome is no-findings and non-empty when outcome is findings.',
+  }),
   repair: Object.freeze({
     execution: 'reviewed',
     required_seats: 'tier',

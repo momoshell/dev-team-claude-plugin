@@ -17,7 +17,7 @@ distinct `prompt-surface-conflict` reason rather than the protected
 `tier-floor-conflict` reason.
 
 The per-lane dispatch line reports `prompt=change` or `prompt=code-only`
-between `forced=` and `proposed=`. The refusal carries this limitation:
+between `forced=` and `recommended=`. The refusal carries this limitation:
 `BLIND SPOT: path matching cannot see a prompt embedded as a template string in a compiler; the named templateBlocks require human recognition.`
 A lane fence cannot identify which string inside a mixed compiler file changed.
 
@@ -60,13 +60,29 @@ A non-`applied` floor outcome escalates as `escalate:sensitivity-floor`; neither
 a clean boot nor a diff that happens not to touch the path substitutes for the
 plan-accept check.
 
-`proposalTierAfterRaise` moves one band only along
-`mechanical → build → judge`. Therefore `make-brief` prints `build` for a
-one-file protected hit even though a pane lane needs `--tier judge` at boot;
-the printed proposal is a proposal and must be overridden on that pane lane.
-Do not turn a proposal into a mid-run reseat. A lane's `tier` is the
-operator's decision; the compiler's proposal advises and never raises it; only
-the protected floor constrains it.
+The compiler's proposal block has three independent fields:
+`recommended_assurance` (`quick`, `standard`, or `rigorous`) is a risk-derived
+recommendation; `recommended_model_band` is a complexity-derived ladder band;
+and `minimum_assurance` is a ratified safety floor. The recommendation warns
+when a request is lower but never raises an explicit lane or batch request. If
+there is no request, the recommendation may supply the assurance. A minimum
+retains the existing protected and prompt floor behavior: a lower batch request
+is raised, while a lower explicit lane request refuses with the applicable
+floor reason. Complexity names only a model band; the compiler never chooses an
+actual model or seat. During migration an old `{shape,strength}` block is
+recorded as `legacy_proposal` and contributes neither recommendation nor
+minimum. A proposal-carried minimum uses the closed `proposal-minimum-conflict`
+reason for a lower explicit lane request; the dispatch log and `tier.force_reason`
+record that same attribution, never `prompt-surface-conflict`. Parser failures
+remain null-valued and carry exactly one of `proposal-absent`,
+`proposal-malformed`, `proposal-ambiguous`, or `proposal-invalid` as the
+unmeasured reason. Operator-facing recommendation warnings use only canonical
+`quick`, `standard`, and `rigorous` assurance names. The effective `tier.forced` field is the maximum of the
+protected, prompt-surface, and proposal minima; when values tie, attribution
+stays in protected, prompt, proposal order. The proposal-owned `tier.minimum`
+and top-level `minimum_assurance` fields report only the proposal's own minimum
+and never claim another source's floor. Do not turn a proposal into a mid-run
+reseat.
 
 If the protected hit is separable from the ordinary work, split the lane rather
 than paying the protected floor for every file. #507 / b153-lab measured the

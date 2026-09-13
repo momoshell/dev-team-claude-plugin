@@ -59,6 +59,30 @@ writes a lane-specific register so runtime state cannot advertise another lane's
 scope. `crew.json` therefore records the lane name and `lane_fence: []`, and the
 unchanged journal event reports `lanes: 0, files: 0`.
 
+### Proposal recommendation and minimum
+
+The compiler's `proposal` fence is v2 JSON with exactly
+`recommended_assurance`, `recommended_model_band`, and `minimum_assurance`.
+Risk may recommend assurance; complexity may recommend only a model band; the
+compiler chooses neither a model nor a seat. A recommendation is advisory: it
+warns when a requested assurance is lower but never raises an explicit lane or
+batch request. With no request, it may supply the assurance. A minimum retains
+the existing floor policy: a lower batch request is raised, while a lower
+explicit lane request refuses with the distinct protected-path, prompt-surface,
+or proposal-only `proposal-minimum-conflict` reason. The dispatch log's `force_reason=` and the record's `tier.force_reason`
+name the source that actually forced the minimum. During migration an old
+`{shape,strength}` block is readable and is recorded as `legacy_proposal`; it
+contributes neither recommendation nor minimum and its fields remain
+observational only. A parser failure leaves all proposal values null and records
+exactly one closed unmeasured reason: `proposal-absent`, `proposal-malformed`,
+`proposal-ambiguous`, or `proposal-invalid`. Operator-facing recommendation
+warnings use only canonical `quick`, `standard`, and `rigorous` assurance
+vocabulary. The effective `tier.forced` is the maximum of protected,
+prompt-surface, and proposal minima, with ties attributed in protected, prompt,
+proposal order. `tier.minimum` and top-level `minimum_assurance` are
+proposal-owned fields: they report only the proposal's own minimum and never
+claim another source's floor.
+
 Retired by ADR-043: `external`, `externalFenceLiveness`, `crossBatchCollisions`, `cross-batch-unknown`, `sibling-leak`, `external-fence-stale`, and `external-fence-abandoned` remain decodable only as historical journal vocabulary; an authored register entry carrying the marker refuses `external-fence-retired`.
 
 ## The executable form

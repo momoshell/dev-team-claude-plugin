@@ -641,8 +641,15 @@ const TIER_MAX_CHARS = 64
 // brief compiler. test/factory-make-brief.test.mjs pins the two declarations
 // equal. Emitter: scripts/factory/make-brief.mjs renderProposalBlock.
 export const PROPOSAL_BLOCK = 'proposal'
-export const PROPOSAL_KEYS = Object.freeze(['shape', 'strength'])
-const NO_PROPOSAL = Object.freeze({ shape: null, strength: null })
+export const PROPOSAL_KEYS = Object.freeze(['recommended_assurance', 'recommended_model_band', 'minimum_assurance'])
+const LEGACY_PROPOSAL_KEYS = Object.freeze(['shape', 'strength'])
+const NO_PROPOSAL = Object.freeze({
+  recommended_assurance: null,
+  recommended_model_band: null,
+  minimum_assurance: null,
+  shape: null,
+  strength: null,
+})
 
 function proposalDefect(defect, absent = false) {
   return { defect, absent, ...NO_PROPOSAL }
@@ -670,12 +677,12 @@ export function parseProposalBrief(text) {
   let parsed
   try { parsed = JSON.parse(blocks[0]) } catch (err) { return proposalDefect(`the ${PROPOSAL_BLOCK} block is not JSON this reader can read: ${err.message}`) }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return proposalDefect(`the ${PROPOSAL_BLOCK} block must be a JSON object`)
-  const extra = Object.keys(parsed).filter((key) => !PROPOSAL_KEYS.includes(key))
-  if (extra.length) return proposalDefect(`the ${PROPOSAL_BLOCK} block declares ${extra.join(', ')}, which nothing reads — the keys are exactly ${PROPOSAL_KEYS.join(', ')}`)
-  const absentKeys = PROPOSAL_KEYS.filter((key) => !Object.prototype.hasOwnProperty.call(parsed, key))
-  if (absentKeys.length) return proposalDefect(`the ${PROPOSAL_BLOCK} block omits ${absentKeys.join(', ')} — a proposal names both or neither`)
+  const keys = Object.keys(parsed)
+  const hasExactly = (expected) => keys.length === expected.length && expected.every((key) => keys.includes(key))
+  const acceptedKeys = hasExactly(PROPOSAL_KEYS) ? PROPOSAL_KEYS : hasExactly(LEGACY_PROPOSAL_KEYS) ? LEGACY_PROPOSAL_KEYS : null
+  if (!acceptedKeys) return proposalDefect(`the ${PROPOSAL_BLOCK} block declares an unsupported key set — the keys are exactly ${PROPOSAL_KEYS.join(', ')} for v2 or ${LEGACY_PROPOSAL_KEYS.join(', ')} for legacy input`)
   const values = { ...NO_PROPOSAL }
-  for (const key of PROPOSAL_KEYS) {
+  for (const key of acceptedKeys) {
     const value = parsed[key]
     if (value === null) continue
     if (typeof value !== 'string' || value.trim() === '' || value.length > TIER_MAX_CHARS) {

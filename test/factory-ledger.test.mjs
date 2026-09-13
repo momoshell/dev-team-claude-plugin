@@ -5795,7 +5795,7 @@ test('proposal parser names malformed, duplicated and unknown blocks, and boot r
       fence, '{"shape":"mechanical","strength":"workhorse"}', '```',
       fence, '{"shape":"mechanical","strength":"workhorse"}', '```',
     ].join('\n'), /duplicated|2 .*proposal/],
-    ['unknown', [fence, '{"shape":"mechanical","strength":"workhorse","tier":"build"}', '```'].join('\n'), /tier/],
+    ['unknown', [fence, '{"shape":"mechanical","strength":"workhorse","tier":"build"}', '```'].join('\n'), /unsupported key set/],
   ]
   for (const [label, brief, defect] of cases) {
     const parsed = parseProposalBrief(brief)

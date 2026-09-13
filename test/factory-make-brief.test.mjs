@@ -15,7 +15,7 @@ import {
   DISCOVERY_PROGRESS_PREFIX, DIRECTED_BLOCK, DIRECTED_GATE_NOTE, DIRECTED_KEYS, HOSTILE_ENV_BLOCK, LADDER_BANDS, OPTIONAL_REQUEST_KEYS,
   PREMISE_UNMEASURED_REASONS, REFUSAL_REASONS, SLOT_MARKER, TIER_NAMES, crossCheckCoupling, readsToAcknowledge,
   discoverTripwires, exportEntries, extractKeys, extractSymbols, gatherFences, gatherProtectedPaths, isTripwireFile, main, symbolIndexFor,
-  MUTATION_CONTRACT_BLOCK, PACK_ABSENT_REASONS, PROPOSAL_BLOCK, PROPOSAL_KEYS, profileField, proposeTier,
+  MUTATION_CONTRACT_BLOCK, PACK_ABSENT_REASONS, PROPOSAL_BLOCK, PROPOSAL_KEYS, PROPOSAL_V2_KEYS, profileField, proposeTier,
   laneFenceFor, measureBrief, readLadderBands, renderBrief, renderProposalBlock, resolveIntent, resolveWriteSurface, SYMBOL_INDEX_ENTRY_LIMIT,
   SYMBOL_INDEX_ABSENT_REASONS, SYMBOL_INDEX_SCAN_LIMIT, testTitleEntries, validateAsk, writePack,
   canonicalisePremiseText, validateRequest, validateScopeEntries, verifyCreates, verifyPremises, verifyWhere,
@@ -2198,7 +2198,11 @@ test('the misclassification flag rewrites neither proposal or proposal fence', (
   assert.equal(proposal.tier, 'judge')
   const fence = body.match(/```proposal\n([\s\S]*?)\n```/)
   assert.ok(fence)
-  assert.deepEqual(JSON.parse(fence[1]), { shape: 'mechanical', strength: 'frontier' })
+  assert.deepEqual(JSON.parse(fence[1]), {
+    recommended_assurance: 'quick',
+    recommended_model_band: 'frontier',
+    minimum_assurance: null,
+  })
 })
 
 test('governance survives a frugal strength', () => {
@@ -2355,15 +2359,16 @@ test('absence cases return neither proposal with reasons and render no proposal'
   assert.match(body, /proposed shape: no proposal/)
   assert.match(body, /proposed strength: no proposal/)
   assert.match(body, /^- .+/m)
-  assert.equal(renderProposalBlock({ shape: null, strength: null }), [
+  assert.equal(renderProposalBlock({ recommendedAssurance: null, recommendedModelBand: null, minimumAssurance: null }), [
     '```proposal',
     '{',
-    '  "shape": null,',
-    '  "strength": null',
+    '  "recommended_assurance": null,',
+    '  "recommended_model_band": null,',
+    '  "minimum_assurance": null',
     '}',
     '```',
   ].join('\n'))
-  assert.match(body, /```proposal\n\{\n  "shape": null,\n  "strength": null\n\n?\}\n```/)
+  assert.match(body, /```proposal\n\{\n  "recommended_assurance": null,\n  "recommended_model_band": null,\n  "minimum_assurance": null\n\}\n```/)
 })
 
 test('shape and strength proposals ship inside the Proposed tier section', () => {
@@ -2371,11 +2376,15 @@ test('shape and strength proposals ship inside the Proposed tier section', () =>
   assert.match(source, /export function proposeTier/)
   assert.doesNotMatch(source, /--blueprint|proposeBlueprint/i)
   assert.doesNotMatch(source, /^##+\s*(Shape|Blueprint)\b/im)
+  const proposal = proposeTier({
+    where: [{ path: 'lib/source.mjs', kind: 'file' }],
+    discovery: { candidates: ['lib/source.mjs'], tripwires: [], broadKeys: [] },
+  })
   const brief = renderBrief({
     request: { ask: 'an ask', done_means: 'done means', out_of_scope: 'out of scope' },
     where: [],
     discovery: { candidates: [], tripwires: [], broadKeys: [] },
-    proposal: proposeTier({ where: [], discovery: { candidates: [], tripwires: [], broadKeys: [] } }),
+    proposal,
   })
   assert.deepEqual(brief.match(/^## .+$/gm), [
     '## The ask', '## Intent', '## Proposed tier', '## Where', '## Premise check', '## Done means', '## Tripwires',
@@ -2390,33 +2399,64 @@ test('shape and strength proposals ship inside the Proposed tier section', () =>
   const fence = brief.indexOf('```proposal')
   assert.ok(strength > start && strength < fence)
   assert.ok(fence > start && fence < end)
-  assert.equal(brief.slice(fence, brief.indexOf('```', fence + 3) + 3), renderProposalBlock(brief.includes('proposed shape: mechanical')
-    ? { shape: 'mechanical', strength: 'workhorse' }
-    : { shape: null, strength: null }))
+  assert.equal(brief.slice(fence, brief.indexOf('```', fence + 3) + 3), renderProposalBlock(proposal))
 })
 
-test('proposal block renders exact mechanical/workhorse bytes and filters out-of-vocabulary values', () => {
-  assert.equal(renderProposalBlock({ shape: 'mechanical', strength: 'workhorse' }), [
+test('proposal block renders exact v2 bytes and filters out-of-vocabulary values', () => {
+  assert.equal(renderProposalBlock({ recommendedAssurance: 'quick', recommendedModelBand: 'workhorse', minimumAssurance: null }), [
     '```proposal',
     '{',
-    '  "shape": "mechanical",',
-    '  "strength": "workhorse"',
+    '  "recommended_assurance": "quick",',
+    '  "recommended_model_band": "workhorse",',
+    '  "minimum_assurance": null',
     '}',
     '```',
   ].join('\n'))
-  assert.equal(renderProposalBlock({ shape: 'not-a-shape', strength: 'not-a-band' }), [
+  assert.equal(renderProposalBlock({ recommendedAssurance: 'not-an-assurance', recommendedModelBand: 'not-a-band', minimumAssurance: 'not-an-assurance' }), [
     '```proposal',
     '{',
-    '  "shape": null,',
-    '  "strength": null',
+    '  "recommended_assurance": null,',
+    '  "recommended_model_band": null,',
+    '  "minimum_assurance": null',
     '}',
     '```',
   ].join('\n'))
 })
 
-test('compiler and emitter proposal declarations stay in agreement', () => {
+test('proposal-v2 E1', () => {
+  const proposal = proposalFor(3)
+  assert.deepEqual(Object.keys(JSON.parse(renderProposalBlock(proposal).split('\n').slice(1, -1).join('\n'))), [...PROPOSAL_V2_KEYS])
+  assert.equal(proposal.recommendedAssurance, 'quick')
+  assert.equal(proposal.recommendedModelBand, 'workhorse')
+  assert.equal(proposal.minimumAssurance, null)
+  assert.equal(Object.hasOwn(proposal, 'model'), false)
+  assert.equal(Object.hasOwn(proposal, 'seat'), false)
+  // An unratified minimum must RENDER as null, not be backfilled from the
+  // recommendation: the key-set check above passes either way, so without this
+  // the E1 mutation survives.
+  assert.deepEqual(JSON.parse(renderProposalBlock(proposal).split('\n').slice(1, -1).join('\n')), {
+    recommended_assurance: 'quick',
+    recommended_model_band: 'workhorse',
+    minimum_assurance: null,
+  })
+
+  const protectedProposal = proposalFor(1, ['lib/source-0.mjs'])
+  assert.equal(protectedProposal.recommendedAssurance, 'standard')
+  assert.equal(protectedProposal.minimumAssurance, 'rigorous')
+  assert.deepEqual(JSON.parse(renderProposalBlock(protectedProposal).split('\n').slice(1, -1).join('\n')), {
+    recommended_assurance: 'standard',
+    recommended_model_band: 'utility',
+    minimum_assurance: 'rigorous',
+  })
+})
+
+test('proposal-v2 K1', () => {
+  const expected = ['recommended_assurance', 'recommended_model_band', 'minimum_assurance']
   assert.equal(PROPOSAL_BLOCK, EMIT_PROPOSAL_BLOCK)
-  assert.deepEqual(PROPOSAL_KEYS, EMIT_PROPOSAL_KEYS)
+  assert.deepEqual(PROPOSAL_KEYS, expected)
+  assert.deepEqual(PROPOSAL_V2_KEYS, expected)
+  assert.deepEqual(EMIT_PROPOSAL_KEYS, expected)
+  assert.equal(PROPOSAL_KEYS, PROPOSAL_V2_KEYS)
 })
 
 test('the parser returns a refusal code for an unknown CLI option', () => {

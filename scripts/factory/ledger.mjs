@@ -403,6 +403,7 @@ export const EVAL_PAYLOAD_KEYS = Object.freeze([
   'usd_total', 'price_source',
 ])
 export const ACCEPT_DECISION_OUTCOMES = Object.freeze(['accepted', 'escalated'])
+export const NARRATION_OUTCOMES = Object.freeze(['accepted', 'refused'])
 export const PROVIDER_FAILURE_LEDGER_KINDS = Object.freeze([
   'rate_limit', 'authentication_failed', 'server_error', 'provider-unclassified',
 ])
@@ -1373,6 +1374,19 @@ export const TABLES = Object.freeze({
     unique: [['adw_id', 'role', 'experiment']],
     indexes: [],
   },
+  narration_measurements: {
+    columns: [
+      { name: 'adw_id', decl: 'TEXT' },
+      { name: 'attempted', decl: 'INTEGER' },
+      { name: 'model', decl: 'TEXT' },
+      { name: 'duration_ms', decl: 'INTEGER' },
+      { name: 'outcome', decl: 'TEXT' },
+      { name: 'reason', decl: 'TEXT' },
+      { name: 'created_at', decl: 'TEXT' },
+    ],
+    unique: [['adw_id']],
+    indexes: [],
+  },
 })
 
 // The closed set of public writer method names — also the closed set of
@@ -1389,6 +1403,7 @@ export const JOURNAL_FACT_KEYS = Object.freeze({
   experiment_arm: 'recordExperimentArm',
   mutation_anchor_bind: 'recordMutationAnchorBind',
   mutation_anchor_absent: 'recordMutationAnchorAbsence',
+  narration: 'recordNarrationMeasurement',
 })
 
 // A crew journal row whose `event` is this value is that fact.
@@ -1404,7 +1419,7 @@ export const JOURNAL_FACT_EVENTS = Object.freeze({
 export const WRITERS = Object.freeze([
   'startSession', 'endSession', 'startPhase', 'endPhase', 'recordEvent',
   'recordEnvelope', 'recordSessionRequest', 'recordRunConfiguration', 'recordRunSeat', 'recordRunObservation', 'recordGateResult', 'recordGateDiscrimination',
-  'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'recordCiCycle', 'recordCiDispatch', 'recordEvalCell', 'recordIntakeSweep', 'recordIntakeRefusal', 'recordIntakeBrake', 'recordIntakeDispatch', 'recordSeatTeardown', 'recordSeatReclaim', 'recordProviderFailure', 'recordPlanScope', 'recordSeatReask', 'recordAcceptReask', 'recordRpcExitContext', 'recordSeatTurnCensus', 'recordPlanAdoption', 'recordExternalFence', 'recordMutationAnchorBind', 'recordMutationAnchorAbsence', 'recordPhaseSlotWait', 'recordExperimentArm', 'startProcess', 'endProcess', 'heartbeat',
+  'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'recordCiCycle', 'recordCiDispatch', 'recordEvalCell', 'recordIntakeSweep', 'recordIntakeRefusal', 'recordIntakeBrake', 'recordIntakeDispatch', 'recordSeatTeardown', 'recordSeatReclaim', 'recordProviderFailure', 'recordPlanScope', 'recordSeatReask', 'recordAcceptReask', 'recordRpcExitContext', 'recordSeatTurnCensus', 'recordPlanAdoption', 'recordExternalFence', 'recordMutationAnchorBind', 'recordMutationAnchorAbsence', 'recordPhaseSlotWait', 'recordExperimentArm', 'recordNarrationMeasurement', 'startProcess', 'endProcess', 'heartbeat',
   'startAgentSession', 'endAgentSession', 'recordSourceError', 'linkRun',
 ])
 
@@ -1452,6 +1467,7 @@ export const WRITER_MIRROR_TABLES = Object.freeze({
   startAgentSession: 'agent_sessions',
   recordPhaseSlotWait: 'phase_slot_waits',
   recordExperimentArm: 'experiment_arms',
+  recordNarrationMeasurement: 'narration_measurements',
 })
 
 // Writers whose mirror is an UPDATE of a row another writer created: they add
@@ -3482,6 +3498,45 @@ export function openLedger({
     return args
   }
 
+  function recordNarrationMeasurement(input = {}) {
+    requireFields(input, ['adw_id', 'attempted', 'outcome'], 'recordNarrationMeasurement')
+    if (typeof input.attempted !== 'boolean') {
+      refuse("recordNarrationMeasurement: field 'attempted' must be boolean")
+    }
+    requireEnum(input.outcome, NARRATION_OUTCOMES, 'recordNarrationMeasurement', 'outcome')
+    if (input.outcome === 'accepted' && input.attempted !== true) {
+      refuse("recordNarrationMeasurement: outcome 'accepted' requires attempted=true")
+    }
+    const model = input.model == null ? null : input.model
+    if (input.attempted) {
+      if (typeof model !== 'string' || model.trim() === '') {
+        refuse("recordNarrationMeasurement: attempted=true requires a non-blank model")
+      }
+      if (typeof input.duration_ms !== 'number' || !Number.isFinite(input.duration_ms) || !Number.isInteger(input.duration_ms) || input.duration_ms < 0) {
+        refuse("recordNarrationMeasurement: attempted=true requires a finite non-negative integer duration_ms")
+      }
+    } else if (model !== null || input.duration_ms != null) {
+      refuse("recordNarrationMeasurement: attempted=false requires null model and duration_ms")
+    }
+    const args = redact({
+      adw_id: input.adw_id,
+      attempted: input.attempted,
+      model: model === null ? null : model.trim(),
+      duration_ms: input.attempted ? input.duration_ms : null,
+      outcome: input.outcome,
+      reason: textOrNull(input.reason, 500),
+      created_at: isoMs(input.created_at ?? now()),
+    }, stats)
+    appendJsonl('recordNarrationMeasurement', args)
+    mirror((conn) => {
+      const cols = tableColumnNames('narration_measurements')
+      const sqlCols = cols.map(quoteSqlIdentifier)
+      conn.prepare(`INSERT OR IGNORE INTO narration_measurements (${sqlCols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
+        .run(...cols.map((c) => toBindable(args[c])))
+    })
+    return args
+  }
+
   function recordExperimentArm(input = {}) {
     const role = normaliseShortName(input.role, 'recordExperimentArm', 'role')
     const experiment = normaliseShortName(input.experiment, 'recordExperimentArm', 'experiment')
@@ -5105,6 +5160,7 @@ export function openLedger({
     const fenceRows = journalFactRows('external_fences', { since, until })
     const bindRows = journalFactRows('mutation_anchor_binds', { since, until })
     const absenceRows = journalFactRows('mutation_anchor_absences', { since, until })
+    const narrationRows = journalFactRows('narration_measurements', { since, until })
     const waitRows = journalFactRows('phase_slot_waits', { since, until })
     const waitMeasured = waitRows.length > 0
     const bindMeasured = bindRows.length > 0
@@ -5115,6 +5171,7 @@ export function openLedger({
     const exitMeasured = exitRows.length > 0
     const adoptionMeasured = adoptionRows.length > 0
     const fenceMeasured = fenceRows.length > 0
+    const narrationMeasured = narrationRows.length > 0
     const runsSeen = journalFactDistinct(providerRows, ['adw_id'])
     const roundsSeen = journalFactDistinct(scopeRows, ['adw_id', 'round'])
     const lanesSeen = journalFactDistinct(fenceRows, ['lane'])
@@ -5152,6 +5209,14 @@ export function openLedger({
           reads: journalFactSum(fenceRows, 'reads'),
         }),
         lanes_seen: fenceMeasured ? lanesSeen : null,
+      },
+      narration_measurements: {
+        ...journalFactFamily(narrationRows, 'measurements', {
+          outcomes: journalFactCounts(narrationRows, 'outcome'),
+          reasons: journalFactCounts(narrationRows, 'reason'),
+          models: journalFactCounts(narrationRows, 'model'),
+          duration_ms: narrationMeasured ? journalFactSum(narrationRows, 'duration_ms') : null,
+        }),
       },
       // #874 (3) — the drift rate's BOTH terms. `declarations_seen` is the denominator: every
       // anchor bind-checked in the window, INCLUDING the passes that found nothing wrong. A
@@ -5728,7 +5793,7 @@ export function openLedger({
   const handle = {
     get degraded() { return degraded },
     startSession, endSession, recordSessionRequest, recordRunConfiguration, recordRunSeat, recordRunObservation, startPhase, endPhase, recordEvent, recordEnvelope,
-    recordGateResult, recordGateDiscrimination, recordMutationAnchorBind, recordMutationAnchorAbsence, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordEvalCell, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown, recordSeatReclaim, recordProviderFailure, recordPlanScope, recordSeatReask, recordAcceptReask, recordRpcExitContext, recordSeatTurnCensus, recordPlanAdoption, recordExternalFence, recordPhaseSlotWait, recordExperimentArm,
+    recordGateResult, recordGateDiscrimination, recordMutationAnchorBind, recordMutationAnchorAbsence, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordEvalCell, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown, recordSeatReclaim, recordProviderFailure, recordPlanScope, recordSeatReask, recordAcceptReask, recordRpcExitContext, recordSeatTurnCensus, recordPlanAdoption, recordExternalFence, recordPhaseSlotWait, recordExperimentArm, recordNarrationMeasurement,
     startProcess, endProcess, heartbeat, startAgentSession, endAgentSession,
     recordSourceError, linkRun,
     listSessions, listEvents, getSession, phantomSessions, dumpTable, tableNames, columnNames, sessionsFiltered, runsStartedWithin, phasesFor, runConfigurationsFor, runObservationsFor, runSeatsFor, agentEventsFor, agentSessionsFor, gateDiscriminationsFor, gateResultsFor, reviewOutcomesFor, acceptDecisionsFor, supportsJson1, eventsPage, maxEventId, cellFailureRowsFor, unattributableCellFailures, seatTeardownRowsFor, intakePicks, intakeSweepTotals, intakeCandidateRefusals, intakeCandidatePicks, agentSessionTokenTotals, gateReviewGap, cellFailures, cellReviews, evalCells, cellUsage, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, escalations, endedRuns, escalationWindow, seatReclaims, journalFacts, plannerSymbolsHoldout, turnEconomy, turnBreakdown, eligibleTasks, runSet, transportsFor, taskReadout, jsonlDrift,
@@ -5834,6 +5899,18 @@ function journalFactArgs(writer, row, adwId) {
   const rowAdwId = source.adw_id ?? adwId ?? null
   const atMs = epochMsOrNull(source.at)
   const createdAt = atMs === null ? undefined : atMs
+  if (writer === JOURNAL_FACT_KEYS.narration) {
+    const narration = value('narration')
+    return {
+      adw_id: rowAdwId,
+      attempted: narration.attempted,
+      model: narration.model ?? null,
+      duration_ms: narration.duration_ms ?? null,
+      outcome: narration.outcome,
+      reason: narration.reason ?? null,
+      ...(createdAt === undefined ? {} : { created_at: createdAt }),
+    }
+  }
   if (writer === JOURNAL_FACT_KEYS.provider_failure) {
     const failure = value('provider_failure')
     return {

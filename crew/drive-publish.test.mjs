@@ -1517,7 +1517,7 @@ test('D1 unsafe configured model is refused before any transport call', () => {
   }
 })
 
-test('E1 empty content with reasoning content refuses narration-empty and publishes no section', () => {
+test('F1 reasoning-only response remains an empty-content refusal', () => {
   const narrated = narrateRecord({
     record: NARRATION_RECORD,
     registerText: configuredNarratorRegister('http://proxy.lan:1234', 'Qwen/Qwen3-Coder:latest'),
@@ -1530,13 +1530,161 @@ test('E1 empty content with reasoning content refuses narration-empty and publis
   assert.equal(narrated.text, undefined)
   const published = composePrBody(applyNarration(NARRATION_RECORD, narrated))
   assert.equal(published.includes(NARRATION_HEADING), false)
+
+  // `content` ABSENT, not merely empty. The fixture above pins `content: ''`,
+  // which a `content ?? reasoning_content` fallback leaves untouched — `??` only
+  // fires on null/undefined — so that case alone cannot discriminate the fallback
+  // this check exists to forbid. A served model that omits `content` entirely is
+  // the shape that would otherwise put private reasoning into a PR body, and the
+  // measured llama-swap models all emit reasoning_content beside content.
+  //
+  // The refusal differs by design and the distinction is kept: an absent field is
+  // an UNREADABLE response, an empty string is EMPTY narration. What matters to
+  // this check is identical either way — the reasoning text never reaches the body.
+  const absent = narrateRecord({
+    record: NARRATION_RECORD,
+    registerText: configuredNarratorRegister('http://proxy.lan:1234', 'Qwen/Qwen3-Coder:latest'),
+    io: narratorIo({ chat: {
+      ok: true,
+      output: JSON.stringify({ choices: [{ message: { reasoning_content: 'internal reasoning' } }] }),
+    } }),
+  })
+  assert.equal(absent.refused, NARRATION_REFUSALS.unreadable)
+  assert.equal(absent.text, undefined)
+  const absentBody = composePrBody(applyNarration(NARRATION_RECORD, absent))
+  assert.equal(absentBody.includes(NARRATION_HEADING), false)
+  assert.equal(absentBody.includes('internal reasoning'), false)
 })
 
-test('F1 narration refusals remain the exact frozen closed set', () => {
+test('A1 narration attempts carry duration model and outcome into the journal', () => {
+  const configured = configuredNarratorRegister('http://proxy.lan:1234', 'gpt-oss-20b')
+  const accepted = runPublished({
+    capabilities: configured,
+    commands: {
+      'curl -sS --max-time 30 -X POST': {
+        ok: true,
+        output: JSON.stringify({ choices: [{ message: { content: 'The lane ran 2 build rounds.' } }] }),
+      },
+    },
+  })
+  const acceptedRow = accepted.io.calls.logs.find((entry) => entry.narration)?.narration
+  assert.deepEqual(acceptedRow, {
+    attempted: true, model: 'gpt-oss-20b', duration_ms: 10, outcome: 'accepted',
+    reason: null, chars: 'The lane ran 2 build rounds.'.length,
+  })
+
+  const refused = runPublished({
+    capabilities: configured,
+    commands: { 'curl -sS --max-time 30 -X POST': { ok: false, output: 'connection refused' } },
+  })
+  assert.deepEqual(refused.io.calls.logs.find((entry) => entry.narration)?.narration, {
+    attempted: true, model: 'gpt-oss-20b', duration_ms: 10, outcome: 'refused',
+    reason: NARRATION_REFUSALS.unreachable,
+  })
+
+  const preChat = runPublished({})
+  assert.deepEqual(preChat.io.calls.logs.find((entry) => entry.narration)?.narration, {
+    attempted: false, model: null, duration_ms: null, outcome: 'refused',
+    reason: NARRATION_REFUSALS.unconfigured,
+  })
+})
+
+test('B1 narration timeout and dead endpoint use distinct closed refusal reasons', () => {
+  const timedIo = ({ models, chat }) => {
+    const collect = []
+    const times = [1000, 1012]
+    let clock = 0
+    return {
+      collect,
+      now: () => times[Math.min(clock++, times.length - 1)],
+      run(command) {
+        collect.push(command)
+        return /\/models(\b|$)/.test(command)
+          ? (models ?? { ok: true, output: JSON.stringify({ data: [{ id: 'gpt-oss-20b' }] }) })
+          : (chat ?? { ok: true, output: JSON.stringify({ choices: [{ message: { content: HONEST_NARRATION } }] }) })
+      },
+    }
+  }
+  const noModel = NARRATOR_REGISTER('http://proxy.lan:1234')
+  const modelListTimeout = narrateRecord({
+    record: NARRATION_RECORD, registerText: noModel,
+    io: timedIo({ models: { ok: false, output: '', threw: 'curl: (28) Operation timed out' } }),
+  })
+  assert.deepEqual({ attempted: modelListTimeout.attempted, model: modelListTimeout.model, duration_ms: modelListTimeout.duration_ms, outcome: modelListTimeout.outcome, refused: modelListTimeout.refused }, {
+    attempted: false, model: null, duration_ms: null, outcome: 'refused', refused: 'narrator-timeout',
+  })
+  const modelListDead = narrateRecord({
+    record: NARRATION_RECORD, registerText: noModel,
+    io: timedIo({ models: { ok: false, output: 'connection refused' } }),
+  })
+  assert.equal(modelListDead.refused, 'narrator-unreachable')
+  assert.equal(modelListDead.attempted, false)
+  assert.equal(modelListDead.model, null)
+  assert.equal(modelListDead.duration_ms, null)
+
+  const configured = configuredNarratorRegister('http://proxy.lan:1234', 'gpt-oss-20b')
+  const chatTimeout = narrateRecord({
+    record: NARRATION_RECORD, registerText: configured,
+    io: timedIo({ chat: { ok: false, output: 'curl: (28) Operation timed out' } }),
+  })
+  assert.deepEqual({ attempted: chatTimeout.attempted, model: chatTimeout.model, duration_ms: chatTimeout.duration_ms, outcome: chatTimeout.outcome, refused: chatTimeout.refused }, {
+    attempted: true, model: 'gpt-oss-20b', duration_ms: 12, outcome: 'refused', refused: 'narrator-timeout',
+  })
+  const chatDead = narrateRecord({
+    record: NARRATION_RECORD, registerText: configured,
+    io: timedIo({ chat: { ok: false, output: 'connection refused' } }),
+  })
+  assert.equal(chatDead.refused, 'narrator-unreachable')
+  assert.equal(chatDead.attempted, true)
+  assert.equal(chatDead.model, 'gpt-oss-20b')
+  assert.equal(chatDead.duration_ms, 12)
+
+  const successfulMarker = 'The lane ran 2 build rounds. curl: (28)'
+  const successful = narrateRecord({
+    record: { ...NARRATION_RECORD, marker_code: 28 }, registerText: configured,
+    io: timedIo({ chat: { ok: true, output: JSON.stringify({ choices: [{ message: { content: successfulMarker } }] }) } }),
+  })
+  assert.equal(successful.refused, undefined)
+  assert.equal(successful.outcome, 'accepted')
+  assert.equal(successful.text, successfulMarker)
+  assert.notEqual(successful.refused, 'narrator-timeout')
+})
+
+test('C1 success timeout and refusal preserve the code-composed body contract', () => {
+  const base = runPublished({})
+  const configured = configuredNarratorRegister('http://proxy.lan:1234', 'gpt-oss-20b')
+  const accepted = runPublished({
+    capabilities: configured,
+    commands: {
+      'curl -sS --max-time 30 -X POST': {
+        ok: true,
+        output: JSON.stringify({ choices: [{ message: { content: 'The lane ran 2 build rounds.' } }] }),
+      },
+    },
+  })
+  const timeout = runPublished({
+    capabilities: configured,
+    commands: { 'curl -sS --max-time 30 -X POST': { ok: false, output: 'curl: (28) Operation timed out' } },
+  })
+  const dead = runPublished({
+    capabilities: configured,
+    commands: { 'curl -sS --max-time 30 -X POST': { ok: false, output: 'connection refused' } },
+  })
+  const body = (run) => run.io.calls.writes[TD + '/pr-body.md']
+  assert.equal(timeout.result.status, 'done')
+  assert.equal(dead.result.status, 'done')
+  assert.equal(body(timeout), body(base))
+  assert.equal(body(dead), body(base))
+  assert.ok(body(accepted).endsWith(body(base)))
+  assert.notEqual(body(accepted), body(base))
+})
+
+test('D1 narration refusal inventory stays frozen closed and reachable', () => {
   const baseline = {
     unconfigured: 'narrator-unconfigured',
     endpointUnsafe: 'narrator-endpoint-unsafe',
     unreachable: 'narrator-unreachable',
+    timeout: 'narrator-timeout',
     unreadable: 'narrator-unreadable',
     empty: 'narration-empty',
     tooLong: 'narration-too-long',
@@ -1549,6 +1697,23 @@ test('F1 narration refusals remain the exact frozen closed set', () => {
   assert.deepEqual(NARRATION_REFUSALS, baseline)
   assert.deepEqual([...NARRATION_REFUSAL_NAMES], Object.values(baseline))
   assert.equal(Object.isFrozen(NARRATION_REFUSALS), true)
+
+  const configured = configuredNarratorRegister('http://proxy.lan:1234', 'gpt-oss-20b')
+  const reachable = [
+    [narrateRecord({ record: NARRATION_RECORD, registerText: 'not json', io: narratorIo() }), baseline.unconfigured],
+    [narrateRecord({ record: NARRATION_RECORD, registerText: NARRATOR_REGISTER('file:///etc/passwd'), io: narratorIo() }), baseline.endpointUnsafe],
+    [narrateRecord({ record: NARRATION_RECORD, registerText: configured, io: narratorIo({ chat: { ok: false, output: 'dead' } }) }), baseline.unreachable],
+    [narrateRecord({ record: NARRATION_RECORD, registerText: configured, io: narratorIo({ chat: { ok: false, output: 'curl: (28)' } }) }), baseline.timeout],
+    [narrateRecord({ record: NARRATION_RECORD, registerText: configured, io: narratorIo({ chat: { ok: true, output: '{}' } }) }), baseline.unreadable],
+    [narrateRecord({ record: NARRATION_RECORD, registerText: configured, io: narratorIo({ chat: { ok: true, output: JSON.stringify({ choices: [{ message: { content: '' } }] }) } }) }), baseline.empty],
+    [narrateRecord({ record: NARRATION_RECORD, registerText: configured, io: narratorIo({ chat: { ok: true, output: JSON.stringify({ choices: [{ message: { content: 'x'.repeat(1201) } }] }) } }) }), baseline.tooLong],
+    [narrateRecord({ record: NARRATION_RECORD, registerText: configured, io: narratorIo({ chat: { ok: true, output: JSON.stringify({ choices: [{ message: { content: 'src/not-known.mjs' } }] }) } }) }), baseline.unknownFact],
+    [narrateRecord({ record: NARRATION_RECORD, registerText: NARRATOR_REGISTER('http://proxy.lan:1234'), io: narratorIo({ models: { ok: true, output: 'not json' } }) }), baseline.modelsUnreadable],
+    [narrateRecord({ record: NARRATION_RECORD, registerText: NARRATOR_REGISTER('http://proxy.lan:1234'), io: narratorIo({ models: { ok: true, output: JSON.stringify({ data: [] }) } }) }), baseline.modelAbsent],
+    [narrateRecord({ record: NARRATION_RECORD, registerText: NARRATOR_REGISTER('http://proxy.lan:1234'), io: narratorIo({ models: { ok: true, output: JSON.stringify({ data: [{ id: 'a' }, { id: 'b' }] }) } }) }), baseline.modelAmbiguous],
+    [narrateRecord({ record: NARRATION_RECORD, registerText: configured, io: narratorIo({ chat: { ok: true, output: JSON.stringify({ choices: [{ message: { content: '{"total":11}' } }] }) } }) }), baseline.rawJson],
+  ]
+  for (const [result, expected] of reachable) assert.equal(result.refused, expected, expected)
 })
 
 test('F2 absent configured model keeps modelAbsent reachable', () => {
@@ -1625,7 +1790,10 @@ test('F1 configured narration is additive and refusal preserves the current body
   const narratedBody = narrated.io.calls.writes[TD + '/pr-body.md']
   assert.ok(narratedBody.startsWith(NARRATION_HEADING + '\nThe lane ran 2 build rounds.\n\n'), JSON.stringify(narratedBody.slice(0, 140)))
   const row = narrated.io.calls.logs.find((entry) => entry.narration)
-  assert.deepEqual(row.narration, { outcome: 'accepted', chars: 'The lane ran 2 build rounds.'.length, model: 'qwen3-coder' })
+  assert.deepEqual(row.narration, {
+    attempted: true, duration_ms: 10, model: 'qwen3-coder', outcome: 'accepted',
+    reason: null, chars: 'The lane ran 2 build rounds.'.length,
+  })
 
   // a refused configured request publishes exactly the no-narrator body — byte for byte
   const dead = runPublished({ capabilities: register, commands: { 'curl -sS --max-time 30 -X POST': { ok: false, output: 'connection refused' } } })

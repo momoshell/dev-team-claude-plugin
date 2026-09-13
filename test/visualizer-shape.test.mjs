@@ -1050,3 +1050,34 @@ test('shapeGateChecks normalises recorded items and degrades malformed JSON', ()
   assert.equal(rows[1].checks_raw, '{not-json')
   assert.ok(rows[1].checks_pending)
 })
+
+test('D1: runtime liveness cites its observation source', () => {
+  const run = shapeRun(base, [], [], null, {}, Date.parse(end), {
+    runObservations: [{
+      id: 1, adw_id: 'x', observed_at: '2024-01-01T00:00:01.000Z', observer: 'lane-watch',
+      driver_state: 'alive', source: 'heartbeat', reason_code: 'heartbeat-fresh', detail: '{"age":1000}',
+    }],
+  })
+  assert.equal(run.runtime.driver_state, 'alive')
+  assert.equal(run.runtime.source, 'heartbeat')
+  assert.equal(run.runtime.reason_code, 'heartbeat-fresh')
+  assert.equal(run.runtime.observed_at, '2024-01-01T00:00:01.000Z')
+  assert.equal(run.pending.driver_state, undefined)
+})
+
+test('J1: the recovery copy exhibit stays unsettled with cited gone evidence', () => {
+  const run = shapeRun({
+    ...base, task_slug: 'b660-restoreproof.recovery-copy', last_heartbeat_at: '2023-12-31T23:00:00.000Z',
+  }, [], [], null, {}, Date.parse(end), {
+    runObservations: [
+      { id: 1, observed_at: '2024-01-01T00:00:00.000Z', observer: 'lane-watch', driver_state: 'alive', source: 'heartbeat', reason_code: 'heartbeat-fresh', detail: '{}' },
+      { id: 2, observed_at: '2024-01-01T00:00:01.000Z', observer: 'closeout.reconcile:operator', driver_state: 'gone', source: 'process_group', reason_code: 'pid-gone', detail: '{"pid":42}' },
+    ],
+  })
+  assert.equal(run.settlement.state, 'unsettled')
+  assert.equal(run.runtime.driver_state, 'gone')
+  assert.equal(run.runtime.source, 'process_group')
+  assert.equal(run.runtime.reason_code, 'pid-gone')
+  assert.equal(run.runtime.heartbeat_state, 'overdue')
+  assert.equal(run.reconciliation_command, 'node scripts/factory/closeout.mjs reconcile b660-restoreproof.recovery-copy --dry-run')
+})

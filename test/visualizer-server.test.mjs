@@ -193,6 +193,29 @@ function fixture(path, { filler = 0 } = {}) {
   return { done, live, pane }
 }
 
+test('ledger feed passes the latest ordered driver observation into runtime shape', { skip: SKIP }, () => {
+  const dir = scratchDir('visualizer-observation-feed-')
+  const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')
+  const adwId = 'observation-feed-run'
+  const ledger = openLedger({ dbPath: ledgerDb, stderr: { write() {} } })
+  try {
+    ledger.startSession({ adw_id: adwId, repo_slug: 'repo', task_slug: 'observation-feed' })
+    ledger.recordRunObservation({ adw_id: adwId, observed_at: '2026-09-11T12:00:00.000Z', observer: 'watch', driver_state: 'alive', source: 'heartbeat', reason_code: 'heartbeat-fresh', detail: '{}' })
+    ledger.recordRunObservation({ adw_id: adwId, observed_at: '2026-09-11T12:00:01.000Z', observer: 'watch', driver_state: 'gone', source: 'process_group', reason_code: 'pid-gone', detail: '{"pid":42}' })
+  } finally { ledger.close() }
+  const feed = createLedgerFeed({ ledgerDb, triageDb })
+  try {
+    const run = feed.listRuns().runs.find((row) => row.adw_id === adwId)
+    assert.equal(run.settlement.state, 'unsettled')
+    assert.equal(run.runtime.driver_state, 'gone')
+    assert.equal(run.runtime.source, 'process_group')
+    assert.equal(run.runtime.reason_code, 'pid-gone')
+  } finally {
+    feed.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 // These probes deliberately bypass fetch: undici normalizes request targets and
 // Host headers before they reach the server.
 test('raw request targets are refused without killing the visualizer', { skip: SKIP }, async () => {

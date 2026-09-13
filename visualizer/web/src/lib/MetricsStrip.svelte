@@ -1,6 +1,6 @@
 <script>
   import { fleetEscalationRate, fleetMedianDuration, fleetPassRate, fleetPhasesPerRun, fleetTokens } from './panels.js'
-  import { fleetActivity } from './fleet.js'
+  import { fleetActivity, runtimeActivity, runtimeActivitySummary } from './fleet.js'
   let { runs = [], envelopes = null, degraded = false, now = Date.now(), onactivity = () => {} } = $props()
   let passRate = $derived(fleetPassRate(runs, { degraded, envelopes }))
   let duration = $derived(fleetMedianDuration(runs, { degraded, envelopes }))
@@ -8,6 +8,11 @@
   let escalation = $derived(fleetEscalationRate(runs, { degraded, envelopes }))
   let tokens = $derived(fleetTokens(runs))
   let activity = $derived(fleetActivity(runs, now))
+  let runtime = $derived(runtimeActivity(runs))
+  let runtimeSummary = $derived(runtimeActivitySummary(runs))
+  let driverMeasured = $derived(runtime.observed)
+  let driverGone = $derived(runtime.gone)
+  let driverUnknown = $derived(runtime.unmeasured)
   let unverified = $derived(activity.silent + activity.unverified + activity.contradicted)
   let activityNote = $derived(activity.open
     ? `${activity.live} live${activity.contradicted ? ` · ${activity.contradicted} contradicted` : ''}${activity.silent ? ` · ${activity.silent} stale` : ''}${activity.unverified ? ` · ${activity.unverified} unverified` : ''}`
@@ -36,10 +41,11 @@
   <article class:pending={phases.average == null}><span class="label">Workflow depth</span><strong>{phases.average == null ? '—' : phases.average.toFixed(1)}</strong><small>phases per task</small></article>
   <article class:pending={escalation.percent == null}><span class="label">Escalation rate</span><strong>{escalation.percent == null ? '—' : `${escalation.percent}%`}</strong><small>{escalation.percent == null ? escalation.pending : 'terminal tasks handed to a human'}</small></article>
   <article class:pending={tokens.total == null}><span class="label">Billed token volume</span><strong>{tokens.total == null ? '—' : compact(tokens.total)}</strong><small title="Cache reads ÷ input, cache writes, and cache reads">{tokens.total == null ? tokens.pending : tokens.cacheRate == null ? tokens.cachePending : `${percent(tokens.cacheRate)} cache hit · ${tokens.measured} tasks`}</small></article>
+  <article class:pending={!driverMeasured}><span class="label">Driver observations</span><strong>{driverMeasured ? `${driverMeasured}/${runs.length}` : '—'}</strong><small>{driverMeasured ? `${driverGone} gone · ${runtimeSummary}` : `${driverUnknown} unmeasured · no liveness inferred`}</small></article>
 </section>
 
 <style>
-.metrics { display:grid; grid-template-columns:repeat(7,minmax(8.5rem,1fr)); gap:.65rem; margin:.9rem 0 1rem; overflow:auto; padding:.12rem 0 .1rem; }
+.metrics { display:grid; grid-template-columns:repeat(8,minmax(8.5rem,1fr)); gap:.65rem; margin:.9rem 0 1rem; overflow:auto; padding:.12rem 0 .1rem; }
 article,.metric-card { position:relative; min-width:9rem; min-height:6.2rem; display:grid; align-content:space-between; border:1px solid var(--line); border-radius:var(--radius); background:color-mix(in srgb,var(--panel) 91%,transparent); padding:.75rem .8rem; color:inherit; text-align:left; }
 article::before,.metric-card::before { content:''; position:absolute; top:0; left:.8rem; right:.8rem; height:1px; background:linear-gradient(90deg,transparent,var(--line),transparent); }
 .metric-card { font:inherit; cursor:pointer; transition:border-color .15s ease,background .15s ease,transform .15s ease; }.metric-card:hover { border-color:color-mix(in srgb,var(--accent) 45%,var(--line)); background:color-mix(in srgb,var(--accent) 4%,var(--panel)); transform:translateY(-1px); }.metric-card:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }

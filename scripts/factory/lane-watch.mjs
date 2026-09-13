@@ -27,9 +27,9 @@ import {
 import { homedir, loadavg as osLoadavg, cpus as osCpus } from 'node:os'
 import { join } from 'node:path'
 import { LIVENESS_PROBE_MS, SEAT_LIVENESS_EVENT } from '../../crew/seat-io.mjs'
-import { defaultDbPath, openLedger } from './ledger.mjs'
+import { defaultDbPath, openLedger, DRIVER_STATES, RUN_OBSERVATION_SOURCES } from './ledger.mjs'
 
-export { SEAT_LIVENESS_EVENT }
+export { SEAT_LIVENESS_EVENT, DRIVER_STATES, RUN_OBSERVATION_SOURCES }
 
 export const NOTE_KINDS = Object.freeze(['silent-lane', 'host-load', 'final-round', 'driver-gone'])
 export const WATCH_EVENT = 'lane-watch'
@@ -77,6 +77,10 @@ export function normalDeps(deps = {}) {
     cpus: deps.cpus || osCpus,
     platform: deps.platform || process.platform,
     now: deps.now || (() => Date.now()),
+    kill: deps.kill || ((pid, signal) => process.kill(pid, signal)),
+    defaultDbPath: deps.defaultDbPath || defaultDbPath,
+    openLedger: deps.openLedger || openLedger,
+    recordRunObservation: deps.recordRunObservation || null,
   }
 }
 
@@ -253,6 +257,61 @@ export const DRIVER_RUNNING = 'running'
 export const DRIVER_GONE = 'driver-gone'
 export const DRIVER_EXITED = 'exited'
 export const DRIVER_UNKNOWN = 'unknown'
+function driverObservation(input = {}) {
+  return {
+    driver_state: DRIVER_STATES.includes(input.driver_state) ? input.driver_state : 'unknown',
+    source: RUN_OBSERVATION_SOURCES.includes(input.source) ? input.source : 'process_group',
+    reason_code: typeof input.reason_code === 'string' && input.reason_code.trim() ? input.reason_code : 'probe-error',
+    detail: input.detail ?? {},
+  }
+}
+
+export const DRIVER_OBSERVATION_REASONS = Object.freeze({
+  pid_alive: 'pid-alive',
+  pid_permission: 'pid-permission',
+  pid_gone: 'pid-gone',
+  pid_missing: 'pid-missing',
+  pid_invalid: 'pid-invalid',
+  pid_unreadable: 'pid-unreadable',
+  pid_probe_error: 'pid-probe-error',
+  terminal_log: 'terminal-run-log',
+  heartbeat_fresh: 'heartbeat-fresh',
+  heartbeat_stale: 'heartbeat-overdue',
+  heartbeat_missing: 'heartbeat-unmeasured',
+})
+// run.pid is a diagnostic identity witness, not a settlement bit. Every
+// unreadable, malformed, interrupted, or opaque probe stays unknown.
+export function probeDriverIdentity(lane, deps = {}) {
+  const d = normalDeps(deps)
+  let path
+  try { path = join(lane?.dir, 'run.pid') } catch {
+    return { driver_state: 'unknown', source: 'process_group', reason_code: DRIVER_OBSERVATION_REASONS.pid_unreadable, detail: { error: 'path-unavailable' } }
+  }
+  let raw
+  try { raw = d.readFileSync(path, 'utf8') } catch (error) {
+    const code = error?.code
+    if (code === 'ENOENT') return { driver_state: 'unknown', source: 'process_group', reason_code: DRIVER_OBSERVATION_REASONS.pid_missing, detail: { error: code } }
+    return { driver_state: 'unknown', source: 'process_group', reason_code: code === 'EINTR' ? 'probe-interrupted' : DRIVER_OBSERVATION_REASONS.pid_unreadable, detail: { error: typeof code === 'string' ? code : 'read-error' } }
+  }
+  const text = typeof raw === 'string' ? raw.trim() : ''
+  if (!/^\d+$/.test(text)) {
+    return { driver_state: 'unknown', source: 'process_group', reason_code: DRIVER_OBSERVATION_REASONS.pid_invalid, detail: { error: 'pid-format' } }
+  }
+  const pid = Number(text)
+  if (!Number.isSafeInteger(pid) || pid <= 0) {
+    return { driver_state: 'unknown', source: 'process_group', reason_code: DRIVER_OBSERVATION_REASONS.pid_invalid, detail: { error: 'pid-range' } }
+  }
+  try {
+    d.kill(pid, 0)
+    return { driver_state: 'alive', source: 'process_group', reason_code: DRIVER_OBSERVATION_REASONS.pid_alive, detail: { pid } }
+  } catch (error) {
+    const code = error?.code
+    if (code === 'EPERM') return { driver_state: 'alive', source: 'process_group', reason_code: DRIVER_OBSERVATION_REASONS.pid_permission, detail: { pid, error: code } }
+    if (code === 'ESRCH') return { driver_state: 'gone', source: 'process_group', reason_code: DRIVER_OBSERVATION_REASONS.pid_gone, detail: { pid, error: code } }
+    const detail = { pid, error: typeof code === 'string' ? code : 'probe-error' }
+    return driverObservation({ driver_state: 'unknown', source: 'process_group', reason_code: 'probe-error', detail })
+  }
+}
 // The terminal line is the LAST line of run.log; a bounded tail is enough and a
 // whole-file read is not — a long run's log is megabytes of seat noise.
 export const RUN_LOG_TAIL_BYTES = 65_536
@@ -305,7 +364,7 @@ export function readLaneSession(lane, deps = {}) {
     const connection = handle?.readConnection?.()
     if (!connection) return null
     row = connection.prepare(
-      'SELECT ended_at, last_heartbeat_at FROM sessions WHERE repo_slug = ? AND task_slug = ? ORDER BY started_at DESC LIMIT 1',
+      'SELECT adw_id, status, outcome, ended_at, last_heartbeat_at FROM sessions WHERE repo_slug = ? AND task_slug = ? ORDER BY started_at DESC LIMIT 1',
     ).get(lane.repo, lane.task) || null
   } catch { failed = true }
   finally {
@@ -323,39 +382,80 @@ export function laneLedgerView(lane, deps = {}) {
   return { session, terminal: runLogTerminal(lane, d), now: d.now() }
 }
 
-export function driverGone(lane, journal, ledger) {
-  if (!laneActive(lane, journal)) return false
-  const session = ledger?.session
-  if (session == null) return false                  // unmeasured is never gone
-  if (session.ended_at != null) return false         // the run closed its own session
-  if (ledger.terminal != null) return false          // run.log already answered for this run
-  const beat = journalAt(session.last_heartbeat_at)
-  if (beat === null) return false                    // never measured (#297)
-  if (!Number.isFinite(ledger.now)) return false
-  const threshold = driverGoneThresholdMs(journal).ms
-  return ledger.now - beat >= threshold
+function observationAt(now) {
+  try { return new Date(now).toISOString() } catch { return null }
 }
 
-export function driverState(lane, journal, ledger) {
-  const threshold = driverGoneThresholdMs(journal)
-  if (!laneActive(lane, journal)) return { state: null, heartbeat_age_ms: null, stale_after_ms: null, threshold_origin: null }
-  const terminal = ledger?.terminal
+function heartbeatObservation(lane, journal, ledger) {
   const session = ledger?.session
-  // A terminal frame is positive evidence that this run's driver exited even
-  // when the read-only ledger is missing or degraded.
-  if (session == null) {
-    return terminal != null
-      ? { state: DRIVER_EXITED, heartbeat_age_ms: null, stale_after_ms: threshold.ms, threshold_origin: threshold.origin }
-      : { state: DRIVER_UNKNOWN, heartbeat_age_ms: null, stale_after_ms: threshold.ms, threshold_origin: threshold.origin }
+  const beat = journalAt(session?.last_heartbeat_at)
+  const now = ledger?.now
+  const age = beat === null || !Number.isFinite(now) ? null : now - beat
+  const freshnessMs = DRIVER_GONE_PERIODS * HEARTBEAT_PERIOD_MS
+  if (age !== null && age >= 0 && age < freshnessMs) {
+    return {
+      driver_state: 'alive', source: 'heartbeat', reason_code: DRIVER_OBSERVATION_REASONS.heartbeat_fresh,
+      heartbeat_state: 'fresh', heartbeat_age_ms: age, detail: { heartbeat_age_ms: age },
+    }
   }
-  const beat = journalAt(session.last_heartbeat_at)
-  const age = beat === null || !Number.isFinite(ledger.now) ? null : ledger.now - beat
-  // It is not a fresh liveness observation, so never fold terminal evidence
-  // back into `running`.
-  if (terminal != null) return { state: DRIVER_EXITED, heartbeat_age_ms: age, stale_after_ms: threshold.ms, threshold_origin: threshold.origin }
-  if (age === null) return { state: DRIVER_UNKNOWN, heartbeat_age_ms: null, stale_after_ms: threshold.ms, threshold_origin: threshold.origin }
-  if (driverGone(lane, journal, ledger)) return { state: DRIVER_GONE, heartbeat_age_ms: age, stale_after_ms: threshold.ms, threshold_origin: threshold.origin }
-  return { state: DRIVER_RUNNING, heartbeat_age_ms: age, stale_after_ms: threshold.ms, threshold_origin: threshold.origin }
+  if (age !== null && age >= freshnessMs) {
+    return {
+      driver_state: 'unknown', source: 'heartbeat', reason_code: DRIVER_OBSERVATION_REASONS.heartbeat_stale,
+      heartbeat_state: 'overdue', heartbeat_age_ms: age, detail: { heartbeat_age_ms: age, stale_after_ms: freshnessMs },
+    }
+  }
+  return {
+    driver_state: 'unknown', source: 'heartbeat', reason_code: DRIVER_OBSERVATION_REASONS.heartbeat_missing,
+    heartbeat_state: 'unmeasured', heartbeat_age_ms: null, detail: { heartbeat: 'unmeasured' },
+  }
+}
+
+// Probe precedence is deliberate: current process identity, bounded terminal
+// log evidence, then heartbeat freshness. Heartbeat age never proves death.
+export function observeDriver(lane, journal, ledger, deps = {}) {
+  const d = normalDeps(deps)
+  if (!laneActive(lane, journal)) {
+    return { driver_state: 'unknown', source: 'heartbeat', reason_code: 'lane-inactive', heartbeat_state: 'unmeasured', heartbeat_age_ms: null, detail: { lane: 'inactive' } }
+  }
+  const identity = probeDriverIdentity(lane, d)
+  const freshnessMs = DRIVER_GONE_PERIODS * HEARTBEAT_PERIOD_MS
+  const beat = journalAt(ledger?.session?.last_heartbeat_at)
+  const age = beat === null || !Number.isFinite(ledger?.now) ? null : ledger.now - beat
+  if (identity.driver_state !== 'unknown') {
+    return { ...identity, heartbeat_state: age === null ? 'unmeasured' : (age >= freshnessMs ? 'overdue' : 'fresh'), heartbeat_age_ms: age }
+  }
+  if (ledger?.terminal != null) {
+    return {
+      driver_state: 'gone', source: 'daemon', reason_code: DRIVER_OBSERVATION_REASONS.terminal_log,
+      heartbeat_state: age === null ? 'unmeasured' : (age >= freshnessMs ? 'overdue' : 'fresh'), heartbeat_age_ms: age,
+      detail: { terminal_status: ledger.terminal },
+    }
+  }
+  return heartbeatObservation(lane, journal, ledger)
+}
+
+export function driverGone(lane, journal, ledger, deps = {}) {
+  if (!laneActive(lane, journal)) return false
+  const observation = observeDriver(lane, journal, ledger, deps)
+  return observation.driver_state === 'gone' && observation.source === 'process_group'
+}
+
+export function driverState(lane, journal, ledger, deps = {}) {
+  const threshold = driverGoneThresholdMs(journal)
+  if (!laneActive(lane, journal)) return { state: null, heartbeat_age_ms: null, stale_after_ms: null, threshold_origin: null, source: null, reason_code: null, heartbeat_state: 'unmeasured' }
+  const observation = observeDriver(lane, journal, ledger, deps)
+  return {
+    state: observation.source === 'daemon' && observation.driver_state === 'gone'
+      ? DRIVER_EXITED
+      : observation.driver_state === 'alive' ? DRIVER_RUNNING : observation.driver_state === 'gone' ? DRIVER_GONE : DRIVER_UNKNOWN,
+    heartbeat_age_ms: observation.heartbeat_age_ms ?? null,
+    stale_after_ms: threshold.ms,
+    threshold_origin: threshold.origin,
+    source: observation.source,
+    reason_code: observation.reason_code,
+    heartbeat_state: observation.heartbeat_state ?? 'unmeasured',
+    detail: observation.detail,
+  }
 }
 
 export function hostLoad({ threshold, deps = {} } = {}) {
@@ -425,6 +525,32 @@ function appendNote(lane, note, deps) {
   return line
 }
 
+function appendObservation(lane, observation, session, at, d) {
+  const adwId = session?.adw_id
+  if (typeof adwId !== 'string' || adwId.trim() === '') return { recorded: false, observation: null }
+  const row = {
+    adw_id: adwId,
+    observed_at: observationAt(at),
+    observer: 'lane-watch',
+    driver_state: observation.driver_state,
+    source: observation.source,
+    reason_code: observation.reason_code,
+    detail: observation.detail ?? {},
+  }
+  if (row.observed_at === null) return { recorded: false, observation: row, error: 'observation-time-invalid' }
+  try {
+    if (typeof d.recordRunObservation === 'function') {
+      d.recordRunObservation(row)
+    } else {
+      const handle = d.openLedger({ dbPath: d.defaultDbPath(), stderr: { write() {} } })
+      try { handle.recordRunObservation(row) } finally { handle.close?.() }
+    }
+    return { recorded: true, observation: row }
+  } catch (error) {
+    return { recorded: false, observation: row, error: error?.reason || error?.code || 'observation-write-failed' }
+  }
+}
+
 // A bounded pass. The caller repeats it; nothing here loops, sleeps, or lives on.
 export function watchPass({ root, now, silenceS, loadThreshold, deps = {} } = {}) {
   const d = normalDeps(typeof now === 'number' ? { ...deps, now: () => now } : deps)
@@ -436,19 +562,37 @@ export function watchPass({ root, now, silenceS, loadThreshold, deps = {} } = {}
   const lanes = discoverLanes(watchRoot, d)
   const load = hostLoad({ threshold, deps: d })
   const written = []
+  const observations = []
   const watched = []
 
   for (const lane of lanes) {
     const journal = readJournal(lane.journal, d)
     if (!laneActive(lane, journal)) continue
     watched.push(lane.id)
-    const driver = driverState(lane, journal, laneLedgerView(lane, d))
+    const ledger = laneLedgerView(lane, d)
+    const measured = observeDriver(lane, journal, ledger, d)
+    const persisted = appendObservation(lane, measured, ledger.session, at, d)
+    observations.push({ lane: lane.id, ...persisted })
+    const observation = persisted.recorded ? measured : (persisted.observation
+      ? { ...measured, driver_state: 'unknown', source: persisted.observation.source, reason_code: 'observation-write-failed', detail: { error: persisted.error } }
+      : measured)
+    const driver = {
+      state: observation.source === 'daemon' && observation.driver_state === 'gone'
+        ? DRIVER_EXITED
+        : observation.driver_state === 'alive' ? DRIVER_RUNNING : observation.driver_state === 'gone' ? DRIVER_GONE : DRIVER_UNKNOWN,
+      heartbeat_age_ms: observation.heartbeat_age_ms ?? null,
+      stale_after_ms: driverGoneThresholdMs(journal).ms,
+      threshold_origin: driverGoneThresholdMs(journal).origin,
+    }
     const artifactMs = latestArtifactMs(lane.taskDir, d)
     const laneNotes = []
     if (driver.state === DRIVER_GONE) {
+      const heartbeatAge = Number.isFinite(driver.heartbeat_age_ms)
+        ? { heartbeat_age_s: Math.max(0, Math.floor(driver.heartbeat_age_ms / 1000)) }
+        : { heartbeat_age_s: null, heartbeat_age_reason: 'unmeasured' }
       laneNotes.push({
         note: 'driver-gone',
-        heartbeat_age_s: Math.max(0, Math.floor(driver.heartbeat_age_ms / 1000)),
+        ...heartbeatAge,
         threshold_s: Math.round(driver.stale_after_ms / 1000),
         threshold_origin: driver.threshold_origin,
         last_stage: journal.lastStage,
@@ -469,5 +613,5 @@ export function watchPass({ root, now, silenceS, loadThreshold, deps = {} } = {}
       written.push(appendNote(lane, { ...note, __at: at }, d))
     }
   }
-  return { at: new Date(at).toISOString(), root: watchRoot, lanes: watched, notes: written, tunables }
+  return { at: new Date(at).toISOString(), root: watchRoot, lanes: watched, notes: written, observations, tunables }
 }

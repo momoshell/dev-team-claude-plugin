@@ -146,28 +146,17 @@ export const EVENT_TYPES = Object.freeze([
 
 export const SESSION_STATUSES = Object.freeze(['running', 'ok', 'fail', 'aborted'])
 export const SESSION_OUTCOMES = Object.freeze(['success', 'escalated', 'aborted', 'failed'])
+export const DRIVER_STATES = Object.freeze(['alive', 'gone', 'unknown'])
+export const RUN_OBSERVATION_SOURCES = Object.freeze(['daemon', 'process_group', 'cmux', 'heartbeat'])
+export const RUN_OBSERVATION_COLUMNS = Object.freeze(['observed_at', 'observer', 'driver_state', 'source', 'reason_code', 'detail'])
+export const RUN_OBSERVATION_WRITE_VERB = 'INSERT'
 
-// Pure readout projection for the sessions-only CLI. It copies every row and
-// changes only a running, unterminated row whose measured heartbeat is at or
-// beyond the fixed driver-gone floor. Fresh, terminal, and invalid-heartbeat
-// rows retain their stored status and fields exactly; no database write occurs.
-export function projectSessions(rows, { now = Date.now(), thresholdMs = DRIVER_GONE_THRESHOLD_MS } = {}) {
-  const observedAt = epochMsOrNull(now)
-  const staleAfter = Number.isFinite(Number(thresholdMs)) && Number(thresholdMs) >= 0
-    ? Number(thresholdMs)
-    : DRIVER_GONE_THRESHOLD_MS
+// Session settlement is durable evidence from endSession. A heartbeat is a
+// separate observation and can never rewrite status, outcome, or terminal
+// provenance in this compatibility readout.
+export function projectSessions(rows) {
   const source = Array.isArray(rows) ? rows : []
-  if (observedAt === null) return source.map((session) => (session && typeof session === 'object' ? { ...session } : session))
-  return source.map((session) => {
-    if (!session || typeof session !== 'object' || Array.isArray(session)) return session
-    if (session.status !== 'running' || session.ended_at != null) return { ...session }
-    const heartbeatAt = epochMsOrNull(session.last_heartbeat_at)
-    if (heartbeatAt === null) return { ...session }
-    const age = observedAt - heartbeatAt
-    if (!Number.isFinite(age) || age < staleAfter) return { ...session }
-    return { ...session, status: null, status_absent_reason: SESSION_STATUS_ABSENT.driver_gone,
-      heartbeat_age_ms: age, stale_after_ms: staleAfter }
-  })
+  return source.map((session) => (session && typeof session === 'object' ? { ...session } : session))
 }
 // An enum with a member nothing can write is a documented contract nobody can rely on.
 // The synthetic-session enum and writer are retired while the additive
@@ -705,6 +694,20 @@ export const TABLES = Object.freeze({
     ],
     unique: [['adw_id']],
     indexes: [],
+  },
+  run_observations: {
+    columns: [
+      { name: 'id', decl: 'INTEGER PRIMARY KEY AUTOINCREMENT' },
+      { name: 'adw_id', decl: 'TEXT' },
+      { name: 'observed_at', decl: 'TEXT' },
+      { name: 'observer', decl: 'TEXT' },
+      { name: 'driver_state', decl: 'TEXT' },
+      { name: 'source', decl: 'TEXT' },
+      { name: 'reason_code', decl: 'TEXT' },
+      { name: 'detail', decl: 'TEXT' },
+    ],
+    unique: [['id']],
+    indexes: [{ name: 'run_observations_adw_observed_id_idx', cols: ['adw_id', 'observed_at', 'id'] }],
   },
   run_configurations: {
     columns: [
@@ -1401,7 +1404,7 @@ export const JOURNAL_FACT_EVENTS = Object.freeze({
 
 export const WRITERS = Object.freeze([
   'startSession', 'endSession', 'startPhase', 'endPhase', 'recordEvent',
-  'recordEnvelope', 'recordSessionRequest', 'recordRunConfiguration', 'recordRunSeat', 'recordGateResult', 'recordGateDiscrimination',
+  'recordEnvelope', 'recordSessionRequest', 'recordRunConfiguration', 'recordRunSeat', 'recordRunObservation', 'recordGateResult', 'recordGateDiscrimination',
   'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'recordCiCycle', 'recordCiDispatch', 'recordEvalCell', 'recordIntakeSweep', 'recordIntakeRefusal', 'recordIntakeBrake', 'recordIntakeDispatch', 'recordSeatTeardown', 'recordSeatReclaim', 'recordProviderFailure', 'recordPlanScope', 'recordSeatReask', 'recordAcceptReask', 'recordRpcExitContext', 'recordSeatTurnCensus', 'recordPlanAdoption', 'recordExternalFence', 'recordMutationAnchorBind', 'recordMutationAnchorAbsence', 'recordPhaseSlotWait', 'recordExperimentArm', 'startProcess', 'endProcess', 'heartbeat',
   'startAgentSession', 'endAgentSession', 'recordSourceError', 'linkRun',
 ])
@@ -1414,6 +1417,7 @@ export const WRITERS = Object.freeze([
 export const WRITER_MIRROR_TABLES = Object.freeze({
   startSession: 'sessions',
   recordRunConfiguration: 'run_configurations',
+  recordRunObservation: 'run_observations',
   recordRunSeat: 'run_seats',
   startPhase: 'phases',
   recordEvent: 'events',
@@ -2960,6 +2964,35 @@ export function openLedger({
     return args
   }
 
+  function recordRunObservation(input = {}) {
+    requireFields(input, ['adw_id', 'observed_at', 'observer', 'driver_state', 'source', 'reason_code', 'detail'], 'recordRunObservation')
+    requireEnum(input.driver_state, DRIVER_STATES, 'recordRunObservation', 'driver_state')
+    requireEnum(input.source, RUN_OBSERVATION_SOURCES, 'recordRunObservation', 'source')
+    const observer = normaliseShortName(input.observer, 'recordRunObservation', 'observer')
+    const reasonCode = normaliseShortName(input.reason_code, 'recordRunObservation', 'reason_code')
+    if (observer === null || reasonCode === null) refuse('recordRunObservation: observer and reason_code are required')
+    const detailValue = typeof input.detail === 'string' ? input.detail : JSON.stringify(input.detail)
+    if (typeof detailValue !== 'string' || detailValue.trim() === '') refuse('recordRunObservation: detail must be non-blank')
+    const redactedDetail = boundText(String(redact(detailValue, stats)), 2000)
+    const args = redact({
+      adw_id: input.adw_id,
+      observed_at: isoMs(input.observed_at),
+      observer,
+      driver_state: input.driver_state,
+      source: input.source,
+      reason_code: reasonCode,
+      detail: redactedDetail,
+    }, stats)
+    appendJsonl('recordRunObservation', args)
+    mirror((conn) => {
+      const cols = tableColumnNames('run_observations').filter((column) => column !== 'id')
+      const verb = RUN_OBSERVATION_WRITE_VERB
+      conn.prepare(`${verb} INTO run_observations (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
+        .run(...cols.map((column) => toBindable(args[column])))
+    })
+    return args
+  }
+
   function startPhase(input = {}) {
     requireFields(input, ['adw_id', 'name'], 'startPhase')
     const explicitSeq = input.seq ?? undefined
@@ -4467,6 +4500,13 @@ export function openLedger({
     return queryRows(`SELECT * FROM run_configurations WHERE adw_id IN (${marks})`, ids)
   }
 
+  function runObservationsFor(adwIds) {
+    const ids = [...new Set((adwIds || []).filter(Boolean))]
+    if (!ids.length) return []
+    const marks = ids.map(() => '?').join(',')
+    return queryRows(`SELECT id, adw_id, observed_at, observer, driver_state, source, reason_code, detail FROM run_observations WHERE adw_id IN (${marks}) ORDER BY adw_id, observed_at, id`, ids)
+  }
+
   function runSeatsFor(adwIds) {
     const ids = [...new Set((adwIds || []).filter(Boolean))]
     if (!ids.length) return []
@@ -5687,11 +5727,11 @@ export function openLedger({
 
   const handle = {
     get degraded() { return degraded },
-    startSession, endSession, recordSessionRequest, recordRunConfiguration, recordRunSeat, startPhase, endPhase, recordEvent, recordEnvelope,
+    startSession, endSession, recordSessionRequest, recordRunConfiguration, recordRunSeat, recordRunObservation, startPhase, endPhase, recordEvent, recordEnvelope,
     recordGateResult, recordGateDiscrimination, recordMutationAnchorBind, recordMutationAnchorAbsence, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordEvalCell, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown, recordSeatReclaim, recordProviderFailure, recordPlanScope, recordSeatReask, recordAcceptReask, recordRpcExitContext, recordSeatTurnCensus, recordPlanAdoption, recordExternalFence, recordPhaseSlotWait, recordExperimentArm,
     startProcess, endProcess, heartbeat, startAgentSession, endAgentSession,
     recordSourceError, linkRun,
-    listSessions, listEvents, getSession, phantomSessions, dumpTable, tableNames, columnNames, sessionsFiltered, runsStartedWithin, phasesFor, runConfigurationsFor, runSeatsFor, agentEventsFor, agentSessionsFor, gateDiscriminationsFor, gateResultsFor, reviewOutcomesFor, acceptDecisionsFor, supportsJson1, eventsPage, maxEventId, cellFailureRowsFor, unattributableCellFailures, seatTeardownRowsFor, intakePicks, intakeSweepTotals, intakeCandidateRefusals, intakeCandidatePicks, agentSessionTokenTotals, gateReviewGap, cellFailures, cellReviews, evalCells, cellUsage, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, escalations, endedRuns, escalationWindow, seatReclaims, journalFacts, plannerSymbolsHoldout, turnEconomy, turnBreakdown, eligibleTasks, runSet, transportsFor, taskReadout, jsonlDrift,
+    listSessions, listEvents, getSession, phantomSessions, dumpTable, tableNames, columnNames, sessionsFiltered, runsStartedWithin, phasesFor, runConfigurationsFor, runObservationsFor, runSeatsFor, agentEventsFor, agentSessionsFor, gateDiscriminationsFor, gateResultsFor, reviewOutcomesFor, acceptDecisionsFor, supportsJson1, eventsPage, maxEventId, cellFailureRowsFor, unattributableCellFailures, seatTeardownRowsFor, intakePicks, intakeSweepTotals, intakeCandidateRefusals, intakeCandidatePicks, agentSessionTokenTotals, gateReviewGap, cellFailures, cellReviews, evalCells, cellUsage, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, escalations, endedRuns, escalationWindow, seatReclaims, journalFacts, plannerSymbolsHoldout, turnEconomy, turnBreakdown, eligibleTasks, runSet, transportsFor, taskReadout, jsonlDrift,
     stats: statsFn,
     captureMirrorErrors,
     readConnection,

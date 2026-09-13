@@ -1,7 +1,7 @@
 <script>
   import { tick } from 'svelte'
   import { getReturns, getSessions } from './lib/api.js'
-  import { createSemaphore, deriveDisplayStatus, fleetActivity, needsAttention } from './lib/fleet.js'
+  import { createSemaphore, deriveDisplayStatus, driverObservation, fleetActivity, needsAttention, runtimeActivitySummary } from './lib/fleet.js'
   import { journalPulse } from './lib/live.js'
   import { formatHash, parseHash, subscribeHash } from './lib/route.js'
   import TaskList from './lib/TaskList.svelte'
@@ -37,6 +37,14 @@
 
   let anyRunning = $derived(runs.some((run) => run.running))
   let activity = $derived(fleetActivity(runs, now))
+  let runtimeSummary = $derived(runtimeActivitySummary(runs))
+  let driverEvidence = $derived(runs.reduce((summary, run) => {
+    const observation = driverObservation(run)
+    if (observation.measured) summary.measured += 1
+    else summary.unknown += 1
+    if (observation.source && !summary.sources.includes(observation.source)) summary.sources.push(observation.source)
+    return summary
+  }, { measured: 0, unknown: 0, sources: [] }))
   let runIndex = $derived(new Map(runs.map((run) => [run.adw_id, run])))
   let selectedRun = $derived(route.view === 'run' || route.view === 'phase' ? runIndex.get(route.adw_id) : null)
   let attentionRows = $derived(runs.map((run) => {
@@ -158,6 +166,7 @@
   </nav>
   <div class="tools">
     <span class:degraded={feedDegraded} class:silent={!feedDegraded && (activity.silent || activity.unverified || activity.contradicted)} class="connection"><i></i>{feedDegraded ? 'Feed degraded' : activity.contradicted ? `${activity.open} open · ${activity.contradicted} contradicted${activity.silent ? ` · ${activity.silent} stale` : ''}${activity.unverified ? ` · ${activity.unverified} unverified` : ''}` : activity.silent ? `${activity.open} open · ${activity.silent} stale${activity.unverified ? ` · ${activity.unverified} unverified` : ''}` : activity.unverified ? `${activity.open} open · ${activity.unverified} unverified` : activity.live ? `${activity.live} live` : 'Ledger ready'}</span>
+    <span class="driver-summary" title={driverEvidence.sources.length ? `Latest observation sources: ${driverEvidence.sources.join(', ')}` : 'No authoritative driver observations'}>{runtimeSummary} · {driverEvidence.unknown} unmeasured</span>
     <label class="theme"><span>Theme</span><Dropdown bind:value={theme} options={THEME_OPTIONS} ariaLabel="Theme" width="5.2rem" variant="compact" /></label>
   </div>
 </header>
@@ -203,7 +212,7 @@
 .brand-mark { display:grid; gap:3px; width:1.45rem; transform:skewX(-10deg); }.brand-mark i { display:block; height:4px; border-radius:1rem; }.brand-mark i:nth-child(1) { width:65%; background:var(--tech-lead-color); }.brand-mark i:nth-child(2) { width:100%; background:var(--planner-color); }.brand-mark i:nth-child(3) { width:48%; margin-left:25%; background:var(--builder-color); }
 nav { justify-self:center; display:flex; gap:.3rem; padding:.25rem; border:1px solid var(--line); border-radius:.65rem; background:color-mix(in srgb,var(--panel) 85%,transparent); }
 nav button { position:relative; border:0; border-radius:.45rem; background:transparent; color:var(--muted); padding:.45rem .8rem; font-size:.78rem; cursor:pointer; } nav button.active { color:inherit; background:var(--panel-raised); box-shadow:0 1px 6px rgba(0,0,0,.15); }
-.tools { justify-self:end; display:flex; align-items:center; gap:.8rem; }.connection { display:inline-flex; align-items:center; gap:.4rem; color:var(--muted); font-size:.7rem; white-space:nowrap; }.connection i { width:.45rem; height:.45rem; border-radius:50%; background:var(--status-ok); box-shadow:0 0 8px var(--status-ok); }.connection.degraded,.connection.silent { color:var(--status-escalated); }.connection.degraded i,.connection.silent i { background:var(--status-escalated); box-shadow:none; }
+.tools { justify-self:end; display:flex; align-items:center; gap:.8rem; }.connection { display:inline-flex; align-items:center; gap:.4rem; color:var(--muted); font-size:.7rem; white-space:nowrap; }.connection i { width:.45rem; height:.45rem; border-radius:50%; background:var(--status-ok); box-shadow:0 0 8px var(--status-ok); }.connection.degraded,.connection.silent { color:var(--status-escalated); }.connection.degraded i,.connection.silent i { background:var(--status-escalated); box-shadow:none; }.driver-summary { color:var(--muted); font:500 .58rem var(--mono); white-space:nowrap; }
 .theme { display:flex; align-items:center; gap:.35rem; }.theme > span { position:absolute; width:1px; height:1px; overflow:hidden; }
 .page { position:relative; width:min(1440px,100%); margin:auto; padding:2rem 1.25rem 4rem; }.page-heading { display:flex; justify-content:space-between; align-items:end; gap:1rem; margin-bottom:1rem; }.page-heading h1 { margin:.1rem 0 .35rem; font-size:clamp(1.7rem,3vw,2.35rem); letter-spacing:-.04em; }.page-heading p { margin:0; color:var(--muted); max-width:44rem; font-size:.9rem; }.page-heading .eyebrow { color:var(--accent); font-size:.66rem; font-weight:700; letter-spacing:.14em; text-transform:uppercase; }.updated { color:var(--muted); font-size:.7rem; padding-bottom:.35rem; white-space:nowrap; }
 .ops-grid { display:grid; gap:1rem; grid-template-columns:repeat(2,minmax(0,1fr)); }

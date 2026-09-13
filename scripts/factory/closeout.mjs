@@ -26,10 +26,11 @@ import {
   teardownVerdict,
 } from './dispatch-batch.mjs'
 import { journalRowsSinceRunStart, parseSuiteCounts, RUN_START_EVENT } from '../../crew/drive.mjs'
-import { BATCH_DIR_EVENT, batchDirFromBrief } from '../../crew/crew.mjs'
-import { ingestJournal as defaultIngestJournal, openLedger as defaultOpenLedger } from './ledger.mjs'
+import { BATCH_DIR_EVENT, batchDirFromBrief, resolveTaskReturn as defaultResolveTaskReturn } from '../../crew/crew.mjs'
+import { defaultDbPath as defaultLedgerDbPath, ingestJournal as defaultIngestJournal, openLedger as defaultOpenLedger } from './ledger.mjs'
+import { probeDriverIdentity as defaultProbeDriverIdentity } from './lane-watch.mjs'
 
-export const CLOSEOUT_VERBS = Object.freeze(['merge-check', 'reap', 'recover'])
+export const CLOSEOUT_VERBS = Object.freeze(['merge-check', 'reap', 'recover', 'reconcile'])
 export const EXIT_OK = 0
 export const EXIT_REFUSED = 1
 export const EXIT_USAGE = 2
@@ -38,6 +39,9 @@ export const STEP_OUTCOMES = Object.freeze({ OK: 'ok', REFUSED: 'refused' })
 export const MERGE_CHECK_STEPS = Object.freeze(['pr-open', 'scratch-worktree', 'merge', 'suite', 'anchor-repair', 'report'])
 export const REAP_STEPS = Object.freeze(['pr-merged', 'turns', 'issues', 'worktree', 'branch', 'prune', 'archive'])
 export const RECOVER_STEPS = Object.freeze(['quiet', 'preserve', 'teardown', 'verify', 'closeout'])
+export const RECONCILE_TERMINAL_STATUS = 'aborted'
+export const RECONCILE_TERMINAL_OUTCOME = 'aborted'
+export const RECONCILE_DEFAULT_REASON = 'driver-gone-without-terminal-envelope'
 export const QUIET_READS = 2
 export const QUIET_GAP_MS = 10_000
 export const ARCHIVE_MARK = '.archive-'
@@ -76,6 +80,13 @@ export const CLOSEOUT_REFUSALS = Object.freeze({
   REBASE_FAILED: 'rebase-failed',
   GATE_RED: 'gate-red',
   COLD_VERIFY_FAILED: 'cold-verify-failed',
+  RECONCILE_SESSION_ABSENT: 'reconcile-session-absent',
+  RECONCILE_SESSION_SETTLED: 'reconcile-session-settled',
+  RECONCILE_IDENTITY_UNKNOWN: 'reconcile-identity-unknown',
+  RECONCILE_DRIVER_ALIVE: 'reconcile-driver-alive',
+  RECONCILE_TERMINAL_ENVELOPE: 'reconcile-terminal-envelope',
+  RECONCILE_EVIDENCE_UNKNOWN: 'reconcile-evidence-unknown',
+  RECONCILE_WRITE_FAILED: 'reconcile-write-failed',
   INTERNAL: 'internal',
 })
 
@@ -139,6 +150,9 @@ export function normalDeps(deps = {}) {
     now: deps.now || (() => Date.now()),
     sleep: deps.sleep || sleepSync,
     openLedger: deps.openLedger || defaultOpenLedger,
+    defaultDbPath: deps.defaultDbPath || defaultLedgerDbPath,
+    probeDriverIdentity: deps.probeDriverIdentity || defaultProbeDriverIdentity,
+    resolveTaskReturn: deps.resolveTaskReturn || defaultResolveTaskReturn,
     ingestJournal: deps.ingestJournal || defaultIngestJournal,
     home: deps.home || homedir(),
     log: deps.log || ((line) => process.stdout.write(`${line}\n`)),
@@ -1049,7 +1063,170 @@ export function recover({ lane, checkout, checkoutExplicit, deps } = {}) {
   return { verb: 'recover', lane: name, lines, refusal: resultRefusal, report, code: resultRefusal ? 1 : 0 }
 }
 
-export const USAGE = 'usage: node scripts/factory/closeout.mjs (merge-check <lane…> | reap <lane…> | recover <lane>) [--checkout <dir>]'
+const RECONCILE_ACTIVE_STATUSES = new Set(['active', 'running', 'pending', 'working', 'open', 'unsettled', 'in-progress', 'in_progress'])
+
+function reconcileSession({ ledger, lane, checkout, supplied }) {
+  if (supplied && typeof supplied === 'object') return supplied
+  let rows
+  try { rows = ledger.listSessions() } catch { return null }
+  const matches = (Array.isArray(rows) ? rows : [])
+    .filter((row) => row && row.task_slug === lane)
+    .sort((a, b) => String(b.started_at || '').localeCompare(String(a.started_at || '')))
+  // A checkout-derived repository match disambiguates identical task slugs in
+  // a shared home, while the task-only fallback keeps old ledgers readable.
+  const repo = basename(checkout)
+  return matches.find((row) => row.repo_slug === repo) || matches[0] || null
+}
+
+function returnArtifactNames(names) {
+  return (Array.isArray(names) ? names : [])
+    .map((raw) => typeof raw === 'string' ? raw : raw?.name)
+    .filter((name) => typeof name === 'string' && name.length > 0)
+    .sort()
+}
+
+function terminalEnvelopeEvidence({ crewDir, deps }) {
+  const d = normalDeps(deps)
+  const returnsDir = join(crewDir, 'returns')
+  let taskReturn
+  try { taskReturn = d.resolveTaskReturn({ dir: crewDir, returnsDir }, d) } catch (error) {
+    return { state: 'unknown', reason: 'task-return-unresolved', detail: error?.code || 'resolve-error' }
+  }
+  if (typeof taskReturn !== 'string' || taskReturn.trim() === '') {
+    return { state: 'unknown', reason: 'task-return-unresolved', detail: 'missing task return' }
+  }
+  const scopeDir = dirname(taskReturn)
+  let names
+  try { names = d.readdirSync(scopeDir) } catch (error) {
+    return { state: 'unknown', reason: 'returns-unreadable', detail: error?.code || 'read-error' }
+  }
+  const artifacts = returnArtifactNames(names)
+  const taskName = basename(taskReturn)
+  const seatEnvelopes = artifacts.filter((name) => ENVELOPE_RE.test(name))
+  if (!artifacts.includes(taskName)) {
+    if (seatEnvelopes.length > 0) return { state: 'none', files: seatEnvelopes, task_return: taskReturn, scope_dir: scopeDir }
+    return { state: 'unknown', reason: 'returns-empty', detail: 'no task or seat envelope' }
+  }
+  let raw
+  try { raw = d.readFileSync(taskReturn, 'utf8') } catch (error) {
+    return { state: 'unknown', reason: 'envelope-unreadable', detail: { file: taskName, error: error?.code || 'read-error' } }
+  }
+  if (textOf(raw).trim() === '') return { state: 'unknown', reason: 'envelope-empty', detail: { file: taskName } }
+  let parsed
+  try { parsed = JSON.parse(textOf(raw)) } catch {
+    return { state: 'unknown', reason: 'envelope-malformed', detail: { file: taskName } }
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || typeof parsed.status !== 'string' || parsed.status.trim() === '') {
+    return { state: 'unknown', reason: 'envelope-malformed', detail: { file: taskName } }
+  }
+  const status = parsed.status.trim().toLowerCase()
+  if (!RECONCILE_ACTIVE_STATUSES.has(status)) {
+    return { state: 'terminal', file: taskName, status: parsed.status, outcome: parsed.outcome ?? parsed.status, detail: { file: taskName, status: parsed.status }, task_return: taskReturn, scope_dir: scopeDir }
+  }
+  return { state: 'none', files: seatEnvelopes, task_return: taskReturn, scope_dir: scopeDir }
+}
+
+function reconciliationRefusal(value) {
+  if (value === 'alive') refuse('current driver identity is alive', CLOSEOUT_REFUSALS.RECONCILE_DRIVER_ALIVE, 'reconcile')
+  if (value === 'terminal-envelope-present') refuse('a terminal envelope already supplies an outcome', CLOSEOUT_REFUSALS.RECONCILE_TERMINAL_ENVELOPE, 'reconcile')
+  refuse('current driver identity is unknown', CLOSEOUT_REFUSALS.RECONCILE_IDENTITY_UNKNOWN, 'reconcile')
+}
+
+function reconcileObservedAt(value) {
+  const at = typeof value === 'number' ? value : value instanceof Date ? value.getTime() : NaN
+  if (!Number.isFinite(at)) return null
+  try { return new Date(at).toISOString() } catch { return null }
+}
+
+export function commitReconciliation({ ledger, session, observation, actor = 'operator', reason = RECONCILE_DEFAULT_REASON } = {}) {
+  if (!ledger || typeof ledger.endSession !== 'function') throw new Error('reconcile ledger is unavailable')
+  return ledger.endSession({ adw_id: session.adw_id, status: 'aborted', outcome: 'aborted', terminal_reason: reason, terminal_actor: actor })
+}
+
+export function reconcile({ lane, checkout, crewDir, dbPath, dryRun = false, reason = RECONCILE_DEFAULT_REASON, actor = 'operator', session: suppliedSession, deps } = {}) {
+  const d = normalDeps(deps)
+  const name = typeof lane === 'string' ? lane : String(lane ?? '')
+  const root = typeof checkout === 'string' && checkout.trim() ? checkout : process.cwd()
+  const stateDir = typeof crewDir === 'string' && crewDir.trim() ? crewDir : dirname(crewJsonPath({ checkout: root, lane: name, deps: d }))
+  const proposed = {
+    status: RECONCILE_TERMINAL_STATUS,
+    outcome: RECONCILE_TERMINAL_OUTCOME,
+    terminal_reason: typeof reason === 'string' && reason.trim() ? reason.trim() : RECONCILE_DEFAULT_REASON,
+    terminal_actor: typeof actor === 'string' && actor.trim() ? actor.trim() : 'operator',
+  }
+  const report = {
+    event: 'closeout-reconcile',
+    lane: name,
+    crew_dir: stateDir,
+    dry_run: dryRun === true,
+    observed_at: null,
+    identity: null,
+    source: null,
+    reason: null,
+    observation: null,
+    proposed_terminal_result: proposed,
+    envelope: null,
+    result: 'refused',
+    refusal: null,
+  }
+  let ledger
+  try {
+    const openPath = typeof dbPath === 'string' && dbPath.trim() ? dbPath : d.defaultDbPath()
+    ledger = d.openLedger({ dbPath: openPath, readOnly: dryRun === true, stderr: { write() {} } })
+    let session = reconcileSession({ ledger, lane: name, checkout: root, supplied: suppliedSession })
+    if (!session) refuse(`no unsettled ledger session found for ${name}`, CLOSEOUT_REFUSALS.RECONCILE_SESSION_ABSENT, 'reconcile')
+    if (session.ended_at != null) refuse(`ledger session is already settled for ${name}`, CLOSEOUT_REFUSALS.RECONCILE_SESSION_SETTLED, 'reconcile')
+    const measuredAt = reconcileObservedAt(d.now())
+    if (measuredAt === null) refuse(`reconcile observation time is unavailable for ${name}`, CLOSEOUT_REFUSALS.RECONCILE_EVIDENCE_UNKNOWN, 'reconcile')
+    report.observed_at = measuredAt
+    const identity = d.probeDriverIdentity({ dir: stateDir, task: name, repo: basename(root) }, d)
+    const identityState = ['alive', 'gone', 'unknown'].includes(identity?.driver_state ?? identity?.state)
+      ? (identity.driver_state ?? identity.state)
+      : 'unknown'
+    report.identity = identity && typeof identity === 'object' ? { ...identity, driver_state: identityState } : { driver_state: 'unknown' }
+    report.source = identity?.source ?? null
+    report.reason = identity?.reason_code ?? null
+    const observation = {
+      adw_id: session.adw_id,
+      observed_at: measuredAt,
+      observer: `closeout.reconcile:${report.proposed_terminal_result.terminal_actor}`,
+      driver_state: identityState,
+      source: identity?.source ?? 'heartbeat',
+      reason_code: identity?.reason_code ?? 'identity-unmeasured',
+      detail: identity?.detail ?? {},
+    }
+    report.observation = observation
+    if (observation.driver_state !== 'gone') return reconciliationRefusal(observation.driver_state)
+    if (observation.source !== 'process_group') return reconciliationRefusal('unknown')
+    report.envelope = terminalEnvelopeEvidence({ crewDir: stateDir, deps: d })
+    const terminalEnvelope = report.envelope.state === 'terminal' ? report.envelope : null
+    if (report.envelope.state === 'unknown') refuse(`terminal envelope evidence is unknown for ${name}`, CLOSEOUT_REFUSALS.RECONCILE_EVIDENCE_UNKNOWN, 'reconcile')
+    if (terminalEnvelope !== null) return reconciliationRefusal('terminal-envelope-present')
+    const actor = proposed.terminal_actor
+    const reason = proposed.terminal_reason
+    if (!dryRun) {
+      if (typeof ledger.recordRunObservation !== 'function') refuse(`ledger does not support run observations for ${name}`, CLOSEOUT_REFUSALS.RECONCILE_WRITE_FAILED, 'reconcile')
+      ledger.recordRunObservation(observation)
+      const latest = typeof ledger.getSession === 'function' ? ledger.getSession(session.adw_id) : session
+      if (latest && latest.ended_at != null) refuse(`ledger session settled during reconcile for ${name}`, CLOSEOUT_REFUSALS.RECONCILE_SESSION_SETTLED, 'reconcile')
+      session = latest || session
+    }
+    if (!dryRun) commitReconciliation({ ledger, session, observation, actor, reason })
+    report.terminal = !dryRun && typeof ledger.getSession === 'function' ? ledger.getSession(session.adw_id) : null
+    report.result = dryRun ? 'would-reconcile' : 'reconciled'
+  } catch (error) {
+    const refusal = error instanceof CloseoutRefusal
+      ? error
+      : new CloseoutRefusal(error?.message || String(error), CLOSEOUT_REFUSALS.INTERNAL, 'reconcile')
+    report.refusal = refusalObject(refusal)
+  } finally {
+    try { ledger?.close?.() } catch { /* evidence already captured */ }
+  }
+  d.log(JSON.stringify(report))
+  return { verb: 'reconcile', lane: name, report, refusal: report.refusal, code: report.refusal ? EXIT_REFUSED : EXIT_OK }
+}
+
+export const USAGE = 'usage: node scripts/factory/closeout.mjs (merge-check <lane…> | reap <lane…> | recover <lane> | reconcile <lane>) [--checkout <dir>] [--dry-run]'
 
 export function parseArgs(argv) {
   if (!Array.isArray(argv)) throw new CloseoutUsageError(USAGE)
@@ -1057,10 +1234,20 @@ export function parseArgs(argv) {
   let checkout = process.cwd()
   let checkout_explicit = false
   let help = false
+  let dry_run = false
+  let reason = null
   const lanes = []
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]
     if (argument === '--help' || argument === '-h') { help = true; continue }
+    if (argument === '--dry-run') { dry_run = true; continue }
+    if (argument === '--reason') {
+      const value = argv[index + 1]
+      if (typeof value !== 'string' || value.trim() === '' || value.startsWith('--')) throw new CloseoutUsageError(`${USAGE}: --reason requires a value`)
+      reason = value
+      index += 1
+      continue
+    }
     if (argument === '--checkout') {
       const value = argv[index + 1]
       if (typeof value !== 'string' || value.trim() === '' || value.startsWith('--')) throw new CloseoutUsageError(`${USAGE}: --checkout requires a value`)
@@ -1075,9 +1262,14 @@ export function parseArgs(argv) {
   }
   if (help) return { verb, lanes, checkout, checkout_explicit, help }
   if (!CLOSEOUT_VERBS.includes(verb)) throw new CloseoutUsageError(`${USAGE}: unknown verb ${String(verb)}`)
+  if (dry_run && verb !== 'reconcile') throw new CloseoutUsageError(`${USAGE}: --dry-run is only valid for reconcile`)
+  if (reason !== null && verb !== 'reconcile') throw new CloseoutUsageError(`${USAGE}: --reason is only valid for reconcile`)
   if (lanes.length === 0) throw new CloseoutUsageError(`${USAGE}: at least one lane is required`)
   if (verb === 'recover' && lanes.length !== 1) throw new CloseoutUsageError(`${USAGE}: recover accepts exactly one lane`)
-  return { verb, lanes, checkout, checkout_explicit, help }
+  const parsed = { verb, lanes, checkout, checkout_explicit, help }
+  if (dry_run) parsed.dry_run = true
+  if (reason !== null) parsed.reason = reason
+  return parsed
 }
 
 export function main(argv, deps = {}) {
@@ -1090,7 +1282,9 @@ export function main(argv, deps = {}) {
       ? mergeCheck({ ...options, lanes: parsed.lanes })
       : parsed.verb === 'reap'
         ? reap({ ...options, lanes: parsed.lanes })
-        : recover({ ...options, lane: parsed.lanes[0], checkoutExplicit: parsed.checkout_explicit })
+        : parsed.verb === 'recover'
+          ? recover({ ...options, lane: parsed.lanes[0], checkoutExplicit: parsed.checkout_explicit })
+          : reconcile({ ...options, lane: parsed.lanes[0], dryRun: parsed.dry_run === true, reason: parsed.reason })
     if (result.refusal) return EXIT_REFUSED
     return EXIT_OK
   } catch (error) {

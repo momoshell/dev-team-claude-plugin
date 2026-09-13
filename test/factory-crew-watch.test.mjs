@@ -29,11 +29,20 @@ import {
 } from '../scripts/factory/crew-watch.mjs'
 import { DRIVER_GONE_PERIODS, HEARTBEAT_PERIOD_MS, discoverLanes, watchPass } from '../scripts/factory/lane-watch.mjs'
 import { PARK_BEAT_MS } from '../crew/headless.mjs'
-import { makeSeedLane } from './helpers.mjs'
+import { makeSeedLane, scratchDir } from './helpers.mjs'
 
 const fixtureRoot = mkdtempSync(join(tmpdir(), 'factory-crew-watch-'))
 const NOW = Date.parse('2026-08-19T18:00:00.000Z')
-const seedLane = makeSeedLane(NOW)
+const seedLaneBase = makeSeedLane(NOW)
+const defaultCheckout = scratchDir('factory-crew-watch-checkout-')
+const seedLane = (root, { checkout = defaultCheckout, ...options } = {}) => {
+  const lane = seedLaneBase(root, options)
+  const crewPath = join(lane.dir, 'crew.json')
+  const crew = JSON.parse(readFileSync(crewPath, 'utf8'))
+  crew.checkout = checkout
+  writeFileSync(crewPath, JSON.stringify(crew))
+  return lane
+}
 let worldNumber = 0
 
 const QUIET = {
@@ -56,7 +65,7 @@ function journalObjects(path) {
   return readFileSync(path, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line))
 }
 
-function crewLane(root, { task = 'crew-lane', checkout = `/w/${task}`, members = {}, ...options } = {}) {
+function crewLane(root, { task = 'crew-lane', checkout = scratchDir('factory-crew-watch-crew-checkout-'), members = {}, ...options } = {}) {
   const lane = seedLane(root, { task, journalLines: [{ at: NOW - 5_000, stage: 'build:r1' }], ...options })
   writeFileSync(join(lane.dir, 'crew.json'), JSON.stringify({ schema_version: 3, task, checkout, members }))
   return lane
@@ -123,7 +132,7 @@ test('bounded report shows active and settled lane status', () => {
 test('seat liveness measures each seat in its own transcript home', () => {
   const root = world()
   const home = join(root, 'home')
-  const checkout = '/w/mixed'
+  const checkout = scratchDir('factory-crew-watch-mixed-checkout-')
   crewLane(root, { task: 'mixed', checkout, members: { lead: { agent: 'claude' }, builder: { agent: 'pi' } } })
   transcriptFrame(home, 'claude', checkout, 120)
   transcriptFrame(home, 'pi', checkout, 30)
@@ -149,7 +158,7 @@ test('claude-only, pi-only and mixed lanes read differently with the same roles'
     ['mixed', members, [['claude', 30], ['pi', 40]]],
   ]
   const readouts = shapes.map(([task, laneMembers, frames]) => {
-    const checkout = `/w/${task}`
+    const checkout = scratchDir(`factory-crew-watch-${task}-checkout-`)
     crewLane(root, { task, checkout, members: laneMembers })
     for (const [agent, ageS] of frames) transcriptFrame(home, agent, checkout, ageS)
     return boundedReport({ root, names: [task], now: NOW, deps: deps(NOW, { homedir: () => home }) }).lines.filter((line) => line.includes(' seat='))
@@ -163,7 +172,7 @@ test('claude-only, pi-only and mixed lanes read differently with the same roles'
 test('a seat with no readable transcript home reads transcript=unknown', () => {
   const root = world()
   const home = join(root, 'home')
-  const checkout = '/w/no-transcript'
+  const checkout = scratchDir('factory-crew-watch-no-transcript-checkout-')
   crewLane(root, { task: 'no-transcript', checkout, members: { lead: { agent: 'claude' }, builder: { agent: 'pi' } } })
   const report = boundedReport({ root, names: ['no-transcript'], now: NOW, deps: deps(NOW, { homedir: () => home }) })
   const lines = report.lines.filter((line) => line.includes(' seat='))
@@ -175,7 +184,7 @@ test('a seat with no readable transcript home reads transcript=unknown', () => {
 test('an escalated lane still reports its seats beside settled status', () => {
   const root = world()
   const home = join(root, 'home')
-  const checkout = '/w/escalated'
+  const checkout = scratchDir('factory-crew-watch-escalated-checkout-')
   crewLane(root, { task: 'escalated', checkout, members: { builder: { agent: 'pi' } }, journalLines: [{ at: NOW - 5_000, stage: 'escalate:review' }] })
   transcriptFrame(home, 'pi', checkout, 30)
   const report = boundedReport({ root, names: ['escalated'], now: NOW, deps: deps(NOW, { homedir: () => home }) })
@@ -287,6 +296,24 @@ test('retry transitions are selected through both default event construction pat
   const state = createState({ root: world(), names: ['demo-lane'] })
   assert.equal(state.events.includes('seat-retrying'), true)
   assert.equal(state.events.includes('seat-retry-cleared'), true)
+})
+
+test('C1 a vanished checkout is classified not live', () => {
+  const root = world()
+  seedLane(root, {
+    task: 'healthy-registration',
+    journalLines: [{ at: NOW - 5_000, stage: 'build:r1' }],
+  })
+  seedLane(root, {
+    task: 'vanished-registration',
+    checkout: join(root, 'checkout-that-is-gone'),
+    journalLines: [{ at: NOW - 5_000, stage: 'build:r1' }],
+  })
+
+  const report = boundedReport({ root, all: true, now: NOW, deps: deps() })
+
+  assert.ok(report.lines.some((line) => line.startsWith('[healthy-registration]')))
+  assert.equal(report.lines.some((line) => line.includes('[vanished-registration]')), false)
 })
 
 test('--all reports live lanes only', () => {

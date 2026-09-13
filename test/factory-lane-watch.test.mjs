@@ -35,7 +35,16 @@ import { makeSeedLane, scratchDir } from './helpers.mjs'
 
 const fixtureRoot = mkdtempSync(join(tmpdir(), 'factory-lane-watch-'))
 const NOW = Date.parse('2026-08-19T18:00:00.000Z')
-const seedLane = makeSeedLane(NOW)
+const seedLaneBase = makeSeedLane(NOW)
+const defaultCheckout = scratchDir('factory-lane-watch-checkout-')
+const seedLane = (root, { checkout = defaultCheckout, ...options } = {}) => {
+  const lane = seedLaneBase(root, options)
+  const crewPath = join(lane.dir, 'crew.json')
+  const crew = JSON.parse(readFileSync(crewPath, 'utf8'))
+  crew.checkout = checkout
+  writeFileSync(crewPath, JSON.stringify(crew))
+  return lane
+}
 let worldNumber = 0
 
 const QUIET = {
@@ -399,6 +408,68 @@ test('a recent lane-watch line does not reset silence or self-silence the lane',
   pass(root)
   assert.equal(notesFor(lane.journal, 'silent-lane').length, 1)
   assert.equal(notesFor(lane.journal, 'silent-lane')[0].silent_s, 645)
+})
+
+test('D1 an existing checkout remains live', () => {
+  const root = world()
+  const checkout = scratchDir('factory-lane-watch-d1-checkout-')
+  const task = 'healthy-checkout'
+  const lane = seedLane(root, { task, checkout })
+
+  assert.deepEqual(discoverLanes(root).map((entry) => entry.id), [`dt-demo/${task}`])
+  assert.deepEqual(archivedLanes(root), [])
+})
+
+test('E1 an archive marker remains independently authoritative', () => {
+  const root = world()
+  const checkout = scratchDir('factory-lane-watch-e1-checkout-')
+  const stamp = '2026-08-20T23-25-28-377Z'
+  const task = `archived-base${ARCHIVE_MARKER}${stamp}`
+  const lane = seedLane(root, {
+    task,
+    checkout,
+  })
+
+  assert.deepEqual(discoverLanes(root), [])
+  assert.deepEqual(archivedLanes(root).map((entry) => ({ task: entry.task, archivedAt: entry.archivedAt })), [
+    { task: 'archived-base', archivedAt: stamp },
+  ])
+  assert.equal(archivedLanes(root)[0].id, `dt-demo/${task}`)
+})
+
+test('F1 live and archived discovery are exact complements', () => {
+  const root = world()
+  const healthy = seedLane(root, { task: 'healthy-complete', checkout: scratchDir('factory-lane-watch-f1-healthy-') })
+  const stale = seedLane(root, { task: 'stale-complete', checkout: join(root, 'missing-checkout') })
+  const explicitTask = `explicit-complete${ARCHIVE_MARKER}2026-08-20T23-25-28-377Z`
+  seedLane(root, {
+    task: explicitTask,
+    checkout: scratchDir('factory-lane-watch-f1-archive-'),
+  })
+  const malformed = seedLane(root, { task: 'malformed-complete' })
+  writeFileSync(join(malformed.dir, 'crew.json'), '{not json')
+
+  const incompleteCrew = join(root, 'repo-incomplete', 'missing-crew')
+  mkdirSync(incompleteCrew, { recursive: true })
+  writeFileSync(join(incompleteCrew, 'journal.jsonl'), '')
+  const incompleteJournal = join(root, 'repo-incomplete', 'missing-journal')
+  mkdirSync(incompleteJournal, { recursive: true })
+  writeFileSync(join(incompleteJournal, 'crew.json'), '{}')
+
+  const live = discoverLanes(root).map((entry) => entry.id)
+  const archived = archivedLanes(root).map((entry) => entry.id)
+  const complete = [
+    'dt-demo/healthy-complete',
+    'dt-demo/stale-complete',
+    `dt-demo/${explicitTask}`,
+    'dt-demo/malformed-complete',
+  ]
+  const all = [...live, ...archived]
+
+  assert.deepEqual(live.filter((id) => archived.includes(id)), [])
+  assert.equal(all.length, complete.length)
+  assert.equal(new Set(all).size, complete.length)
+  for (const id of complete) assert.equal(all.filter((entry) => entry === id).length, 1, id)
 })
 
 test('discovery excludes an archived lane directory and keeps the live one', () => {

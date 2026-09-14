@@ -4876,17 +4876,32 @@ export function openLedger({
   }
 
   function cellFailures({ since = null, until = null } = {}) {
-    // Never joins `sessions`: a boot refusal has no run to join to, and joining
-    // would silently drop exactly the rows this table exists to hold.
+    // The LEFT JOIN only classifies synthetic-session rows and never drops them:
+    // a boot refusal has no run to join to, and a missing session remains a fact.
     return queryRows(`
-      SELECT provider, model_id, agent, effort, role, kind,
-        COUNT(*) AS failures, MIN(created_at) AS first_at, MAX(created_at) AS last_at,
-        SUM(CASE WHEN adw_id IS NULL THEN 1 ELSE 0 END) AS run_less,
-        SUM(CASE WHEN attribution = 'host' AND adw_id IS NOT NULL THEN 1 ELSE 0 END) AS host_attributed
+      SELECT cell_failures.provider, cell_failures.model_id, cell_failures.agent, cell_failures.effort, cell_failures.role, cell_failures.kind,
+        COUNT(*) AS failures, MIN(cell_failures.created_at) AS first_at, MAX(cell_failures.created_at) AS last_at,
+        SUM(CASE WHEN cell_failures.adw_id IS NULL THEN 1 ELSE 0 END) AS run_less,
+        SUM(CASE WHEN cell_failures.attribution = 'host' AND cell_failures.adw_id IS NOT NULL THEN 1 ELSE 0 END) AS host_attributed,
+        SUM(CASE WHEN cell_failures.adw_id IS NOT NULL AND COALESCE(cell_failures.attribution,'') <> 'host' AND s.adw_id IS NOT NULL AND NOT (${excludeSynthetic('s.')}) THEN 1 ELSE 0 END) AS synthetic
       FROM cell_failures
-      WHERE (? IS NULL OR created_at >= ?) AND (? IS NULL OR created_at < ?)
-      GROUP BY provider, model_id, agent, effort, role, kind
-      ORDER BY provider, model_id, agent, effort, role, kind
+      LEFT JOIN sessions s ON s.adw_id = cell_failures.adw_id
+      WHERE (? IS NULL OR cell_failures.created_at >= ?) AND (? IS NULL OR cell_failures.created_at < ?)
+      GROUP BY cell_failures.provider, cell_failures.model_id, cell_failures.agent, cell_failures.effort, cell_failures.role, cell_failures.kind
+      ORDER BY cell_failures.provider, cell_failures.model_id, cell_failures.agent, cell_failures.effort, cell_failures.role, cell_failures.kind
+    `, [since, since, until, until])
+  }
+
+  function cellAttempts({ since = null, until = null } = {}) {
+    return queryRows(`
+      SELECT rs.provider, rs.model_id, rs.agent, rs.effort, rs.role,
+        COUNT(*) AS attempts, MIN(rs.created_at) AS first_at, MAX(rs.created_at) AS last_at
+      FROM run_seats rs
+      JOIN sessions s ON s.adw_id = rs.adw_id
+      WHERE ${excludeSynthetic('s.')}
+        AND (? IS NULL OR rs.created_at >= ?) AND (? IS NULL OR rs.created_at < ?)
+      GROUP BY rs.provider, rs.model_id, rs.agent, rs.effort, rs.role
+      ORDER BY rs.provider, rs.model_id, rs.agent, rs.effort, rs.role
     `, [since, since, until, until])
   }
 
@@ -6035,7 +6050,7 @@ export function openLedger({
     recordGateResult, recordGateDiscrimination, recordMutationAnchorBind, recordMutationAnchorAbsence, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordEvalCell, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown, recordSeatReclaim, recordProviderFailure, recordPlanScope, recordSeatReask, recordAcceptReask, recordRpcExitContext, recordSeatTurnCensus, recordPlanAdoption, recordExternalFence, recordPhaseSlotWait, recordExperimentArm, recordNarrationMeasurement, recordScreenerProposal,
     startProcess, endProcess, heartbeat, startAgentSession, endAgentSession,
     recordSourceError, linkRun,
-    listSessions, listEvents, getSession, phantomSessions, dumpTable, tableNames, columnNames, sessionsFiltered, runsStartedWithin, phasesFor, runConfigurationsFor, runObservationsFor, runSeatsFor, agentEventsFor, agentSessionsFor, gateDiscriminationsFor, gateResultsFor, reviewOutcomesFor, acceptDecisionsFor, supportsJson1, eventsPage, maxEventId, cellFailureRowsFor, unattributableCellFailures, seatTeardownRowsFor, intakePicks, intakeSweepTotals, intakeCandidateRefusals, intakeCandidatePicks, agentSessionTokenTotals, gateReviewGap, cellFailures, cellReviews, screenerAdoptions, evalCells, cellUsage, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, escalations, endedRuns, escalationWindow, seatReclaims, journalFacts, plannerSymbolsHoldout, turnEconomy, turnBreakdown, eligibleTasks, runSet, configurationReadout, transportsFor, taskReadout, jsonlDrift,
+    listSessions, listEvents, getSession, phantomSessions, dumpTable, tableNames, columnNames, sessionsFiltered, runsStartedWithin, phasesFor, runConfigurationsFor, runObservationsFor, runSeatsFor, agentEventsFor, agentSessionsFor, gateDiscriminationsFor, gateResultsFor, reviewOutcomesFor, acceptDecisionsFor, supportsJson1, eventsPage, maxEventId, cellFailureRowsFor, unattributableCellFailures, seatTeardownRowsFor, intakePicks, intakeSweepTotals, intakeCandidateRefusals, intakeCandidatePicks, agentSessionTokenTotals, gateReviewGap, cellFailures, cellAttempts, cellReviews, screenerAdoptions, evalCells, cellUsage, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, escalations, endedRuns, escalationWindow, seatReclaims, journalFacts, plannerSymbolsHoldout, turnEconomy, turnBreakdown, eligibleTasks, runSet, configurationReadout, transportsFor, taskReadout, jsonlDrift,
     stats: statsFn,
     captureMirrorErrors,
     readConnection,

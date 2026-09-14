@@ -5,9 +5,10 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { cpSync, mkdirSync } from 'node:fs'
 import {
-  ACCEPT_FINDINGS, ACCEPT_FINDINGS_SOFT, ACCEPT_REASKS, adversarialPlanEnv, ACCEPT_REFUSALS, B318_GATED_RUNS, B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, CENSUS_ABSENT_REASONS, CENSUS_ROW_ABSENT, CENSUS_TURNS_ABSENT, CENSUS_UNREADABLE, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_MUTATION, CHECK_RUNS, CLOBBER_R2, CONVERGE_GATE, CONVERGE_PLAN, CRASH_FINDINGS, CRASH_STAGES, CTX, CTX_REPAIR, CTX_TL, DECISIONS, D_ASK, D_AUTO, D_COLLISION_CTX, D_PANEL_CTX, D_PATCH_A, D_PATCH_B, ENVELOPE_REFUSAL_REASONS, FINDING_DISPOSITIONS, LIMITS, MUST_FIX_REFUTATION_FINDINGS, NAME_VERDICTS, PANEL_ADJUDICATORS, PANEL_PARTNERS, PERSPECTIVE_TARGETS, PLAN_CHECK_FINDINGS, PLAN_RESIDUAL, PLAN_SCOPE, PLAN_SCOPE_VERDICTS, RED, REFUTATION_CLAIM, REFUTATION_CONVERGE_PLAN, REFUTATION_CONVERGE_RUNS, REFUTATION_EVIDENCE_MAX, RESIDUAL_TYPES, REVIEW_FINDINGS, REVIEW_GATE_PASS, S843_ADDED, S843_D2, S843_DISPATCHED, S843_DROPPED, S843_NARROWED, S843_RUNS, SECOND_OPINION, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, VARIANTS, acceptBounceLines, acceptContractLines, acceptedRawById, assertDriverIdRefusal, b127GroupCommand, b127InvokeGate, b127Lines, b127PidAlive, b127Spy, b318Builders, b318GatedPlan, b318Options, b318ReviewGrants, b318SiteA, b318SiteB, b376ProofIo, bounceTargetOf, buildEnv, checkEnv, classCollisionIo, closeoutIo, crashRun, dAdjEnv, dAutoRows, dBuilders, dDecisionBrief, dGitApplies, dLeads, dOffers, dPanelOutcomes, dPartnerEnv, dPatchWrite, dPlanEnv, dRemintRows, dReviewEnv, dispositionIo, dispositionOf, dispositionPanelIo, dispositionPlan, divergentCollisionIo, divergentPlanScenario, driveTask, envelopeDefect, envelopeFieldsPresent, exhaustionAcceptIo, fakeIo, findingIdDefect, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, join, leadEnv, legacyReviewerExemptions, nameVerdict, observeTurnCensus, panelSeats, phaseTrace, planAcceptContractLines, planCheckAcceptIo, planEnv, planRevisionRun, planScopeVerdict, planThenReviewIo, protectedPlanEnv, protectedReseatRefusal, publicationIo, readFileSync, reconEnv, regrantVerdict, resolveValidationLane, reviewConvergeRun, reviewEnv, reviewFindings, reviewOutcome, reviewShapeDefect, rmSync, roundCursor, s843Ctx, s843Io, s843PlanEnv, s843Rows, scratchDir, shapeDefect, slotCtx, slotFactory, spawnSync, staleVerdictLines, triageEnv, turnCeilingBreached, twoRoundReviewIo, validateAcceptDecision, validateCarve, validatePlanResiduals, validateScopeEntries, validationPlan, validationProbeRun, validationRows, verdictFindingsDefect, writeFileSync,
+  ACCEPT_FINDINGS, ACCEPT_FINDINGS_SOFT, ACCEPT_REASKS, adversarialPlanEnv, ACCEPT_REFUSALS, B318_GATED_RUNS, B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, CENSUS_ABSENT_REASONS, CENSUS_ROW_ABSENT, CENSUS_TURNS_ABSENT, CENSUS_UNREADABLE, SCREENER_MODELS, SCREENER_REGISTER, screenerResult, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_MUTATION, CHECK_RUNS, CLOBBER_R2, CONVERGE_GATE, CONVERGE_PLAN, CRASH_FINDINGS, CRASH_STAGES, CTX, CTX_REPAIR, CTX_TL, DECISIONS, D_ASK, D_AUTO, D_COLLISION_CTX, D_PANEL_CTX, D_PATCH_A, D_PATCH_B, ENVELOPE_REFUSAL_REASONS, FINDING_DISPOSITIONS, LIMITS, MUST_FIX_REFUTATION_FINDINGS, NAME_VERDICTS, PANEL_ADJUDICATORS, PANEL_PARTNERS, PERSPECTIVE_TARGETS, PLAN_CHECK_FINDINGS, PLAN_RESIDUAL, PLAN_SCOPE, PLAN_SCOPE_VERDICTS, RED, REFUTATION_CLAIM, REFUTATION_CONVERGE_PLAN, REFUTATION_CONVERGE_RUNS, REFUTATION_EVIDENCE_MAX, RESIDUAL_TYPES, REVIEW_FINDINGS, REVIEW_GATE_PASS, S843_ADDED, S843_D2, S843_DISPATCHED, S843_DROPPED, S843_NARROWED, S843_RUNS, SECOND_OPINION, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, VARIANTS, acceptBounceLines, acceptContractLines, acceptedRawById, assertDriverIdRefusal, b127GroupCommand, b127InvokeGate, b127Lines, b127PidAlive, b127Spy, b318Builders, b318GatedPlan, b318Options, b318ReviewGrants, b318SiteA, b318SiteB, b376ProofIo, bounceTargetOf, buildEnv, checkEnv, classCollisionIo, closeoutIo, crashRun, dAdjEnv, dAutoRows, dBuilders, dDecisionBrief, dGitApplies, dLeads, dOffers, dPanelOutcomes, dPartnerEnv, dPatchWrite, dPlanEnv, dRemintRows, dReviewEnv, dispositionIo, dispositionOf, dispositionPanelIo, dispositionPlan, divergentCollisionIo, divergentPlanScenario, driveTask, envelopeDefect, envelopeFieldsPresent, exhaustionAcceptIo, fakeIo, findingIdDefect, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, join, leadEnv, legacyReviewerExemptions, nameVerdict, observeTurnCensus, panelSeats, phaseTrace, planAcceptContractLines, planCheckAcceptIo, planEnv, planRevisionRun, planScopeVerdict, planThenReviewIo, protectedPlanEnv, protectedReseatRefusal, publicationIo, readFileSync, reconEnv, regrantVerdict, resolveValidationLane, reviewConvergeRun, reviewEnv, reviewFindings, reviewOutcome, reviewShapeDefect, rmSync, roundCursor, s843Ctx, s843Io, s843PlanEnv, s843Rows, scratchDir, shapeDefect, slotCtx, slotFactory, spawnSync, staleVerdictLines, triageEnv, turnCeilingBreached, twoRoundReviewIo, validateAcceptDecision, validateCarve, validatePlanResiduals, validateScopeEntries, validationPlan, validationProbeRun, validationRows, verdictFindingsDefect, writeFileSync,
 } from './drive-fixtures.mjs'
 import { planScopeWhy, scopeSuggestions, VACUITY_CLAIMS, vacuityFindingDefect } from './drive.mjs'
+import { screenerAdjudicationRows } from './screener.mjs'
 import { ROOT as REPO_ROOT } from '../test/helpers.mjs'
 import { checkSkillAnchors, laneFence, partitionShifts } from '../skills/qa-test-writing/anchor-pin.mjs'
 
@@ -17,6 +18,30 @@ const REVIEW_FINDING = Object.freeze({
   id: 'finding-1', severity: 'should-fix', location: 'src/example.mjs:12',
   summary: 'the reviewed change needs a follow-up', evidence: 'the changed branch is not covered', disposition: 'ask-user',
 })
+const SCREENER_PROPOSAL = Object.freeze({
+  id: 'screen-1', axis: 'correctness', model: 'screen-model', severity: 'consider', disposition: 'ask-user',
+  location: 'src/example.mjs:12', summary: 'the advisory observation', source: 'screener', status: 'proposed',
+})
+
+function injectedScreenerIo({ panel = false, child = screenerResult([SCREENER_PROPOSAL]), register = SCREENER_REGISTER, models = SCREENER_MODELS, diff = { ok: true, output: 'diff --git a/src/example.mjs b/src/example.mjs\n+changed\n' }, reviewerDetails = {}, reviewer = null, files = {}, ...rest } = {}) {
+  const baseReviewer = reviewEnv('pass')
+  const reviewerEnvelope = reviewer || { ...baseReviewer, details: { ...baseReviewer.details, ...reviewerDetails } }
+  const envelopes = panel
+    ? {
+      'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewerEnvelope,
+      'tech-lead:1': { status: 'done', role: 'tech-lead', details: { verdict: 'pass', findings: [] } },
+      'lead:1': { status: 'done', role: 'lead', details: { adjudications: [], class_invariant: 'class', closes_class: true } },
+    }
+    : { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewerEnvelope }
+  return fakeIo({
+    envelopes,
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' }, ...(rest.runs || {}) },
+    changed: ['a.mjs', 'a.test.mjs'],
+    files: { [`${TD}/plan.md`]: '# accepted plan', ...files },
+    screener: { register, models, diff, child },
+    ...rest,
+  })
+}
 
 function reviewEnvelope({ outcome = 'findings', findings = [REVIEW_FINDING], assignment_id = 'd1', run_id = REVIEW_RUN_ID, role = 'reviewer', details = {} } = {}) {
   return {
@@ -4069,4 +4094,153 @@ test('J2 review_only stages remain byte-identical', () => {
   const result = driveTask(REVIEW_CTX, io)
   assert.deepEqual(VARIANTS.review_only.stages, ['review_only', 'scope-gate', 'envelope-accept'])
   assert.deepEqual(result.details.stages, ['review_only:r1', 'scope-gate:r1', 'envelope-accept', 'done'])
+})
+
+test('screener wiring B1', () => {
+  const ordinaryIo = injectedScreenerIo()
+  driveTask({ ...CTX, head: 'base-head' }, ordinaryIo)
+  assert.match(ordinaryIo.calls.writes[`${TD}/review-brief-1.md`], /screen-1/)
+
+  const panelIo = injectedScreenerIo({ panel: true })
+  driveTask({ ...D_PANEL_CTX, head: 'base-head' }, panelIo)
+  for (const name of ['panel-a-brief-1.md', 'panel-b-brief-1.md']) {
+    assert.match(panelIo.calls.writes[`${TD}/${name}`], /screen-1/)
+  }
+})
+
+test('screener wiring C1', () => {
+  const hostile = { ...SCREENER_PROPOSAL, severity: 'must-fix', blocking: true, failure: true, verdict: 'changes-needed', stage: 'escalate' }
+  const io = injectedScreenerIo({ child: screenerResult([hostile]) })
+  const result = driveTask({ ...CTX, head: 'base-head' }, io)
+  assert.equal(result.status, 'done')
+  assert.equal(result.details.accepted_via, 'review pass')
+  assert.equal(io.calls.logs.some((row) => row.screener_proposal?.outcome === 'unadjudicated'), true)
+  assert.equal(result.details.stages.some((stage) => stage.includes('screener')), false)
+})
+
+test('screener wiring D1', () => {
+  const adjudications = [{ proposal_id: 'screen-1', outcome: 'adopted', finding_id: 'finding-1' }]
+  const reviewer = reviewEnv('pass', [REVIEW_FINDING])
+  reviewer.details.adjudications = adjudications
+  const io = injectedScreenerIo({ reviewer })
+  driveTask({ ...CTX, head: 'base-head' }, io)
+  const rows = io.calls.logs.map((entry) => entry.screener_proposal).filter(Boolean)
+  assert.deepEqual(rows, [{
+    round: 1, proposal_id: 'screen-1', axis: 'correctness', model: 'screen-model', outcome: 'adopted', finding_id: 'finding-1',
+  }])
+  const adopted = screenerAdjudicationRows([SCREENER_PROPOSAL], adjudications, [{
+    id: 'finding-1', severity: 'should-fix', location: 'src/example.mjs:12', summary: 'the reviewed change needs a follow-up', disposition: 'ask-user',
+  }])
+  assert.deepEqual(adopted.adopted, [{
+    id: 'finding-1', severity: 'should-fix', location: 'src/example.mjs:12', summary: 'the reviewed change needs a follow-up', disposition: 'ask-user',
+  }])
+  assert.equal(adopted.adopted[0].source, undefined)
+  assert.equal(adopted.adopted[0].status, undefined)
+})
+
+test('screener wiring E1', () => {
+  const io = injectedScreenerIo({
+    reviewerDetails: {
+      adjudications: [{ proposal_id: 'screen-1', outcome: 'rejected', reason: 'first line\nsecond line' }],
+    },
+  })
+  driveTask({ ...CTX, head: 'base-head' }, io)
+  const row = io.calls.logs.map((entry) => entry.screener_proposal).find(Boolean)
+  assert.equal(row.outcome, 'rejected')
+  assert.equal(row.reason, 'first line second line')
+})
+
+test('screener wiring F1', () => {
+  const io = injectedScreenerIo()
+  driveTask({ ...CTX, head: 'base-head' }, io)
+  const row = io.calls.logs.map((entry) => entry.screener_proposal).find(Boolean)
+  assert.equal(row.model, 'screen-model')
+})
+
+test('screener wiring F2', () => {
+  const accepted = reviewEnv('pass', [REVIEW_FINDING])
+  accepted.details.adjudications = [{ proposal_id: 'screen-1', outcome: 'adopted', finding_id: 'finding-1' }]
+  const acceptedIo = injectedScreenerIo({ reviewer: accepted })
+  driveTask({ ...CTX, head: 'base-head' }, acceptedIo)
+  assert.equal(acceptedIo.calls.logs.map((entry) => entry.screener_proposal).find(Boolean).outcome, 'adopted')
+
+  const thrownIo = injectedScreenerIo()
+  const wait = thrownIo.wait.bind(thrownIo)
+  thrownIo.wait = (returnPath, timeoutS) => {
+    if (returnPath === 'reviewer:1') throw new Error('reviewer transport failed')
+    return wait(returnPath, timeoutS)
+  }
+  driveTask({ ...CTX, head: 'base-head' }, thrownIo)
+  assert.equal(thrownIo.calls.logs.map((entry) => entry.screener_proposal).find(Boolean).outcome, 'unadjudicated')
+
+  const refusedIo = injectedScreenerIo({ reviewer: { status: 'insufficient', role: 'reviewer', summary: 'silent', artifacts: [], details: {} } })
+  driveTask({ ...CTX, head: 'base-head' }, refusedIo)
+  assert.equal(refusedIo.calls.logs.map((entry) => entry.screener_proposal).find(Boolean).outcome, 'unadjudicated')
+
+  const panelAccepted = reviewEnv('pass', [REVIEW_FINDING])
+  panelAccepted.details.adjudications = [{ proposal_id: 'screen-1', outcome: 'adopted', finding_id: 'finding-1' }]
+  const panelIo = injectedScreenerIo({ panel: true, reviewer: panelAccepted })
+  const panelWait = panelIo.wait.bind(panelIo)
+  panelIo.wait = (returnPath, timeoutS) => {
+    if (returnPath === 'tech-lead:1') throw new Error('partner transport failed')
+    return panelWait(returnPath, timeoutS)
+  }
+  driveTask({ ...D_PANEL_CTX, head: 'base-head' }, panelIo)
+  assert.equal(panelIo.calls.logs.map((entry) => entry.screener_proposal).find(Boolean).outcome, 'adopted')
+})
+
+test('screener wiring G1', () => {
+  const second = { ...SCREENER_PROPOSAL, id: 'screen-2', axis: 'scope' }
+  const io = injectedScreenerIo({
+    child: screenerResult([SCREENER_PROPOSAL, second]),
+    reviewerDetails: {
+      adjudications: [
+        { proposal_id: 'screen-1', outcome: 'adopted', finding_id: 'finding-1' },
+        { proposal_id: 'screen-2', outcome: 'rejected', reason: 'not in scope' },
+      ],
+      findings: [REVIEW_FINDING],
+    },
+  })
+  driveTask({ ...CTX, head: 'base-head' }, io)
+  const panel = io.calls.logs.map((entry) => entry.screener_panel).find(Boolean)
+  const rows = io.calls.logs.map((entry) => entry.screener_proposal).filter(Boolean)
+  const numerator = rows.filter(({ outcome }) => outcome === 'adopted').length
+  const denominator = rows.length
+  assert.equal(panel.proposals, denominator)
+  assert.equal(numerator, 1)
+  assert.equal(denominator, 2)
+})
+
+test('screener wiring H1', () => {
+  const baseIo = fakeIo({
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+    files: { [`${TD}/plan.md`]: '# accepted plan' },
+  })
+  const base = driveTask({ ...CTX, head: 'base-head' }, baseIo)
+  const absentIo = injectedScreenerIo({ register: JSON.stringify({ local_providers: {} }) })
+  const absent = driveTask({ ...CTX, head: 'base-head' }, absentIo)
+  const deadIo = injectedScreenerIo({ models: { ok: false, output: 'connection refused' } })
+  const dead = driveTask({ ...CTX, head: 'base-head' }, deadIo)
+  const zeroMembers = ['correctness', 'contract-drift', 'vacuity', 'scope'].map((axis) => ({ axis, model: 'screen-model', status: 'unanswered' }))
+  const zeroIo = injectedScreenerIo({ child: screenerResult([], zeroMembers) })
+  const zero = driveTask({ ...CTX, head: 'base-head' }, zeroIo)
+  const shape = (result, io) => ({
+    assignments: io.calls.assign.map(({ role, note, briefFile }) => ({ role, note, briefFile })),
+    stages: result.details.stages,
+    verdict: result.details.verdict,
+    journal: io.calls.logs,
+  })
+  const expected = shape(base, baseIo)
+  assert.deepEqual(shape(absent, absentIo), expected)
+  assert.deepEqual(shape(dead, deadIo), expected)
+  assert.deepEqual(shape(zero, zeroIo), expected)
+})
+
+test('screener wiring I1', () => {
+  const zeroMembers = ['correctness', 'contract-drift', 'vacuity', 'scope'].map((axis) => ({ axis, model: 'screen-model', status: 'unanswered' }))
+  const io = injectedScreenerIo({ child: screenerResult([], zeroMembers) })
+  driveTask({ ...CTX, head: 'base-head' }, io)
+  assert.equal(io.calls.logs.some((row) => row.screener_panel || row.screener_proposal), false)
 })

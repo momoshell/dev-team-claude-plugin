@@ -4394,7 +4394,7 @@ function runPanelReview({ round, panel, io, dissents, setAcceptFindings, setLast
   if (!aEnv || aEnv.status !== 'done' || !reviewerAVerdict) {
     panelDegraded('reviewer')
     stageComplete()
-    return { review: aEnv, panelBounceFindings: '' }
+    return { review: aEnv, reviewerA: aEnv, panelBounceFindings: '' }
   }
   // #800 R8 — a `pass` carrying a must-fix, or a finding id outside the closed shape,
   // is refused by SHAPE before the panel can adjudicate it away. No partner, no
@@ -4407,7 +4407,7 @@ function runPanelReview({ round, panel, io, dissents, setAcceptFindings, setLast
   if (panelRefusal) {
     panelLog({ panel_skipped: panelRefusal.reason })
     stageComplete()
-    return { review: aEnv, panelBounceFindings: '' }
+    return { review: aEnv, reviewerA: aEnv, panelBounceFindings: '' }
   }
 
   const bBrief = art(`panel-b-brief-${round}.md`)
@@ -4424,18 +4424,18 @@ function runPanelReview({ round, panel, io, dissents, setAcceptFindings, setLast
   } catch {
     panelDegraded(panel.partner)
     stageComplete()
-    return { review: aEnv, panelBounceFindings: '' }
+    return { review: aEnv, reviewerA: aEnv, panelBounceFindings: '' }
   }
   if (!bEnv || bEnv.status !== 'done' || !verdictOf(bEnv)) {
     panelDegraded(panel.partner)
     stageComplete()
-    return { review: aEnv, panelBounceFindings: '' }
+    return { review: aEnv, reviewerA: aEnv, panelBounceFindings: '' }
   }
   const partnerShapeRefusal = reviewShapeDefect(bEnv.details)
   if (partnerShapeRefusal) {
     panelLog({ panel_refused: partnerShapeRefusal.reason })
     stageComplete()
-    return { review: bEnv, panelBounceFindings: '', shapeRefusal: partnerShapeRefusal }
+    return { review: bEnv, reviewerA: aEnv, panelBounceFindings: '', shapeRefusal: partnerShapeRefusal }
   }
 
   const findingsOf = (env) => reviewFindings(env?.details)?.findings ?? []
@@ -4555,12 +4555,12 @@ function runPanelReview({ round, panel, io, dissents, setAcceptFindings, setLast
   } catch {
     panelDegraded(panel.adjudicator)
     stageComplete()
-    return { review: aEnv, panelBounceFindings: '' }
+    return { review: aEnv, reviewerA: aEnv, panelBounceFindings: '' }
   }
   if (!adjEnv || adjEnv.status !== 'done') {
     panelDegraded(panel.adjudicator)
     stageComplete()
-    return { review: aEnv, panelBounceFindings: '' }
+    return { review: aEnv, reviewerA: aEnv, panelBounceFindings: '' }
   }
 
   const adjudicated = adjudicatePanel(allocatedDivergent, adjEnv.details)
@@ -4702,7 +4702,7 @@ function runPanelReview({ round, panel, io, dissents, setAcceptFindings, setLast
   if (synthesizedShapeRefusal) {
     panelLog({ panel_refused: synthesizedShapeRefusal.reason })
     stageComplete()
-    return { review, panelBounceFindings, shapeRefusal: synthesizedShapeRefusal }
+    return { review, reviewerA: aEnv, panelBounceFindings, shapeRefusal: synthesizedShapeRefusal }
   }
   publishPanelDissents()
   panelLog({ review_outcome: outcome })
@@ -4716,7 +4716,7 @@ function runPanelReview({ round, panel, io, dissents, setAcceptFindings, setLast
     panel: review.details.panel,
   })
   stageComplete()
-  return { review, panelBounceFindings }
+  return { review, reviewerA: aEnv, panelBounceFindings }
 }
 
 function logScopeGate(io, at, scopeGate) {
@@ -8484,6 +8484,62 @@ function runTask(ctx, io, crash) {
     staleVerdict = { path: lastReviewPath, where }
     stageComplete()
   }
+  const emptyScreenerResult = () => screenerResultFromOutput('')
+  const runScreenerRound = (roundNo) => {
+    const empty = emptyScreenerResult()
+    try {
+      const registerText = io.readFile(`${ctx.checkout}/crew/capabilities.json`)
+      const config = screenerConfig(registerText)
+      if (!config || config.refused) return empty
+      const models = io.run(screenerModelsCommand(config.root))
+      if (!models?.ok || typeof models.output !== 'string' || !models.output.trim()) return empty
+      const modelIds = screenerModelIds(models.output)
+      const members = screenerMembers(config.provider, modelIds)
+      if (members.length !== SCREENER_AXES.length) return empty
+      const diff = io.run(`git diff --binary ${shellArg(ctx.head || 'HEAD')} --`)
+      if (!diff?.ok || typeof diff.output !== 'string' || !diff.output.trim()) return empty
+      const acceptance = io.readFile(planPath)
+      if (typeof acceptance !== 'string' || !acceptance.trim()) return empty
+      const inputPath = art(`screener-input-${roundNo}.json`)
+      const input = {
+        modulePath: `${ctx.checkout}/crew/screener.mjs`,
+        root: config.root,
+        diff: diff.output,
+        acceptance,
+        members,
+        timeoutMs: SCREENER_TIMEOUT_MS,
+      }
+      io.writeFile(inputPath, JSON.stringify(input))
+      const child = io.run(screenerChildCommand({ modulePath: input.modulePath, inputPath }))
+      if (!child?.ok || typeof child.output !== 'string') return empty
+      return screenerResultFromOutput(child.output)
+    } catch {
+      return empty
+    }
+  }
+  const journalScreenerProposals = (roundNo, result, reviewerA) => {
+    try {
+      if (!result || result.answered <= 0 || !Array.isArray(result.proposals) || result.proposals.length === 0) return
+      let adjudications = []
+      let reviewerFindings = []
+      const acceptedReviewer = reviewerA?.status === 'done' && reviewerA?.role === 'reviewer' &&
+        !handledEnvelopeRefusalWhy(reviewerA) && !reviewShapeDefect(reviewerA.details) &&
+        verdictOf(reviewerA) !== null
+      if (acceptedReviewer) {
+        adjudications = reviewerA.details?.adjudications
+        reviewerFindings = reviewFindings(reviewerA.details)?.findings || []
+      }
+      const rows = screenerAdjudicationRows(result.proposals, adjudications, reviewerFindings)
+      for (const row of rows) {
+        io.log(recordRow({ at: io.now(), screener_proposal: {
+          round: roundNo,
+          proposal_id: row.proposal_id, axis: row.axis, model: row.model, outcome: row.outcome,
+          ...(row.finding_id ? { finding_id: row.finding_id } : {}),
+          ...(row.reason ? { reason: row.reason } : {}),
+        } }))
+      }
+    } catch { /* screener evidence is never load-bearing */ }
+  }
   const panel = ctx.continuation === true ? panelSeats(seatList) : null
   if (ctx.continuation === true && !panel) panelLog({ panel_skipped: 'seats' })
   let gateTriaged = false
@@ -9017,6 +9073,16 @@ function runTask(ctx, io, crash) {
       const revBrief = art(`review-brief-${roundNo}.md`)
       const openCarried = carriedOpen()
       const carriedHead = carriedPreambleLines(openCarried)
+      let screenerResult = runScreenerRound(roundNo)
+      if (screenerResult.answered > 0) {
+        try {
+          io.log(recordRow({ at: io.now(), screener_panel: {
+            round: roundNo,
+            reason: screenerResult.reason,
+            asked: screenerResult.asked, answered: screenerResult.answered, proposals: screenerResult.proposals.length,
+          } }))
+        } catch { /* screener evidence is never load-bearing */ }
+      }
       panelBriefText = [
         ...carriedHead,
         `# Review (round ${roundNo})`, '',
@@ -9028,21 +9094,29 @@ function runTask(ctx, io, crash) {
         'Either recognized vacuity_claim requires the marker itself, severity "must-fix", and a disposition other than "no-op"; ordinary observations must omit the marker.',
         'An explicitly supplied vacuity_claim outside "mutation-survived" and "source-text-only" is refused; do not invent values or rely on natural-language matching.',
         ...staleVerdictLines(staleVerdict),
+        ...screenerBriefLines(screenerResult.proposals),
         ...diffFindingLines(report),
       ].join('\n')
       io.writeFile(revBrief, panelBriefText)
       let review
+      let reviewerA = null
       let panelResult = null
       let panelBeforeAcceptFindings = null
       let panelBeforeLastReview = null
-      if (panel) {
-        panelBeforeAcceptFindings = S.acceptFindings
-        panelBeforeLastReview = S.lastReview
-        panelResult = runPanelReview({ round: roundNo, panel, io, dissents: S.dissents, setAcceptFindings: (value) => { S.acceptFindings = value }, setLastReview: (value) => { S.lastReview = value }, planPath, panelBriefText, panelStandingQuestion, art, stage, stageComplete, assignAndWait, carriedOpen, panelLog, panelDegraded, emit })
-        panelBounceFindings = panelResult.panelBounceFindings
-        review = panelResult.review
-      } else {
-        review = assignAndWait('reviewer', revBrief, 'review')
+      try {
+        if (panel) {
+          panelBeforeAcceptFindings = S.acceptFindings
+          panelBeforeLastReview = S.lastReview
+          panelResult = runPanelReview({ round: roundNo, panel, io, dissents: S.dissents, setAcceptFindings: (value) => { S.acceptFindings = value }, setLastReview: (value) => { S.lastReview = value }, planPath, panelBriefText, panelStandingQuestion, art, stage, stageComplete, assignAndWait, carriedOpen, panelLog, panelDegraded, emit })
+          reviewerA = panelResult?.reviewerA || null
+          panelBounceFindings = panelResult.panelBounceFindings
+          review = panelResult.review
+        } else {
+          review = assignAndWait('reviewer', revBrief, 'review')
+          reviewerA = review
+        }
+      } finally {
+        journalScreenerProposals(roundNo, screenerResult, reviewerA)
       }
       const refusalWhy = handledEnvelopeRefusalWhy(review)
       if (refusalWhy) {
@@ -10871,7 +10945,8 @@ export function withPhaseSlot({ pool, phase, owner, now, sleep = slotNap, log = 
 // crew/roles citation this file carries, so the call sites in envelopeDefect,
 // reviewFindings, assignAndWait, panelReview and the review loop add no line
 // above them (#743, #748).
-export const FINDING_DISPOSITIONS = Object.freeze(['auto-fix', 'ask-user', 'no-op'])
+import { FINDING_DISPOSITIONS, SCREENER_AXES, SCREENER_OUTCOMES, SCREENER_TIMEOUT_MS, screenerConfig, screenerModelsCommand, screenerModelIds, screenerMembers, screenerChildCommand, screenerResultFromOutput, screenerBriefLines, screenerAdjudicationRows } from './screener.mjs'
+export { FINDING_DISPOSITIONS }
 
 // The disposition this entry declares, or null. OUT-OF-ENUM READS AS ABSENT: the
 // field is optional in this release, and a value the driver cannot recognise is

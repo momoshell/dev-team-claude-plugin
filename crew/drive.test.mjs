@@ -2674,7 +2674,7 @@ test('every journal emit site in the driver is inventoried, wrapped and on the r
   assert.equal(prescriptionSites.length, 1)
   assert.equal(prescriptionSites[0].wrapper, 'recordRow')
   const legacySites = sites.filter(({ keys }) => !keys.split(' ').includes('scope_admission') && !keys.split(' ').includes('envelope_refused') && !keys.split(' ').includes('plan_prescription_applied'))
-  assert.equal(legacySites.length, 70)
+  assert.equal(legacySites.length, 72)
   assert.deepEqual(legacySites.map(({ wrapper, events, keys }) => [wrapper, events, keys]), DRIVE_JOURNAL_EXPECTED)
   assert.ok(sites.every(({ wrapper }) => wrapper === 'recordRow' || wrapper === 'operationalRow'))
   assert.equal(sites.filter(({ wrapper }) => wrapper === 'operationalRow').length, 2)

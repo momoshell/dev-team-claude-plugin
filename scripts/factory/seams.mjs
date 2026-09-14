@@ -19,6 +19,14 @@ const CLOSED_REASONS = new Set([
   'no_top_level_test_blocks',
   'ambiguous_file_under_test',
 ])
+const PARTITION_KEY = 'file_under_test'
+const PARTITION_REASONS = new Set([
+  'target_not_test_file',
+  'unsupported_extension',
+  'syntax_error',
+  'read_error',
+  'no_top_level_test_blocks',
+])
 const CAVEAT = 'Static imports are a proxy: computed imports can be invisible, and unused imports can create phantom edges. Clean clusters measure split cost; they do not decide whether a split is right.'
 const STAGE_HEAD_CAVEAT = 'Stage-head attribution is file-level static attribution, not a runtime claim.'
 
@@ -792,6 +800,111 @@ function testAnalysis(context) {
   }
 }
 
+function partitionTestName(module, open, span) {
+  const titleStart = skipWhitespace(module.source, open + 1)
+  const literal = readQuoted(module.source, titleStart)
+  return literal ? literal.value : `${module.path}:${span.start}-${span.end}`
+}
+
+function concreteTestBlocks(module) {
+  const blocks = []
+  const callRe = /\btest\s*\(/g
+  let match
+  while ((match = callRe.exec(module.masked))) {
+    if (module.masked[match.index - 1] === '.') continue
+    const open = module.masked.indexOf('(', match.index + match[0].length - 1)
+    const close = findMatching(module.masked, open, '(', ')')
+    const bodyOpen = module.masked.indexOf('{', open + 1)
+    let end = close >= 0 ? close + 1 : module.source.length
+    if (bodyOpen >= 0 && bodyOpen < close) {
+      const bodyClose = findMatching(module.masked, bodyOpen)
+      if (bodyClose >= 0) end = bodyClose + 1
+    }
+    const span = spanFor(module.source, match.index, end, module.lineStarts)
+    blocks.push({
+      kind: 'test',
+      name: partitionTestName(module, open, span),
+      startOffset: match.index,
+      endOffset: end,
+      span,
+    })
+  }
+  return blocks
+}
+
+function partitionTestEntry(block, module) {
+  return {
+    name: block.name ?? `${module.path}:${block.span.start}-${block.span.end}`,
+    kind: 'test',
+    start: block.span.start,
+    end: block.span.end,
+  }
+}
+
+function comparePartitionTests(left, right) {
+  return left.start - right.start || left.end - right.end || left.name.localeCompare(right.name)
+}
+
+function partitionFailure(target, targetKind, reason) {
+  return {
+    target,
+    target_kind: targetKind,
+    partition: null,
+    partition_reason: PARTITION_REASONS.has(reason) ? reason : 'read_error',
+  }
+}
+
+function partitionAnalysis(context) {
+  const testModule = context.modules.get(context.target)
+  if (!testModule) return partitionFailure(context.target, 'test', 'read_error')
+  const blocks = concreteTestBlocks(testModule)
+  if (blocks.length === 0) return partitionFailure(context.target, 'test', 'no_top_level_test_blocks')
+
+  const groups = new Map()
+  const unassigned = []
+  let assigned = 0
+  for (const block of blocks) {
+    const symbolsBySubject = new Map()
+    for (const record of testModule.imports) {
+      if (!record.resolved) continue
+      const importedModule = context.modules.get(record.resolved)
+      if (!importedModule) continue
+      const symbols = blockSymbols(testModule, block, importedModule)
+      if (symbols.length === 0) continue
+      symbolsBySubject.set(record.resolved, [...new Set([
+        ...(symbolsBySubject.get(record.resolved) || []),
+        ...symbols,
+      ])].sort())
+    }
+    const subjectPaths = [...symbolsBySubject.keys()].sort()
+    if (subjectPaths.length !== 1) {
+      unassigned.push({ ...partitionTestEntry(block, testModule), reason: 'no_unique_file_under_test' })
+      continue
+    }
+    const key = subjectPaths[0]
+    if (!groups.has(key)) groups.set(key, [])
+    groups.get(key).push(partitionTestEntry(block, testModule))
+    assigned += 1
+  }
+
+  for (const tests of groups.values()) tests.sort(comparePartitionTests)
+  unassigned.sort(comparePartitionTests)
+  const sortedGroups = [...groups.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([subject, tests]) => ({ subject, tests }))
+  const partition = {
+    grouping_key: PARTITION_KEY,
+    groups: sortedGroups,
+    coverage: {
+      assigned,
+      total: blocks.length,
+      fraction: `${assigned}/${blocks.length}`,
+    },
+    ...(unassigned.length > 0 ? { unassigned: { name: 'unassigned', tests: unassigned } } : {}),
+  }
+  return { target: context.target, target_kind: 'test', partition }
+}
+
 function escapeRegExp(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
@@ -961,6 +1074,48 @@ export function seamReport({ root = process.cwd(), target: requestedTarget } = {
   })
 }
 
+export function partitionReport({ root = process.cwd(), target } = {}) {
+  const absoluteRoot = resolve(root)
+  const tracked = gitTrackedFiles(root)
+  const trackedSet = new Set(tracked)
+  const targetPath = validateTarget(target, trackedSet)
+  if (!isTestFile(targetPath)) {
+    return {
+      target: targetPath,
+      target_kind: 'source',
+      partition: null,
+      partition_reason: 'target_not_test_file',
+    }
+  }
+
+  const targetKind = 'test'
+  const targetExtension = extname(targetPath).toLowerCase()
+  if (!CODE_EXTENSIONS.has(targetExtension)) return partitionFailure(targetPath, targetKind, 'unsupported_extension')
+
+  const codePaths = tracked.filter(isCodePath)
+  const sources = new Map()
+  for (const path of codePaths) {
+    try {
+      sources.set(path, readFileSync(join(absoluteRoot, ...path.split('/')), 'utf8'))
+    } catch {
+      continue
+    }
+  }
+  if (!sources.has(targetPath)) return partitionFailure(targetPath, targetKind, 'read_error')
+
+  const syntaxReason = checkTargetSyntax(absoluteRoot, targetPath)
+  if (syntaxReason) return partitionFailure(targetPath, targetKind, syntaxReason)
+
+  const modules = new Map()
+  try {
+    for (const [path, source] of sources) modules.set(path, parseModule(path, source))
+  } catch {
+    return partitionFailure(targetPath, targetKind, 'read_error')
+  }
+  buildImportReferences(modules, new Set(codePaths))
+  return partitionAnalysis({ root: absoluteRoot, target: targetPath, modules, tracked: codePaths })
+}
+
 // These aliases keep the branch and its public vocabulary explicit while the
 // scanner remains one corpus pass: all module text is already in `context`.
 function analyseSourceTarget(context) {
@@ -979,11 +1134,19 @@ export function main(argv = process.argv.slice(2), options = {}) {
     if (typeof stream === 'function') stream(text)
     else if (stream && typeof stream.write === 'function') stream.write(text)
   }
-  if (args.length !== 1 || typeof args[0] !== 'string' || !args[0].trim()) {
-    write(errorOutput, 'usage: node scripts/factory/seams.mjs <repo-relative-file>\n')
+  const partitionMode = args.length === 2 && args[0] === '--partition'
+  const validLegacy = args.length === 1 && typeof args[0] === 'string' && args[0].trim()
+  const validPartition = partitionMode && typeof args[1] === 'string' && args[1].trim()
+  if (!validLegacy && !validPartition) {
+    write(errorOutput, 'usage: node scripts/factory/seams.mjs [--partition] <repo-relative-file>\n')
     return 2
   }
   try {
+    if (partitionMode) {
+      const report = partitionReport({ root: options.root || process.cwd(), target: args[1] })
+      write(output, `${JSON.stringify(report)}\n`)
+      return 0
+    }
     const report = seamReport({ root: options.root || process.cwd(), target: args[0] })
     write(output, `${JSON.stringify(report)}\n`)
     return 0

@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { PANEL_REFRESH_MS, PANEL_STALE_AFTER_MS, acceptRows, brakePanel, cellHealthPanel, fleetCost, fleetEscalationRate, fleetMedianDuration, fleetPassRate, fleetPhasesPerRun, fleetTokens, findingRows, gateChips, intakeCandidateRows, intakePanel, reviewRows, rosterEditForm, rosterPanel, panelAgeLabel, panelReadLoop, readFreshness, rosterProposal, runSetPanel, teardownPanel } from '../visualizer/web/src/lib/panels.js'
 import { parseHash, formatHash } from '../visualizer/web/src/lib/route.js'
-import { ATTENTION_KEYS, absenceMark, attentionBreakdown, costCell, createSemaphore, crewArchive, deriveDisplayStatus, deriveStatus, escalationProbeTargets, fleetActivity, fleetView, gateCell, heartbeatCell, needsAttention, openRecordNote, reviewCell, runActivity, runtimeActivitySummary, slotWaitCell, tokenCell } from '../visualizer/web/src/lib/fleet.js'
+import { ATTENTION_KEYS, absenceMark, attentionBreakdown, configurationDimensionCell, configurationFilterView, costCell, createSemaphore, crewArchive, deriveDisplayStatus, deriveStatus, escalationProbeTargets, fleetActivity, fleetView, gateCell, heartbeatCell, needsAttention, openRecordNote, reviewCell, runActivity, runtimeActivitySummary, slotWaitCell, tokenCell } from '../visualizer/web/src/lib/fleet.js'
 import { ROLE_ORDER, acceptEvidence, bounceArrows, gateMarkers, gateProofStory, laneRows, phaseFilterId, phasePanel, renderMarkdown } from '../visualizer/web/src/lib/trace.js'
 import { eventStory, eventStreamSummary } from '../visualizer/web/src/lib/event-story.js'
 import { assignmentPath, envelopeFacts, envelopeGroups, envelopeOverview, envelopeSections, trajectoryRowStory, trajectorySummary } from '../visualizer/web/src/lib/diagnostic-story.js'
@@ -61,6 +61,77 @@ test('workflow semantics separate profile, execution and assurance without infer
   assert.equal(recorded.assurance.label, 'Standard')
   assert.equal(recorded.assurance.source, 'explicit')
   assert.equal(recorded.assurance.recording, 'canonical')
+})
+
+function configurationFixture() {
+  const historical = { adw_id: 'historical', tier: 'build', variant: 'full', task_profile: null, execution_shape: null, assurance: null }
+  const measured = { adw_id: 'measured', task_profile: 'implementation', execution_shape: 'full', assurance: 'standard' }
+  const other = { adw_id: 'other', task_profile: 'audit', execution_shape: 'scout', assurance: 'rigorous' }
+  const colliding = { adw_id: 'colliding', task_profile: 'Not recorded', execution_shape: 'directed', assurance: 'quick' }
+  return { historical, measured, other, colliding, rows: [historical, measured, other, colliding] }
+}
+
+test('A1', () => {
+  const { historical } = configurationFixture()
+  assert.deepEqual(configurationFilterView([historical]).dimensions, [])
+})
+
+test('B1', () => {
+  const { rows } = configurationFixture()
+  const view = configurationFilterView(rows)
+  assert.deepEqual(view.dimensions.map((dimension) => dimension.key), ['task_profile', 'execution_shape', 'assurance'])
+  assert.ok(view.dimensions.every((dimension) => dimension.options.length > 0))
+  assert.ok(view.dimensions.every((dimension) => dimension.options.every((option) => option.value !== null)))
+})
+
+test('C1', () => {
+  const { historical } = configurationFixture()
+  const marks = ['task_profile', 'execution_shape', 'assurance'].map((dimension) => configurationDimensionCell(historical, dimension))
+  assert.ok(marks.every((mark) => mark.value === null && mark.text === 'Not recorded' && mark.dashed === true))
+  assert.notEqual(marks[0].text, historical.tier)
+  assert.notEqual(marks[1].text, historical.variant)
+  assert.notEqual(marks[2].text, 'Standard')
+})
+
+test('D1', () => {
+  const { historical, colliding } = configurationFixture()
+  const absent = configurationDimensionCell(historical, 'task_profile')
+  const real = configurationDimensionCell(colliding, 'task_profile')
+  assert.equal(absent.value, null)
+  assert.equal(absent.dashed, true)
+  assert.equal(real.value, 'Not recorded')
+  assert.equal(real.dashed, false)
+  assert.notDeepEqual({ value: absent.value, dashed: absent.dashed }, { value: real.value, dashed: real.dashed })
+})
+
+test('E1', () => {
+  const { historical, measured, other } = configurationFixture()
+  const view = configurationFilterView([historical, measured, other], { task_profile: 'implementation' })
+  assert.deepEqual(view.rows.map((row) => row.adw_id), ['historical', 'measured'])
+  assert.equal(view.excluded.count, 1)
+  assert.equal(view.excluded.line, '1 measured row excluded by configuration filters · not-recorded rows remain visible')
+})
+
+test('F1', () => {
+  const { measured, colliding } = configurationFixture()
+  const view = configurationFilterView([measured, colliding])
+  const options = (key) => view.dimensions.find((dimension) => dimension.key === key).options.map((option) => option.value)
+  assert.deepEqual(options('task_profile'), ['Not recorded', 'implementation'])
+  assert.deepEqual(options('execution_shape'), ['directed', 'full'])
+  assert.deepEqual(options('assurance'), ['quick', 'standard'])
+  assert.doesNotMatch(JSON.stringify(view), /audit|scout|rigorous/)
+})
+
+test('G1', () => {
+  assert.equal(typeof configurationDimensionCell, 'function')
+  assert.equal(typeof configurationFilterView, 'function')
+  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/TaskList.svelte'), 'utf8')
+  assert.match(source, /import \{[^}]*configurationDimensionCell[^}]*configurationFilterView[^}]*\} from '\.\/fleet\.js'/)
+  assert.match(source, /let baseRows = \$derived\(/)
+  assert.match(source, /configurationFilterView\(baseRows,/)
+  for (const dimension of ['task_profile', 'execution_shape', 'assurance']) assert.match(source, new RegExp(`configurationDimensionCell\\(run, '${dimension}'\\)`))
+  assert.match(source, /configurationView\.excluded\.line/)
+  assert.doesNotMatch(source, /runConfiguration|run\.tier|run\.variant|configuration\.legacy_(?:tier|variant)/)
 })
 
 test('crew summary separates distinct seats, assignment turns, and reused dispatch labels', () => {

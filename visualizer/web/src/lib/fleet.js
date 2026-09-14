@@ -1,4 +1,4 @@
-import { assuranceMeta } from './workflow-semantics.js'
+import { assuranceMeta, executionMeta, taskProfileMeta } from './workflow-semantics.js'
 
 export const SILENT_AFTER_MS = 30_000
 const TOKEN_FIELDS = ['billed_input_tokens', 'billed_output_tokens', 'billed_cache_write_tokens', 'billed_cache_read_tokens']
@@ -48,6 +48,49 @@ function envelopeFor(envelopes, adwId) {
 
 export function absenceMark(reason) {
   return { value: null, text: reason || 'not measured', dashed: true, title: reason || null }
+}
+
+const CONFIGURATION_DIMENSIONS = Object.freeze([
+  { key: 'task_profile', label: 'Profile', meta: taskProfileMeta },
+  { key: 'execution_shape', label: 'Execution', meta: executionMeta },
+  { key: 'assurance', label: 'Assurance', meta: assuranceMeta },
+])
+
+function recordedConfigurationValue(run = {}, dimension) {
+  const value = run?.[dimension]
+  return typeof value === 'string' && value.trim() ? value : null
+}
+
+function configurationDimensionDescriptor(source, descriptor) {
+  const values = [...new Set(source.map((run) => recordedConfigurationValue(run, descriptor.key)).filter((value) => value !== null))].sort()
+  if (values.length === 0) return []
+  return [{ key: descriptor.key, label: descriptor.label, options: values.map((value) => ({ value, label: descriptor.meta(value).label })) }]
+}
+
+export function configurationDimensionCell(run = {}, dimension) {
+  const descriptor = CONFIGURATION_DIMENSIONS.find((candidate) => candidate.key === dimension)
+  const value = descriptor ? recordedConfigurationValue(run, descriptor.key) : null
+  if (value === null) return absenceMark('Not recorded')
+  const meta = descriptor.meta(value)
+  return { ...measuredCell(value, meta.label), key: value, summary: meta.summary ?? null }
+}
+
+export function configurationFilterView(runs = [], selections = {}) {
+  const source = Array.isArray(runs) ? runs : []
+  const dimensions = CONFIGURATION_DIMENSIONS.flatMap((descriptor) => configurationDimensionDescriptor(source, descriptor))
+  const rows = source.filter((run) => CONFIGURATION_DIMENSIONS.every((descriptor) => {
+    const selection = selections?.[descriptor.key]
+    if (!selection || selection === 'all') return true
+    const value = recordedConfigurationValue(run, descriptor.key)
+    if (value === null) return true
+    return value === selection
+  }))
+  const count = source.length - rows.length
+  const excluded = {
+    count,
+    line: count === 0 ? '' : `${count} measured row${count === 1 ? '' : 's'} excluded by configuration filters · not-recorded rows remain visible`,
+  }
+  return { dimensions, rows, excluded }
 }
 
 export function deriveStatus(run = {}, taskEnvelope = null) {

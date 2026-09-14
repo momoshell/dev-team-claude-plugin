@@ -1,6 +1,5 @@
 <script>
-  import { deriveDisplayStatus, durationCell, gateCell, needsAttention, reviewCell, runActivity, tokenCell } from './fleet.js'
-  import { assuranceOption, executionMeta, runConfiguration, taskProfileMeta } from './workflow-semantics.js'
+  import { configurationDimensionCell, configurationFilterView, deriveDisplayStatus, durationCell, gateCell, needsAttention, reviewCell, runActivity, tokenCell } from './fleet.js'
   import Pagination from './Pagination.svelte'
   import Dropdown from './Dropdown.svelte'
 
@@ -17,7 +16,6 @@
   function envelopeFor(id) { return envelopes instanceof Map ? envelopes.get(id) : envelopes?.[id] }
   function statusFor(run) { return deriveDisplayStatus(run, envelopeFor(run.adw_id), now) }
   function activityFor(run) { return runActivity(run, now) }
-  function configurationFor(run) { return runConfiguration(run) }
   function matchesState(run) {
     const status = statusFor(run)
     if (state === 'active') return activityFor(run).live
@@ -28,8 +26,7 @@
   function matchesQuery(run) {
     const needle = query.trim().toLowerCase()
     if (!needle) return true
-    const configuration = configurationFor(run)
-    return [run.goal, run.repo_slug, run.adw_id, run.tier, run.assurance, configuration.assurance.label, run.task_profile, configuration.profile.label, run.execution_shape, run.variant, configuration.execution.label, run.engineer].some((value) => String(value || '').toLowerCase().includes(needle))
+    return [run.goal, run.repo_slug, run.adw_id, run.task_profile, run.execution_shape, run.assurance, run.engineer].some((value) => String(value || '').toLowerCase().includes(needle))
   }
   function phaseName(phase) { return String(phase?.name || 'phase').replaceAll('_', ' ') }
   function formatDate(value) {
@@ -44,19 +41,21 @@
   }
   function cacheRate(value) { return value == null ? null : `${value.toFixed(1)}% cache hit` }
 
-  let tiers = $derived([...new Set(runs.map((run) => configurationFor(run).assurance.key).filter(Boolean))].sort())
-  let assuranceOptions = $derived([{ value:'all', label:'All assurance' }, ...tiers.map(assuranceOption)])
-  let profiles = $derived([...new Set(runs.map((run) => run.task_profile).filter(Boolean))].sort())
-  let profileOptions = $derived([{ value:'all', label:'All profiles' }, ...profiles.map((value) => ({ value, label:taskProfileMeta(value).label }))])
-  let executionShapes = $derived([...new Set(runs.map((run) => run.variant).filter(Boolean))].sort())
-  let executionOptions = $derived([{ value:'all', label:'All execution' }, ...executionShapes.map((value) => ({ value, label:executionMeta(value).label }))])
   let counts = $derived({
     all: runs.filter((run) => !run.triage?.reviewed_at).length,
     active: runs.filter((run) => activityFor(run).live && !run.triage?.reviewed_at).length,
     completed: runs.filter((run) => !run.running && !run.triage?.reviewed_at).length,
     attention: runs.filter((run) => needsAttention(statusFor(run).key) && !run.triage?.reviewed_at).length,
   })
-  let filtered = $derived(runs.filter((run) => (showArchived || !run.triage?.reviewed_at) && (run.goal || showArchived) && matchesState(run) && (assurance === 'all' || configurationFor(run).assurance.key === assurance) && (taskProfile === 'all' || run.task_profile === taskProfile) && (executionShape === 'all' || (run.execution_shape ?? run.variant) === executionShape) && matchesQuery(run)))
+  let baseRows = $derived(runs.filter((run) => (showArchived || !run.triage?.reviewed_at) && (run.goal || showArchived) && matchesState(run) && matchesQuery(run)))
+  let configurationView = $derived(configurationFilterView(baseRows, { task_profile: taskProfile, execution_shape: executionShape, assurance }))
+  let taskProfileDimension = $derived(configurationView.dimensions.find((dimension) => dimension.key === 'task_profile'))
+  let executionDimension = $derived(configurationView.dimensions.find((dimension) => dimension.key === 'execution_shape'))
+  let assuranceDimension = $derived(configurationView.dimensions.find((dimension) => dimension.key === 'assurance'))
+  let profileOptions = $derived([{ value:'all', label:'All profiles' }, ...(taskProfileDimension?.options ?? [])])
+  let executionOptions = $derived([{ value:'all', label:'All execution' }, ...(executionDimension?.options ?? [])])
+  let assuranceOptions = $derived([{ value:'all', label:'All assurance' }, ...(assuranceDimension?.options ?? [])])
+  let filtered = $derived(configurationView.rows)
   let paged = $derived(filtered.slice((page - 1) * pageSize, page * pageSize))
 
   $effect(() => { void `${query}|${state}|${assurance}|${taskProfile}|${executionShape}|${showArchived}`; page = 1 })
@@ -82,11 +81,12 @@
   </div>
   <div class="toolbar">
     <label class="search"><span class="search-mark" aria-hidden="true"></span><input bind:value={query} placeholder="Search tasks, repositories, or run IDs" aria-label="Search tasks" /></label>
-    {#if profiles.length}<label class="select-label"><span>Profile</span><Dropdown bind:value={taskProfile} options={profileOptions} ariaLabel="Task profile" width="9rem" variant="compact" /></label>{/if}
-    {#if executionShapes.length}<label class="select-label"><span>Execution</span><Dropdown bind:value={executionShape} options={executionOptions} ariaLabel="Execution shape" width="9rem" variant="compact" /></label>{/if}
-    <label class="select-label"><span>Assurance</span><Dropdown bind:value={assurance} options={assuranceOptions} ariaLabel="Task assurance" width="10.5rem" variant="compact" /></label>
+    {#if taskProfileDimension}<label class="select-label"><span>Profile</span><Dropdown bind:value={taskProfile} options={profileOptions} ariaLabel="Task profile" width="9rem" variant="compact" /></label>{/if}
+    {#if executionDimension}<label class="select-label"><span>Execution</span><Dropdown bind:value={executionShape} options={executionOptions} ariaLabel="Execution shape" width="9rem" variant="compact" /></label>{/if}
+    {#if assuranceDimension}<label class="select-label"><span>Assurance</span><Dropdown bind:value={assurance} options={assuranceOptions} ariaLabel="Task assurance" width="10.5rem" variant="compact" /></label>{/if}
     <label class="archive"><input type="checkbox" bind:checked={showArchived} /><span>Show archived</span></label>
   </div>
+  {#if configurationView.excluded.count}<p class="configuration-note" role="status">{configurationView.excluded.line}</p>{/if}
 
   <div class="table-wrap">
     <table>
@@ -99,12 +99,14 @@
           {@const gate = gateCell(run)}
           {@const review = reviewCell(run)}
           {@const tokens = tokenCell(run)}
-          {@const configuration = configurationFor(run)}
+          {@const profileCell = configurationDimensionCell(run, 'task_profile')}
+          {@const executionCell = configurationDimensionCell(run, 'execution_shape')}
+          {@const assuranceCell = configurationDimensionCell(run, 'assurance')}
           <tr class:running={activity.live} class:silent={activity.attention && run.running} onclick={() => onopen(run)}>
             <td class="task-cell"><button type="button" class="task-link" onclick={(event) => { event.stopPropagation(); onopen(run) }}><strong>{run.goal || 'Untitled run'}</strong><span>{run.repo_slug || 'repository unavailable'} · <code>{String(run.adw_id || '').slice(0, 8)}</code></span></button></td>
             <td><span class={`status ${status.tone}`}><span class="status-dot" aria-hidden="true"></span>{status.word}</span></td>
-            <td class="run-setup"><div><strong class:missing={!configuration.assurance.key}>{configuration.assurance.label}</strong>{#if configuration.assurance.legacy_alias}<code title="Legacy roster preset">{configuration.assurance.legacy_alias}</code>{/if}</div><small title={`${configuration.profile.summary} ${configuration.execution.summary}`}>{configuration.profile.key || configuration.execution.key ? `${configuration.profile.label} · ${configuration.execution.label}` : 'Profile and execution not recorded'}</small></td>
-            <td class="execution"><div class="phase-line" aria-label={`${run.phases?.length || 0} phases`}>{#each run.phases || [] as phase (phase.id ?? phase.seq)}<span class:active={phase.status === 'running'} class:failed={phase.status === 'fail'} style={`--phase-color:var(--lane-${phase.lane ?? 6})`} title={`${phaseName(phase)} · ${phase.status || 'unknown'}`}></span>{/each}</div><small>{run.variant ? `${executionMeta(run.variant).label} · ` : ''}{run.phases?.length ? `${run.phases.length} phase${run.phases.length === 1 ? '' : 's'} · ${phaseName(run.phases.at(-1))}` : 'Waiting for first phase'}</small></td>
+            <td class="run-setup"><div><strong class:missing={assuranceCell.dashed} class:dashed={assuranceCell.dashed}>{assuranceCell.text}</strong></div><small title={`${assuranceCell.summary ?? ''} ${profileCell.summary ?? ''} ${executionCell.summary ?? ''}`}><span class:dashed={profileCell.dashed}>{profileCell.text}</span> · <span class:dashed={executionCell.dashed}>{executionCell.text}</span></small></td>
+            <td class="execution"><div class="phase-line" aria-label={`${run.phases?.length || 0} phases`}>{#each run.phases || [] as phase (phase.id ?? phase.seq)}<span class:active={phase.status === 'running'} class:failed={phase.status === 'fail'} style={`--phase-color:var(--lane-${phase.lane ?? 6})`} title={`${phaseName(phase)} · ${phase.status || 'unknown'}`}></span>{/each}</div><small class:dashed={executionCell.dashed}>{executionCell.text} · {run.phases?.length ? `${run.phases.length} phase${run.phases.length === 1 ? '' : 's'} · ${phaseName(run.phases.at(-1))}` : 'Waiting for first phase'}</small></td>
             <td class="proof"><span class:muted={gate.dashed}>{gate.dashed ? 'No gate proof' : gate.text}</span><small class:muted={review.dashed}>{review.dashed ? 'No review yet' : review.text}</small></td>
             <td class="time"><strong>{duration.dashed ? (run.running ? status.word : '—') : duration.text}</strong><small>{formatDate(run.started_at)}</small></td>
             <td class="usage"><strong>{tokens.dashed ? '—' : shortNumber(tokens.value)}</strong><small title={tokens.cacheRate == null ? tokens.cachePending : 'Cache reads ÷ input, cache writes, and cache reads'}>{tokens.dashed ? 'Not measured' : tokens.cacheRate == null ? 'Cache hit not measured' : cacheRate(tokens.cacheRate)}</small></td>
@@ -128,6 +130,7 @@
 .status-tabs button.active { color:inherit; }.status-tabs button.active::after { background:var(--accent); }
 .status-tabs button span { margin-left:.35rem; color:var(--muted); font-size:.75rem; }
 .toolbar { display:flex; align-items:center; gap:.7rem; padding:.85rem; background:color-mix(in srgb,var(--panel-raised) 65%,transparent); border-bottom:1px solid var(--line); }
+.configuration-note { margin:0; padding:.55rem .85rem; border-bottom:1px solid var(--line); color:var(--muted); font-size:.72rem; }
 .search { position:relative; flex:1; min-width:14rem; }.search input { width:100%; border:1px solid var(--line); border-radius:var(--radius-sm); background:var(--bg); padding:.55rem .75rem .55rem 2.15rem; }
 .search-mark { position:absolute; left:.8rem; top:50%; width:.72rem; height:.72rem; border:1.5px solid var(--muted); border-radius:50%; transform:translateY(-60%); pointer-events:none; }
 .search-mark::after { content:''; position:absolute; width:.38rem; height:1.5px; background:var(--muted); right:-.28rem; bottom:-.16rem; transform:rotate(45deg); }
@@ -142,7 +145,7 @@ tbody tr.silent { box-shadow:inset 2px 0 var(--status-escalated); }
 .task-link span, small { display:block; color:var(--muted); font-size:.71rem; margin-top:.25rem; white-space:nowrap; } code { font-family:var(--mono); color:var(--muted); }
 .status { display:inline-flex; align-items:center; gap:.4rem; font-size:.8rem; white-space:nowrap; }.status-dot { width:.45rem; height:.45rem; border-radius:50%; background:currentColor; box-shadow:0 0 0 3px color-mix(in srgb,currentColor 12%,transparent); }
 .status.ok { color:var(--status-ok); }.status.fail { color:var(--status-fail); }.status.aborted { color:var(--status-running); }.status.busy { color:var(--status-running); }.status.serious { color:var(--status-escalated); }.status.quiet { color:var(--muted); }
-.run-setup > div { display:flex; align-items:center; gap:.38rem; }.run-setup strong { font-size:.78rem; white-space:nowrap; }.run-setup strong.missing { color:var(--muted); }.run-setup code { border:1px solid color-mix(in srgb,var(--accent) 30%,var(--line)); border-radius:1rem; background:color-mix(in srgb,var(--accent) 7%,transparent); color:var(--accent); padding:.12rem .32rem; font-size:.55rem; }.run-setup small { max-width:13rem; overflow:hidden; text-overflow:ellipsis; }
+.run-setup > div { display:flex; align-items:center; gap:.38rem; }.run-setup strong { font-size:.78rem; white-space:nowrap; }.run-setup strong.missing { color:var(--muted); }.run-setup small { max-width:13rem; overflow:hidden; text-overflow:ellipsis; }.dashed { border-bottom:1px dashed currentColor; color:var(--muted); }
 .phase-line { display:flex; align-items:center; gap:3px; width:9rem; }.phase-line span { height:5px; min-width:8px; flex:1; border-radius:1rem; background:color-mix(in srgb,var(--phase-color) 68%,var(--line)); }
 .phase-line span.active { height:7px; background:var(--phase-color); box-shadow:0 0 8px color-mix(in srgb,var(--phase-color) 60%,transparent); }.phase-line span.failed { background:var(--status-fail); }
 .proof > span { display:block; text-transform:capitalize; font-size:.8rem; }.proof .muted { color:var(--muted); }

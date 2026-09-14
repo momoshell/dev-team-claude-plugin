@@ -339,7 +339,7 @@ test('H1 no-widening plans preserve legacy behavior byte-for-byte', () => {
   })
   const same = driveTask(sameCtx, sameIo)
   assert.equal(same.status, 'done')
-  assert.deepEqual(same.details.stages, ['plan:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:pass', 'commit', 'suite', 'suite:cold', 'done'])
+  assert.deepEqual(same.details.stages, ['plan:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:pass', 'commit', 'document', 'suite', 'suite:cold', 'done'])
   assert.equal(sameIo.calls.logs.find((entry) => entry.plan_scope)?.plan_scope.verdict, 'plan-scope-same')
 
   const narrowedIo = fakeIo({

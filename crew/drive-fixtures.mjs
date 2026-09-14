@@ -124,7 +124,7 @@ const fenceDiff = (path, oldStart, oldCount = 1, newStart = oldStart, newCount =
 
 // Scripted fake io: `script` maps `${role}:${n-th call}` -> envelope; runs and
 // git are scripted per call. Everything is recorded for assertions.
-function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cleanThrows = false, cold = 'green', showDoc = false, emit = false, files = {}, reseat = null, gh = null, writeThrough = false, throwOn = null, throwWrites = [], seqIds = false, now = () => 0, slots = null, diffListing = '', diffHunks = {}, diffReports = [], fenceBases = {}, fenceDiffs = {}, baseBlobs = {}, spanDiffs = {}, onRun = null, onCommit = null, commitResults = null, screener = null } = {}) {
+function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cleanThrows = false, cold = 'green', showDoc = false, documentDiff = '', emit = false, files = {}, reseat = null, gh = null, writeThrough = false, throwOn = null, throwWrites = [], seqIds = false, now = () => 0, slots = null, diffListing = '', diffHunks = {}, diffReports = [], fenceBases = {}, fenceDiffs = {}, baseBlobs = {}, spanDiffs = {}, onRun = null, onCommit = null, commitResults = null, screener = null } = {}) {
   const calls = { order: [], trace: [], assign: [], run: [], diffRuns: [], fenceShows: [], fenceDiffs: [], diffInventory: [], diffConfigs: [], runClean: [], runCold: [], wrapped: [], sweeps: [], reseat: [], commits: [], writes: {}, writeLog: [], checkoutLog: [], logs: [], showDoc: [], emits: [], gh: [], waits: [], sleeps: [], slotFactories: [], files, screener: { models: [], diffs: [], children: [] } }
   const counts = {}; let seq = 0
 
@@ -197,6 +197,7 @@ function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cle
         const result = typeof value === 'function' ? value(text, calls.screener.children.length, calls) : value
         return typeof result === 'string' ? { ok: true, output: result } : result
       }
+      if (text.startsWith('git diff --binary --no-ext-diff ')) return { ok: true, output: documentDiff }
       if (text.includes('git ls-files -z --cached --others --exclude-standard')) {
         calls.diffInventory.push(cmd)
         const index = calls.diffInventory.length - 1
@@ -886,11 +887,11 @@ const bothExhaustionPointsScenario = (secondReviewLead = null) => {
 
 const HEALTHY_RESULT = {
   status: 'done',
-  summary: 'Task t1 complete: committed abc1234 (2 files), suite green, cold-verified from /zz/aa11bb, review pass. Stages: plan:r1 | check:r1 | build:r1 | scope-gate:r1 | lane:r1 | review:r1 | review:pass | commit | suite | suite:cold | done',
+  summary: 'Task t1 complete: committed abc1234 (2 files), suite green, cold-verified from /zz/aa11bb, review pass. Stages: plan:r1 | check:r1 | build:r1 | scope-gate:r1 | lane:r1 | review:r1 | review:pass | commit | document | suite | suite:cold | done',
   artifacts: [`${TD}/plan.md`, `${TD}/review.md`, `${TD}/journal.jsonl`],
   details: {
     commit: 'abc1234',
-    stages: ['plan:r1', 'check:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:pass', 'commit', 'suite', 'suite:cold', 'done'],
+    stages: ['plan:r1', 'check:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:pass', 'commit', 'document', 'suite', 'suite:cold', 'done'],
     files_committed: ['a.mjs', 'a.test.mjs'],
     consults: 0,
     dissents: [],
@@ -932,7 +933,7 @@ const CONVERGE_PLAN = () => planEnv({ details: { ...planEnv().details, gate_cmd:
 
 const CONVERGE_GATE = RED(3)
 
-function convergeIo({ seam = true, suite = { ok: true, output: '' }, issueThrows = false, prThrows = false, findings = null, slots = null, now = null } = {}) {
+function convergeIo({ seam = true, suite = { ok: true, output: '' }, issueThrows = false, prThrows = false, findings = null, slots = null, now = null, documentDiff = '' } = {}) {
   return fakeIo({
     envelopes: {
       'planner:1': CONVERGE_PLAN(),
@@ -945,6 +946,7 @@ function convergeIo({ seam = true, suite = { ok: true, output: '' }, issueThrows
       'suite-cmd': suite,
     },
     changed: ['a.mjs'],
+    documentDiff,
     ...(typeof slots === 'function' ? { slots } : {}),
     ...(typeof now === 'function' ? { now } : {}),
     ...(findings ? {
@@ -1000,11 +1002,11 @@ const directSlotRun = ({ phase, refusals = [], now = () => 0, emit = () => {} } 
 
 const ZERO_CAPACITY_RESULT = Object.freeze({
   status: 'done',
-  summary: 'Task t1 complete: committed abc1234 (2 files), suite green, cold-verified from /zz/aa11bb, review pass. Stages: plan:r1 | build:r1 | scope-gate:r1 | lane:r1 | review:r1 | review:pass | commit | suite | suite:cold | done',
+  summary: 'Task t1 complete: committed abc1234 (2 files), suite green, cold-verified from /zz/aa11bb, review pass. Stages: plan:r1 | build:r1 | scope-gate:r1 | lane:r1 | review:r1 | review:pass | commit | document | suite | suite:cold | done',
   artifacts: ['/tmp/fake-task/plan.md', '/tmp/fake-task/review.md', '/tmp/fake-task/journal.jsonl'],
   details: {
     commit: 'abc1234',
-    stages: ['plan:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:pass', 'commit', 'suite', 'suite:cold', 'done'],
+    stages: ['plan:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:pass', 'commit', 'document', 'suite', 'suite:cold', 'done'],
     files_committed: ['a.mjs', 'a.test.mjs'],
     consults: 0,
     dissents: [],
@@ -1052,6 +1054,8 @@ const ZERO_CAPACITY_LOGS = Object.freeze([
   { stage: 'commit', channel: 'record' },
   { commit_subject: 'fallback-from-plan-summary', channel: 'record' },
   { stage_done: 'commit', channel: 'record' },
+  { stage: 'document', channel: 'record' },
+  { stage_done: 'document', channel: 'record' },
   { stage: 'suite', channel: 'record' },
   { stage_done: 'suite', channel: 'record' },
   { stage: 'suite:cold', channel: 'record' },
@@ -1496,7 +1500,7 @@ const PUBLISH_COLD_OUTPUT = '# pass 2\n# fail 0\n# skipped 2\n'
 function publicationIo(options = {}) {
   const {
     commands: commandOverrides = {}, envelopes: envelopeOverrides = {}, changed = ['a.mjs', 'a.test.mjs'],
-    warm = PUBLISH_WARM_OUTPUT, coldOutput = PUBLISH_COLD_OUTPUT, coldResult, journal = `${TD}/journal.jsonl`,
+    warm = PUBLISH_WARM_OUTPUT, coldOutput = PUBLISH_COLD_OUTPUT, coldResult, documentDiff = '', journal = `${TD}/journal.jsonl`,
     journalText: initialJournal = JSON.stringify({ event: RUN_START_EVENT }) + '\n', readFileThrows = false,
     capabilities = null, branch = 'feature/ship', branchResult = { ok: true, output: `${branch}\n` },
     statusResult = { ok: true, output: '' }, gitPaths = {}, rebasePathProbes = {}, initialHead = null,
@@ -1534,6 +1538,7 @@ function publicationIo(options = {}) {
     'gh pr view': { ok: false, output: 'no pull requests found for this branch\n' },
     'git push -u origin': { ok: true, output: '' },
     'gh pr create': { ok: true, output: 'https://github.com/o/r/pull/42\n' },
+    'git diff --binary --no-ext-diff': { ok: true, output: documentDiff },
   }
   const commands = { ...defaults, ...commandOverrides }
   const envelopes = {
@@ -1629,7 +1634,7 @@ const HONEST_NARRATION = 'The lane took 2 build rounds and 11 gate checks, chang
 const NARRATION_RECORD = Object.freeze({
   intent: 'why the lane existed', closes: ['#806'], issues: ['#799'],
   stages: ['plan:r1', 'check:r1', 'gate-baseline', 'build:r1', 'scope-gate:r1', 'lane:r1', 'gate:r1',
-    'review:r1', 'review:r1', 'build:r2', 'review:r2', 'commit', 'rebase', 'suite', 'publish'],
+    'review:r1', 'review:r1', 'build:r2', 'review:r2', 'commit', 'document', 'rebase', 'suite', 'publish'],
   cursor: { plan_round: 1, build_round: 2, review_round: 2 },
   files: ['crew/drive.mjs'],
   gate: { cmd: 'node task/gate.mjs', summary: { total: 11, failed: 0, errored: 0 }, discrimination: 'proven', repairs: 0 },

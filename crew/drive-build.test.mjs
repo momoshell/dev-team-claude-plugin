@@ -487,7 +487,7 @@ test('clean scope does not fire the sensitivity floor or alter the happy-path st
   })
   const res = driveTask(CTX, io)
   assert.equal(res.status, 'done')
-  assert.deepEqual(res.details.stages, ['plan:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:pass', 'commit', 'suite', 'suite:cold', 'done'])
+  assert.deepEqual(res.details.stages, ['plan:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:pass', 'commit', 'document', 'suite', 'suite:cold', 'done'])
   assert.equal(io.calls.reseat.length, 0)
   assert.deepEqual(res.details.modifiers, [])
   assert.deepEqual(io.calls.emits.filter(({ kind }) => kind === 'modifier'), [])
@@ -2587,7 +2587,7 @@ test('mutation outcomes are frozen and every observed row uses the closed vocabu
 
 test('the per-check proof stage is declared by the full variant', () => {
   assert.equal(undeclaredStage(VARIANTS.full, 'gate-proof:1:checks'), null)
-  assert.deepEqual(VARIANTS.full.stages, ['plan', 'check', 'build', 'scope-gate', 'lane', 'gate', 'gate-baseline', 'gate-repair', 'gate-reverify', 'gate-proof', 'review', 'commit', 'rebase', 'suite', 'publish', 'converge'])
+  assert.deepEqual(VARIANTS.full.stages, ['plan', 'check', 'build', 'scope-gate', 'lane', 'gate', 'gate-baseline', 'gate-repair', 'gate-reverify', 'gate-proof', 'review', 'commit', 'document', 'rebase', 'suite', 'publish', 'converge'])
 })
 
 test('a per-check pass is only owed after the generation has a whole-gate proof', () => {
@@ -2880,7 +2880,7 @@ test('directed declaration is pinned and honourable', () => {
   const DIRECTED_SNAPSHOT = {
     execution: 'reviewed', required_seats: ['builder', 'reviewer'],
     stages: ['directed', 'build', 'scope-gate', 'lane', 'gate', 'gate-baseline', 'gate-proof',
-      'review', 'commit', 'rebase', 'suite', 'publish', 'converge'],
+      'review', 'commit', 'document', 'rebase', 'suite', 'publish', 'converge'],
     writes: 'planned',
     accepted_by: 'a review verdict of pass, or a lead accept at review or build exhaustion',
     envelope_fields: [], assignment: null,
@@ -2979,7 +2979,7 @@ test('bounce-reviewer at review exhaustion re-reviews the same tree', () => {
   assert.deepEqual(result.details.stages, [
     'plan:r1', 'gate-baseline', 'build:r1', 'scope-gate:r1', 'lane:r1', 'gate:r1', 'review:r1',
     'build:r2', 'scope-gate:r2', 'lane:r2', 'gate:r2', 'review:r2', 'review:pass',
-    'commit', 'suite', 'suite:cold', 'done',
+    'commit', 'document', 'suite', 'suite:cold', 'done',
   ])
   assert.equal(b318Builders(io).length, 2)
   const roles = io.calls.assign.map(({ role }) => role)
@@ -2997,14 +2997,14 @@ test('stageShape keeps only major phases and counts distinct rounds', () => {
   const stages = ['plan:r1', 'check:r1', 'gate-baseline', 'gate-proof:1', 'gate-proof:1:checks',
     'build:r1', 'scope-gate:r1', 'lane:r1', 'gate:r1', 'review:r1', 'review:r1',
     'build:r2', 'scope-gate:r2', 'lane:r2', 'gate:r2', 'review:r2', 'review:pass',
-    'commit', 'rebase', 'suite', 'suite:cold', 'publish']
-  assert.equal(stageShape(stages), 'plan → build ×2 → review ×2 → commit → rebase → suite → publish')
+    'commit', 'document', 'rebase', 'suite', 'suite:cold', 'publish']
+  assert.equal(stageShape(stages), 'plan → build ×2 → review ×2 → commit → document → rebase → suite → publish')
   for (const noisy of ['check', 'gate-baseline', 'gate-repair', 'gate-reverify', 'gate-proof', 'scope-gate', 'lane', 'gate', 'done']) {
     assert.equal(stageShape(stages).includes(noisy), false, noisy)
     assert.equal(SHAPE_MAJOR_PHASES.includes(noisy), false, noisy)
   }
   // the allow-list is closed and every full-variant head is either a phase or omitted
-  assert.deepEqual([...SHAPE_MAJOR_PHASES], ['plan', 'build', 'review', 'commit', 'rebase', 'suite', 'publish'])
+  assert.deepEqual([...SHAPE_MAJOR_PHASES], ['plan', 'build', 'review', 'commit', 'document', 'rebase', 'suite', 'publish'])
   assert.equal(Object.isFrozen(SHAPE_MAJOR_PHASES), true)
   // suite:cold folds into suite because its head does
   assert.equal(stageShape(['suite', 'suite:cold']), 'suite')

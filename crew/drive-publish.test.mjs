@@ -1140,7 +1140,7 @@ test('armed happy path records commit, rebase, warm/cold suites, publish, and do
   const { result, io } = runPublished({})
   assert.equal(result.status, 'done')
   const at = result.details.stages.indexOf('commit')
-  assert.deepEqual(result.details.stages.slice(at), ['commit', 'rebase', 'suite', 'suite:cold', 'publish', 'done'])
+  assert.deepEqual(result.details.stages.slice(at), ['commit', 'document', 'rebase', 'suite', 'suite:cold', 'publish', 'done'])
   assert.equal(io.calls.suiteHead, io.state.post)
   assert.equal(io.calls.coldHead, io.state.post)
   assert.equal(result.details.commit, io.state.post)
@@ -1575,7 +1575,7 @@ test('F1 rendered PR closing trailers cover zero, one, two, and three closes', (
 
 test('composePrBody is pure and renders every populated section with its own values', () => {
   const record = {
-    issues: ['#679', '#758'], stages: ['commit', 'rebase', 'suite', 'publish', 'done'],
+    issues: ['#679', '#758'], stages: ['commit', 'document', 'rebase', 'suite', 'publish', 'done'],
     cursor: { plan_round: 4, build_round: 5, review_round: 6 },
     gate: { cmd: 'gate-cmd', summary: { total: 2, failed: 0, errored: 0 }, discrimination: 'proven', repairs: 1 },
     review: { verdict: 'changes-needed', residuals: [{ id: 'R1', type: 'cosmetic', summary: 'leave this note' }] },
@@ -1593,7 +1593,7 @@ test('composePrBody is pure and renders every populated section with its own val
     'Suite warm 11 pass / 2 fail / 3 skip; cold 13 pass / 4 fail / 5 skip, cold-verified from a fresh checkout.',
     'Review: changes-needed, 1 residual:\n- R1 (cosmetic): leave this note',
     'Changed: crew/drive.mjs',
-    'Shape: commit → rebase → suite → publish',
+    'Shape: commit → document → rebase → suite → publish',
     '- bounce: retry',
   ].join('\n\n'))
   assert.doesNotMatch(first, /\n{3,}/)
@@ -1608,7 +1608,7 @@ test('composePrBody is pure and renders every populated section with its own val
     '2 gate checks, 0 failed, 0 errored, discrimination unproven', '(gate-cmd)', 'repaired 1 time',
     'warm 11 pass / 2 fail / 3 skip', 'cold 13 pass / 4 fail / 5 skip', 'cold-verified from a fresh checkout',
     'Review: changes-needed, 1 residual:', 'R1 (cosmetic): leave this note', 'Changed: crew/drive.mjs',
-    'Shape: commit → rebase → suite → publish', '- bounce: retry']) assert.ok(first.includes(token), token)
+    'Shape: commit → document → rebase → suite → publish', '- bounce: retry']) assert.ok(first.includes(token), token)
   assert.equal(first.split('\n')[0], 'why the lane existed')
   assert.ok(!/\{\s*"/.test(first))
 })

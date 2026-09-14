@@ -38,7 +38,7 @@
 // filename.
 
 import {
-  existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, readdirSync, statSync, writeFileSync,
+  existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, readdirSync, rmSync, statSync, writeFileSync,
 } from 'node:fs'
 import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -50,7 +50,7 @@ import { resolveProtectedPaths } from '../../crew/protected-paths.mjs'
 import { parseFenceScope, validateFenceScope } from '../../crew/fence-scope.mjs'
 
 const REQUEST_KEYS = Object.freeze(['ask', 'where', 'done_means', 'out_of_scope'])
-export const PACK_OMISSIONS = Object.freeze(['symbols'])
+export const PACK_OMISSIONS = Object.freeze(['symbols', 'tripwires'])
 // A lane may declare files it will CREATE. The key is OPTIONAL, so every
 // request authored before it existed stays valid, and it is a COMPILER key
 // rather than a dispatch-only one: the compiler is what exempts the path.
@@ -2987,7 +2987,7 @@ function readAndKeepGreenFiles(writeSurface, discovery) {
 function conventionsFile(discovery, writeSurface, profile) {
   const surface = renderWriteSurface(writeSurface, discovery).split('\n')[1]
     || 'read-and-keep-green (discovered tripwire surface — pinned by keys you touch; do not edit): (none)'
-  return [surface, renderConventions(profile?.conventions), generatedGrep(discovery), CONVENTIONS_BLOCK].join('\n')
+  return [surface, renderConventions(profile?.conventions), CONVENTIONS_BLOCK].join('\n')
 }
 
 function issueFor(request, issueBodyPath) {
@@ -3175,8 +3175,15 @@ export function writePack({ packDir, taskName, checkout, request, discovery, wri
   const lineCounts = lineCountsFor({ checkout: resolve(checkout || process.cwd()), writeSurface, coupling })
   const tree = treeFor({ checkout: resolve(checkout || process.cwd()), writeSurface })
   const symbolIndex = symbolIndexFor({ checkout: resolve(checkout || process.cwd()), writeSurface, coupling })
-  writeFileSync(paths.vocabulary, `${keyList(discovery).join('\n')}\n`)
-  writeFileSync(paths.rows, `${renderTripwires(discovery)}\n`)
+  if (packOmission !== 'tripwires') {
+    writeFileSync(paths.vocabulary, `${keyList(discovery).join('\n')}\n`)
+    writeFileSync(paths.rows, `${renderTripwires(discovery)}\n`)
+  } else {
+    rmSync(paths.vocabulary, { force: true })
+    rmSync(paths.rows, { force: true })
+    paths.vocabulary = null
+    paths.rows = null
+  }
   writeFileSync(paths.conventions, `${conventionsFile(discovery, writeSurface, profile)}\n`)
   if (packOmission !== 'symbols' && symbolIndex.length > 0) {
     writeFileSync(paths.symbols, `${renderSymbolSidecar(symbolIndex)}\n`)
@@ -3211,6 +3218,7 @@ export function writePack({ packDir, taskName, checkout, request, discovery, wri
 
 function renderTripwirePointer(discovery, pack) {
   if (pack == null) return renderTripwires(discovery)
+  if (pack?.vocabulary == null || pack?.rows == null) return 'tripwires: omitted by brief-tripwires experiment'
   const counts = pack.counts || {}
   const paths = pack
   return [
@@ -3245,7 +3253,7 @@ function renderConventionsPointer(writeSurface, pack) {
   const count = pack.counts?.readAndKeepGreen ?? 0
   return [
     `files_in_scope (expected write surface; basis: ${basis}): ${listedFiles}`,
-    `conventions: ${pack.conventions} — the read-and-keep-green surface (${count} file(s)), the conventions of record, the declare-every-hit grep and the standing factory conventions; read it once with: cat ${pack.conventions}`,
+    `conventions: ${pack.conventions} — the read-and-keep-green surface (${count} file(s)), the conventions of record and the standing factory conventions; read it once with: cat ${pack.conventions}`,
   ].join('\n')
 }
 
@@ -3334,9 +3342,12 @@ function renderContextPack(pack) {
   return lines
 }
 
-function renderValidation(baseline, discovery) {
-  const tests = discovery.tripwires.map((tripwire) => tripwire.file).sort()
-  const narrow = tests.length ? `node --test ${tests.join(' ')}` : 'no tripwire tests discovered'
+function renderValidation(baseline, discovery, pack) {
+  const omitted = pack != null && (pack.vocabulary == null || pack.rows == null)
+  const tests = omitted ? [] : discovery.tripwires.map((tripwire) => tripwire.file).sort()
+  const narrow = omitted
+    ? 'tripwires omitted by brief-tripwires experiment'
+    : tests.length ? `node --test ${tests.join(' ')}` : 'no tripwire tests discovered'
   const full = baseline.lane || 'no full test lane'
   const count = baseline.status === 'unknown'
     ? `unknown (${baseline.reason})`
@@ -3384,7 +3395,7 @@ function renderBriefSections(gathered) {
     briefSection('acceptance', ['## Acceptance', `${request.done_means} · Full suite green. · ${SLOT_MARKER}`]),
     briefSection('acceptance gate', ['## Acceptance gate', standingBlocks().acceptance]),
     briefSection('per-check mutations', ['## Per-check mutations', standingBlocks().mutations]),
-    briefSection('validation lane', ['## Validation lane', renderValidation(baseline, discovery)]),
+    briefSection('validation lane', ['## Validation lane', renderValidation(baseline, discovery, pack)]),
     briefSection('conventions', [
       '## Conventions',
       renderConventionsSlot(writeSurface, pack),

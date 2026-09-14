@@ -1,11 +1,152 @@
 // Split from crew/drive.test.mjs (#918 follow-up): one subject per file so a
 // lane fencing one driver concern no longer locks every driver test.
-// Shared fixtures, and the ledger sandbox side effect, live in ./drive-fixtures.mjs.
+// Shared fixtures live in ./drive-fixtures.mjs; this file carries its OWN ledger
+// sandbox because it imports a ledger door directly (see below).
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  FINDING_DISPOSITIONS, FINDING_SEVERITIES, GATE_CUSTODIAN, MAX_QUESTIONS, PROTECTED_PATHS, REPO_ROOT, RESIDUAL_TYPES, applyPrescriptionLines, checkAnchors, existsSync, join, laneFence, partitionShifts, protectedHits, readFileSync, readdirSync, scratchDir, spawnSync,
+  FINDING_DISPOSITIONS, FINDING_SEVERITIES, GATE_CUSTODIAN, MAX_QUESTIONS, PROTECTED_PATHS, REPO_ROOT, RESIDUAL_TYPES, applyPrescriptionLines, checkAnchors, existsSync, join, laneFence, mkdirSync, partitionShifts, protectedHits, readFileSync, readdirSync, rmSync, scratchDir, spawnSync,
 } from './drive-fixtures.mjs'
+import { bootCmd, composeRolePrompt, FLAG_VALUE_CONTRACT, KNOWN_FLAGS, BOOLEAN_FLAGS, BOOT_ONLY_FLAGS } from './crew.mjs'
+import { after } from 'node:test'
+import { tmpdir } from 'node:os'
+
+// Ledger sandbox (#432 / #824). This file imports crew/crew.mjs#bootCmd, a
+// registered home-default door (test/factory-env.test.mjs:113), so it is a
+// ledger writer in its own right and the sandbox detector reads THIS file's
+// text — ./drive-fixtures.mjs already assigns one, but an import is not a
+// credit it can see. tmpdir() is intentional and mkdtempSync() is not: the
+// raw-temp detector (test/factory-env.test.mjs:691) counts only mkdtemp calls,
+// while the sandbox detector's TEMP_MARKERS (:358) accepts tmpdir( too. Same
+// reasoning, verbatim, as crew/drive-fixtures.mjs:73-81.
+const DOCS_LEDGER_SANDBOX = join(tmpdir(), `b689-drive-docs-ledger-${process.pid}`)
+const DOCS_LEDGER_SANDBOX_PREVIOUS = process.env.DEVTEAM_LEDGER_DIR
+process.env.DEVTEAM_LEDGER_DIR = DOCS_LEDGER_SANDBOX
+after(() => {
+  if (DOCS_LEDGER_SANDBOX_PREVIOUS === undefined) delete process.env.DEVTEAM_LEDGER_DIR
+  else process.env.DEVTEAM_LEDGER_DIR = DOCS_LEDGER_SANDBOX_PREVIOUS
+  rmSync(DOCS_LEDGER_SANDBOX, { recursive: true, force: true })
+})
+
+const CHARTER_TEST_ROLES = Object.freeze(['lead', 'builder'])
+const CHARTER_TAIL = '\n\nBe terse: state the result in the fewest words that carry it, and do not restate context the reader already has.\n'
+
+function charterCapabilityRegister() {
+  const grant = (extra = {}) => ({ tools: [], extensions: [], agents: [], skills: [], advisor: false, requires: [], mcp_servers: [], ...extra })
+  return {
+    schema_version: 1,
+    updated_at: '2026-08-17',
+    roles: {
+      lead: grant(), planner: grant({ requires: ['subagents'] }), builder: grant(),
+      reviewer: grant(), 'tech-lead': grant(),
+    },
+    local_providers: {},
+    coding_agents: {
+      pi: { providers: ['openai', 'anthropic', 'llama-swap'], transports: ['pane', 'headless-rpc'], adapter: 'crew/adapters/adapter-pi.mjs', refuses: ['mcp_servers'] },
+      claude: { providers: ['anthropic'], transports: ['pane', 'headless-json'], adapter: 'crew/adapters/adapter-claude.mjs', refuses: ['extensions', 'skills', 'local_provider'] },
+    },
+  }
+}
+
+async function withTestHome(home, fn) {
+  const previous = process.env.HOME
+  process.env.HOME = home
+  try { return await fn() }
+  finally { if (previous === undefined) delete process.env.HOME; else process.env.HOME = previous }
+}
+
+function charterBootFixture(label) {
+  const home = scratchDir(`drive-docs-charter-${label}-home-`)
+  const checkoutRoot = scratchDir(`drive-docs-charter-${label}-checkout-`)
+  const checkout = join(checkoutRoot, 'checkout')
+  const task = `drive-docs-charter-${label}`
+  const crewDir = join(home, '.crew', 'checkout', task)
+  const register = charterCapabilityRegister()
+  mkdirSync(checkout)
+  return {
+    crewDir,
+    taskDir: join(crewDir, 'task'),
+    boot: (flags = {}) => withTestHome(home, () => bootCmd(
+      { task, checkout, roles: CHARTER_TEST_ROLES.join(','), 'headless-all': true, 'claude-bin': process.execPath, ...flags },
+      { register, awaitSeatsReady: async () => {} },
+    )),
+    cleanup: () => {
+      rmSync(home, { recursive: true, force: true })
+      rmSync(checkoutRoot, { recursive: true, force: true })
+    },
+  }
+}
+
+function charterSource(role) {
+  return {
+    shared: readFileSync(join(REPO_ROOT, 'crew', 'roles', '_shared.md'), 'utf8'),
+    card: readFileSync(join(REPO_ROOT, 'crew', 'roles', `${role}.md`), 'utf8'),
+  }
+}
+
+test('bootCmd writes terse charter tails for every seated role', async () => {
+  const fixture = charterBootFixture('terse')
+  try {
+    await fixture.boot({ 'charter-arm': 'terse-tail' })
+    for (const role of CHARTER_TEST_ROLES) {
+      const { shared, card } = charterSource(role)
+      const prompt = readFileSync(join(fixture.taskDir, `role-${role}.md`), 'utf8')
+      assert.equal(prompt, composeRolePrompt(shared, card, '', 'terse-tail'))
+      assert.equal(prompt.slice(-CHARTER_TAIL.length), CHARTER_TAIL)
+    }
+  } finally { fixture.cleanup() }
+})
+
+test('bootCmd without charter-arm writes control prompts byte-for-byte', async () => {
+  const fixture = charterBootFixture('control')
+  try {
+    await fixture.boot()
+    const section = ''
+    for (const role of CHARTER_TEST_ROLES) {
+      const { shared, card } = charterSource(role)
+      assert.equal(
+        readFileSync(join(fixture.taskDir, `role-${role}.md`), 'utf8'),
+        composeRolePrompt(shared, card, section, 'control'),
+      )
+    }
+  } finally { fixture.cleanup() }
+})
+
+test('bootCmd rejects an unknown charter-arm before crew state', async () => {
+  const fixture = charterBootFixture('invalid')
+  try {
+    const arm = 'unknown-arm'
+    await assert.rejects(
+      () => fixture.boot({ 'charter-arm': arm }),
+      (error) => error?.message === `invalid --charter-arm ${JSON.stringify(arm)}; expected one of control|terse-tail`,
+    )
+    assert.equal(existsSync(join(fixture.crewDir, 'crew.json')), false)
+  } finally { fixture.cleanup() }
+})
+
+test('E1/E2 compose every role prompt with byte-identical control and a final terse tail treatment', () => {
+  const roles = ['lead', 'planner', 'builder', 'reviewer', 'tech-lead']
+  const rolesDir = join(REPO_ROOT, 'crew', 'roles')
+  const shared = readFileSync(join(rolesDir, '_shared.md'), 'utf8')
+  const section = 'memory: retained context'
+  const tail = '\n\nBe terse: state the result in the fewest words that carry it, and do not restate context the reader already has.\n'
+  for (const role of roles) {
+    const card = readFileSync(join(rolesDir, `${role}.md`), 'utf8')
+    const control = `${shared}\n\n${card}${section ? `\n\n${section}` : ''}`
+    assert.equal(composeRolePrompt(shared, card, section, 'control'), control)
+    const treatment = composeRolePrompt(shared, card, section, 'terse-tail')
+    assert.equal(treatment, control + tail)
+    assert.ok(treatment.endsWith(tail))
+    assert.ok(treatment.indexOf(tail) > treatment.indexOf(section))
+  }
+})
+
+test('charter-arm is a value-bearing boot-only input and not a boolean', () => {
+  assert.ok(KNOWN_FLAGS.boot.includes('charter-arm'))
+  assert.equal(FLAG_VALUE_CONTRACT['charter-arm'], 'value')
+  assert.equal(BOOLEAN_FLAGS.includes('charter-arm'), false)
+  assert.equal(BOOT_ONLY_FLAGS.includes('charter-arm'), false)
+})
 
 test('the turn-economy rule is stated once and still reaches every seat', () => {
   const roles = ['builder', 'lead', 'planner', 'reviewer', 'tech-lead']

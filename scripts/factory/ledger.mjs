@@ -366,6 +366,13 @@ export const MUTATION_ANCHOR_REFUSALS = Object.freeze([
 ])
 export const REVIEW_VERDICTS = Object.freeze(['pass', 'changes-needed'])
 export const PLANNER_SYMBOLS_ARMS = Object.freeze(['control', 'symbols-omitted'])
+export const CHARTER_TERSE_ARMS = Object.freeze(['control', 'terse-tail'])
+export const BRIEF_TRIPWIRES_ARMS = Object.freeze(['control', 'tripwires-omitted'])
+export const EXPERIMENT_REGISTRY = Object.freeze({
+  'planner-symbols': PLANNER_SYMBOLS_ARMS,
+  'charter-terse': CHARTER_TERSE_ARMS,
+  'brief-tripwires': BRIEF_TRIPWIRES_ARMS,
+})
 export const PLANNER_SYMBOLS_SAMPLE_FLOOR = 20
 export const PLANNER_SYMBOLS_BOOTSTRAP_RESAMPLES = 10_000
 export const PLANNER_SYMBOLS_BOOTSTRAP_SEED = 1059
@@ -3597,8 +3604,8 @@ export function openLedger({
     const role = normaliseShortName(input.role, 'recordExperimentArm', 'role')
     const experiment = normaliseShortName(input.experiment, 'recordExperimentArm', 'experiment')
     requireEnum(role, ['planner'], 'recordExperimentArm', 'role')
-    requireEnum(experiment, ['planner-symbols'], 'recordExperimentArm', 'experiment')
-    requireEnum(input.arm, PLANNER_SYMBOLS_ARMS, 'recordExperimentArm', 'arm')
+    requireEnum(experiment, Object.keys(EXPERIMENT_REGISTRY), 'recordExperimentArm', 'experiment')
+    requireEnum(input.arm, EXPERIMENT_REGISTRY[experiment], 'recordExperimentArm', 'arm')
     if (typeof input.fraction !== 'number' || !Number.isFinite(input.fraction) || input.fraction < 0 || input.fraction > 1) {
       refuse('recordExperimentArm: field \'fraction\' must be a finite number in [0,1]')
     }

@@ -10,7 +10,7 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 
 export const CAPABILITY_REFUSALS = Object.freeze([
   'register-invalid', 'capability-shortfall', 'unknown-grant', 'grant-unsupported',
-  'extension-missing', 'unknown-skill', 'agent-def-invalid', 'local-settings-missing',
+  'extension-missing', 'unknown-skill', 'agent-def-invalid', 'local-settings-missing', 'local-provider-undeclared',
   'local-endpoint-dead', 'grant-contradicts-deny', 'vendor-extension-missing',
   'agent-unresolved', 'agent-provider-unsupported', 'local-provider-reserved',
 ])

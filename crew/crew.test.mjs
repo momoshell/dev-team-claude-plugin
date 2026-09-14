@@ -7390,7 +7390,7 @@ test('a charter requirement unmet by adapter and register refuses to boot from t
     // "from the closed reason set" — the set itself, matching the honest
     // neighbour a few tests down (crew/crew.test.mjs:4459).
     const CLOSED_REASONS = ['register-invalid', 'capability-shortfall', 'unknown-grant', 'grant-unsupported',
-      'extension-missing', 'unknown-skill', 'agent-def-invalid', 'local-settings-missing',
+      'extension-missing', 'unknown-skill', 'agent-def-invalid', 'local-settings-missing', 'local-provider-undeclared',
       'local-endpoint-dead', 'grant-contradicts-deny', 'vendor-extension-missing',
       'agent-unresolved', 'agent-provider-unsupported', 'local-provider-reserved']
     await assert.rejects(
@@ -7449,6 +7449,7 @@ test('checkout-pinned local providers require live endpoints and expose their se
   try {
     const settings = join(root, 'crew/pi/settings.json')
     writeFileSync(settings, '{}')
+    writeFileSync(join(dirname(settings), 'models.json'), JSON.stringify({ providers: { 'local-pi': null } }))
     const register = capabilityRegister({ local_providers: {
       'local-pi': { settings: 'crew/pi/settings.json', pi_provider: 'local-pi', base_url: 'http://127.0.0.1:11434/v1' },
     } })
@@ -7471,11 +7472,118 @@ test('checkout-pinned local providers require live endpoints and expose their se
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
+test('A1 local provider without models.json refuses by closed declaration reason', async () => {
+  const root = scratchDir('crew-local-provider-a1-')
+  try {
+    const settings = join(root, 'crew/pi/settings.json')
+    mkdirSync(dirname(settings), { recursive: true })
+    writeFileSync(settings, '{}')
+    const register = capabilityRegister({ local_providers: {
+      'local-pi': { settings: 'crew/pi/settings.json', pi_provider: 'local-pi', base_url: 'http://127.0.0.1:11434/v1' },
+    } })
+    const seats = { builder: { agent: 'pi', effort: 'max', provider: 'local-pi', id: 'qwen3-coder', model: null } }
+    await assert.rejects(
+      () => resolveAdapters(['builder'], {}, seats, { register, root, probeEndpoint: async () => true }),
+      (err) => err.reason === 'local-provider-undeclared' && CAPABILITY_REFUSALS.includes(err.reason),
+    )
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('B1 local provider omitted from models.json refuses by closed declaration reason', async () => {
+  const root = scratchDir('crew-local-provider-b1-')
+  try {
+    const settings = join(root, 'crew/pi/settings.json')
+    mkdirSync(dirname(settings), { recursive: true })
+    writeFileSync(settings, '{}')
+    writeFileSync(join(dirname(settings), 'models.json'), JSON.stringify({ providers: { other: null } }))
+    const register = capabilityRegister({ local_providers: {
+      'local-pi': { settings: 'crew/pi/settings.json', pi_provider: 'local-pi', base_url: 'http://127.0.0.1:11434/v1' },
+    } })
+    const seats = { builder: { agent: 'pi', effort: 'max', provider: 'local-pi', id: 'qwen3-coder', model: null } }
+    await assert.rejects(
+      () => resolveAdapters(['builder'], {}, seats, { register, root, probeEndpoint: async () => true }),
+      (err) => err.reason === 'local-provider-undeclared',
+    )
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('C1 local provider declared in models.json boots', async () => {
+  const root = scratchDir('crew-local-provider-c1-')
+  try {
+    const settings = join(root, 'crew/pi/settings.json')
+    mkdirSync(dirname(settings), { recursive: true })
+    writeFileSync(settings, 'settings contents are not read')
+    writeFileSync(join(dirname(settings), 'models.json'), JSON.stringify({ providers: { 'local-pi': null } }))
+    const register = capabilityRegister({ local_providers: {
+      'local-pi': { settings: 'crew/pi/settings.json', pi_provider: 'local-pi', base_url: 'http://127.0.0.1:11434/v1' },
+    } })
+    const seats = { builder: { agent: 'pi', effort: 'max', provider: 'local-pi', id: 'qwen3-coder', model: null } }
+    const adapters = await resolveAdapters(['builder'], {}, seats, { register, root, probeEndpoint: async () => true })
+    assert.equal(adapters.builder.configDir, dirname(settings))
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('D1 empty settings.json with declared models provider boots', async () => {
+  const root = scratchDir('crew-local-provider-d1-')
+  try {
+    const settings = join(root, 'crew/pi/settings.json')
+    mkdirSync(dirname(settings), { recursive: true })
+    writeFileSync(settings, '{}')
+    writeFileSync(join(dirname(settings), 'models.json'), JSON.stringify({ providers: { 'local-pi': null } }))
+    const register = capabilityRegister({ local_providers: {
+      'local-pi': { settings: 'crew/pi/settings.json', pi_provider: 'local-pi', base_url: 'http://127.0.0.1:11434/v1' },
+    } })
+    const seats = { builder: { agent: 'pi', effort: 'max', provider: 'local-pi', id: 'qwen3-coder', model: null } }
+    await assert.doesNotReject(
+      () => resolveAdapters(['builder'], {}, seats, { register, root, probeEndpoint: async () => true }),
+    )
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('E1 undeclared local provider refusal names models file and pi provider', async () => {
+  const root = scratchDir('crew-local-provider-e1-')
+  try {
+    const settings = join(root, 'crew/pi/settings.json')
+    const models = join(dirname(settings), 'models.json')
+    mkdirSync(dirname(settings), { recursive: true })
+    writeFileSync(settings, '{}')
+    writeFileSync(models, JSON.stringify({ providers: { other: null } }))
+    const provider = 'registered-provider'
+    const piProvider = 'configured-pi'
+    const register = capabilityRegister({ local_providers: {
+      [provider]: { settings: 'crew/pi/settings.json', pi_provider: piProvider, base_url: 'http://127.0.0.1:11434/v1' },
+    } })
+    const seats = { builder: { agent: 'pi', effort: 'max', provider, id: 'qwen3-coder', model: null } }
+    await assert.rejects(
+      () => resolveAdapters(['builder'], {}, seats, { register, root, probeEndpoint: async () => true }),
+      (err) => err.reason === 'local-provider-undeclared'
+        && err.message.includes(models)
+        && err.message.includes(piProvider)
+        && err.message.includes(`providers.${piProvider}`),
+    )
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('F1 absent local settings keeps distinct local-settings-missing reason', async () => {
+  const root = scratchDir('crew-local-provider-f1-')
+  try {
+    const register = capabilityRegister({ local_providers: {
+      'local-pi': { settings: 'crew/pi/no-settings.json', pi_provider: 'local-pi', base_url: 'http://127.0.0.1:11434/v1' },
+    } })
+    const seats = { builder: { agent: 'pi', effort: 'max', provider: 'local-pi', id: 'qwen3-coder', model: null } }
+    await assert.rejects(
+      () => resolveAdapters(['builder'], {}, seats, { register, root, probeEndpoint: async () => true }),
+      (err) => err.reason === 'local-settings-missing' && err.reason !== 'local-provider-undeclared',
+    )
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
 test('G1 local provider boot refuses an unreachable base_url by name', async () => {
   const root = capabilityFixtureRoot()
   try {
     const settings = join(root, 'crew/pi/settings.json')
     writeFileSync(settings, '{}\n')
+    writeFileSync(join(dirname(settings), 'models.json'), JSON.stringify({ providers: { 'llama-swap': null } }))
     const register = capabilityRegister({ local_providers: {
       'llama-swap': { settings: 'crew/pi/settings.json', pi_provider: 'llama-swap', base_url: 'http://192.0.2.1:9/v1' },
     } })
@@ -7674,7 +7782,7 @@ test('withheld register grants refuse planners with the closed capability-shortf
     await assertWithheld({}, base)
     await assertWithheld({}, agentsOnly)
     await assertWithheld({ 'agent-planner': 'pi' }, agentsOnly)
-    assert.deepEqual([...CAPABILITY_REFUSALS], ['register-invalid', 'capability-shortfall', 'unknown-grant', 'grant-unsupported', 'extension-missing', 'unknown-skill', 'agent-def-invalid', 'local-settings-missing', 'local-endpoint-dead', 'grant-contradicts-deny', 'vendor-extension-missing', 'agent-unresolved', 'agent-provider-unsupported', 'local-provider-reserved'])
+    assert.deepEqual([...CAPABILITY_REFUSALS], ['register-invalid', 'capability-shortfall', 'unknown-grant', 'grant-unsupported', 'extension-missing', 'unknown-skill', 'agent-def-invalid', 'local-settings-missing', 'local-provider-undeclared', 'local-endpoint-dead', 'grant-contradicts-deny', 'vendor-extension-missing', 'agent-unresolved', 'agent-provider-unsupported', 'local-provider-reserved'])
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 

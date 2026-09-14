@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import {
   B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_IMPL_FILE, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, B384_CORRECTED_FIND, B384_CORRECTED_REPLACE, B384_GREEN, B384_MUTATION, B384_RED, B384_REFACTORED_BUILDER, B384_REFACTORED_UNCORRECTED_BUILDER, B44_LEADLESS_CTX, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_PLAN, CHECK_RUNS, CONVERGE_CTX, CONVERGE_GATE, CONVERGE_PLAN, CTX, CTX_DIRECTED, CTX_REPAIR, DIRECTED_FILES, D_ASK, D_AUTO, ENVELOPE_FIELD_KINDS, EXECUTIONS, FAILURE_UPGRADE, GATE_REAP_CMD_EOF, GATE_REAP_SWEEP_MARKER, GATE_SUMMARY_PREFIX, HARDENING_MARKS, HARDENING_OUTCOMES, HARDENING_REFUSALS, MODIFIER_OUTCOMES, MUTATIONS_MAX, MUTATION_BINDING_FAILURES, MUTATION_CORRECTION_REFUSALS, MUTATION_OUTCOMES, PARTIAL_REVIEWED, RED, SENSITIVITY_FLOOR, SHAPE_MAJOR_PHASES, SHAPE_ROUNDED_STAGES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, UNIVERSAL_STAGE_HEADS, VALIDATION_LANE_UNLOADABLE, VARIANTS, VARIANT_NAMES, WRITE_SURFACES, applyMutationAnchor, applyPrescriptionLines, b127GatePaths, b127PidAlive, b318Builders, b318SiteA, b376Build, b376DiskProofIo, b376ProofIo, b376Review, b376StageStack, b384Io, b384RefactoredIo, b44AssertLeadlessGate, b44GatePlan, bindMutationAnchor, buildEnv, collapseStages, dispositionIo, driveTask, existsSync, fakeIo, fenceBase, fenceDiff, fenceSpan, gateReapCommand, gateReapFresh, gateReapOriginal, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, hardeningBounceLines, hardeningBriefLines, hardeningDebt, hardeningOf, join, laneFence, leadEnv, mutationChangesTokens, outOfScopeFiles, planEnv, protectedPlanEnv, readFileSync, resumeGreen, resumeRed, reviewConvergeRun, reviewEnv, reviewFindings, rmSync, s843Ctx, s843Io, s843PlanEnv, s843Rows, scopeMatcher, scopedPath, scratchDir, shapeDefect, spawnSync, stageShape, treeDigest, triageEnv, undeclaredStage, validateHardened, validateMutations, validationPlan, validationProbeRun, validationRows,
 } from './drive-fixtures.mjs'
-import { CENSUS_CARRIER_FILES, CHECK_MATCHES, FROZEN_FACTORY_ENV_FILE, FROZEN_INVENTORY_FILE, HARDENING_APPEAL_SHAPE, HARDENING_CLASSES, LIMITS, POST_COMMIT_FROZEN_REPAIR_MAX, classifyFrozenInventoryDelta, hardeningAppealLines, hardeningAppealRequest, hardeningClassOf, mutationProofScope } from './drive.mjs'
+import { CENSUS_CARRIER_FILES, CHECK_MATCHES, FROZEN_FACTORY_ENV_FILE, FROZEN_INVENTORY_FILE, HARDENING_APPEAL_SHAPE, HARDENING_CLASSES, HARDENING_PRESCRIPTION_REASONS, HARDENING_PRESCRIPTION_RESOLUTION, LIMITS, POST_COMMIT_FROZEN_REPAIR_MAX, classifyFrozenInventoryDelta, hardeningAppealLines, hardeningAppealRequest, hardeningClassOf, hardeningPrescriptionConflict, hardeningTestPath, mutationProofScope } from './drive.mjs'
 import { openLedger, MUTATION_ANCHOR_REFUSALS } from '../scripts/factory/ledger.mjs'
 import { CENSUS_QUALIFYING_FILES, runCensusExhibits, selectCensusExhibits } from './census-exhibits.mjs'
 import { emitAdapter } from './seat-io.mjs'
@@ -3591,7 +3591,7 @@ test('#839 reviewer hardening marks preserve the five-key finding shape unless v
   assert.deepEqual(HARDENING_CLASSES, ['behavioural', 'coverage'])
   assert.deepEqual(HARDENING_REFUSALS, [
     'no-declaration', 'not-an-array', 'unknown-finding', 'duplicate-finding',
-    'test-not-in-scope', 'file-not-in-scope', 'name-missing', 'name-file-wrapper', 'find-missing',
+    'test-path-invalid', 'test-not-in-scope', 'file-not-in-scope', 'name-missing', 'name-file-wrapper', 'find-missing',
     'replace-identical', 'builder-exemption', 'class-unknown',
   ])
   assert.deepEqual(HARDENING_OUTCOMES, [
@@ -5689,4 +5689,29 @@ test('G1 census post-commit repair keeps its bound and refusals', () => {
   assert.equal(ordinaryResult.details.escalation.where, 'suite')
   assert.match(ordinaryResult.details.escalation.why, /spent|frozen inventory repair/)
   assert.equal(ordinary.io.calls.commits.length, 3)
+})
+
+test('I1 hardening declarations require the shared test path', () => {
+  assert.equal(hardeningTestPath('a.test.mjs'), true)
+  assert.equal(hardeningTestPath('checks.mjs'), false)
+  assert.equal(hardeningTestPath(''), false)
+  const entry = { ...B376_HARDENED, test: 'checks.mjs' }
+  const result = validateHardened({ hardened: [entry] }, [{ id: 'F1' }], scopeMatcher(['a.mjs', 'checks.mjs']))
+  assert.equal(result.entries.length, 0)
+  assert.equal(result.refusals.length, 1)
+  assert.equal(result.refusals[0].finding, 'F1')
+  assert.equal(result.refusals[0].reason, 'test-path-invalid')
+})
+
+test('RV1-1 disposition-less pinned prescriptions conflict', () => {
+  const details = { findings: [{
+    id: 'F1', severity: 'must-fix', location: 'a.test.mjs:1', summary: 'the implementation defect',
+  }] }
+  const witness = new Map([['a.test.mjs', { state: 'read', bytes: 'export const witnessed = true\n' }]])
+  const conflict = hardeningPrescriptionConflict(details, witness)
+  assert.equal(conflict?.reason, HARDENING_PRESCRIPTION_REASONS[0])
+  assert.equal(conflict?.resolution, HARDENING_PRESCRIPTION_RESOLUTION)
+  assert.equal(conflict?.finding.id, 'F1')
+  assert.equal(conflict?.finding.disposition, null)
+  assert.equal(conflict?.file, 'a.test.mjs')
 })

@@ -9540,6 +9540,11 @@ function runTask(ctx, io, crash) {
           hardenAppeals = 0
           hardenOwed = debt
           hardenWitness = witnessTree(scopeFiles)
+          const prescriptionConflict = hardeningPrescriptionConflict(review.details, hardenWitness)
+          if (prescriptionConflict) {
+            stageComplete()
+            return escalate('harden', `[pinned-test-prescription] finding ${prescriptionConflict.finding.id} prescribes a change to hardening-witnessed ${prescriptionConflict.file}; refusing the prescription`, [], { hardening_prescription_conflict: prescriptionConflict })
+          }
           for (const { id, why } of debt.exempt) {
             logHardened(roundNo, { finding: id, test: null, name: null, outcome: 'ungateable', why })
           }
@@ -11668,9 +11673,12 @@ export function hardeningAppealRequest(entry) {
   return hardeningOf(entry) === 'ungateable' ? entry.hardening_why.trim() : null
 }
 
+export const HARDENING_PRESCRIPTION_REASONS = Object.freeze(['pinned-test-prescription'])
+export const HARDENING_PRESCRIPTION_RESOLUTION = 'refuse-prescription'
+
 export const HARDENING_REFUSALS = Object.freeze([
   'no-declaration', 'not-an-array', 'unknown-finding', 'duplicate-finding',
-  'test-not-in-scope', 'file-not-in-scope', 'name-missing', 'name-file-wrapper', 'find-missing',
+  'test-path-invalid', 'test-not-in-scope', 'file-not-in-scope', 'name-missing', 'name-file-wrapper', 'find-missing',
   'replace-identical', 'builder-exemption', 'class-unknown',
 ])
 // Proof OUTCOMES. `name-not-new` is the check's own word for an already-existing test
@@ -11746,6 +11754,44 @@ export function hardeningDebt(details) {
     owed.push({ id: finding.id, location: finding.location, summary: finding.summary })
   }
   return { owed, exempt }
+}
+
+function locationPathFromFinding(finding) {
+  const location = typeof finding?.location === 'string' ? finding.location : ''
+  return /:\d+(?:-\d+)?$/.test(location) ? location.replace(/:\d+(?:-\d+)?$/, '') : null
+}
+
+export function hardeningPrescriptionConflict(details, witness) {
+  if (!(witness instanceof Map) || witness.size === 0) return null
+  const owed = new Set(hardeningDebt(details).owed.map(({ id }) => id))
+  const normalized = reviewFindings(details)?.findings ?? []
+  const rawById = acceptedRawById(details)
+  for (const finding of normalized) {
+    if (!owed.has(finding.id)) continue
+    if (finding.disposition === 'no-op') continue
+    const raw = rawById.get(finding.id)
+    let candidates
+    if (finding.disposition === 'auto-fix' && typeof raw?.patch === 'string' && raw.patch.trim() !== '') {
+      const parsed = patchTargets(raw.patch)
+      candidates = parsed.refusal === null ? parsed.targets : [locationPathFromFinding(finding)]
+    } else {
+      candidates = [locationPathFromFinding(finding)]
+    }
+    for (const file of candidates) {
+      if (!hardeningTestPath(file)) continue
+      const cell = witness.get(file)
+      if (cell === undefined) continue
+      if (cell === null) continue
+      if (cell.state !== 'read') continue
+      return {
+        reason: HARDENING_PRESCRIPTION_REASONS[0],
+        resolution: HARDENING_PRESCRIPTION_RESOLUTION,
+        finding,
+        file,
+      }
+    }
+  }
+  return null
 }
 
 export const HARDEN_APPEAL_MAX = 1
@@ -11847,6 +11893,10 @@ export function mutationChangesTokens(find, replace) {
   return normalizeAnchor(find).text !== normalizeAnchor(replace).text                    // ANCHOR B13
 }
 
+export function hardeningTestPath(file) {
+  return typeof file === 'string' && file.trim() !== '' && file.endsWith('.test.mjs')
+}
+
 export function validateHardened(details, owed, inScope) {
   const wanted = Array.isArray(owed) ? owed : []
   const wantedIds = wanted.map(({ id }) => id)
@@ -11908,6 +11958,10 @@ export function validateHardened(details, owed, inScope) {
     // not ask for, and the journal would record a class nobody wrote.
     if (!HARDENING_CLASSES.includes(hardeningClassOf(entry))) {
       refuse(id, 'class-unknown', `the hardened entry for finding ${id} declares class ${JSON.stringify(entry.class)}; the closed set is ${HARDENING_CLASSES.join(' or ')}`)
+      continue
+    }
+    if (!hardeningTestPath(entry.test)) {
+      refuse(id, 'test-path-invalid', `the hardened test ${entry.test ?? '(missing)'} for finding ${id} must be a non-empty path ending in .test.mjs`)
       continue
     }
     if (!scopedPath(entry.test, scope)) {

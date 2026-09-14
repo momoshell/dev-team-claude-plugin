@@ -751,6 +751,29 @@ export function bootAllocation(roles, args = {}, sources = null, transports = nu
   return Object.keys(out).length ? out : null
 }
 
+function effectiveSeatRecords(roles, seats, members, sources, adapters) {
+  if (seats === null) return []
+  return roles.map((role) => {
+    const seat = seats[role]
+    const source = Object.values(sources?.[role] || {}).some((value) => value === 'override') ? 'operator_override' : 'roster'
+    const warnings = (Array.isArray(adapters[role]?.grants?.vendor_withheld) ? adapters[role].grants.vendor_withheld : [])
+      .map((entry) => entry?.reason)
+      .filter((reason) => typeof reason === 'string' && reason.trim() !== '')
+    return {
+      role,
+      agent: seat.agent,
+      provider: seat.provider,
+      model_id: seat.id,
+      model: seat.model,
+      effort: seat.effort,
+      transport: members[role].transport,
+      source,
+      policy_state: warnings.length ? 'warned' : 'passed',
+      warnings,
+    }
+  })
+}
+
 // A seat's declared BUDGET fallback chain: the cells to try, in order, when the
 // booted cell refuses a turn for budget (crew/headless.mjs classifyRun's
 // `budget-refused`). Closed set, the BAND_FLOOR_REFUSALS shape (:645) — every
@@ -2043,7 +2066,7 @@ export function parkOnOutcome(result, { crew, runId, dir, reason, actor = 'crew'
 export async function bootCmd(args, deps = {}) {
   const {
     cmux: cmuxFn = cmux, tree: treeFn = tree, renameTab: renameTabFn = renameTab,
-    openLedger: openLedgerDep = null, existsSync: existsSyncDep = null,
+    openLedger: openLedgerDep = null, openRun: openRunDep = openRun, existsSync: existsSyncDep = null,
     loadavg: loadavgDep = null, cpus: cpusDep = null,
     probeEndpoint: probeEndpointDep = null, register: registerDep = null,
     writeMcpConfigs: writeMcpConfigsDep = writeMcpConfigs,
@@ -2391,6 +2414,11 @@ export async function bootCmd(args, deps = {}) {
   // after crew.json is on disk: a boot killed at this line leaves a workspace a
   // `crew teardown --task` can still find and close.
   awaitSeatsReadyDep(crew, 'fresh', join(paths.dir, 'journal.jsonl'))
+  const effectiveSeats = effectiveSeatRecords(roles, seats, members, sources, adapters)
+  try {
+    const emitter = openRunDep({ stateDir: paths.dir, repoSlug: paths.repo, taskSlug, dbPath: ledgerDbPath() })
+    emitter.recordSeats(effectiveSeats)
+  } catch { /* instrumentation is never load-bearing */ }
   process.stdout.write(`${JSON.stringify({ workspace_id: workspace ? workspace.id : null, members, task_dir: paths.taskDir, crew_json: join(paths.dir, 'crew.json'), charter_bytes: charter.bytes })}\n`)
 }
 

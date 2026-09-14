@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { PANEL_REFRESH_MS, PANEL_STALE_AFTER_MS, acceptRows, brakePanel, cellHealthPanel, fleetCost, fleetEscalationRate, fleetMedianDuration, fleetPassRate, fleetPhasesPerRun, fleetTokens, findingRows, gateChips, intakeCandidateRows, intakePanel, reviewRows, rosterEditForm, rosterPanel, panelAgeLabel, panelReadLoop, readFreshness, rosterProposal, runSetPanel, teardownPanel } from '../visualizer/web/src/lib/panels.js'
 import { parseHash, formatHash } from '../visualizer/web/src/lib/route.js'
-import { ATTENTION_KEYS, absenceMark, attentionBreakdown, configurationDimensionCell, configurationFilterView, costCell, createSemaphore, crewArchive, deriveDisplayStatus, deriveStatus, escalationProbeTargets, fleetActivity, fleetView, gateCell, heartbeatCell, needsAttention, openRecordNote, reviewCell, runActivity, runtimeActivitySummary, slotWaitCell, tokenCell } from '../visualizer/web/src/lib/fleet.js'
+import { ATTENTION_KEYS, absenceMark, attentionBreakdown, configurationDimensionCell, configurationFilterView, costCell, createSemaphore, crewArchive, deriveDisplayStatus, deriveStatus, escalationProbeTargets, fleetActivity, fleetView, gateCell, heartbeatCell, needsAttention, openRecordNote, operationsOverview, reviewCell, runActivity, runtimeActivitySummary, slotWaitCell, tokenCell } from '../visualizer/web/src/lib/fleet.js'
 import { ROLE_ORDER, acceptEvidence, bounceArrows, gateMarkers, gateProofStory, laneRows, phaseFilterId, phasePanel, renderMarkdown } from '../visualizer/web/src/lib/trace.js'
 import { eventStory, eventStreamSummary } from '../visualizer/web/src/lib/event-story.js'
 import { assignmentPath, envelopeFacts, envelopeGroups, envelopeOverview, envelopeSections, trajectoryRowStory, trajectorySummary } from '../visualizer/web/src/lib/diagnostic-story.js'
@@ -132,6 +132,163 @@ test('G1', () => {
   for (const dimension of ['task_profile', 'execution_shape', 'assurance']) assert.match(source, new RegExp(`configurationDimensionCell\\(run, '${dimension}'\\)`))
   assert.match(source, /configurationView\.excluded\.line/)
   assert.doesNotMatch(source, /runConfiguration|run\.tier|run\.variant|configuration\.legacy_(?:tier|variant)/)
+})
+
+const OPERATIONS_MIXED_CORPUS = [
+  {
+    adw_id: 'ops-success', task_profile: 'implementation', execution_shape: 'full', assurance: 'standard',
+    settlement: { state: 'settled', outcome: 'success', reason: null }, runtime: { driver_state: 'unknown' },
+    configuration: {
+      task_profile: { requested: 'implementation', effective: 'implementation', source: 'explicit' },
+      execution: { requested: 'full', effective: 'full', source: 'explicit' },
+      assurance: { requested: 'standard', effective: 'standard', source: 'explicit' },
+    },
+    seats: [{ role: 'planner', source: 'roster', policy_state: 'accepted', warnings: [] }],
+  },
+  {
+    adw_id: 'ops-escalated', task_profile: 'implementation', execution_shape: 'directed', assurance: 'rigorous',
+    settlement: { state: 'settled', outcome: 'escalated', reason: 'scope' }, runtime: { driver_state: 'unknown' },
+    configuration: {
+      task_profile: { requested: 'implementation', effective: 'implementation', source: 'explicit' },
+      execution: { requested: 'directed', effective: 'directed', source: 'explicit' },
+      assurance: { requested: 'standard', effective: 'rigorous', source: 'protected_floor' },
+    },
+    seats: [{ role: 'builder', source: 'profile_recommendation', policy_state: 'advisory', warnings: ['model-fit advisory'] }],
+  },
+  {
+    adw_id: 'ops-aborted', task_profile: 'audit', execution_shape: 'scout', assurance: 'quick',
+    settlement: { state: 'settled', outcome: 'aborted', reason: 'operator_stop' }, runtime: { driver_state: 'unknown' },
+    configuration: {
+      task_profile: { requested: 'audit', effective: 'audit', source: 'explicit' },
+      execution: { requested: 'scout', effective: 'scout', source: 'explicit' },
+      assurance: { requested: 'quick', effective: 'quick', source: 'explicit' },
+    },
+    seats: [{ role: 'reviewer', source: 'operator_override', policy_state: 'override', warnings: null }],
+  },
+  {
+    adw_id: 'ops-failed', task_profile: 'audit', execution_shape: 'scout', assurance: 'quick',
+    settlement: { state: 'settled', outcome: 'failed', reason: 'runtime' }, runtime: { driver_state: 'unknown' },
+    configuration: {
+      task_profile: { requested: 'audit', effective: 'audit', source: 'explicit' },
+      execution: { requested: 'scout', effective: 'scout', source: 'explicit' },
+      assurance: { requested: 'quick', effective: 'quick', source: 'explicit' },
+    },
+    seats: [{ role: 'lead', source: 'reseat', policy_state: 'reassigned', warnings: [] }, { role: 'legacy', source: 'legacy', policy_state: 'unknown', warnings: ['ignored'] }],
+  },
+  {
+    adw_id: 'ops-unknown-outcome', task_profile: 'implementation', execution_shape: 'full', assurance: 'standard',
+    settlement: { state: 'settled', outcome: null, reason: null }, runtime: { driver_state: 'unknown' },
+    configuration: null, seats: [],
+  },
+  {
+    adw_id: 'ops-inflight', task_profile: 'implementation', execution_shape: 'full', assurance: 'standard',
+    settlement: { state: 'unsettled', outcome: null, reason: null }, runtime: { driver_state: 'alive' },
+    configuration: null, seats: null,
+  },
+  {
+    adw_id: 'ops-historical', task_profile: null, execution_shape: null, assurance: null,
+    settlement: { state: 'settled', outcome: 'success', reason: null }, runtime: { driver_state: 'unknown' },
+    configuration: null, seats: null,
+  },
+  {
+    adw_id: 'ops-alive', task_profile: null, execution_shape: null, assurance: null,
+    settlement: { state: 'unsettled', outcome: null, reason: null }, runtime: { driver_state: 'alive' },
+    configuration: null, seats: null,
+  },
+  {
+    adw_id: 'ops-gone', task_profile: null, execution_shape: null, assurance: null,
+    settlement: { state: 'unsettled', outcome: null, reason: null }, runtime: { driver_state: 'gone' },
+    configuration: null, seats: null,
+  },
+  {
+    adw_id: 'ops-driver-unknown', task_profile: null, execution_shape: null, assurance: null,
+    settlement: { state: 'unsettled', outcome: null, reason: null }, runtime: { driver_state: 'unknown' },
+    configuration: null, seats: null,
+  },
+]
+
+const OPERATIONS_DIMENSION_LABELS = ['Profile', 'Execution', 'Assurance']
+
+const OPERATIONS_EXPECTED_DIMENSIONS = {
+  task_profile: {
+    implementation: { denominator: 4, outcomes: { success: 1, escalated: 1, aborted: 0, failed: 0, unsettled: 1, unknown: 1 } },
+    audit: { denominator: 2, outcomes: { success: 0, escalated: 0, aborted: 1, failed: 1, unsettled: 0, unknown: 0 } },
+  },
+  execution_shape: {
+    full: { denominator: 3, outcomes: { success: 1, escalated: 0, aborted: 0, failed: 0, unsettled: 1, unknown: 1 } },
+    directed: { denominator: 1, outcomes: { success: 0, escalated: 1, aborted: 0, failed: 0, unsettled: 0, unknown: 0 } },
+    scout: { denominator: 2, outcomes: { success: 0, escalated: 0, aborted: 1, failed: 1, unsettled: 0, unknown: 0 } },
+  },
+  assurance: {
+    quick: { denominator: 2, outcomes: { success: 0, escalated: 0, aborted: 1, failed: 1, unsettled: 0, unknown: 0 } },
+    rigorous: { denominator: 1, outcomes: { success: 0, escalated: 1, aborted: 0, failed: 0, unsettled: 0, unknown: 0 } },
+    standard: { denominator: 3, outcomes: { success: 1, escalated: 0, aborted: 0, failed: 0, unsettled: 1, unknown: 1 } },
+  },
+}
+
+test('operations aggregation preserves measured dimensions and separate typed outcomes', () => {
+  const result = operationsOverview(OPERATIONS_MIXED_CORPUS)
+  assert.deepEqual(result.dimensions.map((dimension) => dimension.key), ['task_profile', 'execution_shape', 'assurance'])
+  for (const dimension of result.dimensions) {
+    const expected = OPERATIONS_EXPECTED_DIMENSIONS[dimension.key]
+    assert.deepEqual(Object.fromEntries(dimension.rows.map((row) => [row.value, { denominator: row.denominator, outcomes: row.outcomes }])), expected)
+  }
+  const implementation = result.dimensions.find((dimension) => dimension.key === 'task_profile').rows.find((row) => row.value === 'implementation')
+  assert.deepEqual({ unsettled: implementation.outcomes.unsettled, unknown: implementation.outcomes.unknown }, { unsettled: 1, unknown: 1 })
+})
+
+test('operations aggregation keeps escalations independent from mechanical failures', () => {
+  const result = operationsOverview(OPERATIONS_MIXED_CORPUS)
+  assert.deepEqual(result.escalations, [{ cause: 'scope', count: 1, denominator: OPERATIONS_MIXED_CORPUS.length }])
+  assert.deepEqual(result.failures, { count: 1, denominator: OPERATIONS_MIXED_CORPUS.length })
+  assert.equal(result.escalations.some((row) => row.cause === 'runtime'), false)
+})
+
+test('operations aggregation retains provenance, seat sources, and warning absence', () => {
+  const result = operationsOverview(OPERATIONS_MIXED_CORPUS)
+  assert.deepEqual(result.configurationChanges, [{ adw_id: 'ops-escalated', dimension: 'assurance', label: 'Assurance', requested: 'standard', effective: 'rigorous', source: 'protected_floor' }])
+  // RV1-3: the provenance card must name an axis the way its throughput sibling does.
+  // `execution` is the ledger field and `Execution` is the heading; a record that
+  // carried only the raw field made one axis read two ways across adjacent cards.
+  for (const change of result.configurationChanges) {
+    assert.equal(typeof change.label, 'string')
+    assert.equal(OPERATIONS_DIMENSION_LABELS.includes(change.label), true, `configuration change label ${JSON.stringify(change.label)} is not a rendered dimension label`)
+  }
+  assert.deepEqual(result.seatEvidence.map((seat) => seat.source).sort(), ['operator_override', 'profile_recommendation', 'reseat', 'roster'])
+  assert.deepEqual(result.seatEvidence.find((seat) => seat.role === 'builder').warnings, ['model-fit advisory'])
+  assert.equal(result.seatEvidence.find((seat) => seat.role === 'reviewer').warnings, null)
+  assert.equal(result.seatEvidence.some((seat) => seat.source === 'legacy'), false)
+})
+
+test('operations aggregation reports alive, gone, and unknown unsettled buckets', () => {
+  assert.deepEqual(operationsOverview(OPERATIONS_MIXED_CORPUS).unsettled, { denominator: 4, alive: 2, gone: 1, unknown: 1 })
+})
+
+test('operations aggregation omits historical and all-unmeasured configuration rows', () => {
+  const result = operationsOverview(OPERATIONS_MIXED_CORPUS)
+  assert.equal(result.dimensions.every((dimension) => dimension.rows.every((row) => row.value !== null)), true)
+  assert.deepEqual(result.dimensions.map((dimension) => dimension.rows.reduce((sum, row) => sum + row.denominator, 0)), [6, 6, 6])
+  assert.deepEqual(operationsOverview(OPERATIONS_MIXED_CORPUS.filter((run) => run.task_profile === null && run.execution_shape === null && run.assurance === null)).dimensions, [])
+})
+
+test('operations aggregate carries a denominator on every readout', () => {
+  const result = operationsOverview(OPERATIONS_MIXED_CORPUS)
+  for (const dimension of result.dimensions) {
+    for (const row of dimension.rows) assert.equal(Number.isInteger(row.denominator), true)
+  }
+  for (const row of result.escalations) assert.equal(row.denominator, OPERATIONS_MIXED_CORPUS.length)
+  assert.equal(result.failures.denominator, OPERATIONS_MIXED_CORPUS.length)
+  assert.equal(result.unsettled.denominator, 4)
+})
+
+test('Operations view delegates the aggregate to the fleet plain module', () => {
+  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/OperationsOverview.svelte'), 'utf8')
+  assert.match(source, /import \{ operationsOverview \} from '\.\/fleet\.js'/)
+  assert.match(source, /let operations = \$derived\(operationsOverview\(runs\)\)/)
+  assert.doesNotMatch(source, /function operationsOverview\(/)
+  for (const token of ['dimensions', 'outcomes.success', 'outcomes.escalated', 'outcomes.aborted', 'outcomes.failed', 'outcomes.unsettled', 'outcomes.unknown', 'configurationChanges', 'seatEvidence', 'alive', 'gone', 'unknown']) {
+    assert.match(source, new RegExp(token.replace('.', '\\.' )))
+  }
 })
 
 test('crew summary separates distinct seats, assignment turns, and reused dispatch labels', () => {

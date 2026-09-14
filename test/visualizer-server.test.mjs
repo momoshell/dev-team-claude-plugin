@@ -12,6 +12,7 @@ import { cellHealth } from '../crew/breaker.mjs'
 import { gitGrepHits } from '../scripts/factory/absence.mjs'
 import { parseCliArgs, ServerUsageError, startServer as startVisualizerServer, writeRosterAtomically } from '../visualizer/server/server.mjs'
 import { createLedgerFeed } from '../visualizer/server/ledger-feed.mjs'
+import { readLadder, stageMoves } from '../visualizer/server/roster-ladder.mjs'
 import { shapeIntake } from '../visualizer/server/shape.mjs'
 import { rawRequest, scratchDir, sqliteAvailable, treeDigest } from './helpers.mjs'
 
@@ -994,6 +995,15 @@ test('cell health, roster ladder, and breaker agree on host-attributed failures 
   ledger.recordCellFailure({ ...cell, kind: 'seat-died', adw_id: adwId, attribution: 'host', created_at: new Date(Date.now() - 1700e3).toISOString() })
   ledger.recordCellFailure({ ...cell, kind: 'seat-died', adw_id: adwId, attribution: 'cell', created_at: new Date(Date.now() - 1600e3).toISOString() })
   ledger.recordCellFailure({ ...cell, kind: 'timeout', adw_id: adwId, attribution: 'cell', created_at: new Date(Date.now() - 1500e3).toISOString() })
+  for (let index = 0; index < 12; index += 1) {
+    const attemptRun = `${adwId}-attempt-${index}`
+    const createdAt = new Date(Date.now() - 1800e3 + index * 1000).toISOString()
+    ledger.startSession({ adw_id: attemptRun, repo_slug: 'repo', task_slug: attemptRun, started_at: createdAt })
+    ledger.recordRunSeat({
+      adw_id: attemptRun, role: 'planner', agent: seat.agent, provider: seat.provider, model_id: seat.id,
+      model: seat.id, effort: seat.effort, transport: 'headless-json', source: 'roster', policy_state: 'passed', warnings: [], created_at: createdAt,
+    })
+  }
   ledger.close()
   const feed = createLedgerFeed({ ledgerDb, triageDb })
   let started
@@ -1001,7 +1011,7 @@ test('cell health, roster ladder, and breaker agree on host-attributed failures 
     started = await startInProcess(feed, { ledgerDb, triageDb, crewRoot: dir })
     const health = (await json(started.base, '/api/cell-health')).json
     const ladder = (await json(started.base, '/api/roster/ladder')).json
-    const breaker = cellHealth({ policy: { threshold: 3, window_ms: 24 * 3600e3 }, seats: roster.tiers.judge, dbPath: ledgerDb })
+    const breaker = cellHealth({ policy: { threshold_rate: 0.2, window_ms: 24 * 3600e3 }, seats: roster.tiers.judge, dbPath: ledgerDb })
     const expected = { failures: 4, run_less: 1, host_attributed: 1, counted: 2 }
     const healthCell = health.cells.find((row) => row.provider === seat.provider && row.model_id === seat.id && row.agent === seat.agent && row.effort === seat.effort)
     const ladderChip = ladder.chips.find((row) => row.key === `${seat.provider}/${seat.id}`)
@@ -1014,6 +1024,11 @@ test('cell health, roster ladder, and breaker agree on host-attributed failures 
       assert.equal(ladderChip.measured[key], expected[key], `roster-ladder ${key}`)
       assert.equal(breakerCell[key], expected[key], `breaker ${key}`)
     }
+    assert.equal(breakerCell.numerator, 2)
+    assert.equal(breakerCell.denominator, 12)
+    assert.equal(breakerCell.rate, 1 / 6)
+    assert.equal(breakerCell.measured, true)
+    assert.equal(breakerCell.verdict, 'closed')
   } finally {
     await stopInProcess(started?.server)
     feed.close()
@@ -2129,6 +2144,28 @@ test('intake console keeps the stop-switch path in lockstep and has no boot or g
     const source = readFileSync(join(process.cwd(), file), 'utf8')
     for (const pattern of banned) assert.doesNotMatch(source, pattern, file)
   }
+})
+
+test('roster staging preserves an explicit unmeasured breaker verdict', async () => {
+  const rosterPath = join(process.cwd(), 'crew', 'roster.json')
+  const ladder = readLadder({ ladderPath: join(process.cwd(), 'crew', 'model-ladder.json') })
+  const rosterText = readFileSync(rosterPath, 'utf8')
+  const roster = JSON.parse(rosterText)
+  const current = roster.tiers.build.reviewer
+  const move = { tier: 'build', role: 'reviewer', cell: { ...current, effort: current.effort === 'high' ? 'max' : 'high' } }
+  const breaker = { policy: { threshold_rate: 0.2, window_ms: 24 * 3600e3 }, dbPath: '/tmp/unused-ledger.db' }
+  const cell = { provider: move.cell.provider, model_id: move.cell.id, agent: move.cell.agent, effort: move.cell.effort, verdict: 'unmeasured', numerator: 1, denominator: 1, rate: null, measured: false, reason: 'fewer than 12 attempts' }
+  const unmeasured = await stageMoves({ rosterText, rosterPath, moves: [move], ladder, breaker, readBreaker: () => ({ configured: true, verdict: 'unmeasured', cells: [cell] }) })
+  assert.equal(unmeasured.ok, true)
+  assert.equal(unmeasured.checks.find((entry) => entry.check === 'breaker_state').ok, true)
+  assert.match(unmeasured.checks.find((entry) => entry.check === 'breaker_state').message, /unmeasured/)
+
+  const open = await stageMoves({ rosterText, rosterPath, moves: [move], ladder, breaker, readBreaker: () => ({ configured: true, verdict: 'open', cells: [{ ...cell, verdict: 'open', rate: 1, measured: true }] }) })
+  assert.equal(open.ok, false)
+  assert.equal(open.checks.find((entry) => entry.check === 'breaker_state').ok, false)
+  const unreadable = await stageMoves({ rosterText, rosterPath, moves: [move], ladder, breaker, readBreaker: () => ({ configured: true, verdict: 'unmeasurable', cells: [], why: 'ledger read failed' }) })
+  assert.equal(unreadable.ok, false)
+  assert.equal(unreadable.checks.find((entry) => entry.check === 'breaker_state').ok, false)
 })
 
 test('roster ladder routes stage and compose read-only bundles', { skip: SKIP }, async () => {

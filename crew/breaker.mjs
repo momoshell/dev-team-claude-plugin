@@ -1,6 +1,6 @@
 import { existsSync as realExistsSync } from 'node:fs'
 
-import { NODE_FLOOR, openLedger as realOpenLedger } from '../scripts/factory/ledger.mjs'
+import { NODE_FLOOR, openLedger as realOpenLedger, turnRateCell } from '../scripts/factory/ledger.mjs'
 
 export const BREAKER_ENV = Object.freeze({
   threshold: 'CREW_BREAKER_THRESHOLD',
@@ -17,17 +17,25 @@ function parseInteger(value, name, minimum, maximum = Infinity) {
   return parsed
 }
 
+function parseRate(value, name) {
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 1) {
+    throw new Error(`${name} must be a finite rate in (0, 1] (got ${JSON.stringify(value)})`)
+  }
+  return parsed
+}
+
 // A configured breaker is deliberately explicit: an empty threshold means no
 // policy, while every other malformed value is a boot-time configuration error.
 export function breakerPolicy(env = process.env) {
   const thresholdRaw = env?.[BREAKER_ENV.threshold]
   if (thresholdRaw === undefined || thresholdRaw === '') return null
-  const threshold = parseInteger(thresholdRaw, BREAKER_ENV.threshold, 1)
+  const threshold_rate = parseRate(thresholdRaw, BREAKER_ENV.threshold)
   const windowRaw = env?.[BREAKER_ENV.window_ms]
   const window_ms = windowRaw === undefined
     ? DEFAULT_BREAKER_WINDOW_MS
     : parseInteger(windowRaw, BREAKER_ENV.window_ms, 1, MAX_BREAKER_WINDOW_MS)
-  return { threshold, window_ms }
+  return { threshold_rate, window_ms }
 }
 
 function versionAtLeast(value, floor) {
@@ -48,7 +56,7 @@ function versionAtLeast(value, floor) {
 function baseRecord(policy, since, verdict, why, cells, dbPath = undefined) {
   const record = {
     configured: true,
-    threshold: policy.threshold,
+    threshold_rate: policy.threshold_rate,
     window_ms: policy.window_ms,
     since,
     verdict,
@@ -84,8 +92,14 @@ function compareCell(a, b) {
   return 0
 }
 
-function finishCell(cell, threshold) {
-  const counted = Math.max(0, cell.countedRaw)
+function finishCell(cell, thresholdRate) {
+  const numerator = Math.max(0, cell.countedRaw)
+  const denominator = Math.max(0, cell.attemptsRaw)
+  // The numerator windows on failure time and the denominator on seat time; several
+  // failure rows per run can push the rate above 1. Do not clamp and do not invent
+  // a new verdict: a rate > 1 still opens, which is the honest direction.
+  const evidence = turnRateCell(numerator, denominator)
+  const verdict = evidence.measured ? (evidence.rate >= thresholdRate ? 'open' : 'closed') : 'unmeasured'
   const by_kind = Object.fromEntries(Object.entries(cell.byKind)
     .sort(([left], [right]) => left.localeCompare(right)))
   return {
@@ -97,15 +111,16 @@ function finishCell(cell, threshold) {
     failures: cell.failures,
     run_less: cell.run_less,
     host_attributed: cell.host_attributed,
-    counted,
+    synthetic: cell.synthetic,
+    counted: numerator,
     by_kind,
-    verdict: counted >= threshold ? 'open' : counted > 0 ? 'degraded' : 'closed',
+    numerator, denominator, rate: evidence.rate, measured: evidence.measured, reason: evidence.reason, verdict,
   }
 }
 
 // Read the ledger only after the policy and applicability checks. A fresh
-// install with no database is a measured zero; an existing but unreadable
-// mirror is not an empty result and must fail closed.
+// install with no database has explicit zero-denominator evidence; an existing
+// but unreadable mirror is not an empty result and must fail closed.
 export function cellHealth({
   policy,
   seats,
@@ -127,21 +142,49 @@ export function cellHealth({
       `node ${nodeVersion} is below NODE_FLOOR ${NODE_FLOOR}`)
   }
 
+  const seated = new Map()
+  for (const [role, seat] of Object.entries(seats)) {
+    if (seat?.provider == null || seat?.id == null) continue
+    const key = cellKey(seat.provider, seat.id, seat.agent, seat.effort)
+    let cell = seated.get(key)
+    if (!cell) {
+      cell = {
+        roles: [], provider: seat.provider, model_id: seat.id,
+        agent: seat.agent, effort: seat.effort,
+        failures: 0, run_less: 0, host_attributed: 0, synthetic: 0, countedRaw: 0, attemptsRaw: 0, byKind: {},
+      }
+      seated.set(key, cell)
+    }
+    cell.roles.push(role)
+  }
+
+  const seatedCells = () => [...seated.values()]
+    .map((cell) => finishCell(cell, policy.threshold_rate))
+    .sort(compareCell)
+  const overallVerdict = (cells) => cells.some((cell) => cell.verdict === 'open')
+    ? 'open'
+    : cells.some((cell) => cell.verdict === 'unmeasured') ? 'unmeasured' : 'closed'
+
   let present
   try {
     present = existsSync(dbPath)
   } catch (err) {
     return unmeasurable(policy, since, dbPath, `ledger database existence check failed: ${err?.message || String(err)}`)
   }
-  if (!present) return baseRecord(policy, since, 'closed', null, [])
+  if (!present) {
+    const cells = seatedCells()
+    return baseRecord(policy, since, overallVerdict(cells), null, cells)
+  }
 
   let handle = null
   let rows
+  let attemptRows
   try {
     handle = openLedger({ dbPath, stderr })
     rows = handle.cellFailures({ since })
+    attemptRows = handle.cellAttempts({ since })
     // openLedger decides degradation lazily, so both checks intentionally come
-    // after the real query rather than before it.
+    // after the real queries rather than before them.
     const degraded = handle.degraded
     const mirrorErrors = Number(handle.stats()?.mirror_errors || 0)
     if (degraded || mirrorErrors > 0) {
@@ -156,22 +199,6 @@ export function cellHealth({
     try { handle?.close?.() } catch { /* an already unreadable mirror stays unreadable */ }
   }
 
-  const seated = new Map()
-  for (const [role, seat] of Object.entries(seats)) {
-    if (seat?.provider == null || seat?.id == null) continue
-    const key = cellKey(seat.provider, seat.id, seat.agent, seat.effort)
-    let cell = seated.get(key)
-    if (!cell) {
-      cell = {
-        roles: [], provider: seat.provider, model_id: seat.id,
-        agent: seat.agent, effort: seat.effort,
-        failures: 0, run_less: 0, host_attributed: 0, countedRaw: 0, byKind: {},
-      }
-      seated.set(key, cell)
-    }
-    cell.roles.push(role)
-  }
-
   for (const row of Array.isArray(rows) ? rows : []) {
     if (!row) continue
     const cell = seated.get(cellKey(row.provider, row.model_id, row.agent, row.effort))
@@ -179,24 +206,28 @@ export function cellHealth({
     const failures = numberValue(row.failures)
     const runLess = numberValue(row.run_less)
     const hostAttributed = numberValue(row.host_attributed)
-    // Run-less rows and host-attributed rows are disjoint by the aggregate's
-    // own AND adw_id IS NOT NULL, so subtracting both never double-counts a row.
-    const counted = failures - runLess - hostAttributed
+    const synthetic = numberValue(row.synthetic)
+    // The aggregate makes run-less, host-attributed, and synthetic-session rows
+    // disjoint, so subtracting them cannot double-count a row.
+    const counted = failures - runLess - hostAttributed - synthetic
     cell.failures += failures
     cell.run_less += runLess
     cell.host_attributed += hostAttributed
+    cell.synthetic += synthetic
     cell.countedRaw += counted
     const kind = String(row.kind)
     cell.byKind[kind] = (cell.byKind[kind] || 0) + counted
   }
 
-  const cells = [...seated.values()]
-    .map((cell) => finishCell(cell, policy.threshold))
-    .sort(compareCell)
-  const verdict = cells.some((cell) => cell.verdict === 'open')
-    ? 'open'
-    : cells.some((cell) => cell.verdict === 'degraded') ? 'degraded' : 'closed'
-  return baseRecord(policy, since, verdict, null, cells)
+  for (const row of Array.isArray(attemptRows) ? attemptRows : []) {
+    if (!row) continue
+    const cell = seated.get(cellKey(row.provider, row.model_id, row.agent, row.effort))
+    if (!cell) continue
+    cell.attemptsRaw += numberValue(row.attempts)
+  }
+
+  const cells = seatedCells()
+  return baseRecord(policy, since, overallVerdict(cells), null, cells)
 }
 
 function breakerError(code, message) {
@@ -216,12 +247,12 @@ function windowLabel(windowMs) {
 // Null and non-open verdicts are deliberately no-ops. The caller invokes this
 // after every boot health read, including unconfigured and not-applicable ones.
 export function assertCellsClosed(record) {
-  if (!record || record.verdict === 'closed' || record.verdict === 'degraded' || record.verdict === 'not-applicable') return
+  if (!record || record.verdict === 'closed' || record.verdict === 'unmeasured' || record.verdict === 'not-applicable') return
 
   if (record.verdict === 'unmeasurable') {
     throw breakerError(
       'breaker-unmeasurable',
-      `cell breaker: a threshold of ${record.threshold} failures per cell in the last ${windowLabel(record.window_ms)} (window_ms=${record.window_ms}) is set but the ledger at ${record.dbPath ?? '<unknown path>'} could not be read (${record.why || 'unknown reason'}) — refusing to boot a crew whose cell health cannot be measured (repair the ledger, or unset CREW_BREAKER_THRESHOLD).`,
+      `cell breaker: threshold_rate=${record.threshold_rate} is set for the last ${windowLabel(record.window_ms)} (window_ms=${record.window_ms}), but rate, numerator, and denominator are unmeasurable because the ledger at ${record.dbPath ?? '<unknown path>'} could not be read (${record.why || 'unknown reason'}) — refusing to boot a crew whose cell health cannot be measured (repair the ledger, or unset CREW_BREAKER_THRESHOLD).`,
     )
   }
 
@@ -229,8 +260,9 @@ export function assertCellsClosed(record) {
   const openCells = (record.cells || []).filter((cell) => cell.verdict === 'open')
   const details = openCells.map((cell) =>
     `${cell.provider}/${cell.model_id} agent=${cell.agent} effort=${cell.effort} roles=${cell.roles.join(',')} `
-    + `counted=${cell.counted} threshold=${record.threshold} window_ms=${record.window_ms} (${windowLabel(record.window_ms)}) `
-    + `since=${record.since} by_kind=${JSON.stringify(cell.by_kind)} run_less=${cell.run_less} (run-less rows are excluded from the count) host_attributed=${cell.host_attributed} (host-attributed rows are excluded from the count)`
+    + `rate=${cell.rate} threshold_rate=${record.threshold_rate} numerator=${cell.numerator} denominator=${cell.denominator} window_ms=${record.window_ms} (${windowLabel(record.window_ms)}) `
+    + `since=${record.since} by_kind=${JSON.stringify(cell.by_kind)} run_less=${cell.run_less} (run-less rows are excluded from the count)`
+    + ` host_attributed=${cell.host_attributed} (host-attributed rows are excluded from the count) synthetic=${cell.synthetic} (synthetic-session rows are excluded from the count)`
   ).join('; ')
   throw breakerError(
     'breaker-open',

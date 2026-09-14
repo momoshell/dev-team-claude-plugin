@@ -502,7 +502,7 @@ async function breakerStateCheck({ moves, roster, breaker, readBreaker }) {
       const moved = moves.find((move) => move.tier === tier)
       const label = cellLabel(offending || moved?.cell)
       failures.push(`breaker verdict "${verdict}" for ${label} in tiers.${tier}; see crew/breaker.mjs assertCellsClosed${result?.why ? ` (${result.why})` : ''}`)
-    } else if (!['closed', 'degraded', 'not-applicable'].includes(verdict)) {
+    } else if (!['closed', 'unmeasured', 'not-applicable'].includes(verdict)) {
       failures.push(`breaker verdict "${verdict ?? 'unknown'}" for tiers.${tier} cannot be accepted; see crew/breaker.mjs assertCellsClosed`)
     }
   }

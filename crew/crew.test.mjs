@@ -1311,13 +1311,21 @@ function breakerRow(over = {}) {
   }
 }
 
-function fakeBreakerLedger(rows, { degraded = false } = {}) {
+function breakerAttempt(over = {}) {
+  return {
+    provider: 'openai', model_id: 'gpt-5.6-luna', agent: 'pi', effort: 'max', role: 'builder',
+    attempts: 12, first_at: '2026-08-16T00:00:00.000Z', last_at: '2026-08-16T01:00:00.000Z', ...over,
+  }
+}
+
+function fakeBreakerLedger(rows, { attemptRows = [breakerAttempt()], degraded = false } = {}) {
   const calls = []
   const open = (options) => {
     calls.push(options)
     return {
       get degraded() { return degraded },
       cellFailures: () => rows,
+      cellAttempts: () => attemptRows,
       stats: () => ({ mirror_errors: 0 }),
       close() {},
     }
@@ -4310,12 +4318,13 @@ test('a configured boot can pin a nonexistent ledger and skip an injected opener
   const dbPath = join(home, 'missing-ledger.db')
   const openLedger = fakeBreakerLedger([breakerRow({ failures: 1 })])
   try {
-    await withBreakerEnv({ CREW_BREAKER_THRESHOLD: '1', DEVTEAM_LEDGER_DB: dbPath }, () => withHome(home, () => bootCmd(
+    await withBreakerEnv({ CREW_BREAKER_THRESHOLD: '0.2', DEVTEAM_LEDGER_DB: dbPath }, () => withHome(home, () => bootCmd(
       { task: 'breaker-missing', checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath },
       { cmux: callCounter(), tree: callCounter(), renameTab: callCounter(), openLedger, existsSync: () => false },
     )))
     const breaker = bootRecord(testCrewDir(home, checkout, 'breaker-missing')).breaker
-    assert.equal(breaker.verdict, 'closed')
+    assert.equal(breaker.verdict, 'unmeasured')
+    assert.equal(breaker.cells[0].denominator, 0)
     assert.equal(openLedger.calls.length, 0)
   } finally { rmSync(home, { recursive: true, force: true }); rmSync(checkoutRoot, { recursive: true, force: true }) }
 })
@@ -4329,7 +4338,7 @@ test('an injected opener without existsSync reads rows and refuses before state 
   const cmux = callCounter(); const tree = callCounter(); const renameTab = callCounter()
   try {
     const dir = testCrewDir(home, checkout, 'breaker-open')
-    await withBreakerEnv({ CREW_BREAKER_THRESHOLD: '2', DEVTEAM_LEDGER_DB: dbPath }, () => withHome(home, () => assert.rejects(
+    await withBreakerEnv({ CREW_BREAKER_THRESHOLD: '0.2', DEVTEAM_LEDGER_DB: dbPath }, () => withHome(home, () => assert.rejects(
       () => bootCmd(
         { task: 'breaker-open', checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath },
         { cmux, tree, renameTab, openLedger },
@@ -4347,23 +4356,28 @@ test('an injected opener without existsSync reads rows and refuses before state 
   } finally { rmSync(home, { recursive: true, force: true }); rmSync(checkoutRoot, { recursive: true, force: true }) }
 })
 
-test('an unreadable breaker ledger refuses distinctly from an open cell', async () => {
+test('an unreadable ledger still refuses boot', async () => {
   const home = mkdtempSync(join(tmpdir(), 'crew-breaker-degraded-home-'))
   const { root: checkoutRoot, checkout } = testCheckout('crew-breaker-degraded-checkout-')
   const dbPath = join(home, 'ledger.db')
   writeFileSync(dbPath, 'fake ledger')
   const openLedger = fakeBreakerLedger([], { degraded: true })
+  const cmux = callCounter(); const tree = callCounter(); const renameTab = callCounter()
   try {
     let error
-    await withBreakerEnv({ CREW_BREAKER_THRESHOLD: '2', DEVTEAM_LEDGER_DB: dbPath }, () => withHome(home, () => assert.rejects(
+    await withBreakerEnv({ CREW_BREAKER_THRESHOLD: '0.2', DEVTEAM_LEDGER_DB: dbPath }, () => withHome(home, () => assert.rejects(
       () => bootCmd(
         { task: 'breaker-degraded', checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath },
-        { cmux: callCounter(), tree: callCounter(), renameTab: callCounter(), openLedger },
+        { cmux, tree, renameTab, openLedger },
       ),
       (candidate) => { error = candidate; return candidate.code === 'breaker-unmeasurable' },
     )))
     assert.equal(error.code, 'breaker-unmeasurable')
     assert.doesNotMatch(error.message, /breaker-open/)
+    assert.equal(existsSync(testCrewDir(home, checkout, 'breaker-degraded')), false)
+    assert.equal(cmux.calls.length, 0)
+    assert.equal(tree.calls.length, 0)
+    assert.equal(renameTab.calls.length, 0)
   } finally { rmSync(home, { recursive: true, force: true }); rmSync(checkoutRoot, { recursive: true, force: true }) }
 })
 
@@ -4372,16 +4386,26 @@ test('a below-threshold breaker verdict is journaled alongside allocation', asyn
   const { root: checkoutRoot, checkout } = testCheckout('crew-breaker-healthy-checkout-')
   const dbPath = join(home, 'ledger.db')
   writeFileSync(dbPath, 'fake ledger')
-  const openLedger = fakeBreakerLedger([breakerRow({ failures: 1 })])
+  const openLedger = fakeBreakerLedger([breakerRow({ failures: 1 })], { attemptRows: [
+    breakerAttempt(),
+    breakerAttempt({ provider: 'anthropic', model_id: 'claude-opus-5', agent: 'claude', effort: 'medium', role: 'lead' }),
+    breakerAttempt({ provider: 'openai', model_id: 'gpt-5.6-sol', agent: 'pi', effort: 'medium', role: 'planner' }),
+    breakerAttempt({ provider: 'anthropic', model_id: 'claude-opus-5', agent: 'claude', effort: 'high', role: 'reviewer' }),
+  ] })
   try {
-    await withBreakerEnv({ CREW_BREAKER_THRESHOLD: '5', CREW_BREAKER_WINDOW_MS: '3600000', DEVTEAM_LEDGER_DB: dbPath }, () => withHome(home, () => bootCmd(
+    await withBreakerEnv({ CREW_BREAKER_THRESHOLD: '0.2', CREW_BREAKER_WINDOW_MS: '3600000', DEVTEAM_LEDGER_DB: dbPath }, () => withHome(home, () => bootCmd(
       { task: 'breaker-healthy', checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath },
       { cmux: callCounter(), tree: callCounter(), renameTab: callCounter(), openLedger },
     )))
     const breaker = bootRecord(testCrewDir(home, checkout, 'breaker-healthy')).breaker
-    assert.equal(breaker.verdict, 'degraded')
-    assert.equal(breaker.threshold, 5)
+    assert.equal(breaker.verdict, 'closed')
+    assert.equal(breaker.threshold_rate, 0.2)
     assert.equal(breaker.window_ms, 3600000)
+    const breakerCell = breaker.cells.find((cell) => cell.provider === 'openai' && cell.model_id === 'gpt-5.6-luna' && cell.agent === 'pi' && cell.effort === 'max')
+    assert.ok(breakerCell)
+    assert.equal(breakerCell.numerator, 1)
+    assert.equal(breakerCell.denominator, 12)
+    assert.equal(breakerCell.measured, true)
     assert.ok(breaker.since)
     assert.ok(bootRecord(testCrewDir(home, checkout, 'breaker-healthy')).allocation)
   } finally { rmSync(home, { recursive: true, force: true }); rmSync(checkoutRoot, { recursive: true, force: true }) }
@@ -4396,7 +4420,7 @@ test('a breaker refusal records no cell failure of its own', async () => {
   seeded.close()
   const fake = fakeBreakerLedger([breakerRow({ failures: 3 })])
   try {
-    await withBreakerEnv({ CREW_BREAKER_THRESHOLD: '2', DEVTEAM_LEDGER_DB: dbPath }, () => withHome(home, () => assert.rejects(
+    await withBreakerEnv({ CREW_BREAKER_THRESHOLD: '0.2', DEVTEAM_LEDGER_DB: dbPath }, () => withHome(home, () => assert.rejects(
       () => bootCmd(
         { task: 'breaker-self-feed', checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath },
         { cmux: callCounter(), tree: callCounter(), renameTab: callCounter(), openLedger: fake },
@@ -8832,7 +8856,7 @@ test('shadowPickBoot never creates a missing ledger database', async () => {
     await shadowPickBoot({
       roster: localRoster, tier: 'build', seats: localRoster.tiers.build, sources: { builder: { model: 'roster' } },
       adapters: { builder: { transport: 'headless-json' } }, registry: loadCapabilities(), ladder: loadLadder(),
-      env: { CREW_BREAKER_THRESHOLD: '1' }, dbPath,
+      env: { CREW_BREAKER_THRESHOLD: '0.5' }, dbPath,
     })
     assert.equal(existsSync(dbPath), false)
   } finally { rmSync(parent, { recursive: true, force: true }) }

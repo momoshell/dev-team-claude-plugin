@@ -1531,6 +1531,63 @@ test('cellFailures aggregates by cell and kind, counts run-less rows, and honors
   ])
 })
 
+test('cellFailures classifies synthetic sessions without dropping failures', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const common = { task_slug: 'synthetic-failures', role: 'builder', agent: 'claude', provider: 'anthropic', model_id: 'sonnet', effort: 'high', kind: 'boot-refusal' }
+  try {
+    ledger.startSession({ adw_id: 'ordinary-failure', repo_slug: 'r', task_slug: 'ordinary-failure' })
+    ledger.startSession({ adw_id: 'synthetic-failure', repo_slug: 'r', task_slug: 'synthetic-failure' })
+    ledger.recordCellFailure({ ...common, adw_id: 'ordinary-failure', created_at: '2024-01-01T00:00:00.000Z' })
+    ledger.recordCellFailure({ ...common, adw_id: 'synthetic-failure', created_at: '2024-01-01T00:00:01.000Z' })
+    ledger.recordCellFailure({ ...common, created_at: '2024-01-01T00:00:02.000Z' })
+    const db = new (require('node:sqlite').DatabaseSync)(ledger._dbPath)
+    try {
+      db.prepare('UPDATE sessions SET synthetic_reason = ? WHERE adw_id = ?').run('gate_scratch_checkout', 'synthetic-failure')
+    } finally { db.close() }
+
+    const rows = ledger.cellFailures()
+    assert.equal(rows.length, 1)
+    const failure = rows[0]
+    assert.deepEqual({ failures: failure.failures, run_less: failure.run_less, host_attributed: failure.host_attributed, synthetic: failure.synthetic }, {
+      failures: 3, run_less: 1, host_attributed: 0, synthetic: 1,
+    })
+    assert.equal(failure.failures - failure.run_less - failure.synthetic, 1, 'the ordinary run-attributed row is not synthetic')
+  } finally { ledger.close() }
+})
+
+test('attempt windows use run seat timestamps rather than agent start timestamps', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const since = '2024-01-02T00:00:00.000Z'
+  const until = '2024-01-02T01:00:00.000Z'
+  const cell = { role: 'builder', agent: 'pi', provider: 'openai', model_id: 'attempt-cell', model: 'attempt-cell', effort: 'high', transport: 'headless-json', source: 'roster', policy_state: 'passed', warnings: [] }
+  const seat = (adw_id, created_at, over = {}) => {
+    ledger.startSession({ adw_id, repo_slug: 'r', task_slug: adw_id, started_at: created_at })
+    ledger.recordRunSeat({ ...cell, adw_id, created_at, ...over })
+  }
+  for (let index = 1; index <= 12; index += 1) {
+    seat(`attempt-${index}`, `2024-01-02T00:00:${String(index).padStart(2, '0')}.000Z`)
+  }
+  seat('attempt-old', '2024-01-01T23:59:59.000Z')
+  seat('attempt-until', until)
+  seat('attempt-synthetic', '2024-01-02T00:00:30.000Z')
+  const db = new (require('node:sqlite').DatabaseSync)(ledger._dbPath)
+  try {
+    db.prepare('UPDATE sessions SET synthetic_reason = ? WHERE adw_id = ?').run('gate_scratch_checkout', 'attempt-synthetic')
+  } finally { db.close() }
+
+  try {
+    const rows = ledger.cellAttempts({ since, until })
+    assert.deepEqual(rows.map((row) => ({ ...row })), [{
+      provider: 'openai', model_id: 'attempt-cell', agent: 'pi', effort: 'high', role: 'builder',
+      attempts: 12, first_at: '2024-01-02T00:00:01.000Z', last_at: '2024-01-02T00:00:12.000Z',
+    }])
+    assert.equal(rows[0].attempts, 12)
+    assert.deepEqual(Object.fromEntries(Object.entries(rows[0]).filter(([key]) => ['provider', 'model_id', 'agent', 'effort', 'role'].includes(key))), {
+      provider: 'openai', model_id: 'attempt-cell', agent: 'pi', effort: 'high', role: 'builder',
+    })
+  } finally { ledger.close() }
+})
+
 test('cell-failures CLI prints rows and refuses an inverted optional window', { skip: SKIP }, () => {
   const ledger = openTestLedger()
   ledger.recordCellFailure({
@@ -4871,6 +4928,7 @@ test('read-only ledger answers delegated readouts without creating a missing pat
   try {
     const options = { since: RUNSET_SINCE, until: null }
     assert.deepEqual(reader.cellFailures(options), writable.cellFailures(options))
+    assert.deepEqual(reader.cellAttempts(options), writable.cellAttempts(options))
     assert.deepEqual(reader.runSet(options), writable.runSet(options))
     assert.deepEqual(reader.intakeSweeps(options), writable.intakeSweeps(options))
     assert.deepEqual(reader.intakeRefusals(options), writable.intakeRefusals(options))
@@ -5979,7 +6037,7 @@ test('excludeSynthetic re-probes a legacy read-only handle after the column is a
   }
 })
 
-test('source text wires synthetic exclusion into exactly ten ordinary readers and leaves forensic reads unfiltered', () => {
+test('source text wires synthetic exclusion into exactly twelve ordinary readers and leaves forensic reads unfiltered', () => {
   const source = readFileSync(SCRIPT, 'utf8')
   const block = (name) => {
     const start = source.indexOf(`  function ${name}(`)
@@ -5989,14 +6047,14 @@ test('source text wires synthetic exclusion into exactly ten ordinary readers an
   }
   const ordinary = [
     'listSessions', 'sessionsFiltered', 'runsStartedWithin', 'gateReviewGap', 'escalations',
-    'endedRuns', 'escalationWindow', 'eligibleTasks', 'runSet', 'taskReadout',
+    'endedRuns', 'escalationWindow', 'eligibleTasks', 'runSet', 'taskReadout', 'cellFailures', 'cellAttempts',
   ]
-  assert.equal(new Set(ordinary).size, 10)
-  for (const name of ordinary) assert.match(block(name), /excludeSynthetic\(/, `${name} must hide explicitly marked rows`)
+  assert.equal(new Set(ordinary).size, 12)
+  for (const name of ordinary) assert.match(block(name), /excludeSynthetic\(/, `${name} must consult the synthetic-session predicate`)
   for (const name of ['getSession', 'dumpTable', 'phantomSessions', 'unattributableCellFailures']) {
     assert.doesNotMatch(block(name), /excludeSynthetic\(/, `${name} must retain its forensic/non-session contract`)
   }
-  assert.equal((source.match(/excludeSynthetic\(/g) ?? []).length, 12, 'one helper declaration plus eleven ordinary query sites')
+  assert.equal((source.match(/excludeSynthetic\(/g) ?? []).length, 14, 'one helper declaration plus thirteen ordinary query sites')
   const task = block('taskReadout')
   assert.match(task, /SELECT adw_id FROM sessions WHERE adw_id = \?/, 'direct forensic task lookup must remain visible')
   assert.match(task, /SELECT \* FROM sessions WHERE adw_id = \?/, 'resolved forensic task row must remain visible')

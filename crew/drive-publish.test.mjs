@@ -55,7 +55,7 @@ function resumeCheckpointFixture(overrides = {}) {
     decision: { accepted_via: 'review pass', verdict: 'pass', residuals: [], carried_findings: [], accept_findings: [], accept_decision: { where: 'review', outcome: 'accepted', residuals: [] }, panel_contributors: ['reviewer'] },
     commit: { oid: 'pre1111', pending: false, files: ['a.mjs'], message: 'feat: resume\n\nCloses #42', subject: 'feat: resume' },
     proof: { gate_cmd: 'gate-cmd', gate_path: `${TD}/gate.mjs`, summary: { total: 3, failed: 0, errored: 0 }, discrimination: 'proven', generation: 1, repairs: 0 },
-    suite: { cmd: 'suite-cmd', warm: null, cold: null }, publish: { branch: null, base: 'main' }, prior_stages: ['review:r1', 'commit', 'rebase'],
+    suite: { cmd: 'suite-cmd', warm: null, cold: null }, publish: { branch: null, base: 'main', base_sha: 'base1111' }, prior_stages: ['review:r1', 'commit', 'rebase'],
   }
   return { ...base, ...overrides, tree: { ...base.tree, ...(overrides.tree || {}) }, decision: { ...base.decision, ...(overrides.decision || {}) }, commit: { ...base.commit, ...(overrides.commit || {}) }, proof: { ...base.proof, ...(overrides.proof || {}) }, suite: { ...base.suite, ...(overrides.suite || {}) }, publish: { ...base.publish, ...(overrides.publish || {}) } }
 }
@@ -99,7 +99,7 @@ test('RVR1-2 gate resume preserves typed gate escalation when pending commit fai
 
 test('E1 resume remeasures gate before commit suite and publish', () => {
   const checkpoint = resumeCheckpointFixture({ kind: 'publish', frozen_where: 'publish', publish: { branch: 'feature/ship', base: 'main' } })
-  const io = publicationIo()
+  const io = withPublicationDiff(publicationIo(), {})
   const result = resumeTask({ ...CTX, task: 'resume-publish', publish: { branch: 'feature/ship' }, files_in_scope: ['a.mjs'] }, io, checkpoint)
   assert.equal(result.status, 'done')
   assert.equal(io.calls.assign?.length || 0, 0)
@@ -110,6 +110,20 @@ test('E1 resume remeasures gate before commit suite and publish', () => {
   const pushIndex = io.calls.order.findIndex((entry) => entry.includes('git push -u origin'))
   assert.ok(gateIndex >= 0 && gateIndex < suiteIndex && suiteIndex < coldIndex && coldIndex < pushIndex)
   assert.match(io.calls.writes[`${TD}/pr-body.md`], /Closes #42/)
+})
+
+test('RV1-1 resumes a suite checkpoint with a publish branch through to publication', () => {
+  const checkpoint = resumeCheckpointFixture({
+    kind: 'suite', frozen_where: 'suite',
+    publish: { branch: 'feature/ship', base: 'main', base_sha: 'base1111' },
+    prior_stages: ['review:r1', 'commit', 'rebase', 'suite'],
+  })
+  const io = withPublicationDiff(publicationIo(), { finalDiff: ['a.mjs'] })
+  const result = resumeTask({ ...CTX, task: 'resume-suite-publish', publish: { branch: 'feature/ship' }, files_in_scope: ['a.mjs'] }, io, checkpoint)
+  assert.equal(result.status, 'done')
+  assert.deepEqual(result.details.files_committed, ['a.mjs'])
+  assert.deepEqual(result.details.pr, { url: 'https://github.com/o/r/pull/42', number: 42, head: 'feature/ship', base_sha: 'base1111' })
+  assert.equal(io.calls.run.some((command) => command.startsWith('git push -u origin ')), true)
 })
 
 function installParentProbe(io, parent = { ok: true, output: 'base1111\n' }) {
@@ -124,6 +138,43 @@ function installParentProbe(io, parent = { ok: true, output: 'base1111\n' }) {
   return io
 }
 
+function withPublicationDiff(io, options = {}) {
+  const hasFinalDiff = Object.hasOwn(options, 'finalDiff')
+  const provider = hasFinalDiff ? options.finalDiff : (options.changed || ['a.mjs', 'a.test.mjs'])
+  const resultProvider = options.publishDiffResult
+  const gateResultProvider = options.gateResult
+  const baseRun = io.run
+  io.run = function (command) {
+    const text = String(command)
+    if (typeof gateResultProvider === 'function' && text.includes('\ngate-cmd\n')) {
+      this.calls.run.push(text); this.calls.order.push(`run:${text}`)
+      return gateResultProvider(this.state, text)
+    }
+    if (text.startsWith('git diff --name-only -z ') && text.endsWith('...HEAD')) {
+      this.calls.run.push(text); this.calls.order.push(`run:${text}`)
+      const configured = resultProvider === undefined
+        ? provider
+        : (typeof resultProvider === 'function' ? resultProvider(this.state, text) : resultProvider)
+      if (configured && typeof configured === 'object' && !Array.isArray(configured)
+        && Object.prototype.hasOwnProperty.call(configured, 'ok')) return configured
+      if (typeof configured === 'string') return { ok: true, output: configured }
+      const files = Array.isArray(configured) ? configured : []
+      return { ok: true, output: files.length > 0 ? `${files.join('\0')}\0` : '' }
+    }
+    return baseRun.call(this, command)
+  }
+  if (options.fingerprint) {
+    const files = options.fingerprintFiles || options.changed || []
+    const digest = 'a'.repeat(64)
+    io.fingerprintTree = () => ({
+      measured: true,
+      entries: Object.fromEntries(files.map((path) => [path, `file:-:${digest}`])),
+    })
+    io.indexOid = () => 'tree1111'
+  }
+  return io
+}
+
 function runPublished(options = {}) {
   const branch = options.branch === undefined ? 'feature/ship' : options.branch
   const ctx = {
@@ -131,7 +182,7 @@ function runPublished(options = {}) {
     journal: options.journal || `${options.taskDir || TD}/journal.jsonl`,
     ...(options.ctx || {}), publish: options.publish === undefined ? { branch } : options.publish,
   }
-  const io = installParentProbe(publicationIo({ ...options, branch }), options.commands?.['git rev-parse HEAD^'])
+  const io = installParentProbe(withPublicationDiff(publicationIo({ ...options, branch }), options), options.commands?.['git rev-parse HEAD^'])
   let result
   try { result = driveTask(ctx, io) } catch (error) { return { ctx, io, error } }
   return { ctx, io, result }
@@ -153,6 +204,44 @@ function runPromptPublished(body = '', options = {}) {
     ...(options.changed ? { changed: options.changed } : {}),
     envelopes: { ...defaults.envelopes, ...(options.envelopes || {}) },
   })
+}
+
+const WIDE_PROMPT_FENCE = ['a.mjs', 'crew/roles/planner.md', 'crew/roles/anchors.json']
+const FINAL_CODE_FILES = ['a.mjs']
+const FINAL_PROMPT_FILES = ['crew/roles/planner.md']
+const FINAL_ANCHOR_FILES = ['crew/roles/anchors.json']
+const NUL_FILES = (files) => Array.isArray(files) && files.length > 0 ? `${files.join('\0')}\0` : ''
+
+function widePublicationOptions(finalDiff, extra = {}) {
+  return {
+    ...extra,
+    changed: WIDE_PROMPT_FENCE,
+    finalDiff,
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, files_in_scope: WIDE_PROMPT_FENCE } }),
+      'builder:1': buildEnv({ details: { files_changed: WIDE_PROMPT_FENCE, commit_message: ' ' } }),
+      'reviewer:1': reviewEnv('pass'),
+      ...(extra.envelopes || {}),
+    },
+  }
+}
+
+function wideResumeCheckpoint({ kind = 'publish', message = 'feat: resume\n\n ', files = FINAL_CODE_FILES } = {}) {
+  const bytes = 'file:-:' + 'a'.repeat(64)
+  const treeFiles = WIDE_PROMPT_FENCE.map((path) => ({ path, state: 'present', bytes }))
+  return resumeCheckpointFixture({
+    kind, frozen_where: kind, accepted_scope: WIDE_PROMPT_FENCE,
+    tree: { files: treeFiles, worktree_sha256: resumeWorktreeSha256(treeFiles) },
+    commit: { oid: 'pre1111', pending: false, files, message, subject: 'feat: resume' },
+    publish: { branch: 'feature/ship', base: 'main', base_sha: 'base1111' },
+  })
+}
+
+function runWideResume(finalDiff, options = {}) {
+  const checkpoint = options.checkpoint || wideResumeCheckpoint(options)
+  const io = withPublicationDiff(publicationIo({ changed: WIDE_PROMPT_FENCE }), { ...options, finalDiff })
+  const result = resumeTask({ ...CTX, task: options.task || 'resume-publish', publish: { branch: 'feature/ship' }, files_in_scope: WIDE_PROMPT_FENCE }, io, checkpoint)
+  return { checkpoint, io, result }
 }
 
 const REBASE_PARENT = 'base1111'
@@ -1061,6 +1150,102 @@ test('armed happy path records commit, rebase, warm/cold suites, publish, and do
   for (const key of ['rebase', 'push', 'pr_create']) assert.equal(Number.isFinite(row.published.durations_ms[key]), true)
 })
 
+test('A1 main publication uses final diff instead of wide fence', () => {
+  const run = runPublished(widePublicationOptions(FINAL_CODE_FILES))
+  assert.equal(run.result.status, 'done')
+  assert.deepEqual(run.result.details.files_committed, FINAL_CODE_FILES)
+  assert.deepEqual(run.io.calls.commits[0].files, WIDE_PROMPT_FENCE)
+  assert.match(run.io.calls.writes[`${TD}/pr-body.md`], /Changed: a\.mjs/)
+  assert.doesNotMatch(run.io.calls.writes[`${TD}/pr-body.md`], /crew\/roles\/planner|crew\/roles\/anchors/)
+})
+
+test('B1 resumed publication uses final diff instead of accepted scope', () => {
+  const run = runWideResume(FINAL_CODE_FILES)
+  assert.equal(run.result.status, 'done')
+  assert.deepEqual(run.result.details.files_committed, FINAL_CODE_FILES)
+  assert.match(run.io.calls.writes[`${TD}/pr-body.md`], /Changed: a\.mjs/)
+  assert.doesNotMatch(run.io.calls.writes[`${TD}/pr-body.md`], /crew\/roles\/planner|crew\/roles\/anchors/)
+})
+
+test('C1 main publication refuses a prompt in the final diff', () => {
+  const run = runPublished(widePublicationOptions(FINAL_PROMPT_FILES))
+  assert.equal(run.result.status, 'escalation')
+  assert.equal(run.result.details.publish.refused, PUBLISH_REFUSALS.promptMeasurement)
+  assert.equal(run.io.calls.run.some((command) => command.includes('command -v gh')), false)
+  assert.equal(run.io.calls.run.some((command) => command.includes('git push')), false)
+})
+
+test('D1 resumed publication refuses a prompt in the final diff', () => {
+  const run = runWideResume(FINAL_PROMPT_FILES)
+  assert.equal(run.result.status, 'escalation')
+  assert.equal(run.result.details.publish.refused, PUBLISH_REFUSALS.promptMeasurement)
+  assert.equal(run.io.calls.run.some((command) => command.includes('command -v gh')), false)
+  assert.equal(run.io.calls.run.some((command) => command.includes('git push')), false)
+})
+
+test('E1 generated checkpoint separates committed files from accepted scope', () => {
+  let gateCalls = 0
+  const run = runPublished(widePublicationOptions(FINAL_PROMPT_FILES, {
+    fingerprint: true, fingerprintFiles: WIDE_PROMPT_FENCE,
+    gateResult: () => (++gateCalls === 1 ? { ok: false, output: REBASE_RED } : { ok: true, output: REBASE_GREEN }),
+    envelopes: { 'planner:1': planEnv({ details: { ...planEnv().details, files_in_scope: WIDE_PROMPT_FENCE, gate_cmd: 'gate-cmd' } }) },
+  }))
+  assert.equal(run.result.status, 'escalation')
+  const checkpoint = run.result.details.resume_checkpoint
+  assert.ok(checkpoint)
+  assert.deepEqual(checkpoint.accepted_scope, [...WIDE_PROMPT_FENCE].sort())
+  assert.deepEqual(checkpoint.commit.files, FINAL_PROMPT_FILES)
+  assert.equal(checkpoint.publish.base_sha, 'base1111')
+})
+
+test('F1 both publication paths use post-rebase diff in both divergence directions', () => {
+  const runWithDivergence = (before, after, resume) => {
+    const options = {
+      publishDiffResult: (state, command) => ({
+        ok: true,
+        output: NUL_FILES(command.includes('HEAD^...HEAD') || state.head !== state.post ? before : after),
+      }),
+    }
+    if (!resume) return runPublished(widePublicationOptions(undefined, options))
+    return runWideResume(undefined, { ...options, checkpoint: wideResumeCheckpoint({ kind: 'rebase' }) })
+  }
+  const dropped = {
+    before: FINAL_PROMPT_FILES,
+    after: FINAL_CODE_FILES,
+  }
+  const added = {
+    before: FINAL_CODE_FILES,
+    after: FINAL_PROMPT_FILES,
+  }
+  for (const [label, divergence] of Object.entries({ dropped, added })) {
+    const main = runWithDivergence(divergence.before, divergence.after, false)
+    const resumed = runWithDivergence(divergence.before, divergence.after, true)
+    const expected = label === 'dropped' ? 'done' : 'escalation'
+    assert.equal(main.result.status, expected, `main ${label}`)
+    assert.equal(resumed.result.status, expected, `resume ${label}`)
+    if (expected === 'escalation') {
+      assert.equal(main.result.details.publish.refused, PUBLISH_REFUSALS.promptMeasurement, `main ${label}`)
+      assert.equal(resumed.result.details.publish.refused, PUBLISH_REFUSALS.promptMeasurement, `resume ${label}`)
+    }
+  }
+})
+
+test('G1 publication prompt surface remains path-defined', () => {
+  const run = runPublished({
+    changed: FINAL_ANCHOR_FILES,
+    finalDiff: FINAL_ANCHOR_FILES,
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, files_in_scope: FINAL_ANCHOR_FILES } }),
+      'builder:1': buildEnv({ details: { files_changed: FINAL_ANCHOR_FILES, commit_message: ' ' } }),
+      'reviewer:1': reviewEnv('pass'),
+    },
+  })
+  assert.equal(run.result.status, 'escalation')
+  assert.equal(run.result.details.publish.refused, PUBLISH_REFUSALS.promptMeasurement)
+  assert.match(run.result.details.escalation.why, /crew\/roles\/anchors\.json/)
+  assert.equal(run.io.calls.run.some((command) => command.includes('command -v gh')), false)
+})
+
 test('stateful moved and unmoved bases prove the exact rebase policy', () => {
   const moved = runPublished({})
   assert.equal(moved.result.status, 'done')
@@ -1158,7 +1343,7 @@ test('A2 resumed prompt-surface silence is refused before any publish side effec
     commit: { message: 'feat: resume\n\n ', files: PROMPT_SCOPE },
     kind: 'publish', frozen_where: 'publish', publish: { branch: 'feature/ship', base: 'main' },
   })
-  const io = publicationIo()
+  const io = withPublicationDiff(publicationIo({ changed: PROMPT_SCOPE }), { finalDiff: PROMPT_SCOPE })
   const result = resumeTask({ ...CTX, task: 'resume-prompt-publish', publish: { branch: 'feature/ship' }, files_in_scope: PROMPT_SCOPE }, io, checkpoint)
   assert.equal(result.status, 'escalation')
   assert.equal(result.details.escalation.where, 'publish')

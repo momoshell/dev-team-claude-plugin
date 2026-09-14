@@ -3354,6 +3354,15 @@ export function promptMeasurementDefect({ files, body } = {}) {
   return `prompt-change PR body must name a ledger cell measure with before/after and n, or say unmeasured — n insufficient with a reason and re-measure seat count; prompt surface: ${hits.join(', ')}`
 }
 
+function publishDiffFiles(io, baseSha) {
+  if (typeof io?.run !== 'function' || typeof baseSha !== 'string' || baseSha.trim() === '') return null
+  try {
+    const result = io.run(`git diff --name-only -z ${shellArg(baseSha)}...HEAD`)
+    if (result?.ok !== true || typeof result.output !== 'string') return null
+    return [...new Set(result.output.split('\0').filter((path) => path.length > 0))].sort()
+  } catch { return null }
+}
+
 export const PUBLISH_REFUSALS = Object.freeze({
   branchUnresolved: 'branch-unresolved',
   branchMain: 'branch-main',
@@ -5001,6 +5010,7 @@ function runTask(ctx, io, crash) {
   // is nothing a builder may run inside one. `acceptedGatePath` defaults to the
   // task gate so every refusal can name a useful gate-proof path.
   let acceptedScope = []
+  let verifiedPublishBaseSha = null
   let acceptedGatePath = art('gate.mjs')
   let admitScope = null; const logScopeAdmission = (row) => io.log(recordRow({ at: io.now(), scope_admission: row }))
   let suiteWidenings = 0
@@ -5724,14 +5734,17 @@ function runTask(ctx, io, crash) {
     const kind = resumeCheckpointFamily(frozenWhere)
     if (!kind || !activeGateCmd) return null
     if (!Object.values(S.returns).every((env) => env?.status === 'done')) return null
-    const claimedFiles = Array.isArray(details.files_committed) && details.files_committed.length > 0
-      ? [...details.files_committed]
-      : (acceptedScope.length > 0 ? [...acceptedScope] : (Array.isArray(ctx.files_in_scope) ? [...ctx.files_in_scope] : []))
+    const acceptedFiles = acceptedScope.length > 0 ? [...acceptedScope] : (Array.isArray(ctx.files_in_scope) ? [...ctx.files_in_scope] : [])
+    let dirtyFiles = []
+    if (!Array.isArray(details.files_committed) && details.commit == null && typeof io.changedFiles === 'function') {
+      try { dirtyFiles = [...new Set((io.changedFiles() || []).filter((path) => inScope(path)))].sort() } catch { dirtyFiles = [] }
+    }
+    const committedFiles = Array.isArray(details.files_committed) ? [...details.files_committed] : dirtyFiles
     let concreteFiles = null
-    if (claimedFiles.some((path) => typeof path === 'string' && path.endsWith('/')) && typeof io.changedFiles === 'function') {
+    if (acceptedFiles.some((path) => typeof path === 'string' && path.endsWith('/')) && typeof io.changedFiles === 'function') {
       try { concreteFiles = [...new Set((io.changedFiles() || []).filter((path) => inScope(path)))].sort() } catch { concreteFiles = [] }
     }
-    const snapshotFiles = concreteFiles || claimedFiles
+    const snapshotFiles = concreteFiles || acceptedFiles
     const panel = finalReview.panel || S.lastReview?.panel || null
     const panelContributors = panel && typeof panel === 'object'
       ? ['reviewer', panel.partner, panel.adjudicator].filter((value, index, values) => typeof value === 'string' && value.trim() && values.indexOf(value) === index)
@@ -5749,7 +5762,7 @@ function runTask(ctx, io, crash) {
       },
       commit: {
         oid: details.commit ?? null, pending: details.commit == null,
-        files: snapshotFiles,
+        files: committedFiles,
         message: S.commitMessage || '', subject: S.commitSubject || '',
       },
       proof: {
@@ -5760,7 +5773,11 @@ function runTask(ctx, io, crash) {
         repairs: Number.isInteger(details.gate?.repairs) ? details.gate.repairs : gateRepairs,
       },
       suite: { cmd: ctx.suite, warm: resumeWarmCounts, cold: resumeColdSuite?.counts ?? details.cold_suite?.counts ?? null },
-      publish: { branch: ctx.publish?.branch ?? null, base: typeof ctx.publish?.branch === 'string' && ctx.publish.branch.trim() ? PUBLISH_BASE : null },
+      publish: {
+        branch: ctx.publish?.branch ?? null,
+        base: typeof ctx.publish?.branch === 'string' && ctx.publish.branch.trim() ? PUBLISH_BASE : null,
+        ...(typeof verifiedPublishBaseSha === 'string' && verifiedPublishBaseSha.trim() ? { base_sha: verifiedPublishBaseSha.trim() } : {}),
+      },
       accepted_scope: snapshotFiles,
       prior_stages: Array.isArray(details.stages) ? [...details.stages] : [...S.stages],
       head_oid: typeof details.commit === 'string' && details.commit.trim() ? details.commit : (details.head || ctx.head || null),
@@ -6079,6 +6096,8 @@ function runTask(ctx, io, crash) {
     let warmCounts = checkpoint.suite.warm ?? null
     let coldSuite = checkpoint.suite.cold ?? null
     let published = null
+    let verifiedBaseSha = null
+    let publishFiles = null
 
     const resumeEscalate = (where, why, extraDetails = {}, commit = commitOid) => escalationResult({
       where, why, question: escalationQuestion(where, {}), summary: `Task ${resumeCtx.task} needs a human: ${why}`,
@@ -6142,6 +6161,7 @@ function runTask(ctx, io, crash) {
       catch (error) { fetched = { ok: false, output: error?.message ?? String(error) } }
       if (!fetched?.ok) { stageComplete(); return resumeEscalate('rebase', `the fetch of ${base} failed${fetched?.output ? `: ${String(fetched.output).slice(-2000)}` : ''}`) }
       const baseSha = probe(`git rev-parse ${base}`)
+      verifiedBaseSha = baseSha
       const mergeBase = probe(`git merge-base HEAD ${base}`)
       if (!baseSha || !mergeBase) { stageComplete(); return resumeEscalate('rebase', `the rebase probe for ${base} failed or returned blank output`) }
       let rebased = false
@@ -6161,11 +6181,24 @@ function runTask(ctx, io, crash) {
       void rebased
     }
 
+    const publishBranch = checkpoint.publish.branch
+    const shouldPublish = typeof publishBranch === 'string' && publishBranch.trim() !== ''
+
     if (!commitOid || typeof commitOid !== 'string' || !commitOid.trim()) return resumeEscalate('gate', 'the resumed path has no committed oid')
 
     const census = runCensus()
     if (census.verdict !== 'green' || (Array.isArray(census.failures) && census.failures.length > 0)) {
       return resumeEscalate('census-exhibits', `the post-commit census could not prove a clean committed tree: ${census.reason || census.verdict || 'non-green'}`, { census })
+    }
+
+    if (shouldPublish) {
+      if (!verifiedBaseSha) {
+        const persisted = checkpoint.publish.base_sha
+        verifiedBaseSha = typeof persisted === 'string' && persisted.trim() ? persisted.trim() : null
+      }
+      if (!verifiedBaseSha) return resumeEscalate('rebase', 'the resumed publication has no verified base SHA')
+      publishFiles = publishDiffFiles(resumeIo, verifiedBaseSha)
+      if (!publishFiles) return resumeEscalate('rebase', 'the authoritative publication diff could not be read from the verified base')
     }
 
     const warmFailure = runWarmSuite()
@@ -6191,8 +6224,6 @@ function runTask(ctx, io, crash) {
       return resumeEscalate('cold-suite', why, { cold_suite: coldSuite })
     }
 
-    const publishBranch = checkpoint.publish.branch
-    const shouldPublish = typeof publishBranch === 'string' && publishBranch.trim() !== ''
     if (shouldPublish) {
       stage('publish')
       const baseName = checkpoint.publish.base || PUBLISH_BASE
@@ -6201,7 +6232,7 @@ function runTask(ctx, io, crash) {
         return resumeEscalate('publish', `publish refused (${reason}): ${detail}`, { publish: { refused: reason } })
       }
       if (publishBranch === baseName) return refusePublish(PUBLISH_REFUSALS.branchMain, `the checkout branch is ${baseName}`)
-      const promptDefect = promptMeasurementDefect({ files: checkpoint.accepted_scope, body: composePrBody({ intent: commitIntent(checkpoint.commit.message) }) })
+      const promptDefect = promptMeasurementDefect({ files: publishFiles, body: composePrBody({ intent: commitIntent(checkpoint.commit.message) }) })
       if (promptDefect) return refusePublish(PUBLISH_REFUSALS.promptMeasurement, promptDefect)
       let ghMissing
       try { ghMissing = resumeIo.run('command -v gh') } catch (error) { ghMissing = { ok: false, output: error?.message ?? String(error) } }
@@ -6216,7 +6247,7 @@ function runTask(ctx, io, crash) {
         let existing = null
         try { existing = JSON.parse(String(prProbe.output || '')) } catch { existing = null }
         if (existing && existing.headRefOid === commitOid && existing.baseRefName === baseName && existing.headRefName === publishBranch) {
-          published = { url: existing.url, number: existing.number, head: publishBranch, base_sha: checkpoint.publish.base_sha ?? null }
+          published = { url: existing.url, number: existing.number, head: publishBranch, base_sha: verifiedBaseSha }
           stageComplete()
         } else {
           return refusePublish(PUBLISH_REFUSALS.prExists, 'an existing pull request did not match the checkpoint branch, base, and head oid')
@@ -6232,7 +6263,7 @@ function runTask(ctx, io, crash) {
           intent: commitIntent(checkpoint.commit.message),
           closes: issueTrailers(checkpoint.commit.message).closes,
           issues: issueTrailers(checkpoint.commit.message).refs,
-          stages: [...S.stages], cursor: roundCursor(S.stages), files: [...checkpoint.commit.files],
+          stages: [...S.stages], cursor: roundCursor(S.stages), files: [...publishFiles],
           gate: { cmd: relativizeCommand(gateCmd, { checkout: resumeCtx.checkout, taskDir: resumeCtx.taskDir }), summary: resumeGateResult ? parseGateSummary(resumeGateResult.output) : checkpoint.proof.summary, discrimination: resumeGateResult ? (parseGateSummary(resumeGateResult.output) ? 'proven' : 'unproven') : checkpoint.proof.discrimination, generation: gateGeneration, repairs: gateRepairs },
           review: { verdict: checkpoint.decision.verdict, residuals: checkpoint.decision.residuals, carried: checkpoint.decision.carried_findings },
           suite: { warm: warmCounts, cold: coldSuite.counts, cold_verified: coldSuite.counts !== null }, anomalies: [],
@@ -6245,7 +6276,7 @@ function runTask(ctx, io, crash) {
         } catch (error) { created = { ok: false, output: error?.message ?? String(error) } }
         const urlMatch = String(created?.output || '').match(/https:\/\/[^\s]+\/pull\/(\d+)/)
         if (!created?.ok || !urlMatch) return refusePublish(PUBLISH_REFUSALS.prCreate, `gh pr create did not return a pull request URL${created?.output ? `: ${String(created.output).slice(-2000)}` : ''}`)
-        published = { url: urlMatch[0], number: Number(urlMatch[1]), head: publishBranch, base_sha: checkpoint.publish.base_sha ?? null }
+        published = { url: urlMatch[0], number: Number(urlMatch[1]), head: publishBranch, base_sha: verifiedBaseSha }
         stageComplete()
       }
     }
@@ -6255,7 +6286,7 @@ function runTask(ctx, io, crash) {
       status: 'done', summary: `Task ${resumeCtx.task} resumed from ${checkpoint.frozen_where}: committed ${commitOid}, suite green, cold-verified from ${coldSuite.path || '(fresh checkout)'}.`,
       artifacts: [resumeCtx.journal, checkpoint.proof.gate_path],
       details: {
-        commit: commitOid, stages: S.stages, files_committed: checkpoint.commit.files, consults: 0,
+        commit: commitOid, stages: S.stages, files_committed: shouldPublish ? publishFiles : checkpoint.commit.files, consults: 0,
         dissents: S.dissents, accepted_via: checkpoint.decision.accepted_via, escalation: null,
         ...(published ? { pr: published } : {}), cold_suite: coldSuite, gate: gateBlock(),
         accept_findings: checkpoint.decision.accept_findings, accept_decision: checkpoint.decision.accept_decision,
@@ -9233,6 +9264,8 @@ function runTask(ctx, io, crash) {
   let rebaseMs = 0
   let coldSuite
   let published = null
+  let publishFiles = null
+  verifiedPublishBaseSha = null
   stage('commit')
   const message = composeCommitMessage({ task: ctx.task, planEnv, builderEnv })
   const subject = String(message).split('\n')[0]
@@ -9290,6 +9323,7 @@ function runTask(ctx, io, crash) {
       stageComplete()
       return escalate('rebase', `the rebase probe git rev-parse ${base} failed or returned blank output`, [], { commit: S.commit }, { files: [], base, commit: S.commit })
     }
+    verifiedPublishBaseSha = baseSha
     const mergeBase = probe(`git merge-base HEAD ${base}`)
     if (!mergeBase) {
       stageComplete()
@@ -9600,6 +9634,11 @@ function runTask(ctx, io, crash) {
     if (gateCmd && proofTreeWitness) {
       io.log(recordRow({ at: io.now(), gate_proof_parent: postCommitParent, gate_generation: gateGeneration }))
     }
+    publishFiles = publishDiffFiles(io, baseSha)
+    if (!publishFiles) {
+      stageComplete()
+      return escalate('rebase', 'the authoritative publication diff could not be read from the verified base', [], { commit: S.commit }, { files: [], base, commit: S.commit })
+    }
     rebaseMs = io.now() - rebaseStartedAt
     stageComplete()
   }
@@ -9816,11 +9855,13 @@ function runTask(ctx, io, crash) {
     const branch = String(publishing.branch || '').trim()
     const refusePublish = (reason, detail) => {
       stageComplete()
-      return escalate('publish', `publish refused (${reason}): ${detail}`, [], { commit: S.commit, publish: { refused: reason } })
+      return escalate('publish', `publish refused (${reason}): ${detail}`, [], {
+        commit: S.commit, files_committed: publishFiles, publish: { refused: reason },
+      })
     }
     if (!branch) return refusePublish(PUBLISH_REFUSALS.branchUnresolved, 'the checkout branch is unresolved (detached HEAD)')
     if (branch === PUBLISH_BASE) return refusePublish(PUBLISH_REFUSALS.branchMain, `the checkout branch is ${PUBLISH_BASE}`)
-    const promptDefect = promptMeasurementDefect({ files: scopeFiles, body: composePrBody({ intent: commitIntent(message) }) })
+    const promptDefect = promptMeasurementDefect({ files: publishFiles, body: composePrBody({ intent: commitIntent(message) }) })
     if (promptDefect) return refusePublish(PUBLISH_REFUSALS.promptMeasurement, promptDefect)
 
     let ghMissing
@@ -9860,7 +9901,7 @@ function runTask(ctx, io, crash) {
       issues: trailers.refs,
       stages: [...S.stages],
       cursor: roundCursor(S.stages),
-      files: [...committing],
+      files: [...publishFiles],
       gate: gateNow ? {
         cmd: relativizeCommand(gateNow.cmd, { checkout: ctx.checkout, taskDir: ctx.taskDir }),
         summary: parseGateSummary(lastGateOutput),
@@ -9909,11 +9950,11 @@ function runTask(ctx, io, crash) {
 
   const result = {
     status: 'done',
-    summary: `Task ${ctx.task} complete: committed ${S.commit} (${committing.length} files), suite green, cold-verified from ${coldSuite.path}, ${accepted}. Stages: ${S.stages.join(' | ')}`,
+    summary: `Task ${ctx.task} complete: committed ${S.commit} (${publishing ? publishFiles.length : committing.length} files), suite green, cold-verified from ${coldSuite.path}, ${accepted}. Stages: ${S.stages.join(' | ')}`,
     artifacts: [planPath, art('review.md'), journal],
     details: {
       ...(variant === DIRECTED_STAGE_HEAD ? { variant } : {}),
-      commit: S.commit, stages: S.stages, files_committed: committing, consults: S.consults,
+      commit: S.commit, stages: S.stages, files_committed: publishing ? publishFiles : committing, consults: S.consults,
       dissents: S.dissents, accepted_via: accepted, escalation: null,
       ...(published ? { pr: published } : {}),
       cold_suite: coldSuite,   // the COLD verdict, never folded into the lane's own suite result

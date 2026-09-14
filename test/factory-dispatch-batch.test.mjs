@@ -2109,7 +2109,7 @@ test('F1 the prompt-surface set has one definition and both consumers import it'
   assert.match(dispatcher, /export \{ PROMPT_SURFACE, PROMPT_SURFACE_BLIND_SPOT \} from '\.\.\/\.\.\/crew\/protected-paths\.mjs'/)
 })
 
-test('G1 dispatch-time prompt assurance forcing remains unchanged', () => {
+test('H1 dispatch-time prompt assurance forcing remains unchanged', () => {
   assert.deepEqual(promptSurfaceVerdict({ files: ['crew/roles/planner.md'] }), {
     hits: ['crew/roles/planner.md'], promptChange: true, forced: 'judge',
   })

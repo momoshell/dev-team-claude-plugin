@@ -10,6 +10,8 @@ import {
   briefReadCandidates, carriesOwnSpend, closedReason, emptyTurnEnvelope, finaliseCensus, finalisePreFirstTurn, foldCensusFrame, foldRpcUsage, headlessRpcIo, isBriefReadToolCall, isBusyRefusal, newCensus, PRE_FIRST_TURN_ABSENT_REASONS, PRE_FIRST_TURN_TOLERANCE_MS, PROMPT_REFUSAL_RETRIES, RPC_PROMPT_DELIVERY_WINDOW_MS,
   rpcCensus, rpcCommand, rpcDeliveryCorpusReport, rpcStreamCensus, seatCommandPath, SETTLE_GATE_POLLS, splitFrames, steerFrame, teardownOutcome,
 } from './headless-rpc.mjs'
+import * as piAdapter from './adapters/adapter-pi.mjs'
+import * as claudeAdapter from './adapters/adapter-claude.mjs'
 import { seatCommand as piSeatCommand } from './adapters/adapter-pi.mjs'
 import { assignmentLine } from './driver.mjs'
 import { cellFailureKind } from './seat-io.mjs'
@@ -572,15 +574,24 @@ test('RV1-1 an agents grant with no extension registering the agent tool refuses
   assert.equal(ok.args[ok.args.indexOf('--tools') + 1].split(',').includes('agent'), true)
 })
 
-test('rpcCommand composes a resumable pi invocation', () => {
+test('A1/B1/C1/D1 rpcCommand composes configDir env without changing argv', () => {
   const common = { bin: '/bin/pi', model: 'openai-codex/x', effort: 'high', sessionDir: '/tmp/s', sessionId: 's1', resume: true, promptFile: '/tmp/p', deny: 'Edit', env: { X: '1' } }
   const c = rpcCommand(common)
+  const configured = rpcCommand({ ...common, configDir: '/checkout/crew/pi', env: { ...common.env, PI_CODING_AGENT_DIR: '/inherited' } })
+  const nullConfig = rpcCommand({ ...common, configDir: null })
+  const undefinedConfig = rpcCommand({ ...common, configDir: undefined })
   assert.deepEqual(c.args, [
     '--mode', 'rpc', '--model', 'openai-codex/x', '--thinking', 'high', '--session-dir', '/tmp/s', '--session', 's1',
     '--append-system-prompt', '/tmp/p', '--tools', 'read,bash,edit,write,grep,find,ls', '--exclude-tools', 'edit',
     '--no-context-files', '--no-extensions', '--no-skills',
   ])
+  assert.deepEqual(configured.args, c.args)
+  assert.deepEqual(nullConfig.args, c.args)
+  assert.deepEqual(undefinedConfig.args, c.args)
   assert.deepEqual(c.env, { X: '1' })
+  assert.deepEqual(configured.env, { X: '1', PI_CODING_AGENT_DIR: '/checkout/crew/pi' })
+  assert.equal(Object.hasOwn(nullConfig.env, 'PI_CODING_AGENT_DIR'), false)
+  assert.equal(Object.hasOwn(undefinedConfig.env, 'PI_CODING_AGENT_DIR'), false)
   assert.equal(Object.hasOwn(c.env, 'CREW_PI_AGENTS'), false)
 
   const grants = {
@@ -619,15 +630,20 @@ test('rpcCommand composes a resumable pi invocation', () => {
     assert.equal(command.args.some((arg) => arg === '--provider' || String(arg).startsWith('--provider=')), false)
   }
 
-  const wrapped = fixture({ grants })
+  const configDir = '/checkout/crew/pi'
+  const capturedSpecs = []
+  const wrappedAdapter = { rpcCommand: (spec) => { capturedSpecs.push(spec); return rpcCommand(spec) } }
+  const wrapped = fixture({ adapterEntry: { adapter: wrappedAdapter, grants, configDir } })
   try {
     wrapped.io.assign({ role: 'builder', briefFile: '/brief.md' })
-    assert.deepEqual(wrapped.specs.at(-1).grants, grants)
+    assert.deepEqual(capturedSpecs.at(-1).grants, grants)
+    assert.equal(capturedSpecs.at(-1).configDir, configDir)
     const wrappedCommand = JSON.parse(readFileSync(join(wrapped.paths.taskDir, 'headless-rpc', 'builder', 'cmd.json'), 'utf8'))
     // no agents granted, so no agent tool — this pins absence for an UNGRANTED seat,
     // not the silent drop an unbacked grant used to produce (see the RV1-1 test below).
     assert.equal(wrappedCommand.args[wrappedCommand.args.indexOf('--tools') + 1].split(',').includes('agent'), false)
     assert.deepEqual(wrappedCommand.args.slice(wrappedCommand.args.indexOf('-e'), wrappedCommand.args.indexOf('-e') + 2), ['-e', '/ext-a'])
+    assert.equal(wrappedCommand.env.PI_CODING_AGENT_DIR, configDir)
   } finally { wrapped.cleanup() }
 
   const bareFixture = fixture()
@@ -638,6 +654,32 @@ test('rpcCommand composes a resumable pi invocation', () => {
     assert.equal(bareCommand.args[bareCommand.args.indexOf('--tools') + 1], 'read,bash,edit,write,grep,find,ls')
     assert.equal(bareCommand.args.includes('-e'), false)
   } finally { bareFixture.cleanup() }
+})
+
+test('E1 shipped adapter namespaces fall back to the pi RPC command', () => {
+  assert.equal(piAdapter.rpcCommand, undefined)
+  assert.equal(claudeAdapter.rpcCommand, undefined)
+  const pi = fixture({ adapterEntry: piAdapter })
+  const claude = fixture({ adapterEntry: claudeAdapter })
+  try {
+    pi.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    claude.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    const piCommand = JSON.parse(readFileSync(join(pi.paths.taskDir, 'headless-rpc', 'builder', 'cmd.json'), 'utf8'))
+    const claudeCommand = JSON.parse(readFileSync(join(claude.paths.taskDir, 'headless-rpc', 'builder', 'cmd.json'), 'utf8'))
+    const stableArgs = (args) => {
+      const copy = [...args]
+      for (const flag of ['--session-dir', '--append-system-prompt']) {
+        const at = copy.indexOf(flag)
+        if (at >= 0) copy[at + 1] = `<${flag}>`
+      }
+      return copy
+    }
+    assert.equal(piCommand.bin, '/bin/pi')
+    assert.equal(claudeCommand.bin, '/bin/pi')
+    assert.deepEqual(stableArgs(piCommand.args), stableArgs(claudeCommand.args))
+    assert.deepEqual(piCommand.args.slice(0, 2), ['--mode', 'rpc'])
+    assert.deepEqual(claudeCommand.args.slice(0, 2), ['--mode', 'rpc'])
+  } finally { pi.cleanup(); claude.cleanup() }
 })
 
 test('shared RPC activation adds shipped tools, preserves vendor tools, and refuses unknown extensions', () => {

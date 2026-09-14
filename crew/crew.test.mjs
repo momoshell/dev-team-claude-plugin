@@ -7472,6 +7472,289 @@ test('checkout-pinned local providers require live endpoints and expose their se
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
+test('A1 raw local override resolves its config directory', async () => {
+  const root = scratchDir('crew-raw-local-a1-')
+  try {
+    const settings = join(root, 'crew/pi/settings.json')
+    mkdirSync(dirname(settings), { recursive: true })
+    writeFileSync(settings, '{}')
+    writeFileSync(join(dirname(settings), 'models.json'), JSON.stringify({ providers: { 'local-pi': null } }))
+    const register = capabilityRegister({ local_providers: {
+      'local-pi': { settings: 'crew/pi/settings.json', pi_provider: 'local-pi', base_url: 'http://127.0.0.1:11434/v1' },
+    } })
+    const adapters = await resolveAdapters(['builder'], { 'model-builder': 'local-pi/qwen3-coder', 'agent-builder': 'pi' }, null, {
+      register, root, probeEndpoint: async () => true,
+    })
+    assert.equal(adapters.builder.configDir, dirname(settings))
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('B1 raw local override passes PI_CODING_AGENT_DIR to its seat command', async () => {
+  const root = scratchDir('crew-raw-local-b1-')
+  try {
+    const settings = join(root, 'crew/pi/settings.json')
+    mkdirSync(dirname(settings), { recursive: true })
+    writeFileSync(settings, '{}')
+    writeFileSync(join(dirname(settings), 'models.json'), JSON.stringify({ providers: { 'local-pi': null } }))
+    const register = capabilityRegister({ local_providers: {
+      'local-pi': { settings: 'crew/pi/settings.json', pi_provider: 'local-pi', base_url: 'http://127.0.0.1:11434/v1' },
+    } })
+    const adapters = await resolveAdapters(['builder'], { 'model-builder': 'local-pi/qwen3-coder', 'agent-builder': 'pi' }, null, {
+      register, root, probeEndpoint: async () => true,
+    })
+    const command = adapters.builder.adapter.seatCommand({
+      role: 'builder', model: 'local-pi/qwen3-coder', promptFile: '/tmp/role-builder.md',
+      tools: SEAT_DEFAULTS.builder.tools, deny: SEAT_DEFAULTS.builder.deny, taskDir: root,
+      bootBrief: 'boot', effort: 'max', grants: adapters.builder.grants, configDir: adapters.builder.configDir,
+    })
+    assert.equal(command.match(/PI_CODING_AGENT_DIR=/g)?.length, 1)
+    assert.ok(command.includes(`PI_CODING_AGENT_DIR="${dirname(settings)}"`))
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('C1 hosted raw override carries no PI_CODING_AGENT_DIR', async () => {
+  const root = scratchDir('crew-raw-hosted-c1-')
+  try {
+    const probed = []
+    const register = capabilityRegister({ local_providers: {
+      'local-pi': { settings: 'crew/pi/missing-settings.json', pi_provider: 'local-pi', base_url: 'http://127.0.0.1:11434/v1' },
+    } })
+    const adapters = await resolveAdapters(['builder'], { 'model-builder': 'openai/gpt-5.6-luna', 'agent-builder': 'pi' }, null, {
+      register, root, probeEndpoint: async (url) => { probed.push(url); return true },
+    })
+    assert.equal(adapters.builder.configDir, null)
+    assert.deepEqual(probed, [])
+    const command = adapters.builder.adapter.seatCommand({
+      role: 'builder', model: 'openai/gpt-5.6-luna', promptFile: '/tmp/role-builder.md',
+      tools: SEAT_DEFAULTS.builder.tools, deny: SEAT_DEFAULTS.builder.deny, taskDir: root,
+      bootBrief: 'boot', effort: 'max', grants: adapters.builder.grants, configDir: adapters.builder.configDir,
+    })
+    assert.equal(command.includes('PI_CODING_AGENT_DIR='), false)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('D1 raw local override enforces the models declaration guard', async () => {
+  const root = scratchDir('crew-raw-local-d1-')
+  try {
+    const settings = join(root, 'crew/pi/settings.json')
+    mkdirSync(dirname(settings), { recursive: true })
+    writeFileSync(settings, '{}')
+    const register = capabilityRegister({ local_providers: {
+      'local-pi': { settings: 'crew/pi/settings.json', pi_provider: 'local-pi', base_url: 'http://127.0.0.1:11434/v1' },
+    } })
+    await assert.rejects(
+      () => resolveAdapters(['builder'], { 'model-builder': 'local-pi/qwen3-coder', 'agent-builder': 'pi' }, null, {
+        register, root, probeEndpoint: async () => { throw new Error('declaration refusal must precede probe') },
+      }),
+      (err) => err.reason === 'local-provider-undeclared' && CAPABILITY_REFUSALS.includes(err.reason),
+    )
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('E1 raw local override enforces the endpoint probe', async () => {
+  const root = scratchDir('crew-raw-local-e1-')
+  try {
+    const settings = join(root, 'crew/pi/settings.json')
+    const baseUrl = 'http://127.0.0.1:11434/v1'
+    mkdirSync(dirname(settings), { recursive: true })
+    writeFileSync(settings, '{}')
+    writeFileSync(join(dirname(settings), 'models.json'), JSON.stringify({ providers: { 'local-pi': null } }))
+    const register = capabilityRegister({ local_providers: {
+      'local-pi': { settings: 'crew/pi/settings.json', pi_provider: 'local-pi', base_url: baseUrl },
+    } })
+    const probed = []
+    await assert.rejects(
+      () => resolveAdapters(['builder'], { 'model-builder': 'local-pi/qwen3-coder', 'agent-builder': 'pi' }, null, {
+        register, root, probeEndpoint: async (url) => { probed.push(url); return false },
+      }),
+      (err) => err.reason === 'local-endpoint-dead' && CAPABILITY_REFUSALS.includes(err.reason),
+    )
+    assert.deepEqual(probed, [baseUrl])
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('F1 unknown qualified raw provider refuses by a closed reason', async () => {
+  const root = scratchDir('crew-raw-unknown-f1-')
+  try {
+    const probed = []
+    const register = capabilityRegister()
+    await assert.rejects(
+      () => resolveAdapters(['builder'], { 'model-builder': 'unknown-provider/qwen3-coder', 'agent-builder': 'pi' }, null, {
+        register, root, probeEndpoint: async (url) => { probed.push(url); return true },
+      }),
+      (err) => err.reason === 'agent-provider-unsupported' && CAPABILITY_REFUSALS.includes(err.reason),
+    )
+    assert.deepEqual(probed, [])
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('F1b resolved raw local provider unsupported by the agent refuses by a closed reason', async () => {
+  const root = scratchDir('crew-raw-resolved-local-f1b-')
+  try {
+    const settings = join(root, 'crew/pi/settings.json')
+    const baseUrl = 'http://127.0.0.1:11434/v1'
+    mkdirSync(dirname(settings), { recursive: true })
+    writeFileSync(settings, '{}')
+    writeFileSync(join(dirname(settings), 'models.json'), JSON.stringify({ providers: { 'llama-swap': null } }))
+    const base = capabilityRegister()
+    const register = capabilityRegister({
+      local_providers: {
+        'lan-box': { settings: 'crew/pi/settings.json', pi_provider: 'llama-swap', base_url: baseUrl },
+      },
+      coding_agents: {
+        pi: { ...base.coding_agents.pi, providers: ['openai', 'anthropic'] },
+      },
+    })
+    const probed = []
+    await assert.rejects(
+      () => resolveAdapters(['builder'], { 'model-builder': 'llama-swap/qwen3-coder', 'agent-builder': 'pi' }, null, {
+        register, root, probeEndpoint: async (url) => { probed.push(url); return true },
+      }),
+      (err) => err.reason === 'agent-provider-unsupported'
+        && CAPABILITY_REFUSALS.includes(err.reason)
+        && /coding_agents\.pi\.providers/.test(err.message),
+    )
+    assert.deepEqual(probed, [])
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('G1 ordinary hosted raw provider remains unchanged', async () => {
+  const root = scratchDir('crew-raw-hosted-g1-')
+  try {
+    const probed = []
+    const register = capabilityRegister({ local_providers: {
+      'local-pi': { settings: 'crew/pi/missing-settings.json', pi_provider: 'local-pi', base_url: 'http://127.0.0.1:11434/v1' },
+    } })
+    const adapters = await resolveAdapters(['builder'], { 'model-builder': 'anthropic/claude-opus-5', 'agent-builder': 'pi' }, null, {
+      register, root, probeEndpoint: async (url) => { probed.push(url); return true },
+    })
+    assert.equal(adapters.builder.configDir, null)
+    assert.deepEqual(probed, [])
+    const command = adapters.builder.adapter.seatCommand({
+      role: 'builder', model: 'anthropic/claude-opus-5', promptFile: '/tmp/role-builder.md',
+      tools: SEAT_DEFAULTS.builder.tools, deny: SEAT_DEFAULTS.builder.deny, taskDir: root,
+      bootBrief: 'boot', effort: 'max', grants: adapters.builder.grants, configDir: adapters.builder.configDir,
+    })
+    assert.match(command, /--model anthropic\/claude-opus-5/)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('H1 roster local provider path remains unchanged', async () => {
+  const root = scratchDir('crew-roster-local-h1-')
+  try {
+    const settings = join(root, 'crew/pi/settings.json')
+    const baseUrl = 'http://127.0.0.1:11434/v1'
+    mkdirSync(dirname(settings), { recursive: true })
+    writeFileSync(settings, '{}')
+    writeFileSync(join(dirname(settings), 'models.json'), JSON.stringify({ providers: { 'local-pi': null } }))
+    const register = capabilityRegister({ local_providers: {
+      'local-pi': { settings: 'crew/pi/settings.json', pi_provider: 'local-pi', base_url: baseUrl },
+    } })
+    const probed = []
+    const seats = { builder: { agent: 'pi', effort: 'max', provider: 'local-pi', id: 'qwen3-coder', model: null } }
+    const adapters = await resolveAdapters(['builder'], {}, seats, {
+      register, root, probeEndpoint: async (url) => { probed.push(url); return true },
+    })
+    assert.equal(adapters.builder.configDir, dirname(settings))
+    assert.deepEqual(probed, [baseUrl])
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('RV1-1 raw adapter namespace resolves a divergent local provider', async () => {
+  const root = scratchDir('crew-raw-divergent-rv1-1-')
+  try {
+    const settings = join(root, 'crew/pi/settings.json')
+    const baseUrl = 'http://127.0.0.1:11434/v1'
+    mkdirSync(dirname(settings), { recursive: true })
+    writeFileSync(settings, '{}')
+    writeFileSync(join(dirname(settings), 'models.json'), JSON.stringify({ providers: { 'llama-swap': null } }))
+    const base = capabilityRegister()
+    const register = capabilityRegister({
+      local_providers: {
+        'lan-box': { settings: 'crew/pi/settings.json', pi_provider: 'llama-swap', base_url: baseUrl },
+      },
+      coding_agents: {
+        pi: { ...base.coding_agents.pi, providers: ['openai', 'anthropic', 'lan-box'] },
+      },
+    })
+    const probed = []
+    const adapters = await resolveAdapters(['builder'], { 'model-builder': 'llama-swap/qwen3-coder', 'agent-builder': 'pi' }, null, {
+      register, root, probeEndpoint: async (url) => { probed.push(url); return true },
+    })
+    assert.equal(adapters.builder.configDir, dirname(settings))
+    assert.deepEqual(probed, [baseUrl])
+    probed.length = 0
+    await assert.rejects(
+      () => resolveAdapters(['builder'], { 'model-builder': 'lan-box/qwen3-coder', 'agent-builder': 'pi' }, null, {
+        register, root, probeEndpoint: async (url) => { probed.push(url); return true },
+      }),
+      (err) => err.reason === 'agent-provider-unsupported'
+        && CAPABILITY_REFUSALS.includes(err.reason)
+        && /coding_agents\.pi\.providers/.test(err.message),
+    )
+    assert.deepEqual(probed, [])
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('RV1-2 raw roster-key spelling refuses without an adapter match', async () => {
+  const root = scratchDir('crew-raw-divergent-rv1-2-')
+  try {
+    const settings = join(root, 'crew/pi/settings.json')
+    mkdirSync(dirname(settings), { recursive: true })
+    writeFileSync(settings, '{}')
+    writeFileSync(join(dirname(settings), 'models.json'), JSON.stringify({ providers: { 'llama-swap': null } }))
+    const base = capabilityRegister()
+    const register = capabilityRegister({
+      local_providers: {
+        'lan-box': { settings: 'crew/pi/settings.json', pi_provider: 'llama-swap', base_url: 'http://127.0.0.1:11434/v1' },
+      },
+      coding_agents: {
+        pi: { ...base.coding_agents.pi, providers: ['openai', 'anthropic', 'lan-box'] },
+      },
+    })
+    const probed = []
+    await assert.rejects(
+      () => resolveAdapters(['builder'], { 'model-builder': 'lan-box/qwen3-coder', 'agent-builder': 'pi' }, null, {
+        register, root, probeEndpoint: async (url) => { probed.push(url); return true },
+      }),
+      (err) => err.reason === 'agent-provider-unsupported'
+        && CAPABILITY_REFUSALS.includes(err.reason)
+        && /coding_agents\.pi\.providers/.test(err.message)
+        && /llama-swap\/qwen3-coder/.test(err.message),
+    )
+    assert.deepEqual(probed, [])
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('RV1-3 bare raw override keeps roster local checks', async () => {
+  const root = scratchDir('crew-raw-bare-rv1-3-')
+  try {
+    const settings = join(root, 'crew/pi/settings.json')
+    const baseUrl = 'http://127.0.0.1:11434/v1'
+    mkdirSync(dirname(settings), { recursive: true })
+    writeFileSync(settings, '{}')
+    writeFileSync(join(dirname(settings), 'models.json'), JSON.stringify({ providers: { 'llama-swap': null } }))
+    const register = capabilityRegister({ local_providers: {
+      'llama-swap': { settings: 'crew/pi/settings.json', pi_provider: 'llama-swap', base_url: baseUrl },
+    } })
+    const seats = { builder: { agent: 'pi', effort: 'max', provider: 'llama-swap', id: 'gpt-oss-20b', model: null } }
+    const probed = []
+    const adapters = await resolveAdapters(['builder'], { 'model-builder': 'gpt-oss-20b', 'agent-builder': 'pi' }, seats, {
+      register, root, probeEndpoint: async (url) => { probed.push(url); return true },
+    })
+    assert.equal(adapters.builder.configDir, dirname(settings))
+    assert.deepEqual(probed, [baseUrl])
+    probed.length = 0
+    await assert.rejects(
+      () => resolveAdapters(['builder'], { 'model-builder': 'gpt-oss-20b', 'agent-builder': 'pi' }, seats, {
+        register, root, probeEndpoint: async (url) => { probed.push(url); return false },
+      }),
+      (err) => err.reason === 'local-endpoint-dead' && CAPABILITY_REFUSALS.includes(err.reason),
+    )
+    assert.deepEqual(probed, [baseUrl])
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
 test('A1 local provider without models.json refuses by closed declaration reason', async () => {
   const root = scratchDir('crew-local-provider-a1-')
   try {

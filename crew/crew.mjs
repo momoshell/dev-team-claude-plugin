@@ -1592,6 +1592,7 @@ export async function resolveAdapters(roles, args, seats = null, deps = {}) {
       const seat = seats?.[role]
       const name = String(seat?.agent || seatAgent(role, sourceArgs))
       if (!/^[a-z0-9][a-z0-9-]*$/.test(name)) throw new Error(`invalid agent adapter name "${name}" for seat ${role}`)
+      const rawModel = seat?.model || sourceArgs[`model-${role}`] || null
       const grants = grantsFor(registry, role, { root, exists, agent: name })
       assertGrantsBacked(role, grants, registry, { agent: name })
       assertFanoutCoherent(role, grants)
@@ -1612,6 +1613,33 @@ export async function resolveAdapters(roles, args, seats = null, deps = {}) {
       const adapter = await import(pathToFileURL(file).href)
       if (typeof adapter.seatCommand !== 'function') throw new Error(`agent adapter "${name}" for seat ${role} (${file}) does not export a seatCommand function`)
       if (typeof adapter.capabilitiesFor !== 'function') throw new Error(`agent adapter "${name}" for seat ${role} (${file}) does not export a capabilitiesFor function`)
+      let rawProvider = null
+      let rawSegment = null
+      if (typeof rawModel === 'string' && typeof adapter.modelString === 'function') {
+        const slash = rawModel.indexOf('/')
+        if (slash > 0) {
+          const segment = rawModel.slice(0, slash)
+          const id = rawModel.slice(slash + 1)
+          rawSegment = segment
+          const candidates = [...new Set([...Object.keys(registry.local_providers), ...(registry.coding_agents[name]?.providers || [])])]
+          const matches = []
+          for (const candidate of candidates) {
+            let candidateModel
+            try { candidateModel = adapter.modelString({ provider: candidate, id, localProviders: registry.local_providers }) } catch { continue }
+            if (candidateModel === rawModel) matches.push(candidate)
+          }
+          if (matches.length === 1) rawProvider = matches[0]
+          else {
+            assertAgentProvider(registry, name, segment, { role })
+            if (Object.hasOwn(registry.local_providers, segment)) {
+              let adapterSpelling
+              try { adapterSpelling = adapter.modelString({ provider: segment, id, localProviders: registry.local_providers }) } catch { adapterSpelling = `${registry.local_providers[segment].pi_provider}/${id}` }
+              throw refuse('agent-provider-unsupported', `seat ${role} expected raw override ${JSON.stringify(rawModel)} to name coding agent ${name}'s own provider namespace, found local_providers register key ${JSON.stringify(segment)}, which ${name} spells ${JSON.stringify(adapterSpelling)} — retype the override as ${JSON.stringify(adapterSpelling)}; editing coding_agents.${name}.providers will not help, ${JSON.stringify(segment)} is already admitted there`)
+            }
+          }
+        }
+      }
+      if (rawProvider) assertAgentProvider(registry, name, rawProvider, { role })
       const transport = seatTransport({ role, args: sourceArgs, adapter, agentName: name })
       const relativeAdapterPath = `crew/adapters/adapter-${name}.mjs`
       // Do not re-add an adapter assertion here: loadCapabilities owns adapter-path
@@ -1635,7 +1663,9 @@ export async function resolveAdapters(roles, args, seats = null, deps = {}) {
       for (const fallback of rosterFallbacks) assertAgentModelAgreement(adapter, registry, name, fallback.provider, fallback.id, { role })
 
       let configDir = null
-      const provider = seat?.provider
+      let provider = rawSegment ? null : seat?.provider
+      if (rawProvider) provider = rawProvider
+      else if (!rawModel) provider = seat?.provider
       const localProvider = provider && Object.hasOwn(registry.local_providers, provider) ? registry.local_providers[provider] : null
       if (localProvider) {
         const settingsPath = resolvedGrantPath(root, localProvider.settings)
@@ -1701,7 +1731,8 @@ export async function resolveAdapters(roles, args, seats = null, deps = {}) {
       if (transport === HEADLESS_TRANSPORT && typeof adapter.headlessCommand !== 'function') {
         throw new Error(`agent adapter "${name}" for seat ${role} (${file}) does not export a headlessCommand function`)
       }
-      out[role] = { name, adapter, transport, grants, configDir }
+      const adapterConfig = { name, adapter, transport, grants, configDir }
+      out[role] = adapterConfig
     } catch (err) {
       if (err.role === undefined) { err.role = role; err.cell = seats?.[role] ?? null }
       throw err

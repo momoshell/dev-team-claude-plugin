@@ -532,6 +532,7 @@ const RECORDED_SUITE_SAMPLES = Object.freeze([
   ["crew/reclaim.test.mjs",0.47376554200053217,119,null],
   ["crew/roster-refresh.test.mjs",0.166721165984869,19,null],
   ["crew/run-configuration.test.mjs",0.07368274998664856,11,null],
+  ["crew/screener.test.mjs",0.478546667098999,8,null],
   ["crew/seat-io-death.test.mjs",0.8119189170002937,17,null],
   ["crew/seat-io-heartbeat.test.mjs",0.37624708300828935,8,null],
   ["crew/seat-io-runclean.test.mjs",17.292546541005372,146,null],

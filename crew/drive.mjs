@@ -3727,7 +3727,7 @@ export function composePrBody(record) {
   const intentLines = intent ? [intent, ''] : []
   const closes = Array.isArray(record?.closes) ? record.closes : []
   const issues = Array.isArray(record?.issues) ? record.issues : []
-  const closesLines = closes.length ? [`Closes ${closes.join(', ')}`] : []
+  const closesLines = closes.length ? [`Closes ${closes.join(', closes ')}`] : []
   const refsLines = issues.length ? [`Refs ${issues.join(', ')}`] : []
   const trailerLines = closes.length || issues.length ? [...closesLines, ...refsLines, ''] : []
   const gate = record?.gate || null

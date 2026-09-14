@@ -1,3 +1,4 @@
+import { TASK_PROFILES } from '../../../../crew/task-profiles.mjs'
 import { assuranceMeta, executionMeta, taskProfileMeta } from './workflow-semantics.js'
 
 export const SILENT_AFTER_MS = 30_000
@@ -119,6 +120,248 @@ export function runDetailSeats(run = {}) {
     warnings: normaliseWarnings(seat?.warnings),
   }))
   return { state: 'measured', rows, summary: `${rows.length} seat${rows.length === 1 ? '' : 's'} recorded` }
+}
+
+const DEFAULT_PROFILE_EVIDENCE = Object.freeze([
+  'structured_findings', 'checks_run', 'reproduction_or_cited_failure', 'mutation_or_negative_control',
+])
+
+const EVIDENCE_LABELS = Object.freeze({
+  base_head_identity: 'Base/head identity',
+  captured_evidence: 'Captured evidence',
+  changed_tests: 'Changed tests',
+  check_result: 'Check result',
+  checks_run: 'Verification checks',
+  citations: 'Citations',
+  cited_findings: 'Cited findings',
+  environment: 'Environment',
+  explicit_unknowns: 'Explicit unknowns',
+  fix_validation: 'Fix validation',
+  mutation_or_negative_control: 'Test discrimination',
+  regression_evidence: 'Regression evidence',
+  reproduction_or_cited_failure: 'Bug reproduction',
+  review: 'Review findings',
+  scoped_diff: 'Scoped diff',
+  severity: 'Finding severity',
+  structured_findings: 'Review findings',
+  suite_result: 'Suite result',
+  terminal_result: 'Terminal result',
+  validation: 'Validation',
+  zero_source_writes: 'Zero source writes',
+})
+
+const EVIDENCE_MEANINGS = Object.freeze({
+  base_head_identity: 'Pins the exact base and head that were measured',
+  captured_evidence: 'Preserves the observed output behind each verification check',
+  changed_tests: 'Shows which tests materially changed for the intended behavior',
+  check_result: 'Records the independently measured pass, fail, blocked, or not-run result',
+  checks_run: 'Shows each declared verification target that was actually checked',
+  citations: 'Connects findings to their recorded source locations or evidence',
+  cited_findings: 'Carries the bounded answer and the sources that support it',
+  environment: 'Records the environment assumptions under which the result was measured',
+  explicit_unknowns: 'Keeps unresolved questions visible instead of treating them as settled',
+  fix_validation: 'Shows the validation measured after the proposed fix',
+  mutation_or_negative_control: 'Shows that the tests discriminate the intended behavior',
+  regression_evidence: 'Shows the recorded evidence that unrelated behavior remained intact',
+  reproduction_or_cited_failure: 'Pins the initial failure or cited defect being addressed',
+  review: 'Records the review evidence relevant to the requested change',
+  scoped_diff: 'Identifies the measured files or change set within scope',
+  severity: 'Makes the impact level of each structured finding explicit',
+  structured_findings: 'Carries actionable findings with their recorded evidence and disposition',
+  suite_result: 'Records the relevant suite or validation result',
+  terminal_result: 'Shows the recorded terminal outcome rather than inferring one',
+  validation: 'Shows the validation command or result that was actually recorded',
+  zero_source_writes: 'Preserves the measured proof that the workflow did not write source files',
+})
+
+function profileEvidenceEntries(returns = {}) {
+  const source = Array.isArray(returns) ? returns : Array.isArray(returns?.envelopes) ? returns.envelopes : []
+  return source.filter((entry) => entry && typeof entry === 'object').map((entry) => ({
+    entry,
+    details: entry.details && typeof entry.details === 'object' && !Array.isArray(entry.details) ? entry.details : {},
+  }))
+}
+
+function recordedEvidenceValue(value) {
+  return value !== null && value !== undefined && (typeof value !== 'string' || value.trim().length > 0)
+}
+
+function evidenceReference(entry, field, value) {
+  return {
+    assignment_id: entry.assignment_id ?? null,
+    dispatch_seq: entry.dispatch_seq ?? null,
+    role: entry.role ?? null,
+    field,
+    value,
+  }
+}
+
+function evidenceFields(entries, fields) {
+  const references = []
+  let present = false
+  for (const { entry, details } of entries) {
+    for (const field of fields) {
+      if (!Object.prototype.hasOwnProperty.call(details, field)) continue
+      const value = details[field]
+      if (!recordedEvidenceValue(value)) continue
+      present = true
+      if (Array.isArray(value)) {
+        for (const item of value) references.push(evidenceReference(entry, field, item))
+      } else references.push(evidenceReference(entry, field, value))
+    }
+  }
+  return { present, references }
+}
+
+function combineEvidence(...payloads) {
+  return {
+    present: payloads.some((payload) => payload.present),
+    references: payloads.flatMap((payload) => payload.references),
+  }
+}
+
+function findingEvidenceFields(entries, fields) {
+  const references = []
+  let present = false
+  for (const { entry, details } of entries) {
+    const findings = details.findings
+    if (!Array.isArray(findings)) continue
+    for (const finding of findings) {
+      if (!finding || typeof finding !== 'object') continue
+      for (const field of fields) {
+        const value = finding[field]
+        if (!recordedEvidenceValue(value)) continue
+        present = true
+        if (Array.isArray(value)) {
+          for (const item of value) references.push(evidenceReference(entry, `findings.${field}`, item))
+        } else references.push(evidenceReference(entry, `findings.${field}`, value))
+      }
+    }
+  }
+  return { present, references }
+}
+
+function terminalEvidence(returns, entries) {
+  const references = []
+  let present = false
+  for (const { entry } of entries) {
+    if (!recordedEvidenceValue(entry.status)) continue
+    present = true
+    references.push(evidenceReference(entry, 'status', entry.status))
+  }
+  if (recordedEvidenceValue(returns?.task?.status)) {
+    present = true
+    references.push({ assignment_id: null, dispatch_seq: null, role: 'task', field: 'status', value: returns.task.status })
+  }
+  return { present, references }
+}
+
+function payloadForEvidence(key, entries, returns) {
+  switch (key) {
+    case 'base_head_identity': return evidenceFields(entries, ['base', 'head', 'base_head_identity'])
+    case 'captured_evidence': return evidenceFields(entries, ['captured_evidence', 'evidence'])
+    case 'changed_tests': return evidenceFields(entries, ['changed_tests', 'tests_changed', 'test_files', 'files_changed'])
+    case 'check_result': return evidenceFields(entries, ['check_result', 'product_verdict', 'check_matrix'])
+    case 'checks_run': return evidenceFields(entries, ['checks_run', 'check_matrix'])
+    case 'citations': return combineEvidence(evidenceFields(entries, ['citations']), findingEvidenceFields(entries, ['citations', 'evidence', 'location']))
+    case 'cited_findings': return evidenceFields(entries, ['cited_findings', 'findings', 'citations'])
+    case 'environment': return evidenceFields(entries, ['environment', 'environment_assumptions'])
+    case 'explicit_unknowns': return evidenceFields(entries, ['explicit_unknowns', 'unknowns'])
+    case 'fix_validation': return evidenceFields(entries, ['fix_validation', 'validation', 'validation_lane'])
+    case 'mutation_or_negative_control': return evidenceFields(entries, ['mutations', 'mutation_or_negative_control', 'mutation', 'negative_control'])
+    case 'regression_evidence': return evidenceFields(entries, ['regression_evidence', 'suite_result', 'validation'])
+    case 'reproduction_or_cited_failure': return evidenceFields(entries, ['reproduction', 'reproduction_or_cited_failure', 'cited_failure'])
+    case 'review': return evidenceFields(entries, ['findings', 'review', 'verdict'])
+    case 'scoped_diff': return evidenceFields(entries, ['scoped_diff', 'files_changed', 'files_in_scope'])
+    case 'severity': return combineEvidence(evidenceFields(entries, ['severity']), findingEvidenceFields(entries, ['severity']))
+    case 'structured_findings': return evidenceFields(entries, ['findings', 'structured_findings'])
+    case 'suite_result': return evidenceFields(entries, ['suite_result', 'suite', 'validation', 'validation_lane'])
+    case 'terminal_result': return terminalEvidence(returns, entries)
+    case 'validation': return evidenceFields(entries, ['validation', 'validation_lane'])
+    case 'zero_source_writes': return evidenceFields(entries, ['zero_source_writes', 'zero_write_proof', 'files_written'])
+    default: return evidenceFields(entries, [key])
+  }
+}
+
+function compactEvidenceValue(value) {
+  if (typeof value === 'string') return value.trim().replaceAll(/\\s+/g, ' ').slice(0, 120)
+  if (value === null || value === undefined) return null
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  try {
+    const encoded = JSON.stringify(value)
+    return encoded.length > 120 ? `${encoded.slice(0, 117)}…` : encoded
+  } catch { return 'recorded value' }
+}
+
+function checkStatusCounts(references) {
+  const counts = new Map()
+  for (const reference of references) {
+    const value = reference.value
+    const status = value && typeof value === 'object' ? (value.status ?? value.result ?? value.verdict) : null
+    if (typeof status !== 'string' || !status.trim()) continue
+    counts.set(status, (counts.get(status) ?? 0) + 1)
+  }
+  return [...counts.entries()].map(([status, count]) => `${count} ${status}`).join(' · ')
+}
+
+function evidenceSummary(key, payload) {
+  if (!payload.present) return 'Not recorded'
+  const references = payload.references
+  const count = references.length
+  if (key === 'base_head_identity') {
+    const values = references.map((reference) => `${reference.field} ${compactEvidenceValue(reference.value)}`).filter(Boolean)
+    return values.length ? values.join(' · ') : 'Identity fields recorded without displayable values'
+  }
+  if (key === 'structured_findings' || key === 'review' || key === 'cited_findings') return `${count} finding${count === 1 ? '' : 's'} recorded`
+  if (key === 'checks_run') return count ? `${count} verification check${count === 1 ? '' : 's'} recorded${checkStatusCounts(references) ? ` · ${checkStatusCounts(references)}` : ''}` : '0 verification checks recorded'
+  if (key === 'check_result') return checkStatusCounts(references) || (count ? `${count} check result${count === 1 ? '' : 's'} recorded` : 'Check result recorded without a count')
+  if (key === 'captured_evidence') return count ? `${count} captured evidence item${count === 1 ? '' : 's'} recorded` : '0 captured evidence items recorded'
+  if (key === 'environment') return count ? `${count} environment record${count === 1 ? '' : 's'} recorded` : '0 environment records recorded'
+  if (key === 'mutation_or_negative_control') return count ? `${count} mutation or negative-control record${count === 1 ? '' : 's'} recorded` : '0 mutation or negative-control records recorded'
+  if (key === 'changed_tests') return count ? `${count} changed-test record${count === 1 ? '' : 's'} recorded` : '0 changed-test records recorded'
+  if (key === 'reproduction_or_cited_failure') return references.map((reference) => compactEvidenceValue(reference.value)).filter(Boolean).join(' · ') || 'Reproduction was recorded without displayable text'
+  if (key === 'validation' || key === 'fix_validation' || key === 'regression_evidence' || key === 'suite_result') {
+    const values = references.map((reference) => compactEvidenceValue(reference.value)).filter(Boolean)
+    return values.length ? values.join(' · ') : 'Validation was recorded without displayable text'
+  }
+  if (key === 'terminal_result') return references.map((reference) => compactEvidenceValue(reference.value)).filter(Boolean).join(' · ') || 'Terminal result recorded'
+  if (key === 'zero_source_writes') return references.map((reference) => compactEvidenceValue(reference.value)).filter(Boolean).join(' · ') || 'Zero-write evidence recorded'
+  if (key === 'severity') {
+    const severities = references.map((reference) => reference.value?.severity).filter((value) => typeof value === 'string' && value.trim())
+    return severities.length ? [...new Set(severities)].map((severity) => `${severities.filter((value) => value === severity).length} ${severity}`).join(' · ') : `${count} severity record${count === 1 ? '' : 's'} recorded`
+  }
+  if (key === 'citations') return count ? `${count} citation${count === 1 ? '' : 's'} recorded` : '0 citations recorded'
+  if (key === 'explicit_unknowns') return count ? `${count} explicit unknown${count === 1 ? '' : 's'} recorded` : '0 explicit unknowns recorded'
+  return count ? `${count} record${count === 1 ? '' : 's'} recorded` : 'Recorded evidence is empty'
+}
+
+function profileEvidenceReason(profile, key) {
+  const meaning = EVIDENCE_MEANINGS[key] || `${String(key).replaceAll('_', ' ')} evidence`
+  const outcome = profile?.outcome || 'the recorded envelope evidence'
+  return `${meaning}; this supports ${outcome.charAt(0).toLowerCase()}${outcome.slice(1)}.`
+}
+
+export function profileEvidenceView(profileKey, returns = {}) {
+  const profile = TASK_PROFILES[profileKey] ?? null
+  const required = profile ? [...profile.evidence] : []
+  const keys = profile ? required : [...DEFAULT_PROFILE_EVIDENCE]
+  const entries = profileEvidenceEntries(returns)
+  const blocks = keys.map((key) => {
+    const payload = payloadForEvidence(key, entries, returns)
+    return {
+      key,
+      label: EVIDENCE_LABELS[key] || String(key).replaceAll('_', ' '),
+      reason: profileEvidenceReason(profile, key),
+      summary: evidenceSummary(key, payload),
+      measured: payload.present,
+      references: payload.references,
+    }
+  })
+  return {
+    profile: { key: profile?.name ? profileKey : null, label: profile?.name || 'Not recorded' },
+    profile_specific: Boolean(profile),
+    blocks,
+  }
 }
 
 export function configurationFilterView(runs = [], selections = {}) {

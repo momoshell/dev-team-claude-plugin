@@ -5,11 +5,11 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { PANEL_REFRESH_MS, PANEL_STALE_AFTER_MS, acceptRows, brakePanel, cellHealthPanel, fleetCost, fleetEscalationRate, fleetMedianDuration, fleetPassRate, fleetPhasesPerRun, fleetTokens, findingRows, gateChips, intakeCandidateRows, intakePanel, reviewRows, rosterEditForm, rosterPanel, panelAgeLabel, panelReadLoop, readFreshness, rosterProposal, runSetPanel, teardownPanel } from '../visualizer/web/src/lib/panels.js'
 import { parseHash, formatHash } from '../visualizer/web/src/lib/route.js'
-import { ATTENTION_KEYS, absenceMark, attentionBreakdown, configurationDimensionCell, configurationFilterView, costCell, createSemaphore, crewArchive, deriveDisplayStatus, deriveStatus, escalationProbeTargets, fleetActivity, fleetView, gateCell, heartbeatCell, needsAttention, openRecordNote, operationsOverview, reviewCell, runActivity, runDetailConfiguration, runDetailSeats, runDetailState, runtimeActivitySummary, slotWaitCell, tokenCell } from '../visualizer/web/src/lib/fleet.js'
+import { ATTENTION_KEYS, absenceMark, attentionBreakdown, configurationDimensionCell, configurationFilterView, costCell, createSemaphore, crewArchive, deriveDisplayStatus, deriveStatus, escalationProbeTargets, fleetActivity, fleetView, gateCell, heartbeatCell, needsAttention, openRecordNote, operationsOverview, profileEvidenceView, reviewCell, runActivity, runDetailConfiguration, runDetailSeats, runDetailState, runtimeActivitySummary, slotWaitCell, tokenCell } from '../visualizer/web/src/lib/fleet.js'
 import { ROLE_ORDER, acceptEvidence, bounceArrows, gateMarkers, gateProofStory, laneRows, phaseFilterId, phasePanel, renderMarkdown } from '../visualizer/web/src/lib/trace.js'
 import { eventStory, eventStreamSummary } from '../visualizer/web/src/lib/event-story.js'
 import { assignmentPath, envelopeFacts, envelopeGroups, envelopeOverview, envelopeSections, trajectoryRowStory, trajectorySummary } from '../visualizer/web/src/lib/diagnostic-story.js'
-import { factoryStepCategory, factoryStepName, factoryStepTrace } from '../visualizer/web/src/lib/execution-steps.js'
+import { executionTopology, factoryStepCategory, factoryStepName, factoryStepTrace } from '../visualizer/web/src/lib/execution-steps.js'
 import { crewSummary } from '../visualizer/web/src/lib/crew.js'
 import { assuranceMeta, assuranceOption, executionMeta, runConfiguration, taskProfileMeta } from '../visualizer/web/src/lib/workflow-semantics.js'
 import { diffLines } from '../visualizer/web/src/lib/diff-lines.js'
@@ -24,13 +24,18 @@ async function withAttentionFixture(extraKey, callback) {
   try {
     const sourcePath = join(process.cwd(), 'visualizer/web/src/lib/fleet.js')
     const semanticsPath = join(process.cwd(), 'visualizer/web/src/lib/workflow-semantics.js')
+    const profilesPath = join(process.cwd(), 'crew/task-profiles.mjs')
     const source = readFileSync(sourcePath, 'utf8')
     const original = "export const ATTENTION_KEYS = Object.freeze(['escalated', 'fail', 'aborted', 'silent', 'unverified', 'gone', 'contradicted'])"
     const changed = `export const ATTENTION_KEYS = Object.freeze(['escalated', 'fail', 'aborted', 'silent', 'unverified', 'gone', 'contradicted', '${extraKey}'])`
+    const moduleDir = join(dir, 'visualizer', 'web', 'src', 'lib')
     assert.equal(source.includes(original), true)
-    writeFileSync(join(dir, 'workflow-semantics.js'), readFileSync(semanticsPath, 'utf8'))
-    writeFileSync(join(dir, 'fleet.js'), source.replace(original, changed))
-    const module = await import(`${pathToFileURL(join(dir, 'fleet.js')).href}?attention=${encodeURIComponent(extraKey)}`)
+    mkdirSync(moduleDir, { recursive:true })
+    mkdirSync(join(dir, 'crew'), { recursive:true })
+    writeFileSync(join(moduleDir, 'workflow-semantics.js'), readFileSync(semanticsPath, 'utf8'))
+    writeFileSync(join(moduleDir, 'fleet.js'), source.replace(original, changed))
+    writeFileSync(join(dir, 'crew', 'task-profiles.mjs'), readFileSync(profilesPath, 'utf8'))
+    const module = await import(`${pathToFileURL(join(moduleDir, 'fleet.js')).href}?attention=${encodeURIComponent(extraKey)}`)
     return await callback(module)
   } finally {
     rmSync(dir, { recursive: true, force: true })
@@ -329,7 +334,7 @@ test('G1 task detail state reports measured facts and independently missing fact
 
 test('H1 RunDetail composes plain detail helpers and renders each audited field', () => {
   const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/RunDetail.svelte'), 'utf8')
-  assert.match(source, /import \{ deriveDisplayStatus, durationCell, gateCell, openRecordNote, reviewCell, runDetailConfiguration, runDetailSeats, runDetailState, tokenCell \} from '\.\/fleet\.js'/)
+  assert.match(source, /import \{ deriveDisplayStatus, durationCell, gateCell, openRecordNote, profileEvidenceView, reviewCell, runDetailConfiguration, runDetailSeats, runDetailState, tokenCell \} from '\.\/fleet\.js'/)
   assert.match(source, /let configurationDetail = \$derived\(runDetailConfiguration\(run\)\)/)
   assert.match(source, /let seatPolicy = \$derived\(runDetailSeats\(run\)\)/)
   assert.match(source, /let runState = \$derived\(runDetailState\(run, events\)\)/)
@@ -1574,6 +1579,105 @@ test('factory step trace projects measured journal spans into their owning phase
     trace.steps[1].handoffs.map((handoff) => [Number(handoff.x.toFixed(2)), Number(handoff.width.toFixed(2))]),
     [],
   )
+})
+
+test('profile evidence consumes declaration order and measured envelope families', () => {
+  const returns = { envelopes: [
+    { assignment_id:'r1', dispatch_seq:1, role:'reviewer', details:{ findings:[{ id:'f1', severity:'must-fix', evidence:'a.js:1' }] } },
+    { assignment_id:'q1', dispatch_seq:2, role:'reviewer', details:{ check_matrix:[{ id:'v1', status:'passed', command:'node --test', result:'green', evidence:'tap' }] } },
+    { assignment_id:'b1', dispatch_seq:3, role:'builder', details:{ reproduction:'fails before fix', reproduction_or_cited_failure:'fails before fix', validation:'green', mutations:[{ check:'m1', status:'passed' }] } },
+  ] }
+  const review = profileEvidenceView('code_review', returns)
+  assert.deepEqual(review.blocks.map((block) => block.key), ['base_head_identity', 'structured_findings', 'severity', 'citations', 'zero_source_writes'])
+  assert.match(review.blocks.find((block) => block.key === 'structured_findings').summary, /1 finding recorded/)
+  assert.match(review.blocks.find((block) => block.key === 'citations').summary, /1 citation recorded/)
+  const implementation = profileEvidenceView('implementation', returns)
+  assert.deepEqual(implementation.blocks.map((block) => block.key), ['scoped_diff', 'validation', 'review', 'terminal_result'])
+  assert.equal(implementation.blocks.find((block) => block.key === 'scoped_diff').summary, 'Not recorded')
+  const verification = profileEvidenceView('qa_verification', returns)
+  assert.match(verification.blocks.find((block) => block.key === 'checks_run').summary, /1 verification check recorded/)
+  const bug = profileEvidenceView('bug_fix', returns)
+  assert.match(bug.blocks.find((block) => block.key === 'reproduction_or_cited_failure').summary, /fails before fix/)
+  assert.match(bug.blocks.find((block) => block.key === 'fix_validation').summary, /green/)
+  const authored = profileEvidenceView('test_authoring', returns)
+  assert.match(authored.blocks.find((block) => block.key === 'mutation_or_negative_control').summary, /1 mutation/)
+})
+
+test('profile evidence keeps historical and empty payloads explicit', () => {
+  const absent = profileEvidenceView(null, { envelopes:[{ role:'reviewer', details:{} }] })
+  assert.deepEqual(absent.blocks.map((block) => block.key), ['structured_findings', 'checks_run', 'reproduction_or_cited_failure', 'mutation_or_negative_control'])
+  assert.equal(absent.profile.key, null)
+  assert.equal(absent.profile.label, 'Not recorded')
+  assert.equal(absent.profile_specific, false)
+  assert.equal(absent.blocks.every((block) => block.summary === 'Not recorded'), true)
+  const empty = profileEvidenceView('code_review', { envelopes:[{ role:'reviewer', details:{ findings:[] } }] })
+  assert.match(empty.blocks.find((block) => block.key === 'structured_findings').summary, /0 finding/)
+  assert.equal(empty.blocks.find((block) => block.key === 'structured_findings').measured, true)
+  assert.equal(profileEvidenceView('unknown-profile', {}).profile.key, null)
+})
+
+test('RV1-1 profile evidence array references use distinct RunDetail keys', () => {
+  const view = profileEvidenceView('code_review', { envelopes:[{
+    dispatch_seq:4,
+    role:'reviewer',
+    details:{ findings:[
+      { id:'f1', severity:'must-fix', evidence:'a.js:1' },
+      { id:'f2', severity:'should-fix', evidence:'b.js:2' },
+    ] },
+  }] })
+  const references = view.blocks.find((block) => block.key === 'structured_findings').references
+  assert.deepEqual(references.map((reference) => `${reference.dispatch_seq}-${reference.field}-${reference.role}`), ['4-findings-reviewer', '4-findings-reviewer'])
+  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/RunDetail.svelte'), 'utf8')
+  assert.ok(source.includes("{#each block.references as reference, index (`${reference.dispatch_seq ?? 'task'}-${reference.field}-${reference.role ?? 'unknown'}-${index}`)}"))
+})
+
+test('RV1-2 execution topology de-duplicates repeated undeclared journal labels', () => {
+  const topology = executionTopology('scout', [
+    'commit:r1', 'commit:r1', 'scout:r1', 'scout:r1', 'scope-gate:r1', 'scope-gate:r1', 'envelope-accept',
+  ], { complete:true })
+  assert.deepEqual(topology.defects.filter((defect) => defect.kind === 'undeclared'), [
+    { kind:'undeclared', stage:'commit:r1', message:'Stage commit:r1 was not declared by scout.' },
+  ])
+  assert.deepEqual(topology.undeclared, ['commit:r1'])
+})
+
+test('execution topology reports settled gaps, undeclared stages, and pending work', () => {
+  const missing = executionTopology('scout', ['scout:r1', 'envelope-accept'], { complete:true })
+  assert.equal(missing.rows.find((row) => row.stage === 'scope-gate').status, 'missing')
+  assert.deepEqual(missing.defects.find((defect) => defect.kind === 'missing'), { kind:'missing', stage:'scope-gate', message:'Expected stage scope-gate was not recorded.' })
+  const undeclared = executionTopology('scout', ['scout:r1', 'scope-gate:r1', 'commit:r1', 'envelope-accept'], { complete:true })
+  assert.deepEqual(undeclared.defects.find((defect) => defect.kind === 'undeclared'), { kind:'undeclared', stage:'commit:r1', message:'Stage commit:r1 was not declared by scout.' })
+  assert.equal(undeclared.rows.some((row) => row.stage === 'commit:r1'), false)
+  const complete = executionTopology('scout', ['scout:r1', 'scope-gate:r1', 'envelope-accept'], { complete:true })
+  assert.deepEqual(complete.defects, [])
+  const pending = executionTopology('scout', ['scout:r1'], { complete:false })
+  assert.equal(pending.defects.length, 0)
+  assert.equal(pending.rows.find((row) => row.stage === 'scope-gate').status, 'pending')
+  assert.deepEqual(executionTopology(null, ['scout:r1'], { complete:true }), {
+    execution_shape:null, status:'not-recorded', measured:false, rows:[], defects:[], observed:['scout:r1'], observed_heads:[], terminals:[],
+  })
+})
+
+test('factory step trace keeps checkpoints in distinct measured phases', () => {
+  const trace = factoryStepTrace({ payload:{ rows:[
+    { at:1000, stage:'build:r1' }, { at:1100, stage_done:'build:r1' },
+    { at:2100, stage:'suite:cold' }, { at:2200, stage_done:'suite:cold' },
+  ] } }, { blocks:[
+    { phase_id:1, name:'building', started_at:900, ended_at:1500, x:0, width:.45 },
+    { phase_id:2, name:'validating', started_at:1900, ended_at:2500, x:.55, width:.45 },
+  ] }, { now:2500 })
+  assert.deepEqual(trace.steps.map((step) => [step.label, step.phase_id]), [['build:r1',1], ['suite:cold',2]])
+})
+
+test('RunDetail places profile evidence before raw payloads and keeps topology plain', () => {
+  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/RunDetail.svelte'), 'utf8')
+  const fleetSource = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/fleet.js'), 'utf8')
+  assert.match(source, /profileEvidenceView\(configuration\.profile\.key, returns\)/)
+  assert.match(source, /executionTopology\(configuration\.execution\.key, observedStageLabels/)
+  assert.match(source, /class="profile-evidence" aria-label="Profile evidence summary"/)
+  assert.ok(source.indexOf('class="profile-evidence"') < source.indexOf('<EnvelopeInspector'))
+  assert.doesNotMatch(source, /function\s+executionTopology\s*\(/)
+  for (const label of ['Review findings', 'Verification checks', 'Bug reproduction', 'Test discrimination']) assert.match(fleetSource, new RegExp(label))
 })
 
 test('factory step trace makes a closed stage with no envelope visibly incomplete', () => {

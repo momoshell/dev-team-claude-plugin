@@ -1,3 +1,4 @@
+import { VARIANTS } from '../../../../crew/variants.mjs'
 import { buildTrajectory } from './spans.js'
 
 const CATEGORY = [
@@ -195,5 +196,77 @@ export function factoryStepTrace(journalState = {}, timeline = {}, { now = Date.
     unavailable,
     anomalies: trajectory.anomalies,
     measured: rows.length > 0,
+  }
+}
+
+const TOPOLOGY_TERMINALS = new Set(['done', 'escalate'])
+const CONDITIONAL_TOPOLOGY_STAGES = new Set(['gate-repair', 'gate-reverify'])
+
+function topologyHead(value) {
+  const label = typeof value === 'string' ? value.trim() : ''
+  return label ? label.split(':')[0] : null
+}
+
+function topologyNotRecorded(executionShape, observedLabels) {
+  return {
+    execution_shape: executionShape,
+    status: 'not-recorded',
+    measured: false,
+    rows: [],
+    defects: [],
+    observed: observedLabels,
+    observed_heads: [],
+    terminals: [],
+  }
+}
+
+export function executionTopology(executionShape, observedLabels, { complete = false } = {}) {
+  const shape = typeof executionShape === 'string' && executionShape.trim() ? executionShape.trim() : null
+  const labels = (Array.isArray(observedLabels) ? observedLabels : [])
+    .filter((label) => typeof label === 'string' && label.trim())
+    .map((label) => label.trim())
+  const declaration = shape ? VARIANTS[shape] : null
+  if (!declaration) return topologyNotRecorded(shape, labels)
+
+  const declaredStages = new Set(declaration.stages)
+  const observedHeads = new Set(labels.map(topologyHead).filter(Boolean))
+  const defects = []
+  const rows = declaration.stages.map((stage) => {
+    const conditional = CONDITIONAL_TOPOLOGY_STAGES.has(stage)
+    const status = observedHeads.has(stage) ? 'recorded' : 'missing'
+    if (!conditional) {
+      if (complete && status === 'missing') defects.push({ kind:'missing', stage, message:`Expected stage ${stage} was not recorded.` })
+    }
+    return { stage, status:status === 'missing' ? (conditional ? 'conditional' : complete ? 'missing' : 'pending') : status, conditional }
+  })
+  const terminals = []
+  const undeclared = []
+  const seen = new Set()
+  for (const label of labels) {
+    const head = topologyHead(label)
+    if (!head) continue
+    if (TOPOLOGY_TERMINALS.has(head)) {
+      terminals.push(label)
+      continue
+    }
+    const status = declaredStages.has(head) ? 'recorded' : 'undeclared'
+    if (status === 'undeclared' && seen.has(label)) continue
+    if (status === 'undeclared') defects.push({ kind:'undeclared', stage:label, message:`Stage ${label} was not declared by ${executionShape}.` })
+    if (status === 'undeclared') {
+      seen.add(label)
+      undeclared.push(label)
+    }
+  }
+  return {
+    execution_shape: shape,
+    status: 'measured',
+    measured: true,
+    complete: complete === true,
+    rows,
+    defects,
+    observed: labels,
+    observed_heads: [...observedHeads],
+    terminals,
+    undeclared,
   }
 }

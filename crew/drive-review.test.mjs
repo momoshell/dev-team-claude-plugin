@@ -7,7 +7,7 @@ import { cpSync, mkdirSync } from 'node:fs'
 import {
   ACCEPT_FINDINGS, ACCEPT_FINDINGS_SOFT, ACCEPT_REASKS, adversarialPlanEnv, ACCEPT_REFUSALS, B318_GATED_RUNS, B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, CENSUS_ABSENT_REASONS, CENSUS_ROW_ABSENT, CENSUS_TURNS_ABSENT, CENSUS_UNREADABLE, SCREENER_MODELS, SCREENER_REGISTER, screenerResult, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_MUTATION, CHECK_RUNS, CLOBBER_R2, CONVERGE_GATE, CONVERGE_PLAN, CRASH_FINDINGS, CRASH_STAGES, CTX, CTX_REPAIR, CTX_TL, DECISIONS, D_ASK, D_AUTO, D_COLLISION_CTX, D_PANEL_CTX, D_PATCH_A, D_PATCH_B, ENVELOPE_REFUSAL_REASONS, FINDING_DISPOSITIONS, LIMITS, MUST_FIX_REFUTATION_FINDINGS, NAME_VERDICTS, PANEL_ADJUDICATORS, PANEL_PARTNERS, PERSPECTIVE_TARGETS, PLAN_CHECK_FINDINGS, PLAN_RESIDUAL, PLAN_SCOPE, PLAN_SCOPE_VERDICTS, RED, REFUTATION_CLAIM, REFUTATION_CONVERGE_PLAN, REFUTATION_CONVERGE_RUNS, REFUTATION_EVIDENCE_MAX, RESIDUAL_TYPES, REVIEW_FINDINGS, REVIEW_GATE_PASS, S843_ADDED, S843_D2, S843_DISPATCHED, S843_DROPPED, S843_NARROWED, S843_RUNS, SECOND_OPINION, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, VARIANTS, acceptBounceLines, acceptContractLines, acceptedRawById, assertDriverIdRefusal, b127GroupCommand, b127InvokeGate, b127Lines, b127PidAlive, b127Spy, b318Builders, b318GatedPlan, b318Options, b318ReviewGrants, b318SiteA, b318SiteB, b376ProofIo, bounceTargetOf, buildEnv, checkEnv, classCollisionIo, closeoutIo, crashRun, dAdjEnv, dAutoRows, dBuilders, dDecisionBrief, dGitApplies, dLeads, dOffers, dPanelOutcomes, dPartnerEnv, dPatchWrite, dPlanEnv, dRemintRows, dReviewEnv, dispositionIo, dispositionOf, dispositionPanelIo, dispositionPlan, divergentCollisionIo, divergentPlanScenario, driveTask, envelopeDefect, envelopeFieldsPresent, exhaustionAcceptIo, fakeIo, findingIdDefect, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, join, leadEnv, legacyReviewerExemptions, nameVerdict, observeTurnCensus, panelSeats, phaseTrace, planAcceptContractLines, planCheckAcceptIo, planEnv, planRevisionRun, planScopeVerdict, planThenReviewIo, protectedPlanEnv, protectedReseatRefusal, publicationIo, readFileSync, reconEnv, regrantVerdict, resolveValidationLane, reviewConvergeRun, reviewEnv, reviewFindings, reviewOutcome, reviewShapeDefect, rmSync, roundCursor, s843Ctx, s843Io, s843PlanEnv, s843Rows, scratchDir, shapeDefect, slotCtx, slotFactory, spawnSync, staleVerdictLines, triageEnv, turnCeilingBreached, twoRoundReviewIo, validateAcceptDecision, validateCarve, validatePlanResiduals, validateScopeEntries, validationPlan, validationProbeRun, validationRows, verdictFindingsDefect, writeFileSync,
 } from './drive-fixtures.mjs'
-import { planScopeWhy, scopeSuggestions, VACUITY_CLAIMS, vacuityFindingDefect } from './drive.mjs'
+import { HARDENING_PRESCRIPTION_REASONS, HARDENING_PRESCRIPTION_RESOLUTION, hardeningPrescriptionConflict, hardeningTestPath, planScopeWhy, scopeSuggestions, VACUITY_CLAIMS, vacuityFindingDefect } from './drive.mjs'
 import { screenerAdjudicationRows } from './screener.mjs'
 import { ROOT as REPO_ROOT } from '../test/helpers.mjs'
 import { checkSkillAnchors, laneFence, partitionShifts } from '../skills/qa-test-writing/anchor-pin.mjs'
@@ -2621,18 +2621,22 @@ test('#800 §7b 43 — panel class findings remint around a reviewer-origin coll
   assert.equal(dGitApplies(io).length, 1)
 })
 
-test('#800 §7b 44 — divergent collisions preserve reviewer A ids and route its patch', () => {
+test('#800 §7b 44 — divergent collisions preserve reviewer A ids and refuse a pinned optional prescription', () => {
   const io = divergentCollisionIo()
   const result = driveTask(D_COLLISION_CTX, io)
   const first = dPanelOutcomes(io)[0]
   const adjudication = io.calls.writes[`${TD}/panel-adjudication-1.md`] || ''
   const patch = dPatchWrite(io)?.[1] || ''
-  assert.equal(result.status, 'done')
+  const conflict = result.details.hardening_prescription_conflict
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'harden')
   assert.ok(first.findings.some(({ id, reviewer }) => id === 'RV1-1' && reviewer === 'reviewer'))
   assert.ok(first.findings.some(({ id, reviewer }) => id === 'panel-remint-1' && reviewer === 'tech-lead'))
   assert.match(adjudication, /panel-remint-1/)
-  assert.equal(dGitApplies(io).length, 1)
-  assert.equal(patch.includes('a/a.mjs'), true)
+  assert.equal(conflict.finding.id, 'panel-remint-1')
+  assert.equal(conflict.file, 'a.test.mjs')
+  assert.equal(dGitApplies(io).length, 0)
+  assert.equal(patch, '')
 })
 
 test('RV1-1 reviewer hardening survives a reminted one-sided split', () => {
@@ -2672,7 +2676,7 @@ test('#800 §7b 45 — each reminted final id has one auditable remint join', ()
   ]
   for (const [io, original] of cases) {
     const result = driveTask(D_COLLISION_CTX, io)
-    assert.equal(result.status, 'done')
+    assert.equal(result.status, original === 'RV1-1' ? 'escalation' : 'done')
     const reminted = dPanelOutcomes(io)[0].findings.filter(({ id }) => id.startsWith('panel-remint-')).map(({ id }) => id)
     const rows = dRemintRows(io)
     assert.deepEqual(reminted, ['panel-remint-1'])
@@ -4243,4 +4247,97 @@ test('screener wiring I1', () => {
   const io = injectedScreenerIo({ child: screenerResult([], zeroMembers) })
   driveTask({ ...CTX, head: 'base-head' }, io)
   assert.equal(io.calls.logs.some((row) => row.screener_panel || row.screener_proposal), false)
+})
+
+const prescriptionPatch = (file) => [
+  `diff --git a/${file} b/${file}`,
+  `--- a/${file}`,
+  `+++ b/${file}`,
+  '@@ -1 +1 @@',
+  '-const old = 1',
+  '+const next = 1',
+  '',
+].join('\n')
+
+const prescriptionFinding = (over = {}) => ({
+  id: 'F1', severity: 'must-fix', location: 'a.test.mjs:1', summary: 'the implementation defect', disposition: 'ask-user', ...over,
+})
+
+const readWitness = (file = 'a.test.mjs') => new Map([[file, { state: 'read', bytes: 'export const witnessed = true\n' }]])
+
+test('A1 hardening prescription conflict stops at review accept', () => {
+  const finding = { ...B376_FINDING, location: 'a.mjs:1', disposition: 'auto-fix', patch: prescriptionPatch('a.test.mjs') }
+  const io = b376ProofIo({ reviewer1: reviewEnv('changes-needed', [finding]) })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  const conflict = result.details.hardening_prescription_conflict
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'harden')
+  assert.equal(conflict.reason, 'pinned-test-prescription')
+  assert.equal(conflict.file, 'a.test.mjs')
+  assert.equal(conflict.finding.id, 'F1')
+  assert.equal(dGitApplies(io).length, 0)
+  assert.equal(io.calls.assign.some(({ role, n }) => role === 'builder' && n === 2), false)
+})
+
+test('B1 hardening prescription conflict has a closed reason', () => {
+  assert.deepEqual(HARDENING_PRESCRIPTION_REASONS, ['pinned-test-prescription'])
+  assert.equal(Object.isFrozen(HARDENING_PRESCRIPTION_REASONS), true)
+  assert.equal(HARDENING_PRESCRIPTION_RESOLUTION, 'refuse-prescription')
+  for (const reason of ['build', 'harden', 'review-unresolved', 'anchor-absent']) {
+    assert.equal(HARDENING_PRESCRIPTION_REASONS.includes(reason), false)
+  }
+})
+
+test('C1 unpinned review prescriptions remain unaffected', () => {
+  const details = { findings: [prescriptionFinding({ location: 'a.test.mjs:1', disposition: 'auto-fix', patch: prescriptionPatch('other.test.mjs') })] }
+  assert.equal(hardeningPrescriptionConflict(details, readWitness()), null)
+})
+
+test('D1 pinned test edits cannot substitute for implementation repair', () => {
+  const io = b376ProofIo({ proofOutputs: [B376_GREEN, B376_GREEN, B376_MUT_RED] })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  const row = io.calls.logs.find((entry) => entry.finding_hardened)?.finding_hardened
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'harden')
+  assert.equal(row.outcome, 'pre-repair-green')
+})
+
+test('E1 conflict records the chosen prescription refusal', () => {
+  const finding = { ...B376_FINDING, location: 'a.mjs:1', disposition: 'auto-fix', patch: prescriptionPatch('a.test.mjs') }
+  const io = b376ProofIo({ reviewer1: reviewEnv('changes-needed', [finding]) })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  const conflict = result.details.hardening_prescription_conflict
+  assert.equal(conflict.resolution, 'refuse-prescription')
+  assert.equal(conflict.finding.id, finding.id)
+  assert.equal(conflict.file, 'a.test.mjs')
+})
+
+test('F1 review without a hardening witness remains unaffected', () => {
+  const details = { findings: [prescriptionFinding()] }
+  assert.equal(hardeningPrescriptionConflict(details, undefined), null)
+  assert.equal(hardeningPrescriptionConflict(details, null), null)
+  assert.equal(hardeningPrescriptionConflict(details, new Map()), null)
+})
+
+test('G1 ungateable findings do not create prescription conflicts', () => {
+  const details = { findings: [prescriptionFinding({ hardening: 'ungateable', hardening_why: 'the defect cannot become a guard' })] }
+  assert.equal(hardeningPrescriptionConflict(details, readWitness()), null)
+})
+
+test('H1 no-op findings do not create prescription conflicts', () => {
+  const details = { findings: [prescriptionFinding({ disposition: 'no-op' })] }
+  assert.equal(hardeningPrescriptionConflict(details, readWitness()), null)
+})
+
+test('J1 only readable witness cells can conflict', () => {
+  const details = { findings: [prescriptionFinding()] }
+  assert.equal(hardeningPrescriptionConflict(details, new Map([['a.test.mjs', { state: 'absent', bytes: null }]])), null)
+  assert.equal(hardeningPrescriptionConflict(details, new Map([['a.test.mjs', { state: 'unreadable', bytes: null, why: 'EACCES' }]])), null)
+})
+
+test('K1 conflict extraction requires the shared test path', () => {
+  const details = { findings: [prescriptionFinding({ location: 'checks.mjs:1' })] }
+  const witness = new Map([['checks.mjs', { state: 'read', bytes: 'export const witnessed = true\n' }]])
+  assert.equal(hardeningPrescriptionConflict(details, witness), null)
+  assert.equal(hardeningTestPath('checks.mjs'), false)
 })

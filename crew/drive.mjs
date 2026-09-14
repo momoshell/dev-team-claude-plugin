@@ -1,7 +1,7 @@
 import { draftPrBody, draftPrTitle, followUpIssueBody, followUpIssueTitle, gateSummaryLine, residualList } from './converge.mjs'
 import { adjudicatePanel, fuseFindings, escalationQuestion, crashEscalationQuestion } from './escalation-policy.mjs'
 import { VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT } from './variants.mjs'
-import { protectedHitsIn, resolveProtectedPaths } from './protected-paths.mjs'
+import { protectedHitsIn, resolveProtectedPaths, PROMPT_SURFACE } from './protected-paths.mjs'
 import { parseFenceScope, validateFenceScope, fenceScopesIntersect, fenceScopeContains } from './fence-scope.mjs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -3340,6 +3340,20 @@ export const NARRATION_REFUSALS = Object.freeze({
   rawJson: 'narration-raw-json',
 })
 export const NARRATION_REFUSAL_NAMES = Object.freeze(Object.values(NARRATION_REFUSALS))
+const PROMPT_CLAIM_LINE_START = String.raw`(?:^|\n)`
+const PROMPT_MEASURE_NAME = String.raw`(?:first-round pass rate|turns per seat|[a-z0-9][a-z0-9._-]* refusal frequency)`
+const PROMPT_MEASURE_SAMPLE = String.raw`[^;\n]+\s+\(n=[1-9]\d*\)`
+const PROMPT_MEASURED_CLAIM = new RegExp(String.raw`${PROMPT_CLAIM_LINE_START}Measure: ${PROMPT_MEASURE_NAME}; before: ${PROMPT_MEASURE_SAMPLE}; after: ${PROMPT_MEASURE_SAMPLE}\.?(?:\n|$)`, 'i')
+const PROMPT_UNMEASURED_CLAIM = new RegExp(String.raw`${PROMPT_CLAIM_LINE_START}unmeasured — n insufficient; reason: [^;\n]*[^\s;\n][^;\n]*; re-measure after [1-9]\d* seats\.?(?:\n|$)`, 'i')
+
+export function promptMeasurementDefect({ files, body } = {}) {
+  const hits = protectedHitsIn(files, PROMPT_SURFACE.paths)
+  if (hits.length === 0) return null
+  const text = String(body ?? '')
+  if (PROMPT_MEASURED_CLAIM.test(text) || PROMPT_UNMEASURED_CLAIM.test(text)) return null
+  return `prompt-change PR body must name a ledger cell measure with before/after and n, or say unmeasured — n insufficient with a reason and re-measure seat count; prompt surface: ${hits.join(', ')}`
+}
+
 export const PUBLISH_REFUSALS = Object.freeze({
   branchUnresolved: 'branch-unresolved',
   branchMain: 'branch-main',
@@ -3349,6 +3363,7 @@ export const PUBLISH_REFUSALS = Object.freeze({
   prCheck: 'pr-check',
   pushRejected: 'push-rejected',
   prCreate: 'pr-create',
+  promptMeasurement: 'prompt-measurement-missing',
 })
 export const PUBLISH_REFUSAL_NAMES = Object.freeze(Object.values(PUBLISH_REFUSALS))
 
@@ -6186,6 +6201,8 @@ function runTask(ctx, io, crash) {
         return resumeEscalate('publish', `publish refused (${reason}): ${detail}`, { publish: { refused: reason } })
       }
       if (publishBranch === baseName) return refusePublish(PUBLISH_REFUSALS.branchMain, `the checkout branch is ${baseName}`)
+      const promptDefect = promptMeasurementDefect({ files: checkpoint.accepted_scope, body: composePrBody({ intent: commitIntent(checkpoint.commit.message) }) })
+      if (promptDefect) return refusePublish(PUBLISH_REFUSALS.promptMeasurement, promptDefect)
       let ghMissing
       try { ghMissing = resumeIo.run('command -v gh') } catch (error) { ghMissing = { ok: false, output: error?.message ?? String(error) } }
       if (!ghMissing?.ok) return refusePublish(PUBLISH_REFUSALS.ghMissing, 'the gh executable is not available')
@@ -9803,6 +9820,8 @@ function runTask(ctx, io, crash) {
     }
     if (!branch) return refusePublish(PUBLISH_REFUSALS.branchUnresolved, 'the checkout branch is unresolved (detached HEAD)')
     if (branch === PUBLISH_BASE) return refusePublish(PUBLISH_REFUSALS.branchMain, `the checkout branch is ${PUBLISH_BASE}`)
+    const promptDefect = promptMeasurementDefect({ files: scopeFiles, body: composePrBody({ intent: commitIntent(message) }) })
+    if (promptDefect) return refusePublish(PUBLISH_REFUSALS.promptMeasurement, promptDefect)
 
     let ghMissing
     try { ghMissing = io.run('command -v gh') } catch (err) { ghMissing = { ok: false, output: err?.message ?? String(err) } }

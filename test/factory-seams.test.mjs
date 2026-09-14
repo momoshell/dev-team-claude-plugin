@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join, posix } from 'node:path'
 import { ROOT, git, scratchDir } from './helpers.mjs'
-import { resolveProtectedPaths, seamReport } from '../scripts/factory/seams.mjs'
+import { main, partitionReport, resolveProtectedPaths, seamReport } from '../scripts/factory/seams.mjs'
 
 const EXT = ['.m', 'js'].join('')
 const SOURCE_DIR = ['s', 'rc'].join('')
@@ -32,6 +32,10 @@ function makeRepo(files) {
 
 function reportFor(files, target) {
   return seamReport({ root: makeRepo(files), target })
+}
+
+function partitionFor(files, target) {
+  return partitionReport({ root: makeRepo(files), target })
 }
 
 function emptyHome() {
@@ -80,6 +84,126 @@ test('C1 test blocks cluster by file-under-test symbols and ignore test exports'
   assert.deepEqual(report.clusters.map((cluster) => cluster.symbols), [['first'], ['second']])
   assert.ok(!report.clusters.some((cluster) => cluster.symbols.includes('irrelevantTestExport')))
   assert.ok(report.clusters.every((cluster) => cluster.file_under_test === target))
+})
+
+test('D1 legacy cluster CLI output remains byte-identical', () => {
+  const target = sourcePath('golden')
+  const root = makeRepo({ [target]: 'export const golden = 1\n' })
+  let stdout = ''
+  let stderr = ''
+  const exitCode = main([target], {
+    root,
+    stdout: (text) => { stdout += text },
+    stderr: (text) => { stderr += text },
+  })
+  assert.equal(exitCode, 0)
+  assert.equal(stderr, '')
+  assert.equal(stdout, '{"target":"src/golden.mjs","target_kind":"source","clusters":[{"signature":"[]","importer_signature":"[]","importers":[],"importer_set":[],"symbols":["golden"],"spans":[{"symbol":"golden","start":1,"end":1}],"stage_heads":[],"stage_head_identifiers":[],"stage_head_references":0}],"edges_counted":0,"cross_cluster_edges":0,"fence_cost":{"anchors":{"manifests":[],"pins":0,"manifest_count":0,"pins_by_manifest":{}},"tests_reaching":[],"protected_floor":false},"caveat":"Static imports are a proxy: computed imports can be invisible, and unused imports can create phantom edges. Clean clusters measure split cost; they do not decide whether a split is right.","blind_spots":["Static imports are a proxy: computed imports can be invisible, and unused imports can create phantom edges. Clean clusters measure split cost; they do not decide whether a split is right.","Stage-head attribution is file-level static attribution, not a runtime claim."],"denominators":{"files_scanned":1,"symbols_clustered":1,"edges_counted":0,"skipped":[]}}\n')
+})
+
+test('A1 partition accounts for every test exactly once', () => {
+  const target = pathOf(TEST_DIR, `partition-accounting.test${EXT}`)
+  const first = sourcePath('partition-first')
+  const second = sourcePath('partition-second')
+  const report = partitionFor({
+    [first]: 'export const first = () => 1\n',
+    [second]: 'export const second = () => 2\n',
+    [target]: [
+      `import { first } from '../${SOURCE_DIR}/partition-first${EXT}'`,
+      `import { second } from '../${SOURCE_DIR}/partition-second${EXT}'`,
+      "test('first', () => { first() })",
+      "describe('nested suite', () => {",
+      "  test('nested', () => { second() })",
+      '})',
+      "test('unreferenced', () => {})",
+      "test('ambiguous', () => { first(); second() })",
+      '',
+    ].join('\n'),
+  }, target)
+  const entries = report.partition.groups.flatMap((group) => group.tests)
+  if (report.partition.unassigned) entries.push(...report.partition.unassigned.tests)
+  const spans = entries.map((entry) => `${entry.start}:${entry.end}`)
+  assert.equal(entries.length, report.partition.coverage.total)
+  assert.equal(new Set(spans).size, report.partition.coverage.total)
+  assert.deepEqual(entries.map((entry) => entry.name).sort(), ['ambiguous', 'first', 'nested', 'unreferenced'])
+  assert.ok(entries.every((entry) => entry.kind === 'test' && Number.isInteger(entry.start) && Number.isInteger(entry.end)))
+  assert.equal(report.partition.coverage.assigned, 2)
+  assert.deepEqual(report.partition.unassigned.tests.map((t) => t.name).sort(), ['ambiguous', 'unreferenced'])
+  assert.ok(report.partition.unassigned.tests.every((t) => t.reason === 'no_unique_file_under_test'))
+  assert.ok(report.partition.groups.every((group) => group.tests.every((t) => t.name !== 'ambiguous')))
+})
+
+test('B1 partition coverage carries numerator and denominator', () => {
+  const target = pathOf(TEST_DIR, `partition-coverage.test${EXT}`)
+  const subject = sourcePath('partition-coverage-subject')
+  const report = partitionFor({
+    [subject]: 'export const first = () => 1\nexport const second = () => 2\n',
+    [target]: [
+      `import { first, second } from '../${SOURCE_DIR}/partition-coverage-subject${EXT}'`,
+      "test('first', () => { first() })",
+      "test('second', () => { second() })",
+      '',
+    ].join('\n'),
+  }, target)
+  const { assigned, total, fraction } = report.partition.coverage
+  assert.equal(typeof assigned, 'number')
+  assert.equal(typeof total, 'number')
+  assert.equal(fraction, `${assigned}/${total}`)
+})
+
+test('C1 coherent test subject yields one partition group', () => {
+  const target = pathOf(TEST_DIR, `partition-coherent.test${EXT}`)
+  const subject = sourcePath('partition-coherent-subject')
+  const report = partitionFor({
+    [subject]: 'export const first = () => 1\nexport const second = () => 2\n',
+    [target]: [
+      `import { first, second } from '../${SOURCE_DIR}/partition-coherent-subject${EXT}'`,
+      "test('first', () => { first() })",
+      "test('second', () => { second() })",
+      '',
+    ].join('\n'),
+  }, target)
+  assert.equal(report.partition.groups.length, 1)
+  assert.equal(report.partition.groups[0].subject, subject)
+  assert.equal(report.partition.groups[0].tests.length, 2)
+})
+
+test('E1 partition refuses a non-test target with closed reason', () => {
+  const target = sourcePath('partition-source-refusal')
+  const report = partitionFor({ [target]: 'export const value = 1\n' }, target)
+  assert.deepEqual(report, {
+    target,
+    target_kind: 'source',
+    partition: null,
+    partition_reason: 'target_not_test_file',
+  })
+})
+
+test('F1 non-empty unassigned remainder is explicit', () => {
+  const target = pathOf(TEST_DIR, `partition-remainder.test${EXT}`)
+  const report = partitionFor({ [target]: "test('unassigned', () => {})\n" }, target)
+  assert.equal(report.partition.unassigned.name, 'unassigned')
+  assert.equal(report.partition.unassigned.tests.length, 1)
+})
+
+test('F2 empty unassigned remainder is absent', () => {
+  const target = pathOf(TEST_DIR, `partition-no-remainder.test${EXT}`)
+  const subject = sourcePath('partition-no-remainder-subject')
+  const report = partitionFor({
+    [subject]: 'export const value = () => 1\n',
+    [target]: `import { value } from '../${SOURCE_DIR}/partition-no-remainder-subject${EXT}'\ntest('assigned', () => { value() })\n`,
+  }, target)
+  assert.equal('unassigned' in report.partition, false)
+})
+
+test('G1 partition output names file-under-test key', () => {
+  const target = pathOf(TEST_DIR, `partition-key.test${EXT}`)
+  const subject = sourcePath('partition-key-subject')
+  const report = partitionFor({
+    [subject]: 'export const value = () => 1\n',
+    [target]: `import { value } from '../${SOURCE_DIR}/partition-key-subject${EXT}'\ntest('assigned', () => { value() })\n`,
+  }, target)
+  assert.equal(report.partition.grouping_key, 'file_under_test')
 })
 
 test('RV1-1 regex literals preserve exports following quote characters', () => {

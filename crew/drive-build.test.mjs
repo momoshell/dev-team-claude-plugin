@@ -20,7 +20,7 @@ const proofScopeMutations = () => [
 const frozenSourcePair = () => {
   const current = readFileSync(FROZEN_INVENTORY_FILE, 'utf8')
   const committed = current
-    .replace('test/visualizer-server.test.mjs:1834', 'test/visualizer-server.test.mjs:1672')
+    .replace('test/visualizer-server.test.mjs:1849', 'test/visualizer-server.test.mjs:1672')
     .replace('7d7c508c980cd5b7be2b9952bdc37b7e76a759b77f8e6c93db117c600a3ddb8f', '0ffdacdc5f084cb66b620ae9cd84c2b237f752f7c308803e8ea478b02a64d172')
   return { committed, current }
 }

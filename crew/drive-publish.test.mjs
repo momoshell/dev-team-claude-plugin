@@ -1372,6 +1372,22 @@ test('C1 publication names the measured proof generation', () => {
   assert.doesNotMatch(refreshedBody, /3 gate checks, 0 failed, 0 errored.*repaired-gate-cmd/)
 })
 
+test('F1 rendered PR closing trailers cover zero, one, two, and three closes', () => {
+  const trailer = (record) => composePrBody(record).split('\n\n')[0]
+  const two = { closes: ['#1235', '#1238'] }
+  const twoTrailer = trailer(two)
+  assert.equal(twoTrailer, 'Closes #1235, closes #1238')
+  assert.equal(trailer({ closes: ['#1235', '#1238', '#1247'] }), 'Closes #1235, closes #1238, closes #1247')
+  assert.equal(composePrBody({ closes: ['#806'] }), [
+    'Closes #806',
+    'No acceptance gate ran.',
+    'Suite counts: not measured.',
+    'Review: not recorded, no residuals',
+  ].join('\n\n'))
+  assert.equal(trailer({ issues: ['#679', '#758'] }), 'Refs #679, #758')
+  assert.doesNotMatch(composePrBody({ closes: [] }), /^Closes(?:\s|$)/m)
+})
+
 test('composePrBody is pure and renders every populated section with its own values', () => {
   const record = {
     issues: ['#679', '#758'], stages: ['commit', 'rebase', 'suite', 'publish', 'done'],

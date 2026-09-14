@@ -50,6 +50,7 @@
 // CLI verbs: `sessions` | `phases <adw_id>` | `tail <adw_id> [--after n]
 // [--limit n]` | `procs <adw_id>` | `gate-review-gap` |
 // `eligible-tasks` | `run-set --since <iso> [--until <iso>]` |
+// `configurations [--since <iso>] [--until <iso>]` |
 // `cell-failures [--since <iso>] [--until <iso>]` |
 // `cells [--since <iso>] [--until <iso>] [--prices <path>]` |
 // `modifier-attempts [--since <iso>] [--until <iso>]` |
@@ -171,6 +172,11 @@ const SYNTHETIC_LEGACY_SQL = '1 = 1'
 // vocabulary is owned by crew/roster.json, and restating it here would create a
 // second source of truth (the same reason run_configurations declares none).
 export const SEAT_VALUE_SOURCES = Object.freeze(['roster', 'profile_recommendation', 'operator_override', 'reseat'])
+const CONFIGURATION_DIMENSIONS = Object.freeze([
+  { dimension: 'profile', requested: null, effective: 'task_profile', source: 'task_profile_source' },
+  { dimension: 'execution', requested: 'requested_execution', effective: 'effective_execution', source: 'execution_source' },
+  { dimension: 'assurance', requested: 'requested_assurance', effective: 'effective_assurance', source: 'assurance_source' },
+])
 export const TERMINAL_ACTORS = Object.freeze(['driver', 'lead', 'operator', 'finalizer'])
 export const ESCALATION_CAUSES = Object.freeze([
   'transport', 'budget', 'plan-build-disagreement', 'brief-contradiction',
@@ -5501,6 +5507,87 @@ export function openLedger({
     return rows.map((row) => ({ ...row, variant: variants.get(row.adw_id) ?? null }))
   }
 
+  function configurationReadout({ since = null, until = null } = {}) {
+    // runsStartedWithin has a required lower bound; an omitted --since means
+    // the earliest representable session-start window, while the public value
+    // remains null to preserve the optional-window CLI convention.
+    const sessionSince = since ?? '0000-01-01T00:00:00.000Z'
+    const runs = runsStartedWithin({ since: sessionSince, until })
+    const adwIds = runs.map((run) => run.adw_id)
+    const configurationRows = runConfigurationsFor(adwIds)
+    const seatRows = runSeatsFor(adwIds)
+    const configurationDenominator = configurationRows.length
+    const grouped = new Map()
+    for (const configuration of configurationRows) {
+      for (const descriptor of CONFIGURATION_DIMENSIONS) {
+        const values = {
+          requested: descriptor.requested === null ? null : configuration[descriptor.requested],
+          effective: configuration[descriptor.effective],
+          source: configuration[descriptor.source],
+        }
+        const { requested, effective, source } = values
+        const key = JSON.stringify([descriptor.dimension, requested, effective, source])
+        let row = grouped.get(key)
+        if (!row) {
+          row = {
+            dimension: descriptor.dimension,
+            ...(descriptor.requested === null
+              ? { value: effective, source }
+              : { requested, effective, source, override: requested === null || requested === undefined ? null : requested !== effective }),
+            count: 0,
+            denominator: configurationDenominator,
+          }
+          grouped.set(key, row)
+        }
+        row.count += 1
+      }
+    }
+    const dimensions = [...grouped.values()]
+    const configurationsMeasured = configurationRows.length > 0
+    const seats = seatRows.map((seat) => {
+      let warnings = null
+      if (typeof seat.warnings_json === 'string') {
+        try {
+          const parsed = JSON.parse(seat.warnings_json)
+          warnings = Array.isArray(parsed) ? parsed : null
+        } catch {
+          // A malformed warning list is dropped as null, never promoted to a
+          // fabricated empty warning list.
+        }
+      }
+      return {
+        adw_id: seat.adw_id,
+        role: seat.role,
+        agent: seat.agent,
+        provider: seat.provider,
+        model_id: seat.model_id,
+        model: seat.model,
+        effort: seat.effort,
+        transport: seat.transport,
+        source: seat.source,
+        policy_state: seat.policy_state,
+        warnings,
+        created_at: seat.created_at,
+      }
+    })
+    const absent = configurationsMeasured ? {} : {
+      run_configurations: 'no run_configurations rows in this window — not recorded, never a measured zero or inferred default',
+    }
+    if (seats.length === 0) {
+      absent.run_seats = 'no run_seats rows in this window — not recorded, never a measured zero or inferred seat'
+    }
+    return {
+      since,
+      until,
+      runs: runs.length,
+      configurations: configurationsMeasured ? configurationDenominator : null,
+      measured: configurationsMeasured,
+      dimensions: configurationsMeasured ? dimensions : [],
+      seats,
+      absent,
+    }
+  }
+
   function taskReadout(selector) {
     // Resolve an adw_id before a linked run_id, and a linked run_id before
     // trying task_slug; a slug match is only usable when it names exactly one
@@ -5870,7 +5957,7 @@ export function openLedger({
     recordGateResult, recordGateDiscrimination, recordMutationAnchorBind, recordMutationAnchorAbsence, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordEvalCell, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown, recordSeatReclaim, recordProviderFailure, recordPlanScope, recordSeatReask, recordAcceptReask, recordRpcExitContext, recordSeatTurnCensus, recordPlanAdoption, recordExternalFence, recordPhaseSlotWait, recordExperimentArm, recordNarrationMeasurement,
     startProcess, endProcess, heartbeat, startAgentSession, endAgentSession,
     recordSourceError, linkRun,
-    listSessions, listEvents, getSession, phantomSessions, dumpTable, tableNames, columnNames, sessionsFiltered, runsStartedWithin, phasesFor, runConfigurationsFor, runObservationsFor, runSeatsFor, agentEventsFor, agentSessionsFor, gateDiscriminationsFor, gateResultsFor, reviewOutcomesFor, acceptDecisionsFor, supportsJson1, eventsPage, maxEventId, cellFailureRowsFor, unattributableCellFailures, seatTeardownRowsFor, intakePicks, intakeSweepTotals, intakeCandidateRefusals, intakeCandidatePicks, agentSessionTokenTotals, gateReviewGap, cellFailures, cellReviews, evalCells, cellUsage, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, escalations, endedRuns, escalationWindow, seatReclaims, journalFacts, plannerSymbolsHoldout, turnEconomy, turnBreakdown, eligibleTasks, runSet, transportsFor, taskReadout, jsonlDrift,
+    listSessions, listEvents, getSession, phantomSessions, dumpTable, tableNames, columnNames, sessionsFiltered, runsStartedWithin, phasesFor, runConfigurationsFor, runObservationsFor, runSeatsFor, agentEventsFor, agentSessionsFor, gateDiscriminationsFor, gateResultsFor, reviewOutcomesFor, acceptDecisionsFor, supportsJson1, eventsPage, maxEventId, cellFailureRowsFor, unattributableCellFailures, seatTeardownRowsFor, intakePicks, intakeSweepTotals, intakeCandidateRefusals, intakeCandidatePicks, agentSessionTokenTotals, gateReviewGap, cellFailures, cellReviews, evalCells, cellUsage, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, escalations, endedRuns, escalationWindow, seatReclaims, journalFacts, plannerSymbolsHoldout, turnEconomy, turnBreakdown, eligibleTasks, runSet, configurationReadout, transportsFor, taskReadout, jsonlDrift,
     stats: statsFn,
     captureMirrorErrors,
     readConnection,
@@ -6600,6 +6687,7 @@ const VERB_FLAGS = Object.freeze({
   'eligible-tasks': new Set([]),
   'phantom-sessions': new Set([]),
   'run-set': new Set(['since', 'until']),
+  configurations: new Set(['since', 'until']),
   'cell-failures': new Set(['since', 'until']),
   cells: new Set(['since', 'until', 'prices']),
   evals: new Set(['bench', 'prices']),
@@ -7133,7 +7221,7 @@ export function main(argv) {
   try {
     const { verb, positional, flags } = parseArgs(argv)
     if (!verb) {
-      refuse('a verb is required: sessions | phases | tail | procs | gate-review-gap | eligible-tasks | phantom-sessions | run-set --since <iso> [--until <iso>] | cell-failures [--since <iso>] [--until <iso>] | cells [--since <iso>] [--until <iso>] [--prices <path>] | evals --bench <sha> [--prices <path>] | modifier-attempts [--since <iso>] [--until <iso>] | seat-teardowns [--since <iso>] [--until <iso>] | escalations --since <iso> [--until <iso>] | ci-cycles [--since <iso>] [--until <iso>] | intake-sweeps [--since <iso>] [--until <iso>] | journal-facts [--since <iso>] [--until <iso>] | turns [--since <iso>] [--until <iso>] | task | request <adw_id> --from-brief <path> | advisor-ab --run-dir <dir> --run-started-at <iso|ms> --adjudications <path> <dispatch-id>… | doctor | kill')
+      refuse('a verb is required: sessions | phases | tail | procs | gate-review-gap | eligible-tasks | phantom-sessions | run-set --since <iso> [--until <iso>] | configurations [--since <iso>] [--until <iso>] | cell-failures [--since <iso>] [--until <iso>] | cells [--since <iso>] [--until <iso>] [--prices <path>] | evals --bench <sha> [--prices <path>] | modifier-attempts [--since <iso>] [--until <iso>] | seat-teardowns [--since <iso>] [--until <iso>] | escalations --since <iso> [--until <iso>] | ci-cycles [--since <iso>] [--until <iso>] | intake-sweeps [--since <iso>] [--until <iso>] | journal-facts [--since <iso>] [--until <iso>] | turns [--since <iso>] [--until <iso>] | task | request <adw_id> --from-brief <path> | advisor-ab --run-dir <dir> --run-started-at <iso|ms> --adjudications <path> <dispatch-id>… | doctor | kill')
     }
 
     // TEST SEAM: DEVTEAM_LEDGER_FAKE_NODE_VERSION substitutes for
@@ -7364,6 +7452,32 @@ export function main(argv) {
       }
       stdout.write(`${JSON.stringify(payload)}\n`)
       stderr.write(`ledger: ${rows.length} run(s) in [${since}, ${until ?? 'now'})\n`)
+      return 0
+    }
+
+    if (verb === 'configurations') {
+      if (positional.length > 0) refuse('configurations: takes no positional arguments')
+      const hasSince = Object.prototype.hasOwnProperty.call(flags, 'since')
+      const hasUntil = Object.prototype.hasOwnProperty.call(flags, 'until')
+      const since = hasSince ? windowBound(flags.since, 'since', 'configurations') : null
+      const until = hasUntil ? windowBound(flags.until, 'until', 'configurations') : null
+      if (until != null && since != null && until <= since) refuse('configurations: --until must be later than --since')
+      const readout = ledger.configurationReadout({ since, until })
+      if (ledger.stats().degraded) refuse('configurations: the ledger mirror is degraded — this window is unanswerable, not empty')
+      stdout.write(`${JSON.stringify({
+        schema: 1,
+        question: 'Which task profile, execution shape, assurance, and effective seats were recorded in this run window?',
+        definition: {
+          window: 'runs are sessions whose started_at falls in [since, until); runs is the window denominator',
+          configuration_unit: 'one run × configuration dimension',
+          seat_unit: 'one effective role seat',
+          configuration: 'dimensions group recorded profile, execution, and assurance values; requested and effective values remain separate where the authority records both',
+          override: 'true when both the requested and effective values were recorded and differ; null when no requested value was recorded - an unrecorded request is not a measured difference; never a measured false; comparison is over recorded names, and source alias means a name translation rather than an operator override',
+          seats: 'seats are copied directly from run_seats, including recorded cell, effort, transport, source, policy, and warnings; they are never reconstructed from agent_sessions',
+          absent: 'a null configurations count or absent marker means no run_configurations rows were recorded in the window — not measured, never a measured zero or inferred default; a run_seats absence marker has the same meaning for effective seats',
+        },
+        ...readout,
+      })}\n`)
       return 0
     }
 

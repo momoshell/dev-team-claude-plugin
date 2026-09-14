@@ -1025,6 +1025,268 @@ function callCounter() {
   return fn
 }
 
+async function bootSeatRows({ task = 'seat-writer', tier = 'build', args = {}, openRun: openRunDep = null, afterBoot = null } = {}) {
+  const home = scratchDir(`crew-seat-writer-${task}-home-`)
+  const { root: checkoutRoot, checkout } = testCheckout(`crew-seat-writer-${task}-checkout-`)
+  const rosterPath = join(home, 'roster.json')
+  const dbPath = join(home, 'ledger.db')
+  const brief = join(home, 'brief.md')
+  writeFileSync(rosterPath, JSON.stringify(roster, null, 2))
+  writeFileSync(brief, '# seat writer brief\n')
+  execSync('git init -q && git -c user.email=seat-writer@example.test -c user.name=seat-writer commit --allow-empty -q -m seed', { cwd: checkout })
+  const envKeys = ['DEVTEAM_LEDGER_DB', 'DEVTEAM_LEDGER_DIR']
+  const previousEnv = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]))
+  process.env.DEVTEAM_LEDGER_DB = dbPath
+  process.env.DEVTEAM_LEDGER_DIR = join(home, 'ledger')
+  const bootArgs = {
+    task, checkout, ...(tier === null ? {} : { tier }), roster: rosterPath,
+    'headless-all': true, 'claude-bin': process.execPath, ...args,
+  }
+  const deps = { cmux: callCounter(), tree: callCounter(), renameTab: callCounter(), ...(openRunDep ? { openRun: openRunDep } : {}) }
+  const previousStdoutWrite = process.stdout.write
+  let before = null
+  try {
+    process.stdout.write = () => true
+    await withHome(home, () => bootCmd(bootArgs, deps))
+    const dir = testCrewDir(home, checkout, task)
+    const crew = JSON.parse(readFileSync(join(dir, 'crew.json'), 'utf8'))
+    const boot = bootRecord(dir)
+    const readRows = () => {
+      const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+      try {
+        return { seats: ledger.dumpTable('run_seats'), configurations: ledger.dumpTable('run_configurations') }
+      } finally { ledger.close() }
+    }
+    before = readRows()
+    if (afterBoot) await afterBoot({ home, checkout, dir, dbPath, brief, crew, boot })
+    const after = readRows()
+    const rows = after.seats
+    Object.defineProperties(rows, {
+      crew: { value: crew },
+      boot: { value: boot },
+      configurations: { value: after.configurations },
+      configurationsBefore: { value: before.configurations },
+      home: { value: home },
+      checkout: { value: checkout },
+      dbPath: { value: dbPath },
+    })
+    return rows
+  } finally {
+    process.stdout.write = previousStdoutWrite
+    for (const [key, value] of Object.entries(previousEnv)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value
+    }
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+}
+
+async function bootProposalSession(task) {
+  const done = { status: 'done', summary: '', artifacts: [], details: {} }
+  let session = null
+  const rows = await bootSeatRows({
+    task,
+    afterBoot: async ({ home, checkout, brief, dbPath }) => {
+      writeFileSync(brief, '# proposal brief\n```proposal\n{"shape":"mechanical","strength":"workhorse"}\n```\n')
+      const previousExitCode = process.exitCode
+      const previousStdoutWrite = process.stdout.write
+      try {
+        await withHome(home, () => {
+          process.stdout.write = () => true
+          runCmd(
+            { task, checkout, 'brief-file': brief, keep: true },
+            { drive: () => done, awaitSeatsReady: () => {}, writeTerminalLine: () => {} },
+          )
+        })
+      } finally {
+        process.stdout.write = previousStdoutWrite
+        process.exitCode = previousExitCode
+      }
+      const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+      try {
+        session = ledger.dumpTable('sessions').find((candidate) => candidate.task_slug === task)
+      } finally { ledger.close() }
+    },
+  })
+  return { rows, session }
+}
+
+test('A1 boot writes one run seat per effective role', async () => {
+  const rows = await bootSeatRows({ task: 'seat-writer-a1' })
+  assert.equal(rows.length, rows.crew.roles.length)
+  assert.deepEqual(rows.map((row) => row.role).sort(), [...rows.crew.roles].sort())
+})
+
+test('B1 boot records resolved seat fields', async () => {
+  const rows = await bootSeatRows({ task: 'seat-writer-b1' })
+  for (const row of rows) {
+    const seat = rows.crew.seats[row.role]
+    const member = rows.crew.members[row.role]
+    const allocation = rows.boot.allocation?.[row.role] || {}
+    const warnings = (member.vendor_withheld || [])
+      .map((entry) => entry?.reason)
+      .filter((reason) => typeof reason === 'string' && reason.trim() !== '')
+    assert.deepEqual({
+      provider: row.provider,
+      agent: row.agent,
+      model_id: row.model_id,
+      model: row.model,
+      effort: row.effort,
+      transport: row.transport,
+      source: row.source,
+      policy_state: row.policy_state,
+      warnings: JSON.parse(row.warnings_json),
+    }, {
+      provider: seat.provider,
+      agent: seat.agent,
+      model_id: seat.id,
+      model: seat.model,
+      effort: seat.effort,
+      transport: member.transport,
+      source: Object.values(allocation).some((value) => value === 'override') ? 'operator_override' : 'roster',
+      policy_state: warnings.length ? 'warned' : 'passed',
+      warnings,
+    })
+  }
+})
+
+test('C1 boot seat recording remains non load bearing', async () => {
+  const stderr = []
+  let received = null
+  let realEmitter = null
+  _resetNoticeGuardsForTest()
+  const wrappedOpenRun = (options) => {
+    realEmitter = openRun({ ...options, stderr: { write: (chunk) => { stderr.push(String(chunk)); return true } } })
+    return {
+      startRun: (...args) => realEmitter.startRun(...args),
+      recordSeats: (seats) => {
+        received = seats
+        const [firstGood, ...remainingGood] = seats
+        const malformedSource = { ...firstGood, source: 'malformed-source' }
+        realEmitter.recordSeats([firstGood, malformedSource, ...remainingGood])
+      },
+    }
+  }
+  let rows
+  await assert.doesNotReject(async () => {
+    rows = await bootSeatRows({ task: 'seat-writer-c1', openRun: wrappedOpenRun })
+  })
+  assert.ok(received?.length > 1)
+  assert.equal(rows.length, received.length)
+  assert.ok(rows.some((row) => row.role === received[0].role))
+  assert.ok(rows.some((row) => row.role === received.at(-1).role))
+  assert.ok(realEmitter.stats().dropped > 0)
+  assert.match(stderr.join(''), /recordSeats/)
+})
+
+test('D1 raw model override records operator provenance', async () => {
+  const rows = await bootSeatRows({
+    task: 'seat-writer-d1',
+    args: { 'model-builder': 'openai-codex/gpt-5.6-luna' },
+  })
+  const row = rows.find((candidate) => candidate.role === 'builder')
+  assert.ok(row)
+  assert.equal(row.provider, null)
+  assert.equal(row.model_id, null)
+  assert.equal(row.model, 'openai-codex/gpt-5.6-luna')
+  assert.equal(row.source, 'operator_override')
+})
+
+test('E1 run seat assertion is fed by boot', async () => {
+  const rows = await bootSeatRows({ task: 'seat-writer-real-path' })
+  assert.ok(rows.length > 0)
+  assert.equal(rows.length, rows.crew.roles.length)
+  assert.deepEqual(rows.map((row) => row.role).sort(), [...rows.crew.roles].sort())
+})
+
+test('F1 untiered boot writes no run seats', async () => {
+  const rows = await bootSeatRows({ task: 'seat-writer-f1', tier: null, args: { roles: 'builder' } })
+  assert.equal(rows.length, 0)
+})
+
+test('G1 boot still records one run configuration', async () => {
+  const done = { status: 'done', summary: '', artifacts: [], details: {} }
+  const rows = await bootSeatRows({
+    task: 'seat-writer-g1',
+    afterBoot: async ({ home, checkout, brief }) => {
+      const previousExitCode = process.exitCode
+      const previousStdoutWrite = process.stdout.write
+      try {
+        await withHome(home, () => {
+          process.stdout.write = () => true
+          runCmd(
+            { task: 'seat-writer-g1', checkout, 'brief-file': brief, keep: true },
+            { drive: () => done, awaitSeatsReady: () => {}, writeTerminalLine: () => {} },
+          )
+        })
+      } finally {
+        process.stdout.write = previousStdoutWrite
+        process.exitCode = previousExitCode
+      }
+    },
+  })
+  assert.equal(rows.configurationsBefore.length, 0)
+  assert.equal(rows.configurations.length, 1)
+})
+
+test('RV2-1 boot defers run configuration projection to runCmd', async () => {
+  const done = { status: 'done', summary: '', artifacts: [], details: {} }
+  const rows = await bootSeatRows({
+    task: 'seat-writer-rv2-1',
+    afterBoot: async ({ home, checkout, brief, dir }) => {
+      const crewPath = join(dir, 'crew.json')
+      const crew = JSON.parse(readFileSync(crewPath, 'utf8'))
+      crew.run_configuration.assurance.effective = 'DISTINCT-RUN-VALUE'
+      writeFileSync(crewPath, JSON.stringify(crew, null, 2))
+      const previousExitCode = process.exitCode
+      const previousStdoutWrite = process.stdout.write
+      try {
+        await withHome(home, () => {
+          process.stdout.write = () => true
+          runCmd(
+            { task: 'seat-writer-rv2-1', checkout, 'brief-file': brief, keep: true },
+            { drive: () => done, awaitSeatsReady: () => {}, writeTerminalLine: () => {} },
+          )
+        })
+      } finally {
+        process.stdout.write = previousStdoutWrite
+        process.exitCode = previousExitCode
+      }
+    },
+  })
+  assert.equal(rows.configurationsBefore.length, 0)
+  assert.equal(rows.configurations.length, 1)
+  assert.equal(rows.configurations[0].effective_assurance, 'DISTINCT-RUN-VALUE')
+})
+
+test('RV1-1 boot recordSeats leaves runCmd to start the proposal session', async () => {
+  const { rows, session } = await bootProposalSession('seat-writer-rv1-1')
+  assert.equal(rows.length, rows.crew.roles.length)
+  assert.ok(session)
+  assert.equal(session.proposed_shape, 'mechanical')
+  assert.equal(session.proposed_strength, 'workhorse')
+})
+
+test('RV1-2 proposal tests retain the production boot emitter lifecycle', async () => {
+  const source = readFileSync(new URL('./crew.test.mjs', import.meta.url), 'utf8')
+  const deferredStart = ['defer', 'Boot', 'Run', 'Start'].join('')
+  assert.doesNotMatch(source, new RegExp(`\\b${deferredStart}\\b`))
+  for (const title of [
+    'run wires the compiled brief into the session row',
+    'run leaves a malformed proposal unmeasured and completes the driver',
+    'run does not backfill historical session proposals',
+  ]) {
+    const start = source.indexOf(`test('${title}'`)
+    const end = source.indexOf('\ntest(', start + 1)
+    assert.ok(start >= 0)
+    assert.doesNotMatch(source.slice(start, end === -1 ? source.length : end), /\bopenRun\s*:/)
+  }
+  const { session } = await bootProposalSession('seat-writer-rv1-2')
+  assert.ok(session)
+  assert.equal(session.proposed_shape, 'mechanical')
+  assert.equal(session.proposed_strength, 'workhorse')
+})
+
 function writeDescendantRecord(taskDir, overrides = {}) {
   const dir = join(taskDir, 'descendants')
   mkdirSync(dir, { recursive: true })

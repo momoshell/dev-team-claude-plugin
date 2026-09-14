@@ -93,6 +93,139 @@ export function configurationFilterView(runs = [], selections = {}) {
   return { dimensions, rows, excluded }
 }
 
+const OPERATIONS_DIMENSIONS = Object.freeze([
+  { key: 'task_profile', label: 'Profile', field: 'task_profile', configuration: 'task_profile' },
+  { key: 'execution_shape', label: 'Execution', field: 'execution_shape', configuration: 'execution' },
+  { key: 'assurance', label: 'Assurance', field: 'assurance', configuration: 'assurance' },
+])
+const OPERATIONS_OUTCOMES = Object.freeze(['success', 'escalated', 'aborted', 'failed'])
+const OPERATIONS_SEAT_SOURCES = Object.freeze(['roster', 'profile_recommendation', 'operator_override', 'reseat'])
+const DRIVER_STATES = Object.freeze(['alive', 'gone', 'unknown'])
+const OPERATIONS_CAUSE_ABSENT = 'cause not recorded'
+
+function addCount(counts, key) {
+  counts.set(key, (counts.get(key) ?? 0) + 1)
+}
+
+function operationsOutcome(run = {}) {
+  const settlement = run?.settlement
+  if (settlement?.state === 'unsettled') return 'unsettled'
+  const outcome = settlement?.outcome
+  return settlement?.state === 'settled' && OPERATIONS_OUTCOMES.includes(outcome) ? outcome : 'unknown'
+}
+
+function operationsDimensionLabel(key, value) {
+  if (key === 'task_profile') return taskProfileMeta(value).label
+  if (key === 'execution_shape') return executionMeta(value).label
+  if (key === 'assurance') return assuranceMeta(value).label
+  return value
+}
+
+export function operationsOverview(runs = []) {
+  const source = Array.isArray(runs) ? runs : []
+  const dimensions = []
+
+  for (const descriptor of OPERATIONS_DIMENSIONS) {
+    const measured = []
+    for (const run of source) {
+      let effective = recordedConfigurationValue(run, descriptor.field)
+      if (effective === null) continue
+      measured.push({ run, effective })
+    }
+    if (measured.length === 0) continue
+
+    const groups = new Map()
+    for (const row of measured) {
+      const group = groups.get(row.effective) ?? []
+      group.push(row.run)
+      groups.set(row.effective, group)
+    }
+    const rows = [...groups.entries()]
+      .sort(([left], [right]) => String(left).localeCompare(String(right)))
+      .map(([value, group]) => {
+        const measured = group
+        const outcomes = { success: 0, escalated: 0, aborted: 0, failed: 0, unsettled: 0, unknown: 0 }
+        for (const run of measured) outcomes[operationsOutcome(run)] += 1
+        return {
+          value,
+          label: operationsDimensionLabel(descriptor.key, value),
+          denominator: measured.length,
+          outcomes,
+        }
+      })
+    dimensions.push({ key: descriptor.key, label: descriptor.label, rows })
+  }
+
+  const escalationCauses = new Map()
+  let failureCount = 0
+  const unsettled = { denominator: 0, alive: 0, gone: 0, unknown: 0 }
+  for (const run of source) {
+    const outcome = operationsOutcome(run)
+    const rawReason = run?.settlement?.reason
+    const reason = rawReason == null || (typeof rawReason === 'string' && rawReason.trim() === '')
+      ? OPERATIONS_CAUSE_ABSENT
+      : rawReason
+    if (outcome === 'escalated') addCount(escalationCauses, reason)
+    if (outcome === 'failed') failureCount += 1
+    if (run?.settlement?.state !== 'unsettled') continue
+    unsettled.denominator += 1
+    const state = run?.runtime?.driver_state === 'unknown' ? 'unknown' : DRIVER_STATES.includes(run?.runtime?.driver_state) ? run.runtime.driver_state : 'unknown'
+    unsettled[state] += 1
+  }
+
+  const denominator = source.length
+  const escalations = [...escalationCauses.entries()]
+    .sort(([left], [right]) => String(left).localeCompare(String(right)))
+    .map(([cause, count]) => ({ cause, count, denominator }))
+
+  const configurationChanges = []
+  for (const run of source) {
+    for (const descriptor of OPERATIONS_DIMENSIONS) {
+      const axis = run?.configuration?.[descriptor.configuration]
+      if (!axis || typeof axis !== 'object') continue
+      const requested = recordedConfigurationValue(axis, 'requested')
+      const effective = recordedConfigurationValue(axis, 'effective')
+      if (requested === null || effective === null || requested === effective) continue
+      configurationChanges.push({
+        adw_id: run?.adw_id ?? null,
+        dimension: descriptor.configuration,
+        // RV1-3: the card renders `label`, not `dimension`. `dimension` is the raw
+        // ledger field and is kept as the record's identity — but `execution` there
+        // never matches the `Execution` heading its throughput sibling prints, so an
+        // operator reading the two cards side by side sees one axis named two ways.
+        label: descriptor.label,
+        requested,
+        effective,
+        source: axis.source ?? null,
+      })
+    }
+  }
+
+  const seatEvidence = []
+  for (const run of source) {
+    if (!Array.isArray(run?.seats)) continue
+    for (const seat of run.seats) {
+      if (!seat || typeof seat !== 'object' || !OPERATIONS_SEAT_SOURCES.includes(seat.source)) continue
+      seatEvidence.push({
+        adw_id: run?.adw_id ?? null,
+        role: seat.role ?? null,
+        source: seat.source,
+        policy_state: seat.policy_state ?? null,
+        warnings: seat.warnings ?? null,
+      })
+    }
+  }
+
+  return {
+    dimensions,
+    escalations,
+    failures: { count: failureCount, denominator },
+    configurationChanges,
+    seatEvidence,
+    unsettled,
+  }
+}
+
 export function deriveStatus(run = {}, taskEnvelope = null) {
   const escalation = taskEnvelope?.details?.escalation
   if (taskEnvelope?.status === 'escalation') {

@@ -31,6 +31,7 @@ import {
 export const EVAL_REFUSALS = Object.freeze([
   'bench-unreadable', 'bench-sha-mismatch',
   'no-mechanical-gate', 'production-absent', 'local-endpoint-dead',
+  'judge-unresolvable', 'candidate-unresolvable',
 ])
 export const EVAL_SEAT_FAILURE_REASONS = Object.freeze({ boot_exit: 'boot-failed', boot_parse: 'boot-unreadable', assignment: 'assignment-failed', wait_error: 'wait-failed', wait_empty: 'wait-empty', runner: 'seat-runner-failed' })
 export { EVAL_ABSENT_REASONS }
@@ -60,6 +61,56 @@ function candidateModel(candidate) {
   if (!candidate || typeof candidate !== 'object') return null
   if (!NON_BLANK(candidate.provider) || !NON_BLANK(candidate.id)) return null
   return `${candidate.provider}/${candidate.id}`
+}
+
+function normalizeJudge(judge) {
+  const model = String(judge?.model || '')
+  const slash = model.indexOf('/')
+  const provider = slash < 0 ? judge?.vendor : model.slice(0, slash)
+  const id = slash < 0 ? model : model.slice(slash + 1)
+  return {
+    provider,
+    id,
+    agent: judge?.agent ?? (provider === 'openai' ? 'pi' : 'claude'),
+    effort: judge?.effort ?? 'medium',
+  }
+}
+
+async function seatModel(candidate, role, deps) {
+  const args = {
+    [`agent-${role}`]: candidate.agent,
+    'headless-all': true,
+  }
+  const seats = {
+    [role]: {
+      provider: candidate.provider,
+      id: candidate.id,
+      agent: candidate.agent,
+      effort: candidate.effort,
+      model: null,
+    },
+  }
+  const adapters = await deps.resolveAdapters([role], args, seats)
+  if (NON_BLANK(candidate?.model)) return candidate.model
+  if (!adapters || typeof adapters !== 'object' || Array.isArray(adapters)) {
+    throw new Error(`model-eval: adapter resolver returned no adapter set for seat ${role}`)
+  }
+  const resolvedAdapter = adapters?.[role]?.adapter
+  const localProviders = adapters.registry?.local_providers
+  if (typeof resolvedAdapter?.modelString !== 'function') {
+    throw new Error(`model-eval: adapter for seat ${role} cannot compose model ${JSON.stringify(candidateModel(candidate))}`)
+  }
+  const compose = resolvedAdapter.modelString.bind(resolvedAdapter)
+  const adapter = {
+    modelString(input) {
+      const model = compose(input)
+      if (!NON_BLANK(model)) {
+        throw new Error(`model-eval: adapter for seat ${role} returned no model for ${JSON.stringify(candidateModel(candidate))}`)
+      }
+      return model
+    },
+  }
+  return adapter.modelString({ provider: candidate.provider, id: candidate.id, localProviders })
 }
 
 function validateBenchShape({ task, gate, judge, candidates, benchSha }) {
@@ -176,7 +227,8 @@ function summarizeRunGate(value) {
   return gateSummary(value)
 }
 
-function gateAsserts({ total, failed, errored } = {}) {
+function gateAsserts(gate = null) {
+  const { total, failed, errored } = gate ?? {}
   if (![total, failed, errored].every((number) => Number.isSafeInteger(number) && number >= 0)) {
     return { declared: null, passed: null }
   }
@@ -215,7 +267,7 @@ export async function compileBench({ dir, deps = {} } = {}) {
     throw refusal('no-mechanical-gate', 'gate.mjs reports zero mechanical checks — the bench cannot measure a candidate')
   }
 
-  const { judge, candidates: candidateDocument } = source
+  const { judge: judgeMetadata, candidates: candidateDocument } = source
   const candidates = candidateDocument.candidates
   // RETIRED (#983): no same-vendor candidate refusal.
   // No ADR ratifies the rule; a bench whose judge shares a candidate's vendor is now the operator's call, and during a single-provider outage it is the ONLY bench that can run.
@@ -226,9 +278,21 @@ export async function compileBench({ dir, deps = {} } = {}) {
     throw refusal('production-absent', `the seated ${candidateDocument.role} model ${productionModel} is not among candidates`)
   }
 
+  const judge = normalizeJudge(judgeMetadata)
+  try {
+    await seatModel(judge, 'reviewer', deps)
+  } catch (err) {
+    throw refusal('judge-unresolvable', `judge ${candidateModel(judge)} could not be composed (${err?.message || String(err)})`)
+  }
+
   for (const candidate of candidates) {
     if (candidate.source === 'local' && !(await deps.probe(candidate.base_url))) {
       throw refusal('local-endpoint-dead', `local candidate ${candidateModel(candidate)} at ${candidate.base_url} did not answer the endpoint probe`)
+    }
+    try {
+      await seatModel(candidate, candidateDocument.role, deps)
+    } catch (err) {
+      throw refusal('candidate-unresolvable', `candidate ${candidateModel(candidate)} could not be composed (${err?.message || String(err)})`)
     }
   }
 
@@ -318,8 +382,9 @@ export async function runBench({ dir, deps = {} } = {}) {
             task: handed,
           }))
           if (gate === null) recordReason = recordReason ?? 'gate-not-run'
-        } catch {
-          recordReason = recordReason ?? 'gate-not-run'
+        } catch (err) {
+          recordReason = recordReason ?? 'gate-failed'
+          if (seat.error == null) seat.error = errorText(err, 'gate failed')
         }
         if (recordReason === null) {
           try {
@@ -334,8 +399,9 @@ export async function runBench({ dir, deps = {} } = {}) {
             })
             judgeFindings = findingsFromJudge(judged)
             if (judgeFindings === null) recordReason = recordReason ?? 'judge-not-briefed'
-          } catch {
-            recordReason = recordReason ?? 'judge-not-briefed'
+          } catch (err) {
+            recordReason = recordReason ?? 'judge-failed'
+            if (seat.error == null) seat.error = errorText(err, 'judge failed')
           }
         }
       }
@@ -504,9 +570,15 @@ export async function defaultRunSeat({ task, candidate, role, bench, dir, briefF
   })
   let io = null
   try {
+    let model
+    try {
+      model = await seatModel(candidate, role, deps)
+    } catch (err) {
+      return failure(EVAL_SEAT_FAILURE_REASONS.runner, err)
+    }
     const bootArgs = [
       CREW, 'boot', '--task', taskSlug, '--checkout', checkout, '--roles', role,
-      `--model-${role}`, candidateModel(candidate),
+      `--model-${role}`, model,
       `--agent-${role}`, candidate.agent,
       `--effort-${role}`, candidate.effort,
       '--headless-all',
@@ -546,7 +618,7 @@ export async function defaultRunSeat({ task, candidate, role, bench, dir, briefF
       returnsDir: join(stateDir, 'returns'),
     }
     const adapterArgs = {
-      [`model-${role}`]: member.model || candidateModel(candidate),
+      [`model-${role}`]: member.model || await seatModel(candidate, role, deps),
       [`agent-${role}`]: member.agent || candidate.agent,
       [`effort-${role}`]: member.effort || candidate.effort,
       ...(member.transport === 'headless-rpc' ? { 'headless-rpc': role } : { headless: role }),
@@ -603,9 +675,6 @@ async function defaultRunJudge({ judge, envelope, gate, task, bench, dir, deps =
   // is intentionally not added to the candidate cells. Brief it with the
   // candidate's actual envelope and gate result; an unreadable judge response
   // is an absent finding set, never a fabricated empty list.
-  const slash = String(judge?.model || '').indexOf('/')
-  const provider = slash < 0 ? judge?.vendor : String(judge.model).slice(0, slash)
-  const id = slash < 0 ? judge?.model : String(judge.model).slice(slash + 1)
   const root = resolve(dir || process.cwd())
   const briefFile = join(root, `.model-eval-${String(bench)}-judge.md`)
   const writeFile = deps.writeFile || writeFileSync
@@ -628,13 +697,12 @@ async function defaultRunJudge({ judge, envelope, gate, task, bench, dir, deps =
       '',
     ].join('\n'))
     seat = await defaultRunSeat({
-      task, candidate: { provider, id, agent: judge?.agent ?? (provider === 'openai' ? 'pi' : 'claude'), effort: judge?.effort ?? 'medium' },
+      task, candidate: judge,
       role: 'reviewer', bench: `${bench}-judge`, dir, briefFile, deps,
     })
-    const findings = findingsFromJudge(seat?.envelope)
+    if (seat?.envelope == null) throw new Error(errorText(seat?.error, seat?.absent_reason ?? 'judge seat produced no envelope'))
+    const findings = findingsFromJudge(seat.envelope)
     return findings === null ? null : { findings }
-  } catch {
-    return null
   } finally {
     try { await seat?.cleanup?.() } catch { /* a failed worktree removal remains isolated and is not a finding */ }
     try { await unlinkFile(briefFile) } catch { /* a failed cleanup is not a finding */ }

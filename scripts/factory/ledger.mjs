@@ -400,7 +400,7 @@ export const ADVISOR_AB_INCOMPLETE_REASONS = Object.freeze([
 // docs/advisor-ab-protocol.md), never silently enforced here.
 export const ADVISOR_AB_DISPATCH_FLOOR = 12
 export const EVAL_ENVELOPE_STATUSES = Object.freeze(['received', 'absent'])
-export const EVAL_ABSENT_REASONS = Object.freeze(['no-envelope', 'boot-failed', 'boot-unreadable', 'assignment-failed', 'wait-failed', 'wait-empty', 'seat-runner-failed', 'gate-not-run', 'judge-not-briefed'])
+export const EVAL_ABSENT_REASONS = Object.freeze(['no-envelope', 'boot-failed', 'boot-unreadable', 'assignment-failed', 'wait-failed', 'wait-empty', 'seat-runner-failed', 'gate-not-run', 'judge-not-briefed', 'gate-failed', 'judge-failed'])
 export const EVAL_INCOMPLETE_REASONS = Object.freeze([
   'no-cells', 'envelope-absent', 'gate-not-run', 'judge-absent',
   'usd-unpriced', 'production-absent',

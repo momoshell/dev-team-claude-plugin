@@ -1316,7 +1316,7 @@ test('recordEvalCell refuses closed-enum drift and never records asserts for an 
     )
     assert.deepEqual(ledger.dumpTable('eval_cells'), [])
     assert.deepEqual([...EVAL_ENVELOPE_STATUSES], ['received', 'absent'])
-    assert.deepEqual([...EVAL_ABSENT_REASONS], ['no-envelope', 'boot-failed', 'boot-unreadable', 'assignment-failed', 'wait-failed', 'wait-empty', 'seat-runner-failed', 'gate-not-run', 'judge-not-briefed'])
+    assert.deepEqual([...EVAL_ABSENT_REASONS], ['no-envelope', 'boot-failed', 'boot-unreadable', 'assignment-failed', 'wait-failed', 'wait-empty', 'seat-runner-failed', 'gate-not-run', 'judge-not-briefed', 'gate-failed', 'judge-failed'])
   } finally { ledger.close() }
 })
 

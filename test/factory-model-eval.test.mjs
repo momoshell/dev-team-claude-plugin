@@ -11,10 +11,12 @@ import {
   compileBench,
   runBench,
   defaultRunSeat,
+  normalDeps,
   EVAL_SEAT_FAILURE_REASONS,
   EvalRefusal,
 } from '../scripts/factory/model-eval.mjs'
 import { EVAL_ABSENT_REASONS, evalsReadout } from '../scripts/factory/ledger.mjs'
+import { PI_PROVIDERS } from '../crew/adapters/adapter-pi.mjs'
 import { archivedLanes, discoverLanes } from '../scripts/factory/lane-watch.mjs'
 
 const SQLITE = sqliteAvailable()
@@ -50,6 +52,30 @@ function writeBench({
   return { dir, digest }
 }
 
+function fixtureAdapters(roles, args = {}, seats = null) {
+  const out = {}
+  for (const role of roles) {
+    const seat = seats?.[role]
+    const agent = seat?.agent ?? args[`agent-${role}`] ?? 'claude'
+    out[role] = {
+      name: agent,
+      transport: 'headless-rpc',
+      adapter: {
+        modelString({ provider, id, localProviders }) {
+          if (agent === 'claude') return id
+          const namespace = PI_PROVIDERS[provider] ?? localProviders?.[provider]?.pi_provider
+          if (!namespace) throw new Error(`fixture adapter: no namespace for ${provider}`)
+          return `${namespace}/${id}`
+        },
+      },
+    }
+  }
+  Object.defineProperty(out, 'registry', {
+    value: { local_providers: { 'llama-swap': { pi_provider: 'llama-swap' } } },
+  })
+  return out
+}
+
 function depsFor({
   gate = { total: 2, failed: 0, errored: 0 },
   probe = async () => true,
@@ -58,6 +84,7 @@ function depsFor({
   rows = [],
   calls = [],
   runJudge = async () => ({ findings: ['finding-1'] }),
+  resolveAdapters = null,
 } = {}) {
   return {
     ledger: {
@@ -67,6 +94,7 @@ function depsFor({
     readRoster,
     runGate: async () => gate,
     runJudge,
+    resolveAdapters: resolveAdapters || ((roles, args, seats) => fixtureAdapters(roles, args, seats)),
     runSeat: async ({ task, candidate }) => {
       calls.push({ task, candidate })
       const envelope = envelopes[candidate.id]
@@ -92,6 +120,11 @@ function runnerFixture({
   registrationRoot = null,
   worktree = null,
   rejectDuplicate = true,
+  role = 'builder',
+  candidate = CANDIDATE_A,
+  memberModel = null,
+  omitMemberModel = false,
+  expectedBootModel = null,
 } = {}) {
   const stateDir = scratchDir('factory-model-eval-state-')
   const crewRoot = registrationRoot ?? scratchDir('factory-model-eval-crew-')
@@ -100,12 +133,21 @@ function runnerFixture({
   mkdirSync(stateDir, { recursive: true })
   mkdirSync(checkout, { recursive: true })
   writeFileSync(join(checkout, 'candidate-only-artifact.txt'), 'disposable candidate artifact\n')
-  const role = 'builder'
-  const candidate = CANDIDATE_A
-  const events = { assigns: [], waits: [], teardowns: 0, removals: [] }
+  const events = { assigns: [], waits: [], teardowns: 0, removals: [], boots: [] }
   let crewJson = null
   const commandResult = (args) => {
     if (args.includes('boot')) {
+      events.boots.push(args)
+      const modelIndex = args.indexOf(`--model-${role}`)
+      const bootModel = modelIndex >= 0 ? String(args[modelIndex + 1]) : null
+      if (expectedBootModel !== null && bootModel !== expectedBootModel) {
+        const output = `unexpected boot model ${JSON.stringify(bootModel)}; expected ${JSON.stringify(expectedBootModel)}`
+        return {
+          result: { status: 1, stdout: output, stderr: '' },
+          parsed: null,
+          output,
+        }
+      }
       const taskIndex = args.indexOf('--task')
       const task = taskIndex >= 0 ? String(args[taskIndex + 1]) : 'model-eval-missing-task'
       const checkoutIndex = args.indexOf('--checkout')
@@ -121,6 +163,7 @@ function runnerFixture({
         }
       }
       mkdirSync(join(laneDir, 'returns'), { recursive: true })
+      const configuredModel = memberModel ?? `${candidate.provider}/${candidate.id}`
       writeFileSync(crewJson, JSON.stringify({
         schema_version: 3,
         task,
@@ -129,7 +172,8 @@ function runnerFixture({
         members: {
           [role]: {
             transport: 'headless-rpc', agent: candidate.agent,
-            model: `${candidate.provider}/${candidate.id}`, effort: candidate.effort,
+            ...(omitMemberModel || configuredModel == null ? {} : { model: configuredModel }),
+            effort: candidate.effort,
           },
         },
         task_return: join(stateDir, 'returns', 'task.json'),
@@ -148,7 +192,7 @@ function runnerFixture({
     assign(spec) {
       events.assigns.push(spec)
       if (assign) return assign(spec)
-      return { id: 'd1', returnPath: join(stateDir, 'returns', 'd1.builder.json') }
+      return { id: 'd1', returnPath: join(stateDir, 'returns', `d1.${role}.json`) }
     },
     wait(returnPath, timeoutS) {
       events.waits.push({ returnPath, timeoutS })
@@ -165,11 +209,54 @@ function runnerFixture({
       if (path === checkout) rmSync(path, { recursive: true, force: true })
       return { removed: path === checkout, why: path === checkout ? null : 'fixture refused to remove the source checkout' }
     },
-    resolveAdapters: resolveAdapters || (async () => ({ [role]: { name: candidate.agent, transport: 'headless-rpc', adapter: {} } })),
+    resolveAdapters: resolveAdapters || ((roles, args, seats) => fixtureAdapters(roles, args, seats)),
     seatIo: () => io,
     readFile: readFileSync,
   }
   return { deps, events, worktree: () => checkout, stateDir, crewRoot, get crewJson() { return crewJson } }
+}
+
+function normalizedJudgeFixtureSeat(judge) {
+  const model = String(judge.model || '')
+  const slash = model.indexOf('/')
+  const provider = slash < 0 ? judge.vendor : model.slice(0, slash)
+  const id = slash < 0 ? model : model.slice(slash + 1)
+  return {
+    provider,
+    id,
+    agent: judge.agent ?? (provider === 'openai' ? 'pi' : 'claude'),
+    effort: judge.effort ?? 'medium',
+  }
+}
+
+async function runDefaultJudgeBench({ judge, wait, expectedBootModel }) {
+  const candidate = CANDIDATE_A
+  const bench = writeBench({ judge, candidates: [candidate], production: `${candidate.provider}/${candidate.id}` })
+  const fixture = runnerFixture({
+    role: 'reviewer', candidate: normalizedJudgeFixtureSeat(judge), wait, expectedBootModel,
+  })
+  const rows = []
+  const deps = {
+    ...fixture.deps,
+    readRoster: null,
+    ledger: { recordEvalCell: async (row) => { rows.push(row); return row } },
+    runGate: async () => ({ total: 1, failed: 0, errored: 0 }),
+    runSeat: async () => ({
+      envelope: { status: 'done', summary: 'candidate terminal fixture' },
+      workdir: fixture.worktree(), duration_ms: 1,
+    }),
+  }
+  await runBench({ dir: bench.dir, deps })
+  return { bench, fixture, rows }
+}
+
+async function runFixtureSeat(candidate, options = {}) {
+  const bench = writeBench({ candidates: [candidate], production: `${candidate.provider}/${candidate.id}` })
+  const fixture = runnerFixture({ candidate, ...options })
+  const seat = await defaultRunSeat({
+    task: '# adapter model fixture', candidate, role: options.role ?? 'builder', bench: 'adapter-seat', dir: bench.dir, deps: fixture.deps,
+  })
+  return { bench, fixture, seat }
 }
 
 async function refusalFor(options) {
@@ -179,6 +266,7 @@ async function refusalFor(options) {
     gate: options.gate ?? { total: 2, failed: 0, errored: 0 },
     probe: options.probe ?? (async () => true),
     readRoster: options.readRoster,
+    resolveAdapters: options.resolveAdapters,
   })
   let caught = null
   try {
@@ -572,9 +660,280 @@ test('E1 absent envelopes retain null assertions, findings, USD, and an explicit
   assert.equal(judgeCalls, 0)
 })
 
+test('A1 adapter-composed claude judge reaches verdict', async () => {
+  const judge = {
+    model: 'anthropic/claude-opus-5', vendor: 'anthropic', agent: 'claude', effort: 'medium',
+  }
+  const result = await runDefaultJudgeBench({
+    judge,
+    expectedBootModel: 'claude-opus-5',
+    wait: () => ({ status: 'done', findings: ['claude-verdict'], artifacts: [] }),
+  })
+  const row = result.rows[0]
+  assert.equal(row.envelope_status, 'received')
+  assert.equal(row.absent_reason, null)
+  assert.deepEqual(row.judge_findings, ['claude-verdict'])
+  assert.equal(result.fixture.events.boots.length, 1)
+  assert.equal(result.fixture.events.assigns.length, 1)
+  assert.equal(result.fixture.events.waits.length, 1)
+  assert.equal(result.fixture.events.boots[0][result.fixture.events.boots[0].indexOf('--model-reviewer') + 1], 'claude-opus-5')
+})
+
+test('B1 adapter-composed pi candidate reaches verdict', async () => {
+  const candidate = { provider: 'openai', id: 'gpt-5.6-luna', agent: 'pi', effort: 'medium' }
+  const expected = `${PI_PROVIDERS.openai}/${candidate.id}`
+  const result = await runFixtureSeat(candidate, {
+    expectedBootModel: expected,
+    wait: () => ({ status: 'done', findings: ['pi-verdict'], artifacts: [] }),
+  })
+  assert.equal(result.seat.envelope?.status, 'done')
+  assert.deepEqual(result.seat.envelope?.findings, ['pi-verdict'])
+  assert.equal(result.fixture.events.boots.length, 1)
+  assert.equal(result.fixture.events.assigns.length, 1)
+  assert.equal(result.fixture.events.waits.length, 1)
+  assert.equal(result.fixture.events.boots[0][result.fixture.events.boots[0].indexOf('--model-builder') + 1], expected)
+  await result.seat.cleanup()
+})
+
+test('C1 pi anthropic candidate keeps pi namespace', async () => {
+  const candidate = { provider: 'anthropic', id: 'claude-opus-5', agent: 'pi', effort: 'medium' }
+  const expected = `${PI_PROVIDERS.anthropic}/${candidate.id}`
+  const result = await runFixtureSeat(candidate, {
+    expectedBootModel: expected,
+    wait: () => ({ status: 'done', findings: ['pi-anthropic-verdict'], artifacts: [] }),
+  })
+  assert.equal(result.seat.envelope?.status, 'done')
+  assert.deepEqual(result.seat.envelope?.findings, ['pi-anthropic-verdict'])
+  assert.equal(result.fixture.events.boots.length, 1)
+  assert.equal(result.fixture.events.assigns.length, 1)
+  assert.equal(result.fixture.events.waits.length, 1)
+  await result.seat.cleanup()
+})
+
+test('D1 crew fallback keeps adapter-composed candidate model', async () => {
+  const candidate = { provider: 'openai', id: 'gpt-5.6-luna', agent: 'pi', effort: 'medium' }
+  const expected = `${PI_PROVIDERS.openai}/${candidate.id}`
+  let adapterArgs = null
+  const result = await runFixtureSeat(candidate, {
+    omitMemberModel: true,
+    expectedBootModel: expected,
+    resolveAdapters: (roles, args, seats) => {
+      if (!seats) adapterArgs = { ...args }
+      return fixtureAdapters(roles, args, seats)
+    },
+    wait: () => ({ status: 'done', findings: ['fallback-verdict'], artifacts: [] }),
+  })
+  assert.equal(adapterArgs?.['model-builder'], expected)
+  assert.equal(result.seat.envelope?.status, 'done')
+  assert.deepEqual(result.seat.envelope?.findings, ['fallback-verdict'])
+  assert.equal(result.fixture.events.assigns.length, 1)
+  assert.equal(result.fixture.events.waits.length, 1)
+  await result.seat.cleanup()
+})
+
+test('E1 unsupported candidate provider refuses before boot', async () => {
+  const unsupported = { provider: 'google', id: 'gemini-pro', agent: 'claude', effort: 'medium' }
+  const resolveUnsupported = (roles, args, seats) => {
+    if (seats?.builder?.provider === unsupported.provider) throw new Error('unsupported provider/agent pair')
+    return fixtureAdapters(roles, args, seats)
+  }
+  const direct = await runFixtureSeat(unsupported, { resolveAdapters: resolveUnsupported })
+  assert.equal(direct.seat.envelope, null)
+  assert.equal(direct.seat.absent_reason, EVAL_SEAT_FAILURE_REASONS.runner)
+  assert.equal(direct.fixture.events.boots.length, 0)
+  assert.equal(direct.fixture.events.assigns.length, 0)
+  assert.equal(direct.fixture.events.waits.length, 0)
+  await direct.seat.cleanup()
+
+  const bench = writeBench({
+    judge: { model: 'google/gemini-pro', vendor: 'google', agent: 'claude', effort: 'medium' },
+    candidates: [CANDIDATE_A],
+    production: `${CANDIDATE_A.provider}/${CANDIDATE_A.id}`,
+  })
+  const refused = await refusalFor({
+    dir: bench.dir,
+    resolveAdapters: (roles, args, seats) => {
+      if (seats?.reviewer?.provider === 'google') throw new Error('unsupported judge provider/agent pair')
+      return fixtureAdapters(roles, args, seats)
+    },
+  })
+  assert.equal(refused.caught instanceof EvalRefusal, true)
+  assert.equal(refused.caught.refusal, 'judge-unresolvable')
+  assert.equal(refused.calls.length, 0)
+})
+
+test('M1 unresolvable candidate refuses compileBench before any seat runs', async () => {
+  const bench = writeBench()
+  const refused = await refusalFor({
+    dir: bench.dir,
+    resolveAdapters: (roles, args, seats) => {
+      if (seats?.builder?.provider === CANDIDATE_A.provider) throw new Error('unsupported candidate provider/agent pair')
+      return fixtureAdapters(roles, args, seats)
+    },
+  })
+  assert.equal(refused.caught instanceof EvalRefusal, true)
+  assert.equal(refused.caught.refusal, 'candidate-unresolvable')
+  assert.equal(refused.calls.length, 0)
+})
+
+test('F1 dead seat cannot satisfy model composition checks', async () => {
+  const candidate = { provider: 'openai', id: 'gpt-5.6-luna', agent: 'pi', effort: 'medium' }
+  const expected = `${PI_PROVIDERS.openai}/${candidate.id}`
+  const live = await runFixtureSeat(candidate, {
+    expectedBootModel: expected,
+    wait: () => ({ status: 'done', findings: ['live-verdict'], artifacts: [] }),
+  })
+  assert.equal(live.seat.envelope?.status, 'done')
+  assert.deepEqual(live.seat.envelope?.findings, ['live-verdict'])
+  assert.equal(live.fixture.events.assigns.length, 1)
+  assert.equal(live.fixture.events.waits.length, 1)
+  await live.seat.cleanup()
+
+  const dead = await runFixtureSeat(candidate, {
+    bootStatus: 1,
+    bootOutput: 'forced boot failure',
+    expectedBootModel: expected,
+  })
+  assert.equal(dead.seat.envelope, null)
+  assert.equal(dead.seat.absent_reason, EVAL_SEAT_FAILURE_REASONS.boot_exit)
+  assert.match(dead.seat.error, /forced boot failure/)
+  assert.equal(dead.fixture.events.boots.length, 1)
+  assert.equal(dead.fixture.events.assigns.length, 0)
+  assert.equal(dead.fixture.events.waits.length, 0)
+  await dead.seat.cleanup()
+})
+
+test('G1 thrown judge records closed reason and error text', async () => {
+  const diagnostic = 'judge exploded while reading the candidate'
+  const rows = []
+  const deps = depsFor({
+    rows,
+    runJudge: async () => { throw new Error(diagnostic) },
+  })
+  const bench = writeBench({ candidates: [CANDIDATE_A], production: `${CANDIDATE_A.provider}/${CANDIDATE_A.id}` })
+  await runBench({ dir: bench.dir, deps })
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].absent_reason, 'judge-failed')
+  assert.equal(rows[0].error_text, diagnostic)
+  assert.equal(rows[0].judge_findings, null)
+  assert.equal(EVAL_ABSENT_REASONS.includes(rows[0].absent_reason), true)
+})
+
+test('G2 default judge seat failure preserves its diagnostic', async () => {
+  const diagnostic = '404 judge response not found'
+  const result = await runDefaultJudgeBench({
+    judge: { model: 'anthropic/claude-opus-5', vendor: 'anthropic', agent: 'claude', effort: 'medium' },
+    expectedBootModel: 'claude-opus-5',
+    wait: () => { throw new Error(diagnostic) },
+  })
+  const row = result.rows[0]
+  assert.equal(row.absent_reason, 'judge-failed')
+  assert.equal(row.error_text, diagnostic)
+  assert.equal(row.judge_findings, null)
+  assert.equal(result.fixture.events.assigns.length, 1)
+  assert.equal(result.fixture.events.waits.length, 1)
+})
+
+test('H1 empty judge response differs from thrown judge', async () => {
+  const bench = writeBench({ candidates: [CANDIDATE_A, CANDIDATE_B], production: `${CANDIDATE_A.provider}/${CANDIDATE_A.id}` })
+  const rows = []
+  const diagnostic = 'judge transport threw'
+  const deps = depsFor({
+    rows,
+    runJudge: async ({ candidate }) => {
+      if (candidate.id === CANDIDATE_A.id) return {}
+      throw new Error(diagnostic)
+    },
+  })
+  await runBench({ dir: bench.dir, deps })
+  const empty = rows.find((row) => row.model_id === CANDIDATE_A.id)
+  const thrown = rows.find((row) => row.model_id === CANDIDATE_B.id)
+  assert.equal(empty.absent_reason, 'judge-not-briefed')
+  assert.equal(empty.error_text, null)
+  assert.equal(empty.judge_findings, null)
+  assert.equal(thrown.absent_reason, 'judge-failed')
+  assert.equal(thrown.error_text, diagnostic)
+  assert.equal(thrown.judge_findings, null)
+})
+
+test('I1 thrown gate records closed reason and error text', async () => {
+  const diagnostic = 'gate process was interrupted'
+  const bench = writeBench({ candidates: [CANDIDATE_A], production: `${CANDIDATE_A.provider}/${CANDIDATE_A.id}` })
+  const rows = []
+  let judgeCalls = 0
+  const deps = depsFor({
+    rows,
+    runJudge: async () => { judgeCalls += 1; return { findings: ['unexpected'] } },
+  })
+  deps.runGate = async ({ candidate } = {}) => {
+    if (candidate) throw new Error(diagnostic)
+    return { total: 1, failed: 0, errored: 0 }
+  }
+  await runBench({ dir: bench.dir, deps })
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].absent_reason, 'gate-failed')
+  assert.equal(rows[0].error_text, diagnostic)
+  assert.equal(rows[0].judge_findings, null)
+  assert.equal(judgeCalls, 0)
+})
+
+test('J1 null gate result records gate-not-run', async () => {
+  const bench = writeBench({ candidates: [CANDIDATE_A], production: `${CANDIDATE_A.provider}/${CANDIDATE_A.id}` })
+  const rows = []
+  let judgeCalls = 0
+  const deps = depsFor({
+    rows,
+    runJudge: async () => { judgeCalls += 1; return { findings: ['unexpected'] } },
+  })
+  deps.runGate = async ({ candidate } = {}) => candidate ? null : { total: 1, failed: 0, errored: 0 }
+  await runBench({ dir: bench.dir, deps })
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].absent_reason, 'gate-not-run')
+  assert.equal(rows[0].error_text, null)
+  assert.equal(rows[0].asserts_declared, null)
+  assert.equal(rows[0].asserts_passed, null)
+  assert.equal(judgeCalls, 0)
+})
+
+test('K1 absence reasons remain closed and errors stay separate', async () => {
+  const bench = writeBench({ candidates: [CANDIDATE_A, CANDIDATE_B], production: `${CANDIDATE_A.provider}/${CANDIDATE_A.id}` })
+  const rows = []
+  const gateDiagnostic = 'gate diagnostic text'
+  const judgeDiagnostic = 'judge diagnostic text'
+  const deps = depsFor({ rows })
+  deps.runGate = async ({ candidate } = {}) => {
+    if (!candidate) return { total: 1, failed: 0, errored: 0 }
+    if (candidate.id === CANDIDATE_A.id) throw new Error(gateDiagnostic)
+    return { total: 1, failed: 0, errored: 0 }
+  }
+  deps.runJudge = async () => { throw new Error(judgeDiagnostic) }
+  await runBench({ dir: bench.dir, deps })
+  const gateRow = rows.find((row) => row.model_id === CANDIDATE_A.id)
+  const judgeRow = rows.find((row) => row.model_id === CANDIDATE_B.id)
+  assert.equal(gateRow.absent_reason, 'gate-failed')
+  assert.equal(gateRow.error_text, gateDiagnostic)
+  assert.equal(judgeRow.absent_reason, 'judge-failed')
+  assert.equal(judgeRow.error_text, judgeDiagnostic)
+  for (const row of rows) {
+    assert.equal(EVAL_ABSENT_REASONS.includes(row.absent_reason), true)
+    assert.equal(EVAL_ABSENT_REASONS.includes(row.error_text), false)
+  }
+})
+
+test('L1 production identity remains provider-qualified', async () => {
+  const candidate = { ...CANDIDATE_A }
+  const bench = writeBench({ candidates: [candidate], production: `${candidate.provider}/${candidate.id}` })
+  const rows = []
+  await runBench({ dir: bench.dir, deps: depsFor({ rows }) })
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].production, 1)
+  assert.equal(rows[0].provider, candidate.provider)
+  assert.equal(rows[0].model_id, candidate.id)
+})
+
 test('F1 eval absence vocabularies are frozen, exact, and admit every runner reason', () => {
   const expected = [
-    'no-envelope', 'boot-failed', 'boot-unreadable', 'assignment-failed', 'wait-failed', 'wait-empty', 'seat-runner-failed', 'gate-not-run', 'judge-not-briefed',
+    'no-envelope', 'boot-failed', 'boot-unreadable', 'assignment-failed', 'wait-failed', 'wait-empty', 'seat-runner-failed', 'gate-not-run', 'judge-not-briefed', 'gate-failed', 'judge-failed',
   ]
   assert.equal(Object.isFrozen(EVAL_ABSENT_REASONS), true)
   assert.equal(Object.isFrozen(EVAL_SEAT_FAILURE_REASONS), true)

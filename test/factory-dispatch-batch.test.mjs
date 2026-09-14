@@ -2097,6 +2097,27 @@ test('PS6', () => {
   assert.equal(settled.tier, 'judge')
 })
 
+test('F1 the prompt-surface set has one definition and both consumers import it', () => {
+  const grep = spawnSync('git', ['grep', '-n', '-F', 'export const PROMPT_SURFACE =', '--', 'crew', 'scripts'], { cwd: repoRoot, encoding: 'utf8' })
+  assert.equal(grep.status, 0)
+  const hits = String(grep.stdout || '').trim().split('\n').filter(Boolean)
+  assert.deepEqual(hits.map((line) => line.split(':', 1)[0]), ['crew/protected-paths.mjs'])
+  const driver = readFileSync(join(repoRoot, 'crew/drive.mjs'), 'utf8')
+  const dispatcher = readFileSync(join(repoRoot, 'scripts/factory/dispatch-batch.mjs'), 'utf8')
+  assert.match(driver, /import \{[^}]*\bPROMPT_SURFACE\b[^}]*\} from '\.\/protected-paths\.mjs'/)
+  assert.match(dispatcher, /PROMPT_SURFACE as SHARED_PROMPT_SURFACE/)
+  assert.match(dispatcher, /export \{ PROMPT_SURFACE, PROMPT_SURFACE_BLIND_SPOT \} from '\.\.\/\.\.\/crew\/protected-paths\.mjs'/)
+})
+
+test('G1 dispatch-time prompt assurance forcing remains unchanged', () => {
+  assert.deepEqual(promptSurfaceVerdict({ files: ['crew/roles/planner.md'] }), {
+    hits: ['crew/roles/planner.md'], promptChange: true, forced: 'judge',
+  })
+  assert.deepEqual(promptSurfaceVerdict({ files: ['src/owned.mjs'] }), {
+    hits: [], promptChange: false, forced: null,
+  })
+})
+
 test('PS7', async () => {
   const prompt = await dispatchFixture({
     label: 'PS7-prompt',

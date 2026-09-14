@@ -5,9 +5,9 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { chmodSync, mkdirSync, renameSync, rmSync, statSync, symlinkSync } from 'node:fs'
 import {
-  COMMIT_TRAILER, CTX, HONEST_NARRATION, NARRATION_HEADING, NARRATION_RECORD, NARRATION_REFUSALS, NARRATION_REFUSAL_NAMES, NARRATION_STAGE_VOCABULARY, NARRATOR_REGISTER, PUBLISH_REFUSAL_NAMES, RUN_START_EVENT, TD, VARIANTS, applyNarration, bounceDetail, bounceSeatOf, buildEnv, commitIntent, composeCommitMessage, composePrBody, convergeRun, driveTask, existsSync, fakeIo, issueTrailers, join, journalRowsSinceRunStart, narrateRecord, narrationDefect, narrationFromResponse, narrationIsRawJson, narrationPrompt, narrationStageDefect, narratorApiRoot, narratorCommand, narratorConfig, narratorIo, narratorModelId, narratorModelsCommand, planEnv, prAnomalies, publicationIo, readFileSync, readdirSync, refsFromCommitMessage, reviewEnv, scratchDir, shellArg, spawnSync, writeFileSync,
+  COMMIT_TRAILER, CTX, HONEST_NARRATION, NARRATION_HEADING, NARRATION_RECORD, NARRATION_REFUSALS, NARRATION_REFUSAL_NAMES, NARRATION_STAGE_VOCABULARY, NARRATOR_REGISTER, PUBLISH_REFUSALS, PUBLISH_REFUSAL_NAMES, RUN_START_EVENT, TD, VARIANTS, applyNarration, bounceDetail, bounceSeatOf, buildEnv, commitIntent, composeCommitMessage, composePrBody, convergeRun, driveTask, existsSync, fakeIo, issueTrailers, join, journalRowsSinceRunStart, narrateRecord, narrationDefect, narrationFromResponse, narrationIsRawJson, narrationPrompt, narrationStageDefect, narratorApiRoot, narratorCommand, narratorConfig, narratorIo, narratorModelId, narratorModelsCommand, planEnv, prAnomalies, publicationIo, readFileSync, readdirSync, refsFromCommitMessage, reviewEnv, scratchDir, shellArg, spawnSync, writeFileSync,
 } from './drive-fixtures.mjs'
-import { anchorConflictMechanical, canonicalAnchorManifest, canonicalCitationDoc, lineNumberOnlyAnchorResolution, rebaseConflictRoute, resumeTask, resumeWorktreeSha256 } from './drive.mjs'
+import { anchorConflictMechanical, canonicalAnchorManifest, canonicalCitationDoc, lineNumberOnlyAnchorResolution, promptMeasurementDefect, rebaseConflictRoute, resumeTask, resumeWorktreeSha256 } from './drive.mjs'
 import { git, gitResult } from '../test/helpers.mjs'
 
 const REVIEW_ENVELOPE_SCHEMA = `{
@@ -137,6 +137,24 @@ function runPublished(options = {}) {
   return { ctx, io, result }
 }
 
+const PROMPT_SCOPE = ['crew/roles/planner.md']
+const promptPublicationOptions = (body = '') => ({
+  changed: PROMPT_SCOPE,
+  envelopes: {
+    'planner:1': planEnv({ details: { ...planEnv().details, files_in_scope: PROMPT_SCOPE } }),
+    'builder:1': buildEnv({ details: { files_changed: PROMPT_SCOPE, commit_message: body } }),
+    'reviewer:1': reviewEnv('pass'),
+  },
+})
+function runPromptPublished(body = '', options = {}) {
+  const defaults = promptPublicationOptions(body)
+  return runPublished({
+    ...options, ...defaults,
+    ...(options.changed ? { changed: options.changed } : {}),
+    envelopes: { ...defaults.envelopes, ...(options.envelopes || {}) },
+  })
+}
+
 const REBASE_PARENT = 'base1111'
 const REBASE_RED = 'red\nGATE-SUMMARY {"total":3,"failed":3,"errored":0}'
 const REBASE_GREEN = 'green\nGATE-SUMMARY {"total":3,"failed":0,"errored":0}'
@@ -156,7 +174,7 @@ function rebaseIo(options = {}) {
     changed,
     envelopes: {
       'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations, files_in_scope: scope, commit_subject: 'feat: rebase proof' } }),
-      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+      'builder:1': options.builderEnv || buildEnv(), 'reviewer:1': reviewEnv('pass'),
     },
     commands: {
       'git rev-parse origin/main': { ok: true, output: `${REBASE_PARENT}\n` },
@@ -318,13 +336,19 @@ function anchorPublicationIo({ specs = [], scope, limits = {}, gate = null, enve
   }
   const baseTracked = tracked || Object.keys(allCarriers)
   const initialBytes = { ...allCarriers }
-  const io = publicationIo({
-    changed: effectiveScope,
-    envelopes: {
-      'planner:1': planEnv({ details: { ...planEnv().details, files_in_scope: effectiveScope, ...(gate?.details || {}) } }),
-      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'), ...envelopes,
-    },
-  })
+  const promptMeasurement = 'unmeasured — n insufficient; reason: anchor publication fixture; re-measure after 1 seats.'
+  const anchorEnvelopes = {
+    'planner:1': planEnv({ details: { ...planEnv().details, files_in_scope: effectiveScope, ...(gate?.details || {}) } }),
+    'builder:1': buildEnv({ details: { files_changed: effectiveScope, commit_message: promptMeasurement } }),
+    'reviewer:1': reviewEnv('pass'), ...envelopes,
+  }
+  const publicationEnvelopes = Object.fromEntries(Object.entries(anchorEnvelopes).map(([key, value]) => [
+    key,
+    key.startsWith('builder:') && value && typeof value === 'object'
+      ? { ...value, details: { ...(value.details || {}), files_changed: value.details?.files_changed || effectiveScope, commit_message: promptMeasurement } }
+      : value,
+  ]))
+  const io = publicationIo({ changed: effectiveScope, envelopes: publicationEnvelopes })
   io.calls.assign = []
   const baseAssign = io.assign
   io.assign = function (spec) {
@@ -607,7 +631,13 @@ function assertRecordedRebaseStateFailures(run, facts) {
 function mechanicalProofRun() {
   const stage2 = anchorManifest({ [`${ANCHOR_SOURCE}:10`]: 'anchor-value' })
   const stage3 = anchorManifest({ [`${ANCHOR_SOURCE}:12`]: 'anchor-value' })
-  const io = rebaseIo({ changed: ['a.mjs', 'a.test.mjs', ANCHOR_MANIFEST], scope: ['a.mjs', 'a.test.mjs', ANCHOR_MANIFEST] })
+  const io = rebaseIo({
+    changed: ['a.mjs', 'a.test.mjs', ANCHOR_MANIFEST], scope: ['a.mjs', 'a.test.mjs', ANCHOR_MANIFEST],
+    builderEnv: buildEnv({ details: {
+      files_changed: ['a.mjs', 'a.test.mjs', ANCHOR_MANIFEST],
+      commit_message: 'unmeasured — n insufficient; reason: mechanical anchor fixture; re-measure after 1 seats.',
+    } }),
+  })
   const anchorPath = `${CTX.checkout}/${ANCHOR_MANIFEST}`
   io.state.worktreeBytes[anchorPath] = stage3
   io.state.indexBytes[anchorPath] = stage3
@@ -1107,6 +1137,128 @@ test('failed and blank rebase probes, post-head probes, empty conflicts, and res
   assert.match(wrongHead.result.details.escalation.why, /other4444/)
 })
 
+test('A1 normal prompt-surface silence is refused before any publish side effect', () => {
+  const run = runPromptPublished(' ')
+  assert.equal(run.result.status, 'escalation')
+  assert.equal(run.result.details.escalation.where, 'publish')
+  assert.equal(run.result.details.publish.refused, PUBLISH_REFUSALS.promptMeasurement)
+  assert.match(run.result.details.escalation.why, /crew\/roles\/planner\.md/)
+  assert.equal(run.io.calls.run.some((command) => command.includes('command -v gh')), false)
+  assert.equal(run.io.calls.run.some((command) => command.includes('gh')), false)
+  assert.equal(run.io.calls.run.some((command) => command.includes('git push')), false)
+  assert.equal(run.io.calls.writes[`${TD}/pr-body.md`], undefined)
+  assert.equal(run.io.calls.run.some((command) => command.includes('gh pr create')), false)
+})
+
+test('A2 resumed prompt-surface silence is refused before any publish side effect', () => {
+  const file = { path: PROMPT_SCOPE[0], state: 'present', bytes: 'file:-:' + 'a'.repeat(64) }
+  const checkpoint = resumeCheckpointFixture({
+    accepted_scope: PROMPT_SCOPE,
+    tree: { files: [file], worktree_sha256: resumeWorktreeSha256([file]) },
+    commit: { message: 'feat: resume\n\n ', files: PROMPT_SCOPE },
+    kind: 'publish', frozen_where: 'publish', publish: { branch: 'feature/ship', base: 'main' },
+  })
+  const io = publicationIo()
+  const result = resumeTask({ ...CTX, task: 'resume-prompt-publish', publish: { branch: 'feature/ship' }, files_in_scope: PROMPT_SCOPE }, io, checkpoint)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'publish')
+  assert.equal(result.details.publish.refused, PUBLISH_REFUSALS.promptMeasurement)
+  assert.match(result.details.escalation.why, /crew\/roles\/planner\.md/)
+  assert.equal(io.calls.run.some((command) => command.includes('command -v gh')), false)
+  assert.equal(io.calls.run.some((command) => command.includes('gh')), false)
+  assert.equal(io.calls.run.some((command) => command.includes('git push')), false)
+  assert.equal(io.calls.writes[`${TD}/pr-body.md`], undefined)
+  assert.equal(io.calls.run.some((command) => command.includes('gh pr create')), false)
+})
+
+test('B1 an unmeasured claim with reason and re-measure seat count publishes', () => {
+  const claim = 'unmeasured — n insufficient; reason: first-round data is not available; re-measure after 2 seats.'
+  const run = runPromptPublished(claim)
+  assert.equal(run.result.status, 'done')
+  assert.ok(run.io.calls.writes[`${TD}/pr-body.md`].includes(claim))
+})
+
+test('B2 all three allowed measured metric-name shapes publish with before-after denominators', () => {
+  for (const name of ['first-round pass rate', 'turns per seat', 'prompt-measurement-missing refusal frequency']) {
+    const claim = `Measure: ${name}; before: 80% (n=2); after: 90% (n=3).`
+    const run = runPromptPublished(claim)
+    assert.equal(run.result.status, 'done', name)
+    assert.match(run.io.calls.writes[`${TD}/pr-body.md`], new RegExp(`Measure: ${name}`), name)
+  }
+})
+
+test('B3 an unsupported measured metric name is refused despite valid denominators', () => {
+  const run = runPromptPublished('Measure: completion rate; before: 80% (n=2); after: 90% (n=3).')
+  assert.equal(run.result.status, 'escalation')
+  assert.equal(run.result.details.publish.refused, PUBLISH_REFUSALS.promptMeasurement)
+})
+
+test('B4 malformed unmeasured reasons and re-measure counts are refused', () => {
+  const claims = [
+    'unmeasured — n insufficient; re-measure after 2 seats.',
+    'unmeasured — n insufficient; reason: ; re-measure after 2 seats.',
+    'unmeasured — n insufficient; reason:   ; re-measure after 2 seats.',
+    'unmeasured — n insufficient; reason: \t; re-measure after 2 seats.',
+    'unmeasured — n insufficient; reason: because; data; re-measure after 2 seats.',
+    'unmeasured — n insufficient; reason: data; re-measure after seats.',
+    'unmeasured — n insufficient; reason: data; re-measure after 0 seats.',
+  ]
+  for (const claim of claims) {
+    const run = runPromptPublished(claim)
+    assert.equal(run.result.status, 'escalation', claim)
+    assert.equal(run.result.details.publish.refused, PUBLISH_REFUSALS.promptMeasurement, claim)
+  }
+})
+
+test('B5 prefixed and negated prompt measurement claims are refused', () => {
+  const measured = 'Measure: turns per seat; before: 2 turns (n=2); after: 3 turns (n=3).'
+  const unmeasured = 'unmeasured — n insufficient; reason: data is incomplete; re-measure after 2 seats.'
+  const claims = [
+    `not ${measured}`,
+    `we did not ${measured}`,
+    `not ${unmeasured}`,
+    `we did not ${unmeasured}`,
+    `${measured} not a standalone claim`,
+    `${unmeasured} not a standalone claim`,
+  ]
+  for (const claim of claims) {
+    const run = runPromptPublished(claim)
+    assert.equal(run.result.status, 'escalation', claim)
+    assert.equal(run.result.details.publish.refused, PUBLISH_REFUSALS.promptMeasurement, claim)
+  }
+})
+
+test('C1 a point estimate without n is refused', () => {
+  const claims = [
+    'Prompt changes improved the first-round pass rate to 90%.',
+    'Measure: turns per seat; before: 2 turns; after: 3 turns (n=2).',
+    'Measure: turns per seat; before: 2 turns (n=2); after: 3 turns.',
+  ]
+  for (const claim of claims) {
+    const run = runPromptPublished(claim)
+    assert.equal(run.result.status, 'escalation', claim)
+    assert.equal(run.result.details.publish.refused, PUBLISH_REFUSALS.promptMeasurement, claim)
+  }
+})
+
+test('D1 a code-only lane publishes without a prompt measurement claim', () => {
+  const run = runPublished({})
+  assert.equal(run.result.status, 'done')
+  assert.doesNotMatch(run.io.calls.writes[`${TD}/pr-body.md`], /Measure:|unmeasured — n insufficient/i)
+})
+
+test('E1 the prompt-measurement refusal is a named closed reason', () => {
+  assert.equal(PUBLISH_REFUSALS.promptMeasurement, 'prompt-measurement-missing')
+  assert.equal(PUBLISH_REFUSAL_NAMES.includes(PUBLISH_REFUSALS.promptMeasurement), true)
+  assert.deepEqual(new Set(PUBLISH_REFUSAL_NAMES), new Set(Object.values(PUBLISH_REFUSALS)))
+})
+
+test('E2 prompt-measurement refusal guidance names its triggering path', () => {
+  const paths = ['crew/roles/planner.md', 'crew/guidelines/review-do-not-flag.md']
+  const defect = promptMeasurementDefect({ files: paths, body: '' })
+  assert.equal(defect, 'prompt-change PR body must name a ledger cell measure with before/after and n, or say unmeasured — n insufficient with a reason and re-measure seat count; prompt surface: crew/roles/planner.md, crew/guidelines/review-do-not-flag.md')
+})
+
 test('each closed publish refusal is named and never creates a pull request', () => {
   const cases = [
     ['branch-unresolved', { branch: '' }],
@@ -1116,6 +1268,7 @@ test('each closed publish refusal is named and never creates a pull request', ()
     ['pr-exists', { commands: { 'gh pr view': { ok: true, output: 'not json' } } }],
     ['pr-check', { commands: { 'gh pr view': { ok: false, output: 'permission denied' } } }],
     ['push-rejected', { commands: { 'git push -u origin': { ok: false, output: 'rejected' } } }],
+    ['prompt-measurement-missing', promptPublicationOptions(' ')],
     ['pr-create', { commands: { 'gh pr create': { ok: true, output: 'created but URL omitted' } } }],
   ]
   assert.deepEqual(new Set(cases.map(([reason]) => reason)), new Set(PUBLISH_REFUSAL_NAMES))

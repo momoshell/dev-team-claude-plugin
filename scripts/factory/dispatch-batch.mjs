@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url'
 import { parseDirectedBrief, scopeMatcher, validateScopeEntries as driveValidateScopeEntries, VARIANT_NAMES, VARIANTS, TURN_CEILING_FLAGS, WAITS_S } from '../../crew/drive.mjs'
 import { resolveTaskReturn } from '../../crew/crew.mjs'
 import { assertHostQuiet, hostLoad, loadPolicy, withSuiteSlot } from '../../crew/host-load.mjs'
-import { protectedHitsIn, resolveProtectedPaths } from '../../crew/protected-paths.mjs'
+import { protectedHitsIn, resolveProtectedPaths, PROMPT_SURFACE as SHARED_PROMPT_SURFACE, PROMPT_SURFACE_BLIND_SPOT as SHARED_PROMPT_SURFACE_BLIND_SPOT } from '../../crew/protected-paths.mjs'
 import { fenceScopesIntersect, parseFenceScope } from '../../crew/fence-scope.mjs'
 import { slug } from '../../crew/slug.mjs'
 import { LADDER_BANDS, PROPOSAL_BLOCK, PROPOSAL_V2_KEYS, TIER_NAMES, extractSymbols, gatherFences, isTripwireFile, validateRequest } from './make-brief.mjs'
@@ -91,8 +91,7 @@ export const WARNING_ROWS_UNPERSISTED_PREFIX = 'dispatch-batch: WARNING rows-unp
 
 export const ROLES_ANCHOR_MANIFEST = 'crew/roles/anchors.json'
 export const ROLES_ANCHOR_COMPANIONS = Object.freeze(['crew/roles/planner.md', 'crew/roles/tech-lead.md'])
-export const PROMPT_SURFACE = Object.freeze({ paths: Object.freeze(['crew/roles/', 'crew/guidelines/']), templateBlocks: Object.freeze(['ACCEPTANCE_GATE_BLOCK', 'HOSTILE_ENV_BLOCK', 'CONVENTIONS_BLOCK', 'MUTATION_CONTRACT_BLOCK']) })
-export const PROMPT_SURFACE_BLIND_SPOT = 'BLIND SPOT: path matching cannot see a prompt embedded as a template string in a compiler; the named templateBlocks require human recognition.'
+export { PROMPT_SURFACE, PROMPT_SURFACE_BLIND_SPOT } from '../../crew/protected-paths.mjs'
 
 // The scan reads anchors.json manifests, which are machine-readable. The DOCS that carry
 // those citations are found by citationCarriers below, and its own warning names them, so
@@ -2605,7 +2604,7 @@ export function tierFloor({ files, extra } = {}) {
 }
 
 export function promptSurfaceVerdict({ files } = {}) {
-  const hits = protectedHitsIn(files, PROMPT_SURFACE.paths)
+  const hits = protectedHitsIn(files, SHARED_PROMPT_SURFACE.paths)
   return { hits, promptChange: hits.length > 0, forced: hits.length > 0 ? 'judge' : null }
 }
 
@@ -2659,7 +2658,7 @@ export function resolveRequestedTier({ tier, assurance } = {}) {
 export function reconcileTier({ lane, forced, recommended, requested, requestedFrom = 'lane', forceReason = TIER_FLOOR_CONFLICT } = {}) {
   if (forced && requestedFrom !== 'batch' && requested && TIER_NAMES.indexOf(requested) < TIER_NAMES.indexOf(forced)) {
     if (forceReason === PROMPT_SURFACE_CONFLICT) {
-      refuse(`lane ${lane} requested tier ${requested} below prompt surface floor ${forced}; ${PROMPT_SURFACE_BLIND_SPOT}`, PROMPT_SURFACE_CONFLICT)
+      refuse(`lane ${lane} requested tier ${requested} below prompt surface floor ${forced}; ${SHARED_PROMPT_SURFACE_BLIND_SPOT}`, PROMPT_SURFACE_CONFLICT)
     }
     if (forceReason === PROPOSAL_MINIMUM_CONFLICT) {
       refuse(`lane ${lane} requested assurance ${TIER_TO_ASSURANCE[requested] || requested} below proposal minimum ${TIER_TO_ASSURANCE[forced] || forced}`, PROPOSAL_MINIMUM_CONFLICT)

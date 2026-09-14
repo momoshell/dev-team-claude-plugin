@@ -75,6 +75,52 @@ export function configurationDimensionCell(run = {}, dimension) {
   return { ...measuredCell(value, meta.label), key: value, summary: meta.summary ?? null }
 }
 
+function textValue(value) {
+  return typeof value === 'string' && value.trim() ? value.trim() : null
+}
+
+const RUN_DETAIL_CONFIGURATION_AXES = Object.freeze([
+  { key: 'task_profile', label: 'Task profile' },
+  { key: 'execution', label: 'Execution shape' },
+  { key: 'assurance', label: 'Assurance' },
+])
+
+export function runDetailConfiguration(run = {}) {
+  return RUN_DETAIL_CONFIGURATION_AXES.map((descriptor) => {
+    const axis = run?.configuration?.[descriptor.key]
+    const requested = textValue(axis?.requested)
+    const effective = textValue(axis?.effective)
+    const source = textValue(axis?.source)
+    return {
+      ...descriptor,
+      requested: textValue(axis?.requested),
+      effective: textValue(axis?.effective),
+      source: textValue(axis?.source),
+      requested_text: requested ?? 'Not recorded',
+      effective_text: effective ?? 'Not recorded',
+      source_text: source ?? 'Not recorded',
+      changed: requested !== null && effective !== null && source !== null ? requested !== effective : null,
+    }
+  })
+}
+
+function normaliseWarnings(value) {
+  if (!Array.isArray(value)) return null
+  return value.map((entry) => String(entry))
+}
+
+export function runDetailSeats(run = {}) {
+  if (!Array.isArray(run?.seats)) return { state: 'not-recorded', rows: [], summary: 'Not recorded' }
+  if (run.seats.length === 0) return { state: 'measured-empty', rows: [], summary: 'No seat overrides or policy warnings recorded' }
+  const rows = run.seats.map((seat) => ({
+    role: textValue(seat?.role),
+    source: textValue(seat?.source),
+    policy_state: textValue(seat?.policy_state),
+    warnings: normaliseWarnings(seat?.warnings),
+  }))
+  return { state: 'measured', rows, summary: `${rows.length} seat${rows.length === 1 ? '' : 's'} recorded` }
+}
+
 export function configurationFilterView(runs = [], selections = {}) {
   const source = Array.isArray(runs) ? runs : []
   const dimensions = CONFIGURATION_DIMENSIONS.flatMap((descriptor) => configurationDimensionDescriptor(source, descriptor))
@@ -251,6 +297,48 @@ export function driverObservation(run = {}) {
     observed_at: runtime.observed_at ?? null,
     measured: source !== null,
     text: source === null ? 'not observed' : `${state} · ${source}`,
+  }
+}
+
+export function runDetailState(run = {}, events = []) {
+  const missing = 'Not recorded'
+  const settlement = run?.settlement && typeof run.settlement === 'object' ? run.settlement : {}
+  const settlementState = textValue(settlement.state)
+  const settlementOutcome = textValue(settlement.outcome)
+  const settlementReason = textValue(settlement.reason)
+  const settlementText = [settlementState, settlementOutcome, settlementReason].filter((value) => value !== null).join(' · ') || missing
+  const observation = driverObservation(run)
+  const runtime = run?.runtime && typeof run.runtime === 'object' ? run.runtime : {}
+  const heartbeatState = textValue(runtime.heartbeat_state)
+  const phases = Array.isArray(run?.phases) ? run.phases : []
+  const eventRows = Array.isArray(events) ? events : []
+  const latestPhase = phases.at(-1)
+  const latestEvent = eventRows.at(-1)
+  const reconciliation = textValue(run?.reconciliation_command)
+  return {
+    settlement: {
+      state: settlementState,
+      outcome: settlementOutcome,
+      reason: settlementReason,
+      text: settlementText,
+    },
+    driver: {
+      ...observation,
+      text: observation.measured ? observation.text : missing,
+    },
+    heartbeat: {
+      state: heartbeatState,
+      text: heartbeatState ?? missing,
+      caveat: 'Heartbeat freshness does not establish driver liveness.',
+    },
+    latest: {
+      phase: textValue(latestPhase?.name) ?? missing,
+      event: textValue(latestEvent?.type) ?? missing,
+    },
+    remediation: {
+      command: reconciliation,
+      text: reconciliation ?? missing,
+    },
   }
 }
 

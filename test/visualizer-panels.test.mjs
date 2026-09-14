@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { PANEL_REFRESH_MS, PANEL_STALE_AFTER_MS, acceptRows, brakePanel, cellHealthPanel, fleetCost, fleetEscalationRate, fleetMedianDuration, fleetPassRate, fleetPhasesPerRun, fleetTokens, findingRows, gateChips, intakeCandidateRows, intakePanel, reviewRows, rosterEditForm, rosterPanel, panelAgeLabel, panelReadLoop, readFreshness, rosterProposal, runSetPanel, teardownPanel } from '../visualizer/web/src/lib/panels.js'
 import { parseHash, formatHash } from '../visualizer/web/src/lib/route.js'
-import { ATTENTION_KEYS, absenceMark, attentionBreakdown, configurationDimensionCell, configurationFilterView, costCell, createSemaphore, crewArchive, deriveDisplayStatus, deriveStatus, escalationProbeTargets, fleetActivity, fleetView, gateCell, heartbeatCell, needsAttention, openRecordNote, operationsOverview, reviewCell, runActivity, runtimeActivitySummary, slotWaitCell, tokenCell } from '../visualizer/web/src/lib/fleet.js'
+import { ATTENTION_KEYS, absenceMark, attentionBreakdown, configurationDimensionCell, configurationFilterView, costCell, createSemaphore, crewArchive, deriveDisplayStatus, deriveStatus, escalationProbeTargets, fleetActivity, fleetView, gateCell, heartbeatCell, needsAttention, openRecordNote, operationsOverview, reviewCell, runActivity, runDetailConfiguration, runDetailSeats, runDetailState, runtimeActivitySummary, slotWaitCell, tokenCell } from '../visualizer/web/src/lib/fleet.js'
 import { ROLE_ORDER, acceptEvidence, bounceArrows, gateMarkers, gateProofStory, laneRows, phaseFilterId, phasePanel, renderMarkdown } from '../visualizer/web/src/lib/trace.js'
 import { eventStory, eventStreamSummary } from '../visualizer/web/src/lib/event-story.js'
 import { assignmentPath, envelopeFacts, envelopeGroups, envelopeOverview, envelopeSections, trajectoryRowStory, trajectorySummary } from '../visualizer/web/src/lib/diagnostic-story.js'
@@ -258,6 +258,89 @@ test('operations aggregation retains provenance, seat sources, and warning absen
   assert.deepEqual(result.seatEvidence.find((seat) => seat.role === 'builder').warnings, ['model-fit advisory'])
   assert.equal(result.seatEvidence.find((seat) => seat.role === 'reviewer').warnings, null)
   assert.equal(result.seatEvidence.some((seat) => seat.source === 'legacy'), false)
+})
+
+test('A1 task detail configuration preserves changed requested effective and source', () => {
+  const rows = runDetailConfiguration({ configuration: { assurance: { requested: 'standard', effective: 'rigorous', source: 'protected_floor' } } })
+  const assurance = rows.find((row) => row.key === 'assurance')
+  assert.deepEqual({ requested: assurance.requested, effective: assurance.effective, source: assurance.source, changed: assurance.changed }, { requested:'standard', effective:'rigorous', source:'protected_floor', changed:true })
+  assert.deepEqual({ requested: assurance.requested_text, effective: assurance.effective_text, source: assurance.source_text }, { requested:'standard', effective:'rigorous', source:'protected_floor' })
+})
+
+test('B1 task detail configuration keeps all four provenance sources distinct', () => {
+  const sources = ['roster', 'profile_recommendation', 'operator_override', 'reseat']
+  const found = sources.map((source) => runDetailConfiguration({ configuration: { assurance: { requested:'standard', effective:'rigorous', source } } }).find((row) => row.key === 'assurance').source)
+  assert.deepEqual(found, sources)
+})
+
+test('C1 task detail configuration marks missing provenance Not recorded and changed null', () => {
+  const rows = runDetailConfiguration({ tier:'build', variant:'full', assurance:'standard', configuration: { assurance: { requested:'standard', effective:'standard', source:null } } })
+  const assurance = rows.find((row) => row.key === 'assurance')
+  assert.equal(assurance.source, null)
+  assert.equal(assurance.source_text, 'Not recorded')
+  assert.equal(assurance.changed, null)
+  assert.equal(rows.find((row) => row.key === 'task_profile').effective_text, 'Not recorded')
+})
+
+test('D1 task detail seats keep distinctive warnings attached to their original roles', () => {
+  const result = runDetailSeats({ seats: [
+    { role:'planner', source:'roster', policy_state:'passed', warnings:['planner-only'] },
+    { role:'builder', source:'reseat', policy_state:'warned', warnings:['builder-only'] },
+  ] })
+  assert.deepEqual(result.rows.map((row) => [row.role, row.warnings]), [['planner', ['planner-only']], ['builder', ['builder-only']]])
+})
+
+test('E1 task detail seats distinguish null from measured-empty', () => {
+  const absent = runDetailSeats({ seats:null })
+  const empty = runDetailSeats({ seats:[] })
+  assert.deepEqual(absent, { state:'not-recorded', rows:[], summary:'Not recorded' })
+  assert.deepEqual(empty, { state:'measured-empty', rows:[], summary:'No seat overrides or policy warnings recorded' })
+})
+
+test('F1 task detail seats preserve unknown future policy states', () => {
+  const row = runDetailSeats({ seats: [{ role:'reviewer', source:'operator_override', policy_state:'future_policy', warnings:[] }] }).rows[0]
+  assert.equal(row.policy_state, 'future_policy')
+  assert.deepEqual(row.warnings, [])
+})
+
+test('G1 task detail state reports measured facts and independently missing facts', () => {
+  const measured = runDetailState({
+    settlement:{ state:'settled', outcome:'success', reason:'operator-complete' },
+    runtime:{ driver_state:'alive', source:'daemon', reason_code:'healthy', heartbeat_state:'fresh' },
+    phases:[{ name:'request' }, { name:'build' }],
+    reconciliation_command:'node reconcile --dry-run',
+  }, [{ type:'agent_start' }, { type:'agent_end' }])
+  assert.match(measured.settlement.text, /settled.*success.*operator-complete/)
+  assert.equal(measured.driver.text, 'alive · daemon')
+  assert.equal(measured.heartbeat.text, 'fresh')
+  assert.match(measured.heartbeat.caveat, /heartbeat freshness does not establish driver liveness/i)
+  assert.equal(measured.latest.phase, 'build')
+  assert.equal(measured.latest.event, 'agent_end')
+  assert.equal(measured.remediation.text, 'node reconcile --dry-run')
+
+  const absent = runDetailState({ settlement:null, runtime:null, phases:[], reconciliation_command:null }, [])
+  assert.deepEqual([absent.settlement.text, absent.driver.text, absent.heartbeat.text, absent.latest.phase, absent.latest.event, absent.remediation.text], Array(6).fill('Not recorded'))
+  assert.match(absent.heartbeat.caveat, /heartbeat/i)
+  const noPhase = runDetailState({ phases:[], runtime:{ heartbeat_state:'overdue' } }, [{ type:'log' }])
+  assert.equal(noPhase.latest.phase, 'Not recorded')
+  assert.equal(noPhase.latest.event, 'log')
+  assert.equal(noPhase.heartbeat.text, 'overdue')
+})
+
+test('H1 RunDetail composes plain detail helpers and renders each audited field', () => {
+  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/RunDetail.svelte'), 'utf8')
+  assert.match(source, /import \{ deriveDisplayStatus, durationCell, gateCell, openRecordNote, reviewCell, runDetailConfiguration, runDetailSeats, runDetailState, tokenCell \} from '\.\/fleet\.js'/)
+  assert.match(source, /let configurationDetail = \$derived\(runDetailConfiguration\(run\)\)/)
+  assert.match(source, /let seatPolicy = \$derived\(runDetailSeats\(run\)\)/)
+  assert.match(source, /let runState = \$derived\(runDetailState\(run, events\)\)/)
+  for (const helper of ['runDetailConfiguration', 'runDetailSeats', 'runDetailState']) assert.doesNotMatch(source, new RegExp(`function\\s+${helper}\\s*\\(`))
+  for (const token of [
+    'configuration-strip', 'requested_text', 'effective_text', 'source_text',
+    'configuration-equal', 'configuration-changed', 'seat-policy', 'seatPolicy.rows',
+    'seat.source', 'seat.policy_state', 'seat.warnings', 'No policy warnings recorded',
+    'run-state-card', 'Settlement', 'Driver observation', 'Heartbeat', 'caveat',
+    'Latest phase', 'Latest event', 'Operator remediation', 'runState.remediation.command',
+  ]) assert.match(source, new RegExp(token.replace('.', '\\.' )))
 })
 
 test('operations aggregation reports alive, gone, and unknown unsettled buckets', () => {

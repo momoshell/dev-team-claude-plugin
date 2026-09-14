@@ -4127,6 +4127,8 @@ test('#443: every documented CLI flag remains accepted', { skip: SKIP }, () => {
     { verb: 'tail', flag: 'limit', args: ['tail', 'cli-1', '--after', '0', '--limit', '1'] },
     { verb: 'run-set', flag: 'since', args: ['run-set', '--since', since, '--until', until] },
     { verb: 'run-set', flag: 'until', args: ['run-set', '--since', since, '--until', until] },
+    { verb: 'configurations', flag: 'since', args: ['configurations', '--since', since, '--until', until] },
+    { verb: 'configurations', flag: 'until', args: ['configurations', '--since', since, '--until', until] },
     { verb: 'cell-failures', flag: 'since', args: ['cell-failures', '--since', since, '--until', until] },
     { verb: 'cell-failures', flag: 'until', args: ['cell-failures', '--since', since, '--until', until] },
     { verb: 'cells', flag: 'since', args: ['cells', '--since', since, '--until', until] },
@@ -4167,7 +4169,7 @@ test('#443: flagless subcommands refuse an unknown flag', { skip: SKIP }, () => 
 })
 
 test('#443: every window subcommand refuses the misspelled flag', { skip: SKIP }, () => {
-  for (const verb of ['run-set', 'cell-failures', 'cells', 'modifier-attempts', 'seat-teardowns', 'escalations', 'ci-cycles', 'intake-sweeps']) {
+  for (const verb of ['run-set', 'configurations', 'cell-failures', 'cells', 'modifier-attempts', 'seat-teardowns', 'escalations', 'ci-cycles', 'intake-sweeps']) {
     const result = run([verb, '--sicne', '2026-08-21T00:00:00Z'])
     assert.equal(result.status, 2, `${verb}: ${result.stderr}`)
     assert.match(result.stderr, /unknown flag --sicne/)
@@ -4264,6 +4266,206 @@ function seedRun(ledger, adwId, startedAt, status = 'running') {
   ledger.startSession({ adw_id: adwId, repo_slug: 'r', task_slug: adwId, started_at: startedAt })
   if (status !== 'running') ledger.endSession({ adw_id: adwId, status })
 }
+
+function seedConfigurationRun(ledger, adwId, startedAt, overrides = {}) {
+  seedRun(ledger, adwId, startedAt)
+  const values = {
+    schema_version: 1,
+    task_profile: 'implementation',
+    task_profile_source: 'explicit',
+    requested_execution: 'full',
+    effective_execution: 'full',
+    execution_source: 'profile_recommendation',
+    requested_assurance: 'standard',
+    effective_assurance: 'standard',
+    assurance_source: 'explicit',
+    legacy_variant: null,
+    legacy_tier: null,
+    ...overrides,
+  }
+  ledger.recordRunConfiguration({ adw_id: adwId, ...values, created_at: values.created_at ?? startedAt })
+}
+
+function seedConfigurationSeat(ledger, adwId, role, source, createdAt = '2024-01-01T00:00:10.000Z') {
+  ledger.recordRunSeat({
+    adw_id: adwId,
+    role,
+    agent: 'claude',
+    provider: 'anthropic',
+    model_id: `model-${role}`,
+    model: `model-${role}`,
+    effort: 'high',
+    transport: 'pane',
+    source,
+    policy_state: 'passed',
+    warnings: [`warning-${role}`],
+    created_at: createdAt,
+  })
+}
+
+test('A1: configuration readout reports profile execution and assurance', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const since = '2024-01-01T00:00:00.000Z'
+  const until = '2024-01-02T00:00:00.000Z'
+  let closed = false
+  try {
+    seedConfigurationRun(ledger, 'configuration-inside', '2024-01-01T00:10:00.000Z', {
+      requested_execution: 'standard', effective_execution: 'rigorous', execution_source: 'operator_override',
+    })
+    seedRun(ledger, 'configuration-historical', '2024-01-01T00:20:00.000Z')
+    seedConfigurationRun(ledger, 'configuration-outside', '2024-01-02T00:10:00.000Z')
+
+    const readout = ledger.configurationReadout({ since, until })
+    assert.equal(readout.runs, 2, 'the denominator is every session started in the half-open window')
+    assert.equal(readout.configurations, 1)
+    assert.equal(readout.measured, true)
+    assert.deepEqual(readout.dimensions.map((row) => row.dimension), ['profile', 'execution', 'assurance'])
+    const profile = readout.dimensions[0]
+    assert.deepEqual({ value: profile.value, source: profile.source }, { value: 'implementation', source: 'explicit' })
+    assert.equal(Object.hasOwn(profile, 'requested'), false)
+    const execution = readout.dimensions[1]
+    assert.deepEqual({ requested: execution.requested, effective: execution.effective }, { requested: 'standard', effective: 'rigorous' })
+    assert.equal(execution.override, true)
+    const assurance = readout.dimensions[2]
+    assert.equal(assurance.dimension, 'assurance')
+    for (const row of readout.dimensions) {
+      assert.equal(row.count, 1)
+      assert.equal(row.denominator, 1)
+    }
+
+    const dbPath = ledger._dbPath
+    ledger.close()
+    closed = true
+    const result = run(['configurations', '--since', '2024-01-01T00:00:00Z', '--until', '2024-01-02T00:00:00Z'], { DEVTEAM_LEDGER_DB: dbPath })
+    assert.equal(result.status, 0, result.stderr)
+    const payload = JSON.parse(result.stdout)
+    assert.equal(payload.since, since)
+    assert.equal(payload.until, until)
+    assert.equal(payload.runs, 2)
+    assert.equal(payload.configurations, 1)
+    assert.match(payload.definition.override, /null when no requested value was recorded/)
+    assert.match(payload.definition.override, /source alias means a name translation rather than an operator override/)
+  } finally {
+    if (!closed) ledger.close()
+  }
+})
+
+test('B1: configuration readout preserves requested and effective overrides', { skip: SKIP }, async (t) => {
+  const ledger = openTestLedger()
+  try {
+    seedConfigurationRun(ledger, 'configuration-override', '2024-01-01T00:00:00.000Z', {
+      requested_execution: 'standard', effective_execution: 'rigorous', execution_source: 'operator_override',
+    })
+    const execution = ledger.configurationReadout({ since: '2024-01-01T00:00:00.000Z' }).dimensions
+      .find((row) => row.dimension === 'execution')
+    assert.deepEqual({ requested: execution.requested, effective: execution.effective, override: execution.override }, {
+      requested: 'standard', effective: 'rigorous', override: true,
+    })
+
+    await t.test('configuration readout preserves requested and effective overrides', () => {
+      seedConfigurationRun(ledger, 'configuration-unrequested-assurance', '2024-01-01T00:01:00.000Z', {
+        requested_assurance: null, effective_assurance: 'standard', assurance_source: 'migration_default',
+      })
+      const assurance = ledger.configurationReadout({ since: '2024-01-01T00:00:00.000Z' }).dimensions
+        .find((row) => row.dimension === 'assurance' && row.requested === null && row.effective === 'standard')
+      assert.equal(assurance.override, null)
+      assert.deepEqual({ requested: assurance.requested, effective: assurance.effective, override: assurance.override }, {
+        requested: null, effective: 'standard', override: null,
+      })
+    })
+  } finally { ledger.close() }
+})
+
+test('C1: configuration readout preserves source provenance', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  try {
+    seedConfigurationRun(ledger, 'configuration-sources', '2024-01-01T00:00:00.000Z')
+    SEAT_VALUE_SOURCES.forEach((source, index) => seedConfigurationSeat(ledger, 'configuration-sources', `role-${index}`, source))
+    const readout = ledger.configurationReadout({ since: '2024-01-01T00:00:00.000Z' })
+    assert.deepEqual(readout.seats.map((seat) => seat.source).sort(), [...SEAT_VALUE_SOURCES].sort())
+    for (const seat of readout.seats) {
+      assert.equal(seat.policy_state, 'passed')
+      assert.deepEqual(seat.warnings, [`warning-${seat.role}`])
+    }
+  } finally { ledger.close() }
+})
+
+test('D1: configuration readout pairs every count with its denominator', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  try {
+    seedConfigurationRun(ledger, 'configuration-denominator-a', '2024-01-01T00:00:00.000Z')
+    seedConfigurationRun(ledger, 'configuration-denominator-b', '2024-01-01T00:01:00.000Z', {
+      task_profile: 'review', requested_execution: 'review_only', effective_execution: 'review_only',
+    })
+    const payload = ledger.configurationReadout({ since: '2024-01-01T00:00:00.000Z' })
+    const visit = (value) => {
+      if (!value || typeof value !== 'object') return
+      if (Array.isArray(value)) return value.forEach(visit)
+      if (Object.hasOwn(value, 'count')) {
+        assert.equal(typeof value.denominator, 'number', `count without numeric denominator: ${JSON.stringify(value)}`)
+      }
+      Object.values(value).forEach(visit)
+    }
+    visit(payload)
+    assert.ok(payload.dimensions.every((row) => row.denominator === 2))
+  } finally { ledger.close() }
+})
+
+test('E1: configuration readout marks an unmeasured window absent', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  try {
+    seedRun(ledger, 'configuration-historical-only', '2024-01-01T00:00:00.000Z')
+    const readout = ledger.configurationReadout({ since: '2024-01-01T00:00:00.000Z', until: '2024-01-02T00:00:00.000Z' })
+    assert.equal(readout.runs, 1)
+    assert.equal(readout.measured, false)
+    assert.equal(readout.configurations, null)
+    assert.deepEqual(readout.dimensions, [])
+    assert.equal(readout.absent.run_configurations, 'no run_configurations rows in this window — not recorded, never a measured zero or inferred default')
+    assert.notEqual(readout.configurations, 0)
+  } finally { ledger.close() }
+})
+
+test('F1: configuration readout never marks a measured run absent', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  try {
+    seedConfigurationRun(ledger, 'configuration-measured', '2024-01-01T00:00:00.000Z')
+    const readout = ledger.configurationReadout({ since: '2024-01-01T00:00:00.000Z' })
+    assert.equal(readout.measured, true)
+    assert.equal(readout.configurations, 1)
+    assert.ok(readout.dimensions.length > 0)
+    assert.equal(Object.hasOwn(readout.absent, 'run_configurations'), false)
+  } finally { ledger.close() }
+})
+
+test('G1: configuration query documentation names canonical commands and units', () => {
+  const docs = readFileSync(join(ROOT, 'docs', 'ledger-queries.md'), 'utf8')
+  const command = 'node scripts/factory/ledger.mjs configurations [--since <iso>] [--until <iso>]'
+  const rows = docs.split('\n').filter((line) => line.startsWith('| Which task profile, execution shape, and assurance did runs use? |') || line.startsWith('| Which agent, model, effort and transport actually sat in each role? |'))
+  assert.equal(rows.length, 2)
+  assert.ok(rows[0].includes('`' + command + '`'))
+  assert.ok(rows[1].includes('`' + command + '`'))
+  assert.match(rows[0], /one run × configuration dimension/)
+  assert.match(rows[1], /one effective role seat/)
+  assert.doesNotMatch(docs, /Query `run_configurations` by `adw_id`/)
+  assert.doesNotMatch(docs, /Query `run_seats` by `adw_id`/)
+})
+
+test('configurations CLI refuses positionals, inverted windows, and degraded mirrors', { skip: SKIP }, () => {
+  const positional = run(['configurations', 'unexpected'])
+  assert.equal(positional.status, 2)
+  assert.match(positional.stderr, /takes no positional arguments/)
+  const inverted = run(['configurations', '--since', '2024-01-02T00:00:00Z', '--until', '2024-01-01T00:00:00Z'])
+  assert.equal(inverted.status, 2)
+  assert.match(inverted.stderr, /--until must be later/)
+
+  const corruptDir = nextDir()
+  const corruptDb = join(corruptDir, 'ledger.db')
+  writeFileSync(corruptDb, 'not a sqlite database')
+  const degraded = run(['configurations'], { DEVTEAM_LEDGER_DB: corruptDb })
+  assert.equal(degraded.status, 2)
+  assert.equal(degraded.stdout, '')
+  assert.match(degraded.stderr, /degraded/)
+})
 
 function readerFixture() {
   const ledger = openTestLedger()

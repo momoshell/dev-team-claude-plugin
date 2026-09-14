@@ -10,6 +10,12 @@ import {
 import { bootCmd, composeRolePrompt, FLAG_VALUE_CONTRACT, KNOWN_FLAGS, BOOLEAN_FLAGS, BOOT_ONLY_FLAGS } from './crew.mjs'
 import { after } from 'node:test'
 import { tmpdir } from 'node:os'
+import {
+  documentDiffImages, documentDeclarations, documentChangedDeclarations, documentTrigger,
+  documentStagePlan, documentEntry, runDocumentationDecision, REVIEWED_CORE_STAGES, SHAPE_MAJOR_PHASES,
+  VARIANTS,
+} from './drive.mjs'
+import { convergeRun, runPublished, CONVERGE_CTX } from './drive-fixtures.mjs'
 
 // Ledger sandbox (#432 / #824). This file imports crew/crew.mjs#bootCmd, a
 // registered home-default door (test/factory-env.test.mjs:113), so it is a
@@ -484,4 +490,96 @@ test('#800 §7b 34 — the shared charter pin includes disposition and its compa
   assert.ok(line)
   assert.deepEqual([...line.matchAll(/"([^\"]+)"/g)].map((match) => match[1]), [...FINDING_DISPOSITIONS])
   assert.ok(block.includes('`disposition` is OPTIONAL in this release and REQUIRED from the next'))
+})
+
+const DOCUMENT_DIFF = [
+  "diff --git a/src/lifecycle.mjs b/src/lifecycle.mjs\n--- a/src/lifecycle.mjs\n+++ b/src/lifecycle.mjs\n@@ -1,4 +1,5 @@\n export const STAGES = Object.freeze([\n   'commit',\n+  'document',\n   'publish',\n ])",
+  "diff --git a/src/cli.mjs b/src/cli.mjs\n--- a/src/cli.mjs\n+++ b/src/cli.mjs\n@@ -1,3 +1,3 @@\n const KNOWN_FLAGS = Object.freeze({\n-  run: ['old-flag'],\n+  run: ['old-flag', 'new-flag'],\n })",
+  "diff --git a/src/refusals.mjs b/src/refusals.mjs\n--- a/src/refusals.mjs\n+++ b/src/refusals.mjs\n@@ -1,3 +1,4 @@\n const REFUSAL_REASONS = Object.freeze([\n   OLD_REFUSAL,\n+  NEW_REFUSAL,\n ])",
+  "diff --git a/src/policy.mjs b/src/policy.mjs\n--- a/src/policy.mjs\n+++ b/src/policy.mjs\n@@ -1 +1 @@\n-const RATIFIED_POSTURE = 'old-posture'\n+const RATIFIED_POSTURE = 'new-posture'",
+].join('\n')
+
+const DOCUMENT_ENTRIES = [
+  { surface: 'lifecycle-stages', source: 'src/lifecycle.mjs', target: 'skills/crew-dispatch/references/batch.md', entry: '9. Run the `document` stage after `commit` and before `publish`.' },
+  { surface: 'cli-flags', source: 'src/cli.mjs', target: 'skills/crew-dispatch/references/flags.md', entry: '{"run":["new-flag"]}' },
+  { surface: 'closed-refusals', source: 'src/refusals.mjs', target: 'docs/conventions.md', entry: '- **2026-09-14** — Added closed refusal `NEW_REFUSAL` from `src/refusals.mjs`. *Why:* The lane changed the closed-refusals documented surface.' },
+  { surface: 'ratified-posture', source: 'src/policy.mjs', target: 'docs/conventions.md', entry: '- **2026-09-14** — Ratified posture `new-posture` from `src/policy.mjs`. *Why:* The lane changed the ratified-posture documented surface.' },
+]
+
+test('A1 inventories and stage classification place document after commit', () => {
+  assert.deepEqual([...REVIEWED_CORE_STAGES], ['build', 'scope-gate', 'lane', 'review', 'commit', 'document', 'rebase', 'suite', 'publish'])
+  assert.deepEqual([...SHAPE_MAJOR_PHASES], ['plan', 'build', 'review', 'commit', 'document', 'rebase', 'suite', 'publish'])
+  assert.deepEqual(VARIANTS.repair.stages.slice(-5), ['commit', 'document', 'rebase', 'suite', 'publish'])
+})
+
+test('B1-B6/C1 recognize closed declarations and reject generic options', () => {
+  assert.deepEqual(documentStagePlan({ diff: DOCUMENT_DIFF }, { date: '2026-09-14' }), { triggered: true, readable: true, entries: DOCUMENT_ENTRIES })
+  const dispatch = "diff --git a/scripts/factory/dispatch-batch.mjs b/scripts/factory/dispatch-batch.mjs\n--- a/scripts/factory/dispatch-batch.mjs\n+++ b/scripts/factory/dispatch-batch.mjs\n@@ -1,3 +1,4 @@\n const valueFlags = new Set([\n   'batch',\n+  'new-batch-flag',\n ])"
+  assert.deepEqual(documentStagePlan(dispatch, { date: '2026-09-14' }).entries, [
+    { surface: 'cli-flags', source: 'scripts/factory/dispatch-batch.mjs', target: 'skills/crew-dispatch/references/flags.md', entry: '- Value flags: add `--new-batch-flag`.' },
+  ])
+  const options = "diff --git a/src/runtime.mjs b/src/runtime.mjs\n--- a/src/runtime.mjs\n+++ b/src/runtime.mjs\n@@ -1,3 +1,3 @@\n const options = {\n-  checkout: 'old',\n+  checkout: 'new',\n }"
+  assert.deepEqual(documentStagePlan(options), { triggered: false, readable: true, entries: [] })
+  const twoRefusals = "diff --git a/src/refusals.mjs b/src/refusals.mjs\n--- a/src/refusals.mjs\n+++ b/src/refusals.mjs\n@@ -1,7 +1,9 @@\n const REFUSAL_REASONS = Object.freeze([\n   OLD_REFUSAL,\n+  FIRST_NEW_REFUSAL,\n ])\n const PUBLISH_REFUSALS = Object.freeze([\n   OLD_PUBLISH_REFUSAL,\n+  SECOND_NEW_REFUSAL,\n ])"
+  assert.deepEqual(documentStagePlan(twoRefusals, { date: '2026-09-14' }).entries.map((entry) => entry.entry), [
+    '- **2026-09-14** — Added closed refusal `FIRST_NEW_REFUSAL` from `src/refusals.mjs`. *Why:* The lane changed the closed-refusals documented surface.',
+    '- **2026-09-14** — Added closed refusal `SECOND_NEW_REFUSAL` from `src/refusals.mjs`. *Why:* The lane changed the closed-refusals documented surface.',
+  ])
+  const images = documentDiffImages(DOCUMENT_DIFF)
+  const declarations = documentDeclarations(images)
+  assert.equal(documentChangedDeclarations(images, declarations).length, 4)
+  assert.equal(documentTrigger('const old = 1').readable, false)
+})
+
+test('RV1-1 preserves existing refusals after apostrophe comments', () => {
+  const refusalCommentDiff = [
+    'diff --git a/src/refusals.mjs b/src/refusals.mjs',
+    '--- a/src/refusals.mjs',
+    '+++ b/src/refusals.mjs',
+    '@@ -1,4 +1,4 @@',
+    ' const REFUSAL_REASONS = Object.freeze([',
+    "   'alpha',   // don't reuse",
+    "-  'beta',",
+    "+  'beta', 'gamma',",
+    ' ])',
+  ].join('\n')
+  assert.deepEqual(documentStagePlan(refusalCommentDiff, { date: '2026-09-14' }).entries, [
+    { surface: 'closed-refusals', source: 'src/refusals.mjs', target: 'docs/conventions.md', entry: '- **2026-09-14** — Added closed refusal `gamma` from `src/refusals.mjs`. *Why:* The lane changed the closed-refusals documented surface.' },
+  ])
+})
+
+test('D1/E1 wrapper is diff-only, deterministic, and read-only', () => {
+  const call = (seatOpinion) => {
+    const writes = [], commits = [], worktrees = []
+    const io = { run: () => ({ ok: true, output: DOCUMENT_DIFF }), writeFile: (...args) => writes.push(args), commit: (...args) => commits.push(args) }
+    const result = runDocumentationDecision({ ctx: { head: 'base', seatOpinion, documentDate: '2026-09-14' }, commit: 'head', files: [], io })
+    assert.equal(writes.length + commits.length + worktrees.length, 0)
+    return result
+  }
+  assert.deepEqual(call(true), call(false))
+  assert.equal(call(true).outcome, 'planned')
+})
+
+test('F1/G1/H1/I1 preserve terminals and attach only the optional residual', () => {
+  const ordinary = runPublished({ documentDiff: DOCUMENT_DIFF, ctx: { head: 'base1111', documentDate: '2026-09-14' } })
+  const convergence = convergeRun({ documentDiff: DOCUMENT_DIFF, ctx: { ...CONVERGE_CTX, head: 'base1111', documentDate: '2026-09-14' } })
+  assert.equal(ordinary.result.status, 'done')
+  assert.equal(convergence.result.status, 'converge')
+  assert.deepEqual(ordinary.result.details.documentation.plan, DOCUMENT_ENTRIES)
+  assert.deepEqual(convergence.result.details.documentation.plan, DOCUMENT_ENTRIES)
+  assert.deepEqual(Object.keys(ordinary.result.details).sort(), ['accepted_via', 'cold_suite', 'commit', 'consults', 'dissents', 'documentation', 'enforcements', 'escalation', 'extra_rounds_granted', 'files_committed', 'gate', 'growth', 'modifiers', 'pr', 'stages'])
+  assert.deepEqual(Object.keys(convergence.result.details).sort(), ['accepted_via', 'commit', 'consults', 'converge', 'dissents', 'documentation', 'enforcements', 'escalation', 'extra_rounds_granted', 'files_committed', 'gate', 'growth', 'modifiers', 'stages'])
+  const unreadableOrdinary = runPublished({ documentDiff: 'not a unified diff' })
+  const unreadableConvergence = convergeRun({ documentDiff: 'not a unified diff' })
+  assert.equal(unreadableOrdinary.result.status, 'done')
+  assert.equal(unreadableConvergence.result.status, 'converge')
+  assert.equal(unreadableOrdinary.result.details.documentation.outcome, 'unreadable')
+  assert.equal(unreadableConvergence.result.details.documentation.outcome, 'unreadable')
+  assert.equal(runPublished({ documentDiff: '' }).result.details.documentation, undefined)
+})
+
+test('J1 document journaling is marker-only', () => {
+  const run = runPublished({ documentDiff: '' })
+  const markers = run.io.calls.logs.filter((row) => row.stage === 'document' || row.stage_done === 'document')
+  assert.deepEqual(markers.map((row) => Object.keys(row).filter((key) => key !== 'at')), [['stage', 'channel'], ['stage_done', 'channel']])
 })

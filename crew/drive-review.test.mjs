@@ -586,7 +586,7 @@ test('an unreadable verdict is charged nothing and reuses its round number', () 
   })
   const res = driveTask(CTX, io)
   assert.equal(res.status, 'done')
-  assert.deepEqual(res.details.stages, ['plan:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:r1', 'review:pass', 'commit', 'suite', 'suite:cold', 'done'])
+  assert.deepEqual(res.details.stages, ['plan:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:r1', 'review:pass', 'commit', 'document', 'suite', 'suite:cold', 'done'])
   assert.deepEqual(
     io.calls.logs.filter((r) => r.review_round).map((r) => r.review_round),
     [
@@ -1619,7 +1619,7 @@ test('the unexhausted plan path keeps its diagnostics unchanged', () => {
     'accepted_via', 'cold_suite', 'commit', 'consults', 'dissents', 'enforcements', 'escalation', 'extra_rounds_granted',
     'files_committed', 'gate', 'growth', 'modifiers', 'stages',
   ])
-  assert.deepEqual(result.details.stages, ['plan:r1', 'check:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:pass', 'commit', 'suite', 'suite:cold', 'done'])
+  assert.deepEqual(result.details.stages, ['plan:r1', 'check:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:pass', 'commit', 'document', 'suite', 'suite:cold', 'done'])
   assert.equal(io.calls.logs.filter((entry) => entry.accept_decision).length, 0)
   assert.equal(io.calls.assign.some(({ role }) => role === 'lead'), false)
   assert.equal(Object.keys(io.calls.writes).some((path) => /decision-\d+b?\.md$/.test(path)), false)
@@ -1847,7 +1847,7 @@ test('full is trace-identical and keeps the eleven legacy detail keys', () => {
   const explicitIo = make()
   const omitted = driveTask(CTX, omittedIo)
   const explicit = driveTask({ ...CTX, variant: 'full' }, explicitIo)
-  assert.deepEqual(omitted.details.stages, ['plan:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:pass', 'commit', 'suite', 'suite:cold', 'done'])
+  assert.deepEqual(omitted.details.stages, ['plan:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:pass', 'commit', 'document', 'suite', 'suite:cold', 'done'])
   assert.deepEqual(Object.keys(omitted.details).sort(), ['accepted_via', 'cold_suite', 'commit', 'consults', 'dissents', 'enforcements', 'escalation', 'extra_rounds_granted', 'files_committed', 'gate', 'growth', 'modifiers', 'stages'])
   assert.deepEqual(omitted, explicit)
   assert.deepEqual(omittedIo.calls, explicitIo.calls)
@@ -1862,7 +1862,7 @@ test('repair uses one bounded triage round and keeps the reviewed finish path', 
   })
   const result = driveTask(CTX_REPAIR, io)
   assert.equal(result.status, 'done')
-  assert.deepEqual(result.details.stages, ['repair:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:pass', 'commit', 'suite', 'suite:cold', 'done'])
+  assert.deepEqual(result.details.stages, ['repair:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:pass', 'commit', 'document', 'suite', 'suite:cold', 'done'])
   assert.equal(result.details.commit, 'abc1234')
   assert.equal(result.details.gate, null)
   assert.deepEqual(io.calls.commits[0].files, ['a.mjs', 'a.test.mjs'])
@@ -1880,7 +1880,7 @@ test('full, scout and repair declarations remain byte-identical snapshots', () =
     execution: 'reviewed', required_seats: 'tier',
     stages: ['plan', 'check', 'build', 'scope-gate', 'lane', 'gate',
       'gate-baseline', 'gate-repair', 'gate-reverify', 'gate-proof', 'review',
-      'commit', 'rebase', 'suite', 'publish', 'converge'],
+      'commit', 'document', 'rebase', 'suite', 'publish', 'converge'],
     writes: 'planned',
     accepted_by: 'a review verdict of pass, or a lead accept at review or build exhaustion',
     envelope_fields: [], assignment: null,
@@ -1894,7 +1894,7 @@ test('full, scout and repair declarations remain byte-identical snapshots', () =
   }
   const REPAIR_SNAPSHOT = {
     execution: 'reviewed', required_seats: 'tier',
-    stages: ['repair', 'build', 'scope-gate', 'lane', 'review', 'commit', 'rebase', 'suite', 'publish'],
+    stages: ['repair', 'build', 'scope-gate', 'lane', 'review', 'commit', 'document', 'rebase', 'suite', 'publish'],
     writes: 'planned',
     accepted_by: 'a review verdict of pass, or a lead accept at review or build exhaustion',
     envelope_fields: [],
@@ -2215,7 +2215,7 @@ test('bounce-reviewer at build exhaustion re-reviews without a build', () => {
   assert.equal(result.status, 'done')
   assert.deepEqual(result.details.stages, [
     'plan:r1', 'gate-baseline', 'build:r1', 'scope-gate:r1', 'lane:r1', 'gate:r1', 'review:r1',
-    'review:r2', 'review:pass', 'commit', 'suite', 'suite:cold', 'done',
+    'review:r2', 'review:pass', 'commit', 'document', 'suite', 'suite:cold', 'done',
   ])
   assert.equal(b318Builders(io).length, 1)
 })
@@ -2788,7 +2788,7 @@ test('a matching plan is accepted and journals its identical scope', () => {
   assert.equal(result.status, 'done')
   assert.deepEqual(result.details.stages, [
     'plan:r1', 'check:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:pass',
-    'commit', 'suite', 'suite:cold', 'done',
+    'commit', 'document', 'suite', 'suite:cold', 'done',
   ])
   const rows = s843Rows(io)
   assert.equal(rows.length, 1)
@@ -2805,7 +2805,7 @@ test('a lane with no dispatched scope is unchanged and says so', () => {
   assert.equal(result.status, 'done')
   assert.deepEqual(result.details.stages, [
     'plan:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:pass',
-    'commit', 'suite', 'suite:cold', 'done',
+    'commit', 'document', 'suite', 'suite:cold', 'done',
   ])
   const rows = s843Rows(io)
   assert.equal(rows.length, 1)
@@ -3306,7 +3306,7 @@ test('G1 legal exact and narrow scope stays byte identical', () => {
   const narrowIo = d3ScopeIo(dispatched, narrowed, {}, [dispatched[0]])
   const exact = driveTask(d3ScopeCtx(dispatched), exactIo)
   const narrow = driveTask(d3ScopeCtx(dispatched), narrowIo)
-  const legalStages = ['plan:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:pass', 'commit', 'suite', 'suite:cold', 'done']
+  const legalStages = ['plan:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:pass', 'commit', 'document', 'suite', 'suite:cold', 'done']
   assert.equal(exact.status, 'done')
   assert.equal(narrow.status, 'done')
   assert.deepEqual(exact.details.stages, legalStages)

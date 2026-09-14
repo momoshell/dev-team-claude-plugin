@@ -2156,7 +2156,7 @@ test('shape sources and the repair declaration are pinned', () => {
   assert.deepEqual(SHAPE_SOURCES.scope, ['plan', 'inherited', 'brief'])
   assert.deepEqual(SHAPE_SOURCES.lane, ['plan', 'ctx'])
   assert.deepEqual(SHAPE_SOURCES.gate, ['plan', 'none', 'brief'])
-  assert.deepEqual(REVIEWED_CORE_STAGES, ['build', 'scope-gate', 'lane', 'review', 'commit', 'rebase', 'suite', 'publish'])
+  assert.deepEqual(REVIEWED_CORE_STAGES, ['build', 'scope-gate', 'lane', 'review', 'commit', 'document', 'rebase', 'suite', 'publish'])
   assert.equal(TRIAGE_STAGE_HEAD, 'repair')
   assert.deepEqual(TRIAGE_STAGES, ['repair', ...REVIEWED_CORE_STAGES])
 })

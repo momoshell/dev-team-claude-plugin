@@ -603,7 +603,7 @@ export const SHAPE_SOURCES = Object.freeze({
 })
 // The stages the reviewed executor emits unconditionally after the plan loop —
 // they ARE the reviewed loop, and no declaration may skip them (:1930-2167).
-export const REVIEWED_CORE_STAGES = Object.freeze(['build', 'scope-gate', 'lane', 'review', 'commit', 'rebase', 'suite', 'publish'])
+export const REVIEWED_CORE_STAGES = Object.freeze(['build', 'scope-gate', 'lane', 'review', 'commit', 'document', 'rebase', 'suite', 'publish'])
 // The ONE partial reviewed topology this driver implements: a bounded triage
 // round in place of the plan round, no gate, nothing else changed. A shape that
 // omits a `full` stage is honoured only if it is EXACTLY this — same sources,
@@ -624,7 +624,7 @@ export const DIRECTED_STAGE_HEAD = 'directed'
 export const DIRECTED_SOURCES = Object.freeze({ scope: 'brief', lane: 'ctx', gate: 'brief' })
 export const DIRECTED_SEATS = Object.freeze(['builder', 'reviewer'])
 export const DIRECTED_STAGES = Object.freeze([DIRECTED_STAGE_HEAD, 'build', 'scope-gate',
-  'lane', 'gate', 'gate-baseline', 'gate-proof', 'review', 'commit', 'rebase', 'suite', 'publish', 'converge'])
+  'lane', 'gate', 'gate-baseline', 'gate-proof', 'review', 'commit', 'document', 'rebase', 'suite', 'publish', 'converge'])
 // The CLOSED table of partial reviewed topologies this executor implements. Data
 // consulted at fixed sites, never a composition engine: each key has its own
 // executor branch below, and a name absent from this table is refused before it
@@ -3382,6 +3382,376 @@ export function shellArg(value) {
   return `'${String(value ?? '').replaceAll("'", "'\"'\"'")}'`
 }
 
+// --- read-only documentation decision ----------------------------------------
+// Documentation is derived from the committed lane diff. These declarations are
+// intentionally closed: a lowercase options bag, a prose string, or a generic
+// array is not evidence that a documented surface changed.
+export const DOCUMENT_LIFECYCLE_DECLARATIONS = Object.freeze([
+  'STAGES', 'REVIEWED_CORE_STAGES', 'TRIAGE_STAGES', 'DIRECTED_STAGES', 'SHAPE_MAJOR_PHASES',
+])
+export const DOCUMENT_LIFECYCLE_STAGE = 'document'
+export const DOCUMENT_REFUSAL_DECLARATIONS = Object.freeze([
+  'REFUSAL_REASONS', 'PUBLISH_REFUSALS', 'ENVELOPE_REFUSAL_REASONS', 'ANTI_REPLAY_REFUSAL_REASONS',
+  'ADVISOR_BOOT_REFUSALS', 'FALLBACK_REFUSALS', 'BAND_FLOOR_REFUSALS', 'BOOT_DESCENDANT_REFUSALS',
+  'RESUME_REFUSALS', 'ADVERSARY_REFUSALS', 'ACCEPT_REFUSALS', 'MUTATION_CORRECTION_REFUSALS',
+  'NARRATION_REFUSALS', 'PLAN_SCOPE_WIDEN_REFUSALS', 'SCOPE_REFUSALS', 'HARDENING_REFUSALS',
+  'HARDENING_APPEAL_REFUSALS', 'INTAKE_REFUSALS', 'CLOSEOUT_REFUSALS', 'PROOF_REFUSALS',
+  'LIMIT_REFUSALS', 'ROSTER_REFUSALS', 'SEAT_REFUSALS', 'CAPABILITY_REFUSALS', 'EVAL_REFUSALS',
+])
+export const DOCUMENT_POSTURE_DECLARATIONS = Object.freeze(['RATIFIED_POSTURE'])
+export const DISPATCH_BATCH_FLAG_DECLARATIONS = Object.freeze(['valueFlags', 'booleanFlags', 'repeatableFlags'])
+const CLI_MEMBER = /^--?[a-z0-9][a-z0-9-]*$/
+const CLI_UNDASHED_MEMBER = /^[a-z0-9][a-z0-9-]*$/
+const DOCUMENT_TEXT_PATH = /(?:^|[\\/])(?:test|tests|fixtures?)(?:[\\/]|[-_.])|(?:^|[\\/])docs[\\/]|\.md$/i
+const DOCUMENT_DECLARATION_HEADER = /^(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*/
+
+function documentIgnoredPath(path) {
+  return typeof path !== 'string' || DOCUMENT_TEXT_PATH.test(path)
+}
+
+function documentStringValue(raw) {
+  const text = String(raw ?? '')
+  if (text.length < 2) return null
+  const quote = text[0]
+  if (!["'", '"', '`'].includes(quote) || text.at(-1) !== quote) return null
+  const body = text.slice(1, -1)
+  if (body.includes('\\n') || body.includes('\\r')) return null
+  return body.replace(/\\([\\'"`])/g, '$1')
+}
+
+function documentStringLiterals(text) {
+  const out = []
+  const source = String(text ?? '')
+  const pattern = /(['"`])((?:\\.|(?!\1)[^\r\n])*)\1/g
+  for (const match of source.matchAll(pattern)) {
+    const value = documentStringValue(match[0])
+    if (value !== null) out.push(value)
+  }
+  return out
+}
+
+function documentPathFromHeader(line, side) {
+  const raw = String(line ?? '').slice(4).split('\t')[0].trim()
+  if (!raw || raw.startsWith('"')) return null
+  if (raw === '/dev/null') return raw
+  const prefix = side === 'before' ? 'a/' : 'b/'
+  return raw.startsWith(prefix) ? raw.slice(prefix.length) : null
+}
+
+function documentDiffSection(path, sectionLines) {
+  const unreadable = (reason) => ({ readable: false, reason, image: null })
+  if (sectionLines.some((line) => line === 'Binary files differ' || line.startsWith('Binary files ') || line === 'GIT binary patch')) {
+    return unreadable(`binary diff for ${path}`)
+  }
+  const beforeHeader = sectionLines.find((line) => line.startsWith('--- '))
+  const afterHeader = sectionLines.find((line) => line.startsWith('+++ '))
+  if (!beforeHeader || !afterHeader) return unreadable(`diff image for ${path} has no complete text headers`)
+  const beforePath = documentPathFromHeader(beforeHeader, 'before')
+  const afterPath = documentPathFromHeader(afterHeader, 'after')
+  if (!beforePath || !afterPath || (beforePath !== '/dev/null' && beforePath !== path) || (afterPath !== '/dev/null' && afterPath !== path)) {
+    return unreadable(`diff image for ${path} has mismatched paths`)
+  }
+  const hunks = []
+  for (const [index, line] of sectionLines.entries()) {
+    if (!line.startsWith('@@')) continue
+    const match = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(?:.*)$/.exec(line)
+    if (!match) return unreadable(`invalid full-image hunk for ${path}: ${line}`)
+    hunks.push({ index, oldStart: Number(match[1]), oldCount: Number(match[2] ?? 1), newStart: Number(match[3]), newCount: Number(match[4] ?? 1) })
+  }
+  if (hunks.length === 0) return unreadable(`diff image for ${path} has no text hunk`)
+  const beforeLines = []
+  const afterLines = []
+  const changes = []
+  let beforeTerminated = true
+  let afterTerminated = true
+  for (const hunk of hunks) {
+    let oldNumber = hunk.oldStart
+    let newNumber = hunk.newStart
+    let oldSeen = 0
+    let newSeen = 0
+    let previousSide = null
+    for (let index = hunk.index + 1; index < sectionLines.length; index += 1) {
+      const line = sectionLines[index]
+      if (index > hunk.index + 1 && line.startsWith('@@')) break
+      if (line === '' && index === sectionLines.length - 1) continue
+      if (line === '\\ No newline at end of file') {
+        if (previousSide === 'before') beforeTerminated = false
+        if (previousSide === 'after') afterTerminated = false
+        continue
+      }
+      const marker = line[0]
+      if (![' ', '+', '-'].includes(marker)) return unreadable(`invalid full-image line for ${path}: ${line}`)
+      const text = line.slice(1)
+      if (marker === ' ') {
+        beforeLines.push({ number: oldNumber, text }); afterLines.push({ number: newNumber, text })
+        oldNumber += 1; newNumber += 1; oldSeen += 1; newSeen += 1; previousSide = 'both'; continue
+      }
+      if (marker === '-') {
+        beforeLines.push({ number: oldNumber, text }); oldNumber += 1; oldSeen += 1; previousSide = 'before'
+        continue
+      }
+      const added = { number: newNumber, text }
+      afterLines.push(added); newNumber += 1; newSeen += 1; previousSide = 'after'
+      changes.push({ kind: 'add', line: { ...added } })
+    }
+  }
+  return {
+    readable: true,
+    reason: null,
+    image: {
+      path, before: beforeLines.map(({ text }) => text).join('\n') + (beforeTerminated && beforeLines.length ? '\n' : ''),
+      after: afterLines.map(({ text }) => text).join('\n') + (afterTerminated && afterLines.length ? '\n' : ''),
+      beforeLines, afterLines, changes,
+    },
+  }
+}
+
+export function documentDiffImages(diff) {
+  if (diff === null || diff === undefined || diff === '') return { readable: true, images: [], reason: null }
+  if (typeof diff !== 'string' || diff.includes('\0')) return { readable: false, images: [], reason: 'documentation diff is not readable text' }
+  const lines = diff.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n')
+  const starts = lines.map((line, index) => line.startsWith('diff --git ') ? index : -1).filter((index) => index >= 0)
+  if (starts.length === 0) return { readable: diff.trim() === '' ? true : false, images: [], reason: 'documentation diff has no complete sections' }
+  if (lines.slice(0, starts[0]).some((line) => line.trim() !== '')) return { readable: false, images: [], reason: 'documentation diff has content before its first section' }
+  const images = []
+  for (let sectionIndex = 0; sectionIndex < starts.length; sectionIndex += 1) {
+    const start = starts[sectionIndex]
+    const end = starts[sectionIndex + 1] ?? lines.length
+    const section = lines.slice(start, end)
+    const header = /^diff --git a\/(.+) b\/(.+)$/.exec(section[0])
+    if (!header || header[1] !== header[2] || header[1].includes('\0') || header[1].startsWith('"')) {
+      return { readable: false, images: [], reason: 'documentation diff has an unreadable path header' }
+    }
+    const path = header[1]
+    if (documentIgnoredPath(path)) continue
+    const parsed = documentDiffSection(path, section)
+    if (!parsed.readable) return { readable: false, images: [], reason: parsed.reason }
+    images.push(parsed.image)
+  }
+  return { readable: true, images, reason: null }
+}
+
+function documentDeclarationKind(name, path) {
+  const cli = name === 'KNOWN_FLAGS' || (path === 'scripts/factory/dispatch-batch.mjs' && DISPATCH_BATCH_FLAG_DECLARATIONS.includes(name))
+  if (cli) return 'cli-flags'
+  if (DOCUMENT_LIFECYCLE_DECLARATIONS.includes(name)) return 'lifecycle-stages'
+  if (DOCUMENT_REFUSAL_DECLARATIONS.includes(name)) return 'closed-refusals'
+  if (DOCUMENT_POSTURE_DECLARATIONS.includes(name)) return 'ratified-posture'
+  return null
+}
+
+function documentDeclarationEnd(lines, startIndex, startOffset) {
+  let stack = []
+  let quote = null
+  let escaped = false
+  let started = false
+  let blockComment = false
+  let sawString = false
+  for (let row = startIndex; row < lines.length; row += 1) {
+    const text = String(lines[row].text ?? '')
+    for (let column = row === startIndex ? startOffset : 0; column < text.length; column += 1) {
+      const char = text[column], next = text[column + 1]
+      if (blockComment) {
+        if (char === '*' && next === '/') { blockComment = false; column += 1 }
+        continue
+      }
+      if (!quote && char === '/' && next === '*') { blockComment = true; column += 1; continue }
+      if (!quote && char === '/' && next === '/') break
+      if (quote) {
+        if (escaped) { escaped = false; continue }
+        if (char === '\\') { escaped = true; continue }
+        if (char === quote) quote = null
+        continue
+      }
+      if (char === "'" || char === '"' || char === '`') { quote = char; sawString = true; continue }
+      if (char === '[' || char === '{' || char === '(') { stack.push(char); started = true; continue }
+      if (char === ']' || char === '}' || char === ')') {
+        const expected = char === ']' ? '[' : char === '}' ? '{' : '('
+        if (!stack.length || stack.at(-1) !== expected) return null
+        stack.pop()
+        if (started && stack.length === 0) return { end: lines[row].number, sawString }
+      }
+    }
+    if (started && stack.length === 0) return { end: lines[row].number, sawString }
+    if (!started && sawString && row === startIndex) return { end: lines[row].number, sawString }
+  }
+  return null
+}
+
+export function documentDeclarations(input) {
+  const images = Array.isArray(input) ? input : input?.images
+  const declarations = []
+  for (const image of Array.isArray(images) ? images : []) {
+    if (!image || documentIgnoredPath(image.path)) continue
+    const lines = Array.isArray(image.afterLines) ? image.afterLines : []
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index]
+      const match = DOCUMENT_DECLARATION_HEADER.exec(String(line.text ?? '').trim())
+      if (!match) continue
+      const name = match[1]
+      const kind = documentDeclarationKind(name, image.path)
+      if (!kind) continue
+      const header = String(line.text ?? '')
+      const equals = header.indexOf('=')
+      const ending = documentDeclarationEnd(lines, index, Math.max(0, equals + 1))
+      if (!ending) continue
+      declarations.push({ path: image.path, name, kind, start: line.number, end: ending.end, image, lines })
+    }
+  }
+  return declarations
+}
+
+function documentCliMember(raw) {
+  const text = String(raw ?? '').trim()
+  const canonical = text.replace(/^--?/, '')
+  if (!CLI_MEMBER.test(text) && !CLI_UNDASHED_MEMBER.test(text)) return null
+  return CLI_UNDASHED_MEMBER.test(canonical) ? canonical : null
+}
+
+function documentObjectKey(declaration, lineNumber) {
+  let key = null
+  for (const line of declaration.lines) {
+    if (line.number > lineNumber) break
+    const match = /^\s*([A-Za-z_$][\w$-]*)\s*:/.exec(String(line.text ?? ''))
+    if (match) key = match[1]
+  }
+  return key
+}
+
+function documentPriorMembers(declaration) {
+  const beforeLines = Array.isArray(declaration?.image?.beforeLines) ? declaration.image.beforeLines : []
+  const index = beforeLines.findIndex((line) => DOCUMENT_DECLARATION_HEADER.test(String(line.text ?? '').trim()) && String(line.text ?? '').includes(declaration.name))
+  if (index < 0) return { strings: new Set(), identifiers: new Set() }
+  const header = String(beforeLines[index].text ?? '')
+  const ending = documentDeclarationEnd(beforeLines, index, Math.max(0, header.indexOf('=') + 1))
+  const rows = beforeLines.slice(index, ending ? beforeLines.findIndex((line) => line.number === ending.end) + 1 : index + 1)
+  const source = rows.map((line) => line.text).join('\n')
+  return {
+    strings: new Set(documentStringLiterals(source)),
+    identifiers: new Set(source.match(/\b[A-Z][A-Z0-9_]*\b/g) || []),
+  }
+}
+
+function documentDeclarationChanges(declaration, line) {
+  const text = String(line.text ?? '')
+  const prior = documentPriorMembers(declaration)
+  const values = []
+  if (declaration.kind === 'cli-flags') {
+    for (const value of documentStringLiterals(text)) {
+      const member = documentCliMember(value)
+      if (!member || prior.strings.has(value)) continue
+      values.push({ value: member, group: declaration.name === 'KNOWN_FLAGS' ? documentObjectKey(declaration, line.number) : null })
+    }
+  } else if (declaration.kind === 'ratified-posture') {
+    for (const value of documentStringLiterals(text)) if (value && !prior.strings.has(value)) values.push({ value })
+  } else if (declaration.kind === 'closed-refusals') {
+    const strings = documentStringLiterals(text)
+    for (const value of strings) if (value && !prior.strings.has(value)) values.push({ value })
+    if (strings.length === 0) {
+      for (const value of text.match(/\b[A-Z][A-Z0-9_]*\b/g) || []) {
+        if (value !== declaration.name && value !== 'Object' && value !== 'freeze' && !prior.identifiers.has(value)) values.push({ value })
+      }
+    }
+  } else if (declaration.kind === 'lifecycle-stages') {
+    for (const value of documentStringLiterals(text)) if (value === DOCUMENT_LIFECYCLE_STAGE && !prior.strings.has(value)) values.push({ value })
+  }
+  return values
+}
+
+export function documentChangedDeclarations(input, declared = null) {
+  const images = Array.isArray(input) ? input : input?.images
+  const allDeclarations = Array.isArray(declared) ? declared : documentDeclarations(input)
+  const matches = []
+  for (const image of Array.isArray(images) ? images : []) {
+    const declarations = allDeclarations.filter((entry) => entry?.path === image?.path)
+    const lines = Array.isArray(image?.changes) ? image.changes : []
+    for (const changed of lines) {
+      if (changed?.kind !== 'add') continue
+      const line = changed.line
+      const declaration = declarations.find(({ start, end }) => start <= line.number && line.number <= end)
+      if (declaration) {
+        for (const member of documentDeclarationChanges(declaration, line)) {
+          matches.push({ path: image.path, declaration: declaration.name, surface: declaration.kind, value: member.value, group: member.group ?? null, line: line.number })
+        }
+      }
+      const stagePattern = /\bstage\s*\(\s*(['"`])([^'"`]+)\1\s*\)/g
+      for (const stage of String(line.text ?? '').matchAll(stagePattern)) {
+        if (stage[2] === DOCUMENT_LIFECYCLE_STAGE) matches.push({ path: image.path, declaration: null, surface: 'lifecycle-stages', value: stage[2], group: null, line: line.number })
+      }
+    }
+  }
+  return matches.map((match) => ({ ...match }))
+}
+
+function documentDate(options) {
+  const value = options?.date
+  return value === undefined ? new Date().toISOString().slice(0, 10) : String(value)
+}
+
+export function documentEntry(change, options = {}) {
+  if (!change || typeof change !== 'object') return null
+  if (change.surface === 'lifecycle-stages') {
+    return { surface: 'lifecycle-stages', source: change.path, target: 'skills/crew-dispatch/references/batch.md', entry: '9. Run the `document` stage after `commit` and before `publish`.' }
+  }
+  if (change.surface === 'cli-flags') {
+    if (change.declaration === 'KNOWN_FLAGS') {
+      const group = change.group || 'run'
+      return { surface: 'cli-flags', source: change.path, target: 'skills/crew-dispatch/references/flags.md', entry: JSON.stringify({ [group]: [change.value] }) }
+    }
+    const labels = { valueFlags: 'Value', booleanFlags: 'Boolean', repeatableFlags: 'Repeatable' }
+    const label = labels[change.declaration]
+    if (!label) return null
+    return { surface: 'cli-flags', source: change.path, target: 'skills/crew-dispatch/references/flags.md', entry: `- ${label} flags: add \`--${change.value}\`.` }
+  }
+  const date = documentDate(options)
+  if (change.surface === 'closed-refusals') {
+    const refusalEntry = (change, date) => {
+      return '- **' + date + '** — Added closed refusal `' + change.value + '` from `' + change.path + '`. *Why:* The lane changed the closed-refusals documented surface.'
+    }
+    return { surface: 'closed-refusals', source: change.path, target: 'docs/conventions.md', entry: refusalEntry(change, date) }
+  }
+  if (change.surface === 'ratified-posture') {
+    return { surface: 'ratified-posture', source: change.path, target: 'docs/conventions.md', entry: `- **${date}** — Ratified posture \`${change.value}\` from \`${change.path}\`. *Why:* The lane changed the ratified-posture documented surface.` }
+  }
+  return null
+}
+
+export function documentTrigger(diff) {
+  const images = documentDiffImages(diff)
+  if (!images.readable) return { readable: false, changes: [], reason: images.reason }
+  const declarations = documentDeclarations(images)
+  return { readable: true, changes: documentChangedDeclarations(images, declarations), reason: null }
+}
+
+export function documentStagePlan(input, options = {}) {
+  const diff = input && typeof input === 'object' && Object.prototype.hasOwnProperty.call(input, 'diff') ? input.diff : input
+  const trigger = documentTrigger(diff)
+  if (!trigger.readable) return { triggered: true, readable: false, entries: [] }
+  const entries = []
+  for (const change of trigger.changes) {
+    const entry = documentEntry(change, options)
+    if (entry) entries.push(entry)
+  }
+  return { triggered: entries.length > 0, readable: true, entries }
+}
+
+export function runDocumentationDecision({ ctx = {}, io, commit, files } = {}) {
+  const unreadable = (why) => ({ id: 'documentation-plan', type: 'cosmetic', outcome: 'unreadable', summary: `Documentation diff could not be read: ${why}`, plan: [] })
+  if (!io || typeof io.run !== 'function') return unreadable('diff runner unavailable')
+  const base = ctx.head || 'HEAD'
+  const head = commit || 'HEAD'
+  let result
+  try { result = io.run(`git diff --binary --no-ext-diff --unified=100000 ${shellArg(base)} ${shellArg(head)}`) }
+  catch (error) { return unreadable(error?.message ?? String(error)) }
+  if (result?.ok !== true || typeof result.output !== 'string') return unreadable('diff command returned no readable output')
+  const diff = result.output
+  const date = ctx.documentDate
+  const plan = documentStagePlan(diff, date === undefined ? {} : { date })
+  if (!plan.readable) return unreadable('diff contained malformed, binary, or non-text sections')
+  if (!plan.triggered) return null
+  return { id: 'documentation-plan', type: 'cosmetic', outcome: 'planned', summary: `Documentation residuals planned: ${plan.entries.length}`, plan: plan.entries }
+}
+
 // Publication rebases can safely repair a conflict only when every path is one of the
 // resolver's carriers for a manifest directory. This is intentionally a path predicate:
 // the index bytes and resolver writes are checked separately below.
@@ -3587,7 +3957,7 @@ export function collapseStages(stages) {
 // `check`, `gate-baseline`, `gate-repair`, `gate-reverify` and `gate-proof` too, so
 // a three-item deny-list still published the instrumentation. `review:pass` is a
 // verdict, not a round, and `suite:cold` folds into `suite` because its head does.
-export const SHAPE_MAJOR_PHASES = Object.freeze(['plan', 'build', 'review', 'commit', 'rebase', 'suite', 'publish'])
+export const SHAPE_MAJOR_PHASES = Object.freeze(['plan', 'build', 'review', 'commit', 'document', 'rebase', 'suite', 'publish'])
 export const SHAPE_ROUNDED_STAGES = Object.freeze(['plan', 'build', 'review'])
 export function stageShape(stages) {
   const order = []
@@ -4303,6 +4673,9 @@ function settleConvergence({ why, where, gateOutput, gateRed = true, ctx, io, la
   emit({ kind: 'converge', action: 'committed', commit: commit, files: committing.length })
 
   stageComplete()
+  stage('document')
+  const documentation = runDocumentationDecision({ ctx, io, commit, files: committing })
+  stageComplete()
   stage('converge:pr')
   let pr
   try {
@@ -4356,6 +4729,7 @@ function settleConvergence({ why, where, gateOutput, gateRed = true, ctx, io, la
         pr: { number: pr.number, url: pr.url }, draft: true, issues, residuals,
         gate_summary: { line: gateSummary.line, total: gateSummary.total, failed: gateSummary.failed, errored: gateSummary.errored },
       },
+      ...(documentation ? { documentation } : {}),
     },
   }
   stageComplete()
@@ -9374,6 +9748,9 @@ function runTask(ctx, io, crash) {
     pendingFrozenInventory = null
   }
   stageComplete()
+  stage('document')
+  S.documentation = runDocumentationDecision({ ctx, io, commit: S.commit, files: committing })
+  stageComplete()
 
   if (publishing) {
     stage('rebase')
@@ -10031,6 +10408,7 @@ function runTask(ctx, io, crash) {
       commit: S.commit, stages: S.stages, files_committed: publishing ? publishFiles : committing, consults: S.consults,
       dissents: S.dissents, accepted_via: accepted, escalation: null,
       ...(published ? { pr: published } : {}),
+      ...(S.documentation ? { documentation: S.documentation } : {}),
       cold_suite: coldSuite,   // the COLD verdict, never folded into the lane's own suite result
       extra_rounds_granted: S.grants, growth: S.growth, modifiers: S.modifiers, enforcements: S.enforcements,
       gate: gateBlock(),

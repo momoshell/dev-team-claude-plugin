@@ -319,12 +319,16 @@ test('shapeRun uses session and agent heartbeats without fabricating an absent m
   assert.equal(measured.pending.last_heartbeat_at, undefined)
 })
 
-test('shapeRun keeps absent seats distinct from an empty measured list and parses warnings safely', () => {
+test('B1', () => {
   const now = Date.parse(end)
   const absent = shapeRun(base, [], [], null, { missing: [] }, now)
   assert.equal(absent.seats, null)
   assert.equal(Array.isArray(absent.seats), false)
   assert.match(absent.pending.seats, /not recorded/i)
+
+  const measuredEmpty = shapeRun(base, [], [], null, { missing: [] }, now, { runSeats: [] })
+  assert.deepEqual(measuredEmpty.seats, [])
+  assert.equal(measuredEmpty.pending.seats, undefined)
 
   const measured = shapeRun(base, [], [], null, { missing: [] }, now, {
     runSeats: [

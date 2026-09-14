@@ -185,14 +185,14 @@ export const HEARTBEAT_OVERDUE_MS = 60_000
 
 function pendingFor(field, probe, value) {
   if (value !== null && value !== undefined) return null
+  const missing = probe?.missing || []
   if (field === 'tier') return TIER_UNMEASURED
   if (field === 'task_profile' || field === 'execution_shape' || field === 'assurance') return CONFIGURATION_UNMEASURED
   if (field === 'last_heartbeat_at') return 'no session or agent heartbeat was recorded for this run'
-  if (field === 'seats') return SEATS_UNMEASURED
+  if (field === 'seats') return missing.includes(field) ? 'predates this measurement' : SEATS_UNMEASURED
   if (field === 'driver_state') return DRIVER_UNOBSERVED
   if (field === 'phase_lanes') return "this run's agent events predate phase linkage (#123)"
   if (field === 'billed_cost_usd') return 'money deferred — a subscription seat is not billed per token (#185)'
-  const missing = probe?.missing || []
   if (missing.includes(field)) return 'predates this measurement'
   if (field === 'read_tokens' || field === 'written_tokens') return 'awaiting the metering daemon (#83)'
   if (field === 'gate_discrimination' || field === 'gate_generations' || field === 'reviews') return 'predates this measurement'
@@ -255,7 +255,7 @@ function dateValue(v) {
 
 export function shapeRun(session, phases = [], agentEvents = [], triageRow = null,
                          probe = {}, now = Date.now(), extras = {}) {
-  const { runConfiguration = null, runSeats = [], runObservations: suppliedObservations = [], agentSessions = [], gateDiscriminations = [], reviewOutcomes = [], acceptDecisions = [], gateResults = [], crewState = null } = extras || {}
+  const { runConfiguration = null, runSeats, runObservations: suppliedObservations = [], agentSessions = [], gateDiscriminations = [], reviewOutcomes = [], acceptDecisions = [], gateResults = [], crewState = null } = extras || {}
   const ended = session.ended_at ?? null
   const start = dateValue(session.started_at)
   const finish = dateValue(ended)
@@ -315,7 +315,7 @@ export function shapeRun(session, phases = [], agentEvents = [], triageRow = nul
     warnings: parseWarnings(row.warnings_json),
     created_at: row.created_at ?? null,
   })
-  const seats = runSeats.length ? runSeats.map(shapeSeat) : null
+  const seats = runSeats === undefined ? null : runSeats.map(shapeSeat)
   const crew = crewState && typeof crewState === 'object' ? crewState : null
   const crewArchived = crew && typeof crew.archived === 'boolean' ? crew.archived : null
   const settlementState = ended === null ? 'unsettled' : 'settled'

@@ -193,6 +193,168 @@ function fixture(path, { filler = 0 } = {}) {
   return { done, live, pane }
 }
 
+function runSeatsFixture(prefix = 'visualizer-run-seats-') {
+  const dir = scratchDir(prefix)
+  const ledgerDb = join(dir, 'ledger.db')
+  const triageDb = join(dir, 'visualizer.db')
+  const nonce = `${Date.now()}-${Math.random().toString(36).slice(2)}`
+  const adwId = `run-seats-${nonce}`
+  const repoSlug = `repo-${nonce}`
+  const taskSlug = `task-${nonce}`
+  const createdAt = '2026-09-11T12:00:00.000Z'
+  const configuration = {
+    adw_id: adwId,
+    schema_version: 1,
+    task_profile: `profile-${nonce}`,
+    task_profile_source: 'fixture',
+    requested_execution: `requested-${nonce}`,
+    effective_execution: `execution-${nonce}`,
+    execution_source: 'fixture',
+    requested_assurance: `requested-assurance-${nonce}`,
+    effective_assurance: `assurance-${nonce}`,
+    assurance_source: 'fixture',
+    legacy_variant: `legacy-variant-${nonce}`,
+    legacy_tier: `legacy-tier-${nonce}`,
+    created_at: createdAt,
+  }
+  const seatRows = [
+    {
+      adw_id: adwId, role: 'planner', agent: `agent-${nonce}`, provider: 'anthropic',
+      model_id: `model-${nonce}`, model: `model-name-${nonce}`, effort: 'high', transport: 'pane',
+      source: 'roster', policy_state: 'passed', warnings: [`warning-${nonce}`], created_at: createdAt,
+    },
+    {
+      adw_id: adwId, role: 'builder', agent: `builder-${nonce}`, provider: 'openai',
+      model_id: `builder-model-${nonce}`, model: `builder-model-name-${nonce}`, effort: 'medium', transport: 'headless-rpc',
+      source: 'reseat', policy_state: 'warned', warnings: [], created_at: createdAt,
+    },
+  ]
+  const ledger = openLedger({ dbPath: ledgerDb, stderr: { write() {} } })
+  try {
+    ledger.startSession({ adw_id: adwId, repo_slug: repoSlug, task_slug: taskSlug, started_at: createdAt })
+    ledger.recordRunConfiguration(configuration)
+    for (const row of seatRows) ledger.recordRunSeat(row)
+  } finally {
+    ledger.close()
+  }
+  const feed = createLedgerFeed({ ledgerDb, triageDb })
+  return { dir, ledgerDb, triageDb, adwId, repoSlug, taskSlug, configuration, seatRows, feed }
+}
+
+test('A1', { skip: SKIP }, () => {
+  const fixture = runSeatsFixture()
+  try {
+    const run = fixture.feed.listRuns().runs.find((candidate) => candidate.adw_id === fixture.adwId)
+    assert.ok(run)
+    assert.ok(Array.isArray(run.seats))
+    assert.ok(run.seats.some((seat) => seat.role === 'planner'))
+  } finally {
+    fixture.feed.close()
+  }
+})
+
+test('C1', { skip: SKIP }, () => {
+  const fixture = runSeatsFixture()
+  try {
+    const run = fixture.feed.listRuns().runs.find((candidate) => candidate.adw_id === fixture.adwId)
+    assert.ok(run)
+    const actual = run.seats.map(({ role, source, policy_state, warnings }) => ({ role, source, policy_state, warnings }))
+      .sort((left, right) => left.role.localeCompare(right.role))
+    const expected = fixture.seatRows.map(({ role, source, policy_state, warnings }) => ({ role, source, policy_state, warnings }))
+      .sort((left, right) => left.role.localeCompare(right.role))
+    assert.deepEqual(actual, expected)
+  } finally {
+    fixture.feed.close()
+  }
+})
+
+test('D1', { skip: SKIP }, () => {
+  const fixture = runSeatsFixture()
+  const writable = new (require('node:sqlite').DatabaseSync)(fixture.ledgerDb)
+  try {
+    writable.exec('PRAGMA ignore_check_constraints = ON')
+    writable.prepare(`INSERT INTO run_seats
+      (adw_id, role, agent, provider, model_id, model, effort, transport, source, policy_state, warnings_json, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      fixture.adwId, 'reviewer', 'future-agent', 'future-provider', 'future-model', 'future-model',
+      'future-effort', 'future-transport', 'future_source', 'future-policy', '["future-warning"]', '2026-09-11T12:00:01.000Z',
+    )
+  } finally {
+    writable.close()
+  }
+  try {
+    const run = fixture.feed.listRuns().runs.find((candidate) => candidate.adw_id === fixture.adwId)
+    assert.ok(run)
+    assert.equal(run.seats.find((seat) => seat.role === 'reviewer').source, 'future_source')
+  } finally {
+    fixture.feed.close()
+  }
+})
+
+test('E1', { skip: SKIP }, () => {
+  const fixture = runSeatsFixture()
+  const feed = fixture.feed
+  try {
+    const serverRuns = feed.listRuns().runs
+    const serverRun = serverRuns.find((candidate) => candidate.adw_id === fixture.adwId)
+    assert.ok(serverRun)
+    assert.equal(serverRun.goal, fixture.taskSlug)
+    assert.equal(serverRun.repo_slug, fixture.repoSlug)
+    assert.equal(serverRun.seats.find((seat) => seat.role === 'planner').model_id, fixture.seatRows.find((seat) => seat.role === 'planner').model_id)
+  } finally {
+    fixture.feed.close()
+  }
+})
+
+test('F1', { skip: SKIP }, () => {
+  const fixture = runSeatsFixture()
+  try {
+    const run = fixture.feed.listRuns().runs.find((candidate) => candidate.adw_id === fixture.adwId)
+    assert.ok(run)
+    assert.deepEqual(run.configuration, {
+      schema_version: fixture.configuration.schema_version,
+      task_profile: {
+        requested: null,
+        effective: fixture.configuration.task_profile,
+        source: fixture.configuration.task_profile_source,
+      },
+      execution: {
+        requested: fixture.configuration.requested_execution,
+        effective: fixture.configuration.effective_execution,
+        source: fixture.configuration.execution_source,
+      },
+      assurance: {
+        requested: fixture.configuration.requested_assurance,
+        effective: fixture.configuration.effective_assurance,
+        source: fixture.configuration.assurance_source,
+      },
+      legacy_variant: fixture.configuration.legacy_variant,
+      legacy_tier: fixture.configuration.legacy_tier,
+      created_at: fixture.configuration.created_at,
+    })
+  } finally {
+    fixture.feed.close()
+  }
+})
+
+test('G1', { skip: SKIP }, () => {
+  const fixture = runSeatsFixture()
+  const writable = new (require('node:sqlite').DatabaseSync)(fixture.ledgerDb)
+  try {
+    writable.exec('DROP TABLE run_seats')
+  } finally {
+    writable.close()
+  }
+  try {
+    const run = fixture.feed.listRuns().runs.find((candidate) => candidate.adw_id === fixture.adwId)
+    assert.ok(run)
+    assert.equal(run.seats, null)
+    assert.equal(run.pending.seats, 'predates this measurement')
+  } finally {
+    fixture.feed.close()
+  }
+})
+
 test('ledger feed passes the latest ordered driver observation into runtime shape', { skip: SKIP }, () => {
   const dir = scratchDir('visualizer-observation-feed-')
   const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')

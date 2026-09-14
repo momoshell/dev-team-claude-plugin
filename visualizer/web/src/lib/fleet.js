@@ -102,9 +102,48 @@ export function crewArchive(run = {}) {
   }
 }
 
+// #953 · TL7 — ONE list of the status keys that mean an operator must look at this run. It
+// was hard-coded in App.svelte:52 and TaskList.svelte:25,:57, which is exactly how a key
+// minted in this module reaches neither. Those two consumers ask this predicate; the
+// fleetView rail selects the key directly and is not a caller.
+export const ATTENTION_KEYS = Object.freeze(['escalated', 'fail', 'aborted', 'silent', 'unverified', 'gone', 'contradicted'])
+export function needsAttention(statusKey) { return ATTENTION_KEYS.includes(statusKey) }
+
+const ATTENTION_SEGMENT_LABELS = Object.freeze({
+  escalated: 'escalated',
+  fail: 'failed',
+  aborted: 'aborted',
+  silent: 'stale',
+  unverified: 'unverified',
+  gone: 'gone',
+  contradicted: 'contradicted',
+})
+
+export function attentionBreakdown(rows = []) {
+  const counts = new Map()
+  let total = 0
+  let unattributed = 0
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const key = row?.status?.key
+    if (!needsAttention(key)) continue
+    total += 1
+    const label = ATTENTION_SEGMENT_LABELS[key]
+    if (!label) { unattributed += 1; continue }
+    counts.set(key, (counts.get(key) ?? 0) + 1)
+  }
+  const segments = ATTENTION_KEYS.filter((key) => ATTENTION_SEGMENT_LABELS[key]).map((key) => ({ key, label: ATTENTION_SEGMENT_LABELS[key], count: counts.get(key) ?? 0 }))
+  const parts = segments.filter((segment) => segment.count > 0).map((segment) => `${segment.count} ${segment.label}`)
+  if (unattributed > 0) parts.push(`${unattributed} unattributed`)
+  return { total, segments, unattributed, text: parts.join(' · ') }
+}
+
+export function runActivityResult(key, values) {
+  return { key, ...values, attention: needsAttention(key) }
+}
+
 export function runActivity(run = {}, now = Date.now()) {
   const driver = driverObservation(run)
-  if (!run?.running) return { key: 'settled', live: false, attention: false, heartbeat: heartbeatCell(run, now), driver }
+  if (!run?.running) return runActivityResult('settled', { live: false, heartbeat: heartbeatCell(run, now), driver })
   const heartbeat = heartbeatCell(run, now)
   // #953 — the ledger and the crew state dir disagree. Report the disagreement; do not pick
   // a side. This sits AFTER the settled return, so settlement is read from the ledger and
@@ -113,36 +152,29 @@ export function runActivity(run = {}, now = Date.now()) {
   if (archive.archived === true) {
     const ledgerSide = run?.started_at ? `started ${run.started_at}` : 'started at a time the ledger did not record'
     const archiveSide = archive.archived_at ? `archived ${archive.archived_at}` : `archived at a time this feed could not measure (${archive.archived_at_absent || 'no reason was recorded for the absence'})`
-    return {
-      key: 'contradicted', live: false, attention: true, heartbeat, driver,
+    return runActivityResult('contradicted', {
+      live: false, heartbeat, driver,
       word: 'contradicted · ledger running, crew state archived', tone: 'serious',
       why: `The ledger row still says running (${ledgerSide}), but this lane's crew state directory is archived (${archiveSide}). The two sides disagree; neither is guessed away. This run is not live, not merely stale, and not settled.`,
-    }
+    })
   }
   // New shaped rows always carry runtime. Their activity comes only from the
   // cited observation; heartbeat age stays a separate freshness display.
   if (run?.runtime && typeof run.runtime === 'object') {
-    if (!driver.measured) return { key: 'unverified', live: false, attention: true, heartbeat, driver, word: 'unsettled · runtime unconfirmed', tone: 'serious', why: 'The ledger remains unsettled, but no authoritative driver observation was recorded.' }
-    if (driver.state === 'gone') return { key: 'gone', live: false, attention: true, heartbeat, driver, word: `driver gone · ${driver.source}`, tone: 'serious', why: `The latest ${driver.source} observation recorded the driver as gone.` }
-    if (driver.state === 'alive') return { key: 'live', live: true, attention: false, heartbeat, driver, word: `live · ${driver.source}`, tone: 'busy', why: null }
-    return { key: 'unverified', live: false, attention: true, heartbeat, driver, word: `runtime unknown · ${driver.source}`, tone: 'serious', why: `The latest ${driver.source} observation could not determine driver state.` }
+    if (!driver.measured) return runActivityResult('unverified', { live: false, heartbeat, driver, word: 'unsettled · runtime unconfirmed', tone: 'serious', why: 'The ledger remains unsettled, but no authoritative driver observation was recorded.' })
+    if (driver.state === 'gone') return runActivityResult('gone', { live: false, heartbeat, driver, word: `driver gone · ${driver.source}`, tone: 'serious', why: `The latest ${driver.source} observation recorded the driver as gone.` })
+    if (driver.state === 'alive') return runActivityResult('live', { live: true, heartbeat, driver, word: `live · ${driver.source}`, tone: 'busy', why: null })
+    return runActivityResult('unverified', { live: false, heartbeat, driver, word: `runtime unknown · ${driver.source}`, tone: 'serious', why: `The latest ${driver.source} observation could not determine driver state.` })
   }
   // Historical pre-runtime objects retain the legacy heartbeat-only activity
   // readout. They are never produced by shapeRun after observations shipped.
-  if (heartbeat.dashed) return { key: 'unverified', live: false, attention: true, heartbeat, driver, word: 'running · heartbeat unavailable', tone: 'serious', why: 'The ledger says this session is running, but this feed does not provide a heartbeat, so live activity cannot be verified.' }
+  if (heartbeat.dashed) return runActivityResult('unverified', { live: false, heartbeat, driver, word: 'running · heartbeat unavailable', tone: 'serious', why: 'The ledger says this session is running, but this feed does not provide a heartbeat, so live activity cannot be verified.' })
   if (heartbeat.stale) {
     const quietFor = conciseAge(heartbeat.age_ms)
-    return { key: 'silent', live: false, attention: true, heartbeat, driver, word: `stale · heartbeat ${quietFor} ago`, tone: 'serious', why: `The session still says running, but its last heartbeat was ${quietFor} ago.` }
+    return runActivityResult('silent', { live: false, heartbeat, driver, word: `stale · heartbeat ${quietFor} ago`, tone: 'serious', why: `The session still says running, but its last heartbeat was ${quietFor} ago.` })
   }
-  return { key: 'live', live: true, attention: false, heartbeat, driver, word: 'live', tone: 'busy', why: null }
+  return runActivityResult('live', { live: true, heartbeat, driver, word: 'live', tone: 'busy', why: null })
 }
-
-// #953 · TL7 — ONE list of the status keys that mean an operator must look at this run. It
-// was hard-coded in App.svelte:52 and TaskList.svelte:25,:57, which is exactly how a key
-// minted in this module reaches neither. Those two consumers ask this predicate; the
-// fleetView rail selects the key directly and is not a caller.
-export const ATTENTION_KEYS = Object.freeze(['escalated', 'fail', 'aborted', 'silent', 'unverified', 'gone', 'contradicted'])
-export function needsAttention(statusKey) { return ATTENTION_KEYS.includes(statusKey) }
 
 // #953 · TL7 — the heading an operator reads for an open record that is not live, keyed by
 // the SAME status key. A contradicted lane is NOT stale: its evidence is the crew state

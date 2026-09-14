@@ -20,8 +20,8 @@ const proofScopeMutations = () => [
 const frozenSourcePair = () => {
   const current = readFileSync(FROZEN_INVENTORY_FILE, 'utf8')
   const committed = current
-    .replace('test/visualizer-server.test.mjs:1672', 'test/visualizer-server.test.mjs:1649')
-    .replace('0ffdacdc5f084cb66b620ae9cd84c2b237f752f7c308803e8ea478b02a64d172', '1ffdacdc5f084cb66b620ae9cd84c2b237f752f7c308803e8ea478b02a64d172')
+    .replace('test/visualizer-server.test.mjs:1834', 'test/visualizer-server.test.mjs:1672')
+    .replace('7d7c508c980cd5b7be2b9952bdc37b7e76a759b77f8e6c93db117c600a3ddb8f', '0ffdacdc5f084cb66b620ae9cd84c2b237f752f7c308803e8ea478b02a64d172')
   return { committed, current }
 }
 const frozenAuditedIdentity = (source, member) => source.split('\n').find((line) => line.includes(member)).match(/"([^"]+)"/)[1]
@@ -5508,8 +5508,8 @@ test('B2 frozen inventory repair permits only one re-entry', () => {
 
 test('C1 frozen inventory repair refuses detector regex and warranty logic edits', () => {
   const source = readFileSync(FROZEN_INVENTORY_FILE, 'utf8')
-  const digest = '0ffdacdc5f084cb66b620ae9cd84c2b237f752f7c308803e8ea478b02a64d172'
-  const replacementDigest = '1ffdacdc5f084cb66b620ae9cd84c2b237f752f7c308803e8ea478b02a64d172'
+  const digest = '7d7c508c980cd5b7be2b9952bdc37b7e76a759b77f8e6c93db117c600a3ddb8f'
+  const replacementDigest = '0ffdacdc5f084cb66b620ae9cd84c2b237f752f7c308803e8ea478b02a64d172'
   const contexts = [
     ['arbitrary string', `${source}\nconst decoyText = "test/decoy.mjs:17 ${digest}"\n`],
     ['regex', `${source}\nconst decoyRegex = /test\\/decoy.mjs:17/\n`],
@@ -5523,7 +5523,7 @@ test('C1 frozen inventory repair refuses detector regex and warranty logic edits
     assert.equal(result.action, 'refuse', label)
     assert.equal(result.reason, 'logic', label)
   }
-  const decoy = classifyFrozenInventoryDelta('test/decoy.mjs', source, source.replace(digest, replacementDigest).replace('test/visualizer-server.test.mjs:1672', 'test/visualizer-server.test.mjs:1649'))
+  const decoy = classifyFrozenInventoryDelta('test/decoy.mjs', source, source.replace(digest, replacementDigest).replace('test/visualizer-server.test.mjs:1834', 'test/visualizer-server.test.mjs:1672'))
   assert.equal(decoy.action, 'refuse')
   assert.equal(decoy.reason, 'logic')
   assert.match(decoy.why, /refused as logic/)

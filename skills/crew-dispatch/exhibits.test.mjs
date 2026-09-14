@@ -220,7 +220,7 @@ test('C1 E1 span reach doctrine records the measured choice', () => {
 
 test('RV1-1 census-carrier span false negative and anchor obligation distinctions remain documented', () => {
   const text = readText(join(HERE, 'references/batch.md'))
-  const secondFalseNegative = 'The second is a fence entry carrying a span: `skills/crew-dispatch/exhibits.test.mjs:START-END` is scored as held because `parseFenceScope` supplies the bare path to `matchOwn`, so that carrier is never reported missing and never admitted, while the owed `const ' + 'measurement` and `const ' + 'pristinePairs` repairs sit outside the authored span and the scope gate will refuse them.'
+  const secondFalseNegative = 'The second is a fence entry carrying a span: `skills/crew-dispatch/exhibits.test.mjs:START-END` is scored as held because `parseFenceScope` supplies the bare path to `matchOwn`, so that carrier is never reported missing and never admitted, while the owed RV2-1 repairs to the dynamically computed `current` and `pristine` reach shapes plus integer `ownerDelta` and `pairDelta` assertions sit outside the authored span and the scope gate will refuse them.'
   assert.equal(text.split('There are two false negatives this warning does not measure.').length - 1, 1)
   assert.equal(text.split(secondFalseNegative).length - 1, 1)
   assert.equal(text.includes('span-scoped carrier'), false)
@@ -230,6 +230,14 @@ test('RV1-1 census-carrier span false negative and anchor obligation distinction
   assert.equal(text.replaceAll(/\s+/g, ' ').includes(oldClaim), false)
 })
 
+// Mutation killed: replace the live RV2-1 assertion clause with the stale const names.
+test('RV1-1 census-carrier paragraph names live RV2-1 assertions', () => {
+  const text = readText(join(HERE, 'references/batch.md'))
+  const carrierRepair = "the owed repair still updates batch.md's measurement sentence and exhibits.test.mjs's RV2-1 assertions over the dynamically computed `current` and `pristine` reach shapes plus integer `ownerDelta` and `pairDelta`, while publishing no rotating baseline."
+  assert.equal(text.split(carrierRepair).length - 1, 1)
+  assert.equal(text.includes("exhibits.test.mjs's `const measurement`"), false)
+  assert.equal(text.includes('its `const pristinePairs`'), false)
+})
 
 test('test reach constant names the computed path blind spot', () => {
   assert.ok(TEST_REACH_BLIND_SPOT.includes('a computed path or dynamic import is invisible to a static scan'))

@@ -11,6 +11,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { spawn, spawnSync } from 'node:child_process'
+import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { ROOT, scratchDir } from './helpers.mjs'
 import {
@@ -39,11 +40,13 @@ import {
   issueTrailersFromPrBody,
   normalDeps,
   parseArgs,
+  parsePromptMeasureClaim,
   parseRepairOutput,
   quietProbe,
   quietRefusalDetail,
   reap,
   reapIssueSummary,
+  reapPromptMeasures,
   reconcile,
   recover,
   refsFromPrBody,
@@ -52,6 +55,8 @@ import {
 import { openLedger } from '../scripts/factory/ledger.mjs'
 
 const lane = 'b415-closeout'
+const CLOSEOUT_LEDGER_SANDBOX = join(tmpdir(), `factory-closeout-ledger-${process.pid}.db`)
+if (!process.env.DEVTEAM_LEDGER_DB) process.env.DEVTEAM_LEDGER_DB = CLOSEOUT_LEDGER_SANDBOX
 
 function scratch(prefix = 'factory-closeout-') {
   return scratchDir(prefix)
@@ -70,11 +75,13 @@ function answerFor(argv, answers, options = {}) {
   return { status: 0, stdout: '', stderr: '' }
 }
 
-function harness({ home = null, answers = [], newest = () => 1000, now = null, log = null, openLedger = null, ingestJournal = null } = {}) {
-  const calls = { spawn: [], cp: [], rename: [], rm: [], log: [] }
+function harness({ home = null, answers = [], newest = () => 1000, now = null, log = null, openLedger = null, ingestJournal = null, promptMeasurePath = null } = {}) {
+  const queuePath = promptMeasurePath || join(tmpdir(), `factory-closeout-prompt-${process.pid}-${Math.random().toString(16).slice(2)}.json`)
+  const calls = { spawn: [], cp: [], rename: [], rm: [], write: [], log: [] }
   let clock = 0
   const deps = normalDeps({
     home,
+    promptMeasurePath: queuePath,
     mkdtempSync: (prefix) => scratchDir(basename(prefix), { parent: dirname(prefix) }),
     now: now || (() => { clock += 5; return clock }),
     sleep: () => {},
@@ -82,8 +89,16 @@ function harness({ home = null, answers = [], newest = () => 1000, now = null, l
     ...(openLedger ? { openLedger } : {}),
     ...(ingestJournal ? { ingestJournal } : {}),
     cpSync: (from, to, options) => calls.cp.push([from, to, options]),
-    renameSync: (from, to) => calls.rename.push([from, to]),
+    renameSync: (from, to) => {
+      calls.rename.push([from, to])
+      if (to === queuePath || from.startsWith(join(dirname(queuePath), `.${basename(queuePath)}.`))) renameSync(from, to)
+    },
     rmSync: (path, options) => calls.rm.push([path, options]),
+    writeFileSync: (path, text, options) => {
+      calls.write.push([path, text, options])
+      mkdirSync(dirname(path), { recursive: true })
+      writeFileSync(path, text, options)
+    },
     log: log || ((line) => calls.log.push(line)),
     spawn: (options) => {
       const argv = [options.file, ...(options.args || [])].join(' ')
@@ -243,6 +258,34 @@ function spawned(calls, needle) {
 
 function rows(result) {
   return result.lines.map((row) => typeof row === 'string' ? JSON.parse(row) : row)
+}
+
+function promptCellsPayload({ passes = 9, reviews = 12, rows: suppliedRows = null, absent = {} } = {}) {
+  return {
+    schema: 1,
+    rate_floor: 12,
+    rows: suppliedRows || [{ first_round_passes: passes, first_round_reviews: reviews }],
+    absent,
+  }
+}
+
+function promptMetadataPayload({ files = [{ path: 'crew/roles/planner.md' }], mergedAt = '2026-09-14T08:00:00Z' } = {}) {
+  return { files, mergedAt }
+}
+
+function promptRecord(overrides = {}) {
+  return {
+    pr_number: 700,
+    lane: 'origin-lane',
+    measure: 'first-round pass rate',
+    reason: 'not enough observations',
+    target_n: 12,
+    merged_at: '2026-09-13T08:00:00Z',
+    status: 'pending',
+    before: { value: 0.5, numerator: 6, denominator: 12, rate_floor: 12, reason: null },
+    closed_reason: null,
+    ...overrides,
+  }
 }
 
 test('refsFromPrBody reads both trailer shapes and ignores closing keywords', () => {
@@ -1473,4 +1516,167 @@ test('reap emits one JSON line per step with step, ms and outcome', () => {
     assert.equal(row.ms >= 0, true)
     assert.equal(Object.values(STEP_OUTCOMES).includes(row.outcome), true)
   }
+})
+
+test('A1 a prompt unmeasured claim is durably queued', () => {
+  const root = scratch('closeout-prompt-a1-')
+  const promptMeasurePath = join(root, 'state', 'pending-prompt-measures.json')
+  const body = 'Measure: first-round pass rate\nunmeasured — n insufficient; reason: the cohort is still small; re-measure after 20 seats.\n'
+  const { deps } = harness({
+    promptMeasurePath,
+    answers: [
+      ['--json files,mergedAt', { status: 0, stdout: JSON.stringify(promptMetadataPayload()), stderr: '' }],
+      ['ledger.mjs cells', { status: 0, stdout: JSON.stringify(promptCellsPayload()) + '\n', stderr: '' }],
+    ],
+  })
+  const pr = { number: 1001, body, checkout: root }
+  assert.deepEqual(parsePromptMeasureClaim(body), {
+    measure: 'first-round pass rate', reason: 'the cohort is still small', target_n: 20, closed_reason: null,
+  })
+  const first = reapPromptMeasures({ lane: 'prompt-a1', pr, root, deps })
+  assert.equal(first.queued, 1)
+  const second = reapPromptMeasures({ lane: 'prompt-a1', pr: { ...pr, body: '' }, root, deps })
+  assert.equal(second.settled, 0)
+  const state = JSON.parse(readFileSync(promptMeasurePath, 'utf8'))
+  assert.equal(state.schema, 1)
+  assert.equal(state.records.length, 1)
+  assert.deepEqual(state.records[0], {
+    pr_number: 1001,
+    lane: 'prompt-a1',
+    measure: 'first-round pass rate',
+    reason: 'the cohort is still small',
+    target_n: 20,
+    merged_at: '2026-09-14T08:00:00Z',
+    status: 'pending',
+    before: { value: 0.75, numerator: 9, denominator: 12, rate_floor: 12, reason: null },
+    closed_reason: 'under-floor: 12/20',
+  })
+})
+
+test('B1 a non-prompt PR does not enter the due list', () => {
+  const root = scratch('closeout-prompt-b1-')
+  const promptMeasurePath = join(root, 'pending-prompt-measures.json')
+  const body = 'Measure: first-round pass rate\nunmeasured — n insufficient; reason: code-only evidence; re-measure after 12 seats.\n'
+  const { deps } = harness({
+    promptMeasurePath,
+    answers: [['--json files,mergedAt', { status: 0, stdout: JSON.stringify(promptMetadataPayload({ files: [{ path: 'scripts/factory/closeout.mjs' }] })), stderr: '' }]],
+  })
+  const result = reapPromptMeasures({ lane: 'code-only', pr: { number: 1002, body, checkout: root }, root, deps })
+  assert.equal(result.reason, 'not-prompt-change')
+  assert.equal(existsSync(promptMeasurePath), false)
+})
+
+test('C1 a settled prompt measure does not enter the due list', () => {
+  const root = scratch('closeout-prompt-c1-')
+  const promptMeasurePath = join(root, 'pending-prompt-measures.json')
+  const body = 'Measure: first-round pass rate; before: 0.50 (n=12); after: 0.60 (n=12).\n'
+  const { deps } = harness({ promptMeasurePath })
+  const result = reapPromptMeasures({ lane: 'settled-prompt', pr: { number: 1003, body, checkout: root }, root, deps })
+  assert.equal(result.queued, 0)
+  assert.equal(existsSync(promptMeasurePath), false)
+})
+
+test('D1 a due pending claim comments before and after with denominators', () => {
+  const root = scratch('closeout-prompt-d1-')
+  const promptMeasurePath = join(root, 'pending-prompt-measures.json')
+  put(promptMeasurePath, JSON.stringify({ schema: 1, records: [promptRecord({ pr_number: 700, target_n: 12 })] }))
+  const { deps, calls } = harness({
+    promptMeasurePath,
+    answers: [['ledger.mjs cells', { status: 0, stdout: JSON.stringify(promptCellsPayload({ passes: 8, reviews: 12 })) + '\n', stderr: '' }]],
+  })
+  const result = reapPromptMeasures({ lane: 'later-lane', pr: { number: 1004, body: '', checkout: root }, root, deps })
+  const state = JSON.parse(readFileSync(promptMeasurePath, 'utf8'))
+  const comments = spawned(calls, 'gh pr comment')
+  assert.equal(result.settled, 1)
+  assert.equal(comments.length, 1)
+  assert.equal(comments[0].args[2], '700')
+  assert.equal(comments[0].args[comments[0].args.indexOf('--body') + 1], 'Measure: first-round pass rate; before: 0.5 (n=12); after: 0.6666666666666666 (n=12)')
+  assert.equal(state.records[0].status, 'settled')
+  assert.equal(state.records[0].after.denominator, 12)
+  assert.ok(state.records[0].settled_at)
+})
+
+test('E1 an under-floor claim stays visibly pending', () => {
+  const root = scratch('closeout-prompt-e1-')
+  const promptMeasurePath = join(root, 'pending-prompt-measures.json')
+  put(promptMeasurePath, JSON.stringify({ schema: 1, records: [promptRecord({ pr_number: 701, target_n: 20 })] }))
+  const { deps, calls } = harness({
+    promptMeasurePath,
+    answers: [['ledger.mjs cells', { status: 0, stdout: JSON.stringify(promptCellsPayload({ passes: 8, reviews: 12 })) + '\n', stderr: '' }]],
+  })
+  const result = reapPromptMeasures({ lane: 'later-lane', pr: { number: 1005, body: '', checkout: root }, root, deps })
+  const state = JSON.parse(readFileSync(promptMeasurePath, 'utf8'))
+  assert.equal(result.settled, 0)
+  assert.equal(state.records[0].status, 'pending')
+  assert.equal(state.records[0].closed_reason, 'under-floor: 12/20')
+  assert.equal(Object.hasOwn(state.records[0], 'after'), false)
+  assert.equal(spawned(calls, 'gh pr comment').length, 0)
+})
+
+test('F1 settlement is idempotent across reap sweeps', () => {
+  const root = scratch('closeout-prompt-f1-')
+  const promptMeasurePath = join(root, 'pending-prompt-measures.json')
+  put(promptMeasurePath, JSON.stringify({ schema: 1, records: [promptRecord({ pr_number: 702 })] }))
+  const { deps, calls } = harness({
+    promptMeasurePath,
+    answers: [['ledger.mjs cells', { status: 0, stdout: JSON.stringify(promptCellsPayload({ passes: 10, reviews: 12 })) + '\n', stderr: '' }]],
+  })
+  const pr = { number: 1006, body: '', checkout: root }
+  const first = reapPromptMeasures({ lane: 'later-lane', pr, root, deps })
+  const second = reapPromptMeasures({ lane: 'later-lane', pr, root, deps })
+  assert.equal(first.comments, 1)
+  assert.equal(second.comments, 0)
+  assert.equal(spawned(calls, 'gh pr comment').length, 1)
+  assert.equal(JSON.parse(readFileSync(promptMeasurePath, 'utf8')).records[0].status, 'settled')
+})
+
+test('RV1-1 failed settlement comment persists its closed reason', () => {
+  const root = scratch('closeout-prompt-rv1-1-')
+  const promptMeasurePath = join(root, 'pending-prompt-measures.json')
+  put(promptMeasurePath, JSON.stringify({ schema: 1, records: [promptRecord({ pr_number: 703 })] }))
+  const { deps, calls } = harness({
+    promptMeasurePath,
+    answers: [
+      ['ledger.mjs cells', { status: 0, stdout: JSON.stringify(promptCellsPayload({ passes: 10, reviews: 12 })) + '\n', stderr: '' }],
+      ['gh pr comment', { status: 1, stdout: '', stderr: 'comment denied' }],
+    ],
+  })
+  const result = reapPromptMeasures({ lane: 'later-lane', pr: { number: 1008, body: '', checkout: root }, root, deps })
+  const record = JSON.parse(readFileSync(promptMeasurePath, 'utf8')).records[0]
+  assert.equal(result.settled, 1)
+  assert.equal(result.comments, 0)
+  assert.deepEqual(result.closed, ['prompt-comment-failed: comment denied'])
+  assert.equal(spawned(calls, 'gh pr comment').length, 1)
+  assert.equal(record.status, 'settled')
+  assert.equal(record.closed_reason, 'prompt-comment-failed: comment denied')
+})
+
+test('G1 an unnamed measure stays pending with one closed reason', () => {
+  const root = scratch('closeout-prompt-g1-')
+  const promptMeasurePath = join(root, 'pending-prompt-measures.json')
+  const body = 'unmeasured — n insufficient; reason: no measure was named; re-measure after 12 seats.\n'
+  const { deps, calls } = harness({
+    promptMeasurePath,
+    answers: [['--json files,mergedAt', { status: 0, stdout: JSON.stringify(promptMetadataPayload()), stderr: '' }]],
+  })
+  const result = reapPromptMeasures({ lane: 'unnamed-lane', pr: { number: 1007, body, checkout: root }, root, deps })
+  const record = JSON.parse(readFileSync(promptMeasurePath, 'utf8')).records[0]
+  assert.equal(result.queued, 1)
+  assert.equal(record.measure, null)
+  assert.equal(record.closed_reason, 'measure-unnamed')
+  assert.equal(record.status, 'pending')
+  assert.equal(spawned(calls, 'gh pr comment').length, 0)
+  assert.equal(spawned(calls, 'ledger.mjs').length, 0)
+})
+
+test('H1 reap preserves its existing ordered step contract', () => {
+  const { deps, calls } = harness({
+    home: scratch('closeout-prompt-h1-'),
+    answers: [['gh pr view', { status: 0, stdout: JSON.stringify({ number: 1008, state: 'MERGED', body: 'Closes #1031' }), stderr: '' }]],
+  })
+  const result = reap({ lanes: ['ordinary-lane'], checkout: process.cwd(), deps })
+  assert.deepEqual([...REAP_STEPS], ['pr-merged', 'turns', 'issues', 'worktree', 'branch', 'prune', 'archive'])
+  assert.deepEqual(rows(result).map((row) => row.step), [...REAP_STEPS])
+  assert.deepEqual(result.report.closed, [1031])
+  assert.equal(spawned(calls, 'issue close').length, 1)
 })

@@ -10,7 +10,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
@@ -478,8 +478,6 @@ function worktreeCleanup(sourceCheckout, checkout, removeWorktree) {
 export async function defaultRunSeat({ task, candidate, role, bench, dir, briefFile = null, deps = {} }) {
   const root = resolve(dir || process.cwd())
   const taskFile = briefFile ? resolve(root, String(briefFile)) : join(root, 'task.md')
-  const taskSlug = `model-eval-${String(bench).slice(0, 16)}-${role}-${candidate.provider}-${candidate.id}`
-    .replace(/[^A-Za-z0-9._-]+/g, '-').slice(0, 120)
   const now = deps.now || (() => Date.now())
   const started = now()
   if (typeof deps.commandResult !== 'function') deps = { ...deps, commandResult: (args, options) => commandResult(args, { ...options, spawn: deps.spawnSync || spawnSync }) }
@@ -492,6 +490,9 @@ export async function defaultRunSeat({ task, candidate, role, bench, dir, briefF
 
   const checkout = deps.makeWorktree(process.cwd())
   if (!NON_BLANK(checkout)) throw new Error('model-eval: worktree helper returned no checkout')
+  const runKey = basename(dirname(checkout))
+  const taskSlug = `model-eval-${String(bench).slice(0, 16)}-${role}-${candidate.provider}-${candidate.id}-${runKey}`
+    .replace(/[^A-Za-z0-9._-]+/g, '-').slice(0, 120)
   const cleanup = worktreeCleanup(process.cwd(), checkout, deps.removeWorktree)
   const failure = (reason, detail) => ({
     envelope: null,

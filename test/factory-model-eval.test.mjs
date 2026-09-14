@@ -15,6 +15,7 @@ import {
   EvalRefusal,
 } from '../scripts/factory/model-eval.mjs'
 import { EVAL_ABSENT_REASONS, evalsReadout } from '../scripts/factory/ledger.mjs'
+import { archivedLanes, discoverLanes } from '../scripts/factory/lane-watch.mjs'
 
 const SQLITE = sqliteAvailable()
 const SKIP = SQLITE ? false : 'node:sqlite unavailable below the shared floor'
@@ -88,23 +89,42 @@ function runnerFixture({
   wait = null,
   resolveAdapters = null,
   seatIo = null,
+  registrationRoot = null,
+  worktree = null,
+  rejectDuplicate = true,
 } = {}) {
   const stateDir = scratchDir('factory-model-eval-state-')
-  const worktree = scratchDir('factory-model-eval-worktree-')
+  const crewRoot = registrationRoot ?? scratchDir('factory-model-eval-crew-')
+  const worktreeParent = scratchDir('factory-model-eval-worktree-')
+  const checkout = worktree ?? join(worktreeParent, 'tree')
   mkdirSync(stateDir, { recursive: true })
-  mkdirSync(worktree, { recursive: true })
-  writeFileSync(join(worktree, 'candidate-only-artifact.txt'), 'disposable candidate artifact\n')
-  const crewJson = join(stateDir, 'crew.json')
+  mkdirSync(checkout, { recursive: true })
+  writeFileSync(join(checkout, 'candidate-only-artifact.txt'), 'disposable candidate artifact\n')
   const role = 'builder'
   const candidate = CANDIDATE_A
   const events = { assigns: [], waits: [], teardowns: 0, removals: [] }
-  const validBootOutput = JSON.stringify({ crew_json: crewJson })
+  let crewJson = null
   const commandResult = (args) => {
     if (args.includes('boot')) {
+      const taskIndex = args.indexOf('--task')
+      const task = taskIndex >= 0 ? String(args[taskIndex + 1]) : 'model-eval-missing-task'
+      const checkoutIndex = args.indexOf('--checkout')
+      const recordedCheckout = checkoutIndex >= 0 ? String(args[checkoutIndex + 1]) : checkout
+      const laneDir = join(crewRoot, 'repo', task)
+      crewJson = join(laneDir, 'crew.json')
+      if (rejectDuplicate && existsSync(crewJson)) {
+        const output = `duplicate task registration: ${task}`
+        return {
+          result: { status: 1, stdout: output, stderr: '' },
+          parsed: null,
+          output,
+        }
+      }
+      mkdirSync(join(laneDir, 'returns'), { recursive: true })
       writeFileSync(crewJson, JSON.stringify({
         schema_version: 3,
-        task: 'model-eval-fixture',
-        checkout: worktree,
+        task,
+        checkout: recordedCheckout,
         roles: [role],
         members: {
           [role]: {
@@ -114,6 +134,8 @@ function runnerFixture({
         },
         task_return: join(stateDir, 'returns', 'task.json'),
       }))
+      writeFileSync(join(laneDir, 'journal.jsonl'), '')
+      const validBootOutput = JSON.stringify({ crew_json: crewJson })
       return {
         result: { status: bootStatus, stdout: bootOutput ?? validBootOutput, stderr: bootStderr },
         parsed: bootOutput === null ? (bootStatus === 0 ? { crew_json: crewJson } : null) : undefined,
@@ -137,17 +159,17 @@ function runnerFixture({
   }
   const deps = {
     commandResult,
-    makeWorktree: () => worktree,
+    makeWorktree: () => checkout,
     removeWorktree: (_source, path) => {
       events.removals.push(path)
-      if (path === worktree) rmSync(path, { recursive: true, force: true })
-      return { removed: path === worktree, why: path === worktree ? null : 'fixture refused to remove the source checkout' }
+      if (path === checkout) rmSync(path, { recursive: true, force: true })
+      return { removed: path === checkout, why: path === checkout ? null : 'fixture refused to remove the source checkout' }
     },
     resolveAdapters: resolveAdapters || (async () => ({ [role]: { name: candidate.agent, transport: 'headless-rpc', adapter: {} } })),
     seatIo: () => io,
     readFile: readFileSync,
   }
-  return { deps, events, worktree: () => worktree, stateDir, crewJson }
+  return { deps, events, worktree: () => checkout, stateDir, crewRoot, get crewJson() { return crewJson } }
 }
 
 async function refusalFor(options) {
@@ -331,6 +353,70 @@ test('a failed local endpoint refuses before runSeat', async () => {
   assert.equal(result.caught instanceof EvalRefusal, true)
   assert.equal(result.caught.refusal, 'local-endpoint-dead')
   assert.equal(result.calls.length, 0)
+})
+
+test('A1 two consecutive fixed-sha bench runs reach candidate verdicts', async () => {
+  const bench = writeBench({ candidates: [CANDIDATE_A], production: `${CANDIDATE_A.provider}/${CANDIDATE_A.id}` })
+  const registrationRoot = scratchDir('factory-model-eval-shared-crew-')
+  const first = runnerFixture({ registrationRoot })
+  const second = runnerFixture({ registrationRoot })
+  const rows = []
+  const run = (fixture) => runBench({
+    dir: bench.dir,
+    deps: {
+      ...fixture.deps,
+      readRoster: null,
+      ledger: { recordEvalCell: async (row) => { rows.push(row); return row } },
+      runGate: async () => ({ total: 1, failed: 0, errored: 0 }),
+      runJudge: async () => ({ findings: ['candidate-verdict'] }),
+    },
+  })
+
+  await run(first)
+  await run(second)
+
+  assert.notEqual(first.worktree(), second.worktree())
+  assert.equal(rows.length, 2)
+  assert.equal(rows.every((row) => row.envelope_status === 'received'), true)
+  assert.equal(rows.every((row) => row.absent_reason === null), true)
+  assert.equal(rows.every((row) => row.error_text === null), true)
+  assert.deepEqual(rows.map((row) => row.judge_findings), [['candidate-verdict'], ['candidate-verdict']])
+  assert.equal(rows.some((row) => row.absent_reason === EVAL_SEAT_FAILURE_REASONS.boot_exit), false)
+})
+
+test('B1 a settled bench candidate leaves no live registration', async () => {
+  const bench = writeBench({ candidates: [CANDIDATE_A], production: `${CANDIDATE_A.provider}/${CANDIDATE_A.id}` })
+  const fixture = runnerFixture()
+  const rows = []
+  let initial = null
+  const deps = {
+    ...fixture.deps,
+    readRoster: null,
+    ledger: { recordEvalCell: async (row) => { rows.push(row); return row } },
+    runGate: async (spec) => {
+      if (spec.envelope) {
+        const live = discoverLanes(fixture.crewRoot)
+        assert.equal(live.length, 1)
+        initial = live[0]
+      }
+      return { total: 1, failed: 0, errored: 0 }
+    },
+    runJudge: async () => ({ findings: ['settled-verdict'] }),
+  }
+
+  await runBench({ dir: bench.dir, deps })
+
+  assert.ok(initial)
+  assert.equal(fixture.events.removals.length, 1)
+  assert.equal(existsSync(fixture.worktree()), false)
+  assert.deepEqual(discoverLanes(fixture.crewRoot), [])
+  const historical = archivedLanes(fixture.crewRoot)
+  assert.equal(historical.length, 1)
+  assert.equal(historical[0].id, initial.id)
+  assert.equal(historical[0].task, initial.task)
+  assert.equal(historical[0].archivedAt, null)
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].envelope_status, 'received')
 })
 
 test('A1 production candidate reaches headless-rpc assign/wait and mechanical judge measurement', async () => {

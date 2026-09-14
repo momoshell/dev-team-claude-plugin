@@ -181,6 +181,15 @@ function walkLanes(root, d) {
       const dir = join(root, repo.name, task.name)
       if (!d.existsSync(join(dir, 'crew.json')) || !d.existsSync(join(dir, 'journal.jsonl'))) continue
       const archive = archivedLaneName(task.name)
+      let checkout = null
+      if (archive === null) {
+        try {
+          const crew = JSON.parse(d.readFileSync(join(dir, 'crew.json'), 'utf8'))
+          if (typeof crew?.checkout === 'string' && crew.checkout.trim() !== '') checkout = crew.checkout
+        } catch { /* an unreadable checkout is unmeasured, not absent */ }
+      }
+      const checkoutMissing = checkout !== null && !d.existsSync(checkout)
+      const archived = archive !== null || checkoutMissing
       lanes.push({
         id: `${repo.name}/${task.name}`,
         repo: repo.name,
@@ -189,7 +198,7 @@ function walkLanes(root, d) {
         journal: join(dir, 'journal.jsonl'),
         taskDir: join(dir, 'task'),
         settled: d.existsSync(join(dir, 'returns', 'task.json')),
-        archived: archive !== null,
+        archived,
         archivedAt: archive ? archive.archivedAt : null,
       })
     }

@@ -29,7 +29,7 @@ import {
   RUN_VARIANTS, RUN_VARIANT_MARKERS, STAGE_MARKER_CHUNK, variantFromFirstMessage,
   REQUEST_MAX_CHARS, ADVISOR_AB_INCOMPLETE_REASONS, USAGE_ABSENT_CAUSES, usageAbsentCause,
   AGENT_SESSION_ABSENT_REASONS, AGENT_SESSION_ABSENT_REASON_KEYS,
-  CELL_RATE_FLOOR, TURN_TRANSPORTS, CELL_PRICE_UNITS, REVIEW_VERDICTS,
+  CELL_RATE_FLOOR, SCREENER_PROPOSAL_OUTCOMES, TURN_TRANSPORTS, CELL_PRICE_UNITS, REVIEW_VERDICTS,
   PHASE_SLOT_WAIT_KINDS, PHASE_SLOT_WAIT_DEPTH_ABSENT, PHASE_SLOT_WAIT_ABSENT,
   NARRATION_OUTCOMES,
   EVAL_ENVELOPE_STATUSES, EVAL_ABSENT_REASONS, EVAL_INCOMPLETE_REASONS, EVAL_PAYLOAD_KEYS,
@@ -8488,4 +8488,213 @@ test('G1 escalation triage sends only durable record evidence', { skip: SKIP }, 
     assert.ok(Buffer.byteLength(ledger.escalationProposalFor(id).proposed_evidence, 'utf8') <= 2 * 1024)
     assert.equal(readFileSync(join(crewDir, 'returns', 'task.json'), 'utf8').includes(checkoutTrap), false)
   } finally { ledger.close() }
+})
+
+// ---------------------------------------------------------------------------
+// Screener proposal adoption readout
+// ---------------------------------------------------------------------------
+
+test('A1 screener proposal journal rows persist model and outcome', { skip: SKIP }, () => {
+  const dir = nextDir()
+  const journalPath = join(dir, 'journal.jsonl')
+  const createdAt = '2024-01-01T00:00:00.000Z'
+  writeFileSync(journalPath, `${JSON.stringify({
+    at: createdAt,
+    screener_proposal: {
+      round: 2, proposal_id: 'proposal-1', axis: 'correctness', model: 'model-a',
+      outcome: 'adopted', finding_id: 'finding-1',
+    },
+  })}\n`)
+  const source = openTestLedger()
+  try {
+    assert.deepEqual(ingestJournal(journalPath, source, { adw_id: 'screener-a1' }), {
+      applied: 1, skipped: 0, ignored: 0, failed: 0, complete: true, first_failure: null,
+    })
+    assert.ok(Object.isFrozen(SCREENER_PROPOSAL_OUTCOMES))
+    assert.deepEqual([...SCREENER_PROPOSAL_OUTCOMES], ['adopted', 'rejected', 'unadjudicated'])
+    assert.equal(JOURNAL_FACT_KEYS.screener_proposal, 'recordScreenerProposal')
+    assert.ok(WRITERS.includes('recordScreenerProposal'))
+    assert.equal(WRITER_MIRROR_TABLES.recordScreenerProposal, 'screener_proposals')
+    assert.deepEqual(TABLES.screener_proposals.columns.map(({ name }) => name), [
+      'adw_id', 'round', 'proposal_id', 'axis', 'model', 'outcome',
+      'finding_id', 'reason', 'at_ms', 'created_at',
+    ])
+    const persisted = source.dumpTable('screener_proposals')
+    assert.equal(persisted.length, 1)
+    assert.equal(persisted[0].model, 'model-a')
+    assert.equal(persisted[0].outcome, 'adopted')
+    assert.equal(persisted[0].finding_id, 'finding-1')
+    const target = openTestLedger()
+    try {
+      assert.deepEqual(replayJsonl(source._jsonlPath, target), {
+        applied: 1, skipped: 0, failed: 0, complete: true, first_failure: null,
+      })
+      const replayed = target.dumpTable('screener_proposals')
+      assert.equal(replayed.length, 1)
+      assert.equal(replayed[0].model, 'model-a')
+      assert.equal(replayed[0].outcome, 'adopted')
+    } finally { target.close() }
+  } finally { source.close() }
+})
+
+test('B1 screener adoption readout groups rates by model', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const createdAt = '2024-01-01T00:00:00.000Z'
+  const add = (model, outcome, index) => ledger.recordScreenerProposal({
+    adw_id: 'screener-b1', round: 1, proposal_id: `${model}-${index}`, axis: 'scope', model, outcome, created_at: createdAt,
+  })
+  try {
+    for (let i = 0; i < 12; i += 1) add('model-a', 'adopted', `a-${i}`)
+    for (let i = 0; i < 12; i += 1) add('model-a', 'rejected', `r-${i}`)
+    for (let i = 0; i < 12; i += 1) add('model-b', 'adopted', `a-${i}`)
+    for (let i = 0; i < 4; i += 1) add('model-b', 'rejected', `r-${i}`)
+    const rows = ledger.screenerAdoptions({ since: createdAt, until: '2024-01-02T00:00:00.000Z' })
+    assert.deepEqual(rows.map((row) => row.model), ['model-a', 'model-b'])
+    assert.deepEqual(rows.map((row) => ({ proposals: row.proposals, adopted: row.adopted, rejected: row.rejected })), [
+      { proposals: 24, adopted: 12, rejected: 12 },
+      { proposals: 16, adopted: 12, rejected: 4 },
+    ])
+    assert.deepEqual(rows.map((row) => row.rate), [0.5, 0.75])
+  } finally { ledger.close() }
+})
+
+test('C1 screener adoption rates carry numerator and denominator', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const createdAt = '2024-01-01T00:00:00.000Z'
+  const add = (model, outcome, index) => ledger.recordScreenerProposal({
+    adw_id: 'screener-c1', round: 1, proposal_id: `${model}-${outcome}-${index}`, axis: 'vacuity', model, outcome, created_at: createdAt,
+  })
+  for (let i = 0; i < 12; i += 1) add('model-a', 'adopted', i)
+  for (let i = 0; i < 12; i += 1) add('model-a', 'rejected', i)
+  for (let i = 0; i < 12; i += 1) add('model-b', 'adopted', i)
+  const dbPath = ledger._dbPath
+  ledger.close()
+  const result = run([
+    'screener-adoptions', '--since', '2024-01-01T00:00:00Z', '--until', '2024-01-02T00:00:00Z',
+  ], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(result.status, 0, result.stderr)
+  const payload = JSON.parse(result.stdout)
+  assert.equal(payload.schema, 1)
+  assert.equal(payload.measured, true)
+  assert.ok(payload.rows.length >= 2)
+  for (const row of payload.rows) {
+    for (const key of ['numerator', 'denominator']) assert.equal(Number.isInteger(row[key]), true)
+    assert.equal(row.numerator, row.adopted)
+    assert.equal(row.denominator, row.adjudicated)
+    assert.equal(row.denominator, row.adopted + row.rejected)
+    assert.equal(typeof row.measured, 'boolean')
+    assert.ok(Object.hasOwn(row, 'rate'))
+    assert.ok(Object.hasOwn(row, 'reason'))
+  }
+})
+
+test('D1 screener adoption rates below the floor are unmeasured', { skip: SKIP }, () => {
+  const empty = openTestLedger()
+  const emptyDb = empty._dbPath
+  empty.close()
+  const emptyResult = run([
+    'screener-adoptions', '--since', '2030-01-01T00:00:00Z', '--until', '2030-01-02T00:00:00Z',
+  ], { DEVTEAM_LEDGER_DB: emptyDb })
+  assert.equal(emptyResult.status, 0, emptyResult.stderr)
+  const emptyPayload = JSON.parse(emptyResult.stdout)
+  assert.equal(emptyPayload.measured, false)
+  assert.deepEqual(emptyPayload.rows, [])
+  assert.match(emptyPayload.reason, /^unmeasured:/)
+
+  const ledger = openLedger({ dbPath: emptyDb, stderr: { write: () => {} } })
+  ledger.recordScreenerProposal({
+    adw_id: 'screener-d1', round: 1, proposal_id: 'thin-1', axis: 'scope', model: 'thin-model', outcome: 'adopted',
+    created_at: '2024-01-01T00:00:00.000Z',
+  })
+  ledger.close()
+  const below = run([
+    'screener-adoptions', '--since', '2024-01-01T00:00:00Z', '--until', '2024-01-02T00:00:00Z',
+  ], { DEVTEAM_LEDGER_DB: emptyDb })
+  assert.equal(below.status, 0, below.stderr)
+  const belowRow = JSON.parse(below.stdout).rows.find((row) => row.model === 'thin-model')
+  assert.equal(belowRow.denominator, 1)
+  assert.equal(belowRow.rate, null)
+  assert.equal(belowRow.measured, false)
+  assert.match(belowRow.reason, new RegExp(`denominator 1.*${CELL_RATE_FLOOR}`))
+
+  const atFloor = openLedger({ dbPath: emptyDb, stderr: { write: () => {} } })
+  try {
+    for (let i = 1; i < CELL_RATE_FLOOR; i += 1) {
+      atFloor.recordScreenerProposal({
+        adw_id: 'screener-d1', round: 1, proposal_id: `thin-${i + 1}`, axis: 'scope', model: 'thin-model', outcome: 'rejected',
+        created_at: '2024-01-01T00:00:00.000Z',
+      })
+    }
+  } finally { atFloor.close() }
+  const measured = run([
+    'screener-adoptions', '--since', '2024-01-01T00:00:00Z', '--until', '2024-01-02T00:00:00Z',
+  ], { DEVTEAM_LEDGER_DB: emptyDb })
+  assert.equal(measured.status, 0, measured.stderr)
+  const measuredRow = JSON.parse(measured.stdout).rows.find((row) => row.model === 'thin-model')
+  assert.equal(measuredRow.denominator, CELL_RATE_FLOOR)
+  assert.equal(measuredRow.measured, true)
+  assert.equal(measuredRow.rate, 1 / CELL_RATE_FLOOR)
+})
+
+test('E1 rejected and unadjudicated screener proposals remain distinct', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  try {
+    const base = { adw_id: 'screener-e1', round: 1, model: 'model-e', created_at: '2024-01-01T00:00:00.000Z' }
+    ledger.recordScreenerProposal({ ...base, proposal_id: 'adopted', axis: 'correctness', outcome: 'adopted' })
+    ledger.recordScreenerProposal({ ...base, proposal_id: 'rejected', axis: 'scope', outcome: 'rejected', reason: 'not supported' })
+    ledger.recordScreenerProposal({ ...base, proposal_id: 'unknown', axis: 'vacuity', outcome: 'unadjudicated' })
+    const row = ledger.screenerAdoptions({ since: '2024-01-01T00:00:00.000Z', until: '2024-01-02T00:00:00.000Z' })[0]
+    assert.deepEqual({ proposals: row.proposals, adopted: row.adopted, rejected: row.rejected, unadjudicated: row.unadjudicated, adjudicated: row.adjudicated }, {
+      proposals: 3, adopted: 1, rejected: 1, unadjudicated: 1, adjudicated: 2,
+    })
+    assert.equal(row.denominator, row.adopted + row.rejected)
+  } finally { ledger.close() }
+})
+
+test('F1 colliding screener proposal ids preserve unadjudicated rows', { skip: SKIP }, () => {
+  const dir = nextDir()
+  const journalPath = join(dir, 'journal.jsonl')
+  const rows = [
+    { round: 1, proposal_id: 'same-id', axis: 'correctness', model: 'model-f', outcome: 'rejected', reason: 'wrong' },
+    { round: 1, proposal_id: 'same-id', axis: 'scope', model: 'model-f', outcome: 'unadjudicated' },
+  ]
+  writeFileSync(journalPath, rows.map((screener_proposal) => JSON.stringify({ at: '2024-01-01T00:00:00.000Z', screener_proposal })).join('\n') + '\n')
+  const ledger = openTestLedger()
+  try {
+    const result = ingestJournal(journalPath, ledger, { adw_id: 'screener-f1' })
+    assert.equal(result.applied, 2)
+    assert.equal(ledger.dumpTable('screener_proposals').length, 2)
+    const row = ledger.screenerAdoptions({ since: '2024-01-01T00:00:00.000Z', until: '2024-01-02T00:00:00.000Z' })[0]
+    assert.deepEqual({ proposals: row.proposals, adopted: row.adopted, rejected: row.rejected, unadjudicated: row.unadjudicated, adjudicated: row.adjudicated }, {
+      proposals: 2, adopted: 0, rejected: 1, unadjudicated: 1, adjudicated: 1,
+    })
+  } finally { ledger.close() }
+})
+
+test('G1 screener journal ingest failure never throws into its caller', () => {
+  const dir = nextDir()
+  const journalPath = join(dir, 'journal.jsonl')
+  writeFileSync(journalPath, `${JSON.stringify({
+    at: '2024-01-01T00:00:00.000Z',
+    screener_proposal: { round: 1, proposal_id: 'g1', axis: 'scope', model: 'model-g', outcome: 'adopted' },
+  })}\n`)
+  const ledger = { recordScreenerProposal: () => { throw new Error('injected failure') } }
+  let result
+  assert.doesNotThrow(() => { result = ingestJournal(journalPath, ledger, { adw_id: 'screener-g1' }) })
+  assert.deepEqual(result, {
+    applied: 0, skipped: 0, ignored: 0, failed: 1, complete: false,
+    first_failure: { line: 1, reason: 'Error' },
+  })
+})
+
+test('H1 screener adoption recipe names command and row unit', () => {
+  const docs = readFileSync(join(ROOT, 'docs', 'ledger-queries.md'), 'utf8')
+  const question = "| What fraction of each screener model's proposals did reviewers adopt? |"
+  const rows = docs.split('\n').filter((line) => line.startsWith(question))
+  assert.equal(rows.length, 1)
+  assert.match(rows[0], /node scripts\/factory\/ledger\.mjs screener-adoptions \[--since <iso>\] \[--until <iso>\]/)
+  assert.match(rows[0], /each row is one screener model/)
+  assert.match(rows[0], /numerator is adopted/)
+  assert.match(rows[0], /denominator is adjudicated \(`adopted \+ rejected`\)/)
+  assert.match(rows[0], /Unadjudicated proposals are counted separately and excluded/)
 })

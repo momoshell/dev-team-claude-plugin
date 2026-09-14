@@ -389,6 +389,7 @@ const PLANNER_SYMBOLS_METRICS = Object.freeze([
 // share over a handful of reviews is not a policy input, and the readout says
 // so rather than leaving the reader to notice the denominator.
 export const CELL_RATE_FLOOR = 12
+export const SCREENER_PROPOSAL_OUTCOMES = Object.freeze(['adopted', 'rejected', 'unadjudicated'])
 export const TURN_TRANSPORTS = Object.freeze(['headless-json', 'headless-rpc', 'pane'])
 export const CELL_PRICE_UNITS = 'USD per 1,000,000 tokens: input and output at cost_in_per_mtok and cost_out_per_mtok, cache reads at cost_cache_read_per_mtok and cache writes at cost_cache_write_per_mtok, all four ratified per model in the same catalog — a model missing either cache rate leaves the whole row unpriced, never partly priced, and a token class even one member session never measured does the same; billed_cache_write_tokens collapses the 1h and 5m write TTLs into one column, so pricing every write at the ratified 1h rate is an explicit lossy convention (#527)'
 export const ADVISOR_AB_VERDICTS = Object.freeze(['overlap', 'no-overlap', 'skipped'])
@@ -1412,6 +1413,22 @@ export const TABLES = Object.freeze({
     unique: [['adw_id']],
     indexes: [],
   },
+  screener_proposals: {
+    columns: [
+      { name: 'adw_id', decl: 'TEXT' },
+      { name: 'round', decl: 'INTEGER' },
+      { name: 'proposal_id', decl: 'TEXT' },
+      { name: 'axis', decl: 'TEXT' },
+      { name: 'model', decl: 'TEXT' },
+      { name: 'outcome', decl: 'TEXT' },
+      { name: 'finding_id', decl: 'TEXT' },
+      { name: 'reason', decl: 'TEXT' },
+      { name: 'at_ms', decl: 'INTEGER' },
+      { name: 'created_at', decl: 'TEXT' },
+    ],
+    unique: [['adw_id', 'round', 'proposal_id', 'axis', 'model']],
+    indexes: [],
+  },
 })
 
 // The closed set of public writer method names — also the closed set of
@@ -1429,6 +1446,7 @@ export const JOURNAL_FACT_KEYS = Object.freeze({
   mutation_anchor_bind: 'recordMutationAnchorBind',
   mutation_anchor_absent: 'recordMutationAnchorAbsence',
   narration: 'recordNarrationMeasurement',
+  screener_proposal: 'recordScreenerProposal',
 })
 
 // A crew journal row whose `event` is this value is that fact.
@@ -1444,7 +1462,7 @@ export const JOURNAL_FACT_EVENTS = Object.freeze({
 export const WRITERS = Object.freeze([
   'startSession', 'endSession', 'recordEscalationProposal', 'startPhase', 'endPhase', 'recordEvent',
   'recordEnvelope', 'recordSessionRequest', 'recordRunConfiguration', 'recordRunSeat', 'recordRunObservation', 'recordGateResult', 'recordGateDiscrimination',
-  'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'recordCiCycle', 'recordCiDispatch', 'recordEvalCell', 'recordIntakeSweep', 'recordIntakeRefusal', 'recordIntakeBrake', 'recordIntakeDispatch', 'recordSeatTeardown', 'recordSeatReclaim', 'recordProviderFailure', 'recordPlanScope', 'recordSeatReask', 'recordAcceptReask', 'recordRpcExitContext', 'recordSeatTurnCensus', 'recordPlanAdoption', 'recordExternalFence', 'recordMutationAnchorBind', 'recordMutationAnchorAbsence', 'recordPhaseSlotWait', 'recordExperimentArm', 'recordNarrationMeasurement', 'startProcess', 'endProcess', 'heartbeat',
+  'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'recordCiCycle', 'recordCiDispatch', 'recordEvalCell', 'recordIntakeSweep', 'recordIntakeRefusal', 'recordIntakeBrake', 'recordIntakeDispatch', 'recordSeatTeardown', 'recordSeatReclaim', 'recordProviderFailure', 'recordPlanScope', 'recordSeatReask', 'recordAcceptReask', 'recordRpcExitContext', 'recordSeatTurnCensus', 'recordPlanAdoption', 'recordExternalFence', 'recordMutationAnchorBind', 'recordMutationAnchorAbsence', 'recordPhaseSlotWait', 'recordExperimentArm', 'recordNarrationMeasurement', 'recordScreenerProposal', 'startProcess', 'endProcess', 'heartbeat',
   'startAgentSession', 'endAgentSession', 'recordSourceError', 'linkRun',
 ])
 
@@ -1494,6 +1512,7 @@ export const WRITER_MIRROR_TABLES = Object.freeze({
   recordPhaseSlotWait: 'phase_slot_waits',
   recordExperimentArm: 'experiment_arms',
   recordNarrationMeasurement: 'narration_measurements',
+  recordScreenerProposal: 'screener_proposals',
 })
 
 // Writers whose mirror is an UPDATE of a row another writer created: they add
@@ -3606,6 +3625,43 @@ export function openLedger({
     return args
   }
 
+  function recordScreenerProposal(input = {}) {
+    requireFields(input, ['adw_id', 'round', 'proposal_id', 'axis', 'model', 'outcome'], 'recordScreenerProposal')
+    const round = typeof input.round === 'number' ? input.round : Number(input.round)
+    if (!Number.isSafeInteger(round) || round < 1) {
+      refuse("recordScreenerProposal: field 'round' must be a positive integer")
+    }
+    normaliseShortName(input.proposal_id, 'recordScreenerProposal', 'proposal_id')
+    normaliseShortName(input.axis, 'recordScreenerProposal', 'axis')
+    normaliseShortName(input.model, 'recordScreenerProposal', 'model')
+    requireEnum(input.outcome, SCREENER_PROPOSAL_OUTCOMES, 'recordScreenerProposal', 'outcome')
+    const args = redact({
+      adw_id: input.adw_id,
+      round,
+      proposal_id: normaliseShortName(input.proposal_id, 'recordScreenerProposal', 'proposal_id'),
+      axis: normaliseShortName(input.axis, 'recordScreenerProposal', 'axis'),
+      model: input.model, outcome: input.outcome,
+      finding_id: textOrNull(input.finding_id, 120),
+      reason: textOrNull(input.reason, 500),
+      at_ms: epochMsOrNull(input.at_ms),
+      created_at: isoMs(input.created_at ?? now()),
+    }, stats)
+    if (typeof args.adw_id !== 'string' || args.adw_id.trim() === ''
+      || typeof args.proposal_id !== 'string' || args.proposal_id.trim() === ''
+      || typeof args.axis !== 'string' || args.axis.trim() === ''
+      || typeof args.model !== 'string' || args.model.trim() === '') {
+      refuse('recordScreenerProposal: required proposal fields were redacted')
+    }
+    appendJsonl('recordScreenerProposal', args)
+    mirror((conn) => {
+      const cols = tableColumnNames('screener_proposals')
+      const sqlCols = cols.map(quoteSqlIdentifier)
+      conn.prepare(`INSERT OR IGNORE INTO screener_proposals (${sqlCols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
+        .run(...cols.map((c) => toBindable(args[c])))
+    })
+    return args
+  }
+
   function recordExperimentArm(input = {}) {
     const role = normaliseShortName(input.role, 'recordExperimentArm', 'role')
     const experiment = normaliseShortName(input.experiment, 'recordExperimentArm', 'experiment')
@@ -4861,6 +4917,28 @@ export function openLedger({
     `, [since, since, until, until])
   }
 
+  function screenerAdoptions({ since = null, until = null } = {}) {
+    const rows = queryRows(`
+      SELECT model,
+        COUNT(*) AS proposals,
+        SUM(CASE WHEN outcome = 'adopted' THEN 1 ELSE 0 END) AS adopted,
+        SUM(CASE WHEN outcome = 'rejected' THEN 1 ELSE 0 END) AS rejected,
+        SUM(CASE WHEN outcome = 'unadjudicated' THEN 1 ELSE 0 END) AS unadjudicated
+      FROM screener_proposals
+      WHERE (? IS NULL OR created_at >= ?) AND (? IS NULL OR created_at < ?)
+      GROUP BY model
+      ORDER BY model
+    `, [since, since, until, until])
+    return rows.map((row) => {
+      const proposals = Number(row.proposals)
+      const adopted = Number(row.adopted)
+      const rejected = Number(row.rejected)
+      const unadjudicated = Number(row.unadjudicated)
+      const adjudicated = adopted + rejected
+      return { model: row.model, proposals, adopted, rejected, unadjudicated, adjudicated, ...turnRateCell(adopted, adjudicated) }
+    })
+  }
+
   function evalCells({ bench } = {}) {
     return queryRows(`
       SELECT * FROM eval_cells WHERE bench = ? ORDER BY created_at, id
@@ -5954,10 +6032,10 @@ export function openLedger({
     get degraded() { return degraded },
     startSession, endSession, recordEscalationProposal, recordSessionRequest, recordRunConfiguration, recordRunSeat, recordRunObservation, startPhase, endPhase, recordEvent, recordEnvelope,
     escalationProposalFor,
-    recordGateResult, recordGateDiscrimination, recordMutationAnchorBind, recordMutationAnchorAbsence, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordEvalCell, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown, recordSeatReclaim, recordProviderFailure, recordPlanScope, recordSeatReask, recordAcceptReask, recordRpcExitContext, recordSeatTurnCensus, recordPlanAdoption, recordExternalFence, recordPhaseSlotWait, recordExperimentArm, recordNarrationMeasurement,
+    recordGateResult, recordGateDiscrimination, recordMutationAnchorBind, recordMutationAnchorAbsence, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordEvalCell, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown, recordSeatReclaim, recordProviderFailure, recordPlanScope, recordSeatReask, recordAcceptReask, recordRpcExitContext, recordSeatTurnCensus, recordPlanAdoption, recordExternalFence, recordPhaseSlotWait, recordExperimentArm, recordNarrationMeasurement, recordScreenerProposal,
     startProcess, endProcess, heartbeat, startAgentSession, endAgentSession,
     recordSourceError, linkRun,
-    listSessions, listEvents, getSession, phantomSessions, dumpTable, tableNames, columnNames, sessionsFiltered, runsStartedWithin, phasesFor, runConfigurationsFor, runObservationsFor, runSeatsFor, agentEventsFor, agentSessionsFor, gateDiscriminationsFor, gateResultsFor, reviewOutcomesFor, acceptDecisionsFor, supportsJson1, eventsPage, maxEventId, cellFailureRowsFor, unattributableCellFailures, seatTeardownRowsFor, intakePicks, intakeSweepTotals, intakeCandidateRefusals, intakeCandidatePicks, agentSessionTokenTotals, gateReviewGap, cellFailures, cellReviews, evalCells, cellUsage, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, escalations, endedRuns, escalationWindow, seatReclaims, journalFacts, plannerSymbolsHoldout, turnEconomy, turnBreakdown, eligibleTasks, runSet, configurationReadout, transportsFor, taskReadout, jsonlDrift,
+    listSessions, listEvents, getSession, phantomSessions, dumpTable, tableNames, columnNames, sessionsFiltered, runsStartedWithin, phasesFor, runConfigurationsFor, runObservationsFor, runSeatsFor, agentEventsFor, agentSessionsFor, gateDiscriminationsFor, gateResultsFor, reviewOutcomesFor, acceptDecisionsFor, supportsJson1, eventsPage, maxEventId, cellFailureRowsFor, unattributableCellFailures, seatTeardownRowsFor, intakePicks, intakeSweepTotals, intakeCandidateRefusals, intakeCandidatePicks, agentSessionTokenTotals, gateReviewGap, cellFailures, cellReviews, screenerAdoptions, evalCells, cellUsage, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, escalations, endedRuns, escalationWindow, seatReclaims, journalFacts, plannerSymbolsHoldout, turnEconomy, turnBreakdown, eligibleTasks, runSet, configurationReadout, transportsFor, taskReadout, jsonlDrift,
     stats: statsFn,
     captureMirrorErrors,
     readConnection,
@@ -6069,6 +6147,21 @@ function journalFactArgs(writer, row, adwId) {
       duration_ms: narration.duration_ms ?? null,
       outcome: narration.outcome,
       reason: narration.reason ?? null,
+      ...(createdAt === undefined ? {} : { created_at: createdAt }),
+    }
+  }
+  if (writer === JOURNAL_FACT_KEYS.screener_proposal) {
+    const proposal = value('screener_proposal')
+    return {
+      adw_id: rowAdwId,
+      round: proposal.round,
+      proposal_id: proposal.proposal_id,
+      axis: proposal.axis,
+      model: proposal.model,
+      outcome: proposal.outcome,
+      finding_id: proposal.finding_id ?? null,
+      reason: proposal.reason ?? null,
+      at_ms: atMs,
       ...(createdAt === undefined ? {} : { created_at: createdAt }),
     }
   }
@@ -6256,6 +6349,15 @@ function journalFactArgs(writer, row, adwId) {
   return {}
 }
 
+function applyJournalFact(ledger, writer, args) {
+  try {
+    ledger[writer](args)
+    return null
+  } catch (err) {
+    return err
+  }
+}
+
 const INGEST_ABSENT = Object.freeze({
   applied: 0, skipped: 0, ignored: 0, failed: 0, complete: true, first_failure: null,
 })
@@ -6391,22 +6493,38 @@ export function ingestJournal(journalPath, ledger, { adw_id = null, since = null
         continue
       }
       for (const role of source.roles) {
+        let args
         try {
-          ledger.recordRunSeat(bootSeatArgs(source, role, adw_id))
-          applied += 1
+          args = bootSeatArgs(source, role, adw_id)
         } catch (err) {
           failed += 1
           firstFailure ??= { line: lineNo, reason: ingestFailureReason(err) }
+          continue
+        }
+        const error = applyJournalFact(ledger, 'recordRunSeat', args)
+        if (error === null) {
+          applied += 1
+        } else {
+          failed += 1
+          firstFailure ??= { line: lineNo, reason: ingestFailureReason(error) }
         }
       }
       continue
     }
+    let args
     try {
-      ledger[writer](journalFactArgs(writer, source, adw_id))
-      applied += 1
+      args = journalFactArgs(writer, source, adw_id)
     } catch (err) {
       failed += 1
       if (firstFailure === null) firstFailure = { line: lineNo, reason: ingestFailureReason(err) }
+      continue
+    }
+    const error = applyJournalFact(ledger, writer, args)
+    if (error === null) {
+      applied += 1
+    } else {
+      failed += 1
+      if (firstFailure === null) firstFailure = { line: lineNo, reason: ingestFailureReason(error) }
     }
   }
   return { applied, skipped, ignored, failed, complete: failed === 0 && skipped === 0, first_failure: firstFailure }
@@ -6697,6 +6815,7 @@ const VERB_FLAGS = Object.freeze({
   'ci-cycles': new Set(['since', 'until']),
   'intake-sweeps': new Set(['since', 'until']),
   'journal-facts': new Set(['since', 'until']),
+  'screener-adoptions': new Set(['since', 'until']),
   'planner-symbols-holdout': new Set(['since', 'until']),
   turns: new Set(['since', 'until', 'adw-id', 'crew-root']),
   task: new Set([]),
@@ -7221,7 +7340,7 @@ export function main(argv) {
   try {
     const { verb, positional, flags } = parseArgs(argv)
     if (!verb) {
-      refuse('a verb is required: sessions | phases | tail | procs | gate-review-gap | eligible-tasks | phantom-sessions | run-set --since <iso> [--until <iso>] | configurations [--since <iso>] [--until <iso>] | cell-failures [--since <iso>] [--until <iso>] | cells [--since <iso>] [--until <iso>] [--prices <path>] | evals --bench <sha> [--prices <path>] | modifier-attempts [--since <iso>] [--until <iso>] | seat-teardowns [--since <iso>] [--until <iso>] | escalations --since <iso> [--until <iso>] | ci-cycles [--since <iso>] [--until <iso>] | intake-sweeps [--since <iso>] [--until <iso>] | journal-facts [--since <iso>] [--until <iso>] | turns [--since <iso>] [--until <iso>] | task | request <adw_id> --from-brief <path> | advisor-ab --run-dir <dir> --run-started-at <iso|ms> --adjudications <path> <dispatch-id>… | doctor | kill')
+      refuse('a verb is required: sessions | phases | tail | procs | gate-review-gap | eligible-tasks | phantom-sessions | run-set --since <iso> [--until <iso>] | configurations [--since <iso>] [--until <iso>] | cell-failures [--since <iso>] [--until <iso>] | cells [--since <iso>] [--until <iso>] [--prices <path>] | evals --bench <sha> [--prices <path>] | modifier-attempts [--since <iso>] [--until <iso>] | seat-teardowns [--since <iso>] [--until <iso>] | escalations --since <iso> [--until <iso>] | ci-cycles [--since <iso>] [--until <iso>] | intake-sweeps [--since <iso>] [--until <iso>] | journal-facts [--since <iso>] [--until <iso>] | screener-adoptions [--since <iso>] [--until <iso>] | turns [--since <iso>] [--until <iso>] | task | request <adw_id> --from-brief <path> | advisor-ab --run-dir <dir> --run-started-at <iso|ms> --adjudications <path> <dispatch-id>… | doctor | kill')
     }
 
     // TEST SEAM: DEVTEAM_LEDGER_FAKE_NODE_VERSION substitutes for
@@ -7943,6 +8062,37 @@ export function main(argv) {
         since,
         until,
         ...facts,
+      })}\n`)
+      return 0
+    }
+
+    if (verb === 'screener-adoptions') {
+      if (positional.length > 0) refuse('screener-adoptions: takes no positional arguments')
+      const hasSince = Object.prototype.hasOwnProperty.call(flags, 'since')
+      const hasUntil = Object.prototype.hasOwnProperty.call(flags, 'until')
+      const since = hasSince ? windowBound(flags.since, 'since', 'screener-adoptions') : null
+      const until = hasUntil ? windowBound(flags.until, 'until', 'screener-adoptions') : null
+      if (until != null && since != null && until <= since) refuse('screener-adoptions: --until must be later than --since')
+      const rows = ledger.screenerAdoptions({ since, until })
+      if (ledger.stats().degraded) refuse('screener-adoptions: the ledger mirror is degraded — this window is unanswerable, not empty')
+      const measured = rows.length > 0
+      stdout.write(`${JSON.stringify({
+        schema: 1,
+        question: "What fraction of each screener model's proposals did reviewers adopt?",
+        definition: {
+          unit: 'one screener model per row',
+          numerator: 'adopted proposals',
+          denominator: 'adjudicated proposals: adopted + rejected',
+          unadjudicated: 'counted separately and excluded from the adoption denominator',
+          absent: 'below-floor adoption cells and empty windows are unmeasured, never zero',
+        },
+        since,
+        until,
+        rate_floor: CELL_RATE_FLOOR,
+        outcomes: SCREENER_PROPOSAL_OUTCOMES,
+        measured,
+        reason: measured ? null : 'unmeasured: no screener proposal rows in this window',
+        rows,
       })}\n`)
       return 0
     }

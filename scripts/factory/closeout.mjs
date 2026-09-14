@@ -13,6 +13,7 @@ import {
   renameSync as fsRenameSync,
   rmSync as fsRmSync,
   statSync as fsStatSync,
+  writeFileSync as fsWriteFileSync,
 } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
@@ -27,7 +28,8 @@ import {
 } from './dispatch-batch.mjs'
 import { journalRowsSinceRunStart, parseSuiteCounts, RUN_START_EVENT } from '../../crew/drive.mjs'
 import { BATCH_DIR_EVENT, batchDirFromBrief, resolveTaskReturn as defaultResolveTaskReturn } from '../../crew/crew.mjs'
-import { defaultDbPath as defaultLedgerDbPath, ingestJournal as defaultIngestJournal, openLedger as defaultOpenLedger } from './ledger.mjs'
+import { PROMPT_SURFACE, protectedHitsIn } from '../../crew/protected-paths.mjs'
+import { CELL_RATE_FLOOR, defaultDbPath as defaultLedgerDbPath, ingestJournal as defaultIngestJournal, openLedger as defaultOpenLedger } from './ledger.mjs'
 import { probeDriverIdentity as defaultProbeDriverIdentity } from './lane-watch.mjs'
 
 export const CLOSEOUT_VERBS = Object.freeze(['merge-check', 'reap', 'recover', 'reconcile'])
@@ -53,6 +55,25 @@ export const REFUSED_PREFIX = 'refused '
 export const MERGED_STATE = 'MERGED'
 export const REFS_PATTERN = /^Refs:?\s+(.*)$/
 export const CLOSES_PATTERN = /^Closes:?\s+(.*)$/
+const PROMPT_MEASURE_NAME = String.raw`(?:first-round pass rate|turns per seat|[a-z0-9][a-z0-9._-]* refusal frequency)`
+const PROMPT_MEASURE_LINE = new RegExp(String.raw`(?:^|\r?\n)Measure: (${PROMPT_MEASURE_NAME})(?:\r?\n|$)`, 'i')
+const PROMPT_UNMEASURED_LINE = new RegExp(String.raw`(?:^|\r?\n)unmeasured — n insufficient; reason: ([^;\n]*[^\s;\n][^;\n]*); re-measure after ([1-9]\d*) seats\.?(?:\r?\n|$)`, 'i')
+
+export function parsePromptMeasureClaim(body) {
+  const text = textOf(body)
+  const unmeasured = PROMPT_UNMEASURED_LINE.exec(text)
+  if (unmeasured === null) return null
+  const measureMatch = PROMPT_MEASURE_LINE.exec(text)
+  const measure = measureMatch === null ? null : measureMatch[1].trim().toLowerCase()
+  const target_n = Number(unmeasured[2])
+  if (!Number.isFinite(target_n) || target_n <= 0) return null
+  return {
+    measure,
+    reason: unmeasured[1].trim(),
+    target_n,
+    closed_reason: measure === null ? 'measure-unnamed' : null,
+  }
+}
 export const REAP_CLOSED_LABEL = 'closed'
 export const REAP_REFERENCED_LABEL = 'referenced (left open)'
 export const ENVELOPE_RE = /^d(\d+)\.([a-z-]+)\.json$/
@@ -134,6 +155,10 @@ function sleepSync(ms) {
   }
 }
 
+function defaultPromptMeasurePath(deps) {
+  try { return join(dirname(deps.defaultDbPath()), 'pending-prompt-measures.json') } catch { return null }
+}
+
 export function normalDeps(deps = {}) {
   const d = {
     existsSync: deps.existsSync || fsExistsSync,
@@ -145,6 +170,7 @@ export function normalDeps(deps = {}) {
     cpSync: deps.cpSync || fsCpSync,
     renameSync: deps.renameSync || fsRenameSync,
     rmSync: deps.rmSync || fsRmSync,
+    writeFileSync: deps.writeFileSync || fsWriteFileSync,
     spawn: deps.spawn || ((options) => spawnSync(options.file, options.args, { cwd: options.cwd, env: options.env, encoding: 'utf8' })),
     newest: deps.newest || newestMtime,
     now: deps.now || (() => Date.now()),
@@ -157,6 +183,7 @@ export function normalDeps(deps = {}) {
     home: deps.home || homedir(),
     log: deps.log || ((line) => process.stdout.write(`${line}\n`)),
   }
+  d.promptMeasurePath = deps.promptMeasurePath || defaultPromptMeasurePath(d)
   return d
 }
 
@@ -558,6 +585,299 @@ function commandOk(result) {
   return Boolean(result && result.status === 0)
 }
 
+const PROMPT_QUEUE_SCHEMA = 1
+
+function promptQueuePath(deps) {
+  try {
+    const value = typeof deps.promptMeasurePath === 'function' ? deps.promptMeasurePath(deps) : deps.promptMeasurePath
+    return typeof value === 'string' && value.trim() ? value : null
+  } catch {
+    return null
+  }
+}
+
+function promptQueueFailure(prefix, error) {
+  const reason = error?.code || error?.message || error?.name || String(error)
+  return `${prefix}: ${reason}`
+}
+
+function readPromptMeasureQueue(deps) {
+  const path = promptQueuePath(deps)
+  if (path === null) return { valid: false, path: null, records: [], reason: 'prompt-measures-path-unavailable' }
+  let raw
+  try {
+    raw = deps.readFileSync(path, 'utf8')
+  } catch (error) {
+    if (error?.code === 'ENOENT') return { valid: true, path, records: [], missing: true, reason: null }
+    return { valid: false, path, records: [], reason: promptQueueFailure('prompt-measures-queue-unreadable', error) }
+  }
+  if (textOf(raw).trim() === '') return { valid: false, path, records: [], reason: 'prompt-measures-queue-malformed: empty state' }
+  let parsed
+  try {
+    parsed = JSON.parse(textOf(raw))
+  } catch (error) {
+    return { valid: false, path, records: [], reason: promptQueueFailure('prompt-measures-queue-malformed', error) }
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || parsed.schema !== PROMPT_QUEUE_SCHEMA || !Array.isArray(parsed.records)) {
+    return { valid: false, path, records: [], reason: 'prompt-measures-queue-invalid: expected schema 1 records array' }
+  }
+  if (parsed.records.some((record) => !record || typeof record !== 'object' || Array.isArray(record))) {
+    return { valid: false, path, records: [], reason: 'prompt-measures-queue-invalid: records must be objects' }
+  }
+  return { valid: true, path, records: parsed.records, missing: false, reason: null }
+}
+
+function writePromptMeasureQueue({ deps, path, records }) {
+  if (typeof path !== 'string' || path.trim() === '') return { ok: false, reason: 'prompt-measures-path-unavailable' }
+  let temporary
+  try {
+    const stamp = String(deps.now())
+    temporary = join(dirname(path), `.${basename(path)}.${process.pid}.${stamp}.tmp`)
+    deps.mkdirSync(dirname(path), { recursive: true })
+    deps.writeFileSync(temporary, `${JSON.stringify({ schema: PROMPT_QUEUE_SCHEMA, records })}\n`, 'utf8')
+    deps.renameSync(temporary, path)
+    return { ok: true, reason: null }
+  } catch (error) {
+    return { ok: false, reason: promptQueueFailure('prompt-measures-queue-write-failed', error) }
+  }
+}
+
+function meaningfulPromptAbsent(value) {
+  if (value === null || value === undefined) return false
+  if (typeof value === 'string') return value.trim() !== ''
+  if (Array.isArray(value)) return value.some((entry) => meaningfulPromptAbsent(entry))
+  if (typeof value === 'object') return Object.values(value).some((entry) => meaningfulPromptAbsent(entry))
+  return true
+}
+
+function promptMetricFailure(reason) {
+  return { value: null, numerator: null, denominator: null, rate_floor: CELL_RATE_FLOOR, reason }
+}
+
+function finiteMetricNumber(value) {
+  return typeof value === 'number' && Number.isFinite(value)
+}
+
+function promptMetricName(value) {
+  return typeof value === 'string' ? value.trim().toLowerCase() : ''
+}
+
+function promptMetricCommand({ measure, mergedAt, direction, root, deps }) {
+  const normalized = promptMetricName(measure)
+  if (normalized !== 'first-round pass rate' && normalized !== 'turns per seat') {
+    return promptMetricFailure(`measure-unsupported: ${measure}`)
+  }
+  if (typeof root !== 'string' || root.trim() === '') return promptMetricFailure('prompt-root-unavailable: root is absent')
+  const verb = normalized === 'first-round pass rate' ? 'cells' : 'turns'
+  let dbPath
+  try { dbPath = deps.defaultDbPath() } catch (error) {
+    return promptMetricFailure(promptQueueFailure('ledger-path-unavailable', error))
+  }
+  if (typeof dbPath !== 'string' || dbPath.trim() === '') return promptMetricFailure('ledger-path-unavailable: default path is absent')
+  const command = {
+    file: 'node',
+    args: [join(root, 'scripts/factory/ledger.mjs'), verb, direction === 'before' ? '--until' : '--since', mergedAt],
+    cwd: root,
+    env: { ...process.env, DEVTEAM_LEDGER_DB: dbPath },
+  }
+  const result = runCommand(command, deps)
+  if (!commandOk(result)) return promptMetricFailure(promptQueueFailure('ledger-read-failed', new Error(childFailure(result))))
+  let payload
+  try {
+    payload = JSON.parse(textOf(result.stdout).trim())
+  } catch (error) {
+    return promptMetricFailure(promptQueueFailure('ledger-read-malformed', error))
+  }
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload) || payload.schema !== 1) {
+    return promptMetricFailure('ledger-read-invalid: expected schema 1 object')
+  }
+  if (payload.degraded === true || meaningfulPromptAbsent(payload.degraded)) return promptMetricFailure('ledger-degraded: readout is degraded')
+  if (meaningfulPromptAbsent(payload.absent)) return promptMetricFailure(`ledger-absent: ${textOf(payload.absent)}`)
+  if (normalized === 'first-round pass rate') {
+    if (!Array.isArray(payload.rows)) return promptMetricFailure('ledger-read-invalid: cells rows must be an array')
+    let numerator = 0
+    let denominator = 0
+    for (const row of payload.rows) {
+      if (!row || typeof row !== 'object' || Array.isArray(row)
+        || !finiteMetricNumber(row.first_round_passes) || !finiteMetricNumber(row.first_round_reviews)) {
+        return promptMetricFailure('ledger-read-invalid: cells row has nonfinite fields')
+      }
+      numerator += row.first_round_passes
+      denominator += row.first_round_reviews
+      if (!finiteMetricNumber(numerator) || !finiteMetricNumber(denominator)) return promptMetricFailure('ledger-read-invalid: cells aggregate is nonfinite')
+    }
+    if (denominator < CELL_RATE_FLOOR) return { value: null, numerator, denominator, rate_floor: CELL_RATE_FLOOR, reason: `under-floor: ${denominator}/${CELL_RATE_FLOOR}` }
+    const value = numerator / denominator
+    if (!finiteMetricNumber(value)) return promptMetricFailure('ledger-read-invalid: cells rate is nonfinite')
+    return { value, numerator, denominator, rate_floor: CELL_RATE_FLOOR, reason: null }
+  }
+  if (!finiteMetricNumber(payload.turns) || !finiteMetricNumber(payload.dispatches_measured)) return promptMetricFailure('ledger-read-invalid: turns fields are nonfinite')
+  const numerator = payload.turns
+  const denominator = payload.dispatches_measured
+  if (denominator < CELL_RATE_FLOOR) return { value: null, numerator, denominator, rate_floor: CELL_RATE_FLOOR, reason: `under-floor: ${denominator}/${CELL_RATE_FLOOR}` }
+  const value = numerator / denominator
+  if (!finiteMetricNumber(value)) return promptMetricFailure('ledger-read-invalid: turns rate is nonfinite')
+  return { value, numerator, denominator, rate_floor: CELL_RATE_FLOOR, reason: null }
+}
+
+function promptMetricReady(metric) {
+  return Boolean(metric
+    && finiteMetricNumber(metric.value)
+    && finiteMetricNumber(metric.denominator)
+    && finiteMetricNumber(metric.rate_floor)
+    && metric.denominator >= metric.rate_floor)
+}
+
+function promptUnderFloorReason(metric, target) {
+  if (!finiteMetricNumber(metric?.denominator)) return null
+  const requested = finiteMetricNumber(Number(target)) ? Number(target) : CELL_RATE_FLOOR
+  const required = Math.max(requested, finiteMetricNumber(metric.rate_floor) ? metric.rate_floor : CELL_RATE_FLOOR)
+  return `under-floor: ${metric.denominator}/${required}`
+}
+
+function promptSettledAt(deps) {
+  try {
+    const raw = deps.now()
+    const value = typeof raw === 'string' ? Date.parse(raw) : Number(raw)
+    if (!Number.isFinite(value)) return null
+    return new Date(value).toISOString()
+  } catch {
+    return null
+  }
+}
+
+function promptMetadata({ lane, pr, deps, root }) {
+  const result = runCommand({
+    file: 'gh',
+    args: ['pr', 'view', lane, '--json', 'files,mergedAt'],
+    cwd: pr?.checkout || root,
+  }, deps)
+  if (!commandOk(result)) return { ok: false, reason: promptQueueFailure('prompt-metadata-unavailable', new Error(childFailure(result))) }
+  let payload
+  try {
+    payload = JSON.parse(textOf(result.stdout).trim())
+  } catch (error) {
+    return { ok: false, reason: promptQueueFailure('prompt-metadata-malformed', error) }
+  }
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload) || !Array.isArray(payload.files)) {
+    return { ok: false, reason: 'prompt-metadata-unavailable: files are absent' }
+  }
+  if (typeof payload.mergedAt !== 'string' || payload.mergedAt.trim() === '') return { ok: false, reason: 'prompt-metadata-unavailable: mergedAt is absent' }
+  if (!Number.isFinite(Date.parse(payload.mergedAt))) return { ok: false, reason: 'prompt-metadata-unavailable: mergedAt is invalid' }
+  const paths = payload.files
+    .map((file) => file && typeof file.path === 'string' ? file.path.trim().replaceAll('\\', '/').replace(/^\.\//, '') : null)
+    .filter((path) => path !== null && path !== '')
+  return { ok: true, merged_at: payload.mergedAt, paths, hits: protectedHitsIn(paths, PROMPT_SURFACE.paths) }
+}
+
+function promptSweepDetail({ records, pending, settled, comments, closed }) {
+  return {
+    queued: 0,
+    settled,
+    comments,
+    pending: records.filter((record) => record.status === 'pending').length,
+    closed,
+    swept: pending.length,
+  }
+}
+
+function promptComment(record, after) {
+  return `Measure: ${record.measure}; before: ${record.before.value} (n=${record.before.denominator}); after: ${after.value} (n=${after.denominator})`
+}
+
+export function reapPromptMeasures({ lane, pr, root, deps } = {}) {
+  const d = normalDeps(deps)
+  const queue = readPromptMeasureQueue(d)
+  if (!queue.valid) return { queued: 0, settled: 0, comments: 0, pending: 0, swept: 0, closed: [queue.reason], reason: queue.reason }
+  const records = queue.records
+  const pending = records.filter((record) => record.status === 'pending')
+  let settled = 0
+  let comments = 0
+  const closed = []
+  for (const record of pending) {
+    let after
+    if (record.measure === null) {
+      after = promptMetricFailure(record.closed_reason || 'measure-unnamed')
+    } else {
+      after = promptMetricCommand({ measure: record.measure, mergedAt: record.merged_at, direction: 'after', root, deps: d })
+    }
+    let nextReason = after.reason
+    if (after.denominator >= record.target_n) {
+      if (promptMetricReady(record.before) && promptMetricReady(after)) {
+        const comment = promptComment(record, after)
+        const previous = { status: record.status, after: record.after, settled_at: record.settled_at, closed_reason: record.closed_reason }
+        record.status = 'settled'
+        record.after = after
+        record.settled_at = promptSettledAt(d)
+        record.closed_reason = null
+        const saved = writePromptMeasureQueue({ deps: d, path: queue.path, records })
+        if (!saved.ok) {
+          record.status = previous.status
+          if (previous.after === undefined) delete record.after
+          else record.after = previous.after
+          if (previous.settled_at === undefined) delete record.settled_at
+          else record.settled_at = previous.settled_at
+          record.closed_reason = saved.reason
+          closed.push(saved.reason)
+          continue
+        }
+        settled += 1
+        const commentResult = runCommand({ file: 'gh', args: ['pr', 'comment', String(record.pr_number), '--body', comment], cwd: root }, d)
+        if (commandOk(commentResult)) comments += 1
+        else {
+          const failure = promptQueueFailure('prompt-comment-failed', new Error(childFailure(commentResult)))
+          record.closed_reason = failure
+          const noted = writePromptMeasureQueue({ deps: d, path: queue.path, records })
+          closed.push(failure)
+          if (!noted.ok) closed.push(noted.reason)
+        }
+        continue
+      }
+      nextReason = after.reason || (record.before?.value === null ? 'before-unmeasured' : promptUnderFloorReason(after, record.target_n))
+    }
+    nextReason = nextReason || promptUnderFloorReason(after, record.target_n) || 'prompt-measure-unmeasured'
+    if (nextReason) closed.push(nextReason)
+    if (record.closed_reason !== nextReason) {
+      record.closed_reason = nextReason
+      const saved = writePromptMeasureQueue({ deps: d, path: queue.path, records })
+      if (!saved.ok) closed.push(saved.reason)
+    }
+  }
+
+  const swept = promptSweepDetail({ records, pending, settled, comments, closed })
+  const claim = parsePromptMeasureClaim(pr?.body)
+  if (claim === null) return { ...swept, reason: 'no-unmeasured-claim' }
+  const metadata = promptMetadata({ lane, pr, deps: d, root })
+  if (!metadata.ok) return { ...swept, reason: metadata.reason }
+  const promptChanged = metadata.hits.length > 0
+  if (!promptChanged) return { queued: 0, reason: 'not-prompt-change' }
+  const prNumber = Number(pr?.number)
+  if (!Number.isInteger(prNumber) || prNumber <= 0) return { ...swept, reason: 'prompt-metadata-unavailable: PR number is absent' }
+  if (records.some((record) => Number(record.pr_number) === prNumber)) return { ...swept, reason: 'already-queued' }
+  const before = claim.measure === null
+    ? promptMetricFailure(claim.closed_reason)
+    : promptMetricCommand({ measure: claim.measure, mergedAt: metadata.merged_at, direction: 'before', root, deps: d })
+  const record = {
+    pr_number: prNumber,
+    lane,
+    measure: claim.measure,
+    reason: claim.reason,
+    target_n: claim.target_n,
+    merged_at: metadata.merged_at,
+    status: 'pending',
+    before,
+    closed_reason: claim.closed_reason || before.reason || null,
+  }
+  records.push(record)
+  const saved = writePromptMeasureQueue({ deps: d, path: queue.path, records })
+  if (!saved.ok) {
+    records.pop()
+    return { ...swept, reason: saved.reason }
+  }
+  if (record.closed_reason) swept.closed.push(record.closed_reason)
+  return { ...swept, queued: 1, pending: records.filter((candidate) => candidate.status === 'pending').length, reason: 'queued', prompt_changed: true, protected_hits: metadata.hits }
+}
+
 function prView({ lane, checkout, deps, step = 'pr-open' }) {
   const d = normalDeps(deps)
   const result = runCommand({
@@ -759,7 +1079,9 @@ export function reap({ lanes, checkout, deps } = {}) {
         for (const issue of closing) closeIssue({ issue, lane, pr, deps: d })
         laneReport.closed = [...closing]
         laneReport.referenced = [...trailers.referenced]
-        return { closed: laneReport.closed, referenced: laneReport.referenced, summary: reapIssueSummary(laneReport) }
+        const promptMeasures = reapPromptMeasures({ lane, pr, root, deps: d })
+        laneReport.prompt_measures = promptMeasures
+        return { closed: laneReport.closed, referenced: laneReport.referenced, summary: reapIssueSummary(laneReport), prompt_measures: promptMeasures }
       },
       worktree: () => gitStep({ args: ['worktree', 'remove', laneDir], cwd: root, reason: CLOSEOUT_REFUSALS.WORKTREE_FAILED, step: 'worktree', deps: d, message: `worktree removal failed for ${lane}` }),
       branch: () => gitStep({ args: ['branch', '-d', lane], cwd: root, reason: CLOSEOUT_REFUSALS.BRANCH_FAILED, step: 'branch', deps: d, message: `branch deletion failed for ${lane}` }),

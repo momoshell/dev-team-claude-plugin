@@ -178,7 +178,7 @@ const VACUITY_EXEMPT = new Map([
   ['crew/pi/extensions/lab.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['crew/pi/extensions/lab.test.mjs'], 'flagged', 'audited 2026-09-09: the extension entrypoint presence site is at crew/pi/extensions/lab.test.mjs:206; registration behavior is pinned by the test below it. Outside this lane\'s fence, so flagged rather than converted')],
   ['crew/pi/extensions/subagent.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['crew/pi/extensions/subagent.test.mjs'], 'flagged', 'audited 2026-09-09: the extension entrypoint presence site is at crew/pi/extensions/subagent.test.mjs:191; registration behavior is pinned by the test below it. Outside this lane\'s fence, so flagged rather than converted')],
   ['crew/reclaim-descendants.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['crew/reclaim-descendants.test.mjs'], 'by-design', 'audited 2026-09-09: the injected sleep precondition is at crew/reclaim-descendants.test.mjs:820 and is called on the next line, which makes the record assertion below it meaningful; the source alias exclusion at crew/reclaim-descendants.test.mjs:832 proves the second direct settleSeatTeardown call is not hidden behind a resume alias.')],
-  ['crew/roster-refresh.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['crew/roster-refresh.test.mjs'], 'by-design', "audited 2026-09-09: the 2026-08-25 positive 'lead' in roster.tiers.mechanical site is absent at HEAD; the only nearby membership assertion is the detector-excluded negative assert.equal('anthropic/embed-1' in normalized, false) at crew/roster-refresh.test.mjs:212", { tombstone: true })],
+  ['crew/roster-refresh.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['crew/roster-refresh.test.mjs'], 'by-design', "audited 2026-09-09: the 2026-08-25 positive 'lead' in roster.tiers.mechanical site is absent at HEAD; the only nearby membership assertion is the detector-excluded negative assert.equal('anthropic/embed-1' in normalized, false) at crew/roster-refresh.test.mjs:225", { tombstone: true })],
   // NOT frozenVacuitySites: its warranty is a COUNT, so a file-level exemption would
   // also cover two genuinely vacuous sites that replaced these. This warranty is bound
   // to the exact paired assertions that make the two sites honest — swap either pair
@@ -207,7 +207,7 @@ const VACUITY_SOURCE_SHA256 = Object.freeze({
   'crew/pi/extensions/lab.test.mjs': 'aa1c9a34bd88efeb3679b738a75d933e44a4f42df16d34e7366505cb1abee553',
   'crew/pi/extensions/subagent.test.mjs': 'fa91597e544b54eac9dc22530a1c07784ff3c85aaa23b8122916c103fa84f313',
   'crew/reclaim-descendants.test.mjs': '5b5c49106a9d282011747f0c0fb312fe79b053f7be68c6fa55f5b83d85a386d9',
-  'crew/roster-refresh.test.mjs': '90f49f42cabff9cded5f02b712653524bf900f56c4cbda4d2a9821d984b428c9',
+  'crew/roster-refresh.test.mjs': '41950e050119cb5cc8d736438bfcbdb9afe9032c0f5cf6a47770fb7b8415de4a',
   'test/factory-emit.test.mjs': '35854f1777a7388da535aba12e8de8d571f7bd8d63d8afd36fb6ab68447d7c5f',
   'test/factory-make-brief.test.mjs': 'ce896b411ca3ceeae65e98b10d514ea46e27da164be3954fad3492470cfc45db',
   'test/fixtures.test.mjs': '20a7b9c408ca687f8378c3c70ced32c7943179fb520f6326384426f3bb698c55',
@@ -336,7 +336,7 @@ test('E1', () => {
   const roster = VACUITY_EXEMPT.get('crew/roster-refresh.test.mjs')
   assert.match(roster.rationale, /^audited 2026-09-09:/)
   assert.match(roster.rationale, /2026-08-25 positive 'lead' in roster\.tiers\.mechanical site is absent at HEAD/)
-  assert.match(roster.rationale, /only nearby membership assertion is the detector-excluded negative assert\.equal\('anthropic\/embed-1' in normalized, false\) at crew\/roster-refresh\.test\.mjs:212/)
+  assert.match(roster.rationale, /only nearby membership assertion is the detector-excluded negative assert\.equal\('anthropic\/embed-1' in normalized, false\) at crew\/roster-refresh\.test\.mjs:225/)
   assert.doesNotMatch(roster.rationale, /:146/)
   for (const [file, exemption] of VACUITY_EXEMPT) {
     if (!exemption.rationale) continue

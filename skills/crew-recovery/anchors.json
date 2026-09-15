@@ -7,5 +7,5 @@
   "crew/crew.mjs:3083": "escalation -> NEVER teardown",
   "crew/crew.mjs:3740": "seats.proven !== seats.seats || seats.recorded !== seats.seats",
   "crew/crew.mjs:3627": "const seats = rows.length",
-  "crew/drive.mjs:7817": "const completeCheckProof = (label, options = {}) => {"
+  "crew/drive.mjs:7876": "const completeCheckProof = (label, options = {}) => {"
 }

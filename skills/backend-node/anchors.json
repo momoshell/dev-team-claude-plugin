@@ -17,7 +17,6 @@
   "crew/pi/extensions/subagent.test.mjs:474": "usage is a complete pi Usage or absent",
   "crew/pi/extensions/subagent.ts:653": "Complete or absent — never partial",
   "crew/drive.mjs:524": "export const DECISIONS = Object.freeze",
-  "crew/drive-review.test.mjs:1562": "assert.deepEqual([...DECISIONS], ['bounce', 'bounce-builder', 'bounce-reviewer', 'accept', 'escalate'])",
   "scripts/factory/ledger.mjs:6846": "function refuseUnknownFlags(verb, flags)",
   "test/factory-emit.test.mjs:1723": "CLI: emit-cli-unknown-flag-refusal",
   "scripts/factory/ledger.mjs:6814": "const VERB_FLAGS = Object.freeze",
@@ -28,9 +27,7 @@
   "scripts/factory/ledger.mjs:8256": "unknown verb: ${verb}",
   "scripts/factory/ledger.mjs:455": "export const CI_DECISIONS = Object.freeze",
   "scripts/factory/ledger.mjs:3815": "requireEnum(input.decision, CI_DECISIONS",
-  "crew/drive-review.test.mjs:1560": "DECISIONS and LIMITS are the frozen public contract",
   "crew/shape-validator.mjs:233": "ENVELOPE_FIELD_KINDS.includes(field?.kind)",
-  "crew/drive-review.test.mjs:1561": "Object.isFrozen(DECISIONS) && Object.isFrozen(LIMITS)",
   "crew/shape-validator.mjs:222": "if (!shape || typeof shape !== 'object')",
   "test/factory-ledger.test.mjs:4166": "unknown flag --untill",
   "crew/daemon.test.mjs:263": "assert.doesNotMatch(variantsCode",
@@ -41,5 +38,8 @@
   "crew/daemon.test.mjs:261": "assert.doesNotMatch(policyCode",
   "crew/daemon.test.mjs:259": "assert.doesNotMatch(slugCode",
   "docs/conventions.md:126": "A frozen exported enum's drift guard needs",
-  "docs/conventions.md:49": "first TypeScript file on main, and every file under"
+  "docs/conventions.md:49": "first TypeScript file on main, and every file under",
+  "crew/drive-review.test.mjs:1572": "assert.deepEqual([...DECISIONS], ['bounce', 'bounce-builder', 'bounce-reviewer', 'accept', 'escalate'])",
+  "crew/drive-review.test.mjs:1570": "DECISIONS and LIMITS are the frozen public contract",
+  "crew/drive-review.test.mjs:1571": "Object.isFrozen(DECISIONS) && Object.isFrozen(LIMITS)"
 }

@@ -15,6 +15,7 @@ export const CENSUS_EXHIBIT_REGISTER = Object.freeze([
   Object.freeze({ file: 'test/factory-dispatch-batch.test.mjs', kind: 'near-miss', reason: 'controlled fixture inventory' }),
   Object.freeze({ file: 'test/factory-dispatch-batch-fences.test.mjs', kind: 'near-miss', reason: 'controlled fixture inventory' }),
   Object.freeze({ file: 'crew/drive-publish.test.mjs', kind: 'near-miss', reason: 'controlled fixture inventory' }),
+  Object.freeze({ file: 'test/factory-env.test.mjs', kind: 'near-miss', reason: 'tracked-file import scan, not a count census' }),
 ])
 
 export const CENSUS_MEASUREMENT_REASONS = Object.freeze([

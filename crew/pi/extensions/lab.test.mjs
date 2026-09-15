@@ -83,7 +83,7 @@ function scriptedProgram(requests, result = 'done', { concurrent = false, close 
   return { child, responses }
 }
 
-function scriptedHarness({ requests, result = 'done', concurrent = false, suite = {}, deps = {}, envPatch = {} } = {}) {
+function scriptedHarness({ requests, result = 'done', concurrent = false, suite = {}, deps = {}, envPatch = {}, skill } = {}) {
   const holder = temp('lab-harness-')
   const taskDir = join(holder, 'task')
   mkdirSync(taskDir, { recursive: true })
@@ -128,7 +128,7 @@ function scriptedHarness({ requests, result = 'done', concurrent = false, suite 
     removeDir,
     mkTempDir: deps.mkTempDir || (() => temp('lab-harness-dir-')),
   })
-  return { holder, taskDir, tool, program, calls, syncCalls, removeCalls, suiteChildren }
+  return { holder, taskDir, tool, program, calls, syncCalls, removeCalls, suiteChildren, skill }
 }
 
 // The scratch tree the fake clone materialises. Deliberately its OWN literal and
@@ -187,13 +187,13 @@ function assertOpsAnswered(run, count) {
   })
 }
 
-async function realTool(program, root = ROOT, deps = {}) {
+async function realTool(program, root = ROOT, deps = {}, skill) {
   const holder = temp()
   const taskDir = join(holder, 'task')
   mkdirSync(taskDir, { recursive: true })
   const env = { ...process.env, CREW_ROLE: 'planner', CREW_TASK_DIR: taskDir }
   delete env.NODE_OPTIONS
-  return mod.createLabTool({ env, ...deps }).execute('test-call', { program }, null, null, { cwd: root })
+  return mod.createLabTool({ env, ...deps }).execute('test-call', paramsFor(program, skill), null, null, { cwd: root })
 }
 
 test('the module is zero-dep and erasable', () => {
@@ -218,6 +218,197 @@ test('the extension registers one lab tool and one result handler', () => {
   assert.equal(tools[0].executionMode, 'sequential')
   assert.equal(typeof tools[0].execute, 'function')
   assert.deepEqual(handlers.map(([event]) => event), ['tool_result'])
+})
+
+const QA_GRANT_OWNER = 'skills/qa-test-writing/grants.json'
+const QA_EVIDENCE_OWNER = 'skills/qa-test-writing/anchor-evidence.mjs'
+
+function skillGrant(ops = [], hostAuthority = []) {
+  return { schema_version: 1, lab: { ops, host_authority: hostAuthority } }
+}
+
+function grantFixture(value, prefix = 'lab-grant-') {
+  const dir = temp(prefix)
+  if (value !== undefined) writeFileSync(join(dir, 'grants.json'), typeof value === 'string' ? value : JSON.stringify(value))
+  return dir
+}
+
+function assertGrantInvalid(skillDir, deps) {
+  assert.throws(() => mod.loadSkillLabGrant(skillDir, deps), (error) => {
+    assert.equal(error?.labRefusal, 'skill-grant-invalid')
+    assert.doesNotMatch(String(error?.message || ''), /ENOENT|EPERM|Unexpected token|denied/i)
+    return true
+  })
+}
+
+function paramsFor(program = 'export default 1', skill) {
+  return skill === undefined ? { program } : { program, skill }
+}
+
+test('A1 unknown skill grant operation refuses skill-grant-invalid', () => {
+  const dir = grantFixture(skillGrant(['scratchCheckout', 'not-an-operation']))
+  assertGrantInvalid(dir)
+})
+
+test('A2 duplicate skill grant operation refuses skill-grant-invalid', () => {
+  const dir = grantFixture(skillGrant(['scratchCheckout', 'scratchCheckout']))
+  assertGrantInvalid(dir)
+})
+
+test('A3 invalid skill grant declarations fail closed', () => {
+  const cases = [
+    { label: 'missing' },
+    {
+      label: 'unreadable',
+      reader: (dir) => (path, encoding) => {
+        assert.equal(path, join(dir, 'grants.json'))
+        assert.equal(encoding, 'utf8')
+        throw Object.assign(new Error('permission denied'), { code: 'EPERM' })
+      },
+    },
+    { label: 'invalid JSON', raw: '{' },
+    { label: 'array', raw: '[]' },
+    { label: 'null', raw: 'null' },
+    { label: 'number', raw: '1' },
+    { label: 'string', raw: '"grant"' },
+    { label: 'wrong schema version', value: { ...skillGrant(), schema_version: 2 } },
+    { label: 'root missing key', value: { schema_version: 1 } },
+    { label: 'root extra key', value: { ...skillGrant(), extra: true } },
+    { label: 'lab missing key', value: { schema_version: 1, lab: { ops: [] } } },
+    { label: 'lab extra key', value: { ...skillGrant(), lab: { ...skillGrant().lab, extra: true } } },
+    { label: 'ops wrong type', value: { ...skillGrant(), lab: { ops: 'read', host_authority: [] } } },
+    { label: 'host authority wrong type', value: { ...skillGrant(), lab: { ops: [], host_authority: 'runSuite' } } },
+    { label: 'invalid host authority', value: skillGrant(['scratchCheckout'], ['mutate']) },
+    { label: 'duplicate host authority', value: skillGrant(['scratchCheckout', 'runSuite'], ['runSuite', 'runSuite']) },
+  ]
+  for (const entry of cases) {
+    const dir = grantFixture(entry.raw ?? entry.value, `lab-grant-${entry.label.replace(/[^a-z0-9]+/gi, '-')}-`)
+    assertGrantInvalid(dir, entry.reader?.(dir))
+  }
+
+  for (const [ops, hostAuthority] of [
+    [[], []],
+    [['scratchCheckout'], []],
+    [['scratchCheckout', 'runSuite'], ['runSuite']],
+  ]) {
+    const dir = grantFixture(skillGrant(ops, hostAuthority), 'lab-grant-valid-')
+    const loaded = mod.loadSkillLabGrant(dir)
+    assert.deepEqual(loaded.ops, ops)
+    assert.deepEqual(loaded.host_authority, hostAuthority)
+    assert.equal(Object.isFrozen(loaded), true)
+    assert.equal(Object.isFrozen(loaded.ops), true)
+    assert.equal(Object.isFrozen(loaded.host_authority), true)
+  }
+})
+
+test('B1 ungranted known lab operation refuses op-ungranted', async () => {
+  const run = scriptedHarness({
+    requests: [
+      { id: 1, op: 'scratchCheckout', args: [] },
+      { id: 2, op: 'mutate', args: [SUITE_PATH, 'x', 'y'] },
+    ],
+    deps: { spawnSync: fakeGitSpawnSync() },
+    skill: 'skills/qa-test-writing',
+  })
+  const result = await run.tool.execute('x', paramsFor('export default 1', run.skill), null, null, { cwd: ROOT })
+  assert.equal(result.details.outcome, 'ok')
+  assert.equal(run.program.responses[1].refused, 'op-ungranted')
+  assert.notEqual(run.program.responses[1].refused, 'unknown-op')
+  assert.equal(run.calls.length, 1)
+})
+
+test('C1.ops runSuite without an ops declaration refuses', () => {
+  const dir = grantFixture(skillGrant(['scratchCheckout'], ['runSuite']), 'lab-grant-c1-ops-')
+  assertGrantInvalid(dir)
+})
+
+test('C1.host runSuite without host authority refuses', () => {
+  const dir = grantFixture(skillGrant(['scratchCheckout', 'runSuite'], []), 'lab-grant-c1-host-')
+  assertGrantInvalid(dir)
+})
+
+test('D1 scratchCheckout is required with every other granted operation', () => {
+  for (const [ops, hostAuthority] of [
+    [['read'], []],
+    [['grep'], []],
+    [['mutate'], []],
+    [['runSuite'], ['runSuite']],
+  ]) {
+    const dir = grantFixture(skillGrant(ops, hostAuthority), 'lab-grant-d1-')
+    assertGrantInvalid(dir)
+  }
+})
+
+test('skill identities reject absolute, traversing, and non-canonical paths before child creation', async () => {
+  for (const skill of ['/skills/qa-test-writing', '../skills/qa-test-writing', 'skills/../crew-dispatch', 'skills//qa-test-writing', 'skills/qa-test-writing/', 'skills/./qa-test-writing', 'skills/qa-test-writing/extra', 'skills\\\\qa-test-writing', 'skills/QA-test-writing']) {
+    const calls = []
+    const tool = mod.createLabTool({
+      env: {},
+      isDirectory: () => true,
+      mkTempDir: () => { calls.push('temp'); return temp('lab-invalid-skill-') },
+      spawn: () => { calls.push('spawn'); return fakeChild() },
+    })
+    const result = await tool.execute('x', paramsFor('export default 1', skill), null, null, { cwd: ROOT })
+    assert.equal(result.details.refused, 'skill-grant-invalid')
+    assert.deepEqual(calls, [])
+  }
+})
+
+test('E1 shipped anchor evidence program runs under its grant', async () => {
+  const citationsFile = 'skills/qa-test-writing/references/citations.md'
+  const anchorPinFile = 'skills/qa-test-writing/anchor-pin.mjs'
+  const hitsFor = (file, pattern) => readFileSync(join(ROOT, file), 'utf8').split(/\r?\n/).flatMap((text, index) => text.includes(pattern) ? [{ file, line: index + 1, text }] : [])
+  const expectedAnchors = { pattern: 'anchors.json', hits: hitsFor(citationsFile, 'anchors.json'), truncated: false }
+  const expectedShifted = { pattern: 'shifted', hits: hitsFor(anchorPinFile, 'shifted'), truncated: false }
+  const source = readFileSync(join(ROOT, QA_EVIDENCE_OWNER), 'utf8')
+  const copied = join(temp('lab-anchor-evidence-'), 'anchor-evidence.mjs')
+  writeFileSync(copied, source)
+  const calls = []
+  const previousLab = Object.getOwnPropertyDescriptor(globalThis, 'lab')
+  try {
+    globalThis.lab = Object.freeze({
+      scratchCheckout: async () => {
+        calls.push({ op: 'scratchCheckout' })
+        return { path: '/tmp/qa-anchor-evidence' }
+      },
+      grep: async (pattern, options) => {
+        calls.push({ op: 'grep', pattern, options })
+        if (pattern === 'anchors.json') return expectedAnchors
+        if (pattern === 'shifted') return expectedShifted
+        throw new Error('unexpected grep pattern')
+      },
+    })
+    const imported = await import(new URL(copied, 'file:').href)
+    assert.deepEqual(imported.default, { anchors: expectedAnchors, shifted: expectedShifted })
+    assert.deepEqual(calls.map(({ op }) => op), ['scratchCheckout', 'grep', 'grep'])
+    assert.deepEqual(calls[1], {
+      op: 'grep', pattern: 'anchors.json', options: { fixedString: true, pathspec: [citationsFile] },
+    })
+    assert.deepEqual(calls[2], {
+      op: 'grep', pattern: 'shifted', options: { fixedString: true, pathspec: [anchorPinFile] },
+    })
+    assert.deepEqual(expectedAnchors.hits, hitsFor(citationsFile, 'anchors.json'))
+    assert.deepEqual(expectedShifted.hits, hitsFor(anchorPinFile, 'shifted'))
+    const declared = JSON.parse(readFileSync(join(ROOT, QA_GRANT_OWNER), 'utf8'))
+    assert.deepEqual(declared, skillGrant(['scratchCheckout', 'read', 'grep']))
+
+    const run = scriptedHarness({
+      requests: [
+        { id: 1, op: 'scratchCheckout', args: [] },
+        { id: 2, op: 'read', args: [SUITE_PATH] },
+        { id: 3, op: 'grep', args: ['x', { fixedString: true, pathspec: [SUITE_PATH] }] },
+      ],
+      deps: { spawnSync: fakeGitSpawnSync() },
+      skill: 'skills/qa-test-writing',
+    })
+    const result = await run.tool.execute('x', paramsFor('export default 1', run.skill), null, null, { cwd: ROOT })
+    assert.equal(result.details.outcome, 'ok')
+    assert.deepEqual(result.details.ops, ['scratchCheckout', 'read', 'grep'])
+    assertOpsAnswered(run, 3)
+  } finally {
+    if (previousLab) Object.defineProperty(globalThis, 'lab', previousLab)
+    else delete globalThis.lab
+  }
 })
 
 test('the permissive parameter schema leaves checks to execute', () => {

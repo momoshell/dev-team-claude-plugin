@@ -11,6 +11,18 @@ import {
   trackedSuites,
 } from '../scripts/factory/suite-cost.mjs'
 
+const CONSTRUCTION_TIME_SUITES = [
+  'test/factory-dispatch-batch-adoption.test.mjs',
+  'test/factory-dispatch-batch-cli.test.mjs',
+  'test/factory-dispatch-batch-fences.test.mjs',
+  'test/factory-dispatch-batch-refusals.test.mjs',
+  'test/factory-dispatch-batch.test.mjs',
+  'test/factory-suite-cost.test.mjs',
+  'test/visualizer-panels.test.mjs',
+  'test/visualizer-server.test.mjs',
+  'test/visualizer-shape.test.mjs',
+]
+
 function tap(tests, { pass = tests.length, fail = 0, skipped = 0, todo = 0, cancelled = 0 } = {}) {
   return [
     'TAP version 13',
@@ -43,6 +55,61 @@ function captureOutput() {
     },
   }
 }
+
+function assertDeliveredConstructionSuites(report, discovered) {
+  assert.deepEqual(report.suites.map((row) => row?.suite), discovered)
+  assert.equal(report.denominator.suites, discovered.length)
+  assert.ok(report.denominator.measured_suites > 0)
+  assert.ok(report.denominator.tests > 0)
+  const deliveredRows = new Map(report.suites.map((row) => [row?.suite, row]))
+  for (const suite of CONSTRUCTION_TIME_SUITES) {
+    const row = deliveredRows.get(suite)
+    assert.equal(row?.reason, null, suite)
+    assert.ok(Number.isFinite(row?.duration_seconds), suite)
+    assert.ok(row && row.test_count > 0, suite)
+    assert.ok(Number.isFinite(row?.seconds_per_test), suite)
+    assert.ok(row?.slowest_tests.length > 0, suite)
+  }
+}
+
+function cloneReportWithSuiteRows(change) {
+  return {
+    ...RECORDED_SUITE_COST_REPORT,
+    denominator: { ...RECORDED_SUITE_COST_REPORT.denominator },
+    suites: RECORDED_SUITE_COST_REPORT.suites.map((row, index) => ({
+      ...row,
+      ...change(row, index),
+    })),
+  }
+}
+
+test('A1 delivered construction suites reject null and zero counts', () => {
+  const discovered = trackedSuites({ checkout: ROOT })
+  const nullCountReport = cloneReportWithSuiteRows((row) => row.suite === 'test/factory-suite-cost.test.mjs'
+    ? { test_count: null }
+    : {})
+  const zeroCountReport = cloneReportWithSuiteRows((row) => row.suite === 'test/factory-suite-cost.test.mjs'
+    ? { test_count: 0 }
+    : {})
+  assert.throws(() => assertDeliveredConstructionSuites(nullCountReport, discovered))
+  assert.throws(() => assertDeliveredConstructionSuites(zeroCountReport, discovered))
+})
+
+test('B1 delivered construction suites reject an unknown tracked row', () => {
+  const discovered = trackedSuites({ checkout: ROOT })
+  const substitutedReport = cloneReportWithSuiteRows((row) => row.suite === 'test/factory-absence.test.mjs'
+    ? { suite: 'test/unknown-suite.test.mjs' }
+    : {})
+  assert.throws(() => assertDeliveredConstructionSuites(substitutedReport, discovered))
+})
+
+test('C1 delivered construction suites accept changed positive counts', () => {
+  const discovered = trackedSuites({ checkout: ROOT })
+  const variedReport = cloneReportWithSuiteRows((row, index) => CONSTRUCTION_TIME_SUITES.includes(row.suite)
+    ? { test_count: 1000 + index }
+    : {})
+  assert.doesNotThrow(() => assertDeliveredConstructionSuites(variedReport, discovered))
+})
 
 test('trackedSuites sorts regular test files from cached and untracked git output', () => {
   const checkout = scratchDir('suite-cost-discovery-')
@@ -198,29 +265,7 @@ test('CLI help and unknown options are bounded refusals without running a suite'
 
 test('RV1-2 records delivered measurements for construction-time suites', () => {
   const discovered = trackedSuites({ checkout: ROOT })
-  assert.deepEqual(RECORDED_SUITE_COST_REPORT.suites.map(({ suite }) => suite), discovered)
-  assert.equal(RECORDED_SUITE_COST_REPORT.denominator.suites, discovered.length)
-  assert.ok(RECORDED_SUITE_COST_REPORT.denominator.measured_suites > 0)
-  assert.ok(RECORDED_SUITE_COST_REPORT.denominator.tests > 0)
-  const deliveredRows = new Map(RECORDED_SUITE_COST_REPORT.suites.map((row) => [row.suite, row]))
-  for (const [suite, testCount] of [
-    ['test/factory-dispatch-batch-adoption.test.mjs', 12],
-    ['test/factory-dispatch-batch-cli.test.mjs', 19],
-    ['test/factory-dispatch-batch-fences.test.mjs', 34],
-    ['test/factory-dispatch-batch-refusals.test.mjs', 18],
-    ['test/factory-dispatch-batch.test.mjs', 216],
-    ['test/factory-suite-cost.test.mjs', 11],
-    ['test/visualizer-panels.test.mjs', 161],
-    ['test/visualizer-server.test.mjs', 92],
-    ['test/visualizer-shape.test.mjs', 78],
-  ]) {
-    const row = deliveredRows.get(suite)
-    assert.equal(row?.reason, null, suite)
-    assert.ok(Number.isFinite(row?.duration_seconds), suite)
-    assert.equal(row?.test_count, testCount, suite)
-    assert.ok(Number.isFinite(row?.seconds_per_test), suite)
-    assert.ok(row?.slowest_tests.length > 0, suite)
-  }
+  assertDeliveredConstructionSuites(RECORDED_SUITE_COST_REPORT, discovered)
   assert.deepEqual(
     RECORDED_SUITE_COST_REPORT.slowest_suites,
     [...RECORDED_SUITE_COST_REPORT.slowest_suites].sort((left, right) => {

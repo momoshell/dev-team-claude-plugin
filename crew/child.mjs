@@ -207,6 +207,7 @@ export function runChild(argv, injected = {}) {
   const append = injected.appendJournal || injected.appendFileSync || fsAppendFileSync
   const readdir = injected.readdirSync || injected.readdir || fsReaddirSync
   const exec = injected.execSync || cpExecSync
+  const openRunChild = injected.openRun || openRun
   // Same seam as read/write/exec: the protected-paths probe is the first thing
   // the run does after seatIo, and a test that cannot get inside it cannot prove
   // what a signal does there. Production always uses the imported probe.
@@ -380,7 +381,7 @@ export function runChild(argv, injected = {}) {
     let sidecarDbPath = ledgerSidecarDbPath(crewDir, existsChild, read)
     if (!enforceBudgetLedger || sidecarDbPath == null || sidecarDbPath === dbPath) {
       try {
-        emitter = openRun({
+        emitter = openRunChild({
           stateDir: crewDir,
           repoSlug: slugOrNull(basename(checkout)) || 'repo',
           taskSlug: slugOrNull(ctx.task) || 'task',
@@ -392,6 +393,9 @@ export function runChild(argv, injected = {}) {
         // work away from the ledger the daemon reads.
         sidecarDbPath = emitter?.sidecar?.()?.db_path ?? null
         if (!enforceBudgetLedger || sidecarDbPath == null || sidecarDbPath === dbPath) {
+          try {
+            appendJournalRow(journal, { at: new Date().toISOString(), event: 'run-configuration', run_configuration: spec.run_configuration ?? null }, append)
+          } catch { /* instrumentation is never load-bearing */ }
           emitter.startRun()
           emitter.linkRun(spec.run_id, { crewDir })
         }
@@ -418,9 +422,6 @@ export function runChild(argv, injected = {}) {
       } catch { /* instrumentation is never load-bearing */ }
       try {
         io.log?.({ at: new Date().toISOString(), event: 'validation-lane', lane: validationLane.lane, source: validationLane.source })
-      } catch { /* instrumentation is never load-bearing */ }
-      try {
-        io.log?.({ at: new Date().toISOString(), event: 'run-configuration', run_configuration: spec.run_configuration ?? null })
       } catch { /* instrumentation is never load-bearing */ }
       // The lane fence rides the same seam as the protected paths: crew.mjs's
       // run verb resolves it out of crew.json (crew/crew.mjs:1190) and the

@@ -26,6 +26,7 @@ A fence is each lane's own write surface for its scope gate and brief; it is nev
    an empty `lane_fence`; `checkArrival` refuses any runtime entries. The journal
    carries the unchanged `lane-fence` event with `lanes: 0, files: 0`.
    **`fence=NONE`** in a write lane means a boot-only flag went to the wrong verb.
+9. Run the `document` stage after `commit` and before `publish`.
 
 Parallelise through isolated worktrees, not by requiring file-set disjointness.
 The batch's compiles run in parallel; only a baseline fallback is serialised behind

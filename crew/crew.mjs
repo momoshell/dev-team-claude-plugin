@@ -488,6 +488,138 @@ function loadCrew(paths) {
   return JSON.parse(readFileSync(p, 'utf8'))
 }
 
+export const GRANT_SNAPSHOT_REFUSAL = 'invalid-grant-snapshot'
+const GRANT_SNAPSHOT_KEYS = Object.freeze(['schema_version', 'role', 'agent', 'grants'])
+const RESOLVED_GRANT_KEYS = Object.freeze([
+  'tools', 'extensions', 'vendor_extensions', 'vendor_withheld',
+  'agents', 'skills', 'requires', 'mcp_servers', 'advisor',
+])
+
+function plainRecord(value) {
+  try {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+    const prototype = Object.getPrototypeOf(value)
+    return prototype === Object.prototype || prototype === null
+  } catch {
+    return false
+  }
+}
+
+function exactRecordKeys(value, keys) {
+  try {
+    const actual = Reflect.ownKeys(value)
+    return actual.length === keys.length && keys.every((key) => Object.hasOwn(value, key))
+  } catch {
+    return false
+  }
+}
+
+function nonblankString(value) {
+  return typeof value === 'string' && value.trim() !== ''
+}
+
+function stringList(value) {
+  return Array.isArray(value) && value.every(nonblankString)
+}
+
+function validAgentGrant(value) {
+  return plainRecord(value)
+    && exactRecordKeys(value, ['name', 'def'])
+    && nonblankString(value.name)
+    && nonblankString(value.def)
+}
+
+function validVendorExtensionGrant(value) {
+  return plainRecord(value)
+    && exactRecordKeys(value, ['package', 'tools', 'entries'])
+    && nonblankString(value.package)
+    && stringList(value.tools)
+    && stringList(value.entries)
+}
+
+function validVendorWithheldGrant(value) {
+  return plainRecord(value)
+    && exactRecordKeys(value, ['package', 'tools', 'reason', 'detail'])
+    && nonblankString(value.package)
+    && stringList(value.tools)
+    && nonblankString(value.reason)
+    && nonblankString(value.detail)
+}
+
+function validMcpCommand(value) {
+  return plainRecord(value)
+    && exactRecordKeys(value, ['bin', 'args'])
+    && nonblankString(value.bin)
+    && Array.isArray(value.args)
+    && value.args.every((arg) => typeof arg === 'string')
+}
+
+function validMcpServer(value) {
+  if (!plainRecord(value) || !exactRecordKeys(value, ['name', 'command', 'url']) || !nonblankString(value.name)) return false
+  const command = value.command !== null && validMcpCommand(value.command) && value.url === null
+  const url = value.command === null && nonblankString(value.url)
+  return command || url
+}
+
+function validResolvedGrants(grants) {
+  return plainRecord(grants)
+    && exactRecordKeys(grants, RESOLVED_GRANT_KEYS)
+    && stringList(grants.tools)
+    && stringList(grants.extensions)
+    && Array.isArray(grants.vendor_extensions)
+    && grants.vendor_extensions.every(validVendorExtensionGrant)
+    && Array.isArray(grants.vendor_withheld)
+    && grants.vendor_withheld.every(validVendorWithheldGrant)
+    && Array.isArray(grants.agents)
+    && grants.agents.every(validAgentGrant)
+    && stringList(grants.skills)
+    && stringList(grants.requires)
+    && Array.isArray(grants.mcp_servers)
+    && grants.mcp_servers.every(validMcpServer)
+    && typeof grants.advisor === 'boolean'
+}
+
+function invalidGrantSnapshot(role, detail) {
+  return Object.assign(
+    new Error(`seat ${role} has an invalid persisted grant snapshot: ${detail} [${GRANT_SNAPSHOT_REFUSAL}]`),
+    { reason: GRANT_SNAPSHOT_REFUSAL },
+  )
+}
+
+function projectGrantSnapshot(role, member) {
+  if (!plainRecord(member)) throw invalidGrantSnapshot(role, 'malformed member')
+  if (!Object.hasOwn(member, 'grant_snapshot')) return EMPTY_GRANTS
+  const snapshot = member.grant_snapshot
+  if (!plainRecord(snapshot) || !exactRecordKeys(snapshot, GRANT_SNAPSHOT_KEYS)) {
+    throw invalidGrantSnapshot(role, 'malformed snapshot')
+  }
+  if (snapshot.schema_version !== 1 || !nonblankString(snapshot.role) || !nonblankString(snapshot.agent)) {
+    throw invalidGrantSnapshot(role, 'unsupported snapshot version or identity')
+  }
+  if (snapshot.role !== role || snapshot.agent !== member.agent) throw invalidGrantSnapshot(role, 'role/agent binding mismatch')
+  const { grants } = snapshot
+  if (!validResolvedGrants(grants)) throw invalidGrantSnapshot(role, 'malformed resolved grants')
+  return grants
+}
+
+export function persistedAdapters(crew = {}) {
+  if (!plainRecord(crew)) throw invalidGrantSnapshot('unknown', 'malformed crew')
+  if (!Object.hasOwn(crew, 'roles')) return {}
+  if (!Array.isArray(crew.roles)) throw invalidGrantSnapshot('unknown', 'malformed roles')
+  const members = crew.members
+  if (!plainRecord(members)) {
+    if (crew.roles.length === 0) return {}
+    throw invalidGrantSnapshot('unknown', 'malformed members')
+  }
+  const out = {}
+  for (const role of crew.roles) {
+    if (!nonblankString(role)) throw invalidGrantSnapshot(String(role || 'unknown'), 'malformed role')
+    const member = Object.hasOwn(members, role) ? members[role] : null
+    out[role] = { grants: projectGrantSnapshot(role, member) }
+  }
+  return out
+}
+
 function seatModel(role, args) {
   return args[`model-${role}`] || SEAT_DEFAULTS[role].model
 }
@@ -2294,6 +2426,7 @@ export async function bootCmd(args, deps = {}) {
   const memberFor = (role, pane = null, surface = null) => ({
     pane_id: pane?.id || null, surface_id: surface?.id || null,
     transport: adapters[role].transport, model: seats?.[role]?.model || seatModel(role, args), agent: adapters[role].name,
+    grant_snapshot: { schema_version: 1, role, agent: adapters[role].name, grants: adapters[role].grants },
     tools: effectiveTools(role, adapters[role].grants), deny: SEAT_DEFAULTS[role].deny,
     // Persist optional vendor grant shortfalls in the durable crew record.
     vendor_withheld: adapters[role].grants?.vendor_withheld ?? [],
@@ -2662,7 +2795,7 @@ export function resumeCmd(args, deps = {}) {
   } catch { emitter = null }
   logLine(journal, { at: new Date().toISOString(), event: 'resume-start', head: checkpoint.head_oid, kind: checkpoint.kind, frozen_where: checkpoint.frozen_where })
   const seatIoDep = deps.seatIo || seatIo
-  const io = seatIoDep(crew, paths, checkout, emitter, null, args, { readRoster: rosterSnapshotReader(crew) })
+  const io = seatIoDep(crew, paths, checkout, emitter, persistedAdapters(crew), args, { readRoster: rosterSnapshotReader(crew) })
   const ctx = {
     task: taskSlug, taskDir: paths.taskDir, checkout, journal,
     head: checkpoint.head_oid, roles: crew.roles, variant,
@@ -2859,7 +2992,7 @@ export function runCmd(args, deps = {}) {
   } catch { emitter = null }
   installRunFinalizersDep?.(emitter)
 
-  const io = seatIoDep(crew, runPaths, checkout, emitter, null, args, { readRoster: rosterSnapshotReader(crew) })
+  const io = seatIoDep(crew, runPaths, checkout, emitter, persistedAdapters(crew), args, { readRoster: rosterSnapshotReader(crew) })
   // A throw out of the driver (member timeout, dead pane, git failure) is an
   // OUTCOME, not a stack trace: it must still produce a task envelope, or a
   // concurrent `crew.mjs wait` spins its full timeout for nothing.

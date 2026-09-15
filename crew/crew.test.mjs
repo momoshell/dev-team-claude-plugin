@@ -21,7 +21,7 @@ import {
   MEMORY_ROLES, memoryConfig, CHARTER_BASELINE_BYTES, CHARTER_SOURCE_BUDGET, CHARTER_SOURCE_TOTAL_BUDGET, CHARTER_CEILINGS, CHARTER_BUDGET_REFUSAL, CHARTER_UNMEASURED_CAUSES, charterFileBytes, compiledCharterBytes, charterBudgetRefusals, charterSourceRefusals, assertCharterBudgets, charterBytesRecord, CAPABILITY_REFUSALS, loadCapabilities,
   agentRegisterEntry, assertAgentProvider, assertAgentTransport, assertAgentRefusals,
   grantsFor, assertGrantsBacked, assertFanoutCoherent, deniedFanout, EMPTY_GRANTS, probeLocalEndpoint,
-  effectiveTools, ADVISOR_CONFIG_VERSION, ADVISOR_BOOT_REFUSALS, SAFE_MODEL, classifyAdvisorCell,
+  effectiveTools, persistedAdapters, GRANT_SNAPSHOT_REFUSAL, ADVISOR_CONFIG_VERSION, ADVISOR_BOOT_REFUSALS, SAFE_MODEL, classifyAdvisorCell,
   advisorBootRecord, advisorJournalRecord, advisorEndpointOrigin, assertAdvisorCellLive,
   advisorManifest, assertAdvisorManifest, packageSuite, SUITE_OWNER_PATH, SUITE_REFUSAL,
   PANE_TURN_CEILING_UNMEASURED, paneTurnCeilingRefusals, resumeCmd, validateResumeState, RESUME_REFUSALS, RESUME_REFUSAL_NAMES, refuseResume,
@@ -9860,4 +9860,240 @@ test('E1 attended CLI ledger keeps declared execution axis', async () => {
     rmSync(home, { recursive: true, force: true })
     rmSync(checkoutRoot, { recursive: true, force: true })
   }
+})
+
+function grantRuntimeRpcCommand(member, grants, role = 'planner') {
+  return rpcCommand({
+    bin: '/repo/pi', model: member.model, effort: member.effort,
+    sessionDir: '/tmp/crew-task/sessions', sessionId: role, resume: false,
+    promptFile: `/tmp/crew-task/role-${role}.md`, deny: member.deny,
+    env: { CREW_ROLE: role, CREW_TASK_DIR: '/tmp/crew-task' }, grants,
+  })
+}
+
+function rpcExtensionOperands(args) {
+  const out = []
+  for (let i = 0; i < (args || []).length; i += 1) if (args[i] === '-e') out.push(args[i + 1])
+  return out
+}
+
+function paneExtensionOperands(command) {
+  const out = []
+  const pattern = /(?:^|\s)-e\s+(?:"([^"]+)"|'([^']+)'|(\S+))/g
+  for (const match of String(command || '').matchAll(pattern)) out.push(match[1] || match[2] || match[3])
+  return out
+}
+
+async function withQuietStdout(fn) {
+  const previous = process.stdout.write
+  process.stdout.write = () => true
+  try { return await fn() } finally { process.stdout.write = previous }
+}
+
+test('A1 granted extensions reach the runtime-composed RPC command', async () => {
+  let captured = null
+  const rows = await bootSeatRows({
+    task: 'grant-runtime-a1', args: { 'agent-planner': 'pi' },
+    afterBoot: async ({ home, checkout, brief }) => {
+      await withHome(home, () => runCmd(
+        { task: 'grant-runtime-a1', checkout, 'brief-file': brief, keep: true },
+        {
+          openRun: () => ({ startRun() {}, endRun() {} }), awaitSeatsReady: () => {},
+          seatIo: (...args) => { captured = args; return {} },
+          drive: () => ({ status: 'done', summary: '', artifacts: [], details: {} }),
+          writeTerminalLine: () => {},
+        },
+      ))
+    },
+  })
+  const member = rows.crew.members.planner
+  const expected = member.grant_snapshot.grants.extensions
+  assert.deepEqual(rpcExtensionOperands(grantRuntimeRpcCommand(member, captured[4].planner.grants).args), expected)
+  assert.equal(Object.hasOwn(captured[4].planner, 'configDir'), false)
+})
+
+test('A2 resumed runtime seats replay persisted grants', () => {
+  const fixture = resumeCommandFixture('crew-grant-runtime-a2-')
+  const previousExitCode = process.exitCode
+  const previousHome = process.env.HOME
+  try {
+    const grants = pinnedGrants(loadCapabilities(), 'pi')
+    const crew = JSON.parse(readFileSync(join(fixture.dir, 'crew.json'), 'utf8'))
+    crew.roles = ['planner']
+    crew.members = {
+      planner: {
+        pane_id: null, surface_id: null, transport: 'headless-rpc',
+        model: 'openai-codex/gpt-5.6-sol', effort: 'medium', agent: 'pi',
+        deny: SEAT_DEFAULTS.planner.deny,
+        grant_snapshot: { schema_version: 1, role: 'planner', agent: 'pi', grants },
+      },
+    }
+    writeFileSync(join(fixture.dir, 'crew.json'), JSON.stringify(crew, null, 2))
+    process.env.HOME = fixture.home
+    process.exitCode = undefined
+    let captured = null
+    resumeCmd({ task: fixture.task, checkout: fixture.checkout, keep: true }, {
+      openRun: () => ({ startRun() {}, endRun() {} }),
+      seatIo: (...args) => { captured = args; return {} },
+      resume: () => ({ status: 'done', summary: '', artifacts: [], details: {} }),
+      writeTerminalLine: () => {},
+    })
+    assert.deepEqual(rpcExtensionOperands(grantRuntimeRpcCommand(crew.members.planner, captured[4].planner.grants).args), grants.extensions)
+  } finally {
+    process.exitCode = previousExitCode
+    if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome
+    rmSync(fixture.root, { recursive: true, force: true })
+  }
+})
+
+test('B1 explicit extensions retain disabled discovery', () => {
+  const grants = pinnedGrants(loadCapabilities(), 'pi')
+  const command = grantRuntimeRpcCommand({ model: 'openai-codex/gpt-5.6', effort: 'medium', deny: SEAT_DEFAULTS.planner.deny }, grants)
+  assert.equal(command.args.includes('--no-extensions'), true)
+  assert.deepEqual(rpcExtensionOperands(command.args), grants.extensions)
+})
+
+test('C1 an extensionless seat retains closed discovery without operands', () => {
+  const command = grantRuntimeRpcCommand({ model: 'openai-codex/gpt-5.6', effort: 'medium', deny: SEAT_DEFAULTS.builder.deny }, EMPTY_GRANTS)
+  assert.equal(command.args.includes('--no-extensions'), true)
+  assert.deepEqual(rpcExtensionOperands(command.args), [])
+  const tools = command.args[command.args.indexOf('--tools') + 1].split(',')
+  assert.equal(tools.includes('agent'), false)
+  assert.equal(tools.includes('lab'), false)
+})
+
+test('D1 pane and RPC transports receive the same granted extensions', async () => {
+  const home = scratchDir('crew-grant-pane-d1-home-')
+  const { root: checkoutRoot, checkout } = testCheckout('crew-grant-pane-d1-checkout-')
+  const task = 'grant-pane-d1'
+  const roles = ['lead', 'planner']
+  const cmux = callCounter()
+  let treeCalls = 0
+  const tree = () => {
+    treeCalls += 1
+    if (treeCalls === 1) return { windows: [] }
+    return { windows: [{ id: 'window-1', workspaces: [{
+      id: 'workspace-1', name: `crew-${task}`,
+      panes: roles.map((role) => ({ id: `pane-${role}`, surfaces: [{ id: `surface-${role}`, name: role }] })),
+    }] }] }
+  }
+  try {
+    await withHome(home, () => withQuietStdout(() => bootCmd(
+      { task, checkout, roles: 'planner', 'agent-planner': 'pi' },
+      { cmux, tree, renameTab: () => {}, awaitSeatsReady: () => {} },
+    )))
+    const dir = testCrewDir(home, checkout, task)
+    const crew = JSON.parse(readFileSync(join(dir, 'crew.json'), 'utf8'))
+    const layoutArgs = cmux.calls[0][1]
+    const layout = JSON.parse(layoutArgs[layoutArgs.indexOf('--layout') + 1])
+    const leaves = []
+    const walk = (node) => {
+      if (node?.pane?.surfaces?.[0]?.command) leaves.push(node.pane.surfaces[0].command)
+      for (const child of node?.children || []) walk(child)
+    }
+    walk(layout)
+    const pane = leaves.find((command) => command.includes(' CREW_ROLE=planner '))
+    assert.ok(pane)
+    const rpc = grantRuntimeRpcCommand(crew.members.planner, persistedAdapters(crew).planner.grants)
+    assert.deepEqual(paneExtensionOperands(pane), rpcExtensionOperands(rpc.args))
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+})
+
+test('E1 runtime RPC tools activate every granted extension tool', () => {
+  const grants = pinnedGrants(loadCapabilities(), 'pi')
+  const command = grantRuntimeRpcCommand({ model: 'openai-codex/gpt-5.6', effort: 'medium', deny: SEAT_DEFAULTS.planner.deny }, grants)
+  const tools = command.args[command.args.indexOf('--tools') + 1].split(',')
+  assert.deepEqual(tools.filter((tool) => ['agent', 'lab', 'retrieve'].includes(tool)), ['agent', 'lab'])
+  assert.equal(tools.includes('retrieve'), false)
+})
+
+test('F1 durable seat state records its resolved extensions', async () => {
+  const rows = await bootSeatRows({ task: 'grant-snapshot-f1', args: { 'agent-planner': 'pi' } })
+  const member = rows.crew.members.planner
+  assert.deepEqual(member.grant_snapshot, {
+    schema_version: 1, role: 'planner', agent: 'pi',
+    grants: member.grant_snapshot.grants,
+  })
+  assert.deepEqual(member.grant_snapshot.grants.extensions, [
+    join(ROOT, 'crew/pi/extensions/subagent.ts'),
+    join(ROOT, 'crew/pi/extensions/lab.ts'),
+    join(ROOT, 'crew/pi/extensions/readgate.ts'),
+  ])
+  assert.equal(Object.hasOwn(member, 'config_dir'), false)
+})
+
+test('G1 legacy extensionless seat commands remain byte-identical', async () => {
+  let captured = null
+  const rows = await bootSeatRows({
+    task: 'grant-legacy-g1', args: { 'agent-planner': 'pi' },
+    afterBoot: async ({ home, checkout, brief, dir }) => {
+      const crew = JSON.parse(readFileSync(join(dir, 'crew.json'), 'utf8'))
+      delete crew.members.planner.grant_snapshot
+      writeFileSync(join(dir, 'crew.json'), JSON.stringify(crew, null, 2))
+      await withHome(home, () => runCmd(
+        { task: 'grant-legacy-g1', checkout, 'brief-file': brief, keep: true },
+        {
+          openRun: () => ({ startRun() {}, endRun() {} }), awaitSeatsReady: () => {},
+          seatIo: (...args) => { captured = args; return {} },
+          drive: () => ({ status: 'done', summary: '', artifacts: [], details: {} }),
+          writeTerminalLine: () => {},
+        },
+      ))
+    },
+  })
+  const member = rows.crew.members.planner
+  const actual = grantRuntimeRpcCommand(member, captured[4].planner.grants)
+  const expected = grantRuntimeRpcCommand(member, EMPTY_GRANTS)
+  assert.deepEqual(actual, expected)
+})
+
+test('H1 malformed grant snapshots refuse before seat IO', async () => {
+  let seatIoCalls = 0
+  await bootSeatRows({
+    task: 'grant-malformed-h1', args: { 'agent-planner': 'pi' },
+    afterBoot: async ({ home, checkout, brief, dir }) => {
+      const path = join(dir, 'crew.json')
+      const crew = JSON.parse(readFileSync(path, 'utf8'))
+      crew.members.planner.grant_snapshot.grants.tools = ['   ']
+      writeFileSync(path, JSON.stringify(crew, null, 2))
+      await withHome(home, () => assert.throws(
+        () => runCmd(
+          { task: 'grant-malformed-h1', checkout, 'brief-file': brief, keep: true },
+          {
+            openRun: () => ({ startRun() {}, endRun() {} }), awaitSeatsReady: () => {},
+            seatIo: () => { seatIoCalls += 1; return {} }, drive: () => { throw new Error('driver reached') },
+          },
+        ),
+        (error) => error.reason === GRANT_SNAPSHOT_REFUSAL && /malformed resolved grants/.test(error.message),
+      ))
+    },
+  })
+  assert.equal(seatIoCalls, 0)
+})
+
+test('I1 grant snapshots cannot replay across roles', async () => {
+  let seatIoCalls = 0
+  await bootSeatRows({
+    task: 'grant-binding-i1', args: { 'agent-planner': 'pi' },
+    afterBoot: async ({ home, checkout, brief, dir }) => {
+      const path = join(dir, 'crew.json')
+      const crew = JSON.parse(readFileSync(path, 'utf8'))
+      crew.members.builder.grant_snapshot = JSON.parse(JSON.stringify(crew.members.planner.grant_snapshot))
+      writeFileSync(path, JSON.stringify(crew, null, 2))
+      await withHome(home, () => assert.throws(
+        () => runCmd(
+          { task: 'grant-binding-i1', checkout, 'brief-file': brief, keep: true },
+          {
+            openRun: () => ({ startRun() {}, endRun() {} }), awaitSeatsReady: () => {},
+            seatIo: () => { seatIoCalls += 1; return {} }, drive: () => { throw new Error('driver reached') },
+          },
+        ),
+        (error) => error.reason === GRANT_SNAPSHOT_REFUSAL && /role\/agent binding mismatch/.test(error.message),
+      ))
+    },
+  })
+  assert.equal(seatIoCalls, 0)
 })

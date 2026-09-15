@@ -4,7 +4,7 @@
 // (12/13 green; A13 needs the lane test file). Every LITERAL anchor in plan.md
 // appears here verbatim. The builder may adopt it, but owns its correctness.
 
-import { existsSync as fsExistsSync, readFileSync as fsReadFileSync, readdirSync as fsReaddirSync } from 'node:fs'
+import { existsSync as fsExistsSync, readFileSync as fsReadFileSync, readdirSync as fsReaddirSync, unlinkSync as fsUnlinkSync } from 'node:fs'
 import { spawnSync as cpSpawnSync } from 'node:child_process'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -42,6 +42,7 @@ export function normalDeps(deps = {}) {
     existsSync: deps.existsSync || fsExistsSync,
     readFileSync: deps.readFileSync || fsReadFileSync,
     readdirSync: deps.readdirSync || fsReaddirSync,
+    unlinkSync: deps.unlinkSync || fsUnlinkSync,
     kill: deps.kill || null,
     snapshot: deps.snapshot || null,
     sleep: deps.sleep || null,
@@ -190,6 +191,169 @@ export function reapTask(task, { dryRun = false, deps = {} } = {}) {
   return base
 }
 
+const LOCK_EPOCH_RE = /^(.+)\.lock\.(\d+)$/
+
+export function parseLockEpoch(name) {
+  const match = LOCK_EPOCH_RE.exec(String(name))
+  if (!match) return null
+  const epoch = Number(match[2])
+  if (!Number.isSafeInteger(epoch)) return null
+  return { name: match[1], epoch }
+}
+
+function discoverLockDirectories(root, d) {
+  const directories = []
+  const failures = []
+  const walk = (current, isLockDirectory = false) => {
+    let entries
+    try { entries = d.readdirSync(current, { withFileTypes: true }) }
+    catch (err) {
+      if (isLockDirectory) directories.push({ path: current, entries: null })
+      failures.push({ path: current, reason: err?.code || 'directory-read-failed', kind: 'directory' })
+      return
+    }
+    if (!Array.isArray(entries)) {
+      if (isLockDirectory) directories.push({ path: current, entries: null })
+      failures.push({ path: current, reason: 'directory-read-unknown', kind: 'directory' })
+      return
+    }
+    const ordered = entries.slice().sort((a, b) => {
+      const left = typeof a?.name === 'string' ? a.name : ''
+      const right = typeof b?.name === 'string' ? b.name : ''
+      return left < right ? -1 : left > right ? 1 : 0
+    })
+    if (isLockDirectory) directories.push({ path: current, entries: ordered })
+    for (const entry of ordered) {
+      if (!entry || typeof entry.name !== 'string' || typeof entry.isDirectory !== 'function') {
+        failures.push({ path: current, reason: 'directory-entry-unknown', kind: 'directory' })
+        continue
+      }
+      let isDirectory = false
+      try { isDirectory = entry.isDirectory() }
+      catch (err) {
+        failures.push({ path: join(current, entry.name), reason: err?.code || 'directory-entry-unknown', kind: 'directory' })
+        continue
+      }
+      if (isDirectory) walk(join(current, entry.name), entry.name === 'locks')
+    }
+  }
+  walk(root)
+  return { directories, failures }
+}
+
+function inspectLockDirectories(discovered) {
+  const groups = new Map()
+  for (const directory of discovered.directories) {
+    if (!Array.isArray(directory.entries)) continue
+    for (const entry of directory.entries) {
+      if (!entry || typeof entry.name !== 'string' || typeof entry.isFile !== 'function') continue
+      let isFile = false
+      try { isFile = entry.isFile() } catch { continue }
+      if (!isFile) continue
+      const parsed = parseLockEpoch(entry.name)
+      if (!parsed) continue
+      const key = `${directory.path}\u0000${parsed.name}`
+      let group = groups.get(key)
+      if (!group) {
+        group = { directory: directory.path, name: parsed.name, files: [] }
+        groups.set(key, group)
+      }
+      group.files.push({
+        path: join(directory.path, entry.name),
+        filename: entry.name,
+        epoch: parsed.epoch,
+      })
+    }
+  }
+  const candidatePaths = []
+  let files = 0
+  const orderedGroups = [...groups.values()].sort((a, b) => {
+    if (a.directory !== b.directory) return a.directory < b.directory ? -1 : 1
+    return a.name < b.name ? -1 : a.name > b.name ? 1 : 0
+  })
+  for (const group of orderedGroups) {
+    group.files.sort((a, b) => a.epoch - b.epoch || (a.filename < b.filename ? -1 : a.filename > b.filename ? 1 : 0))
+    const epochs = group.files.map(({ epoch }) => epoch)
+    const superseded = epochs.slice(0, -1)
+    files += epochs.length
+    for (const file of group.files.slice(0, superseded.length)) candidatePaths.push({ ...file, directory: group.directory, name: group.name })
+  }
+  return {
+    files,
+    candidates: candidatePaths.length,
+    directories: discovered.directories.length,
+    groups: orderedGroups.length,
+    candidate_paths: candidatePaths,
+  }
+}
+
+function lockRefusalFor(task, taskResult) {
+  if (task.archived !== true) return { task: task.id, directory: task.dir, reason: 'active-task' }
+  const verdicts = taskResult?.verdicts || {}
+  for (const verdict of [REAP_VERDICTS.REFUSED_LIVE, REAP_VERDICTS.REFUSED_MISMATCH, REAP_VERDICTS.REFUSED_UNKNOWN]) {
+    if (verdicts[verdict] > 0) return { task: task.id, directory: task.dir, reason: verdict }
+  }
+  return null
+}
+
+function refusedLockSweep(task, directories, refusal) {
+  const inspected = inspectLockDirectories(directories)
+  const failureRows = [...directories.failures]
+  return {
+    id: task.id, task: task.task, dir: task.dir, archived: task.archived === true,
+    files: inspected.files, candidates: 0, removed: 0,
+    directories: inspected.directories, groups: inspected.groups, refused: 1,
+    failures: failureRows.length, failure_rows: failureRows,
+    refusals: [refusal], candidate_paths: [],
+  }
+}
+
+export function lockSweepForTask(task, taskResult, { reclaim = false, deps = {} } = {}) {
+  const d = normalDeps(deps)
+  const directories = discoverLockDirectories(task.dir, d)
+  const refusal = lockRefusalFor(task, taskResult)
+  if (refusal !== null) return refusedLockSweep(task, directories, refusal)
+  const inspected = inspectLockDirectories(directories)
+  const failures = [...directories.failures]
+  const removeSuperseded = reclaim === true
+  let removed = 0
+  for (const { path } of inspected.candidate_paths) {
+    try {
+      if (removeSuperseded) d.unlinkSync(path)
+      if (removeSuperseded) removed += 1
+    } catch (err) {
+      failures.push({ path, reason: err?.code || 'unlink-failed' })
+      continue
+    }
+  }
+  return {
+    id: task.id, task: task.task, dir: task.dir, archived: task.archived === true,
+    files: inspected.files, candidates: inspected.candidates, removed,
+    directories: inspected.directories, groups: inspected.groups, refused: 0,
+    failures: failures.length, failure_rows: failures, refusals: [],
+    candidate_paths: inspected.candidate_paths,
+  }
+}
+
+export function aggregateLockSweeps(taskResults = []) {
+  const out = {
+    tasks: taskResults, task_count: taskResults.length, files: 0, candidates: 0,
+    removed: 0, directories: 0, groups: 0, failures: 0, refused: 0,
+    candidate_paths: [], failure_rows: [], refusals: [],
+  }
+  for (const task of taskResults) {
+    for (const key of ['files', 'candidates', 'removed', 'directories', 'groups', 'failures', 'refused']) out[key] += task[key]
+    out.candidate_paths.push(...task.candidate_paths)
+    out.failure_rows.push(...task.failure_rows)
+    out.refusals.push(...task.refusals)
+  }
+  out.summary = {
+    files: out.files, candidates: out.candidates, removed: out.removed,
+    directories: out.directories, failures: out.failures, refused: out.refused,
+  }
+  return out
+}
+
 export function reapOutcome(totals, dryRun) {
   if (dryRun) return totals.pending > 0 ? REAP_OUTCOMES.PENDING : REAP_OUTCOMES.NOTHING
   if (totals.records === 0) return REAP_OUTCOMES.NOTHING
@@ -203,7 +367,8 @@ export function reapOutcome(totals, dryRun) {
 export function reapPass({ root, dryRun = false, reclaimPaneShells = false, deps = {} } = {}) {
   const d = normalDeps(deps)
   const sweepRoot = root || crewRoot({ home: d.home })
-  const tasks = candidateTasks(sweepRoot, d).map((task) => reapTask(task, { dryRun, deps: d }))
+  const candidateRows = candidateTasks(sweepRoot, d)
+  const tasks = candidateRows.map((task) => reapTask(task, { dryRun, deps: d }))
   const totals = {
     tasks: tasks.length, active_tasks: 0, archived_tasks: 0, pending: 0, records: 0, swept: 0, skipped: 0,
     retryable: 0, groups: 0, reclaimed: 0, refused: 0, verdicts: zeroVerdicts(), outcomes: zeroOutcomes(),
@@ -221,11 +386,14 @@ export function reapPass({ root, dryRun = false, reclaimPaneShells = false, deps
   // A true `dryRun` means nothing anywhere is signalled, and that has to hold
   // for a DIRECT caller of reapPass, not only for the CLI whose parseArgs
   // already refuses. Derived once, and used for the sweep AND its fallback.
+  const lockReclaim = dryRun !== true
+  const lockTasks = candidateRows.map((task, index) => lockSweepForTask(task, tasks[index], { reclaim: lockReclaim, deps: d }))
+  const locks = aggregateLockSweeps(lockTasks)
   const panesReclaim = dryRun !== true && reclaimPaneShells === true
   let pane
   try { pane = panePass({ reclaim: panesReclaim, deps: d }) }
   catch { pane = unmeasuredPane(panesReclaim, PANE_UNKNOWN_REASONS.TABLE) }
-  return { root: sweepRoot, dry_run: dryRun === true, tasks, totals, pane, outcome: reapOutcome(totals, dryRun === true) }
+  return { root: sweepRoot, dry_run: dryRun === true, tasks, totals, locks, pane, outcome: reapOutcome(totals, dryRun === true) }
 }
 
 export function formatReport(pass) {
@@ -242,6 +410,18 @@ export function formatReport(pass) {
   lines.push(pass.dry_run
     ? `reap: totals — tasks ${t.tasks} (active ${t.active_tasks}, archived ${t.archived_tasks}) pending ${t.pending}`
     : `reap: totals — tasks ${t.tasks} (active ${t.active_tasks}, archived ${t.archived_tasks}) records ${t.records} swept ${t.swept} skipped ${t.skipped} retryable ${t.retryable} refused ${t.refused} | groups ${t.groups} reclaimed ${t.reclaimed} (live ${t.verdicts[REAP_VERDICTS.REFUSED_LIVE]}, mismatch ${t.verdicts[REAP_VERDICTS.REFUSED_MISMATCH]}, unknown ${t.verdicts[REAP_VERDICTS.REFUSED_UNKNOWN]}) | proven ${t.outcomes.proven} failed ${t.outcomes.failed} unproven ${t.outcomes.unproven}`)
+  if (pass.locks) {
+    for (const candidate of pass.locks.candidate_paths || []) lines.push(`reap: locks — candidate ${candidate.path}`)
+    for (const refusal of pass.locks.refusals || []) lines.push(`reap: locks — refused ${refusal.task} (${refusal.directory}) [reason: ${refusal.reason}]`)
+    for (const failure of pass.locks.failure_rows || []) {
+      const label = failure.kind === 'directory' ? 'failed-directory' : 'failed'
+      lines.push(`reap: locks — ${label} ${failure.path} [reason: ${failure.reason}]`)
+    }
+    const s = pass.locks
+    lines.push(pass.dry_run
+      ? `reap: locks — Would remove ${s.candidates} of ${s.files} files across ${s.directories} directories`
+      : `reap: locks — Removed ${s.removed} of ${s.files} files across ${s.directories} directories`)
+  }
   if (pass.dry_run) lines.push('reap: dry run — nothing was signalled; re-run with `npm run crew:reap -- --reclaim` to reclaim')
   if (pass.pane) lines.push(...formatPaneReport(pass.pane))
   lines.push(`reap-outcome: ${pass.outcome}`)

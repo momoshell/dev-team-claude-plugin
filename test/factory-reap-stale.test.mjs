@@ -115,7 +115,7 @@ const inventoryOf = (dir) => {
 // Node's default reporter emits U+2139 instead of TAP's "# pass N" summary.
 // Emit a summary only after a successful lane so this compatibility line cannot
 // make a failing suite look green.
-const LANE_TEST_COUNT = 33
+const LANE_TEST_COUNT = 41
 process.once('exit', (code) => {
   if (code === 0 && !String(process.env.NODE_OPTIONS || '').includes('--test-reporter=tap')) {
     process.stdout.write(`# pass ${LANE_TEST_COUNT}\n`)
@@ -756,4 +756,240 @@ test('main threads both reclaim keys through to the pane sweep', async () => {
   assert.equal(await main(['--reclaim', '--root', root], { ...deps, kill: quiet.kill, stdout: (text) => quietOut.push(text) }), 0)
   assert.deepEqual(quiet.calls, [])
   assert.match(quietOut.join(''), /pane-outcome: pending-pane-orphans/)
+})
+
+const lockDirAt = (base, ...parts) => {
+  const dir = join(base, ...parts)
+  mkdirSync(dir, { recursive: true })
+  return dir
+}
+const writeLockEpoch = (dir, name, epoch, contents = `${name}:${epoch}`) => {
+  const path = join(dir, `${name}.lock.${epoch}`)
+  writeFileSync(path, contents)
+  return path
+}
+
+test('A1 dry-run names and counts superseded lock epochs without unlinking bytes', () => {
+  const root = newRoot()
+  const taskDir = deadRun(root, 'repo-a', ARCHIVED_LANE)
+  const locks = lockDirAt(taskDir, 'nested', 'locks')
+  const oldOne = writeLockEpoch(locks, 'worker', 1, 'old-one')
+  const oldTwo = writeLockEpoch(locks, 'worker', 2, 'old-two')
+  const current = writeLockEpoch(locks, 'worker', 9, 'current')
+  const unrelated = join(locks, 'README')
+  writeFileSync(unrelated, 'leave-me')
+  const unlinkCalls = []
+  const pass = reapPass({
+    root,
+    dryRun: true,
+    deps: { ...depsFor(killSpy()), unlinkSync: (path) => unlinkCalls.push(path) },
+  })
+  const report = formatReport(pass).join('\n')
+  assert.equal(pass.locks.files, 3)
+  assert.equal(pass.locks.candidates, 2)
+  assert.equal(pass.locks.removed, 0)
+  assert.equal(pass.locks.directories, 1)
+  assert.equal(unlinkCalls.length, 0)
+  assert.ok(report.includes(oldOne))
+  assert.ok(report.includes(oldTwo))
+  assert.match(report, /reap: locks — Would remove 2 of 3 files across 1 directories/)
+  assert.equal(readFileSync(oldOne, 'utf8'), 'old-one')
+  assert.equal(readFileSync(oldTwo, 'utf8'), 'old-two')
+  assert.equal(readFileSync(current, 'utf8'), 'current')
+  assert.equal(readFileSync(unrelated, 'utf8'), 'leave-me')
+})
+
+test('B1 reclaim removes strict-below-maximum lock epochs and keeps the maximum', () => {
+  const root = newRoot()
+  const taskDir = deadRun(root, 'repo-a', ARCHIVED_LANE)
+  const locks = lockDirAt(taskDir, 'locks')
+  const oldOne = writeLockEpoch(locks, 'worker', 1)
+  const oldTwo = writeLockEpoch(locks, 'worker', 2)
+  const current = writeLockEpoch(locks, 'worker', 4)
+  const pass = reapPass({ root, deps: depsFor(killSpy({ esrch: [-42] })) })
+  assert.equal(pass.locks.removed, 2)
+  assert.equal(pass.locks.failures, 0)
+  assert.equal(existsSync(oldOne), false)
+  assert.equal(existsSync(oldTwo), false)
+  assert.equal(existsSync(current), true)
+})
+
+test('C1 reclaim groups each lock name in each directory and retains every maximum', () => {
+  const root = newRoot()
+  const taskDir = deadRun(root, 'repo-a', ARCHIVED_LANE)
+  const first = lockDirAt(taskDir, 'state-a', 'locks')
+  const second = lockDirAt(taskDir, 'state-b', 'locks')
+  const firstOld = [writeLockEpoch(first, 'alpha', 1), writeLockEpoch(first, 'alpha', 9), writeLockEpoch(first, 'beta', 2), writeLockEpoch(first, 'beta', 4)]
+  const secondOld = [writeLockEpoch(second, 'alpha', 3), writeLockEpoch(second, 'alpha', 10), writeLockEpoch(second, 'gamma', 1), writeLockEpoch(second, 'gamma', 2)]
+  const pass = reapPass({ root, deps: depsFor(killSpy({ esrch: [-42] })) })
+  // reclaimDescendants leaves its current epoch in task/descendants/locks;
+  // the lock sweep measures it and retains that maximum too.
+  assert.equal(pass.locks.files, 9)
+  assert.equal(pass.locks.candidates, 4)
+  assert.equal(pass.locks.removed, 4)
+  for (const path of [firstOld[0], firstOld[2], secondOld[0], secondOld[2]]) assert.equal(existsSync(path), false)
+  for (const path of [firstOld[1], firstOld[3], secondOld[1], secondOld[3]]) assert.equal(existsSync(path), true)
+})
+
+test('D1 active and existing-live archived tasks are named and refuse lock removal', () => {
+  const root = newRoot()
+  const archivedTaskDir = liveRun(root, 'repo-a', ARCHIVED_LANE)
+  const activeTaskDir = deadRun(root, 'repo-a', 'recovery-copy-lane')
+  const archivedLocks = lockDirAt(archivedTaskDir, 'locks')
+  const activeLocks = lockDirAt(activeTaskDir, 'locks')
+  const archivedLock = writeLockEpoch(archivedLocks, 'live', 1)
+  const archivedCurrent = writeLockEpoch(archivedLocks, 'live', 2)
+  const activeLock = writeLockEpoch(activeLocks, 'copy', 1)
+  const activeCurrent = writeLockEpoch(activeLocks, 'copy', 2)
+  const pass = reapPass({
+    root,
+    deps: depsFor(killSpy({ esrch: [-42] }), () => snapshotOf([LIVE_ROW])),
+  })
+  const report = formatReport(pass).join('\n')
+  assert.equal(pass.locks.removed, 0)
+  assert.equal(pass.locks.candidates, 0)
+  assert.deepEqual(pass.locks.candidate_paths, [])
+  assert.doesNotMatch(report, /reap: locks — candidate /)
+  assert.deepEqual(pass.locks.refusals.map(({ task, reason }) => ({ task, reason })).sort((a, b) => a.task.localeCompare(b.task)), [
+    { task: 'repo-a/old-lane.archive-2026-08-21T01-40-00-000Z', reason: REAP_VERDICTS.REFUSED_LIVE },
+    { task: 'repo-a/recovery-copy-lane', reason: 'active-task' },
+  ])
+  assert.match(report, /repo-a\/old-lane\.archive-2026-08-21T01-40-00-000Z .*reason: refused-live/)
+  assert.match(report, /repo-a\/recovery-copy-lane .*reason: active-task/)
+  for (const path of [archivedLock, archivedCurrent, activeLock, activeCurrent]) assert.equal(existsSync(path), true)
+})
+
+test('E1 reclaim reports removed files, denominator, and lock directory count', () => {
+  const root = newRoot()
+  const taskDir = deadRun(root, 'repo-a', ARCHIVED_LANE)
+  const first = lockDirAt(taskDir, 'first', 'locks')
+  const second = lockDirAt(taskDir, 'second', 'locks')
+  writeLockEpoch(first, 'worker', 1)
+  writeLockEpoch(first, 'worker', 3)
+  writeLockEpoch(first, 'worker', 5)
+  writeLockEpoch(second, 'worker', 2)
+  writeLockEpoch(second, 'worker', 8)
+  const pass = reapPass({ root, deps: depsFor(killSpy({ esrch: [-42] })) })
+  // The descendant pass contributes one current epoch in its own locks dir.
+  assert.match(formatReport(pass).join('\n'), /^reap: locks — Removed 3 of 6 files across 3 directories$/m)
+  assert.equal(pass.locks.removed, 3)
+  assert.equal(pass.locks.files, 6)
+  assert.equal(pass.locks.directories, 3)
+})
+
+test('F1 an unlink failure is counted and later lock directories continue sweeping', () => {
+  const root = newRoot()
+  const taskDir = deadRun(root, 'repo-a', ARCHIVED_LANE)
+  const first = lockDirAt(taskDir, 'first', 'locks')
+  const second = lockDirAt(taskDir, 'second', 'locks')
+  const failed = writeLockEpoch(first, 'worker', 1)
+  const firstCurrent = writeLockEpoch(first, 'worker', 2)
+  const later = writeLockEpoch(second, 'worker', 1)
+  const laterCurrent = writeLockEpoch(second, 'worker', 2)
+  const calls = []
+  const pass = reapPass({
+    root,
+    deps: {
+      ...depsFor(killSpy({ esrch: [-42] })),
+      unlinkSync: (path) => {
+        calls.push(path)
+        if (path === failed) {
+          const err = new Error('permission denied')
+          err.code = 'EPERM'
+          throw err
+        }
+        rmSync(path)
+      },
+    },
+  })
+  const report = formatReport(pass).join('\n')
+  assert.equal(pass.locks.failures, 1)
+  assert.equal(pass.locks.removed, 1)
+  assert.equal(calls.length, 2)
+  assert.equal(existsSync(failed), true)
+  assert.equal(existsSync(firstCurrent), true)
+  assert.equal(existsSync(later), false)
+  assert.equal(existsSync(laterCurrent), true)
+  assert.match(report, new RegExp(`failed ${failed.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')} \\[reason: EPERM\\]`))
+})
+
+test('G1 lock sweep preserves directories, maxima, records, leases, parks, and unrelated files', () => {
+  const root = newRoot()
+  const taskDir = deadRun(root, 'repo-a', ARCHIVED_LANE)
+  const laneDir = join(taskDir, '..')
+  const laneLocks = lockDirAt(laneDir, '.crewjson-lock', 'locks')
+  const taskLocks = lockDirAt(taskDir, 'nested', 'locks')
+  const laneOld = writeLockEpoch(laneLocks, 'lane', 1, 'lane-old')
+  const laneMax = writeLockEpoch(laneLocks, 'lane', 7, 'lane-max')
+  const taskOld = writeLockEpoch(taskLocks, 'task', 2, 'task-old')
+  const taskMax = writeLockEpoch(taskLocks, 'task', 8, 'task-max')
+  const laneNote = join(laneLocks, 'operator-note')
+  const taskNote = join(taskLocks, 'operator-note')
+  writeFileSync(laneNote, 'lane-note')
+  writeFileSync(taskNote, 'task-note')
+  const lease = join(laneDir, '.crewjson-lock', 'leases', 'lease.json')
+  const park = join(laneDir, '.crewjson-lock', 'parks', 'park.json')
+  const unrelatedPlan = join(taskDir, 'plan.md')
+  const unrelatedReturn = join(laneDir, 'returns', 'd1.json')
+  mkdirSync(join(laneDir, '.crewjson-lock', 'leases'), { recursive: true })
+  mkdirSync(join(laneDir, '.crewjson-lock', 'parks'), { recursive: true })
+  mkdirSync(join(laneDir, 'returns'), { recursive: true })
+  writeFileSync(lease, 'lease-bytes')
+  writeFileSync(park, 'park-bytes')
+  writeFileSync(unrelatedPlan, 'plan-bytes')
+  writeFileSync(unrelatedReturn, 'return-bytes')
+  const before = inventoryOf(laneDir)
+  const beforeRecord = readRecords(taskDir)
+  const pass = reapPass({ root, deps: depsFor(killSpy({ esrch: [-42] })) })
+  const after = inventoryOf(laneDir)
+  const removed = [relative(laneDir, laneOld), relative(laneDir, taskOld)]
+  assert.deepEqual(after, before.filter((path) => !removed.includes(path)))
+  assert.equal(existsSync(laneLocks), true)
+  assert.equal(existsSync(taskLocks), true)
+  assert.equal(existsSync(laneMax), true)
+  assert.equal(existsSync(taskMax), true)
+  assert.equal(readFileSync(laneNote, 'utf8'), 'lane-note')
+  assert.equal(readFileSync(taskNote, 'utf8'), 'task-note')
+  assert.equal(readFileSync(lease, 'utf8'), 'lease-bytes')
+  assert.equal(readFileSync(park, 'utf8'), 'park-bytes')
+  assert.equal(readFileSync(unrelatedPlan, 'utf8'), 'plan-bytes')
+  assert.equal(readFileSync(unrelatedReturn, 'utf8'), 'return-bytes')
+  assert.equal(readRecords(taskDir).length, beforeRecord.length)
+  assert.equal(readRecords(taskDir).every((record) => record.swept_at != null), true)
+  assert.equal(pass.locks.removed, 2)
+})
+
+test('H1 descendant and pane totals/outcomes stay compatible while locks are additive', () => {
+  const root = newRoot()
+  deadRun(root)
+  const pass = reapPass({ root, dryRun: true, deps: depsFor(killSpy()) })
+  assert.deepEqual({
+    tasks: pass.totals.tasks,
+    active_tasks: pass.totals.active_tasks,
+    archived_tasks: pass.totals.archived_tasks,
+    pending: pass.totals.pending,
+    records: pass.totals.records,
+    swept: pass.totals.swept,
+    skipped: pass.totals.skipped,
+    retryable: pass.totals.retryable,
+    groups: pass.totals.groups,
+    reclaimed: pass.totals.reclaimed,
+    refused: pass.totals.refused,
+    outcome: pass.outcome,
+  }, {
+    tasks: 1, active_tasks: 1, archived_tasks: 0, pending: 1, records: 0,
+    swept: 0, skipped: 0, retryable: 0, groups: 0, reclaimed: 0, refused: 0,
+    outcome: REAP_OUTCOMES.PENDING,
+  })
+  assert.deepEqual(pass.pane.totals, {
+    candidates: 0, orphan: 0, refused_live_tty: 0, clear: 0, unknown: 0,
+    signalled: 0, proven: 0, unproven: 0, failed: 0, refused_recheck: 0,
+  })
+  assert.equal(pass.pane.outcome, PANE_OUTCOMES.NONE)
+  assert.ok(pass.locks)
+  assert.equal(pass.locks.files, 0)
+  const report = formatReport(pass).join('\n')
+  assert.match(report, /reap: locks — Would remove 0 of 0 files across 0 directories/)
+  assert.match(report, /reap-outcome: pending-reclaim/)
+  assert.match(report, /pane-outcome: no-pane-orphans/)
 })

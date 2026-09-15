@@ -578,11 +578,11 @@ const RECORDED_SUITE_SAMPLES = Object.freeze([
   ["test/visualizer-local-env.test.mjs",0.07176354199647904,2,null],
   ["test/visualizer-model-catalog.test.mjs",0.07035033398866654,10,null],
   ["test/visualizer-model-directory.test.mjs",0.06760395801067352,2,null],
-  ["test/visualizer-panels.test.mjs",0.15884783300757407,123,null],
+  ["test/visualizer-panels.test.mjs",0.21324924993515015,161,null],
   ["test/visualizer-returns.test.mjs",0.07350987499952316,1,null],
   ["test/visualizer-roster-edit.test.mjs",0.14319766601920128,30,null],
-  ["test/visualizer-server.test.mjs",5.626880959004164,82,null],
-  ["test/visualizer-shape.test.mjs",0.14418170899152755,74,null],
+  ["test/visualizer-server.test.mjs",7.242753708004951,92,null],
+  ["test/visualizer-shape.test.mjs",0.15336395895481109,78,null],
   ["test/visualizer-teardown.test.mjs",0.20401062497496605,8,null],
   ["test/visualizer-trajectory.test.mjs",0.13766058298945427,36,null],
 ])
@@ -643,6 +643,21 @@ const RECORDED_SLOWEST_TESTS = Object.freeze({
   "trackedSuites sorts regular test files from cached and untracked git output",
   "measureSuite takes three wall samples, derives runner count, and sorts TAP durations"
 ]),
+  "test/visualizer-panels.test.mjs": Object.freeze([
+  "the feed carries the crew state it measured, and says so when it measured none",
+  "a settled row says its crew state was intentionally not read",
+  "the feed reads crew state only for rows the ledger still calls running"
+]),
+  "test/visualizer-server.test.mjs": Object.freeze([
+  "raw Host values are refused without killing the visualizer",
+  "HEAD is supported for GET routes while write routes retain their Allow value",
+  "viz-port-env-door — a bad DEVTEAM_VIZ_PORT refuses like the flag does"
+]),
+  "test/visualizer-shape.test.mjs": Object.freeze([
+  "the run-set route keeps healthy ledger rows measured when triage is degraded",
+  "shapeCellHealth folds kinds into one cell and keeps run-less separate",
+  "visualizer architecture keeps sqlite and legacy Svelte syntax behind the boundaries"
+]),
 })
 
 const RECORDED_SUITE_MEASUREMENTS = Object.freeze(RECORDED_SUITE_SAMPLES.map(([suite, duration_seconds, test_count, reason]) => ({
@@ -701,7 +716,7 @@ const RECORDED_CHEAPER_TESTS = Object.freeze([
 
 export const RECORDED_SUITE_COST_REPORT = Object.freeze({
   schema: 1,
-  measured_at: '2026-09-09T16:37:49.445Z',
+  measured_at: '2026-09-15T12:56:13.300Z',
   sample_runs: 3,
   timeout_ms: 180_000,
   denominator: RECORDED_SUITE_SUMMARY.denominator,

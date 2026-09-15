@@ -10,6 +10,7 @@ import { createReturnsSource } from './returns-source.mjs'
 import { createJournalSource } from './journal-source.mjs'
 import { createRosterSource } from './roster-source.mjs'
 import { proposeEdit } from './roster-edit.mjs'
+import { createAgentsSource } from './agents-source.mjs'
 import { readLadder, readReference, ladderView, stageMoves, composeMoves, applyMoves } from './roster-ladder.mjs'
 import { createArtificialAnalysisCatalog } from './model-catalog.mjs'
 import { saveArtificialAnalysisKey } from './local-env.mjs'
@@ -79,6 +80,10 @@ const ROUTE_PARAMS = Object.freeze({
   '/api/returns': ['repo_slug', 'task_slug', 'adw_id'],
   '/api/journal': ['repo_slug', 'task_slug', 'adw_id'],
   '/api/roster': [],
+  '/api/agents': [],
+  '/api/agents/propose': [],
+  '/api/skills/propose': [],
+  '/api/prompts/propose': [],
   '/api/cell-health': ['since', 'until'],
   '/api/run-set': ['since', 'until'],
   '/api/intake': ['since', 'until'],
@@ -305,6 +310,7 @@ export function startServer(options = {}) {
   const journal = config.journal || createJournalSource({ crewRoot: config.crewRoot })
   const roster = config.roster || createRosterSource({ rosterPath: config.rosterPath })
   const modelCatalog = config.modelCatalog || createArtificialAnalysisCatalog({ apiKey: env.ARTIFICIAL_ANALYSIS_API_KEY, fetchImpl: config.fetchImpl })
+  const agents = config.agents || config.agentsSource || createAgentsSource({ checkout: config.checkout, crewRoot: config.crewRoot })
   const server = createServer(async (req, res) => {
     // #544: the request target and the Host header are both attacker-chosen, and
     // an unparseable one threw ABOVE this handler's try — an unhandled rejection
@@ -380,6 +386,36 @@ export function startServer(options = {}) {
       if (url.pathname === '/api/roster') {
         if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
         return json(res, 200, { schema, ...roster.readRoster() })
+      }
+      if (url.pathname === '/api/agents') {
+        if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
+        const result = typeof agents.read === 'function' ? await agents.read() : { degraded: true, reasons: ['agents source is unavailable'], agents: [], skills: [], roles: [], prompts: [] }
+        return json(res, 200, { schema, ...result })
+      }
+      if (url.pathname === '/api/agents/propose' || url.pathname === '/api/skills/propose' || url.pathname === '/api/prompts/propose') {
+        if (method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'POST' })
+        const refusal = writeGuard(req)
+        if (refusal) return json(res, refusal.status, { schema, error: refusal.error })
+        let input
+        try { input = await body(req) } catch (err) { return json(res, 400, { schema, error: err.message || 'invalid json' }) }
+        if (!input || typeof input !== 'object' || Array.isArray(input)) return json(res, 400, { schema, error: 'request body must be an object' })
+        const route = url.pathname === '/api/agents/propose' ? 'agents' : url.pathname === '/api/skills/propose' ? 'skills' : 'prompts'
+        const fields = route === 'agents' ? ['name', 'entry'] : route === 'skills' ? ['role', 'skills'] : ['role', 'text']
+        const unknownFields = Object.keys(input).filter((field) => !fields.includes(field))
+        if (unknownFields.length) return json(res, 400, { schema, error: `unknown field ${unknownFields[0]}` })
+        if (route === 'agents' && (typeof input.name !== 'string' || !input.name.trim() || !input.entry || typeof input.entry !== 'object' || Array.isArray(input.entry))) return json(res, 400, { schema, error: 'name and entry object are required' })
+        if (route === 'skills' && (typeof input.role !== 'string' || !Array.isArray(input.skills))) return json(res, 400, { schema, error: 'role and skills array are required' })
+        if (route === 'prompts' && (typeof input.role !== 'string' || typeof input.text !== 'string')) return json(res, 400, { schema, error: 'role and text are required' })
+        let result
+        if (route === 'agents') result = await agents.proposeAgent(input)
+        else if (route === 'skills') result = await agents.proposeSkills(input)
+        else result = await agents.proposePrompt(input)
+        const { target_path, after_text, ...response } = result || { ok: false, diff: null, refusals: [{ code: 'source-unavailable', message: 'agents source returned no proposal' }] }
+        if (route === 'agents') {
+          return json(res, 200, { schema, proposal: 'agents', ...response })
+        }
+        if (route === 'prompts') return json(res, 200, { schema, proposal: 'prompts', ...response })
+        return json(res, 200, { schema, proposal: 'skills', ...response })
       }
       if (url.pathname === '/api/cell-health') {
         if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
@@ -644,7 +680,7 @@ export function startServer(options = {}) {
     const address = server.address()
     process.stdout.write(`${JSON.stringify({ listening: true, port: address.port, ledger_db: config.ledgerDb, triage_db: config.triageDb || join(dirname(config.ledgerDb), 'visualizer.db'), crew_root: config.crewRoot, returns_readonly: true, readonly: false, ledger_feed_readonly: true, triage_sidecar_writable: true, writes: ['triage sidecar (may create visualizer.db and its WAL/SHM)', 'stop-switch', 'intake brake ledger rows (may create the ledger directory, ledger.jsonl, ledger.db, WAL and SHM)', 'configured roster file when Apply for next task is explicitly requested', 'Artificial Analysis key in the project .env.local when explicitly requested'] })}\n`)
   })
-  return { server, feed }
+  return { server, feed, agents }
 }
 
 // realpath both sides: the ESM loader realpaths import.meta.url while argv[1]

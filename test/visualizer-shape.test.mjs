@@ -4,6 +4,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'n
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { INTAKE_REFUSAL_REASONS, INTAKE_WINDOW_MS, defaultCellWindow, defaultIntakeWindow, defaultRunSetWindow, RUN_SET_WINDOW_MS, shapeCellHealth, shapeGateChecks, shapeIntake, shapeRunSet, shapeRun, foldAgents, laneFor, matchesFilters, ROLE_ORDER, withCells } from '../visualizer/server/shape.mjs'
+import { normalizeAgents, normalizePrompts, normalizeSkills } from '../visualizer/web/src/lib/agents.js'
 import { startServer } from '../visualizer/server/server.mjs'
 import { drainEvents, createDrainQueue } from '../visualizer/web/src/lib/drain.js'
 import { layoutTimeline, MIN_WIDTH, QUEUED_WIDTH } from '../visualizer/web/src/lib/timeline.js'
@@ -772,6 +773,37 @@ test('attemptPairs finds consecutive attempts per role', () => {
   const pairs = attemptPairs([{ role: 'builder', dispatch_seq: 1 }, { role: 'planner', dispatch_seq: 2 }, { role: 'builder', dispatch_seq: 3 }])
   assert.equal(pairs.length, 1)
   assert.equal(pairs[0].role, 'builder')
+})
+
+test('A1 agents page marks unavailable data with reasons', () => {
+  const payload = {
+    agents: [{ name: 'pi', availability: null, install_hint: '' }],
+    skills: [{ name: 'frontend-svelte', description: 'Svelte' }],
+    matrix: [{ role: 'builder', cells: { 'frontend-svelte': { register_grant: false, last_seat_delivery: { value: 'unmeasured', measured: false, reason: 'no boot command' } } } }],
+    prompts: [{ role: 'builder', text: 'charter', source_bytes: { value: 7, measured: true }, charter_bytes: null, arm: null }],
+  }
+  const agent = normalizeAgents(payload)[0]
+  const prompt = normalizePrompts(payload)[0]
+  assert.equal(agent.availability.value, 'unmeasured')
+  assert.equal(agent.availability.measured, false)
+  assert.ok(agent.availability.reason)
+  assert.equal(agent.install_hint.value, 'unmeasured')
+  assert.equal(agent.install_hint.measured, false)
+  assert.ok(agent.install_hint.reason)
+  assert.equal(prompt.charter_bytes.value, 'unmeasured')
+  assert.equal(prompt.charter_bytes.measured, false)
+  assert.ok(prompt.charter_bytes.reason)
+})
+
+test('C1 agents page keeps register and delivered skill grants distinct', () => {
+  const view = normalizeSkills({
+    skills: [{ name: 'frontend-svelte', description: 'Svelte' }],
+    matrix: [{ role: 'builder', cells: { 'frontend-svelte': { register_grant: false, last_seat_delivery: true } } }],
+  })
+  const cell = view.matrix.find((row) => row.role === 'builder').cells['frontend-svelte']
+  assert.equal(cell.register_grant, false)
+  assert.equal(cell.last_seat_delivery, true)
+  assert.notEqual(cell.register_grant, cell.last_seat_delivery)
 })
 
 test('timeline empty run is safe', () => {

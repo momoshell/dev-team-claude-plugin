@@ -2,7 +2,7 @@ import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
 import { createHash } from 'node:crypto'
-import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync, readdirSync, statSync, symlinkSync } from 'node:fs'
+import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync, readdirSync, statSync, symlinkSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createServer, connect } from 'node:net'
@@ -14,6 +14,7 @@ import { parseCliArgs, ServerUsageError, startServer as startVisualizerServer, w
 import { createLedgerFeed } from '../visualizer/server/ledger-feed.mjs'
 import { readLadder, stageMoves } from '../visualizer/server/roster-ladder.mjs'
 import { shapeIntake } from '../visualizer/server/shape.mjs'
+import { createAgentsSource, proposeAgent, proposePrompt, proposeSkills } from '../visualizer/server/agents-source.mjs'
 import { rawRequest, scratchDir, sqliteAvailable, treeDigest } from './helpers.mjs'
 
 const require = createRequire(import.meta.url)
@@ -82,7 +83,12 @@ async function startInProcess(feed, options) {
   return { ...handles, base: `http://127.0.0.1:${handles.server.address().port}` }
 }
 async function stopInProcess(server) {
-  if (server?.listening) await new Promise((resolve) => server.close(resolve))
+  const target = server?.server ?? server
+  if (target?.listening) {
+    target.closeIdleConnections?.()
+    target.closeAllConnections?.()
+    await new Promise((resolve) => target.close(resolve))
+  }
 }
 function serverRosterFixture() {
   const cell = (provider, id, agent, effort) => ({ provider, id, agent, effort })
@@ -127,6 +133,45 @@ function serverRosterFixtureFile(prefix = 'visualizer-roster-fixture-') {
   writeFileSync(path, JSON.stringify(serverRosterFixture(), null, 2))
   return { dir, path }
 }
+function agentsFixture(prefix = 'visualizer-agents-') {
+  const dir = scratchDir(prefix)
+  const checkout = join(dir, 'checkout'), crewRoot = join(dir, 'crew-root')
+  mkdirSync(join(checkout, 'crew', 'roles'), { recursive: true })
+  mkdirSync(join(checkout, 'skills'), { recursive: true })
+  const capabilities = {
+    schema_version: 1,
+    updated_at: '2026-09-15',
+    coding_agents: {
+      pi: { providers: ['openai'], transports: ['pane', 'headless-rpc'], adapter: 'crew/adapters/adapter-pi.mjs', refuses: ['mcp_servers'] },
+      claude: { providers: ['anthropic'], transports: ['pane', 'headless-json'], adapter: 'crew/adapters/adapter-claude.mjs', refuses: ['skills'] },
+    },
+    roles: Object.fromEntries(['lead', 'planner', 'builder', 'reviewer', 'tech-lead'].map((role) => [role, { tools: [], extensions: [], agents: [], skills: [], advisor: false, requires: [], mcp_servers: [] }])),
+    local_providers: {},
+  }
+  const capabilitiesPath = join(checkout, 'crew', 'capabilities.json')
+  writeFileSync(capabilitiesPath, JSON.stringify(capabilities, null, 2) + '\n')
+  const skillNames = ['backend-node', 'crew-dispatch', 'crew-onboard', 'crew-recovery', 'devops', 'frontend-svelte', 'pr-review', 'qa-test-writing', 'ui-design']
+  for (const name of skillNames) { mkdirSync(join(checkout, 'skills', name), { recursive: true }); writeFileSync(join(checkout, 'skills', name, 'SKILL.md'), `---\nname: ${name}\ndescription: Fixture description for ${name}.\n---\n\n# ${name}\n`) }
+  for (const role of ['_shared', 'lead', 'planner', 'builder', 'reviewer', 'tech-lead']) writeFileSync(join(checkout, 'crew', 'roles', `${role}.md`), `# ${role}\nFixture charter for ${role}.\n`)
+  const lane = join(crewRoot, 'dt-agents-fixture', 'fixture-task'), task = join(lane, 'task')
+  mkdirSync(join(task, 'headless', 'builder'), { recursive: true })
+  mkdirSync(join(task, 'headless-rpc', 'builder'), { recursive: true })
+  mkdirSync(join(task, 'headless-json', 'planner'), { recursive: true })
+  const oldCommand = join(task, 'headless', 'builder', 'cmd.json')
+  const newCommand = join(task, 'headless-rpc', 'builder', 'cmd.json')
+  writeFileSync(oldCommand, JSON.stringify({ args: ['pi', '--skill', 'skills/old-skill/SKILL.md'] }))
+  writeFileSync(newCommand, JSON.stringify({ args: ['pi', '--skill', 'skills/frontend-svelte/SKILL.md'] }))
+  utimesSync(oldCommand, new Date(1000), new Date(1000)); utimesSync(newCommand, new Date(2000), new Date(2000))
+  writeFileSync(join(task, 'headless-json', 'planner', 'cmd.json'), JSON.stringify({ command: 'pi --skill skills/ui-design/SKILL.md' }))
+  writeFileSync(join(lane, 'journal.jsonl'), [
+    JSON.stringify({ at: '2026-09-14T00:00:00.000Z', event: 'boot', charter_bytes: { builder: 10, planner: 11 } }),
+    JSON.stringify({ at: '2026-09-15T00:00:00.000Z', event: 'boot', charter_bytes: { builder: 20, planner: 21 } }),
+  ].join('\n') + '\n')
+  writeFileSync(join(task, 'role-builder.md'), '# compiled builder\n')
+  writeFileSync(join(task, 'role-planner.md'), '# compiled planner\n')
+  return { dir, checkout, crewRoot, capabilitiesPath, lane, task, skillNames }
+}
+
 function rawStatus(response) {
   return Number((response.text.match(/^HTTP\/1\.1 (\d{3})/) || [])[1] || 0)
 }
@@ -423,6 +468,9 @@ const WRITE_ROUTES = [
   { path: '/api/intake/brake', body: JSON.stringify({ engaged: true, actor: 'evil.example' }) },
   { path: '/api/triage', body: JSON.stringify({ adw_id: 'csrf-0000-0000-000000000001', reviewed: true }) },
   { path: '/api/roster/propose', body: JSON.stringify({ tier: 'build', role: 'reviewer', cell: null }) },
+  { path: '/api/agents/propose', body: JSON.stringify({ name: 'future-agent', entry: {} }) },
+  { path: '/api/skills/propose', body: JSON.stringify({ role: 'builder', skills: [] }) },
+  { path: '/api/prompts/propose', body: JSON.stringify({ role: 'builder', text: 'proposal' }) },
   { path: '/api/roster/ladder/stage', body: JSON.stringify({ moves: [] }) },
   { path: '/api/roster/ladder/compose', body: JSON.stringify({ moves: [] }) },
   { path: '/api/roster/ladder/apply', body: JSON.stringify({ moves: [] }) },
@@ -507,11 +555,67 @@ test('same-origin and originless JSON clients still engage the stop switch', { s
 
     const api = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/api.js'), 'utf8')
     const posts = api.split('\n').filter((line) => line.includes("method: 'POST'"))
-    assert.equal(posts.length, 7)
+    assert.equal(posts.length, 10)
     assert.ok(posts.every((line) => line.includes("'content-type': 'application/json'")))
   } finally {
     if (server) await stopServer(server.child)
     rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('B1 agents page proposal endpoints are diff-only', async () => {
+  const fixture = agentsFixture('visualizer-agents-proposals-')
+  const source = createAgentsSource({ checkout: fixture.checkout, crewRoot: fixture.crewRoot })
+  const checkoutBefore = treeDigest(fixture.checkout), crewBefore = treeDigest(fixture.crewRoot)
+  let server
+  try {
+    server = await startInProcess({}, { checkout: fixture.checkout, crewRoot: fixture.crewRoot, agents: source, ledgerDb: join(fixture.dir, 'ledger.db'), triageDb: join(fixture.dir, 'triage.db') })
+    const view = await json(server.base, '/api/agents')
+    assert.equal(view.status, 200)
+    assert.equal(view.json.agents.length, 2)
+    assert.equal(view.json.skills.length, 9)
+    assert.equal(view.json.roles.length, 5)
+    assert.equal(view.json.prompts.length, 6)
+    assert.equal(view.json.roles.find((row) => row.role === 'builder').cells['frontend-svelte'].last_seat_delivery, true)
+    const post = (path, body) => json(server.base, path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+    const agent = await post('/api/agents/propose', { name: 'future-agent', entry: { providers: ['openai'], transports: ['pane'], adapter: 'crew/adapters/adapter-pi.mjs', refuses: [], availability: 'proposal-stub' } })
+    assert.equal(agent.status, 200); assert.equal(agent.json.ok, true); assert.ok(agent.json.diff); assert.deepEqual(agent.json.refusals, []); assert.equal(Object.hasOwn(agent.json, 'target_path'), false); assert.equal(Object.hasOwn(agent.json, 'after_text'), false)
+    const skills = await post('/api/skills/propose', { role: 'builder', skills: ['frontend-svelte'] })
+    assert.equal(skills.status, 200); assert.equal(skills.json.ok, true); assert.match(skills.json.diff, /crew\/capabilities\.json/); assert.deepEqual(skills.json.refusals, [])
+    const prompt = await post('/api/prompts/propose', { role: 'builder', text: '# replacement charter\n' })
+    assert.equal(prompt.status, 200); assert.equal(prompt.json.ok, true); assert.match(prompt.json.diff, /crew\/roles\/builder\.md/); assert.deepEqual(prompt.json.refusals, []); assert.deepEqual(prompt.json.labels, ['protected: prompt-surface'])
+    assert.equal(treeDigest(fixture.checkout), checkoutBefore)
+    assert.equal(treeDigest(fixture.crewRoot), crewBefore)
+    for (const [path, body] of [['/api/agents/propose', '{ not json'], ['/api/skills/propose', JSON.stringify({ role: 'builder', skills: 'frontend-svelte' })], ['/api/prompts/propose', JSON.stringify({ role: 'builder' })]]) {
+      const response = await json(server.base, path, { method: 'POST', headers: { 'content-type': 'application/json' }, body })
+      assert.equal(response.status, 400, path)
+    }
+    assert.equal((await json(server.base, '/api/agents/propose?unknown=1', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).status, 400)
+    const deniedError = Object.assign(new Error('permission denied'), { code: 'EPERM' })
+    const denied = proposeAgent({ checkout: fixture.checkout, name: 'denied', entry: {}, readFileSync: () => { throw deniedError } })
+    assert.equal(denied.ok, false); assert.ok(denied.refusals[0].message)
+    const empty = proposeSkills({ checkout: fixture.checkout, role: 'builder', skills: [], readFileSync: () => '', readdirSync: () => [] })
+    assert.equal(empty.ok, false); assert.ok(empty.refusals[0].message)
+  } finally {
+    if (server) await stopInProcess(server)
+  }
+})
+
+test('D1 agents page labels prompt proposals protected', async () => {
+  const fixture = agentsFixture('visualizer-agents-prompts-')
+  const source = createAgentsSource({ checkout: fixture.checkout, crewRoot: fixture.crewRoot })
+  const before = treeDigest(fixture.checkout)
+  let server
+  try {
+    server = await startInProcess({}, { checkout: fixture.checkout, crewRoot: fixture.crewRoot, agents: source, ledgerDb: join(fixture.dir, 'ledger.db'), triageDb: join(fixture.dir, 'triage.db') })
+    const response = await json(server.base, '/api/prompts/propose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ role: 'builder', text: '# changed\n' }) })
+    assert.equal(response.status, 200)
+    assert.deepEqual(response.json.labels, ['protected: prompt-surface'])
+    assert.match(response.json.diff, /^--- a\/crew\/roles\/builder\.md$/m)
+    assert.match(response.json.diff, /^\+\+\+ b\/crew\/roles\/builder\.md$/m)
+    assert.equal(treeDigest(fixture.checkout), before)
+  } finally {
+    if (server) await stopInProcess(server)
   }
 })
 
@@ -525,6 +629,10 @@ test('all 405 responses advertise an allowed method', { skip: SKIP }, async () =
     for (const [method, path, allow] of [
       ['POST', '/api/sessions', 'GET'],
       ['GET', '/api/triage', 'POST'],
+      ['POST', '/api/agents', 'GET'],
+      ['GET', '/api/agents/propose', 'POST'],
+      ['GET', '/api/skills/propose', 'POST'],
+      ['GET', '/api/prompts/propose', 'POST'],
       ['GET', '/api/roster/propose', 'POST'],
       ['PUT', '/api/intake/brake', 'GET, POST'],
       ['PUT', '/', 'GET, HEAD'],
@@ -2435,7 +2543,7 @@ test('HTTP query doors refuse unknown names and admit their declared vocabulary'
   const dir = scratchDir('visualizer-query-vocabulary-')
   const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')
   fixture(ledgerDb)
-  const routes = ['/api/cell-health', '/api/run-set', '/api/events', '/api/sessions']
+  const routes = ['/api/cell-health', '/api/run-set', '/api/events', '/api/sessions', '/api/agents']
   let child, base
   try {
     ({ child, base } = await startServer(ledgerDb, triageDb))
@@ -2636,7 +2744,7 @@ test('HEAD is supported for GET routes while write routes retain their Allow val
       const response = await fetch(`${base}${path}`, { method: 'HEAD' })
       return { status: response.status, allow: response.headers.get('allow'), body: await response.text() }
     }
-    for (const path of ['/api/health', '/api/sessions', '/api/roster']) {
+    for (const path of ['/api/health', '/api/sessions', '/api/roster', '/api/agents']) {
       const response = await head(path)
       assert.equal(response.status, 200, path)
       assert.equal(response.body, '', path)

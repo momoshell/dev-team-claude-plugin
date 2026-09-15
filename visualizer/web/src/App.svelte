@@ -12,6 +12,7 @@
   import RunSetPanel from './lib/RunSetPanel.svelte'
   import IntakePanel from './lib/IntakePanel.svelte'
   import RosterPanel from './lib/RosterPanel.svelte'
+  import AgentsPage from './lib/AgentsPage.svelte'
   import RunDetail from './lib/RunDetail.svelte'
   import Dropdown from './lib/Dropdown.svelte'
 
@@ -59,7 +60,7 @@
     return { run, status, why }
   }).filter((row) => needsAttention(row.status.key) && !row.run.triage?.reviewed_at))
   let attentionSummary = $derived(attentionBreakdown(attentionRows))
-  let pageTitle = $derived(selectedRun ? `${selectedRun.goal || 'Task'} · Factory` : route.view === 'roster' ? 'Roster · Factory' : route.view === 'ops' ? 'Operations · Factory' : 'Tasks · Factory')
+  let pageTitle = $derived(selectedRun ? `${selectedRun.goal || 'Task'} · Factory` : route.view === 'roster' ? 'Roster · Factory' : route.view === 'agents' ? 'Agents · Factory' : route.view === 'ops' ? 'Operations · Factory' : 'Tasks · Factory')
 
   $effect(() => subscribeHash((next) => route = next))
   $effect(() => {
@@ -155,6 +156,7 @@
   <nav aria-label="Primary navigation">
     <button class:active={route.view === 'fleet' || route.view === 'run' || route.view === 'phase'} onclick={() => navigate({ view: 'fleet' })}>Tasks</button>
     <button class:active={route.view === 'roster'} onclick={() => navigate({ view: 'roster' })}>Roster</button>
+    <button class:active={route.view === 'agents'} onclick={() => navigate({ view: 'agents' })}>Agents</button>
     <button class:active={route.view === 'ops'} onclick={() => navigate({ view: 'ops' })}>Operations</button>
   </nav>
   <div class="tools">
@@ -182,6 +184,11 @@
   <main class="page">
     <div class="page-heading"><div><p class="eyebrow">Capability map</p><h1>Model roster</h1><p>Who fills each assurance preset, which models are suitable, and what is currently ratified.</p></div></div>
     <RosterPanel />
+  </main>
+{:else if route.view === 'agents'}
+  <main class="page">
+    <div class="page-heading"><div><p class="eyebrow">Seat composition</p><h1>Agents · Skills · Prompts</h1><p>Read the register, last-seat evidence, and charter surface without applying edits.</p></div></div>
+    <AgentsPage />
   </main>
 {:else}
   <main class="page">

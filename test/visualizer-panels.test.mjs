@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { PANEL_REFRESH_MS, PANEL_STALE_AFTER_MS, acceptRows, brakePanel, cellHealthPanel, fleetCost, fleetEscalationRate, fleetMedianDuration, fleetPassRate, fleetPhasesPerRun, fleetTokens, findingRows, gateChips, intakeCandidateRows, intakePanel, reviewRows, rosterEditForm, rosterPanel, panelAgeLabel, panelReadLoop, readFreshness, rosterProposal, runSetPanel, teardownPanel } from '../visualizer/web/src/lib/panels.js'
 import { VIEWS, parseHash, formatHash } from '../visualizer/web/src/lib/route.js'
-import { ATTENTION_KEYS, absenceMark, attentionBreakdown, configurationDimensionCell, configurationFilterView, costCell, createSemaphore, crewArchive, deriveDisplayStatus, deriveStatus, escalationProbeTargets, fleetActivity, fleetView, gateCell, heartbeatCell, needsAttention, openRecordNote, operationsOverview, profileEvidenceView, reviewCell, runActivity, runDetailConfiguration, runDetailSeats, runDetailState, runtimeActivitySummary, slotWaitCell, tokenCell } from '../visualizer/web/src/lib/fleet.js'
+import { ATTENTION_KEYS, absenceMark, attentionBreakdown, configurationDimensionCell, configurationFilterView, costCell, createSemaphore, crewArchive, deriveDisplayStatus, deriveStatus, escalationProbeTargets, fleetActivity, fleetView, gateCell, heartbeatCell, needsAttention, openRecordNote, operationsOverview, profileEvidenceView, reviewCell, runActivity, runDetailConfiguration, runDetailSeats, runDetailState, runtimeActivitySummary, slotWaitCell, tokenCell, shipStatus } from '../visualizer/web/src/lib/fleet.js'
 import { ROLE_ORDER, acceptEvidence, bounceArrows, gateMarkers, gateProofStory, laneRows, phaseFilterId, phasePanel, renderMarkdown } from '../visualizer/web/src/lib/trace.js'
 import { eventStory, eventStreamSummary } from '../visualizer/web/src/lib/event-story.js'
 import { assignmentPath, envelopeFacts, envelopeGroups, envelopeOverview, envelopeSections, trajectoryRowStory, trajectorySummary } from '../visualizer/web/src/lib/diagnostic-story.js'
@@ -334,7 +334,7 @@ test('G1 task detail state reports measured facts and independently missing fact
 
 test('H1 RunDetail composes plain detail helpers and renders each audited field', () => {
   const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/RunDetail.svelte'), 'utf8')
-  assert.match(source, /import \{ deriveDisplayStatus, durationCell, gateCell, openRecordNote, profileEvidenceView, reviewCell, runDetailConfiguration, runDetailSeats, runDetailState, tokenCell \} from '\.\/fleet\.js'/)
+  assert.match(source, /import \{ deriveDisplayStatus, durationCell, gateCell, openRecordNote, profileEvidenceView, reviewCell, runDetailConfiguration, runDetailSeats, runDetailState, shipStatus, tokenCell \} from '\.\/fleet\.js'/)
   assert.match(source, /let configurationDetail = \$derived\(runDetailConfiguration\(run\)\)/)
   assert.match(source, /let seatPolicy = \$derived\(runDetailSeats\(run\)\)/)
   assert.match(source, /let runState = \$derived\(runDetailState\(run, events\)\)/)
@@ -2393,4 +2393,31 @@ test('F1: every reachable run activity result derives attention from its key', (
 
 test('G1: a key outside the attention vocabulary is not attention work', () => {
   assert.equal(needsAttention('outside-attention-vocabulary'), false)
+})
+
+test('G1 task list ships column and tab use only Tier-2 colour aliases', () => {
+  const taskList = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/TaskList.svelte'), 'utf8')
+  const detail = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/RunDetail.svelte'), 'utf8')
+  assert.equal(shipStatus({ ship: { state: 'merged', reason: 'merged' } }).tone, 'ok')
+  assert.equal(shipStatus({ ship: { state: 'open', reason: 'open' } }).tone, 'busy')
+  assert.equal(shipStatus({ ship: { state: 'closed-unmerged', reason: 'closed' } }).tone, 'fail')
+  assert.equal(shipStatus({ ship: { state: 'unpublished', reason: 'unpublished' } }).tone, 'quiet')
+  assert.equal(shipStatus({ ship: { state: 'not-applicable', reason: 'not applicable' } }).tone, 'quiet')
+  assert.equal(shipStatus({ ship: { state: 'unmeasured', reason: 'unmeasured', stale: true } }).reason, 'unmeasured (cached ship state is stale.)')
+  assert.deepEqual(shipStatus({}), { key:'unmeasured', word:'not measured', tone:'quiet', reason:'ship state not measured' })
+  assert.match(taskList, /import \{[^}]*shipStatus[^}]*\} from '\.\/fleet\.js'/)
+  assert.match(taskList, /<th>Ship<\/th>/)
+  assert.match(taskList, /\['shipped',\s*'Shipped'\]/)
+  assert.match(taskList, /if \(state === 'shipped'\) return shipStatus\(run\)\.key === 'merged'/)
+  assert.match(taskList, /title=\{ship\.reason\}/)
+  assert.match(detail, /run\?\.ship\?\.pr_url/)
+  assert.match(detail, /target="_blank" rel="noreferrer"/)
+  assert.match(detail, /dateParts\(run\.ship\.merged_at\)/)
+  assert.match(detail, /run\.ship\.merge_commit_sha/)
+  const css = [...taskList.matchAll(/<style>([\s\S]*?)<\/style>/g), ...detail.matchAll(/<style>([\s\S]*?)<\/style>/g)].map((match) => match[1]).join('\\n')
+  const declarationValues = [...css.matchAll(/[^{};]+:\s*([^;{}]+)/g)].map((match) => match[1])
+  assert.ok(declarationValues.every((value) => !/#[0-9a-f]{3,8}|(?:rgba?|hsla?)\s*\(/i.test(value)))
+  const shipCss = [...css.matchAll(/(?:shipping|status)[^{}]*\{([^{}]*)\}/g)].map((match) => match[1]).join('\\n')
+  assert.doesNotMatch(shipCss, /\b(?:red|blue|green|orange|purple)\b/i)
+  assert.doesNotMatch(shipCss, /--(?:palette|tier-?1|raw)/i)
 })

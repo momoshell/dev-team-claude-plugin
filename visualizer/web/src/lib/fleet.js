@@ -535,6 +535,23 @@ export function deriveStatus(run = {}, taskEnvelope = null) {
   return { key: 'unknown', word: 'status not recorded', tone: 'quiet', where: null, why: null }
 }
 
+const SHIP_STATUS_META = Object.freeze({
+  merged: Object.freeze({ key:'merged', word:'shipped', tone:'ok' }),
+  open: Object.freeze({ key:'open', word:'open', tone:'busy' }),
+  'closed-unmerged': Object.freeze({ key:'closed-unmerged', word:'closed', tone:'fail' }),
+  unpublished: Object.freeze({ key:'unpublished', word:'unpublished', tone:'quiet' }),
+  'not-applicable': Object.freeze({ key:'not-applicable', word:'not applicable', tone:'quiet' }),
+  unmeasured: Object.freeze({ key:'unmeasured', word:'not measured', tone:'quiet' }),
+})
+
+export function shipStatus(run = {}) {
+  const ship = run?.ship
+  const meta = SHIP_STATUS_META[ship?.state]
+  const reason = typeof ship?.reason === 'string' && ship.reason.trim() ? ship.reason : null
+  if (!meta || reason === null) return { key:'unmeasured', word:'not measured', tone:'quiet', reason:'ship state not measured' }
+  return { ...meta, reason: ship.stale === true ? `${reason} (cached ship state is stale.)` : reason }
+}
+
 export function driverObservation(run = {}) {
   const runtime = run?.runtime && typeof run.runtime === 'object' ? run.runtime : {}
   const state = ['alive', 'gone', 'unknown'].includes(runtime.driver_state) ? runtime.driver_state : 'unknown'

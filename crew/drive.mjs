@@ -3411,7 +3411,16 @@ export const DOCUMENT_REFUSAL_DECLARATIONS = Object.freeze([
 ])
 export const DOCUMENT_POSTURE_DECLARATIONS = Object.freeze(['RATIFIED_POSTURE'])
 export const DOCUMENT_APPEND_TARGET = 'docs/conventions.md'
+export const DOCUMENT_BATCH_TARGET = 'skills/crew-dispatch/references/batch.md'
+export const DOCUMENT_FLAGS_TARGET = 'skills/crew-dispatch/references/flags.md'
+export const DOCUMENT_LIFECYCLE_ENTRY = 'Run the `document` stage after `commit` and before `publish`.'
 export const DISPATCH_BATCH_FLAG_DECLARATIONS = Object.freeze(['valueFlags', 'booleanFlags', 'repeatableFlags'])
+const DOCUMENT_WRITABLE_TARGETS = new Set([DOCUMENT_APPEND_TARGET, DOCUMENT_BATCH_TARGET, DOCUMENT_FLAGS_TARGET])
+const DOCUMENT_TARGET_ROOTS = new Map([
+  [DOCUMENT_APPEND_TARGET, 'skills/backend-node'],
+  [DOCUMENT_BATCH_TARGET, 'skills/crew-dispatch'],
+  [DOCUMENT_FLAGS_TARGET, 'skills/crew-dispatch'],
+])
 const CLI_MEMBER = /^--?[a-z0-9][a-z0-9-]*$/
 const CLI_UNDASHED_MEMBER = /^[a-z0-9][a-z0-9-]*$/
 const DOCUMENT_TEXT_PATH = /(?:^|[\\/])(?:test|tests|fixtures?)(?:[\\/]|[-_.])|(?:^|[\\/])docs[\\/]|\.md$/i
@@ -3700,20 +3709,26 @@ function documentDate(options) {
   return value === undefined ? new Date().toISOString().slice(0, 10) : String(value)
 }
 
+function documentFlagEntry(group, value) {
+  const dispatchLabels = new Set(['Value', 'Boolean', 'Repeatable'])
+  if (dispatchLabels.has(group)) return `- ${group} flags: \`--${value}\`.`
+  return `"${group}": ["${value}"]`
+}
+
 export function documentEntry(change, options = {}) {
   if (!change || typeof change !== 'object') return null
   if (change.surface === 'lifecycle-stages') {
-    return { surface: 'lifecycle-stages', source: change.path, target: 'skills/crew-dispatch/references/batch.md', entry: '9. Run the `document` stage after `commit` and before `publish`.' }
+    return { surface: 'lifecycle-stages', source: change.path, target: 'skills/crew-dispatch/references/batch.md', entry: DOCUMENT_LIFECYCLE_ENTRY }
   }
   if (change.surface === 'cli-flags') {
     if (change.declaration === 'KNOWN_FLAGS') {
       const group = change.group || 'run'
-      return { surface: 'cli-flags', source: change.path, target: 'skills/crew-dispatch/references/flags.md', entry: JSON.stringify({ [group]: [change.value] }) }
+      return { surface: 'cli-flags', source: change.path, target: 'skills/crew-dispatch/references/flags.md', entry: documentFlagEntry(group, change.value) }
     }
     const labels = { valueFlags: 'Value', booleanFlags: 'Boolean', repeatableFlags: 'Repeatable' }
     const label = labels[change.declaration]
     if (!label) return null
-    return { surface: 'cli-flags', source: change.path, target: 'skills/crew-dispatch/references/flags.md', entry: `- ${label} flags: add \`--${change.value}\`.` }
+    return { surface: 'cli-flags', source: change.path, target: 'skills/crew-dispatch/references/flags.md', entry: documentFlagEntry(label, change.value) }
   }
   const date = documentDate(options)
   if (change.surface === 'closed-refusals') {
@@ -3747,6 +3762,260 @@ export function documentStagePlan(input, options = {}) {
   return { triggered: entries.length > 0, readable: true, entries }
 }
 
+function documentTextLines(text) {
+  const newline = text.includes('\r\n') ? '\r\n' : '\n'
+  return { newline, lines: text.split(/\r\n|\n/) }
+}
+
+function numberedProcedure(lines) {
+  const start = lines.findIndex((line) => /^\s*\d+\.\s+\S/.test(line))
+  if (start < 0) return null
+  const numbered = []
+  let index = start
+  while (index < lines.length) {
+    const line = lines[index]
+    const match = /^\s*(\d+)\.\s+(.+)$/.exec(line)
+    if (match) {
+      numbered.push({ number: Number(match[1]), index, text: match[2] })
+      index += 1
+      continue
+    }
+    if (line.trim() === '') break
+    if (/^\s/.test(line)) {
+      index += 1
+      continue
+    }
+    break
+  }
+  return { numbered, terminator: index }
+}
+
+function firstJsonBlock(lines) {
+  const fenceStart = lines.findIndex((line) => line.trim().toLowerCase() === '```json')
+  if (fenceStart < 0) throw new Error('documentation target has no fenced JSON object')
+  const fenceEnd = lines.findIndex((line, index) => index > fenceStart && line.trim() === '```')
+  if (fenceEnd < 0) throw new Error('documentation target has an unterminated JSON fence')
+  const start = lines.findIndex((line, index) => index > fenceStart && index < fenceEnd && line.trim() === '{')
+  const end = lines.findLastIndex((line, index) => index > fenceStart && index < fenceEnd && line.trim() === '}')
+  if (start < 0 || end < start) throw new Error('documentation target has no fenced JSON object body')
+  return { fenceStart, fenceEnd, start, end }
+}
+
+function jsonPropertyIndex(lines, block, group) {
+  const escaped = String(group).replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')
+  const property = new RegExp(`^\\s*"${escaped}"\\s*:`)
+  for (let index = block.start + 1; index < block.end; index += 1) {
+    if (property.test(lines[index])) return index
+  }
+  return -1
+}
+
+function jsonPropertyInsertionIndex(lines, block) {
+  return block.end
+}
+
+function jsonPreviousPropertyIndex(lines, block) {
+  for (let index = block.end - 1; index > block.start; index -= 1) {
+    if (/^\s*"[A-Za-z_$][\w$-]*"\s*:/.test(lines[index])) return index
+  }
+  return -1
+}
+
+function jsonArrayEndIndex(lines, start, block) {
+  let depth = 0
+  let quote = null
+  let escaped = false
+  for (let row = start; row < block.end; row += 1) {
+    for (const char of lines[row]) {
+      if (quote) {
+        if (escaped) { escaped = false; continue }
+        if (char === '\\') { escaped = true; continue }
+        if (char === quote) quote = null
+        continue
+      }
+      if (char === '"') { quote = char; continue }
+      if (char === '[') depth += 1
+      if (char === ']') depth -= 1
+      if (depth === 0) return row
+    }
+  }
+  return -1
+}
+
+function jsonArrayMembers(lines, start, end) {
+  const source = lines.slice(start, end + 1).join('\n')
+  const open = source.indexOf('[')
+  const close = source.lastIndexOf(']')
+  if (open < 0 || close < open) throw new Error('documentation target has a malformed JSON array')
+  return [...source.slice(open + 1, close).matchAll(/"([^"]+)"/g)].map((match) => match[1])
+}
+
+function insertJsonMember(line, member) {
+  const close = line.lastIndexOf(']')
+  if (close < 0) throw new Error('documentation target has a malformed JSON array line')
+  const before = line.slice(0, close)
+  const trailing = before.match(/\s*$/)?.[0] || ''
+  const body = before.slice(0, before.length - trailing.length)
+  const open = body.lastIndexOf('[')
+  if (open < 0) throw new Error('documentation target has a malformed JSON array line')
+  const values = body.slice(open + 1).trim()
+  const separator = values.length === 0 ? '' : values.endsWith(',') ? ' ' : ', '
+  return `${body}${separator}"${member}"${trailing}]${line.slice(close + 1)}`
+}
+
+function jsonPropertyIndent(lines, block) {
+  for (let index = block.start + 1; index < block.end; index += 1) {
+    const match = /^(\s*)"[A-Za-z_$][\w$-]*"\s*:/.exec(lines[index])
+    if (match) return match[1]
+  }
+  return '  '
+}
+
+function transformJsonEntry(text, entry) {
+  const { newline, lines } = documentTextLines(text)
+  const block = firstJsonBlock(lines)
+  const match = /^"([A-Za-z_$][\w$-]*)": \["([a-z0-9][a-z0-9-]*)"\]$/.exec(entry)
+  if (!match) throw new Error(`documentation target received malformed JSON entry ${entry}`)
+  const group = match[1]
+  const member = match[2]
+  const index = jsonPropertyIndex(lines, block, group)
+  if (index < 0) {
+    const previous = jsonPreviousPropertyIndex(lines, block)
+    if (previous >= 0 && !/,\s*$/.test(lines[previous])) lines[previous] += ','
+    entry = `${jsonPropertyIndent(lines, block)}${entry}`
+  }
+  if (index < 0) lines.splice(jsonPropertyInsertionIndex(lines, block), 0, entry)
+  else {
+    const end = jsonArrayEndIndex(lines, index, block)
+    if (end < 0) throw new Error(`documentation target has a malformed JSON array for ${group}`)
+    if (end === index) lines[index] = insertJsonMember(lines[index], member)
+    else lines.splice(end, 0, `${jsonPropertyIndent(lines, block)}  "${member}",`)
+  }
+  return lines.join(newline)
+}
+
+function dispatchLabel(line) {
+  return /^\s*-\s*(Value|Boolean|Repeatable)(?:\s+flags)?\s*:/.exec(line)?.[1] || null
+}
+
+function dispatchCategoryIndexes(lines, block) {
+  const indexes = []
+  for (let index = block.fenceEnd + 1; index < lines.length; index += 1) {
+    if (dispatchLabel(lines[index])) indexes.push(index)
+  }
+  return indexes
+}
+
+function flagLineInsertionIndex(lines, label) {
+  const order = { Value: 0, Boolean: 1, Repeatable: 2 }
+  const block = firstJsonBlock(lines)
+  const indexes = dispatchCategoryIndexes(lines, block)
+  const later = indexes.find((index) => order[dispatchLabel(lines[index])] > order[label])
+  if (later !== undefined) return later
+  const last = indexes.at(-1)
+  return last === undefined ? block.fenceEnd + 1 : last + 1
+}
+
+function insertFlagMember(line, member) {
+  const open = line.indexOf('`')
+  const close = line.lastIndexOf('`')
+  if (open < 0 || close <= open) throw new Error('documentation target has a malformed labelled flag line')
+  const body = line.slice(open + 1, close)
+  const trailing = body.match(/\s*$/)?.[0] || ''
+  const core = body.slice(0, body.length - trailing.length)
+  const separator = core.trim().length === 0 ? '' : ' '
+  return `${line.slice(0, open + 1)}${core}${separator}--${member}${trailing}${line.slice(close)}`
+}
+
+function transformFlagEntry(text, entry) {
+  const { newline, lines } = documentTextLines(text)
+  const block = firstJsonBlock(lines)
+  const match = /^-\s+(Value|Boolean|Repeatable) flags:\s+`--([a-z0-9][a-z0-9-]*)`\.$/.exec(entry)
+  if (!match) throw new Error(`documentation target received malformed labelled entry ${entry}`)
+  const label = match[1]
+  const member = match[2]
+  const index = dispatchCategoryIndexes(lines, block).find((candidate) => dispatchLabel(lines[candidate]) === label) ?? -1
+  if (index < 0) lines.splice(flagLineInsertionIndex(lines, label), 0, entry)
+  else lines[index] = insertFlagMember(lines[index], member)
+  return lines.join(newline)
+}
+
+function structuralFlagMember(entry) {
+  const json = /^"([A-Za-z_$][\w$-]*)": \["([a-z0-9][a-z0-9-]*)"\]$/.exec(entry)
+  if (json) return { kind: 'json', group: json[1], member: json[2] }
+  const labelled = /^-\s+(Value|Boolean|Repeatable) flags:\s+`--([a-z0-9][a-z0-9-]*)`\.$/.exec(entry)
+  if (labelled) return { kind: 'labelled', label: labelled[1], member: labelled[2] }
+  return null
+}
+
+function targetHasEntry(target, text, entry) {
+  if (target === DOCUMENT_BATCH_TARGET) {
+    const body = entry.replace(/^\s*\d+\.\s+/, '')
+    return text.split(/\r\n|\n/).some((line) => line === body || line.replace(/^\s*\d+\.\s+/, '') === body)
+  }
+  if (target === DOCUMENT_FLAGS_TARGET) {
+    const member = structuralFlagMember(entry)
+    if (!member) return text.split(/\r\n|\n/).includes(entry)
+    const { lines } = documentTextLines(text)
+    const block = firstJsonBlock(lines)
+    if (member.kind === 'json') {
+      const index = jsonPropertyIndex(lines, block, member.group)
+      if (index < 0) return false
+      const end = jsonArrayEndIndex(lines, index, block)
+      return end >= 0 && jsonArrayMembers(lines, index, end).includes(member.member)
+    }
+    return dispatchCategoryIndexes(lines, block).some((index) => {
+      if (dispatchLabel(lines[index]) !== member.label) return false
+      const open = lines[index].indexOf('`')
+      const close = lines[index].lastIndexOf('`')
+      if (open < 0 || close <= open) return false
+      return new RegExp(`(?:^|\\s)--${member.member}(?=\\s|$)`).test(lines[index].slice(open + 1, close))
+    })
+  }
+  return text.split(/\r\n|\n/).includes(entry)
+}
+
+function transformStructuralEntry(target, text, entry) {
+  if (targetHasEntry(target, text, entry)) return text
+  if (target === DOCUMENT_BATCH_TARGET) {
+    const { newline, lines } = documentTextLines(text)
+    const procedure = numberedProcedure(lines)
+    if (!procedure || procedure.numbered.length === 0) throw new Error('documentation target has no contiguous numbered procedure')
+    const { numbered } = procedure
+    const next = Math.max(...numbered.map(({ number }) => number)) + 1
+    lines.splice(procedure.terminator, 0, `${next}. ${entry}`)
+    return lines.join(newline)
+  }
+  if (target === DOCUMENT_FLAGS_TARGET) {
+    const member = structuralFlagMember(entry)
+    if (!member) throw new Error(`documentation target received malformed structural entry ${entry}`)
+    return member.kind === 'json' ? transformJsonEntry(text, entry) : transformFlagEntry(text, entry)
+  }
+  throw new Error(`documentation target ${target} is not structurally writable`)
+}
+
+function appendConventionEntries(text, entries) {
+  const targetLines = text.split('\n')
+  const entryHeadingIndexes = targetLines
+    .map((line, index) => line.replace(/\r$/, '') === '## Entries' ? index : -1)
+    .filter((index) => index >= 0)
+  const entryHeadingIndex = entryHeadingIndexes[0]
+  if (entryHeadingIndexes.length !== 1 || targetLines.slice(entryHeadingIndex + 1).some((line) => /^## /.test(line.replace(/\r$/, '')))) {
+    throw new Error('documentation target is not an append-only Entries document')
+  }
+  const seen = new Set(text.split('\n'))
+  const pending = entries.filter(({ entry }) => !seen.has(entry) && (seen.add(entry), true))
+  if (pending.length === 0) return text
+  return `${text}${text.endsWith('\n') ? '' : '\n'}${pending.map(({ entry }) => entry).join('\n')}\n`
+}
+
+function transformDocumentationTarget(target, text, entries) {
+  if (target === DOCUMENT_APPEND_TARGET) return appendConventionEntries(text, entries)
+  let next = text
+  for (const { entry } of entries) next = transformStructuralEntry(target, next, entry)
+  return next
+}
+
 export function runDocumentationDecision({ ctx = {}, io, commit, inScope = () => false } = {}) {
   const unreadable = (why) => ({ id: 'documentation-plan', type: 'cosmetic', outcome: 'unreadable', summary: `Documentation diff could not be read: ${why}`, plan: [] })
   const plannedResidual = (entries) => ({ id: 'documentation-plan', type: 'cosmetic', outcome: 'planned', summary: `Documentation residuals planned: ${entries.length}`, plan: entries })
@@ -3763,40 +4032,44 @@ export function runDocumentationDecision({ ctx = {}, io, commit, inScope = () =>
   if (!plan.readable) return { commit, documentation: unreadable('diff contained malformed, binary, or non-text sections') }
   if (!plan.triggered) return { commit, documentation: null }
   const writable = plan.entries.filter((entry) => {
-    if (entry.target !== DOCUMENT_APPEND_TARGET) return false
+    if (!DOCUMENT_WRITABLE_TARGETS.has(entry.target)) return false
     if (!inScope(entry.target)) return false
     return true
   })
   const residualEntries = plan.entries.filter((entry) => !writable.includes(entry))
   const operational = (nextCommit) => ({ commit: nextCommit, documentation: residualEntries.length > 0 ? plannedResidual(residualEntries) : null })
   if (writable.length === 0) return operational(commit)
-  const targetPath = `${ctx.checkout}/${DOCUMENT_APPEND_TARGET}`
-  let targetText = io.readFile(targetPath)
-  if (typeof targetText !== 'string') throw new Error(`documentation target ${targetPath} could not be read`)
-  const targetLines = targetText.split('\n')
-  const entryHeadingIndexes = targetLines
-    .map((line, index) => line.replace(/\r$/, '') === '## Entries' ? index : -1)
-    .filter((index) => index >= 0)
-  const entryHeadingIndex = entryHeadingIndexes[0]
-  if (entryHeadingIndexes.length !== 1 || targetLines.slice(entryHeadingIndex + 1).some((line) => /^## /.test(line.replace(/\r$/, '')))) {
-    throw new Error(`documentation target ${targetPath} is not an append-only Entries document`)
+
+  const grouped = new Map()
+  for (const entry of writable) {
+    if (!grouped.has(entry.target)) grouped.set(entry.target, [])
+    grouped.get(entry.target).push(entry)
   }
-  const seen = new Set(targetText.split('\n'))
-  const pending = writable.filter(({ entry }) => !seen.has(entry) && (seen.add(entry), true))
-  if (pending.length > 0) {
-    io.writeFile(targetPath, `${targetText}${targetText.endsWith('\n') ? '' : '\n'}${pending.map(({ entry }) => entry).join('\n')}\n`)
-    const repairCommand = `node skills/qa-test-writing/anchor-pin.mjs --repair skills/backend-node --root ${shellArg(ctx.checkout)} --base ${shellArg(ctx.head)}`
+  const staged = []
+  for (const [target, entries] of grouped) {
+    const targetPath = `${ctx.checkout}/${target}`
+    const targetText = io.readFile(targetPath)
+    if (typeof targetText !== 'string') throw new Error(`documentation target ${targetPath} could not be read`)
+    const nextText = transformDocumentationTarget(target, targetText, entries)
+    if (nextText !== targetText) staged.push({ target, targetPath, text: nextText })
+  }
+  if (staged.length === 0) return operational(commit)
+  for (const { targetPath, text } of staged) io.writeFile(targetPath, text)
+
+  const repairRoots = [...new Set(staged.map(({ target }) => DOCUMENT_TARGET_ROOTS.get(target)).filter(Boolean))]
+  for (const root of repairRoots) {
+    const repairCommand = `node skills/qa-test-writing/anchor-pin.mjs --repair ${root} --root ${shellArg(ctx.checkout)} --base ${shellArg(ctx.head)}`
     const repair = io.run(repairCommand)
     const refusalOutput = /^\s*refused\b/m.test(String(repair?.output || ''))
     if (repair?.ok !== true || (Array.isArray(repair?.refusals) && repair.refusals.length > 0) || repair?.refused === true || refusalOutput) {
       throw new Error(`anchor repair refused${repair?.output ? `: ${String(repair.output).slice(-2000)}` : ''}`)
     }
-    const authoredFiles = io.changedFiles().filter(inScope)
-    const authoredCommit = io.commit(authoredFiles, 'docs: author planned conventions entries')
-    if (typeof authoredCommit !== 'string' || !authoredCommit.trim()) throw new Error('documentation author commit returned no commit id')
-    return operational(authoredCommit)
   }
-  return operational(commit)
+  const structuralChanged = staged.some(({ target }) => target === DOCUMENT_BATCH_TARGET || target === DOCUMENT_FLAGS_TARGET)
+  const authoredFiles = io.changedFiles().filter((path) => inScope(path) || (structuralChanged && path === 'skills/crew-dispatch/anchors.json'))
+  const authoredCommit = io.commit(authoredFiles, 'docs: author planned conventions entries')
+  if (typeof authoredCommit !== 'string' || !authoredCommit.trim()) throw new Error('documentation author commit returned no commit id')
+  return operational(authoredCommit)
 }
 
 // Publication rebases can safely repair a conflict only when every path is one of the

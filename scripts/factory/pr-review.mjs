@@ -324,11 +324,13 @@ function syncCommand(spawn, file, args, options = {}) {
  * alone is not evidence: a partial add can leave either a directory or a
  * registration behind.
  */
-// Canonical form of a worktree path that may no longer exist: the real path of its parent plus its
-// own name. git lists real paths (/private/var on macOS) while resolve() keeps the symlinked form.
+// Canonical form of a worktree path that may no longer exist: the real path of the target, or of its
+// parent plus its own name. git lists real paths (/private/var on macOS) while resolve() keeps the
+// symlinked form. When neither resolves (a symlinked parent that is itself gone), the path is
+// UNRESOLVED: the registration git lists may be the real path, so absence cannot be proven.
 export function canonicalWorktreePath(target, realpath = realpathSync) {
   try { return realpath(target) } catch { /* the worktree directory may already be removed */ }
-  try { return `${realpath(dirname(target))}/${basename(target)}` } catch { return target }
+  try { return `${realpath(dirname(target))}/${basename(target)}` } catch { return null }
 }
 
 export function removeWorktreeDefault(checkout, worktree, options = {}) {
@@ -375,7 +377,11 @@ export function removeWorktreeDefault(checkout, worktree, options = {}) {
     if (!commandSucceeded(listResult) || paths.length === 0) {
       registrationError = commandFailure(listResult, 'git worktree list returned no records')
     } else {
-      registrationAbsent = paths.every((path) => path !== target && path !== canonicalTarget)
+      if (canonicalTarget === null) {
+        registrationError = 'worktree path could not be canonicalized, so its git registration cannot be proven absent'
+      } else {
+        registrationAbsent = paths.every((path) => path !== target && path !== canonicalTarget)
+      }
     }
   } catch (error) { registrationError = errorText(error, 'git worktree list could not be spawned') }
 

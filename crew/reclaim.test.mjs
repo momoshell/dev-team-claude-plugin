@@ -81,7 +81,7 @@ test('override remains subordinate to a live owner', () => each(({ s }) => { con
 test('override mismatch throws', () => each(({ s }) => { s.reserve('a', { phase: PHASES.RUNNING }); assert.throws(() => s.override('a', { actor: 'ops', reservation_id: 'wrong' })) }))
 test('alive evidence outranks override', () => each(({ dir, deps }) => { const ev = join(dir, 'd1', 'pgid'); mkdirSync(join(dir, 'd1')); writeFileSync(ev, '700'); const s = reclaimStore({ dir, deps, probes: { pgid: () => LIVENESS.ALIVE } }); const r = s.reserve('a', { phase: PHASES.SPAWNING, id: 'd1', evidence: { kind: 'pgid', file: ev } }); s.override('a', { actor: 'ops', reservation_id: r.handle.reservation_id }); assert.equal(s.reconcile('a').verdict, VERDICTS.BUSY) }))
 test('lock acquire and release', () => each(({ s }) => { const a = s.acquire('x'); assert.equal(a.ok, true); assert.equal(s.checkFence(a.handle), true); assert.equal(s.release(a.handle), true); assert.equal(s.checkFence(a.handle), false) }))
-test('lock fences increase monotonically and retain epochs', () => each(({ s, dir }) => { const a = s.acquire('x'); s.release(a.handle); const b = s.acquire('x'); assert.equal(b.handle.fence, 2); assert.equal(existsSync(join(dir, 'locks', 'x.lock.1')), true); assert.equal(existsSync(join(dir, 'locks', 'x.lock.2')), true) }))
+test('lock fences increase monotonically and retire superseded epochs', () => each(({ s, dir }) => { const a = s.acquire('x'); s.release(a.handle); const b = s.acquire('x'); assert.equal(b.handle.fence, 2); assert.equal(existsSync(join(dir, 'locks', 'x.lock.1')), false); assert.equal(existsSync(join(dir, 'locks', 'x.lock.2')), true) }))
 test('stale lock release is harmless', () => each(({ s }) => { const a = s.acquire('x'); s.release(a.handle); const b = s.acquire('x'); assert.equal(s.release(a.handle), false); assert.equal(s.checkFence(b.handle), true) }))
 test('withLock passes a handle', () => each(({ s }) => { let seen; s.withLock('x', (h) => { seen = h; assert.equal(s.checkFence(h), true) }); assert.equal(typeof seen.token, 'string') }))
 test('lock override requires attestation', () => each(({ s }) => { const a = s.acquire('x'); assert.throws(() => s.overrideLock('x', { actor: 'ops', reason: 'x', fence: a.handle.fence, token: a.handle.token })); assert.equal(s.checkFence(a.handle), true) }))
@@ -99,7 +99,134 @@ test('canonical evidence probes as busy', () => { const f = fixture(); try { mkd
 test('invalid pgid values are unknown', () => each(({ s, dir, deps }) => { for (const value of ['0', '-1', '1.5', '9007199254740992', '']) { const file = join(dir, `p-${value || 'blank'}`); writeFileSync(file, value); assert.equal(s.probeEvidence({ kind: 'pgid', file }), LIVENESS.UNKNOWN) } }))
 test('lease-shaped engine without surface policies fails closed', () => { const f = deadFixture(); try { const e = reservationEngine({ dir: f.dir, actor: 'x', phases: { allowed: ['held'], preEffect: null }, completionProof: null, evidencePolicy: null, deps: f.deps }); const r = e.reserve('a', { phase: 'held', evidence: { kind: 'unknown' } }); assert.equal(r.ok, true); const p = join(f.dir, '.a.active.json'); const m = JSON.parse(readFileSync(p)); m.owner.pid = 999999999; writeFileSync(p, JSON.stringify(m)); assert.equal(e.reconcile('a').verdict, VERDICTS.UNRESOLVABLE) } finally { f.done() } })
 test('post-link foreign token fails closed without rewriting bytes', () => { const f = fixture(); try { let tampered = null; const s = reclaimStore({ dir: f.dir, actor: 'x', deps: { ...f.deps, linkSync(from, to) { fsLink(from, to); if (!tampered) { tampered = JSON.stringify({ fence: 1, token: 'foreign', owner: { pid: 1 }, released: false }); writeFileSync(to, tampered) } } } }); const r = s.acquire('x'); assert.equal(r.reason, 'unresolvable'); assert.equal(readFileSync(join(f.dir, 'locks', 'x.lock.1'), 'utf8'), tampered) } finally { f.done() } })
-test('lock epoch paths are retained after release', () => each(({ s, dir }) => { const a = s.acquire('x'); s.release(a.handle); s.acquire('x'); assert.equal(existsSync(join(dir, 'locks', 'x.lock.1')), true) }))
+test('lock epoch paths retire after successor acquire', () => each(({ s, dir }) => { const a = s.acquire('x'); s.release(a.handle); s.acquire('x'); assert.equal(existsSync(join(dir, 'locks', 'x.lock.1')), false) }))
+
+test('A1 bounded lock epochs keep only the current maximum', () => each(({ s, dir }) => {
+  const fences = []
+  for (let cycle = 0; cycle < 25; cycle += 1) {
+    const acquired = s.acquire('x')
+    assert.equal(acquired.ok, true)
+    fences.push(acquired.handle.fence)
+    assert.equal(s.release(acquired.handle), true)
+  }
+  assert.deepEqual(fences, Array.from({ length: 25 }, (_, index) => index + 1))
+  assert.deepEqual(readdirSync(join(dir, 'locks')), ['x.lock.25'])
+}))
+
+test('B1 current maximum lock file survives retirement', () => each(({ s, dir }) => {
+  const first = s.acquire('x')
+  assert.equal(first.ok, true)
+  assert.equal(s.release(first.handle), true)
+  const current = s.acquire('x')
+  assert.equal(current.ok, true)
+  const path = join(dir, 'locks', 'x.lock.2')
+  assert.equal(existsSync(path), true)
+  const record = JSON.parse(readFileSync(path, 'utf8'))
+  assert.deepEqual({ fence: record.fence, token: record.token }, { fence: current.handle.fence, token: current.handle.token })
+  assert.equal(s.release(current.handle), true)
+}))
+
+test('C1 retired stale holder loses by fence number without its old file', () => each(({ s, dir }) => {
+  const old = s.acquire('x')
+  assert.equal(old.ok, true)
+  assert.equal(s.release(old.handle), true)
+  const current = s.acquire('x')
+  assert.equal(current.ok, true)
+  assert.equal(existsSync(join(dir, 'locks', 'x.lock.1')), false)
+  assert.equal(s.checkFence(old.handle), false)
+  assert.equal(s.checkFence(current.handle), true)
+  assert.equal(s.release(current.handle), true)
+}))
+
+test('D1 acquisition scans only bounded lock entries', () => each(({ dir, deps }) => {
+  const lockDir = join(dir, 'locks')
+  const counts = []
+  const observedReaddir = (path) => {
+    const entries = readdirSync(path)
+    if (String(path) === lockDir) counts.push(entries.length)
+    return entries
+  }
+  const s = reclaimStore({ dir, actor: 'test', deps: { ...deps, readdirSync: observedReaddir } })
+  for (let cycle = 0; cycle < 25; cycle += 1) {
+    const acquired = s.acquire('x')
+    assert.equal(acquired.ok, true)
+    assert.equal(s.release(acquired.handle), true)
+  }
+  const settled = observedReaddir(lockDir)
+  assert.ok(counts.every((count) => count <= 2))
+  assert.equal(counts.at(-1), 1)
+  assert.deepEqual(settled, ['x.lock.25'])
+}))
+
+test('E1 retirement begins only after the successor maximum exists', () => each(({ dir, deps }) => {
+  const seed = reclaimStore({ dir, actor: 'seed', deps })
+  const first = seed.acquire('x')
+  assert.equal(first.ok, true)
+  assert.equal(seed.release(first.handle), true)
+  const observer = reclaimStore({ dir, actor: 'observer', deps })
+  const oldPath = join(dir, 'locks', 'x.lock.1')
+  const successorPath = join(dir, 'locks', 'x.lock.2')
+  let firstObservation
+  const successorStore = reclaimStore({
+    dir,
+    actor: 'successor',
+    deps: {
+      ...deps,
+      unlinkSync(path) {
+        if (firstObservation === undefined && String(path) === oldPath) {
+          let successorExists = false
+          let successorCurrent = false
+          try {
+            successorExists = existsSync(successorPath)
+            if (successorExists) {
+              const record = JSON.parse(readFileSync(successorPath, 'utf8'))
+              successorCurrent = observer.checkFence({ name: 'x', fence: record.fence, token: record.token })
+            }
+          } catch {}
+          firstObservation = { successorExists, successorCurrent }
+        }
+        return fsUnlink(path)
+      },
+    },
+  })
+  const successor = successorStore.acquire('x')
+  assert.equal(successor.ok, true)
+  assert.deepEqual(firstObservation, { successorExists: true, successorCurrent: true })
+  assert.equal(successorStore.release(successor.handle), true)
+}))
+
+test('F1 retirement unlink failure does not fail acquisition or release', () => each(({ dir, deps }) => {
+  const seed = reclaimStore({ dir, actor: 'seed', deps })
+  const first = seed.acquire('x')
+  assert.equal(first.ok, true)
+  assert.equal(seed.release(first.handle), true)
+  const oldPath = join(dir, 'locks', 'x.lock.1')
+  const scratchUnlinks = []
+  const successorStore = reclaimStore({
+    dir,
+    actor: 'successor',
+    deps: {
+      ...deps,
+      unlinkSync(path) {
+        if (String(path) === oldPath) {
+          const error = Error('retirement denied')
+          error.code = 'EACCES'
+          throw error
+        }
+        scratchUnlinks.push(String(path))
+        return fsUnlink(path)
+      },
+    },
+  })
+  const successor = successorStore.acquire('x')
+  assert.equal(successor.ok, true)
+  assert.equal(successorStore.checkFence(successor.handle), true)
+  assert.equal(successorStore.release(successor.handle), true)
+  assert.equal(successorStore.checkFence(successor.handle), false)
+  assert.ok(scratchUnlinks.some((path) => path.endsWith('.tmp')))
+  assert.equal(readdirSync(join(dir, 'locks')).some((entry) => entry.includes('.tmp')), false)
+}))
+
 test('bounded lock acquisition returns contended', () => { const f = fixture(); try { f.s.acquire('x'); let sleeps = 0; const s = reclaimStore({ dir: f.dir, actor: 'y', deps: { ...f.deps, pid: 701, sleep: () => { sleeps += 1 } } }); const r = s.acquire('x'); assert.equal(r.reason, 'contended'); assert.ok(sleeps <= LOCK_ATTEMPTS) } finally { f.done() } })
 test('ESRCH holder is displaced', () => { const f = fixture(); try { const a = f.s.acquire('x'); const s = reclaimStore({ dir: f.dir, actor: 'y', deps: { ...f.deps, pid: 701, kill: () => { const e = Error(); e.code = 'ESRCH'; throw e } } }); assert.equal(s.acquire('x').ok, true); assert.equal(s.checkFence(a.handle), false) } finally { f.done() } })
 test('unattested lock override does not unblock', () => each(({ s }) => { const a = s.acquire('x'); assert.throws(() => s.overrideLock('x', { actor: 'ops', reason: 'x', fence: a.handle.fence, token: a.handle.token })); assert.equal(s.checkFence(a.handle), true) }))

@@ -194,6 +194,12 @@ export function reclaimStore({ dir, actor, probes = {}, evidencePolicies = {}, d
     try { record = JSON.parse(raw) } catch { /* corrupt maximum */ }
     return { fence, path, raw: String(raw), record }
   }
+  function retireSuperseded({ name, fence }) {
+    for (const epoch of epochs(name)) {
+      if (!(epoch < fence)) continue
+      try { d.unlinkSync(lockPath(name, epoch)) } catch {}
+    }
+  }
   function matchingLockOverride(name, cur) {
     if (!cur) return false
     return readOverrides(overridePath, d).some((r) => {
@@ -309,7 +315,10 @@ export function reclaimStore({ dir, actor, probes = {}, evidencePolicies = {}, d
         releaseHistorical({ name, fence, token })
         return { ok: false, reason: 'lost', attempts }
       }
-      if (after?.fence === fence && after.record?.token === token) return { ok: true, handle: { name, fence, token }, attempts }
+      if (after?.fence === fence && after.record?.token === token) {
+        retireSuperseded({ name, fence })
+        return { ok: true, handle: { name, fence, token }, attempts }
+      }
       if (after?.fence === fence) return { ok: false, reason: 'unresolvable', attempts }
       return { ok: false, reason: 'lost', attempts }
     }

@@ -41,6 +41,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { execSync, spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
+import { isDeepStrictEqual } from 'node:util'
 
 import { cmux, tree, sendLine, renameTab, closeSurface, closeWorkspace, logLine } from './driver.mjs'
 import { slug } from './slug.mjs'
@@ -80,6 +81,8 @@ export { CAPABILITY_DELIVERY, CAPABILITY_REFUSALS, EMPTY_GRANTS, assertGrantsBac
 } from './capabilities.mjs'
 import { completionLogPath } from './factoryctl.mjs'
 import { hostLoad, loadPolicy, assertHostQuiet } from './host-load.mjs'
+import { loadWorkflow, validateWorkflow, workflowRefusal } from './workflows.mjs'
+export { loadWorkflow, validateWorkflow, workflowRefusal } from './workflows.mjs'
 export { LOAD_ENV, hostLoad, loadPolicy, assertHostQuiet } from './host-load.mjs'
 
 // Cell position is resolver context, while the register helper stays reusable for
@@ -2195,6 +2198,10 @@ export function parkOnOutcome(result, { crew, runId, dir, reason, actor = 'crew'
   return { park_id: res.park.park_id, error: null }
 }
 
+function workflowSeatFields(seat) {
+  return { agent: seat?.agent, provider: seat?.provider, id: seat?.id, effort: seat?.effort }
+}
+
 export async function bootCmd(args, deps = {}) {
   const {
     cmux: cmuxFn = cmux, tree: treeFn = tree, renameTab: renameTabFn = renameTab,
@@ -2205,6 +2212,10 @@ export async function bootCmd(args, deps = {}) {
     awaitSeatsReady: awaitSeatsReadyDep = awaitSeatsReady,
     readRosterFile: readRosterFileDep = readFileSync,
     writeRosterSnapshot: writeRosterSnapshotDep = writeRosterSnapshot,
+    loadWorkflow: loadWorkflowDep = loadWorkflow,
+    validateWorkflow: validateWorkflowDep = validateWorkflow,
+    workflowDir: workflowDirDep = null,
+    readWorkflowFile: readWorkflowFileDep = null,
   } = deps
   // Capture the invocation environment before async adapter resolution so the
   // breaker and host-load policies cannot be lost while boot is awaiting imports.
@@ -2230,7 +2241,11 @@ export async function bootCmd(args, deps = {}) {
   const laneFence = resolveLaneFence(args)
   let roles, tierName = null, tierSeats = null, sources = null, roster = null
   let rosterRecord = null
+  let workflow = null
   const seatingTier = args.tier !== undefined || args.assurance !== undefined ? assuranceTier(configuration.assurance.effective) : null
+  if (args.workflow && !seatingTier) {
+    throw workflowRefusal('workflow-needs-tier', `--workflow ${JSON.stringify(args.workflow)} requires --tier or --assurance so the effective seating tier and model floor are known`, { workflow: args.workflow })
+  }
   if (seatingTier) {
     if (args.roles) throw new Error('--assurance/--tier and --roles are mutually exclusive: the assurance defines the seating')
     // The roster is the RUNTIME's policy, not the target checkout's. A
@@ -2299,6 +2314,28 @@ export async function bootCmd(args, deps = {}) {
     assertBandFloors(seats, tierName, ladder, { adapters, localProviders: registry.local_providers, models: roster?.models })
     // #377: the same floor over the models granted agent DEFINITIONS pin.
     assertDefBandFloors(grantedDefModels(adapters, { localProviders: registry.local_providers }), tierName, ladder, { adapters, localProviders: registry.local_providers })
+  }
+  if (args.workflow) {
+    const workflowLoadOptions = {}
+    if (workflowDirDep) workflowLoadOptions.dir = workflowDirDep
+    if (readWorkflowFileDep) workflowLoadOptions.readFile = readWorkflowFileDep
+    const workflowMap = loadWorkflowDep(args.workflow, workflowLoadOptions)
+    const workflowPath = resolvePath(join(workflowDirDep || join(HERE, 'workflows'), `${args.workflow}.json`))
+    const validated = validateWorkflowDep(workflowMap, {
+      register: registry, ladder, tier: tierName, roles, path: workflowPath,
+    })
+    workflow = { name: args.workflow, ...validated }
+    for (const role of roles) {
+      const expected = workflowSeatFields(workflow.seats[role])
+      const actual = workflowSeatFields(seats?.[role])
+      if (!isDeepStrictEqual(actual, expected)) {
+        throw workflowRefusal(
+          'workflow-seat-mismatch',
+          `workflow ${workflow.name} seat for role ${role} expected ${JSON.stringify(expected)}, found ${JSON.stringify(actual)}`,
+          { role, expected, actual },
+        )
+      }
+    }
   }
   // #45 Tier B: opt-in cell breaker. With no policy configured this is a
   // null and the ledger is never opened (acceptance #1). An open cell
@@ -2432,6 +2469,7 @@ export async function bootCmd(args, deps = {}) {
     vendor_withheld: adapters[role].grants?.vendor_withheld ?? [],
     mcp_servers: adapters[role].grants?.mcp_servers ?? [],
     ...(seats ? { effort: seats[role].effort, provider: seats[role].provider, id: seats[role].id } : {}),
+    ...(workflow ? { workflow_seat: workflow.seats[role] } : {}),
     ...(seats?.[role]?.fallback ? { fallback: seats[role].fallback } : {}),
   })
   if (headlessOnly) {
@@ -2503,6 +2541,7 @@ export async function bootCmd(args, deps = {}) {
     ...(workerBin ? { claude_bin: workerBin } : {}),
     ...(turnCeilingRecord ? { turn_ceilings: turnCeilingRecord } : {}),
     ...(tierName ? { tier: tierName, seats } : {}),
+    ...(workflow ? { workflow: workflow.name } : {}),
     ...(rosterRecord ? { roster: { path: rosterRecord.path, origin: rosterRecord.origin, sha256: rosterRecord.sha256, snapshot: rosterSnapshot } } : {}),
     ...(laneFence ? { lane_name: laneFence.lane, lane_fence: laneFence.fence } : {}),
     ...(advisorRecord.granted.length ? { advisor: advisorRecord } : {}),
@@ -3982,7 +4021,7 @@ export function parseArgs(argv) {
 }
 
 export const KNOWN_FLAGS = Object.freeze({
-  boot: Object.freeze(['task', 'checkout', 'roles', 'tier', 'fences', 'lane', 'headless', 'headless-rpc', 'headless-all', 'memory-dir', 'memory-backend', 'memory-budget-bytes', 'claude-bin', 'profile', 'assurance', 'roster', 'charter-arm', ...TURN_CEILING_FLAGS]),
+  boot: Object.freeze(['task', 'checkout', 'roles', 'tier', 'fences', 'lane', 'headless', 'headless-rpc', 'headless-all', 'memory-dir', 'memory-backend', 'memory-budget-bytes', 'claude-bin', 'profile', 'assurance', 'roster', 'workflow', 'charter-arm', ...TURN_CEILING_FLAGS]),
   run: Object.freeze(['task', 'checkout', 'brief-file', 'variant', 'execution', 'files-in-scope', 'validation-lane', 'lane', 'plan-rounds', 'build-rounds', 'review-rounds', ...WAIT_FLAGS, 'suite', 'keep', 'claude-bin']),
   resume: Object.freeze(['task', 'checkout', 'suite', 'keep']),
   handoff: Object.freeze(['task', 'checkout', 'brief-file']),
@@ -4003,7 +4042,7 @@ export const FLAG_VALUE_REFUSAL = 'invalid-flag-value'
 export const FLAG_VALUE_CONTRACT = Object.freeze({
   task: 'value', checkout: 'value', roles: 'value', tier: 'value',
   fences: 'value', lane: 'value', 'brief-file': 'value', variant: 'value',
-  profile: 'value', execution: 'value', assurance: 'value', roster: 'value', 'charter-arm': 'value',
+  profile: 'value', execution: 'value', assurance: 'value', roster: 'value', workflow: 'value', 'charter-arm': 'value',
   'files-in-scope': 'value', 'validation-lane': 'value',
   'plan-rounds': 'value', 'build-rounds': 'value', 'review-rounds': 'value',
   ...Object.fromEntries(WAIT_FLAGS.map((flag) => [flag, 'value'])),

@@ -51,6 +51,7 @@ import { testCheckout } from '../test/fixtures.mjs'
 import { ROOT, scratchDir } from '../test/helpers.mjs'
 import { FINGERPRINT_FILE, FINGERPRINT_OUTCOMES, FINGERPRINT_WITHHELD, checkRecordedTree } from './tree-fingerprint.mjs'
 import { probeRepo } from '../scripts/factory/probe-repo.mjs'
+import { WORKFLOW_REFUSALS, SEAT_BEARING_STAGES, loadWorkflow, validateWorkflow } from './workflows.mjs'
 
 // Ledger sandbox (#432): every ledger writer this file drives resolves its db
 // through DEVTEAM_LEDGER_DIR (scripts/factory/ledger.mjs:2903), so this
@@ -1025,13 +1026,13 @@ function callCounter() {
   return fn
 }
 
-async function bootSeatRows({ task = 'seat-writer', tier = 'build', args = {}, openRun: openRunDep = null, afterBoot = null } = {}) {
+async function bootSeatRows({ task = 'seat-writer', tier = 'build', args = {}, openRun: openRunDep = null, afterBoot = null, rosterValue = roster, workflowDir = null, readWorkflowFile = null } = {}) {
   const home = scratchDir(`crew-seat-writer-${task}-home-`)
   const { root: checkoutRoot, checkout } = testCheckout(`crew-seat-writer-${task}-checkout-`)
   const rosterPath = join(home, 'roster.json')
   const dbPath = join(home, 'ledger.db')
   const brief = join(home, 'brief.md')
-  writeFileSync(rosterPath, JSON.stringify(roster, null, 2))
+  writeFileSync(rosterPath, JSON.stringify(rosterValue, null, 2))
   writeFileSync(brief, '# seat writer brief\n')
   execSync('git init -q && git -c user.email=seat-writer@example.test -c user.name=seat-writer commit --allow-empty -q -m seed', { cwd: checkout })
   const envKeys = ['DEVTEAM_LEDGER_DB', 'DEVTEAM_LEDGER_DIR']
@@ -1042,7 +1043,12 @@ async function bootSeatRows({ task = 'seat-writer', tier = 'build', args = {}, o
     task, checkout, ...(tier === null ? {} : { tier }), roster: rosterPath,
     'headless-all': true, 'claude-bin': process.execPath, ...args,
   }
-  const deps = { cmux: callCounter(), tree: callCounter(), renameTab: callCounter(), ...(openRunDep ? { openRun: openRunDep } : {}) }
+  const deps = {
+    cmux: callCounter(), tree: callCounter(), renameTab: callCounter(),
+    ...(openRunDep ? { openRun: openRunDep } : {}),
+    ...(workflowDir ? { workflowDir } : {}),
+    ...(readWorkflowFile ? { readWorkflowFile } : {}),
+  }
   const previousStdoutWrite = process.stdout.write
   let before = null
   try {
@@ -10096,4 +10102,238 @@ test('I1 grant snapshots cannot replay across roles', async () => {
     },
   })
   assert.equal(seatIoCalls, 0)
+})
+
+const workflowPath = fileURLToPath(new URL('./workflows/full.json', import.meta.url))
+const workflowSourcePath = fileURLToPath(new URL('./workflows.mjs', import.meta.url))
+const workflowMap = () => JSON.parse(readFileSync(workflowPath, 'utf8'))
+const workflowRoles = ['lead', 'planner', 'builder', 'reviewer']
+const workflowOptions = (overrides = {}) => ({
+  register: loadCapabilities(), ladder: loadLadder(), tier: 'build', roles: workflowRoles,
+  path: '<workflow>', ...overrides,
+})
+const cloneWorkflow = () => workflowMap()
+const workflowReason = (fn, reason) => {
+  assert.throws(fn, (error) => error?.reason === reason)
+}
+
+// D1 validates the shipped declaration against runtime capabilities and the
+// ratified ladder, then projects only the role-keyed, frozen seat contract.
+test('D1-valid shipped workflow validates', () => {
+  const resolved = validateWorkflow(loadWorkflow('full'), workflowOptions())
+  assert.equal(resolved.shape, 'full')
+  assert.deepEqual(Object.keys(resolved.seats), ['planner', 'builder', 'lead', 'reviewer'])
+  assert.equal(Object.isFrozen(resolved), true)
+  assert.equal(Object.isFrozen(resolved.seats), true)
+  for (const role of workflowRoles) {
+    const seat = resolved.seats[role]
+    assert.deepEqual(Object.keys(seat), ['agent', 'provider', 'id', 'effort', 'skills', 'extensions', 'availability'])
+    assert.equal(seat.availability, 'unmeasured')
+    assert.equal(Object.isFrozen(seat), true)
+  }
+})
+
+test('D1-codes workflow refusal set is frozen and every validator code is reachable', () => {
+  assert.deepEqual(WORKFLOW_REFUSALS, [
+    'workflow-name-invalid', 'workflow-unreadable', 'workflow-schema', 'workflow-shape-unsupported',
+    'workflow-stage-extra', 'workflow-stage-not-seated', 'workflow-stage-missing', 'workflow-stage-role',
+    'workflow-role-unseated', 'workflow-role-divergent', 'workflow-agent-unknown', 'workflow-model-unknown',
+    'workflow-model-below-floor', 'workflow-grant-undeliverable', 'workflow-needs-tier', 'workflow-seat-mismatch',
+  ])
+  assert.equal(Object.isFrozen(WORKFLOW_REFUSALS), true)
+  const dir = mkdtempSync(join(tmpdir(), 'crew-workflow-codes-'))
+  try {
+    writeFileSync(join(dir, 'broken.json'), '{')
+    workflowReason(() => loadWorkflow('Bad', { dir }), 'workflow-name-invalid')
+    workflowReason(() => loadWorkflow('missing', { dir }), 'workflow-unreadable')
+    workflowReason(() => loadWorkflow('broken', { dir }), 'workflow-unreadable')
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+
+  const cases = [
+    ['workflow-schema', () => ({ ...cloneWorkflow(), extra: true })],
+    ['workflow-shape-unsupported', () => ({ shape: 'scout', seats: {} })],
+    ['workflow-stage-extra', () => {
+      const map = cloneWorkflow(); map.seats.extra = { ...map.seats.plan }; return map
+    }],
+    ['workflow-stage-not-seated', () => {
+      const map = cloneWorkflow(); map.seats['scope-gate'] = { ...map.seats.plan }; return map
+    }],
+    ['workflow-stage-missing', () => {
+      const map = cloneWorkflow(); delete map.seats.plan; return map
+    }],
+    ['workflow-stage-role', () => {
+      const map = cloneWorkflow(); map.seats.plan.role = 'builder'; return map
+    }],
+    ['workflow-role-unseated', () => {
+      const map = cloneWorkflow()
+      map.seats.check = { ...map.seats.plan, role: 'tech-lead', extensions: [] }
+      return map
+    }],
+    ['workflow-agent-unknown', () => {
+      const map = cloneWorkflow(); map.seats.plan.agent = 'unknown-agent'; return map
+    }],
+    ['workflow-model-unknown', () => {
+      const map = cloneWorkflow(); map.seats.plan.id = 'unknown-model'; return map
+    }],
+    ['workflow-model-below-floor', () => {
+      const map = cloneWorkflow()
+      map.seats.plan.agent = 'claude'; map.seats.plan.provider = 'anthropic'; map.seats.plan.id = 'claude-haiku-4-5'; map.seats.plan.extensions = []
+      return map
+    }],
+    ['workflow-grant-undeliverable', () => {
+      const map = cloneWorkflow(); map.seats.plan.skills = ['crew/skills/not-granted.md']; return map
+    }],
+    ['workflow-role-divergent', () => {
+      const map = cloneWorkflow(); map.seats.review.role = 'builder'
+      const inventory = { ...SEAT_BEARING_STAGES, full: { ...SEAT_BEARING_STAGES.full, review: 'builder' } }
+      return { map, options: { seatBearingStages: inventory } }
+    }],
+  ]
+  for (const [reason, make] of cases) {
+    const candidate = make()
+    const map = candidate.map || candidate
+    const options = candidate.options || {}
+    workflowReason(() => validateWorkflow(map, workflowOptions(options)), reason)
+  }
+})
+
+test('D1-skill ungranted workflow skill refuses', () => {
+  const map = cloneWorkflow(); map.seats.plan.skills = ['crew/skills/not-granted.md']
+  workflowReason(() => validateWorkflow(map, workflowOptions()), 'workflow-grant-undeliverable')
+})
+
+test('D1-extension ungranted workflow extension refuses', () => {
+  const map = cloneWorkflow(); map.seats.plan.extensions = ['crew/pi/extensions/not-granted.ts']
+  workflowReason(() => validateWorkflow(map, workflowOptions()), 'workflow-grant-undeliverable')
+})
+
+test('D1-basement basement workflow model below utility refuses', () => {
+  const map = cloneWorkflow()
+  map.seats.plan.agent = 'claude'; map.seats.plan.provider = 'anthropic'; map.seats.plan.id = 'claude-haiku-4-5'; map.seats.plan.extensions = []
+  workflowReason(() => validateWorkflow(map, workflowOptions()), 'workflow-model-below-floor')
+})
+
+test('D1-agent unknown workflow agent refuses', () => {
+  const map = cloneWorkflow(); map.seats.plan.agent = 'unknown-agent'
+  workflowReason(() => validateWorkflow(map, workflowOptions()), 'workflow-agent-unknown')
+})
+
+test('D1-extra stage absent from workflow shape refuses', () => {
+  const map = cloneWorkflow(); map.seats.extra = { ...map.seats.plan }
+  workflowReason(() => validateWorkflow(map, workflowOptions()), 'workflow-stage-extra')
+})
+
+test('D1-not-seated code-only shape stage refuses', () => {
+  const map = cloneWorkflow(); map.seats['scope-gate'] = { ...map.seats.plan }
+  workflowReason(() => validateWorkflow(map, workflowOptions()), 'workflow-stage-not-seated')
+})
+
+test('D1-missing required seated workflow stage refuses', () => {
+  const map = cloneWorkflow(); delete map.seats.plan
+  workflowReason(() => validateWorkflow(map, workflowOptions()), 'workflow-stage-missing')
+})
+
+test('D1-role wrong workflow stage role refuses', () => {
+  const map = cloneWorkflow(); map.seats.plan.role = 'builder'
+  workflowReason(() => validateWorkflow(map, workflowOptions()), 'workflow-stage-role')
+})
+
+test('D1-unseated stage for an unseated workflow role refuses', () => {
+  const map = cloneWorkflow(); map.seats.check = { ...map.seats.plan, role: 'tech-lead', extensions: [] }
+  workflowReason(() => validateWorkflow(map, workflowOptions()), 'workflow-role-unseated')
+})
+
+test('D1-divergent same-role workflow cells refuse', () => {
+  const map = cloneWorkflow(); map.seats.review.role = 'builder'
+  const seatBearingStages = { ...SEAT_BEARING_STAGES, full: { ...SEAT_BEARING_STAGES.full, review: 'builder' } }
+  workflowReason(() => validateWorkflow(map, workflowOptions({ seatBearingStages })), 'workflow-role-divergent')
+})
+
+test('D1-leaf workflow validator imports neither crew nor drive', () => {
+  const source = readFileSync(workflowSourcePath, 'utf8')
+  assert.doesNotMatch(source, /from ['"]\.\/(?:crew|drive)\.mjs['"]/)
+  assert.doesNotMatch(source, /import ['"]\.\/(?:crew|drive)\.mjs['"]/)
+})
+
+test('E1-mismatch named workflow seat drift refuses before side effects', async () => {
+  const home = scratchDir('crew-workflow-mismatch-home-')
+  const { root: checkoutRoot, checkout } = testCheckout('crew-workflow-mismatch-checkout-')
+  const task = 'workflow-mismatch'
+  const rosterPath = join(home, 'roster.json')
+  const dbPath = join(home, 'ledger.db')
+  writeFileSync(rosterPath, JSON.stringify(shippedRoster(), null, 2))
+  execSync('git init -q && git -c user.email=workflow@example.test -c user.name=workflow commit --allow-empty -q -m seed', { cwd: checkout })
+  const cmux = callCounter(); const tree = callCounter()
+  const args = {
+    task, checkout, tier: 'build', roster: rosterPath, workflow: 'full',
+    'headless-all': true, 'claude-bin': process.execPath, 'effort-builder': 'high',
+  }
+  try {
+    await withHome(home, () => assert.rejects(
+      () => bootCmd(args, { cmux, tree, workflowDir: join(ROOT, 'crew/workflows') }),
+      (error) => error?.reason === 'workflow-seat-mismatch'
+        && error.role === 'builder'
+        && error.expected?.agent === 'pi'
+        && error.expected?.effort === 'max'
+        && error.actual?.agent === 'pi'
+        && error.actual?.effort === 'high'
+        && error.message.includes('builder')
+        && error.message.includes('workflow-seat-mismatch'),
+    ))
+    assert.equal(cmux.calls.length, 0)
+    assert.equal(tree.calls.length, 0)
+    assert.equal(existsSync(testCrewDir(home, checkout, task)), false)
+  } finally {
+    rmSync(home, { recursive: true, force: true }); rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+})
+
+test('E1-unnamed boot member record stays deep-equal', async () => {
+  const unnamed = await bootSeatRows({ task: 'workflow-unnamed-before', rosterValue: shippedRoster() })
+  const named = await bootSeatRows({
+    task: 'workflow-unnamed-after', rosterValue: shippedRoster(), args: { workflow: 'full' },
+    workflowDir: join(ROOT, 'crew/workflows'),
+  })
+  const withoutWorkflowSeat = (members) => Object.fromEntries(Object.entries(members).map(([role, member]) => {
+    const copy = JSON.parse(JSON.stringify(member)); delete copy.workflow_seat; return [role, copy]
+  }))
+  const crewContract = (crew) => {
+    const copy = JSON.parse(JSON.stringify(crew))
+    for (const key of ['created_at', 'checkout', 'workspace_id', 'window_id', 'task', 'task_return', 'roster', 'workflow']) delete copy[key]
+    copy.members = withoutWorkflowSeat(copy.members)
+    return copy
+  }
+  assert.deepEqual(withoutWorkflowSeat(named.crew.members), unnamed.crew.members)
+  assert.deepEqual(crewContract(named.crew), crewContract(unnamed.crew))
+})
+
+test('E1-record named workflow persists map and unmeasured seat availability', async () => {
+  const rows = await bootSeatRows({
+    task: 'workflow-record', rosterValue: shippedRoster(), args: { workflow: 'full' },
+    workflowDir: join(ROOT, 'crew/workflows'),
+  })
+  const validated = validateWorkflow(loadWorkflow('full'), workflowOptions())
+  assert.equal(rows.crew.workflow, 'full')
+  for (const role of workflowRoles) {
+    assert.deepEqual(rows.crew.members[role].workflow_seat, validated.seats[role])
+    assert.equal(rows.crew.members[role].workflow_seat.availability, 'unmeasured')
+  }
+})
+
+test('E1-tier workflow boot without tier or assurance refuses before side effects', async () => {
+  const home = scratchDir('crew-workflow-tier-home-')
+  const { root: checkoutRoot, checkout } = testCheckout('crew-workflow-tier-checkout-')
+  const task = 'workflow-tier-required'
+  const cmux = callCounter(); const tree = callCounter()
+  try {
+    await withHome(home, () => assert.rejects(
+      () => bootCmd({ task, checkout, workflow: 'full', roles: 'builder', 'headless-all': true, 'claude-bin': process.execPath }, { cmux, tree }),
+      (error) => error?.reason === 'workflow-needs-tier' && error.message.includes('workflow-needs-tier'),
+    ))
+    assert.equal(cmux.calls.length, 0)
+    assert.equal(tree.calls.length, 0)
+    assert.equal(existsSync(testCrewDir(home, checkout, task)), false)
+  } finally {
+    rmSync(home, { recursive: true, force: true }); rmSync(checkoutRoot, { recursive: true, force: true })
+  }
 })

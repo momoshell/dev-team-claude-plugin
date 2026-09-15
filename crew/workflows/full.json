@@ -1,0 +1,49 @@
+{
+  "shape": "full",
+  "seats": {
+    "plan": {
+      "role": "planner",
+      "agent": "pi",
+      "provider": "openai",
+      "id": "gpt-5.6-sol",
+      "effort": "medium",
+      "skills": [],
+      "extensions": [
+        "crew/pi/extensions/subagent.ts",
+        "crew/pi/extensions/lab.ts",
+        "crew/pi/extensions/readgate.ts"
+      ]
+    },
+    "build": {
+      "role": "builder",
+      "agent": "pi",
+      "provider": "openai",
+      "id": "gpt-5.6-luna",
+      "effort": "max",
+      "skills": [],
+      "extensions": [
+        "crew/pi/extensions/builderloop.ts",
+        "crew/pi/extensions/readgate.ts",
+        "crew/pi/extensions/skeletonread.ts"
+      ]
+    },
+    "gate-repair": {
+      "role": "lead",
+      "agent": "claude",
+      "provider": "anthropic",
+      "id": "claude-opus-5",
+      "effort": "medium",
+      "skills": [],
+      "extensions": []
+    },
+    "review": {
+      "role": "reviewer",
+      "agent": "claude",
+      "provider": "anthropic",
+      "id": "claude-opus-5",
+      "effort": "high",
+      "skills": [],
+      "extensions": []
+    }
+  }
+}

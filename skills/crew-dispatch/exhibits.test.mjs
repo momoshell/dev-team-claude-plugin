@@ -305,6 +305,7 @@ test('I1 tracked non-test owners are covered by dynamic reach census', () => {
   const addedOwners = [
     ['visualizer/server/openrouter-catalog.mjs', ['test/visualizer-model-catalog.test.mjs']],
     ['scripts/factory/agent-doctor.mjs', ['test/factory-agent-doctor.test.mjs']],
+    ['scripts/factory/pr-review.mjs', ['test/factory-pr-review.test.mjs']],
     ['visualizer/server/workflows-source.mjs', ['test/visualizer-server.test.mjs']],
     ['visualizer/web/src/lib/workflows.js', ['test/visualizer-panels.test.mjs']],
     ['visualizer/web/src/lib/WorkflowsPage.svelte', ['test/visualizer-panels.test.mjs']],
@@ -312,7 +313,7 @@ test('I1 tracked non-test owners are covered by dynamic reach census', () => {
     ['visualizer/web/src/lib/stage-docs.json', ['test/visualizer-panels.test.mjs']],
     ['skills/lean-build/SKILL.md', ['crew/drive-docs.test.mjs']],
   ]
-  const addedTests = ['test/factory-agent-doctor.test.mjs']
+  const addedTests = ['test/factory-agent-doctor.test.mjs', 'test/factory-pr-review.test.mjs']
   const currentReach = collectTestReach({ checkout: ROOT })
   const addedPaths = addedOwners.map(([owner]) => owner)
   const currentFiles = [...new Set([...gitPaths(['ls-files', '-z']), ...addedPaths, ...addedTests])]

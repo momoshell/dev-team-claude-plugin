@@ -2895,6 +2895,7 @@ export function runCmd(args, deps = {}) {
   // dispatch refuses HERE when the dispatch carries none — before crew state is
   // read and long before a seat is driven.
   assertCtxSources(executionConfiguration.execution.effective, { validationLane })
+  const reviewIdentity = reviewIdentityFromArgs(args)
   const { drive = driveTask, appendCompletion: appendCompletionDep = appendCompletion, awaitSeatsReady: awaitSeatsReadyDep = awaitSeatsReady, writeTerminalLine: writeTerminalLineDep, seatIo: seatIoDep = seatIo, openRun: openRunDep = openRun, installRunFinalizers: installRunFinalizersDep, randomUUID: randomUUIDDep = randomUUID } = deps
   const taskSlug = slug(args.task)
   const checkout = resolvePath(args.checkout || process.cwd())
@@ -2995,6 +2996,7 @@ export function runCmd(args, deps = {}) {
     ...(limitsOverlay ? { limits: limitsOverlay } : {}),
     ...(waitsOverlay ? { waits: waitsOverlay } : {}),
     ...(crew.turn_ceilings ? { turnCeilings: crew.turn_ceilings } : {}),
+    ...(reviewIdentity ? { review_identity: reviewIdentity } : {}),
     ...(filesInScope ? { files_in_scope: filesInScope } : {}),
   }
   // Keep run identity available to the driver without making otherwise stable
@@ -4022,7 +4024,7 @@ export function parseArgs(argv) {
 
 export const KNOWN_FLAGS = Object.freeze({
   boot: Object.freeze(['task', 'checkout', 'roles', 'tier', 'fences', 'lane', 'headless', 'headless-rpc', 'headless-all', 'memory-dir', 'memory-backend', 'memory-budget-bytes', 'claude-bin', 'profile', 'assurance', 'roster', 'workflow', 'charter-arm', ...TURN_CEILING_FLAGS]),
-  run: Object.freeze(['task', 'checkout', 'brief-file', 'variant', 'execution', 'files-in-scope', 'validation-lane', 'lane', 'plan-rounds', 'build-rounds', 'review-rounds', ...WAIT_FLAGS, 'suite', 'keep', 'claude-bin']),
+  run: Object.freeze(['task', 'checkout', 'brief-file', 'variant', 'execution', 'files-in-scope', 'validation-lane', 'lane', 'plan-rounds', 'build-rounds', 'review-rounds', 'review-base-sha', 'review-head-sha', ...WAIT_FLAGS, 'suite', 'keep', 'claude-bin']),
   resume: Object.freeze(['task', 'checkout', 'suite', 'keep']),
   handoff: Object.freeze(['task', 'checkout', 'brief-file']),
   wait: Object.freeze(['task', 'checkout', 'timeout-s']),
@@ -4045,6 +4047,7 @@ export const FLAG_VALUE_CONTRACT = Object.freeze({
   profile: 'value', execution: 'value', assurance: 'value', roster: 'value', workflow: 'value', 'charter-arm': 'value',
   'files-in-scope': 'value', 'validation-lane': 'value',
   'plan-rounds': 'value', 'build-rounds': 'value', 'review-rounds': 'value',
+  'review-base-sha': 'value', 'review-head-sha': 'value',
   ...Object.fromEntries(WAIT_FLAGS.map((flag) => [flag, 'value'])),
   ...Object.fromEntries(TURN_CEILING_FLAGS.map((flag) => [flag, 'value'])),
   suite: 'value', 'claude-bin': 'value', 'timeout-s': 'value', pid: 'value',
@@ -4138,6 +4141,17 @@ export function assertUsage(verb, args) {
       throw new UsageError(`crew.mjs ${verb} requires --${flag} ${shape}`)
     }
   }
+}
+
+const REVIEW_SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
+export function reviewIdentityFromArgs(args = {}) {
+  const baseSha = args?.['review-base-sha']
+  const headSha = args?.['review-head-sha']
+  if (baseSha === undefined && headSha === undefined) return null
+  if (typeof baseSha !== 'string' || typeof headSha !== 'string' || !REVIEW_SHA.test(baseSha) || !REVIEW_SHA.test(headSha)) {
+    throw Object.assign(new UsageError(`review identity requires paired lowercase 40- or 64-character hexadecimal SHAs [invalid-review-identity]`), { reason: 'invalid-review-identity' })
+  }
+  return Object.freeze({ base_sha: baseSha, head_sha: headSha })
 }
 
 // package.json's scripts.test is the one suite-command owner (#616); this

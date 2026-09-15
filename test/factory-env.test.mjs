@@ -1,8 +1,9 @@
+import { execFileSync } from 'node:child_process'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, readdirSync } from 'node:fs'
-import { join, posix } from 'node:path'
-import { ROOT } from './helpers.mjs'
+import { readFileSync, readdirSync, mkdirSync, writeFileSync } from 'node:fs'
+import { dirname, join, posix } from 'node:path'
+import { ROOT, scratchDir } from './helpers.mjs'
 import { NODE_FLOOR } from '../scripts/factory/ledger.mjs'
 
 const workflowYml = readFileSync(join(ROOT, '.github/workflows/test.yml'), 'utf8')
@@ -517,10 +518,169 @@ const LEDGER_SANDBOX_EXEMPT = new Map([
   }],
 ])
 const TRIPWIRE_SELF = 'test/factory-env.test.mjs'
+// These are exact Vite build entrypoints loaded only by Vite, not a prefix allowlist.
+const PACKAGE_IMPORT_BUILD_ENTRYPOINTS = ['visualizer/web/src/main.js', 'visualizer/web/vite.config.mjs']
+const NODE_MODULE_FILE = (file) => (file.endsWith('.js') || file.endsWith('.mjs')) && !file.split('/').includes('node_modules')
+// The optional clause may span lines (a multi-line { a, b } list) but never a quote: a lazy
+// [\s\S]*? let `import "pkg"` followed by `import { a } from "./a.js"` swallow the side-effect
+// import whole and report only ./a.js (review RV1-1).
+const IMPORT_FROM = /^(\s*)import\s+(?:[^'"]*?\s+from\s+)?(['"])([^'"\r\n]+)\2/gm
+const EXPORT_FROM = /^(\s*)export\s+(?:\*[^'"\r\n]*|\{[\s\S]*?\})\s+from\s+(['"])([^'"\r\n]+)\2/gm
+const DYNAMIC_IMPORT = /\bimport\s*\(\s*(['"])([^'"\r\n]+)\1\s*\)/g
+
+function importSpecifiers(source) {
+  const text = String(source)
+  const code = maskCode(text)
+  const patterns = [
+    [IMPORT_FROM, 3, 'import'],
+    [EXPORT_FROM, 3, 'export'],
+    [DYNAMIC_IMPORT, 2, 'import'],
+  ]
+  const specifiers = []
+  for (const [pattern, specifierCapture, keyword] of patterns) {
+    for (const match of text.matchAll(pattern)) {
+      const keywordOffset = match.index + match[0].indexOf(keyword)
+      if (code.slice(keywordOffset, keywordOffset + keyword.length) !== keyword) continue
+      specifiers.push(match[specifierCapture])
+    }
+  }
+  return specifiers
+}
+
+function admittedSpecifier(specifier) {
+  return specifier.startsWith('node:') || specifier.startsWith('./') || specifier.startsWith('../') || specifier.startsWith('/') || specifier.startsWith('file:')
+}
+
+function packageImportScan(repoRoot, fileList) {
+  const scanned = fileList.filter((file) => NODE_MODULE_FILE(file) && !PACKAGE_IMPORT_BUILD_ENTRYPOINTS.includes(file))
+  if (scanned.length === 0) throw new Error('package import tripwire scanned 0 files')
+  const offenders = []
+  for (const file of scanned) {
+    const source = readFileSync(join(repoRoot, file), 'utf8')
+    for (const specifier of importSpecifiers(source)) {
+      if (!admittedSpecifier(specifier)) offenders.push(`${file}: ${specifier}`)
+    }
+  }
+  return { scanned: scanned.length, offenders }
+}
+
+function trackedFiles(repoRoot) {
+  const output = execFileSync('git', ['-C', repoRoot, 'ls-files', '-z'], { encoding: 'utf8' })
+  const files = output.split('\0')
+  if (files.at(-1) === '') files.pop()
+  return files
+}
+
+function packageImportScratchRepo(fixtures) {
+  const root = scratchDir('factory-package-import-')
+  for (const [file, source] of Object.entries(fixtures)) {
+    const fixturePath = join(root, file)
+    mkdirSync(dirname(fixturePath), { recursive: true })
+    writeFileSync(fixturePath, source)
+  }
+  execFileSync('git', ['-C', root, 'init', '-q'])
+  execFileSync('git', ['-C', root, 'add', '--all'])
+  return { root, files: trackedFiles(root) }
+}
+
+function packageImportExemptionViolations(repoRoot, fileList) {
+  const violations = []
+  const tracked = new Set(fileList)
+  for (const exemption of PACKAGE_IMPORT_BUILD_ENTRYPOINTS) {
+    if (!tracked.has(exemption)) violations.push(`${exemption}: exemption is not tracked`)
+  }
+  const importers = fileList.filter((file) => NODE_MODULE_FILE(file) && !PACKAGE_IMPORT_BUILD_ENTRYPOINTS.includes(file))
+  for (const importer of importers) {
+    const source = readFileSync(join(repoRoot, importer), 'utf8')
+    for (const specifier of importSpecifiers(source)) {
+      if (!specifier.startsWith('./') && !specifier.startsWith('../')) continue
+      const resolved = posix.normalize(posix.join(posix.dirname(importer), specifier))
+      if (PACKAGE_IMPORT_BUILD_ENTRYPOINTS.includes(resolved)) violations.push(`${importer}: relative import reaches ${resolved}`)
+    }
+  }
+  return violations
+}
+
 // Every tree that carries test files, and every tree that carries production
 // code — not the two the scan happened to start with (#552 N5).
 const LEDGER_TEST_SCAN_DIRS = ['crew', 'test', 'commands', 'skills']
 const LEDGER_PROD_SCAN_DIRS = ['crew', 'scripts', 'visualizer', 'commands', 'skills']
+
+test('A1 dependency tripwire refuses a bare package in visualizer JavaScript', () => {
+  const { root, files } = packageImportScratchRepo({
+    'safe.js': 'const safe = true\n',
+    'visualizer/web/src/lib/dagre-fixture.js': "import dagre from '@dagrejs/dagre'\n",
+  })
+  const result = packageImportScan(root, files)
+  assert.deepEqual(result.offenders, ['visualizer/web/src/lib/dagre-fixture.js: @dagrejs/dagre'])
+})
+
+test('B1 dependency tripwire admits relative and node imports', () => {
+  const { root, files } = packageImportScratchRepo({
+    'imports.js': [
+      "import x from './y.js'",
+      "import fs from 'node:fs'",
+      "const lazy = import('node:path')",
+      '',
+    ].join('\n'),
+  })
+  const result = packageImportScan(root, files)
+  assert.deepEqual(result.offenders, [])
+})
+
+test('C1 dependency tripwire excludes Svelte components', () => {
+  const { root, files } = packageImportScratchRepo({
+    'safe.js': 'const safe = true\n',
+    'component.svelte': "<script>import { SvelteComponent } from '@xyflow/svelte'</script>\n",
+  })
+  const result = packageImportScan(root, files)
+  assert.equal(result.scanned, 1)
+  assert.deepEqual(result.offenders, [])
+})
+
+test('D1a dependency tripwire sees export-from package specifiers', () => {
+  const { root, files } = packageImportScratchRepo({
+    'reexport.js': "export { x } from 'pkg'\n",
+  })
+  const result = packageImportScan(root, files)
+  assert.deepEqual(result.offenders, ['reexport.js: pkg'])
+})
+
+test('D1b dependency tripwire sees multi-line static imports', () => {
+  const { root, files } = packageImportScratchRepo({
+    'multiline.js': [
+      'import {',
+      '  x,',
+      "} from '@scope/pkg'",
+      '',
+    ].join('\n'),
+  })
+  const result = packageImportScan(root, files)
+  assert.deepEqual(result.offenders, ['multiline.js: @scope/pkg'])
+})
+
+test('X1 dependency tripwire exemptions remain tracked and unreachable from scanned modules', () => {
+  const { root, files } = packageImportScratchRepo({
+    'visualizer/web/src/main.js': 'const mount = () => {}\n',
+    'visualizer/web/src/lib/reaches.js': "import '../main.js'\n",
+  })
+  const violations = packageImportExemptionViolations(root, files)
+  assert.deepEqual(violations, [
+    'visualizer/web/vite.config.mjs: exemption is not tracked',
+    'visualizer/web/src/lib/reaches.js: relative import reaches visualizer/web/src/main.js',
+  ])
+})
+
+test('E1 dependency tripwire scans tracked repository modules and reports the denominator', (t) => {
+  const files = trackedFiles(ROOT)
+  const result = packageImportScan(ROOT, files)
+  const violations = packageImportExemptionViolations(ROOT, files)
+  assert.deepEqual(result.offenders, [])
+  assert.deepEqual(violations, [])
+  assert.ok(result.scanned > 0, `expected a positive scanned denominator, found ${result.scanned}`)
+  t.diagnostic(`scanned ${result.scanned} files`)
+  assert.throws(() => packageImportScan(ROOT, []), /scanned 0 files/)
+})
 
 // MUTATION A1: removing the openRun registry key lets the aliased opener pass unnamed.
 test('ledger sandbox tripwire — alias imports retain the exported opener door', () => {
@@ -842,4 +1002,19 @@ test('temp sandbox tripwire — the five measured leakers may never be exempted'
     assert.equal(rawTempSites(source), 0, `${file} still has a raw temp call`)
     assert.match(source, /\bscratchDir\b/, `${file} does not name scratchDir`)
   }
+})
+
+// Review RV1-1 and RV1-2 on lane b749. Mutation killed: restoring the lazy [\\s\\S]*? clause lets a
+// side-effect package import that precedes a from-import escape, and reads a quoted word in a comment.
+test("RV1-1 a side-effect package import before a from-import is still refused", () => {
+  const specifiers = importSpecifiers("import \"dotenv/config\"\nimport { a } from \"./a.js\"\n")
+  assert.deepEqual(specifiers, ["dotenv/config", "./a.js"])
+  const { root, files } = packageImportScratchRepo({ "visualizer/web/src/lib/side-effect.js": "import \"dotenv/config\"\nimport { a } from \"./a.js\"\n", "visualizer/web/src/lib/a.js": "export const a = 1\n" })
+  const { offenders } = packageImportScan(root, files)
+  assert.deepEqual(offenders, ["visualizer/web/src/lib/side-effect.js: dotenv/config"])
+})
+
+test("RV1-2 a quoted word in a trailing comment is not an import specifier", () => {
+  assert.deepEqual(importSpecifiers("import './a.js' // moved from 'pkg'\n"), ["./a.js"])
+  assert.deepEqual(importSpecifiers("import {\n  a,\n  b,\n} from './multi.js'\n"), ["./multi.js"])
 })

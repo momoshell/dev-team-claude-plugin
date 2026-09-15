@@ -7972,14 +7972,14 @@ function runTask(ctx, io, crash) {
     let settledCurrent = current
     try { settledCurrent = readDiffInventory({ includeChanged: false, reportedOverride: diffChangedSnapshot }) }
     catch (err) {
-      diffMutationReport.fatal = diffFatal(`diff inventory could not be refreshed: ${err?.message ?? String(err)}`)
+      diffMutationReport.fatal = { reason: 'tree-not-restored', why: `diff inventory could not be refreshed: ${err?.message ?? String(err)}` }
       journalDiffMutation()
       diffMutationReports.push(diffMutationReport)
       gateProofFatal = `tree-not-restored: diff inventory could not be refreshed: ${err?.message ?? String(err)}`
       return { settled: false, fatal: gateProofFatal }
     }
     if (!diffInventoriesEqual(current, settledCurrent)) {
-      diffMutationReport.fatal = diffFatal(`checkout inventory changed while proving diff generation ${gateGeneration}`)
+      diffMutationReport.fatal = { reason: 'tree-not-restored', why: `checkout inventory changed while proving diff generation ${gateGeneration}` }
       journalDiffMutation()
       diffMutationReports.push(diffMutationReport)
       gateProofFatal = `tree-not-restored: ${diffMutationReport.fatal.why}`

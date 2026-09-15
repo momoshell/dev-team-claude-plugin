@@ -5715,3 +5715,171 @@ test('RV1-1 disposition-less pinned prescriptions conflict', () => {
   assert.equal(conflict?.finding.disposition, null)
   assert.equal(conflict?.file, 'a.test.mjs')
 })
+
+const DIFF_SETTLEMENT_FILE = 'a.mjs'
+const DIFF_SETTLEMENT_PATH = `${CTX.checkout}/${DIFF_SETTLEMENT_FILE}`
+const DIFF_SETTLEMENT_OMITTED_REASON = 'mutants beyond the configured cap are omitted because each mutant runs both the accepted validation lane and gate and large diffs otherwise multiply suite cost; omitted mutants are a blind spot'
+const DIFF_SETTLEMENT_RED = `FAIL baseline\n${GATE_SUMMARY_PREFIX} {"total":1,"failed":1,"errored":0}`
+const DIFF_SETTLEMENT_GREEN = `green\n${GATE_SUMMARY_PREFIX} {"total":1,"failed":0,"errored":0}`
+
+const diffSettlementReport = (generation) => ({
+  generation, cap: 8, configured_cap: 8, cap_omitted: 0,
+  total_candidates: 0, generated: 0, killed: 0, survived: 0, skipped: 0, omitted: 0,
+  omitted_reason: DIFF_SETTLEMENT_OMITTED_REASON, blind_spot: null, skip_counts: {}, mutants: [],
+})
+
+function diffSettlementIo({ settleRead = null, review = 'pass', onBuilder2 = null } = {}) {
+  const files = { [DIFF_SETTLEMENT_PATH]: 'before\n' }
+  const plan = planEnv({ details: {
+    ...planEnv().details, files_in_scope: [DIFF_SETTLEMENT_FILE], gate_cmd: 'gate-cmd', validation_lane: 'lane-cmd',
+  } })
+  const envelopes = {
+    'planner:1': plan,
+    'builder:1': buildEnv(),
+    'reviewer:1': review === 'changes-needed' ? reviewEnv('changes-needed') : reviewEnv('pass'),
+  }
+  if (onBuilder2) envelopes['builder:2'] = () => {
+    onBuilder2(files)
+    return buildEnv()
+  }
+  if (review === 'changes-needed') envelopes['reviewer:2'] = reviewEnv('pass')
+  const io = fakeIo({
+    envelopes,
+    runs: {
+      'gate-cmd:1': { ok: false, output: DIFF_SETTLEMENT_RED },
+      'gate-cmd:2': { ok: true, output: DIFF_SETTLEMENT_GREEN },
+      'gate-cmd:3': { ok: true, output: DIFF_SETTLEMENT_GREEN },
+      'gate-cmd:4': { ok: true, output: DIFF_SETTLEMENT_GREEN },
+      'gate-cmd': { ok: true, output: DIFF_SETTLEMENT_GREEN },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    cleanRuns: { 'gate-cmd': { ok: false, output: DIFF_SETTLEMENT_RED } },
+    files, writeThrough: true,
+    diffListing: `${DIFF_SETTLEMENT_FILE}\0`, changed: [DIFF_SETTLEMENT_FILE],
+    diffReports: (command, index) => {
+      const match = /diff-mutation-(\d+)\.json/.exec(String(command))
+      const generation = Number(match?.[1] ?? index + 1)
+      return { ok: true, output: `DIFF-MUTATION-SUMMARY ${JSON.stringify(diffSettlementReport(generation))}` }
+    },
+  })
+  const baseRead = io.readFile
+  io.readFile = function (path) {
+    if (settleRead && io.calls.diffConfigs.length > 0 && path === DIFF_SETTLEMENT_PATH) {
+      if (settleRead === 'throw') throw new Error('permission denied')
+      if (settleRead === 'change') return 'after\n'
+    }
+    return baseRead.call(this, path)
+  }
+  return { io, files }
+}
+
+const diffSettlementFatal = (io) => io.calls.logs.find((row) => row.diff_mutation_proof)?.diff_mutation_proof?.fatal
+
+
+test('A1 settle-time inventory read failure reports typed tree contamination', () => {
+  const fixture = diffSettlementIo({ settleRead: 'throw' })
+  let result
+  assert.doesNotThrow(() => { result = driveTask(CTX, fixture.io) })
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'gate')
+  const fatal = diffSettlementFatal(fixture.io)
+  assert.ok(fatal)
+  assert.equal(fatal.reason, 'tree-not-restored')
+  assert.equal(fatal.why, 'diff inventory could not be refreshed: diff inventory could not read a.mjs: permission denied')
+  assert.ok(fatal.why.length > 0)
+  assert.match(result.details.escalation.why, /tree-not-restored: diff inventory could not be refreshed/)
+})
+
+test('B1 changed settle-time inventory names the diff generation', () => {
+  const fixture = diffSettlementIo({ settleRead: 'change' })
+  const result = driveTask(CTX, fixture.io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'gate')
+  const fatal = diffSettlementFatal(fixture.io)
+  assert.ok(fatal)
+  assert.equal(fatal.reason, 'tree-not-restored')
+  assert.match(fatal.why, /diff generation 1/)
+  assert.ok(fatal.why.length > 0)
+})
+
+test('C1 settle-time inventory fatals keep the typed reason and non-empty why', () => {
+  for (const settleRead of ['throw', 'change']) {
+    const fixture = diffSettlementIo({ settleRead })
+    const result = driveTask(CTX, fixture.io)
+    assert.equal(result.status, 'escalation')
+    const fatal = diffSettlementFatal(fixture.io)
+    assert.ok(fatal)
+    assert.deepEqual(Object.keys(fatal).sort(), ['reason', 'why'])
+    assert.equal(fatal.reason, 'tree-not-restored')
+    assert.equal(typeof fatal.why, 'string')
+    assert.ok(fatal.why.trim().length > 0)
+  }
+})
+
+test('D1 settle-time inventory fatals are journalled', () => {
+  for (const settleRead of ['throw', 'change']) {
+    const fixture = diffSettlementIo({ settleRead })
+    const result = driveTask(CTX, fixture.io)
+    assert.equal(result.status, 'escalation')
+    const row = fixture.io.calls.logs.find((entry) => entry.diff_mutation_proof)?.diff_mutation_proof
+    assert.ok(row)
+    assert.ok(row.fatal)
+    assert.equal(result.details.escalation.where, 'gate')
+    assert.equal(result.details.gate.discrimination, 'proven')
+    assert.equal(result.details.gate.generation, 1)
+    assert.ok(result.details.escalation.why.includes(`tree-not-restored: ${row.fatal.why}`))
+  }
+})
+
+test('D2 settle-time fatal reports remain retained for aggregation', () => {
+  const source = readFileSync(`${process.cwd()}/crew/drive.mjs`, 'utf8')
+  for (const marker of ['diff inventory could not be refreshed', 'checkout inventory changed while proving diff generation']) {
+    const markerAt = source.indexOf(marker)
+    assert.notEqual(markerAt, -1)
+    const start = source.lastIndexOf('      diffMutationReport.fatal =', markerAt)
+    const end = source.indexOf('      return { settled: false, fatal: gateProofFatal }', markerAt)
+    assert.ok(start >= 0 && end > start)
+    const block = source.slice(start, end)
+    assert.match(block, /journalDiffMutation\(\)\n      diffMutationReports\.push\(diffMutationReport\)/)
+  }
+})
+
+test('E1 unchanged settle-time inventory settles and advances its baseline', () => {
+  const fixture = diffSettlementIo({
+    review: 'changes-needed',
+    onBuilder2: (files) => { files[DIFF_SETTLEMENT_PATH] = 'after\n' },
+  })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2, review_rounds: 2 } }, fixture.io)
+  assert.equal(result.status, 'done')
+  assert.equal(fixture.io.calls.diffConfigs.length, 2)
+  const secondConfig = JSON.parse(fixture.io.calls.writes[`${TD}/diff-mutation-2.json`])
+  assert.match(secondConfig.patch, /-before\n\+after/)
+  assert.deepEqual(fixture.io.calls.diffConfigs.map((command) => Number(/diff-mutation-(\d+)\.json/.exec(command)?.[1])), [1, 2])
+})
+
+test('F1 driver keeps the mutation runner behind the scripts import firewall', () => {
+  const source = readFileSync(`${process.cwd()}/crew/drive.mjs`, 'utf8')
+  const staticImportSpecifiers = (text) => [...String(text).matchAll(/^import\s+(?:[^'"\n]*?\s+from\s+)?['"]([^'"]+)['"]/gm)].map((match) => match[1])
+  const hasScriptsImport = (text) => staticImportSpecifiers(text).some((specifier) => specifier.includes('scripts/'))
+  assert.deepEqual(staticImportSpecifiers(source).filter((specifier) => specifier.includes('scripts/')), [])
+  assert.equal(hasScriptsImport(`${source}\nimport { forbidden } from '../scripts/forbidden.mjs'\n`), true)
+  assert.equal(hasScriptsImport(`${source}\nimport '../scripts/forbidden.mjs'\n`), true)
+  assert.match(source, /runner = phaseSlot\(SUITE_SLOT_PHASES\.gate, \(\) => io\.run\(/)
+  assert.match(source, /node scripts\/factory\/prove-mutations\.mjs --diff-config/)
+})
+
+test('G1 baseline inventory fatal retains the typed tree contamination shape', () => {
+  const fixture = diffSettlementIo()
+  const baseRead = fixture.io.readFile
+  fixture.io.readFile = function (path) {
+    if (path === DIFF_SETTLEMENT_PATH) throw new Error('baseline read denied')
+    return baseRead.call(this, path)
+  }
+  let result
+  assert.doesNotThrow(() => { result = driveTask(CTX, fixture.io) })
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'gate')
+  const fatal = diffSettlementFatal(fixture.io)
+  assert.deepEqual(fatal, { reason: 'tree-not-restored', why: 'diff inventory could not read a.mjs: baseline read denied' })
+  assert.ok(fatal.why.length > 0)
+})

@@ -2424,6 +2424,46 @@ test('ladder source and API calls carry the required drag surface', () => {
   assert.doesNotMatch(panel, /localStorage.*catalogKey|catalogKey.*localStorage/)
 })
 
+test('D1a OpenRouter failure serves AA-only rows with absence', async () => {
+  let handles
+  try {
+    handles = await startInProcess({}, {
+      openRouterCatalog: { get:async () => ({ configured:true, source:'OpenRouter', source_url:'https://openrouter.ai/api/v1/models', models:null, absent:'OpenRouter unavailable' }) },
+      modelCatalog: { get:async () => ({ configured:true, credential_source:'environment', source:'Artificial Analysis', source_url:'https://artificialanalysis.ai/', models:[{ source_id:'aa-only', name:'AA Only', slug:'aa-only', family_name:'AA Only', family_slug:'aa-only', creator:'Example', creator_id:'example', provider_hint:'example', runtime_id_hint:'aa/runtime', intelligence:73, coding:null, agentic:null, price_input:4, price_output:8, context_window_tokens:32768 }], absent:null }) },
+    })
+    const result = await json(handles.base, '/api/model-catalog')
+    assert.equal(result.status, 200)
+    assert.deepEqual(result.json.join, { matched:0, total:0 })
+    assert.equal(result.json.absent, 'OpenRouter unavailable')
+    assert.equal(result.json.models.length, 1)
+    assert.equal(result.json.models[0].runtime_id, null)
+    assert.equal(result.json.models[0].intelligence, 73)
+    assert.equal(result.json.models[0].score_absent_reason, 'no-runtime-listing')
+  } finally {
+    if (handles) await stopInProcess(handles.server)
+  }
+})
+
+test('D1b absent AA key serves OpenRouter rows as aa-unconfigured', async () => {
+  let handles
+  try {
+    handles = await startInProcess({}, {
+      openRouterCatalog: { get:async () => ({ configured:true, source:'OpenRouter', source_url:'https://openrouter.ai/api/v1/models', models:[{ source_id:'meta/muse-spark-1.3', runtime_id:'meta/muse-spark-1.3', name:'Muse Spark 1.3', slug:'muse-spark-1.3', family_name:'Muse Spark 1.3', family_slug:'muse-spark-1.3', creator:'Meta', creator_id:'meta', provider_hint:'meta', price_input:0.1, price_output:0.2, context_length:131072, context_window_tokens:131072 }], absent:null }) },
+      modelCatalog: { get:async () => ({ configured:false, credential_source:null, source:'Artificial Analysis', source_url:'https://artificialanalysis.ai/', models:null, absent:'Add an Artificial Analysis API key to load current benchmark data.' }) },
+    })
+    const result = await json(handles.base, '/api/model-catalog')
+    assert.equal(result.status, 200)
+    assert.deepEqual(result.json.join, { matched:0, total:1 })
+    assert.equal(result.json.models.length, 1)
+    assert.equal(result.json.models[0].runtime_id, 'meta/muse-spark-1.3')
+    assert.equal(result.json.models[0].intelligence, null)
+    assert.equal(result.json.models[0].score_absent_reason, 'aa-unconfigured')
+    assert.equal(result.json.absent, 'Add an Artificial Analysis API key to load current benchmark data.')
+  } finally {
+    if (handles) await stopInProcess(handles.server)
+  }
+})
+
 test('the model catalog endpoint persists a key only when explicitly requested', async () => {
   const dir = scratchDir('visualizer-catalog-env-')
   const envFile = join(dir, '.env.local')
@@ -2432,6 +2472,7 @@ test('the model catalog endpoint persists a key only when explicitly requested',
     handles = await startInProcess({}, {
       envFile,
       fetchImpl:async () => new Response(JSON.stringify({ tier:'free', intelligence_index_version:4.1, pagination:{ has_more:false }, data:[] }), { status:200, headers:{ 'content-type':'application/json' } }),
+      openRouterCatalog:{ get:async () => ({ configured:true, source:'OpenRouter', source_url:'https://openrouter.ai/api/v1/models', models:[], absent:null }) },
     })
     const saved = await json(handles.base, '/api/model-catalog/key', {
       method:'POST', headers:{ 'content-type':'application/json' },

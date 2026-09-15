@@ -118,7 +118,7 @@
   $effect(() => {
     let active = true
     getModelCatalog().then((result) => { if (active) directory = result }).catch((err) => {
-      if (active) directory = { configured:true, models:null, absent:err.message || 'model catalog request failed', source:'Artificial Analysis', source_url:'https://artificialanalysis.ai/' }
+      if (active) directory = { configured:true, models:null, absent:err.message || 'model catalog request failed', source:'OpenRouter', source_url:'https://openrouter.ai/api/v1/models' }
     }).finally(() => { if (active) directoryLoading = false })
     return () => { active = false }
   })
@@ -158,14 +158,21 @@
   function money(value) { return value == null ? '—' : value < 0.01 ? `$${value.toFixed(3)}` : `$${value.toFixed(2)}` }
   function score(value) { return value == null ? '—' : Number(value).toFixed(1) }
   function suggestedBand(intelligence) {
-    if (intelligence == null) return 'utility'
+    if (intelligence == null) return null
     return [...(payload?.bands || [])].sort((left, right) => right.rank - left.rank).find((band) => intelligence >= band.floor_reference_score)?.band || 'basement'
   }
-  function directoryKey(model) { return `${model.provider_hint || 'provider'}/${model.slug}` }
+  function catalogConnectionState() {
+    if (directory?.artificial_analysis_unavailable) return 'Artificial Analysis not loading'
+    if (directory?.credential_source === 'environment') return 'Connected · .env.local'
+    if (directory?.credential_source === 'session') return 'Connected · temporary key'
+    return 'OpenRouter listing · Artificial Analysis not connected'
+  }
   function directoryChip(model) { return chips.find((chip) => directoryModelMatchesChip(model, chip)) || null }
   function directoryModelState(model) {
-    const chip = directoryChip(model)
-    return chip ? { known:true, label:chip.local_draft ? 'In draft' : 'In roster' } : { known:false, label:'+ Add' }
+    const variant = selectedDirectoryVariant(model, directorySelections)
+    if (variant?.runtime_id == null) return { known:true, noRuntime:true, label:'No runtime listing' }
+    const chip = directoryChip(variant)
+    return chip ? { known:true, noRuntime:false, label:chip.local_draft ? 'In draft' : 'In roster' } : { known:false, noRuntime:false, label:'+ Add' }
   }
   function sourceCell(chip, target, effort = null) {
     const source = rail.flatMap((column) => column.seats || []).find((seat) => seat.model_key === chip.key)?.cell
@@ -252,15 +259,16 @@
   }
   function addDirectoryModel(model) {
     const variant = selectedDirectoryVariant(model, directorySelections)
-    const key = directoryKey(model)
-    if (directoryChip(model)) { draftNotice = `${model.name} is already in the roster or draft.`; return }
+    if (!variant?.runtime_id) { draftNotice = `${model.name} has no OpenRouter runtime listing and cannot be added.`; return }
+    const key = variant.runtime_id
+    if (directoryChip(variant)) { draftNotice = `${model.name} is already in the roster or draft.`; return }
     customModels = [...customModels, {
-      key, provider:model.provider_hint || 'provider', id:model.slug, band:suggestedBand(variant.intelligence),
-      local_draft:true, benchmark_draft:true, source_id:variant.source_id, source:'Artificial Analysis',
-      reasoning_effort:variant.reasoning_effort, reasoning_mode:variant.reasoning_mode, benchmark_variant:variant.name,
-      context:variant.context_window_tokens, cost_in_per_mtok:variant.price_input, cost_out_per_mtok:variant.price_output,
+      key, provider:variant.runtime_id.split('/')[0], id:variant.runtime_id.split('/').slice(1).join('/'), band:suggestedBand(variant.intelligence),
+      local_draft:true, benchmark_draft:true, source_id:variant.source_id, source:'OpenRouter',
+      reasoning_effort:variant.reasoning_effort, reasoning_mode:variant.reasoning_mode, benchmark_variant:variant.benchmark_variant,
+      context:variant.context_window_tokens ?? variant.context_length, cost_in_per_mtok:variant.price_input, cost_out_per_mtok:variant.price_output,
       cost_cache_read_per_mtok:variant.price_cache_hit, intelligence:variant.intelligence, coding:variant.coding, agentic:variant.agentic,
-      reference:variant.intelligence, reference_pending:variant.intelligence == null ? 'Not measured by Artificial Analysis' : null,
+      reference:variant.intelligence, reference_pending:variant.intelligence == null ? variant.score_absent_reason : null,
       measured:null, measured_pending:'Not yet measured by this factory', seated_at:[],
     }]
     selectedModel = key
@@ -450,15 +458,16 @@
 
           {#if catalogMode === 'discover'}
             {#if directoryLoading}
-              <div class="directory-loading"><span></span><p>Loading current model intelligence and pricing…</p></div>
-            {:else if !directory?.models}
+              <div class="directory-loading"><span></span><p>Loading the OpenRouter model listing and optional intelligence scores…</p></div>
+            {:else}
+              {#if directory?.configured === false || directory?.artificial_analysis_unavailable || !directory?.models}
               <section class="source-setup">
                 <header>
-                  <span class:warning={directory?.configured} class="source-state"><i></i>{directory?.configured ? 'Connection needs attention' : 'Model source not configured'}</span>
+                  <span class:warning={directory?.configured} class="source-state"><i></i>{directory?.configured ? 'Connection needs attention' : 'Model intelligence not configured'}</span>
                   <a href="https://artificialanalysis.ai/data-api" target="_blank" rel="noreferrer">Get a key ↗</a>
                 </header>
                 <div class="source-message">
-                  <div><h3>{directory?.configured ? 'Artificial Analysis could not load' : 'Connect model intelligence'}</h3><p>{catalogKeyError || directory?.absent}</p></div>
+                  <div><h3>{directory?.configured ? 'Artificial Analysis could not load' : 'Connect model intelligence'}</h3><p>{catalogKeyError || directory?.artificial_analysis_absent || directory?.absent}</p></div>
                   <button type="button" class="temporary-key" aria-expanded={catalogKeyOpen} onclick={() => catalogKeyOpen = !catalogKeyOpen}>{catalogKeyOpen ? 'Cancel' : directory?.configured ? 'Replace key' : 'Add API key'}</button>
                 </div>
                 <p class="persistent-hint"><b>Persistent by default.</b> Keep “Remember on this machine” selected to save the key in the ignored <code>.env.local</code> file. Uncheck it for this server run only.</p>
@@ -470,7 +479,8 @@
                   <small id="catalog-key-note">{rememberCatalogKey ? 'Only the named environment variable is updated; the key is never returned to the browser.' : 'Temporary mode holds the key only in local server memory until it restarts.'}</small>
                 {/if}
               </section>
-            {:else}
+              {/if}
+              {#if directory?.models}
               <div class="directory-tools">
                 <label class="search"><span>Find a model</span><input bind:value={directoryQuery} oninput={() => directoryPage = 1} placeholder="Grok, Kimi, GLM, Gemma…" /></label>
                 <label class="sort"><span>Sort by</span><Dropdown bind:value={directorySort} options={DIRECTORY_SORTS} onchange={() => directoryPage = 1} ariaLabel="Sort model catalog" /></label>
@@ -487,15 +497,15 @@
                     <div class="score"><strong>{score(variant.coding)}</strong><small>Coding</small></div>
                     <div class="price"><strong>{money(variant.price_output)}</strong><small>{money(variant.price_input)} input</small></div>
                     <div class="speed"><strong>{variant.output_tokens_per_second == null ? '—' : Math.round(variant.output_tokens_per_second)}</strong><small>tok/s</small></div>
-                    <button type="button" disabled={modelState.known} onclick={() => addDirectoryModel(model)}>{modelState.label}</button>
+                    <button type="button" disabled={modelState.known || modelState.noRuntime} onclick={() => addDirectoryModel(model)}>{modelState.label}</button>
                   </article>
                 {/each}
                 {#if !visibleDirectoryModels.length}<p class="empty-catalog">No benchmarked models match that search.</p>{/if}
               </div>
               <footer class="directory-footer">
-                <p>Intelligence, coding, pricing, and performance data from <a href={directory.source_url} target="_blank" rel="noreferrer">Artificial Analysis ↗</a>. Null means not measured—not zero.{directory.stale ? ` Showing cached data because refresh failed: ${directory.absent}` : ''}</p>
+                <p>Current model listings, runtime IDs, context windows, and token prices from <a href={directory.openrouter_source_url || 'https://openrouter.ai/api/v1/models'} target="_blank" rel="noreferrer">OpenRouter ↗</a>. Optional intelligence, coding, and performance scores from <a href={directory.artificial_analysis_source_url || 'https://artificialanalysis.ai/'} target="_blank" rel="noreferrer">Artificial Analysis ↗</a>. Null means not measured—not zero.{directory.stale ? ` Showing cached data because refresh failed: ${directory.absent}` : ''}</p>
                 <div>
-                  <span class="connection-chip"><i></i>Connected · {directory.credential_source === 'environment' ? '.env.local' : 'temporary key'}</span>
+                  <span class="connection-chip"><i></i>{catalogConnectionState()}</span>
                   {#if directory.credential_source === 'session'}<button class="forget-key" type="button" title="Clear the temporary API key" onclick={disconnectCatalog}>Clear key</button>{/if}
                   <nav class="directory-pager" aria-label="Model catalog pages">
                     <button type="button" aria-label="Previous model page" disabled={directoryPage <= 1} onclick={() => directoryPage -= 1}>Previous</button>
@@ -504,6 +514,7 @@
                   </nav>
                 </div>
               </footer>
+              {/if}
             {/if}
           {:else}
             {#if addModelOpen}
@@ -532,7 +543,7 @@
                 <article class:selected={selectedModel === chip.key} class:local={chip.local_draft} class:benchmark={chip.benchmark_draft}>
                   <button class="model-choice" type="button" draggable="true" ondragstart={(event) => dragStart(event, chip)} onclick={() => chooseModel(chip.key)}>
                     <b class={`provider ${provider(chip.key)}`}>{providerMark(chip.key)}</b>
-                    <span><strong>{modelName(chip.key)}</strong><small>{chip.provider} · {chip.band || 'unratified'} · ${chip.cost_out_per_mtok ?? '—'} output / Mtok</small>{#if chip.intelligence != null}<small>Intelligence {score(chip.intelligence)} · Coding {score(chip.coding)}</small>{:else if chip.measured}<small>{chip.measured.failures ? `${chip.measured.failures} recent failures` : 'No recent failures'} · {chip.measured.cells} cells measured</small>{:else}<small>{chip.measured_pending}</small>{/if}{#if chip.drift}<small class="drift">Band review: {chip.drift.proposed || chip.drift.why}</small>{/if}</span>
+                    <span><strong>{modelName(chip.key)}</strong><small>{chip.provider} · {chip.band == null ? 'unmeasured' : chip.band || 'unratified'} · ${chip.cost_out_per_mtok ?? '—'} output / Mtok</small>{#if chip.intelligence != null}<small>Intelligence {score(chip.intelligence)} · Coding {score(chip.coding)}</small>{:else if chip.measured}<small>{chip.measured.failures ? `${chip.measured.failures} recent failures` : 'No recent failures'} · {chip.measured.cells} cells measured</small>{:else}<small>{chip.measured_pending}</small>{/if}{#if chip.drift}<small class="drift">Band review: {chip.drift.proposed || chip.drift.why}</small>{/if}</span>
                   </button>
                   {#if chip.local_draft}<button class="remove-model" type="button" title={`Remove ${chip.key}`} onclick={() => removeCustomModel(chip.key)}>×</button>{/if}
                 </article>

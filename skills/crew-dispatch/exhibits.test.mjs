@@ -298,9 +298,13 @@ test('the batch reference makes depends_on sequencing distinct from locking', ()
   assert.equal(text.includes('no two entries in one register'), false)
 })
 
-test('RV2-1 computes pristine reach shape and comparison deltas', () => {
+test('I1 OpenRouter owner is covered by dynamic reach census', () => {
+  const addedOwner = 'visualizer/server/openrouter-catalog.mjs'
   const currentReach = collectTestReach({ checkout: ROOT })
-  const current = reachCensus(gitPaths(['ls-files', '-z']), currentReach)
+  const currentFiles = [...new Set([...gitPaths(['ls-files', '-z']), addedOwner])]
+  const current = reachCensus(currentFiles, currentReach)
+  const ownerTests = currentReach.pathByFile.get(addedOwner)
+  assert.ok(ownerTests?.has('test/visualizer-model-catalog.test.mjs'))
   const pristineFiles = gitPaths(['ls-tree', '-r', '--name-only', '-z', 'HEAD'])
   const pristineReach = collectTestReach({
     checkout: ROOT,
@@ -321,6 +325,11 @@ test('RV2-1 computes pristine reach shape and comparison deltas', () => {
   assert.ok(pristine.owners <= pristine.nonTests)
   assert.ok(pristine.pairs >= pristine.owners)
   assert.ok(pristine.contributingTests <= pristine.tests)
+  if (!pristineFiles.includes(addedOwner)) {
+    assert.equal(pristineReach.pathByFile.has(addedOwner), false)
+    assert.ok(current.owners > pristine.owners)
+    assert.ok(current.pairs > pristine.pairs)
+  }
   const ownerDelta = current.owners - pristine.owners
   const pairDelta = current.pairs - pristine.pairs
   assert.equal(Number.isInteger(ownerDelta), true)

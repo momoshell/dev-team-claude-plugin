@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { artificialAnalysisVariant, createArtificialAnalysisCatalog, shapeArtificialAnalysisModel } from '../visualizer/server/model-catalog.mjs'
+import { createOpenRouterCatalog, shapeOpenRouterModel } from '../visualizer/server/openrouter-catalog.mjs'
 import { directoryModelMatchesChip, fallbackModelName, groupDirectoryModels, providerDisplayName } from '../visualizer/web/src/lib/model-directory.js'
 
 function response(payload, status = 200) {
@@ -134,4 +135,53 @@ test('a failed refresh returns an honest absence without exposing the key', asyn
   assert.equal(result.models, null)
   assert.match(result.absent, /rejected the configured API key/)
   assert.doesNotMatch(result.absent, /top-secret/)
+})
+
+test('G1 OpenRouter catalog shapes prices and caches', async () => {
+  let calls = 0
+  let clock = Date.parse('2026-08-30T10:00:00.000Z')
+  const fixture = {
+    data: [
+      { id:'meta/muse-spark-1.3:free', name:'Muse Spark 1.3 Free', context_length:131072, pricing:{ prompt:'0.0000001', completion:0.0000002 } },
+      { id:'', name:'Missing id', pricing:{} },
+      { id:'meta/no-name', name:'', pricing:{} },
+    ],
+  }
+  const catalog = createOpenRouterCatalog({ now:() => clock, fetchImpl:async (url, options) => {
+    calls += 1
+    assert.equal(url, 'https://openrouter.ai/api/v1/models')
+    assert.deepEqual(options, { headers:{ accept:'application/json' } })
+    return response(fixture)
+  } })
+  const first = await catalog.get()
+  const second = await catalog.get()
+  assert.equal(first.models.length, 1)
+  assert.equal(first.models[0].runtime_id, 'meta/muse-spark-1.3:free')
+  assert.equal(first.models[0].provider, 'meta')
+  assert.equal(first.models[0].slug, 'muse-spark-1.3:free')
+  assert.equal(first.models[0].price_input, 0.1)
+  assert.equal(first.models[0].price_output, 0.2)
+  assert.equal(first.models[0].context_length, 131072)
+  assert.equal(first.models[0].context_window_tokens, 131072)
+  assert.equal(second, first)
+  assert.equal(calls, 1)
+  clock += 1_000
+  assert.equal(shapeOpenRouterModel({ id:'meta/one', name:'One', pricing:{ prompt:'not-a-number' } }).price_input, null)
+})
+
+test('H1 OpenRouter failure is an honest absence', async () => {
+  for (const fetchImpl of [
+    async () => response({ nope:true }),
+    async () => response({ error:'upstream unavailable' }, 503),
+  ]) {
+    let calls = 0
+    const catalog = createOpenRouterCatalog({ fetchImpl:async (...args) => { calls += 1; return fetchImpl(...args) } })
+    const result = await catalog.get()
+    assert.equal(result.configured, true)
+    assert.equal(result.models, null)
+    assert.equal(typeof result.absent, 'string')
+    assert.notEqual(result.absent.length, 0)
+    assert.equal(calls, 1)
+    assert.doesNotMatch(JSON.stringify(result), /api[_ -]?key/i)
+  }
 })

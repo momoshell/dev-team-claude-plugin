@@ -506,7 +506,7 @@ const RECORDED_SUITE_SAMPLES = Object.freeze([
   ["crew/crew.test.mjs",18.88692666697502,463,null],
   ["crew/daemon.test.mjs",1.5502793329954148,161,null],
   ["crew/drive-build.test.mjs",4.23105324998498,168,null],
-  ["crew/drive-docs.test.mjs",0.6452182919979096,21,null],
+  ["crew/drive-docs.test.mjs",0.6796569160223007,56,null],
   ["crew/drive-plan.test.mjs",0.14682616701722145,116,null],
   ["crew/drive-publish.test.mjs",0.12568533298373222,28,null],
   ["crew/drive-review.test.mjs",3.2749259169995786,183,null],

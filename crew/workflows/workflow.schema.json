@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.internal/crew/workflows/workflow.schema.json",
+  "title": "closed workflow seat map",
+  "type": "object",
+  "required": ["shape", "seats"],
+  "additionalProperties": false,
+  "properties": {
+    "shape": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]*$"
+    },
+    "seats": {
+      "type": "object",
+      "patternProperties": {
+        "^[a-z0-9][a-z0-9_-]*$": {
+          "$ref": "#/$defs/seat"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "$defs": {
+    "seat": {
+      "type": "object",
+      "required": ["role", "agent", "provider", "id", "effort", "skills", "extensions"],
+      "additionalProperties": false,
+      "properties": {
+        "role": {
+          "enum": ["lead", "planner", "builder", "reviewer", "tech-lead"]
+        },
+        "agent": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]*$"
+        },
+        "provider": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]*$"
+        },
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]+$"
+        },
+        "effort": {
+          "enum": ["low", "medium", "high", "xhigh", "max"]
+        },
+        "skills": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/relpath" }
+        },
+        "extensions": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/relpath" }
+        }
+      }
+    },
+    "relpath": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$"
+    }
+  }
+}

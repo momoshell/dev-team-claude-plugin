@@ -7,7 +7,7 @@ import { cpSync, mkdirSync } from 'node:fs'
 import {
   ACCEPT_FINDINGS, ACCEPT_FINDINGS_SOFT, ACCEPT_REASKS, adversarialPlanEnv, ACCEPT_REFUSALS, B318_GATED_RUNS, B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, CENSUS_ABSENT_REASONS, CENSUS_ROW_ABSENT, CENSUS_TURNS_ABSENT, CENSUS_UNREADABLE, SCREENER_MODELS, SCREENER_REGISTER, screenerResult, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_MUTATION, CHECK_RUNS, CLOBBER_R2, CONVERGE_GATE, CONVERGE_PLAN, CRASH_FINDINGS, CRASH_STAGES, CTX, CTX_REPAIR, CTX_TL, DECISIONS, D_ASK, D_AUTO, D_COLLISION_CTX, D_PANEL_CTX, D_PATCH_A, D_PATCH_B, ENVELOPE_REFUSAL_REASONS, FINDING_DISPOSITIONS, LIMITS, MUST_FIX_REFUTATION_FINDINGS, NAME_VERDICTS, PANEL_ADJUDICATORS, PANEL_PARTNERS, PERSPECTIVE_TARGETS, PLAN_CHECK_FINDINGS, PLAN_RESIDUAL, PLAN_SCOPE, PLAN_SCOPE_VERDICTS, RED, REFUTATION_CLAIM, REFUTATION_CONVERGE_PLAN, REFUTATION_CONVERGE_RUNS, REFUTATION_EVIDENCE_MAX, RESIDUAL_TYPES, REVIEW_FINDINGS, REVIEW_GATE_PASS, S843_ADDED, S843_D2, S843_DISPATCHED, S843_DROPPED, S843_NARROWED, S843_RUNS, SECOND_OPINION, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, VARIANTS, acceptBounceLines, acceptContractLines, acceptedRawById, assertDriverIdRefusal, b127GroupCommand, b127InvokeGate, b127Lines, b127PidAlive, b127Spy, b318Builders, b318GatedPlan, b318Options, b318ReviewGrants, b318SiteA, b318SiteB, b376ProofIo, bounceTargetOf, buildEnv, checkEnv, classCollisionIo, closeoutIo, crashRun, dAdjEnv, dAutoRows, dBuilders, dDecisionBrief, dGitApplies, dLeads, dOffers, dPanelOutcomes, dPartnerEnv, dPatchWrite, dPlanEnv, dRemintRows, dReviewEnv, dispositionIo, dispositionOf, dispositionPanelIo, dispositionPlan, divergentCollisionIo, divergentPlanScenario, driveTask, envelopeDefect, envelopeFieldsPresent, exhaustionAcceptIo, fakeIo, findingIdDefect, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, join, leadEnv, legacyReviewerExemptions, nameVerdict, observeTurnCensus, panelSeats, phaseTrace, planAcceptContractLines, planCheckAcceptIo, planEnv, planRevisionRun, planScopeVerdict, planThenReviewIo, protectedPlanEnv, protectedReseatRefusal, publicationIo, readFileSync, reconEnv, regrantVerdict, resolveValidationLane, reviewConvergeRun, reviewEnv, reviewFindings, reviewOutcome, reviewShapeDefect, rmSync, roundCursor, s843Ctx, s843Io, s843PlanEnv, s843Rows, scratchDir, shapeDefect, slotCtx, slotFactory, spawnSync, staleVerdictLines, triageEnv, turnCeilingBreached, twoRoundReviewIo, validateAcceptDecision, validateCarve, validatePlanResiduals, validateScopeEntries, validationPlan, validationProbeRun, validationRows, verdictFindingsDefect, writeFileSync,
 } from './drive-fixtures.mjs'
-import { HARDENING_PRESCRIPTION_REASONS, HARDENING_PRESCRIPTION_RESOLUTION, hardeningPrescriptionConflict, hardeningTestPath, planScopeWhy, scopeSuggestions, VACUITY_CLAIMS, vacuityFindingDefect } from './drive.mjs'
+import { HARDENING_PRESCRIPTION_REASONS, HARDENING_PRESCRIPTION_RESOLUTION, hardeningPrescriptionConflict, hardeningTestPath, planScopeWhy, prescriptionAuthorshipEvidence, prescriptionSpanIsLaneAuthored, prescriptionSpansAreLaneAuthored, scopeSuggestions, VACUITY_CLAIMS, vacuityFindingDefect } from './drive.mjs'
 import { screenerAdjudicationRows } from './screener.mjs'
 import { ROOT as REPO_ROOT } from '../test/helpers.mjs'
 import { checkSkillAnchors, laneFence, partitionShifts } from '../skills/qa-test-writing/anchor-pin.mjs'
@@ -4443,4 +4443,314 @@ test('K1 conflict extraction requires the shared test path', () => {
   const witness = new Map([['checks.mjs', { state: 'read', bytes: 'export const witnessed = true\n' }]])
   assert.equal(hardeningPrescriptionConflict(details, witness), null)
   assert.equal(hardeningTestPath('checks.mjs'), false)
+})
+
+const prescriptionBlob = (path) => `100644 blob ${'a'.repeat(40)}\t${path}\0`
+const prescriptionRead = (path, bytes = 'one\ntwo\nthree\n') => new Map([[path, { state: 'read', bytes }]])
+const prescriptionAuthored = (path, spans, reason = null) => new Map([[path, { spans, reason }]])
+const prescriptionPathSpan = (path, start, end = start) => ({ path, start, end })
+
+function prescriptionRuntimeIo(io, { base = '', diff = '' } = {}) {
+  const originalRun = io.run
+  const calls = []
+  io.run = function (cmd) {
+    if (cmd.startsWith('git ls-tree -z --full-tree ')) {
+      calls.push({ kind: 'tree', cmd })
+      return typeof base === 'function' ? base(cmd, calls) : { ok: true, output: base }
+    }
+    if (cmd.startsWith("git diff --unified=0 'base-head' -- ")) {
+      calls.push({ kind: 'diff', cmd })
+      return typeof diff === 'function' ? diff(cmd, calls) : { ok: true, output: diff }
+    }
+    return originalRun.call(this, cmd)
+  }
+  io.prescriptionCalls = calls
+  return io
+}
+
+const contextfulPrescriptionPatch = [
+  'diff --git a/a.test.mjs b/a.test.mjs',
+  '--- a/a.test.mjs',
+  '+++ b/a.test.mjs',
+  '@@ -1,3 +1,3 @@',
+  ' context before',
+  '-lane old',
+  '+lane new',
+  ' context after',
+  '',
+].join('\n')
+
+const basePresentAuthoredDiff = [
+  'diff --git a/a.test.mjs b/a.test.mjs',
+  'index aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa..bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb 100644',
+  '--- a/a.test.mjs',
+  '+++ b/a.test.mjs',
+  '@@ -2,1 +2,1 @@',
+  '-old',
+  '+new',
+  '',
+].join('\n')
+
+test('A1 lane-authored witnessed test lines admit the review prescription', () => {
+  const finding = { ...B376_FINDING, disposition: 'auto-fix', patch: contextfulPrescriptionPatch }
+  const io = prescriptionRuntimeIo(b376ProofIo({
+    reviewer1: reviewEnv('changes-needed', [finding]),
+    files: { ...B376_FILES, [`${CTX.checkout}/a.test.mjs`]: 'context before\nlane old\ncontext after\n' },
+    runs: {},
+  }), { base: prescriptionBlob('a.test.mjs'), diff: basePresentAuthoredDiff })
+  const result = driveTask({ ...CTX, head: 'base-head', limits: { build_rounds: 2 } }, io)
+  assert.equal(result.status, 'done')
+  assert.equal(result.details?.escalation ?? null, null)
+  assert.equal(io.prescriptionCalls.filter(({ kind }) => kind === 'tree').length, 1)
+  assert.equal(io.prescriptionCalls.filter(({ kind }) => kind === 'diff').length, 1)
+  assert.ok(dGitApplies(io).length > 0)
+  assert.ok(io.calls.logs.some((entry) => entry.finding_hardened?.outcome === 'killed'))
+
+  const createdPath = 'created.test.mjs'
+  const createdFinding = { ...B376_FINDING, location: `${createdPath}:1-2` }
+  const createdIo = prescriptionRuntimeIo(b376ProofIo({
+    reviewer1: reviewEnv('changes-needed', [createdFinding]),
+    files: { ...B376_FILES, [`${CTX.checkout}/${createdPath}`]: 'created one\ncreated two\n' },
+    changed: ['a.mjs', 'a.test.mjs', createdPath],
+    plan: { files_in_scope: ['a.mjs', 'a.test.mjs', createdPath] },
+  }), { base: '' })
+  const created = driveTask({ ...CTX, head: 'base-head', limits: { build_rounds: 2 } }, createdIo)
+  assert.equal(created.status, 'done')
+  assert.equal(created.details?.escalation ?? null, null)
+  assert.equal(createdIo.prescriptionCalls.filter(({ kind }) => kind === 'tree').length, 1)
+  assert.equal(createdIo.prescriptionCalls.filter(({ kind }) => kind === 'diff').length, 0)
+  assert.ok(createdIo.calls.logs.some((entry) => entry.finding_hardened?.outcome === 'killed'))
+})
+
+test('B1 pre-existing witnessed test lines keep the pinned prescription refusal', () => {
+  const path = 'a.test.mjs'
+  const details = { findings: [prescriptionFinding({ location: `${path}:2` })] }
+  const witness = prescriptionRead(path)
+  const authored = prescriptionAuthored(path, [prescriptionPathSpan(path, 1)])
+  assert.equal(prescriptionSpanIsLaneAuthored(prescriptionPathSpan(path, 2), authored), false)
+  assert.equal(prescriptionSpansAreLaneAuthored([prescriptionPathSpan(path, 2)], authored), false)
+  const conflict = hardeningPrescriptionConflict(details, witness, authored)
+  assert.equal(conflict?.reason, HARDENING_PRESCRIPTION_REASONS[0])
+  assert.equal(conflict?.resolution, HARDENING_PRESCRIPTION_RESOLUTION)
+  assert.equal(conflict?.file, path)
+})
+
+test('C1 mixed auto-fix hunks keep the pinned prescription refusal', () => {
+  const patch = [
+    'diff --git a/a.test.mjs b/a.test.mjs',
+    '--- a/a.test.mjs',
+    '+++ b/a.test.mjs',
+    '@@ -1,3 +1,3 @@',
+    ' context before',
+    '-lane authored',
+    '+replacement one',
+    ' context after',
+    '@@ -5,3 +5,3 @@',
+    ' context before two',
+    '-pre-existing',
+    '+replacement two',
+    ' context after two',
+    'diff --git a/a.mjs b/a.mjs',
+    '--- a/a.mjs',
+    '+++ b/a.mjs',
+    '@@ -1 +1 @@',
+    '-implementation old',
+    '+implementation new',
+    '',
+  ].join('\n')
+  const details = { findings: [prescriptionFinding({ disposition: 'auto-fix', patch })] }
+  const witness = prescriptionRead('a.test.mjs', 'context before\nlane authored\ncontext after\nfour\ncontext before two\npre-existing\ncontext after two\n')
+  const authored = prescriptionAuthored('a.test.mjs', [prescriptionPathSpan('a.test.mjs', 2)])
+  const conflict = hardeningPrescriptionConflict(details, witness, authored)
+  assert.equal(conflict?.reason, HARDENING_PRESCRIPTION_REASONS[0])
+  assert.equal(conflict?.resolution, HARDENING_PRESCRIPTION_RESOLUTION)
+  assert.equal(conflict?.file, 'a.test.mjs')
+
+  const unrelatedPatch = [
+    'diff --git a/a.test.mjs b/a.test.mjs',
+    '--- a/a.test.mjs',
+    '+++ b/a.test.mjs',
+    '@@ -2 +2 @@',
+    '-lane authored',
+    '+replacement',
+    'diff --git a/a.mjs b/a.mjs',
+    '--- a/a.mjs',
+    '+++ b/a.mjs',
+    '@@ -1 +1 @@',
+    '-pre-existing implementation',
+    '+replacement implementation',
+    '',
+  ].join('\n')
+  const unrelated = hardeningPrescriptionConflict(
+    { findings: [prescriptionFinding({ disposition: 'auto-fix', patch: unrelatedPatch })] },
+    prescriptionRead('a.test.mjs', 'one\nlane authored\nthree\n'),
+    prescriptionAuthored('a.test.mjs', [prescriptionPathSpan('a.test.mjs', 2)]),
+  )
+  assert.equal(unrelated, null)
+})
+
+test('RV1-1 same-path patch sections retain every witnessed test coordinate', () => {
+  const path = 'a.test.mjs'
+  const patch = (firstBody) => [
+    `diff --git a/${path} b/${path}`,
+    `--- a/${path}`,
+    `+++ b/${path}`,
+    '@@ -5 +5 @@',
+    ...firstBody,
+    `diff --git a/${path} b/${path}`,
+    `--- a/${path}`,
+    `+++ b/${path}`,
+    '@@ -2 +2 @@',
+    '-authored',
+    '+replacement two',
+    '',
+  ].join('\n')
+  const witness = prescriptionRead(path, 'one\nauthored\nthree\nfour\npre-existing\n')
+  const authored = prescriptionAuthored(path, [prescriptionPathSpan(path, 2)])
+  for (const firstBody of [
+    ['-pre-existing', '+replacement one'],
+    ['-pre-existing', '+replacement one', '+unexpected addition'],
+  ]) {
+    const details = { findings: [prescriptionFinding({ disposition: 'auto-fix', patch: patch(firstBody) })] }
+    const conflict = hardeningPrescriptionConflict(details, witness, authored)
+    assert.equal(conflict?.reason, HARDENING_PRESCRIPTION_REASONS[0])
+    assert.equal(conflict?.resolution, HARDENING_PRESCRIPTION_RESOLUTION)
+    assert.equal(conflict?.file, path)
+  }
+})
+
+test('RV2-1 test hunk content matches its witnessed header coordinates', () => {
+  const path = 'a.test.mjs'
+  const witness = prescriptionRead(path, 'a\nb\nc\nd\ne\nf\ng\n')
+  const shiftedPatch = [
+    `diff --git a/${path} b/${path}`,
+    `--- a/${path}`,
+    `+++ b/${path}`,
+    '@@ -2,3 +2,3 @@',
+    ' e',
+    '-f',
+    '+X',
+    ' g',
+    '',
+  ].join('\n')
+  const shifted = hardeningPrescriptionConflict(
+    { findings: [prescriptionFinding({ disposition: 'auto-fix', patch: shiftedPatch })] },
+    witness,
+    prescriptionAuthored(path, [prescriptionPathSpan(path, 3)]),
+    witness,
+  )
+  assert.equal(shifted?.reason, HARDENING_PRESCRIPTION_REASONS[0])
+  assert.equal(shifted?.resolution, HARDENING_PRESCRIPTION_RESOLUTION)
+
+  const repeatedPatch = [
+    `diff --git a/${path} b/${path}`,
+    `--- a/${path}`,
+    `+++ b/${path}`,
+    '@@ -2 +2 @@',
+    '-b',
+    '+B',
+    `diff --git a/${path} b/${path}`,
+    `--- a/${path}`,
+    `+++ b/${path}`,
+    '@@ -3 +3 @@',
+    '-c',
+    '+C',
+    '',
+  ].join('\n')
+  const repeated = hardeningPrescriptionConflict(
+    { findings: [prescriptionFinding({ disposition: 'auto-fix', patch: repeatedPatch })] },
+    witness,
+    prescriptionAuthored(path, [prescriptionPathSpan(path, 2, 3)]),
+    witness,
+  )
+  assert.equal(repeated?.reason, HARDENING_PRESCRIPTION_REASONS[0])
+  assert.equal(repeated?.resolution, HARDENING_PRESCRIPTION_RESOLUTION)
+})
+
+test('D1 unresolvable witnessed test locations keep the pinned prescription refusal', () => {
+  const path = 'a.test.mjs'
+  const witness = prescriptionRead(path)
+  const unresolved = prescriptionAuthored(path, [], 'unknown evidence')
+  for (const location of [
+    `${path}:0`, `${path}:2-1`, `${path}:9007199254740992`, `${path}:1-9007199254740992`, `${path}:bad`, `${path}:1-2-3`,
+  ]) {
+    assert.doesNotThrow(() => {
+      const conflict = hardeningPrescriptionConflict({ findings: [prescriptionFinding({ location })] }, witness, unresolved)
+      assert.equal(conflict?.reason, HARDENING_PRESCRIPTION_REASONS[0])
+      assert.equal(conflict?.resolution, HARDENING_PRESCRIPTION_RESOLUTION)
+      assert.equal(conflict?.file, path)
+    })
+  }
+  const valid = { findings: [prescriptionFinding({ location: `${path}:1` })] }
+  const evidenceCases = [
+    { run: () => ({ ok: false, output: '' }) },
+    { run: () => ({ ok: true, output: 'not an ls-tree record' }) },
+    { run: () => { throw new Error('interrupted') } },
+    {
+      run: (cmd) => cmd.startsWith('git ls-tree')
+        ? { ok: true, output: prescriptionBlob(path) }
+        : { ok: true, output: '@@ malformed hunk' },
+    },
+  ]
+  for (const io of evidenceCases) {
+    const evidence = prescriptionAuthorshipEvidence(valid, witness, { head: 'base-head' }, io)
+    assert.equal(evidence.get(path)?.reason === null, false)
+    assert.doesNotThrow(() => assert.equal(hardeningPrescriptionConflict(valid, witness, evidence)?.reason, HARDENING_PRESCRIPTION_REASONS[0]))
+  }
+})
+
+test('E1 existing pinned prescription contracts remain unchanged', () => {
+  const path = 'a.test.mjs'
+  const witness = prescriptionRead(path)
+  const ordinary = { findings: [prescriptionFinding({ location: `${path}:1` })] }
+  assert.deepEqual(HARDENING_PRESCRIPTION_REASONS, ['pinned-test-prescription'])
+  assert.equal(Object.isFrozen(HARDENING_PRESCRIPTION_REASONS), true)
+  assert.equal(HARDENING_PRESCRIPTION_RESOLUTION, 'refuse-prescription')
+  assert.equal(hardeningPrescriptionConflict(ordinary, witness)?.resolution, HARDENING_PRESCRIPTION_RESOLUTION)
+  for (const location of [undefined, '', ':bad', 'unrelated prose']) {
+    assert.equal(hardeningPrescriptionConflict({ findings: [prescriptionFinding({ location })] }, witness), null)
+  }
+  assert.equal(hardeningPrescriptionConflict(ordinary, undefined), null)
+  assert.equal(hardeningPrescriptionConflict(ordinary, new Map()), null)
+  assert.equal(hardeningPrescriptionConflict(ordinary, new Map([[path, { state: 'unreadable', bytes: null }]])), null)
+  assert.equal(hardeningPrescriptionConflict({ findings: [prescriptionFinding({ location: 'checks.mjs:1' })] }, new Map([['checks.mjs', { state: 'read', bytes: 'x\n' }]])), null)
+  assert.equal(hardeningPrescriptionConflict({ findings: [prescriptionFinding({ disposition: 'no-op' })] }, witness), null)
+  assert.equal(hardeningPrescriptionConflict({ findings: [prescriptionFinding({ hardening: 'ungateable', hardening_why: 'no guard' })] }, witness), null)
+
+  const deletionPatch = [
+    `diff --git a/${path} b/${path}`,
+    `--- a/${path}`,
+    `+++ b/${path}`,
+    '@@ -2,1 +2,0 @@',
+    '-two',
+    '',
+  ].join('\n')
+  const deletion = { findings: [prescriptionFinding({ disposition: 'auto-fix', patch: deletionPatch })] }
+  const authoredDeletion = prescriptionAuthored(path, [prescriptionPathSpan(path, 2)])
+  assert.equal(hardeningPrescriptionConflict(deletion, witness, authoredDeletion), null)
+
+  for (const patch of [
+    [
+      `diff --git a/${path} b/${path}`,
+      `--- a/${path}`,
+      `+++ b/${path}`,
+      '@@ -0,0 +1,1 @@',
+      '+inserted',
+      '',
+    ].join('\n'),
+    [
+      `diff --git a/${path} b/${path}`,
+      `--- a/${path}`,
+      `+++ b/${path}`,
+      '@@ -1,1 +2,2 @@',
+      ' unchanged context',
+      '+inserted',
+      '',
+    ].join('\n'),
+  ]) {
+    const insertion = { findings: [prescriptionFinding({ disposition: 'auto-fix', patch })] }
+    const conflict = hardeningPrescriptionConflict(insertion, witness, prescriptionAuthored(path, [prescriptionPathSpan(path, 1, 3)]))
+    assert.equal(conflict?.reason, HARDENING_PRESCRIPTION_REASONS[0])
+    assert.equal(conflict?.resolution, HARDENING_PRESCRIPTION_RESOLUTION)
+  }
 })

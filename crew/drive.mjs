@@ -9826,7 +9826,8 @@ function runTask(ctx, io, crash) {
           hardenAppeals = 0
           hardenOwed = debt
           hardenWitness = witnessTree(scopeFiles)
-          const prescriptionConflict = hardeningPrescriptionConflict(review.details, hardenWitness)
+          const prescriptionAuthored = prescriptionAuthorshipEvidence(review.details, hardenWitness, ctx, io)
+          const prescriptionConflict = hardeningPrescriptionConflict(review.details, hardenWitness, prescriptionAuthored, hardenWitness)
           if (prescriptionConflict) {
             stageComplete()
             return escalate('harden', `[pinned-test-prescription] finding ${prescriptionConflict.finding.id} prescribes a change to hardening-witnessed ${prescriptionConflict.file}; refusing the prescription`, [], { hardening_prescription_conflict: prescriptionConflict })
@@ -11824,6 +11825,331 @@ export function patchTargets(patch) {
   return { targets: [...targets], refusal: null }
 }
 
+function prescriptionCoordinate(text, positive = false) {
+  if (typeof text !== 'string' || !/^\d+$/.test(text)) return null
+  const value = Number(text)
+  if (!Number.isSafeInteger(value) || (positive && value < 1)) return null
+  return value
+}
+
+function prescriptionPathHeader(line, side) {
+  const raw = String(line ?? '').slice(4).split('\t')[0].trim()
+  if (!raw) return { invalid: true, path: null, devNull: false }
+  if (raw === '/dev/null') return { invalid: false, path: '/dev/null', devNull: true }
+  if (raw.startsWith('"')) return { invalid: true, path: null, devNull: false }
+  const prefix = side === 'before' ? 'a/' : 'b/'
+  if (!raw.startsWith(prefix)) return { invalid: true, path: null, devNull: false }
+  const path = raw.slice(prefix.length)
+  return path === '' ? { invalid: true, path: null, devNull: false } : { invalid: false, path, devNull: false }
+}
+
+function prescriptionHunkHeader(line) {
+  const match = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(?:.*)$/.exec(String(line ?? ''))
+  if (!match) return { hunk: null, reason: `invalid prescription hunk header ${String(line ?? '')}` }
+  const oldStart = prescriptionCoordinate(match[1])
+  const oldCount = prescriptionCoordinate(match[2] ?? '1')
+  const newStart = prescriptionCoordinate(match[3])
+  const newCount = prescriptionCoordinate(match[4] ?? '1')
+  // A zero-width side may start at zero (`-0,0`/`+0,0`), while every side with
+  // lines has a positive start. Counts themselves are non-negative safe integers.
+  const oldStartValue = match[1] === '0' ? 0 : oldStart
+  const newStartValue = match[3] === '0' ? 0 : newStart
+  const oldCountValue = match[2] === '0' ? 0 : oldCount
+  const newCountValue = match[4] === '0' ? 0 : newCount
+  if (oldStartValue === null || newStartValue === null || oldCountValue === null || newCountValue === null) {
+    return { hunk: null, reason: `prescription hunk coordinates are not safe integers: ${String(line ?? '')}` }
+  }
+  if ((oldCountValue > 0 && oldStartValue < 1) || (newCountValue > 0 && newStartValue < 1)) {
+    return { hunk: null, reason: `prescription hunk coordinates are not positive on a non-empty side: ${String(line ?? '')}` }
+  }
+  const oldEnd = oldCountValue === 0 ? oldStartValue : oldStartValue + oldCountValue - 1
+  const newEnd = newCountValue === 0 ? newStartValue : newStartValue + newCountValue - 1
+  if (![oldEnd, newEnd].every((value) => Number.isSafeInteger(value))) {
+    return { hunk: null, reason: `prescription hunk range overflow: ${String(line ?? '')}` }
+  }
+  return { hunk: { oldStart: oldStartValue, oldCount: oldCountValue, newStart: newStartValue, newCount: newCountValue }, reason: null }
+}
+
+const PRESCRIPTION_PATCH_METADATA = /^(?:index |new file mode |deleted file mode |old mode |new mode |similarity index |dissimilarity index )/
+
+function prescriptionPatchResolution(path, spans = [], reason = null) {
+  return { path, spans, reason }
+}
+
+function prescriptionWitnessLines(bytes) {
+  if (typeof bytes !== 'string' || bytes.includes('\0')) return null
+  const lines = bytes.split('\n')
+  if (lines.at(-1) === '') lines.pop()
+  return lines
+}
+
+function prescriptionHunkLineMatchesWitness(lines, lineNumber, body) {
+  return Array.isArray(lines) && lines[lineNumber - 1] === body
+}
+
+// Parse the complete body only after patchTargets has validated its write surface.
+// The old side is the current tree for a review prescription: context and deletion
+// consume its coordinate, but only deletion (`-`) coordinates become prescribed spans.
+export function prescriptionPatchResolutions(patch, targets = [], witness = null, matchWitness = false) {
+  const targetSet = new Set((Array.isArray(targets) ? targets : [])
+    .filter((path) => typeof path === 'string' && path !== ''))
+  const testTargets = [...targetSet].filter((path) => hardeningTestPath(path))
+  const unresolved = (why) => new Map(testTargets.map((path) => [path, prescriptionPatchResolution(path, [], why)]))
+  if (typeof patch !== 'string' || patch.includes('\0')) return unresolved('the prescription patch body was unreadable')
+  const source = patch.replace(/\r\n?/g, '\n')
+  const lines = source.split('\n')
+  const starts = []
+  lines.forEach((line, index) => { if (line.startsWith('diff --git ')) starts.push(index) })
+  if (starts.length === 0 || lines.slice(0, starts[0]).some((line) => line.trim() !== '')) {
+    return unresolved('the prescription patch has no complete section')
+  }
+  const resolutions = new Map()
+  const witnessedTestSections = new Set()
+  for (let sectionIndex = 0; sectionIndex < starts.length; sectionIndex += 1) {
+    const sectionStart = starts[sectionIndex]
+    const sectionEnd = starts[sectionIndex + 1] ?? lines.length
+    const section = lines.slice(sectionStart, sectionEnd)
+    const beforeLines = section.filter((line) => line.startsWith('--- '))
+    const afterLines = section.filter((line) => line.startsWith('+++ '))
+    const before = beforeLines.length === 1 ? prescriptionPathHeader(beforeLines[0], 'before') : { invalid: true, path: null, devNull: false }
+    const after = afterLines.length === 1 ? prescriptionPathHeader(afterLines[0], 'after') : { invalid: true, path: null, devNull: false }
+    const sectionPaths = [before, after].filter((side) => !side.invalid && !side.devNull).map((side) => side.path)
+    const testPaths = [...new Set(sectionPaths.filter((path) => hardeningTestPath(path)))]
+    let sectionReason = null
+    const witnessedTestPaths = testPaths.filter((path) => witness instanceof Map && witness.get(path)?.state === 'read')
+    for (const path of witnessedTestPaths) {
+      if (witnessedTestSections.has(path)) sectionReason ||= 'the prescription patch repeats a witnessed test target section'
+      witnessedTestSections.add(path)
+    }
+    const beforeCell = witness instanceof Map && typeof before.path === 'string' ? witness.get(before.path) : null
+    const checkBeforeWitness = matchWitness && hardeningTestPath(before.path) && beforeCell?.state === 'read'
+    const beforeWitnessLines = checkBeforeWitness ? prescriptionWitnessLines(beforeCell.bytes) : null
+    const gitHeader = /^diff --git a\/(.+) b\/(.+)$/.exec(section[0] || '')
+    if (!gitHeader) sectionReason = 'the prescription patch section header was malformed'
+    if (before.invalid || after.invalid) sectionReason = 'the prescription patch has mismatched or unreadable side paths'
+    if (beforeLines.length !== 1 || afterLines.length !== 1) sectionReason = 'the prescription patch has no complete side-path pair'
+    if (gitHeader && !before.invalid && !before.devNull && gitHeader[1] !== before.path) sectionReason = 'the prescription patch before path disagreed with its section header'
+    if (gitHeader && !after.invalid && !after.devNull && gitHeader[2] !== after.path) sectionReason = 'the prescription patch after path disagreed with its section header'
+    for (const side of [before, after]) {
+      if (!side.invalid && !side.devNull && !targetSet.has(side.path)) sectionReason = 'the prescription patch side path was not in its validated write surface'
+    }
+    if (!before.invalid && !after.invalid && before.devNull && after.devNull) sectionReason = 'the prescription patch has no current-tree side'
+    const hunkIndexes = []
+    for (let index = 1; index < section.length; index += 1) {
+      if (section[index].startsWith('@@')) hunkIndexes.push(index)
+    }
+    if (hunkIndexes.length === 0) sectionReason ||= 'the prescription patch test section has no hunk body'
+    const changed = []
+    for (let hunkIndex = 0; hunkIndex < hunkIndexes.length; hunkIndex += 1) {
+      const headerIndex = hunkIndexes[hunkIndex]
+      const nextHeader = hunkIndexes[hunkIndex + 1] ?? section.length
+      const parsed = prescriptionHunkHeader(section[headerIndex])
+      if (parsed.reason) { sectionReason ||= parsed.reason; continue }
+      let oldNumber = parsed.hunk.oldStart
+      let newNumber = parsed.hunk.newStart
+      let oldSeen = 0
+      let newSeen = 0
+      let previousMarker = false
+      let hunkChanged = 0
+      for (let index = headerIndex + 1; index < nextHeader; index += 1) {
+        const line = section[index]
+        if (line === '' && section.slice(index + 1).every((rest) => rest === '')) continue
+        if (line === '\\ No newline at end of file') {
+          if (!previousMarker) sectionReason ||= 'the prescription patch has a misplaced no-newline marker'
+          continue
+        }
+        const marker = line[0]
+        if (![' ', '+', '-'].includes(marker)) { sectionReason ||= `the prescription patch has an invalid hunk-body marker ${line}`; continue }
+        if ((marker === ' ' || marker === '-') && checkBeforeWitness && !prescriptionHunkLineMatchesWitness(beforeWitnessLines, oldNumber, line.slice(1))) {
+          sectionReason ||= 'the prescription patch hunk did not match the witnessed test at its declared old-side coordinate'
+        }
+        previousMarker = true
+        if (marker === ' ') {
+          if (before.devNull || after.devNull) sectionReason ||= 'the prescription patch context line has a missing side'
+          oldSeen += 1; newSeen += 1
+          if (oldNumber < Number.MAX_SAFE_INTEGER) oldNumber += 1
+          else sectionReason ||= 'the prescription patch old-side coordinate overflowed'
+          if (newNumber < Number.MAX_SAFE_INTEGER) newNumber += 1
+          else sectionReason ||= 'the prescription patch new-side coordinate overflowed'
+        } else if (marker === '-') {
+          if (before.devNull) sectionReason ||= 'the prescription patch deletion has no old-side path'
+          oldSeen += 1
+          if (before.path) {
+            changed.push({ path: before.path, start: oldNumber, end: oldNumber })
+            hunkChanged += 1
+          }
+          if (oldNumber < Number.MAX_SAFE_INTEGER) oldNumber += 1
+          else sectionReason ||= 'the prescription patch old-side coordinate overflowed'
+        } else {
+          if (after.devNull) sectionReason ||= 'the prescription patch addition has no new-side path'
+          newSeen += 1
+          if (newNumber < Number.MAX_SAFE_INTEGER) newNumber += 1
+          else sectionReason ||= 'the prescription patch new-side coordinate overflowed'
+        }
+      }
+      if (oldSeen !== parsed.hunk.oldCount || newSeen !== parsed.hunk.newCount) {
+        sectionReason ||= `the prescription patch hunk counts did not match the body: observed ${oldSeen}/${newSeen}, declared ${parsed.hunk.oldCount}/${parsed.hunk.newCount}`
+      }
+      if (testPaths.length > 0 && hunkChanged === 0) sectionReason ||= 'the witnessed test hunk has no current-tree deletion coordinate'
+    }
+    for (const path of testPaths) {
+      const pathChanged = changed.filter((span) => span.path === path)
+      const next = sectionReason
+        ? prescriptionPatchResolution(path, [], sectionReason)
+        : pathChanged.length > 0
+          ? prescriptionPatchResolution(path, pathChanged, null)
+          : prescriptionPatchResolution(path, [], 'the witnessed test hunk has no current-tree deletion coordinate')
+      resolutions.set(path, next)
+    }
+  }
+  for (const path of testTargets) {
+    if (!resolutions.has(path)) resolutions.set(path, prescriptionPatchResolution(path, [], 'the prescription patch section was not resolved'))
+  }
+  return resolutions
+}
+
+export function resolveHardeningPrescriptionLocation(location) {
+  const empty = { path: null, spans: [], reason: null }
+  if (typeof location !== 'string') return empty
+  const text = location.trim()
+  if (text === '') return empty
+  const valid = /^(.+):(\d+)(?:-(\d+))?$/.exec(text)
+  if (valid && !/[\s\0]/.test(valid[1])) {
+    const path = valid[1]
+    const start = prescriptionCoordinate(valid[2], true)
+    const end = valid[3] === undefined ? start : prescriptionCoordinate(valid[3], true)
+    if (start !== null && end !== null && start <= end) return { path, spans: [{ path, start, end }], reason: null }
+    return { path, spans: [], reason: 'the prescription location coordinates were invalid' }
+  }
+  const colon = text.lastIndexOf(':')
+  const path = (colon >= 0 ? text.slice(0, colon) : text).trim()
+  if (path === '' || /[\s\0]/.test(path)) return empty
+  return { path, spans: [], reason: colon >= 0 ? 'the prescription location coordinates were invalid' : 'the prescription location had no coordinates' }
+}
+
+function prescriptionFullWitnessSpan(path, bytes) {
+  if (typeof bytes !== 'string' || bytes.includes('\0')) return { spans: [], reason: 'the witnessed test bytes were unreadable' }
+  if (bytes.length === 0) return { spans: [], reason: null }
+  const lines = bytes.replace(/\r\n?/g, '\n').split('\n')
+  if (lines.at(-1) === '') lines.pop()
+  return lines.length > 0
+    ? { spans: [{ path, start: 1, end: lines.length }], reason: null }
+    : { spans: [], reason: null }
+}
+
+export function parsePrescriptionBaseTree(output, path) {
+  if (typeof output !== 'string') return { present: null, reason: 'the base-tree query output was malformed' }
+  if (output === '') return { present: false, reason: null }
+  if (!output.endsWith('\0')) return { present: null, reason: 'the base-tree query did not terminate its exact record' }
+  const records = output.split('\0')
+  if (records.length !== 2 || records[0] === '') return { present: null, reason: 'the base-tree query returned multiple or empty records' }
+  const match = /^(?:[0-7]{6})\s+blob\s+[0-9A-Fa-f]{4,64}\t([^\n\r\0]+)$/.exec(records[0])
+  if (!match || match[1] !== path) return { present: null, reason: 'the base-tree query record did not exactly name its requested path' }
+  return { present: true, reason: null }
+}
+
+export function parsePrescriptionAuthoredDiff(output, path) {
+  if (typeof output !== 'string' || output.includes('\0')) return { spans: [], reason: 'the authored diff output was unreadable' }
+  if (output === '') return { spans: [], reason: null }
+  const source = output.replace(/\r\n?/g, '\n')
+  const lines = source.split('\n')
+  const starts = []
+  lines.forEach((line, index) => { if (line.startsWith('diff --git ')) starts.push(index) })
+  if (starts.length > 0 && lines.slice(0, starts[0]).some((line) => line.trim() !== '')) return { spans: [], reason: 'the authored diff had content before its first section' }
+  const sections = starts.length > 0 ? starts.map((start, index) => lines.slice(start, starts[index + 1] ?? lines.length)) : [lines]
+  const spans = []
+  let hunks = 0
+  for (const section of sections) {
+    const gitHeader = starts.length > 0 ? /^diff --git a\/(.+) b\/(.+)$/.exec(section[0] || '') : null
+    if (starts.length > 0 && !gitHeader) return { spans: [], reason: 'the authored diff section header was malformed' }
+    const beforeLines = section.filter((line) => line.startsWith('--- '))
+    const afterLines = section.filter((line) => line.startsWith('+++ '))
+    if (starts.length > 0 && (beforeLines.length !== 1 || afterLines.length !== 1)) return { spans: [], reason: 'the authored diff had an incomplete side-path pair' }
+    const before = beforeLines.length === 1 ? prescriptionPathHeader(beforeLines[0], 'before') : null
+    const after = afterLines.length === 1 ? prescriptionPathHeader(afterLines[0], 'after') : null
+    if (before?.invalid || after?.invalid) return { spans: [], reason: 'the authored diff had an unreadable side path' }
+    if (before && !before.devNull && before.path !== path) return { spans: [], reason: 'the authored diff before path did not match its witness' }
+    if (after && !after.devNull && after.path !== path) return { spans: [], reason: 'the authored diff after path did not match its witness' }
+    if (gitHeader && before && !before.devNull && gitHeader[1] !== before.path) return { spans: [], reason: 'the authored diff before path disagreed with its section header' }
+    if (gitHeader && after && !after.devNull && gitHeader[2] !== after.path) return { spans: [], reason: 'the authored diff after path disagreed with its section header' }
+    for (const line of section) {
+      if (!line.startsWith('@@')) continue
+      const parsed = prescriptionHunkHeader(line)
+      if (parsed.reason) return { spans: [], reason: parsed.reason }
+      hunks += 1
+      if (parsed.hunk.newCount > 0) spans.push({ path, start: parsed.hunk.newStart, end: parsed.hunk.newStart + parsed.hunk.newCount - 1 })
+    }
+    if (section.some((line) => line.startsWith('@@') === false && line.startsWith('diff --git ') === false && line.startsWith('--- ') === false && line.startsWith('+++ ') === false && line !== '' && !PRESCRIPTION_PATCH_METADATA.test(line) && !line.startsWith('index ' ) && !line.startsWith('\\ No newline at end of file') && ![' ', '+', '-'].includes(line[0]))) {
+      return { spans: [], reason: 'the authored diff contained an unreadable line' }
+    }
+  }
+  if (hunks === 0) return { spans: [], reason: 'the authored diff contained no valid hunk' }
+  return { spans, reason: null }
+}
+
+function readPrescriptionAuthorship(ctx, io, path, cell) {
+  const unknown = (why) => ({ spans: [], reason: why })
+  if (typeof ctx?.head !== 'string' || ctx.head.trim() === '') return unknown('the lane base commit was blank')
+  if (!cell || cell.state !== 'read' || typeof cell.bytes !== 'string') return unknown('the witnessed test bytes were unreadable')
+  if (typeof io?.run !== 'function') return unknown('the base-tree query runner was unavailable')
+  let tree
+  try { tree = io.run(`git ls-tree -z --full-tree ${shellArg(ctx.head)} -- ${shellArg(path)}`) }
+  catch (err) { return unknown(`the base-tree query was interrupted: ${err?.message ?? String(err)}`) }
+  if (!tree || tree.ok !== true || typeof tree.output !== 'string') return unknown('the base-tree query returned non-ok output')
+  const existence = parsePrescriptionBaseTree(tree.output, path)
+  if (existence.reason !== null) return unknown(existence.reason)
+  if (existence.present === false) return prescriptionFullWitnessSpan(path, cell.bytes)
+  let diff
+  try { diff = io.run(`git diff --unified=0 ${shellArg(ctx.head)} -- ${shellArg(path)}`) }
+  catch (err) { return unknown(`the authored diff query was interrupted: ${err?.message ?? String(err)}`) }
+  if (!diff || diff.ok !== true || typeof diff.output !== 'string') return unknown('the authored diff query returned non-ok output')
+  return parsePrescriptionAuthoredDiff(diff.output, path)
+}
+
+function prescriptionPathsFromDetails(details) {
+  const paths = new Set()
+  const owed = new Set(hardeningDebt(details).owed.map(({ id }) => id))
+  const normalized = reviewFindings(details)?.findings ?? []
+  const rawById = acceptedRawById(details)
+  for (const finding of normalized) {
+    if (!owed.has(finding.id) || finding.disposition === 'no-op') continue
+    const raw = rawById.get(finding.id)
+    if (finding.disposition === 'auto-fix' && typeof raw?.patch === 'string' && raw.patch.trim() !== '') {
+      const parsed = patchTargets(raw.patch)
+      if (parsed.refusal === null) {
+        for (const path of parsed.targets) if (hardeningTestPath(path)) paths.add(path)
+        continue
+      }
+    }
+    const location = resolveHardeningPrescriptionLocation(finding.location)
+    if (hardeningTestPath(location.path)) paths.add(location.path)
+  }
+  return paths
+}
+
+export function prescriptionAuthorshipEvidence(details, witness, ctx, io) {
+  const evidence = new Map()
+  if (!(witness instanceof Map) || witness.size === 0) return evidence
+  for (const path of prescriptionPathsFromDetails(details)) {
+    const cell = witness.get(path)
+    if (!cell || cell.state !== 'read') continue
+    evidence.set(path, readPrescriptionAuthorship(ctx, io, path, cell))
+  }
+  return evidence
+}
+
+export function prescriptionSpanIsLaneAuthored(span, authored) {
+  if (!span || typeof span.path !== 'string' || !Number.isSafeInteger(span.start) || !Number.isSafeInteger(span.end) || span.start < 1 || span.end < span.start) return false
+  const raw = authored instanceof Map ? authored.get(span.path) : null
+  const authoredSpans = (Array.isArray(raw) ? raw : raw?.spans)?.filter((candidate) => candidate && Number.isSafeInteger(candidate.start) && Number.isSafeInteger(candidate.end) && candidate.start >= 1 && candidate.end >= candidate.start)
+  return Array.isArray(authoredSpans) && authoredSpans.some((candidate) => candidate.start <= span.start && candidate.end >= span.end)
+}
+
+export function prescriptionSpansAreLaneAuthored(spans, authored) {
+  if (!Array.isArray(spans)) return false
+  return spans.every((span) => prescriptionSpanIsLaneAuthored(span, authored))
+}
+
 // Split one review's findings by what the DRIVER can do with them, per ADR-030's
 // programmatic-over-model-tokens rule (#800, TRD §5 R4):
 //   autoFix   — mechanically safe and carrying a patch: code applies it, no seat.
@@ -12050,13 +12376,9 @@ export function hardeningDebt(details) {
   return { owed, exempt }
 }
 
-function locationPathFromFinding(finding) {
-  const location = typeof finding?.location === 'string' ? finding.location : ''
-  return /:\d+(?:-\d+)?$/.test(location) ? location.replace(/:\d+(?:-\d+)?$/, '') : null
-}
-
-export function hardeningPrescriptionConflict(details, witness) {
+export function hardeningPrescriptionConflict(details, witness, authored = new Map(), appliedWitness = null) {
   if (!(witness instanceof Map) || witness.size === 0) return null
+  const patchWitness = appliedWitness === witness ? witness : null
   const owed = new Set(hardeningDebt(details).owed.map(({ id }) => id))
   const normalized = reviewFindings(details)?.findings ?? []
   const rawById = acceptedRawById(details)
@@ -12064,12 +12386,18 @@ export function hardeningPrescriptionConflict(details, witness) {
     if (!owed.has(finding.id)) continue
     if (finding.disposition === 'no-op') continue
     const raw = rawById.get(finding.id)
+    const parsed = finding.disposition === 'auto-fix' && typeof raw?.patch === 'string' && raw.patch.trim() !== ''
+      ? patchTargets(raw.patch)
+      : { targets: [], refusal: 'no patch' }
+    let resolutions
     let candidates
-    if (finding.disposition === 'auto-fix' && typeof raw?.patch === 'string' && raw.patch.trim() !== '') {
-      const parsed = patchTargets(raw.patch)
-      candidates = parsed.refusal === null ? parsed.targets : [locationPathFromFinding(finding)]
+    if (parsed.refusal === null) {
+      candidates = parsed.targets
+      resolutions = prescriptionPatchResolutions(raw.patch, parsed.targets, witness, patchWitness === witness)
     } else {
-      candidates = [locationPathFromFinding(finding)]
+      const location = resolveHardeningPrescriptionLocation(finding.location)
+      candidates = [location.path]
+      resolutions = location.path === null ? new Map() : new Map([[location.path, location]])
     }
     for (const file of candidates) {
       if (!hardeningTestPath(file)) continue
@@ -12077,6 +12405,8 @@ export function hardeningPrescriptionConflict(details, witness) {
       if (cell === undefined) continue
       if (cell === null) continue
       if (cell.state !== 'read') continue
+      const resolution = resolutions.get(file) || { spans: [], reason: 'the prescription evidence was unresolved' }
+      if (resolution.reason === null && prescriptionSpansAreLaneAuthored(resolution.spans, authored)) continue
       return {
         reason: HARDENING_PRESCRIPTION_REASONS[0],
         resolution: HARDENING_PRESCRIPTION_RESOLUTION,

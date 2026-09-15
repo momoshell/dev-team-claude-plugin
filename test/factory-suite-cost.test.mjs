@@ -56,9 +56,18 @@ function captureOutput() {
   }
 }
 
+// The recorded report is a timestamped measurement, so a suite added after it was measured has no
+// row. That suite is UNMEASURED, returned with a closed reason, never a failure: requiring a row
+// forced every lane that adds a test file to re-measure and edit the report (b771). What is still
+// refused is a recorded row that names no tracked suite, and a row set that is unsorted or repeated.
+export const UNRECORDED_SUITE_REASON = 'recorded-before-suite-existed'
+
 function assertDeliveredConstructionSuites(report, discovered) {
-  assert.deepEqual(report.suites.map((row) => row?.suite), discovered)
-  assert.equal(report.denominator.suites, discovered.length)
+  const recorded = report.suites.map((row) => row?.suite)
+  const tracked = new Set(discovered)
+  for (const suite of recorded) assert.ok(tracked.has(suite), `recorded suite ${suite} is not a tracked suite`)
+  assert.deepEqual(recorded, [...new Set(recorded)].sort(), 'recorded suites are unique and sorted')
+  assert.equal(report.denominator.suites, recorded.length)
   assert.ok(report.denominator.measured_suites > 0)
   assert.ok(report.denominator.tests > 0)
   const deliveredRows = new Map(report.suites.map((row) => [row?.suite, row]))
@@ -70,6 +79,8 @@ function assertDeliveredConstructionSuites(report, discovered) {
     assert.ok(Number.isFinite(row?.seconds_per_test), suite)
     assert.ok(row?.slowest_tests.length > 0, suite)
   }
+  const recordedSet = new Set(recorded)
+  return { unmeasured: discovered.filter((suite) => !recordedSet.has(suite)), reason: UNRECORDED_SUITE_REASON }
 }
 
 function cloneReportWithSuiteRows(change) {
@@ -101,6 +112,20 @@ test('B1 delivered construction suites reject an unknown tracked row', () => {
     ? { suite: 'test/unknown-suite.test.mjs' }
     : {})
   assert.throws(() => assertDeliveredConstructionSuites(substitutedReport, discovered))
+})
+
+// Mutation killed: restoring exact list equality makes a newly added test file fail this suite again.
+test('D1 a tracked suite added after the recorded measurement is unmeasured, not a failure', () => {
+  const discovered = [...trackedSuites({ checkout: ROOT }), 'test/zz-added-after-measurement.test.mjs'].sort()
+  const result = assertDeliveredConstructionSuites(RECORDED_SUITE_COST_REPORT, discovered)
+  assert.deepEqual(result.unmeasured, ['test/zz-added-after-measurement.test.mjs'])
+  assert.equal(result.reason, UNRECORDED_SUITE_REASON)
+})
+
+// Mutation killed: dropping the tracked-suite check lets a report describe a suite that does not exist.
+test('E1 a recorded row naming no tracked suite is refused', () => {
+  const discovered = trackedSuites({ checkout: ROOT }).filter((suite) => suite !== 'test/factory-absence.test.mjs')
+  assert.throws(() => assertDeliveredConstructionSuites(RECORDED_SUITE_COST_REPORT, discovered), /is not a tracked suite/)
 })
 
 test('C1 delivered construction suites accept changed positive counts', () => {

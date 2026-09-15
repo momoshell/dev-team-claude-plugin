@@ -3399,6 +3399,7 @@ export const DOCUMENT_REFUSAL_DECLARATIONS = Object.freeze([
   'LIMIT_REFUSALS', 'ROSTER_REFUSALS', 'SEAT_REFUSALS', 'CAPABILITY_REFUSALS', 'EVAL_REFUSALS',
 ])
 export const DOCUMENT_POSTURE_DECLARATIONS = Object.freeze(['RATIFIED_POSTURE'])
+export const DOCUMENT_APPEND_TARGET = 'docs/conventions.md'
 export const DISPATCH_BATCH_FLAG_DECLARATIONS = Object.freeze(['valueFlags', 'booleanFlags', 'repeatableFlags'])
 const CLI_MEMBER = /^--?[a-z0-9][a-z0-9-]*$/
 const CLI_UNDASHED_MEMBER = /^[a-z0-9][a-z0-9-]*$/
@@ -3735,21 +3736,56 @@ export function documentStagePlan(input, options = {}) {
   return { triggered: entries.length > 0, readable: true, entries }
 }
 
-export function runDocumentationDecision({ ctx = {}, io, commit, files } = {}) {
+export function runDocumentationDecision({ ctx = {}, io, commit, inScope = () => false } = {}) {
   const unreadable = (why) => ({ id: 'documentation-plan', type: 'cosmetic', outcome: 'unreadable', summary: `Documentation diff could not be read: ${why}`, plan: [] })
-  if (!io || typeof io.run !== 'function') return unreadable('diff runner unavailable')
+  const plannedResidual = (entries) => ({ id: 'documentation-plan', type: 'cosmetic', outcome: 'planned', summary: `Documentation residuals planned: ${entries.length}`, plan: entries })
+  if (!io || typeof io.run !== 'function') return { commit, documentation: unreadable('diff runner unavailable') }
   const base = ctx.head || 'HEAD'
   const head = commit || 'HEAD'
   let result
   try { result = io.run(`git diff --binary --no-ext-diff --unified=100000 ${shellArg(base)} ${shellArg(head)}`) }
-  catch (error) { return unreadable(error?.message ?? String(error)) }
-  if (result?.ok !== true || typeof result.output !== 'string') return unreadable('diff command returned no readable output')
+  catch (error) { return { commit, documentation: unreadable(error?.message ?? String(error)) } }
+  if (result?.ok !== true || typeof result.output !== 'string') return { commit, documentation: unreadable('diff command returned no readable output') }
   const diff = result.output
   const date = ctx.documentDate
   const plan = documentStagePlan(diff, date === undefined ? {} : { date })
-  if (!plan.readable) return unreadable('diff contained malformed, binary, or non-text sections')
-  if (!plan.triggered) return null
-  return { id: 'documentation-plan', type: 'cosmetic', outcome: 'planned', summary: `Documentation residuals planned: ${plan.entries.length}`, plan: plan.entries }
+  if (!plan.readable) return { commit, documentation: unreadable('diff contained malformed, binary, or non-text sections') }
+  if (!plan.triggered) return { commit, documentation: null }
+  const writable = plan.entries.filter((entry) => {
+    if (entry.target !== DOCUMENT_APPEND_TARGET) return false
+    if (!inScope(entry.target)) return false
+    return true
+  })
+  const residualEntries = plan.entries.filter((entry) => !writable.includes(entry))
+  const operational = (nextCommit) => ({ commit: nextCommit, documentation: residualEntries.length > 0 ? plannedResidual(residualEntries) : null })
+  if (writable.length === 0) return operational(commit)
+  const targetPath = `${ctx.checkout}/${DOCUMENT_APPEND_TARGET}`
+  let targetText = io.readFile(targetPath)
+  if (typeof targetText !== 'string') throw new Error(`documentation target ${targetPath} could not be read`)
+  const targetLines = targetText.split('\n')
+  const entryHeadingIndexes = targetLines
+    .map((line, index) => line.replace(/\r$/, '') === '## Entries' ? index : -1)
+    .filter((index) => index >= 0)
+  const entryHeadingIndex = entryHeadingIndexes[0]
+  if (entryHeadingIndexes.length !== 1 || targetLines.slice(entryHeadingIndex + 1).some((line) => /^## /.test(line.replace(/\r$/, '')))) {
+    throw new Error(`documentation target ${targetPath} is not an append-only Entries document`)
+  }
+  const seen = new Set(targetText.split('\n'))
+  const pending = writable.filter(({ entry }) => !seen.has(entry) && (seen.add(entry), true))
+  if (pending.length > 0) {
+    io.writeFile(targetPath, `${targetText}${targetText.endsWith('\n') ? '' : '\n'}${pending.map(({ entry }) => entry).join('\n')}\n`)
+    const repairCommand = `node skills/qa-test-writing/anchor-pin.mjs --repair skills/backend-node --root ${shellArg(ctx.checkout)} --base ${shellArg(ctx.head)}`
+    const repair = io.run(repairCommand)
+    const refusalOutput = /^\s*refused\b/m.test(String(repair?.output || ''))
+    if (repair?.ok !== true || (Array.isArray(repair?.refusals) && repair.refusals.length > 0) || repair?.refused === true || refusalOutput) {
+      throw new Error(`anchor repair refused${repair?.output ? `: ${String(repair.output).slice(-2000)}` : ''}`)
+    }
+    const authoredFiles = io.changedFiles().filter(inScope)
+    const authoredCommit = io.commit(authoredFiles, 'docs: author planned conventions entries')
+    if (typeof authoredCommit !== 'string' || !authoredCommit.trim()) throw new Error('documentation author commit returned no commit id')
+    return operational(authoredCommit)
+  }
+  return operational(commit)
 }
 
 // Publication rebases can safely repair a conflict only when every path is one of the
@@ -4669,12 +4705,14 @@ function settleConvergence({ why, where, gateOutput, gateRed = true, ctx, io, la
   const hasCommitSubject = String(planEnv.details?.commit_subject || '').split('\n').some((line) => line.trim())
   if (!hasCommitSubject) io.log(recordRow({ at: io.now(), commit_subject: 'fallback-from-plan-summary' }))
   const committing = io.changedFiles().filter(inScope)
-  const commit = setCommit(io.commit(committing, message))
+  let commit = setCommit(io.commit(committing, message))
   emit({ kind: 'converge', action: 'committed', commit: commit, files: committing.length })
 
   stageComplete()
   stage('document')
-  const documentation = runDocumentationDecision({ ctx, io, commit, files: committing })
+  const documented = runDocumentationDecision({ ctx, io, commit, inScope })
+  commit = setCommit(documented.commit)
+  const documentation = documented.documentation
   stageComplete()
   stage('converge:pr')
   let pr
@@ -9754,7 +9792,9 @@ function runTask(ctx, io, crash) {
   }
   stageComplete()
   stage('document')
-  S.documentation = runDocumentationDecision({ ctx, io, commit: S.commit, files: committing })
+  const documented = runDocumentationDecision({ ctx, io, commit: S.commit, inScope })
+  S.commit = documented.commit
+  S.documentation = documented.documentation
   stageComplete()
 
   if (publishing) {

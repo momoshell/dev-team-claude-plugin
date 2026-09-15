@@ -14,6 +14,12 @@ import { checkSkillAnchors, laneFence, partitionShifts } from '../skills/qa-test
 
 const REVIEW_RUN_ID = 'run-review-783'
 const REVIEW_CTX = Object.freeze({ ...CTX, variant: 'review_only', run_id: REVIEW_RUN_ID, roles: ['reviewer'], seatedRoles: ['reviewer'] })
+const REVIEW_BASE_SHA = Object.freeze('a'.repeat(40))
+const REVIEW_HEAD_SHA = Object.freeze('b'.repeat(40))
+const REVIEW_IDENTITY = Object.freeze({ base_sha: REVIEW_BASE_SHA, head_sha: REVIEW_HEAD_SHA })
+const REVIEW_NULL_PROTO_IDENTITY = Object.freeze(Object.assign(Object.create(null), { base_sha: REVIEW_BASE_SHA, head_sha: REVIEW_HEAD_SHA }))
+const REVIEW_CONTEXTFUL_CTX = Object.freeze({ ...REVIEW_CTX, review_identity: REVIEW_IDENTITY })
+const REVIEW_NULL_PROTO_CTX = Object.freeze({ ...REVIEW_CTX, review_identity: REVIEW_NULL_PROTO_IDENTITY })
 const REVIEW_FINDING = Object.freeze({
   id: 'finding-1', severity: 'should-fix', location: 'src/example.mjs:12',
   summary: 'the reviewed change needs a follow-up', evidence: 'the changed branch is not covered', disposition: 'ask-user',
@@ -48,6 +54,10 @@ function reviewEnvelope({ outcome = 'findings', findings = [REVIEW_FINDING], ass
     assignment_id, run_id, role, status: 'done', summary: 'review complete', artifacts: [`${TD}/review.md`],
     details: { base: 'base-sha', head: 'head-sha', outcome, findings, ...details },
   }
+}
+
+function reviewIdentityEnvelope(baseSha, headSha) {
+  return reviewEnvelope({ details: { base: baseSha, head: headSha } })
 }
 
 function zeroTurnReviewEnvelope(assignment_id = 'd1') {
@@ -3945,6 +3955,147 @@ test('D2 envelope declaration metadata fails closed', () => {
     withFindings((field) => ({ ...field, item_values: { ...field.item_values, severity: Object.freeze([]) } })),
   ]
   for (const shape of malformed) assert.equal(typeof shapeDefect(shape, 'review_only'), 'string')
+})
+
+test('A1 review identity rejects wrong returned base and head before acceptance', () => {
+  const cases = [
+    { base: 'c'.repeat(40), head: REVIEW_HEAD_SHA },
+    { base: REVIEW_BASE_SHA, head: 'd'.repeat(40) },
+  ]
+  for (const returned of cases) {
+    const io = strictReviewIo(reviewIdentityEnvelope(returned.base, returned.head))
+    const result = driveTask(REVIEW_CONTEXTFUL_CTX, io)
+    const refusal = {
+      reason: 'identity-mismatch',
+      expected: { base_sha: REVIEW_BASE_SHA, head_sha: REVIEW_HEAD_SHA },
+      returned: { base_sha: returned.base, head_sha: returned.head },
+    }
+    assert.equal(result.status, 'escalation')
+    assert.deepEqual(result.details.escalation.review_identity, refusal)
+    const rows = io.calls.logs.filter((row) => row.review_identity_refused)
+    assert.equal(rows.length, 1)
+    assert.deepEqual(rows[0].review_identity_refused, refusal)
+    assert.equal(io.calls.logs.some((row) => row.envelope_refused), false)
+    assert.equal(io.calls.logs.some((row) => row.stage === 'envelope-accept'), false)
+    assert.equal(io.calls.logs.some((row) => row.envelope_accepted), false)
+    assert.equal(io.calls.commits.length, 0)
+  }
+})
+
+test('B1 review identity rejects malformed context before dispatch', () => {
+  const valueCases = []
+  for (const field of ['base_sha', 'head_sha']) {
+    for (const value of ['AF'.repeat(20), 'g'.repeat(40), 'a'.repeat(39), 'a'.repeat(41)]) {
+      const identity = { base_sha: REVIEW_BASE_SHA, head_sha: REVIEW_HEAD_SHA }
+      identity[field] = value
+      valueCases.push([`${field}-${value.length}`, identity])
+    }
+  }
+  const missing = { base_sha: REVIEW_BASE_SHA }
+  const ordinaryExtra = { ...REVIEW_IDENTITY, extra: true }
+  const symbolExtra = { ...REVIEW_IDENTITY }
+  Object.defineProperty(symbolExtra, Symbol('extra'), { value: true })
+  const hiddenExtra = { ...REVIEW_IDENTITY }
+  Object.defineProperty(hiddenExtra, 'extra', { value: true })
+  const inherited = Object.assign(Object.create({ inherited: true }), REVIEW_IDENTITY)
+  const custom = Object.assign(Object.create({}), REVIEW_IDENTITY)
+  class ReviewIdentityClass {
+    constructor() {
+      this.base_sha = REVIEW_BASE_SHA
+      this.head_sha = REVIEW_HEAD_SHA
+    }
+  }
+  const throwingOwnKeys = new Proxy({ ...REVIEW_IDENTITY }, {
+    ownKeys() { throw new Error('ownKeys denied') },
+  })
+  const throwingGetter = { head_sha: REVIEW_HEAD_SHA }
+  Object.defineProperty(throwingGetter, 'base_sha', {
+    enumerable: true,
+    get() { throw new Error('getter denied') },
+  })
+  const cycle = { ...REVIEW_IDENTITY }
+  cycle.self = cycle
+  const bigInt = { base_sha: 1n, head_sha: REVIEW_HEAD_SHA }
+  const shapeCases = [
+    ['null', null], ['array', [REVIEW_BASE_SHA, REVIEW_HEAD_SHA]], ['missing', missing],
+    ['ordinary-extra', ordinaryExtra], ['symbol-extra', symbolExtra], ['hidden-extra', hiddenExtra],
+    ['inherited-prototype', inherited], ['custom-prototype', custom], ['class-prototype', new ReviewIdentityClass()],
+    ['throwing-ownKeys', throwingOwnKeys], ['throwing-getter', throwingGetter], ['cycle', cycle], ['bigint', bigInt],
+  ]
+  for (const [label, identity] of [...valueCases, ...shapeCases]) {
+    const ctx = Object.freeze({ ...REVIEW_CTX, review_identity: identity })
+    const io = strictReviewIo(reviewEnvelope())
+    const result = driveTask(ctx, io)
+    assert.equal(result.status, 'escalation', label)
+    assert.equal(result.details.escalation.review_identity.reason, 'review-identity-malformed', label)
+    assert.equal(io.calls.assign.length, 0, label)
+    assert.equal(io.calls.writes[`${TD}/review_only-brief.md`], undefined, label)
+    assert.equal(io.calls.logs.some((row) => row.stage === 'review_only:r1'), false, label)
+    assert.equal(io.calls.logs.some((row) => row.envelope_refused), false, label)
+    const rows = io.calls.logs.filter((row) => row.review_identity_refused)
+    assert.equal(rows.length, 1, label)
+    assert.deepEqual(rows[0].review_identity_refused, result.details.escalation.review_identity, label)
+    assert.doesNotThrow(() => JSON.stringify(rows[0]), label)
+    assert.doesNotThrow(() => JSON.stringify(result), label)
+  }
+
+  const nullProtoIo = strictReviewIo(reviewIdentityEnvelope(REVIEW_BASE_SHA, REVIEW_HEAD_SHA))
+  const nullProtoResult = driveTask(REVIEW_NULL_PROTO_CTX, nullProtoIo)
+  assert.equal(nullProtoResult.status, 'done')
+  const accepted = nullProtoIo.calls.logs.find((row) => row.envelope_accepted).envelope_accepted
+  assert.deepEqual(accepted.review_identity, {
+    expected: { base_sha: REVIEW_BASE_SHA, head_sha: REVIEW_HEAD_SHA },
+    returned: { base_sha: REVIEW_BASE_SHA, head_sha: REVIEW_HEAD_SHA },
+    match: true,
+  })
+})
+
+test('C1 review identity records a matching expected and returned pair', () => {
+  const pairs = [
+    { base_sha: REVIEW_BASE_SHA, head_sha: REVIEW_HEAD_SHA },
+    { base_sha: 'c'.repeat(64), head_sha: 'd'.repeat(64) },
+  ]
+  for (const pair of pairs) {
+    const identity = Object.freeze({ ...pair })
+    const ctx = Object.freeze({ ...REVIEW_CTX, review_identity: identity })
+    const io = strictReviewIo(reviewIdentityEnvelope(pair.base_sha, pair.head_sha))
+    const result = driveTask(ctx, io)
+    assert.equal(result.status, 'done')
+    const expected = { ...pair }
+    const audit = { expected, returned: { ...pair }, match: true }
+    const accepted = io.calls.logs.find((row) => row.envelope_accepted).envelope_accepted
+    assert.deepEqual(accepted.review_identity, audit)
+    assert.deepEqual(result.details.review_identity, audit)
+  }
+})
+
+test('D1 review identity preserves the blockless review_only contract', () => {
+  const io = strictReviewIo(reviewEnvelope())
+  const result = driveTask(REVIEW_CTX, io)
+  assert.equal(result.status, 'done')
+  assert.deepEqual(result.details.stages, ['review_only:r1', 'scope-gate:r1', 'envelope-accept', 'done'])
+  assert.deepEqual(result.details.envelope.values, reviewEnvelope().details)
+  const accepted = io.calls.logs.find((row) => row.envelope_accepted).envelope_accepted
+  assert.equal(Object.hasOwn(accepted, 'review_identity'), false)
+  assert.equal(Object.hasOwn(result.details, 'review_identity'), false)
+  assert.equal(io.calls.commits.length, 0)
+
+  const dirtyIo = strictReviewIo(reviewEnvelope(), { changed: ['crew/drive.mjs'] })
+  const dirty = driveTask(REVIEW_CTX, dirtyIo)
+  assert.equal(dirty.status, 'escalation')
+  assert.deepEqual(dirty.details.stages, ['review_only:r1', 'scope-gate:r1', 'escalate:scope'])
+  assert.deepEqual(dirty.details.escalation, {
+    where: 'scope',
+    why: 'a review_only run writes nothing, but the tree carries 1 changed file(s): crew/drive.mjs',
+    question: {
+      type: 'single-choice',
+      prompt: 'How should this scope escalation be resolved?',
+      options: ['widen-fence-to', 'split-lane', 'park'],
+      slots: { files: ['crew/drive.mjs'] },
+    },
+  })
+  assert.equal(Object.hasOwn(dirty.details, 'review_identity'), false)
+  assert.equal(dirtyIo.calls.commits.length, 0)
 })
 
 test('E1 review_only round-trips no-findings as a measured outcome', () => {

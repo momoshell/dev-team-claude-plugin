@@ -1198,6 +1198,35 @@ export function sameRecordKeys(left, right, key) {
   return leftKeys.every((value) => rightSet.has(value))
 }
 
+const REVIEW_IDENTITY_UNSERIALIZABLE = Object.freeze({ unavailable: 'review-identity-unserializable' })
+const REVIEW_IDENTITY_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
+
+function reviewIdentityContext(value) {
+  if (value === undefined) return { expected: null, defect: null, evidence: null }
+  const malformed = (evidence) => Object.freeze({ expected: null, defect: 'review-identity-malformed', evidence })
+  let evidence
+  let keys
+  let prototype
+  try {
+    evidence = JSON.parse(JSON.stringify(value))
+    keys = Reflect.ownKeys(value)
+    prototype = Object.getPrototypeOf(value)
+  } catch {
+    return malformed(REVIEW_IDENTITY_UNSERIALIZABLE)
+  }
+  if (prototype !== Object.prototype && prototype !== null) return malformed(evidence)
+  if (keys.length !== 2 || !keys.every((key) => typeof key === 'string') || !keys.includes('base_sha') || !keys.includes('head_sha')) {
+    return malformed(evidence)
+  }
+  if (!evidence || typeof evidence !== 'object' || Array.isArray(evidence)
+    || typeof evidence.base_sha !== 'string' || !REVIEW_IDENTITY_PATTERN.test(evidence.base_sha)
+    || typeof evidence.head_sha !== 'string' || !REVIEW_IDENTITY_PATTERN.test(evidence.head_sha)) {
+    return malformed(evidence)
+  }
+  const expected = Object.freeze({ base_sha: evidence.base_sha, head_sha: evidence.head_sha })
+  return Object.freeze({ expected, defect: null, evidence: expected })
+}
+
 // What accepts an envelope-shape run: the SHAPE of what came back. Deliberately
 // stricter than validEnvelope (:124), which only guards against a stale or
 // mis-addressed file. The required fields and their kinds come from the shape's
@@ -6446,10 +6475,10 @@ function runTask(ctx, io, crash) {
   // is a fabricated absence that reads as measured (#297). The post-commit
   // `converge-pr` escalations (crew/drive.mjs:1868,1878) keep overriding it through
   // extraDetails, which is why that spread stays LAST (crew/drive.test.mjs:5200).
-  function escalationResult({ where, why, question, summary, commit, artifacts = [], extraDetails = {}, terminal }) {
+  function escalationResult({ where, why, question, summary, commit, artifacts = [], extraDetails = {}, escalationExtra = {}, terminal }) {
     if (terminal) stage(`escalate:${where}`)
     const details = {
-      stages: S.stages, escalation: { where, why, question }, commit, dissents: S.dissents,
+      stages: S.stages, escalation: { where, why, question, ...escalationExtra }, commit, dissents: S.dissents,
       extra_rounds_granted: S.grants, growth: S.growth, modifiers: S.modifiers, enforcements: S.enforcements,
       gate: gateBlock(),
       ...(frozenInventoryReports.length > 0 ? { frozen_inventory_repairs: frozenInventoryReports.map((report) => ({ ...report })) } : {}),
@@ -6469,11 +6498,11 @@ function runTask(ctx, io, crash) {
     return result
   }
 
-  function escalate(where, why, extraArtifacts = [], extraDetails = {}, resolutionSlots = {}) {
+  function escalate(where, why, extraArtifacts = [], extraDetails = {}, resolutionSlots = {}, escalationExtra = {}) {
     const escalationWhere = where === 'review_only' || where === 'verify_only' ? 'envelope' : where
     return escalationResult({
       where: escalationWhere, why, question: escalationQuestion(escalationWhere, resolutionSlots), summary: `Task ${ctx.task} needs a human: ${why}`,
-      commit: null, artifacts: extraArtifacts, extraDetails, terminal: true,
+      commit: null, artifacts: extraArtifacts, extraDetails, escalationExtra, terminal: true,
     })
   }
 
@@ -6608,6 +6637,25 @@ function runTask(ctx, io, crash) {
   // branches on the shape's name: that is what makes the issue's other
   // envelope-only shape (`prompt`) a VARIANTS entry rather than new code.
   const driveEnvelopeShape = () => {
+    let reviewIdentity
+    if (variant === 'review_only') {
+      try {
+        reviewIdentity = reviewIdentityContext(ctx.review_identity)
+      } catch {
+        reviewIdentity = Object.freeze({ expected: null, defect: 'review-identity-malformed', evidence: REVIEW_IDENTITY_UNSERIALIZABLE })
+      }
+    } else {
+      reviewIdentity = { expected: null, defect: null, evidence: null }
+    }
+    const writeReviewIdentityRefusal = (refusal) => {
+      try { io.log(recordRow({ at: io.now(), review_identity_refused: refusal })) } catch { /* never load-bearing */ }
+    }
+    if (reviewIdentity.defect) {
+      const refusal = { reason: 'review-identity-malformed', expected: reviewIdentity.evidence }
+      writeReviewIdentityRefusal(refusal)
+      return escalate(variant, `the ${variant} review identity is malformed`, [], {}, {}, { review_identity: refusal })
+    }
+    let acceptedReviewIdentity = null
     const runs = (head) => stageEnabled(shape, head)
     const seat = shape.required_seats[0]
     const briefPath = art(`${variant}-brief.md`)
@@ -6689,6 +6737,15 @@ function runTask(ctx, io, crash) {
     if (defect) {
       return escalate('envelope', `the ${variant} envelope is not the shape that accepts it [${defect.reason}]: ${defect.why}`, Array.isArray(env.artifacts) ? env.artifacts : [])
     }
+    if (reviewIdentity.expected) {
+      const returnedReviewIdentity = { base_sha: env.details.base, head_sha: env.details.head }
+      if (returnedReviewIdentity.base_sha !== reviewIdentity.expected.base_sha || returnedReviewIdentity.head_sha !== reviewIdentity.expected.head_sha) {
+        const refusal = { reason: 'identity-mismatch', expected: reviewIdentity.expected, returned: returnedReviewIdentity }
+        writeReviewIdentityRefusal(refusal)
+        return escalate(variant, `the ${variant} envelope returned a review identity that does not match the expected identity`, [], {}, {}, { review_identity: refusal })
+      }
+      acceptedReviewIdentity = { expected: reviewIdentity.expected, returned: returnedReviewIdentity, match: true }
+    }
     stage('envelope-accept')
     const observedFields = envelopeFieldsPresent(env, shape)
     const reportedValues = shape.report_values
@@ -6696,6 +6753,7 @@ function runTask(ctx, io, crash) {
       : null
     const accepted = { variant, seat, files_changed: 0, fields: observedFields }
     if (shape.report_values) accepted.values = reportedValues
+    if (acceptedReviewIdentity) accepted.review_identity = acceptedReviewIdentity
     io.log(recordRow({ at: io.now(), envelope_accepted: accepted }))
     stageComplete()
     stage('done')
@@ -6708,6 +6766,7 @@ function runTask(ctx, io, crash) {
         dissents: S.dissents, accepted_via: shape.accepted_by, escalation: null,
         extra_rounds_granted: S.grants, growth: S.growth, modifiers: S.modifiers, enforcements: S.enforcements, gate: null,
         envelope: { seat, fields: observedFields, files_changed: 0, ...(shape.report_values ? { values: { ...reportedValues } } : {}) },
+        ...(acceptedReviewIdentity ? { review_identity: acceptedReviewIdentity } : {}),
       },
     }
     stageComplete()

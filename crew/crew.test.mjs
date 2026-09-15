@@ -10141,7 +10141,7 @@ test('D1-codes workflow refusal set is frozen and every validator code is reacha
     'workflow-model-below-floor', 'workflow-grant-undeliverable', 'workflow-needs-tier', 'workflow-seat-mismatch',
   ])
   assert.equal(Object.isFrozen(WORKFLOW_REFUSALS), true)
-  const dir = mkdtempSync(join(tmpdir(), 'crew-workflow-codes-'))
+  const dir = scratchDir('crew-workflow-codes-')
   try {
     writeFileSync(join(dir, 'broken.json'), '{')
     workflowReason(() => loadWorkflow('Bad', { dir }), 'workflow-name-invalid')

@@ -30,7 +30,7 @@ workspace. A `repair` run is triage, not a shortened planning loop: it carries
 the failing scope and lane into one bounded fix. A `directed` run treats the
 brief as the plan and never asks a seat to author a gate it did not receive.
 
-A `review_only` run is an envelope run: it returns the declared base/head identity, a closed outcome, and structured findings (or an explicitly measured no-findings empty list). The driver accepts it only with the unchanged zero-write scope proof; there is no commit.
+A `review_only` run is an envelope run: it returns the declared base/head identity, a closed outcome, structured findings (or an explicitly measured no-findings empty list), `reviewed_files` paths, and `unreviewable_files` `{path, reason}` rows. Unreviewable reasons are closed to `binary`, `generated`, `too-large`, and `out-of-context`; both lists must be bounded to the base/head change set and remain disjoint. The driver accepts it only with the unchanged zero-write scope proof; there is no commit.
 
 A `verify_only` run is an envelope run for reviewer-only verification: it returns complete target, assumption, product-verdict, check-matrix, environment, and blocker evidence. It has no lane context, writes nothing to the checkout, and accepts ephemeral build/test artifacts only while checks run; those artifacts must be removed before return so the final checkout is clean.
 

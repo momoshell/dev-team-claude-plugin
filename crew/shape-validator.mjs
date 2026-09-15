@@ -2,7 +2,7 @@
 
 const EXECUTIONS = Object.freeze(['reviewed', 'envelope'])
 const WRITE_SURFACES = Object.freeze(['planned', 'none'])
-const ENVELOPE_FIELD_KINDS = Object.freeze(['text', 'records'])
+const ENVELOPE_FIELD_KINDS = Object.freeze(['text', 'records', 'paths'])
 
 const SHAPE_SOURCES = Object.freeze({
   scope: Object.freeze(['plan', 'inherited', 'brief']),
@@ -86,7 +86,7 @@ function frozenStringArrayDefect(value, label) {
   return null
 }
 
-function envelopeFieldMetadataDefect(field, envelopeFields = []) {
+export function envelopeFieldMetadataDefect(field, envelopeFields = []) {
   if (!field || typeof field !== 'object' || Array.isArray(field)) return 'envelope field must be an object'
   const kind = field.kind
   const itemFields = Array.isArray(field.item_fields) ? field.item_fields : []
@@ -99,7 +99,11 @@ function envelopeFieldMetadataDefect(field, envelopeFields = []) {
     const defect = frozenStringArrayDefect(field.values, `envelope field ${JSON.stringify(field.name)}.values`)
     if (defect) return defect
   }
-  for (const key of ['allow_empty', 'item_values', 'item_patterns', 'cardinality', 'optional_item_fields']) {
+  if (kind === 'paths' && hasOwn(field, 'item_fields')) return `envelope field ${JSON.stringify(field.name)} may declare item_fields only on records`
+  if (hasOwn(field, 'allow_empty') && kind !== 'records' && kind !== 'paths') {
+    return `envelope field ${JSON.stringify(field.name)} may declare allow_empty only on records`
+  }
+  for (const key of ['item_values', 'item_patterns', 'cardinality', 'optional_item_fields']) {
     if (hasOwn(field, key) && kind !== 'records') return `envelope field ${JSON.stringify(field.name)} may declare ${key} only on records`
   }
   if (hasOwn(field, 'allow_empty') && typeof field.allow_empty !== 'boolean') {

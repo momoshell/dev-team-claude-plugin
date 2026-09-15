@@ -94,6 +94,14 @@ test('verify_only documentation pins reviewer-only no-write clean-tree execution
   assert.match(text, /ephemeral build\/test artifacts only while checks run; those artifacts must be removed before return so the final checkout is clean/)
 })
 
+test('review_only documentation pins complete coverage contract', () => {
+  const text = readText(VARIANTS_DOC)
+  assert.match(text, /`reviewed_files` paths/)
+  assert.match(text, /`unreviewable_files` `\{path, reason\}` rows/)
+  for (const reason of ['binary', 'generated', 'too-large', 'out-of-context']) assert.ok(text.includes('`' + reason + '`'))
+  assert.match(text, /both lists must be bounded to the base\/head change set and remain disjoint/)
+})
+
 test('the pane-reseat refusal remains quoted in the tier reference', () => {
   const sentence = 'a pane seat bakes model and effort into its launch command at boot (paneCommand in crew/crew.mjs); its reassign: true capability means give a settled seat NEW WORK, never change its cell'
   assert.ok(readText(TIER).includes(sentence))

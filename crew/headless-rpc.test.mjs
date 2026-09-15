@@ -18,6 +18,9 @@ import { cellFailureKind } from './seat-io.mjs'
 import { CENSUS_ABSENT_CAUSES, NO_ENVELOPE_CENSUS_ABSENT_REASONS, NO_ENVELOPE_REASONS, SEAT_SUITE_POLICY_EVENT, SUITE_RUN_REFUSAL, SUITE_RUN_UNRECOGNISED, WAIT_POLL_MS, claudeCensus, noEnvelopeDetail } from './headless.mjs'
 import { scratchDir } from '../test/helpers.mjs'
 
+const KEEPALIVE_LIFETIME_ENV = 'CREW_TEST_KEEPALIVE_LIFETIME_MS'
+const KEEPALIVE_LIFETIME_DEFAULT_MS = 300_000
+
 // The b200-helperdedup envelope, byte-exact: 1921 bytes, schema-shaped, and
 // unparseable on ONE literal newline inside the `summary` string value.
 function b200Bytes(bytes = 1921) {
@@ -1788,6 +1791,7 @@ test('run-end teardown proves a worker that survives its first SIGTERM and the o
     '})',
     'process.stdin.resume()',
     "process.stdout.write('{\"type\":\"ready\"}\\n')",
+    `setTimeout(() => process.exit(0), Number(process.env.CREW_TEST_KEEPALIVE_LIFETIME_MS || ${KEEPALIVE_LIFETIME_DEFAULT_MS}))`,
     'setInterval(() => {}, 1000)',
     '',
   ].join('\n'))

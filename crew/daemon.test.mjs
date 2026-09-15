@@ -49,6 +49,8 @@ const CHILD_SOURCE = readFileSync(join(HERE, 'child.mjs'), 'utf8')
 const sourceCode = (source) => source.split('\n').filter((line) => !line.trim().startsWith('//') && !line.trim().startsWith('*')).join('\n')
 const DAEMON_CODE = sourceCode(DAEMON_SOURCE)
 const CHILD_CODE = sourceCode(CHILD_SOURCE)
+const KEEPALIVE_LIFETIME_ENV = 'CREW_TEST_KEEPALIVE_LIFETIME_MS'
+const KEEPALIVE_LIFETIME_DEFAULT_MS = 300_000
 const DRIVE_MODULE = ['drive', 'mjs'].join('.')
 const SEAT_IO_MODULE = ['seat-io', 'mjs'].join('.')
 // D1 (#591 tranche 2): the node:sqlite probe now comes from test/helpers.mjs.
@@ -3444,7 +3446,11 @@ test('run-end teardown kills a real piped seat and its recorded pgid is gone', {
   const savedPath = process.env.PATH
   teardownPgidPaths.add(pgidPath)
   mkdirSync(binDir)
-  writeFileSync(join(binDir, 'pi'), '#!/usr/bin/env node\nprocess.stdin.resume()\nsetInterval(() => {}, 1000)\n')
+  writeFileSync(join(binDir, 'pi'), `#!/usr/bin/env node
+process.stdin.resume()
+setTimeout(() => process.exit(0), Number(process.env.CREW_TEST_KEEPALIVE_LIFETIME_MS || ${KEEPALIVE_LIFETIME_DEFAULT_MS}))
+setInterval(() => {}, 1000)
+`)
   chmodSync(join(binDir, 'pi'), 0o755)
   process.env.PATH = `${binDir}:${savedPath || ''}`
   try {

@@ -6653,7 +6653,7 @@ function runTask(ctx, io, crash) {
     if (reviewIdentity.defect) {
       const refusal = { reason: 'review-identity-malformed', expected: reviewIdentity.evidence }
       writeReviewIdentityRefusal(refusal)
-      return escalate(variant, `the ${variant} review identity is malformed`, [], {}, {}, { review_identity: refusal })
+      return escalate('envelope', `the ${variant} review identity is malformed`, [], {}, {}, { review_identity: refusal })
     }
     let acceptedReviewIdentity = null
     const runs = (head) => stageEnabled(shape, head)
@@ -6742,7 +6742,7 @@ function runTask(ctx, io, crash) {
       if (returnedReviewIdentity.base_sha !== reviewIdentity.expected.base_sha || returnedReviewIdentity.head_sha !== reviewIdentity.expected.head_sha) {
         const refusal = { reason: 'identity-mismatch', expected: reviewIdentity.expected, returned: returnedReviewIdentity }
         writeReviewIdentityRefusal(refusal)
-        return escalate(variant, `the ${variant} envelope returned a review identity that does not match the expected identity`, [], {}, {}, { review_identity: refusal })
+        return escalate('envelope', `the ${variant} envelope returned a review identity that does not match the expected identity`, [], {}, {}, { review_identity: refusal })
       }
       acceptedReviewIdentity = { expected: reviewIdentity.expected, returned: returnedReviewIdentity, match: true }
     }

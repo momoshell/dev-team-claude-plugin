@@ -692,12 +692,15 @@ export function envelopeFieldMetadataDefect(field, envelopeFields = []) {
   const kind = field.kind
   const itemFields = Array.isArray(field.item_fields) ? field.item_fields : []
   const itemSet = new Set(itemFields)
+  const optionalItemFields = Array.isArray(field.optional_item_fields) ? field.optional_item_fields : []
+  const optionalItemSet = new Set(optionalItemFields)
+  const declaredItemSet = new Set([...itemFields, ...optionalItemFields])
   if (hasOwn(field, 'values')) {
     if (kind !== 'text') return `envelope field ${JSON.stringify(field.name)} may declare values only on text`
     const defect = frozenStringArrayDefect(field.values, `envelope field ${JSON.stringify(field.name)}.values`)
     if (defect) return defect
   }
-  for (const key of ['allow_empty', 'item_values', 'item_patterns', 'cardinality']) {
+  for (const key of ['allow_empty', 'item_values', 'item_patterns', 'cardinality', 'optional_item_fields']) {
     if (hasOwn(field, key) && kind !== 'records') return `envelope field ${JSON.stringify(field.name)} may declare ${key} only on records`
   }
   if (hasOwn(field, 'allow_empty') && typeof field.allow_empty !== 'boolean') {
@@ -719,8 +722,12 @@ export function envelopeFieldMetadataDefect(field, envelopeFields = []) {
   if (kind === 'records' && (!Array.isArray(field.item_fields) || itemFields.some((name) => typeof name !== 'string' || !name) || new Set(itemFields).size !== itemFields.length)) {
     return `envelope field ${JSON.stringify(field.name)}.item_fields must be unique non-empty strings`
   }
+  if (hasOwn(field, 'optional_item_fields') && (!Array.isArray(field.optional_item_fields) || optionalItemFields.some((name) => typeof name !== 'string' || !name) || new Set(optionalItemFields).size !== optionalItemFields.length)) {
+    return `envelope field ${JSON.stringify(field.name)}.optional_item_fields must be unique non-empty strings`
+  }
+  if (optionalItemFields.some((name) => itemSet.has(name))) return `envelope field ${JSON.stringify(field.name)}.optional_item_fields must be disjoint from item_fields`
   for (const [key, values] of Object.entries(field.item_values || {})) {
-    if (!itemSet.has(key)) return `envelope field ${JSON.stringify(field.name)}.item_values names undeclared item field ${JSON.stringify(key)}`
+    if (!declaredItemSet.has(key)) return `envelope field ${JSON.stringify(field.name)}.item_values names undeclared item field ${JSON.stringify(key)}`
     const defect = frozenStringArrayDefect(values, `envelope field ${JSON.stringify(field.name)}.item_values.${key}`)
     if (defect) return defect
   }
@@ -728,7 +735,7 @@ export function envelopeFieldMetadataDefect(field, envelopeFields = []) {
     return `envelope field ${JSON.stringify(field.name)}.item_values must be an object`
   }
   for (const [key, source] of Object.entries(field.item_patterns || {})) {
-    if (!itemSet.has(key)) return `envelope field ${JSON.stringify(field.name)}.item_patterns names undeclared item field ${JSON.stringify(key)}`
+    if (!declaredItemSet.has(key)) return `envelope field ${JSON.stringify(field.name)}.item_patterns names undeclared item field ${JSON.stringify(key)}`
     if (typeof source !== 'string') return `envelope field ${JSON.stringify(field.name)}.item_patterns.${key} must be a regex source`
     try { new RegExp(source) } catch { return `envelope field ${JSON.stringify(field.name)}.item_patterns.${key} is not a valid regex` }
   }
@@ -1289,11 +1296,13 @@ export function envelopeDefect(env, shape, { taskDir } = {}) {
         return refuse('field-item', `details.${field.name} may be empty only when details.${field.cardinality.discriminator} is ${JSON.stringify(field.cardinality.empty)}, and non-empty only when it is ${JSON.stringify(field.cardinality.nonempty)}`)
       }
     }
+    const optionalItemSet = new Set(Array.isArray(field.optional_item_fields) ? field.optional_item_fields : [])
     for (const item of value) {
       if (!item || typeof item !== 'object' || Array.isArray(item)) return refuse('field-item', `every details.${field.name} entry must be an object`)
       // MUTATION A4: append an undeclared 'id' to the required item fields and a
       // well-formed envelope is over-refused.
-      for (const key of field.item_fields || []) {
+      for (const key of [...(field.item_fields || []), ...(field.optional_item_fields || [])]) {
+        if (optionalItemSet.has(key) && !hasOwn(item, key)) continue
         if (!text(item[key])) return refuse('field-item', `every details.${field.name} entry needs a non-empty ${key}`)
         if (field.item_values?.[key] && !field.item_values[key].includes(item[key])) {
           return refuse('field-item', `details.${field.name}.${key} must be one of ${field.item_values[key].join(', ')}`)
@@ -1304,6 +1313,8 @@ export function envelopeDefect(env, shape, { taskDir } = {}) {
           if (!matches) return refuse('field-item', `details.${field.name}.${key} does not match ${JSON.stringify(field.item_patterns[key])}`)
         }
       }
+      if (optionalItemSet.has('program') && optionalItemSet.has('output') && hasOwn(item, 'program') && !hasOwn(item, 'output')) return refuse('field-item', `details.${field.name}.program requires output`)
+      if (optionalItemSet.has('program') && optionalItemSet.has('output') && hasOwn(item, 'output') && !hasOwn(item, 'program')) return refuse('field-item', `details.${field.name}.output requires program`)
     }
     if (field.covers && !sameRecordKeys(value, env.details[field.covers.field], field.covers.key)) return refuse('field-item', `details.${field.name} must contain exactly one record for each ${field.covers.field}.${field.covers.key}`)
   }
@@ -6370,7 +6381,9 @@ function runTask(ctx, io, crash) {
           const values = Array.isArray(f.values) ? `; exactly one of ${f.values.join(' | ')}` : ''
           return `  details.${f.name}: a non-empty string${values}`
         }
-        if (!f.allow_empty) return `  details.${f.name}: a non-empty array of records, each with a non-empty ${f.item_fields.join(' and a non-empty ')}`
+        const optionalItemFields = Array.isArray(f.optional_item_fields) ? f.optional_item_fields : []
+        const optional = optionalItemFields.length ? `; optional fields ${optionalItemFields.join(' and ')} are each non-empty when present` : ''
+        if (!f.allow_empty) return `  details.${f.name}: a non-empty array of records, each with a non-empty ${f.item_fields.join(' and a non-empty ')}${optional}`
         const cardinality = f.cardinality
         const empty = f.covers
           ? `; exactly one record for each details.${f.covers.field}.${f.covers.key}, so an empty array is refused whenever that field carries records`
@@ -6379,7 +6392,7 @@ function runTask(ctx, io, crash) {
             : '; empty is allowed'
         const constraints = Object.entries(f.item_values || {}).map(([key, values]) => `${key} is one of ${values.join(' | ')}`)
           .concat(Object.entries(f.item_patterns || {}).map(([key, source]) => `${key} matches ${JSON.stringify(source)}`))
-        return `  details.${f.name}: an array of records with a non-empty ${f.item_fields.join(' and a non-empty ')}${empty}${constraints.length ? `; ${constraints.join('; ')}` : ''}`
+        return `  details.${f.name}: an array of records with a non-empty ${f.item_fields.join(' and a non-empty ')}${optional}${empty}${constraints.length ? `; ${constraints.join('; ')}` : ''}`
       }),
     ].join('\n')
     io.writeFile(briefPath, briefText())

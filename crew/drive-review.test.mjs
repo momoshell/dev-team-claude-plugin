@@ -1889,7 +1889,7 @@ test('full, scout and repair declarations remain byte-identical snapshots', () =
     execution: 'envelope', required_seats: ['planner'],
     stages: ['scout', 'scope-gate', 'envelope-accept'], writes: 'none',
     accepted_by: 'envelope shape',
-    envelope_fields: [{ name: 'findings', kind: 'records', item_fields: ['summary', 'evidence'] }],
+    envelope_fields: [{ name: 'findings', kind: 'records', item_fields: ['summary', 'evidence'], optional_item_fields: ['program', 'output'] }],
     assignment: 'Read-only recon. Answer the brief from the code and the checkout, write your notes into the task dir, and change nothing.',
   }
   const REPAIR_SNAPSHOT = {
@@ -1931,6 +1931,109 @@ test('scout rejects envelopes that do not match its declared shape', () => {
   assert.equal(envelopeDefect(reconEnv(), VARIANTS.scout, { taskDir: TD }), null)
   assert.equal(envelopeDefect(null, VARIANTS.scout, { taskDir: TD }).reason, 'no-envelope')
   assert.match(envelopeDefect(null, VARIANTS.scout, { taskDir: TD }).why, /no envelope/)
+})
+
+test('A1 accepts paired optional scout lab evidence', () => {
+  const finding = {
+    summary: 'the loop is code-owned', evidence: 'crew/drive.mjs:720',
+    program: 'node scripts/check-loop.mjs', output: 'loop check passed',
+  }
+  const env = reconEnv({ details: { findings: [finding] } })
+  assert.equal(envelopeDefect(env, VARIANTS.scout, { taskDir: TD }), null)
+  assert.deepEqual(env.details.findings, [finding])
+  assert.deepEqual(VARIANTS.scout.envelope_fields[0].optional_item_fields, ['program', 'output'])
+})
+
+test('B1 preserves legacy scout findings without lab evidence', () => {
+  const env = reconEnv()
+  assert.equal(envelopeDefect(env, VARIANTS.scout, { taskDir: TD }), null)
+  assert.deepEqual(env.details, { findings: [{ summary: 'the loop is code-owned', evidence: 'crew/drive.mjs:720' }] })
+})
+
+test('C1P refuses a scout program without output', () => {
+  const env = reconEnv({ details: { findings: [{ summary: 's', evidence: 'e', program: 'node check.mjs' }] } })
+  const defect = envelopeDefect(env, VARIANTS.scout, { taskDir: TD })
+  assert.equal(defect.reason, 'field-item')
+  assert.match(defect.why, /program requires output/)
+})
+
+test('C1O refuses scout output without a program', () => {
+  const env = reconEnv({ details: { findings: [{ summary: 's', evidence: 'e', output: 'check passed' }] } })
+  const defect = envelopeDefect(env, VARIANTS.scout, { taskDir: TD })
+  assert.equal(defect.reason, 'field-item')
+  assert.match(defect.why, /output requires program/)
+})
+
+test('D1 validates a present optional scout field as non-empty', () => {
+  const env = reconEnv({ details: { findings: [{ summary: 's', evidence: 'e', program: '', output: 'check passed' }] } })
+  const defect = envelopeDefect(env, VARIANTS.scout, { taskDir: TD })
+  assert.equal(defect.reason, 'field-item')
+})
+
+test('E1 refuses required and optional item field overlap', () => {
+  const field = VARIANTS.scout.envelope_fields[0]
+  const shape = {
+    ...VARIANTS.scout,
+    envelope_fields: [{ ...field, item_fields: ['summary', 'evidence'], optional_item_fields: ['evidence'] }],
+  }
+  assert.equal(typeof shapeDefect(shape, 'scout'), 'string')
+})
+
+test('F1 validates optional item field declaration shape', () => {
+  const field = VARIANTS.scout.envelope_fields[0]
+  for (const optional_item_fields of [null, 'program', [1], [''], ['program', 'program']]) {
+    const shape = { ...VARIANTS.scout, envelope_fields: [{ ...field, optional_item_fields }] }
+    assert.equal(typeof shapeDefect(shape, 'scout'), 'string', JSON.stringify(optional_item_fields))
+  }
+})
+
+test('F2 permits optional_item_fields only on records', () => {
+  const shape = {
+    ...VARIANTS.scout,
+    envelope_fields: [{ name: 'note', kind: 'text', optional_item_fields: ['program'] }],
+  }
+  assert.equal(typeof shapeDefect(shape, 'scout'), 'string')
+})
+
+test('G1 leaves every non-scout variant envelope contract unchanged', () => {
+  const expected = JSON.parse(`{"full":{"execution":"reviewed","required_seats":"tier","stages":["plan","check","build","scope-gate","lane","gate","gate-baseline","gate-repair","gate-reverify","gate-proof","review","commit","document","rebase","suite","publish","converge"],"writes":"planned","accepted_by":"a review verdict of pass, or a lead accept at review or build exhaustion","envelope_fields":[],"assignment":null},"review_only":{"execution":"envelope","required_seats":["reviewer"],"stages":["review_only","scope-gate","envelope-accept"],"writes":"none","accepted_by":"structured envelope plus zero-write proof; no commit","strict_identity":true,"report_values":true,"envelope_fields":[{"name":"base","kind":"text"},{"name":"head","kind":"text"},{"name":"outcome","kind":"text","values":["findings","no-findings"]},{"name":"findings","kind":"records","allow_empty":true,"item_fields":["id","severity","location","summary","evidence","disposition"],"item_values":{"severity":["must-fix","should-fix","consider"],"disposition":["auto-fix","ask-user","no-op"]},"item_patterns":{"id":"^[A-Za-z0-9_-]{1,64}$"},"cardinality":{"discriminator":"outcome","empty":"no-findings","nonempty":"findings"}}],"assignment":"Review the returned base/head identity and the declared change set as a read-only code review. This assignment supersedes the ordinary reviewer deliverable: do not create, edit, delete, checkout, or commit anything in the checkout. Read-only validation is permitted. Return the complete structured envelope with non-empty base and head, outcome findings or no-findings, and findings records containing id, severity, location, summary, evidence, and disposition; findings must be empty exactly when outcome is no-findings and non-empty when outcome is findings."},"repair":{"execution":"reviewed","required_seats":"tier","stages":["repair","build","scope-gate","lane","review","commit","document","rebase","suite","publish"],"writes":"planned","accepted_by":"a review verdict of pass, or a lead accept at review or build exhaustion","envelope_fields":[],"assignment":"Bounded triage. Read the failure the task brief carries verbatim, then write the smallest fix the builder can execute inside the scope this run inherits. This is NOT a plan round: there is no revision, no plan-check, no second attempt, and no acceptance gate.","sources":{"scope":"inherited","lane":"ctx","gate":"none"}},"directed":{"execution":"reviewed","required_seats":["builder","reviewer"],"stages":["directed","build","scope-gate","lane","gate","gate-baseline","gate-proof","review","commit","document","rebase","suite","publish","converge"],"writes":"planned","accepted_by":"a review verdict of pass, or a lead accept at review or build exhaustion","envelope_fields":[],"assignment":null,"sources":{"scope":"brief","lane":"ctx","gate":"brief"}},"verify_only":{"execution":"envelope","required_seats":["reviewer"],"stages":["verify_only","scope-gate","envelope-accept"],"writes":"none","accepted_by":"complete structured verification report plus zero-write proof; no commit, regardless of product verdict","strict_identity":true,"report_values":true,"envelope_fields":[{"name":"verification_targets","kind":"records","item_fields":["id","target"]},{"name":"environment_assumptions","kind":"records","item_fields":["name","assumption"]},{"name":"product_verdict","kind":"text","values":["passing","failing"]},{"name":"check_matrix","kind":"records","allow_empty":true,"item_fields":["id","status","command","result","evidence"],"item_values":{"status":["passed","failed","blocked","not run"]},"covers":{"field":"verification_targets","key":"id"}},{"name":"environment","kind":"records","item_fields":["name","observed"]},{"name":"environmental_blockers","kind":"records","allow_empty":true,"item_fields":["target","reason"]}],"assignment":"Read-only verification. Return a complete structured verification report with details.verification_targets as non-empty records with id,target; details.environment_assumptions as non-empty records with name,assumption; details.product_verdict as passing or failing; details.check_matrix as records with id,status,command,result,evidence and one row for each verification target; details.environment as non-empty records with name,observed; and details.environmental_blockers as records with target,reason. Ephemeral build/test artifacts may exist only while checks run and must be removed before return; the final checkout must be clean. No tester role is introduced."}}`)
+  const actual = Object.fromEntries(Object.entries(VARIANTS).filter(([name]) => name !== 'scout'))
+  assert.deepEqual(actual, expected)
+})
+
+test('H1 renders optional scout item fields as optional guidance', () => {
+  const io = fakeIo({ envelopes: { 'planner:1': reconEnv() }, changed: [] })
+  const result = driveTask({ ...CTX, variant: 'scout' }, io)
+  const brief = io.calls.writes[`${TD}/scout-brief.md`]
+  assert.equal(result.status, 'done')
+  assert.match(brief, /; optional fields program and output are each non-empty when present/)
+  assert.doesNotMatch(brief, /each with a non-empty summary and a non-empty evidence and a non-empty program/)
+})
+
+test('I1V enforces item_values on present optional fields', () => {
+  const shape = {
+    ...VARIANTS.scout,
+    envelope_fields: [{
+      name: 'findings', kind: 'records', item_fields: ['summary'], optional_item_fields: ['program'],
+      item_values: { program: Object.freeze(['allowed']) },
+    }],
+  }
+  const env = reconEnv({ details: { findings: [{ summary: 's', program: 'forbidden' }] } })
+  const defect = envelopeDefect(env, shape, { taskDir: TD })
+  assert.equal(defect.reason, 'field-item')
+})
+
+test('I1P enforces item_patterns on present optional fields', () => {
+  const shape = {
+    ...VARIANTS.scout,
+    envelope_fields: [{
+      name: 'findings', kind: 'records', item_fields: ['summary'], optional_item_fields: ['program'],
+      item_patterns: { program: '^[a-z]+$' },
+    }],
+  }
+  const env = reconEnv({ details: { findings: [{ summary: 's', program: 'INVALID' }] } })
+  const defect = envelopeDefect(env, shape, { taskDir: TD })
+  assert.equal(defect.reason, 'field-item')
 })
 
 test('the envelope refusal reason set is closed and frozen', () => {

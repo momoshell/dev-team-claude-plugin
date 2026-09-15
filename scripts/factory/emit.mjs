@@ -755,16 +755,67 @@ function openRunInner({
     }
   }
 
-  // ADR-035: crew boot resolves three independent configuration axes and
-  // persists the decision in crew.json before any run emission. Read those
-  // effective values verbatim so the ledger can answer what this particular
-  // run used. Missing/legacy boot records stay null; phases and seats are not
+  // The journal is append-only ACROSS runs, so the last run-start row is the
+  // boundary for the runtime value this emitter is about to record. A malformed
+  // or truncated current segment fails closed rather than retaining an older
+  // run's configuration; phases, seats and legacy variants are never consulted.
+  function runtimeRunConfiguration() {
+    try {
+      const raw = readFileSync(join(stateDir, 'journal.jsonl'), 'utf8')
+      let current = null
+      let inCurrentRun = false
+      const validName = (value) => typeof value === 'string'
+        && value.trim() !== '' && value.length <= TIER_MAX_CHARS
+      for (const line of raw.split('\n')) {
+        if (line.trim() === '') continue
+        let event
+        try {
+          event = JSON.parse(line)
+        } catch {
+          if (inCurrentRun) current = null
+          continue
+        }
+        if (!event || typeof event !== 'object' || Array.isArray(event)) {
+          if (inCurrentRun) current = null
+          continue
+        }
+        if (event.event === 'run-start') {
+          inCurrentRun = true
+          current = null
+          continue
+        }
+        if (!inCurrentRun || event.event !== 'run-configuration') continue
+        const candidate = event.run_configuration
+        const execution = candidate?.execution
+        const requested = execution?.requested
+        if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)
+          || !execution || typeof execution !== 'object' || Array.isArray(execution)
+          || !Object.hasOwn(execution, 'requested')
+          || (requested !== null && !validName(requested))
+          || !validName(execution.effective) || !validName(execution.source)) {
+          current = null
+          continue
+        }
+        current = candidate
+      }
+      return current
+    } catch {
+      return null
+    }
+  }
+
+  // ADR-035: crew boot persists only profile and assurance in crew.json;
+  // execution belongs to the run and is read verbatim from the current journal
+  // segment. Missing/legacy boot records stay null; phases and seats are not
   // reverse-engineered into configuration.
   function bootRunConfiguration(legacyTier) {
     try {
       const raw = readFileSync(join(stateDir, 'crew.json'), 'utf8')
-      const configuration = JSON.parse(raw)?.run_configuration
-      if (!configuration || typeof configuration !== 'object') return null
+      const bootConfiguration = JSON.parse(raw)?.run_configuration
+      if (!bootConfiguration || typeof bootConfiguration !== 'object' || Array.isArray(bootConfiguration)) return null
+      const runtimeConfiguration = runtimeRunConfiguration()
+      const execution = runtimeConfiguration?.execution
+      const configuration = { ...bootConfiguration, execution }
       const value = (axis, field) => {
         const candidate = configuration?.[axis]?.[field]
         if (candidate == null) return null

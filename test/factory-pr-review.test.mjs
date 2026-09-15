@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { symlinkSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { scratchDir } from './helpers.mjs'
@@ -181,6 +181,27 @@ test('SHA1-base-untrimmed', async () => {
   assert.equal(current.calls.git.some((call) => call.args[0] === 'worktree' && call.args[1] === 'add'), false)
 })
 
+// Sol pass 2 should-fix: pin the exact merge-base boundary, not just trim(). Mutations killed: stripping
+// every trailing newline, right-trimming, and dropping the last byte unconditionally.
+test('SHA1-base-boundaries', async () => {
+  const outcome = async (stdout) => {
+    const current = fixture()
+    const git = current.deps.git
+    current.deps.git = (args, options) => args[0] === 'merge-base' ? { status: 0, stdout } : git(args, options)
+    try {
+      await runPrReview({ pr: 22, deps: current.deps })
+      return 'accepted'
+    } catch (error) {
+      return /invalid-review-sha|malformed review base/.test(`${error?.reason || ''} ${error?.message || ''}`) ? 'refused' : `other: ${error?.message}`
+    }
+  }
+  assert.equal(await outcome(`${BASE40}\n`), 'accepted')
+  assert.equal(await outcome(BASE40), 'accepted')
+  assert.equal(await outcome(`${BASE40}\r\n`), 'refused')
+  assert.equal(await outcome(`${BASE40}\n\n`), 'refused')
+  assert.equal(await outcome(`${BASE40} \n`), 'refused')
+})
+
 test('B1-partial', () => {
   const root = scratchDir('pr-review-real-partial-')
   const checkout = join(root, 'repo')
@@ -191,7 +212,7 @@ test('B1-partial', () => {
   // Sol must-fix 2: the residue must be a REAL git registration, or the prune proof is vacuous.
   // Case 1: add succeeded (directory and registration exist), then the review failed.
   execFileSync('git', ['-C', checkout, 'worktree', 'add', '--detach', residue, 'HEAD'], { stdio: 'pipe' })
-  const registered = (path) => execFileSync('git', ['-C', checkout, 'worktree', 'list', '--porcelain', '-z'], { encoding: 'utf8' }).includes(`worktree ${canonicalWorktreePath(path)}\0`)
+  const registered = (path) => execFileSync('git', ['-C', checkout, 'worktree', 'list', '--porcelain', '-z'], { encoding: 'utf8' }).includes(`worktree ${canonicalWorktreePath(path) ?? path}\0`)
   assert.equal(registered(residue), true)
   const result = removeWorktreeDefault(checkout, residue)
   assert.equal(result.removed, true)
@@ -223,7 +244,7 @@ test('B1-prune-after-failed-remove', () => {
   execFileSync('git', ['-c', 'user.email=fixture@example.test', '-c', 'user.name=fixture', 'commit', '--allow-empty', '-q', '-m', 'seed'], { cwd: checkout })
   execFileSync('git', ['-C', checkout, 'worktree', 'add', '--detach', orphan, 'HEAD'], { stdio: 'pipe' })
   rmSync(orphan, { recursive: true, force: true })
-  const registered = () => execFileSync('git', ['-C', checkout, 'worktree', 'list', '--porcelain', '-z'], { encoding: 'utf8' }).includes(`worktree ${canonicalWorktreePath(orphan)}\0`)
+  const registered = () => execFileSync('git', ['-C', checkout, 'worktree', 'list', '--porcelain', '-z'], { encoding: 'utf8' }).includes(`worktree ${canonicalWorktreePath(orphan) ?? orphan}\0`)
   assert.equal(registered(), true)
   // remove exits non-zero (a completed, observed failure); every other git call is real.
   const spawn = (command, args, options) => {
@@ -236,10 +257,63 @@ test('B1-prune-after-failed-remove', () => {
   assert.equal(registered(), false)
 })
 
+// Sol pass 2 should-fix: remove fails while the directory still EXISTS, so recursive removal and
+// prune are both required. Mutation killed: dropping the recursive rmSync leaves the directory.
+test('B1-failed-remove-present-directory', () => {
+  const root = scratchDir('pr-review-present-')
+  const checkout = join(root, 'repo')
+  const present = join(root, 'present-worktree')
+  mkdirSync(checkout, { recursive: true })
+  execFileSync('git', ['init', '-q'], { cwd: checkout })
+  execFileSync('git', ['-c', 'user.email=fixture@example.test', '-c', 'user.name=fixture', 'commit', '--allow-empty', '-q', '-m', 'seed'], { cwd: checkout })
+  execFileSync('git', ['-C', checkout, 'worktree', 'add', '--detach', present, 'HEAD'], { stdio: 'pipe' })
+  const registered = () => execFileSync('git', ['-C', checkout, 'worktree', 'list', '--porcelain', '-z'], { encoding: 'utf8' }).includes(`worktree ${canonicalWorktreePath(present) ?? present}\0`)
+  assert.equal(existsSync(present), true)
+  assert.equal(registered(), true)
+  const canonical = canonicalWorktreePath(present)
+  const spawn = (command, args, options) => {
+    if (args.includes('remove')) return { status: 128, stdout: '', stderr: 'fatal: simulated remove failure' }
+    const stdout = execFileSync(command, args, { encoding: 'utf8', ...(options || {}) })
+    return { status: 0, stdout, stderr: '' }
+  }
+  const result = removeWorktreeDefault(checkout, present, { spawn })
+  assert.equal(result.removed, true, result.why)
+  assert.equal(existsSync(present), false)
+  assert.equal(execFileSync('git', ['-C', checkout, 'worktree', 'list', '--porcelain', '-z'], { encoding: 'utf8' }).includes(`worktree ${canonical}\0`), false)
+})
+
+// Sol pass 2 must-fix: a symlinked parent that is itself gone leaves the path unresolvable while git
+// still lists the REAL path. Removal must fail closed. Mutation killed: falling back to the lexical path
+// reports removed:true while the real directory and registration both survive.
+test('B1-unresolvable-parent-fails-closed', () => {
+  const root = scratchDir('pr-review-unresolvable-')
+  const checkout = join(root, 'repo')
+  const physical = join(root, 'physical')
+  const link = join(root, 'link')
+  mkdirSync(checkout, { recursive: true })
+  mkdirSync(physical, { recursive: true })
+  execFileSync('git', ['init', '-q'], { cwd: checkout })
+  execFileSync('git', ['-c', 'user.email=fixture@example.test', '-c', 'user.name=fixture', 'commit', '--allow-empty', '-q', '-m', 'seed'], { cwd: checkout })
+  symlinkSync(physical, link)
+  const viaLink = join(link, 'wt')
+  execFileSync('git', ['-C', checkout, 'worktree', 'add', '--detach', viaLink, 'HEAD'], { stdio: 'pipe' })
+  rmSync(link)
+  assert.equal(existsSync(join(physical, 'wt')), true)
+  assert.equal(canonicalWorktreePath(viaLink), null)
+  const result = removeWorktreeDefault(checkout, viaLink)
+  assert.equal(result.removed, false)
+  assert.match(result.why, /could not be canonicalized/)
+})
+
 test('B1-registration-canonical', () => {
   const root = scratchDir('pr-review-canonical-')
   const checkout = join(root, 'repo')
-  const stuck = join(root, 'stuck-worktree')
+  // An explicit symlinked parent, so the proof holds on hosts whose temp directory has no symlink.
+  const physical = join(root, 'physical')
+  const link = join(root, 'link')
+  mkdirSync(physical, { recursive: true })
+  symlinkSync(physical, link)
+  const stuck = join(link, 'stuck-worktree')
   mkdirSync(checkout, { recursive: true })
   execFileSync('git', ['init', '-q'], { cwd: checkout })
   execFileSync('git', ['-c', 'user.email=fixture@example.test', '-c', 'user.name=fixture', 'commit', '--allow-empty', '-q', '-m', 'seed'], { cwd: checkout })

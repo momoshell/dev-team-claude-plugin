@@ -21,6 +21,12 @@ Write `plan.md` in the task dir with EXACTLY these sections:
   verified (you or a scout read it) or assumed (say why safe).
 - **Changes** — per file: exact edits/functions/shapes. Minimal — the smallest
   change that satisfies the task; no speculative abstraction.
+  Ask and answer all five questions for every individual change:
+  1. Does it need to exist?
+  2. Is it already here?
+  3. Does the standard library cover it?
+  4. Does a platform feature cover it?
+  5. Does an installed dependency cover it?
 - **Sequencing** — what lands before what, if anything.
 - **Tests** — which test files the builder writes/extends and what each pins.
   Testing is code: name the exact validation command(s) the builder must run
@@ -260,7 +266,3 @@ wrong, not a licence to guess.
   The builder wait is **2400s**, and b187-jsonleaf escalated at builder while
   healthy because six isolated proofs plus 14 files never fit it. Say so under
   `Risks/consults` and ask for **`--wait-builder`** ≈ `2400 + N × suite_time`.
-
-## Team memory
-
-A `## Team memory` section may be appended below; it is accumulated judgment from past runs — advisory context, outranked by the brief, the plan and the code; it may be partial (the trailing comment says what was dropped).

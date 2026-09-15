@@ -7,7 +7,7 @@ import assert from 'node:assert/strict'
 import {
   FINDING_DISPOSITIONS, FINDING_SEVERITIES, GATE_CUSTODIAN, MAX_QUESTIONS, PROTECTED_PATHS, REPO_ROOT, RESIDUAL_TYPES, applyPrescriptionLines, checkAnchors, existsSync, join, laneFence, mkdirSync, partitionShifts, protectedHits, readFileSync, readdirSync, rmSync, scratchDir, spawnSync,
 } from './drive-fixtures.mjs'
-import { bootCmd, composeRolePrompt, FLAG_VALUE_CONTRACT, KNOWN_FLAGS, BOOLEAN_FLAGS, BOOT_ONLY_FLAGS } from './crew.mjs'
+import { bootCmd, composeRolePrompt, FLAG_VALUE_CONTRACT, KNOWN_FLAGS, BOOLEAN_FLAGS, BOOT_ONLY_FLAGS, compiledCharterBytes, charterBudgetRefusals, CHARTER_CEILINGS } from './crew.mjs'
 import { after } from 'node:test'
 import { tmpdir } from 'node:os'
 import {
@@ -283,6 +283,23 @@ test('the planner charter tells the planner to grep the changed file’s own pat
   assert.doesNotMatch(discovery, /production/)
 })
 
+test('the planner Changes section carries the five-rung minimality ladder', () => {
+  const planner = readFileSync(new URL('./roles/planner.md', import.meta.url), 'utf8')
+  const start = planner.indexOf('- **Changes**')
+  const end = planner.indexOf('- **Sequencing**', start)
+  assert.ok(start >= 0 && end > start)
+  const changes = planner.slice(start, end)
+  const rungs = changes.split('\n').filter((line) => /^  \d+\./.test(line))
+  assert.deepEqual(rungs, [
+    '  1. Does it need to exist?',
+    '  2. Is it already here?',
+    '  3. Does the standard library cover it?',
+    '  4. Does a platform feature cover it?',
+    '  5. Does an installed dependency cover it?',
+  ])
+  assert.doesNotMatch(planner, /first yes/i)
+})
+
 test('A1', () => {
   const charter = readFileSync(new URL('./roles/planner.md', import.meta.url), 'utf8')
   const rule = '- Quote every cited range inline with its line numbers; those are the lines the builder needs.'
@@ -464,12 +481,56 @@ test('charters pin the batched question and keyed answer conventions', () => {
   const planner = readFileSync(new URL('./roles/planner.md', import.meta.url), 'utf8')
   const builder = readFileSync(new URL('./roles/builder.md', import.meta.url), 'utf8')
   for (const token of ['"questions"', '"id"', '"question"']) assert.ok(shared.includes(token))
+  assert.ok(shared.includes('If brief or plan gaps prevent completion, return ALL gaps together in SAME envelope:'))
+  assert.match(shared, /unique within the envelope/i)
   assert.match(shared, /one round instead of one round per gap/i)
+  const example = `    "details": {"questions": [{"id": "q1","question": "<one specific gap>"},
+      {"id": "q2","question": "..."}] }`
+  assert.equal(shared.split(example).length - 1, 1)
   const cap = shared.match(/at most ([0-9]+) questions/)
   assert.equal(Number(cap?.[1]), MAX_QUESTIONS)
   for (const token of ['"answers"', '"answer"', 'UNANSWERED']) assert.ok(lead.includes(token))
   assert.ok(planner.includes('status: insufficient') && planner.includes('details.questions'))
   assert.ok(builder.includes('insufficient') && builder.includes('details.questions'))
+})
+
+test('shared Hard rules retain ordered never-simplify safeguards and role charters forbid one-line guidance', () => {
+  const rolesDir = join(REPO_ROOT, 'crew', 'roles')
+  const shared = readFileSync(join(rolesDir, '_shared.md'), 'utf8')
+  const lines = shared.split('\n')
+  const hardRules = lines.indexOf('## Hard rules')
+  const marker = '- Never simplify away:'
+  const indexes = lines.flatMap((line, index) => line === marker ? [index] : [])
+  assert.equal(indexes.length, 1)
+  assert.ok(indexes[0] > hardRules)
+  const safeguards = lines.slice(indexes[0] + 1, indexes[0] + 8)
+  assert.deepEqual(safeguards, [
+    '  - trust-boundary validation',
+    '  - data-loss error handling',
+    '  - security checks',
+    '  - anything the task explicitly requested',
+    '  - closed enums',
+    '  - honest absence with a reason',
+    '  - a denominator beside every rate',
+  ])
+  assert.equal(lines[indexes[0] + 8]?.startsWith('  - '), false)
+  const offenders = readdirSync(rolesDir)
+    .filter((name) => name.endsWith('.md'))
+    .filter((name) => /\b(?:make|made) it one line\b|\bone-liner\b/i.test(readFileSync(join(rolesDir, name), 'utf8')))
+  assert.deepEqual(offenders, [])
+})
+
+test('runtime composed charter sizes stay at their ceilings', () => {
+  const rolesDir = join(REPO_ROOT, 'crew', 'roles')
+  const measured = compiledCharterBytes(rolesDir)
+  const sizes = Object.fromEntries(Object.entries(measured).map(([role, entry]) => [role, entry.bytes]))
+  const expected = { builder: 8878, lead: 12813, planner: 20639, reviewer: 11133, 'tech-lead': 9962 }
+  const summary = Object.entries(measured).map(([role, entry]) => `${role}=${entry.bytes}`).join(', ')
+  assert.deepEqual(sizes, expected, `composed charter sizes: ${summary}`)
+  for (const [role, ceiling] of Object.entries(CHARTER_CEILINGS)) {
+    assert.ok(measured[role]?.bytes <= ceiling, `composed charter ${role} exceeds ${ceiling}: ${summary}`)
+  }
+  assert.deepEqual(charterBudgetRefusals(measured), [], `unexpected charter refusals: ${summary}`)
 })
 
 test('both charters state where the planner stops and the lead takes over', () => {

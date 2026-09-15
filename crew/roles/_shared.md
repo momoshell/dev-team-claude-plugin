@@ -38,19 +38,14 @@ what is missing in `summary`. `blocked` = an external obstacle. NEVER fake a
 
 ## Asking questions (batched, id-addressable)
 
-When you cannot finish because the brief or the plan leaves gaps, do not
-surface one gap and wait. Find them ALL, then return them as a numbered set in
-the SAME envelope:
+If brief or plan gaps prevent completion, return ALL gaps together in SAME envelope:
 
-    "details": { "questions": [ {"id": "q1", "question": "<one specific gap>"},
-                                {"id": "q2", "question": "..."} ] }
+    "details": {"questions": [{"id": "q1","question": "<one specific gap>"},
+      {"id": "q2","question": "..."}] }
 
-Ids are yours and must be unique within the envelope; at most 10 questions per
-envelope; each `question` must be a real question, not a topic. The lead
-answers them keyed to your ids and every answer comes back in ONE bounce brief
-— one round instead of one round per gap. Malformed entries are dropped and
-reported; they never change the round's outcome. Only the planner's and the
-builder's status returns consume this field today.
+IDs are unique within the envelope; at most 10 questions. Each `question` must be a real
+question, not a topic. Lead answers keyed to IDs in ONE bounce brief: one round instead of one round per gap.
+Malformed entries are dropped and reported; outcome never changes. Only planner/builder status returns consume this field.
 
 ## Turn economy
 
@@ -69,3 +64,11 @@ Read a file once and cite it from context — re-slicing a file you have already
 - If a permission prompt or unexpected interactive stop appears, do not fight
   it — write an `insufficient` envelope explaining, then the CREW-DONE line.
 - Timestamps/IDs come from the assignment — because the driver correlates envelopes by the id it issued; an invented id arrives as a missing envelope, not as a renamed one. Never invent your own task naming.
+- Never simplify away:
+  - trust-boundary validation
+  - data-loss error handling
+  - security checks
+  - anything the task explicitly requested
+  - closed enums
+  - honest absence with a reason
+  - a denominator beside every rate

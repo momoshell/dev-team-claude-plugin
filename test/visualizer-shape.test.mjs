@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { INTAKE_REFUSAL_REASONS, INTAKE_WINDOW_MS, defaultCellWindow, defaultIntakeWindow, defaultRunSetWindow, RUN_SET_WINDOW_MS, shapeCellHealth, shapeGateChecks, shapeIntake, shapeRunSet, shapeRun, foldAgents, laneFor, matchesFilters, ROLE_ORDER, withCells } from '../visualizer/server/shape.mjs'
 import { normalizeAgents, normalizePrompts, normalizeSkills } from '../visualizer/web/src/lib/agents.js'
 import { startServer } from '../visualizer/server/server.mjs'
+import { createWorkflowsSource } from '../visualizer/server/workflows-source.mjs'
 import { drainEvents, createDrainQueue } from '../visualizer/web/src/lib/drain.js'
 import { layoutTimeline, MIN_WIDTH, QUEUED_WIDTH } from '../visualizer/web/src/lib/timeline.js'
 import { diffEnvelopes, attemptPairs } from '../visualizer/web/src/lib/envelope-diff.js'
@@ -938,6 +939,18 @@ test('visualizer architecture keeps sqlite and legacy Svelte syntax behind the b
   assert.doesNotMatch(feed, /\bSELECT\b/)
   assert.doesNotMatch(feed, /\.prepare\(/)
   assert.match(feed, /import \{ openLedger \} from ['"]\.\.\/\.\.\/scripts\/factory\/ledger\.mjs['"]/)
+})
+
+test('workflow source is the read-only shaper boundary without an apply route', () => {
+  const source = readFileSync(join(process.cwd(), 'visualizer/server/workflows-source.mjs'), 'utf8')
+  const server = readFileSync(join(process.cwd(), 'visualizer/server/server.mjs'), 'utf8')
+  assert.equal(typeof createWorkflowsSource, 'function')
+  assert.match(source, /createWorkflowsSource\(\{ root/)
+  assert.match(source, /feed\.listRuns\(\)/)
+  assert.match(server, /url\.pathname === '\/api\/workflows'/)
+  assert.match(server, /url\.pathname === '\/api\/workflows\/propose'/)
+  assert.doesNotMatch(server, /writeWorkflow|applyWorkflow|writeFileSync\([^)]*workflows/)
+  assert.doesNotMatch(source, /writeFileSync|renameSync|rmSync/)
 })
 
 test('shapeIntake merges per-issue candidates, keeps the latest refusal, and sorts by issue', () => {

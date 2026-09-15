@@ -1,0 +1,122 @@
+{
+  "build": {
+    "description": "The driver opens the builder execution stage for the current build round before it waits for the builder return.",
+    "charter": "Builder seat: implement the accepted plan within the declared scope and return the structured build evidence.",
+    "source": { "file": "crew/drive.mjs", "line": 9343 }
+  },
+  "check": {
+    "description": "The driver opens the plan-check stage for the current round before checking the planner's returned plan.",
+    "charter": "Planner seat: provide a bounded plan whose files, tests, and acceptance evidence can be checked.",
+    "source": { "file": "crew/drive.mjs", "line": 7534 }
+  },
+  "commit": {
+    "description": "The driver opens the commit stage when it is ready to create the task commit from the accepted tree.",
+    "charter": null,
+    "source": { "file": "crew/drive.mjs", "line": 10046 }
+  },
+  "converge": {
+    "description": "The driver records convergence after the terminal suite, publication, and residual decisions have been handled.",
+    "charter": null,
+    "source": { "file": "crew/drive.mjs", "line": 5037 }
+  },
+  "directed": {
+    "description": "The directed execution shape opens its brief-led round before the declared reviewed stages continue.",
+    "charter": null,
+    "source": { "file": "crew/drive.mjs", "line": 7111 }
+  },
+  "document": {
+    "description": "The driver opens the documentation stage to record the accepted task decision and its durable evidence.",
+    "charter": null,
+    "source": { "file": "crew/drive.mjs", "line": 10080 }
+  },
+  "done": {
+    "description": "The envelope path records done after the structured envelope has passed the envelope acceptance checks.",
+    "charter": null,
+    "source": { "file": "crew/drive.mjs", "line": 6755 }
+  },
+  "envelope-accept": {
+    "description": "The envelope path opens its acceptance stage to validate the returned structured envelope before settling it.",
+    "charter": null,
+    "source": { "file": "crew/drive.mjs", "line": 6746 }
+  },
+  "gate": {
+    "description": "The driver opens the acceptance-gate stage for the built tree and records the gate result before deciding what follows.",
+    "charter": null,
+    "source": { "file": "crew/drive.mjs", "line": 9489 }
+  },
+  "gate-baseline": {
+    "description": "The driver runs the acceptance gate against the baseline tree before accepting work from a reviewed plan.",
+    "charter": null,
+    "source": { "file": "crew/drive.mjs", "line": 8747 }
+  },
+  "gate-proof": {
+    "description": "The driver records a gate-proof stage while measuring whether the acceptance gate distinguishes the built tree from the pristine tree.",
+    "charter": null,
+    "source": { "file": "crew/drive.mjs", "line": 8699 }
+  },
+  "gate-repair": {
+    "description": "The driver records a gate-repair stage when gate custody assigns the bounded repair of a diagnosed gate defect.",
+    "charter": null,
+    "source": { "file": "crew/drive.mjs", "line": 8549 }
+  },
+  "gate-reverify": {
+    "description": "The driver labels the re-verification proof after a repaired gate is accepted for another pristine-tree measurement.",
+    "charter": null,
+    "source": { "file": "crew/drive.mjs", "line": 8590 }
+  },
+  "lane": {
+    "description": "The driver opens the validation-lane stage to run the declared lane against the built checkout.",
+    "charter": null,
+    "source": { "file": "crew/drive.mjs", "line": 9444 }
+  },
+  "plan": {
+    "description": "The reviewed execution path opens the plan stage before assigning the planner the task brief and scope.",
+    "charter": "Planner seat: translate the brief into a bounded implementation plan with files, tests, and acceptance evidence.",
+    "source": { "file": "crew/drive.mjs", "line": 7198 }
+  },
+  "publish": {
+    "description": "The driver opens the publication stage when the accepted commit is eligible for the configured publication path.",
+    "charter": null,
+    "source": { "file": "crew/drive.mjs", "line": 10636 }
+  },
+  "rebase": {
+    "description": "The driver opens the rebase stage to reconcile an accepted commit with the configured publication base.",
+    "charter": null,
+    "source": { "file": "crew/drive.mjs", "line": 10087 }
+  },
+  "repair": {
+    "description": "The bounded-repair shape opens its triage stage before assigning the inherited failure and scope to the builder.",
+    "charter": "Planner seat: scout the inherited failure and write the smallest bounded repair note for the builder.",
+    "source": { "file": "crew/drive.mjs", "line": 7017 }
+  },
+  "review": {
+    "description": "The driver opens the reviewer stage for the current round and records the review return before acceptance.",
+    "charter": "Reviewer seat: inspect the returned tree against the brief and report structured findings with evidence.",
+    "source": { "file": "crew/drive.mjs", "line": 9767 }
+  },
+  "review_only": {
+    "description": "The read-only review shape opens its review-only envelope round before its reviewer returns structured findings.",
+    "charter": "Reviewer seat: review the supplied base and head without changing the checkout and return the complete report.",
+    "source": { "file": "crew/drive.mjs", "line": 6668 }
+  },
+  "scope-gate": {
+    "description": "The driver opens the scope gate to compare changed files with the declared scope before accepting the stage result.",
+    "charter": null,
+    "source": { "file": "crew/drive.mjs", "line": 5427 }
+  },
+  "scout": {
+    "description": "The scout envelope shape opens its read-only reconnaissance round before collecting findings for acceptance.",
+    "charter": "Planner seat: read the brief and checkout, record evidence-backed recon findings, and change nothing.",
+    "source": { "file": "crew/drive.mjs", "line": 6668 }
+  },
+  "suite": {
+    "description": "The driver opens the suite stage to run the configured warm validation suite after the accepted tree is assembled.",
+    "charter": null,
+    "source": { "file": "crew/drive.mjs", "line": 10489 }
+  },
+  "verify_only": {
+    "description": "The read-only verification shape opens its verification envelope round before its reviewer returns the complete matrix.",
+    "charter": "Reviewer seat: verify the declared targets without changing the checkout and return measured results and assumptions.",
+    "source": { "file": "crew/drive.mjs", "line": 6668 }
+  }
+}

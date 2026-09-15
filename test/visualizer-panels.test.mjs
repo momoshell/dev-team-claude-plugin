@@ -10,6 +10,8 @@ import { ROLE_ORDER, acceptEvidence, bounceArrows, gateMarkers, gateProofStory, 
 import { eventStory, eventStreamSummary } from '../visualizer/web/src/lib/event-story.js'
 import { assignmentPath, envelopeFacts, envelopeGroups, envelopeOverview, envelopeSections, trajectoryRowStory, trajectorySummary } from '../visualizer/web/src/lib/diagnostic-story.js'
 import { executionTopology, factoryStepCategory, factoryStepName, factoryStepTrace } from '../visualizer/web/src/lib/execution-steps.js'
+import { VARIANTS } from '../crew/variants.mjs'
+import { compareSeat, draftTopologyEdit, inspectWorkflowNode, layoutWorkflowGraph, shapeWorkflowGraph, validateTopologyEdit } from '../visualizer/web/src/lib/workflows.js'
 import { crewSummary } from '../visualizer/web/src/lib/crew.js'
 import { assuranceMeta, assuranceOption, executionMeta, runConfiguration, taskProfileMeta } from '../visualizer/web/src/lib/workflow-semantics.js'
 import { diffLines } from '../visualizer/web/src/lib/diff-lines.js'
@@ -1028,7 +1030,7 @@ test('E1 agents page route nav and title are wired', () => {
   const root = join(process.cwd(), 'visualizer/web/src')
   const app = readFileSync(join(root, 'App.svelte'), 'utf8')
   const page = readFileSync(join(root, 'lib/AgentsPage.svelte'), 'utf8')
-  assert.deepEqual(VIEWS, ['fleet', 'ops', 'roster', 'agents', 'run', 'phase'])
+  assert.deepEqual(VIEWS, ['fleet', 'ops', 'roster', 'agents', 'workflows', 'run', 'phase'])
   assert.match(app, /route\.view === 'agents'/)
   assert.match(app, /Agents · Factory/)
   assert.match(app, /<AgentsPage\s*\/?\s*>/)
@@ -2330,4 +2332,123 @@ test('F1: every reachable run activity result derives attention from its key', (
 
 test('G1: a key outside the attention vocabulary is not attention work', () => {
   assert.equal(needsAttention('outside-attention-vocabulary'), false)
+})
+
+test('workflow-page:A1', () => {
+  for (const shape of Object.keys(VARIANTS)) {
+    const topology = executionTopology(shape, [])
+    const graph = shapeWorkflowGraph(shape, { observedLabels: [] })
+    assert.deepEqual(graph.nodes.map((node) => node.stage), topology.rows.map((row) => row.stage), shape)
+    assert.deepEqual(graph.stageOrder, topology.rows.map((row) => row.stage), shape)
+  }
+})
+
+test('workflow-page:A2', () => {
+  const graph = shapeWorkflowGraph('full', {
+    observedLabels: ['plan', 'gate', 'gate-repair:1', 'gate-reverify:1', 'review:r1', 'review:r2'],
+    workflow: { shape: 'full', seats: { planner: { agent: 'pi', provider: 'anthropic', id: 'planner', effort: 'high', skills: ['planning'], extensions: ['notes'] } } },
+  })
+  const laidOut = layoutWorkflowGraph(graph)
+  assert.ok(laidOut.nodes.every((node) => Number.isFinite(node.position.x) && Number.isFinite(node.position.y)))
+  assert.deepEqual(graph.fixed_edges.map((edge) => [edge.source, edge.target]), graph.stageOrder.slice(1).map((stage, index) => [`stage:${graph.stageOrder[index]}`, `stage:${stage}`]))
+  assert.deepEqual(shapeWorkflowGraph('full', { observedLabels: [] }).loop_edges, [])
+  assert.ok(graph.loop_edges.some((edge) => edge.label === 'gate repair'))
+  assert.ok(graph.loop_edges.some((edge) => edge.label === 'gate reverify'))
+  assert.ok(graph.loop_edges.some((edge) => edge.label === 'review bounce'))
+  assert.equal(graph.nodes.find((node) => node.stage === 'plan').kind, 'universal')
+  assert.equal(graph.nodes.find((node) => node.stage === 'converge').kind, 'universal')
+  assert.equal(graph.nodes.find((node) => node.stage === 'scope-gate').kind, 'control')
+  const planner = graph.nodes.find((node) => node.stage === 'plan').seat
+  for (const field of ['agent', 'model', 'effort', 'skills', 'extensions']) assert.ok(field in planner)
+  assert.equal(planner.model, 'anthropic/planner')
+})
+
+test('workflow-page:B1', () => {
+  for (const shape of Object.keys(VARIANTS)) {
+    for (const stage of VARIANTS[shape].stages) {
+      const verdict = validateTopologyEdit(draftTopologyEdit({ shape, stage, action: 'remove' }))
+      assert.deepEqual(verdict, { status: 'unmeasured', reason: 'validator-pending-1291', tone: 'warning' })
+      assert.notEqual(verdict.status, 'success')
+      assert.notEqual(verdict.status, 'valid')
+    }
+  }
+})
+
+test('workflow-page:D1', () => {
+  const drivePath = join(process.cwd(), 'crew/drive.mjs')
+  const drive = readFileSync(drivePath, 'utf8')
+  const docs = JSON.parse(readFileSync(join(process.cwd(), 'visualizer/web/src/lib/stage-docs.json'), 'utf8'))
+  const declared = new Set(Object.values(VARIANTS).flatMap((variant) => variant.stages))
+  for (const match of drive.matchAll(/stage\(\s*(['"])(.*?)\1/g)) declared.add(match[2].split(':')[0])
+  assert.deepEqual(Object.keys(docs).sort(), [...declared].sort())
+  for (const [stage, doc] of Object.entries(docs)) {
+    assert.equal(typeof doc.description, 'string')
+    assert.ok(doc.description.trim().length > 20)
+    assert.doesNotMatch(doc.description, /\n/)
+    assert.ok(Object.prototype.hasOwnProperty.call(doc, 'charter'))
+    assert.equal(doc.source.file, 'crew/drive.mjs')
+    const lines = drive.split('\n')
+    assert.ok(doc.source.line >= 1 && doc.source.line <= lines.length)
+    assert.ok(lines[doc.source.line - 1].trim().length > 0, `${stage} citation is empty`)
+  }
+})
+
+test('workflow-page:D2', () => {
+  const docs = JSON.parse(readFileSync(join(process.cwd(), 'visualizer/web/src/lib/stage-docs.json'), 'utf8'))
+  const graph = shapeWorkflowGraph('scout', { observedLabels: ['scout'], docs })
+  const newest = { run_id: 'newest', stages: [{ label: 'scout', duration_ms: 21, outcome: 'ok' }] }
+  const older = { run_id: 'older', stages: [{ label: 'scout', duration_ms: 8, outcome: 'failed' }] }
+  const result = inspectWorkflowNode(graph, 'stage:scout', { docs, recentRuns: [newest, older] })
+  assert.equal(result.declaration.stage, 'scout')
+  assert.equal(result.charter, docs.scout.charter)
+  assert.equal(result.docs.description, docs.scout.description)
+  assert.deepEqual(result.history.map((row) => [row.run_id, row.duration_ms, row.outcome]), [['newest', 21, 'ok'], ['older', 8, 'failed']])
+  assert.equal(result.history.length, 2)
+})
+
+test('workflow-page:D3', () => {
+  const assigned = { agent: 'pi', provider: 'openai', id: 'gpt', effort: 'high' }
+  assert.equal(compareSeat({ ...assigned }, { ...assigned }).status, 'equal')
+  const differs = compareSeat({ ...assigned, effort: 'low' }, assigned)
+  assert.equal(differs.status, 'differs-with-diff')
+  assert.equal(differs.diff.effort.boot, 'low')
+  const equalGraph = shapeWorkflowGraph('scout', { workflow: { seats: { planner: assigned } }, bootSeats: { planner: assigned } })
+  assert.equal(equalGraph.nodes.find((node) => node.stage === 'scout').enforcement.status, 'equal')
+  const differingGraph = shapeWorkflowGraph('scout', { workflow: { seats: { planner: assigned } }, bootSeats: { planner: { ...assigned, effort: 'low' } } })
+  assert.equal(differingGraph.nodes.find((node) => node.stage === 'scout').enforcement.status, 'differs-with-diff')
+  assert.equal(compareSeat(null, assigned).status, 'unmeasured')
+})
+
+test('workflow-page:E1', () => {
+  assert.deepEqual(VIEWS, ['fleet', 'ops', 'roster', 'agents', 'workflows', 'run', 'phase'])
+  for (const hash of ['#/workflows', '#/ops', '#/roster', '#/adw-123', '#/adw-123/plan']) assert.equal(formatHash(parseHash(hash)), hash)
+  assert.deepEqual(parseHash('#/workflows/ignored'), { view: 'workflows', adw_id: null, phase: null })
+  const app = readFileSync(join(process.cwd(), 'visualizer/web/src/App.svelte'), 'utf8')
+  assert.match(app, /import WorkflowsPage from '\.\/lib\/WorkflowsPage\.svelte'/)
+  assert.match(app, /route\.view === 'workflows'/)
+  assert.match(app, /Workflows · Factory/)
+  assert.match(app, /<WorkflowsPage \/>/)
+  assert.match(app, />Workflows<\//)
+})
+
+test('workflow-page:F1', () => {
+  const aliases = /var\(--(?:bg|panel|panel-raised|line|muted|accent|neutral|status-[a-z-]+|role-[a-z-]+)\)/
+  for (const relative of ['visualizer/web/src/lib/WorkflowsPage.svelte', 'visualizer/web/src/lib/WorkflowGraph.svelte']) {
+    const source = readFileSync(join(process.cwd(), relative), 'utf8')
+    for (const declaration of source.matchAll(/(?:^|[;{])\s*(?:color|background(?:-color)?|border(?:-color)?|box-shadow)\s*:[^;}]+/gm)) {
+      assert.match(declaration[0], aliases, `${relative} has an unaliased painted declaration ${declaration[0]}`)
+      assert.doesNotMatch(declaration[0], /#|rgb\(|--ink|--paper|--spot|--serious/)
+    }
+  }
+})
+
+test('workflow-page:F2', () => {
+  const graph = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/WorkflowGraph.svelte'), 'utf8')
+  assert.match(graph, /@xyflow\/svelte/)
+  assert.match(graph, /<SvelteFlow[\s\S]*\{nodes\}[\s\S]*\{edges\}/)
+  assert.match(graph, /class="graph-shell"/)
+  assert.match(graph, /width:100%;/)
+  assert.match(graph, /max-width:100%;/)
+  assert.match(graph, /overflow:auto;/)
+  assert.doesNotMatch(graph, /min-width:\\s*(?:4(?:0[1-9]|[1-9]\\d{2})|[5-9]\\d{2}|\\d{4,})px/)
 })

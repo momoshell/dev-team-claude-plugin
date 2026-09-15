@@ -11,6 +11,8 @@ import { openLedger, NODE_FLOOR, PHASE_SLOT_WAIT_ABSENT, replayJsonl, WRITERS, U
 import { cellHealth } from '../crew/breaker.mjs'
 import { gitGrepHits } from '../scripts/factory/absence.mjs'
 import { parseCliArgs, ServerUsageError, startServer as startVisualizerServer, writeRosterAtomically } from '../visualizer/server/server.mjs'
+import { createWorkflowsSource } from '../visualizer/server/workflows-source.mjs'
+import { VARIANTS } from '../crew/variants.mjs'
 import { createLedgerFeed } from '../visualizer/server/ledger-feed.mjs'
 import { readLadder, stageMoves } from '../visualizer/server/roster-ladder.mjs'
 import { shapeIntake } from '../visualizer/server/shape.mjs'
@@ -555,7 +557,7 @@ test('same-origin and originless JSON clients still engage the stop switch', { s
 
     const api = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/api.js'), 'utf8')
     const posts = api.split('\n').filter((line) => line.includes("method: 'POST'"))
-    assert.equal(posts.length, 10)
+    assert.equal(posts.length, 11)
     assert.ok(posts.every((line) => line.includes("'content-type': 'application/json'")))
   } finally {
     if (server) await stopServer(server.child)
@@ -2730,6 +2732,82 @@ test('static responses refuse symlinks that leave web/dist', { skip: SKIP }, asy
     rmSync(leakPath, { force: true })
     if (madeDist) rmSync(dist, { recursive: true, force: true })
     rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('workflow-page:C1', async () => {
+  const root = scratchDir('visualizer-workflows-source-')
+  const crew = join(root, 'crew')
+  mkdirSync(crew, { recursive: true })
+  const rosterPath = join(crew, 'roster.json')
+  writeFileSync(rosterPath, JSON.stringify({ tiers: { build: { planner: { provider: 'anthropic', id: 'planner', agent: 'pi', effort: 'high', skills: ['plan'] }, builder: null } } }))
+  let reads = 0
+  const feed = { listRuns() { reads += 1; return { runs: [
+    { adw_id: 'older', execution_shape: 'full', started_at: '2026-01-01T00:00:00.000Z', phases: [{ name: 'plan', status: 'ok', duration_ms: 4 }], seats: [{ role: 'planner', provider: 'anthropic', model_id: 'planner', agent: 'pi', effort: 'high' }] },
+    { adw_id: 'newer', execution_shape: 'full', started_at: '2026-01-02T00:00:00.000Z', phases: [{ name: 'plan', status: 'ok', duration_ms: 9 }], seats: [{ role: 'planner', provider: 'anthropic', model_id: 'planner', agent: 'pi', effort: 'high' }] },
+  ] } }, close() {} }
+  const source = createWorkflowsSource({ root, feed, variants: VARIANTS, rosterPath, docsPath: join(process.cwd(), 'visualizer/web/src/lib/stage-docs.json') })
+  const absent = source.readWorkflows({ recent: 1 })
+  assert.deepEqual(absent.workflows.map((row) => row.shape), Object.keys(VARIANTS))
+  assert.equal(absent.workflows.find((row) => row.shape === 'full').source, 'roster-default')
+  assert.equal(absent.workflows.find((row) => row.shape === 'full').recent_runs[0].run_id, 'newer')
+  assert.equal(absent.workflows.find((row) => row.shape === 'full').recent_runs[0].stages[0].duration_ms, 9)
+  assert.equal(reads, 1)
+
+  const workflows = join(crew, 'workflows')
+  mkdirSync(workflows, { recursive: true })
+  writeFileSync(join(workflows, 'full.json'), JSON.stringify({ shape: 'full', seats: { builder: { provider: 'openai', id: 'builder', agent: 'pi', effort: 'max' } } }))
+  writeFileSync(join(workflows, 'scout.json'), '{ malformed')
+  writeFileSync(join(workflows, 'repair.json'), '')
+  const present = source.readWorkflows({ recent: 5 })
+  assert.equal(present.workflows.find((row) => row.shape === 'full').source, 'workflow-map')
+  assert.equal(present.workflows.find((row) => row.shape === 'full').seats.builder.model, 'openai/builder')
+  assert.match(present.workflows.find((row) => row.shape === 'scout').map_error, /malformed/i)
+  assert.match(present.workflows.find((row) => row.shape === 'repair').map_error, /empty/i)
+
+  const beforeDigest = treeDigest(root)
+  const proposal = await source.propose({ workflow: 'full', edit: { stage: 'plan', role: 'planner', cell: { provider: 'anthropic', id: 'planner-2', agent: 'pi', effort: 'max' } } })
+  assert.equal(proposal.ok, true)
+  assert.equal(proposal.workflow_path, 'crew/workflows/full.json')
+  assert.match(proposal.diff, /^--- a\/crew\/workflows\/full\.json$/m)
+  assert.match(proposal.diff, /^\+\+\+ b\/crew\/workflows\/full\.json$/m)
+  assert.equal(treeDigest(root), beforeDigest)
+  assert.equal(reads, 2)
+})
+
+test('workflow-page:C2', async () => {
+  const root = scratchDir('visualizer-workflows-http-')
+  const crew = join(root, 'crew')
+  mkdirSync(crew, { recursive: true })
+  const rosterPath = join(crew, 'roster.json')
+  writeFileSync(rosterPath, JSON.stringify({ tiers: { build: { planner: { provider: 'anthropic', id: 'planner', agent: 'pi', effort: 'high' } } } }))
+  let feedReads = 0
+  const feed = { listRuns() { feedReads += 1; return { runs: [], degraded: true, absent: 'ledger denied' } }, close() {} }
+  const server = await startInProcess(feed, { checkout: root, rosterPath, workflowsDocsPath: join(process.cwd(), 'visualizer/web/src/lib/stage-docs.json') })
+  try {
+    const get = await json(server.base, '/api/workflows?recent=2')
+    assert.equal(get.status, 200)
+    assert.deepEqual(get.json.workflows.map((row) => row.shape), Object.keys(VARIANTS))
+    assert.equal(get.json.evidence.measured, false)
+    assert.match(get.json.evidence.error, /ledger denied/i)
+    assert.equal(feedReads, 1)
+    const api = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/api.js'), 'utf8')
+    assert.match(api, /proposeWorkflowEdit = \(workflow, edit\) => request\('\/api\/workflows\/propose'/)
+    assert.equal((await json(server.base, '/api/workflows?unknown=1')).status, 400)
+    assert.equal((await json(server.base, '/api/workflows', { method: 'POST' })).status, 405)
+    assert.equal((await json(server.base, '/api/workflows/propose')).status, 405)
+    assert.equal((await json(server.base, '/api/workflows/propose', { method: 'POST', body: '{}' })).status, 415)
+    assert.equal((await json(server.base, '/api/workflows/propose', { method: 'POST', headers: { 'content-type': 'application/json', origin: 'https://evil.example' }, body: JSON.stringify({ workflow: 'full', edit: { role: 'planner', cell: null } }) })).status, 403)
+    assert.equal((await json(server.base, '/api/workflows/propose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{' })).status, 400)
+    const beforeDigest = treeDigest(root)
+    const proposal = await json(server.base, '/api/workflows/propose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ workflow: 'full', edit: { stage: 'plan', role: 'planner', cell: null } }) })
+    assert.equal(proposal.status, 200)
+    assert.equal(proposal.json.ok, true)
+    assert.equal(proposal.json.workflow_path, 'crew/workflows/full.json')
+    assert.equal(existsSync(join(crew, 'workflows', 'full.json')), false)
+    assert.equal(treeDigest(root), beforeDigest)
+  } finally {
+    await stopInProcess(server.server)
   }
 })
 

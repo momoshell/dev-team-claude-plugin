@@ -9,8 +9,10 @@ import { createFeed } from './feed.mjs'
 import { createReturnsSource } from './returns-source.mjs'
 import { createJournalSource } from './journal-source.mjs'
 import { createRosterSource } from './roster-source.mjs'
+import { createWorkflowsSource } from './workflows-source.mjs'
 import { proposeEdit } from './roster-edit.mjs'
 import { createAgentsSource } from './agents-source.mjs'
+import { VARIANTS } from '../../crew/variants.mjs'
 import { readLadder, readReference, ladderView, stageMoves, composeMoves, applyMoves } from './roster-ladder.mjs'
 import { createArtificialAnalysisCatalog } from './model-catalog.mjs'
 import { saveArtificialAnalysisKey } from './local-env.mjs'
@@ -84,6 +86,8 @@ const ROUTE_PARAMS = Object.freeze({
   '/api/agents/propose': [],
   '/api/skills/propose': [],
   '/api/prompts/propose': [],
+  '/api/workflows': ['recent'],
+  '/api/workflows/propose': [],
   '/api/cell-health': ['since', 'until'],
   '/api/run-set': ['since', 'until'],
   '/api/intake': ['since', 'until'],
@@ -309,6 +313,8 @@ export function startServer(options = {}) {
   const returns = config.returns || createReturnsSource({ crewRoot: config.crewRoot })
   const journal = config.journal || createJournalSource({ crewRoot: config.crewRoot })
   const roster = config.roster || createRosterSource({ rosterPath: config.rosterPath })
+
+  const workflows = config.workflows || createWorkflowsSource({ root: config.checkout, feed, variants: VARIANTS, rosterPath: config.rosterPath, docsPath: config.workflowsDocsPath })
   const modelCatalog = config.modelCatalog || createArtificialAnalysisCatalog({ apiKey: env.ARTIFICIAL_ANALYSIS_API_KEY, fetchImpl: config.fetchImpl })
   const agents = config.agents || config.agentsSource || createAgentsSource({ checkout: config.checkout, crewRoot: config.crewRoot })
   const server = createServer(async (req, res) => {
@@ -344,6 +350,13 @@ export function startServer(options = {}) {
         }
         if (filters.since && filters.until && Date.parse(filters.until) <= Date.parse(filters.since)) return json(res, 400, { schema, error: 'until must be later than since' })
         const result = feed.listRuns(filters)
+        return json(res, 200, { schema, ...result })
+      }
+      if (url.pathname === '/api/workflows') {
+        if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
+        const recent = integer(url.searchParams.get('recent'), 5)
+        if (recent === null || recent < 0 || recent > 1000) return json(res, 400, { schema, error: 'recent must be an integer between 0 and 1000' })
+        const result = workflows.readWorkflows({ recent })
         return json(res, 200, { schema, ...result })
       }
       if (url.pathname === '/api/events') {
@@ -540,6 +553,18 @@ export function startServer(options = {}) {
           ...recorded,
           ...(transitionError ? { error: transitionError } : {}),
         })
+      }
+      if (url.pathname === '/api/workflows/propose') {
+        if (method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'POST' })
+        const refusal = writeGuard(req)
+        if (refusal) return json(res, refusal.status, { schema, error: refusal.error })
+        let input
+        try { input = await body(req) } catch (err) { return json(res, 400, { schema, error: err.message || 'invalid json' }) }
+        if (!input || typeof input !== 'object' || Array.isArray(input) || (typeof input.workflow !== 'string' && !(input.workflow && typeof input.workflow === 'object')) || !input.edit || typeof input.edit !== 'object' || Array.isArray(input.edit)) {
+          return json(res, 400, { schema, error: 'workflow and edit are required' })
+        }
+        const result = await workflows.propose({ workflow: input.workflow, edit: input.edit })
+        return json(res, 200, { schema, ...result })
       }
       if (url.pathname === '/api/roster/propose') {
         if (method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'POST' })

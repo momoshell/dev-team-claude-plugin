@@ -16,8 +16,6 @@
   "crew/pi/extensions/subagent.ts:473": "totals.cost += usage.cost.total",
   "crew/pi/extensions/subagent.test.mjs:474": "usage is a complete pi Usage or absent",
   "crew/pi/extensions/subagent.ts:653": "Complete or absent — never partial",
-  "docs/conventions.md:124": "A frozen exported enum's drift guard needs",
-  "docs/conventions.md:47": "first TypeScript file on main, and every file under",
   "crew/drive.mjs:524": "export const DECISIONS = Object.freeze",
   "crew/drive-review.test.mjs:1562": "assert.deepEqual([...DECISIONS], ['bounce', 'bounce-builder', 'bounce-reviewer', 'accept', 'escalate'])",
   "scripts/factory/ledger.mjs:6846": "function refuseUnknownFlags(verb, flags)",
@@ -41,5 +39,7 @@
   "crew/daemon.test.mjs:227": "IMPORT FIREWALL: daemon.mjs carries no top-level import",
   "crew/daemon.test.mjs:296": "DAEMON_CODE.includes(adapterImport)",
   "crew/daemon.test.mjs:261": "assert.doesNotMatch(policyCode",
-  "crew/daemon.test.mjs:259": "assert.doesNotMatch(slugCode"
+  "crew/daemon.test.mjs:259": "assert.doesNotMatch(slugCode",
+  "docs/conventions.md:126": "A frozen exported enum's drift guard needs",
+  "docs/conventions.md:49": "first TypeScript file on main, and every file under"
 }

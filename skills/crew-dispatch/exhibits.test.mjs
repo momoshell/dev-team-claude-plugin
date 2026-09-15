@@ -301,16 +301,25 @@ test('the batch reference makes depends_on sequencing distinct from locking', ()
   assert.equal(text.includes('no two entries in one register'), false)
 })
 
-test('I1 OpenRouter and agent-doctor owners are covered by dynamic reach census', () => {
-  const addedOwners = ['visualizer/server/openrouter-catalog.mjs', 'scripts/factory/agent-doctor.mjs']
+test('I1 tracked non-test owners are covered by dynamic reach census', () => {
+  const addedOwners = [
+    ['visualizer/server/openrouter-catalog.mjs', ['test/visualizer-model-catalog.test.mjs']],
+    ['scripts/factory/agent-doctor.mjs', ['test/factory-agent-doctor.test.mjs']],
+    ['visualizer/server/workflows-source.mjs', ['test/visualizer-server.test.mjs']],
+    ['visualizer/web/src/lib/workflows.js', ['test/visualizer-panels.test.mjs']],
+    ['visualizer/web/src/lib/WorkflowsPage.svelte', ['test/visualizer-panels.test.mjs']],
+    ['visualizer/web/src/lib/WorkflowGraph.svelte', ['test/visualizer-panels.test.mjs']],
+    ['visualizer/web/src/lib/stage-docs.json', ['test/visualizer-panels.test.mjs']],
+  ]
   const addedTests = ['test/factory-agent-doctor.test.mjs']
   const currentReach = collectTestReach({ checkout: ROOT })
-  const currentFiles = [...new Set([...gitPaths(['ls-files', '-z']), ...addedOwners, ...addedTests])]
+  const addedPaths = addedOwners.map(([owner]) => owner)
+  const currentFiles = [...new Set([...gitPaths(['ls-files', '-z']), ...addedPaths, ...addedTests])]
   const current = reachCensus(currentFiles, currentReach)
-  const ownerTests = currentReach.pathByFile.get(addedOwners[0])
-  assert.ok(ownerTests?.has('test/visualizer-model-catalog.test.mjs'))
-  const doctorOwnerTests = currentReach.pathByFile.get(addedOwners[1])
-  assert.ok(doctorOwnerTests?.has(addedTests[0]))
+  for (const [owner, expectedTests] of addedOwners) {
+    const ownerTests = currentReach.pathByFile.get(owner)
+    for (const expectedTest of expectedTests) assert.ok(ownerTests?.has(expectedTest), `${owner} must be reached by ${expectedTest}`)
+  }
   const pristineFiles = gitPaths(['ls-tree', '-r', '--name-only', '-z', 'HEAD'])
   const pristineReach = collectTestReach({
     checkout: ROOT,
@@ -331,17 +340,20 @@ test('I1 OpenRouter and agent-doctor owners are covered by dynamic reach census'
   assert.ok(pristine.owners <= pristine.nonTests)
   assert.ok(pristine.pairs >= pristine.owners)
   assert.ok(pristine.contributingTests <= pristine.tests)
-  for (const addedOwner of addedOwners) {
-    if (!pristineFiles.includes(addedOwner)) {
-      assert.equal(pristineReach.pathByFile.has(addedOwner), false)
-      assert.ok(current.owners > pristine.owners)
-      assert.ok(current.pairs > pristine.pairs)
-    }
+  const missingOwners = addedPaths.filter((owner) => !pristineFiles.includes(owner))
+  for (const owner of missingOwners) assert.equal(pristineReach.pathByFile.has(owner), false)
+  if (missingOwners.length > 0) {
+    assert.ok(current.owners > pristine.owners)
+    assert.ok(current.pairs > pristine.pairs)
   }
   const ownerDelta = current.owners - pristine.owners
   const pairDelta = current.pairs - pristine.pairs
   assert.equal(Number.isInteger(ownerDelta), true)
   assert.equal(Number.isInteger(pairDelta), true)
+  if (missingOwners.length > 0) {
+    assert.ok(ownerDelta >= missingOwners.length)
+    assert.ok(pairDelta >= addedOwners.reduce((total, [owner]) => total + (missingOwners.includes(owner) ? addedOwners.find(([candidate]) => candidate === owner)[1].length : 0), 0))
+  }
 })
 
 test('RV2-1 newly tracked lab grant owners are covered by dynamic reach census', () => {

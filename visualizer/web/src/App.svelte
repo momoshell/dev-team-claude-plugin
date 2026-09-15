@@ -13,6 +13,7 @@
   import IntakePanel from './lib/IntakePanel.svelte'
   import RosterPanel from './lib/RosterPanel.svelte'
   import AgentsPage from './lib/AgentsPage.svelte'
+  import WorkflowsPage from './lib/WorkflowsPage.svelte'
   import RunDetail from './lib/RunDetail.svelte'
   import Dropdown from './lib/Dropdown.svelte'
 
@@ -60,7 +61,7 @@
     return { run, status, why }
   }).filter((row) => needsAttention(row.status.key) && !row.run.triage?.reviewed_at))
   let attentionSummary = $derived(attentionBreakdown(attentionRows))
-  let pageTitle = $derived(selectedRun ? `${selectedRun.goal || 'Task'} · Factory` : route.view === 'roster' ? 'Roster · Factory' : route.view === 'agents' ? 'Agents · Factory' : route.view === 'ops' ? 'Operations · Factory' : 'Tasks · Factory')
+  let pageTitle = $derived(selectedRun ? `${selectedRun.goal || 'Task'} · Factory` : route.view === 'roster' ? 'Roster · Factory' : route.view === 'agents' ? 'Agents · Factory' : route.view === 'ops' ? 'Operations · Factory' : route.view === 'workflows' ? 'Workflows · Factory' : 'Tasks · Factory')
 
   $effect(() => subscribeHash((next) => route = next))
   $effect(() => {
@@ -157,6 +158,7 @@
     <button class:active={route.view === 'fleet' || route.view === 'run' || route.view === 'phase'} onclick={() => navigate({ view: 'fleet' })}>Tasks</button>
     <button class:active={route.view === 'roster'} onclick={() => navigate({ view: 'roster' })}>Roster</button>
     <button class:active={route.view === 'agents'} onclick={() => navigate({ view: 'agents' })}>Agents</button>
+    <button class:active={route.view === 'workflows'} onclick={() => navigate({ view: 'workflows' })}>Workflows</button>
     <button class:active={route.view === 'ops'} onclick={() => navigate({ view: 'ops' })}>Operations</button>
   </nav>
   <div class="tools">
@@ -190,6 +192,8 @@
     <div class="page-heading"><div><p class="eyebrow">Seat composition</p><h1>Agents · Skills · Prompts</h1><p>Read the register, last-seat evidence, and charter surface without applying edits.</p></div></div>
     <AgentsPage />
   </main>
+{:else if route.view === 'workflows'}
+  <WorkflowsPage />
 {:else}
   <main class="page">
     <div class="page-heading task-heading"><div><p class="eyebrow">Work history</p><h1>Factory tasks</h1><p>Follow work in progress, inspect completed runs, and open the full execution waterfall.</p></div><span class="updated">Live ledger · refreshed automatically</span></div>

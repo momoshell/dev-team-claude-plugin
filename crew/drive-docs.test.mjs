@@ -12,10 +12,10 @@ import { after } from 'node:test'
 import { tmpdir } from 'node:os'
 import {
   documentDiffImages, documentDeclarations, documentChangedDeclarations, documentTrigger,
-  documentStagePlan, documentEntry, runDocumentationDecision, REVIEWED_CORE_STAGES, SHAPE_MAJOR_PHASES,
+  documentStagePlan, documentEntry, runDocumentationDecision, DOCUMENT_APPEND_TARGET, driveTask, REVIEWED_CORE_STAGES, SHAPE_MAJOR_PHASES,
   VARIANTS,
 } from './drive.mjs'
-import { convergeRun, runPublished, CONVERGE_CTX } from './drive-fixtures.mjs'
+import { convergeIo, convergeRun, runPublished, CONVERGE_CTX, CTX, planEnv, publicationIo } from './drive-fixtures.mjs'
 
 // Ledger sandbox (#432 / #824). This file imports crew/crew.mjs#bootCmd, a
 // registered home-default door (test/factory-env.test.mjs:113), so it is a
@@ -548,34 +548,244 @@ test('RV1-1 preserves existing refusals after apostrophe comments', () => {
   ])
 })
 
-test('D1/E1 wrapper is diff-only, deterministic, and read-only', () => {
-  const call = (seatOpinion) => {
-    const writes = [], commits = [], worktrees = []
-    const io = { run: () => ({ ok: true, output: DOCUMENT_DIFF }), writeFile: (...args) => writes.push(args), commit: (...args) => commits.push(args) }
-    const result = runDocumentationDecision({ ctx: { head: 'base', seatOpinion, documentDate: '2026-09-14' }, commit: 'head', files: [], io })
-    assert.equal(writes.length + commits.length + worktrees.length, 0)
-    return result
+const DOCUMENT_CHECKOUT = '/tmp/document-author-checkout'
+const DOCUMENT_TARGET_PATH = `${DOCUMENT_CHECKOUT}/${DOCUMENT_APPEND_TARGET}`
+const DOCUMENT_BASE = '# Conventions fixture\n\n## Format\n\nformat-marker\n\n## Entries\n\n- **2026-01-01** — Existing entry. *Why:* fixture.\n'
+const DOCUMENT_REFUSAL_DIFF = [
+  'diff --git a/src/refusals.mjs b/src/refusals.mjs',
+  '--- a/src/refusals.mjs',
+  '+++ b/src/refusals.mjs',
+  '@@ -1,3 +1,4 @@',
+  ' const REFUSAL_REASONS = Object.freeze([',
+  '  OLD_REFUSAL,',
+  '+ NEW_REFUSAL,',
+  ' ])',
+].join('\n')
+
+function documentationIo({ diff = DOCUMENT_DIFF, targetText = DOCUMENT_BASE, fence = () => true, changed = [], repair = { ok: true, output: '' }, commitIds = ['author-1'] } = {}) {
+  const files = new Map([[DOCUMENT_TARGET_PATH, targetText]])
+  const changedSet = new Set(changed)
+  const writes = [], commits = [], reads = [], runs = [], events = [], anchorCommands = []
+  let changedReads = 0
+  return {
+    files, writes, commits, reads, runs, events, anchorCommands,
+    get changedReads() { return changedReads },
+    run(command) {
+      runs.push(command); events.push({ type: 'run', command })
+      if (command.startsWith('git diff --binary --no-ext-diff ')) return { ok: true, output: diff }
+      if (command.startsWith('node skills/qa-test-writing/anchor-pin.mjs --repair ')) {
+        anchorCommands.push(command)
+        return typeof repair === 'function' ? repair(command) : repair
+      }
+      return { ok: true, output: '' }
+    },
+    readFile(path) {
+      reads.push(path)
+      return files.has(path) ? files.get(path) : null
+    },
+    writeFile(path, content) {
+      writes.push({ path, content }); events.push({ type: 'write', path, content })
+      files.set(path, content); changedSet.add(path === DOCUMENT_TARGET_PATH ? DOCUMENT_APPEND_TARGET : path)
+    },
+    changedFiles() {
+      changedReads += 1
+      return [...changedSet]
+    },
+    commit(filesForCommit, message) {
+      const record = { files: [...filesForCommit], message }
+      commits.push(record); events.push({ type: 'commit', ...record })
+      return commitIds.shift() ?? null
+    },
+    inScope: fence,
   }
-  assert.deepEqual(call(true), call(false))
-  assert.equal(call(true).outcome, 'planned')
+}
+
+const documentationDecision = (io, over = {}) => runDocumentationDecision({
+  ctx: { checkout: DOCUMENT_CHECKOUT, head: 'base1111', documentDate: '2026-09-14', ...over.ctx },
+  commit: over.commit || 'head2222', inScope: io.inScope, io,
 })
 
-test('F1/G1/H1/I1 preserve terminals and attach only the optional residual', () => {
-  const ordinary = runPublished({ documentDiff: DOCUMENT_DIFF, ctx: { head: 'base1111', documentDate: '2026-09-14' } })
-  const convergence = convergeRun({ documentDiff: DOCUMENT_DIFF, ctx: { ...CONVERGE_CTX, head: 'base1111', documentDate: '2026-09-14' } })
-  assert.equal(ordinary.result.status, 'done')
-  assert.equal(convergence.result.status, 'converge')
-  assert.deepEqual(ordinary.result.details.documentation.plan, DOCUMENT_ENTRIES)
-  assert.deepEqual(convergence.result.details.documentation.plan, DOCUMENT_ENTRIES)
-  assert.deepEqual(Object.keys(ordinary.result.details).sort(), ['accepted_via', 'cold_suite', 'commit', 'consults', 'dissents', 'documentation', 'enforcements', 'escalation', 'extra_rounds_granted', 'files_committed', 'gate', 'growth', 'modifiers', 'pr', 'stages'])
-  assert.deepEqual(Object.keys(convergence.result.details).sort(), ['accepted_via', 'commit', 'consults', 'converge', 'dissents', 'documentation', 'enforcements', 'escalation', 'extra_rounds_granted', 'files_committed', 'gate', 'growth', 'modifiers', 'stages'])
-  const unreadableOrdinary = runPublished({ documentDiff: 'not a unified diff' })
-  const unreadableConvergence = convergeRun({ documentDiff: 'not a unified diff' })
-  assert.equal(unreadableOrdinary.result.status, 'done')
-  assert.equal(unreadableConvergence.result.status, 'converge')
-  assert.equal(unreadableOrdinary.result.details.documentation.outcome, 'unreadable')
-  assert.equal(unreadableConvergence.result.details.documentation.outcome, 'unreadable')
-  assert.equal(runPublished({ documentDiff: '' }).result.details.documentation, undefined)
+function decorateDriverDocumentationIo(io, { targetText = DOCUMENT_BASE, targetPath = DOCUMENT_TARGET_PATH, changed = [], commitIds = ['code-1', 'author-1'] } = {}) {
+  const files = new Map([[targetPath, targetText]])
+  const originalRead = io.readFile.bind(io)
+  const originalWrite = io.writeFile.bind(io)
+  const originalRun = io.run.bind(io)
+  const originalChanged = io.changedFiles.bind(io)
+  const originalCommit = io.commit.bind(io)
+  const events = []
+  let targetWritten = false
+  io.readFile = (path) => {
+    if (path === targetPath) return files.get(path) ?? null
+    return originalRead(path)
+  }
+  io.writeFile = (path, content) => {
+    if (path === targetPath) { targetWritten = true; files.set(path, content); events.push({ type: 'write', path, content }) }
+    return originalWrite(path, content)
+  }
+  io.run = (command) => {
+    if (command.startsWith('node skills/qa-test-writing/anchor-pin.mjs --repair ')) {
+      events.push({ type: 'repair', command })
+      return { ok: true, output: '' }
+    }
+    return originalRun(command)
+  }
+  io.changedFiles = () => {
+    const base = [...(changed.length > 0 ? changed : originalChanged())]
+    return targetWritten ? [...new Set([...base, targetPath.replace(`${io.state?.checkout || '/tmp/repo'}/`, '')])] : base
+  }
+  io.commit = (filesForCommit, message) => {
+    const result = originalCommit(filesForCommit, message)
+    const commit = commitIds.shift() ?? null
+    const record = io.calls?.commits?.at(-1)
+    if (record) record.sha = commit
+    if (io.state) io.state.head = commit
+    events.push({ type: 'commit', files: [...filesForCommit], message, commit })
+    return commit
+  }
+  io.__documentation = { files, events }
+  return io
+}
+
+const DOCUMENT_SCOPE = ['a.mjs', 'a.test.mjs', DOCUMENT_APPEND_TARGET]
+const documentationPlan = () => planEnv({ details: { ...planEnv().details, files_in_scope: DOCUMENT_SCOPE } })
+
+test('A1 document author appends and commits a fenced conventions entry', () => {
+  const io = documentationIo({ diff: DOCUMENT_REFUSAL_DIFF, changed: [] })
+  const result = documentationDecision(io)
+  const entry = DOCUMENT_ENTRIES[2].entry
+  assert.equal(result.documentation, null)
+  assert.equal(result.commit, 'author-1')
+  assert.equal(io.writes.length, 1)
+  assert.equal(io.writes[0].path, DOCUMENT_TARGET_PATH)
+  assert.equal(io.writes[0].content, `${DOCUMENT_BASE}${entry}\n`)
+  assert.equal(io.commits.length, 1)
+  assert.deepEqual(io.commits[0].files, [DOCUMENT_APPEND_TARGET])
+  assert.equal(io.commits[0].message, 'docs: author planned conventions entries')
+})
+
+test('B1 document author appends after the last existing Entries line', () => {
+  const targetText = '# B1 fixture\n\n## Format\n\nformat-marker\n\n## Entries\n\n- **2026-01-01** — final old line. *Why:* fixture.'
+  const io = documentationIo({ diff: DOCUMENT_REFUSAL_DIFF, targetText })
+  const result = documentationDecision(io)
+  const entry = DOCUMENT_ENTRIES[2].entry
+  const authored = io.files.get(DOCUMENT_TARGET_PATH)
+  assert.equal(result.documentation, null)
+  assert.equal(authored, `${targetText}\n${entry}\n`)
+  assert.ok(authored.indexOf(entry) > authored.indexOf('- **2026-01-01** — final old line.'))
+  assert.ok(authored.indexOf(entry) > authored.indexOf('## Entries'))
+})
+
+test('C1 document author is idempotent across two runs for one commit', () => {
+  const duplicateDiff = [
+    'diff --git a/src/refusals.mjs b/src/refusals.mjs',
+    '--- a/src/refusals.mjs',
+    '+++ b/src/refusals.mjs',
+    '@@ -1,7 +1,9 @@',
+    ' const REFUSAL_REASONS = Object.freeze([',
+    '  OLD_REFUSAL,',
+    '+ DUPLICATE_REFUSAL,',
+    ' ])',
+    ' const PUBLISH_REFUSALS = Object.freeze([',
+    '  OLD_PUBLISH_REFUSAL,',
+    '+ DUPLICATE_REFUSAL,',
+    ' ])',
+  ].join('\n')
+  const io = documentationIo({ diff: duplicateDiff, commitIds: ['author-1', 'author-2'] })
+  const first = documentationDecision(io)
+  const second = documentationDecision(io, { commit: first.commit })
+  const entry = '- **2026-09-14** — Added closed refusal `DUPLICATE_REFUSAL` from `src/refusals.mjs`. *Why:* The lane changed the closed-refusals documented surface.'
+  assert.equal(first.documentation, null)
+  assert.equal(second.documentation, null)
+  assert.equal(io.files.get(DOCUMENT_TARGET_PATH).split(entry).length - 1, 1)
+  assert.equal(io.writes.length, 1)
+  assert.equal(io.commits.length, 1)
+  assert.equal(first.commit, 'author-1')
+  assert.equal(second.commit, 'author-1')
+})
+
+test('D1 document author leaves an unfenced conventions target byte-identical and residual', () => {
+  const io = documentationIo({ diff: DOCUMENT_REFUSAL_DIFF, fence: () => false })
+  const result = documentationDecision(io)
+  assert.deepEqual(result.documentation, {
+    id: 'documentation-plan', type: 'cosmetic', outcome: 'planned',
+    summary: 'Documentation residuals planned: 1', plan: [DOCUMENT_ENTRIES[2]],
+  })
+  assert.equal(io.files.get(DOCUMENT_TARGET_PATH), DOCUMENT_BASE)
+  assert.equal(io.writes.length, 0)
+  assert.equal(io.commits.length, 0)
+  assert.equal(io.reads.includes(DOCUMENT_TARGET_PATH), false)
+})
+
+test('E1 document author makes an untriggered decision a write-free commit-free no-op', () => {
+  const io = documentationIo({ diff: '' })
+  const result = documentationDecision(io, { commit: 'unchanged-1' })
+  assert.equal(result.documentation, null)
+  assert.equal(result.commit, 'unchanged-1')
+  assert.equal(io.writes.length, 0)
+  assert.equal(io.commits.length, 0)
+  assert.equal(io.changedReads, 0)
+})
+
+test('F1 document author preserves unreadable residual bytes and writes nothing', () => {
+  const io = documentationIo({ diff: 'not a unified diff' })
+  const result = documentationDecision(io, { commit: 'unchanged-1' })
+  assert.deepEqual(result.documentation, {
+    id: 'documentation-plan', type: 'cosmetic', outcome: 'unreadable',
+    summary: 'Documentation diff could not be read: diff contained malformed, binary, or non-text sections', plan: [],
+  })
+  assert.equal(result.commit, 'unchanged-1')
+  assert.equal(io.writes.length, 0)
+  assert.equal(io.commits.length, 0)
+  assert.equal(io.reads.includes(DOCUMENT_TARGET_PATH), false)
+})
+
+test('G1 document author leaves both structural skill targets residual and unwritten', () => {
+  const io = documentationIo()
+  const result = documentationDecision(io)
+  assert.deepEqual(result.documentation?.plan, DOCUMENT_ENTRIES.slice(0, 2))
+  assert.equal(io.writes.length, 1)
+  assert.deepEqual(io.writes.map(({ path }) => path), [DOCUMENT_TARGET_PATH])
+  assert.equal(io.reads.some((path) => path.endsWith('skills/crew-dispatch/references/batch.md')), false)
+  assert.equal(io.reads.some((path) => path.endsWith('skills/crew-dispatch/references/flags.md')), false)
+})
+
+test('H1 both driver paths retain residuals beside an authored entry', () => {
+  const ordinaryIo = decorateDriverDocumentationIo(publicationIo({
+    documentDiff: DOCUMENT_DIFF, changed: ['a.mjs', 'a.test.mjs'], envelopes: { 'planner:1': documentationPlan() },
+  }), { targetPath: `${CTX.checkout}/${DOCUMENT_APPEND_TARGET}`, changed: ['a.mjs', 'a.test.mjs'], commitIds: ['ordinary-code', 'ordinary-docs'] })
+  const ordinary = driveTask({ ...CTX, head: 'base1111', documentDate: '2026-09-14' }, ordinaryIo)
+  assert.equal(ordinary.status, 'done')
+  assert.equal(ordinary.details.commit, 'ordinary-docs')
+  assert.deepEqual(ordinary.details.documentation.plan, DOCUMENT_ENTRIES.slice(0, 2))
+  assert.ok(ordinaryIo.calls.commits.find((commit) => commit.sha === 'ordinary-docs').files.includes(DOCUMENT_APPEND_TARGET))
+
+  const convergenceIo = decorateDriverDocumentationIo(convergeIo({ documentDiff: DOCUMENT_DIFF, changed: ['a.mjs'] }), {
+    targetPath: `${CTX.checkout}/${DOCUMENT_APPEND_TARGET}`, changed: ['a.mjs'], commitIds: ['converge-code', 'converge-docs'],
+  })
+  const originalWait = convergenceIo.wait.bind(convergenceIo)
+  convergenceIo.wait = (path) => {
+    const env = originalWait(path)
+    return path === 'planner:1' ? { ...env, details: { ...env.details, files_in_scope: DOCUMENT_SCOPE } } : env
+  }
+  const convergence = driveTask({ ...CONVERGE_CTX, head: 'base1111', documentDate: '2026-09-14' }, convergenceIo)
+  assert.equal(convergence.status, 'converge')
+  assert.equal(convergence.details.commit, 'converge-docs')
+  assert.deepEqual(convergence.details.documentation.plan, DOCUMENT_ENTRIES.slice(0, 2))
+  assert.ok(convergenceIo.calls.commits.find((commit) => commit.sha === 'converge-docs').files.includes(DOCUMENT_APPEND_TARGET))
+})
+
+test('I1 document author runs anchor repair over the touched conventions target', () => {
+  const io = documentationIo({ diff: DOCUMENT_REFUSAL_DIFF })
+  const result = documentationDecision(io)
+  assert.equal(result.commit, 'author-1')
+  assert.equal(io.anchorCommands.length, 1)
+  assert.match(io.anchorCommands[0], /--repair skills\/backend-node/)
+  assert.match(io.anchorCommands[0], /--root '\/tmp\/document-author-checkout'/)
+  assert.match(io.anchorCommands[0], /--base 'base1111'/)
+  const repairIndex = io.events.findIndex(({ type, command }) => type === 'run' && command === io.anchorCommands[0])
+  const writeIndex = io.events.findIndex(({ type }) => type === 'write')
+  const commitIndex = io.events.findIndex(({ type }) => type === 'commit')
+  assert.ok(writeIndex < repairIndex && repairIndex < commitIndex)
 })
 
 test('J1 document journaling is marker-only', () => {

@@ -517,6 +517,13 @@ export function operationsOverview(runs = []) {
 
 export function deriveStatus(run = {}, taskEnvelope = null) {
   const escalation = taskEnvelope?.details?.escalation
+  const typed = {
+    escalated: { key: 'escalated', word: 'escalated', tone: 'serious', where: escalation?.where ?? null, why: escalation?.why ?? null },
+    aborted: { key: 'aborted', word: 'aborted', tone: 'aborted', where: null, why: null },
+    success: { key: 'success', word: 'success', tone: 'ok', where: null, why: null },
+    failed: { key: 'fail', word: 'failed', tone: 'fail', where: null, why: null },
+  }[run?.settlement?.outcome]
+  if (typed) return typed
   if (taskEnvelope?.status === 'escalation') {
     return { key: 'escalated', word: 'escalated', tone: 'serious', where: escalation?.where, why: escalation?.why }
   }

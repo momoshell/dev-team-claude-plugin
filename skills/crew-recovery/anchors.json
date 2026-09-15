@@ -4,8 +4,8 @@
   "scripts/factory/make-brief.mjs:931": "function colourNeutralEnv(base = process.env)",
   "crew/drive.mjs:55": "builder: 2400, reviewer: 1800",
   "crew/seat-io.mjs:1710": "export function recogniseProviderRetry(text) {",
-  "crew/crew.mjs:2911": "escalation -> NEVER teardown",
-  "crew/crew.mjs:3568": "seats.proven !== seats.seats || seats.recorded !== seats.seats",
-  "crew/crew.mjs:3455": "const seats = rows.length",
-  "crew/drive.mjs:7582": "const completeCheckProof = (label, options = {}) => {"
+  "crew/crew.mjs:3044": "escalation -> NEVER teardown",
+  "crew/crew.mjs:3701": "seats.proven !== seats.seats || seats.recorded !== seats.seats",
+  "crew/crew.mjs:3588": "const seats = rows.length",
+  "crew/drive.mjs:7855": "const completeCheckProof = (label, options = {}) => {"
 }

@@ -554,6 +554,52 @@ test('model directory pagination uses compact named controls', () => {
   assert.doesNotMatch(source, /onclick=\{\(\) => directoryPage -= 1\}>←<\/button>/)
 })
 
+test('E1 directory add uses OpenRouter runtime identity', () => {
+  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
+  assert.match(source, /const key = variant\.runtime_id/)
+  assert.match(source, /provider:variant\.runtime_id\.split\('\/'\)\[0\]/)
+  assert.match(source, /id:variant\.runtime_id\.split\('\/'\)\.slice\(1\)\.join\('\/'\)/)
+  assert.match(source, /if \(!variant\?\.runtime_id\)/)
+  assert.match(source, /disabled=\{modelState\.known \|\| modelState\.noRuntime\}/)
+})
+
+test('RV1-1 tier variants use their own runtime draft key', () => {
+  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
+  assert.match(source, /const chip = directoryChip\(variant\)/)
+  assert.match(source, /if \(directoryChip\(variant\)\)/)
+  assert.doesNotMatch(source, /const chip = directoryChip\(model\)/)
+  assert.doesNotMatch(source, /if \(directoryChip\(model\)\)/)
+})
+
+test('RV1-2 unconfigured intelligence keeps key setup and footer honest', () => {
+  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
+  assert.match(source, /\{#if directory\?\.configured === false \|\| directory\?\.artificial_analysis_unavailable \|\| !directory\?\.models\}/)
+  assert.match(source, /Model intelligence not configured/)
+  assert.match(source, /Add API key/)
+  assert.match(source, /\{#if directory\?\.models\}/)
+  assert.match(source, /function catalogConnectionState\(\) \{[\s\S]*?return 'OpenRouter listing · Artificial Analysis not connected'/)
+  assert.match(source, /<span class="connection-chip"><i><\/i>\{catalogConnectionState\(\)\}<\/span>/)
+  assert.doesNotMatch(source, /credential_source === 'environment' \? '\.env\.local' : 'temporary key'/)
+})
+
+test('RV2-1 configured AA failure keeps repair controls and footer honest', () => {
+  const directorySource = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/model-directory.js'), 'utf8')
+  const panel = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
+  assert.match(directorySource, /\? 'aa-unavailable' : 'not-benchmarked'/)
+  assert.match(panel, /directory\?\.configured === false \|\| directory\?\.artificial_analysis_unavailable \|\| !directory\?\.models/)
+  assert.match(panel, /catalogKeyError \|\| directory\?\.artificial_analysis_absent \|\| directory\?\.absent/)
+  assert.match(panel, /if \(directory\?\.artificial_analysis_unavailable\) return 'Artificial Analysis not loading'/)
+})
+
+test('F1 null intelligence produces an unmeasured draft', () => {
+  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
+  assert.match(source, /if \(intelligence == null\) return null/)
+  assert.match(source, /band == null \? 'unmeasured'/)
+  assert.match(source, /reference_pending:variant\.intelligence == null \? variant\.score_absent_reason/)
+  assert.doesNotMatch(source, /if \(intelligence == null\) return 'utility'/)
+  assert.match(source, /'unmeasured'/)
+})
+
 test('roster seat assignment asks for an explicit per-seat thinking effort', () => {
   const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
   assert.match(source, /const EFFORT_OPTIONS = \[/)

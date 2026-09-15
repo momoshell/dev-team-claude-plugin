@@ -13,6 +13,8 @@ import { proposeEdit } from './roster-edit.mjs'
 import { createAgentsSource } from './agents-source.mjs'
 import { readLadder, readReference, ladderView, stageMoves, composeMoves, applyMoves } from './roster-ladder.mjs'
 import { createArtificialAnalysisCatalog } from './model-catalog.mjs'
+import { createOpenRouterCatalog } from './openrouter-catalog.mjs'
+import { mergeModelDirectory } from '../web/src/lib/model-directory.js'
 import { saveArtificialAnalysisKey } from './local-env.mjs'
 import { breakerPolicy } from '../../crew/breaker.mjs'
 import { openLedger } from '../../scripts/factory/ledger.mjs'
@@ -311,6 +313,11 @@ export function startServer(options = {}) {
   const roster = config.roster || createRosterSource({ rosterPath: config.rosterPath })
   const modelCatalog = config.modelCatalog || createArtificialAnalysisCatalog({ apiKey: env.ARTIFICIAL_ANALYSIS_API_KEY, fetchImpl: config.fetchImpl })
   const agents = config.agents || config.agentsSource || createAgentsSource({ checkout: config.checkout, crewRoot: config.crewRoot })
+  const openRouterCatalog = config.openRouterCatalog || createOpenRouterCatalog({ fetchImpl: config.fetchImpl })
+  const readModelCatalog = async () => {
+    const [openRouter, artificialAnalysis] = await Promise.all([openRouterCatalog.get(), modelCatalog.get()])
+    return mergeModelDirectory({ openRouter, artificialAnalysis })
+  }
   const server = createServer(async (req, res) => {
     // #544: the request target and the Host header are both attacker-chosen, and
     // an unparseable one threw ABOVE this handler's try — an unhandled rejection
@@ -564,7 +571,7 @@ export function startServer(options = {}) {
       }
       if (url.pathname === '/api/model-catalog') {
         if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
-        return json(res, 200, { schema, ...await modelCatalog.get() })
+        return json(res, 200, { schema, ...await readModelCatalog() })
       }
       if (url.pathname === '/api/model-catalog/key') {
         if (method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'POST' })
@@ -574,14 +581,14 @@ export function startServer(options = {}) {
         try { input = await body(req) } catch (err) { return json(res, 400, { schema, error: err.message || 'invalid json' }) }
         if (!input || typeof input !== 'object' || Array.isArray(input)) return json(res, 400, { schema, error: 'request body must be an object' })
         try {
-          if (input.api_key === null) { modelCatalog.clearApiKey(); return json(res, 200, { schema, ...await modelCatalog.get(), persisted:false }) }
+          if (input.api_key === null) { modelCatalog.clearApiKey(); return json(res, 200, { schema, ...await readModelCatalog(), persisted:false }) }
           if (input.persist !== undefined && typeof input.persist !== 'boolean') return json(res, 400, { schema, error:'persist must be a boolean' })
           if (input.persist === true) {
             saveArtificialAnalysisKey(config.envFile, input.api_key)
             modelCatalog.setPersistentApiKey(input.api_key)
           } else modelCatalog.setApiKey(input.api_key)
         } catch (err) { return json(res, 400, { schema, error: err.message || 'invalid api_key' }) }
-        return json(res, 200, { schema, ...await modelCatalog.get(), persisted:input.persist === true })
+        return json(res, 200, { schema, ...await readModelCatalog(), persisted:input.persist === true })
       }
       if (url.pathname === '/api/roster/ladder/stage') {
         if (method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'POST' })

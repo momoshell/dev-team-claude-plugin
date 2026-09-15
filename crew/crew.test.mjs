@@ -2590,6 +2590,20 @@ function childSignalFixture() {
 // exits 0. Measured on this checkout: unarmed windows die in 1-2ms.
 const SIGNAL_BLOCK_MS = 3000
 const SIGNAL_KILL_BOUND_MS = 1000
+const KEEPALIVE_LIFETIME_ENV = 'CREW_TEST_KEEPALIVE_LIFETIME_MS'
+const KEEPALIVE_LIFETIME_DEFAULT_MS = 300_000
+const KEEPALIVE_LIFETIME_TEST_MS = 750
+const KEEPALIVE_READY_TIMEOUT_MS = 5000
+const KEEPALIVE_EXIT_TIMEOUT_MS = 5000
+const KEEPALIVE_OBSERVATION_WINDOW_MS = 250
+const KEEPALIVE_CLEANUP_TIMEOUT_MS = 1000
+const KEEPALIVE_POLL_MS = 25
+const KEEPALIVE_INTERVAL = ['set', 'Interval', '(() => {}, 1000)'].join('')
+const KEEPALIVE_TIMER_STATEMENT = [
+  'setTimeout(() => process.exit(0), Number(process.env.',
+  KEEPALIVE_LIFETIME_ENV,
+  ' || ${KEEPALIVE_LIFETIME_DEFAULT_MS}))',
+].join('')
 
 async function sigtermWhileBlocked(f, body) {
   const harness = join(f.root, 'signal-harness.mjs')
@@ -2723,6 +2737,7 @@ emitter.startRun()
 installRunFinalizers(emitter)
 writeFileSync(readyPath + '.tmp', JSON.stringify({ adw_id: emitter.adwId }))
 renameSync(readyPath + '.tmp', readyPath)
+setTimeout(() => process.exit(0), Number(process.env.CREW_TEST_KEEPALIVE_LIFETIME_MS || ${KEEPALIVE_LIFETIME_DEFAULT_MS}))
 setInterval(() => {}, 1000)
 `)
   return { root, stateDir, dbPath, readyPath, script }
@@ -2779,6 +2794,259 @@ async function runFinalizerChild() {
     rmSync(fixture.root, { recursive: true, force: true })
   }
 }
+
+function rememberKeepaliveError(child) {
+  child._keepaliveError = null
+  child.once('error', (error) => { child._keepaliveError = error })
+  return child
+}
+
+function launchKeepaliveChild(fixture, env) {
+  return rememberKeepaliveError(spawn(process.execPath, [fixture.script], {
+    env, stdio: ['ignore', 'ignore', 'ignore'],
+  }))
+}
+
+function keepaliveChildRunning(child) {
+  return child != null && child.exitCode == null && child.signalCode == null
+}
+
+async function waitForKeepaliveReady(fixture, child) {
+  const deadline = Date.now() + KEEPALIVE_READY_TIMEOUT_MS
+  while (!existsSync(fixture.readyPath)) {
+    if (child?._keepaliveError) throw child._keepaliveError
+    if (!keepaliveChildRunning(child)) throw new Error(`keepalive child exited before readiness: code=${child?.exitCode ?? 'unknown'} signal=${child?.signalCode ?? 'unknown'}`)
+    if (Date.now() >= deadline) throw new Error(`keepalive child never wrote ${fixture.readyPath}`)
+    await new Promise((resolve) => setTimeout(resolve, KEEPALIVE_POLL_MS))
+  }
+}
+
+function waitForKeepaliveClose(child, timeoutMs) {
+  if (!child) return Promise.resolve(null)
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve({ code: child.exitCode, signal: child.signalCode })
+  return new Promise((resolve) => {
+    let timer
+    const onClose = (code, signal) => finish({ code, signal })
+    const finish = (result) => {
+      clearTimeout(timer)
+      child.removeListener('close', onClose)
+      resolve(result)
+    }
+    child.once('close', onClose)
+    timer = setTimeout(() => finish(null), timeoutMs)
+  })
+}
+
+function probeKeepaliveProcess(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return null
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return error?.code === 'ESRCH' ? false : null
+  }
+}
+
+async function waitForKeepaliveProcessGone(pid, timeoutMs) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (probeKeepaliveProcess(pid) === false) return true
+    await new Promise((resolve) => setTimeout(resolve, KEEPALIVE_POLL_MS))
+  }
+  return probeKeepaliveProcess(pid) === false
+}
+
+function readKeepalivePid(path) {
+  try {
+    const raw = readFileSync(path, 'utf8').trim()
+    const pid = Number(raw)
+    return raw && Number.isSafeInteger(pid) && pid > 0 ? pid : null
+  } catch {
+    return null
+  }
+}
+
+function disposableKeepaliveParentFixture(fixture) {
+  const pidPath = join(fixture.root, 'keepalive-child.pid')
+  const parentScript = join(fixture.root, 'keepalive-parent.mjs')
+  writeFileSync(parentScript, `import { existsSync, writeFileSync } from 'node:fs'
+import { spawn } from 'node:child_process'
+const child = spawn(${JSON.stringify(process.execPath)}, [${JSON.stringify(fixture.script)}], { stdio: 'ignore' })
+writeFileSync(${JSON.stringify(pidPath)}, String(child.pid))
+const deadline = Date.now() + ${KEEPALIVE_READY_TIMEOUT_MS}
+const wait = () => {
+  if (existsSync(${JSON.stringify(fixture.readyPath)})) {
+    child.unref()
+    process.exit(0)
+  }
+  if (Date.now() >= deadline) {
+    try { child.kill('SIGKILL') } catch {}
+    process.exit(1)
+  }
+  setTimeout(wait, ${KEEPALIVE_POLL_MS})
+}
+wait()
+`)
+  return { parentScript, pidPath }
+}
+
+function readKeepaliveSource(file) {
+  try { return readFileSync(fileURLToPath(new URL(file, import.meta.url)), 'utf8') }
+  catch (error) { throw new Error(`keepalive source unavailable: ${file}: ${error?.code || 'unknown'}`, { cause: error }) }
+}
+
+test('A1: an uncollected keepalive exits at its injected lifetime', { timeout: 10_000 }, async () => {
+  const fixture = finalizerChildFixture()
+  const env = { ...process.env, [KEEPALIVE_LIFETIME_ENV]: String(KEEPALIVE_LIFETIME_TEST_MS) }
+  let child
+  let closed = null
+  let assertionsPassed = false
+  try {
+    const startedAt = Date.now()
+    child = launchKeepaliveChild(fixture, env)
+    await waitForKeepaliveReady(fixture, child)
+    closed = await waitForKeepaliveClose(child, KEEPALIVE_EXIT_TIMEOUT_MS)
+    assert.ok(closed, 'injected keepalive did not exit naturally before the deadline')
+    assert.equal(closed.code, 0)
+    assert.equal(closed.signal, null)
+    assert.ok(Date.now() - startedAt < KEEPALIVE_EXIT_TIMEOUT_MS)
+    assertionsPassed = true
+  } finally {
+    if (!assertionsPassed && keepaliveChildRunning(child)) {
+      try { child.kill('SIGKILL') } catch {}
+      await waitForKeepaliveClose(child, KEEPALIVE_CLEANUP_TIMEOUT_MS)
+    }
+    rmSync(fixture.root, { recursive: true, force: true })
+  }
+})
+
+test('B1: a keepalive exits after its parent dies without cleanup', { timeout: 12_000 }, async () => {
+  const fixture = finalizerChildFixture()
+  const parentFixture = disposableKeepaliveParentFixture(fixture)
+  const env = { ...process.env, [KEEPALIVE_LIFETIME_ENV]: String(KEEPALIVE_LIFETIME_TEST_MS) }
+  let parent
+  let parentClosed = null
+  let childPid = null
+  let childGone = false
+  let assertionsPassed = false
+  try {
+    parent = rememberKeepaliveError(spawn(process.execPath, [parentFixture.parentScript], {
+      env, stdio: ['ignore', 'ignore', 'ignore'],
+    }))
+    parentClosed = await waitForKeepaliveClose(parent, KEEPALIVE_READY_TIMEOUT_MS + KEEPALIVE_EXIT_TIMEOUT_MS)
+    assert.ok(parentClosed, 'disposable parent did not exit before the deadline')
+    assert.equal(parent._keepaliveError, null)
+    assert.equal(parentClosed.code, 0)
+    assert.equal(parentClosed.signal, null)
+    childPid = readKeepalivePid(parentFixture.pidPath)
+    assert.ok(childPid, 'disposable parent left an empty or invalid child PID')
+    childGone = await waitForKeepaliveProcessGone(childPid, KEEPALIVE_EXIT_TIMEOUT_MS)
+    assert.equal(childGone, true, `recorded child PID ${childPid} remained live after its parent exited`)
+    assertionsPassed = true
+  } finally {
+    if (!assertionsPassed) {
+      if (keepaliveChildRunning(parent)) {
+        try { parent.kill('SIGKILL') } catch {}
+        await waitForKeepaliveClose(parent, KEEPALIVE_CLEANUP_TIMEOUT_MS)
+      }
+      if (childPid && probeKeepaliveProcess(childPid) !== false) {
+        try { process.kill(childPid, 'SIGKILL') } catch {}
+      }
+    }
+    rmSync(fixture.root, { recursive: true, force: true })
+  }
+})
+
+test('C1: the default lifetime outlasts normal fixture observation', { timeout: 10_000 }, async () => {
+  const fixture = finalizerChildFixture()
+  const env = { ...process.env }
+  delete env[KEEPALIVE_LIFETIME_ENV]
+  let child
+  let assertionsPassed = false
+  try {
+    child = launchKeepaliveChild(fixture, env)
+    await waitForKeepaliveReady(fixture, child)
+    const deadline = Date.now() + KEEPALIVE_OBSERVATION_WINDOW_MS
+    let observations = 0
+    while (Date.now() < deadline) {
+      assert.equal(child._keepaliveError, null)
+      assert.equal(child.exitCode, null)
+      assert.equal(child.signalCode, null)
+      observations += 1
+      await new Promise((resolve) => setTimeout(resolve, KEEPALIVE_POLL_MS))
+    }
+    assert.ok(observations > 0)
+    assert.equal(child.kill('SIGTERM'), true)
+    const closed = await waitForKeepaliveClose(child, KEEPALIVE_CLEANUP_TIMEOUT_MS)
+    assert.ok(closed, 'ordinary SIGTERM cleanup did not close the child')
+    assert.equal(closed.code, 143)
+    assert.equal(closed.signal, null)
+    assertionsPassed = true
+  } finally {
+    if (!assertionsPassed && keepaliveChildRunning(child)) {
+      try { child.kill('SIGKILL') } catch {}
+      await waitForKeepaliveClose(child, KEEPALIVE_CLEANUP_TIMEOUT_MS)
+    }
+    rmSync(fixture.root, { recursive: true, force: true })
+  }
+})
+
+test('D1: all five generated keepalive sites use the same self-exit bound', () => {
+  const sources = [
+    ['./crew.test.mjs', 3],
+    ['./headless-rpc.test.mjs', 1],
+    ['./daemon.test.mjs', 1],
+  ]
+  const defaultDeclaration = 'const KEEPALIVE_LIFETIME_DEFAULT_MS = 300_000'
+  const envDeclaration = `const KEEPALIVE_LIFETIME_ENV = '${KEEPALIVE_LIFETIME_ENV}'`
+  for (const [file, expectedCount] of sources) {
+    const source = readKeepaliveSource(file).replaceAll(String.raw`\n`, '\n')
+    const lines = source.split('\n').map((line) => line.trim())
+    assert.equal(lines.filter((line) => line === defaultDeclaration).length, 1, `${file} must declare the shared default once`)
+    assert.equal(lines.filter((line) => line === envDeclaration).length, 1, `${file} must declare the shared environment name once`)
+    const intervalIndexes = lines.flatMap((line, index) => line.includes(KEEPALIVE_INTERVAL) ? [index] : [])
+    assert.equal(intervalIndexes.length, expectedCount, `${file} must contain exactly its in-scope keepalive sites`)
+    for (const index of intervalIndexes) {
+      assert.ok(lines[index - 1]?.includes(KEEPALIVE_TIMER_STATEMENT), `${file}:${index + 1} must put the shared timer directly before its keepalive`)
+    }
+  }
+})
+
+test('E1: the existing parent finally cleanup still collects a live child', { timeout: 10_000 }, async () => {
+  const fixture = finalizerChildFixture()
+  const env = { ...process.env }
+  delete env[KEEPALIVE_LIFETIME_ENV]
+  const cleanup = { delivered: null, closed: null }
+  let child
+  let forcedError = null
+  let assertionsPassed = false
+  try {
+    try {
+      child = launchKeepaliveChild(fixture, env)
+      await waitForKeepaliveReady(fixture, child)
+      throw new Error('force parent finally cleanup')
+    } catch (error) {
+      forcedError = error
+    } finally {
+      if (child) {
+        const cleanupDelivered = child.kill('SIGKILL')
+        cleanup.delivered = cleanupDelivered
+        cleanup.closed = await waitForKeepaliveClose(child, KEEPALIVE_CLEANUP_TIMEOUT_MS)
+      }
+    }
+    assert.equal(forcedError?.message, 'force parent finally cleanup')
+    assert.equal(cleanup.delivered, true)
+    assert.ok(cleanup.closed, 'parent finally cleanup did not close the child before its deadline')
+    assert.equal(cleanup.closed.signal, 'SIGKILL')
+    assertionsPassed = true
+  } finally {
+    if (!assertionsPassed && keepaliveChildRunning(child)) {
+      try { child.kill('SIGKILL') } catch {}
+      await waitForKeepaliveClose(child, KEEPALIVE_CLEANUP_TIMEOUT_MS)
+    }
+    rmSync(fixture.root, { recursive: true, force: true })
+  }
+})
 
 test('the settle path writes the envelope before its teardown and only once', () => {
   const f = childSignalFixture()
@@ -3203,7 +3471,7 @@ test('installExitMarker writes one terminal line for normal, signal and uncaught
 test('a real SIGTERM leaves exactly one exit marker on a child stdout', async () => {
   const root = scratchDir('crew-exit-marker-')
   const script = join(root, 'marker-child.mjs')
-  writeFileSync(script, `import { installExitMarker } from ${JSON.stringify(new URL('./crew.mjs', import.meta.url).href)}\ninstallExitMarker()\nprocess.stderr.write('ready\\n')\nsetInterval(() => {}, 1000)\n`)
+  writeFileSync(script, `import { installExitMarker } from ${JSON.stringify(new URL('./crew.mjs', import.meta.url).href)}\ninstallExitMarker()\nprocess.stderr.write('ready\\n')\nsetTimeout(() => process.exit(0), Number(process.env.CREW_TEST_KEEPALIVE_LIFETIME_MS || ${KEEPALIVE_LIFETIME_DEFAULT_MS}))\nsetInterval(() => {}, 1000)\n`)
   let child
   let output = ''
   try {
@@ -3410,6 +3678,7 @@ mkdirSync(join(crewDir, 'ledger'), { recursive: true })
 writeFileSync(join(crewDir, 'ledger', 'run.json'), JSON.stringify({ adw_id: adwId, db_path: dbPath }))
 process.on('SIGTERM', () => process.exit(0))   // cooperative: the finalizer runs first
 writeFileSync(readyPath, 'ready\\n')
+setTimeout(() => process.exit(0), Number(process.env.CREW_TEST_KEEPALIVE_LIFETIME_MS || ${KEEPALIVE_LIFETIME_DEFAULT_MS}))
 setInterval(() => {}, 1000)
 `)
   } else {

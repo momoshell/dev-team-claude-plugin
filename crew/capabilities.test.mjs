@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { isAbsolute, join, dirname, resolve as resolvePath } from 'node:path'
 import {
   CAPABILITY_ADAPTERS, CAPABILITY_CLASSES, CAPABILITY_DELIVERY, CAPABILITY_PROBES,
-  CAPABILITY_REFUSALS, AGENT_AVAILABILITY_STATES, EMPTY_GRANTS, REGISTER_ROOT, ACP_TRANSPORT_PROFILE, assertGrantsBacked,
+  CAPABILITY_REFUSALS, AGENT_AVAILABILITY_STATES, AGENT_AVAILABILITY_REASONS, EMPTY_GRANTS, REGISTER_ROOT, ACP_TRANSPORT_PROFILE, assertGrantsBacked,
   agentAvailability, agentRegisterEntry, assertAgentProvider, assertAgentTransport, assertAgentAdapter, assertAgentRefusals,
   declaredCapabilities, effectiveCapabilities, grantsFor, loadCapabilities, probeCapability, validateRosterAgents,
   refuse, seatableLocalProviderNames, validateCapabilities, vendorRoots,
@@ -357,6 +357,52 @@ test('A1 agentAvailability reaches all four closed states', () => {
     assert.equal(result.state, state)
     assert.equal(result.reason, state)
   }
+
+  assert.deepEqual([...AGENT_AVAILABILITY_REASONS], [
+    'executable', 'proposal-stub', 'adapter-import-failed', 'discovered-unavailable',
+    'shim-not-binary', 'version-spawn-failed', 'version-interrupted',
+    'installed-unconfigured', 'transport-refused',
+  ])
+  assert.equal(Object.isFrozen(AGENT_AVAILABILITY_REASONS), true)
+  const present = { exists: () => true, which: () => '/bin/fixture', home: '/fixture-home' }
+  const evidence = (extra = {}) => agentAvailability(register, 'fixture-executable', {
+    ...present, version: { status: 0, signal: null, error: null, stdout: '' }, ...extra,
+  })
+  const cases = [
+    ['adapter import failure', { adapterLoadError: new Error('broken import') }, 'proposal-stub', 'adapter-import-failed'],
+    ['missing binary', { which: () => null }, 'discovered-unavailable', 'discovered-unavailable'],
+    ['version spawn error', { version: { status: null, signal: null, error: new Error('EPERM'), stdout: '' } }, 'discovered-unavailable', 'version-spawn-failed'],
+    ['version interruption', { version: { status: null, signal: 'SIGTERM', error: null, stdout: '' } }, 'discovered-unavailable', 'version-interrupted'],
+    ['shim is not binary', { version: { status: 1, signal: null, error: null, stdout: 'shim' } }, 'discovered-unavailable', 'shim-not-binary'],
+    ['transport refusal', { transportRefusals: [{ transport: 'pane', message: 'refused' }] }, 'installed-unconfigured', 'transport-refused'],
+  ]
+  for (const [label, extra, state, reason] of cases) {
+    const result = evidence(extra)
+    assert.equal(result.state, state, label)
+    assert.equal(result.reason, reason, label)
+    assert.equal(AGENT_AVAILABILITY_REASONS.includes(result.reason), true, label)
+  }
+  assert.equal(evidence().state, 'executable')
+  assert.equal(evidence().reason, 'executable')
+  assert.deepEqual(agentAvailability(register, 'fixture-executable'), {
+    agent: 'fixture-executable', state: 'proposal-stub', reason: 'proposal-stub',
+    display_name: 'fixture-executable', install_hint: 'Install fixture-executable.',
+  })
+  const precedence = agentAvailability(register, 'fixture-config', {
+    ...present,
+    exists: (path) => path.endsWith('adapter-fixture-config.mjs'),
+    version: { status: 2, signal: 'SIGTERM', error: new Error('spawn'), stdout: '' },
+    adapterLoadError: new Error('import'),
+    transportRefusals: [{ transport: 'pane', message: 'refused' }],
+    which: () => '/bin/fixture-config',
+  })
+  assert.deepEqual({ state: precedence.state, reason: precedence.reason }, { state: 'proposal-stub', reason: 'adapter-import-failed' })
+  const missingAdapter = agentAvailability(register, 'fixture-stub', {
+    exists: () => false,
+    adapterLoadError: new Error('import'),
+    which: () => '/bin/fixture-stub',
+  })
+  assert.deepEqual({ state: missingAdapter.state, reason: missingAdapter.reason }, { state: 'proposal-stub', reason: 'proposal-stub' })
 })
 
 test('B1 proposal stubs are legal declarations but cannot resolve for boot', () => {

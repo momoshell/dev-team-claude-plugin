@@ -301,13 +301,16 @@ test('the batch reference makes depends_on sequencing distinct from locking', ()
   assert.equal(text.includes('no two entries in one register'), false)
 })
 
-test('I1 OpenRouter owner is covered by dynamic reach census', () => {
-  const addedOwner = 'visualizer/server/openrouter-catalog.mjs'
+test('I1 OpenRouter and agent-doctor owners are covered by dynamic reach census', () => {
+  const addedOwners = ['visualizer/server/openrouter-catalog.mjs', 'scripts/factory/agent-doctor.mjs']
+  const addedTests = ['test/factory-agent-doctor.test.mjs']
   const currentReach = collectTestReach({ checkout: ROOT })
-  const currentFiles = [...new Set([...gitPaths(['ls-files', '-z']), addedOwner])]
+  const currentFiles = [...new Set([...gitPaths(['ls-files', '-z']), ...addedOwners, ...addedTests])]
   const current = reachCensus(currentFiles, currentReach)
-  const ownerTests = currentReach.pathByFile.get(addedOwner)
+  const ownerTests = currentReach.pathByFile.get(addedOwners[0])
   assert.ok(ownerTests?.has('test/visualizer-model-catalog.test.mjs'))
+  const doctorOwnerTests = currentReach.pathByFile.get(addedOwners[1])
+  assert.ok(doctorOwnerTests?.has(addedTests[0]))
   const pristineFiles = gitPaths(['ls-tree', '-r', '--name-only', '-z', 'HEAD'])
   const pristineReach = collectTestReach({
     checkout: ROOT,
@@ -328,10 +331,12 @@ test('I1 OpenRouter owner is covered by dynamic reach census', () => {
   assert.ok(pristine.owners <= pristine.nonTests)
   assert.ok(pristine.pairs >= pristine.owners)
   assert.ok(pristine.contributingTests <= pristine.tests)
-  if (!pristineFiles.includes(addedOwner)) {
-    assert.equal(pristineReach.pathByFile.has(addedOwner), false)
-    assert.ok(current.owners > pristine.owners)
-    assert.ok(current.pairs > pristine.pairs)
+  for (const addedOwner of addedOwners) {
+    if (!pristineFiles.includes(addedOwner)) {
+      assert.equal(pristineReach.pathByFile.has(addedOwner), false)
+      assert.ok(current.owners > pristine.owners)
+      assert.ok(current.pairs > pristine.pairs)
+    }
   }
   const ownerDelta = current.owners - pristine.owners
   const pairDelta = current.pairs - pristine.pairs

@@ -50,8 +50,13 @@ exactly that reason. Two decisions have collided here before. ADR numbers are
 cited from shipped code as the authority for invariants, so a citation that
 resolves to nothing is a real defect.
 
-**This plugin ships zero runtime dependencies.** `package.json` has no `dependencies` key at all; the only devDependencies are svelte/vite for the visualizer. Do not
-add one. `jq` is not available either — use `node -p` for JSON in shell recipes.
+**The runtime ships zero dependencies; the visualizer may take build-time ones.** `package.json` has no
+`dependencies` key at all and `crew/acp-client.test.mjs` refuses one: nothing under `crew/` or `scripts/`
+may import a package. `devDependencies` exist only for the visualizer, which vite bundles into `dist/`
+(svelte, vite, `@xyflow/svelte` + `@dagrejs/dagre` for the workflow graph, `codemirror` for
+prompt/JSON editing, `lucide-svelte` for icons — ratified by the operator 2026-09-15). A visualizer
+dependency is still a decision: name it in `docs/conventions.md` with the page that needs it. `jq` is
+not available either — use `node -p` for JSON in shell recipes.
 
 ## Honesty doctrine
 

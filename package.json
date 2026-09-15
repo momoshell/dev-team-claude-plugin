@@ -20,7 +20,8 @@
     "viz:build": "vite build --config visualizer/web/vite.config.mjs",
     "viz:dev": "vite --config visualizer/web/vite.config.mjs",
     "crew:watch": "node scripts/factory/crew-watch.mjs",
-    "crew:reap": "node scripts/factory/reap-stale.mjs"
+    "crew:reap": "node scripts/factory/reap-stale.mjs",
+    "agent:doctor": "node scripts/factory/agent-doctor.mjs"
   },
   "devDependencies": {
     "@codemirror/lang-json": "^6.0.2",

@@ -547,6 +547,7 @@ const RECORDED_SUITE_SAMPLES = Object.freeze([
   ["skills/qa-test-writing/anchor-pin.test.mjs",1.025599541991949,70,null],
   ["test/docs-decisions.test.mjs",0.07182912501692772,5,null],
   ["test/factory-absence.test.mjs",0.12716166600584983,5,null],
+  ["test/factory-agent-doctor.test.mjs",0.1748368330001831,5,null],
   ["test/factory-closeout.test.mjs",0.36528808400034907,54,null],
   ["test/factory-crew-watch.test.mjs",1.6785940420031547,47,null],
   ["test/factory-dispatch-batch-adoption.test.mjs",0.1012353749871254,12,null],
@@ -588,6 +589,11 @@ const RECORDED_SUITE_SAMPLES = Object.freeze([
 ])
 
 const RECORDED_SLOWEST_TESTS = Object.freeze({
+  "test/factory-agent-doctor.test.mjs": Object.freeze([
+    "A1 doctor probes every registered agent, transport, state, and closed reason",
+    "C1 default and --write modes print proposals without mutating absent or existing targets",
+    "E1 package and production import contracts contain only the doctor script addition"
+  ]),
   "crew/pi/extensions/lab.test.mjs": Object.freeze([
   "a red suite is data while a suite without TAP summary is suite-failed",
   "mutate permits an empty replacement and rejects an empty find",

@@ -17,6 +17,11 @@ export const CAPABILITY_REFUSALS = Object.freeze([
 export const AGENT_AVAILABILITY_STATES = Object.freeze([
   'executable', 'discovered-unavailable', 'installed-unconfigured', 'proposal-stub',
 ])
+export const AGENT_AVAILABILITY_REASONS = Object.freeze([
+  'executable', 'proposal-stub', 'adapter-import-failed', 'discovered-unavailable',
+  'shim-not-binary', 'version-spawn-failed', 'version-interrupted',
+  'installed-unconfigured', 'transport-refused',
+])
 const CAPABILITIES_PATH = join(HERE, 'capabilities.json')
 const CAPABILITIES_SCHEMA_PATH = join(HERE, 'capabilities.schema.json')
 export const REGISTER_ROOT = resolvePath(join(HERE, '..'))
@@ -241,11 +246,14 @@ export function pathMessage(reason, seat, kind, expected, found, path) {
   return refuse(reason, `seat ${seat} ${kind} expected ${expected}, found ${found}, at ${path}`)
 }
 
-function agentAvailabilityResult(entry, agent, state) {
+function agentAvailabilityResult(entry, agent, state, reason = state) {
+  if (!AGENT_AVAILABILITY_REASONS.includes(reason)) {
+    throw new Error(`unknown agent availability reason ${JSON.stringify(reason)}`)
+  }
   return Object.freeze({
     agent,
     state,
-    reason: state,
+    reason,
     display_name: entry.display_name,
     install_hint: entry.install_hint,
   })
@@ -277,13 +285,19 @@ export function agentAvailability(register, agent, probe = null) {
   const exists = probe?.exists ?? existsSync
   const which = probe?.which ?? null
   const adapterPath = resolvedGrantPath(REGISTER_ROOT, entry.adapter)
-  if (!pathExists(exists, adapterPath)) return agentAvailabilityResult(entry, agent, 'proposal-stub')
+  if (!pathExists(exists, adapterPath)) return agentAvailabilityResult(entry, agent, 'proposal-stub', 'proposal-stub')
+  if (probe?.adapterLoadError) return agentAvailabilityResult(entry, agent, 'proposal-stub', 'adapter-import-failed')
 
   let binary = null
   if (which !== null) {
     try { binary = which(entry.binary) } catch {}
-    if (which !== null && !binary) return agentAvailabilityResult(entry, agent, 'discovered-unavailable')
+    if (which !== null && !binary) return agentAvailabilityResult(entry, agent, 'discovered-unavailable', 'discovered-unavailable')
   }
+
+  const version = probe?.version ?? null
+  if (version?.error) return agentAvailabilityResult(entry, agent, 'discovered-unavailable', 'version-spawn-failed')
+  if (version && version.status === null && version.signal) return agentAvailabilityResult(entry, agent, 'discovered-unavailable', 'version-interrupted')
+  if (version && version.status !== 0) return agentAvailabilityResult(entry, agent, 'discovered-unavailable', 'shim-not-binary')
 
   if (which !== null && Array.isArray(entry.config) && entry.config.length) {
     const home = typeof probe?.home === 'string' ? probe.home : ''
@@ -291,10 +305,11 @@ export function agentAvailability(register, agent, probe = null) {
       const candidate = configPath.startsWith('~/') ? join(home, configPath.slice(2)) : configPath
       return pathExists(exists, candidate)
     })
-    if (!configured) return agentAvailabilityResult(entry, agent, 'installed-unconfigured')
+    if (!configured) return agentAvailabilityResult(entry, agent, 'installed-unconfigured', 'installed-unconfigured')
   }
 
-  return agentAvailabilityResult(entry, agent, 'executable')
+  if (probe?.transportRefusals?.length) return agentAvailabilityResult(entry, agent, 'installed-unconfigured', 'transport-refused')
+  return agentAvailabilityResult(entry, agent, 'executable', 'executable')
 }
 
 export function agentRegisterEntry(register, agent, { role = 'unknown', probe } = {}) {

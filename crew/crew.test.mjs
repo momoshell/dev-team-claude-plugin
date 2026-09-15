@@ -24,7 +24,7 @@ import {
   effectiveTools, persistedAdapters, GRANT_SNAPSHOT_REFUSAL, ADVISOR_CONFIG_VERSION, ADVISOR_BOOT_REFUSALS, SAFE_MODEL, classifyAdvisorCell,
   advisorBootRecord, advisorJournalRecord, advisorEndpointOrigin, assertAdvisorCellLive,
   advisorManifest, assertAdvisorManifest, packageSuite, SUITE_OWNER_PATH, SUITE_REFUSAL,
-  PANE_TURN_CEILING_UNMEASURED, paneTurnCeilingRefusals, resumeCmd, validateResumeState, RESUME_REFUSALS, RESUME_REFUSAL_NAMES, refuseResume,
+  PANE_TURN_CEILING_UNMEASURED, paneTurnCeilingRefusals, resumeCmd, validateResumeState, RESUME_REFUSALS, RESUME_REFUSAL_NAMES, refuseResume, reviewIdentityFromArgs,
 } from './crew.mjs'
 import {
   runChild, specExecution, resolveValidationLane as resolveChildValidationLane,
@@ -1790,6 +1790,24 @@ test('run configuration flags are admitted only on their owning crew verbs', () 
   assert.doesNotThrow(() => assertUsage('run', { task: 'task', 'brief-file': 'brief.md', execution: 'scout' }))
   assert.throws(() => assertUsage('boot', { task: 'task', execution: 'scout' }), /--execution/)
   assert.throws(() => assertUsage('run', { task: 'task', 'brief-file': 'brief.md', assurance: 'standard' }), /--assurance/)
+})
+
+test('review identity requires paired lowercase 40-or-64 hexadecimal SHAs and freezes the context value', () => {
+  assert.equal(reviewIdentityFromArgs({}), null)
+  const forty = 'a'.repeat(40)
+  const sixtyFour = 'b'.repeat(64)
+  const identity = reviewIdentityFromArgs({ 'review-base-sha': forty, 'review-head-sha': sixtyFour })
+  assert.deepEqual(identity, { base_sha: forty, head_sha: sixtyFour })
+  assert.equal(Object.isFrozen(identity), true)
+  for (const args of [
+    { 'review-base-sha': forty },
+    { 'review-head-sha': sixtyFour },
+    { 'review-base-sha': 'A'.repeat(40), 'review-head-sha': sixtyFour },
+    { 'review-base-sha': 'a'.repeat(39), 'review-head-sha': sixtyFour },
+    { 'review-base-sha': forty, 'review-head-sha': 'b'.repeat(63) },
+  ]) {
+    assert.throws(() => reviewIdentityFromArgs(args), (error) => error.reason === 'invalid-review-identity')
+  }
 })
 
 test('persisted run configuration derives honest values from legacy crew records', () => {
@@ -4207,9 +4225,13 @@ test('run places explicit scope on ctx and omits it for a neutral shape', async 
       const capture = (ctx) => { seen.push(ctx); return done }
       runCmd({ task, checkout, 'brief-file': brief, variant: inherited, lane: 'lane-cmd', 'files-in-scope': 'a.mjs, a.test.mjs', keep: true }, { drive: capture })
       runCmd({ task, checkout, 'brief-file': brief, keep: true }, { drive: capture })
+      runCmd({ task, checkout, 'brief-file': brief, 'review-base-sha': 'a'.repeat(40), 'review-head-sha': 'b'.repeat(64), keep: true }, { drive: capture })
     })
     assert.deepEqual(seen[0].files_in_scope, ['a.mjs', 'a.test.mjs'])
     assert.equal(Object.prototype.hasOwnProperty.call(seen[1], 'files_in_scope'), false)
+    assert.equal(Object.prototype.hasOwnProperty.call(seen[1], 'review_identity'), false)
+    assert.deepEqual(seen[2].review_identity, { base_sha: 'a'.repeat(40), head_sha: 'b'.repeat(64) })
+    assert.equal(Object.isFrozen(seen[2].review_identity), true)
   } finally {
     if (previousLedger === undefined) delete process.env.DEVTEAM_LEDGER_DB
     else process.env.DEVTEAM_LEDGER_DB = previousLedger

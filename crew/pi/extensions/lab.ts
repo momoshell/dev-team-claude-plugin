@@ -101,6 +101,7 @@ export const LAB_REFUSALS = Object.freeze([
   'path-escapes-scratch', 'file-missing',
   'find-absent', 'find-equals-replace', 'op-args-invalid',
   'op-timeout', 'op-oversize', 'unknown-op',
+  'skill-grant-invalid', 'op-ungranted',
   'child-denied', 'child-timeout', 'child-unreaped', 'child-failed', 'net-unenforceable',
   'suite-failed', 'output-oversize',
 ])
@@ -128,6 +129,9 @@ export const LAB_PARAMS = {
     program: {
       description: 'A seat-authored program using scratchCheckout, read, grep, mutate and runSuite against a clone of the committed HEAD. runSuite is the declared host authority carve-out: its suite child runs with host authority after mutate().',
     },
+    skill: {
+      description: 'Optional repo-relative skill identity in the form skills/<name>; its grants.json restricts lab operations.',
+    },
   },
 }
 
@@ -144,6 +148,49 @@ function isRefusal(value: any): boolean {
 function errorRefusal(error: any, fallback = 'child-failed'): string {
   if (isRefusal(error?.labRefusal)) return error.labRefusal
   return fallback
+}
+
+function isClosedSkillGrantShape(value: any, keys: string[]): boolean {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    && Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key))
+}
+
+function isValidSkillLabGrant(value: any): boolean {
+  if (!isClosedSkillGrantShape(value, ['schema_version', 'lab'])) return false
+  if (value.schema_version !== 1 || !isClosedSkillGrantShape(value.lab, ['ops', 'host_authority'])) return false
+  const ops = value.lab.ops
+  const hostAuthority = value.lab.host_authority
+  if (!Array.isArray(ops) || !Array.isArray(hostAuthority) || ops.some((op: any) => typeof op !== 'string') || hostAuthority.some((authority: any) => typeof authority !== 'string')) return false
+  if (new Set(hostAuthority).size !== hostAuthority.length) return false
+  for (const op of ops) {
+    if (!LAB_API.includes(op)) throw refusalError('skill-grant-invalid', 'skill grant names an unknown operation')
+  }
+  if (new Set(ops).size !== ops.length) throw refusalError('skill-grant-invalid', 'skill grant names duplicate operations')
+  if (hostAuthority.some((authority: string) => authority !== 'runSuite')) return false
+  if (ops.some((op) => op !== 'scratchCheckout') && !ops.includes('scratchCheckout')) throw refusalError('skill-grant-invalid', 'scratchCheckout is required by every other operation')
+  if (hostAuthority.includes('runSuite') && !ops.includes('runSuite')) throw refusalError('skill-grant-invalid', 'runSuite host authority requires the operation grant')
+  if (ops.includes('runSuite') && !hostAuthority.includes('runSuite')) throw refusalError('skill-grant-invalid', 'runSuite requires host authority')
+  return true
+}
+
+export function loadSkillLabGrant(skillDir: string, deps: any = {}): any {
+  const readFile = deps?.readFile || deps?.readFileSync || readFileSync
+  try {
+    if (typeof skillDir !== 'string' || !skillDir) throw refusalError('skill-grant-invalid', 'skill grant declaration is invalid')
+    const parsed = JSON.parse(String(readFile(join(skillDir, 'grants.json'), 'utf8')))
+    if (!isValidSkillLabGrant(parsed)) throw refusalError('skill-grant-invalid', 'skill grant declaration is invalid')
+    return Object.freeze({
+      ops: Object.freeze([...parsed.lab.ops]),
+      host_authority: Object.freeze([...parsed.lab.host_authority]),
+    })
+  } catch (error: any) {
+    if (error?.labRefusal === 'skill-grant-invalid') throw error
+    throw refusalError('skill-grant-invalid', 'skill grant declaration is invalid')
+  }
+}
+
+function isCanonicalSkillIdentity(value: any): boolean {
+  return typeof value === 'string' && /^skills\/[a-z0-9][a-z0-9-]*$/.test(value)
 }
 
 export function containsScratch(scratchReal: string, candidateReal: string): boolean {
@@ -834,6 +881,7 @@ export function createLabTool(deps: any = {}) {
       let hostAuthority = false
       let outcome = 'refused'
       let refused: string | null = null
+      let grant: any = null
       let denial: any = null
       let audit: any = null
       let resultValue: any = null
@@ -874,6 +922,12 @@ export function createLabTool(deps: any = {}) {
       if (!cwd.startsWith('/') || !isDirectory(cwd)) return refuseEarly('cwd-invalid')
       if (typeof program !== 'string' || !program.length) return refuseEarly('program-invalid')
       if (Buffer.byteLength(program, 'utf8') > LAB_PROGRAM_CAP_BYTES) return refuseEarly('program-oversize')
+      const skill = params?.skill
+      if (skill !== undefined) {
+        if (!isCanonicalSkillIdentity(skill)) return refuseEarly('skill-grant-invalid')
+        try { grant = loadSkillLabGrant(join(cwd, skill), { readFile }) }
+        catch { return refuseEarly('skill-grant-invalid') }
+      }
 
       const childEnv = { ...env }
       delete childEnv.NODE_OPTIONS
@@ -894,6 +948,7 @@ export function createLabTool(deps: any = {}) {
         const op = frame.op
         ops.push(op)
         if (!LAB_API.includes(op)) throw refusalError('unknown-op', 'unknown lab operation')
+        if (grant && !grant.ops.includes(op)) throw refusalError('op-ungranted', 'lab operation is not granted to this skill')
         const args = Array.isArray(frame.args) ? frame.args : null
         if (!args) throw refusalError('op-args-invalid', 'operation arguments are invalid')
         if (op === 'scratchCheckout') {

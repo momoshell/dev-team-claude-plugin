@@ -19,6 +19,8 @@ The store creates these sibling directories:
 <dir>/locks/...
 ```
 
+Verified successful lock acquisition best-effort retires strictly lower epochs, retains the current maximum as the `linkSync` exclusion primitive, and may temporarily retain old epochs after cleanup failure without affecting lock correctness.
+
 A park record has exactly these twelve top-level keys:
 
 ```js

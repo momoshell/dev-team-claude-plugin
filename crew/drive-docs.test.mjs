@@ -12,7 +12,7 @@ import { after } from 'node:test'
 import { tmpdir } from 'node:os'
 import {
   documentDiffImages, documentDeclarations, documentChangedDeclarations, documentTrigger,
-  documentStagePlan, documentEntry, runDocumentationDecision, DOCUMENT_APPEND_TARGET, driveTask, REVIEWED_CORE_STAGES, SHAPE_MAJOR_PHASES,
+  documentStagePlan, documentEntry, runDocumentationDecision, DOCUMENT_APPEND_TARGET, DOCUMENT_BATCH_TARGET, DOCUMENT_FLAGS_TARGET, DOCUMENT_LIFECYCLE_ENTRY, driveTask, REVIEWED_CORE_STAGES, SHAPE_MAJOR_PHASES,
   VARIANTS,
 } from './drive.mjs'
 import { convergeIo, convergeRun, runPublished, CONVERGE_CTX, CTX, planEnv, publicationIo } from './drive-fixtures.mjs'
@@ -500,8 +500,8 @@ const DOCUMENT_DIFF = [
 ].join('\n')
 
 const DOCUMENT_ENTRIES = [
-  { surface: 'lifecycle-stages', source: 'src/lifecycle.mjs', target: 'skills/crew-dispatch/references/batch.md', entry: '9. Run the `document` stage after `commit` and before `publish`.' },
-  { surface: 'cli-flags', source: 'src/cli.mjs', target: 'skills/crew-dispatch/references/flags.md', entry: '{"run":["new-flag"]}' },
+  { surface: 'lifecycle-stages', source: 'src/lifecycle.mjs', target: 'skills/crew-dispatch/references/batch.md', entry: 'Run the `document` stage after `commit` and before `publish`.' },
+  { surface: 'cli-flags', source: 'src/cli.mjs', target: 'skills/crew-dispatch/references/flags.md', entry: '"run": ["new-flag"]' },
   { surface: 'closed-refusals', source: 'src/refusals.mjs', target: 'docs/conventions.md', entry: '- **2026-09-14** — Added closed refusal `NEW_REFUSAL` from `src/refusals.mjs`. *Why:* The lane changed the closed-refusals documented surface.' },
   { surface: 'ratified-posture', source: 'src/policy.mjs', target: 'docs/conventions.md', entry: '- **2026-09-14** — Ratified posture `new-posture` from `src/policy.mjs`. *Why:* The lane changed the ratified-posture documented surface.' },
 ]
@@ -516,7 +516,7 @@ test('B1-B6/C1 recognize closed declarations and reject generic options', () => 
   assert.deepEqual(documentStagePlan({ diff: DOCUMENT_DIFF }, { date: '2026-09-14' }), { triggered: true, readable: true, entries: DOCUMENT_ENTRIES })
   const dispatch = "diff --git a/scripts/factory/dispatch-batch.mjs b/scripts/factory/dispatch-batch.mjs\n--- a/scripts/factory/dispatch-batch.mjs\n+++ b/scripts/factory/dispatch-batch.mjs\n@@ -1,3 +1,4 @@\n const valueFlags = new Set([\n   'batch',\n+  'new-batch-flag',\n ])"
   assert.deepEqual(documentStagePlan(dispatch, { date: '2026-09-14' }).entries, [
-    { surface: 'cli-flags', source: 'scripts/factory/dispatch-batch.mjs', target: 'skills/crew-dispatch/references/flags.md', entry: '- Value flags: add `--new-batch-flag`.' },
+    { surface: 'cli-flags', source: 'scripts/factory/dispatch-batch.mjs', target: 'skills/crew-dispatch/references/flags.md', entry: '- Value flags: `--new-batch-flag`.' }
   ])
   const options = "diff --git a/src/runtime.mjs b/src/runtime.mjs\n--- a/src/runtime.mjs\n+++ b/src/runtime.mjs\n@@ -1,3 +1,3 @@\n const options = {\n-  checkout: 'old',\n+  checkout: 'new',\n }"
   assert.deepEqual(documentStagePlan(options), { triggered: false, readable: true, entries: [] })
@@ -550,7 +550,33 @@ test('RV1-1 preserves existing refusals after apostrophe comments', () => {
 
 const DOCUMENT_CHECKOUT = '/tmp/document-author-checkout'
 const DOCUMENT_TARGET_PATH = `${DOCUMENT_CHECKOUT}/${DOCUMENT_APPEND_TARGET}`
+const DOCUMENT_BATCH_PATH = `${DOCUMENT_CHECKOUT}/skills/crew-dispatch/references/batch.md`
+const DOCUMENT_FLAGS_PATH = `${DOCUMENT_CHECKOUT}/skills/crew-dispatch/references/flags.md`
+const DOCUMENT_MANIFEST_PATH = `${DOCUMENT_CHECKOUT}/skills/crew-dispatch/anchors.json`
 const DOCUMENT_BASE = '# Conventions fixture\n\n## Format\n\nformat-marker\n\n## Entries\n\n- **2026-01-01** — Existing entry. *Why:* fixture.\n'
+const DOCUMENT_BATCH_BASE = [
+  '# Batch fixture', '',
+  '1. First step.',
+  '2. Second step.',
+  '4. Final step.',
+  '  indented continuation survives.',
+  '',
+  'Parallel prose remains after the procedure.', '',
+].join('\n')
+const DOCUMENT_FLAGS_BASE = [
+  '# Flags fixture', '',
+  '```json',
+  '{',
+  '  "boot": ["boot-old"],',
+  '  "run":  ["run-old"]',
+  '}',
+  '```', '',
+  '## Batch dispatch: the dispatch-batch flag family', '',
+  '- Value flags: `--old-value`.',
+  '- Boolean flags: `--old-boolean`.',
+  '- Repeatable: `--old-repeatable`.',
+  '- Prefix-matched per-seat forms: `--agent-<role>`.', '',
+].join('\n')
 const DOCUMENT_REFUSAL_DIFF = [
   'diff --git a/src/refusals.mjs b/src/refusals.mjs',
   '--- a/src/refusals.mjs',
@@ -561,21 +587,41 @@ const DOCUMENT_REFUSAL_DIFF = [
   '+ NEW_REFUSAL,',
   ' ])',
 ].join('\n')
+const DOCUMENT_STRUCTURAL_DIFF = [
+  "diff --git a/src/lifecycle.mjs b/src/lifecycle.mjs\n--- a/src/lifecycle.mjs\n+++ b/src/lifecycle.mjs\n@@ -1,4 +1,5 @@\n export const STAGES = Object.freeze([\n   'commit',\n+  'document',\n   'publish',\n ])",
+  "diff --git a/src/cli.mjs b/src/cli.mjs\n--- a/src/cli.mjs\n+++ b/src/cli.mjs\n@@ -1,3 +1,3 @@\n const KNOWN_FLAGS = Object.freeze({\n-  run: ['old-flag'],\n+  run: ['old-flag', 'new-flag'],\n })",
+  "diff --git a/scripts/factory/dispatch-batch.mjs b/scripts/factory/dispatch-batch.mjs\n--- a/scripts/factory/dispatch-batch.mjs\n+++ b/scripts/factory/dispatch-batch.mjs\n@@ -1,3 +1,4 @@\n const valueFlags = new Set([\n   'old-value',\n+  'new-value',\n ])",
+].join('\n')
+const DOCUMENT_LIFECYCLE_DIFF = DOCUMENT_STRUCTURAL_DIFF.split('\ndiff --git ')[0]
+const DOCUMENT_KNOWN_FLAGS_DIFF = [
+  "diff --git a/src/cli.mjs b/src/cli.mjs\n--- a/src/cli.mjs\n+++ b/src/cli.mjs\n@@ -1,3 +1,3 @@\n const KNOWN_FLAGS = Object.freeze({\n-  run: ['old-flag'],\n+  run: ['old-flag', 'new-flag'],\n })",
+].join('\n')
+const DOCUMENT_DISPATCH_DIFF = [
+  "diff --git a/scripts/factory/dispatch-batch.mjs b/scripts/factory/dispatch-batch.mjs\n--- a/scripts/factory/dispatch-batch.mjs\n+++ b/scripts/factory/dispatch-batch.mjs\n@@ -1,3 +1,4 @@\n const valueFlags = new Set([\n   'old-value',\n+  'new-value',\n ])",
+].join('\n')
+const DOCUMENT_BOOLEAN_DIFF = "diff --git a/scripts/factory/dispatch-batch.mjs b/scripts/factory/dispatch-batch.mjs\n--- a/scripts/factory/dispatch-batch.mjs\n+++ b/scripts/factory/dispatch-batch.mjs\n@@ -1,3 +1,4 @@\n const booleanFlags = new Set([\n   'old-boolean',\n+  'new-boolean',\n ])"
+const DOCUMENT_ABSENT_GROUP_DIFF = "diff --git a/src/cli.mjs b/src/cli.mjs\n--- a/src/cli.mjs\n+++ b/src/cli.mjs\n@@ -1,4 +1,5 @@\n const KNOWN_FLAGS = Object.freeze({\n   'boot': ['boot-old'],\n+  admin: ['admin-new'],\n   'run': ['run-old'],\n })"
 
-function documentationIo({ diff = DOCUMENT_DIFF, targetText = DOCUMENT_BASE, fence = () => true, changed = [], repair = { ok: true, output: '' }, commitIds = ['author-1'] } = {}) {
-  const files = new Map([[DOCUMENT_TARGET_PATH, targetText]])
+function documentationIo({ diff = DOCUMENT_DIFF, targetText = DOCUMENT_BASE, targetTexts = {}, fence = () => true, changed = [], repair = { ok: true, output: '' }, commitIds = ['author-1'] } = {}) {
+  const files = new Map([
+    [DOCUMENT_TARGET_PATH, targetText],
+    [DOCUMENT_BATCH_PATH, DOCUMENT_BATCH_BASE],
+    [DOCUMENT_FLAGS_PATH, DOCUMENT_FLAGS_BASE],
+  ])
+  const targetPath = (path) => path.startsWith('/') ? path : `${DOCUMENT_CHECKOUT}/${path}`
+  for (const [path, text] of Object.entries(targetTexts)) files.set(targetPath(path), text)
   const changedSet = new Set(changed)
   const writes = [], commits = [], reads = [], runs = [], events = [], anchorCommands = []
   let changedReads = 0
-  return {
-    files, writes, commits, reads, runs, events, anchorCommands,
+  const io = {
+    files, changedSet, writes, commits, reads, runs, events, anchorCommands,
     get changedReads() { return changedReads },
     run(command) {
       runs.push(command); events.push({ type: 'run', command })
       if (command.startsWith('git diff --binary --no-ext-diff ')) return { ok: true, output: diff }
       if (command.startsWith('node skills/qa-test-writing/anchor-pin.mjs --repair ')) {
         anchorCommands.push(command)
-        return typeof repair === 'function' ? repair(command) : repair
+        return typeof repair === 'function' ? repair(command, io) : repair
       }
       return { ok: true, output: '' }
     },
@@ -585,7 +631,8 @@ function documentationIo({ diff = DOCUMENT_DIFF, targetText = DOCUMENT_BASE, fen
     },
     writeFile(path, content) {
       writes.push({ path, content }); events.push({ type: 'write', path, content })
-      files.set(path, content); changedSet.add(path === DOCUMENT_TARGET_PATH ? DOCUMENT_APPEND_TARGET : path)
+      files.set(path, content)
+      changedSet.add(path.startsWith(`${DOCUMENT_CHECKOUT}/`) ? path.slice(`${DOCUMENT_CHECKOUT}/`.length) : path)
     },
     changedFiles() {
       changedReads += 1
@@ -598,6 +645,7 @@ function documentationIo({ diff = DOCUMENT_DIFF, targetText = DOCUMENT_BASE, fen
     },
     inScope: fence,
   }
+  return io
 }
 
 const documentationDecision = (io, over = {}) => runDocumentationDecision({
@@ -605,34 +653,37 @@ const documentationDecision = (io, over = {}) => runDocumentationDecision({
   commit: over.commit || 'head2222', inScope: io.inScope, io,
 })
 
-function decorateDriverDocumentationIo(io, { targetText = DOCUMENT_BASE, targetPath = DOCUMENT_TARGET_PATH, changed = [], commitIds = ['code-1', 'author-1'] } = {}) {
-  const files = new Map([[targetPath, targetText]])
+function decorateDriverDocumentationIo(io, { targetText = DOCUMENT_BASE, targetPath = null, targetTexts = {}, changed = [], commitIds = ['code-1', 'author-1'], repair = null } = {}) {
+  const root = io.state?.checkout || '/tmp/repo'
+  const paths = {
+    [DOCUMENT_APPEND_TARGET]: targetPath || `${root}/${DOCUMENT_APPEND_TARGET}`,
+    [DOCUMENT_BATCH_TARGET]: `${root}/${DOCUMENT_BATCH_TARGET}`,
+    [DOCUMENT_FLAGS_TARGET]: `${root}/${DOCUMENT_FLAGS_TARGET}`,
+  }
+  const files = new Map([[paths[DOCUMENT_APPEND_TARGET], targetText]])
+  for (const [target, text] of Object.entries(targetTexts)) files.set(paths[target] || target, text)
   const originalRead = io.readFile.bind(io)
   const originalWrite = io.writeFile.bind(io)
   const originalRun = io.run.bind(io)
   const originalChanged = io.changedFiles.bind(io)
   const originalCommit = io.commit.bind(io)
   const events = []
-  let targetWritten = false
-  io.readFile = (path) => {
-    if (path === targetPath) return files.get(path) ?? null
-    return originalRead(path)
-  }
+  const changedDocs = new Set()
+  const relativeDocPath = (path) => path.startsWith(`${io.state?.checkout || '/tmp/repo'}/`) ? path.slice(`${io.state?.checkout || '/tmp/repo'}/`.length) : path
+  io.readFile = (path) => files.has(path) ? files.get(path) : originalRead(path)
   io.writeFile = (path, content) => {
-    if (path === targetPath) { targetWritten = true; files.set(path, content); events.push({ type: 'write', path, content }) }
+    if (files.has(path)) { files.set(path, content); changedDocs.add(relativeDocPath(path)); events.push({ type: 'write', path, content }) }
     return originalWrite(path, content)
   }
   io.run = (command) => {
     if (command.startsWith('node skills/qa-test-writing/anchor-pin.mjs --repair ')) {
       events.push({ type: 'repair', command })
+      if (typeof repair === 'function') return repair(command, { files, changedDocs, events })
       return { ok: true, output: '' }
     }
     return originalRun(command)
   }
-  io.changedFiles = () => {
-    const base = [...(changed.length > 0 ? changed : originalChanged())]
-    return targetWritten ? [...new Set([...base, targetPath.replace(`${io.state?.checkout || '/tmp/repo'}/`, '')])] : base
-  }
+  io.changedFiles = () => [...new Set([...(changed.length > 0 ? changed : originalChanged()), ...changedDocs])]
   io.commit = (filesForCommit, message) => {
     const result = originalCommit(filesForCommit, message)
     const commit = commitIds.shift() ?? null
@@ -739,14 +790,16 @@ test('F1 document author preserves unreadable residual bytes and writes nothing'
   assert.equal(io.reads.includes(DOCUMENT_TARGET_PATH), false)
 })
 
-test('G1 document author leaves both structural skill targets residual and unwritten', () => {
-  const io = documentationIo()
+test('E1 structural documentation targets remain fenced residuals', () => {
+  const io = documentationIo({ fence: (target) => target === DOCUMENT_APPEND_TARGET })
   const result = documentationDecision(io)
   assert.deepEqual(result.documentation?.plan, DOCUMENT_ENTRIES.slice(0, 2))
+  assert.equal(io.files.get(DOCUMENT_BATCH_PATH), DOCUMENT_BATCH_BASE)
+  assert.equal(io.files.get(DOCUMENT_FLAGS_PATH), DOCUMENT_FLAGS_BASE)
   assert.equal(io.writes.length, 1)
   assert.deepEqual(io.writes.map(({ path }) => path), [DOCUMENT_TARGET_PATH])
-  assert.equal(io.reads.some((path) => path.endsWith('skills/crew-dispatch/references/batch.md')), false)
-  assert.equal(io.reads.some((path) => path.endsWith('skills/crew-dispatch/references/flags.md')), false)
+  assert.equal(io.reads.includes(DOCUMENT_BATCH_PATH), false)
+  assert.equal(io.reads.includes(DOCUMENT_FLAGS_PATH), false)
 })
 
 test('H1 both driver paths retain residuals beside an authored entry', () => {
@@ -792,4 +845,163 @@ test('J1 document journaling is marker-only', () => {
   const run = runPublished({ documentDiff: '' })
   const markers = run.io.calls.logs.filter((row) => row.stage === 'document' || row.stage_done === 'document')
   assert.deepEqual(markers.map((row) => Object.keys(row).filter((key) => key !== 'at')), [['stage', 'channel'], ['stage_done', 'channel']])
+})
+
+test('A1 structural batch insertion derives the next number', () => {
+  const io = documentationIo({ diff: DOCUMENT_LIFECYCLE_DIFF, targetTexts: { [DOCUMENT_BATCH_TARGET]: DOCUMENT_BATCH_BASE } })
+  const result = documentationDecision(io)
+  const authored = io.files.get(DOCUMENT_BATCH_PATH)
+  assert.equal(result.commit, 'author-1')
+  assert.match(authored, /4\. Final step\.\n  indented continuation survives\.\n5\. Run the `document` stage after `commit` and before `publish`\.\n\nParallel prose remains/)
+  assert.equal(io.reads.filter((path) => path === DOCUMENT_BATCH_PATH).length, 1)
+  assert.equal(io.writes.length, 1)
+  assert.equal(io.anchorCommands.length, 1)
+  assert.match(io.anchorCommands[0], /--repair skills\/crew-dispatch/)
+})
+
+test('B1 structural flag insertion extends the existing labelled line', () => {
+  const io = documentationIo({ diff: DOCUMENT_DISPATCH_DIFF, targetTexts: { [DOCUMENT_FLAGS_TARGET]: DOCUMENT_FLAGS_BASE } })
+  documentationDecision(io)
+  const authored = io.files.get(DOCUMENT_FLAGS_PATH)
+  assert.match(authored, /- Value flags: `--old-value --new-value`\./)
+  assert.equal(authored.split('- Value flags:').length - 1, 1)
+  assert.equal(io.writes.length, 1)
+})
+
+test('B2 structural KNOWN_FLAGS insertion extends the existing JSON array', () => {
+  const io = documentationIo({ diff: DOCUMENT_KNOWN_FLAGS_DIFF, targetTexts: { [DOCUMENT_FLAGS_TARGET]: DOCUMENT_FLAGS_BASE } })
+  documentationDecision(io)
+  const authored = io.files.get(DOCUMENT_FLAGS_PATH)
+  assert.match(authored, /  "run":  \["run-old", "new-flag"\]/)
+  assert.equal(authored.split('"new-flag"').length - 1, 1)
+  assert.equal(authored.includes('"run": ["new-flag"]'), false)
+})
+
+test('C1 structural flag insertion creates a genuinely absent labelled line', () => {
+  const targetText = DOCUMENT_FLAGS_BASE.replace('- Boolean flags: `--old-boolean`.\n', '')
+  const io = documentationIo({ diff: DOCUMENT_BOOLEAN_DIFF, targetTexts: { [DOCUMENT_FLAGS_TARGET]: targetText } })
+  documentationDecision(io)
+  const authored = io.files.get(DOCUMENT_FLAGS_PATH)
+  assert.ok(authored.indexOf('- Value flags:') < authored.indexOf('- Boolean flags: `--new-boolean`.'))
+  assert.ok(authored.indexOf('- Boolean flags: `--new-boolean`.') < authored.indexOf('- Repeatable:'))
+  assert.equal(authored.split('- Boolean flags:').length - 1, 1)
+})
+
+test('C2 structural KNOWN_FLAGS insertion creates an absent JSON property', () => {
+  const io = documentationIo({ diff: DOCUMENT_ABSENT_GROUP_DIFF, targetTexts: { [DOCUMENT_FLAGS_TARGET]: DOCUMENT_FLAGS_BASE } })
+  documentationDecision(io)
+  const authored = io.files.get(DOCUMENT_FLAGS_PATH)
+  assert.match(authored, /  "run":  \["run-old"\],\n  "admin": \["admin-new"\]\n\}/)
+  assert.equal(authored.split('"admin":').length - 1, 1)
+  assert.equal(authored.includes('- "admin":'), false)
+  const json = authored.match(/```json\n([\s\S]*?)\n```/)[1]
+  assert.deepEqual(JSON.parse(json).admin, ['admin-new'])
+})
+
+test('D1 structural documentation insertion is idempotent per target', () => {
+  const io = documentationIo({ diff: DOCUMENT_STRUCTURAL_DIFF })
+  const first = documentationDecision(io)
+  const second = documentationDecision(io, { commit: first.commit })
+  const batch = io.files.get(DOCUMENT_BATCH_PATH)
+  const flags = io.files.get(DOCUMENT_FLAGS_PATH)
+  assert.equal(first.commit, 'author-1')
+  assert.equal(second.commit, 'author-1')
+  assert.equal(io.writes.length, 2)
+  assert.equal(io.commits.length, 1)
+  assert.equal(io.anchorCommands.length, 1)
+  assert.equal(batch.split('Run the `document` stage').length - 1, 1)
+  assert.equal(batch.split(/\n\d+\. Run the `document` stage/).length - 1, 1)
+  assert.equal(flags.split('"new-flag"').length - 1, 1)
+  assert.equal(flags.split('--new-value').length - 1, 1)
+  assert.equal(flags.split('- Value flags:').length - 1, 1)
+})
+
+test('F1 conventions append behavior remains unchanged', () => {
+  const io = documentationIo({ diff: DOCUMENT_REFUSAL_DIFF })
+  const result = documentationDecision(io)
+  const entry = DOCUMENT_ENTRIES[2].entry
+  const command = "node skills/qa-test-writing/anchor-pin.mjs --repair skills/backend-node --root '/tmp/document-author-checkout' --base 'base1111'"
+  assert.equal(result.commit, 'author-1')
+  assert.equal(io.files.get(DOCUMENT_TARGET_PATH), `${DOCUMENT_BASE}${entry}\n`)
+  assert.deepEqual(io.writes.map(({ path }) => path), [DOCUMENT_TARGET_PATH])
+  assert.deepEqual(io.anchorCommands, [command])
+  assert.deepEqual(io.commits[0], { files: [DOCUMENT_APPEND_TARGET], message: 'docs: author planned conventions entries' })
+})
+
+test('G1 untriggered documentation remains write free and commit free', () => {
+  const io = documentationIo({ diff: '' })
+  const result = documentationDecision(io, { commit: 'unchanged-1' })
+  assert.equal(result.commit, 'unchanged-1')
+  assert.equal(result.documentation, null)
+  assert.equal(io.reads.length, 0)
+  assert.equal(io.writes.length, 0)
+  assert.equal(io.changedReads, 0)
+  assert.equal(io.anchorCommands.length, 0)
+  assert.equal(io.commits.length, 0)
+})
+
+test('H1 unwritten documentation residuals still reach both driver envelopes', () => {
+  const ordinaryIo = decorateDriverDocumentationIo(publicationIo({
+    documentDiff: DOCUMENT_DIFF, changed: ['a.mjs', 'a.test.mjs'], envelopes: { 'planner:1': documentationPlan() },
+  }), { changed: ['a.mjs', 'a.test.mjs'], commitIds: ['ordinary-code', 'ordinary-docs'] })
+  const ordinary = driveTask({ ...CTX, head: 'base1111', documentDate: '2026-09-14' }, ordinaryIo)
+  assert.deepEqual(ordinary.details.documentation.plan, DOCUMENT_ENTRIES.slice(0, 2))
+
+  const convergenceIo = decorateDriverDocumentationIo(convergeIo({ documentDiff: DOCUMENT_DIFF, changed: ['a.mjs'] }), {
+    changed: ['a.mjs'], commitIds: ['converge-code', 'converge-docs'],
+  })
+  const originalWait = convergenceIo.wait.bind(convergenceIo)
+  convergenceIo.wait = (path) => {
+    const env = originalWait(path)
+    return path === 'planner:1' ? { ...env, details: { ...env.details, files_in_scope: DOCUMENT_SCOPE } } : env
+  }
+  const convergence = driveTask({ ...CONVERGE_CTX, head: 'base1111', documentDate: '2026-09-14' }, convergenceIo)
+  assert.deepEqual(convergence.details.documentation.plan, DOCUMENT_ENTRIES.slice(0, 2))
+})
+
+test('I1 KNOWN_FLAGS document entry avoids whole-object JSON', () => {
+  const entry = documentEntry({ surface: 'cli-flags', declaration: 'KNOWN_FLAGS', group: 'run', value: 'new-flag' }).entry
+  assert.equal(entry, '"run": ["new-flag"]')
+  assert.doesNotMatch(entry, /^\s*\{/) 
+  assert.doesNotMatch(entry, /--new-flag/)
+})
+
+test('I2 lifecycle document entry omits hardcoded numbering', () => {
+  const entry = documentEntry({ surface: 'lifecycle-stages', path: 'src/lifecycle.mjs' }).entry
+  assert.equal(entry, DOCUMENT_LIFECYCLE_ENTRY)
+  assert.doesNotMatch(entry, /^\d+\./)
+})
+
+test('I3 dispatch document entries omit add instructions', () => {
+  for (const [declaration, label] of [['valueFlags', 'Value'], ['booleanFlags', 'Boolean'], ['repeatableFlags', 'Repeatable']]) {
+    const entry = documentEntry({ surface: 'cli-flags', declaration, value: `new-${declaration}` }).entry
+    assert.equal(entry, `- ${label} flags: \`--new-${declaration}\`.`)
+    assert.doesNotMatch(entry, /add /)
+  }
+})
+
+test('J1 structural documentation runs one fenced crew-dispatch anchor repair', () => {
+  const command = "node skills/qa-test-writing/anchor-pin.mjs --repair skills/crew-dispatch --root '/tmp/document-author-checkout' --base 'base1111'"
+  const io = documentationIo({
+    diff: DOCUMENT_STRUCTURAL_DIFF,
+    repair: (seen, fixture) => {
+      if (seen === command) {
+        fixture.files.set(DOCUMENT_MANIFEST_PATH, '{\"repaired\":true}\n')
+        fixture.changedSet.add('skills/crew-dispatch/anchors.json')
+      }
+      return { ok: true, output: '' }
+    },
+  })
+  const result = documentationDecision(io)
+  const writeIndexes = io.events.map(({ type, path }) => type === 'write' && [DOCUMENT_BATCH_PATH, DOCUMENT_FLAGS_PATH].includes(path) ? io.events.findIndex((event) => event.type === 'write' && event.path === path) : -1).filter((index) => index >= 0)
+  const repairIndex = io.events.findIndex(({ type, command: seen }) => type === 'run' && seen === command)
+  const commitIndex = io.events.findIndex(({ type }) => type === 'commit')
+  assert.equal(result.commit, 'author-1')
+  assert.deepEqual(io.anchorCommands, [command])
+  assert.equal(io.runs.filter((seen) => seen.includes('--repair')).length, 1)
+  assert.ok(writeIndexes.every((index) => index < repairIndex))
+  assert.ok(repairIndex < commitIndex)
+  assert.equal(io.runs.some((seen) => seen.includes('skills/backend-node') || seen.includes('--repair-all')), false)
+  assert.deepEqual(io.commits[0].files, [DOCUMENT_BATCH_TARGET, DOCUMENT_FLAGS_TARGET, 'skills/crew-dispatch/anchors.json'])
+  assert.equal(io.commits[0].files.length, 3)
 })

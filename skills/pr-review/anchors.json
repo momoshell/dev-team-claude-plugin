@@ -6,12 +6,12 @@
   "crew/roles/reviewer.md:14": "2. Judge two separate questions, in order:",
   "crew/roles/reviewer.md:16": "Out-of-plan edits are findings even when harmless.",
   "crew/child.mjs:351": "The daemon's regrant hook is the sole caller that sets continuation:",
-  "crew/drive.mjs:4597": "for (const match of narration.matchAll(/[A-Za-z0-9_.-]+\\/[A-Za-z0-9_./-]+/g)) {",
   "crew/drive.mjs:2201": "export function validateScopeEntries(entries) {",
-  "crew/drive.mjs:9752": "        panelResult = runPanelReview({ round: roundNo, panel, io, dissents: S.dissents, setAcceptFindings: (value) => { S.acceptFindings = value }, setLastReview: (value) => { S.lastReview = value }, planPath, panelBriefText, panelStandingQuestion, art, stage, stageComplete, assignAndWait, carriedOpen, panelLog, panelDegraded, emit })",
-  "crew/drive.mjs:9185": "const panel = ctx.continuation === true ? panelSeats(seatList) : null",
   "crew/drive.mjs:798": "export function panelSeats(seated) {",
-  "crew/drive.mjs:5016": "function runPanelReview({ round, panel, io, dissents, setAcceptFindings, setLastReview, planPath, panelBriefText, panelStandingQuestion, art, stage, stageComplete, assignAndWait, carriedOpen, panelLog, panelDegraded, emit }) {",
-  "crew/drive.mjs:5082": "const fused = fuseFindings(findingsOf(aEnv), findingsOf(bEnv), {",
-  "crew/drive.mjs:5206": "const adjudicated = adjudicatePanel(allocatedDivergent, adjEnv.details)"
+  "crew/drive.mjs:4598": "for (const match of narration.matchAll(/[A-Za-z0-9_.-]+\\/[A-Za-z0-9_./-]+/g)) {",
+  "crew/drive.mjs:9770": "        panelResult = runPanelReview({ round: roundNo, panel, io, dissents: S.dissents, setAcceptFindings: (value) => { S.acceptFindings = value }, setLastReview: (value) => { S.lastReview = value }, planPath, panelBriefText, panelStandingQuestion, art, stage, stageComplete, assignAndWait, carriedOpen, panelLog, panelDegraded, emit })",
+  "crew/drive.mjs:9203": "const panel = ctx.continuation === true ? panelSeats(seatList) : null",
+  "crew/drive.mjs:5017": "function runPanelReview({ round, panel, io, dissents, setAcceptFindings, setLastReview, planPath, panelBriefText, panelStandingQuestion, art, stage, stageComplete, assignAndWait, carriedOpen, panelLog, panelDegraded, emit }) {",
+  "crew/drive.mjs:5083": "const fused = fuseFindings(findingsOf(aEnv), findingsOf(bEnv), {",
+  "crew/drive.mjs:5207": "const adjudicated = adjudicatePanel(allocatedDivergent, adjEnv.details)"
 }

@@ -98,10 +98,8 @@
           "pattern": "^[A-Za-z0-9._-]+$"
         },
         "agent": {
-          "enum": [
-            "claude",
-            "pi"
-          ]
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]*$"
         },
         "effort": {
           "enum": [
@@ -130,7 +128,7 @@
       "properties": {
         "provider": { "type": "string", "pattern": "^[a-z0-9-]+$" },
         "id": { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" },
-        "agent": { "enum": ["claude", "pi"] },
+        "agent": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
         "effort": { "$ref": "#/$defs/fallbackEffort" }
       }
     },

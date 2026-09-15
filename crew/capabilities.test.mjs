@@ -5,9 +5,9 @@ import { tmpdir } from 'node:os'
 import { isAbsolute, join, dirname, resolve as resolvePath } from 'node:path'
 import {
   CAPABILITY_ADAPTERS, CAPABILITY_CLASSES, CAPABILITY_DELIVERY, CAPABILITY_PROBES,
-  CAPABILITY_REFUSALS, EMPTY_GRANTS, REGISTER_ROOT, ACP_TRANSPORT_PROFILE, assertGrantsBacked,
-  agentRegisterEntry, assertAgentProvider, assertAgentTransport, assertAgentAdapter, assertAgentRefusals,
-  declaredCapabilities, effectiveCapabilities, grantsFor, loadCapabilities, probeCapability,
+  CAPABILITY_REFUSALS, AGENT_AVAILABILITY_STATES, EMPTY_GRANTS, REGISTER_ROOT, ACP_TRANSPORT_PROFILE, assertGrantsBacked,
+  agentAvailability, agentRegisterEntry, assertAgentProvider, assertAgentTransport, assertAgentAdapter, assertAgentRefusals,
+  declaredCapabilities, effectiveCapabilities, grantsFor, loadCapabilities, probeCapability, validateRosterAgents,
   refuse, seatableLocalProviderNames, validateCapabilities, vendorRoots,
 } from './capabilities.mjs'
 import { seatCommand as claudeSeatCommand, capabilitiesFor } from './adapters/adapter-claude.mjs'
@@ -52,8 +52,8 @@ function capabilityRegister(overrides = {}) {
     },
     local_providers: {},
     coding_agents: {
-      pi: { providers: ['openai', 'anthropic', 'llama-swap'], transports: ['pane', 'headless-rpc'], adapter: 'crew/adapters/adapter-pi.mjs', refuses: ['mcp_servers'] },
-      claude: { providers: ['anthropic'], transports: ['pane', 'headless-json'], adapter: 'crew/adapters/adapter-claude.mjs', refuses: ['extensions', 'skills', 'local_provider'] },
+      pi: { providers: ['openai', 'anthropic', 'llama-swap'], transports: ['pane', 'headless-rpc'], adapter: 'crew/adapters/adapter-pi.mjs', refuses: ['mcp_servers'], display_name: 'Pi', binary: 'pi', install_hint: 'Install Pi and ensure the pi binary is on PATH.' },
+      claude: { providers: ['anthropic'], transports: ['pane', 'headless-json'], adapter: 'crew/adapters/adapter-claude.mjs', refuses: ['extensions', 'skills', 'local_provider'], display_name: 'Claude Code', binary: 'claude', install_hint: 'Install Claude Code and ensure the claude binary is on PATH.' },
     },
   }
   const local_providers = { ...base.local_providers, ...(overrides.local_providers || {}) }
@@ -148,6 +148,13 @@ test('A1 coding agent register validates as a closed schema', () => {
     (value) => { value.coding_agents.pi.transports = ['unknown'] },
     (value) => { value.coding_agents.pi.refuses = ['unknown'] },
     (value) => { value.coding_agents.pi.extra = true },
+    (value) => { delete value.coding_agents.pi.display_name },
+    (value) => { delete value.coding_agents.pi.binary },
+    (value) => { delete value.coding_agents.pi.install_hint },
+    (value) => { value.coding_agents.pi.display_name = '   ' },
+    (value) => { value.coding_agents.pi.binary = 'pi --version' },
+    (value) => { value.coding_agents.pi.install_hint = '' },
+    (value) => { value.coding_agents.pi.config = ['   '] },
     (value) => { delete value.coding_agents.pi.adapter },
     (value) => { delete value.coding_agents },
   ]) {
@@ -301,6 +308,137 @@ test('E1 subagent grant agents retain their existing meaning', () => {
   const shipped = loadCapabilities()
   assert.deepEqual(shipped.roles.planner.by_agent.pi.agents, [{ name: 'scout', def: 'crew/pi/agents/scout.json' }])
   assert.deepEqual(shipped.roles.planner.by_agent.pi.agents[0], { name: 'scout', def: 'crew/pi/agents/scout.json' })
+})
+
+function availabilityFixtureAgent(name, { config, displayName = name } = {}) {
+  return {
+    providers: ['openai'],
+    transports: ['pane'],
+    adapter: `crew/adapters/adapter-${name}.mjs`,
+    refuses: [],
+    display_name: displayName,
+    binary: name,
+    install_hint: `Install ${name}.`,
+    ...(config === undefined ? {} : { config }),
+  }
+}
+
+test('A1 agentAvailability reaches all four closed states', () => {
+  const register = loadCapabilities({ register: capabilityRegister({ coding_agents: {
+    'fixture-stub': availabilityFixtureAgent('fixture-stub'),
+    'fixture-binary': availabilityFixtureAgent('fixture-binary'),
+    'fixture-config': availabilityFixtureAgent('fixture-config', { config: ['~/fixture-config.json'] }),
+    'fixture-executable': availabilityFixtureAgent('fixture-executable', { config: ['/fixture/config-executable'] }),
+  } }) })
+  const existing = new Set([
+    join(REGISTER_ROOT, 'crew/adapters/adapter-fixture-binary.mjs'),
+    join(REGISTER_ROOT, 'crew/adapters/adapter-fixture-config.mjs'),
+    join(REGISTER_ROOT, 'crew/adapters/adapter-fixture-executable.mjs'),
+    '/fixture/config-executable',
+  ])
+  const probe = {
+    exists: (path) => existing.has(path),
+    which: (binary) => binary === 'fixture-binary' ? null : `/bin/${binary}`,
+    home: '/fixture-home',
+  }
+  const expected = {
+    'fixture-stub': 'proposal-stub',
+    'fixture-binary': 'discovered-unavailable',
+    'fixture-config': 'installed-unconfigured',
+    'fixture-executable': 'executable',
+  }
+  assert.deepEqual([...AGENT_AVAILABILITY_STATES], ['executable', 'discovered-unavailable', 'installed-unconfigured', 'proposal-stub'])
+  assert.equal(Object.isFrozen(AGENT_AVAILABILITY_STATES), true)
+  for (const [agent, state] of Object.entries(expected)) {
+    const result = agentAvailability(register, agent, probe)
+    assert.deepEqual(Object.keys(result), ['agent', 'state', 'reason', 'display_name', 'install_hint'])
+    assert.equal(Object.isFrozen(result), true)
+    assert.equal(result.agent, agent)
+    assert.equal(result.state, state)
+    assert.equal(result.reason, state)
+  }
+})
+
+test('B1 proposal stubs are legal declarations but cannot resolve for boot', () => {
+  const register = loadCapabilities({ register: capabilityRegister({ coding_agents: {
+    'fixture-proposal': availabilityFixtureAgent('fixture-proposal'),
+  } }) })
+  assert.equal(Object.hasOwn(register.coding_agents, 'fixture-proposal'), true)
+  const injected = { exists: () => false, which: () => '/bin/fixture-proposal', home: '/fixture-home' }
+  for (const options of [
+    { role: 'builder', probe: injected },
+    { role: 'builder' },
+  ]) {
+    assert.throws(
+      () => agentRegisterEntry(register, 'fixture-proposal', options),
+      (err) => err.reason === 'agent-unavailable'
+        && err.state === 'proposal-stub'
+        && err.availability_reason === 'proposal-stub'
+        && /builder/.test(err.message)
+        && /fixture-proposal/.test(err.message)
+        && /state proposal-stub/.test(err.message)
+        && /reason proposal-stub/.test(err.message),
+    )
+  }
+})
+
+test('C1 roster agent validation rejects unavailable primary and fallback cells', () => {
+  const register = loadCapabilities({ register: capabilityRegister({ coding_agents: {
+    'fixture-unavailable': availabilityFixtureAgent('fixture-unavailable'),
+  } }) })
+  const probe = {
+    exists: (path) => path.endsWith('adapter-fixture-unavailable.mjs') || path.endsWith('adapter-pi.mjs') || path.endsWith('adapter-claude.mjs'),
+    which: (binary) => binary === 'fixture-unavailable' ? null : '/fixture/bin/agent',
+    home: '/fixture-home',
+  }
+  const cases = [
+    ['tiers.build.builder', { tiers: { build: { builder: { agent: 'fixture-unavailable' } } } }],
+    ['tiers.build.builder.fallback[0]', { tiers: { build: { builder: { agent: 'pi', fallback: [{ agent: 'fixture-unavailable' }] } } } }],
+    ['assurances.standard.builder', { assurances: { standard: { builder: { agent: 'fixture-unavailable' } } } }],
+    ['assurances.standard.builder.fallback[0]', { assurances: { standard: { builder: { agent: 'pi', fallback: [{ agent: 'fixture-unavailable' }] } } } }],
+  ]
+  for (const [location, roster] of cases) {
+    assert.throws(
+      () => validateRosterAgents(roster, register, probe),
+      (err) => err.reason === 'agent-unavailable'
+        && err.state === 'discovered-unavailable'
+        && err.availability_reason === 'discovered-unavailable'
+        && err.message.includes(`roster cell ${location}`)
+        && err.message.includes('fixture-unavailable'),
+    )
+  }
+  assert.throws(
+    () => validateRosterAgents({ tiers: { build: { builder: { agent: 'missing-agent' } } } }, register, probe),
+    (err) => err.reason === 'agent-unresolved'
+      && err.message.includes('roster cell tiers.build.builder')
+      && err.message.includes('coding_agents.missing-agent'),
+  )
+})
+
+test('D1 shipped agent availability follows only the injected probe', () => {
+  const register = loadCapabilities()
+  const adapterPresent = (path) => path.endsWith('adapter-pi.mjs') || path.endsWith('adapter-claude.mjs')
+  for (const agent of ['pi', 'claude']) {
+    assert.equal(agentAvailability(register, agent, { exists: adapterPresent, which: () => '/fixture/bin/agent', home: '/empty-home' }).state, 'executable')
+    assert.equal(agentAvailability(register, agent, { exists: adapterPresent, which: () => null, home: '/empty-home' }).state, 'discovered-unavailable')
+  }
+})
+
+test('E1 shipped agent metadata preserves existing boot contracts', () => {
+  const raw = JSON.parse(readFileSync(new URL('./capabilities.json', import.meta.url), 'utf8'))
+  assert.deepEqual(raw.coding_agents.pi.display_name, 'Pi')
+  assert.deepEqual(raw.coding_agents.pi.binary, 'pi')
+  assert.deepEqual(raw.coding_agents.pi.install_hint, 'Install Pi and ensure the pi binary is on PATH.')
+  assert.deepEqual(raw.coding_agents.claude.display_name, 'Claude Code')
+  assert.deepEqual(raw.coding_agents.claude.binary, 'claude')
+  assert.deepEqual(raw.coding_agents.claude.install_hint, 'Install Claude Code and ensure the claude binary is on PATH.')
+  assert.equal(Object.hasOwn(raw.coding_agents.pi, 'config'), false)
+  assert.equal(Object.hasOwn(raw.coding_agents.claude, 'config'), false)
+  const register = loadCapabilities({ register: raw })
+  for (const agent of ['pi', 'claude']) {
+    assert.equal(agentAvailability(register, agent).state, 'executable')
+    assert.equal(agentRegisterEntry(register, agent).binary, agent)
+  }
 })
 
 test('F1A unknown coding agent refuses by closed name', () => {
@@ -977,7 +1115,7 @@ test('claude refuses a vendor grant while pi composes the same resolved grant', 
 
 test('capability refusal reasons are closed and EMPTY_GRANTS is frozen', () => {
   assert.equal(Object.isFrozen(CAPABILITY_REFUSALS), true)
-  assert.deepEqual([...CAPABILITY_REFUSALS], ['register-invalid', 'capability-shortfall', 'unknown-grant', 'grant-unsupported', 'extension-missing', 'unknown-skill', 'agent-def-invalid', 'local-settings-missing', 'local-provider-undeclared', 'local-endpoint-dead', 'grant-contradicts-deny', 'vendor-extension-missing', 'agent-unresolved', 'agent-provider-unsupported', 'local-provider-reserved'])
+  assert.deepEqual([...CAPABILITY_REFUSALS], ['register-invalid', 'capability-shortfall', 'unknown-grant', 'grant-unsupported', 'extension-missing', 'unknown-skill', 'agent-def-invalid', 'local-settings-missing', 'local-provider-undeclared', 'local-endpoint-dead', 'grant-contradicts-deny', 'vendor-extension-missing', 'agent-unresolved', 'agent-provider-unsupported', 'agent-unavailable', 'local-provider-reserved'])
   assert.throws(() => refuse('not-a-capability-reason', 'bad'))
   assert.throws(
     () => claudeSeatCommand({ role: 'builder', model: 'sonnet', promptFile: '/tmp/role.md', tools: 'Read', deny: 'Task,Agent', taskDir: '/tmp', bootBrief: 'boot', grants: { tools: [], extensions: ['/tmp/ext.js'], skills: [], agents: [], advisor: false } }),

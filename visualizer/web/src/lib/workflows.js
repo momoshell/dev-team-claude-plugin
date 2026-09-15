@@ -1,4 +1,3 @@
-import dagre from '@dagrejs/dagre'
 import { VARIANTS } from '../../../../crew/variants.mjs'
 import { executionTopology } from './execution-steps.js'
 
@@ -245,8 +244,15 @@ export function shapeWorkflowGraph(executionShape, options = {}, legacyOptions =
   }
 }
 
-export function layoutWorkflowGraph(graph, { rankdir = 'LR', nodesep = 34, ranksep = 56 } = {}) {
+// The layout engine is injected, never imported: this module is loaded by the
+// node suite, and CI runs it with no node_modules. WorkflowsPage.svelte passes
+// @dagrejs/dagre, which vite bundles. No engine means no positions, with a reason.
+export function layoutWorkflowGraph(graph, { engine = null, rankdir = 'LR', nodesep = 34, ranksep = 56 } = {}) {
   const source = graph && typeof graph === 'object' ? graph : { nodes: [], edges: [] }
+  if (!engine?.graphlib?.Graph || typeof engine.layout !== 'function') {
+    return { ...source, nodes: (Array.isArray(source.nodes) ? source.nodes : []).map((node) => ({ ...node, position: null })), edges: Array.isArray(source.edges) ? source.edges.map((edge) => ({ ...edge })) : [], layout: { measured: false, reason: 'layout-engine-absent' } }
+  }
+  const dagre = engine
   const layout = new dagre.graphlib.Graph().setDefaultEdgeLabel(() => ({}))
   layout.setGraph({ rankdir, nodesep, ranksep, marginx: 16, marginy: 16 })
   for (const node of Array.isArray(source.nodes) ? source.nodes : []) layout.setNode(node.id, { width: NODE_WIDTH, height: NODE_HEIGHT })
@@ -256,7 +262,7 @@ export function layoutWorkflowGraph(graph, { rankdir = 'LR', nodesep = 34, ranks
     const point = layout.node(node.id) || { x: 0, y: 0 }
     return { ...node, position: { x: point.x - NODE_WIDTH / 2, y: point.y - NODE_HEIGHT / 2 }, width: NODE_WIDTH, height: NODE_HEIGHT, sourcePosition: 'right', targetPosition: 'left' }
   })
-  return { ...source, nodes, edges: Array.isArray(source.edges) ? source.edges.map((edge) => ({ ...edge })) : [] }
+  return { ...source, nodes, edges: Array.isArray(source.edges) ? source.edges.map((edge) => ({ ...edge })) : [], layout: { measured: true, reason: null } }
 }
 
 function comparableSeat(value) {

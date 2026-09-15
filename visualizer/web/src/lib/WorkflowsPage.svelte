@@ -1,4 +1,5 @@
 <script>
+  import dagre from '@dagrejs/dagre'
   import { getWorkflows, proposeWorkflowEdit } from './api.js'
   import { draftTopologyEdit, inspectWorkflowNode, layoutWorkflowGraph, shapeWorkflowGraph, validateTopologyEdit } from './workflows.js'
   import WorkflowGraph from './WorkflowGraph.svelte'
@@ -45,7 +46,7 @@
     roster: payload?.roster,
     docs: payload?.docs || {},
     bootSeats: selectedWorkflow?.boot_seats || {},
-  })))
+  }), { engine: dagre }))
   let selectedNode = $derived(graph?.nodes?.find((node) => node.id === selectedNodeId) || graph?.nodes?.[0] || null)
   let inspection = $derived(inspectWorkflowNode(graph, selectedNode?.id, {
     docs: payload?.docs || {},

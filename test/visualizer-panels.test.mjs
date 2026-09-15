@@ -2334,6 +2334,28 @@ test('G1: a key outside the attention vocabulary is not attention work', () => {
   assert.equal(needsAttention('outside-attention-vocabulary'), false)
 })
 
+// A stand-in for @dagrejs/dagre with the surface layoutWorkflowGraph uses. The real
+// package is a vite build-time dependency; CI runs this suite with no node_modules.
+function fakeLayoutEngine() {
+  class Graph {
+    constructor() { this.nodes = new Map() }
+    setDefaultEdgeLabel() { return this }
+    setGraph() { return this }
+    setNode(id, value) { this.nodes.set(id, { ...value }) }
+    setEdge() {}
+    node(id) { return this.nodes.get(id) }
+  }
+  return { graphlib: { Graph }, layout: (g) => { let i = 0; for (const value of g.nodes.values()) { value.x = 100 + i * 200; value.y = 50; i += 1 } } }
+}
+
+// Mutation killed: re-adding a bare package import to the shaper makes this fail,
+// and the suite would otherwise break only in CI, where no node_modules exist.
+test('workflow-page:import-free shaper', () => {
+  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/workflows.js'), 'utf8')
+  const bare = [...source.matchAll(/^\s*import\s[^'"]*['"]([^'"]+)['"]/gm)].map((m) => m[1]).filter((spec) => !spec.startsWith('.') && !spec.startsWith('node:'))
+  assert.deepEqual(bare, [])
+})
+
 test('workflow-page:A1', () => {
   for (const shape of Object.keys(VARIANTS)) {
     const topology = executionTopology(shape, [])
@@ -2348,8 +2370,12 @@ test('workflow-page:A2', () => {
     observedLabels: ['plan', 'gate', 'gate-repair:1', 'gate-reverify:1', 'review:r1', 'review:r2'],
     workflow: { shape: 'full', seats: { planner: { agent: 'pi', provider: 'anthropic', id: 'planner', effort: 'high', skills: ['planning'], extensions: ['notes'] } } },
   })
-  const laidOut = layoutWorkflowGraph(graph)
+  const laidOut = layoutWorkflowGraph(graph, { engine: fakeLayoutEngine() })
   assert.ok(laidOut.nodes.every((node) => Number.isFinite(node.position.x) && Number.isFinite(node.position.y)))
+  assert.deepEqual(laidOut.layout, { measured: true, reason: null })
+  const unlaid = layoutWorkflowGraph(graph)
+  assert.ok(unlaid.nodes.every((node) => node.position === null))
+  assert.deepEqual(unlaid.layout, { measured: false, reason: 'layout-engine-absent' })
   assert.deepEqual(graph.fixed_edges.map((edge) => [edge.source, edge.target]), graph.stageOrder.slice(1).map((stage, index) => [`stage:${graph.stageOrder[index]}`, `stage:${stage}`]))
   assert.deepEqual(shapeWorkflowGraph('full', { observedLabels: [] }).loop_edges, [])
   assert.ok(graph.loop_edges.some((edge) => edge.label === 'gate repair'))

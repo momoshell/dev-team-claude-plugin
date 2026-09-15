@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url'
 import { createFeed } from './feed.mjs'
 import { createReturnsSource } from './returns-source.mjs'
 import { createJournalSource } from './journal-source.mjs'
+import { createShipStateResolver } from './ship-state.mjs'
 import { createRosterSource } from './roster-source.mjs'
 import { proposeEdit } from './roster-edit.mjs'
 import { createAgentsSource } from './agents-source.mjs'
@@ -310,6 +311,7 @@ export function startServer(options = {}) {
   const feed = config.feed || createFeed({ kind: config.kind || 'ledger', ledgerDb: config.ledgerDb, triageDb: config.triageDb, crewRoot: config.crewRoot })
   const returns = config.returns || createReturnsSource({ crewRoot: config.crewRoot })
   const journal = config.journal || createJournalSource({ crewRoot: config.crewRoot })
+  const ship = config.shipState || createShipStateResolver({ journalSource: journal, fetchImpl: config.fetchImpl, token: env.GITHUB_TOKEN, apiUrl: env.DEVTEAM_GITHUB_API_URL, repository: env.GITHUB_REPOSITORY })
   const roster = config.roster || createRosterSource({ rosterPath: config.rosterPath })
   const modelCatalog = config.modelCatalog || createArtificialAnalysisCatalog({ apiKey: env.ARTIFICIAL_ANALYSIS_API_KEY, fetchImpl: config.fetchImpl })
   const agents = config.agents || config.agentsSource || createAgentsSource({ checkout: config.checkout, crewRoot: config.crewRoot })
@@ -351,7 +353,9 @@ export function startServer(options = {}) {
         }
         if (filters.since && filters.until && Date.parse(filters.until) <= Date.parse(filters.since)) return json(res, 400, { schema, error: 'until must be later than since' })
         const result = feed.listRuns(filters)
-        return json(res, 200, { schema, ...result })
+        const shipStates = await ship.resolve(result.runs)
+        const runs = result.runs.map((run) => ({ ...run, ship: shipStates?.get?.(run.adw_id) || { state: 'unmeasured', reason: 'ship state not measured', stale: false } }))
+        return json(res, 200, { schema, ...result, runs })
       }
       if (url.pathname === '/api/events') {
         if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })

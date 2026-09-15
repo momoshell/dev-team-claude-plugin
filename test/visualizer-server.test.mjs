@@ -11,17 +11,18 @@ import { openLedger, NODE_FLOOR, PHASE_SLOT_WAIT_ABSENT, replayJsonl, WRITERS, U
 import { cellHealth } from '../crew/breaker.mjs'
 import { gitGrepHits } from '../scripts/factory/absence.mjs'
 import { parseCliArgs, ServerUsageError, startServer as startVisualizerServer, writeRosterAtomically } from '../visualizer/server/server.mjs'
+import { createShipStateResolver } from '../visualizer/server/ship-state.mjs'
+import { createJournalSource } from '../visualizer/server/journal-source.mjs'
+import { deriveStatus } from '../visualizer/web/src/lib/fleet.js'
 import { createLedgerFeed } from '../visualizer/server/ledger-feed.mjs'
 import { readLadder, stageMoves } from '../visualizer/server/roster-ladder.mjs'
 import { shapeIntake } from '../visualizer/server/shape.mjs'
 import { createAgentsSource, proposeAgent, proposePrompt, proposeSkills } from '../visualizer/server/agents-source.mjs'
 import { rawRequest, scratchDir, sqliteAvailable, treeDigest } from './helpers.mjs'
-
 const require = createRequire(import.meta.url)
 const SKIP = sqliteAvailable() ? false : `node:sqlite unavailable (below NODE_FLOOR ${NODE_FLOOR})`
 const children = new Set()
 after(() => { for (const child of children) { try { child.kill('SIGKILL') } catch {} } })
-
 function digest(path) { return createHash('sha256').update(readFileSync(path)).digest('hex') }
 async function json(base, path, options) {
   const response = await fetch(`${base}${path}`, options)
@@ -66,7 +67,7 @@ function startServer(ledgerDb, triageDb, crewRoot, rosterPath, environment = nul
   if (rosterPath) args.push('--roster', rosterPath)
   if (ladderPath) args.push('--ladder', ladderPath)
   if (referencePath) args.push('--model-reference', referencePath)
-  const child = spawnProcess(process.execPath, args, { stdio: ['ignore', 'pipe', 'pipe'], env: environment ? { ...process.env, ...environment } : process.env })
+  const child = spawnProcess(process.execPath, args, { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, DEVTEAM_GITHUB_API_URL: TEST_GITHUB_API_URL, ...(environment || {}) } })
   children.add(child)
   return announce(child).then((base) => ({ child, base }))
 }
@@ -74,8 +75,8 @@ async function stopServer(child) {
   child.kill('SIGTERM')
   await new Promise((resolve) => child.once('exit', resolve))
 }
-async function startInProcess(feed, options) {
-  const handles = startVisualizerServer({ port: 0, host: '127.0.0.1', feed, ...options })
+async function startInProcess(feed, options = {}) {
+  const handles = startVisualizerServer({ port: 0, host: '127.0.0.1', feed, ...options, env: { ...process.env, DEVTEAM_GITHUB_API_URL: TEST_GITHUB_API_URL, ...(options.env || {}) } })
   await new Promise((resolve, reject) => {
     handles.server.once('error', reject)
     handles.server.once('listening', resolve)
@@ -683,7 +684,7 @@ test('visualizer server never writes to the ledger', { skip: SKIP }, async () =>
   const crewBefore = treeDigest(crewRoot)
   let child, base
   try {
-    child = spawn(process.execPath, ['visualizer/server/server.mjs', '--port', '0', '--ledger-db', ledgerDb, '--triage-db', triageDb, '--crew-root', crewRoot], { stdio: ['ignore', 'pipe', 'pipe'] })
+    child = spawn(process.execPath, ['visualizer/server/server.mjs', '--port', '0', '--ledger-db', ledgerDb, '--triage-db', triageDb, '--crew-root', crewRoot], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, DEVTEAM_GITHUB_API_URL: TEST_GITHUB_API_URL } })
     children.add(child)
     base = await announce(child)
     const sessions = await json(base, '/api/sessions')
@@ -1949,7 +1950,6 @@ test('/api/intake/brake attributes successful and failed transitions and its wri
     assert.equal(failed.status, 200); assert.equal(failed.json.ok, false); assert.equal(failed.json.wrote, false); assert.equal(failed.json.state, 'clear')
     assert.match(failed.json.error, /STOP|factory/)
     await stopServer(child); child = null
-
     const source = openLedger({ dbPath: ledgerDb })
     const rows = source.dumpTable('intake_brakes')
     const jsonlPath = source._jsonlPath
@@ -2503,7 +2503,7 @@ test('the model catalog endpoint persists a key only when explicitly requested',
   }
 })
 
-test('visualizer loads only a git-ignored local env file for catalog secrets', () => {
+test('RV1-1 GitHub repository routing guard and local env catalog secrets', async () => {
   const pkg = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8'))
   const ignore = readFileSync(join(process.cwd(), '.gitignore'), 'utf8')
   const example = readFileSync(join(process.cwd(), '.env.example'), 'utf8')
@@ -2512,6 +2512,20 @@ test('visualizer loads only a git-ignored local env file for catalog secrets', (
   assert.match(ignore, /^!\.env\.example$/m)
   assert.match(example, /^ARTIFICIAL_ANALYSIS_API_KEY=$/m)
   assert.doesNotMatch(example, /ARTIFICIAL_ANALYSIS_API_KEY=.+/)
+
+  const calls = []
+  const resolver = createShipStateResolver({
+    journalSource: { readJournal: () => ({ rows: [
+      { published: { number: 507, url: 'https://github.com/other-owner/other-repo/pull/507' } },
+      { published: { number: 508, url: githubPullUrl(508) } },
+      { published: { number: 509, url: 'https://github.com/momoshell/dev-team-claude-plugin/issues/509' } },
+    ] }) },
+    fetchImpl: pageFixture({ 1: [{ number: 509, state: 'open', html_url: 'https://github.test/pull/509', head: { ref: 'routing-guard' } }] }, calls),
+    apiUrl: 'https://github.test',
+  })
+  const routed = (await resolver.resolve([{ adw_id: 'rv1-1-route', repo_slug: CREW_REPOSITORY_SLUG, goal: 'routing-guard' }])).get('rv1-1-route')
+  assert.equal(routed.state, 'open')
+  assertGitHubPullPath(calls)
 })
 
 test('visualizer dropdowns use the shared themed listbox instead of native menus', () => {
@@ -2772,6 +2786,197 @@ test('static responses refuse symlinks that leave web/dist', { skip: SKIP }, asy
     if (madeDist) rmSync(dist, { recursive: true, force: true })
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+const TEST_GITHUB_API_URL = process.env.TEST_GITHUB_API_URL || 'fixture-invalid://github'
+const TEST_GITHUB_REPOSITORY = 'momoshell/dev-team-claude-plugin'
+const CREW_REPOSITORY_SLUG = 'dt-b745-shipstate'
+const githubPullUrl = (number) => `https://github.com/${TEST_GITHUB_REPOSITORY}/pull/${number}`
+
+function assertGitHubPullPath(calls) {
+  assert.equal(calls.length, 1)
+  assert.equal(new URL(calls[0].url).pathname, `/repos/${TEST_GITHUB_REPOSITORY}/pulls`)
+  assert.equal(calls.some(({ url }) => url.includes(CREW_REPOSITORY_SLUG)), false)
+}
+
+function shipLaneFixture(root, { adwId, goal, execution = 'full', published = null, repoSlug = CREW_REPOSITORY_SLUG }) {
+  const lane = join(root, repoSlug, goal)
+  mkdirSync(join(lane, 'ledger'), { recursive: true })
+  writeFileSync(join(lane, 'ledger', 'run.json'), JSON.stringify({ adw_id: adwId, repo_slug: repoSlug, task_slug: goal }))
+  const rows = [{ event: 'run-configuration', run_configuration: { execution: { effective: execution } } }]
+  if (published !== null) rows.push({ event: 'publish', published })
+  writeFileSync(join(lane, 'journal.jsonl'), `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`)
+  return { adw_id: adwId, repo_slug: repoSlug, goal }
+}
+
+function pullResponse(rows, status = 200, headers = {}) {
+  return new Response(JSON.stringify(rows), { status, headers: { 'content-type': 'application/json', ...headers } })
+}
+
+function pageFixture(pages, calls = []) {
+  return async (url, options) => {
+    calls.push({ url, options })
+    const page = Number(new URL(url).searchParams.get('page'))
+    const value = pages[page]
+    if (value instanceof Error) throw value
+    return pullResponse(value ?? [])
+  }
+}
+
+test('A1 ship state exposes all six closed states with one reason', async () => {
+  const root = scratchDir('ship-state-a1-')
+  try {
+    const runs = [
+      shipLaneFixture(root, { adwId: 'ship-merged', goal: 'merged-lane', published: { number: 101, url: githubPullUrl(101) } }),
+      shipLaneFixture(root, { adwId: 'ship-open', goal: 'open-lane' }),
+      shipLaneFixture(root, { adwId: 'ship-closed', goal: 'closed-lane' }),
+      shipLaneFixture(root, { adwId: 'ship-unpublished', goal: 'unpublished-lane' }),
+      shipLaneFixture(root, { adwId: 'ship-scout', goal: 'scout-lane', execution: 'scout' }),
+      shipLaneFixture(root, { adwId: 'ship-review', goal: 'review-lane', execution: 'review_only' }),
+      shipLaneFixture(root, { adwId: 'ship-verify', goal: 'verify-lane', execution: 'verify_only' }),
+      { adw_id: 'ship-unmeasured', repo_slug: CREW_REPOSITORY_SLUG, goal: '' },
+    ]
+    const noRepository = shipLaneFixture(root, { adwId: 'ship-no-repository', goal: 'no-repository-lane' })
+    const noRepositoryCalls = []
+    const noRepositoryResolver = createShipStateResolver({
+      journalSource: createJournalSource({ crewRoot: root }),
+      fetchImpl: pageFixture({ 1: [] }, noRepositoryCalls),
+      apiUrl: 'https://github.test',
+    })
+    const noRepositoryShip = (await noRepositoryResolver.resolve([noRepository])).get(noRepository.adw_id)
+    assert.deepEqual(noRepositoryShip, { state: 'unmeasured', reason: 'No GitHub repository is recorded for this run.', stale: false })
+    assert.equal(noRepositoryCalls.length, 0)
+
+    const calls = []
+    const resolver = createShipStateResolver({
+      journalSource: createJournalSource({ crewRoot: root }),
+      fetchImpl: pageFixture({ 1: [
+        { number: 101, state: 'closed', merged_at: '2026-09-01T10:00:00.000Z', merge_commit_sha: 'abc123', html_url: 'https://github.test/pull/101', head: { ref: 'other-lane' } },
+        { number: 102, state: 'open', html_url: 'https://github.test/pull/102', head: { ref: 'open-lane' } },
+        { number: 103, state: 'closed', merged_at: null, html_url: 'https://github.test/pull/103', head: { ref: 'closed-lane' } },
+      ] }, calls),
+      apiUrl: 'https://github.test',
+      repository: TEST_GITHUB_REPOSITORY,
+    })
+    const states = await resolver.resolve(runs)
+    assert.deepEqual(new Set([...states.values()].map((ship) => ship.state)), new Set(['merged', 'open', 'closed-unmerged', 'unpublished', 'not-applicable', 'unmeasured']))
+    for (const ship of states.values()) {
+      assert.equal(Object.keys(ship).filter((key) => key === 'reason').length, 1)
+      assert.equal(typeof ship.reason, 'string')
+      assert.ok(ship.reason.trim())
+      assert.equal(typeof ship.stale, 'boolean')
+    }
+    assert.deepEqual(states.get('ship-merged'), {
+      state: 'merged', reason: 'GitHub reports the pull request merged.', stale: false,
+      merged_at: '2026-09-01T10:00:00.000Z', merge_commit_sha: 'abc123', pr_url: 'https://github.test/pull/101',
+    })
+    assert.equal(states.get('ship-review').state, 'not-applicable')
+    assert.equal(states.get('ship-verify').state, 'not-applicable')
+    assertGitHubPullPath(calls)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('B1 merged shipping remains separate from an escalated driver outcome', async () => {
+  const run = { adw_id: 'ship-http', repo_slug: CREW_REPOSITORY_SLUG, goal: 'http-lane', status: 'fail', running: false, phases: [] }
+  const feed = { listRuns: () => ({ runs: [run], degraded: false }), close: () => {} }
+  const journal = { readJournal: () => ({ rows: [{ event: 'publish', published: { number: 201, url: githubPullUrl(201) } }] }) }
+  const calls = []
+  const started = await startInProcess(feed, {
+    journal,
+    fetchImpl: pageFixture({ 1: [{ number: 201, state: 'closed', merged_at: '2026-09-02T10:00:00.000Z', merge_commit_sha: 'def456', html_url: 'https://github.test/pull/201', head: { ref: 'different-lane' } }] }, calls),
+    env: { DEVTEAM_GITHUB_API_URL: 'https://github.test', GITHUB_REPOSITORY: TEST_GITHUB_REPOSITORY },
+  })
+  try {
+    const response = await json(started.base, '/api/sessions')
+    assert.equal(response.status, 200)
+    assert.equal(response.json.runs[0].ship.state, 'merged')
+    assert.equal(response.json.runs[0].status, 'fail')
+    assertGitHubPullPath(calls)
+    assert.equal(deriveStatus(run, { status: 'escalation', details: { escalation: { where: 'review', why: 'operator review required' } } }).key, 'escalated')
+  } finally {
+    await stopInProcess(started.server)
+  }
+})
+
+test('C1 scout execution is not applicable rather than unpublished', async () => {
+  const root = scratchDir('ship-state-c1-')
+  let reads = 0
+  let fetches = 0
+  try {
+    const run = shipLaneFixture(root, { adwId: 'ship-c1', goal: 'scout-lane', execution: 'scout' })
+    const source = { readJournal(input) { reads += 1; return createJournalSource({ crewRoot: root }).readJournal(input) } }
+    const resolver = createShipStateResolver({ journalSource: source, fetchImpl: async () => { fetches += 1; throw new Error('network must not be called') }, apiUrl: 'https://github.test' })
+    const ship = (await resolver.resolve([run])).get(run.adw_id)
+    assert.deepEqual(ship, { state: 'not-applicable', reason: 'Execution scout declares that this run writes no changes.', stale: false })
+    assert.equal(reads, 1)
+    assert.equal(fetches, 0)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('D1 GitHub failure is unmeasured and a good cache becomes stale', async () => {
+  const run = { adw_id: 'ship-d1', repo_slug: CREW_REPOSITORY_SLUG, goal: 'cache-lane' }
+  const source = { readJournal: () => ({ rows: [] }) }
+  const uncached = createShipStateResolver({ journalSource: source, fetchImpl: async () => { throw new Error('offline') }, apiUrl: 'https://github.test', repository: TEST_GITHUB_REPOSITORY })
+  const firstFailure = (await uncached.resolve([run])).get(run.adw_id)
+  assert.equal(firstFailure.state, 'unmeasured')
+  assert.match(firstFailure.reason, /GitHub unreachable/i)
+  let clock = 0
+  const calls = []
+  let refreshes = 0
+  const resolver = createShipStateResolver({
+    journalSource: source,
+    fetchImpl: async (url, options) => {
+      calls.push({ url, options })
+      if (refreshes++ > 0) throw new Error('refresh failed')
+      return pullResponse([{ number: 301, state: 'open', html_url: 'https://github.test/pull/301', head: { ref: 'cache-lane' } }])
+    },
+    apiUrl: 'https://github.test', repository: TEST_GITHUB_REPOSITORY, now: () => clock, cacheMs: 10,
+  })
+  const good = (await resolver.resolve([run])).get(run.adw_id)
+  assert.equal(good.state, 'open')
+  clock = 11
+  const stale = (await resolver.resolve([run])).get(run.adw_id)
+  assert.equal(stale.state, 'open')
+  assert.equal(stale.stale, true)
+  assert.equal(stale.reason, 'GitHub reports the pull request open.')
+  assert.equal(calls.length, 2)
+})
+
+test('E1 published journal identity wins over a branch-name pull request', async () => {
+  const root = scratchDir('ship-state-e1-')
+  try {
+    const preferred = shipLaneFixture(root, { adwId: 'ship-preferred', goal: 'same-lane', published: { number: 401, url: githubPullUrl(401) } })
+    const noMatch = shipLaneFixture(root, { adwId: 'ship-no-match', goal: 'no-match' })
+    const missingBranch = { adw_id: 'ship-no-branch', repo_slug: CREW_REPOSITORY_SLUG, goal: '' }
+    const calls = []
+    const resolver = createShipStateResolver({
+      journalSource: createJournalSource({ crewRoot: root }),
+      fetchImpl: pageFixture({ 1: [
+        { number: 401, state: 'closed', merged_at: null, html_url: 'https://github.test/pull/401', head: { ref: 'other-lane' } },
+        { number: 402, state: 'open', html_url: 'https://github.test/pull/402', head: { ref: 'same-lane' } },
+      ] }, calls),
+      apiUrl: 'https://github.test',
+      repository: TEST_GITHUB_REPOSITORY,
+    })
+    const states = await resolver.resolve([preferred, noMatch, missingBranch])
+    assert.equal(states.get(preferred.adw_id).state, 'closed-unmerged')
+    assert.equal(states.get(preferred.adw_id).pr_url, 'https://github.test/pull/401')
+    assert.equal(states.get(noMatch.adw_id).state, 'unpublished')
+    assert.equal(states.get(missingBranch.adw_id).state, 'unmeasured')
+    assert.match(states.get(missingBranch.adw_id).reason, /branch/i)
+    assertGitHubPullPath(calls)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('F1 ship state has no child process dependency', () => {
+  const source = readFileSync(join(process.cwd(), 'visualizer/server/ship-state.mjs'), 'utf8')
+  assert.doesNotMatch(source, /node:child_process/)
 })
 
 test('HEAD is supported for GET routes while write routes retain their Allow value', { skip: SKIP }, async () => {

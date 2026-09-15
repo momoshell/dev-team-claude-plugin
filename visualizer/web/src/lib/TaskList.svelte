@@ -1,5 +1,5 @@
 <script>
-  import { configurationDimensionCell, configurationFilterView, deriveDisplayStatus, durationCell, gateCell, needsAttention, reviewCell, runActivity, tokenCell } from './fleet.js'
+  import { configurationDimensionCell, configurationFilterView, deriveDisplayStatus, durationCell, gateCell, needsAttention, reviewCell, runActivity, shipStatus, tokenCell } from './fleet.js'
   import Pagination from './Pagination.svelte'
   import Dropdown from './Dropdown.svelte'
 
@@ -21,6 +21,7 @@
     if (state === 'active') return activityFor(run).live
     if (state === 'completed') return !run.running
     if (state === 'attention') return needsAttention(status.key)
+    if (state === 'shipped') return shipStatus(run).key === 'merged'
     return true
   }
   function matchesQuery(run) {
@@ -46,6 +47,7 @@
     active: runs.filter((run) => activityFor(run).live && !run.triage?.reviewed_at).length,
     completed: runs.filter((run) => !run.running && !run.triage?.reviewed_at).length,
     attention: runs.filter((run) => needsAttention(statusFor(run).key) && !run.triage?.reviewed_at).length,
+    shipped: runs.filter((run) => shipStatus(run).key === 'merged' && !run.triage?.reviewed_at).length,
   })
   let baseRows = $derived(runs.filter((run) => (showArchived || !run.triage?.reviewed_at) && (run.goal || showArchived) && matchesState(run) && matchesQuery(run)))
   let configurationView = $derived(configurationFilterView(baseRows, { task_profile: taskProfile, execution_shape: executionShape, assurance }))
@@ -60,7 +62,7 @@
 
   $effect(() => { void `${query}|${state}|${assurance}|${taskProfile}|${executionShape}|${showArchived}`; page = 1 })
   $effect(() => {
-    if (!focus?.revision || !['all', 'active', 'completed', 'attention'].includes(focus.state)) return
+    if (!focus?.revision || !['all', 'active', 'completed', 'attention', 'shipped'].includes(focus.state)) return
     state = focus.state
     query = ''
     assurance = 'all'
@@ -73,7 +75,7 @@
 
 <section class="tasks-panel" id="task-board">
   <div class="status-tabs" role="tablist" aria-label="Task status">
-    {#each [['all','All tasks'], ['active','Live now'], ['completed','Completed'], ['attention','Needs attention']] as tab (tab[0])}
+    {#each [['all','All tasks'], ['active','Live now'], ['completed','Completed'], ['attention','Needs attention'], ['shipped','Shipped']] as tab (tab[0])}
       <button type="button" class:active={state === tab[0]} onclick={() => state = tab[0]} role="tab" aria-selected={state === tab[0]}>
         {tab[1]} <span>{counts[tab[0]]}</span>
       </button>
@@ -90,10 +92,11 @@
 
   <div class="table-wrap">
     <table>
-      <thead><tr><th>Task</th><th>Status</th><th>Run setup</th><th>Progress</th><th>Proof</th><th>Elapsed</th><th>Usage</th><th><span class="sr-only">Open</span></th></tr></thead>
+      <thead><tr><th>Task</th><th>Status</th><th>Ship</th><th>Run setup</th><th>Progress</th><th>Proof</th><th>Elapsed</th><th>Usage</th><th><span class="sr-only">Open</span></th></tr></thead>
       <tbody>
         {#each paged as run (run.adw_id)}
           {@const status = statusFor(run)}
+          {@const ship = shipStatus(run)}
           {@const activity = activityFor(run)}
           {@const duration = durationCell(run)}
           {@const gate = gateCell(run)}
@@ -105,6 +108,7 @@
           <tr class:running={activity.live} class:silent={activity.attention && run.running} onclick={() => onopen(run)}>
             <td class="task-cell"><button type="button" class="task-link" onclick={(event) => { event.stopPropagation(); onopen(run) }}><strong>{run.goal || 'Untitled run'}</strong><span>{run.repo_slug || 'repository unavailable'} · <code>{String(run.adw_id || '').slice(0, 8)}</code></span></button></td>
             <td><span class={`status ${status.tone}`}><span class="status-dot" aria-hidden="true"></span>{status.word}</span></td>
+            <td title={ship.reason}><span class={`status ${ship.tone}`}><span class="status-dot" aria-hidden="true"></span>{ship.word}</span></td>
             <td class="run-setup"><div><strong class:missing={assuranceCell.dashed} class:dashed={assuranceCell.dashed}>{assuranceCell.text}</strong></div><small title={`${assuranceCell.summary ?? ''} ${profileCell.summary ?? ''} ${executionCell.summary ?? ''}`}><span class:dashed={profileCell.dashed}>{profileCell.text}</span> · <span class:dashed={executionCell.dashed}>{executionCell.text}</span></small></td>
             <td class="execution"><div class="phase-line" aria-label={`${run.phases?.length || 0} phases`}>{#each run.phases || [] as phase (phase.id ?? phase.seq)}<span class:active={phase.status === 'running'} class:failed={phase.status === 'fail'} style={`--phase-color:var(--lane-${phase.lane ?? 6})`} title={`${phaseName(phase)} · ${phase.status || 'unknown'}`}></span>{/each}</div><small class:dashed={executionCell.dashed}>{executionCell.text} · {run.phases?.length ? `${run.phases.length} phase${run.phases.length === 1 ? '' : 's'} · ${phaseName(run.phases.at(-1))}` : 'Waiting for first phase'}</small></td>
             <td class="proof"><span class:muted={gate.dashed}>{gate.dashed ? 'No gate proof' : gate.text}</span><small class:muted={review.dashed}>{review.dashed ? 'No review yet' : review.text}</small></td>
@@ -113,7 +117,7 @@
             <td><button class="open" type="button" aria-label={`Open ${run.goal || 'task'}`} onclick={(event) => { event.stopPropagation(); onopen(run) }}>→</button></td>
           </tr>
         {:else}
-          <tr><td colspan="8" class="empty"><strong>No tasks match this view.</strong><span>Try another status, assurance preset, or search term.</span></td></tr>
+          <tr><td colspan="9" class="empty"><strong>No tasks match this view.</strong><span>Try another status, assurance preset, or search term.</span></td></tr>
         {/each}
       </tbody>
     </table>

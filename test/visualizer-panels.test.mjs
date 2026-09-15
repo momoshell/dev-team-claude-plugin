@@ -10,6 +10,9 @@ import { ROLE_ORDER, acceptEvidence, bounceArrows, gateMarkers, gateProofStory, 
 import { eventStory, eventStreamSummary } from '../visualizer/web/src/lib/event-story.js'
 import { assignmentPath, envelopeFacts, envelopeGroups, envelopeOverview, envelopeSections, trajectoryRowStory, trajectorySummary } from '../visualizer/web/src/lib/diagnostic-story.js'
 import { executionTopology, factoryStepCategory, factoryStepName, factoryStepTrace } from '../visualizer/web/src/lib/execution-steps.js'
+import { VARIANTS } from '../crew/variants.mjs'
+import { shapeValidationDefect } from '../crew/shape-validator.mjs'
+import { compareSeat, draftTopologyEdit, inspectWorkflowNode, layoutWorkflowGraph, selectionReset, shapeWorkflowGraph, validateTopologyEdit } from '../visualizer/web/src/lib/workflows.js'
 import { crewSummary } from '../visualizer/web/src/lib/crew.js'
 import { assuranceMeta, assuranceOption, executionMeta, runConfiguration, taskProfileMeta } from '../visualizer/web/src/lib/workflow-semantics.js'
 import { diffLines } from '../visualizer/web/src/lib/diff-lines.js'
@@ -1074,7 +1077,7 @@ test('E1 agents page route nav and title are wired', () => {
   const root = join(process.cwd(), 'visualizer/web/src')
   const app = readFileSync(join(root, 'App.svelte'), 'utf8')
   const page = readFileSync(join(root, 'lib/AgentsPage.svelte'), 'utf8')
-  assert.deepEqual(VIEWS, ['fleet', 'ops', 'roster', 'agents', 'run', 'phase'])
+  assert.deepEqual(VIEWS, ['fleet', 'ops', 'roster', 'agents', 'workflows', 'run', 'phase'])
   assert.match(app, /route\.view === 'agents'/)
   assert.match(app, /Agents · Factory/)
   assert.match(app, /<AgentsPage\s*\/?\s*>/)
@@ -2420,4 +2423,359 @@ test('G1 task list ships column and tab use only Tier-2 colour aliases', () => {
   const shipCss = [...css.matchAll(/(?:shipping|status)[^{}]*\{([^{}]*)\}/g)].map((match) => match[1]).join('\\n')
   assert.doesNotMatch(shipCss, /\b(?:red|blue|green|orange|purple)\b/i)
   assert.doesNotMatch(shipCss, /--(?:palette|tier-?1|raw)/i)
+})
+
+// A stand-in for @dagrejs/dagre with the surface layoutWorkflowGraph uses. The real
+// package is a vite build-time dependency; CI runs this suite with no node_modules.
+function fakeLayoutEngine() {
+  class Graph {
+    constructor() { this.nodes = new Map() }
+    setDefaultEdgeLabel() { return this }
+    setGraph() { return this }
+    setNode(id, value) { this.nodes.set(id, { ...value }) }
+    setEdge() {}
+    node(id) { return this.nodes.get(id) }
+  }
+  return { graphlib: { Graph }, layout: (g) => { let i = 0; for (const value of g.nodes.values()) { value.x = 100 + i * 200; value.y = 50; i += 1 } } }
+}
+
+// Mutation killed: re-adding a bare package import to the shaper makes this fail,
+// and the suite would otherwise break only in CI, where no node_modules exist.
+test('workflow-page:import-free shaper', () => {
+  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/workflows.js'), 'utf8')
+  const bare = [...source.matchAll(/^\s*import\s[^'"]*['"]([^'"]+)['"]/gm)].map((m) => m[1]).filter((spec) => !spec.startsWith('.') && !spec.startsWith('node:'))
+  assert.deepEqual(bare, [])
+})
+
+test('workflow-page:A1', () => {
+  for (const shape of Object.keys(VARIANTS)) {
+    const topology = executionTopology(shape, [])
+    const graph = shapeWorkflowGraph(shape, { observedLabels: [] })
+    assert.deepEqual(graph.nodes.map((node) => node.stage), topology.rows.map((row) => row.stage), shape)
+    assert.deepEqual(graph.stageOrder, topology.rows.map((row) => row.stage), shape)
+  }
+})
+
+test('workflow-page:A2', () => {
+  const graph = shapeWorkflowGraph('full', {
+    observedLabels: ['plan', 'gate', 'gate-repair:1', 'gate-reverify:1', 'review:r1', 'review:r2'],
+    workflow: { shape: 'full', seats: { planner: { agent: 'pi', provider: 'anthropic', id: 'planner', effort: 'high', skills: ['planning'], extensions: ['notes'] } } },
+  })
+  const laidOut = layoutWorkflowGraph(graph, { engine: fakeLayoutEngine() })
+  assert.ok(laidOut.nodes.every((node) => Number.isFinite(node.position.x) && Number.isFinite(node.position.y)))
+  assert.deepEqual(laidOut.layout, { measured: true, reason: null })
+  const unlaid = layoutWorkflowGraph(graph)
+  assert.ok(unlaid.nodes.every((node) => node.position === null))
+  assert.deepEqual(unlaid.layout, { measured: false, reason: 'layout-engine-absent' })
+  assert.deepEqual(graph.fixed_edges.map((edge) => [edge.source, edge.target]), graph.stageOrder.slice(1).map((stage, index) => [`stage:${graph.stageOrder[index]}`, `stage:${stage}`]))
+  assert.deepEqual(shapeWorkflowGraph('full', { observedLabels: [] }).loop_edges, [])
+  assert.ok(graph.loop_edges.some((edge) => edge.label === 'gate repair'))
+  assert.ok(graph.loop_edges.some((edge) => edge.label === 'gate reverify'))
+  assert.ok(graph.loop_edges.some((edge) => edge.label === 'review bounce'))
+  assert.equal(graph.nodes.find((node) => node.stage === 'plan').kind, 'universal')
+  assert.equal(graph.nodes.find((node) => node.stage === 'converge').kind, 'universal')
+  assert.equal(graph.nodes.find((node) => node.stage === 'scope-gate').kind, 'control')
+  const planner = graph.nodes.find((node) => node.stage === 'plan').seat
+  for (const field of ['agent', 'model', 'effort', 'skills', 'extensions']) assert.ok(field in planner)
+  assert.equal(planner.model, 'anthropic/planner')
+})
+
+test('workflow-page:B1', () => {
+  for (const shape of Object.keys(VARIANTS)) {
+    for (const stage of VARIANTS[shape].stages) {
+      const verdict = validateTopologyEdit(draftTopologyEdit({ shape, stage, action: 'remove' }))
+      const candidate = { ...VARIANTS[shape], stages: VARIANTS[shape].stages.filter((head) => head !== stage) }
+      const expected = shape === 'full' ? 'stage-reordered' : shapeValidationDefect(candidate, shape)?.defect ?? null
+      assert.equal(verdict.reason, expected, `${shape} minus ${stage}`)
+      if (expected) { assert.equal(verdict.status, 'refused'); assert.notEqual(verdict.tone, 'ok') }
+    }
+    const unchanged = validateTopologyEdit({ shape, stage: VARIANTS[shape].stages[0], action: 'add' })
+    assert.deepEqual([unchanged.status, unchanged.reason], ['unmeasured', 'edit-no-op'], `${shape} unchanged is measured as a no-op`)
+  }
+  const scout = validateTopologyEdit(draftTopologyEdit({ shape: 'scout', stage: 'scope-gate', action: 'remove' }))
+  assert.deepEqual([scout.status, scout.reason, scout.tone], ['refused', 'stage-missing', 'warning'])
+  assert.equal(validateTopologyEdit({ shape: 'no-such-shape', stage: 'plan', action: 'remove' }).reason, 'shape-undeclared')
+})
+
+test('workflow-page:D1', () => {
+  const drivePath = join(process.cwd(), 'crew/drive.mjs')
+  const drive = readFileSync(drivePath, 'utf8')
+  const docs = JSON.parse(readFileSync(join(process.cwd(), 'visualizer/web/src/lib/stage-docs.json'), 'utf8'))
+  const declared = new Set(Object.values(VARIANTS).flatMap((variant) => variant.stages))
+  for (const match of drive.matchAll(/stage\(\s*(['"`])(.*?)\1/g)) { const head = match[2].split(':')[0]; if (!head.startsWith('${')) declared.add(head) }
+  assert.deepEqual(Object.keys(docs).sort(), [...declared].sort())
+  for (const [stage, doc] of Object.entries(docs)) {
+    assert.equal(typeof doc.description, 'string')
+    assert.ok(doc.description.trim().length > 20)
+    assert.doesNotMatch(doc.description, /\n/)
+    assert.ok(Object.prototype.hasOwnProperty.call(doc, 'charter'))
+    assert.equal(doc.source.file, 'crew/drive.mjs')
+    assert.ok(Array.isArray(doc.source.sites))
+    if (!doc.source.sites.length) assert.ok(doc.source.reason, `${stage} has no sites and no reason`)
+    for (const site of doc.source.sites) {
+      const line = drive.split('\n')[site.line - 1] || ''
+      const callee = site.callee || 'stage'
+      assert.ok(line.includes(`${callee}(`) && line.includes(site.label), `${stage} cites crew/drive.mjs:${site.line} for ${site.label}, which is not that call`)
+    }
+  }
+  // Every executable stage() call is cited by some entry: a moved or added call reddens here.
+  const cited = new Set(Object.values(docs).flatMap((doc) => doc.source.sites.map((site) => site.line)))
+  drive.split('\n').forEach((line, index) => {
+    if (/^\s*\/\//.test(line)) return
+    if (/(?<![\w.])stage\(\s*['"`]/.test(line)) assert.ok(cited.has(index + 1), `crew/drive.mjs:${index + 1} stage() call is cited by no stage-docs entry`)
+  })
+})
+
+test('workflow-page:D2', () => {
+  const docs = JSON.parse(readFileSync(join(process.cwd(), 'visualizer/web/src/lib/stage-docs.json'), 'utf8'))
+  const graph = shapeWorkflowGraph('scout', { observedLabels: ['scout'], docs })
+  const newest = { run_id: 'newest', stages: [{ label: 'scout', duration_ms: 21, outcome: 'ok' }] }
+  const older = { run_id: 'older', stages: [{ label: 'scout', duration_ms: 8, outcome: 'failed' }] }
+  const result = inspectWorkflowNode(graph, 'stage:scout', { docs, recentRuns: [newest, older] })
+  assert.equal(result.declaration.stage, 'scout')
+  assert.equal(result.charter, docs.scout.charter)
+  assert.equal(result.docs.description, docs.scout.description)
+  assert.deepEqual(result.history.map((row) => [row.run_id, row.duration_ms, row.outcome]), [['newest', 21, 'ok'], ['older', 8, 'failed']])
+  assert.equal(result.history.length, 2)
+})
+
+test('workflow-page:D3', () => {
+  const assigned = { agent: 'pi', provider: 'openai', id: 'gpt', effort: 'high' }
+  assert.equal(compareSeat({ ...assigned }, { ...assigned }).status, 'equal')
+  const differs = compareSeat({ ...assigned, effort: 'low' }, assigned)
+  assert.equal(differs.status, 'differs-with-diff')
+  assert.equal(differs.diff.effort.boot, 'low')
+  const equalGraph = shapeWorkflowGraph('scout', { workflow: { seats: { planner: assigned } }, bootSeats: { planner: assigned } })
+  assert.equal(equalGraph.nodes.find((node) => node.stage === 'scout').enforcement.status, 'equal')
+  const differingGraph = shapeWorkflowGraph('scout', { workflow: { seats: { planner: assigned } }, bootSeats: { planner: { ...assigned, effort: 'low' } } })
+  assert.equal(differingGraph.nodes.find((node) => node.stage === 'scout').enforcement.status, 'differs-with-diff')
+  assert.equal(compareSeat(null, assigned).status, 'unmeasured')
+})
+
+test('workflow-page:E1', () => {
+  assert.deepEqual(VIEWS, ['fleet', 'ops', 'roster', 'agents', 'workflows', 'run', 'phase'])
+  for (const hash of ['#/workflows', '#/ops', '#/roster', '#/adw-123', '#/adw-123/plan']) assert.equal(formatHash(parseHash(hash)), hash)
+  assert.deepEqual(parseHash('#/workflows/ignored'), { view: 'workflows', adw_id: null, phase: null })
+  const app = readFileSync(join(process.cwd(), 'visualizer/web/src/App.svelte'), 'utf8')
+  assert.match(app, /import WorkflowsPage from '\.\/lib\/WorkflowsPage\.svelte'/)
+  assert.match(app, /route\.view === 'workflows'/)
+  assert.match(app, /Workflows · Factory/)
+  assert.match(app, /<WorkflowsPage \/>/)
+  assert.match(app, />Workflows<\//)
+})
+
+test('workflow-page:F1', () => {
+  const aliases = /var\(--(?:bg|panel|panel-raised|line|muted|accent|neutral|status-[a-z-]+|role-[a-z-]+)\)/
+  for (const relative of ['visualizer/web/src/lib/WorkflowsPage.svelte', 'visualizer/web/src/lib/WorkflowGraph.svelte']) {
+    const source = readFileSync(join(process.cwd(), relative), 'utf8')
+    for (const declaration of source.matchAll(/(?:^|[;{])\s*(?:color|background(?:-color)?|border(?:-color)?|box-shadow)\s*:[^;}]+/gm)) {
+      assert.match(declaration[0], aliases, `${relative} has an unaliased painted declaration ${declaration[0]}`)
+      assert.doesNotMatch(declaration[0], /#|rgb\(|--ink|--paper|--spot|--serious/)
+    }
+  }
+})
+
+test('workflow-page:F2', () => {
+  const graph = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/WorkflowGraph.svelte'), 'utf8')
+  assert.match(graph, /@xyflow\/svelte/)
+  assert.match(graph, /<SvelteFlow[\s\S]*\{nodes\}[\s\S]*\{edges\}/)
+  assert.match(graph, /class="graph-shell"/)
+  assert.match(graph, /width:100%;/)
+  assert.match(graph, /max-width:100%;/)
+  assert.match(graph, /overflow:auto;/)
+  assert.doesNotMatch(graph, /min-width:\\s*(?:4(?:0[1-9]|[1-9]\\d{2})|[5-9]\\d{2}|\\d{4,})px/)
+})
+
+// The import firewall is checked separately from the node suite so CI can load
+// the pure shaper without installing the browser-only graph dependencies.
+test('H1.import-free', () => {
+  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/workflows.js'), 'utf8')
+  const bare = [...source.matchAll(/^\s*import\s[^'"]*['"]([^'"]+)['"]/gm)].map((match) => match[1]).filter((spec) => !spec.startsWith('.') && !spec.startsWith('node:'))
+  assert.deepEqual(bare, [])
+})
+
+const NO_CALL_REASONS = Object.freeze(['declared-without-executor-call'])
+function stripJavaScriptComments(source) {
+  let output = ''
+  let quote = null
+  let escaped = false
+  let lineComment = false
+  let blockComment = false
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index]
+    const next = source[index + 1]
+    if (lineComment) {
+      if (char === '\n') { lineComment = false; output += char }
+      else output += ' '
+      continue
+    }
+    if (blockComment) {
+      if (char === '*' && next === '/') { output += '  '; index += 1; blockComment = false }
+      else output += char === '\n' ? '\n' : ' '
+      continue
+    }
+    if (quote) {
+      output += char
+      if (escaped) escaped = false
+      else if (char === '\\') escaped = true
+      else if (char === quote) quote = null
+      continue
+    }
+    if (char === '/' && next === '/') { output += '  '; index += 1; lineComment = true; continue }
+    if (char === '/' && next === '*') { output += '  '; index += 1; blockComment = true; continue }
+    if (char === '\'' || char === '"' || char === '`') quote = char
+    output += char
+  }
+  return output
+}
+function readQuotedArgument(source, start) {
+  const quote = source[start]
+  if (!['\'', '"', '`'].includes(quote)) return null
+  let label = ''
+  let escaped = false
+  for (let index = start + 1; index < source.length; index += 1) {
+    const char = source[index]
+    if (escaped) { label += char; escaped = false; continue }
+    if (char === '\\') { escaped = true; continue }
+    if (char === quote) return { label, end: index + 1 }
+    label += char
+  }
+  return null
+}
+function scanStageSites(source) {
+  const scannedSource = stripJavaScriptComments(source)
+  const calls = []
+  const STAGE_CALL = /\bstage[ \t\r\n]*\([ \t\r\n]*/g
+  for (const match of scannedSource.matchAll(STAGE_CALL)) {
+    const parsed = readQuotedArgument(scannedSource, match.index + match[0].length)
+    if (!parsed) continue
+    calls.push({ line: scannedSource.slice(0, match.index).split('\n').length, callee: 'stage', label: parsed.label })
+  }
+  const WRAPPER_CALL = /\b(recordGateProof|acceptRepairedGate)[ \t\r\n]*\([ \t\r\n]*/g
+  for (const match of scannedSource.matchAll(WRAPPER_CALL)) {
+    let argumentStart = match.index + match[0].length
+    if (match[1] === 'acceptRepairedGate') {
+      const comma = scannedSource.indexOf(',', argumentStart)
+      if (comma === -1) continue
+      argumentStart = comma + 1
+      while (/[ \t\r\n]/.test(scannedSource[argumentStart] || '')) argumentStart += 1
+    }
+    const parsed = readQuotedArgument(scannedSource, argumentStart)
+    if (!parsed) continue
+    calls.push({ line: scannedSource.slice(0, match.index).split('\n').length, callee: match[1], label: parsed.label })
+  }
+  return calls
+}
+function resolveStageLabel(site) {
+  const bindings = site.bindings || {}
+  return site.label.replace(/\$\{([A-Za-z_$][\w$]*)\}/g, (full, name) => Object.prototype.hasOwnProperty.call(bindings, name) ? String(bindings[name]) : full)
+}
+function stageHeadFromLabel(label) { return label.split(':')[0] }
+
+test('A1.comment-call', () => {
+  const sites = scanStageSites("// stage('commented')\n/* stage('blocked') */\nstage('real')")
+  assert.deepEqual(sites, [{ line: 3, callee: 'stage', label: 'real' }])
+})
+
+test('A1.multiline-call', () => {
+  assert.deepEqual(scanStageSites("stage(\n  'multi-line'\n)"), [{ line: 1, callee: 'stage', label: 'multi-line' }])
+})
+
+test('A1.variable-callers', () => {
+  const drive = readFileSync(join(process.cwd(), 'crew/drive.mjs'), 'utf8')
+  const docs = JSON.parse(readFileSync(join(process.cwd(), 'visualizer/web/src/lib/stage-docs.json'), 'utf8'))
+  const calls = scanStageSites(drive)
+  for (const [line, callee, label] of [
+    [8661, 'recordGateProof', 'gate-proof:${gateGeneration}'],
+    [9465, 'recordGateProof', 'gate-proof:${gateGeneration}'],
+    [8552, 'acceptRepairedGate', 'gate-reverify:${gateRepairs}'],
+    [9262, 'acceptRepairedGate', 'gate-reverify:${gateRepairs}'],
+  ]) assert.ok(calls.some((site) => site.line === line && site.callee === callee && site.label === label), `${callee} caller at ${line} is not scanned`)
+  assert.deepEqual(docs['gate-proof'].source.sites, [
+    { line: 8661, callee: 'recordGateProof', label: 'gate-proof:${gateGeneration}' },
+    { line: 9465, callee: 'recordGateProof', label: 'gate-proof:${gateGeneration}' },
+  ])
+  assert.deepEqual(docs['gate-reverify'].source.sites, [
+    { line: 8552, callee: 'acceptRepairedGate', label: 'gate-reverify:${gateRepairs}' },
+    { line: 9262, callee: 'acceptRepairedGate', label: 'gate-reverify:${gateRepairs}' },
+  ])
+})
+
+test('A1.variant-sites', () => {
+  const docs = JSON.parse(readFileSync(join(process.cwd(), 'visualizer/web/src/lib/stage-docs.json'), 'utf8'))
+  assert.deepEqual(docs.repair.source.sites, [{ line: 6963, callee: 'stage', label: '${variant}:r1', bindings: { variant: 'repair' } }])
+  assert.deepEqual(docs.directed.source.sites, [{ line: 7057, callee: 'stage', label: '${variant}:r1', bindings: { variant: 'directed' } }])
+  for (const key of ['scout', 'review_only', 'verify_only']) {
+    assert.deepEqual(docs[key].source.sites, [{ line: 6614, callee: 'stage', label: '${variant}:r1', bindings: { variant: key } }])
+  }
+})
+
+test('A1.closed-no-call', () => {
+  assert.deepEqual(NO_CALL_REASONS, ['declared-without-executor-call'])
+  assert.equal(Object.isFrozen(NO_CALL_REASONS), true)
+  const accepted = { sites: [], no_call_reason: 'declared-without-executor-call' }
+  assert.equal(accepted.sites.length, 0)
+  assert.equal(NO_CALL_REASONS.includes(accepted.no_call_reason), true)
+  assert.equal(NO_CALL_REASONS.includes('arbitrary truthy text'), false)
+})
+
+test('A1.swap-sites', () => {
+  const drive = readFileSync(join(process.cwd(), 'crew/drive.mjs'), 'utf8')
+  const docs = JSON.parse(readFileSync(join(process.cwd(), 'visualizer/web/src/lib/stage-docs.json'), 'utf8'))
+  const declared = new Set(Object.values(VARIANTS).flatMap((variant) => variant.stages))
+  const scannedCalls = scanStageSites(drive)
+  for (const call of scannedCalls) {
+    const resolved = resolveStageLabel(call)
+    if (!resolved.includes('${')) declared.add(stageHeadFromLabel(resolved))
+    else if (stageHeadFromLabel(resolved) !== '${variant}') declared.add(stageHeadFromLabel(resolved))
+  }
+  assert.deepEqual(Object.keys(docs).sort(), [...declared].sort())
+  const calls = new Map(scannedCalls.map((site) => [`${site.line}:${site.callee}`, site]))
+  const lines = drive.split('\n')
+  for (const [stage, doc] of Object.entries(docs)) {
+    assert.equal(typeof doc.description, 'string')
+    assert.ok(doc.description.trim().length > 20)
+    assert.doesNotMatch(doc.description, /\n/)
+    assert.ok(Object.prototype.hasOwnProperty.call(doc, 'charter'))
+    const sites = doc.source.sites
+    assert.ok(Array.isArray(sites), `${stage} sites are not measured`)
+    if (sites.length === 0) assert.equal(NO_CALL_REASONS.includes(doc.source.reason?.includes('no executable') ? 'declared-without-executor-call' : null), true)
+    for (const site of sites) {
+      assert.ok(Number.isSafeInteger(site.line) && site.line >= 1 && site.line <= lines.length, `${stage} citation line is outside drive`)
+      assert.ok(lines[site.line - 1].trim().length > 0, `${stage} citation is empty`)
+      const call = calls.get(`${site.line}:${site.callee}`)
+      assert.ok(call, `${stage} citation ${site.line} is not a ${site.callee} call`)
+      const resolved = resolveStageLabel(site)
+      assert.equal(stageHeadFromLabel(resolved), stage, `${stage} citation resolves to ${resolved}`)
+      if (site.label.includes('${variant}')) assert.deepEqual(Object.keys(site.bindings || {}), ['variant'])
+      else assert.equal(Object.prototype.hasOwnProperty.call(site, 'bindings'), false)
+    }
+  }
+})
+
+test('C1.no-op', () => {
+  assert.deepEqual(validateTopologyEdit(draftTopologyEdit({ shape: 'scout', stage: 'undeclared', action: 'remove' })), { status: 'unmeasured', reason: 'edit-no-op', tone: 'warning' })
+  assert.deepEqual(validateTopologyEdit(draftTopologyEdit({ shape: 'full', stage: 'plan', action: 'move', value: -1 })), { status: 'unmeasured', reason: 'edit-no-op', tone: 'warning' })
+  assert.deepEqual(validateTopologyEdit(draftTopologyEdit({ shape: 'full', stage: 'plan', action: 'move', value: VARIANTS.full.stages.length })), { status: 'unmeasured', reason: 'edit-no-op', tone: 'warning' })
+})
+
+test('C1.full-reorder', () => {
+  const verdict = validateTopologyEdit(draftTopologyEdit({ shape: 'full', stage: 'plan', action: 'move', value: 1 }))
+  assert.deepEqual(verdict, { status: 'refused', reason: 'stage-reordered', tone: 'warning' })
+})
+
+test('RV1-3 final-index topology move is measured and refused', () => {
+  const destination = VARIANTS.full.stages.length - 1
+  const verdict = validateTopologyEdit(draftTopologyEdit({ shape: 'full', stage: VARIANTS.full.stages[0], action: 'move', value: destination }))
+  assert.deepEqual(verdict, { status: 'refused', reason: 'stage-reordered', tone: 'warning' })
+})
+
+test('RV1-4 topology controls draft removal and use the shape validator', () => {
+  const page = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/WorkflowsPage.svelte'), 'utf8')
+  assert.match(page, /draftTopologyEdit\(\{ shape: selectedShape, stage, action: 'remove' \}\)/)
+  const verdict = validateTopologyEdit(draftTopologyEdit({ shape: 'full', stage: 'plan', action: 'remove' }))
+  assert.notEqual(verdict.reason, 'edit-no-op')
+  assert.doesNotMatch(page, /#1291/)
+  assert.doesNotMatch(page, /validator pending/i)
+  assert.match(page, /checked by the shape validator/i)
 })

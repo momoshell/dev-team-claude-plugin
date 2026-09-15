@@ -579,10 +579,10 @@ const RECORDED_SUITE_SAMPLES = Object.freeze([
   ["test/visualizer-local-env.test.mjs",0.07176354199647904,2,null],
   ["test/visualizer-model-catalog.test.mjs",0.1519699580669403,12,null],
   ["test/visualizer-model-directory.test.mjs",0.11101808297634125,7,null],
-  ["test/visualizer-panels.test.mjs",0.21324924993515015,161,null],
+  ["test/visualizer-panels.test.mjs",0.336350958108902,188,null],
   ["test/visualizer-returns.test.mjs",0.07350987499952316,1,null],
   ["test/visualizer-roster-edit.test.mjs",0.14319766601920128,30,null],
-  ["test/visualizer-server.test.mjs",7.242753708004951,92,null],
+  ["test/visualizer-server.test.mjs",7.260019000053406,106,null],
   ["test/visualizer-shape.test.mjs",0.15336395895481109,78,null],
   ["test/visualizer-teardown.test.mjs",0.20401062497496605,8,null],
   ["test/visualizer-trajectory.test.mjs",0.13766058298945427,36,null],
@@ -650,13 +650,13 @@ const RECORDED_SLOWEST_TESTS = Object.freeze({
   "measureSuite takes three wall samples, derives runner count, and sorts TAP durations"
 ]),
   "test/visualizer-panels.test.mjs": Object.freeze([
-  "the feed carries the crew state it measured, and says so when it measured none",
-  "a settled row says its crew state was intentionally not read",
-  "the feed reads crew state only for rows the ledger still calls running"
+  "A1.variable-callers",
+  "A1.swap-sites",
+  "workflow-page:D1"
 ]),
   "test/visualizer-server.test.mjs": Object.freeze([
   "raw Host values are refused without killing the visualizer",
-  "HEAD is supported for GET routes while write routes retain their Allow value",
+  "viz-cli-unknown-flag-refusal — an unknown flag or a bad flag value refuses with exit 2 and never leaks a stack",
   "viz-port-env-door — a bad DEVTEAM_VIZ_PORT refuses like the flag does"
 ]),
   "test/visualizer-shape.test.mjs": Object.freeze([

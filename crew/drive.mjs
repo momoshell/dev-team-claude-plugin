@@ -1,6 +1,7 @@
 import { draftPrBody, draftPrTitle, followUpIssueBody, followUpIssueTitle, gateSummaryLine, residualList } from './converge.mjs'
 import { adjudicatePanel, fuseFindings, escalationQuestion, crashEscalationQuestion } from './escalation-policy.mjs'
 import { VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT } from './variants.mjs'
+import { shapeValidationDefect } from './shape-validator.mjs'
 import { protectedHitsIn, resolveProtectedPaths, PROMPT_SURFACE } from './protected-paths.mjs'
 import { parseFenceScope, validateFenceScope, fenceScopesIntersect, fenceScopeContains } from './fence-scope.mjs'
 import { homedir } from 'node:os'
@@ -766,64 +767,7 @@ export function envelopeFieldMetadataDefect(field, envelopeFields = []) {
 // reviewed loop: the executor implements `full`'s stage set, except for the
 // one declared bounded-triage topology whose sources and identity are checked
 // below. Any other reviewed subset is refused before it can reach stage().
-export function shapeDefect(shape, variantName) {
-  if (!shape || typeof shape !== 'object') return 'no declaration'
-  if (!EXECUTIONS.includes(shape.execution)) return `execution must be one of ${EXECUTIONS.join(', ')}`
-  if (!WRITE_SURFACES.includes(shape.writes)) return `writes must be one of ${WRITE_SURFACES.join(', ')}`
-  if (typeof shape.accepted_by !== 'string' || !shape.accepted_by.trim()) return 'accepted_by must say what accepts this shape'
-  if (!Array.isArray(shape.stages) || shape.stages.length === 0) return 'stages must declare the heads this shape emits'
-  if (!Array.isArray(shape.envelope_fields)) return 'envelope_fields must be an array'
-  for (const key of ['strict_identity', 'report_values']) {
-    if (hasOwn(shape, key) && typeof shape[key] !== 'boolean') return `${key} must be boolean`
-  }
-  const fieldNames = new Set()
-  for (const field of shape.envelope_fields) {
-    if (!ENVELOPE_FIELD_KINDS.includes(field?.kind)) return `envelope field ${JSON.stringify(field?.name)} must declare a kind in ${ENVELOPE_FIELD_KINDS.join(', ')}`
-    if (typeof field.name !== 'string' || !field.name || fieldNames.has(field.name)) return 'envelope fields must have unique non-empty names'
-    fieldNames.add(field.name)
-    const metadataDefect = envelopeFieldMetadataDefect(field, shape.envelope_fields)
-    if (metadataDefect) return metadataDefect
-  }
-  if (shape.execution === 'reviewed') {
-    const missing = VARIANTS.full.stages.filter((head) => !shape.stages.includes(head))
-    const topology = missing.length ? PARTIAL_REVIEWED[variantName] ?? null : null
-    const seats = topology ? topology.required_seats : 'tier'
-    if (Array.isArray(seats)) {
-      if (!Array.isArray(shape.required_seats) || shape.required_seats.length !== seats.length
-        || seats.some((role, i) => shape.required_seats[i] !== role)) {
-        return `the ${variantName} shape runs exactly ${seats.join(', ')}; required_seats must be that list`
-      }
-    } else if (shape.required_seats !== 'tier') {
-      return 'a reviewed shape is seated by the tier; required_seats must be "tier"'
-    }
-    if (!missing.length) return null
-    const undeclared = sourcesDefect(shape.sources)
-    if (undeclared) {
-      return `the reviewed executor implements exactly the full stage set; this declaration omits ${missing.join(', ')}, and a partial reviewed shape needs declared sources for scope, lane and gate before it can be run: ${undeclared}`
-    }
-    if (!topology) {
-      return `the partial reviewed shapes this driver implements are ${Object.keys(PARTIAL_REVIEWED).join(' and ')}; a declaration registered as ${JSON.stringify(variantName ?? null)} would open ${JSON.stringify(`${variantName}:r1`)}, a stage it does not declare`
-    }
-    const sourced = Object.keys(SHAPE_SOURCES).map((key) => `${key}=${shape.sources[key]}`).join(', ')
-    if (Object.keys(SHAPE_SOURCES).some((key) => shape.sources[key] !== topology.sources[key])) {
-      return `the ${variantName} shape sources ${Object.entries(topology.sources).map(([k, v]) => `${k}=${v}`).join(', ')}; this declaration sources ${sourced}`
-    }
-    if (shape.stages.length !== topology.stages.length || topology.stages.some((head, i) => shape.stages[i] !== head)) {
-      return `a ${variantName} shape runs exactly ${topology.stages.join(', ')}; this declaration runs ${shape.stages.join(', ')}`
-    }
-    return null
-  }
-  const seats = shape.required_seats
-  if (!Array.isArray(seats) || seats.length !== 1 || typeof seats[0] !== 'string' || !seats[0]) {
-    return 'an envelope shape runs exactly one declared seat; required_seats must be a one-role array'
-  }
-  if (!stageEnabled(shape, 'envelope-accept')) return 'an envelope shape must declare its envelope-accept stage'
-  if (shape.writes !== 'none') return 'an envelope shape has no plan to source a write surface from; writes must be "none"'
-  if (!stageEnabled(shape, 'scope-gate')) {
-    return 'a shape that claims to write nothing must declare the scope-gate stage that proves it'
-  }
-  return null
-}
+export function shapeDefect(shape, variantName) { return shapeValidationDefect(shape, variantName).detail }
 
 export const MODIFIER_OUTCOMES = Object.freeze(['applied', 'transport', 'exhausted', 'no-tier', 'agent-change', 'spent'])
 

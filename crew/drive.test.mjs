@@ -6,6 +6,7 @@ import assert from 'node:assert/strict'
 import {
   B44_LEADLESS_CTX, adversarialPlanEnv, CENSUS_ROW_ABSENT, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_RUNS, CONVERGE_CTX, CONVERGE_GATE, CRASH_WHY, CTX, CTX_DIRECTED, CTX_REPAIR, CTX_TL, DEFAULT_VARIANT, DIRECTED_BRIEF_PATH, DIRECTED_BRIEF_TEXT, DIRECTED_FILES, DRIVE_JOURNAL_EXPECTED, D_ASK, D_AUTO, D_GREEN_GATE, D_PATCH_A, D_PATCH_B, D_PATCH_EMPTY_PATH, D_PATCH_MIXED_MODE, D_PATCH_MIXED_RENAME, D_RED_GATE, ENVELOPE_DEBRIS, GATE_CUSTODIAN, GATE_SUMMARY_PREFIX, HEALTHY_RESULT, JOURNAL_CHANNELS, JOURNAL_CHANNEL_NAMES, JUDGE_TIER, MAX_QUESTIONS, MODIFIER_OUTCOMES, PHASE_SLOT_WAIT_EVENT, PROTECTED_PATHS, RED, REPO_ROOT, REVIEWED_CORE_STAGES, S843_ADDED, S843_D2, S843_RUNS, SCOPE_REFUSALS, SEAT_REFUSAL_STAGE, SENSITIVITY_FLOOR, SHAPE_SOURCES, SKILL_NAMES, SUITE_SLOT_PHASES, SUITE_SLOT_PHASE_NAMES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, TRIAGE_SOURCES, TRIAGE_STAGES, TRIAGE_STAGE_HEAD, VARIANTS, VARIANT_NAMES, WAITS_S, WAIT_FLAGS, WAIT_REFUSALS, WAIT_ROLES, WAIT_SECONDS_MAX, WAIT_SECONDS_MIN, ZERO_CAPACITY_LOGS, ZERO_CAPACITY_RESULT, answerBounceLines, assertSeats, b127GatePaths, b127InvokeGate, b318Builders, b318ReviewGrants, b318SiteA, b318SiteB, b44AssertLeadlessGate, b44GateFixIo, b44GatePlan, b44MidRunRepairIo, baselineGateDefect, bothExhaustionPointsScenario, buildEnv, carveRun, checkEnv, checkFailureLine, closeoutIo, convergeIo, convergeRun, crashIo, crashRun, dApplyCommand, dAutoRows, dBuilders, dGitApplies, dLeads, dReviewEnv, deliberateRun, directSlotRun, dispositionIo, divergentPlanScenario, driveJournalSites, driveTask, enforcementPreamble, envelopeDefect, envelopeFieldsPresent, escalationStageRows, exhaustionAcceptIo, existsSync, fakeIo, fenceBase, fenceDiff, fenceSpan, gateReapCommand, guardedWrite, join, laneFence, laneFenceHits, laneProbeCommand, laneProbeKinds, leadEnv, matchAnswers, mkdirSync, normaliseJournalTimes, operationalRow, osCpus, parseDirectedBrief, parseGateSummary, parseQuestions, parseSuiteCounts, patchTargets, phaseTrace, planEnv, postCommitCrashRun, protectedPlanEnv, protectedReseatRefusal, questionConsultLines, readFileSync, reconEnv, recordRow, refuseWait, replayResumeStages, resolveProtectedPaths, resolveWaits, resumeDoneRows, resumeKeys, resumeStageRows, reviewEnv, rmSync, runChild, runCmd, runCmdFixture, s843Ctx, s843Io, s843PathsIn, s843PlanEnv, scopeBounceBrief, scopeMatcher, scopeRefusal, scratchDir, shapeDefect, shellArg, shellWords, slotCtx, slotFactory, sourcesDefect, spawnSync, stageEnabled, suiteRefusalEnv, throwAutoFixWrites, throwingWaitRun, tmpdir, traceLabels, triageEnv, undeclaredStage, validateScopeEntries, waitsCtx, waitsRecord, writeFileSync,
 } from './drive-fixtures.mjs'
+import { EXECUTOR_TOPOLOGIES, SHAPE_DEFECT_CODES, shapeValidationDefect } from './shape-validator.mjs'
 import { ADVERSARY_REFUSAL, ADVERSARY_REFUSALS, ADVERSARY_TRIGGERS, CENSUS_CARRIER_FILES as RUNTIME_CENSUS_CARRIER_FILES, SCOPE_ADMISSION_SOURCES, SCOPE_REQUEST_KINDS, SEAT_ADMISSION_MAX as RUNTIME_SEAT_ADMISSION_MAX, SUITE_ADMISSION_MAX as RUNTIME_SUITE_ADMISSION_MAX, fenceScopeOf, fenceScopesIntersect, parseUnifiedZeroHunks, resolveAdversaryTrigger, scopeAdmissionDecision, scopeRequestOf, siblingSpanIntersects, suiteRedTestFiles, RESUME_CHECKPOINT_VERSION, RESUME_CHECKPOINT_FAMILIES, resumeCheckpointDefect, resumeTask, resumeWorktreeSha256 } from './drive.mjs'
 import { CENSUS_CARRIER_FILES as DISPATCH_CENSUS_CARRIER_FILES } from '../scripts/factory/dispatch-batch.mjs'
 import { ANTI_REPLAY_REFUSAL_REASONS } from './drive.mjs'
@@ -2143,6 +2144,180 @@ test('the daemon child preflight accepts the same planner-less directed crew', (
       rmSync(fixture.dir, { recursive: true, force: true })
     }
   }
+})
+
+test('coded shape topology is measured against every successful executor family', () => {
+  const head = (label) => String(label).split(':')[0]
+  const emittedHeads = (result) => result.details.stages.filter((label) => !['escalate', 'done'].includes(head(label))).map(head)
+  const strictEnvelopeIo = (envelope, role, runId) => {
+    const io = fakeIo({ changed: [] })
+    const assign = io.assign.bind(io)
+    io.assign = (spec) => ({ ...assign(spec), id: 'd1', returnPath: `${role}:1` })
+    io.wait = () => ({ ...envelope, assignment_id: 'd1', run_id: runId, role })
+    return io
+  }
+  const reviewOnlyEnvelope = {
+    status: 'done', role: 'reviewer', summary: 'review complete', artifacts: [`${TD}/review.md`],
+    details: { base: 'base-sha', head: 'head-sha', outcome: 'no-findings', findings: [] },
+  }
+  const verifyOnlyEnvelope = {
+    status: 'done', role: 'reviewer', summary: 'verification complete', artifacts: [`${TD}/verification.md`],
+    details: {
+      verification_targets: [{ id: 'target-1', target: 'the declared behavior' }],
+      environment_assumptions: [{ name: 'runtime', assumption: 'the supported runtime is available' }],
+      product_verdict: 'passing',
+      check_matrix: [{ id: 'target-1', status: 'passed', command: 'node --test', result: 'ok', evidence: 'captured output' }],
+      environment: [{ name: 'runtime', observed: 'node test runtime' }],
+      environmental_blockers: [],
+    },
+  }
+  const red = `red\n${GATE_SUMMARY_PREFIX} {"total":2,"failed":2,"errored":0}`
+  const green = `${GATE_SUMMARY_PREFIX} {"total":2,"failed":0,"errored":0}`
+  const fixtures = {
+    full: () => {
+      const io = fakeIo({
+        envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+        runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+        changed: ['a.mjs', 'a.test.mjs'],
+      })
+      return driveTask(CTX, io)
+    },
+    scout: () => driveTask({ ...CTX, variant: 'scout' }, fakeIo({ envelopes: { 'planner:1': reconEnv() }, changed: [] })),
+    review_only: () => driveTask(
+      { ...CTX, variant: 'review_only', run_id: 'run-review-783', roles: ['reviewer'], seatedRoles: ['reviewer'] },
+      strictEnvelopeIo(reviewOnlyEnvelope, 'reviewer', 'run-review-783'),
+    ),
+    repair: () => {
+      const io = fakeIo({
+        envelopes: { 'planner:1': triageEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+        runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+        changed: ['a.mjs'], files: TRIAGE_FILES,
+      })
+      return driveTask(CTX_REPAIR, io)
+    },
+    directed: () => {
+      const io = fakeIo({
+        files: DIRECTED_FILES,
+        envelopes: { 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+        runs: {
+          'directed-gate:1': { ok: false, output: red }, 'directed-gate': { ok: true, output: green },
+          'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+        },
+        cleanRuns: { 'directed-gate': { ok: false, output: red } },
+        changed: ['a.mjs', 'a.test.mjs'],
+      })
+      return driveTask(CTX_DIRECTED, io)
+    },
+    verify_only: () => driveTask(
+      { ...CTX, variant: 'verify_only', run_id: 'run-verify-783', roles: ['reviewer'], seatedRoles: ['reviewer'] },
+      strictEnvelopeIo(verifyOnlyEnvelope, 'reviewer', 'run-verify-783'),
+    ),
+  }
+  const measured = Object.entries(VARIANTS).map(([name, shape]) => {
+    const result = fixtures[name]()
+    assert.equal(result.status, 'done', name)
+    const row = {
+      name,
+      coded: shapeValidationDefect(shape, name),
+      executor: emittedHeads(result),
+      canonical: [...EXECUTOR_TOPOLOGIES[name].stages],
+      operations: {},
+    }
+    assert.deepEqual(row.coded, { defect: null, detail: null }, name)
+    assert.equal(row.executor.every((stage) => row.canonical.includes(stage)), true, name)
+    return row
+  })
+  assert.deepEqual(measured.map(({ name }) => name), Object.keys(VARIANTS))
+  assert.equal(measured.length, 6)
+
+  const allHeads = [...new Set(Object.values(VARIANTS).flatMap(({ stages }) => stages))]
+  for (const row of measured) {
+    const shape = VARIANTS[row.name]
+    const expected = EXECUTOR_TOPOLOGIES[row.name].stages
+    row.operations.extra = (() => {
+      const extra = allHeads.find((candidate) => !shape.stages.includes(candidate))
+      const coded = shapeValidationDefect({ ...shape, stages: [...shape.stages, extra] }, row.name)
+      assert.equal(coded.defect, 'stage-extra', `${row.name} known extra`)
+      return { coded, executor: row.executor }
+    })()
+    for (const removed of [shape.stages[0], 'scope-gate']) {
+      const coded = shapeValidationDefect({ ...shape, stages: shape.stages.filter((stage) => stage !== removed) }, row.name)
+      assert.equal(coded.defect, 'stage-missing', `${row.name} missing ${removed}`)
+      row.operations[removed === 'scope-gate' ? 'scope-gate' : 'required'] = { coded, executor: row.executor }
+    }
+    if (expected.length > 1) {
+      row.operations.swap = []
+      for (let left = 0; left < expected.length - 1; left += 1) {
+        for (let right = left + 1; right < expected.length; right += 1) {
+          const stages = [...shape.stages]
+          ;[stages[left], stages[right]] = [stages[right], stages[left]]
+          const coded = shapeValidationDefect({ ...shape, stages }, row.name)
+          const expectedDefect = row.name === 'full' ? null : 'stage-reordered'
+          assert.equal(coded.defect, expectedDefect, `${row.name} swap ${left}/${right}`)
+          row.operations.swap.push({ coded, executor: row.executor })
+        }
+      }
+    }
+  }
+  assert.equal(shapeValidationDefect({ ...VARIANTS.full, stages: [...VARIANTS.full.stages].reverse() }, 'full').defect, null)
+  assert.deepEqual([
+    ['scope-gate', 'review_only', 'envelope-accept'],
+    ['review_only', 'envelope-accept', 'scope-gate'],
+    ['review_only', 'scope-gate', 'gate', 'envelope-accept'],
+  ].map((stages) => shapeValidationDefect({ ...VARIANTS.review_only, stages }, 'review_only').defect), [
+    'stage-reordered', 'stage-reordered', 'stage-extra',
+  ])
+  assert.equal(shapeValidationDefect({ ...VARIANTS.full, stages: [...VARIANTS.full.stages, 'not-implemented'] }, 'full').defect, 'stage-unimplemented')
+  assert.equal(shapeValidationDefect(VARIANTS.full, 'not-a-variant').defect, 'stage-unimplemented')
+  assert.equal(shapeValidationDefect({ ...VARIANTS.scout, required_seats: ['reviewer'] }, 'scout').defect, 'seats-mismatch')
+  assert.equal(shapeValidationDefect({ ...VARIANTS.repair, sources: { ...VARIANTS.repair.sources, gate: 'brief' } }, 'repair').defect, 'sources-invalid')
+  assert.equal(shapeValidationDefect({ ...VARIANTS.directed, required_seats: ['reviewer', 'builder'] }, 'directed').defect, 'seats-mismatch')
+})
+
+test('shape validator exposes a frozen closed vocabulary, preserves legacy details, and is server-loadable', () => {
+  assert.equal(Object.isFrozen(SHAPE_DEFECT_CODES), true)
+  assert.deepEqual(SHAPE_DEFECT_CODES, [
+    'stage-reordered', 'stage-extra', 'stage-missing', 'stage-unimplemented', 'seats-mismatch',
+    'declaration-missing', 'execution-invalid', 'writes-invalid', 'accepted-by-invalid',
+    'stages-invalid', 'envelope-fields-invalid', 'boolean-field-invalid',
+    'envelope-field-kind-invalid', 'envelope-field-name-invalid', 'envelope-field-metadata-invalid',
+    'sources-invalid',
+  ])
+  const deeplyFrozen = (value) => {
+    if (!value || typeof value !== 'object') return true
+    assert.equal(Object.isFrozen(value), true)
+    for (const child of Object.values(value)) deeplyFrozen(child)
+    return true
+  }
+  deeplyFrozen(EXECUTOR_TOPOLOGIES)
+  for (const [name, shape] of Object.entries(VARIANTS)) assert.deepEqual(shapeValidationDefect(shape, name), { defect: null, detail: null })
+  const legacy = [
+    [null, undefined, 'no declaration'],
+    [{ ...VARIANTS.full, execution: 'unknown' }, 'full', 'execution must be one of reviewed, envelope'],
+    [{ ...VARIANTS.full, writes: 'unknown' }, 'full', 'writes must be one of planned, none'],
+    [{ ...VARIANTS.full, accepted_by: '' }, 'full', 'accepted_by must say what accepts this shape'],
+    [{ ...VARIANTS.full, stages: [] }, 'full', 'stages must declare the heads this shape emits'],
+    [{ ...VARIANTS.full, envelope_fields: null }, 'full', 'envelope_fields must be an array'],
+    [{ ...VARIANTS.full, strict_identity: 'yes' }, 'full', 'strict_identity must be boolean'],
+    [{ ...VARIANTS.scout, envelope_fields: [{ name: 'findings', kind: 'unknown' }] }, 'scout', 'envelope field "findings" must declare a kind in text, records'],
+    [{ ...VARIANTS.scout, envelope_fields: [{ name: '', kind: 'records' }] }, 'scout', 'envelope fields must have unique non-empty names'],
+    [{ ...VARIANTS.scout, envelope_fields: [{ name: 'findings', kind: 'records', item_fields: ['summary'], optional_item_fields: ['summary'] }] }, 'scout', 'envelope field "findings".optional_item_fields must be disjoint from item_fields'],
+    [{ ...VARIANTS.scout, stages: ['scout', 'scope-gate'] }, 'scout', 'an envelope shape must declare its envelope-accept stage'],
+    [{ ...VARIANTS.scout, writes: 'planned' }, 'scout', 'an envelope shape has no plan to source a write surface from; writes must be "none"'],
+    [{ ...VARIANTS.scout, stages: ['scout', 'envelope-accept'] }, 'scout', 'a shape that claims to write nothing must declare the scope-gate stage that proves it'],
+    [{ ...VARIANTS.directed, required_seats: ['builder'] }, 'directed', 'the directed shape runs exactly builder, reviewer; required_seats must be that list'],
+    [{ ...VARIANTS.repair, sources: undefined }, 'repair', 'the reviewed executor implements exactly the full stage set; this declaration omits plan, check, gate, gate-baseline, gate-repair, gate-reverify, gate-proof, converge, and a partial reviewed shape needs declared sources for scope, lane and gate before it can be run: no sources declared'],
+    [{ ...VARIANTS.repair }, 'quality', 'the partial reviewed shapes this driver implements are repair and directed; a declaration registered as "quality" would open "quality:r1", a stage it does not declare'],
+    [{ ...VARIANTS.repair, sources: { ...VARIANTS.repair.sources, gate: 'brief' } }, 'repair', 'the repair shape sources scope=inherited, lane=ctx, gate=none; this declaration sources scope=inherited, lane=ctx, gate=brief'],
+    [{ ...VARIANTS.repair, stages: [...VARIANTS.repair.stages].reverse() }, 'repair', 'a repair shape runs exactly repair, build, scope-gate, lane, review, commit, document, rebase, suite, publish; this declaration runs publish, suite, rebase, document, commit, review, lane, scope-gate, build, repair'],
+    [{ ...VARIANTS.full, required_seats: ['planner'] }, undefined, 'a reviewed shape is seated by the tier; required_seats must be "tier"'],
+  ]
+  for (const [shape, name, expected] of legacy) assert.equal(shapeDefect(shape, name), expected, expected)
+  const source = readFileSync(new URL('./shape-validator.mjs', import.meta.url), 'utf8')
+  assert.doesNotMatch(source, /^\s*import\b/m)
+  assert.doesNotMatch(source, /(?:drive\.mjs|scripts\/)/)
+  const loaded = spawnSync(process.execPath, ['--input-type=module', '-e', "const leaf = await import('./crew/shape-validator.mjs'); if (!leaf.shapeValidationDefect) process.exit(2)"], { cwd: REPO_ROOT, encoding: 'utf8' })
+  assert.equal(loaded.status, 0, loaded.stderr || loaded.stdout)
 })
 
 test('shape sources and the repair declaration are pinned', () => {

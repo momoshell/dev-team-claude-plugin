@@ -50,7 +50,7 @@
       "tools": [],
       "extensions": [],
       "agents": [],
-      "skills": [],
+      "skills": ["skills/lean-build/SKILL.md"],
       "advisor": false,
       "requires": [],
       "mcp_servers": [],

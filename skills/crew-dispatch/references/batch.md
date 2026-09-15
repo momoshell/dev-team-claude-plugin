@@ -167,7 +167,7 @@ Measured fact: test reach is scored against the whole carrier path, so a span fe
 Silence from this check is therefore an UNMEASURED clear, not a measured one: the carrier side, `matchOwn`, honours directory prefixes, while the trigger side does not.
 
 Newly tracked non-test owners are asserted by their path and current reach in the census carrier. Current/pristine owner and pair deltas are conditional on the owner being absent from pristine `HEAD`; no rotating repository-wide baseline is published.
-The newly tracked `skills/qa-test-writing/grants.json` and `skills/qa-test-writing/anchor-evidence.mjs` owners are each asserted as reached by `crew/pi/extensions/lab.test.mjs`; when an owner is absent from pristine `HEAD`, the census checks positive current/pristine owner and pair deltas plus integer deltas.
+The newly tracked `skills/lean-build/SKILL.md` owner is asserted as reached by `crew/drive-docs.test.mjs`; the `skills/qa-test-writing/grants.json` and `skills/qa-test-writing/anchor-evidence.mjs` owners are each asserted as reached by `crew/pi/extensions/lab.test.mjs`; when an owner is absent from pristine `HEAD`, the census checks positive current/pristine owner and pair deltas plus integer deltas.
 
 Re-measure with the shipped `collectTestReach` over the `git ls-files` partition.
 

@@ -78,6 +78,44 @@ function frozenCycleIo({ suite = [frozenRed(), frozenGreen()], builder2 = null, 
   return { io, ctx: dynamic, files, frozenPath, committed, current }
 }
 
+const suiteRed = (file, line = 1, detail = 'suite failure') => `FAIL file://${CTX.checkout}/${file}:${line}:1 ${detail}`
+
+function suiteCycleIo({ planFiles = ['a.mjs', 'a.test.mjs'], suite = [], changed = null, envelopes = {}, ctx = {}, laneFence = [], protectedPaths = [], onSuite = null, onAssign = null } = {}) {
+  const suiteRuns = Object.fromEntries(suite.map((result, index) => [`suite-cmd:${index + 1}`, result]))
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, files_in_scope: [...planFiles] } }),
+      'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(), 'builder:4': buildEnv(),
+      'reviewer:1': reviewEnv('pass'), 'reviewer:2': reviewEnv('pass'), 'reviewer:3': reviewEnv('pass'), 'reviewer:4': reviewEnv('pass'),
+      ...envelopes,
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, ...suiteRuns },
+    changed: changed ?? Array.from({ length: 12 }, () => [...planFiles]),
+  })
+  let activeProtected = [...protectedPaths]
+  const dynamic = { ...CTX, ...ctx, files_in_scope: [...planFiles], laneFence }
+  Object.defineProperty(dynamic, 'protectedPaths', { configurable: true, get: () => activeProtected })
+  const setProtected = (value) => { activeProtected = Array.isArray(value) ? [...value] : [] }
+  if (onSuite) {
+    const originalRun = io.run
+    let count = 0
+    io.run = function (command) {
+      const result = originalRun.call(this, command)
+      if (String(command) === 'suite-cmd') onSuite({ count: ++count, setProtected })
+      return result
+    }
+  }
+  if (onAssign) {
+    const originalAssign = io.assign
+    io.assign = function (spec) {
+      const result = originalAssign.call(this, spec)
+      onAssign({ spec, result, setProtected })
+      return result
+    }
+  }
+  return { ctx: dynamic, io }
+}
+
 test('A1 proof scope re-proves only changed mutation files', () => {
   const mutations = proofScopeMutations()
   const result = mutationProofScope({
@@ -5476,6 +5514,157 @@ test('F1 builder reversion witness records an unmeasurable fingerprint as null w
   assert.deepEqual(currentUnknown, { paths: null, reason: 'fingerprint-unmeasurable', cause: 'current-interrupted', detail: 'partial snapshot' })
   assert.deepEqual(currentIo.calls.logs.filter((row) => row.scope_gate?.reversion?.paths).at(-1)?.scope_gate.reversion.paths, ['round-one.mjs'])
   assert.equal(currentIo.calls.commits.length, 0)
+})
+
+test('A1 in-scope suite red bounces builder without widening', () => {
+  const base = ['a.mjs', 'a.test.mjs']
+  const directRed = suiteRed('a.test.mjs', 4, 'direct in-scope failure')
+  const direct = suiteCycleIo({
+    suite: [{ ok: false, output: directRed }, { ok: true, output: 'suite green' }],
+    changed: [base, base, base, base],
+  })
+  const directResult = driveTask(direct.ctx, direct.io)
+  assert.equal(directResult.status, 'done')
+  const directBuilders = direct.io.calls.assign.filter(({ role }) => role === 'builder')
+  assert.equal(directBuilders.length, 2)
+  assert.deepEqual(directBuilders.map(({ policy }) => policy.fence), [base, base])
+  assert.deepEqual(direct.io.calls.logs.filter((row) => row.scope_admission).map((row) => row.scope_admission.files), [[]])
+  assert.equal(directBuilders[1].note, 'suite-red-fix')
+  const directBrief = direct.io.calls.writes[`${TD}/suite-red-bounce-r1.md`]
+  assert.match(directBrief, /Failure excerpts \(all failing lines with 2 lines of context\)/)
+  assert.match(directBrief, /direct in-scope failure/)
+  assert.match(directBrief, new RegExp(`Plan: ${TD}/plan\\.md`))
+
+  const widenedRed = suiteRed('new.test.mjs', 7, 'widening failure')
+  const repeatedRed = suiteRed('a.test.mjs', 8, 'already-scoped failure')
+  const widened = suiteCycleIo({
+    suite: [{ ok: false, output: widenedRed }, { ok: false, output: repeatedRed }, { ok: true, output: 'suite green' }],
+    changed: [base, base, ['new.test.mjs'], ['new.test.mjs'], ['a.test.mjs'], ['a.test.mjs']],
+  })
+  const widenedResult = driveTask(widened.ctx, widened.io)
+  assert.equal(widenedResult.status, 'done')
+  const widenedBuilders = widened.io.calls.assign.filter(({ role }) => role === 'builder')
+  assert.equal(widenedBuilders.length, 3)
+  assert.notDeepEqual(widenedBuilders[0].policy.fence, widenedBuilders[1].policy.fence)
+  assert.deepEqual(widenedBuilders[1].policy.fence, widenedBuilders[2].policy.fence)
+  assert.ok(widenedBuilders.slice(1).every(({ note }) => note === 'suite-red-fix'))
+  assert.deepEqual(widened.io.calls.logs.filter((row) => row.scope_admission).map((row) => row.scope_admission.files), [['new.test.mjs'], []])
+  const widenedBrief = widened.io.calls.writes[`${TD}/suite-red-bounce-r1.md`]
+  assert.match(widenedBrief, /already-scoped failure/)
+  assert.match(widenedBrief, new RegExp(`Plan: ${TD}/plan\\.md`))
+})
+
+test('B1 repeated in-scope suite red escalates with spent limit', () => {
+  const base = ['a.mjs', 'a.test.mjs']
+  const red = suiteRed('a.test.mjs', 10, 'repeat in-scope failure')
+  const fixture = suiteCycleIo({
+    suite: [{ ok: false, output: red }, { ok: false, output: red }],
+    changed: [base, base, base, base],
+  })
+  const result = driveTask(fixture.ctx, fixture.io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'suite')
+  assert.match(result.details.escalation.why, /in-scope bounce limit of 1 has been spent/)
+  assert.equal(fixture.io.calls.assign.filter(({ role }) => role === 'builder').length, 2)
+  assert.equal(fixture.io.calls.writeLog.filter(({ path }) => path === `${TD}/suite-red-bounce-r1.md`).length, 1)
+  assert.equal(fixture.io.calls.logs.filter((row) => row.scope_admission).length, 1)
+})
+
+test('C1 held suite red still escalates', () => {
+  const held = 'held.test.mjs'
+  const fixture = suiteCycleIo({
+    suite: [{ ok: false, output: suiteRed(held, 11, 'held failure') }],
+    laneFence: [{ lane: 'sibling', files: [held] }],
+    changed: [['a.mjs', 'a.test.mjs']],
+  })
+  const result = driveTask(fixture.ctx, fixture.io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'suite')
+  assert.match(result.details.escalation.why, /held\.test\.mjs is owned by lane sibling/)
+  assert.equal(fixture.io.calls.assign.filter(({ role }) => role === 'builder').length, 1)
+  assert.equal(fixture.io.calls.logs.filter((row) => row.scope_admission).length, 0)
+  assert.equal(fixture.io.calls.writeLog.filter(({ path }) => path === `${TD}/suite-red-bounce-r1.md`).length, 0)
+})
+
+test('C1-protected already-scoped protected suite red still escalates', () => {
+  const protectedFile = 'already.test.mjs'
+  const base = ['a.mjs', 'a.test.mjs', protectedFile]
+  const fixture = suiteCycleIo({
+    planFiles: base,
+    suite: [
+      { ok: false, output: suiteRed('new.test.mjs', 12, 'widen before protected') },
+      { ok: false, output: suiteRed(protectedFile, 13, 'protected already-scoped failure') },
+    ],
+    changed: [base, base, ['new.test.mjs'], ['new.test.mjs']],
+    onSuite: ({ count, setProtected }) => { if (count === 1) setProtected([protectedFile]) },
+  })
+  const result = driveTask(fixture.ctx, fixture.io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'suite')
+  assert.match(result.details.escalation.why, /protected paths cannot be admitted/)
+  assert.match(result.details.escalation.why, new RegExp(protectedFile.replace('.', '\\.')))
+  assert.equal(fixture.io.calls.assign.filter(({ role }) => role === 'builder').length, 2)
+  assert.deepEqual(fixture.io.calls.logs.filter((row) => row.scope_admission).map((row) => row.scope_admission.files), [['new.test.mjs']])
+  assert.equal(fixture.io.calls.writeLog.filter(({ path }) => path === `${TD}/suite-red-bounce-r1.md`).length, 1)
+})
+
+test('C1-seat seat admission checks only new additions', () => {
+  const existing = 'new.test.mjs'
+  const added = 'seat-new.mjs'
+  const base = ['a.mjs', 'a.test.mjs']
+  const evidence = { kind: 'builder-request', output: `${existing} is already scoped; ${added} is needed` }
+  const request = {
+    scope_request: { kind: 'admit-files', files: [existing, added] }, evidence,
+    files_changed: [],
+  }
+  const fixture = suiteCycleIo({
+    suite: [{ ok: false, output: suiteRed(existing, 14, 'seed suite failure') }, { ok: true, output: 'suite green' }],
+    changed: [base, base, [added], [added]],
+    envelopes: {
+      'builder:2': buildEnv({ details: request }),
+      'builder:3': buildEnv({ details: { files_changed: [added], commit_message: 'seat repair' } }),
+    },
+    onAssign: ({ spec, setProtected }) => { if (spec.role === 'builder' && spec.note === 'suite-red-fix') setProtected([existing]) },
+  })
+  const result = driveTask(fixture.ctx, fixture.io)
+  assert.equal(result.status, 'done')
+  const seatRows = fixture.io.calls.logs.filter((row) => row.scope_admission?.source === 'seat-request').map((row) => row.scope_admission)
+  assert.equal(seatRows.length, 1)
+  assert.deepEqual(seatRows[0].files, [added])
+  const builders = fixture.io.calls.assign.filter(({ role }) => role === 'builder')
+  assert.equal(builders.length, 3)
+  assert.ok(builders[2].policy.fence.includes(existing))
+  assert.ok(builders[2].policy.fence.includes(added))
+})
+
+test('D1 mixed suite red admits only new unheld files', () => {
+  const existing = 'a.test.mjs'
+  const added = 'mixed-new.test.mjs'
+  const base = ['a.mjs', existing]
+  const red = `${suiteRed(existing, 15, 'existing failure')}\n${suiteRed(added, 16, 'new failure')}`
+  const fixture = suiteCycleIo({
+    suite: [{ ok: false, output: red }, { ok: true, output: 'suite green' }],
+    changed: [base, base, [added], [added]],
+  })
+  const result = driveTask(fixture.ctx, fixture.io)
+  assert.equal(result.status, 'done')
+  const row = fixture.io.calls.logs.find((entry) => entry.scope_admission?.source === 'suite-red')?.scope_admission
+  assert.deepEqual(row.files, [added])
+  assert.ok(fixture.io.calls.assign.find(({ role, n, policy }) => role === 'builder' && n === 2 && policy.fence.includes(added)))
+})
+
+test('E1 in-scope suite bounce journals already-scoped empty admission', () => {
+  const red = suiteRed('a.test.mjs', 17, 'empty admission failure')
+  const evidence = { output: red, commit: 'abc1234', test_files: ['a.test.mjs'] }
+  const fixture = suiteCycleIo({
+    suite: [{ ok: false, output: red }, { ok: true, output: 'suite green' }],
+    changed: [['a.mjs', 'a.test.mjs'], ['a.mjs', 'a.test.mjs']],
+  })
+  const result = driveTask(fixture.ctx, fixture.io)
+  assert.equal(result.status, 'done')
+  const rows = fixture.io.calls.logs.filter((entry) => entry.scope_admission).map((entry) => entry.scope_admission)
+  assert.deepEqual(rows, [{ source: 'suite-red', files: [], evidence, reason: 'already-scoped' }])
+  assert.equal(fixture.io.calls.assign.filter(({ role }) => role === 'builder').length, 2)
 })
 
 test('A1 moved frozen pins receive one post-commit repair and proceed', () => {

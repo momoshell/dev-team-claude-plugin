@@ -2529,6 +2529,7 @@ const fenceBreachList = (hits) => hits.map(({ entry, lane }) => `${entry} is own
 export const SCOPE_ADMISSION_SOURCES = Object.freeze(['suite-red', 'seat-request'])
 export const SCOPE_REQUEST_KINDS = Object.freeze(['admit-files'])
 export const SUITE_ADMISSION_MAX = 1
+export const SUITE_IN_SCOPE_BOUNCE_MAX = 1
 export const SEAT_ADMISSION_MAX = 1
 
 const scopeRequestRefusal = (reason, why) => ({
@@ -5654,6 +5655,7 @@ function runTask(ctx, io, crash) {
   let acceptedGatePath = art('gate.mjs')
   let admitScope = null; const logScopeAdmission = (row) => io.log(recordRow({ at: io.now(), scope_admission: row }))
   let suiteWidenings = 0
+  let suiteInScopeBounces = 0
   let seatWidenings = 0
   const seatPolicy = (role) => ({
     suiteCommand: ctx.suite ?? null,
@@ -7647,16 +7649,32 @@ function runTask(ctx, io, crash) {
     const decision = scopeAdmissionDecision({
       source, files, evidence,
       laneFence: pathOnlyLaneFence(ctx.laneFence, ctx.laneName),
-      suiteWidenings, seatWidenings,
+      suiteWidenings: source === 'suite-red' ? 0 : suiteWidenings, seatWidenings,
     })
     if (decision.action !== 'admit') return decision
     const additions = decision.files.filter((entry) => !scopeFiles.includes(entry))
-    if (additions.length === 0) {
-      return { action: 'escalate', reason: 'already-scoped', why: `scope admission refused: all ${source} files are already in the effective scope: ${decision.files.join(', ')}` }
-    }
-    const protectedAdditions = protectedHits(additions, ctx.protectedPaths)
+    const protectedCandidates = source === 'suite-red' ? decision.files : additions
+    const protectedAdditions = protectedHits(protectedCandidates, ctx.protectedPaths)
     if (protectedAdditions.length > 0) {
       return { action: 'escalate', reason: 'protected', why: `scope admission refused: protected paths cannot be admitted: ${protectedAdditions.join(', ')}` }
+    }
+    if (additions.length === 0) {
+      if (source !== 'suite-red') {
+        return { action: 'escalate', reason: 'already-scoped', why: `scope admission refused: all ${source} files are already in the effective scope: ${decision.files.join(', ')}` }
+      }
+      if (suiteInScopeBounces >= SUITE_IN_SCOPE_BOUNCE_MAX) {
+        return { action: 'escalate', reason: 'repeat', why: `scope admission refused: the suite-red in-scope bounce limit of ${SUITE_IN_SCOPE_BOUNCE_MAX} has been spent` }
+      }
+      suiteInScopeBounces += 1
+      const row = {
+        source, files: [], evidence,
+        ...(source === 'suite-red' && additions.length === 0 ? { reason: 'already-scoped' } : {}),
+      }
+      logScopeAdmission(row)
+      return { ...decision, action: 'bounce', reason: 'already-scoped', files: [] }
+    }
+    if (source === 'suite-red' && suiteWidenings >= SUITE_ADMISSION_MAX) {
+      return { action: 'escalate', reason: 'repeat', why: `scope admission refused: the suite-red widening limit of ${SUITE_ADMISSION_MAX} has been spent` }
     }
     if (additions.length > 0) {
       if (source === 'seat-request') seatWidenings += 1
@@ -10478,8 +10496,8 @@ function runTask(ctx, io, crash) {
       stageComplete()
       return escalate('suite', `full suite red after acceptance crosses a held scope: ${suiteAdmission.why}\n${suiteOutput.slice(-2000)}`, [], { commit: S.commit, suite_red: suiteEvidence })
     }
-    if (suiteAdmission.action === 'admit') {
-      suiteWidenings += 1
+    if (suiteAdmission.action === 'admit' || suiteAdmission.action === 'bounce') {
+      if (suiteAdmission.action === 'admit') suiteWidenings += 1
       const b = art(`suite-red-bounce-r${reviews + 1}.md`)
       failureUpgrade('suite', 'builder')
       const suiteLines = suiteOutput.split(/\r?\n/)
@@ -10490,14 +10508,20 @@ function runTask(ctx, io, crash) {
       }
       const retainedIndexes = [...retained].sort((a, b) => a - b)
       const failureExcerpt = { text: retainedIndexes.map((index) => suiteLines[index]).join('\n'), totalLines: suiteLines.length, elidedLines: suiteLines.length - retainedIndexes.length }
+      const scopeWording = suiteAdmission.action === 'admit'
+        ? `The accepted commit ${S.commit} made the full suite red. The failing output named these unheld test files, which are now admitted to the effective scope:`
+        : `The accepted commit ${S.commit} made the full suite red. The failing output named only test files already in the effective scope, so no scope widening is needed:`
+      const allowanceWording = suiteAdmission.action === 'admit'
+        ? 'Repair the implementation and rerun the builder/review/gate/commit cycle. This is the one permitted suite-red widening.'
+        : 'Repair the implementation and rerun the builder/review/gate/commit cycle. This is the one permitted in-scope suite-red bounce.'
       io.writeFile(b, [
         '# Suite-red scope admission bounce', '',
-        `The accepted commit ${S.commit} made the full suite red. The failing output named these unheld test files, which are now admitted to the effective scope:`,
+        scopeWording,
         ...suiteAdmission.files.map((entry) => `- ${entry}`),
         '', 'Failure excerpts (all failing lines with 2 lines of context):', failureExcerpt.text,
         `Elided ${failureExcerpt.elidedLines} of ${failureExcerpt.totalLines} suite output lines; full output remains in ${journal}.`,
         '', `Plan: ${planPath}`,
-        'Repair the implementation and rerun the builder/review/gate/commit cycle. This is the one permitted suite-red widening.',
+        allowanceWording,
       ].join('\n'))
       suiteBuildBrief = b
       suiteBuildNote = 'suite-red-fix'

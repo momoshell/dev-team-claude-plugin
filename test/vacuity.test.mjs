@@ -197,7 +197,7 @@ const VACUITY_EXEMPT = new Map([
   ['test/factory-make-brief.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['test/factory-make-brief.test.mjs'], 'by-design', 'audited 2026-09-10: the /BROAD_PIN/ section distinction is asserted at test/factory-make-brief.test.mjs:2983 and paired with a positive match for the same token in the Tripwires section.')],
   ['test/fixtures.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['test/fixtures.test.mjs'], 'by-design', 'audited 2026-09-09: the /toLowerCase/ source-text guard is at test/fixtures.test.mjs:20 and is paired with a positive production-rule import match.')],
   ['test/visualizer-server.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['test/visualizer-server.test.mjs'], 'flagged', 'audited 2026-09-15: method presence at test/visualizer-server.test.mjs:1957 sits beside a WRITERS.includes() pin and real row assertions that already cover it. Outside this lane\'s fence, so flagged rather than converted')],
-  ['test/visualizer-shape.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['test/visualizer-shape.test.mjs'], 'by-design', 'audited 2026-09-15: the /DatabaseSync/ import-firewall pin is at test/visualizer-shape.test.mjs:934 and is paired with a positive openLedger import match.')],
+  ['test/visualizer-shape.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['test/visualizer-shape.test.mjs'], 'by-design', 'audited 2026-09-15: the /DatabaseSync/ import-firewall pin is at test/visualizer-shape.test.mjs:937 and is paired with a positive openLedger import match.')],
 ])
 
 const VACUITY_SOURCE_SHA256 = Object.freeze({
@@ -212,7 +212,7 @@ const VACUITY_SOURCE_SHA256 = Object.freeze({
   'test/factory-make-brief.test.mjs': 'ce896b411ca3ceeae65e98b10d514ea46e27da164be3954fad3492470cfc45db',
   'test/fixtures.test.mjs': '20a7b9c408ca687f8378c3c70ced32c7943179fb520f6326384426f3bb698c55',
   'test/visualizer-server.test.mjs': 'b788cb163c8f4f20221a9eea91ca0682bd2cd36f83abe408d48ff725d854e9c9',
-  'test/visualizer-shape.test.mjs': 'fe2f8f16595cec57f3b8edfb78e6f071909cdcbada7eaa5e1d1c98eb48ef5830',
+  'test/visualizer-shape.test.mjs': '9ecedd683fd1c0a27621a99246c40d6e76fea22a711ecf9c824da797a52b1392',
 })
 
 const SKELETONREAD_FILE = 'crew/pi/extensions/skeletonread.test.mjs'

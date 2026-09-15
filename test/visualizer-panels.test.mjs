@@ -2497,6 +2497,25 @@ test('workflow-page:B1', () => {
   assert.equal(validateTopologyEdit({ shape: 'no-such-shape', stage: 'plan', action: 'remove' }).reason, 'shape-undeclared')
 })
 
+// Citations name a call by callee, label and its occurrence among identical calls, never by line
+// number: a line number is a derived value that every edit above it in crew/drive.mjs invalidates,
+// and it turned an unrelated driver lane red (b768). The line is resolved against the live source.
+function resolveStageSite(site, scanned) {
+  const matches = scanned.filter((call) => call.callee === (site.callee || 'stage') && call.label === site.label)
+  return Number.isSafeInteger(site.occurrence) && site.occurrence >= 1 ? matches[site.occurrence - 1] || null : null
+}
+
+// Mutation killed: storing a line number again reintroduces the pin that broke b768.
+test('workflow-page:D1.no-stored-lines', () => {
+  const docs = JSON.parse(readFileSync(join(process.cwd(), 'visualizer/web/src/lib/stage-docs.json'), 'utf8'))
+  for (const [stage, doc] of Object.entries(docs)) {
+    for (const site of doc.source.sites) {
+      assert.equal(Object.prototype.hasOwnProperty.call(site, 'line'), false, `${stage} stores a line number`)
+      assert.ok(Number.isSafeInteger(site.occurrence) && site.occurrence >= 1, `${stage} site has no occurrence`)
+    }
+  }
+})
+
 test('workflow-page:D1', () => {
   const drivePath = join(process.cwd(), 'crew/drive.mjs')
   const drive = readFileSync(drivePath, 'utf8')
@@ -2513,13 +2532,12 @@ test('workflow-page:D1', () => {
     assert.ok(Array.isArray(doc.source.sites))
     if (!doc.source.sites.length) assert.ok(doc.source.reason, `${stage} has no sites and no reason`)
     for (const site of doc.source.sites) {
-      const line = drive.split('\n')[site.line - 1] || ''
-      const callee = site.callee || 'stage'
-      assert.ok(line.includes(`${callee}(`) && line.includes(site.label), `${stage} cites crew/drive.mjs:${site.line} for ${site.label}, which is not that call`)
+      assert.ok(resolveStageSite(site, scanStageSites(drive)), `${stage} cites occurrence ${site.occurrence} of ${site.callee}('${site.label}'), which is not a call in crew/drive.mjs`)
     }
   }
   // Every executable stage() call is cited by some entry: a moved or added call reddens here.
-  const cited = new Set(Object.values(docs).flatMap((doc) => doc.source.sites.map((site) => site.line)))
+  const scanned = scanStageSites(drive)
+  const cited = new Set(Object.values(docs).flatMap((doc) => doc.source.sites.map((site) => resolveStageSite(site, scanned)?.line)))
   drive.split('\n').forEach((line, index) => {
     if (/^\s*\/\//.test(line)) return
     if (/(?<![\w.])stage\(\s*['"`]/.test(line)) assert.ok(cited.has(index + 1), `crew/drive.mjs:${index + 1} stage() call is cited by no stage-docs entry`)
@@ -2685,28 +2703,29 @@ test('A1.variable-callers', () => {
   const drive = readFileSync(join(process.cwd(), 'crew/drive.mjs'), 'utf8')
   const docs = JSON.parse(readFileSync(join(process.cwd(), 'visualizer/web/src/lib/stage-docs.json'), 'utf8'))
   const calls = scanStageSites(drive)
-  for (const [line, callee, label] of [
-    [8661, 'recordGateProof', 'gate-proof:${gateGeneration}'],
-    [9465, 'recordGateProof', 'gate-proof:${gateGeneration}'],
-    [8552, 'acceptRepairedGate', 'gate-reverify:${gateRepairs}'],
-    [9262, 'acceptRepairedGate', 'gate-reverify:${gateRepairs}'],
-  ]) assert.ok(calls.some((site) => site.line === line && site.callee === callee && site.label === label), `${callee} caller at ${line} is not scanned`)
+  for (const [callee, label] of [
+    ['recordGateProof', 'gate-proof:${gateGeneration}'],
+    ['acceptRepairedGate', 'gate-reverify:${gateRepairs}'],
+  ]) assert.equal(calls.filter((site) => site.callee === callee && site.label === label).length, 2, `${callee} callers are not both scanned`)
   assert.deepEqual(docs['gate-proof'].source.sites, [
-    { line: 8661, callee: 'recordGateProof', label: 'gate-proof:${gateGeneration}' },
-    { line: 9465, callee: 'recordGateProof', label: 'gate-proof:${gateGeneration}' },
+    { callee: 'recordGateProof', label: 'gate-proof:${gateGeneration}', occurrence: 1 },
+    { callee: 'recordGateProof', label: 'gate-proof:${gateGeneration}', occurrence: 2 },
   ])
   assert.deepEqual(docs['gate-reverify'].source.sites, [
-    { line: 8552, callee: 'acceptRepairedGate', label: 'gate-reverify:${gateRepairs}' },
-    { line: 9262, callee: 'acceptRepairedGate', label: 'gate-reverify:${gateRepairs}' },
+    { callee: 'acceptRepairedGate', label: 'gate-reverify:${gateRepairs}', occurrence: 1 },
+    { callee: 'acceptRepairedGate', label: 'gate-reverify:${gateRepairs}', occurrence: 2 },
   ])
+  for (const site of [...docs['gate-proof'].source.sites, ...docs['gate-reverify'].source.sites]) {
+    assert.ok(resolveStageSite(site, calls), `${site.callee} occurrence ${site.occurrence} does not resolve`)
+  }
 })
 
 test('A1.variant-sites', () => {
   const docs = JSON.parse(readFileSync(join(process.cwd(), 'visualizer/web/src/lib/stage-docs.json'), 'utf8'))
-  assert.deepEqual(docs.repair.source.sites, [{ line: 6963, callee: 'stage', label: '${variant}:r1', bindings: { variant: 'repair' } }])
-  assert.deepEqual(docs.directed.source.sites, [{ line: 7057, callee: 'stage', label: '${variant}:r1', bindings: { variant: 'directed' } }])
+  assert.deepEqual(docs.repair.source.sites, [{ callee: 'stage', label: '${variant}:r1', occurrence: 2, bindings: { variant: 'repair' } }])
+  assert.deepEqual(docs.directed.source.sites, [{ callee: 'stage', label: '${variant}:r1', occurrence: 3, bindings: { variant: 'directed' } }])
   for (const key of ['scout', 'review_only', 'verify_only']) {
-    assert.deepEqual(docs[key].source.sites, [{ line: 6614, callee: 'stage', label: '${variant}:r1', bindings: { variant: key } }])
+    assert.deepEqual(docs[key].source.sites, [{ callee: 'stage', label: '${variant}:r1', occurrence: 1, bindings: { variant: key } }])
   }
 })
 
@@ -2730,7 +2749,6 @@ test('A1.swap-sites', () => {
     else if (stageHeadFromLabel(resolved) !== '${variant}') declared.add(stageHeadFromLabel(resolved))
   }
   assert.deepEqual(Object.keys(docs).sort(), [...declared].sort())
-  const calls = new Map(scannedCalls.map((site) => [`${site.line}:${site.callee}`, site]))
   const lines = drive.split('\n')
   for (const [stage, doc] of Object.entries(docs)) {
     assert.equal(typeof doc.description, 'string')
@@ -2741,10 +2759,8 @@ test('A1.swap-sites', () => {
     assert.ok(Array.isArray(sites), `${stage} sites are not measured`)
     if (sites.length === 0) assert.equal(NO_CALL_REASONS.includes(doc.source.reason?.includes('no executable') ? 'declared-without-executor-call' : null), true)
     for (const site of sites) {
-      assert.ok(Number.isSafeInteger(site.line) && site.line >= 1 && site.line <= lines.length, `${stage} citation line is outside drive`)
-      assert.ok(lines[site.line - 1].trim().length > 0, `${stage} citation is empty`)
-      const call = calls.get(`${site.line}:${site.callee}`)
-      assert.ok(call, `${stage} citation ${site.line} is not a ${site.callee} call`)
+      const call = resolveStageSite(site, scannedCalls)
+      assert.ok(call && call.line >= 1 && call.line <= lines.length && lines[call.line - 1].trim().length > 0, `${stage} citation occurrence ${site.occurrence} is not a ${site.callee} call`)
       const resolved = resolveStageLabel(site)
       assert.equal(stageHeadFromLabel(resolved), stage, `${stage} citation resolves to ${resolved}`)
       if (site.label.includes('${variant}')) assert.deepEqual(Object.keys(site.bindings || {}), ['variant'])

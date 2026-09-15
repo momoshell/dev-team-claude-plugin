@@ -46,6 +46,8 @@ place that runs the review flow.
 
 ## Rubric, ordered by measured yield
 
+When this rubric finds over-building, route the finding through the closed `category` in `references/findings-shape.md` and name what to use instead.
+
 | # | area | exhibit | measured |
 |---|---|---|---|
 | 1 | a finding written as a counterexample | F10 · F11 | 74% must-fix (95 of 129) vs 20% (25 of 125) |

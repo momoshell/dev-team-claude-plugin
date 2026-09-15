@@ -29,6 +29,15 @@ details fields` section. Never fill one shape with the other's keys. The scout
 shape is for one narrow, cited answer; the reviewer shape is the optional finding
 entry in a review envelope.
 
+The optional reviewer finding `category` is closed to these five over-building tags:
+- `delete` — remove code that the requested behavior does not need.
+- `stdlib` — replace custom code with the language standard library.
+- `native` — replace custom code with a native platform feature.
+- `yagni` — omit capability that has no current requirement.
+- `shrink` — replace an oversized implementation with a smaller equivalent.
+A finding carrying any category above must also name a replacement: what to use instead, never only a complaint.
+Summarize the total removable code as `net: -N lines possible`.
+
 The disposition set is exactly: `auto-fix` · `ask-user` · `no-op`
 
 - `auto-fix` is mechanically safe and intent-neutral. A `patch` rides with

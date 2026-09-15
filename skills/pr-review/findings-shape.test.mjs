@@ -12,6 +12,7 @@ import { FINDING_DISPOSITIONS, FINDING_ID_SHAPE } from '../../crew/drive.mjs'
 const HERE = fileURLToPath(new URL('./', import.meta.url))
 const SCOUT = join(REPO, 'crew/pi/agents/scout.json')
 const DOC = join(HERE, 'references/findings-shape.md')
+const SKILL = join(HERE, 'SKILL.md')
 const CHARTER = join(REPO, 'crew/roles/reviewer.md')
 
 const TOP_KEYS = ['summary', 'findings', 'gaps']
@@ -19,6 +20,11 @@ const FINDING_KEYS = ['claim', 'evidence', 'confidence']
 const CONFIDENCE_ENUM = '"verified" | "assumed"'
 const MANDATORY = '`confidence` is not optional'
 const CLOSED = 'No other keys are permitted'
+const CATEGORY_INTRO = 'The optional reviewer finding `category` is closed to these five over-building tags:'
+const OVER_BUILDING_CATEGORIES = ['delete', 'stdlib', 'native', 'yagni', 'shrink']
+const REPLACEMENT_RULE = 'A finding carrying any category above must also name a replacement: what to use instead, never only a complaint.'
+const NET_SUMMARY = 'Summarize the total removable code as `net: -N lines possible`.'
+const SKILL_ROUTE = 'When this rubric finds over-building, route the finding through the closed `category` in `references/findings-shape.md` and name what to use instead.'
 
 // Collect `"key":` tokens at a fixed brace/bracket depth, in source order.
 function keysAtDepth(block, wantDepth) {
@@ -49,8 +55,17 @@ function blockFrom(text, from) {
   throw new Error('unterminated shape block')
 }
 
+function overBuildingCategories(text) {
+  const start = text.indexOf(CATEGORY_INTRO)
+  if (start < 0) return []
+  const end = text.indexOf(REPLACEMENT_RULE, start + CATEGORY_INTRO.length)
+  if (end < 0) return []
+  return [...text.slice(start, end).matchAll(/^- `([^`]+)` — .+$/gm)].map((match) => match[1])
+}
+
 const scoutPrompt = JSON.parse(readFileSync(SCOUT, 'utf8')).prompt
 const doc = readFileSync(DOC, 'utf8')
+const skill = readFileSync(SKILL, 'utf8')
 const docBlock = (doc.match(/```json\n([\s\S]*?)```/) || [])[1]
 
 test('scout.json defines the shape the skill documents', () => {
@@ -124,4 +139,11 @@ test('every worked example in the skill conforms to the shape', () => {
     }
   }
   assert.ok(examples >= 1, 'the skill carries no worked example of the shape')
+})
+
+test('over-building category is closed and requires replacements', () => {
+  assert.deepEqual(overBuildingCategories(doc), OVER_BUILDING_CATEGORIES)
+  assert.ok(doc.includes(REPLACEMENT_RULE))
+  assert.ok(doc.includes(NET_SUMMARY))
+  assert.ok(skill.includes(SKILL_ROUTE))
 })

@@ -4,7 +4,7 @@ import { mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync }
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { PANEL_REFRESH_MS, PANEL_STALE_AFTER_MS, acceptRows, brakePanel, cellHealthPanel, fleetCost, fleetEscalationRate, fleetMedianDuration, fleetPassRate, fleetPhasesPerRun, fleetTokens, findingRows, gateChips, intakeCandidateRows, intakePanel, reviewRows, rosterEditForm, rosterPanel, panelAgeLabel, panelReadLoop, readFreshness, rosterProposal, runSetPanel, teardownPanel } from '../visualizer/web/src/lib/panels.js'
-import { parseHash, formatHash } from '../visualizer/web/src/lib/route.js'
+import { VIEWS, parseHash, formatHash } from '../visualizer/web/src/lib/route.js'
 import { ATTENTION_KEYS, absenceMark, attentionBreakdown, configurationDimensionCell, configurationFilterView, costCell, createSemaphore, crewArchive, deriveDisplayStatus, deriveStatus, escalationProbeTargets, fleetActivity, fleetView, gateCell, heartbeatCell, needsAttention, openRecordNote, operationsOverview, profileEvidenceView, reviewCell, runActivity, runDetailConfiguration, runDetailSeats, runDetailState, runtimeActivitySummary, slotWaitCell, tokenCell } from '../visualizer/web/src/lib/fleet.js'
 import { ROLE_ORDER, acceptEvidence, bounceArrows, gateMarkers, gateProofStory, laneRows, phaseFilterId, phasePanel, renderMarkdown } from '../visualizer/web/src/lib/trace.js'
 import { eventStory, eventStreamSummary } from '../visualizer/web/src/lib/event-story.js'
@@ -1010,8 +1010,8 @@ test('brakePanel names the resolved checkout and switch path in every state', ()
   }
 })
 
-test('hash routes parse and format all five canonical views', () => {
-  for (const hash of ['#/', '#/ops', '#/roster', '#/adw-123', '#/adw-123/plan']) {
+test('hash routes parse and format all six canonical views', () => {
+  for (const hash of ['#/', '#/ops', '#/roster', '#/agents', '#/adw-123', '#/adw-123/plan']) {
     assert.equal(formatHash(parseHash(hash)), hash)
   }
   assert.deepEqual(parseHash(''), { view: 'fleet', adw_id: null, phase: null })
@@ -1021,6 +1021,32 @@ test('hash routes parse and format all five canonical views', () => {
   assert.deepEqual(parseHash('#/adw-123/plan/ignored'), { view: 'phase', adw_id: 'adw-123', phase: 'plan' })
   assert.equal(parseHash('#/ops').adw_id, null)
   assert.equal(parseHash('#/roster').adw_id, null)
+  assert.equal(parseHash('#/agents').adw_id, null)
+})
+
+test('E1 agents page route nav and title are wired', () => {
+  const root = join(process.cwd(), 'visualizer/web/src')
+  const app = readFileSync(join(root, 'App.svelte'), 'utf8')
+  const page = readFileSync(join(root, 'lib/AgentsPage.svelte'), 'utf8')
+  assert.deepEqual(VIEWS, ['fleet', 'ops', 'roster', 'agents', 'run', 'phase'])
+  assert.match(app, /route\.view === 'agents'/)
+  assert.match(app, /Agents · Factory/)
+  assert.match(app, /<AgentsPage\s*\/?\s*>/)
+  assert.match(app, /route\.view === 'agents'[^\n]*>Agents</)
+  assert.match(page, /role="tablist"/)
+})
+
+test('F1 agents page uses only Tier-2 colour aliases', () => {
+  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/AgentsPage.svelte'), 'utf8')
+  const css = source.match(/<style>([\s\S]*?)<\/style>/)?.[1] || ''
+  const declarations = [...css.matchAll(/(?:^|[;{}])\s*[-a-z]+\s*:\s*([^;{}]+)/g)].map((match) => match[1].trim())
+  assert.equal(css.includes('data-theme'), false)
+  assert.equal(declarations.some((value) => /#[0-9a-f]{3,8}\b/i.test(value)), false)
+  assert.equal(declarations.some((value) => /(?:^|\s)(?:white|black|red|blue|green|gray|grey)(?:\s|$)/i.test(value)), false)
+  assert.equal(declarations.some((value) => /--(?:ink|paper|spot|serious|status-\w+-raw|role-\w+-(?:dark|light))/.test(value)), false)
+  assert.ok(source.includes('background:var(--panel); border:1px solid var(--line);'))
+  for (const token of ['Register grant', 'Last-seat delivery', 'Proposal only — nothing is applied.', 'protected: prompt-surface']) assert.ok(source.includes(token), token)
+  for (const tab of ['Agents', 'Skills', 'Prompts']) assert.ok(source.includes(tab), tab)
 })
 
 test('fleet cells preserve honest absence and discriminate status evidence', () => {

@@ -210,6 +210,9 @@ test('RV1-2 records delivered measurements for construction-time suites', () => 
     ['test/factory-dispatch-batch-refusals.test.mjs', 18],
     ['test/factory-dispatch-batch.test.mjs', 216],
     ['test/factory-suite-cost.test.mjs', 11],
+    ['test/visualizer-panels.test.mjs', 161],
+    ['test/visualizer-server.test.mjs', 92],
+    ['test/visualizer-shape.test.mjs', 78],
   ]) {
     const row = deliveredRows.get(suite)
     assert.equal(row?.reason, null, suite)

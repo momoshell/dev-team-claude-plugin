@@ -14,7 +14,7 @@ import {
 } from './daemon.mjs'
 import { driveTask, PROTECTED_PATHS, validateScopeEntries } from './drive.mjs'
 import { VARIANTS, VARIANT_NAMES } from './variants.mjs'
-import { runChild } from './child.mjs'
+import { runChild, specExecution } from './child.mjs'
 import { DEFAULT_TRANSPORT, emitAdapter, seatIo, settleSeatTeardown } from './seat-io.mjs'
 import { splitFrames } from './headless-rpc.mjs'
 import { openRun } from '../scripts/factory/emit.mjs'
@@ -3654,4 +3654,194 @@ test('a never-started daemon still admits an enqueue', async () => {
     await f.d.stop()
     f.cleanup()
   }
+})
+
+test('A1 daemon child ledger records declared execution axis', () => {
+  if (!LEDGER_SQLITE_OK) return
+  const f = fixture()
+  const ledgerRoot = scratchDir('daemon-child-axis-a1-')
+  const dbPath = join(ledgerRoot, 'ledger.db')
+  const task = 'child-axis-a1'
+  try {
+    const crewPath = join(f.crewDir, 'crew.json')
+    const crew = JSON.parse(readFileSync(crewPath, 'utf8'))
+    crew.run_configuration = {
+      profile: { requested: 'investigation', effective: 'investigation', source: 'explicit' },
+      assurance: { requested: 'rigorous', effective: 'rigorous', source: 'explicit' },
+    }
+    writeFileSync(crewPath, JSON.stringify(crew))
+    const result = runChild({
+      crew_dir: f.crewDir, task, checkout: f.dir,
+      task_return: f.taskReturn, ledger_db: dbPath,
+      run_configuration: { execution: { requested: 'scout', effective: 'scout', source: 'explicit' } },
+    }, {
+      preflight: false,
+      driveTask: () => ({ status: 'done', summary: 'axis recorded' }),
+      seatIo: () => ({}),
+    })
+    assert.equal(result.status, 'done')
+    const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+    try {
+      const rows = ledger.dumpTable('run_configurations')
+      assert.equal(rows.length, 1)
+      assert.deepEqual({
+        requested_execution: rows[0].requested_execution,
+        effective_execution: rows[0].effective_execution,
+        execution_source: rows[0].execution_source,
+      }, { requested_execution: 'scout', effective_execution: 'scout', execution_source: 'explicit' })
+    } finally { ledger.close() }
+  } finally { f.cleanup() }
+})
+
+test('B1 daemon child journals run configuration before startRun', () => {
+  const branchStart = CHILD_SOURCE.indexOf('if (!enforceBudgetLedger || sidecarDbPath == null || sidecarDbPath === dbPath) {')
+  const branchEnd = CHILD_SOURCE.indexOf('if (enforceBudgetLedger && sidecarDbPath && sidecarDbPath !== dbPath) {', branchStart)
+  assert.ok(branchStart >= 0, 'child emitter branch must remain present')
+  assert.ok(branchEnd > branchStart, 'child emitter branch must have a bounded end')
+  const branch = CHILD_SOURCE.slice(branchStart, branchEnd)
+  const append = "appendJournalRow(journal, { at: new Date().toISOString(), event: 'run-configuration', run_configuration: spec.run_configuration ?? null }, append)"
+  assert.equal(CHILD_SOURCE.indexOf(append), CHILD_SOURCE.lastIndexOf(append), 'the child must have one run-configuration append')
+  assert.equal((branch.match(/appendJournalRow\(journal, \{ at: new Date\(\)\.toISOString\(\), event: 'run-configuration', run_configuration: spec\.run_configuration \?\? null \}, append\)/g) || []).length, 1)
+  assert.equal((branch.match(/emitter\.startRun\(\)/g) || []).length, 1)
+  const appendOffset = branch.indexOf(append)
+  const startOffset = branch.indexOf('emitter.startRun()')
+  assert.ok(appendOffset >= 0, 'run configuration must be appended inside the emitter branch')
+  assert.ok(startOffset >= 0, 'startRun must remain inside the emitter branch')
+  assert.ok(appendOffset < startOffset, 'run configuration must be journaled before the ledger session starts')
+})
+
+test('C1 daemon child leaves absent execution axis unmeasured', () => {
+  if (!LEDGER_SQLITE_OK) return
+  const f = fixture()
+  const ledgerRoot = scratchDir('daemon-child-axis-c1-')
+  const dbPath = join(ledgerRoot, 'ledger.db')
+  const task = 'child-axis-c1'
+  let seen = null
+  try {
+    const crewPath = join(f.crewDir, 'crew.json')
+    const crew = JSON.parse(readFileSync(crewPath, 'utf8'))
+    crew.run_configuration = {
+      profile: { requested: 'investigation', effective: 'investigation', source: 'explicit' },
+      assurance: { requested: 'rigorous', effective: 'rigorous', source: 'explicit' },
+    }
+    writeFileSync(crewPath, JSON.stringify(crew))
+    const result = runChild({
+      crew_dir: f.crewDir, task, checkout: f.dir,
+      task_return: f.taskReturn, ledger_db: dbPath,
+      variant: 'scout', phases: ['planning', 'build'], seats: { planner: 'legacy-seat' },
+    }, {
+      preflight: false,
+      driveTask: (ctx) => { seen = ctx; return { status: 'done', summary: 'axis absent' } },
+      seatIo: () => ({}),
+    })
+    assert.equal(result.status, 'done')
+    assert.equal(seen?.variant, 'scout')
+    assert.equal(specExecution({}), null)
+    const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+    try {
+      const rows = ledger.dumpTable('run_configurations')
+      assert.equal(rows.length, 1)
+      assert.deepEqual({
+        requested_execution: rows[0].requested_execution,
+        effective_execution: rows[0].effective_execution,
+        execution_source: rows[0].execution_source,
+      }, { requested_execution: null, effective_execution: null, execution_source: null })
+    } finally { ledger.close() }
+  } finally { f.cleanup() }
+})
+
+test('D1 daemon child survives a refused run-configuration journal write', () => {
+  const f = fixture()
+  const ledgerRoot = scratchDir('daemon-child-axis-d1-')
+  const dbPath = join(ledgerRoot, 'ledger.db')
+  const task = 'child-axis-d1'
+  let drove = 0
+  let refused = 0
+  const calls = { start: 0, link: 0, end: 0 }
+  const append = (path, text, options) => {
+    const row = JSON.parse(String(text))
+    if (row.event === 'run-configuration') {
+      refused += 1
+      throw new Error('run configuration journal refused')
+    }
+    appendFileSync(path, text, options)
+  }
+  try {
+    const result = runChild({
+      crew_dir: f.crewDir, task, checkout: f.dir,
+      task_return: f.taskReturn, ledger_db: dbPath,
+    }, {
+      preflight: false,
+      appendJournal: append,
+      openRun: () => ({
+        sidecar: () => null,
+        startRun: () => { calls.start += 1 },
+        linkRun: () => { calls.link += 1 },
+        endRun: () => { calls.end += 1 },
+      }),
+      driveTask: () => { drove += 1; return { status: 'done', summary: 'journal failure isolated' } },
+      seatIo: () => ({}),
+    })
+    assert.equal(result.status, 'done')
+    assert.equal(drove, 1)
+    assert.equal(calls.start, 1)
+    assert.equal(calls.link, 1)
+    assert.ok(calls.end >= 1)
+    assert.ok(refused >= 1)
+    const rows = readFileSync(join(f.crewDir, 'journal.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+    assert.equal(rows.some((row) => row.event === 'run-start'), true)
+    assert.equal(rows.some((row) => row.event === 'run-configuration'), false)
+    assert.equal(JSON.parse(readFileSync(f.taskReturn, 'utf8')).status, 'done')
+  } finally { f.cleanup() }
+})
+
+test('D2 daemon child survives a throwing ledger start', () => {
+  const f = fixture()
+  const ledgerRoot = scratchDir('daemon-child-axis-d2-')
+  const dbPath = join(ledgerRoot, 'ledger.db')
+  const task = 'child-axis-d2'
+  let started = 0
+  let drove = 0
+  const openRunChild = () => ({
+    startRun: () => { started += 1; throw new Error('ledger start refused') },
+    linkRun: () => { throw new Error('linkRun must follow a successful start') },
+    endRun: () => {},
+  })
+  try {
+    const result = runChild({
+      crew_dir: f.crewDir, task, checkout: f.dir,
+      task_return: f.taskReturn, ledger_db: dbPath,
+      run_configuration: { execution: { requested: 'scout', effective: 'scout', source: 'explicit' } },
+    }, {
+      preflight: false,
+      openRun: openRunChild,
+      driveTask: () => { drove += 1; return { status: 'done', summary: 'ledger failure isolated' } },
+      seatIo: () => ({}),
+    })
+    assert.equal(result.status, 'done')
+    assert.equal(started, 1)
+    assert.equal(drove, 1)
+    const journal = readFileSync(join(f.crewDir, 'journal.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+    assert.equal(journal.some((row) => row.event === 'run-start'), true)
+    assert.equal(journal.some((row) => row.event === 'run-configuration'), true)
+    assert.equal(JSON.parse(readFileSync(f.taskReturn, 'utf8')).status, 'done')
+  } finally { f.cleanup() }
+})
+
+test('F1 daemon child refuses boot and run execution disagreement', () => {
+  const f = fixture()
+  let drove = 0
+  try {
+    assert.throws(() => runChild({
+      crew_dir: f.crewDir, task: 'child-axis-f1', task_return: f.taskReturn,
+      variant: 'scout', run_configuration: { execution: { effective: 'full' } },
+    }, {
+      preflight: false,
+      driveTask: () => { drove += 1; return { status: 'done' } },
+      seatIo: () => ({}),
+    }), /boot and run may never disagree/)
+    assert.equal(drove, 0)
+    assert.equal(readFileSync(join(f.crewDir, 'journal.jsonl'), 'utf8'), '')
+    assert.equal(existsSync(f.taskReturn), false)
+  } finally { f.cleanup() }
 })

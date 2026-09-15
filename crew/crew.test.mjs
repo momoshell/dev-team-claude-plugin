@@ -9555,3 +9555,40 @@ test('boundary resolver makes the latest scoped path exclusive in live and archi
   present.add(newestTask)
   assert.equal(archivedReturn(paths, archiveDeps), newestTask)
 })
+
+test('E1 attended CLI ledger keeps declared execution axis', async () => {
+  if (!nodeMeetsLedgerFloor) return
+  const home = scratchDir('crew-run-config-e1-home-')
+  const { root: checkoutRoot, checkout } = testCheckout('crew-run-config-e1-checkout-')
+  const task = 'run-config-e1'
+  const brief = join(home, 'brief.md')
+  const dbPath = join(home, 'ledger', 'ledger.db')
+  const done = { status: 'done', summary: '', artifacts: [], details: { commit: null, stages: [] } }
+  writeFileSync(brief, '# run configuration e1\n')
+  execSync('git init -q', { cwd: checkout })
+  try {
+    await withCompletionEnv(home, join(home, 'completions.jsonl'), async () => {
+      await bootCmd(
+        { task, checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath },
+        { cmux: callCounter(), tree: callCounter(), renameTab: callCounter(), awaitSeatsReady: async () => {} },
+      )
+      runCmd(
+        { task, checkout, 'brief-file': brief, execution: 'scout', keep: true },
+        { drive: () => done, awaitSeatsReady: () => {}, writeTerminalLine: () => {} },
+      )
+    })
+    const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+    try {
+      const rows = ledger.dumpTable('run_configurations')
+      assert.equal(rows.length, 1)
+      assert.deepEqual({
+        requested_execution: rows[0].requested_execution,
+        effective_execution: rows[0].effective_execution,
+        execution_source: rows[0].execution_source,
+      }, { requested_execution: 'scout', effective_execution: 'scout', execution_source: 'explicit' })
+    } finally { ledger.close() }
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+})

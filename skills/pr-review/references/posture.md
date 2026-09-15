@@ -19,7 +19,7 @@ path. A round that reviewed alone is not evidence the flow is unbuilt:
 
 - **A regranted continuation.** The panel is formed only when ctx.continuation is
   true (`crew/drive.mjs:8968`), and the daemon's regrant hook is the sole caller
-  that sets it (`crew/child.mjs:350`). Every first boot reviews with one
+  that sets it (`crew/child.mjs:351`). Every first boot reviews with one
   reviewer.
 - **A seated tech-lead.** `panelSeats()` returns null without a seated tech-lead
   partner and a distinct adjudicator (`crew/drive.mjs:854`); the driver records

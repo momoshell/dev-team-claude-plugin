@@ -12,7 +12,10 @@ export const CAPABILITY_REFUSALS = Object.freeze([
   'register-invalid', 'capability-shortfall', 'unknown-grant', 'grant-unsupported',
   'extension-missing', 'unknown-skill', 'agent-def-invalid', 'local-settings-missing', 'local-provider-undeclared',
   'local-endpoint-dead', 'grant-contradicts-deny', 'vendor-extension-missing',
-  'agent-unresolved', 'agent-provider-unsupported', 'local-provider-reserved',
+  'agent-unresolved', 'agent-provider-unsupported', 'agent-unavailable', 'local-provider-reserved',
+])
+export const AGENT_AVAILABILITY_STATES = Object.freeze([
+  'executable', 'discovered-unavailable', 'installed-unconfigured', 'proposal-stub',
 ])
 const CAPABILITIES_PATH = join(HERE, 'capabilities.json')
 const CAPABILITIES_SCHEMA_PATH = join(HERE, 'capabilities.schema.json')
@@ -238,10 +241,102 @@ export function pathMessage(reason, seat, kind, expected, found, path) {
   return refuse(reason, `seat ${seat} ${kind} expected ${expected}, found ${found}, at ${path}`)
 }
 
-export function agentRegisterEntry(register, agent, { role = 'unknown' } = {}) {
-  const entry = register?.coding_agents && Object.hasOwn(register.coding_agents, agent) ? register.coding_agents[agent] : null
-  if (!entry) throw refuse('agent-unresolved', `seat ${role} expected coding agent ${JSON.stringify(agent)}, found no entry, at coding_agents.${agent}`)
-  return entry
+function agentAvailabilityResult(entry, agent, state) {
+  return Object.freeze({
+    agent,
+    state,
+    reason: state,
+    display_name: entry.display_name,
+    install_hint: entry.install_hint,
+  })
+}
+
+function agentUnavailable(role, agent, availability) {
+  return Object.assign(
+    refuse('agent-unavailable', `seat ${role} coding agent ${JSON.stringify(agent)} unavailable: state ${availability.state}, reason ${availability.reason}, at coding_agents.${agent}`),
+    { state: availability.state, availability_reason: availability.reason },
+  )
+}
+
+function unavailableRosterAgent(location, agent, availability) {
+  return Object.assign(
+    refuse('agent-unavailable', `roster cell ${location} coding agent ${JSON.stringify(agent)} unavailable: state ${availability.state}, reason ${availability.reason}, at ${location}.agent`),
+    { state: availability.state, availability_reason: availability.reason },
+  )
+}
+
+export function agentAvailability(register, agent, probe = null) {
+  const codingAgents = register?.coding_agents
+  const entry = typeof agent === 'string' && codingAgents && Object.hasOwn(codingAgents, agent)
+    ? codingAgents[agent]
+    : null
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+    throw refuse('agent-unresolved', `expected coding agent ${JSON.stringify(agent)}, found no entry, at coding_agents.${agent}`)
+  }
+
+  const exists = probe?.exists ?? existsSync
+  const which = probe?.which ?? null
+  const adapterPath = resolvedGrantPath(REGISTER_ROOT, entry.adapter)
+  if (!pathExists(exists, adapterPath)) return agentAvailabilityResult(entry, agent, 'proposal-stub')
+
+  let binary = null
+  if (which !== null) {
+    try { binary = which(entry.binary) } catch {}
+    if (which !== null && !binary) return agentAvailabilityResult(entry, agent, 'discovered-unavailable')
+  }
+
+  if (which !== null && Array.isArray(entry.config) && entry.config.length) {
+    const home = typeof probe?.home === 'string' ? probe.home : ''
+    const configured = entry.config.some((configPath) => {
+      const candidate = configPath.startsWith('~/') ? join(home, configPath.slice(2)) : configPath
+      return pathExists(exists, candidate)
+    })
+    if (!configured) return agentAvailabilityResult(entry, agent, 'installed-unconfigured')
+  }
+
+  return agentAvailabilityResult(entry, agent, 'executable')
+}
+
+export function agentRegisterEntry(register, agent, { role = 'unknown', probe } = {}) {
+  const codingAgents = register?.coding_agents
+  if (typeof agent !== 'string' || !codingAgents || !Object.hasOwn(codingAgents, agent) || !codingAgents[agent]) {
+    throw refuse('agent-unresolved', `seat ${role} expected coding agent ${JSON.stringify(agent)}, found no entry, at coding_agents.${agent}`)
+  }
+  const availability = agentAvailability(register, agent, probe)
+  if (availability.state !== 'executable') throw agentUnavailable(role, agent, availability)
+  return register.coding_agents[agent]
+}
+
+export function validateRosterAgents(roster, register, probe = null) {
+  for (const mapName of ['tiers', 'assurances']) {
+    const seating = roster?.[mapName]
+    if (!seating || typeof seating !== 'object' || Array.isArray(seating)) continue
+    for (const [tier, cells] of Object.entries(seating)) {
+      if (!cells || typeof cells !== 'object' || Array.isArray(cells)) continue
+      for (const [role, cell] of Object.entries(cells)) {
+        if (cell === null || typeof cell !== 'object' || Array.isArray(cell)) continue
+        validateCell(cell, `${mapName}.${tier}.${role}`)
+      }
+    }
+  }
+  return roster
+
+  function validateCell(cell, location) {
+    validateAgent(cell.agent, location)
+    for (const [index, fallback] of (Array.isArray(cell.fallback) ? cell.fallback : []).entries()) {
+      if (fallback === null || typeof fallback !== 'object' || Array.isArray(fallback)) continue
+      validateAgent(fallback.agent, `${location}.fallback[${index}]`)
+    }
+  }
+
+  function validateAgent(agent, location) {
+    const codingAgents = register?.coding_agents
+    if (typeof agent !== 'string' || !codingAgents || !Object.hasOwn(codingAgents, agent)) {
+      throw refuse('agent-unresolved', `roster cell ${location} expected coding agent ${JSON.stringify(agent)}, found no entry, at coding_agents.${agent}`)
+    }
+    const availability = agentAvailability(register, agent, probe)
+    if (availability.state !== 'executable') throw unavailableRosterAgent(location, agent, availability)
+  }
 }
 
 export function assertAgentProvider(register, agent, provider, { role = 'unknown' } = {}) {

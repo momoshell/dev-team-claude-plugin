@@ -122,6 +122,19 @@ test('roster.json validates against roster.schema.json', () => {
   assert.deepEqual(errors, [])
 })
 
+test('agent declarations use register-shaped names instead of hardcoded enums', () => {
+  const primary = schema.$defs.seat.properties.agent
+  const fallback = schema.$defs.fallbackEntry.properties.agent
+  for (const declaration of [primary, fallback]) {
+    assert.equal(declaration.enum, undefined)
+    assert.equal(declaration.pattern, '^[a-z0-9][a-z0-9-]*$')
+  }
+  assert.deepEqual(validate(schema, roster), [])
+  const malformed = structuredClone(roster)
+  malformed.tiers.build.builder.agent = 'Pi'
+  assert.ok(validate(schema, malformed).length > 0)
+})
+
 test('every seated model resolves into the models map', () => {
   for (const seats of Object.values(roster.tiers)) {
     for (const entry of Object.values(seats)) {

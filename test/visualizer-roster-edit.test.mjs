@@ -296,7 +296,8 @@ test('an agent with no adapter is unknown, and unknown refuses', async () => {
   assert.match(direct.find(({ code }) => code === 'capability_unknown').message, /nosuch-agent/)
 
   const seatSchema = loadSeatSchema()
-  seatSchema.properties.agent.enum.push('nosuch-agent')
+  assert.equal(seatSchema.properties.agent.enum, undefined)
+  assert.equal(seatSchema.properties.agent.pattern, '^[a-z0-9][a-z0-9-]*$')
   const result = await edit({ role: 'planner', seatSchema, cell: { provider: 'anthropic', id: 'claude-opus-5', agent: 'nosuch-agent', effort: 'high' } })
   assert.equal(result.ok, false)
   assert.equal(result.diff, null)

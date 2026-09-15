@@ -104,10 +104,32 @@
         "providers",
         "transports",
         "adapter",
-        "refuses"
+        "refuses",
+        "display_name",
+        "binary",
+        "install_hint"
       ],
       "additionalProperties": false,
       "properties": {
+        "display_name": {
+          "type": "string",
+          "pattern": "^\\S(?:.*\\S)?$"
+        },
+        "binary": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+        },
+        "install_hint": {
+          "type": "string",
+          "pattern": "^\\S(?:.*\\S)?$"
+        },
+        "config": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^\\S(?:.*\\S)?$"
+          }
+        },
         "providers": {
           "type": "array",
           "minItems": 1,

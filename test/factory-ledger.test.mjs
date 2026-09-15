@@ -76,6 +76,12 @@ function bootTieredRun(tier, runConfiguration = null) {
     schema_version: 3, task: 'boot-tier', roles: ['lead', 'planner'], ...(tier === null ? {} : { tier }),
     ...(runConfiguration ? { run_configuration: runConfiguration } : {}),
   }))
+  if (runConfiguration?.execution) {
+    writeFileSync(join(stateDir, 'journal.jsonl'), [
+      JSON.stringify({ event: 'run-start' }),
+      JSON.stringify({ event: 'run-configuration', run_configuration: runConfiguration }),
+    ].join('\n') + '\n')
+  }
   const dbPath = join(stateDir, 'ledger', 'ledger.db')
   const emitter = openRun({ stateDir, repoSlug: 'r', taskSlug: 'boot-tier', dbPath })
   try {
@@ -4359,6 +4365,238 @@ function seedConfigurationSeat(ledger, adwId, role, source, createdAt = '2024-01
     created_at: createdAt,
   })
 }
+
+const EXECUTION_AXIS_BOOT_CONFIGURATION = {
+  profile: { requested: 'implementation', effective: 'implementation', source: 'explicit' },
+  assurance: { requested: 'standard', effective: 'standard', source: 'explicit' },
+}
+
+function executionAxisState() {
+  return nextDir()
+}
+
+function writeExecutionAxisCrew(stateDir, runConfiguration = EXECUTION_AXIS_BOOT_CONFIGURATION) {
+  writeFileSync(join(stateDir, 'crew.json'), JSON.stringify({
+    schema_version: 3, task: 'execution-axis', roles: ['lead', 'planner'], tier: 'fixture-tier', run_configuration: runConfiguration,
+  }))
+}
+
+function writeExecutionAxisJournal(stateDir, rows) {
+  writeFileSync(join(stateDir, 'journal.jsonl'), `${rows.map((row) => typeof row === 'string' ? row : JSON.stringify(row)).join('\n')}\n`)
+}
+
+function executionAxisRuntime(execution) {
+  return {
+    profile: EXECUTION_AXIS_BOOT_CONFIGURATION.profile,
+    execution: { ...execution },
+    assurance: EXECUTION_AXIS_BOOT_CONFIGURATION.assurance,
+  }
+}
+
+function executionAxisRow(ledger, adwId) {
+  return ledger.dumpTable('run_configurations').find((row) => row.adw_id === adwId) ?? null
+}
+
+test('A1 execution journal supplies explicit axis to first ledger row', { skip: SKIP }, () => {
+  const stateDir = executionAxisState()
+  const dbPath = join(stateDir, 'ledger', 'ledger.db')
+  writeExecutionAxisCrew(stateDir)
+  writeExecutionAxisJournal(stateDir, [
+    { event: 'run-start' },
+    { event: 'run-configuration', run_configuration: executionAxisRuntime({ requested: 'scout', effective: 'scout', source: 'explicit', status: 'existing' }) },
+  ])
+  const emitter = openRun({ stateDir, repoSlug: 'r', taskSlug: 'execution-axis', dbPath, stderr: { write: () => {} } })
+  try {
+    emitter.startRun()
+    const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+    try {
+      const row = executionAxisRow(ledger, emitter.adwId)
+      assert.ok(row)
+      assert.deepEqual({
+        requested_execution: row.requested_execution,
+        effective_execution: row.effective_execution,
+        execution_source: row.execution_source,
+      }, {
+        requested_execution: 'scout', effective_execution: 'scout', execution_source: 'explicit',
+      })
+    } finally { ledger.close() }
+  } finally {
+    emitter.dispose()
+    rmSync(stateDir, { recursive: true, force: true })
+  }
+})
+
+test('C1 journal axis is present on the first insert-or-ignore write', { skip: SKIP }, () => {
+  const stateDir = executionAxisState()
+  const dbPath = join(stateDir, 'ledger', 'ledger.db')
+  const poisonedBoot = {
+    ...EXECUTION_AXIS_BOOT_CONFIGURATION,
+    execution: { requested: 'full', effective: 'full', source: 'poisoned_fixture' },
+  }
+  writeExecutionAxisCrew(stateDir, poisonedBoot)
+  writeExecutionAxisJournal(stateDir, [
+    { event: 'run-start' },
+    { event: 'run-configuration', run_configuration: executionAxisRuntime({ requested: 'repair', effective: 'repair', source: 'explicit', status: 'existing' }) },
+  ])
+  const emitter = openRun({ stateDir, repoSlug: 'r', taskSlug: 'execution-axis', dbPath, stderr: { write: () => {} } })
+  try {
+    emitter.startRun()
+    assert.equal(emitter.emit((handle) => handle.recordRunConfiguration({
+      adw_id: emitter.adwId,
+      schema_version: 1,
+      task_profile: 'implementation', task_profile_source: 'explicit',
+      requested_execution: 'full', effective_execution: 'full', execution_source: 'poisoned_second_write',
+      requested_assurance: 'standard', effective_assurance: 'standard', assurance_source: 'explicit',
+      legacy_variant: null, legacy_tier: 'fixture-tier',
+    })), true)
+  } finally { emitter.dispose() }
+  const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+  try {
+    const rows = ledger.dumpTable('run_configurations').filter((row) => row.adw_id === emitter.adwId)
+    assert.equal(rows.length, 1)
+    assert.deepEqual({
+      requested_execution: rows[0].requested_execution,
+      effective_execution: rows[0].effective_execution,
+      execution_source: rows[0].execution_source,
+    }, {
+      requested_execution: 'repair', effective_execution: 'repair', execution_source: 'explicit',
+    })
+  } finally {
+    ledger.close()
+    rmSync(stateDir, { recursive: true, force: true })
+  }
+})
+
+test('D1 journal supplies resolved default execution with null request', { skip: SKIP }, () => {
+  const stateDir = executionAxisState()
+  const dbPath = join(stateDir, 'ledger', 'ledger.db')
+  writeExecutionAxisCrew(stateDir)
+  writeExecutionAxisJournal(stateDir, [
+    { event: 'run-start' },
+    { event: 'run-configuration', run_configuration: executionAxisRuntime({ requested: null, effective: 'scout', source: 'profile_default', status: 'existing' }) },
+  ])
+  const emitter = openRun({ stateDir, repoSlug: 'r', taskSlug: 'execution-axis', dbPath, stderr: { write: () => {} } })
+  try {
+    emitter.startRun()
+    const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+    try {
+      const row = executionAxisRow(ledger, emitter.adwId)
+      assert.ok(row)
+      assert.deepEqual({
+        requested_execution: row.requested_execution,
+        effective_execution: row.effective_execution,
+        execution_source: row.execution_source,
+      }, {
+        requested_execution: null,
+        effective_execution: 'scout',
+        execution_source: 'profile_default',
+      })
+    } finally { ledger.close() }
+  } finally {
+    emitter.dispose()
+    rmSync(stateDir, { recursive: true, force: true })
+  }
+})
+
+test('E1 missing or unreadable runtime execution remains null without inference', { skip: SKIP }, () => {
+  const oldRuntime = { event: 'run-configuration', run_configuration: executionAxisRuntime({ requested: 'full', effective: 'full', source: 'explicit', status: 'existing' }) }
+  const cases = [
+    {
+      label: 'absent',
+      current: { event: 'phase', variant: 'distinctive-legacy-variant', phases: ['distinctive-phase'], roles: ['distinctive-role'] },
+    },
+    {
+      label: 'malformed',
+      current: {
+        event: 'run-configuration',
+        variant: 'distinctive-malformed-variant', phases: ['distinctive-malformed-phase'], roles: ['distinctive-malformed-role'],
+        run_configuration: { ...EXECUTION_AXIS_BOOT_CONFIGURATION, execution: ['not-an-axis'] },
+      },
+    },
+  ]
+  for (const { label, current } of cases) {
+    const stateDir = executionAxisState()
+    const dbPath = join(stateDir, 'ledger', 'ledger.db')
+    writeExecutionAxisCrew(stateDir)
+    writeExecutionAxisJournal(stateDir, [
+      { event: 'run-start' }, oldRuntime,
+      { event: 'run-start' }, current,
+    ])
+    const emitter = openRun({ stateDir, repoSlug: 'r', taskSlug: 'execution-axis', dbPath, stderr: { write: () => {} } })
+    try {
+      emitter.startRun()
+      const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+      try {
+        const row = executionAxisRow(ledger, emitter.adwId)
+        assert.ok(row)
+        assert.deepEqual({
+          requested_execution: row.requested_execution,
+          effective_execution: row.effective_execution,
+          execution_source: row.execution_source,
+        }, { requested_execution: null, effective_execution: null, execution_source: null }, label)
+      } finally { ledger.close() }
+    } finally {
+      emitter.dispose()
+      rmSync(stateDir, { recursive: true, force: true })
+    }
+  }
+})
+
+test('F1 refused configuration write is counted and never load-bearing', { skip: SKIP }, () => {
+  _resetNoticeGuardsForTest()
+  const stateDir = executionAxisState()
+  const dbPath = join(stateDir, 'ledger', 'ledger.db')
+  writeExecutionAxisCrew(stateDir)
+  writeExecutionAxisJournal(stateDir, [
+    { event: 'run-start' },
+    { event: 'run-configuration', run_configuration: executionAxisRuntime({ requested: 'scout', effective: 'scout', source: 'explicit', status: 'existing' }) },
+  ])
+  const stderrLines = []
+  let sessionCalls = 0
+  let phaseCalls = 0
+  const emitter = openRun({
+    stateDir, repoSlug: 'r', taskSlug: 'execution-axis', dbPath, stderr: { write: (line) => stderrLines.push(String(line)) },
+    _openLedger: () => ({
+      startSession: () => { sessionCalls += 1 },
+      recordRunConfiguration: () => { throw new Error('configuration refused') },
+      startPhase: () => { phaseCalls += 1; return 1 },
+      stats: () => ({ mirror_errors: 0 }),
+      close: () => {},
+    }),
+  })
+  try {
+    assert.doesNotThrow(() => emitter.startRun())
+    assert.equal(sessionCalls, 1)
+    assert.equal(phaseCalls, 1)
+    assert.equal(emitter.stats().dropped, 1)
+    assert.equal(stderrLines.length, 1)
+    assert.match(stderrLines[0], /^emit: emission dropped: configuration refused/)
+  } finally {
+    emitter.dispose()
+    rmSync(stateDir, { recursive: true, force: true })
+  }
+})
+
+test('G1 configurations reports execution override tri-state', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  try {
+    seedConfigurationRun(ledger, 'configuration-different-execution', '2024-01-01T00:00:00.000Z', {
+      requested_execution: 'scout', effective_execution: 'full', execution_source: 'operator_override',
+    })
+    seedConfigurationRun(ledger, 'configuration-equal-execution', '2024-01-01T00:01:00.000Z', {
+      requested_execution: 'scout', effective_execution: 'scout', execution_source: 'explicit',
+    })
+    seedConfigurationRun(ledger, 'configuration-unrequested-execution', '2024-01-01T00:02:00.000Z', {
+      requested_execution: null, effective_execution: 'scout', execution_source: 'profile_default',
+    })
+    const executions = ledger.configurationReadout({ since: '2024-01-01T00:00:00.000Z' }).dimensions
+      .filter((row) => row.dimension === 'execution')
+    assert.equal(executions.length, 3)
+    assert.equal(executions.find((row) => row.requested === 'scout' && row.effective === 'full').override, true)
+    assert.equal(executions.find((row) => row.requested === 'scout' && row.effective === 'scout').override, false)
+    assert.equal(executions.find((row) => row.requested === null && row.effective === 'scout').override, null)
+  } finally { ledger.close() }
+})
 
 test('A1: configuration readout reports profile execution and assurance', { skip: SKIP }, () => {
   const ledger = openTestLedger()

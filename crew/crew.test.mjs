@@ -1805,7 +1805,7 @@ test('child execution projection follows the resolved shape and refuses disagree
   assert.equal(specExecution({}), null)
 })
 
-test('boot and run persist one configuration while the driver sees only effective execution', async () => {
+test('B1 boot crew record remains profile and assurance only', async () => {
   const { root: checkoutRoot, checkout } = testCheckout('crew-run-config-checkout-')
   const home = scratchDir('crew-run-config-home-')
   const task = 'run-config'
@@ -1826,7 +1826,13 @@ test('boot and run persist one configuration while the driver sees only effectiv
         profile: { requested: 'investigation', effective: 'investigation', source: 'explicit' },
         assurance: { requested: 'rigorous', effective: 'rigorous', source: 'explicit' },
       })
-      assert.deepEqual(bootRecord(dir).run_configuration, crew.run_configuration)
+      const bootConfiguration = bootRecord(dir).run_configuration
+      assert.deepEqual(bootConfiguration, {
+        profile: crew.run_configuration.profile,
+        assurance: crew.run_configuration.assurance,
+      })
+      assert.equal(Object.hasOwn(bootConfiguration, 'execution'), false)
+      assert.deepEqual(bootConfiguration, crew.run_configuration)
       runCmd({ task, checkout, 'brief-file': brief, execution: 'scout', keep: true }, {
         drive: (ctx) => { seen = ctx; return done }, awaitSeatsReady: () => {}, writeTerminalLine: () => {},
       })

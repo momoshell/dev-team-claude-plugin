@@ -23,6 +23,7 @@ import { readLadder, stageMoves } from '../visualizer/server/roster-ladder.mjs'
 import { shapeIntake } from '../visualizer/server/shape.mjs'
 import { createAgentsSource, proposeAgent, proposePrompt, proposeSkills } from '../visualizer/server/agents-source.mjs'
 import { normalizeSkillsPage } from '../visualizer/web/src/lib/agents.js'
+import { loadCapabilities } from '../crew/capabilities.mjs'
 import { rawRequest, scratchDir, sqliteAvailable, treeDigest } from './helpers.mjs'
 const require = createRequire(import.meta.url)
 const SKIP = sqliteAvailable() ? false : `node:sqlite unavailable (below NODE_FLOOR ${NODE_FLOOR})`
@@ -148,8 +149,14 @@ function agentsFixture(prefix = 'visualizer-agents-') {
     schema_version: 1,
     updated_at: '2026-09-15',
     coding_agents: {
-      pi: { providers: ['openai'], transports: ['pane', 'headless-rpc'], adapter: 'crew/adapters/adapter-pi.mjs', refuses: ['mcp_servers'] },
-      claude: { providers: ['anthropic'], transports: ['pane', 'headless-json'], adapter: 'crew/adapters/adapter-claude.mjs', refuses: ['skills'] },
+      pi: {
+        providers: ['openai'], transports: ['pane', 'headless-rpc'], adapter: 'crew/adapters/adapter-pi.mjs', refuses: ['mcp_servers'],
+        display_name: 'Pi', binary: 'pi', install_hint: 'Install Pi.', availability: 'discovered-unavailable', availability_reason: 'version-spawn-failed',
+      },
+      claude: {
+        providers: ['anthropic'], transports: ['pane', 'headless-json'], adapter: 'crew/adapters/adapter-claude.mjs', refuses: ['skills'],
+        display_name: 'Claude Code', binary: 'claude', install_hint: 'Install Claude Code.', availability: 'executable', availability_reason: 'executable',
+      },
     },
     roles: Object.fromEntries(['lead', 'planner', 'builder', 'reviewer', 'tech-lead'].map((role) => [role, { tools: [], extensions: [], agents: [], skills: [], advisor: false, requires: [], mcp_servers: [] }])),
     local_providers: {},
@@ -579,12 +586,14 @@ test('B1 agents page proposal endpoints are diff-only', async () => {
     const view = await json(server.base, '/api/agents')
     assert.equal(view.status, 200)
     assert.equal(view.json.agents.length, 2)
+    assert.equal(view.json.agents.find((agent) => agent.name === 'pi').availability.value, 'discovered-unavailable')
+    assert.equal(view.json.agents.find((agent) => agent.name === 'pi').install_hint.value, 'Install Pi.')
     assert.equal(view.json.skills.length, 9)
     assert.equal(view.json.roles.length, 5)
     assert.equal(view.json.prompts.length, 6)
     assert.equal(view.json.roles.find((row) => row.role === 'builder').cells['frontend-svelte'].last_seat_delivery, true)
     const post = (path, body) => json(server.base, path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
-    const agent = await post('/api/agents/propose', { name: 'future-agent', entry: { providers: ['openai'], transports: ['pane'], adapter: 'crew/adapters/adapter-pi.mjs', refuses: [], availability: 'proposal-stub' } })
+    const agent = await post('/api/agents/propose', { name: 'future-agent', entry: { providers: ['openai'], transports: ['pane'], adapter: 'crew/adapters/adapter-future-agent.mjs', refuses: [], availability: 'proposal-stub' } })
     assert.equal(agent.status, 200); assert.equal(agent.json.ok, true); assert.ok(agent.json.diff); assert.deepEqual(agent.json.refusals, []); assert.equal(Object.hasOwn(agent.json, 'target_path'), false); assert.equal(Object.hasOwn(agent.json, 'after_text'), false)
     const skills = await post('/api/skills/propose', { role: 'builder', skills: ['frontend-svelte'] })
     assert.equal(skills.status, 200); assert.equal(skills.json.ok, true); assert.match(skills.json.diff, /crew\/capabilities\.json/); assert.deepEqual(skills.json.refusals, [])
@@ -662,6 +671,33 @@ test('skills-page:C1', async () => {
     assert.equal(treeDigest(fixture.crewRoot), crewBefore)
   } finally {
     if (server) await stopInProcess(server)
+  }
+})
+
+test('E1 proposed agent entry passes capability loading', () => {
+  const fixture = agentsFixture('visualizer-agents-proposal-schema-')
+  try {
+    const proposal = proposeAgent({
+      checkout: fixture.checkout,
+      name: 'future-agent',
+      entry: { providers: ['openai'], transports: ['pane'], adapter: 'crew/adapters/adapter-future-agent.mjs', refuses: [], availability: 'proposal-stub' },
+    })
+    assert.equal(proposal.ok, true)
+    const parsed = JSON.parse(proposal.after_text)
+    const loaded = loadCapabilities({ register: parsed })
+    assert.deepEqual(loaded.coding_agents['future-agent'], {
+      providers: ['openai'],
+      transports: ['pane'],
+      adapter: 'crew/adapters/adapter-future-agent.mjs',
+      refuses: [],
+      display_name: 'future-agent',
+      binary: 'future-agent',
+      install_hint: 'Install future-agent and ensure the future-agent binary is on PATH.',
+      availability: 'proposal-stub',
+      availability_reason: 'proposal-stub',
+    })
+  } finally {
+    rmSync(fixture.dir, { recursive: true, force: true })
   }
 })
 

@@ -53,8 +53,8 @@ function capabilityRegister(overrides = {}) {
     },
     local_providers: {},
     coding_agents: {
-      pi: { providers: ['openai', 'anthropic', 'llama-swap'], transports: ['pane', 'headless-rpc'], adapter: 'crew/adapters/adapter-pi.mjs', refuses: ['mcp_servers'], display_name: 'Pi', binary: 'pi', install_hint: 'Install Pi and ensure the pi binary is on PATH.' },
-      claude: { providers: ['anthropic'], transports: ['pane', 'headless-json'], adapter: 'crew/adapters/adapter-claude.mjs', refuses: ['extensions', 'skills', 'local_provider'], display_name: 'Claude Code', binary: 'claude', install_hint: 'Install Claude Code and ensure the claude binary is on PATH.' },
+      pi: { providers: ['openai', 'anthropic', 'llama-swap'], transports: ['pane', 'headless-rpc'], adapter: 'crew/adapters/adapter-pi.mjs', refuses: ['mcp_servers'], display_name: 'Pi', binary: 'pi', install_hint: 'Install Pi and ensure the pi binary is on PATH.', availability: 'executable', availability_reason: 'executable' },
+      claude: { providers: ['anthropic'], transports: ['pane', 'headless-json'], adapter: 'crew/adapters/adapter-claude.mjs', refuses: ['extensions', 'skills', 'local_provider'], display_name: 'Claude Code', binary: 'claude', install_hint: 'Install Claude Code and ensure the claude binary is on PATH.', availability: 'executable', availability_reason: 'executable' },
     },
   }
   const local_providers = { ...base.local_providers, ...(overrides.local_providers || {}) }
@@ -152,6 +152,10 @@ test('A1 coding agent register validates as a closed schema', () => {
     (value) => { delete value.coding_agents.pi.display_name },
     (value) => { delete value.coding_agents.pi.binary },
     (value) => { delete value.coding_agents.pi.install_hint },
+    (value) => { delete value.coding_agents.pi.availability },
+    (value) => { value.coding_agents.pi.availability = 'invented-state' },
+    (value) => { delete value.coding_agents.pi.availability_reason },
+    (value) => { value.coding_agents.pi.availability_reason = 'invented-reason' },
     (value) => { value.coding_agents.pi.display_name = '   ' },
     (value) => { value.coding_agents.pi.binary = 'pi --version' },
     (value) => { value.coding_agents.pi.install_hint = '' },
@@ -311,7 +315,9 @@ test('E1 subagent grant agents retain their existing meaning', () => {
   assert.deepEqual(shipped.roles.planner.by_agent.pi.agents[0], { name: 'scout', def: 'crew/pi/agents/scout.json' })
 })
 
-function availabilityFixtureAgent(name, { config, displayName = name } = {}) {
+function availabilityFixtureAgent(name, {
+  config, displayName = name, availability = 'executable', availabilityReason = availability,
+} = {}) {
   return {
     providers: ['openai'],
     transports: ['pane'],
@@ -320,9 +326,73 @@ function availabilityFixtureAgent(name, { config, displayName = name } = {}) {
     display_name: displayName,
     binary: name,
     install_hint: `Install ${name}.`,
+    availability,
+    availability_reason: availabilityReason,
     ...(config === undefined ? {} : { config }),
   }
 }
+
+test('B1 schema refuses every contradictory availability state and reason pair', () => {
+  const schema = JSON.parse(readFileSync(new URL('./capabilities.schema.json', import.meta.url), 'utf8'))
+  const allowed = {
+    executable: ['executable'],
+    'proposal-stub': ['proposal-stub', 'adapter-import-failed'],
+    'discovered-unavailable': ['discovered-unavailable', 'shim-not-binary', 'version-spawn-failed', 'version-interrupted'],
+    'installed-unconfigured': ['installed-unconfigured', 'transport-refused'],
+  }
+  const reasons = [...AGENT_AVAILABILITY_REASONS]
+  for (const state of AGENT_AVAILABILITY_STATES) {
+    for (const reason of reasons) {
+      const register = capabilityRegister({ coding_agents: {
+        'fixture-matrix': availabilityFixtureAgent('fixture-matrix', { availability: state, availabilityReason: reason }),
+      } })
+      const accepted = allowed[state].includes(reason)
+      if (accepted) assert.doesNotThrow(() => loadCapabilities({ register }), `${state}/${reason} should be accepted`)
+      else assert.throws(() => loadCapabilities({ register }), (error) => error.reason === 'register-invalid', `${state}/${reason} should be rejected`)
+    }
+  }
+
+  const overlapping = {
+    oneOf: [
+      { type: 'object', properties: { value: { type: 'string' } } },
+      { type: 'object', properties: { value: { type: 'string' } } },
+    ],
+  }
+  assert.ok(validateCapabilities(overlapping, { value: 'matches-both' }).length > 0)
+})
+
+test('C1 persisted availability reason is independent from availability state', () => {
+  const register = loadCapabilities({ register: capabilityRegister({ coding_agents: {
+    'fixture-persisted': availabilityFixtureAgent('fixture-persisted', {
+      availability: 'discovered-unavailable',
+      availabilityReason: 'version-spawn-failed',
+    }),
+  } }) })
+  assert.deepEqual(agentAvailability(register, 'fixture-persisted'), {
+    agent: 'fixture-persisted',
+    state: 'discovered-unavailable',
+    reason: 'version-spawn-failed',
+    display_name: 'fixture-persisted',
+    install_hint: 'Install fixture-persisted.',
+  })
+})
+
+test('D1 roster validation refuses each non-executable persisted state', () => {
+  for (const state of AGENT_AVAILABILITY_STATES) {
+    const register = loadCapabilities({ register: capabilityRegister({ coding_agents: {
+      'fixture-roster': availabilityFixtureAgent('fixture-roster', { availability: state }),
+    } }) })
+    const primary = { tiers: { build: { builder: { agent: 'fixture-roster' } } } }
+    const fallback = { tiers: { build: { builder: { agent: 'pi', fallback: [{ agent: 'fixture-roster' }] } } } }
+    for (const roster of [primary, fallback]) {
+      if (state === 'executable') assert.doesNotThrow(() => validateRosterAgents(roster, register))
+      else assert.throws(
+        () => validateRosterAgents(roster, register),
+        (error) => error.reason === 'agent-unavailable' && error.state === state && error.availability_reason === state,
+      )
+    }
+  }
+})
 
 test('A1 agentAvailability reaches all four closed states', () => {
   const register = loadCapabilities({ register: capabilityRegister({ coding_agents: {
@@ -386,7 +456,7 @@ test('A1 agentAvailability reaches all four closed states', () => {
   assert.equal(evidence().state, 'executable')
   assert.equal(evidence().reason, 'executable')
   assert.deepEqual(agentAvailability(register, 'fixture-executable'), {
-    agent: 'fixture-executable', state: 'proposal-stub', reason: 'proposal-stub',
+    agent: 'fixture-executable', state: 'executable', reason: 'executable',
     display_name: 'fixture-executable', install_hint: 'Install fixture-executable.',
   })
   const precedence = agentAvailability(register, 'fixture-config', {
@@ -408,7 +478,7 @@ test('A1 agentAvailability reaches all four closed states', () => {
 
 test('B1 proposal stubs are legal declarations but cannot resolve for boot', () => {
   const register = loadCapabilities({ register: capabilityRegister({ coding_agents: {
-    'fixture-proposal': availabilityFixtureAgent('fixture-proposal'),
+    'fixture-proposal': availabilityFixtureAgent('fixture-proposal', { availability: 'proposal-stub' }),
   } }) })
   assert.equal(Object.hasOwn(register.coding_agents, 'fixture-proposal'), true)
   const injected = { exists: () => false, which: () => '/bin/fixture-proposal', home: '/fixture-home' }

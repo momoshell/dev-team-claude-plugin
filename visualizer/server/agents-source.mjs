@@ -170,18 +170,15 @@ function registerFlags(refuses) {
 
 function registerAgents(register, reasons) {
   const entries = record(register?.coding_agents) ? register.coding_agents : {}
-  const availability = record(register?.agentAvailability)
-    ? register.agentAvailability
-    : (record(register?.agent_availability) ? register.agent_availability : null)
   return Object.entries(entries).sort(([left], [right]) => left.localeCompare(right)).map(([name, entry]) => {
     const safe = record(entry) ? entry : {}
     const refuses = Array.isArray(safe.refuses) ? safe.refuses.filter((value) => AGENT_REFUSALS.includes(value)) : []
-    const supplied = availability?.[name] ?? safe.agentAvailability ?? safe.agent_availability
-    const suppliedRecord = record(supplied) ? supplied : null
-    const availabilityValue = suppliedRecord ? suppliedRecord.value ?? suppliedRecord.state ?? suppliedRecord.availability : supplied
-    const installValue = suppliedRecord?.install_hint ?? (record(safe.install_hint) ? safe.install_hint : undefined)
-    const availabilityMark = availability ? (record(supplied) && Object.hasOwn(supplied, 'value') ? supplied : marked(availabilityValue, 'agent availability was supplied without a value')) : marked(null, AVAILABILITY_REASON)
-    const installMark = availability ? (record(supplied) && Object.hasOwn(supplied, 'install_hint') ? supplied.install_hint : marked(installValue, AVAILABILITY_REASON)) : marked(null, AVAILABILITY_REASON)
+    const availabilityMark = Object.hasOwn(safe, 'availability')
+      ? marked(safe.availability, null)
+      : marked(null, AVAILABILITY_REASON)
+    const installMark = Object.hasOwn(safe, 'install_hint')
+      ? marked(safe.install_hint, null)
+      : marked(null, AVAILABILITY_REASON)
     if (availabilityMark.measured === false && availabilityMark.reason) reasons.push(`${name} availability: ${availabilityMark.reason}`)
     if (installMark.measured === false && installMark.reason) reasons.push(`${name} install hint: ${installMark.reason}`)
     return {
@@ -421,11 +418,25 @@ export function proposeAgent({ checkout = process.cwd(), name, entry, readFileSy
   refusals.push(...validateStringArray(value.providers, 'providers', { minItems: 1, pattern: /^[a-z0-9][a-z0-9-]*$/ }))
   refusals.push(...validateStringArray(value.transports, 'transports', { minItems: 1, vocabulary: ['pane', 'headless-json', 'headless-rpc'] }))
   if (!validPath(value.adapter)) refusals.push(refusal('adapter-path', 'adapter must be a confined checkout-relative path'))
+  else if (value.adapter !== `crew/adapters/adapter-${name}.mjs`) refusals.push(refusal('adapter-path', `adapter must match coding agent ${name}: crew/adapters/adapter-${name}.mjs`))
   refusals.push(...validateStringArray(value.refuses, 'refuses', { vocabulary: AGENT_REFUSALS }))
   if (value.availability !== 'proposal-stub') refusals.push(refusal('availability-stub', 'new coding agents must carry availability: proposal-stub'))
   if (refusals.length) return proposalResult({ target_path: target, refusals })
   const afterValue = structuredClone(source.value)
-  afterValue.coding_agents = { ...(record(afterValue.coding_agents) ? afterValue.coding_agents : {}), [name]: { providers: [...value.providers], transports: [...value.transports], adapter: value.adapter, refuses: [...value.refuses], availability: 'proposal-stub' } }
+  afterValue.coding_agents = {
+    ...(record(afterValue.coding_agents) ? afterValue.coding_agents : {}),
+    [name]: {
+      providers: [...value.providers],
+      transports: [...value.transports],
+      adapter: value.adapter,
+      refuses: [...value.refuses],
+      display_name: name,
+      binary: name,
+      install_hint: `Install ${name} and ensure the ${name} binary is on PATH.`,
+      availability: 'proposal-stub',
+      availability_reason: 'proposal-stub',
+    },
+  }
   const after = canonicalJson(afterValue)
   return proposalResult({ ok: true, diff: unifiedDiff(source.before, after, { path: 'crew/capabilities.json' }), target_path: target, after_text: after })
 }

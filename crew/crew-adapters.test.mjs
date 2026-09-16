@@ -307,7 +307,9 @@ test('assertCapabilities rejects an adapter that cannot enforce tool denial, nam
 test('resolveAdapters rejects an unknown --agent-<role>, and refuses a role-wide skills grant on claude', async () => {
   await assert.rejects(
     () => resolveAdapters(['builder'], { 'agent-builder': 'nope' }, null, { register: capabilityRegister() }),
-    /adapter-nope\.mjs/,
+    (error) => error.reason === 'agent-unresolved'
+      && /seat builder/.test(error.message)
+      && /coding_agents\.nope/.test(error.message),
   )
   // The shipped register grants the builder's skill under the pi overlay, because claude refuses the
   // skills dimension, so the shipped default resolves.
@@ -321,6 +323,104 @@ test('resolveAdapters rejects an unknown --agent-<role>, and refuses a role-wide
       && error.message.includes('builder')
       && error.message.includes('skills'),
   )
+})
+
+test('resolveAdapters refuses a recorded proposal stub before checking its adapter path', async () => {
+  const base = capabilityRegister()
+  const register = capabilityRegister({ coding_agents: {
+    stub: {
+      ...base.coding_agents.pi,
+      adapter: 'crew/adapters/adapter-stub.mjs',
+      display_name: 'Stub',
+      binary: 'stub',
+      install_hint: 'Install Stub.',
+      availability: 'proposal-stub',
+      availability_reason: 'proposal-stub',
+    },
+  } })
+  let existsCalls = 0
+  await assert.rejects(
+    () => resolveAdapters(['lead'], { 'agent-lead': 'stub' }, null, {
+      register,
+      exists: () => { existsCalls += 1; return false },
+    }),
+    (err) => err.reason === 'agent-unavailable'
+      && err.state === 'proposal-stub'
+      && err.availability_reason === 'proposal-stub'
+      && /seat lead/.test(err.message)
+      && /stub/.test(err.message)
+      && /state proposal-stub/.test(err.message)
+      && /reason proposal-stub/.test(err.message),
+  )
+  assert.equal(existsCalls, 0)
+})
+
+test('bootCmd refuses an unavailable selected roster cell before workspace creation', async () => {
+  const home = scratchDir('crew-roster-admission-home-')
+  const { root: checkoutRoot, checkout } = testCheckout('crew-roster-admission-checkout-')
+  const task = 'crew-roster-admission'
+  const rawRoster = JSON.parse(readFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
+  const base = capabilityRegister()
+  const register = capabilityRegister({ coding_agents: {
+    pi: { ...base.coding_agents.pi, availability: 'discovered-unavailable', availability_reason: 'discovered-unavailable' },
+  } })
+  let workspaceCalls = 0
+  try {
+    await withHome(home, () => assert.rejects(
+      () => bootCmd(
+        { task, checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath },
+        {
+          register,
+          readRosterFile: () => JSON.stringify(rawRoster),
+          cmux: () => { workspaceCalls += 1 },
+        },
+      ),
+      (err) => err.reason === 'agent-unavailable'
+        && err.state === 'discovered-unavailable'
+        && err.availability_reason === 'discovered-unavailable'
+        && /roster cell tiers\.build\.planner/.test(err.message)
+        && /pi/.test(err.message),
+    ))
+    assert.equal(workspaceCalls, 0)
+    assert.equal(existsSync(join(testCrewDir(home, checkout, task), 'crew.json')), false)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+})
+
+test('RV1-2 bootCmd admits selected cells despite unavailable unselected roster cells', async () => {
+  const home = scratchDir('crew-selected-roster-admission-home-')
+  const { root: checkoutRoot, checkout } = testCheckout('crew-selected-roster-admission-checkout-')
+  const task = 'crew-selected-roster-admission'
+  const rawRoster = JSON.parse(readFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
+  rawRoster.tiers.build.planner = { ...rawRoster.tiers.build.planner, provider: 'anthropic', id: 'claude-opus-5', agent: 'claude' }
+  rawRoster.tiers.build.builder = { ...rawRoster.tiers.build.builder, provider: 'anthropic', id: 'claude-opus-5', agent: 'claude' }
+  const base = capabilityRegister()
+  const register = capabilityRegister({ coding_agents: {
+    pi: { ...base.coding_agents.pi, availability: 'discovered-unavailable', availability_reason: 'discovered-unavailable' },
+  } })
+  let workspaceCalls = 0
+  try {
+    await withHome(home, () => assert.doesNotReject(
+      () => bootCmd(
+        { task, checkout, tier: 'build', 'headless-all': true, 'allow-shortfall-planner': 'subagents', 'claude-bin': process.execPath },
+        {
+          register,
+          readRosterFile: () => JSON.stringify(rawRoster),
+          cmux: () => { workspaceCalls += 1 },
+          awaitSeatsReady: async () => {},
+        },
+      ),
+    ))
+    assert.equal(workspaceCalls, 0)
+    const crew = JSON.parse(readFileSync(join(testCrewDir(home, checkout, task), 'crew.json'), 'utf8'))
+    assert.equal(Object.keys(crew.members).length, 4)
+    for (const member of Object.values(crew.members)) assert.equal(member.agent, 'claude')
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
 })
 
 test('resolveAdapters tags a refusal with the role and roster cell it rejected', async () => {

@@ -74,7 +74,7 @@ import {
 import {
   CAPABILITY_DELIVERY, EMPTY_GRANTS, assertGrantsBacked, effectiveCapabilities, grantsFor,
   loadCapabilities, refuse, REGISTER_ROOT, resolvedGrantPath, pathExists, pathMessage,
-  agentRegisterEntry, assertAgentProvider, assertAgentTransport, assertAgentAdapter, assertAgentRefusals as assertRegisteredAgentRefusals,
+  agentRegisterEntry, validateRosterAgents, assertAgentProvider, assertAgentTransport, assertAgentAdapter, assertAgentRefusals as assertRegisteredAgentRefusals,
 } from './capabilities.mjs'
 export { CAPABILITY_DELIVERY, CAPABILITY_REFUSALS, EMPTY_GRANTS, assertGrantsBacked, effectiveCapabilities, grantsFor, loadCapabilities, refuse, validateCapabilities,
   agentRegisterEntry, assertAgentProvider, assertAgentTransport, assertAgentAdapter, assertAgentRefusals,
@@ -2373,6 +2373,7 @@ export async function resolveAdapters(roles, args, seats = null, deps = {}) {
     if (m && !roles.includes(m[1])) throw new Error(`--allow-shortfall-${m[1]} given but crew seats no ${m[1]}`)
   }
   const registry = deps.register ? loadCapabilities({ register: deps.register }) : loadCapabilities()
+  if (deps.roster) validateRosterAgents(deps.roster, registry)
   const root = deps.root ?? REGISTER_ROOT
   const exists = deps.exists || existsSync
   const readFile = deps.readFile || readFileSync
@@ -2382,6 +2383,15 @@ export async function resolveAdapters(roles, args, seats = null, deps = {}) {
       const seat = seats?.[role]
       const name = String(seat?.agent || seatAgent(role, sourceArgs))
       if (!/^[a-z0-9][a-z0-9-]*$/.test(name)) throw new Error(`invalid agent adapter name "${name}" for seat ${role}`)
+      try {
+        agentRegisterEntry(registry, name, { role })
+      } catch (error) {
+        if (error?.reason !== 'agent-unresolved') throw error
+        throw Object.assign(
+          new Error(`unknown agent adapter ${JSON.stringify(name)} for seat ${role}: ${error.message}`),
+          { reason: error.reason },
+        )
+      }
       const rawModel = seat?.model || sourceArgs[`model-${role}`] || null
       let grants = grantsFor(registry, role, { root, exists, agent: name })
       assertGrantsBacked(role, grants, registry, { agent: name })
@@ -2928,10 +2938,12 @@ export async function bootCmd(args, deps = {}) {
 
   // Resolve adapters before touching cmux — a bad --agent-<role> or a
   // capability shortfall must fail before a workspace gets created.
+  const selectedRoster = tierSeats && tierName ? { tiers: { [tierName]: tierSeats } } : null
   let adapters
   try {
     adapters = await resolveAdapters(roles, args, tierSeats, {
       ...(registerDep ? { register: registerDep } : {}),
+      ...(selectedRoster ? { roster: selectedRoster } : {}),
       exists: existsSyncDep ? (path) => path === FFF_MCP_BIN ? existsSyncDep(path) : existsSync(path) : existsSync,
     })
   } catch (err) {

@@ -1,12 +1,13 @@
 #!/usr/bin/env node
-// scripts/factory/agent-doctor.mjs — a read-only coding-agent availability probe.
+// scripts/factory/agent-doctor.mjs — a coding-agent availability probe.
 // The doctor gathers host evidence, delegates state resolution to the capability
-// register, and renders a proposal without ever applying it.
+// register, and renders a proposal that --write can persist atomically.
 
-import { readFileSync, realpathSync } from 'node:fs'
+import { mkdirSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
   REGISTER_ROOT,
@@ -16,10 +17,8 @@ import {
 
 export const USAGE = 'usage: node scripts/factory/agent-doctor.mjs [--write] [--state <path>]'
 
-export function AGENT_AVAILABILITY_STATE_PATH(value = homedir()) {
-  const supplied = typeof value === 'string' ? value : value?.home
-  const home = typeof supplied === 'function' ? supplied() : supplied
-  return join(home || homedir(), '.crew', 'agent-availability.json')
+export function AGENT_AVAILABILITY_STATE_PATH() {
+  return join(REGISTER_ROOT, 'crew', 'capabilities.json')
 }
 
 class DoctorUsageError extends Error {
@@ -45,6 +44,10 @@ function normalDeps(deps = {}) {
     spawn: source.spawn || defaultSpawn,
     importAdapter: source.importAdapter || ((url) => import(url)),
     readFile: source.readFile || readFileSync,
+    mkdirSync: source.mkdirSync || mkdirSync,
+    writeFileSync: source.writeFileSync || writeFileSync,
+    renameSync: source.renameSync || renameSync,
+    unlinkSync: source.unlinkSync || unlinkSync,
     home: source.home || homedir,
     now: source.now || (() => Date.now()),
     availability: source.agentAvailability || agentAvailability,
@@ -278,6 +281,56 @@ function writeOutput(d, value) {
   d.stdout(`${value}\n`)
 }
 
+function persistState(d, statePath, proposedText) {
+  const parent = dirname(statePath)
+  let temporary = null
+  try {
+    temporary = join(parent, `.${basename(statePath)}.${process.pid}.${randomUUID()}.tmp`)
+    d.mkdirSync(parent, { recursive: true })
+    d.writeFileSync(temporary, proposedText, { encoding: 'utf8', flag: 'wx' })
+    d.renameSync(temporary, statePath)
+  } catch (error) {
+    if (temporary) {
+      try { d.unlinkSync(temporary) } catch { /* preserve the original target on cleanup failure */ }
+    }
+    throw error
+  }
+}
+
+async function readStateRegister(d, statePath) {
+  let before
+  try {
+    before = textOf(await d.readFile(statePath, 'utf8'))
+  } catch (error) {
+    throw Object.assign(new Error(errorText(error)), { reason: 'state-read-failed', cause: error })
+  }
+  if (before.trim() === '') {
+    throw Object.assign(new Error(`runtime capability register ${statePath} is empty`), { reason: 'state-read-failed' })
+  }
+  let parsed
+  try {
+    parsed = JSON.parse(before)
+  } catch (error) {
+    throw Object.assign(new Error(errorText(error)), { reason: 'state-read-failed', cause: error })
+  }
+  try {
+    return { before, register: loadCapabilities({ path: statePath, register: parsed }) }
+  } catch (error) {
+    throw Object.assign(new Error(errorText(error)), { reason: 'state-read-failed', cause: error })
+  }
+}
+
+function mergeProbeAvailability(register, results) {
+  const merged = structuredClone(register)
+  for (const result of results) {
+    const entry = merged?.coding_agents?.[result.agent]
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue
+    entry.availability = result.state
+    entry.availability_reason = result.reason
+  }
+  return merged
+}
+
 export async function main(argv = process.argv.slice(2), deps = {}) {
   const d = normalDeps(deps)
   let flags
@@ -288,33 +341,52 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
     return 2
   }
 
+  const statePath = flags.state || AGENT_AVAILABILITY_STATE_PATH()
+  let before = null
+  let targetRegister = null
+  if (flags.write) {
+    try {
+      ({ before, register: targetRegister } = await readStateRegister(d, statePath))
+    } catch (error) {
+      d.stderr(`${errorText(error)} [reason: state-read-failed]\n`)
+      return 2
+    }
+  }
+
   let probed
   let home
   try {
     home = await resolvedValue(d.home, homedir())
-    probed = await probeAgents(deps?.register ?? null, { ...d, home })
+    const register = flags.write ? targetRegister : (deps?.register ?? null)
+    probed = await probeAgents(register, { ...d, home })
   } catch (error) {
     d.stderr(`${errorText(error)} [reason: probe-failed]\n`)
     return 1
   }
 
-  const statePath = flags.state || AGENT_AVAILABILITY_STATE_PATH(home)
-  let before = null
+  let proposedText = probed.proposedText
   if (flags.write) {
     try {
-      before = textOf(await d.readFile(statePath, 'utf8'))
+      const merged = mergeProbeAvailability(targetRegister, probed.results)
+      const validated = loadCapabilities({ register: merged })
+      proposedText = `${JSON.stringify(validated, null, 2)}\n`
     } catch (error) {
-      if (error?.code !== 'ENOENT') {
-        d.stderr(`${errorText(error)} [reason: state-read-failed]\n`)
-        return 2
-      }
+      d.stderr(`${errorText(error)} [reason: state-read-failed]\n`)
+      return 2
     }
   }
 
-  const proposedText = probed.proposedText
   const output = [renderReadout(probed.results)]
   if (flags.write) output.push(renderUnifiedDiff(before, proposedText, statePath))
   writeOutput(d, output.filter((value, index) => index === 0 || value !== '').join('\n'))
+  if (flags.write && before !== proposedText) {
+    try {
+      persistState(d, statePath, proposedText)
+    } catch (error) {
+      d.stderr(`${errorText(error)} [reason: state-write-failed]\n`)
+      return 2
+    }
+  }
   return 0
 }
 

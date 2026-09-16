@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { readFileSync, writeFileSync as fsWriteFileSync } from 'node:fs'
+import { mkdirSync as fsMkdirSync, readFileSync, renameSync as fsRenameSync, rmSync, unlinkSync as fsUnlinkSync, writeFileSync as fsWriteFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { AGENT_AVAILABILITY_STATE_PATH, main, probeReport, renderReadout } from '../scripts/factory/agent-doctor.mjs'
+import { agentAvailability, loadCapabilities } from '../crew/capabilities.mjs'
+import { createAgentsSource } from '../visualizer/server/agents-source.mjs'
 import { ROOT, scratchDir } from './helpers.mjs'
 
 const SCRATCH_HOME = process.env.CREW_AGENT_DOCTOR_TEST_HOME || scratchDir('factory-agent-doctor-home-')
@@ -23,6 +25,8 @@ function fixtureEntry(name, { transports = ['pane'], config, binary = `${name}-b
     display_name: name,
     binary,
     install_hint: `Install ${name}.`,
+    availability: 'executable',
+    availability_reason: 'executable',
     ...(config ? { config } : {}),
   }
 }
@@ -30,7 +34,14 @@ function fixtureEntry(name, { transports = ['pane'], config, binary = `${name}-b
 function fixtureRegister(names) {
   const coding_agents = {}
   for (const [name, options] of names) coding_agents[name] = fixtureEntry(name, options)
-  return { coding_agents }
+  const grant = () => ({ tools: [], extensions: [], agents: [], skills: [], advisor: false, requires: [], mcp_servers: [] })
+  return {
+    schema_version: 1,
+    updated_at: '2026-09-15',
+    coding_agents,
+    roles: { lead: grant(), planner: grant(), builder: grant(), reviewer: grant(), 'tech-lead': grant() },
+    local_providers: {},
+  }
 }
 
 function adapterName(url) {
@@ -135,8 +146,136 @@ test('A1 doctor probes every registered agent, transport, state, and closed reas
   assert.deepEqual(Object.keys(probed.value.agents), Object.keys(register.coding_agents))
   assert.match(probed.proposedText, /"schema_version": 1/)
   assert.equal(probed.proposedText.endsWith('\n'), true)
-  assert.equal(AGENT_AVAILABILITY_STATE_PATH(SCRATCH_HOME), join(SCRATCH_HOME, '.crew', 'agent-availability.json'))
+  assert.equal(AGENT_AVAILABILITY_STATE_PATH(), join(ROOT, 'crew', 'capabilities.json'))
   assert.equal(readCalls.length, 1)
+})
+
+test('A1 doctor persists availability in the capability register consumed by boot and visualizer', async () => {
+  assert.equal(AGENT_AVAILABILITY_STATE_PATH(), join(ROOT, 'crew', 'capabilities.json'))
+  const root = scratchDir('factory-agent-doctor-register-')
+  const checkout = join(root, 'checkout')
+  const home = join(root, 'home')
+  const statePath = join(checkout, 'crew', 'capabilities.json')
+  const target = fixtureRegister([['target', { transports: ['pane'], config: ['~/target-config.json'], binary: 'target-binary' }]])
+  fsMkdirSync(join(checkout, 'crew'), { recursive: true })
+  fsWriteFileSync(statePath, `${JSON.stringify(target, null, 2)}\n`)
+  const injected = fixtureRegister([['injected', { transports: ['pane'], binary: 'injected-binary', config: ['~/injected-config.json'] }]])
+  const calls = { which: [], spawn: [], imports: [], reads: [], write: 0, rename: 0 }
+  const stdout = []
+  const stderr = []
+  try {
+    const code = await main(['--write', '--state', statePath], doctorDeps(injected, {
+      home: () => home,
+      readFile: async (path, encoding) => {
+        calls.reads.push(path)
+        if (path === statePath) return readFileSync(path, encoding)
+        throw missing()
+      },
+      which: (binary) => {
+        calls.which.push(binary)
+        return binary === 'target-binary' ? '/fixture/target-binary' : null
+      },
+      spawn: (binary, args) => {
+        calls.spawn.push({ binary, args })
+        throw Object.assign(new Error('version probe denied'), { code: 'EPERM' })
+      },
+      importAdapter: async (url) => {
+        calls.imports.push(url)
+        return { capabilitiesFor: () => ({}) }
+      },
+      stdout: (value) => stdout.push(String(value)),
+      stderr: (value) => stderr.push(String(value)),
+      writeFileSync: (path, value, options) => { calls.write += 1; return fsWriteFileSync(path, value, options) },
+      renameSync: (from, to) => { calls.rename += 1; return fsRenameSync(from, to) },
+    }))
+    assert.equal(code, 0)
+    assert.deepEqual(calls.which, ['target-binary'])
+    assert.deepEqual(calls.spawn, [{ binary: '/fixture/target-binary', args: ['--version'] }])
+    assert.equal(calls.imports.length, 1)
+    assert.match(calls.imports[0], /adapter-target\.mjs$/)
+    assert.ok(calls.reads.includes(statePath))
+    assert.ok(calls.reads.includes(join(home, 'target-config.json')))
+    assert.equal(calls.write, 1)
+    assert.equal(calls.rename, 1)
+    assert.deepEqual(stderr, [])
+    assert.match(stdout.join(''), /1 agents probed, 0 executable, 1 unavailable/)
+
+    const before = target.coding_agents.target
+    const persisted = JSON.parse(readFileSync(statePath, 'utf8'))
+    const after = persisted.coding_agents.target
+    assert.equal(after.availability, 'discovered-unavailable')
+    assert.equal(after.availability_reason, 'version-spawn-failed')
+    for (const key of ['providers', 'transports', 'adapter', 'refuses', 'display_name', 'binary', 'install_hint', 'config']) {
+      assert.deepEqual(after[key], before[key], key)
+    }
+
+    const loaded = loadCapabilities({ path: statePath })
+    assert.deepEqual(
+      { state: agentAvailability(loaded, 'target').state, reason: agentAvailability(loaded, 'target').reason },
+      { state: 'discovered-unavailable', reason: 'version-spawn-failed' },
+    )
+    const view = createAgentsSource({ checkout }).read()
+    const visualizerAgent = view.agents.find((agent) => agent.name === 'target')
+    assert.equal(visualizerAgent.availability.value, 'discovered-unavailable')
+    assert.equal(visualizerAgent.install_hint.value, 'Install target.')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('TL5 doctor validates exactly one selected target snapshot', async () => {
+  const root = scratchDir('factory-agent-doctor-one-snapshot-')
+  const statePath = join(root, 'capabilities.json')
+  const target = fixtureRegister([['snapshot', { transports: ['pane'] }]])
+  const reads = []
+  const stderr = []
+  try {
+    const code = await main(['--write', '--state', statePath], doctorDeps(fixtureRegister([['injected', { transports: ['pane'] }]]), {
+      readFile: async (path) => {
+        reads.push(path)
+        if (path === statePath) return `${JSON.stringify(target, null, 2)}\n`
+        throw missing(`unexpected read ${path}`)
+      },
+      which: () => '/fixture/snapshot-binary',
+      spawn: () => ({ status: 0, signal: null, error: null, stdout: 'snapshot 1.0\n' }),
+      importAdapter: async () => ({ capabilitiesFor: () => ({}) }),
+      mkdirSync: () => {},
+      writeFileSync: () => {},
+      renameSync: () => {},
+      unlinkSync: () => {},
+      stdout: () => {},
+      stderr: (value) => stderr.push(String(value)),
+    }))
+    assert.equal(code, 0)
+    assert.deepEqual(reads, [statePath])
+    assert.deepEqual(stderr, [])
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('A1 doctor refuses a parseable schema-invalid register before probing or writing', async () => {
+  const root = scratchDir('factory-agent-doctor-invalid-register-')
+  const statePath = join(root, 'capabilities.json')
+  const target = fixtureRegister([['target', { transports: ['pane'] }]])
+  target.coding_agents.target.availability_reason = 'transport-refused'
+  const old = `${JSON.stringify(target, null, 2)}\n`
+  fsWriteFileSync(statePath, old)
+  const calls = { probe: 0, write: 0, rename: 0 }
+  const stderr = []
+  try {
+    const code = await main(['--write', '--state', statePath], doctorDeps(fixtureRegister([['injected', { transports: ['pane'] }]]), {
+      readFile: async (path, encoding) => readFileSync(path, encoding),
+      which: () => { calls.probe += 1; return '/fixture/agent' },
+      spawn: () => { calls.probe += 1; return { status: 0, signal: null, error: null, stdout: 'ok\\n' } },
+      importAdapter: async () => { calls.probe += 1; return { capabilitiesFor: () => ({}) } },
+      writeFileSync: () => { calls.write += 1 },
+      renameSync: () => { calls.rename += 1 },
+      stderr: (value) => stderr.push(String(value)),
+    }))
+    assert.equal(code, 2)
+    assert.match(stderr.join(''), /\[reason: state-read-failed\]/)
+    assert.deepEqual(calls, { probe: 0, write: 0, rename: 0 })
+    assert.equal(readFileSync(statePath, 'utf8'), old)
+  } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
 test('B1 a resolved shim whose version exits nonzero is unavailable, never executable', async () => {
@@ -152,25 +291,25 @@ test('B1 a resolved shim whose version exits nonzero is unavailable, never execu
   assert.notEqual(probed.results[0].state, 'executable')
 })
 
-test('C1 default and --write modes print proposals without mutating absent or existing targets', async () => {
+test('C1 default and --write modes print and persist proposals atomically', async () => {
   const register = fixtureRegister([['executable', { transports: ['pane'] }]])
-  const statePath = join(SCRATCH_HOME, 'agent-doctor-state.json')
+  register.coding_agents.executable.availability = 'discovered-unavailable'
+  register.coding_agents.executable.availability_reason = 'discovered-unavailable'
+  const statePath = join(SCRATCH_HOME, 'agent-doctor-state', 'capabilities.json')
+  fsMkdirSync(join(SCRATCH_HOME, 'agent-doctor-state'), { recursive: true })
+  fsWriteFileSync(statePath, `${JSON.stringify(register, null, 2)}\n`)
   const calls = { write: 0, mkdir: 0, rename: 0, unlink: 0 }
-  let existing = null
   const stdout = []
   const stderr = []
   const deps = doctorDeps(register, {
     home: () => SCRATCH_HOME,
-    readFile: async (path) => {
-      if (path === statePath && existing !== null) return existing
-      throw missing()
-    },
+    readFile: async (path, encoding) => readFileSync(path, encoding),
     stdout: (value) => stdout.push(String(value)),
     stderr: (value) => stderr.push(String(value)),
-    writeFileSync: (path, value) => { calls.write += 1; fsWriteFileSync(path, value) },
-    mkdirSync: () => { calls.mkdir += 1 },
-    renameSync: () => { calls.rename += 1 },
-    unlinkSync: () => { calls.unlink += 1 },
+    writeFileSync: (path, value, options) => { calls.write += 1; return fsWriteFileSync(path, value, options) },
+    mkdirSync: (path, options) => { calls.mkdir += 1; return fsMkdirSync(path, options) },
+    renameSync: (from, to) => { calls.rename += 1; return fsRenameSync(from, to) },
+    unlinkSync: (path) => { calls.unlink += 1; return fsUnlinkSync(path) },
   })
   assert.equal(await main(['--unknown'], deps), 2)
   assert.equal(await main(['--state'], deps), 2)
@@ -180,23 +319,101 @@ test('C1 default and --write modes print proposals without mutating absent or ex
   assert.equal(stdout.join(''), '1 agents probed, 1 executable, 0 unavailable\n')
   stdout.length = 0
   assert.equal(await main(['--write', '--state', statePath], deps), 0)
-  assert.equal(existing, null)
-  assert.throws(() => readFileSync(statePath, 'utf8'), { code: 'ENOENT' })
-  assert.match(stdout.join(''), /--- \/dev\/null/)
+  const persisted = readFileSync(statePath, 'utf8')
+  const persistedValue = JSON.parse(persisted)
+  assert.equal(persistedValue.coding_agents.executable.availability, 'executable')
+  assert.equal(persistedValue.coding_agents.executable.availability_reason, 'executable')
+  assert.equal(persisted.endsWith('\n'), true)
+  assert.ok(stdout.join('').includes(`--- ${statePath}`))
   assert.equal(stdout.join('').includes(`+++ ${statePath}`), true)
+  assert.equal(calls.write, 1)
+  assert.equal(calls.mkdir, 1)
+  assert.equal(calls.rename, 1)
+  assert.equal(calls.unlink, 0)
 
-  existing = '{"old":true}\n'
-  fsWriteFileSync(statePath, existing)
   stdout.length = 0
   assert.equal(await main(['--write', '--state', statePath], deps), 0)
-  assert.equal(readFileSync(statePath, 'utf8'), existing)
+  assert.equal(readFileSync(statePath, 'utf8'), persisted)
+  assert.equal(stdout.join('').includes(`--- ${statePath}`), false)
+  assert.equal(calls.write, 1)
+  assert.equal(calls.mkdir, 1)
+  assert.equal(calls.rename, 1)
+  assert.equal(calls.unlink, 0)
+
+  const changed = JSON.parse(persisted)
+  changed.coding_agents.executable.availability = 'discovered-unavailable'
+  changed.coding_agents.executable.availability_reason = 'discovered-unavailable'
+  fsWriteFileSync(statePath, `${JSON.stringify(changed, null, 2)}\n`)
+  stdout.length = 0
+  assert.equal(await main(['--write', '--state', statePath], deps), 0)
+  const refreshed = JSON.parse(readFileSync(statePath, 'utf8'))
+  assert.equal(refreshed.coding_agents.executable.availability, 'executable')
+  assert.equal(refreshed.coding_agents.executable.availability_reason, 'executable')
   assert.equal(stdout.join('').includes(`--- ${statePath}`), true)
   assert.doesNotMatch(stdout.join(''), /--- \/dev\/null/)
-  assert.equal(calls.write, 0)
-  assert.equal(calls.mkdir, 0)
-  assert.equal(calls.rename, 0)
+  assert.equal(calls.write, 2)
+  assert.equal(calls.mkdir, 2)
+  assert.equal(calls.rename, 2)
   assert.equal(calls.unlink, 0)
   assert.deepEqual(stderr, [])
+})
+
+test('C1F mkdir, write, and rename failures return state-write-failed and preserve old data', async () => {
+  const failures = [
+    ['mkdir', { mkdirSync: () => { throw Object.assign(new Error('mkdir denied'), { code: 'EPERM' }) } }],
+    ['write', { writeFileSync: () => { throw Object.assign(new Error('write denied'), { code: 'EPERM' }) } }],
+    ['rename', { renameSync: () => { throw Object.assign(new Error('rename denied'), { code: 'EPERM' }) } }],
+  ]
+  for (const [label, injected] of failures) {
+    const root = scratchDir(`factory-agent-doctor-${label}-`)
+    const statePath = join(root, 'capabilities.json')
+    const register = fixtureRegister([['executable', { transports: ['pane'] }]])
+    register.coding_agents.executable.availability = 'discovered-unavailable'
+    register.coding_agents.executable.availability_reason = 'discovered-unavailable'
+    const old = `${JSON.stringify(register, null, 2)}\n`
+    fsWriteFileSync(statePath, old)
+    const stderr = []
+    try {
+      const code = await main(['--write', '--state', statePath], doctorDeps(register, {
+        home: () => root,
+        readFile: async (path, encoding) => readFileSync(path, encoding),
+        stderr: (value) => stderr.push(String(value)),
+        ...injected,
+      }))
+      assert.equal(code, 2, label)
+      assert.match(stderr.join(''), /\[reason: state-write-failed\]/, label)
+      assert.equal(readFileSync(statePath, 'utf8'), old, label)
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  }
+})
+
+test('A1 doctor refuses denied, unknown, empty, and malformed state reads before probing', async () => {
+  const cases = [
+    ['denied', async () => { throw Object.assign(new Error('read denied'), { code: 'EPERM' }) }],
+    ['unknown', async () => undefined],
+    ['empty', async () => ''],
+    ['malformed', async () => '{ not-json'],
+  ]
+  for (const [label, readState] of cases) {
+    const root = scratchDir(`factory-agent-doctor-state-${label}-`)
+    const statePath = join(root, 'capabilities.json')
+    const calls = { probe: 0, write: 0, rename: 0 }
+    const stderr = []
+    try {
+      const code = await main(['--write', '--state', statePath], doctorDeps(fixtureRegister([['injected', { transports: ['pane'] }]]), {
+        readFile: async (path, encoding) => path === statePath ? readState(path, encoding) : readFileSync(path, encoding),
+        which: () => { calls.probe += 1; return '/fixture/agent' },
+        spawn: () => { calls.probe += 1; return { status: 0, signal: null, error: null, stdout: 'ok\\n' } },
+        importAdapter: async () => { calls.probe += 1; return { capabilitiesFor: () => ({}) } },
+        writeFileSync: () => { calls.write += 1 },
+        renameSync: () => { calls.rename += 1 },
+        stderr: (value) => stderr.push(String(value)),
+      }))
+      assert.equal(code, 2, label)
+      assert.match(stderr.join(''), /\[reason: state-read-failed\]/, label)
+      assert.deepEqual(calls, { probe: 0, write: 0, rename: 0 }, label)
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  }
 })
 
 test('D1 readout reports the exact probed/executable/unavailable denominator and every reason', async () => {

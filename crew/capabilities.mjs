@@ -67,18 +67,18 @@ export function validateCapabilities(schema, value) {
     return matched
   }
 
-  function walk(schemaNode, current, path) {
+  function walk(schemaNode, current, path, report = errors) {
     const s = resolve(schemaNode)
     if (!s || typeof s !== 'object') {
-      errors.push(`${path}: invalid schema reference`)
+      report.push(`${path}: invalid schema reference`)
       return
     }
     if (Object.hasOwn(s, 'const')) {
-      if (current !== s.const) errors.push(`${path}: expected const ${JSON.stringify(s.const)}, got ${JSON.stringify(current)}`)
+      if (current !== s.const) report.push(`${path}: expected const ${JSON.stringify(s.const)}, got ${JSON.stringify(current)}`)
       return
     }
     if (s.enum && !s.enum.includes(current)) {
-      errors.push(`${path}: ${JSON.stringify(current)} not in enum ${JSON.stringify(s.enum)}`)
+      report.push(`${path}: ${JSON.stringify(current)} not in enum ${JSON.stringify(s.enum)}`)
       return
     }
 
@@ -86,25 +86,34 @@ export function validateCapabilities(schema, value) {
     if (s.type) {
       const types = Array.isArray(s.type) ? s.type : [s.type]
       if (!types.some((type) => matched.has(type))) {
-        errors.push(`${path}: expected type ${types.join('|')}, got ${[...matched].join('|') || typeof current}`)
+        report.push(`${path}: expected type ${types.join('|')}, got ${[...matched].join('|') || typeof current}`)
         return
       }
+    }
+    if (Array.isArray(s.oneOf)) {
+      let matches = 0
+      for (const branch of s.oneOf) {
+        const branchErrors = []
+        walk(branch, current, path, branchErrors)
+        if (branchErrors.length === 0) matches += 1
+      }
+      if (matches !== 1) report.push(`${path}: expected exactly one oneOf schema to match, got ${matches}`)
     }
     if (current === null) return
     if (typeof current === 'string' && s.pattern) {
       let valid = false
       try { valid = new RegExp(s.pattern).test(current) } catch { valid = false }
-      if (!valid) errors.push(`${path}: ${JSON.stringify(current)} does not match pattern ${s.pattern}`)
+      if (!valid) report.push(`${path}: ${JSON.stringify(current)} does not match pattern ${s.pattern}`)
     }
     if (Array.isArray(current) && Number.isInteger(s.minItems) && current.length < s.minItems) {
-      errors.push(`${path}: expected at least ${s.minItems} item(s), got ${current.length}`)
+      report.push(`${path}: expected at least ${s.minItems} item(s), got ${current.length}`)
     }
     if (Array.isArray(current) && s.items) {
-      current.forEach((item, index) => walk(s.items, item, `${path}[${index}]`))
+      current.forEach((item, index) => walk(s.items, item, `${path}[${index}]`, report))
     }
     if (current && typeof current === 'object' && !Array.isArray(current)) {
       for (const key of s.required || []) {
-        if (!Object.hasOwn(current, key)) errors.push(`${path}: missing required property ${JSON.stringify(key)}`)
+        if (!Object.hasOwn(current, key)) report.push(`${path}: missing required property ${JSON.stringify(key)}`)
       }
       const patterns = Object.entries(s.patternProperties || {}).map(([pattern, child]) => [new RegExp(pattern), child])
       for (const [key, childValue] of Object.entries(current)) {
@@ -112,10 +121,10 @@ export function validateCapabilities(schema, value) {
         if (s.properties && Object.hasOwn(s.properties, key)) matchedSchemas.push(s.properties[key])
         for (const [pattern, child] of patterns) if (pattern.test(key)) matchedSchemas.push(child)
         if (!matchedSchemas.length && s.additionalProperties === false) {
-          errors.push(`${path}: additional property ${JSON.stringify(key)} not allowed`)
+          report.push(`${path}: additional property ${JSON.stringify(key)} not allowed`)
           continue
         }
-        for (const child of matchedSchemas) walk(child, childValue, `${path}.${key}`)
+        for (const child of matchedSchemas) walk(child, childValue, `${path}.${key}`, report)
       }
     }
   }
@@ -281,6 +290,8 @@ export function agentAvailability(register, agent, probe = null) {
   if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
     throw refuse('agent-unresolved', `expected coding agent ${JSON.stringify(agent)}, found no entry, at coding_agents.${agent}`)
   }
+
+  if (probe === null) return agentAvailabilityResult(entry, agent, entry.availability, entry.availability_reason)
 
   const exists = probe?.exists ?? existsSync
   const which = probe?.which ?? null

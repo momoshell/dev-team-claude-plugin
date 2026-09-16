@@ -59,6 +59,7 @@ const READ_ONLY_RECIPES = new Map([
   ['viz:dev', 'vite dev server; mutates no repo file'],
   ['crew:watch', 'watches lanes and prints; signals nothing'],
   ['crew:reap', 'dry run by default — signalling requires an explicit -- --reclaim (#439)'],
+  ['crew:review', 'orchestrates a review and may post COMMENT or REQUEST_CHANGES; mutates no repository file and never posts APPROVE'],
   ['agent:doctor', 'read-only availability doctor — --write prints a proposal diff but never applies it'],
 ])
 const RECLAIM_FLAGS = ['--reclaim']
@@ -72,6 +73,10 @@ function recipeVerdict(name, command) {
 test('every npm script is an allowlisted read-only recipe, whatever it is called', () => {
   const offenders = Object.entries(pkg.scripts).filter(([name, command]) => recipeVerdict(name, command) !== 'read-only')
   assert.deepEqual(offenders, [], `these npm scripts are not allowlisted read-only recipes: ${offenders.map(([name]) => name).join(', ')}`)
+})
+
+test('crew:review forwards directly to the PR-review module', () => {
+  assert.equal(pkg.scripts['crew:review'], 'node scripts/factory/pr-review.mjs')
 })
 
 test('the recipe verdict catches a destructive name the four-word blacklist missed', () => {

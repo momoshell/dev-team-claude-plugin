@@ -22,7 +22,7 @@ import { createCrewStateSource } from '../visualizer/server/crew-state.mjs'
 import { createLedgerFeed } from '../visualizer/server/ledger-feed.mjs'
 import { openLedger } from '../scripts/factory/ledger.mjs'
 import { scratchDir, sqliteAvailable } from './helpers.mjs'
-import { getAssurances, proposeAssuranceChange, proposeRosterEdit, proposeSkills } from '../visualizer/web/src/lib/api.js'
+import { getAssurances, proposeAssuranceChange, proposePrompt, proposeRosterEdit, proposeSkills } from '../visualizer/web/src/lib/api.js'
 
 async function withAttentionFixture(extraKey, callback) {
   const dir = scratchDir('visualizer-attention-')
@@ -1183,8 +1183,8 @@ test('brakePanel names the resolved checkout and switch path in every state', ()
   }
 })
 
-test('hash routes parse and format all nine canonical views', () => {
-  for (const hash of ['#/', '#/ops', '#/roster', '#/agents', '#/skills', '#/workflows', '#/assurances', '#/adw-123', '#/adw-123/plan']) {
+test('hash routes parse and format all ten canonical views', () => {
+  for (const hash of ['#/', '#/ops', '#/roster', '#/agents', '#/skills', '#/prompts', '#/workflows', '#/assurances', '#/adw-123', '#/adw-123/plan']) {
     assert.equal(formatHash(parseHash(hash)), hash)
   }
   assert.deepEqual(parseHash(''), { view: 'fleet', adw_id: null, phase: null })
@@ -1197,13 +1197,14 @@ test('hash routes parse and format all nine canonical views', () => {
   assert.equal(parseHash('#/agents').adw_id, null)
   assert.equal(parseHash('#/skills').adw_id, null)
   assert.equal(parseHash('#/assurances').adw_id, null)
+  assert.equal(parseHash('#/prompts').adw_id, null)
 })
 
 test('E1 agents page route nav and title are wired', () => {
   const root = join(process.cwd(), 'visualizer/web/src')
   const app = readFileSync(join(root, 'App.svelte'), 'utf8')
   const page = readFileSync(join(root, 'lib/AgentsPage.svelte'), 'utf8')
-  assert.deepEqual(VIEWS, ['fleet', 'ops', 'roster', 'agents', 'skills', 'workflows', 'assurances', 'run', 'phase'])
+  assert.deepEqual(VIEWS, ['fleet', 'ops', 'roster', 'agents', 'skills', 'prompts', 'workflows', 'assurances', 'run', 'phase'])
   assert.match(app, /route\.view === 'agents'/)
   assert.match(app, /Agents · Factory/)
   assert.match(app, /<AgentsPage\s*\/?\s*>/)
@@ -1272,6 +1273,55 @@ test('assurance page exposes separate axes and only prepares proposals', () => {
   const interactive = [...pairedInteractive, ...voidInteractive].map((match) => match[0]).join('\n')
   for (const tag of ['input', 'label', 'select', 'option']) assert.match(interactive, new RegExp(`<${tag}\\b`, 'i'))
   assert.doesNotMatch(`${interactive}\n${app}`, /\b(?:dispatch|apply|post)\b/i)
+})
+
+test('prompts-page:A1', async () => {
+  const root = join(process.cwd(), 'visualizer/web/src')
+  const app = readFileSync(join(root, 'App.svelte'), 'utf8')
+  const page = readFileSync(join(root, 'lib/PromptsPage.svelte'), 'utf8')
+  assert.deepEqual(parseHash('#/prompts'), { view: 'prompts', adw_id: null, phase: null })
+  assert.equal(formatHash(parseHash('#/prompts')), '#/prompts')
+  assert.match(app, /import PromptsPage from '\.\/lib\/PromptsPage\.svelte'/)
+  assert.match(app, /Prompts · Factory/)
+  assert.match(app, /route\.view === 'prompts'/)
+  assert.match(app, /route\.view === 'prompts'[^\n]*>Prompts</)
+  assert.match(app, /<PromptsPage\s*\/>/)
+  assert.equal((page.match(/onsubmit=/g) || []).length, 1)
+  assert.match(page, /onsubmit=\{submitPrompt\}/)
+  assert.match(page, /proposePrompt\(/)
+  assert.match(page, /PROMPT_SURFACE_CONSEQUENCE/)
+  assert.match(page, /protected: prompt-surface/)
+  assert.match(page, /Proposal only — nothing is applied\./)
+  assert.match(page, /Unmeasured — \$\{prompt\.recipients_reason\}/)
+  assert.doesNotMatch(page, /\b(?:apply|dispatch)\b/i)
+
+  const originalFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (path, options = {}) => {
+    calls.push({ path: String(path), options })
+    return new Response(JSON.stringify({ ok: true, diff: '--- a/crew/roles/builder.md\\n+++ b/crew/roles/builder.md', refusals: [], labels: ['protected: prompt-surface'] }), { status: 200, headers: { 'content-type': 'application/json' } })
+  }
+  try {
+    const result = await proposePrompt('builder', '# replacement charter\\n')
+    assert.equal(result.ok, true)
+    assert.match(result.diff, /crew\/roles\/builder\.md/)
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].path, '/api/prompts/propose')
+    assert.equal(calls[0].options.method, 'POST')
+    assert.equal(calls[0].options.headers['content-type'], 'application/json')
+    assert.deepEqual(JSON.parse(calls[0].options.body), { role: 'builder', text: '# replacement charter\\n' })
+    assert.deepEqual(result.labels, ['protected: prompt-surface'])
+    assert.doesNotMatch(calls[0].path, /\/(?:apply|dispatch)(?:\?|$)/)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('prompts-page:RV1-1 consequence export resolves', async () => {
+  const page = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/PromptsPage.svelte'), 'utf8')
+  const agents = await import(`${pathToFileURL(join(process.cwd(), 'visualizer/web/src/lib/agents.js')).href}?prompts-page-rv1-1`)
+  assert.match(page, /import \{[^}]*PROMPT_SURFACE_CONSEQUENCE[^}]*\} from '\.\/agents\.js'/)
+  assert.equal(agents.PROMPT_SURFACE_CONSEQUENCE, 'Charter changes force stronger assurance and require a measurement claim in the commit message.')
 })
 
 test('F1 agents page uses only Tier-2 colour aliases', () => {
@@ -2826,8 +2876,8 @@ test('workflow-page:D3', () => {
 })
 
 test('workflow-page:E1', () => {
-  assert.deepEqual(VIEWS, ['fleet', 'ops', 'roster', 'agents', 'skills', 'workflows', 'assurances', 'run', 'phase'])
-  for (const hash of ['#/workflows', '#/ops', '#/roster', '#/skills', '#/assurances', '#/adw-123', '#/adw-123/plan']) assert.equal(formatHash(parseHash(hash)), hash)
+  assert.deepEqual(VIEWS, ['fleet', 'ops', 'roster', 'agents', 'skills', 'prompts', 'workflows', 'assurances', 'run', 'phase'])
+  for (const hash of ['#/workflows', '#/ops', '#/roster', '#/skills', '#/prompts', '#/assurances', '#/adw-123', '#/adw-123/plan']) assert.equal(formatHash(parseHash(hash)), hash)
   assert.deepEqual(parseHash('#/workflows/ignored'), { view: 'workflows', adw_id: null, phase: null })
   const app = readFileSync(join(process.cwd(), 'visualizer/web/src/App.svelte'), 'utf8')
   assert.match(app, /import WorkflowsPage from '\.\/lib\/WorkflowsPage\.svelte'/)

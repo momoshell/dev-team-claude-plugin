@@ -1,5 +1,5 @@
-export const VIEWS = Object.freeze(['fleet', 'ops', 'roster', 'agents', 'skills', 'workflows', 'assurances', 'run', 'phase'])
-export const RESERVED = Object.freeze(['ops', 'roster', 'agents', 'skills', 'workflows', 'assurances'])
+export const VIEWS = Object.freeze(['fleet', 'ops', 'roster', 'agents', 'skills', 'prompts', 'workflows', 'assurances', 'run', 'phase'])
+export const RESERVED = Object.freeze(['ops', 'roster', 'agents', 'skills', 'prompts', 'workflows', 'assurances'])
 
 function segment(value) {
   try { return decodeURIComponent(value) } catch { return value }
@@ -21,7 +21,7 @@ export function parseHash(hash = '') {
 
 export function formatHash(route = {}) {
   const view = route?.view
-  if (view === 'ops' || view === 'roster' || view === 'agents' || view === 'skills' || view === 'workflows' || view === 'assurances') return `#/${view}`
+  if (view === 'ops' || view === 'roster' || view === 'agents' || view === 'skills' || view === 'prompts' || view === 'workflows' || view === 'assurances') return `#/${view}`
   if ((view === 'run' || view === 'phase') && route?.adw_id != null && route.adw_id !== '') {
     const id = encodeURIComponent(String(route.adw_id))
     if (view === 'phase' && route?.phase != null && route.phase !== '') return `#/${id}/${encodeURIComponent(String(route.phase))}`

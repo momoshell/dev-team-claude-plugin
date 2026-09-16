@@ -701,6 +701,46 @@ test('E1 proposed agent entry passes capability loading', () => {
   }
 })
 
+test('prompts-page:C1', async () => {
+  const fixture = agentsFixture('visualizer-prompts-page-')
+  const source = createAgentsSource({ checkout: fixture.checkout, crewRoot: fixture.crewRoot })
+  const checkoutBefore = treeDigest(fixture.checkout), crewBefore = treeDigest(fixture.crewRoot)
+  let server
+  try {
+    server = await startInProcess({}, { checkout: fixture.checkout, crewRoot: fixture.crewRoot, agents: source, ledgerDb: join(fixture.dir, 'ledger.db'), triageDb: join(fixture.dir, 'triage.db') })
+    const view = await json(server.base, '/api/agents')
+    assert.equal(view.status, 200)
+    assert.deepEqual(view.json.prompts.map((prompt) => prompt.role), ['_shared', 'lead', 'planner', 'builder', 'reviewer', 'tech-lead'])
+    assert.equal(view.json.prompts.length, 6)
+    for (const prompt of view.json.prompts) {
+      if (prompt.recipients === null) {
+        assert.equal(typeof prompt.recipients_reason, 'string')
+        assert.ok(prompt.recipients_reason.trim().length > 0)
+      } else {
+        assert.ok(Array.isArray(prompt.recipients) && prompt.recipients.length > 0 && prompt.recipients.every((recipient) => typeof recipient === 'string' && recipient.trim()))
+        assert.equal(prompt.recipients_reason, null)
+      }
+    }
+    const response = await json(server.base, '/api/prompts/propose', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ role: 'builder', text: '# replacement charter\\n' }),
+    })
+    assert.equal(response.status, 200)
+    assert.equal(response.json.ok, true)
+    assert.match(response.json.diff, /crew\/roles\/builder\.md/)
+    assert.deepEqual(response.json.labels, ['protected: prompt-surface'])
+    assert.equal(treeDigest(fixture.checkout), checkoutBefore)
+    assert.equal(treeDigest(fixture.crewRoot), crewBefore)
+    for (const body of ['{ not json', JSON.stringify({ role: 'builder' })]) {
+      const malformed = await json(server.base, '/api/prompts/propose', { method: 'POST', headers: { 'content-type': 'application/json' }, body })
+      assert.equal(malformed.status, 400)
+    }
+  } finally {
+    if (server) await stopInProcess(server)
+  }
+})
+
 test('D1 agents page labels prompt proposals protected', async () => {
   const fixture = agentsFixture('visualizer-agents-prompts-')
   const source = createAgentsSource({ checkout: fixture.checkout, crewRoot: fixture.crewRoot })

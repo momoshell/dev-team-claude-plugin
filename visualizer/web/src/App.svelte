@@ -15,6 +15,7 @@
   import AgentsPage from './lib/AgentsPage.svelte'
   import SkillsPage from './lib/SkillsPage.svelte'
   import AssurancePage from './lib/AssurancePage.svelte'
+  import PromptsPage from './lib/PromptsPage.svelte'
   import WorkflowsPage from './lib/WorkflowsPage.svelte'
   import RunDetail from './lib/RunDetail.svelte'
   import Dropdown from './lib/Dropdown.svelte'
@@ -63,7 +64,7 @@
     return { run, status, why }
   }).filter((row) => needsAttention(row.status.key) && !row.run.triage?.reviewed_at))
   let attentionSummary = $derived(attentionBreakdown(attentionRows))
-  let pageTitle = $derived(selectedRun ? `${selectedRun.goal || 'Task'} · Factory` : route.view === 'roster' ? 'Roster · Factory' : route.view === 'agents' ? 'Agents · Factory' : route.view === 'skills' ? 'Skills · Factory' : route.view === 'ops' ? 'Operations · Factory' : route.view === 'workflows' ? 'Workflows · Factory' : route.view === 'assurances' ? 'Assurances · Factory' : 'Tasks · Factory')
+  let pageTitle = $derived(selectedRun ? `${selectedRun.goal || 'Task'} · Factory` : route.view === 'roster' ? 'Roster · Factory' : route.view === 'agents' ? 'Agents · Factory' : route.view === 'skills' ? 'Skills · Factory' : route.view === 'prompts' ? 'Prompts · Factory' : route.view === 'ops' ? 'Operations · Factory' : route.view === 'workflows' ? 'Workflows · Factory' : route.view === 'assurances' ? 'Assurances · Factory' : 'Tasks · Factory')
 
   $effect(() => subscribeHash((next) => route = next))
   $effect(() => {
@@ -161,6 +162,7 @@
     <button class:active={route.view === 'roster'} onclick={() => navigate({ view: 'roster' })}>Roster</button>
     <button class:active={route.view === 'agents'} onclick={() => navigate({ view: 'agents' })}>Agents</button>
     <button class:active={route.view === 'skills'} onclick={() => navigate({ view: 'skills' })}>Skills</button>
+    <button class:active={route.view === 'prompts'} onclick={() => navigate({ view: 'prompts' })}>Prompts</button>
     <button class:active={route.view === 'workflows'} onclick={() => navigate({ view: 'workflows' })}>Workflows</button>
     <button class:active={route.view === 'assurances'} onclick={() => navigate({ view: 'assurances' })}>Assurances</button>
     <button class:active={route.view === 'ops'} onclick={() => navigate({ view: 'ops' })}>Operations</button>
@@ -200,6 +202,11 @@
   <main class="page">
     <div class="page-heading"><div><p class="eyebrow">Shipped capability inventory</p><h1>Skills</h1><p>Read every shipped skill and prepare a role-grant proposal without changing a file.</p></div></div>
     <SkillsPage />
+  </main>
+{:else if route.view === 'prompts'}
+  <main class="page">
+    <div class="page-heading"><div><p class="eyebrow">Shipped prompt charters</p><h1>Prompts</h1><p>Read shipped role and shared charters and prepare a proposal without changing a file.</p></div></div>
+    <PromptsPage />
   </main>
 {:else if route.view === 'workflows'}
   <WorkflowsPage />

@@ -8,6 +8,8 @@ import { assertUsage, parseArgs, reviewIdentityFromArgs } from '../crew/crew.mjs
 import { canonicalWorktreePath,
   PrReviewError,
   parseChangedFiles,
+  parseMainArgs,
+  renderReviewBody,
   reportCounts,
   removeWorktreeDefault,
   runPrReview,
@@ -18,6 +20,21 @@ const BASE40 = 'a'.repeat(40)
 const HEAD40 = 'b'.repeat(40)
 const BASE64 = 'c'.repeat(64)
 const HEAD64 = 'd'.repeat(64)
+const DEFAULT_VALUES = {
+  base: BASE40,
+  head: HEAD40,
+  outcome: 'findings',
+  findings: [{
+    id: 'F1',
+    severity: 'must-fix',
+    location: 'src/a.mjs',
+    summary: 'fixture finding',
+    evidence: 'fixture evidence',
+    disposition: 'ask-user',
+  }],
+  reviewed_files: ['src/a.mjs'],
+  unreviewable_files: [{ path: 'src/b.mjs', reason: 'binary' }],
+}
 
 function terminal(pointer, status = 'done') {
   return JSON.stringify({ status, commit: null, task_return: pointer, archived: null })
@@ -27,24 +44,43 @@ function fixture({
   runMode = 'success',
   teardownMode = 'success',
   removeMode = 'success',
-  values = { base: BASE40, head: HEAD40, outcome: 'findings', findings: [{ id: 'F1', location: 'src/a.mjs' }] },
+  values = DEFAULT_VALUES,
   taskStatus = 'done',
   taskValue = null,
+  ghViews = null,
+  postResult = { status: 0, stdout: '' },
 } = {}) {
   const root = scratchDir('pr-review-fixture-')
   const checkout = join(root, 'checkout')
   mkdirSync(checkout, { recursive: true })
   const pointer = join(root, 'task.json')
-  const calls = { gh: [], git: [], crew: [], reads: [], writes: [], remove: 0, teardownRead: false }
+  const calls = { gh: [], review: [], git: [], crew: [], reads: [], writes: [], remove: 0, teardownRead: false }
   const registrations = new Set()
   let worktree = null
   let task = taskValue || { status: taskStatus, details: { envelope: { values } } }
+  const queuedGhViews = ghViews ? [...ghViews] : [
+    { headRefOid: HEAD40, title: 'fixture title', body: 'fixture body' },
+    { headRefOid: HEAD40, reviews: [] },
+  ]
+  const ghResult = (value) => {
+    if (value && typeof value === 'object'
+      && ['status', 'stdout', 'stderr', 'output', 'error', 'signal', 'ok'].some((key) => key in value)) return value
+    return { status: 0, stdout: JSON.stringify(value) }
+  }
   const deps = {
     checkout,
     tempRoot: root,
     gh: (args, options) => {
       calls.gh.push({ args: [...args], options })
-      return { status: 0, stdout: JSON.stringify({ headRefOid: HEAD40, title: 'fixture title', body: 'fixture body' }) }
+      if (args[0] === 'pr' && args[1] === 'view') {
+        const response = queuedGhViews.shift() || { headRefOid: HEAD40, reviews: [] }
+        return typeof response === 'function' ? response(args, options) : ghResult(response)
+      }
+      if (args[0] === 'pr' && args[1] === 'review') {
+        calls.review.push({ args: [...args], options })
+        return typeof postResult === 'function' ? postResult(args, options) : ghResult(postResult)
+      }
+      return { status: 0, stdout: '' }
     },
     git: (args, options) => {
       calls.git.push({ args: [...args], options })
@@ -112,6 +148,17 @@ function assertCleaned(fixtureValue) {
   assert.equal(fixtureValue.calls.remove, 1)
 }
 
+function bodyPayload(body) {
+  const separator = '\n\n<!-- review-only:'
+  return JSON.parse(body.slice(0, body.indexOf(separator)))
+}
+
+function bodyMarker(body) {
+  const match = body.match(/<!-- review-only:[0-9a-f]{64} -->/)
+  assert.ok(match, 'rendered body must carry an idempotency marker')
+  return match[0]
+}
+
 async function rejectedReason(promise, reason) {
   await assert.rejects(promise, (error) => error instanceof PrReviewError && error.reason === reason)
 }
@@ -142,6 +189,9 @@ test('B1-success', async () => {
   assert.equal(report.outcome, 'findings')
   assert.deepEqual(report.counts.findings, { count: 1, reason: 'review-envelope' })
   assert.deepEqual(report.counts.changed_files, { count: 2, reason: 'pr-diff' })
+  assert.deepEqual(report.counts.reviewed_files, { count: 1, reason: 'review-envelope' })
+  assert.deepEqual(report.counts.unreviewable_files, { count: 1, reason: 'review-envelope' })
+  assert.equal(report.posted, true)
   assertCleaned(current)
 })
 
@@ -369,7 +419,10 @@ test('C1', async () => {
 })
 
 test('D1-values', async () => {
-  const current = fixture({ values: { base: BASE40, head: HEAD40, outcome: 'no-findings', findings: [] } })
+  const current = fixture({ values: {
+    base: BASE40, head: HEAD40, outcome: 'no-findings', findings: [],
+    reviewed_files: ['src/a.mjs'], unreviewable_files: [{ path: 'src/b.mjs', reason: 'generated' }],
+  } })
   const report = await runPrReview({ pr: 23, deps: current.deps })
   assert.equal(report.outcome, 'no-findings')
   assert.deepEqual(report.findings, [])
@@ -379,7 +432,17 @@ test('D1-values', async () => {
 
 test('D1-no-coverage', async () => {
   const current = fixture()
-  const values = new Proxy({ base: BASE40, head: HEAD40, outcome: 'findings', findings: [{ id: 'one', location: 'x' }] }, {
+  const values = new Proxy({
+    base: BASE40,
+    head: HEAD40,
+    outcome: 'findings',
+    findings: [{
+      id: 'one', severity: 'should-fix', location: 'x', summary: 'summary',
+      evidence: 'evidence', disposition: 'no-op',
+    }],
+    reviewed_files: ['x'],
+    unreviewable_files: [{ path: 'y', reason: 'out-of-context' }],
+  }, {
     get(target, property, receiver) {
       if (property === 'coverage') throw new Error('coverage must not be read')
       return Reflect.get(target, property, receiver)
@@ -393,10 +456,10 @@ test('D1-no-coverage', async () => {
   })
   current.setTask({ status: 'done', details: { envelope } })
   const report = await runPrReview({ pr: 24, deps: current.deps })
-  assert.equal(report.counts.reviewed.count, null)
-  assert.equal(report.counts.unreviewable.count, null)
-  assert.equal(report.counts.reviewed.reason, 'review-envelope-has-no-coverage')
-  assert.equal(report.counts.unreviewable.reason, 'review-envelope-has-no-coverage')
+  assert.equal(report.counts.reviewed_files.count, 1)
+  assert.equal(report.counts.unreviewable_files.count, 1)
+  assert.equal(report.counts.reviewed_files.reason, 'review-envelope')
+  assert.equal(report.counts.unreviewable_files.reason, 'review-envelope')
 })
 
 test('E1-nul', () => {
@@ -410,15 +473,238 @@ test('E1-whitespace', () => {
 })
 
 test('F1-measured', () => {
-  const counts = reportCounts({ findings: [{ id: 'a' }, { id: 'b' }] }, ['a.mjs', 'b.mjs', 'c.mjs'])
+  const counts = reportCounts({
+    findings: [{ id: 'a' }, { id: 'b' }],
+    reviewed_files: ['a.mjs'],
+    unreviewable_files: [{ path: 'b.mjs', reason: 'binary' }],
+  }, ['a.mjs', 'b.mjs', 'c.mjs'])
   assert.deepEqual(counts.findings, { count: 2, reason: 'review-envelope' })
   assert.deepEqual(counts.changed_files, { count: 3, reason: 'pr-diff' })
+  assert.deepEqual(counts.reviewed_files, { count: 1, reason: 'review-envelope' })
+  assert.deepEqual(counts.unreviewable_files, { count: 1, reason: 'review-envelope' })
 })
 
-test('F1-unmeasured', () => {
-  const counts = reportCounts({ findings: [{ location: 'a.mjs' }, { location: 'b.mjs' }] }, ['a.mjs'])
-  assert.deepEqual(counts.reviewed, { count: null, reason: 'review-envelope-has-no-coverage' })
-  assert.deepEqual(counts.unreviewable, { count: null, reason: 'review-envelope-has-no-coverage' })
+test('F1-measured-empty', () => {
+  const counts = reportCounts({ findings: [], reviewed_files: [], unreviewable_files: [] }, [])
+  assert.deepEqual(counts.reviewed_files, { count: 0, reason: 'review-envelope' })
+  assert.deepEqual(counts.unreviewable_files, { count: 0, reason: 'review-envelope' })
+})
+
+test('POST-A1', async () => {
+  const moved = 'e'.repeat(40)
+  const current = fixture({ ghViews: [
+    { headRefOid: HEAD40, title: 'fixture title', body: 'fixture body' },
+    { headRefOid: moved, reviews: [] },
+  ] })
+  await assert.rejects(runPrReview({ pr: 41, deps: current.deps }), (error) => {
+    assert.equal(error.reason, 'head-moved')
+    assert.match(error.message, new RegExp(`${HEAD40}.*${moved}`))
+    return true
+  })
+  assert.equal(current.calls.review.length, 0)
+  assert.deepEqual(current.calls.gh.map(({ args }) => args), [
+    ['pr', 'view', '41', '--json', 'headRefOid,title,body'],
+    ['pr', 'view', '41', '--json', 'headRefOid,reviews'],
+  ])
+  assertCleaned(current)
+})
+
+test('POST-B1', async () => {
+  const first = fixture()
+  const posted = await runPrReview({ pr: 42, deps: first.deps })
+  const marker = bodyMarker(posted.review_body)
+  assert.equal(renderReviewBody(posted, 'COMMENT').body, posted.review_body)
+
+  const duplicate = fixture({ ghViews: [
+    { headRefOid: HEAD40, title: 'fixture title', body: 'fixture body' },
+    { headRefOid: HEAD40, reviews: [{ body: `existing ${marker} review` }] },
+  ] })
+  const duplicateReport = await runPrReview({ pr: 42, deps: duplicate.deps })
+  assert.equal(duplicateReport.posted, false)
+  assert.equal(duplicateReport.reason, 'already-posted')
+  assert.equal(bodyMarker(duplicateReport.review_body), marker)
+  assert.equal(duplicate.calls.review.length, 0)
+  assertCleaned(duplicate)
+
+  const distinctValues = {
+    ...DEFAULT_VALUES,
+    findings: [{ ...DEFAULT_VALUES.findings[0], id: 'F2' }],
+  }
+  const distinct = fixture({ values: distinctValues })
+  const distinctReport = await runPrReview({ pr: 42, noPost: true, deps: distinct.deps })
+  assert.notEqual(bodyMarker(distinctReport.review_body), marker)
+  assertCleaned(distinct)
+})
+
+test('POST-C1', async () => {
+  const output = []
+  const current = fixture()
+  const code = await main(['--pr', '43', '--no-post'], {
+    ...current.deps,
+    stdout: (value) => output.push(String(value)),
+  })
+  assert.equal(code, 0)
+  const body = output.join('').trimEnd()
+  assert.equal(bodyPayload(body).schema, 'review_only')
+  assert.match(body, /<!-- review-only:[0-9a-f]{64} -->/)
+  assert.equal(current.calls.gh.filter(({ args }) => args.join(' ') === 'pr view 43 --json headRefOid,reviews').length, 0)
+  assert.equal(current.calls.review.length, 0)
+  assertCleaned(current)
+})
+
+test('POST-D1', async () => {
+  const current = fixture({ values: {
+    ...DEFAULT_VALUES,
+    unreviewable_files: [
+      { path: 'src/b.mjs', reason: 'binary' },
+      { path: 'src/generated.mjs', reason: 'generated' },
+      { path: 'src/large.mjs', reason: 'too-large' },
+      { path: 'src/other.mjs', reason: 'out-of-context' },
+    ],
+  } })
+  const report = await runPrReview({ pr: 44, noPost: true, deps: current.deps })
+  const payload = bodyPayload(report.review_body)
+  for (const key of ['findings', 'changed_files', 'reviewed_files', 'unreviewable_files']) {
+    assert.equal(Number.isInteger(payload.counts[key].count), true, key)
+  }
+  assert.deepEqual(payload.counts, {
+    findings: { count: 1, reason: 'review-envelope' },
+    changed_files: { count: 2, reason: 'pr-diff' },
+    reviewed_files: { count: 1, reason: 'review-envelope' },
+    unreviewable_files: { count: 4, reason: 'review-envelope' },
+  })
+  assert.deepEqual(payload.unreviewable_files, [
+    { path: 'src/b.mjs', reason: 'binary' },
+    { path: 'src/generated.mjs', reason: 'generated' },
+    { path: 'src/large.mjs', reason: 'too-large' },
+    { path: 'src/other.mjs', reason: 'out-of-context' },
+  ])
+  assert.equal(report.review_body.includes(['fence', 'excluded'].join(' ')), false)
+  assertCleaned(current)
+})
+
+test('POST-E1', async () => {
+  const defaultRun = fixture()
+  const defaultReport = await runPrReview({ pr: 45, deps: defaultRun.deps })
+  assert.equal(defaultReport.verdict, 'COMMENT')
+  assert.deepEqual(defaultRun.calls.review.map(({ args }) => args), [[
+    'pr', 'review', '45', '--comment', '--body', defaultReport.review_body,
+  ]])
+  assert.doesNotMatch(defaultReport.review_body, /APPROVE/)
+  assertCleaned(defaultRun)
+
+  const requested = fixture()
+  const requestedReport = await runPrReview({ pr: 46, requestChanges: true, deps: requested.deps })
+  assert.equal(requestedReport.verdict, 'REQUEST_CHANGES')
+  assert.deepEqual(requested.calls.review.map(({ args }) => args), [[
+    'pr', 'review', '46', '--request-changes', '--body', requestedReport.review_body,
+  ]])
+  assert.doesNotMatch(requestedReport.review_body, /APPROVE/)
+  assertCleaned(requested)
+
+  const output = []
+  const renderOnly = fixture()
+  assert.equal(await main(['--pr', '47', '--no-post'], {
+    ...renderOnly.deps,
+    stdout: (value) => output.push(String(value)),
+  }), 0)
+  assert.equal(bodyPayload(output.join('').trimEnd()).verdict, 'COMMENT')
+  assert.equal(renderOnly.calls.review.length, 0)
+  assert.equal(renderOnly.calls.gh.filter(({ args }) => args.at(-1) === 'headRefOid,reviews').length, 0)
+  assert.doesNotMatch(output.join(''), /APPROVE/)
+  assertCleaned(renderOnly)
+})
+
+test('POST-cli-refusals', () => {
+  assert.deepEqual(parseMainArgs(['--pr', '48']), { pr: '48', requestChanges: false, noPost: false })
+  assert.deepEqual(parseMainArgs(['--request-changes', '--no-post', '--pr', '49']), { pr: '49', requestChanges: true, noPost: true })
+  for (const args of [
+    ['--pr', '48', '--pr', '49'],
+    ['--pr', '48', '--request-changes', '--request-changes'],
+    ['--pr', '48', '--no-post', '--no-post'],
+    ['--pr', '48', '--unknown'],
+    ['--pr', '48', '--approve'],
+  ]) assert.throws(() => parseMainArgs(args), (error) => error.reason === 'malformed-pr')
+})
+
+test('POST-post-failure-no-retry', async () => {
+  for (const postResult of [
+    () => ({ status: 1, stderr: 'permission denied' }),
+    () => ({ signal: 'SIGTERM' }),
+    () => ({}),
+    () => '',
+    () => { throw new Error('review process failed') },
+  ]) {
+    let attempts = 0
+    const current = fixture({ postResult: (...args) => {
+      attempts += 1
+      return postResult(...args)
+    } })
+    await rejectedReason(runPrReview({ pr: 50, deps: current.deps }), 'post-failed')
+    assert.equal(attempts, 1)
+    assert.equal(current.calls.review.length, 1)
+    assertCleaned(current)
+  }
+})
+
+test('POST-recheck-refusals', async () => {
+  for (const response of [
+    { headRefOid: HEAD40 },
+    { headRefOid: HEAD40, reviews: {} },
+    { headRefOid: 'not-a-sha', reviews: [] },
+    { headRefOid: HEAD40, reviews: [{ body: 42 }] },
+  ]) {
+    const current = fixture({ ghViews: [
+      { headRefOid: HEAD40, title: 'fixture title', body: 'fixture body' },
+      response,
+    ] })
+    await rejectedReason(runPrReview({ pr: 51, deps: current.deps }), 'post-failed')
+    assert.equal(current.calls.gh.length, 2)
+    assert.equal(current.calls.review.length, 0)
+    assertCleaned(current)
+  }
+})
+
+test('POST-envelope-validation', async () => {
+  const current = fixture({ values: {
+    ...DEFAULT_VALUES,
+    findings: [{ id: 'bad', location: 'src/a.mjs' }],
+  } })
+  await rejectedReason(runPrReview({ pr: 52, deps: current.deps }), 'task-return-invalid')
+  assert.equal(current.calls.gh.length, 1)
+  assert.equal(current.calls.review.length, 0)
+  assertCleaned(current)
+})
+
+test('RV1-1 accepts optional review-only record fields', async () => {
+  const values = {
+    ...DEFAULT_VALUES,
+    findings: [{ ...DEFAULT_VALUES.findings[0], vacuity_claim: 'mutation-survived' }],
+    unreviewable_files: [{ ...DEFAULT_VALUES.unreviewable_files[0], source: 'reviewer' }],
+  }
+  const current = fixture({ values })
+  const report = await runPrReview({ pr: 53, noPost: true, deps: current.deps })
+  assert.deepEqual(report.findings, values.findings)
+  assert.deepEqual(report.unreviewable_files, values.unreviewable_files)
+  assert.equal(report.posted, false)
+  assert.equal(report.reason, 'no-post')
+  assertCleaned(current)
+})
+
+test('RV1-2 renders vacuity claims into distinct markers', () => {
+  const report = {
+    head: HEAD40,
+    findings: DEFAULT_VALUES.findings,
+    counts: reportCounts(DEFAULT_VALUES, ['src/a.mjs', 'src/b.mjs']),
+    unreviewable_files: DEFAULT_VALUES.unreviewable_files,
+  }
+  const ordinary = renderReviewBody(report, 'COMMENT')
+  const claimed = renderReviewBody({
+    ...report,
+    findings: [{ ...DEFAULT_VALUES.findings[0], vacuity_claim: 'mutation-survived' }],
+  }, 'COMMENT')
+  assert.equal(bodyPayload(claimed.body).findings[0].vacuity_claim, 'mutation-survived')
+  assert.notEqual(claimed.marker, ordinary.marker)
 })
 
 test('G1-context', () => {

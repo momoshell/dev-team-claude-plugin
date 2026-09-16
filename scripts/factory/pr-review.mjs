@@ -2,6 +2,7 @@
 // scripts/factory/pr-review.mjs — resolve one pull request and run a read-only,
 // identity-bound review in a disposable worktree.
 
+import { createHash } from 'node:crypto'
 import { readlinkSync, realpathSync,
   lstatSync,
   mkdtempSync,
@@ -34,6 +35,8 @@ export const PR_REVIEW_REFUSALS = Object.freeze({
   TASK_RETURN_UNREADABLE: 'task-return-unreadable',
   TASK_RETURN_INVALID: 'task-return-invalid',
   TEARDOWN_FAILED: 'teardown-failed',
+  HEAD_MOVED: 'head-moved',
+  POST_FAILED: 'post-failed',
 })
 
 const REFUSAL_NAMES = new Set(Object.values(PR_REVIEW_REFUSALS))
@@ -144,11 +147,36 @@ function positivePr(value) {
   return value
 }
 
-function parseMainArgs(argv) {
-  if (!Array.isArray(argv) || argv.length !== 2 || argv[0] !== '--pr') {
-    refuse(PR_REVIEW_REFUSALS.MALFORMED_PR, 'usage: node scripts/factory/pr-review.mjs --pr <positive decimal integer>')
+export function parseMainArgs(argv) {
+  if (!Array.isArray(argv) || argv.length === 0) {
+    refuse(PR_REVIEW_REFUSALS.MALFORMED_PR, 'usage: node scripts/factory/pr-review.mjs --pr <positive decimal integer> [--request-changes] [--no-post]')
   }
-  return positivePr(argv[1])
+  let pr = null
+  let requestChanges = false
+  let noPost = false
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index]
+    if (argument === '--pr') {
+      if (pr !== null) refuse(PR_REVIEW_REFUSALS.MALFORMED_PR, 'duplicate --pr option')
+      const value = argv[++index]
+      if (value === undefined || (typeof value === 'string' && value.startsWith('--'))) {
+        refuse(PR_REVIEW_REFUSALS.MALFORMED_PR, 'missing value for --pr')
+      }
+      pr = positivePr(value)
+    } else if (argument === '--request-changes') {
+      if (requestChanges) refuse(PR_REVIEW_REFUSALS.MALFORMED_PR, 'duplicate --request-changes option')
+      requestChanges = true
+    } else if (argument === '--no-post') {
+      if (noPost) refuse(PR_REVIEW_REFUSALS.MALFORMED_PR, 'duplicate --no-post option')
+      noPost = true
+    } else {
+      refuse(PR_REVIEW_REFUSALS.MALFORMED_PR, `unknown option: ${String(argument)}`)
+    }
+  }
+  if (pr === null) {
+    refuse(PR_REVIEW_REFUSALS.MALFORMED_PR, 'usage: node scripts/factory/pr-review.mjs --pr <positive decimal integer> [--request-changes] [--no-post]')
+  }
+  return { pr, requestChanges, noPost }
 }
 
 function parseJson(value) {
@@ -242,19 +270,44 @@ function buildBrief({ title, body, diff, skill, rubric, base, head }) {
 }
 
 /**
- * Findings are measured from the accepted envelope and changed files from the
- * PR diff. The review variant has no coverage field, so reviewed and
- * unreviewable remain honest unknowns rather than inferred zeros.
+ * Findings and coverage are measured from the accepted envelope; changed files
+ * are measured from the PR diff.
  */
 export function reportCounts(values, changedFiles) {
-  const findings = Array.isArray(values?.findings) ? values.findings.length : null
-  const changed = Array.isArray(changedFiles) ? changedFiles.length : null
   return {
-    findings: { count: findings, reason: 'review-envelope' },
-    changed_files: { count: changed, reason: 'pr-diff' },
-    reviewed: { count: null, reason: 'review-envelope-has-no-coverage' },
-    unreviewable: { count: null, reason: 'review-envelope-has-no-coverage' },
+    findings: { count: values.findings.length, reason: 'review-envelope' },
+    changed_files: { count: changedFiles.length, reason: 'pr-diff' },
+    reviewed_files: { count: values.reviewed_files.length, reason: 'review-envelope' },
+    unreviewable_files: { count: values.unreviewable_files.length, reason: 'review-envelope' },
   }
+}
+
+export function renderReviewBody(report, verdict) {
+  const payload = {
+    schema: 'review_only',
+    head: report.head,
+    verdict,
+    findings: report.findings.map((finding) => ({
+      id: finding.id,
+      severity: finding.severity,
+      location: finding.location,
+      summary: finding.summary,
+      evidence: finding.evidence,
+      disposition: finding.disposition,
+      ...(finding.vacuity_claim !== undefined ? { vacuity_claim: finding.vacuity_claim } : {}),
+    })),
+    counts: {
+      findings: { count: report.counts.findings.count, reason: report.counts.findings.reason },
+      changed_files: { count: report.counts.changed_files.count, reason: report.counts.changed_files.reason },
+      reviewed_files: { count: report.counts.reviewed_files.count, reason: report.counts.reviewed_files.reason },
+      unreviewable_files: { count: report.counts.unreviewable_files.count, reason: report.counts.unreviewable_files.reason },
+    },
+    unreviewable_files: report.unreviewable_files.map((row) => ({ path: row.path, reason: row.reason })),
+  }
+  const canonical = JSON.stringify(payload)
+  const digest = createHash('sha256').update(canonical, 'utf8').digest('hex')
+  const marker = `<!-- review-only:${digest} -->`
+  return { body: `${canonical}\n\n${marker}`, marker, payload }
 }
 
 function parseTerminalLine(output) {
@@ -286,6 +339,33 @@ function readJsonValue(raw) {
   return JSON.parse(textOf(raw))
 }
 
+const REVIEW_FINDING_FIELDS = Object.freeze(['id', 'severity', 'location', 'summary', 'evidence', 'disposition'])
+const REVIEW_SEVERITIES = new Set(['must-fix', 'should-fix', 'consider'])
+const REVIEW_DISPOSITIONS = new Set(['auto-fix', 'ask-user', 'no-op'])
+const REVIEW_UNREVIEWABLE_REASONS = new Set(['binary', 'generated', 'too-large', 'out-of-context'])
+const REVIEW_FINDING_ID = /^[A-Za-z0-9_-]{1,64}$/
+
+function hasExactFields(value, fields) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  return fields.every((field) => Object.prototype.hasOwnProperty.call(value, field))
+}
+
+function acceptedFinding(value) {
+  return hasExactFields(value, REVIEW_FINDING_FIELDS)
+    && typeof value.id === 'string' && REVIEW_FINDING_ID.test(value.id)
+    && typeof value.severity === 'string' && REVIEW_SEVERITIES.has(value.severity)
+    && typeof value.location === 'string'
+    && typeof value.summary === 'string'
+    && typeof value.evidence === 'string'
+    && typeof value.disposition === 'string' && REVIEW_DISPOSITIONS.has(value.disposition)
+}
+
+function acceptedUnreviewable(value) {
+  return hasExactFields(value, ['path', 'reason'])
+    && typeof value.path === 'string' && value.path.length > 0
+    && typeof value.reason === 'string' && REVIEW_UNREVIEWABLE_REASONS.has(value.reason)
+}
+
 async function readTaskEnvelope(pointer, expected, d) {
   let raw
   try { raw = await d.readFile(pointer, 'utf8') } catch (error) {
@@ -303,7 +383,12 @@ async function readTaskEnvelope(pointer, expected, d) {
     || values.base !== expected.base || values.head !== expected.head
     || !['findings', 'no-findings'].includes(values.outcome)
     || !Array.isArray(values.findings)
-    || (values.outcome === 'findings' ? values.findings.length === 0 : values.findings.length !== 0)) {
+    || (values.outcome === 'findings' ? values.findings.length === 0 : values.findings.length !== 0)
+    || !values.findings.every(acceptedFinding)
+    || !Array.isArray(values.reviewed_files)
+    || !values.reviewed_files.every((path) => typeof path === 'string' && path.length > 0)
+    || !Array.isArray(values.unreviewable_files)
+    || !values.unreviewable_files.every(acceptedUnreviewable)) {
     refuse(PR_REVIEW_REFUSALS.TASK_RETURN_INVALID, `task envelope ${pointer} is not an accepted review envelope`)
   }
   return { task, values }
@@ -433,6 +518,67 @@ function requireCommandSuccess(result, label) {
   if (!commandSucceeded(result)) refuse(PR_REVIEW_REFUSALS.CREW_FAILED, `${label}: ${commandFailure(result, `${label} failed`)}`)
 }
 
+function postCommandSucceeded(result) {
+  return Boolean(result && typeof result === 'object' && !Array.isArray(result)
+    && !Buffer.isBuffer(result) && !result.error && !result.signal && result.status === 0)
+}
+
+async function readCurrentReviewState(pr, d) {
+  let result
+  try {
+    result = await invoke(d.gh, ['pr', 'view', pr, '--json', 'headRefOid,reviews'], {
+      cwd: d.checkout, encoding: 'utf8', maxBuffer: MAX_BUFFER,
+    })
+  } catch (error) {
+    refuse(PR_REVIEW_REFUSALS.POST_FAILED, `gh could not re-check PR ${pr}: ${errorText(error)}`)
+  }
+  if (!commandSucceeded(result)) {
+    refuse(PR_REVIEW_REFUSALS.POST_FAILED, `gh could not re-check PR ${pr}: ${commandFailure(result, 'lookup failed')}`)
+  }
+  let current
+  try { current = parseJson(commandOutput(result) || result) } catch (error) {
+    refuse(PR_REVIEW_REFUSALS.POST_FAILED, `gh returned invalid re-check JSON for PR ${pr}: ${errorText(error)}`)
+  }
+  const head = current?.headRefOid
+  const reviews = current?.reviews
+  if (!current || typeof current !== 'object' || Array.isArray(current)
+    || typeof head !== 'string' || !SHA.test(head)
+    || !Array.isArray(reviews)
+    || !reviews.every((review) => review && typeof review === 'object' && !Array.isArray(review)
+      && (review.body === undefined || review.body === null || typeof review.body === 'string'))) {
+    refuse(PR_REVIEW_REFUSALS.POST_FAILED, `gh returned malformed re-check data for PR ${pr}`)
+  }
+  return { head_sha: head, reviews }
+}
+
+async function postReview(pr, report, config, d) {
+  const verdict = config.requestChanges ? 'REQUEST_CHANGES' : 'COMMENT'
+  const rendered = renderReviewBody(report, verdict)
+  const body = rendered.body
+  const marker = rendered.marker
+  report = { ...report, verdict }
+  if (config.noPost) return { ...report, posted: false, reason: 'no-post', review_body: body }
+
+  const current = await readCurrentReviewState(pr, d)
+  if (current.head_sha !== report.head) refuse(PR_REVIEW_REFUSALS.HEAD_MOVED, `PR ${pr} head moved from ${report.head} to ${current.head_sha}`)
+  const existingReviews = current.reviews
+  if (existingReviews.some((review) => textOf(review?.body).includes(marker))) return { ...report, posted: false, reason: 'already-posted', review_body: body }
+
+  const reviewFlag = verdict === 'REQUEST_CHANGES' ? '--request-changes' : '--comment'
+  let result
+  try {
+    result = await invoke(d.gh, ['pr', 'review', pr, reviewFlag, '--body', body], {
+      cwd: d.checkout, encoding: 'utf8', maxBuffer: MAX_BUFFER,
+    })
+  } catch (error) {
+    refuse(PR_REVIEW_REFUSALS.POST_FAILED, `gh pr review failed: ${errorText(error)}`)
+  }
+  if (!postCommandSucceeded(result)) {
+    refuse(PR_REVIEW_REFUSALS.POST_FAILED, `gh pr review failed: ${commandFailure(result, 'review command did not complete successfully')}`)
+  }
+  return { ...report, posted: true, review_body: body }
+}
+
 export async function runPrReview(input = {}, maybeDeps = {}) {
   const config = input && typeof input === 'object' && !Array.isArray(input)
     ? input
@@ -504,6 +650,8 @@ export async function runPrReview(input = {}, maybeDeps = {}) {
       head: metadata.head_sha,
       outcome: accepted.values.outcome,
       findings: accepted.values.findings,
+      reviewed_files: accepted.values.reviewed_files,
+      unreviewable_files: accepted.values.unreviewable_files,
       changed_files: changedFiles,
       counts,
       terminal_status: terminal.status,
@@ -539,7 +687,7 @@ export async function runPrReview(input = {}, maybeDeps = {}) {
   if (removalError) throw removalError
   if (teardownError) throw teardownError
   if (primaryError) throw primaryError
-  return report
+  return postReview(pr, report, config, d)
 }
 
 export async function main(argv = process.argv.slice(2), deps = {}) {
@@ -549,10 +697,14 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
     deps = options.deps ?? deps
   }
   try {
-    const pr = parseMainArgs(argv)
+    const config = parseMainArgs(argv)
     const runner = typeof deps.runPrReview === 'function' ? deps.runPrReview : runPrReview
-    const result = await runner({ pr, deps })
-    if (typeof deps.stdout === 'function') deps.stdout(`${JSON.stringify(result)}\n`)
+    const result = await runner({ ...config, deps })
+    if (config.noPost) {
+      if (typeof result?.review_body !== 'string') refuse(PR_REVIEW_REFUSALS.POST_FAILED, 'render-only review body is unavailable')
+      if (typeof deps.stdout === 'function') deps.stdout(`${result.review_body}\n`)
+      else process.stdout.write(`${result.review_body}\n`)
+    } else if (typeof deps.stdout === 'function') deps.stdout(`${JSON.stringify(result)}\n`)
     else process.stdout.write(`${JSON.stringify(result)}\n`)
     return 0
   } catch (error) {

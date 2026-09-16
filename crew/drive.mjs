@@ -5557,6 +5557,10 @@ function runTask(ctx, io, crash) {
   const floorDiscoveryWhy = (phase, floor) => `the ${phase} discovered protected paths (${floor.paths.join(', ')}) and the sensitivity floor could not seat the judge tier's reviewer cell (${floor.floor.outcome}${floor.floor.why ? `: ${floor.floor.why}` : ''}) — a protected change is never reviewed under an under-graded reviewer`
   const frozenInventoryReports = []
   let pendingFrozenInventory = null
+  // Explicit caller provenance: post-commit repair re-entry has accepted work in HEAD,
+  // while a pre-commit build or post-rebase soft reset does not. Never infer this from
+  // dirtiness, stash behaviour, S.commit, or the suite-cycle number.
+  let committedBaseline = false
   const art = (name) => `${ctx.taskDir}/${name}`
   // These gate cells are initialised before the resume branch so its canonical
   // gate and the ordinary escalation composer have the same state vocabulary.
@@ -8335,13 +8339,17 @@ function runTask(ctx, io, crash) {
   // Accept a lead-returned replacement gate: a NEW generation (identity is
   // the driver's, not the command string) that must prove itself on the
   // pristine tree before it is trusted against the already-built tree.
-  const acceptRepairedGate = (cmd, label) => {
+  const acceptRepairedGate = (cmd, label, { committedBaseline = false } = {}) => {
+    if (committedBaseline === true) {
+      return { escalation: gateEscalate(`the substantive replacement gate ${cmd} was reached on a committed baseline, but no verified parent runner is available; refusing to manufacture pristine discrimination`) }
+    }
     gateHistory.push(gateCmd)
     gateCmd = cmd
     activeGateCmd = gateCmd
     gateGeneration += 1
     recordGateProof(label)
     gateReverified = gateDiscrimination === 'proven'
+    return null
   }
 
   // A delimiter-only correction fixes the current gate generation. It must not
@@ -8379,7 +8387,7 @@ function runTask(ctx, io, crash) {
   // `1 + gate_repairs` pristine runs — reaching a third is a bug, not a budget
   // question.
   // Returns { escalation } | { repaired: bool }.
-  const settleFailedProof = () => {
+  const settleFailedProof = (committedBaseline = false) => {
     let repaired = false
     let repairRunLabel = null
     while (true) {
@@ -8484,7 +8492,11 @@ function runTask(ctx, io, crash) {
         stageComplete()
         return { escalation: gateEscalate(`the gate could not be repaired after a failed discrimination proof (${GATE_CUSTODIAN} returned ${rep.status}: ${rep.summary || 'no detail'}) — ${proofNote()}. Gate: ${gateCmd}`) }
       }
-      acceptRepairedGate(rep.details.gate_cmd, `gate-reverify:${gateRepairs}`)
+      const replacement = acceptRepairedGate(rep.details.gate_cmd, `gate-reverify:${gateRepairs}`, { committedBaseline })
+      if (replacement?.escalation) {
+        stageComplete()
+        return replacement
+      }
       repaired = true
       stageComplete()
     }
@@ -8503,7 +8515,7 @@ function runTask(ctx, io, crash) {
         .filter((check) => typeof check === 'string' && !settled.has(check)),
     )
   }
-  const refreshProofTree = (round = null) => {
+  const refreshProofTree = (round = null, { committedBaseline = false } = {}) => {
     const comparison = compareProofTree()
     const staleProofFiles = comparison.staleProofFiles
     const changedProofFiles = comparison.changedProofFiles
@@ -8563,7 +8575,7 @@ function runTask(ctx, io, crash) {
         }
         const diffSettled = settleDiffMutationProof(round)
         if (diffSettled.fatal || gateProofFatal) {
-          const fatal = settleFailedProof()
+          const fatal = settleFailedProof(committedBaseline)
           if (fatal.escalation) return { ok: false, escalation: fatal.escalation }
         }
         captureProofTree(round)
@@ -8573,28 +8585,60 @@ function runTask(ctx, io, crash) {
     }
     const unwitnessedChangedFile = !carryableAdmissionProof && changedProofFiles.some((file) => !proofTreeWitness.cells.has(file))
     if (staleProofFiles.length > 0 || correctedChecks.size > 0 || unwitnessedChangedFile) {
-      gateGeneration = gateGeneration + 1
-      const scope = mutationProofScope({
-        mutations,
-        previousRows,
-        staleProofFiles: proofScopeStaleFiles(staleProofFiles, comparison.unknown),
-        correctedChecks,
-        generation: gateGeneration,
-        previousGeneration,
-        unknown: comparison.unknown,
-        forceFresh: unwitnessedChangedFile,
-      })
-      let selected = scope.selected
-      let carried = scope.carried
+      // A committed-baseline refresh must not advance proof state until the current
+      // tree is green: a red observation returns to the builder with the old proof
+      // still authoritative, so first-green cannot runClean against committed HEAD.
+      const nextGeneration = gateGeneration + 1
+      let selected = []
+      let carried = []
       let forceFullCheckProof = false
-      let gateRes = runGate(`gate-fresh:${gateGeneration}`, gateCmd)
+      let carriedWholeGateProof = false
+      let gateRes = runGate(`gate-fresh:${nextGeneration}`, gateCmd)
       if (!gateRes?.ok) {
+        if (committedBaseline === true) return { ok: false, gateRes }
+        gateGeneration = nextGeneration
         gateDiscrimination = 'unproven'
         gateProofNote = `the acceptance gate was red after proof-tree freshness changed: ${String(gateRes?.output || '').slice(-2000)}`
         return { ok: false, gateRes }
       }
-      recordGateProof(`gate-proof:${gateGeneration}`)
-      let settled = settleFailedProof()
+      gateGeneration = nextGeneration
+      const baselineContainsCommittedWork = committedBaseline === true
+      if (baselineContainsCommittedWork && gateProvenGeneration === previousGeneration) {
+        const scope = mutationProofScope({
+          mutations,
+          previousRows,
+          staleProofFiles: proofScopeStaleFiles(staleProofFiles, comparison.unknown),
+          correctedChecks,
+          generation: gateGeneration,
+          previousGeneration,
+          unknown: comparison.unknown,
+          forceFresh: unwitnessedChangedFile,
+        })
+        selected = scope.selected
+        carried = scope.carried
+        resetCheckProof()
+        carryGateProof(previousMeasuredGeneration, changedProofFiles)
+        checkProofPending = mutations.length > 0 ? gateGeneration : null
+        carriedWholeGateProof = true
+      } else {
+        if (baselineContainsCommittedWork) {
+          return { ok: false, escalation: gateEscalate(`the acceptance gate is unproven on a committed baseline (same-gate proof generation ${previousGeneration} was not available); no verified parent runner is available, so pristine discrimination is refused`) }
+        }
+        const scope = mutationProofScope({
+          mutations,
+          previousRows,
+          staleProofFiles: proofScopeStaleFiles(staleProofFiles, comparison.unknown),
+          correctedChecks,
+          generation: gateGeneration,
+          previousGeneration,
+          unknown: comparison.unknown,
+          forceFresh: unwitnessedChangedFile,
+        })
+        selected = scope.selected
+        carried = scope.carried
+        recordGateProof(`gate-proof:${gateGeneration}`)
+      }
+      let settled = settleFailedProof(committedBaseline)
       if (settled.escalation) return { ok: false, escalation: settled.escalation }
       if (settled.repaired) {
         selected = mutations
@@ -8611,12 +8655,12 @@ function runTask(ctx, io, crash) {
         forceFullCheckProof = false
         completeCheckProof(`gate-proof:${gateGeneration}:checks`, { mutations: selected, carried, fresh: freshCheckProof })
         if (gateProofFatal) {
-          const fatal = settleFailedProof()
+          const fatal = settleFailedProof(committedBaseline)
           if (fatal.escalation) return { ok: false, escalation: fatal.escalation }
         }
         if (checkProofDisagreement()) return { ok: false, escalation: escalate('anchor-absent', anchorAbsentWhy(checkProofUnbound)) }
         if (!gateProofFatal && checkProofVerdict !== 'failed') break
-        settled = settleFailedProof()
+        settled = settleFailedProof(committedBaseline)
         if (settled.escalation) return { ok: false, escalation: settled.escalation }
         if (settled.repaired) {
           selected = mutations
@@ -8631,10 +8675,11 @@ function runTask(ctx, io, crash) {
       }
       const diffSettled = settleDiffMutationProof(round)
       if (diffSettled.fatal || gateProofFatal) {
-        const fatal = settleFailedProof()
+        const fatal = settleFailedProof(committedBaseline)
         if (fatal.escalation) return { ok: false, escalation: fatal.escalation }
       }
       captureProofTree(round)
+      if (carriedWholeGateProof) proofTreeWitness.measured_generation = previousMeasuredGeneration
       return { ok: true, gateRes }
     }
     return { ok: true, gateRes: null }
@@ -9180,7 +9225,7 @@ function runTask(ctx, io, crash) {
   // never opened, and the lane burned all four lead consults and escalated with
   // `gate_repairs` still 0. Returns the (possibly re-run) gate result, and an
   // `escalation` the CALLER must return — this closure never returns out of driveTask.
-  const gateDefectValve = (round, gateRes) => {
+  const gateDefectValve = (round, gateRes, { committedBaseline = false } = {}) => {
     if (gateRes.ok || round < limits.gate_fails_to_triage || gateTriaged || gateRepairs >= limits.gate_repairs) return { gateRes }
     if (gateObserving) gateObserveTriaged = true
     else gateTriaged = true
@@ -9210,13 +9255,14 @@ function runTask(ctx, io, crash) {
       // on the normal branches, NEVER an unconditional `finally` — an unexpected throw must
       // still leave the failing stage OPEN, which is what the journal contract means.
       if (rep.status !== 'done' || !rep.details?.gate_cmd) { stageComplete(); return { gateRes } }
-      acceptRepairedGate(rep.details.gate_cmd, `gate-reverify:${gateRepairs}`)
+      const replacement = acceptRepairedGate(rep.details.gate_cmd, `gate-reverify:${gateRepairs}`, { committedBaseline })
+      if (replacement?.escalation) { stageComplete(); return { gateRes, escalation: replacement.escalation } }
       // The re-proof no longer trusts bare `pristine.ok`: a repaired gate
       // that crashes or prints no summary on the pristine tree is not red
       // for the right reason either (#153, ADR-030 §3). The budget is
       // already spent here, so a failed re-proof escalates — with the
       // diagnosis that actually applies.
-      const settled = settleFailedProof()
+      const settled = settleFailedProof(committedBaseline)
       if (settled.escalation) { stageComplete(); return { gateRes, escalation: settled.escalation } }
       gateRes = runGate(settled.runLabel || `gate-repair:${gateRepairs}`, gateCmd) // re-run immediately; no builder round consumed
       stageComplete()
@@ -9240,7 +9286,7 @@ function runTask(ctx, io, crash) {
     // gate but never reaches triage, so a lane still terminates on consult exhaustion with
     // gate_repairs 0.
     gateObserving = true
-    const triaged = gateDefectValve(round, probe)                                      // ANCHOR VD2
+    const triaged = gateDefectValve(round, probe, { committedBaseline })                                      // ANCHOR VD2
     gateObserving = false
     if (triaged.escalation) { stageComplete(); return { escalation: triaged.escalation } }
     // MUTATION D1: rewrite this two-line tail into `return probe.ok ? {} : { escalation: … }`
@@ -9406,7 +9452,7 @@ function runTask(ctx, io, crash) {
       let gateRes = runGate(`gate:r${round}`, gateCmd)
       // MUTATION B3: neutralise this call and the triage this lane hoisted no longer
       // fires where it always fired — the DONE-path valve, gone.
-      const valved = gateDefectValve(round, gateRes)                                   // ANCHOR VD1
+      const valved = gateDefectValve(round, gateRes, { committedBaseline })                                   // ANCHOR VD1
       if (valved.escalation) { stageComplete(); return valved.escalation }
       gateRes = valved.gateRes
       forceFullCheckProof = valved.forceFullCheckProof === true
@@ -9416,7 +9462,7 @@ function runTask(ctx, io, crash) {
       // bound on pristine runs.
       if (gateRes.ok && gateProvenGeneration !== gateGeneration) {
         recordGateProof(`gate-proof:${gateGeneration}`)
-        const settled = settleFailedProof()
+        const settled = settleFailedProof(committedBaseline)
         if (settled.escalation) {
           stageComplete()
           return settled.escalation
@@ -9463,7 +9509,7 @@ function runTask(ctx, io, crash) {
         // it is restored, and bouncing anyone onto that tree asks them to repair code the driver
         // broke. Settled here so a dirty restore is never reported merely as drift.
         if (gateProofFatal) {
-          const fatal = settleFailedProof()
+          const fatal = settleFailedProof(committedBaseline)
           if (fatal.escalation) {
             stageComplete()
             return fatal.escalation
@@ -9483,7 +9529,7 @@ function runTask(ctx, io, crash) {
           return escalate('anchor-absent', anchorAbsentWhy(checkProofUnbound))                       // ANCHOR B1
         }
         if (!gateProofFatal && checkProofVerdict !== 'failed') break
-        const settled = settleFailedProof()
+        const settled = settleFailedProof(committedBaseline)
         if (settled.escalation) {
           stageComplete()
           return settled.escalation
@@ -9497,7 +9543,7 @@ function runTask(ctx, io, crash) {
         if (!proofTreeWitness || proofTreeWitness.generation < gateGeneration) {
           const diffSettled = settleDiffMutationProof(round)
           if (diffSettled.fatal || gateProofFatal) {
-            const fatal = settleFailedProof()
+            const fatal = settleFailedProof(committedBaseline)
             if (fatal.escalation) {
               stageComplete()
               return fatal.escalation
@@ -9505,7 +9551,7 @@ function runTask(ctx, io, crash) {
           }
           captureProofTree(round)
         } else if (proofTreeBuildRound !== null && proofTreeBuildRound < round) {
-          const refreshed = refreshProofTree(round)
+          const refreshed = refreshProofTree(round, { committedBaseline })
           if (refreshed.escalation) {
             stageComplete()
             return refreshed.escalation
@@ -9942,7 +9988,7 @@ function runTask(ctx, io, crash) {
   // The reviewer can accept only the tree that is about to be committed. This
   // second call is deliberately after hardening and all review-side mechanisms.
   if (gateCmd && proofTreeWitness) {
-    const refreshed = refreshProofTree()
+    const refreshed = refreshProofTree(null, { committedBaseline })
     if (refreshed.escalation) return refreshed.escalation
     if (!refreshed.ok && refreshed.gateRes) {
       return escalate('gate', `the acceptance gate is red after the final proof-tree freshness check: ${String(refreshed.gateRes.output || '').slice(-2000)}`)
@@ -10265,6 +10311,7 @@ function runTask(ctx, io, crash) {
               return escalate('rebase', `the rebase recovery was restored but the global builder budget is exhausted after ${builderAttempts} attempt(s)`, [], { commit: S.commit })
             }
             stageComplete()
+            committedBaseline = false
             continue suiteCycle
           }
           stageComplete()
@@ -10303,7 +10350,7 @@ function runTask(ctx, io, crash) {
       let postRebaseProof
       let postRebaseProofThrown = null
       try {
-        postRebaseProof = refreshProofTree()
+        postRebaseProof = refreshProofTree(null, { committedBaseline: false })
       } catch (err) {
         postRebaseProofThrown = err
       }
@@ -10370,6 +10417,7 @@ function runTask(ctx, io, crash) {
       suiteBuildBrief = bounce
       suiteBuildNote = 'census-exhibits-fix'
       if (builderRemaining() <= 0) grantBuilderAllowance()
+      committedBaseline = true
       continue suiteCycle
     }
     if (postCommitInside.length > 0) {
@@ -10388,6 +10436,7 @@ function runTask(ctx, io, crash) {
       suiteBuildBrief = bounce
       suiteBuildNote = 'census-exhibits-fix'
       if (builderRemaining() <= 0) grantBuilderAllowance()
+      committedBaseline = true
       continue suiteCycle
     }
     if (postCommit.escalation) return postCommit.escalation
@@ -10428,6 +10477,7 @@ function runTask(ctx, io, crash) {
         suiteBuildBrief = b
         suiteBuildNote = 'frozen-inventory-fix'
         stageComplete()
+        committedBaseline = true
         if (builderRemaining() <= 0) return escalate('suite', `frozen inventory repair was recorded but the global builder budget is exhausted after ${builderAttempts} attempt(s)`, [], { commit: S.commit, suite_red: suiteEvidence })
         continue suiteCycle
       }
@@ -10471,6 +10521,7 @@ function runTask(ctx, io, crash) {
       suiteBuildBrief = b
       suiteBuildNote = 'suite-red-fix'
       stageComplete()
+      committedBaseline = true
       if (builderRemaining() <= 0) return escalate('suite', `suite-red repair was recorded but the global builder budget is exhausted after ${builderAttempts} attempt(s)`, [], { commit: S.commit, suite_red: suiteEvidence })
       continue suiteCycle
     }

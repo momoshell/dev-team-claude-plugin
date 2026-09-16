@@ -34,14 +34,14 @@ const frozenPlan = () => planEnv({ details: { ...planEnv().details, files_in_sco
 const frozenRed = () => ({ ok: false, output: `not ok 1 - ${CTX.checkout}/${FROZEN_INVENTORY_FILE}:203\nnot ok 2 - ${CTX.checkout}/test/visualizer-server.test.mjs:365` })
 const frozenGreen = () => ({ ok: true, output: 'ok 1 - vacuity' })
 
-function frozenCycleIo({ suite = [frozenRed(), frozenGreen()], builder2 = null, builder3 = null, reviewer1 = reviewEnv('pass'), reviewer2 = reviewEnv('pass'), reviewer3 = reviewEnv('pass'), runs = {}, changed = null, ctx = {}, laneFence = undefined, protectedPaths = undefined, onSuite = null, onRun = null, commitResults = null, census = false } = {}) {
+function frozenCycleIo({ suite = [frozenRed(), frozenGreen()], builder2 = null, builder3 = null, reviewer1 = reviewEnv('pass'), reviewer2 = reviewEnv('pass'), reviewer3 = reviewEnv('pass'), runs = {}, changed = null, ctx = {}, laneFence = undefined, protectedPaths = undefined, onSuite = null, onRun = null, commitResults = null, census = false, gateCmd = null, cleanRuns = null } = {}) {
   const { committed, current } = frozenSourcePair()
   const frozenPath = `${CTX.checkout}/${FROZEN_INVENTORY_FILE}`
   let io
   const files = { [frozenPath]: committed }
   const suiteRuns = Object.fromEntries(suite.map((result, index) => [`suite-cmd:${index + 1}`, result]))
   const envelopes = {
-    'planner:1': frozenPlan(),
+    'planner:1': gateCmd ? planEnv({ details: { ...frozenPlan().details, gate_cmd: gateCmd } }) : frozenPlan(),
     'builder:1': buildEnv(),
     'builder:2': () => { if (builder2) builder2(files, frozenPath, current); return buildEnv() },
     'builder:3': () => { if (builder3) builder3(files, frozenPath, current); return buildEnv() },
@@ -57,6 +57,7 @@ function frozenCycleIo({ suite = [frozenRed(), frozenGreen()], builder2 = null, 
     commitResults,
     ...(onRun ? { onRun } : {}),
     ...(census ? { cleanRuns: {} } : {}),
+    ...(cleanRuns ? { cleanRuns } : {}),
   })
   const dynamic = { ...CTX, ...ctx }
   if (laneFence !== undefined || protectedPaths !== undefined || onSuite) {
@@ -4631,8 +4632,9 @@ test('F1 context round changing a declared target forces fresh discrimination', 
   const result = driveTask(fixture.ctx, fixture.io)
   assert.equal(result.status, 'done')
   assert.equal(result.details.gate.generation, 2)
-  assert.equal(result.details.stages.includes('gate-proof:2'), true)
-  assert.equal(fixture.io.calls.logs.filter((entry) => entry.gate_discrimination_carry).length, 0)
+  assert.equal(result.details.stages.includes('gate-proof:2'), false)
+  const carry = fixture.io.calls.logs.find((entry) => entry.gate_discrimination_carry)?.gate_discrimination_carry
+  assert.deepEqual(carry, { proof: 'carried-forward', generation: 2, measured_generation: 1, files: [carrier, target] })
   const row = fixture.io.calls.logs.find((entry) => entry.gate_check_discrimination && entry.gate_generation === 2)?.gate_check_discriminations?.find(({ check }) => check === 'F1-target')
   assert.equal(row.proof, 'fresh')
   assert.equal(row.measured_generation, 2)
@@ -4662,8 +4664,8 @@ test('F2 file admitted before witness capture forces fresh discrimination', () =
   const result = driveTask(fixture.ctx, fixture.io)
   assert.equal(result.status, 'done')
   assert.equal(result.details.gate.generation, 2)
-  assert.equal(result.details.stages.includes('gate-proof:2'), true)
-  assert.equal(fixture.io.calls.logs.filter((entry) => entry.gate_discrimination_carry).length, 0)
+  assert.equal(result.details.stages.includes('gate-proof:2'), false)
+  assert.equal(fixture.io.calls.logs.filter((entry) => entry.gate_discrimination_carry).length, 1)
 })
 
 test('reported-only proof inventory validates entries and never inserts exact scope literals', () => {
@@ -5482,6 +5484,164 @@ test('A1 moved frozen pins receive one post-commit repair and proceed', () => {
   assert.equal(result.details.frozen_inventory_repairs[0].files.length, 1)
   assert.deepEqual(result.details.frozen_inventory_repairs[0].files.map(({ file }) => file), [FROZEN_INVENTORY_FILE])
   assert.equal(result.details.frozen_inventory_repairs[0].files[0].changes.length, 2)
+})
+
+test('A1 post-commit refresh carries the pre-commit whole-gate proof', () => {
+  const mutation = { check: 'committed-repair', file: 'a.mjs', find: 'true', replace: 'false' }
+  const green = `green\n${GATE_SUMMARY_PREFIX} {"total":1,"failed":0,"errored":0}`
+  const killed = `FAIL committed-repair: caught\n${GATE_SUMMARY_PREFIX} {"total":1,"failed":1,"errored":0}`
+  const targetPath = `${CTX.checkout}/a.mjs`
+  const files = {
+    [targetPath]: CHECK_BUILT,
+    [`${CTX.checkout}/a.test.mjs`]: 'export const test = true\n',
+  }
+  let io
+  io = fakeIo({
+    files, writeThrough: true, emit: true,
+    cleanRuns: { 'gate-cmd': { ok: false, output: RED(1) } },
+    runs: {
+      'gate-cmd:1': { ok: false, output: RED(1) },
+      'gate-cmd:2': { ok: true, output: green },
+      'gate-cmd:3': { ok: false, output: killed },
+      'gate-cmd:4': { ok: true, output: green },
+      'gate-cmd:5': { ok: true, output: green },
+      'gate-cmd:6': { ok: false, output: killed },
+      'gate-cmd': { ok: true, output: green },
+      'lane-cmd': { ok: true, output: '' },
+      'suite-cmd:1': { ok: false, output: suiteRed('a.test.mjs', 7, 'committed repair') },
+      'suite-cmd:2': { ok: true, output: 'suite green' },
+    },
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations: [mutation] } }),
+      'builder:1': buildEnv(),
+      'builder:2': () => { files[targetPath] = `${CHECK_BUILT}// committed repair\n`; return buildEnv() },
+      'reviewer:1': reviewEnv('pass'), 'reviewer:2': reviewEnv('pass'),
+    },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2, review_rounds: 2 } }, io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.runClean.length, 1)
+  assert.equal(result.details.gate.generation, 2)
+  const carries = io.calls.logs.filter((row) => row.gate_discrimination_carry).map((row) => row.gate_discrimination_carry)
+  assert.equal(carries.length, 1)
+  assert.equal(carries[0].measured_generation, 1)
+  const proof = io.calls.logs.find((row) => row.gate_check_discrimination && row.gate_generation === 2)?.gate_check_discriminations?.find(({ check }) => check === mutation.check)
+  assert.deepEqual({ proof: proof?.proof, measured_generation: proof?.measured_generation }, { proof: 'fresh', measured_generation: 2 })
+})
+
+test('RV1-1 chained committed-baseline carries retain the original measured generation', () => {
+  const [carrier] = CENSUS_CARRIER_FILES
+  const suiteFile = 'suite-context.test.mjs'
+  const mutation = { check: 'RV1-1-carried', file: 'a.mjs', find: 'true', replace: 'false' }
+  const killed = `FAIL RV1-1-carried: caught\n${GATE_SUMMARY_PREFIX} {"total":1,"failed":1,"errored":0}`
+  const plan = planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations: [mutation] } })
+  const fixture = censusDriveIo([censusRecord(), censusRecord([carrier]), censusRecord(), censusRecord()], {
+    envelopes: {
+      'planner:1': plan,
+      'builder:2': () => { fixture.io.calls.files[`${CTX.checkout}/a.mjs`] = 'export const a = true // census repair\n'; return buildEnv() },
+      'builder:3': () => { fixture.io.calls.files[`${CTX.checkout}/a.mjs`] = 'export const a = true // suite repair\n'; return buildEnv() },
+    },
+    suiteResults: [
+      { ok: false, output: suiteRed(suiteFile, 1, 'second committed repair') },
+      { ok: true, output: CENSUS_TAP_GREEN },
+    ],
+    suiteRuns: {
+      'gate-cmd:3': { ok: false, output: killed },
+      'gate-cmd:6': { ok: false, output: killed },
+      'gate-cmd:9': { ok: false, output: killed },
+    },
+    changed() {
+      const censusRuns = this.calls.run.filter(({ cmd }) => cmd === 'node crew/census-exhibits.mjs').length
+      const suiteRuns = this.calls.run.filter(({ cmd }) => cmd === 'suite-cmd').length
+      if (censusRuns >= 3 && suiteRuns >= 1) return [suiteFile, 'a.mjs']
+      if (censusRuns >= 2) return [carrier, 'a.mjs']
+      return ['a.mjs', 'a.test.mjs']
+    },
+  })
+  const result = driveTask({ ...fixture.ctx, limits: { build_rounds: 3, review_rounds: 3 } }, fixture.io)
+  assert.equal(result.status, 'done')
+  assert.equal(fixture.io.calls.runClean.length, 1)
+  const carries = fixture.io.calls.logs.filter((row) => row.gate_discrimination_carry).map((row) => row.gate_discrimination_carry)
+  assert.deepEqual(carries.map(({ generation, measured_generation }) => ({ generation, measured_generation })), [
+    { generation: 2, measured_generation: 1 },
+    { generation: 3, measured_generation: 1 },
+  ])
+})
+
+test('B1 a pre-commit red proof is not refused after frozen-pin repair', () => {
+  const green = `green\n${GATE_SUMMARY_PREFIX} {"total":1,"failed":0,"errored":0}`
+  const frozen = frozenCycleIo({
+    gateCmd: 'gate-cmd',
+    cleanRuns: {
+      'gate-cmd:1': { ok: false, output: RED(1) },
+      'gate-cmd:2': { ok: true, output: 'post-commit pristine-green sentinel' },
+    },
+    runs: {
+      'gate-cmd:1': { ok: false, output: RED(1) },
+      'gate-cmd:2': { ok: true, output: green },
+      'gate-cmd:3': { ok: true, output: green },
+      'gate-cmd:4': { ok: false, output: RED(1) },
+      'gate-cmd:5': { ok: true, output: green },
+      'gate-cmd:6': { ok: true, output: green },
+    },
+    builder2: (files, path, current) => { files[path] = current },
+  })
+  const repaired = driveTask(Object.assign(frozen.ctx, { limits: { build_rounds: 3, gate_fails_to_triage: 9 } }), frozen.io)
+  assert.equal(repaired.status, 'done')
+  assert.equal(frozen.io.calls.runClean.length, 1)
+  assert.equal(frozen.io.calls.runClean.some(({ n }) => n === 2), false)
+  assert.equal(repaired.details.gate.discrimination, 'proven')
+  assert.equal(repaired.details.gate.generation, 2)
+  assert.equal(frozen.io.calls.logs.some((row) => row.gate_discrimination === 'unproven'), false)
+
+  const replacement = fakeIo({
+    cleanRuns: { 'gate-cmd': { ok: false, output: RED(1) } },
+    runs: {
+      'gate-cmd:1': { ok: false, output: RED(1) },
+      'gate-cmd:2': { ok: true, output: green },
+      'gate-cmd:3': { ok: false, output: RED(1) },
+      'lane-cmd': { ok: true, output: '' },
+      'suite-cmd:1': { ok: false, output: suiteRed('a.test.mjs', 8, 'replacement gate') },
+    },
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }),
+      'builder:1': buildEnv(), 'builder:2': buildEnv(),
+      'reviewer:1': reviewEnv('pass'),
+      'reviewer:2': { status: 'done', role: 'reviewer', details: { defect: 'gate', reason: 'the replacement gate is substantive' } },
+      'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } },
+    },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const refused = driveTask({ ...CTX, limits: { build_rounds: 2 } }, replacement)
+  assert.equal(refused.status, 'escalation')
+  assert.equal(refused.details.escalation.where, 'gate')
+  assert.match(refused.details.escalation.why, /committed baseline/)
+  assert.match(refused.details.escalation.why, /parent runner/)
+  assert.equal(replacement.calls.runClean.length, 1)
+  assert.equal(replacement.calls.runClean.some(({ cmd }) => cmd === 'gate-fixed'), false)
+})
+
+test('C1 a genuinely vacuous gate is still caught before commit', () => {
+  const io = fakeIo({
+    cleanRuns: { 'gate-cmd': { ok: true, output: 'pristine-green before commit' } },
+    runs: {
+      'gate-cmd:1': { ok: false, output: RED(1) },
+      'gate-cmd:2': { ok: true, output: '' },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }),
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask({ ...CTX, roles: ['planner', 'builder', 'reviewer'] }, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'gate')
+  assert.match(result.details.escalation.why, /STILL green/)
+  assert.equal(io.calls.commits.length, 0)
+  assert.equal(io.calls.runClean.length, 1)
 })
 
 test('B2 frozen inventory repair permits only one re-entry', () => {

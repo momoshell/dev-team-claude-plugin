@@ -49,5 +49,5 @@ test('the enforcement gap is real', () => {
 // something the target repeats, and this test reddens — the old pin passed
 // while the line said something else entirely (#550).
 test('every backend-node path:line anchor carries what the prose claims', () => {
-  assert.equal(assertAnchorsPinned({ root: ROOT, skillDir: HERE, manifestPath: join(HERE, 'anchors.json'), minAnchors: 135 }), 135)
+  assert.equal(assertAnchorsPinned({ root: ROOT, skillDir: HERE, manifestPath: join(HERE, 'anchors.json'), minAnchors: 139 }), 139)
 })

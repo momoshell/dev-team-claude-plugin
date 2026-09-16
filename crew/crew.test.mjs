@@ -9696,6 +9696,46 @@ test('resume admits the persisted custom suite and refuses only a byte-different
   } finally { rmSync(fixture.root, { recursive: true, force: true }) }
 })
 
+test('resume lifecycle carries an authoritative committed file outside the original context', () => {
+  const fixture = resumeCommandFixture('crew-resume-context-record-')
+  const previousHome = process.env.HOME
+  try {
+    const source = 'resume context record\n'
+    writeFileSync(join(fixture.checkout, 'outside-context.mjs'), source)
+    execSync('git add outside-context.mjs && git commit -qm context-record', { cwd: fixture.checkout })
+    const head = execSync('git rev-parse HEAD', { cwd: fixture.checkout, encoding: 'utf8' }).trim()
+    const index = execSync('git write-tree', { cwd: fixture.checkout, encoding: 'utf8' }).trim()
+    const outside = { path: 'outside-context.mjs', state: 'present', bytes: `file:-:${createHash('sha256').update(source).digest('hex')}` }
+    const files = [...fixture.checkpoint.tree.files, outside].sort((left, right) => left.path.localeCompare(right.path))
+    Object.assign(fixture.checkpoint, {
+      head_oid: head,
+      accepted_scope: files.map(({ path }) => path),
+      tree: { index_oid: index, files, worktree_sha256: resumeWorktreeSha256(files) },
+      commit: { ...fixture.checkpoint.commit, oid: head, pending: false, files: files.map(({ path }) => path) },
+    })
+    fixture.setEnvelope(fixture.envelope())
+    const seen = []
+    process.env.HOME = fixture.home
+    const result = resumeCmd({ task: fixture.task, checkout: fixture.checkout, keep: true }, {
+      openRun: () => ({ startRun() {}, endRun() {} }),
+      seatIo: () => ({}),
+      resume: (ctx, io, checkpoint) => {
+        seen.push({ scope: ctx.files_in_scope, committed: checkpoint.commit.files })
+        return { status: 'done', summary: 'resumed', artifacts: [], details: { commit: checkpoint.commit.oid, files_committed: checkpoint.commit.files } }
+      },
+      writeTerminalLine: () => {},
+    })
+    assert.equal(result.status, 'done')
+    assert.deepEqual(seen, [{ scope: ['a.mjs', 'outside-context.mjs'], committed: ['a.mjs', 'outside-context.mjs'] }])
+    writeFileSync(join(fixture.checkout, 'outside-context.mjs'), 'tampered context record\n')
+    assert.throws(() => validateResumeState({ args: {}, checkout: fixture.checkout, taskDir: fixture.taskDir, envelope: fixture.envelope() }), (error) => error.reason === RESUME_REFUSALS.fingerprintMismatch)
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    rmSync(fixture.root, { recursive: true, force: true })
+  }
+})
+
 test('D1 direct CLI run still starts at planning rather than resuming', () => {
   const root = scratchDir('crew-resume-d1-')
   const home = join(root, 'home')

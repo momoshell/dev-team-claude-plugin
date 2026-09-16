@@ -442,6 +442,7 @@ function anchorPublicationIo({ specs = [], scope, limits = {}, gate = null, enve
   const baseAssign = io.assign
   io.assign = function (spec) {
     const assigned = baseAssign.call(this, spec)
+    this.calls.order.push(`assign:${spec.role}:${assigned.returnPath.split(':').at(-1)}`)
     this.calls.assign.push({ ...spec, id: assigned.id, returnPath: assigned.returnPath })
     return assigned
   }
@@ -848,6 +849,9 @@ test('C1 exhausted rebase bounce budget escalates with paths', () => {
   assert.match(result.details.escalation.why, new RegExp(secondPath.replaceAll('.', '\\.') ))
   assert.match(result.details.escalation.why, /limits\.build_rounds budget is exhausted/)
   assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 2)
+  const builderBounce = io.calls.order.indexOf('assign:builder:2')
+  const rebaseRuns = io.calls.order.map((entry, index) => entry === 'run:git rebase origin/main' ? index : -1).filter((index) => index >= 0)
+  assert.ok(rebaseRuns.length >= 2 && rebaseRuns[0] < builderBounce && builderBounce < rebaseRuns[1])
   assert.equal(io.state.abortCount, 2)
   assert.equal(io.state.resetCommand, 'git reset --soft base1111')
 })
@@ -1018,9 +1022,10 @@ test('E1 resolved conflict enters existing post-rebase proof', () => {
   assert.equal(freshRows.length, REBASE_MUTATIONS.length)
   assert.ok(freshRows.every((row) => row.measured_generation > 1))
   const suiteIndex = io.calls.order.indexOf('run:suite-cmd')
+  const builderBounce = io.calls.order.indexOf('assign:builder:2')
   const freshIndexes = io.calls.order.map((entry, index) => entry === 'fresh-proof-row' ? index : -1).filter((index) => index >= 0)
   assert.ok(freshIndexes.length > 0)
-  assert.ok(freshIndexes.every((index) => index < suiteIndex))
+  assert.ok(freshIndexes.every((index) => builderBounce < index && index < suiteIndex))
 })
 
 test('F1 clean rebase adds neither bounce nor proof', () => {
@@ -1075,6 +1080,9 @@ test('H1 unsafe resolver writes restore and bounce', () => {
   assert.equal(io.state.worktreeBytes[`${CTX.checkout}/${ANCHOR_SKILL}`], beforeSkill)
   assert.equal(io.state.addCommands.some((command) => command.includes(ANCHOR_SKILL)), false)
   assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 2)
+  const resetIndex = io.calls.order.indexOf('run:git reset --soft base1111')
+  const builderBounce = io.calls.order.indexOf('assign:builder:2')
+  assert.ok(resetIndex >= 0 && resetIndex < builderBounce)
 })
 
 test('RV1-1 the observe-and-end residual reaches the commit and PR intent verbatim', () => {

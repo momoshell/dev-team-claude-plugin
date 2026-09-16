@@ -4,7 +4,6 @@ import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { ROOT } from '../../test/helpers.mjs'
-import { PLAN_SCOPE } from '../../crew/drive.mjs'
 import { SEAT_DIED_STAGE, SEAT_REFUSAL_STAGE } from '../../crew/seat-io.mjs'
 import { VARIANT_NAMES } from '../../crew/variants.mjs'
 import { assertAnchorsPinned, pinnedKey } from '../qa-test-writing/anchor-pin.mjs'
@@ -28,13 +27,15 @@ test("escalations.md's driver table equals the escalate() producers", () => {
   const emitted = new Set()
   for (const match of source.matchAll(new RegExp(`\\bescalate\\(\\s*${QUOTE}([a-z][a-z0-9-]*)${QUOTE}`, 'g'))) emitted.add(match[1])
   for (const name of VARIANT_NAMES) emitted.add(name)
-  emitted.add(PLAN_SCOPE.widened)
   emitted.add('driver')
   // The underscore is load-bearing: VARIANT_NAMES are added to `emitted` verbatim,
   // and `review_only` (with `verify_only` to follow) is the first variant whose name
   // is not a single lowercase word. Without `_` here the doc side can never match its
   // row, so the equality is UNSATISFIABLE for such a variant rather than merely red.
-  const documented = new Set([...readText(join(HERE, 'references/escalations.md')).matchAll(/^\|\s*`escalate:([a-z][a-z0-9_-]*)`\s*\|/gm)].map((match) => match[1]))
+  const prose = readText(join(HERE, 'references/escalations.md'))
+  assert.doesNotMatch(prose, /escalate:plan-scope-widened/)
+  assert.doesNotMatch(prose, /widening limit|held-scope.*refus|sibling-fence.*refus/i)
+  const documented = new Set([...prose.matchAll(/^\|\s*`escalate:([a-z][a-z0-9_-]*)`\s*\|/gm)].map((match) => match[1]))
   assert.deepEqual([...documented].sort(), [...emitted].sort())
 })
 
@@ -172,7 +173,7 @@ test('mutation proof preserves first and mutates in a detached worktree', () => 
 // Mutation killed: removing the bounded frozen-pin route from the existing suite row leaves the operator without its refusal contract.
 test('H1 suite escalation documentation names the bounded frozen-pin repair', () => {
   const text = readText(join(HERE, 'references/escalations.md'))
-  const sentence = 'An already-scoped frozen pin gets one data-only post-commit repair; identity, logic, held-scope, protected-path, and repeat repairs still refuse.'
+  const sentence = 'Frozen inventory receives only its bounded data-only repair; identity, logic, unmeasured, and repeat cases remain terminal.'
   assert.equal(text.split(sentence).length - 1, 1)
-  assert.match(text, /Compare the repair journal row and envelope report\./)
+  assert.match(text, /A named failing test path is recorded as context for the already-budgeted builder repair\./)
 })

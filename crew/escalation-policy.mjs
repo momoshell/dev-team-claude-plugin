@@ -324,7 +324,7 @@ const deliberateEscalationWhere = Object.freeze([
   'converge-pr', 'scope', 'gate', 'envelope', 'triage', 'triage-scope', 'plan', 'plan-carve',
   'plan-check', 'sensitivity-floor', 'anchor-absent', 'census-exhibits', 'scope-request', 'build',
   'lane', 'harden', 'review', 'refuted-must-fix', 'diff-mutation', 'review-unresolved', 'rebase',
-  'suite', 'cold-suite', 'publish', 'scout', 'directed', 'plan-scope-malformed', 'plan-scope-widened',
+  'suite', 'cold-suite', 'publish', 'scout', 'directed', 'plan-scope-malformed',
 ])
 
 const heterogeneousReason = (where) => `heterogeneous failures at ${where} do not map to an existing closed recovery verb.`
@@ -358,7 +358,6 @@ const escalationQuestionCatalog = {
   scout: heterogeneousQuestion('scout', 'What should happen next when the scout envelope cannot be accepted?'),
   directed: heterogeneousQuestion('directed', 'What should happen next when the directed brief cannot be executed?'),
   'plan-scope-malformed': heterogeneousQuestion('plan-scope-malformed', 'What should happen next when the plan declares malformed scope?'),
-  'plan-scope-widened': heterogeneousQuestion('plan-scope-widened', 'What should happen next when the plan widens the dispatched scope?'),
 }
 
 export const ESCALATION_QUESTION_TYPES = Object.freeze(['single-choice', 'free-text'])

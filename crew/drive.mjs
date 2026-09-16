@@ -244,16 +244,15 @@ export function predecessorFindingsClosed(planCheckText, planText) {
 // CENSUS_ABSENT_REASONS (:262) — the driver owns the vocabulary it publishes.
 export const SUITE_RUN_NOT_OWNED = 'suite-run-not-owned'
 
-// A refused suite run BOUNCES the seat (#969). Every other seat-level refusal in
-// this runtime bounces: an out-of-scope write returns as a scope-fix brief, an
-// invalid envelope is re-asked, a gate defect opens the repair valve. This was
-// the one refusal that was terminal. BOUNDED at one, because the point is to
-// tell a seat what it may not run, not to fund a seat that keeps running it.
+// A refused suite run BOUNCES the seat (#969). Other recoverable seat-level failures
+// already have bounded routes: an invalid envelope is re-asked, and a gate defect
+// opens the repair valve. Ordinary out-of-context writes are recorded and proceed
+// under ADR-045; they are not refusals.
 export const SUITE_REASK_MAX = 1
 
 // A measured RPC non-start is a driver-owned recovery, distinct from a generic
 // no-envelope settlement. It receives one direct re-ask without importing the
-// transport vocabulary or widening transport retry policy.
+// transport vocabulary or an expanded transport retry policy.
 export const ZERO_TURN_NON_START = 'zero-turn-non-start'
 export const ZERO_TURN_REASK_MAX = 1
 
@@ -2341,8 +2340,8 @@ export function validateMutations(entries, inScope = () => true) {
         why = 'an exemption must carry its reason'
       } else if (!exempt && (typeof entry.file !== 'string' || entry.file.trim() === '')) {
         why = 'a mutation must name the file it edits'
-      } else if (!exempt && (validateScopeEntries([entry.file]).length > 0 || entry.file.endsWith('/') || !inScope(entry.file))) {
-        why = 'file must be a repo-relative file inside files_in_scope'
+      } else if (!exempt && (validateScopeEntries([entry.file]).length > 0 || entry.file.endsWith('/'))) {
+        why = 'file must be a repo-relative literal file'
       } else if (!exempt && (typeof entry.find !== 'string' || entry.find.length === 0 || typeof entry.replace !== 'string')) {
         why = 'a mutation must carry a non-empty literal find and a replace string'
       } else if (!exempt && entry.find === entry.replace) {
@@ -2490,16 +2489,13 @@ export function laneFenceHits(entries, laneFence) {
   return hits
 }
 
-const fenceBreachList = (hits) => hits.map(({ entry, lane }) => `${entry} is owned by lane ${lane}`).join('; ')
 
-// Scope widening is deliberately tiny and typed. A request is not an invitation to
-// reinterpret prose: only this closed shape can add literal files to the accepted
-// scope. Suite-red and seat-request widening each have independent task bounds.
+// Scope requests are typed context records, not write admission. A request may
+// add or repeat literal paths, but its source, shape, evidence, and path syntax
+// remain trust-boundary contracts (ADR-045).
 export const SCOPE_ADMISSION_SOURCES = Object.freeze(['suite-red', 'seat-request'])
 export const SCOPE_REQUEST_KINDS = Object.freeze(['admit-files'])
-export const SUITE_ADMISSION_MAX = 1
-export const SUITE_IN_SCOPE_BOUNCE_MAX = 1
-export const SEAT_ADMISSION_MAX = 1
+const SUITE_IN_SCOPE_BOUNCE_MAX = 1
 
 const scopeRequestRefusal = (reason, why) => ({
   kind: 'scope-request-refusal', refusal: 'scope-request', reason, why,
@@ -3043,10 +3039,11 @@ export function classifyFrozenInventoryDelta(file, committed, current) {
 export const frozenInventoryClassifier = classifyFrozenInventoryDelta
 export const classifyFrozenInventory = classifyFrozenInventoryDelta
 
-// Pure policy for either admission source. Every refusal is explicit: unknown
-// source, missing evidence, an occupied sibling fence, a spent widening cap, or a
-// malformed file list can never silently become an effective-scope mutation.
-export function scopeAdmissionDecision({ source, files, evidence, laneFence, suiteWidenings = 0, seatWidenings = 0 } = {}) {
+// Pure policy for either admission source. Scope is recorded context, not an
+// allow-list: only the typed source, evidence, and literal path shape remain a
+// trust-boundary check. A valid request is always admitted, including one that
+// contributes no new path to the current context (ADR-045).
+export function scopeAdmissionDecision({ source, files, evidence } = {}) {
   if (!SCOPE_ADMISSION_SOURCES.includes(source)) {
     return { action: 'escalate', reason: 'source', why: `scope admission source is not allowed: ${JSON.stringify(source)}` }
   }
@@ -3060,47 +3057,9 @@ export function scopeAdmissionDecision({ source, files, evidence, laneFence, sui
   if (unique.some((entry) => typeof entry !== 'string') || validateScopeEntries(unique).length > 0 || unique.some((entry) => typeof entry === 'string' && (entry.endsWith('/') || /^[A-Za-z][A-Za-z0-9+.-]*:/.test(entry)))) {
     return { action: 'escalate', reason: 'files', why: 'scope admission files must be literal repo-relative paths' }
   }
-  const hits = laneFenceHits(unique, laneFence)
-  if (hits.length > 0) {
-    return { action: 'escalate', reason: 'held', hits, why: `scope admission refused: ${fenceBreachList(hits)}` }
-  }
-  if (source === 'suite-red' && suiteWidenings >= SUITE_ADMISSION_MAX) {
-    return { action: 'escalate', reason: 'repeat', why: `scope admission refused: the suite-red widening limit of ${SUITE_ADMISSION_MAX} has been spent` }
-  }
-  if (source === 'seat-request' && seatWidenings >= SEAT_ADMISSION_MAX) {
-    return { action: 'escalate', reason: 'repeat', why: `scope admission refused: the seat-request widening limit of ${SEAT_ADMISSION_MAX} has been spent` }
-  }
   return { action: 'admit', source, files: unique, evidence }
 }
 
-function pathOnlyLaneFence(laneFence, laneName) {
-  return (Array.isArray(laneFence) ? laneFence : [])
-    .filter((record) => record?.lane !== laneName)
-    .map((record) => ({
-      ...record,
-      files: (Array.isArray(record?.files) ? record.files : [])
-        .filter((entry) => fenceScopeOf(entry).kind !== 'span'),
-    }))
-}
-
-function spanPlanFenceHits(scopeFiles, ownScopes, siblingScopes) {
-  const hits = []
-  for (const entry of Array.isArray(scopeFiles) ? scopeFiles : []) {
-    const plan = fenceScopeOf(entry)
-    if (plan.kind !== 'file') continue
-    for (const sibling of siblingScopes) {
-      const pathMatches = plan.path === sibling.path
-        || (plan.path.endsWith('/') && sibling.path.startsWith(plan.path))
-      if (!pathMatches) continue
-      const own = ownScopes.filter((scope) => scope.path === sibling.path)
-      if (own.length > 0 && !own.some((scope) => fenceScopesIntersect(scope, sibling))) continue
-      if (!hits.some((hit) => hit.entry === sibling.entry && hit.lane === sibling.lane)) {
-        hits.push({ entry: sibling.entry, lane: sibling.lane })
-      }
-    }
-  }
-  return hits
-}
 
 function fenceLineCount(text) {
   const normal = text.replace(/\r\n/g, '\n')
@@ -3319,7 +3278,7 @@ export const DOCUMENT_REFUSAL_DECLARATIONS = Object.freeze([
   'REFUSAL_REASONS', 'PUBLISH_REFUSALS', 'ENVELOPE_REFUSAL_REASONS', 'ANTI_REPLAY_REFUSAL_REASONS',
   'ADVISOR_BOOT_REFUSALS', 'FALLBACK_REFUSALS', 'BAND_FLOOR_REFUSALS', 'BOOT_DESCENDANT_REFUSALS',
   'RESUME_REFUSALS', 'ADVERSARY_REFUSALS', 'ACCEPT_REFUSALS', 'MUTATION_CORRECTION_REFUSALS',
-  'NARRATION_REFUSALS', 'PLAN_SCOPE_WIDEN_REFUSALS', 'SCOPE_REFUSALS', 'HARDENING_REFUSALS',
+  'NARRATION_REFUSALS', 'SCOPE_REFUSALS', 'HARDENING_REFUSALS',
   'HARDENING_APPEAL_REFUSALS', 'INTAKE_REFUSALS', 'CLOSEOUT_REFUSALS', 'PROOF_REFUSALS',
   'LIMIT_REFUSALS', 'ROSTER_REFUSALS', 'SEAT_REFUSALS', 'CAPABILITY_REFUSALS', 'EVAL_REFUSALS',
 ])
@@ -3945,11 +3904,7 @@ export function runDocumentationDecision({ ctx = {}, io, commit, inScope = () =>
   const plan = documentStagePlan(diff, date === undefined ? {} : { date })
   if (!plan.readable) return { commit, documentation: unreadable('diff contained malformed, binary, or non-text sections') }
   if (!plan.triggered) return { commit, documentation: null }
-  const writable = plan.entries.filter((entry) => {
-    if (!DOCUMENT_WRITABLE_TARGETS.has(entry.target)) return false
-    if (!inScope(entry.target)) return false
-    return true
-  })
+  const writable = plan.entries.filter((entry) => DOCUMENT_WRITABLE_TARGETS.has(entry.target))
   const residualEntries = plan.entries.filter((entry) => !writable.includes(entry))
   const operational = (nextCommit) => ({ commit: nextCommit, documentation: residualEntries.length > 0 ? plannedResidual(residualEntries) : null })
   if (writable.length === 0) return operational(commit)
@@ -3979,8 +3934,14 @@ export function runDocumentationDecision({ ctx = {}, io, commit, inScope = () =>
       throw new Error(`anchor repair refused${repair?.output ? `: ${String(repair.output).slice(-2000)}` : ''}`)
     }
   }
-  const structuralChanged = staged.some(({ target }) => target === DOCUMENT_BATCH_TARGET || target === DOCUMENT_FLAGS_TARGET)
-  const authoredFiles = io.changedFiles().filter((path) => inScope(path) || (structuralChanged && path === 'skills/crew-dispatch/anchors.json'))
+  let changed
+  try { changed = io.changedFiles() } catch (error) { throw new Error(`documentation changed-file inventory could not be read: ${error?.message ?? String(error)}`) }
+  if (!Array.isArray(changed)) throw new Error('documentation changed-file inventory was not an array')
+  const recognizedCarriers = new Set(repairRoots.map((root) => `${root}/anchors.json`))
+  const recognizedTargets = new Set([...staged.map(({ target }) => target), ...recognizedCarriers])
+  const authoredFiles = [...new Set(changed.filter((path) => recognizedTargets.has(path)))]
+  const missingTargets = staged.map(({ target }) => target).filter((target) => !authoredFiles.includes(target))
+  if (missingTargets.length > 0) throw new Error(`documentation target changes were not present in the authoritative changed-file inventory: ${missingTargets.join(', ')}`)
   const authoredCommit = io.commit(authoredFiles, 'docs: author planned conventions entries')
   if (typeof authoredCommit !== 'string' || !authoredCommit.trim()) throw new Error('documentation author commit returned no commit id')
   return operational(authoredCommit)
@@ -4671,17 +4632,27 @@ export function resumeCheckpointDefect(checkpoint) {
   if (!RESUME_CHECKPOINT_FAMILIES.includes(checkpoint.kind)) return 'unsupported checkpoint family'
   if (typeof checkpoint.frozen_where !== 'string' || resumeCheckpointFamily(checkpoint.frozen_where) !== checkpoint.kind) return 'checkpoint family does not match frozen terminal'
   if (typeof checkpoint.head_oid !== 'string' || !checkpoint.head_oid.trim()) return 'checkpoint HEAD oid is absent'
+  const concreteWitnessPath = (path) => typeof path === 'string'
+    && path.length > 0
+    && !path.startsWith('/')
+    && !path.startsWith('\\')
+    && !/^[A-Za-z]:[\\/]/.test(path)
+    && !path.endsWith('/')
+    && !/[?*\[\]{}\\\0\r\n]/.test(path)
+    && validateScopeEntries([path]).length === 0
+    && !path.split('/').some((part) => part === '' || part === '.' || part === '..')
+    && join(...path.split('/')) === path
   const tree = checkpoint.tree
   if (!tree || typeof tree !== 'object' || Array.isArray(tree)) return 'checkpoint tree is absent'
   if (typeof tree.index_oid !== 'string' || !tree.index_oid.trim()) return 'checkpoint index oid is absent'
   if (!Array.isArray(tree.files)) return 'checkpoint tree files are absent'
   if (typeof tree.worktree_sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(tree.worktree_sha256)) return 'checkpoint worktree fingerprint is absent'
-  if (!Array.isArray(checkpoint.accepted_scope) || checkpoint.accepted_scope.length === 0 || checkpoint.accepted_scope.some((path) => typeof path !== 'string' || !path || path.startsWith('/') || path.split('/').some((part) => part === '.' || part === '..'))) return 'checkpoint accepted scope is invalid'
+  if (!Array.isArray(checkpoint.accepted_scope) || checkpoint.accepted_scope.length === 0 || checkpoint.accepted_scope.some((path) => !concreteWitnessPath(path))) return 'checkpoint accepted scope is invalid'
   const scope = [...checkpoint.accepted_scope].sort()
   if (new Set(scope).size !== scope.length) return 'checkpoint accepted scope contains duplicates'
   if (tree.files.length !== scope.length) return 'checkpoint tree files do not match accepted scope'
   const treePaths = tree.files.map((entry) => entry?.path)
-  if (treePaths.some((path) => typeof path !== 'string' || !path || path.startsWith('/') || path.split('/').some((part) => part === '.' || part === '..')) || new Set(treePaths).size !== treePaths.length || [...treePaths].sort().some((path, index) => path !== scope[index])) return 'checkpoint tree files do not match accepted scope'
+  if (treePaths.some((path) => !concreteWitnessPath(path)) || new Set(treePaths).size !== treePaths.length || [...treePaths].sort().some((path, index) => path !== scope[index])) return 'checkpoint tree files do not match accepted scope'
   const emptyDigest = resumeSha256(Buffer.alloc(0))
   for (const entry of tree.files) {
     if (!['present', 'empty', 'deleted'].includes(entry?.state)) return 'checkpoint tree file state is invalid'
@@ -4697,6 +4668,10 @@ export function resumeCheckpointDefect(checkpoint) {
   if (typeof decision.accepted_via !== 'string' || typeof decision.verdict !== 'string' || !Array.isArray(decision.residuals) || !Array.isArray(decision.carried_findings) || !Array.isArray(decision.accept_findings) || !decision.accept_decision || typeof decision.accept_decision !== 'object' || !Array.isArray(decision.panel_contributors)) return 'checkpoint decision is incomplete'
   const commit = checkpoint.commit
   if (!commit || typeof commit !== 'object' || Array.isArray(commit) || typeof commit.pending !== 'boolean' || !Array.isArray(commit.files) || typeof commit.message !== 'string' || typeof commit.subject !== 'string' || (commit.oid !== null && (typeof commit.oid !== 'string' || !commit.oid.trim()))) return 'checkpoint commit is incomplete'
+  const commitFiles = commit.files
+  if (commitFiles.some((path) => !concreteWitnessPath(path)) || new Set(commitFiles).size !== commitFiles.length) return 'checkpoint commit files are invalid'
+  const witnessed = new Set(treePaths)
+  if (commitFiles.some((path) => !scope.includes(path) || !witnessed.has(path))) return 'checkpoint commit files are not witnessed by accepted scope and tree'
   const proof = checkpoint.proof
   if (!proof || typeof proof !== 'object' || Array.isArray(proof) || typeof proof.gate_cmd !== 'string' || !proof.gate_cmd.trim() || typeof proof.gate_path !== 'string' || !proof.gate_path.trim() || proof.summary === undefined || typeof proof.discrimination !== 'string' || !Number.isInteger(proof.generation) || !Number.isInteger(proof.repairs)) return 'checkpoint gate proof is incomplete'
   const suite = checkpoint.suite
@@ -4726,7 +4701,14 @@ function captureResumeCheckpoint(result, ctx, io) {
   const where = resumeCheckpointFamily(terminal) ? terminal : source.frozen_where
   const kind = resumeCheckpointFamily(where)
   if (!kind) return null
-  const paths = [...new Set(Array.isArray(source.accepted_scope) ? source.accepted_scope : (Array.isArray(result?.details?.files_committed) ? result.details.files_committed : []))].sort()
+  const reportedCommitFiles = Array.isArray(result?.details?.files_committed)
+    ? result.details.files_committed
+    : (Array.isArray(source.commit?.files) ? source.commit.files : [])
+  const commitFiles = [...new Set(reportedCommitFiles)].sort()
+  const paths = [...new Set([
+    ...(Array.isArray(source.accepted_scope) ? source.accepted_scope : []),
+    ...commitFiles,
+  ])].sort()
   if (paths.length === 0 || typeof io?.fingerprintTree !== 'function') return null
   let witness
   try { witness = io.fingerprintTree(ctx.checkout) } catch { return null }
@@ -4749,7 +4731,7 @@ function captureResumeCheckpoint(result, ctx, io) {
     head_oid: source.head_oid || ctx.head || null, tree,
     accepted_scope: paths,
     returns: source.returns, decision: source.decision,
-    commit: source.commit, proof: { ...source.proof, gate_cmd: source.proof?.gate_cmd || source.gate_cmd, gate_path: source.proof?.gate_path || `${ctx.taskDir}/gate.mjs` },
+    commit: { ...(source.commit || {}), files: commitFiles }, proof: { ...source.proof, gate_cmd: source.proof?.gate_cmd || source.gate_cmd, gate_path: source.proof?.gate_path || `${ctx.taskDir}/gate.mjs` },
     suite: { ...source.suite, cmd: source.suite?.cmd || ctx.suite },
     publish: source.publish || { branch: ctx.publish?.branch ?? null, base: typeof ctx.publish?.branch === 'string' && ctx.publish.branch.trim() ? PUBLISH_BASE : null },
     prior_stages: Array.isArray(source.prior_stages) ? [...source.prior_stages] : (result?.details?.stages || []),
@@ -4902,7 +4884,7 @@ function settleConvergence({ why, where, gateOutput, gateRed = true, ctx, io, la
   const message = composeCommitMessage({ task: ctx.task, planEnv, builderEnv })
   const hasCommitSubject = String(planEnv.details?.commit_subject || '').split('\n').some((line) => line.trim())
   if (!hasCommitSubject) io.log(recordRow({ at: io.now(), commit_subject: 'fallback-from-plan-summary' }))
-  const committing = io.changedFiles().filter(inScope)
+  const committing = [...new Set(io.changedFiles())]
   let commit = setCommit(io.commit(committing, message))
   emit({ kind: 'converge', action: 'committed', commit: commit, files: committing.length })
 
@@ -5337,7 +5319,7 @@ function builderReversionWhy(paths) {
   return `builder edits reverted to the pre-build baseline: ${paths.join(', ')}; the workspace is retained for human inspection`
 }
 
-function runScopeGate({ round, finalRound, builderDetails, builderObservation, acceptBuilderBaseline, hasAcceptanceGate, ctx, io, plans, scopeFiles, planPath, ownSpanScopes, siblingSpanScopes, inScope, mutations, readBuilt, art, stage, stageComplete, failureUpgrade, escalate, escalateReversion, frozenVerifier = null }) {
+function runScopeGate({ round, finalRound, builderDetails, builderObservation, acceptBuilderBaseline, hasAcceptanceGate, ctx, io, plans, scopeFiles, planPath, inScope, mutations, readBuilt, art, stage, stageComplete, failureUpgrade, escalate, escalateReversion, frozenVerifier = null, sensitivityFloor = null, flooredProtectedPaths = null }) {
   stage(`scope-gate:r${round}`)
   let changed
   try { changed = io.changedFiles() }
@@ -5352,71 +5334,48 @@ function runScopeGate({ round, finalRound, builderDetails, builderObservation, a
     const frozen = frozenVerifier(changed)
     if (frozen?.escalation) { stageComplete(); return frozen }
   }
-  const gateFenceHits = laneFenceHits(changed, pathOnlyLaneFence(ctx.laneFence, ctx.laneName))
-  if (gateFenceHits.length > 0) {
-    stageComplete()
-    return { escalation: escalate('scope',
-      `the build crossed another live lane's fence: ${fenceBreachList(gateFenceHits)} — a file a sibling crew owns is never a bounce, it is a human's call`, [], {}, { files: escalationFiles(gateFenceHits) }) }
-  }
-
-  const spanPaths = new Set([...ownSpanScopes, ...siblingSpanScopes].map((scope) => scope.path))
-  let siblingSpanFailure = null
-  let siblingSpanFailureFiles = []
-  let ownSpanRefusal = null
-  for (const path of (Array.isArray(changed) ? changed : []).filter((candidate) => spanPaths.has(candidate))) {
-    const pathOwnScopes = ownSpanScopes.filter((scope) => scope.path === path)
-    const pathSiblingScopes = siblingSpanScopes.filter((scope) => scope.path === path)
-    const diff = readFenceDiff(ctx, io, path)
-    if (diff.reason) {
-      if (pathSiblingScopes.length > 0) {
-        siblingSpanFailure = `the changed path ${path} could not be checked against ${fenceBreachList(pathSiblingScopes)}: ${diff.reason}`
-        siblingSpanFailureFiles = [path]
-      } else if (pathOwnScopes.length > 0) {
-        ownSpanRefusal = spanScopeRefusal(pathOwnScopes, `the changed path ${path} could not be checked against this lane's span fence: ${diff.reason}`)
-      }
-      break
+  // ADR-045 keeps the protected floor while retiring placement as an admission gate.
+  // The authoritative changed-file inventory is the only late discovery source, and a
+  // path is floored once for the whole accepted lane before lane/review/commit.
+  const alreadyFloored = flooredProtectedPaths instanceof Set ? flooredProtectedPaths : new Set()
+  const discoveredProtected = protectedHits(Array.isArray(changed) ? changed : [], ctx.protectedPaths)
+    .filter((path) => !alreadyFloored.has(path))
+  if (discoveredProtected.length > 0 && typeof sensitivityFloor === 'function') {
+    const floor = sensitivityFloor(discoveredProtected, 'build-discovery')
+    if (floor.outcome !== 'applied') {
+      stageComplete()
+      return { escalation: escalate('sensitivity-floor',
+        `the build discovered protected paths (${discoveredProtected.join(', ')}) and the sensitivity floor could not seat the judge tier's reviewer cell (${floor.outcome}${floor.why ? `: ${floor.why}` : ''}) — a protected change is never reviewed under an under-graded reviewer`, [], {}, { files: discoveredProtected }) }
     }
-    const siblingHit = pathSiblingScopes.find((scope) => siblingSpanIntersects(scope, diff.hunks))
-    if (siblingHit) {
-      siblingSpanFailure = `the build's changed hunk crosses another live lane's span fence: ${fenceBreachList([siblingHit])} — a file a sibling crew owns is never a bounce, it is a human's call`
-      siblingSpanFailureFiles = [path]
-      break
-    }
-    if (pathOwnScopes.length > 0) {
-      const ownScopes = mergeFenceScopes(pathOwnScopes)
-      const hunks = diff.hunks
-      const escaped = hunks.some((hunk) => !ownScopes.some((scope) => fenceScopeContains(scope, hunk)))
-      if (escaped) {
-        ownSpanRefusal = spanScopeRefusal(ownScopes, `the changed hunk on ${path} is outside this lane's span fence; keep the edit inside ${ownScopes.map((scope) => scope.entry).join(', ')}`)
-        break
-      }
-    }
+    for (const path of discoveredProtected) alreadyFloored.add(path)
   }
-  if (siblingSpanFailure) {
-    stageComplete()
-    return { escalation: escalate('scope', siblingSpanFailure, [], {}, { files: escalationFiles(siblingSpanFailureFiles) }) }
-  }
-  // #846 — protocol debris is classified BEFORE scope subtraction. `outOfScopeFiles`
-  // mechanically removes every in-scope path (crew/drive.mjs:1519-1529, and
-  // `scopeMatcher` at :1519-1522), so a plan that names `returns/d1.builder.json` in
-  // files_in_scope could write exactly that checkout debris and be told the tree is
-  // clean. The ask makes the envelope refusal a property of a `returns/*.json` being
-  // INSIDE the CHECKOUT, never a property of what the planner happened to fence.
-  const debris = changed.filter((f) => ENVELOPE_DEBRIS.test(f))
-  let refusal = scopeRefusal([...new Set([...outOfScopeFiles(changed, inScope), ...debris])])
-  if (refusal.reason === null && ownSpanRefusal) refusal = ownSpanRefusal
+  const outOfContext = outOfScopeFiles(changed, inScope)
+  const heldFence = laneFenceHits(Array.isArray(changed) ? changed : [],
+    (Array.isArray(ctx.laneFence) ? ctx.laneFence : []).filter((record) => record?.lane !== ctx.laneName))
+  // #846 — protocol debris is classified independently of planner context. A valid
+  // out-of-context edit is recorded, while returns/*.json in the checkout remains a
+  // protocol/trust-boundary refusal.
+  const debris = (Array.isArray(changed) ? changed : []).filter((f) => ENVELOPE_DEBRIS.test(f))
+  let refusal = scopeRefusal(debris)
   if (refusal.reason === null && builderDetails !== undefined) {
     refusal = mutationAnchorScopeRefusal(changed, mutations, builderDetails, readBuilt)
   }
+  const scopeGate = {
+    round, reason: refusal.reason, envelopes: refusal.envelopes,
+    edits: [...new Set([...(refusal.edits || []), ...outOfContext])],
+    ...(heldFence.length > 0 ? { lane_fence: heldFence } : {}),
+    ...(refusal.spans ? { spans: refusal.spans } : {}),
+    ...(builderDetails !== undefined && refusal.reason === 'anchor-absent' ? { mutation: refusal.unresolved || [] } : {}),
+    ...(builderObservation?.reversion ? { reversion: builderObservation.reversion } : {}),
+    ...(builderObservation?.repair ? { repair: builderObservation.repair } : {}),
+  }
+  // Scope is context: record an ordinary write, fence, refusal, or data-loss witness;
+  // an entirely in-context round has no scope event to journal.
+  if (refusal.reason !== null || scopeGate.edits.length > 0 || heldFence.length > 0 || builderObservation?.reversion || builderObservation?.repair) {
+    logScopeGate(io, io.now(), scopeGate)
+  }
   const reversion = builderObservation?.reversion ?? null
   const repair = builderObservation?.repair ?? null
-  const scopeGate = {
-    round, reason: refusal.reason, envelopes: refusal.envelopes, edits: refusal.edits,
-    ...(refusal.spans ? { spans: refusal.spans } : {}),
-    ...(reversion ? { reversion } : {}),
-    ...(repair ? { repair } : {}),
-  }
-  if (reversion || repair) logScopeGate(io, io.now(), scopeGate)
   if (Array.isArray(reversion?.paths) && reversion.paths.length > 0) {
     if (refusal.reason === null && hasAcceptanceGate) {
       stageComplete()
@@ -5425,10 +5384,7 @@ function runScopeGate({ round, finalRound, builderDetails, builderObservation, a
     stageComplete()
     return { escalation: escalateReversion(reversion.paths) }
   }
-  // MUTATION A4: invert this early return and a round whose tree is entirely in scope
-  // starts paying for a gate it does not need.
   if (refusal.reason === null) { stageComplete(); return { ok: true } }              // ANCHOR A4
-  if (!reversion && !repair) logScopeGate(io, io.now(), scopeGate)
   const canBounce = plans && !finalRound()
   if (!canBounce) {
     stageComplete()
@@ -5439,7 +5395,7 @@ function runScopeGate({ round, finalRound, builderDetails, builderObservation, a
   const b = art(`build-bounce-r${round}.md`)
   failureUpgrade('scope', 'builder')
   io.writeFile(b, scopeBounceBrief(round, refusal, scopeFiles, planPath))
-  acceptBuilderBaseline(builderObservation.fingerprint)
+  acceptBuilderBaseline(builderObservation?.fingerprint)
   stageComplete()
   return { bounce: b }
 }
@@ -5579,6 +5535,26 @@ function runTask(ctx, io, crash) {
   const waits = { ...WAITS_S, ...(ctx.waits || {}) }
   const S = { consults: 0, stages: [], commit: null, dissents: [], grants: [], growth: [], modifiers: [], enforcements: [], acceptFindings: null, lastReview: null, seqHighWater: 0, planAccept: null, carried: [], carriedCleared: new Set(), returns: { planner: null, builder: null, reviewer: null }, commitMessage: null, commitSubject: null, panelContributors: [] }
   let postCommitFrozenRepairs = 0
+  // These counters belong to the whole accepted lane, including every suite,
+  // census, frozen, and rebase re-entry. Only an explicit lead grant or the capped
+  // post-commit census recovery changes the allowance; a context record alone does not.
+  let builderAttempts = 0
+  let grantedBuildAllowance = 0
+  const builderRemaining = () => limits.build_rounds + grantedBuildAllowance - builderAttempts
+  const grantBuilderAllowance = () => {
+    grantedBuildAllowance += 1
+  }
+  const flooredProtectedPaths = new Set()
+  const floorDiscoveredPaths = (paths, kind) => {
+    const hits = protectedHits(Array.isArray(paths) ? paths : [], ctx.protectedPaths)
+      .filter((path) => !flooredProtectedPaths.has(path))
+    if (hits.length === 0) return { ok: true, paths: [] }
+    const floor = sensitivityFloor(hits, kind)
+    if (floor.outcome !== 'applied') return { ok: false, paths: hits, floor }
+    for (const path of hits) flooredProtectedPaths.add(path)
+    return { ok: true, paths: hits }
+  }
+  const floorDiscoveryWhy = (phase, floor) => `the ${phase} discovered protected paths (${floor.paths.join(', ')}) and the sensitivity floor could not seat the judge tier's reviewer cell (${floor.floor.outcome}${floor.floor.why ? `: ${floor.floor.why}` : ''}) — a protected change is never reviewed under an under-graded reviewer`
   const frozenInventoryReports = []
   let pendingFrozenInventory = null
   const art = (name) => `${ctx.taskDir}/${name}`
@@ -5623,9 +5599,7 @@ function runTask(ctx, io, crash) {
   let verifiedPublishBaseSha = null
   let acceptedGatePath = art('gate.mjs')
   let admitScope = null; const logScopeAdmission = (row) => io.log(recordRow({ at: io.now(), scope_admission: row }))
-  let suiteWidenings = 0
   let suiteInScopeBounces = 0
-  let seatWidenings = 0
   const seatPolicy = (role) => ({
     suiteCommand: ctx.suite ?? null,
     gatePath: acceptedGatePath,
@@ -5704,11 +5678,11 @@ function runTask(ctx, io, crash) {
     })
   }
 
-  // The sensitivity floor: a plan whose declared scope touches a protected path
-  // gets the JUDGE tier's reviewer cell or the run stops. Refuse-not-reroute
+  // The sensitivity floor: a plan or build discovery that touches a protected
+  // path gets the JUDGE tier's reviewer cell or the run stops. Refuse-not-reroute
   // (ADR-032 family): the escalation is load-bearing by design, the RECORD is
   // not — every firing, honoured or inert, is a modifier_attempts row.
-  const sensitivityFloor = (hits) => {
+  const sensitivityFloor = (hits, kind = 'plan-accept') => {
     let entry
     try {
       if (typeof io.reseat !== 'function') {
@@ -5727,9 +5701,9 @@ function runTask(ctx, io, crash) {
       entry = { outcome: 'transport', why: `io.reseat threw: ${err?.message ?? err}` }
     }
     const why = [`protected paths: ${hits.join(', ')}`, entry.why].filter(Boolean).join(' — ')
-    const record = { modifier: SENSITIVITY_FLOOR, kind: 'plan-accept', role: 'reviewer', paths: hits, ...entry, why }
+    const record = { modifier: SENSITIVITY_FLOOR, kind, role: 'reviewer', paths: hits, ...entry, why }
     try { S.modifiers.push(record); io.log(recordRow({ at: io.now(), modifier: record })) } catch { /* never load-bearing */ }
-    emit({ kind: 'modifier', modifier: record.modifier, bounce: 'plan-accept', role: 'reviewer',
+    emit({ kind: 'modifier', modifier: record.modifier, bounce: kind, role: 'reviewer',
       outcome: record.outcome, why: record.why, from: record.from ?? null, to: record.to ?? null, rung: record.rung ?? null })
     return record
   }
@@ -6290,14 +6264,13 @@ function runTask(ctx, io, crash) {
         source: 'seat-request', files: request.files, evidence: d.evidence,
         role: 'lead', stage: S.stages.at(-1),
       })
-      if (leadAdmission.reason === 'held') {
-        return { decision: 'escalate', reason: `scope-request refused [held]: ${leadAdmission.why}` }
-      }
-      if (leadAdmission.action === 'admit') {
-        requestedGuidance = `The following files were admitted to the effective scope: ${leadAdmission.files.join(', ')}. ${d.guidance || ''}`.trim()
-      } else {
+      if (leadAdmission.action !== 'admit') {
         return { decision: 'escalate', reason: `scope-request refused [${leadAdmission.reason || 'scope'}]: ${leadAdmission.why || 'the request was not admitted'}` }
       }
+      if (builderRemaining() <= 0) {
+        return { decision: 'escalate', reason: `scope-request was recorded, but no globally budgeted builder attempt remains after ${builderAttempts} attempt(s)` }
+      }
+      requestedGuidance = `The following files were admitted to the effective scope: ${leadAdmission.files.join(', ')}. ${d.guidance || ''}`.trim()
     }
     // Round 2: a repeat second-opinion passes through raw so consultLead can
     // name the one-hop bound precisely in its escalation reason.
@@ -6346,16 +6319,23 @@ function runTask(ctx, io, crash) {
     if (!kind || !activeGateCmd) return null
     if (!Object.values(S.returns).every((env) => env?.status === 'done')) return null
     const acceptedFiles = acceptedScope.length > 0 ? [...acceptedScope] : (Array.isArray(ctx.files_in_scope) ? [...ctx.files_in_scope] : [])
+    const concrete = (path) => typeof path === 'string' && path !== '' && !path.startsWith('/') && !path.startsWith('\\')
+      && !/^[A-Za-z]:[\\/]/.test(path) && !path.endsWith('/') && !/[?*\[\]{}\\\0\r\n]/.test(path)
+      && !path.split('/').some((part) => part === '' || part === '.' || part === '..')
+      && join(...path.split('/')) === path && validateScopeEntries([path]).length === 0
+    const reportedCommitFiles = Array.isArray(details.files_committed) ? details.files_committed : null
     let dirtyFiles = []
-    if (!Array.isArray(details.files_committed) && details.commit == null && typeof io.changedFiles === 'function') {
-      try { dirtyFiles = [...new Set((io.changedFiles() || []).filter((path) => inScope(path)))].sort() } catch { dirtyFiles = [] }
+    if (reportedCommitFiles === null && typeof io.changedFiles === 'function') {
+      let observed
+      try { observed = io.changedFiles() } catch { return null }
+      if (!Array.isArray(observed) || observed.some((path) => !concrete(path))) return null
+      dirtyFiles = [...new Set(observed)].sort()
     }
-    const committedFiles = Array.isArray(details.files_committed) ? [...details.files_committed] : dirtyFiles
-    let concreteFiles = null
-    if (acceptedFiles.some((path) => typeof path === 'string' && path.endsWith('/')) && typeof io.changedFiles === 'function') {
-      try { concreteFiles = [...new Set((io.changedFiles() || []).filter((path) => inScope(path)))].sort() } catch { concreteFiles = [] }
-    }
-    const snapshotFiles = concreteFiles || acceptedFiles
+    if (reportedCommitFiles !== null && reportedCommitFiles.some((path) => !concrete(path))) return null
+    const committedFiles = reportedCommitFiles === null
+      ? dirtyFiles
+      : [...new Set(reportedCommitFiles)].sort()
+    const snapshotFiles = [...new Set([...acceptedFiles, ...committedFiles].filter(concrete))].sort()
     const panel = finalReview.panel || S.lastReview?.panel || null
     const panelContributors = panel && typeof panel === 'object'
       ? ['reviewer', panel.partner, panel.adjudicator].filter((value, index, values) => typeof value === 'string' && value.trim() && values.indexOf(value) === index)
@@ -6989,7 +6969,7 @@ function runTask(ctx, io, crash) {
       '',
       'Inherited files_in_scope (the failing run accepted this list):',
       ...inherited.map((entry) => `- ${entry}`),
-      'You may NARROW this list, never widen it — a wider surface is an escalation, not a re-plan.',
+      'Treat this list as inherited context; a valid later context may add concrete files when the repair evidence requires them.',
       '',
       `Validation lane (fixed): ${laneCmd}`,
       'This shape runs NO acceptance gate — do not author one.',
@@ -6999,7 +6979,7 @@ function runTask(ctx, io, crash) {
       '  summary: a non-empty sentence',
       `  artifacts: absolute paths you wrote, every one inside ${ctx.taskDir}`,
       '  details.plan_path: one of those artifacts, containing the triage note the builder will be briefed from',
-      '  details.files_in_scope: optional narrowed scope, never wider than the inherited list',
+      '  details.files_in_scope: optional concrete context update, validated for shape but not membership',
       '  details.commit_subject / details.issues: optional',
     ].join('\n'))
     const env = assignAndWait('planner', briefPath, 'triage')
@@ -7043,11 +7023,6 @@ function runTask(ctx, io, crash) {
       if (askedErrors.length > 0) {
         stageComplete()
         return { stop: escalate('triage-scope', `files_in_scope carries entries the scope gate cannot honor — fix the triage, not the build: ${askedErrors.map(({ entry, why }) => `${JSON.stringify(entry)} (${why})`).join('; ')}`, env.artifacts) }
-      }
-      const extra = outOfScopeFiles(asked, scopeMatcher(inherited))
-      if (extra.length > 0) {
-        stageComplete()
-        return { stop: escalate('triage-scope', `the triage round asked to widen the inherited scope with ${extra.join(', ')} — a triage that needs a wider surface is an escalation, not a re-plan`, env.artifacts) }
       }
       scope = asked
     }
@@ -7113,7 +7088,6 @@ function runTask(ctx, io, crash) {
   let extraPlanRounds = 0
   let prescribedPlanApplicationUsed = false
   let prescribedPlanApplications = 0
-  let planWideningAdjudications = 0
   let planScopeBaseline = Array.isArray(ctx.files_in_scope) ? [...ctx.files_in_scope] : []
   let divergenceConsulted = false
   const readOrNull = (path) => { try { const text = io.readFile(path); return typeof text === 'string' ? text : null } catch { return null } }
@@ -7171,9 +7145,7 @@ function runTask(ctx, io, crash) {
         '`LANE_VALUE_OPTIONS` (for values such as `--test-timeout`) and `LANE_PATH_OPTIONS` (for paths such as `--import`) are supported.',
         'An environment value belongs in the test as a declared constant, with the variable as an optional override.',
         'details.needs_adversary must be a boolean: true requests the adversary plan-check round; false does not.',
-        `For one bounded plan-time scope widening only, widen details.files_in_scope with tracked literal files and set details.scope_request to exactly { kind: 'admit-files', files: [...] } using the added files.`,
-        `Set details.evidence.reasons to exactly one { file, reason } object per added file; reason must be one of: ${PLAN_SCOPE_WIDEN_REASONS.join(', ')}.`,
-        'There is one plan-time scope-widening adjudication per lane; protected paths and paths held by another live lane never admit.',
+        'files_in_scope is mutable plan context, not an allow-list; wider, narrower, and later-round contexts are recorded and proceed when their literal shape is valid and each newly named concrete path is tracked in the checkout.',
       ].join('\n'))
     } catch (err) {
       stageComplete()
@@ -7276,16 +7248,15 @@ function runTask(ctx, io, crash) {
       return escalate('plan', currentAdversary.refusal, env.artifacts || [])
     }
     // RV1-2: re-resolve EVERY round. Latching on the first valid envelope meant
-    // that after the widened-scope or validation-lane bounce below, a round-2
+    // that after a context-record or validation-lane bounce below, a round-2
     // planner-request or coverage-absent was discarded, the plan was accepted
     // with zero check:rN, and the single journal row attributed the REJECTED
     // round-1 envelope. The row is emitted once, where the decision is actually
     // consumed, so it names the trigger of the plan that was accepted.
     planAdversary = currentAdversary
-    // #843 — compute additions before any Git probe. Exact, narrowed, and dispatched
-    // directory-covered literals stay on the old in-memory path; only genuine literal
-    // additions need a tracking answer. A trailing-slash addition remains widening and
-    // is intentionally not sent through Git.
+    // ADR-045 records tracked wider and narrower contexts rather than refusing
+    // them. An added literal still asserts a checkout path, so Git verifies that
+    // trust-boundary claim; an untracked path is malformed, not ordinary context.
     const dispatchedScope = planScopeBaseline.length > 0 ? planScopeBaseline : []
     const rawAdded = dispatchedScope.length > 0
       ? outOfScopeFiles(plannedScope, scopeMatcher(dispatchedScope)) : []
@@ -7321,9 +7292,6 @@ function runTask(ctx, io, crash) {
       }
     }
     if (inventoryWhy) {
-      // The planner brief tells the seat not to change its declaration, so another
-      // round cannot repair this infrastructure refusal. failureUpgrade's one-shot
-      // upgradeSpent budget must not spend the lane's only seat upgrade on checkout I/O.
       inventoryWhy += '; the declaration was not at fault, no path was guessed untracked, and the checkout probe must be repaired before re-dispatch'
       stageComplete()
       return escalate('plan', inventoryWhy, env.artifacts || [])
@@ -7349,54 +7317,13 @@ function runTask(ctx, io, crash) {
       round, ...planScope,
       ...(inheritedScope.preserved.length > 0 ? { preserved_admissions: inheritedScope.preserved } : {}),
     } }))
-    if (planScope.verdict === PLAN_SCOPE.widened) {
-      const hasScopeRequest = env.details && typeof env.details === 'object' && !Array.isArray(env.details)
-        && Object.prototype.hasOwnProperty.call(env.details, 'scope_request')
-      if (hasScopeRequest) {
-        const request = scopeRequestOf(env.details)
-        const wideningDecision = planScopeWideningDecision({
-          request,
-          added: planScope.added,
-          reasons: env.details?.evidence?.reasons,
-          protectedPaths: ctx.protectedPaths,
-          laneFence: (Array.isArray(ctx.laneFence) ? ctx.laneFence : []).filter((record) => record?.lane !== ctx.laneName),
-          planWideningAdjudications,
-        })
-        planWideningAdjudications += 1
-        if (wideningDecision.action === 'admit') {
-          planScopeBaseline = [...new Set([...planScopeBaseline, ...wideningDecision.files])]
-          logScopeAdmission({ source: 'plan-request', files: wideningDecision.files, evidence: { reasons: wideningDecision.reasons } })
-        } else {
-          stageComplete()
-          const metadata = wideningDecision.hits ? { files: escalationFiles(wideningDecision.hits) } : {}
-          return escalatePlanScopeRequest(`plan scope request refused [${wideningDecision.reason}]: ${wideningDecision.why}`, env.artifacts || [], metadata)
-        }
-      } else {
-        const scopeFinal = round >= planRounds()
-        if (scopeFinal) {
-          stageComplete()
-          return escalate(PLAN_SCOPE.widened, planScopeWhy(planScope, true), env.artifacts || [])
-        }
-        const b = art(`plan-bounce-r${round}.md`)
-        failureUpgrade('plan', 'planner') // the kind the other three plan bounces already use
-        io.writeFile(b, planScopeBounceLines(round, planScope, ctx.briefFile, ctx.files_in_scope).join('\n'))
-        planBrief = b
-        planNote = PLAN_SCOPE.widened
-        planEnv = null
-        stageComplete()
-        continue
-      }
-    }
     // #915 — resolve the PLANNER's lane against the tree before accepting the plan. The
     // operator's ctx.lane is deliberately NOT read here: --lane is already the operator's
     // responsibility, and this seam exists only for the lane no seat may amend once it is
     // fixed at :3781. The probe goes through io.run because that is the only authoritative
     // type seam the driver has, and it already runs with cwd: checkout
     // (crew/seat-io.mjs:3100), so a relative input resolves the way the lane itself will.
-    // A refusal is a BOUNCE while a plan round remains and an escalation only when none
-    // does — the shape the widened-scope refusal above already uses. Reusing the `plan`
-    // head is deliberate; it classifies `unclassified` in the ledger, like several other
-    // `plan` escalations, and fixing that belongs to a ledger lane, not this fence.
+    // Validation-lane shape remains a trust-boundary check; scope membership is not.
     const laneAsked = env.details?.validation_lane
     laneDeferred = []
     if (typeof laneAsked === 'string' && laneAsked.trim()) {
@@ -7640,82 +7567,54 @@ function runTask(ctx, io, crash) {
   readDispatchAdmissions()
   const fenceResolution = resolveFenceScopes(ctx, io)
   if (fenceResolution.error) return escalate('scope', fenceResolution.error, planEnv.artifacts || [], {}, { files: [] })
-  const resolvedFenceScopes = fenceResolution.scopes
-  const ownFenceScopes = resolvedFenceScopes.filter((scope) => scope.lane === ctx.laneName)
-  const siblingFenceScopes = resolvedFenceScopes.filter((scope) => scope.lane !== ctx.laneName)
-  let ownSpanScopes = ownFenceScopes.filter((scope) => scope.kind === 'span')
-  const siblingSpanScopes = siblingFenceScopes.filter((scope) => scope.kind === 'span')
   const plannerAuthoredScope = planEnv.role === 'planner'
   const acceptedInheritedScope = plannerAuthoredScope
     ? inheritedPlanScope(ctx.files_in_scope, planEnv.details.files_in_scope, dispatchAdmissions)
     : { effective: planEnv.details.files_in_scope, preserved: [] }
   let scopeFiles = [...acceptedInheritedScope.effective]
-  const planFenceHits = laneFenceHits(scopeFiles, pathOnlyLaneFence(ctx.laneFence, ctx.laneName))
-  const planSpanFenceHits = spanPlanFenceHits(scopeFiles, ownSpanScopes, siblingSpanScopes)
-  const allPlanFenceHits = [...planFenceHits, ...planSpanFenceHits.filter((span) => (
-    !planFenceHits.some((path) => path.entry === span.entry && path.lane === span.lane)
-  ))]
-  if (allPlanFenceHits.length > 0) {
-    return escalate('scope',
-      `the plan's files_in_scope crosses another live lane's fence: ${fenceBreachList(allPlanFenceHits)} — this lane never edits another lane's write surface`,
-      planEnv.artifacts || [], {}, { files: escalationFiles(allPlanFenceHits) })
-  }
+  // Lane fences remain recorded context for operators, not placement admission.
   acceptedScope = scopeFiles
   let inScope = scopeMatcher(scopeFiles)
-  admitScope = ({ source, files, evidence, role = null, stage: requestedStage = null } = {}) => {
-    const decision = scopeAdmissionDecision({
-      source, files, evidence,
-      laneFence: pathOnlyLaneFence(ctx.laneFence, ctx.laneName),
-      suiteWidenings: source === 'suite-red' ? 0 : suiteWidenings, seatWidenings,
-    })
+  admitScope = ({ source, files, evidence, role = null, stage: requestedStage = null, recordFiles = null } = {}) => {
+    // Census context is driver-derived, while the public request-source enum remains closed.
+    const decisionSource = source === 'census-bounce' ? 'suite-red' : source
+    const decision = scopeAdmissionDecision({ source: decisionSource, files, evidence })
     if (decision.action !== 'admit') return decision
     const additions = decision.files.filter((entry) => !scopeFiles.includes(entry))
-    const protectedCandidates = source === 'suite-red' ? decision.files : additions
-    const protectedAdditions = protectedHits(protectedCandidates, ctx.protectedPaths)
-    if (protectedAdditions.length > 0) {
-      return { action: 'escalate', reason: 'protected', why: `scope admission refused: protected paths cannot be admitted: ${protectedAdditions.join(', ')}` }
-    }
-    if (additions.length === 0) {
-      if (source !== 'suite-red') {
-        return { action: 'escalate', reason: 'already-scoped', why: `scope admission refused: all ${source} files are already in the effective scope: ${decision.files.join(', ')}` }
-      }
+    if (source === 'suite-red' && additions.length === 0) {
       if (suiteInScopeBounces >= SUITE_IN_SCOPE_BOUNCE_MAX) {
         return { action: 'escalate', reason: 'repeat', why: `scope admission refused: the suite-red in-scope bounce limit of ${SUITE_IN_SCOPE_BOUNCE_MAX} has been spent` }
       }
       suiteInScopeBounces += 1
-      const row = {
-        source, files: [], evidence,
-        ...(source === 'suite-red' && additions.length === 0 ? { reason: 'already-scoped' } : {}),
-      }
-      logScopeAdmission(row)
-      return { ...decision, action: 'bounce', reason: 'already-scoped', files: [] }
-    }
-    if (source === 'suite-red' && suiteWidenings >= SUITE_ADMISSION_MAX) {
-      return { action: 'escalate', reason: 'repeat', why: `scope admission refused: the suite-red widening limit of ${SUITE_ADMISSION_MAX} has been spent` }
+      logScopeAdmission({ source, files: [], evidence })
+      return { action: 'bounce', source, files: [], evidence, reason: 'already-scoped' }
     }
     if (additions.length > 0) {
-      if (source === 'seat-request') seatWidenings += 1
       scopeFiles = [...scopeFiles, ...additions]
       acceptedScope = scopeFiles
       inScope = scopeMatcher(scopeFiles)
     }
+    const journalFiles = source === 'census-bounce' && Array.isArray(recordFiles)
+      ? decision.files.filter((entry) => recordFiles.includes(entry))
+      : additions
     const row = {
-      source, files: additions, evidence,
+      source, files: journalFiles, evidence,
       ...(source === 'seat-request' ? { role, stage: requestedStage ?? S.stages.at(-1) ?? null } : {}),
     }
     logScopeAdmission(row)
-    return { ...decision, files: additions }
+    return { action: 'admit', source, files: additions, evidence }
   }
   const lane = planEnv.details?.validation_lane || ctx.lane
   if (!lane) return escalate('plan', 'no validation lane (neither planner envelope nor --lane provided)')
   const floorHits = protectedHits(scopeFiles, ctx.protectedPaths)
   if (floorHits.length > 0) {
-    const floor = sensitivityFloor(floorHits)
+    const floor = sensitivityFloor(floorHits, 'plan-accept')
     if (floor.outcome !== 'applied') {
       return escalate('sensitivity-floor',
         `the plan's files_in_scope touches protected paths (${floorHits.join(', ')}) and the sensitivity floor could not seat the judge tier's reviewer cell (${floor.outcome}${floor.why ? `: ${floor.why}` : ''}) — a protected change is never reviewed under an under-graded reviewer`,
         planEnv.artifacts || [])
     }
+    for (const path of floorHits) flooredProtectedPaths.add(path)
   }
   acceptedGatePath = taskLocalPath(planEnv.details?.gate_path) ?? art('gate.mjs')
   let gateCmd = planEnv.details?.gate_cmd || null
@@ -7959,7 +7858,10 @@ function runTask(ctx, io, crash) {
       if (typeof entry === 'string' && entry !== '' && !entry.endsWith('/')) concrete.add(entry)
     }
     for (const file of Array.isArray(reported) ? reported : []) {
-      if (typeof file !== 'string' || file === '' || file.endsWith('/') || !inScope(file)) continue
+      if (typeof file !== 'string' || file === '' || file.startsWith('/') || file.startsWith('\\')
+        || /^[A-Za-z]:[\\/]/.test(file) || file.endsWith('/') || /[\\\0\r\n]/.test(file)
+        || file.split('/').some((segment) => segment === '' || segment === '.' || segment === '..')
+        || join(...file.split('/')) !== file || validateScopeEntries([file]).length > 0) continue
       concrete.add(file)
     }
     return [...concrete].sort()
@@ -7995,11 +7897,16 @@ function runTask(ctx, io, crash) {
       reported = []
       unknown = true
     }
+    const malformedReported = Array.isArray(reported) && reported.some((file) => typeof file !== 'string'
+      || file.length === 0 || file.startsWith('/') || file.startsWith('\\') || /^[A-Za-z]:[\\/]/.test(file)
+      || file.endsWith('/') || /[\\\0\r\n]/.test(file)
+      || file.split('/').some((segment) => segment === '' || segment === '.' || segment === '..')
+      || join(...file.split('/')) !== file || validateScopeEntries([file]).length > 0)
     const observed = readProofCells(concreteProofFiles(reported))
     proofTreeWitness = {
       generation: gateGeneration,
       cells: observed.cells,
-      unknown: unknown || observed.unreadable,
+      unknown: unknown || malformedReported || observed.unreadable,
       checkProofs: Array.isArray(checkProofs) ? checkProofs.map((row) => ({ ...row })) : [],
     }
     proofTreeBuildRound = round
@@ -8033,8 +7940,10 @@ function runTask(ctx, io, crash) {
       : { state: 'unreadable', bytes: null, why: `the inventory read returned ${value === undefined ? 'undefined' : typeof value}, not bytes` }
   const diffInventoryPaths = (listed, reported = [], includeScopeLiterals = true) => {
     const paths = new Set()
-    const allowed = (path) => typeof path === 'string' && path !== '' && !path.endsWith('/')
-      && validateScopeEntries([path]).length === 0 && inScope(path)
+    const allowed = (path) => typeof path === 'string' && path !== '' && !path.startsWith('/') && !path.startsWith('\\')
+      && !/^[A-Za-z]:[\\/]/.test(path) && !path.endsWith('/') && !/[\\\0\r\n]/.test(path)
+      && !path.split('/').some((segment) => segment === '' || segment === '.' || segment === '..')
+      && join(...path.split('/')) === path && validateScopeEntries([path]).length === 0
     if (includeScopeLiterals) for (const entry of scopeFiles) if (allowed(entry)) paths.add(entry)
     for (const path of [...(Array.isArray(listed) ? listed : []), ...(Array.isArray(reported) ? reported : [])]) {
       if (allowed(path)) paths.add(path)
@@ -8057,6 +7966,15 @@ function runTask(ctx, io, crash) {
         catch (err) { throw new Error(`diff current changed-file inventory failed: ${err?.message ?? String(err)}`) }
       }
       if (!Array.isArray(reported)) throw new Error('diff current changed-file inventory was not an array')
+      const malformed = reported.find((path) => typeof path !== 'string' || path === '' || path.startsWith('/') || path.startsWith('\\')
+        || /^[A-Za-z]:[\\/]/.test(path) || path.endsWith('/') || /[\\\0\r\n]/.test(path)
+        || path.split('/').some((segment) => segment === '..' || segment === '.')
+        || join(...path.split('/')) !== path || validateScopeEntries([path]).length > 0)
+      if (malformed !== undefined) {
+        // changedFiles is advisory for this supplement; proof-tree comparison records it
+        // as unknown, while the trusted git inventory supplies the concrete read set.
+        reported = []
+      }
       diffChangedSnapshot = reported
     }
     const paths = diffInventoryPaths(listed, reported, includeScopeLiterals)
@@ -8108,7 +8026,7 @@ function runTask(ctx, io, crash) {
   }
   const buildDiffRoundPatch = (round, current) => {
     if (!diffRoundBaseline || !current) return { patch: '', changed: [], error: 'diff inventory was not captured' }
-    const allPaths = [...new Set([...diffRoundBaseline.paths, ...current.paths])].filter((path) => inScope(path)).sort()
+    const allPaths = [...new Set([...diffRoundBaseline.paths, ...current.paths])].sort()
     const changed = diffRoundBaseline.complete && current.complete
       ? allPaths.filter((path) => diffCellChanged(
         diffRoundBaseline.cells.get(path) || { state: 'absent', bytes: null },
@@ -8304,7 +8222,7 @@ function runTask(ctx, io, crash) {
       && !file.startsWith('\\')
       && !/^[A-Za-z]:[\\/]/.test(file)
       && !file.endsWith('/')
-      && !/[\\\\\0\r\n]/.test(file)
+      && !/[\\\0\r\n]/.test(file)
       && !file.split('/').some((segment) => segment === '' || segment === '.' || segment === '..')
       && join(...file.split('/')) === file
       && validateScopeEntries([file]).length === 0
@@ -8595,7 +8513,7 @@ function runTask(ctx, io, crash) {
     const previousRows = Array.isArray(proofTreeWitness?.checkProofs) ? proofTreeWitness.checkProofs : []
     const mutationTargets = new Set(mutationTargetFiles())
     const plannedScope = scopeMatcher(Array.isArray(planEnv?.details?.files_in_scope) ? planEnv.details.files_in_scope : [])
-    const carryCandidate = changedProofFiles.length > 0 && changedProofFiles.every(file => inScope(file) && (!plannedScope(file) || mutationTargets.has(file) || proofTreeWitness.cells.has(file)))
+    const carryCandidate = changedProofFiles.length > 0 && changedProofFiles.every(file => (!plannedScope(file) || mutationTargets.has(file) || proofTreeWitness.cells.has(file)))
     const noChangedMutationTarget = changedProofFiles.every((file) => !mutationTargets.has(file))
     const noChangedPriorWitness = changedProofFiles.every((file) => !proofTreeWitness.cells.has(file))
     let carryableAdmissionProof = carryCandidate
@@ -8830,12 +8748,11 @@ function runTask(ctx, io, crash) {
     const censusFence = (Array.isArray(ctx.laneFence) ? ctx.laneFence : []).filter((record) => record?.lane !== ctx.laneName)
     const held = laneFenceHits(files, censusFence)
     const protectedFiles = protectedHits(files, ctx.protectedPaths)
-    const dispatched = Array.isArray(ctx.files_in_scope) ? ctx.files_in_scope : []
-    const dispatchedScope = effectiveScope || scopeMatcher(dispatched)
-    const heldFiles = new Set(held.map(({ entry }) => entry))
-    const protectedSet = new Set(protectedFiles)
-    const outside = files.filter((file) => !dispatchedScope(file) || heldFiles.has(file) || protectedSet.has(file))
-    const inside = files.filter((file) => !outside.includes(file))
+    // Census placement is context, not admission. Keep held/protected measurements
+    // for data-repair boundaries and reporting, but every measured failing path is
+    // eligible for the existing repair route regardless of files_in_scope.
+    const outside = []
+    const inside = files
     return { files, outside, inside, held, protectedFiles }
   }
   const censusWhy = (phase, census, outside, inside) => {
@@ -8883,9 +8800,6 @@ function runTask(ctx, io, crash) {
       }
       if (censusFiles(census).some((file) => declared.has(file))) return { repair: true, outside: classified.outside, inside: classified.inside, held: classified.held }
     }
-    if (classified.outside.length > 0) {
-      return { escalation: escalate('census-exhibits', censusWhy(phase, census, classified.outside, classified.inside), [], { census }) }
-    }
     if (allowInsideRepair && classified.inside.length > 0) return { inside: classified.inside }
     return { inside: [] }
   }
@@ -8899,6 +8813,8 @@ function runTask(ctx, io, crash) {
     // behaviour and the mutation declared against it killed nothing.
     if (preBuild.escalation) return preBuild.escalation
     if (preBuildInside.length > 0) {
+      const floor = floorDiscoveredPaths(preBuildInside, 'census-pre-build')
+      if (!floor.ok) return escalate('sensitivity-floor', floorDiscoveryWhy('pre-build census', floor), [], { census: firstCensus }, { files: floor.paths })
       scopeFiles = [...new Set([...scopeFiles, ...preBuildInside])]
       acceptedScope = scopeFiles
       inScope = scopeMatcher(scopeFiles)
@@ -8925,7 +8841,7 @@ function runTask(ctx, io, crash) {
 
   // ---- 2. BUILD + mechanical gates + REVIEW ------------------------------------
   // The warm suite is part of a bounded accepted cycle. A first, evidence-backed
-  // red may widen the scope and re-enter this same path once; every later red is
+  // red may extend the mutable context and re-enter this same path once; every later red is
   // still a terminal suite escalation.
   const builderFingerprintState = (() => {
     if (typeof io.fingerprintTree !== 'function') return { supported: false, fingerprint: null }
@@ -9062,7 +8978,6 @@ function runTask(ctx, io, crash) {
   // EXTENDS the bound by one real round instead (bounded in turn by the
   // consult limit, so a looping judge still cannot loop the driver).
   let accepted = null
-  let extraRounds = 0
   let extraReviews = 0
   let hardenOwed = { owed: [], exempt: [] }
   let hardenWitness = null              // Map<repo-relative path, {state, bytes}>, or null
@@ -9108,10 +9023,10 @@ function runTask(ctx, io, crash) {
     ].join('\n')
   }
   // #800 — a finding the reviewer marked `auto-fix` and shipped a patch for is applied
-  // by CODE (programmatic-over-model-tokens). The patch is REFUSED unless its whole
-  // write surface is readable AND inside files_in_scope: the scope gate is the one
-  // write surface this run has, and a reviewer's patch is not exempt from it. Every
-  // attempt is journalled — an applied patch nobody can see is not a fix, it is drift.
+  // by CODE (programmatic-over-model-tokens). The patch is REFUSED when its whole
+  // write surface is unreadable or malformed, or its protected target cannot reach the
+  // judge-tier sensitivity floor; files outside recorded context remain valid writes under ADR-045. Every attempt is journalled — an applied patch nobody
+  // can see is not a fix, it is drift.
   // The id is safe as a path component by CONSTRUCTION: findingIdDefect refused the
   // whole envelope upstream if it was not (FINDING_ID_SHAPE). Nothing is sanitized
   // here — a silent rewrite is what turns two distinct ids into one artifact path.
@@ -9121,9 +9036,9 @@ function runTask(ctx, io, crash) {
     for (const entry of entries) {
       const { targets, refusal } = patchTargets(entry.patch)
       if (refusal) { refused.push({ id: entry.id, why: `the patch was refused unread: ${refusal}` }); continue }
-      const outside = outOfScopeFiles(targets, inScope)
-      if (outside.length > 0) {
-        refused.push({ id: entry.id, why: `the patch writes ${outside.join(', ')}, outside files_in_scope` })
+      const floor = floorDiscoveredPaths(targets, 'auto-fix')
+      if (!floor.ok) {
+        refused.push({ id: entry.id, why: `the patch was refused because the sensitivity floor could not be applied to: ${floor.paths.join(', ')}` })
         continue
       }
       const patchPath = art(`auto-fix-r${roundNo}-${entry.id}.patch`)
@@ -9138,17 +9053,18 @@ function runTask(ctx, io, crash) {
   }
 
   // #800 — code applied a patch, so code re-runs the code-owned checks that already
-  // passed on the tree BEFORE it: scope, the validation lane, and the configured
-  // acceptance gate. Returns {ok:true} or {ok:false, kind, brief}; `kind` is the
-  // failed check's own name and becomes the escalation `where`, because "the lane is red"
-  // and "no accepted build" are different facts and only one of them is true.
+  // passed on the tree BEFORE it: the validation lane and configured acceptance gate.
+  // Scope remains recorded context under ADR-045, not a second membership gate.
+  // Returns {ok:true} or {ok:false, kind, brief}; `kind` is the failed check's own
+  // name and becomes the escalation `where`, because "the lane is red" and "no
+  // accepted build" are different facts and only one of them is true.
   // The brief carries the failure VERBATIM — a paraphrased failure is a second
   // interpretation of evidence the builder can read directly.
   const revalidateAfterAutoFix = (roundNo, applied) => {
     const record = (outcome, why) => io.log(recordRow({ at: io.now(), auto_fix_revalidation: { round: roundNo, applied, outcome, why } }))
     const failed = (kind, what, detail) => {
       record(kind, what)
-      return { ok: false, kind, files: kind === 'scope' ? escalationFiles(outside) : [], brief: [
+      return { ok: false, kind, files: [], brief: [
         `# Auto-fix revalidation bounce (round ${roundNo})`, '',
         `The driver applied the reviewer's auto-fix patch(es) — ${applied.join(', ')} — and re-ran the code-owned checks. ${what}`,
         '', detail,
@@ -9156,8 +9072,6 @@ function runTask(ctx, io, crash) {
         '', `Plan: ${planPath}`,
       ].join('\n') }
     }
-    const outside = outOfScopeFiles(io.changedFiles(), inScope)
-    if (outside.length > 0) return failed('scope', 'The tree now carries files OUTSIDE the plan scope:', outside.map((f) => `- ${f}`).join('\n'))
     const laneAfter = io.run(lane)
     if (!laneAfter.ok) return failed('lane', `The validation lane is RED. Make it green:\n\n    ${lane}`, `Failures:\n${String(laneAfter.output || '').slice(-4000)}`)
     if (gateCmd) {
@@ -9337,9 +9251,12 @@ function runTask(ctx, io, crash) {
     return {}                                                                          // ANCHOR VD3
   }
   build:
-  for (let round = 1; round <= limits.build_rounds + extraRounds; round += 1) {
-    const finalRound = () => round >= limits.build_rounds + extraRounds
+  for (;;) {
+    if (builderRemaining() <= 0) return escalate('build', `no accepted build within ${builderAttempts} builder attempt(s); the global build budget is exhausted`)
+    const round = builderAttempts + 1
+    const finalRound = () => builderRemaining() <= 0
     stage(`build:r${round}`)
+    builderAttempts += 1
     const env = assignAndWait('builder', builderAssignmentBrief(buildBrief), buildNote)
     const refusalWhy = handledEnvelopeRefusalWhy(env)
     if (refusalWhy) {
@@ -9371,12 +9288,11 @@ function runTask(ctx, io, crash) {
         source: 'seat-request', files: request.files, evidence: env.details.evidence,
         role: 'builder', stage: S.stages.at(-1),
       })
-      if (requestAdmission.reason === 'held') {
-        stageComplete()
-        return escalate('scope', `scope-request refused [held]: ${requestAdmission.why}`, env.artifacts || [], {}, { files: escalationFiles(requestAdmission.hits || []) })
-      }
       if (requestAdmission.action === 'admit') {
-        if (finalRound()) extraRounds += 1
+        if (builderRemaining() <= 0) {
+          stageComplete()
+          return escalate('scope-request', `scope-request was recorded, but no globally budgeted builder attempt remains after ${builderAttempts} attempt(s)`, env.artifacts || [])
+        }
         const b = art(`build-bounce-r${round}.md`)
         failureUpgrade('scope', 'builder')
         io.writeFile(b, [
@@ -9398,7 +9314,7 @@ function runTask(ctx, io, crash) {
       // MUTATION A1: neutralise this call and a bounced round again reaches no scope
       // gate — the b363-seatreask defect, restored.
       stageComplete()
-      const bounced = runScopeGate({ round, finalRound, builderDetails: undefined, builderObservation, acceptBuilderBaseline, hasAcceptanceGate: Boolean(gateCmd), ctx, io, plans, scopeFiles, planPath, ownSpanScopes, siblingSpanScopes, inScope, mutations, readBuilt, art, stage, stageComplete, failureUpgrade, escalate, escalateReversion, frozenVerifier: pendingFrozenInventory ? verifyPendingFrozenRepair : null })                                    // ANCHOR A1
+      const bounced = runScopeGate({ round, finalRound, builderDetails: undefined, builderObservation, acceptBuilderBaseline, hasAcceptanceGate: Boolean(gateCmd), ctx, io, plans, scopeFiles, planPath, inScope, mutations, readBuilt, art, stage, stageComplete, failureUpgrade, escalate, escalateReversion, frozenVerifier: pendingFrozenInventory ? verifyPendingFrozenRepair : null, sensitivityFloor, flooredProtectedPaths })                                    // ANCHOR A1
       if (bounced.escalation) return bounced.escalation
       if (bounced.pendingReversion) pendingReversion = bounced.pendingReversion
       if (bounced.bounce) { buildBrief = bounced.bounce; buildNote = 'scope-fix'; continue }
@@ -9418,7 +9334,7 @@ function runTask(ctx, io, crash) {
       if (c.decision === 'escalate') {
         return escalate('build', c.reason, env.artifacts || [])
       }
-      if (finalRound()) extraRounds += 1 // the granted bounce needs a round to land in
+      if (finalRound()) grantBuilderAllowance('build', round) // the lead-granted bounce needs a round to land in
       const b = art(`build-bounce-r${round}.md`)
       failureUpgrade('build', 'builder')
       const matched = matchAnswers(questions, c.answers)
@@ -9434,7 +9350,7 @@ function runTask(ctx, io, crash) {
     builderEnv = env
     stageComplete()
 
-    const scoped = runScopeGate({ round, finalRound, builderDetails: env.details, builderObservation, acceptBuilderBaseline, hasAcceptanceGate: Boolean(gateCmd), ctx, io, plans, scopeFiles, planPath, ownSpanScopes, siblingSpanScopes, inScope, mutations, readBuilt, art, stage, stageComplete, failureUpgrade, escalate, escalateReversion, frozenVerifier: pendingFrozenInventory ? verifyPendingFrozenRepair : null })
+    const scoped = runScopeGate({ round, finalRound, builderDetails: env.details, builderObservation, acceptBuilderBaseline, hasAcceptanceGate: Boolean(gateCmd), ctx, io, plans, scopeFiles, planPath, inScope, mutations, readBuilt, art, stage, stageComplete, failureUpgrade, escalate, escalateReversion, frozenVerifier: pendingFrozenInventory ? verifyPendingFrozenRepair : null, sensitivityFloor, flooredProtectedPaths })
     if (scoped.escalation) return scoped.escalation
     if (scoped.pendingReversion) pendingReversion = scoped.pendingReversion
     if (scoped.bounce) { buildBrief = scoped.bounce; buildNote = 'scope-fix'; continue }
@@ -9465,7 +9381,7 @@ function runTask(ctx, io, crash) {
           stageComplete()
           return escalate('lane', c.reason)
         }
-        extraRounds += 1
+        grantBuilderAllowance('lane', round)
       }
       const b = art(`build-bounce-r${round}.md`)
       failureUpgrade('lane', 'builder')
@@ -9612,7 +9528,7 @@ function runTask(ctx, io, crash) {
             stageComplete()
             return gateEscalate(c.reason)
           }
-          extraRounds += 1
+          grantBuilderAllowance('gate', round)
         }
         const b = art(`build-bounce-r${round}.md`)
         failureUpgrade('gate', 'builder')
@@ -9731,7 +9647,7 @@ function runTask(ctx, io, crash) {
         if (c.decision === 'bounce-builder') {
           grant('review', round)
           extraReviews += 1
-          if (finalRound()) extraRounds += 1
+          if (finalRound()) grantBuilderAllowance('review', round)
           const b = art(`build-bounce-r${round}.md`)
           failureUpgrade('review', 'builder')
           io.writeFile(b, reviewBounceBrief(round, lastReviewPath))
@@ -9891,7 +9807,7 @@ function runTask(ctx, io, crash) {
           stageComplete()
           return escalate('review-unresolved', c.reason, [], { ask_user: disposed.askUser.map(({ id }) => id) }, { finding_ids: disposed.askUser.map(({ id }) => id) })
         }
-        if (lastAsk) { grant('review', round); extraRounds += 1; extraReviews += 1 }
+        if (lastAsk) { grant('review', round); grantBuilderAllowance('review', round); extraReviews += 1 }
         // A review carrying BOTH dispositions still gets its auto-fix applied: the
         // ask-user finding is what needs the seat, the auto-fix never did. The builder
         // round that follows supplies the code-owned validation, so no in-place
@@ -9934,7 +9850,7 @@ function runTask(ctx, io, crash) {
               stageComplete()
               return escalate(revalidated.kind, c.reason, [], {}, { files: revalidated.files || [] })
             }
-            grant('review', round); extraRounds += 1; extraReviews += 1
+            grant('review', round); grantBuilderAllowance('review', round); extraReviews += 1
           }
           const b = art(`build-bounce-r${round}.md`)
           failureUpgrade('review', 'builder')
@@ -9964,7 +9880,7 @@ function runTask(ctx, io, crash) {
           }
           if (c.decision === 'bounce-builder') {
             grant('review', round)
-            extraRounds += 1
+            grantBuilderAllowance('review', round)
             extraReviews += 1
             const b = art(`build-bounce-r${round}.md`)
             failureUpgrade('review', 'builder')
@@ -10020,7 +9936,7 @@ function runTask(ctx, io, crash) {
     }
   }
   if (!builderEnv || !accepted) {
-    return escalate('build', `no accepted build within ${limits.build_rounds + extraRounds} rounds`)
+    return escalate('build', `no accepted build within ${builderAttempts} builder attempt(s)`)
   }
 
   // The reviewer can accept only the tree that is about to be committed. This
@@ -10065,7 +9981,7 @@ function runTask(ctx, io, crash) {
     }
     report = finalFrozen.report
   }
-  const committing = (commitChanged || io.changedFiles()).filter(inScope)
+  const committing = [...new Set(commitChanged || io.changedFiles())]
   const preRebaseCommit = io.commit(committing, message)
   if (pendingFrozenInventory && !preRebaseCommit) {
     stageComplete()
@@ -10185,7 +10101,6 @@ function runTask(ctx, io, crash) {
 
         const anchorResolution = () => {
           if (!evidenceMeasured || !anchorConflictMechanical(conflicted)) return { ok: false, why: 'conflict is not mechanically anchor-resolvable' }
-          if (conflicted.some((path) => !inScope(path))) return { ok: false, why: 'anchor conflict path is outside the accepted scope' }
           const stagesReadable = conflicted.every((path) => canonicalAnchorContent(path, stageBytes.get(`2:${path}`)) !== null
             && canonicalAnchorContent(path, stageBytes.get(`3:${path}`)) !== null)
           if (!stagesReadable) return { ok: false, why: 'anchor conflict stages were malformed or unreadable' }
@@ -10196,11 +10111,12 @@ function runTask(ctx, io, crash) {
           let checkedOut
           try { checkedOut = io.run(checkout) } catch (err) { checkedOut = { ok: false, output: err?.message ?? String(err) } }
           if (checkedOut?.ok !== true) return { ok: false, why: `taking the rebase incoming side failed${checkedOut?.output ? `: ${String(checkedOut.output).slice(-1000)}` : ''}` }
+          const observedPaths = [...inventory.tracked].sort()
           const before = new Map()
-          for (const path of inventory.carriers) {
+          for (const path of observedPaths) {
             let bytes
-            try { bytes = io.readFile(`${ctx.checkout}/${path}`) } catch (err) { return { ok: false, why: `anchor resolver carrier ${path} could not be read before repair: ${err?.message ?? String(err)}` } }
-            if (typeof bytes !== 'string') return { ok: false, why: `anchor resolver carrier ${path} could not be read before repair` }
+            try { bytes = io.readFile(`${ctx.checkout}/${path}`) } catch (err) { return { ok: false, why: `anchor resolver path ${path} could not be read before repair: ${err?.message ?? String(err)}` } }
+            if (typeof bytes !== 'string') return { ok: false, why: `anchor resolver path ${path} could not be read before repair` }
             before.set(path, bytes)
           }
           for (const directory of [...directories].sort()) {
@@ -10213,28 +10129,20 @@ function runTask(ctx, io, crash) {
             }
           }
           const after = new Map()
-          for (const path of inventory.carriers) {
+          for (const path of observedPaths) {
             let bytes
-            try { bytes = io.readFile(`${ctx.checkout}/${path}`) } catch (err) { return { ok: false, why: `anchor resolver carrier ${path} could not be read after repair: ${err?.message ?? String(err)}` } }
+            try { bytes = io.readFile(`${ctx.checkout}/${path}`) } catch (err) { return { ok: false, why: `anchor resolver path ${path} could not be read after repair: ${err?.message ?? String(err)}` } }
             after.set(path, typeof bytes === 'string' ? bytes : null)
           }
-          const changed = inventory.carriers.filter((path) => before.get(path) !== after.get(path)).sort()
+          const changed = observedPaths.filter((path) => before.get(path) !== after.get(path))
           const recognized = new Set(inventory.carriers)
-          const resolverWritesSafe = changed.every((path) => inScope(path) && recognized.has(path))
+          const conflictedSet = new Set(conflicted)
+          const resolverWritesSafe = changed.every((path) => recognized.has(path) && conflictedSet.has(path))
           if (!resolverWritesSafe) return { ok: false, why: 'anchor resolver write set is unsafe' }
           const stages = conflicted.map((path) => ({
             path, stage2: stageBytes.get(`2:${path}`), stage3: stageBytes.get(`3:${path}`), repaired: after.get(path),
           }))
           if (!lineNumberOnlyAnchorResolution(stages)) return { ok: false, why: 'anchor conflict changes content' }
-          const conflictedSet = new Set(conflicted)
-          for (const path of changed) {
-            if (conflictedSet.has(path)) continue
-            const beforeForm = canonicalAnchorContent(path, before.get(path))
-            const afterForm = canonicalAnchorContent(path, after.get(path))
-            if (beforeForm === null || afterForm === null || !canonicalEqual(beforeForm, afterForm)) {
-              return { ok: false, why: `anchor resolver changed content in ${path}` }
-            }
-          }
           const verified = [...new Set([...conflicted, ...changed])].sort()
           if (verified.length === 0) return { ok: false, why: 'anchor resolver produced no verified paths' }
           let added
@@ -10291,6 +10199,9 @@ function runTask(ctx, io, crash) {
             return { escalation: escalate('rebase', conflicted.length
               ? `the rebase onto ${base} failed with conflicts in ${conflicted.join(', ')}; restoration proven at HEAD ${restoredHead}`
               : `the rebase onto ${base} failed`, [], { commit: S.commit }, { files: escalationFiles(conflicted), base, commit: S.commit }) }
+          }
+          if (builderRemaining() <= 0) {
+            return { escalation: escalate('rebase', `the rebase onto ${base} failed with conflicts in ${conflicted.join(', ')}; restoration proven at HEAD ${restoredHead}; the limits.build_rounds budget is exhausted after ${builderAttempts} attempt(s)`, [], { commit: S.commit }) }
           }
           const route = routeOverride || rebaseConflictRoute({ mechanical: false, bounces: rebaseConflictBounces, buildRounds: limits.build_rounds })
           if (route === 'escalate') {
@@ -10349,6 +10260,10 @@ function runTask(ctx, io, crash) {
           const settled = restoreConflict(classifiedMechanical, mechanical.why, routeOverride)
           if (settled.escalation) { stageComplete(); return settled.escalation }
           if (settled.bounce) {
+            if (builderRemaining() <= 0) {
+              stageComplete()
+              return escalate('rebase', `the rebase recovery was restored but the global builder budget is exhausted after ${builderAttempts} attempt(s)`, [], { commit: S.commit })
+            }
             stageComplete()
             continue suiteCycle
           }
@@ -10436,51 +10351,43 @@ function runTask(ctx, io, crash) {
     if (postCommit.escalation) return postCommit.escalation
     if (postCommit.repair) {
       const repairFiles = [...CENSUS_CARRIER_FILES]
-      const repairEscalation = (repairHeld, artifacts) => escalate('census-exhibits', `post-commit census repair crosses a held scope: ${fenceBreachList(repairHeld)}`, artifacts, { commit: S.commit, census: committedCensus })
+      const floor = floorDiscoveredPaths(repairFiles, 'census-post-commit')
+      if (!floor.ok) return escalate('sensitivity-floor', floorDiscoveryWhy('post-commit census', floor), [], { commit: S.commit, census: committedCensus }, { files: floor.paths })
       if (postCommitCensusBounces >= POST_COMMIT_CENSUS_BOUNCE_MAX) {
         return escalate('census-exhibits', censusWhy('post-commit', committedCensus, postCommitOutside, postCommitInside), [], { commit: S.commit, census: committedCensus })
       }
-      // TWO DISJOINT holder checks, not one subsuming the other. Every failing file in this
-      // branch is a declared carrier (every failing REPAIR FILE is — the branch may still
-      // contain an undeclared failure already inside scope), so a guard over ALL carriers
-      // strictly contains a guard
-      // over the failing ones — which made the first check vacuous: disabling it changed
-      // nothing, because the second caught the same rows. Partitioned so each guard owns a set
-      // the other cannot see, and each is therefore independently killable.
-      const repairHeld = postCommit.held
-      if (repairHeld.length > 0) return repairEscalation(repairHeld, [])
-      const failedCarriers = new Set(censusFiles(committedCensus))
-      const unfailedPair = repairFiles.filter((file) => !failedCarriers.has(file))
-      const repairUnitHeld = laneFenceHits(unfailedPair, (Array.isArray(ctx.laneFence) ? ctx.laneFence : []).filter((record) => record?.lane !== ctx.laneName))
-      if (repairUnitHeld.length > 0) return repairEscalation(repairUnitHeld, [])
-      const additions = repairFiles.filter((file) => !inScope(file))
-      const spanSupersedes = repairFiles.filter((file) => !additions.includes(file))
-      const repairProtected = protectedHits(additions, ctx.protectedPaths)
-      if (repairProtected.length > 0) {
-        return escalate('census-exhibits', `post-commit census repair refused: protected paths cannot be admitted: ${repairProtected.join(', ')}`, [], { commit: S.commit, census: committedCensus })
+      // Census membership is recorded context under ADR-045. Its carrier identity,
+      // measured/unmeasured state, and bounded repeat remain terminal; a sibling
+      // placement does not suppress the declared repair unit, while protected paths
+      // first require the sensitivity floor above.
+      const censusAdmission = admitScope({ source: 'census-bounce', files: repairFiles, evidence: committedCensus })
+      if (censusAdmission.action !== 'admit') {
+        return escalate('census-exhibits', `the post-commit census repair context could not be recorded: ${censusAdmission.why || censusAdmission.reason || 'unknown reason'}`, [], { commit: S.commit, census: committedCensus })
       }
-      scopeFiles = [...scopeFiles, ...additions]
-      acceptedScope = scopeFiles
-      inScope = scopeMatcher(scopeFiles)
-      ownSpanScopes = ownSpanScopes.filter((scope) => !additions.includes(scope.path))
-      ownSpanScopes = ownSpanScopes.filter((scope) => !spanSupersedes.includes(scope.path))
-      if (additions.length > 0) logScopeAdmission({ source: 'census-bounce', files: additions, evidence: committedCensus })
       postCommitCensusBounces += 1
       const bounce = art(`census-exhibits-bounce-r${postCommitCensusBounces}.md`)
       io.writeFile(bounce, ['# Census exhibit bounce', '', censusWhy('post-commit', committedCensus, postCommitOutside, postCommitInside), '', `Commit: ${S.commit}`, `Plan: ${planPath}`].join('\n'))
       suiteBuildBrief = bounce
       suiteBuildNote = 'census-exhibits-fix'
+      if (builderRemaining() <= 0) grantBuilderAllowance()
       continue suiteCycle
     }
     if (postCommitInside.length > 0) {
+      const floor = floorDiscoveredPaths(postCommitInside, 'census-post-commit')
+      if (!floor.ok) return escalate('sensitivity-floor', floorDiscoveryWhy('post-commit census', floor), [], { commit: S.commit, census: committedCensus }, { files: floor.paths })
       if (postCommitCensusBounces >= POST_COMMIT_CENSUS_BOUNCE_MAX) {
         return escalate('census-exhibits', censusWhy('post-commit', committedCensus, [], postCommitInside), [], { commit: S.commit, census: committedCensus })
+      }
+      const censusAdmission = admitScope({ source: 'census-bounce', files: postCommitInside, evidence: committedCensus, recordFiles: postCommitInside })
+      if (censusAdmission.action !== 'admit') {
+        return escalate('census-exhibits', `the post-commit census context could not be recorded: ${censusAdmission.why || censusAdmission.reason || 'unknown reason'}`, [], { commit: S.commit, census: committedCensus })
       }
       postCommitCensusBounces += 1
       const bounce = art(`census-exhibits-bounce-r${postCommitCensusBounces}.md`)
       io.writeFile(bounce, ['# Census exhibit bounce', '', censusWhy('post-commit', committedCensus, [], postCommitInside), '', `Commit: ${S.commit}`, `Plan: ${planPath}`].join('\n'))
       suiteBuildBrief = bounce
       suiteBuildNote = 'census-exhibits-fix'
+      if (builderRemaining() <= 0) grantBuilderAllowance()
       continue suiteCycle
     }
     if (postCommit.escalation) return postCommit.escalation
@@ -10496,8 +10403,7 @@ function runTask(ctx, io, crash) {
     const testFiles = suiteRedTestFiles(failureTail, ctx.checkout)
     const suiteEvidence = { output: suiteOutput, commit: S.commit, test_files: testFiles }
     const frozenFiles = testFiles.filter((file) => file === FROZEN_INVENTORY_FILE || file === FROZEN_FACTORY_ENV_FILE)
-    const outsideScope = frozenFiles.filter((file) => !inScope(file))
-    if (frozenFiles.length > 0 && outsideScope.length === 0) {
+    if (frozenFiles.length > 0) {
       const frozenRepair = frozenRepairPreflight(frozenFiles)
       if (frozenRepair.action === 'repair') {
         pendingFrozenInventory = {
@@ -10522,6 +10428,7 @@ function runTask(ctx, io, crash) {
         suiteBuildBrief = b
         suiteBuildNote = 'frozen-inventory-fix'
         stageComplete()
+        if (builderRemaining() <= 0) return escalate('suite', `frozen inventory repair was recorded but the global builder budget is exhausted after ${builderAttempts} attempt(s)`, [], { commit: S.commit, suite_red: suiteEvidence })
         continue suiteCycle
       }
       stageComplete()
@@ -10530,12 +10437,16 @@ function runTask(ctx, io, crash) {
     const suiteAdmission = admitScope({
       source: 'suite-red', files: testFiles, evidence: suiteEvidence,
     })
-    if (suiteAdmission.reason === 'held') {
-      stageComplete()
-      return escalate('suite', `full suite red after acceptance crosses a held scope: ${suiteAdmission.why}\n${suiteOutput.slice(-2000)}`, [], { commit: S.commit, suite_red: suiteEvidence })
-    }
     if (suiteAdmission.action === 'admit' || suiteAdmission.action === 'bounce') {
-      if (suiteAdmission.action === 'admit') suiteWidenings += 1
+      const floor = floorDiscoveredPaths(testFiles, 'suite-red')
+      if (!floor.ok) {
+        stageComplete()
+        return escalate('sensitivity-floor', floorDiscoveryWhy('full suite', floor), [], { commit: S.commit, suite_red: suiteEvidence }, { files: floor.paths })
+      }
+      if (builderRemaining() <= 0) {
+        stageComplete()
+        return escalate('suite', `full suite red after acceptance was recorded, but the global builder budget is exhausted after ${builderAttempts} attempt(s)\n${suiteOutput.slice(-2000)}`, [], { commit: S.commit, suite_red: suiteEvidence })
+      }
       const b = art(`suite-red-bounce-r${reviews + 1}.md`)
       failureUpgrade('suite', 'builder')
       const suiteLines = suiteOutput.split(/\r?\n/)
@@ -10546,12 +10457,8 @@ function runTask(ctx, io, crash) {
       }
       const retainedIndexes = [...retained].sort((a, b) => a - b)
       const failureExcerpt = { text: retainedIndexes.map((index) => suiteLines[index]).join('\n'), totalLines: suiteLines.length, elidedLines: suiteLines.length - retainedIndexes.length }
-      const scopeWording = suiteAdmission.action === 'admit'
-        ? `The accepted commit ${S.commit} made the full suite red. The failing output named these unheld test files, which are now admitted to the effective scope:`
-        : `The accepted commit ${S.commit} made the full suite red. The failing output named only test files already in the effective scope, so no scope widening is needed:`
-      const allowanceWording = suiteAdmission.action === 'admit'
-        ? 'Repair the implementation and rerun the builder/review/gate/commit cycle. This is the one permitted suite-red widening.'
-        : 'Repair the implementation and rerun the builder/review/gate/commit cycle. This is the one permitted in-scope suite-red bounce.'
+      const scopeWording = `The accepted commit ${S.commit} made the full suite red. The failing output named these test files, which are now recorded in the mutable context:`
+      const allowanceWording = 'Repair the implementation and rerun the builder/review/gate/commit cycle using one already-remaining builder attempt. This is context, not a scope widening cap.'
       io.writeFile(b, [
         '# Suite-red scope admission bounce', '',
         scopeWording,
@@ -10564,10 +10471,11 @@ function runTask(ctx, io, crash) {
       suiteBuildBrief = b
       suiteBuildNote = 'suite-red-fix'
       stageComplete()
+      if (builderRemaining() <= 0) return escalate('suite', `suite-red repair was recorded but the global builder budget is exhausted after ${builderAttempts} attempt(s)`, [], { commit: S.commit, suite_red: suiteEvidence })
       continue suiteCycle
     }
     stageComplete()
-    return escalate('suite', `full suite red after acceptance — no safe unheld test-file admission could be made: ${suiteAdmission.why || 'the failure output was unparseable'}\n${suiteOutput.slice(-2000)}`, [], { commit: S.commit, suite_red: suiteEvidence })
+    return escalate('suite', `full suite red after acceptance — no safe test-file context record could be made: ${suiteAdmission.why || 'the failure output was unparseable'}\n${suiteOutput.slice(-2000)}`, [], { commit: S.commit, suite_red: suiteEvidence })
   }
   if (publishing && warmCounts === null) {
     stageComplete()
@@ -11169,14 +11077,9 @@ export const PLAN_SCOPE = Object.freeze({
   malformed: 'plan-scope-malformed',
 })
 export const PLAN_SCOPE_VERDICTS = Object.freeze(Object.values(PLAN_SCOPE))
-export const PLAN_SCOPE_WIDEN_REASONS = Object.freeze(['behavior-doc', 'shared-fixture', 'coherent-module', 'external-constant'])
-export const PLAN_SCOPE_WIDEN_MAX = 1
-export const PLAN_SCOPE_WIDEN_REFUSALS = Object.freeze(['shape', 'files', 'reason', 'protected', 'held', 'repeat'])
-export const PLAN_SCOPE_WIDEN_REFUSAL_NAMES = PLAN_SCOPE_WIDEN_REFUSALS
 
-// Scope corrections are deliberately suggestions only. The path that the planner
-// declared remains the path the driver refuses; accepting a correction here would turn
-// a typo into an unreviewed widening.
+// Scope corrections are deliberately suggestions only. Literal shape remains a
+// trust-boundary check; valid wider or narrower context is recorded, never refused.
 export function levenshtein(left, right) {
   const a = String(left ?? '')
   const b = String(right ?? '')
@@ -11283,71 +11186,6 @@ export function planScopeVerdict(dispatched, planned, tracked = null) {
   return tracked === null ? base : { ...base, malformed, suggestions, effective }
 }
 
-const planScopeWideningRefusal = (reason, why, extra = {}) => ({ action: 'escalate', reason, why, ...extra })
-
-export function planScopeWideningDecision(options = {}) {
-  const input = options && typeof options === 'object' && !Array.isArray(options) ? options : {}
-  const { request = null, added = [], reasons, protectedPaths, laneFence = [], planWideningAdjudications: requestedAdjudications, adjudications } = input
-  const planWideningAdjudications = requestedAdjudications ?? adjudications ?? 0
-  try {
-    if (request === null || request === undefined) return { action: 'skip' }
-    if (!request || typeof request !== 'object' || Array.isArray(request) || request.refusal) {
-      return planScopeWideningRefusal('shape', request?.why || 'scope_request must be a parsed admit-files request')
-    }
-    const additions = Array.isArray(added) ? [...added] : []
-    if (additions.length === 0 || new Set(additions).size !== additions.length
-      || additions.some((entry) => typeof entry !== 'string' || entry.endsWith('/') || validateScopeEntries([entry]).length > 0)) {
-      return planScopeWideningRefusal('files', 'plan scope widening requires non-empty tracked literal additions')
-    }
-    const requestFiles = Array.isArray(request.files) ? request.files : []
-    if (requestFiles.length !== additions.length || new Set(requestFiles).size !== requestFiles.length
-      || requestFiles.some((entry) => !additions.includes(entry)) || additions.some((entry) => !requestFiles.includes(entry))) {
-      return planScopeWideningRefusal('files', 'scope_request.files must set-equal planScope.added')
-    }
-    const planProtectedAdditions = protectedHits(additions, protectedPaths)
-    if (planProtectedAdditions.length > 0) {
-      return planScopeWideningRefusal('protected', `protected paths cannot be admitted: ${planProtectedAdditions.join(', ')}`, { files: planProtectedAdditions })
-    }
-    const planHeldAdditions = laneFenceHits(additions, laneFence)
-    if (planHeldAdditions.length > 0) {
-      return planScopeWideningRefusal('held', `paths are held by another live lane: ${planHeldAdditions.map(({ entry, lane }) => `${entry} is owned by lane ${lane}`).join('; ')}`, { hits: planHeldAdditions })
-    }
-    if (planWideningAdjudications >= PLAN_SCOPE_WIDEN_MAX) {
-      return planScopeWideningRefusal('repeat', `the plan-time widening limit of ${PLAN_SCOPE_WIDEN_MAX} adjudication is spent`)
-    }
-    if (!Array.isArray(reasons) || reasons.length !== additions.length) {
-      return planScopeWideningRefusal('reason', 'details.evidence.reasons must contain exactly one mapping per added file')
-    }
-    const seen = new Set()
-    const normalized = []
-    for (const entry of reasons) {
-      if (!entry || typeof entry !== 'object' || Array.isArray(entry) || Reflect.ownKeys(entry).length !== 2
-        || !Reflect.ownKeys(entry).includes('file') || !Reflect.ownKeys(entry).includes('reason')) {
-        return planScopeWideningRefusal('reason', 'each evidence.reasons entry must be exactly { file, reason }')
-      }
-      const { file, reason } = entry
-      if (typeof file !== 'string' || !additions.includes(file) || seen.has(file)) {
-        return planScopeWideningRefusal('reason', 'evidence.reasons must map each added file exactly once')
-      }
-      if (!PLAN_SCOPE_WIDEN_REASONS.includes(reason)) {
-        return planScopeWideningRefusal('reason', `evidence.reasons contains an unknown reason ${JSON.stringify(reason)}`)
-      }
-      seen.add(file)
-      normalized.push({ file, reason })
-    }
-    if (seen.size !== additions.length) {
-      return planScopeWideningRefusal('reason', 'evidence.reasons must map each added file exactly once')
-    }
-    const reasonsByFile = new Map(normalized.map((entry) => [entry.file, entry.reason]))
-    return {
-      action: 'admit',
-      files: additions,
-      reasons: additions.map((file) => ({ file, reason: reasonsByFile.get(file) })),
-    }
-  } catch (err) {
-    return planScopeWideningRefusal('shape', `plan scope widening request could not be read: ${err?.message ?? String(err)}`)
-  }
-}
 export function planScopeWhy(verdict, final) {
   if (verdict?.verdict === PLAN_SCOPE.malformed) {
     const malformed = Array.isArray(verdict.malformed) ? verdict.malformed : []
@@ -11360,19 +11198,16 @@ export function planScopeWhy(verdict, final) {
     const detail = entries.length > 0 ? entries.join('; ') : 'the declaration could not be matched to a tracked path'
     return `the plan declares malformed files_in_scope entries: ${detail}${final ? '; on the final plan round there is no revision left to bounce it to' : ''}`
   }
-  return `the plan widens the dispatched write surface with ${verdict.added.join(', ')} — a lane may narrow the surface it was dispatched with, never widen it${final ? '; on the final plan round there is no revision left to bounce it to' : ''}`
+  return `the plan records context relative to the dispatched surface: added ${verdict.added.join(', ') || '(none)'}, dropped ${verdict.dropped?.join(', ') || '(none)'}${final ? '; this is the final plan record' : ''}`
 }
 export function planScopeBounceLines(round, verdict, briefFile, dispatched) {
   return [
     `# Plan scope bounce (round ${round})`, '',
     planScopeWhy(verdict, false), '',
-    'The dispatched write surface — the only files this lane may write:',
+    'The dispatched files_in_scope is context for this plan, not a write allow-list:',
     ...dispatched.map((f) => `- ${f}`), '',
-    'Your files_in_scope added, and this lane may not:',
-    ...verdict.added.map((f) => `- ${f}`), '',
-    'Re-plan INSIDE the dispatched surface. Narrowing it is legal and is recorded, not refused;',
-    'if the task genuinely cannot be built inside it, return status insufficient with the gap as',
-    'a numbered details.questions entry rather than widening the surface yourself.', '',
+    'Keep every files_in_scope entry a concrete, literal repo-relative path; wider and narrower',
+    'contexts are recorded as plan_scope rows and proceed without a membership refusal.', '',
     `Original brief: ${briefFile}`,
   ]
 }
@@ -12531,16 +12366,13 @@ export function hardenWitnessCommand(testFile) {
   return `node --test --test-reporter=tap ${shellArg(testFile)}`                       // ANCHOR B5f
 }
 
-// #839 — ONE predicate for both declared paths, drawn where `validateMutations` already
-// draws it for a declared mutation file (crew/drive.mjs:1475-1500). A directory scope
-// matcher is a RAW PREFIX check (crew/drive.mjs:1519-1522), so under scope `crew/tests/`
-// the path `crew/tests/../../outside.mjs` satisfies `inScope` and
-// `${ctx.checkout}/${file}` escapes the authorized subtree. The hardening proof READS,
-// RUNS and WRITES builder-declared paths, so it needs that same boundary — the traversal
-// must be refused BEFORE any io.readFile, io.run or io.writeFile touches it.
-// MUTATION B10: drop the traversal conjunct and a declared `crew/tests/../../outside.mjs`
-// is read, run and written outside the fence.
-export const scopedPath = (file, inScope) => typeof file === 'string' && validateScopeEntries([file]).length === 0 && !file.endsWith('/') && inScope(file)   // ANCHOR B10
+// #839 — ONE predicate for both declared paths. Scope is recorded context rather
+// than an allow-list under ADR-045, but hardening still accepts only a concrete,
+// repo-relative literal path so a traversal can never escape `${ctx.checkout}`.
+export const scopedPath = (file, _inScope) => typeof file === 'string'
+  && validateScopeEntries([file]).length === 0
+  && !file.endsWith('/')
+  && !/[?*\[\]{}]/.test(file)   // ANCHOR B10
 
 // ONE token-change predicate, shared by the plan-mutation contract (`validateMutations`,
 // crew/drive.mjs:1510) and the hardening declaration contract. `normalizeAnchor` is the
@@ -12626,11 +12458,11 @@ export function validateHardened(details, owed, inScope) {
       continue
     }
     if (!scopedPath(entry.test, scope)) {
-      refuse(id, 'test-not-in-scope', `the hardened test ${entry.test ?? '(missing)'} is not a file inside files_in_scope`)
+      refuse(id, 'test-not-in-scope', `the hardened test ${entry.test ?? '(missing)'} must be a concrete repo-relative literal path`)
       continue
     }
     if (!scopedPath(entry.file, scope)) {
-      refuse(id, 'file-not-in-scope', `the hardened implementation ${entry.file ?? '(missing)'} is not a file inside files_in_scope`)
+      refuse(id, 'file-not-in-scope', `the hardened implementation ${entry.file ?? '(missing)'} must be a concrete repo-relative literal path`)
       continue
     }
     if (typeof entry.name !== 'string' || entry.name.trim() === '') {

@@ -211,9 +211,6 @@ test('A1', () => {
     } else if (line.startsWith('PLAN_SCOPE.malformed')) {
       dynamic.push('PLAN_SCOPE.malformed')
       reachable.push('plan-scope-malformed')
-    } else if (line.startsWith('PLAN_SCOPE.widened')) {
-      dynamic.push('PLAN_SCOPE.widened')
-      reachable.push('plan-scope-widened')
     } else if (line.startsWith('revalidated.kind')) {
       dynamic.push('revalidated.kind')
       reachable.push(...['scope', 'lane', 'gate'])
@@ -222,8 +219,8 @@ test('A1', () => {
     }
   }
   assert.deepEqual([...new Set(reachable)].sort(), Object.keys(ESCALATION_QUESTIONS).sort())
-  assert.deepEqual(dynamic.sort(), ['PLAN_SCOPE.malformed', 'PLAN_SCOPE.widened', 'revalidated.kind', 'variant', 'variant', 'variant', 'variant', 'variant'].sort())
-  for (const forbidden of ['full', 'repair', 'plan-scope-undispatched', 'plan-scope-same', 'plan-scope-narrowed']) {
+  assert.deepEqual(dynamic.sort(), ['PLAN_SCOPE.malformed', 'revalidated.kind', 'variant', 'variant', 'variant', 'variant', 'variant'].sort())
+  for (const forbidden of ['full', 'repair', 'plan-scope-undispatched', 'plan-scope-same', 'plan-scope-narrowed', 'plan-scope-widened']) {
     assert.equal(Object.hasOwn(ESCALATION_QUESTIONS, forbidden), false)
   }
   const missing = { ...ESCALATION_QUESTIONS }
@@ -268,4 +265,8 @@ test('D1', () => {
     assert.equal(materialized.options, undefined)
     assert.equal(resolutionDefect(where, { type: 'free-text', value: 'human guidance' }), null)
   }
+})
+
+test('F1 retired plan-scope-widened has no escalation question', () => {
+  assert.throws(() => escalationQuestion('plan-scope-widened'), /undeclared escalation where/)
 })

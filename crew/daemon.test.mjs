@@ -2013,7 +2013,7 @@ function childFenceIo({ taskDir, planFiles, includeBuilder = false, includeRevie
       details: { verdict: 'pass', review_path: `${taskDir}/review.md`, must_fix: 0 },
     }
   }
-  const calls = { assign: [], run: [], runCold: [], commits: [], writes: {} }
+  const calls = { assign: [], run: [], runCold: [], commits: [], writes: {}, logs: [] }
   const counts = {}
   const changedQueue = Array.isArray(changed[0]) ? [...changed] : [changed]
   return {
@@ -2032,12 +2032,12 @@ function childFenceIo({ taskDir, planFiles, includeBuilder = false, includeRevie
     runCold(cmd, names) { calls.runCold.push({ cmd, names }); return { ok: true, output: '', path: '/zz/aa11bb', kept: null } },
     changedFiles() { return changedQueue.length > 1 ? changedQueue.shift() : changedQueue[0] },
     commit(files, message) { calls.commits.push({ files, message }); return 'abc1234' },
-    log() {},
+    log(row) { calls.logs.push(row) },
     now: () => 0,
   }
 }
 
-test('the child entry rides the persisted lane fence into ctx and refuses at plan acceptance', () => {
+test('the child entry rides the persisted lane fence is recorded in ctx and proceeds', () => {
   const f = fixture()
   const fence = [{ lane: 'intake-loop', files: ['scripts/factory/intake.mjs'] }]
   const logged = []
@@ -2061,16 +2061,24 @@ test('the child entry rides the persisted lane fence into ctx and refuses at pla
     assert.equal(row.lanes, 1)
     assert.equal(row.files, 1)
 
-    const io = childFenceIo({ taskDir: seen.taskDir, planFiles: ['scripts/factory/intake.mjs'] })
+    const io = childFenceIo({
+      taskDir: seen.taskDir,
+      planFiles: ['scripts/factory/intake.mjs'],
+      includeBuilder: true,
+      includeReviewer: true,
+      changed: ['scripts/factory/intake.mjs'],
+    })
     const result = driveTask(seen, io)
-    assert.equal(result.status, 'escalation')
-    assert.equal(result.details.escalation.where, 'scope')
-    assert.match(result.details.escalation.why, /intake-loop/)
-    assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 0)
+    assert.equal(result.status, 'done')
+    assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 1)
+    assert.equal(io.calls.assign.filter(({ role }) => role === 'reviewer').length, 1)
+    const scope = io.calls.logs.find((entry) => entry.scope_gate)?.scope_gate
+    assert.ok(scope)
+    assert.deepEqual(scope.lane_fence, [{ entry: 'scripts/factory/intake.mjs', lane: 'intake-loop' }])
   } finally { f.cleanup() }
 })
 
-test("the child entry's persisted lane fence is caught again at the final scope-gate", () => {
+test("the child entry's persisted lane fence is recorded at the final scope-gate", () => {
   const f = fixture()
   const fence = [{ lane: 'intake-loop', files: ['scripts/factory/intake.mjs'] }]
   let seen
@@ -2088,13 +2096,16 @@ test("the child entry's persisted lane fence is caught again at the final scope-
       taskDir: seen.taskDir,
       planFiles: ['a.mjs', 'a.test.mjs'],
       includeBuilder: true,
+      includeReviewer: true,
       changed: ['scripts/factory/intake.mjs'],
     })
     const result = driveTask(seen, io)
-    assert.equal(result.status, 'escalation')
-    assert.equal(result.details.escalation.where, 'scope')
-    assert.match(result.details.escalation.why, /intake-loop/)
-    assert.equal(io.calls.commits.length, 0)
+    assert.equal(result.status, 'done')
+    const scope = io.calls.logs.find((entry) => entry.scope_gate)?.scope_gate
+    assert.ok(scope)
+    assert.deepEqual(scope.edits, ['scripts/factory/intake.mjs'])
+    assert.deepEqual(scope.lane_fence, [{ entry: 'scripts/factory/intake.mjs', lane: 'intake-loop' }])
+    assert.equal(io.calls.commits.length, 1)
   } finally { f.cleanup() }
 })
 

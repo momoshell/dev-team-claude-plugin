@@ -3332,7 +3332,7 @@ test('C1 untracked non near miss is malformed by name', () => {
   assert.equal(nonFinalIo.calls.logs.some((row) => row.modifier?.kind === 'plan' && row.modifier?.role === 'planner'), false)
 })
 
-test('D1 tracked widening remains byte identical', () => {
+test('D1 tracked widening is recorded context', () => {
   const tracked = 'crew/drive-review.test.mjs'
   const runs = {
     [D3_SCOPE_HEALTH]: { ok: true, output: '' },
@@ -3340,19 +3340,21 @@ test('D1 tracked widening remains byte identical', () => {
   }
   const io = d3ScopeIo(D3_SCOPE_DISPATCHED, [...D3_SCOPE_DISPATCHED, tracked], runs)
   const result = driveTask(d3ScopeCtx(), io)
-  const expectedWhy = `the plan widens the dispatched write surface with ${tracked} — a lane may narrow the surface it was dispatched with, never widen it; on the final plan round there is no revision left to bounce it to`
-  assert.equal(result.status, 'escalation')
-  assert.equal(result.details.escalation.where, PLAN_SCOPE.widened)
-  assert.equal(result.details.escalation.why, expectedWhy)
+  assert.equal(result.status, 'done')
+  assert.equal(result.details.escalation, null)
   assert.deepEqual(s843Rows(io)[0], {
     round: 1, verdict: PLAN_SCOPE.widened, added: [tracked], dropped: [], dispatched: 1, planned: 2,
     malformed: [], suggestions: new Map(), effective: [...D3_SCOPE_DISPATCHED, tracked],
   })
+  assert.equal(io.calls.run.some(({ cmd }) => cmd === D3_SCOPE_HEALTH), true)
+  assert.equal(io.calls.run.some(({ cmd }) => cmd === d3ScopeInventory(tracked)), true)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 1)
 
   const prefix = 'crew/new-surface/'
   const prefixIo = d3ScopeIo(D3_SCOPE_DISPATCHED, [...D3_SCOPE_DISPATCHED, prefix])
   const prefixResult = driveTask(d3ScopeCtx(), prefixIo)
-  assert.equal(prefixResult.details.escalation.where, PLAN_SCOPE.widened)
+  assert.equal(prefixResult.status, 'done')
+  assert.equal(s843Rows(prefixIo)[0].verdict, PLAN_SCOPE.widened)
   assert.equal(prefixIo.calls.run.some(({ cmd }) => cmd === D3_SCOPE_HEALTH || cmd.startsWith('git ls-files --error-unmatch --')), false)
 })
 

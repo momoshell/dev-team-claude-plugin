@@ -814,6 +814,15 @@ test('A1 document author appends and commits a fenced conventions entry', () => 
   assert.equal(io.commits[0].message, 'docs: author planned conventions entries')
 })
 
+test('ADR-045 document author commits a recognized target outside recorded context', () => {
+  const io = documentationIo({ diff: DOCUMENT_REFUSAL_DIFF, fence: () => false })
+  const result = documentationDecision(io)
+  assert.equal(result.commit, 'author-1')
+  assert.equal(result.documentation, null)
+  assert.deepEqual(io.commits[0].files, [DOCUMENT_APPEND_TARGET])
+  assert.equal(io.writes[0].path, DOCUMENT_TARGET_PATH)
+})
+
 test('B1 document author appends after the last existing Entries line', () => {
   const targetText = '# B1 fixture\n\n## Format\n\nformat-marker\n\n## Entries\n\n- **2026-01-01** — final old line. *Why:* fixture.'
   const io = documentationIo({ diff: DOCUMENT_REFUSAL_DIFF, targetText })
@@ -854,17 +863,16 @@ test('C1 document author is idempotent across two runs for one commit', () => {
   assert.equal(second.commit, 'author-1')
 })
 
-test('D1 document author leaves an unfenced conventions target byte-identical and residual', () => {
+test('D1 document author writes a recognized conventions target outside context', () => {
   const io = documentationIo({ diff: DOCUMENT_REFUSAL_DIFF, fence: () => false })
   const result = documentationDecision(io)
-  assert.deepEqual(result.documentation, {
-    id: 'documentation-plan', type: 'cosmetic', outcome: 'planned',
-    summary: 'Documentation residuals planned: 1', plan: [DOCUMENT_ENTRIES[2]],
-  })
-  assert.equal(io.files.get(DOCUMENT_TARGET_PATH), DOCUMENT_BASE)
-  assert.equal(io.writes.length, 0)
-  assert.equal(io.commits.length, 0)
-  assert.equal(io.reads.includes(DOCUMENT_TARGET_PATH), false)
+  const entry = DOCUMENT_ENTRIES[2].entry
+  assert.equal(result.documentation, null)
+  assert.equal(result.commit, 'author-1')
+  assert.equal(io.files.get(DOCUMENT_TARGET_PATH), `${DOCUMENT_BASE}${entry}\n`)
+  assert.deepEqual(io.writes.map(({ path }) => path), [DOCUMENT_TARGET_PATH])
+  assert.deepEqual(io.commits[0].files, [DOCUMENT_APPEND_TARGET])
+  assert.equal(io.reads.includes(DOCUMENT_TARGET_PATH), true)
 })
 
 test('E1 document author makes an untriggered decision a write-free commit-free no-op', () => {
@@ -890,30 +898,40 @@ test('F1 document author preserves unreadable residual bytes and writes nothing'
   assert.equal(io.reads.includes(DOCUMENT_TARGET_PATH), false)
 })
 
-test('E1 structural documentation targets remain fenced residuals', () => {
+test('E1 structural documentation targets are authored outside context', () => {
   const io = documentationIo({ fence: (target) => target === DOCUMENT_APPEND_TARGET })
   const result = documentationDecision(io)
-  assert.deepEqual(result.documentation?.plan, DOCUMENT_ENTRIES.slice(0, 2))
-  assert.equal(io.files.get(DOCUMENT_BATCH_PATH), DOCUMENT_BATCH_BASE)
-  assert.equal(io.files.get(DOCUMENT_FLAGS_PATH), DOCUMENT_FLAGS_BASE)
-  assert.equal(io.writes.length, 1)
-  assert.deepEqual(io.writes.map(({ path }) => path), [DOCUMENT_TARGET_PATH])
-  assert.equal(io.reads.includes(DOCUMENT_BATCH_PATH), false)
-  assert.equal(io.reads.includes(DOCUMENT_FLAGS_PATH), false)
+  assert.equal(result.documentation, null)
+  assert.equal(result.commit, 'author-1')
+  assert.notEqual(io.files.get(DOCUMENT_BATCH_PATH), DOCUMENT_BATCH_BASE)
+  assert.notEqual(io.files.get(DOCUMENT_FLAGS_PATH), DOCUMENT_FLAGS_BASE)
+  assert.notEqual(io.files.get(DOCUMENT_TARGET_PATH), DOCUMENT_BASE)
+  assert.deepEqual(io.writes.map(({ path }) => path), [DOCUMENT_BATCH_PATH, DOCUMENT_FLAGS_PATH, DOCUMENT_TARGET_PATH])
+  assert.deepEqual(io.commits[0].files, [DOCUMENT_BATCH_TARGET, DOCUMENT_FLAGS_TARGET, DOCUMENT_APPEND_TARGET])
+  assert.equal(io.reads.includes(DOCUMENT_BATCH_PATH), true)
+  assert.equal(io.reads.includes(DOCUMENT_FLAGS_PATH), true)
 })
 
-test('H1 both driver paths retain residuals beside an authored entry', () => {
+test('H1 both driver paths author recognized targets outside context', () => {
   const ordinaryIo = decorateDriverDocumentationIo(publicationIo({
     documentDiff: DOCUMENT_DIFF, changed: ['a.mjs', 'a.test.mjs'], envelopes: { 'planner:1': documentationPlan() },
-  }), { targetPath: `${CTX.checkout}/${DOCUMENT_APPEND_TARGET}`, changed: ['a.mjs', 'a.test.mjs'], commitIds: ['ordinary-code', 'ordinary-docs'] })
+  }), {
+    targetPath: `${CTX.checkout}/${DOCUMENT_APPEND_TARGET}`,
+    targetTexts: { [DOCUMENT_BATCH_TARGET]: DOCUMENT_BATCH_BASE, [DOCUMENT_FLAGS_TARGET]: DOCUMENT_FLAGS_BASE },
+    changed: ['a.mjs', 'a.test.mjs'], commitIds: ['ordinary-code', 'ordinary-docs'],
+  })
   const ordinary = driveTask({ ...CTX, head: 'base1111', documentDate: '2026-09-14' }, ordinaryIo)
   assert.equal(ordinary.status, 'done')
   assert.equal(ordinary.details.commit, 'ordinary-docs')
-  assert.deepEqual(ordinary.details.documentation.plan, DOCUMENT_ENTRIES.slice(0, 2))
+  assert.equal(ordinary.details.documentation ?? null, null)
   assert.ok(ordinaryIo.calls.commits.find((commit) => commit.sha === 'ordinary-docs').files.includes(DOCUMENT_APPEND_TARGET))
+  assert.ok(ordinaryIo.calls.commits.find((commit) => commit.sha === 'ordinary-docs').files.includes(DOCUMENT_BATCH_TARGET))
+  assert.ok(ordinaryIo.calls.commits.find((commit) => commit.sha === 'ordinary-docs').files.includes(DOCUMENT_FLAGS_TARGET))
 
   const convergenceIo = decorateDriverDocumentationIo(convergeIo({ documentDiff: DOCUMENT_DIFF, changed: ['a.mjs'] }), {
-    targetPath: `${CTX.checkout}/${DOCUMENT_APPEND_TARGET}`, changed: ['a.mjs'], commitIds: ['converge-code', 'converge-docs'],
+    targetPath: `${CTX.checkout}/${DOCUMENT_APPEND_TARGET}`,
+    targetTexts: { [DOCUMENT_BATCH_TARGET]: DOCUMENT_BATCH_BASE, [DOCUMENT_FLAGS_TARGET]: DOCUMENT_FLAGS_BASE },
+    changed: ['a.mjs'], commitIds: ['converge-code', 'converge-docs'],
   })
   const originalWait = convergenceIo.wait.bind(convergenceIo)
   convergenceIo.wait = (path) => {
@@ -923,8 +941,10 @@ test('H1 both driver paths retain residuals beside an authored entry', () => {
   const convergence = driveTask({ ...CONVERGE_CTX, head: 'base1111', documentDate: '2026-09-14' }, convergenceIo)
   assert.equal(convergence.status, 'converge')
   assert.equal(convergence.details.commit, 'converge-docs')
-  assert.deepEqual(convergence.details.documentation.plan, DOCUMENT_ENTRIES.slice(0, 2))
+  assert.equal(convergence.details.documentation ?? null, null)
   assert.ok(convergenceIo.calls.commits.find((commit) => commit.sha === 'converge-docs').files.includes(DOCUMENT_APPEND_TARGET))
+  assert.ok(convergenceIo.calls.commits.find((commit) => commit.sha === 'converge-docs').files.includes(DOCUMENT_BATCH_TARGET))
+  assert.ok(convergenceIo.calls.commits.find((commit) => commit.sha === 'converge-docs').files.includes(DOCUMENT_FLAGS_TARGET))
 })
 
 test('I1 document author runs anchor repair over the touched conventions target', () => {
@@ -1040,15 +1060,20 @@ test('G1 untriggered documentation remains write free and commit free', () => {
   assert.equal(io.commits.length, 0)
 })
 
-test('H1 unwritten documentation residuals still reach both driver envelopes', () => {
+test('H1 recognized documentation targets reach both driver envelopes outside context', () => {
+  const targetTexts = { [DOCUMENT_BATCH_TARGET]: DOCUMENT_BATCH_BASE, [DOCUMENT_FLAGS_TARGET]: DOCUMENT_FLAGS_BASE }
   const ordinaryIo = decorateDriverDocumentationIo(publicationIo({
     documentDiff: DOCUMENT_DIFF, changed: ['a.mjs', 'a.test.mjs'], envelopes: { 'planner:1': documentationPlan() },
-  }), { changed: ['a.mjs', 'a.test.mjs'], commitIds: ['ordinary-code', 'ordinary-docs'] })
+  }), { targetTexts, changed: ['a.mjs', 'a.test.mjs'], commitIds: ['ordinary-code', 'ordinary-docs'] })
   const ordinary = driveTask({ ...CTX, head: 'base1111', documentDate: '2026-09-14' }, ordinaryIo)
-  assert.deepEqual(ordinary.details.documentation.plan, DOCUMENT_ENTRIES.slice(0, 2))
+  assert.equal(ordinary.details.documentation ?? null, null)
+  const ordinaryDocs = ordinaryIo.calls.commits.find((commit) => commit.sha === 'ordinary-docs')
+  assert.ok(ordinaryDocs.files.includes(DOCUMENT_APPEND_TARGET))
+  assert.ok(ordinaryDocs.files.includes(DOCUMENT_BATCH_TARGET))
+  assert.ok(ordinaryDocs.files.includes(DOCUMENT_FLAGS_TARGET))
 
   const convergenceIo = decorateDriverDocumentationIo(convergeIo({ documentDiff: DOCUMENT_DIFF, changed: ['a.mjs'] }), {
-    changed: ['a.mjs'], commitIds: ['converge-code', 'converge-docs'],
+    targetTexts, changed: ['a.mjs'], commitIds: ['converge-code', 'converge-docs'],
   })
   const originalWait = convergenceIo.wait.bind(convergenceIo)
   convergenceIo.wait = (path) => {
@@ -1056,7 +1081,11 @@ test('H1 unwritten documentation residuals still reach both driver envelopes', (
     return path === 'planner:1' ? { ...env, details: { ...env.details, files_in_scope: DOCUMENT_SCOPE } } : env
   }
   const convergence = driveTask({ ...CONVERGE_CTX, head: 'base1111', documentDate: '2026-09-14' }, convergenceIo)
-  assert.deepEqual(convergence.details.documentation.plan, DOCUMENT_ENTRIES.slice(0, 2))
+  assert.equal(convergence.details.documentation ?? null, null)
+  const convergenceDocs = convergenceIo.calls.commits.find((commit) => commit.sha === 'converge-docs')
+  assert.ok(convergenceDocs.files.includes(DOCUMENT_APPEND_TARGET))
+  assert.ok(convergenceDocs.files.includes(DOCUMENT_BATCH_TARGET))
+  assert.ok(convergenceDocs.files.includes(DOCUMENT_FLAGS_TARGET))
 })
 
 test('I1 KNOWN_FLAGS document entry avoids whole-object JSON', () => {

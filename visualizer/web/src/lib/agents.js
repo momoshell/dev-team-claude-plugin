@@ -118,9 +118,45 @@ export function normalizeSkills(payload = {}) {
     ...skill,
     name: typeof skill.name === 'string' && skill.name ? skill.name : 'unmeasured',
     description: typeof skill.description === 'string' && skill.description ? skill.description : markedValue(skill.description, 'skill frontmatter is unavailable'),
+    content: typeof skill.content === 'string' && skill.content ? skill.content : markedValue(skill.content, 'skill content is unavailable'),
   }))
   const matrix = buildSkillMatrix(payload, skills)
   return { skills, matrix, rows: matrix }
+}
+
+function measuredGrant(value) {
+  if (typeof value === 'boolean') return value
+  if (record(value) && value.measured !== false && typeof value.value === 'boolean') return value.value
+  return null
+}
+
+function grantReason(value, fallback) {
+  return record(value) && typeof value.reason === 'string' && value.reason.trim() ? value.reason : fallback
+}
+
+export function normalizeSkillsPage(payload = {}) {
+  const normalized = normalizeSkills(payload)
+  const rows = normalized.skills.map((skill) => {
+    const grants = normalized.matrix.map((row) => {
+      const grant = row.cells[skill.name]?.register_grant
+      return { role: row.role, raw: grant, value: measuredGrant(grant) }
+    })
+    const unknown = grants.filter((grant) => grant.value === null)
+    const holders = unknown.length
+      ? {
+          value: null,
+          measured: false,
+          reason: unknown.map((grant) => `${grant.role}: ${grantReason(grant.raw, `register grant for ${grant.role}/${skill.name} is unavailable`)}`).join('; '),
+        }
+      : { value: grants.filter((grant) => grant.value === true).map((grant) => grant.role), measured: true, reason: null }
+    return { ...skill, holders }
+  })
+  return {
+    skills: rows,
+    rows,
+    matrix: normalized.matrix,
+    reasons: Array.isArray(payload?.reasons) ? payload.reasons.filter((reason) => typeof reason === 'string' && reason) : [],
+  }
 }
 
 export function skillsView(payload = {}) {

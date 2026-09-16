@@ -168,9 +168,30 @@ const PI_FFF_TOOLS = Object.freeze(['fff_grep', 'fff_find', 'fff_multi_grep'])
 const CLAUDE_FFF_TOOLS = Object.freeze(['mcp__fff__grep', 'mcp__fff__find_files', 'mcp__fff__multi_grep'])
 const PI_SEARCH_TOOLS = Object.freeze(['grep', 'find'])
 const CLAUDE_SEARCH_TOOLS = Object.freeze(['Glob', 'Grep'])
+export const FFF_SEARCH_WITHHOLDINGS = Object.freeze(['direct-and-listed-wrappers-refused'])
+export const FFF_SEARCH_WITHHOLDING_LIMITS = Object.freeze(['arbitrary-shell-indirection-not-refused'])
 
-function searchRecord(tools, fff, reason = undefined) {
-  return Object.freeze({ tools: Object.freeze([...tools]), fff, ...(reason ? { reason } : {}) })
+export function normalizeFffSearchWithholdingLimit(value) {
+  if (!FFF_SEARCH_WITHHOLDING_LIMITS.includes(value)) {
+    throw new TypeError(`invalid FFF search withholding limit: ${JSON.stringify(value)}`)
+  }
+  return value
+}
+
+function searchRecord(tools, fff, reasonOrOptions = undefined) {
+  const reason = typeof reasonOrOptions === 'string' ? reasonOrOptions : undefined
+  const options = reasonOrOptions && typeof reasonOrOptions === 'object' ? reasonOrOptions : undefined
+  const withholding = options?.withholding
+  const limit = options?.limit === undefined ? undefined : normalizeFffSearchWithholdingLimit(options.limit)
+  if (withholding !== undefined && !FFF_SEARCH_WITHHOLDINGS.includes(withholding)) {
+    throw new TypeError(`invalid FFF search withholding: ${JSON.stringify(withholding)}`)
+  }
+  return Object.freeze({
+    tools: Object.freeze([...tools]), fff,
+    ...(reason ? { reason } : {}),
+    ...(withholding !== undefined ? { withholding } : {}),
+    ...(limit !== undefined ? { limit } : {}),
+  })
 }
 
 function copyFffGrant(grants, adapter, available) {
@@ -207,7 +228,7 @@ function resolveFffSearch(role, adapter, grants, exists) {
   }
   return {
     grants,
-    search: searchRecord(adapter === 'pi' ? PI_FFF_TOOLS : CLAUDE_FFF_TOOLS, 'granted'),
+    search: searchRecord(adapter === 'pi' ? PI_FFF_TOOLS : CLAUDE_FFF_TOOLS, 'granted', { withholding: FFF_SEARCH_WITHHOLDINGS[0], limit: FFF_SEARCH_WITHHOLDING_LIMITS[0] }),
   }
 }
 

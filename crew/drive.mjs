@@ -8801,6 +8801,26 @@ function runTask(ctx, io, crash) {
   let rebaseConflictBounces = 0
   let suiteBuildBrief = planPath
   let suiteBuildNote = 'build'
+  const builderAssignmentBrief = (briefPath) => {
+    if (protectedHitsIn(scopeFiles, PROMPT_SURFACE.paths).length === 0) return briefPath
+    const wrapperPath = art('builder-assignment.md')
+    io.writeFile(wrapperPath, [
+      '# Builder assignment wrapper', '',
+      `Read the current builder brief at ${briefPath}.`,
+      `Builder source brief: ${briefPath}.`, '',
+      'The commit message must carry a prompt measurement claim.',
+      'Measure: <name>; before: <sample> (n=N); after: <sample> (n=N).',
+      'unmeasured — n insufficient; reason: <why>; re-measure after N seats.',
+      'Choose <name> from the closed set: `first-round pass rate`, `turns per seat`, or `<slug> refusal frequency` where `<slug>` matches `[a-z0-9][a-z0-9._-]*`.',
+      '`<name>`, `<sample>`, `<why>`, and `N` are placeholders to substitute, never literals; every `n=` and the `re-measure after N seats` count must be a positive integer.',
+      'The semicolon is the field separator: `<sample>` and `<why>` must not contain `;` or a line break.',
+      '`<why>` must contain at least one non-whitespace character; empty or all-space reasons do not match.',
+      'Put the claim on its own whole line in the commit message body, not the subject line: nothing may precede it on that line or follow its final period; a trailing ` Closes #123.` breaks the match.',
+      '`<sample>` must be followed by whitespace and then the literal parenthesised `(n=N)` shape, exactly as the template line shows.',
+      'Put the claim in details.commit_message.',
+    ].join('\n'))
+    return wrapperPath
+  }
   const censusFiles = (census) => {
     const rows = Array.isArray(census?.failures) ? census.failures : []
     return [...new Set(rows.map((row) => typeof row === 'string' ? row : row?.file).filter((file) => typeof file === 'string' && file.length > 0))]
@@ -9320,7 +9340,7 @@ function runTask(ctx, io, crash) {
   for (let round = 1; round <= limits.build_rounds + extraRounds; round += 1) {
     const finalRound = () => round >= limits.build_rounds + extraRounds
     stage(`build:r${round}`)
-    const env = assignAndWait('builder', buildBrief, buildNote)
+    const env = assignAndWait('builder', builderAssignmentBrief(buildBrief), buildNote)
     const refusalWhy = handledEnvelopeRefusalWhy(env)
     if (refusalWhy) {
       stageComplete()

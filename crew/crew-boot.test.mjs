@@ -6,7 +6,7 @@ import { execSync, spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { openLedger } from '../scripts/factory/ledger.mjs'
-import { writeRosterSnapshot, loadLadder, assertBandFloors, BAND_FLOOR_REFUSALS, bootCmd, runCmd, stopCmd, RUN_START_EVENT, BATCH_DIR_EVENT, BATCH_DIR_NOT_BATCHED, batchDirFromBrief, RUN_CONFIG_DECLARATIONS, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, awaitSeatsReady, writeTerminalLine, UsageError, memoryConfig, CHARTER_BASELINE_BYTES, CHARTER_SOURCE_BUDGET, CHARTER_SOURCE_TOTAL_BUDGET, CHARTER_CEILINGS, CHARTER_BUDGET_REFUSAL, CHARTER_UNMEASURED_CAUSES, charterFileBytes, compiledCharterBytes, charterBudgetRefusals, charterSourceRefusals, assertCharterBudgets, charterBytesRecord } from './crew.mjs'
+import { writeRosterSnapshot, loadLadder, assertBandFloors, BAND_FLOOR_REFUSALS, bootCmd, runCmd, stopCmd, RUN_START_EVENT, BATCH_DIR_EVENT, BATCH_DIR_NOT_BATCHED, batchDirFromBrief, RUN_CONFIG_DECLARATIONS, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, awaitSeatsReady, writeTerminalLine, UsageError, memoryConfig, CHARTER_BASELINE_BYTES, CHARTER_SOURCE_BUDGET, CHARTER_SOURCE_TOTAL_BUDGET, CHARTER_CEILINGS, CHARTER_BUDGET_REFUSAL, CHARTER_UNMEASURED_CAUSES, charterFileBytes, compiledCharterBytes, charterBudgetRefusals, charterSourceRefusals, assertCharterBudgets, charterBytesRecord, composeRolePrompt } from './crew.mjs'
 import { runChild, resolveValidationLane as resolveChildValidationLane } from './child.mjs'
 import { daemon, RUN_CONFIG_DECLARATIONS as DAEMON_RUN_CONFIG_DECLARATIONS } from './daemon.mjs'
 import { RUN_CONFIG_DECLARATIONS as FACTORY_RUN_CONFIG_DECLARATIONS, completionLogPath } from './factoryctl.mjs'
@@ -19,10 +19,10 @@ import { seatIo } from './seat-io.mjs'
 import { testCheckout } from '../test/fixtures.mjs'
 import { ROOT, scratchDir } from '../test/helpers.mjs'
 import { probeRepo } from '../scripts/factory/probe-repo.mjs'
-import { roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter } from './crew-test-helpers.mjs'
+import { roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter, capabilityRegister } from './crew-test-helpers.mjs'
 
 // Keep lexical import reach visible before byte-pinned regex test bodies.
-void [test, after, assert, createHash, readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync, execSync, spawn, tmpdir, join, dirname, openLedger, writeRosterSnapshot, loadLadder, assertBandFloors, BAND_FLOOR_REFUSALS, bootCmd, runCmd, stopCmd, RUN_START_EVENT, BATCH_DIR_EVENT, BATCH_DIR_NOT_BATCHED, batchDirFromBrief, RUN_CONFIG_DECLARATIONS, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, awaitSeatsReady, writeTerminalLine, UsageError, memoryConfig, CHARTER_BASELINE_BYTES, CHARTER_SOURCE_BUDGET, CHARTER_SOURCE_TOTAL_BUDGET, CHARTER_CEILINGS, CHARTER_BUDGET_REFUSAL, CHARTER_UNMEASURED_CAUSES, charterFileBytes, compiledCharterBytes, charterBudgetRefusals, charterSourceRefusals, assertCharterBudgets, charterBytesRecord, runChild, resolveChildValidationLane, daemon, DAEMON_RUN_CONFIG_DECLARATIONS, FACTORY_RUN_CONFIG_DECLARATIONS, completionLogPath, TASK_PROFILES, ASSURANCES, ASSURANCE_ALIASES, driveTask, LIMITS, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, PROTECTED_PATHS, validateScopeEntries, LIMIT_REFUSALS, PLAN_ROUNDS_MAX, BUILD_ROUNDS_MAX, REVIEW_ROUNDS_MAX, limitsCtx, limitsRecord, resolveBuildRounds, resolveLimits, resolvePlanRounds, resolveReviewRounds, piModelString, seatIo, testCheckout, ROOT, scratchDir, probeRepo, roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter, globalThis.realWrite]
+void [test, after, assert, createHash, readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync, execSync, spawn, tmpdir, join, dirname, openLedger, writeRosterSnapshot, loadLadder, assertBandFloors, BAND_FLOOR_REFUSALS, bootCmd, runCmd, stopCmd, RUN_START_EVENT, BATCH_DIR_EVENT, BATCH_DIR_NOT_BATCHED, batchDirFromBrief, RUN_CONFIG_DECLARATIONS, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, awaitSeatsReady, writeTerminalLine, UsageError, memoryConfig, CHARTER_BASELINE_BYTES, CHARTER_SOURCE_BUDGET, CHARTER_SOURCE_TOTAL_BUDGET, CHARTER_CEILINGS, CHARTER_BUDGET_REFUSAL, CHARTER_UNMEASURED_CAUSES, charterFileBytes, compiledCharterBytes, charterBudgetRefusals, charterSourceRefusals, assertCharterBudgets, charterBytesRecord, composeRolePrompt, runChild, resolveChildValidationLane, daemon, DAEMON_RUN_CONFIG_DECLARATIONS, FACTORY_RUN_CONFIG_DECLARATIONS, completionLogPath, TASK_PROFILES, ASSURANCES, ASSURANCE_ALIASES, driveTask, LIMITS, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, PROTECTED_PATHS, validateScopeEntries, LIMIT_REFUSALS, PLAN_ROUNDS_MAX, BUILD_ROUNDS_MAX, REVIEW_ROUNDS_MAX, limitsCtx, limitsRecord, resolveBuildRounds, resolveLimits, resolvePlanRounds, resolveReviewRounds, piModelString, seatIo, testCheckout, ROOT, scratchDir, probeRepo, roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter, capabilityRegister, globalThis.realWrite]
 
 const SIGNAL_BLOCK_MS = 3000
 
@@ -1545,6 +1545,54 @@ test('a memory addendum is measured outside the ceiling, and an unreadable chart
   assert.ok(CHARTER_UNMEASURED_CAUSES.includes(unreadable.unmeasured.planner))
   assert.notEqual(unreadable.bytes.planner, 0)
 })
+
+test('lean charter arm appends its tail to the complete control charter', () => {
+  const shared = 'shared charter'
+  const card = 'role card'
+  const section = 'measured section'
+  const control = composeRolePrompt(shared, card, section, 'control')
+  const lean = composeRolePrompt(shared, card, section, 'lean')
+  const terse = composeRolePrompt(shared, card, section, 'terse-tail')
+  const doctrine = 'Before adding code, apply these checks in order: delete, stdlib, native, yagni, shrink; name a concrete replacement for each tag; implement the smallest satisfying change'
+  assert.equal(lean.startsWith(control), true)
+  assert.equal(lean.slice(control.length).includes(doctrine), true)
+  assert.equal(control.includes(doctrine), false)
+  assert.equal(lean.indexOf(doctrine), control.length + 2)
+  assert.notEqual(lean, terse)
+})
+
+test('D1 prototype-named charter arms compose control exactly', () => {
+  const control = composeRolePrompt('shared', 'card', 'memory', 'control')
+  for (const arm of ['constructor', 'toString']) {
+    assert.equal(composeRolePrompt('shared', 'card', 'memory', arm), control)
+  }
+})
+
+test('B1 an invalid charter arm still refuses by name', async () => {
+  const home = scratchDir('crew-charter-invalid-home-')
+  const { root: checkoutRoot, checkout } = testCheckout('crew-charter-invalid-checkout-')
+  const cmux = callCounter()
+  const tree = callCounter()
+  try {
+    await assert.rejects(
+      () => withHome(home, () => bootCmd(
+        { task: 'charter-invalid', checkout, tier: 'build', 'headless-all': true, 'charter-arm': 'rogue-arm' },
+        { cmux, tree, renameTab: callCounter(), register: capabilityRegister() },
+      )),
+      (error) => error?.message.includes('rogue-arm')
+        && error.message.includes('control')
+        && error.message.includes('terse-tail')
+        && error.message.includes('lean'),
+    )
+    assert.equal(existsSync(testCrewDir(home, checkout, 'charter-invalid')), false)
+    assert.equal(cmux.calls.length, 0)
+    assert.equal(tree.calls.length, 0)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+})
+
 
 test('awaitSeatsReady returns immediately without probing an all-headless crew', () => {
   const cmux = callCounter()

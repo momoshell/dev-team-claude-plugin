@@ -124,7 +124,7 @@ test('bootCmd rejects an unknown charter-arm before crew state', async () => {
     const arm = 'unknown-arm'
     await assert.rejects(
       () => fixture.boot({ 'charter-arm': arm }),
-      (error) => error?.message === `invalid --charter-arm ${JSON.stringify(arm)}; expected one of control|terse-tail`,
+      (error) => error?.message === `invalid --charter-arm ${JSON.stringify(arm)}; expected one of control|terse-tail|lean`,
     )
     assert.equal(existsSync(join(fixture.crewDir, 'crew.json')), false)
   } finally { fixture.cleanup() }
@@ -145,6 +145,35 @@ test('E1/E2 compose every role prompt with byte-identical control and a final te
     assert.ok(treatment.endsWith(tail))
     assert.ok(treatment.indexOf(tail) > treatment.indexOf(section))
   }
+})
+
+test('B1 lean charter tail is self-contained and identical for every seat', () => {
+  const roles = ['lead', 'planner', 'builder', 'reviewer', 'tech-lead']
+  const rolesDir = join(REPO_ROOT, 'crew', 'roles')
+  const shared = readFileSync(join(rolesDir, '_shared.md'), 'utf8')
+  const section = 'memory: retained context'
+  const tail = '\n\nBefore adding code, apply these checks in order: delete, stdlib, native, yagni, shrink; name a concrete replacement for each tag; implement the smallest satisfying change; never simplify away the hard rules your charter already lists.\n'
+  const tags = ['delete', 'stdlib', 'native', 'yagni', 'shrink']
+  assert.doesNotMatch(tail, /ladder/i)
+  assert.ok(tail.includes('apply these checks in order'))
+  assert.ok(tail.includes('name a concrete replacement for each tag'))
+  for (const tag of tags) assert.ok(tail.includes(tag))
+  for (const role of roles) {
+    const card = readFileSync(join(rolesDir, `${role}.md`), 'utf8')
+    const control = `${shared}\n\n${card}\n\n${section}`
+    assert.equal(composeRolePrompt(shared, card, section, 'control'), control)
+    assert.equal(composeRolePrompt(shared, card, section, 'lean'), control + tail)
+  }
+})
+
+test('RV1-2 split crew suite imports helpers rather than redefining them', () => {
+  const source = readFileSync(join(REPO_ROOT, 'crew', 'crew.test.mjs'), 'utf8')
+  const helperImport = "import { shippedRoster, roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter } from './crew-test-helpers.mjs'"
+  assert.ok(source.includes(helperImport))
+  for (const definition of [
+    'const shippedRoster =', 'const roster =', 'const nodeMeetsLedgerFloor =',
+    'async function withHome', 'function testCrewDir', 'function callCounter', 'function capabilityRegister',
+  ]) assert.equal(source.includes(definition), false, `unexpected inline ${definition}`)
 })
 
 test('charter-arm is a value-bearing boot-only input and not a boolean', () => {

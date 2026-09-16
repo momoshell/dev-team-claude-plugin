@@ -162,6 +162,8 @@ export const PLANNER_SYMBOLS_EXPERIMENT = 'planner-symbols'
 export const PLANNER_SYMBOLS_ARMS = Object.freeze(['control', 'symbols-omitted'])
 export const CHARTER_TERSE_EXPERIMENT = 'charter-terse'
 export const CHARTER_TERSE_ARMS = Object.freeze(['control', 'terse-tail'])
+export const CHARTER_LEAN_EXPERIMENT = 'charter-lean'
+export const CHARTER_LEAN_ARMS = Object.freeze(['control', 'lean'])
 export const BRIEF_TRIPWIRES_EXPERIMENT = 'brief-tripwires'
 export const BRIEF_TRIPWIRES_ARMS = Object.freeze(['control', 'tripwires-omitted'])
 
@@ -855,6 +857,10 @@ export function parseCharterTerseHoldoutFraction(value) {
   return parseAdditionalHoldoutFraction(value, '--charter-terse-holdout-fraction')
 }
 
+export function parseCharterLeanHoldoutFraction(value) {
+  return parseAdditionalHoldoutFraction(value, '--charter-lean-holdout-fraction')
+}
+
 export function parseBriefTripwiresHoldoutFraction(value) {
   return parseAdditionalHoldoutFraction(value, '--brief-tripwires-holdout-fraction')
 }
@@ -863,6 +869,12 @@ export function selectCharterTerseArm(fraction, random = Math.random) {
   if (fraction === null) return null
   const draw = random()
   return draw < fraction ? 'control' : 'terse-tail'
+}
+
+export function selectCharterLeanArm(fraction, random = Math.random) {
+  if (fraction === null) return null
+  const draw = random()
+  return draw < fraction ? 'control' : 'lean'
 }
 
 export function selectBriefTripwiresArm(fraction, random = Math.random) {
@@ -3392,7 +3404,7 @@ export function bootCommand({ lane, laneDir, tier, registerPath, transport, seat
       ...shortfallFlagArgs(seats),
       ...memoryFlagArgs(runFlags),
       ...turnCeilingFlagArgs(runFlags),
-      ...(charterArm === 'terse-tail' ? ['--charter-arm', 'terse-tail'] : []),
+      ...(charterArm !== 'control' ? ['--charter-arm', charterArm] : []),
       // crew.mjs boot knows no --panes flag (KNOWN_FLAGS.boot, crew/crew.mjs:2232):
       // a pane seat is what boot produces WITHOUT --headless-all, so the pane
       // transport is the ABSENCE of this flag, never a flag of its own.
@@ -3546,6 +3558,7 @@ function resumeCommand({ batchDir, fences, checkout, parentDir, outDir, tier, ex
   add('baseline', runFlags.baseline)
   add('planner-symbols-holdout-fraction', runFlags['planner-symbols-holdout-fraction'])
   add('charter-terse-holdout-fraction', runFlags['charter-terse-holdout-fraction'])
+  add('charter-lean-holdout-fraction', runFlags['charter-lean-holdout-fraction'])
   add('brief-tripwires-holdout-fraction', runFlags['brief-tripwires-holdout-fraction'])
   for (const spec of Array.isArray(runFlags.adopt) ? runFlags.adopt : (runFlags.adopt ? [runFlags.adopt] : [])) add('adopt', spec)
   for (const path of Array.isArray(runFlags[TURN_CENSUS_FLAG]) ? runFlags[TURN_CENSUS_FLAG] : (runFlags[TURN_CENSUS_FLAG] ? [runFlags[TURN_CENSUS_FLAG]] : [])) add(TURN_CENSUS_FLAG, path)
@@ -3606,9 +3619,13 @@ function prepareDispatchContext(options) {
   } = options
   const plannerSymbolsHoldoutFraction = parsePlannerSymbolsHoldoutFraction(runFlags['planner-symbols-holdout-fraction'])
   const charterTerseHoldoutFraction = parseCharterTerseHoldoutFraction(runFlags['charter-terse-holdout-fraction'])
+  const charterLeanHoldoutFraction = parseCharterLeanHoldoutFraction(runFlags['charter-lean-holdout-fraction'])
   const briefTripwiresHoldoutFraction = parseBriefTripwiresHoldoutFraction(runFlags['brief-tripwires-holdout-fraction'])
   if (plannerSymbolsHoldoutFraction !== null && briefTripwiresHoldoutFraction !== null) {
     refuse('cannot combine --planner-symbols-holdout-fraction with --brief-tripwires-holdout-fraction because pack omission is scalar', BATCH_UNREADABLE)
+  }
+  if (charterTerseHoldoutFraction !== null && charterLeanHoldoutFraction !== null) {
+    refuse('cannot combine --charter-terse-holdout-fraction with --charter-lean-holdout-fraction because charter arm selection is scalar', BATCH_UNREADABLE)
   }
   const d = normalDeps(deps)
   const transport = resolveTransport({ runFlags })
@@ -3746,6 +3763,7 @@ function prepareDispatchContext(options) {
     deps,
     plannerSymbolsHoldoutFraction,
     charterTerseHoldoutFraction,
+    charterLeanHoldoutFraction,
     briefTripwiresHoldoutFraction,
     batchExecutionSpelling,
     batchAssuranceSpelling,
@@ -3789,6 +3807,7 @@ async function compileDispatchWave(prepared) {
     batchSeats,
     plannerSymbolsHoldoutFraction,
     charterTerseHoldoutFraction,
+    charterLeanHoldoutFraction,
     briefTripwiresHoldoutFraction,
     batchExecutionSpelling,
     batchAssuranceSpelling,
@@ -3855,7 +3874,7 @@ async function compileDispatchWave(prepared) {
   }
 
   const plannerSymbolsArms = new Map()
-  const charterTerseArms = new Map()
+  const charterArms = new Map()
   const briefTripwiresArms = new Map()
   const experimentEnrollments = new Map()
   for (const lane of waveLanes) {
@@ -3867,8 +3886,13 @@ async function compileDispatchWave(prepared) {
     }
     if (charterTerseHoldoutFraction !== null) {
       const arm = selectCharterTerseArm(charterTerseHoldoutFraction, d.random)
-      charterTerseArms.set(lane.lane, arm)
+      charterArms.set(lane.lane, arm)
       enrollments.push({ name: CHARTER_TERSE_EXPERIMENT, arm, fraction: charterTerseHoldoutFraction })
+    }
+    if (charterLeanHoldoutFraction !== null) {
+      const arm = selectCharterLeanArm(charterLeanHoldoutFraction, d.random)
+      charterArms.set(lane.lane, arm)
+      enrollments.push({ name: CHARTER_LEAN_EXPERIMENT, arm, fraction: charterLeanHoldoutFraction })
     }
     if (briefTripwiresHoldoutFraction !== null) {
       const arm = selectBriefTripwiresArm(briefTripwiresHoldoutFraction, d.random)
@@ -3915,7 +3939,7 @@ async function compileDispatchWave(prepared) {
     const prompt = promptSurfaceVerdict({ files: assuranceFiles })
     const laneEntry = laneByName.get(item.lane)
     const enrollments = experimentEnrollments.get(item.lane) || []
-    const charterArm = charterTerseArms.get(item.lane) || 'control'
+    const charterArm = charterArms.get(item.lane) || 'control'
     // A lane's own assurance is the requested tier for THAT lane; --assurance stays the
     // batch default for every lane that does not name one. A protected floor
     // raises a lower batch default, while an explicit lane assurance below it refuses.
@@ -3947,6 +3971,7 @@ async function compileDispatchWave(prepared) {
     const recordPath = join(outputDir, `${item.lane}${DISPATCH_RECORD_SUFFIX}`)
     const record = {
       lane: item.lane,
+      charter_arm: charterArm,
       proposal_source: item.proposal.source,
       proposal_unmeasured_reason: item.proposal.unmeasuredReason,
       recommended_assurance: item.proposal.recommendedAssuranceCanonical,
@@ -4200,7 +4225,7 @@ export function parseCliArgs(argv) {
   const flags = {}
   const positional = []
   const valueFlags = new Set([
-    'batch', 'fences', 'checkout', 'parent', 'out', 'tier', 'assurance', 'execution', 'variant', 'wave', 'planner-symbols-holdout-fraction', 'charter-terse-holdout-fraction', 'brief-tripwires-holdout-fraction',
+    'batch', 'fences', 'checkout', 'parent', 'out', 'tier', 'assurance', 'execution', 'variant', 'wave', 'planner-symbols-holdout-fraction', 'charter-terse-holdout-fraction', 'charter-lean-holdout-fraction', 'brief-tripwires-holdout-fraction',
     'plan-rounds', 'build-rounds', 'review-rounds', 'wait-builder', 'wait-planner',
     'wait-reviewer', 'wait-lead', 'wait-tech-lead', 'validation-lane', 'suite', 'baseline',
     TURN_CENSUS_FLAG,

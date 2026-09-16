@@ -16,7 +16,7 @@ import { fileURLToPath } from 'node:url'
 import { ROOT } from './helpers.mjs'
 import {
   openLedger, EVENT_TYPES, LedgerUsageError, WRITERS, NODE_FLOOR, isLockedError,
-  PLANNER_SYMBOLS_ARMS, CHARTER_TERSE_ARMS, BRIEF_TRIPWIRES_ARMS, EXPERIMENT_REGISTRY,
+  PLANNER_SYMBOLS_ARMS, CHARTER_TERSE_ARMS, CHARTER_LEAN_ARMS, BRIEF_TRIPWIRES_ARMS, EXPERIMENT_REGISTRY,
 } from '../scripts/factory/ledger.mjs'
 
 const SCRIPT = join(ROOT, 'scripts', 'factory', 'ledger.mjs')
@@ -95,7 +95,7 @@ function degradedHandle(extra = {}) {
   })
 }
 
-test('A1 records the charter-terse treatment through the closed registry', () => {
+test('charter-terse records the treatment through the closed registry', () => {
   const ledger = degradedHandle()
   const row = ledger.recordExperimentArm({
     adw_id: 'charter-a1', role: 'planner', experiment: 'charter-terse', arm: 'terse-tail',
@@ -113,6 +113,17 @@ test('B1 rejects a charter-terse arm outside its closed enum', () => {
   }), /recordExperimentArm: field 'arm' must be one of control\\|terse-tail/)
 })
 
+test('B2 records a charter-lean treatment and rejects an unknown lean arm', () => {
+  const ledger = degradedHandle()
+  const row = ledger.recordExperimentArm({
+    adw_id: 'charter-b2', role: 'planner', experiment: 'charter-lean', arm: 'lean', fraction: 0.1,
+  })
+  assert.deepEqual({ experiment: row.experiment, arm: row.arm }, { experiment: 'charter-lean', arm: 'lean' })
+  assert.throws(() => ledger.recordExperimentArm({
+    adw_id: 'charter-b2-unknown', role: 'planner', experiment: 'charter-lean', arm: 'free-text', fraction: 0.1,
+  }), /recordExperimentArm: field 'arm' must be one of control\\|lean/)
+})
+
 test('C1 rejects an unknown experiment before arm lookup', () => {
   const ledger = degradedHandle()
   assert.throws(() => ledger.recordExperimentArm({
@@ -121,14 +132,87 @@ test('C1 rejects an unknown experiment before arm lookup', () => {
   }), /recordExperimentArm: field 'experiment' must be one of/)
 })
 
+test('E1 empty and one-of-twenty thin lean reports stay unmeasured', () => {
+  const dbPath = join(fixture, 'lean-floor.db')
+  const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+  try {
+    const adwId = 'lean-floor-0'
+    const createdAt = '2030-01-01T00:00:00.000Z'
+    ledger.recordExperimentArm({
+      adw_id: adwId, role: 'planner', experiment: 'charter-lean', arm: 'control',
+      fraction: 0.5, at_ms: Date.parse(createdAt), created_at: createdAt,
+    })
+    ledger.recordSeatTurnCensus({
+      adw_id: adwId, role: 'planner', dispatch_id: 'lean-floor-dispatch-0', transport: 'headless-rpc',
+      turns: 1, distinct_files_read: 2, re_reads: 3, at_ms: Date.parse(createdAt), created_at: createdAt,
+    })
+    const report = ledger.charterLeanHoldout()
+    assert.deepEqual(report.arms, ['control', 'lean'])
+    assert.equal(report.rows.length, 8)
+    for (const row of report.rows) {
+      const expectedN = row.metric === 'first_round_plan_acceptance' ? 0 : row.arm === 'control' ? 1 : 0
+      assert.equal(row.n, expectedN)
+      assert.ok(row.n < 20)
+      assert.equal(row.floor, 20)
+      assert.equal(row.status, 'unmeasured')
+      assert.equal(Object.hasOwn(row, 'mean'), false)
+      assert.equal(Object.hasOwn(row, 'proportion'), false)
+      assert.equal(Object.hasOwn(row, 'interval'), false)
+    }
+  } finally { ledger.close() }
+
+  const empty = openLedger({ dbPath: join(fixture, 'lean-empty.db'), stderr: { write: () => {} } })
+  try {
+    const report = empty.charterLeanHoldout()
+    assert.deepEqual(report.arms, ['control', 'lean'])
+    assert.equal(report.rows.length, 8)
+    for (const row of report.rows) {
+      assert.equal(row.n, 0)
+      assert.equal(row.floor, 20)
+      assert.equal(row.status, 'unmeasured')
+      assert.equal(Object.hasOwn(row, 'mean'), false)
+      assert.equal(Object.hasOwn(row, 'proportion'), false)
+      assert.equal(Object.hasOwn(row, 'interval'), false)
+    }
+    assert.equal(report.rows.some((row) => row.arm === 'control' && row.n > 0), false)
+  } finally { empty.close() }
+})
+
+test('A1 charter-lean holdout keeps measured cohort means isolated', () => {
+  const ledger = openLedger({ dbPath: join(fixture, 'lean-isolation.db'), stderr: { write: () => {} } })
+  try {
+    const role = 'planner'
+    for (let index = 0; index < 20; index += 1) {
+      const adwId = `isolation-shared-${index}`
+      const createdAt = `2030-01-02T00:00:${String(index).padStart(2, '0')}.000Z`
+      for (const experiment of ['charter-lean', 'planner-symbols']) {
+        ledger.recordExperimentArm({
+          adw_id: adwId, role, experiment, arm: 'control', fraction: 0.5,
+          at_ms: Date.parse(createdAt), created_at: createdAt,
+        })
+      }
+      ledger.recordSeatTurnCensus({
+        adw_id: adwId, role, dispatch_id: `${adwId}-dispatch`, transport: 'headless-rpc',
+        turns: 1, distinct_files_read: 1, re_reads: 1, at_ms: Date.parse(createdAt), created_at: createdAt,
+      })
+    }
+    const leanControlTurns = ledger.charterLeanHoldout().rows.find((row) => row.arm === 'control' && row.metric === 'turns')
+    assert.equal(leanControlTurns?.n, 20)
+    assert.equal(leanControlTurns?.status, 'measured')
+    assert.equal(leanControlTurns?.mean, 1)
+  } finally { ledger.close() }
+})
+
 test('D1 pins the frozen experiment registry and planner-symbols identity', () => {
   assert.deepEqual(PLANNER_SYMBOLS_ARMS, ['control', 'symbols-omitted'])
   assert.deepEqual(CHARTER_TERSE_ARMS, ['control', 'terse-tail'])
+  assert.deepEqual(CHARTER_LEAN_ARMS, ['control', 'lean'])
   assert.deepEqual(BRIEF_TRIPWIRES_ARMS, ['control', 'tripwires-omitted'])
-  assert.deepEqual(Object.keys(EXPERIMENT_REGISTRY), ['planner-symbols', 'charter-terse', 'brief-tripwires'])
+  assert.deepEqual(Object.keys(EXPERIMENT_REGISTRY), ['planner-symbols', 'charter-terse', 'charter-lean', 'brief-tripwires'])
   assert.equal(EXPERIMENT_REGISTRY['planner-symbols'], PLANNER_SYMBOLS_ARMS)
   assert.equal(Object.isFrozen(PLANNER_SYMBOLS_ARMS), true)
   assert.equal(Object.isFrozen(CHARTER_TERSE_ARMS), true)
+  assert.equal(Object.isFrozen(CHARTER_LEAN_ARMS), true)
   assert.equal(Object.isFrozen(BRIEF_TRIPWIRES_ARMS), true)
   assert.equal(Object.isFrozen(EXPERIMENT_REGISTRY), true)
 })

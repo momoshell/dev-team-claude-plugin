@@ -373,10 +373,12 @@ export const MUTATION_ANCHOR_REFUSALS = Object.freeze([
 export const REVIEW_VERDICTS = Object.freeze(['pass', 'changes-needed'])
 export const PLANNER_SYMBOLS_ARMS = Object.freeze(['control', 'symbols-omitted'])
 export const CHARTER_TERSE_ARMS = Object.freeze(['control', 'terse-tail'])
+export const CHARTER_LEAN_ARMS = Object.freeze(['control', 'lean'])
 export const BRIEF_TRIPWIRES_ARMS = Object.freeze(['control', 'tripwires-omitted'])
 export const EXPERIMENT_REGISTRY = Object.freeze({
   'planner-symbols': PLANNER_SYMBOLS_ARMS,
   'charter-terse': CHARTER_TERSE_ARMS,
+  'charter-lean': CHARTER_LEAN_ARMS,
   'brief-tripwires': BRIEF_TRIPWIRES_ARMS,
 })
 export const PLANNER_SYMBOLS_SAMPLE_FLOOR = 20
@@ -5564,7 +5566,7 @@ export function openLedger({
     }
   }
 
-  function plannerSymbolsHoldout({ since = null, until = null } = {}) {
+  function experimentHoldout(experiment, closedArms, { since = null, until = null } = {}) {
     const sinceMs = since === null || since === undefined ? null : epochMsOrNull(since)
     const untilMs = until === null || until === undefined ? null : epochMsOrNull(until)
     const inWindow = (row) => {
@@ -5572,7 +5574,7 @@ export function openLedger({
       return (sinceMs === null || (Number.isFinite(atMs) && atMs >= sinceMs))
         && (untilMs === null || (Number.isFinite(atMs) && atMs < untilMs))
     }
-    const allArms = queryRows('SELECT * FROM experiment_arms ORDER BY created_at, adw_id')
+    const allArms = queryRows('SELECT * FROM experiment_arms WHERE experiment = ? ORDER BY created_at, adw_id', [experiment])
     const arms = allArms.filter(inWindow)
     const adwIds = [...new Set(arms.map((row) => row.adw_id).filter((value) => typeof value === 'string' && value.trim() !== ''))]
     const marks = adwIds.map(() => '?').join(',')
@@ -5582,8 +5584,9 @@ export function openLedger({
       JOIN experiment_arms arms
         ON census.adw_id = arms.adw_id
        AND census.role = arms.role
+       AND arms.experiment = ?
       WHERE arms.adw_id IN (${marks})
-    `, adwIds)
+    `, [experiment, ...adwIds])
     const reviewRows = adwIds.length === 0 ? [] : queryRows(`
       SELECT adw_id, verdict, created_at, id
       FROM review_outcomes
@@ -5633,7 +5636,7 @@ export function openLedger({
     })
     const reviewed = lanes.filter((lane) => lane.first_review !== null)
     const rows = []
-    for (const arm of PLANNER_SYMBOLS_ARMS) {
+    for (const arm of closedArms) {
       for (const metric of PLANNER_SYMBOLS_METRICS) {
         const source = metric === 'first_round_plan_acceptance'
           ? reviewed
@@ -5669,7 +5672,7 @@ export function openLedger({
       })
     }
     const excluded_from_first_round = []
-    for (const arm of [...PLANNER_SYMBOLS_ARMS]) {
+    for (const arm of [...closedArms]) {
       for (const entry of grouped.values()) {
         if (entry.arm !== arm) continue
         const lane = { arm: entry.arm, exclusion_reason: entry.reason, exclusion_count: entry.count }
@@ -5677,8 +5680,8 @@ export function openLedger({
       }
     }
     return {
-      experiment: 'planner-symbols',
-      arms: [...PLANNER_SYMBOLS_ARMS],
+      experiment,
+      arms: [...closedArms],
       metrics: [...PLANNER_SYMBOLS_METRICS],
       floor: PLANNER_SYMBOLS_SAMPLE_FLOOR,
       bootstrap: {
@@ -5690,6 +5693,14 @@ export function openLedger({
       rows,
       excluded_from_first_round,
     }
+  }
+
+  function plannerSymbolsHoldout(options = {}) {
+    return experimentHoldout('planner-symbols', PLANNER_SYMBOLS_ARMS, options)
+  }
+
+  function charterLeanHoldout(options = {}) {
+    return experimentHoldout('charter-lean', CHARTER_LEAN_ARMS, options)
   }
 
   function eligibleTasks() {
@@ -6181,7 +6192,7 @@ export function openLedger({
     recordGateResult, recordGateDiscrimination, recordMutationAnchorBind, recordMutationAnchorAbsence, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordEvalCell, recordRoutingChoice, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown, recordSeatReclaim, recordProviderFailure, recordPlanScope, recordSeatReask, recordAcceptReask, recordRpcExitContext, recordSeatTurnCensus, recordPlanAdoption, recordExternalFence, recordPhaseSlotWait, recordExperimentArm, recordNarrationMeasurement, recordScreenerProposal,
     startProcess, endProcess, heartbeat, startAgentSession, endAgentSession,
     recordSourceError, linkRun,
-    listSessions, listEvents, getSession, phantomSessions, dumpTable, tableNames, columnNames, sessionsFiltered, runsStartedWithin, phasesFor, runConfigurationsFor, runObservationsFor, runSeatsFor, agentEventsFor, agentSessionsFor, gateDiscriminationsFor, gateResultsFor, reviewOutcomesFor, acceptDecisionsFor, supportsJson1, eventsPage, maxEventId, cellFailureRowsFor, unattributableCellFailures, seatTeardownRowsFor, intakePicks, intakeSweepTotals, intakeCandidateRefusals, intakeCandidatePicks, agentSessionTokenTotals, gateReviewGap, cellFailures, cellAttempts, cellReviews, screenerAdoptions, evalCells, routingChoices, cellUsage, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, escalations, endedRuns, escalationWindow, seatReclaims, journalFacts, plannerSymbolsHoldout, turnEconomy, turnBreakdown, eligibleTasks, runSet, configurationReadout, transportsFor, taskReadout, jsonlDrift,
+    listSessions, listEvents, getSession, phantomSessions, dumpTable, tableNames, columnNames, sessionsFiltered, runsStartedWithin, phasesFor, runConfigurationsFor, runObservationsFor, runSeatsFor, agentEventsFor, agentSessionsFor, gateDiscriminationsFor, gateResultsFor, reviewOutcomesFor, acceptDecisionsFor, supportsJson1, eventsPage, maxEventId, cellFailureRowsFor, unattributableCellFailures, seatTeardownRowsFor, intakePicks, intakeSweepTotals, intakeCandidateRefusals, intakeCandidatePicks, agentSessionTokenTotals, gateReviewGap, cellFailures, cellAttempts, cellReviews, screenerAdoptions, evalCells, routingChoices, cellUsage, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, escalations, endedRuns, escalationWindow, seatReclaims, journalFacts, plannerSymbolsHoldout, charterLeanHoldout, turnEconomy, turnBreakdown, eligibleTasks, runSet, configurationReadout, transportsFor, taskReadout, jsonlDrift,
     stats: statsFn,
     captureMirrorErrors,
     readConnection,

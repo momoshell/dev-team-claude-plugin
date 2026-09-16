@@ -49,8 +49,8 @@ import { FINGERPRINT_FILE, fingerprintWithheld, recordTreeFingerprint } from './
 import { driveTask, resumeTask, resumeCheckpointDefect, resumeCheckpointFamily, resumeWorktreeSha256, RESUME_CHECKPOINT_VERSION, RESUME_CHECKPOINT_FAMILIES, LIMITS, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, validateScopeEntries, WAITS_S, WAIT_FLAGS, resolveWaits, waitsCtx, waitsRecord, TURN_CEILING_FLAGS, NO_TURN_CEILING, resolveTurnCeilings, turnCeilingArgs, turnCeilingsRecord, turnCeilingsJournalPatch, RUN_START_EVENT } from './drive.mjs'
 import { TASK_PROFILES } from './task-profiles.mjs'
 import { ASSURANCES, ASSURANCE_ALIASES, ASSURANCE_ALIAS_OF, canonicalAssurance } from './assurances.mjs'
-import { loadRoster, normalizeRoster, refuseRoster, rosterSeating, serializeRosterV1, serializeRosterV2, ROSTER_REFUSALS, ROSTER_SCHEMA_VERSIONS } from './roster.mjs'
-export { loadRoster, normalizeRoster, refuseRoster, rosterSeating, serializeRosterV1, serializeRosterV2, ROSTER_REFUSALS, ROSTER_SCHEMA_VERSIONS }
+import { loadRoster, normalizeRoster, refuseRoster, rosterSeating, serializeRosterV1, serializeRosterV2, ROSTER_REFUSALS, ROSTER_SCHEMA_VERSIONS, ROSTER_TRANSPORTS, assertRosterTransportPolicies } from './roster.mjs'
+export { loadRoster, normalizeRoster, refuseRoster, rosterSeating, serializeRosterV1, serializeRosterV2, ROSTER_REFUSALS, ROSTER_SCHEMA_VERSIONS, ROSTER_TRANSPORTS, assertRosterTransportPolicies }
 import { REQUEST_ALIASES, resolveRunConfiguration } from './run-configuration.mjs'
 import { limitsCtx, limitsRecord, resolveLimits } from './limits.mjs'
 import { reclaimStore } from './reclaim.mjs'
@@ -99,6 +99,10 @@ const ROLES_DIR = join(HERE, 'roles')
 const SHARED_PROMPT = join(ROLES_DIR, '_shared.md')
 
 export const HEADLESS_TRANSPORTS = Object.freeze([HEADLESS_TRANSPORT, HEADLESS_RPC_TRANSPORT])
+
+export function offCriticalPathStages () {
+  return new Set(Object.values(VARIANTS).flatMap((variant) => variant.off_critical_path_stages))
+}
 
 // Per-seat defaults. Model is overridable per task (--model-<role>) so the
 // orchestrator can size the crew: cheap seats for mechanical work, capable
@@ -1051,6 +1055,7 @@ export function resolveTier(roster, tier, args = {}) {
       // passthrough, never translated (the operator is speaking their own
       // CLI's namespace).
       model: modelOverride || null,
+      ...(Object.hasOwn(cell, 'transport_policy') ? { transport_policy: structuredClone(cell.transport_policy) } : {}),
     }
     if (cell.fallback !== undefined) {
       if (!Array.isArray(cell.fallback) || cell.fallback.length === 0) {
@@ -2885,6 +2890,7 @@ export async function bootCmd(args, deps = {}) {
       const source = loadRosterSource(rosterPath, args, { readFile: readRosterFileDep })
       roster = source.roster
       rosterRecord = source.record
+      assertRosterTransportPolicies(roster, offCriticalPathStages())
     } catch (err) {
       if (err?.reason) throw err
       throw new Error(`--tier needs a readable roster at ${rosterPath} (the runtime's own, or the one --roster names): ${err.message}`)

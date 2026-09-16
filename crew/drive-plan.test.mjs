@@ -28,6 +28,12 @@ import {
 } from './drive.mjs'
 import { suiteRunPolicy } from './headless.mjs'
 
+const A1_BOUNCE_TRACE = Object.freeze(['plan', 'build', 'scope-gate', 'lane', 'review', 'build', 'scope-gate', 'lane', 'review', 'commit', 'document', 'suite'])
+
+const normaliseStageHeads = (stages) => (Array.isArray(stages) ? stages : [])
+  .map((label) => String(label).split(':')[0])
+  .filter((head) => !['done', 'escalate'].includes(head))
+
 const zeroTurnEnvelope = (id = 'planner1', role = 'planner', detail = {}) => ({
   assignment_id: id, role, status: 'insufficient', summary: 'the RPC seat produced no envelope', artifacts: [],
   details: {
@@ -917,7 +923,7 @@ test('a throwing runClean records unproven and preserves its stash message in th
   })
 })
 
-test('a review bounce does not repeat the first-green proof for one generation', () => {
+test('A1-bounce: successful review bounce preserves both ordered rounds', () => {
   const io = fakeIo({
     envelopes: {
       'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }),
@@ -935,6 +941,19 @@ test('a review bounce does not repeat the first-green proof for one generation',
   assert.equal(res.status, 'done')
   assert.equal(io.calls.runClean.length, 1)
   assert.equal(io.calls.assign.filter((a) => a.role === 'builder').length, 2)
+  const complete = normaliseStageHeads(res.details.stages)
+  assert.deepEqual(complete, [
+    'plan', 'gate-baseline', 'build', 'scope-gate', 'lane', 'gate', 'gate-proof', 'review',
+    'build', 'scope-gate', 'lane', 'gate', 'review', 'review', 'commit', 'document', 'suite', 'suite',
+  ])
+  const projection = res.details.stages
+    .filter((label) => {
+      const head = String(label).split(':')[0]
+      return head !== 'gate-baseline' && head !== 'gate' && head !== 'gate-proof'
+        && label !== 'review:pass' && label !== 'suite:cold' && head !== 'done' && head !== 'escalate'
+    })
+    .map((label) => String(label).split(':')[0])
+  assert.deepEqual(projection, A1_BOUNCE_TRACE)
 })
 
 test('a byte-identical repair starts generation two and records its own proof', () => {

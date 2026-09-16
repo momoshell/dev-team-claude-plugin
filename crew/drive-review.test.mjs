@@ -12,6 +12,17 @@ import { screenerAdjudicationRows } from './screener.mjs'
 import { ROOT as REPO_ROOT } from '../test/helpers.mjs'
 import { checkSkillAnchors, laneFence, partitionShifts } from '../skills/qa-test-writing/anchor-pin.mjs'
 
+const A1_ENVELOPE_TRACE = Object.freeze(['review_only', 'scope-gate', 'envelope-accept'])
+const A1_REPAIR_TRACE = Object.freeze(['repair', 'build', 'scope-gate', 'lane', 'review', 'commit', 'document', 'suite'])
+const B1_REPEAT_TRACE = Object.freeze(['review', 'review', 'review'])
+const C1_ENVELOPE_SEAT_SCOPE = Object.freeze(['review_only', 'scope-gate'])
+const C1_ENVELOPE_SCOPE_ACCEPT = Object.freeze(['scope-gate', 'envelope-accept'])
+const C1_REPAIR_OPEN = Object.freeze(['repair', 'build'])
+
+const normaliseStageHeads = (stages) => (Array.isArray(stages) ? stages : [])
+  .map((label) => String(label).split(':')[0])
+  .filter((head) => !['done', 'escalate'].includes(head))
+
 const REVIEW_RUN_ID = 'run-review-783'
 const REVIEW_CTX = Object.freeze({ ...CTX, variant: 'review_only', run_id: REVIEW_RUN_ID, roles: ['reviewer'], seatedRoles: ['reviewer'] })
 const REVIEW_BASE_SHA = Object.freeze('a'.repeat(40))
@@ -1885,6 +1896,63 @@ test('repair uses one bounded triage round and keeps the reviewed finish path', 
   assert.match(io.calls.writes[`${TD}/repair-brief.md`], /files_in_scope/)
   assert.match(io.calls.writes[`${TD}/repair-brief.md`], /\n- a\.mjs\n/)
   assert.doesNotMatch(JSON.stringify(io.calls.logs), /\"stage\":\"(?:plan|check|gate)/)
+})
+
+test('A1-envelope: review_only emits the complete envelope trace', () => {
+  const result = driveTask(REVIEW_CTX, strictReviewIo(reviewEnvelope()))
+  assert.equal(result.status, 'done')
+  assert.deepEqual(normaliseStageHeads(result.details.stages), A1_ENVELOPE_TRACE)
+})
+
+test('A1-repair: repair emits its ordered branch projection', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': triageEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    changed: ['a.mjs', 'a.test.mjs'], files: TRIAGE_FILES,
+  })
+  const result = driveTask(CTX_REPAIR, io)
+  assert.equal(result.status, 'done')
+  assert.deepEqual(normaliseStageHeads(result.details.stages), [
+    'repair', 'build', 'scope-gate', 'lane', 'review', 'review', 'commit', 'document', 'suite', 'suite',
+  ])
+  const projection = result.details.stages
+    .filter((label) => label !== 'review:pass' && label !== 'suite:cold')
+    .filter((label) => !['done', 'escalate'].includes(String(label).split(':')[0]))
+    .map((label) => String(label).split(':')[0])
+  assert.deepEqual(projection, A1_REPAIR_TRACE)
+})
+
+test('B1-repeat: a true review bounce retains all reviewer heads', () => {
+  const { result, io } = b318SiteA('bounce')
+  assert.equal(result.status, 'done')
+  const reviews = normaliseStageHeads(result.details.stages).filter((head) => head === 'review')
+  assert.deepEqual(reviews, B1_REPEAT_TRACE)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'reviewer').length, 2)
+})
+
+test('C1-envelope-seat-scope: the named envelope seat precedes scope proof', () => {
+  const result = driveTask(REVIEW_CTX, strictReviewIo(reviewEnvelope()))
+  assert.equal(result.status, 'done')
+  assert.deepEqual(normaliseStageHeads(result.details.stages).slice(0, 2), C1_ENVELOPE_SEAT_SCOPE)
+})
+
+test('C1-envelope-scope-accept: scope proof precedes envelope acceptance', () => {
+  const result = driveTask(REVIEW_CTX, strictReviewIo(reviewEnvelope()))
+  assert.equal(result.status, 'done')
+  assert.deepEqual(normaliseStageHeads(result.details.stages).slice(1, 3), C1_ENVELOPE_SCOPE_ACCEPT)
+})
+
+test('C1-repair-open: repair opens before its build', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': triageEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    changed: ['a.mjs', 'a.test.mjs'], files: TRIAGE_FILES,
+  })
+  const result = driveTask(CTX_REPAIR, io)
+  assert.equal(result.status, 'done')
+  assert.deepEqual(normaliseStageHeads(result.details.stages).slice(0, 2), C1_REPAIR_OPEN)
 })
 
 test('full, scout and repair declarations remain byte-identical snapshots', () => {

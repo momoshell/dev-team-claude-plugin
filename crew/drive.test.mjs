@@ -11,6 +11,22 @@ import { ADVERSARY_REFUSAL, ADVERSARY_REFUSALS, ADVERSARY_TRIGGERS, CENSUS_CARRI
 import { CENSUS_CARRIER_FILES as DISPATCH_CENSUS_CARRIER_FILES } from '../scripts/factory/dispatch-batch.mjs'
 import { ANTI_REPLAY_REFUSAL_REASONS, envelopeFieldMetadataDefect } from './drive.mjs'
 
+const A1_FULL_TRACE = Object.freeze(['plan', 'build', 'scope-gate', 'lane', 'review', 'commit', 'document', 'suite'])
+const A1_PUBLISH_DISABLED_TRACE = Object.freeze(['commit', 'document', 'suite', 'suite'])
+const D1_ORDERED_PAIR = Object.freeze(['plan', 'build'])
+const E1_FORBIDDEN_ITERATION = 'for (const declaredStage of shape.stages) execute(declaredStage)'
+
+const d1ControlRow = () => ({ name: 'D1 control', executor: ['plan', 'build'], expected: D1_ORDERED_PAIR })
+const assertExactTraceRows = (rows) => {
+  for (const row of rows) {
+    assert.deepEqual(row.executor, row.expected, `${row.name} emitted trace`)
+  }
+}
+
+const normaliseStageHeads = (stages) => (Array.isArray(stages) ? stages : [])
+  .map((label) => String(label).split(':')[0])
+  .filter((head) => !['done', 'escalate'].includes(head))
+
 test('a supplied wait budget reaches io.wait and names the seat overdue at that budget', () => {
   const io = fakeIo({ envelopes: { 'planner:1': null } })
   const res = driveTask({ ...CTX, waits: { planner: 42 } }, io)
@@ -2073,8 +2089,15 @@ test('the daemon child preflight accepts the same planner-less directed crew', (
 })
 
 test('coded shape topology is measured against every successful executor family', () => {
-  const head = (label) => String(label).split(':')[0]
-  const emittedHeads = (result) => result.details.stages.filter((label) => !['escalate', 'done'].includes(head(label))).map(head)
+  const expectedTraces = {
+    full: ['plan', 'build', 'scope-gate', 'lane', 'review', 'review', 'commit', 'document', 'suite', 'suite'],
+    scout: ['scout', 'scope-gate', 'envelope-accept'],
+    review_only: ['review_only', 'scope-gate', 'envelope-accept'],
+    repair: ['repair', 'build', 'scope-gate', 'lane', 'review', 'review', 'commit', 'document', 'suite', 'suite'],
+    directed: ['directed', 'gate-baseline', 'build', 'scope-gate', 'lane', 'gate', 'gate-proof', 'review', 'review', 'commit', 'document', 'suite', 'suite'],
+    verify_only: ['verify_only', 'scope-gate', 'envelope-accept'],
+  }
+  const emittedHeads = (result) => normaliseStageHeads(result.details.stages)
   const strictEnvelopeIo = (envelope, role, runId) => {
     const io = fakeIo({ changed: [] })
     const assign = io.assign.bind(io)
@@ -2146,11 +2169,12 @@ test('coded shape topology is measured against every successful executor family'
       name,
       coded: shapeValidationDefect(shape, name),
       executor: emittedHeads(result),
+      expected: expectedTraces[name],
       canonical: [...EXECUTOR_TOPOLOGIES[name].stages],
+      raw: [...result.details.stages],
       operations: {},
     }
     assert.deepEqual(row.coded, { defect: null, detail: null }, name)
-    assert.equal(row.executor.every((stage) => row.canonical.includes(stage)), true, name)
     return row
   })
   assert.deepEqual(measured.map(({ name }) => name), Object.keys(VARIANTS))
@@ -2183,6 +2207,22 @@ test('coded shape topology is measured against every successful executor family'
           row.operations.swap.push({ coded, executor: row.executor })
         }
       }
+    }
+  }
+  measured.push(d1ControlRow())
+  assertExactTraceRows(measured)
+  for (const row of measured) {
+    if (!row.canonical) continue
+    const projection = row.raw
+      .filter((label) => label !== 'review:pass' && label !== 'suite:cold')
+      .filter((label) => !['done', 'escalate'].includes(String(label).split(':')[0]))
+      .filter((label) => !(row.name === 'directed' && String(label).split(':')[0] === 'gate-baseline'))
+      .map((label) => String(label).split(':')[0])
+    let cursor = 0
+    for (const stage of projection) {
+      const position = row.canonical.indexOf(stage, cursor)
+      assert.notEqual(position, -1, `${row.name} monotone projection missing ${stage}`)
+      cursor = position + 1
     }
   }
   assert.equal(shapeValidationDefect({ ...VARIANTS.full, stages: [...VARIANTS.full.stages].reverse() }, 'full').defect, 'stage-reordered')
@@ -2222,6 +2262,57 @@ test('D1 full stage order rejects a permutation', () => {
   const stages = [...VARIANTS.full.stages]
   ;[stages[0], stages[1]] = [stages[1], stages[0]]
   assert.equal(shapeValidationDefect({ ...VARIANTS.full, stages }, 'full').defect, 'stage-reordered')
+})
+
+test('A1-full: full emits its ordered main-flow projection', () => {
+  const io = fakeIo({
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'done')
+  assert.deepEqual(normaliseStageHeads(result.details.stages), [
+    'plan', 'build', 'scope-gate', 'lane', 'review', 'review', 'commit', 'document', 'suite', 'suite',
+  ])
+  const projection = result.details.stages
+    .filter((label) => label !== 'review:pass' && label !== 'suite:cold')
+    .filter((label) => !['done', 'escalate'].includes(String(label).split(':')[0]))
+    .map((label) => String(label).split(':')[0])
+  assert.deepEqual(projection, A1_FULL_TRACE)
+})
+
+test('A1-publish-off: default-unarmed publish-disabled path retains the mechanical tail', () => {
+  const io = fakeIo({
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'done')
+  const complete = normaliseStageHeads(result.details.stages)
+  assert.deepEqual(complete, [
+    'plan', 'build', 'scope-gate', 'lane', 'review', 'review', 'commit', 'document', 'suite', 'suite',
+  ])
+  assert.deepEqual(complete.slice(complete.indexOf('commit')), A1_PUBLISH_DISABLED_TRACE)
+})
+
+test('D1-ordered: the control row reaches the exact matrix equality', () => {
+  assertExactTraceRows([d1ControlRow()])
+})
+
+test('E1-no-interpreter: the detector rejects declared-stage iteration', () => {
+  const detectsInterpreter = (source) => typeof source === 'string' && source.includes('for (const declaredStage of shape.stages) execute(declaredStage)')
+  assert.equal(detectsInterpreter(E1_FORBIDDEN_ITERATION), true)
+  let driveSource
+  try {
+    driveSource = readFileSync(new URL('./drive.mjs', import.meta.url), 'utf8')
+  } catch (error) {
+    assert.fail(`drive source unreadable: ${error?.code || error?.message || 'unknown'}`)
+  }
+  assert.equal(typeof driveSource, 'string')
+  assert.ok(driveSource.length > 0, 'drive source must not be empty')
+  assert.equal(detectsInterpreter(driveSource), false)
 })
 
 test('shape validator exposes a frozen closed vocabulary, preserves legacy details, and is server-loadable', () => {

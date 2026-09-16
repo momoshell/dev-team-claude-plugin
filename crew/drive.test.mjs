@@ -2813,8 +2813,9 @@ test('every journal emit site in the driver is inventoried, wrapped and on the r
   assert.equal(prescriptionSites.length, 1)
   assert.equal(prescriptionSites[0].wrapper, 'recordRow')
   const legacySites = sites.filter(({ keys }) => !keys.split(' ').includes('scope_admission') && !keys.split(' ').includes('envelope_refused') && !keys.split(' ').includes('review_identity_refused') && !keys.split(' ').includes('plan_prescription_applied'))
-  assert.equal(legacySites.length, 72)
-  assert.deepEqual(legacySites.map(({ wrapper, events, keys }) => [wrapper, events, keys]), DRIVE_JOURNAL_EXPECTED)
+  const expectedLegacySites = DRIVE_JOURNAL_EXPECTED.filter(([, , keys]) => keys !== 'at rebase_restore_diagnosis')
+  assert.equal(legacySites.length, expectedLegacySites.length)
+  assert.deepEqual(legacySites.map(({ wrapper, events, keys }) => [wrapper, events, keys]), expectedLegacySites)
   assert.ok(sites.every(({ wrapper }) => wrapper === 'recordRow' || wrapper === 'operationalRow'))
   assert.equal(sites.filter(({ wrapper }) => wrapper === 'operationalRow').length, 2)
   assert.deepEqual(sites.filter(({ wrapper }) => wrapper === 'operationalRow').map(({ events, keys }) => [events, keys]), [
@@ -3334,36 +3335,38 @@ test('RV1-1 producer slots survive every envelope route', () => {
     'git merge-base HEAD origin/main': { ok: true, output: 'older000\n' },
   }
   const commonSlots = { files: [], base: 'origin/main', commit: 'abc1234' }
+  const recoveryOid = 'a'.repeat(40)
+  const recoveryRef = `refs/crew/recovery/${recoveryOid}`
+  const recoveryProof = {
+    ["git rev-parse --verify 'abc1234^{commit}'"]: { ok: true, output: `${recoveryOid}\n` },
+    [`git update-ref '${recoveryRef}' '${recoveryOid}'`]: { ok: true, output: '' },
+    [`git rev-parse --verify '${recoveryRef}^{commit}'`]: { ok: true, output: `${recoveryOid}\n` },
+  }
   const rebaseCases = [
     ['fetch', { 'git fetch origin main': { ok: false, output: 'fetch failed' } }, commonSlots],
     ['base-probe', { ...rebaseBase, 'git rev-parse origin/main': { ok: false, output: '' } }, commonSlots],
     ['merge-base-probe', { ...rebaseBase, 'git merge-base HEAD origin/main': { ok: false, output: '' } }, commonSlots],
     ['conflict', {
-      ...rebaseBase, 'git rebase origin/main': { ok: false, output: 'conflict' },
-      'git diff --name-only --diff-filter=U:1': { ok: true, output: 'conflict.mjs\n' },
-      'git diff --name-only --diff-filter=U:2': { ok: true, output: '' },
-      'git rebase --abort': { ok: true, output: '' }, 'git rev-parse HEAD': { ok: true, output: 'abc1234\n' },
-      'git symbolic-ref --quiet --short HEAD': { ok: true, output: 'feature/slot-coverage\n' },
-      'git status --porcelain -uall': { ok: true, output: '' },
-      'git rev-parse --git-path rebase-merge': { ok: true, output: `${CTX.checkout}/.git/rebase-merge\n` },
-      'git rev-parse --git-path rebase-apply': { ok: true, output: `${CTX.checkout}/.git/rebase-apply\n` },
-    }, { files: ['conflict.mjs'], base: 'origin/main', commit: 'abc1234' }, /restoration proven at HEAD abc1234/],
-    ['unproven-restoration', {
-      ...rebaseBase, 'git rebase origin/main': { ok: false, output: 'conflict' },
-      'git rebase --abort': { ok: false, output: '' }, 'git rev-parse HEAD': { ok: true, output: 'abc1234\n' },
-    }, commonSlots],
+      ...rebaseBase, ...recoveryProof,
+      'git rebase origin/main': { ok: false, output: 'conflict' },
+      'git diff --name-only --diff-filter=U': { ok: true, output: 'conflict.mjs\n' },
+    }, { files: ['conflict.mjs'], base: 'origin/main', commit: 'abc1234' }, /conflict evidence was empty or unmeasurable/],
+    ['recovery-ref', {
+      ...rebaseBase,
+      'git rebase origin/main': { ok: false, output: 'conflict' },
+      'git diff --name-only --diff-filter=U': { ok: true, output: 'conflict.mjs\n' },
+    }, { files: ['conflict.mjs'], base: 'origin/main', commit: 'abc1234' }, /accepted commit recovery ref was not proved/],
     ['post-rebase-head', {
       ...rebaseBase, 'git rebase origin/main': { ok: true, output: '' },
       'git rev-parse HEAD': { ok: false, output: '' },
     }, commonSlots],
   ]
-  for (const [producer, runs, slots, restorationRoute] of rebaseCases) {
+  for (const [producer, runs, slots, expectedWhy] of rebaseCases) {
     const result = rebaseSlotFixture(runs)
     assertChoiceEscalation(result, 'rebase', slots, `rebase:${producer}`)
-    if (restorationRoute) {
-      assert.match(result.details.escalation.why, restorationRoute, `rebase:${producer} must reach the proven-restoration producer`)
-      assert.doesNotMatch(result.details.escalation.why, /UNPROVEN/, `rebase:${producer} must not collapse into the unproven-restoration producer`)
-    }
+    if (expectedWhy) assert.match(result.details.escalation.why, expectedWhy, `rebase:${producer} must preserve its direct retained-state diagnosis`)
+    if (producer === 'conflict') assert.equal(result.details.recovery_ref, recoveryRef)
+    if (producer === 'recovery-ref') assert.equal(result.details.recovery_ref, undefined)
   }
   for (const { producer, files, run } of scopeSlotFixtures()) {
     assertChoiceEscalation(run(), 'scope', { files }, producer)

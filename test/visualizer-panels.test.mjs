@@ -11,8 +11,9 @@ import { eventStory, eventStreamSummary } from '../visualizer/web/src/lib/event-
 import { assignmentPath, envelopeFacts, envelopeGroups, envelopeOverview, envelopeSections, trajectoryRowStory, trajectorySummary } from '../visualizer/web/src/lib/diagnostic-story.js'
 import { executionTopology, factoryStepCategory, factoryStepName, factoryStepTrace } from '../visualizer/web/src/lib/execution-steps.js'
 import { VARIANTS } from '../crew/variants.mjs'
+import { TASK_PROFILES } from '../crew/task-profiles.mjs'
 import { shapeValidationDefect } from '../crew/shape-validator.mjs'
-import { compareSeat, draftTopologyEdit, inspectWorkflowNode, layoutWorkflowGraph, selectionReset, shapeWorkflowGraph, validateTopologyEdit } from '../visualizer/web/src/lib/workflows.js'
+import { compareSeat, draftTopologyEdit, inspectWorkflowNode, layoutWorkflowGraph, selectionReset, shapeWorkflowGraph, validateTopologyEdit, workflowPresentation } from '../visualizer/web/src/lib/workflows.js'
 import { crewSummary } from '../visualizer/web/src/lib/crew.js'
 import { assuranceMeta, assuranceOption, executionMeta, runConfiguration, taskProfileMeta } from '../visualizer/web/src/lib/workflow-semantics.js'
 import { diffLines } from '../visualizer/web/src/lib/diff-lines.js'
@@ -2514,6 +2515,72 @@ test('workflow-page:A1', () => {
   }
 })
 
+test('workflow-catalog:A1 canonical numbered stages', () => {
+  const page = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/WorkflowsPage.svelte'), 'utf8')
+  for (const shape of Object.keys(VARIANTS)) {
+    const presentation = workflowPresentation(shape, { observedLabels: [] })
+    const expected = executionTopology(shape, []).rows.map((row, index) => ({ name: row.stage, position: index + 1 }))
+    assert.deepEqual(presentation.stages, expected, shape)
+    assert.deepEqual(presentation.stages.map((stage) => stage.position), expected.map((stage) => stage.position), shape)
+  }
+  assert.match(page, /#each presentations as presentation \(presentation\.shape\)/)
+  assert.match(page, /<ol class="stage-order">[\s\S]*presentation\.stages/)
+})
+
+test('workflow-catalog:B1 declaration facts and profile inversion', () => {
+  for (const shape of Object.keys(VARIANTS)) {
+    const declaration = VARIANTS[shape]
+    const presentation = workflowPresentation(shape, { observedLabels: [] })
+    const expectedSeats = Array.isArray(declaration.required_seats) ? [...declaration.required_seats] : ['planner', 'builder', 'reviewer']
+    const expectedProfiles = Object.entries(TASK_PROFILES)
+      .filter(([, profile]) => profile.recommended_execution === shape)
+      .map(([key, profile]) => ({ key, name: profile.name }))
+    assert.deepEqual(presentation.seats.items, expectedSeats, `${shape} seats`)
+    assert.equal(presentation.writes.value, declaration.writes, `${shape} writes`)
+    assert.deepEqual(presentation.envelope_fields.items, declaration.envelope_fields, `${shape} envelope fields`)
+    assert.deepEqual(presentation.recommended_profiles.items, expectedProfiles, `${shape} recommending profiles`)
+    assert.notEqual(presentation.seats.items, declaration.required_seats, `${shape} seats are cloned`)
+    assert.notEqual(presentation.envelope_fields.items, declaration.envelope_fields, `${shape} envelope fields are cloned`)
+    if (declaration.envelope_fields[0]?.item_fields) assert.notEqual(presentation.envelope_fields.items[0].item_fields, declaration.envelope_fields[0].item_fields, `${shape} nested envelope metadata is cloned`)
+  }
+})
+
+test('workflow-catalog:C1 canonical topology contract and page dependency', () => {
+  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/workflows.js'), 'utf8')
+  const body = source.match(/export function workflowPresentation\([\s\S]*?\n\}/)?.[0] || ''
+  assert.match(body, /const canonicalTopology = executionTopology\(executionShape, observedLabels\)/)
+  assert.doesNotMatch(body, /(?:VARIANTS\[[^\]]+\]|declaration)\.stages/)
+  const page = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/WorkflowsPage.svelte'), 'utf8')
+  assert.match(page, /import \{ workflowPresentation \} from '\.\/workflows\.js'/)
+  assert.match(page, /workflowPresentation\(workflow\?\.shape/)
+})
+
+test('workflow-catalog:D1 empty facts explain their absence', () => {
+  for (const shape of Object.keys(VARIANTS)) {
+    const presentation = workflowPresentation(shape, { observedLabels: [] })
+    for (const key of ['seats', 'envelope_fields', 'recommended_profiles']) {
+      const fact = presentation[key]
+      if (fact.items.length === 0) assert.equal(typeof fact.absence_reason, 'string', `${shape}.${key} reason type`)
+      if (fact.items.length === 0) assert.ok(fact.absence_reason.trim(), `${shape}.${key} reason`)
+      if (fact.items.length > 0) assert.equal(fact.absence_reason, null, `${shape}.${key} present reason`)
+    }
+    if (presentation.writes.value == null) assert.ok(presentation.writes.absence_reason?.trim(), `${shape}.writes reason`)
+    else assert.equal(presentation.writes.absence_reason, null, `${shape}.writes present reason`)
+  }
+  assert.ok(workflowPresentation('full').envelope_fields.absence_reason)
+  for (const shape of ['repair', 'directed']) assert.ok(workflowPresentation(shape).recommended_profiles.absence_reason)
+  const unknown = workflowPresentation('not-declared')
+  for (const key of ['seats', 'envelope_fields', 'recommended_profiles']) assert.ok(unknown[key].absence_reason?.trim(), `unknown ${key} reason`)
+  assert.ok(unknown.writes.absence_reason?.trim())
+})
+
+test('workflow-catalog:E1 all-shapes read-only page boundary', () => {
+  const page = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/WorkflowsPage.svelte'), 'utf8')
+  assert.match(page, /let presentations = \$derived\(workflows\.map\(/)
+  assert.match(page, /<p class="boundary-note">Read-only catalog\. This page has no editing, compose, dispatch, apply, or post action\.<\/p>/)
+  for (const violation of [/proposeWorkflowEdit|proposeSeat|beginTopology|draftTopologyEdit|validateTopologyEdit/, /<input\b/i, /<button\b/i, /<form\b/i]) assert.doesNotMatch(page, violation)
+})
+
 test('workflow-page:A2', () => {
   const graph = shapeWorkflowGraph('full', {
     observedLabels: ['plan', 'gate', 'gate-repair:1', 'gate-reverify:1', 'review:r1', 'review:r2'],
@@ -2844,12 +2911,10 @@ test('RV1-3 final-index topology move is measured and refused', () => {
   assert.deepEqual(verdict, { status: 'refused', reason: 'stage-reordered', tone: 'warning' })
 })
 
-test('RV1-4 topology controls draft removal and use the shape validator', () => {
+test('RV1-4 workflow page keeps the read-only boundary', () => {
   const page = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/WorkflowsPage.svelte'), 'utf8')
-  assert.match(page, /draftTopologyEdit\(\{ shape: selectedShape, stage, action: 'remove' \}\)/)
-  const verdict = validateTopologyEdit(draftTopologyEdit({ shape: 'full', stage: 'plan', action: 'remove' }))
-  assert.notEqual(verdict.reason, 'edit-no-op')
-  assert.doesNotMatch(page, /#1291/)
-  assert.doesNotMatch(page, /validator pending/i)
-  assert.match(page, /checked by the shape validator/i)
+  assert.match(page, /<p class="boundary-note">Read-only catalog\. This page has no editing, compose, dispatch, apply, or post action\.<\/p>/)
+  assert.match(page, /workflowPresentation/)
+  assert.doesNotMatch(page, /proposeWorkflowEdit|proposeSeat|beginTopology|draftTopologyEdit|validateTopologyEdit/)
+  assert.doesNotMatch(page, /<input\b|<button\b|<form\b/i)
 })

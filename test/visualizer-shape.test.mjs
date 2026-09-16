@@ -833,6 +833,22 @@ test('skills-page:B1 measured holders distinguish grants from false cells', () =
   assert.match(beta.holders.reason, /planner/)
 })
 
+test('prompts-page:B1', () => {
+  const page = normalizePrompts({ prompts: [
+    { role: '_shared', text: 'shared', recipients: ['lead', 'planner'], recipients_reason: null },
+    { role: 'builder', text: 'builder', recipients: [], recipients_reason: 'recipient evidence is unavailable' },
+  ] })
+  assert.deepEqual(page.map((prompt) => prompt.role), ['_shared', 'builder'])
+  const measured = page.find((prompt) => prompt.role === '_shared')
+  const unknown = page.find((prompt) => prompt.role === 'builder')
+  assert.deepEqual(measured.recipients, ['lead', 'planner'])
+  assert.equal(measured.recipients_reason, null)
+  assert.equal(unknown.recipients, null)
+  assert.notDeepEqual(unknown.recipients, [])
+  assert.equal(typeof unknown.recipients_reason, 'string')
+  assert.ok(unknown.recipients_reason.length > 0)
+})
+
 test('timeline empty run is safe', () => {
   const out = layoutTimeline({ phases: [] }, [])
   assert.deepEqual(out.blocks, [])

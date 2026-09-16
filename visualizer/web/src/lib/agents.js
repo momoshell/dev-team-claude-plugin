@@ -1,6 +1,7 @@
 export const AGENT_ROLES = Object.freeze(['lead', 'planner', 'builder', 'reviewer', 'tech-lead'])
 export const REFUSAL_FLAGS = Object.freeze(['extensions', 'skills', 'mcp_servers', 'local_provider'])
 export const UNMEASURED_REASON = 'measurement is unavailable'
+export const PROMPT_SURFACE_CONSEQUENCE = 'Charter changes force stronger assurance and require a measurement claim in the commit message.'
 
 function record(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -165,15 +166,26 @@ export function skillsView(payload = {}) {
 
 export function normalizePrompts(payload = {}) {
   const prompts = Array.isArray(payload?.prompts) ? payload.prompts : []
-  return prompts.map((prompt = {}) => ({
-    ...prompt,
-    role: typeof prompt.role === 'string' && prompt.role ? prompt.role : 'unmeasured',
-    text: typeof prompt.text === 'string' ? prompt.text : null,
-    source_bytes: markedValue(prompt.source_bytes, 'prompt source byte size is unavailable'),
-    charter_bytes: markedValue(prompt.charter_bytes, 'charter_bytes is unavailable from the last boot journal'),
-    arm: markedValue(prompt.arm, 'compiled role prompt is unavailable'),
-    protected: prompt.protected || prompt.label || 'protected: prompt-surface',
-  }))
+  return prompts.map((prompt = {}) => {
+    const recipients = Array.isArray(prompt.recipients)
+      ? prompt.recipients.filter((recipient) => typeof recipient === 'string' && recipient.trim())
+      : []
+    const measuredRecipients = recipients.length ? recipients : null
+    const recipientsReason = typeof prompt.recipients_reason === 'string' && prompt.recipients_reason.trim()
+      ? prompt.recipients_reason
+      : 'prompt recipients are unavailable'
+    return {
+      ...prompt,
+      role: typeof prompt.role === 'string' && prompt.role ? prompt.role : 'unmeasured',
+      text: typeof prompt.text === 'string' ? prompt.text : null,
+      recipients: measuredRecipients,
+      recipients_reason: measuredRecipients ? null : recipientsReason,
+      source_bytes: markedValue(prompt.source_bytes, 'prompt source byte size is unavailable'),
+      charter_bytes: markedValue(prompt.charter_bytes, 'charter_bytes is unavailable from the last boot journal'),
+      arm: markedValue(prompt.arm, 'compiled role prompt is unavailable'),
+      protected: prompt.protected || prompt.label || 'protected: prompt-surface',
+    }
+  })
 }
 
 export function promptsView(payload = {}) {

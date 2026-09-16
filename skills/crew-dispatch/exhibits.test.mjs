@@ -247,6 +247,17 @@ test('test reach constant names the computed path blind spot', () => {
   assert.ok(TEST_REACH_BLIND_SPOT.includes('a computed path or dynamic import is invisible to a static scan'))
 })
 
+test('RV1-1 D1 avoids deleted declaration paths in HEAD', () => {
+  const source = readText(join(ROOT, 'test/factory-model-eval.test.mjs'))
+  const start = source.indexOf("test('D1 moved candidate declarations retain reviewed bytes'")
+  const end = source.indexOf('\ntest(', start + 1)
+  assert.notEqual(start, -1, 'D1 contract test is missing')
+  assert.notEqual(end, -1, 'D1 contract test has no closing boundary')
+  const d1Source = source.slice(start, end)
+  assert.equal(d1Source.includes('HEAD:'), false)
+  assert.equal(d1Source.includes('execFileSync'), false)
+})
+
 test('batch doctrine mirrors the computed path blind spot', () => {
   const text = readText(join(HERE, 'references/batch.md'))
   assert.equal(text.split(TEST_REACH_BLIND_SPOT).length - 1, 1)

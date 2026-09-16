@@ -4,6 +4,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { join } from 'node:path'
+import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { ROOT, scratchDir, sqliteAvailable } from './helpers.mjs'
 import {
@@ -278,15 +280,15 @@ async function refusalFor(options) {
   return { caught, calls }
 }
 
-test('offline bench declarations pin mechanical cells and local model membership', () => {
+test('A1 role benches contain every required valid input', () => {
   const readJson = (relativePath) => JSON.parse(readFileSync(join(ROOT, relativePath), 'utf8'))
   const declarations = {
     planner: {
-      path: 'docs/audits/2026-09-16/bench/planner-candidates.json',
+      path: 'docs/audits/2026-09-16/bench/planner/candidates.json',
       cell: readJson('crew/roster.json').tiers.mechanical.planner,
     },
     builder: {
-      path: 'docs/audits/2026-09-16/bench/builder-candidates.json',
+      path: 'docs/audits/2026-09-16/bench/builder/candidates.json',
       cell: readJson('crew/roster.json').tiers.mechanical.builder,
     },
   }
@@ -316,6 +318,19 @@ test('offline bench declarations pin mechanical cells and local model membership
   })
 
   for (const [role, spec] of Object.entries(declarations)) {
+    const benchDir = join(ROOT, 'docs/audits/2026-09-16/bench', role)
+    const requiredBenchFiles = ['task.md', 'gate.mjs', 'judge.json', 'candidates.json']
+    for (const name of [...requiredBenchFiles, 'bench.sha']) {
+      const bytes = readFileSync(join(benchDir, name))
+      assert.ok(bytes.length > 0, `${role}/${name} must be non-blank`)
+    }
+    const judge = readJson(`docs/audits/2026-09-16/bench/${role}/judge.json`)
+    assert.deepEqual(Object.keys(judge).sort(), ['model', 'vendor'])
+    assert.equal(typeof judge.model, 'string')
+    assert.notEqual(judge.model.trim(), '')
+    assert.equal(typeof judge.vendor, 'string')
+    assert.notEqual(judge.vendor.trim(), '')
+    assert.match(readFileSync(join(benchDir, 'bench.sha'), 'utf8').trim(), /^[a-f0-9]{64}$/i)
     const declaration = readJson(spec.path)
     assert.equal(typeof declaration, 'object')
     assert.equal(Array.isArray(declaration), false)
@@ -1089,4 +1104,220 @@ test('routing policy and ledger write refusals stop bench admission without fabr
   )
   assert.deepEqual(rows, [])
   assert.deepEqual(calls, [])
+})
+
+const ROLE_BENCH_ROOT = 'docs/audits/2026-09-16/bench'
+const ROLE_NAMES = ['planner', 'builder']
+const reviewedCandidateShas = {
+  planner: '8571f5eef303d0429a504ba356538c9a4d0c6acbe7a684a0a251cd2e1f585c52',
+  builder: '6bd024951c522057ce3bc84904585ad3cc34c6d629fe0b4c4ad097bb5628063a',
+}
+const PLANNER_TARGET = ['bench', 'sha', 'mismatch'].join('-')
+const BUILDER_README = `${ROLE_BENCH_ROOT}/builder/README.md`
+
+function roleBenchPath(role, name) {
+  return join(ROOT, ROLE_BENCH_ROOT, role, name)
+}
+
+function gateSummaryFromOutput(output) {
+  const line = String(output || '').split(/\r?\n/).filter((entry) => entry.startsWith('GATE-SUMMARY ')).at(-1)
+  assert.ok(line, `gate output must contain a readable summary: ${String(output || '')}`)
+  let summary
+  try { summary = JSON.parse(line.slice('GATE-SUMMARY '.length)) } catch (error) { assert.fail(`gate summary must be JSON: ${error.message}`) }
+  assert.equal(Number.isSafeInteger(summary.total), true)
+  assert.equal(Number.isSafeInteger(summary.failed), true)
+  assert.equal(Number.isSafeInteger(summary.errored), true)
+  return summary
+}
+
+function runRoleGate(role) {
+  const result = spawnSync(process.execPath, [roleBenchPath(role, 'gate.mjs')], {
+    cwd: ROOT,
+    encoding: 'utf8',
+    env: { ...process.env, MODEL_EVAL_TEST_ENDPOINT: 'http://127.0.0.1:1' },
+  })
+  assert.equal(result.error, undefined, `gate ${role} must start: ${result.error?.message || ''}`)
+  assert.equal(result.signal, null, `gate ${role} must not be interrupted`)
+  assert.equal(typeof result.status, 'number', `gate ${role} must return an exit status`)
+  const output = `${result.stdout || ''}\n${result.stderr || ''}`
+  return { ...result, output, summary: gateSummaryFromOutput(output) }
+}
+
+function fixtureGit(cwd, args) {
+  const result = spawnSync('git', args, {
+    cwd,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      GIT_AUTHOR_NAME: 'model-eval fixture',
+      GIT_AUTHOR_EMAIL: 'fixture@example.invalid',
+      GIT_COMMITTER_NAME: 'model-eval fixture',
+      GIT_COMMITTER_EMAIL: 'fixture@example.invalid',
+    },
+  })
+  assert.equal(result.error, undefined, `fixture git command must start: ${result.error?.message || ''}`)
+  assert.equal(result.signal, null, `fixture git command must not be interrupted: ${args.join(' ')}`)
+  assert.equal(result.status, 0, `fixture git command must succeed: ${args.join(' ')}\n${result.stdout || ''}\n${result.stderr || ''}`)
+  return result
+}
+
+function runFixtureGate(dir) {
+  const result = spawnSync(process.execPath, [join(dir, 'gate.mjs')], {
+    cwd: dir,
+    encoding: 'utf8',
+    env: { ...process.env, MODEL_EVAL_TEST_ENDPOINT: 'http://127.0.0.1:1' },
+  })
+  assert.equal(result.error, undefined, `fixture gate must start: ${result.error?.message || ''}`)
+  assert.equal(result.signal, null, 'fixture gate must not be interrupted')
+  assert.equal(typeof result.status, 'number', 'fixture gate must return an exit status')
+  const output = `${result.stdout || ''}\n${result.stderr || ''}`
+  return { ...result, output, summary: gateSummaryFromOutput(output) }
+}
+
+function plannerGateFixture({ output } = {}) {
+  const dir = scratchDir('factory-model-eval-planner-gate-')
+  mkdirSync(dir, { recursive: true })
+  fixtureGit(dir, ['init', '-q'])
+  const source = `header\n${PLANNER_TARGET}\nfooter\n${PLANNER_TARGET}\n`
+  writeFileSync(join(dir, 'source.mjs'), source)
+  fixtureGit(dir, ['add', 'source.mjs'])
+  fixtureGit(dir, ['-c', 'commit.gpgsign=false', 'commit', '-qm', 'fixture'])
+  writeFileSync(join(dir, 'gate.mjs'), readFileSync(roleBenchPath('planner', 'gate.mjs'), 'utf8'))
+  mkdirSync(join(dir, '.bench-out'), { recursive: true })
+  const findings = [
+    { path: 'source.mjs', line: 2, classification: 'fixture occurrence' },
+    { path: 'source.mjs', line: 4, classification: 'fixture occurrence' },
+  ]
+  writeFileSync(join(dir, '.bench-out/planner-scout.json'), JSON.stringify(
+    output ?? { schema: 1, target: PLANNER_TARGET, findings },
+    null,
+    2,
+  ))
+  return { dir, findings }
+}
+
+function builderCanonicalReadme(scaffold) {
+  const input = '[3, -1, 3, 2, -1]\n<!-- PLACEHOLDER: replace this array with the canonical ascending unique JSON array. -->'
+  assert.equal(scaffold.includes(input), true, 'builder fixture scaffold must contain its work item')
+  return scaffold.replace(input, '[-1,2,3]')
+}
+
+function builderGateFixture({ readme = null, extraDiff = false } = {}) {
+  const dir = scratchDir('factory-model-eval-builder-gate-')
+  mkdirSync(join(dir, 'docs/audits/2026-09-16/bench/builder'), { recursive: true })
+  fixtureGit(dir, ['init', '-q'])
+  const scaffold = readFileSync(roleBenchPath('builder', 'README.md'), 'utf8')
+  writeFileSync(join(dir, BUILDER_README), scaffold)
+  if (extraDiff) writeFileSync(join(dir, 'fixture-noise.txt'), 'fixture baseline\n')
+  fixtureGit(dir, ['add', '.'])
+  fixtureGit(dir, ['-c', 'commit.gpgsign=false', 'commit', '-qm', 'fixture'])
+  writeFileSync(join(dir, 'gate.mjs'), readFileSync(roleBenchPath('builder', 'gate.mjs'), 'utf8'))
+  if (readme !== null) writeFileSync(join(dir, BUILDER_README), readme)
+  if (extraDiff) writeFileSync(join(dir, 'fixture-noise.txt'), 'fixture changed\n')
+  return { dir, scaffold, canonical: builderCanonicalReadme(scaffold) }
+}
+
+test('B1 role gates report positive readable summaries', () => {
+  for (const role of ROLE_NAMES) {
+    const result = runRoleGate(role)
+    const summary = result.summary
+    assert.notEqual(result.status, 0, `${role} gate must be red at the repository baseline`)
+    assert.ok(summary.total >= 1, `${role} gate must report at least one check`)
+    assert.ok(summary.failed >= 1)
+    assert.equal(summary.errored, 0)
+  }
+})
+
+test('C1 recorded bench digests match all four inputs', () => {
+  const inputNames = { task: 'task.md', gate: 'gate.mjs', judge: 'judge.json', candidates: 'candidates.json' }
+  for (const role of ROLE_NAMES) {
+    const input = {}
+    for (const [name, file] of Object.entries(inputNames)) input[name] = readFileSync(roleBenchPath(role, file), 'utf8')
+    const expectedDigest = benchSha(input)
+    const recordedDigest = readFileSync(roleBenchPath(role, 'bench.sha'), 'utf8').trim()
+    assert.equal(recordedDigest, expectedDigest, `${role} recorded digest`)
+    for (const name of Object.keys(input)) {
+      const changed = { ...input, [name]: `${input[name]}changed` }
+      assert.notEqual(benchSha(changed), expectedDigest, `${role} digest must change when ${name} changes`)
+    }
+  }
+})
+
+test('D1 moved candidate declarations retain reviewed bytes', () => {
+  for (const role of ROLE_NAMES) {
+    const oldPath = `docs/audits/2026-09-16/bench/${role}-candidates.json`
+    const movedPath = roleBenchPath(role, 'candidates.json')
+    assert.equal(existsSync(join(ROOT, oldPath)), false, `${oldPath} must be absent`)
+    const moved = readFileSync(movedPath)
+    const actualCandidateSha = createHash('sha256').update(moved).digest('hex')
+    assert.equal(actualCandidateSha, reviewedCandidateShas[role])
+  }
+})
+
+test('E1 real bench compile coverage remains offline', async () => {
+  const probes = []
+  const deps = {
+    readRoster: null,
+    runGate: async () => ({ total: 4, failed: 1, errored: 0 }),
+    probe: async (url) => { probes.push(url); return true },
+    resolveAdapters: (roles, args, seats) => fixtureAdapters(roles, args, seats),
+  }
+  for (const role of ROLE_NAMES) {
+    const compiled = await compileBench({ dir: join(ROOT, ROLE_BENCH_ROOT, role), deps })
+    assert.equal(compiled.role, role)
+    assert.match(compiled.sha, /^[a-f0-9]{64}$/)
+  }
+  assert.equal(probes.length, 6)
+  assert.equal(probes.every((url) => url === 'http://10.112.20.20:8080/v1'), true)
+
+  const source = readFileSync(join(ROOT, 'test/factory-model-eval.test.mjs'), 'utf8')
+  const start = source.indexOf("test('E1 real bench compile coverage remains offline'")
+  const end = source.indexOf('\ntest(', start + 1)
+  assert.notEqual(start, -1)
+  assert.notEqual(end, -1)
+  const e1Source = source.slice(start, end)
+  for (const fragment of [
+    ['run', 'Bench'].join(''),
+    ['fetch', '('].join(''),
+    ['http', 's.request('].join(''),
+    ['probeLocalEndpoint', '('].join(''),
+    ['model-eval.mjs', 'run'].join(' '),
+  ]) assert.equal(e1Source.includes(fragment), false, `E1 must not contain ${fragment}`)
+})
+
+test('planner candidate gate exercises every P1-P4 check in both directions', () => {
+  const positive = plannerGateFixture()
+  const green = runFixtureGate(positive.dir)
+  assert.equal(green.status, 0, green.output)
+  assert.deepEqual(green.summary, { total: 4, failed: 0, errored: 0 })
+  for (const [label, output] of [
+    ['P1', []],
+    ['P2', { schema: 1, target: PLANNER_TARGET, findings: [{ ...positive.findings[0], classification: '' }, positive.findings[1]] }],
+    ['P3', { schema: 1, target: PLANNER_TARGET, findings: [positive.findings[0], positive.findings[0]] }],
+    ['P4', { schema: 1, target: PLANNER_TARGET, findings: [positive.findings[0]] }],
+  ]) {
+    const fixture = plannerGateFixture({ output })
+    const red = runFixtureGate(fixture.dir)
+    assert.notEqual(red.status, 0, `${label} mutation must make the gate red`)
+    assert.match(red.output, new RegExp(`^FAIL ${label}(?::|\\s)`, 'm'))
+  }
+})
+
+test('builder candidate gate exercises every B1-B3 check in both directions', () => {
+  const positive = builderGateFixture({ readme: builderCanonicalReadme(readFileSync(roleBenchPath('builder', 'README.md'), 'utf8')) })
+  const green = runFixtureGate(positive.dir)
+  assert.equal(green.status, 0, green.output)
+  assert.deepEqual(green.summary, { total: 3, failed: 0, errored: 0 })
+
+  const scaffold = readFileSync(roleBenchPath('builder', 'README.md'), 'utf8')
+  for (const [label, options] of [
+    ['B1', { readme: scaffold.replace('```BENCH_WORK_ITEM\n', '') }],
+    ['B2', { readme: scaffold }],
+    ['B3', { readme: builderCanonicalReadme(scaffold), extraDiff: true }],
+  ]) {
+    const fixture = builderGateFixture(options)
+    const red = runFixtureGate(fixture.dir)
+    assert.notEqual(red.status, 0, `${label} mutation must make the gate red`)
+    assert.match(red.output, new RegExp(`^FAIL ${label}(?::|\\s)`, 'm'))
+  }
 })

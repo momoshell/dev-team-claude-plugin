@@ -2178,14 +2178,14 @@ test('coded shape topology is measured against every successful executor family'
           const stages = [...shape.stages]
           ;[stages[left], stages[right]] = [stages[right], stages[left]]
           const coded = shapeValidationDefect({ ...shape, stages }, row.name)
-          const expectedDefect = row.name === 'full' ? null : 'stage-reordered'
+          const expectedDefect = 'stage-reordered'
           assert.equal(coded.defect, expectedDefect, `${row.name} swap ${left}/${right}`)
           row.operations.swap.push({ coded, executor: row.executor })
         }
       }
     }
   }
-  assert.equal(shapeValidationDefect({ ...VARIANTS.full, stages: [...VARIANTS.full.stages].reverse() }, 'full').defect, null)
+  assert.equal(shapeValidationDefect({ ...VARIANTS.full, stages: [...VARIANTS.full.stages].reverse() }, 'full').defect, 'stage-reordered')
   assert.deepEqual([
     ['scope-gate', 'review_only', 'envelope-accept'],
     ['review_only', 'envelope-accept', 'scope-gate'],
@@ -2198,6 +2198,30 @@ test('coded shape topology is measured against every successful executor family'
   assert.equal(shapeValidationDefect({ ...VARIANTS.scout, required_seats: ['reviewer'] }, 'scout').defect, 'seats-mismatch')
   assert.equal(shapeValidationDefect({ ...VARIANTS.repair, sources: { ...VARIANTS.repair.sources, gate: 'brief' } }, 'repair').defect, 'sources-invalid')
   assert.equal(shapeValidationDefect({ ...VARIANTS.directed, required_seats: ['reviewer', 'builder'] }, 'directed').defect, 'seats-mismatch')
+})
+
+test('A1 full reordered declaration is refused', () => {
+  const stages = [...VARIANTS.full.stages]
+  const last = stages.length - 1
+  ;[stages[0], stages[last]] = [stages[last], stages[0]]
+  assert.equal(shapeValidationDefect({ ...VARIANTS.full, stages }, 'full').defect, 'stage-reordered')
+})
+
+test('B1 canonical full declaration validates', () => {
+  assert.deepEqual(shapeValidationDefect(VARIANTS.full, 'full'), { defect: null, detail: null })
+})
+
+test('C1 full extras and missing heads retain distinct codes', () => {
+  const extra = shapeValidationDefect({ ...VARIANTS.full, stages: [...VARIANTS.full.stages, 'scout'] }, 'full')
+  const missing = shapeValidationDefect({ ...VARIANTS.full, stages: VARIANTS.full.stages.filter((stage) => stage !== 'check') }, 'full')
+  assert.equal(extra.defect, 'stage-extra')
+  assert.equal(missing.defect, 'stage-missing')
+})
+
+test('D1 full stage order rejects a permutation', () => {
+  const stages = [...VARIANTS.full.stages]
+  ;[stages[0], stages[1]] = [stages[1], stages[0]]
+  assert.equal(shapeValidationDefect({ ...VARIANTS.full, stages }, 'full').defect, 'stage-reordered')
 })
 
 test('shape validator exposes a frozen closed vocabulary, preserves legacy details, and is server-loadable', () => {

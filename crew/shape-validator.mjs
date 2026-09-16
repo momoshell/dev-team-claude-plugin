@@ -211,7 +211,7 @@ function topologyDefect(topology, actual, verdict) {
   if (expected.some((head) => !actual.includes(head))) {
     return verdict('stage-missing', actual, expected)
   }
-  if (topology !== EXECUTOR_TOPOLOGIES.full && actual.some((head, i) => actual[i] !== expected[i])) {
+  if (actual.some((head, i) => actual[i] !== expected[i])) {
     return verdict('stage-reordered', actual, expected)
   }
   return { defect: null, detail: null }

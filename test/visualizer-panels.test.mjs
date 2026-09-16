@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { PANEL_REFRESH_MS, PANEL_STALE_AFTER_MS, acceptRows, brakePanel, cellHealthPanel, fleetCost, fleetEscalationRate, fleetMedianDuration, fleetPassRate, fleetPhasesPerRun, fleetTokens, findingRows, gateChips, intakeCandidateRows, intakePanel, reviewRows, rosterEditForm, rosterPanel, panelAgeLabel, panelReadLoop, readFreshness, rosterProposal, runSetPanel, teardownPanel } from '../visualizer/web/src/lib/panels.js'
+import { PANEL_REFRESH_MS, PANEL_STALE_AFTER_MS, acceptRows, brakePanel, cellHealthPanel, fleetCost, fleetEscalationRate, fleetMedianDuration, fleetPassRate, fleetPhasesPerRun, fleetTokens, findingRows, gateChips, intakeCandidateRows, intakePanel, panelAgeLabel, panelReadLoop, readFreshness, reviewRows, rosterEditForm, rosterPanel, rosterPickPanel, rosterProposal, runSetPanel, teardownPanel } from '../visualizer/web/src/lib/panels.js'
 import { VIEWS, parseHash, formatHash } from '../visualizer/web/src/lib/route.js'
 import { ATTENTION_KEYS, absenceMark, attentionBreakdown, configurationDimensionCell, configurationFilterView, costCell, createSemaphore, crewArchive, deriveDisplayStatus, deriveStatus, escalationProbeTargets, fleetActivity, fleetView, gateCell, heartbeatCell, needsAttention, openRecordNote, operationsOverview, profileEvidenceView, reviewCell, runActivity, runDetailConfiguration, runDetailSeats, runDetailState, runtimeActivitySummary, slotWaitCell, tokenCell, shipStatus } from '../visualizer/web/src/lib/fleet.js'
 import { ROLE_ORDER, acceptEvidence, bounceArrows, gateMarkers, gateProofStory, laneRows, phaseFilterId, phasePanel, renderMarkdown } from '../visualizer/web/src/lib/trace.js'
@@ -21,6 +21,7 @@ import { createCrewStateSource } from '../visualizer/server/crew-state.mjs'
 import { createLedgerFeed } from '../visualizer/server/ledger-feed.mjs'
 import { openLedger } from '../scripts/factory/ledger.mjs'
 import { scratchDir, sqliteAvailable } from './helpers.mjs'
+import { proposeRosterEdit } from '../visualizer/web/src/lib/api.js'
 
 async function withAttentionFixture(extraKey, callback) {
   const dir = scratchDir('visualizer-attention-')
@@ -635,7 +636,7 @@ test('roster diffs distinguish metadata, additions, removals, and context', () =
   assert.deepEqual(lines.map((line) => line.kind), ['meta', 'meta', 'meta', 'removal', 'addition', 'context'])
   const panel = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
   const block = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/DiffBlock.svelte'), 'utf8')
-  assert.equal((panel.match(/<DiffBlock /g) || []).length, 2)
+  assert.equal((panel.match(/<DiffBlock /g) || []).length, 3)
   assert.match(block, /diff-line\.addition/)
   assert.match(block, /diff-line\.removal/)
   assert.match(block, /diff-line\.meta/)
@@ -694,6 +695,63 @@ test('rosterEditForm derives options and seeds the selected seat', () => {
   assert.deepEqual(result.roles, ['reviewer', 'tech-lead'])
   assert.deepEqual(result.cell, { provider: 'openai', id: 'gpt-5', agent: 'pi', effort: 'max' })
   assert.equal(result.pending, null)
+})
+
+test("C1 propose the pick returns today's diff without a write", async () => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  const cell = { provider:'openai', id:'gpt-5.6-sol', agent:'pi', effort:'high' }
+  globalThis.fetch = async (path, options = {}) => {
+    calls.push({ path:String(path), options })
+    return new Response(JSON.stringify({ ok:true, diff:'--- a/crew/roster.json\\n+++ b/crew/roster.json', refusals:[] }), { status:200, headers:{ 'content-type':'application/json' } })
+  }
+  try {
+    const result = await proposeRosterEdit('build', 'reviewer', cell)
+    assert.equal(result.diff, '--- a/crew/roster.json\\n+++ b/crew/roster.json')
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].path, '/api/roster/propose')
+    assert.equal(calls.filter(({ path }) => /\/apply(?:\?|$)/.test(path)).length, 0)
+    assert.deepEqual(JSON.parse(calls[0].options.body), { tier:'build', role:'reviewer', cell })
+    const panel = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
+    assert.match(panel, /Propose the pick/)
+    assert.match(panel, /proposeRosterEdit\(column\.tier, seat\.role, pick\.chosen_cell\)/)
+    const policyStart = panel.indexOf('class="pick-explanation"')
+    const policyEnd = panel.indexOf('</section>', policyStart)
+    assert.ok(policyStart >= 0 && policyEnd > policyStart)
+    assert.doesNotMatch(panel.slice(policyStart, policyEnd), /applyRosterLadder/)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('RV1-1 roster pick fetch effect ignores staged local drafts', () => {
+  const panel = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
+  assert.match(panel, /let pickRows = \$derived\(\(payload\?\.rail \|\| \[\]\)\.flatMap\(/)
+  const start = panel.indexOf('const revision = ++pickRevision')
+  const end = panel.indexOf('return () => { active = false }', start)
+  assert.ok(start >= 0 && end > start)
+  const pickEffect = panel.slice(start, end)
+  assert.match(pickEffect, /const rows = pickRows/)
+  assert.doesNotMatch(pickEffect, /\b(?:rail|staged)\b/)
+})
+
+test('rosterPickPanel preserves null metrics, ranked order, and raw evidence', () => {
+  const payload = {
+    current_cell:null,
+    policy_candidates:[{ rate:{ value:null, display:null, numerator:null, denominator:null, reason:'rate-absent' }, cost:{ value:null, source:null, reason:'cost-absent' } }],
+    exclusions:[{ cell:{ id:'thin' }, reason:'rate-thin' }],
+    ranked_survivors:[{ cell:{ id:'winner' } }],
+    eval_cells:[{ id:1, asserts_passed:null }],
+    chosen_cell:null,
+    outcome:'abstained',
+    reason:'no-eligible-candidate',
+  }
+  const view = rosterPickPanel(payload)
+  assert.equal(view.policy_candidates[0].rate.denominator, null)
+  assert.equal(view.policy_candidates[0].cost.value, null)
+  assert.equal(view.ranked_survivors[0].cell.id, 'winner')
+  assert.deepEqual(view.eval_cells, payload.eval_cells)
+  assert.equal(view.reason, 'no-eligible-candidate')
 })
 
 test('rosterProposal exposes refusals as pending and preserves a successful diff', () => {

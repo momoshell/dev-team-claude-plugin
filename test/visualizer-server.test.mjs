@@ -29,7 +29,7 @@ function digest(path) { return createHash('sha256').update(readFileSync(path)).d
 async function json(base, path, options) {
   const response = await fetch(`${base}${path}`, options)
   const text = await response.text()
-  return { status: response.status, body: text, json: JSON.parse(text) }
+  return { status: response.status, body: text, json: JSON.parse(text), allow: response.headers.get('allow') }
 }
 function announce(child) {
   return new Promise((resolve, reject) => {
@@ -2310,6 +2310,67 @@ test('roster ladder routes stage and compose read-only bundles', { skip: SKIP },
   }
 })
 
+test('roster pick validates its read-only query and explains the selected bench', { skip: SKIP }, async () => {
+  const dir = scratchDir('visualizer-roster-pick-route-')
+  const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')
+  const fixtureRoster = serverRosterFixtureFile('visualizer-roster-pick-roster-')
+  const rosterValue = JSON.parse(readFileSync(fixtureRoster.path, 'utf8'))
+  for (const model of Object.values(rosterValue.models)) {
+    model.cost_cache_read_per_mtok ??= 0
+    model.cost_cache_write_per_mtok ??= 0
+  }
+  writeFileSync(fixtureRoster.path, JSON.stringify(rosterValue, null, 2))
+  fixture(ledgerDb)
+  const writer = openLedger({ dbPath:ledgerDb, stderr:{ write() {} } })
+  writer.recordEvalCell({
+    bench:'bench-pick-newest', role:'reviewer', provider:'openai', model_id:'gpt-5.6-sol', agent:'pi', effort:'high',
+    envelope_status:'received', production:1, asserts_passed:12, asserts_declared:12,
+    billed_input_tokens:100, billed_output_tokens:200, billed_cache_read_tokens:300, billed_cache_write_tokens:400,
+    created_at:'2026-09-15T00:00:00.000Z',
+  })
+  writer.close()
+  const beforeLedger = digest(ledgerDb), beforeRoster = digest(fixtureRoster.path)
+  let child, base
+  try {
+    ({ child, base } = await startServer(ledgerDb, triageDb, null, fixtureRoster.path))
+    const success = await json(base, '/api/roster/pick?tier=build&role=reviewer')
+    assert.equal(success.status, 200)
+    assert.equal(success.json.current_cell.id, 'gpt-5.6-sol')
+    assert.equal(success.json.policy_candidates.length, 1)
+    assert.equal(success.json.policy_candidates[0].rate.denominator, 12)
+    assert.equal(success.json.policy_candidates[0].cost.source, 'roster model catalog')
+    assert.equal(success.json.chosen_cell.id, 'gpt-5.6-sol')
+    assert.equal(success.json.ranked_survivors[0].cell.id, 'gpt-5.6-sol')
+    assert.equal(success.json.eval_cells.length, 1)
+    assert.equal(success.json.eval_cells[0].role, 'reviewer')
+    assert.equal((await json(base, '/api/roster/pick?tier=build')).status, 400)
+    assert.equal((await json(base, '/api/roster/pick?tier=build&tier=build&role=reviewer')).status, 400)
+    assert.equal((await json(base, '/api/roster/pick?tier=build&role=')).status, 400)
+    assert.equal((await json(base, '/api/roster/pick?tier=unknown&role=reviewer')).status, 400)
+    const post = await json(base, '/api/roster/pick?tier=build&role=reviewer', { method:'POST' })
+    assert.equal(post.status, 405)
+    assert.equal(post.allow, 'GET')
+    const head = await fetch(`${base}/api/roster/pick?tier=build&role=reviewer`, { method:'HEAD' })
+    assert.equal(head.status, 200)
+    await stopServer(child); child = null
+    assert.equal(digest(ledgerDb), beforeLedger)
+    assert.equal(digest(fixtureRoster.path), beforeRoster)
+
+    const missingDir = join(dir, 'missing'), missingDb = join(missingDir, 'ledger.db')
+    ;({ child, base } = await startServer(missingDb, join(dir, 'missing-visualizer.db'), null, fixtureRoster.path))
+    const missing = await json(base, '/api/roster/pick?tier=build&role=reviewer')
+    assert.equal(missing.status, 200)
+    assert.equal(missing.json.chosen_cell, null)
+    assert.ok(missing.json.evidence_reason)
+    await stopServer(child); child = null
+    assert.equal(existsSync(missingDb), false)
+  } finally {
+    if (child) await stopServer(child)
+    rmSync(dir, { recursive:true, force:true })
+    rmSync(fixtureRoster.dir, { recursive:true, force:true })
+  }
+})
+
 test('atomic roster writes refuse a stale draft and preserve the current file', () => {
   const dir = scratchDir('visualizer-roster-atomic-')
   const rosterPath = join(dir, 'roster.json')
@@ -2533,12 +2594,14 @@ test('RV1-1 GitHub repository routing guard and local env catalog secrets', asyn
 test('visualizer dropdowns use the shared themed listbox instead of native menus', () => {
   const root = join(process.cwd(), 'visualizer', 'web', 'src')
   const dropdown = readFileSync(join(root, 'lib', 'Dropdown.svelte'), 'utf8')
-  const consumers = ['App.svelte', 'lib/Filters.svelte', 'lib/Pagination.svelte', 'lib/TaskList.svelte', 'lib/EventStream.svelte', 'lib/RosterEditor.svelte', 'lib/RosterPanel.svelte']
+  const consumers = ['App.svelte', 'lib/Filters.svelte', 'lib/Pagination.svelte', 'lib/TaskList.svelte', 'lib/EventStream.svelte', 'lib/RosterPanel.svelte']
   for (const file of consumers) {
     const source = readFileSync(join(root, file), 'utf8')
     assert.match(source, /Dropdown/)
     assert.doesNotMatch(source, /<select\b/)
   }
+  assert.equal(existsSync(join(root, 'lib', 'RosterEditor.svelte')), false)
+  assert.equal(gitGrepHits({ needle:'RosterEditor', paths:['visualizer/web/src/'], cwd:process.cwd() }).count, 0)
   for (const needle of ['role="combobox"', 'role="listbox"', 'role="option"', 'aria-controls', 'ArrowDown', 'ArrowUp', 'Escape', 'dropdown-menu']) assert.match(dropdown, new RegExp(needle))
   assert.match(dropdown, /var\(--panel-raised\)/)
 })

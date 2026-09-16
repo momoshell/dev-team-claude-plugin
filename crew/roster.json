@@ -271,6 +271,22 @@
       ],
       "source": "~/.pi/agent/models-store.json (pi model directory, provider openai-codex)",
       "last_verified": "2026-09-16"
+    },
+    "meta/muse-spark-1.3-contributor": {
+      "cost_in_per_mtok": 0.1,
+      "cost_out_per_mtok": 0.2,
+      "cost_cache_read_per_mtok": 0.002,
+      "cost_cache_write_per_mtok": 0,
+      "cache_rate_source": "openrouter publishes a cacheRead of 0.002 per Mtok against a 0.1 input rate for meta/muse-spark-1.3-contributor — a 0.02x multiplier, NOT the 0.10x that anthropic and openai publish. The figure is recorded as served rather than normalised to the ratified 0.10x, because a rate nobody charges is not a cheaper guess, it is a wrong one. cacheWrite is a published 0.00x rate rather than an absent one.",
+      "context": 1048576,
+      "tags": [
+        "reasoning",
+        "tool-call",
+        "cheap",
+        "vendor-diverse"
+      ],
+      "source": "~/.pi/agent/models-store.json (pi model directory, provider openrouter)",
+      "last_verified": "2026-09-17"
     }
   }
 }

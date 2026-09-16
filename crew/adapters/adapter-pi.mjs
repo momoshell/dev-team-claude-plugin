@@ -86,7 +86,7 @@ export function capabilitiesFor({ transport, grants } = {}) {
 // pi namespaces models as <pi-provider>/<id>. openai -> openai-codex is
 // DELIBERATE: that provider routes through the ChatGPT subscription OAuth
 // (verified `pi auth check --provider openai-codex`).
-export const PI_PROVIDERS = Object.freeze({ openai: 'openai-codex', anthropic: 'anthropic' })
+export const PI_PROVIDERS = Object.freeze({ openai: 'openai-codex', anthropic: 'anthropic', meta: 'openrouter/meta' })
 
 // An OWN-property lookup on BOTH halves (#739): a bare bracket read reaches
 // Object.prototype, so a roster provider named `toString` or `constructor`

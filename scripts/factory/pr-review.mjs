@@ -2,7 +2,7 @@
 // scripts/factory/pr-review.mjs — resolve one pull request and run a read-only,
 // identity-bound review in a disposable worktree.
 
-import { realpathSync,
+import { readlinkSync, realpathSync,
   lstatSync,
   mkdtempSync,
   readFileSync,
@@ -329,8 +329,27 @@ function syncCommand(spawn, file, args, options = {}) {
 // symlinked form. When neither resolves (a symlinked parent that is itself gone), the path is
 // UNRESOLVED: the registration git lists may be the real path, so absence cannot be proven.
 export function canonicalWorktreePath(target, realpath = realpathSync) {
-  try { return realpath(target) } catch { /* the worktree directory may already be removed */ }
-  try { return `${realpath(dirname(target))}/${basename(target)}` } catch { return null }
+  const [first] = worktreePathCandidates(target, { realpath })
+  return first ?? null
+}
+
+// Every path git could list for this worktree, most resolved first. A dangling symlink resolves
+// through its own link target, which is what git recorded. An empty list means NOTHING resolved:
+// absence cannot be proven, and the caller fails closed.
+export function worktreePathCandidates(target, { realpath = realpathSync, readlink = readlinkSync, lstat = lstatSync } = {}) {
+  const candidates = []
+  const add = (value) => { if (typeof value === "string" && value && !candidates.includes(value)) candidates.push(value) }
+  try { add(realpath(target)) } catch { /* the worktree directory may already be removed */ }
+  try {
+    if (lstat(target).isSymbolicLink()) {
+      const link = resolve(dirname(target), readlink(target))
+      try { add(realpath(link)) } catch { /* the link target may already be removed */ }
+      try { add(`${realpath(dirname(link))}/${basename(link)}`) } catch { /* its parent may be gone too */ }
+      add(link)
+    }
+  } catch { /* not a symlink, or unreadable */ }
+  try { add(`${realpath(dirname(target))}/${basename(target)}`) } catch { /* the parent may be gone */ }
+  return candidates
 }
 
 export function removeWorktreeDefault(checkout, worktree, options = {}) {
@@ -338,7 +357,11 @@ export function removeWorktreeDefault(checkout, worktree, options = {}) {
   const remove = options.rmSync || rmSync
   const lstat = options.lstatSync || lstatSync
   const target = resolve(worktree)
-  const canonicalTarget = canonicalWorktreePath(target, options.realpathSync || realpathSync)
+  const candidatePaths = worktreePathCandidates(target, {
+    realpath: options.realpathSync || realpathSync,
+    readlink: options.readlinkSync || readlinkSync,
+    lstat: options.lstatSync || lstatSync,
+  })
   let removeResult
   let removeUnknown = null
   try {
@@ -377,10 +400,10 @@ export function removeWorktreeDefault(checkout, worktree, options = {}) {
     if (!commandSucceeded(listResult) || paths.length === 0) {
       registrationError = commandFailure(listResult, 'git worktree list returned no records')
     } else {
-      if (canonicalTarget === null) {
+      if (candidatePaths.length === 0) {
         registrationError = 'worktree path could not be canonicalized, so its git registration cannot be proven absent'
       } else {
-        registrationAbsent = paths.every((path) => path !== target && path !== canonicalTarget)
+        registrationAbsent = paths.every((path) => path !== target && !candidatePaths.includes(path))
       }
     }
   } catch (error) { registrationError = errorText(error, 'git worktree list could not be spawned') }

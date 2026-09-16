@@ -305,6 +305,31 @@ test('B1-unresolvable-parent-fails-closed', () => {
   assert.match(result.why, /could not be canonicalized/)
 })
 
+// Sol pass 3 must-fix: an alias symlink whose worktree directory is gone canonicalizes to the alias,
+// while git still lists the real path. Mutation killed: dropping the link-target candidate reports
+// removed:true while the registration survives.
+test('B1-dangling-alias-registration', () => {
+  const root = scratchDir('pr-review-dangling-')
+  const checkout = join(root, 'repo')
+  const real = join(root, 'real-worktree')
+  const alias = join(root, 'alias-worktree')
+  mkdirSync(checkout, { recursive: true })
+  execFileSync('git', ['init', '-q'], { cwd: checkout })
+  execFileSync('git', ['-c', 'user.email=fixture@example.test', '-c', 'user.name=fixture', 'commit', '--allow-empty', '-q', '-m', 'seed'], { cwd: checkout })
+  execFileSync('git', ['-C', checkout, 'worktree', 'add', '--detach', real, 'HEAD'], { stdio: 'pipe' })
+  symlinkSync(real, alias)
+  rmSync(real, { recursive: true, force: true })
+  // git that neither removes nor prunes: the real registration survives behind the dangling alias.
+  const spawn = (command, args, options) => {
+    if (args.includes('remove') || args.includes('prune')) return { status: 0, stdout: '', stderr: '' }
+    const stdout = execFileSync(command, args, { encoding: 'utf8', ...(options || {}) })
+    return { status: 0, stdout, stderr: '' }
+  }
+  const result = removeWorktreeDefault(checkout, alias, { spawn })
+  assert.equal(result.removed, false, JSON.stringify(result))
+  assert.match(result.why, /registration still exists|could not be canonicalized/)
+})
+
 test('B1-registration-canonical', () => {
   const root = scratchDir('pr-review-canonical-')
   const checkout = join(root, 'repo')

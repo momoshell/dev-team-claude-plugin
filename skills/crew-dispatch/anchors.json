@@ -14,5 +14,5 @@
   "scripts/factory/make-brief.mjs:136": "STALE_READ_ACK = 'stale-read-ack'",
   "scripts/factory/make-brief.mjs:1687": "a recorded baseline is a fact about a commit and is never consumed",
   "crew/drive.mjs:761": "export const GATE_REAP_SHELL = '/bin/bash'",
-  "crew/drive.test.mjs:1362": "'/path/that/does/not/exist'"
+  "crew/drive.test.mjs:1378": "'/path/that/does/not/exist'"
 }

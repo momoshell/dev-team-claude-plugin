@@ -278,6 +278,99 @@ async function refusalFor(options) {
   return { caught, calls }
 }
 
+test('offline bench declarations pin mechanical cells and local model membership', () => {
+  const readJson = (relativePath) => JSON.parse(readFileSync(join(ROOT, relativePath), 'utf8'))
+  const declarations = {
+    planner: {
+      path: 'docs/audits/2026-09-16/bench/planner-candidates.json',
+      cell: readJson('crew/roster.json').tiers.mechanical.planner,
+    },
+    builder: {
+      path: 'docs/audits/2026-09-16/bench/builder-candidates.json',
+      cell: readJson('crew/roster.json').tiers.mechanical.builder,
+    },
+  }
+  const ladder = readJson('crew/model-ladder.json')
+  const capabilities = readJson('crew/capabilities.json')
+  const localProviderName = 'llama-swap'
+  const localAgent = 'pi'
+  const localProvider = capabilities.local_providers?.[localProviderName]
+  assert.equal(capabilities.coding_agents?.[localAgent]?.providers?.includes(localProviderName), true)
+  assert.equal(typeof localProvider?.base_url, 'string')
+  assert.notEqual(localProvider.base_url.trim(), '')
+  const localModelKeys = ladder.bands.flatMap((band) => band.members)
+    .filter((key) => key.startsWith(`${localProviderName}/`))
+  assert.deepEqual(localModelKeys, [
+    'llama-swap/qwen3.8-27b',
+    'llama-swap/gpt-oss-20b',
+    'llama-swap/gemma4-31b',
+  ])
+  const topKeys = ['candidates', 'production', 'role', 'schema']
+  const candidateKeys = ['agent', 'base_url', 'effort', 'id', 'provider', 'source']
+  const modelKey = (candidate) => `${candidate.provider}/${candidate.id}`
+  const cellProjection = (candidate) => ({
+    provider: candidate.provider,
+    id: candidate.id,
+    agent: candidate.agent,
+    effort: candidate.effort,
+  })
+
+  for (const [role, spec] of Object.entries(declarations)) {
+    const declaration = readJson(spec.path)
+    assert.equal(typeof declaration, 'object')
+    assert.equal(Array.isArray(declaration), false)
+    assert.deepEqual(Object.keys(declaration).sort(), topKeys)
+    assert.equal(declaration.schema, 1)
+    assert.equal(declaration.role, role)
+    assert.equal(typeof declaration.role, 'string')
+    assert.notEqual(declaration.role.trim(), '')
+    assert.equal(typeof declaration.production, 'string')
+    assert.notEqual(declaration.production.trim(), '')
+    assert.ok(Array.isArray(declaration.candidates))
+    assert.ok(declaration.candidates.length > 0)
+    assert.equal(declaration.candidates.length, localModelKeys.length + 1)
+
+    for (const candidate of declaration.candidates) {
+      assert.equal(typeof candidate, 'object')
+      assert.equal(Array.isArray(candidate), false)
+      for (const field of ['provider', 'id', 'agent', 'effort']) {
+        assert.equal(typeof candidate[field], 'string')
+        assert.notEqual(candidate[field].trim(), '')
+      }
+      assert.equal(typeof candidate.source, 'string')
+      assert.notEqual(candidate.source.trim(), '')
+      const expectedKeys = candidate.source === 'local'
+        ? candidateKeys
+        : candidateKeys.filter((key) => key !== 'base_url')
+      assert.deepEqual(Object.keys(candidate).sort(), expectedKeys)
+      if (candidate.source === 'local') {
+        assert.equal(candidate.provider, localProviderName)
+        assert.equal(candidate.agent, localAgent)
+        assert.equal(candidate.base_url, localProvider.base_url)
+      } else {
+        assert.equal(candidate.source, 'models.dev')
+      }
+    }
+
+    assert.equal(declaration.production, modelKey(spec.cell))
+    const productionCandidates = declaration.candidates.filter(
+      (candidate) => modelKey(candidate) === declaration.production,
+    )
+    assert.equal(productionCandidates.length, 1)
+    assert.deepEqual(cellProjection(productionCandidates[0]), cellProjection(spec.cell))
+    assert.equal(productionCandidates[0].source, 'models.dev')
+    assert.equal(modelKey(declaration.candidates[0]), declaration.production)
+
+    const localCandidates = declaration.candidates.filter((candidate) => candidate.source === 'local')
+    assert.equal(localCandidates.length, localModelKeys.length)
+    assert.deepEqual(localCandidates.map(modelKey), localModelKeys)
+    assert.deepEqual(
+      [...new Set(localCandidates.map(modelKey))].sort(),
+      [...new Set(localModelKeys)].sort(),
+    )
+  }
+})
+
 test('compile refuses unreadable, stale, zero-gate and absent-production benches before a seat', { skip: SKIP }, async () => {
   const unreadable = scratchDir('factory-model-eval-unreadable-')
   const unreadableResult = await refusalFor({ dir: unreadable })

@@ -1,0 +1,38 @@
+{
+  "schema": 1,
+  "role": "planner",
+  "production": "anthropic/claude-opus-5",
+  "candidates": [
+    {
+      "provider": "anthropic",
+      "id": "claude-opus-5",
+      "agent": "claude",
+      "effort": "medium",
+      "source": "models.dev"
+    },
+    {
+      "provider": "llama-swap",
+      "id": "qwen3.8-27b",
+      "agent": "pi",
+      "effort": "medium",
+      "source": "local",
+      "base_url": "http://10.112.20.20:8080/v1"
+    },
+    {
+      "provider": "llama-swap",
+      "id": "gpt-oss-20b",
+      "agent": "pi",
+      "effort": "medium",
+      "source": "local",
+      "base_url": "http://10.112.20.20:8080/v1"
+    },
+    {
+      "provider": "llama-swap",
+      "id": "gemma4-31b",
+      "agent": "pi",
+      "effort": "medium",
+      "source": "local",
+      "base_url": "http://10.112.20.20:8080/v1"
+    }
+  ]
+}

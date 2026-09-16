@@ -7,7 +7,7 @@ import { cpSync, mkdirSync } from 'node:fs'
 import {
   ACCEPT_FINDINGS, ACCEPT_FINDINGS_SOFT, ACCEPT_REASKS, adversarialPlanEnv, ACCEPT_REFUSALS, B318_GATED_RUNS, B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, CENSUS_ABSENT_REASONS, CENSUS_ROW_ABSENT, CENSUS_TURNS_ABSENT, CENSUS_UNREADABLE, SCREENER_MODELS, SCREENER_REGISTER, screenerResult, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_MUTATION, CHECK_RUNS, CLOBBER_R2, CONVERGE_GATE, CONVERGE_PLAN, CRASH_FINDINGS, CRASH_STAGES, CTX, CTX_REPAIR, CTX_TL, DECISIONS, D_ASK, D_AUTO, D_COLLISION_CTX, D_PANEL_CTX, D_PATCH_A, D_PATCH_B, ENVELOPE_REFUSAL_REASONS, FINDING_DISPOSITIONS, LIMITS, MUST_FIX_REFUTATION_FINDINGS, NAME_VERDICTS, PANEL_ADJUDICATORS, PANEL_PARTNERS, PERSPECTIVE_TARGETS, PLAN_CHECK_FINDINGS, PLAN_RESIDUAL, PLAN_SCOPE, PLAN_SCOPE_VERDICTS, RED, REFUTATION_CLAIM, REFUTATION_CONVERGE_PLAN, REFUTATION_CONVERGE_RUNS, REFUTATION_EVIDENCE_MAX, RESIDUAL_TYPES, REVIEW_FINDINGS, REVIEW_GATE_PASS, S843_ADDED, S843_D2, S843_DISPATCHED, S843_DROPPED, S843_NARROWED, S843_RUNS, SECOND_OPINION, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, VARIANTS, acceptBounceLines, acceptContractLines, acceptedRawById, assertDriverIdRefusal, b127GroupCommand, b127InvokeGate, b127Lines, b127PidAlive, b127Spy, b318Builders, b318GatedPlan, b318Options, b318ReviewGrants, b318SiteA, b318SiteB, b376ProofIo, bounceTargetOf, buildEnv, checkEnv, classCollisionIo, closeoutIo, crashRun, dAdjEnv, dAutoRows, dBuilders, dDecisionBrief, dGitApplies, dLeads, dOffers, dPanelOutcomes, dPartnerEnv, dPatchWrite, dPlanEnv, dRemintRows, dReviewEnv, dispositionIo, dispositionOf, dispositionPanelIo, dispositionPlan, divergentCollisionIo, divergentPlanScenario, driveTask, envelopeDefect, envelopeFieldsPresent, exhaustionAcceptIo, fakeIo, findingIdDefect, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, join, leadEnv, legacyReviewerExemptions, nameVerdict, observeTurnCensus, panelSeats, phaseTrace, planAcceptContractLines, planCheckAcceptIo, planEnv, planRevisionRun, planScopeVerdict, planThenReviewIo, protectedPlanEnv, protectedReseatRefusal, publicationIo, readFileSync, reconEnv, regrantVerdict, resolveValidationLane, reviewConvergeRun, reviewEnv, reviewFindings, reviewOutcome, reviewShapeDefect, rmSync, roundCursor, s843Ctx, s843Io, s843PlanEnv, s843Rows, scratchDir, shapeDefect, slotCtx, slotFactory, spawnSync, staleVerdictLines, triageEnv, turnCeilingBreached, twoRoundReviewIo, validateAcceptDecision, validateCarve, validatePlanResiduals, validateScopeEntries, validationPlan, validationProbeRun, validationRows, verdictFindingsDefect, writeFileSync,
 } from './drive-fixtures.mjs'
-import { HARDENING_PRESCRIPTION_REASONS, HARDENING_PRESCRIPTION_RESOLUTION, hardeningPrescriptionConflict, hardeningTestPath, planScopeWhy, prescriptionAuthorshipEvidence, prescriptionSpanIsLaneAuthored, prescriptionSpansAreLaneAuthored, scopeSuggestions, shellArg, VACUITY_CLAIMS, vacuityFindingDefect } from './drive.mjs'
+import { CREATES_MARK, HARDENING_PRESCRIPTION_REASONS, HARDENING_PRESCRIPTION_RESOLUTION, createsFromBrief, hardeningPrescriptionConflict, hardeningTestPath, planScopeWhy, prescriptionAuthorshipEvidence, prescriptionSpanIsLaneAuthored, prescriptionSpansAreLaneAuthored, scopeSuggestions, shellArg, VACUITY_CLAIMS, vacuityFindingDefect } from './drive.mjs'
 import { screenerAdjudicationRows } from './screener.mjs'
 import { ROOT as REPO_ROOT } from '../test/helpers.mjs'
 import { checkSkillAnchors, laneFence, partitionShifts } from '../skills/qa-test-writing/anchor-pin.mjs'
@@ -5168,4 +5168,93 @@ test('E1 existing pinned prescription contracts remain unchanged', () => {
     assert.equal(conflict?.reason, HARDENING_PRESCRIPTION_REASONS[0])
     assert.equal(conflict?.resolution, HARDENING_PRESCRIPTION_RESOLUTION)
   }
+})
+
+test('A1 created plan scope is accepted', () => {
+  const path = 'crew/created-scope.mjs'
+  const briefText = ['# Created path', '', '## Where', `${CREATES_MARK}${path}`, '', '## Why', 'the plan creates the absent file'].join('\n')
+  assert.deepEqual(createsFromBrief(briefText), [path])
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': s843PlanEnv([...D3_SCOPE_DISPATCHED, path]),
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: S843_RUNS, changed: [D3_SCOPE_DISPATCHED[0]], files: { [CTX.briefFile]: briefText },
+  })
+  const result = driveTask(d3ScopeCtx(), io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 1)
+  assert.equal(io.calls.run.some(({ cmd }) => cmd === D3_SCOPE_HEALTH), false)
+  assert.equal(io.calls.run.some(({ cmd }) => cmd.startsWith('git ls-files')), false)
+})
+
+test('B1 created plan scope is planned context', () => {
+  const path = 'crew/created-scope-context.mjs'
+  const briefText = ['# Created path', '', '## Where', `${CREATES_MARK}${path}`, '', '## Why', 'the plan creates the absent file'].join('\n')
+  assert.deepEqual(createsFromBrief(briefText), [path])
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': s843PlanEnv([...D3_SCOPE_DISPATCHED, path]),
+      'builder:1': buildEnv({ details: { ...buildEnv().details, files_changed: [path] } }),
+      'reviewer:1': reviewEnv('pass'),
+    },
+    runs: S843_RUNS, changed: [path], files: { [CTX.briefFile]: briefText },
+  })
+  const result = driveTask(d3ScopeCtx(), io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.logs.some((row) => row.scope_gate?.edits?.includes(path)), false)
+})
+
+test('C1 undeclared untracked plan scope is refused', () => {
+  const declared = 'crew/created-scope-whitespace.mjs'
+  const cases = [
+    { name: 'undeclared', path: 'crew/created-scope-untracked.mjs', creates: [] },
+    { name: 'whitespace-distinct', path: `${declared} `, creates: [declared] },
+  ]
+  for (const scenario of cases) {
+    const briefText = ['# Created path', '', '## Where', ...scenario.creates.map((path) => `${CREATES_MARK}${path}`), '', '## Why', 'the plan creates the absent file'].join('\n')
+    assert.deepEqual(createsFromBrief(briefText), scenario.creates, scenario.name)
+    const inventory = d3ScopeInventory(scenario.path)
+    const io = fakeIo({
+      envelopes: {
+        'planner:1': s843PlanEnv([...D3_SCOPE_DISPATCHED, scenario.path]),
+        'builder:1': buildEnv(),
+      },
+      runs: {
+        ...S843_RUNS,
+        [D3_SCOPE_HEALTH]: { ok: true, output: '' },
+        [inventory]: { ok: false, output: '' },
+      },
+      changed: [D3_SCOPE_DISPATCHED[0]], files: { [CTX.briefFile]: briefText },
+    })
+    const result = driveTask(d3ScopeCtx(), io)
+    assert.equal(result.status, 'escalation', scenario.name)
+    assert.equal(result.details.escalation.where, PLAN_SCOPE.malformed, scenario.name)
+    assert.ok(result.details.escalation.why.includes(scenario.path), scenario.name)
+    assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 0, scenario.name)
+  }
+})
+
+test('D1 malformed refusal names path and correction', () => {
+  const candidate = D3_SCOPE_DISPATCHED[0]
+  const bad = 'crew/drive-fixtures.mennials'
+  const inventory = d3ScopeInventory(bad)
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': s843PlanEnv([candidate, bad]),
+      'builder:1': buildEnv(),
+    },
+    runs: {
+      ...S843_RUNS,
+      [D3_SCOPE_HEALTH]: { ok: true, output: '' },
+      [inventory]: { ok: false, output: '' },
+    },
+    changed: [candidate],
+  })
+  const result = driveTask(d3ScopeCtx(), io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, PLAN_SCOPE.malformed)
+  assert.ok(result.details.escalation.why.includes(bad))
+  assert.ok(result.details.escalation.why.includes(`did you mean ${candidate}, which is in your surface?`))
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 0)
 })

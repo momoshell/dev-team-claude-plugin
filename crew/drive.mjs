@@ -7262,27 +7262,28 @@ function runTask(ctx, io, crash) {
     // consumed, so it names the trigger of the plan that was accepted.
     planAdversary = currentAdversary
     // ADR-045 records tracked wider and narrower contexts rather than refusing
-    // them. An added literal still asserts a checkout path, so Git verifies that
-    // trust-boundary claim; an untracked path is malformed, not ordinary context.
+    // them. An added literal asserts a checkout path unless the original brief
+    // declares its creation; Git verifies every undeclared trust-boundary claim.
     const dispatchedScope = planScopeBaseline.length > 0 ? planScopeBaseline : []
     const rawAdded = dispatchedScope.length > 0
       ? outOfScopeFiles(plannedScope, scopeMatcher(dispatchedScope)) : []
     const literalAdded = rawAdded.filter((entry) => typeof entry === 'string' && !entry.endsWith('/'))
+    const inventoryAdded = literalAdded.filter((entry) => !declaredCreates.includes(entry))
     let tracked = null
     let inventoryWhy = null
-    if (literalAdded.length > 0) {
+    if (literalAdded.length > 0) tracked = new Set()
+    if (inventoryAdded.length > 0) {
       let health = null
       try {
         health = io.run('git rev-parse --is-inside-work-tree')
       } catch (err) {
-        inventoryWhy = `Git scope health probe for ${literalAdded.join(', ')} was interrupted: ${err?.message ?? String(err)}`
+        inventoryWhy = `Git scope health probe for ${inventoryAdded.join(', ')} was interrupted: ${err?.message ?? String(err)}`
       }
       if (!inventoryWhy && health?.ok !== true) {
-        inventoryWhy = `Git scope health probe for ${literalAdded.join(', ')} was unavailable (ok=${String(health?.ok ?? 'unknown')})`
+        inventoryWhy = `Git scope health probe for ${inventoryAdded.join(', ')} was unavailable (ok=${String(health?.ok ?? 'unknown')})`
       }
       if (!inventoryWhy) {
-        tracked = new Set()
-        for (const path of literalAdded) {
+        for (const path of inventoryAdded) {
           let result = null
           try {
             result = io.run(`git ls-files --error-unmatch -- ${shellArg(path)}`)
@@ -7303,7 +7304,7 @@ function runTask(ctx, io, crash) {
       stageComplete()
       return escalate('plan', inventoryWhy, env.artifacts || [])
     }
-    const planScope = planScopeVerdict(planScopeBaseline, plannedScope, tracked)
+    const planScope = planScopeVerdict(planScopeBaseline, plannedScope, tracked, declaredCreates)
     if (planScope.verdict === PLAN_SCOPE.malformed) {
       const scopeFinal = round >= planRounds()
       if (scopeFinal) {
@@ -11374,14 +11375,18 @@ const trackedScopePath = (tracked, path) => {
 // be the drift that leaf exists to prevent. `tracked` is null for the historical pure
 // helper and a Set (or equivalent membership source) only after the plan loop has probed
 // literal additions against Git.
-export function planScopeVerdict(dispatched, planned, tracked = null) {
+export function planScopeVerdict(dispatched, planned, tracked = null, creates = []) {
   const asked = Array.isArray(planned) ? planned : []
   const available = Array.isArray(dispatched) && dispatched.length > 0 ? dispatched : []
+  const declared = new Set((Array.isArray(creates) ? creates : [])
+    .filter((entry) => typeof entry === 'string')
+    .map(normaliseLaneInput))
   const compared = available.length > 0
   const rawAdded = compared ? outOfScopeFiles(asked, scopeMatcher(available)) : []
   const malformed = tracked === null
     ? []
-    : rawAdded.filter((entry) => typeof entry === 'string' && !entry.endsWith('/') && !trackedScopePath(tracked, entry))
+    : rawAdded.filter((entry) => typeof entry === 'string' && !entry.endsWith('/')
+      && !trackedScopePath(tracked, entry) && !declared.has(entry))
   const suggestions = scopeSuggestions(malformed, dispatched)
   const effective = asked
   const widening = rawAdded.filter((entry) => !malformed.includes(entry))

@@ -646,13 +646,34 @@ test('I3', () => {
   assert.match(repeat.reason, /turn 5/)
 })
 
+test('fffSearchProgram keeps measured direct and wrapper forms closed', () => {
+  for (const [command, program] of [
+    ['grep needle', 'grep'],
+    ['rg needle', 'rg'],
+    ['find .', 'find'],
+    ['fd needle', 'fd'],
+    ['git grep needle', 'grep'],
+    ['xargs grep needle', 'grep'],
+    ['env rg needle', 'rg'],
+    ['command find .', 'find'],
+    ['cd src && rg needle', 'rg'],
+  ]) assert.equal(mod.fffSearchProgram(command), program, command)
+  for (const command of [
+    'echo grep needle', 'git -C src grep needle',
+    'xargs -0 grep needle', 'env FOO=bar rg needle', 'command -- find .',
+    'cd src; rg needle', 'cd src && rg needle && echo done', 'grep "unterminated',
+    '', null, { command: 'rg needle' },
+  ]) assert.equal(mod.fffSearchProgram(command), undefined, String(command))
+})
+
+
 test('readgate is zero-dependency, erasable, and exposes three lifecycle registrations', () => {
   const source = readFileSync(new URL('./readgate.ts', import.meta.url), 'utf8')
   const imports = [...source.matchAll(/^import[\s\S]*?from\s+["']([^"']+)["']/gm)].map((match) => match[1])
   assert.ok(imports.length > 0)
   assert.ok(imports.every((specifier) => specifier.startsWith('node:')), imports.join(', '))
   assert.doesNotMatch(source, /^\s*(enum|namespace)\s/m)
-  assert.deepEqual(Object.keys(mod).sort(), ['DEFAULT_MAX_LINES', 'MAX_LINES_ENV', 'attachReadGate', 'createReadGate', 'default'].sort())
+  assert.deepEqual(Object.keys(mod).sort(), ['DEFAULT_MAX_LINES', 'MAX_LINES_ENV', 'attachReadGate', 'createReadGate', 'default', 'fffSearchProgram'].sort())
 
   const registrations = []
   const gate = mod.attachReadGate({ on: (...args) => registrations.push(args) }, { env: {} })

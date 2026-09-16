@@ -379,7 +379,7 @@ test('adapter-claude.seatCommand pins the pane command with the per-seat usage s
   // Captured from main BEFORE the adapter refactor — do not regenerate this
   // from the new code; it is the compatibility bar, now including the
   // independently derived per-seat usage settings path.
-  const EXPECTED = `env DEVTEAM_WORKER=1 CREW_ROLE=builder CREW_TASK_DIR="/tmp/crew-task" claude --model sonnet --permission-mode bypassPermissions --strict-mcp-config --mcp-config "/tmp/crew-task/mcp/builder.json" --settings "${CLAUDE_USAGE_SETTINGS}" --allowedTools "Read,Edit,Write,Glob,Grep,Bash" --disallowedTools "Task,Agent,mcp__*" --append-system-prompt-file "/tmp/crew-task/role-builder.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."`
+  const EXPECTED = `env DEVTEAM_WORKER=1 CREW_ROLE=builder CREW_TASK_DIR="/tmp/crew-task" CREW_FFF=0 CREW_FFF_NODE="" CREW_FFF_HOOK="" claude --model sonnet --permission-mode bypassPermissions --strict-mcp-config --mcp-config "/tmp/crew-task/mcp/builder.json" --settings "${CLAUDE_USAGE_SETTINGS}" --allowedTools "Read,Edit,Write,Glob,Grep,Bash" --disallowedTools "Task,Agent,mcp__*" --append-system-prompt-file "/tmp/crew-task/role-builder.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."`
   assert.equal(seatCommand(SAMPLE), EXPECTED)
 })
 
@@ -438,13 +438,13 @@ test('the default claude planner pane command is pinned byte for byte across the
   // through adapter-claude's allowedTools() merge. Byte-for-byte, no exceptions.
   assert.equal(
     seatCommand({ ...PIN_SEAT, model: 'opus', grants: pinnedGrants(register, 'claude') }),
-    `env DEVTEAM_WORKER=1 CREW_ROLE=planner CREW_TASK_DIR="/tmp/crew-task" claude --model opus --permission-mode bypassPermissions --strict-mcp-config --mcp-config "/tmp/crew-task/mcp/planner.json" --settings "${CLAUDE_USAGE_SETTINGS}" --allowedTools "Read,Glob,Grep,Bash,Write,Task" --disallowedTools "Edit,NotebookEdit,mcp__*" --append-system-prompt-file "/tmp/crew-task/role-planner.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."`,
+    `env DEVTEAM_WORKER=1 CREW_ROLE=planner CREW_TASK_DIR="/tmp/crew-task" CREW_FFF=0 CREW_FFF_NODE="" CREW_FFF_HOOK="" claude --model opus --permission-mode bypassPermissions --strict-mcp-config --mcp-config "/tmp/crew-task/mcp/planner.json" --settings "${CLAUDE_USAGE_SETTINGS}" --allowedTools "Read,Glob,Grep,Bash,Write,Task" --disallowedTools "Edit,NotebookEdit,mcp__*" --append-system-prompt-file "/tmp/crew-task/role-planner.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."`,
   )
   // UNGRANTED: the same seat with no grants at all composes a DIFFERENT command
   // (no Task), so the granted assertion above is not vacuous.
   assert.equal(
     seatCommand({ ...PIN_SEAT, model: 'opus', grants: EMPTY_GRANTS }),
-    `env DEVTEAM_WORKER=1 CREW_ROLE=planner CREW_TASK_DIR="/tmp/crew-task" claude --model opus --permission-mode bypassPermissions --strict-mcp-config --mcp-config "/tmp/crew-task/mcp/planner.json" --settings "${CLAUDE_USAGE_SETTINGS}" --allowedTools "Read,Glob,Grep,Bash,Write" --disallowedTools "Edit,NotebookEdit,mcp__*" --append-system-prompt-file "/tmp/crew-task/role-planner.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."`,
+    `env DEVTEAM_WORKER=1 CREW_ROLE=planner CREW_TASK_DIR="/tmp/crew-task" CREW_FFF=0 CREW_FFF_NODE="" CREW_FFF_HOOK="" claude --model opus --permission-mode bypassPermissions --strict-mcp-config --mcp-config "/tmp/crew-task/mcp/planner.json" --settings "${CLAUDE_USAGE_SETTINGS}" --allowedTools "Read,Glob,Grep,Bash,Write" --disallowedTools "Edit,NotebookEdit,mcp__*" --append-system-prompt-file "/tmp/crew-task/role-planner.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."`,
   )
   // The load-bearing constraint of #403: the by_agent overlay never reaches the
   // claude planner, so stripping it from the register moves NOTHING.

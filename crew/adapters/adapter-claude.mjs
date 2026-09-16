@@ -1,6 +1,10 @@
-import { readFileSync as fsReadFileSync } from 'node:fs'
+import { readFileSync as fsReadFileSync, realpathSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
+import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
+
+const require = createRequire(import.meta.url)
+let sharedFffSearchProgram
 
 export const PANE_USAGE_SETTINGS = fileURLToPath(new URL('./claude-usage.settings.json', import.meta.url))
 
@@ -57,13 +61,155 @@ const PROFILES = Object.freeze({
   }),
 })
 
-export function capabilitiesFor({ transport, grants } = {}) {
-  const p = PROFILES[transport]
-  if (!p) throw new Error(`adapter-claude: no capability profile for transport "${transport}" (shipped: ${Object.keys(PROFILES).join(', ')}) — refusing a guessed passthrough`)
-  return Object.freeze({ ...INVARIANT, ...p })
+const NO_GRANTS = Object.freeze({ tools: [], extensions: [], agents: [], skills: [], advisor: false, mcp_servers: [] })
+const FFF_MCP_NAME = 'fff'
+const FFF_MCP_BIN = '/opt/homebrew/bin/fff-mcp'
+const FFF_HOOK_COMMAND = 'if [ "$CREW_FFF" != "1" ]; then exit 0; fi; exec "$CREW_FFF_NODE" "$CREW_FFF_HOOK"'
+export const FFF_HOOK_PATH = fileURLToPath(import.meta.url)
+
+export function hasFffGrant(grants = NO_GRANTS) {
+  return Array.isArray(grants?.mcp_servers) && grants.mcp_servers.some((server) => (
+    server?.name === FFF_MCP_NAME && server?.command?.bin === FFF_MCP_BIN
+  ))
 }
 
-const NO_GRANTS = Object.freeze({ tools: [], extensions: [], agents: [], skills: [], advisor: false, mcp_servers: [] })
+export function hasFffPreToolUseHook(settings) {
+  try {
+    if (!settings || typeof settings !== 'object' || Array.isArray(settings)) return false
+    const entries = settings.hooks?.PreToolUse
+    if (!Array.isArray(entries)) return false
+    return entries.some((entry) => (
+      entry?.matcher === 'Bash'
+      && Array.isArray(entry.hooks)
+      && entry.hooks.some((hook) => hook?.type === 'command' && hook.command === FFF_HOOK_COMMAND)
+    ))
+  } catch {
+    return false
+  }
+}
+
+function loadFffSettings({ settings, settingsDocument, readSettings, settingsReader } = {}) {
+  try {
+    let source
+    if (settings !== undefined) source = settings
+    else if (settingsDocument !== undefined) source = settingsDocument
+    else if (typeof readSettings === 'function') source = readSettings(PANE_USAGE_SETTINGS)
+    else if (typeof settingsReader === 'function') source = settingsReader(PANE_USAGE_SETTINGS)
+    else source = fsReadFileSync(PANE_USAGE_SETTINGS, 'utf8')
+    if (Buffer.isBuffer(source)) source = source.toString('utf8')
+    if (typeof source === 'string') {
+      if (!source.trim()) return undefined
+      return JSON.parse(source)
+    }
+    return source
+  } catch {
+    return undefined
+  }
+}
+
+function fffEnvironment(grants = NO_GRANTS) {
+  return {
+    CREW_FFF: hasFffGrant(grants) ? '1' : '0',
+    CREW_FFF_NODE: hasFffGrant(grants) ? process.execPath : '',
+    CREW_FFF_HOOK: hasFffGrant(grants) ? FFF_HOOK_PATH : '',
+  }
+}
+
+function hookDeny(reason) {
+  return {
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+      permissionDecision: 'deny',
+      permissionDecisionReason: reason,
+    },
+  }
+}
+
+function fffSearchProgramForClaude(command) {
+  if (!sharedFffSearchProgram) {
+    const readgate = require('../pi/extensions/readgate.ts')
+    if (typeof readgate?.fffSearchProgram !== 'function') throw new Error('fff search classifier is unavailable')
+    sharedFffSearchProgram = readgate.fffSearchProgram
+  }
+  return sharedFffSearchProgram(command)
+}
+
+function hookInput(payload) {
+  if (Buffer.isBuffer(payload)) return payload.toString('utf8')
+  return payload
+}
+
+export function fffHookDecision(payload, options = {}) {
+  const input = typeof options === 'boolean' ? { granted: options } : (options && typeof options === 'object' ? options : {})
+  let granted = input.granted
+  if (granted === undefined) {
+    try { granted = (input.env ?? process.env)?.CREW_FFF === '1' } catch { granted = false }
+  }
+  if (granted !== true) return undefined
+
+  let value = hookInput(payload)
+  if (typeof value === 'string') {
+    if (!value.trim()) return hookDeny('Refusing Bash: unable to verify the command for fff search enforcement.')
+    try { value = JSON.parse(value) } catch { return hookDeny('Refusing Bash: unable to verify the command for fff search enforcement.') }
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return hookDeny('Refusing Bash: unable to verify the command for fff search enforcement.')
+  }
+
+  const hasToolName = Object.hasOwn(value, 'tool_name') || Object.hasOwn(value, 'toolName')
+  const toolName = value.tool_name ?? value.toolName
+  if (!hasToolName) return hookDeny('Refusing Bash: unable to verify the command for fff search enforcement.')
+  if (toolName !== 'Bash') return undefined
+
+  const toolInput = value.tool_input ?? value.toolInput ?? value.input
+  if (!toolInput || typeof toolInput !== 'object' || Array.isArray(toolInput) || typeof toolInput.command !== 'string' || toolInput.command.trim() === '') {
+    return hookDeny('Refusing Bash: unable to verify the command for fff search enforcement.')
+  }
+  let program
+  try { program = fffSearchProgramForClaude(toolInput.command) } catch {
+    return hookDeny('Refusing Bash: unable to verify the command for fff search enforcement.')
+  }
+  if (program === undefined) return undefined
+  const replacement = program === 'grep' || program === 'rg' ? 'mcp__fff__grep' : 'mcp__fff__find_files'
+  return hookDeny(`Refusing ${program}: use ${replacement} instead.`)
+}
+
+function invokedDirectly() {
+  try {
+    if (!process.argv[1]) return false
+    return realpathSync(process.argv[1]) === realpathSync(FFF_HOOK_PATH)
+  } catch {
+    return process.argv[1] === FFF_HOOK_PATH
+  }
+}
+
+function runHook() {
+  let raw
+  try { raw = fsReadFileSync(0, 'utf8') } catch { raw = undefined }
+  let payload = raw
+  if (typeof raw === 'string') {
+    try { payload = raw.trim() ? JSON.parse(raw) : undefined } catch { payload = undefined }
+  }
+  const decision = fffHookDecision(payload)
+  if (decision !== undefined) process.stdout.write(`${JSON.stringify(decision)}\n`)
+}
+
+if (invokedDirectly()) runHook()
+
+export function capabilitiesFor({ transport, grants = NO_GRANTS, settings: injectedSettings, settingsDocument, readSettings, settingsReader } = {}) {
+  const p = PROFILES[transport]
+  if (!p) throw new Error(`adapter-claude: no capability profile for transport "${transport}" (shipped: ${Object.keys(PROFILES).join(', ')}) — refusing a guessed passthrough`)
+  const settings = hasFffGrant(grants)
+    ? loadFffSettings({ settings: injectedSettings, settingsDocument, readSettings, settingsReader })
+    : undefined
+  if (hasFffGrant(grants) && !hasFffPreToolUseHook(settings)) {
+    throw Object.assign(
+      new Error(`adapter-claude cannot enforce the fff Bash hook from ${PANE_USAGE_SETTINGS} — refusing to boot a silently weaker seat [grant-unsupported]`),
+      { reason: 'grant-unsupported' },
+    )
+  }
+  return Object.freeze({ ...INVARIANT, ...p })
+}
 
 const STRICT_MCP_ARGS = Object.freeze(['--strict-mcp-config'])
 
@@ -145,19 +291,21 @@ export function headlessCommand({ role, model, promptFile, tools, deny, taskDir,
       '--permission-mode', 'bypassPermissions',
       ...STRICT_MCP_ARGS,
       '--mcp-config', mcpConfigPath({ taskDir, role }),
+      '--settings', PANE_USAGE_SETTINGS,
       ...(effort ? ['--effort', effort] : []),
       '--allowedTools', allowedTools(tools, grants),
       '--disallowedTools', deniedTools(deny, grants),
       '--append-system-prompt-file', promptFile,
       ...(resume ? ['--resume', sessionId] : ['--session-id', sessionId]),
     ],
-    env: { DEVTEAM_WORKER: '1', CREW_ROLE: role, CREW_TASK_DIR: taskDir },
+    env: { DEVTEAM_WORKER: '1', CREW_ROLE: role, CREW_TASK_DIR: taskDir, ...fffEnvironment(grants) },
   }
 }
 
 export function seatCommand({ role, model, promptFile, tools, deny, taskDir, bootBrief, effort, grants = NO_GRANTS, configDir = null }) {
   assertSupportedGrants(grants)
   assertNoLocalProvider(configDir)
+  const fff = fffEnvironment(grants)
   // `env` (a real binary) sets the vars regardless of how cmux runs the
   // command. DEVTEAM_WORKER=1 keeps any installed dev-team plugin hooks
   // quiet inside the pane (defensive; a no-op when the plugin is absent).
@@ -167,9 +315,10 @@ export function seatCommand({ role, model, promptFile, tools, deny, taskDir, boo
   // here) — beyond that, containment is the git scope gate, the feature-
   // branch blast radius, and the operator's global deny rules.
   // effort is OPTIONAL: absent, the command stays byte-identical to the
-  // pre-effort adapter (the compatibility pin in crew.test.mjs holds).
+  // effort-less fff-aware adapter (the compatibility pin in crew.test.mjs holds).
   return [
     'env', 'DEVTEAM_WORKER=1', `CREW_ROLE=${role}`, `CREW_TASK_DIR="${taskDir}"`,
+    `CREW_FFF=${fff.CREW_FFF}`, `CREW_FFF_NODE="${fff.CREW_FFF_NODE}"`, `CREW_FFF_HOOK="${fff.CREW_FFF_HOOK}"`,
     'claude', '--model', model, '--permission-mode', 'bypassPermissions',
     ...STRICT_MCP_ARGS,
     '--mcp-config', `"${mcpConfigPath({ taskDir, role })}"`,

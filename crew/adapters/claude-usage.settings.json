@@ -1,5 +1,6 @@
 {
   "hooks": {
+    "PreToolUse": [{ "matcher": "Bash", "hooks": [{ "type": "command", "command": "if [ \"$CREW_FFF\" != \"1\" ]; then exit 0; fi; exec \"$CREW_FFF_NODE\" \"$CREW_FFF_HOOK\"" }] }],
     "SessionStart": [{ "hooks": [{ "type": "command", "command": "mkdir -p \"$CREW_TASK_DIR/usage\" && { cat; echo; } >> \"$CREW_TASK_DIR/usage/$CREW_ROLE.jsonl\"" }] }],
     "Stop": [{ "hooks": [{ "type": "command", "command": "mkdir -p \"$CREW_TASK_DIR/usage\" && { cat; echo; } >> \"$CREW_TASK_DIR/usage/$CREW_ROLE.jsonl\"" }] }]
   }

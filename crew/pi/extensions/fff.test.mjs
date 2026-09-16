@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
 import { after, test } from 'node:test'
 import { EventEmitter } from 'node:events'
-import { existsSync as fsExists, readFileSync, rmSync, mkdirSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { chmodSync, existsSync as fsExists, readFileSync, rmSync, mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 
@@ -13,7 +14,10 @@ import {
   bootCmd, effectiveDeny, mcpConfigDocument, persistedAdapters, resolveAdapters, SEAT_DEFAULTS, slug,
 } from '../../crew.mjs'
 import { seatCommand as piSeatCommand } from '../../adapters/adapter-pi.mjs'
-import { headlessCommand as claudeHeadlessCommand, seatCommand as claudeSeatCommand } from '../../adapters/adapter-claude.mjs'
+import {
+  FFF_HOOK_PATH, PANE_USAGE_SETTINGS, capabilitiesFor as claudeCapabilitiesFor,
+  fffHookDecision, headlessCommand as claudeHeadlessCommand, seatCommand as claudeSeatCommand,
+} from '../../adapters/adapter-claude.mjs'
 import { headlessIo } from '../../headless.mjs'
 import { scratchDir } from '../../../test/helpers.mjs'
 
@@ -64,6 +68,29 @@ function claudeCommand(entry, search = entry.search) {
     tools: SEAT_DEFAULTS.builder.tools, deny: effectiveDeny('builder', search), taskDir: '/tmp/crew-task',
     bootBrief: 'boot', grants: entry.grants, configDir: entry.configDir,
   })
+}
+
+function paneFffEnvironment(command) {
+  const read = (name) => command.match(new RegExp(`${name}="([^"]*)"`))?.[1]
+  return { CREW_FFF: command.match(/\bCREW_FFF=([^\s]+)/)?.[1], CREW_FFF_NODE: read('CREW_FFF_NODE'), CREW_FFF_HOOK: read('CREW_FFF_HOOK') }
+}
+
+function hookCommand() {
+  const settings = JSON.parse(readFileSync(PANE_USAGE_SETTINGS, 'utf8'))
+  return settings.hooks.PreToolUse[0].hooks[0].command
+}
+
+function runHook(command, env, payload) {
+  return spawnSync('sh', ['-c', command], {
+    input: `${JSON.stringify(payload)}\n`, encoding: 'utf8', env: { ...process.env, ...env },
+  })
+}
+
+function fffGrant() {
+  return {
+    tools: [], extensions: [], agents: [], skills: [], advisor: false,
+    mcp_servers: [{ name: 'fff', command: { bin: FFF_MCP_BIN, args: [] }, url: null }],
+  }
 }
 
 class FakeChild extends EventEmitter {
@@ -241,6 +268,147 @@ test('fff-E1-admit', () => {
   for (const program of ['grep', 'rg', 'find', 'fd']) {
     assert.equal(gate.onToolCall({ toolName: 'bash', input: { command: `${program} needle` } }, { cwd: '/tmp' }), undefined, program)
   }
+})
+
+test('A1 granted claude Bash search is refused with the fff replacement', async () => {
+  const entry = await claudeEntry()
+  const environment = paneFffEnvironment(claudeCommand(entry))
+  assert.equal(environment.CREW_FFF, '1')
+  assert.equal(environment.CREW_FFF_NODE, process.execPath)
+  assert.equal(environment.CREW_FFF_HOOK, FFF_HOOK_PATH)
+  const result = runHook(hookCommand(), environment, {
+    session_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', cwd: '/tmp', permission_mode: 'default',
+    hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'rg needle' },
+    tool_use_id: 'toolu_fff_a1', transcript_path: '/tmp/transcript.jsonl',
+  })
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
+  assert.equal(result.stderr, '')
+  assert.deepEqual(JSON.parse(result.stdout), {
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse', permissionDecision: 'deny',
+      permissionDecisionReason: 'Refusing rg: use mcp__fff__grep instead.',
+    },
+  })
+})
+
+test('B1 ungranted claude Bash search remains untouched', async () => {
+  const register = ungrantedBuilderRegister()
+  const entry = (await resolveAdapters(['builder'], {}, null, { register, exists: present })).builder
+  const taskDir = '/tmp/crew-task'
+  const base = {
+    role: 'builder', model: 'sonnet', promptFile: '/tmp/role-builder.md',
+    tools: SEAT_DEFAULTS.builder.tools, deny: SEAT_DEFAULTS.builder.deny, taskDir, bootBrief: 'boot',
+    prompt: 'go', sessionId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', bin: '/usr/local/bin/claude',
+    grants: entry.grants, configDir: entry.configDir,
+  }
+  const pane = claudeSeatCommand(base)
+  const headless = claudeHeadlessCommand(base)
+  assert.deepEqual(paneFffEnvironment(pane), { CREW_FFF: '0', CREW_FFF_NODE: '', CREW_FFF_HOOK: '' })
+  assert.deepEqual(headless.env, {
+    DEVTEAM_WORKER: '1', CREW_ROLE: 'builder', CREW_TASK_DIR: taskDir,
+    CREW_FFF: '0', CREW_FFF_NODE: '', CREW_FFF_HOOK: '',
+  })
+  assert.deepEqual(headless.args.slice(headless.args.indexOf('--settings'), headless.args.indexOf('--allowedTools')), ['--settings', PANE_USAGE_SETTINGS])
+
+  const root = scratchDir('fff-hostile-hook-')
+  const marker = join(root, 'hostile-ran')
+  const hostileNode = join(root, 'hostile-node')
+  const hostileHook = join(root, 'hostile-hook')
+  writeFileSync(hostileNode, `#!/bin/sh\nprintf ran > '${marker}'\n`)
+  writeFileSync(hostileHook, `#!/bin/sh\nprintf ran > '${marker}'\n`)
+  chmodSync(hostileNode, 0o755)
+  chmodSync(hostileHook, 0o755)
+  const hostile = { CREW_FFF: '1', CREW_FFF_NODE: hostileNode, CREW_FFF_HOOK: hostileHook }
+  try {
+    for (const environment of [paneFffEnvironment(pane), headless.env]) {
+      const result = runHook(hookCommand(), { ...hostile, ...environment }, { tool_name: 'Bash', tool_input: { command: 'rg needle' } })
+      assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
+      assert.equal(result.stdout, '')
+      assert.equal(result.stderr, '')
+      assert.equal(fsExists(marker), false)
+    }
+    assert.equal(fffHookDecision({}, { env: { ...hostile, CREW_FFF: '0' } }), undefined)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('C1 wrapper search forms have equal reach on pi and claude', () => {
+  const cases = [
+    ['git grep needle', 'fff_grep', 'mcp__fff__grep'],
+    ['xargs grep needle', 'fff_grep', 'mcp__fff__grep'],
+    ['env rg needle', 'fff_grep', 'mcp__fff__grep'],
+    ['command find .', 'fff_find', 'mcp__fff__find_files'],
+    ['cd src && rg needle', 'fff_grep', 'mcp__fff__grep'],
+  ]
+  const pi = createReadGate({ env: { CREW_FFF: '1' }, hasUnquotedPipe: () => false })
+  for (const [command, piReplacement, claudeReplacement] of cases) {
+    const result = pi.onToolCall({ toolName: 'bash', input: { command } }, { cwd: '/tmp' })
+    assert.equal(result?.block, true, command)
+    assert.match(result.reason, new RegExp(piReplacement), command)
+    const decision = fffHookDecision({ tool_name: 'Bash', tool_input: { command } }, { env: { CREW_FFF: '1' } })
+    assert.equal(decision?.hookSpecificOutput?.permissionDecision, 'deny', command)
+    assert.match(decision?.hookSpecificOutput?.permissionDecisionReason || '', new RegExp(claudeReplacement), command)
+  }
+
+  const root = scratchDir('fff-ungranted-shell-read-')
+  const large = join(root, 'large.txt')
+  writeFileSync(large, 'large\n'.repeat(351))
+  try {
+    const ungranted = createReadGate({ env: { CREW_FFF: '0' }, cwd: root, hasUnquotedPipe: () => false })
+    const result = ungranted.onToolCall({ toolName: 'bash', input: { command: `cat '${large}'` } }, { cwd: root })
+    assert.equal(result?.block, true)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('RV1-1 quoted and escaped direct fff searches remain withheld', () => {
+  const cases = [
+    ["'grep' needle", 'fff_grep', 'mcp__fff__grep'],
+    ['"rg" needle', 'fff_grep', 'mcp__fff__grep'],
+    [String.raw`g\rep needle`, 'fff_grep', 'mcp__fff__grep'],
+    [String.raw`\grep needle`, 'fff_grep', 'mcp__fff__grep'],
+    ["gr'ep' needle", 'fff_grep', 'mcp__fff__grep'],
+    ['"find" .', 'fff_find', 'mcp__fff__find_files'],
+    ["'fd' x", 'fff_find', 'mcp__fff__find_files'],
+  ]
+  const pi = createReadGate({ env: { CREW_FFF: '1' }, hasUnquotedPipe: () => false })
+  for (const [command, piReplacement, claudeReplacement] of cases) {
+    const result = pi.onToolCall({ toolName: 'bash', input: { command } }, { cwd: '/tmp' })
+    assert.equal(result?.block, true, command)
+    assert.match(result?.reason || '', new RegExp(piReplacement), command)
+    const decision = fffHookDecision({ tool_name: 'Bash', tool_input: { command } }, { env: { CREW_FFF: '1' } })
+    assert.equal(decision?.hookSpecificOutput?.permissionDecision, 'deny', command)
+    assert.match(decision?.hookSpecificOutput?.permissionDecisionReason || '', new RegExp(claudeReplacement), command)
+  }
+})
+
+test('D1 claude fff grant refuses boot when its hook is absent', () => {
+  const grants = fffGrant()
+  const valid = JSON.parse(readFileSync(PANE_USAGE_SETTINGS, 'utf8'))
+  const drifted = structuredClone(valid)
+  drifted.hooks.PreToolUse[0].hooks[0].command += ' '
+  const cases = [
+    ['hook-less', { settings: { hooks: {} } }],
+    ['empty', { settings: '' }],
+    ['malformed', { settings: '{' }],
+    ['unreadable', { readSettings: () => { throw new Error('EPERM') } }],
+    ['command-drifted', { settings: drifted }],
+  ]
+  for (const [label, injected] of cases) {
+    assert.throws(
+      () => claudeCapabilitiesFor({ transport: 'pane', grants, ...injected }),
+      (error) => error.reason === 'grant-unsupported', label,
+    )
+  }
+  assert.doesNotThrow(() => claudeCapabilitiesFor({ transport: 'pane', grants, settings: valid }))
+  let reads = 0
+  assert.doesNotThrow(() => claudeCapabilitiesFor({
+    transport: 'pane', grants: { tools: [], extensions: [], agents: [], skills: [], advisor: false, mcp_servers: [] },
+    readSettings: () => { reads += 1; throw new Error('must not read') },
+  }))
+  assert.equal(reads, 0)
 })
 
 test('fff-F1', async () => {

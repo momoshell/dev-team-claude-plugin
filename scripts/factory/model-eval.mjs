@@ -19,6 +19,8 @@ import {
   loadRoster,
   rosterSeating,
   resolveAdapters,
+  loadRoutingPolicy,
+  materialiseRoutingChoice,
 } from '../../crew/crew.mjs'
 import { seatIo, settleSeatTeardown } from '../../crew/seat-io.mjs'
 import { GATE_SUMMARY_PREFIX, parseGateSummary } from '../../crew/drive.mjs'
@@ -32,6 +34,7 @@ export const EVAL_REFUSALS = Object.freeze([
   'bench-unreadable', 'bench-sha-mismatch',
   'no-mechanical-gate', 'production-absent', 'local-endpoint-dead',
   'judge-unresolvable', 'candidate-unresolvable',
+  'routing-policy-unreadable', 'routing-policy-invalid', 'routing-ledger-unavailable',
 ])
 export const EVAL_SEAT_FAILURE_REASONS = Object.freeze({ boot_exit: 'boot-failed', boot_parse: 'boot-unreadable', assignment: 'assignment-failed', wait_error: 'wait-failed', wait_empty: 'wait-empty', runner: 'seat-runner-failed' })
 export { EVAL_ABSENT_REASONS }
@@ -340,12 +343,94 @@ function findingsFromJudge(result) {
     .filter((finding) => typeof finding === 'string')
 }
 
+function benchRoutingCellKey(cell) {
+  return [cell?.provider, cell?.id, cell?.agent, cell?.effort].map((value) => String(value ?? '')).join('\u001f')
+}
+
+function benchRoutingMeasurements(bench, ledger, policy) {
+  let historical = []
+  if (typeof ledger?.evalCells === 'function') {
+    try {
+      const rows = ledger.evalCells({ bench: bench.sha })
+      historical = Array.isArray(rows) ? rows : []
+    } catch {
+      // A historical read that is unavailable is unmeasured. The choice keeps
+      // null metrics and their reasons rather than inventing a zero or a pass.
+      historical = []
+    }
+  }
+  // Start with the policy route, not candidates.json: the policy supplies the
+  // advisory candidate set. Append bench-only cells only to preserve their
+  // explicit undeclared-candidate evidence; the serial evaluator below still
+  // owns their execution order and never consults this recommendation.
+  const declared = policy?.routes?.build?.[bench.role]?.candidates
+  const cells = []
+  const seen = new Set()
+  for (const candidate of [...(Array.isArray(declared) ? declared : []), ...bench.candidates]) {
+    const key = benchRoutingCellKey(candidate)
+    if (seen.has(key)) continue
+    seen.add(key)
+    cells.push(candidate)
+  }
+  return cells.map((candidate) => {
+    const prior = historical.find((row) => row
+      && row.provider === candidate.provider
+      && row.model_id === candidate.id
+      && row.agent === candidate.agent
+      && row.effort === candidate.effort
+      && row.role === bench.role)
+    const numerator = prior?.asserts_passed ?? prior?.first_round_passes ?? null
+    const denominator = prior?.asserts_declared ?? prior?.first_round_reviews ?? null
+    const rate = numerator != null || denominator != null
+      ? { numerator, denominator, value: Number.isSafeInteger(numerator) && Number.isSafeInteger(denominator) && denominator > 0 ? numerator / denominator : null }
+      : null
+    return {
+      cell: candidate,
+      rate,
+      cost_usd: prior?.cost_usd ?? prior?.billed_cost_usd ?? null,
+    }
+  })
+}
+
 export async function runBench({ dir, deps = {} } = {}) {
   deps = normalDeps(deps)
   const bench = await compileBench({ dir, deps })
   if (deps.ledger == null) deps.ledger = deps.openLedger()
   if (!deps.ledger || typeof deps.ledger.recordEvalCell !== 'function') {
     throw new Error('model-eval: a ledger with recordEvalCell is required')
+  }
+  if (typeof deps.ledger.recordRoutingChoice !== 'function') {
+    throw refusal('routing-ledger-unavailable', 'model-eval: a ledger with recordRoutingChoice is required before candidate evaluation')
+  }
+  let routingLoaded
+  try {
+    routingLoaded = deps.loadRoutingPolicy()
+    if (!routingLoaded?.policy || !routingLoaded?.policyHash) throw new Error('loader returned no policy and hash')
+  } catch (err) {
+    const refusalName = err?.reason === 'policy-unreadable' ? 'routing-policy-unreadable' : 'routing-policy-invalid'
+    throw refusal(refusalName, `model-eval: routing policy could not be loaded (${err?.message || String(err)})`)
+  }
+  let routingChoice
+  try {
+    routingChoice = deps.materialiseRoutingChoice({
+      policy: routingLoaded.policy,
+      policyHash: routingLoaded.policyHash,
+      tier: 'build',
+      role: bench.role,
+      measurements: benchRoutingMeasurements(bench, deps.ledger, routingLoaded.policy),
+      entryPoint: 'bench',
+    })
+  } catch (err) {
+    throw refusal('routing-policy-invalid', `model-eval: routing policy could not materialise bench choice (${err?.message || String(err)})`)
+  }
+  // This is the bench's one routing row. It is evidence only: the serial loop
+  // below deliberately retains every candidate and its original order. A writer
+  // refusal is load-bearing for the bench admission and must not turn into a
+  // successful run or a fabricated per-cell record.
+  try {
+    await deps.ledger.recordRoutingChoice(routingChoice)
+  } catch (err) {
+    throw refusal('routing-ledger-unavailable', `model-eval: routing choice could not be recorded (${err?.message || String(err)})`)
   }
   const recorded = []
   for (const candidate of bench.candidates) {
@@ -442,6 +527,7 @@ export async function runBench({ dir, deps = {} } = {}) {
   return {
     bench: bench.sha,
     task_sha: createHash('sha256').update(bench.task).digest('hex'),
+    routing_choice: routingChoice,
     cells: recorded,
     production: bench.production,
   }
@@ -718,6 +804,8 @@ export function normalDeps(deps = {}) {
     makeWorktree: source.makeWorktree ?? ((checkout) => makeWorktreeDefault(checkout, { spawn: source.spawnSync || spawnSync, mkdtemp: source.mkdtemp || mkdtempSync, tempRoot: source.tempRoot || tmpdir() })),
     removeWorktree: source.removeWorktree ?? ((checkout, dir) => removeWorktreeDefault(checkout, dir, { spawn: source.spawnSync || spawnSync })),
     resolveAdapters: source.resolveAdapters ?? resolveAdapters,
+    loadRoutingPolicy: source.loadRoutingPolicy ?? loadRoutingPolicy,
+    materialiseRoutingChoice: source.materialiseRoutingChoice ?? materialiseRoutingChoice,
     seatIo: source.seatIo ?? seatIo,
     settleSeatTeardown: source.settleSeatTeardown ?? settleSeatTeardown,
     readFile: source.readFile ?? source.readFileSync ?? readFileSync,
@@ -740,6 +828,8 @@ export function normalDeps(deps = {}) {
     makeWorktree: runtime.makeWorktree,
     removeWorktree: runtime.removeWorktree,
     resolveAdapters: runtime.resolveAdapters,
+    loadRoutingPolicy: runtime.loadRoutingPolicy,
+    materialiseRoutingChoice: runtime.materialiseRoutingChoice,
     seatIo: runtime.seatIo,
     settleSeatTeardown: runtime.settleSeatTeardown,
     readFile: runtime.readFile,

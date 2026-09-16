@@ -1488,6 +1488,552 @@ function sameShadowCell(a, b) {
     && a?.agent === b?.agent && a?.effort === b?.effort
 }
 
+// ---- checkout-pinned routing policy (#routing-policy) ----------------------
+// This policy is evidence only. Roster seating and the ratified model ladder
+// remain the execution authorities; this lane may narrow and order their cells,
+// but never writes a chosen cell back into either authority or into a member.
+export const ROUTING_POLICY_PATH = join(HERE, 'routing-policy.json')
+export const ROUTING_POLICY_SCHEMA = 1
+export const ROUTING_POLICY_REFUSALS = Object.freeze(['policy-unreadable', 'policy-invalid'])
+export const ROUTING_TIERS = Object.freeze(['mechanical', 'build', 'judge'])
+export const ROUTING_SEATED_ROLES = Object.freeze({
+  mechanical: Object.freeze(['planner', 'builder', 'reviewer']),
+  build: Object.freeze(['lead', 'planner', 'builder', 'reviewer']),
+  judge: Object.freeze(['lead', 'planner', 'builder', 'reviewer', 'tech-lead']),
+})
+export const ROUTING_TIE_BREAKS = Object.freeze(['first_round_pass_rate_desc', 'cost_usd_asc', 'policy_order'])
+export const ROUTING_ENTRY_POINTS = Object.freeze(['boot', 'daemon', 'bench'])
+export const ROUTING_EXCLUSION_REASONS = Object.freeze([
+  'capability-shortfall', 'agent-unresolved', 'band-unknown', 'band-below-floor',
+  'breaker-open', 'undeclared-candidate', 'measurement-absent', 'rate-absent',
+  'rate-invalid', 'rate-thin', 'cost-absent', 'cost-invalid', 'measurement-invalid',
+])
+export const ROUTING_ABSTENTION_REASONS = Object.freeze(['no-eligible-candidate'])
+export const ROUTING_WIN_REASONS = Object.freeze([...ROUTING_TIE_BREAKS])
+export const ROUTING_PRECEDENCE = 'the policy composes over, and does not supersede, crew/roster.json or crew/model-ladder.json; roster supplies current seats/catalog, ladder supplies tier floors, and this policy may only narrow and order declared cells'
+
+function routingPolicyRefusal(reason, message) {
+  if (!ROUTING_POLICY_REFUSALS.includes(reason)) throw new Error(`unknown routing policy refusal reason ${JSON.stringify(reason)}`)
+  return Object.assign(new Error(`${message} [${reason}]`), { reason })
+}
+
+function routingCell(cell) {
+  const source = cell?.cell && plainRecord(cell.cell) ? cell.cell : cell
+  const text = (value) => nonblankString(value) ? value : null
+  return {
+    provider: text(source?.provider),
+    id: text(source?.id),
+    agent: text(source?.agent),
+    effort: text(source?.effort),
+  }
+}
+
+function routingCellKey(cell) {
+  return routingCanonical(routingCell(cell))
+}
+
+function routingCellComplete(cell) {
+  return plainRecord(cell)
+    && exactRecordKeys(cell, ['provider', 'id', 'agent', 'effort'])
+    && ['provider', 'id', 'agent', 'effort'].every((field) => nonblankString(cell[field]))
+}
+
+function routingJsonClone(value) {
+  return JSON.parse(JSON.stringify(value))
+}
+
+function routingDeepFreeze(value) {
+  if (value && typeof value === 'object' && !ArrayBuffer.isView(value) && !Object.isFrozen(value)) {
+    for (const child of Object.values(value)) routingDeepFreeze(child)
+    Object.freeze(value)
+  }
+  return value
+}
+
+function routingExactKeys(value, keys) {
+  return plainRecord(value) && exactRecordKeys(value, keys)
+}
+
+function validateRoutingVocabulary(values, closed, where) {
+  if (!Array.isArray(values) || values.length !== closed.length || new Set(values).size !== values.length
+    || values.some((value) => !closed.includes(value))) {
+    throw routingPolicyRefusal('policy-invalid', `${where} must enumerate its closed vocabulary exactly once`)
+  }
+}
+
+function validateRoutingEntry(entry, where = 'routing policy route') {
+  if (!routingExactKeys(entry, ['candidates', 'tie_break', 'measurement_window', 'null_handling', 'abstention_reasons'])) {
+    throw routingPolicyRefusal('policy-invalid', `${where} has an open or incomplete shape`)
+  }
+  if (!Array.isArray(entry.candidates) || entry.candidates.length === 0) {
+    throw routingPolicyRefusal('policy-invalid', `${where}.candidates must be non-empty`)
+  }
+  const seen = new Set()
+  for (const [index, cell] of entry.candidates.entries()) {
+    if (!routingCellComplete(cell)) throw routingPolicyRefusal('policy-invalid', `${where}.candidates[${index}] must be a full cell`)
+    const key = routingCellKey(cell)
+    if (seen.has(key)) throw routingPolicyRefusal('policy-invalid', `${where}.candidates contains a duplicate full cell`)
+    seen.add(key)
+  }
+  if (!Array.isArray(entry.tie_break) || entry.tie_break.length !== ROUTING_TIE_BREAKS.length
+    || new Set(entry.tie_break).size !== entry.tie_break.length
+    || entry.tie_break.some((value) => !ROUTING_TIE_BREAKS.includes(value))
+    || entry.tie_break.at(-1) !== 'policy_order') {
+    throw routingPolicyRefusal('policy-invalid', `${where}.tie_break must be an ordered closed comparator ending in policy_order`)
+  }
+  if (!routingExactKeys(entry.measurement_window, ['lookback_days', 'minimum_rate_denominator'])
+    || !Number.isSafeInteger(entry.measurement_window.lookback_days) || entry.measurement_window.lookback_days <= 0
+    || !Number.isSafeInteger(entry.measurement_window.minimum_rate_denominator) || entry.measurement_window.minimum_rate_denominator <= 0) {
+    throw routingPolicyRefusal('policy-invalid', `${where}.measurement_window must contain positive lookback_days and minimum_rate_denominator integers`)
+  }
+  if (!routingExactKeys(entry.null_handling, ['rate', 'cost'])
+    || entry.null_handling.rate !== 'exclude-with-reason' || entry.null_handling.cost !== 'exclude-with-reason') {
+    throw routingPolicyRefusal('policy-invalid', `${where}.null_handling must exclude absent rate and cost with a reason`)
+  }
+  validateRoutingVocabulary(entry.abstention_reasons, ROUTING_ABSTENTION_REASONS, `${where}.abstention_reasons`)
+  return entry
+}
+
+function validateRoutingPolicy(policy, path = ROUTING_POLICY_PATH) {
+  const required = ['$comment', 'schema_version', 'updated_at', 'precedence', 'exclusion_reasons', 'abstention_reasons', 'routes']
+  if (!routingExactKeys(policy, required) || policy.schema_version !== ROUTING_POLICY_SCHEMA
+    || !nonblankString(policy.$comment) || !/^\d{4}-\d{2}-\d{2}$/.test(policy.updated_at)
+    || !nonblankString(policy.precedence)
+    || !policy.$comment.toLowerCase().includes(ROUTING_PRECEDENCE)
+    || policy.precedence.toLowerCase() !== ROUTING_PRECEDENCE) {
+    throw routingPolicyRefusal('policy-invalid', `routing policy at ${path} must pin schema version, metadata and the roster/ladder composition statement`)
+  }
+  validateRoutingVocabulary(policy.exclusion_reasons, ROUTING_EXCLUSION_REASONS, 'routing policy exclusion_reasons')
+  validateRoutingVocabulary(policy.abstention_reasons, ROUTING_ABSTENTION_REASONS, 'routing policy abstention_reasons')
+  if (!routingExactKeys(policy.routes, ROUTING_TIERS)) throw routingPolicyRefusal('policy-invalid', `routing policy at ${path} must cover exactly the shipped tiers`)
+  for (const tier of ROUTING_TIERS) {
+    const roles = ROUTING_SEATED_ROLES[tier]
+    if (!routingExactKeys(policy.routes[tier], roles)) throw routingPolicyRefusal('policy-invalid', `routing policy at ${path} must cover exactly the seated roles for tier ${tier}`)
+    for (const role of roles) validateRoutingEntry(policy.routes[tier][role], `routing policy routes.${tier}.${role}`)
+  }
+  return policy
+}
+
+export function loadRoutingPolicy(options = {}) {
+  const source = typeof options === 'string' ? { path: options } : (options || {})
+  const path = source.path || ROUTING_POLICY_PATH
+  const readFile = source.readFile || readFileSync
+  let bytes
+  try {
+    bytes = readFile(path)
+  } catch (err) {
+    throw routingPolicyRefusal('policy-unreadable', `routing policy at ${path} could not be read (${err?.message || String(err)})`)
+  }
+  let exactBytes
+  try {
+    exactBytes = Buffer.from(typeof bytes === 'string' ? bytes : bytes)
+    if (exactBytes.length === 0) throw new Error('the policy file is empty')
+  } catch (err) {
+    throw routingPolicyRefusal('policy-invalid', `routing policy at ${path} is not a non-empty byte sequence (${err?.message || String(err)})`)
+  }
+  const policyHash = createHash('sha256').update(exactBytes).digest('hex')
+  let policy
+  try {
+    policy = JSON.parse(exactBytes.toString('utf8'))
+  } catch (err) {
+    throw routingPolicyRefusal('policy-invalid', `routing policy at ${path} is not valid JSON (${err?.message || String(err)})`)
+  }
+  validateRoutingPolicy(policy, path)
+  return routingDeepFreeze({ policy, policyHash, bytes: exactBytes })
+}
+
+function nullRoutingMetric(reason) {
+  return { value: null, reason }
+}
+
+function normaliseRoutingRate(measurement, entry) {
+  const source = measurement?.rate !== undefined
+    ? measurement.rate
+    : measurement?.first_round_pass_rate !== undefined
+      ? measurement.first_round_pass_rate
+      : null
+  let numerator = measurement?.first_round_passes ?? measurement?.rate_numerator ?? null
+  let denominator = measurement?.first_round_reviews ?? measurement?.rate_denominator ?? null
+  let value = source
+  let suppliedReason = null
+  if (plainRecord(source)) {
+    numerator = source.numerator ?? numerator
+    denominator = source.denominator ?? denominator
+    value = source.value
+    suppliedReason = source.reason ?? null
+  }
+  if (numerator == null && denominator == null && value == null) {
+    const absent = nullRoutingMetric(['rate-absent', 'rate-invalid', 'rate-thin'].includes(suppliedReason) ? suppliedReason : 'rate-absent')
+    return { numerator: null, denominator: null, ...absent }
+  }
+  if (!Number.isSafeInteger(numerator) || numerator < 0 || !Number.isSafeInteger(denominator) || denominator < 0 || numerator > denominator) {
+    return { numerator: Number.isSafeInteger(numerator) ? numerator : null, denominator: Number.isSafeInteger(denominator) ? denominator : null, value: null, reason: 'rate-invalid' }
+  }
+  if (denominator === 0) {
+    if (value != null) return { numerator, denominator, value: null, reason: 'rate-invalid' }
+    const absent = nullRoutingMetric(['rate-absent', 'rate-invalid'].includes(suppliedReason) ? suppliedReason : 'rate-absent')
+    return { numerator, denominator, ...absent }
+  }
+  if (value == null && suppliedReason === 'rate-absent') {
+    return { numerator, denominator, value: null, reason: 'rate-absent' }
+  }
+  const expected = numerator / denominator
+  if (typeof value !== 'number' || !Number.isFinite(value) || value !== expected) {
+    return { numerator, denominator, value: null, reason: 'rate-invalid' }
+  }
+  const reason = denominator < entry.measurement_window.minimum_rate_denominator ? 'rate-thin' : null
+  return { numerator, denominator, value, reason }
+}
+
+function normaliseRoutingCost(measurement) {
+  const source = measurement?.cost_usd !== undefined ? measurement.cost_usd : measurement?.cost
+  let value = source
+  let reason = null
+  if (plainRecord(source)) {
+    value = source.value
+    reason = source.reason ?? null
+  }
+  if (value == null) {
+    const absent = nullRoutingMetric(['cost-absent', 'cost-invalid'].includes(reason) ? reason : 'cost-absent')
+    return absent
+  }
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return { value: null, reason: 'cost-invalid' }
+  return { value, reason: null }
+}
+
+function normaliseRoutingMeasurement(raw, keyHint, entry) {
+  const candidate = routingCell(raw?.cell || raw)
+  if (candidate.provider === null && typeof keyHint === 'string') {
+    const parts = keyHint.split('/')
+    if (parts.length === 4 && parts.every((part) => part)) {
+      candidate.provider = parts[0]; candidate.id = parts[1]; candidate.agent = parts[2]; candidate.effort = parts[3]
+    }
+  }
+  const rate = normaliseRoutingRate(raw, entry)
+  const cost_usd = normaliseRoutingCost(raw)
+  return { cell: candidate, rate, cost_usd, exclusion_reason: null }
+}
+
+function routingMeasurementsArray(measurements) {
+  if (Array.isArray(measurements)) return measurements.map((value) => ({ value, key: null }))
+  if (plainRecord(measurements)) return Object.entries(measurements).map(([key, value]) => ({ value, key }))
+  throw routingPolicyRefusal('policy-invalid', 'routing measurements must be an array or object map')
+}
+
+function routingStatusReason(measurement, names) {
+  const candidates = [
+    measurement?.exclusion_reason, measurement?.routing_exclusion_reason, measurement?.excluded_reason,
+    measurement?.capability?.reason, measurement?.capability_fit?.reason,
+    measurement?.band?.reason, measurement?.breaker?.reason,
+  ]
+  for (const reason of candidates) if (names.includes(reason)) return reason
+  return null
+}
+
+function routingExclusionFor(measurement, normalised, entry) {
+  const explicit = routingStatusReason(measurement, ROUTING_EXCLUSION_REASONS)
+  if (explicit) return { reason: explicit, detail: null }
+  if (measurement?.capability?.ok === false || measurement?.capability_fit?.ok === false || measurement?.capability_ok === false) {
+    return { reason: 'capability-shortfall', detail: null }
+  }
+  if (measurement?.band?.ok === false || measurement?.band_ok === false) {
+    return { reason: routingStatusReason(measurement, ['agent-unresolved', 'band-unknown', 'band-below-floor']) || 'band-unknown', detail: null }
+  }
+  if (measurement?.breaker?.verdict === 'open' || measurement?.breaker_verdict === 'open' || measurement?.breaker_open === true) {
+    return { reason: 'breaker-open', detail: null }
+  }
+  if (measurement?.__absent === true) return { reason: 'measurement-absent', detail: null }
+  if (normalised.rate.reason !== null) return { reason: normalised.rate.reason, detail: null }
+  if (normalised.cost_usd.reason !== null) return { reason: normalised.cost_usd.reason, detail: null }
+  return null
+}
+
+function compareRoutingCandidate(a, b) {
+  const tieBreak = Array.isArray(a.tie_break) ? a.tie_break : ROUTING_TIE_BREAKS
+  for (const criterion of tieBreak) {
+    if (criterion === 'first_round_pass_rate_desc') {
+      const av = a.rate.value; const bv = b.rate.value
+      if (av !== bv) return bv - av
+    } else if (criterion === 'cost_usd_asc') {
+      const av = a.cost_usd.value; const bv = b.cost_usd.value
+      if (av !== bv) return av - bv
+    } else if (criterion === 'policy_order' && a.policy_order !== b.policy_order) {
+      return a.policy_order - b.policy_order
+    }
+  }
+  return a.policy_order - b.policy_order
+}
+
+function routingWinnerReason(winner, runner) {
+  if (runner == null) return 'policy_order'
+  const tieBreak = winner.tie_break || ROUTING_TIE_BREAKS
+  for (const criterion of tieBreak) {
+    if (criterion === 'first_round_pass_rate_desc' && winner.rate.value !== runner?.rate?.value) return criterion
+    if (criterion === 'cost_usd_asc' && winner.cost_usd.value !== runner?.cost_usd?.value) return criterion
+    if (criterion === 'policy_order' && winner.policy_order !== runner?.policy_order) return criterion
+  }
+  return 'policy_order'
+}
+
+function routingCanonical(value) {
+  if (Array.isArray(value)) return `[${value.map(routingCanonical).join(',')}]`
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${routingCanonical(value[key])}`).join(',')}}`
+  }
+  return JSON.stringify(value)
+}
+
+function routingFingerprint(value) {
+  return createHash('sha256').update(routingCanonical(value)).digest('hex')
+}
+
+export function materialiseRoutingChoice({ policy, policyHash, tier, role, measurements = [], entryPoint = 'boot' } = {}) {
+  if (!ROUTING_ENTRY_POINTS.includes(entryPoint)) throw routingPolicyRefusal('policy-invalid', `routing choice has an unknown entry point ${JSON.stringify(entryPoint)}`)
+  if (!ROUTING_TIERS.includes(tier) || !ROUTING_SEATED_ROLES[tier].includes(role)) {
+    throw routingPolicyRefusal('policy-invalid', `routing policy has no exact tier/role route for ${JSON.stringify(tier)}/${JSON.stringify(role)}`)
+  }
+  const entry = policy?.routes?.[tier]?.[role] || policy?.[tier]?.[role]
+  if (!entry) throw routingPolicyRefusal('policy-invalid', `routing policy has no exact tier/role route for ${JSON.stringify(tier)}/${JSON.stringify(role)}`)
+  validateRoutingEntry(entry, `routing policy route ${tier}/${role}`)
+  if (!/^[0-9a-f]{64}$/i.test(String(policyHash ?? ''))) throw routingPolicyRefusal('policy-invalid', 'routing choice requires the SHA-256 policy hash')
+  const input = routingMeasurementsArray(measurements)
+  const declared = new Set(entry.candidates.map(routingCellKey))
+  const observed = new Map()
+  const normalisedRows = []
+  const exclusions = []
+  // Normalize before sorting: once malformed/absent values have been reduced
+  // to the closed row shape, the cell key plus canonical row bytes make array
+  // and object-map input order irrelevant without trusting caller order.
+  const orderedInput = input.map(({ value: raw, key }) => {
+    const normalised = normaliseRoutingMeasurement(raw, key, entry)
+    return { raw, normalised, cell_key: routingCellKey(normalised.cell) }
+  }).sort((a, b) => a.cell_key.localeCompare(b.cell_key)
+    || routingCanonical(a.normalised).localeCompare(routingCanonical(b.normalised)))
+  for (const source of orderedInput) {
+    const candidate = { cell: source.normalised.cell, reason: 'undeclared-candidate' }
+    if (!declared.has(source.cell_key)) {
+      source.normalised.exclusion_reason = candidate.reason
+      exclusions.push({ cell: candidate.cell, reason: candidate.reason })
+      normalisedRows.push(source.normalised)
+      continue
+    }
+    if (!observed.has(source.cell_key)) observed.set(source.cell_key, [])
+    observed.get(source.cell_key).push(source)
+    normalisedRows.push(source.normalised)
+  }
+  const eligible = []
+  for (const [policy_order, policyCell] of entry.candidates.entries()) {
+    const declaredCell = routingCell(policyCell)
+    const cellKey = routingCellKey(declaredCell)
+    let sources = observed.get(cellKey)
+    if (!sources) {
+      const raw = { cell: declaredCell, __absent: true, rate: null, cost_usd: null }
+      const normalised = normaliseRoutingMeasurement(raw, null, entry)
+      sources = [{ raw, normalised, cell_key: cellKey }]
+      observed.set(cellKey, sources)
+      normalisedRows.push(normalised)
+    }
+    const source = sources[0]
+    const candidate = {
+      cell: declaredCell,
+      policy_order,
+      tie_break: entry.tie_break,
+      rate: source.normalised.rate,
+      cost_usd: source.normalised.cost_usd,
+      measurement: source.normalised,
+    }
+    let exclusion = null
+    if (sources.length > 1) {
+      for (const duplicate of sources) duplicate.normalised.exclusion_reason = 'measurement-invalid'
+      exclusion = { reason: 'measurement-invalid', detail: null }
+    } else {
+      exclusion = routingExclusionFor(source.raw, source.normalised, entry)
+    }
+    if (exclusion) {
+      source.normalised.exclusion_reason = exclusion.reason
+      exclusions.push({ cell: candidate.cell, reason: exclusion.reason })
+      continue
+    }
+    source.normalised.exclusion_reason = null
+    eligible.push(candidate)
+  }
+  exclusions.sort((a, b) => routingCellKey(a.cell).localeCompare(routingCellKey(b.cell)) || a.reason.localeCompare(b.reason))
+  normalisedRows.sort((a, b) => routingCellKey(a.cell).localeCompare(routingCellKey(b.cell))
+    || routingCanonical(a).localeCompare(routingCanonical(b)))
+  const ranked = [...eligible].sort(compareRoutingCandidate)
+  const winner = ranked[0] || null
+  let policyEntry
+  try {
+    policyEntry = routingJsonClone(entry)
+  } catch (err) {
+    throw routingPolicyRefusal('policy-invalid', `routing policy route ${tier}/${role} is not JSON-replayable (${err?.message || String(err)})`)
+  }
+  const fingerprint = routingFingerprint({ tier, role, entry_point: entryPoint, measurements: normalisedRows })
+  const result = {
+    schema_version: ROUTING_POLICY_SCHEMA,
+    entry_point: entryPoint,
+    tier,
+    role,
+    policy_hash: policyHash,
+    candidate_set: entry.candidates.map(routingCell),
+    exclusions,
+    normalized_measurements: normalisedRows,
+    measurement_fingerprint: fingerprint,
+    policy_entry: policyEntry,
+    outcome: winner ? 'chosen' : 'abstained',
+    chosen_cell: winner ? routingCell(winner) : null,
+    ...(winner ? { reason: routingWinnerReason(winner, ranked[1]) } : { abstention_reason: entry.abstention_reasons[0] }),
+  }
+  return routingDeepFreeze(result)
+}
+
+export function replayRoutingChoice(row = {}) {
+  if (!plainRecord(row)) throw routingPolicyRefusal('policy-invalid', 'routing journal row is not an object')
+  if (row.role == null && plainRecord(row.decisions)) {
+    if (row.entry_point !== 'boot' || !ROUTING_TIERS.includes(row.tier) || !/^[0-9a-f]{64}$/i.test(String(row.policy_hash ?? ''))) {
+      throw routingPolicyRefusal('policy-invalid', 'routing aggregate journal row lacks the boot tier and policy hash')
+    }
+    const decisions = {}
+    for (const role of Object.keys(row.decisions).sort()) {
+      const replayed = replayRoutingChoice(row.decisions[role])
+      if (replayed.policy_hash !== row.policy_hash || replayed.tier !== row.tier || replayed.role !== role) {
+        throw routingPolicyRefusal('policy-invalid', `routing aggregate decision for ${role} does not match its aggregate authority`)
+      }
+      decisions[role] = replayed
+    }
+    return routingDeepFreeze({
+      schema_version: ROUTING_POLICY_SCHEMA,
+      event: 'routing-choice',
+      entry_point: 'boot',
+      tier: row.tier,
+      policy_hash: row.policy_hash,
+      decisions,
+    })
+  }
+  const parseJsonField = (value, field) => {
+    if (typeof value !== 'string') return value
+    try { return JSON.parse(value) } catch (err) {
+      throw routingPolicyRefusal('policy-invalid', `routing journal field ${field} is not valid JSON (${err?.message || String(err)})`)
+    }
+  }
+  const policyEntry = row.policy_entry ?? parseJsonField(row.policy_entry_json, 'policy_entry_json')
+  if (!plainRecord(policyEntry) || !nonblankString(row.policy_hash)) {
+    throw routingPolicyRefusal('policy-invalid', 'routing journal row lacks a replayable policy entry and hash')
+  }
+  const normalized = row.normalized_measurements ?? parseJsonField(row.normalized_measurements_json, 'normalized_measurements_json')
+  const measurements = Array.isArray(normalized)
+    ? normalized
+    : plainRecord(normalized)
+      ? Object.values(normalized)
+      : null
+  if (!measurements) throw routingPolicyRefusal('policy-invalid', 'routing journal row lacks normalized measurements')
+  const policy = {
+    schema_version: ROUTING_POLICY_SCHEMA,
+    $comment: ROUTING_PRECEDENCE,
+    updated_at: 'replayed',
+    precedence: ROUTING_PRECEDENCE,
+    exclusion_reasons: [...ROUTING_EXCLUSION_REASONS],
+    abstention_reasons: [...ROUTING_ABSTENTION_REASONS],
+    routes: { [row.tier]: { [row.role]: policyEntry } },
+  }
+  return materialiseRoutingChoice({
+    policy,
+    policyHash: row.policy_hash,
+    tier: row.tier,
+    role: row.role,
+    measurements,
+    entryPoint: row.entry_point,
+  })
+}
+
+function bootRoutingReviewRows({ dbPath, since, openLedger = realOpenLedger, existsSync: existsSyncDep = existsSync }) {
+  let reviewRows = null
+  try {
+    const present = dbPath ? existsSyncDep(dbPath) : false
+    if (present) {
+      let handle = null
+      try {
+        handle = openLedger({ dbPath, stderr: { write() {} } })
+        const rows = handle.cellReviews({ since })
+        const mirrorErrors = Number(handle.stats?.()?.mirror_errors ?? 0)
+        const degraded = handle.degraded || !Number.isFinite(mirrorErrors) || mirrorErrors !== 0
+        if (!degraded && Array.isArray(rows)) reviewRows = rows
+      } finally {
+        try { handle?.close?.() } catch { /* unreadable review evidence stays absent */ }
+      }
+    }
+  } catch {
+    reviewRows = null
+  }
+  return reviewRows
+}
+
+function bootRoutingCapability(role, cell, seats, adapters) {
+  if (adapters?.[role] && sameShadowCell(cell, seats?.[role])) return { ok: true }
+  return { ok: null, reason: 'measurement-absent' }
+}
+
+function bootRoutingChoice({ policy, policyHash, tier, seats, adapters, breaker,
+  dbPath, openLedger = realOpenLedger, existsSync: existsSyncDep = existsSync,
+  materialise = materialiseRoutingChoice }) {
+  const decisions = {}
+  const seatRoles = Object.keys(seats || {})
+  const roles = ROUTING_SEATED_ROLES[tier]?.filter((role) => Object.hasOwn(seats || {}, role)) || []
+  if (roles.length !== seatRoles.length) {
+    throw routingPolicyRefusal('policy-invalid', `routing policy cannot materialise an undeclared seated role for tier ${tier}`)
+  }
+  const reviewRowsByLookback = new Map()
+  const observationAt = Date.now()
+  const reviewRowsFor = (entry) => {
+    const lookbackDays = entry.measurement_window.lookback_days
+    if (!reviewRowsByLookback.has(lookbackDays)) {
+      const since = new Date(observationAt - lookbackDays * 24 * 60 * 60 * 1000).toISOString()
+      reviewRowsByLookback.set(lookbackDays, bootRoutingReviewRows({
+        dbPath, since, openLedger, existsSync: existsSyncDep,
+      }))
+    }
+    return reviewRowsByLookback.get(lookbackDays)
+  }
+  for (const role of roles) {
+    const entry = policy?.routes?.[tier]?.[role]
+    if (!entry) throw routingPolicyRefusal('policy-invalid', `routing policy has no route for seated role ${tier}/${role}`)
+    const reviewRows = reviewRowsFor(entry)
+    const measurements = entry.candidates.map((cell) => {
+      const breakerCell = (breaker?.cells || []).find((row) => row
+        && row.provider === cell.provider && row.model_id === cell.id
+        && row.agent === cell.agent && row.effort === cell.effort)
+      const review = reviewRows === null ? null : shadowReviewRow(cell, role, reviewRows)
+      return {
+        cell,
+        capability: bootRoutingCapability(role, cell, seats, adapters),
+        ...(breakerCell?.verdict === 'open' ? { breaker: { verdict: 'open' } } : {}),
+        rate: review === null || review.first_round_reviews < entry.measurement_window.minimum_rate_denominator
+          ? {
+              numerator: review?.first_round_passes ?? null,
+              denominator: review?.first_round_reviews ?? null,
+              value: null,
+              reason: 'rate-absent',
+            }
+          : {
+              numerator: review.first_round_passes,
+              denominator: review.first_round_reviews,
+              value: review.first_round_pass_rate,
+            },
+        cost_usd: { value: null, reason: 'cost-absent' },
+      }
+    })
+    decisions[role] = materialise({ policy, policyHash, tier, role, measurements, entryPoint: 'boot' })
+  }
+  return routingDeepFreeze({
+    schema_version: ROUTING_POLICY_SCHEMA,
+    event: 'routing-choice',
+    entry_point: 'boot',
+    tier,
+    policy_hash: policyHash,
+    decisions,
+  })
+}
+
 export function shadowCandidates(roster, role) {
   const tiers = rosterSeating(roster)
   if (!tiers || typeof tiers !== 'object' || Array.isArray(tiers)) return []
@@ -2276,6 +2822,8 @@ export async function bootCmd(args, deps = {}) {
     validateWorkflow: validateWorkflowDep = validateWorkflow,
     workflowDir: workflowDirDep = null,
     readWorkflowFile: readWorkflowFileDep = null,
+    loadRoutingPolicy: loadRoutingPolicyDep = loadRoutingPolicy,
+    materialiseRoutingChoice: materialiseRoutingChoiceDep = materialiseRoutingChoice,
   } = deps
   // Capture the invocation environment before async adapter resolution so the
   // breaker and host-load policies cannot be lost while boot is awaiting imports.
@@ -2420,6 +2968,34 @@ export async function bootCmd(args, deps = {}) {
   await assertAdvisorCellLive({ record: advisorRecord, adapters, taskSlug,
     probeEndpoint: probeEndpointDep || probeLocalEndpoint,
     note: noteRunlessCellFailure })
+  // Materialise exactly once, after roster/ladder/capability/breaker facts are
+  // resolved and before any workspace, member, state-dir or crew snapshot is
+  // created. The result is evidence only: the existing roster-derived seats
+  // and members below remain the execution inputs.
+  let routingChoice = null
+  if (tierName && tierSeats) {
+    try {
+      const loadedRouting = loadRoutingPolicyDep()
+      if (!loadedRouting || !plainRecord(loadedRouting.policy) || !nonblankString(loadedRouting.policyHash)) {
+        throw routingPolicyRefusal('policy-invalid', 'routing policy loader returned no policy and hash')
+      }
+      routingChoice = bootRoutingChoice({
+        policy: loadedRouting.policy,
+        policyHash: loadedRouting.policyHash,
+        tier: tierName,
+        seats: tierSeats,
+        adapters,
+        breaker,
+        dbPath: ledgerDbPath(),
+        openLedger: openLedgerDep ?? realOpenLedger,
+        existsSync: existsSyncDep ?? existsSync,
+        materialise: materialiseRoutingChoiceDep,
+      })
+    } catch (err) {
+      if (ROUTING_POLICY_REFUSALS.includes(err?.reason)) throw err
+      throw routingPolicyRefusal(err?.code === 'ENOENT' || err?.code === 'EACCES' ? 'policy-unreadable' : 'policy-invalid', `routing policy could not be materialised (${err?.message || String(err)})`)
+    }
+  }
   const paneRoles = roles.filter((role) => adapters[role].transport === DEFAULT_TRANSPORT)
   const headlessOnly = paneRoles.length === 0
   const turnCeilingsResolved = headlessOnly
@@ -2640,6 +3216,7 @@ export async function bootCmd(args, deps = {}) {
     ...(allocation ? { allocation } : {}),
     ...(breaker ? { breaker } : {}),
     ...(load ? { load } : {}),
+    ...(routingChoice ? { routing_choice: routingChoice } : {}),
     ...(shadow ? { shadow_pick: shadow } : {}),
     ...(laneFence ? { lane_name: laneFence.lane, fenced_lanes: laneFence.fence.length } : {}),
     capabilities: { schema_version: registry.schema_version, roles: Object.keys(registry.roles) },

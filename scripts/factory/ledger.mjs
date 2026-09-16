@@ -417,6 +417,17 @@ export const EVAL_PAYLOAD_KEYS = Object.freeze([
   'bench', 'ratifiable', 'incomplete', 'rows', 'production', 'cost_is_floor',
   'usd_total', 'price_source',
 ])
+// Routing choices are advisory evidence. This duplicate closed vocabulary keeps
+// the factory ledger independent of crew/crew.mjs (which imports this module).
+export const ROUTING_ENTRY_POINTS = Object.freeze(['boot', 'daemon', 'bench'])
+export const ROUTING_OUTCOMES = Object.freeze(['chosen', 'abstained'])
+export const ROUTING_EXCLUSION_REASONS = Object.freeze([
+  'capability-shortfall', 'agent-unresolved', 'band-unknown', 'band-below-floor',
+  'breaker-open', 'undeclared-candidate', 'measurement-absent', 'rate-absent',
+  'rate-invalid', 'rate-thin', 'cost-absent', 'cost-invalid', 'measurement-invalid',
+])
+export const ROUTING_CHOICE_REASONS = Object.freeze(['first_round_pass_rate_desc', 'cost_usd_asc', 'policy_order'])
+export const ROUTING_ABSTENTION_REASONS = Object.freeze(['no-eligible-candidate'])
 export const ACCEPT_DECISION_OUTCOMES = Object.freeze(['accepted', 'escalated'])
 export const NARRATION_OUTCOMES = Object.freeze(['accepted', 'refused'])
 export const PROVIDER_FAILURE_LEDGER_KINDS = Object.freeze([
@@ -1070,6 +1081,26 @@ export const TABLES = Object.freeze({
     unique: [['bench', 'provider', 'model_id', 'agent', 'effort']],
     indexes: [{ name: 'eval_cells_bench_idx', cols: ['bench', 'created_at'] }],
   },
+  routing_choices: {
+    columns: [
+      { name: 'id', decl: 'INTEGER PRIMARY KEY' },
+      { name: 'entry_point', decl: 'TEXT' },
+      { name: 'tier', decl: 'TEXT' },
+      { name: 'role', decl: 'TEXT' },
+      { name: 'policy_hash', decl: 'TEXT' },
+      { name: 'measurement_fingerprint', decl: 'TEXT' },
+      { name: 'outcome', decl: 'TEXT' },
+      { name: 'chosen_cell_json', decl: 'TEXT' },
+      { name: 'candidate_set_json', decl: 'TEXT' },
+      { name: 'exclusions_json', decl: 'TEXT' },
+      { name: 'normalized_measurements_json', decl: 'TEXT' },
+      { name: 'policy_entry_json', decl: 'TEXT' },
+      { name: 'reason', decl: 'TEXT' },
+      { name: 'created_at', decl: 'TEXT' },
+    ],
+    unique: [['entry_point', 'tier', 'role', 'measurement_fingerprint', 'created_at']],
+    indexes: [{ name: 'routing_choices_entry_idx', cols: ['entry_point', 'tier', 'role', 'created_at'] }],
+  },
   intake_sweeps: {
     columns: [
       { name: 'id', decl: 'INTEGER PRIMARY KEY' },
@@ -1462,7 +1493,7 @@ export const JOURNAL_FACT_EVENTS = Object.freeze({
 export const WRITERS = Object.freeze([
   'startSession', 'endSession', 'recordEscalationProposal', 'startPhase', 'endPhase', 'recordEvent',
   'recordEnvelope', 'recordSessionRequest', 'recordRunConfiguration', 'recordRunSeat', 'recordRunObservation', 'recordGateResult', 'recordGateDiscrimination',
-  'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'recordCiCycle', 'recordCiDispatch', 'recordEvalCell', 'recordIntakeSweep', 'recordIntakeRefusal', 'recordIntakeBrake', 'recordIntakeDispatch', 'recordSeatTeardown', 'recordSeatReclaim', 'recordProviderFailure', 'recordPlanScope', 'recordSeatReask', 'recordAcceptReask', 'recordRpcExitContext', 'recordSeatTurnCensus', 'recordPlanAdoption', 'recordExternalFence', 'recordMutationAnchorBind', 'recordMutationAnchorAbsence', 'recordPhaseSlotWait', 'recordExperimentArm', 'recordNarrationMeasurement', 'recordScreenerProposal', 'startProcess', 'endProcess', 'heartbeat',
+  'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'recordCiCycle', 'recordCiDispatch', 'recordEvalCell', 'recordRoutingChoice', 'recordIntakeSweep', 'recordIntakeRefusal', 'recordIntakeBrake', 'recordIntakeDispatch', 'recordSeatTeardown', 'recordSeatReclaim', 'recordProviderFailure', 'recordPlanScope', 'recordSeatReask', 'recordAcceptReask', 'recordRpcExitContext', 'recordSeatTurnCensus', 'recordPlanAdoption', 'recordExternalFence', 'recordMutationAnchorBind', 'recordMutationAnchorAbsence', 'recordPhaseSlotWait', 'recordExperimentArm', 'recordNarrationMeasurement', 'recordScreenerProposal', 'startProcess', 'endProcess', 'heartbeat',
   'startAgentSession', 'endAgentSession', 'recordSourceError', 'linkRun',
 ])
 
@@ -1491,6 +1522,7 @@ export const WRITER_MIRROR_TABLES = Object.freeze({
   recordCiCycle: 'ci_cycles',
   recordCiDispatch: 'ci_dispatches',
   recordEvalCell: 'eval_cells',
+  recordRoutingChoice: 'routing_choices',
   recordIntakeSweep: 'intake_sweeps',
   recordIntakeRefusal: 'intake_refusals',
   recordIntakeBrake: 'intake_brakes',
@@ -3957,6 +3989,92 @@ export function openLedger({
     return args
   }
 
+  function recordRoutingChoice(input = {}) {
+    requireFields(input, [
+      'entry_point', 'tier', 'policy_hash', 'measurement_fingerprint', 'outcome',
+      'chosen_cell', 'candidate_set', 'exclusions', 'normalized_measurements', 'policy_entry',
+    ], 'recordRoutingChoice')
+    requireEnum(input.entry_point, ROUTING_ENTRY_POINTS, 'recordRoutingChoice', 'entry_point')
+    requireEnum(input.outcome, ROUTING_OUTCOMES, 'recordRoutingChoice', 'outcome')
+    if (input.tier == null || !normaliseShortName(input.tier, 'recordRoutingChoice', 'tier')) {
+      refuse('recordRoutingChoice: tier must be a non-blank string')
+    }
+    const role = input.role == null ? null : normaliseShortName(input.role, 'recordRoutingChoice', 'role')
+    if ((input.entry_point === 'boot') !== (role === null)) {
+      refuse('recordRoutingChoice: boot choices are aggregate (role null); non-boot choices require a role')
+    }
+    if (input.policy_hash == null || typeof input.policy_hash !== 'string' || !/^[0-9a-f]{64}$/i.test(input.policy_hash.trim())) {
+      refuse('recordRoutingChoice: policy_hash must be a SHA-256 hex digest')
+    }
+    if (input.measurement_fingerprint == null || typeof input.measurement_fingerprint !== 'string' || !/^[0-9a-f]{64}$/i.test(input.measurement_fingerprint.trim())) {
+      refuse('recordRoutingChoice: measurement_fingerprint must be a SHA-256 hex digest')
+    }
+    if (input.outcome === 'chosen' && (input.chosen_cell == null || typeof input.chosen_cell !== 'object' || Array.isArray(input.chosen_cell))) {
+      refuse("recordRoutingChoice: chosen outcome requires a chosen_cell object")
+    }
+    if (input.outcome === 'abstained' && input.chosen_cell !== null) {
+      refuse("recordRoutingChoice: abstained outcome requires chosen_cell null")
+    }
+    const reason = input.reason ?? input.abstention_reason ?? null
+    if (input.outcome === 'chosen') requireEnum(reason, ROUTING_CHOICE_REASONS, 'recordRoutingChoice', 'reason')
+    else requireEnum(reason, ROUTING_ABSTENTION_REASONS, 'recordRoutingChoice', 'reason')
+    const json = (value, field) => {
+      try {
+        const encoded = JSON.stringify(value)
+        if (encoded === undefined) refuse(`recordRoutingChoice: field '${field}' must be JSON-serializable`)
+        return encoded
+      } catch {
+        refuse(`recordRoutingChoice: field '${field}' must be JSON-serializable`)
+      }
+    }
+    if (!Array.isArray(input.candidate_set) || !Array.isArray(input.exclusions) || !Array.isArray(input.normalized_measurements)) {
+      refuse('recordRoutingChoice: candidate_set, exclusions and normalized_measurements must be arrays')
+    }
+    if (input.policy_entry === null || typeof input.policy_entry !== 'object' || Array.isArray(input.policy_entry)) {
+      refuse('recordRoutingChoice: policy_entry must be an object')
+    }
+    for (const exclusion of input.exclusions) {
+      if (!exclusion || typeof exclusion !== 'object' || !ROUTING_EXCLUSION_REASONS.includes(exclusion.reason)) {
+        refuse('recordRoutingChoice: exclusions must carry closed reasons')
+      }
+    }
+    // Keep the JSONL authority in the public writer shape so replayJsonl can
+    // dispatch this exact row back through recordRoutingChoice. The mirror
+    // stores the structured values as JSON text, just like recordEvent derives
+    // payload_json only at insert time.
+    const args = redact({
+      entry_point: input.entry_point,
+      tier: normaliseShortName(input.tier, 'recordRoutingChoice', 'tier'),
+      role,
+      policy_hash: input.policy_hash.trim(),
+      measurement_fingerprint: input.measurement_fingerprint.trim(),
+      outcome: input.outcome,
+      chosen_cell: input.chosen_cell,
+      candidate_set: input.candidate_set,
+      exclusions: input.exclusions,
+      normalized_measurements: input.normalized_measurements,
+      policy_entry: input.policy_entry,
+      reason,
+      created_at: isoMs(input.created_at ?? now()),
+    }, stats)
+    const row = {
+      ...args,
+      chosen_cell_json: json(args.chosen_cell, 'chosen_cell'),
+      candidate_set_json: json(args.candidate_set, 'candidate_set'),
+      exclusions_json: json(args.exclusions, 'exclusions'),
+      normalized_measurements_json: json(args.normalized_measurements, 'normalized_measurements'),
+      policy_entry_json: json(args.policy_entry, 'policy_entry'),
+    }
+    appendJsonl('recordRoutingChoice', args)
+    mirror((conn) => {
+      const cols = tableColumnNames('routing_choices').filter((c) => c !== 'id')
+      const sqlCols = cols.map(quoteSqlIdentifier)
+      conn.prepare(`INSERT OR IGNORE INTO routing_choices (${sqlCols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
+        .run(...cols.map((c) => toBindable(row[c])))
+    })
+    return args
+  }
+
   function recordIntakeSweep(input = {}) {
     requireFields(input, ['board_owner', 'board_project', 'outcome', 'considered', 'pages'], 'recordIntakeSweep')
     requireEnum(input.outcome, INTAKE_OUTCOMES, 'recordIntakeSweep', 'outcome')
@@ -4958,6 +5076,19 @@ export function openLedger({
     return queryRows(`
       SELECT * FROM eval_cells WHERE bench = ? ORDER BY created_at, id
     `, [bench])
+  }
+
+  function routingChoices({ entry_point = null, tier = null, role = undefined } = {}) {
+    const clauses = []
+    const params = []
+    if (entry_point !== null) { clauses.push('entry_point = ?'); params.push(entry_point) }
+    if (tier !== null) { clauses.push('tier = ?'); params.push(tier) }
+    if (role !== undefined) {
+      if (role === null) clauses.push('role IS NULL')
+      else { clauses.push('role = ?'); params.push(role) }
+    }
+    const where = clauses.length ? ` WHERE ${clauses.join(' AND ')}` : ''
+    return queryRows(`SELECT * FROM routing_choices${where} ORDER BY created_at, id`, params)
   }
 
   function cellUsage({ since = null, until = null } = {}) {
@@ -6047,10 +6178,10 @@ export function openLedger({
     get degraded() { return degraded },
     startSession, endSession, recordEscalationProposal, recordSessionRequest, recordRunConfiguration, recordRunSeat, recordRunObservation, startPhase, endPhase, recordEvent, recordEnvelope,
     escalationProposalFor,
-    recordGateResult, recordGateDiscrimination, recordMutationAnchorBind, recordMutationAnchorAbsence, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordEvalCell, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown, recordSeatReclaim, recordProviderFailure, recordPlanScope, recordSeatReask, recordAcceptReask, recordRpcExitContext, recordSeatTurnCensus, recordPlanAdoption, recordExternalFence, recordPhaseSlotWait, recordExperimentArm, recordNarrationMeasurement, recordScreenerProposal,
+    recordGateResult, recordGateDiscrimination, recordMutationAnchorBind, recordMutationAnchorAbsence, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordEvalCell, recordRoutingChoice, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown, recordSeatReclaim, recordProviderFailure, recordPlanScope, recordSeatReask, recordAcceptReask, recordRpcExitContext, recordSeatTurnCensus, recordPlanAdoption, recordExternalFence, recordPhaseSlotWait, recordExperimentArm, recordNarrationMeasurement, recordScreenerProposal,
     startProcess, endProcess, heartbeat, startAgentSession, endAgentSession,
     recordSourceError, linkRun,
-    listSessions, listEvents, getSession, phantomSessions, dumpTable, tableNames, columnNames, sessionsFiltered, runsStartedWithin, phasesFor, runConfigurationsFor, runObservationsFor, runSeatsFor, agentEventsFor, agentSessionsFor, gateDiscriminationsFor, gateResultsFor, reviewOutcomesFor, acceptDecisionsFor, supportsJson1, eventsPage, maxEventId, cellFailureRowsFor, unattributableCellFailures, seatTeardownRowsFor, intakePicks, intakeSweepTotals, intakeCandidateRefusals, intakeCandidatePicks, agentSessionTokenTotals, gateReviewGap, cellFailures, cellAttempts, cellReviews, screenerAdoptions, evalCells, cellUsage, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, escalations, endedRuns, escalationWindow, seatReclaims, journalFacts, plannerSymbolsHoldout, turnEconomy, turnBreakdown, eligibleTasks, runSet, configurationReadout, transportsFor, taskReadout, jsonlDrift,
+    listSessions, listEvents, getSession, phantomSessions, dumpTable, tableNames, columnNames, sessionsFiltered, runsStartedWithin, phasesFor, runConfigurationsFor, runObservationsFor, runSeatsFor, agentEventsFor, agentSessionsFor, gateDiscriminationsFor, gateResultsFor, reviewOutcomesFor, acceptDecisionsFor, supportsJson1, eventsPage, maxEventId, cellFailureRowsFor, unattributableCellFailures, seatTeardownRowsFor, intakePicks, intakeSweepTotals, intakeCandidateRefusals, intakeCandidatePicks, agentSessionTokenTotals, gateReviewGap, cellFailures, cellAttempts, cellReviews, screenerAdoptions, evalCells, routingChoices, cellUsage, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, escalations, endedRuns, escalationWindow, seatReclaims, journalFacts, plannerSymbolsHoldout, turnEconomy, turnBreakdown, eligibleTasks, runSet, configurationReadout, transportsFor, taskReadout, jsonlDrift,
     stats: statsFn,
     captureMirrorErrors,
     readConnection,

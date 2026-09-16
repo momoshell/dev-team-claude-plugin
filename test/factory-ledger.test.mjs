@@ -393,6 +393,16 @@ function exerciseEveryWriter(ledger, adwId) {
     billed_input_tokens: 10, billed_output_tokens: 20, billed_cache_read_tokens: 30,
     billed_cache_write_tokens: 40, duration_ms: 50, created_at: '2024-01-01T00:00:00.000Z',
   })
+  ledger.recordRoutingChoice({
+    entry_point: 'bench', tier: 'build', role: 'builder',
+    policy_hash: 'a'.repeat(64), measurement_fingerprint: 'b'.repeat(64),
+    outcome: 'abstained', chosen_cell: null,
+    candidate_set: [{ provider: 'openai', id: 'gpt-5.6-luna', agent: 'pi', effort: 'max' }],
+    exclusions: [{ cell: { provider: 'openai', id: 'gpt-5.6-luna', agent: 'pi', effort: 'max' }, reason: 'rate-absent' }],
+    normalized_measurements: [{ cell: { provider: 'openai', id: 'gpt-5.6-luna', agent: 'pi', effort: 'max' }, rate: { numerator: null, denominator: null, value: null, reason: 'rate-absent' }, cost_usd: { value: null, reason: 'cost-absent' }, exclusion_reason: 'rate-absent' }],
+    policy_entry: { candidates: [{ provider: 'openai', id: 'gpt-5.6-luna', agent: 'pi', effort: 'max' }], tie_break: ['first_round_pass_rate_desc', 'cost_usd_asc', 'policy_order'], measurement_window: { lookback_days: 30, minimum_rate_denominator: 12 }, null_handling: { rate: 'exclude-with-reason', cost: 'exclude-with-reason' }, abstention_reasons: ['no-eligible-candidate'] },
+    reason: 'no-eligible-candidate', created_at: '2024-01-01T00:00:00.000Z',
+  })
   ledger.recordIntakeSweep({
     board_owner: 'owner', board_project: 7, outcome: 'picked', reason: null,
     considered: 2, pages: 1, picked_issue: 42, rate_limit_remaining: 900,
@@ -656,6 +666,16 @@ function seedAllWritersWithMarker(ledger) {
   ledger.recordGateResult({
     adw_id: ctx, phase_id: phaseId, gate_name: 'g', attempt: 1, ok: false,
     checks: [{ item: MARKER_ADW, ok: false, note: MARKER_ADW }], violations: [MARKER_ADW],
+  })
+  ledger.recordRoutingChoice({
+    entry_point: 'bench', tier: 'build', role: 'builder',
+    policy_hash: 'a'.repeat(64), measurement_fingerprint: 'b'.repeat(64),
+    outcome: 'abstained', chosen_cell: null,
+    candidate_set: [{ provider: MARKER_ADW, id: 'marker-model', agent: 'pi', effort: 'max' }],
+    exclusions: [{ cell: { provider: MARKER_ADW, id: 'marker-model', agent: 'pi', effort: 'max' }, reason: 'measurement-invalid' }],
+    normalized_measurements: [{ cell: { provider: MARKER_ADW, id: 'marker-model', agent: 'pi', effort: 'max' }, rate: { numerator: null, denominator: null, value: null, reason: 'rate-invalid' }, cost_usd: { value: null, reason: 'cost-absent' }, exclusion_reason: 'measurement-invalid' }],
+    policy_entry: { candidates: [{ provider: MARKER_ADW, id: 'marker-model', agent: 'pi', effort: 'max' }], tie_break: ['first_round_pass_rate_desc', 'cost_usd_asc', 'policy_order'], measurement_window: { lookback_days: 30, minimum_rate_denominator: 12 }, null_handling: { rate: 'exclude-with-reason', cost: 'exclude-with-reason' }, abstention_reasons: ['no-eligible-candidate'] },
+    reason: 'no-eligible-candidate', created_at: '2024-01-01T00:00:03.000Z',
   })
   ledger.startProcess({ adw_id: ctx, dispatch_id: 'd', pid: 555, command: MARKER_ADW })
   const started = ledger.dumpTable('processes').find((p) => p.pid === 555).started_at

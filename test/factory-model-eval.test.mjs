@@ -88,6 +88,7 @@ function depsFor({
 } = {}) {
   return {
     ledger: {
+      recordRoutingChoice: async (row) => row,
       recordEvalCell: async (row) => { rows.push(row); return row },
     },
     probe,
@@ -239,7 +240,7 @@ async function runDefaultJudgeBench({ judge, wait, expectedBootModel }) {
   const deps = {
     ...fixture.deps,
     readRoster: null,
-    ledger: { recordEvalCell: async (row) => { rows.push(row); return row } },
+    ledger: { recordRoutingChoice: async (row) => row, recordEvalCell: async (row) => { rows.push(row); return row } },
     runGate: async () => ({ total: 1, failed: 0, errored: 0 }),
     runSeat: async () => ({
       envelope: { status: 'done', summary: 'candidate terminal fixture' },
@@ -454,7 +455,7 @@ test('A1 two consecutive fixed-sha bench runs reach candidate verdicts', async (
     deps: {
       ...fixture.deps,
       readRoster: null,
-      ledger: { recordEvalCell: async (row) => { rows.push(row); return row } },
+      ledger: { recordRoutingChoice: async (row) => row, recordEvalCell: async (row) => { rows.push(row); return row } },
       runGate: async () => ({ total: 1, failed: 0, errored: 0 }),
       runJudge: async () => ({ findings: ['candidate-verdict'] }),
     },
@@ -480,7 +481,7 @@ test('B1 a settled bench candidate leaves no live registration', async () => {
   const deps = {
     ...fixture.deps,
     readRoster: null,
-    ledger: { recordEvalCell: async (row) => { rows.push(row); return row } },
+    ledger: { recordRoutingChoice: async (row) => row, recordEvalCell: async (row) => { rows.push(row); return row } },
     runGate: async (spec) => {
       if (spec.envelope) {
         const live = discoverLanes(fixture.crewRoot)
@@ -514,7 +515,7 @@ test('A1 production candidate reaches headless-rpc assign/wait and mechanical ju
   const deps = {
     ...fixture.deps,
     readRoster: null,
-    ledger: { recordEvalCell: async (row) => { rows.push(row); return row } },
+    ledger: { recordRoutingChoice: async (row) => row, recordEvalCell: async (row) => { rows.push(row); return row } },
     runGate: async (spec) => {
       if (spec.envelope) {
         assert.equal(spec.envelope.status, 'done')
@@ -576,7 +577,7 @@ test('C1 command output and exceptions survive in the ledger input and readout r
   const deps = {
     ...fixture.deps,
     readRoster: null,
-    ledger: { recordEvalCell: async (row) => { rows.push(row); return row } },
+    ledger: { recordRoutingChoice: async (row) => row, recordEvalCell: async (row) => { rows.push(row); return row } },
     runGate: async () => ({ total: 1, failed: 0, errored: 0 }),
   }
   await runBench({ dir: bench.dir, deps })
@@ -603,7 +604,7 @@ test('D1 candidate artifacts stay in the disposable worktree through judge, then
   const deps = {
     ...fixture.deps,
     readRoster: null,
-    ledger: { recordEvalCell: async (row) => { rows.push(row); return row } },
+    ledger: { recordRoutingChoice: async (row) => row, recordEvalCell: async (row) => { rows.push(row); return row } },
     runGate: async (spec) => {
       if (spec.envelope) {
         gateSawArtifact = existsSync(artifact())
@@ -941,4 +942,58 @@ test('F1 eval absence vocabularies are frozen, exact, and admit every runner rea
   assert.deepEqual(Object.keys(EVAL_SEAT_FAILURE_REASONS), ['boot_exit', 'boot_parse', 'assignment', 'wait_error', 'wait_empty', 'runner'])
   for (const reason of Object.values(EVAL_SEAT_FAILURE_REASONS)) assert.equal(EVAL_ABSENT_REASONS.includes(reason), true)
   assert.equal(EVAL_ABSENT_REASONS.includes('seat-refused'), false)
+})
+
+test('routing A1 bench records one replayable choice before every candidate and retains candidate order', async () => {
+  const bench = writeBench()
+  const routingRows = []
+  const evalRows = []
+  const calls = []
+  const deps = depsFor({ rows: evalRows, calls })
+  deps.ledger.recordRoutingChoice = async (row) => {
+    assert.equal(evalRows.length, 0)
+    routingRows.push(row)
+    return row
+  }
+  const result = await runBench({ dir: bench.dir, deps })
+  assert.equal(routingRows.length, 1)
+  assert.equal(result.routing_choice, routingRows[0])
+  assert.equal(evalRows.length, 2)
+  assert.deepEqual(calls.map(({ candidate }) => candidate.id), [CANDIDATE_A.id, CANDIDATE_B.id])
+  assert.deepEqual(evalRows.map((row) => row.model_id), [CANDIDATE_A.id, CANDIDATE_B.id])
+  assert.equal(routingRows[0].entry_point, 'bench')
+  assert.equal(routingRows[0].outcome, 'abstained')
+  assert.equal(routingRows[0].exclusions.some(({ reason }) => reason === 'undeclared-candidate'), true)
+  for (const row of routingRows[0].normalized_measurements) {
+    assert.equal(row.rate.value, null)
+    assert.equal(row.rate.denominator, null)
+  }
+  assert.notDeepEqual(routingRows[0].candidate_set, [CANDIDATE_A, CANDIDATE_B])
+})
+
+test('routing policy and ledger write refusals stop bench admission without fabricated evaluation rows', async () => {
+  const bench = writeBench()
+  const absent = () => {
+    const error = new Error('policy bytes missing')
+    error.reason = 'policy-unreadable'
+    throw error
+  }
+  await assert.rejects(
+    () => runBench({ dir: bench.dir, deps: { ...depsFor(), loadRoutingPolicy: absent } }),
+    (error) => error instanceof EvalRefusal && error.refusal === 'routing-policy-unreadable',
+  )
+  const invalid = () => ({ policy: {}, policyHash: 'a'.repeat(64) })
+  await assert.rejects(
+    () => runBench({ dir: bench.dir, deps: { ...depsFor(), loadRoutingPolicy: invalid } }),
+    (error) => error instanceof EvalRefusal && error.refusal === 'routing-policy-invalid',
+  )
+  const rows = []; const calls = []
+  const deps = depsFor({ rows, calls })
+  deps.ledger.recordRoutingChoice = async () => { throw new Error('mirror unavailable') }
+  await assert.rejects(
+    () => runBench({ dir: bench.dir, deps }),
+    (error) => error instanceof EvalRefusal && error.refusal === 'routing-ledger-unavailable',
+  )
+  assert.deepEqual(rows, [])
+  assert.deepEqual(calls, [])
 })

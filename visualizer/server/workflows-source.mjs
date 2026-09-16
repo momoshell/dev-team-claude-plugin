@@ -1,6 +1,7 @@
 import { readFileSync, readdirSync } from 'node:fs'
 import { isAbsolute, join, resolve } from 'node:path'
 import { VARIANTS } from '../../crew/variants.mjs'
+import { shapeValidationDefect } from '../../crew/shape-validator.mjs'
 import { unifiedDiff } from './roster-edit.mjs'
 
 export const DEFAULT_RECENT_RUNS = 5
@@ -256,6 +257,9 @@ export async function proposeWorkflowEdit({ root = process.cwd(), variants = VAR
   const name = shape && SAFE_WORKFLOW_NAME.test(shape) ? safeWorkflowPath(root, shape) : null
   if (!name) refusals.push(proposalRefusal('path', 'workflow path is not safe'))
   if (refusals.length) return { ok: false, refusals, diff: null, workflow_path: name?.relativePath ?? null, before: null, after: null }
+  const topologyDeclaration = record(workflow) ? (workflow.declaration === undefined ? declaration : workflow.declaration) : declaration
+  const topologyDefect = record(workflow) ? shapeValidationDefect(topologyDeclaration, shape) : { defect: null, detail: null }
+  if (topologyDefect.defect) return { ok: false, refusals: [proposalRefusal(topologyDefect.defect, topologyDefect.detail)], diff: null, workflow_path: name?.relativePath ?? null, before: null, after: null }
 
   const rosterFile = resolve(rosterPath ? (isAbsolute(rosterPath) ? rosterPath : join(root, rosterPath)) : join(root, 'crew', 'roster.json'))
   const roster = readRoster(rosterFile)
@@ -267,7 +271,8 @@ export async function proposeWorkflowEdit({ root = process.cwd(), variants = VAR
   if (!tier?.measured) return { ok: false, refusals: [proposalRefusal('tier-unmeasured', 'selected tier is unmeasured')], diff: null, workflow_path: name.relativePath, before: null, after: null }
   const beforeRead = readBefore(name.path)
   if (beforeRead.error) return { ok: false, refusals: [proposalRefusal('read-error', beforeRead.error)], diff: null, workflow_path: name.relativePath, before: null, after: null }
-  const baseline = canonicalWorkflowBefore(beforeRead.before, shape, suppliedSeats === undefined ? tier.cells : suppliedSeats)
+  const fallbackSeats = requestedTier === undefined && suppliedSeats !== undefined ? suppliedSeats : tier.cells
+  const baseline = canonicalWorkflowBefore(beforeRead.before, shape, fallbackSeats)
   if (baseline.error) return { ok: false, refusals: [proposalRefusal('workflow-map', baseline.error)], diff: null, workflow_path: name.relativePath, before: beforeRead.before, after: null }
   const seats = normalizeSeats(baseline.seats) || {}
   const role = inputEdit.role || (stageHead ? roleForStage(stageHead) : null)

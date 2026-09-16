@@ -13,6 +13,7 @@ import { gitGrepHits } from '../scripts/factory/absence.mjs'
 import { parseCliArgs, ServerUsageError, startServer as startVisualizerServer, writeRosterAtomically } from '../visualizer/server/server.mjs'
 import { createWorkflowsSource, WORKFLOW_FEED_REASONS } from '../visualizer/server/workflows-source.mjs'
 import { VARIANTS } from '../crew/variants.mjs'
+import { SHAPE_DEFECT_CODES } from '../crew/shape-validator.mjs'
 import { ASSURANCE_NAMES, ASSURANCES } from '../crew/assurances.mjs'
 import { PROTECTED_PATHS } from '../crew/protected-paths.mjs'
 import { createShipStateResolver } from '../visualizer/server/ship-state.mjs'
@@ -3256,7 +3257,7 @@ test('E1.feed-reasons', () => {
   assert.notEqual(empty.evidence.reason, degraded.evidence.reason)
 })
 
-test('workflow-page:C1', async () => {
+test('B1 unsupported topology refuses with closed code and no write', async () => {
   const root = scratchDir('visualizer-workflows-source-')
   const crew = join(root, 'crew')
   mkdirSync(crew, { recursive: true })
@@ -3287,6 +3288,22 @@ test('workflow-page:C1', async () => {
   assert.match(present.workflows.find((row) => row.shape === 'repair').map_error, /empty/i)
 
   const beforeDigest = treeDigest(root)
+  const fullWorkflow = present.workflows.find((row) => row.shape === 'full')
+  const unsupportedWorkflow = {
+    ...fullWorkflow,
+    declaration: { ...fullWorkflow.declaration, stages: [...fullWorkflow.declaration.stages].reverse() },
+  }
+  const unsupported = await source.propose({ workflow: unsupportedWorkflow, edit: { stage: 'plan', role: 'planner', cell: { provider: 'anthropic', id: 'planner-2', agent: 'pi', effort: 'max' } } })
+  assert.equal(unsupported.ok, false)
+  assert.equal(unsupported.diff, null)
+  assert.equal(unsupported.refusals.length, 1)
+  const [topologyRefusal] = unsupported.refusals
+  assert.equal(SHAPE_DEFECT_CODES.includes(topologyRefusal.code), true)
+  assert.equal(topologyRefusal.code, 'stage-reordered')
+  assert.equal(typeof topologyRefusal.message, 'string')
+  assert.ok(topologyRefusal.message.trim())
+  assert.equal(treeDigest(root), beforeDigest)
+
   const proposal = await source.propose({ workflow: 'full', edit: { stage: 'plan', role: 'planner', cell: { provider: 'anthropic', id: 'planner-2', agent: 'pi', effort: 'max' } } })
   assert.equal(proposal.ok, true)
   assert.equal(proposal.workflow_path, 'crew/workflows/full.json')
@@ -3332,20 +3349,21 @@ test('workflow-page:C2', async () => {
   }
 })
 
-// Sol review MF4: a proposal seeds untouched seats from the SELECTED tier, never tiers[0].
-test('workflow-page:C3 a seat proposal seeds from the selected tier and refuses an unknown one', async () => {
+// RV1-1: a requested measured tier overrides stale seats carried by the submitted row.
+test('RV1-1 requested tier composes its seats over submitted workflow seats', async () => {
   const { proposeWorkflowEdit } = await import('../visualizer/server/workflows-source.mjs')
   const root = scratchDir('visualizer-workflows-tier-')
   mkdirSync(join(root, 'crew'), { recursive: true })
   const rosterPath = join(root, 'crew', 'roster.json')
   const seat = (id) => ({ provider: 'anthropic', id, agent: 'pi', effort: 'high' })
   writeFileSync(rosterPath, JSON.stringify({ tiers: { mechanical: { planner: seat('mech-planner'), reviewer: seat('mech-reviewer') }, judge: { planner: seat('judge-planner'), reviewer: seat('judge-reviewer') } } }))
-  const result = await proposeWorkflowEdit({ root, rosterPath, workflow: 'full', tier: 'judge', edit: { role: 'reviewer', cell: seat('edited') } })
+  const workflow = { shape: 'full', seats: { planner: seat('mech-planner'), reviewer: seat('mech-reviewer') } }
+  const result = await proposeWorkflowEdit({ root, rosterPath, workflow, tier: 'judge', edit: { role: 'planner', cell: seat('edited') } })
   assert.equal(result.ok, true)
   const after = JSON.parse(result.after)
-  assert.equal(after.seats.planner.id, 'judge-planner')
-  assert.equal(after.seats.reviewer.id, 'edited')
-  const unknown = await proposeWorkflowEdit({ root, rosterPath, workflow: 'full', tier: 'nope', edit: { role: 'reviewer', cell: seat('edited') } })
+  assert.equal(after.seats.planner.id, 'edited')
+  assert.equal(after.seats.reviewer.id, 'judge-reviewer')
+  const unknown = await proposeWorkflowEdit({ root, rosterPath, workflow, tier: 'nope', edit: { role: 'planner', cell: seat('edited') } })
   assert.equal(unknown.ok, false)
   assert.equal(unknown.refusals[0].code, 'tier')
 })

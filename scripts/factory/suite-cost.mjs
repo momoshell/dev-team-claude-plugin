@@ -524,6 +524,7 @@ const RECORDED_SUITE_SAMPLES = Object.freeze([
   ["crew/memory.test.mjs",0.08506266701221465,21,null],
   ["crew/pi/extensions/advisor.test.mjs",0.2518920409977436,7,null],
   ["crew/pi/extensions/builderloop.test.mjs",0.2377102079987526,13,null],
+  ["crew/pi/extensions/fff.test.mjs",0.3735225,16,null],
   ["crew/pi/extensions/lab.test.mjs",33.957276542007925,58,null],
   ["crew/pi/extensions/readgate.test.mjs",0.14805212497711182,27,null],
   ["crew/pi/extensions/skeletonread.test.mjs",0.16577875000238418,18,null],

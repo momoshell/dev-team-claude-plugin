@@ -519,21 +519,21 @@ test('BG1', () => {
   }
   assert.deepEqual(
     piSeatCommand(builder),
-    'env DEVTEAM_WORKER=1 CREW_ROLE=builder CREW_TASK_DIR="/tmp/crew-task" pi --model openai-codex/gpt-5.6 --tools "read,bash,edit,write,grep,find,ls,retrieve" --no-extensions -e "/repo/crew/pi/extensions/builderloop.ts" -e "/repo/crew/pi/extensions/readgate.ts" -e "/repo/crew/pi/extensions/skeletonread.ts" --skill "/repo/skills/lean-build/SKILL.md" --append-system-prompt "/tmp/role-builder.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
+    'env DEVTEAM_WORKER=1 CREW_ROLE=builder CREW_TASK_DIR="/tmp/crew-task" pi --model openai-codex/gpt-5.6 --tools "read,bash,edit,write,grep,find,ls,retrieve,fff_grep,fff_find,fff_multi_grep" --no-extensions -e "/repo/crew/pi/extensions/builderloop.ts" -e "/repo/crew/pi/extensions/readgate.ts" -e "/repo/crew/pi/extensions/skeletonread.ts" -e "/repo/crew/pi/extensions/fff.ts" --skill \"/repo/skills/lean-build/SKILL.md\" --append-system-prompt "/tmp/role-builder.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
   )
   const builderCommand = piSeatCommand(builder)
-  assert.equal(builderCommand.split(' -e ').length - 1, 3)
+  assert.equal(builderCommand.split(' -e ').length - 1, 4)
   assert.equal(builderCommand.includes('--skill "/repo/skills/lean-build/SKILL.md"'), true)
   assert.equal(builderCommand.includes('--no-skills'), false)
+  assert.ok(builderCommand.includes('-e "/repo/crew/pi/extensions/fff.ts"'))
   assert.ok(builderCommand.includes('-e "/repo/crew/pi/extensions/builderloop.ts"'))
   assert.ok(piSeatCommand(builder).includes('-e "/repo/crew/pi/extensions/readgate.ts"'))
   const claudeBuilder = grantsFor(register, 'builder', { ...PIN_ROOT, agent: 'claude' })
   assert.deepEqual(claudeBuilder.extensions, [])
-  assert.throws(
-    () => seatCommand({ ...builder, grants: claudeBuilder }),
-    (error) => error.reason === 'grant-unsupported'
-      && error.message.includes('/repo/skills/lean-build/SKILL.md'),
-  )
+  // The lean-build skill is granted under the pi overlay, because the claude agent refuses the
+  // skills dimension; a claude builder therefore holds no skills grant and boots without one.
+  assert.deepEqual(claudeBuilder.skills, [])
+  assert.doesNotThrow(() => seatCommand({ ...builder, grants: claudeBuilder }))
   for (const role of ROLE_ORDER.filter((name) => name !== 'builder')) {
     const grants = grantsFor(register, role, { ...PIN_ROOT, agent: 'pi' })
     assert.doesNotThrow(() => assertGrantsBacked(role, grants, register, { agent: 'pi' }))
@@ -569,19 +569,20 @@ test('BG2', () => {
     args: [
       '--mode', 'rpc', '--model', 'openai-codex/gpt-5.6', '--thinking', 'max', '--session-dir', '/tmp/crew-task/sessions',
       '--session-id', 'builder', '--append-system-prompt', '/tmp/role-builder.md',
-      '--tools', 'read,bash,edit,write,grep,find,ls,retrieve', '--no-context-files', '--no-extensions',
+      '--tools', 'read,bash,edit,write,grep,find,ls,retrieve,fff_grep,fff_find,fff_multi_grep', '--no-context-files', '--no-extensions',
       '-e', '/repo/crew/pi/extensions/builderloop.ts', '-e', '/repo/crew/pi/extensions/readgate.ts',
-      '-e', '/repo/crew/pi/extensions/skeletonread.ts', '--skill', '/repo/skills/lean-build/SKILL.md',
+      '-e', '/repo/crew/pi/extensions/skeletonread.ts', '-e', '/repo/crew/pi/extensions/fff.ts', '--skill', '/repo/skills/lean-build/SKILL.md',
     ],
     env: { CREW_ROLE: 'builder', CREW_TASK_DIR: '/tmp/crew-task' },
   })
-  assert.equal(builder.args.filter((value) => value === '-e').length, 3)
+  assert.equal(builder.args.filter((value) => value === '-e').length, 4)
   assert.equal(builder.args.includes('/repo/crew/pi/extensions/builderloop.ts'), true)
   assert.equal(builder.args.includes('/repo/crew/pi/extensions/readgate.ts'), true)
   assert.equal(builder.args.includes('/repo/crew/pi/extensions/skeletonread.ts'), true)
   assert.equal(builder.args.filter((value) => value === '--skill').length, 1)
   assert.equal(builder.args.includes('/repo/skills/lean-build/SKILL.md'), true)
   assert.equal(builder.args.includes('--no-skills'), false)
+  assert.equal(builder.args.includes('/repo/crew/pi/extensions/fff.ts'), true)
   for (const role of ROLE_ORDER.filter((name) => name !== 'builder')) {
     const grants = grantsFor(register, role, { ...PIN_ROOT, agent: 'pi' })
     assert.doesNotThrow(() => assertGrantsBacked(role, grants, register, { agent: 'pi' }))
@@ -779,13 +780,19 @@ test('assertCapabilities rejects an adapter that cannot enforce tool denial, nam
   assert.doesNotThrow(() => assertCapabilities('builder', 'claude', { tool_deny: true }))
 })
 
-test('resolveAdapters rejects an unknown --agent-<role> and refuses the shipped default claude builder grant', async () => {
+test('resolveAdapters rejects an unknown --agent-<role>, and refuses a role-wide skills grant on claude', async () => {
   await assert.rejects(
     () => resolveAdapters(['builder'], { 'agent-builder': 'nope' }, null, { register: capabilityRegister() }),
     /adapter-nope\.mjs/,
   )
+  // The shipped register grants the builder's skill under the pi overlay, because claude refuses the
+  // skills dimension, so the shipped default resolves.
+  await assert.doesNotReject(() => resolveAdapters(['builder'], {}))
+  // The refusal itself still fires for a register that grants skills role-wide.
+  const roleWide = JSON.parse(readFileSync(new URL('./capabilities.json', import.meta.url), 'utf8'))
+  roleWide.roles.builder.skills = ['skills/lean-build/SKILL.md']
   await assert.rejects(
-    () => resolveAdapters(['builder'], {}),
+    () => resolveAdapters(['builder'], {}, null, { register: roleWide }),
     (error) => error.reason === 'grant-unsupported'
       && error.message.includes('builder')
       && error.message.includes('skills'),
@@ -8642,7 +8649,8 @@ test('the shipped register is where the fan-out grant lives', async () => {
     assert.deepEqual(register.roles[role].tools, ['planner', 'reviewer'].includes(role) ? ['Task'] : [])
     assert.deepEqual(register.roles[role].extensions, [])
     assert.deepEqual(register.roles[role].agents, [])
-    assert.deepEqual(register.roles[role].skills, role === 'builder' ? ['skills/lean-build/SKILL.md'] : [])
+    assert.deepEqual(register.roles[role].skills, [])
+    assert.deepEqual(register.roles[role].by_agent?.pi?.skills ?? [], role === 'builder' ? ['skills/lean-build/SKILL.md'] : [])
     assert.equal(register.roles[role].advisor, false)
   }
   for (const tier of Object.keys(roster.tiers)) {

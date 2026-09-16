@@ -22,6 +22,11 @@ export const MAX_LINES_ENV = 'CREW_READGATE_MAX_LINES'
 // | 100% | 45/558 | 8.1% |
 const REPEAT_OVERLAP_THRESHOLD = 0.15
 
+function fffEnabled(env) {
+  try { return env?.CREW_FFF === '1' }
+  catch { return false }
+}
+
 const defaultRead = (path) => readFileSync(path, 'utf8')
 const defaultSnapshotFile = (path) => {
   const raw = readFileSync(path)
@@ -550,6 +555,11 @@ export function createReadGate(options = {}) {
       const words = tokenize(command)
       if (!Array.isArray(words) || words.length === 0) return undefined
       const program = basename(words[0])
+      if (program === 'grep' || program === 'rg' || program === 'find' || program === 'fd') {
+        if (!fffEnabled(env)) return undefined
+        const tool = program === 'grep' || program === 'rg' ? 'fff_grep' : 'fff_find'
+        return { block: true, reason: `Refusing direct ${program}: use ${tool} instead.` }
+      }
       if (program !== 'cat' && program !== 'head' && program !== 'tail') return undefined
       const maxLines = configuredMaxLines()
       const cwd = ctx?.cwd || cwdDefault

@@ -161,6 +161,64 @@ export const ROLE_ORDER = Object.freeze(['lead', 'planner', 'builder', 'reviewer
 const CHARTER_ARMS = Object.freeze(['control', 'terse-tail'])
 const CHARTER_TERSE_TAIL = '\n\nBe terse: state the result in the fewest words that carry it, and do not restate context the reader already has.\n'
 
+const FFF_EXTENSION_SUFFIX = '/crew/pi/extensions/fff.ts'
+const FFF_MCP_NAME = 'fff'
+const FFF_MCP_BIN = '/opt/homebrew/bin/fff-mcp'
+const PI_FFF_TOOLS = Object.freeze(['fff_grep', 'fff_find', 'fff_multi_grep'])
+const CLAUDE_FFF_TOOLS = Object.freeze(['mcp__fff__grep', 'mcp__fff__find_files', 'mcp__fff__multi_grep'])
+const PI_SEARCH_TOOLS = Object.freeze(['grep', 'find'])
+const CLAUDE_SEARCH_TOOLS = Object.freeze(['Glob', 'Grep'])
+
+function searchRecord(tools, fff, reason = undefined) {
+  return Object.freeze({ tools: Object.freeze([...tools]), fff, ...(reason ? { reason } : {}) })
+}
+
+function copyFffGrant(grants, adapter, available) {
+  const matches = adapter === 'pi'
+    ? (extension) => String(extension).replaceAll('\\', '/').endsWith(FFF_EXTENSION_SUFFIX)
+    : (server) => server?.name === FFF_MCP_NAME && server?.command?.bin === FFF_MCP_BIN
+  if (adapter === 'pi') {
+    return Object.freeze({ ...grants, extensions: Object.freeze(grants.extensions.filter((extension) => !matches(extension))) })
+  }
+  return Object.freeze({ ...grants, mcp_servers: Object.freeze(grants.mcp_servers.filter((server) => !matches(server))) })
+}
+
+function resolveFffSearch(role, adapter, grants, exists) {
+  const declared = role === 'builder' && (
+    adapter === 'pi'
+      ? grants.extensions.some((extension) => String(extension).replaceAll('\\', '/').endsWith(FFF_EXTENSION_SUFFIX))
+      : adapter === 'claude' && grants.mcp_servers.some((server) => server?.name === FFF_MCP_NAME && server?.command?.bin === FFF_MCP_BIN)
+  )
+  const builtins = adapter === 'pi' ? PI_SEARCH_TOOLS : CLAUDE_SEARCH_TOOLS
+  if (!declared) return { grants, search: searchRecord(builtins, 'ungranted') }
+  try {
+    const available = exists(FFF_MCP_BIN)
+    if (declared && !available) {
+      return {
+        grants: copyFffGrant(grants, adapter, available),
+        search: searchRecord(builtins, 'withheld', 'binary-absent'),
+      }
+    }
+  } catch {
+    return {
+      grants: copyFffGrant(grants, adapter, false),
+      search: searchRecord(builtins, 'withheld', 'binary-absent'),
+    }
+  }
+  return {
+    grants,
+    search: searchRecord(adapter === 'pi' ? PI_FFF_TOOLS : CLAUDE_FFF_TOOLS, 'granted'),
+  }
+}
+
+const UNGRANTED_SEARCH = Object.freeze({ tools: Object.freeze([]), fff: 'ungranted' })
+
+export function effectiveDeny(role, search = UNGRANTED_SEARCH) {
+  const base = SEAT_DEFAULTS[role].deny
+  search ||= UNGRANTED_SEARCH
+  return search.fff === 'granted' ? `${base},Glob,Grep` : base
+}
+
 // Every FANOUT_TOOLS name this role's seat default withholds. The deny string
 // IS the seat's charter boundary, so this is the register-vs-charter comparison
 // the boot refusal below makes.
@@ -1751,8 +1809,10 @@ export async function resolveAdapters(roles, args, seats = null, deps = {}) {
       const name = String(seat?.agent || seatAgent(role, sourceArgs))
       if (!/^[a-z0-9][a-z0-9-]*$/.test(name)) throw new Error(`invalid agent adapter name "${name}" for seat ${role}`)
       const rawModel = seat?.model || sourceArgs[`model-${role}`] || null
-      const grants = grantsFor(registry, role, { root, exists, agent: name })
+      let grants = grantsFor(registry, role, { root, exists, agent: name })
       assertGrantsBacked(role, grants, registry, { agent: name })
+      const fff = resolveFffSearch(role, name, grants, exists)
+      grants = fff.grants
       assertFanoutCoherent(role, grants)
       const activeGrantDimensions = ['extensions', 'skills', 'mcp_servers'].filter((key) => (grants[key]?.length ?? 0) > 0)
       const dimensionsForProvider = (provider) => [
@@ -1889,7 +1949,7 @@ export async function resolveAdapters(roles, args, seats = null, deps = {}) {
       if (transport === HEADLESS_TRANSPORT && typeof adapter.headlessCommand !== 'function') {
         throw new Error(`agent adapter "${name}" for seat ${role} (${file}) does not export a headlessCommand function`)
       }
-      const adapterConfig = { name, adapter, transport, grants, configDir }
+      const adapterConfig = { name, adapter, transport, grants, configDir, search: fff.search }
       out[role] = adapterConfig
     } catch (err) {
       if (err.role === undefined) { err.role = role; err.cell = seats?.[role] ?? null }
@@ -2132,7 +2192,7 @@ export function writeMcpConfigs({ taskDir, roles, adapters }, deps = {}) {
   }
 }
 
-function paneCommand(role, args, { taskDir, bootBrief, adapter, tierSeat, grants = EMPTY_GRANTS, configDir = null, advisorCell = null }) {
+function paneCommand(role, args, { taskDir, bootBrief, adapter, tierSeat, grants = EMPTY_GRANTS, search = null, configDir = null, advisorCell = null }) {
   const seat = SEAT_DEFAULTS[role]
   const merged = join(taskDir, `role-${role}.md`)
   // effort: per-seat boot flag (--effort-<role> high), OPTIONAL — or, when a
@@ -2142,7 +2202,7 @@ function paneCommand(role, args, { taskDir, bootBrief, adapter, tierSeat, grants
   // --thinking).
   return adapter.seatCommand({
     role, model: tierSeat?.model || seatModel(role, args), promptFile: merged,
-    tools: seat.tools, deny: seat.deny, taskDir, bootBrief,
+    tools: seat.tools, deny: effectiveDeny(role, search), taskDir, bootBrief,
     effort: tierSeat?.effort || args[`effort-${role}`] || undefined,
     grants, configDir, advisorCell,
   })
@@ -2292,7 +2352,10 @@ export async function bootCmd(args, deps = {}) {
   // capability shortfall must fail before a workspace gets created.
   let adapters
   try {
-    adapters = await resolveAdapters(roles, args, tierSeats, registerDep ? { register: registerDep } : {})
+    adapters = await resolveAdapters(roles, args, tierSeats, {
+      ...(registerDep ? { register: registerDep } : {}),
+      exists: existsSyncDep ? (path) => path === FFF_MCP_BIN ? existsSyncDep(path) : existsSync(path) : existsSync,
+    })
   } catch (err) {
     noteRunlessCellFailure({ taskSlug, role: err.role ?? null, kind: 'boot-refusal', err, cell: err.cell ?? null })
     throw err
@@ -2464,7 +2527,8 @@ export async function bootCmd(args, deps = {}) {
     pane_id: pane?.id || null, surface_id: surface?.id || null,
     transport: adapters[role].transport, model: seats?.[role]?.model || seatModel(role, args), agent: adapters[role].name,
     grant_snapshot: { schema_version: 1, role, agent: adapters[role].name, grants: adapters[role].grants },
-    tools: effectiveTools(role, adapters[role].grants), deny: SEAT_DEFAULTS[role].deny,
+    tools: effectiveTools(role, adapters[role].grants), deny: effectiveDeny(role, adapters[role].search),
+    search: adapters[role].search,
     // Persist optional vendor grant shortfalls in the durable crew record.
     vendor_withheld: adapters[role].grants?.vendor_withheld ?? [],
     mcp_servers: adapters[role].grants?.mcp_servers ?? [],
@@ -2477,7 +2541,7 @@ export async function bootCmd(args, deps = {}) {
   } else {
     const mk = (role) => paneCommand(role, args, {
       taskDir: paths.taskDir, bootBrief, adapter: adapters[role].adapter, tierSeat: seats?.[role],
-      grants: adapters[role].grants, configDir: adapters[role].configDir,
+      grants: adapters[role].grants, search: adapters[role].search, configDir: adapters[role].configDir,
       advisorCell: adapters[role].grants?.advisor === true
         ? { endpoint: advisorRecord.endpoint, model: advisorRecord.model } : null,
     })
@@ -2563,6 +2627,7 @@ export async function bootCmd(args, deps = {}) {
     models: Object.fromEntries(roles.map((r) => [r, members[r].model])),
     transports: Object.fromEntries(roles.map((r) => [r, members[r].transport])),
     mcp_servers: Object.fromEntries(roles.map((r) => [r, members[r].mcp_servers])),
+    search: Object.fromEntries(roles.map((r) => [r, adapters[r].search])),
     // Persist optional vendor grant shortfalls in the append-only boot event.
     vendor_withheld: Object.fromEntries(roles.map((r) => [r, adapters[r].grants?.vendor_withheld ?? []])),
     charter_bytes: charter.bytes,

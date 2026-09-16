@@ -3,19 +3,37 @@
   "updated_at": "2026-09-12",
   "coding_agents": {
     "pi": {
-      "providers": ["openai", "anthropic", "llama-swap"],
-      "transports": ["pane", "headless-rpc"],
+      "providers": [
+        "openai",
+        "anthropic",
+        "llama-swap"
+      ],
+      "transports": [
+        "pane",
+        "headless-rpc"
+      ],
       "adapter": "crew/adapters/adapter-pi.mjs",
-      "refuses": ["mcp_servers"],
+      "refuses": [
+        "mcp_servers"
+      ],
       "display_name": "Pi",
       "binary": "pi",
       "install_hint": "Install Pi and ensure the pi binary is on PATH."
     },
     "claude": {
-      "providers": ["anthropic"],
-      "transports": ["pane", "headless-json"],
+      "providers": [
+        "anthropic"
+      ],
+      "transports": [
+        "pane",
+        "headless-json"
+      ],
       "adapter": "crew/adapters/adapter-claude.mjs",
-      "refuses": ["extensions", "skills", "local_provider"],
+      "refuses": [
+        "extensions",
+        "skills",
+        "local_provider"
+      ],
       "display_name": "Claude Code",
       "binary": "claude",
       "install_hint": "Install Claude Code and ensure the claude binary is on PATH."
@@ -32,17 +50,30 @@
       "mcp_servers": []
     },
     "planner": {
-      "tools": ["Task"],
+      "tools": [
+        "Task"
+      ],
       "extensions": [],
       "agents": [],
       "skills": [],
       "advisor": false,
-      "requires": ["subagents"],
+      "requires": [
+        "subagents"
+      ],
       "mcp_servers": [],
       "by_agent": {
         "pi": {
-          "extensions": ["crew/pi/extensions/subagent.ts", "crew/pi/extensions/lab.ts", "crew/pi/extensions/readgate.ts"],
-          "agents": [{ "name": "scout", "def": "crew/pi/agents/scout.json" }]
+          "extensions": [
+            "crew/pi/extensions/subagent.ts",
+            "crew/pi/extensions/lab.ts",
+            "crew/pi/extensions/readgate.ts"
+          ],
+          "agents": [
+            {
+              "name": "scout",
+              "def": "crew/pi/agents/scout.json"
+            }
+          ]
         }
       }
     },
@@ -50,18 +81,40 @@
       "tools": [],
       "extensions": [],
       "agents": [],
-      "skills": ["skills/lean-build/SKILL.md"],
+      "skills": [],
       "advisor": false,
       "requires": [],
       "mcp_servers": [],
       "by_agent": {
         "pi": {
-          "extensions": ["crew/pi/extensions/builderloop.ts", "crew/pi/extensions/readgate.ts", "crew/pi/extensions/skeletonread.ts"]
+          "extensions": [
+            "crew/pi/extensions/builderloop.ts",
+            "crew/pi/extensions/readgate.ts",
+            "crew/pi/extensions/skeletonread.ts",
+            "crew/pi/extensions/fff.ts"
+          ],
+          "skills": [
+            "skills/lean-build/SKILL.md"
+          ]
+        },
+        "claude": {
+          "mcp_servers": [
+            {
+              "name": "fff",
+              "command": {
+                "bin": "/opt/homebrew/bin/fff-mcp",
+                "args": []
+              },
+              "url": null
+            }
+          ]
         }
       }
     },
     "reviewer": {
-      "tools": ["Task"],
+      "tools": [
+        "Task"
+      ],
       "extensions": [],
       "agents": [],
       "skills": [],
@@ -79,7 +132,9 @@
       "mcp_servers": [],
       "by_agent": {
         "pi": {
-          "extensions": ["crew/pi/extensions/readgate.ts"]
+          "extensions": [
+            "crew/pi/extensions/readgate.ts"
+          ]
         }
       }
     }

@@ -503,7 +503,12 @@ const RECORDED_SUITE_SAMPLES = Object.freeze([
   ["crew/breaker.test.mjs",0.08306816598773002,24,null],
   ["crew/capabilities.test.mjs",0.14822824999690057,43,null],
   ["crew/converge.test.mjs",0.07020254197716713,11,null],
-  ["crew/crew.test.mjs",18.88692666697502,463,null],
+  ["crew/crew-adapters.test.mjs",0.1746568329334259,73,null],
+  ["crew/crew-boot.test.mjs",4.253483334064484,68,null],
+  ["crew/crew-cli.test.mjs",15.706222499966621,181,null],
+  ["crew/crew-emit.test.mjs",0.234096666932106,11,null],
+  ["crew/crew-seatio.test.mjs",0.11575595891475678,26,null],
+  ["crew/crew.test.mjs",4.091008375048637,115,null],
   ["crew/daemon.test.mjs",1.5502793329954148,161,null],
   ["crew/drive-build.test.mjs",4.23105324998498,168,null],
   ["crew/drive-docs.test.mjs",0.6796569160223007,56,null],
@@ -729,7 +734,7 @@ const RECORDED_CHEAPER_TESTS = Object.freeze([
 
 export const RECORDED_SUITE_COST_REPORT = Object.freeze({
   schema: 1,
-  measured_at: '2026-09-15T12:56:13.300Z',
+  measured_at: '2026-09-16T13:48:41.499Z',
   sample_runs: 3,
   timeout_ms: 180_000,
   denominator: RECORDED_SUITE_SUMMARY.denominator,

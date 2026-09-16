@@ -21,6 +21,7 @@
     "viz:dev": "vite --config visualizer/web/vite.config.mjs",
     "crew:watch": "node scripts/factory/crew-watch.mjs",
     "crew:reap": "node scripts/factory/reap-stale.mjs",
+    "crew:review": "node scripts/factory/pr-review.mjs",
     "agent:doctor": "node scripts/factory/agent-doctor.mjs"
   },
   "devDependencies": {

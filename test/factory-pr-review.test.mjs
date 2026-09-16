@@ -6,6 +6,7 @@ import { execFileSync } from 'node:child_process'
 import { scratchDir } from './helpers.mjs'
 import { assertUsage, parseArgs, reviewIdentityFromArgs } from '../crew/crew.mjs'
 import { canonicalWorktreePath,
+  PR_REVIEW_REFUSALS,
   PrReviewError,
   parseChangedFiles,
   parseMainArgs,
@@ -162,6 +163,30 @@ function bodyMarker(body) {
 async function rejectedReason(promise, reason) {
   await assert.rejects(promise, (error) => error instanceof PrReviewError && error.reason === reason)
 }
+
+test('PR_REVIEW_REFUSALS is the closed 14-value vocabulary', () => {
+  const expected = [
+    'malformed-pr',
+    'unknown-pr',
+    'invalid-review-sha',
+    'worktree-add-failed',
+    'worktree-remove-failed',
+    'git-diff-failed',
+    'review-input-unreadable',
+    'crew-failed',
+    'terminal-unreadable',
+    'task-return-unreadable',
+    'task-return-invalid',
+    'teardown-failed',
+    'head-moved',
+    'post-failed',
+  ]
+  const actual = Object.values(PR_REVIEW_REFUSALS)
+  assert.equal(Object.isFrozen(PR_REVIEW_REFUSALS), true)
+  assert.equal(actual.length, expected.length)
+  assert.equal(new Set(actual).size, actual.length)
+  assert.deepEqual([...actual].sort(), [...expected].sort())
+})
 
 test('A1', async () => {
   const malformed = fixture()

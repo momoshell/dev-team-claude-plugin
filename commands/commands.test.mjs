@@ -7,6 +7,7 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { ROOT } from '../test/helpers.mjs'
+import { PR_REVIEW_REFUSALS } from '../scripts/factory/pr-review.mjs'
 
 const HERE = fileURLToPath(new URL('./', import.meta.url))
 const SKILLS = join(ROOT, 'skills')
@@ -17,8 +18,9 @@ const DISPATCHES_TO = {
   'close-out.md': ['crew-recovery'],
   'status.md': ['devops', 'crew-recovery'],
   'onboard.md': ['crew-onboard'],
+  'review.md': ['pr-review'],
 }
-const TAKES_ARGUMENT = ['dispatch.md', 'close-out.md', 'onboard.md']
+const TAKES_ARGUMENT = ['dispatch.md', 'close-out.md', 'onboard.md', 'review.md']
 
 // Procedure content the skills own. A command repeating any of these has
 // stopped being thin, and a single edit no longer keeps both surfaces true.
@@ -78,6 +80,22 @@ test('argument-taking commands declare a hint and pass the argument through', ()
     assert.ok(frontValue(front, 'argument-hint'), `${name} must declare an argument-hint`)
     assert.ok(body.includes('$ARGUMENTS'), `${name} must pass $ARGUMENTS through`)
   }
+})
+
+test('review command pins its invocation, safety guarantees, and closed refusals', () => {
+  const { body } = parts('review.md')
+  assert.ok(body.includes('npm run crew:review -- --pr $ARGUMENTS'))
+  assert.ok(body.includes('npm run crew:review -- --pr <positive decimal integer> [--request-changes] [--no-post]'))
+  assert.match(body, /`--no-post`[^.\n]*without touching GitHub/)
+  assert.match(body, /never posts APPROVE/)
+
+  const refusalSection = body.split(/^## Refusals\s*$/m)[1] ?? ''
+  const rows = [...refusalSection.matchAll(/^- `([^`]+)` — ([^\r\n]+)$/gm)]
+  const names = rows.map(([, name]) => name).sort()
+  const expected = Object.values(PR_REVIEW_REFUSALS).sort()
+  assert.equal(rows.length, expected.length, 'review.md must explain every refusal exactly once')
+  assert.deepEqual(names, expected, 'review.md refusals must equal the module-owned closed vocabulary')
+  for (const [, name, meaning] of rows) assert.ok(meaning.trim(), `${name} must have a refusal meaning`)
 })
 
 test('the status command takes no argument', () => {

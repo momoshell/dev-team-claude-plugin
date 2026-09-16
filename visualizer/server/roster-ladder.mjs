@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { unifiedDiff, proposeEdit } from './roster-edit.mjs'
 import { normalizeRoster, serializeRosterV1, serializeRosterV2 } from '../../crew/roster.mjs'
 import { breakerPolicy, cellHealth } from '../../crew/breaker.mjs'
+import { materialiseRoutingChoice } from '../../crew/crew.mjs'
 
 const SERVER_DIR = dirname(fileURLToPath(import.meta.url))
 export const LADDER_PATH = resolve(SERVER_DIR, '..', '..', 'crew', 'model-ladder.json')
@@ -339,6 +340,352 @@ export function ladderView({ roster, ladder, reference, cells } = {}) {
     bands,
     chips,
     rail: railRows(roster, ladder),
+  }
+}
+
+const PICK_TOKEN_FIELDS = Object.freeze([
+  'billed_input_tokens', 'billed_output_tokens', 'billed_cache_read_tokens', 'billed_cache_write_tokens',
+])
+const PICK_CATALOG_RATE_FIELDS = Object.freeze([
+  'cost_in_per_mtok', 'cost_out_per_mtok', 'cost_cache_read_per_mtok', 'cost_cache_write_per_mtok',
+])
+const PICK_PRICE_SOURCE = 'roster model catalog'
+
+function pickCell(cell = {}) {
+  return {
+    provider: cell?.provider ?? null,
+    id: cell?.model_id ?? cell?.id ?? null,
+    agent: cell?.agent ?? null,
+    effort: cell?.effort ?? null,
+  }
+}
+
+function pickCellKey(cell) {
+  const value = pickCell(cell)
+  return JSON.stringify([value.provider, value.id, value.agent, value.effort])
+}
+
+function pickCatalog(roster) {
+  if (Array.isArray(roster?.models)) {
+    return new Map(roster.models
+      .filter((model) => model?.key != null)
+      .map((model) => [String(model.key), model]))
+  }
+  if (record(roster?.models)) return new Map(Object.entries(roster.models))
+  return new Map()
+}
+
+function pickCurrentCell(roster, tier, role) {
+  if (Array.isArray(roster?.tiers)) {
+    const column = roster.tiers.find((entry) => entry?.tier === tier)
+    const seat = (Array.isArray(column?.seats) ? column.seats : []).find((entry) => entry?.role === role)
+    return seat ? pickCell(seat?.cell || seat) : null
+  }
+  if (record(roster?.tiers)) {
+    const cell = roster.tiers[tier]?.[role]
+    return cell && record(cell) ? pickCell(cell) : null
+  }
+  if (Array.isArray(roster?.rail)) {
+    const column = roster.rail.find((entry) => entry?.tier === tier)
+    const seat = (Array.isArray(column?.seats) ? column.seats : []).find((entry) => entry?.role === role)
+    return seat?.cell ? pickCell(seat.cell) : null
+  }
+  return null
+}
+
+function pickLadderInfo(ladder, tier) {
+  const source = ladder?.path || 'crew/model-ladder.json'
+  const bands = Array.isArray(ladder?.bands) ? ladder.bands : []
+  const byMember = new Map()
+  const byName = new Map()
+  for (const band of bands) {
+    if (!record(band) || typeof band.band !== 'string') continue
+    byName.set(band.band, band)
+    for (const member of Array.isArray(band.members) ? band.members : []) byMember.set(member, band)
+  }
+  const floorName = ladder?.tier_floors?.[tier]
+    ?? ladder?.rail?.find((entry) => entry?.tier === tier)?.floor_band
+    ?? null
+  const floor = byName.get(floorName)
+  const chips = Array.isArray(ladder?.chips) ? new Map(ladder.chips.map((chip) => [chip?.key, chip])) : new Map()
+  return {
+    source,
+    degraded: ladder?.degraded === true || (!bands.length && !chips.size),
+    byMember,
+    byName,
+    chips,
+    floorName,
+    floorRank: finite(floor?.rank) ? floor.rank : null,
+  }
+}
+
+function pickBand(cell, ladderInfo) {
+  const modelKey = `${cell.provider}/${cell.id}`
+  const ratified = ladderInfo.byMember.get(modelKey)
+  const chip = ladderInfo.chips.get(modelKey)
+  const name = ratified?.band ?? chip?.band ?? null
+  const band = ratified || (name ? { band: name, rank: chip?.rank ?? null } : null)
+  let reason = null
+  if (ladderInfo.degraded || !name) reason = 'band-unknown'
+  else if (ladderInfo.floorRank != null && (!finite(band?.rank) || band.rank < ladderInfo.floorRank)) reason = 'band-below-floor'
+  return {
+    name,
+    source: name ? ladderInfo.source : null,
+    reason,
+  }
+}
+
+function pickFinite(value) {
+  return typeof value === 'number' && Number.isFinite(value)
+}
+
+function pickCost(row, catalog) {
+  const cell = pickCell(row)
+  const key = `${cell.provider}/${cell.id}`
+  const model = catalog.get(key)
+  if (!model) return { value: null, source: null, reason: 'cost-absent' }
+  const tokenMissing = PICK_TOKEN_FIELDS.some((field) => row?.[field] == null)
+  const tokenInvalid = PICK_TOKEN_FIELDS.some((field) => !pickFinite(row?.[field]) || row[field] < 0)
+  if (tokenMissing) return { value: null, source: null, reason: 'cost-absent' }
+  if (tokenInvalid) return { value: null, source: null, reason: 'cost-invalid' }
+  const rateMissing = PICK_CATALOG_RATE_FIELDS.some((field) => model?.[field] == null)
+  const rateInvalid = PICK_CATALOG_RATE_FIELDS.some((field) => !pickFinite(model?.[field]) || model[field] < 0)
+  if (rateMissing) return { value: null, source: null, reason: 'cost-absent' }
+  if (rateInvalid) return { value: null, source: null, reason: 'cost-invalid' }
+  const rates = PICK_CATALOG_RATE_FIELDS.map((field) => model[field])
+  const value = PICK_TOKEN_FIELDS.reduce((sum, field, index) => sum + row[field] * rates[index] / 1_000_000, 0)
+  if (!pickFinite(value) || value < 0) return { value: null, source: null, reason: 'cost-invalid' }
+  return { value, source: PICK_PRICE_SOURCE, reason: null }
+}
+
+function pickRate(row) {
+  const numerator = row?.asserts_passed ?? row?.first_round_passes ?? row?.rate_numerator ?? null
+  const denominator = row?.asserts_declared ?? row?.first_round_reviews ?? row?.rate_denominator ?? null
+  if (numerator == null && denominator == null) return null
+  const valid = Number.isSafeInteger(numerator) && numerator >= 0
+    && Number.isSafeInteger(denominator) && denominator > 0 && numerator <= denominator
+  return { numerator, denominator, value: valid ? numerator / denominator : null }
+}
+
+function pickMeasurements(rows, candidates, role, catalog, ladderInfo) {
+  const candidateKeys = new Set(candidates.map(pickCellKey))
+  const evidence = (Array.isArray(rows) ? rows : []).filter((row) => row?.role === role && candidateKeys.has(pickCellKey(row)))
+  const measurements = evidence.map((row) => {
+    const cell = pickCell(row)
+    const rate = pickRate(row)
+    const cost = pickCost(row, catalog)
+    const band = pickBand(cell, ladderInfo)
+    return {
+      cell,
+      rate,
+      cost_usd: cost.value == null ? { value: null, reason: cost.reason } : cost.value,
+      ...(band.reason ? { band: { ok: false, reason: band.reason } } : {}),
+    }
+  })
+  return { evidence, measurements }
+}
+
+function shapePickRate(rate = {}) {
+  if (!rate || typeof rate !== 'object') rate = { value:null, numerator:null, denominator:null, reason:'rate-absent' }
+  const value = rate
+  return {
+    value: value.value ?? null,
+    denominator: rate.denominator,
+    display: rate.reason === 'rate-thin' ? 'thin' : rate.value,
+    numerator: rate.numerator ?? null,
+    reason: value.reason || (value.value == null ? 'rate-absent' : null),
+  }
+}
+
+function shapePickCost(metric = {}, source = null) {
+  if (!metric || typeof metric !== 'object') metric = { value:null, reason:'cost-absent' }
+  const value = metric
+  return {
+    value: metric.value,
+    source: value.value == null ? null : source,
+    reason: value.reason || (value.value == null ? 'cost-absent' : null),
+  }
+}
+
+function pickRouteWithCandidates(policy, tier, role, candidates) {
+  const copy = clone(policy)
+  const route = copy?.routes?.[tier]?.[role] || copy?.[tier]?.[role]
+  if (!route) return null
+  route.candidates = candidates.map((candidate) => pickCell(candidate))
+  return copy
+}
+
+function authorityRankedCells({ policy, policyHash, tier, role, entry, measurements, materialise }) {
+  let remaining = entry.candidates.map((candidate) => pickCell(candidate))
+  const ranked = []
+  while (remaining.length) {
+    const narrowed = pickRouteWithCandidates(policy, tier, role, remaining)
+    if (!narrowed) break
+    let result
+    try {
+      result = materialise({ policy: narrowed, policyHash, tier, role, measurements, entryPoint: 'bench' })
+    } catch {
+      break
+    }
+    if (result?.outcome !== 'chosen' || !result.chosen_cell) break
+    const winnerKey = pickCellKey(result.chosen_cell)
+    const index = remaining.findIndex((candidate) => pickCellKey(candidate) === winnerKey)
+    if (index < 0) break
+    ranked.push(remaining[index])
+    remaining = remaining.filter((_, candidateIndex) => candidateIndex !== index)
+  }
+  return ranked
+}
+
+function unavailablePick({ tier = null, role = null, reason = 'routing pick is unavailable' } = {}) {
+  const absence = String(reason || 'routing pick is unavailable')
+  return {
+    schema_version: 1,
+    entry_point: 'bench',
+    tier,
+    role,
+    policy_hash: null,
+    current_cell: null,
+    current: null,
+    policy_candidates: null,
+    candidate_set: null,
+    exclusions: [],
+    ranked_survivors: [],
+    ranked: [],
+    outcome: 'abstained',
+    chosen_cell: null,
+    chosen: null,
+    abstention_reason: 'no-eligible-candidate',
+    reason: absence,
+    why: absence,
+    band: null,
+    band_source: null,
+    cost: { value: null, source: null, reason: absence },
+    eval_cells: [],
+    evidence: [],
+    bench: null,
+    selected_bench: null,
+    evidence_reason: absence,
+    unavailable: absence,
+  }
+}
+
+export function rosterPickView({
+  policy: suppliedPolicy,
+  policyHash: suppliedPolicyHash,
+  policy_hash,
+  loadedPolicy,
+  routing,
+  tier,
+  role,
+  roster,
+  currentRoster,
+  current_roster,
+  currentRosterView,
+  current_view,
+  ladder,
+  eval_cells,
+  evalCells,
+  bench,
+  evidenceReason = null,
+  materialise = materialiseRoutingChoice,
+} = {}) {
+  const loaded = loadedPolicy || routing || {}
+  const policy = suppliedPolicy?.policy && record(suppliedPolicy.policy) ? suppliedPolicy.policy
+    : suppliedPolicy || loaded.policy || loaded
+  const policyHash = suppliedPolicyHash || policy_hash || suppliedPolicy?.policyHash || loaded.policyHash || loaded.policy_hash
+  const entry = policy?.routes?.[tier]?.[role] || policy?.[tier]?.[role]
+  if (!entry) throw new Error(`routing policy has no exact tier/role route for ${JSON.stringify(tier)}/${JSON.stringify(role)}`)
+  const candidates = Array.isArray(entry.candidates) ? entry.candidates.map((candidate) => pickCell(candidate)) : []
+  const rosterView = roster || currentRoster || current_roster || currentRosterView || current_view || null
+  const catalog = pickCatalog(rosterView)
+  const ladderInfo = pickLadderInfo(ladder, tier)
+  const rows = eval_cells ?? evalCells ?? []
+  const prepared = pickMeasurements(rows, candidates, role, catalog, ladderInfo)
+  const materialised = materialise({
+    policy,
+    policyHash,
+    tier,
+    role,
+    measurements: prepared.measurements,
+    entryPoint: 'bench',
+  })
+  const normalised = new Map((Array.isArray(materialised.normalized_measurements) ? materialised.normalized_measurements : [])
+    .map((metric) => [pickCellKey(metric?.cell), metric]))
+  const evidenceByCell = new Map()
+  for (const row of prepared.evidence) {
+    const key = pickCellKey(row)
+    const list = evidenceByCell.get(key) || []
+    list.push(row)
+    evidenceByCell.set(key, list)
+  }
+  const costByCell = new Map()
+  for (const row of prepared.evidence) {
+    const key = pickCellKey(row)
+    if (!costByCell.has(key)) costByCell.set(key, pickCost(row, catalog))
+  }
+  const exclusionByCell = new Map((Array.isArray(materialised.exclusions) ? materialised.exclusions : [])
+    .map((entry) => [pickCellKey(entry?.cell), entry]))
+  const policyCandidates = candidates.map((cell, policyOrder) => {
+    const key = pickCellKey(cell)
+    const metric = normalised.get(key) || { rate: null, cost_usd: { value: null, reason: 'cost-absent' } }
+    const band = pickBand(cell, ladderInfo)
+    const exclusion = exclusionByCell.get(key) || null
+    const costInfo = costByCell.get(key) || { value: null, source: null, reason: metric.cost_usd?.reason || 'cost-absent' }
+    return {
+      cell: clone(cell),
+      policy_order: policyOrder,
+      eligible: exclusion == null,
+      exclusion: exclusion ? { cell: clone(exclusion.cell), reason: exclusion.reason } : null,
+      exclusion_reason: exclusion?.reason ?? null,
+      reason: exclusion?.reason ?? null,
+      band: band.name,
+      band_name: band.name,
+      band_source: band.source,
+      band_reason: band.reason,
+      rate: shapePickRate(metric.rate),
+      cost: shapePickCost(metric.cost_usd, costInfo.source),
+      evidence: (evidenceByCell.get(key) || []).map((row) => clone(row)),
+    }
+  })
+  const rankedCells = authorityRankedCells({ policy, policyHash, tier, role, entry, measurements: prepared.measurements, materialise })
+  const candidateByCell = new Map(policyCandidates.map((candidate) => [pickCellKey(candidate.cell), candidate]))
+  const rankedSurvivors = rankedCells.map((cell) => candidateByCell.get(pickCellKey(cell))).filter(Boolean)
+  const chosen = materialised.chosen_cell ? candidateByCell.get(pickCellKey(materialised.chosen_cell)) || null : null
+  const chosenCell = materialised.chosen_cell ? clone(materialised.chosen_cell) : null
+  const rootCost = chosen?.cost || { value: null, source: null, reason: materialised.outcome === 'abstained' ? (materialised.abstention_reason || 'no chosen cell') : 'cost-absent' }
+  return {
+    schema_version: materialised.schema_version,
+    entry_point: materialised.entry_point,
+    tier: materialised.tier,
+    role: materialised.role,
+    policy_hash: materialised.policy_hash,
+    current_cell: pickCurrentCell(rosterView, tier, role),
+    current: pickCurrentCell(rosterView, tier, role),
+    policy_candidates: policyCandidates,
+    candidate_set: policyCandidates.map((candidate) => clone(candidate.cell)),
+    exclusions: (Array.isArray(materialised.exclusions) ? materialised.exclusions : []).map((entry) => ({ cell: clone(entry.cell), reason: entry.reason })),
+    ranked_survivors: rankedSurvivors,
+    ranked: rankedSurvivors,
+    chosen_cell: chosenCell,
+    chosen: chosen ? { cell: chosenCell, reason: materialised.reason || null } : null,
+    outcome: materialised.outcome,
+    reason: materialised.reason || materialised.abstention_reason,
+    why: materialised.reason || materialised.abstention_reason,
+    win_reason: materialised.reason || null,
+    abstention_reason: materialised.abstention_reason || null,
+    abstention: materialised.outcome === 'abstained' ? { reason: materialised.abstention_reason } : null,
+    band: chosen?.band ?? null,
+    band_name: chosen?.band ?? null,
+    band_source: chosen?.band_source ?? null,
+    cost: rootCost,
+    bench: typeof bench === 'string' ? bench : bench?.sha ?? bench?.bench ?? null,
+    selected_bench: typeof bench === 'string' ? bench : bench?.sha ?? bench?.bench ?? null,
+    evidence_reason: evidenceReason || (prepared.evidence.length ? null : 'no exact eval_cells evidence was available for this role and policy candidate set'),
+    evidence: prepared.evidence.map((row) => clone(row)),
+    eval_cells: prepared.evidence.map((row) => clone(row)),
+    measurement_fingerprint: materialised.measurement_fingerprint,
+    policy_entry: clone(materialised.policy_entry),
   }
 }
 

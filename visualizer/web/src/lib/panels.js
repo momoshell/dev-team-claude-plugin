@@ -176,6 +176,40 @@ export function rosterPanel(payload = {}) {
   }
 }
 
+function panelClone(value) {
+  try { return structuredClone(value) } catch { return value }
+}
+
+export function rosterPickPanel(payload = {}) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return {
+      current_cell: null,
+      policy_candidates: [],
+      exclusions: [],
+      ranked_survivors: [],
+      ranked: [],
+      chosen_cell: null,
+      outcome: 'abstained',
+      reason: 'roster pick unavailable — no explanation was reported',
+      eval_cells: [],
+      evidence: [],
+      pending: 'roster pick unavailable — no explanation was reported',
+    }
+  }
+  const view = panelClone(payload)
+  view.current_cell = Object.prototype.hasOwnProperty.call(payload, 'current_cell') ? panelClone(payload.current_cell) : null
+  view.policy_candidates = Array.isArray(payload.policy_candidates) ? panelClone(payload.policy_candidates) : []
+  view.exclusions = Array.isArray(payload.exclusions) ? panelClone(payload.exclusions) : []
+  view.ranked_survivors = Array.isArray(payload.ranked_survivors) ? panelClone(payload.ranked_survivors) : []
+  view.ranked = Array.isArray(payload.ranked) ? panelClone(payload.ranked) : panelClone(view.ranked_survivors)
+  view.chosen_cell = Object.prototype.hasOwnProperty.call(payload, 'chosen_cell') ? panelClone(payload.chosen_cell) : null
+  view.eval_cells = Array.isArray(payload.eval_cells) ? panelClone(payload.eval_cells) : []
+  view.evidence = Array.isArray(payload.evidence) ? panelClone(payload.evidence) : panelClone(view.eval_cells)
+  view.reason = typeof payload.reason === 'string' && payload.reason.length ? payload.reason : 'roster pick unavailable — no explanation was reported'
+  view.pending = payload.unavailable || (payload.outcome === 'abstained' && payload.chosen_cell == null ? view.reason : null)
+  return view
+}
+
 export function rosterEditForm(payload = {}, selection = {}) {
   const unavailable = payload?.error || 'roster unavailable — no reason was reported'
   if (!Array.isArray(payload?.tiers) || payload.tiers.length === 0) {

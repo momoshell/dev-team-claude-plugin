@@ -8,7 +8,7 @@ import { pathToFileURL } from 'node:url'
 import { scratchDir } from '../test/helpers.mjs'
 import { DEFAULT_TRANSPORT, HEADLESS_TRANSPORTS, ROLE_ORDER, assertCapabilities } from '../crew/crew.mjs'
 import { capabilityRefusals, loadSeatSchema, proposeEdit } from '../visualizer/server/roster-edit.mjs'
-import { applyMoves, composeMoves, ladderView, readLadder, readReference, stageMoves } from '../visualizer/server/roster-ladder.mjs'
+import { applyMoves, composeMoves, ladderView, readLadder, readReference, rosterPickView, stageMoves } from '../visualizer/server/roster-ladder.mjs'
 
 const shippedRosterPath = join(process.cwd(), 'crew', 'roster.json')
 const schemaPath = join(process.cwd(), 'crew', 'roster.schema.json')
@@ -362,6 +362,86 @@ test('ladderView keeps ratified drift, measured records and tier rail separate',
   assert.equal(absent.measured, null); assert.ok(absent.measured_pending)
   const broken = ladderView({ roster: ladderRosterView(), ladder: readLadder({ ladderPath: '/tmp/missing-model-ladder.json' }), reference, cells })
   assert.equal(broken.bands, null); assert.equal(broken.chips, null); assert.equal(broken.rail, null)
+})
+
+const pickCells = {
+  first: { provider:'openai', id:'gpt-5.6-sol', agent:'pi', effort:'medium' },
+  thin: { provider:'openai', id:'gpt-5.6-terra', agent:'pi', effort:'max' },
+  winner: { provider:'anthropic', id:'claude-sonnet-5', agent:'claude', effort:'high' },
+}
+const pickEntry = {
+  candidates: [pickCells.first, pickCells.thin, pickCells.winner],
+  tie_break: ['first_round_pass_rate_desc', 'cost_usd_asc', 'policy_order'],
+  measurement_window: { lookback_days:30, minimum_rate_denominator:12 },
+  null_handling: { rate:'exclude-with-reason', cost:'exclude-with-reason' },
+  abstention_reasons: ['no-eligible-candidate'],
+}
+const pickPolicy = { routes: { build: { reviewer: pickEntry } } }
+function pickRosterView() {
+  const view = ladderRosterView()
+  view.models = view.models.map((model) => ({
+    ...model,
+    cost_in_per_mtok: model.cost_in_per_mtok ?? 1,
+    cost_out_per_mtok: model.cost_out_per_mtok ?? 2,
+    cost_cache_read_per_mtok: model.cost_cache_read_per_mtok ?? 0.1,
+    cost_cache_write_per_mtok: model.cost_cache_write_per_mtok ?? 0.2,
+  }))
+  return view
+}
+function pickEvidenceRows() {
+  const row = (cell, passed, declared) => ({
+    id: `${cell.id}-${declared}`,
+    bench:'bench-newest', role:'reviewer', provider:cell.provider, model_id:cell.id,
+    agent:cell.agent, effort:cell.effort, production:1,
+    asserts_passed:passed, asserts_declared:declared,
+    billed_input_tokens:1_000_000, billed_output_tokens:500_000,
+    billed_cache_read_tokens:100_000, billed_cache_write_tokens:50_000,
+    created_at:'2026-09-15T00:00:00.000Z',
+  })
+  return [row(pickCells.winner, 12, 12), row(pickCells.thin, 10, 11), row(pickCells.first, 9, 12)]
+}
+
+function nullPickPolicy() {
+  return { routes: { build: { reviewer: { ...pickEntry, candidates:[pickCells.first] } } } }
+}
+
+test('A1 roster pick carries exclusions and rate denominators', () => {
+  const evidence = pickEvidenceRows()
+  const view = rosterPickView({ policy:pickPolicy, policyHash:'a'.repeat(64), tier:'build', role:'reviewer', roster:pickRosterView(), ladder:ratifiedLadder, eval_cells:evidence, bench:'bench-newest' })
+  assert.deepEqual(view.eval_cells, evidence)
+  assert.equal(view.policy_candidates.length, 3)
+  assert.equal(view.policy_candidates.find((candidate) => candidate.cell.id === pickCells.first.id).rate.denominator, 12)
+  const excluded = view.exclusions.find((entry) => entry.cell.id === pickCells.thin.id)
+  assert.equal(excluded.reason, 'rate-thin')
+  assert.deepEqual(view.ranked_survivors.map((candidate) => candidate.cell.id), [pickCells.winner.id, pickCells.first.id])
+  assert.equal(view.chosen_cell.id, pickCells.winner.id)
+  assert.equal(view.reason, 'first_round_pass_rate_desc')
+  assert.equal(view.policy_candidates.find((candidate) => candidate.cell.id === pickCells.winner.id).band, 'workhorse')
+  assert.ok(view.policy_candidates.find((candidate) => candidate.cell.id === pickCells.winner.id).band_source)
+  assert.equal(view.policy_candidates.find((candidate) => candidate.cell.id === pickCells.winner.id).cost.source, 'roster model catalog')
+})
+
+test('B1 roster pick renders below-floor rates as thin', () => {
+  const view = rosterPickView({ policy:pickPolicy, policyHash:'b'.repeat(64), tier:'build', role:'reviewer', roster:pickRosterView(), ladder:ratifiedLadder, eval_cells:pickEvidenceRows(), bench:'bench-newest' })
+  const thin = view.policy_candidates.find((candidate) => candidate.cell.id === pickCells.thin.id)
+  assert.equal(thin.rate.denominator, 11)
+  assert.equal(thin.rate.display, 'thin')
+  assert.equal(typeof thin.rate.display, 'string')
+  assert.notEqual(thin.rate.display, thin.rate.value)
+})
+
+test('E1 roster pick preserves null metrics with reasons', () => {
+  const cell = pickCells.first
+  const evidence = [{ bench:'bench-null', role:'reviewer', provider:cell.provider, model_id:cell.id, agent:cell.agent, effort:cell.effort, asserts_passed:null, asserts_declared:null, billed_input_tokens:null, billed_output_tokens:null, billed_cache_read_tokens:null, billed_cache_write_tokens:null }]
+  const view = rosterPickView({ policy:nullPickPolicy(), policyHash:'c'.repeat(64), tier:'build', role:'reviewer', roster:pickRosterView(), ladder:ratifiedLadder, eval_cells:evidence, bench:'bench-null' })
+  const candidate = view.policy_candidates[0]
+  assert.equal(view.outcome, 'abstained')
+  assert.equal(candidate.rate.value, null)
+  assert.equal(candidate.rate.denominator, null)
+  assert.ok(candidate.rate.reason)
+  assert.equal(candidate.cost.value, null)
+  assert.ok(candidate.cost.reason)
+  assert.equal(candidate.exclusion_reason, 'rate-absent')
 })
 
 async function stageLadder(moves, extra = {}) {

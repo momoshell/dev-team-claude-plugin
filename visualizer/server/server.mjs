@@ -14,12 +14,13 @@ import { createWorkflowsSource } from './workflows-source.mjs'
 import { proposeEdit } from './roster-edit.mjs'
 import { createAgentsSource } from './agents-source.mjs'
 import { VARIANTS } from '../../crew/variants.mjs'
-import { readLadder, readReference, ladderView, stageMoves, composeMoves, applyMoves } from './roster-ladder.mjs'
+import { readLadder, readReference, ladderView, rosterPickView, stageMoves, composeMoves, applyMoves } from './roster-ladder.mjs'
 import { createArtificialAnalysisCatalog } from './model-catalog.mjs'
 import { createOpenRouterCatalog } from './openrouter-catalog.mjs'
 import { mergeModelDirectory } from '../web/src/lib/model-directory.js'
 import { saveArtificialAnalysisKey } from './local-env.mjs'
 import { breakerPolicy } from '../../crew/breaker.mjs'
+import { loadRoutingPolicy, ROUTING_SEATED_ROLES, ROUTING_TIERS } from '../../crew/crew.mjs'
 import { openLedger } from '../../scripts/factory/ledger.mjs'
 import { defaultCellWindow, defaultRunSetWindow, defaultIntakeWindow, defaultTeardownWindow, RUN_SET_WINDOW_MS, shapeCellHealth, shapeRunSet, shapeIntake, shapeSeatTeardowns, shapeCellAttribution } from './shape.mjs'
 
@@ -85,6 +86,7 @@ const ROUTE_PARAMS = Object.freeze({
   '/api/returns': ['repo_slug', 'task_slug', 'adw_id'],
   '/api/journal': ['repo_slug', 'task_slug', 'adw_id'],
   '/api/roster': [],
+  '/api/roster/pick': ['tier', 'role'],
   '/api/agents': [],
   '/api/agents/propose': [],
   '/api/skills/propose': [],
@@ -307,6 +309,118 @@ function staticResponse(req, res) {
   } catch { res.writeHead(404); res.end('Not found') }
 }
 
+function rosterPickCellKey(cell) {
+  return JSON.stringify([cell?.provider ?? null, cell?.model_id ?? cell?.id ?? null, cell?.agent ?? null, cell?.effort ?? null])
+}
+
+function rosterPickRoute(policy, tier, role) {
+  return policy?.routes?.[tier]?.[role] || policy?.[tier]?.[role] || null
+}
+
+function rosterPickBenchNewest(ledger, policy, tier, role) {
+  if (!ledger || typeof ledger.tableNames !== 'function') return { rows: [], bench: null, reason: 'ledger read handle is unavailable — eval_cells evidence is unmeasured' }
+  let tables
+  try {
+    tables = ledger.tableNames()
+  } catch (err) {
+    return { rows: [], bench: null, reason: `ledger table list failed: ${err?.message || String(err)}` }
+  }
+  if (!Array.isArray(tables) || !tables.includes('eval_cells')) return { rows: [], bench: null, reason: 'eval_cells table is unavailable — evidence is unmeasured, not zero' }
+  const route = rosterPickRoute(policy, tier, role)
+  const candidates = Array.isArray(route?.candidates) ? route.candidates : []
+  const candidateKeys = new Set(candidates.map(rosterPickCellKey))
+  const beforeStats = typeof ledger.stats === 'function' ? ledger.stats() : null
+  const beforeErrors = Number(beforeStats?.mirror_errors || 0)
+  let allRows
+  try {
+    allRows = ledger.dumpTable('eval_cells')
+  } catch (err) {
+    return { rows: [], bench: null, reason: `eval_cells read failed: ${err?.message || String(err)}` }
+  }
+  const afterStats = typeof ledger.stats === 'function' ? ledger.stats() : null
+  const afterErrors = Number(afterStats?.mirror_errors || 0)
+  if (afterErrors > beforeErrors) return { rows: [], bench: null, reason: 'eval_cells read failed — the ledger did not provide trustworthy evidence' }
+  if (!Array.isArray(allRows)) return { rows: [], bench: null, reason: 'eval_cells read returned unknown data — evidence is unmeasured' }
+  const groups = new Map()
+  for (const row of allRows) {
+    if (row?.role !== role || !candidateKeys.has(rosterPickCellKey(row)) || typeof row?.bench !== 'string' || !row.bench.trim()) continue
+    if (!groups.has(row.bench)) groups.set(row.bench, [])
+    groups.get(row.bench).push(row)
+  }
+  const complete = [...groups.entries()]
+    .map(([bench, rows]) => ({ bench, rows, keys: new Set(rows.map(rosterPickCellKey)) }))
+    .filter((group) => candidates.every((candidate) => group.keys.has(rosterPickCellKey(candidate))))
+  if (!complete.length) return { rows: [], bench: null, reason: 'no bench contains evidence for every requested role and routing-policy candidate — evidence is unmeasured' }
+  complete.sort((left, right) => {
+    const latest = (rows) => [...rows].sort((a, b) => String(a?.created_at || '').localeCompare(String(b?.created_at || '')) || Number(a?.id || 0) - Number(b?.id || 0)).at(-1)
+    const a = latest(left.rows), b = latest(right.rows)
+    return String(b?.created_at || '').localeCompare(String(a?.created_at || ''))
+      || Number(b?.id || 0) - Number(a?.id || 0)
+      || left.bench.localeCompare(right.bench)
+  })
+  const selected = complete.at(0)
+  let rows = selected.rows
+  if (typeof ledger.evalCells === 'function') {
+    try {
+      const ordered = ledger.evalCells({ bench: selected.bench })
+      if (!Array.isArray(ordered)) return { rows: [], bench: null, reason: 'eval_cells bench read returned unknown data — evidence is unmeasured' }
+      const evalStats = typeof ledger.stats === 'function' ? ledger.stats() : null
+      const evalErrors = Number(evalStats?.mirror_errors || 0)
+      if (evalErrors > afterErrors) return { rows: [], bench: null, reason: 'eval_cells bench read failed — the ledger did not provide trustworthy evidence' }
+      rows = ordered
+    } catch (err) {
+      return { rows: [], bench: null, reason: `eval_cells bench read failed: ${err?.message || String(err)}` }
+    }
+  }
+  return { rows, bench: selected.bench, reason: null }
+}
+
+function rosterPickUnavailable(tier, role, reason) {
+  const message = String(reason || 'routing pick is unavailable')
+  return {
+    schema_version: 1,
+    entry_point: 'bench',
+    tier,
+    role,
+    policy_hash: null,
+    current_cell: null,
+    current: null,
+    policy_candidates: null,
+    candidate_set: null,
+    exclusions: [],
+    ranked_survivors: [],
+    ranked: [],
+    outcome: 'abstained',
+    chosen_cell: null,
+    chosen: null,
+    abstention_reason: 'no-eligible-candidate',
+    reason: message,
+    why: message,
+    win_reason: null,
+    abstention: { reason: message },
+    band: null,
+    band_name: null,
+    band_source: null,
+    cost: { value: null, source: null, reason: message },
+    bench: null,
+    selected_bench: null,
+    evidence: [],
+    eval_cells: [],
+    evidence_reason: message,
+    unavailable: message,
+  }
+}
+
+function readPickQuery(url) {
+  const values = {}
+  for (const name of ['tier', 'role']) {
+    const matches = url.searchParams.getAll(name)
+    if (matches.length !== 1 || typeof matches[0] !== 'string' || !matches[0].trim()) return { error: `${name} must be supplied exactly once and be non-blank` }
+    values[name] = matches[0].trim()
+  }
+  return values
+}
+
 export function startServer(options = {}) {
   const config = { ...defaults(), ...options }
   config.checkout = resolve(config.checkout || process.cwd())
@@ -409,6 +523,67 @@ export function startServer(options = {}) {
       if (url.pathname === '/api/roster') {
         if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
         return json(res, 200, { schema, ...roster.readRoster() })
+      }
+      if (url.pathname === '/api/roster/pick') {
+        if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
+        const query = readPickQuery(url)
+        if (query.error) return json(res, 400, { schema, error: query.error })
+        const { tier, role } = query
+        if (!ROUTING_TIERS.includes(tier) || !ROUTING_SEATED_ROLES[tier]?.includes(role)) {
+          return json(res, 400, { schema, error: `unknown roster pick tier/role ${JSON.stringify(tier)}/${JSON.stringify(role)}` })
+        }
+        let loaded
+        try {
+          loaded = loadRoutingPolicy({ path: config.routingPolicyPath || config.policyPath })
+        } catch (err) {
+          const view = rosterPickUnavailable(tier, role, `routing policy is unavailable: ${err?.message || String(err)}`)
+          return json(res, 200, { schema, ...view })
+        }
+        let currentRoster
+        try {
+          currentRoster = roster.readRoster()
+        } catch (err) {
+          currentRoster = { tiers: null, models: null, degraded: true, error: `roster read failed: ${err?.message || String(err)}` }
+        }
+        let ladder
+        try {
+          ladder = readLadder({ ladderPath: config.ladderPath })
+        } catch (err) {
+          ladder = { degraded: true, bands: null, tier_floors: null, error: `model ladder read failed: ${err?.message || String(err)}` }
+        }
+        let ledger = null
+        let evidence = { rows: [], bench: null, reason: 'ledger evidence was not read' }
+        try {
+          const openReadLedger = config.openLedger || openLedger
+          ledger = openReadLedger({ dbPath: config.ledgerDb, readOnly: true, stderr: { write() {} } })
+          if (ledger?.readConnection && !ledger.readConnection()) {
+            const stats = typeof ledger.stats === 'function' ? ledger.stats() : null
+            evidence = { rows: [], bench: null, reason: stats?.degraded_message || 'ledger could not be opened read-only — evidence is unmeasured' }
+          } else {
+            evidence = rosterPickBenchNewest(ledger, loaded.policy, tier, role)
+          }
+        } catch (err) {
+          evidence = { rows: [], bench: null, reason: `ledger evidence read failed: ${err?.message || String(err)}` }
+        } finally {
+          try { ledger?.close?.() } catch {}
+        }
+        let view
+        try {
+          view = rosterPickView({
+            policy: loaded.policy,
+            policyHash: loaded.policyHash,
+            tier,
+            role,
+            roster: currentRoster,
+            ladder,
+            eval_cells: evidence.rows,
+            bench: evidence.bench,
+            evidenceReason: evidence.reason,
+          })
+        } catch (err) {
+          view = rosterPickUnavailable(tier, role, `routing pick could not be materialised: ${err?.message || String(err)}`)
+        }
+        return json(res, 200, { schema, ...view })
       }
       if (url.pathname === '/api/agents') {
         if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })

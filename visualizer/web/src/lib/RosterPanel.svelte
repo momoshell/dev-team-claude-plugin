@@ -1,7 +1,8 @@
 <script>
-  import { applyRosterLadder, composeRosterLadder, getModelCatalog, getRosterLadder, setModelCatalogKey, stageRosterLadder } from './api.js'
+  import { applyRosterLadder, composeRosterLadder, getModelCatalog, getRosterLadder, getRosterPick, proposeRosterEdit, setModelCatalogKey, stageRosterLadder } from './api.js'
   import { directoryModelMatchesChip, directoryVariantLabel, fallbackModelName, groupDirectoryModels, providerDisplayName, selectedDirectoryVariant } from './model-directory.js'
   import { assuranceMeta } from './workflow-semantics.js'
+  import { rosterPickPanel, rosterProposal } from './panels.js'
   import DiffBlock from './DiffBlock.svelte'
   import Dropdown from './Dropdown.svelte'
 
@@ -50,6 +51,9 @@
   let directorySelections = $state({})
   let catalogKey = $state('')
   let connectingCatalog = $state(false)
+  let policyPicks = $state({})
+  let pickProposals = $state({})
+  let pickRevision = 0
   let catalogKeyError = $state('')
   let catalogKeyOpen = $state(false)
   let rememberCatalogKey = $state(true)
@@ -104,6 +108,17 @@
   let directoryPages = $derived(Math.max(1, Math.ceil(directoryModels.length / DIRECTORY_PAGE_SIZE)))
   let visibleDirectoryModels = $derived(directoryModels.slice((Math.min(directoryPage, directoryPages) - 1) * DIRECTORY_PAGE_SIZE, Math.min(directoryPage, directoryPages) * DIRECTORY_PAGE_SIZE))
 
+  function pickKey(tier, role) { return `${tier}\u001f${role}` }
+  function seatRows(column) {
+    return [
+      ...(column?.seats || []).map((seat) => ({ ...seat, assigned:true })),
+      ...(column?.unseated || []).map((role) => ({ role, assigned:false, model_key:null, cell:null })),
+    ]
+  }
+  let pickRows = $derived((payload?.rail || []).flatMap((column) => seatRows(column).map((seat) => ({ tier:column.tier, role:seat.role }))))
+  function pickFor(tier, role) { return policyPicks[pickKey(tier, role)] || null }
+  function proposalFor(tier, role) { return pickProposals[pickKey(tier, role)] || null }
+
   $effect(() => {
     let active = true
     getRosterLadder().then((result) => { if (active) { payload = result; requestError = ''; loading = false } }).catch((err) => {
@@ -112,6 +127,25 @@
       payload = { degraded: true, error: requestError, bands: null, chips: null, rail: null }
       loading = false
     })
+    return () => { active = false }
+  })
+
+  $effect(() => {
+    if (loading || payload?.degraded || !Array.isArray(payload?.rail)) return
+    let active = true
+    const revision = ++pickRevision
+    const rows = pickRows
+    policyPicks = Object.fromEntries(rows.map((row) => [pickKey(row.tier, row.role), { loading:true, pick:null, error:null }]))
+    for (const row of rows) {
+      const key = pickKey(row.tier, row.role)
+      getRosterPick(row.tier, row.role).then((result) => {
+        if (!active || revision !== pickRevision) return
+        policyPicks = { ...policyPicks, [key]: { loading:false, pick:rosterPickPanel(result), error:null } }
+      }).catch((err) => {
+        if (!active || revision !== pickRevision) return
+        policyPicks = { ...policyPicks, [key]: { loading:false, pick:null, error:err.message || 'roster pick request failed' } }
+      })
+    }
     return () => { active = false }
   })
 
@@ -230,6 +264,17 @@
       if (revision === validationRevision) requestError = err.message || 'roster guidance could not be loaded'
     } finally {
       if (revision === validationRevision) staging = false
+    }
+  }
+  async function proposePolicyPick(column, seat, pick) {
+    if (!pick?.chosen_cell) return
+    const key = pickKey(column.tier, seat.role)
+    pickProposals = { ...pickProposals, [key]: { loading:true, response:null, error:null } }
+    try {
+      const response = await proposeRosterEdit(column.tier, seat.role, pick.chosen_cell)
+      pickProposals = { ...pickProposals, [key]: { loading:false, response, error:null } }
+    } catch (err) {
+      pickProposals = { ...pickProposals, [key]: { loading:false, response:null, error:err.message || 'roster pick proposal failed' } }
     }
   }
   function drop(event, tier, role) { event.preventDefault(); beginAssignment(tier, role, event.dataTransfer?.getData('text/plain')) }
@@ -399,16 +444,50 @@
             <header><div><p class="micro">{assurance.label} assurance</p><h2>{assurance.label}</h2><code>{column.tier}</code></div><span class="floor">Minimum {column.floor_band || 'unrated'}</span></header>
             <div class="tier-note"><strong>{assurance.summary}</strong><span>{assurance.staffing}</span><small>Output guardrail · up to ${column.cost_ceiling_out_per_mtok ?? '—'} / Mtok</small></div>
             <div class="seats">
-              {#each column.seats || [] as seat (seat.role)}
+              {#each seatRows(column) as seat (seat.role)}
                 {@const health = chipFor(seat.model_key)?.measured}
-                <button type="button" class="seat" class:changeable={selectedModel} onclick={() => selectedModel && beginAssignment(column.tier, seat.role, selectedModel)} ondragover={(event) => event.preventDefault()} ondrop={(event) => drop(event, column.tier, seat.role)}>
-                  <span class="role"><i style={`--seat-color:${roleColor(seat.role)}`}></i>{seat.role}</span>
-                  <span class="model"><b class={`provider ${provider(seat.model_key)}`}>{providerMark(seat.model_key)}</b><span><strong>{modelName(seat.model_key)}</strong><small>{seat.cell?.agent || 'agent —'} · {seat.cell?.effort || 'effort —'}</small></span></span>
-                  {#if health == null}<span class="health">Not measured</span>{:else if health.failures > 0}<span class="health warn" title={`${health.failures} measured failures across ${health.cells} cells`}>{health.failures} recent failure{health.failures === 1 ? '' : 's'}</span>{:else}<span class="health">No recent failures</span>{/if}
-                </button>
-              {/each}
-              {#each column.unseated || [] as role (role)}
-                <button type="button" class="seat empty" class:changeable={selectedModel} onclick={() => selectedModel && beginAssignment(column.tier, role, selectedModel)} ondragover={(event) => event.preventDefault()} ondrop={(event) => drop(event, column.tier, role)}><span class="role"><i style={`--seat-color:${roleColor(role)}`}></i>{role}</span><span>Unassigned</span></button>
+                {@const pickEntry = pickFor(column.tier, seat.role)}
+                {@const pick = pickEntry?.pick}
+                {@const proposalEntry = proposalFor(column.tier, seat.role)}
+                {@const proposal = rosterProposal(proposalEntry?.response)}
+                <div class="seat-row">
+                  {#if seat.assigned}
+                    <button type="button" class="seat" class:changeable={selectedModel} onclick={() => selectedModel && beginAssignment(column.tier, seat.role, selectedModel)} ondragover={(event) => event.preventDefault()} ondrop={(event) => drop(event, column.tier, seat.role)}>
+                      <span class="role"><i style={`--seat-color:${roleColor(seat.role)}`}></i>{seat.role}</span>
+                      <span class="model"><b class={`provider ${provider(seat.model_key)}`}>{providerMark(seat.model_key)}</b><span><strong>{modelName(seat.model_key)}</strong><small>{seat.cell?.agent || 'agent —'} · {seat.cell?.effort || 'effort —'}</small></span></span>
+                      {#if health == null}<span class="health">Not measured</span>{:else if health.failures > 0}<span class="health warn" title={`${health.failures} measured failures across ${health.cells} cells`}>{health.failures} recent failure{health.failures === 1 ? '' : 's'}</span>{:else}<span class="health">No recent failures</span>{/if}
+                    </button>
+                  {:else}
+                    <button type="button" class="seat empty" class:changeable={selectedModel} onclick={() => selectedModel && beginAssignment(column.tier, seat.role, selectedModel)} ondragover={(event) => event.preventDefault()} ondrop={(event) => drop(event, column.tier, seat.role)}><span class="role"><i style={`--seat-color:${roleColor(seat.role)}`}></i>{seat.role}</span><span>Unassigned</span></button>
+                  {/if}
+                  <section class="pick-explanation" aria-label={`Routing policy pick for ${column.tier} ${seat.role}`}>
+                    <header><strong>Routing policy pick</strong>{#if pickEntry?.loading}<span class="pick-muted">Loading…</span>{:else if pickEntry?.error}<span class="pick-unavailable">Unavailable</span>{:else}<span class:pick-unavailable={!pick || pick.outcome === 'abstained'}>{pick?.outcome === 'chosen' ? 'Chosen' : 'Abstained'}</span>{/if}</header>
+                    {#if pickEntry?.error}<p class="pick-muted">{pickEntry.error}</p>
+                    {:else if !pick}<p class="pick-muted">{pickEntry?.pending || 'Pick explanation unavailable — no measured result was reported.'}</p>
+                    {:else}
+                      <p class="pick-current">Current cell · <code>{pick.current_cell ? `${pick.current_cell.provider}/${pick.current_cell.id} · ${pick.current_cell.agent} · ${pick.current_cell.effort}` : 'unassigned'}</code></p>
+                      <p class="pick-result">{pick.outcome === 'chosen' ? `Chosen ${pick.chosen_cell?.provider}/${pick.chosen_cell?.id} · ${pick.chosen_cell?.agent} · ${pick.chosen_cell?.effort}` : 'No eligible policy candidate'} · {pick.reason || pick.abstention_reason || 'reason unavailable'}</p>
+                      <p class="pick-band">Band · <strong>{pick.band || 'unavailable'}</strong>{#if pick.band_source}<small> · {pick.band_source}</small>{/if}</p>
+                      <div class="pick-candidates"><strong>Routing-policy candidates</strong>
+                        {#each pick.policy_candidates || [] as candidate (candidate.policy_order)}
+                          <article>
+                            <code>{candidate.cell?.provider}/{candidate.cell?.id} · {candidate.cell?.agent} · {candidate.cell?.effort}</code>
+                            <span class:pick-unavailable={!candidate.eligible}>{candidate.eligible ? 'Eligible survivor' : `Excluded · ${candidate.exclusion_reason || candidate.reason || 'reason unavailable'}`}</span>
+                            <span>Band · {candidate.band || 'unavailable'}{candidate.band_source ? ` · ${candidate.band_source}` : ''}</span>
+                            <span>Rate · {candidate.rate?.display ?? '—'} ({candidate.rate?.numerator ?? '—'}/{candidate.rate?.denominator ?? '—'}){candidate.rate?.reason ? ` · ${candidate.rate.reason}` : ''}</span>
+                            <span>Cost · {candidate.cost?.value == null ? '—' : `$${candidate.cost.value}`} · source {candidate.cost?.source || 'unavailable'} · reason {candidate.cost?.reason || 'measured'}</span>
+                          </article>
+                        {/each}
+                      </div>
+                      <details class="pick-evidence"><summary>Raw eval_cells evidence · {(pick.eval_cells || []).length} row{(pick.eval_cells || []).length === 1 ? '' : 's'}</summary><pre>{JSON.stringify(pick.eval_cells || [], null, 2)}</pre></details>
+                      {#if pick.chosen_cell}
+                        <button type="button" class="propose-pick" disabled={proposalEntry?.loading} onclick={() => proposePolicyPick(column, seat, pick)}>{proposalEntry?.loading ? 'Proposing…' : 'Propose the pick'}</button>
+                      {/if}
+                      {#if proposalEntry?.error}<p class="pick-unavailable">{proposalEntry.error}</p>{/if}
+                      {#if proposal.diff !== null}<DiffBlock text={proposal.diff} empty="(no roster change)" label="Policy pick roster diff" />{/if}
+                    {/if}
+                  </section>
+                </div>
               {/each}
             </div>
           </article>
@@ -639,4 +718,5 @@
 @media (max-width: 1100px) { .roster-summary { grid-template-columns:repeat(4,1fr); }.roster-summary > p { grid-column:1/-1; border-top:1px solid var(--line); }.tier-grid { grid-template-columns:1fr; }.seat { grid-template-columns:7rem minmax(0,1fr) auto; }.studio-layout { grid-template-columns:1fr; }.catalog { border-right:0; border-bottom:1px solid var(--line); }.draft-panel { position:static; grid-template-columns:repeat(2,minmax(0,1fr)); }.draft-panel > header,.draft-actions,.publish-note { grid-column:1/-1; } }
 @media (max-width: 760px) { .axis-guide { grid-template-columns:1fr; }.axis-guide article { border-right:0; border-bottom:1px solid var(--line); }.axis-guide article:last-child { border-bottom:0; }.workflow { grid-template-columns:repeat(2,1fr); }.workflow li:nth-child(2) { border-right:0; }.workflow li:nth-child(-n+2) { border-bottom:1px solid var(--line); }.workspace-modes { grid-template-columns:1fr; }.workspace-modes > i { display:none; }.model-form { grid-template-columns:1fr 1fr; }.model-form label.wide { grid-column:span 1; }.catalog-tools { align-items:stretch; flex-direction:column; }.search { width:100%; }.scope { justify-content:flex-start; }.draft-panel { grid-template-columns:1fr; }.draft-panel > * { grid-column:1!important; }.directory-tools { grid-template-columns:1fr 1fr; }.source-meta { justify-items:start; }.directory-head { display:none; }.directory-list article { grid-template-columns:minmax(10rem,1.5fr) repeat(2,4rem) 3.5rem; }.directory-list article .price { grid-column:2; }.directory-list article .speed { grid-column:3; }.directory-list article > button { grid-column:4; grid-row:1/3; }.directory-footer { align-items:start; flex-direction:column; } }
 @media (max-width: 620px) { .roster-summary { grid-template-columns:repeat(2,1fr); }.roster-summary article:nth-child(2) { border-right:0; }.section-intro { align-items:start; flex-direction:column; gap:.35rem; }.section-intro > p { text-align:left; }.seat { grid-template-columns:5rem minmax(0,1fr); }.health { grid-column:2; text-align:left; }.bands > header { align-items:start; flex-direction:column; gap:.35rem; }.bands header > p { text-align:left; }.band { grid-template-columns:1fr; }.band-name { border-right:0; border-bottom:1px solid var(--line); }.studio-title { align-items:start; flex-direction:column; }.model-form { grid-template-columns:1fr; }.model-form label,.model-form label.wide,.create-model { grid-column:1; }.workflow { grid-template-columns:1fr; }.workflow li { border-right:0; border-bottom:1px solid var(--line); }.workflow li:last-child { border-bottom:0; }.assignment-dialog dl { grid-template-columns:1fr; }.assignment-dialog dl > div { border-right:0; border-bottom:1px solid var(--line); }.assignment-dialog dl > div:last-child { border-bottom:0; } }
+.seat-row { display:grid; gap:.35rem; }.pick-explanation { display:grid; gap:.35rem; border:1px solid color-mix(in srgb,var(--accent) 25%,var(--line)); border-radius:var(--radius); background:color-mix(in srgb,var(--accent) 3%,var(--panel)); padding:.65rem .75rem; }.pick-explanation > header { display:flex; align-items:center; justify-content:space-between; gap:.5rem; }.pick-explanation > header strong { color:var(--accent); font-size:.62rem; }.pick-explanation code { color:var(--text); font:500 .56rem/1.4 var(--mono); overflow-wrap:anywhere; }.pick-current,.pick-result,.pick-band { margin:0; color:var(--muted); font-size:.58rem; line-height:1.4; }.pick-result { color:var(--text); }.pick-band strong { color:var(--text); text-transform:capitalize; }.pick-band small { color:var(--muted); }.pick-muted { color:var(--muted); font-size:.58rem; line-height:1.4; }.pick-unavailable { color:var(--status-escalated); }.pick-candidates { display:grid; gap:.3rem; }.pick-candidates > strong { color:var(--muted); font-size:.56rem; text-transform:uppercase; letter-spacing:.05em; }.pick-candidates article { display:grid; gap:.12rem; border-top:1px solid var(--line); padding-top:.35rem; }.pick-candidates article > span { color:var(--muted); font-size:.55rem; line-height:1.35; }.pick-candidates article > span.pick-unavailable { color:var(--status-escalated); }.pick-evidence { border-top:1px solid var(--line); padding-top:.35rem; }.pick-evidence summary { color:var(--muted); cursor:pointer; font-size:.57rem; }.pick-evidence pre { max-height:12rem; margin:.35rem 0 0; overflow:auto; border:1px solid var(--line); border-radius:var(--radius-sm); background:var(--bg); padding:.5rem; color:var(--muted); font:500 .5rem/1.4 var(--mono); white-space:pre-wrap; }.propose-pick { justify-self:start; border:1px solid var(--accent); border-radius:var(--radius-sm); background:var(--accent-soft); color:var(--accent); padding:.42rem .6rem; cursor:pointer; font-size:.58rem; font-weight:750; }.propose-pick:disabled { cursor:not-allowed; opacity:.45; }
 </style>

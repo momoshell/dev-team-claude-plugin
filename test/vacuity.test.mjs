@@ -211,7 +211,7 @@ const VACUITY_SOURCE_SHA256 = Object.freeze({
   'test/factory-emit.test.mjs': '35854f1777a7388da535aba12e8de8d571f7bd8d63d8afd36fb6ab68447d7c5f',
   'test/factory-make-brief.test.mjs': '741fc22e27bb6ab062295544de6c8cf082b8928c91c5cb89d0cb333791dae08c',
   'test/fixtures.test.mjs': '20a7b9c408ca687f8378c3c70ced32c7943179fb520f6326384426f3bb698c55',
-  'test/visualizer-server.test.mjs': 'e3bb0e0ebc21e8c28d785db73939e9d3219c7c13031bf8a4d8e61f091eeea1e4',
+  'test/visualizer-server.test.mjs': '331845e47abc9158b82ac432182823d29e4bd37566131ef87554d72cbd52f1ca',
   'test/visualizer-shape.test.mjs': '9ecedd683fd1c0a27621a99246c40d6e76fea22a711ecf9c824da797a52b1392',
 })
 

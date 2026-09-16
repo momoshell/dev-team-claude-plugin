@@ -437,7 +437,7 @@ const anchorHunk = (paths) => paths.map((path) => [
 // Publication-only rebase seam. The shared publicationIo remains unchanged: this local
 // adapter models the index stages and carrier filesystem needed by A1-H1.
 function anchorPublicationIo({ specs = [], scope, limits = {}, gate = null, envelopes = {}, carriers = {}, tracked, ordinary = [], ignored = [], reset = null,
-  canonicalResult = null, recoveryUpdateResult = null, recoveryReadbackResult = null,
+  canonicalResult = null, recoveryUpdateResult = null, recoveryReadbackResult = null, postResolutionPristineGreen = false,
   shortCommitOid = 'short1111', acceptedCommitOid = 'a'.repeat(40), postCommitOid = 'b'.repeat(40) } = {}) {
   const first = specs[0] || {
     paths: [ANCHOR_MANIFEST],
@@ -649,7 +649,11 @@ function anchorPublicationIo({ specs = [], scope, limits = {}, gate = null, enve
     const red = 'red\nGATE-SUMMARY {"total":3,"failed":3,"errored":0}'
     const green = 'green\nGATE-SUMMARY {"total":3,"failed":0,"errored":0}'
     if (gateCmd && String(command).includes(gateCmd)) {
-      if (this.state.phase === 'reset') this.calls.order.push('deferred-pristine-proof')
+      if (this.state.phase === 'reset') {
+        this.calls.order.push('deferred-pristine-proof')
+        // The unmutated retained-continuation path never runs this reset-phase proof; this only shapes A1's mutant failure.
+        if (postResolutionPristineGreen) return { ok: true, output: green }
+      }
       return { ok: false, output: red }
     }
     return { ok: false, output: this.state.phase === 'initial' ? red : green }
@@ -710,15 +714,29 @@ test('A1 retained rebase state reaches conflict resolver before any abort', () =
   const builderBounce = io.calls.order.indexOf('assign:builder:2')
   const add = io.calls.order.findIndex((entry) => entry === `run:git add -- '${path}'`)
   const continued = io.calls.order.indexOf('run:git -c core.editor=true rebase --continue')
-  const deferredProof = io.calls.order.indexOf('deferred-pristine-proof')
   const reset = io.calls.order.indexOf('run:git reset --soft base1111')
-  assert.ok(builderBounce >= 0 && add > builderBounce && continued > add && deferredProof > continued && reset > continued)
+  assert.ok(builderBounce >= 0 && add > builderBounce && continued > add && reset > continued)
   assert.equal(io.state.runCleanCalls.filter(({ phase }) => phase === 'conflicted').length, 0)
   assert.equal(io.calls.order.some((entry) => entry === 'run:git rebase --abort'), false)
   assert.equal(io.calls.order.slice(builderBounce, continued).filter((entry) => entry === 'commit').length, 0)
   assert.equal(io.state.resetCommand, 'git reset --soft base1111')
   assert.equal(io.state.commitCount, 2)
   assert.equal(io.state.resolverCalls.length, 0)
+})
+
+test('A1 committed rebase resolution carries the pre-commit proof', () => {
+  const path = 'src/semantic.mjs'
+  const spec = {
+    paths: [path], stage2: { [path]: 'base\n' }, stage3: { [path]: 'lane\n' }, hunk: anchorHunk([path]),
+    builderEdits: { [path]: 'resolved by builder\n' },
+  }
+  const { io, result } = runAnchorPublication({ gate: { details: { gate_cmd: 'gate-cmd' } }, specs: [spec], scope: [path], limits: { build_rounds: 2 }, postResolutionPristineGreen: true, envelopes: {
+    'builder:2': buildEnv(), 'reviewer:2': reviewEnv('pass'),
+  } })
+  assert.equal(result.status, 'done')
+  assert.equal(io.state.continueCount, 1)
+  assert.equal(io.state.resetCommand, 'git reset --soft base1111')
+  assert.equal(io.state.runCleanCalls.filter(({ phase }) => phase === 'reset').length, 0)
 })
 
 test('RV1-1 retained conflict bounce renders live-index safety instructions on separate lines', () => {

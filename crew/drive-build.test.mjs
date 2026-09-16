@@ -5750,6 +5750,40 @@ test('C1 a genuinely vacuous gate is still caught before commit', () => {
   assert.equal(io.calls.runClean.length, 1)
 })
 
+test('B1 all four post-commit suite re-entry sites retain explicit committed provenance', () => {
+  const source = readFileSync(`${process.cwd()}/crew/drive.mjs`, 'utf8')
+  const branch = (start, end) => {
+    const from = source.indexOf(start)
+    const to = source.indexOf(end, from + start.length)
+    assert.ok(from >= 0, `missing source branch: ${start}`)
+    assert.ok(to > from, `missing source branch boundary: ${end}`)
+    return source.slice(from, to)
+  }
+  const branches = [
+    ['census repair', branch('    if (postCommit.repair) {', '    if (postCommitInside.length > 0) {')],
+    ['inside census', branch('    if (postCommitInside.length > 0) {', '    if (postCommit.escalation) return postCommit.escalation')],
+    ['frozen inventory', branch('      if (frozenRepair.action === \'repair\') {', '    const suiteAdmission = admitScope({')],
+    ['suite red', branch('    if (suiteAdmission.action === \'admit\' || suiteAdmission.action === \'bounce\') {', '  if (publishing && warmCounts === null) {')],
+  ]
+  for (const [label, text] of branches) assert.equal((text.match(/committedBaseline = true/g) || []).length, 1, label)
+})
+
+test('D1 committed rebase provenance is explicit and not inferred', () => {
+  const source = readFileSync(`${process.cwd()}/crew/drive.mjs`, 'utf8')
+  const boundary = '    S.commit = continuedHead\n    committedBaseline = true\n    pendingRebaseConflict = null'
+  assert.equal(source.split(boundary).length - 1, 1)
+})
+
+test('RV1-1 post-reset refresh requires retained-continuation provenance', () => {
+  const source = readFileSync(`${process.cwd()}/crew/drive.mjs`, 'utf8')
+  const start = source.indexOf('      let postRebaseProof')
+  const end = source.indexOf('      if (postRebaseProofThrown !== null) {', start)
+  assert.ok(start >= 0 && end > start)
+  const postResetProof = source.slice(start, end)
+  assert.match(postResetProof, /postRebaseProof = refreshProofTree\(null, \{ committedBaseline: continuingRebase && committedBaseline \}\)/)
+  assert.doesNotMatch(postResetProof, /postRebaseProof = refreshProofTree\(null, \{ committedBaseline \}\)/)
+})
+
 test('B2 frozen inventory repair permits only one re-entry', () => {
   const fixture = frozenCycleIo({
     suite: [frozenRed(), frozenRed()],

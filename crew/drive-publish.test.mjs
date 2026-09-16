@@ -8,6 +8,25 @@ import {
 } from './drive-fixtures.mjs'
 import { anchorConflictMechanical, canonicalAnchorManifest, canonicalCitationDoc, lineNumberOnlyAnchorResolution, promptMeasurementDefect, rebaseConflictRoute, resumeTask, resumeWorktreeSha256 } from './drive.mjs'
 
+const A1_RESUME_TRACE = Object.freeze(['gate', 'suite', 'suite', 'publish'])
+const A1_CONVERGE_TRACE = Object.freeze(['converge', 'suite', 'commit', 'publish'])
+const C1_DOCUMENT_REBASE = Object.freeze(['document', 'rebase'])
+const C1_REBASE_SUITE = Object.freeze(['rebase', 'suite'])
+const C1_SUITE_PUBLISH = Object.freeze(['suite', 'publish'])
+const C1_RESUME_TAIL = Object.freeze(['suite', 'suite', 'publish'])
+const C1_CONVERGE_TAIL = Object.freeze(['suite', 'commit', 'publish'])
+
+const normaliseStageHeads = (stages) => (Array.isArray(stages) ? stages : [])
+  .map((label) => String(label).split(':')[0])
+  .filter((head) => !['done', 'escalate'].includes(head))
+
+const convergeEmittedTrace = (stages) => (Array.isArray(stages) ? stages : []).flatMap((stage) => {
+  if (stage === 'converge:suite') return ['converge', 'suite']
+  if (stage === 'converge:commit') return ['commit']
+  if (stage === 'converge:pr') return ['publish']
+  return []
+})
+
 const REVIEW_ENVELOPE_SCHEMA = `{
   "assignment_id": "string (exact current dispatch id)",
   "run_id": "string (exact current run id)",
@@ -95,7 +114,7 @@ test('RVR1-2 gate resume preserves typed gate escalation when pending commit fai
   assertTypedGate({ version: 0 }, () => { throw new Error('must not commit') }, /resume checkpoint is unusable/)
 })
 
-test('E1 resume remeasures gate before commit suite and publish', () => {
+test('A1-resume: resumed publication preserves gate and suite order', () => {
   const checkpoint = resumeCheckpointFixture({ kind: 'publish', frozen_where: 'publish', publish: { branch: 'feature/ship', base: 'main' } })
   const io = withPublicationDiff(publicationIo(), {})
   const result = resumeTask({ ...CTX, task: 'resume-publish', publish: { branch: 'feature/ship' }, files_in_scope: ['a.mjs'] }, io, checkpoint)
@@ -108,6 +127,14 @@ test('E1 resume remeasures gate before commit suite and publish', () => {
   const pushIndex = io.calls.order.findIndex((entry) => entry.includes('git push -u origin'))
   assert.ok(gateIndex >= 0 && gateIndex < suiteIndex && suiteIndex < coldIndex && coldIndex < pushIndex)
   assert.match(io.calls.writes[`${TD}/pr-body.md`], /Closes #42/)
+  assert.deepEqual(normaliseStageHeads(result.details.stages), ['review', 'commit', 'rebase', 'gate', 'suite', 'suite', 'publish'])
+  const callProjection = [
+    io.calls.order[gateIndex] ? 'gate' : null,
+    io.calls.order[suiteIndex] ? 'suite' : null,
+    io.calls.order[coldIndex] === 'runCold' ? 'suite' : null,
+    io.calls.order[pushIndex] ? 'publish' : null,
+  ]
+  assert.deepEqual(callProjection, A1_RESUME_TRACE)
 })
 
 test('RV1-1 resumes a suite checkpoint with a publish branch through to publication', () => {
@@ -910,7 +937,7 @@ test('RV1-1 the observe-and-end residual reaches the commit and PR intent verbat
   assert.equal(pr.slice(0, `${body}\n\nRefs #904`.length), `${body}\n\nRefs #904`)
 })
 
-test('converge happy path files must-fix residuals, commits once, and opens one draft PR', () => {
+test('A1-converge: convergence preserves suite, commit, and publication order', () => {
   const { io, result } = convergeRun()
   assert.equal(result.status, 'converge')
   assert.equal(io.calls.gh.filter((call) => call.method === 'createDraftPr').length, 1)
@@ -919,6 +946,52 @@ test('converge happy path files must-fix residuals, commits once, and opens one 
   assert.equal(result.details.converge.draft, true)
   assert.equal(result.details.converge.issues.length, 1)
   assert.ok(io.calls.gh.find((call) => call.method === 'createDraftPr').args.body.includes(String(result.details.converge.issues[0].number)))
+  const complete = normaliseStageHeads(result.details.stages)
+  assert.deepEqual(complete, [
+    'plan', 'gate-baseline', 'build', 'scope-gate', 'lane', 'gate',
+    'converge', 'converge', 'converge', 'document', 'converge', 'converge',
+  ])
+  assert.deepEqual(convergeEmittedTrace(result.details.stages), A1_CONVERGE_TRACE)
+})
+
+test('C1-document-rebase: documentation precedes rebase', () => {
+  const { result } = runPublished({})
+  const complete = normaliseStageHeads(result.details.stages)
+  const documentIndex = complete.indexOf('document')
+  const rebaseIndex = complete.indexOf('rebase', documentIndex + 1)
+  assert.deepEqual(complete.slice(documentIndex, rebaseIndex + 1), C1_DOCUMENT_REBASE)
+})
+
+test('C1-rebase-suite: rebase precedes the warm suite', () => {
+  const { result } = runPublished({})
+  const complete = normaliseStageHeads(result.details.stages)
+  const rebaseIndex = complete.indexOf('rebase')
+  const suiteIndex = complete.indexOf('suite', rebaseIndex + 1)
+  assert.deepEqual(complete.slice(rebaseIndex, suiteIndex + 1), C1_REBASE_SUITE)
+})
+
+test('C1-suite-publish: the final suite precedes publication', () => {
+  const { result } = runPublished({})
+  const complete = normaliseStageHeads(result.details.stages)
+  const publishIndex = complete.indexOf('publish')
+  const suiteIndex = complete.lastIndexOf('suite', publishIndex - 1)
+  assert.deepEqual(complete.slice(suiteIndex, publishIndex + 1), C1_SUITE_PUBLISH)
+})
+
+test('C1-resume-tail: resumed warm and cold suites precede publication', () => {
+  const checkpoint = resumeCheckpointFixture({ kind: 'publish', frozen_where: 'publish', publish: { branch: 'feature/ship', base: 'main' } })
+  const io = withPublicationDiff(publicationIo(), {})
+  const result = resumeTask({ ...CTX, task: 'resume-publish-tail', publish: { branch: 'feature/ship' }, files_in_scope: ['a.mjs'] }, io, checkpoint)
+  assert.equal(result.status, 'done')
+  const complete = normaliseStageHeads(result.details.stages)
+  const publishIndex = complete.indexOf('publish')
+  assert.deepEqual(complete.slice(publishIndex - 2, publishIndex + 1), C1_RESUME_TAIL)
+})
+
+test('C1-converge-tail: converged suite precedes commit and publication', () => {
+  const { io, result } = convergeRun()
+  assert.equal(result.status, 'converge')
+  assert.deepEqual(convergeEmittedTrace(result.details.stages).slice(1), C1_CONVERGE_TAIL)
 })
 
 test('converge PR title and body are byte-stable through two identical seams', () => {
@@ -960,6 +1033,10 @@ test('armed happy path records commit, rebase, warm/cold suites, publish, and do
   assert.equal(result.status, 'done')
   const at = result.details.stages.indexOf('commit')
   assert.deepEqual(result.details.stages.slice(at), ['commit', 'document', 'rebase', 'suite', 'suite:cold', 'publish', 'done'])
+  assert.deepEqual(normaliseStageHeads(result.details.stages), [
+    'plan', 'build', 'scope-gate', 'lane', 'review', 'review',
+    'commit', 'document', 'rebase', 'suite', 'suite', 'publish',
+  ])
   assert.equal(io.calls.suiteHead, io.state.post)
   assert.equal(io.calls.coldHead, io.state.post)
   assert.equal(result.details.commit, io.state.post)

@@ -12,10 +12,71 @@ import { CENSUS_QUALIFYING_FILES, runCensusExhibits, selectCensusExhibits } from
 import { emitAdapter } from './seat-io.mjs'
 import { GATE_RUN_MS_ABSENT_REASONS, gateRunTiming } from './drive.mjs'
 
+const A1_DIRECTED_TRACE = Object.freeze(['directed', 'gate-baseline', 'build', 'scope-gate', 'lane', 'gate', 'gate-proof', 'review', 'commit', 'document', 'suite'])
+const A1_GATE_REPAIR_TRACE = Object.freeze(['gate', 'gate-repair', 'gate-reverify', 'gate-proof'])
+const C1_PROOF_REVIEW = Object.freeze(['gate-proof', 'review'])
+const C1_PROOF_COMMIT = Object.freeze(['gate-proof', 'commit'])
+const C1_DIRECTED_OPEN = Object.freeze(['directed', 'build'])
+
+const normaliseStageHeads = (stages) => (Array.isArray(stages) ? stages : [])
+  .map((label) => String(label).split(':')[0])
+  .filter((head) => !['done', 'escalate'].includes(head))
+
 const proofScopeMutations = () => [
   { check: 'first', file: 'a.mjs' },
   { check: 'second', file: 'b.mjs' },
 ]
+
+const directedTrace = () => {
+  const red = `red\n${GATE_SUMMARY_PREFIX} {"total":2,"failed":2,"errored":0}`
+  const green = `${GATE_SUMMARY_PREFIX} {"total":2,"failed":0,"errored":0}`
+  const io = fakeIo({
+    files: DIRECTED_FILES,
+    envelopes: { 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: {
+      'directed-gate:1': { ok: false, output: red }, 'directed-gate': { ok: true, output: green },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    cleanRuns: { 'directed-gate': { ok: false, output: red } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask(CTX_DIRECTED, io)
+  assert.equal(result.status, 'done')
+  return normaliseStageHeads(result.details.stages)
+}
+
+const traceMatrixSource = () => {
+  try {
+    const source = readFileSync(new URL('./drive.test.mjs', import.meta.url), 'utf8')
+    assert.equal(typeof source, 'string')
+    assert.ok(source.length > 0, 'trace matrix source must not be empty')
+    return source
+  } catch (error) {
+    assert.fail(`trace matrix source unreadable: ${error?.code || error?.message || 'unknown'}`)
+  }
+}
+
+test('RV1-1 D1 exact equality stays gate-bound', () => {
+  const source = traceMatrixSource()
+  const exactEquality = "assert.deepEqual(row.executor, row.expected, `${row.name} emitted trace`)"
+  assert.equal(source.split(exactEquality).length - 1, 1)
+  assert.equal(source.split('measured.push(d1ControlRow())').length - 1, 1)
+  assert.equal(source.split('assertExactTraceRows(measured)').length - 1, 1)
+  const start = source.indexOf("test('D1-ordered:")
+  assert.notEqual(start, -1)
+  const end = source.indexOf('\n})', start)
+  assert.notEqual(end, -1)
+  assert.match(source.slice(start, end + 3), /assertExactTraceRows\(\[d1ControlRow\(\)\]\)/)
+})
+
+test('RV1-2 full reorder pins the same refusal as every other shape', () => {
+  const source = traceMatrixSource()
+  const swapExpectation = "const expectedDefect = 'stage-reordered'"
+  const reversalExpectation = "assert.equal(shapeValidationDefect({ ...VARIANTS.full, stages: [...VARIANTS.full.stages].reverse() }, 'full').defect, 'stage-reordered')"
+  assert.equal(source.includes('const fullOrderingDefect'), false)
+  assert.equal(source.split(swapExpectation).length - 1, 1)
+  assert.equal(source.split(reversalExpectation).length - 1, 1)
+})
 
 // Derived from the live inventory, never copied from it: a lane that edits
 // test/visualizer-server.test.mjs or test/visualizer-shape.test.mjs moves both
@@ -2475,7 +2536,7 @@ test('D1 untouched checks are carried forward from their measured generation', (
   })
 })
 
-test('E1 gate repair still re-verifies and re-proves', () => {
+test('A1-gate-repair: repair precedes reverify and final proof', () => {
   const green = `green\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":0,"errored":0}`
   const mutation = { ...CHECK_MUTATION, check: 'repair-check' }
   const io = fakeIo({
@@ -2501,6 +2562,35 @@ test('E1 gate repair still re-verifies and re-proves', () => {
   assert.ok(result.details.stages.includes('gate-reverify:1'))
   assert.deepEqual(io.calls.emits.filter(({ kind }) => kind === 'discrimination').map(({ generation }) => generation), [1, 2])
   assert.deepEqual(io.calls.emits.filter(({ kind }) => kind === 'check-discrimination').map(({ generation }) => generation), [1, 2])
+  const complete = normaliseStageHeads(result.details.stages)
+  assert.deepEqual(complete, [
+    'plan', 'gate-baseline', 'build', 'scope-gate', 'lane', 'gate', 'gate-proof', 'gate-proof',
+    'gate-repair', 'gate-reverify', 'gate-proof', 'review', 'review', 'commit', 'document', 'suite', 'suite',
+  ])
+  const gateIndex = complete.indexOf('gate')
+  const repairIndex = complete.indexOf('gate-repair', gateIndex + 1)
+  const reverifyIndex = complete.indexOf('gate-reverify', repairIndex + 1)
+  const finalProofIndex = complete.indexOf('gate-proof', reverifyIndex + 1)
+  assert.deepEqual([complete[gateIndex], complete[repairIndex], complete[reverifyIndex], complete[finalProofIndex]], A1_GATE_REPAIR_TRACE)
+})
+
+test('C1-proof-review: gate proof dominates review', () => {
+  const complete = directedTrace()
+  const proofIndex = complete.indexOf('gate-proof')
+  const reviewIndex = complete.indexOf('review', proofIndex + 1)
+  assert.deepEqual([complete[proofIndex], complete[reviewIndex]], C1_PROOF_REVIEW)
+})
+
+test('C1-proof-commit: gate proof dominates commit', () => {
+  const complete = directedTrace()
+  const proofIndex = complete.indexOf('gate-proof')
+  const commitIndex = complete.indexOf('commit', proofIndex + 1)
+  assert.deepEqual([complete[proofIndex], complete[commitIndex]], C1_PROOF_COMMIT)
+})
+
+test('C1-directed-open: directed opens before its build', () => {
+  const complete = directedTrace()
+  assert.deepEqual([complete[0], complete[2]], C1_DIRECTED_OPEN)
 })
 
 test('a mutated gate that errors or omits its summary survives instead of claiming a kill', () => {
@@ -2876,7 +2966,7 @@ test('directed declaration is pinned and honourable', () => {
   assert.deepEqual(Object.keys(PARTIAL_REVIEWED), ['repair', 'directed'])
 })
 
-test('a directed run seats no planner, opens with directed:r1, and proves its gate discriminates', () => {
+test('A1-directed: directed preserves its baseline-before-build trace', () => {
   const red = `red\n${GATE_SUMMARY_PREFIX} {"total":2,"failed":2,"errored":0}`
   const green = `${GATE_SUMMARY_PREFIX} {"total":2,"failed":0,"errored":0}`
   const io = fakeIo({
@@ -2900,6 +2990,21 @@ test('a directed run seats no planner, opens with directed:r1, and proves its ga
   assert.equal(result.details.gate.discrimination, 'proven')
   assert.equal(result.details.variant, 'directed')
   assert.equal(result.details.commit, 'abc1234')
+  const complete = normaliseStageHeads(result.details.stages)
+  assert.deepEqual(complete, [
+    'directed', 'gate-baseline', 'build', 'scope-gate', 'lane', 'gate', 'gate-proof',
+    'review', 'review', 'commit', 'document', 'suite', 'suite',
+  ])
+  const namedProjection = result.details.stages
+    .filter((label) => label !== 'review:pass' && label !== 'suite:cold')
+    .filter((label) => !['done', 'escalate'].includes(String(label).split(':')[0]))
+    .map((label) => String(label).split(':')[0])
+  assert.deepEqual(namedProjection, A1_DIRECTED_TRACE)
+  const mainFlow = complete.filter((head, index) => !(index === 1 && head === 'gate-baseline'))
+  assert.deepEqual(mainFlow, [
+    'directed', 'build', 'scope-gate', 'lane', 'gate', 'gate-proof',
+    'review', 'review', 'commit', 'document', 'suite', 'suite',
+  ])
 })
 
 test('declarations remain frozen and observed behaviour stays within their closed vocabulary', () => {

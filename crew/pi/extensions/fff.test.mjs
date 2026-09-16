@@ -11,7 +11,8 @@ import {
 } from './fff.ts'
 import { createReadGate } from './readgate.ts'
 import {
-  bootCmd, effectiveDeny, mcpConfigDocument, persistedAdapters, resolveAdapters, SEAT_DEFAULTS, slug,
+  bootCmd, effectiveDeny, FFF_SEARCH_WITHHOLDINGS, FFF_SEARCH_WITHHOLDING_LIMITS,
+  mcpConfigDocument, normalizeFffSearchWithholdingLimit, persistedAdapters, resolveAdapters, SEAT_DEFAULTS, slug,
 } from '../../crew.mjs'
 import { seatCommand as piSeatCommand } from '../../adapters/adapter-pi.mjs'
 import {
@@ -132,7 +133,7 @@ class FakeChild extends EventEmitter {
   }
 }
 
-async function bootRecord({ agent = null, available = true } = {}) {
+async function bootRecord({ agent = null, available = true, register = null } = {}) {
   const home = scratchDir('fff-record-home-')
   const checkout = scratchDir('fff-record-checkout-')
   const previousHome = process.env.HOME
@@ -146,7 +147,10 @@ async function bootRecord({ agent = null, available = true } = {}) {
     ...(agent ? { 'agent-builder': agent } : {}),
   }
   try {
-    await bootCmd(args, { existsSync: exists, awaitSeatsReady: async () => {} })
+    await bootCmd(args, {
+      existsSync: exists, awaitSeatsReady: async () => {},
+      ...(register ? { register } : {}),
+    })
     const repo = slug(basename(checkout))
     const dir = join(home, '.crew', repo, 'fff-record')
     const crew = JSON.parse(readFileSync(join(dir, 'crew.json'), 'utf8'))
@@ -254,6 +258,42 @@ test('fff-D1-record', async () => {
   assert.equal(member.tools, SEAT_DEFAULTS.builder.tools)
 })
 
+test('A1 granted seat record names withholding and its measured limit', async () => {
+  const pi = await bootRecord({ agent: 'pi', available: true })
+  const claude = await bootRecord({ available: true })
+  const piExpected = {
+    tools: ['fff_grep', 'fff_find', 'fff_multi_grep'], fff: 'granted',
+    withholding: 'direct-and-listed-wrappers-refused', limit: 'arbitrary-shell-indirection-not-refused',
+  }
+  const claudeExpected = {
+    tools: ['mcp__fff__grep', 'mcp__fff__find_files', 'mcp__fff__multi_grep'], fff: 'granted',
+    withholding: 'direct-and-listed-wrappers-refused', limit: 'arbitrary-shell-indirection-not-refused',
+  }
+  assert.deepEqual(pi.crew.members.builder.search, piExpected)
+  assert.deepEqual(pi.journal.search.builder, piExpected)
+  assert.deepEqual(claude.crew.members.builder.search, claudeExpected)
+  assert.deepEqual(claude.journal.search.builder, claudeExpected)
+})
+
+test('B1 search withholding limit is a closed value', () => {
+  assert.deepEqual(FFF_SEARCH_WITHHOLDINGS, ['direct-and-listed-wrappers-refused'])
+  assert.deepEqual(FFF_SEARCH_WITHHOLDING_LIMITS, ['arbitrary-shell-indirection-not-refused'])
+  assert.equal(Object.isFrozen(FFF_SEARCH_WITHHOLDINGS), true)
+  assert.equal(Object.isFrozen(FFF_SEARCH_WITHHOLDING_LIMITS), true)
+  assert.equal(normalizeFffSearchWithholdingLimit('arbitrary-shell-indirection-not-refused'), 'arbitrary-shell-indirection-not-refused')
+  assert.throws(
+    () => normalizeFffSearchWithholdingLimit('indirect-shell-parser-refused'),
+    TypeError,
+  )
+})
+
+test('C1 ungranted seat search record remains byte-identical', async () => {
+  const { crew, journal } = await bootRecord({ register: ungrantedBuilderRegister() })
+  const expected = { tools: ['Glob', 'Grep'], fff: 'ungranted' }
+  assert.deepEqual(crew.members.builder.search, expected)
+  assert.deepEqual(journal.search.builder, expected)
+})
+
 test('fff-E1-refuse', () => {
   const gate = createReadGate({ env: { CREW_FFF: '1' }, hasUnquotedPipe: () => false })
   for (const [program, recommendation] of [['grep', 'fff_grep'], ['rg', 'fff_grep'], ['find', 'fff_find'], ['fd', 'fff_find']]) {
@@ -333,7 +373,7 @@ test('B1 ungranted claude Bash search remains untouched', async () => {
   }
 })
 
-test('C1 wrapper search forms have equal reach on pi and claude', () => {
+test('D1 direct and listed-wrapper search refusals remain enforced', () => {
   const cases = [
     ['git grep needle', 'fff_grep', 'mcp__fff__grep'],
     ['xargs grep needle', 'fff_grep', 'mcp__fff__grep'],
@@ -426,7 +466,10 @@ test('fff-F1', async () => {
 test('fff-G1-pi-record', async () => {
   const { crew, journal } = await bootRecord({ agent: 'pi', available: true })
   const member = crew.members.builder
-  assert.deepEqual(member.search, { tools: ['fff_grep', 'fff_find', 'fff_multi_grep'], fff: 'granted' })
+  assert.deepEqual(member.search, {
+    tools: ['fff_grep', 'fff_find', 'fff_multi_grep'], fff: 'granted',
+    withholding: 'direct-and-listed-wrappers-refused', limit: 'arbitrary-shell-indirection-not-refused',
+  })
   assert.deepEqual(journal.search.builder, member.search)
   assert.deepEqual(member.grant_snapshot.grants.extensions.at(-1).split('/').slice(-3), ['pi', 'extensions', 'fff.ts'])
 })
@@ -434,7 +477,10 @@ test('fff-G1-pi-record', async () => {
 test('fff-G1-claude-record', async () => {
   const { crew, journal } = await bootRecord({ available: true })
   const member = crew.members.builder
-  assert.deepEqual(member.search, { tools: ['mcp__fff__grep', 'mcp__fff__find_files', 'mcp__fff__multi_grep'], fff: 'granted' })
+  assert.deepEqual(member.search, {
+    tools: ['mcp__fff__grep', 'mcp__fff__find_files', 'mcp__fff__multi_grep'], fff: 'granted',
+    withholding: 'direct-and-listed-wrappers-refused', limit: 'arbitrary-shell-indirection-not-refused',
+  })
   assert.deepEqual(journal.search.builder, member.search)
   assert.deepEqual(member.mcp_servers, [{ name: 'fff', command: { bin: FFF_MCP_BIN, args: [] }, url: null }])
 })

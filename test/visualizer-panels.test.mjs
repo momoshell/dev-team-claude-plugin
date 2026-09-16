@@ -2695,7 +2695,7 @@ test('workflow-page:A1', () => {
   }
 })
 
-test('workflow-catalog:A1 canonical numbered stages', () => {
+test('D1 workflows page preserves every declared shape', () => {
   const page = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/WorkflowsPage.svelte'), 'utf8')
   for (const shape of Object.keys(VARIANTS)) {
     const presentation = workflowPresentation(shape, { observedLabels: [] })
@@ -2703,8 +2703,11 @@ test('workflow-catalog:A1 canonical numbered stages', () => {
     assert.deepEqual(presentation.stages, expected, shape)
     assert.deepEqual(presentation.stages.map((stage) => stage.position), expected.map((stage) => stage.position), shape)
   }
+  assert.match(page, /let presentations = \$derived\(workflows\.map\(\(workflow\) => workflowPresentation\(workflow\?\.shape, \{/)
+  assert.doesNotMatch(page, /workflows\.(?:slice|filter)\(/)
   assert.match(page, /#each presentations as presentation \(presentation\.shape\)/)
   assert.match(page, /<ol class="stage-order">[\s\S]*presentation\.stages/)
+  assert.match(page, /No canonical stages are available for this workflow shape\./)
 })
 
 test('workflow-catalog:B1 declaration facts and profile inversion', () => {
@@ -2754,11 +2757,28 @@ test('workflow-catalog:D1 empty facts explain their absence', () => {
   assert.ok(unknown.writes.absence_reason?.trim())
 })
 
-test('workflow-catalog:E1 all-shapes read-only page boundary', () => {
+test('A1 workflows page composes proposal diff', () => {
   const page = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/WorkflowsPage.svelte'), 'utf8')
-  assert.match(page, /let presentations = \$derived\(workflows\.map\(/)
-  assert.match(page, /<p class="boundary-note">Read-only catalog\. This page has no editing, compose, dispatch, apply, or post action\.<\/p>/)
-  for (const violation of [/proposeWorkflowEdit|proposeSeat|beginTopology|draftTopologyEdit|validateTopologyEdit/, /<input\b/i, /<button\b/i, /<form\b/i]) assert.doesNotMatch(page, violation)
+  assert.match(page, /import \{ getWorkflows, proposeWorkflowEdit \} from '\.\/api\.js'/)
+  assert.match(page, /import DiffBlock from '\.\/DiffBlock\.svelte'/)
+  assert.match(page, /proposal = await proposeWorkflowEdit\(\{ workflow: selectedWorkflow, edit: \{ stage: selectedStage, role: selectedRole, cell \}, tier: selectedTier \}\)/)
+  assert.match(page, /<DiffBlock text=\{proposal\.diff\}/)
+  assert.match(page, /navigator\.clipboard\.writeText\(proposal\.diff\)/)
+  assert.match(page, /refusal\.code/)
+  assert.match(page, /refusal\.message/)
+  assert.match(page, /Cell draft is not valid JSON/)
+  assert.match(page, /No seat-bearing stages are available/)
+  assert.match(page, /no measured seat data.*cell draft can be seeded/)
+})
+
+test('C1 workflows page has no execution action', () => {
+  const page = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/WorkflowsPage.svelte'), 'utf8')
+  assert.match(page, /<form class="proposal-form" onsubmit=\{submitProposal\}>/)
+  assert.equal((page.match(/onsubmit=/g) || []).length, 1)
+  assert.doesNotMatch(page, /data-action\s*=/i)
+  const controls = [...page.matchAll(/<(?:form|button)\b[\s\S]*?<\/(?:form|button)>/gi)].map((match) => match[0]).join('\n')
+  assert.doesNotMatch(controls, /\b(?:dispatch|boot|apply|post)\b/i)
+  assert.match(page, /never dispatches or boots a run, posts a review, applies policy, or writes the proposal\./)
 })
 
 test('workflow-page:A2', () => {
@@ -3091,10 +3111,11 @@ test('RV1-3 final-index topology move is measured and refused', () => {
   assert.deepEqual(verdict, { status: 'refused', reason: 'stage-reordered', tone: 'warning' })
 })
 
-test('RV1-4 workflow page keeps the read-only boundary', () => {
+test('RV1-4 workflow page states the proposal-only boundary', () => {
   const page = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/WorkflowsPage.svelte'), 'utf8')
-  assert.match(page, /<p class="boundary-note">Read-only catalog\. This page has no editing, compose, dispatch, apply, or post action\.<\/p>/)
+  assert.match(page, /<p class="boundary-note">This page composes a workflow proposal diff for copying; it never dispatches or boots a run, posts a review, applies policy, or writes the proposal\.<\/p>/)
+  assert.doesNotMatch(page, />Read-only catalog<\/p>/)
   assert.match(page, /workflowPresentation/)
-  assert.doesNotMatch(page, /proposeWorkflowEdit|proposeSeat|beginTopology|draftTopologyEdit|validateTopologyEdit/)
-  assert.doesNotMatch(page, /<input\b|<button\b|<form\b/i)
+  assert.match(page, /DiffBlock/)
+  assert.doesNotMatch(page, /data-action\s*=/i)
 })

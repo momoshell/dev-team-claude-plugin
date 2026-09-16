@@ -118,7 +118,15 @@ test('B1 delivered construction suites reject an unknown tracked row', () => {
 test('D1 a tracked suite added after the recorded measurement is unmeasured, not a failure', () => {
   const discovered = [...trackedSuites({ checkout: ROOT }), 'test/zz-added-after-measurement.test.mjs'].sort()
   const result = assertDeliveredConstructionSuites(RECORDED_SUITE_COST_REPORT, discovered)
-  assert.deepEqual(result.unmeasured, ['test/zz-added-after-measurement.test.mjs'])
+  assert.deepEqual(result.unmeasured, [
+    'test/factory-ledger-cells.test.mjs',
+    'test/factory-ledger-core.test.mjs',
+    'test/factory-ledger-escalations.test.mjs',
+    'test/factory-ledger-modifiers.test.mjs',
+    'test/factory-ledger-sessions.test.mjs',
+    'test/factory-ledger-store.test.mjs',
+    'test/zz-added-after-measurement.test.mjs',
+  ])
   assert.equal(result.reason, UNRECORDED_SUITE_REASON)
 })
 

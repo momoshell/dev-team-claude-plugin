@@ -6076,3 +6076,91 @@ test('G1 baseline inventory fatal retains the typed tree contamination shape', (
   assert.deepEqual(fatal, { reason: 'tree-not-restored', why: 'diff inventory could not read a.mjs: baseline read denied' })
   assert.ok(fatal.why.length > 0)
 })
+
+test('A1 prompt-surface plan briefs builder with measurement claim', () => {
+  const scope = ['crew/roles/builder.md']
+  const plan = planEnv({ details: { ...planEnv().details, files_in_scope: scope } })
+  const io = fakeIo({
+    envelopes: { 'planner:1': plan, 'builder:1': buildEnv({ details: { ...buildEnv().details, files_changed: scope } }), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: scope,
+  })
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'done')
+  const assignment = io.calls.assign.find(({ role }) => role === 'builder')
+  assert.equal(assignment?.briefFile, `${TD}/builder-assignment.md`)
+  const brief = io.calls.writes[assignment.briefFile]
+  assert.ok(brief)
+  assert.match(brief, /The commit message must carry a prompt measurement claim\./)
+  assert.match(brief, /Measure: <name>; before: <sample> \(n=N\); after: <sample> \(n=N\)\./)
+  assert.match(brief, /unmeasured — n insufficient; reason: <why>; re-measure after N seats\./)
+  assert.match(brief, /Put the claim in details\.commit_message\./)
+  assert.ok(brief.includes('Choose <name> from the closed set: `first-round pass rate`, `turns per seat`, or `<slug> refusal frequency` where `<slug>` matches `[a-z0-9][a-z0-9._-]*`.'))
+  assert.ok(brief.includes('The semicolon is the field separator: `<sample>` and `<why>` must not contain `;` or a line break.'))
+  assert.ok(brief.includes(plan.details.plan_path))
+})
+
+test('B1 ordinary plan keeps builder assignment unchanged', () => {
+  const io = fakeIo({
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'done')
+  const assignment = io.calls.assign.find(({ role }) => role === 'builder')
+  assert.deepEqual(assignment, {
+    role: 'builder',
+    briefFile: `${TD}/plan.md`,
+    note: 'build',
+    policy: { suiteCommand: 'suite-cmd', gatePath: `${TD}/gate.mjs`, fence: ['a.mjs', 'a.test.mjs'] },
+    n: 1,
+  })
+  assert.equal(io.calls.writeLog.some(({ path }) => path === `${TD}/builder-assignment.md`), false)
+})
+
+test('C1 publish measurement guard and tests remain untouched', () => {
+  const repo = process.cwd()
+  const headBytes = (file) => {
+    const result = spawnSync('git', ['show', `HEAD:${file}`], { cwd: repo })
+    assert.equal(result.error, undefined, `git show ${file} was unavailable: ${result.error?.message || 'unknown error'}`)
+    assert.equal(result.status, 0, `git show ${file} exited ${result.status}`)
+    assert.ok(Buffer.isBuffer(result.stdout) && result.stdout.length > 0, `git show ${file} returned empty output`)
+    return result.stdout
+  }
+  const promptBlock = (bytes) => {
+    const start = bytes.indexOf(Buffer.from('const PROMPT_CLAIM_LINE_START'))
+    const end = bytes.indexOf(Buffer.from('\n}\n\nfunction publishDiffFiles'), start)
+    assert.ok(start >= 0 && end > start, 'prompt measurement enforcement block is unavailable')
+    return bytes.subarray(start, end + 2)
+  }
+  const promptCalls = (bytes) => {
+    const call = Buffer.from('const promptDefect = promptMeasurementDefect')
+    const refusal = Buffer.from('if (promptDefect) return refusePublish')
+    const blocks = []
+    let offset = 0
+    for (;;) {
+      const marker = bytes.indexOf(call, offset)
+      if (marker < 0) break
+      const start = bytes.lastIndexOf(0x0a, marker - 1) + 1
+      const refusalAt = bytes.indexOf(refusal, marker)
+      assert.ok(refusalAt > marker, 'prompt measurement refusal block is incomplete')
+      const end = bytes.indexOf(0x0a, refusalAt)
+      assert.ok(end > refusalAt, 'prompt measurement refusal line is incomplete')
+      blocks.push(bytes.subarray(start, end))
+      offset = end + 1
+    }
+    assert.equal(blocks.length, 2, 'expected both publish prompt measurement call/refusal blocks')
+    assert.ok(blocks.every((block) => block.toString().split('\n').length === 2), 'publish prompt measurement blocks must stay two lines')
+    return blocks
+  }
+
+  const currentDrive = readFileSync(`${repo}/crew/drive.mjs`)
+  const headDrive = headBytes('crew/drive.mjs')
+  assert.deepEqual(promptBlock(currentDrive), promptBlock(headDrive))
+  assert.deepEqual(promptCalls(currentDrive), promptCalls(headDrive))
+
+  const currentPublish = readFileSync(`${repo}/crew/drive-publish.test.mjs`)
+  const headPublish = headBytes('crew/drive-publish.test.mjs')
+  assert.deepEqual(currentPublish, headPublish)
+})

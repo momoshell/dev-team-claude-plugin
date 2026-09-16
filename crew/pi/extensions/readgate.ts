@@ -27,6 +27,39 @@ function fffEnabled(env) {
   catch { return false }
 }
 
+const FFF_SEARCH_PROGRAMS = new Set(['grep', 'rg', 'find', 'fd'])
+const FFF_SEARCH_WRAPPERS = new Set(['git', 'xargs', 'env', 'command'])
+
+function directFffSearchProgram(command) {
+  if (typeof command !== 'string') return undefined
+  const trimmed = command.trim()
+  if (!trimmed) return undefined
+  let words
+  try { words = defaultTokenize(trimmed) } catch { return undefined }
+  if (!Array.isArray(words) || words.length === 0) return undefined
+  const program = basename(words[0])
+  return FFF_SEARCH_PROGRAMS.has(program) ? program : undefined
+}
+
+export function fffSearchProgram(command) {
+  if (typeof command !== 'string' || command.trim() === '') return undefined
+  const direct = directFffSearchProgram(command)
+  if (direct) return direct
+
+  const trimmed = command.trim()
+  const wrapper = /^([A-Za-z0-9_./-]+)\s+([A-Za-z0-9_./-]+)(?:\s|$)/.exec(trimmed)
+  if (wrapper && FFF_SEARCH_WRAPPERS.has(wrapper[1]) && FFF_SEARCH_PROGRAMS.has(wrapper[2])) {
+    let words
+    try { words = defaultTokenize(trimmed) } catch { return undefined }
+    if (Array.isArray(words) && words[0] === wrapper[1] && words[1] === wrapper[2]) return wrapper[2]
+    return undefined
+  }
+
+  const cdWrapper = /^\s*cd\s+((?:\"(?:\\.|[^\"])*\"|'(?:\\.|[^'])*'|\\.|[^\s;&|])+)\s+&&\s+([\s\S]*)$/.exec(trimmed)
+  if (cdWrapper && !/[`$]/.test(cdWrapper[1])) return directFffSearchProgram(cdWrapper[2]) === 'rg' ? 'rg' : undefined
+  return undefined
+}
+
 const defaultRead = (path) => readFileSync(path, 'utf8')
 const defaultSnapshotFile = (path) => {
   const raw = readFileSync(path)
@@ -552,14 +585,16 @@ export function createReadGate(options = {}) {
       if (event?.toolName !== 'bash') return undefined
       const command = input.command
       if (hasUnquotedPipe(command)) return undefined
+      if (fffEnabled(env)) {
+        const searchProgram = fffSearchProgram(command)
+        if (searchProgram !== undefined) {
+          const tool = searchProgram === 'grep' || searchProgram === 'rg' ? 'fff_grep' : 'fff_find'
+          return { block: true, reason: `Refusing direct ${searchProgram}: use ${tool} instead.` }
+        }
+      }
       const words = tokenize(command)
       if (!Array.isArray(words) || words.length === 0) return undefined
       const program = basename(words[0])
-      if (program === 'grep' || program === 'rg' || program === 'find' || program === 'fd') {
-        if (!fffEnabled(env)) return undefined
-        const tool = program === 'grep' || program === 'rg' ? 'fff_grep' : 'fff_find'
-        return { block: true, reason: `Refusing direct ${program}: use ${tool} instead.` }
-      }
       if (program !== 'cat' && program !== 'head' && program !== 'tail') return undefined
       const maxLines = configuredMaxLines()
       const cwd = ctx?.cwd || cwdDefault

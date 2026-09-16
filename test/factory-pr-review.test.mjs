@@ -676,18 +676,68 @@ test('POST-envelope-validation', async () => {
   assertCleaned(current)
 })
 
-test('RV1-1 accepts optional review-only record fields', async () => {
+test('A1 valid vacuity claim is accepted', async () => {
   const values = {
     ...DEFAULT_VALUES,
     findings: [{ ...DEFAULT_VALUES.findings[0], vacuity_claim: 'mutation-survived' }],
-    unreviewable_files: [{ ...DEFAULT_VALUES.unreviewable_files[0], source: 'reviewer' }],
   }
   const current = fixture({ values })
   const report = await runPrReview({ pr: 53, noPost: true, deps: current.deps })
   assert.deepEqual(report.findings, values.findings)
-  assert.deepEqual(report.unreviewable_files, values.unreviewable_files)
   assert.equal(report.posted, false)
   assert.equal(report.reason, 'no-post')
+  assertCleaned(current)
+})
+
+test('B1 undeclared record keys are refused', async () => {
+  const cases = [
+    {
+      ...DEFAULT_VALUES,
+      findings: [{ ...DEFAULT_VALUES.findings[0], undeclared: 'not-permitted' }],
+    },
+    {
+      ...DEFAULT_VALUES,
+      unreviewable_files: [{ ...DEFAULT_VALUES.unreviewable_files[0], source: 'reviewer' }],
+    },
+  ]
+  for (const values of cases) {
+    const current = fixture({ values })
+    await rejectedReason(runPrReview({ pr: 54, deps: current.deps }), 'task-return-invalid')
+    assert.equal(current.calls.review.length, 0)
+    assertCleaned(current)
+  }
+})
+
+test('C1 unknown vacuity claim is refused', async () => {
+  const values = {
+    ...DEFAULT_VALUES,
+    findings: [{ ...DEFAULT_VALUES.findings[0], vacuity_claim: 'invented-claim' }],
+  }
+  const current = fixture({ values })
+  await rejectedReason(runPrReview({ pr: 55, deps: current.deps }), 'task-return-invalid')
+  assert.equal(current.calls.review.length, 0)
+  assertCleaned(current)
+})
+
+test('D1 non-must-fix vacuity claim is refused', async () => {
+  const values = {
+    ...DEFAULT_VALUES,
+    findings: [{ ...DEFAULT_VALUES.findings[0], severity: 'should-fix', vacuity_claim: 'mutation-survived' }],
+  }
+  const current = fixture({ values })
+  await rejectedReason(runPrReview({ pr: 56, deps: current.deps }), 'task-return-invalid')
+  assert.equal(current.calls.review.length, 0)
+  assertCleaned(current)
+})
+
+test('D2 no-op vacuity claim is refused', async () => {
+  const values = {
+    ...DEFAULT_VALUES,
+    findings: [{ ...DEFAULT_VALUES.findings[0], disposition: 'no-op', vacuity_claim: 'mutation-survived' }],
+  }
+  const current = fixture({ values })
+  await rejectedReason(runPrReview({ pr: 57, deps: current.deps }), 'task-return-invalid')
+  assert.equal(current.calls.review.length, 0)
   assertCleaned(current)
 })
 

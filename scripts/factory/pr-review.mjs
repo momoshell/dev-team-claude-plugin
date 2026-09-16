@@ -340,24 +340,32 @@ function readJsonValue(raw) {
 }
 
 const REVIEW_FINDING_FIELDS = Object.freeze(['id', 'severity', 'location', 'summary', 'evidence', 'disposition'])
+const REVIEW_FINDING_OPTIONAL_FIELDS = Object.freeze(['vacuity_claim'])
+const REVIEW_VACUITY_CLAIMS = new Set(['mutation-survived', 'source-text-only'])
 const REVIEW_SEVERITIES = new Set(['must-fix', 'should-fix', 'consider'])
 const REVIEW_DISPOSITIONS = new Set(['auto-fix', 'ask-user', 'no-op'])
 const REVIEW_UNREVIEWABLE_REASONS = new Set(['binary', 'generated', 'too-large', 'out-of-context'])
 const REVIEW_FINDING_ID = /^[A-Za-z0-9_-]{1,64}$/
 
-function hasExactFields(value, fields) {
+function hasExactFields(value, fields, optionalFields = []) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const allowed = new Set([...fields, ...optionalFields])
   return fields.every((field) => Object.prototype.hasOwnProperty.call(value, field))
+    && Reflect.ownKeys(value).every((field) => typeof field === 'string' && allowed.has(field))
 }
 
 function acceptedFinding(value) {
-  return hasExactFields(value, REVIEW_FINDING_FIELDS)
+  return hasExactFields(value, REVIEW_FINDING_FIELDS, REVIEW_FINDING_OPTIONAL_FIELDS)
     && typeof value.id === 'string' && REVIEW_FINDING_ID.test(value.id)
     && typeof value.severity === 'string' && REVIEW_SEVERITIES.has(value.severity)
     && typeof value.location === 'string'
     && typeof value.summary === 'string'
     && typeof value.evidence === 'string'
     && typeof value.disposition === 'string' && REVIEW_DISPOSITIONS.has(value.disposition)
+    && (!Object.prototype.hasOwnProperty.call(value, 'vacuity_claim')
+      || (REVIEW_VACUITY_CLAIMS.has(value.vacuity_claim)
+        && value.severity === 'must-fix'
+        && value.disposition !== 'no-op'))
 }
 
 function acceptedUnreviewable(value) {

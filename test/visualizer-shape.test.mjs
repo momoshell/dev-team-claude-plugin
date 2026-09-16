@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'n
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { INTAKE_REFUSAL_REASONS, INTAKE_WINDOW_MS, defaultCellWindow, defaultIntakeWindow, defaultRunSetWindow, RUN_SET_WINDOW_MS, shapeCellHealth, shapeGateChecks, shapeIntake, shapeRunSet, shapeRun, foldAgents, laneFor, matchesFilters, ROLE_ORDER, withCells } from '../visualizer/server/shape.mjs'
-import { normalizeAgents, normalizePrompts, normalizeSkills } from '../visualizer/web/src/lib/agents.js'
+import { normalizeAgents, normalizePrompts, normalizeSkills, normalizeSkillsPage } from '../visualizer/web/src/lib/agents.js'
 import { startServer } from '../visualizer/server/server.mjs'
 import { drainEvents, createDrainQueue } from '../visualizer/web/src/lib/drain.js'
 import { layoutTimeline, MIN_WIDTH, QUEUED_WIDTH } from '../visualizer/web/src/lib/timeline.js'
@@ -804,6 +804,33 @@ test('C1 agents page keeps register and delivered skill grants distinct', () => 
   assert.equal(cell.register_grant, false)
   assert.equal(cell.last_seat_delivery, true)
   assert.notEqual(cell.register_grant, cell.last_seat_delivery)
+})
+
+test('skills-page:B1 measured holders distinguish grants from false cells', () => {
+  const roles = ['lead', 'planner', 'builder', 'reviewer', 'tech-lead']
+  const payload = {
+    skills: [
+      { name: 'alpha', description: 'Alpha description', content: '# alpha\\n' },
+      { name: 'beta', description: 'Beta description', content: '# beta\\n' },
+    ],
+    matrix: roles.map((role) => ({
+      role,
+      cells: {
+        alpha: { register_grant: role === 'builder', last_seat_delivery: role === 'reviewer' },
+        beta: { register_grant: role === 'planner' ? { value: 'unmeasured', measured: false, reason: 'planner register unavailable' } : false },
+      },
+    })),
+  }
+  const page = normalizeSkillsPage(payload)
+  const alpha = page.rows.find((skill) => skill.name === 'alpha')
+  const beta = page.rows.find((skill) => skill.name === 'beta')
+  assert.deepEqual(alpha.holders, { value: ['builder'], measured: true, reason: null })
+  assert.equal(alpha.description, 'Alpha description')
+  assert.equal(alpha.content, '# alpha\\n')
+  assert.equal(beta.holders.value, null)
+  assert.equal(beta.holders.measured, false)
+  assert.match(beta.holders.reason, /planner register unavailable/)
+  assert.match(beta.holders.reason, /planner/)
 })
 
 test('timeline empty run is safe', () => {

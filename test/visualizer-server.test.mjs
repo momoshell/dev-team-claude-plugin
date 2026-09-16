@@ -20,6 +20,7 @@ import { createLedgerFeed } from '../visualizer/server/ledger-feed.mjs'
 import { readLadder, stageMoves } from '../visualizer/server/roster-ladder.mjs'
 import { shapeIntake } from '../visualizer/server/shape.mjs'
 import { createAgentsSource, proposeAgent, proposePrompt, proposeSkills } from '../visualizer/server/agents-source.mjs'
+import { normalizeSkillsPage } from '../visualizer/web/src/lib/agents.js'
 import { rawRequest, scratchDir, sqliteAvailable, treeDigest } from './helpers.mjs'
 const require = createRequire(import.meta.url)
 const SKIP = sqliteAvailable() ? false : `node:sqlite unavailable (below NODE_FLOOR ${NODE_FLOOR})`
@@ -599,6 +600,64 @@ test('B1 agents page proposal endpoints are diff-only', async () => {
     assert.equal(denied.ok, false); assert.ok(denied.refusals[0].message)
     const empty = proposeSkills({ checkout: fixture.checkout, role: 'builder', skills: [], readFileSync: () => '', readdirSync: () => [] })
     assert.equal(empty.ok, false); assert.ok(empty.refusals[0].message)
+  } finally {
+    if (server) await stopInProcess(server)
+  }
+})
+
+test('skills-page:A1', async () => {
+  const fixture = agentsFixture('visualizer-skills-inventory-')
+  const source = createAgentsSource({ checkout: fixture.checkout, crewRoot: fixture.crewRoot })
+  let server
+  try {
+    server = await startInProcess({}, { checkout: fixture.checkout, crewRoot: fixture.crewRoot, agents: source, ledgerDb: join(fixture.dir, 'ledger.db'), triageDb: join(fixture.dir, 'triage.db') })
+    const response = await json(server.base, '/api/agents')
+    assert.equal(response.status, 200)
+    const expected = fixture.skillNames.map((name) => ({
+      name,
+      description: `Fixture description for ${name}.`,
+      content: readFileSync(join(fixture.checkout, 'skills', name, 'SKILL.md'), 'utf8'),
+    }))
+    assert.deepEqual(response.json.skills.map(({ name, description, content }) => ({ name, description, content })), expected)
+    const page = normalizeSkillsPage(response.json)
+    assert.deepEqual(page.rows.map(({ name, description, content }) => ({ name, description, content })), expected)
+  } finally {
+    if (server) await stopInProcess(server)
+  }
+})
+
+test('skills-page:B1', () => {
+  const fixture = agentsFixture('visualizer-skills-holders-')
+  const capabilities = JSON.parse(readFileSync(fixture.capabilitiesPath, 'utf8'))
+  delete capabilities.roles
+  writeFileSync(fixture.capabilitiesPath, `${JSON.stringify(capabilities, null, 2)}\n`)
+  const source = createAgentsSource({ checkout: fixture.checkout, crewRoot: fixture.crewRoot })
+  const page = normalizeSkillsPage(source.read())
+  assert.equal(page.rows.length, fixture.skillNames.length)
+  for (const row of page.rows) {
+    assert.equal(row.holders.measured, false)
+    assert.equal(row.holders.value, null)
+    assert.equal(typeof row.holders.reason, 'string')
+    assert.ok(row.holders.reason.length > 0)
+    assert.notDeepEqual(row.holders.value, [])
+  }
+})
+
+test('skills-page:C1', async () => {
+  const fixture = agentsFixture('visualizer-skills-proposal-')
+  const source = createAgentsSource({ checkout: fixture.checkout, crewRoot: fixture.crewRoot })
+  const checkoutBefore = treeDigest(fixture.checkout), crewBefore = treeDigest(fixture.crewRoot)
+  let server
+  try {
+    server = await startInProcess({}, { checkout: fixture.checkout, crewRoot: fixture.crewRoot, agents: source, ledgerDb: join(fixture.dir, 'ledger.db'), triageDb: join(fixture.dir, 'triage.db') })
+    const response = await json(server.base, '/api/skills/propose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ role: 'builder', skills: ['frontend-svelte'] }) })
+    assert.equal(response.status, 200)
+    assert.equal(response.json.ok, true)
+    assert.match(response.json.diff, /capabilities\.json/)
+    assert.equal(Object.hasOwn(response.json, 'target_path'), false)
+    assert.equal(Object.hasOwn(response.json, 'after_text'), false)
+    assert.equal(treeDigest(fixture.checkout), checkoutBefore)
+    assert.equal(treeDigest(fixture.crewRoot), crewBefore)
   } finally {
     if (server) await stopInProcess(server)
   }

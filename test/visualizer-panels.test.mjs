@@ -22,7 +22,7 @@ import { createCrewStateSource } from '../visualizer/server/crew-state.mjs'
 import { createLedgerFeed } from '../visualizer/server/ledger-feed.mjs'
 import { openLedger } from '../scripts/factory/ledger.mjs'
 import { scratchDir, sqliteAvailable } from './helpers.mjs'
-import { proposeRosterEdit } from '../visualizer/web/src/lib/api.js'
+import { proposeRosterEdit, proposeSkills } from '../visualizer/web/src/lib/api.js'
 
 async function withAttentionFixture(extraKey, callback) {
   const dir = scratchDir('visualizer-attention-')
@@ -1119,7 +1119,7 @@ test('brakePanel names the resolved checkout and switch path in every state', ()
 })
 
 test('hash routes parse and format all six canonical views', () => {
-  for (const hash of ['#/', '#/ops', '#/roster', '#/agents', '#/adw-123', '#/adw-123/plan']) {
+  for (const hash of ['#/', '#/ops', '#/roster', '#/agents', '#/skills', '#/adw-123', '#/adw-123/plan']) {
     assert.equal(formatHash(parseHash(hash)), hash)
   }
   assert.deepEqual(parseHash(''), { view: 'fleet', adw_id: null, phase: null })
@@ -1130,18 +1130,59 @@ test('hash routes parse and format all six canonical views', () => {
   assert.equal(parseHash('#/ops').adw_id, null)
   assert.equal(parseHash('#/roster').adw_id, null)
   assert.equal(parseHash('#/agents').adw_id, null)
+  assert.equal(parseHash('#/skills').adw_id, null)
 })
 
 test('E1 agents page route nav and title are wired', () => {
   const root = join(process.cwd(), 'visualizer/web/src')
   const app = readFileSync(join(root, 'App.svelte'), 'utf8')
   const page = readFileSync(join(root, 'lib/AgentsPage.svelte'), 'utf8')
-  assert.deepEqual(VIEWS, ['fleet', 'ops', 'roster', 'agents', 'workflows', 'run', 'phase'])
+  assert.deepEqual(VIEWS, ['fleet', 'ops', 'roster', 'agents', 'skills', 'workflows', 'run', 'phase'])
   assert.match(app, /route\.view === 'agents'/)
   assert.match(app, /Agents · Factory/)
   assert.match(app, /<AgentsPage\s*\/?\s*>/)
   assert.match(app, /route\.view === 'agents'[^\n]*>Agents</)
   assert.match(page, /role="tablist"/)
+})
+
+test('skills-page:D1', () => {
+  const root = join(process.cwd(), 'visualizer/web/src')
+  const app = readFileSync(join(root, 'App.svelte'), 'utf8')
+  const page = readFileSync(join(root, 'lib/SkillsPage.svelte'), 'utf8')
+  assert.equal(formatHash(parseHash('#/skills')), '#/skills')
+  assert.ok(app.includes("import SkillsPage from './lib/SkillsPage.svelte'"))
+  assert.ok(app.includes('Skills · Factory'))
+  assert.ok(app.includes("route.view === 'skills'"))
+  assert.ok(app.includes('<SkillsPage />'))
+  assert.match(app, />Skills<\//)
+  assert.ok(page.includes('onsubmit={submitProposal}'))
+  assert.equal((page.match(/onsubmit=/g) || []).length, 1)
+  assert.ok(page.includes('proposeSkills'))
+  assert.match(page, /no file was changed/i)
+  assert.doesNotMatch(page, /\b(?:apply|dispatch|post|boot|policy)\b/i)
+  assert.doesNotMatch(page, /#[0-9a-f]{3,8}\b|rgb\(|--(?:ink|paper|spot|serious)/i)
+})
+
+test('skills-page:E1', async () => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (path, options = {}) => {
+    calls.push({ path: String(path), options })
+    return new Response(JSON.stringify({ ok: true, diff: '--- a/crew/capabilities.json\\n+++ b/crew/capabilities.json', refusals: [] }), { status: 200, headers: { 'content-type': 'application/json' } })
+  }
+  try {
+    const result = await proposeSkills('builder', ['frontend-svelte'])
+    assert.equal(result.ok, true)
+    assert.match(result.diff, /capabilities\.json/)
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].path, '/api/skills/propose')
+    assert.deepEqual(JSON.parse(calls[0].options.body), { role: 'builder', skills: ['frontend-svelte'] })
+    assert.equal(calls[0].options.method, 'POST')
+    assert.equal(calls[0].options.headers['content-type'], 'application/json')
+    assert.doesNotMatch(calls[0].path, /\/apply(?:\?|$)/)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
 })
 
 test('F1 agents page uses only Tier-2 colour aliases', () => {
@@ -2696,8 +2737,8 @@ test('workflow-page:D3', () => {
 })
 
 test('workflow-page:E1', () => {
-  assert.deepEqual(VIEWS, ['fleet', 'ops', 'roster', 'agents', 'workflows', 'run', 'phase'])
-  for (const hash of ['#/workflows', '#/ops', '#/roster', '#/adw-123', '#/adw-123/plan']) assert.equal(formatHash(parseHash(hash)), hash)
+  assert.deepEqual(VIEWS, ['fleet', 'ops', 'roster', 'agents', 'skills', 'workflows', 'run', 'phase'])
+  for (const hash of ['#/workflows', '#/ops', '#/roster', '#/skills', '#/adw-123', '#/adw-123/plan']) assert.equal(formatHash(parseHash(hash)), hash)
   assert.deepEqual(parseHash('#/workflows/ignored'), { view: 'workflows', adw_id: null, phase: null })
   const app = readFileSync(join(process.cwd(), 'visualizer/web/src/App.svelte'), 'utf8')
   assert.match(app, /import WorkflowsPage from '\.\/lib\/WorkflowsPage\.svelte'/)

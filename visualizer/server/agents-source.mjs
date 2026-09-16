@@ -149,16 +149,16 @@ function listSkills({ read, readdir, checkout }) {
     const source = safeRead(read, path, path)
     if (!source.text) {
       reasons.push(source.reason || `${path} is unavailable`)
-      skills.push({ name: entry.name, description: null, path: relative(checkout, path).replaceAll('\\', '/'), frontmatter: marked(null, source.reason || 'skill frontmatter is unavailable') })
+      skills.push({ name: entry.name, description: null, content: marked(null, source.reason || 'skill content is unavailable'), path: relative(checkout, path).replaceAll('\\', '/'), frontmatter: marked(null, source.reason || 'skill frontmatter is unavailable') })
       continue
     }
     const frontmatter = readFrontmatter(source.text)
     if (!frontmatter.value) {
       reasons.push(`${path}: ${frontmatter.reason}`)
-      skills.push({ name: entry.name, description: null, path: relative(checkout, path).replaceAll('\\', '/'), frontmatter: marked(null, `${path}: ${frontmatter.reason}`) })
+      skills.push({ name: entry.name, description: null, content: marked(null, `${path}: ${frontmatter.reason}`), path: relative(checkout, path).replaceAll('\\', '/'), frontmatter: marked(null, `${path}: ${frontmatter.reason}`) })
       continue
     }
-    skills.push({ name: frontmatter.value.name, description: frontmatter.value.description, path: relative(checkout, path).replaceAll('\\', '/'), frontmatter: frontmatter.value })
+    skills.push({ name: frontmatter.value.name, description: frontmatter.value.description, content: source.text, path: relative(checkout, path).replaceAll('\\', '/'), frontmatter: frontmatter.value })
   }
   return { skills, reasons }
 }
@@ -349,13 +349,14 @@ function roleDelivery({ read, readdir, stat, crewRoot, role }) {
 }
 
 function matrixRows({ skills, register, deliveries }) {
-  const configured = record(register?.roles) ? register.roles : {}
+  const configured = record(register?.roles) ? register.roles : null
   return AGENT_ROLES.map((role) => {
-    const grants = Array.isArray(configured[role]?.skills) ? configured[role].skills : []
+    const roleConfig = configured && record(configured[role]) ? configured[role] : null
+    const grants = Array.isArray(roleConfig?.skills) ? roleConfig.skills : null
     const delivery = deliveries[role]
     const cells = Object.fromEntries(skills.map((skill) => {
       const name = skill.name
-      const registerGrant = grants.includes(name)
+      const registerGrant = grants ? grants.includes(name) : marked(null, DEFAULT_REASONS.register)
       const lastSeatDelivery = delivery.measured ? delivery.skills.includes(name) : marked(null, delivery.reason || DEFAULT_REASONS.command)
       return [name, { register_grant: registerGrant, last_seat_delivery: lastSeatDelivery }]
     }))

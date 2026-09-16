@@ -52,8 +52,16 @@ export const VARIANTS = Object.freeze({
         item_patterns: Object.freeze({ id: '^[A-Za-z0-9_-]{1,64}$' }),
         cardinality: Object.freeze({ discriminator: 'outcome', empty: 'no-findings', nonempty: 'findings' }),
       }),
+      Object.freeze({ name: 'reviewed_files', kind: 'paths', allow_empty: true }),
+      Object.freeze({
+        name: 'unreviewable_files', kind: 'records', allow_empty: true,
+        item_fields: Object.freeze(['path', 'reason']),
+        item_values: Object.freeze({
+          reason: Object.freeze(['binary', 'generated', 'too-large', 'out-of-context']),
+        }),
+      }),
     ]),
-    assignment: 'Review the returned base/head identity and the declared change set as a read-only code review. This assignment supersedes the ordinary reviewer deliverable: do not create, edit, delete, checkout, or commit anything in the checkout. Read-only validation is permitted. Return the complete structured envelope with non-empty base and head, outcome findings or no-findings, and findings records containing id, severity, location, summary, evidence, and disposition; findings must be empty exactly when outcome is no-findings and non-empty when outcome is findings.',
+    assignment: 'Review the returned base/head identity and the declared change set as a read-only code review. This assignment supersedes the ordinary reviewer deliverable: do not create, edit, delete, checkout, or commit anything in the checkout. Read-only validation is permitted. Return the complete structured envelope with non-empty base and head, outcome findings or no-findings, reviewed_files as an array of paths, and unreviewable_files as records with path and reason; every unreviewable reason must be binary, generated, too-large, or out-of-context, every listed path must belong to the base/head change set, and reviewed_files and unreviewable_files must be disjoint. Return findings records containing id, severity, location, summary, evidence, and disposition; findings must be empty exactly when outcome is no-findings and non-empty when outcome is findings.',
   }),
   repair: Object.freeze({
     execution: 'reviewed',

@@ -6,10 +6,10 @@ import assert from 'node:assert/strict'
 import {
   B44_LEADLESS_CTX, adversarialPlanEnv, CENSUS_ROW_ABSENT, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_RUNS, CONVERGE_CTX, CONVERGE_GATE, CRASH_WHY, CTX, CTX_DIRECTED, CTX_REPAIR, CTX_TL, DEFAULT_VARIANT, DIRECTED_BRIEF_PATH, DIRECTED_BRIEF_TEXT, DIRECTED_FILES, DRIVE_JOURNAL_EXPECTED, D_ASK, D_AUTO, D_GREEN_GATE, D_PATCH_A, D_PATCH_B, D_PATCH_EMPTY_PATH, D_PATCH_MIXED_MODE, D_PATCH_MIXED_RENAME, D_RED_GATE, ENVELOPE_DEBRIS, GATE_CUSTODIAN, GATE_SUMMARY_PREFIX, HEALTHY_RESULT, JOURNAL_CHANNELS, JOURNAL_CHANNEL_NAMES, JUDGE_TIER, MAX_QUESTIONS, MODIFIER_OUTCOMES, PHASE_SLOT_WAIT_EVENT, PROTECTED_PATHS, RED, REPO_ROOT, REVIEWED_CORE_STAGES, S843_ADDED, S843_D2, S843_RUNS, SCOPE_REFUSALS, SEAT_REFUSAL_STAGE, SENSITIVITY_FLOOR, SHAPE_SOURCES, SKILL_NAMES, SUITE_SLOT_PHASES, SUITE_SLOT_PHASE_NAMES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, TRIAGE_SOURCES, TRIAGE_STAGES, TRIAGE_STAGE_HEAD, VARIANTS, VARIANT_NAMES, WAITS_S, WAIT_FLAGS, WAIT_REFUSALS, WAIT_ROLES, WAIT_SECONDS_MAX, WAIT_SECONDS_MIN, ZERO_CAPACITY_LOGS, ZERO_CAPACITY_RESULT, answerBounceLines, assertSeats, b127GatePaths, b127InvokeGate, b318Builders, b318ReviewGrants, b318SiteA, b318SiteB, b44AssertLeadlessGate, b44GateFixIo, b44GatePlan, b44MidRunRepairIo, baselineGateDefect, bothExhaustionPointsScenario, buildEnv, carveRun, checkEnv, checkFailureLine, closeoutIo, convergeIo, convergeRun, crashIo, crashRun, dApplyCommand, dAutoRows, dBuilders, dGitApplies, dLeads, dReviewEnv, deliberateRun, directSlotRun, dispositionIo, divergentPlanScenario, driveJournalSites, driveTask, enforcementPreamble, envelopeDefect, envelopeFieldsPresent, escalationStageRows, exhaustionAcceptIo, existsSync, fakeIo, fenceBase, fenceDiff, fenceSpan, gateReapCommand, guardedWrite, join, laneFence, laneFenceHits, laneProbeCommand, laneProbeKinds, leadEnv, matchAnswers, mkdirSync, normaliseJournalTimes, operationalRow, osCpus, parseDirectedBrief, parseGateSummary, parseQuestions, parseSuiteCounts, patchTargets, phaseTrace, planEnv, postCommitCrashRun, protectedPlanEnv, protectedReseatRefusal, questionConsultLines, readFileSync, reconEnv, recordRow, refuseWait, replayResumeStages, resolveProtectedPaths, resolveWaits, resumeDoneRows, resumeKeys, resumeStageRows, reviewEnv, rmSync, runChild, runCmd, runCmdFixture, s843Ctx, s843Io, s843PathsIn, s843PlanEnv, scopeBounceBrief, scopeMatcher, scopeRefusal, scratchDir, shapeDefect, shellArg, shellWords, slotCtx, slotFactory, sourcesDefect, spawnSync, stageEnabled, suiteRefusalEnv, throwAutoFixWrites, throwingWaitRun, tmpdir, traceLabels, triageEnv, undeclaredStage, validateScopeEntries, waitsCtx, waitsRecord, writeFileSync,
 } from './drive-fixtures.mjs'
-import { EXECUTOR_TOPOLOGIES, SHAPE_DEFECT_CODES, shapeValidationDefect } from './shape-validator.mjs'
+import { envelopeFieldMetadataDefect as leafEnvelopeFieldMetadataDefect, EXECUTOR_TOPOLOGIES, SHAPE_DEFECT_CODES, shapeValidationDefect } from './shape-validator.mjs'
 import { ADVERSARY_REFUSAL, ADVERSARY_REFUSALS, ADVERSARY_TRIGGERS, CENSUS_CARRIER_FILES as RUNTIME_CENSUS_CARRIER_FILES, SCOPE_ADMISSION_SOURCES, SCOPE_REQUEST_KINDS, SEAT_ADMISSION_MAX as RUNTIME_SEAT_ADMISSION_MAX, SUITE_ADMISSION_MAX as RUNTIME_SUITE_ADMISSION_MAX, fenceScopeOf, fenceScopesIntersect, parseUnifiedZeroHunks, resolveAdversaryTrigger, scopeAdmissionDecision, scopeRequestOf, siblingSpanIntersects, suiteRedTestFiles, RESUME_CHECKPOINT_VERSION, RESUME_CHECKPOINT_FAMILIES, resumeCheckpointDefect, resumeTask, resumeWorktreeSha256 } from './drive.mjs'
 import { CENSUS_CARRIER_FILES as DISPATCH_CENSUS_CARRIER_FILES } from '../scripts/factory/dispatch-batch.mjs'
-import { ANTI_REPLAY_REFUSAL_REASONS } from './drive.mjs'
+import { ANTI_REPLAY_REFUSAL_REASONS, envelopeFieldMetadataDefect } from './drive.mjs'
 
 test('a supplied wait budget reaches io.wait and names the seat overdue at that budget', () => {
   const io = fakeIo({ envelopes: { 'planner:1': null } })
@@ -2158,7 +2158,7 @@ test('coded shape topology is measured against every successful executor family'
   }
   const reviewOnlyEnvelope = {
     status: 'done', role: 'reviewer', summary: 'review complete', artifacts: [`${TD}/review.md`],
-    details: { base: 'base-sha', head: 'head-sha', outcome: 'no-findings', findings: [] },
+    details: { base: 'base-sha', head: 'head-sha', outcome: 'no-findings', findings: [], reviewed_files: [], unreviewable_files: [] },
   }
   const verifyOnlyEnvelope = {
     status: 'done', role: 'reviewer', summary: 'verification complete', artifacts: [`${TD}/verification.md`],
@@ -2299,7 +2299,8 @@ test('shape validator exposes a frozen closed vocabulary, preserves legacy detai
     [{ ...VARIANTS.full, stages: [] }, 'full', 'stages must declare the heads this shape emits'],
     [{ ...VARIANTS.full, envelope_fields: null }, 'full', 'envelope_fields must be an array'],
     [{ ...VARIANTS.full, strict_identity: 'yes' }, 'full', 'strict_identity must be boolean'],
-    [{ ...VARIANTS.scout, envelope_fields: [{ name: 'findings', kind: 'unknown' }] }, 'scout', 'envelope field "findings" must declare a kind in text, records'],
+    [{ ...VARIANTS.scout, envelope_fields: [{ name: 'findings', kind: 'unknown' }] }, 'scout', 'envelope field "findings" must declare a kind in text, records, paths'],
+    [{ ...VARIANTS.scout, envelope_fields: [{ name: 'paths', kind: 'paths', item_fields: ['path'] }] }, 'scout', 'envelope field "paths" may declare item_fields only on records'],
     [{ ...VARIANTS.scout, envelope_fields: [{ name: '', kind: 'records' }] }, 'scout', 'envelope fields must have unique non-empty names'],
     [{ ...VARIANTS.scout, envelope_fields: [{ name: 'findings', kind: 'records', item_fields: ['summary'], optional_item_fields: ['summary'] }] }, 'scout', 'envelope field "findings".optional_item_fields must be disjoint from item_fields'],
     [{ ...VARIANTS.scout, stages: ['scout', 'scope-gate'] }, 'scout', 'an envelope shape must declare its envelope-accept stage'],
@@ -2318,6 +2319,16 @@ test('shape validator exposes a frozen closed vocabulary, preserves legacy detai
   assert.doesNotMatch(source, /(?:drive\.mjs|scripts\/)/)
   const loaded = spawnSync(process.execPath, ['--input-type=module', '-e', "const leaf = await import('./crew/shape-validator.mjs'); if (!leaf.shapeValidationDefect) process.exit(2)"], { cwd: REPO_ROOT, encoding: 'utf8' })
   assert.equal(loaded.status, 0, loaded.stderr || loaded.stdout)
+})
+
+test('drive re-exports the leaf envelope field metadata validator', () => {
+  assert.strictEqual(envelopeFieldMetadataDefect, leafEnvelopeFieldMetadataDefect)
+  for (const [name, shape] of Object.entries(VARIANTS)) {
+    for (const field of shape.envelope_fields) {
+      assert.equal(envelopeFieldMetadataDefect(field, shape.envelope_fields), null, `${name}.${field.name}`)
+    }
+  }
+  assert.notEqual(envelopeFieldMetadataDefect({ name: 'paths', kind: 'paths', item_values: {} }), null)
 })
 
 test('shape sources and the repair declaration are pinned', () => {

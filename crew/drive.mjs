@@ -542,7 +542,7 @@ export { parseFenceScope, validateFenceScope, fenceScopesIntersect } from './fen
 // terminals, so they are not a shape's own declared stages.
 export const EXECUTIONS = Object.freeze(['reviewed', 'envelope'])
 export const WRITE_SURFACES = Object.freeze(['planned', 'none'])
-export const ENVELOPE_FIELD_KINDS = Object.freeze(['text', 'records'])
+export const ENVELOPE_FIELD_KINDS = Object.freeze(['text', 'records', 'paths'])
 // #915 — the planner's validation_lane is RESOLVED where it is ACCEPTED, not where it is
 // run. b428 burned all three build rounds on a lane naming three fixtures node's loader
 // cannot open: the lane is fixed at plan acceptance (:3781) and no seat may amend it, so
@@ -677,89 +677,7 @@ function hasOwn(object, key) {
   return object !== null && typeof object === 'object' && Object.prototype.hasOwnProperty.call(object, key)
 }
 
-function frozenStringArrayDefect(value, label) {
-  if (!Array.isArray(value) || !Object.isFrozen(value) || value.length === 0) {
-    return `${label} must be a frozen non-empty string array`
-  }
-  if (value.some((item) => typeof item !== 'string' || !item)) return `${label} must contain only non-empty strings`
-  if (new Set(value).size !== value.length) return `${label} must contain unique strings`
-  return null
-}
-
-// Metadata is trusted declaration data, not member input. Keep its vocabulary
-// closed here so envelopeDefect can remain a pure consumer of a declaration.
-export function envelopeFieldMetadataDefect(field, envelopeFields = []) {
-  if (!field || typeof field !== 'object' || Array.isArray(field)) return 'envelope field must be an object'
-  const kind = field.kind
-  const itemFields = Array.isArray(field.item_fields) ? field.item_fields : []
-  const itemSet = new Set(itemFields)
-  const optionalItemFields = Array.isArray(field.optional_item_fields) ? field.optional_item_fields : []
-  const optionalItemSet = new Set(optionalItemFields)
-  const declaredItemSet = new Set([...itemFields, ...optionalItemFields])
-  if (hasOwn(field, 'values')) {
-    if (kind !== 'text') return `envelope field ${JSON.stringify(field.name)} may declare values only on text`
-    const defect = frozenStringArrayDefect(field.values, `envelope field ${JSON.stringify(field.name)}.values`)
-    if (defect) return defect
-  }
-  for (const key of ['allow_empty', 'item_values', 'item_patterns', 'cardinality', 'optional_item_fields']) {
-    if (hasOwn(field, key) && kind !== 'records') return `envelope field ${JSON.stringify(field.name)} may declare ${key} only on records`
-  }
-  if (hasOwn(field, 'allow_empty') && typeof field.allow_empty !== 'boolean') {
-    return `envelope field ${JSON.stringify(field.name)}.allow_empty must be boolean`
-  }
-  if (hasOwn(field, 'covers')) {
-    if (kind !== 'records') return `envelope field ${JSON.stringify(field.name)} may declare covers only on records`
-    const covers = field.covers
-    if (!covers || typeof covers !== 'object' || Array.isArray(covers)) return `envelope field ${JSON.stringify(field.name)}.covers must be an object`
-    if (typeof covers.field !== 'string' || !covers.field || covers.field === field.name) return `envelope field ${JSON.stringify(field.name)}.covers.field must name another records field`
-    const covered = envelopeFields.find((candidate) => candidate?.name === covers.field)
-    if (!covered) return `envelope field ${JSON.stringify(field.name)}.covers.field ${JSON.stringify(covers.field)} is not declared`
-    if (covered.kind !== 'records') return `envelope field ${JSON.stringify(field.name)}.covers.field ${JSON.stringify(covers.field)} must be records`
-    if (typeof covers.key !== 'string' || !covers.key) return `envelope field ${JSON.stringify(field.name)}.covers.key must name an item field`
-    if (!itemFields.includes(covers.key) || !Array.isArray(covered.item_fields) || !covered.item_fields.includes(covers.key)) {
-      return `envelope field ${JSON.stringify(field.name)}.covers.key ${JSON.stringify(covers.key)} must be required by both records fields`
-    }
-  }
-  if (kind === 'records' && (!Array.isArray(field.item_fields) || itemFields.some((name) => typeof name !== 'string' || !name) || new Set(itemFields).size !== itemFields.length)) {
-    return `envelope field ${JSON.stringify(field.name)}.item_fields must be unique non-empty strings`
-  }
-  if (hasOwn(field, 'optional_item_fields') && (!Array.isArray(field.optional_item_fields) || optionalItemFields.some((name) => typeof name !== 'string' || !name) || new Set(optionalItemFields).size !== optionalItemFields.length)) {
-    return `envelope field ${JSON.stringify(field.name)}.optional_item_fields must be unique non-empty strings`
-  }
-  if (optionalItemFields.some((name) => itemSet.has(name))) return `envelope field ${JSON.stringify(field.name)}.optional_item_fields must be disjoint from item_fields`
-  for (const [key, values] of Object.entries(field.item_values || {})) {
-    if (!declaredItemSet.has(key)) return `envelope field ${JSON.stringify(field.name)}.item_values names undeclared item field ${JSON.stringify(key)}`
-    const defect = frozenStringArrayDefect(values, `envelope field ${JSON.stringify(field.name)}.item_values.${key}`)
-    if (defect) return defect
-  }
-  if (hasOwn(field, 'item_values') && (!field.item_values || typeof field.item_values !== 'object' || Array.isArray(field.item_values))) {
-    return `envelope field ${JSON.stringify(field.name)}.item_values must be an object`
-  }
-  for (const [key, source] of Object.entries(field.item_patterns || {})) {
-    if (!declaredItemSet.has(key)) return `envelope field ${JSON.stringify(field.name)}.item_patterns names undeclared item field ${JSON.stringify(key)}`
-    if (typeof source !== 'string') return `envelope field ${JSON.stringify(field.name)}.item_patterns.${key} must be a regex source`
-    try { new RegExp(source) } catch { return `envelope field ${JSON.stringify(field.name)}.item_patterns.${key} is not a valid regex` }
-  }
-  if (hasOwn(field, 'item_patterns') && (!field.item_patterns || typeof field.item_patterns !== 'object' || Array.isArray(field.item_patterns))) {
-    return `envelope field ${JSON.stringify(field.name)}.item_patterns must be an object`
-  }
-  if (hasOwn(field, 'cardinality')) {
-    const cardinality = field.cardinality
-    if (!cardinality || typeof cardinality !== 'object' || Array.isArray(cardinality)) return `envelope field ${JSON.stringify(field.name)}.cardinality must be an object`
-    const { discriminator, empty, nonempty } = cardinality
-    if (typeof discriminator !== 'string' || !discriminator) return `envelope field ${JSON.stringify(field.name)}.cardinality.discriminator must name a text field`
-    const discriminatorField = envelopeFields.find((candidate) => candidate?.name === discriminator)
-    if (!discriminatorField) return `envelope field ${JSON.stringify(field.name)}.cardinality discriminator ${JSON.stringify(discriminator)} is not declared`
-    if (discriminatorField.kind !== 'text') return `envelope field ${JSON.stringify(field.name)}.cardinality discriminator ${JSON.stringify(discriminator)} must be text`
-    if (typeof empty !== 'string' || !empty || typeof nonempty !== 'string' || !nonempty || empty === nonempty) {
-      return `envelope field ${JSON.stringify(field.name)}.cardinality must name distinct empty and nonempty values`
-    }
-    if (!Array.isArray(discriminatorField.values) || !discriminatorField.values.includes(empty) || !discriminatorField.values.includes(nonempty)) {
-      return `envelope field ${JSON.stringify(field.name)}.cardinality values must belong to the discriminator's closed values`
-    }
-  }
-  return null
-}
+export { envelopeFieldMetadataDefect } from './shape-validator.mjs'
 
 // Can this driver honour the declaration at all? A shape it cannot execute is
 // REFUSED with a reason — never silently run as something else. This is what
@@ -1227,6 +1145,21 @@ function reviewIdentityContext(value) {
   return Object.freeze({ expected, defect: null, evidence: expected })
 }
 
+export function reviewCoverageDefect(details, declaredFiles) {
+  details = details && typeof details === 'object' && !Array.isArray(details) ? details : {}
+  if (!Array.isArray(details.reviewed_files)) details = { ...details, reviewed_files: [] }
+  if (!Array.isArray(details.unreviewable_files)) details = { ...details, unreviewable_files: [] }
+  const declared = new Set(Array.isArray(declaredFiles) ? declaredFiles : [])
+  const reviewed = details.reviewed_files
+  const unreviewablePaths = new Set(details.unreviewable_files.map((record) => record?.path))
+  const unreviewable = unreviewablePaths
+  const reported = [...reviewed, ...unreviewable]
+  if (reported.some((path) => !declared.has(path))) return 'reported path is outside the declared change set'
+  if (reviewed.some((path) => unreviewable.has(path))) return 'a path may not be both reviewed and unreviewable'
+  if (unreviewablePaths.size !== details.unreviewable_files.length) return 'unreviewable_files contains duplicate paths'
+  return null
+}
+
 // What accepts an envelope-shape run: the SHAPE of what came back. Deliberately
 // stricter than validEnvelope (:124), which only guards against a stale or
 // mis-addressed file. The required fields and their kinds come from the shape's
@@ -1255,6 +1188,13 @@ export function envelopeDefect(env, shape, { taskDir } = {}) {
       if (Array.isArray(field.values) && !field.values.includes(value)) {
         return refuse('field-kind', `details.${field.name} must be one of ${field.values.join(', ')}`)
       }
+      continue
+    }
+    if (field.kind === 'paths') {
+      if (!Array.isArray(value)) return refuse('field-kind', `details.${field.name} must be an array`)
+      if (value.length === 0 && field.allow_empty !== true) return refuse('field-kind', `details.${field.name} must be a non-empty array`)
+      if (value.some((path) => !text(path))) return refuse('field-item', `every details.${field.name} entry must be a non-empty path string`)
+      if (new Set(value).size !== value.length) return refuse('field-item', `details.${field.name} must contain unique paths`)
       continue
     }
     // 'records'
@@ -6682,6 +6622,9 @@ function runTask(ctx, io, crash) {
       '  summary: a non-empty sentence',
       `  artifacts: absolute paths you wrote, every one inside ${ctx.taskDir}`,
       ...shape.envelope_fields.map((f) => {
+        if (f.kind === 'paths') {
+          return `  details.${f.name}: an array of non-empty path strings${f.allow_empty === true ? '; empty is allowed' : ''}`
+        }
         if (f.kind !== 'records') {
           const values = Array.isArray(f.values) ? `; exactly one of ${f.values.join(' | ')}` : ''
           return `  details.${f.name}: a non-empty string${values}`
@@ -6745,6 +6688,21 @@ function runTask(ctx, io, crash) {
         return escalate('envelope', `the ${variant} envelope returned a review identity that does not match the expected identity`, [], {}, {}, { review_identity: refusal })
       }
       acceptedReviewIdentity = { expected: reviewIdentity.expected, returned: returnedReviewIdentity, match: true }
+    }
+    if (variant === 'review_only') {
+      const changeSetCommand = `git diff --name-only -z --end-of-options ${shellArg(`${env.details.base}...${env.details.head}`)} --`
+      let changeSetResult
+      try { changeSetResult = io.run(changeSetCommand) } catch (err) {
+        return escalate('envelope', `the review change-set probe was interrupted: ${err?.message ?? String(err)}`, Array.isArray(env.artifacts) ? env.artifacts : [])
+      }
+      if (changeSetResult?.ok !== true || typeof changeSetResult.output !== 'string') {
+        return escalate('envelope', 'the review change-set probe was not green or returned unreadable output', Array.isArray(env.artifacts) ? env.artifacts : [])
+      }
+      const declaredFiles = changeSetResult.output.split('\0').filter((path) => path.length > 0)
+      const coverageDefect = reviewCoverageDefect(env.details, declaredFiles)
+      if (coverageDefect) {
+        return escalate('envelope', `the review coverage is invalid: ${coverageDefect}`, Array.isArray(env.artifacts) ? env.artifacts : [])
+      }
     }
     stage('envelope-accept')
     const observedFields = envelopeFieldsPresent(env, shape)

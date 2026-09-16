@@ -7,7 +7,7 @@ import { cpSync, mkdirSync } from 'node:fs'
 import {
   ACCEPT_FINDINGS, ACCEPT_FINDINGS_SOFT, ACCEPT_REASKS, adversarialPlanEnv, ACCEPT_REFUSALS, B318_GATED_RUNS, B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, CENSUS_ABSENT_REASONS, CENSUS_ROW_ABSENT, CENSUS_TURNS_ABSENT, CENSUS_UNREADABLE, SCREENER_MODELS, SCREENER_REGISTER, screenerResult, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_MUTATION, CHECK_RUNS, CLOBBER_R2, CONVERGE_GATE, CONVERGE_PLAN, CRASH_FINDINGS, CRASH_STAGES, CTX, CTX_REPAIR, CTX_TL, DECISIONS, D_ASK, D_AUTO, D_COLLISION_CTX, D_PANEL_CTX, D_PATCH_A, D_PATCH_B, ENVELOPE_REFUSAL_REASONS, FINDING_DISPOSITIONS, LIMITS, MUST_FIX_REFUTATION_FINDINGS, NAME_VERDICTS, PANEL_ADJUDICATORS, PANEL_PARTNERS, PERSPECTIVE_TARGETS, PLAN_CHECK_FINDINGS, PLAN_RESIDUAL, PLAN_SCOPE, PLAN_SCOPE_VERDICTS, RED, REFUTATION_CLAIM, REFUTATION_CONVERGE_PLAN, REFUTATION_CONVERGE_RUNS, REFUTATION_EVIDENCE_MAX, RESIDUAL_TYPES, REVIEW_FINDINGS, REVIEW_GATE_PASS, S843_ADDED, S843_D2, S843_DISPATCHED, S843_DROPPED, S843_NARROWED, S843_RUNS, SECOND_OPINION, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, VARIANTS, acceptBounceLines, acceptContractLines, acceptedRawById, assertDriverIdRefusal, b127GroupCommand, b127InvokeGate, b127Lines, b127PidAlive, b127Spy, b318Builders, b318GatedPlan, b318Options, b318ReviewGrants, b318SiteA, b318SiteB, b376ProofIo, bounceTargetOf, buildEnv, checkEnv, classCollisionIo, closeoutIo, crashRun, dAdjEnv, dAutoRows, dBuilders, dDecisionBrief, dGitApplies, dLeads, dOffers, dPanelOutcomes, dPartnerEnv, dPatchWrite, dPlanEnv, dRemintRows, dReviewEnv, dispositionIo, dispositionOf, dispositionPanelIo, dispositionPlan, divergentCollisionIo, divergentPlanScenario, driveTask, envelopeDefect, envelopeFieldsPresent, exhaustionAcceptIo, fakeIo, findingIdDefect, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, join, leadEnv, legacyReviewerExemptions, nameVerdict, observeTurnCensus, panelSeats, phaseTrace, planAcceptContractLines, planCheckAcceptIo, planEnv, planRevisionRun, planScopeVerdict, planThenReviewIo, protectedPlanEnv, protectedReseatRefusal, publicationIo, readFileSync, reconEnv, regrantVerdict, resolveValidationLane, reviewConvergeRun, reviewEnv, reviewFindings, reviewOutcome, reviewShapeDefect, rmSync, roundCursor, s843Ctx, s843Io, s843PlanEnv, s843Rows, scratchDir, shapeDefect, slotCtx, slotFactory, spawnSync, staleVerdictLines, triageEnv, turnCeilingBreached, twoRoundReviewIo, validateAcceptDecision, validateCarve, validatePlanResiduals, validateScopeEntries, validationPlan, validationProbeRun, validationRows, verdictFindingsDefect, writeFileSync,
 } from './drive-fixtures.mjs'
-import { HARDENING_PRESCRIPTION_REASONS, HARDENING_PRESCRIPTION_RESOLUTION, hardeningPrescriptionConflict, hardeningTestPath, planScopeWhy, prescriptionAuthorshipEvidence, prescriptionSpanIsLaneAuthored, prescriptionSpansAreLaneAuthored, scopeSuggestions, VACUITY_CLAIMS, vacuityFindingDefect } from './drive.mjs'
+import { HARDENING_PRESCRIPTION_REASONS, HARDENING_PRESCRIPTION_RESOLUTION, hardeningPrescriptionConflict, hardeningTestPath, planScopeWhy, prescriptionAuthorshipEvidence, prescriptionSpanIsLaneAuthored, prescriptionSpansAreLaneAuthored, scopeSuggestions, shellArg, VACUITY_CLAIMS, vacuityFindingDefect } from './drive.mjs'
 import { screenerAdjudicationRows } from './screener.mjs'
 import { ROOT as REPO_ROOT } from '../test/helpers.mjs'
 import { checkSkillAnchors, laneFence, partitionShifts } from '../skills/qa-test-writing/anchor-pin.mjs'
@@ -24,6 +24,8 @@ const REVIEW_FINDING = Object.freeze({
   id: 'finding-1', severity: 'should-fix', location: 'src/example.mjs:12',
   summary: 'the reviewed change needs a follow-up', evidence: 'the changed branch is not covered', disposition: 'ask-user',
 })
+const reviewDiffCommand = (base, head) => `git diff --name-only -z --end-of-options ${shellArg(`${base}...${head}`)} --`
+const reviewDiffRuns = (result, base = 'base-sha', head = 'head-sha') => ({ [reviewDiffCommand(base, head)]: result })
 const SCREENER_PROPOSAL = Object.freeze({
   id: 'screen-1', axis: 'correctness', model: 'screen-model', severity: 'consider', disposition: 'ask-user',
   location: 'src/example.mjs:12', summary: 'the advisory observation', source: 'screener', status: 'proposed',
@@ -52,7 +54,7 @@ function injectedScreenerIo({ panel = false, child = screenerResult([SCREENER_PR
 function reviewEnvelope({ outcome = 'findings', findings = [REVIEW_FINDING], assignment_id = 'd1', run_id = REVIEW_RUN_ID, role = 'reviewer', details = {} } = {}) {
   return {
     assignment_id, run_id, role, status: 'done', summary: 'review complete', artifacts: [`${TD}/review.md`],
-    details: { base: 'base-sha', head: 'head-sha', outcome, findings, ...details },
+    details: { base: 'base-sha', head: 'head-sha', outcome, findings, reviewed_files: [], unreviewable_files: [], ...details },
   }
 }
 
@@ -67,8 +69,8 @@ function zeroTurnReviewEnvelope(assignment_id = 'd1') {
   }
 }
 
-function strictReviewIo(envelope, { changed = [] } = {}) {
-  const io = fakeIo({ changed })
+function strictReviewIo(envelope, { changed = [], runs = {} } = {}) {
+  const io = fakeIo({ changed, runs })
   const assign = io.assign.bind(io)
   io.assign = function (spec) {
     const assigned = assign(spec)
@@ -2006,7 +2008,7 @@ test('F2 permits optional_item_fields only on records', () => {
 })
 
 test('G1 leaves every non-scout variant envelope contract unchanged', () => {
-  const expected = JSON.parse(`{"full":{"execution":"reviewed","required_seats":"tier","stages":["plan","check","build","scope-gate","lane","gate","gate-baseline","gate-repair","gate-reverify","gate-proof","review","commit","document","rebase","suite","publish","converge"],"writes":"planned","accepted_by":"a review verdict of pass, or a lead accept at review or build exhaustion","envelope_fields":[],"assignment":null},"review_only":{"execution":"envelope","required_seats":["reviewer"],"stages":["review_only","scope-gate","envelope-accept"],"writes":"none","accepted_by":"structured envelope plus zero-write proof; no commit","strict_identity":true,"report_values":true,"envelope_fields":[{"name":"base","kind":"text"},{"name":"head","kind":"text"},{"name":"outcome","kind":"text","values":["findings","no-findings"]},{"name":"findings","kind":"records","allow_empty":true,"item_fields":["id","severity","location","summary","evidence","disposition"],"item_values":{"severity":["must-fix","should-fix","consider"],"disposition":["auto-fix","ask-user","no-op"]},"item_patterns":{"id":"^[A-Za-z0-9_-]{1,64}$"},"cardinality":{"discriminator":"outcome","empty":"no-findings","nonempty":"findings"}}],"assignment":"Review the returned base/head identity and the declared change set as a read-only code review. This assignment supersedes the ordinary reviewer deliverable: do not create, edit, delete, checkout, or commit anything in the checkout. Read-only validation is permitted. Return the complete structured envelope with non-empty base and head, outcome findings or no-findings, and findings records containing id, severity, location, summary, evidence, and disposition; findings must be empty exactly when outcome is no-findings and non-empty when outcome is findings."},"repair":{"execution":"reviewed","required_seats":"tier","stages":["repair","build","scope-gate","lane","review","commit","document","rebase","suite","publish"],"writes":"planned","accepted_by":"a review verdict of pass, or a lead accept at review or build exhaustion","envelope_fields":[],"assignment":"Bounded triage. Read the failure the task brief carries verbatim, then write the smallest fix the builder can execute inside the scope this run inherits. This is NOT a plan round: there is no revision, no plan-check, no second attempt, and no acceptance gate.","sources":{"scope":"inherited","lane":"ctx","gate":"none"}},"directed":{"execution":"reviewed","required_seats":["builder","reviewer"],"stages":["directed","build","scope-gate","lane","gate","gate-baseline","gate-proof","review","commit","document","rebase","suite","publish","converge"],"writes":"planned","accepted_by":"a review verdict of pass, or a lead accept at review or build exhaustion","envelope_fields":[],"assignment":null,"sources":{"scope":"brief","lane":"ctx","gate":"brief"}},"verify_only":{"execution":"envelope","required_seats":["reviewer"],"stages":["verify_only","scope-gate","envelope-accept"],"writes":"none","accepted_by":"complete structured verification report plus zero-write proof; no commit, regardless of product verdict","strict_identity":true,"report_values":true,"envelope_fields":[{"name":"verification_targets","kind":"records","item_fields":["id","target"]},{"name":"environment_assumptions","kind":"records","item_fields":["name","assumption"]},{"name":"product_verdict","kind":"text","values":["passing","failing"]},{"name":"check_matrix","kind":"records","allow_empty":true,"item_fields":["id","status","command","result","evidence"],"item_values":{"status":["passed","failed","blocked","not run"]},"covers":{"field":"verification_targets","key":"id"}},{"name":"environment","kind":"records","item_fields":["name","observed"]},{"name":"environmental_blockers","kind":"records","allow_empty":true,"item_fields":["target","reason"]}],"assignment":"Read-only verification. Return a complete structured verification report with details.verification_targets as non-empty records with id,target; details.environment_assumptions as non-empty records with name,assumption; details.product_verdict as passing or failing; details.check_matrix as records with id,status,command,result,evidence and one row for each verification target; details.environment as non-empty records with name,observed; and details.environmental_blockers as records with target,reason. Ephemeral build/test artifacts may exist only while checks run and must be removed before return; the final checkout must be clean. No tester role is introduced."}}`)
+  const expected = JSON.parse(`{"full":{"execution":"reviewed","required_seats":"tier","stages":["plan","check","build","scope-gate","lane","gate","gate-baseline","gate-repair","gate-reverify","gate-proof","review","commit","document","rebase","suite","publish","converge"],"writes":"planned","accepted_by":"a review verdict of pass, or a lead accept at review or build exhaustion","envelope_fields":[],"assignment":null},"review_only":{"execution":"envelope","required_seats":["reviewer"],"stages":["review_only","scope-gate","envelope-accept"],"writes":"none","accepted_by":"structured envelope plus zero-write proof; no commit","strict_identity":true,"report_values":true,"envelope_fields":[{"name":"base","kind":"text"},{"name":"head","kind":"text"},{"name":"outcome","kind":"text","values":["findings","no-findings"]},{"name":"findings","kind":"records","allow_empty":true,"item_fields":["id","severity","location","summary","evidence","disposition"],"item_values":{"severity":["must-fix","should-fix","consider"],"disposition":["auto-fix","ask-user","no-op"]},"item_patterns":{"id":"^[A-Za-z0-9_-]{1,64}$"},"cardinality":{"discriminator":"outcome","empty":"no-findings","nonempty":"findings"}}, {"name":"reviewed_files","kind":"paths","allow_empty":true},{"name":"unreviewable_files","kind":"records","allow_empty":true,"item_fields":["path","reason"],"item_values":{"reason":["binary","generated","too-large","out-of-context"]}}],"assignment":"Review the returned base/head identity and the declared change set as a read-only code review. This assignment supersedes the ordinary reviewer deliverable: do not create, edit, delete, checkout, or commit anything in the checkout. Read-only validation is permitted. Return the complete structured envelope with non-empty base and head, outcome findings or no-findings, reviewed_files as an array of paths, and unreviewable_files as records with path and reason; every unreviewable reason must be binary, generated, too-large, or out-of-context, every listed path must belong to the base/head change set, and reviewed_files and unreviewable_files must be disjoint. Return findings records containing id, severity, location, summary, evidence, and disposition; findings must be empty exactly when outcome is no-findings and non-empty when outcome is findings."},"repair":{"execution":"reviewed","required_seats":"tier","stages":["repair","build","scope-gate","lane","review","commit","document","rebase","suite","publish"],"writes":"planned","accepted_by":"a review verdict of pass, or a lead accept at review or build exhaustion","envelope_fields":[],"assignment":"Bounded triage. Read the failure the task brief carries verbatim, then write the smallest fix the builder can execute inside the scope this run inherits. This is NOT a plan round: there is no revision, no plan-check, no second attempt, and no acceptance gate.","sources":{"scope":"inherited","lane":"ctx","gate":"none"}},"directed":{"execution":"reviewed","required_seats":["builder","reviewer"],"stages":["directed","build","scope-gate","lane","gate","gate-baseline","gate-proof","review","commit","document","rebase","suite","publish","converge"],"writes":"planned","accepted_by":"a review verdict of pass, or a lead accept at review or build exhaustion","envelope_fields":[],"assignment":null,"sources":{"scope":"brief","lane":"ctx","gate":"brief"}},"verify_only":{"execution":"envelope","required_seats":["reviewer"],"stages":["verify_only","scope-gate","envelope-accept"],"writes":"none","accepted_by":"complete structured verification report plus zero-write proof; no commit, regardless of product verdict","strict_identity":true,"report_values":true,"envelope_fields":[{"name":"verification_targets","kind":"records","item_fields":["id","target"]},{"name":"environment_assumptions","kind":"records","item_fields":["name","assumption"]},{"name":"product_verdict","kind":"text","values":["passing","failing"]},{"name":"check_matrix","kind":"records","allow_empty":true,"item_fields":["id","status","command","result","evidence"],"item_values":{"status":["passed","failed","blocked","not run"]},"covers":{"field":"verification_targets","key":"id"}},{"name":"environment","kind":"records","item_fields":["name","observed"]},{"name":"environmental_blockers","kind":"records","allow_empty":true,"item_fields":["target","reason"]}],"assignment":"Read-only verification. Return a complete structured verification report with details.verification_targets as non-empty records with id,target; details.environment_assumptions as non-empty records with name,assumption; details.product_verdict as passing or failing; details.check_matrix as records with id,status,command,result,evidence and one row for each verification target; details.environment as non-empty records with name,observed; and details.environmental_blockers as records with target,reason. Ephemeral build/test artifacts may exist only while checks run and must be removed before return; the final checkout must be clean. No tester role is introduced."}}`)
   const actual = Object.fromEntries(Object.entries(VARIANTS).filter(([name]) => name !== 'scout'))
   assert.deepEqual(actual, expected)
 })
@@ -3957,6 +3959,186 @@ test('D2 envelope declaration metadata fails closed', () => {
   for (const shape of malformed) assert.equal(typeof shapeDefect(shape, 'review_only'), 'string')
 })
 
+test('D3 review_only paths reject record metadata and malformed members', () => {
+  const pathsField = VARIANTS.review_only.envelope_fields.find((field) => field.name === 'reviewed_files')
+  const withPaths = (change) => ({
+    ...VARIANTS.review_only,
+    envelope_fields: VARIANTS.review_only.envelope_fields.map((field) => field.name === 'reviewed_files' ? change({ ...field }) : field),
+  })
+  const malformed = [
+    withPaths((field) => ({ ...field, item_fields: ['path'] })),
+    withPaths((field) => ({ ...field, item_values: { path: ['x'] } })),
+    withPaths((field) => ({ ...field, item_patterns: { path: '.+' } })),
+    withPaths((field) => ({ ...field, cardinality: { discriminator: 'outcome', empty: 'no-findings', nonempty: 'findings' } })),
+    withPaths((field) => ({ ...field, optional_item_fields: ['path'] })),
+    withPaths((field) => ({ ...field, covers: { field: 'findings', key: 'id' } })),
+    withPaths((field) => ({ ...field, allow_empty: 'yes' })),
+  ]
+  for (const shape of malformed) assert.equal(typeof shapeDefect(shape, 'review_only'), 'string')
+  assert.equal(shapeDefect(VARIANTS.review_only, 'review_only'), null)
+  assert.equal(envelopeDefect(reviewEnvelope({ details: { reviewed_files: [] } }), VARIANTS.review_only, { taskDir: TD }), null)
+  for (const paths of [[''], ['  '], [null], [1], ['src/a.mjs', 'src/a.mjs']]) {
+    const defect = envelopeDefect(reviewEnvelope({ details: { reviewed_files: paths } }), VARIANTS.review_only, { taskDir: TD })
+    assert.equal(defect.reason, 'field-item', JSON.stringify(paths))
+  }
+  assert.equal(pathsField.allow_empty, true)
+})
+
+test('A1 coverage outside the declared change set is refused', () => {
+  const declared = ['src/reviewed.mjs', 'src/generated.bin']
+  const diff = `${declared.join('\0')}\0`
+  const valid = reviewEnvelope({ details: {
+    reviewed_files: ['src/reviewed.mjs'],
+    unreviewable_files: [{ path: 'src/generated.bin', reason: 'generated' }],
+  } })
+  const acceptedIo = strictReviewIo(valid, { runs: reviewDiffRuns({ ok: true, output: diff }) })
+  const accepted = driveTask(REVIEW_CTX, acceptedIo)
+  assert.equal(accepted.status, 'done')
+  for (const details of [
+    { reviewed_files: ['src/outside.mjs'], unreviewable_files: [] },
+    { reviewed_files: [], unreviewable_files: [{ path: 'src/outside.mjs', reason: 'generated' }] },
+  ]) {
+    const io = strictReviewIo(reviewEnvelope({ details }), { runs: reviewDiffRuns({ ok: true, output: diff }) })
+    const result = driveTask(REVIEW_CTX, io)
+    assert.equal(result.status, 'escalation')
+    assert.equal(result.details.escalation.where, 'envelope')
+    assert.equal(io.calls.logs.some((row) => row.stage === 'envelope-accept'), false)
+  }
+  for (const probe of [
+    { ok: false, output: 'git diff failed' },
+    { ok: true, output: null },
+    () => { throw new Error('diff interrupted') },
+  ]) {
+    const io = strictReviewIo(reviewEnvelope(), { runs: reviewDiffRuns(probe) })
+    const result = driveTask(REVIEW_CTX, io)
+    assert.equal(result.status, 'escalation')
+    assert.equal(result.details.escalation.where, 'envelope')
+    assert.equal(io.calls.logs.some((row) => row.stage === 'envelope-accept'), false)
+  }
+})
+
+test('A2 review diff terminates options before returned revisions', () => {
+  const base = '--output=hostile.mjs'
+  const head = 'head-sha'
+  const env = reviewEnvelope({ details: { base, head } })
+  const command = reviewDiffCommand(base, head)
+  const io = strictReviewIo(env, { runs: { [command]: { ok: true, output: '' } } })
+  const result = driveTask(REVIEW_CTX, io)
+  const probe = io.calls.wrapped.find(({ wrapped }) => wrapped === command)?.wrapped
+  assert.equal(result.status, 'done')
+  assert.equal(typeof probe, 'string')
+  assert.ok(probe.indexOf('--end-of-options') < probe.indexOf(shellArg(`${base}...${head}`)))
+  assert.equal(probe.endsWith(' --'), true)
+  assert.equal(io.calls.checkoutLog.length, 0)
+  assert.equal(io.calls.commits.length, 0)
+})
+
+test('B1 overlapping review coverage is refused', () => {
+  const path = 'src/shared.mjs'
+  const env = reviewEnvelope({ details: {
+    reviewed_files: [path],
+    unreviewable_files: [{ path, reason: 'out-of-context' }],
+  } })
+  const io = strictReviewIo(env, { runs: reviewDiffRuns({ ok: true, output: `${path}\0` }) })
+  const result = driveTask(REVIEW_CTX, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'envelope')
+  assert.match(result.details.escalation.why, /both reviewed and unreviewable/)
+  assert.equal(io.calls.logs.some((row) => row.stage === 'envelope-accept'), false)
+})
+
+test('B2 duplicate unreviewable paths are refused', () => {
+  const path = 'src/generated.mjs'
+  const env = reviewEnvelope({ details: {
+    reviewed_files: [],
+    unreviewable_files: [{ path, reason: 'generated' }, { path, reason: 'binary' }],
+  } })
+  const io = strictReviewIo(env, { runs: reviewDiffRuns({ ok: true, output: `${path}\0` }) })
+  const result = driveTask(REVIEW_CTX, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'envelope')
+  assert.match(result.details.escalation.why, /duplicate paths/)
+  assert.equal(io.calls.logs.some((row) => row.stage === 'envelope-accept'), false)
+})
+
+test('C1 unreviewable reasons are closed', () => {
+  const reasons = ['binary', 'generated', 'too-large', 'out-of-context']
+  assert.deepEqual(VARIANTS.review_only.envelope_fields.find((field) => field.name === 'unreviewable_files').item_values.reason, reasons)
+  for (const reason of reasons) {
+    const path = `src/${reason}.mjs`
+    const env = reviewEnvelope({ details: { unreviewable_files: [{ path, reason }] } })
+    const result = driveTask(REVIEW_CTX, strictReviewIo(env, { runs: reviewDiffRuns({ ok: true, output: `${path}\0` }) }))
+    assert.equal(result.status, 'done', reason)
+  }
+  const unknown = reviewEnvelope({ details: { unreviewable_files: [{ path: 'src/unknown.mjs', reason: 'unknown' }] } })
+  const defect = envelopeDefect(unknown, VARIANTS.review_only, { taskDir: TD })
+  assert.equal(defect.reason, 'field-item')
+})
+
+test('D1 accepted review coverage is carried in envelope values', () => {
+  const details = {
+    reviewed_files: ['src/reviewed.mjs'],
+    unreviewable_files: [{ path: 'src/binary.bin', reason: 'binary' }],
+  }
+  const env = reviewEnvelope({ details })
+  const io = strictReviewIo(env, { runs: reviewDiffRuns({ ok: true, output: 'src/reviewed.mjs\0src/binary.bin\0' }) })
+  const result = driveTask(REVIEW_CTX, io)
+  const accepted = io.calls.logs.find((row) => row.envelope_accepted).envelope_accepted
+  assert.equal(result.status, 'done')
+  assert.deepEqual(result.details.envelope.values, { ...reviewEnvelope().details, ...details })
+  assert.deepEqual(accepted.values, result.details.envelope.values)
+})
+
+test('E1 review coverage preserves every other shipped shape contract', () => {
+  for (const [name, shape] of Object.entries(VARIANTS)) assert.equal(shapeDefect(shape, name), null, name)
+  const expected = {
+    execution: 'envelope',
+    required_seats: ['reviewer'],
+    stages: ['review_only', 'scope-gate', 'envelope-accept'],
+    writes: 'none',
+    accepted_by: 'structured envelope plus zero-write proof; no commit',
+    strict_identity: true,
+    report_values: true,
+    envelope_fields: [
+      { name: 'base', kind: 'text' }, { name: 'head', kind: 'text' },
+      { name: 'outcome', kind: 'text', values: ['findings', 'no-findings'] },
+      {
+        name: 'findings', kind: 'records', allow_empty: true,
+        item_fields: ['id', 'severity', 'location', 'summary', 'evidence', 'disposition'],
+        item_values: { severity: ['must-fix', 'should-fix', 'consider'], disposition: ['auto-fix', 'ask-user', 'no-op'] },
+        item_patterns: { id: '^[A-Za-z0-9_-]{1,64}$' },
+        cardinality: { discriminator: 'outcome', empty: 'no-findings', nonempty: 'findings' },
+      },
+      { name: 'reviewed_files', kind: 'paths', allow_empty: true },
+      {
+        name: 'unreviewable_files', kind: 'records', allow_empty: true,
+        item_fields: ['path', 'reason'],
+        item_values: { reason: ['binary', 'generated', 'too-large', 'out-of-context'] },
+      },
+    ],
+    assignment: 'Review the returned base/head identity and the declared change set as a read-only code review. This assignment supersedes the ordinary reviewer deliverable: do not create, edit, delete, checkout, or commit anything in the checkout. Read-only validation is permitted. Return the complete structured envelope with non-empty base and head, outcome findings or no-findings, reviewed_files as an array of paths, and unreviewable_files as records with path and reason; every unreviewable reason must be binary, generated, too-large, or out-of-context, every listed path must belong to the base/head change set, and reviewed_files and unreviewable_files must be disjoint. Return findings records containing id, severity, location, summary, evidence, and disposition; findings must be empty exactly when outcome is no-findings and non-empty when outcome is findings.',
+  }
+  assert.deepEqual(VARIANTS.review_only, expected)
+  const io = strictReviewIo(reviewEnvelope())
+  const result = driveTask(REVIEW_CTX, io)
+  assert.equal(result.status, 'done')
+  assert.deepEqual(result.details.stages, ['review_only:r1', 'scope-gate:r1', 'envelope-accept', 'done'])
+  assert.equal(result.details.envelope.seat, 'reviewer')
+  assert.equal(result.details.envelope.files_changed, 0)
+  assert.deepEqual(result.details.envelope.values, reviewEnvelope().details)
+  assert.equal(result.details.commit, null)
+  assert.equal(io.calls.commits.length, 0)
+})
+
+test('E2 review coverage paths render an accurate envelope contract', () => {
+  const io = strictReviewIo(reviewEnvelope())
+  const result = driveTask(REVIEW_CTX, io)
+  const brief = io.calls.writes[`${TD}/review_only-brief.md`]
+  assert.equal(result.status, 'done')
+  assert.match(brief, /details\.reviewed_files: an array of non-empty path strings; empty is allowed/)
+  assert.doesNotMatch(brief, /details\.reviewed_files: a non-empty string/)
+})
+
 test('A1 review identity rejects wrong returned base and head before acceptance', () => {
   const cases = [
     { base: 'c'.repeat(40), head: REVIEW_HEAD_SHA },
@@ -4111,7 +4293,7 @@ test('E1 review_only round-trips no-findings as a measured outcome', () => {
   const noneAccepted = noneIo.calls.logs.find((row) => row.envelope_accepted).envelope_accepted
   assert.equal(none.status, 'done')
   assert.deepEqual(noneAccepted.values, none.details.envelope.values)
-  assert.deepEqual(none.details.envelope.values, { base: 'base-sha', head: 'head-sha', outcome: 'no-findings', findings: [] })
+  assert.deepEqual(none.details.envelope.values, { base: 'base-sha', head: 'head-sha', outcome: 'no-findings', findings: [], reviewed_files: [], unreviewable_files: [] })
   const mismatch = reviewEnvelope({ outcome: 'findings', findings: [] })
   assert.equal(envelopeDefect(mismatch, VARIANTS.review_only, { taskDir: TD }).reason, 'field-item')
 
@@ -4341,8 +4523,14 @@ test('J1 review_only declaration remains byte-identical', () => {
         item_patterns: { id: '^[A-Za-z0-9_-]{1,64}$' },
         cardinality: { discriminator: 'outcome', empty: 'no-findings', nonempty: 'findings' },
       },
+      { name: 'reviewed_files', kind: 'paths', allow_empty: true },
+      {
+        name: 'unreviewable_files', kind: 'records', allow_empty: true,
+        item_fields: ['path', 'reason'],
+        item_values: { reason: ['binary', 'generated', 'too-large', 'out-of-context'] },
+      },
     ],
-    assignment: 'Review the returned base/head identity and the declared change set as a read-only code review. This assignment supersedes the ordinary reviewer deliverable: do not create, edit, delete, checkout, or commit anything in the checkout. Read-only validation is permitted. Return the complete structured envelope with non-empty base and head, outcome findings or no-findings, and findings records containing id, severity, location, summary, evidence, and disposition; findings must be empty exactly when outcome is no-findings and non-empty when outcome is findings.',
+    assignment: 'Review the returned base/head identity and the declared change set as a read-only code review. This assignment supersedes the ordinary reviewer deliverable: do not create, edit, delete, checkout, or commit anything in the checkout. Read-only validation is permitted. Return the complete structured envelope with non-empty base and head, outcome findings or no-findings, reviewed_files as an array of paths, and unreviewable_files as records with path and reason; every unreviewable reason must be binary, generated, too-large, or out-of-context, every listed path must belong to the base/head change set, and reviewed_files and unreviewable_files must be disjoint. Return findings records containing id, severity, location, summary, evidence, and disposition; findings must be empty exactly when outcome is no-findings and non-empty when outcome is findings.',
   }
   assert.equal(JSON.stringify(VARIANTS.review_only), JSON.stringify(expected))
 })

@@ -19,6 +19,8 @@ export const proposeAgent = (name, entry) => request('/api/agents/propose', { me
 export const proposeSkills = (role, skills) => request('/api/skills/propose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ role, skills }) })
 export const proposePrompt = (role, text) => request('/api/prompts/propose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ role, text }) })
 export const getWorkflows = (recent) => request(`/api/workflows${recent == null ? '' : `?recent=${encodeURIComponent(recent)}`}`)
+export const getAssurances = () => request('/api/assurances')
+export const proposeAssuranceChange = (document, assurance, path) => request('/api/assurances/propose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ document, assurance, ...(typeof path === 'string' && path.trim() ? { path } : {}) }) })
 export const proposeWorkflowEdit = ({ workflow, edit, tier }) => request('/api/workflows/propose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ workflow, edit, tier }) })
 export const getCellHealth = (params = {}) => request(`/api/cell-health?${new URLSearchParams(params)}`)
 export const getSeatTeardowns = (params = {}) => request(`/api/seat-teardowns?${new URLSearchParams(params)}`)

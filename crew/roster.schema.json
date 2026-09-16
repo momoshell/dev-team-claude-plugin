@@ -112,6 +112,54 @@
         },
         "fallback": {
           "$ref": "#/$defs/fallbackChain"
+        },
+        "transport_policy": {
+          "$ref": "#/$defs/transportPolicy"
+        }
+      }
+    },
+    "transport": {
+      "type": "string",
+      "enum": ["pane", "headless-json", "headless-rpc", "headless-api"]
+    },
+    "offCriticalStage": {
+      "type": "string",
+      "enum": []
+    },
+    "transportPolicy": {
+      "type": "object",
+      "required": ["transports", "batch_eligible"],
+      "additionalProperties": false,
+      "properties": {
+        "transports": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/transport"
+          }
+        },
+        "batch_eligible": {
+          "type": "boolean"
+        },
+        "stage": {
+          "$ref": "#/$defs/offCriticalStage"
+        }
+      },
+      "if": {
+        "required": ["batch_eligible"],
+        "properties": {
+          "batch_eligible": {
+            "const": true
+          }
+        }
+      },
+      "then": {
+        "required": ["stage"]
+      },
+      "else": {
+        "not": {
+          "required": ["stage"]
         }
       }
     },

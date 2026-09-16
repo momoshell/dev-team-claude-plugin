@@ -2865,6 +2865,7 @@ test('directed declaration is pinned and honourable', () => {
     execution: 'reviewed', required_seats: ['builder', 'reviewer'],
     stages: ['directed', 'build', 'scope-gate', 'lane', 'gate', 'gate-baseline', 'gate-proof',
       'review', 'commit', 'document', 'rebase', 'suite', 'publish', 'converge'],
+    off_critical_path_stages: [],
     writes: 'planned',
     accepted_by: 'a review verdict of pass, or a lead accept at review or build exhaustion',
     envelope_fields: [], assignment: null,

@@ -427,6 +427,11 @@ test('scopeEntryDefects agrees with drive.mjs over good and bad entries', () => 
 
 test('enqueue carries every shape in the closed set into the enqueue record and the child spec', async () => {
   for (const name of VARIANT_NAMES) {
+    const offCriticalStages = VARIANTS[name].off_critical_path_stages
+    assert.equal(Object.hasOwn(VARIANTS[name], 'off_critical_path_stages'), true)
+    assert.equal(Array.isArray(offCriticalStages), true)
+    assert.equal(Object.isFrozen(offCriticalStages), true)
+    assert.deepEqual(offCriticalStages, [])
     await each(async (f) => {
       const filesInScope = VARIANTS[name]?.sources?.scope === 'inherited' ? ['a.mjs'] : undefined
       const spec = { crew_dir: f.crewDir, variant: name, ...(filesInScope ? { files_in_scope: filesInScope } : {}) }

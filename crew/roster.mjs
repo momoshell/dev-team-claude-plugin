@@ -2,15 +2,20 @@ import { readFileSync } from 'node:fs'
 import { ASSURANCE_NAMES, ASSURANCE_ALIAS_OF, canonicalAssurance } from './assurances.mjs'
 
 export const ROSTER_SCHEMA_VERSIONS = Object.freeze([1, 2])
+export const ROSTER_TRANSPORTS = Object.freeze(['pane', 'headless-json', 'headless-rpc', 'headless-api'])
 export const ROSTER_REFUSALS = Object.freeze([
-  'roster-not-object',          // the document is not a JSON object
-  'roster-version-unknown',     // schema_version outside ROSTER_SCHEMA_VERSIONS
-  'roster-version-mismatch',    // declared version disagrees with the container
-  'roster-seating-absent',      // neither "tiers" nor "assurances" is declared
-  'roster-seating-both',        // both names are declared, whatever their values
-  'roster-seating-invalid',     // the sole declared container is not a usable map
-  'roster-seating-unknown',     // a seating key the vocabulary does not name
-  'roster-seating-incomplete',  // a preset is missing from the seating
+  'roster-not-object',               // the document is not a JSON object
+  'roster-version-unknown',          // schema_version outside ROSTER_SCHEMA_VERSIONS
+  'roster-version-mismatch',         // declared version disagrees with the container
+  'roster-seating-absent',           // neither "tiers" nor "assurances" is declared
+  'roster-seating-both',             // both names are declared, whatever their values
+  'roster-seating-invalid',          // the sole declared container is not a usable map
+  'roster-seating-unknown',          // a seating key the vocabulary does not name
+  'roster-seating-incomplete',       // a preset is missing from the seating
+  'roster-transport-policy-invalid', // transport_policy is not a closed usable object
+  'roster-transport-invalid',        // transports is empty, duplicate, or unknown
+  'roster-transport-stage-invalid',  // stage is missing, malformed, or forbidden
+  'roster-batch-stage-critical',     // batch eligibility names a loop/unknown stage
 ])
 export function refuseRoster (reason, message) {
   if (!ROSTER_REFUSALS.includes(reason)) throw new Error(`unknown roster refusal reason ${JSON.stringify(reason)}`)
@@ -21,6 +26,56 @@ const seatingMap = (value) => (value !== null && typeof value === 'object' && !A
 
 export function rosterSeating (roster) {
   return seatingMap(roster?.tiers) ?? seatingMap(roster?.assurances)
+}
+
+const plainRecord = (value) => {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const prototype = Object.getPrototypeOf(value)
+  return prototype === Object.prototype || prototype === null
+}
+
+export function assertRosterTransportPolicies (roster, offCriticalStages) {
+  if (!(offCriticalStages instanceof Set)
+    || [...offCriticalStages].some((stage) => typeof stage !== 'string' || stage.length === 0)) {
+    throw refuseRoster('roster-transport-stage-invalid', 'off-critical stage declarations must be a Set of non-empty strings')
+  }
+  const seating = rosterSeating(roster)
+  if (!seating) throw refuseRoster('roster-transport-policy-invalid', 'cannot validate transport policies without a seating map')
+  const policyKeys = ['transports', 'batch_eligible', 'stage']
+  for (const [tier, cells] of Object.entries(seating)) {
+    if (cells === null || typeof cells !== 'object') continue
+    for (const [role, cell] of Object.entries(cells)) {
+      if (cell === null || typeof cell !== 'object' || !Object.hasOwn(cell, 'transport_policy')) continue
+      const policy = cell.transport_policy
+      const where = `transport_policy at ${tier}.${role}`
+      if (!plainRecord(policy) || Reflect.ownKeys(policy).some((key) => typeof key !== 'string' || !policyKeys.includes(key))) {
+        throw refuseRoster('roster-transport-policy-invalid', `${where} must be a closed object with transports and batch_eligible`)
+      }
+      if (!Array.isArray(policy.transports) || policy.transports.length === 0) {
+        throw refuseRoster('roster-transport-invalid', `${where}.transports must be a non-empty array`)
+      }
+      const seen = new Set()
+      for (const transport of policy.transports) {
+        if (typeof transport !== 'string' || !ROSTER_TRANSPORTS.includes(transport) || seen.has(transport)) {
+          throw refuseRoster('roster-transport-invalid', `${where}.transports must contain each allowed transport exactly once`)
+        }
+        seen.add(transport)
+      }
+      if (typeof policy.batch_eligible !== 'boolean') {
+        throw refuseRoster('roster-transport-policy-invalid', `${where}.batch_eligible must be boolean`)
+      }
+      if (policy.batch_eligible) {
+        if (!Object.hasOwn(policy, 'stage') || typeof policy.stage !== 'string' || policy.stage.length === 0) {
+          throw refuseRoster('roster-transport-stage-invalid', `${where}.stage is required for batch eligibility`)
+        }
+        if (!offCriticalStages.has(policy.stage)) {
+          throw refuseRoster('roster-batch-stage-critical', `${where}.stage ${JSON.stringify(policy.stage)} is not an off-critical stage`)
+        }
+      } else if (Object.hasOwn(policy, 'stage')) {
+        throw refuseRoster('roster-transport-stage-invalid', `${where}.stage is forbidden when batch_eligible is false`)
+      }
+    }
+  }
 }
 
 export function normalizeRoster (raw) {

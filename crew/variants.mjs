@@ -3,6 +3,8 @@
 // validators stay in drive.mjs because they encode what that driver can run,
 // rather than knowledge the daemon needs. Consumers are drive.mjs and daemon.mjs.
 // Keep this file import-free because daemon.test.mjs allowlists it as a LEAF.
+const NO_OFF_CRITICAL_PATH_STAGES = Object.freeze([])
+
 export const VARIANTS = Object.freeze({
   full: Object.freeze({
     execution: 'reviewed',
@@ -10,6 +12,7 @@ export const VARIANTS = Object.freeze({
     stages: Object.freeze(['plan', 'check', 'build', 'scope-gate', 'lane', 'gate',
       'gate-baseline', 'gate-repair', 'gate-reverify', 'gate-proof', 'review',
       'commit', 'document', 'rebase', 'suite', 'publish', 'converge']),
+    off_critical_path_stages: NO_OFF_CRITICAL_PATH_STAGES,
     writes: 'planned',
     // All THREE terminals, not just the first: :1876, :1860, :1905.
     accepted_by: 'a review verdict of pass, or a lead accept at review or build exhaustion',
@@ -20,6 +23,7 @@ export const VARIANTS = Object.freeze({
     execution: 'envelope',
     required_seats: Object.freeze(['planner']),
     stages: Object.freeze(['scout', 'scope-gate', 'envelope-accept']),
+    off_critical_path_stages: NO_OFF_CRITICAL_PATH_STAGES,
     writes: 'none',
     accepted_by: 'envelope shape',
     envelope_fields: Object.freeze([
@@ -35,6 +39,7 @@ export const VARIANTS = Object.freeze({
     execution: 'envelope',
     required_seats: Object.freeze(['reviewer']),
     stages: Object.freeze(['review_only', 'scope-gate', 'envelope-accept']),
+    off_critical_path_stages: NO_OFF_CRITICAL_PATH_STAGES,
     writes: 'none',
     accepted_by: 'structured envelope plus zero-write proof; no commit',
     strict_identity: true,
@@ -70,6 +75,7 @@ export const VARIANTS = Object.freeze({
     // this shape declares gate source 'none', and undeclaredStage is what makes
     // that mechanical rather than a promise.
     stages: Object.freeze(['repair', 'build', 'scope-gate', 'lane', 'review', 'commit', 'document', 'rebase', 'suite', 'publish']),
+    off_critical_path_stages: NO_OFF_CRITICAL_PATH_STAGES,
     writes: 'planned',
     accepted_by: 'a review verdict of pass, or a lead accept at review or build exhaustion',
     envelope_fields: Object.freeze([]),
@@ -87,6 +93,7 @@ export const VARIANTS = Object.freeze({
     stages: Object.freeze(['directed', 'build', 'scope-gate',   // ⚓ A4 (the first three)
       'lane', 'gate', 'gate-baseline', 'gate-proof', 'review',
       'commit', 'document', 'rebase', 'suite', 'publish', 'converge']),
+    off_critical_path_stages: NO_OFF_CRITICAL_PATH_STAGES,
     writes: 'planned',
     accepted_by: 'a review verdict of pass, or a lead accept at review or build exhaustion',
     envelope_fields: Object.freeze([]),
@@ -97,6 +104,7 @@ export const VARIANTS = Object.freeze({
     execution: 'envelope',
     required_seats: Object.freeze(['reviewer']),
     stages: Object.freeze(['verify_only', 'scope-gate', 'envelope-accept']),
+    off_critical_path_stages: NO_OFF_CRITICAL_PATH_STAGES,
     writes: 'none',
     accepted_by: 'complete structured verification report plus zero-write proof; no commit, regardless of product verdict',
     strict_identity: true,

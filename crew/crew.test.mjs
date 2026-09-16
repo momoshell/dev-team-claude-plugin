@@ -8,13 +8,13 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { openLedger } from '../scripts/factory/ledger.mjs'
 import { openRun, _resetNoticeGuardsForTest } from '../scripts/factory/emit.mjs'
-import { composeLayout, DEFAULT_ROLES, bootAllocation, resolveWorkerBin, docOpenArgs, resolveTier, resolveSeatModels, FALLBACK_REFUSALS, refuseFallback, loadRoster, normalizeRoster, refuseRoster, rosterSeating, serializeRosterV1, serializeRosterV2, ROSTER_REFUSALS, ROSTER_SCHEMA_VERSIONS, rosterSourcePath, loadRosterSource, writeRosterSnapshot, rosterSnapshotReader, loadLadder, assertBandFloors, grantedDefModels, assertDefBandFloors, refuseBandFloor, seatModelKey, bandForMember, bandForRaw, seatBand, LADDER_PATH, BAND_FLOOR_REFUSALS, shadowCandidates, assertSeats, parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, RUN_START_EVENT, assignmentsFromJournal, resolveRunConfig, aliasDeprecationLines, persistedRunConfig, awaitSeatsReady, teardownCore, teardownCmd, TEARDOWN_EXIT_SEATLESS, TEARDOWN_EXIT_UNPROVEN, TEARDOWN_ABSENT_CAUSES, teardownAbsentCause, TEARDOWN_DRAIN_MS, TEARDOWN_DRAIN_ERROR_MS, installRunFinalizers, writeTerminalLine, BOOT_DESCENDANT_REFUSALS, descendantRefusal, refuseStaleDescendants, loadCapabilities, reviewIdentityFromArgs } from './crew.mjs'
+import { composeLayout, DEFAULT_ROLES, bootAllocation, resolveWorkerBin, docOpenArgs, resolveTier, resolveSeatModels, FALLBACK_REFUSALS, refuseFallback, loadRoster, normalizeRoster, refuseRoster, rosterSeating, serializeRosterV1, serializeRosterV2, ROSTER_REFUSALS, ROSTER_SCHEMA_VERSIONS, ROSTER_TRANSPORTS, assertRosterTransportPolicies, offCriticalPathStages, rosterSourcePath, loadRosterSource, writeRosterSnapshot, rosterSnapshotReader, loadLadder, assertBandFloors, grantedDefModels, assertDefBandFloors, refuseBandFloor, seatModelKey, bandForMember, bandForRaw, seatBand, LADDER_PATH, BAND_FLOOR_REFUSALS, shadowCandidates, assertSeats, parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, RUN_START_EVENT, assignmentsFromJournal, resolveRunConfig, aliasDeprecationLines, persistedRunConfig, awaitSeatsReady, teardownCore, teardownCmd, TEARDOWN_EXIT_SEATLESS, TEARDOWN_EXIT_UNPROVEN, TEARDOWN_ABSENT_CAUSES, teardownAbsentCause, TEARDOWN_DRAIN_MS, TEARDOWN_DRAIN_ERROR_MS, installRunFinalizers, writeTerminalLine, BOOT_DESCENDANT_REFUSALS, descendantRefusal, refuseStaleDescendants, loadCapabilities, reviewIdentityFromArgs } from './crew.mjs'
 import { specExecution } from './child.mjs'
 import { resolveRunConfig as resolveDaemonRunConfig } from './daemon.mjs'
 import { resolveRunConfig as resolveFactoryRunConfig, parseArgs as parseFactoryArgs, runVerb } from './factoryctl.mjs'
 import { TASK_PROFILES } from './task-profiles.mjs'
 import { ASSURANCES, ASSURANCE_ALIASES, ASSURANCE_ALIAS_OF } from './assurances.mjs'
-import { VARIANT_NAMES, DEFAULT_VARIANT } from './drive.mjs'
+import { VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT } from './drive.mjs'
 import { reclaimStore } from './reclaim.mjs'
 import { modelString as claudeModelString } from './adapters/adapter-claude.mjs'
 import { modelString as piModelString } from './adapters/adapter-pi.mjs'
@@ -24,7 +24,7 @@ import { scratchDir } from '../test/helpers.mjs'
 import { shippedRoster, roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter } from './crew-test-helpers.mjs'
 
 // Keep lexical import reach visible before byte-pinned regex test bodies.
-void [test, assert, createHash, readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync, execSync, spawn, tmpdir, join, fileURLToPath, openLedger, openRun, _resetNoticeGuardsForTest, composeLayout, DEFAULT_ROLES, bootAllocation, resolveWorkerBin, docOpenArgs, resolveTier, resolveSeatModels, FALLBACK_REFUSALS, refuseFallback, loadRoster, normalizeRoster, refuseRoster, rosterSeating, serializeRosterV1, serializeRosterV2, ROSTER_REFUSALS, ROSTER_SCHEMA_VERSIONS, rosterSourcePath, loadRosterSource, writeRosterSnapshot, rosterSnapshotReader, loadLadder, assertBandFloors, grantedDefModels, assertDefBandFloors, refuseBandFloor, seatModelKey, bandForMember, bandForRaw, seatBand, LADDER_PATH, BAND_FLOOR_REFUSALS, shadowCandidates, assertSeats, parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, RUN_START_EVENT, assignmentsFromJournal, resolveRunConfig, aliasDeprecationLines, persistedRunConfig, awaitSeatsReady, teardownCore, teardownCmd, TEARDOWN_EXIT_SEATLESS, TEARDOWN_EXIT_UNPROVEN, TEARDOWN_ABSENT_CAUSES, teardownAbsentCause, TEARDOWN_DRAIN_MS, TEARDOWN_DRAIN_ERROR_MS, installRunFinalizers, writeTerminalLine, BOOT_DESCENDANT_REFUSALS, descendantRefusal, refuseStaleDescendants, loadCapabilities, reviewIdentityFromArgs, specExecution, resolveDaemonRunConfig, resolveFactoryRunConfig, parseFactoryArgs, runVerb, TASK_PROFILES, ASSURANCES, ASSURANCE_ALIASES, ASSURANCE_ALIAS_OF, VARIANT_NAMES, DEFAULT_VARIANT, reclaimStore, claudeModelString, piModelString, seatIo, paneTeardownRows, PANE_SETTLE_POLLS, PANE_SETTLE_MS, testCheckout, scratchDir, shippedRoster, roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter]
+void [test, assert, createHash, readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync, execSync, spawn, tmpdir, join, fileURLToPath, openLedger, openRun, _resetNoticeGuardsForTest, composeLayout, DEFAULT_ROLES, bootAllocation, resolveWorkerBin, docOpenArgs, resolveTier, resolveSeatModels, FALLBACK_REFUSALS, refuseFallback, loadRoster, normalizeRoster, refuseRoster, rosterSeating, serializeRosterV1, serializeRosterV2, ROSTER_REFUSALS, ROSTER_SCHEMA_VERSIONS, ROSTER_TRANSPORTS, assertRosterTransportPolicies, offCriticalPathStages, rosterSourcePath, loadRosterSource, writeRosterSnapshot, rosterSnapshotReader, loadLadder, assertBandFloors, grantedDefModels, assertDefBandFloors, refuseBandFloor, seatModelKey, bandForMember, bandForRaw, seatBand, LADDER_PATH, BAND_FLOOR_REFUSALS, shadowCandidates, assertSeats, parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, RUN_START_EVENT, assignmentsFromJournal, resolveRunConfig, aliasDeprecationLines, persistedRunConfig, awaitSeatsReady, teardownCore, teardownCmd, TEARDOWN_EXIT_SEATLESS, TEARDOWN_EXIT_UNPROVEN, TEARDOWN_ABSENT_CAUSES, teardownAbsentCause, TEARDOWN_DRAIN_MS, TEARDOWN_DRAIN_ERROR_MS, installRunFinalizers, writeTerminalLine, BOOT_DESCENDANT_REFUSALS, descendantRefusal, refuseStaleDescendants, loadCapabilities, reviewIdentityFromArgs, specExecution, resolveDaemonRunConfig, resolveFactoryRunConfig, parseFactoryArgs, runVerb, TASK_PROFILES, ASSURANCES, ASSURANCE_ALIASES, ASSURANCE_ALIAS_OF, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, reclaimStore, claudeModelString, piModelString, seatIo, paneTeardownRows, PANE_SETTLE_POLLS, PANE_SETTLE_MS, testCheckout, scratchDir, shippedRoster, roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter]
 
 const rosterLadder = JSON.parse(readFileSync(new URL('./model-ladder.json', import.meta.url), 'utf8'))
 
@@ -55,6 +55,21 @@ function fallbackSchemaErrors(value, entry = 'seat', document = 'roster.schema.j
       if (actual !== shape.const) errors.push(`${path}: const`)
       return
     }
+    if (shape.if) {
+      const before = errors.length
+      walk(shape.if, here, actual, path)
+      const matched = errors.length === before
+      errors.length = before
+      const branch = matched ? shape.then : shape.else
+      if (branch) walk(branch, here, actual, path)
+    }
+    if (shape.not) {
+      const before = errors.length
+      walk(shape.not, here, actual, path)
+      const matched = errors.length === before
+      errors.length = before
+      if (matched) errors.push(`${path}: not`)
+    }
     const types = Array.isArray(shape.type) ? shape.type : shape.type ? [shape.type] : []
     if (types.length) {
       const kinds = actual === null ? ['null'] : Array.isArray(actual) ? ['array'] : typeof actual === 'number' && Number.isInteger(actual) ? ['number', 'integer'] : [typeof actual]
@@ -66,6 +81,7 @@ function fallbackSchemaErrors(value, entry = 'seat', document = 'roster.schema.j
     if (typeof actual === 'number' && shape.minimum !== undefined && actual < shape.minimum) errors.push(`${path}: minimum`)
     if (Array.isArray(actual)) {
       if (Number.isFinite(shape.minItems) && actual.length < shape.minItems) errors.push(`${path}: minItems`)
+      if (shape.uniqueItems && new Set(actual.map((entry) => JSON.stringify(entry))).size !== actual.length) errors.push(`${path}: uniqueItems`)
       if (shape.items) actual.forEach((child, i) => walk(shape.items, here, child, `${path}[${i}]`))
       return
     }
@@ -1528,6 +1544,95 @@ test('fallback schema accepts inherited effort and refuses malformed chain entri
   assert.notDeepEqual(fallbackSchemaErrors({ ...base, fallback: [{ provider: 'anthropic', id: 'claude-opus-5', agent: 'pi', transport: 'headless-json' }] }), [])
 })
 
+test('A1: roster schema refuses batch eligibility on a loop stage', () => {
+  const seat = {
+    ...roster.tiers.build.builder,
+    transport_policy: { transports: ['headless-api'], batch_eligible: true, stage: 'plan' },
+  }
+  assert.ok(fallbackSchemaErrors(seat).length > 0)
+})
+
+test('B1: boot independently refuses batch transport on a loop stage', async () => {
+  const home = scratchDir('crew-roster-batch-stage-home-')
+  const { root: checkoutRoot, checkout } = testCheckout('crew-roster-batch-stage-checkout-')
+  const sourcePath = join(home, 'roster.json')
+  const source = structuredClone(roster)
+  source.tiers.build.builder.transport_policy = {
+    transports: ['headless-api'], batch_eligible: true, stage: 'plan',
+  }
+  writeFileSync(sourcePath, JSON.stringify(source, null, 2))
+  const cmux = callCounter()
+  const tree = callCounter()
+  const renameTab = callCounter()
+  let stateChecks = 0
+  try {
+    await withHome(home, () => assert.rejects(
+      () => bootCmd(
+        { task: 'roster-batch-stage', checkout, tier: 'build', roster: sourcePath, 'headless-all': true, 'claude-bin': process.execPath },
+        {
+          cmux, tree, renameTab,
+          existsSync: () => { stateChecks += 1; return false },
+        },
+      ),
+      (err) => err.reason === 'roster-batch-stage-critical',
+    ))
+    assert.equal(cmux.calls.length, 0)
+    assert.equal(tree.calls.length, 0)
+    assert.equal(renameTab.calls.length, 0)
+    assert.equal(stateChecks, 0)
+    assert.equal(existsSync(testCrewDir(home, checkout, 'roster-batch-stage')), false)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+})
+
+test('C1: every current variant declares no off-critical stages', () => {
+  const schema = JSON.parse(readFileSync(new URL('./roster.schema.json', import.meta.url), 'utf8'))
+  const union = new Set()
+  for (const name of VARIANT_NAMES) {
+    const stages = VARIANTS[name].off_critical_path_stages
+    assert.equal(Object.hasOwn(VARIANTS[name], 'off_critical_path_stages'), true, name)
+    assert.equal(Array.isArray(stages), true, name)
+    assert.equal(Object.isFrozen(stages), true, name)
+    assert.deepEqual(stages, [], name)
+    for (const stage of stages) union.add(stage)
+  }
+  assert.deepEqual([...union].sort(), [...schema.$defs.offCriticalStage.enum].sort())
+  assert.deepEqual(schema.$defs.transport.enum, ROSTER_TRANSPORTS)
+})
+
+test('roster transport policies are closed, conditional, and absent by default', () => {
+  const rosterFor = (policy) => ({ tiers: { build: { builder: { transport_policy: policy } } } })
+  const valid = { transports: ['headless-api'], batch_eligible: false }
+  assert.deepEqual(fallbackSchemaErrors({ ...roster.tiers.build.builder, transport_policy: valid }), [])
+  assert.doesNotThrow(() => assertRosterTransportPolicies(rosterFor(valid), new Set()))
+  assert.doesNotThrow(() => assertRosterTransportPolicies({ tiers: { build: { builder: {} } } }, new Set()))
+  for (const policy of [
+    { transports: ['pane', 'pane'], batch_eligible: false },
+    { transports: ['pane'], batch_eligible: false, stage: 'plan' },
+    { transports: ['pane'], batch_eligible: true },
+    { transports: ['pane'], batch_eligible: true, stage: 'plan' },
+  ]) {
+    assert.ok(fallbackSchemaErrors({ ...roster.tiers.build.builder, transport_policy: policy }).length > 0)
+  }
+  for (const policy of [
+    null,
+    [],
+    {},
+    { transports: [], batch_eligible: false },
+    { transports: ['pane', 'pane'], batch_eligible: false },
+    { transports: ['not-a-transport'], batch_eligible: false },
+    { transports: ['pane'], batch_eligible: 'false' },
+    { transports: ['pane'], batch_eligible: false, stage: 'plan' },
+    { transports: ['pane'], batch_eligible: true },
+    { transports: ['pane'], batch_eligible: true, stage: 'plan' },
+    { transports: ['pane'], batch_eligible: false, extra: true },
+  ]) {
+    assert.throws(() => assertRosterTransportPolicies(rosterFor(policy), new Set()), (err) => ROSTER_REFUSALS.includes(err.reason))
+  }
+})
+
 test('resolveTier carries declared fallback chains and leaves absent keys absent', () => {
   const r = resolveTier(roster, 'judge', {})
   assert.deepEqual(r.seats['tech-lead'].fallback, [{ provider: 'anthropic', id: 'claude-opus-5', agent: 'pi', effort: 'xhigh' }])
@@ -1784,6 +1889,19 @@ test('serializers round-trip seats, preserve policy, and emit a compatibility v1
   const preserved = JSON.parse(serializeRosterV2({ ...v2, policy }))
   assert.deepEqual(preserved.policy, policy)
   assert.deepEqual(JSON.parse(serializeRosterV2(v1)).policy, {})
+
+  const transportPolicy = { transports: ['pane'], batch_eligible: false }
+  const v1WithTransportPolicy = structuredClone(v1)
+  v1WithTransportPolicy.tiers.build.builder.transport_policy = transportPolicy
+  const v2WithTransportPolicy = structuredClone(v2)
+  v2WithTransportPolicy.assurances.standard.builder.transport_policy = transportPolicy
+  const v1RoundTrip = normalizeRoster(JSON.parse(serializeRosterV1(v1WithTransportPolicy)))
+  const v2RoundTrip = normalizeRoster(JSON.parse(serializeRosterV2(v2WithTransportPolicy)))
+  assert.deepEqual(v1RoundTrip.tiers.build.builder.transport_policy, transportPolicy)
+  assert.deepEqual(v2RoundTrip.assurances.standard.builder.transport_policy, transportPolicy)
+  assert.deepEqual(resolveTier(v1RoundTrip, 'build').seats.builder.transport_policy, transportPolicy)
+  assert.deepEqual(resolveTier(v2RoundTrip, 'standard').seats.builder.transport_policy, transportPolicy)
+  assert.equal(Object.hasOwn(JSON.parse(serializeRosterV1(v1)).tiers.build.builder, 'transport_policy'), false)
 })
 
 test('v2 schema validates its root while the old root remains v1', () => {

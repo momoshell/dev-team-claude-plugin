@@ -530,11 +530,10 @@ test('BG1', () => {
   assert.ok(piSeatCommand(builder).includes('-e "/repo/crew/pi/extensions/readgate.ts"'))
   const claudeBuilder = grantsFor(register, 'builder', { ...PIN_ROOT, agent: 'claude' })
   assert.deepEqual(claudeBuilder.extensions, [])
-  assert.throws(
-    () => seatCommand({ ...builder, grants: claudeBuilder }),
-    (error) => error.reason === 'grant-unsupported'
-      && error.message.includes('/repo/skills/lean-build/SKILL.md'),
-  )
+  // The lean-build skill is granted under the pi overlay, because the claude agent refuses the
+  // skills dimension; a claude builder therefore holds no skills grant and boots without one.
+  assert.deepEqual(claudeBuilder.skills, [])
+  assert.doesNotThrow(() => seatCommand({ ...builder, grants: claudeBuilder }))
   for (const role of ROLE_ORDER.filter((name) => name !== 'builder')) {
     const grants = grantsFor(register, role, { ...PIN_ROOT, agent: 'pi' })
     assert.doesNotThrow(() => assertGrantsBacked(role, grants, register, { agent: 'pi' }))
@@ -781,13 +780,19 @@ test('assertCapabilities rejects an adapter that cannot enforce tool denial, nam
   assert.doesNotThrow(() => assertCapabilities('builder', 'claude', { tool_deny: true }))
 })
 
-test('resolveAdapters rejects an unknown --agent-<role> and refuses the shipped default claude builder grant', async () => {
+test('resolveAdapters rejects an unknown --agent-<role>, and refuses a role-wide skills grant on claude', async () => {
   await assert.rejects(
     () => resolveAdapters(['builder'], { 'agent-builder': 'nope' }, null, { register: capabilityRegister() }),
     /adapter-nope\.mjs/,
   )
+  // The shipped register grants the builder's skill under the pi overlay, because claude refuses the
+  // skills dimension, so the shipped default resolves.
+  await assert.doesNotReject(() => resolveAdapters(['builder'], {}))
+  // The refusal itself still fires for a register that grants skills role-wide.
+  const roleWide = JSON.parse(readFileSync(new URL('./capabilities.json', import.meta.url), 'utf8'))
+  roleWide.roles.builder.skills = ['skills/lean-build/SKILL.md']
   await assert.rejects(
-    () => resolveAdapters(['builder'], {}),
+    () => resolveAdapters(['builder'], {}, null, { register: roleWide }),
     (error) => error.reason === 'grant-unsupported'
       && error.message.includes('builder')
       && error.message.includes('skills'),
@@ -8644,7 +8649,8 @@ test('the shipped register is where the fan-out grant lives', async () => {
     assert.deepEqual(register.roles[role].tools, ['planner', 'reviewer'].includes(role) ? ['Task'] : [])
     assert.deepEqual(register.roles[role].extensions, [])
     assert.deepEqual(register.roles[role].agents, [])
-    assert.deepEqual(register.roles[role].skills, role === 'builder' ? ['skills/lean-build/SKILL.md'] : [])
+    assert.deepEqual(register.roles[role].skills, [])
+    assert.deepEqual(register.roles[role].by_agent?.pi?.skills ?? [], role === 'builder' ? ['skills/lean-build/SKILL.md'] : [])
     assert.equal(register.roles[role].advisor, false)
   }
   for (const tier of Object.keys(roster.tiers)) {

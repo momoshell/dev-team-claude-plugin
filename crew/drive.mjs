@@ -4056,6 +4056,8 @@ export const isAnchorMechanicalConflict = anchorConflictMechanical
 export const canonicalizeAnchorManifest = canonicalAnchorManifest
 export const canonicalizeCitationDoc = canonicalCitationDoc
 
+const FULL_COMMIT_OID_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i
+
 export function rebaseConflictRoute({ mechanical, bounces, buildRounds }) {
   if (mechanical) return 'mechanical'
   return bounces < Math.max(0, buildRounds - 1) ? 'bounce' : 'escalate'
@@ -5806,6 +5808,7 @@ function runTask(ctx, io, crash) {
     },
   }
   let pendingReversion = null
+  let pendingRebaseConflict = null
   const gateReapTally = { invocations: 0, 'already-dead': 0, proven: 0, failed: 0, unproven: 0 }
   // `runner` is an io METHOD, so it must be invoked as one: `seatIo.runClean`
   // calls `this.run(cmd)` (crew/seat-io.mjs:241,245), and passing it detached
@@ -7690,6 +7693,13 @@ function runTask(ctx, io, crash) {
   // repair this one at all.
   const checkProofDisagreement = () => checkProofUnbound.length > 0
   const recordGateProof = (label) => {
+    if (pendingRebaseConflict !== null) {
+      resetCheckProof()
+      gateProvenGeneration = null
+      gateDiscrimination = 'unproven'
+      gateProofNote = 'pristine gate proof deferred while the rebase/index remain live'
+      return { deferred: true }
+    }
     resetCheckProof()                     // FIRST, before every early return: a
     gateProvenGeneration = gateGeneration  // generation never inherits the previous
     const settleProof = (summary) => {
@@ -8391,6 +8401,9 @@ function runTask(ctx, io, crash) {
     let repaired = false
     let repairRunLabel = null
     while (true) {
+      if (pendingRebaseConflict && (gateDiscrimination === 'failed' || checkProofVerdict === 'failed')) {
+        return { escalation: pendingRebaseEscalate('the pending conflict cycle requires a pristine gate proof or gate repair before continuation') }
+      }
       if (gateProofFatal) {
         return { escalation: gateEscalate(`the proof could not restore the built tree: ${gateProofFatal} — the run stops rather than commit the driver's own mutation. Gate: ${gateCmd}`) }
       }
@@ -8516,6 +8529,7 @@ function runTask(ctx, io, crash) {
     )
   }
   const refreshProofTree = (round = null, { committedBaseline = false } = {}) => {
+    if (pendingRebaseConflict) return { ok: true, gateRes: null, deferred: true }
     const comparison = compareProofTree()
     const staleProofFiles = comparison.staleProofFiles
     const changedProofFiles = comparison.changedProofFiles
@@ -8759,11 +8773,119 @@ function runTask(ctx, io, crash) {
 
   const censusEnabled = !io.calls || typeof io.runClean === 'function'
   let postCommitCensusBounces = 0
-  // This counter belongs to the whole accepted lane, not to suiteCycle: a proven
-  // abort may re-enter that cycle, but it must not mint a fresh rebase budget.
+  // This counter belongs to the whole accepted lane, not to suiteCycle: a retained
+  // conflict may re-enter that cycle, but it must not mint a fresh rebase budget.
   let rebaseConflictBounces = 0
+  const fullOidFromResult = (result) => {
+    if (result?.ok !== true || typeof result.output !== 'string') return null
+    const oid = result.output.trim()
+    return FULL_COMMIT_OID_RE.test(oid) ? oid : null
+  }
+  const parseConflictPaths = (result) => {
+    if (result?.ok !== true || typeof result.output !== 'string' || result.output.includes('\0')) return null
+    if (result.output === '') return []
+    const lines = result.output.split(/\r?\n/)
+    if (lines.at(-1) === '') lines.pop()
+    if (lines.length === 0 || lines.some((path) => path === '' || path !== path.trim())) return null
+    const paths = lines
+    if (new Set(paths).size !== paths.length) return null
+    if (paths.some((path) => path.startsWith('/') || path.startsWith('\\')
+      || /^[A-Za-z]:[\\/]/.test(path) || path.endsWith('/')
+      || path.includes('\0') || path.includes('\r') || path.includes('\n')
+      || path.split('/').some((segment) => segment === '' || segment === '.' || segment === '..')
+      || validateScopeEntries([path]).length > 0)) return null
+    return paths
+  }
+  const currentRebaseConflictProof = (pending) => {
+    if (!pending || !Array.isArray(pending.paths) || pending.paths.length === 0 || !(pending.stageBytes instanceof Map)) {
+      return { ok: false, why: 'the retained conflict record is incomplete' }
+    }
+    let result
+    try { result = io.run('git diff --name-only --diff-filter=U') }
+    catch (err) { return { ok: false, why: `the current unmerged-path probe was interrupted: ${err?.message ?? String(err)}` } }
+    const paths = parseConflictPaths(result)
+    if (paths === null) return { ok: false, why: 'the current unmerged-path probe was unreadable' }
+    const expected = [...pending.paths].sort()
+    const observed = [...paths].sort()
+    if (JSON.stringify(expected) !== JSON.stringify(observed)) {
+      return { ok: false, why: `the current unmerged paths changed (expected ${expected.join(', ')}, found ${observed.join(', ') || '(none)'})` }
+    }
+    const stages = new Map()
+    for (const path of paths) {
+      for (const number of [2, 3]) {
+        let shown
+        try { shown = io.run(`git show ${shellArg(`:${number}:${path}`)}`) }
+        catch (err) { return { ok: false, why: `the current stage ${number} for ${path} was interrupted: ${err?.message ?? String(err)}` } }
+        if (shown?.ok !== true || typeof shown.output !== 'string') {
+          return { ok: false, why: `the current stage ${number} for ${path} was unreadable` }
+        }
+        const key = `${number}:${path}`
+        if (shown.output !== pending.stageBytes.get(key)) {
+          return { ok: false, why: `the current stage ${number} for ${path} no longer matches the captured conflict stage` }
+        }
+        stages.set(key, shown.output)
+      }
+    }
+    return { ok: true, paths, stages }
+  }
+  const pendingRebaseEscalate = (why) => {
+    const pending = pendingRebaseConflict
+    const files = escalationFiles(pending?.paths || [])
+    const base = pending?.base || null
+    const recoveryRef = pending?.recovery_ref || null
+    const detail = {
+      commit: S.commit,
+      ...(recoveryRef ? { recovery_ref: recoveryRef } : {}),
+    }
+    return escalate('rebase', `${why}; the rebase/index remain live with captured conflict paths ${files.join(', ') || '(none)'}${recoveryRef ? ` and proved recovery ref ${recoveryRef}` : ''}`, [], detail, { files, base, commit: S.commit })
+  }
+  const proveAcceptedRecoveryRef = () => {
+    if (typeof S.commit !== 'string' || S.commit.trim() === '') {
+      return { ok: false, why: 'the accepted commit id was empty or unreadable' }
+    }
+    const acceptedCommand = `git rev-parse --verify ${shellArg(`${S.commit}^{commit}`)}`
+    let canonical
+    try { canonical = io.run(acceptedCommand) }
+    catch (err) { return { ok: false, why: `accepted commit canonicalization was interrupted: ${err?.message ?? String(err)}` } }
+    const acceptedCommitOid = fullOidFromResult(canonical)
+    if (!acceptedCommitOid) return { ok: false, why: 'accepted commit canonicalization returned a non-OID result' }
+    const recoveryRef = `refs/crew/recovery/${acceptedCommitOid}`
+    let updated
+    try { updated = io.run(`git update-ref ${shellArg(recoveryRef)} ${shellArg(acceptedCommitOid)}`) }
+    catch (err) { return { ok: false, why: `recovery ref ${recoveryRef} could not be updated: ${err?.message ?? String(err)}` } }
+    if (updated?.ok !== true) return { ok: false, why: `recovery ref ${recoveryRef} could not be updated` }
+    let readBack
+    try { readBack = io.run(`git rev-parse --verify ${shellArg(`${recoveryRef}^{commit}`)}`) }
+    catch (err) { return { ok: false, why: `recovery ref ${recoveryRef} read-back was interrupted: ${err?.message ?? String(err)}` } }
+    const readBackOid = fullOidFromResult(readBack)
+    if (!readBackOid || readBackOid !== acceptedCommitOid) return { ok: false, why: `recovery ref ${recoveryRef} did not read back the canonical accepted commit OID` }
+    return { ok: true, accepted_commit_oid: acceptedCommitOid, recovery_ref: recoveryRef }
+  }
   let suiteBuildBrief = planPath
   let suiteBuildNote = 'build'
+  const retainRebaseConflict = (pending, why) => {
+    const bounceNumber = rebaseConflictBounces + 1
+    const bounce = art(`rebase-conflict-bounce-r${bounceNumber}.md`)
+    try {
+      io.writeFile(bounce, [
+        `# Rebase conflict bounce (round ${bounceNumber})`, '',
+        `The rebase onto ${pending.base} and its conflict index remain LIVE after the accepted commit ${pending.accepted_commit_oid}.`,
+        `Recovery ref: ${pending.recovery_ref} (proved to ${pending.accepted_commit_oid}).`,
+        `Recovery route: ${why || 'the conflict requires builder reconciliation'}.`,
+        '', 'Conflicted paths:', ...pending.paths.map((path) => `- ${path}`),
+        '', 'Combined conflict hunks (captured before dispatch):', pending.hunks || '(conflict hunks unavailable)',
+        '', 'The rebase/index remain live. Do not run `git add`, `git rebase --continue`, `git rebase --abort`, `git reset`, or `git commit`; edit only the conflicted worktree files and return them for driver-owned continuation.',
+        '', `Plan: ${planPath}`,
+      ].join('\n'))
+    } catch (err) {
+      return { ok: false, why: `the rebase conflict bounce artifact could not be written: ${err?.message ?? String(err)}` }
+    }
+    rebaseConflictBounces = bounceNumber
+    pendingRebaseConflict = pending
+    suiteBuildBrief = bounce
+    suiteBuildNote = 'rebase-conflict-fix'
+    return { ok: true, bounce }
+  }
   const builderAssignmentBrief = (briefPath) => {
     if (protectedHitsIn(scopeFiles, PROMPT_SURFACE.paths).length === 0) return briefPath
     const wrapperPath = art('builder-assignment.md')
@@ -9226,6 +9348,10 @@ function runTask(ctx, io, crash) {
   // `gate_repairs` still 0. Returns the (possibly re-run) gate result, and an
   // `escalation` the CALLER must return — this closure never returns out of driveTask.
   const gateDefectValve = (round, gateRes, { committedBaseline = false } = {}) => {
+    if (pendingRebaseConflict && !gateRes?.ok && round >= limits.gate_fails_to_triage
+      && !gateTriaged && !gateObserveTriaged && gateRepairs < limits.gate_repairs) {
+      return { gateRes, escalation: pendingRebaseEscalate('the pending conflict cycle requires gate repair before continuation') }
+    }
     if (gateRes.ok || round < limits.gate_fails_to_triage || gateTriaged || gateRepairs >= limits.gate_repairs) return { gateRes }
     if (gateObserving) gateObserveTriaged = true
     else gateTriaged = true
@@ -9539,7 +9665,7 @@ function runTask(ctx, io, crash) {
           gateRes = runGate(settled.runLabel || `gate-repair:${gateRepairs}`, gateCmd)
         }
       }
-      if (gateRes.ok && gateDiscrimination === 'proven' && (!mutations.length || checkProofVerdict === 'proven')) {
+      if (!pendingRebaseConflict && gateRes.ok && gateDiscrimination === 'proven' && (!mutations.length || checkProofVerdict === 'proven')) {
         if (!proofTreeWitness || proofTreeWitness.generation < gateGeneration) {
           const diffSettled = settleDiffMutationProof(round)
           if (diffSettled.fatal || gateProofFatal) {
@@ -9550,7 +9676,7 @@ function runTask(ctx, io, crash) {
             }
           }
           captureProofTree(round)
-        } else if (proofTreeBuildRound !== null && proofTreeBuildRound < round) {
+        } else if (!pendingRebaseConflict && proofTreeBuildRound !== null && proofTreeBuildRound < round) {
           const refreshed = refreshProofTree(round, { committedBaseline })
           if (refreshed.escalation) {
             stageComplete()
@@ -9987,7 +10113,7 @@ function runTask(ctx, io, crash) {
 
   // The reviewer can accept only the tree that is about to be committed. This
   // second call is deliberately after hardening and all review-side mechanisms.
-  if (gateCmd && proofTreeWitness) {
+  if (!pendingRebaseConflict && gateCmd && proofTreeWitness) {
     const refreshed = refreshProofTree(null, { committedBaseline })
     if (refreshed.escalation) return refreshed.escalation
     if (!refreshed.ok && refreshed.gateRes) {
@@ -10005,6 +10131,7 @@ function runTask(ctx, io, crash) {
   let published = null
   let publishFiles = null
   verifiedPublishBaseSha = null
+  const continuingRebase = pendingRebaseConflict !== null
   stage('commit')
   const message = composeCommitMessage({ task: ctx.task, planEnv, builderEnv })
   const subject = String(message).split('\n')[0]
@@ -10014,53 +10141,110 @@ function runTask(ctx, io, crash) {
   if (!hasCommitSubject) io.log(recordRow({ at: io.now(), commit_subject: 'fallback-from-plan-summary' }))
   let commitChanged = null
   let report = null
-  if (pendingFrozenInventory) {
-    try { commitChanged = io.changedFiles() }
-    catch (err) {
+  let committing = []
+  if (pendingRebaseConflict) {
+    const pending = pendingRebaseConflict
+    const eligible = currentRebaseConflictProof(pending)
+    if (!eligible.ok) {
       stageComplete()
-      return escalate('suite', `the pending frozen inventory repair could not verify its final dirty set: ${err?.message ?? String(err)}`, [], { commit: S.commit })
+      return pendingRebaseEscalate(`the retained conflict could not be proved immediately before continuation: ${eligible.why}`)
     }
-    const finalFrozen = verifyPendingFrozenRepair(commitChanged)
-    if (!finalFrozen.ok) {
+    const addCommand = `git add -- ${pending.paths.map((path) => shellArg(path)).join(' ')}`
+    let added
+    try { added = io.run(addCommand) }
+    catch (err) { added = { ok: false, output: err?.message ?? String(err) } }
+    if (added?.ok !== true) {
       stageComplete()
-      return finalFrozen.escalation
+      return pendingRebaseEscalate(`staging the retained conflict paths failed${added?.output ? `: ${String(added.output).slice(-1000)}` : ''}`)
     }
-    report = finalFrozen.report
-  }
-  const committing = [...new Set(commitChanged || io.changedFiles())]
-  const preRebaseCommit = io.commit(committing, message)
-  if (pendingFrozenInventory && !preRebaseCommit) {
+    let continued
+    try { continued = io.run('git -c core.editor=true rebase --continue') }
+    catch (err) { continued = { ok: false, output: err?.message ?? String(err) } }
+    if (continued?.ok !== true) {
+      const afterFailure = currentRebaseConflictProof(pending)
+      if (!afterFailure.ok) {
+        stageComplete()
+        return pendingRebaseEscalate(`continuing the retained rebase failed and the current conflict stages are no longer eligible: ${afterFailure.why}`)
+      }
+      const route = rebaseConflictRoute({ mechanical: false, bounces: rebaseConflictBounces, buildRounds: limits.build_rounds })
+      if (route === 'bounce' && builderRemaining() > 0) {
+        const bounced = retainRebaseConflict({ ...pending, stageBytes: new Map(afterFailure.stages) }, `rebase --continue failed${continued?.output ? `: ${String(continued.output).slice(-1000)}` : ''}`)
+        if (!bounced.ok) {
+          stageComplete()
+          return pendingRebaseEscalate(bounced.why)
+        }
+        stageComplete()
+        continue suiteCycle
+      }
+      stageComplete()
+      return pendingRebaseEscalate(`continuing the retained rebase failed${continued?.output ? `: ${String(continued.output).slice(-1000)}` : ''}; the conflict recovery budget is exhausted`)
+    }
+    let headResult
+    try { headResult = io.run('git rev-parse HEAD') }
+    catch (err) { headResult = { ok: false, output: err?.message ?? String(err) } }
+    const continuedHead = fullOidFromResult(headResult)
+    if (!continuedHead) {
+      stageComplete()
+      return pendingRebaseEscalate('the retained rebase continued, but HEAD was not a verified full commit OID')
+    }
+    const durable = pending
+    baseSha = durable.base_sha
+    verifiedPublishBaseSha = durable.base_sha
+    rebased = true
+    committing = [...new Set(Array.isArray(durable.accepted_commit_files) ? durable.accepted_commit_files : [])]
+    S.commit = continuedHead
+    pendingRebaseConflict = null
     stageComplete()
-    return escalate('suite', 'the frozen inventory repair commit returned no commit id; the repair was not recorded', [], { commit: S.commit })
+  } else {
+    if (pendingFrozenInventory) {
+      try { commitChanged = io.changedFiles() }
+      catch (err) {
+        stageComplete()
+        return escalate('suite', `the pending frozen inventory repair could not verify its final dirty set: ${err?.message ?? String(err)}`, [], { commit: S.commit })
+      }
+      const finalFrozen = verifyPendingFrozenRepair(commitChanged)
+      if (!finalFrozen.ok) {
+        stageComplete()
+        return finalFrozen.escalation
+      }
+      report = finalFrozen.report
+    }
+    committing = [...new Set(commitChanged || io.changedFiles())]
+    const preRebaseCommit = io.commit(committing, message)
+    if (pendingFrozenInventory && !preRebaseCommit) {
+      stageComplete()
+      return escalate('suite', 'the frozen inventory repair commit returned no commit id; the repair was not recorded', [], { commit: S.commit })
+    }
+    S.commit = preRebaseCommit
+    if (pendingFrozenInventory) {
+      recordFrozenInventoryRepair(report)
+      pendingFrozenInventory = null
+    }
+    stageComplete()
+    stage('document')
+    const documented = runDocumentationDecision({ ctx, io, commit: S.commit, inScope })
+    S.commit = documented.commit
+    S.documentation = documented.documentation
+    stageComplete()
   }
-  S.commit = preRebaseCommit
-  if (pendingFrozenInventory) {
-    recordFrozenInventoryRepair(report)
-    pendingFrozenInventory = null
-  }
-  stageComplete()
-  stage('document')
-  const documented = runDocumentationDecision({ ctx, io, commit: S.commit, inScope })
-  S.commit = documented.commit
-  S.documentation = documented.documentation
-  stageComplete()
 
   if (publishing) {
     stage('rebase')
     const rebaseStartedAt = io.now()
     const base = `origin/${PUBLISH_BASE}`
+    const probe = (command) => {
+      let result
+      try { result = io.run(command) } catch { return null }
+      const output = String(result?.output || '').trim()
+      return result?.ok && output ? output : null
+    }
+    if (!continuingRebase) {
     let fetched
     try { fetched = io.run(`git fetch origin ${PUBLISH_BASE}`) }
     catch (err) { fetched = { ok: false, output: err?.message ?? String(err) } }
     if (!fetched?.ok) {
       stageComplete()
       return escalate('rebase', `the fetch of ${base} failed${fetched?.output ? `: ${String(fetched.output).slice(-2000)}` : ''}`, [], { commit: S.commit }, { files: [], base, commit: S.commit })
-    }
-    const probe = (command) => {
-      let result
-      try { result = io.run(command) } catch { return null }
-      const output = String(result?.output || '').trim()
-      return result?.ok && output ? output : null
     }
     baseSha = probe(`git rev-parse ${base}`)
     if (!baseSha) {
@@ -10079,16 +10263,26 @@ function runTask(ctx, io, crash) {
       try { rebaseResult = io.run(`git rebase ${base}`) }
       catch (err) { rebaseResult = { ok: false, output: err?.message ?? String(err) } }
       if (!rebaseResult?.ok) {
-        let conflicted = []
-        try {
-          conflicted = String(io.run('git diff --name-only --diff-filter=U')?.output || '')
-            .split('\n').map((line) => line.trim()).filter(Boolean)
-        } catch { conflicted = [] }
-        const conflictDetail = conflicted.length ? ` with conflicts in ${conflicted.join(', ')}` : ''
+        let conflictProbe
+        try { conflictProbe = io.run('git diff --name-only --diff-filter=U') }
+        catch (err) { conflictProbe = { ok: false, output: err?.message ?? String(err) } }
+        const conflicted = parseConflictPaths(conflictProbe)
+        const conflictDetail = Array.isArray(conflicted) && conflicted.length ? ` with conflicts in ${conflicted.join(', ')}` : ''
+        if (!Array.isArray(conflicted)) {
+          stageComplete()
+          return escalate('rebase', `the rebase onto ${base} failed; the unmerged-path probe was unreadable`, [], { commit: S.commit }, { files: [], base, commit: S.commit })
+        }
+        const conflictEscalate = (why, recoveryRef = null) => escalate(
+          'rebase',
+          `the rebase onto ${base} failed${conflictDetail}; ${why}`,
+          [],
+          { commit: S.commit, ...(recoveryRef ? { recovery_ref: recoveryRef } : {}) },
+          { files: escalationFiles(conflicted), base, commit: S.commit },
+        )
 
-        // Capture both index stages and the combined hunk BEFORE aborting. The index is
+        // Capture both index stages and the combined hunk BEFORE dispatch. The index is
         // the only place that can still prove whether a conflict was line-number churn;
-        // after --abort these blobs and hunks are gone.
+        // a later abort or continuation can destroy these blobs and hunks.
         const stageBytes = new Map()
         let evidenceMeasured = conflicted.length > 0
         for (const path of conflicted) {
@@ -10106,6 +10300,11 @@ function runTask(ctx, io, crash) {
           try { hunks = io.run(`git diff --cc -- ${conflicted.map((path) => shellArg(path)).join(' ')}`) } catch { hunks = null }
           conflictHunks = hunks?.ok === true && typeof hunks.output === 'string' ? hunks.output : null
           if (!conflictHunks || !conflictHunks.trim()) evidenceMeasured = false
+        }
+        const recovery = proveAcceptedRecoveryRef()
+        if (!recovery.ok) {
+          stageComplete()
+          return conflictEscalate(`the accepted commit recovery ref was not proved: ${recovery.why}`)
         }
 
         // The resolver's complete carrier set is proved tracked before the CLI runs.
@@ -10200,98 +10399,41 @@ function runTask(ctx, io, crash) {
           return { ok: true }
         }
 
-        // Every failed recovery reaches this one abort path. No write-back is attempted:
-        // post-abort observations independently prove whether the checkout was restored.
-        const restoreConflict = (mechanical, why, routeOverride = null) => {
-          let aborted
-          try { aborted = io.run('git rebase --abort') }
-          catch (err) { aborted = { ok: false, output: err?.message ?? String(err) } }
-          const checkedOutput = (command) => {
-            let result
-            try { result = io.run(command) } catch { return null }
-            if (result?.ok !== true || typeof result.output !== 'string') return null
-            return result.output.trim()
-          }
-          const expectedBranch = typeof publishing?.branch === 'string' && publishing.branch.trim()
-            ? publishing.branch.trim()
-            : null
-          const restoredHead = checkedOutput('git rev-parse HEAD')
-          const restoredBranch = checkedOutput('git symbolic-ref --quiet --short HEAD') || ''
-          const cleanAfterAbort = checkedOutput('git status --porcelain -uall') === ''
-          const noConflictsAfterAbort = checkedOutput('git diff --name-only --diff-filter=U') === ''
-          const absenceScript = [
-            "const { lstatSync, statSync, readdirSync } = require('node:fs')",
-            "const { dirname } = require('node:path')",
-            "const target = process.argv[1]",
-            "try { lstatSync(target); process.exitCode = 1 } catch (error) { if (error?.code !== 'ENOENT') process.exitCode = 1; else { try { const parent = dirname(target); if (statSync(parent).isDirectory()) { readdirSync(parent); process.exitCode = 0 } else process.exitCode = 1 } catch { process.exitCode = 1 } } }",
-          ].join(';')
-          const rebasePathAbsent = (path) => {
-            if (!path) return false
-            return checkedOutput(`${shellArg(process.execPath)} -e ${shellArg(absenceScript)} ${shellArg(path)}`) === ''
-          }
-          const rebaseMergePath = checkedOutput('git rev-parse --git-path rebase-merge')
-          const rebaseApplyPath = checkedOutput('git rev-parse --git-path rebase-apply')
-          const noRebaseInProgress = rebasePathAbsent(rebaseMergePath) && rebasePathAbsent(rebaseApplyPath)
-          const restorationProven = Boolean(restoredHead && restoredBranch === expectedBranch && cleanAfterAbort && noRebaseInProgress && noConflictsAfterAbort)
-          const abortDiagnosis = !aborted?.ok && restorationProven ? 'aborted.ok was false while HEAD, branch, cleanliness, rebase-state absence, and conflict absence proved restoration' : null
-          if (abortDiagnosis !== null) {
-            io.log(recordRow({ at: io.now(), rebase_restore_diagnosis: abortDiagnosis }))
-          }
-          if (!restorationProven) {
-            const found = restoredHead || '(unavailable)'
-            return { escalation: escalate('rebase', `the rebase onto ${base} failed${conflictDetail}; restoration is UNPROVEN — HEAD found after abort: ${found}`, [], { commit: S.commit }, { files: escalationFiles(conflicted), base, commit: S.commit }) }
-          }
+        // A failed rebase must retain its live index. The accepted commit is pinned first,
+        // then the captured stages are re-proved immediately before any retained dispatch.
+        const retainConflictOrEscalate = (mechanical, why, routeOverride = null) => {
           if (!evidenceMeasured) {
-            return { escalation: escalate('rebase', conflicted.length
-              ? `the rebase onto ${base} failed with conflicts in ${conflicted.join(', ')}; restoration proven at HEAD ${restoredHead}`
-              : `the rebase onto ${base} failed`, [], { commit: S.commit }, { files: escalationFiles(conflicted), base, commit: S.commit }) }
+            return { escalation: conflictEscalate('conflict evidence was empty or unmeasurable; no builder was dispatched', recovery.recovery_ref) }
           }
+          const pending = {
+            paths: [...conflicted], base, base_sha: baseSha,
+            accepted_commit_oid: recovery.accepted_commit_oid, recovery_ref: recovery.recovery_ref,
+            stageBytes: new Map(stageBytes), hunks: conflictHunks,
+            accepted_commit_files: [...committing],
+          }
+          const eligible = currentRebaseConflictProof(pending)
+          if (!eligible.ok) return { escalation: conflictEscalate(`the current conflict stages were not eligible for retained recovery: ${eligible.why}`, recovery.recovery_ref) }
           if (builderRemaining() <= 0) {
-            return { escalation: escalate('rebase', `the rebase onto ${base} failed with conflicts in ${conflicted.join(', ')}; restoration proven at HEAD ${restoredHead}; the limits.build_rounds budget is exhausted after ${builderAttempts} attempt(s)`, [], { commit: S.commit }) }
+            return { escalation: conflictEscalate(`the limits.build_rounds budget is exhausted after ${builderAttempts} attempt(s)`, recovery.recovery_ref) }
           }
           const route = routeOverride || rebaseConflictRoute({ mechanical: false, bounces: rebaseConflictBounces, buildRounds: limits.build_rounds })
           if (route === 'escalate') {
-            return { escalation: escalate('rebase', `the rebase onto ${base} failed with conflicts in ${conflicted.join(', ')}; restoration proven at HEAD ${restoredHead}; the limits.build_rounds budget is exhausted`, [], { commit: S.commit }) }
+            return { escalation: conflictEscalate('the limits.build_rounds conflict-recovery budget is exhausted', recovery.recovery_ref) }
           }
-          const restoredParent = probe('git rev-parse HEAD^')
-          if (!restoredParent) {
-            return { escalation: escalate('rebase', `the rebase onto ${base} failed with conflicts in ${conflicted.join(', ')}; restoration proven at HEAD ${restoredHead}, but the recovery commit ${S.commit} has no readable parent for the bounded builder bounce`, [], { commit: S.commit }) }
-          }
-          let reset
-          try { reset = io.run(`git reset --soft ${restoredParent}`) } catch (err) { reset = { ok: false, output: err?.message ?? String(err) } }
-          if (!reset?.ok) {
-            return { escalation: escalate('rebase', `the rebase onto ${base} failed with conflicts in ${conflicted.join(', ')}; restoration proven at HEAD ${restoredHead}, but the soft reset to ${restoredParent} failed${reset?.output ? `: ${String(reset.output).slice(-1000)}` : ''}`, [], { commit: S.commit }) }
-          }
-          const bounceNumber = rebaseConflictBounces + 1
-          const bounce = art(`rebase-conflict-bounce-r${bounceNumber}.md`)
-          const hunkText = conflictHunks || '(conflict hunks unavailable)'
-          try {
-            io.writeFile(bounce, [
-              `# Rebase conflict bounce (round ${bounceNumber})`, '',
-              `The rebase onto ${base} failed after the accepted commit ${S.commit}. Restoration was proven at HEAD ${restoredHead}.`,
-              ...(abortDiagnosis ? [`Diagnosis: ${abortDiagnosis}.`] : []),
-              `Recovery route: ${mechanical ? 'mechanical anchor repair was refused' : (why || 'the conflict requires builder reconciliation')}.`,
-              '', 'Conflicted paths:', ...conflicted.map((path) => `- ${path}`),
-              '', 'Combined conflict hunks (captured before abort):', hunkText,
-              '', `Plan: ${planPath}`,
-              'Reconcile these paths, then rerun the builder/review/gate/commit cycle.',
-            ].join('\n'))
-          } catch (err) {
-            return { escalation: escalate('rebase', `the rebase conflict was restored, but the builder bounce artifact could not be written: ${err?.message ?? String(err)}`, [], { commit: S.commit }) }
-          }
-          rebaseConflictBounces = bounceNumber
-          suiteBuildBrief = bounce
-          suiteBuildNote = 'rebase-conflict-fix'
+          const retained = retainRebaseConflict(pending, mechanical
+            ? 'mechanical anchor repair was refused'
+            : (why || 'the conflict requires builder reconciliation'))
+          if (!retained.ok) return { escalation: conflictEscalate(retained.why, recovery.recovery_ref) }
           return { bounce: true }
         }
 
         // Evidence with no measurable stage/hunk is intentionally not routed to a blind
         // builder bounce. Otherwise a truncated conflict probe could spend build budget.
         if (!evidenceMeasured) {
-          const settled = restoreConflict(false, 'conflict evidence was empty or unmeasurable')
+          const settled = retainConflictOrEscalate(false, 'conflict evidence was empty or unmeasurable')
           if (settled.escalation) { stageComplete(); return settled.escalation }
           stageComplete()
-          return escalate('rebase', `the rebase onto ${base} failed${conflictDetail}`, [], { commit: S.commit }, { files: escalationFiles(conflicted), base, commit: S.commit })
+          return conflictEscalate('the conflict evidence could not be retained', recovery.recovery_ref)
         }
         const classifiedMechanical = anchorConflictMechanical(conflicted)
         const classifiedRoute = rebaseConflictRoute({ mechanical: classifiedMechanical, bounces: rebaseConflictBounces, buildRounds: limits.build_rounds })
@@ -10303,19 +10445,19 @@ function runTask(ctx, io, crash) {
           // refreshProofTree path below. No second proof is introduced here.
         } else {
           const routeOverride = classifiedMechanical && classifiedRoute !== 'mechanical' ? classifiedRoute : null
-          const settled = restoreConflict(classifiedMechanical, mechanical.why, routeOverride)
+          const settled = retainConflictOrEscalate(classifiedMechanical, mechanical.why, routeOverride)
           if (settled.escalation) { stageComplete(); return settled.escalation }
           if (settled.bounce) {
             if (builderRemaining() <= 0) {
               stageComplete()
-              return escalate('rebase', `the rebase recovery was restored but the global builder budget is exhausted after ${builderAttempts} attempt(s)`, [], { commit: S.commit })
+              return conflictEscalate(`the retained rebase conflict cannot be dispatched because the global builder budget is exhausted after ${builderAttempts} attempt(s)`, pendingRebaseConflict?.recovery_ref)
             }
             stageComplete()
             committedBaseline = false
             continue suiteCycle
           }
           stageComplete()
-          return escalate('rebase', `the rebase onto ${base} failed${conflictDetail}`, [], { commit: S.commit }, { files: escalationFiles(conflicted), base, commit: S.commit })
+          return conflictEscalate('the retained rebase conflict could not be routed', pendingRebaseConflict?.recovery_ref)
         }
       }
       const postRebaseHead = probe('git rev-parse HEAD')
@@ -10324,6 +10466,7 @@ function runTask(ctx, io, crash) {
         return escalate('rebase', 'the rebase succeeded but git rev-parse HEAD failed or returned blank output', [], { commit: S.commit }, { files: [], base, commit: S.commit })
       }
       S.commit = postRebaseHead
+    }
     }
     // #1176 used `git rev-parse HEAD^`, which is the base only for a SINGLE-commit
     // lane. A lane that committed twice — a harden round, an anchor repair, a
@@ -10345,6 +10488,21 @@ function runTask(ctx, io, crash) {
       if (!resetResult?.ok) {
         stageComplete()
         return escalate('rebase', `the soft reset to ${postCommitParent} failed${resetResult?.output ? `: ${String(resetResult.output).slice(-2000)}` : ''}`, [], { commit: recoveryCommit })
+      }
+      let postResetInventory
+      try { postResetInventory = io.changedFiles() }
+      catch (err) {
+        stageComplete()
+        return escalate('rebase', `the post-rebase changed-file inventory was interrupted after the soft reset: ${err?.message ?? String(err)}`, [], { commit: recoveryCommit })
+      }
+      if (!Array.isArray(postResetInventory) || postResetInventory.some((file) => typeof file !== 'string' || file.trim() === '')) {
+        stageComplete()
+        return escalate('rebase', 'the post-rebase changed-file inventory was unreadable after the soft reset', [], { commit: recoveryCommit })
+      }
+      committing = [...new Set(postResetInventory)]
+      if (committing.length === 0) {
+        stageComplete()
+        return escalate('rebase', 'the post-rebase changed-file inventory was empty after the soft reset', [], { commit: recoveryCommit })
       }
       proofTreeWitness = { ...proofTreeWitness, unknown: true }
       let postRebaseProof

@@ -179,12 +179,13 @@ test('the protected floor is documented as the resolved union', () => {
   assert.equal(fences.includes('package-lock.json'), false)
 })
 
-// Mutation killed: restoring lock or live-claim prose must make this doctrine test fail.
-test('G1 batch doctrine describes own write surfaces', () => {
+// Mutation killed: restoring a write-enforcement claim must make this doctrine test fail.
+test('G1 batch doctrine describes scope as context', () => {
   const text = readText(join(HERE, 'references/batch.md'))
-  const doctrine = "A fence is each lane's own write surface for its scope gate and brief; it is never a lock."
+  const doctrine = 'ADR-045 makes a fence and request scope **context**, not write enforcement. They tell a lane what to read and preserve useful observations; they are never a lock or an authority to refuse a write.'
   assert.equal(text.split(doctrine).length - 1, 1)
-  assert.ok(text.includes('lane_fence` is always empty'))
+  assert.equal(text.includes("A fence is each lane's own write surface for its scope gate and brief; it is never a lock."), false)
+  assert.ok(text.includes('Runtime `lane_fence` is empty'))
   assert.ok(text.includes('lanes: 0, files: 0'))
   assert.equal(text.split('Retired by ADR-043:').length - 1, 1)
   assert.ok(text.includes('`external`'))
@@ -223,7 +224,7 @@ test('C1 E1 span reach doctrine records the measured choice', () => {
 
 test('RV1-1 census-carrier span false negative and anchor obligation distinctions remain documented', () => {
   const text = readText(join(HERE, 'references/batch.md'))
-  const secondFalseNegative = 'The second is a fence entry carrying a span: `skills/crew-dispatch/exhibits.test.mjs:START-END` is scored as held because `parseFenceScope` supplies the bare path to `matchOwn`, so that carrier is never reported missing and never admitted, while the owed RV2-1 repairs to the dynamically computed `current` and `pristine` reach shapes plus integer `ownerDelta` and `pairDelta` assertions sit outside the authored span and the scope gate will refuse them.'
+  const secondFalseNegative = 'The second is a fence entry carrying a span: `skills/crew-dispatch/exhibits.test.mjs:START-END` is scored as held because `parseFenceScope` supplies the bare path to `matchOwn`, so that carrier is never reported missing and never admitted, while the owed RV2-1 repairs to the dynamically computed `current` and `pristine` reach shapes plus integer `ownerDelta` and `pairDelta` assertions sit outside the authored span and remain contextual rather than enforcement.'
   assert.equal(text.split('There are two false negatives this warning does not measure.').length - 1, 1)
   assert.equal(text.split(secondFalseNegative).length - 1, 1)
   assert.equal(text.includes('span-scoped carrier'), false)

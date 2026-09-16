@@ -2,30 +2,18 @@
 
 Dispatch a batch in this order, and record what refuses at each boundary:
 
-A fence is each lane's own write surface for its scope gate and brief; it is never a lock.
+ADR-045 makes a fence and request scope **context**, not write enforcement. They tell a lane what to read and preserve useful observations; they are never a lock or an authority to refuse a write.
 
 1. Create one worktree per lane.
-2. Compile with **one authored fence register for the whole batch**. Each entry
-   defines only that lane's own write surface for scope checks and brief generation;
-   worktrees isolate concurrent writes, so overlapping surfaces are allowed.
-3. Keep the complete effective register available through compilation and brief
-   generation; a lane-specific runtime register is written only after compilation.
-4. Ask the compiler with `--discover-reads <lane>` for the reads a lane must acknowledge, write those records into the register, and perform a **single compile**. If that compile still refuses, the batch refuses `reads-unresolved` rather than retrying. A hand-authored register with spare acknowledgements remains guarded by **`stale-read-ack`**, while the coupled-source-unfenced refusal names the records discovery returns. A `where` path that does not exist refuses
-   **`missing-path`** (`scripts/factory/make-brief.mjs:129`, `COUPLED_SOURCE_UNFENCED = 'coupled-source-unfenced'`; `scripts/factory/make-brief.mjs:130`, `STALE_READ_ACK = 'stale-read-ack'`). An unreadable adopted plan or gate refuses **`plan-adopt-unreadable`** before anything is copied. An adopted `gate.mjs` that resolves the repository through an absolute path — an import specifier, or a `REPO`/`ROOT`/`CHECKOUT` assignment — refuses **`plan-adopt-gate-absolute-path`** before copying or worktree creation, because `prove-mutations` runs a gate in a fresh temporary worktree and a pinned gate can kill no mutation. Its own checkout counts, not only a predecessor's. A quoted absolute literal that is merely DATA is admitted: refusing on any such literal measured 10/214 precision over the archived corpus, since bare `/` and the comment `// gate` both begin with a slash. A repo-root assignment under the system temp dir is exempt as a scratch fixture; an import from there is not.
-5. Verify through **`validateScopeEntries`** and **`scopeMatcher`** for each
-   lane's own-file coverage. Overlap is not a refusal: rebase reconciles shared
-   edits after isolated worktrees are merged.
-6. Check the protected floor with **`protectedHitsIn`** over
-   **`resolveProtectedPaths`** (`crew/protected-paths.mjs:27`, `export function resolveProtectedPaths(extra)`); the floor evidence is in
-   `references/tier.md`.
-7. After compilation, boot each lane with a generated register containing only
-   that lane's effective entry. Runtime `lane_fence` is always empty, and the
-   unchanged `lane-fence` journal event reports `lanes: 0, files: 0`; then
-   background `run`.
-8. Check **arrival, not parsing**: `crew.json` carries the own `lane_name` and
-   an empty `lane_fence`; `checkArrival` refuses any runtime entries. The journal
-   carries the unchanged `lane-fence` event with `lanes: 0, files: 0`.
-   **`fence=NONE`** in a write lane means a boot-only flag went to the wrong verb.
+2. Read one authored fence register for the batch, sanitize every request and register scope value, and record excluded unsafe or malformed entries as observations. Only valid survivors reach authority surfaces.
+3. Always materialize `dispatch.fences.json` as the effective sanitized register used for compilation and the lane-specific runtime register.
+4. Ask the compiler once with `--discover-reads <lane>` and perform one compile. Discovery failures, unacknowledged discovered reads, coupled sources outside a fence, stale acknowledgements, absent `where` paths, and absent create parents are warning context; they do not rewrite a register or stop dispatch. Unsafe paths, malformed request objects, protected floors, proof obligations, and compiler failures unrelated to this context remain hard checks. An unreadable adopted plan or gate still refuses **`plan-adopt-unreadable`**; an adopted `gate.mjs` with an absolute repository resolution still refuses **`plan-adopt-gate-absolute-path`**.
+5. Use **`validateScopeEntries`** and **`scopeMatcher`** to classify scope safely, not to enforce own-file coverage. Worktrees isolate writes, and overlap is reconciled after merge.
+6. Check the protected floor with **`protectedHitsIn`** over **`resolveProtectedPaths`** (`crew/protected-paths.mjs:27`); the floor evidence is in `references/tier.md`.
+
+The compiler's contextual coupling and stale-read labels remain cited at `scripts/factory/make-brief.mjs:135` and `scripts/factory/make-brief.mjs:136`; the present-created-leaf guard remains `scripts/factory/make-brief.mjs:142`.
+7. After compilation, boot each lane with its generated effective entry. Runtime `lane_fence` is empty and the unchanged `lane-fence` journal event reports `lanes: 0, files: 0`; then background `run`.
+8. A missing, unreadable, unparsable, or non-object `crew.json` is **`boot-failed`**. A `lane_name` or `lane_fence` mismatch is a durable `fence-observation` journal row, not a dispatch refusal. **`fence=NONE`** in a write lane still means a boot-only flag went to the wrong verb.
 9. Run the `document` stage after `commit` and before `publish`.
 
 Parallelise through isolated worktrees, not by requiring file-set disjointness.
@@ -123,7 +111,7 @@ three scans is admitted to its owning lane's effective fence exactly once, with 
 source: `test-reach`, `anchor-pin`, or `census-carrier`. The admission is written to
 `perLane[name].files`, the effective `dispatch.fences.json` when widening occurred,
 `dispatch.warnings.json`, bounded normal and dry-run output, and the lane journal
-after boot. Admitted paths widen the effective fence, scope gate, and brief, but never
+after boot. Admitted paths widen the effective contextual register and brief, but never
 the assurance floor, so admission cannot change the tier the operator asked for. No
 caller may widen a fence with a bare path; `fence-admission-unsourced`
 refuses a missing or unknown source. An admission records evidence only: it proves
@@ -154,7 +142,7 @@ The **census-carrier** warning carries this exact blind spot: BLIND SPOT: this w
 
 This is a possibility-only trigger: it fires because a fenced `*.test.mjs` edit might move either repository-wide census, not because dispatch has observed a move. Its two carriers are `skills/crew-dispatch/references/batch.md` and `skills/crew-dispatch/exhibits.test.mjs`. Each concrete missing carrier is admitted with source `census-carrier` when unheld; a measured holder leaves it outside the effective fence and the possibility-only warning remains warning-only. This follows ADR-040: the warning and this exact blind spot remain visible because admission proves neither a census move nor test intent; the owed repair still updates batch.md's measurement sentence and exhibits.test.mjs's RV2-1 assertions over the dynamically computed `current` and `pristine` reach shapes plus integer `ownerDelta` and `pairDelta`, while publishing no rotating baseline.
 
-There are two false negatives this warning does not measure. A directory-prefix fence entry such as `test/` or `crew/` is supported, including a lane whose `creates` path is a new tracked test, but the trigger reads only whole-file `*.test.mjs` fence entries. Such a lane emits no census warning even though its directory fence is the broadest test-editing surface in the batch. The second is a fence entry carrying a span: `skills/crew-dispatch/exhibits.test.mjs:START-END` is scored as held because `parseFenceScope` supplies the bare path to `matchOwn`, so that carrier is never reported missing and never admitted, while the owed RV2-1 repairs to the dynamically computed `current` and `pristine` reach shapes plus integer `ownerDelta` and `pairDelta` assertions sit outside the authored span and the scope gate will refuse them.
+There are two false negatives this warning does not measure. A directory-prefix fence entry such as `test/` or `crew/` is supported, including a lane whose `creates` path is a new tracked test, but the trigger reads only whole-file `*.test.mjs` fence entries. Such a lane emits no census warning even though its directory fence is the broadest test-editing surface in the batch. The second is a fence entry carrying a span: `skills/crew-dispatch/exhibits.test.mjs:START-END` is scored as held because `parseFenceScope` supplies the bare path to `matchOwn`, so that carrier is never reported missing and never admitted, while the owed RV2-1 repairs to the dynamically computed `current` and `pristine` reach shapes plus integer `ownerDelta` and `pairDelta` assertions sit outside the authored span and remain contextual rather than enforcement.
 
 Measured fact: test reach is scored against the whole carrier path, so a span fence does not buy parallelism when another lane holds a test that reaches that file. A fence such as `skills/crew-dispatch/exhibits.test.mjs:START-END` is parsed by `parseFenceScope`, which supplies the bare path to `matchOwn` for reach matching; the authored `path:START-END` spans remain in the refusal remedy. This is intentional option 3 behavior — selected whole-file reach, not a blind spot.
 
@@ -197,19 +185,7 @@ A fence bounds its own lane's declared surface, so silently narrowing
 
 ## A lane can declare what it will create
 
-A `where` path must exist, so a lane whose deliverable is a NEW file could not
-be dispatched at all: the dispatcher creates the worktrees itself, so there is
-no moment at which an operator can commit a stub first. A request therefore
-carries an optional `creates` list, verified by the OPPOSITE condition — the
-path must NOT exist and its parent directory must — which refuses
-**`creates-exists`** and **`creates-parent-missing`**
-(`scripts/factory/make-brief.mjs:136`, `CREATES_EXISTS = 'creates-exists'`).
-`missing-path` is untouched: it still refuses every `where` path that is
-absent, because that is the check which catches the commonest brief typo.
-The compiler EXEMPTS and the dispatcher never seeds a stub — a seeded stub
-would satisfy `missing-path` for whatever path was mistyped, making a typo
-indistinguishable from an intent. A created path is still part of the lane's
-write surface: it must sit inside that lane's own fence (**`where-outside-fence`**).
+Under ADR-045, an absent `where` path and a `creates` path whose parent is absent are warning context, not dispatch refusals. A request may carry `creates`; a present created leaf still refuses **`creates-exists`**, while unsafe paths and malformed request values remain excluded at the trust boundary. The dispatcher never seeds a stub. Created paths and authored scope inform the brief and effective context; they do not have to pass a `where-outside-fence` write gate.
 
 ## A dispatched batch lets the caller choose its transport
 
@@ -218,8 +194,8 @@ so an unflagged batch is unchanged and behaves exactly as before. The two
 transport names and the refusal are pinned in the dispatcher:
 `BOOT_TRANSPORT = 'headless-all'`, `PANE_TRANSPORT = 'panes'`, and
 `TRANSPORT_CONFLICT = 'transport-conflict'`
-(`scripts/factory/dispatch-batch.mjs:162`,
-`scripts/factory/dispatch-batch.mjs:163`,
+(`scripts/factory/dispatch-batch.mjs:155`,
+`scripts/factory/dispatch-batch.mjs:156`,
 `scripts/factory/dispatch-batch.mjs:22`).
 
 `--headless-all` explicitly selects the factory transport. `--panes` selects

@@ -1,13 +1,10 @@
 # Fence compilation and arrival
 
-A fence is a deny-list for sibling lanes and an allow-list for this lane. Treat
-the compiler's coupling check as a two-pass protocol; a register that parses is
-not yet a register the driver can safely consume.
+Under ADR-045, a fence is read/brief context, not a deny-list or an allow-list for a write. The dispatcher sanitizes authored scope before it reaches an authority surface and retains excluded values as observations.
 
-## Two-pass compile
+## One-pass compile
 
-Start with a register whose lane has the intended `files` and an empty reads
-list:
+Start with a register whose lane has the intended contextual `files` and an empty reads list:
 
 ```json
 {
@@ -21,11 +18,7 @@ list:
 }
 ```
 
-`gatherFences` accepts exactly `lane`, `files` and `reads`. **ADR-043 retired the
-`external` marker along with the whole collision half of the fence** — a fence is
-this lane's own write surface for its scope gate and brief, never a lock on
-another lane. Dispatch one lane per register; overlap is expected and is resolved
-at `rebase`.
+`lane`, `files`, and `reads` are contextual data. The dispatcher records malformed, unsafe, missing, symlinked, or case-mismatched entries and removes them from effective authority; it does not turn those scope findings into write enforcement. **ADR-043 retired `external`**, which is likewise recorded and excluded. Dispatch may carry overlapping lanes; worktrees and rebase reconcile writes.
 
 Compile pass one with the current factory CLI:
 
@@ -33,19 +26,9 @@ Compile pass one with the current factory CLI:
 node scripts/factory/make-brief.mjs --request task/request.json --checkout "$PWD" --fences task/fences.json --lane <lane> --out task/brief.md --force
 ```
 
-The pass-one refusal is the useful output: read the complete
-`coupled-source-unfenced` list. For every coupled file outside this lane's
-write surface, add exactly one read record with the source file and a
-non-blank `why`, for example
-`{"file":"crew/variants.mjs","why":"the brief reads VARIANTS to choose a closed dispatch shape"}`.
-Do not acknowledge a file that is in the fence itself, and do not omit one
-that the compiler reported. Compile the same command again with that exact
-list. The reverse mistake—leaving a read acknowledgement for a file that is
-no longer coupled outside the fence—refuses with `stale-read-ack`.
+Read discovery is observational. A successful nonempty result emits an `unacknowledged read` warning and compilation continues with the sanitized register unchanged; it never auto-adds reads. Coupled sources outside the contextual fence and stale acknowledgements are likewise warning context. Operators may add a precise `{ "file", "why" }` read record when it helps explain the brief, but no acknowledgement is required for dispatch.
 
-A single-lane register can have no coupled sources outside its surface. In that
-case pass one has an empty coupled list and `reads: []` remains correct; do not
-invent acknowledgements merely to make the list non-empty.
+A single-lane register can have no coupled sources outside its context. In that case `reads: []` remains correct; do not invent acknowledgements merely to make the list non-empty.
 
 A register may narrow a file to one closed `path:START-END` span, for example
 `"scripts/factory/make-brief.mjs:START-END"`. Coordinates come from the lane's base
@@ -91,20 +74,14 @@ measured against.
 
 ## Arrival, not parsing
 
-After boot, verify the persisted `crew.json` has both `lane_name` and an array
-`lane_fence` for the selected lane, then verify the run journal contains the
-`lane-fence` event. The event is the driver's arrival receipt:
+After boot, a readable object `crew.json` is the boot boundary. Its `lane_name` and `lane_fence` fields remain useful context: mismatches are durable `fence-observation` journal rows, while a missing, unreadable, unparsable, or non-object file is `boot-failed`. The unchanged `lane-fence` event is still useful operational evidence:
 
 ```sh
 CREW_JSON=<state-dir>/crew.json LANE=<lane> node --input-type=module -e "import { readFileSync } from 'node:fs'; const crew = JSON.parse(readFileSync(process.env.CREW_JSON, 'utf8')); if (crew.lane_name !== process.env.LANE || !Array.isArray(crew.lane_fence)) throw new Error('lane fence did not arrive'); console.log({ lane_name: crew.lane_name, lane_fence: crew.lane_fence })"
 grep -F '"event":"lane-fence"' <state-dir>/journal.jsonl
 ```
 
-`laneFenceFor` returns the **other** lanes' surfaces. Consequently
-`lane_fence: []` is CORRECT for a single-lane register: there are no sibling
-surfaces to deny. An empty array at arrival is not evidence that the fence was
-lost; the lane name plus the journal `lane-fence` event establish that it
-arrived.
+`laneFenceFor` returns the **other** lanes' contextual surfaces. Consequently `lane_fence: []` is correct for a single-lane register. Its value is not write enforcement; the lane name and journal retain the operator context.
 
 ## The fence is a claim about the code
 
@@ -126,7 +103,7 @@ one `.js` file was missed in a 20-file rename. When a brief moves a constant,
 value into two declarations and only the second has its own pinning test (b161
 → `escalate:scope`, three plan rounds, zero code). A task changing a
 **DETECTOR** owns whatever that detector newly flags; compute that set before
-dispatch. A `where` path that does not exist refuses **`missing-path`**, so a
-lane needing a new file puts its fixture in an existing home. A source-grep
-tripwire is trivially spoofable: when relocating code, retarget it honestly,
-not with a comment.
+dispatch. Under ADR-045, an absent `where` path is warning context, so a lane
+may describe a new file honestly; unsafe paths remain excluded from authority.
+A source-grep tripwire is trivially spoofable: when relocating code, retarget
+it honestly, not with a comment.

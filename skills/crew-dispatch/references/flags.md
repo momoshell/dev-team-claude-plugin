@@ -110,11 +110,11 @@ The archive is a crew directory: the dispatcher reads its `task/` subdirectory.
 Naming the `task` directory itself also works. `plan.md` and `gate.mjs` are
 required. If either is missing, dispatch refuses `plan-adopt-unreadable` having
 copied nothing. An optional `plan-check.md` carrying `VERDICT: revise` adds the
-findings clause to the adopting brief. The adopted plan's `files_in_scope` is
-capped by the dispatched write surface, so a narrower current fence wins over
-the archived declaration. If a required file is gone at copy time, not only at
-`resolveAdoptions`, dispatch refuses `plan-adopt-unreadable` by name with nothing
-copied.
+findings clause to the adopting brief. Under ADR-045, adopted `files_in_scope`
+and the dispatched fence remain contextual rather than a narrowing write gate;
+unsafe scope values are recorded and excluded from authority surfaces. If a
+required file is gone at copy time, not only at `resolveAdoptions`, dispatch
+refuses `plan-adopt-unreadable` by name with nothing copied.
 
 The dispatcher writes a `plan-adopted` journal row with the archive path and a
 sha256 of the adopted plan.

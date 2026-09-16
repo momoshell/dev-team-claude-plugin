@@ -3,7 +3,7 @@
 // It owns the ordered checks between a batch request directory and background
 // crew runs; every failed check is a named refusal and stops the batch.
 
-import { appendFileSync, closeSync, existsSync as fsExistsSync, openSync, readFileSync as fsReadFileSync, readdirSync as fsReaddirSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, closeSync, existsSync as fsExistsSync, lstatSync as fsLstatSync, openSync, readFileSync as fsReadFileSync, readdirSync as fsReaddirSync, mkdirSync, realpathSync, rmSync, statSync as fsStatSync, writeFileSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { homedir, tmpdir } from 'node:os'
 import { spawn as childSpawn, spawnSync } from 'node:child_process'
@@ -15,7 +15,7 @@ import { assertHostQuiet, hostLoad, loadPolicy, withSuiteSlot } from '../../crew
 import { protectedHitsIn, resolveProtectedPaths, PROMPT_SURFACE as SHARED_PROMPT_SURFACE, PROMPT_SURFACE_BLIND_SPOT as SHARED_PROMPT_SURFACE_BLIND_SPOT } from '../../crew/protected-paths.mjs'
 import { fenceScopesIntersect, parseFenceScope } from '../../crew/fence-scope.mjs'
 import { slug } from '../../crew/slug.mjs'
-import { LADDER_BANDS, PROPOSAL_BLOCK, PROPOSAL_V2_KEYS, TIER_NAMES, extractSymbols, gatherFences, isTripwireFile, validateRequest } from './make-brief.mjs'
+import { LADDER_BANDS, PROPOSAL_BLOCK, PROPOSAL_V2_KEYS, TIER_NAMES, extractSymbols, isTripwireFile, validateRequest } from './make-brief.mjs'
 
 const BATCH_EMPTY = 'batch-empty'
 const BATCH_UNREADABLE = 'batch-unreadable'
@@ -51,26 +51,21 @@ const FENCE_ADMISSION_UNSOURCED = 'fence-admission-unsourced'
 const PLAN_ADOPT_GATE_ABSOLUTE_PATH = 'plan-adopt-gate-absolute-path'
 
 export const FENCE_ADMISSION_EVENT = 'fence-admitted'
+export const FENCE_OBSERVATION_EVENT = 'fence-observation'
 export const FENCE_ADMISSION_SOURCES = Object.freeze(['test-reach', 'anchor-pin', 'census-carrier'])
 
 export const REFUSAL_REASONS = Object.freeze([
   BATCH_EMPTY,
   BATCH_UNREADABLE,
   TRANSPORT_CONFLICT,
-  LANE_UNFENCED,
-  SCOPE_ENTRY_INVALID,
-  WHERE_OUTSIDE_FENCE,
   WORKTREE_EXISTS,
   BRANCH_TAKEN,
   WORKTREE_FAILED,
   COMPILE_REFUSED,
-  READS_UNRESOLVED,
   TIER_FLOOR_CONFLICT,
   PROMPT_SURFACE_CONFLICT,
   PROPOSAL_MINIMUM_CONFLICT,
   BOOT_FAILED,
-  FENCE_NOT_ARRIVED,
-  FENCE_COUNT_MISMATCH,
   RUN_FAILED,
   DEPENDENCY_CYCLE,
   DEPENDENCY_UNKNOWN,
@@ -78,10 +73,8 @@ export const REFUSAL_REASONS = Object.freeze([
   PLAN_SCOPE_OUTSIDE_FENCE,
   GRAPH_UNMEASURED,
   LANE_SHAPE_INVALID,
-  FENCE_REGISTER_MISMATCH,
   DIRECTED_BRIEF_INVALID,
   SEAT_FLOOR_CONFLICT,
-  EXTERNAL_FENCE_RETIRED,
   PLAN_ADOPT_UNREADABLE,
   TEST_REACH_UNFENCED,
   FENCE_ADMISSION_UNSOURCED,
@@ -756,6 +749,14 @@ export class BatchRefusal extends Error {
 
 function refuse(message, reason) { throw new BatchRefusal(message, reason) }
 
+function warningRow(kind, fields, text) {
+  return { kind, ...fields, text }
+}
+
+function warn(message, reason, fields = {}) {
+  return warningRow('warning', { reason, ...fields }, `dispatch-batch: WARNING ${message} [reason: ${reason}]`)
+}
+
 function spawnAsyncDefault({ file, args, cwd, env }) {
   return new Promise((resolve) => {
     const child = childSpawn(file, args, { cwd, env })
@@ -876,6 +877,43 @@ function normaliseRepoPath(value) {
   return normal.startsWith('./') ? normal.slice(2) : normal
 }
 
+function requestScopeReason(value, field) {
+  const candidate = typeof value === 'string' ? normaliseRepoPath(value) : value
+  const shape = driveValidateScopeEntries([candidate])
+  if (shape.length > 0) return shape[0].why
+  const parsed = parseFenceScope(candidate)
+  if (parsed.kind === 'invalid') return parsed.reason
+  if (field === 'creates' && parsed.path.endsWith('/')) return 'creates entry must name a file, not a directory'
+  return null
+}
+
+function sanitiseRequestScope(request, requestPath) {
+  const sanitized = { ...request }
+  const observations = []
+  for (const field of ['where', 'creates']) {
+    if (!Array.isArray(request?.[field])) continue
+    const values = []
+    request[field].forEach((value, index) => {
+      const reason = requestScopeReason(value, field)
+      if (reason) {
+        observations.push({
+          kind: 'scope-entry',
+          field,
+          index,
+          authored: value,
+          reason: SCOPE_ENTRY_INVALID,
+          detail: reason,
+          request: requestPath,
+        })
+        return
+      }
+      values.push(normaliseRepoPath(value))
+    })
+    sanitized[field] = values
+  }
+  return { request: sanitized, observations }
+}
+
 export function fenceAdmission({ lane, file, source, holder } = {}) {
   if (!FENCE_ADMISSION_SOURCES.includes(source)) {
     refuse(`fence admission for lane ${lane ?? '(unknown)'} and file ${file ?? '(unknown)'} has no allowed source: ${JSON.stringify(source)}`, FENCE_ADMISSION_UNSOURCED)
@@ -896,16 +934,20 @@ function laneNameOf(lane) {
   return resolved
 }
 
+function laneScopeValues(lane, field) {
+  const declared = lane && Array.isArray(lane[field]) ? lane[field]
+    : lane && Array.isArray(lane.request?.[field]) ? lane.request[field] : []
+  return declared
+    .filter((value) => requestScopeReason(value, field) === null)
+    .map(normaliseRepoPath)
+}
+
 function laneWhereOf(lane) {
-  if (lane && Array.isArray(lane.where)) return lane.where.map(normaliseRepoPath)
-  if (lane && Array.isArray(lane.request?.where)) return lane.request.where.map(normaliseRepoPath)
-  return []
+  return laneScopeValues(lane, 'where')
 }
 
 function laneCreatesOf(lane) {
-  if (lane && Array.isArray(lane.creates)) return lane.creates.map(normaliseRepoPath)
-  if (lane && Array.isArray(lane.request?.creates)) return lane.request.creates.map(normaliseRepoPath)
-  return []
+  return laneScopeValues(lane, 'creates')
 }
 
 export function isTestReachOverride(value) {
@@ -1170,7 +1212,7 @@ function splitDispatchKeys(parsed, requestPath) {
   }
 }
 
-export function readBatch({ batchDir, deps } = {}) {
+export function readBatch({ batchDir, checkout, deps } = {}) {
   const d = normalDeps(deps)
   if (typeof batchDir !== 'string' || batchDir.trim() === '') {
     refuse('batch directory is required', BATCH_UNREADABLE)
@@ -1206,10 +1248,13 @@ export function readBatch({ batchDir, deps } = {}) {
     } catch (err) {
       refuse(`cannot read or validate request ${requestPath}: ${err?.message || String(err)}`, BATCH_UNREADABLE)
     }
+    const scoped = sanitiseRequestScope(request, requestPath)
     lanes.push({
       lane,
       name,
-      request,
+      request: scoped.request,
+      scope_observations: scoped.observations,
+      authored_request: request,
       execution: execution ?? null,
       assurance: assurance ?? null,
       executionSpelling,
@@ -1224,8 +1269,8 @@ export function readBatch({ batchDir, deps } = {}) {
       adopt: typeof dispatch.adopt === 'string' ? dispatch.adopt : null,
       [TEST_REACH_OVERRIDE_KEY]: Array.isArray(dispatch[TEST_REACH_OVERRIDE_KEY]) ? dispatch[TEST_REACH_OVERRIDE_KEY].map(normaliseTestReachOverride) : [],
       depends_on: Array.isArray(dispatch.depends_on) ? [...new Set(dispatch.depends_on)] : [],
-      where: request.where.map(normaliseRepoPath),
-      creates: Array.isArray(request.creates) ? request.creates.map(normaliseRepoPath) : [],
+      where: scoped.request.where.map(normaliseRepoPath),
+      creates: Array.isArray(scoped.request.creates) ? scoped.request.creates.map(normaliseRepoPath) : [],
     })
   }
   return lanes.sort((a, b) => a.lane < b.lane ? -1 : a.lane > b.lane ? 1 : 0)
@@ -1433,7 +1478,41 @@ export function anchorPinsOutsideFence({ surface, fenceFiles, pins } = {}) {
 
 export function checkFences({ fences, lanes, graph, checkout, outDir, deps } = {}) {
   const d = normalDeps(deps)
-  const entries = fenceEntriesOf(fences).map(normaliseFence)
+  const inheritedObservations = Array.isArray(fences?.observations) ? [...fences.observations] : []
+  const observations = [...inheritedObservations]
+  const entries = []
+  for (const [index, raw] of fenceEntriesOf(fences).entries()) {
+    if (!plainObject(raw)) {
+      observations.push({ kind: 'register-entry', index, authored: raw, reason: SCOPE_ENTRY_INVALID, detail: 'lane entry must be an object' })
+      continue
+    }
+    const entry = normaliseFence(raw)
+    if (typeof raw.lane !== 'string' || raw.lane.trim() === '') {
+      observations.push({ kind: 'register-entry', index, authored: raw.lane, reason: SCOPE_ENTRY_INVALID, detail: 'lane must be a non-empty string' })
+      continue
+    }
+    if (!Array.isArray(raw.files)) {
+      observations.push({ kind: 'scope-entry', lane: entry.lane, field: 'files', authored: raw.files, reason: SCOPE_ENTRY_INVALID, detail: 'files must be an array' })
+      entry.files = []
+    }
+    const validFiles = []
+    for (const [fileIndex, file] of entry.files.entries()) {
+      const parsed = parseFenceScope(file)
+      if (parsed.kind === 'invalid') {
+        observations.push({ kind: 'scope-entry', lane: entry.lane, field: 'files', index: fileIndex, authored: file, reason: SCOPE_ENTRY_INVALID, detail: parsed.reason })
+        continue
+      }
+      const shape = driveValidateScopeEntries(parsed.kind === 'file' ? [parsed.path] : [])
+      if (shape.length > 0 || (parsed.kind === 'span' && parsed.path.endsWith('/'))) {
+        observations.push({ kind: 'scope-entry', lane: entry.lane, field: 'files', index: fileIndex, authored: file, reason: SCOPE_ENTRY_INVALID, detail: shape[0]?.why || 'line spans must name a file' })
+        continue
+      }
+      validFiles.push(file)
+    }
+    entry.files = [...new Set(validFiles)]
+    if (Object.hasOwn(raw, 'external')) observations.push({ kind: 'register-entry', lane: entry.lane, authored: raw.external, reason: EXTERNAL_FENCE_RETIRED, detail: 'external register markers are not authority' })
+    entries.push(entry)
+  }
   const batchLanes = Array.isArray(lanes) ? lanes : []
   const byLane = new Map(entries.map((entry) => [entry.lane, entry]))
 
@@ -1444,32 +1523,16 @@ export function checkFences({ fences, lanes, graph, checkout, outDir, deps } = {
   const hasGraph = Boolean(graph && graph.ancestors instanceof Map)
   if (declaredEdges && !hasGraph) refuse(`checkFences cannot judge sibling-leak for a batch that declares depends_on edges without the graph that carries them; pass the graph planWaves returns`, GRAPH_UNMEASURED)
 
-  // Check the register's membership before inspecting its shapes: a batch lane
-  // can never fall through to an implicit, unfenced write surface.
+  // A parsed batch lane with no valid authored register entry gets an empty
+  // observational fence. Invalid register values never become authority.
   const batchNames = new Set(batchLanes.map(laneNameOf))
   for (const lane of batchLanes) {
     const name = laneNameOf(lane)
-    if (!byLane.has(name)) refuse(`lane is not in the fence register: ${name}`, LANE_UNFENCED)
-  }
-
-  // The drive-side validator is intentionally used here. The compiler's helper
-  // has a different object-shaped contract and throws instead of returning rows.
-  for (const entry of entries) {
-    if (!Array.isArray(entry.files)) {
-      refuse(`invalid scope entries for lane ${entry.lane}: files must be an array`, SCOPE_ENTRY_INVALID)
-    }
-    const parsed = entry.files.map((file) => parseFenceScope(file))
-    const invalid = parsed.find((scope) => scope.kind === 'invalid')
-    if (invalid) {
-      refuse(`invalid scope entries for lane ${entry.lane}: ${invalid.entry} (${invalid.reason})`, SCOPE_ENTRY_INVALID)
-    }
-    const wholeFiles = parsed.filter((scope) => scope.kind === 'file').map((scope) => scope.path)
-    let shapeErrors
-    try { shapeErrors = driveValidateScopeEntries(wholeFiles) } catch (err) {
-      refuse(`invalid scope entries for lane ${entry.lane}: ${err?.message || String(err)}`, SCOPE_ENTRY_INVALID)
-    }
-    if (shapeErrors.length > 0) {
-      refuse(`invalid scope entries for lane ${entry.lane}: ${shapeErrors.map(({ entry: path, why }) => `${path} (${why})`).join('; ')}`, SCOPE_ENTRY_INVALID)
+    if (!byLane.has(name)) {
+      const synthetic = { lane: name, files: [], reads: [] }
+      entries.push(synthetic)
+      byLane.set(name, synthetic)
+      observations.push({ kind: 'register-entry', lane: name, reason: FENCE_REGISTER_MISMATCH, detail: 'lane is absent from the sanitized fence register' })
     }
   }
 
@@ -1488,7 +1551,7 @@ export function checkFences({ fences, lanes, graph, checkout, outDir, deps } = {
   // Admission arbitration reads only the authored register. Runtime state in another
   // worktree is deliberately outside this preflight contract: worktrees isolate writes,
   // and any overlap is reconciled when the branches are rebased.
-  const authoredHolders = entries.map((entry) => ({
+  const authoredHolders = entries.filter((entry) => batchNames.has(entry.lane)).map((entry) => ({
     lane: entry.lane,
     files: [...(Array.isArray(entry.files) ? entry.files : [])].map(normaliseRepoPath),
     dir: null,
@@ -1509,6 +1572,13 @@ export function checkFences({ fences, lanes, graph, checkout, outDir, deps } = {
   const deferredWarnings = []
   const summaryLanes = []
   const warnings = []
+  const observationText = (observation) => `dispatch-batch: WARNING scope-observation lane=${observation.lane ?? 'unknown'} reason=${observation.reason} authored=${JSON.stringify(observation.authored)} detail=${observation.detail}`
+  for (const observation of observations) {
+    const text = observation.text || observationText(observation)
+    warnings.push({ ...observation, text })
+    d.log(text)
+  }
+  const observationsFor = (lane) => observations.filter((observation) => observation.lane === lane)
   const reachRefusals = []
   const admissionByLane = new Map()
   const admissionOwners = new Map()
@@ -1524,10 +1594,16 @@ export function checkFences({ fences, lanes, graph, checkout, outDir, deps } = {
   const authoredPerLane = {}
   for (const lane of batchLanes) {
     const name = laneNameOf(lane)
-    const own = byLane.get(name)
-    const ownFiles = own.files.map(normaliseRepoPath)
-    authoredPerLane[name] = { files: [...ownFiles] }
-    const effectiveFiles = [...ownFiles]
+    const own = byLane.get(name) || { lane: name, files: [], reads: [] }
+    const ownFiles = (Array.isArray(own.files) ? own.files : []).filter((file) => parseFenceScope(file).kind !== 'invalid').map(normaliseRepoPath)
+    const ownWhere = laneWhereOf(lane)
+    const ownCreates = laneCreatesOf(lane)
+    const requestedSurface = [...ownWhere, ...ownCreates]
+    const ownPaths = ownFiles.map((file) => parseFenceScope(file).path).filter((path) => typeof path === 'string')
+    // Request scope remains on `where`/`creates` below; only the authored fence sets write authority.
+    const authorityFiles = [...ownFiles]
+    authoredPerLane[name] = { files: [...authorityFiles] }
+    const effectiveFiles = [...authorityFiles]
     const laneAdmissions = []
     const admissionKeys = new Set()
     admissionByLane.set(name, laneAdmissions)
@@ -1549,10 +1625,7 @@ export function checkFences({ fences, lanes, graph, checkout, outDir, deps } = {
       if (!admissionOwner) admissionOwners.set(row.file, { lane: name, file: row.file, source })
       return recordAdmission(row)
     }
-    const ownPaths = ownFiles.map((file) => parseFenceScope(file).path)
-    const ownWhere = laneWhereOf(lane)
-    const ownCreates = laneCreatesOf(lane)
-    const matchOwn = scopeMatcher(ownPaths)
+    const matchOwn = scopeMatcher([...ownPaths, ...requestedSurface])
     const hasTestSurface = ownPaths.some((path) => path.endsWith('.test.mjs'))
     const missingCensusCarriers = CENSUS_CARRIER_FILES.filter((carrier) => !matchOwn(carrier))
     const censusExposure = hasTestSurface && missingCensusCarriers.length > 0
@@ -1575,10 +1648,14 @@ export function checkFences({ fences, lanes, graph, checkout, outDir, deps } = {
         if (!holder) automaticAdmission('census-carrier', carrier)
       }
     }
-    const ownSurface = [...ownWhere, ...ownCreates]
-    if (!ownSurface.every(matchOwn)) {
-      const outside = ownSurface.filter((path) => !matchOwn(path))
-      refuse(`lane ${name} where path(s) outside own fence: ${outside.join(', ')}`, WHERE_OUTSIDE_FENCE)
+    const ownSurface = [...requestedSurface]
+    const outside = ownSurface.filter((path) => !matchOwn(path))
+    if (outside.length > 0) {
+      const observation = { kind: 'scope-entry', lane: name, field: 'request', authored: outside, reason: WHERE_OUTSIDE_FENCE, detail: 'request scope is retained as context and does not narrow dispatch authority' }
+      observations.push(observation)
+      const text = observationText(observation)
+      warnings.push({ ...observation, text })
+      d.log(text)
     }
 
     // #635 made a shift REPAIRABLE: content found once at a new line is relocated and
@@ -1659,7 +1736,8 @@ export function checkFences({ fences, lanes, graph, checkout, outDir, deps } = {
     if (refusedRows.length > 0) reachRefusals.push({ lane: name, rows: refusedRows, files: ownFiles })
     const overrideField = overridden.length > 0 ? { test_reach_overrides: overridden } : {}
     const arbitrationField = admissionArbitrations.get(name)?.length > 0 ? { fence_admission_arbitrated: admissionArbitrations.get(name) } : {}
-    reportLanes.push({ lane: name, test_reach: reachRows, test_reach_dropped: droppedReachRows, citation_carriers: unfencedCarriers, anchor_pins: unfencedPins, census_carriers: censusWarning ? [censusWarning] : [], ...(laneAdmissions.length > 0 ? { fence_admissions: laneAdmissions } : {}), ...arbitrationField, ...overrideField })
+    const laneObservations = observationsFor(name)
+    reportLanes.push({ lane: name, test_reach: reachRows, test_reach_dropped: droppedReachRows, citation_carriers: unfencedCarriers, anchor_pins: unfencedPins, census_carriers: censusWarning ? [censusWarning] : [], ...(laneAdmissions.length > 0 ? { fence_admissions: laneAdmissions } : {}), ...(laneObservations.length > 0 ? { observations: laneObservations } : {}), ...arbitrationField, ...overrideField })
     summaryLanes.push({
       lane: name,
       counts: {
@@ -1686,6 +1764,7 @@ export function checkFences({ fences, lanes, graph, checkout, outDir, deps } = {
       creates: ownCreates,
       reads: Array.isArray(own.reads) ? own.reads : [],
       siblings,
+      ...(laneObservations.length > 0 ? { observations: laneObservations } : {}),
       ...(laneAdmissions.length > 0 ? { fence_admissions: laneAdmissions } : {}),
       ...(admissionArbitrations.get(name)?.length > 0 ? { fence_admission_arbitrated: admissionArbitrations.get(name) } : {}),
     }
@@ -1751,18 +1830,22 @@ export function checkFences({ fences, lanes, graph, checkout, outDir, deps } = {
     const text = `test(s) outside a lane fence assert the behaviour that lane changes: ${detail}; ${remedyText}; declare ${TEST_REACH_OVERRIDE_KEY} on the lane request to dispatch anyway, and the decision is logged and recorded on ${FENCE_REPORT_FILE}. ${TEST_REACH_REFUSAL_BLIND_SPOT}`
     refuse(text, TEST_REACH_UNFENCED)
   }
-  // The other half of the membership invariant (#658): a register may not be a
-  // SUPERSET of the batch it is dispatched with. Lane-specific runtime registers
-  // intentionally contain no non-own entries, so this is decided from the authored
-  // register and batch before anything boots. This check runs LAST on purpose: no
-  // existing refusal changes the cause it names.
+  // A register may carry lanes outside this batch; retain them as authored
+  // observations but never let them become a holder or launch authority.
   const absent = entries.map(({ lane }) => lane).filter((name) => !batchNames.has(name))
-  if (absent.length > 0) refuse(`fence register names lane(s) absent from the batch: ${absent.join(', ')}; the batch carries ${[...batchNames].join(', ') || 'no lanes'}`, FENCE_REGISTER_MISMATCH)
-  const effectiveFences = entries.map((entry) => ({
+  for (const name of absent) {
+    const observation = { kind: 'register-entry', lane: name, reason: FENCE_REGISTER_MISMATCH, detail: `lane is absent from the batch (${[...batchNames].join(', ') || 'no lanes'})` }
+    observations.push(observation)
+    const text = observationText(observation)
+    warnings.push({ ...observation, text })
+    d.log(text)
+  }
+  const effectiveFences = entries.filter((entry) => batchNames.has(entry.lane)).map((entry) => ({
     ...entry,
     files: perLane[entry.lane]?.files ? [...perLane[entry.lane].files] : [...entry.files],
   }))
-  return { perLane, authoredPerLane, warnings, fences: effectiveFences, admissions }
+  Object.defineProperty(effectiveFences, 'observations', { value: observations, enumerable: false })
+  return { perLane, authoredPerLane, warnings, observations, fences: effectiveFences, admissions }
 }
 
 // A fence denies a SIBLING's declared surface; it never denied an UNCLAIMED path, so a
@@ -1928,9 +2011,137 @@ export function readsFromRefusal(stderr) {
   return { reason: STALE_READ_ACK, files: parse(stalePrefix, staleAt, ',', false) }
 }
 
+function pathCaseMismatch(root, value) {
+  const parts = String(value).replace(/\/+$/, '').split('/').filter(Boolean)
+  let directory = root
+  for (const part of parts) {
+    let names
+    try { names = fsReaddirSync(directory) } catch (error) {
+      if (error?.code === 'ENOENT' || error?.code === 'ENOTDIR') return { missing: true }
+      return { inaccessible: true, error }
+    }
+    if (names.includes(part)) {
+      directory = join(directory, part)
+      continue
+    }
+    const actual = names.find((name) => name.toLowerCase() === part.toLowerCase())
+    if (actual) return { mismatch: actual }
+    return { missing: true }
+  }
+  return { missing: false }
+}
+
+function registerScopeCandidate({ checkout, lane, index, authored } = {}) {
+  const observation = (reason, detail) => ({
+    kind: 'scope-entry', lane, field: 'files', index, authored, reason, detail,
+  })
+  const parsed = parseFenceScope(authored)
+  if (parsed.kind === 'invalid') return { parsed, observation: observation(SCOPE_ENTRY_INVALID, parsed.reason) }
+  const shape = driveValidateScopeEntries(parsed.kind === 'file' ? [parsed.path] : [])
+  if (shape.length > 0) return { parsed, observation: observation(SCOPE_ENTRY_INVALID, shape[0].why) }
+  if (parsed.kind === 'span' && parsed.path.endsWith('/')) {
+    return { parsed, observation: observation(SCOPE_ENTRY_INVALID, 'line spans must name a file, not a directory prefix') }
+  }
+  const root = resolve(typeof checkout === 'string' && checkout.trim() ? checkout : process.cwd())
+  const spelling = pathCaseMismatch(root, parsed.path)
+  if (spelling.mismatch) return { parsed, observation: observation(SCOPE_ENTRY_INVALID, `on-disk spelling is ${spelling.mismatch}`) }
+  if (spelling.inaccessible) return { parsed, observation: observation(SCOPE_ENTRY_INVALID, 'path segment is inaccessible') }
+  if (spelling.missing) return { parsed, observation: observation('missing-path', 'path does not exist') }
+  let segment = root
+  for (const part of parsed.path.replace(/\/+$/, '').split('/').filter(Boolean)) {
+    segment = join(segment, part)
+    let metadata
+    try { metadata = fsLstatSync(segment) } catch (error) {
+      if (error?.code === 'ENOENT' || error?.code === 'ENOTDIR') return { parsed, observation: observation('missing-path', 'path does not exist') }
+      return { parsed, observation: observation(SCOPE_ENTRY_INVALID, `path cannot be inspected: ${error?.code || error?.message || String(error)}`) }
+    }
+    if (metadata.isSymbolicLink()) return { parsed, observation: observation(SCOPE_ENTRY_INVALID, 'path includes a symlinked segment') }
+  }
+  let metadata
+  try { metadata = fsStatSync(join(root, ...parsed.path.split('/').filter(Boolean))) } catch (error) {
+    if (error?.code === 'ENOENT' || error?.code === 'ENOTDIR') return { parsed, observation: observation('missing-path', 'path does not exist') }
+    return { parsed, observation: observation(SCOPE_ENTRY_INVALID, `path cannot be inspected: ${error?.code || error?.message || String(error)}`) }
+  }
+  if (parsed.kind === 'file' && metadata.isDirectory() && !parsed.path.endsWith('/')) {
+    return { parsed, observation: observation(SCOPE_ENTRY_INVALID, 'directory prefix requires a trailing slash') }
+  }
+  if (!metadata.isFile() && !metadata.isDirectory()) return { parsed, observation: observation(SCOPE_ENTRY_INVALID, 'path is neither a regular file nor directory') }
+  if (parsed.kind === 'span') {
+    const ref = `HEAD:${parsed.path}`
+    let type
+    try { type = spawnSync('git', ['-C', root, 'cat-file', '-t', ref], { encoding: 'utf8', timeout: 10_000 }) } catch (error) {
+      return { parsed, observation: observation(SCOPE_ENTRY_INVALID, `committed base is unreadable: ${error?.message || String(error)}`) }
+    }
+    if (!type || type.status !== 0 || type.error || type.signal || String(type.stdout || '').trim() !== 'blob') {
+      return { parsed, observation: observation(SCOPE_ENTRY_INVALID, 'span has no readable committed base blob') }
+    }
+    let shown
+    try { shown = spawnSync('git', ['-C', root, 'show', ref], { encoding: 'utf8', timeout: 10_000 }) } catch (error) {
+      return { parsed, observation: observation(SCOPE_ENTRY_INVALID, `committed base is unreadable: ${error?.message || String(error)}`) }
+    }
+    if (!shown || shown.status !== 0 || shown.error || shown.signal || typeof shown.stdout !== 'string' || shown.stdout.includes('\\0')) {
+      return { parsed, observation: observation(SCOPE_ENTRY_INVALID, 'span has no readable committed base blob') }
+    }
+    const normal = shown.stdout.replace(/\r\n/g, '\n')
+    const lineCount = normal.length === 0 ? 0 : normal.endsWith('\n') ? normal.slice(0, -1).split('\n').length : normal.split('\n').length
+    if (parsed.start > parsed.end) return { parsed, observation: observation(SCOPE_ENTRY_INVALID, `span start ${parsed.start} is after end ${parsed.end}`) }
+    if (parsed.end > lineCount) return { parsed, observation: observation(SCOPE_ENTRY_INVALID, `span end ${parsed.end} is past base EOF ${lineCount}`) }
+  }
+  return { parsed, value: authored }
+}
+
+function sanitiseRegister({ raw, checkout } = {}) {
+  const observations = []
+  const fences = []
+  for (const [index, authored] of raw.lanes.entries()) {
+    if (!plainObject(authored)) {
+      observations.push({ kind: 'register-entry', index, authored, reason: SCOPE_ENTRY_INVALID, detail: 'lane entry must be an object' })
+      continue
+    }
+    if (typeof authored.lane !== 'string' || authored.lane.trim() === '') {
+      observations.push({ kind: 'register-entry', index, authored: authored.lane, reason: SCOPE_ENTRY_INVALID, detail: 'lane must be a non-empty string' })
+      continue
+    }
+    const lane = authored.lane
+    if (Object.hasOwn(authored, 'external')) observations.push({ kind: 'register-entry', lane, index, authored: authored.external, reason: EXTERNAL_FENCE_RETIRED, detail: 'external register markers are not authority' })
+    const files = []
+    if (!Array.isArray(authored.files)) {
+      observations.push({ kind: 'scope-entry', lane, field: 'files', index: 0, authored: authored.files, reason: SCOPE_ENTRY_INVALID, detail: 'files must be an array' })
+    } else {
+      authored.files.forEach((value, fileIndex) => {
+        const checked = registerScopeCandidate({ checkout, lane, index: fileIndex, authored: value })
+        if (checked.observation) observations.push(checked.observation)
+        else if (!files.includes(checked.value)) files.push(checked.value)
+      })
+    }
+    const reads = []
+    if (authored.reads !== undefined) {
+      if (!Array.isArray(authored.reads)) observations.push({ kind: 'read-entry', lane, authored: authored.reads, reason: SCOPE_ENTRY_INVALID, detail: 'reads must be an array' })
+      else authored.reads.forEach((read, readIndex) => {
+        if (!plainObject(read) || typeof read.file !== 'string' || read.file.trim() === '' || typeof read.why !== 'string' || read.why.trim() === '') {
+          observations.push({ kind: 'read-entry', lane, index: readIndex, authored: read, reason: SCOPE_ENTRY_INVALID, detail: 'read must contain non-blank file and why strings' })
+          return
+        }
+        const reason = requestScopeReason(read.file, 'where')
+        if (reason) {
+          observations.push({ kind: 'read-entry', lane, index: readIndex, authored: read, reason: SCOPE_ENTRY_INVALID, detail: reason })
+          return
+        }
+        const file = normaliseRepoPath(read.file)
+        if (!reads.some((candidate) => candidate.file === file)) reads.push({ file, why: read.why.trim() })
+      })
+    }
+    const unknown = Object.keys(authored).filter((key) => !['lane', 'files', 'reads', 'external'].includes(key))
+    for (const key of unknown) observations.push({ kind: 'register-key', lane, key, authored: authored[key], reason: SCOPE_ENTRY_INVALID, detail: 'unknown register key is not authority' })
+    fences.push({ lane, files: files.sort(), reads: reads.sort((a, b) => a.file < b.file ? -1 : a.file > b.file ? 1 : 0) })
+  }
+  Object.defineProperty(fences, 'observations', { value: observations, enumerable: false })
+  return { fences, observations }
+}
+
 // External fence markers are retired at the authored-register boundary by ADR-043.
-// Keep the register bytes untouched for every accepted batch; compilation and boot
-// receive the same authored surface (boot narrows it later to one lane).
+// Keep authored defects as observations while ensuring only sanitized entries reach
+// compilation, matcher, holder arbitration, and boot authority surfaces.
 export function readRegister({ fencesPath, checkout, deps } = {}) {
   const d = normalDeps(deps)
   const authored = resolve(fencesPath)
@@ -1941,14 +2152,8 @@ export function readRegister({ fencesPath, checkout, deps } = {}) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw) || !Array.isArray(raw.lanes)) {
     refuse(`fence register ${authored} must be an object carrying a lanes array`, BATCH_UNREADABLE)
   }
-  raw.lanes.map((entry, index) => {
-    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
-      refuse(`fence register ${authored} lanes[${index}] must be an object`, BATCH_UNREADABLE)
-    }
-    if (Object.hasOwn(entry, 'external')) refuse('fence register external entries are retired by ADR-043', EXTERNAL_FENCE_RETIRED)
-    return entry
-  })
-  return { fences: gatherFences({ fencesPath: authored, checkout }), externals: [], registerPath: authored }
+  const sanitized = sanitiseRegister({ raw, checkout })
+  return { fences: sanitized.fences, externals: [], observations: sanitized.observations, registerPath: authored }
 }
 
 function registerData({ fences, registerPath, d }) {
@@ -1963,22 +2168,6 @@ function registerData({ fences, registerPath, d }) {
   try { return JSON.parse(d.readFileSync(resolve(registerPath), 'utf8')) } catch (err) {
     refuse(`cannot read compile fence register ${registerPath}: ${err?.message || String(err)}`, COMPILE_REFUSED)
   }
-}
-
-function writeUpdatedRegister({ data, lane, reads, outDir, d }) {
-  const copy = JSON.parse(JSON.stringify(data))
-  if (!Array.isArray(copy?.lanes)) refuse(`compile fence register has no lanes array for ${lane}`, READS_UNRESOLVED)
-  const entry = copy.lanes.find((candidate) => candidate && candidate.lane === lane)
-  if (!entry) refuse(`compile fence register has no lane ${lane}`, READS_UNRESOLVED)
-  const current = Array.isArray(entry.reads) ? entry.reads.filter((read) => read && typeof read.file === 'string') : []
-  const byFile = new Map(current.map((read) => [normaliseRepoPath(read.file), { ...read, file: normaliseRepoPath(read.file) }]))
-  for (const read of reads) byFile.set(read.file, { file: read.file, why: read.why })
-  entry.reads = [...byFile.values()].sort((a, b) => a.file < b.file ? -1 : a.file > b.file ? 1 : 0)
-  const path = join(outDir, `${lane}.fences.json`)
-  try { writeFileSync(path, JSON.stringify(copy, null, 2) + '\n') } catch (err) {
-    refuse(`cannot write compiler retry fence register ${path}: ${err?.message || String(err)}`, READS_UNRESOLVED)
-  }
-  return path
 }
 
 function writeRuntimeRegister({ entry, lane, outDir, d }) {
@@ -2332,16 +2521,19 @@ function discoverCommand({ requestPath, lane, laneDir, registerPath }) {
 function discoveredReads(stdout, lane) {
   let parsed
   try { parsed = JSON.parse(textOf(stdout)) } catch {
-    refuse(`compiler read discovery for lane ${lane} produced no JSON: ${JSON.stringify(textOf(stdout).slice(0, 200))}`, READS_UNRESOLVED)
+    throw new Error(`compiler read discovery for lane ${lane} produced no JSON: ${JSON.stringify(textOf(stdout).slice(0, 200))}`)
   }
-  if (!Array.isArray(parsed)) refuse(`compiler read discovery for lane ${lane} produced no array`, READS_UNRESOLVED)
-  return parsed.map((record, index) => {
+  if (!Array.isArray(parsed)) throw new Error(`compiler read discovery for lane ${lane} produced no array`)
+  const byFile = new Map()
+  parsed.forEach((record, index) => {
     const named = (value) => typeof value === 'string' && value.trim() !== ''
     if (!plainObject(record) || !named(record.file) || !named(record.why)) {
-      refuse(`compiler read discovery for lane ${lane} record ${index} is not {file, why}: ${JSON.stringify(record)}`, READS_UNRESOLVED)
+      throw new Error(`compiler read discovery for lane ${lane} record ${index} is not {file, why}: ${JSON.stringify(record)}`)
     }
-    return { file: normaliseRepoPath(record.file), why: record.why }
+    const file = normaliseRepoPath(record.file)
+    if (!byFile.has(file)) byFile.set(file, { file, why: record.why })
   })
+  return [...byFile.values()].sort((a, b) => a.file < b.file ? -1 : a.file > b.file ? 1 : 0)
 }
 
 export function briefMeasure(text) {
@@ -2560,19 +2752,34 @@ export async function compileLane({ lane, batchDir, requestPath, laneDir, regist
     }
   }
 
+  const compileWarnings = []
   let discovered
   try { discovered = await d.spawnAsync(discoverCommand({ lane: name, requestPath: compileRequest, laneDir: checkout, registerPath: authoredRegister })) } catch (err) {
-    refuse(`compiler could not start read discovery for ${name}: ${err?.message || String(err)}`, COMPILE_REFUSED)
+    discovered = { status: null, error: err, stdout: '', stderr: '' }
   }
   if (!discovered || discovered.status !== 0) {
-    refuse(`compiler could not discover reads for lane ${name}: ${JSON.stringify(childFailure(discovered))}`, READS_UNRESOLVED)
+    const discoveryWarning = warn(`compiler could not discover reads for lane ${name}: ${JSON.stringify(childFailure(discovered))}`, READS_UNRESOLVED, { lane: name })
+    compileWarnings.push(discoveryWarning)
+    d.log(discoveryWarning.text)
   }
-  const reads = discoveredReads(discovered.stdout, name)
-  let currentRegister = authoredRegister
+  let reads = []
+  if (discovered && discovered.status === 0) {
+    try {
+      reads = discoveredReads(discovered.stdout, name)
+    } catch (err) {
+      const discoveryWarning = warn(`compiler returned unusable read discovery for lane ${name}: ${err?.message || String(err)}`, READS_UNRESOLVED, { lane: name })
+      compileWarnings.push(discoveryWarning)
+      d.log(discoveryWarning.text)
+    }
+  }
+  // Discovery is observational under ADR-045: never rewrite authored reads or
+  // acknowledge every finding before the compiler's real pass.
   if (reads.length > 0) {
-    const data = registerData({ fences, registerPath: authoredRegister, d })
-    currentRegister = writeUpdatedRegister({ data, lane: name, reads, outDir: outputDir, d })
+    const unacknowledged = warn(`unacknowledged read for lane ${name}: ${reads.map(({ file }) => file).join(', ')}`, READS_UNRESOLVED)
+    compileWarnings.push(unacknowledged)
+    d.log(unacknowledged.text)
   }
+  const currentRegister = authoredRegister
   const issueBodyPath = issueBodyFor({ requestPath: compileRequest, lane: name, checkout, outDir: outputDir, d })
   let result
   try { result = await d.spawnAsync(compileCommand({ lane: name, requestPath: compileRequest, laneDir: checkout, registerPath: currentRegister, outDir: outputDir, baselinePath, issueBodyPath, packOmission })) } catch (err) {
@@ -2584,7 +2791,7 @@ export async function compileLane({ lane, batchDir, requestPath, laneDir, regist
     // Discovery has already run: a compiler that STILL names reads is naming
     // ones this lane cannot resolve, never a retry (#737).
     const detail = parsed.reason ? `still refuses ${parsed.reason} after read discovery` : 'refused after read discovery'
-    refuse(`compiler ${detail} for lane ${name}: ${JSON.stringify(stderr)}`, READS_UNRESOLVED)
+    refuse(`compiler ${detail} for lane ${name}: ${JSON.stringify(stderr)}`, COMPILE_REFUSED)
   }
   const briefPath = join(outputDir, `${name}.brief.md`)
   let brief
@@ -2593,7 +2800,7 @@ export async function compileLane({ lane, batchDir, requestPath, laneDir, regist
   }
   const measured = briefMeasure(brief)
   const proposal = proposalFromBrief(brief)
-  return { lane: name, brief: briefPath, registerPath: currentRegister, proposal, staffing: proposal.staffing, intent: intentFromBrief(brief), bytes: measured.bytes, topSection: measured.topSection }
+  return { lane: name, brief: briefPath, registerPath: currentRegister, proposal, staffing: proposal.staffing, intent: intentFromBrief(brief), bytes: measured.bytes, topSection: measured.topSection, ...(compileWarnings.length > 0 ? { warnings: compileWarnings } : {}) }
 }
 
 export function tierFloor({ files, extra } = {}) {
@@ -2684,17 +2891,19 @@ function recommendationNote(result) {
 }
 
 export function checkArrival({ crew, lane } = {}) {
-  const state = crew && typeof crew === 'object' ? crew : {}
+  const state = crew && typeof crew === 'object' && !Array.isArray(crew) ? crew : {}
+  const observations = []
   if (state.lane_name !== lane) {
-    refuse(`crew lane_name is ${JSON.stringify(state.lane_name)}, expected ${lane}`, FENCE_NOT_ARRIVED)
+    observations.push({ kind: 'arrival', lane, reason: FENCE_NOT_ARRIVED, detail: `crew lane_name is ${JSON.stringify(state.lane_name)}, expected ${lane}` })
   }
   if (!Array.isArray(state.lane_fence)) {
-    refuse(`crew lane_fence is missing or not an array for ${lane}`, FENCE_NOT_ARRIVED)
+    observations.push({ kind: 'arrival', lane, reason: FENCE_NOT_ARRIVED, detail: `crew lane_fence is missing or not an array for ${lane}` })
+    return { lane, siblings: [], externals: [], observations }
   }
   if (state.lane_fence.length !== 0) {
-    refuse(`crew lane_fence for ${lane} has ${state.lane_fence.length} entry(s), expected 0`, FENCE_COUNT_MISMATCH)
+    observations.push({ kind: 'arrival', lane, reason: FENCE_COUNT_MISMATCH, detail: `crew lane_fence for ${lane} has ${state.lane_fence.length} entry(s), expected 0` })
   }
-  return { lane, siblings: [], externals: [] }
+  return { lane, siblings: [], externals: [], ...(observations.length > 0 ? { observations } : {}) }
 }
 
 export function crewJsonPath({ checkout, lane, deps } = {}) {
@@ -3407,14 +3616,14 @@ function prepareDispatchContext(options) {
   const batchAssuranceSpelling = runFlagSpelling(runFlags, 'assurance', 'tier', '--assurance', '--tier')
   execution = execution ?? runFlags.execution ?? variant ?? runFlags.variant
   if (tier === undefined || tier === null) tier = resolveRequestedTier({ tier: runFlags.tier, assurance: runFlags.assurance })
-  const lanes = readBatch({ batchDir, deps: d })
-  const { waves, graph } = planWaves({ lanes })
   const root = typeof checkout === 'string' && checkout.trim() ? checkout : process.cwd()
+  const lanes = readBatch({ batchDir, checkout: root, deps: d })
+  const { waves, graph } = planWaves({ lanes })
   const parent = typeof parentDir === 'string' && parentDir.trim() ? parentDir : dirname(resolve(root))
   const outputDir = typeof outDir === 'string' && outDir.trim() ? resolve(outDir) : join(resolve(batchDir), 'out')
   const fenceReport = checkFences({ fences, lanes, graph, checkout, outDir: outputDir, deps: d })
   const hasAdmissions = fenceReport.admissions.length > 0
-  const effectiveFences = hasAdmissions ? fenceReport.fences : fences
+  const effectiveFences = fenceReport.fences
   // Preflight BEFORE planWorktrees: planWorktrees probes git for existing
   // branches, so an unsupported --variant reached here after the probe and was
   // reported as `branch-taken` when the real cause was an invalid run option
@@ -3451,15 +3660,13 @@ function prepareDispatchContext(options) {
     : typeof runFlags.fences === 'string' && runFlags.fences.trim()
       ? resolve(runFlags.fences)
       : join(outputDir, 'dispatch.fences.json')
-  const registerPath = hasAdmissions ? join(outputDir, 'dispatch.fences.json') : authoredRegisterPath
-  if (dryRun && hasAdmissions) {
-    const data = registerData({ fences: effectiveFences, registerPath, d })
-    try {
-      d.mkdirSync(outputDir, { recursive: true })
-      d.writeFileSync(registerPath, JSON.stringify(data, null, 2) + '\n')
-    } catch (err) {
-      refuse(`cannot write effective dispatch fence register ${registerPath}: ${err?.message || String(err)}`, COMPILE_REFUSED)
-    }
+  const registerPath = join(outputDir, 'dispatch.fences.json')
+  const effectiveData = registerData({ fences: effectiveFences, registerPath, d })
+  try {
+    d.mkdirSync(outputDir, { recursive: true })
+    d.writeFileSync(registerPath, JSON.stringify(effectiveData, null, 2) + '\n')
+  } catch (err) {
+    refuse(`cannot write effective dispatch fence register ${registerPath}: ${err?.message || String(err)}`, COMPILE_REFUSED)
   }
   const unstarted = []
 
@@ -3855,7 +4062,10 @@ function launchDispatchWave(compiled) {
     }
     let crew
     try { crew = JSON.parse(d.readFileSync(path, 'utf8')) } catch (err) {
-      refuse(`crew boot produced no readable crew.json for ${item.lane}: ${err?.message || String(err)}`, FENCE_NOT_ARRIVED)
+      refuse(`crew boot produced no readable crew.json for ${item.lane}: ${err?.message || String(err)}`, BOOT_FAILED)
+    }
+    if (!crew || typeof crew !== 'object' || Array.isArray(crew)) {
+      refuse(`crew boot produced a structurally invalid crew.json for ${item.lane}: expected an object`, BOOT_FAILED)
     }
     // A pane boot's proof is what boot RETURNED, not the argv it was given:
     // crew.mjs writes workspace_id null whenever no workspace was created
@@ -3867,6 +4077,14 @@ function launchDispatchWave(compiled) {
     }
     const arrival = checkArrival({ crew, lane: item.lane })
     const journal = join(dirname(path), 'journal.jsonl')
+    for (const observation of arrival.observations || []) {
+      const row = { at: new Date().toISOString(), event: FENCE_OBSERVATION_EVENT, lane: item.lane, reason: observation.reason, detail: observation.detail }
+      try {
+        d.appendFileSync(journal, `${JSON.stringify(row)}\n`)
+      } catch (err) {
+        d.log(`dispatch-batch: ${FENCE_OBSERVATION_EVENT} journal append failed lane=${item.lane}: ${err?.message || String(err)} observation=${JSON.stringify(observation)}`)
+      }
+    }
     const admissionRows = fenceReport.perLane[item.lane]?.fence_admissions || []
     if (admissionRows.length > 0) {
       let journalExists = false

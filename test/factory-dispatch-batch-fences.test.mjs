@@ -1530,6 +1530,28 @@ DIRECT && test('checkFences does not compare external crew directories', () => {
   }))
 })
 
+// RV1-1: request scope is CONTEXT. `where` names what a lane reads, so it must never reach write
+// authority: authoredPerLane[].files is the sole input to tierFloor and promptSurfaceVerdict, and the
+// same list is published as the lane's write surface. A lane that only READS crew/drive.mjs and
+// crew/roles/planner.md therefore keeps its standard assurance and raises no prompt-surface verdict.
+// Mutation killed: merging the requested surface back into authorityFiles.
+DIRECT && test('RV1-1-where-is-not-write-authority', () => {
+  const report = checkFences({
+    fences: [entry('lane-a', ['README.md'])],
+    lanes: [{ lane: 'lane-a', where: ['crew/drive.mjs', 'crew/roles/planner.md'], assurance: 'standard' }],
+    deps: { home: join(root, 'rv1-1-where-authority-home'), log: () => {} },
+  })
+  const authority = report.authoredPerLane['lane-a'].files
+  assert.deepEqual(authority, ['README.md'])
+  // Automatic admissions may still grow the EFFECTIVE surface; what must never appear in it is a
+  // file the lane only named as request scope.
+  assert.equal(report.perLane['lane-a'].files.includes('crew/drive.mjs'), false)
+  assert.equal(report.perLane['lane-a'].files.includes('crew/roles/planner.md'), false)
+  assert.equal(tierFloor({ files: authority }).forced, null)
+  assert.deepEqual(tierFloor({ files: authority }).hits, [])
+  assert.equal(promptSurfaceVerdict({ files: authority }).promptChange, false)
+})
+
 DIRECT && test('checkFences returns an empty external result contract', () => {
   const report = checkFences({
     fences: [entry('lane-a', ['README.md'])],
@@ -1537,7 +1559,7 @@ DIRECT && test('checkFences returns an empty external result contract', () => {
     externals: ['external-lane'],
     deps: { home: join(root, 'external-empty-contract-home'), log: () => {} },
   })
-  assert.deepEqual(Object.keys(report).sort(), ['admissions', 'authoredPerLane', 'fences', 'perLane', 'warnings'])
+  assert.deepEqual(Object.keys(report).sort(), ['admissions', 'authoredPerLane', 'fences', 'observations', 'perLane', 'warnings'])
 })
 
 DIRECT && test('path reach admits a rooted planner charter literal when unheld', () => {
@@ -2052,42 +2074,35 @@ DIRECT && test('checkFences admits sibling overlap before any worktree subproces
   assert.doesNotThrow(() => checkFences({ fences, lanes }))
 })
 
-DIRECT && test('checkFences still refuses a batch lane absent from the register', () => {
-  // This is the pre-existing direction of the same invariant: batch membership without a register entry.
-  refusal(() => checkFences({
+DIRECT && test('checkFences records a batch lane absent from the register', () => {
+  const report = checkFences({
     fences: [entry('lane-a', ['crew/owned-a.mjs'])],
     lanes: [
       { lane: 'lane-a', where: ['crew/owned-a.mjs'] },
       { lane: 'lane-b', where: ['crew/owned-b.mjs'] },
     ],
-  }), 'lane-unfenced')
+  })
+  assert.equal(report.observations.some(({ lane, reason }) => lane === 'lane-b' && reason === 'fence-register-mismatch'), true)
+  assert.deepEqual(report.perLane['lane-b'].files, [])
+  assert.deepEqual(report.perLane['lane-b'].where, ['crew/owned-b.mjs'])
 })
 
-DIRECT && test('checkFences pins own coverage, register membership, and scope entry shape', () => {
-  refusal(() => checkFences({
+DIRECT && test('checkFences treats own coverage and scope shape as contextual observations', () => {
+  const uncovered = checkFences({
     fences: [entry('lane-a', ['crew/owned.mjs'])],
-    lanes: [{ lane: 'lane-a', where: ['crew/not-owned.mjs'] }],
-  }), 'where-outside-fence')
-  refusal(() => checkFences({
-    fences: [entry('lane-a', ['crew/owned.mjs'])],
-    lanes: [{ lane: 'lane-a', where: ['crew/owned.mjs'], creates: ['crew/not-owned.mjs'] }],
-  }), 'where-outside-fence')
-  refusal(() => checkFences({
-    fences: [entry('lane-a', ['crew/owned.mjs'])],
-    lanes: [{ lane: 'lane-b', where: ['crew/owned.mjs'] }],
-  }), 'lane-unfenced')
-  refusal(() => checkFences({
-    fences: [entry('lane-a', ['crew/*'])],
-    lanes: [{ lane: 'lane-a', where: ['crew/owned.mjs'] }],
-  }), 'scope-entry-invalid')
-  refusal(() => checkFences({
-    fences: [entry('lane-a', [null])],
-    lanes: [{ lane: 'lane-a', where: ['null'] }],
-  }), 'scope-entry-invalid')
-  refusal(() => checkFences({
-    fences: [{ lane: 'lane-a', files: 'crew/owned.mjs' }],
-    lanes: [{ lane: 'lane-a', where: ['crew/owned.mjs'] }],
-  }), 'scope-entry-invalid')
+    lanes: [{ lane: 'lane-a', where: ['crew/not-owned.mjs'], creates: ['crew/also-not-owned.mjs'] }],
+  })
+  assert.deepEqual(uncovered.perLane['lane-a'].files, ['crew/owned.mjs'])
+  assert.deepEqual(uncovered.perLane['lane-a'].where, ['crew/not-owned.mjs'])
+  assert.deepEqual(uncovered.perLane['lane-a'].creates, ['crew/also-not-owned.mjs'])
+  for (const fences of [
+    [entry('lane-a', ['crew/*'])],
+    [entry('lane-a', [null])],
+    [{ lane: 'lane-a', files: 'crew/owned.mjs' }],
+  ]) {
+    const report = checkFences({ fences, lanes: [{ lane: 'lane-a', where: ['crew/owned.mjs'] }] })
+    assert.equal(report.observations.some(({ reason }) => reason === 'scope-entry-invalid'), true)
+  }
 })
 
 DIRECT && test('A1 warns for a pinned file in the write surface when its manifest is unfenced', () => {

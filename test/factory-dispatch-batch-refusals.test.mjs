@@ -385,7 +385,7 @@ test('a trailing-slash directory write surface admits the same unheld reaching t
   assert.equal(result.report.perLane['lane-a'].files.includes('crew/crew.test.mjs'), true)
 })
 
-test('register-superset remains after unheld test-reach admission', () => {
+test('register-superset is an observation after unheld test-reach admission', () => {
   const checkout = namedReachFixture('precedence')
   const result = reachCheck({
     checkout,
@@ -393,8 +393,8 @@ test('register-superset remains after unheld test-reach admission', () => {
     surface: ['crew/adapters/adapter-pi.mjs'],
     extraFences: [entry('lane-ghost', ['docs/ghost.md'])],
   })
-  assert.ok(result.error instanceof BatchRefusal)
-  assert.equal(result.error.reason, 'fence-register-mismatch')
+  assert.equal(result.error, null)
+  assert.equal(result.report.observations.some(({ lane, reason }) => lane === 'lane-ghost' && reason === 'fence-register-mismatch'), true)
 })
 
 test('malformed depends_on values refuse batch-unreadable at their request path', () => {
@@ -430,7 +430,7 @@ test('a refused compile names its lane and cannot be masked by a sibling success
       return { status: 0, stdout: '', stderr: '' }
     },
   }), (error) => error instanceof BatchRefusal
-    && error.reason === 'reads-unresolved'
+    && error.reason === 'compile-refused'
     && error.message.includes('lane-a'))
   assert.deepEqual(started.sort(), ['lane-a', 'lane-b'])
   assert.equal(boots, 0)

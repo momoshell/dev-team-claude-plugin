@@ -566,6 +566,7 @@ const RECORDED_SUITE_SAMPLES = Object.freeze([
   ["test/factory-make-brief.test.mjs",30.59013679200411,156,null],
   ["test/factory-model-eval.test.mjs",0.10144804200530053,9,null],
   ["test/factory-probe-repo.test.mjs",11.686587416023016,41,null],
+  ["test/factory-pr-review.test.mjs",0.17961495900154115,15,null],
   ["test/factory-prove-mutations.test.mjs",3.1957976669967176,22,null],
   ["test/factory-reap-stale.test.mjs",0.29526654198765756,33,null],
   ["test/factory-seams.test.mjs",1.233184374988079,14,null],
@@ -603,6 +604,11 @@ const RECORDED_SLOWEST_TESTS = Object.freeze({
   "context pack records complete source data beyond argv limits",
   "indexing a 70k-symbol file stays within a countable byte budget",
   "scope validation refuses unslashed directories without changing the rendered surface"
+]),
+  "test/factory-pr-review.test.mjs": Object.freeze([
+  "B1-partial",
+  "B1-teardown",
+  "A1"
 ]),
   "test/factory-intake.test.mjs": Object.freeze([
   "a malformed protectedPaths is refused rather than swallowed",

@@ -197,6 +197,45 @@ test('BC2', () => {
   assert.equal(charter.split(sentence).length - 1, 1)
 })
 
+test('builder lean rules and lean-build skill stay exact', () => {
+  const charterLines = readFileSync(join(REPO_ROOT, 'crew', 'roles', 'builder.md'), 'utf8').split('\n')
+  const rules = [
+    '- Before writing code, reuse what is already here.',
+    '- If not, use the standard library.',
+    '- If not, use a platform feature.',
+    '- If not, use an installed dependency.',
+    '- For a bug fix, grep every caller, fix the root cause, and put one guard in the shared function.',
+    '- Leave one runnable check for the behavior you changed.',
+    '- Output the code, then at most three lines of `skipped X, add when Y`.',
+  ]
+  for (const rule of rules) assert.equal(charterLines.filter((line) => line === rule).length, 1, rule)
+
+  const skillLines = readFileSync(join(REPO_ROOT, 'skills/lean-build/SKILL.md'), 'utf8').split('\n')
+  assert.equal(skillLines[0], '---')
+  assert.equal(skillLines[1], 'name: lean-build')
+  assert.match(skillLines[2] || '', /^description: .+$/)
+  assert.equal(skillLines[3], '---')
+  for (const line of [
+    'Apply the ladder before writing new code.',
+    'Every review tag requires a concrete replacement.',
+  ]) assert.equal(skillLines.filter((candidate) => candidate === line).length, 1, line)
+  for (const tag of ['delete', 'stdlib', 'native', 'yagni', 'shrink']) assert.equal(skillLines.some((line) => line.includes(`\`${tag}\``)), true, tag)
+  for (const example of [
+    "- Cache: replace a hand-built cache with Python's `functools.lru_cache` (the platform LRU).",
+    '- Validator: replace a custom validator with one line: `const valid = schema.safeParse(value).success`.',
+    '- Date picker: replace a custom widget with `<input type="date">`.',
+  ]) assert.equal(skillLines.filter((line) => line === example).length, 1, example)
+  for (const limit of [
+    'trust-boundary validation',
+    'data-loss error handling',
+    'security checks',
+    'anything the task explicitly requested',
+    'closed enums',
+    'honest absence with a reason',
+    'a denominator beside every rate',
+  ]) assert.equal(skillLines.some((line) => line.includes(limit)), true, limit)
+})
+
 test('the shared charter and validator agree on the findings contract', () => {
   const charter = readFileSync(new URL('./roles/reviewer.md', import.meta.url), 'utf8')
   const start = charter.indexOf('## Envelope details fields')
@@ -524,7 +563,7 @@ test('runtime composed charter sizes stay at their ceilings', () => {
   const rolesDir = join(REPO_ROOT, 'crew', 'roles')
   const measured = compiledCharterBytes(rolesDir)
   const sizes = Object.fromEntries(Object.entries(measured).map(([role, entry]) => [role, entry.bytes]))
-  const expected = { builder: 8878, lead: 12813, planner: 20639, reviewer: 11133, 'tech-lead': 9962 }
+  const expected = { builder: 7781, lead: 12813, planner: 20639, reviewer: 11133, 'tech-lead': 9962 }
   const summary = Object.entries(measured).map(([role, entry]) => `${role}=${entry.bytes}`).join(', ')
   assert.deepEqual(sizes, expected, `composed charter sizes: ${summary}`)
   for (const [role, ceiling] of Object.entries(CHARTER_CEILINGS)) {

@@ -519,15 +519,21 @@ test('BG1', () => {
   }
   assert.deepEqual(
     piSeatCommand(builder),
-    'env DEVTEAM_WORKER=1 CREW_ROLE=builder CREW_TASK_DIR="/tmp/crew-task" pi --model openai-codex/gpt-5.6 --tools "read,bash,edit,write,grep,find,ls,retrieve" --no-extensions -e "/repo/crew/pi/extensions/builderloop.ts" -e "/repo/crew/pi/extensions/readgate.ts" -e "/repo/crew/pi/extensions/skeletonread.ts" --no-skills --append-system-prompt "/tmp/role-builder.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
+    'env DEVTEAM_WORKER=1 CREW_ROLE=builder CREW_TASK_DIR="/tmp/crew-task" pi --model openai-codex/gpt-5.6 --tools "read,bash,edit,write,grep,find,ls,retrieve" --no-extensions -e "/repo/crew/pi/extensions/builderloop.ts" -e "/repo/crew/pi/extensions/readgate.ts" -e "/repo/crew/pi/extensions/skeletonread.ts" --skill "/repo/skills/lean-build/SKILL.md" --append-system-prompt "/tmp/role-builder.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
   )
-  assert.equal(piSeatCommand(builder).split(' -e ').length - 1, 3)
-  assert.ok(piSeatCommand(builder).includes('-e "/repo/crew/pi/extensions/builderloop.ts"'))
+  const builderCommand = piSeatCommand(builder)
+  assert.equal(builderCommand.split(' -e ').length - 1, 3)
+  assert.equal(builderCommand.includes('--skill "/repo/skills/lean-build/SKILL.md"'), true)
+  assert.equal(builderCommand.includes('--no-skills'), false)
+  assert.ok(builderCommand.includes('-e "/repo/crew/pi/extensions/builderloop.ts"'))
   assert.ok(piSeatCommand(builder).includes('-e "/repo/crew/pi/extensions/readgate.ts"'))
   const claudeBuilder = grantsFor(register, 'builder', { ...PIN_ROOT, agent: 'claude' })
   assert.deepEqual(claudeBuilder.extensions, [])
-  assert.equal(seatCommand({ ...builder, grants: claudeBuilder }).includes('/repo/crew/pi/extensions/builderloop.ts'), false)
-  assert.equal(seatCommand({ ...builder, grants: claudeBuilder }).includes('/repo/crew/pi/extensions/readgate.ts'), false)
+  assert.throws(
+    () => seatCommand({ ...builder, grants: claudeBuilder }),
+    (error) => error.reason === 'grant-unsupported'
+      && error.message.includes('/repo/skills/lean-build/SKILL.md'),
+  )
   for (const role of ROLE_ORDER.filter((name) => name !== 'builder')) {
     const grants = grantsFor(register, role, { ...PIN_ROOT, agent: 'pi' })
     assert.doesNotThrow(() => assertGrantsBacked(role, grants, register, { agent: 'pi' }))
@@ -536,9 +542,10 @@ test('BG1', () => {
       tools: SEAT_DEFAULTS[role].tools, deny: SEAT_DEFAULTS[role].deny, grants,
     })
     assert.equal(command.includes('/repo/crew/pi/extensions/builderloop.ts'), false)
+    assert.equal(command.includes('/repo/skills/lean-build/SKILL.md'), false)
     assert.equal(command.includes('/repo/crew/pi/extensions/readgate.ts'), role === 'planner' || role === 'tech-lead')
   }
-  for (const role of ROLE_ORDER) {
+  for (const role of ROLE_ORDER.filter((name) => name !== 'builder')) {
     const grants = grantsFor(register, role, { ...PIN_ROOT, agent: 'claude' })
     const command = seatCommand({
       ...builder, role, model: 'opus', promptFile: `/tmp/role-${role}.md`,
@@ -564,7 +571,7 @@ test('BG2', () => {
       '--session-id', 'builder', '--append-system-prompt', '/tmp/role-builder.md',
       '--tools', 'read,bash,edit,write,grep,find,ls,retrieve', '--no-context-files', '--no-extensions',
       '-e', '/repo/crew/pi/extensions/builderloop.ts', '-e', '/repo/crew/pi/extensions/readgate.ts',
-      '-e', '/repo/crew/pi/extensions/skeletonread.ts', '--no-skills',
+      '-e', '/repo/crew/pi/extensions/skeletonread.ts', '--skill', '/repo/skills/lean-build/SKILL.md',
     ],
     env: { CREW_ROLE: 'builder', CREW_TASK_DIR: '/tmp/crew-task' },
   })
@@ -572,6 +579,9 @@ test('BG2', () => {
   assert.equal(builder.args.includes('/repo/crew/pi/extensions/builderloop.ts'), true)
   assert.equal(builder.args.includes('/repo/crew/pi/extensions/readgate.ts'), true)
   assert.equal(builder.args.includes('/repo/crew/pi/extensions/skeletonread.ts'), true)
+  assert.equal(builder.args.filter((value) => value === '--skill').length, 1)
+  assert.equal(builder.args.includes('/repo/skills/lean-build/SKILL.md'), true)
+  assert.equal(builder.args.includes('--no-skills'), false)
   for (const role of ROLE_ORDER.filter((name) => name !== 'builder')) {
     const grants = grantsFor(register, role, { ...PIN_ROOT, agent: 'pi' })
     assert.doesNotThrow(() => assertGrantsBacked(role, grants, register, { agent: 'pi' }))
@@ -581,6 +591,7 @@ test('BG2', () => {
       env: { CREW_ROLE: role, CREW_TASK_DIR: '/tmp/crew-task' }, grants,
     })
     assert.equal(command.args.includes('/repo/crew/pi/extensions/builderloop.ts'), false)
+    assert.equal(command.args.includes('/repo/skills/lean-build/SKILL.md'), false)
     assert.equal(command.args.includes('/repo/crew/pi/extensions/readgate.ts'), role === 'planner' || role === 'tech-lead')
   }
 })
@@ -768,13 +779,17 @@ test('assertCapabilities rejects an adapter that cannot enforce tool denial, nam
   assert.doesNotThrow(() => assertCapabilities('builder', 'claude', { tool_deny: true }))
 })
 
-test('resolveAdapters rejects an unknown --agent-<role> naming the missing file, resolves the default claude adapter otherwise', async () => {
+test('resolveAdapters rejects an unknown --agent-<role> and refuses the shipped default claude builder grant', async () => {
   await assert.rejects(
-    () => resolveAdapters(['builder'], { 'agent-builder': 'nope' }),
+    () => resolveAdapters(['builder'], { 'agent-builder': 'nope' }, null, { register: capabilityRegister() }),
     /adapter-nope\.mjs/,
   )
-  const r = await resolveAdapters(['builder'], {})
-  assert.equal(r.builder.name, 'claude')
+  await assert.rejects(
+    () => resolveAdapters(['builder'], {}),
+    (error) => error.reason === 'grant-unsupported'
+      && error.message.includes('builder')
+      && error.message.includes('skills'),
+  )
 })
 
 test('resolveAdapters tags a refusal with the role and roster cell it rejected', async () => {
@@ -790,10 +805,11 @@ test('resolveAdapters tags a refusal with the role and roster cell it rejected',
 })
 
 test('resolveAdapters boots headless claude and refuses the unshipped pi pair', async () => {
-  const r = await resolveAdapters(['builder'], { headless: 'builder' })
+  const register = capabilityRegister()
+  const r = await resolveAdapters(['builder'], { headless: 'builder' }, null, { register })
   assert.equal(r.builder.transport, 'headless-json')
   await assert.rejects(
-    () => resolveAdapters(['builder'], { headless: 'builder', 'agent-builder': 'pi' }),
+    () => resolveAdapters(['builder'], { headless: 'builder', 'agent-builder': 'pi' }, null, { register }),
     (err) => err.reason === 'capability-shortfall'
       && /headless-json/.test(err.message)
       && /coding_agents\.pi\.transports/.test(err.message),
@@ -873,6 +889,7 @@ test('SEAT_DEFAULTS requires subagents for the planner ALONE — the scout-comma
 
 test('every roster tier still boots its seats — the requirement cannot strand a shipped tier', async () => {
   const roster = shippedRoster()
+  for (const tier of ['mechanical', 'build', 'judge']) assert.equal(roster.tiers[tier]?.builder?.agent, 'pi', `${tier} builder must remain pi`)
   for (const tier of Object.keys(roster.tiers)) {
     const { roles, seats } = resolveTier(roster, tier, {})
     await assert.doesNotReject(
@@ -885,7 +902,10 @@ test('every roster tier still boots its seats — the requirement cannot strand 
 test('resolveAdapters boots pi headless-rpc and refuses claude on that transport', async () => {
   const r = await resolveAdapters(['builder'], { 'headless-rpc': 'builder', 'agent-builder': 'pi' })
   assert.equal(r.builder.transport, 'headless-rpc')
-  await assert.rejects(() => resolveAdapters(['builder'], { 'headless-rpc': 'builder' }), /claude.*headless-rpc/)
+  await assert.rejects(
+    () => resolveAdapters(['builder'], { 'headless-rpc': 'builder' }, null, { register: capabilityRegister() }),
+    /claude.*headless-rpc/,
+  )
 })
 
 test('resolveWorkerBin prefers an explicit existing path over the environment', () => {
@@ -1026,7 +1046,7 @@ function callCounter() {
   return fn
 }
 
-async function bootSeatRows({ task = 'seat-writer', tier = 'build', args = {}, openRun: openRunDep = null, afterBoot = null, rosterValue = roster, workflowDir = null, readWorkflowFile = null } = {}) {
+async function bootSeatRows({ task = 'seat-writer', tier = 'build', args = {}, openRun: openRunDep = null, afterBoot = null, rosterValue = roster, workflowDir = null, readWorkflowFile = null, register = null } = {}) {
   const home = scratchDir(`crew-seat-writer-${task}-home-`)
   const { root: checkoutRoot, checkout } = testCheckout(`crew-seat-writer-${task}-checkout-`)
   const rosterPath = join(home, 'roster.json')
@@ -1046,6 +1066,7 @@ async function bootSeatRows({ task = 'seat-writer', tier = 'build', args = {}, o
   const deps = {
     cmux: callCounter(), tree: callCounter(), renameTab: callCounter(),
     ...(openRunDep ? { openRun: openRunDep } : {}),
+    ...(register ? { register } : {}),
     ...(workflowDir ? { workflowDir } : {}),
     ...(readWorkflowFile ? { readWorkflowFile } : {}),
   }
@@ -1206,7 +1227,7 @@ test('E1 run seat assertion is fed by boot', async () => {
 })
 
 test('F1 untiered boot writes no run seats', async () => {
-  const rows = await bootSeatRows({ task: 'seat-writer-f1', tier: null, args: { roles: 'builder' } })
+  const rows = await bootSeatRows({ task: 'seat-writer-f1', tier: null, args: { roles: 'builder' }, register: capabilityRegisterForBoot() })
   assert.equal(rows.length, 0)
 })
 
@@ -1496,7 +1517,7 @@ test('a refused boot creates no seat, no workspace and no crew.json', async () =
     await withBreakerEnv({ DEVTEAM_LEDGER_DB: undefined }, () => withHome(home, () => assert.rejects(
       () => bootCmd(
         { task, checkout, roles: 'lead,planner,builder,reviewer' },
-        { cmux, tree, renameTab: callCounter(), descendantDeps: { kill: () => true, snapshot: () => ({ ok: true, rows: new Map([[5000, { pid: 5000, pgid: 5000, start: 'live-root', stat: 'Ss' }]]) }), sleep: () => {} } },
+        { cmux, tree, renameTab: callCounter(), register: capabilityRegisterForBoot(), descendantDeps: { kill: () => true, snapshot: () => ({ ok: true, rows: new Map([[5000, { pid: 5000, pgid: 5000, start: 'live-root', stat: 'Ss' }]]) }), sleep: () => {} } },
       ),
       (error) => error.reason === 'descendants-alive',
     )))
@@ -1677,7 +1698,7 @@ test('boot refusal records a run-less boot-refusal row naming the rejected cell'
   try {
     await withHome(home, () => assert.rejects(
       () => bootCmd({ task: 'boot-refusal', checkout, roles: 'lead,planner,builder,reviewer', 'agent-reviewer': 'no-such-agent' }, {
-        cmux: callCounter(), tree: callCounter(), renameTab: callCounter(),
+        cmux: callCounter(), tree: callCounter(), renameTab: callCounter(), register: capabilityRegisterForBoot(),
       }),
       /unknown agent adapter/,
     ))
@@ -4736,7 +4757,7 @@ test('a mixed boot refuses with mixed-transport before any workspace or state di
     await withHome(home, () => assert.rejects(
       () => bootCmd(
         { task, checkout, roles: 'lead,planner,builder,reviewer', headless: 'builder', 'claude-bin': process.execPath },
-        { cmux, tree, renameTab },
+        { cmux, tree, renameTab, register: capabilityRegisterForBoot() },
       ),
       (err) => {
         assert.equal(err.code, 'mixed-transport')
@@ -4790,19 +4811,20 @@ test('the charter ceilings and source budgets are the delivered bytes, below the
   assert.equal(Object.isFrozen(CHARTER_SOURCE_BUDGET), true)
   assert.equal(Object.isFrozen(CHARTER_BASELINE_BYTES), true)
   assert.deepEqual(CHARTER_BASELINE_BYTES, { _shared: 3432, builder: 5169, lead: 9378, planner: 16930, reviewer: 7697, 'tech-lead': 6529 })
-  assert.deepEqual(CHARTER_SOURCE_BUDGET, { _shared: 3750, builder: 5126, lead: 9061, planner: 16887, reviewer: 7381, 'tech-lead': 6210 })
-  assert.deepEqual(CHARTER_CEILINGS, { builder: 8878, lead: 12813, planner: 20639, reviewer: 11133, 'tech-lead': 9962 })
+  assert.deepEqual(CHARTER_SOURCE_BUDGET, { _shared: 3750, builder: 4029, lead: 9061, planner: 16887, reviewer: 7381, 'tech-lead': 6210 })
+  assert.deepEqual(CHARTER_CEILINGS, { builder: 7781, lead: 12813, planner: 20639, reviewer: 11133, 'tech-lead': 9962 })
   for (const value of [...Object.values(CHARTER_BASELINE_BYTES), ...Object.values(CHARTER_SOURCE_BUDGET), ...Object.values(CHARTER_CEILINGS)]) assert.equal(Number.isInteger(value), true)
   for (const role of roles) {
     assert.equal(CHARTER_CEILINGS[role], CHARTER_SOURCE_BUDGET._shared + 2 + CHARTER_SOURCE_BUDGET[role])
     assert.ok(CHARTER_SOURCE_BUDGET[role] < CHARTER_BASELINE_BYTES[role])
   }
-  assert.equal(CHARTER_SOURCE_TOTAL_BUDGET, 48415)
+  assert.equal(CHARTER_SOURCE_TOTAL_BUDGET, 47318)
   assert.equal(CHARTER_SOURCE_TOTAL_BUDGET, Object.values(CHARTER_SOURCE_BUDGET).reduce((sum, value) => sum + value, 0))
   assert.ok(CHARTER_SOURCE_TOTAL_BUDGET < 49135)
 
   const source = charterFileBytes()
   assert.deepEqual(Object.fromEntries(Object.entries(source).map(([name, entry]) => [name, entry.bytes])), CHARTER_SOURCE_BUDGET)
+  assert.equal(source.builder.bytes, CHARTER_SOURCE_BUDGET.builder, `builder source bytes: ${source.builder.bytes}`)
   const shared = readFileSync(join(ROOT, 'crew', 'roles', '_shared.md'), 'utf8')
   for (const name of files) {
     assert.equal(source[name].reason, null)
@@ -4888,7 +4910,7 @@ test('boot records what each seat\'s charter costs per turn', async () => {
     try {
       await withoutMemoryEnv(() => withHome(home, () => bootCmd(
         { task, checkout, roles: roles.join(','), 'headless-all': true, 'claude-bin': process.execPath },
-        { cmux: callCounter(), tree: callCounter(), renameTab: callCounter() },
+        { cmux: callCounter(), tree: callCounter(), renameTab: callCounter(), register: capabilityRegisterForBoot() },
       )))
     } finally { process.stdout.write = previousWrite }
     const dir = testCrewDir(home, checkout, task)
@@ -7603,6 +7625,13 @@ test("a child run with no suite in its spec drives the owner's command", () => {
 
 // --- capability register ----------------------------------------------------
 
+function capabilityRegisterForBoot() {
+  const base = capabilityRegister()
+  return capabilityRegister({ roles: {
+    planner: { ...base.roles.planner, tools: ['Task'] },
+  } })
+}
+
 function capabilityRegister(overrides = {}) {
   const grant = (extra = {}) => ({ tools: [], extensions: [], agents: [], skills: [], advisor: false, requires: [], mcp_servers: [], ...extra })
   const base = {
@@ -8591,7 +8620,7 @@ test('the shipped register is where the fan-out grant lives', async () => {
     assert.deepEqual(register.roles[role].tools, ['planner', 'reviewer'].includes(role) ? ['Task'] : [])
     assert.deepEqual(register.roles[role].extensions, [])
     assert.deepEqual(register.roles[role].agents, [])
-    assert.deepEqual(register.roles[role].skills, [])
+    assert.deepEqual(register.roles[role].skills, role === 'builder' ? ['skills/lean-build/SKILL.md'] : [])
     assert.equal(register.roles[role].advisor, false)
   }
   for (const tier of Object.keys(roster.tiers)) {

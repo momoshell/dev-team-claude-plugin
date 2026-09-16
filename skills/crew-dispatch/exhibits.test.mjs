@@ -310,6 +310,7 @@ test('I1 tracked non-test owners are covered by dynamic reach census', () => {
     ['visualizer/web/src/lib/WorkflowsPage.svelte', ['test/visualizer-panels.test.mjs']],
     ['visualizer/web/src/lib/WorkflowGraph.svelte', ['test/visualizer-panels.test.mjs']],
     ['visualizer/web/src/lib/stage-docs.json', ['test/visualizer-panels.test.mjs']],
+    ['skills/lean-build/SKILL.md', ['crew/drive-docs.test.mjs']],
   ]
   const addedTests = ['test/factory-agent-doctor.test.mjs']
   const currentReach = collectTestReach({ checkout: ROOT })

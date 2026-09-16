@@ -162,8 +162,10 @@ export const MEMORY_ROLES = Object.freeze(['lead', 'planner'])
 // Must stay key-identical to SEAT_DEFAULTS (pinned by a test).
 export const ROLE_ORDER = Object.freeze(['lead', 'planner', 'builder', 'reviewer', 'tech-lead'])
 
-const CHARTER_ARMS = Object.freeze(['control', 'terse-tail'])
+const CHARTER_ARMS = Object.freeze(['control', 'terse-tail', 'lean'])
 const CHARTER_TERSE_TAIL = '\n\nBe terse: state the result in the fewest words that carry it, and do not restate context the reader already has.\n'
+export const CHARTER_LEAN_TAIL = '\n\nBefore adding code, apply these checks in order: delete, stdlib, native, yagni, shrink; name a concrete replacement for each tag; implement the smallest satisfying change; never simplify away the hard rules your charter already lists.\n'
+const CHARTER_TAILS = Object.freeze({ control: '', 'terse-tail': CHARTER_TERSE_TAIL, lean: CHARTER_LEAN_TAIL, })
 
 const FFF_EXTENSION_SUFFIX = '/crew/pi/extensions/fff.ts'
 const FFF_MCP_NAME = 'fff'
@@ -2720,7 +2722,8 @@ export function charterBytesRecord(taskDir, roles, sections = {}, deps = {}) {
 
 export function composeRolePrompt(shared, card, section = '', charterArm = 'control') {
   const control = `${shared}\n\n${card}${section ? `\n\n${section}` : ''}`
-  return charterArm === 'terse-tail' ? `${control}${CHARTER_TERSE_TAIL}` : control
+  const tail = Object.hasOwn(CHARTER_TAILS, charterArm) ? CHARTER_TAILS[charterArm] : ''
+  return `${control}${tail}`
 }
 
 function writeRolePrompt(role, taskDir, section = '', charterArm = 'control') {
@@ -3200,7 +3203,7 @@ export async function bootCmd(args, deps = {}) {
   }
 
   const crew = {
-    schema_version: 3, task: taskSlug, checkout,
+    schema_version: 3, task: taskSlug, checkout, charter_arm: charterArm,
     workspace_id: workspace ? workspace.id : null, window_id: windowId ?? null,
     roles, members, task_return: join(paths.returnsDir, 'task.json'),
     run_configuration: bootConfigRecord,
@@ -3224,7 +3227,7 @@ export async function bootCmd(args, deps = {}) {
     ? await shadowPickBoot({ roster, tier: tierName, seats: tierSeats, sources, adapters, registry, ladder, env: bootEnv, dbPath: ledgerDbPath() })
     : null
   logLine(join(paths.dir, 'journal.jsonl'), {
-    at: new Date().toISOString(), event: 'boot', roles,
+    at: new Date().toISOString(), event: 'boot', roles, charter_arm: charterArm,
     run_configuration: bootConfigRecord,
     ...turnCeilingsJournalPatch(turnCeilingRecord),
     models: Object.fromEntries(roles.map((r) => [r, members[r].model])),
@@ -3260,7 +3263,7 @@ export async function bootCmd(args, deps = {}) {
     const emitter = openRunDep({ stateDir: paths.dir, repoSlug: paths.repo, taskSlug, dbPath: ledgerDbPath() })
     emitter.recordSeats(effectiveSeats)
   } catch { /* instrumentation is never load-bearing */ }
-  process.stdout.write(`${JSON.stringify({ workspace_id: workspace ? workspace.id : null, members, task_dir: paths.taskDir, crew_json: join(paths.dir, 'crew.json'), charter_bytes: charter.bytes })}\n`)
+  process.stdout.write(`${JSON.stringify({ workspace_id: workspace ? workspace.id : null, members, task_dir: paths.taskDir, crew_json: join(paths.dir, 'crew.json'), charter_arm: charterArm, charter_bytes: charter.bytes })}\n`)
 }
 
 function ledgerDbPath() {

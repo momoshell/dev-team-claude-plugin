@@ -10,6 +10,7 @@ import { openLedger, USAGE_ABSENT_CAUSES } from '../scripts/factory/ledger.mjs'
 import { TURN_CEILING_FLAGS } from './drive.mjs'
 import { openRun, _resetNoticeGuardsForTest } from '../scripts/factory/emit.mjs'
 import { SEAT_DEFAULTS, FANOUT_TOOLS, ROLE_ORDER, resolveAdapters, resolveTier, loadLadder, shadowCandidates, shadowExclusion, shadowPick, shadowPickBoot, SHADOW_EXCLUSIONS, SHADOW_OUTCOMES, SHADOW_ABSENT, loadRoutingPolicy, materialiseRoutingChoice, replayRoutingChoice, ROUTING_EXCLUSION_REASONS, ROUTING_PRECEDENCE, bootCmd, runCmd, runExitCode, runOutcome, RUN_EXIT_CODES, RUN_EXIT_UNEXPECTED, RUN_START_EVENT, readHead, readBranch, teardownDecision, stagesFromJournal, resolveValidationLane, awaitSeatsReady, teardownCore, installExitMarker, installRunFinalizers, writeTerminalLine, terminalLineSeen, runScopedPaths, returnsInheritanceRecord, RETURNS_INHERITANCE_REASONS, resolveTaskReturn, archivedReturn, UsageError, KNOWN_FLAGS, ROLE_FLAG_PREFIXES, REQUIRED_FLAGS, BOOT_ONLY_FLAGS, assertUsage, parseArgs, FLAG_VALUE_REFUSAL, FLAG_VALUE_CONTRACT, BOOLEAN_FLAGS, resolveTimeoutS, TIMEOUT_S_REFUSAL, TIMEOUT_S_DEFAULT, MEMORY_ROLES, CHARTER_CEILINGS, CAPABILITY_REFUSALS, loadCapabilities, grantsFor, assertGrantsBacked, assertFanoutCoherent, deniedFanout, EMPTY_GRANTS, probeLocalEndpoint, effectiveTools, persistedAdapters, GRANT_SNAPSHOT_REFUSAL, ADVISOR_CONFIG_VERSION, ADVISOR_BOOT_REFUSALS, SAFE_MODEL, classifyAdvisorCell, advisorBootRecord, advisorJournalRecord, advisorEndpointOrigin, assertAdvisorCellLive, advisorManifest, assertAdvisorManifest, packageSuite, SUITE_OWNER_PATH, SUITE_REFUSAL, PANE_TURN_CEILING_UNMEASURED, paneTurnCeilingRefusals, resumeCmd, validateResumeState, RESUME_REFUSALS, RESUME_REFUSAL_NAMES, refuseResume } from './crew.mjs'
+import { composeRolePrompt } from './crew.mjs'
 import { runChild, packageSuite as childPackageSuite, SUITE_OWNER_PATH as CHILD_SUITE_OWNER_PATH } from './child.mjs'
 import { driveTask, resumeWorktreeSha256 } from './drive.mjs'
 import { seatCommand } from './adapters/adapter-claude.mjs'
@@ -23,7 +24,7 @@ import { WORKFLOW_REFUSALS, SEAT_BEARING_STAGES, loadWorkflow, validateWorkflow 
 import { shippedRoster, roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter, capabilityRegister, capabilityFixtureRoot } from './crew-test-helpers.mjs'
 
 // Keep lexical import reach visible before byte-pinned regex test bodies.
-void [test, after, assert, createHash, readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync, chmodSync, symlinkSync, cpSync, realpathSync, execSync, spawn, spawnSync, tmpdir, homedir, join, basename, dirname, fileURLToPath, openLedger, USAGE_ABSENT_CAUSES, TURN_CEILING_FLAGS, openRun, _resetNoticeGuardsForTest, SEAT_DEFAULTS, FANOUT_TOOLS, ROLE_ORDER, resolveAdapters, resolveTier, loadLadder, shadowCandidates, shadowExclusion, shadowPick, shadowPickBoot, SHADOW_EXCLUSIONS, SHADOW_OUTCOMES, SHADOW_ABSENT, loadRoutingPolicy, materialiseRoutingChoice, replayRoutingChoice, ROUTING_EXCLUSION_REASONS, ROUTING_PRECEDENCE, bootCmd, runCmd, runExitCode, runOutcome, RUN_EXIT_CODES, RUN_EXIT_UNEXPECTED, RUN_START_EVENT, readHead, readBranch, teardownDecision, stagesFromJournal, resolveValidationLane, awaitSeatsReady, teardownCore, installExitMarker, installRunFinalizers, writeTerminalLine, terminalLineSeen, runScopedPaths, returnsInheritanceRecord, RETURNS_INHERITANCE_REASONS, resolveTaskReturn, archivedReturn, UsageError, KNOWN_FLAGS, ROLE_FLAG_PREFIXES, REQUIRED_FLAGS, BOOT_ONLY_FLAGS, assertUsage, parseArgs, FLAG_VALUE_REFUSAL, FLAG_VALUE_CONTRACT, BOOLEAN_FLAGS, resolveTimeoutS, TIMEOUT_S_REFUSAL, TIMEOUT_S_DEFAULT, MEMORY_ROLES, CHARTER_CEILINGS, CAPABILITY_REFUSALS, loadCapabilities, grantsFor, assertGrantsBacked, assertFanoutCoherent, deniedFanout, EMPTY_GRANTS, probeLocalEndpoint, effectiveTools, persistedAdapters, GRANT_SNAPSHOT_REFUSAL, ADVISOR_CONFIG_VERSION, ADVISOR_BOOT_REFUSALS, SAFE_MODEL, classifyAdvisorCell, advisorBootRecord, advisorJournalRecord, advisorEndpointOrigin, assertAdvisorCellLive, advisorManifest, assertAdvisorManifest, packageSuite, SUITE_OWNER_PATH, SUITE_REFUSAL, PANE_TURN_CEILING_UNMEASURED, paneTurnCeilingRefusals, resumeCmd, validateResumeState, RESUME_REFUSALS, RESUME_REFUSAL_NAMES, refuseResume, runChild, childPackageSuite, CHILD_SUITE_OWNER_PATH, driveTask, resumeWorktreeSha256, seatCommand, piSeatCommand, translateDeny, PI_BUILTIN_TOOLS, rpcCommand, seatIo, DEFAULT_TRANSPORT, HEADLESS_TRANSPORT, testCheckout, ROOT, scratchDir, FINGERPRINT_FILE, FINGERPRINT_OUTCOMES, FINGERPRINT_WITHHELD, checkRecordedTree, WORKFLOW_REFUSALS, SEAT_BEARING_STAGES, loadWorkflow, validateWorkflow, shippedRoster, roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter, capabilityRegister, capabilityFixtureRoot, globalThis.appendFileSync]
+void [test, after, assert, createHash, readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync, chmodSync, symlinkSync, cpSync, realpathSync, execSync, spawn, spawnSync, tmpdir, homedir, join, basename, dirname, fileURLToPath, openLedger, USAGE_ABSENT_CAUSES, TURN_CEILING_FLAGS, openRun, _resetNoticeGuardsForTest, SEAT_DEFAULTS, FANOUT_TOOLS, ROLE_ORDER, resolveAdapters, resolveTier, loadLadder, shadowCandidates, shadowExclusion, shadowPick, shadowPickBoot, SHADOW_EXCLUSIONS, SHADOW_OUTCOMES, SHADOW_ABSENT, loadRoutingPolicy, materialiseRoutingChoice, replayRoutingChoice, ROUTING_EXCLUSION_REASONS, ROUTING_PRECEDENCE, bootCmd, runCmd, runExitCode, runOutcome, RUN_EXIT_CODES, RUN_EXIT_UNEXPECTED, RUN_START_EVENT, readHead, readBranch, teardownDecision, stagesFromJournal, resolveValidationLane, awaitSeatsReady, teardownCore, installExitMarker, installRunFinalizers, writeTerminalLine, terminalLineSeen, runScopedPaths, returnsInheritanceRecord, RETURNS_INHERITANCE_REASONS, resolveTaskReturn, archivedReturn, UsageError, KNOWN_FLAGS, ROLE_FLAG_PREFIXES, REQUIRED_FLAGS, BOOT_ONLY_FLAGS, assertUsage, parseArgs, FLAG_VALUE_REFUSAL, FLAG_VALUE_CONTRACT, BOOLEAN_FLAGS, resolveTimeoutS, TIMEOUT_S_REFUSAL, TIMEOUT_S_DEFAULT, MEMORY_ROLES, CHARTER_CEILINGS, CAPABILITY_REFUSALS, loadCapabilities, grantsFor, assertGrantsBacked, assertFanoutCoherent, deniedFanout, EMPTY_GRANTS, probeLocalEndpoint, effectiveTools, persistedAdapters, GRANT_SNAPSHOT_REFUSAL, ADVISOR_CONFIG_VERSION, ADVISOR_BOOT_REFUSALS, SAFE_MODEL, classifyAdvisorCell, advisorBootRecord, advisorJournalRecord, advisorEndpointOrigin, assertAdvisorCellLive, advisorManifest, assertAdvisorManifest, packageSuite, SUITE_OWNER_PATH, SUITE_REFUSAL, PANE_TURN_CEILING_UNMEASURED, paneTurnCeilingRefusals, resumeCmd, validateResumeState, RESUME_REFUSALS, RESUME_REFUSAL_NAMES, refuseResume, runChild, childPackageSuite, CHILD_SUITE_OWNER_PATH, driveTask, resumeWorktreeSha256, seatCommand, piSeatCommand, translateDeny, PI_BUILTIN_TOOLS, rpcCommand, seatIo, DEFAULT_TRANSPORT, HEADLESS_TRANSPORT, testCheckout, ROOT, scratchDir, FINGERPRINT_FILE, FINGERPRINT_OUTCOMES, FINGERPRINT_WITHHELD, checkRecordedTree, WORKFLOW_REFUSALS, SEAT_BEARING_STAGES, loadWorkflow, validateWorkflow, shippedRoster, roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter, capabilityRegister, capabilityFixtureRoot, composeRolePrompt, globalThis.appendFileSync]
 
 const KEEPALIVE_LIFETIME_DEFAULT_MS = 300 * 1000
 const CLAUDE_USAGE_SETTINGS = fileURLToPath(new URL('./adapters/claude-usage.settings.json', import.meta.url))
@@ -2039,31 +2040,55 @@ test('a mixed boot refuses with mixed-transport before any workspace or state di
   }
 })
 
-test('boot records what each seat\'s charter costs per turn', async () => {
+test('C1 boot records each seat\'s charter costs within an independent tail budget', async () => {
   const roles = ['lead', 'planner', 'builder', 'reviewer', 'tech-lead']
   const home = scratchDir('crew-charter-boot-home-')
   const { root: checkoutRoot, checkout } = testCheckout('crew-charter-boot-checkout-')
   const task = 'charter-boot'
+  const controlTask = 'charter-boot-control'
   execSync('git init -q', { cwd: checkout })
   let output = ''
   const previousWrite = process.stdout.write
   try {
     process.stdout.write = (chunk) => { output += String(chunk); return true }
     try {
-      await withoutMemoryEnv(() => withHome(home, () => bootCmd(
-        { task, checkout, roles: roles.join(','), 'headless-all': true, 'claude-bin': process.execPath },
-        { cmux: callCounter(), tree: callCounter(), renameTab: callCounter(), register: capabilityRegisterForBoot() },
-      )))
+      await withoutMemoryEnv(() => withHome(home, async () => {
+        await bootCmd(
+          { task: controlTask, checkout, roles: roles.join(','), 'headless-all': true, 'claude-bin': process.execPath },
+          { cmux: callCounter(), tree: callCounter(), renameTab: callCounter(), register: capabilityRegisterForBoot() },
+        )
+        await bootCmd(
+          { task, checkout, roles: roles.join(','), 'headless-all': true, 'claude-bin': process.execPath, 'charter-arm': 'lean' },
+          { cmux: callCounter(), tree: callCounter(), renameTab: callCounter(), register: capabilityRegisterForBoot() },
+        )
+      }))
     } finally { process.stdout.write = previousWrite }
+    const control = bootRecord(testCrewDir(home, checkout, controlTask))
     const dir = testCrewDir(home, checkout, task)
     const boot = bootRecord(dir)
+    const crew = JSON.parse(readFileSync(join(dir, 'crew.json'), 'utf8'))
     const result = JSON.parse(output.trim().split('\n').at(-1))
+    assert.equal(crew.charter_arm, 'lean')
+    assert.equal(boot.charter_arm, crew.charter_arm)
+    assert.equal(result.charter_arm, crew.charter_arm)
     assert.deepEqual(result.charter_bytes, boot.charter_bytes)
     for (const role of roles) {
       const expected = Buffer.byteLength(readFileSync(join(dir, 'task', `role-${role}.md`), 'utf8'), 'utf8')
       assert.equal(boot.charter_bytes[role], expected)
       assert.equal(boot.charter_memory_bytes[role], 0)
-      assert.equal(boot.charter_base_bytes[role], CHARTER_CEILINGS[role])
+      assert.equal(control.charter_base_bytes[role], CHARTER_CEILINGS[role])
+      const sharedPrompt = readFileSync(new URL('./roles/_shared.md', import.meta.url), 'utf8')
+      const cardPrompt = readFileSync(new URL(`./roles/${role}.md`, import.meta.url), 'utf8')
+      const controlPrompt = composeRolePrompt(sharedPrompt, cardPrompt, '', 'control')
+      const leanPrompt = composeRolePrompt(sharedPrompt, cardPrompt, '', 'lean')
+      const controlBytes = Buffer.byteLength(controlPrompt, 'utf8')
+      const leanBytes = Buffer.byteLength(leanPrompt, 'utf8')
+      const delta = leanBytes - controlBytes
+      const maxTailBytes = 256
+      assert.equal(controlBytes, CHARTER_CEILINGS[role])
+      assert.ok(leanBytes > controlBytes)
+      assert.ok(delta > 0 && delta <= maxTailBytes)
+      assert.equal(boot.charter_base_bytes[role], leanBytes)
     }
   } finally {
     process.stdout.write = previousWrite

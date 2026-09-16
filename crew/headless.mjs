@@ -1988,7 +1988,12 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turn
     const stream = join(dir, 'stream.jsonl'), stderr = join(dir, 'stderr.log'), exit = join(dir, 'exit'), cmdPath = join(dir, 'cmd.json')
     const delivery = assignmentDelivery({ briefFile, readFileSync: read })
     const prompt = assignmentPrompt({ id, role, briefFile, returnPath, taskDir: taskDir || paths.taskDir, ...delivery }) + (note ? `\n${note}` : '')
-    const command = workerCommand(adapterFor(adapters, role), { role, model: member.model, promptFile: join(taskDir || paths.taskDir, `role-${role}.md`), tools: member.tools || undefined, deny: member.deny || undefined, taskDir: taskDir || paths.taskDir, prompt, sessionId, resume: !!member.started, bin, effort: member.effort })
+    const command = workerCommand(adapterFor(adapters, role), {
+      role, model: member.model, promptFile: join(taskDir || paths.taskDir, `role-${role}.md`),
+      tools: member.tools || undefined, deny: member.deny || undefined, taskDir: taskDir || paths.taskDir,
+      prompt, sessionId, resume: !!member.started, bin, effort: member.effort,
+      grants: adapters?.[role]?.grants,
+    })
     const args = command.args || []
     const pgid = join(dir, 'pgid')
     const shell = `printf '%s' $$ >${shq(`${pgid}.tmp`)}; mv ${shq(`${pgid}.tmp`)} ${shq(pgid)}; ${shq(command.bin)} ${args.map(shq).join(' ')} >${shq(stream)} 2>${shq(stderr)}; printf '%s' $? >${shq(`${exit}.tmp`)}; mv ${shq(`${exit}.tmp`)} ${shq(exit)}`

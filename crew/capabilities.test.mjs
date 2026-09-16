@@ -23,6 +23,7 @@ test('G1T freezes the exhaustive first-party extension declaration table and mat
     'crew/pi/extensions/lab.ts': ['lab'],
     'crew/pi/extensions/skeletonread.ts': ['retrieve'],
     'crew/pi/extensions/subagent.ts': ['agent'],
+    'crew/pi/extensions/fff.ts': ['fff_grep', 'fff_find', 'fff_multi_grep'],
   }
   assert.deepEqual(PI_FIRST_PARTY_EXTENSION_TOOLS, expected)
   assert.equal(Object.isFrozen(PI_FIRST_PARTY_EXTENSION_TOOLS), true)
@@ -595,6 +596,7 @@ test('the shipped builder pi overlay resolves its checkout-pinned extensions', (
     join(REGISTER_ROOT, 'crew/pi/extensions/builderloop.ts'),
     join(REGISTER_ROOT, 'crew/pi/extensions/readgate.ts'),
     join(REGISTER_ROOT, 'crew/pi/extensions/skeletonread.ts'),
+    join(REGISTER_ROOT, 'crew/pi/extensions/fff.ts'),
   ]
   const pi = grantsFor(loaded, 'builder', { agent: 'pi' })
   assert.deepEqual(pi.extensions, expected)

@@ -115,6 +115,7 @@ export function modelString({ provider, id, localProviders }) {
 // dropped denial itself enforces nothing.
 const PI_TOOL_NAMES = Object.freeze({
   Read: 'read', Write: 'write', Edit: 'edit', Bash: 'bash',
+  Glob: 'find', Grep: 'grep',
   NotebookEdit: null, Task: null, Agent: null,
 })
 
@@ -164,6 +165,7 @@ export const PI_FIRST_PARTY_EXTENSION_TOOLS = Object.freeze({
   'crew/pi/extensions/lab.ts': Object.freeze(['lab']),
   'crew/pi/extensions/skeletonread.ts': Object.freeze(['retrieve']),
   'crew/pi/extensions/subagent.ts': Object.freeze(['agent']),
+  'crew/pi/extensions/fff.ts': Object.freeze(['fff_grep', 'fff_find', 'fff_multi_grep']),
 })
 
 export function validatePiExtensionTools(table) {

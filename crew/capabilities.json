@@ -18,7 +18,9 @@
       ],
       "display_name": "Pi",
       "binary": "pi",
-      "install_hint": "Install Pi and ensure the pi binary is on PATH."
+      "install_hint": "Install Pi and ensure the pi binary is on PATH.",
+      "availability": "executable",
+      "availability_reason": "executable"
     },
     "claude": {
       "providers": [
@@ -36,7 +38,9 @@
       ],
       "display_name": "Claude Code",
       "binary": "claude",
-      "install_hint": "Install Claude Code and ensure the claude binary is on PATH."
+      "install_hint": "Install Claude Code and ensure the claude binary is on PATH.",
+      "availability": "executable",
+      "availability_reason": "executable"
     }
   },
   "roles": {

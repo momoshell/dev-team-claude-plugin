@@ -107,9 +107,39 @@
         "refuses",
         "display_name",
         "binary",
-        "install_hint"
+        "install_hint",
+        "availability",
+        "availability_reason"
       ],
       "additionalProperties": false,
+      "oneOf": [
+        {
+          "properties": {
+            "availability": { "const": "executable" },
+            "availability_reason": { "const": "executable" }
+          }
+        },
+        {
+          "properties": {
+            "availability": { "const": "proposal-stub" },
+            "availability_reason": { "enum": ["proposal-stub", "adapter-import-failed"] }
+          }
+        },
+        {
+          "properties": {
+            "availability": { "const": "discovered-unavailable" },
+            "availability_reason": {
+              "enum": ["discovered-unavailable", "shim-not-binary", "version-spawn-failed", "version-interrupted"]
+            }
+          }
+        },
+        {
+          "properties": {
+            "availability": { "const": "installed-unconfigured" },
+            "availability_reason": { "enum": ["installed-unconfigured", "transport-refused"] }
+          }
+        }
+      ],
       "properties": {
         "display_name": {
           "type": "string",
@@ -122,6 +152,20 @@
         "install_hint": {
           "type": "string",
           "pattern": "^\\S(?:.*\\S)?$"
+        },
+        "availability": { "enum": ["executable", "discovered-unavailable", "installed-unconfigured", "proposal-stub"] },
+        "availability_reason": {
+          "enum": [
+            "executable",
+            "proposal-stub",
+            "adapter-import-failed",
+            "discovered-unavailable",
+            "shim-not-binary",
+            "version-spawn-failed",
+            "version-interrupted",
+            "installed-unconfigured",
+            "transport-refused"
+          ]
         },
         "config": {
           "type": "array",

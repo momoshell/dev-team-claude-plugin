@@ -119,12 +119,16 @@ test('D1 a tracked suite added after the recorded measurement is unmeasured, not
   const discovered = [...trackedSuites({ checkout: ROOT }), 'test/zz-added-after-measurement.test.mjs'].sort()
   const result = assertDeliveredConstructionSuites(RECORDED_SUITE_COST_REPORT, discovered)
   assert.deepEqual(result.unmeasured, [
+    'test/factory-ledger-advisor.test.mjs',
     'test/factory-ledger-cells.test.mjs',
+    'test/factory-ledger-cli.test.mjs',
     'test/factory-ledger-core.test.mjs',
     'test/factory-ledger-escalations.test.mjs',
     'test/factory-ledger-modifiers.test.mjs',
+    'test/factory-ledger-sandbox.test.mjs',
     'test/factory-ledger-sessions.test.mjs',
     'test/factory-ledger-store.test.mjs',
+    'test/factory-ledger-turns.test.mjs',
     'test/zz-added-after-measurement.test.mjs',
   ])
   assert.equal(result.reason, UNRECORDED_SUITE_REASON)

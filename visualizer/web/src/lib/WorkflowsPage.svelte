@@ -1,43 +1,16 @@
 <script>
-  import dagre from '@dagrejs/dagre'
-  import { getWorkflows, proposeWorkflowEdit } from './api.js'
-  import { draftTopologyEdit, inspectWorkflowNode, layoutWorkflowGraph, selectionReset, shapeWorkflowGraph, validateTopologyEdit } from './workflows.js'
-  import WorkflowGraph from './WorkflowGraph.svelte'
+  import { getWorkflows } from './api.js'
+  import { workflowPresentation } from './workflows.js'
 
   let payload = $state(null)
   let loading = $state(true)
   let requestError = $state('')
-  let selectedShape = $state('')
-  let selectedTier = $state('')
-  let selectedNodeId = $state(null)
-  let topologyDraft = $state(null)
-  let topologyVerdict = $state(null)
-  let proposal = $state(null)
-  let seatDrafts = $state({})
-  let previousSelection = { shape: selectedShape, tier: selectedTier }
-
-  $effect(() => {
-    const nextSelection = { shape: selectedShape, tier: selectedTier }
-    const reset = selectionReset(previousSelection, nextSelection)
-    previousSelection = nextSelection
-    if (reset) {
-      selectedNodeId = reset.selectedNodeId
-      topologyDraft = reset.topologyDraft
-      topologyVerdict = reset.topologyVerdict
-      proposal = reset.proposal
-      seatDrafts = reset.seatDrafts
-    }
-  })
 
   $effect(() => {
     let active = true
     getWorkflows(5).then((result) => {
       if (!active) return
-      payload = result
-      const firstShape = result?.workflows?.[0]?.shape || result?.shapes?.[0]?.shape || ''
-      const firstTier = result?.roster?.tiers?.[0]?.tier || result?.tiers?.[0]?.tier || ''
-      if (!selectedShape) selectedShape = firstShape
-      if (!selectedTier) selectedTier = firstTier
+      payload = result && typeof result === 'object' ? result : { workflows: [] }
       requestError = ''
       loading = false
     }).catch((error) => {
@@ -49,107 +22,121 @@
   })
 
   let workflows = $derived(Array.isArray(payload?.workflows) ? payload.workflows : [])
-  let tiers = $derived(Array.isArray(payload?.roster?.tiers) ? payload.roster.tiers : Array.isArray(payload?.tiers) ? payload.tiers : [])
-  let selectedWorkflow = $derived(workflows.find((workflow) => workflow.shape === selectedShape) || workflows[0] || null)
-  let tierMap = $derived(selectedWorkflow?.tier_maps?.[selectedTier] || null)
-  let selectedMap = $derived(selectedWorkflow?.source === 'workflow-map' ? selectedWorkflow.map : tierMap || selectedWorkflow?.map || null)
-  let graph = $derived(layoutWorkflowGraph(shapeWorkflowGraph(selectedWorkflow?.shape || selectedShape, {
-    observedLabels: selectedWorkflow?.observed_labels || [],
-    workflow: selectedMap,
-    tier: selectedTier,
-    roster: payload?.roster,
-    docs: payload?.docs || {},
-    bootSeats: selectedWorkflow?.boot_seats || {},
-  }), { engine: dagre }))
-  let selectedNode = $derived(graph?.nodes?.find((node) => node.id === selectedNodeId) || graph?.nodes?.[0] || null)
-  let inspection = $derived(inspectWorkflowNode(graph, selectedNode?.id, {
-    docs: payload?.docs || {},
-    recentRuns: selectedWorkflow?.recent_runs || [],
-  }))
-  let seatRoles = $derived(Object.keys(selectedMap?.seats ?? {}).filter((role) => role))
+  let presentations = $derived(workflows.map((workflow) => workflowPresentation(workflow?.shape, {
+    observedLabels: Array.isArray(workflow?.observed_labels) ? workflow.observed_labels : [],
+  })))
 
-  function chooseNode(node) { selectedNodeId = node?.id || null }
-  function beginTopology(stage) {
-    topologyDraft = draftTopologyEdit({ shape: selectedShape, stage, action: 'remove' })
-    topologyVerdict = validateTopologyEdit(topologyDraft)
-  }
-  function updateSeat(role, field, value) {
-    seatDrafts = { ...seatDrafts, [role]: { ...(seatDrafts[role] || {}), [field]: value } }
-  }
-  async function proposeSeat(role) {
-    const current = selectedMap?.seats?.[role] || {}
-    const edit = { role, cell: { ...current, ...(seatDrafts[role] || {}) } }
-    proposal = null
-    try { proposal = await proposeWorkflowEdit({ workflow: selectedShape, edit, tier: selectedTier }) } catch (error) { proposal = { ok: false, refusals: [{ code: 'request', message: error?.message || 'proposal request failed' }] } }
+  function metadataValue(value) {
+    if (Array.isArray(value)) return value.length ? value.join(', ') : 'empty'
+    if (value && typeof value === 'object') return JSON.stringify(value)
+    if (value == null) return 'not recorded'
+    return String(value)
   }
 </script>
 
 <main class="page workflows-page">
   <div class="page-heading">
-    <div><p class="eyebrow">Read-only topology</p><h1>Workflows</h1><p>Inspect executor order, measured evidence, and the patch a seat edit would propose. Nothing is applied from this view.</p></div>
-    <span class="updated">Declarations are bounds · topology checked by the shape validator</span>
+    <div><p class="eyebrow">Read-only catalog</p><h1>Workflows</h1><p>Compare every declared execution shape, its canonical stage order, seats, writes, envelope contract, and recommending task profiles.</p></div>
+    <span class="updated">Declarations are authoritative · topology comes from executionTopology</span>
   </div>
+  <p class="boundary-note">Read-only catalog. This page has no editing, compose, dispatch, apply, or post action.</p>
 
   {#if loading}
-    <section class="state-card"><strong>Loading workflows</strong><p>Reading declarations, roster maps, stage documentation, and measured runs.</p></section>
+    <section class="state-card"><strong>Loading workflows</strong><p>Reading the declared workflow catalog.</p></section>
   {:else if requestError}
-    <section class="state-card degraded"><strong>Workflow evidence unavailable</strong><p>{requestError}</p></section>
-  {:else if !workflows.length}
-    <section class="state-card"><strong>No workflows declared</strong><p>The variant declaration source returned no workflow shapes.</p></section>
+    <section class="state-card degraded"><strong>Workflow catalog unavailable</strong><p>{requestError}</p></section>
   {:else}
-    <section class="selector-card" aria-label="Workflow selectors">
-      <label>Workflow
-        <select bind:value={selectedShape}>
-          {#each workflows as workflow (workflow.shape)}<option value={workflow.shape}>{workflow.shape}</option>{/each}
-        </select>
-      </label>
-      <label>Assurance tier <span class="selector-note">initial: first roster tier</span>
-        <select bind:value={selectedTier}>
-          {#each tiers as tier (tier.tier)}<option value={tier.tier}>{tier.tier}</option>{/each}
-        </select>
-      </label>
-      <span class:degraded={payload?.degraded} class="readout">{payload?.degraded ? 'Degraded evidence' : 'Declarations loaded'}{#if payload?.error} · {payload.error}{/if}</span>
-    </section>
+    {#if payload?.degraded}
+      <p class="degraded-note" role="status">Workflow declarations are shown; supporting evidence is degraded{#if payload?.error}: {payload.error}{/if}.</p>
+    {/if}
+    {#if !workflows.length}
+      <section class="state-card"><strong>No workflows declared</strong><p>The workflow declaration feed returned no shapes, so no catalog facts can be displayed.</p></section>
+    {:else}
+      <section class="workflow-catalog" aria-label="All declared workflows">
+        {#each presentations as presentation (presentation.shape)}
+          <article class="workflow-card" aria-labelledby={`workflow-${presentation.shape}`}>
+            <header class="workflow-heading">
+              <div><p class="eyebrow">Execution shape</p><h2 id={`workflow-${presentation.shape}`}>{presentation.shape || 'undeclared'}</h2></div>
+              <span class="shape-note">Canonical declaration</span>
+            </header>
 
-    <div class="workflow-layout">
-      <div class="workflow-main">
-        <WorkflowGraph graph={graph} onnodeclick={chooseNode} />
-        <section class="history-card">
-          <header><div><p class="eyebrow">Observed history</p><h2>Last five measured runs</h2></div><span class="muted">newest first</span></header>
-          {#if selectedWorkflow?.evidence?.error && !selectedWorkflow?.recent_runs?.length}<p class="unmeasured">{selectedWorkflow.evidence.error} · unmeasured, not zero.</p>{:else if !selectedWorkflow?.recent_runs?.length}<p class="unmeasured">No measured run carries this workflow shape.</p>{:else}
-            <div class="run-table" role="table">
-              <div class="run-row run-head" role="row"><span>Run</span><span>Outcome</span><span>Stages</span><span>Enforcement</span></div>
-              {#each selectedWorkflow.recent_runs as run (run.run_id)}
-                <div class="run-row" role="row"><span class="mono">{run.run_id || 'unidentified'}</span><span>{run.outcome || 'unmeasured'}</span><span>{run.stages?.length || 0} observed</span><span>{selectedWorkflow.boot_seats ? 'boot seat recorded' : 'unmeasured'}</span></div>
-              {/each}
+            <section class="catalog-section stages-section" aria-labelledby={`workflow-${presentation.shape}-stages`}>
+              <h3 id={`workflow-${presentation.shape}-stages`}>Stage order</h3>
+              {#if presentation.stages.length}
+                <ol class="stage-order">
+                  {#each presentation.stages as stage (stage.position)}
+                    <li><span class="stage-position">{stage.position}</span><strong>{stage.name}</strong></li>
+                  {/each}
+                </ol>
+              {:else}
+                <p class="absence">No canonical stages are available for this workflow shape.</p>
+              {/if}
+            </section>
+
+            <div class="workflow-facts">
+              <section class="catalog-section" aria-labelledby={`workflow-${presentation.shape}-seats`}>
+                <h3 id={`workflow-${presentation.shape}-seats`}>Seats</h3>
+                {#if presentation.seats.items.length}
+                  <ul class="fact-list">
+                    {#each presentation.seats.items as role (role)}<li><strong>{role}</strong></li>{/each}
+                  </ul>
+                {:else}
+                  <p class="absence">{presentation.seats.absence_reason}</p>
+                {/if}
+              </section>
+
+              <section class="catalog-section" aria-labelledby={`workflow-${presentation.shape}-writes`}>
+                <h3 id={`workflow-${presentation.shape}-writes`}>Writes</h3>
+                {#if presentation.writes.value == null}
+                  <p class="absence">{presentation.writes.absence_reason}</p>
+                {:else}
+                  <p class="fact-value mono">{metadataValue(presentation.writes.value)}</p>
+                {/if}
+              </section>
             </div>
-          {/if}
-        </section>
-      </div>
 
-      <aside class="inspect-column">
-        <section class="inspect-card">
-          <header><div><p class="eyebrow">Inspect</p><h2>{inspection.stage || 'Select a stage'}</h2></div><span class="enforcement-mark">{inspection.enforcement?.status || 'unmeasured'}</span></header>
-          {#if inspection.docs}<p>{inspection.docs.description}</p><dl><dt>Declaration</dt><dd>{inspection.declaration?.status || 'unmeasured'} · {inspection.declaration?.shape || selectedShape}</dd><dt>Charter</dt><dd>{inspection.charter || 'Control stage; no seat charter.'}</dd><dt>History</dt><dd>{inspection.history?.filter((row) => row.measured).length || 0} measured observations</dd></dl>{:else}<p class="unmeasured">Stage documentation is unmeasured.</p>{/if}
-          {#if inspection.history?.length}<ul class="history-list">{#each inspection.history as row (row.run_id)}<li><span>{row.run_id || 'unidentified'}</span><span>{row.duration_ms == null ? 'duration unmeasured' : `${row.duration_ms} ms`}</span><span>{row.outcome || 'outcome unmeasured'}</span></li>{/each}</ul>{/if}
-        </section>
+            <section class="catalog-section envelope-section" aria-labelledby={`workflow-${presentation.shape}-envelope`}>
+              <h3 id={`workflow-${presentation.shape}-envelope`}>Envelope fields</h3>
+              {#if presentation.envelope_fields.items.length}
+                <div class="envelope-list">
+                  {#each presentation.envelope_fields.items as field (field.name)}
+                    <article class="envelope-field">
+                      <header><strong>{field.name}</strong><span>{field.kind || 'kind unavailable'}</span></header>
+                      <dl class="metadata-list">
+                        <div><dt>Kind</dt><dd>{metadataValue(field.kind)}</dd></div>
+                        {#if field.values !== undefined}<div><dt>Values</dt><dd>{metadataValue(field.values)}</dd></div>{/if}
+                        {#if field.item_fields !== undefined}<div><dt>Item fields</dt><dd>{metadataValue(field.item_fields)}</dd></div>{/if}
+                        {#if field.optional_item_fields !== undefined}<div><dt>Optional item fields</dt><dd>{metadataValue(field.optional_item_fields)}</dd></div>{/if}
+                        {#if field.item_values !== undefined}<div><dt>Item values</dt><dd>{metadataValue(field.item_values)}</dd></div>{/if}
+                        {#if field.item_patterns !== undefined}<div><dt>Item patterns</dt><dd>{metadataValue(field.item_patterns)}</dd></div>{/if}
+                        {#if field.cardinality !== undefined}<div><dt>Cardinality</dt><dd>{metadataValue(field.cardinality)}</dd></div>{/if}
+                        {#if field.covers !== undefined}<div><dt>Covers</dt><dd>{metadataValue(field.covers)}</dd></div>{/if}
+                        {#if field.allow_empty !== undefined}<div><dt>Allow empty</dt><dd>{metadataValue(field.allow_empty)}</dd></div>{/if}
+                      </dl>
+                    </article>
+                  {/each}
+                </div>
+              {:else}
+                <p class="absence">{presentation.envelope_fields.absence_reason}</p>
+              {/if}
+            </section>
 
-        <section class="seat-card">
-          <header><div><p class="eyebrow">Seat proposal</p><h2>Map controls</h2></div><span class="muted">proposal only</span></header>
-          {#if !seatRoles.length}<p class="unmeasured">No seat-bearing map fields are measured.</p>{:else}{#each seatRoles as role (role)}
-            <div class="seat-control"><strong>{role}</strong><input aria-label={`${role} agent`} value={selectedMap?.seats?.[role]?.agent || ''} oninput={(event) => updateSeat(role, 'agent', event.currentTarget.value)} placeholder="agent" /><input aria-label={`${role} effort`} value={selectedMap?.seats?.[role]?.effort || ''} oninput={(event) => updateSeat(role, 'effort', event.currentTarget.value)} placeholder="effort" /><button onclick={() => proposeSeat(role)}>Prepare diff</button></div>
-          {/each}{/if}
-          {#if proposal}<div class="proposal-result" class:refused={!proposal.ok}>{#if proposal.ok}<strong>Proposed workflow patch</strong><pre>{proposal.diff || 'No text changes.'}</pre>{:else}<strong>Proposal refused</strong><ul>{#each proposal.refusals || [] as refusal}<li>{refusal.code}: {refusal.message}</li>{/each}</ul>{/if}</div>{/if}
-        </section>
-
-        <section class="topology-card">
-          <header><div><p class="eyebrow">Topology draft</p><h2>Validator adapter</h2></div><span class="enforcement-mark">warning</span></header>
-          <p>Topology controls stay local; each draft is checked by the shape validator.</p>
-          {#each graph?.nodes || [] as node (node.id)}<button class="topology-button" onclick={() => beginTopology(node.stage)}>{node.stage} <span>draft</span></button>{/each}
-          {#if topologyVerdict}<p class="verdict-warning">{topologyVerdict.status} · {topologyVerdict.reason}</p>{/if}
-        </section>
-      </aside>
-    </div>
+            <section class="catalog-section" aria-labelledby={`workflow-${presentation.shape}-profiles`}>
+              <h3 id={`workflow-${presentation.shape}-profiles`}>Recommending profiles</h3>
+              {#if presentation.recommended_profiles.items.length}
+                <ul class="profile-list">
+                  {#each presentation.recommended_profiles.items as profile (profile.key)}
+                    <li><strong>{profile.name}</strong><span class="mono">{profile.key}</span></li>
+                  {/each}
+                </ul>
+              {:else}
+                <p class="absence">{presentation.recommended_profiles.absence_reason}</p>
+              {/if}
+            </section>
+          </article>
+        {/each}
+      </section>
+    {/if}
   {/if}
 </main>
 
@@ -157,36 +144,52 @@
 .workflows-page { padding-top:2rem; }
 .page-heading { display:flex; justify-content:space-between; align-items:end; gap:1rem; margin-bottom:1rem; }
 .page-heading h1 { margin:.1rem 0 .35rem; font-size:clamp(1.7rem,3vw,2.35rem); letter-spacing:-.04em; }
-.page-heading p { margin:0; color:var(--muted); max-width:44rem; font-size:.9rem; }
+.page-heading p { margin:0; color:var(--muted); max-width:46rem; font-size:.9rem; }
 .eyebrow { color:var(--accent); font-size:.66rem; font-weight:700; letter-spacing:.14em; text-transform:uppercase; }
-.updated,.muted { color:var(--muted); font-size:.7rem; }
-.selector-card,.history-card,.inspect-card,.seat-card,.topology-card,.state-card { border:1px solid var(--line); border-radius:var(--radius); background:var(--panel); }
-.selector-card { display:flex; align-items:end; flex-wrap:wrap; gap:.8rem; padding:.8rem; margin-bottom:1rem; }
-.selector-card label { display:grid; gap:.28rem; min-width:12rem; color:var(--muted); font-size:.64rem; font-weight:700; }
-.selector-card select,.seat-control input { min-width:0; border:1px solid var(--line); border-radius:var(--radius-sm); background:var(--panel-raised); padding:.4rem .5rem; }
-.selector-note { color:var(--accent); font-size:.56rem; font-weight:400; }
-.readout { margin-left:auto; color:var(--status-ok); font:600 .62rem var(--mono); }
-.readout.degraded { color:var(--status-escalated); }
-.workflow-layout { display:grid; grid-template-columns:minmax(0,2fr) minmax(15rem,1fr); gap:1rem; align-items:start; }
-.workflow-main,.inspect-column { display:grid; gap:1rem; min-width:0; }
-.graph-card { min-width:0; }
-.history-card,.inspect-card,.seat-card,.topology-card { overflow:hidden; padding:.8rem; }
-.history-card header,.inspect-card header,.seat-card header,.topology-card header { display:flex; justify-content:space-between; align-items:start; gap:.7rem; margin-bottom:.7rem; }
-.history-card h2,.inspect-card h2,.seat-card h2,.topology-card h2 { margin:.12rem 0 0; font-size:1rem; }
-.history-card .eyebrow,.inspect-card .eyebrow,.seat-card .eyebrow,.topology-card .eyebrow { margin:0; }
-.run-table { display:grid; overflow:auto; }
-.run-row { display:grid; grid-template-columns:minmax(7rem,1fr) minmax(5rem,1fr) minmax(5rem,1fr) minmax(7rem,1fr); gap:.5rem; border-top:1px solid var(--line); padding:.5rem 0; color:var(--muted); font-size:.63rem; }
-.run-head { border-top:0; color:var(--accent); font-weight:700; text-transform:uppercase; letter-spacing:.08em; }
+.updated,.shape-note { color:var(--muted); font-size:.7rem; }
+.boundary-note { margin:0 0 1rem; border:1px dashed var(--accent); border-radius:var(--radius); padding:.7rem .8rem; color:var(--muted); font-size:.7rem; }
+.degraded-note { margin:0 0 1rem; border:1px solid var(--status-escalated); border-radius:var(--radius); padding:.7rem .8rem; color:var(--status-escalated); font-size:.7rem; }
+.workflow-catalog { display:grid; grid-template-columns:repeat(auto-fit,minmax(20rem,1fr)); gap:1rem; align-items:start; }
+.workflow-card,.state-card { min-width:0; border:1px solid var(--line); border-radius:var(--radius); background:var(--panel); }
+.workflow-card { overflow:hidden; }
+.workflow-heading { display:flex; justify-content:space-between; align-items:start; gap:1rem; padding:1rem; border-bottom:1px solid var(--line); }
+.workflow-heading h2 { margin:.12rem 0 0; color:var(--accent); font-size:1.15rem; }
+.workflow-heading .eyebrow { margin:0; }
+.catalog-section { min-width:0; padding:1rem; border-bottom:1px solid var(--line); }
+.catalog-section:last-child { border-bottom:0; }
+.catalog-section h3 { margin:0 0 .65rem; color:var(--accent); font-size:.72rem; letter-spacing:.08em; text-transform:uppercase; }
+.workflow-facts { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); border-bottom:1px solid var(--line); }
+.workflow-facts .catalog-section { border-bottom:0; }
+.stage-order,.fact-list,.profile-list { display:grid; gap:.35rem; margin:0; padding:0; list-style:none; }
+.stage-order li { display:grid; grid-template-columns:2rem minmax(0,1fr); align-items:center; gap:.45rem; border:1px solid var(--line); border-radius:var(--radius-sm); background:var(--panel-raised); padding:.4rem .5rem; }
+.stage-order strong { overflow-wrap:anywhere; font-size:.7rem; }
+.stage-position { display:grid; width:1.45rem; height:1.45rem; place-items:center; border-radius:50%; background:var(--accent); color:var(--bg); font:700 .62rem var(--mono); }
+.fact-list li,.profile-list li { display:flex; justify-content:space-between; gap:.7rem; border-top:1px solid var(--line); padding:.45rem 0; font-size:.7rem; }
+.fact-list li:first-child,.profile-list li:first-child { border-top:0; padding-top:0; }
+.fact-list strong { color:var(--accent); }
+.profile-list strong { overflow-wrap:anywhere; }
+.profile-list span { color:var(--muted); font-size:.62rem; }
+.fact-value { margin:0; color:var(--accent); font-size:.75rem; }
+.envelope-list { display:grid; gap:.65rem; }
+.envelope-field { min-width:0; border:1px solid var(--line); border-radius:var(--radius-sm); background:var(--panel-raised); padding:.65rem; }
+.envelope-field header { display:flex; justify-content:space-between; align-items:start; gap:.7rem; margin-bottom:.5rem; }
+.envelope-field header strong { overflow-wrap:anywhere; color:var(--accent); font-size:.72rem; }
+.envelope-field header span { color:var(--neutral); font:600 .58rem var(--mono); text-transform:uppercase; }
+.metadata-list { display:grid; gap:.35rem; margin:0; }
+.metadata-list div { display:grid; grid-template-columns:minmax(6rem,max-content) minmax(0,1fr); gap:.55rem; border-top:1px solid var(--line); padding-top:.35rem; }
+.metadata-list dt { color:var(--muted); font-size:.58rem; text-transform:uppercase; letter-spacing:.05em; }
+.metadata-list dd { min-width:0; margin:0; overflow-wrap:anywhere; color:var(--accent); font: .61rem/1.4 var(--mono); }
+.absence { margin:0; color:var(--muted); font-size:.68rem; line-height:1.45; }
 .mono { font-family:var(--mono); }
-.unmeasured { color:var(--muted); font-size:.7rem; }
-.enforcement-mark { color:var(--status-running); font:600 .58rem var(--mono); text-transform:uppercase; }
-.inspect-card p,.topology-card p { color:var(--muted); font-size:.7rem; line-height:1.5; }
-dl { display:grid; grid-template-columns:max-content minmax(0,1fr); gap:.35rem .6rem; margin:.8rem 0; font-size:.64rem; } dt { color:var(--accent); font-weight:700; } dd { min-width:0; margin:0; color:var(--muted); }
-.history-list { display:grid; gap:.35rem; list-style:none; margin:.7rem 0 0; padding:0; } .history-list li { display:grid; grid-template-columns:minmax(0,1fr) auto auto; gap:.45rem; border-top:1px solid var(--line); padding-top:.35rem; color:var(--muted); font-size:.58rem; }
-.seat-control { display:grid; grid-template-columns:4rem minmax(0,1fr) minmax(0,1fr) auto; align-items:center; gap:.4rem; border-top:1px solid var(--line); padding:.5rem 0; } .seat-control strong { color:var(--accent); font-size:.65rem; }.seat-control button,.topology-button { border:1px solid var(--line); border-radius:var(--radius-sm); background:var(--panel-raised); color:var(--accent); padding:.4rem .5rem; cursor:pointer; font-size:.6rem; }
-.proposal-result { margin-top:.7rem; border-top:1px solid var(--line); padding-top:.6rem; color:var(--status-ok); font-size:.65rem; }.proposal-result.refused { color:var(--status-escalated); }.proposal-result pre { max-height:15rem; overflow:auto; margin:.45rem 0 0; color:var(--muted); font: .58rem/1.45 var(--mono); white-space:pre-wrap; }
-.topology-button { display:flex; justify-content:space-between; width:100%; margin-top:.35rem; text-align:left; }.topology-button span { color:var(--muted); }.verdict-warning { border-top:1px solid var(--line); padding-top:.6rem; color:var(--status-escalated) !important; font-family:var(--mono); }
-.state-card { max-width:42rem; margin:3rem auto; padding:1.4rem; text-align:center; }.state-card strong { color:var(--accent); }.state-card p { color:var(--muted); font-size:.75rem; }.state-card.degraded { border-color:var(--status-escalated); }
-@media (max-width: 980px) { .workflow-layout { grid-template-columns:1fr; }.inspect-column { grid-template-columns:repeat(2,minmax(0,1fr)); }.topology-card { grid-column:1/-1; } }
-@media (max-width: 650px) { .page-heading { align-items:start; }.updated { display:none; }.inspect-column { grid-template-columns:1fr; }.seat-control { grid-template-columns:1fr 1fr; }.seat-control strong { grid-column:1/-1; }.seat-control button { grid-column:1/-1; } }
+.state-card { max-width:42rem; margin:3rem auto; padding:1.4rem; text-align:center; }
+.state-card strong { color:var(--accent); }
+.state-card p { color:var(--muted); font-size:.75rem; }
+.state-card.degraded { border-color:var(--status-escalated); }
+@media (max-width:700px) {
+  .page-heading { align-items:start; }
+  .updated { display:none; }
+  .workflow-facts { grid-template-columns:1fr; }
+  .workflow-facts .catalog-section { border-bottom:1px solid var(--line); }
+  .workflow-facts .catalog-section:last-child { border-bottom:0; }
+}
 </style>

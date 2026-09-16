@@ -1,4 +1,5 @@
 import { VARIANTS } from '../../../../crew/variants.mjs'
+import { TASK_PROFILES } from '../../../../crew/task-profiles.mjs'
 import { EXECUTOR_TOPOLOGIES, shapeValidationDefect } from '../../../../crew/shape-validator.mjs'
 import { executionTopology } from './execution-steps.js'
 
@@ -104,6 +105,10 @@ function displaySeats(seats) {
   return Object.fromEntries(Object.entries(seats).map(([role, value]) => [role, seatDisplay(role, value)]))
 }
 
+function presentationFact(items, reason) {
+  return { items, absence_reason: items.length ? null : reason }
+}
+
 function roleForStage(stage) {
   return ROLE_BY_HEAD.get(stage) || null
 }
@@ -177,6 +182,47 @@ export function workflowOptions({ variants = VARIANTS, roster = null, maps = nul
     workflows: names.map((shape) => ({ value: shape, label: shape.replaceAll('_', ' ') })),
     tiers: tiers.map((tier) => ({ value: tier, label: tier })),
     maps: record(maps) ? Object.keys(maps) : [],
+  }
+}
+
+export function workflowPresentation(executionShape, { observedLabels = [] } = {}) {
+  const canonicalTopology = executionTopology(executionShape, observedLabels)
+  const shape = canonicalTopology.execution_shape
+  const declaration = shape ? VARIANTS[shape] || null : null
+  const stages = canonicalTopology.rows.map((row, index) => ({ name: row.stage, position: index + 1 }))
+  const seatItems = Array.isArray(declaration?.required_seats)
+    ? [...declaration.required_seats]
+    : declaration?.required_seats === 'tier'
+      ? ['planner', 'builder', 'reviewer']
+      : []
+  const writesValue = declaration?.writes ?? null
+  const envelopeItems = Array.isArray(declaration?.envelope_fields) ? clone(declaration.envelope_fields) : []
+  const profileItems = Object.entries(TASK_PROFILES)
+    .filter(([, profile]) => profile.recommended_execution === executionShape)
+    .map(([key, profile]) => ({ key, name: profile.name }))
+  const shapeLabel = shape || 'This workflow shape'
+  const declarationAbsence = declaration
+    ? `${shapeLabel} declares no ${'{fact}'}.`
+    : 'The workflow shape is undeclared, so this fact cannot be derived.'
+  const seatsReason = declarationAbsence.replace('{fact}', 'required seats')
+  const envelopeReason = declarationAbsence.replace('{fact}', 'envelope fields')
+  const profilesReason = declaration
+    ? `No task profile recommends the ${shapeLabel} execution shape.`
+    : 'No recommending profiles can be derived because the workflow shape is undeclared.'
+  return {
+    shape,
+    stages,
+    seats: presentationFact(seatItems, seatsReason),
+    writes: {
+      value: writesValue,
+      absence_reason: writesValue == null
+        ? declaration
+          ? `${shapeLabel} does not declare a writes value.`
+          : 'The workflow shape is undeclared, so its writes value cannot be derived.'
+        : null,
+    },
+    envelope_fields: presentationFact(envelopeItems, envelopeReason),
+    recommended_profiles: presentationFact(profileItems, profilesReason),
   }
 }
 

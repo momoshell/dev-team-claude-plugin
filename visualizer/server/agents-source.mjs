@@ -372,6 +372,8 @@ function promptRows({ read, checkout, deliveries }) {
     const sourceBytes = source.text === null ? marked(null, source.reason || DEFAULT_REASONS.prompt) : marked(Buffer.byteLength(source.text, 'utf8'), null)
     if (!source.text) reasons.push(source.reason || `${path} is unavailable`)
     const delivery = role === '_shared' ? null : deliveries[role]
+    const recipients = role === '_shared' ? [...AGENT_ROLES] : AGENT_ROLES.includes(role) ? [role] : null
+    const recipientsReason = recipients === null ? `recipient seats for ${role} charter are unavailable` : null
     const charterBytes = delivery?.charter_bytes || marked(null, 'shared charter has no role-keyed boot measurement')
     const arm = delivery?.arm || marked(null, 'shared charter arm is not role-keyed')
     prompts.push({
@@ -383,6 +385,8 @@ function promptRows({ read, checkout, deliveries }) {
       arm,
       protected: PROMPT_LABEL,
       label: PROMPT_LABEL,
+      recipients,
+      recipients_reason: recipientsReason,
       delivery_source: delivery?.source_path || null,
     })
   }

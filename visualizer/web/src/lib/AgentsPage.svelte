@@ -1,27 +1,26 @@
 <script>
-  import { getAgents, proposeAgent, proposePrompt, proposeSkills } from './api.js'
+  import { getAgents, proposeAgent, proposeSkills } from './api.js'
   import { displayTone, displayValue, flagValue, normalizeAgentsPage } from './agents.js'
 
   let { } = $props()
-  const tabs = Object.freeze(['agents', 'skills', 'prompts'])
-  const tabLabels = Object.freeze({ agents: 'Agents', skills: 'Skills', prompts: 'Prompts' })
+  const tabs = Object.freeze(['agents', 'skills'])
+  const tabLabels = Object.freeze({ agents: 'Agents', skills: 'Skills' })
   const roles = Object.freeze(['lead', 'planner', 'builder', 'reviewer', 'tech-lead'])
   let activeTab = $state('agents')
-  let payload = $state({ agents: [], skills: [], matrix: [], prompts: [], reasons: [] })
+  let payload = $state({ agents: [], skills: [], matrix: [], reasons: [] })
   let loading = $state(true)
   let error = $state('')
   let result = $state(null)
   let agentDraft = $state({ name: '', providers: '', transports: 'pane', adapter: 'crew/adapters/adapter-', refuses: '' })
   let selectedRole = $state('builder')
   let skillDraft = $state('')
-  let promptDraft = $state({ role: 'builder', text: '' })
   let shaped = $derived(normalizeAgentsPage(payload))
 
   $effect(() => {
     let active = true
     getAgents().then((value) => {
       if (!active) return
-      payload = value || { agents: [], skills: [], matrix: [], prompts: [], reasons: [] }
+      payload = value || { agents: [], skills: [], matrix: [], reasons: [] }
       error = ''
       loading = false
     }).catch((cause) => {
@@ -57,24 +56,18 @@
     catch (cause) { result = { ok: false, diff: null, refusals: [{ message: cause.message || 'skill proposal failed' }] } }
   }
 
-  async function submitPrompt(event) {
-    event.preventDefault()
-    result = null
-    try { result = await proposePrompt(promptDraft.role, promptDraft.text) }
-    catch (cause) { result = { ok: false, diff: null, refusals: [{ message: cause.message || 'prompt proposal failed' }] } }
-  }
 </script>
 
-<section class="agents-page" aria-label="Agents, skills, and prompts">
+<section class="agents-page" aria-label="Agents and skills">
   <div class="tabs" role="tablist" aria-label="Seat composition">
-    {#each tabs as tab}
+    {#each tabs as tab (tab)}
       <button type="button" role="tab" aria-selected={activeTab === tab} class:active={activeTab === tab} onclick={() => { activeTab = tab; result = null }}>{tabLabels[tab]}</button>
     {/each}
   </div>
   <p class="proposal-note">Proposal only — nothing is applied.</p>
   {#if loading}<p class="notice">Reading register evidence…</p>{/if}
   {#if error}<p class="notice error">{error}</p>{/if}
-  {#if shaped.reasons.length}<details class="notice"><summary>Measurement notes</summary><ul>{#each shaped.reasons as reason}<li>{reason}</li>{/each}</ul></details>{/if}
+  {#if shaped.reasons.length}<details class="notice"><summary>Measurement notes</summary><ul>{#each shaped.reasons as reason, index (index)}<li>{reason}</li>{/each}</ul></details>{/if}
 
   {#if activeTab === 'agents'}
     <div class="grid">
@@ -87,7 +80,7 @@
             <div><dt>Adapter</dt><dd class="mono">{displayValue(agent.adapter)}</dd></div>
             <div><dt>Install hint</dt><dd>{displayValue(agent.install_hint)}</dd></div>
           </dl>
-          <div class="flags"><span class="label">Capability flags</span>{#each Object.entries(agent.flags) as [name, value]}<span class="flag"><b>{name}</b>{flagValue(value)}</span>{/each}</div>
+          <div class="flags"><span class="label">Capability flags</span>{#each Object.entries(agent.flags) as [name, value] (name)}<span class="flag"><b>{name}</b>{flagValue(value)}</span>{/each}</div>
         </article>
       {/each}
       {#if !shaped.agents.length}<p class="notice">No coding-agent register entries were measured.</p>{/if}
@@ -104,20 +97,13 @@
     </section>
     <form class="panel proposal-form" onsubmit={submitSkills}>
       <header><div><p class="eyebrow">Capabilities proposal</p><h2>Replace one role's skills</h2></div><span class="tone neutral">proposal diff only</span></header>
-      <div class="fields"><label>Role<select bind:value={selectedRole}>{#each roles as role}<option value={role}>{role}</option>{/each}</select></label><label class="wide-field">Skills<input bind:value={skillDraft} placeholder="frontend-svelte, ui-design" /></label></div>
+      <div class="fields"><label>Role<select bind:value={selectedRole}>{#each roles as role (role)}<option value={role}>{role}</option>{/each}</select></label><label class="wide-field">Skills<input bind:value={skillDraft} placeholder="frontend-svelte, ui-design" /></label></div>
       <button type="submit">Propose skill grants</button>
     </form>
-  {:else}
-    <section class="prompts">
-      {#each shaped.prompts as prompt (prompt.role)}
-        <article class="panel prompt-card"><header><div><p class="eyebrow">Prompt surface</p><h2>{prompt.role}</h2></div><span class="tone {displayTone(prompt.arm)}">{displayValue(prompt.arm)}</span></header><div class="prompt-meta"><span>Source bytes: {displayValue(prompt.source_bytes)}</span><span>Last boot charter bytes: {displayValue(prompt.charter_bytes)}</span><span>Label: {prompt.protected}</span></div><pre>{prompt.text ?? `Unmeasured — ${prompt.role} charter text is unavailable`}</pre></article>
-      {/each}
-    </section>
-    <form class="panel proposal-form" onsubmit={submitPrompt}><header><div><p class="eyebrow">Prompt proposal</p><h2>Replace charter text</h2></div><span class="tone neutral">protected: prompt-surface</span></header><div class="fields"><label>Role<select bind:value={promptDraft.role}>{#each ['_shared', ...roles] as role}<option value={role}>{role}</option>{/each}</select></label><label class="wide-field">Text<textarea bind:value={promptDraft.text} rows="8" required></textarea></label></div><button type="submit">Propose prompt change</button></form>
   {/if}
 
   {#if result}
-    <section class="panel proposal-result" aria-live="polite"><h2>Proposal result</h2>{#if result.diff}<h3>Unified diff</h3><pre>{result.diff}</pre>{/if}{#if result.refusals?.length}<h3>Refusals</h3><ul>{#each result.refusals as refusal}<li>{refusal.code ? `${refusal.code}: ` : ''}{refusal.message}</li>{/each}</ul>{:else if result.ok}<p class="success">Proposal is ready for review; no checkout file was changed.</p>{/if}</section>
+    <section class="panel proposal-result" aria-live="polite"><h2>Proposal result</h2>{#if result.diff}<h3>Unified diff</h3><pre>{result.diff}</pre>{/if}{#if result.refusals?.length}<h3>Refusals</h3><ul>{#each result.refusals as refusal, index (index)}<li>{refusal.code ? `${refusal.code}: ` : ''}{refusal.message}</li>{/each}</ul>{:else if result.ok}<p class="success">Proposal is ready for review; no checkout file was changed.</p>{/if}</section>
   {/if}
 </section>
 
@@ -130,7 +116,7 @@
 .notice { border:1px dashed var(--line); border-radius:var(--radius); padding:.7rem .8rem; }
 .notice.error { color:var(--status-fail); }
 .notice ul { margin:.45rem 0 0; padding-left:1.15rem; }
-.grid,.prompts { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:1rem; }
+.grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:1rem; }
 .panel { background:var(--panel); border:1px solid var(--line); border-radius:.6rem; padding:1rem; }
 .panel header { display:flex; justify-content:space-between; align-items:start; gap:1rem; }
 .eyebrow { margin:0 0 .22rem; color:var(--muted); font-size:.6rem; font-weight:700; letter-spacing:.13em; text-transform:uppercase; }
@@ -152,7 +138,7 @@
 .fields { display:flex; flex-wrap:wrap; gap:.7rem; }
 .fields label { display:grid; gap:.25rem; min-width:10rem; color:var(--muted); font-size:.65rem; }
 .fields .wide-field { flex:1 1 20rem; }
-input,select,textarea { min-width:0; border:1px solid var(--line); border-radius:.4rem; background:var(--bg); padding:.5rem .6rem; }
+input,select { min-width:0; border:1px solid var(--line); border-radius:.4rem; background:var(--bg); padding:.5rem .6rem; }
 button[type='submit'] { width:max-content; border:1px solid var(--accent); border-radius:.45rem; background:var(--accent); color:var(--bg); padding:.5rem .75rem; cursor:pointer; }
 .table-wrap { overflow:auto; margin-top:1rem; }
 table { width:100%; border-collapse:collapse; min-width:44rem; font-size:.68rem; }
@@ -160,10 +146,8 @@ th,td { border-top:1px solid var(--line); padding:.55rem .45rem; text-align:left
 thead th { border-top:0; color:var(--muted); font-size:.6rem; text-transform:uppercase; letter-spacing:.06em; }
 td.measured { color:var(--status-ok); }
 td.unmeasured { color:var(--status-escalated); }
-.prompt-card { min-width:0; }
-.prompt-meta { display:flex; flex-wrap:wrap; gap:.5rem 1rem; margin:.7rem 0; color:var(--muted); font-size:.6rem; }
 pre { overflow:auto; margin:0; border:1px solid var(--line); border-radius:.45rem; background:var(--bg); padding:.8rem; white-space:pre-wrap; font-size:.65rem; line-height:1.5; }
 .proposal-result { border-color:var(--accent); }
 .proposal-result ul { margin:.3rem 0 0; padding-left:1.2rem; color:var(--status-fail); font-size:.7rem; }
-@media (max-width:760px) { .grid,.prompts { grid-template-columns:1fr; } .tabs { overflow:auto; } }
+@media (max-width:760px) { .grid { grid-template-columns:1fr; } .tabs { overflow:auto; } }
 </style>

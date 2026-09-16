@@ -1117,8 +1117,8 @@ test('brakePanel names the resolved checkout and switch path in every state', ()
   }
 })
 
-test('hash routes parse and format all six canonical views', () => {
-  for (const hash of ['#/', '#/ops', '#/roster', '#/agents', '#/adw-123', '#/adw-123/plan']) {
+test('hash routes parse and format canonical views', () => {
+  for (const hash of ['#/', '#/ops', '#/roster', '#/agents', '#/prompts', '#/adw-123', '#/adw-123/plan']) {
     assert.equal(formatHash(parseHash(hash)), hash)
   }
   assert.deepEqual(parseHash(''), { view: 'fleet', adw_id: null, phase: null })
@@ -1129,13 +1129,14 @@ test('hash routes parse and format all six canonical views', () => {
   assert.equal(parseHash('#/ops').adw_id, null)
   assert.equal(parseHash('#/roster').adw_id, null)
   assert.equal(parseHash('#/agents').adw_id, null)
+  assert.equal(parseHash('#/prompts').adw_id, null)
 })
 
 test('E1 agents page route nav and title are wired', () => {
   const root = join(process.cwd(), 'visualizer/web/src')
   const app = readFileSync(join(root, 'App.svelte'), 'utf8')
   const page = readFileSync(join(root, 'lib/AgentsPage.svelte'), 'utf8')
-  assert.deepEqual(VIEWS, ['fleet', 'ops', 'roster', 'agents', 'workflows', 'run', 'phase'])
+  assert.deepEqual(VIEWS, ['fleet', 'ops', 'roster', 'agents', 'prompts', 'workflows', 'run', 'phase'])
   assert.match(app, /route\.view === 'agents'/)
   assert.match(app, /Agents · Factory/)
   assert.match(app, /<AgentsPage\s*\/?\s*>/)
@@ -1152,8 +1153,22 @@ test('F1 agents page uses only Tier-2 colour aliases', () => {
   assert.equal(declarations.some((value) => /(?:^|\s)(?:white|black|red|blue|green|gray|grey)(?:\s|$)/i.test(value)), false)
   assert.equal(declarations.some((value) => /--(?:ink|paper|spot|serious|status-\w+-raw|role-\w+-(?:dark|light))/.test(value)), false)
   assert.ok(source.includes('background:var(--panel); border:1px solid var(--line);'))
-  for (const token of ['Register grant', 'Last-seat delivery', 'Proposal only — nothing is applied.', 'protected: prompt-surface']) assert.ok(source.includes(token), token)
-  for (const tab of ['Agents', 'Skills', 'Prompts']) assert.ok(source.includes(tab), tab)
+  for (const token of ['Register grant', 'Last-seat delivery', 'Proposal only — nothing is applied.']) assert.ok(source.includes(token), token)
+  for (const tab of ['Agents', 'Skills']) assert.ok(source.includes(tab), tab)
+  assert.doesNotMatch(source, /prompt-surface|Prompts/)
+  const promptPage = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/PromptsPage.svelte'), 'utf8')
+  for (const token of ['Prompt surface', 'protected: prompt-surface', 'Recipients']) assert.ok(promptPage.includes(token), token)
+})
+
+test('F2 prompts page uses only Tier-2 colour aliases', () => {
+  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/PromptsPage.svelte'), 'utf8')
+  const css = source.match(/<style>([\s\S]*?)<\/style>/)?.[1] || ''
+  const declarations = [...css.matchAll(/(?:^|[;{}])\s*[-a-z]+\s*:\s*([^;{}]+)/g)].map((match) => match[1].trim())
+  assert.equal(css.includes('data-theme'), false)
+  assert.equal(declarations.some((value) => /#[0-9a-f]{3,8}\b/i.test(value)), false)
+  assert.equal(declarations.some((value) => /(?:^|\s)(?:white|black|red|blue|green|gray|grey)(?:\s|$)/i.test(value)), false)
+  assert.equal(declarations.some((value) => /--(?:ink|paper|spot|serious|status-\w+-raw|role-\w+-(?:dark|light))/.test(value)), false)
+  assert.ok(source.includes('background:var(--panel); border:1px solid var(--line);'))
 })
 
 test('fleet cells preserve honest absence and discriminate status evidence', () => {
@@ -2629,8 +2644,8 @@ test('workflow-page:D3', () => {
 })
 
 test('workflow-page:E1', () => {
-  assert.deepEqual(VIEWS, ['fleet', 'ops', 'roster', 'agents', 'workflows', 'run', 'phase'])
-  for (const hash of ['#/workflows', '#/ops', '#/roster', '#/adw-123', '#/adw-123/plan']) assert.equal(formatHash(parseHash(hash)), hash)
+  assert.deepEqual(VIEWS, ['fleet', 'ops', 'roster', 'agents', 'prompts', 'workflows', 'run', 'phase'])
+  for (const hash of ['#/workflows', '#/ops', '#/roster', '#/prompts', '#/adw-123', '#/adw-123/plan']) assert.equal(formatHash(parseHash(hash)), hash)
   assert.deepEqual(parseHash('#/workflows/ignored'), { view: 'workflows', adw_id: null, phase: null })
   const app = readFileSync(join(process.cwd(), 'visualizer/web/src/App.svelte'), 'utf8')
   assert.match(app, /import WorkflowsPage from '\.\/lib\/WorkflowsPage\.svelte'/)
@@ -2638,6 +2653,34 @@ test('workflow-page:E1', () => {
   assert.match(app, /Workflows · Factory/)
   assert.match(app, /<WorkflowsPage \/>/)
   assert.match(app, />Workflows<\//)
+})
+
+test('prompts-page:D1 mounted page renders the prompt-surface consequence', () => {
+  const root = join(process.cwd(), 'visualizer/web/src')
+  const app = readFileSync(join(root, 'App.svelte'), 'utf8')
+  const page = readFileSync(join(root, 'lib/PromptsPage.svelte'), 'utf8')
+  const agents = readFileSync(join(root, 'lib/agents.js'), 'utf8')
+  const consequence = 'Charter changes force stronger assurance and require a measurement claim in the commit message.'
+  assert.match(app, /import PromptsPage from '\.\/lib\/PromptsPage\.svelte'/)
+  assert.match(app, /route\.view === 'prompts'/)
+  assert.match(app, /Prompts · Factory/)
+  assert.match(app, /<PromptsPage\s*\/>/)
+  assert.ok(agents.includes(`export const PROMPT_SURFACE_CONSEQUENCE = '${consequence}'`))
+  assert.match(page, /PROMPT_SURFACE_CONSEQUENCE/)
+  assert.match(page, /\{PROMPT_SURFACE_CONSEQUENCE\}/)
+  assert.ok(page.includes('Proposal only — nothing is applied.'))
+  assert.doesNotMatch(page, /\/api\/prompts\/(?:apply|dispatch|run-boot|review-post)/)
+  for (const action of ['dispatch', 'run-boot', 'review-post']) assert.equal(page.includes(action), false, action)
+})
+
+test('prompts-page:E1 reuses the sole prompt proposal endpoint', () => {
+  const root = join(process.cwd(), 'visualizer/web/src')
+  const page = readFileSync(join(root, 'lib/PromptsPage.svelte'), 'utf8')
+  const api = readFileSync(join(root, 'lib/api.js'), 'utf8')
+  assert.match(page, /import \{ getAgents, proposePrompt \} from '\.\/api\.js'/)
+  assert.match(page, /proposePrompt\(promptDraft\.role, promptDraft\.text\)/)
+  assert.deepEqual([...api.matchAll(/\/api\/prompts\/[a-z-]+/g)].map((match) => match[0]), ['/api/prompts/propose'])
+  for (const action of ['apply', 'dispatch', 'run-boot', 'review-post']) assert.doesNotMatch(api, new RegExp(`/api/prompts/${action}`))
 })
 
 test('workflow-page:F1', () => {

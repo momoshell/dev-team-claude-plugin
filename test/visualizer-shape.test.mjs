@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'n
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { INTAKE_REFUSAL_REASONS, INTAKE_WINDOW_MS, defaultCellWindow, defaultIntakeWindow, defaultRunSetWindow, RUN_SET_WINDOW_MS, shapeCellHealth, shapeGateChecks, shapeIntake, shapeRunSet, shapeRun, foldAgents, laneFor, matchesFilters, ROLE_ORDER, withCells } from '../visualizer/server/shape.mjs'
-import { normalizeAgents, normalizePrompts, normalizeSkills } from '../visualizer/web/src/lib/agents.js'
+import { AGENT_ROLES, normalizeAgents, normalizePrompts, normalizeSkills } from '../visualizer/web/src/lib/agents.js'
 import { startServer } from '../visualizer/server/server.mjs'
 import { drainEvents, createDrainQueue } from '../visualizer/web/src/lib/drain.js'
 import { layoutTimeline, MIN_WIDTH, QUEUED_WIDTH } from '../visualizer/web/src/lib/timeline.js'
@@ -793,6 +793,25 @@ test('A1 agents page marks unavailable data with reasons', () => {
   assert.equal(prompt.charter_bytes.value, 'unmeasured')
   assert.equal(prompt.charter_bytes.measured, false)
   assert.ok(prompt.charter_bytes.reason)
+})
+
+test('prompts-page:B1 recipient mappings preserve measured seats and explain absence', () => {
+  const prompts = normalizePrompts({ prompts: [
+    { role: '_shared', recipients: [] },
+    { role: 'builder', recipients: [] },
+    { role: 'reviewer', recipients: ['review-seat'] },
+    { role: 'future-seat', recipients: [] },
+    { role: null, recipients: [] },
+  ] })
+  assert.deepEqual(prompts[0].recipients, [...AGENT_ROLES])
+  assert.deepEqual(prompts[1].recipients, ['builder'])
+  assert.deepEqual(prompts[2].recipients, ['review-seat'])
+  for (const prompt of prompts.slice(3)) {
+    assert.equal(prompt.recipients, null)
+    assert.notDeepEqual(prompt.recipients, [])
+    assert.equal(typeof prompt.recipients_reason, 'string')
+    assert.ok(prompt.recipients_reason.trim())
+  }
 })
 
 test('C1 agents page keeps register and delivered skill grants distinct', () => {

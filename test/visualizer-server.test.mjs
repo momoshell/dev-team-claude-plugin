@@ -19,7 +19,7 @@ import { deriveStatus } from '../visualizer/web/src/lib/fleet.js'
 import { createLedgerFeed } from '../visualizer/server/ledger-feed.mjs'
 import { readLadder, stageMoves } from '../visualizer/server/roster-ladder.mjs'
 import { shapeIntake } from '../visualizer/server/shape.mjs'
-import { createAgentsSource, proposeAgent, proposePrompt, proposeSkills } from '../visualizer/server/agents-source.mjs'
+import { AGENT_ROLES, createAgentsSource, proposeAgent, proposePrompt, proposeSkills } from '../visualizer/server/agents-source.mjs'
 import { rawRequest, scratchDir, sqliteAvailable, treeDigest } from './helpers.mjs'
 const require = createRequire(import.meta.url)
 const SKIP = sqliteAvailable() ? false : `node:sqlite unavailable (below NODE_FLOOR ${NODE_FLOOR})`
@@ -566,6 +566,27 @@ test('same-origin and originless JSON clients still engage the stop switch', { s
   }
 })
 
+test('prompts-page:A1 server lists the closed charter inventory and current text', async () => {
+  const fixture = agentsFixture('visualizer-agents-inventory-')
+  const source = createAgentsSource({ checkout: fixture.checkout, crewRoot: fixture.crewRoot })
+  let server
+  try {
+    server = await startInProcess({}, { checkout: fixture.checkout, crewRoot: fixture.crewRoot, agents: source, ledgerDb: join(fixture.dir, 'ledger.db'), triageDb: join(fixture.dir, 'triage.db') })
+    const response = await json(server.base, '/api/agents')
+    assert.equal(response.status, 200)
+    const expectedRoles = ['_shared', ...AGENT_ROLES]
+    assert.deepEqual(response.json.prompts.map((row) => row.role), expectedRoles)
+    for (const role of expectedRoles) {
+      const row = response.json.prompts.find((candidate) => candidate.role === role)
+      assert.equal(row.text, readFileSync(join(fixture.checkout, 'crew', 'roles', `${role}.md`), 'utf8'))
+      assert.deepEqual(row.recipients, role === '_shared' ? [...AGENT_ROLES] : [role])
+      assert.equal(row.recipients_reason, null)
+    }
+  } finally {
+    if (server) await stopInProcess(server)
+  }
+})
+
 test('B1 agents page proposal endpoints are diff-only', async () => {
   const fixture = agentsFixture('visualizer-agents-proposals-')
   const source = createAgentsSource({ checkout: fixture.checkout, crewRoot: fixture.crewRoot })
@@ -599,6 +620,27 @@ test('B1 agents page proposal endpoints are diff-only', async () => {
     assert.equal(denied.ok, false); assert.ok(denied.refusals[0].message)
     const empty = proposeSkills({ checkout: fixture.checkout, role: 'builder', skills: [], readFileSync: () => '', readdirSync: () => [] })
     assert.equal(empty.ok, false); assert.ok(empty.refusals[0].message)
+  } finally {
+    if (server) await stopInProcess(server)
+  }
+})
+
+test('prompts-page:C1 prompt proposals return a diff without writes', async () => {
+  const fixture = agentsFixture('visualizer-agents-prompt-diff-')
+  const source = createAgentsSource({ checkout: fixture.checkout, crewRoot: fixture.crewRoot })
+  const checkoutBefore = treeDigest(fixture.checkout), crewBefore = treeDigest(fixture.crewRoot)
+  let server
+  try {
+    server = await startInProcess({}, { checkout: fixture.checkout, crewRoot: fixture.crewRoot, agents: source, ledgerDb: join(fixture.dir, 'ledger.db'), triageDb: join(fixture.dir, 'triage.db') })
+    const response = await json(server.base, '/api/prompts/propose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ role: 'builder', text: '# replacement charter\n' }) })
+    assert.equal(response.status, 200)
+    assert.equal(response.json.ok, true)
+    assert.match(response.json.diff, /^--- a\/crew\/roles\/builder\.md$/m)
+    assert.match(response.json.diff, /^\+\+\+ b\/crew\/roles\/builder\.md$/m)
+    assert.equal(Object.hasOwn(response.json, 'target_path'), false)
+    assert.equal(Object.hasOwn(response.json, 'after_text'), false)
+    assert.equal(treeDigest(fixture.checkout), checkoutBefore)
+    assert.equal(treeDigest(fixture.crewRoot), crewBefore)
   } finally {
     if (server) await stopInProcess(server)
   }

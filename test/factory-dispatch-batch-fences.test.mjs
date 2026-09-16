@@ -1566,12 +1566,12 @@ DIRECT && test('path reach admits a rooted planner charter literal when unheld',
   const planner = ['crew', 'roles', 'planner.md'].join('/')
   const reach = collectTestReach({ checkout: repoRoot })
   const rows = testsOutsideFence({ surface: [planner], fenceFiles: [planner], reach })
-  assert.deepEqual(rows.find((row) => row.test === 'crew/crew.test.mjs'), {
-    test: 'crew/crew.test.mjs', file: planner, hops: null, how: 'path', symbols: [],
+  assert.deepEqual(rows.find((row) => row.test === 'crew/crew-boot.test.mjs'), {
+    test: 'crew/crew-boot.test.mjs', file: planner, hops: null, how: 'path', symbols: [],
   })
   const result = reachCheck({ checkout: repoRoot, fenceFiles: [planner], surface: [planner] })
   assert.equal(result.error, null)
-  assert.ok(result.report.admissions.some((row) => row.source === 'test-reach' && row.file === 'crew/crew.test.mjs'))
+  assert.ok(result.report.admissions.some((row) => row.source === 'test-reach' && row.file === 'crew/crew-boot.test.mjs'))
 })
 
 DIRECT && test('A1 admits unheld test reach', async () => {

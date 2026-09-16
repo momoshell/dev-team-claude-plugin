@@ -408,6 +408,16 @@ function sandboxVerdict(source) {
   return allTempRooted ? 'sandboxed' : 'unsandboxed'
 }
 
+const CREW_TEST_HELPER_IMPORT = /^\s*import\s+\{[^}]*\}\s+from\s+(['"])\.\/crew-test-helpers\.mjs\1\s*$/gm
+
+function importsCrewTestLedgerSandbox(source, dir) {
+  const code = maskCode(source)
+  const imported = [...source.matchAll(CREW_TEST_HELPER_IMPORT)].some((match) => code.slice(match.index, match.index + 6) === 'import')
+  if (!imported) return false
+  const helper = readFileSync(join(ROOT, posix.normalize(posix.join(dir, 'crew-test-helpers.mjs'))), 'utf8')
+  return helper.length > 0 && sandboxVerdict(helper) === 'sandboxed'
+}
+
 function ledgerSandboxVerdict(source, dir) {
   const doors = doorsUsed(source, dir)
   const bindings = importBindings(source, dir)
@@ -417,7 +427,10 @@ function ledgerSandboxVerdict(source, dir) {
     return callArgs(source, local).some((args) => !/\bdbPath\b/.test(args))
   })
   if (!hasHomeDefault && !hasUncontainedOpener) return 'not-a-writer'
-  return sandboxVerdict(source)
+  const own = sandboxVerdict(source)
+  if (own === 'points-at-real-ledger') return own
+  if (importsCrewTestLedgerSandbox(source, dir)) return 'sandboxed'
+  return own
 }
 
 function functionHeaders(code) {
@@ -750,6 +763,16 @@ test('ledger sandbox tripwire — a one-hop module-scope mkdtemp redirect is acc
   assert.equal(ledgerSandboxVerdict('const x = 1\n', 'test'), 'not-a-writer')
 })
 
+// MUTATION A8: crediting the shared helper before the module own verdict lets a
+// helper-importing module point DEVTEAM_LEDGER_DIR at the real ledger and read
+// as sandboxed.
+test('ledger sandbox tripwire — the shared-helper credit never outranks a real-ledger pointer', () => {
+  const imported = "import { callCounter } from './crew-test-helpers.mjs'\nimport { bootCmd } from './crew.mjs'\n"
+  const real = `${imported}const real = join(homedir(), '.dev-team')\nprocess.env.DEVTEAM_LEDGER_DIR = real\nawait bootCmd({ task: 't' })\n`
+  assert.equal(ledgerSandboxVerdict(real, 'crew'), 'points-at-real-ledger')
+  assert.equal(ledgerSandboxVerdict(imported, 'crew'), 'sandboxed')
+})
+
 // MUTATION M3: reading a control-header slash as a division desynchronises the
 // ledger tripwire the same way — its sandbox assignment stops being visible and
 // a sandboxed file is reported as an unsandboxed writer.
@@ -827,7 +850,7 @@ test('ledger sandbox tripwire — every exemption has a live, load-bearing warra
     const verdict = ledgerSandboxVerdict(source, dir)
     assert.ok(!['not-a-writer', 'sandboxed'].includes(verdict), `exemption ${file} is redundant; ignoring it gives ${verdict}`)
   }
-  for (const file of ['crew/crew.test.mjs', 'crew/daemon.test.mjs', 'crew/reclaim-descendants.test.mjs']) {
+  for (const file of ['crew/crew.test.mjs', 'crew/crew-boot.test.mjs', 'crew/crew-adapters.test.mjs', 'crew/crew-emit.test.mjs', 'crew/crew-seatio.test.mjs', 'crew/crew-cli.test.mjs', 'crew/daemon.test.mjs', 'crew/reclaim-descendants.test.mjs']) {
     assert.ok(!LEDGER_SANDBOX_EXEMPT.has(file), `${file} is a live ledger leak and may never be exempted`)
   }
 })
@@ -840,8 +863,8 @@ test('ledger sandbox tripwire — every exemption has a live, load-bearing warra
 // and a single rmSync passes any presence check and still leaks nineteen — that
 // is how 142 directories per run went unnoticed since Aug 15 (#572).
 //
-// Scope: *.test.mjs under the directories that hold test files, plus the one
-// shared non-test test module (test/fixtures.mjs:28 mints for its callers).
+// Scope: *.test.mjs under the directories that hold test files, plus the two
+// shared non-test test modules (test/fixtures.mjs and crew/crew-test-helpers.mjs).
 // Production modules are NEVER enumerated, so crew/pi/extensions/lab.ts and
 // crew/pi/extensions/subagent.ts — whose runtime mkdtemp is legitimate — cannot
 // be flagged by construction, not by an exception. test/helpers.mjs is the one
@@ -852,7 +875,7 @@ test('ledger sandbox tripwire — every exemption has a live, load-bearing warra
 const RAW_TEMP_CALL = new RegExp(String.raw`\bmkdtempSync\s*\(|\bmkdtemp\s*\(`, 'g')
 const TEMP_HELPER_SELF = 'test/helpers.mjs'
 const TEMP_SCAN_DIRS = ['commands', 'crew', 'scripts', 'skills', 'test', 'visualizer']
-const TEMP_SCAN_EXTRA = ['test/fixtures.mjs']
+const TEMP_SCAN_EXTRA = ['test/fixtures.mjs', 'crew/crew-test-helpers.mjs']
 
 function rawTempSites(source) {
   return [...maskCode(source).matchAll(RAW_TEMP_CALL)].length
@@ -894,7 +917,13 @@ function frozenTempSites(sites) {
 const RAW_TEMP_EXEMPT = new Map([
   ['crew/arms.test.mjs', frozenTempSites(1)],
   ['crew/capabilities.test.mjs', frozenTempSites(1)],
-  ['crew/crew.test.mjs', frozenTempSites(84)],
+  ['crew/crew.test.mjs', frozenTempSites(14)],
+  ['crew/crew-boot.test.mjs', frozenTempSites(26)],
+  ['crew/crew-adapters.test.mjs', frozenTempSites(1)],
+  ['crew/crew-emit.test.mjs', frozenTempSites(4)],
+  ['crew/crew-seatio.test.mjs', frozenTempSites(2)],
+  ['crew/crew-cli.test.mjs', frozenTempSites(35)],
+  ['crew/crew-test-helpers.mjs', frozenTempSites(2)],
   ['crew/daemon.test.mjs', frozenTempSites(7)],
   ['crew/factoryctl.test.mjs', frozenTempSites(2)],
   ['crew/harvest.test.mjs', frozenTempSites(1)],

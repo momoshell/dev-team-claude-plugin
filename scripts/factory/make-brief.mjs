@@ -120,6 +120,12 @@ const UNKNOWN_KEY = 'unknown-key'
 const BLANK_ASK = 'blank-ask'
 const RESTATING_ASK = 'restating-ask'
 const MISSING_PATH = 'missing-path'
+const WHERE_OUTSIDE_CHECKOUT = 'where-outside-checkout'
+const WHERE_SYMLINK = 'where-symlink'
+const WHERE_STAT_FAILED = 'where-stat-failed'
+const WHERE_READ_FAILED = 'where-read-failed'
+const CREATES_PATH_UNSAFE = 'creates-path-unsafe'
+const CREATES_STAT_FAILED = 'creates-stat-failed'
 const NOT_A_GIT_REPO = 'not-a-git-repo'
 const OUT_DIR_MISSING = 'out-dir-missing'
 const OUT_EXISTS = 'out-exists'
@@ -149,22 +155,24 @@ export const REFUSAL_REASONS = Object.freeze([
   UNKNOWN_KEY,
   BLANK_ASK,
   RESTATING_ASK,
-  MISSING_PATH,
+  WHERE_OUTSIDE_CHECKOUT,
+  WHERE_SYMLINK,
+  WHERE_STAT_FAILED,
+  WHERE_READ_FAILED,
+  CREATES_PATH_UNSAFE,
+  CREATES_STAT_FAILED,
   NOT_A_GIT_REPO,
   OUT_DIR_MISSING,
   OUT_EXISTS,
   BAD_FENCES,
   BAD_PROTECTED,
   UNKNOWN_LANE,
-  COUPLED_SOURCE_UNFENCED,
-  STALE_READ_ACK,
   PROFILE_UNREADABLE,
   PROFILE_UNRATIFIED,
   SCOPE_DIRECTORY_UNSLASHED,
   SCOPE_ENTRY_SHAPE,
   SCOPE_ENTRY_CASE,
   CREATES_EXISTS,
-  CREATES_PARENT_MISSING,
   DIRECTED_UNKNOWN_KEY,
   DIRECTED_SHAPE,
   DIRECTED_FENCE_COLLISION,
@@ -421,6 +429,11 @@ function refuseUsage(message, reason = MISSING_LINE) {
   throw new BriefUsageError(`brief: ${message}`, reason)
 }
 
+function warnUsage(message, reason) {
+  process.stderr.write(`brief: warning: ${message} [reason: ${reason}]\n`)
+  return { message, reason }
+}
+
 function nonEmptyString(value) {
   return typeof value === 'string' && value.trim().length > 0
 }
@@ -638,27 +651,62 @@ function absoluteWhere(checkout, entry) {
   return resolve(realpathOr(resolve(checkout)), entry)
 }
 
-export function verifyWhere({ checkout, where }) {
+function unresolvedWhere(entry, reason, allowUnresolved = false) {
+  const message = `where path ${reason === MISSING_PATH ? 'does not exist' : 'is not a regular file or directory'}: ${entry}`
+  if (allowUnresolved !== true) refuseUsage(message, reason)
+  warnUsage(message, reason)
+  return { path: entry, kind: 'unresolved', reason }
+}
+
+function checkWhereSegments(root, entry) {
+  const normalised = normaliseRepoPath(entry)
+  let segment = root
+  for (const part of normalised.split('/').filter(Boolean)) {
+    segment = join(segment, part)
+    let metadata
+    try { metadata = lstatSync(segment) } catch (error) {
+      if (error?.code === 'ENOENT' || error?.code === 'ENOTDIR') return { missing: true }
+      refuseUsage(`where path cannot inspect a checkout segment: ${entry}`, WHERE_STAT_FAILED)
+    }
+    if (metadata.isSymbolicLink()) refuseUsage(`where path includes a symlinked segment: ${entry}`, WHERE_SYMLINK)
+  }
+  return { missing: false }
+}
+
+export function verifyWhere({ checkout, where, allowUnresolved = false }) {
   const root = gitRoot(checkout)
   if (!Array.isArray(where)) refuseUsage('where must be an array', WRONG_TYPE)
+  // Shape and case checks remain trust-boundary checks. Unlike a fence entry,
+  // `where` may name an existing directory without a trailing slash because it
+  // is expanded for discovery; ordinary absence is handled below.
   return where.map((entry) => {
     if (typeof entry !== 'string' || !entry.trim()) {
       refuseUsage(`where entry is invalid: ${String(entry)}`, MISSING_LINE)
     }
+    const normalised = normaliseRepoPath(entry)
+    const parsed = parseFenceScope(normalised)
+    if (parsed.kind === 'invalid' || parsed.kind === 'span') {
+      refuseUsage(`where entry is invalid: ${entry}`, SCOPE_ENTRY_SHAPE)
+    }
+    const actual = onDiskSpelling(root, normalised)
+    if (actual !== null) {
+      refuseUsage(`where entry's on-disk spelling is ${actual}, not ${normalised}`, SCOPE_ENTRY_CASE)
+    }
     const absolute = absoluteWhere(root, entry)
     const relativePath = relative(root, absolute).split(sep).join('/')
     if (relativePath === '..' || relativePath.startsWith('../')) {
-      refuseUsage(`where path is outside checkout: ${entry}`, MISSING_PATH)
+      refuseUsage(`where path is outside checkout: ${entry}`, WHERE_OUTSIDE_CHECKOUT)
     }
+    const segments = checkWhereSegments(root, entry)
+    if (segments.missing) return unresolvedWhere(entry, MISSING_PATH, allowUnresolved)
     let stat
     try {
       stat = statSync(absolute)
-    } catch {
-      refuseUsage(`where path does not exist: ${entry}`, MISSING_PATH)
+    } catch (error) {
+      if (error?.code === 'ENOENT' || error?.code === 'ENOTDIR') return unresolvedWhere(entry, MISSING_PATH, allowUnresolved)
+      refuseUsage(`where path cannot be inspected: ${entry}`, WHERE_STAT_FAILED)
     }
-    if (!stat.isFile() && !stat.isDirectory()) {
-      refuseUsage(`where path is neither a file nor directory: ${entry}`, MISSING_PATH)
-    }
+    if (!stat.isFile() && !stat.isDirectory()) return unresolvedWhere(entry, 'where-not-regular', allowUnresolved)
     // Resolve the repository once here as a refusal, even for an otherwise
     // valid path. The return keeps the author's spelling for rendering.
     if (!root) refuseUsage(`checkout is not a git repository: ${checkout}`, NOT_A_GIT_REPO)
@@ -687,7 +735,7 @@ export function verifyCreates({ checkout, creates = [] } = {}) {
     const absolute = absoluteWhere(root, normalised)
     const relativePath = relative(root, absolute).split(sep).join('/')
     if (relativePath === '' || relativePath === '..' || relativePath.startsWith('../')) {
-      refuseUsage(`creates path has no parent directory in the checkout: ${entry}`, CREATES_PARENT_MISSING)
+      refuseUsage(`creates path is outside the checkout: ${entry}`, CREATES_PATH_UNSAFE)
     }
     let pathSegment = root
     for (const segment of relativePath.split('/').filter(Boolean)) {
@@ -695,21 +743,29 @@ export function verifyCreates({ checkout, creates = [] } = {}) {
       let segmentStat = null
       try { segmentStat = lstatSync(pathSegment) } catch (error) {
         if (error?.code === 'ENOENT') break
-        refuseUsage(`creates path includes a symlink or inaccessible segment: ${entry}`, CREATES_PARENT_MISSING)
+        refuseUsage(`creates path includes an inaccessible segment: ${entry}`, CREATES_STAT_FAILED)
       }
       if (segmentStat.isSymbolicLink()) {
-        refuseUsage(`creates path ${pathSegment === absolute ? 'already exists' : 'includes a symlink or inaccessible segment'}: ${entry}`, pathSegment === absolute ? CREATES_EXISTS : CREATES_PARENT_MISSING)
+        refuseUsage(`creates path ${pathSegment === absolute ? 'already exists' : 'includes a symlinked segment'}: ${entry}`, pathSegment === absolute ? CREATES_EXISTS : CREATES_PATH_UNSAFE)
       }
     }
     if (seen.has(relativePath)) refuseUsage(`creates path is listed twice: ${entry}`, WRONG_TYPE)
     seen.add(relativePath)
     let stat = null
-    try { stat = statSync(absolute) } catch { stat = null }
+    try { stat = statSync(absolute) } catch (error) {
+      if (error?.code !== 'ENOENT') refuseUsage(`creates path cannot be inspected: ${entry}`, CREATES_STAT_FAILED)
+    }
     if (stat) refuseUsage(`creates path already exists: ${entry}`, CREATES_EXISTS)
     let parent = null
-    try { parent = statSync(dirname(absolute)) } catch { parent = null }
-    if (!parent || !parent.isDirectory()) {
-      refuseUsage(`creates path has no parent directory in the checkout: ${entry}`, CREATES_PARENT_MISSING)
+    try { parent = statSync(dirname(absolute)) } catch (error) {
+      if (error?.code !== 'ENOENT') refuseUsage(`creates path parent cannot be inspected: ${entry}`, CREATES_STAT_FAILED)
+    }
+    if (!parent) {
+      warnUsage(`creates path has no parent directory in the checkout: ${entry}`, CREATES_PARENT_MISSING)
+      return { path: relativePath, kind: 'created', reason: CREATES_PARENT_MISSING }
+    }
+    if (!parent.isDirectory()) {
+      refuseUsage(`creates path parent is not a directory: ${entry}`, CREATES_PATH_UNSAFE)
     }
     return { path: relativePath, kind: 'created' }
   })
@@ -740,6 +796,7 @@ function listDirectoryFiles(checkout, repoRoot, entry) {
 function expandFiles({ checkout, entries, repoRoot }) {
   const files = []
   for (const entry of entries) {
+    if (entry.kind === 'unresolved') continue
     if (entry.kind === 'file') {
       files.push({
         file: repoRelative(repoRoot, absoluteWhere(checkout, entry.path)),
@@ -802,7 +859,7 @@ export function discoverTripwires({ checkout, files, lane = null, budgetMs = DIS
   if (!Array.isArray(files)) refuseUsage('files must be an array', WRONG_TYPE)
   const entries = files.map((entry) => {
     if (typeof entry === 'string') return verifyWhere({ checkout, where: [entry] })[0]
-    if (!entry || typeof entry !== 'object' || !['file', 'directory'].includes(entry.kind) || typeof entry.path !== 'string') {
+    if (!entry || typeof entry !== 'object' || !['file', 'directory', 'unresolved'].includes(entry.kind) || typeof entry.path !== 'string') {
       refuseUsage('files must contain verified path entries', WRONG_TYPE)
     }
     return entry
@@ -822,8 +879,12 @@ export function discoverTripwires({ checkout, files, lane = null, budgetMs = DIS
     let source
     try {
       source = readFileSync(sourceFile.absolute, 'utf8')
-    } catch {
-      refuseUsage(`where path cannot be read: ${sourceFile.file}`, MISSING_PATH)
+    } catch (error) {
+      if (error?.code === 'ENOENT' || error?.code === 'ENOTDIR' || error?.code === 'EISDIR') {
+        warnUsage(`where path disappeared during read: ${sourceFile.file}`, MISSING_PATH)
+        continue
+      }
+      refuseUsage(`where path cannot be read: ${sourceFile.file}`, WHERE_READ_FAILED)
     }
     const keys = extractKeys(source, sourceFile.file)
     const symbols = extractSymbols(source, sourceFile.file)
@@ -1126,6 +1187,7 @@ function validateRegisterFence({ checkout, entry, context } = {}) {
     refuseUsage(`${context}: fence entry ${entry} is invalid: ${parsed.reason}`, SCOPE_ENTRY_SHAPE)
   }
   validateScopeEntries({ checkout, files: [parsed.path], context })
+  if (parsed.kind === 'span' && checkWhereSegments(gitRoot(checkout), parsed.path).missing) return parsed
   if (parsed.kind === 'span') {
     const lineCount = committedFenceLineCount({ checkout, parsed, entry, context })
     const validated = validateFenceScope(entry, lineCount)
@@ -1257,7 +1319,10 @@ export function validateScopeEntries({ checkout, files = [], context = '' } = {}
     if (normalised === '.') continue
     if (normalised.endsWith('/')) continue
     let stat
-    try { stat = statSync(resolve(root, normalised)) } catch { continue }
+    try { stat = statSync(resolve(root, normalised)) } catch (error) {
+      if (error?.code === 'ENOENT' || error?.code === 'ENOTDIR') continue
+      refuseUsage(`${label}scope entry cannot be inspected: ${entry}`, WHERE_STAT_FAILED)
+    }
     if (!stat.isDirectory()) continue
     refuseUsage(`${label}scope entry resolves to a directory and can only match with a trailing slash: ${entry} (write "${normalised}/")`, SCOPE_DIRECTORY_UNSLASHED)
   }
@@ -1376,7 +1441,7 @@ export function crossCheckCoupling({ discovery, writeSurface, enforce = true } =
   }
 
   const result = {
-    enforced: enforce !== false,
+    enforced: false,
     coupled: records == null ? null : [
       ...inFence,
       ...acknowledged,
@@ -1387,14 +1452,14 @@ export function crossCheckCoupling({ discovery, writeSurface, enforce = true } =
     unfenced: unfenced.map(({ file }) => file),
     stale,
   }
-  if (enforce !== false && stale.length > 0) {
-    refuseUsage(`stale read acknowledgement(s): ${stale.map((read) => read.file).join(', ')}`, STALE_READ_ACK)
+  if (stale.length > 0) {
+    warnUsage(`stale read acknowledgement(s): ${stale.map((read) => read.file).join(', ')}`, STALE_READ_ACK)
   }
-  if (enforce !== false && unfenced.length > 0) {
+  if (unfenced.length > 0) {
     const details = unfenced
       .map((entry) => `${entry.file} · ${entry.keys.join(', ')}`)
       .join('; ')
-    refuseUsage(`coupled source(s) outside lane fence: ${details}`, COUPLED_SOURCE_UNFENCED)
+    warnUsage(`coupled source(s) outside lane fence: ${details}`, COUPLED_SOURCE_UNFENCED)
   }
   return result
 }
@@ -2256,14 +2321,14 @@ function trackedFileText(checkout, file) {
   let metadata
   try { metadata = lstatSync(target) } catch (error) {
     if (error?.code === 'ENOENT' || error?.code === 'ENOTDIR') return null
-    refuseUsage(`cannot inspect tracked file for tripwire keys: ${file}`, MISSING_PATH)
+    refuseUsage(`cannot inspect tracked file for tripwire keys: ${file}`, WHERE_STAT_FAILED)
   }
   // git grep ignores symlinks, gitlinks, and every other non-regular entry.
   if (!metadata.isFile()) return null
   try { return readFileSync(target, 'utf8') } catch (error) {
     // A regular entry can disappear or become a directory after lstatSync.
     if (error?.code === 'ENOENT' || error?.code === 'ENOTDIR' || error?.code === 'EISDIR') return null
-    refuseUsage(`cannot read tracked file for tripwire keys: ${file}`, MISSING_PATH)
+    refuseUsage(`cannot read tracked file for tripwire keys: ${file}`, WHERE_READ_FAILED)
   }
 }
 
@@ -2799,8 +2864,12 @@ function generatedGrep(discovery) {
 
 function renderWhere(where, creates = []) {
   return [
-    ...where.map((entry) => `verified · ${entry.kind} · ${entry.path}`),
-    ...creates.map((entry) => `${CREATES_MARK}${entry.path}`),
+    ...where.map((entry) => entry.kind === 'unresolved'
+      ? `warning · unresolved · ${entry.path} · reason: ${entry.reason}`
+      : `verified · ${entry.kind} · ${entry.path}`),
+    ...creates.map((entry) => entry.reason === CREATES_PARENT_MISSING
+      ? `${CREATES_MARK}${entry.path} · warning: parent is unresolved`
+      : `${CREATES_MARK}${entry.path}`),
   ].join('\n')
 }
 
@@ -2847,7 +2916,7 @@ function renderCoupled(coupling) {
     if (entry.status === 'acknowledged') {
       status = `acknowledged read-only: ${acknowledgements.get(normaliseRepoPath(entry.file)) ?? entry.why ?? ''}`
     }
-    if (entry.status === 'unfenced') status = 'not in any fence (refused)'
+    if (entry.status === 'unfenced') status = 'not in any fence (warning; scope is context)'
     lines.push(`- ${entry.file} · ${keys} · ${status}`)
   }
   return lines.join('\n')
@@ -3599,7 +3668,7 @@ function compile(flags) {
   const checkout = gitRoot(flags.checkout || process.cwd())
   const result = verifyPremises(request, checkout)
   if (result.stale.length > 0) refuseUsage(formatStalePremises(result.stale), BRIEF_PREMISE_STALE)
-  const where = verifyWhere({ checkout, where: request.where })
+  const where = verifyWhere({ checkout, where: request.where, allowUnresolved: true })
   const creates = verifyCreates({ checkout, creates: request.creates ?? [] })
   const discovery = discoverTripwires({ checkout, files: where, lane: flags.lane ?? null, onProgress: stderrProgressSink })
   const profileResult = gatherProfile({
@@ -3681,7 +3750,7 @@ function discoverReadsOnly(flags) {
   const request = readRequestFile(flags.request)
   validateRequest(request, { taskName: parseTaskStem(`${lane}.brief.md`) })
   const checkout = gitRoot(flags.checkout || process.cwd())
-  const discoverWhere = verifyWhere({ checkout, where: request.where })
+  const discoverWhere = verifyWhere({ checkout, where: request.where, allowUnresolved: true })
   const discoverCreates = verifyCreates({ checkout, creates: request.creates ?? [] })
   const discovery = discoverTripwires({ checkout, files: discoverWhere, lane, onProgress: stderrProgressSink })
   const fences = gatherFences({ fencesPath: flags.fences, checkout })

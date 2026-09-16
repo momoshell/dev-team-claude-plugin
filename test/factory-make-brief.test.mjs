@@ -518,7 +518,7 @@ test('a packed no-code fence emits no symbol index', () => {
   assert.equal(existsSync(join(pack, 'nocode.symbols.md')), false)
 })
 
-test('an oversized brief refuses with its largest section and byte count', () => {
+test('D1 brief-too-large remains a refusal', () => {
   const root = fixture('oversized-brief')
   const ask = `Please ${'x'.repeat(BRIEF_BYTE_LIMIT)} authored section`
   const requestPath = request(root, { ask })
@@ -618,11 +618,12 @@ test('intent resolves one collapsed sentence, accepts authored text, and validat
   assert.ok(brief.indexOf('## Intent') < brief.indexOf('## Proposed tier'))
 })
 
-test('a missing where path refuses by name and a blank ask refuses', () => {
+test('a missing where path warns by name and a blank ask still refuses', () => {
   const root = fixture('refusals')
   const missing = run(root, ['--request', request(root, { where: ['lib/nope.mjs'] }), '--checkout', root])
-  assert.equal(missing.status, 2)
+  assert.equal(missing.status, 0, `${missing.stderr}\n${missing.stdout}`)
   assert.match(`${missing.stderr}${missing.stdout}`, /lib\/nope\.mjs/)
+  assert.match(`${missing.stderr}${missing.stdout}`, /missing-path/)
   const blank = run(root, ['--request', request(root, { ask: '   ' }), '--checkout', root])
   assert.equal(blank.status, 2)
   assert.match(blank.stderr, /blank-ask/)
@@ -648,7 +649,9 @@ test('creates verifies the opposite existence pair and reuses scope shape checks
     { path: 'lib/new-widget.mjs', kind: 'created' },
   ])
   assert.throws(() => verifyCreates({ checkout: root, creates: ['lib/widget.mjs'] }), (error) => error.reason === 'creates-exists')
-  assert.throws(() => verifyCreates({ checkout: root, creates: ['nope/new-widget.mjs'] }), (error) => error.reason === 'creates-parent-missing')
+  assert.deepEqual(verifyCreates({ checkout: root, creates: ['nope/new-widget.mjs'] }), [
+    { path: 'nope/new-widget.mjs', kind: 'created', reason: 'creates-parent-missing' },
+  ])
   assert.throws(() => verifyCreates({ checkout: root, creates: ['lib/new-widget.mjs', 'lib/new-widget.mjs'] }), (error) => error.reason === 'wrong-type')
   for (const entry of [
     join(root, 'lib', 'absolute.mjs'), 'lib/*.mjs', 'lib/../new-widget.mjs', 'lib/new-dir/', 'Lib/new-widget.mjs',
@@ -658,7 +661,17 @@ test('creates verifies the opposite existence pair and reuses scope shape checks
     ), entry)
   }
   assert.ok(REFUSAL_REASONS.includes('creates-exists'))
-  assert.ok(REFUSAL_REASONS.includes('creates-parent-missing'))
+  assert.equal(REFUSAL_REASONS.includes('creates-parent-missing'), false)
+})
+
+test('A1 creates with an absent parent dispatches with a warning', () => {
+  const root = fixture('creates-absent-parent')
+  const result = run(root, [
+    '--request', request(root, { creates: ['nope/new-widget.mjs'] }), '--checkout', root,
+  ])
+  assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`)
+  assert.match(result.stderr, /creates-parent-missing/)
+  assert.match(result.stderr, /nope\/new-widget\.mjs/)
 })
 
 test('creates refuses symlinked parent segments and classifies a present leaf as existing', () => {
@@ -670,29 +683,29 @@ test('creates refuses symlinked parent segments and classifies a present leaf as
   git(root, 'add', 'link', 'present-link.mjs')
 
   for (const entry of ['link/new-widget.mjs', 'link/nested/new-widget.mjs']) {
-    assert.throws(() => verifyCreates({ checkout: root, creates: [entry] }), (error) => error.reason === 'creates-parent-missing', entry)
+    assert.throws(() => verifyCreates({ checkout: root, creates: [entry] }), (error) => error.reason === 'creates-path-unsafe', entry)
   }
   assert.throws(() => verifyCreates({ checkout: root, creates: ['present-link.mjs'] }), (error) => error.reason === 'creates-exists')
   const result = run(root, [
     '--request', request(root, { creates: ['link/new-widget.mjs'] }), '--checkout', root,
   ])
   assert.equal(result.status, 2)
-  assert.match(result.stderr, /creates-parent-missing/)
+  assert.match(result.stderr, /creates-path-unsafe/)
   const presentInBoth = run(root, [
     '--request', request(root, { where: ['present-link.mjs'], creates: ['present-link.mjs'] }), '--checkout', root,
   ])
   assert.equal(presentInBoth.status, 2)
-  assert.match(presentInBoth.stderr, /creates-exists/)
+  assert.match(presentInBoth.stderr, /where-symlink/)
   assert.equal(existsSync(join(outside, 'new-widget.mjs')), false)
 })
 
-test('creates keeps missing-path strict in both where/creates directions and accepts an empty list', () => {
+test('creates warns on missing paths in both where/creates directions and accepts an empty list', () => {
   // Compiler/git/filesystem coverage remains real; only the irrelevant nested baseline suite is replaced.
   const root = fixture('creates-controls', { scripts: FAST_FIXTURE_TEST })
   const absentInBoth = run(root, [
     '--request', request(root, { where: ['lib/new-widget.mjs'], creates: ['lib/new-widget.mjs'] }), '--checkout', root,
   ])
-  assert.equal(absentInBoth.status, 2)
+  assert.equal(absentInBoth.status, 0, `${absentInBoth.stderr}\n${absentInBoth.stdout}`)
   assert.match(absentInBoth.stderr, /missing-path/)
 
   const existsInBoth = run(root, [
@@ -704,7 +717,7 @@ test('creates keeps missing-path strict in both where/creates directions and acc
   const whereAbsent = run(root, [
     '--request', request(root, { where: ['lib/new-widget.mjs'], creates: ['config/new-widget.yml'] }), '--checkout', root,
   ])
-  assert.equal(whereAbsent.status, 2)
+  assert.equal(whereAbsent.status, 0, `${whereAbsent.stderr}\n${whereAbsent.stdout}`)
   assert.match(whereAbsent.stderr, /missing-path/)
 
   const without = compile(root, {}, [], 'without-creates.md').brief
@@ -1043,7 +1056,7 @@ test('citation-only code comments couple to a where owner', () => {
   assert.ok(citation.keys.includes('lib/widget.mjs') || citation.keys.includes('widget.mjs'))
 })
 
-test('citation-only coupling is enforced by fences and can be acknowledged as read-only', () => {
+test('citation-only coupling is contextual and can be acknowledged as read-only', () => {
   const root = fixture('citation-fence', { citingComment: true })
   const fencesPath = put(root, 'fences.json', `${JSON.stringify({
     lanes: [{ lane: 'own', files: ['lib/widget.mjs'] }],
@@ -1053,8 +1066,8 @@ test('citation-only coupling is enforced by fences and can be acknowledged as re
     '--request', requestPath, '--checkout', root,
     '--fences', fencesPath, '--lane', 'own', '--out', join(root, 'refused.md'),
   ])
-  assert.equal(refused.status, 2)
-  assert.match(refused.stderr, /coupled-source-unfenced/)
+  assert.equal(refused.status, 0, `${refused.stderr}\n${refused.stdout}`)
+  assert.match(refused.stderr, /coupled source\(s\) outside lane fence/)
   assert.match(refused.stderr, /lib\/cites\.js/)
 
   const acknowledgedPath = put(root, 'ack-fences.json', `${JSON.stringify({
@@ -1070,7 +1083,7 @@ test('citation-only coupling is enforced by fences and can be acknowledged as re
   assert.match(brief, /lib\/cites\.js · .*acknowledged read-only/)
 })
 
-test('--discover-reads names exactly the records the coupled refusal names', () => {
+test('--discover-reads records coupled context without refusing', () => {
   const root = fixture('discover-reads-names', { citingComment: true })
   const fencesPath = put(root, 'fences.json', `${JSON.stringify({
     lanes: [{ lane: 'own', files: ['lib/widget.mjs'] }],
@@ -1080,8 +1093,8 @@ test('--discover-reads names exactly the records the coupled refusal names', () 
     '--request', requestPath, '--checkout', root,
     '--fences', fencesPath, '--lane', 'own', '--out', join(root, 'refused.md'),
   ])
-  assert.equal(refused.status, 2)
-  assert.match(refused.stderr, /coupled-source-unfenced/)
+  assert.equal(refused.status, 0, `${refused.stderr}\n${refused.stdout}`)
+  assert.match(refused.stderr, /coupled source\(s\) outside lane fence/)
   const discovered = run(root, [
     '--discover-reads', 'own', '--request', requestPath, '--checkout', root, '--fences', fencesPath,
   ])
@@ -1165,7 +1178,7 @@ test('--discover-reads prints an empty register when every coupled source is fen
   assert.equal(result.stdout.trim(), '[]')
 })
 
-test('--discover-reads refuses what the compile path refuses', () => {
+test('--discover-reads preserves hard refusals while warning on missing paths', () => {
   const root = fixture('discover-reads-refusals')
   const fencesPath = put(root, 'fences.json', `${JSON.stringify({
     lanes: [{ lane: 'own', files: ['lib/widget.mjs'] }],
@@ -1178,8 +1191,8 @@ test('--discover-reads refuses what the compile path refuses', () => {
   const missingDiscover = run(root, [
     '--discover-reads', 'own', '--request', missingRequest, '--checkout', root, '--fences', fencesPath,
   ])
-  assert.equal(missingCompile.status, 2)
-  assert.equal(missingDiscover.status, 2)
+  assert.equal(missingCompile.status, 0, `${missingCompile.stderr}\n${missingCompile.stdout}`)
+  assert.equal(missingDiscover.status, 0, `${missingDiscover.stderr}\n${missingDiscover.stdout}`)
   assert.equal(reason(missingCompile), 'missing-path')
   assert.equal(reason(missingDiscover), reason(missingCompile))
 
@@ -2462,7 +2475,11 @@ test('proposal-v2 K1', () => {
 test('the parser returns a refusal code for an unknown CLI option', () => {
   assert.equal(main(['--bogus']), 2)
   assert.equal(new Set(REFUSAL_REASONS).size, REFUSAL_REASONS.length)
-  assert.equal(REFUSAL_REASONS.length, 28)
+  assert.equal(REFUSAL_REASONS.length, 30)
+  for (const retired of [
+    'missing-path', 'creates-parent-missing', 'coupled-source-unfenced', 'reads-unresolved', 'stale-read-ack',
+    'scope-entry-invalid', 'fence-not-arrived', 'fence-count-mismatch', 'fence-register-mismatch',
+  ]) assert.equal(REFUSAL_REASONS.includes(retired), false, retired)
   assert.ok(REFUSAL_REASONS.includes('brief-premise-stale'))
   assert.ok(REFUSAL_REASONS.includes('brief-too-large'))
   assert.ok(REFUSAL_REASONS.includes('brief-size-unmeasured'))
@@ -2473,13 +2490,13 @@ test('the parser returns a refusal code for an unknown CLI option', () => {
   assert.ok(REFUSAL_REASONS.includes('scope-directory-unslashed'))
   assert.ok(REFUSAL_REASONS.includes('scope-entry-shape'))
   assert.ok(REFUSAL_REASONS.includes('scope-entry-case'))
-  assert.ok(REFUSAL_REASONS.includes('coupled-source-unfenced'))
-  assert.ok(REFUSAL_REASONS.includes('stale-read-ack'))
+  assert.equal(REFUSAL_REASONS.includes('coupled-source-unfenced'), false)
+  assert.equal(REFUSAL_REASONS.includes('stale-read-ack'), false)
   assert.ok(REFUSAL_REASONS.includes('profile-unreadable'))
   assert.ok(REFUSAL_REASONS.includes('profile-unratified'))
   assert.ok(REFUSAL_REASONS.includes('bad-protected'))
   assert.ok(REFUSAL_REASONS.includes('creates-exists'))
-  assert.ok(REFUSAL_REASONS.includes('creates-parent-missing'))
+  assert.equal(REFUSAL_REASONS.includes('creates-parent-missing'), false)
 })
 
 test('the compiler parses cleanly with node --check', () => {
@@ -2840,13 +2857,15 @@ test('packed coupled savings isolate the populated sidecar', () => {
   assert.equal(existsSync(join(emptyPack, 'packed-coupled-savings.coupled.md')), false)
 })
 
-test('coupling refuses an unfenced caller and quiets when every caller is covered', () => {
+test('coupling reports an unfenced caller and quiets when every caller is covered', () => {
   const where = verifyWhere({ checkout: ROOT, where: ['crew/limits.mjs'] })
   const discovery = discoverTripwires({ checkout: ROOT, files: where })
-  assert.throws(() => crossCheckCoupling({
+  const observed = crossCheckCoupling({
     discovery,
     writeSurface: { basis: 'fences', files: ['crew/limits.mjs'], reads: [] },
-  }), (error) => error.reason === 'coupled-source-unfenced' && /crew\/child\.mjs/.test(error.message))
+  })
+  assert.equal(observed.enforced, false)
+  assert.ok(observed.unfenced.includes('crew/child.mjs'))
   const quiet = crossCheckCoupling({
     discovery,
     writeSurface: { basis: 'fences', files: [
@@ -2857,7 +2876,7 @@ test('coupling refuses an unfenced caller and quiets when every caller is covere
   assert.deepEqual(quiet.unfenced, [])
 })
 
-test('a coupled fixture refuses a fence that omits its caller', () => {
+test('B1 an unfenced coupled source compiles with warning context', () => {
   const root = fixture('coupled-firing', { coupledCaller: true })
   const fencesPath = put(root, 'fences.json', `${JSON.stringify({
     lanes: [{ lane: 'own', files: ['lib/widget.mjs'] }],
@@ -2866,22 +2885,24 @@ test('a coupled fixture refuses a fence that omits its caller', () => {
     '--request', request(root), '--checkout', root,
     '--fences', fencesPath, '--lane', 'own', '--out', join(root, 'refused.md'),
   ])
-  assert.equal(result.status, 2)
-  assert.match(result.stderr, /coupled-source-unfenced/)
+  assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`)
+  assert.match(result.stderr, /coupled source\(s\) outside lane fence/)
   assert.match(result.stderr, /lib\/caller\.mjs/)
 })
 
 test('a valid acknowledgement does not clear another unfenced coupled source', () => {
   const where = verifyWhere({ checkout: ROOT, where: ['crew/limits.mjs'] })
   const discovery = discoverTripwires({ checkout: ROOT, files: where })
-  assert.throws(() => crossCheckCoupling({
+  const observed = crossCheckCoupling({
     discovery,
     writeSurface: {
       basis: 'fences',
       files: ['crew/limits.mjs'],
       reads: [{ file: 'crew/child.mjs', why: 'read only here' }],
     },
-  }), (error) => error.reason === 'coupled-source-unfenced' && /crew\/crew\.mjs/.test(error.message))
+  })
+  assert.equal(observed.enforced, false)
+  assert.ok(observed.unfenced.includes('crew/crew.mjs'))
 })
 
 test('a coupled fixture renders an in-fence caller', () => {
@@ -2907,7 +2928,7 @@ test('a coupled fixture can acknowledge a read-only caller verbatim', () => {
   assert.match(section(brief, '## Coupled sources'), new RegExp(`acknowledged read-only: ${why}`))
 })
 
-test('stale and malformed coupling acknowledgements refuse by input reason', () => {
+test('stale coupling acknowledgements warn while malformed input still refuses', () => {
   // Compiler/git/filesystem coverage remains real; only the irrelevant nested baseline suite is replaced.
   const root = fixture('coupled-bad-reads', { coupledCaller: true, scripts: FAST_FIXTURE_TEST })
   const stalePath = put(root, 'stale-fences.json', `${JSON.stringify({
@@ -2917,8 +2938,8 @@ test('stale and malformed coupling acknowledgements refuse by input reason', () 
     '--request', request(root), '--checkout', root,
     '--fences', stalePath, '--lane', 'own', '--out', join(root, 'stale.md'),
   ])
-  assert.equal(stale.status, 2)
-  assert.match(stale.stderr, /stale-read-ack/)
+  assert.equal(stale.status, 0, `${stale.stderr}\n${stale.stdout}`)
+  assert.match(stale.stderr, /stale read acknowledgement/)
   for (const [label, reads] of [
     ['blank', [{ file: 'lib/caller.mjs', why: '   ' }]],
     ['not-object', ['lib/caller.mjs']],
@@ -2998,7 +3019,7 @@ test('G1 absent coupling discovery retains the not-discovered line', () => {
   assert.doesNotMatch(body, /none discovered/)
 })
 
-test('stale acknowledgements refuse before unfenced coupled sources', () => {
+test('stale acknowledgements warn before unfenced coupled sources', () => {
   const root = fixture('coupled-ordering', { coupledCaller: true })
   const fencesPath = put(root, 'fences.json', `${JSON.stringify({
     lanes: [{ lane: 'own', files: ['lib/widget.mjs'], reads: [{ file: 'config/thing.yml', why: 'stale' }] }],
@@ -3007,9 +3028,9 @@ test('stale acknowledgements refuse before unfenced coupled sources', () => {
     '--request', request(root), '--checkout', root,
     '--fences', fencesPath, '--lane', 'own', '--out', join(root, 'ordering.md'),
   ])
-  assert.equal(result.status, 2)
-  assert.match(result.stderr, /stale-read-ack/)
-  assert.doesNotMatch(result.stderr, /coupled-source-unfenced/)
+  assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`)
+  assert.match(result.stderr, /stale read acknowledgement/)
+  assert.match(result.stderr, /coupled source\(s\) outside lane fence/)
 })
 
 test('A1 stale quoted code refuses before compiler work', () => {

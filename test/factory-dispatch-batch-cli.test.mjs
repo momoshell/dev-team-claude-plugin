@@ -145,7 +145,7 @@ test('readBatch reads request JSON, normalises where paths, and sorts lanes', ()
   assert.equal(lanes[0].name, 'lane-a.request.json')
   assert.deepEqual(lanes[0].where, ['crew/owned.mjs'])
   assert.deepEqual(lanes[0].creates, ['crew/x.mjs'])
-  assert.deepEqual(lanes[0].request.creates, ['./crew/x.mjs'])
+  assert.deepEqual(lanes[0].request.creates, ['crew/x.mjs'])
   assert.equal(lanes[0].request.ask, 'measure lane-a source behavior')
 })
 

@@ -10193,6 +10193,7 @@ function runTask(ctx, io, crash) {
     rebased = true
     committing = [...new Set(Array.isArray(durable.accepted_commit_files) ? durable.accepted_commit_files : [])]
     S.commit = continuedHead
+    committedBaseline = true
     pendingRebaseConflict = null
     stageComplete()
   } else {
@@ -10508,7 +10509,10 @@ function runTask(ctx, io, crash) {
       let postRebaseProof
       let postRebaseProofThrown = null
       try {
-        postRebaseProof = refreshProofTree(null, { committedBaseline: false })
+        // `committedBaseline` is loop-scoped across suite re-entry; after this soft reset,
+        // "a pre-commit build or post-rebase soft reset does not" have accepted work in HEAD.
+        // Consult `continuingRebase`, not the shared variable.
+        postRebaseProof = refreshProofTree(null, { committedBaseline: continuingRebase && committedBaseline })
       } catch (err) {
         postRebaseProofThrown = err
       }

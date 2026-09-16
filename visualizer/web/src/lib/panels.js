@@ -180,6 +180,38 @@ function panelClone(value) {
   try { return structuredClone(value) } catch { return value }
 }
 
+export function assurancePanel(payload = {}) {
+  const source = Array.isArray(payload?.assurance?.presets) ? payload.assurance.presets : []
+  const presets = source.map((preset) => ({
+    key: preset?.key ?? null,
+    rank: preset?.rank ?? null,
+    name: preset?.name ?? null,
+    alias: preset?.alias ?? null,
+    description: preset?.description ?? null,
+    forcing: typeof preset?.forcing === 'string' && preset.forcing ? preset.forcing : 'Forcing rule unavailable — endpoint supplied no reason',
+  }))
+  const floorPayload = payload?.band_floors
+  const floorValues = floorPayload && typeof floorPayload === 'object' && !Array.isArray(floorPayload) ? floorPayload.values : null
+  const band_floors = floorValues && typeof floorValues === 'object' && !Array.isArray(floorValues) ? { ...floorValues } : null
+  const band_floors_absent = band_floors
+    ? null
+    : typeof floorPayload?.absent === 'string' && floorPayload.absent.trim()
+      ? floorPayload.absent
+      : 'Model seating eligibility unavailable — endpoint supplied no reason'
+  return {
+    presets,
+    assurance_axis: 'Review strength',
+    band_floor_axis: 'Model seating eligibility',
+    band_floors,
+    band_floors_absent,
+    absent: band_floors_absent,
+    protected_paths: Array.isArray(payload?.protected_paths) ? [...payload.protected_paths] : [],
+    assurance_absent: typeof payload?.assurance?.absent === 'string' && payload.assurance.absent.trim()
+      ? payload.assurance.absent
+      : presets.length ? null : 'Assurance presets unavailable — endpoint supplied no rows',
+  }
+}
+
 export function rosterPickPanel(payload = {}) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
     return {

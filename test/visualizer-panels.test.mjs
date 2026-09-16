@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { PANEL_REFRESH_MS, PANEL_STALE_AFTER_MS, acceptRows, brakePanel, cellHealthPanel, fleetCost, fleetEscalationRate, fleetMedianDuration, fleetPassRate, fleetPhasesPerRun, fleetTokens, findingRows, gateChips, intakeCandidateRows, intakePanel, panelAgeLabel, panelReadLoop, readFreshness, reviewRows, rosterEditForm, rosterPanel, rosterPickPanel, rosterProposal, runSetPanel, teardownPanel } from '../visualizer/web/src/lib/panels.js'
+import { PANEL_REFRESH_MS, PANEL_STALE_AFTER_MS, acceptRows, assurancePanel, brakePanel, cellHealthPanel, fleetCost, fleetEscalationRate, fleetMedianDuration, fleetPassRate, fleetPhasesPerRun, fleetTokens, findingRows, gateChips, intakeCandidateRows, intakePanel, panelAgeLabel, panelReadLoop, readFreshness, reviewRows, rosterEditForm, rosterPanel, rosterPickPanel, rosterProposal, runSetPanel, teardownPanel } from '../visualizer/web/src/lib/panels.js'
 import { VIEWS, parseHash, formatHash } from '../visualizer/web/src/lib/route.js'
 import { ATTENTION_KEYS, absenceMark, attentionBreakdown, configurationDimensionCell, configurationFilterView, costCell, createSemaphore, crewArchive, deriveDisplayStatus, deriveStatus, escalationProbeTargets, fleetActivity, fleetView, gateCell, heartbeatCell, needsAttention, openRecordNote, operationsOverview, profileEvidenceView, reviewCell, runActivity, runDetailConfiguration, runDetailSeats, runDetailState, runtimeActivitySummary, slotWaitCell, tokenCell, shipStatus } from '../visualizer/web/src/lib/fleet.js'
 import { ROLE_ORDER, acceptEvidence, bounceArrows, gateMarkers, gateProofStory, laneRows, phaseFilterId, phasePanel, renderMarkdown } from '../visualizer/web/src/lib/trace.js'
@@ -22,7 +22,7 @@ import { createCrewStateSource } from '../visualizer/server/crew-state.mjs'
 import { createLedgerFeed } from '../visualizer/server/ledger-feed.mjs'
 import { openLedger } from '../scripts/factory/ledger.mjs'
 import { scratchDir, sqliteAvailable } from './helpers.mjs'
-import { proposeRosterEdit, proposeSkills } from '../visualizer/web/src/lib/api.js'
+import { getAssurances, proposeAssuranceChange, proposeRosterEdit, proposeSkills } from '../visualizer/web/src/lib/api.js'
 
 async function withAttentionFixture(extraKey, callback) {
   const dir = scratchDir('visualizer-attention-')
@@ -725,6 +725,45 @@ test("C1 propose the pick returns today's diff without a write", async () => {
   }
 })
 
+test('assurance API wrappers use the caller document and omit blank labels', async () => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (path, options = {}) => {
+    calls.push({ path: String(path), options })
+    return new Response(JSON.stringify({ ok: true, diff: '', refusals: [], wrote: false }), { status: 200, headers: { 'content-type': 'application/json' } })
+  }
+  try {
+    const read = await getAssurances()
+    assert.equal(read.ok, true)
+    await proposeAssuranceChange('{\n  "ask": "fixture"\n}', 'judge', '  ')
+    await proposeAssuranceChange('{}', 'quick', 'lane-request.json')
+    assert.equal(calls[0].path, '/api/assurances')
+    assert.equal(calls[1].path, '/api/assurances/propose')
+    assert.deepEqual(JSON.parse(calls[1].options.body), { document: '{\n  "ask": "fixture"\n}', assurance: 'judge' })
+    assert.deepEqual(JSON.parse(calls[2].options.body), { document: '{}', assurance: 'quick', path: 'lane-request.json' })
+    assert.equal(calls[1].options.headers['content-type'], 'application/json')
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('assurance page preserves the server refusal message from a 400 response', async () => {
+  const originalFetch = globalThis.fetch
+  const message = 'path must be a non-blank single line of at most 240 characters'
+  globalThis.fetch = async () => new Response(JSON.stringify({ error: message, refusals: [{ code: 'path_invalid', message }] }), { status: 400, headers: { 'content-type': 'application/json' } })
+  try {
+    await assert.rejects(proposeAssuranceChange('{}', 'standard', 'x'.repeat(250)), (error) => {
+      assert.equal(error.message, message)
+      return true
+    })
+    const page = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/AssurancePage.svelte'), 'utf8')
+    assert.match(page, /message: cause\?\.message/)
+    assert.doesNotMatch(page, /request failed \(400\)/)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
 test('RV1-1 roster pick fetch effect ignores staged local drafts', () => {
   const panel = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
   assert.match(panel, /let pickRows = \$derived\(\(payload\?\.rail \|\| \[\]\)\.flatMap\(/)
@@ -778,6 +817,32 @@ test('rosterPanel marks an uncatalogued seat instead of fabricating rates', () =
   assert.ok(seat)
   assert.equal(seat.model, null)
   assert.ok(seat.model_pending)
+})
+
+test('assurancePanel keeps review strength, seating floors and forcing reasons honest', () => {
+  const payload = {
+    assurance: { presets: [
+      { key: 'quick', rank: 1, name: 'Quick', alias: 'mechanical', description: 'routine', forcing: 'This protected-path rule does not force this preset; it forces rigorous.' },
+      { key: 'standard', rank: 2, name: 'Standard', alias: 'build', description: 'normal', forcing: 'This protected-path rule does not force this preset; it forces rigorous.' },
+      { key: 'rigorous', rank: 3, name: 'Rigorous', alias: 'judge', description: 'sensitive', forcing: 'Any listed protected path forces rigorous assurance.' },
+    ] },
+    band_floors: { axis: 'model_seating', values: { mechanical: 'utility', build: 'utility', judge: 'utility' }, absent: null },
+    protected_paths: ['crew/protected-paths.mjs'],
+  }
+  const result = assurancePanel(payload)
+  assert.deepEqual(result.presets.map((preset) => preset.key), ['quick', 'standard', 'rigorous'])
+  assert.ok(result.presets.every((preset) => typeof preset.forcing === 'string' && preset.forcing.trim()))
+  assert.equal(result.assurance_axis, 'Review strength')
+  assert.equal(result.band_floor_axis, 'Model seating eligibility')
+  assert.deepEqual(result.band_floors, payload.band_floors.values)
+  assert.deepEqual(result.protected_paths, payload.protected_paths)
+  const absent = assurancePanel({ assurance: { presets: null }, band_floors: { values: null, absent: 'model ladder denied at /tmp/ladder.json' } })
+  assert.deepEqual(absent.presets, [])
+  assert.equal(absent.band_floors, null)
+  assert.equal(absent.band_floors_absent, 'model ladder denied at /tmp/ladder.json')
+  assert.equal(absent.absent, 'model ladder denied at /tmp/ladder.json')
+  const missingReason = assurancePanel({ assurance: { presets: [{ key: 'quick' }] }, band_floors: { values: null, absent: null } })
+  assert.equal(missingReason.presets[0].forcing, 'Forcing rule unavailable — endpoint supplied no reason')
 })
 
 test('gateChips keeps unproven distinct from failed and proven', () => {
@@ -1118,8 +1183,8 @@ test('brakePanel names the resolved checkout and switch path in every state', ()
   }
 })
 
-test('hash routes parse and format all six canonical views', () => {
-  for (const hash of ['#/', '#/ops', '#/roster', '#/agents', '#/skills', '#/adw-123', '#/adw-123/plan']) {
+test('hash routes parse and format all nine canonical views', () => {
+  for (const hash of ['#/', '#/ops', '#/roster', '#/agents', '#/skills', '#/workflows', '#/assurances', '#/adw-123', '#/adw-123/plan']) {
     assert.equal(formatHash(parseHash(hash)), hash)
   }
   assert.deepEqual(parseHash(''), { view: 'fleet', adw_id: null, phase: null })
@@ -1131,13 +1196,14 @@ test('hash routes parse and format all six canonical views', () => {
   assert.equal(parseHash('#/roster').adw_id, null)
   assert.equal(parseHash('#/agents').adw_id, null)
   assert.equal(parseHash('#/skills').adw_id, null)
+  assert.equal(parseHash('#/assurances').adw_id, null)
 })
 
 test('E1 agents page route nav and title are wired', () => {
   const root = join(process.cwd(), 'visualizer/web/src')
   const app = readFileSync(join(root, 'App.svelte'), 'utf8')
   const page = readFileSync(join(root, 'lib/AgentsPage.svelte'), 'utf8')
-  assert.deepEqual(VIEWS, ['fleet', 'ops', 'roster', 'agents', 'skills', 'workflows', 'run', 'phase'])
+  assert.deepEqual(VIEWS, ['fleet', 'ops', 'roster', 'agents', 'skills', 'workflows', 'assurances', 'run', 'phase'])
   assert.match(app, /route\.view === 'agents'/)
   assert.match(app, /Agents · Factory/)
   assert.match(app, /<AgentsPage\s*\/?\s*>/)
@@ -1183,6 +1249,29 @@ test('skills-page:E1', async () => {
   } finally {
     globalThis.fetch = originalFetch
   }
+})
+
+test('assurance page exposes separate axes and only prepares proposals', () => {
+  const root = join(process.cwd(), 'visualizer/web/src')
+  const app = readFileSync(join(root, 'App.svelte'), 'utf8')
+  const page = readFileSync(join(root, 'lib/AssurancePage.svelte'), 'utf8')
+  assert.match(app, /Assurances · Factory/)
+  assert.match(app, /route\.view === 'assurances'/)
+  assert.match(app, /<AssurancePage \/>/)
+  assert.match(app, />Assurances<\//)
+  for (const heading of ['Review strength', 'Model seating eligibility']) assert.match(page, new RegExp(heading))
+  assert.match(page, /\{preset\.forcing\}/)
+  assert.match(page, /getAssurances\(/)
+  assert.match(page, /assurancePanel\(/)
+  assert.match(page, /proposeAssuranceChange\(/)
+  assert.match(page, /Proposal only — nothing was applied\./)
+  assert.equal([...page.matchAll(/\{#each shaped\.presets as preset, index \(preset\.key \?\? index\)\}/g)].length, 2)
+  const pairedInteractive = ['button', 'form', 'a', 'label', 'select', 'option', 'textarea']
+    .flatMap((tag) => [...page.matchAll(new RegExp(`<${tag}\\b[\\s\\S]*?<\\/${tag}>`, 'gi'))])
+  const voidInteractive = [...page.matchAll(/<input\b[^>]*>/gi)]
+  const interactive = [...pairedInteractive, ...voidInteractive].map((match) => match[0]).join('\n')
+  for (const tag of ['input', 'label', 'select', 'option']) assert.match(interactive, new RegExp(`<${tag}\\b`, 'i'))
+  assert.doesNotMatch(`${interactive}\n${app}`, /\b(?:dispatch|apply|post)\b/i)
 })
 
 test('F1 agents page uses only Tier-2 colour aliases', () => {
@@ -2737,8 +2826,8 @@ test('workflow-page:D3', () => {
 })
 
 test('workflow-page:E1', () => {
-  assert.deepEqual(VIEWS, ['fleet', 'ops', 'roster', 'agents', 'skills', 'workflows', 'run', 'phase'])
-  for (const hash of ['#/workflows', '#/ops', '#/roster', '#/skills', '#/adw-123', '#/adw-123/plan']) assert.equal(formatHash(parseHash(hash)), hash)
+  assert.deepEqual(VIEWS, ['fleet', 'ops', 'roster', 'agents', 'skills', 'workflows', 'assurances', 'run', 'phase'])
+  for (const hash of ['#/workflows', '#/ops', '#/roster', '#/skills', '#/assurances', '#/adw-123', '#/adw-123/plan']) assert.equal(formatHash(parseHash(hash)), hash)
   assert.deepEqual(parseHash('#/workflows/ignored'), { view: 'workflows', adw_id: null, phase: null })
   const app = readFileSync(join(process.cwd(), 'visualizer/web/src/App.svelte'), 'utf8')
   assert.match(app, /import WorkflowsPage from '\.\/lib\/WorkflowsPage\.svelte'/)

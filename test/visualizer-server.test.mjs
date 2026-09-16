@@ -13,6 +13,8 @@ import { gitGrepHits } from '../scripts/factory/absence.mjs'
 import { parseCliArgs, ServerUsageError, startServer as startVisualizerServer, writeRosterAtomically } from '../visualizer/server/server.mjs'
 import { createWorkflowsSource, WORKFLOW_FEED_REASONS } from '../visualizer/server/workflows-source.mjs'
 import { VARIANTS } from '../crew/variants.mjs'
+import { ASSURANCE_NAMES, ASSURANCES } from '../crew/assurances.mjs'
+import { PROTECTED_PATHS } from '../crew/protected-paths.mjs'
 import { createShipStateResolver } from '../visualizer/server/ship-state.mjs'
 import { createJournalSource } from '../visualizer/server/journal-source.mjs'
 import { deriveStatus } from '../visualizer/web/src/lib/fleet.js'
@@ -559,7 +561,7 @@ test('same-origin and originless JSON clients still engage the stop switch', { s
 
     const api = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/api.js'), 'utf8')
     const posts = api.split('\n').filter((line) => line.includes("method: 'POST'"))
-    assert.equal(posts.length, 11)
+    assert.equal(posts.length, 12)
     assert.ok(posts.every((line) => line.includes("'content-type': 'application/json'")))
   } finally {
     if (server) await stopServer(server.child)
@@ -3283,4 +3285,226 @@ test('workflow-page:C4 an unmeasured workflow evidence row carries a closed reas
   const rows = source.readWorkflows({}).workflows
   for (const row of rows) if (row.evidence.measured === false) assert.ok(row.evidence.reason, `${row.shape} evidence is unmeasured with no reason`)
   assert.equal(rows.find((row) => row.shape === 'scout').evidence.reason, 'no-runs-for-shape')
+})
+
+test('assurance endpoints derive policy authority and keep floors separate', async () => {
+  const root = scratchDir('visualizer-assurance-policy-')
+  const ladderPath = join(root, 'model-ladder.json')
+  writeFileSync(ladderPath, readFileSync(join(process.cwd(), 'crew', 'model-ladder.json')))
+  let server
+  try {
+    server = await startInProcess({ close() {} }, { checkout: root, ladderPath })
+    const view = await json(server.base, '/api/assurances')
+    assert.equal(view.status, 200)
+    assert.deepEqual(view.json.assurance.presets.map((preset) => preset.key), ASSURANCE_NAMES)
+    for (const key of ASSURANCE_NAMES) {
+      const preset = view.json.assurance.presets.find((row) => row.key === key)
+      assert.equal(preset.alias, ASSURANCES[key].alias)
+      assert.equal(preset.description, ASSURANCES[key].description)
+      assert.equal(typeof preset.forcing, 'string')
+      assert.ok(preset.forcing)
+    }
+    assert.equal(view.json.assurance.axis, 'review_strength')
+    assert.deepEqual(view.json.band_floors, { axis: 'model_seating', values: { mechanical: 'utility', build: 'utility', judge: 'utility' }, absent: null })
+    assert.deepEqual(view.json.protected_paths, PROTECTED_PATHS)
+    const unknownGet = await json(server.base, '/api/assurances?unknown=1')
+    assert.equal(unknownGet.status, 400)
+    assert.deepEqual(unknownGet.json.refusals, [{ code: 'unknown_query_parameter', message: 'unknown query parameter unknown — /api/assurances accepts no query parameters' }])
+    assert.equal(unknownGet.json.error, unknownGet.json.refusals[0].message)
+    const wrongGet = await json(server.base, '/api/assurances', { method: 'POST' })
+    assert.equal(wrongGet.status, 405)
+    assert.deepEqual(wrongGet.json.refusals, [{ code: 'method_not_allowed', message: 'method not allowed' }])
+    assert.equal(wrongGet.json.error, wrongGet.json.refusals[0].message)
+    assert.equal((await json(server.base, '/api/assurances/propose')).status, 405)
+    assert.equal((await json(server.base, '/api/assurances/propose?unknown=1', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).status, 400)
+  } finally {
+    if (server) await stopInProcess(server)
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('assurance policy endpoint degrades with an unavailable ladder', async () => {
+  const root = scratchDir('visualizer-assurance-ladder-absent-')
+  let server
+  try {
+    server = await startInProcess({ close() {} }, { checkout: root, ladderPath: join(root, 'missing-model-ladder.json') })
+    const view = await json(server.base, '/api/assurances')
+    assert.equal(view.status, 200)
+    assert.equal(view.json.band_floors.values, null)
+    assert.ok(view.json.band_floors.absent)
+    assert.match(view.json.band_floors.absent, /missing-model-ladder/)
+  } finally {
+    if (server) await stopInProcess(server)
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('assurance proposal validates a closed body and emits a no-write canonical diff', async () => {
+  const root = scratchDir('visualizer-assurance-proposal-')
+  const before = treeDigest(root)
+  const canonical = `${JSON.stringify({ ask: 'fixture', assurance: 'standard' }, null, 2)}\n`
+  let server
+  try {
+    server = await startInProcess({ close() {} }, { checkout: root, ladderPath: join(process.cwd(), 'crew', 'model-ladder.json') })
+    const post = (body) => json(server.base, '/api/assurances/propose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: typeof body === 'string' ? body : JSON.stringify(body) })
+    for (const body of ['null', '[]', '{ not json']) {
+      const response = await post(body)
+      assert.equal(response.status, 400)
+      assert.equal(response.json.ok, false)
+      assert.equal(response.json.wrote, false)
+      assert.equal(response.json.diff, null)
+      assert.equal(response.json.refusals.length, 1)
+      assert.equal(response.json.error, response.json.refusals[0].message)
+    }
+    for (const body of [
+      { document: canonical, assurance: 'standard', extra: true },
+      { document: 42, assurance: 'standard' },
+      { document: canonical, assurance: 'standard', path: '' },
+      { document: canonical, assurance: 'standard', path: 'one\ntwo' },
+      { document: canonical, assurance: 'standard', path: 'x'.repeat(241) },
+    ]) {
+      const response = await post(body)
+      assert.equal(response.status, 400)
+      assert.equal(response.json.ok, false)
+      assert.equal(response.json.wrote, false)
+      assert.equal(response.json.diff, null)
+      assert.equal(response.json.refusals.length, 1)
+      assert.equal(response.json.error, response.json.refusals[0].message)
+    }
+    for (const [document, code] of [['[]', 'document_shape'], ['{"ask":"fixture"}', 'document_not_canonical'], ['{', 'document_malformed']]) {
+      const response = await post({ document, assurance: 'standard' })
+      assert.equal(response.status, 200)
+      assert.equal(response.json.ok, false)
+      assert.equal(response.json.refusals[0].code, code)
+    }
+    const legacy = await post({ document: `${JSON.stringify({ ask: 'fixture', tier: 'build', assurance: 'standard' }, null, 2)}\n`, assurance: 'rigorous' })
+    assert.equal(legacy.status, 200)
+    assert.equal(legacy.json.ok, false)
+    assert.equal(legacy.json.refusals[0].code, 'legacy_tier_conflict')
+    const unknown = await post({ document: canonical, assurance: 'unknown' })
+    assert.equal(unknown.status, 200)
+    assert.equal(unknown.json.ok, false)
+    assert.equal(unknown.json.refusals[0].code, 'assurance_unknown')
+
+    for (const [spelling, expected] of [['quick', 'quick'], ['mechanical', 'quick'], ['standard', 'standard'], ['build', 'standard'], ['rigorous', 'rigorous'], ['judge', 'rigorous']]) {
+      const response = await post({ document: canonical, assurance: spelling, path: 'lane-request.json' })
+      assert.equal(response.status, 200)
+      assert.equal(response.json.ok, true)
+      assert.equal(response.json.wrote, false)
+      assert.deepEqual(response.json.refusals, [])
+      assert.equal(Object.hasOwn(response.json, 'target_path'), false)
+      assert.equal(Object.hasOwn(response.json, 'after_text'), false)
+      if (expected === 'standard') {
+        assert.equal(response.json.diff, '')
+      } else {
+        assert.match(response.json.diff, /^--- a\/lane-request\.json$/m)
+        assert.ok(response.json.diff.includes(`+  "assurance": "${expected}"`))
+      }
+    }
+    const inserted = await post({ document: `${JSON.stringify({ ask: 'fixture' }, null, 2)}\n`, assurance: 'judge' })
+    assert.equal(inserted.json.ok, true)
+    assert.ok(inserted.json.diff.includes('+  "assurance": "rigorous"'))
+    const tooLongPath = await post({ document: canonical, assurance: 'standard', path: 'x'.repeat(250) })
+    const pathMessage = 'path must be a non-blank single line of at most 240 characters'
+    assert.equal(tooLongPath.status, 400)
+    assert.equal(tooLongPath.json.error, pathMessage)
+    assert.deepEqual(tooLongPath.json.refusals, [{ code: 'path_invalid', message: pathMessage }])
+    assert.equal(treeDigest(root), before)
+  } finally {
+    if (server) await stopInProcess(server)
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('RV1-1 closes assurance proposal query vocabulary before parsing a valid body', async () => {
+  const root = scratchDir('visualizer-assurance-query-vocabulary-')
+  const request = { ask: '', assurance: 'standard' }
+  const baseDocument = `${JSON.stringify(request, null, 2)}\n`
+  request.ask = 'x'.repeat(4246 - Buffer.byteLength(baseDocument))
+  const document = `${JSON.stringify(request, null, 2)}\n`
+  assert.equal(Buffer.byteLength(document), 4246)
+  let server
+  try {
+    server = await startInProcess({ close() {} }, { checkout: root, ladderPath: join(process.cwd(), 'crew', 'model-ladder.json') })
+    const post = (path) => json(server.base, path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ document, assurance: 'judge' }) })
+    const accepted = await post('/api/assurances/propose')
+    assert.equal(accepted.status, 200)
+    assert.equal(accepted.json.ok, true)
+    const message = 'unknown query parameter checkout — /api/assurances/propose accepts no query parameters'
+    const refused = await post('/api/assurances/propose?checkout=/etc')
+    assert.equal(refused.status, 400)
+    assert.equal(refused.json.error, message)
+    assert.deepEqual(refused.json.refusals, [{ code: 'unknown_query_parameter', message }])
+  } finally {
+    if (server) await stopInProcess(server)
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('RV1-2 accepts a bounded large assurance proposal document', async () => {
+  const root = scratchDir('visualizer-assurance-large-document-')
+  const request = { ask: '', assurance: 'standard' }
+  const baseDocument = `${JSON.stringify(request, null, 2)}\n`
+  request.ask = 'x'.repeat(4246 - Buffer.byteLength(baseDocument))
+  const document = `${JSON.stringify(request, null, 2)}\n`
+  const envelope = JSON.stringify({ document, assurance: 'judge' })
+  assert.equal(Buffer.byteLength(document), 4246)
+  assert.ok(Buffer.byteLength(envelope) > 4096)
+  assert.ok(Buffer.byteLength(envelope) < 262144)
+  let server
+  try {
+    server = await startInProcess({ close() {} }, { checkout: root, ladderPath: join(process.cwd(), 'crew', 'model-ladder.json') })
+    const post = (body) => json(server.base, '/api/assurances/propose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+    const accepted = await post({ document, assurance: 'judge' })
+    assert.equal(accepted.status, 200)
+    assert.equal(accepted.json.ok, true)
+    assert.ok(accepted.json.diff.includes('+  "assurance": "rigorous"'))
+    const oversizedDocument = `${JSON.stringify({ ask: 'x'.repeat(262144), assurance: 'standard' }, null, 2)}\n`
+    const oversized = await post({ document: oversizedDocument, assurance: 'judge' })
+    assert.equal(oversized.status, 400)
+    assert.equal(oversized.json.refusals[0].code, 'body_too_large')
+    assert.equal(oversized.json.error, oversized.json.refusals[0].message)
+  } finally {
+    if (server) await stopInProcess(server)
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('assurance body overflow classification uses its error sentinel', () => {
+  const source = readFileSync(join(process.cwd(), 'visualizer/server/server.mjs'), 'utf8')
+  assert.match(source, /const BODY_TOO_LARGE = 'body_too_large'/)
+  assert.match(source, /error\.code = BODY_TOO_LARGE/)
+  assert.match(source, /err\?\.code === BODY_TOO_LARGE/)
+  assert.doesNotMatch(source, /message\.startsWith\('body too large'\)/)
+})
+
+test('RV2-1 bounds multi-line assurance proposal documents before diffing', async () => {
+  const root = scratchDir('visualizer-assurance-document-lines-')
+  const documentFor = (items) => `${JSON.stringify({ items: Array.from({ length: items }, () => 'x'), assurance: 'standard' }, null, 2)}\n`
+  const lineCount = (document) => document.endsWith('\n') ? document.slice(0, -1).split('\n').length : document.split('\n').length
+  const tooManyLines = documentFor(2100)
+  const acceptedLines = documentFor(1895)
+  const refusedCount = lineCount(tooManyLines)
+  assert.ok(refusedCount > 2000)
+  assert.ok(lineCount(acceptedLines) < 2000)
+  let server
+  try {
+    server = await startInProcess({ close() {} }, { checkout: root, ladderPath: join(process.cwd(), 'crew', 'model-ladder.json') })
+    const post = (document) => json(server.base, '/api/assurances/propose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ document, assurance: 'judge' }) })
+    const refused = await post(tooManyLines)
+    const message = `document has ${refusedCount} lines; the proposal endpoint accepts at most 2000`
+    assert.equal(refused.status, 200)
+    assert.equal(refused.json.ok, false)
+    assert.equal(refused.json.refusals[0].code, 'document_too_many_lines')
+    assert.equal(refused.json.refusals[0].message, message)
+    const accepted = await post(acceptedLines)
+    assert.equal(accepted.status, 200)
+    assert.equal(accepted.json.ok, true)
+    assert.equal(accepted.json.wrote, false)
+    const changedLines = accepted.json.diff.split('\n').filter((line) => !line.startsWith('---') && !line.startsWith('+++') && (line.startsWith('-') || line.startsWith('+')))
+    assert.deepEqual(changedLines, ['-  "assurance": "standard"', '+  "assurance": "rigorous"'])
+  } finally {
+    if (server) await stopInProcess(server)
+    rmSync(root, { recursive: true, force: true })
+  }
 })

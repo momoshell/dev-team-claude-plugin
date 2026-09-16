@@ -11,9 +11,11 @@ import { createJournalSource } from './journal-source.mjs'
 import { createShipStateResolver } from './ship-state.mjs'
 import { createRosterSource } from './roster-source.mjs'
 import { createWorkflowsSource } from './workflows-source.mjs'
-import { proposeEdit } from './roster-edit.mjs'
+import { unifiedDiff, proposeEdit } from './roster-edit.mjs'
 import { createAgentsSource } from './agents-source.mjs'
 import { VARIANTS } from '../../crew/variants.mjs'
+import { ASSURANCE_NAMES, ASSURANCES, canonicalAssurance } from '../../crew/assurances.mjs'
+import { PROTECTED_PATHS } from '../../crew/protected-paths.mjs'
 import { readLadder, readReference, ladderView, rosterPickView, stageMoves, composeMoves, applyMoves } from './roster-ladder.mjs'
 import { createArtificialAnalysisCatalog } from './model-catalog.mjs'
 import { createOpenRouterCatalog } from './openrouter-catalog.mjs'
@@ -93,6 +95,8 @@ const ROUTE_PARAMS = Object.freeze({
   '/api/prompts/propose': [],
   '/api/workflows': ['recent'],
   '/api/workflows/propose': [],
+  '/api/assurances': [],
+  '/api/assurances/propose': [],
   '/api/cell-health': ['since', 'until'],
   '/api/run-set': ['since', 'until'],
   '/api/intake': ['since', 'until'],
@@ -143,6 +147,9 @@ function json(res, status, value, headers = {}) {
   const body = JSON.stringify(value)
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(body), ...headers })
   res.end(body)
+}
+function assuranceRefusal(res, status, code, message, headers = {}) {
+  return json(res, status, { schema, error: message, ok: false, diff: null, wrote: false, refusals: [{ code, message }] }, headers)
 }
 
 // #543: a state-writing route must not be reachable as a CORS SIMPLE request.
@@ -275,11 +282,17 @@ export function budgetCeiling(env = process.env) {
   return { max_tokens, window_ms, source, error: null }
 }
 
-async function body(req) {
+const BODY_TOO_LARGE = 'body_too_large'
+const ASSURANCE_DOCUMENT_LINE_LIMIT = 2000
+async function body(req, limit = 4096) {
   let text = ''
   for await (const chunk of req) {
     text += chunk
-    if (Buffer.byteLength(text) > 4096) throw new Error('body too large')
+    if (Buffer.byteLength(text) > limit) {
+      const error = new Error(`body too large (max ${limit} bytes)`)
+      error.code = BODY_TOO_LARGE
+      throw error
+    }
   }
   return JSON.parse(text || '{}')
 }
@@ -457,7 +470,10 @@ export function startServer(options = {}) {
       // /api/journal verbatim and sits outside this lane's fence.
       const method = req.method === 'HEAD' ? 'GET' : req.method
       const unknown = refuseUnknownParams(url)
-      if (unknown) return json(res, 400, { schema, error: unknown })
+      if (unknown) {
+        if (url.pathname === '/api/assurances' || url.pathname === '/api/assurances/propose') return assuranceRefusal(res, 400, 'unknown_query_parameter', unknown)
+        return json(res, 400, { schema, error: unknown })
+      }
       if (url.pathname === '/api/sessions') {
         if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
         const filters = { mode: url.searchParams.get('mode') || '', status: url.searchParams.get('status') || '', since: '', until: '' }
@@ -482,6 +498,70 @@ export function startServer(options = {}) {
         if (recent === null || recent < 0 || recent > 1000) return json(res, 400, { schema, error: 'recent must be an integer between 0 and 1000' })
         const result = workflows.readWorkflows({ recent })
         return json(res, 200, { schema, ...result })
+      }
+      if (url.pathname === '/api/assurances') {
+        if (method !== 'GET') return assuranceRefusal(res, 405, 'method_not_allowed', 'method not allowed', { allow: 'GET' })
+        let ladder
+        try {
+          ladder = readLadder({ ladderPath: config.ladderPath })
+        } catch (err) {
+          ladder = { tier_floors: null, error: `model ladder read failed: ${err?.message || String(err)}` }
+        }
+        const values = ladder?.degraded !== true && ladder?.tier_floors && typeof ladder.tier_floors === 'object' && !Array.isArray(ladder.tier_floors)
+          ? { ...ladder.tier_floors }
+          : null
+        const absent = values
+          ? null
+          : typeof ladder?.error === 'string' && ladder.error.trim()
+            ? ladder.error
+            : 'model ladder is unavailable — no reason was reported'
+        const presets = ASSURANCE_NAMES.map((key, rank) => ({ key, rank: rank + 1, ...ASSURANCES[key], forcing: key === 'rigorous' ? 'Any listed protected path forces rigorous assurance.' : 'This protected-path rule does not force this preset; it forces rigorous.' }))
+        return json(res, 200, {
+          schema,
+          assurance: { axis: 'review_strength', presets },
+          band_floors: { axis: 'model_seating', values, absent },
+          protected_paths: [...PROTECTED_PATHS],
+        })
+      }
+      if (url.pathname === '/api/assurances/propose') {
+        if (method !== 'POST') return assuranceRefusal(res, 405, 'method_not_allowed', 'method not allowed', { allow: 'POST' })
+        const refusal = writeGuard(req)
+        if (refusal) return assuranceRefusal(res, refusal.status, 'write_guard', refusal.error)
+        const reject = (code, message, status = 400) => status === 200
+          ? json(res, status, { schema, ok: false, diff: null, wrote: false, refusals: [{ code, message }] })
+          : assuranceRefusal(res, status, code, message)
+        let input
+        try { input = await body(req, 262144) } catch (err) {
+          const message = typeof err?.message === 'string' && err.message ? err.message : 'invalid json'
+          return reject(err?.code === BODY_TOO_LARGE ? BODY_TOO_LARGE : 'invalid_json', message)
+        }
+        if (!input || typeof input !== 'object' || Array.isArray(input)) return reject('body_shape', 'request body must be an object')
+        if (input.tier !== undefined && input.tier !== null) return reject('legacy_tier_conflict', 'request body cannot include a non-null legacy tier alongside assurance')
+        const unknownField = Object.keys(input).find((field) => !['document', 'assurance', 'path'].includes(field))
+        if (unknownField) return reject('unknown_field', `unknown field ${unknownField}`)
+        if (typeof input.document !== 'string') return reject('document_type', 'document must be a string')
+        if (typeof input.assurance !== 'string') return reject('assurance_type', 'assurance must be a string')
+        if (Object.hasOwn(input, 'path') && (typeof input.path !== 'string' || !input.path.trim() || /[\r\n\u2028\u2029]/.test(input.path) || input.path.length > 240)) {
+          return reject('path_invalid', 'path must be a non-blank single line of at most 240 characters')
+        }
+        const canonical = canonicalAssurance(input.assurance)
+        if (!canonical) return reject('assurance_unknown', `unknown assurance ${JSON.stringify(input.assurance)}`, 200)
+        let parsed
+        try { parsed = JSON.parse(input.document) } catch (err) {
+          return reject('document_malformed', `document is malformed JSON: ${err?.message || String(err)}`, 200)
+        }
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return reject('document_shape', 'document must contain a JSON object', 200)
+        const normalised = input.document.endsWith('\n') ? input.document.slice(0, -1) : input.document
+        const documentLineCount = normalised === '' ? 0 : normalised.split('\n').length
+        if (documentLineCount > ASSURANCE_DOCUMENT_LINE_LIMIT) {
+          return reject('document_too_many_lines', `document has ${documentLineCount} lines; the proposal endpoint accepts at most ${ASSURANCE_DOCUMENT_LINE_LIMIT}`, 200)
+        }
+        if (JSON.stringify(parsed, null, 2) !== normalised) return reject('document_not_canonical', 'document is non-canonically-formatted; refusing a misleading diff', 200)
+        if (Object.hasOwn(parsed, 'tier') && parsed.tier !== null) return reject('legacy_tier_conflict', 'document cannot carry a non-null legacy tier alongside assurance', 200)
+        parsed.assurance = canonical
+        const afterText = `${JSON.stringify(parsed, null, 2)}${input.document.endsWith('\n') ? '\n' : ''}`
+        const diff = unifiedDiff(input.document, afterText, { path: input.path ?? 'request.json' })
+        return json(res, 200, { schema, ok: true, diff, wrote: false, refusals: [] })
       }
       if (url.pathname === '/api/events') {
         if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })

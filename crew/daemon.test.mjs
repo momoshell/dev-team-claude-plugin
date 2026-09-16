@@ -342,6 +342,22 @@ test('a tier enqueue boots through the spawn seam and forks the run child', asyn
   })
 })
 
+test('routing daemon tier admission consumes the child boot record without a duplicate routing decision', async () => {
+  await each(async (f) => {
+    const spawn = f.deps.spawnSync
+    f.deps.spawnSync = (...args) => {
+      const result = spawn(...args)
+      writeFileSync(join(f.reportedCrewDir, 'journal.jsonl'), `${JSON.stringify({ event: 'boot', routing_choice: { event: 'routing-choice', entry_point: 'boot' } })}\\n`)
+      return result
+    }
+    f.d = daemon({ root: f.root, deps: f.deps })
+    f.d.enqueue({ tier: 'build', task: 'routing-daemon', checkout: f.dir, brief_file: f.brief })
+    const rows = readFileSync(join(f.reportedCrewDir, 'journal.jsonl'), 'utf8').split('\\n').filter(Boolean).map(JSON.parse)
+    assert.equal(rows.filter((row) => row.routing_choice != null).length, 1)
+    assert.equal(DAEMON_CODE.includes('routing_choice'), false)
+  })
+})
+
 test('crew_dir enqueue inherits boot configuration and refuses boot-owned axes', async () => {
   await each(async (f) => {
     const bootConfiguration = {

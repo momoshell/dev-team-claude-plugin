@@ -2050,3 +2050,70 @@ test('an update-only writer line is not counted as a missing row', { skip: SKIP 
     assert.equal(drift.writers.some((writer) => writer.writer === 'endSession'), false)
   } finally { ledger.close() }
 })
+
+function routingLedgerFixture(overrides = {}) {
+  return {
+    entry_point: 'bench', tier: 'build', role: 'builder',
+    policy_hash: 'a'.repeat(64), measurement_fingerprint: 'b'.repeat(64),
+    outcome: 'abstained', chosen_cell: null,
+    candidate_set: [{ provider: 'openai', id: 'gpt-5.6-luna', agent: 'pi', effort: 'max' }],
+    exclusions: [{ cell: { provider: 'openai', id: 'gpt-5.6-luna', agent: 'pi', effort: 'max' }, reason: 'rate-absent' }],
+    normalized_measurements: [{
+      cell: { provider: 'openai', id: 'gpt-5.6-luna', agent: 'pi', effort: 'max' },
+      rate: { numerator: null, denominator: null, value: null, reason: 'rate-absent' },
+      cost_usd: { value: null, reason: 'cost-absent' }, exclusion_reason: 'rate-absent',
+    }],
+    policy_entry: {
+      candidates: [{ provider: 'openai', id: 'gpt-5.6-luna', agent: 'pi', effort: 'max' }],
+      tie_break: ['first_round_pass_rate_desc', 'cost_usd_asc', 'policy_order'],
+      measurement_window: { lookback_days: 30, minimum_rate_denominator: 12 },
+      null_handling: { rate: 'exclude-with-reason', cost: 'exclude-with-reason' },
+      abstention_reasons: ['no-eligible-candidate'],
+    },
+    reason: 'no-eligible-candidate', created_at: '2024-01-01T00:00:00.000Z',
+    ...overrides,
+  }
+}
+
+test('routing ledger writer round-trips JSONL, SQLite, replay and preserves rate denominators', { skip: SKIP }, () => {
+  const source = openTestLedger()
+  const args = source.recordRoutingChoice(routingLedgerFixture())
+  assert.deepEqual(args.chosen_cell, null)
+  assert.equal(args.normalized_measurements[0].rate.denominator, null)
+  const line = readFileSync(source._jsonlPath, 'utf8').trim().split('\n').map(JSON.parse).find((row) => row.kind === 'recordRoutingChoice')
+  assert.ok(line)
+  assert.deepEqual(line.args.chosen_cell, null)
+  assert.equal(line.args.normalized_measurements[0].rate.denominator, null)
+  const rows = source.dumpTable('routing_choices')
+  assert.equal(rows.length, 1)
+  assert.equal(JSON.parse(rows[0].normalized_measurements_json)[0].rate.denominator, null)
+  assert.deepEqual(source.routingChoices({ entry_point: 'bench', tier: 'build', role: 'builder' }).map((row) => row.id), [rows[0].id])
+  const replayed = openTestLedger()
+  assert.deepEqual(replayJsonl(source._jsonlPath, replayed), { applied: 1, skipped: 0, failed: 0, complete: true, first_failure: null })
+  assert.deepEqual(replayed.dumpTable('routing_choices'), source.dumpTable('routing_choices'))
+  assert.equal(replayed.dumpTable('routing_choices').length, 1)
+  source.close(); replayed.close()
+})
+
+test('routing ledger writer rejects closed outcomes and reasons without appending', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const before = existsSync(ledger._jsonlPath) ? readFileSync(ledger._jsonlPath, 'utf8') : ''
+  assert.throws(() => ledger.recordRoutingChoice(routingLedgerFixture({ outcome: 'maybe' })), /recordRoutingChoice/)
+  assert.throws(() => ledger.recordRoutingChoice(routingLedgerFixture({ reason: 'invented' })), /recordRoutingChoice/)
+  assert.equal(existsSync(ledger._jsonlPath) ? readFileSync(ledger._jsonlPath, 'utf8') : '', before)
+  ledger.close()
+})
+
+test('routing ledger writer keeps JSONL evidence when the SQLite mirror is unavailable', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  ledger.startSession({ adw_id: 'routing-degraded', repo_slug: 'r', task_slug: 't' })
+  const { DatabaseSync } = require('node:sqlite')
+  const raw = new DatabaseSync(ledger._dbPath)
+  raw.exec('DROP TABLE routing_choices')
+  raw.close()
+  assert.doesNotThrow(() => ledger.recordRoutingChoice(routingLedgerFixture()))
+  const line = readFileSync(ledger._jsonlPath, 'utf8').trim().split('\n').map(JSON.parse).find((row) => row.kind === 'recordRoutingChoice')
+  assert.ok(line)
+  assert.ok(ledger.stats().mirror_errors > 0)
+  ledger.close()
+})

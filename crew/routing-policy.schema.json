@@ -1,0 +1,151 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dev-team.invalid/crew/routing-policy.schema.json",
+  "title": "Checkout-pinned routing policy",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$comment",
+    "schema_version",
+    "updated_at",
+    "precedence",
+    "exclusion_reasons",
+    "abstention_reasons",
+    "routes"
+  ],
+  "properties": {
+    "$comment": { "type": "string", "minLength": 1 },
+    "schema_version": { "const": 1 },
+    "updated_at": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+    "precedence": { "type": "string", "minLength": 1 },
+    "exclusion_reasons": {
+      "type": "array",
+      "minItems": 13,
+      "maxItems": 13,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "capability-shortfall",
+          "agent-unresolved",
+          "band-unknown",
+          "band-below-floor",
+          "breaker-open",
+          "undeclared-candidate",
+          "measurement-absent",
+          "rate-absent",
+          "rate-invalid",
+          "rate-thin",
+          "cost-absent",
+          "cost-invalid",
+          "measurement-invalid"
+        ]
+      }
+    },
+    "abstention_reasons": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1,
+      "uniqueItems": true,
+      "items": { "enum": ["no-eligible-candidate"] }
+    },
+    "routes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mechanical", "build", "judge"],
+      "properties": {
+        "mechanical": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["planner", "builder", "reviewer"],
+          "properties": {
+            "planner": { "$ref": "#/$defs/route" },
+            "builder": { "$ref": "#/$defs/route" },
+            "reviewer": { "$ref": "#/$defs/route" }
+          }
+        },
+        "build": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["lead", "planner", "builder", "reviewer"],
+          "properties": {
+            "lead": { "$ref": "#/$defs/route" },
+            "planner": { "$ref": "#/$defs/route" },
+            "builder": { "$ref": "#/$defs/route" },
+            "reviewer": { "$ref": "#/$defs/route" }
+          }
+        },
+        "judge": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["lead", "planner", "builder", "reviewer", "tech-lead"],
+          "properties": {
+            "lead": { "$ref": "#/$defs/route" },
+            "planner": { "$ref": "#/$defs/route" },
+            "builder": { "$ref": "#/$defs/route" },
+            "reviewer": { "$ref": "#/$defs/route" },
+            "tech-lead": { "$ref": "#/$defs/route" }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "cell": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "id", "agent", "effort"],
+      "properties": {
+        "provider": { "type": "string", "minLength": 1 },
+        "id": { "type": "string", "minLength": 1 },
+        "agent": { "type": "string", "minLength": 1 },
+        "effort": { "type": "string", "minLength": 1 }
+      }
+    },
+    "route": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["candidates", "tie_break", "measurement_window", "null_handling", "abstention_reasons"],
+      "properties": {
+        "candidates": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/cell" }
+        },
+        "tie_break": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": ["first_round_pass_rate_desc", "cost_usd_asc", "policy_order"]
+          }
+        },
+        "measurement_window": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["lookback_days", "minimum_rate_denominator"],
+          "properties": {
+            "lookback_days": { "type": "integer", "exclusiveMinimum": 0 },
+            "minimum_rate_denominator": { "type": "integer", "exclusiveMinimum": 0 }
+          }
+        },
+        "null_handling": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["rate", "cost"],
+          "properties": {
+            "rate": { "const": "exclude-with-reason" },
+            "cost": { "const": "exclude-with-reason" }
+          }
+        },
+        "abstention_reasons": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "uniqueItems": true,
+          "items": { "enum": ["no-eligible-candidate"] }
+        }
+      }
+    }
+  }
+}

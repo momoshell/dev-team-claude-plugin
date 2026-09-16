@@ -11,7 +11,7 @@ import { TURN_CEILING_FLAGS } from './drive.mjs'
 import { openRun, _resetNoticeGuardsForTest } from '../scripts/factory/emit.mjs'
 import {
   composeLayout, mcpConfigDocument, writeMcpConfigs, SEAT_DEFAULTS, FANOUT_TOOLS, DEFAULT_ROLES, ROLE_ORDER, transportFor, seatTransport, HEADLESS_TRANSPORTS, assertCapabilities, resolveAdapters, bootAllocation, resolveWorkerBin, docOpenArgs,
-  resolveTier, resolveSeatModels, FALLBACK_REFUSALS, refuseFallback, loadRoster, normalizeRoster, refuseRoster, rosterSeating, serializeRosterV1, serializeRosterV2, ROSTER_REFUSALS, ROSTER_SCHEMA_VERSIONS, rosterSourcePath, loadRosterSource, writeRosterSnapshot, rosterSnapshotReader, loadLadder, assertBandFloors, grantedDefModels, assertDefBandFloors, refuseBandFloor, seatModelKey, bandForMember, bandForRaw, seatBand, LADDER_PATH, BAND_FLOOR_REFUSALS, shadowCandidates, shadowExclusion, shadowPick, shadowPickBoot, SHADOW_EXCLUSIONS, SHADOW_OUTCOMES, SHADOW_ABSENT, seatReadySignal, assertSeats, phaseForStage, emitAdapter,
+  resolveTier, resolveSeatModels, FALLBACK_REFUSALS, refuseFallback, loadRoster, normalizeRoster, refuseRoster, rosterSeating, serializeRosterV1, serializeRosterV2, ROSTER_REFUSALS, ROSTER_SCHEMA_VERSIONS, rosterSourcePath, loadRosterSource, writeRosterSnapshot, rosterSnapshotReader, loadLadder, assertBandFloors, grantedDefModels, assertDefBandFloors, refuseBandFloor, seatModelKey, bandForMember, bandForRaw, seatBand, LADDER_PATH, BAND_FLOOR_REFUSALS, shadowCandidates, shadowExclusion, shadowPick, shadowPickBoot, SHADOW_EXCLUSIONS, SHADOW_OUTCOMES, SHADOW_ABSENT, loadRoutingPolicy, materialiseRoutingChoice, replayRoutingChoice, ROUTING_EXCLUSION_REASONS, ROUTING_PRECEDENCE, seatReadySignal, assertSeats, phaseForStage, emitAdapter,
   waitForEnvelope, WAIT_POLL_MS, LIVENESS_PROBE_MS, LIVENESS_MISSES_TO_DIE,
   parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, stopCmd, runExitCode, runOutcome, RUN_EXIT_CODES, RUN_EXIT_UNEXPECTED, RUN_START_EVENT, BATCH_DIR_EVENT, BATCH_DIR_NOT_BATCHED, batchDirFromBrief, readHead, readBranch, teardownDecision, stagesFromJournal, assignmentsFromJournal, RUN_CONFIG_DECLARATIONS, resolveRunConfig, aliasDeprecationLines, persistedRunConfig, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, seatLiveness, awaitSeatsReady, teardownCore, teardownCmd, TEARDOWN_EXIT_SEATLESS, TEARDOWN_EXIT_UNPROVEN, TEARDOWN_ABSENT_CAUSES, teardownAbsentCause, TEARDOWN_DRAIN_MS, TEARDOWN_DRAIN_ERROR_MS, installExitMarker, installRunFinalizers, writeTerminalLine, EXITED_STATUS, SIGNAL_EXIT_CODES, UNCAUGHT_EXIT_CODE, terminalLineSeen, runScopedPaths, returnsInheritanceRecord, RETURNS_INHERITANCE_REASONS, resolveTaskReturn, archivedReturn,
   UsageError, KNOWN_FLAGS, ROLE_FLAG_PREFIXES, REQUIRED_FLAGS, BOOT_ONLY_FLAGS, assertUsage,
@@ -1053,7 +1053,7 @@ function callCounter() {
   return fn
 }
 
-async function bootSeatRows({ task = 'seat-writer', tier = 'build', args = {}, openRun: openRunDep = null, afterBoot = null, rosterValue = roster, workflowDir = null, readWorkflowFile = null, register = null } = {}) {
+async function bootSeatRows({ task = 'seat-writer', tier = 'build', args = {}, openLedger: openLedgerDep = null, openRun: openRunDep = null, existsSync: existsSyncDep = null, beforeBoot = null, afterBoot = null, rosterValue = roster, workflowDir = null, readWorkflowFile = null, register = null } = {}) {
   const home = scratchDir(`crew-seat-writer-${task}-home-`)
   const { root: checkoutRoot, checkout } = testCheckout(`crew-seat-writer-${task}-checkout-`)
   const rosterPath = join(home, 'roster.json')
@@ -1072,7 +1072,9 @@ async function bootSeatRows({ task = 'seat-writer', tier = 'build', args = {}, o
   }
   const deps = {
     cmux: callCounter(), tree: callCounter(), renameTab: callCounter(),
+    ...(openLedgerDep ? { openLedger: openLedgerDep } : {}),
     ...(openRunDep ? { openRun: openRunDep } : {}),
+    ...(existsSyncDep ? { existsSync: existsSyncDep } : {}),
     ...(register ? { register } : {}),
     ...(workflowDir ? { workflowDir } : {}),
     ...(readWorkflowFile ? { readWorkflowFile } : {}),
@@ -1081,6 +1083,7 @@ async function bootSeatRows({ task = 'seat-writer', tier = 'build', args = {}, o
   let before = null
   try {
     process.stdout.write = () => true
+    if (beforeBoot) await beforeBoot({ home, checkout, dbPath, brief })
     await withHome(home, () => bootCmd(bootArgs, deps))
     const dir = testCrewDir(home, checkout, task)
     const crew = JSON.parse(readFileSync(join(dir, 'crew.json'), 'utf8'))
@@ -10395,4 +10398,246 @@ test('E1-tier workflow boot without tier or assurance refuses before side effect
   } finally {
     rmSync(home, { recursive: true, force: true }); rmSync(checkoutRoot, { recursive: true, force: true })
   }
+})
+
+function routingTestPolicy() {
+  const loaded = loadRoutingPolicy()
+  const policy = JSON.parse(JSON.stringify(loaded.policy))
+  policy.routes.build.builder.candidates = [
+    { provider: 'fixture', id: 'alpha', agent: 'claude', effort: 'medium' },
+    { provider: 'fixture', id: 'beta', agent: 'pi', effort: 'medium' },
+  ]
+  return { policy, policyHash: loaded.policyHash }
+}
+
+function routingMeasurement(cell, numerator, denominator, cost_usd) {
+  return {
+    cell,
+    rate: { numerator, denominator, value: numerator / denominator },
+    cost_usd,
+  }
+}
+
+test('routing A1 validates the checkout-pinned schema and returns exactly one chosen cell or abstention', () => {
+  const loaded = loadRoutingPolicy()
+  assert.equal(loaded.policy.schema_version, 1)
+  assert.equal(loaded.policy.precedence, ROUTING_PRECEDENCE)
+  const schema = JSON.parse(readFileSync(new URL('./routing-policy.schema.json', import.meta.url), 'utf8'))
+  assert.equal(schema.$schema, 'https://json-schema.org/draft/2020-12/schema')
+  const { policy, policyHash } = routingTestPolicy()
+  const result = materialiseRoutingChoice({
+    policy, policyHash, tier: 'build', role: 'builder', entryPoint: 'boot',
+    measurements: [
+      routingMeasurement(policy.routes.build.builder.candidates[0], 9, 12, 3),
+      routingMeasurement(policy.routes.build.builder.candidates[1], 8, 12, 1),
+    ],
+  })
+  assert.equal(result.outcome, 'chosen')
+  assert.deepEqual(result.chosen_cell, policy.routes.build.builder.candidates[0])
+  assert.equal(Object.hasOwn(result, 'chosen_cells'), false)
+  assert.equal(Array.isArray(result.chosen_cell), false)
+})
+
+test('routing B1 keeps every exclusion paired with a closed reason', () => {
+  const { policy, policyHash } = routingTestPolicy()
+  const [capability, breaker] = policy.routes.build.builder.candidates
+  const absent = { provider: 'fixture', id: 'gamma', agent: 'pi', effort: 'medium' }
+  const undeclared = { provider: 'fixture', id: 'outside-policy', agent: 'pi', effort: 'medium' }
+  policy.routes.build.builder.candidates.push(absent)
+  const result = materialiseRoutingChoice({
+    policy, policyHash, tier: 'build', role: 'builder', entryPoint: 'boot',
+    measurements: [
+      { cell: capability, capability: { ok: false } },
+      { cell: breaker, breaker: { verdict: 'open' } },
+      { cell: absent, rate: null, cost_usd: null },
+      { cell: undeclared, rate: null, cost_usd: null },
+    ],
+  })
+  assert.equal(result.outcome, 'abstained')
+  for (const reason of ['capability-shortfall', 'breaker-open', 'rate-absent', 'undeclared-candidate']) {
+    assert.ok(result.exclusions.some((entry) => entry.reason === reason), reason)
+  }
+  assert.ok(result.exclusions.every((entry) => ROUTING_EXCLUSION_REASONS.includes(entry.reason)))
+})
+
+test('routing C1 reversed measurement order is byte-equivalent and replayable', () => {
+  const { policy, policyHash } = routingTestPolicy()
+  const [alpha, beta] = policy.routes.build.builder.candidates
+  const measurements = [routingMeasurement(alpha, 9, 12, 3), routingMeasurement(beta, 9, 12, 1)]
+  const forward = materialiseRoutingChoice({ policy, policyHash, tier: 'build', role: 'builder', entryPoint: 'bench', measurements })
+  const reversed = materialiseRoutingChoice({ policy, policyHash, tier: 'build', role: 'builder', entryPoint: 'bench', measurements: [...measurements].reverse() })
+  assert.deepEqual(forward, reversed)
+  assert.deepEqual(replayRoutingChoice(forward), forward)
+  assert.deepEqual(forward.chosen_cell, beta)
+  assert.equal(forward.reason, 'cost_usd_asc')
+})
+
+test('routing D1 preserves null rate and cost with honest denominators and reasons', () => {
+  const { policy, policyHash } = routingTestPolicy()
+  const result = materialiseRoutingChoice({
+    policy, policyHash, tier: 'build', role: 'builder', entryPoint: 'boot', measurements: [],
+  })
+  assert.equal(result.outcome, 'abstained')
+  assert.equal(result.chosen_cell, null)
+  assert.equal(result.abstention_reason, 'no-eligible-candidate')
+  for (const row of result.normalized_measurements) {
+    assert.equal(row.rate.value, null)
+    assert.equal(row.rate.numerator, null)
+    assert.equal(row.rate.denominator, null)
+    assert.equal(row.rate.reason, 'rate-absent')
+    assert.equal(row.cost_usd.value, null)
+    assert.equal(row.cost_usd.reason, 'cost-absent')
+  }
+})
+
+test('routing E1 keeps shadowPick decisive false and never applies advisory routing to roster models', async () => {
+  const source = readFileSync(new URL('./crew.mjs', import.meta.url), 'utf8')
+  assert.equal((source.match(/decides:\s*false/g) || []).length, 1)
+  const rows = await bootSeatRows({ task: 'routing-e1-roster-authority' })
+  assert.deepEqual(Object.keys(rows.boot.routing_choice.decisions).sort(), [...rows.crew.roles].sort())
+  assert.deepEqual(replayRoutingChoice(rows.boot.routing_choice), rows.boot.routing_choice)
+  assert.equal(rows.boot.shadow_pick.decides, false)
+  for (const row of rows) {
+    assert.equal(rows.crew.members[row.role].model, row.model)
+    assert.equal(rows.crew.seats[row.role].model, row.model)
+  }
+})
+
+test('routing RV1-1 uses ledger first-round measurements before boot without changing seats', async () => {
+  const rows = await bootSeatRows({
+    task: 'routing-rv1-1-ledger-evidence',
+    beforeBoot: ({ dbPath }) => {
+      const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+      try {
+        const created_at = new Date().toISOString()
+        for (let index = 0; index < 50; index += 1) {
+          const adw_id = `routing-rv1-1-review-${index}`
+          ledger.startSession({ adw_id, repo_slug: 'routing', task_slug: adw_id, tier: 'build' })
+          ledger.recordReviewOutcome({
+            adw_id, dispatch_id: `routing-rv1-1-dispatch-${index}`, role: 'builder',
+            verdict: index < 45 ? 'pass' : 'changes-needed',
+            provider: 'openai', model_id: 'gpt-5.6-luna', model: 'gpt-5.6-luna', agent: 'pi', effort: 'max',
+            created_at,
+          })
+        }
+      } finally { ledger.close() }
+    },
+  })
+  const decision = rows.boot.routing_choice.decisions.builder
+  assert.equal(decision.outcome, 'abstained')
+  assert.equal(decision.chosen_cell, null)
+  assert.equal(decision.abstention_reason, 'no-eligible-candidate')
+  assert.ok(decision.exclusions.some((entry) => entry.reason === 'cost-absent'))
+  assert.equal(decision.exclusions.some((entry) => entry.reason === 'rate-absent'), false)
+  const measurement = decision.normalized_measurements.find((row) => row.cell.id === 'gpt-5.6-luna')
+  assert.notEqual(measurement.rate.value, null)
+  assert.equal(measurement.rate.value, measurement.rate.numerator / measurement.rate.denominator)
+  assert.deepEqual(measurement.rate, { numerator: 45, denominator: 50, value: 0.9, reason: null })
+  assert.deepEqual(measurement.cost_usd, { value: null, reason: 'cost-absent' })
+  for (const row of rows) {
+    assert.equal(rows.crew.members[row.role].model, row.model)
+    assert.equal(rows.crew.seats[row.role].model, row.model)
+  }
+})
+
+test('routing RV2-1 leaves boot cost absent and applies the declared lookback', async () => {
+  let cellReviewCalls = 0
+  let reviewOptions = null
+  const beganAt = Date.now()
+  const rows = await bootSeatRows({
+    task: 'routing-rv2-1-cost-absence',
+    existsSync: () => true,
+    openLedger: () => ({
+      degraded: false,
+      cellReviews(options) {
+        cellReviewCalls += 1
+        reviewOptions = options
+        return [{
+          provider: 'openai', model_id: 'gpt-5.6-luna', agent: 'pi', effort: 'max', role: 'builder',
+          reviews: 50, first_round_reviews: 50, first_round_passes: 45,
+        }]
+      },
+      stats: () => ({ mirror_errors: 0 }),
+      close() {},
+    }),
+  })
+  const finishedAt = Date.now()
+  assert.equal(cellReviewCalls, 1)
+  assert.deepEqual(Object.keys(reviewOptions), ['since'])
+  const since = Date.parse(reviewOptions.since)
+  const windowMs = 30 * 24 * 60 * 60 * 1000
+  assert.ok(Number.isFinite(since))
+  assert.ok(since >= beganAt - windowMs)
+  assert.ok(since <= finishedAt - windowMs)
+  const decision = rows.boot.routing_choice.decisions.builder
+  assert.equal(decision.outcome, 'abstained')
+  assert.ok(decision.exclusions.some((entry) => entry.reason === 'cost-absent'))
+  assert.equal(decision.exclusions.some((entry) => entry.reason === 'rate-absent'), false)
+  const measurement = decision.normalized_measurements.find((row) => row.cell.id === 'gpt-5.6-luna')
+  assert.deepEqual(measurement.cost_usd, { value: null, reason: 'cost-absent' })
+})
+
+test('routing RV1-1 abstains honestly when boot review evidence is absent or degraded', async () => {
+  const cases = [
+    {
+      name: 'absent',
+      existsSync: () => false,
+      openLedger: () => { throw new Error('an absent ledger must not be opened') },
+    },
+    {
+      name: 'degraded',
+      existsSync: () => true,
+      openLedger: () => ({
+        degraded: true,
+        cellReviews: () => [{
+          provider: 'openai', model_id: 'gpt-5.6-luna', agent: 'pi', effort: 'max', role: 'builder',
+          reviews: 50, first_round_reviews: 50, first_round_passes: 45,
+        }],
+        stats: () => ({ mirror_errors: 0 }),
+        close() {},
+      }),
+    },
+    {
+      name: 'mirror-errors',
+      existsSync: () => true,
+      openLedger: () => ({
+        degraded: false,
+        cellReviews: () => [{
+          provider: 'openai', model_id: 'gpt-5.6-luna', agent: 'pi', effort: 'max', role: 'builder',
+          reviews: 50, first_round_reviews: 50, first_round_passes: 45,
+        }],
+        stats: () => ({ mirror_errors: 1 }),
+        close() {},
+      }),
+    },
+  ]
+  for (const fixture of cases) {
+    const rows = await bootSeatRows({ task: `routing-rv1-1-${fixture.name}`, ...fixture })
+    const decision = rows.boot.routing_choice.decisions.builder
+    assert.equal(decision.outcome, 'abstained')
+    assert.ok(decision.exclusions.some((entry) => entry.reason === 'rate-absent'))
+    const measurement = decision.normalized_measurements.find((row) => row.cell.id === 'gpt-5.6-luna')
+    assert.deepEqual(measurement.rate, { numerator: null, denominator: null, value: null, reason: 'rate-absent' })
+  }
+})
+
+test('routing RV1-1 keeps a below-floor boot review rate absent with its denominator', async () => {
+  const rows = await bootSeatRows({
+    task: 'routing-rv1-1-thin-rate',
+    existsSync: () => true,
+    openLedger: () => ({
+      degraded: false,
+      cellReviews: () => [{
+        provider: 'openai', model_id: 'gpt-5.6-luna', agent: 'pi', effort: 'max', role: 'builder',
+        reviews: 11, first_round_reviews: 11, first_round_passes: 10,
+      }],
+      stats: () => ({ mirror_errors: 0 }),
+      close() {},
+    }),
+  })
+  const decision = rows.boot.routing_choice.decisions.builder
+  assert.equal(decision.outcome, 'abstained')
+  assert.ok(decision.exclusions.some((entry) => entry.reason === 'rate-absent'))
+  const measurement = decision.normalized_measurements.find((row) => row.cell.id === 'gpt-5.6-luna')
+  assert.deepEqual(measurement.rate, { numerator: 10, denominator: 11, value: null, reason: 'rate-absent' })
 })

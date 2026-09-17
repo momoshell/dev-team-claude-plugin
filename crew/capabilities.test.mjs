@@ -653,9 +653,11 @@ test('the shipped planner pi overlay resolves its checkout-pinned bundle', () =>
     join(REGISTER_ROOT, 'crew/pi/extensions/lab.ts'),
     join(REGISTER_ROOT, 'crew/pi/extensions/readgate.ts'),
   ]
+  const expectedSkills = [join(REGISTER_ROOT, 'skills/lean-build/SKILL.md')]
   const grants = grantsFor(loaded, 'planner', { agent: 'pi' })
   assert.deepEqual(grants.extensions, expected)
-  for (const path of expected) assert.equal(existsSync(path), true)
+  assert.deepEqual(grants.skills, expectedSkills)
+  for (const path of [...expected, ...expectedSkills]) assert.equal(existsSync(path), true)
   assert.doesNotThrow(() => assertGrantsBacked('planner', grants, loaded, { agent: 'pi' }))
   assert.deepEqual(grants.agents, [{ name: 'scout', def: join(REGISTER_ROOT, 'crew/pi/agents/scout.json') }])
 })
@@ -668,12 +670,15 @@ test('the shipped builder pi overlay resolves its checkout-pinned extensions', (
     join(REGISTER_ROOT, 'crew/pi/extensions/skeletonread.ts'),
     join(REGISTER_ROOT, 'crew/pi/extensions/fff.ts'),
   ]
+  const expectedSkills = [join(REGISTER_ROOT, 'skills/lean-build/SKILL.md')]
   const pi = grantsFor(loaded, 'builder', { agent: 'pi' })
   assert.deepEqual(pi.extensions, expected)
-  for (const path of expected) assert.equal(existsSync(path), true)
+  assert.deepEqual(pi.skills, expectedSkills)
+  for (const path of [...expected, ...expectedSkills]) assert.equal(existsSync(path), true)
   assert.doesNotThrow(() => assertGrantsBacked('builder', pi, loaded, { agent: 'pi' }))
   const claude = grantsFor(loaded, 'builder', { agent: 'claude' })
   assert.deepEqual(claude.extensions, [])
+  assert.deepEqual(claude.skills, [])
   const forged = { ...pi, extensions: [...pi.extensions, join(REGISTER_ROOT, 'crew/pi/extensions/forged.ts')] }
   assert.throws(
     () => assertGrantsBacked('builder', forged, loaded, { agent: 'pi' }),

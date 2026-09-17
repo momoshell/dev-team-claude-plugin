@@ -683,7 +683,7 @@ test('runtime composed charter sizes stay at their ceilings', () => {
   const rolesDir = join(REPO_ROOT, 'crew', 'roles')
   const measured = compiledCharterBytes(rolesDir)
   const sizes = Object.fromEntries(Object.entries(measured).map(([role, entry]) => [role, entry.bytes]))
-  const expected = { builder: 8030, lead: 12813, planner: 20680, reviewer: 11133, 'tech-lead': 9962 }
+  const expected = { builder: 8030, lead: 12851, planner: 20680, reviewer: 11133, 'tech-lead': 9962 }
   const summary = Object.entries(measured).map(([role, entry]) => `${role}=${entry.bytes}`).join(', ')
   assert.deepEqual(sizes, expected, `composed charter sizes: ${summary}`)
   for (const [role, ceiling] of Object.entries(CHARTER_CEILINGS)) {
@@ -1270,7 +1270,7 @@ test('J1 structural documentation runs one fenced crew-dispatch anchor repair', 
 // before-source: fixture
 // before-lead-sha256: 2448872e30f1765649a62c5b520b01a5ff16f543732041b65f63a82225a63d55
 // before-tech-lead-sha256: f14559227cee0ed481997255d15cbd804b455b3be25c2c6233944e5b8add2748
-// f1-anchor-builder-sha256: 489fdbfd93207a36e8f6e5cfbd6d5c314d934a808031ba43175fd7617d28dc74
+// f1-anchor-builder-sha256: a77542834deb53d0211af4f4fcffd6fb836f34d97eaaf555b87a2a036416f14e
 // | sentence | subject | class | source | quote |
 // | --- | --- | --- | --- | --- |
 // | **`correctness-unverified` is code-refused into escalation.** | into escalation | enforced | crew/drive.mjs:2109 planAcceptContractLines; enforcement crew/drive.mjs:6542 settleAccept and crew/drive.mjs:2127 ACCEPT_REFUSALS | A residual typed correctness-unverified is legitimate but asks a human, so code refuses it into escalation — the same rule as at review exhaustion. That is a fact about the FIELD, not about which stage you are standing in. |

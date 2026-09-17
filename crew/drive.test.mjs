@@ -2093,6 +2093,7 @@ test('coded shape topology is measured against every successful executor family'
     full: ['plan', 'build', 'scope-gate', 'lane', 'review', 'review', 'commit', 'document', 'suite', 'suite'],
     scout: ['scout', 'scope-gate', 'envelope-accept'],
     review_only: ['review_only', 'scope-gate', 'envelope-accept'],
+    review_panel: ['review_panel', 'scope-gate', 'envelope-accept'],
     repair: ['repair', 'build', 'scope-gate', 'lane', 'review', 'review', 'commit', 'document', 'suite', 'suite'],
     directed: ['directed', 'gate-baseline', 'build', 'scope-gate', 'lane', 'gate', 'gate-proof', 'review', 'review', 'commit', 'document', 'suite', 'suite'],
     verify_only: ['verify_only', 'scope-gate', 'envelope-accept'],
@@ -2103,6 +2104,18 @@ test('coded shape topology is measured against every successful executor family'
     const assign = io.assign.bind(io)
     io.assign = (spec) => ({ ...assign(spec), id: 'd1', returnPath: `${role}:1` })
     io.wait = () => ({ ...envelope, assignment_id: 'd1', run_id: runId, role })
+    return io
+  }
+  const reviewPanelEnvelopes = {
+    reviewer: { status: 'done', role: 'reviewer', summary: 'review complete', artifacts: [`${TD}/panel-review.md`], details: { base: 'a'.repeat(40), head: 'b'.repeat(40), outcome: 'no-findings', findings: [], reviewed_files: [], unreviewable_files: [] } },
+    'tech-lead': { status: 'done', role: 'tech-lead', summary: 'partner review complete', artifacts: [`${TD}/panel-partner.md`], details: { base: 'a'.repeat(40), head: 'b'.repeat(40), outcome: 'no-findings', findings: [], reviewed_files: [], unreviewable_files: [] } },
+    lead: { status: 'done', role: 'lead', summary: 'panel adjudicated', artifacts: [`${TD}/panel-adjudication.md`], details: { base: 'a'.repeat(40), head: 'b'.repeat(40), adjudications: [], reviewed_files: [], unreviewable_files: [] } },
+  }
+  const strictPanelIo = (runId) => {
+    const io = fakeIo({ changed: [] })
+    const assign = io.assign.bind(io)
+    io.assign = (spec) => ({ ...assign(spec), id: 'd1', returnPath: `${spec.role}:1` })
+    io.wait = (returnPath) => ({ ...reviewPanelEnvelopes[returnPath.split(':')[0]], assignment_id: 'd1', run_id: runId, role: returnPath.split(':')[0] })
     return io
   }
   const reviewOnlyEnvelope = {
@@ -2135,6 +2148,10 @@ test('coded shape topology is measured against every successful executor family'
     review_only: () => driveTask(
       { ...CTX, variant: 'review_only', run_id: 'run-review-783', roles: ['reviewer'], seatedRoles: ['reviewer'] },
       strictEnvelopeIo(reviewOnlyEnvelope, 'reviewer', 'run-review-783'),
+    ),
+    review_panel: () => driveTask(
+      { ...CTX, variant: 'review_panel', run_id: 'run-review-panel-783', roles: ['reviewer', 'tech-lead', 'lead'], seatedRoles: ['reviewer', 'tech-lead', 'lead'], review_identity: { base_sha: 'a'.repeat(40), head_sha: 'b'.repeat(40) } },
+      strictPanelIo('run-review-panel-783'),
     ),
     repair: () => {
       const io = fakeIo({
@@ -2178,7 +2195,7 @@ test('coded shape topology is measured against every successful executor family'
     return row
   })
   assert.deepEqual(measured.map(({ name }) => name), Object.keys(VARIANTS))
-  assert.equal(measured.length, 6)
+  assert.equal(measured.length, 7)
 
   const allHeads = [...new Set(Object.values(VARIANTS).flatMap(({ stages }) => stages))]
   for (const row of measured) {
@@ -2238,6 +2255,17 @@ test('coded shape topology is measured against every successful executor family'
   assert.equal(shapeValidationDefect({ ...VARIANTS.scout, required_seats: ['reviewer'] }, 'scout').defect, 'seats-mismatch')
   assert.equal(shapeValidationDefect({ ...VARIANTS.repair, sources: { ...VARIANTS.repair.sources, gate: 'brief' } }, 'repair').defect, 'sources-invalid')
   assert.equal(shapeValidationDefect({ ...VARIANTS.directed, required_seats: ['reviewer', 'builder'] }, 'directed').defect, 'seats-mismatch')
+})
+
+test('G1 review_panel topology rejects reordered extra and missing stages', () => {
+  const shape = VARIANTS.review_panel
+  const reordered = [...shape.stages]
+  ;[reordered[0], reordered[1]] = [reordered[1], reordered[0]]
+  assert.equal(shapeValidationDefect({ ...shape, stages: reordered }, 'review_panel').defect, 'stage-reordered')
+  const extra = shapeValidationDefect({ ...shape, stages: [...shape.stages, 'gate'] }, 'review_panel')
+  assert.equal(extra.defect, 'stage-extra')
+  const missing = shapeValidationDefect({ ...shape, stages: shape.stages.filter((stage) => stage !== 'scope-gate') }, 'review_panel')
+  assert.equal(missing.defect, 'stage-missing')
 })
 
 test('A1 full reordered declaration is refused', () => {
@@ -2340,7 +2368,7 @@ test('shape validator exposes a frozen closed vocabulary, preserves legacy detai
     [{ ...VARIANTS.full, stages: [] }, 'full', 'stages must declare the heads this shape emits'],
     [{ ...VARIANTS.full, envelope_fields: null }, 'full', 'envelope_fields must be an array'],
     [{ ...VARIANTS.full, strict_identity: 'yes' }, 'full', 'strict_identity must be boolean'],
-    [{ ...VARIANTS.scout, envelope_fields: [{ name: 'findings', kind: 'unknown' }] }, 'scout', 'envelope field "findings" must declare a kind in text, records, paths'],
+    [{ ...VARIANTS.scout, envelope_fields: [{ name: 'findings', kind: 'unknown' }] }, 'scout', 'envelope field "findings" must declare a kind in text, records, paths, object'],
     [{ ...VARIANTS.scout, envelope_fields: [{ name: 'paths', kind: 'paths', item_fields: ['path'] }] }, 'scout', 'envelope field "paths" may declare item_fields only on records'],
     [{ ...VARIANTS.scout, envelope_fields: [{ name: '', kind: 'records' }] }, 'scout', 'envelope fields must have unique non-empty names'],
     [{ ...VARIANTS.scout, envelope_fields: [{ name: 'findings', kind: 'records', item_fields: ['summary'], optional_item_fields: ['summary'] }] }, 'scout', 'envelope field "findings".optional_item_fields must be disjoint from item_fields'],

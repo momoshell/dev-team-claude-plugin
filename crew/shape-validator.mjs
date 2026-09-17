@@ -2,7 +2,7 @@
 
 const EXECUTIONS = Object.freeze(['reviewed', 'envelope'])
 const WRITE_SURFACES = Object.freeze(['planned', 'none'])
-const ENVELOPE_FIELD_KINDS = Object.freeze(['text', 'records', 'paths'])
+const ENVELOPE_FIELD_KINDS = Object.freeze(['text', 'records', 'paths', 'object'])
 
 const SHAPE_SOURCES = Object.freeze({
   scope: Object.freeze(['plan', 'inherited', 'brief']),
@@ -14,6 +14,7 @@ const REVIEWED_CORE_STAGES = Object.freeze(['build', 'scope-gate', 'lane', 'revi
 const ENVELOPE_STAGE_ORDERS = Object.freeze({
   scout: Object.freeze(['scout', 'scope-gate', 'envelope-accept']),
   review_only: Object.freeze(['review_only', 'scope-gate', 'envelope-accept']),
+  review_panel: Object.freeze(['review_panel', 'scope-gate', 'envelope-accept']),
   verify_only: Object.freeze(['verify_only', 'scope-gate', 'envelope-accept']),
 })
 
@@ -49,6 +50,11 @@ export const EXECUTOR_TOPOLOGIES = deepFreeze({
     execution: 'envelope',
     required_seats: Object.freeze(['reviewer']),
     stages: ENVELOPE_STAGE_ORDERS.review_only,
+  },
+  review_panel: {
+    execution: 'envelope',
+    required_seats: Object.freeze(['reviewer', 'tech-lead', 'lead']),
+    stages: ENVELOPE_STAGE_ORDERS.review_panel,
   },
   repair: {
     execution: 'reviewed',
@@ -89,6 +95,11 @@ function frozenStringArrayDefect(value, label) {
 export function envelopeFieldMetadataDefect(field, envelopeFields = []) {
   if (!field || typeof field !== 'object' || Array.isArray(field)) return 'envelope field must be an object'
   const kind = field.kind
+  if (kind === 'object') {
+    const metadataKeys = ['values', 'allow_empty', 'item_fields', 'optional_item_fields', 'item_values', 'item_patterns', 'cardinality', 'covers']
+    const metadataKey = metadataKeys.find((key) => hasOwn(field, key))
+    if (metadataKey) return `envelope field ${JSON.stringify(field.name)} may not declare ${metadataKey} on object`
+  }
   const itemFields = Array.isArray(field.item_fields) ? field.item_fields : []
   const itemSet = new Set(itemFields)
   const optionalItemFields = Array.isArray(field.optional_item_fields) ? field.optional_item_fields : []
@@ -280,11 +291,13 @@ export function shapeValidationDefect(shape, variantName = 'full') {
   }
 
   const seats = shape.required_seats
-  if (!Array.isArray(seats) || seats.length !== 1 || typeof seats[0] !== 'string' || !seats[0]) {
+  const expectedEnvelopeSeats = topology?.execution === 'envelope' ? topology.required_seats : null
+  if (expectedEnvelopeSeats) {
+    if (!sameSeats(seats, expectedEnvelopeSeats)) {
+      return verdict('seats-mismatch', `the ${variantName} shape runs exactly ${expectedEnvelopeSeats.join(', ')}; required_seats must be that list`)
+    }
+  } else if (!Array.isArray(seats) || seats.length !== 1 || typeof seats[0] !== 'string' || !seats[0]) {
     return verdict('seats-mismatch', 'an envelope shape runs exactly one declared seat; required_seats must be a one-role array')
-  }
-  if (topology?.execution === 'envelope' && !sameSeats(seats, topology.required_seats)) {
-    return verdict('seats-mismatch', `the ${variantName} shape runs exactly ${topology.required_seats.join(', ')}; required_seats must be that list`)
   }
   if (shape.writes !== 'none') return verdict('writes-invalid', 'an envelope shape has no plan to source a write surface from; writes must be "none"')
 

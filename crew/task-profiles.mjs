@@ -50,7 +50,7 @@ export const TASK_PROFILES = Object.freeze({
     outcome: 'Actionable findings against a declared change set',
     evidence: Object.freeze(['base_head_identity', 'structured_findings', 'severity', 'citations', 'zero_source_writes']),
     recommended_execution: 'review_only',
-    allowed_executions: Object.freeze([]),
+    allowed_executions: Object.freeze(['review_panel']),
     execution_conditions: Object.freeze({}),
   }),
   qa_verification: Object.freeze({

@@ -68,6 +68,40 @@ export const VARIANTS = Object.freeze({
     ]),
     assignment: 'Review the returned base/head identity and the declared change set as a read-only code review. This assignment supersedes the ordinary reviewer deliverable: do not create, edit, delete, checkout, or commit anything in the checkout. Read-only validation is permitted. Return the complete structured envelope with non-empty base and head, outcome findings or no-findings, reviewed_files as an array of paths, and unreviewable_files as records with path and reason; every unreviewable reason must be binary, generated, too-large, or out-of-context, every listed path must belong to the base/head change set, and reviewed_files and unreviewable_files must be disjoint. Return findings records containing id, severity, location, summary, evidence, and disposition; findings must be empty exactly when outcome is no-findings and non-empty when outcome is findings.',
   }),
+  review_panel: Object.freeze({
+    execution: 'envelope',
+    required_seats: Object.freeze(['reviewer', 'tech-lead', 'lead']),
+    stages: Object.freeze(['review_panel', 'scope-gate', 'envelope-accept']),
+    off_critical_path_stages: NO_OFF_CRITICAL_PATH_STAGES,
+    writes: 'none',
+    accepted_by: 'structured three-seat panel envelope plus zero-write proof; no commit',
+    strict_identity: true,
+    report_values: true,
+    envelope_fields: Object.freeze([
+      Object.freeze({ name: 'base', kind: 'text' }), Object.freeze({ name: 'head', kind: 'text' }),
+      Object.freeze({ name: 'outcome', kind: 'text', values: Object.freeze(['findings', 'no-findings']) }),
+      Object.freeze({
+        name: 'findings', kind: 'records', allow_empty: true,
+        item_fields: Object.freeze(['id', 'severity', 'location', 'summary', 'evidence', 'disposition']),
+        item_values: Object.freeze({
+          severity: Object.freeze(['must-fix', 'should-fix', 'consider']),
+          disposition: Object.freeze(['auto-fix', 'ask-user', 'no-op']),
+        }),
+        item_patterns: Object.freeze({ id: '^[A-Za-z0-9_-]{1,64}$' }),
+        cardinality: Object.freeze({ discriminator: 'outcome', empty: 'no-findings', nonempty: 'findings' }),
+      }),
+      Object.freeze({ name: 'reviewed_files', kind: 'paths', allow_empty: true }),
+      Object.freeze({
+        name: 'unreviewable_files', kind: 'records', allow_empty: true,
+        item_fields: Object.freeze(['path', 'reason']),
+        item_values: Object.freeze({
+          reason: Object.freeze(['binary', 'generated', 'too-large', 'out-of-context']),
+        }),
+      }),
+      Object.freeze({ name: 'panel', kind: 'object' }),
+    ]),
+    assignment: 'Run a read-only three-seat review panel. Reviewer and tech-lead must independently return the complete review-only contract: non-empty base/head, outcome findings or no-findings, findings records with id, severity, location, summary, evidence, and disposition, reviewed_files paths, and unreviewable_files path/reason records; their coverage lists must be disjoint and inside the immutable base/head change set. Lead must return base/head, adjudications with each collision-safe divergent id exactly once, disposition uphold or dismiss, a non-empty reason, and its own reviewed_files and unreviewable_files coverage. The driver fuses matching findings, preserves origin fields and dismissed provenance, and accepts only a read-only result; do not create, edit, delete, checkout, or commit anything in the checkout. Read-only validation is permitted.',
+  }),
   repair: Object.freeze({
     execution: 'reviewed',
     required_seats: 'tier',

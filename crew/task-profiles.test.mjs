@@ -32,7 +32,7 @@ const EXPECTED = {
     name: 'Code review',
     outcome: 'Actionable findings against a declared change set',
     recommended_execution: 'review_only',
-    allowed_executions: [],
+    allowed_executions: ['review_panel'],
   },
   qa_verification: {
     name: 'QA verification',

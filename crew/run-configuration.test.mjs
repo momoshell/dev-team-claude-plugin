@@ -12,12 +12,12 @@ import {
 const PROFILE_KEYS = Object.freeze([
   'implementation', 'bug_fix', 'investigation', 'code_review', 'qa_verification', 'test_authoring',
 ])
-const SHAPE_KEYS = Object.freeze(['full', 'directed', 'scout', 'repair', 'review_only', 'verify_only'])
+const SHAPE_KEYS = Object.freeze(['full', 'directed', 'scout', 'repair', 'review_only', 'review_panel', 'verify_only'])
 const COMPATIBLE = Object.freeze({
   implementation: Object.freeze(['full', 'directed']),
   bug_fix: Object.freeze(['full', 'directed', 'repair']),
   investigation: Object.freeze(['scout']),
-  code_review: Object.freeze(['review_only']),
+  code_review: Object.freeze(['review_only', 'review_panel']),
   qa_verification: Object.freeze(['verify_only']),
   test_authoring: Object.freeze(['full', 'directed']),
 })
@@ -27,6 +27,7 @@ const SHAPE_STATUS = Object.freeze({
   scout: 'existing',
   repair: 'existing',
   review_only: 'existing',
+  review_panel: 'existing',
   verify_only: 'existing',
 })
 const ALIAS_PAIRS = Object.freeze([
@@ -85,14 +86,14 @@ test('the complete §3.3 compatibility matrix resolves valid pairs explicitly', 
       })
     }
   }
-  assert.equal(pairs, 10)
+  assert.equal(pairs, 11)
 })
 
 test('every incompatible matrix pair refuses with selected values and all allowed shapes', () => {
   const invalidPairs = PROFILE_KEYS.flatMap((profile) => SHAPE_KEYS
     .filter((execution) => !COMPATIBLE[profile].includes(execution))
     .map((execution) => [profile, execution]))
-  assert.equal(invalidPairs.length, 26)
+  assert.equal(invalidPairs.length, 31)
   for (const [profile, execution] of invalidPairs) {
     const error = assertRefusal({ profile, execution }, 'incompatible_execution')
     const message = String(error.message)

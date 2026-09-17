@@ -1460,14 +1460,14 @@ test('the charter ceilings and source budgets are the delivered bytes, below the
   assert.equal(Object.isFrozen(CHARTER_SOURCE_BUDGET), true)
   assert.equal(Object.isFrozen(CHARTER_BASELINE_BYTES), true)
   assert.deepEqual(CHARTER_BASELINE_BYTES, { _shared: 3432, builder: 5169, lead: 9378, planner: 16930, reviewer: 7697, 'tech-lead': 6529 })
-  assert.deepEqual(CHARTER_SOURCE_BUDGET, { _shared: 3750, builder: 4029, lead: 9061, planner: 16887, reviewer: 7381, 'tech-lead': 6210 })
-  assert.deepEqual(CHARTER_CEILINGS, { builder: 7781, lead: 12813, planner: 20639, reviewer: 11133, 'tech-lead': 9962 })
+  assert.deepEqual(CHARTER_SOURCE_BUDGET, { _shared: 3167, builder: 3988, lead: 4975, planner: 8200, reviewer: 4710, 'tech-lead': 3283 })
+  assert.deepEqual(CHARTER_CEILINGS, { builder: 7157, lead: 8144, planner: 11369, reviewer: 7879, 'tech-lead': 6452 })
   for (const value of [...Object.values(CHARTER_BASELINE_BYTES), ...Object.values(CHARTER_SOURCE_BUDGET), ...Object.values(CHARTER_CEILINGS)]) assert.equal(Number.isInteger(value), true)
   for (const role of roles) {
     assert.equal(CHARTER_CEILINGS[role], CHARTER_SOURCE_BUDGET._shared + 2 + CHARTER_SOURCE_BUDGET[role])
     assert.ok(CHARTER_SOURCE_BUDGET[role] < CHARTER_BASELINE_BYTES[role])
   }
-  assert.equal(CHARTER_SOURCE_TOTAL_BUDGET, 47318)
+  assert.equal(CHARTER_SOURCE_TOTAL_BUDGET, 28323)
   assert.equal(CHARTER_SOURCE_TOTAL_BUDGET, Object.values(CHARTER_SOURCE_BUDGET).reduce((sum, value) => sum + value, 0))
   assert.ok(CHARTER_SOURCE_TOTAL_BUDGET < 49135)
 

@@ -36,7 +36,7 @@ place that runs the review flow.
 - The reviewer envelope's finding object is at `crew/roles/reviewer.md:47-54` and
   it is `{id, severity, disposition, patch, location, summary}` — not the
   four-field shape the sentence claims; `findings` is optional, at
-  `crew/roles/reviewer.md:62`. `confidence` appears in reviewer.md only in the
+  `crew/roles/reviewer.md:59`. `confidence` appears in reviewer.md only in the
   scout/recommendation shape.
 
 - The do-not-flag guidelines are repo data loaded by the procedure layer, and a

@@ -464,7 +464,7 @@ test('every crew/drive.mjs anchor the tech-lead charter cites resolves to the co
   const rolesDir = join(REPO_ROOT, 'crew', 'roles')
   const docs = readdirSync(rolesDir).filter((name) => name.endsWith('.md')).sort().map((name) => join(rolesDir, name))
   const result = checkAnchors({ root: REPO_ROOT, docs, manifest })
-  assert.ok(result.anchors >= 12, `expected at least 12 anchors, found ${result.anchors}`)
+  assert.ok(result.anchors + (result.named || 0) >= 12, `expected at least 12 pins, found ${result.anchors} numeric + ${(result.named || 0)} named`)
   assert.deepEqual(result.failures, [])
   const { inFence, outOfFence } = partitionShifts({ shifted: result.shifted, fence: laneFence({ root: REPO_ROOT }).paths, manifest: 'crew/roles/anchors.json' })
   for (const shift of outOfFence) console.warn(`shifted ${shift.key} -> line ${shift.to}; repair after this lane merges, on main with: node skills/qa-test-writing/anchor-pin.mjs --repair-all crew/roles`)
@@ -628,7 +628,7 @@ test('runtime composed charter sizes stay at their ceilings', () => {
   const rolesDir = join(REPO_ROOT, 'crew', 'roles')
   const measured = compiledCharterBytes(rolesDir)
   const sizes = Object.fromEntries(Object.entries(measured).map(([role, entry]) => [role, entry.bytes]))
-  const expected = { builder: 7781, lead: 12813, planner: 20639, reviewer: 11133, 'tech-lead': 9962 }
+  const expected = { builder: 7157, lead: 8144, planner: 11369, reviewer: 7879, 'tech-lead': 6452 }
   const summary = Object.entries(measured).map(([role, entry]) => `${role}=${entry.bytes}`).join(', ')
   assert.deepEqual(sizes, expected, `composed charter sizes: ${summary}`)
   for (const [role, ceiling] of Object.entries(CHARTER_CEILINGS)) {
@@ -646,6 +646,85 @@ test('both charters state where the planner stops and the lead takes over', () =
   assert.match(planner, /domain ends when your plan is accepted/)
   assert.match(planner.slice(planner.indexOf('domain ends when your plan is accepted')), /lead/)
   assert.doesNotMatch(planner, /## Perspective assignments/)
+})
+
+test('charters pin their must-keep sentences and forbid their negations', () => {
+  const rolesDir = join(REPO_ROOT, 'crew', 'roles')
+  const planner = readFileSync(join(rolesDir, 'planner.md'), 'utf8')
+  const builder = readFileSync(join(rolesDir, 'builder.md'), 'utf8')
+  const reviewer = readFileSync(join(rolesDir, 'reviewer.md'), 'utf8')
+  const shared = readFileSync(join(rolesDir, '_shared.md'), 'utf8')
+  assert.ok(planner.includes('NEVER edit repo files'));
+  assert.doesNotMatch(planner, /you may edit/i);
+  assert.ok(planner.includes('spawns no scouts'));
+  assert.doesNotMatch(planner, /spawn scouts freely/i);
+  assert.doesNotMatch(shared, /run no tests/i);
+  assert.ok(shared.includes('## Turn economy'));
+  assert.ok(builder.includes('the test files you are changing'));
+  assert.doesNotMatch(builder, /never run the gate/i);
+  assert.ok(planner.includes('Run nothing else'));
+  assert.doesNotMatch(planner, /run everything/i);
+  assert.ok(reviewer.includes('mechanically safe and intent-neutral'));
+  assert.doesNotMatch(reviewer, /auto-fix is forbidden/i);
+})
+
+test('rv1-1 planner deliverable names every required section', () => {
+  const planner = readFileSync(join(REPO_ROOT, 'crew', 'roles', 'planner.md'), 'utf8')
+  for (const section of ['- **Task**', '- **Ground truth**', '- **Changes**', '- **Sequencing**', '- **Tests**', '- **Acceptance criteria**', '- **Risks/consults**']) assert.ok(planner.includes(section), section)
+})
+
+test('rv1-2 shared assignment loop keeps every step body', () => {
+  const shared = readFileSync(join(REPO_ROOT, 'crew', 'roles', '_shared.md'), 'utf8')
+  assert.ok(shared.includes('Do the work per your role charter (below the shared section).'))
+  assert.ok(shared.includes('Do nothing else.'))
+  assert.ok(shared.includes('NEW assignment (a bounce), not a continuation'))
+})
+
+test('rv1-3 tech-lead method keeps attack and consult bodies', () => {
+  const charter = readFileSync(join(REPO_ROOT, 'crew', 'roles', 'tech-lead.md'), 'utf8')
+  assert.ok(charter.includes('wrong-premise'))
+  assert.ok(charter.includes('consult_questions'))
+})
+
+test('rv1-4 lead decision loop keeps step four', () => {
+  const charter = readFileSync(join(REPO_ROOT, 'crew', 'roles', 'lead.md'), 'utf8')
+  assert.ok(charter.includes('Print your CREW-DONE line.'))
+})
+
+test('rv1-5 reviewer method list has no orphan index', () => {
+  const charter = readFileSync(join(REPO_ROOT, 'crew', 'roles', 'reviewer.md'), 'utf8')
+  assert.equal(charter.split('\n').filter((line) => line === '2.').length, 0)
+  assert.ok(charter.includes('2. Judge two separate questions, in order:'))
+})
+
+test('rv1-6 reviewer keeps carried findings and read-only', () => {
+  const charter = readFileSync(join(REPO_ROOT, 'crew', 'roles', 'reviewer.md'), 'utf8')
+  assert.ok(charter.includes('carried-silent'))
+  assert.ok(charter.includes('You change NOTHING in the repo'))
+})
+
+test('rv1-7 planner gate states its decision contract', () => {
+  const charter = readFileSync(join(REPO_ROOT, 'crew', 'roles', 'planner.md'), 'utf8')
+  assert.ok(charter.includes('exits 0 iff what the brief asked for is what got built'))
+})
+
+test('rv1-8 review-proved sentences stay in their charters', () => {
+  const rolesDir = join(REPO_ROOT, 'crew', 'roles')
+  const planner = readFileSync(join(rolesDir, 'planner.md'), 'utf8')
+  const shared = readFileSync(join(rolesDir, '_shared.md'), 'utf8')
+  const reviewer = readFileSync(join(rolesDir, 'reviewer.md'), 'utf8')
+  const lead = readFileSync(join(rolesDir, 'lead.md'), 'utf8')
+  const techLead = readFileSync(join(rolesDir, 'tech-lead.md'), 'utf8')
+  assert.ok(planner.includes('- **Ground truth**'))
+  assert.ok(planner.includes('- **Acceptance criteria**'))
+  assert.ok(planner.includes('exits 0 iff what the brief asked for is what got built'))
+  assert.ok(shared.includes('Do the work per your role charter (below the shared section).'))
+  assert.ok(reviewer.includes('carried-silent'))
+  assert.ok(reviewer.includes('You change NOTHING in the repo'))
+  assert.ok(reviewer.includes('2. Judge two separate questions, in order:'))
+  assert.ok(lead.includes('Print your CREW-DONE line.'))
+  assert.ok(techLead.includes('wrong-premise'))
+  assert.ok(techLead.includes('consult_questions'))
 })
 
 test('#800 §7b 34 — the shared charter pin includes disposition and its compatibility window', () => {

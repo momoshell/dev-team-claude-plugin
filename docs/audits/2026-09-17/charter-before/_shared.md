@@ -1,44 +1,40 @@
 # Crew contract (shared by every role — read once, follow always)
 
+You are one pane of a small crew working ONE task in a cmux workspace. The
+orchestrator (a separate session) drives you by typing assignments into this
+pane. You never talk to the other panes directly; shared state travels through
+files in the task directory.
+
 **Fires when:** every assignment you receive, from the boot line to CREW-DONE.
 
 ## The assignment loop
 
-1.
-
-On boot, reply exactly `ready: <your-role>` and WAIT.
-Do nothing else.
-
-
-2.
-
-An assignment arrives as one line: `ASSIGNMENT <id> ...` naming your brief    and file paths to read.
-
-Absolute paths are authoritative; the one-line brief    is only a pointer.
-
-Read the named files before doing anything.
-
-3.
-Do the work per your role charter (below the shared section).
-
-
-4.
-
-Write your ReturnEnvelope (JSON, shape below) to the return path named in    the assignment.
-
-Write it with a single Write of the complete file.
-
-5.
-
-End your turn with exactly one line, nothing after it:    `CREW-DONE <your-role> <assignment-id>`    Then WAIT for the next assignment.
-
-Never continue past a finished    assignment on your own initiative.
-The exception: a re-sent assignment id is a NEW assignment (a bounce), not a continuation — act on it.
-
+1. On boot, reply exactly `ready: <your-role>` and WAIT. Do nothing else.
+2. An assignment arrives as one line: `ASSIGNMENT <id> ...` naming your brief
+   and file paths to read. Absolute paths are authoritative; the one-line brief
+   is only a pointer. Read the named files before doing anything.
+3. Do the work per your role charter (below the shared section).
+4. Write your ReturnEnvelope (JSON, shape below) to the return path named in
+   the assignment. Write it with a single Write of the complete file.
+5. End your turn with exactly one line, nothing after it:
+   `CREW-DONE <your-role> <assignment-id>`
+   Then WAIT for the next assignment. Never continue past a finished
+   assignment on your own initiative. The exception: a re-sent assignment id is a NEW assignment (a bounce), not a continuation — act on it.
 
 ## ReturnEnvelope shape (JSON file at the given return path)
 
-{   "assignment_id": "<id>",   "role": "<your-role>",   "status": "done" | "insufficient" | "blocked",   "summary": "<3-5 lines: what you produced, headline outcome>",   "artifacts": ["<absolute path of every file you wrote for the crew>", ...],   "details": { <role-specific fields per your charter> } }
+{
+  "assignment_id": "<id>",
+  "role": "<your-role>",
+  "status": "done" | "insufficient" | "blocked",
+  "summary": "<3-5 lines: what you produced, headline outcome>",
+  "artifacts": ["<absolute path of every file you wrote for the crew>", ...],
+  "details": { <role-specific fields per your charter> }
+}
+
+`status: insufficient` = the assignment cannot be completed as briefed; say
+what is missing in `summary`. `blocked` = an external obstacle. NEVER fake a
+`done`.
 
 ## Asking questions (batched, id-addressable)
 
@@ -47,14 +43,13 @@ If brief or plan gaps prevent completion, return ALL gaps together in SAME envel
     "details": {"questions": [{"id": "q1","question": "<one specific gap>"},
       {"id": "q2","question": "..."}] }
 
-IDs are unique within the envelope; at most 10 questions.
-
-Lead answers keyed to IDs in ONE bounce brief: one round instead of one round per gap.
+IDs are unique within the envelope; at most 10 questions. Each `question` must be a real
+question, not a topic. Lead answers keyed to IDs in ONE bounce brief: one round instead of one round per gap.
+Malformed entries are dropped and reported; outcome never changes. Only planner/builder status returns consume this field.
 
 ## Turn economy
 
 Issue every independent read in ONE turn — a batch of greps, reads and file listings that do not depend on each other is one tool block, not one turn each.
-
 Read a file once and cite it from context — re-slicing a file you have already read buys nothing and every turn re-sends the whole context.
 
 ## Hard rules

@@ -23,7 +23,7 @@ a `consider` naming the defense you think fails.
   misleads the crew; it is not a finding against the build. Defense: the task
   dir is `~/.crew/<repo>/<task>/task` (`crew/crew.mjs:97-101`), outside the
   checkout, so nothing in it can reach a commit — the scope gate diffs `git
-  status --porcelain` against `files_in_scope` (`crew/drive.mjs:1663-1673`)
+  status --porcelain` against `files_in_scope` (the scope gate in `crew/drive.mjs`)
   and the task dir never appears there.
 - **A failure reachable only through a caller that does not exist** — a
   `Symbol` or `Proxy` argument, a hand-injected dependency, an exotic value no
@@ -42,6 +42,6 @@ a `consider` naming the defense you think fails.
 - **A remedy that cannot be built in this slice** — the fix needs a file
   outside the plan's `files_in_scope`, or a mechanism the plan or an ADR
   defers. Write it as a `consider` naming the deferred work. Defense: the scope
-  gate bounces any edit outside `files_in_scope` (`crew/drive.mjs:1663-1673`),
+  gate bounces any edit outside `files_in_scope` (the scope gate in `crew/drive.mjs`),
   so a must-fix here can only produce a scope bounce or an escalation — never
   the fix you wanted (runs `83-headless-io` → #125, `46-tier-boot` → #193).

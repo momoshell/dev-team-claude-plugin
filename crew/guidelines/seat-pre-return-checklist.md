@@ -61,14 +61,14 @@ the builder's own diff; neither needs a reviewer to notice.
   exits non-zero with `errored: 0`, and record the literal summary line as a
   verified Ground truth fact in `plan.md`. Kills: the gate bounce that spends a
   whole plan round on a vacuous or broken gate — the driver enforces exactly
-  this at baseline (`crew/drive.mjs:230-236`) and a second green baseline
+  this at baseline (the baseline-gate rule in `crew/drive.mjs`) and a second green baseline
   escalates the task.
 - **P3 — every gate check names the mutation that kills it.** Each check
   carries a `MUTATION:` comment naming one edit to an in-scope file that turns
   that check red, and the same set is declared in `details.mutations` so the
   driver can apply them to the built tree. Kills: the whole-gate false positive
   — a gate that is red overall while some individual check adjudicates nothing
-  (#330, `crew/drive.mjs:851-914`).
+  (#330, the mutation-declaration rule in `crew/drive.mjs`).
   The entry is machine-applied, not prose: `{ "check": "<stable token>", "file":
   "<a file inside files_in_scope>", "find": "<non-empty literal text in that file>",
   "replace": "<a different string>" }` — or, for a check no single edit can kill,

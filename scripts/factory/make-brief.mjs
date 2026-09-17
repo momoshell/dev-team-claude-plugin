@@ -2868,7 +2868,7 @@ function renderWhere(where, creates = []) {
       ? `warning · unresolved · ${entry.path} · reason: ${entry.reason}`
       : `verified · ${entry.kind} · ${entry.path}`),
     ...creates.map((entry) => entry.reason === CREATES_PARENT_MISSING
-      ? `${CREATES_MARK}${entry.path} · warning: parent is unresolved`
+      ? `warning · created · ${entry.path} · reason: ${entry.reason}`
       : `${CREATES_MARK}${entry.path}`),
   ].join('\n')
 }

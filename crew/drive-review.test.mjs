@@ -5205,6 +5205,51 @@ test('B1 created plan scope is planned context', () => {
   assert.equal(io.calls.logs.some((row) => row.scope_gate?.edits?.includes(path)), false)
 })
 
+test('B1 warning-leading created plan scope is accepted', () => {
+  const path = 'crew/created-scope.mjs'
+  const briefText = ['# Created path', '', '## Where', `warning · created · ${path} · reason: creates-parent-missing`, '', '## Why', 'the plan creates the absent file'].join('\n')
+  assert.deepEqual(createsFromBrief(briefText), [path])
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': s843PlanEnv([...D3_SCOPE_DISPATCHED, path]),
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: S843_RUNS, changed: [D3_SCOPE_DISPATCHED[0]], files: { [CTX.briefFile]: briefText },
+  })
+  const result = driveTask(d3ScopeCtx(), io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 1)
+  assert.equal(s843Rows(io).some(({ verdict }) => verdict === 'plan-scope-malformed'), false)
+})
+
+test('F1 legacy marked warning plan scope is accepted', () => {
+  const path = 'crew/created-scope.mjs'
+  const briefText = ['# Created path', '', '## Where', `${CREATES_MARK}${path} · warning: parent is unresolved`, '', '## Why', 'the plan creates the absent file'].join('\n')
+  assert.deepEqual(createsFromBrief(briefText), [path])
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': s843PlanEnv([...D3_SCOPE_DISPATCHED, path]),
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: S843_RUNS, changed: [D3_SCOPE_DISPATCHED[0]], files: { [CTX.briefFile]: briefText },
+  })
+  const result = driveTask(d3ScopeCtx(), io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 1)
+  assert.equal(s843Rows(io).some(({ verdict }) => verdict === 'plan-scope-malformed'), false)
+})
+
+test('warning-leading created rows with incomplete fields are ignored', () => {
+  for (const line of [
+    'warning · created · crew/created-scope.mjs',
+    'warning · created ·  · reason: creates-parent-missing',
+    'warning · created · crew/created-scope.mjs · reason: ',
+  ]) {
+    const briefText = ['# Created path', '', '## Where', line, '', '## Why', 'the plan creates the absent file'].join('\n')
+    assert.deepEqual(createsFromBrief(briefText), [], line)
+  }
+})
+
 test('C1 undeclared untracked plan scope is refused', () => {
   const declared = 'crew/created-scope-whitespace.mjs'
   const cases = [

@@ -322,6 +322,7 @@ function freeTextQuestion(prompt, reason) {
 
 const deliberateEscalationWhere = Object.freeze([
   'converge-pr', 'scope', 'gate', 'envelope', 'triage', 'triage-scope', 'plan', 'plan-carve',
+  'plan-chunks',
   'plan-check', 'sensitivity-floor', 'anchor-absent', 'census-exhibits', 'scope-request', 'build',
   'lane', 'harden', 'review', 'refuted-must-fix', 'diff-mutation', 'review-unresolved', 'rebase',
   'suite', 'cold-suite', 'publish', 'scout', 'directed', 'plan-scope-malformed',
@@ -339,6 +340,7 @@ const escalationQuestionCatalog = {
   'triage-scope': heterogeneousQuestion('triage-scope', 'What should happen next when a repair-run scope request is invalid?'),
   plan: heterogeneousQuestion('plan', 'What should happen next when plan preparation cannot proceed?'),
   'plan-carve': heterogeneousQuestion('plan-carve', 'What should happen next when the plan cannot be carved into an executable shape?'),
+  'plan-chunks': heterogeneousQuestion('plan-chunks', 'What should happen next when the chunk program cannot be validated?'),
   'plan-check': choiceQuestion('How should this plan-check escalation be resolved?', ['adopt-and-continue', 're-dispatch', 'park'], ['finding_ids']),
   'sensitivity-floor': heterogeneousQuestion('sensitivity-floor', 'What should happen next when the protected-path review floor cannot be met?'),
   'anchor-absent': heterogeneousQuestion('anchor-absent', 'What should happen next when a declared proof anchor cannot be found?'),

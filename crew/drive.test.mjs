@@ -3731,3 +3731,59 @@ test('D1 missing assignment id remains tolerated', () => {
   assert.doesNotThrow(() => driveTask(ctx, io))
   assert.equal(io.calls.logs.some((row) => row.envelope_refused), false)
 })
+
+const DRIVE_CHUNK_MUTATIONS = [
+  { check: 'A1', file: 'a.mjs', find: 'const a = 1', replace: 'const a = 2' },
+  { check: 'B1', file: 'a.test.mjs', find: 'const b = 1', replace: 'const b = 2' },
+]
+const DRIVE_CHUNK_PROGRAM = [
+  { id: 'c1', summary: 'first', files_in_scope: ['a.mjs'], checks: ['A1'], depends_on: [] },
+  { id: 'c2', summary: 'second', files_in_scope: ['a.test.mjs'], checks: ['B1'], depends_on: ['c1'] },
+]
+const driveChunkPlan = () => planEnv({
+  details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations: DRIVE_CHUNK_MUTATIONS, chunks: DRIVE_CHUNK_PROGRAM },
+})
+const driveChunkIo = ({ gate = { ok: true, output: '' }, clean = null, extraRuns = {} } = {}) => fakeIo({
+  envelopes: { 'planner:1': driveChunkPlan(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+  runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' }, 'gate-cmd': gate, ...extraRuns },
+  changed: ['a.mjs', 'a.test.mjs'],
+  emit: true,
+  files: { [`${CTX.checkout}/a.mjs`]: 'const a = 1\n', [`${CTX.checkout}/a.test.mjs`]: 'const b = 1\n' },
+  ...(clean ? { cleanRuns: clean, writeThrough: true } : {}),
+})
+
+test('a chunk lane stays green on a foreign red and records its owner', () => {
+  const io = driveChunkIo({
+    gate: { ok: false, output: 'FAIL B1: foreign red\nGATE-SUMMARY {"total":2,"failed":1,"errored":0}' },
+    extraRuns: { 'gate-cmd:1': { ok: false, output: 'FAIL A1: baseline red\nGATE-SUMMARY {"total":2,"failed":1,"errored":0}' } },
+  })
+  const result = driveTask({ ...CTX, chunked: true, chunk: 'c1' }, io)
+  assert.equal(result.status, 'done')
+  const gate = io.calls.emits.find((event) => event.kind === 'gate' && event.name === 'gate:r1')
+  assert.equal(gate.ok, true)
+  assert.deepEqual(gate.chunk, { id: 'c1', deferred: [{ check: 'B1', status: 'owned-by:c2' }] })
+})
+
+test('a chunk lane stays red on an owned red', () => {
+  const io = driveChunkIo({ gate: { ok: false, output: 'FAIL A1: owned red\nGATE-SUMMARY {"total":2,"failed":1,"errored":0}' } })
+  const result = driveTask({ ...CTX, chunked: true, chunk: 'c1' }, io)
+  assert.notEqual(result.status, 'done')
+  const gate = io.calls.emits.find((event) => event.kind === 'gate' && event.name === 'gate:r1')
+  assert.equal(gate.ok, false)
+})
+
+test('a chunk lane proves owned checks only', () => {
+  const io = driveChunkIo({
+    gate: { ok: false, output: 'FAIL B1: foreign red\nGATE-SUMMARY {"total":2,"failed":1,"errored":0}' },
+    clean: { 'gate-cmd': { ok: false, output: 'FAIL A1: baseline red\nGATE-SUMMARY {"total":2,"failed":1,"errored":0}' } },
+    extraRuns: {
+      'gate-cmd:1': { ok: false, output: 'FAIL A1: baseline red\nGATE-SUMMARY {"total":2,"failed":1,"errored":0}' },
+      'gate-cmd:3': { ok: false, output: `FAIL A1: caught\nGATE-SUMMARY {"total":3,"failed":1,"errored":0}` },
+    },
+  })
+  const result = driveTask({ ...CTX, chunked: true, chunk: 'c1' }, io)
+  assert.equal(result.status, 'done')
+  assert.deepEqual(io.calls.run.filter((run) => run.cmd === 'gate-cmd').map((run) => run.n), [1, 2, 3])
+  const row = io.calls.logs.find((entry) => entry.gate_check_discrimination)
+  assert.deepEqual(row.gate_check_discriminations.map((entry) => entry.check), ['A1'])
+})

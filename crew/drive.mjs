@@ -1458,6 +1458,84 @@ export function validateCarve(details) {
   }
 }
 
+export const CHUNK_ID = /^c[1-9]\d*$/;
+export function shouldValidateChunks(ctx, details) {
+  if (ctx?.chunked === true) return true;
+  return details?.chunks !== undefined;
+}
+export function validateChunks(details, { scope = [], checkLabels = [] } = {}) {
+  const raw = details?.chunks;
+  if (!Array.isArray(raw)) return { chunks: [], defect: 'chunks-not-array', why: 'chunks must be declared as an array of chunk entries' };
+  const seen = new Set();
+  for (const entry of raw) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry) || typeof entry.id !== 'string' || !CHUNK_ID.test(entry.id)) {
+      return { chunks: [], defect: 'chunk-id-invalid', why: `every chunk id must match ${String(CHUNK_ID)}` };
+    }
+    if (seen.has(entry.id)) return { chunks: [], defect: 'chunk-id-dup', why: `duplicate chunk id ${JSON.stringify(entry.id)}` };
+    seen.add(entry.id);
+  }
+  const position = new Map(raw.map((entry, index) => [entry.id, index]));
+  const usable = [];
+  for (const entry of raw) {
+    const files = entry.files_in_scope;
+    if (!Array.isArray(files) || files.length === 0 || validateScopeEntries(files).length > 0 || !files.every((file) => scope.includes(file))) {
+      return { chunks: [], defect: 'chunk-files-outside-plan', why: `chunk ${JSON.stringify(entry.id)} files_in_scope must be a non-empty subset of the accepted plan scope` };
+    }
+    const checks = entry.checks;
+    if (!Array.isArray(checks) || checks.length === 0 || !checks.every((label) => checkLabels.includes(label))) {
+      return { chunks: [], defect: 'chunk-check-unknown', why: `chunk ${JSON.stringify(entry.id)} checks must be a non-empty list of declared gate checks` };
+    }
+    const deps = entry.depends_on ?? [];
+    if (!Array.isArray(deps)) return { chunks: [], defect: 'chunk-dep-unknown', why: `chunk ${JSON.stringify(entry.id)} depends_on must be an array of program ids` };
+    for (const dep of deps) {
+      if (typeof dep !== 'string' || !position.has(dep)) {
+        return { chunks: [], defect: 'chunk-dep-unknown', why: `chunk ${JSON.stringify(entry.id)} depends on unknown chunk ${JSON.stringify(dep)}` };
+      }
+      if (position.get(dep) >= position.get(entry.id)) {
+        return { chunks: [], defect: 'chunk-dep-forward', why: `chunk ${JSON.stringify(entry.id)} depends on ${JSON.stringify(dep)}, which is not strictly earlier in the program` };
+      }
+    }
+    usable.push({ id: entry.id, summary: typeof entry.summary === 'string' ? entry.summary : '', files_in_scope: [...files], checks: [...checks], depends_on: [...deps] });
+  }
+  const owned = new Map();
+  for (const entry of usable) for (const label of entry.checks) owned.set(label, (owned.get(label) ?? 0) + 1);
+  for (const label of checkLabels) {
+    if ((owned.get(label) ?? 0) === 0) return { chunks: [], defect: 'chunk-check-unowned', why: `declared check ${JSON.stringify(label)} is owned by no chunk` };
+  }
+  for (const label of checkLabels) {
+    if ((owned.get(label) ?? 0) > 1) return { chunks: [], defect: 'chunk-check-double-owned', why: `declared check ${JSON.stringify(label)} is owned by more than one chunk` };
+  }
+  const root = usable.find((entry) => entry.id === 'c1');
+  if (!root || root.depends_on.length !== 0) {
+    return { chunks: [], defect: 'chunk-1-not-alone', why: 'the program must contain chunk c1 with empty depends_on' };
+  }
+  return { chunks: usable, defect: null, why: null };
+}
+export function chunkGateVerdict(output, ownedChecks, ownerOf) {
+  const owned = Array.isArray(ownedChecks) ? ownedChecks : [];
+  const owners = ownerOf && typeof ownerOf === 'object' ? ownerOf : {};
+  const deferred = [];
+  for (const label of Object.keys(owners)) {
+    if (owned.includes(label)) continue;
+    if (checkFailureLine(output, label)) deferred.push({ check: label, ownedBy: owners[label] });
+  }
+  const summary = parseGateSummary(output);
+  const errored = summary !== null && summary.errored > 0;
+  const failed = owned.filter((label) => checkFailureLine(output, label) || errored);
+  return { ok: failed.length === 0, deferred, failed };
+}
+export function chunkProofMutations(mutations, ownedChecks) {
+  const owned = Array.isArray(ownedChecks) ? ownedChecks : [];
+  const list = Array.isArray(mutations) ? mutations : [];
+  return list.filter((entry) => owned.includes(entry?.check));
+}
+export function chunkBaselineDefect(output, ownedChecks) {
+  const owned = Array.isArray(ownedChecks) ? ownedChecks : [];
+  const failed = owned.filter((label) => checkFailureLine(output, label));
+  if (failed.length === 0) return "the chunk lane's gate is STILL green at baseline on its owned checks, so its verdict does not depend on the work";
+  return null;
+}
+
 export const GROWTH_DIVERGENCE_FACTOR = 2 // ADR-030 §4 as amended at §9.3
 
 const integerOrNull = (value) => (Number.isInteger(value) ? value : null)
@@ -5608,6 +5686,8 @@ function runTask(ctx, io, crash) {
   let proofTreeWitness = null
   let proofTreeBuildRound = null
   let gateHistory = []
+  let activeChunk = null
+  let chunkLaneLogged = false
   // ONE task-local path validator, used by the suite policy AND by the growth
   // measurement, so there is no weaker second check to drift. A bare
   // `startsWith(taskDir)` accepts `${ctx.taskDir}/../checkout/evil.mjs`; rejecting
@@ -5889,6 +5969,15 @@ function runTask(ctx, io, crash) {
       }
     }
     const gateTiming = gateRunTiming(gateStartedAt, gateEndedAt)
+    let chunkVerdict = null
+    if (activeChunk && res && typeof res.output === 'string') {
+      chunkVerdict = chunkGateVerdict(res.output, activeChunk.checks, activeChunk.ownerOf)
+      // A gate that printed no parseable GATE-SUMMARY did not run, and a chunk verdict
+      // read off its output is not evidence. Only a MEASURED gate may overturn the exit
+      // status; otherwise the exit status stands. (baselineGateDefect :1028-1035.)
+      const measured = parseGateSummary(res.output) !== null
+      res = { ...res, ok: measured ? chunkVerdict.ok : res.ok }
+    }
     let reap
     try { reap = gateReapVerdict(gateReapFresh(reportCleared, io.readFile(reapPaths.report))) }
     catch { reap = gateReapVerdict(null) } // a read that threw measured nothing
@@ -5899,7 +5988,7 @@ function runTask(ctx, io, crash) {
     if (reap.outcome !== 'already-dead') {
       io.log(operationalRow({ at: io.now(), gate_reap: { name, attempt: gateAttempt, ...reap } }))
     }
-    emit({ kind: 'gate', name, attempt: gateAttempt, ok: !!res.ok, cmd, summary: parseGateSummary(res.output), generation: gateGeneration, pristine, gate_run_ms: gateTiming.gate_run_ms, gate_run_ms_absent_reason: gateTiming.gate_run_ms_absent_reason, reap })
+    emit({ kind: 'gate', name, attempt: gateAttempt, ok: !!res.ok, cmd, summary: parseGateSummary(res.output), generation: gateGeneration, pristine, gate_run_ms: gateTiming.gate_run_ms, gate_run_ms_absent_reason: gateTiming.gate_run_ms_absent_reason, reap, ...(chunkVerdict ? { chunk: { id: activeChunk.id, deferred: chunkVerdict.deferred.map((d) => ({ check: d.check, status: `owned-by:${d.ownedBy}` })) } } : {}) })
     return res
   }
   // Attention fires ONLY where the gate loop stops being self-correcting:
@@ -8000,6 +8089,26 @@ function runTask(ctx, io, crash) {
         planEnv.artifacts || [])
     }
   }
+  if (shouldValidateChunks(ctx, planEnv.details)) {
+    const checkLabels = mutations.filter((entry) => !entry?.exempt && typeof entry?.check === 'string').map((entry) => entry.check)
+    const chunked = validateChunks(planEnv.details, { scope: scopeFiles, checkLabels })
+    io.log(recordRow({ at: io.now(), chunk_program: { chunked: ctx.chunked === true, count: chunked.chunks.length, defect: chunked.defect } }))
+    if (chunked.defect) {
+      return escalate('plan-chunks', `[${chunked.defect}] ${chunked.why}`, planEnv.artifacts || [])
+    }
+    if (ctx.chunk != null) {
+      if (ctx.chunked !== true) {
+        return escalate('plan-chunks', '[chunk-without-chunked] ctx.chunk names a chunk lane without ctx.chunked', planEnv.artifacts || [])
+      }
+      const lane = chunked.chunks.find((entry) => entry.id === ctx.chunk)
+      if (!lane) {
+        return escalate('plan-chunks', `[chunk-unknown] ctx.chunk ${JSON.stringify(ctx.chunk)} names no chunk in the validated program`, planEnv.artifacts || [])
+      }
+      const ownerOf = {}
+      for (const entry of chunked.chunks) for (const label of entry.checks) ownerOf[label] = entry.id
+      activeChunk = { id: lane.id, checks: [...lane.checks], ownerOf }
+    }
+  }
   gateRepairs = 0
   failDelimiterRepairs = 0 // one bounded correction that does not spend gateRepairs
   gateReverified = null // set only when a MID-RUN repair is accepted:
@@ -8083,9 +8192,11 @@ function runTask(ctx, io, crash) {
       return null
     }
     gateProofOutput = pristine.output
-    const defect = pristine.ok
-      ? "the gate is STILL green at baseline (pristine tree, the builder's changes set aside), so its verdict does not depend on the work"
-      : baselineGateDefect(pristine.output)
+    const defect = activeChunk
+      ? chunkBaselineDefect(pristine.output, activeChunk.checks)
+      : (pristine.ok
+        ? "the gate is STILL green at baseline (pristine tree, the builder's changes set aside), so its verdict does not depend on the work"
+        : baselineGateDefect(pristine.output))
     gateDiscrimination = defect ? 'failed' : 'proven'
     gateProofNote = defect // null when proven; the throw path sets it above
     if (gateDiscrimination === 'proven' && mutations.length > 0) checkProofPending = gateGeneration
@@ -8106,7 +8217,9 @@ function runTask(ctx, io, crash) {
   const completeCheckProof = (label, options = {}) => {
     checkProofPending = null
     stage(label)
-    const proofMutations = Array.isArray(options.mutations) ? options.mutations : mutations
+    const proofMutations = activeChunk
+      ? chunkProofMutations(Array.isArray(options.mutations) ? options.mutations : mutations, activeChunk.checks)
+      : (Array.isArray(options.mutations) ? options.mutations : mutations)
     const carriedRows = Array.isArray(options.carried) ? options.carried : []
     const fresh = options.fresh === true
     const freshFields = () => (fresh ? { proof: 'fresh', measured_generation: gateGeneration } : {})
@@ -10071,6 +10184,10 @@ function runTask(ctx, io, crash) {
         continue
       }
       lastGateOutput = gateRes.output
+      if (activeChunk && !chunkLaneLogged) {
+        chunkLaneLogged = true
+        io.log(recordRow({ at: io.now(), chunk_lane: { parent: ctx.task, chunk: activeChunk.id, owned: [...activeChunk.checks], green: activeChunk.checks.filter((label) => !checkFailureLine(gateRes.output, label)) } }))
+      }
       if (gateRes.ok) {
         finalReview.residuals = upsertReversionResidual(finalReview.residuals, pendingReversion)
         pendingReversion = null

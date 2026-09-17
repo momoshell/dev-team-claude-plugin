@@ -3437,3 +3437,90 @@ test('G1 directed scope remains brief-authored despite journal admissions', () =
   const builder = io.calls.assign.find(({ role }) => role === 'builder')
   assert.deepEqual(builder.policy.fence, ['a.mjs', 'a.test.mjs'])
 })
+
+const CHUNK_MUTATIONS = [
+  { check: 'A1', file: 'a.mjs', find: 'const a = 1', replace: 'const a = 2' },
+  { check: 'B1', file: 'a.test.mjs', find: 'const b = 1', replace: 'const b = 2' },
+]
+const CHUNK_PROGRAM = [
+  { id: 'c1', summary: 'first', files_in_scope: ['a.mjs'], checks: ['A1'], depends_on: [] },
+  { id: 'c2', summary: 'second', files_in_scope: ['a.test.mjs'], checks: ['B1'], depends_on: ['c1'] },
+]
+const chunkPlanEnv = (chunks, extra = {}) => planEnv({
+  details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations: CHUNK_MUTATIONS, chunks, ...extra },
+})
+const CHUNK_RED_BASELINE = 'FAIL A1: missing\nFAIL B1: missing\nGATE-SUMMARY {"total":2,"failed":2,"errored":0}'
+const CHUNK_FOREIGN_RED = 'FAIL B1: foreign red\nGATE-SUMMARY {"total":2,"failed":1,"errored":0}'
+const chunkGreenIo = (planner, runs = {}) => fakeIo({
+  envelopes: { 'planner:1': planner, 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+  runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' }, 'gate-cmd': { ok: true, output: '' }, ...runs },
+  changed: ['a.mjs', 'a.test.mjs'],
+  files: { [`${CTX.checkout}/a.mjs`]: 'const a = 1\n', [`${CTX.checkout}/a.test.mjs`]: 'const b = 1\n' },
+})
+
+test('a chunked parent with a valid program reaches done and journals its program', () => {
+  const io = chunkGreenIo(chunkPlanEnv(CHUNK_PROGRAM), { 'gate-cmd:1': { ok: false, output: CHUNK_RED_BASELINE } })
+  const result = driveTask({ ...CTX, chunked: true }, io)
+  assert.equal(result.status, 'done')
+  const rows = io.calls.logs.filter((entry) => entry.chunk_program)
+  assert.equal(rows.length, 1)
+  assert.deepEqual(rows[0].chunk_program, { chunked: true, count: 2, defect: null })
+  assert.equal(io.calls.logs.some((entry) => entry.chunk_lane), false)
+})
+
+test('a chunked run without a program bounces carrying the array defect', () => {
+  const io = chunkGreenIo(planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }))
+  const result = driveTask({ ...CTX, chunked: true }, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'plan-chunks')
+  assert.match(result.details.escalation.why, /chunks-not-array/)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 0)
+})
+
+test('a present but malformed program bounces even without the chunked flag', () => {
+  const io = chunkGreenIo(chunkPlanEnv('not-a-program'))
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'plan-chunks')
+  assert.match(result.details.escalation.why, /chunks-not-array/)
+})
+
+test('an unchunked run without a program journals no chunk program row', () => {
+  const io = chunkGreenIo(planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }), { 'gate-cmd:1': { ok: false, output: CHUNK_RED_BASELINE } })
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.logs.some((entry) => entry.chunk_program), false)
+  assert.equal(io.calls.logs.some((entry) => entry.chunk_lane), false)
+})
+
+test('a chunk lane journals its owned checks and its green subset once', () => {
+  const io = chunkGreenIo(chunkPlanEnv(CHUNK_PROGRAM), {
+    'gate-cmd:1': { ok: false, output: 'FAIL A1: baseline red\nGATE-SUMMARY {"total":2,"failed":1,"errored":0}' },
+    'gate-cmd': { ok: false, output: CHUNK_FOREIGN_RED },
+  })
+  const result = driveTask({ ...CTX, chunked: true, chunk: 'c1' }, io)
+  assert.equal(result.status, 'done')
+  const rows = io.calls.logs.filter((entry) => entry.chunk_lane)
+  assert.equal(rows.length, 1)
+  assert.deepEqual(rows[0].chunk_lane, { parent: 't1', chunk: 'c1', owned: ['A1'], green: ['A1'] })
+})
+
+test('a chunk lane records no owned check green when its gate errors', () => {
+  const io = chunkGreenIo(chunkPlanEnv(CHUNK_PROGRAM), {
+    'gate-cmd:1': { ok: false, output: 'FAIL A1: baseline red\nGATE-SUMMARY {"total":2,"failed":1,"errored":0}' },
+    'gate-cmd': { ok: false, output: 'ERROR A1: boom\nGATE-SUMMARY {"total":2,"failed":0,"errored":1}' },
+  })
+  const result = driveTask({ ...CTX, chunked: true, chunk: 'c1' }, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(io.calls.logs.some((entry) => entry.chunk_lane), false)
+})
+
+test('a chunk lane stays red when its gate prints no summary', () => {
+  const io = chunkGreenIo(chunkPlanEnv(CHUNK_PROGRAM), {
+    'gate-cmd:1': { ok: false, output: 'FAIL A1: baseline red\nGATE-SUMMARY {"total":2,"failed":1,"errored":0}' },
+    'gate-cmd': { ok: false, output: 'TypeError: boom\n    at file:///gate.mjs:9:1' },
+  })
+  const result = driveTask({ ...CTX, chunked: true, chunk: 'c1' }, io)
+  assert.notEqual(result.status, 'done')
+  assert.equal(io.calls.logs.some((entry) => entry.chunk_lane), false)
+})

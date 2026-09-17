@@ -1522,7 +1522,7 @@ test('argv value contracts cover every known flag and every hostile shape', () =
   for (const flags of Object.values(KNOWN_FLAGS)) for (const flag of flags) union.add(flag)
   assert.deepEqual([...Object.keys(FLAG_VALUE_CONTRACT)].sort(), [...union].sort())
   assert.ok(Object.values(FLAG_VALUE_CONTRACT).every((contract) => contract === 'value' || contract === 'boolean'))
-  assert.deepEqual(BOOLEAN_FLAGS, ['headless-all', 'keep'])
+  assert.deepEqual(BOOLEAN_FLAGS, ['chunked', 'headless-all', 'keep'])
 
   const requiredPrefix = (verb) => {
     const prefix = ['--task', 't']
@@ -1562,6 +1562,22 @@ test('CLI refuses valueless suite forms before a run can reach the suite stage',
   const good = cliEntry('run', '--task', CLI_PROBE_TASK, '--brief-file', CLI_PROBE_BRIEF, '--suite', 'npm test')
   assert.notEqual(good.status, 2)
   assert.match(good.output, /no crew booted/)
+})
+
+test('CLI accepts chunked lanes and refuses malformed or unparented chunk requests', () => {
+  assert.doesNotThrow(() => assertUsage('run', parseArgs(['--task', 't', '--brief-file', 'brief.md', '--chunked'])))
+  assert.doesNotThrow(() => assertUsage('run', parseArgs(['--task', 't', '--brief-file', 'brief.md', '--chunked', '--chunk', 'c2'])))
+  for (const malformed of ['c0', 'c', 'x1', '']) {
+    const result = cliEntry('run', '--task', CLI_PROBE_TASK, '--brief-file', CLI_PROBE_BRIEF, '--chunked', '--chunk', malformed)
+    assert.equal(result.status, 2, malformed || 'empty-string')
+    assert.match(result.output, /--chunk/, malformed || 'empty-string')
+  }
+  const unparented = cliEntry('run', '--task', CLI_PROBE_TASK, '--brief-file', CLI_PROBE_BRIEF, '--chunk', 'c1')
+  assert.equal(unparented.status, 2)
+  assert.match(unparented.output, /--chunked/)
+  const lane = cliEntry('run', '--task', CLI_PROBE_TASK, '--brief-file', CLI_PROBE_BRIEF, '--chunked', '--chunk', 'c1')
+  assert.notEqual(lane.status, 2)
+  assert.match(lane.output, /no crew booted/)
 })
 
 test('resolveTimeoutS refuses coercive values and accepts the closed numeric range', () => {

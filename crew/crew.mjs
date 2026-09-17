@@ -3575,6 +3575,14 @@ export function runCmd(args, deps = {}) {
   // Same posture, same breath: a malformed validation lane refuses before any
   // state is read, spawned or written.
   const validationLane = resolveValidationLane({ validationLane: args['validation-lane'], lane: args.lane, fences: args.fences })
+  const chunked = args.chunked === true
+  const chunk = args.chunk ?? null
+  if (chunk != null && (typeof chunk !== 'string' || !/^c[1-9]\d*$/.test(chunk))) {
+    throw new UsageError(`crew.mjs run --chunk must name a chunk id matching /^c[1-9]\\d*$/, got ${JSON.stringify(chunk)}`)
+  }
+  if (chunk != null && !chunked) {
+    throw new UsageError('crew.mjs run --chunk requires --chunked: a chunk lane without a chunked parent is a dispatch error')
+  }
   // Same breath again: a shape whose declaration takes an input from the
   // dispatch refuses HERE when the dispatch carries none — before crew state is
   // read and long before a seat is driven.
@@ -3627,6 +3635,9 @@ export function runCmd(args, deps = {}) {
   // The EFFECTIVE round validation lane and its source, recorded on every run:
   // an escalation at the lane stage reads differently when no lane was declared.
   logLine(journal, { at: new Date().toISOString(), event: 'validation-lane', lane: validationLane.lane, source: validationLane.source })
+  if (chunked || chunk != null) {
+    logLine(journal, { at: new Date().toISOString(), event: 'chunk', chunked, chunk })
+  }
   logLine(journal, { at: new Date().toISOString(), event: BATCH_DIR_EVENT, ...batchDirFromBrief(briefFile) })
   logLine(journal, { at: new Date().toISOString(), event: 'run-configuration', run_configuration: runConfiguration, ...turnCeilingsJournalPatch(crew.turn_ceilings ?? null) })
   if (crew.advisor?.granted?.length) {
@@ -3676,6 +3687,8 @@ export function runCmd(args, deps = {}) {
     protectedPathsBasis: protectedFloor.basis,
     ...(laneFence ? { laneFence, laneName: crew.lane_name ?? null } : {}),
     roles: crew.roles, lane: validationLane.lane, suite: args.suite || packageSuite(), variant,
+    ...(chunked ? { chunked: true } : {}),
+    ...(chunk != null ? { chunk } : {}),
     publish: { branch: readBranch(checkout) },
     ...(limitsOverlay ? { limits: limitsOverlay } : {}),
     ...(waitsOverlay ? { waits: waitsOverlay } : {}),
@@ -4708,7 +4721,7 @@ export function parseArgs(argv) {
 
 export const KNOWN_FLAGS = Object.freeze({
   boot: Object.freeze(['task', 'checkout', 'roles', 'tier', 'fences', 'lane', 'headless', 'headless-rpc', 'headless-all', 'memory-dir', 'memory-backend', 'memory-budget-bytes', 'claude-bin', 'profile', 'assurance', 'roster', 'workflow', 'charter-arm', ...TURN_CEILING_FLAGS]),
-  run: Object.freeze(['task', 'checkout', 'brief-file', 'variant', 'execution', 'files-in-scope', 'validation-lane', 'lane', 'plan-rounds', 'build-rounds', 'review-rounds', 'review-base-sha', 'review-head-sha', ...WAIT_FLAGS, 'suite', 'keep', 'claude-bin']),
+  run: Object.freeze(['task', 'checkout', 'brief-file', 'variant', 'execution', 'files-in-scope', 'validation-lane', 'lane', 'plan-rounds', 'build-rounds', 'review-rounds', 'review-base-sha', 'review-head-sha', ...WAIT_FLAGS, 'suite', 'keep', 'claude-bin', 'chunked', 'chunk']),
   resume: Object.freeze(['task', 'checkout', 'suite', 'keep']),
   handoff: Object.freeze(['task', 'checkout', 'brief-file']),
   wait: Object.freeze(['task', 'checkout', 'timeout-s']),
@@ -4746,10 +4759,12 @@ export const FLAG_VALUE_CONTRACT = Object.freeze({
   // --keep is a switch: runCmd reads only its truthiness (:1887) to skip the
   // auto-teardown a done run would otherwise perform.
   keep: 'boolean',
+  chunked: 'boolean',
+  chunk: 'value',
 })
 // The boolean flags, named and exported rather than inlined as exceptions, so
 // the argv matrix in crew/crew.test.mjs can be exhaustive by construction.
-const BOOLEAN_FLAG_NAMES = Object.freeze(['headless-all', 'keep'])
+const BOOLEAN_FLAG_NAMES = Object.freeze(['chunked', 'headless-all', 'keep'])
 export const BOOLEAN_FLAGS = Object.freeze(Object.keys(FLAG_VALUE_CONTRACT)
   .filter((flag) => BOOLEAN_FLAG_NAMES.includes(flag) && FLAG_VALUE_CONTRACT[flag] === 'boolean').sort())
 export const ROLE_FLAG_PREFIXES = Object.freeze(['model-', 'agent-', 'effort-', 'allow-shortfall-'])

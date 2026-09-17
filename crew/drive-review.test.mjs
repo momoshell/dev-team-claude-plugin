@@ -7,7 +7,7 @@ import { cpSync, mkdirSync } from 'node:fs'
 import {
   ACCEPT_FINDINGS, ACCEPT_FINDINGS_SOFT, ACCEPT_REASKS, adversarialPlanEnv, ACCEPT_REFUSALS, B318_GATED_RUNS, B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, CENSUS_ABSENT_REASONS, CENSUS_ROW_ABSENT, CENSUS_TURNS_ABSENT, CENSUS_UNREADABLE, SCREENER_MODELS, SCREENER_REGISTER, screenerResult, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_MUTATION, CHECK_RUNS, CLOBBER_R2, CONVERGE_GATE, CONVERGE_PLAN, CRASH_FINDINGS, CRASH_STAGES, CTX, CTX_REPAIR, CTX_TL, DECISIONS, D_ASK, D_AUTO, D_COLLISION_CTX, D_PANEL_CTX, D_PATCH_A, D_PATCH_B, ENVELOPE_REFUSAL_REASONS, FINDING_DISPOSITIONS, LIMITS, MUST_FIX_REFUTATION_FINDINGS, NAME_VERDICTS, PANEL_ADJUDICATORS, PANEL_PARTNERS, PERSPECTIVE_TARGETS, PLAN_CHECK_FINDINGS, PLAN_RESIDUAL, PLAN_SCOPE, PLAN_SCOPE_VERDICTS, RED, REFUTATION_CLAIM, REFUTATION_CONVERGE_PLAN, REFUTATION_CONVERGE_RUNS, REFUTATION_EVIDENCE_MAX, RESIDUAL_TYPES, REVIEW_FINDINGS, REVIEW_GATE_PASS, S843_ADDED, S843_D2, S843_DISPATCHED, S843_DROPPED, S843_NARROWED, S843_RUNS, SECOND_OPINION, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, VARIANTS, acceptBounceLines, acceptContractLines, acceptedRawById, assertDriverIdRefusal, b127GroupCommand, b127InvokeGate, b127Lines, b127PidAlive, b127Spy, b318Builders, b318GatedPlan, b318Options, b318ReviewGrants, b318SiteA, b318SiteB, b376ProofIo, bounceTargetOf, buildEnv, checkEnv, classCollisionIo, closeoutIo, crashRun, dAdjEnv, dAutoRows, dBuilders, dDecisionBrief, dGitApplies, dLeads, dOffers, dPanelOutcomes, dPartnerEnv, dPatchWrite, dPlanEnv, dRemintRows, dReviewEnv, dispositionIo, dispositionOf, dispositionPanelIo, dispositionPlan, divergentCollisionIo, divergentPlanScenario, driveTask, envelopeDefect, envelopeFieldsPresent, exhaustionAcceptIo, fakeIo, findingIdDefect, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, join, leadEnv, legacyReviewerExemptions, nameVerdict, observeTurnCensus, panelSeats, phaseTrace, planAcceptContractLines, planCheckAcceptIo, planEnv, planRevisionRun, planScopeVerdict, planThenReviewIo, protectedPlanEnv, protectedReseatRefusal, publicationIo, readFileSync, reconEnv, regrantVerdict, resolveValidationLane, reviewConvergeRun, reviewEnv, reviewFindings, reviewOutcome, reviewShapeDefect, rmSync, roundCursor, s843Ctx, s843Io, s843PlanEnv, s843Rows, scratchDir, shapeDefect, slotCtx, slotFactory, spawnSync, staleVerdictLines, triageEnv, turnCeilingBreached, twoRoundReviewIo, validateAcceptDecision, validateCarve, validatePlanResiduals, validateScopeEntries, validationPlan, validationProbeRun, validationRows, verdictFindingsDefect, writeFileSync,
 } from './drive-fixtures.mjs'
-import { CREATES_MARK, HARDENING_PRESCRIPTION_REASONS, HARDENING_PRESCRIPTION_RESOLUTION, createsFromBrief, hardeningPrescriptionConflict, hardeningTestPath, planScopeWhy, prescriptionAuthorshipEvidence, prescriptionSpanIsLaneAuthored, prescriptionSpansAreLaneAuthored, scopeSuggestions, shellArg, VACUITY_CLAIMS, vacuityFindingDefect } from './drive.mjs'
+import { CHUNK_ID, CREATES_MARK, HARDENING_PRESCRIPTION_REASONS, HARDENING_PRESCRIPTION_RESOLUTION, chunkBaselineDefect, chunkGateVerdict, chunkProofMutations, createsFromBrief, hardeningPrescriptionConflict, hardeningTestPath, planScopeWhy, prescriptionAuthorshipEvidence, prescriptionSpanIsLaneAuthored, prescriptionSpansAreLaneAuthored, scopeSuggestions, shellArg, shouldValidateChunks, VACUITY_CLAIMS, vacuityFindingDefect, validateChunks } from './drive.mjs'
 import { screenerAdjudicationRows } from './screener.mjs'
 import { ROOT as REPO_ROOT } from '../test/helpers.mjs'
 import { checkSkillAnchors, laneFence, partitionShifts } from '../skills/qa-test-writing/anchor-pin.mjs'
@@ -5613,4 +5613,125 @@ test('D1 malformed refusal names path and correction', () => {
   assert.ok(result.details.escalation.why.includes(bad))
   assert.ok(result.details.escalation.why.includes(`did you mean ${candidate}, which is in your surface?`))
   assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 0)
+})
+
+const CHUNK_SCOPE = ['crew/drive.mjs', 'crew/crew.mjs']
+const CHUNK_LABELS = ['A1', 'B1']
+const chunkBase = () => ({
+  chunks: [
+    { id: 'c1', summary: 'root', files_in_scope: ['crew/drive.mjs'], checks: ['A1'], depends_on: [] },
+    { id: 'c2', summary: 'leaf', files_in_scope: ['crew/crew.mjs'], checks: ['B1'], depends_on: ['c1'] },
+  ],
+})
+const chunkOpts = () => ({ scope: CHUNK_SCOPE, checkLabels: CHUNK_LABELS })
+
+test('chunk program validation accepts a valid two-chunk program with usable entries', () => {
+  assert.deepEqual(validateChunks(chunkBase(), chunkOpts()), {
+    chunks: [
+      { id: 'c1', summary: 'root', files_in_scope: ['crew/drive.mjs'], checks: ['A1'], depends_on: [] },
+      { id: 'c2', summary: 'leaf', files_in_scope: ['crew/crew.mjs'], checks: ['B1'], depends_on: ['c1'] },
+    ],
+    defect: null,
+    why: null,
+  })
+})
+
+test('chunk program validation refuses a missing program as not an array', () => {
+  const result = validateChunks({}, chunkOpts())
+  assert.equal(result.defect, 'chunks-not-array')
+  assert.ok(result.why)
+  assert.deepEqual(result.chunks, [])
+})
+
+test('chunk program validation refuses a zero chunk id', () => {
+  const details = { chunks: [{ id: 'c0', summary: 'x', files_in_scope: ['crew/drive.mjs'], checks: ['A1'], depends_on: [] }] }
+  assert.equal(validateChunks(details, { scope: ['crew/drive.mjs'], checkLabels: ['A1'] }).defect, 'chunk-id-invalid')
+  assert.ok(CHUNK_ID.test('c1'))
+  assert.equal(CHUNK_ID.test('c0'), false)
+})
+
+test('chunk program validation refuses a duplicate chunk id', () => {
+  const base = chunkBase().chunks
+  const details = { chunks: [base[0], { ...base[1], id: 'c1', checks: ['B1'] }] }
+  assert.equal(validateChunks(details, chunkOpts()).defect, 'chunk-id-dup')
+})
+
+test('chunk program validation refuses files outside the accepted plan scope', () => {
+  const base = chunkBase().chunks
+  const details = { chunks: [{ ...base[0], files_in_scope: ['nope.mjs'] }, base[1]] }
+  assert.equal(validateChunks(details, chunkOpts()).defect, 'chunk-files-outside-plan')
+})
+
+test('chunk program validation refuses an unknown gate check label', () => {
+  const base = chunkBase().chunks
+  const details = { chunks: [{ ...base[0], checks: ['ZZ'] }, { ...base[1], checks: ['B1'] }] }
+  assert.equal(validateChunks(details, chunkOpts()).defect, 'chunk-check-unknown')
+})
+
+test('chunk program validation refuses a declared check owned by no chunk', () => {
+  const base = chunkBase().chunks
+  const details = { chunks: [{ ...base[0], checks: ['A1'] }] }
+  assert.equal(validateChunks(details, chunkOpts()).defect, 'chunk-check-unowned')
+})
+
+test('chunk program validation refuses a check owned by two chunks', () => {
+  const base = chunkBase().chunks
+  const details = { chunks: [base[0], { ...base[1], checks: ['A1', 'B1'] }] }
+  assert.equal(validateChunks(details, chunkOpts()).defect, 'chunk-check-double-owned')
+})
+
+test('chunk program validation refuses a dependency naming no program chunk', () => {
+  const base = chunkBase().chunks
+  const details = { chunks: [base[0], { ...base[1], depends_on: ['c9'] }] }
+  assert.equal(validateChunks(details, chunkOpts()).defect, 'chunk-dep-unknown')
+})
+
+test('chunk program validation refuses a dependency on a later chunk', () => {
+  const base = chunkBase().chunks
+  const details = { chunks: [{ ...base[0], depends_on: ['c2'] }, base[1]] }
+  assert.equal(validateChunks(details, chunkOpts()).defect, 'chunk-dep-forward')
+})
+
+test('chunk program validation refuses a program whose root is not an alone c1', () => {
+  const base = chunkBase().chunks
+  const details = { chunks: [{ ...base[0], id: 'c2', depends_on: [] }, { ...base[1], id: 'c3', checks: ['B1'], depends_on: ['c2'] }] }
+  assert.equal(validateChunks(details, chunkOpts()).defect, 'chunk-1-not-alone')
+})
+
+test('chunk validation demand follows the chunked flag and the present program', () => {
+  assert.equal(shouldValidateChunks({}, {}), false)
+  assert.equal(shouldValidateChunks({}, { chunks: [] }), true)
+  assert.equal(shouldValidateChunks({ chunked: true }, {}), true)
+  assert.equal(shouldValidateChunks({ chunked: true }, { chunks: [] }), true)
+})
+
+test('chunk gate verdict defers a foreign red while staying green', () => {
+  const result = chunkGateVerdict('ok\nFAIL B1: boom\n', ['A1'], { A1: 'c1', B1: 'c2' })
+  assert.equal(result.ok, true)
+  assert.deepEqual(result.failed, [])
+  assert.deepEqual(result.deferred, [{ check: 'B1', ownedBy: 'c2' }])
+})
+
+test('chunk gate verdict fails on an owned red', () => {
+  const result = chunkGateVerdict('ok\nFAIL A1: boom\n', ['A1'], { A1: 'c1', B1: 'c2' })
+  assert.equal(result.ok, false)
+  assert.deepEqual(result.failed, ['A1'])
+  assert.deepEqual(result.deferred, [])
+})
+
+test('chunk gate verdict refuses an owned check that errors without failing', () => {
+  const result = chunkGateVerdict('ERROR A1: boom\nGATE-SUMMARY {"total":2,"failed":0,"errored":1}', ['A1'], { A1: 'c1', B1: 'c2' })
+  assert.equal(result.ok, false)
+  assert.deepEqual(result.failed, ['A1'])
+  assert.deepEqual(result.deferred, [])
+})
+
+test('chunk proof keeps owned mutation entries only', () => {
+  assert.deepEqual(chunkProofMutations([{ check: 'A1' }, { check: 'B1' }], ['A1']), [{ check: 'A1' }])
+})
+
+test('chunk baseline defect excuses a green owned gate at baseline', () => {
+  assert.match(chunkBaselineDefect('', ['A1']), /STILL green/)
+  assert.match(chunkBaselineDefect('FAIL B1: boom', ['A1']), /STILL green/)
+  assert.equal(chunkBaselineDefect('FAIL A1: boom', ['A1']), null)
 })

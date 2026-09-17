@@ -371,10 +371,37 @@ test('the planner charter documents how to discover files_in_scope', () => {
     'crew/adapter-*.test.mjs',
     '#193',
     '#199',
-    'dispatched surface is a CEILING',
-    '`details.questions` entry rather than a wider `files_in_scope`',
+    'plan context, not a ceiling',
   ]) assert.ok(charter.includes(token), token)
   assert.match(charter, /grep/i)
+})
+
+test('charter scope writes are recorded, not bounced', () => {
+  const planner = readFileSync(new URL('./roles/planner.md', import.meta.url), 'utf8')
+  const builder = readFileSync(new URL('./roles/builder.md', import.meta.url), 'utf8')
+  const guidelines = readFileSync(new URL('./guidelines/review-do-not-flag.md', import.meta.url), 'utf8')
+  for (const text of [planner, builder, guidelines]) {
+    assert.match(text, /records? the write|is recorded/)
+    assert.match(text, /proceeds/)
+    assert.match(text, /still refuses/)
+    assert.doesNotMatch(text, /bounces anything outside/)
+    assert.doesNotMatch(text, /is a CEILING/)
+    assert.doesNotMatch(text, /is the scope GATE/)
+  }
+  assert.match(planner, /plan context, not a ceiling/)
+})
+
+test('planner fan-out bar carries no stale reason', () => {
+  const planner = readFileSync(new URL('./roles/planner.md', import.meta.url), 'utf8')
+  assert.match(planner, /spawns no scouts/)
+  assert.match(planner, /only brake/)
+  assert.doesNotMatch(planner, /#808/)
+})
+
+test('builder charter forbids commits', () => {
+  const builder = readFileSync(new URL('./roles/builder.md', import.meta.url), 'utf8')
+  assert.match(builder, /Commit nothing/)
+  assert.match(builder, /owns git/)
 })
 
 test('the planner charter tells the planner to grep the changed file’s own path', () => {
@@ -628,7 +655,7 @@ test('runtime composed charter sizes stay at their ceilings', () => {
   const rolesDir = join(REPO_ROOT, 'crew', 'roles')
   const measured = compiledCharterBytes(rolesDir)
   const sizes = Object.fromEntries(Object.entries(measured).map(([role, entry]) => [role, entry.bytes]))
-  const expected = { builder: 7781, lead: 12813, planner: 20639, reviewer: 11133, 'tech-lead': 9962 }
+  const expected = { builder: 7909, lead: 12813, planner: 20642, reviewer: 11133, 'tech-lead': 9962 }
   const summary = Object.entries(measured).map(([role, entry]) => `${role}=${entry.bytes}`).join(', ')
   assert.deepEqual(sizes, expected, `composed charter sizes: ${summary}`)
   for (const [role, ceiling] of Object.entries(CHARTER_CEILINGS)) {

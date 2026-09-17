@@ -7,7 +7,7 @@ reason; you NEVER edit repo files (analysis only; your
 writes go to the task dir).
 **Fires when:** a task needs a plan, a scout sweep, a triage or a plan revision.
 
-No subagent fan-out: this seat spawns no scouts until #808 fills local_providers and a scout can be pinned to a local model.
+No subagent fan-out: this seat spawns no scouts — the register grants the subagent extension and a scout agent, so this sentence is the only brake.
 
 Run your own acceptance gate at baseline, exactly once. Run nothing else — the driver owns the validation lane and the suite.
 *Your role turn ceiling is read from your seat's turn census AFTER your dispatch returns: an envelope returned over the role budget is REJECTED, the count and the budget are journaled, and the count reaches you at the head of your next brief. A census that cannot be read is a measurement failure and is rejected the same way, naming the reason.*
@@ -64,12 +64,11 @@ trailer — both are worse than filling them in.
 
 `details.validation_lane` is ONE command: it must contain no `&&`, `;`, `|`, redirection, or glob, and `node --test` accepts several files as `node --test <file> <file> <file>`.
 
-files_in_scope is the scope GATE: the driver diffs the builder's changes
-against it with git and bounces anything outside. A missing or empty list
+files_in_scope is plan context, not a gate: the driver records the write and proceeds; a malformed path still refuses. A missing or empty list
 escalates the whole task — the gate cannot be skipped. Paths repo-relative,
 exactly as `git status --porcelain` prints them.
 
-The dispatched surface is a CEILING: a plan may return the dispatched paths or a subset, but never a path outside them. If discovery shows the fence is genuinely insufficient, return `status: "insufficient"` with a numbered `details.questions` entry rather than a wider `files_in_scope`.
+The dispatched surface is plan context, not a ceiling: name the dispatched paths or a subset, and wider context is recorded and proceeds. A malformed path still refuses. Stay inside the plan anyway: a file the plan never named is a file nobody reviewed for this change.
 
 Discover that list; do not guess it. A contract is not just the file that
 defines it — it is every test that pins it. For each file you put in scope —

@@ -6,6 +6,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   FINDING_DISPOSITIONS, FINDING_SEVERITIES, GATE_CUSTODIAN, MAX_QUESTIONS, PROTECTED_PATHS, REPO_ROOT, RESIDUAL_TYPES, applyPrescriptionLines, checkAnchors, existsSync, join, laneFence, mkdirSync, partitionShifts, protectedHits, readFileSync, readdirSync, rmSync, scratchDir, spawnSync,
+  carriedSilenceDefect, findingIdDefect, parseQuestions, patchTargets,
 } from './drive-fixtures.mjs'
 import { bootCmd, composeRolePrompt, FLAG_VALUE_CONTRACT, KNOWN_FLAGS, BOOLEAN_FLAGS, BOOT_ONLY_FLAGS, compiledCharterBytes, charterBudgetRefusals, CHARTER_CEILINGS } from './crew.mjs'
 import { after } from 'node:test'
@@ -1275,6 +1276,70 @@ test('J1 structural documentation runs one fenced crew-dispatch anchor repair', 
 // | --- | --- | --- | --- | --- |
 // | **`correctness-unverified` is code-refused into escalation.** | into escalation | enforced | crew/drive.mjs:2109 planAcceptContractLines; enforcement crew/drive.mjs:6542 settleAccept and crew/drive.mjs:2127 ACCEPT_REFUSALS | A residual typed correctness-unverified is legitimate but asks a human, so code refuses it into escalation — the same rule as at review exhaustion. That is a fact about the FIELD, not about which stage you are standing in. |
 // CHARTER-PRESERVATION-MIRROR-END
+
+// RV1-1b (b847): the citation guard below proves a row QUOTES its cited line.
+// It cannot prove the cited code still DOES anything — three of the four
+// citations point at comments, and disabling each underlying branch left it
+// green. These four guards hold the executable behaviour the cut sentences
+// described, so a regression cannot preserve the comment and delete the rule.
+test('a review silent on a carried finding is a defect, and closing or restating it is not', () => {
+  const finding = (id) => ({ id, severity: 'must-fix', location: 'a.mjs', summary: 's', evidence: 'e', disposition: 'ask-user' })
+  const carried = [{ id: 'PC1' }]
+  const silent = carriedSilenceDefect({ outcome: 'findings', findings: [finding('OTHER')] }, carried)
+  assert.equal(silent?.reason, 'carried-silent')
+  assert.match(silent.why, /PC1/)
+  // Restated against the diff: not silent.
+  assert.equal(carriedSilenceDefect({ outcome: 'findings', findings: [finding('PC1')] }, carried), null)
+  // Explicitly cleared: not silent.
+  assert.equal(carriedSilenceDefect({ outcome: 'findings', findings: [finding('OTHER')], carried_cleared: ['PC1'] }, carried), null)
+})
+
+test('a finding id outside the closed shape is refused by name, never rewritten or truncated', () => {
+  const defect = findingIdDefect({ findings: [{ id: 'bad id/../escape' }] })
+  assert.equal(defect?.reason, 'finding-id')
+  // The offending id is reported VERBATIM: refusing is not repairing.
+  assert.ok(defect.why.includes('bad id/../escape'), defect.why)
+  assert.equal(findingIdDefect({ findings: [{ id: 'F1' }] }), null)
+  assert.equal(findingIdDefect({ findings: [{ id: 'a'.repeat(64) }] }), null)
+  assert.equal(findingIdDefect({ findings: [{ id: 'a'.repeat(65) }] })?.reason, 'finding-id')
+})
+
+test('one undecodable patch section refuses the WHOLE patch, unread', () => {
+  const good = 'diff --git a/x.mjs b/x.mjs\n--- a/x.mjs\n+++ b/x.mjs\n@@ -1 +1 @@\n-a\n+b\n'
+  assert.deepEqual(patchTargets(good), { targets: ['x.mjs'], refusal: null })
+  for (const [name, section] of [
+    ['rename', 'diff --git a/x b/y\nrename from x\nrename to y\n'],
+    ['copy', 'diff --git a/x b/y\ncopy from x\ncopy to y\n'],
+    ['binary', 'diff --git a/x b/x\nGIT binary patch\n'],
+    ['mode-only', 'diff --git a/x b/x\nold mode 100644\nnew mode 100755\n'],
+  ]) {
+    // The BAD section is second: a good first section must not rescue the patch.
+    const mixed = patchTargets(good + section)
+    assert.deepEqual(mixed.targets, [], `${name} left targets readable`)
+    assert.ok(typeof mixed.refusal === 'string' && mixed.refusal.length > 0, `${name} refused without a reason`)
+  }
+  assert.equal(patchTargets('').refusal, 'the patch is empty')
+})
+
+test('malformed question entries are dropped and reported, and the outcome never changes', () => {
+  const parsed = parseQuestions({ questions: [
+    { id: 'q1', question: 'a real question?' },
+    { id: '', question: 'no id' },
+    'not an object',
+    { id: 'q1', question: 'duplicate id' },
+  ] })
+  // Dropped, not refused: the good entry survives.
+  assert.deepEqual(parsed.questions, [{ id: 'q1', question: 'a real question?' }])
+  // Reported: every drop carries its index and a reason.
+  assert.equal(parsed.rejected.length, 3)
+  for (const row of parsed.rejected) {
+    assert.equal(Number.isInteger(row.index), true)
+    assert.ok(typeof row.why === 'string' && row.why.length > 0)
+  }
+  // A non-array questions field is the ABSENCE of the field, not a refusal.
+  assert.equal(parseQuestions({ questions: 'nope' }), null)
+  assert.equal(parseQuestions({}), null)
+})
 
 // RV1-1 (b847): every enforced row of the charter-preservation table must quote
 // the cited line itself, not merely the cited file. The gate's A1 checks

@@ -8889,7 +8889,8 @@ function runTask(ctx, io, crash) {
     return { ok: true, bounce }
   }
   const builderAssignmentBrief = (briefPath) => {
-    if (protectedHitsIn(scopeFiles, promptSurfacePaths(loadCapabilities())).length === 0) return briefPath
+    // Document hits, like publish and closeout: an anchor-only lane is never told to carry a claim it cannot make.
+    if (promptDocumentHits(scopeFiles, promptSurfacePaths(loadCapabilities())).length === 0) return briefPath
     const wrapperPath = art('builder-assignment.md')
     io.writeFile(wrapperPath, [
       '# Builder assignment wrapper', '',

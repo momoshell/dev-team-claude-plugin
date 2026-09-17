@@ -28,7 +28,7 @@ import {
 } from './dispatch-batch.mjs'
 import { journalRowsSinceRunStart, parseSuiteCounts, RUN_START_EVENT } from '../../crew/drive.mjs'
 import { BATCH_DIR_EVENT, batchDirFromBrief, resolveTaskReturn as defaultResolveTaskReturn } from '../../crew/crew.mjs'
-import { PROMPT_SURFACE, protectedHitsIn, promptDocumentHits, promptSurfacePaths } from '../../crew/protected-paths.mjs'
+import { promptDocumentHits, promptSurfacePaths } from '../../crew/protected-paths.mjs'
 import { loadCapabilities } from '../../crew/capabilities.mjs'
 import { CELL_RATE_FLOOR, defaultDbPath as defaultLedgerDbPath, ingestJournal as defaultIngestJournal, openLedger as defaultOpenLedger } from './ledger.mjs'
 import { probeDriverIdentity as defaultProbeDriverIdentity } from './lane-watch.mjs'

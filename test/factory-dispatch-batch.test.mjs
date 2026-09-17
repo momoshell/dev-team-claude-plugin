@@ -2206,8 +2206,16 @@ test('F1 the prompt-surface set has one definition and both consumers import it'
   assert.match(driver, /import \{[^}]*\bPROMPT_SURFACE\b[^}]*\} from '\.\/protected-paths\.mjs'/)
   assert.match(driver, /import \{[^}]*\bpromptDocumentHits\b[^}]*\bpromptSurfacePaths\b[^}]*\} from '\.\/protected-paths\.mjs'/)
   assert.match(dispatcher, /PROMPT_SURFACE as SHARED_PROMPT_SURFACE/)
-  assert.match(dispatcher, /\bpromptDocumentHits\b/)
-  assert.match(dispatcher, /\bpromptSurfacePaths\b/)
+  // Three consumers, two readings — and the reading is pinned per consumer, not by which names get imported:
+  // the dispatcher's assurance trigger stays WIDE (touching anchors.json is a tiering input); publish, the
+  // builder-brief wrapper and closeout are MEASUREMENT consumers and read documents only.
+  const closeout = readFileSync(join(repoRoot, 'scripts/factory/closeout.mjs'), 'utf8')
+  assert.match(dispatcher, /protectedHitsIn\([^)]*promptSurfacePaths\(/)
+  assert.doesNotMatch(dispatcher, /\bpromptDocumentHits\b/)
+  assert.match(driver, /promptDocumentHits\(files, promptSurfacePaths\(register\)\)/)
+  assert.match(driver, /promptDocumentHits\(scopeFiles, promptSurfacePaths\(loadCapabilities\(\)\)\)/)
+  assert.match(closeout, /promptDocumentHits\(paths, promptSurfacePaths\(register\)\)/)
+  assert.doesNotMatch(closeout, /protectedHitsIn|PROMPT_SURFACE\b/)
   assert.match(dispatcher, /export \{ PROMPT_SURFACE, PROMPT_SURFACE_BLIND_SPOT \} from '\.\.\/\.\.\/crew\/protected-paths\.mjs'/)
 })
 

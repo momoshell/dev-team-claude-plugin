@@ -13,7 +13,7 @@ import { parseDirectedBrief, scopeMatcher, validateScopeEntries as driveValidate
 import { resolveTaskReturn } from '../../crew/crew.mjs'
 import { assertHostQuiet, hostLoad, loadPolicy, withSuiteSlot } from '../../crew/host-load.mjs'
 import { loadCapabilities } from '../../crew/capabilities.mjs'
-import { protectedHitsIn, resolveProtectedPaths, PROMPT_SURFACE as SHARED_PROMPT_SURFACE, PROMPT_SURFACE_BLIND_SPOT as SHARED_PROMPT_SURFACE_BLIND_SPOT, promptDocumentHits, promptSurfacePaths } from '../../crew/protected-paths.mjs'
+import { protectedHitsIn, resolveProtectedPaths, PROMPT_SURFACE as SHARED_PROMPT_SURFACE, PROMPT_SURFACE_BLIND_SPOT as SHARED_PROMPT_SURFACE_BLIND_SPOT, promptSurfacePaths } from '../../crew/protected-paths.mjs'
 import { fenceScopesIntersect, parseFenceScope } from '../../crew/fence-scope.mjs'
 import { slug } from '../../crew/slug.mjs'
 import { LADDER_BANDS, PROPOSAL_BLOCK, PROPOSAL_V2_KEYS, TIER_NAMES, extractSymbols, isTripwireFile, validateRequest } from './make-brief.mjs'

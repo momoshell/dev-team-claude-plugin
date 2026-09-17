@@ -2641,7 +2641,7 @@ export const CHARTER_SOURCE_BUDGET = Object.freeze({
   builder: 4278,
   lead: 9099,
   planner: 16928,
-  reviewer: 7381,
+  reviewer: 7028,
   'tech-lead': 6210,
 })
 export const CHARTER_SOURCE_TOTAL_BUDGET = 47646
@@ -2651,7 +2651,7 @@ export const CHARTER_CEILINGS = Object.freeze({
   builder: 8030,
   lead: 12851,
   planner: 20680,
-  reviewer: 11133,
+  reviewer: 10780,
   'tech-lead': 9962,
 })
 

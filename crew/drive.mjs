@@ -6580,11 +6580,15 @@ function runTask(ctx, io, crash) {
       const failure = evidence && typeof evidence === 'object' && evidence.reason === reason
         ? evidence
         : { reason, seat, ...(evidence && typeof evidence === 'object' ? { evidence } : {}) }
-      const why = `${reason}${seat ? ` (${seat})` : ''}${failure.evidence ? `: ${failure.evidence.summary || failure.evidence.why || 'seat evidence recorded'}` : ''}`
+      // A write refusal's whole value is WHICH paths moved: keep them in the summary a human reads
+      // and in the scope escalation's files slot, not only under details.panel.failure.
+      const writtenPaths = Array.isArray(failure.paths) ? failure.paths : (Array.isArray(failure.evidence?.paths) ? failure.evidence.paths : [])
+      const pathNote = writtenPaths.length ? `: wrote ${writtenPaths.join(', ')}` : ''
+      const why = `${reason}${seat ? ` (${seat})` : ''}${pathNote || (failure.evidence ? `: ${failure.evidence.summary || failure.evidence.why || 'seat evidence recorded'}` : '')}`
       const extraDetails = { panel: { failure } }
       const escalationExtra = { reason, variant: 'review_panel', ...(seat ? { seat } : {}) }
       if (reason === 'panel-write-refusal' || reason === 'panel-write-unproven') {
-        return escalate('scope', why, [], extraDetails, {}, escalationExtra)
+        return escalate('scope', why, [], extraDetails, { files: writtenPaths }, escalationExtra)
       }
       return escalate('envelope', why, [], extraDetails, {}, escalationExtra)
     }
@@ -6780,9 +6784,9 @@ function runTask(ctx, io, crash) {
       return failAfterSeat('lead', 'panel-adjudicator-failed', adjudicatorEnv, null, { reason: 'panel-object-invalid', why: 'details.panel must be a non-array object' })
     }
 
-    const adjudications = Array.isArray(adjudicatorEnv.details.adjudications)
-      ? adjudicatorEnv.details.adjudications
-      : Array.isArray(adjudicatorEnv.details.panel?.adjudications) ? adjudicatorEnv.details.panel.adjudications : null
+    // The adjudicator's declared contract names TOP-LEVEL details.adjudications. A nested
+    // details.panel.adjudications fallback was accepted by nothing and declared by nothing.
+    const adjudications = Array.isArray(adjudicatorEnv.details.adjudications) ? adjudicatorEnv.details.adjudications : null
     const adjudicationById = new Map()
     const adjudicationDefect = (() => {
       if (!Array.isArray(adjudications)) return { reason: 'panel-adjudication-invalid', why: 'details.adjudications must be an array' }
@@ -6872,19 +6876,27 @@ function runTask(ctx, io, crash) {
       ...(Array.isArray(partnerEnv.artifacts) ? partnerEnv.artifacts : []),
       ...(Array.isArray(adjudicatorEnv.artifacts) ? adjudicatorEnv.artifacts : []),
     ])]
+    // The shape declares report_values, so the FUSED values are what it reports — built once
+    // from the declared envelope_fields and attached to both the accepted record and the
+    // envelope, exactly as the generic envelope path does (crew/drive.mjs reportedValues).
+    // scripts/factory/pr-review.mjs reads details.envelope.values and can consume no other shape.
+    const panelValues = {
+      base: reviewIdentity.expected.base_sha, head: reviewIdentity.expected.head_sha, outcome, findings,
+      reviewed_files: canonicalCoverage.reviewed_files, unreviewable_files: canonicalCoverage.unreviewable_files,
+      panel,
+    }
+    if (shape.report_values) accepted.values = { ...panelValues }
     const result = {
       status: 'done',
       summary: `review_panel ${ctx.task} complete: envelope accepted on shape, 0 files changed. Stages: ${S.stages.join(' | ')}`,
       artifacts,
       details: {
         variant, commit: null, stages: S.stages, files_committed: [], consults: S.consults,
-        dissents: S.dissents, accepted_via: shape.accepted_by, escalation: null,
+        dissents: S.dissents, accepted_via: shape.accepted_by, escalation: null, gate: null,
         extra_rounds_granted: S.grants, growth: S.growth, modifiers: S.modifiers, enforcements: S.enforcements,
-        base: reviewIdentity.expected.base_sha, head: reviewIdentity.expected.head_sha, outcome, findings,
-        reviewed_files: canonicalCoverage.reviewed_files, unreviewable_files: canonicalCoverage.unreviewable_files,
-        envelope: { seat: 'lead', fields: accepted.fields, files_changed: 0 },
+        ...panelValues,
+        envelope: { seat: 'lead', fields: accepted.fields, files_changed: 0, ...(shape.report_values ? { values: { ...panelValues } } : {}) },
         review_identity: accepted.review_identity,
-        panel,
       },
     }
     stageComplete()

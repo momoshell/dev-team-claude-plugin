@@ -4667,6 +4667,34 @@ test('B1 review_panel rejects seat identity mismatch before fusion', () => {
   assert.equal(io.calls.logs.some((row) => row.envelope_accepted), false)
 })
 
+test('B2 review_panel rejects PARTNER and ADJUDICATOR identity mismatch before fusion', () => {
+  // MUTATION B2: check identity for the reviewer only and a partner or adjudicator returning a
+  // foreign head is fused into the panel's findings.
+  for (const [seat, over] of [
+    ['tech-lead', { partner: panelEnvelope({ role: 'tech-lead', head: 'd'.repeat(40) }) }],
+    ['lead', { adjudicator: panelEnvelope({ role: 'lead', head: 'e'.repeat(40), details: { adjudications: [] } }) }],
+  ]) {
+    const io = strictPanelIo({ runs: reviewDiffRuns({ ok: true, output: '' }, PANEL_BASE_SHA, PANEL_HEAD_SHA), ...over })
+    const result = driveTask(panelContext(), io)
+    assert.equal(result.status, 'escalation', seat)
+    assert.equal(result.details.panel.failure.reason, 'identity-mismatch', seat)
+    assert.equal(result.details.panel.failure.seat, seat)
+    assert.deepEqual(result.details.panel.failure.expected, { base_sha: PANEL_BASE_SHA, head_sha: PANEL_HEAD_SHA }, seat)
+    assert.equal(io.calls.logs.some((row) => row.envelope_accepted), false, seat)
+  }
+})
+
+test('B3 review_panel refuses a malformed identity context before any seat', () => {
+  // MUTATION B3: treat an unserialisable review_identity as absent and the panel dispatches seats
+  // against an identity nothing can compare.
+  const io = strictPanelIo({})
+  const cyclic = {}; cyclic.self = cyclic
+  const result = driveTask(panelContext({ review_identity: cyclic }), io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.panel.failure.reason, 'review-identity-malformed')
+  assert.deepEqual(io.calls.assign.map(({ role }) => role), [])
+})
+
 test('C1 review_panel preserves reviewer coverage and uses adjudicator coverage', () => {
   const declared = 'src/a.mjs\0src/b.mjs\0'
   const reviewer = panelEnvelope({ role: 'reviewer', details: { reviewed_files: ['src/a.mjs'], unreviewable_files: [{ path: 'src/b.mjs', reason: 'generated' }] } })
@@ -4701,6 +4729,38 @@ test('D1 review_panel zero-write proof runs after every seat', () => {
     reason: 'panel-write-refusal', seat: 'tech-lead', paths: ['crew/drive.mjs'], evidence: 'panel seat complete',
   })
   assert.deepEqual(dirty.calls.assign.map(({ role }) => role), ['reviewer', 'tech-lead'])
+})
+
+test('D2 review_panel reports the fused values the shape declares', () => {
+  // MUTATION D2: drop `accepted.values` (or details.envelope.values) and scripts/factory/pr-review.mjs
+  // cannot consume a panel result at all — it reads details.envelope.values and nothing else.
+  const io = strictPanelIo({ runs: reviewDiffRuns({ ok: true, output: '' }, PANEL_BASE_SHA, PANEL_HEAD_SHA) })
+  const result = driveTask(panelContext(), io)
+  assert.equal(result.status, 'done')
+  assert.equal(VARIANTS.review_panel.report_values, true)
+  const values = result.details.envelope.values
+  assert.ok(values, 'the declared report_values shape must report values')
+  assert.deepEqual(Object.keys(values).sort(), VARIANTS.review_panel.envelope_fields.map((field) => field.name).sort())
+  assert.equal(values.base, PANEL_BASE_SHA)
+  assert.equal(values.head, PANEL_HEAD_SHA)
+  assert.deepEqual(values.findings, result.details.findings)
+  assert.deepEqual(values.panel, result.details.panel)
+  assert.equal(result.details.gate, null)
+  const acceptedRow = io.calls.logs.find((row) => row.envelope_accepted)?.envelope_accepted
+  assert.deepEqual(acceptedRow.values, values)
+})
+
+test('D3 a panel write refusal names its paths where an operator reads them', () => {
+  // MUTATION D3: drop the written paths from `why` and the escalation files slot, and the operator
+  // surface says only that seat evidence was recorded — the one fact that matters is buried.
+  const dirty = strictPanelIo({ changed: [[], ['crew/drive.mjs', 'crew/variants.mjs']], runs: reviewDiffRuns({ ok: true, output: '' }, PANEL_BASE_SHA, PANEL_HEAD_SHA) })
+  const result = driveTask(panelContext(), dirty)
+  assert.equal(result.status, 'escalation')
+  assert.match(result.details.escalation.why, /crew\/drive\.mjs/)
+  assert.match(result.details.escalation.why, /crew\/variants\.mjs/)
+  // The scope question declares a `files` slot (crew/escalation-policy.mjs:335); that is where a
+  // human reading the escalation finds them.
+  assert.deepEqual(result.details.escalation.question.slots.files, ['crew/drive.mjs', 'crew/variants.mjs'])
 })
 
 test('E1 review_panel fails closed when partner or adjudicator is absent', () => {
@@ -4777,16 +4837,24 @@ test('RV1-2 review_panel refuses every invalid adjudication cover', () => {
     reviewer: panelEnvelope({ role: 'reviewer', findings: [finding] }),
     adjudicator: panelEnvelope({ role: 'lead', details: { adjudications } }),
   }))
-  for (const [label, adjudications] of [
-    ['missing', []],
-    ['extra', [valid, { ...valid, id: 'extra-adjudication' }]],
-    ['duplicate', [valid, { ...valid }]],
-    ['unknown disposition', [{ ...valid, disposition: 'maybe' }]],
-    ['blank reason', [{ ...valid, reason: ' ' }]],
+  // Each case asserts its OWN why. Sol measured that a shared-reason assertion is vacuous:
+  // neutralising the id predicate stayed GREEN because the later exact-cover check returned the
+  // same top-level refusal. MUTATION RV1-2: drop any one predicate in adjudicationDefect and
+  // exactly the case naming it reddens.
+  for (const [label, adjudications, why] of [
+    ['not an array', 'not-an-array', /details\.adjudications must be an array/],
+    ['missing id', [{ disposition: 'uphold', reason: 'no id at all' }], /needs a non-empty id/],
+    ['blank id', [{ ...valid, id: '   ' }], /needs a non-empty id/],
+    ['duplicate', [valid, { ...valid }], /duplicate adjudication id/],
+    ['unknown disposition', [{ ...valid, disposition: 'maybe' }], /unknown disposition/],
+    ['blank reason', [{ ...valid, reason: ' ' }], /needs a non-empty reason/],
+    ['missing cover', [], /missing=\["panel-adjudication-finding"\]/],
+    ['extra cover', [valid, { ...valid, id: 'extra-adjudication' }], /extra=\["extra-adjudication"\]/],
   ]) {
     const result = resultFor(adjudications)
     assert.equal(result.status, 'escalation', label)
     assert.equal(result.details.panel.failure.reason, 'panel-adjudication-invalid', label)
+    assert.match(result.details.panel.failure.why, why, label)
   }
 })
 

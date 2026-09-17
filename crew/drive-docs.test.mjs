@@ -362,6 +362,15 @@ test('the lead charter documents the typed exhaustion accept contract', () => {
   assert.match(collapsed, /summary is REQUIRED there and is omitted from a keyed review-exhaustion claim/)
 })
 
+test('the lead FIELD bullet carries its correctness-unverified antecedent', () => {
+  const charter = readFileSync(new URL('./roles/lead.md', import.meta.url), 'utf8')
+  const start = charter.indexOf('## Two things that cost a lane to rediscover')
+  assert.ok(start >= 0)
+  const field = charter.slice(start).split('\n- ').find((bullet) => bullet.includes('about the FIELD'))
+  assert.ok(field)
+  assert.ok(field.includes('correctness-unverified'))
+})
+
 test('the planner charter documents how to discover files_in_scope', () => {
   const charter = readFileSync(new URL('./roles/planner.md', import.meta.url), 'utf8')
   for (const token of [
@@ -692,6 +701,17 @@ test('both charters state where the planner stops and the lead takes over', () =
   assert.match(planner, /domain ends when your plan is accepted/)
   assert.match(planner.slice(planner.indexOf('domain ends when your plan is accepted')), /lead/)
   assert.doesNotMatch(planner, /## Perspective assignments/)
+})
+
+test('both judgement charters carry exactly one Perspective assignments section', () => {
+  for (const role of ['lead', 'tech-lead']) {
+    const charter = readFileSync(new URL(`./roles/${role}.md`, import.meta.url), 'utf8')
+    assert.equal(charter.split('## Perspective assignments').length - 1, 1, role)
+  }
+  for (const role of ['_shared', 'planner']) {
+    const charter = readFileSync(new URL(`./roles/${role}.md`, import.meta.url), 'utf8')
+    assert.equal(charter.split('## Perspective assignments').length - 1, 0, role)
+  }
 })
 
 test('#800 §7b 34 — the shared charter pin includes disposition and its compatibility window', () => {
@@ -1245,3 +1265,13 @@ test('J1 structural documentation runs one fenced crew-dispatch anchor repair', 
   assert.deepEqual(io.commits[0].files, [DOCUMENT_BATCH_TARGET, DOCUMENT_FLAGS_TARGET, 'skills/crew-dispatch/anchors.json'])
   assert.equal(io.commits[0].files.length, 3)
 })
+
+// CHARTER-PRESERVATION-MIRROR-START
+// before-source: fixture
+// before-lead-sha256: 2448872e30f1765649a62c5b520b01a5ff16f543732041b65f63a82225a63d55
+// before-tech-lead-sha256: f14559227cee0ed481997255d15cbd804b455b3be25c2c6233944e5b8add2748
+// f1-anchor-builder-sha256: 489fdbfd93207a36e8f6e5cfbd6d5c314d934a808031ba43175fd7617d28dc74
+// | sentence | subject | class | source | quote |
+// | --- | --- | --- | --- | --- |
+// | **`correctness-unverified` is code-refused into escalation.** | into escalation | enforced | crew/drive.mjs:2109 planAcceptContractLines; enforcement crew/drive.mjs:6542 settleAccept and crew/drive.mjs:2127 ACCEPT_REFUSALS | A residual typed correctness-unverified is legitimate but asks a human, so code refuses it into escalation — the same rule as at review exhaustion. That is a fact about the FIELD, not about which stage you are standing in. |
+// CHARTER-PRESERVATION-MIRROR-END

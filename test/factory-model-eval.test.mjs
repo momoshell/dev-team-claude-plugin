@@ -1110,7 +1110,7 @@ const ROLE_BENCH_ROOT = 'docs/audits/2026-09-17/bench'
 const ROLE_NAMES = ['planner', 'builder']
 const reviewedCandidateShas = {
   planner: 'b7a3b776e298eeecfeda1fffaee2012df30d9295f421d4be36c0d473dbcb450a',
-  builder: '12938c3bd54693d199ae3f82a2f5a091edc3860031e5ca347f5fe71d7a9be668',
+  builder: '8a5cac6d76c0e02734ff938fcfac4e4e072c14f86b4a304804006bbdabee5096',
 }
 const PLANNER_TARGET = ['bench', 'sha', 'mismatch'].join('-')
 const BUILDER_README = `${ROLE_BENCH_ROOT}/builder/README.md`

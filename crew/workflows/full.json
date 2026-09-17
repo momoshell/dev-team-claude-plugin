@@ -18,7 +18,7 @@
       "role": "builder",
       "agent": "pi",
       "provider": "openai",
-      "id": "gpt-5.3-codex-spark",
+      "id": "gpt-5.6-luna",
       "effort": "high",
       "skills": [],
       "extensions": [

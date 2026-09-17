@@ -22,10 +22,9 @@
       "floor_reference_score": 50,
       "members": [
         "openai/gpt-5.6-terra",
-        "anthropic/claude-sonnet-5",
-        "openai/gpt-5.3-codex-spark"
+        "anthropic/claude-sonnet-5"
       ],
-      "membership_basis": "Workhorse placement for openai/gpt-5.3-codex-spark is an assertion ratified by the operator on 2026-09-17: the Artificial Analysis catalog carries no score for it, so no reference score exists to compare against this band floor."
+      "membership_basis": "Workhorse holds no asserted member. openai/gpt-5.3-codex-spark was admitted on 2026-09-17 and removed the same day: probed against this account it is refused outright — the Codex provider answers that the model is not supported when using Codex with a ChatGPT account — so it could never have earned a band here. Its catalog entry, ladder membership and bench arm are removed rather than left as an assertion nothing can test."
     },
     {
       "band": "utility",

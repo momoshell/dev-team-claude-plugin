@@ -1522,7 +1522,7 @@ test('argv value contracts cover every known flag and every hostile shape', () =
   for (const flags of Object.values(KNOWN_FLAGS)) for (const flag of flags) union.add(flag)
   assert.deepEqual([...Object.keys(FLAG_VALUE_CONTRACT)].sort(), [...union].sort())
   assert.ok(Object.values(FLAG_VALUE_CONTRACT).every((contract) => contract === 'value' || contract === 'boolean'))
-  assert.deepEqual(BOOLEAN_FLAGS, ['headless-all', 'keep'])
+  assert.deepEqual(BOOLEAN_FLAGS, ['headless-all', 'keep', 'panel-distinct-agents'])
 
   const requiredPrefix = (verb) => {
     const prefix = ['--task', 't']

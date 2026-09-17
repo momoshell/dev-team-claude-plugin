@@ -4735,6 +4735,11 @@ test('D2 review_panel reports the fused values the shape declares', () => {
   // MUTATION D2: drop `accepted.values` (or details.envelope.values) and scripts/factory/pr-review.mjs
   // cannot consume a panel result at all — it reads details.envelope.values and nothing else.
   const io = strictPanelIo({ runs: reviewDiffRuns({ ok: true, output: '' }, PANEL_BASE_SHA, PANEL_HEAD_SHA) })
+  // Serialize AT LOG TIME. fakeIo keeps the live object, so asserting on it later passes even when
+  // values are attached after the row is written — the durable journal would still lack them.
+  const serialized = []
+  const baseLog = io.log.bind(io)
+  io.log = function (row) { serialized.push(JSON.stringify(row)); return baseLog(row) }
   const result = driveTask(panelContext(), io)
   assert.equal(result.status, 'done')
   assert.equal(VARIANTS.review_panel.report_values, true)
@@ -4746,7 +4751,11 @@ test('D2 review_panel reports the fused values the shape declares', () => {
   assert.deepEqual(values.findings, result.details.findings)
   assert.deepEqual(values.panel, result.details.panel)
   assert.equal(result.details.gate, null)
-  const acceptedRow = io.calls.logs.find((row) => row.envelope_accepted)?.envelope_accepted
+  // Sol's catch: a live object reference makes this pass even when values are attached AFTER the
+  // row is logged. The durable journal row is JSON, so assert on a SNAPSHOT taken at log time.
+  // MUTATION D2b: move the values assignment below logEnvelopeAccepted and this reddens.
+  const acceptedRow = serialized.map((row) => JSON.parse(row)).find((row) => row.envelope_accepted)?.envelope_accepted
+  assert.ok(acceptedRow.values, 'the journal row must carry values as serialized, not by reference')
   assert.deepEqual(acceptedRow.values, values)
 })
 
@@ -4848,8 +4857,8 @@ test('RV1-2 review_panel refuses every invalid adjudication cover', () => {
     ['duplicate', [valid, { ...valid }], /duplicate adjudication id/],
     ['unknown disposition', [{ ...valid, disposition: 'maybe' }], /unknown disposition/],
     ['blank reason', [{ ...valid, reason: ' ' }], /needs a non-empty reason/],
-    ['missing cover', [], /missing=\["panel-adjudication-finding"\]/],
-    ['extra cover', [valid, { ...valid, id: 'extra-adjudication' }], /extra=\["extra-adjudication"\]/],
+    ['missing cover', [], /adjudications omit divergent ids; missing=\["panel-adjudication-finding"\]/],
+    ['extra cover', [valid, { ...valid, id: 'extra-adjudication' }], /adjudications name ids that are not divergent; extra=\["extra-adjudication"\]/],
   ]) {
     const result = resultFor(adjudications)
     assert.equal(result.status, 'escalation', label)

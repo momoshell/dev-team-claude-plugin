@@ -6802,8 +6802,14 @@ function runTask(ctx, io, crash) {
       const expected = new Set(divergentRows.map((finding) => finding.id))
       const missing = [...expected].filter((id) => !adjudicationById.has(id))
       const extra = [...adjudicationById.keys()].filter((id) => !expected.has(id))
-      if (missing.length || extra.length || adjudicationById.size !== expected.size) {
-        return { reason: 'panel-adjudication-invalid', why: `adjudications must exactly cover divergent ids; missing=${JSON.stringify(missing)}, extra=${JSON.stringify(extra)}` }
+      // Separate branches, no size fallback: a single `missing.length || extra.length || size`
+      // test let either predicate be disabled while the other produced the same refusal, so
+      // neither had a witness that killed only itself.
+      if (missing.length) {
+        return { reason: 'panel-adjudication-invalid', why: `adjudications omit divergent ids; missing=${JSON.stringify(missing)}` }
+      }
+      if (extra.length) {
+        return { reason: 'panel-adjudication-invalid', why: `adjudications name ids that are not divergent; extra=${JSON.stringify(extra)}` }
       }
       return null
     })()
@@ -6862,9 +6868,15 @@ function runTask(ctx, io, crash) {
       adjudicator: { role: 'lead', reviewed_files: adjudicatorCoverage.reviewed_files, unreviewable_files: adjudicatorCoverage.unreviewable_files },
       findings: panelFindings,
     }
+    const panelValues = {
+      base: reviewIdentity.expected.base_sha, head: reviewIdentity.expected.head_sha, outcome, findings,
+      reviewed_files: canonicalCoverage.reviewed_files, unreviewable_files: canonicalCoverage.unreviewable_files,
+      panel,
+    }
     const accepted = {
       variant, seat: 'lead', files_changed: 0,
       fields: ['base', 'head', 'outcome', 'findings', 'reviewed_files', 'unreviewable_files', 'panel'],
+      ...(shape.report_values ? { values: { ...panelValues } } : {}),
       review_identity: { expected: reviewIdentity.expected, returned: { base_sha: reviewIdentity.expected.base_sha, head_sha: reviewIdentity.expected.head_sha }, match: true },
     }
     logEnvelopeAccepted(accepted)
@@ -6876,16 +6888,6 @@ function runTask(ctx, io, crash) {
       ...(Array.isArray(partnerEnv.artifacts) ? partnerEnv.artifacts : []),
       ...(Array.isArray(adjudicatorEnv.artifacts) ? adjudicatorEnv.artifacts : []),
     ])]
-    // The shape declares report_values, so the FUSED values are what it reports — built once
-    // from the declared envelope_fields and attached to both the accepted record and the
-    // envelope, exactly as the generic envelope path does (crew/drive.mjs reportedValues).
-    // scripts/factory/pr-review.mjs reads details.envelope.values and can consume no other shape.
-    const panelValues = {
-      base: reviewIdentity.expected.base_sha, head: reviewIdentity.expected.head_sha, outcome, findings,
-      reviewed_files: canonicalCoverage.reviewed_files, unreviewable_files: canonicalCoverage.unreviewable_files,
-      panel,
-    }
-    if (shape.report_values) accepted.values = { ...panelValues }
     const result = {
       status: 'done',
       summary: `review_panel ${ctx.task} complete: envelope accepted on shape, 0 files changed. Stages: ${S.stages.join(' | ')}`,

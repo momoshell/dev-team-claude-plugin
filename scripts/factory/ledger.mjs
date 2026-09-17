@@ -146,6 +146,8 @@ export const EVENT_TYPES = Object.freeze([
 ])
 
 export const SESSION_STATUSES = Object.freeze(['running', 'ok', 'fail', 'aborted'])
+export const CHUNK_LANE_UNBOOTED = 'chunk-lane-unbooted'
+export const CHUNK_GATE_NOT_RUN = 'gate-not-run'
 export const SESSION_OUTCOMES = Object.freeze(['success', 'escalated', 'aborted', 'failed'])
 export const DRIVER_STATES = Object.freeze(['alive', 'gone', 'unknown'])
 export const RUN_OBSERVATION_SOURCES = Object.freeze(['daemon', 'process_group', 'cmux', 'heartbeat'])
@@ -721,6 +723,19 @@ export const TABLES = Object.freeze({
     ],
     unique: [['adw_id']],
     indexes: [],
+  },
+  chunk_runs: {
+    columns: [
+      { name: 'parent_lane', decl: 'TEXT' },
+      { name: 'chunk_id', decl: 'TEXT' },
+      { name: 'lane', decl: 'TEXT' },
+      { name: 'wave', decl: 'INTEGER' },
+      { name: 'depends_on', decl: 'TEXT' },
+      { name: 'checks_owned', decl: 'TEXT' },
+      { name: 'created_at', decl: 'TEXT' },
+    ],
+    unique: [['parent_lane', 'chunk_id']],
+    indexes: [{ name: 'chunk_runs_parent_lane_idx', cols: ['parent_lane'] }],
   },
   escalation_proposals: {
     columns: [
@@ -1493,7 +1508,7 @@ export const JOURNAL_FACT_EVENTS = Object.freeze({
 })
 
 export const WRITERS = Object.freeze([
-  'startSession', 'endSession', 'recordEscalationProposal', 'startPhase', 'endPhase', 'recordEvent',
+  'startSession', 'endSession', 'recordEscalationProposal', 'recordChunkRun', 'startPhase', 'endPhase', 'recordEvent',
   'recordEnvelope', 'recordSessionRequest', 'recordRunConfiguration', 'recordRunSeat', 'recordRunObservation', 'recordGateResult', 'recordGateDiscrimination',
   'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'recordCiCycle', 'recordCiDispatch', 'recordEvalCell', 'recordRoutingChoice', 'recordIntakeSweep', 'recordIntakeRefusal', 'recordIntakeBrake', 'recordIntakeDispatch', 'recordSeatTeardown', 'recordSeatReclaim', 'recordProviderFailure', 'recordPlanScope', 'recordSeatReask', 'recordAcceptReask', 'recordRpcExitContext', 'recordSeatTurnCensus', 'recordPlanAdoption', 'recordExternalFence', 'recordMutationAnchorBind', 'recordMutationAnchorAbsence', 'recordPhaseSlotWait', 'recordExperimentArm', 'recordNarrationMeasurement', 'recordScreenerProposal', 'startProcess', 'endProcess', 'heartbeat',
   'startAgentSession', 'endAgentSession', 'recordSourceError', 'linkRun',
@@ -1506,6 +1521,7 @@ export const WRITERS = Object.freeze([
 // never restated here — it is read from TABLES.
 export const WRITER_MIRROR_TABLES = Object.freeze({
   startSession: 'sessions',
+  recordChunkRun: 'chunk_runs',
   recordEscalationProposal: 'escalation_proposals',
   recordRunConfiguration: 'run_configurations',
   recordRunObservation: 'run_observations',
@@ -3808,6 +3824,35 @@ export function openLedger({
     return args
   }
 
+  function recordChunkRun(input = {}) {
+    requireFields(input, ['parent_lane', 'chunk_id', 'lane'], 'recordChunkRun')
+    const args = redact({
+      parent_lane: String(input.parent_lane),
+      chunk_id: String(input.chunk_id),
+      lane: String(input.lane),
+      wave: integerOrNull(input.wave, 'recordChunkRun', 'wave'),
+      depends_on: Array.isArray(input.depends_on) ? [...input.depends_on] : [],
+      checks_owned: Array.isArray(input.checks_owned) ? [...input.checks_owned] : [],
+      created_at: isoMs(input.created_at ?? now()),
+    }, stats)
+    appendJsonl('recordChunkRun', args)
+    mirror((conn) => {
+      const row = {
+        parent_lane: args.parent_lane,
+        chunk_id: args.chunk_id,
+        lane: args.lane,
+        wave: args.wave,
+        depends_on: JSON.stringify(args.depends_on),
+        checks_owned: JSON.stringify(args.checks_owned),
+        created_at: args.created_at,
+      }
+      const cols = tableColumnNames('chunk_runs')
+      conn.prepare(`INSERT OR IGNORE INTO chunk_runs (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
+        .run(...cols.map((c) => toBindable(row[c])))
+    })
+    return args
+  }
+
   function recordCellFailure(input = {}) {
     requireFields(input, ['role', 'kind'], 'recordCellFailure')
     requireEnum(input.kind, CELL_FAILURE_KINDS, 'recordCellFailure', 'kind')
@@ -4850,6 +4895,37 @@ export function openLedger({
     if (!ids.length) return []
     const marks = ids.map(() => '?').join(',')
     return queryRows(`SELECT adw_id, phase_id, gate_name, attempt, ok, checks_json, gate_generation, pristine, gate_run_ms, gate_run_ms_absent_reason, created_at FROM gate_results WHERE adw_id IN (${marks}) ORDER BY adw_id, gate_generation, attempt`, ids)
+  }
+
+  function chunkProgress(parentLane) {
+    if (typeof parentLane !== 'string' || parentLane.trim() === '') return { parent_lane: parentLane ?? null, chunks: [], done: 0, total: 0 }
+    const rows = queryRows('SELECT parent_lane, chunk_id, lane, wave, depends_on, checks_owned, created_at FROM chunk_runs WHERE parent_lane = ? ORDER BY wave, chunk_id', [parentLane])
+    const sessions = queryRows(`SELECT s.* FROM sessions s WHERE s.task_slug NOT IN ('x','daemon80','unfenced-child','fence-scope','fence-plan','daemon-null-lane') AND NOT EXISTS (SELECT 1 FROM sessions s2 WHERE s2.task_slug = s.task_slug AND s2.task_slug NOT IN ('x','daemon80','unfenced-child','fence-scope','fence-plan','daemon-null-lane') AND (s2.started_at > s.started_at OR (s2.started_at = s.started_at AND s2.adw_id > s.adw_id)))`, [])
+    const gates = queryRows(`SELECT g.* FROM gate_results g WHERE g.pristine IS NOT 1 AND g.id IN (SELECT MAX(g2.id) FROM gate_results g2 WHERE g2.adw_id = g.adw_id AND g2.gate_generation = (SELECT MAX(g3.gate_generation) FROM gate_results g3 WHERE g3.adw_id = g.adw_id))`, [])
+    const sessionByLane = new Map(sessions.map((row) => [row.task_slug || row.adw_id, row]))
+    const gateByLane = new Map(gates.map((row) => [row.adw_id, row]))
+    const chunks = rows.map((row) => {
+      let owned
+      let deps
+      try { owned = JSON.parse(row.checks_owned || '[]') } catch { owned = [] }
+      try { deps = JSON.parse(row.depends_on || '[]') } catch { deps = [] }
+      owned = Array.isArray(owned) ? owned : []
+      const session = sessionByLane.get(row.lane) || null
+      const gate = session ? gateByLane.get(session.adw_id) || null : null
+      const base = { parent_lane: row.parent_lane, chunk_id: row.chunk_id, lane: row.lane, wave: row.wave, depends_on: deps, checks_owned: owned, stage: session?.status ?? null, owned_total: owned.length }
+      if (!session || !gate) {
+        const absent_reason = !session ? CHUNK_LANE_UNBOOTED : CHUNK_GATE_NOT_RUN
+        return { ...base, owned_green: null, absent_reason }
+      }
+      let checks
+      try { checks = JSON.parse(gate.checks_json || '[]') } catch { checks = [] }
+      const green = owned.filter((label) => checks.some((el) => el === label || el?.name === label || el?.label === label || el?.check === label)).length
+      return { ...base, owned_green: green, gate_generation: gate.gate_generation ?? null }
+    })
+    // stage is sessions.status, whose closed enum (SESSION_STATUSES) has 'ok' as its
+    // only terminal-done state — no second disjunct belongs here.
+    const done = chunks.filter((chunk) => chunk.stage === 'ok' && chunk.owned_green !== null && chunk.owned_green === chunk.owned_total).length
+    return { parent_lane: parentLane, chunks, done, total: chunks.length }
   }
 
   function reviewOutcomesFor(adwIds) {
@@ -6189,10 +6265,11 @@ export function openLedger({
     get degraded() { return degraded },
     startSession, endSession, recordEscalationProposal, recordSessionRequest, recordRunConfiguration, recordRunSeat, recordRunObservation, startPhase, endPhase, recordEvent, recordEnvelope,
     escalationProposalFor,
+    recordChunkRun,
     recordGateResult, recordGateDiscrimination, recordMutationAnchorBind, recordMutationAnchorAbsence, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordEvalCell, recordRoutingChoice, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown, recordSeatReclaim, recordProviderFailure, recordPlanScope, recordSeatReask, recordAcceptReask, recordRpcExitContext, recordSeatTurnCensus, recordPlanAdoption, recordExternalFence, recordPhaseSlotWait, recordExperimentArm, recordNarrationMeasurement, recordScreenerProposal,
     startProcess, endProcess, heartbeat, startAgentSession, endAgentSession,
     recordSourceError, linkRun,
-    listSessions, listEvents, getSession, phantomSessions, dumpTable, tableNames, columnNames, sessionsFiltered, runsStartedWithin, phasesFor, runConfigurationsFor, runObservationsFor, runSeatsFor, agentEventsFor, agentSessionsFor, gateDiscriminationsFor, gateResultsFor, reviewOutcomesFor, acceptDecisionsFor, supportsJson1, eventsPage, maxEventId, cellFailureRowsFor, unattributableCellFailures, seatTeardownRowsFor, intakePicks, intakeSweepTotals, intakeCandidateRefusals, intakeCandidatePicks, agentSessionTokenTotals, gateReviewGap, cellFailures, cellAttempts, cellReviews, screenerAdoptions, evalCells, routingChoices, cellUsage, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, escalations, endedRuns, escalationWindow, seatReclaims, journalFacts, plannerSymbolsHoldout, charterLeanHoldout, turnEconomy, turnBreakdown, eligibleTasks, runSet, configurationReadout, transportsFor, taskReadout, jsonlDrift,
+    listSessions, listEvents, getSession, phantomSessions, dumpTable, tableNames, columnNames, sessionsFiltered, runsStartedWithin, phasesFor, runConfigurationsFor, runObservationsFor, runSeatsFor, agentEventsFor, agentSessionsFor, gateDiscriminationsFor, gateResultsFor, chunkProgress, reviewOutcomesFor, acceptDecisionsFor, supportsJson1, eventsPage, maxEventId, cellFailureRowsFor, unattributableCellFailures, seatTeardownRowsFor, intakePicks, intakeSweepTotals, intakeCandidateRefusals, intakeCandidatePicks, agentSessionTokenTotals, gateReviewGap, cellFailures, cellAttempts, cellReviews, screenerAdoptions, evalCells, routingChoices, cellUsage, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, escalations, endedRuns, escalationWindow, seatReclaims, journalFacts, plannerSymbolsHoldout, charterLeanHoldout, turnEconomy, turnBreakdown, eligibleTasks, runSet, configurationReadout, transportsFor, taskReadout, jsonlDrift,
     stats: statsFn,
     captureMirrorErrors,
     readConnection,
@@ -6955,6 +7032,7 @@ const BOOLEAN_FLAGS = new Set(['yes'])
 // entry is only reachable for an unknown VERB, which :3770 already refuses.
 const VERB_FLAGS = Object.freeze({
   sessions: new Set([]),
+  'chunk-progress': new Set([]),
   phases: new Set([]),
   procs: new Set([]),
   tail: new Set(['after', 'limit']),
@@ -7625,6 +7703,14 @@ export function main(argv) {
       }
       stdout.write(`${JSON.stringify(payload)}\n`)
       stderr.write(`ledger: ${sessions.length} session(s)\n`)
+      return 0
+    }
+
+    if (verb === 'chunk-progress') {
+      if (positional.length !== 1 || typeof positional[0] !== 'string' || positional[0].trim() === '') refuse('chunk-progress: requires <parent_lane>')
+      const progress = ledger.chunkProgress(positional[0])
+      if (ledger.stats().degraded) refuse('chunk-progress: the ledger mirror is degraded — progress is unanswerable, not empty')
+      stdout.write(`${JSON.stringify(progress)}\n`)
       return 0
     }
 

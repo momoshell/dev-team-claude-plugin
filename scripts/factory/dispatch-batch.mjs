@@ -17,6 +17,8 @@ import { protectedHitsIn, resolveProtectedPaths, PROMPT_SURFACE_BLIND_SPOT as SH
 import { fenceScopesIntersect, parseFenceScope } from '../../crew/fence-scope.mjs'
 import { slug } from '../../crew/slug.mjs'
 import { LADDER_BANDS, PROPOSAL_BLOCK, PROPOSAL_V2_KEYS, TIER_NAMES, extractSymbols, isTripwireFile, validateRequest } from './make-brief.mjs'
+import { recordChunkRuns } from './emit.mjs'
+import { defaultDbPath } from './ledger.mjs'
 
 const BATCH_EMPTY = 'batch-empty'
 const BATCH_UNREADABLE = 'batch-unreadable'
@@ -50,6 +52,9 @@ const PLAN_ADOPT_UNREADABLE = 'plan-adopt-unreadable'
 const TEST_REACH_UNFENCED = 'test-reach-unfenced'
 const FENCE_ADMISSION_UNSOURCED = 'fence-admission-unsourced'
 const PLAN_ADOPT_GATE_ABSOLUTE_PATH = 'plan-adopt-gate-absolute-path'
+const CHUNKS_ABSENT = 'chunks-absent'
+const CHUNK_SCOPE_OUTSIDE_PARENT = 'chunk-scope-outside-parent'
+const CHUNK_DEPS_UNSETTLED = 'chunk-deps-unsettled'
 
 export const FENCE_ADMISSION_EVENT = 'fence-admitted'
 export const FENCE_OBSERVATION_EVENT = 'fence-observation'
@@ -80,6 +85,9 @@ export const REFUSAL_REASONS = Object.freeze([
   TEST_REACH_UNFENCED,
   FENCE_ADMISSION_UNSOURCED,
   PLAN_ADOPT_GATE_ABSOLUTE_PATH,
+  CHUNKS_ABSENT,
+  CHUNK_SCOPE_OUTSIDE_PARENT,
+  CHUNK_DEPS_UNSETTLED,
 ])
 export const WARNING_ROWS_UNPERSISTED_PREFIX = 'dispatch-batch: WARNING rows-unpersisted:'
 
@@ -144,7 +152,7 @@ export const TOOL_CLASSES = ['edit', 'read', 'test', 'other']
 // the dispatcher logs and persists the decision. A dispatch-only key, so the compiler's
 // closed schema never sees it.
 export const TEST_REACH_OVERRIDE_KEY = 'allow_test_reach'
-export const DISPATCH_ONLY_REQUEST_KEYS = Object.freeze(['assurance', 'tier', 'execution', 'variant', 'depends_on', 'seats', 'adopt', TEST_REACH_OVERRIDE_KEY])
+export const DISPATCH_ONLY_REQUEST_KEYS = Object.freeze(['assurance', 'tier', 'execution', 'variant', 'depends_on', 'seats', 'adopt', 'chunk', TEST_REACH_OVERRIDE_KEY])
 // The transports a dispatched batch can boot. Headless is the software-factory
 // mode and stays the DEFAULT, so an unflagged batch behaves exactly as it did
 // before this flag existed. #617 made the transport STATED; it is choosable
@@ -1280,6 +1288,7 @@ export function readBatch({ batchDir, checkout, deps } = {}) {
       variant: variantSupplied && typeof dispatch.variant === 'string' ? dispatch.variant : null,
       seats: dispatch.seats && typeof dispatch.seats === 'object' ? dispatch.seats : null,
       adopt: typeof dispatch.adopt === 'string' ? dispatch.adopt : null,
+      chunk: dispatch.chunk ?? null,
       [TEST_REACH_OVERRIDE_KEY]: Array.isArray(dispatch[TEST_REACH_OVERRIDE_KEY]) ? dispatch[TEST_REACH_OVERRIDE_KEY].map(normaliseTestReachOverride) : [],
       depends_on: Array.isArray(dispatch.depends_on) ? [...new Set(dispatch.depends_on)] : [],
       where: scoped.request.where.map(normaliseRepoPath),
@@ -1287,6 +1296,146 @@ export function readBatch({ batchDir, checkout, deps } = {}) {
     })
   }
   return lanes.sort((a, b) => a.lane < b.lane ? -1 : a.lane > b.lane ? 1 : 0)
+}
+
+export function readChunkProgram({ parentLaneDir, deps } = {}) {
+  const d = { readdirSync: deps?.readdirSync || fsReaddirSync, readFileSync: deps?.readFileSync || fsReadFileSync, statSync: deps?.statSync || fsStatSync }
+  const root = join(resolve(parentLaneDir || ''), 'returns')
+  const files = []
+  const scan = (dir) => {
+    let names
+    try { names = d.readdirSync(dir, { withFileTypes: true }) } catch (err) {
+      if (err?.code === 'ENOENT') return
+      refuse(`cannot read planner returns ${dir}: ${err?.message || String(err)}`, BATCH_UNREADABLE)
+    }
+    if (!Array.isArray(names)) refuse(`cannot enumerate planner returns ${dir}`, BATCH_UNREADABLE)
+    for (const entry of names) {
+      const name = typeof entry === 'string' ? entry : entry?.name
+      if (typeof name !== 'string') continue
+      const path = join(dir, name)
+      let directory = false
+      try { directory = typeof entry?.isDirectory === 'function' ? entry.isDirectory() : d.statSync(path).isDirectory() } catch { continue }
+      if (directory) scan(path)
+      else if (name.endsWith('.planner.json')) files.push(path)
+    }
+  }
+  scan(root)
+  const candidates = []
+  for (const envelopePath of files) {
+    let envelope
+    try { envelope = JSON.parse(d.readFileSync(envelopePath, 'utf8')) } catch { continue }
+    if (envelope?.role === 'planner' && envelope?.status === 'done' && envelope?.details?.chunks !== undefined) {
+      let mtime = 0
+      try { mtime = d.statSync(envelopePath).mtimeMs || 0 } catch { /* unknown ordering is deterministic below */ }
+      candidates.push({ envelopePath, envelope, mtime })
+    }
+  }
+  // Newest wins: a parent that re-plans lands a second accepted envelope under the
+  // same returns directory, and the later program supersedes the earlier scope.
+  candidates.sort((a, b) => a.mtime - b.mtime || a.envelopePath.localeCompare(b.envelopePath))
+  const selected = candidates[candidates.length - 1]
+  if (!selected) refuse(`no accepted planner envelope with details.chunks under ${root}`, CHUNKS_ABSENT)
+  const chunks = selected.envelope.details.chunks
+  if (!Array.isArray(chunks) || chunks.length === 0) refuse(`planner envelope ${selected.envelopePath} has no non-empty chunks array`, BATCH_UNREADABLE)
+  for (const chunk of chunks) {
+    if (!chunk || typeof chunk !== 'object' || typeof chunk.id !== 'string' || chunk.id.trim() === ''
+      || !Array.isArray(chunk.files_in_scope) || chunk.files_in_scope.length === 0
+      || !Array.isArray(chunk.checks) || chunk.checks.length === 0) {
+      refuse(`planner envelope ${selected.envelopePath} has malformed chunk shape`, BATCH_UNREADABLE)
+    }
+  }
+  return { envelopePath: selected.envelopePath, parentScope: selected.envelope.details.files_in_scope ?? [], chunks: chunks.map((chunk) => ({ ...chunk, depends_on: Array.isArray(chunk.depends_on) ? chunk.depends_on : [] })) }
+}
+
+export function checkChunkScope({ chunkId, files, parentScope } = {}) {
+  try { return checkPlanScope({ lane: chunkId, declared: files, files: parentScope }) } catch (err) {
+    if (err instanceof BatchRefusal && err.reason === PLAN_SCOPE_OUTSIDE_FENCE) {
+      refuse(`chunk ${chunkId} declares files outside parent scope: ${(Array.isArray(files) ? files : []).join(', ')}`, CHUNK_SCOPE_OUTSIDE_PARENT)
+    }
+    throw err
+  }
+}
+
+export function chunkFlagArgs({ id }) { return ['--chunked', '--chunk', String(id)] }
+
+export function compileChunkBatch({ parentLaneDir, batchDir, parentLane, runFlags = {}, only = null, parentDir = null, dbPath = null, deps } = {}) {
+  const d = {
+    mkdirSync: deps?.mkdirSync || mkdirSync,
+    writeFileSync: deps?.writeFileSync || writeFileSync,
+    readFileSync: deps?.readFileSync || fsReadFileSync,
+    existsSync: deps?.existsSync || fsExistsSync,
+  }
+  const program = readChunkProgram({ parentLaneDir, deps })
+  const selected = only == null ? program.chunks : program.chunks.filter((chunk) => chunk.id === String(only))
+  if (only != null && selected.length === 0) refuse(`--only ${only} does not name a chunk in ${program.envelopePath}`, BATCH_UNREADABLE)
+  for (const chunk of selected) checkChunkScope({ chunkId: chunk.id, files: chunk.files_in_scope, parentScope: program.parentScope })
+  if (only != null) {
+    // Settlement is probed under the worktree parent, where lane checkouts live —
+    // the same directory the wave gate probes. The batch directory's own parent
+    // is not that directory, so deriving the probe from it looks in the wrong place.
+    const worktreeParent = typeof parentDir === 'string' && parentDir.trim() !== '' ? resolve(parentDir) : dirname(resolve(batchDir || process.cwd()))
+    for (const dep of selected[0].depends_on) {
+      const outcome = laneOutcome({ lane: `${parentLane}-${dep}`, laneDir: join(worktreeParent, `dt-${parentLane}-${dep}`), deps })
+      if (outcome.status !== 'done') refuse(`chunk ${only} depends on unsettled chunk ${dep}`, CHUNK_DEPS_UNSETTLED)
+    }
+  }
+  const chunkParentArchive = resolve(parentLaneDir)
+  const lanes = selected.map((chunk) => {
+    const lane = `${parentLane}-${chunk.id}`
+    // Chunk ids become lane names here; the existing rule-7 predecessor gate then
+    // defers later chunks when an earlier chunk escalates or remains unsettled.
+    const depends_on = chunk.depends_on.map((dep) => `${parentLane}-${dep}`)
+    const assurance = runFlags.assurance ?? runFlags.tier ?? 'quick'
+    const checks = chunk.checks.map((check) => typeof check === 'string' ? check : check?.name || check?.label || String(check))
+    const request = {
+      ask: `Chunk ${chunk.id}: ${chunk.summary || 'implement the assigned chunk'} — ${parentLane}`,
+      where: chunk.files_in_scope,
+      done_means: `owned checks pass: ${checks.join(', ')}`,
+      out_of_scope: 'everything outside this chunk files_in_scope',
+      depends_on, assurance,
+      adopt: chunkParentArchive,
+      chunk: { parent: parentLane, id: chunk.id },
+    }
+    d.mkdirSync(resolve(batchDir), { recursive: true })
+    d.writeFileSync(join(resolve(batchDir), `${lane}.request.json`), JSON.stringify(request, null, 2) + '\n')
+    return { lane, chunk, depends_on, checks_owned: checks }
+  })
+  const fencePath = join(resolve(batchDir), 'chunk.fences.json')
+  let register = { lanes: [] }
+  try { register = JSON.parse(d.readFileSync(fencePath, 'utf8')) } catch { /* missing or interrupted register starts fresh */ }
+  const existing = Array.isArray(register.lanes) ? register.lanes.filter((entry) => !lanes.some((item) => item.lane === entry?.lane)) : []
+  register = { ...register, lanes: [...existing, ...lanes.map(({ lane, chunk }) => ({ lane, files: chunk.files_in_scope }))] }
+  d.writeFileSync(fencePath, JSON.stringify(register, null, 2) + '\n')
+  // Waves are planned over the FULL program, never the --only subset: a selected
+  // lane's predecessors live outside the selection, and planning the subset alone
+  // would refuse dependency-unknown on dependencies already proven settled above.
+  const waves = planWaves({ lanes: program.chunks.map((chunk) => ({ lane: `${parentLane}-${chunk.id}`, depends_on: chunk.depends_on.map((dep) => `${parentLane}-${dep}`) })) }).waves
+  // The ledger write needs a real database path: runFlags carry no --dbPath flag,
+  // so an undefined dbPath would throw inside openLedger and record zero rows.
+  // main supplies defaultDbPath(); direct callers (gate, tests) pass dbPath.
+  // With neither, recording is skipped rather than failed into a stderr line.
+  const chunkDbPath = dbPath ?? runFlags.dbPath ?? null
+  if (chunkDbPath != null || runFlags._openLedger) {
+    try { recordChunkRuns({ dbPath: chunkDbPath, parentLane, rows: lanes.map((item) => ({ chunk_id: item.chunk.id, lane: item.lane, wave: waves.findIndex((wave) => wave.includes(item.lane)) + 1, depends_on: item.depends_on, checks_owned: item.checks_owned })), _openLedger: runFlags._openLedger }) } catch { /* instrumentation never blocks compilation */ }
+  }
+  return { lanes: lanes.map((item) => item.lane), waves, fencePath }
+}
+
+export function mergeChunkFences({ fences, compiledFencePath, deps } = {}) {
+  const d = { readFileSync: deps?.readFileSync || fsReadFileSync }
+  let compiled = null
+  try { compiled = JSON.parse(d.readFileSync(compiledFencePath, 'utf8')) } catch (err) {
+    refuse(`cannot read compiled chunk fences ${compiledFencePath}: ${err?.message || String(err)}`, BATCH_UNREADABLE)
+  }
+  const compiledLanes = Array.isArray(compiled?.lanes) ? compiled.lanes : []
+  const seen = new Set((Array.isArray(fences) ? fences : []).map((entry) => entry?.lane))
+  const merged = [...(Array.isArray(fences) ? fences : [])]
+  for (const lane of compiledLanes) {
+    if (!lane || typeof lane.lane !== 'string' || seen.has(lane.lane)) continue
+    seen.add(lane.lane)
+    merged.push(lane)
+  }
+  return merged
 }
 
 export function planWaves({ lanes } = {}) {
@@ -3388,7 +3537,7 @@ function recordIntent({ intent, crewPath, crewDir, lane, deps } = {}) {
   return { intent }
 }
 
-export function bootCommand({ lane, laneDir, tier, registerPath, transport, seats, runFlags = {}, charterArm = 'control' }) {
+export function bootCommand({ lane, laneDir, tier, registerPath, transport, seats, runFlags = {}, charterArm = 'control', chunk = null }) {
   const tierArgs = ['--assurance', ASSURANCE_ALIASES[tier]]
   return {
     file: 'node',
@@ -3405,6 +3554,9 @@ export function bootCommand({ lane, laneDir, tier, registerPath, transport, seat
       ...shortfallFlagArgs(seats),
       ...memoryFlagArgs(runFlags),
       ...turnCeilingFlagArgs(runFlags),
+      // chunk arrives as its own field: lane here is the lane NAME string, which
+      // carries no chunk meta, so reading the identity off lane would never fire.
+      ...(chunk?.id != null ? chunkFlagArgs({ id: chunk.id }) : []),
       ...(charterArm !== 'control' ? ['--charter-arm', charterArm] : []),
       // crew.mjs boot knows no --panes flag (KNOWN_FLAGS.boot, crew/crew.mjs:2232):
       // a pane seat is what boot produces WITHOUT --headless-all, so the pane
@@ -3430,7 +3582,7 @@ function bootOnce({ item, registerPath, transport, runFlags, deps }) {
   const d = normalDeps(deps)
   let result
   const laneRegisterPath = item.runtimeRegisterPath || registerPath
-  try { result = d.spawn(bootCommand({ lane: item.lane, laneDir: item.plan.dir, tier: item.tier, registerPath: laneRegisterPath, transport, seats: item.seats, runFlags, charterArm: item.charterArm })) } catch (err) {
+  try { result = d.spawn(bootCommand({ lane: item.lane, laneDir: item.plan.dir, tier: item.tier, registerPath: laneRegisterPath, transport, seats: item.seats, runFlags, charterArm: item.charterArm, chunk: item.chunk })) } catch (err) {
     return { ok: false, result: null, floorReason: null, why: err?.message || String(err) }
   }
   if (result && result.status === 0) return { ok: true, result, floorReason: null, why: null }
@@ -3526,7 +3678,7 @@ function preflightRunOptions({ execution, runFlags = {}, lanes = [] } = {}) {
   }
 }
 
-function runCommand({ lane, laneDir, briefPath, files, execution, keep, runFlags = {} }) {
+function runCommand({ lane, laneDir, briefPath, files, execution, keep, runFlags = {}, chunk = null }) {
   const args = ['crew/crew.mjs', 'run', '--task', lane, '--checkout', laneDir, '--brief-file', briefPath]
   if (keep) args.push('--keep')
   const add = (flag, value) => {
@@ -3536,6 +3688,7 @@ function runCommand({ lane, laneDir, briefPath, files, execution, keep, runFlags
   add('execution', execution)
   add('files-in-scope', files.map((entry) => parseFenceScope(entry).path).join(','))
   add('validation-lane', runFlags['validation-lane'])
+  if (chunk?.id != null) args.push(...chunkFlagArgs({ id: chunk.id }))
   for (const flag of [
     'plan-rounds', 'build-rounds', 'review-rounds', 'wait-builder', 'wait-planner',
     'wait-reviewer', 'wait-lead', 'wait-tech-lead', 'suite',
@@ -4022,7 +4175,7 @@ async function compileDispatchWave(prepared) {
       outDir: outputDir,
       d,
     })
-    settled.push({ ...item, plan, floor, prompt, tier: result.tier, execution: laneExecution, variant: laneVariant, seats, staffing, charterArm, enrollments, record: recordPath, runtimeRegisterPath })
+    settled.push({ ...item, plan, floor, prompt, tier: result.tier, execution: laneExecution, variant: laneVariant, seats, staffing, charterArm, enrollments, record: recordPath, runtimeRegisterPath, chunk: laneEntry?.chunk ?? null })
   }
 
   // #658: every lane whose plan IS its brief is validated before ANY lane boots — the brief is
@@ -4163,6 +4316,7 @@ function launchDispatchWave(compiled) {
           execution: item.execution,
           keep,
           runFlags,
+          chunk: item.chunk,
         }),
         background: true,
         logPath: runLog,
@@ -4226,7 +4380,7 @@ export function parseCliArgs(argv) {
   const flags = {}
   const positional = []
   const valueFlags = new Set([
-    'batch', 'fences', 'checkout', 'parent', 'out', 'tier', 'assurance', 'execution', 'variant', 'wave', 'planner-symbols-holdout-fraction', 'charter-terse-holdout-fraction', 'charter-lean-holdout-fraction', 'brief-tripwires-holdout-fraction',
+    'batch', 'fences', 'checkout', 'parent', 'out', 'tier', 'assurance', 'execution', 'variant', 'wave', 'from-plan', 'only', 'planner-symbols-holdout-fraction', 'charter-terse-holdout-fraction', 'charter-lean-holdout-fraction', 'brief-tripwires-holdout-fraction',
     'plan-rounds', 'build-rounds', 'review-rounds', 'wait-builder', 'wait-planner',
     'wait-reviewer', 'wait-lead', 'wait-tech-lead', 'validation-lane', 'suite', 'baseline',
     TURN_CENSUS_FLAG,
@@ -4274,6 +4428,20 @@ export async function main(argv, deps = {}) {
     const checkout = resolve(typeof flags.checkout === 'string' ? flags.checkout : process.cwd())
     const parentDir = typeof flags.parent === 'string' ? resolve(flags.parent) : dirname(checkout)
     const outDir = typeof flags.out === 'string' ? resolve(flags.out) : join(resolve(flags.batch), 'out')
+    const runFlags = flags
+    const chunkMode = typeof runFlags['from-plan'] === 'string' && runFlags['from-plan'].trim() !== '';
+    if (flags.only != null && !chunkMode) refuse('--only requires --from-plan <parent-lane-dir>', BATCH_UNREADABLE)
+    let compiledFencePath = null
+    if (chunkMode) {
+      const parentLaneDir = resolve(flags['from-plan'])
+      const parentLane = basename(parentLaneDir).replace(/^dt-/, '')
+      // The chunk ledger write needs a real database path, resolved here where
+      // the operator's environment is available — never left undefined.
+      let chunkDbPath = null
+      try { chunkDbPath = defaultDbPath() } catch { chunkDbPath = null }
+      const compiled = compileChunkBatch({ parentLaneDir, batchDir: resolve(flags.batch), parentLane, runFlags: flags, only: flags.only ?? null, parentDir, dbPath: chunkDbPath, deps })
+      compiledFencePath = compiled.fencePath
+    }
     const requestedExecution = resolveRequestedExecution({ execution: flags.execution, variant: flags.variant })
     const requestedTier = resolveRequestedTier({ tier: flags.tier, assurance: flags.assurance })
     let register
@@ -4283,9 +4451,16 @@ export async function main(argv, deps = {}) {
       if (err instanceof BatchRefusal) throw err
       refuse(`cannot read or validate fences ${flags.fences}: ${err?.message || String(err)}`, BATCH_UNREADABLE)
     }
+    let mergedFences = register.fences
+    if (compiledFencePath != null) {
+      // Without this merge the dispatch below would run the compiled lanes against
+      // the operator's register, which names none of them — the per-chunk fence
+      // context the compiler just derived would be written to disk and thrown away.
+      mergedFences = mergeChunkFences({ fences: register.fences, compiledFencePath, deps })
+    }
     await dispatchBatch({
       batchDir: resolve(flags.batch),
-      fences: register.fences,
+      fences: mergedFences,
       registerPath: undefined,
       checkout,
       parentDir,

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { appendFileSync as fsAppendFileSync, existsSync as fsExistsSync, mkdirSync, readFileSync, readdirSync as fsReaddirSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync as fsAppendFileSync, existsSync as fsExistsSync, mkdirSync, readFileSync, readdirSync as fsReaddirSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
@@ -67,6 +67,10 @@ import {
   adoptSourceDir,
   checkFences,
   checkPlanScope,
+  compileChunkBatch,
+  mergeChunkFences,
+  readChunkProgram,
+  chunkFlagArgs,
   checkMachineryBudget,
   collectAnchorPins,
   collectTestReach,
@@ -5532,4 +5536,149 @@ test('checkFences warns with the citation-carrier prefix and names the fence add
     assert.equal(warning.text.includes(retired), false, `retired carrier wording: ${retired}`)
   }
   assert.equal(warning.text.includes(CITATION_CARRIER_BLIND_SPOT), true)
+})
+
+// ---------------------------------------------------------------------------
+// Chunked dispatch (b836) — permanent guards for review round-1 must-fix set
+// ---------------------------------------------------------------------------
+
+function chunkParentFixture(name, chunks, parentScope) {
+  const dir = join(root, name)
+  mkdirSync(join(dir, 'returns', 'run1'), { recursive: true })
+  put(join(dir, 'returns', 'run1', 'd1.planner.json'), JSON.stringify({
+    assignment_id: 'chunk-guard', role: 'planner', status: 'done', summary: 'chunk guard parent', artifacts: [],
+    details: { files_in_scope: parentScope, chunks },
+  }))
+  // Compiled lanes adopt the parent archive, so the fixture carries the adopted
+  // files a real parent task dir holds; without them resolveAdoptions refuses.
+  mkdirSync(join(dir, 'task'), { recursive: true })
+  put(join(dir, 'task', 'plan.md'), '# guard parent plan\n')
+  put(join(dir, 'task', 'gate.mjs'), 'export const checks = []\n')
+  return dir
+}
+
+const CHUNK_GUARD_CHUNKS = [
+  { id: 'c1', summary: 'one', files_in_scope: ['src/owned.mjs'], checks: ['A1'], depends_on: [] },
+  { id: 'c2', summary: 'two', files_in_scope: ['src/coupled.mjs'], checks: ['B1'], depends_on: ['c1'] },
+  { id: 'c3', summary: 'three', files_in_scope: ['src/stale.mjs'], checks: ['C1'], depends_on: ['c2'] },
+]
+const CHUNK_GUARD_SCOPE = ['src/owned.mjs', 'src/coupled.mjs', 'src/stale.mjs']
+
+test('RV1-1 compileChunkBatch records chunk_runs rows at the given dbPath', () => {
+  const parent = chunkParentFixture('rv11-parent', CHUNK_GUARD_CHUNKS, CHUNK_GUARD_SCOPE)
+  const batch = join(root, 'rv11-batch')
+  mkdirSync(batch, { recursive: true })
+  const dbPath = join(scratchDir('rv11-ledger-'), 'ledger.db')
+  const result = compileChunkBatch({ parentLaneDir: parent, batchDir: batch, parentLane: 'rv11-parent', dbPath })
+  assert.deepEqual(result.lanes, ['rv11-parent-c1', 'rv11-parent-c2', 'rv11-parent-c3'])
+  const handle = openLedger({ dbPath, stderr: { write: () => {} } })
+  try {
+    const rows = handle.dumpTable('chunk_runs')
+    assert.equal(rows.length, 3)
+    const c1 = rows.find((row) => row.chunk_id === 'c1')
+    assert.equal(c1.parent_lane, 'rv11-parent')
+    assert.equal(c1.lane, 'rv11-parent-c1')
+    assert.deepEqual(JSON.parse(c1.checks_owned), ['A1'])
+    assert.deepEqual(JSON.parse(c1.depends_on), [])
+  } finally {
+    handle.close()
+  }
+})
+
+test('RV1-2 main merges compiled chunk fences into the dispatched register', async () => {
+  const checkout = gitFixture()
+  const parent = chunkParentFixture('rv12-parent', CHUNK_GUARD_CHUNKS, CHUNK_GUARD_SCOPE)
+  const batch = join(root, 'rv12-batch')
+  mkdirSync(batch, { recursive: true })
+  const register = join(root, 'rv12-fences.json')
+  put(register, JSON.stringify({ lanes: [] }))
+  const outDir = join(root, 'rv12-out')
+  const dbPath = join(scratchDir('rv12-ledger-'), 'ledger.db')
+  const previous = process.env.DEVTEAM_LEDGER_DB
+  process.env.DEVTEAM_LEDGER_DB = dbPath
+  let code
+  try {
+    code = await main([
+      '--batch', batch,
+      '--fences', register,
+      '--checkout', checkout,
+      '--parent', root,
+      '--out', outDir,
+      '--from-plan', parent,
+      '--dry-run',
+    ], { home: root, existsSync: (p) => fsExistsSync(p), spawn: () => ({ status: 1 }), log: () => {} })
+  } finally {
+    if (previous === undefined) delete process.env.DEVTEAM_LEDGER_DB
+    else process.env.DEVTEAM_LEDGER_DB = previous
+  }
+  assert.equal(code, 0)
+  const effective = JSON.parse(readFileSync(join(outDir, 'dispatch.fences.json'), 'utf8'))
+  for (const lane of ['rv12-parent-c1', 'rv12-parent-c2', 'rv12-parent-c3']) {
+    assert.ok(effective.lanes.some((entry) => entry.lane === lane), `dispatched register has no ${lane}`)
+  }
+  const handle = openLedger({ dbPath, stderr: { write: () => {} } })
+  try {
+    assert.equal(handle.dumpTable('chunk_runs').length, 3)
+  } finally {
+    handle.close()
+  }
+})
+
+test('RV1-3 --only probes dependency settlement under parentDir', () => {
+  const workParent = scratchDir('rv13-work-')
+  const home = scratchDir('rv13-home-')
+  const parent = chunkParentFixture('rv13-parent', CHUNK_GUARD_CHUNKS.slice(0, 2), CHUNK_GUARD_SCOPE.slice(0, 2))
+  const batch = join(scratchDir('rv13-batchroot-'), 'batch')
+  mkdirSync(batch, { recursive: true })
+  // Settle rv13p-c1 under the worktree parent: a live crew dir whose returns
+  // task envelope reads done.
+  const laneDir = join(workParent, 'dt-rv13p-c1')
+  const crewPath = crewJsonPath({ checkout: laneDir, lane: 'rv13p-c1', deps: { home } })
+  mkdirSync(join(crewPath, '..', 'returns'), { recursive: true })
+  put(join(crewPath, '..', 'returns', 'task.json'), JSON.stringify({ status: 'done', details: {} }))
+  const settled = compileChunkBatch({
+    parentLaneDir: parent, batchDir: batch, parentLane: 'rv13p', only: 'c2',
+    parentDir: workParent, deps: { home },
+  })
+  assert.deepEqual(settled.lanes, ['rv13p-c2'])
+  // Settlement evidence lives in the crew home keyed by lane: a home with no
+  // evidence for the predecessor is unsettled and refuses.
+  const error = thrown(() => compileChunkBatch({
+    parentLaneDir: parent, batchDir: batch, parentLane: 'rv13p', only: 'c2',
+    parentDir: workParent, deps: { home: scratchDir('rv13-empty-home-') },
+  }))
+  assert.ok(error instanceof BatchRefusal)
+  assert.equal(error.reason, 'chunk-deps-unsettled')
+})
+
+test('RV1-4 bootCommand threads chunk identity flags', () => {
+  const base = { lane: 'p-c1', laneDir: '/tmp/dispatching-lane', tier: 'build', registerPath: '/tmp/register.json', transport: BOOT_TRANSPORT, seats: {}, runFlags: {} }
+  const withChunk = bootCommand({ ...base, chunk: { parent: 'p', id: 'c1' } })
+  const flagIndex = withChunk.args.indexOf('--chunked')
+  assert.notEqual(flagIndex, -1)
+  assert.deepEqual(withChunk.args.slice(flagIndex, flagIndex + 3), ['--chunked', '--chunk', 'c1'])
+  assert.deepEqual(chunkFlagArgs({ id: 'c1' }), ['--chunked', '--chunk', 'c1'])
+  const withoutChunk = bootCommand(base)
+  assert.equal(withoutChunk.args.includes('--chunked'), false)
+  assert.equal(withoutChunk.args.includes('--chunk'), false)
+})
+
+test('chunk program selects the newest accepted planner envelope', () => {
+  const dir = join(root, 'rv15-parent')
+  mkdirSync(join(dir, 'returns', 'run1'), { recursive: true })
+  const oldPath = join(dir, 'returns', 'run1', 'a.planner.json')
+  const newPath = join(dir, 'returns', 'run1', 'b.planner.json')
+  put(oldPath, JSON.stringify({
+    assignment_id: 'chunk-guard', role: 'planner', status: 'done', summary: 'old', artifacts: [],
+    details: { files_in_scope: CHUNK_GUARD_SCOPE, chunks: [{ id: 'c-old', summary: 'old', files_in_scope: ['src/owned.mjs'], checks: ['A1'], depends_on: [] }] },
+  }))
+  put(newPath, JSON.stringify({
+    assignment_id: 'chunk-guard', role: 'planner', status: 'done', summary: 'new', artifacts: [],
+    details: { files_in_scope: CHUNK_GUARD_SCOPE, chunks: [{ id: 'c-new', summary: 'new', files_in_scope: ['src/owned.mjs'], checks: ['A1'], depends_on: [] }] },
+  }))
+  // Same-millisecond writes must not decide: the older program is explicitly older.
+  utimesSync(oldPath, new Date('2024-01-01T00:00:00Z'), new Date('2024-01-01T00:00:00Z'))
+  utimesSync(newPath, new Date('2024-06-01T00:00:00Z'), new Date('2024-06-01T00:00:00Z'))
+  const program = readChunkProgram({ parentLaneDir: dir })
+  assert.deepEqual(program.chunks.map((chunk) => chunk.id), ['c-new'])
 })

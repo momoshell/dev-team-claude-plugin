@@ -1964,3 +1964,24 @@ function triageResponse(cause = 'budget', evidence = 'measured budget exhaustion
 export {
   NONCE_PREFIX, SCRIPT, require, SQLITE_OK, SKIP, bootTieredRun, bootBriefRun, fixture, paneReviewRun, spawnedChildren, trackChild, nextDir, run, openTestLedger, openB499Ledger, seedCellUsage, makeUnenforcedSeatIndexDb, exerciseEveryWriter, seedTaskAgentSession, MARKER_ADW, seedAllWritersWithMarker, MARKER_PLAIN, MARKER_NONCE_ONLY, CALIBRATED_RENDEZVOUS_DELAY_MS, CALIBRATED_RENDEZVOUS_DELAYS_MS, resolveRendezvousDelayMs, waitForEmitterReady, runConcurrentEmitterTrial, RUNSET_SINCE, RUNSET_UNTIL, seedRun, seedConfigurationRun, seedConfigurationSeat, EXECUTION_AXIS_BOOT_CONFIGURATION, executionAxisState, writeExecutionAxisCrew, writeExecutionAxisJournal, executionAxisRuntime, executionAxisRow, readerFixture, ADVISOR_AB_EPOCH, advisorAbFixture, advisorAbEnvelope, advisorAbFinding, runAdvisorAb, advisorReasons, advisorNote, SANDBOX_LEDGER_URL, SANDBOX_DEFAULT_RESOLVER, runSandboxChild, B381_PROVIDER_FAILURE_LINE, B395_SLOT_WAIT_GATE_LINE, B395_SLOT_WAIT_WARM_LINE, B395_SLOT_WAIT_COLD_LINE, B395_OLD_CORPUS_LINES, B381_PLAN_SCOPE_LINE, B381_TIMEOUT_REASK_LINE, B381_RPC_EXIT_LINE, B381_PLAN_ADOPTION_LINE, B381_EXTERNAL_REGISTER, ingestJournalLine, journalFactsCli, measuredJournalFactsDb, assertMeasuredAndAbsent, writeTurnsCorpusJournal, turnsCorpusPayload, builderTurnRole, holdoutLedger, addHoldoutLane, holdoutRows, TRIAGE_MODEL, makeTriageFixture, triageLedger, triageResponse,
 }
+
+test('chunk_runs records per-chunk links and chunkProgress reports owned and total', () => {
+  const ledger = openTestLedger()
+  ledger.recordChunkRun({ parent_lane: 'chunk-guard', chunk_id: 'c1', lane: 'chunk-guard-c1', wave: 1, depends_on: [], checks_owned: ['A1'] })
+  ledger.recordChunkRun({ parent_lane: 'chunk-guard', chunk_id: 'c2', lane: 'chunk-guard-c2', wave: 2, depends_on: ['chunk-guard-c1'], checks_owned: ['B1'] })
+  const stored = ledger.dumpTable('chunk_runs')
+  assert.equal(stored.length, 2)
+  assert.deepEqual(JSON.parse(stored.find((row) => row.chunk_id === 'c2').depends_on), ['chunk-guard-c1'])
+  ledger.startSession({ adw_id: 'chunk-guard-c1', repo_slug: 'test', task_slug: 'chunk-guard-c1' })
+  ledger.recordGateResult({ adw_id: 'chunk-guard-c1', phase_id: 1, gate_name: 'gate', attempt: 1, ok: true, checks: ['A1'], gate_generation: 1 })
+  ledger.endSession({ adw_id: 'chunk-guard-c1', status: 'ok' })
+  const progress = ledger.chunkProgress('chunk-guard')
+  assert.equal(progress.total, 2)
+  assert.equal(progress.done, 1)
+  const c1 = progress.chunks.find((row) => row.chunk_id === 'c1')
+  assert.equal(c1.owned_total, 1)
+  assert.equal(c1.owned_green, 1)
+  const c2 = progress.chunks.find((row) => row.chunk_id === 'c2')
+  assert.equal(c2.owned_green, null)
+  assert.equal(c2.absent_reason, 'chunk-lane-unbooted')
+})

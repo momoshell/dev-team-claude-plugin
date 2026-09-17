@@ -32,6 +32,7 @@ The factory ledger is the register for run facts. When a session asks what happe
 | Which RPC exit contexts were recorded? | `node scripts/factory/ledger.mjs journal-facts [--since <iso>] [--until <iso>]` — prints `rpc_exits` by outcome beside `exits_seen`, the recorded exit-context denominator. The unit is one RPC exit context; an absent family is unmeasured, never a measured zero. |
 | How many turns and tool calls does a dispatch cost, by role and tier? | `node scripts/factory/ledger.mjs turns --since <iso> --until <iso>` — prints the `seat_turn_census` totals, the `dispatches` denominator, and `by_role_tier` rows. A null cell with an absence marker is unmeasured, never a measured zero. The unit is one seat dispatch. |
 | Which adopted plans were recorded? | `node scripts/factory/ledger.mjs journal-facts [--since <iso>] [--until <iso>]` — prints `plan_adoptions`, including file and finding totals, beside `adoptions_seen`, the recorded-adoption denominator. The unit is one adopted plan; an absent family is unmeasured, never a measured zero. |
+| How is a parent lane's chunk build progressing? | `node scripts/factory/ledger.mjs chunk-progress <parent_lane>` — prints each chunk's owned-total, owned-green, stage and closed absence marker, plus chunks done / chunks total. |
 | Which external fence lanes were registered? | `node scripts/factory/ledger.mjs journal-facts [--since <iso>] [--until <iso>]` — prints `external_fences`, including file/read totals, beside `lanes_seen`, the distinct-lane denominator. The unit is one dispatch-register lane entry; an absent family is unmeasured, never a measured zero. |
 | How often does a plan-time mutation anchor miss the built tree, and how often did the builder correct it? | `node scripts/factory/ledger.mjs journal-facts [--since <iso>] [--until <iso>]` — prints `mutation_anchors`: `binds` (one per bind-check pass), `absences` and `corrections`, `by_correction` over the closed `none`/`refused`/`accepted` set and `by_refusal` over the terminal refusal reasons, beside `declarations_seen`, the declared-anchor denominator. The unit is one declared mutation anchor. `absences: 0` on a measured window is a real zero — every declaration bound; an absent family is unmeasured, never a measured zero. Before #874 this rate had no writer, so the two known cases (b384-suiteslot, b381-journalfacts) are a floor and not a rate. |
 | How much time did lanes lose waiting for a suite slot, and over how many waits? | `node scripts/factory/ledger.mjs journal-facts [--since <iso>] [--until <iso>]` — prints `phase_slot_waits`: `waited_ms` beside `waits`, its denominator, `by_day` splitting both terms by UTC day, `by_kind` over the closed `gate`/`suite-warm`/`suite-cold` set, and `depth_absent`, how many waits never scanned a queue depth. The unit is one recorded wait; an absent family is unmeasured, never a measured zero. See **Recipe M**. |
@@ -718,6 +719,26 @@ per-seat-session (unit: one pi seat session)
 ```
 
 **The claude half is deliberately `left unpriced` here.** A claude transcript frame carries token counts and no cost field, so pricing it needs a rate source and a decision about which rates are authoritative — and `ledger cells` already computes `cost_usd` from `crew/roster.json` rates under `CELL_PRICE_UNITS` (`scripts/factory/ledger.mjs:321`), the OPEN CONTRADICTION (#626) recorded above. Recipe H prices claude pane seats from that same roster. Until #626 is decided, this recipe prices only the half that prices itself rather than adding a second authority.
+
+### Recipe Chunk progress — owned checks and completed chunks
+
+```sh
+node scripts/factory/ledger.mjs chunk-progress <parent_lane>
+```
+
+The per-chunk denominator is **owned checks green / owned total** (`owned-green / owned-total`); the parent denominator is **chunks done / chunks total**. A lane with no session is unmeasured with `chunk-lane-unbooted`; a booted lane with no latest gate result is unmeasured with `gate-not-run`. Null values are closed absence vocabulary, never measured zeroes.
+
+The equivalent SQL shape is:
+
+```sql
+SELECT cr.parent_lane, cr.chunk_id, cr.lane, cr.wave,
+       cr.checks_owned AS owned_total,
+       s.status AS stage, g.checks_json
+FROM chunk_runs cr
+LEFT JOIN sessions s ON s.task_slug = cr.lane
+LEFT JOIN gate_results g ON g.adw_id = s.adw_id
+WHERE cr.parent_lane = ?;
+```
 
 ### Recipe L — which runs were reseated or operator-overridden?
 

@@ -574,6 +574,24 @@ export function recordCellFailure({ dbPath, stderr = process.stderr, _openLedger
   }
 }
 
+// Chunk links are N rows, one per compiled chunk, recorded after a --from-plan
+// compile. One-shot open, N rows, close. NEVER throws: instrumentation is never
+// load-bearing, exactly like openRun and emit().
+export function recordChunkRuns({ dbPath, parentLane, rows, stderr = process.stderr, _openLedger, ...fields } = {}) {
+  let handle = null
+  try {
+    handle = (_openLedger || openLedger)({ dbPath, stderr, ...fields })
+    const created_at = new Date().toISOString()
+    for (const row of Array.isArray(rows) ? rows : []) handle.recordChunkRun({ parent_lane: parentLane, ...row, created_at })
+    return true
+  } catch (err) {
+    try { stderr.write(`emit: chunk runs not recorded (${err?.message || String(err)})\n`) } catch { /* best effort */ }
+    return false
+  } finally {
+    try { if (handle) handle.close() } catch { /* best effort */ }
+  }
+}
+
 // A watch that aborts because instrumentation refused is a watch that lost
 // the cycle it was there to record. Keep this one-shot write non-load-bearing:
 // open one ledger, attempt one row, close it, and never throw.

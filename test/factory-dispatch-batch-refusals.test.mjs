@@ -92,6 +92,7 @@ import {
   planWorktrees,
   readsFromRefusal,
   readBatch,
+  compileChunkBatch,
   reconcileTier,
   seatChain,
   seatFlagArgs,
@@ -647,4 +648,31 @@ test('a ratified band-floor refusal is not retried', async () => {
   assert.equal(error.reason, 'seat-floor-conflict')
   assert.equal(boots, 1)
   assert.equal(teardowns, 0)
+})
+
+test('chunk program absent refuses chunks-absent with nothing written', async () => {
+  const parent = join(root, 'rv-absent-parent')
+  mkdirSync(join(parent, 'returns', 'run1'), { recursive: true })
+  const batch = join(root, 'rv-absent-batch')
+  mkdirSync(batch, { recursive: true })
+  const error = await thrownAsync(() => compileChunkBatch({ parentLaneDir: parent, batchDir: batch, parentLane: 'rvabsent' }))
+  assert.ok(error instanceof BatchRefusal)
+  assert.equal(error.reason, 'chunks-absent')
+})
+
+test('--only naming no chunk refuses batch-unreadable', async () => {
+  const parent = join(root, 'rv-only-parent')
+  mkdirSync(join(parent, 'returns', 'run1'), { recursive: true })
+  put(join(parent, 'returns', 'run1', 'd1.planner.json'), JSON.stringify({
+    assignment_id: 'chunk-guard', role: 'planner', status: 'done', summary: 'x', artifacts: [],
+    details: {
+      files_in_scope: ['a.mjs'],
+      chunks: [{ id: 'c1', summary: 'one', files_in_scope: ['a.mjs'], checks: ['A1'], depends_on: [] }],
+    },
+  }))
+  const batch = join(root, 'rv-only-batch')
+  mkdirSync(batch, { recursive: true })
+  const error = await thrownAsync(() => compileChunkBatch({ parentLaneDir: parent, batchDir: batch, parentLane: 'rvonly', only: 'c9' }))
+  assert.ok(error instanceof BatchRefusal)
+  assert.equal(error.reason, 'batch-unreadable')
 })

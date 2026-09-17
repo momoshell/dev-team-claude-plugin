@@ -1,5 +1,17 @@
 # Batch dispatch
 
+## Chunked plan dispatch
+
+`--from-plan <parent-lane-dir>` scans the accepted planner envelope under the parent returns directory, validates each chunk against the parent's scope, writes dependent request lanes and `chunk.fences.json`, then continues through the ordinary dispatch pipeline. Use `--only <id>` to re-dispatch one chunk after its predecessors settle; chunk `depends_on` values are mapped to lane names before wave planning.
+
+| Refusal | Meaning |
+| --- | --- |
+| `chunks-absent` | no accepted planner envelope with a chunk program was found |
+| `chunk-scope-outside-parent` | a chunk declares a path outside the parent scope |
+| `chunk-deps-unsettled` | `--only` names a chunk whose predecessor is not done |
+
+The compiler validates all selected chunk scopes before writing request files, and chunk progress is available with `node scripts/factory/ledger.mjs chunk-progress <parent_lane>`.
+
 Dispatch a batch in this order, and record what refuses at each boundary:
 
 ADR-045 makes a fence and request scope **context**, not write enforcement. They tell a lane what to read and preserve useful observations; they are never a lock or an authority to refuse a write.

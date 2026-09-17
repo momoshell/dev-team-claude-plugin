@@ -4865,6 +4865,17 @@ test('RV1-2 review_panel refuses every invalid adjudication cover', () => {
     assert.equal(result.details.panel.failure.reason, 'panel-adjudication-invalid', label)
     assert.match(result.details.panel.failure.why, why, label)
   }
+
+  // The seat contract names TOP-LEVEL details.adjudications. A nested details.panel.adjudications
+  // form was accepted by an undeclared fallback and nothing guarded its removal.
+  // MUTATION RV1-2-nested: restore the fallback at the adjudications assignment and this reddens.
+  const nested = driveTask(panelContext(), strictPanelIo({
+    reviewer: panelEnvelope({ role: 'reviewer', findings: [finding] }),
+    adjudicator: panelEnvelope({ role: 'lead', details: { panel: { adjudications: [valid] } } }),
+  }))
+  assert.equal(nested.status, 'escalation')
+  assert.equal(nested.details.panel.failure.reason, 'panel-adjudication-invalid')
+  assert.match(nested.details.panel.failure.why, /details\.adjudications must be an array/)
 })
 
 test('H1 review_only remains byte-identical under panel execution', () => {

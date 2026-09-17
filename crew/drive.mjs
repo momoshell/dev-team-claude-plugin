@@ -542,7 +542,7 @@ export { parseFenceScope, validateFenceScope, fenceScopesIntersect } from './fen
 // terminals, so they are not a shape's own declared stages.
 export const EXECUTIONS = Object.freeze(['reviewed', 'envelope'])
 export const WRITE_SURFACES = Object.freeze(['planned', 'none'])
-export const ENVELOPE_FIELD_KINDS = Object.freeze(['text', 'records', 'paths'])
+export const ENVELOPE_FIELD_KINDS = Object.freeze(['text', 'records', 'paths', 'object'])
 // #915 — the planner's validation_lane is RESOLVED where it is ACCEPTED, not where it is
 // run. b428 burned all three build rounds on a lane naming three fixtures node's loader
 // cannot open: the lane is fixed at plan acceptance (:3781) and no seat may amend it, so
@@ -1195,6 +1195,10 @@ export function envelopeDefect(env, shape, { taskDir } = {}) {
       if (value.length === 0 && field.allow_empty !== true) return refuse('field-kind', `details.${field.name} must be a non-empty array`)
       if (value.some((path) => !text(path))) return refuse('field-item', `every details.${field.name} entry must be a non-empty path string`)
       if (new Set(value).size !== value.length) return refuse('field-item', `details.${field.name} must contain unique paths`)
+      continue
+    }
+    if (field.kind === 'object') {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return refuse('field-kind', `details.${field.name} must be a non-array object`)
       continue
     }
     // 'records'
@@ -6564,6 +6568,328 @@ function runTask(ctx, io, crash) {
   // which is deliberately not the reviewed shapes' vocabulary. Nothing here
   // branches on the shape's name: that is what makes the issue's other
   // envelope-only shape (`prompt`) a VARIANTS entry rather than new code.
+  const logEnvelopeAccepted = (accepted) => io.log(recordRow({ at: io.now(), envelope_accepted: accepted }))
+  const driveReviewPanelShape = () => {
+    let reviewIdentity
+    try {
+      reviewIdentity = reviewIdentityContext(ctx.review_identity)
+    } catch {
+      reviewIdentity = Object.freeze({ expected: null, defect: 'review-identity-malformed', evidence: REVIEW_IDENTITY_UNSERIALIZABLE })
+    }
+    const panelFailure = (reason, seat, evidence = null) => {
+      const failure = evidence && typeof evidence === 'object' && evidence.reason === reason
+        ? evidence
+        : { reason, seat, ...(evidence && typeof evidence === 'object' ? { evidence } : {}) }
+      const why = `${reason}${seat ? ` (${seat})` : ''}${failure.evidence ? `: ${failure.evidence.summary || failure.evidence.why || 'seat evidence recorded'}` : ''}`
+      const extraDetails = { panel: { failure } }
+      const escalationExtra = { reason, variant: 'review_panel', ...(seat ? { seat } : {}) }
+      if (reason === 'panel-write-refusal' || reason === 'panel-write-unproven') {
+        return escalate('scope', why, [], extraDetails, {}, escalationExtra)
+      }
+      return escalate('envelope', why, [], extraDetails, {}, escalationExtra)
+    }
+    const completePanelStage = () => { if (S.stages.at(-1) === 'review_panel:r1') stageComplete() }
+    const identityRefusal = () => {
+      const refusal = { reason: 'review-identity-malformed', expected: reviewIdentity?.evidence ?? null }
+      return panelFailure(refusal.reason, null, refusal)
+    }
+    if (reviewIdentity?.defect || reviewIdentity?.expected === null) return identityRefusal()
+
+    const seatList = Array.isArray(ctx.seatedRoles) ? ctx.seatedRoles : ctx.roles
+    if (!Array.isArray(seatList) || !seatList.includes('reviewer')) return panelFailure('panel-reviewer-absent', 'reviewer')
+    if (!seatList.includes('tech-lead')) return panelFailure('panel-partner-absent', 'tech-lead')
+    if (!seatList.includes('lead')) return panelFailure('panel-adjudicator-absent', 'lead')
+
+    const changeSetCommand = `git diff --name-only -z --end-of-options ${shellArg(`${reviewIdentity.expected.base_sha}...${reviewIdentity.expected.head_sha}`)} --`
+    let changeSetResult
+    try { changeSetResult = io.run(changeSetCommand) } catch (err) {
+      return panelFailure('panel-diff-probe-failed', null, { reason: 'panel-diff-probe-failed', error: err?.message ?? String(err) })
+    }
+    if (changeSetResult?.ok !== true || typeof changeSetResult.output !== 'string') {
+      return panelFailure('panel-diff-probe-failed', null, { reason: 'panel-diff-probe-failed', evidence: changeSetResult?.output ?? null })
+    }
+    const changedFiles = Object.freeze(changeSetResult.output.split('\0').filter((path) => path.length > 0))
+    const panelSeatBrief = (role, id = null, runId = null) => [
+      '# review_panel seat assignment',
+      '',
+      `You are the ${role} seat in a three-seat read-only review panel.`,
+      shape.assignment,
+      '',
+      `Immutable base_sha: ${reviewIdentity.expected.base_sha}`,
+      `Immutable head_sha: ${reviewIdentity.expected.head_sha}`,
+      'Declared changed files (the only coverage denominator):',
+      ...(changedFiles.length > 0 ? changedFiles.map((path) => `- ${path}`) : ['- (none)']),
+      '',
+      role === 'lead'
+        ? 'Return base and head, adjudications for every collision-safe divergent id, each disposition uphold or dismiss, each with a non-empty reason, and your own reviewed_files and unreviewable_files.'
+        : 'Return the complete review-only fields: base, head, outcome, findings, reviewed_files, and unreviewable_files. Review independently; do not rely on another seat or write to the checkout.',
+      'Do not create, edit, delete, checkout, or commit anything in the checkout. Read-only validation is permitted.',
+      `Transport identity is exact: assignment_id=${JSON.stringify(id ?? '<dispatch id>')}, run_id=${JSON.stringify(runId ?? '<current run id>')}, role=${JSON.stringify(role)}.`,
+    ].join('\n')
+    const writeBriefAndAssign = (role, file, note, briefBuilder) => {
+      try {
+        io.writeFile(file, briefBuilder())
+        return { env: assignAndWait(role, file, note, {
+          strictIdentity: true,
+          briefBuilder: ({ id, runId }) => briefBuilder(id, runId),
+        }), error: null }
+      } catch (error) {
+        return { env: null, error }
+      }
+    }
+    const provePanelZeroWrite = (seat, envelope) => {
+      let inventory
+      try { inventory = io.changedFiles() } catch (error) {
+        return { reason: 'panel-write-unproven', seat, paths: [], evidence: { error: error?.message ?? String(error) } }
+      }
+      if (!Array.isArray(inventory) || inventory.some((path) => typeof path !== 'string')) {
+        return { reason: 'panel-write-unproven', seat, paths: [], evidence: { inventory: null } }
+      }
+      const outOfScope = outOfScopeFiles(inventory, scopeMatcher([]))
+      if (outOfScope.length > 0) return { reason: 'panel-write-refusal', seat, paths: [...outOfScope], evidence: envelope?.summary ?? null }
+      return null
+    }
+    const failureEvidence = (env, error, defect = null) => ({
+      status: typeof env?.status === 'string' ? env.status : null,
+      summary: typeof env?.summary === 'string' ? env.summary : null,
+      error: error?.message ?? (error ? String(error) : null),
+      ...(defect ? { defect } : {}),
+      ...(env?.details?.envelope_refusal ? { envelope_refusal: env.details.envelope_refusal } : {}),
+    })
+    const failAfterSeat = (seat, reason, env, error, defect = null) => {
+      completePanelStage()
+      const evidence = defect && defect.reason === reason ? defect : failureEvidence(env, error, defect)
+      return panelFailure(reason, seat, evidence)
+    }
+
+    stage('review_panel:r1')
+    const reviewerBrief = art('review-panel-reviewer-r1.md')
+    const reviewerDispatch = writeBriefAndAssign('reviewer', reviewerBrief, 'review-panel-reviewer', (id, runId) => panelSeatBrief('reviewer', id, runId))
+    const reviewerEnv = reviewerDispatch.env
+    const reviewerWriteRefusal = provePanelZeroWrite('reviewer', reviewerEnv)
+    if (reviewerWriteRefusal) return failAfterSeat('reviewer', reviewerWriteRefusal.reason, reviewerEnv, reviewerDispatch.error, reviewerWriteRefusal)
+    if (reviewerDispatch.error || !reviewerEnv || reviewerEnv.status !== 'done') {
+      return failAfterSeat('reviewer', 'panel-reviewer-failed', reviewerEnv, reviewerDispatch.error)
+    }
+    const reviewerDefect = envelopeDefect(reviewerEnv, VARIANTS.review_only, { taskDir: ctx.taskDir })
+    if (reviewerDefect) return failAfterSeat('reviewer', 'panel-reviewer-failed', reviewerEnv, null, reviewerDefect)
+
+    const partnerBrief = art('review-panel-tech-lead-r1.md')
+    const partnerDispatch = writeBriefAndAssign('tech-lead', partnerBrief, 'review-panel-tech-lead', (id, runId) => panelSeatBrief('tech-lead', id, runId))
+    const partnerEnv = partnerDispatch.env
+    const partnerWriteRefusal = provePanelZeroWrite('tech-lead', partnerEnv)
+    if (partnerWriteRefusal) return failAfterSeat('tech-lead', partnerWriteRefusal.reason, partnerEnv, partnerDispatch.error, partnerWriteRefusal)
+    if (partnerDispatch.error || !partnerEnv || partnerEnv.status !== 'done') {
+      return failAfterSeat('tech-lead', 'panel-partner-failed', partnerEnv, partnerDispatch.error)
+    }
+    const partnerDefect = envelopeDefect(partnerEnv, VARIANTS.review_only, { taskDir: ctx.taskDir })
+    if (partnerDefect) return failAfterSeat('tech-lead', 'panel-partner-failed', partnerEnv, null, partnerDefect)
+
+    const returnedIdentity = { base_sha: reviewerEnv.details.base, head_sha: reviewerEnv.details.head }
+    const identityMismatch = returnedIdentity.base_sha !== reviewIdentity.expected.base_sha || returnedIdentity.head_sha !== reviewIdentity.expected.head_sha
+    const validateIdentity = (env, seat) => {
+      const identity = { base_sha: env.details.base, head_sha: env.details.head }
+      const mismatch = identity.base_sha !== reviewIdentity.expected.base_sha || identity.head_sha !== reviewIdentity.expected.head_sha
+      if (!mismatch) return null
+      return { reason: 'identity-mismatch', seat, expected: reviewIdentity.expected, returned: identity }
+    }
+    const reviewerIdentityRefusal = identityMismatch
+      ? { reason: 'identity-mismatch', seat: 'reviewer', expected: reviewIdentity.expected, returned: returnedIdentity }
+      : null
+    if (reviewerIdentityRefusal) return failAfterSeat('reviewer', 'identity-mismatch', reviewerEnv, null, reviewerIdentityRefusal)
+    const partnerIdentityRefusal = validateIdentity(partnerEnv, 'tech-lead')
+    if (partnerIdentityRefusal) return failAfterSeat('tech-lead', 'identity-mismatch', partnerEnv, null, partnerIdentityRefusal)
+    const reviewerCoverageDefect = reviewCoverageDefect(reviewerEnv.details, changedFiles)
+    if (reviewerCoverageDefect) return failAfterSeat('reviewer', 'coverage-invalid', reviewerEnv, null, { reason: 'coverage-invalid', seat: 'reviewer', why: reviewerCoverageDefect })
+    const partnerCoverageDefect = reviewCoverageDefect(partnerEnv.details, changedFiles)
+    if (partnerCoverageDefect) return failAfterSeat('tech-lead', 'coverage-invalid', partnerEnv, null, { reason: 'coverage-invalid', seat: 'tech-lead', why: partnerCoverageDefect })
+
+    const rawByPanelId = new Map()
+    const panelInputs = (role, env) => {
+      const findings = Array.isArray(env?.details?.findings) ? env.details.findings : []
+      return findings.map((finding, index) => {
+        const id = `panel-${role}-${index}`
+        rawByPanelId.set(id, finding)
+        return { ...finding, id }
+      })
+    }
+    const fused = fuseFindings(panelInputs('reviewer', reviewerEnv), panelInputs('tech-lead', partnerEnv), {
+      sourceA: 'reviewer', sourceB: 'tech-lead',
+    })
+    const allocatedIds = new Set()
+    let remint = 0
+    const allocateId = (id) => {
+      if (!allocatedIds.has(id)) {
+        allocatedIds.add(id)
+        return id
+      }
+      let minted = `panel-remint-${++remint}`
+      while (allocatedIds.has(minted)) minted = `panel-remint-${++remint}`
+      allocatedIds.add(minted)
+      return minted
+    }
+    const consensusRows = fused.consensus.map((finding) => {
+      const raw = rawByPanelId.get(finding.matched?.reviewer ?? finding.id) ?? null
+      const originId = raw?.id ?? finding.id
+      return {
+        ...finding,
+        id: allocateId(originId),
+        origin_id: originId,
+        raised_by: ['reviewer', 'tech-lead'],
+        raw,
+      }
+    })
+    const divergentRows = fused.divergent.map((finding) => {
+      const raw = rawByPanelId.get(finding.id) ?? null
+      const originId = raw?.id ?? finding.id
+      return {
+        ...finding,
+        id: allocateId(originId),
+        origin_id: originId,
+        raised_by: [finding.source],
+        raw,
+      }
+    })
+    const divergenceEntries = divergentRows.map(({ id, source, severity, location, summary }) => ({ id, source, severity, location, summary }))
+    const adjudicationBrief = art('review-panel-lead-r1.md')
+    const adjudicationText = [
+      '# review_panel adjudication', '',
+      'Adjudicate only these collision-safe divergent findings. Do not infer or add ids:',
+      ...(divergenceEntries.length > 0 ? divergenceEntries.map((entry) => `- ${JSON.stringify(entry)}`) : ['- (none)']),
+      '',
+      'Return base, head, adjudications, reviewed_files, and unreviewable_files. Each adjudication must be exactly one of uphold or dismiss and must include a non-empty reason.',
+      'Do not create, edit, delete, checkout, or commit anything in the checkout.',
+    ].join('\n')
+    const adjudicatorDispatch = writeBriefAndAssign('lead', adjudicationBrief, 'review-panel-adjudication', (id, runId) => `${adjudicationText}\nTransport identity is exact: assignment_id=${JSON.stringify(id ?? '<dispatch id>')}, run_id=${JSON.stringify(runId ?? '<current run id>')}, role="lead".`)
+    const adjudicatorEnv = adjudicatorDispatch.env
+    const adjudicatorWriteRefusal = provePanelZeroWrite('lead', adjudicatorEnv)
+    if (adjudicatorWriteRefusal) return failAfterSeat('lead', adjudicatorWriteRefusal.reason, adjudicatorEnv, adjudicatorDispatch.error, adjudicatorWriteRefusal)
+    if (adjudicatorDispatch.error || !adjudicatorEnv || adjudicatorEnv.status !== 'done') {
+      return failAfterSeat('lead', 'panel-adjudicator-failed', adjudicatorEnv, adjudicatorDispatch.error)
+    }
+    const adjudicatorFields = {
+      envelope_fields: VARIANTS.review_panel.envelope_fields.filter((field) => ['base', 'head', 'reviewed_files', 'unreviewable_files'].includes(field.name)),
+    }
+    const adjudicatorDefect = envelopeDefect(adjudicatorEnv, adjudicatorFields, { taskDir: ctx.taskDir })
+    if (adjudicatorDefect) return failAfterSeat('lead', 'panel-adjudicator-failed', adjudicatorEnv, null, adjudicatorDefect)
+    const adjudicatorIdentityRefusal = validateIdentity(adjudicatorEnv, 'lead')
+    if (adjudicatorIdentityRefusal) return failAfterSeat('lead', 'identity-mismatch', adjudicatorEnv, null, adjudicatorIdentityRefusal)
+    const adjudicatorCoverageDefect = reviewCoverageDefect(adjudicatorEnv.details, changedFiles)
+    if (adjudicatorCoverageDefect) return failAfterSeat('lead', 'coverage-invalid', adjudicatorEnv, null, { reason: 'coverage-invalid', seat: 'lead', why: adjudicatorCoverageDefect })
+    if (hasOwn(adjudicatorEnv.details, 'panel') && (!adjudicatorEnv.details.panel || typeof adjudicatorEnv.details.panel !== 'object' || Array.isArray(adjudicatorEnv.details.panel))) {
+      return failAfterSeat('lead', 'panel-adjudicator-failed', adjudicatorEnv, null, { reason: 'panel-object-invalid', why: 'details.panel must be a non-array object' })
+    }
+
+    const adjudications = Array.isArray(adjudicatorEnv.details.adjudications)
+      ? adjudicatorEnv.details.adjudications
+      : Array.isArray(adjudicatorEnv.details.panel?.adjudications) ? adjudicatorEnv.details.panel.adjudications : null
+    const adjudicationById = new Map()
+    const adjudicationDefect = (() => {
+      if (!Array.isArray(adjudications)) return { reason: 'panel-adjudication-invalid', why: 'details.adjudications must be an array' }
+      for (const entry of adjudications) {
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry) || typeof entry.id !== 'string' || !entry.id.trim()) {
+          return { reason: 'panel-adjudication-invalid', why: 'each adjudication needs a non-empty id' }
+        }
+        if (adjudicationById.has(entry.id)) return { reason: 'panel-adjudication-invalid', why: `duplicate adjudication id ${entry.id}` }
+        if (!['uphold', 'dismiss'].includes(entry.disposition)) return { reason: 'panel-adjudication-invalid', why: `adjudication ${entry.id} has an unknown disposition` }
+        if (typeof entry.reason !== 'string' || !entry.reason.trim()) return { reason: 'panel-adjudication-invalid', why: `adjudication ${entry.id} needs a non-empty reason` }
+        adjudicationById.set(entry.id, entry)
+      }
+      const expected = new Set(divergentRows.map((finding) => finding.id))
+      const missing = [...expected].filter((id) => !adjudicationById.has(id))
+      const extra = [...adjudicationById.keys()].filter((id) => !expected.has(id))
+      if (missing.length || extra.length || adjudicationById.size !== expected.size) {
+        return { reason: 'panel-adjudication-invalid', why: `adjudications must exactly cover divergent ids; missing=${JSON.stringify(missing)}, extra=${JSON.stringify(extra)}` }
+      }
+      return null
+    })()
+    if (adjudicationDefect) return failAfterSeat('lead', adjudicationDefect.reason, adjudicatorEnv, null, adjudicationDefect)
+    const adjudicated = adjudicatePanel(divergentRows, { adjudications: [...adjudicationById.values()] })
+    const panelFindings = [
+      ...consensusRows.map((finding) => ({
+        id: finding.id, raised_by: finding.raised_by, panel_disposition: 'consensus',
+        reason: 'reviewer and tech-lead agreed on this finding',
+      })),
+      ...divergentRows.map((finding) => {
+        const decision = adjudicationById.get(finding.id)
+        return {
+          id: finding.id, raised_by: finding.raised_by,
+          panel_disposition: decision.disposition === 'uphold' ? 'upheld' : 'dismissed',
+          reason: decision.reason,
+        }
+      }),
+    ]
+    const actionablePanelFindings = panelFindings.filter((finding) => finding.panel_disposition === 'consensus' || finding.panel_disposition === 'upheld')
+    const actionableIds = new Set(actionablePanelFindings.map((finding) => finding.id))
+    const completeFinding = (row) => {
+      const raw = row.raw || {}
+      return {
+        id: row.id,
+        severity: raw.severity ?? row.severity,
+        location: raw.location ?? row.location,
+        summary: raw.summary ?? row.summary,
+        evidence: raw.evidence,
+        disposition: raw.disposition,
+      }
+    }
+    const findings = [...consensusRows, ...adjudicated.upheld]
+      .filter((row) => actionableIds.has(row.id))
+      .map(completeFinding)
+    const reviewerCoverage = { reviewed_files: reviewerEnv.details.reviewed_files, unreviewable_files: reviewerEnv.details.unreviewable_files }
+    const partnerCoverage = { reviewed_files: partnerEnv.details.reviewed_files, unreviewable_files: partnerEnv.details.unreviewable_files }
+    const adjudicatorCoverage = { reviewed_files: adjudicatorEnv.details.reviewed_files, unreviewable_files: adjudicatorEnv.details.unreviewable_files }
+    const canonicalCoverage = adjudicatorCoverage
+    const outcome = findings.length > 0 ? 'findings' : 'no-findings'
+    stageComplete()
+    stage('scope-gate:r1')
+    const finalWriteRefusal = provePanelZeroWrite('lead', adjudicatorEnv)
+    if (finalWriteRefusal) {
+      stageComplete()
+      return panelFailure(finalWriteRefusal.reason, 'lead', finalWriteRefusal)
+    }
+    stageComplete()
+    stage('envelope-accept')
+    const panel = {
+      changed_files: changedFiles,
+      reviewers: [
+        { role: 'reviewer', reviewed_files: reviewerCoverage.reviewed_files, unreviewable_files: reviewerCoverage.unreviewable_files },
+        { role: 'tech-lead', reviewed_files: partnerCoverage.reviewed_files, unreviewable_files: partnerCoverage.unreviewable_files },
+      ],
+      adjudicator: { role: 'lead', reviewed_files: adjudicatorCoverage.reviewed_files, unreviewable_files: adjudicatorCoverage.unreviewable_files },
+      findings: panelFindings,
+    }
+    const accepted = {
+      variant, seat: 'lead', files_changed: 0,
+      fields: ['base', 'head', 'outcome', 'findings', 'reviewed_files', 'unreviewable_files', 'panel'],
+      review_identity: { expected: reviewIdentity.expected, returned: { base_sha: reviewIdentity.expected.base_sha, head_sha: reviewIdentity.expected.head_sha }, match: true },
+    }
+    logEnvelopeAccepted(accepted)
+    stageComplete()
+    stage('done')
+    const artifacts = [...new Set([
+      journal,
+      ...(Array.isArray(reviewerEnv.artifacts) ? reviewerEnv.artifacts : []),
+      ...(Array.isArray(partnerEnv.artifacts) ? partnerEnv.artifacts : []),
+      ...(Array.isArray(adjudicatorEnv.artifacts) ? adjudicatorEnv.artifacts : []),
+    ])]
+    const result = {
+      status: 'done',
+      summary: `review_panel ${ctx.task} complete: envelope accepted on shape, 0 files changed. Stages: ${S.stages.join(' | ')}`,
+      artifacts,
+      details: {
+        variant, commit: null, stages: S.stages, files_committed: [], consults: S.consults,
+        dissents: S.dissents, accepted_via: shape.accepted_by, escalation: null,
+        extra_rounds_granted: S.grants, growth: S.growth, modifiers: S.modifiers, enforcements: S.enforcements,
+        base: reviewIdentity.expected.base_sha, head: reviewIdentity.expected.head_sha, outcome, findings,
+        reviewed_files: canonicalCoverage.reviewed_files, unreviewable_files: canonicalCoverage.unreviewable_files,
+        envelope: { seat: 'lead', fields: accepted.fields, files_changed: 0 },
+        review_identity: accepted.review_identity,
+        panel,
+      },
+    }
+    stageComplete()
+    return result
+  }
   const driveEnvelopeShape = () => {
     let reviewIdentity
     if (variant === 'review_only') {
@@ -6700,7 +7026,7 @@ function runTask(ctx, io, crash) {
     const accepted = { variant, seat, files_changed: 0, fields: observedFields }
     if (shape.report_values) accepted.values = reportedValues
     if (acceptedReviewIdentity) accepted.review_identity = acceptedReviewIdentity
-    io.log(recordRow({ at: io.now(), envelope_accepted: accepted }))
+    logEnvelopeAccepted(accepted)
     stageComplete()
     stage('done')
     const result = {
@@ -6951,6 +7277,7 @@ function runTask(ctx, io, crash) {
     const resume = runResumeTail(checkpoint, ctx, io)
     return resume
   }
+  if (variant === 'review_panel') return driveReviewPanelShape()
   if (shape.execution === 'envelope') return driveEnvelopeShape()
   const driveTriageRound = () => {
     const inherited = shape.sources.scope === 'inherited' ? ctx.files_in_scope : null

@@ -136,6 +136,11 @@
           "callee": "stage",
           "label": "done",
           "occurrence": 3
+        },
+        {
+          "callee": "stage",
+          "label": "done",
+          "occurrence": 4
         }
       ]
     }
@@ -150,6 +155,11 @@
           "callee": "stage",
           "label": "envelope-accept",
           "occurrence": 1
+        },
+        {
+          "callee": "stage",
+          "label": "envelope-accept",
+          "occurrence": 2
         }
       ]
     }
@@ -402,6 +412,20 @@
       ]
     }
   },
+  "review_panel": {
+    "description": "The read-only three-seat panel opens its review-panel envelope round before independent reviewer and tech-lead reports are adjudicated by the lead.",
+    "charter": "Reviewer and tech-lead seats review the immutable base/head independently; the lead adjudicates collision-safe divergences. All seats are read-only.",
+    "source": {
+      "file": "crew/drive.mjs",
+      "sites": [
+        {
+          "callee": "stage",
+          "label": "review_panel:r1",
+          "occurrence": 1
+        }
+      ]
+    }
+  },
   "scope-gate": {
     "description": "The driver opens the scope gate to compare changed files with the declared scope before accepting the stage result.",
     "charter": null,
@@ -417,6 +441,11 @@
           "callee": "stage",
           "label": "scope-gate:r1",
           "occurrence": 1
+        },
+        {
+          "callee": "stage",
+          "label": "scope-gate:r1",
+          "occurrence": 2
         }
       ]
     }

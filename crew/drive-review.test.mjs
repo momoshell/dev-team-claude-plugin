@@ -95,6 +95,49 @@ function strictReviewIo(envelope, { changed = [], runs = {} } = {}) {
   return io
 }
 
+const PANEL_RUN_ID = 'run-panel-784'
+const PANEL_BASE_SHA = 'a'.repeat(40)
+const PANEL_HEAD_SHA = 'b'.repeat(40)
+const PANEL_IDENTITY = Object.freeze({ base_sha: PANEL_BASE_SHA, head_sha: PANEL_HEAD_SHA })
+
+function panelEnvelope({ role, status = 'done', base = PANEL_BASE_SHA, head = PANEL_HEAD_SHA, findings = [], details = {}, summary = 'panel seat complete' } = {}) {
+  return {
+    assignment_id: 'placeholder', run_id: PANEL_RUN_ID, role, status, summary,
+    artifacts: [`${TD}/panel-${role}.md`],
+    details: { base, head, outcome: findings.length > 0 ? 'findings' : 'no-findings', findings, reviewed_files: [], unreviewable_files: [], ...details },
+  }
+}
+
+function panelContext(over = {}) {
+  return { ...CTX, variant: 'review_panel', run_id: PANEL_RUN_ID, roles: ['reviewer', 'tech-lead', 'lead'], seatedRoles: ['reviewer', 'tech-lead', 'lead'], review_identity: PANEL_IDENTITY, ...over }
+}
+
+function strictPanelIo({ reviewer = panelEnvelope({ role: 'reviewer' }), partner = panelEnvelope({ role: 'tech-lead' }), adjudicator = panelEnvelope({ role: 'lead', details: { adjudications: [] } }), changed = [], runs = {} } = {}) {
+  const io = fakeIo({ changed, runs: { ...runs } })
+  let changedCalls = 0
+  const changedFiles = io.changedFiles.bind(io)
+  io.changedFiles = function () { changedCalls += 1; return changedFiles() }
+  io.panelChangedCalls = () => changedCalls
+  const envelopes = { reviewer, 'tech-lead': partner, lead: adjudicator }
+  const assign = io.assign.bind(io)
+  io.assign = function (spec) {
+    const assigned = assign(spec)
+    const id = `panel-${this.calls.assign.length}`
+    return { ...assigned, id, returnPath: `${spec.role}:panel` }
+  }
+  io.wait = function (returnPath, timeoutS) {
+    this.calls.waits.push({ returnPath, timeoutS })
+    const role = returnPath.split(':')[0]
+    const env = envelopes[role]
+    return typeof env === 'function' ? env(role) : { ...env, role, assignment_id: `panel-${this.calls.assign.findIndex(({ role: assignedRole }) => assignedRole === role) + 1}`, run_id: PANEL_RUN_ID }
+  }
+  return io
+}
+
+const PANEL_CONSENSUS_A = { id: 'panel-shared-a', severity: 'should-fix', location: 'src/a.mjs:1', summary: 'shared concern', evidence: 'reviewer evidence', disposition: 'ask-user' }
+const PANEL_CONSENSUS_B = { id: 'panel-shared-b', severity: 'should-fix', location: 'src/a.mjs:1', summary: 'shared concern', evidence: 'partner evidence', disposition: 'ask-user' }
+const PANEL_DIVERGENCE = { id: 'panel-only-a', severity: 'consider', location: 'src/b.mjs:2', summary: 'one-sided concern', evidence: 'one-sided evidence', disposition: 'no-op' }
+
 const VERIFY_RUN_ID = 'run-verify-784'
 const VERIFY_CTX = Object.freeze({ ...CTX, variant: 'verify_only', run_id: VERIFY_RUN_ID, roles: ['reviewer'], seatedRoles: ['reviewer'] })
 const VERIFY_TARGETS = Object.freeze([{ id: 'target-1', target: 'the declared behavior' }])
@@ -2079,9 +2122,9 @@ test('F2 permits optional_item_fields only on records', () => {
   assert.equal(typeof shapeDefect(shape, 'scout'), 'string')
 })
 
-test('G1 leaves every non-scout variant envelope contract unchanged', () => {
+test('G1 leaves every legacy non-scout variant envelope contract unchanged', () => {
   const expected = JSON.parse(`{"full":{"execution":"reviewed","required_seats":"tier","stages":["plan","check","build","scope-gate","lane","gate","gate-baseline","gate-repair","gate-reverify","gate-proof","review","commit","document","rebase","suite","publish","converge"],"off_critical_path_stages":[],"writes":"planned","accepted_by":"a review verdict of pass, or a lead accept at review or build exhaustion","envelope_fields":[],"assignment":null},"review_only":{"execution":"envelope","required_seats":["reviewer"],"stages":["review_only","scope-gate","envelope-accept"],"off_critical_path_stages":[],"writes":"none","accepted_by":"structured envelope plus zero-write proof; no commit","strict_identity":true,"report_values":true,"envelope_fields":[{"name":"base","kind":"text"},{"name":"head","kind":"text"},{"name":"outcome","kind":"text","values":["findings","no-findings"]},{"name":"findings","kind":"records","allow_empty":true,"item_fields":["id","severity","location","summary","evidence","disposition"],"item_values":{"severity":["must-fix","should-fix","consider"],"disposition":["auto-fix","ask-user","no-op"]},"item_patterns":{"id":"^[A-Za-z0-9_-]{1,64}$"},"cardinality":{"discriminator":"outcome","empty":"no-findings","nonempty":"findings"}}, {"name":"reviewed_files","kind":"paths","allow_empty":true},{"name":"unreviewable_files","kind":"records","allow_empty":true,"item_fields":["path","reason"],"item_values":{"reason":["binary","generated","too-large","out-of-context"]}}],"assignment":"Review the returned base/head identity and the declared change set as a read-only code review. This assignment supersedes the ordinary reviewer deliverable: do not create, edit, delete, checkout, or commit anything in the checkout. Read-only validation is permitted. Return the complete structured envelope with non-empty base and head, outcome findings or no-findings, reviewed_files as an array of paths, and unreviewable_files as records with path and reason; every unreviewable reason must be binary, generated, too-large, or out-of-context, every listed path must belong to the base/head change set, and reviewed_files and unreviewable_files must be disjoint. Return findings records containing id, severity, location, summary, evidence, and disposition; findings must be empty exactly when outcome is no-findings and non-empty when outcome is findings."},"repair":{"execution":"reviewed","required_seats":"tier","stages":["repair","build","scope-gate","lane","review","commit","document","rebase","suite","publish"],"off_critical_path_stages":[],"writes":"planned","accepted_by":"a review verdict of pass, or a lead accept at review or build exhaustion","envelope_fields":[],"assignment":"Bounded triage. Read the failure the task brief carries verbatim, then write the smallest fix the builder can execute inside the scope this run inherits. This is NOT a plan round: there is no revision, no plan-check, no second attempt, and no acceptance gate.","sources":{"scope":"inherited","lane":"ctx","gate":"none"}},"directed":{"execution":"reviewed","required_seats":["builder","reviewer"],"stages":["directed","build","scope-gate","lane","gate","gate-baseline","gate-proof","review","commit","document","rebase","suite","publish","converge"],"off_critical_path_stages":[],"writes":"planned","accepted_by":"a review verdict of pass, or a lead accept at review or build exhaustion","envelope_fields":[],"assignment":null,"sources":{"scope":"brief","lane":"ctx","gate":"brief"}},"verify_only":{"execution":"envelope","required_seats":["reviewer"],"stages":["verify_only","scope-gate","envelope-accept"],"off_critical_path_stages":[],"writes":"none","accepted_by":"complete structured verification report plus zero-write proof; no commit, regardless of product verdict","strict_identity":true,"report_values":true,"envelope_fields":[{"name":"verification_targets","kind":"records","item_fields":["id","target"]},{"name":"environment_assumptions","kind":"records","item_fields":["name","assumption"]},{"name":"product_verdict","kind":"text","values":["passing","failing"]},{"name":"check_matrix","kind":"records","allow_empty":true,"item_fields":["id","status","command","result","evidence"],"item_values":{"status":["passed","failed","blocked","not run"]},"covers":{"field":"verification_targets","key":"id"}},{"name":"environment","kind":"records","item_fields":["name","observed"]},{"name":"environmental_blockers","kind":"records","allow_empty":true,"item_fields":["target","reason"]}],"assignment":"Read-only verification. Return a complete structured verification report with details.verification_targets as non-empty records with id,target; details.environment_assumptions as non-empty records with name,assumption; details.product_verdict as passing or failing; details.check_matrix as records with id,status,command,result,evidence and one row for each verification target; details.environment as non-empty records with name,observed; and details.environmental_blockers as records with target,reason. Ephemeral build/test artifacts may exist only while checks run and must be removed before return; the final checkout must be clean. No tester role is introduced."}}`)
-  const actual = Object.fromEntries(Object.entries(VARIANTS).filter(([name]) => name !== 'scout'))
+  const actual = Object.fromEntries(Object.entries(VARIANTS).filter(([name]) => name !== 'scout' && name !== 'review_panel'))
   assert.deepEqual(actual, expected)
 })
 
@@ -4058,6 +4101,22 @@ test('D3 review_only paths reject record metadata and malformed members', () => 
   assert.equal(pathsField.allow_empty, true)
 })
 
+test('D4 object envelope fields accept objects and reject null arrays and scalars', () => {
+  const valid = reviewEnvelope({ details: { panel: {} } })
+  assert.equal(envelopeDefect(valid, VARIANTS.review_panel, { taskDir: TD }), null)
+  for (const panel of [null, [], 'scalar', 1]) {
+    const defect = envelopeDefect(reviewEnvelope({ details: { panel } }), VARIANTS.review_panel, { taskDir: TD })
+    assert.equal(defect.reason, 'field-kind', JSON.stringify(panel))
+  }
+  for (const change of [
+    { values: ['x'] }, { allow_empty: true }, { item_fields: ['x'] }, { covers: { field: 'findings', key: 'id' } },
+  ]) {
+    const field = { ...VARIANTS.review_panel.envelope_fields.find(({ name }) => name === 'panel'), ...change }
+    const shape = { ...VARIANTS.review_panel, envelope_fields: VARIANTS.review_panel.envelope_fields.map((candidate) => candidate.name === 'panel' ? field : candidate) }
+    assert.equal(typeof shapeDefect(shape, 'review_panel'), 'string', JSON.stringify(change))
+  }
+})
+
 test('A1 coverage outside the declared change set is refused', () => {
   const declared = ['src/reviewed.mjs', 'src/generated.bin']
   const diff = `${declared.join('\0')}\0`
@@ -4577,6 +4636,170 @@ test('H1 qa_verification requires an environment record', () => {
   const emptyResult = driveTask(VERIFY_CTX, strictVerifyIo(empty))
   assert.equal(emptyResult.status, 'escalation')
   assert.match(emptyResult.details.escalation.why, /\[field-kind\]/)
+})
+
+test('A1 review_panel runs three seats and returns one fused envelope', () => {
+  const reviewer = panelEnvelope({ role: 'reviewer', findings: [PANEL_CONSENSUS_A, PANEL_DIVERGENCE] })
+  const partner = panelEnvelope({ role: 'tech-lead', findings: [PANEL_CONSENSUS_B] })
+  const adjudicator = panelEnvelope({ role: 'lead', details: { adjudications: [{ id: PANEL_DIVERGENCE.id, disposition: 'uphold', reason: 'the one-sided evidence is actionable' }] } })
+  const io = strictPanelIo({ reviewer, partner, adjudicator, runs: reviewDiffRuns({ ok: true, output: '' }, PANEL_BASE_SHA, PANEL_HEAD_SHA) })
+  const result = driveTask(panelContext(), io)
+  assert.equal(result.status, 'done')
+  assert.deepEqual(io.calls.assign.map(({ role }) => role), ['reviewer', 'tech-lead', 'lead'])
+  assert.deepEqual(result.details.stages, ['review_panel:r1', 'scope-gate:r1', 'envelope-accept', 'done'])
+  assert.equal(io.calls.logs.filter((row) => row.envelope_accepted).length, 1)
+  assert.equal(result.details.panel.findings.some((finding) => finding.panel_disposition === 'consensus'), true)
+  assert.ok(result.details.findings.some((finding) => finding.id === PANEL_CONSENSUS_A.id))
+  assert.equal(io.calls.commits.length, 0)
+})
+
+test('B1 review_panel rejects seat identity mismatch before fusion', () => {
+  const wrong = panelEnvelope({ role: 'reviewer', base: 'c'.repeat(40) })
+  const io = strictPanelIo({ reviewer: wrong, runs: reviewDiffRuns({ ok: true, output: '' }, PANEL_BASE_SHA, PANEL_HEAD_SHA) })
+  const result = driveTask(panelContext(), io)
+  assert.equal(result.status, 'escalation')
+  assert.deepEqual(result.details.panel.failure, {
+    reason: 'identity-mismatch', seat: 'reviewer',
+    expected: { base_sha: PANEL_BASE_SHA, head_sha: PANEL_HEAD_SHA },
+    returned: { base_sha: 'c'.repeat(40), head_sha: PANEL_HEAD_SHA },
+  })
+  assert.deepEqual(io.calls.assign.map(({ role }) => role), ['reviewer', 'tech-lead'])
+  assert.equal(io.calls.logs.some((row) => row.envelope_accepted), false)
+})
+
+test('C1 review_panel preserves reviewer coverage and uses adjudicator coverage', () => {
+  const declared = 'src/a.mjs\0src/b.mjs\0'
+  const reviewer = panelEnvelope({ role: 'reviewer', details: { reviewed_files: ['src/a.mjs'], unreviewable_files: [{ path: 'src/b.mjs', reason: 'generated' }] } })
+  const partner = panelEnvelope({ role: 'tech-lead', details: { reviewed_files: ['src/b.mjs'], unreviewable_files: [] } })
+  const adjudicator = panelEnvelope({ role: 'lead', details: { adjudications: [], reviewed_files: ['src/a.mjs', 'src/b.mjs'], unreviewable_files: [] } })
+  const io = strictPanelIo({ reviewer, partner, adjudicator, runs: reviewDiffRuns({ ok: true, output: declared }, PANEL_BASE_SHA, PANEL_HEAD_SHA) })
+  const result = driveTask(panelContext(), io)
+  assert.equal(result.status, 'done')
+  assert.deepEqual(result.details.panel.changed_files, ['src/a.mjs', 'src/b.mjs'])
+  assert.deepEqual(result.details.panel.reviewers, [
+    { role: 'reviewer', reviewed_files: ['src/a.mjs'], unreviewable_files: [{ path: 'src/b.mjs', reason: 'generated' }] },
+    { role: 'tech-lead', reviewed_files: ['src/b.mjs'], unreviewable_files: [] },
+  ])
+  assert.deepEqual(result.details.panel.adjudicator, { role: 'lead', reviewed_files: ['src/a.mjs', 'src/b.mjs'], unreviewable_files: [] })
+  assert.deepEqual(result.details.reviewed_files, ['src/a.mjs', 'src/b.mjs'])
+  assert.deepEqual(result.details.unreviewable_files, [])
+  assert.equal(Object.hasOwn(result.details.panel.reviewers[0], 'seat'), false)
+  assert.equal(Object.hasOwn(result.details.panel.reviewers[0], 'changed_files'), false)
+})
+
+test('D1 review_panel zero-write proof runs after every seat', () => {
+  const clean = strictPanelIo({ runs: reviewDiffRuns({ ok: true, output: '' }, PANEL_BASE_SHA, PANEL_HEAD_SHA) })
+  const cleanResult = driveTask(panelContext(), clean)
+  assert.equal(cleanResult.status, 'done')
+  assert.equal(clean.panelChangedCalls(), 4)
+  assert.equal(clean.calls.assign.length, 3)
+
+  const dirty = strictPanelIo({ changed: [[], ['crew/drive.mjs']], runs: reviewDiffRuns({ ok: true, output: '' }, PANEL_BASE_SHA, PANEL_HEAD_SHA) })
+  const dirtyResult = driveTask(panelContext(), dirty)
+  assert.equal(dirtyResult.status, 'escalation')
+  assert.deepEqual(dirtyResult.details.panel.failure, {
+    reason: 'panel-write-refusal', seat: 'tech-lead', paths: ['crew/drive.mjs'], evidence: 'panel seat complete',
+  })
+  assert.deepEqual(dirty.calls.assign.map(({ role }) => role), ['reviewer', 'tech-lead'])
+})
+
+test('E1 review_panel fails closed when partner or adjudicator is absent', () => {
+  const absentPartner = driveTask(panelContext({ roles: ['reviewer', 'lead'], seatedRoles: ['reviewer', 'lead'] }), strictPanelIo())
+  assert.equal(absentPartner.status, 'escalation')
+  assert.equal(absentPartner.details.panel.failure.reason, 'panel-partner-absent')
+  assert.deepEqual(absentPartner.details.panel.failure.seat, 'tech-lead')
+  assert.deepEqual(absentPartner.details.stages, ['escalate:envelope'])
+
+  const absentAdjudicator = driveTask(panelContext({ roles: ['reviewer', 'tech-lead'], seatedRoles: ['reviewer', 'tech-lead'] }), strictPanelIo())
+  assert.equal(absentAdjudicator.status, 'escalation')
+  assert.equal(absentAdjudicator.details.panel.failure.reason, 'panel-adjudicator-absent')
+  assert.deepEqual(absentAdjudicator.details.panel.failure.seat, 'lead')
+  assert.deepEqual(absentAdjudicator.details.stages, ['escalate:envelope'])
+
+  const failedPartner = driveTask(panelContext(), strictPanelIo({ partner: panelEnvelope({ role: 'tech-lead', status: 'insufficient', summary: 'partner timeout' }) }))
+  assert.equal(failedPartner.status, 'escalation')
+  assert.equal(failedPartner.details.panel.failure.reason, 'panel-partner-failed')
+  assert.deepEqual(failedPartner.details.panel.failure.seat, 'tech-lead')
+  assert.deepEqual(failedPartner.details.panel.failure.evidence.status, 'insufficient')
+  assert.deepEqual(failedPartner.details.panel.failure.evidence.summary, 'partner timeout')
+
+  const failedAdjudicatorIo = strictPanelIo({ adjudicator: panelEnvelope({ role: 'lead', status: 'insufficient', summary: 'adjudicator timeout', details: { adjudications: [] } }) })
+  const failedAdjudicator = driveTask(panelContext(), failedAdjudicatorIo)
+  assert.equal(failedAdjudicator.status, 'escalation')
+  assert.equal(failedAdjudicator.details.panel.failure.reason, 'panel-adjudicator-failed')
+  assert.deepEqual(failedAdjudicator.details.panel.failure.seat, 'lead')
+  assert.deepEqual(failedAdjudicator.details.panel.failure.evidence.status, 'insufficient')
+  assert.equal(failedAdjudicator.details.panel.failure.evidence.summary, 'adjudicator timeout')
+  assert.deepEqual(failedAdjudicatorIo.calls.assign.map(({ role }) => role), ['reviewer', 'tech-lead', 'lead'])
+})
+
+test('F1 review_panel retains dismissed provenance outside actionable findings', () => {
+  const dismissed = panelEnvelope({ role: 'reviewer', findings: [PANEL_DIVERGENCE] })
+  const io = strictPanelIo({
+    reviewer: dismissed,
+    adjudicator: panelEnvelope({ role: 'lead', details: { adjudications: [{ id: PANEL_DIVERGENCE.id, disposition: 'dismiss', reason: 'the evidence does not establish a defect' }] } }),
+  })
+  const result = driveTask(panelContext(), io)
+  assert.equal(result.status, 'done')
+  assert.equal(result.details.outcome, 'no-findings')
+  assert.deepEqual(result.details.findings, [])
+  assert.deepEqual(result.details.panel.findings, [{
+    id: PANEL_DIVERGENCE.id, raised_by: ['reviewer'], panel_disposition: 'dismissed', reason: 'the evidence does not establish a defect',
+  }])
+})
+
+test('RV1-1 review_panel remints duplicate source ids with their own evidence', () => {
+  const first = { id: 'F1', severity: 'must-fix', location: 'a.mjs:1', summary: 'first finding', evidence: 'first evidence', disposition: 'no-op' }
+  const second = { id: 'F1', severity: 'consider', location: 'b.mjs:9', summary: 'second finding', evidence: 'second evidence', disposition: 'no-op' }
+  const io = strictPanelIo({
+    reviewer: panelEnvelope({ role: 'reviewer', findings: [first, second] }),
+    adjudicator: panelEnvelope({ role: 'lead', details: { adjudications: [
+      { id: 'F1', disposition: 'uphold', reason: 'first finding is actionable' },
+      { id: 'panel-remint-1', disposition: 'uphold', reason: 'second finding is actionable' },
+    ] } }),
+  })
+  const result = driveTask(panelContext(), io)
+  assert.equal(result.status, 'done')
+  assert.deepEqual(result.details.findings, [
+    first,
+    { ...second, id: 'panel-remint-1' },
+  ])
+  assert.deepEqual(result.details.panel.findings, [
+    { id: 'F1', raised_by: ['reviewer'], panel_disposition: 'upheld', reason: 'first finding is actionable' },
+    { id: 'panel-remint-1', raised_by: ['reviewer'], panel_disposition: 'upheld', reason: 'second finding is actionable' },
+  ])
+})
+
+test('RV1-2 review_panel refuses every invalid adjudication cover', () => {
+  const finding = { ...PANEL_DIVERGENCE, id: 'panel-adjudication-finding' }
+  const valid = { id: finding.id, disposition: 'uphold', reason: 'the finding is actionable' }
+  const resultFor = (adjudications) => driveTask(panelContext(), strictPanelIo({
+    reviewer: panelEnvelope({ role: 'reviewer', findings: [finding] }),
+    adjudicator: panelEnvelope({ role: 'lead', details: { adjudications } }),
+  }))
+  for (const [label, adjudications] of [
+    ['missing', []],
+    ['extra', [valid, { ...valid, id: 'extra-adjudication' }]],
+    ['duplicate', [valid, { ...valid }]],
+    ['unknown disposition', [{ ...valid, disposition: 'maybe' }]],
+    ['blank reason', [{ ...valid, reason: ' ' }]],
+  ]) {
+    const result = resultFor(adjudications)
+    assert.equal(result.status, 'escalation', label)
+    assert.equal(result.details.panel.failure.reason, 'panel-adjudication-invalid', label)
+  }
+})
+
+test('H1 review_only remains byte-identical under panel execution', () => {
+  assert.equal(JSON.stringify(VARIANTS.review_only.required_seats), JSON.stringify(['reviewer']))
+  assert.deepEqual(VARIANTS.review_only.stages, ['review_only', 'scope-gate', 'envelope-accept'])
+  const env = reviewEnvelope({ outcome: 'no-findings', findings: [] })
+  const io = strictReviewIo(env)
+  const result = driveTask(REVIEW_CTX, io)
+  assert.equal(result.status, 'done')
+  assert.deepEqual(io.calls.assign.map(({ role }) => role), ['reviewer'])
+  assert.deepEqual(result.details.envelope.values, env.details)
+  assert.deepEqual(result.details.stages, ['review_only:r1', 'scope-gate:r1', 'envelope-accept', 'done'])
 })
 
 test('J1 review_only declaration remains byte-identical', () => {

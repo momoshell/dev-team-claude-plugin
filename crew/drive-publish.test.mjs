@@ -1073,6 +1073,20 @@ test('A1 main publication uses final diff instead of wide fence', () => {
   assert.doesNotMatch(run.io.calls.writes[`${TD}/pr-body.md`], /crew\/roles\/planner|crew\/roles\/anchors/)
 })
 
+test('A2 normal anchor-only publication is admitted without a measurement claim', () => {
+  const run = runPublished(widePublicationOptions(FINAL_ANCHOR_FILES))
+  assert.equal(run.result.status, 'done')
+  assert.deepEqual(run.result.details.files_committed, FINAL_ANCHOR_FILES)
+  assert.doesNotMatch(run.io.calls.writes[`${TD}/pr-body.md`], /Measure:|unmeasured — n insufficient/i)
+})
+
+test('A3 resumed anchor-only publication is admitted without a measurement claim', () => {
+  const run = runWideResume(FINAL_ANCHOR_FILES)
+  assert.equal(run.result.status, 'done')
+  assert.deepEqual(run.result.details.files_committed, FINAL_ANCHOR_FILES)
+  assert.doesNotMatch(run.io.calls.writes[`${TD}/pr-body.md`], /Measure:|unmeasured — n insufficient/i)
+})
+
 test('B1 resumed publication uses final diff instead of accepted scope', () => {
   const run = runWideResume(FINAL_CODE_FILES)
   assert.equal(run.result.status, 'done')
@@ -1144,7 +1158,7 @@ test('F1 both publication paths use post-rebase diff in both divergence directio
   }
 })
 
-test('G1 publication prompt surface remains path-defined', () => {
+test('G1 anchor metadata publication is admitted without a prompt measurement claim', () => {
   const run = runPublished({
     changed: FINAL_ANCHOR_FILES,
     finalDiff: FINAL_ANCHOR_FILES,
@@ -1154,10 +1168,9 @@ test('G1 publication prompt surface remains path-defined', () => {
       'reviewer:1': reviewEnv('pass'),
     },
   })
-  assert.equal(run.result.status, 'escalation')
-  assert.equal(run.result.details.publish.refused, PUBLISH_REFUSALS.promptMeasurement)
-  assert.match(run.result.details.escalation.why, /crew\/roles\/anchors\.json/)
-  assert.equal(run.io.calls.run.some((command) => command.includes('command -v gh')), false)
+  assert.equal(run.result.status, 'done')
+  assert.doesNotMatch(run.io.calls.writes[`${TD}/pr-body.md`], /Measure:|unmeasured — n insufficient/i)
+  assert.equal(run.io.calls.run.some((command) => command.includes('command -v gh')), true)
 })
 
 test('stateful moved and unmoved bases prove the exact rebase policy', () => {
@@ -1356,6 +1369,21 @@ test('E2 prompt-measurement refusal guidance names its triggering path', () => {
   const paths = ['crew/roles/planner.md', 'crew/guidelines/review-do-not-flag.md']
   const defect = promptMeasurementDefect({ files: paths, body: '' })
   assert.equal(defect, 'prompt-change PR body must name a ledger cell measure with before/after and n, or say unmeasured — n insufficient with a reason and re-measure seat count; prompt surface: crew/roles/planner.md, crew/guidelines/review-do-not-flag.md')
+})
+
+test('F1 capability-register grants require claims and identify the triggering skill', () => {
+  const register = {
+    roles: {
+      lead: { skills: ['skills/backend-node/SKILL.md'] },
+      builder: { skills: [], by_agent: { pi: { skills: ['skills/lean-build/SKILL.md'] } } },
+    },
+  }
+  for (const file of ['skills/backend-node/SKILL.md', 'skills/lean-build/SKILL.md']) {
+    const defect = promptMeasurementDefect({ files: [file], body: '', register })
+    assert.equal(typeof defect, 'string', file)
+    assert.ok(defect.includes(file), file)
+  }
+  assert.equal(promptMeasurementDefect({ files: ['skills/pr-review/SKILL.md'], body: '', register }), null)
 })
 
 test('each closed publish refusal is named and never creates a pull request', () => {

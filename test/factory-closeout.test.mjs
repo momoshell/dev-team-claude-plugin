@@ -1566,6 +1566,35 @@ test('B1 a non-prompt PR does not enter the due list', () => {
   assert.equal(existsSync(promptMeasurePath), false)
 })
 
+test('B2 a granted-skill-only PR is a prompt change and enters the due list', () => {
+  const root = scratch('closeout-prompt-b2-')
+  const promptMeasurePath = join(root, 'pending-prompt-measures.json')
+  const body = 'Measure: first-round pass rate\nunmeasured — n insufficient; reason: skill prose evidence; re-measure after 12 seats.\n'
+  const { deps } = harness({
+    promptMeasurePath,
+    answers: [['--json files,mergedAt', { status: 0, stdout: JSON.stringify(promptMetadataPayload({ files: [{ path: 'skills/lean-build/SKILL.md' }] })), stderr: '' }]],
+  })
+  // MUTATION B2: read the bare PROMPT_SURFACE.paths again in promptMetadata and this sweeps as not-prompt-change.
+  const register = { roles: { builder: { skills: [], by_agent: { pi: { skills: ['skills/lean-build/SKILL.md'] } } } } }
+  const result = reapPromptMeasures({ lane: 'skill-only', pr: { number: 1003, body, checkout: root }, root, deps, register })
+  assert.notEqual(result.reason, 'not-prompt-change')
+  assert.equal(existsSync(promptMeasurePath), true)
+})
+
+test('B3 an anchor-manifest-only PR is not a prompt change', () => {
+  const root = scratch('closeout-prompt-b3-')
+  const promptMeasurePath = join(root, 'pending-prompt-measures.json')
+  const body = 'Measure: first-round pass rate\nunmeasured — n insufficient; reason: pin repair; re-measure after 12 seats.\n'
+  const { deps } = harness({
+    promptMeasurePath,
+    answers: [['--json files,mergedAt', { status: 0, stdout: JSON.stringify(promptMetadataPayload({ files: [{ path: 'crew/roles/anchors.json' }] })), stderr: '' }]],
+  })
+  // MUTATION B3: match any path under the surface prefixes, not documents, and anchors.json queues a measurement of prose nobody wrote.
+  const result = reapPromptMeasures({ lane: 'anchor-only', pr: { number: 1004, body, checkout: root }, root, deps })
+  assert.equal(result.reason, 'not-prompt-change')
+  assert.equal(existsSync(promptMeasurePath), false)
+})
+
 test('C1 a settled prompt measure does not enter the due list', () => {
   const root = scratch('closeout-prompt-c1-')
   const promptMeasurePath = join(root, 'pending-prompt-measures.json')

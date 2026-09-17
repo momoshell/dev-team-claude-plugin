@@ -54,3 +54,31 @@ export function protectedHitsIn(entries, paths) {
   }
   return hits
 }
+
+export function grantedSkillPaths(register) {
+  const grants = []
+  for (const role of Object.values(register?.roles || {})) {
+    if (Array.isArray(role?.skills)) grants.push(...role.skills.filter((entry) => typeof entry === 'string'))
+    for (const overlay of Object.values(role?.by_agent || {})) {
+      if (Array.isArray(overlay?.skills)) grants.push(...overlay.skills.filter((entry) => typeof entry === 'string'))
+    }
+  }
+  return Object.freeze([...new Set(grants)].sort())
+}
+
+export function promptSurfacePaths(register) {
+  return Object.freeze([...new Set([...PROMPT_SURFACE.paths, ...grantedSkillPaths(register)])].sort())
+}
+
+// The builder-brief wrapper sees the PLAN's scope, which may name a directory
+// ('crew/roles/'). A directory that intersects the surface is a hit — the
+// builder may write a charter under it — while a concrete non-Markdown file
+// (crew/roles/anchors.json) is not. promptDocumentHits stays for the publish
+// and closeout consumers, whose inputs are always concrete committed files.
+export function promptScopeHits(entries, paths) {
+  return protectedHitsIn(entries, paths).filter((entry) => entry.endsWith('/') || entry.endsWith('.md'))
+}
+
+export function promptDocumentHits(entries, paths) {
+  return protectedHitsIn(entries, paths).filter((entry) => entry.endsWith('.md'))
+}

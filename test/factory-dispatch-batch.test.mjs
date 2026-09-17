@@ -131,6 +131,7 @@ import {
   resolveRequestedTier,
 } from '../scripts/factory/dispatch-batch.mjs'
 import { parseDirectedBrief, WAITS_S } from '../crew/drive.mjs'
+import { promptSurfacePaths } from '../crew/protected-paths.mjs'
 import { openLedger } from '../scripts/factory/ledger.mjs'
 import { partitionShifts } from '../skills/qa-test-writing/anchor-pin.mjs'
 import { crossCheckCoupling, discoverTripwires, laneFenceFor, renderBrief, resolveWriteSurface, verifyWhere, writePack } from '../scripts/factory/make-brief.mjs'
@@ -486,7 +487,7 @@ test('E1 booted lanes persist an empty lane fence and journal it', async () => {
   assert.ok(states.every((state) => state.lane_fence.length === 0))
 })
 
-test('F1 own-surface admission remains byte-for-byte', () => {
+test('F1 ownership smoke test: one surface definition, each consumer calls its helper', () => {
   const checkout = gitFixture()
   const source = 'src/owned.mjs'
   const surfaceTest = 'test/surface.test.mjs'
@@ -2098,6 +2099,13 @@ test('tier floor and reconciliation keep the protected path at judge', () => {
   assert.equal(reconcileTier({ lane: 'lane-a', forced: 'build', recommended: 'judge', requested: null }).tier, 'judge')
 })
 
+const PROMPT_REGISTER_FIXTURE = {
+  roles: {
+    lead: { skills: ['skills/backend-node/SKILL.md'] },
+    builder: { skills: [], by_agent: { pi: { skills: ['skills/lean-build/SKILL.md'] } } },
+  },
+}
+
 test('PS1', () => {
   const verdict = promptSurfaceVerdict({ files: ['crew/roles/planner.md'] })
   assert.deepEqual(verdict, {
@@ -2118,6 +2126,27 @@ test('PS2', () => {
     lane: 'guideline', forced: verdict.forced, recommended: 'build', requested: 'mechanical',
     requestedFrom: 'batch', forceReason: 'prompt-surface-conflict',
   }).tier, 'judge')
+})
+
+test('PS-C1 anchors remain a wide dispatch prompt surface', () => {
+  assert.deepEqual(promptSurfaceVerdict({ files: ['crew/roles/anchors.json'], register: PROMPT_REGISTER_FIXTURE }), {
+    hits: ['crew/roles/anchors.json'], promptChange: true, forced: 'judge',
+  })
+})
+
+test('PS-D1 role-level and by-agent grants force dispatch assurance', () => {
+  for (const file of ['skills/backend-node/SKILL.md', 'skills/lean-build/SKILL.md']) {
+    const verdict = promptSurfaceVerdict({ files: [file], register: PROMPT_REGISTER_FIXTURE })
+    assert.deepEqual(verdict, { hits: [file], promptChange: true, forced: 'judge' }, file)
+  }
+})
+
+test('PS-E1 ungranted skills do not trigger and no bare skills prefix is derived', () => {
+  const file = 'skills/pr-review/SKILL.md'
+  assert.deepEqual(promptSurfacePaths(PROMPT_REGISTER_FIXTURE).includes('skills/'), false)
+  assert.deepEqual(promptSurfaceVerdict({ files: [file], register: PROMPT_REGISTER_FIXTURE }), {
+    hits: [], promptChange: false, forced: null,
+  })
 })
 
 test('PS3', () => {
@@ -2167,15 +2196,28 @@ test('PS6', () => {
   assert.equal(settled.tier, 'judge')
 })
 
-test('F1 the prompt-surface set has one definition and both consumers import it', () => {
+test('F1 the prompt-surface set has one definition and the four consumers import it', () => {
   const grep = spawnSync('git', ['grep', '-n', '-F', 'export const PROMPT_SURFACE =', '--', 'crew', 'scripts'], { cwd: repoRoot, encoding: 'utf8' })
   assert.equal(grep.status, 0)
   const hits = String(grep.stdout || '').trim().split('\n').filter(Boolean)
   assert.deepEqual(hits.map((line) => line.split(':', 1)[0]), ['crew/protected-paths.mjs'])
   const driver = readFileSync(join(repoRoot, 'crew/drive.mjs'), 'utf8')
   const dispatcher = readFileSync(join(repoRoot, 'scripts/factory/dispatch-batch.mjs'), 'utf8')
-  assert.match(driver, /import \{[^}]*\bPROMPT_SURFACE\b[^}]*\} from '\.\/protected-paths\.mjs'/)
-  assert.match(dispatcher, /PROMPT_SURFACE as SHARED_PROMPT_SURFACE/)
+  assert.match(driver, /import \{[^}]*\bpromptDocumentHits\b[^}]*\bpromptSurfacePaths\b[^}]*\} from '\.\/protected-paths\.mjs'/)
+  // OWNERSHIP SMOKE TEST ONLY: one definition of the surface, and each consumer calls the helper it is
+  // meant to. It cannot pin semantics — a supplemental condition beside the call keeps it green — so the
+  // behaviour is proven where it lives: crew/drive-build.test.mjs A1-A5 (builder wrapper), crew/drive-publish.test.mjs
+  // A2/A3/G1/F1 (publish), test/factory-closeout.test.mjs B1-B3 (closeout), PS-* below (dispatcher).
+  // Four consumers, three readings: dispatcher wide; builder wrapper scope (documents or intersecting directories); publish and closeout documents only:
+  // the dispatcher's assurance trigger stays WIDE (touching anchors.json is a tiering input); publish, the
+  // builder-brief wrapper and closeout are MEASUREMENT consumers and read documents only.
+  const closeout = readFileSync(join(repoRoot, 'scripts/factory/closeout.mjs'), 'utf8')
+  assert.match(dispatcher, /protectedHitsIn\([^)]*promptSurfacePaths\(/)
+  assert.doesNotMatch(dispatcher, /\bpromptDocumentHits\b/)
+  assert.match(driver, /promptDocumentHits\(files, promptSurfacePaths\(register\)\)/)
+  assert.match(driver, /promptScopeHits\(scopeFiles, promptSurfacePaths\(loadCapabilities\(\)\)\)/)
+  assert.match(closeout, /promptDocumentHits\(paths, promptSurfacePaths\(register\)\)/)
+  assert.doesNotMatch(closeout, /protectedHitsIn|PROMPT_SURFACE\b/)
   assert.match(dispatcher, /export \{ PROMPT_SURFACE, PROMPT_SURFACE_BLIND_SPOT \} from '\.\.\/\.\.\/crew\/protected-paths\.mjs'/)
 })
 

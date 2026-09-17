@@ -28,7 +28,8 @@ import {
 } from './dispatch-batch.mjs'
 import { journalRowsSinceRunStart, parseSuiteCounts, RUN_START_EVENT } from '../../crew/drive.mjs'
 import { BATCH_DIR_EVENT, batchDirFromBrief, resolveTaskReturn as defaultResolveTaskReturn } from '../../crew/crew.mjs'
-import { PROMPT_SURFACE, protectedHitsIn } from '../../crew/protected-paths.mjs'
+import { promptDocumentHits, promptSurfacePaths } from '../../crew/protected-paths.mjs'
+import { loadCapabilities } from '../../crew/capabilities.mjs'
 import { CELL_RATE_FLOOR, defaultDbPath as defaultLedgerDbPath, ingestJournal as defaultIngestJournal, openLedger as defaultOpenLedger } from './ledger.mjs'
 import { probeDriverIdentity as defaultProbeDriverIdentity } from './lane-watch.mjs'
 
@@ -746,7 +747,7 @@ function promptSettledAt(deps) {
   }
 }
 
-function promptMetadata({ lane, pr, deps, root }) {
+function promptMetadata({ lane, pr, deps, root, register }) {
   const result = runCommand({
     file: 'gh',
     args: ['pr', 'view', lane, '--json', 'files,mergedAt'],
@@ -767,7 +768,10 @@ function promptMetadata({ lane, pr, deps, root }) {
   const paths = payload.files
     .map((file) => file && typeof file.path === 'string' ? file.path.trim().replaceAll('\\', '/').replace(/^\.\//, '') : null)
     .filter((path) => path !== null && path !== '')
-  return { ok: true, merged_at: payload.mergedAt, paths, hits: protectedHitsIn(paths, PROMPT_SURFACE.paths) }
+  // The same surface the publish guard and the dispatcher read (b826): prompt DOCUMENTS under the
+  // static prefixes plus every skill file the register grants. A closeout that still read the bare
+  // prefixes would sweep a granted-skill PR as not-prompt-change — a reason that is false, not absent.
+  return { ok: true, merged_at: payload.mergedAt, paths, hits: promptDocumentHits(paths, promptSurfacePaths(register)) }
 }
 
 function promptSweepDetail({ records, pending, settled, comments, closed }) {
@@ -785,7 +789,7 @@ function promptComment(record, after) {
   return `Measure: ${record.measure}; before: ${record.before.value} (n=${record.before.denominator}); after: ${after.value} (n=${after.denominator})`
 }
 
-export function reapPromptMeasures({ lane, pr, root, deps } = {}) {
+export function reapPromptMeasures({ lane, pr, root, deps, register = loadCapabilities() } = {}) {
   const d = normalDeps(deps)
   const queue = readPromptMeasureQueue(d)
   if (!queue.valid) return { queued: 0, settled: 0, comments: 0, pending: 0, swept: 0, closed: [queue.reason], reason: queue.reason }
@@ -847,7 +851,7 @@ export function reapPromptMeasures({ lane, pr, root, deps } = {}) {
   const swept = promptSweepDetail({ records, pending, settled, comments, closed })
   const claim = parsePromptMeasureClaim(pr?.body)
   if (claim === null) return { ...swept, reason: 'no-unmeasured-claim' }
-  const metadata = promptMetadata({ lane, pr, deps: d, root })
+  const metadata = promptMetadata({ lane, pr, deps: d, root, register })
   if (!metadata.ok) return { ...swept, reason: metadata.reason }
   const promptChanged = metadata.hits.length > 0
   if (!promptChanged) return { queued: 0, reason: 'not-prompt-change' }

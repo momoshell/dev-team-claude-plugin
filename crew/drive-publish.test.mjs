@@ -54,8 +54,10 @@ const REVIEW_ENVELOPE_INTENT = ['Envelope schema proposed for ADR', '', '```json
 
 test('H1 PR body preserves the proposed review envelope schema verbatim', () => {
   const body = composePrBody({ intent: REVIEW_ENVELOPE_INTENT })
-  assert.equal(body.slice(0, REVIEW_ENVELOPE_INTENT.length), REVIEW_ENVELOPE_INTENT)
+  assert.equal(body.includes(REVIEW_ENVELOPE_INTENT), true)
   assert.equal(body.includes(REVIEW_ENVELOPE_SCHEMA), true)
+  const what = body.slice(body.indexOf('## What\n') + '## What\n'.length, body.indexOf('## Why')).trim()
+  assert.equal(what, REVIEW_ENVELOPE_INTENT)
 })
 
 function resumeCheckpointFixture(overrides = {}) {
@@ -952,7 +954,9 @@ test('RV1-1 the observe-and-end residual reaches the commit and PR intent verbat
   assert.equal(message, `fix(crew): account suite policy calls\n\n${body}\n\nRefs: #904`)
   assert.equal(commitIntent(message), body)
   const pr = composePrBody({ intent: commitIntent(message), issues: ['#904'] })
-  assert.equal(pr.slice(0, `${body}\n\nRefs #904`.length), `${body}\n\nRefs #904`)
+  const what = pr.slice(pr.indexOf('## What\n') + '## What\n'.length, pr.indexOf('## Why')).trim()
+  assert.equal(what, commitIntent(message))
+  assert.ok(pr.includes('## Why\nRefs #904'))
 })
 
 test('A1-converge: convergence preserves suite, commit, and publication order', () => {
@@ -1069,7 +1073,7 @@ test('A1 main publication uses final diff instead of wide fence', () => {
   assert.equal(run.result.status, 'done')
   assert.deepEqual(run.result.details.files_committed, FINAL_CODE_FILES)
   assert.deepEqual(run.io.calls.commits[0].files, WIDE_PROMPT_FENCE)
-  assert.match(run.io.calls.writes[`${TD}/pr-body.md`], /Changed: a\.mjs/)
+  assert.match(run.io.calls.writes[`${TD}/pr-body.md`], /- a\.mjs/)
   assert.doesNotMatch(run.io.calls.writes[`${TD}/pr-body.md`], /crew\/roles\/planner|crew\/roles\/anchors/)
 })
 
@@ -1091,7 +1095,7 @@ test('B1 resumed publication uses final diff instead of accepted scope', () => {
   const run = runWideResume(FINAL_CODE_FILES)
   assert.equal(run.result.status, 'done')
   assert.deepEqual(run.result.details.files_committed, FINAL_CODE_FILES)
-  assert.match(run.io.calls.writes[`${TD}/pr-body.md`], /Changed: a\.mjs/)
+  assert.match(run.io.calls.writes[`${TD}/pr-body.md`], /- a\.mjs/)
   assert.doesNotMatch(run.io.calls.writes[`${TD}/pr-body.md`], /crew\/roles\/planner|crew\/roles\/anchors/)
 })
 
@@ -1495,64 +1499,103 @@ test('C1 publication names the measured proof generation', () => {
   assert.equal(refreshed.details.gate.generation, 4)
   assert.equal(oldGateRuns, 4)
   const refreshedBody = refreshedIo.calls.writes[`${TD}/pr-body.md`]
-  assert.match(refreshedBody, /7 gate checks, 0 failed, 0 errored, discrimination proven on generation 4\*\* \(repaired-gate-cmd\)/)
+  assert.match(refreshedBody, /- Gate: 7 checks, 0 failed, 0 errored — discrimination proven on generation 4 \(`repaired-gate-cmd`\)/)
   assert.doesNotMatch(refreshedBody, /3 gate checks, 0 failed, 0 errored.*repaired-gate-cmd/)
 })
 
 test('F1 rendered PR closing trailers cover zero, one, two, and three closes', () => {
-  const trailer = (record) => composePrBody(record).split('\n\n')[0]
-  const two = { closes: ['#1235', '#1238'] }
-  const twoTrailer = trailer(two)
-  assert.equal(twoTrailer, 'Closes #1235, closes #1238')
-  assert.equal(trailer({ closes: ['#1235', '#1238', '#1247'] }), 'Closes #1235, closes #1238, closes #1247')
-  assert.equal(composePrBody({ closes: ['#806'] }), [
-    'Closes #806',
-    'No acceptance gate ran.',
-    'Suite counts: not measured.',
-    'Review: not recorded, no residuals',
-  ].join('\n\n'))
-  assert.equal(trailer({ issues: ['#679', '#758'] }), 'Refs #679, #758')
-  assert.doesNotMatch(composePrBody({ closes: [] }), /^Closes(?:\s|$)/m)
+  const whyOf = (record) => {
+    const body = composePrBody(record)
+    return body.slice(body.indexOf('## Why\n') + '## Why\n'.length, body.indexOf('## Proof')).trim()
+  }
+  assert.equal(whyOf({ closes: ['#1235', '#1238'] }), 'Closes #1235, #1238')
+  assert.equal(whyOf({ closes: ['#1235', '#1238', '#1247'] }), 'Closes #1235, #1238, #1247')
+  assert.equal(whyOf({ closes: ['#806'] }), 'Closes #806')
+  assert.equal(whyOf({ issues: ['#679', '#758'] }), 'Refs #679, #758')
+  assert.equal(whyOf({ closes: ['#806'], issues: ['#679', '#758'] }), 'Closes #806 · Refs #679, #758')
+  const sparse = composePrBody({ closes: [] })
+  assert.ok(sparse.includes('No issue named.'))
+  assert.doesNotMatch(sparse, /^Closes(?:\s|$)/m)
 })
 
 test('composePrBody is pure and renders every populated section with its own values', () => {
+  const claim = 'Measure: turns per seat; before: 2 turns (n=2); after: 3 turns (n=3).'
   const record = {
     issues: ['#679', '#758'], stages: ['commit', 'document', 'rebase', 'suite', 'publish', 'done'],
     cursor: { plan_round: 4, build_round: 5, review_round: 6 },
     gate: { cmd: 'gate-cmd', summary: { total: 2, failed: 0, errored: 0 }, discrimination: 'proven', repairs: 1 },
     review: { verdict: 'changes-needed', residuals: [{ id: 'R1', type: 'cosmetic', summary: 'leave this note' }] },
     suite: { warm: { pass: 11, fail: 2, skipped: 3 }, cold: { pass: 13, fail: 4, skipped: 5 }, cold_verified: true },
-    intent: 'why the lane existed', closes: ['#806'], files: ['crew/drive.mjs'],
+    intent: `why the lane existed\n\n${claim}`, closes: ['#806'], files: ['crew/drive.mjs'],
     anomalies: [{ kind: 'bounce', detail: 'retry' }],
   }
   const first = composePrBody(record)
   const second = composePrBody(JSON.parse(JSON.stringify(record)))
   assert.equal(first, second)
   assert.equal(first, [
-    'why the lane existed',
-    'Closes #806\nRefs #679, #758',
-    '**2 gate checks, 0 failed, 0 errored, discrimination unproven** (gate-cmd), repaired 1 time.',
-    'Suite warm 11 pass / 2 fail / 3 skip; cold 13 pass / 4 fail / 5 skip, cold-verified from a fresh checkout.',
-    'Review: changes-needed, 1 residual:\n- R1 (cosmetic): leave this note',
-    'Changed: crew/drive.mjs',
-    'Shape: commit → document → rebase → suite → publish',
-    '- bounce: retry',
+    `## What\nwhy the lane existed\n\n${claim}`,
+    '## Why\nCloses #806 · Refs #679, #758',
+    '## Proof\n- Gate: 2 checks, 0 failed, 0 errored — discrimination unproven (`gate-cmd`)\n- Suite: warm 11/2/3 · cold 13/4/5, cold-verified from a fresh checkout\n- Review: changes-needed · 1 residual\n  - R1 (cosmetic): leave this note',
+    '## Changed\n- crew/drive.mjs',
+    '## Run\ncommit → document → rebase → suite → publish\n- bounce: retry',
+    `## Prompt measurement\n${claim}`,
   ].join('\n\n'))
+  assert.deepEqual(first.split('\n').filter((line) => line.startsWith('## ')), ['## What', '## Why', '## Proof', '## Changed', '## Run', '## Prompt measurement'])
   assert.doesNotMatch(first, /\n{3,}/)
   const sparse = composePrBody({ closes: ['#806'] })
   assert.equal(sparse, [
-    'Closes #806',
-    'No acceptance gate ran.',
-    'Suite counts: not measured.',
-    'Review: not recorded, no residuals',
+    '## What',
+    '## Why\nCloses #806',
+    '## Proof\nNo acceptance gate ran.\nSuite counts: not measured.\n- Review: not recorded · no residuals',
+    '## Run',
   ].join('\n\n'))
-  for (const token of ['why the lane existed', 'Closes #806', 'Refs #679, #758',
-    '2 gate checks, 0 failed, 0 errored, discrimination unproven', '(gate-cmd)', 'repaired 1 time',
-    'warm 11 pass / 2 fail / 3 skip', 'cold 13 pass / 4 fail / 5 skip', 'cold-verified from a fresh checkout',
-    'Review: changes-needed, 1 residual:', 'R1 (cosmetic): leave this note', 'Changed: crew/drive.mjs',
-    'Shape: commit → document → rebase → suite → publish', '- bounce: retry']) assert.ok(first.includes(token), token)
-  assert.equal(first.split('\n')[0], 'why the lane existed')
+  for (const token of ['why the lane existed', 'Closes #806 · Refs #679, #758',
+    '- Gate: 2 checks, 0 failed, 0 errored — discrimination unproven', '(`gate-cmd`)',
+    'warm 11/2/3', 'cold 13/4/5', 'cold-verified from a fresh checkout',
+    '- Review: changes-needed · 1 residual', '  - R1 (cosmetic): leave this note', '## Changed\n- crew/drive.mjs',
+    'commit → document → rebase → suite → publish', '- bounce: retry', '## Prompt measurement', claim]) assert.ok(first.includes(token), token)
+  assert.equal(first.split('\n')[0], '## What')
+  assert.equal(first.includes('repaired'), false)
   assert.ok(!/\{\s*"/.test(first))
+})
+
+test('RV1-1 carried plan-check findings count on the Review summary line above their sub-bullets', () => {
+  const carried = [{ id: 'PC1-3', severity: 'must-fix', correction: 'fix the phase table' }]
+  const body = composePrBody({ review: { verdict: 'pass', residuals: [], carried } })
+  assert.ok(body.includes('- Review: pass · no residuals · 1 carried plan-check finding unresolved'))
+  assert.ok(body.includes('  - PC1-3 (must-fix) carried-to-review: fix the phase table'))
+  const empty = composePrBody({ review: { verdict: 'pass', residuals: [], carried: [] } })
+  assert.ok(empty.includes('- Review: pass · no residuals\n'))
+  assert.equal(empty.includes('carried plan-check finding'), false)
+})
+
+test('RV1-2 adjacent stage repetition renders a Repeated row under Run', () => {
+  const body = composePrBody({ stages: ['plan:r1', 'build:r1', 'review:r1', 'review:r1', 'commit', 'document', 'rebase', 'suite', 'publish'] })
+  assert.ok(body.includes('- Repeated: review:r1 ×2'))
+  const run = body.slice(body.indexOf('## Run\n') + '## Run\n'.length).split('\n\n')[0]
+  assert.ok(run.includes('- Repeated: review:r1 ×2'))
+  const unrepeated = composePrBody({ stages: ['commit', 'document', 'rebase', 'suite', 'publish', 'done'] })
+  assert.equal(unrepeated.includes('Repeated:'), false)
+})
+
+test('RV2-1 plural residuals and carried rows count with an s on the Review summary line', () => {
+  const body = composePrBody({ review: {
+    verdict: 'changes-needed',
+    residuals: [
+      { id: 'R1', type: 'cosmetic', summary: 'leave this note' },
+      { id: 'R2', type: 'correctness', summary: 'fix the gate' },
+    ],
+    carried: [
+      { id: 'PC1-3', severity: 'must-fix', correction: 'fix the phase table' },
+      { id: 'PC1-9', severity: 'should-fix', correction: 'note the sibling lane' },
+    ],
+  } })
+  const line = body.split('\n').find((l) => l.startsWith('- Review:'))
+  assert.equal(line, '- Review: changes-needed · 2 residuals · 2 carried plan-check findings unresolved')
+  assert.ok(body.includes('  - R1 (cosmetic): leave this note'))
+  assert.ok(body.includes('  - R2 (correctness): fix the gate'))
+  assert.ok(body.includes('  - PC1-3 (must-fix) carried-to-review: fix the phase table'))
+  assert.ok(body.includes('  - PC1-9 (should-fix) carried-to-review: note the sibling lane'))
 })
 
 test('commitIntent removes only the final trailer block and keeps an internal one verbatim', () => {
@@ -2053,17 +2096,24 @@ test('raw-JSON narration is refused by its own name even when every number is a 
   assert.equal(narrationDefect(HONEST_NARRATION, NARRATION_RECORD), null)
 })
 
-test('applyNarration transfers accepted narration only, and never mutates its input', () => {
+test('applyNarration returns the record unchanged and never attaches narration', () => {
   const record = { ...NARRATION_RECORD }
-  assert.equal(applyNarration(record, { text: HONEST_NARRATION }).narrative, HONEST_NARRATION)
+  assert.equal(applyNarration(record, { text: HONEST_NARRATION }), record)
   assert.equal('narrative' in record, false)
-  for (const narrated of [undefined, null, {}, { refused: NARRATION_REFUSALS.unreachable }, { text: '' }, { text: '   ' }]) {
-    assert.equal('narrative' in applyNarration(record, narrated), false, JSON.stringify(narrated))
+  for (const narrated of [undefined, null, {}, { refused: NARRATION_REFUSALS.unreachable }, { text: '' }, { text: '   ' }, { text: HONEST_NARRATION }]) {
+    const back = applyNarration(record, narrated)
+    assert.equal(back, record, JSON.stringify(narrated))
+    assert.equal('narrative' in back, false, JSON.stringify(narrated))
   }
-  assert.equal(applyNarration(record, { text: '  ' + HONEST_NARRATION + '  ' }).narrative, HONEST_NARRATION)
+  assert.equal(applyNarration(record, { text: '  ' + HONEST_NARRATION + '  ' }), record)
+  // narration on the record no longer reaches the body either
+  const narratedBody = composePrBody({ ...NARRATION_RECORD, narrative: 'SNEAKY model prose here' })
+  assert.equal(narratedBody, composePrBody(NARRATION_RECORD))
+  assert.equal(narratedBody.includes('SNEAKY'), false)
+  assert.equal(narratedBody.includes(NARRATION_HEADING), false)
 })
 
-test('F1 configured narration is additive and refusal preserves the current body', () => {
+test('F1 configured narration leaves the published body byte-identical and records an accepted journal row', () => {
   const narratorCommands = {
     [NARRATOR_CHAT_COMMAND_PREFIX]: { ok: true, output: JSON.stringify({ choices: [{ message: { content: 'The lane ran 2 build rounds.' } }] }) },
   }
@@ -2072,8 +2122,11 @@ test('F1 configured narration is additive and refusal preserves the current body
   const register = JSON.stringify(configured)
   const narrated = runPublished({ capabilities: register, commands: narratorCommands })
   assert.equal(narrated.result.status, 'done')
+  const none = runPublished({})
   const narratedBody = narrated.io.calls.writes[TD + '/pr-body.md']
-  assert.ok(narratedBody.startsWith(NARRATION_HEADING + '\nThe lane ran 2 build rounds.\n\n'), JSON.stringify(narratedBody.slice(0, 140)))
+  const noneBody = none.io.calls.writes[TD + '/pr-body.md']
+  assert.equal(narratedBody, noneBody)
+  assert.equal(narratedBody.includes(NARRATION_HEADING), false)
   const row = narrated.io.calls.logs.find((entry) => entry.narration)
   assert.deepEqual(row.narration, {
     attempted: true, duration_ms: 10, model: 'qwen3-coder', outcome: 'accepted',
@@ -2082,11 +2135,8 @@ test('F1 configured narration is additive and refusal preserves the current body
 
   // a refused configured request publishes exactly the no-narrator body — byte for byte
   const dead = runPublished({ capabilities: register, commands: { [NARRATOR_CHAT_COMMAND_PREFIX]: { ok: false, output: 'connection refused' } } })
-  const none = runPublished({})
   const deadBody = dead.io.calls.writes[TD + '/pr-body.md']
-  const noneBody = none.io.calls.writes[TD + '/pr-body.md']
   assert.equal(deadBody, noneBody)
-  assert.ok(narratedBody.endsWith(deadBody))
   assert.equal(dead.result.status, 'done')
   assert.equal(dead.io.calls.logs.find((entry) => entry.narration).narration.outcome, 'refused')
   assert.equal(noneBody.includes(NARRATION_HEADING), false)

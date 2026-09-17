@@ -4300,66 +4300,79 @@ export function carriedPrLines(carried) {
     ...rows.map((row) => `- ${row?.id ?? ''} (${row?.severity ?? ''}) carried-to-review: ${row?.correction ?? ''}`), '']
 }
 
+const SECTION_ORDER = ['## What', '## Why', '## Proof', '## Changed', '## Run', '## Prompt measurement']
+
+export function promptClaimLines(intent) {
+  const lines = String(intent ?? '').split('\n')
+  return lines.filter((line) => PROMPT_MEASURED_CLAIM.test(line) || PROMPT_UNMEASURED_CLAIM.test(line))
+}
+
 export function composePrBody(record) {
-  // Narration is labeled and additive; terminal empties delimit blocks without changing un-narrated facts (#806 U6).
-  const narrative = String(record?.narrative ?? '').trim()
-  const narrativeLines = narrative ? [NARRATION_HEADING, narrative, ''] : []
   const intent = String(record?.intent || '').trim()
-  const intentLines = intent ? [intent, ''] : []
   const closes = Array.isArray(record?.closes) ? record.closes : []
   const issues = Array.isArray(record?.issues) ? record.issues : []
-  const closesLines = closes.length ? [`Closes ${closes.join(', closes ')}`] : []
-  const refsLines = issues.length ? [`Refs ${issues.join(', ')}`] : []
-  const trailerLines = closes.length || issues.length ? [...closesLines, ...refsLines, ''] : []
+  const whyParts = []
+  if (closes.length) whyParts.push(`Closes ${closes.join(', ')}`)
+  if (issues.length) whyParts.push(`Refs ${issues.join(', ')}`)
+  const why = whyParts.length ? whyParts.join(' · ') : 'No issue named.'
   const gate = record?.gate || null
   const summary = gate?.summary || null
   const gateLines = (() => {
-    if (!gate) return ['No acceptance gate ran.'].concat('')
-    const where = gate.cmd ? ` (${gate.cmd})` : ''
-    if (!summary) return [`The acceptance gate${where} ran; its summary could not be measured.`].concat('')
-    const repairs = Number.isFinite(gate.repairs) ? gate.repairs : 0
-    const repaired = repairs > 0 ? `, repaired ${repairs} time${repairs === 1 ? '' : 's'}` : ''
+    if (!gate) return ['No acceptance gate ran.']
+    if (!summary) {
+      const where = gate.cmd ? ` (${gate.cmd})` : ''
+      return [`The acceptance gate${where} ran; its summary could not be measured.`]
+    }
     const generation = Number.isSafeInteger(gate.generation) ? gate.generation : null
     const discrimination = generation === null ? 'unproven' : (gate.discrimination || 'unproven')
-    const measured = generation === null ? '' : ` on generation ${generation}`
-    return [`**${summary.total} gate checks, ${summary.failed} failed, ${summary.errored} errored, discrimination ${discrimination}${measured}**${where}${repaired}.`].concat('')
+    const gen = generation === null ? '' : ` on generation ${generation}`
+    const cmd = gate.cmd ? ` (\`${gate.cmd}\`)` : ''
+    return [`- Gate: ${summary.total} checks, ${summary.failed} failed, ${summary.errored} errored — discrimination ${discrimination}${gen}${cmd}`]
   })()
-  // Unknown is never a zero: an unmeasured count says so rather than reading as green.
   const suite = record?.suite || {}
   const countText = (label, value) => (value && typeof value === 'object'
-    ? `${label} ${value.pass} pass / ${value.fail} fail / ${value.skipped} skip`
+    ? `${label} ${value.pass}/${value.fail}/${value.skipped}`
     : null)
-  const measured = [countText('warm', suite.warm), countText('cold', suite.cold)].filter(Boolean)
-  const suiteLines = measured.length
-    ? [`Suite ${measured.join('; ')}${suite.cold_verified ? ', cold-verified from a fresh checkout' : '; cold verification not recorded'}.`].concat('')
-    : ['Suite counts: not measured.'].concat('')
+  const warm = countText('warm', suite.warm)
+  const cold = countText('cold', suite.cold)
+  const suiteLines = (() => {
+    if (!warm && !cold) return ['Suite counts: not measured.']
+    const measured = [warm, cold].filter(Boolean).join(' · ')
+    const tail = suite.cold_verified ? ', cold-verified from a fresh checkout' : '; cold verification not recorded'
+    return [`- Suite: ${measured}${tail}`]
+  })()
   const review = record?.review || {}
   const residuals = Array.isArray(review.residuals) ? review.residuals : []
+  const carried = Array.isArray(review.carried) ? review.carried : []
+  const reviewCount = residuals.length ? `${residuals.length} residual${residuals.length === 1 ? '' : 's'}` : 'no residuals'
+  const carriedCount = carried.length ? ` · ${carried.length} carried plan-check finding${carried.length === 1 ? '' : 's'} unresolved` : ''
   const reviewLines = [
-    `Review: ${review.verdict || 'not recorded'}, ${residuals.length ? `${residuals.length} residual${residuals.length === 1 ? '' : 's'}:` : 'no residuals'}`,
-    ...residuals.map((row) => `- ${row?.id ?? ''} (${row?.type ?? ''}): ${row?.summary ?? ''}`),
-    ...carriedPrLines(review.carried),
-    '',
+    `- Review: ${review.verdict || 'not recorded'} · ${reviewCount}${carriedCount}`,
+    ...residuals.map((row) => `  - ${row?.id ?? ''} (${row?.type ?? ''}): ${row?.summary ?? ''}`),
+    ...carried.map((row) => `  - ${row?.id ?? ''} (${row?.severity ?? ''}) carried-to-review: ${row?.correction ?? ''}`),
   ]
-  const files = Array.isArray(record?.files) ? record.files : []
-  const changedLines = files.length ? [`Changed: ${files.join(', ')}`] : []
+  const files = Array.isArray(record?.files) ? [...record.files].sort() : []
   const stages = Array.isArray(record?.stages) ? record.stages : []
-  const shapeLines = stages.length ? [`Shape: ${stageShape(stages)}`, ''] : []
-  const repeats = collapseStages(stages).filter(({ count }) => count > 1).map(({ token, count }) => `${token} ×${count}`)
-  const repeatLines = repeats.length ? [`Repeated: ${repeats.join(', ')}`] : []
+  const shape = stageShape(stages)
   const anomalies = Array.isArray(record?.anomalies) ? record.anomalies : []
-  const anomalyLines = anomalies.length ? [...anomalies.map((row) => `- ${row?.kind ?? 'anomaly'}: ${row?.detail ?? ''}`), ''] : []
-  for (const lines of [changedLines, repeatLines]) if (lines.length) lines.push('')
-  const blocks = [[]]
-  for (const line of [
-    ...narrativeLines, ...intentLines, ...trailerLines,
-    ...gateLines, ...suiteLines, ...reviewLines,
-    ...changedLines, ...shapeLines, ...repeatLines, ...anomalyLines,
-  ]) {
-    if (line === '') blocks.push([])
-    else blocks.at(-1).push(line)
-  }
-  return blocks.filter((lines) => lines.length).map((lines) => lines.join('\n')).join('\n\n')
+  const repeated = collapseStages(stages).filter(({ count }) => count > 1).map(({ token, count }) => `${token} ×${count}`)
+  const runLines = [
+    ...(shape ? [shape] : []),
+    ...(repeated.length ? [`- Repeated: ${repeated.join(', ')}`] : []),
+    ...anomalies.map((row) => `- ${row?.kind ?? 'anomaly'}: ${row?.detail ?? ''}`),
+  ]
+  const claims = promptClaimLines(intent)
+  const prSections = [
+    ['## What', intent],
+    ['## Why', why],
+    ['## Proof', [...gateLines, ...suiteLines, ...reviewLines].join('\n')],
+    ...(files.length ? [['## Changed', files.map((f) => `- ${f}`).join('\n')]] : []),
+    ['## Run', runLines.join('\n')],
+    ...(claims.length > 0 ? [['## Prompt measurement', claims.join('\n')]] : []),
+  ]
+  return SECTION_ORDER.filter((h) => prSections.some(([hh]) => hh === h))
+    .map((h) => `${h}\n${prSections.find(([hh]) => hh === h)[1]}`.trimEnd())
+    .join('\n\n')
 }
 
 // --- record-only narration (#806 U6) -------------------------------------------
@@ -4415,6 +4428,11 @@ export function narratorModelId(output) {
   return { id: ids[0] }
 }
 
+// The prompt's first line names a destination the output no longer reaches: since
+// this lane, narration reaches only the narration journal row
+// (attempted/outcome/reason/chars) and never composePrBody. The wording is retained
+// deliberately so the measurement is not silently redefined — see the 2026-09-17
+// docs/conventions.md entry and the pending ADR-034 §U6 amendment.
 export function narrationPrompt(record) {
   return [
     'You are writing the narrative paragraph of a pull-request body for an automated code lane.',
@@ -4604,13 +4622,11 @@ export function narrateRecord({ record, registerText, io } = {}) {
   return { text, model, attempted: true, duration_ms, outcome: 'accepted' }
 }
 
-// The publish wiring, as a pure function so it can be gated: ONLY accepted narration
-// reaches the record. A refusal leaves the record — and therefore the published body
-// — byte-identical to a run with no narrator at all.
-export function applyNarration(record, narrated) {
-  const text = typeof narrated?.text === 'string' ? narrated.text.trim() : ''
-  if (!text) return record
-  return { ...record, narrative: text }
+// Narration no longer reaches the PR body: the published body is identical
+// with or without a narrator. The narrator pipeline, its refusals and its
+// journal row are untouched.
+export function applyNarration(record, _narrated) {
+  return record
 }
 
 // --- persisted post-build checkpoints -----------------------------------------
@@ -11176,9 +11192,9 @@ function runTask(ctx, io, crash) {
         attempted: narrated.attempted ?? false,
         duration_ms: narrated.duration_ms ?? null,
         model: narrated.model ?? null,
-        outcome: bodyRecord.narrative ? 'accepted' : 'refused',
-        reason: bodyRecord.narrative ? null : narrated.refused ?? null,
-        ...(bodyRecord.narrative ? { chars: bodyRecord.narrative.length } : {}),
+        outcome: narrated.text ? 'accepted' : 'refused',
+        reason: narrated.text ? null : narrated.refused ?? null,
+        ...(narrated.text ? { chars: narrated.text.length } : {}),
       } }))
     } catch { /* instrumentation is never load-bearing */ }
     const prCreateStartedAt = io.now()

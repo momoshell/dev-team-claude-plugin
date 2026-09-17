@@ -638,6 +638,7 @@ test('an optional creates declaration compiles, renders after verified paths, an
     'verified · file · config/thing.yml',
     'declared · created · lib/new-widget.mjs',
   ])
+  assert.deepEqual(createsFromBrief(brief), ['lib/new-widget.mjs'], 'C1')
   const writeLine = section(brief, '## Conventions').split('\n').find((line) => line.startsWith('files_in_scope'))
   assert.equal(writeLine, 'files_in_scope (expected write surface; basis: authored where paths, no lane fence applied): config/thing.yml, lib/new-widget.mjs, lib/widget.mjs')
   assert.deepEqual(OPTIONAL_REQUEST_KEYS, ['creates', 'directed', 'intent', 'premise_optouts'])
@@ -666,9 +667,17 @@ test('creates verifies the opposite existence pair and reuses scope shape checks
 
 test('A1 creates with an absent parent dispatches with a warning', () => {
   const root = fixture('creates-absent-parent')
-  const result = run(root, [
-    '--request', request(root, { creates: ['nope/new-widget.mjs'] }), '--checkout', root,
-  ])
+  const { result, brief } = compile(root, { creates: ['nope/new-widget.mjs'] })
+  const where = section(brief, '## Where').trim().split('\n')
+  const warning = 'warning · created · nope/new-widget.mjs · reason: creates-parent-missing'
+  assert.deepEqual(where, [
+    'verified · file · lib/widget.mjs',
+    'verified · file · config/thing.yml',
+    warning,
+  ], 'A1')
+  assert.equal(where.includes(`${CREATES_MARK}nope/new-widget.mjs · warning: parent is unresolved`), false, 'A1')
+  assert.deepEqual(createsFromBrief(brief), ['nope/new-widget.mjs'])
+  assert.match(where.at(-1), /^warning · created · nope\/new-widget\.mjs · reason: [^\s]+$/, 'D1')
   assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`)
   assert.match(result.stderr, /creates-parent-missing/)
   assert.match(result.stderr, /nope\/new-widget\.mjs/)
@@ -811,7 +820,9 @@ test('the compiler and the driver declare one directed contract', () => {
 })
 
 test('the compiler and the driver declare one creates contract', () => {
-  assert.equal(CREATES_MARK, DRIVE_CREATES_MARK)
+  assert.equal(CREATES_MARK, DRIVE_CREATES_MARK, 'E1')
+  assert.equal(CREATES_MARK, 'declared · created · ')
+  assert.equal(DRIVE_CREATES_MARK, 'declared · created · ')
   const gathered = {
     request: { ask: ASK, done_means: DONE, out_of_scope: OUT },
     where: [{ path: 'lib/widget.mjs', kind: 'file' }],
@@ -3435,4 +3446,15 @@ test('HoldA3', () => {
   const bad = run(root, ['--request', request(root), '--checkout', root, '--out', join(root, 'bad.md'), '--pack', firstPack, '--pack-omission', 'rows'])
   assert.equal(bad.status, 2)
   assert.match(bad.stderr, /pack-omission/)
+})
+
+test('RV1-2 unresolved-parent rendering retains its reason', () => {
+  const brief = renderBrief({
+    request: { ask: ASK, done_means: DONE, out_of_scope: OUT },
+    where: [],
+    creates: [{ path: 'nope/new-widget.mjs', kind: 'created', reason: 'creates-parent-missing' }],
+    discovery: { candidates: [], tripwires: [], broadKeys: [] },
+  })
+  const where = section(brief, '## Where').trim().split('\n')
+  assert.match(where.at(-1), /^warning · created · nope\/new-widget\.mjs · reason: creates-parent-missing$/)
 })

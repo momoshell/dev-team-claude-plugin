@@ -2205,7 +2205,7 @@ export function createsFromBrief(text) {
   const found = []
   for (let i = start + 1; i < lines.length; i += 1) {
     if (lines[i].startsWith('## ')) break
-    if (lines[i].startsWith(CREATES_MARK)) found.push(normaliseLaneInput(lines[i].slice(CREATES_MARK.length)))
+    if (lines[i].startsWith(CREATES_MARK) || lines[i].startsWith('warning · created · ')) found.push(createdPathFromWhereLine(lines[i]))
   }
   return found.filter(Boolean)
 }
@@ -12791,4 +12791,16 @@ function decodeCensusResult(result, error = null) {
     total_seconds: null, elapsed_seconds: null, denominator: { suites: null, tests: null },
     measurement: null, cost: null,
   }
+}
+
+function createdPathFromWhereLine(line) {
+  if (line.startsWith('warning · created · ')) {
+    const reasonAt = line.lastIndexOf(' · reason: ')
+    if (reasonAt <= 'warning · created · '.length || reasonAt + ' · reason: '.length >= line.length) return null
+    return normaliseLaneInput(line.slice('warning · created · '.length, reasonAt))
+  }
+  if (!line.startsWith(CREATES_MARK)) return null
+  const declared = normaliseLaneInput(line.slice(CREATES_MARK.length))
+  const warning = ' · warning: parent is unresolved'
+  return declared.endsWith(warning) ? declared.slice(0, -warning.length) : declared
 }

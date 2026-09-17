@@ -17,9 +17,9 @@
     "build": {
       "role": "builder",
       "agent": "pi",
-      "provider": "openai",
-      "id": "gpt-5.3-codex-spark",
-      "effort": "high",
+      "provider": "meta",
+      "id": "muse-spark-1.3-contributor",
+      "effort": "medium",
       "skills": [],
       "extensions": [
         "crew/pi/extensions/builderloop.ts",

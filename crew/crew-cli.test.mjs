@@ -288,7 +288,7 @@ function writeDescendantRecord(taskDir, overrides = {}) {
 
 function breakerRow(over = {}) {
   return {
-    provider: 'openai', model_id: 'gpt-5.3-codex-spark', agent: 'pi', effort: 'high', role: 'builder', kind: 'timeout',
+    provider: 'meta', model_id: 'muse-spark-1.3-contributor', agent: 'pi', effort: 'medium', role: 'builder', kind: 'timeout',
     failures: 1, first_at: '2026-08-16T00:00:00.000Z', last_at: '2026-08-16T01:00:00.000Z', run_less: 0, ...over,
   }
 }
@@ -296,7 +296,7 @@ function breakerRow(over = {}) {
 
 function breakerAttempt(over = {}) {
   return {
-    provider: 'openai', model_id: 'gpt-5.3-codex-spark', agent: 'pi', effort: 'high', role: 'builder',
+    provider: 'meta', model_id: 'muse-spark-1.3-contributor', agent: 'pi', effort: 'medium', role: 'builder',
     attempts: 12, first_at: '2026-08-16T00:00:00.000Z', last_at: '2026-08-16T01:00:00.000Z', ...over,
   }
 }
@@ -1915,7 +1915,7 @@ test('an injected opener without existsSync reads rows and refuses before state 
       ),
       (error) => {
         assert.equal(error.code, 'breaker-open')
-        for (const value of ['gpt-5.3-codex-spark', '--model-', '--agent-', '--tier']) assert.ok(error.message.includes(value), `missing ${value}`)
+        for (const value of ['muse-spark-1.3-contributor', '--model-', '--agent-', '--tier']) assert.ok(error.message.includes(value), `missing ${value}`)
         return true
       },
     )))
@@ -1971,7 +1971,7 @@ test('a below-threshold breaker verdict is journaled alongside allocation', asyn
     assert.equal(breaker.verdict, 'closed')
     assert.equal(breaker.threshold_rate, 0.2)
     assert.equal(breaker.window_ms, 3600000)
-    const breakerCell = breaker.cells.find((cell) => cell.provider === 'openai' && cell.model_id === 'gpt-5.3-codex-spark' && cell.agent === 'pi' && cell.effort === 'high')
+    const breakerCell = breaker.cells.find((cell) => cell.provider === 'meta' && cell.model_id === 'muse-spark-1.3-contributor' && cell.agent === 'pi' && cell.effort === 'medium')
     assert.ok(breakerCell)
     assert.equal(breakerCell.numerator, 1)
     assert.equal(breakerCell.denominator, 12)
@@ -4156,7 +4156,7 @@ test('E1-mismatch named workflow seat drift refuses before side effects', async 
       (error) => error?.reason === 'workflow-seat-mismatch'
         && error.role === 'builder'
         && error.expected?.agent === 'pi'
-        && error.expected?.effort === 'high'
+        && error.expected?.effort === 'medium'
         && error.actual?.agent === 'pi'
         && error.actual?.effort === 'max'
         && error.message.includes('builder')

@@ -14,6 +14,7 @@ investigating.
 | `escalate:plan` | No usable plan, scope, lane, or mutation declaration reached acceptance. | Read the planner return and the exact refusal; do not ask the builder to guess. |
 | `escalate:plan-check` | The plan-check seat rejected or could not accept the plan. | Preserve the plan and check return, then identify the rejected contract. |
 | `escalate:plan-carve` | The planner said the surface is too large to build whole or returned an invalid carve. | Keep the slice record and ask the human which slice to dispatch. |
+| `escalate:plan-chunks` | A --chunked run's accepted plan carries no valid chunk program, or --chunk names a chunk the program does not declare. | Read the closed refusal in the escalation why; the chunk program is the planner's and cannot be amended after acceptance, so re-plan or drop --chunked. |
 | `escalate:sensitivity-floor` | A protected path was discovered and the required judge-tier floor could not be applied. | Stop before lane/review/commit and boot a judge-tier pane; the record names whether discovery occurred at plan acceptance or during build. |
 | `escalate:triage` | Repair triage lacks inherited scope/lane or returned an unusable repair note. | Read the failing run's context and the triage envelope before changing files. |
 | `escalate:triage-scope` | Repair triage returned an empty, malformed, or otherwise invalid context declaration. | Preserve the triage artifact and correct its literal context declaration. |

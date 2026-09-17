@@ -79,7 +79,7 @@ Retired by ADR-043: `external`, `externalFenceLiveness`, `crossBatchCollisions`,
 `scripts/factory/dispatch-batch.mjs` is this sequence as code: one entry point
 over a batch directory of request JSONs and a fence register, refusing the
 batch at the first failed check rather than proceeding
-(`scripts/factory/dispatch-batch.mjs:35`, `FENCE_NOT_ARRIVED = 'fence-not-arrived'`).
+(`scripts/factory/dispatch-batch.mjs:36`, `FENCE_NOT_ARRIVED = 'fence-not-arrived'`).
 Every refusal above has a name in its exported `REFUSAL_REASONS`; the prose here
 says WHY each check exists, which the script cannot.
 
@@ -194,9 +194,9 @@ so an unflagged batch is unchanged and behaves exactly as before. The two
 transport names and the refusal are pinned in the dispatcher:
 `BOOT_TRANSPORT = 'headless-all'`, `PANE_TRANSPORT = 'panes'`, and
 `TRANSPORT_CONFLICT = 'transport-conflict'`
-(`scripts/factory/dispatch-batch.mjs:155`,
-`scripts/factory/dispatch-batch.mjs:156`,
-`scripts/factory/dispatch-batch.mjs:22`).
+(`scripts/factory/dispatch-batch.mjs:156`,
+`scripts/factory/dispatch-batch.mjs:157`,
+`scripts/factory/dispatch-batch.mjs:23`).
 
 `--headless-all` explicitly selects the factory transport. `--panes` selects
 pane mode by the ABSENCE of `--headless-all`, because `crew.mjs boot` knows no
@@ -227,8 +227,8 @@ the own-surface meaning of either entry.
 A **wave** is a topological level of the declared graph. The operator authors
 an edge in the request; it is never inferred, because an inferred ordering is
 one nobody can audit. Unknown names and cycles refuse by name: **dependency-unknown**
-and **dependency-cycle** are the reasons pinned by `scripts/factory/dispatch-batch.mjs:39`
-and `scripts/factory/dispatch-batch.mjs:38`.
+and **dependency-cycle** are the reasons pinned by `scripts/factory/dispatch-batch.mjs:40`
+and `scripts/factory/dispatch-batch.mjs:39`.
 
 A wave runs only after every predecessor reached `done`, **never on an `escalation`**.
 A dependent lane briefed against work that did not land is
@@ -243,7 +243,7 @@ and merge reconcile shared edits after the wave.
 A dependent lane compiles in a worktree cut AFTER its predecessor landed, so
 its ground truth, baseline, and tripwires are the moved tree's. Containment is
 probed; a base that does not carry the predecessor's commit refuses
-**dependent-base-stale** (`scripts/factory/dispatch-batch.mjs:40`) rather than
+**dependent-base-stale** (`scripts/factory/dispatch-batch.mjs:41`) rather than
 compiling against a stale tree.
 
 Each wave is one invocation (`--wave`), because `run` is backgrounded and this

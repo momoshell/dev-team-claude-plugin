@@ -48,7 +48,7 @@
 // unexpected internal throw (mapped to 1).
 //
 // CLI verbs: `sessions` | `phases <adw_id>` | `tail <adw_id> [--after n]
-// [--limit n]` | `procs <adw_id>` | `gate-review-gap` |
+// [--limit n]` | `procs <adw_id>` | `gate-review-gap` | `chunk-progress <parent_lane> [--chunk <id>]` |
 // `eligible-tasks` | `run-set --since <iso> [--until <iso>]` |
 // `configurations [--since <iso>] [--until <iso>]` |
 // `cell-failures [--since <iso>] [--until <iso>]` |
@@ -849,6 +849,19 @@ export const TABLES = Object.freeze({
     unique: [['adw_id', 'gate_name', 'attempt']],
     indexes: [],
   },
+  chunk_runs: {
+    columns: [
+      { name: 'parent_lane', decl: 'TEXT' },
+      { name: 'chunk_id', decl: 'TEXT' },
+      { name: 'lane', decl: 'TEXT' },
+      { name: 'wave', decl: 'INTEGER' },
+      { name: 'depends_on_json', decl: 'TEXT' },
+      { name: 'checks_owned_json', decl: 'TEXT' },
+      { name: 'created_at', decl: 'TEXT' },
+    ],
+    unique: [['parent_lane', 'chunk_id']],
+    indexes: [],
+  },
   gate_discriminations: {
     columns: [
       { name: 'id', decl: 'INTEGER PRIMARY KEY' },
@@ -1464,6 +1477,53 @@ export const TABLES = Object.freeze({
   },
 })
 
+export function upsertChunkRun(conn, { parentLane, chunkId, lane, wave, dependsOn = [], checksOwned = [] } = {}) {
+  if (!conn || typeof conn.prepare !== 'function') throw new Error('upsertChunkRun requires a database connection')
+  conn.prepare(`INSERT INTO chunk_runs (parent_lane, chunk_id, lane, wave, depends_on_json, checks_owned_json, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(parent_lane, chunk_id) DO UPDATE SET lane = excluded.lane, wave = excluded.wave,
+      depends_on_json = excluded.depends_on_json, checks_owned_json = excluded.checks_owned_json`).run(
+    parentLane, chunkId, lane, wave, JSON.stringify(Array.isArray(dependsOn) ? dependsOn : []),
+    JSON.stringify(Array.isArray(checksOwned) ? checksOwned : []), new Date().toISOString())
+}
+
+export const CHUNK_PROGRESS_SQL = `SELECT cr.chunk_id AS chunk_id, cr.lane AS lane, cr.wave AS wave,
+cr.checks_owned_json AS checks_owned_json,
+(SELECT COUNT(*) FROM sessions s WHERE s.adw_id = cr.lane) AS session_count,
+(SELECT s.status FROM sessions s WHERE s.adw_id = cr.lane LIMIT 1) AS session_status,
+(SELECT g.ok FROM gate_results g WHERE g.adw_id = cr.lane ORDER BY COALESCE(g.gate_generation, -1) DESC, g.attempt DESC, g.id DESC LIMIT 1) AS gate_ok,
+(SELECT g.checks_json FROM gate_results g WHERE g.adw_id = cr.lane ORDER BY COALESCE(g.gate_generation, -1) DESC, g.attempt DESC, g.id DESC LIMIT 1) AS gate_checks_json
+FROM chunk_runs cr WHERE cr.parent_lane = ? ORDER BY cr.wave ASC, cr.chunk_id ASC`
+
+export function chunkProgress({ conn, parentLane, chunkId = null } = {}) {
+  if (!conn || typeof conn.prepare !== 'function') throw new Error('chunkProgress requires a database connection')
+  const rows = conn.prepare(CHUNK_PROGRESS_SQL).all(parentLane)
+  if (!Array.isArray(rows) || rows.length === 0) return { parent_lane: parentLane, chunks: [], chunks_done: null, chunks_total: 0, measured: false, absent_reason: 'chunk-parent-absent' };
+  const mapped = rows.map((row) => {
+    let owned
+    try { owned = JSON.parse(row.checks_owned_json) } catch { return { parent_lane: parentLane, chunk_id: row.chunk_id, lane: row.lane, wave: row.wave, owned_total: null, reason: 'chunk-row-malformed' } }
+    if (!Array.isArray(owned)) return { parent_lane: parentLane, chunk_id: row.chunk_id, lane: row.lane, wave: row.wave, owned_total: null, reason: 'chunk-row-malformed' }
+    const ownedTotal = owned.length
+    const session = row.session_count > 0 ? { status: row.session_status } : null
+    const done = session != null && session.status !== 'running' && row.gate_ok === 1;
+    if (session === null) return { chunk_id: row.chunk_id, lane: row.lane, wave: row.wave, owned_total: ownedTotal, owned_green: null, reason: 'chunk-lane-unbooted', done };
+    if (row.gate_ok === null || row.gate_ok === undefined) return { chunk_id: row.chunk_id, lane: row.lane, wave: row.wave, owned_total: ownedTotal, owned_green: null, reason: 'chunk-gate-unmeasured', done };
+    if (row.gate_ok !== 1) return { chunk_id: row.chunk_id, lane: row.lane, wave: row.wave, owned_total: ownedTotal, owned_green: null, reason: 'chunk-checks-unrecorded', done };
+    let checks
+    try { checks = JSON.parse(row.gate_checks_json) } catch { checks = null }
+    if (!Array.isArray(checks) || checks.length === 0) return { chunk_id: row.chunk_id, lane: row.lane, wave: row.wave, owned_total: ownedTotal, owned_green: null, reason: 'chunk-checks-empty', done };
+    const ownedGreen = row.gate_ok === 1 ? ownedTotal : null;
+    return { chunk_id: row.chunk_id, lane: row.lane, wave: row.wave, owned_total: ownedTotal, owned_green: ownedGreen, done, reason: 'chunk-gate-ok' };
+  })
+  if (chunkId !== null) {
+    const chunk = mapped.find((row) => row.chunk_id === chunkId)
+    return chunk ? { parent_lane: parentLane, chunk_id: chunkId, chunk } : { parent_lane: parentLane, chunk_id: chunkId, chunk: null, absent_reason: 'chunk-unknown' }
+  }
+  const measured = mapped.every((row) => row.reason === 'chunk-gate-ok')
+  const chunksDone = measured ? mapped.filter((row) => row.done).length : null
+  return { parent_lane: parentLane, chunks: mapped, chunks_done: chunksDone, chunks_total: mapped.length, measured }
+}
+
 // The closed set of public writer method names — also the closed set of
 // JSONL line `kind` values. replayJsonl refuses any `kind` outside this set.
 // A crew journal row carrying this KEY is that fact. The crew journal is the driver's
@@ -1494,7 +1554,7 @@ export const JOURNAL_FACT_EVENTS = Object.freeze({
 
 export const WRITERS = Object.freeze([
   'startSession', 'endSession', 'recordEscalationProposal', 'startPhase', 'endPhase', 'recordEvent',
-  'recordEnvelope', 'recordSessionRequest', 'recordRunConfiguration', 'recordRunSeat', 'recordRunObservation', 'recordGateResult', 'recordGateDiscrimination',
+  'recordEnvelope', 'recordSessionRequest', 'recordRunConfiguration', 'recordRunSeat', 'recordRunObservation', 'recordGateResult', 'recordChunkRun', 'recordGateDiscrimination',
   'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'recordCiCycle', 'recordCiDispatch', 'recordEvalCell', 'recordRoutingChoice', 'recordIntakeSweep', 'recordIntakeRefusal', 'recordIntakeBrake', 'recordIntakeDispatch', 'recordSeatTeardown', 'recordSeatReclaim', 'recordProviderFailure', 'recordPlanScope', 'recordSeatReask', 'recordAcceptReask', 'recordRpcExitContext', 'recordSeatTurnCensus', 'recordPlanAdoption', 'recordExternalFence', 'recordMutationAnchorBind', 'recordMutationAnchorAbsence', 'recordPhaseSlotWait', 'recordExperimentArm', 'recordNarrationMeasurement', 'recordScreenerProposal', 'startProcess', 'endProcess', 'heartbeat',
   'startAgentSession', 'endAgentSession', 'recordSourceError', 'linkRun',
 ])
@@ -1515,6 +1575,7 @@ export const WRITER_MIRROR_TABLES = Object.freeze({
   recordSourceError: 'events',
   recordEnvelope: 'envelopes',
   recordGateResult: 'gate_results',
+  recordChunkRun: 'chunk_runs',
   recordGateDiscrimination: 'gate_discriminations',
   recordReviewOutcome: 'review_outcomes',
   recordAcceptDecision: 'accept_decisions',
@@ -3316,6 +3377,27 @@ export function openLedger({
       conn.prepare(`INSERT OR IGNORE INTO gate_results (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
         .run(...cols.map((c) => toBindable(row[c])))
     })
+    return args
+  }
+
+  function recordChunkRun(input = {}) {
+    const parentLane = input.parentLane ?? input.parent_lane
+    const chunkId = input.chunkId ?? input.chunk_id
+    requireFields({ parentLane, chunkId, lane: input.lane, wave: input.wave }, ['parentLane', 'chunkId', 'lane', 'wave'], 'recordChunkRun')
+    const args = redact({
+      parent_lane: parentLane,
+      chunk_id: chunkId,
+      lane: input.lane,
+      wave: input.wave,
+      depends_on: Array.isArray(input.dependsOn ?? input.depends_on) ? [...(input.dependsOn ?? input.depends_on)] : [],
+      checks_owned: Array.isArray(input.checksOwned ?? input.checks_owned) ? [...(input.checksOwned ?? input.checks_owned)] : [],
+      created_at: isoMs(input.created_at ?? now()),
+    }, stats)
+    appendJsonl('recordChunkRun', args)
+    mirror((conn) => upsertChunkRun(conn, {
+      parentLane: args.parent_lane, chunkId: args.chunk_id, lane: args.lane, wave: args.wave,
+      dependsOn: args.depends_on, checksOwned: args.checks_owned,
+    }))
     return args
   }
 
@@ -6189,9 +6271,10 @@ export function openLedger({
     get degraded() { return degraded },
     startSession, endSession, recordEscalationProposal, recordSessionRequest, recordRunConfiguration, recordRunSeat, recordRunObservation, startPhase, endPhase, recordEvent, recordEnvelope,
     escalationProposalFor,
-    recordGateResult, recordGateDiscrimination, recordMutationAnchorBind, recordMutationAnchorAbsence, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordEvalCell, recordRoutingChoice, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown, recordSeatReclaim, recordProviderFailure, recordPlanScope, recordSeatReask, recordAcceptReask, recordRpcExitContext, recordSeatTurnCensus, recordPlanAdoption, recordExternalFence, recordPhaseSlotWait, recordExperimentArm, recordNarrationMeasurement, recordScreenerProposal,
+    recordGateResult, recordChunkRun, recordGateDiscrimination, recordMutationAnchorBind, recordMutationAnchorAbsence, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordEvalCell, recordRoutingChoice, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown, recordSeatReclaim, recordProviderFailure, recordPlanScope, recordSeatReask, recordAcceptReask, recordRpcExitContext, recordSeatTurnCensus, recordPlanAdoption, recordExternalFence, recordPhaseSlotWait, recordExperimentArm, recordNarrationMeasurement, recordScreenerProposal,
     startProcess, endProcess, heartbeat, startAgentSession, endAgentSession,
     recordSourceError, linkRun,
+    chunkProgress: (parentLane, chunkId = null) => chunkProgress({ conn: ensureDb(), parentLane, chunkId }),
     listSessions, listEvents, getSession, phantomSessions, dumpTable, tableNames, columnNames, sessionsFiltered, runsStartedWithin, phasesFor, runConfigurationsFor, runObservationsFor, runSeatsFor, agentEventsFor, agentSessionsFor, gateDiscriminationsFor, gateResultsFor, reviewOutcomesFor, acceptDecisionsFor, supportsJson1, eventsPage, maxEventId, cellFailureRowsFor, unattributableCellFailures, seatTeardownRowsFor, intakePicks, intakeSweepTotals, intakeCandidateRefusals, intakeCandidatePicks, agentSessionTokenTotals, gateReviewGap, cellFailures, cellAttempts, cellReviews, screenerAdoptions, evalCells, routingChoices, cellUsage, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, escalations, endedRuns, escalationWindow, seatReclaims, journalFacts, plannerSymbolsHoldout, charterLeanHoldout, turnEconomy, turnBreakdown, eligibleTasks, runSet, configurationReadout, transportsFor, taskReadout, jsonlDrift,
     stats: statsFn,
     captureMirrorErrors,
@@ -6959,6 +7042,7 @@ const VERB_FLAGS = Object.freeze({
   procs: new Set([]),
   tail: new Set(['after', 'limit']),
   'gate-review-gap': new Set([]),
+  'chunk-progress': new Set(['chunk']),
   'eligible-tasks': new Set([]),
   'phantom-sessions': new Set([]),
   'run-set': new Set(['since', 'until']),
@@ -7497,7 +7581,7 @@ export function main(argv) {
   try {
     const { verb, positional, flags } = parseArgs(argv)
     if (!verb) {
-      refuse('a verb is required: sessions | phases | tail | procs | gate-review-gap | eligible-tasks | phantom-sessions | run-set --since <iso> [--until <iso>] | configurations [--since <iso>] [--until <iso>] | cell-failures [--since <iso>] [--until <iso>] | cells [--since <iso>] [--until <iso>] [--prices <path>] | evals --bench <sha> [--prices <path>] | modifier-attempts [--since <iso>] [--until <iso>] | seat-teardowns [--since <iso>] [--until <iso>] | escalations --since <iso> [--until <iso>] | ci-cycles [--since <iso>] [--until <iso>] | intake-sweeps [--since <iso>] [--until <iso>] | journal-facts [--since <iso>] [--until <iso>] | screener-adoptions [--since <iso>] [--until <iso>] | turns [--since <iso>] [--until <iso>] | task | request <adw_id> --from-brief <path> | advisor-ab --run-dir <dir> --run-started-at <iso|ms> --adjudications <path> <dispatch-id>… | doctor | kill')
+      refuse('a verb is required: sessions | phases | tail | procs | gate-review-gap | chunk-progress <parent_lane> [--chunk <id>] | eligible-tasks | phantom-sessions | run-set --since <iso> [--until <iso>] | configurations [--since <iso>] [--until <iso>] | cell-failures [--since <iso>] [--until <iso>] | cells [--since <iso>] [--until <iso>] [--prices <path>] | evals --bench <sha> [--prices <path>] | modifier-attempts [--since <iso>] [--until <iso>] | seat-teardowns [--since <iso>] [--until <iso>] | escalations --since <iso> [--until <iso>] | ci-cycles [--since <iso>] [--until <iso>] | intake-sweeps [--since <iso>] [--until <iso>] | journal-facts [--since <iso>] [--until <iso>] | screener-adoptions [--since <iso>] [--until <iso>] | turns [--since <iso>] [--until <iso>] | task | request <adw_id> --from-brief <path> | advisor-ab --run-dir <dir> --run-started-at <iso|ms> --adjudications <path> <dispatch-id>… | doctor | kill')
     }
 
     // TEST SEAM: DEVTEAM_LEDGER_FAKE_NODE_VERSION substitutes for
@@ -7606,6 +7690,15 @@ export function main(argv) {
 
     const dbPath = defaultDbPath()
     const ledger = openLedger({ dbPath, nodeVersion, stderr })
+
+    if (verb === 'chunk-progress') {
+      const parentLane = positional[0]
+      if (!parentLane) refuse('chunk-progress: requires a parent_lane argument')
+      if (positional.length > 1) refuse('chunk-progress: takes exactly one positional argument')
+      const result = ledger.chunkProgress(parentLane, flags.chunk ?? null)
+      stdout.write(`${JSON.stringify(result)}\n`)
+      return 0
+    }
 
     if (verb === 'sessions') {
       const sessions = projectSessions(ledger.listSessions())

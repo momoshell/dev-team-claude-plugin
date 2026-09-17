@@ -13,7 +13,7 @@ import { spawnSync, spawn } from 'node:child_process'
 import { ROOT, scratchDir } from './helpers.mjs'
 
 import {
-  openLedger, replayJsonl, isoMs, TABLES, MIGRATIONS, applyMigrations, DRIVER_GONE_THRESHOLD_MS, DRIVER_STATES, RUN_OBSERVATION_SOURCES, RUN_OBSERVATION_COLUMNS, RUN_OBSERVATION_WRITE_VERB, SESSION_STATUSES, SESSION_OUTCOMES, SEAT_VALUE_SOURCES, TERMINAL_ACTORS, ESCALATION_CAUSE_UNCLASSIFIED, escalationCause, TERM_TO_KILL_MS, WRITERS, WRITER_MIRROR_TABLES, UPDATE_ONLY_WRITERS, DRIFT_REMEDY, DRIFT_COLLAPSE_REMEDY, LedgerUsageError, MODIFIER_KINDS, INTAKE_DISPATCH_OUTCOMES, SEAT_TEARDOWN_OUTCOMES, GATE_DISCRIMINATION_VERDICTS, MUTATION_ANCHOR_CORRECTIONS, MUTATION_ANCHOR_REFUSALS, CELL_FAILURE_ATTRIBUTIONS, RUN_VARIANTS, RUN_VARIANT_MARKERS, STAGE_MARKER_CHUNK, variantFromFirstMessage, REQUEST_MAX_CHARS, USAGE_ABSENT_CAUSES, usageAbsentCause, AGENT_SESSION_ABSENT_REASONS, AGENT_SESSION_ABSENT_REASON_KEYS, CELL_RATE_FLOOR, SCREENER_PROPOSAL_OUTCOMES, CELL_PRICE_UNITS, REVIEW_VERDICTS, PHASE_SLOT_WAIT_KINDS, PHASE_SLOT_WAIT_DEPTH_ABSENT, PHASE_SLOT_WAIT_ABSENT, NARRATION_OUTCOMES, EVAL_ENVELOPE_STATUSES, EVAL_ABSENT_REASONS, EVAL_PAYLOAD_KEYS, ingestJournal, ingestExternalFenceRegister, JOURNAL_FACT_KEYS, JOURNAL_FACT_EVENTS, PLANNER_SYMBOLS_ARMS, PLANNER_SYMBOLS_SAMPLE_FLOOR, bootstrapPercentile,
+  openLedger, replayJsonl, isoMs, TABLES, MIGRATIONS, applyMigrations, DRIVER_GONE_THRESHOLD_MS, DRIVER_STATES, RUN_OBSERVATION_SOURCES, RUN_OBSERVATION_COLUMNS, RUN_OBSERVATION_WRITE_VERB, SESSION_STATUSES, SESSION_OUTCOMES, SEAT_VALUE_SOURCES, TERMINAL_ACTORS, ESCALATION_CAUSE_UNCLASSIFIED, escalationCause, TERM_TO_KILL_MS, WRITERS, WRITER_MIRROR_TABLES, UPDATE_ONLY_WRITERS, DRIFT_REMEDY, DRIFT_COLLAPSE_REMEDY, LedgerUsageError, MODIFIER_KINDS, INTAKE_DISPATCH_OUTCOMES, SEAT_TEARDOWN_OUTCOMES, GATE_DISCRIMINATION_VERDICTS, MUTATION_ANCHOR_CORRECTIONS, MUTATION_ANCHOR_REFUSALS, CELL_FAILURE_ATTRIBUTIONS, RUN_VARIANTS, RUN_VARIANT_MARKERS, STAGE_MARKER_CHUNK, variantFromFirstMessage, REQUEST_MAX_CHARS, USAGE_ABSENT_CAUSES, usageAbsentCause, AGENT_SESSION_ABSENT_REASONS, AGENT_SESSION_ABSENT_REASON_KEYS, CELL_RATE_FLOOR, SCREENER_PROPOSAL_OUTCOMES, CELL_PRICE_UNITS, REVIEW_VERDICTS, PHASE_SLOT_WAIT_KINDS, PHASE_SLOT_WAIT_DEPTH_ABSENT, PHASE_SLOT_WAIT_ABSENT, NARRATION_OUTCOMES, EVAL_ENVELOPE_STATUSES, EVAL_ABSENT_REASONS, EVAL_PAYLOAD_KEYS, ingestJournal, ingestExternalFenceRegister, JOURNAL_FACT_KEYS, JOURNAL_FACT_EVENTS, PLANNER_SYMBOLS_ARMS, PLANNER_SYMBOLS_SAMPLE_FLOOR, bootstrapPercentile, chunkProgress, upsertChunkRun, CHUNK_PROGRESS_SQL,
 } from '../scripts/factory/ledger.mjs'
 
 import { FAILURE_UPGRADE, MODIFIER_OUTCOMES, SENSITIVITY_FLOOR, VARIANT_NAMES, SUITE_SLOT_PHASE_NAMES, anchorAbsentWhy, MUTATION_CORRECTION_OUTCOMES, MUTATION_CORRECTION_REFUSALS } from '../crew/drive.mjs'
@@ -2116,4 +2116,43 @@ test('routing ledger writer keeps JSONL evidence when the SQLite mirror is unava
   assert.ok(line)
   assert.ok(ledger.stats().mirror_errors > 0)
   ledger.close()
+})
+
+test('chunk RV1-1 unbooted chunk reports null green with chunk-lane-unbooted and owned denominator', () => {
+  const ledger = openTestLedger()
+  ledger.recordChunkRun({ parentLane: 'p1', chunkId: 'c1', lane: 'p1-c1', wave: 0, checksOwned: ['A1'] })
+  const { DatabaseSync } = require('node:sqlite')
+  const conn = new DatabaseSync(ledger._dbPath)
+  try {
+    const out = chunkProgress({ conn, parentLane: 'p1' })
+    const row = out.chunks.find((c) => c.chunk_id === 'c1')
+    assert.ok(row)
+    assert.equal(row.owned_green, null)
+    assert.equal(row.reason, 'chunk-lane-unbooted')
+    assert.equal(row.owned_total, 1)
+    assert.equal(row.done, false)
+  } finally {
+    conn.close()
+    ledger.close()
+  }
+})
+
+test('chunk upsertChunkRun recompile replaces owned checks and CHUNK_PROGRESS_SQL matches docs', () => {
+  const ledger = openTestLedger()
+  ledger.recordChunkRun({ parentLane: 'p1', chunkId: 'c1', lane: 'p1-c1', wave: 0, checksOwned: ['A1'] })
+  const { DatabaseSync } = require('node:sqlite')
+  const conn = new DatabaseSync(ledger._dbPath)
+  try {
+    upsertChunkRun(conn, { parentLane: 'p1', chunkId: 'c1', lane: 'p1-c1', wave: 0, checksOwned: ['A1', 'A2', 'A3'] })
+    const left = conn.prepare(`SELECT checks_owned_json FROM chunk_runs WHERE parent_lane = 'p1' AND chunk_id = 'c1'`).get()?.checks_owned_json
+    assert.equal(JSON.parse(left).length, 3)
+    const doc = readFileSync(join(ROOT, 'docs', 'ledger-queries.md'), 'utf8')
+    const m = doc.match(/<!-- CHUNK_PROGRESS_SQL -->\s*```sql\s*([\s\S]*?)```/)
+    assert.ok(m)
+    assert.equal(m[1].replace(/\s+/g, ' ').trim(), CHUNK_PROGRESS_SQL.replace(/\s+/g, ' ').trim())
+    assert.equal(Object.keys(TABLES).length, 42)
+  } finally {
+    conn.close()
+    ledger.close()
+  }
 })

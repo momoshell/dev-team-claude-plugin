@@ -13,7 +13,7 @@ import { spawn } from 'node:child_process'
 import { ROOT, scratchDir } from './helpers.mjs'
 
 import {
-  ESCALATION_CAUSES, escalationCause,
+  ESCALATION_CAUSES, escalationCause, TABLES,
 } from '../scripts/factory/ledger.mjs'
 
 import { SUBMIT_BLIND_SPOT } from '../crew/driver.mjs'
@@ -200,7 +200,7 @@ test('ledger query docs pin typed outcomes, run seats, closed vocabularies, and 
   for (const source of ['roster', 'profile_recommendation', 'operator_override', 'reseat']) {
     assert.ok(docs.includes(`\`${source}\``), `docs missing ${source}`)
   }
-  assert.match(docs, /\*\*35 tables\*\*/)
+  assert.match(docs, new RegExp(`\\*\\*${Object.keys(TABLES).length} tables\\*\\*`))
   assert.ok(docs.includes('`phase_slot_waits`'))
   assert.ok(docs.includes('Recipe M'))
   assert.match(docs, /FROM\s+run_seats/i)

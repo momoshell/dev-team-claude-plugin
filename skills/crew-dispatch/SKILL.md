@@ -39,6 +39,8 @@ a parsed brief or a green-looking dispatch insufficient evidence.
 - Verify that the fence ARRIVED in `crew.json` and `journal.jsonl`, not merely that it parsed (b88-b91).
 - Rebase the lane onto `main` before opening the PR (#500).
 - A dry run is not a step of the recipe, and a green one is not a validated dispatch (#961).
+- `--from-plan` resolves a done planner envelope from immediate or run-scoped returns, choosing the lexicographically greatest path rather than mtime; it validates chunk IDs, ordered dependencies, and covered scopes before atomic staging.
+- Parent `details.chunks` is the chunk convention; absent chunks derive independent `c1..cn` entries from `details.carve_slices`. `--only <id>` validates the whole graph and requires every dependency to be done.
 
 ## Key references
 

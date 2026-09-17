@@ -5,7 +5,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  FINDING_DISPOSITIONS, FINDING_SEVERITIES, GATE_CUSTODIAN, MAX_QUESTIONS, PROTECTED_PATHS, REPO_ROOT, RESIDUAL_TYPES, applyPrescriptionLines, checkAnchors, existsSync, join, laneFence, mkdirSync, partitionShifts, protectedHits, readFileSync, readdirSync, rmSync, scratchDir, spawnSync,
+  FINDING_DISPOSITIONS, FINDING_SEVERITIES, GATE_CUSTODIAN, MAX_QUESTIONS, PROTECTED_PATHS, REPO_ROOT, RESIDUAL_TYPES, applyPrescriptionLines, checkAnchors, existsSync, join, laneFence, mkdirSync, partitionShifts, shiftsAreOwedHere, protectedHits, readFileSync, readdirSync, rmSync, scratchDir, spawnSync,
   carriedSilenceDefect, findingIdDefect, parseQuestions, patchTargets,
 } from './drive-fixtures.mjs'
 import { bootCmd, composeRolePrompt, FLAG_VALUE_CONTRACT, KNOWN_FLAGS, BOOLEAN_FLAGS, BOOT_ONLY_FLAGS, compiledCharterBytes, charterBudgetRefusals, CHARTER_CEILINGS } from './crew.mjs'
@@ -522,8 +522,15 @@ test('every crew/drive.mjs anchor the tech-lead charter cites resolves to the co
   const result = checkAnchors({ root: REPO_ROOT, docs, manifest })
   assert.ok(result.anchors >= 12, `expected at least 12 anchors, found ${result.anchors}`)
   assert.deepEqual(result.failures, [])
-  const { inFence, outOfFence } = partitionShifts({ shifted: result.shifted, fence: laneFence({ root: REPO_ROOT }).paths, manifest: 'crew/roles/anchors.json' })
-  for (const shift of outOfFence) console.warn(`shifted ${shift.key} -> line ${shift.to}; repair after this lane merges, on main with: node skills/qa-test-writing/anchor-pin.mjs --repair-all crew/roles`)
+  const fence = laneFence({ root: REPO_ROOT })
+  const { inFence, outOfFence } = partitionShifts({ shifted: result.shifted, fence: fence.paths, manifest: 'crew/roles/anchors.json' })
+  const repair = 'node skills/qa-test-writing/anchor-pin.mjs --repair-all crew/roles'
+  // On the default branch there is no lane to defer to: this IS the post-merge pass
+  // the warning names, so a deferred shift is owed here rather than warned about again.
+  if (shiftsAreOwedHere(fence)) {
+    assert.deepEqual(outOfFence.map((shift) => `${shift.key} -> ${shift.to}`), [], `no lane to defer to — repair here with: ${repair}`)
+  }
+  for (const shift of outOfFence) console.warn(`shifted ${shift.key} -> line ${shift.to}; repair after this lane merges, on main with: ${repair}`)
   assert.deepEqual(inFence, [], 'a shift this lane can repair here must be repaired, not tolerated')
   // Both citation forms of the four anchors #698 found stale: the qualified
   // `crew/drive.mjs:2299` and the bare `:2226` continuation the file also used.

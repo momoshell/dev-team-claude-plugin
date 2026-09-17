@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join, relative } from 'node:path'
 import { ROOT, git, scratchDir } from '../../test/helpers.mjs'
-import { anchorManifestDirs, assertAnchorsPinned, checkAnchors, checkSkillAnchors, citationCarrierTests, collectAnchors, collectNamed, collectRanges, INVERTED_MARK, laneFence, MIN_EXPECTED_LENGTH, partitionShifts, pinnedKey, pinnedLiteralsInTests, repairAnchors, repairAnchorsInPlace, repairCli, resolveNamed, rewriteCitations, skillDocs, PINNED_LITERAL_BLIND_SPOT } from './anchor-pin.mjs'
+import { anchorManifestDirs, assertAnchorsPinned, checkAnchors, checkSkillAnchors, citationCarrierTests, collectAnchors, collectNamed, collectRanges, INVERTED_MARK, laneFence, MIN_EXPECTED_LENGTH, partitionShifts, shiftsAreOwedHere, pinnedKey, pinnedLiteralsInTests, repairAnchors, repairAnchorsInPlace, repairCli, resolveNamed, rewriteCitations, skillDocs, PINNED_LITERAL_BLIND_SPOT } from './anchor-pin.mjs'
 
 const EXPECTED = "KEY = 'anchored-sentinel-value'"
 const RANGE_EXPECTED = "RANGE = 'range-first-sentinel-value'"
@@ -1535,4 +1535,36 @@ test('F1', () => {
     '// against the commit named in `baseCommit`", never "that commit is the right one".',
   ].join('\n')
   assert.equal(source.includes(blindSpot), true)
+})
+
+// #859/#882 deferred an out-of-fence shift to a post-merge pass on main that nobody
+// ran: the warning printed inside a GREEN suite and 14 of 16 `crew/roles` pins drifted
+// over four days. The deferral is only sound while a lane EXISTS to defer to.
+test('a shift is owed here exactly when no lane exists to defer it to', () => {
+  // On the default branch the fence is MEASURED and EMPTY: this is the post-merge
+  // moment the warning names, so the repair is owed here.
+  assert.equal(shiftsAreOwedHere({ measured: true, paths: [] }), true)
+  // In a lane there is somewhere to defer to.
+  assert.equal(shiftsAreOwedHere({ measured: true, paths: ['crew/drive.mjs'] }), false)
+  // An UNMEASURED fence is a blind spot, not a clear: a scratch root, no git, no base
+  // branch. Empty-because-unmeasured must never read as empty-because-on-main.
+  assert.equal(shiftsAreOwedHere({ measured: false, paths: [], reason: 'no merge base with origin/main' }), false)
+  assert.equal(shiftsAreOwedHere(null), false)
+  assert.equal(shiftsAreOwedHere(undefined), false)
+  assert.equal(shiftsAreOwedHere({ paths: [] }), false)
+})
+
+test('an out-of-fence shift fails on the default branch and only warns inside a lane', () => {
+  const shifted = [{ key: 'crew/drive.mjs:100', rel: 'crew/drive.mjs', to: 214 }]
+  // The decision the three call sites make, exercised directly.
+  const decide = (fence) => {
+    const { outOfFence } = partitionShifts({ shifted, fence: fence.paths, manifest: 'crew/roles/anchors.json' })
+    return { owed: shiftsAreOwedHere(fence), deferred: outOfFence.length }
+  }
+  const onMain = decide({ measured: true, paths: [] })
+  assert.deepEqual(onMain, { owed: true, deferred: 1 }, 'on main the shift is deferred by partition but owed here')
+  const inLane = decide({ measured: true, paths: ['crew/roles/lead.md'] })
+  assert.deepEqual(inLane, { owed: false, deferred: 1 }, 'a lane that owns neither side still defers')
+  const unmeasured = decide({ measured: false, paths: [] })
+  assert.deepEqual(unmeasured, { owed: false, deferred: 1 }, 'an unmeasured fence never turns a warning into a failure')
 })

@@ -10,7 +10,7 @@ import {
 import { CREATES_MARK, HARDENING_PRESCRIPTION_REASONS, HARDENING_PRESCRIPTION_RESOLUTION, createsFromBrief, hardeningPrescriptionConflict, hardeningTestPath, planScopeWhy, prescriptionAuthorshipEvidence, prescriptionSpanIsLaneAuthored, prescriptionSpansAreLaneAuthored, scopeSuggestions, shellArg, VACUITY_CLAIMS, vacuityFindingDefect } from './drive.mjs'
 import { screenerAdjudicationRows } from './screener.mjs'
 import { ROOT as REPO_ROOT } from '../test/helpers.mjs'
-import { checkSkillAnchors, laneFence, partitionShifts } from '../skills/qa-test-writing/anchor-pin.mjs'
+import { checkSkillAnchors, laneFence, partitionShifts, shiftsAreOwedHere } from '../skills/qa-test-writing/anchor-pin.mjs'
 
 const A1_ENVELOPE_TRACE = Object.freeze(['review_only', 'scope-gate', 'envelope-accept'])
 const A1_REPAIR_TRACE = Object.freeze(['repair', 'build', 'scope-gate', 'lane', 'review', 'commit', 'document', 'suite'])
@@ -3910,8 +3910,15 @@ test('b600 N1', () => {
   const skillDir = join(REPO_ROOT, 'skills/pr-review')
   const result = checkSkillAnchors({ root: REPO_ROOT, skillDir, manifestPath: join(skillDir, 'anchors.json') })
   assert.deepEqual(result.failures, [])
-  const { inFence, outOfFence } = partitionShifts({ shifted: result.shifted, fence: laneFence({ root: REPO_ROOT }).paths, manifest: 'skills/pr-review/anchors.json' })
-  for (const shift of outOfFence) console.warn(`shifted ${shift.key} -> line ${shift.to}; repair after this lane merges, on main with: node skills/qa-test-writing/anchor-pin.mjs --repair-all skills/pr-review`)
+  const fence = laneFence({ root: REPO_ROOT })
+  const { inFence, outOfFence } = partitionShifts({ shifted: result.shifted, fence: fence.paths, manifest: 'skills/pr-review/anchors.json' })
+  const repair = 'node skills/qa-test-writing/anchor-pin.mjs --repair-all skills/pr-review'
+  // On the default branch there is no lane to defer to: this IS the post-merge pass
+  // the warning names, so a deferred shift is owed here rather than warned about again.
+  if (shiftsAreOwedHere(fence)) {
+    assert.deepEqual(outOfFence.map((shift) => `${shift.key} -> ${shift.to}`), [], `no lane to defer to — repair here with: ${repair}`)
+  }
+  for (const shift of outOfFence) console.warn(`shifted ${shift.key} -> line ${shift.to}; repair after this lane merges, on main with: ${repair}`)
   assert.deepEqual(inFence, [], 'a shift this lane can repair here must be repaired, not tolerated')
 })
 

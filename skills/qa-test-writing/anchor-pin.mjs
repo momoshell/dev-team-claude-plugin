@@ -232,6 +232,22 @@ export function checkSkillAnchors({ root, skillDir, manifestPath }) {
 // pins it. When this lane changed both, it could have run --repair and did not: that is a
 // failure. Otherwise it is a warning, because failing on it would demand a repair outside
 // the fence. #859, #882
+// #859/#882 sent an out-of-fence shift to the post-merge pass on main. It was never
+// run: the warning prints to stderr inside a GREEN suite, where nobody reads it, and
+// 14 of 16 `crew/roles` pins drifted over four days without a single red test.
+//
+// The deferral is only sound while a lane EXISTS to defer to. `laneFence` reports the
+// paths this branch changed against its merge base; on the default branch that set is
+// EMPTY and measured, which is exactly the post-merge moment the warning names. There
+// is nothing to defer to and nothing to collide with, so the repair is owed HERE.
+//
+// An empty fence that could not be MEASURED is a different thing — a scratch root, no
+// git, no base branch. That is a blind spot, not a clear, and it keeps the warning.
+export function shiftsAreOwedHere(fence) {
+  if (!fence || fence.measured !== true) return false
+  return (Array.isArray(fence.paths) ? fence.paths : []).length === 0
+}
+
 export function partitionShifts({ shifted, fence, manifest }) {
   const fenced = new Set(Array.isArray(fence) ? fence : [])
   const owned = typeof manifest === 'string' ? fenced.has(manifest) : true

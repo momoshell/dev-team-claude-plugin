@@ -371,10 +371,56 @@ test('the planner charter documents how to discover files_in_scope', () => {
     'crew/adapter-*.test.mjs',
     '#193',
     '#199',
-    'dispatched surface is a CEILING',
-    '`details.questions` entry rather than a wider `files_in_scope`',
+    'plan context, not a ceiling',
   ]) assert.ok(charter.includes(token), token)
   assert.match(charter, /grep/i)
+})
+
+test('charter scope writes are recorded, not bounced', () => {
+  const planner = readFileSync(new URL('./roles/planner.md', import.meta.url), 'utf8')
+  const builder = readFileSync(new URL('./roles/builder.md', import.meta.url), 'utf8')
+  const guidelines = readFileSync(new URL('./guidelines/review-do-not-flag.md', import.meta.url), 'utf8')
+  // Each charter is pinned by its OWN complete sentence. A shared token regex is
+  // vacuous here: one passage supplies the words while another regresses.
+  const sentences = [
+    [planner, 'the driver records the write and proceeds.'],
+    [planner, 'wider context is recorded and proceeds.'],
+    [builder, 'The driver records an ORDINARY out-of-context write and proceeds.'],
+    [guidelines, 'an out-of-context write is recorded and the lane proceeds'],
+  ]
+  for (const [text, sentence] of sentences) assert.ok(text.includes(sentence), sentence)
+  for (const text of [planner, builder, guidelines]) {
+    assert.doesNotMatch(text, /bounces anything outside/)
+    assert.doesNotMatch(text, /is a CEILING/)
+    assert.doesNotMatch(text, /is the scope GATE/)
+  }
+  assert.match(planner, /plan context, not a ceiling/)
+  // The retired claim: the scope stage is not a gate, so nothing "cannot be skipped".
+  assert.doesNotMatch(planner, /the gate cannot be skipped/)
+  // The refusals that SURVIVE are named, not summarised as "a malformed path".
+  assert.ok(builder.includes('a `returns/*.json` envelope left in the checkout'), 'builder names the debris refusal')
+  assert.ok(builder.includes('an unresolved mutation anchor'), 'builder names the anchor refusal')
+  // False in both: the reviewer reads the COMPLETE diff (roles/reviewer.md).
+  for (const text of [planner, builder, guidelines]) {
+    assert.ok(!text.includes('a file nobody reviewed for this change'), 'no "nobody reviewed" claim')
+  }
+})
+
+test('planner fan-out bar carries no stale reason', () => {
+  const planner = readFileSync(new URL('./roles/planner.md', import.meta.url), 'utf8')
+  assert.ok(planner.includes('this seat spawns no scouts even where its adapter grants fan-out, so this sentence is the only brake.'),
+    'planner pins the complete adapter-neutral fan-out sentence')
+  assert.doesNotMatch(planner, /#808/)
+  // The claim was adapter-specific and false for the claude planner, whose
+  // grants carry no extension and no scout agent.
+  assert.doesNotMatch(planner, /the register grants the subagent extension/)
+})
+
+test('builder charter forbids commits', () => {
+  const builder = readFileSync(new URL('./roles/builder.md', import.meta.url), 'utf8')
+  const commitRule = [...builder.matchAll(/^.*Commit nothing.*$/gm)].map((m) => m[0].trim())
+  assert.equal(commitRule.length, 1, `exactly one commit rule: ${JSON.stringify(commitRule)}`)
+  assert.equal(commitRule[0], '- Commit nothing: the driver commits only after scope gate, lane, and full suite are green; the orchestrator owns git.')
 })
 
 test('the planner charter tells the planner to grep the changed file’s own path', () => {
@@ -628,11 +674,11 @@ test('runtime composed charter sizes stay at their ceilings', () => {
   const rolesDir = join(REPO_ROOT, 'crew', 'roles')
   const measured = compiledCharterBytes(rolesDir)
   const sizes = Object.fromEntries(Object.entries(measured).map(([role, entry]) => [role, entry.bytes]))
-  const expected = { builder: 7781, lead: 12813, planner: 20639, reviewer: 11133, 'tech-lead': 9962 }
+  const expected = { builder: 8030, lead: 12813, planner: 20680, reviewer: 11133, 'tech-lead': 9962 }
   const summary = Object.entries(measured).map(([role, entry]) => `${role}=${entry.bytes}`).join(', ')
   assert.deepEqual(sizes, expected, `composed charter sizes: ${summary}`)
   for (const [role, ceiling] of Object.entries(CHARTER_CEILINGS)) {
-    assert.ok(measured[role]?.bytes <= ceiling, `composed charter ${role} exceeds ${ceiling}: ${summary}`)
+    assert.equal(measured[role]?.bytes, ceiling, `composed charter ${role} must EQUAL its ceiling ${ceiling}: ${summary}`)
   }
   assert.deepEqual(charterBudgetRefusals(measured), [], `unexpected charter refusals: ${summary}`)
 })

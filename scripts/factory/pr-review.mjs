@@ -398,25 +398,50 @@ function acceptedPanelCoverage(value) {
 
 function acceptedPanelFinding(value) {
   return value && typeof value === 'object' && !Array.isArray(value)
-    && typeof value.id === 'string' && value.id.length > 0
+    && typeof value.id === 'string' && value.id.trim().length > 0
     && Array.isArray(value.raised_by) && value.raised_by.length > 0
-    && value.raised_by.every((role) => typeof role === 'string' && role.length > 0)
+    && value.raised_by.every((role) => typeof role === 'string' && role.trim().length > 0)
     && typeof value.panel_disposition === 'string' && REVIEW_PANEL_DISPOSITIONS.has(value.panel_disposition)
-    && typeof value.reason === 'string' && value.reason.length > 0
+    && typeof value.reason === 'string' && value.reason.trim().length > 0
 }
 
-function acceptedPanel(value) {
-  return value && typeof value === 'object' && !Array.isArray(value)
-    && Array.isArray(value.changed_files)
-    && value.changed_files.every((path) => typeof path === 'string' && path.length > 0)
-    && Array.isArray(value.reviewers) && value.reviewers.length > 0
-    && value.reviewers.every(acceptedPanelCoverage)
-    && acceptedPanelCoverage(value.adjudicator) && value.adjudicator.role === 'lead'
-    && Array.isArray(value.findings)
-    && value.findings.every(acceptedPanelFinding)
+// The two seats that inspect the diff. The lead adjudicates and is NOT a reviewer.
+const PANEL_REVIEWER_ROLES = Object.freeze(['reviewer', 'tech-lead'])
+const sameSet = (a, b) => a.length === b.length && new Set(a).size === a.length && a.every((x) => b.includes(x))
+
+/**
+ * Panel provenance is a TRUST BOUNDARY, not a shape. A seat can claim any
+ * coverage it likes; the only authority for what changed is the PR diff we
+ * measured ourselves, and the only authority for which findings are real is
+ * the envelope's own top-level findings. Anything a seat asserts beyond those
+ * two is fabricated, and this refuses it rather than posting it as measured.
+ */
+function acceptedPanel(value, changedFiles = null, findingIds = null) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  if (!Array.isArray(value.changed_files)
+    || !value.changed_files.every((path) => typeof path === 'string' && path.length > 0)) return false
+  // Exact equality with the measured diff: a claimed file we did not measure is invented.
+  if (changedFiles && !sameSet(value.changed_files, changedFiles)) return false
+  if (!Array.isArray(value.reviewers) || !value.reviewers.every(acceptedPanelCoverage)) return false
+  // Exactly the two reviewer roles, each once. No invented role, no missing seat.
+  if (!sameSet(value.reviewers.map((seat) => seat.role), [...PANEL_REVIEWER_ROLES])) return false
+  // A seat may only claim to have read a file that actually changed.
+  if (!value.reviewers.every((seat) => seat.reviewed_files.every((f) => value.changed_files.includes(f)))) return false
+  if (!acceptedPanelCoverage(value.adjudicator) || value.adjudicator.role !== 'lead') return false
+  if (!Array.isArray(value.findings) || !value.findings.every(acceptedPanelFinding)) return false
+  const ids = value.findings.map((f) => f.id)
+  if (new Set(ids).size !== ids.length) return false
+  for (const f of value.findings) {
+    // raised_by is a CLOSED membership over the two reviewer seats.
+    if (!f.raised_by.every((role) => PANEL_REVIEWER_ROLES.includes(role))) return false
+    if (new Set(f.raised_by).size !== f.raised_by.length) return false
+    // An upheld finding must exist in the actionable findings it claims to be.
+    if (findingIds && f.panel_disposition !== 'dismissed' && !findingIds.includes(f.id)) return false
+  }
+  return true
 }
 
-async function readTaskEnvelope(pointer, expected, d, panel = false) {
+async function readTaskEnvelope(pointer, expected, d, panel = false, changedFiles = null) {
   let raw
   try { raw = await d.readFile(pointer, 'utf8') } catch (error) {
     refuse(PR_REVIEW_REFUSALS.TASK_RETURN_UNREADABLE, `cannot read task envelope ${pointer}: ${errorText(error)}`)
@@ -439,7 +464,7 @@ async function readTaskEnvelope(pointer, expected, d, panel = false) {
     || !values.reviewed_files.every((path) => typeof path === 'string' && path.length > 0)
     || !Array.isArray(values.unreviewable_files)
     || !values.unreviewable_files.every(acceptedUnreviewable)
-    || (panel && !acceptedPanel(values.panel))) {
+    || (panel && !acceptedPanel(values.panel, changedFiles, values.findings.map((f) => f.id)))) {
     refuse(PR_REVIEW_REFUSALS.TASK_RETURN_INVALID, `task envelope ${pointer} is not an accepted review envelope`)
   }
   return { task, values }
@@ -705,7 +730,7 @@ export async function runPrReview(input = {}, maybeDeps = {}) {
       refuse(PR_REVIEW_REFUSALS.CREW_FAILED, `panel refusal ${escalationReason}${escalationSeat ? ` (${escalationSeat})` : ''}`)
     }
     const pointer = resolve(terminal.task_return)
-    const accepted = await readTaskEnvelope(pointer, { base, head: metadata.head_sha }, d, config.panel === true)
+    const accepted = await readTaskEnvelope(pointer, { base, head: metadata.head_sha }, d, config.panel === true, changedFiles)
     const counts = reportCounts(accepted.values, changedFiles)
     report = {
       pr: pr,
@@ -718,7 +743,7 @@ export async function runPrReview(input = {}, maybeDeps = {}) {
       unreviewable_files: accepted.values.unreviewable_files,
       changed_files: changedFiles,
       counts,
-      panel: accepted.values.panel ?? null,
+      panel: config.panel === true ? (accepted.values.panel ?? null) : null,
       terminal_status: terminal.status,
       task_return: pointer,
       brief_file: briefPath,
@@ -749,9 +774,9 @@ export async function runPrReview(input = {}, maybeDeps = {}) {
       try { d.rmSync(root, { recursive: true, force: true }) } catch { /* worktree verification owns the verdict */ }
     }
   }
+  if (primaryError) throw primaryError
   if (removalError) throw removalError
   if (teardownError) throw teardownError
-  if (primaryError) throw primaryError
   return postReview(pr, report, config, d)
 }
 

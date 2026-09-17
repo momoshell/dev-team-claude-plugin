@@ -809,8 +809,14 @@ function panelFinding(id, panelDisposition, reason, raisedBy) {
 }
 
 function panelEnvelope(findings) {
+  // Provenance and the actionable findings must AGREE: an upheld or consensus
+  // panel row names a finding the review is actually raising. A dismissed row
+  // names one it is not, so it has no actionable counterpart.
+  const actionable = findings.filter((row) => row.panel_disposition !== 'dismissed')
+    .map((row) => ({ ...DEFAULT_VALUES.findings[0], id: row.id }))
   return {
     ...DEFAULT_VALUES,
+    findings: actionable.length > 0 ? actionable : DEFAULT_VALUES.findings,
     panel: {
       changed_files: ['src/a.mjs', 'src/b.mjs'],
       reviewers: [
@@ -886,6 +892,65 @@ test('panel post renders every disposition with provenance and coverage', async 
   assert.equal(payload.panel.adjudicator.role, 'lead')
   bodyMarker(report.review_body)
   assertCleaned(current)
+})
+
+test('panel provenance a seat invented is refused at the boundary', async () => {
+  const base = () => panelEnvelope([panelFinding('F1', 'consensus', 'reviewer and tech-lead agreed on this finding', ['reviewer', 'tech-lead'])])
+  const attacks = [
+    ['a changed file the PR diff never had', (v) => { v.panel.changed_files = ['src/a.mjs', 'src/b.mjs', 'src/invented.mjs'] }],
+    ['a changed file the PR diff did have, dropped', (v) => { v.panel.changed_files = ['src/a.mjs'] }],
+    ['an invented reviewer role', (v) => { v.panel.reviewers[1].role = 'intruder' }],
+    ['a duplicated reviewer seat', (v) => { v.panel.reviewers[1].role = 'reviewer' }],
+    ['a third reviewer seat', (v) => { v.panel.reviewers.push({ role: 'lead', reviewed_files: [], unreviewable_files: [] }) }],
+    ['a seat claiming a file outside the diff', (v) => { v.panel.reviewers[0].reviewed_files = ['src/elsewhere.mjs'] }],
+    ['an invented raised_by role', (v) => { v.panel.findings[0].raised_by = ['intruder'] }],
+    ['a whitespace finding id', (v) => { v.panel.findings[0].id = '   ' }],
+    ['a whitespace reason', (v) => { v.panel.findings[0].reason = '  \t ' }],
+    ['a duplicate finding id', (v) => { v.panel.findings.push({ ...v.panel.findings[0] }) }],
+    ['an upheld row absent from the actionable findings', (v) => { v.panel.findings[0].id = 'never-raised' }],
+  ]
+  for (const [name, attack] of attacks) {
+    const values = base()
+    attack(values)
+    const current = fixture({ values })
+    await assert.rejects(
+      runPrReview({ pr: 66, panel: true, noPost: true, deps: current.deps }),
+      (error) => error.reason === 'task-return-invalid',
+      name,
+    )
+  }
+})
+
+test('a non-panel run carries no panel, whatever the envelope volunteered', async () => {
+  for (const stray of [{}, { reviewers: [] }, panelEnvelope([panelFinding('F1', 'consensus', 'agreed here', ['reviewer'])]).panel]) {
+    const current = fixture({ values: { ...DEFAULT_VALUES, panel: stray } })
+    const report = await runPrReview({ pr: 67, noPost: true, deps: current.deps })
+    assert.equal(report.panel, null)
+    assert.ok(!('panel' in bodyPayload(report.review_body)))
+    assertCleaned(current)
+  }
+})
+
+test('a pre-workspace panel refusal is not masked by the teardown that follows it', async () => {
+  const current = fixture({ values: panelEnvelope([panelFinding('F1', 'consensus', 'agreed here', ['reviewer'])]) })
+  const realCrew = current.deps.crew
+  current.deps.crew = async (args, options) => {
+    if (args[0] === 'boot') {
+      const error = new Error('panel-same-agent: reviewer and tech-lead resolved to the same agent')
+      error.stdout = 'panel-same-agent'
+      return { status: 1, stdout: 'panel-same-agent', stderr: '' }
+    }
+    if (args[0] === 'teardown') return { status: 1, stdout: '', stderr: 'no crew booted' }
+    return realCrew(args, options)
+  }
+  await assert.rejects(
+    runPrReview({ pr: 68, panel: true, panelDistinctAgents: true, noPost: true, deps: current.deps }),
+    (error) => {
+      assert.notEqual(error.reason, 'teardown-failed', 'teardown must not outrank the cause')
+      assert.match(String(error.detail), /panel-same-agent/)
+      return true
+    },
+  )
 })
 
 test('provenance-only panel changes move the idempotency digest', async () => {

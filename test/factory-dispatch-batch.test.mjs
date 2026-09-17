@@ -2203,17 +2203,19 @@ test('F1 the prompt-surface set has one definition and both consumers import it'
   assert.deepEqual(hits.map((line) => line.split(':', 1)[0]), ['crew/protected-paths.mjs'])
   const driver = readFileSync(join(repoRoot, 'crew/drive.mjs'), 'utf8')
   const dispatcher = readFileSync(join(repoRoot, 'scripts/factory/dispatch-batch.mjs'), 'utf8')
-  assert.match(driver, /import \{[^}]*\bPROMPT_SURFACE\b[^}]*\} from '\.\/protected-paths\.mjs'/)
   assert.match(driver, /import \{[^}]*\bpromptDocumentHits\b[^}]*\bpromptSurfacePaths\b[^}]*\} from '\.\/protected-paths\.mjs'/)
-  assert.match(dispatcher, /PROMPT_SURFACE as SHARED_PROMPT_SURFACE/)
-  // Three consumers, two readings — and the reading is pinned per consumer, not by which names get imported:
+  // OWNERSHIP SMOKE TEST ONLY: one definition of the surface, and each consumer calls the helper it is
+  // meant to. It cannot pin semantics — a supplemental condition beside the call keeps it green — so the
+  // behaviour is proven where it lives: crew/drive-build.test.mjs A1-A5 (builder wrapper), crew/drive-publish.test.mjs
+  // A2/A3/G1/F1 (publish), test/factory-closeout.test.mjs B1-B3 (closeout), PS-* below (dispatcher).
+  // Three consumers, two readings:
   // the dispatcher's assurance trigger stays WIDE (touching anchors.json is a tiering input); publish, the
   // builder-brief wrapper and closeout are MEASUREMENT consumers and read documents only.
   const closeout = readFileSync(join(repoRoot, 'scripts/factory/closeout.mjs'), 'utf8')
   assert.match(dispatcher, /protectedHitsIn\([^)]*promptSurfacePaths\(/)
   assert.doesNotMatch(dispatcher, /\bpromptDocumentHits\b/)
   assert.match(driver, /promptDocumentHits\(files, promptSurfacePaths\(register\)\)/)
-  assert.match(driver, /promptDocumentHits\(scopeFiles, promptSurfacePaths\(loadCapabilities\(\)\)\)/)
+  assert.match(driver, /promptScopeHits\(scopeFiles, promptSurfacePaths\(loadCapabilities\(\)\)\)/)
   assert.match(closeout, /promptDocumentHits\(paths, promptSurfacePaths\(register\)\)/)
   assert.doesNotMatch(closeout, /protectedHitsIn|PROMPT_SURFACE\b/)
   assert.match(dispatcher, /export \{ PROMPT_SURFACE, PROMPT_SURFACE_BLIND_SPOT \} from '\.\.\/\.\.\/crew\/protected-paths\.mjs'/)

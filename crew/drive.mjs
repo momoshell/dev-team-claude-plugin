@@ -3,7 +3,7 @@ import { adjudicatePanel, fuseFindings, escalationQuestion, crashEscalationQuest
 import { VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT } from './variants.mjs'
 import { shapeValidationDefect } from './shape-validator.mjs'
 import { loadCapabilities } from './capabilities.mjs'
-import { protectedHitsIn, resolveProtectedPaths, PROMPT_SURFACE, promptDocumentHits, promptSurfacePaths } from './protected-paths.mjs'
+import { protectedHitsIn, resolveProtectedPaths, promptDocumentHits, promptScopeHits, promptSurfacePaths } from './protected-paths.mjs'
 import { parseFenceScope, validateFenceScope, fenceScopesIntersect, fenceScopeContains } from './fence-scope.mjs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -8890,7 +8890,7 @@ function runTask(ctx, io, crash) {
   }
   const builderAssignmentBrief = (briefPath) => {
     // Document hits, like publish and closeout: an anchor-only lane is never told to carry a claim it cannot make.
-    if (promptDocumentHits(scopeFiles, promptSurfacePaths(loadCapabilities())).length === 0) return briefPath
+    if (promptScopeHits(scopeFiles, promptSurfacePaths(loadCapabilities())).length === 0) return briefPath
     const wrapperPath = art('builder-assignment.md')
     io.writeFile(wrapperPath, [
       '# Builder assignment wrapper', '',

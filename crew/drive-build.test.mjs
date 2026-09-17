@@ -6200,6 +6200,39 @@ test('A1 prompt-surface plan briefs builder with measurement claim', () => {
   assert.ok(brief.includes(plan.details.plan_path))
 })
 
+test('A4 directory-scoped charter plan briefs builder with measurement claim', () => {
+  // MUTATION A4: filter the wrapper predicate to .md files only (promptDocumentHits) and a plan scoped
+  // to crew/roles/ hands the builder plan.md with no claim instruction.
+  const scope = ['crew/roles/']
+  const plan = planEnv({ details: { ...planEnv().details, files_in_scope: scope } })
+  const io = fakeIo({
+    envelopes: { 'planner:1': plan, 'builder:1': buildEnv({ details: { ...buildEnv().details, files_changed: ['crew/roles/builder.md'] } }), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['crew/roles/builder.md'],
+  })
+  driveTask(CTX, io)
+  const assignment = io.calls.assign.find(({ role }) => role === 'builder')
+  assert.equal(assignment?.briefFile, `${TD}/builder-assignment.md`)
+  assert.match(io.calls.writes[assignment.briefFile], /The commit message must carry a prompt measurement claim\./)
+})
+
+test('A5 anchor-manifest-only plan keeps the plain builder brief and writes no wrapper', () => {
+  // MUTATION A5: add a supplemental wide condition — || protectedHitsIn(scopeFiles, ...).length — beside the
+  // predicate and the anchor-only plan is wrapped again with a claim it cannot make.
+  const scope = ['crew/roles/anchors.json']
+  const plan = planEnv({ details: { ...planEnv().details, files_in_scope: scope } })
+  const io = fakeIo({
+    envelopes: { 'planner:1': plan, 'builder:1': buildEnv({ details: { ...buildEnv().details, files_changed: scope } }), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: scope,
+  })
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'done')
+  const assignment = io.calls.assign.find(({ role }) => role === 'builder')
+  assert.notEqual(assignment?.briefFile, `${TD}/builder-assignment.md`)
+  assert.equal(io.calls.writes[`${TD}/builder-assignment.md`], undefined)
+})
+
 test('A2 granted skill plan briefs builder with measurement claim', () => {
   const scope = ['skills/lean-build/SKILL.md']
   const plan = planEnv({ details: { ...planEnv().details, files_in_scope: scope } })

@@ -1275,3 +1275,31 @@ test('J1 structural documentation runs one fenced crew-dispatch anchor repair', 
 // | --- | --- | --- | --- | --- |
 // | **`correctness-unverified` is code-refused into escalation.** | into escalation | enforced | crew/drive.mjs:2109 planAcceptContractLines; enforcement crew/drive.mjs:6542 settleAccept and crew/drive.mjs:2127 ACCEPT_REFUSALS | A residual typed correctness-unverified is legitimate but asks a human, so code refuses it into escalation — the same rule as at review exhaustion. That is a fact about the FIELD, not about which stage you are standing in. |
 // CHARTER-PRESERVATION-MIRROR-END
+
+// RV1-1 (b847): every enforced row of the charter-preservation table must quote
+// the cited line itself, not merely the cited file. The gate's A1 checks
+// containment over the whole source file, so a wrong line number still passes;
+// this guard fails the moment a row's line drifts from its evidence.
+test('charter preservation rows quote the cited line', () => {
+  const table = readFileSync(join(REPO_ROOT, 'docs/audits/2026-09-18/charter-preservation-reviewermdandsharedmd.md'), 'utf8')
+  const rows = []
+  for (const line of table.split('\n')) {
+    const trimmed = line.trim()
+    if (!trimmed.startsWith('|')) continue
+    if (/^\|[\s:|-]+\|$/.test(trimmed)) continue
+    const cells = trimmed.split('|').slice(1, -1).map((cell) => cell.trim())
+    if (cells.length !== 5) continue
+    if (cells[0] === 'sentence') continue
+    rows.push({ sentence: cells[0], subject: cells[1], cls: cells[2], source: cells[3], quote: cells[4] })
+  }
+  const enforced = rows.filter((row) => row.cls === 'enforced')
+  assert.ok(enforced.length > 0, 'preservation table carries no enforced rows')
+  for (const row of enforced) {
+    const at = row.source.match(/^([A-Za-z0-9_@./-]+\.(?:mjs|js|md|json)):(\d+)$/)
+    assert.ok(at, `enforced row names no path:line source: ${row.source}`)
+    const lines = readFileSync(join(REPO_ROOT, at[1]), 'utf8').split('\n')
+    const cited = lines[Number(at[2]) - 1]
+    assert.ok(typeof cited === 'string', `cited line is past end of file: ${row.source}`)
+    assert.ok(cited.includes(row.quote), `quote not on its cited line ${row.source}: ${row.quote.slice(0, 80)}`)
+  }
+})

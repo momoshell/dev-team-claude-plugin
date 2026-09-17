@@ -45,7 +45,7 @@ If brief or plan gaps prevent completion, return ALL gaps together in SAME envel
 
 IDs are unique within the envelope; at most 10 questions. Each `question` must be a real
 question, not a topic. Lead answers keyed to IDs in ONE bounce brief: one round instead of one round per gap.
-Only planner/builder status returns consume this field.
+Malformed entries are dropped and reported; outcome never changes. Only planner/builder status returns consume this field.
 
 ## Turn economy
 

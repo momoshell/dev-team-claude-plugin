@@ -12,7 +12,8 @@ import { fileURLToPath } from 'node:url'
 import { parseDirectedBrief, scopeMatcher, validateScopeEntries as driveValidateScopeEntries, VARIANT_NAMES, VARIANTS, TURN_CEILING_FLAGS, WAITS_S } from '../../crew/drive.mjs'
 import { resolveTaskReturn } from '../../crew/crew.mjs'
 import { assertHostQuiet, hostLoad, loadPolicy, withSuiteSlot } from '../../crew/host-load.mjs'
-import { protectedHitsIn, resolveProtectedPaths, PROMPT_SURFACE as SHARED_PROMPT_SURFACE, PROMPT_SURFACE_BLIND_SPOT as SHARED_PROMPT_SURFACE_BLIND_SPOT } from '../../crew/protected-paths.mjs'
+import { loadCapabilities } from '../../crew/capabilities.mjs'
+import { protectedHitsIn, resolveProtectedPaths, PROMPT_SURFACE as SHARED_PROMPT_SURFACE, PROMPT_SURFACE_BLIND_SPOT as SHARED_PROMPT_SURFACE_BLIND_SPOT, promptDocumentHits, promptSurfacePaths } from '../../crew/protected-paths.mjs'
 import { fenceScopesIntersect, parseFenceScope } from '../../crew/fence-scope.mjs'
 import { slug } from '../../crew/slug.mjs'
 import { LADDER_BANDS, PROPOSAL_BLOCK, PROPOSAL_V2_KEYS, TIER_NAMES, extractSymbols, isTripwireFile, validateRequest } from './make-brief.mjs'
@@ -2822,8 +2823,8 @@ export function tierFloor({ files, extra } = {}) {
   return { hits, forced, floor: forced }
 }
 
-export function promptSurfaceVerdict({ files } = {}) {
-  const hits = protectedHitsIn(files, SHARED_PROMPT_SURFACE.paths)
+export function promptSurfaceVerdict({ files, register = loadCapabilities() } = {}) {
+  const hits = protectedHitsIn(files, promptSurfacePaths(register))
   return { hits, promptChange: hits.length > 0, forced: hits.length > 0 ? 'judge' : null }
 }
 

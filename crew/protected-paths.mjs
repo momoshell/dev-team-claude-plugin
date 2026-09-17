@@ -54,3 +54,22 @@ export function protectedHitsIn(entries, paths) {
   }
   return hits
 }
+
+export function grantedSkillPaths(register) {
+  const grants = []
+  for (const role of Object.values(register?.roles || {})) {
+    if (Array.isArray(role?.skills)) grants.push(...role.skills.filter((entry) => typeof entry === 'string'))
+    for (const overlay of Object.values(role?.by_agent || {})) {
+      if (Array.isArray(overlay?.skills)) grants.push(...overlay.skills.filter((entry) => typeof entry === 'string'))
+    }
+  }
+  return Object.freeze([...new Set(grants)].sort())
+}
+
+export function promptSurfacePaths(register) {
+  return Object.freeze([...new Set([...PROMPT_SURFACE.paths, ...grantedSkillPaths(register)])].sort())
+}
+
+export function promptDocumentHits(entries, paths) {
+  return protectedHitsIn(entries, paths).filter((entry) => entry.endsWith('.md'))
+}

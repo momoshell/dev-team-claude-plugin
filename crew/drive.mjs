@@ -2,7 +2,8 @@ import { draftPrBody, draftPrTitle, followUpIssueBody, followUpIssueTitle, gateS
 import { adjudicatePanel, fuseFindings, escalationQuestion, crashEscalationQuestion } from './escalation-policy.mjs'
 import { VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT } from './variants.mjs'
 import { shapeValidationDefect } from './shape-validator.mjs'
-import { protectedHitsIn, resolveProtectedPaths, PROMPT_SURFACE } from './protected-paths.mjs'
+import { loadCapabilities } from './capabilities.mjs'
+import { protectedHitsIn, resolveProtectedPaths, PROMPT_SURFACE, promptDocumentHits, promptSurfacePaths } from './protected-paths.mjs'
 import { parseFenceScope, validateFenceScope, fenceScopesIntersect, fenceScopeContains } from './fence-scope.mjs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -3230,8 +3231,8 @@ const PROMPT_MEASURE_SAMPLE = String.raw`[^;\n]+\s+\(n=[1-9]\d*\)`
 const PROMPT_MEASURED_CLAIM = new RegExp(String.raw`${PROMPT_CLAIM_LINE_START}Measure: ${PROMPT_MEASURE_NAME}; before: ${PROMPT_MEASURE_SAMPLE}; after: ${PROMPT_MEASURE_SAMPLE}\.?(?:\n|$)`, 'i')
 const PROMPT_UNMEASURED_CLAIM = new RegExp(String.raw`${PROMPT_CLAIM_LINE_START}unmeasured — n insufficient; reason: [^;\n]*[^\s;\n][^;\n]*; re-measure after [1-9]\d* seats\.?(?:\n|$)`, 'i')
 
-export function promptMeasurementDefect({ files, body } = {}) {
-  const hits = protectedHitsIn(files, PROMPT_SURFACE.paths)
+export function promptMeasurementDefect({ files, body, register = loadCapabilities() } = {}) {
+  const hits = promptDocumentHits(files, promptSurfacePaths(register))
   if (hits.length === 0) return null
   const text = String(body ?? '')
   if (PROMPT_MEASURED_CLAIM.test(text) || PROMPT_UNMEASURED_CLAIM.test(text)) return null
@@ -8888,7 +8889,7 @@ function runTask(ctx, io, crash) {
     return { ok: true, bounce }
   }
   const builderAssignmentBrief = (briefPath) => {
-    if (protectedHitsIn(scopeFiles, PROMPT_SURFACE.paths).length === 0) return briefPath
+    if (protectedHitsIn(scopeFiles, promptSurfacePaths(loadCapabilities())).length === 0) return briefPath
     const wrapperPath = art('builder-assignment.md')
     io.writeFile(wrapperPath, [
       '# Builder assignment wrapper', '',

@@ -590,7 +590,7 @@ test('the granted pi planner pane command is pinned byte for byte so by_agent de
   // CREW_PI_AGENTS allowlist, and the `agent` activator in --tools.
   assert.equal(
     piSeatCommand({ ...PIN_SEAT, model: 'openai-codex/gpt-5.6', grants: pinnedGrants(register, 'pi') }),
-    'env DEVTEAM_WORKER=1 CREW_ROLE=planner CREW_TASK_DIR="/tmp/crew-task" CREW_PI_AGENTS=\'[{"name":"scout","def":"/repo/crew/pi/agents/scout.json"}]\' pi --model openai-codex/gpt-5.6 --tools "read,bash,edit,write,grep,find,ls,Task,agent,lab" --exclude-tools "edit" --no-extensions -e "/repo/crew/pi/extensions/subagent.ts" -e "/repo/crew/pi/extensions/lab.ts" -e "/repo/crew/pi/extensions/readgate.ts" --no-skills --append-system-prompt "/tmp/crew-task/role-planner.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
+    'env DEVTEAM_WORKER=1 CREW_ROLE=planner CREW_TASK_DIR="/tmp/crew-task" CREW_PI_AGENTS=\'[{"name":"scout","def":"/repo/crew/pi/agents/scout.json"}]\' pi --model openai-codex/gpt-5.6 --tools "read,bash,edit,write,grep,find,ls,Task,agent,lab" --exclude-tools "edit" --no-extensions -e "/repo/crew/pi/extensions/subagent.ts" -e "/repo/crew/pi/extensions/lab.ts" -e "/repo/crew/pi/extensions/readgate.ts" --skill "/repo/skills/lean-build/SKILL.md" --append-system-prompt "/tmp/crew-task/role-planner.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
   )
   // Ungranted: the same pi seat with no grants loses exactly the delivery.
   assert.equal(
@@ -611,7 +611,7 @@ test('the shipped planner pi RPC command pins the complete extension-derived too
     '--session-id', 'planner', '--append-system-prompt', '/tmp/crew-task/role-planner.md',
     '--tools', 'read,bash,edit,write,grep,find,ls,Task,agent,lab', '--exclude-tools', 'edit',
     '--no-context-files', '--no-extensions', '-e', '/repo/crew/pi/extensions/subagent.ts', '-e', '/repo/crew/pi/extensions/lab.ts',
-    '-e', '/repo/crew/pi/extensions/readgate.ts', '--no-skills',
+    '-e', '/repo/crew/pi/extensions/readgate.ts', '--skill', '/repo/skills/lean-build/SKILL.md',
   ])
 })
 
@@ -670,7 +670,8 @@ test('BG1', () => {
       tools: SEAT_DEFAULTS[role].tools, deny: SEAT_DEFAULTS[role].deny, grants,
     })
     assert.equal(command.includes('/repo/crew/pi/extensions/builderloop.ts'), false)
-    assert.equal(command.includes('/repo/skills/lean-build/SKILL.md'), false)
+    assert.equal(command.split('--skill "/repo/skills/lean-build/SKILL.md"').length - 1, role === 'planner' ? 1 : 0)
+    assert.equal(command.includes('--no-skills'), role !== 'planner')
     assert.equal(command.includes('/repo/crew/pi/extensions/readgate.ts'), role === 'planner' || role === 'tech-lead')
   }
   for (const role of ROLE_ORDER.filter((name) => name !== 'builder')) {
@@ -720,7 +721,9 @@ test('BG2', () => {
       env: { CREW_ROLE: role, CREW_TASK_DIR: '/tmp/crew-task' }, grants,
     })
     assert.equal(command.args.includes('/repo/crew/pi/extensions/builderloop.ts'), false)
-    assert.equal(command.args.includes('/repo/skills/lean-build/SKILL.md'), false)
+    assert.equal(command.args.filter((value) => value === '--skill').length, role === 'planner' ? 1 : 0)
+    assert.equal(command.args.filter((value) => value === '/repo/skills/lean-build/SKILL.md').length, role === 'planner' ? 1 : 0)
+    assert.equal(command.args.includes('--no-skills'), role !== 'planner')
     assert.equal(command.args.includes('/repo/crew/pi/extensions/readgate.ts'), role === 'planner' || role === 'tech-lead')
   }
 })
@@ -2430,7 +2433,7 @@ test('the shipped register is where the fan-out grant lives', async () => {
     assert.deepEqual(register.roles[role].extensions, [])
     assert.deepEqual(register.roles[role].agents, [])
     assert.deepEqual(register.roles[role].skills, [])
-    assert.deepEqual(register.roles[role].by_agent?.pi?.skills ?? [], role === 'builder' ? ['skills/lean-build/SKILL.md'] : [])
+    assert.deepEqual(register.roles[role].by_agent?.pi?.skills ?? [], ['planner', 'builder'].includes(role) ? ['skills/lean-build/SKILL.md'] : [])
     assert.equal(register.roles[role].advisor, false)
   }
   for (const tier of Object.keys(roster.tiers)) {

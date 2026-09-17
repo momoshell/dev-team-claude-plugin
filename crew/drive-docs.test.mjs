@@ -239,21 +239,56 @@ test('builder lean rules and lean-build skill stay exact', () => {
   ]
   for (const rule of rules) assert.equal(charterLines.filter((line) => line === rule).length, 1, rule)
 
-  const skillLines = readFileSync(join(REPO_ROOT, 'skills/lean-build/SKILL.md'), 'utf8').split('\n')
+  const skill = readFileSync(join(REPO_ROOT, 'skills/lean-build/SKILL.md'), 'utf8')
+  const skillLines = skill.split('\n')
   assert.equal(skillLines[0], '---')
   assert.equal(skillLines[1], 'name: lean-build')
   assert.match(skillLines[2] || '', /^description: .+$/)
-  assert.equal(skillLines[3], '---')
-  for (const line of [
-    'Apply the ladder before writing new code.',
-    'Every review tag requires a concrete replacement.',
-  ]) assert.equal(skillLines.filter((candidate) => candidate === line).length, 1, line)
-  for (const tag of ['delete', 'stdlib', 'native', 'yagni', 'shrink']) assert.equal(skillLines.some((line) => line.includes(`\`${tag}\``)), true, tag)
-  for (const example of [
-    "- Cache: replace a hand-built cache with Python's `functools.lru_cache` (the platform LRU).",
-    '- Validator: replace a custom validator with one line: `const valid = schema.safeParse(value).success`.',
-    '- Date picker: replace a custom widget with `<input type="date">`.',
-  ]) assert.equal(skillLines.filter((line) => line === example).length, 1, example)
+  assert.equal(skillLines[3], 'compatibility: Delivered only to pi builder and planner seats; claude seats receive nothing because adapter-claude refuses skill grants.')
+  assert.equal(skillLines[4], '---')
+  const flow = "Trace the change's flow until you understand it; only then climb the ladder."
+  const ladder = 'Apply the ladder before writing new code.'
+  const review = 'Every review tag requires a concrete replacement.'
+  const tags = 'Review tags: `delete`, `stdlib`, `native`, `yagni`, and `shrink`.'
+  const tieBreak = 'When two standard-library options are the same size, choose the edge-case-correct one.'
+  for (const line of [flow, ladder, review, tags, tieBreak]) {
+    assert.equal(skillLines.filter((candidate) => candidate === line).length, 1, line)
+  }
+  assert.ok(skillLines.indexOf(flow) < skillLines.indexOf(ladder))
+  for (const tag of ['delete', 'stdlib', 'native', 'yagni', 'shrink']) {
+    assert.equal(skillLines.filter((line) => line === tags && line.includes(`\`${tag}\``)).length, 1, tag)
+  }
+
+  const expectedExamples = [
+    { line: '- Standard library: replace a shell-built `git add` command with `execFileSync(\'git\', [\'add\', \'--\', ...toAdd])` (crew/seat-io.mjs:3608).', file: 'crew/seat-io.mjs', first: 3608, last: 3608, firstFragment: "execFileSync('git', ['add', '--', ...toAdd]", lastFragment: "execFileSync('git', ['add', '--', ...toAdd]" },
+    { line: "- Closed enum: replace an open stage string with `Object.freeze(['plan', 'check', 'build', ...])` (crew/variants.mjs:12-13).", file: 'crew/variants.mjs', first: 12, last: 13, firstFragment: "stages: Object.freeze(['plan', 'check', 'build'", lastFragment: "'gate-baseline'" },
+    { line: '- Existing helper: replace a reimplemented temporary-directory cleanup fixture with `scratchDir(...)` (test/helpers.mjs:39-42).', file: 'test/helpers.mjs', first: 39, last: 42, firstFragment: 'export function scratchDir(', lastFragment: 'return dir' },
+    { line: '- Honest absence: replace an invented candidate count of zero with `candidates: null` and a closed reason (crew/headless-rpc.mjs:129).', file: 'crew/headless-rpc.mjs', first: 129, last: 129, firstFragment: 'candidates: null, reason: closedReason(error)', lastFragment: 'candidates: null, reason: closedReason(error)' },
+  ]
+  const derived = skillLines.filter((line) => line.startsWith('- '))
+  assert.deepEqual(derived, expectedExamples.map(({ line }) => line))
+  for (const line of derived) {
+    const citation = line.match(/\(([^():]+):(\d+)(?:-(\d+))?\)\.$/)
+    assert.ok(citation, `expected a resolving citation in ${line}`)
+    const [, file, firstText, lastText] = citation
+    const first = Number(firstText)
+    const last = Number(lastText ?? firstText)
+    const expected = expectedExamples.find((example) => example.line === line)
+    assert.ok(expected, `unexpected example ${line}`)
+    assert.equal(file, expected.file)
+    assert.equal(first, expected.first)
+    assert.equal(last, expected.last)
+    const sourcePath = join(REPO_ROOT, file)
+    assert.equal(existsSync(sourcePath), true, sourcePath)
+    const sourceLines = readFileSync(sourcePath, 'utf8').split('\n')
+    assert.ok(first >= 1 && first <= sourceLines.length, `${file}:${first} is out of bounds`)
+    assert.ok(last >= first && last <= sourceLines.length, `${file}:${last} is out of bounds`)
+    assert.ok(sourceLines[first - 1].includes(expected.firstFragment), `${file}:${first} did not contain ${expected.firstFragment}`)
+    assert.ok(sourceLines[last - 1].includes(expected.lastFragment), `${file}:${last} did not contain ${expected.lastFragment}`)
+  }
+
+  const neverSimplify = 'Never simplify away: trust-boundary validation; data-loss error handling; security checks; anything the task explicitly requested; closed enums; honest absence with a reason; a denominator beside every rate.'
+  assert.equal(skillLines.filter((line) => line === neverSimplify).length, 1)
   for (const limit of [
     'trust-boundary validation',
     'data-loss error handling',
@@ -262,7 +297,8 @@ test('builder lean rules and lean-build skill stay exact', () => {
     'closed enums',
     'honest absence with a reason',
     'a denominator beside every rate',
-  ]) assert.equal(skillLines.some((line) => line.includes(limit)), true, limit)
+  ]) assert.equal(skillLines.filter((line) => line === neverSimplify && line.includes(limit)).length, 1, limit)
+  for (const retired of ['lru_cache', 'safeParse', 'type="date"']) assert.equal(skill.includes(retired), false, retired)
 })
 
 test('the shared charter and validator agree on the findings contract', () => {

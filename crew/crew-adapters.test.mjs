@@ -311,9 +311,25 @@ test('resolveAdapters rejects an unknown --agent-<role>, and refuses a role-wide
       && /seat builder/.test(error.message)
       && /coding_agents\.nope/.test(error.message),
   )
-  // The shipped register grants the builder's skill under the pi overlay, because claude refuses the
-  // skills dimension, so the shipped default resolves.
-  await assert.doesNotReject(() => resolveAdapters(['builder'], {}))
+  // The shipped register grants lean-build under pi overlays; claude refuses the skills
+  // dimension, so both claude authoring seats resolve without a skill grant.
+  const shipped = JSON.parse(readFileSync(new URL('./capabilities.json', import.meta.url), 'utf8'))
+  const withoutPiSkills = JSON.parse(JSON.stringify(shipped))
+  for (const role of ['planner', 'builder']) delete withoutPiSkills.roles[role].by_agent.pi.skills
+  const claudeArgs = { 'agent-builder': 'claude', 'agent-reviewer': 'claude' }
+  const before = await resolveAdapters(['builder', 'reviewer'], claudeArgs, null, { register: shipped })
+  const after = await resolveAdapters(['builder', 'reviewer'], claudeArgs, null, { register: withoutPiSkills })
+  for (const role of ['builder', 'reviewer']) {
+    const seat = {
+      role, model: 'sonnet', promptFile: `/tmp/crew-task/role-${role}.md`,
+      tools: SEAT_DEFAULTS[role].tools, deny: SEAT_DEFAULTS[role].deny,
+      taskDir: '/tmp/crew-task', bootBrief: 'boot',
+    }
+    assert.equal(
+      seatCommand({ ...seat, grants: before[role].grants }),
+      seatCommand({ ...seat, grants: after[role].grants }),
+    )
+  }
   // The refusal itself still fires for a register that grants skills role-wide.
   const roleWide = JSON.parse(readFileSync(new URL('./capabilities.json', import.meta.url), 'utf8'))
   roleWide.roles.builder.skills = ['skills/lean-build/SKILL.md']

@@ -73,6 +73,9 @@
             "crew/pi/extensions/lab.ts",
             "crew/pi/extensions/readgate.ts"
           ],
+          "skills": [
+            "skills/lean-build/SKILL.md"
+          ],
           "agents": [
             {
               "name": "scout",

@@ -6217,8 +6217,8 @@ test('A4 directory-scoped charter plan briefs builder with measurement claim', (
 })
 
 test('A5 anchor-manifest-only plan keeps the plain builder brief and writes no wrapper', () => {
-  // MUTATION A5: add a supplemental wide condition — || protectedHitsIn(scopeFiles, ...).length — beside the
-  // predicate and the anchor-only plan is wrapped again with a claim it cannot make.
+  // MUTATION A5: rewrite the guard as if (!(promptScopeHits(scopeFiles, S).length || protectedHitsIn(scopeFiles, S).length)) return briefPath
+  // and the anchor-only plan is wrapped again with a claim it cannot make.
   const scope = ['crew/roles/anchors.json']
   const plan = planEnv({ details: { ...planEnv().details, files_in_scope: scope } })
   const io = fakeIo({
@@ -6231,6 +6231,22 @@ test('A5 anchor-manifest-only plan keeps the plain builder brief and writes no w
   const assignment = io.calls.assign.find(({ role }) => role === 'builder')
   assert.notEqual(assignment?.briefFile, `${TD}/builder-assignment.md`)
   assert.equal(io.calls.writes[`${TD}/builder-assignment.md`], undefined)
+})
+
+test('A6 granted-skill parent directory scope briefs builder with measurement claim', () => {
+  // MUTATION A6: drop the directory clause from promptScopeHits and a plan scoped to the granted skill's
+  // parent hands the builder plan.md with no claim instruction.
+  const scope = ['skills/lean-build/']
+  const plan = planEnv({ details: { ...planEnv().details, files_in_scope: scope } })
+  const io = fakeIo({
+    envelopes: { 'planner:1': plan, 'builder:1': buildEnv({ details: { ...buildEnv().details, files_changed: ['skills/lean-build/SKILL.md'] } }), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['skills/lean-build/SKILL.md'],
+  })
+  driveTask(CTX, io)
+  const assignment = io.calls.assign.find(({ role }) => role === 'builder')
+  assert.equal(assignment?.briefFile, `${TD}/builder-assignment.md`)
+  assert.match(io.calls.writes[assignment.briefFile], /The commit message must carry a prompt measurement claim\./)
 })
 
 test('A2 granted skill plan briefs builder with measurement claim', () => {

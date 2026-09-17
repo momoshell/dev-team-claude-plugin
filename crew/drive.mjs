@@ -8889,7 +8889,8 @@ function runTask(ctx, io, crash) {
     return { ok: true, bounce }
   }
   const builderAssignmentBrief = (briefPath) => {
-    // Document hits, like publish and closeout: an anchor-only lane is never told to carry a claim it cannot make.
+    // Plan-scope hits: .md documents on the surface or a directory that intersects it — never a concrete
+    // non-Markdown file — so an anchor-only lane is not told to carry a claim it cannot make.
     if (promptScopeHits(scopeFiles, promptSurfacePaths(loadCapabilities())).length === 0) return briefPath
     const wrapperPath = art('builder-assignment.md')
     io.writeFile(wrapperPath, [

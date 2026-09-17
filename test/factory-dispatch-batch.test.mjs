@@ -487,7 +487,7 @@ test('E1 booted lanes persist an empty lane fence and journal it', async () => {
   assert.ok(states.every((state) => state.lane_fence.length === 0))
 })
 
-test('F1 own-surface admission remains byte-for-byte', () => {
+test('F1 ownership smoke test: one surface definition, each consumer calls its helper', () => {
   const checkout = gitFixture()
   const source = 'src/owned.mjs'
   const surfaceTest = 'test/surface.test.mjs'
@@ -2196,7 +2196,7 @@ test('PS6', () => {
   assert.equal(settled.tier, 'judge')
 })
 
-test('F1 the prompt-surface set has one definition and both consumers import it', () => {
+test('F1 the prompt-surface set has one definition and the four consumers import it', () => {
   const grep = spawnSync('git', ['grep', '-n', '-F', 'export const PROMPT_SURFACE =', '--', 'crew', 'scripts'], { cwd: repoRoot, encoding: 'utf8' })
   assert.equal(grep.status, 0)
   const hits = String(grep.stdout || '').trim().split('\n').filter(Boolean)
@@ -2208,7 +2208,7 @@ test('F1 the prompt-surface set has one definition and both consumers import it'
   // meant to. It cannot pin semantics — a supplemental condition beside the call keeps it green — so the
   // behaviour is proven where it lives: crew/drive-build.test.mjs A1-A5 (builder wrapper), crew/drive-publish.test.mjs
   // A2/A3/G1/F1 (publish), test/factory-closeout.test.mjs B1-B3 (closeout), PS-* below (dispatcher).
-  // Three consumers, two readings:
+  // Four consumers, three readings: dispatcher wide; builder wrapper scope (documents or intersecting directories); publish and closeout documents only:
   // the dispatcher's assurance trigger stays WIDE (touching anchors.json is a tiering input); publish, the
   // builder-brief wrapper and closeout are MEASUREMENT consumers and read documents only.
   const closeout = readFileSync(join(repoRoot, 'scripts/factory/closeout.mjs'), 'utf8')

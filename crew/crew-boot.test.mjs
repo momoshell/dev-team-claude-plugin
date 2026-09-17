@@ -1453,23 +1453,23 @@ test('a missing memory budget value falls back to the default and records invali
   assert.equal(cfg.reason, 'invalid-budget')
 })
 
-test('the charter ceilings and source budgets are the delivered bytes, below the 2026-09-05 baseline', () => {
+test('the charter ceilings, baselines, and source budgets are the delivered bytes', () => {
   const roles = ['builder', 'lead', 'planner', 'reviewer', 'tech-lead']
   const files = ['_shared', ...roles]
   assert.equal(Object.isFrozen(CHARTER_CEILINGS), true)
   assert.equal(Object.isFrozen(CHARTER_SOURCE_BUDGET), true)
   assert.equal(Object.isFrozen(CHARTER_BASELINE_BYTES), true)
-  assert.deepEqual(CHARTER_BASELINE_BYTES, { _shared: 3432, builder: 5169, lead: 9378, planner: 16930, reviewer: 7697, 'tech-lead': 6529 })
-  assert.deepEqual(CHARTER_SOURCE_BUDGET, { _shared: 3750, builder: 4029, lead: 9061, planner: 16887, reviewer: 7381, 'tech-lead': 6210 })
-  assert.deepEqual(CHARTER_CEILINGS, { builder: 7781, lead: 12813, planner: 20639, reviewer: 11133, 'tech-lead': 9962 })
+  assert.deepEqual(CHARTER_BASELINE_BYTES, { _shared: 2124, builder: 1617, lead: 1649, planner: 3221, reviewer: 2102, 'tech-lead': 1449 })
+  assert.deepEqual(CHARTER_SOURCE_BUDGET, { _shared: 2124, builder: 1617, lead: 1649, planner: 3221, reviewer: 2102, 'tech-lead': 1449 })
+  assert.deepEqual(CHARTER_CEILINGS, { builder: 3743, lead: 3775, planner: 5347, reviewer: 4228, 'tech-lead': 3575 })
   for (const value of [...Object.values(CHARTER_BASELINE_BYTES), ...Object.values(CHARTER_SOURCE_BUDGET), ...Object.values(CHARTER_CEILINGS)]) assert.equal(Number.isInteger(value), true)
   for (const role of roles) {
     assert.equal(CHARTER_CEILINGS[role], CHARTER_SOURCE_BUDGET._shared + 2 + CHARTER_SOURCE_BUDGET[role])
-    assert.ok(CHARTER_SOURCE_BUDGET[role] < CHARTER_BASELINE_BYTES[role])
+    assert.ok(CHARTER_SOURCE_BUDGET[role] <= CHARTER_BASELINE_BYTES[role])
   }
-  assert.equal(CHARTER_SOURCE_TOTAL_BUDGET, 47318)
+  assert.equal(CHARTER_SOURCE_TOTAL_BUDGET, 12162)
   assert.equal(CHARTER_SOURCE_TOTAL_BUDGET, Object.values(CHARTER_SOURCE_BUDGET).reduce((sum, value) => sum + value, 0))
-  assert.ok(CHARTER_SOURCE_TOTAL_BUDGET < 49135)
+  assert.ok(CHARTER_SOURCE_TOTAL_BUDGET < 13000)
 
   const source = charterFileBytes()
   assert.deepEqual(Object.fromEntries(Object.entries(source).map(([name, entry]) => [name, entry.bytes])), CHARTER_SOURCE_BUDGET)
@@ -1497,7 +1497,7 @@ test('BH1', () => {
   assert.deepEqual(Object.fromEntries(Object.entries(source).map(([name, entry]) => [name, entry.bytes])), CHARTER_SOURCE_BUDGET)
   for (const [role, entry] of Object.entries(compiled)) {
     assert.equal(entry.bytes, CHARTER_CEILINGS[role])
-    assert.ok(CHARTER_SOURCE_BUDGET[role] < CHARTER_BASELINE_BYTES[role])
+    assert.ok(CHARTER_SOURCE_BUDGET[role] <= CHARTER_BASELINE_BYTES[role])
   }
 })
 

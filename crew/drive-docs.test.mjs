@@ -7,7 +7,7 @@ import assert from 'node:assert/strict'
 import {
   FINDING_DISPOSITIONS, FINDING_SEVERITIES, GATE_CUSTODIAN, MAX_QUESTIONS, PROTECTED_PATHS, REPO_ROOT, RESIDUAL_TYPES, applyPrescriptionLines, checkAnchors, existsSync, join, laneFence, mkdirSync, partitionShifts, protectedHits, readFileSync, readdirSync, rmSync, scratchDir, spawnSync,
 } from './drive-fixtures.mjs'
-import { bootCmd, composeRolePrompt, FLAG_VALUE_CONTRACT, KNOWN_FLAGS, BOOLEAN_FLAGS, BOOT_ONLY_FLAGS, compiledCharterBytes, charterBudgetRefusals, CHARTER_CEILINGS } from './crew.mjs'
+import { bootCmd, composeRolePrompt, FLAG_VALUE_CONTRACT, KNOWN_FLAGS, BOOLEAN_FLAGS, BOOT_ONLY_FLAGS, compiledCharterBytes, charterFileBytes, charterBudgetRefusals, CHARTER_BASELINE_BYTES, CHARTER_SOURCE_BUDGET, CHARTER_SOURCE_TOTAL_BUDGET, CHARTER_CEILINGS } from './crew.mjs'
 import { after } from 'node:test'
 import { tmpdir } from 'node:os'
 import {
@@ -36,6 +36,9 @@ after(() => {
 
 const CHARTER_TEST_ROLES = Object.freeze(['lead', 'builder'])
 const CHARTER_TAIL = '\n\nBe terse: state the result in the fewest words that carry it, and do not restate context the reader already has.\n'
+const CHARTER_SOURCE_CEILINGS = Object.freeze({ _shared: 3000, builder: 3500, lead: 5000, planner: 7000, reviewer: 4000, 'tech-lead': 3000 })
+const CHARTER_PRESERVATION = 'docs/audits/2026-09-17/charter-preservation.md'
+const CHARTER_BLIND_SPOT = 'Equivalent seat conduct cannot be proven in-lane; measure escalation-cause distribution for the next twelve seats against the previous twelve.'
 
 function charterCapabilityRegister() {
   const grant = (extra = {}) => ({ tools: [], extensions: [], agents: [], skills: [], advisor: false, requires: [], mcp_servers: [], ...extra })
@@ -89,6 +92,260 @@ function charterSource(role) {
     card: readFileSync(join(REPO_ROOT, 'crew', 'roles', `${role}.md`), 'utf8'),
   }
 }
+
+function normaliseCharterSentence(value) {
+  return String(value).replace(/\\\|/g, '|').replace(/`/g, '').replace(/\s+/g, ' ').trim()
+}
+
+function charterSentences(source) {
+  const lines = source.split('\n')
+  const paragraphs = []
+  let block = null
+  let fenced = false
+  const flush = () => {
+    if (!block) return
+    if (!/^\s*#/.test(block.lines[0])) paragraphs.push(block)
+    block = null
+  }
+  lines.forEach((line, index) => {
+    if (/^\s*```/.test(line)) { flush(); fenced = !fenced; return }
+    if (fenced) return
+    if (!line.trim()) { flush(); return }
+    if (!block) block = { line: index + 1, lines: [] }
+    block.lines.push(line)
+  })
+  flush()
+  const segmenter = new Intl.Segmenter('en', { granularity: 'sentence' })
+  const out = []
+  for (const paragraph of paragraphs) {
+    const raw = paragraph.lines.map((line) => line.replace(/^\s*(?:[-*]|\d+\.)\s+/, '')).join('\n')
+    const text = raw.replace(/\n/g, ' ')
+    for (const { segment, index } of segmenter.segment(text)) {
+      const sentence = normaliseCharterSentence(segment)
+      if (!sentence) continue
+      const actualIndex = index + (segment.match(/^\s*/)?.[0].length || 0)
+      const line = paragraph.line + (raw.slice(0, actualIndex).match(/\n/g)?.length || 0)
+      out.push({ line, sentence })
+    }
+  }
+  return out
+}
+
+function auditTableRows(audit, heading, nextHeading) {
+  const start = audit.indexOf(heading)
+  assert.ok(start >= 0, `missing ${heading}`)
+  const tail = audit.slice(start + heading.length)
+  const end = nextHeading ? tail.indexOf(nextHeading) : -1
+  const section = end < 0 ? tail : tail.slice(0, end)
+  const lines = section.split('\n').filter((line) => /^\|.*\|$/.test(line) && !/^\|\s*[-:]+/.test(line))
+  assert.ok(lines.length > 0, `missing table for ${heading}`)
+  const parse = (line) => {
+    const cells = []
+    let cell = ''
+    let escaped = false
+    for (const ch of line.slice(1, -1)) {
+      if (escaped) { cell += ch; escaped = false; continue }
+      if (ch === '\\') { escaped = true; continue }
+      if (ch === '|') { cells.push(normaliseCharterSentence(cell)); cell = ''; continue }
+      cell += ch
+    }
+    cells.push(normaliseCharterSentence(cell))
+    return cells
+  }
+  return lines.slice(1).map(parse)
+}
+
+function auditOccurrenceKey(path, line, sentence) { return `${path}\0${line}\0${sentence}` }
+
+const CHARTER_COVERAGE_SOURCES = Object.freeze({
+  'seat-io injected lines': Object.freeze({
+    roles: Object.freeze(['_shared', 'builder', 'lead', 'planner', 'reviewer', 'tech-lead']),
+    path: 'crew/driver.mjs', needle: 'export function assignmentPrompt',
+    sentence: /\b(?:assignment|brief|ReturnEnvelope|envelope|details|finding|review|verdict|patch|disposition|gate|driver|planner|lead|builder|task|plan|read|write|run|test|scope|answer|decision|residual|mutation|check|id|path|status)\b/i,
+  }),
+  ACCEPTANCE_GATE_BLOCK: Object.freeze({
+    roles: Object.freeze(['planner']), path: 'scripts/factory/make-brief.mjs', needle: 'export const ACCEPTANCE_GATE_BLOCK',
+    sentence: /\b(?:acceptance gate|gate|GATE-SUMMARY|baseline|check)\b/i,
+  }),
+  MUTATION_CONTRACT_BLOCK: Object.freeze({
+    roles: Object.freeze(['planner']), path: 'scripts/factory/make-brief.mjs', needle: 'export const MUTATION_CONTRACT_BLOCK',
+    sentence: /\b(?:mutation|anchor|find|replace|declaration|check label|MUTATIONS_MAX)\b/i,
+  }),
+  'deny list': Object.freeze({
+    roles: Object.freeze(['reviewer']), path: 'crew/guidelines/review-do-not-flag.md', needle: '## Do not flag',
+    sentence: /\b(?:defen[cs]e|consider|review)\b/i,
+  }),
+  'war-story': Object.freeze({
+    roles: null, path: null, needle: null,
+    sentence: /(?:#\d+|\bb\d{2,}\b|\b(?:one|two|three|four|five|six|seven|eight|nine|\d+) (?:rounds?|lanes?|runs?)\b|\btwice\b|\barchetype\b|\blost\b)/i,
+  }),
+})
+
+function auditRole(path) { return path.match(/^crew\/roles\/([a-z_-]+)\.md$/)?.[1] || null }
+
+function assertCutCoverage(cutRows, headByPath, currentByPath) {
+  const sourceCache = new Map()
+  for (const [path, line, sentence, coverage] of cutRows) {
+    const duplicate = /^duplicate-of:(crew\/roles\/[a-z_-]+\.md):(\d+)$/.exec(coverage)
+    if (duplicate) {
+      const target = (currentByPath[duplicate[1]] || []).find((entry) => entry.line === Number(duplicate[2]))
+      assert.ok(target, `duplicate coverage target absent for ${path}:${line}`)
+      const sharedTerms = ['batch', 'read', 'turn'].filter((term) => new RegExp(`\\b${term}`, 'i').test(sentence) && new RegExp(`\\b${term}`, 'i').test(target.sentence))
+      assert.ok(sharedTerms.length >= 2, `duplicate coverage target does not carry the deleted rule for ${path}:${line}`)
+      continue
+    }
+    const source = CHARTER_COVERAGE_SOURCES[coverage]
+    assert.ok(source, `coverage ${coverage} is not a delivered source for ${path}:${line}`)
+    const role = auditRole(path)
+    assert.ok(role && (source.roles === null || source.roles.includes(role)), `coverage ${coverage} does not reach ${path}:${line}`)
+    assert.match(sentence, source.sentence, `coverage ${coverage} does not cover ${path}:${line}`)
+    if (source.path) {
+      const text = sourceCache.get(source.path) || readFileSync(join(REPO_ROOT, source.path), 'utf8')
+      sourceCache.set(source.path, text)
+      assert.ok(text.includes(source.needle), `coverage source ${source.path} is unavailable for ${path}:${line}`)
+    }
+  }
+}
+
+function reconcileCharterAudit({ audit, headByPath, currentByPath }) {
+  const cutRows = auditTableRows(audit, '## Cut sentences', '## Retained/reworded sentences')
+  const rewordRows = auditTableRows(audit, '## Retained/reworded sentences', '## Blind spot')
+  const allowed = /^(?:ENVELOPE_REFUSAL_REASONS|SCOPE_REFUSALS|MUTATION_CORRECTION_REFUSALS|HARDENING_REFUSALS|PUBLISH_REFUSALS|ACCEPT_REFUSALS|WORKFLOW_REFUSALS|deny list|seat-io injected lines?|ACCEPTANCE_GATE_BLOCK|MUTATION_CONTRACT_BLOCK|war-story|duplicate-of:[^:]+:\d+)$/
+  assert.equal(cutRows.every((row) => row.length === 4 && /^crew\/roles\/.+\.md$/.test(row[0]) && /^\d+$/.test(row[1]) && allowed.test(row[3])), true, 'malformed cut row')
+  assert.equal(rewordRows.every((row) => row.length === 4 && /^crew\/roles\/.+\.md$/.test(row[0]) && /^\d+$/.test(row[1]) && row[3]), true, 'malformed retained/reworded row')
+  const cutKeys = cutRows.map((row) => auditOccurrenceKey(row[0], row[1], row[2]))
+  const rewordKeys = rewordRows.map((row) => auditOccurrenceKey(row[0], row[1], row[2]))
+  assert.equal(new Set(cutKeys).size, cutKeys.length, 'duplicate cut row')
+  assert.equal(new Set(rewordKeys).size, rewordKeys.length, 'duplicate reword row')
+  assert.equal(cutKeys.some((key) => rewordKeys.includes(key)), false, 'occurrence classified twice')
+  assertCutCoverage(cutRows, headByPath, currentByPath)
+  const expected = new Set()
+  const headKeys = new Set()
+  for (const [path, before] of Object.entries(headByPath)) {
+    const current = currentByPath[path] || []
+    const remaining = new Map()
+    for (const { sentence } of current) remaining.set(sentence, (remaining.get(sentence) || 0) + 1)
+    for (const { line, sentence } of before) {
+      const key = auditOccurrenceKey(path, line, sentence)
+      headKeys.add(key)
+      const count = remaining.get(sentence) || 0
+      if (count > 0) remaining.set(sentence, count - 1)
+      else expected.add(key)
+    }
+  }
+  const declared = new Set([...cutKeys, ...rewordKeys])
+  assert.deepEqual([...declared].filter((key) => !headKeys.has(key) || !expected.has(key)), [], 'wrong or extra audit row')
+  for (const row of rewordRows) {
+    const current = currentByPath[row[0]] || []
+    assert.ok(current.some(({ sentence }) => sentence === row[3]), `new sentence absent for ${row[0]}:${row[1]}`)
+  }
+  assert.deepEqual([...expected].filter((key) => !declared.has(key)), [], 'missing audit row')
+  return { cutRows, rewordRows, expected }
+}
+
+function charterHeadInventory() {
+  const names = ['_shared', 'builder', 'lead', 'planner', 'reviewer', 'tech-lead']
+  const headByPath = {}
+  const currentByPath = {}
+  for (const name of names) {
+    const path = `crew/roles/${name}.md`
+    const result = spawnSync('git', ['show', `HEAD:${path}`], { cwd: REPO_ROOT, encoding: 'utf8' })
+    assert.equal(result.status, 0, `${path}: unable to read HEAD (${result.error?.code || result.signal || result.stderr || 'unknown'})`)
+    headByPath[path] = charterSentences(result.stdout)
+    currentByPath[path] = charterSentences(readFileSync(join(REPO_ROOT, path), 'utf8'))
+  }
+  return { headByPath, currentByPath }
+}
+
+test('charter source ceilings and measured delivered budgets stay exact', () => {
+  const source = charterFileBytes(join(REPO_ROOT, 'crew', 'roles'))
+  const measured = Object.fromEntries(Object.entries(source).map(([name, entry]) => [name, entry.bytes]))
+  assert.deepEqual(CHARTER_SOURCE_CEILINGS, { _shared: 3000, builder: 3500, lead: 5000, planner: 7000, reviewer: 4000, 'tech-lead': 3000 })
+  assert.deepEqual(CHARTER_SOURCE_BUDGET, measured)
+  assert.deepEqual(CHARTER_BASELINE_BYTES, measured)
+  assert.equal(CHARTER_SOURCE_TOTAL_BUDGET, Object.values(measured).reduce((sum, bytes) => sum + bytes, 0))
+  for (const [name, ceiling] of Object.entries(CHARTER_SOURCE_CEILINGS)) assert.ok(measured[name] <= ceiling, `${name}=${measured[name]} exceeds ${ceiling}`)
+  const compiled = compiledCharterBytes(join(REPO_ROOT, 'crew', 'roles'))
+  for (const name of Object.keys(compiled)) assert.deepEqual(compiled[name], { bytes: measured._shared + 2 + measured[name], reason: null })
+  for (const [role, ceiling] of Object.entries(CHARTER_CEILINGS)) assert.equal(compiled[role].bytes, ceiling)
+})
+
+test('rewritten charters carry the four judgment additions and retained boundaries', () => {
+  const builder = readFileSync(join(REPO_ROOT, 'crew/roles/builder.md'), 'utf8')
+  const planner = readFileSync(join(REPO_ROOT, 'crew/roles/planner.md'), 'utf8')
+  const reviewer = readFileSync(join(REPO_ROOT, 'crew/roles/reviewer.md'), 'utf8')
+  const lead = readFileSync(join(REPO_ROOT, 'crew/roles/lead.md'), 'utf8')
+  assert.ok(builder.includes('Trace the flow first; only after you understand the change apply the reuse, standard-library, platform, dependency ladder.'))
+  assert.ok(builder.includes('For a complex request, ship the lean version and question the rest in the same envelope rather than spending a round on insufficient.'))
+  assert.ok(builder.includes('Scope is context under ADR-045; record necessary out-of-context edits rather than predicting a bounce.'))
+  assert.equal((planner.match(/\*\*Decisions\*\*/g) || []).length, 1)
+  assert.ok(planner.includes('A placeholder such as add appropriate error handling or similar to X makes a plan under-specified.'))
+  assert.ok(planner.includes('The domain ends when your plan is accepted; the lead then owns gate custody.'))
+  assert.ok(planner.includes('Scope is context under ADR-045.'))
+  assert.ok(reviewer.includes('Lean already. Ship.'))
+  assert.ok(lead.includes('## Gate custody (post-acceptance)'))
+  assert.ok(lead.includes('Return details.gate_cmd for gate custody.'))
+  assert.ok(lead.includes('A gate-fix spends no budget.'))
+  assert.doesNotMatch(planner, /## Perspective assignments/)
+})
+
+test('charter preservation reconciles every changed HEAD occurrence and blind spot', () => {
+  assert.equal(existsSync(join(REPO_ROOT, CHARTER_PRESERVATION)), true)
+  const audit = readFileSync(join(REPO_ROOT, CHARTER_PRESERVATION), 'utf8')
+  const { headByPath, currentByPath } = charterHeadInventory()
+  reconcileCharterAudit({ audit, headByPath, currentByPath })
+  const start = audit.indexOf('## Blind spot')
+  const section = start < 0 ? '' : audit.slice(start)
+  assert.equal(section.split(CHARTER_BLIND_SPOT).length - 1, 1)
+})
+
+test('RV1-1 reviewer charter resolves carried plan-check findings', () => {
+  const reviewer = readFileSync(join(REPO_ROOT, 'crew', 'roles', 'reviewer.md'), 'utf8')
+  const contract = 'When a carried plan-check finding is closed, list its id in `details.carried_cleared`; when it remains open, restate it as a finding with the same id.'
+  assert.ok(reviewer.includes(contract))
+})
+
+test('charter preservation rejects wrong-line, extra, duplicate, missing, and duplicate-occurrence omissions', () => {
+  const audit = readFileSync(join(REPO_ROOT, CHARTER_PRESERVATION), 'utf8')
+  const inventory = charterHeadInventory()
+  const lines = audit.split('\n')
+  const rowIndex = lines.findIndex((line) => /^\|\s*crew\/roles\/[^|]+\|\s*\d+\s*\|/.test(line))
+  assert.ok(rowIndex >= 0, 'audit has no data row to mutate')
+  const original = lines[rowIndex]
+  const wrong = [...lines]
+  wrong[rowIndex] = original.replace(/\|\s*(\d+)\s*\|/, (_, line) => `| ${Number(line) + 1} |`)
+  assert.throws(() => reconcileCharterAudit({ audit: wrong.join('\n'), ...inventory }), /wrong or extra|missing audit row/)
+  const duplicate = [...lines]
+  duplicate.splice(rowIndex + 1, 0, original)
+  assert.throws(() => reconcileCharterAudit({ audit: duplicate.join('\n'), ...inventory }), /duplicate/)
+  const missing = [...lines]
+  missing.splice(rowIndex, 1)
+  assert.throws(() => reconcileCharterAudit({ audit: missing.join('\n'), ...inventory }), /missing audit row/)
+  const repeatedPath = 'crew/roles/_shared.md'
+  const repeatedSentence = 'A ReturnEnvelope is required.'
+  const repeated = { headByPath: { [repeatedPath]: [{ line: 10, sentence: repeatedSentence }, { line: 20, sentence: repeatedSentence }] }, currentByPath: { [repeatedPath]: [{ line: 10, sentence: repeatedSentence }] } }
+  const noRow = '# audit\n\n## Cut sentences\n\n| charter path | true old starting line | complete normalized HEAD sentence | coverage |\n| --- | --- | --- | --- |\n\n## Retained/reworded sentences\n\n| charter path | true old starting line | complete normalized HEAD sentence | complete normalized new sentence |\n| --- | --- | --- | --- |\n\n## Blind spot\n'
+  assert.throws(() => reconcileCharterAudit({ audit: noRow, ...repeated }), /missing audit row/)
+  const oneRow = noRow.replace('\n\n## Retained/reworded sentences', `\n| ${repeatedPath} | 20 | ${repeatedSentence} | seat-io injected lines |\n\n## Retained/reworded sentences`)
+  assert.doesNotThrow(() => reconcileCharterAudit({ audit: oneRow, ...repeated }))
+})
+
+test('RV1-2 preservation audit keeps wrapped sentences whole and coverage reachable', () => {
+  assert.deepEqual(charterSentences('First.\nA complete sentence wraps\nacross a source line.\n'), [
+    { line: 1, sentence: 'First.' },
+    { line: 2, sentence: 'A complete sentence wraps across a source line.' },
+  ])
+  const audit = readFileSync(join(REPO_ROOT, CHARTER_PRESERVATION), 'utf8')
+  const inventory = charterHeadInventory()
+  assert.doesNotThrow(() => reconcileCharterAudit({ audit, ...inventory }))
+  const lines = audit.split('\n')
+  const start = lines.findIndex((line) => line === '## Cut sentences')
+  const rowIndex = lines.findIndex((line, index) => index > start && /^\|\s*crew\/roles\/[^|]+\|\s*\d+\s*\|/.test(line))
+  assert.ok(rowIndex > start, 'audit has no cut row to validate')
+  const unsupported = [...lines]
+  unsupported[rowIndex] = unsupported[rowIndex].replace(/\|\s*[^|]+\|\s*$/, '| WORKFLOW_REFUSALS |')
+  assert.throws(() => reconcileCharterAudit({ audit: unsupported.join('\n'), ...inventory }), /coverage .*delivered source|coverage .*does not reach|coverage .*does not cover/)
+})
 
 test('bootCmd writes terse charter tails for every seated role', async () => {
   const fixture = charterBootFixture('terse')
@@ -186,11 +443,11 @@ test('charter-arm is a value-bearing boot-only input and not a boolean', () => {
 test('the turn-economy rule is stated once and still reaches every seat', () => {
   const roles = ['builder', 'lead', 'planner', 'reviewer', 'tech-lead']
   const rules = {
-    builder: "Run the acceptance gate and the test files you are changing — never the full suite, which the driver's own suite stage owns and re-runs after you.",
-    planner: 'Run your own acceptance gate at baseline, exactly once. Run nothing else — the driver owns the validation lane and the suite.',
-    lead: 'Run no tests. The gate proof and the suite result are already journalled; read them from the task dir and the journal rather than re-buying them.',
-    reviewer: 'Run no tests. The gate proof and the suite result are already journalled; read them from the task dir and the journal rather than re-buying them.',
-    'tech-lead': 'Run no tests. The gate proof and the suite result are already journalled; read them from the task dir and the journal rather than re-buying them.',
+    builder: 'Run the acceptance gate and changed tests at most once before returning.',
+    planner: 'Run your own acceptance gate at baseline, exactly once.',
+    lead: 'You never edit repo files, run tests, or commit.',
+    reviewer: 'Run no tests; use the recorded gate and lane results.',
+    'tech-lead': 'Run no tests and change no repo files.',
   }
   const rolesDir = join(REPO_ROOT, 'crew', 'roles')
   const docs = readdirSync(rolesDir).filter((name) => name.endsWith('.md')).map((name) => readFileSync(join(rolesDir, name), 'utf8'))
@@ -216,13 +473,13 @@ test('the turn-economy rule is stated once and still reaches every seat', () => 
 
 test('BC1', () => {
   const charter = readFileSync(join(REPO_ROOT, 'crew', 'roles', 'builder.md'), 'utf8')
-  const sentence = 'Run the gate at most once before returning; never rerun a command without an intervening edit.'
+  const sentence = 'Run the acceptance gate and changed tests at most once before returning.'
   assert.equal(charter.split(sentence).length - 1, 1)
 })
 
 test('BC2', () => {
   const charter = readFileSync(join(REPO_ROOT, 'crew', 'roles', 'builder.md'), 'utf8')
-  const sentence = 'Batch independent reads and edits into one turn.'
+  const sentence = 'Trace the flow first; only after you understand the change apply the reuse, standard-library, platform, dependency ladder.'
   assert.equal(charter.split(sentence).length - 1, 1)
 })
 
@@ -265,28 +522,22 @@ test('builder lean rules and lean-build skill stay exact', () => {
   ]) assert.equal(skillLines.some((line) => line.includes(limit)), true, limit)
 })
 
-test('the shared charter and validator agree on the findings contract', () => {
+test('the reviewer charter carries the findings contract and gate triage judgment', () => {
   const charter = readFileSync(new URL('./roles/reviewer.md', import.meta.url), 'utf8')
   const start = charter.indexOf('## Envelope details fields')
   const end = charter.indexOf('## Perspective assignments', start)
   assert.ok(start >= 0 && end > start)
   const block = charter.slice(start, end)
   for (const token of ['"findings"', '"id"', '"severity"']) assert.ok(block.includes(token))
-  // #457: this slice used to stop AT '## Gate triage', so the gate-repair
-  // custody sentence under that heading was pinned by nothing and survived
-  // custody moving to the lead (#334/PR #348). The slice now covers it.
-  assert.ok(block.includes('## Gate triage'), 'the charter slice must cover the gate-triage section')
-  assert.ok(block.includes(`grants the **${GATE_CUSTODIAN}**`), 'the gate verdict must grant the repair to the gate custodian')
-  assert.doesNotMatch(block, /grants the (\*\*)?planner\b/)
-  const severityField = block.match(/"severity":\s*([^\n]+)/)?.[1]
-  assert.ok(severityField)
-  const documented = [...severityField.matchAll(/"([^\"]+)"/g)].map((match) => match[1])
-  assert.deepEqual(documented, [...FINDING_SEVERITIES])
-  const dispositionField = block.match(/"disposition":\s*([^\n]+)/)?.[1]
-  assert.ok(dispositionField)
-  const dispositions = [...dispositionField.matchAll(/"([^\"]+)"/g)].map((match) => match[1])
-  assert.deepEqual(dispositions, [...FINDING_DISPOSITIONS])
-  assert.ok(block.includes('`disposition` is OPTIONAL in this release and REQUIRED from the next'))
+  assert.ok(charter.includes('## Gate triage'))
+  assert.ok(charter.includes('`build`'))
+  assert.ok(charter.includes('`gate`'))
+  assert.match(block, /"severity":\s*"must-fix"\s*\|\s*"should-fix"\s*\|\s*"consider"/)
+  assert.match(block, /"disposition":\s*"auto-fix"\s*\|\s*"ask-user"\s*\|\s*"no-op"/)
+  assert.deepEqual([...FINDING_SEVERITIES], ['must-fix', 'should-fix', 'consider'])
+  assert.deepEqual([...FINDING_DISPOSITIONS], ['auto-fix', 'ask-user', 'no-op'])
+  assert.ok(charter.includes('Lean already. Ship.'))
+  assert.doesNotMatch(charter, /verdict-findings|finding-id|patch-admission/i)
 })
 
 test("the reviewer guidelines carry a defended 'Do not flag' list", () => {
@@ -314,29 +565,27 @@ test("the reviewer guidelines carry a defended 'Do not flag' list", () => {
   assert.ok(charter.includes('crew/guidelines/review-do-not-flag.md'))
 })
 
-test('the lead charter documents the typed exhaustion accept contract', () => {
+test('the lead charter keeps typed decisions and gate custody judgment', () => {
   const charter = readFileSync(new URL('./roles/lead.md', import.meta.url), 'utf8')
   for (const token of ['residuals', 'refuted', ...RESIDUAL_TYPES]) assert.ok(charter.includes(token), token)
   assert.match(charter, /code-refused/)
-  const collapsed = charter.replace(/\s+/g, ' ')
-  assert.match(collapsed, /the plan is a contract/)
-  assert.match(collapsed, /not amendable after acceptance/)
-  assert.match(collapsed, /correctness-unverified[^.]*code-refused/)
-  assert.match(collapsed, /not a statement about which stage/)
-  assert.match(collapsed, /summary is REQUIRED there and is omitted from a keyed review-exhaustion claim/)
+  assert.match(charter, /closed options/)
+  assert.match(charter, /second opinion/i)
+  assert.match(charter, /bounce.*accept.*escalate/s)
+  assert.ok(charter.includes('Return details.gate_cmd for gate custody.'))
+  assert.ok(charter.includes('A gate-fix spends no budget.'))
+  assert.ok(charter.includes('preserve every legitimate check'))
 })
 
 test('the planner charter documents how to discover files_in_scope', () => {
   const charter = readFileSync(new URL('./roles/planner.md', import.meta.url), 'utf8')
   for (const token of [
-    'every test that pins it',
-    'crew/daemon.test.mjs',
-    'crew/factoryctl.test.mjs',
-    'crew/adapter-*.test.mjs',
-    '#193',
-    '#199',
-    'dispatched surface is a CEILING',
-    '`details.questions` entry rather than a wider `files_in_scope`',
+    'every test or document that pins them',
+    "changed file's own repo-relative path",
+    'exported symbols',
+    '## Implementation files',
+    'Scope is context under ADR-045.',
+    'The dispatched surface supplies context, not a refusal prediction.',
   ]) assert.ok(charter.includes(token), token)
   assert.match(charter, /grep/i)
 })
@@ -351,93 +600,72 @@ test('the planner charter tells the planner to grep the changed file’s own pat
   assert.doesNotMatch(discovery, /production/)
 })
 
-test('the planner Changes section carries the five-rung minimality ladder', () => {
+test('the planner Changes section carries one choice-changing Decisions block', () => {
   const planner = readFileSync(new URL('./roles/planner.md', import.meta.url), 'utf8')
   const start = planner.indexOf('- **Changes**')
   const end = planner.indexOf('- **Sequencing**', start)
   assert.ok(start >= 0 && end > start)
   const changes = planner.slice(start, end)
-  const rungs = changes.split('\n').filter((line) => /^  \d+\./.test(line))
-  assert.deepEqual(rungs, [
-    '  1. Does it need to exist?',
-    '  2. Is it already here?',
-    '  3. Does the standard library cover it?',
-    '  4. Does a platform feature cover it?',
-    '  5. Does an installed dependency cover it?',
-  ])
-  assert.doesNotMatch(planner, /first yes/i)
+  assert.equal((changes.match(/\*\*Decisions\*\*/g) || []).length, 1)
+  assert.match(changes, /ladder rungs that changed a choice/)
+  assert.doesNotMatch(changes, /Does it need to exist\?|Does the standard library cover it\?/)
+  assert.ok(planner.includes('A placeholder such as add appropriate error handling or similar to X makes a plan under-specified.'))
 })
 
 test('A1', () => {
   const charter = readFileSync(new URL('./roles/planner.md', import.meta.url), 'utf8')
-  const rule = '- Quote every cited range inline with its line numbers; those are the lines the builder needs.'
-  assert.equal(charter.split(rule).length - 1, 1)
+  assert.ok(charter.includes('Write `plan.md` with exactly these sections:'))
+  assert.ok(charter.includes('**Acceptance criteria** — numbered mechanical checks.'))
 })
 
 test('B1', () => {
   const charter = readFileSync(new URL('./roles/builder.md', import.meta.url), 'utf8')
-  const rule = "- The plan's cited ranges are your working set; read outside them only when an edit fails to bind or a test names another line."
-  assert.equal(charter.split(rule).length - 1, 1)
+  assert.ok(charter.includes('Read `plan.md` fully before the first edit'))
+  assert.ok(charter.includes('only when an edit fails to bind or a test names another line'))
 })
 
-test('RV1-1 planner range guidance follows required plan sections', () => {
+test('RV1-1 planner scope judgment follows ADR-045', () => {
   const charter = readFileSync(new URL('./roles/planner.md', import.meta.url), 'utf8')
-  const tail = `- **Risks/consults** — anything you are <90% sure of. If a tech-lead pane
-  exists, questions you want it to answer; else flag for the orchestrator.
-- Quote every cited range inline with its line numbers; those are the lines the builder needs.`
-  assert.equal(charter.split(tail).length - 1, 1)
+  assert.equal(charter.split('Scope is context under ADR-045.').length - 1, 1)
+  assert.doesNotMatch(charter, /scope gate bounces|dispatched surface is a CEILING/i)
 })
 
 test('F1', () => {
   const charter = readFileSync(new URL('./roles/planner.md', import.meta.url), 'utf8')
-  const sentence = '`details.validation_lane` is ONE command: it must contain no `&&`, `;`, `|`, redirection, or glob, and `node --test` accepts several files as `node --test <file> <file> <file>`.'
-  assert.ok(charter.includes(sentence))
-  for (const token of ['ONE command', '&&', ';', '|', 'redirection', 'glob', 'accepts several files', 'node --test <file> <file> <file>']) {
-    assert.ok(charter.includes(token), token)
-  }
+  assert.ok(charter.includes('`validation_lane`'))
+  assert.ok(charter.includes('exact commands'))
+  assert.ok(charter.includes('The gate is not a substitute for the plan\'s tests.'))
 })
 
 // The file nobody pinned is the file that rotted: tech-lead.md carried the whole
 // plan-check doctrine and no test read a byte of it (#698).
-test('the tech-lead charter documents envelope custody and the residual it cannot type', () => {
+test('the tech-lead charter documents adversarial plan judgment and custody', () => {
   const charter = readFileSync(new URL('./roles/tech-lead.md', import.meta.url), 'utf8')
   for (const token of [
     'details.mutations', 'files_in_scope', 'details.residuals',
-    'correctness-unverified', 'verdictOf', 'applyPrescriptionLines',
+    'correctness-unverified', 'prescribing revise', 'wrong premise',
+    'simpler satisfying shape', 'missing failure mode', 'untestable acceptance',
   ]) assert.ok(charter.includes(token), token)
-  const collapsed = charter.replace(/\s+/g, ' ')
-  assert.match(collapsed, /frozen at acceptance/)
-  assert.match(collapsed, /not amendable after acceptance/)
-  assert.match(collapsed, /VERDICT: revise[^.]*PRESCRIBES/)
-  assert.match(collapsed, /correctness-unverified[^.]*code-refused/)
-  assert.match(collapsed, /cannot type a residual/)
+  assert.match(charter, /VERDICT: approve.*VERDICT: revise/s)
+  assert.match(charter, /blocker.*major.*minor/s)
+  assert.match(charter, /## Perspective assignments/)
+  assert.doesNotMatch(charter, /crew\/drive\.mjs:\d/)
 })
 
-// Prose file:line citations are invisible to skills/*/anchors.json, so crew/roles/anchors.json
-// pins the CONTENT each cited line of crew/drive.mjs must carry. A shape-only check could not
-// tell a right line from a wrong one, and twice a build kept it green by deleting a blank line
-// elsewhere to compensate for one it inserted (#743, #748, #747). The manifest and the prose are
-// held to a bijection in both directions, so a citation added to one side alone fails here.
-test('every crew/drive.mjs anchor the tech-lead charter cites resolves to the code it names', () => {
-  const charterPath = join(REPO_ROOT, 'crew', 'roles', 'tech-lead.md')
-  const charter = readFileSync(charterPath, 'utf8')
+// Numeric implementation citations are deliberately absent from the owned prompt surface;
+// stable symbol and block names do not create moving line pins.
+test('owned charters and guidelines contain no numeric driver citations', () => {
+  const docs = [
+    ...readdirSync(join(REPO_ROOT, 'crew', 'roles')).filter((name) => name.endsWith('.md')).map((name) => join(REPO_ROOT, 'crew', 'roles', name)),
+    join(REPO_ROOT, 'crew', 'guidelines', 'review-do-not-flag.md'),
+    join(REPO_ROOT, 'crew', 'guidelines', 'seat-pre-return-checklist.md'),
+  ]
+  for (const path of docs) assert.doesNotMatch(readFileSync(path, 'utf8'), /crew\/drive\.mjs:\d/, path)
   const manifest = JSON.parse(readFileSync(join(REPO_ROOT, 'crew', 'roles', 'anchors.json'), 'utf8'))
-  // Every charter in crew/roles, not only the tech-lead's: the manifest is directory-wide
-  // and anchor-pin.mjs --repair crew/roles scans the same set, so a pin cited only by
-  // planner.md or reviewer.md is a citation here, never an orphan.
-  const rolesDir = join(REPO_ROOT, 'crew', 'roles')
-  const docs = readdirSync(rolesDir).filter((name) => name.endsWith('.md')).sort().map((name) => join(rolesDir, name))
-  const result = checkAnchors({ root: REPO_ROOT, docs, manifest })
-  assert.ok(result.anchors >= 12, `expected at least 12 anchors, found ${result.anchors}`)
+  const roleDocs = docs.filter((path) => path.includes(join(REPO_ROOT, 'crew', 'roles')))
+  const result = checkAnchors({ root: REPO_ROOT, docs: roleDocs, manifest })
   assert.deepEqual(result.failures, [])
-  const { inFence, outOfFence } = partitionShifts({ shifted: result.shifted, fence: laneFence({ root: REPO_ROOT }).paths, manifest: 'crew/roles/anchors.json' })
-  for (const shift of outOfFence) console.warn(`shifted ${shift.key} -> line ${shift.to}; repair after this lane merges, on main with: node skills/qa-test-writing/anchor-pin.mjs --repair-all crew/roles`)
-  assert.deepEqual(inFence, [], 'a shift this lane can repair here must be repaired, not tolerated')
-  // Both citation forms of the four anchors #698 found stale: the qualified
-  // `crew/drive.mjs:2299` and the bare `:2226` continuation the file also used.
-  for (const retired of [':2299', ':2226', ':2319', ':2217']) {
-    assert.equal(charter.includes(retired), false, `retired anchor ${retired}`)
-  }
+  assert.deepEqual(result.shifted, [])
 })
 
 test('the codemod stages before it applies and fails loudly without ast-grep', () => {
@@ -592,7 +820,7 @@ test('runtime composed charter sizes stay at their ceilings', () => {
   const rolesDir = join(REPO_ROOT, 'crew', 'roles')
   const measured = compiledCharterBytes(rolesDir)
   const sizes = Object.fromEntries(Object.entries(measured).map(([role, entry]) => [role, entry.bytes]))
-  const expected = { builder: 7781, lead: 12813, planner: 20639, reviewer: 11133, 'tech-lead': 9962 }
+  const expected = { builder: 3743, lead: 3775, planner: 5347, reviewer: 4228, 'tech-lead': 3575 }
   const summary = Object.entries(measured).map(([role, entry]) => `${role}=${entry.bytes}`).join(', ')
   assert.deepEqual(sizes, expected, `composed charter sizes: ${summary}`)
   for (const [role, ceiling] of Object.entries(CHARTER_CEILINGS)) {
@@ -612,13 +840,13 @@ test('both charters state where the planner stops and the lead takes over', () =
   assert.doesNotMatch(planner, /## Perspective assignments/)
 })
 
-test('#800 §7b 34 — the shared charter pin includes disposition and its compatibility window', () => {
+test('#800 §7b 34 — the reviewer charter pins the closed disposition set', () => {
   const charter = readFileSync(new URL('./roles/reviewer.md', import.meta.url), 'utf8')
   const block = charter.slice(charter.indexOf('## Envelope details fields'), charter.indexOf('## Perspective assignments'))
   const line = block.match(/"disposition":\s*([^\n]+)/)?.[1]
   assert.ok(line)
   assert.deepEqual([...line.matchAll(/"([^\"]+)"/g)].map((match) => match[1]), [...FINDING_DISPOSITIONS])
-  assert.ok(block.includes('`disposition` is OPTIONAL in this release and REQUIRED from the next'))
+  assert.ok(block.includes('Finding ids use the closed shape'))
 })
 
 const DOCUMENT_DIFF = [

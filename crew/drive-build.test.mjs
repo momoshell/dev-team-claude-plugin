@@ -78,6 +78,22 @@ test('RV1-2 full reorder pins the same refusal as every other shape', () => {
   assert.equal(source.split(reversalExpectation).length - 1, 1)
 })
 
+test('RV1-1 reviewer carried-clearance prompt guard', () => {
+  const charter = readFileSync(new URL('./roles/reviewer.md', import.meta.url), 'utf8')
+  const contract = 'When a carried plan-check finding is closed, list its id in `details.carried_cleared`; when it remains open, restate it as a finding with the same id.'
+  assert.ok(charter.includes(contract))
+})
+
+test('RV1-2 preservation audit coverage guard', () => {
+  const audit = readFileSync(new URL('../docs/audits/2026-09-17/charter-preservation.md', import.meta.url), 'utf8')
+  const docsTest = readFileSync(new URL('./drive-docs.test.mjs', import.meta.url), 'utf8')
+  assert.ok(audit.includes('| crew/roles/_shared.md | 3 | You are one pane of a small crew working ONE task in a cmux workspace. |'))
+  assert.ok(audit.includes('| crew/roles/builder.md | 13 | Batch independent reads and edits into one turn. | duplicate-of:crew/roles/_shared.md:25 |'))
+  assert.doesNotMatch(audit, /\|\s*WORKFLOW_REFUSALS\s*\|/)
+  assert.ok(docsTest.includes('function assertCutCoverage'))
+  assert.ok(docsTest.includes('coverage source ${source.path} is unavailable'))
+})
+
 // Derived from the live inventory, never copied from it: a lane that edits
 // test/visualizer-server.test.mjs or test/visualizer-shape.test.mjs moves both
 // values, and literal replacements then silently no-op (b740, b741).

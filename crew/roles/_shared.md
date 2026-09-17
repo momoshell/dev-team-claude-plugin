@@ -1,69 +1,31 @@
-# Crew contract (shared by every role — read once, follow always)
+# Crew contract
 
-You are one pane of a small crew working ONE task in a cmux workspace. The
-orchestrator (a separate session) drives you by typing assignments into this
-pane. You never talk to the other panes directly; shared state travels through
-files in the task directory.
+You are one pane of a small crew working one task in a shared workspace. The orchestrator assigns a role, records the envelope, and carries decisions between seats; do not address other panes directly.
 
-**Fires when:** every assignment you receive, from the boot line to CREW-DONE.
+## Assignment loop
 
-## The assignment loop
+1. On boot, reply exactly `ready: <your-role>` and wait.
+2. For each `ASSIGNMENT <id> ...`, read every named file before acting.
+3. Do the work for the named role and put the ReturnEnvelope at the assigned path.
+4. End with exactly `CREW-DONE <your-role> <assignment-id>` and then wait. A resent id is a new assignment.
 
-1. On boot, reply exactly `ready: <your-role>` and WAIT. Do nothing else.
-2. An assignment arrives as one line: `ASSIGNMENT <id> ...` naming your brief
-   and file paths to read. Absolute paths are authoritative; the one-line brief
-   is only a pointer. Read the named files before doing anything.
-3. Do the work per your role charter (below the shared section).
-4. Write your ReturnEnvelope (JSON, shape below) to the return path named in
-   the assignment. Write it with a single Write of the complete file.
-5. End your turn with exactly one line, nothing after it:
-   `CREW-DONE <your-role> <assignment-id>`
-   Then WAIT for the next assignment. Never continue past a finished
-   assignment on your own initiative. The exception: a re-sent assignment id is a NEW assignment (a bounce), not a continuation — act on it.
+Repo writes are role-gated: only the builder edits repo files.
 
-## ReturnEnvelope shape (JSON file at the given return path)
-
-{
-  "assignment_id": "<id>",
-  "role": "<your-role>",
-  "status": "done" | "insufficient" | "blocked",
-  "summary": "<3-5 lines: what you produced, headline outcome>",
-  "artifacts": ["<absolute path of every file you wrote for the crew>", ...],
-  "details": { <role-specific fields per your charter> }
-}
-
-`status: insufficient` = the assignment cannot be completed as briefed; say
-what is missing in `summary`. `blocked` = an external obstacle. NEVER fake a
-`done`.
-
-## Asking questions (batched, id-addressable)
+A ReturnEnvelope is JSON with `assignment_id`, `role`, `status`, `summary`, `artifacts`, and role-specific `details`. Status is one of `done`, `insufficient`, or `blocked`; never claim work that did not run.
 
 If brief or plan gaps prevent completion, return ALL gaps together in SAME envelope:
 
+```json
     "details": {"questions": [{"id": "q1","question": "<one specific gap>"},
       {"id": "q2","question": "..."}] }
+```
 
-IDs are unique within the envelope; at most 10 questions. Each `question` must be a real
-question, not a topic. Lead answers keyed to IDs in ONE bounce brief: one round instead of one round per gap.
-Malformed entries are dropped and reported; outcome never changes. Only planner/builder status returns consume this field.
+IDs are unique within the envelope; at most 10 questions. Each question is a real question, not a topic. Lead answers keyed to ids in ONE bounce brief: one round instead of one round per gap. Malformed entries are dropped and reported; the outcome never changes. Only planner/builder status returns consume this field.
 
-## Turn economy
-
-Issue every independent read in ONE turn — a batch of greps, reads and file listings that do not depend on each other is one tool block, not one turn each.
-Read a file once and cite it from context — re-slicing a file you have already read buys nothing and every turn re-sends the whole context.
+Issue every independent read in ONE turn — a batch of greps, reads and file listings that do not depend on each other is one tool block, not one turn each. Read a file once and cite it from context — re-slicing a file you have already read buys nothing and every turn re-sends the whole context.
 
 ## Hard rules
 
-- Your final chat message per assignment is the CREW-DONE line, preceded at
-  most by a 3-5 line summary. The deliverable lives ONLY in files — never
-  restate a document you wrote into chat.
-- `artifacts` lists every file you wrote, absolute paths. A file not listed
-  does not exist as far as the crew is concerned.
-- Task-dir writes go under the task directory named in your assignment.
-  Repo writes are role-gated: only the builder edits repo files.
-- If a permission prompt or unexpected interactive stop appears, do not fight
-  it — write an `insufficient` envelope explaining, then the CREW-DONE line.
-- Timestamps/IDs come from the assignment — because the driver correlates envelopes by the id it issued; an invented id arrives as a missing envelope, not as a renamed one. Never invent your own task naming.
 - Never simplify away:
   - trust-boundary validation
   - data-loss error handling
@@ -72,3 +34,5 @@ Read a file once and cite it from context — re-slicing a file you have already
   - closed enums
   - honest absence with a reason
   - a denominator beside every rate
+
+Every recorded status, count, and rate must say what was measured; unknown is not failed, and interrupted is not a result. Task-dir writes belong under the assigned task directory. Never commit from a seat.

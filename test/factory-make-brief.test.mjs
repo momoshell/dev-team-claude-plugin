@@ -1970,16 +1970,33 @@ test('the mutation contract demands a mutation exercising the narrowest claim', 
     'two verbs', '#409']) assert.ok(compound[0].includes(clause), clause)
 })
 
-test('the charter and the checklist state the contract the driver enforces', () => {
-  const charter = readFileSync(join(ROOT, 'crew', 'roles', 'planner.md'), 'utf8')
+test('the compiled brief and the checklist state the contract the driver enforces', () => {
+  // The contract is delivered where the planner READS it, and the charter is not that place:
+  // every compiled brief renders the standing block under '## Per-check mutations'
+  // (scripts/factory/make-brief.mjs standingBlocks().mutations), and the checklist's P3 repeats the
+  // shape. The charter said the same thing a third time and drifted from validateMutations, which is
+  // the single enforcement point. Asserting it on the CARRIER is what keeps the seat informed.
+  // MUTATION: replace standingBlocks().mutations with standingBlocks().nothing in renderBrief and no
+  // compiled brief carries the contract — this test reddens where the charter copy never could.
+  const brief = renderBrief({
+    request: { ask: ASK, where: ['lib/widget.mjs'], done_means: DONE, out_of_scope: OUT, intent: 'mutation contract delivery' },
+    where: [], discovery: { candidates: [], tripwires: [], broadKeys: [] },
+  })
   const checklist = readFileSync(join(ROOT, 'crew', 'guidelines', 'seat-pre-return-checklist.md'), 'utf8')
+  // Scoped to the SECTION, never the whole brief: these tokens also occur in the ask and the
+  // acceptance block, so a whole-brief assertion passes even when the section is emptied.
+  assert.match(brief, /^## Per-check mutations$/m)
+  const start = brief.indexOf('## Per-check mutations')
+  const rest = brief.slice(start + '## Per-check mutations'.length)
+  const end = rest.search(/^## /m)
+  const section = end === -1 ? rest : rest.slice(0, end)
   for (const token of ['"check"', '"file"', '"find"', '"replace"', '"exempt"', 'files_in_scope', '#330']) {
-    assert.ok(charter.includes(token), token)
+    assert.ok(section.includes(token), token)
   }
-  assert.match(charter, /\{\s*"check":\s*"[A-Za-z0-9][A-Za-z0-9._-]*"/)
+  assert.match(section, /\{\s*"check":\s*"[A-Za-z0-9][A-Za-z0-9._-]*"/)
   // the worked example pairs a token label with the human sentence in a comment
-  assert.match(charter, /\/\/ MUTATION [A-Za-z0-9][A-Za-z0-9._-]*:/)
-  assert.ok(charter.includes(String(MUTATIONS_MAX)))
+  assert.match(section, /\/\/ MUTATION [A-Za-z0-9][A-Za-z0-9._-]*:/)
+  assert.ok(section.includes(String(MUTATIONS_MAX)))
   const p3 = checklist.slice(checklist.indexOf('- **P3'))
   for (const token of ['`find`', '`replace`', '`exempt`', 'files_in_scope', 'stable token']) {
     assert.ok(p3.includes(token), token)

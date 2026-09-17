@@ -14,6 +14,8 @@ const SCOUT = join(REPO, 'crew/pi/agents/scout.json')
 const DOC = join(HERE, 'references/findings-shape.md')
 const SKILL = join(HERE, 'SKILL.md')
 const CHARTER = join(REPO, 'crew/roles/reviewer.md')
+const PRESERVATION_AUDIT = join(REPO, 'docs/audits/2026-09-17/charter-preservation.md')
+const CARRIED_CLEARANCE_CONTRACT = 'When a carried plan-check finding is closed, list its id in `details.carried_cleared`; when it remains open, restate it as a finding with the same id.'
 
 const TOP_KEYS = ['summary', 'findings', 'gaps']
 const FINDING_KEYS = ['claim', 'evidence', 'confidence']
@@ -104,6 +106,20 @@ test('the skill and the reviewer charter agree on the disposition set', () => {
   assert.ok(line)
   const values = [...line.slice(line.indexOf(':') + 1).matchAll(/"([^"]+)"/g)].map((match) => match[1])
   assert.deepEqual(values, [...FINDING_DISPOSITIONS])
+})
+
+test('RV1-1 carried clearance prompt remains explicit', () => {
+  assert.ok(readFileSync(CHARTER, 'utf8').includes(CARRIED_CLEARANCE_CONTRACT))
+})
+
+test('RV1-2 preservation audit keeps full sentences and rejects workflow labels', () => {
+  const audit = readFileSync(PRESERVATION_AUDIT, 'utf8')
+  const docsTest = readFileSync(join(REPO, 'crew/drive-docs.test.mjs'), 'utf8')
+  assert.ok(audit.includes('| crew/roles/_shared.md | 3 | You are one pane of a small crew working ONE task in a cmux workspace. |'))
+  assert.ok(audit.includes('| crew/roles/builder.md | 13 | Batch independent reads and edits into one turn. | duplicate-of:crew/roles/_shared.md:25 |'))
+  assert.doesNotMatch(audit, /\|\s*WORKFLOW_REFUSALS\s*\|/)
+  assert.ok(docsTest.includes('function assertCutCoverage'))
+  assert.ok(docsTest.includes('coverage source ${source.path} is unavailable'))
 })
 
 test('the skill states the disposition window and the pass/must-fix refusal', () => {

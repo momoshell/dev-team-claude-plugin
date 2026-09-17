@@ -1,10 +1,9 @@
 {
   "crew/escalation-policy.mjs:81": "export function fuseFindings(a, b, options = {}) {",
   "crew/escalation-policy.mjs:128": "export function adjudicatePanel(divergent, details) {",
-  "crew/roles/reviewer.md:47": "\"details\": { \"review_path\": \"<abs>\", \"verdict\": \"pass\"|\"changes-needed\",",
-  "crew/roles/reviewer.md:62": "`findings` is optional: omit it and the run behaves exactly as before.",
-  "crew/roles/reviewer.md:14": "2. Judge two separate questions, in order:",
-  "crew/roles/reviewer.md:16": "Out-of-plan edits are findings even when harmless.",
+  "crew/roles/reviewer.md:5": "1. **Conformance** — does the change implement the plan's Changes and Tests, and nothing unplanned?",
+  "crew/roles/reviewer.md:8": "Use concrete counterexamples: state → wrong observable → consequential failure. Treat carried findings as open until the current tree either closes or reproduces each one. When a carried plan-check finding is closed, list its id in `details.carried_cleared`; when it remains open, restate it as a finding with the same id. Triage a failing gate as a build defect or a gate defect, and say which evidence decides. Scope is context under ADR-045; judge necessary context work rather than predicting a refusal.",
+  "crew/roles/reviewer.md:18": "\"id\": \"<stable id>\",",
   "crew/child.mjs:351": "The daemon's regrant hook is the sole caller that sets continuation:",
   "crew/drive.mjs:2169": "export function validateScopeEntries(entries) {",
   "crew/drive.mjs:715": "export function panelSeats(seated) {",
@@ -13,5 +12,6 @@
   "crew/drive.mjs:5036": "const fused = fuseFindings(findingsOf(aEnv), findingsOf(bEnv), {",
   "crew/drive.mjs:5160": "const adjudicated = adjudicatePanel(allocatedDivergent, adjEnv.details)",
   "crew/drive.mjs:9896": "        panelResult = runPanelReview({ round: roundNo, panel, io, dissents: S.dissents, setAcceptFindings: (value) => { S.acceptFindings = value }, setLastReview: (value) => { S.lastReview = value }, planPath, panelBriefText, panelStandingQuestion, art, stage, stageComplete, assignAndWait, carriedOpen, panelLog, panelDegraded, emit })",
-  "crew/drive.mjs:9322": "const panel = ctx.continuation === true ? panelSeats(seatList) : null"
+  "crew/drive.mjs:9322": "const panel = ctx.continuation === true ? panelSeats(seatList) : null",
+  "crew/roles/reviewer.md:29": "The review output is `pass` or `changes-needed`; findings use only the closed severity and disposition sets. A no-findings review says exactly: `Lean already. Ship.`"
 }

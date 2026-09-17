@@ -2622,32 +2622,32 @@ export function memoryExtracts(roles, args, taskSlug) {
 // — it was five copies of one rule that could drift apart, and three variants of
 // the third line show they had begun to.
 export const CHARTER_BASELINE_BYTES = Object.freeze({
-  _shared: 3432,
-  builder: 5169,
-  lead: 9378,
-  planner: 16930,
-  reviewer: 7697,
-  'tech-lead': 6529,
+  _shared: 2124,
+  builder: 1617,
+  lead: 1649,
+  planner: 3221,
+  reviewer: 2102,
+  'tech-lead': 1449,
 })
 
-// Delivered source bytes, per file. Every card is below its baseline above.
+// Delivered source bytes, per file. The baseline records the same measured source bytes.
 export const CHARTER_SOURCE_BUDGET = Object.freeze({
-  _shared: 3750,
-  builder: 4029,
-  lead: 9061,
-  planner: 16887,
-  reviewer: 7381,
-  'tech-lead': 6210,
+  _shared: 2124,
+  builder: 1617,
+  lead: 1649,
+  planner: 3221,
+  reviewer: 2102,
+  'tech-lead': 1449,
 })
-export const CHARTER_SOURCE_TOTAL_BUDGET = 47318
+export const CHARTER_SOURCE_TOTAL_BUDGET = 12162
 
 // Delivered COMPILED bytes, per role: CHARTER_SOURCE_BUDGET._shared + 2 + card.
 export const CHARTER_CEILINGS = Object.freeze({
-  builder: 7781,
-  lead: 12813,
-  planner: 20639,
-  reviewer: 11133,
-  'tech-lead': 9962,
+  builder: 3743,
+  lead: 3775,
+  planner: 5347,
+  reviewer: 4228,
+  'tech-lead': 3575,
 })
 
 export const CHARTER_BUDGET_REFUSAL = 'charter-over-ceiling'

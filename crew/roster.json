@@ -5,16 +5,16 @@
     "mechanical": {
       "lead": null,
       "planner": {
-        "provider": "anthropic",
-        "id": "claude-opus-5",
-        "agent": "claude",
+        "provider": "meta",
+        "id": "muse-spark-1.3-contributor",
+        "agent": "pi",
         "effort": "medium"
       },
       "builder": {
         "provider": "openai",
-        "id": "gpt-5.6-luna",
+        "id": "gpt-5.3-codex-spark",
         "agent": "pi",
-        "effort": "max"
+        "effort": "high"
       },
       "reviewer": {
         "provider": "openai",
@@ -31,16 +31,16 @@
         "effort": "medium"
       },
       "planner": {
-        "provider": "openai",
-        "id": "gpt-5.6-sol",
+        "provider": "meta",
+        "id": "muse-spark-1.3-contributor",
         "agent": "pi",
-        "effort": "medium"
+        "effort": "high"
       },
       "builder": {
         "provider": "openai",
-        "id": "gpt-5.6-luna",
+        "id": "gpt-5.3-codex-spark",
         "agent": "pi",
-        "effort": "max"
+        "effort": "high"
       },
       "reviewer": {
         "provider": "anthropic",
@@ -57,16 +57,16 @@
         "effort": "high"
       },
       "planner": {
-        "provider": "openai",
-        "id": "gpt-5.6-sol",
+        "provider": "meta",
+        "id": "muse-spark-1.3-contributor",
         "agent": "pi",
-        "effort": "medium"
+        "effort": "high"
       },
       "builder": {
         "provider": "openai",
         "id": "gpt-5.6-luna",
         "agent": "pi",
-        "effort": "max"
+        "effort": "xhigh"
       },
       "reviewer": {
         "provider": "anthropic",
@@ -78,7 +78,7 @@
         "provider": "openai",
         "id": "gpt-5.6-sol",
         "agent": "pi",
-        "effort": "xhigh",
+        "effort": "high",
         "fallback": [
           {
             "provider": "anthropic",

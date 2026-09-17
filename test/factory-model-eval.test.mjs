@@ -284,11 +284,11 @@ test('A1 role benches contain every required valid input', () => {
   const readJson = (relativePath) => JSON.parse(readFileSync(join(ROOT, relativePath), 'utf8'))
   const declarations = {
     planner: {
-      path: 'docs/audits/2026-09-16/bench/planner/candidates.json',
+      path: 'docs/audits/2026-09-17/bench/planner/candidates.json',
       cell: readJson('crew/roster.json').tiers.mechanical.planner,
     },
     builder: {
-      path: 'docs/audits/2026-09-16/bench/builder/candidates.json',
+      path: 'docs/audits/2026-09-17/bench/builder/candidates.json',
       cell: readJson('crew/roster.json').tiers.mechanical.builder,
     },
   }
@@ -318,13 +318,13 @@ test('A1 role benches contain every required valid input', () => {
   })
 
   for (const [role, spec] of Object.entries(declarations)) {
-    const benchDir = join(ROOT, 'docs/audits/2026-09-16/bench', role)
+    const benchDir = join(ROOT, 'docs/audits/2026-09-17/bench', role)
     const requiredBenchFiles = ['task.md', 'gate.mjs', 'judge.json', 'candidates.json']
     for (const name of [...requiredBenchFiles, 'bench.sha']) {
       const bytes = readFileSync(join(benchDir, name))
       assert.ok(bytes.length > 0, `${role}/${name} must be non-blank`)
     }
-    const judge = readJson(`docs/audits/2026-09-16/bench/${role}/judge.json`)
+    const judge = readJson(`docs/audits/2026-09-17/bench/${role}/judge.json`)
     assert.deepEqual(Object.keys(judge).sort(), ['model', 'vendor'])
     assert.equal(typeof judge.model, 'string')
     assert.notEqual(judge.model.trim(), '')
@@ -1106,11 +1106,11 @@ test('routing policy and ledger write refusals stop bench admission without fabr
   assert.deepEqual(calls, [])
 })
 
-const ROLE_BENCH_ROOT = 'docs/audits/2026-09-16/bench'
+const ROLE_BENCH_ROOT = 'docs/audits/2026-09-17/bench'
 const ROLE_NAMES = ['planner', 'builder']
 const reviewedCandidateShas = {
-  planner: '8571f5eef303d0429a504ba356538c9a4d0c6acbe7a684a0a251cd2e1f585c52',
-  builder: '6bd024951c522057ce3bc84904585ad3cc34c6d629fe0b4c4ad097bb5628063a',
+  planner: 'b7a3b776e298eeecfeda1fffaee2012df30d9295f421d4be36c0d473dbcb450a',
+  builder: '12938c3bd54693d199ae3f82a2f5a091edc3860031e5ca347f5fe71d7a9be668',
 }
 const PLANNER_TARGET = ['bench', 'sha', 'mismatch'].join('-')
 const BUILDER_README = `${ROLE_BENCH_ROOT}/builder/README.md`
@@ -1204,7 +1204,7 @@ function builderCanonicalReadme(scaffold) {
 
 function builderGateFixture({ readme = null, extraDiff = false } = {}) {
   const dir = scratchDir('factory-model-eval-builder-gate-')
-  mkdirSync(join(dir, 'docs/audits/2026-09-16/bench/builder'), { recursive: true })
+  mkdirSync(join(dir, 'docs/audits/2026-09-17/bench/builder'), { recursive: true })
   fixtureGit(dir, ['init', '-q'])
   const scaffold = readFileSync(roleBenchPath('builder', 'README.md'), 'utf8')
   writeFileSync(join(dir, BUILDER_README), scaffold)

@@ -1,0 +1,38 @@
+{
+  "schema": 1,
+  "role": "builder",
+  "production": "openai/gpt-5.3-codex-spark",
+  "candidates": [
+    {
+      "provider": "openai",
+      "id": "gpt-5.3-codex-spark",
+      "agent": "pi",
+      "effort": "high",
+      "source": "models.dev"
+    },
+    {
+      "provider": "llama-swap",
+      "id": "qwen3.8-27b",
+      "agent": "pi",
+      "effort": "max",
+      "source": "local",
+      "base_url": "http://10.112.20.20:8080/v1"
+    },
+    {
+      "provider": "llama-swap",
+      "id": "gpt-oss-20b",
+      "agent": "pi",
+      "effort": "max",
+      "source": "local",
+      "base_url": "http://10.112.20.20:8080/v1"
+    },
+    {
+      "provider": "llama-swap",
+      "id": "gemma4-31b",
+      "agent": "pi",
+      "effort": "max",
+      "source": "local",
+      "base_url": "http://10.112.20.20:8080/v1"
+    }
+  ]
+}

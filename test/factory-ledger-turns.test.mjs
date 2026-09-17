@@ -584,6 +584,9 @@ test('every roster model carries its ratified cache rates and their provenance',
     'openai/gpt-5.6-sol': { read: 0.4, write: 0 },
     'openai/gpt-5.6-terra': { read: 0.2, write: 0 },
     'openai/gpt-5.6-luna': { read: 0.02, write: 0 },
+    'openai/gpt-6-astra': { read: 1, write: 12.5 },
+    'openai/gpt-5.3-codex-spark': { read: 0.175, write: 0 },
+    "meta/muse-spark-1.3-contributor": { read: 0.002, write: 0 },
     'llama-swap/qwen3.8-27b': { read: 0, write: 0 },
     'llama-swap/gpt-oss-20b': { read: 0, write: 0 },
     'llama-swap/gemma4-31b': { read: 0, write: 0 },
@@ -591,6 +594,9 @@ test('every roster model carries its ratified cache rates and their provenance',
   const expectedSources = {
     anthropic: "anthropic published prompt-caching multipliers applied to this entry's own cost_in_per_mtok: cache read 0.10x, 1h-TTL cache write 2.00x. billed_cache_write_tokens collapses the 1h and 5m TTLs into one column, so pricing every cache write at the 1h rate is an explicit lossy convention, not a reconstruction of any session's TTL; 1h is the ratified one because this task's acceptance figures require it and because both sampled b168-paneusage claude-opus-5 pane seats used only 1h writes.",
     openai: "openai published prompt-caching rates applied to this entry's own cost_in_per_mtok: cached input 0.10x, and cache writes are not charged, so cost_cache_write_per_mtok is a published 0.00x rate rather than an absent one.",
+    "openai/gpt-6-astra": "pi's model directory publishes these rates directly for openai-codex/gpt-6-astra rather than as multipliers of this entry's cost_in_per_mtok: cacheRead 1.00 and cacheWrite 12.50 per Mtok. The directory also declares a second price tier above 272000 input tokens (input 20, output 50->75, cacheRead 2, cacheWrite 25); that tier is NOT represented here because the schema carries one rate per column, and it is unreachable within a single request since the tier threshold equals this model's whole context window. A conversation billed above the threshold would be underpriced by this entry.",
+    "openai/gpt-5.3-codex-spark": "pi's model directory publishes these rates directly for openai-codex/gpt-5.3-codex-spark: cacheRead 0.175 per Mtok, which is 0.10x this entry's cost_in_per_mtok, and cacheWrite 0 — a published zero rate, not an absent one.",
+    "meta/muse-spark-1.3-contributor": "openrouter publishes a cacheRead of 0.002 per Mtok against a 0.1 input rate for meta/muse-spark-1.3-contributor — a 0.02x multiplier, NOT the 0.10x that anthropic and openai publish. The figure is recorded as served rather than normalised to the ratified 0.10x, because a rate nobody charges is not a cheaper guess, it is a wrong one. cacheWrite is a published 0.00x rate rather than an absent one.",
     'llama-swap/qwen3.8-27b': 'llama-swap local serving has a published 0 rate rather than an absent one for llama-swap/qwen3.8-27b cache reads and writes.',
     'llama-swap/gpt-oss-20b': 'llama-swap local serving has a published 0 rate rather than an absent one for llama-swap/gpt-oss-20b cache reads and writes.',
     'llama-swap/gemma4-31b': 'llama-swap local serving has a published 0 rate rather than an absent one for llama-swap/gemma4-31b cache reads and writes.',
@@ -604,6 +610,11 @@ test('every roster model carries its ratified cache rates and their provenance',
       assert.equal(model.cost_out_per_mtok, 0)
       assert.equal(model.cost_cache_read_per_mtok, 0)
       assert.equal(model.cost_cache_write_per_mtok, 0)
+    } else if (key === "meta/muse-spark-1.3-contributor") {
+      // openrouter serves this model's cache reads at 0.02x, not the 0.10x anthropic
+      // and openai publish. Pinned to the SERVED figure so a 0.10x normalisation
+      // cannot creep back in: the exemption is this one key, not the rule.
+      assert.ok(Math.abs(model.cost_cache_read_per_mtok - model.cost_in_per_mtok * 0.02) <= 1e-12)
     } else {
       assert.ok(Math.abs(model.cost_cache_read_per_mtok - model.cost_in_per_mtok * 0.10) <= 1e-12)
     }

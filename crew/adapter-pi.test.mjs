@@ -244,7 +244,7 @@ test('modelString refuses an unmapped provider rather than guessing', () => {
 test('modelString refuses providers inherited from Object.prototype', () => {
   const names = ['toString', 'constructor', 'hasOwnProperty', 'valueOf']
   for (const name of names) {
-    const expected = `adapter-pi: no pi provider for roster provider "${name}" (known: openai, anthropic) — refusing a guessed passthrough: pi synthesizes phantom models on narrowed lookups`
+    const expected = `adapter-pi: no pi provider for roster provider "${name}" (known: openai, anthropic, meta) — refusing a guessed passthrough: pi synthesizes phantom models on narrowed lookups`
     assert.throws(
       () => modelString({ provider: name, id: 'x' }),
       (error) => error.message === expected,
@@ -256,7 +256,7 @@ test('modelString refuses undeclared Object.prototype providers with a local reg
   const localProviders = { 'local-pi': { pi_provider: 'local-pi' } }
   const names = ['toString', 'constructor', 'hasOwnProperty', 'valueOf']
   for (const name of names) {
-    const expected = `adapter-pi: no pi provider for roster provider "${name}" (known: openai, anthropic, local-pi) — refusing a guessed passthrough: pi synthesizes phantom models on narrowed lookups`
+    const expected = `adapter-pi: no pi provider for roster provider "${name}" (known: openai, anthropic, meta, local-pi) — refusing a guessed passthrough: pi synthesizes phantom models on narrowed lookups`
     assert.throws(
       () => modelString({ provider: name, id: 'x', localProviders }),
       (error) => error.message === expected,
@@ -438,7 +438,7 @@ test('modelString handles null-prototype local provider registers', () => {
   assert.equal(modelString({ provider: 'local-pi', id: 'qwen3-coder', localProviders }), 'local-pi/qwen3-coder')
   assert.throws(
     () => modelString({ provider: 'toString', id: 'x', localProviders }),
-    (error) => error.message === 'adapter-pi: no pi provider for roster provider "toString" (known: openai, anthropic, local-pi) — refusing a guessed passthrough: pi synthesizes phantom models on narrowed lookups',
+    (error) => error.message === 'adapter-pi: no pi provider for roster provider "toString" (known: openai, anthropic, meta, local-pi) — refusing a guessed passthrough: pi synthesizes phantom models on narrowed lookups',
   )
 })
 

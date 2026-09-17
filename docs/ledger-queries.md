@@ -32,12 +32,27 @@ The factory ledger is the register for run facts. When a session asks what happe
 | Which RPC exit contexts were recorded? | `node scripts/factory/ledger.mjs journal-facts [--since <iso>] [--until <iso>]` — prints `rpc_exits` by outcome beside `exits_seen`, the recorded exit-context denominator. The unit is one RPC exit context; an absent family is unmeasured, never a measured zero. |
 | How many turns and tool calls does a dispatch cost, by role and tier? | `node scripts/factory/ledger.mjs turns --since <iso> --until <iso>` — prints the `seat_turn_census` totals, the `dispatches` denominator, and `by_role_tier` rows. A null cell with an absence marker is unmeasured, never a measured zero. The unit is one seat dispatch. |
 | Which adopted plans were recorded? | `node scripts/factory/ledger.mjs journal-facts [--since <iso>] [--until <iso>]` — prints `plan_adoptions`, including file and finding totals, beside `adoptions_seen`, the recorded-adoption denominator. The unit is one adopted plan; an absent family is unmeasured, never a measured zero. |
+| What is the progress of a parent plan's chunks? | `node scripts/factory/ledger.mjs chunk-progress <parent_lane> [--chunk <id>]` — derives chunk completion from sessions and the latest gate row. Rates carry owned-green / owned-total and chunks-done / chunks-total denominators. |
 | Which external fence lanes were registered? | `node scripts/factory/ledger.mjs journal-facts [--since <iso>] [--until <iso>]` — prints `external_fences`, including file/read totals, beside `lanes_seen`, the distinct-lane denominator. The unit is one dispatch-register lane entry; an absent family is unmeasured, never a measured zero. |
 | How often does a plan-time mutation anchor miss the built tree, and how often did the builder correct it? | `node scripts/factory/ledger.mjs journal-facts [--since <iso>] [--until <iso>]` — prints `mutation_anchors`: `binds` (one per bind-check pass), `absences` and `corrections`, `by_correction` over the closed `none`/`refused`/`accepted` set and `by_refusal` over the terminal refusal reasons, beside `declarations_seen`, the declared-anchor denominator. The unit is one declared mutation anchor. `absences: 0` on a measured window is a real zero — every declaration bound; an absent family is unmeasured, never a measured zero. Before #874 this rate had no writer, so the two known cases (b384-suiteslot, b381-journalfacts) are a floor and not a rate. |
 | How much time did lanes lose waiting for a suite slot, and over how many waits? | `node scripts/factory/ledger.mjs journal-facts [--since <iso>] [--until <iso>]` — prints `phase_slot_waits`: `waited_ms` beside `waits`, its denominator, `by_day` splitting both terms by UTC day, `by_kind` over the closed `gate`/`suite-warm`/`suite-cold` set, and `depth_absent`, how many waits never scanned a queue depth. The unit is one recorded wait; an absent family is unmeasured, never a measured zero. See **Recipe M**. |
 | Can a hand-driven run get its compiled request? | **Supported, hand-driven (#456)** — `node scripts/factory/ledger.mjs request <adw_id> --from-brief <path>` reads the first non-blank paragraph under `## The ask` and records it with `request_source: 'brief-file'`; missing, absent, or blank sections refuse rather than guessing. It is **not retired**: it is the only writer that reaches a production ledger today, because the intake dispatcher's call records under `withLedger`, a no-op without a `dbPath` (`scripts/factory/intake.mjs:812`). |
 
 Replace `<adw_id>` or `<task_slug>` placeholders with the run's identifier, and replace `<iso>` placeholders with an ISO-8601 timestamp such as `2026-08-15T00:00:00Z`; the optional tail flags are literal command-line options.
+
+## Chunk progress
+
+The `chunk-progress` command is the authority for chunk status. It reports a full owned-green count only when the latest gate has `ok = 1`; a failed gate reports a null owned-green value with reason `chunk-checks-unrecorded`, and a lane with no session reports null with reason `chunk-lane-unbooted`. Completion requires both a booted session and a passing latest gate. Rates are owned green / owned total and chunks done / chunks total; unmeasured cells retain null values and a reason.
+
+<!-- CHUNK_PROGRESS_SQL -->
+```sql
+SELECT cr.chunk_id AS chunk_id, cr.lane AS lane, cr.wave AS wave,
+cr.checks_owned_json AS checks_owned_json,
+(SELECT COUNT(*) FROM sessions s WHERE s.adw_id = cr.lane) AS session_count,
+(SELECT g.ok FROM gate_results g WHERE g.adw_id = cr.lane ORDER BY COALESCE(g.gate_generation, -1) DESC, g.attempt DESC, g.id DESC LIMIT 1) AS gate_ok,
+(SELECT g.checks_json FROM gate_results g WHERE g.adw_id = cr.lane ORDER BY COALESCE(g.gate_generation, -1) DESC, g.attempt DESC, g.id DESC LIMIT 1) AS gate_checks_json
+FROM chunk_runs cr WHERE cr.parent_lane = ? ORDER BY cr.wave ASC, cr.chunk_id ASC
+```
 
 ## Honesty rules
 
@@ -75,7 +90,7 @@ node scripts/factory/ledger.mjs turns --since <iso> --until <iso>
 
 The denominator is `dispatches` (with `dispatches_measured` as the denominator for rates); a null cell with an `absent` marker is unmeasured, never a measured zero. The `seat_turn_census` table records the five counters (`turns`, `tool_calls`, `distinct_files_read`, `suite_runs`, `re_reads`), the four closed classes (`edit`, `read`, `test`, `other`), and the closed absence vocabulary for pane, stream, frame, replay-clock, and same-poll observations.
 
-The ledger declares **35 tables** plus SQLite's own `sqlite_sequence`. `run_configurations` and `run_seats` are populated only for runs booted after canonical configuration and effective-seat recording shipped; older runs deliberately have no row. The eleven journal-fact tables — `provider_failures`, `plan_scope_changes`, `seat_reasks`, `accept_reasks`, `rpc_exit_contexts`, `seat_turn_census`, `plan_adoptions`, `external_fences`, `mutation_anchor_binds`, `mutation_anchor_absences`, and `phase_slot_waits` — are populated only for records ingested after this lane; older journal and dispatch-register rows are never backfilled. `envelopes` and `processes` are retired by declaration. The empty CI/intake tables remain unreached writers, not measured zeros.
+The ledger declares **36 tables** plus SQLite's own `sqlite_sequence`. `run_configurations` and `run_seats` are populated only for runs booted after canonical configuration and effective-seat recording shipped; older runs deliberately have no row. The eleven journal-fact tables — `provider_failures`, `plan_scope_changes`, `seat_reasks`, `accept_reasks`, `rpc_exit_contexts`, `seat_turn_census`, `plan_adoptions`, `external_fences`, `mutation_anchor_binds`, `mutation_anchor_absences`, and `phase_slot_waits` — are populated only for records ingested after this lane; older journal and dispatch-register rows are never backfilled. `envelopes` and `processes` are retired by declaration. The empty CI/intake tables remain unreached writers, not measured zeros.
 
 ## Typed run outcomes
 

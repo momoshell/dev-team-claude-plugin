@@ -1,5 +1,11 @@
 # Batch dispatch
 
+## Chunked parent plans
+
+Use `--from-plan <parent-lane-dir>` to compile the newest accepted `.planner.json` envelope under the parent `returns/` directory. The envelope's `details.chunks` is an ordered program of records shaped as `{id, files_in_scope, depends_on?, goal?}`; each chunk becomes a lane named `<parent>-<id>`, adopted from the parent and booted with `--chunked --chunk <id>`. Chunk dependencies must name an earlier chunk, and chunk scope must remain within the parent scope.
+
+The dispatcher refuses the closed reasons `chunks-absent`, `chunk-id-invalid`, `chunk-duplicate-id`, `chunk-deps-unordered`, `chunk-scope-outside-parent`, and `chunk-deps-unsettled`. Validation happens before requests, worktrees, or ledger rows are written.
+
 Dispatch a batch in this order, and record what refuses at each boundary:
 
 ADR-045 makes a fence and request scope **context**, not write enforcement. They tell a lane what to read and preserve useful observations; they are never a lock or an authority to refuse a write.

@@ -4707,7 +4707,7 @@ export function parseArgs(argv) {
 }
 
 export const KNOWN_FLAGS = Object.freeze({
-  boot: Object.freeze(['task', 'checkout', 'roles', 'tier', 'fences', 'lane', 'headless', 'headless-rpc', 'headless-all', 'memory-dir', 'memory-backend', 'memory-budget-bytes', 'claude-bin', 'profile', 'assurance', 'roster', 'workflow', 'charter-arm', ...TURN_CEILING_FLAGS]),
+  boot: Object.freeze(['task', 'checkout', 'roles', 'tier', 'fences', 'lane', 'chunked', 'chunk', 'headless', 'headless-rpc', 'headless-all', 'memory-dir', 'memory-backend', 'memory-budget-bytes', 'claude-bin', 'profile', 'assurance', 'roster', 'workflow', 'charter-arm', ...TURN_CEILING_FLAGS]),
   run: Object.freeze(['task', 'checkout', 'brief-file', 'variant', 'execution', 'files-in-scope', 'validation-lane', 'lane', 'plan-rounds', 'build-rounds', 'review-rounds', 'review-base-sha', 'review-head-sha', ...WAIT_FLAGS, 'suite', 'keep', 'claude-bin']),
   resume: Object.freeze(['task', 'checkout', 'suite', 'keep']),
   handoff: Object.freeze(['task', 'checkout', 'brief-file']),
@@ -4745,11 +4745,11 @@ export const FLAG_VALUE_CONTRACT = Object.freeze({
   'headless-all': 'boolean',
   // --keep is a switch: runCmd reads only its truthiness (:1887) to skip the
   // auto-teardown a done run would otherwise perform.
-  keep: 'boolean',
+  keep: 'boolean', chunked: 'boolean', chunk: 'value',
 })
 // The boolean flags, named and exported rather than inlined as exceptions, so
 // the argv matrix in crew/crew.test.mjs can be exhaustive by construction.
-const BOOLEAN_FLAG_NAMES = Object.freeze(['headless-all', 'keep'])
+const BOOLEAN_FLAG_NAMES = Object.freeze(['headless-all', 'keep', 'chunked'])
 export const BOOLEAN_FLAGS = Object.freeze(Object.keys(FLAG_VALUE_CONTRACT)
   .filter((flag) => BOOLEAN_FLAG_NAMES.includes(flag) && FLAG_VALUE_CONTRACT[flag] === 'boolean').sort())
 export const ROLE_FLAG_PREFIXES = Object.freeze(['model-', 'agent-', 'effort-', 'allow-shortfall-'])

@@ -200,7 +200,7 @@ test('ledger query docs pin typed outcomes, run seats, closed vocabularies, and 
   for (const source of ['roster', 'profile_recommendation', 'operator_override', 'reseat']) {
     assert.ok(docs.includes(`\`${source}\``), `docs missing ${source}`)
   }
-  assert.match(docs, /\*\*35 tables\*\*/)
+  assert.match(docs, /\*\*36 tables\*\*/)
   assert.ok(docs.includes('`phase_slot_waits`'))
   assert.ok(docs.includes('Recipe M'))
   assert.match(docs, /FROM\s+run_seats/i)

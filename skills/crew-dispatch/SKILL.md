@@ -27,6 +27,10 @@ a parsed brief or a green-looking dispatch insufficient evidence.
 | Isolating and closing the checkout | `references/worktree.md` | Use a real worktree, detect dirty symlinks, and rebase before the PR. |
 | Deciding whether to dry-run a batch | `references/flags.md` | A dry run is not a step; use it only where creating branches is unwelcome. |
 
+## Chunked dispatch
+
+For a parent planner envelope carrying `details.chunks`, dispatch with `--from-plan <parent-lane-dir>`. The ordered chunk records use `{id, files_in_scope, depends_on?, goal?}`; generated lanes adopt the parent and boot with `--chunked --chunk <id>`. Forward or unknown dependencies and scope outside the parent are refused before any output is written.
+
 ## Critical rules
 
 - Verify a fence through its consumers, not by reading the register alone (#145).

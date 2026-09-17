@@ -41,4 +41,4 @@ a `consider` naming the defense you think fails.
   in run `205-regrant`.
 - **A remedy that cannot be built in this slice** — the fix needs a file
   outside the plan's `files_in_scope`, or a mechanism the plan or an ADR
-  defers. Write it as a `consider` naming the deferred work. Defense: an out-of-context write is recorded and the lane proceeds (ADR-045), so a must-fix here lands where `files_in_scope` never sent a reviewer — a file the plan never named is a file nobody reviewed for this change; a malformed path still refuses (runs `83-headless-io` → #125, `46-tier-boot` → #193).
+  defers. Write it as a `consider` naming the deferred work. Defense: the remedy is out of this slice, not invisible — you read the complete diff, so say what is wrong and name the deferred work. Under ADR-045 an out-of-context write is recorded and the lane proceeds, so a repair that needs a file outside `files_in_scope` CAN now be built; raise it as a `consider` only when the plan or an ADR defers the mechanism itself (runs `83-headless-io` → #125, `46-tier-boot` → #193).

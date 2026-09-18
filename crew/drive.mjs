@@ -2321,6 +2321,43 @@ function checkLabelMisdelimited(output, check) {
 }
 // Why a declared mutation cannot be honoured, per entry — the validateScopeEntries
 // shape: [{ entry, why }], empty when the declaration is usable.
+// The acceptance ids the BRIEF asked for: `(A1)`, `(B2)` … at the head of a line or a
+// sentence inside the brief's `## Acceptance` section. The operator writes them; nothing
+// until now read them back, so a plan could answer four of six acceptance items and the
+// lane would prove exactly what it chose to. Kiro's specs thread a requirement id from the
+// requirement into the task into the test (`_Requirements: 5.3_`); this is that thread for
+// the one carrier this repo already has.
+const ACCEPTANCE_SECTION = /^##\s+Acceptance\s*$/m
+const ACCEPTANCE_ID = /\((?<id>[A-Z][A-Za-z0-9]{0,7}[0-9][a-z]?)\)/g
+export function acceptanceIds(briefText) {
+  const text = String(briefText ?? '')
+  const start = text.search(ACCEPTANCE_SECTION)
+  if (start < 0) return null
+  const rest = text.slice(start)
+  const end = rest.slice(1).search(/^##\s+/m)
+  const section = end < 0 ? rest : rest.slice(0, end + 1)
+  const ids = [...section.matchAll(ACCEPTANCE_ID)].map((match) => match.groups.id)
+  return ids.length > 0 ? [...new Set(ids)] : null
+}
+
+// Which acceptance ids the plan's gate checks answer. UNMEASURED — null, never an empty
+// set — when the brief states no ids or could not be read: an operator who writes no ids
+// is not owed a refusal, and a brief nobody could read proves nothing either way.
+export function acceptanceCoverage(briefText, mutations) {
+  const ids = acceptanceIds(briefText)
+  if (ids === null) return { status: 'unmeasured', reason: 'no acceptance ids in the brief', ids: null, covered: null, uncovered: null, extra: null }
+  const checks = new Set((Array.isArray(mutations) ? mutations : []).map((entry) => entry?.check).filter((check) => typeof check === 'string'))
+  const covered = ids.filter((id) => checks.has(id))
+  return {
+    status: 'measured',
+    reason: null,
+    ids,
+    covered,
+    uncovered: ids.filter((id) => !checks.has(id)),
+    extra: [...checks].filter((check) => !ids.includes(check)),
+  }
+}
+
 export function validateMutations(entries, inScope = () => true) {
   if (!Array.isArray(entries)) return [{ entry: entries, why: 'mutations must be an array of declared checks' }]
   if (entries.length > MUTATIONS_MAX) return [{ entry: entries, why: `declares ${entries.length} mutations, over the bound of ${MUTATIONS_MAX}` }]
@@ -7992,6 +8029,18 @@ function runTask(ctx, io, crash) {
     if (!gateCmd && mutations.length > 0) {
       return escalate('plan',
         'details.mutations declares per-check proofs but the plan authored no gate_cmd — there is nothing for a mutation to redden',
+        planEnv.artifacts || [])
+    }
+    // Every acceptance id the brief asked for must be answered by a gate check, or the lane
+    // proves a subset of what was asked and nobody sees which part went unproven. An extra
+    // check is recorded, never refused: a planner may prove more than it was asked.
+    let briefText = null
+    try { briefText = ctx.briefFile ? io.readFile(ctx.briefFile) : null } catch { briefText = null }
+    const coverage = acceptanceCoverage(briefText, mutations)
+    io.log(recordRow({ at: io.now(), event: 'acceptance-coverage', ...coverage }))
+    if (coverage.status === 'measured' && coverage.uncovered.length > 0) {
+      return escalate('plan',
+        `the plan's gate checks answer ${coverage.covered.length} of ${coverage.ids.length} acceptance ids; ${coverage.uncovered.join(', ')} ${coverage.uncovered.length === 1 ? 'has' : 'have'} no check — fix the plan, not the build`,
         planEnv.artifacts || [])
     }
   }

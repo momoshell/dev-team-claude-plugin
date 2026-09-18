@@ -13,7 +13,7 @@ Mutants measured (over the baseline-eligible suites only): 16 of 17 (94.1%)
 Mutants killed: 9 of 17 (52.9%)
 Tests observed: 1085
 Tests with a kill-set: 74 of 1085 (6.8%)
-Wall clock seconds (baseline census and mutation loop): 153.432
+Wall clock seconds (baseline census and mutation loop): 148.75
 
 ## Sampling
 Lines requested: 40
@@ -26,11 +26,11 @@ Candidates omitted: 19 of 36 (52.8%)
 
 ## Provenance
 Seed: 0
-Checkout HEAD: e34765b39455f0c238faa9b1921f323e798aa90a
-Tool sha256: 0bc8aadee6ee025a1db3fcd3c6f41b7d069b75d3e095a3e99bb130ab2fd05d1f
+Checkout HEAD: 860571a3b6942053d631acec2e8601a699a0847c
+Tool sha256: c091c94fdedbf63a2a3447fb407ee7476c29bc9f22a05f111c3e0ccac072cdfe
 Node: v26.8.2
 Mutations ran in: a disposable git worktree at that HEAD, removed at the end; a run killed uncatchably leaves one behind, and the next run removes it before starting
-Abandoned worktrees reclaimed at start: 0
+Abandoned worktrees reclaimed at start: 0 verified gone; 0 left — a recycled pid reads as live, so such a worktree is left, never taken
 
 ## Redundancy candidates (sampled kill-set subsumption, not proof of redundancy)
 A candidate is a test whose sampled kill-set is a strict subset of another test's.

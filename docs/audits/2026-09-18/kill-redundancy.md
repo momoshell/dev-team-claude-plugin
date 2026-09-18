@@ -13,7 +13,7 @@ Mutants measured: 16 of 17 (94.1%)
 Mutants killed: 9 of 17 (52.9%)
 Tests observed: 1085
 Tests with a kill-set: 74 of 1085 (6.8%)
-Wall clock seconds: 140.181
+Wall clock seconds: 145.304
 
 ## Sampling
 Lines requested: 40
@@ -26,8 +26,8 @@ Candidates omitted: 19 of 36 (52.8%)
 
 ## Provenance
 Seed: 0
-Checkout HEAD: b9334af52bc604dee99ba0a49b5491676b7f79a4
-Tool sha256: bbc5e6be5c3ab0f1bcfff61e448cff9b2e04554ceac66c335b0a6f45d7c97da0
+Checkout HEAD: 8211b094b6bdb6c1d7e332d2fdc95f7ad9da7761
+Tool sha256: 0eef4809e85398a181e3c14a816a91ebb9f197d9e8dfe778524cb86724da12dd
 Node: v26.8.2
 
 ## Redundancy candidates (sampled kill-set subsumption, not proof of redundancy)
@@ -45,6 +45,6 @@ not modelled. Unsampled mutants may separate the two tests.
 - Error: 1 of 7 (14.3%) survivors
 
 ## Unmeasured outcomes
-- 821c27b99f3f5ff7e3281d71220319aeecd155fef63b2c7c4b453dedcfbd3eba: outcome-set-differs
+- 821c27b99f3f5ff7e3281d71220319aeecd155fef63b2c7c4b453dedcfbd3eba: file-level-failure
 
 Sample blind spot: only the first generated candidate per sampled line was measured (17 of 36 (47.2%) of the candidates generated on sampled lines).

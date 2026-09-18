@@ -868,10 +868,13 @@ export const SUITE_RUN_UNRECOGNISED = 'suite-run-unrecognised'
 // DATA, not branches: a policy change is a data edit, the posture
 // SEAT_REFUSAL_ACTIONS (:71) already takes.
 export const SUITE_RUN_OWNERSHIP = Object.freeze({
-  planner: 'once', 'tech-lead': 'never', builder: 'fenced-once', reviewer: 'never', lead: 'never',
+  planner: 'once', 'tech-lead': 'never', builder: 'fenced', reviewer: 'never', lead: 'never',
 })
-// Closed, so a typo in the table above is a refusal and never a silent admit.
-export const SUITE_RUN_OWNERSHIP_KINDS = Object.freeze(['never', 'once', 'fenced', 'fenced-once'])
+// Closed, so a typo in the table above is a refusal and never a silent admit. The builder
+// owns NO full-suite run: its charter says so, and the driver's suite stage runs it after
+// every build. The one-run allowance that used to sit here ('fenced-once') was spent by
+// zero recorded commands — not one of 318 in the corpus is a bare declared run.
+export const SUITE_RUN_OWNERSHIP_KINDS = Object.freeze(['never', 'once', 'fenced'])
 
 export function suiteRefusalEnvelope({ id, role, returnPath, transport, verdict }) {
   return {
@@ -933,7 +936,8 @@ export function turnCeilingDetail({ at = Date.now(), role, id, turns, budget, ab
   }
 }
 
-export function suitePolicyCounters() { return { refused: 0, admitted: 0, unrecognised: 0, allowance_spent: 0, suite_allowance_spent: 0 } }
+// Per ROLE for the run.
+export function suitePolicyCounters() { return { refused: 0, admitted: 0, unrecognised: 0, allowance_spent: 0 } }
 
 // Two facts beyond the decision, both accounting-only, both defaulted so a legacy
 // two-argument call keeps its old meaning: `kind` absent charges the allowance,
@@ -943,9 +947,6 @@ export function countSuiteDecision(counters, decision, { kind = null, blind = fa
   else if (decision === 'admit') counters.admitted += 1
   else counters.unrecognised += 1
   if (decision === 'admit' && kind !== 'gate' && kind !== 'task-local') counters.allowance_spent += 1
-  // The builder's ONE full-suite run is charged on its own counter: a fenced
-  // scoped test must not spend the allowance its Done condition needs.
-  if (decision === 'admit' && kind === 'suite') counters.suite_allowance_spent += 1
   if (blind && decision !== 'unrecognised') counters.unrecognised += 1
   return counters
 }
@@ -1319,7 +1320,7 @@ function suiteRefusal(role, command, gatePath, kind) {
 
 function suiteAdmit(why, kind) { return { decision: 'admit', reason: why, kind } }
 
-function decideSuiteRun({ role, command, fence, gatePath, ranBefore, suiteRanBefore, suiteCommand, taskDir, kind }) {
+function decideSuiteRun({ role, command, fence, gatePath, ranBefore, suiteCommand, taskDir, kind }) {
   if (kind === null) return { decision: 'unrecognised', reason: SUITE_RUN_UNRECOGNISED, role, command, kind: null, gate_path: gatePath }
   if (kind === 'task-local' && SUITE_RUN_OWNERSHIP[role] !== undefined) return suiteAdmit('task-local', kind)
   if (SUITE_RUN_OWNERSHIP[role] === 'never') return suiteRefusal(role, command, gatePath, kind)
@@ -1334,41 +1335,7 @@ function decideSuiteRun({ role, command, fence, gatePath, ranBefore, suiteRanBef
     if (kind === 'suite') return suiteRefusal(role, command, gatePath, kind)
     return fencedScopedTest(command, fence, taskDir) ? suiteAdmit('fenced-test', kind) : suiteRefusal(role, command, gatePath, kind)
   }
-  // `fenced-once` is `fenced` plus the ONE full-suite run the builder's Done
-  // condition requires. Every brief in this repo makes `npm test` green a
-  // condition of done, so a policy that refused it outright would end the
-  // dispatch of a builder doing exactly what it was told (RV1-7). It still
-  // kills #866's grievance: the 18-49 runs per lane become one.
-  if (SUITE_RUN_OWNERSHIP[role] === 'fenced-once') {
-    if (kind === 'gate') return suiteAdmit('gate', kind)
-    if (kind === 'suite') {
-      // `suite` is overloaded: it is BOTH the declared suite command and the
-      // recognised-but-unaccountable fall-through (#904's posture). Only the
-      // DECLARED command may spend the allowance — an unaccountable invocation
-      // refuses and is charged nothing, so it can never buy the builder's one run.
-      if (!isDeclaredSuiteRun(command, suiteCommand)) return suiteRefusal(role, command, gatePath, kind)
-      return suiteRanBefore >= 1 ? suiteRefusal(role, command, gatePath, kind) : suiteAdmit('suite-allowance', kind)
-    }
-    return fencedScopedTest(command, fence, taskDir) ? suiteAdmit('fenced-test', kind) : suiteRefusal(role, command, gatePath, kind)
-  }
   return suiteRefusal(role, command, gatePath, kind)
-}
-
-// Fail-closed by construction: with no declared suite command there is nothing
-// the allowance could name, so nothing spends it.
-//
-// EXACTLY ONE segment must be the declared command. Requiring it to be the ONLY
-// segment was wrong and cost b438-refstrailer a lane on its first build round:
-// `cd <checkout> && npm test` is how a seat actually runs the suite, and the
-// `cd` made it two segments, so the builder's one legitimate run was refused
-// and its dispatch ended before it could write an envelope. Counting instead of
-// requiring solitude keeps the allowance exact — `npm test && npm test` is two
-// declared runs and still refuses — while admitting the ordinary spelling.
-function isDeclaredSuiteRun(command, suiteCommand) {
-  if (typeof suiteCommand !== 'string' || suiteCommand.trim() === '') return false
-  const declared = suiteCommand.trim()
-  const matches = splitShellCommands(command).filter((segment) => segment.trim() === declared)
-  return matches.length === 1
 }
 
 function fencedScopedTest(command, fence, taskDir) {
@@ -1376,9 +1343,9 @@ function fencedScopedTest(command, fence, taskDir) {
   return targets !== null && targets.every((target) => fenceCovers(fence, target))
 }
 
-export function suiteRunPolicy({ role, command, fence = [], gatePath = null, ranBefore = 0, suiteRanBefore = 0, suiteCommand = null, taskDir = null } = {}) {
+export function suiteRunPolicy({ role, command, fence = [], gatePath = null, ranBefore = 0, suiteCommand = null, taskDir = null } = {}) {
   const { kind, blind } = recogniseInvocation(command, { suiteCommand, gatePath, taskDir })
-  return { ...decideSuiteRun({ role, command, fence, gatePath, ranBefore, suiteRanBefore, suiteCommand, taskDir, kind }), blind }
+  return { ...decideSuiteRun({ role, command, fence, gatePath, ranBefore, suiteCommand, taskDir, kind }), blind }
 }
 
 // Every shell invocation the claude stream ALREADY recorded, in order, with the
@@ -2427,7 +2394,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turn
       const verdict = suiteRunPolicy({
         role: run.role, command: call.command,
         fence: run.policy.fence || [], gatePath: run.policy.gatePath || null,
-        ranBefore: counters.allowance_spent, suiteRanBefore: counters.suite_allowance_spent,
+        ranBefore: counters.allowance_spent,
         suiteCommand: run.policy.suiteCommand || null, taskDir: taskDir || paths.taskDir,
       })
       countSuiteDecision(counters, verdict.decision, { kind: verdict.kind, blind: verdict.blind })

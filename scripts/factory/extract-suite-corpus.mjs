@@ -16,7 +16,7 @@ import { shellToolCalls, recogniseSuiteInvocation, suiteRunPolicy, splitShellCom
 
 const SUITE_COMMAND = 'npm test'
 const SAMPLE_PREFIXES = Object.freeze(['00', '01', '02', '03'])
-const DECISION_KEYS = Object.freeze(['lead', 'planner', 'builder', 'builder_spent'])
+const DECISION_KEYS = Object.freeze(['lead', 'planner', 'builder'])
 const DECISIONS = new Set(['admit', 'refuse', 'unrecognised'])
 const ROW_KEYS = Object.freeze(['id', 'role', 'source_stream', 'command', 'kind', 'decisions', 'selected_by'])
 const LEGAL_ROLES = new Set(['planner', 'lead', 'reviewer', 'builder', 'tech-lead'])
@@ -35,8 +35,7 @@ const REDACTION = Object.freeze([
 const DECISION_CONTEXTS = Object.freeze({
   lead: 'suiteRunPolicy({ role: "lead", fence: [], gatePath: null, suiteCommand: "npm test" }) -- the shared NEVER-OWNER verdict. lead, reviewer and tech-lead all carry SUITE_RUN_OWNERSHIP "never", so this single stored value is the expected verdict for ALL THREE, and every one of them is compared against it by the corpus tests and by the acceptance gate.',
   planner: 'suiteRunPolicy({ role: "planner", fence: [], gatePath: null, ranBefore: 0, suiteCommand: "npm test" })',
-  builder: 'suiteRunPolicy({ role: "builder", fence: [], gatePath: null, suiteRanBefore: 0, suiteCommand: "npm test" })',
-  builder_spent: 'suiteRunPolicy({ role: "builder", fence: [], gatePath: null, suiteRanBefore: 1, suiteCommand: "npm test" })',
+  builder: 'suiteRunPolicy({ role: "builder", fence: [], gatePath: null, suiteCommand: "npm test" })',
 })
 
 const defaultIo = Object.freeze({
@@ -164,8 +163,7 @@ function decisionsFor(command) {
   return {
     lead: suiteRunPolicy({ role: 'lead', command, fence: [], gatePath: null, suiteCommand: SUITE_COMMAND }).decision,
     planner: suiteRunPolicy({ role: 'planner', command, fence: [], gatePath: null, ranBefore: 0, suiteCommand: SUITE_COMMAND }).decision,
-    builder: suiteRunPolicy({ role: 'builder', command, fence: [], gatePath: null, suiteRanBefore: 0, suiteCommand: SUITE_COMMAND }).decision,
-    builder_spent: suiteRunPolicy({ role: 'builder', command, fence: [], gatePath: null, suiteRanBefore: 1, suiteCommand: SUITE_COMMAND }).decision,
+    builder: suiteRunPolicy({ role: 'builder', command, fence: [], gatePath: null, suiteCommand: SUITE_COMMAND }).decision,
   }
 }
 

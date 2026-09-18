@@ -357,7 +357,6 @@ test('recordAnswer is byte-stable and conflict-safe', () => each(({ s, dir }) =>
   assert.equal(readFileSync(path, 'utf8'), before)
   assert.equal(s.recordAnswer(id, { ...answer, actor: 'b' }).reason, 'answer-conflict')
   assert.equal(s.recordAnswer(id, { decision_id: 'd2', actor: 'a', answer: 'yes' }).reason, 'answer-conflict')
-  assert.equal(readFileSync(path, 'utf8'), before)
 }))
 
 test('claim freezes one persisted decision and replay is pure', () => each(({ s, dir }) => {

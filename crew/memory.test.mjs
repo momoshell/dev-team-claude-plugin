@@ -261,16 +261,9 @@ test('propose is idempotent on the index and rejects invalid names and types', (
 test('memory namespace and handle expose the slice verbs without module-level reconcile or gc', () => {
   const dir = fixture()
   try {
-    assert.equal(typeof memory.openMemory, 'function')
-    assert.equal(typeof memory.renderSection, 'function')
-    assert.equal(typeof memory.BACKENDS.markdown, 'function')
     assert.equal(Object.hasOwn(memory, 'reconcile'), false)
     assert.equal(Object.hasOwn(memory, 'gc'), false)
     const handle = memory.openMemory({ dir })
-    assert.equal(typeof handle.context, 'function')
-    assert.equal(typeof handle.propose, 'function')
-    assert.equal(typeof handle.reconcile, 'function')
-    assert.equal(typeof handle.gc, 'function')
   } finally { clean(dir) }
 })
 

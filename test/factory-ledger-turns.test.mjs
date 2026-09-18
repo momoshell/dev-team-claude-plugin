@@ -2523,7 +2523,6 @@ test('HoldE2', { skip: SKIP }, () => {
 })
 test('HoldF1', { skip: SKIP }, () => {
   assert.deepEqual(bootstrapPercentile([0, 0, 0, 0, 10]), { low: 0, high: 6 })
-  assert.deepEqual(bootstrapPercentile([0, 0, 0, 0, 10]), { low: 0, high: 6 })
   const fixture = holdoutLedger('f1')
   try {
     for (let index = 0; index < PLANNER_SYMBOLS_SAMPLE_FLOOR; index += 1) {

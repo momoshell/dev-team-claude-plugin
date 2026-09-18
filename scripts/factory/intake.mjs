@@ -18,10 +18,8 @@ import { createHash } from 'node:crypto'
 import {
   existsSync as fsExistsSync, readFileSync as fsReadFileSync,
   writeFileSync as fsWriteFileSync, mkdirSync as fsMkdirSync,
-  realpathSync as fsRealpathSync,
-} from 'node:fs'
+  } from 'node:fs'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
 import {
   INTAKE_REFUSALS, INTAKE_OUTCOMES, openLedger,
 } from './ledger.mjs'
@@ -1862,11 +1860,7 @@ export function main(argv, deps = {}) {
 // realpath both sides: the ESM loader realpaths import.meta.url while argv[1]
 // stays literal, so under a symlinked path component a literal compare is
 // silently false and the CLI would no-op.
-function realpathOr(path) {
-  try { return fsRealpathSync(path) } catch { return path }
-}
-
-const invokedDirectly = process.argv[1] && realpathOr(process.argv[1]) === realpathOr(fileURLToPath(import.meta.url))
+const invokedDirectly = import.meta.main
 if (invokedDirectly) {
   // process.exitCode, not process.exit: a piped stdout can be truncated by
   // process.exit's synchronous teardown.

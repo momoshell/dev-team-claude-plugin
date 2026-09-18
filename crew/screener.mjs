@@ -257,7 +257,6 @@ export function screenerFindingsFromOutput(output) {
 
 // Alias kept explicit for callers that name the OpenAI response rather than its
 // findings; both paths use the same parser and therefore the same refusal posture.
-export const screenerResponseFromOutput = screenerFindingsFromOutput
 
 function validResultMember(member) {
   return member && typeof member === 'object' && !Array.isArray(member) &&

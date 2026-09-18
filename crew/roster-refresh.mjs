@@ -1,5 +1,4 @@
 import { readFileSync, writeFileSync } from 'node:fs'
-import { pathToFileURL } from 'node:url'
 
 export const CATALOG_URL = 'https://models.dev/api.json'
 
@@ -144,7 +143,7 @@ export function renderReport(diff, { generatedAt, rosterUpdatedAt, seatedCount }
 
 const USAGE = 'usage: node crew/roster-refresh.mjs [--roster <path>] [--catalog <path>] [--out <path>]'
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (import.meta.main) {
   if (process.argv.includes('--help')) {
     console.log(USAGE)
     process.exit(0)

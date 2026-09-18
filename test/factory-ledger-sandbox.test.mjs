@@ -71,6 +71,13 @@ test('S8: kill refuses when the recorded command does not match the live process
     alive = false
   }
   assert.ok(alive, 'the mismatched-command gate must refuse before sending any signal')
+  // The gate refused to signal it, so this test owns the kill: no child outlives its test.
+  // (The suite tracker asserts exactly that; it is not a garbage collector.)
+  if (child.exitCode === null && child.signalCode === null) {
+    const gone = new Promise((resolve) => child.on('exit', resolve))
+    child.kill('SIGKILL')
+    await gone
+  }
 })
 test('TERM_TO_KILL_MS is exported and equals 5000', { skip: SKIP }, () => {
   assert.equal(TERM_TO_KILL_MS, 5000)

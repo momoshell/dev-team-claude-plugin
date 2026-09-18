@@ -10,6 +10,7 @@ import {
   renameSync as fsRenameSync,
 } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { stripVTControlCharacters } from 'node:util'
 import { spawn as cpSpawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 
@@ -120,18 +121,17 @@ export const SEAT_REFUSAL_ACTIONS = Object.freeze({
 // scripts/factory/probe-repo.mjs:498. A worker colourises inside the phrase
 // ("rate\x1b[0m limit"), which a raw-byte matcher cannot see at all.
 // eslint-disable-next-line no-control-regex
-const ANSI_CSI = /\x1b\[[0-?]*[ -/]*[@-~]/g
 
 export function recogniseProviderCondition(text) {
   if (typeof text !== 'string' || !text) return null
-  const plain = text.replace(ANSI_CSI, '')
+  const plain = stripVTControlCharacters(text)
   for (const { condition, pattern } of PROVIDER_CONDITIONS) if (pattern.test(plain)) return condition
   return null
 }
 
 export function recogniseSeatRefusal(text) {
   if (typeof text !== 'string' || !text) return null
-  const plain = text.replace(ANSI_CSI, '')
+  const plain = stripVTControlCharacters(text)
   for (const { member, pattern } of SEAT_REFUSALS) if (pattern.test(plain)) return member
   return null
 }

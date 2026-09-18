@@ -2840,8 +2840,6 @@ export function issueBindingFrom(requestPath, deps) {
   return issueBindingFromRecord(request)
 }
 
-export const requestBindingFrom = issueBindingFrom
-export const requestIssueBinding = issueBindingFrom
 
 function historicalIssueReport(reason) {
   return {

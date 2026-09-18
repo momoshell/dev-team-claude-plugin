@@ -133,8 +133,6 @@ test('F1', () => {
 })
 
 test('G1', () => {
-  assert.equal(typeof configurationDimensionCell, 'function')
-  assert.equal(typeof configurationFilterView, 'function')
   const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/TaskList.svelte'), 'utf8')
   assert.match(source, /import \{[^}]*configurationDimensionCell[^}]*configurationFilterView[^}]*\} from '\.\/fleet\.js'/)
   assert.match(source, /let baseRows = \$derived\(/)

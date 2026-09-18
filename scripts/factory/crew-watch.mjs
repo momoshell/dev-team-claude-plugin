@@ -3,11 +3,10 @@
 // lane-watch.mjs and re-implements none of it. It never acts on a crew and
 // spawns nothing.
 
-import { existsSync, openSync, readSync, closeSync, readFileSync, readdirSync, statSync, appendFileSync, realpathSync } from 'node:fs'
+import { existsSync, openSync, readSync, closeSync, readFileSync, readdirSync, statSync, appendFileSync } from 'node:fs'
 import { homedir, loadavg, cpus } from 'node:os'
 import { join } from 'node:path'
 import { archivedLanes, crewRoot, discoverLanes, driverState, journalAt, laneActive, laneLedgerView, readJournal, resolveTunables, watchPass, TERMINAL_STAGES, DRIVER_EXITED, DRIVER_GONE, DRIVER_GONE_PERIODS, DRIVER_RUNNING, HEARTBEAT_PERIOD_MS } from './lane-watch.mjs'
-import { fileURLToPath } from 'node:url'
 
 export const DEFAULT_EVENTS = Object.freeze(['stage', 'attention', 'escalat', 'refus', 'review_outcome', 'gate_check_discrimination', 'commit', 'seat-teardown', 'seat-retrying', 'seat-retry-cleared'])
 // The cases behind one word. Until #659 `status=active` covered a working seat,
@@ -563,11 +562,7 @@ export async function main(argv, deps = {}) {
   }
 }
 
-function realpathOr(path) {
-  try { return realpathSync(path) } catch { return path }
-}
-
-const invokedDirectly = process.argv[1] && realpathOr(process.argv[1]) === realpathOr(fileURLToPath(import.meta.url))
+const invokedDirectly = import.meta.main
 if (invokedDirectly) {
   process.exitCode = await main(process.argv.slice(2))
 }

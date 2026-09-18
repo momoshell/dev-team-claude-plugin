@@ -3,12 +3,12 @@
 // The doctor gathers host evidence, delegates state resolution to the capability
 // register, and renders a proposal that --write can persist atomically.
 
-import { mkdirSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
-import { fileURLToPath, pathToFileURL } from 'node:url'
+import { pathToFileURL } from 'node:url'
 import {
   REGISTER_ROOT,
   agentAvailability,
@@ -225,8 +225,6 @@ export async function probeReport(registerOrOptions = null, deps = {}) {
   return probeAgents(registerOrOptions, deps)
 }
 
-export const reportAgents = probeReport
-export const probe = probeReport
 
 export function renderReadout(results = []) {
   const executable = results.filter(({ state }) => state === 'executable').length
@@ -390,10 +388,5 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
   return 0
 }
 
-function realpathOr(path) {
-  try { return realpathSync(path) } catch { return path }
-}
-
-const invokedDirectly = process.argv[1]
-  && realpathOr(process.argv[1]) === realpathOr(fileURLToPath(import.meta.url))
+const invokedDirectly = import.meta.main
 if (invokedDirectly) process.exitCode = await main(process.argv.slice(2))

@@ -42,7 +42,7 @@ Read the evidence in this order:
 
 1. The seat's transcript home: `~/.claude/projects/<checkout with / as ->` for claude, or `~/.pi/agent/sessions/-<checkout with / as ->--` for pi. The newest `*.jsonl` mtime advances while the seat works.
 2. The worktree's own newest file mtime.
-3. `crew-watch <lane>`, which prints one `seat=… agent=… home=… transcript=…` line per seat across both homes (`scripts/factory/crew-watch.mjs:185`).
+3. `crew-watch <lane>`, which prints one `seat=… agent=… home=… transcript=…` line per seat across both homes (`scripts/factory/crew-watch.mjs:184`).
 
 Both homes are keyed on the checkout, not the role, so a lane's two pi seats share one home and read the same age. A home with no readable transcript reads `unknown`, never dead.
 
@@ -51,7 +51,7 @@ Both homes are keyed on the checkout, not the role, so a lane's two pi seats sha
 The reliable signals are ordered: **transcript mtime** first, then the pane's
 **token counters compared across two readings**, then **the spinner, which is worthless**. In particular, a spinner and an elapsed timer are not evidence of life:
 surface can remain present while a seat has stopped mid-turn. The threshold and
-classifier are implemented at `crew/seat-io.mjs:125`; when a wait expires, the
+classifier are implemented at `crew/seat-io.mjs:126`; when a wait expires, the
 driver names the state as `the seat is STALE:`, `the seat REFUSED:`, or `the seat
 is WORKING:`. A `seat-stale` row in `journal.jsonl` is the in-flight warning
 that arrives before the budget does. A stale reading names a state; it does not

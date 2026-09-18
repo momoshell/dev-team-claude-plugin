@@ -16,7 +16,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync, spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
-import { ROOT, scratchDir, sqliteAvailable } from './helpers.mjs'
+import { ROOT, scratchDir, sqliteAvailable, childTracker } from './helpers.mjs'
 // Inlined from the retired legacy runtime's contract (scripts/cmux/contract.mjs):
 // the completion-nonce prefix the ledger's sweep guard checks against.
 const NONCE_PREFIX = 'devteam-done-'
@@ -163,17 +163,7 @@ after(() => rmSync(fixture, { recursive: true, force: true }))
 // Safety-net process cleanup: every long-lived child spawned by the
 // kill/finalizer tests is tracked here so a failing assertion mid-test
 // cannot leak it — swept unconditionally in the top-level after() hook.
-const spawnedChildren = new Set()
-function trackChild(child) {
-  spawnedChildren.add(child)
-  child.on('exit', () => spawnedChildren.delete(child))
-  return child
-}
-after(() => {
-  for (const child of spawnedChildren) {
-    try { child.kill('SIGKILL') } catch { /* already gone */ }
-  }
-})
+const trackChild = childTracker(after, assert)
 
 let n = 0
 function nextDir() {
@@ -1962,7 +1952,7 @@ function triageResponse(cause = 'budget', evidence = 'measured budget exhaustion
 // ---------------------------------------------------------------------------
 
 export {
-  NONCE_PREFIX, SCRIPT, require, SQLITE_OK, SKIP, bootTieredRun, bootBriefRun, fixture, paneReviewRun, spawnedChildren, trackChild, nextDir, run, openTestLedger, openB499Ledger, seedCellUsage, makeUnenforcedSeatIndexDb, exerciseEveryWriter, seedTaskAgentSession, MARKER_ADW, seedAllWritersWithMarker, MARKER_PLAIN, MARKER_NONCE_ONLY, CALIBRATED_RENDEZVOUS_DELAY_MS, CALIBRATED_RENDEZVOUS_DELAYS_MS, resolveRendezvousDelayMs, waitForEmitterReady, runConcurrentEmitterTrial, RUNSET_SINCE, RUNSET_UNTIL, seedRun, seedConfigurationRun, seedConfigurationSeat, EXECUTION_AXIS_BOOT_CONFIGURATION, executionAxisState, writeExecutionAxisCrew, writeExecutionAxisJournal, executionAxisRuntime, executionAxisRow, readerFixture, ADVISOR_AB_EPOCH, advisorAbFixture, advisorAbEnvelope, advisorAbFinding, runAdvisorAb, advisorReasons, advisorNote, SANDBOX_LEDGER_URL, SANDBOX_DEFAULT_RESOLVER, runSandboxChild, B381_PROVIDER_FAILURE_LINE, B395_SLOT_WAIT_GATE_LINE, B395_SLOT_WAIT_WARM_LINE, B395_SLOT_WAIT_COLD_LINE, B395_OLD_CORPUS_LINES, B381_PLAN_SCOPE_LINE, B381_TIMEOUT_REASK_LINE, B381_RPC_EXIT_LINE, B381_PLAN_ADOPTION_LINE, B381_EXTERNAL_REGISTER, ingestJournalLine, journalFactsCli, measuredJournalFactsDb, assertMeasuredAndAbsent, writeTurnsCorpusJournal, turnsCorpusPayload, builderTurnRole, holdoutLedger, addHoldoutLane, holdoutRows, TRIAGE_MODEL, makeTriageFixture, triageLedger, triageResponse,
+  NONCE_PREFIX, SCRIPT, require, SQLITE_OK, SKIP, bootTieredRun, bootBriefRun, fixture, paneReviewRun, trackChild, nextDir, run, openTestLedger, openB499Ledger, seedCellUsage, makeUnenforcedSeatIndexDb, exerciseEveryWriter, seedTaskAgentSession, MARKER_ADW, seedAllWritersWithMarker, MARKER_PLAIN, MARKER_NONCE_ONLY, CALIBRATED_RENDEZVOUS_DELAY_MS, CALIBRATED_RENDEZVOUS_DELAYS_MS, resolveRendezvousDelayMs, waitForEmitterReady, runConcurrentEmitterTrial, RUNSET_SINCE, RUNSET_UNTIL, seedRun, seedConfigurationRun, seedConfigurationSeat, EXECUTION_AXIS_BOOT_CONFIGURATION, executionAxisState, writeExecutionAxisCrew, writeExecutionAxisJournal, executionAxisRuntime, executionAxisRow, readerFixture, ADVISOR_AB_EPOCH, advisorAbFixture, advisorAbEnvelope, advisorAbFinding, runAdvisorAb, advisorReasons, advisorNote, SANDBOX_LEDGER_URL, SANDBOX_DEFAULT_RESOLVER, runSandboxChild, B381_PROVIDER_FAILURE_LINE, B395_SLOT_WAIT_GATE_LINE, B395_SLOT_WAIT_WARM_LINE, B395_SLOT_WAIT_COLD_LINE, B395_OLD_CORPUS_LINES, B381_PLAN_SCOPE_LINE, B381_TIMEOUT_REASK_LINE, B381_RPC_EXIT_LINE, B381_PLAN_ADOPTION_LINE, B381_EXTERNAL_REGISTER, ingestJournalLine, journalFactsCli, measuredJournalFactsDb, assertMeasuredAndAbsent, writeTurnsCorpusJournal, turnsCorpusPayload, builderTurnRole, holdoutLedger, addHoldoutLane, holdoutRows, TRIAGE_MODEL, makeTriageFixture, triageLedger, triageResponse,
 }
 
 test('chunk CLI chunk-progress prints parent progress and refuses unknown flags', () => {

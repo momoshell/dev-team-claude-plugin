@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process'
+import { stripVTControlCharacters } from 'node:util'
 import { readFileSync } from 'node:fs'
 
 export const CENSUS_FULL_SUITE_SECONDS = 52
@@ -281,7 +282,7 @@ function parseLastNumber(text, expression) {
 }
 
 export function parseCensusTap(tap) {
-  const text = String(tap ?? '').replace(/\x1b\[[0-9;]*m/g, '')
+  const text = stripVTControlCharacters(String(tap ?? ''))
   const plan = parseLastNumber(text, /^1\.\.(\d+)\s*$/gm)
   const testsFooter = parseLastNumber(text, /^#\s+tests\s+(\d+)\s*$/gm)
   const pass = parseLastNumber(text, /^#\s+pass\s+(\d+)\s*$/gm)
@@ -498,12 +499,7 @@ export function runCensusExhibits({ checkout, filesInScope = [], deps = {} } = {
   return result
 }
 
-function isMain() {
-  if (!process.argv[1]) return false
-  return normalPath(process.argv[1]) === normalPath(new URL(import.meta.url).pathname)
-}
-
-if (isMain()) {
+if (import.meta.main) {
   const result = runCensusExhibits({ checkout: process.cwd() })
   process.stdout.write(`${JSON.stringify(result)}\n`)
 }

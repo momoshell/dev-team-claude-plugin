@@ -3041,8 +3041,6 @@ export function classifyFrozenInventoryDelta(file, committed, current) {
   }
 }
 
-export const frozenInventoryClassifier = classifyFrozenInventoryDelta
-export const classifyFrozenInventory = classifyFrozenInventoryDelta
 
 // Pure policy for either admission source. Scope is recorded context, not an
 // allow-list: only the typed source, evidence, and literal path shape remain a
@@ -4057,9 +4055,6 @@ export function lineNumberOnlyAnchorResolution(stages) {
   })
 }
 
-export const isAnchorMechanicalConflict = anchorConflictMechanical
-export const canonicalizeAnchorManifest = canonicalAnchorManifest
-export const canonicalizeCitationDoc = canonicalCitationDoc
 
 const FULL_COMMIT_OID_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i
 

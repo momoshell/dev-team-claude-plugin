@@ -139,17 +139,17 @@ function vacuityScannedFiles() {
 const VACUITY_VERDICTS = Object.freeze(['by-design', 'flagged'])
 
 const AUDITED_VACUITY_LINES = Object.freeze({
-  'crew/io-contract.test.mjs': Object.freeze(["assert.equal(typeof io.fingerprintTree, 'function')", "assert.equal(typeof io.runClean, 'function')", "assert.equal(typeof received.deps.emit, 'function')", "assert.equal(typeof io.reseat, 'function')", "assert.equal(typeof io.teardown, 'function')"]),
-  'crew/memory.test.mjs': Object.freeze(["assert.equal(typeof memory.openMemory, 'function')", "assert.equal(typeof memory.renderSection, 'function')", "assert.equal(typeof memory.BACKENDS.markdown, 'function')", "assert.equal(typeof handle.context, 'function')", "assert.equal(typeof handle.propose, 'function')", "assert.equal(typeof handle.reconcile, 'function')", "assert.equal(typeof handle.gc, 'function')"]),
-  'crew/pi/extensions/advisor.test.mjs': Object.freeze(["assert.doesNotMatch(source, /registerTool/)", "assert.equal(typeof advisor.default, 'function')"]),
-  'crew/pi/extensions/lab.test.mjs': Object.freeze(["assert.equal(typeof mod.default, 'function')"]),
-  'crew/pi/extensions/subagent.test.mjs': Object.freeze(["assert.equal(typeof mod.default, 'function')"]),
+  'crew/io-contract.test.mjs': Object.freeze(["assert.equal(typeof io.fingerprintTree, 'function')", "assert.equal(typeof received.deps.emit, 'function')"]),
+  'crew/memory.test.mjs': Object.freeze([]),
+  'crew/pi/extensions/advisor.test.mjs': Object.freeze(["assert.doesNotMatch(source, /registerTool/)"]),
+  'crew/pi/extensions/lab.test.mjs': Object.freeze([]),
+  'crew/pi/extensions/subagent.test.mjs': Object.freeze([]),
   'crew/reclaim-descendants.test.mjs': Object.freeze(["assert.equal(typeof received.deps.sleep, 'function')", 'assert.doesNotMatch(crew, /settleResumeSeats/)']),
   'crew/roster-refresh.test.mjs': Object.freeze([]),
   'test/factory-emit.test.mjs': Object.freeze(["assert.doesNotMatch(gate.stderr, /no_run/)"]),
   'test/factory-make-brief.test.mjs': Object.freeze(["assert.doesNotMatch(coupled, /BROAD_PIN/)"]),
   'test/fixtures.test.mjs': Object.freeze(["assert.doesNotMatch(source, /toLowerCase/)"]),
-  'test/visualizer-server.test.mjs': Object.freeze(["assert.equal(typeof source.recordIntakeBrake, 'function')"]),
+  'test/visualizer-server.test.mjs': Object.freeze([]),
   'test/visualizer-shape.test.mjs': Object.freeze(["assert.doesNotMatch(feed, /DatabaseSync/)"]),
 })
 
@@ -172,11 +172,11 @@ function frozenVacuitySites(auditedIdentities, verdict, rationale, { tombstone =
 }
 
 const VACUITY_EXEMPT = new Map([
-  ['crew/io-contract.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['crew/io-contract.test.mjs'], 'flagged', 'audited 2026-09-09: method-presence sites are preconditions for the behavioral calls at crew/io-contract.test.mjs:465, crew/io-contract.test.mjs:633, crew/io-contract.test.mjs:696, and crew/io-contract.test.mjs:705. Outside this lane\'s fence, so flagged rather than converted')],
-  ['crew/memory.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['crew/memory.test.mjs'], 'flagged', 'audited 2026-09-09: namespace and handle method-presence sites are preconditions for the memory behavior at crew/memory.test.mjs:264, crew/memory.test.mjs:265, crew/memory.test.mjs:266, crew/memory.test.mjs:270, crew/memory.test.mjs:271, crew/memory.test.mjs:272, and crew/memory.test.mjs:273. Outside this lane\'s fence, so flagged rather than converted')],
-  ['crew/pi/extensions/advisor.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['crew/pi/extensions/advisor.test.mjs'], 'flagged', 'audited 2026-09-09: the source absence pin is an import firewall at crew/pi/extensions/advisor.test.mjs:79, while the entrypoint presence site at crew/pi/extensions/advisor.test.mjs:81 remains a flagged export-presence candidate. Outside this lane\'s fence, so flagged rather than converted')],
-  ['crew/pi/extensions/lab.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['crew/pi/extensions/lab.test.mjs'], 'flagged', 'audited 2026-09-09: the extension entrypoint presence site is at crew/pi/extensions/lab.test.mjs:206; registration behavior is pinned by the test below it. Outside this lane\'s fence, so flagged rather than converted')],
-  ['crew/pi/extensions/subagent.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['crew/pi/extensions/subagent.test.mjs'], 'flagged', 'audited 2026-09-09: the extension entrypoint presence site is at crew/pi/extensions/subagent.test.mjs:191; registration behavior is pinned by the test below it. Outside this lane\'s fence, so flagged rather than converted')],
+  ['crew/io-contract.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['crew/io-contract.test.mjs'], 'flagged', 'audited 2026-09-18: the fingerprintTree method-presence site at crew/io-contract.test.mjs:465 is a precondition for the behavioral call below it; the runClean, reseat and teardown presence sites beside it were removed as standalone assertions')],
+  ['crew/memory.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['crew/memory.test.mjs'], 'flagged', 'audited 2026-09-18: the seven namespace and handle method-presence sites removed as a standalone method-presence assertion — a typeof pin proves an import, not a behaviour; the behaviour tests beside it remain', { tombstone: true })],
+  ['crew/pi/extensions/advisor.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['crew/pi/extensions/advisor.test.mjs'], 'by-design', 'audited 2026-09-18: the source absence pin is an import firewall at crew/pi/extensions/advisor.test.mjs:79; the entrypoint presence site beside it was removed as a standalone method-presence assertion')],
+  ['crew/pi/extensions/lab.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['crew/pi/extensions/lab.test.mjs'], 'flagged', 'audited 2026-09-18: the extension entrypoint presence site removed as a standalone method-presence assertion — a typeof pin proves an import, not a behaviour; the behaviour tests beside it remain', { tombstone: true })],
+  ['crew/pi/extensions/subagent.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['crew/pi/extensions/subagent.test.mjs'], 'flagged', 'audited 2026-09-18: the extension entrypoint presence site removed as a standalone method-presence assertion — a typeof pin proves an import, not a behaviour; the behaviour tests beside it remain', { tombstone: true })],
   ['crew/reclaim-descendants.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['crew/reclaim-descendants.test.mjs'], 'by-design', 'audited 2026-09-09: the injected sleep precondition is at crew/reclaim-descendants.test.mjs:820 and is called on the next line, which makes the record assertion below it meaningful; the source alias exclusion at crew/reclaim-descendants.test.mjs:832 proves the second direct settleSeatTeardown call is not hidden behind a resume alias.')],
   ['crew/roster-refresh.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['crew/roster-refresh.test.mjs'], 'by-design', "audited 2026-09-09: the 2026-08-25 positive 'lead' in roster.tiers.mechanical site is absent at HEAD; the only nearby membership assertion is the detector-excluded negative assert.equal('anthropic/embed-1' in normalized, false) at crew/roster-refresh.test.mjs:225", { tombstone: true })],
   // NOT frozenVacuitySites: its warranty is a COUNT, so a file-level exemption would
@@ -193,25 +193,25 @@ const VACUITY_EXEMPT = new Map([
       && /assert\.match\(other, \/SECOND_BODY\/\)/.test(source)
       && /assert\.doesNotMatch\(other, \/FIRST_BODY\/\)/.test(source),
   }],
-  ['test/factory-emit.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['test/factory-emit.test.mjs'], 'by-design', 'audited 2026-09-09: /no_run/ is serialized in the stderr distinction at test/factory-emit.test.mjs:1747, so the assertion discriminates an unknown_flag refusal from a no_run one.')],
+  ['test/factory-emit.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['test/factory-emit.test.mjs'], 'by-design', 'audited 2026-09-09: /no_run/ is serialized in the stderr distinction at test/factory-emit.test.mjs:1734, so the assertion discriminates an unknown_flag refusal from a no_run one.')],
   ['test/factory-make-brief.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['test/factory-make-brief.test.mjs'], 'by-design', 'audited 2026-09-10: the /BROAD_PIN/ section distinction is asserted at test/factory-make-brief.test.mjs:3015 and paired with a positive match for the same token in the Tripwires section.')],
   ['test/fixtures.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['test/fixtures.test.mjs'], 'by-design', 'audited 2026-09-09: the /toLowerCase/ source-text guard is at test/fixtures.test.mjs:20 and is paired with a positive production-rule import match.')],
-  ['test/visualizer-server.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['test/visualizer-server.test.mjs'], 'flagged', 'audited 2026-09-15: method presence at test/visualizer-server.test.mjs:2097 sits beside a WRITERS.includes() pin and real row assertions that already cover it. Outside this lane\'s fence, so flagged rather than converted')],
+  ['test/visualizer-server.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['test/visualizer-server.test.mjs'], 'flagged', 'audited 2026-09-18: the recordIntakeBrake presence site removed as a standalone method-presence assertion — a typeof pin proves an import, not a behaviour; the behaviour tests beside it remain', { tombstone: true })],
   ['test/visualizer-shape.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['test/visualizer-shape.test.mjs'], 'by-design', 'audited 2026-09-15: the /DatabaseSync/ import-firewall pin is at test/visualizer-shape.test.mjs:980 and is paired with a positive openLedger import match.')],
 ])
 
 const VACUITY_SOURCE_SHA256 = Object.freeze({
-  'crew/io-contract.test.mjs': 'b007ea222c33dbefc00c1a0dbca17cda7910839ba469df045c0dd8dfa780ccd2',
-  'crew/memory.test.mjs': '8a2c6044f7412a8a8f2b958f97d7a570f9a8ac05af5382d78c0209918889586a',
-  'crew/pi/extensions/advisor.test.mjs': '745cc91367fcedfe74296ed5d0d9a09a4e3246a132d86151ea6d4bd2ca0bb462',
-  'crew/pi/extensions/lab.test.mjs': '146e8ce15af3558e5975110d112ab6a692903ba4fcaafffafc1d3d3b8c5f26fa',
-  'crew/pi/extensions/subagent.test.mjs': 'fa91597e544b54eac9dc22530a1c07784ff3c85aaa23b8122916c103fa84f313',
+  'crew/io-contract.test.mjs': '5d739bfe794b04b57bdb79f4396b9da775c2e3f3da957650d13bfbfe0de5f218',
+  'crew/memory.test.mjs': 'e4a4ca3286874d9ecfd2e4edc7d3c34ce18b8713d2bb52d71cffd5d0cf0062e6',
+  'crew/pi/extensions/advisor.test.mjs': 'f37a1633d404c4544c2b5c84c1bfdac905c02bfdfd4421cb54765de1065e94d6',
+  'crew/pi/extensions/lab.test.mjs': '1381f74a41af5bd17ec740a63dd55fe4380dededb1733e383d4dda0b3c5a9fed',
+  'crew/pi/extensions/subagent.test.mjs': '4544af561368c9af2508d7c8fca40e7c4dd0592848267b862803aa9fa0bccb79',
   'crew/reclaim-descendants.test.mjs': '5b5c49106a9d282011747f0c0fb312fe79b053f7be68c6fa55f5b83d85a386d9',
   'crew/roster-refresh.test.mjs': 'f054604a83d185d6d38a2dc979250cb81b82b14a91703753ab93bcc94bac4d3a',
-  'test/factory-emit.test.mjs': '35854f1777a7388da535aba12e8de8d571f7bd8d63d8afd36fb6ab68447d7c5f',
+  'test/factory-emit.test.mjs': '6b80c6794717d3bde392184ed48b5344d94b3f87cc0823f82de4bba92815957c',
   'test/factory-make-brief.test.mjs': '71b80e2f7b30f19b6dec747b320a58937efb6cac5aab3a247255648f7e95f84a',
   'test/fixtures.test.mjs': '20a7b9c408ca687f8378c3c70ced32c7943179fb520f6326384426f3bb698c55',
-  'test/visualizer-server.test.mjs': '82254b3850db4eab27777fd8264af20dbe7ebafdf888b04d13f40c106c2756cd',
+  'test/visualizer-server.test.mjs': 'c7d5f055b32a6b2faab7505cad7fb5951025f3d2e37bd380ea8912ab890540a6',
   'test/visualizer-shape.test.mjs': '1b6647815e0707a8c4be2e46bab3f011038c768802d3d3dc78dc0be68733865e',
 })
 
@@ -226,7 +226,7 @@ function assertVacuityMapGuard(file, exemption) {
   if (exemption.sites === 0) {
     assert.equal(exemption.tombstone, true, `${file} zero-site entry requires a tombstone`)
     assert.deepEqual(exemption.auditedIdentities, [], `${file} tombstones cannot audit identities`)
-    assert.match(exemption.why, /^audited 2026-09-09:/, `${file} tombstone needs a fresh audit date`)
+    assert.match(exemption.why, /^audited 2026-09-(?:09|18):/, `${file} tombstone needs a fresh audit date`)
   } else {
     assert.equal(exemption.tombstone, false, `${file} tombstones cannot carry sites`)
   }
@@ -299,8 +299,8 @@ test('B1', () => {
     }
     total += file === SKELETONREAD_FILE ? exemption.sites : exemption.auditedIdentities.length
   }
-  assert.equal(sharedTotal, 23)
-  assert.equal(total, 25)
+  assert.equal(sharedTotal, 9)
+  assert.equal(total, 11)
 })
 
 test('C1', () => {
@@ -341,6 +341,13 @@ test('E1', () => {
   for (const [file, exemption] of VACUITY_EXEMPT) {
     if (!exemption.rationale) continue
     const citations = [...exemption.rationale.matchAll(/([A-Za-z0-9_./-]+\.test\.mjs):(\d+)/g)]
+    // A tombstone records a REMOVED site: there is no live line to cite, and citing one would
+    // claim an audited identity it no longer has. roster-refresh keeps its retained-negative
+    // citation as the one explicit exception below.
+    if (exemption.tombstone && exemption.auditedIdentities.length === 0 && file !== 'crew/roster-refresh.test.mjs') {
+      assert.equal(citations.length, 0, `${file} is a tombstone and cites a live line`)
+      continue
+    }
     assert.ok(citations.length > 0, `${file} rationale has no current line citation`)
     for (const [, citedFile, lineNumber] of citations) {
       assert.equal(citedFile, file, `${file} rationale cites ${citedFile}`)
@@ -435,5 +442,5 @@ test('presence-only tripwire — the live report distinguishes flagged from by-d
   console.log(`VACUITY-REPORT ${JSON.stringify(report)}`)
   assert.ok(report.flagged > 0, 'a report with nothing flagged is a suspicious result, not a clean bill of health')
   assert.ok(report.by_design > 0, 'a report with nothing permitted by design means the pattern set is too wide')
-  assert.equal(report.sites, 25)
+  assert.equal(report.sites, 11)
 })

@@ -59,7 +59,7 @@ function diagnostic(diagnostics, source, reason, code = null, partial = true) {
 function errorCode(error) {
   const code = error?.code
   if (typeof code === 'string' && code.trim()) return code.toUpperCase()
-  if (error?.name === 'AbortError') return 'ABORT_ERR'
+  if (error?.name === 'AbortError' || error?.name === 'TimeoutError') return 'ABORT_ERR'
   if (typeof error?.name === 'string' && error.name.trim()) return error.name.toUpperCase()
   return 'UNKNOWN'
 }
@@ -414,13 +414,8 @@ function endpointUrl(endpoint) {
 
 async function boundedFetch(url, options = {}) {
   if (typeof globalThis.fetch !== 'function') throw new Error('fetch is unavailable')
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), TRIAGE_REQUEST_TIMEOUT_MS)
-  try {
-    return await globalThis.fetch(url, { ...options, signal: controller.signal })
-  } finally {
-    clearTimeout(timer)
-  }
+  // AbortSignal.timeout rejects with a TimeoutError, which the classifiers below name.
+  return globalThis.fetch(url, { ...options, signal: AbortSignal.timeout(TRIAGE_REQUEST_TIMEOUT_MS) })
 }
 
 async function requestWithinBudget(request, url, options) {
@@ -436,7 +431,7 @@ async function requestWithinBudget(request, url, options) {
 }
 
 function timeoutError(error) {
-  return error?.name === 'AbortError' || error?.code === 'ETIMEDOUT' || error?.code === 'ABORT_ERR'
+  return error?.name === 'AbortError' || error?.name === 'TimeoutError' || error?.code === 'ETIMEDOUT' || error?.code === 'ABORT_ERR'
 }
 
 async function responseBody(response) {

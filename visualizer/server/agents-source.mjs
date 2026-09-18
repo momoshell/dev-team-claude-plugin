@@ -480,9 +480,6 @@ export function proposePrompt({ checkout = process.cwd(), role, text, readFileSy
   return proposalResult({ ok: true, diff: unifiedDiff(beforeSource.text, after, { path: publicTarget }), target_path: target, after_text: after, extra: { labels: ['protected: prompt-surface'], public_target_path: publicTarget } })
 }
 
-export const proposeAgentEntry = proposeAgent
-export const proposeRoleSkills = proposeSkills
-export const proposeCharter = proposePrompt
 
 export function createAgentsSource({ checkout = process.cwd(), crewRoot = process.env.HOME ? join(process.env.HOME, '.crew') : process.cwd(), readFileSync = fsReadFileSync, readdirSync = fsReaddirSync, statSync = fsStatSync } = {}) {
   const root = resolve(checkout)

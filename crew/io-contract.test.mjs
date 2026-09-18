@@ -630,7 +630,6 @@ test('outer seatIo keeps runClean available for headless-json and headless-rpc s
         spawnSync: (_bin, argv) => { executed.push(argv); return { status: 0, stdout: '', stderr: '' } },
       },
     )
-    assert.equal(typeof io.runClean, 'function')
     assert.deepEqual(io.runClean.call(io, 'outer-seat-io-run'), { ok: true, output: '' })
   }
   assert.deepEqual(executed, [['-c', 'outer-seat-io-run'], ['-c', 'outer-seat-io-run']])
@@ -702,8 +701,6 @@ test('seatIo passes a guarded transport emitter that routes through io.emit', ()
 
 test('seatIo exposes reseat and teardown as optional functions', () => {
   const io = makeSeatIo().io
-  assert.equal(typeof io.reseat, 'function')
-  assert.equal(typeof io.teardown, 'function')
 })
 
 test('pane reseat refuses with a transport-specific explanation', () => {

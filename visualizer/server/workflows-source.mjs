@@ -371,4 +371,3 @@ export function createWorkflowsSource({ root = process.cwd(), feed = null, varia
   }
 }
 
-export const proposeWorkflow = proposeWorkflowEdit

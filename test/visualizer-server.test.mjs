@@ -792,7 +792,7 @@ test('all 405 responses advertise an allowed method', { skip: SKIP }, async () =
 
 test('server direct invocation realpaths both sides of its guard', () => {
   const source = readFileSync(SERVER_SCRIPT, 'utf8')
-  assert.match(source, /realpathOr\(process\.argv\[1\]\)\s*===\s*realpathOr\(fileURLToPath\(import\.meta\.url\)\)/)
+  assert.match(source, /const invokedDirectly = import\.meta\.main/,)
   assert.match(source, /function realpathOr\(path\)[\s\S]*realpathSync\(path\)/)
 })
 
@@ -2094,7 +2094,6 @@ test('/api/intake/brake attributes successful and failed transitions and its wri
     const rows = source.dumpTable('intake_brakes')
     const jsonlPath = source._jsonlPath
     assert.equal(WRITERS.includes('recordIntakeBrake'), true)
-    assert.equal(typeof source.recordIntakeBrake, 'function')
     assert.equal(rows.filter((row) => row.outcome === 'ok').length, 2)
     assert.equal(rows.filter((row) => row.outcome === 'failed').length, 1)
     assert.ok(rows.every((row) => row.actor === 'ada' && /^\d{4}-\d{2}-\d{2}T/.test(row.created_at)))

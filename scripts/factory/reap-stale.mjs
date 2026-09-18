@@ -7,8 +7,6 @@
 import { existsSync as fsExistsSync, readFileSync as fsReadFileSync, readdirSync as fsReaddirSync, unlinkSync as fsUnlinkSync } from 'node:fs'
 import { spawnSync as cpSpawnSync } from 'node:child_process'
 import { join } from 'node:path'
-import { fileURLToPath } from 'node:url'
-import { realpathSync } from 'node:fs'
 import { DESCENDANT_DIR, reclaimDescendants } from '../../crew/seat-io.mjs'
 import { LIVENESS } from '../../crew/reclaim.mjs'
 import { crewRoot } from './lane-watch.mjs'
@@ -815,11 +813,7 @@ export async function main(argv, deps = {}) {
   }
 }
 
-function realpathOr(path) {
-  try { return realpathSync(path) } catch { return path }
-}
-
-const invokedDirectly = process.argv[1] && realpathOr(process.argv[1]) === realpathOr(fileURLToPath(import.meta.url))
+const invokedDirectly = import.meta.main
 if (invokedDirectly) {
   process.exitCode = await main(process.argv.slice(2))
 }

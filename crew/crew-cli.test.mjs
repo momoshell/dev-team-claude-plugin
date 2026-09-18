@@ -2789,21 +2789,19 @@ test('J1 boot retains adapter and transport refusals', async () => {
 })
 
 test('RV1-1 advisor vacuity pin stays synchronized', () => {
+  // The entrypoint presence site (typeof advisor.default) was a flagged vacuity candidate and is
+  // removed; only the import-firewall absence pin remains audited.
   const advisorTest = join(ROOT, 'crew', 'pi', 'extensions', 'advisor.test.mjs')
   const vacuityTest = join(ROOT, 'test', 'vacuity.test.mjs')
   const source = readFileSync(advisorTest, 'utf8')
   const vacuity = readFileSync(vacuityTest, 'utf8')
   const digest = createHash('sha256').update(source).digest('hex')
   const sourceAbsenceIdentity = `assert.does${'Not'}Match(source, /registerTool/)`
-  const entrypointIdentity = `assert.equal(${'typeof'} advisor.default, 'function')`
   const sourceLines = source.split('\n')
   const sourceAbsenceLine = sourceLines.findIndex((line) => line.trim() === sourceAbsenceIdentity) + 1
-  const entrypointLine = sourceLines.findIndex((line) => line.trim() === entrypointIdentity) + 1
   assert.ok(sourceAbsenceLine > 0)
-  assert.ok(entrypointLine > 0)
   assert.ok(vacuity.includes(`'crew/pi/extensions/advisor.test.mjs': '${digest}'`))
   assert.ok(vacuity.includes(`crew/pi/extensions/advisor.test.mjs:${sourceAbsenceLine}`))
-  assert.ok(vacuity.includes(`crew/pi/extensions/advisor.test.mjs:${entrypointLine}`))
 })
 
 test('RV2-1 emitTier0 remains journal-only', () => {
@@ -3535,7 +3533,6 @@ test('D1 direct CLI run still starts at planning rather than resuming', () => {
   const child = spawnSync(process.execPath, [entry, 'run', '--task', task, '--checkout', checkout, '--brief-file', brief], { cwd: ROOT, encoding: 'utf8', env: { ...CLI_ENV, HOME: home } })
   const output = `${child.stdout || ''}${child.stderr || ''}`
   try {
-    assert.notEqual(child.status, 0)
     assert.notEqual(child.status, 0)
     const rows = readFileSync(join(dir, 'journal.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line))
     assert.equal(rows.some((row) => row.stage === 'plan:r1'), true)

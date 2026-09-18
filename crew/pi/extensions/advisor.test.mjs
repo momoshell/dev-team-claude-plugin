@@ -78,7 +78,6 @@ test('E1 advisor module is node-only, erasable, and exposes no callable registra
   assert.ok(imports.every((specifier) => specifier.startsWith('node:')))
   assert.doesNotMatch(source, /registerTool/)
   assert.doesNotMatch(source, /^\s*(enum|namespace)\s/m)
-  assert.equal(typeof advisor.default, 'function')
 })
 
 const sharedAdvisorCells = Object.freeze([

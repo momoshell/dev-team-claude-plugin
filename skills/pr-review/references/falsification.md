@@ -68,14 +68,16 @@ as free.
 
 ## Rulings persist across rounds
 
-What the driver carries into a later review is narrower than a ruling ledger,
-and each carrier carries a different thing:
+What the driver carries forward is narrower than a ruling ledger, and each
+carrier carries a different thing to a different stage:
 
 - **Carried plan-check findings** (`crew/roles/reviewer.md`, that section;
-  `carriedResolution` in `crew/drive.mjs`): the plan-check's finding ids, to
-  be closed or restated against the diff.
+  `carriedResolution` in `crew/drive.mjs`): each plan-check finding's id,
+  severity and prescribed correction, in the review brief, to be closed or
+  restated against the diff.
 - **`CLOSED:` markers of an adopted plan** (`predecessorFindingsClosed`): which
-  predecessor findings the adopted plan claims closed; it caps planning rounds.
+  predecessor findings the adopted plan claims closed. This reaches the
+  planning-round cap, not a reviewer.
 - **A stale verdict** (`staleVerdict` in `crew/drive.mjs`): when the lead
   bounces the *reviewer* rather than the builder, the next review brief says
   the lead ruled the prior verdict stale against the current tree and its

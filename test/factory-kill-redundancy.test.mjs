@@ -10,6 +10,8 @@ import {
   classifyMutantOutcome,
   formatRate,
   main,
+  MUTANT_UNMEASURED_REASONS,
+  baselineCensus,
   mutantsForLines,
   parseTapKills,
   restoreSnapshot,
@@ -113,8 +115,15 @@ test('TAP is attributed to leaf tests by suite and subtest path; containers and 
   assert.deepEqual(parsed.killers, ['crew/x.test.mjs :: fails here', 'crew/x.test.mjs :: nested > inner fails'])
   assert.deepEqual(parsed.observed, ['crew/x.test.mjs :: passes', 'crew/x.test.mjs :: fails here', 'crew/x.test.mjs :: nested > inner ok', 'crew/x.test.mjs :: nested > inner fails'])
   assert.deepEqual([parsed.totals.tests, parsed.totals.fail, parsed.fileLevel, parsed.failedRecords], [5, 3, false, 3])
-  const crash = parseTapKills(['TAP version 13', '# Error: boom', '# Subtest: crash.test.mjs', 'not ok 1 - crash.test.mjs', '  exitCode: 7', '1..1', '# tests 1', '# fail 1'].join('\n'), 'crash.test.mjs')
+  const crash = parseTapKills(['TAP version 13', '# Error: boom', '# Subtest: crash.test.mjs', 'not ok 1 - crash.test.mjs', '  exitCode: 7', '1..1', '# tests 1', '# fail 1'].join('\n'), 'test/crash.test.mjs')
   assert.deepEqual([crash.killers, crash.observed, crash.fileLevel], [[], [], true])
+  // Sol on #1401: a test that merely calls itself "x.test.mjs" is a test, not a file row.
+  const named = parseTapKills(['TAP version 13', '# Subtest: named.test.mjs', 'ok 1 - named.test.mjs', '# Subtest: dir/other.test.mjs', 'not ok 2 - dir/other.test.mjs', '# Subtest: ordinary', 'ok 3 - ordinary', '1..3', '# tests 3', '# fail 1'].join('\n'), 'test/suite.test.mjs')
+  assert.deepEqual([named.observed.length, named.killers, named.fileLevel], [3, ['test/suite.test.mjs :: dir/other.test.mjs'], false])
+  // Directives: a skipped or TODO record measures nothing — not observed, never a kill —
+  // and node's `# fail` excludes a TODO failure, which the reconciliation must match.
+  const directives = parseTapKills(['TAP version 13', '# Subtest: a', 'ok 1 - a', '# Subtest: s', 'ok 2 - s # SKIP not today', '# Subtest: t', 'not ok 3 - t # TODO later', '1..3', '# tests 3', '# pass 1', '# fail 0', '# skipped 1', '# todo 1'].join('\n'), 'x')
+  assert.deepEqual([directives.observed, directives.killers, directives.failedRecords, directives.totals.todo], [['x :: a'], [], 0, 1])
   assert.equal(parseTapKills('TAP version 13\nok 1 - x\n', 's'), null, 'no summary: not a finished run')
 })
 
@@ -127,7 +136,8 @@ test('a mutant is measured only when every suite run finished with attributable 
   assert.deepEqual(classifyMutantOutcome({ suiteOutputs: [ok] }), { status: 'measured', survivor: true, killers: [], observed: ['s :: a', 's :: b'], suitesMeasured: ['s'] })
   assert.deepEqual(classifyMutantOutcome({ suiteOutputs: [ok, killed] }).killers, ['s :: b'])
   const reasons = {
-    'file-level-failure': { suite: 's', status: 1, stdout: 'TAP version 13\n# Subtest: s.test.mjs\nnot ok 1 - s.test.mjs\n1..1\n# tests 1\n# fail 1\n', stderr: '' },
+    'file-level-failure': { suite: 's', status: 1, stdout: 'TAP version 13\n# Subtest: s\nnot ok 1 - s\n  exitCode: 7\n1..1\n# tests 1\n# fail 1\n', stderr: '' },
+    cancelled: { suite: 's', status: 1, stdout: tap('# Subtest: a\nok 1 - a\n# Subtest: b\nnot ok 2 - b', 1).replace('# fail 1', '# fail 1\n# cancelled 1'), stderr: '' },
     'failures-unattributed': { suite: 's', status: 1, stdout: tap('# Subtest: a\nok 1 - a\n# Subtest: b\nok 2 - b', 1), stderr: '' },
     'suite-exit-unattributed': { suite: 's', status: 1, stdout: tap('# Subtest: a\nok 1 - a\n# Subtest: b\nok 2 - b', 0), stderr: '' },
     'no-tap-output': { suite: 's', status: 0, stdout: '', stderr: '' },
@@ -135,7 +145,53 @@ test('a mutant is measured only when every suite run finished with attributable 
   for (const [reason, output] of Object.entries(reasons)) {
     const verdict = classifyMutantOutcome({ suiteOutputs: [ok, output] })
     assert.deepEqual([verdict.status, verdict.reason, verdict.survivor], ['unmeasured', reason, false], reason)
+    assert.ok(MUTANT_UNMEASURED_REASONS.includes(reason), `${reason} is in the closed enum`)
   }
+  // A TODO failure is not a kill and `# fail 0` reconciles: the mutant is measured, a survivor.
+  const todo = { suite: 's', status: 0, stdout: 'TAP version 13\n# Subtest: a\nok 1 - a\n# Subtest: t\nnot ok 2 - t # TODO\n1..2\n# tests 2\n# pass 1\n# fail 0\n# todo 1\n', stderr: '' }
+  assert.deepEqual(classifyMutantOutcome({ suiteOutputs: [todo] }), { status: 'measured', survivor: true, killers: [], observed: ['s :: a'], suitesMeasured: ['s'] })
+})
+
+// Sol on #1401, pass 2: without a pristine census, a run that finished after only test A
+// makes B's later kill-set a strict subset of A's. A mutant run measures the same thing as
+// the baseline or it is unmeasured. Mutation killed: dropping the outcome-set comparison.
+test('a mutant run whose observed set differs from the pristine baseline is unmeasured', () => {
+  const tap = (body, fail, tests) => `TAP version 13\n${body}\n1..${tests}\n# tests ${tests}\n# pass ${tests - fail}\n# fail ${fail}\n`
+  const pristine = { suite: 's', status: 0, stdout: tap('# Subtest: a\nok 1 - a\n# Subtest: b\nok 2 - b', 0, 2), stderr: '' }
+  const census = baselineCensus(pristine)
+  assert.deepEqual(census, { suite: 's', status: 'measured', reason: null, observed: ['s :: a', 's :: b'] })
+  const baselines = new Map([['s', census.observed]])
+  const truncated = { suite: 's', status: 1, stdout: tap('# Subtest: a\nnot ok 1 - a', 1, 1), stderr: '' }
+  assert.deepEqual([classifyMutantOutcome({ suiteOutputs: [truncated], baselines }).reason, classifyMutantOutcome({ suiteOutputs: [truncated] }).status], ['outcome-set-differs', 'measured'])
+  const full = { suite: 's', status: 1, stdout: tap('# Subtest: a\nnot ok 1 - a\n# Subtest: b\nok 2 - b', 1, 2), stderr: '' }
+  assert.deepEqual(classifyMutantOutcome({ suiteOutputs: [full], baselines }).killers, ['s :: a'])
+  const red = baselineCensus({ suite: 's', status: 1, stdout: tap('# Subtest: a\nnot ok 1 - a', 1, 1), stderr: '' })
+  assert.deepEqual([red.status, red.reason, MUTANT_UNMEASURED_REASONS.includes(red.reason)], ['unmeasured', 'baseline-red', true])
+})
+
+// End to end with a positive candidate, through --out: the JSON serializes the record
+// (Sol on #1401: it threw on the removed key) and the markdown names the dominator.
+// Mutation killed: serializing entry.key / entry.dominatedBy again.
+test('a redundancy candidate survives --out serialization and is named in the report', () => {
+  const dir = scratchDir('kr-e2e-')
+  mkdirSync(join(dir, 'crew'), { recursive: true })
+  writeFileSync(join(dir, 'crew', 'drive.mjs'), ['export const a = 1', 'export function f(x) { return x + 1 }', 'export const b = a + 2', 'export function g(y) { return y * 2 }', ''].join('\n'))
+  const tap = (fails) => `TAP version 13\n# Subtest: A\n${fails.includes('A') ? 'not ok' : 'ok'} 1 - A\n# Subtest: B\n${fails.includes('B') ? 'not ok' : 'ok'} 2 - B\n1..2\n# tests 2\n# pass ${2 - fails.length}\n# fail ${fails.length}\n`
+  let runs = 0
+  // Run 1 is the pristine baseline; odd mutants are killed by A alone, even ones by A and B,
+  // so B's sampled kill-set is a strict subset of A's once two mutants ran.
+  const spawnSync = () => { runs += 1; const fails = runs === 1 ? [] : runs % 2 === 0 ? ['A'] : ['A', 'B']; return { status: fails.length ? 1 : 0, stdout: tap(fails), stderr: '' } }
+  const code = main(['--mutants', '4', '--seed', '3', '--suites', 's', '--out', join(dir, 'k.json'), '--md', join(dir, 'k.md'), '--checkout', dir], { spawnSync })
+  assert.equal(code, 0)
+  const report = JSON.parse(readFileSync(join(dir, 'k.json'), 'utf8'))
+  assert.ok(report.sampling.selectedCandidates >= 2, `at least two mutants: ${JSON.stringify(report.sampling)}`)
+  assert.ok(runs >= 3, `baseline plus mutants ran: ${runs}`)
+  assert.equal(report.redundant.length, 1, JSON.stringify(report.redundant))
+  assert.deepEqual([report.redundant[0].candidate, report.redundant[0].dominator, report.redundant[0].status], ['s :: B', 's :: A', 'redundancy-candidate'])
+  assert.deepEqual(report.baselines, [{ suite: 's', status: 'measured', reason: null, tests: 2 }])
+  const md = readFileSync(join(dir, 'k.md'), 'utf8')
+  assert.match(md, /- s :: A dominates s :: B: \d+ of \d+ \(/)
+  assert.match(md, /Sample blind spot: .* of the candidates generated on sampled lines/)
 })
 
 test('a zero denominator is stated as unmeasured, never as 0%', () => {

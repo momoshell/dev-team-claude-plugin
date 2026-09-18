@@ -15,7 +15,9 @@ export const DRIVER_SUITES = Object.freeze([
   'crew/drive.test.mjs',
 ])
 export const SAMPLE_UNMEASURED_REASON = 'sample-killed-nothing'
+// Every reason an unmeasured mutant can carry — closed, and the only source of them.
 export const MUTANT_UNMEASURED_REASONS = Object.freeze([
+  'file-level-failure', 'failures-unattributed', 'suite-exit-unattributed', 'cancelled', 'outcome-set-differs', 'baseline-unmeasured', 'baseline-red',
   'suite-missing', 'no-tap-output', 'spawn-denied', 'interrupted', 'timeout',
 ])
 export const USAGE = `usage: node scripts/factory/kill-redundancy.mjs [--mutants <n>] [--out <json>] [--md <markdown>] [--suites <suite>] [--checkout <dir>] [--timeout-ms <n>] [--seed <n>]`
@@ -89,28 +91,38 @@ export function parseTapKills(output, suite = null) {
   const totalsMatch = /^# tests\s+(\d+)\s*$/m.exec(text)
   if (!totalsMatch) return null
   const count = (name) => { const m = new RegExp(`^# ${name}\\s+(\\d+)\\s*$`, 'm').exec(text); return m ? Number(m[1]) : null }
-  const totals = { tests: Number(totalsMatch[1]), pass: count('pass'), fail: count('fail'), cancelled: count('cancelled') }
+  const totals = { tests: Number(totalsMatch[1]), pass: count('pass'), fail: count('fail'), cancelled: count('cancelled'), skipped: count('skipped'), todo: count('todo') }
   const prefix = suite ? `${suite} :: ` : ''
+  const suiteName = suite ? String(suite).split(/[/\\]/).pop() : null
+  const lines = text.split(/\r?\n/)
   const names = []
   const records = []
   let fileLevel = false
-  for (const line of text.split(/\r?\n/)) {
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index]
     const subtest = /^(\s*)# Subtest: (.*)$/.exec(line)
     if (subtest) { names[subtest[1].length / 4] = subtest[2].trim(); continue }
-    const match = /^(\s*)(ok|not ok)\s+\d+\s*(?:-\s*(.*))?\s*$/.exec(line)
+    const match = /^(\s*)(ok|not ok)\s+\d+\s*(?:-\s*(.*?))?\s*(?:#\s*(SKIP|TODO)\b.*)?$/i.exec(line)
     if (!match) continue
     const depth = match[1].length / 4
     const title = (match[3] || '').trim()
-    if (depth === 0 && /(?:^|[/\\])[^/\\]+\.test\.mjs$/.test(title)) { if (match[2] === 'not ok') fileLevel = true; continue }
+    const directive = match[4] ? match[4].toUpperCase() : null
+    // A file-level failure is the record node emits FOR the file: top-level, titled by the
+    // suite's own name, with the process diagnostics (`exitCode:`) in its YAML block. A test
+    // that merely calls itself "x.test.mjs" is a test.
+    if (depth === 0 && suiteName !== null && (title === suiteName || title === suite) && /^\s+exitCode:/.test(lines[index + 1] ?? '') && match[2] === 'not ok') { fileLevel = true; continue }
     const path = [...names.slice(0, depth), title].filter(Boolean).join(' > ')
-    records.push({ depth, failed: match[2] === 'not ok', key: `${prefix}${path}` })
+    records.push({ depth, failed: match[2] === 'not ok', directive, key: `${prefix}${path}` })
   }
+  // A skipped or TODO record is neither observed nor a kill: it did not measure the mutant.
+  const measuring = (record) => record.directive === null
   const leaves = records.filter((record, index) => !(index > 0 && records[index - 1].depth > record.depth))
-  const killers = [...new Set(leaves.filter((record) => record.failed).map((record) => record.key))]
-  const observed = [...new Set(leaves.map((record) => record.key))]
-  // Node's `# fail` counts containers too, so attribution is checked against every failed
-  // record, while kills and observations are the leaves.
-  const failedRecords = records.filter((record) => record.failed).length + (fileLevel ? 1 : 0)
+  const killers = [...new Set(leaves.filter((record) => record.failed && measuring(record)).map((record) => record.key))]
+  const observed = [...new Set(leaves.filter(measuring).map((record) => record.key))]
+  // Node's `# fail` counts containers too and excludes TODO failures, so attribution is
+  // checked against every non-directive failed record, while kills and observations are
+  // the leaves.
+  const failedRecords = records.filter((record) => record.failed && measuring(record)).length + (fileLevel ? 1 : 0)
   return { killers, observed, totals, fileLevel, failedRecords }
 }
 
@@ -125,7 +137,17 @@ function resultError(result) {
 // failure the parser could not put on a test (a file-level crash, a non-zero exit with no
 // failing record, a `# fail` total above the records attributed) is an unmeasured mutant
 // with a closed reason — never a survivor, never a kill.
-export function classifyMutantOutcome({ suiteOutputs = [] } = {}) {
+// The pristine run of one suite: the leaf tests it measures when nothing is mutated. A
+// mutant run whose observed set differs — a truncated run, a crash after some tests, a
+// test that appeared — did not measure the same thing, and is unmeasured with a reason.
+export function baselineCensus(result) {
+  const verdict = classifyMutantOutcome({ suiteOutputs: [result] })
+  if (verdict.status !== 'measured') return { suite: result?.suite ?? null, status: 'unmeasured', reason: verdict.reason, observed: null }
+  if (verdict.killers.length > 0) return { suite: result?.suite ?? null, status: 'unmeasured', reason: 'baseline-red', observed: null }
+  return { suite: result?.suite ?? null, status: 'measured', reason: null, observed: verdict.observed }
+}
+
+export function classifyMutantOutcome({ suiteOutputs = [], baselines = null } = {}) {
   const unmeasured = (reason) => ({ status: 'unmeasured', reason, survivor: false, killers: [], observed: [], suitesMeasured: [] })
   if (!suiteOutputs.length) return unmeasured('no-tap-output')
   const killers = new Set()
@@ -139,9 +161,15 @@ export function classifyMutantOutcome({ suiteOutputs = [] } = {}) {
     const parsed = parseTapKills(`${result?.stdout || ''}${result?.stderr || ''}`, result?.suite ?? null)
     if (!parsed) return unmeasured('no-tap-output')
     if (parsed.fileLevel) return unmeasured('file-level-failure')
+    if (parsed.totals.cancelled > 0) return unmeasured('cancelled')
     const failed = Number.isInteger(parsed.totals.fail) ? parsed.totals.fail : null
-    if (failed !== null && failed > parsed.failedRecords) return unmeasured('failures-unattributed')
+    if (failed !== null && failed !== parsed.failedRecords) return unmeasured('failures-unattributed')
     if (typeof result?.status === 'number' && result.status !== 0 && parsed.killers.length === 0) return unmeasured('suite-exit-unattributed')
+    const baseline = baselines instanceof Map ? baselines.get(result?.suite ?? null) : undefined
+    if (baseline !== undefined) {
+      const expected = new Set(baseline)
+      if (parsed.observed.length !== expected.size || parsed.observed.some((key) => !expected.has(key))) return unmeasured('outcome-set-differs')
+    }
     for (const killer of parsed.killers) killers.add(killer)
     for (const key of parsed.observed) observed.add(key)
     suitesMeasured.push(result?.suite ?? null)
@@ -325,8 +353,8 @@ export function buildMarkdown(analysis = {}) {
     '',
     `Suites with at least one measured run: ${formatRate(analysis.suitesMeasured ?? 0, suites.length)}`,
     `Suite runs measured: ${formatRate(runs.measured ?? 0, runs.total ?? 0)}`,
-    'Driver suites:',
-    ...suites.map((suite) => `- ${suite}`),
+    'Driver suites (pristine baseline: measured leaf tests, or the reason it was not):',
+    ...suites.map((suite) => { const b = (analysis.baselines || []).find((row) => row.suite === suite); return `- ${suite}: ${b ? (b.status === 'measured' ? `${b.tests} tests` : `unmeasured (${b.reason})`) : 'no baseline recorded'}` }),
     `Mutants selected: ${formatRate(sampled, sampled)}`,
     `Mutants measured: ${formatRate(sampled - (analysis.unmeasured?.length ?? 0), sampled)}`,
     `Mutants killed: ${formatRate(killed, sampled)}`,
@@ -373,7 +401,7 @@ export function buildMarkdown(analysis = {}) {
   lines.push('', '## Unmeasured outcomes')
   if (!analysis.unmeasured?.length) lines.push('- none observed')
   else for (const row of analysis.unmeasured) lines.push(`- ${row.id}: ${row.reason}`)
-  lines.push('', `Sample blind spot: only the first generated candidate per sampled line was measured (${formatRate(sampled, sampled)}).`)
+  lines.push('', `Sample blind spot: only the first generated candidate per sampled line was measured (${formatRate(sampling.selectedCandidates ?? sampled, sampling.generatedCandidates ?? sampled)} of the candidates generated on sampled lines).`)
   return `${lines.join('\n')}\n`
 }
 
@@ -381,7 +409,7 @@ function jsonAnalysis(analysis) {
   return {
     ...analysis,
     tests: (analysis.tests || []).map((test) => ({ ...test, kills: [...(test.kills || [])] })),
-    redundant: (analysis.redundant || []).map((entry) => ({ ...entry, key: [...entry.key], dominatedBy: [...entry.dominatedBy] })),
+    redundant: (analysis.redundant || []).map((entry) => ({ ...entry, kills: [...entry.kills], dominatorKills: [...entry.dominatorKills] })),
   }
 }
 
@@ -403,6 +431,16 @@ export function main(argv = process.argv.slice(2), deps = {}) {
   const observedTests = new Set()
   const suitesWithMeasuredRun = new Set()
   const suiteRuns = { measured: 0, total: 0 }
+  // Pristine census first: what each suite measures with nothing mutated. A suite whose
+  // baseline is unmeasured (or red) is not run against mutants at all.
+  const baselines = new Map()
+  const baselineOutcomes = []
+  for (const suite of options.suites) {
+    const census = baselineCensus(runSuite(suite, checkout, options.timeoutMs, spawn))
+    baselineOutcomes.push(census)
+    if (census.status === 'measured') { baselines.set(suite, census.observed); for (const key of census.observed) observedTests.add(key) }
+  }
+  const measurableSuites = options.suites.filter((suite) => baselines.has(suite))
   // The signal source is a seam: node --test's own child listens for SIGINT on process
   // and aborts the file, so a test hands in its own emitter.
   const signals = deps.signals || process
@@ -427,7 +465,9 @@ export function main(argv = process.argv.slice(2), deps = {}) {
         } else {
           const nextBytes = applied.bytes
           writeFileSync(targetPath, nextBytes)
-          suiteOutputs = options.suites.map((suite) => runSuite(suite, checkout, options.timeoutMs, spawn))
+          suiteOutputs = measurableSuites.length === 0
+            ? [{ error: Object.assign(new Error('no suite has a measured baseline'), { code: 'BASELINE' }) }]
+            : measurableSuites.map((suite) => runSuite(suite, checkout, options.timeoutMs, spawn))
         }
       } catch (error) {
         suiteOutputs = [{ error }]
@@ -435,11 +475,10 @@ export function main(argv = process.argv.slice(2), deps = {}) {
         restoreSnapshot(snapshot)
         inFlightSnapshot = null
       }
-      const outcome = classifyMutantOutcome({ suiteOutputs })
+      const outcome = suiteOutputs[0]?.error?.code === 'BASELINE' ? { status: 'unmeasured', reason: 'baseline-unmeasured', survivor: false, killers: [], observed: [], suitesMeasured: [] } : classifyMutantOutcome({ suiteOutputs, baselines })
       suiteRuns.total += suiteOutputs.length
       suiteRuns.measured += outcome.suitesMeasured.length
       for (const suite of outcome.suitesMeasured) if (suite) suitesWithMeasuredRun.add(suite)
-      for (const key of outcome.observed) observedTests.add(key)
       mutantResults.push({ mutant, ...outcome })
     }
   } finally {
@@ -450,6 +489,7 @@ export function main(argv = process.argv.slice(2), deps = {}) {
   analysis.sourceLines = sourceLines
   analysis.suitesMeasured = suitesWithMeasuredRun.size
   analysis.suiteRuns = suiteRuns
+  analysis.baselines = baselineOutcomes.map((census) => ({ suite: census.suite, status: census.status, reason: census.reason, tests: census.observed ? census.observed.length : null }))
   analysis.suitePaths = options.suites
   analysis.sampledMutants = generated.candidates.length
   analysis.sampling = generated.sampling

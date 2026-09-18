@@ -174,7 +174,7 @@ function frozenVacuitySites(auditedIdentities, verdict, rationale, { tombstone =
 const VACUITY_EXEMPT = new Map([
   ['crew/io-contract.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['crew/io-contract.test.mjs'], 'flagged', 'audited 2026-09-18: the fingerprintTree method-presence site at crew/io-contract.test.mjs:465 is a precondition for the behavioral call below it; the runClean, reseat and teardown presence sites beside it were removed as standalone assertions')],
   ['crew/memory.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['crew/memory.test.mjs'], 'flagged', 'audited 2026-09-18: the seven namespace and handle method-presence sites removed as a standalone method-presence assertion — a typeof pin proves an import, not a behaviour; the behaviour tests beside it remain', { tombstone: true })],
-  ['crew/pi/extensions/advisor.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['crew/pi/extensions/advisor.test.mjs'], 'by-design', 'audited 2026-09-18: the source absence pin is an import firewall at crew/pi/extensions/advisor.test.mjs:79; the entrypoint presence site beside it was removed as a standalone method-presence assertion')],
+  ['crew/pi/extensions/advisor.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['crew/pi/extensions/advisor.test.mjs'], 'by-design', 'audited 2026-09-18: the source absence pin is an import firewall at crew/pi/extensions/advisor.test.mjs:96; the entrypoint presence site beside it was removed as a standalone method-presence assertion')],
   ['crew/pi/extensions/lab.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['crew/pi/extensions/lab.test.mjs'], 'flagged', 'audited 2026-09-18: the extension entrypoint presence site removed as a standalone method-presence assertion — a typeof pin proves an import, not a behaviour; the behaviour tests beside it remain', { tombstone: true })],
   ['crew/pi/extensions/subagent.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['crew/pi/extensions/subagent.test.mjs'], 'flagged', 'audited 2026-09-18: the extension entrypoint presence site removed as a standalone method-presence assertion — a typeof pin proves an import, not a behaviour; the behaviour tests beside it remain', { tombstone: true })],
   ['crew/reclaim-descendants.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['crew/reclaim-descendants.test.mjs'], 'by-design', 'audited 2026-09-09: the injected sleep precondition is at crew/reclaim-descendants.test.mjs:820 and is called on the next line, which makes the record assertion below it meaningful; the source alias exclusion at crew/reclaim-descendants.test.mjs:832 proves the second direct settleSeatTeardown call is not hidden behind a resume alias.')],
@@ -202,8 +202,8 @@ const VACUITY_EXEMPT = new Map([
 
 const VACUITY_SOURCE_SHA256 = Object.freeze({
   'crew/io-contract.test.mjs': '5d739bfe794b04b57bdb79f4396b9da775c2e3f3da957650d13bfbfe0de5f218',
-  'crew/memory.test.mjs': 'e4a4ca3286874d9ecfd2e4edc7d3c34ce18b8713d2bb52d71cffd5d0cf0062e6',
-  'crew/pi/extensions/advisor.test.mjs': 'f37a1633d404c4544c2b5c84c1bfdac905c02bfdfd4421cb54765de1065e94d6',
+  'crew/memory.test.mjs': 'ce555debdb4cfef489a40434f8bc661e88b8b73de123c1b1a29cedd59a3a8fce',
+  'crew/pi/extensions/advisor.test.mjs': '89e38100189d7aca2392fa24aeab8332e85552d1617205276ee497f0f90478bd',
   'crew/pi/extensions/lab.test.mjs': '1381f74a41af5bd17ec740a63dd55fe4380dededb1733e383d4dda0b3c5a9fed',
   'crew/pi/extensions/subagent.test.mjs': '4544af561368c9af2508d7c8fca40e7c4dd0592848267b862803aa9fa0bccb79',
   'crew/reclaim-descendants.test.mjs': '5b5c49106a9d282011747f0c0fb312fe79b053f7be68c6fa55f5b83d85a386d9',
@@ -211,7 +211,7 @@ const VACUITY_SOURCE_SHA256 = Object.freeze({
   'test/factory-emit.test.mjs': '6b80c6794717d3bde392184ed48b5344d94b3f87cc0823f82de4bba92815957c',
   'test/factory-make-brief.test.mjs': '71b80e2f7b30f19b6dec747b320a58937efb6cac5aab3a247255648f7e95f84a',
   'test/fixtures.test.mjs': '20a7b9c408ca687f8378c3c70ced32c7943179fb520f6326384426f3bb698c55',
-  'test/visualizer-server.test.mjs': 'c7d5f055b32a6b2faab7505cad7fb5951025f3d2e37bd380ea8912ab890540a6',
+  'test/visualizer-server.test.mjs': 'c0188b4db6619f0bb8bb2f0e837832b253ccb09cd70037507ec24a99792e1f16',
   'test/visualizer-shape.test.mjs': '1b6647815e0707a8c4be2e46bab3f011038c768802d3d3dc78dc0be68733865e',
 })
 

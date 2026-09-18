@@ -1,4 +1,5 @@
 import { test } from 'node:test'
+import { scratchDir } from '../test/helpers.mjs'
 import assert from 'node:assert/strict'
 import {
   existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync,
@@ -21,6 +22,11 @@ function fixture(order = ['alpha', 'beta']) {
 function clean(dir) {
   rmSync(dir, { recursive: true, force: true })
 }
+
+test('an unknown backend name refuses by name — the check is closed, not a lookup that falls through', () => {
+  const dir = scratchDir('memory-backend-')
+  assert.throws(() => memory.openMemory({ dir, backend: 'misspelt' }), /unknown memory backend "misspelt"/)
+})
 
 test('markdown memory includes MEMORY.md first and linked files in index order', () => {
   const dir = fixture()

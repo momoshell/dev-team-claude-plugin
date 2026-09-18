@@ -71,6 +71,23 @@ function fetcher(reply = { class: 'edge-path', severity: 'medium', claim: 'the r
   return fn
 }
 
+test('the default export IS attachAdvisor: inert without the grant, and it refuses an unsupported role by name', async () => {
+  // Pi loads advisor.ts and calls its default with only `pi`; attach then reads process.env. A typeof
+  // pin proved the export existed. This proves it delegates: the two gates attachAdvisor applies
+  // first are observable through the default with no endpoint and no journal.
+  const saved = { grant: process.env[advisor.ADVISOR_GRANT_ENV], role: process.env.CREW_ROLE, task: process.env.CREW_TASK_DIR }
+  try {
+    delete process.env[advisor.ADVISOR_GRANT_ENV]; delete process.env.CREW_ROLE
+    const inert = pi()
+    assert.equal(await advisor.default(inert), undefined)
+    assert.deepEqual(inert.handlers, [], 'without the grant the advisor registers nothing')
+    process.env[advisor.ADVISOR_GRANT_ENV] = '1'; process.env.CREW_TASK_DIR = scratchDir('advisor-default-')
+    await assert.rejects(() => advisor.default(pi()), /role-unsupported/)
+  } finally {
+    for (const [k, v] of [[advisor.ADVISOR_GRANT_ENV, saved.grant], ['CREW_ROLE', saved.role], ['CREW_TASK_DIR', saved.task]]) { if (v === undefined) delete process.env[k]; else process.env[k] = v }
+  }
+})
+
 test('E1 advisor module is node-only, erasable, and exposes no callable registration surface', () => {
   const source = readFileSync(new URL('./advisor.ts', import.meta.url), 'utf8')
   const imports = [...source.matchAll(/^import[\s\S]*?from\s+["']([^"']+)["']/gm)].map((match) => match[1])

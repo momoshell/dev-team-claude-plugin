@@ -679,6 +679,8 @@ test('readgate is zero-dependency, erasable, and exposes three lifecycle registr
   const gate = mod.attachReadGate({ on: (...args) => registrations.push(args) }, { env: {} })
   assert.equal(registrations.length, 3)
   assert.deepEqual(registrations.map(([name]) => name), ['turn_start', 'tool_call', 'tool_result'])
+  // Registered is not enough — Pi will CALL these. An undefined handler registers fine and fails at the first event.
+  for (const [name, handler] of registrations) assert.doesNotThrow(() => handler({ toolName: 'bash', input: { command: 'echo x' } }, {}), `${name} handler must run`)
   assert.deepEqual(gate, {
     onToolCall: gate.onToolCall,
     onToolResult: gate.onToolResult,

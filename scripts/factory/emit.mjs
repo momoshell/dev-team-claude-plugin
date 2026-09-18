@@ -1828,10 +1828,8 @@ export function main(argv) {
   }
 }
 
-// realpath both sides: the ESM loader realpaths import.meta.url while
-// argv[1] stays literal, so under a symlinked path component a literal
-// compare is silently false and the CLI would no-op (mirrors
-// the retired dispatch.mjs's realpathOr / invokedDirectly shape exactly).
+// import.meta.main: the platform decides whether this module is the entry point, so a
+// symlinked path component cannot make the guard silently false as a literal compare once did.
 const invokedDirectly = import.meta.main
 if (invokedDirectly) {
   // process.exitCode, not process.exit: a piped stdout can be truncated by

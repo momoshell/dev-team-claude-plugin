@@ -8,8 +8,9 @@
 // the file with Node's erasable type stripping. This file uses only erasable
 // syntax and node:-only imports; it has no runtime dependency on pi or the repo.
 
-import { spawn as nodeSpawn } from 'node:child_process'
-import { appendFileSync, closeSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs'
+import { spawn as nodeSpawn, spawnSync as nodeSpawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
+import { appendFileSync, closeSync, lstatSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { StringDecoder } from 'node:string_decoder'
 
@@ -30,6 +31,7 @@ const FAILURE_REASONS = new Set(['crash', 'timeout', 'interrupted'])
 const TEST_PATH = /\.test\.(?:mjs|js|ts)$/
 const SAFE_PATH = /^[A-Za-z0-9._/-]+$/
 const RUN_START_EVENT = 'run-start'
+const RERUN_REFUSAL_RULE = 'builder-rerun-refusal'
 
 const defaultRead = (path, encoding) => readFileSync(path, encoding)
 const defaultAppend = (path, text) => appendFileSync(path, text)
@@ -295,6 +297,114 @@ function testOperand(value) {
   const segments = clean.split('/')
   if (segments.some((segment) => !segment || segment === '.' || segment === '..')) return null
   return clean
+}
+
+// lean: a second decoder until #1406 lands; import shellWords then
+function decodeShellWords(command) {
+  if (typeof command !== 'string' || bytes(command) > MAX_COMMAND_BYTES) return null
+  const words = []
+  let word = ''
+  let haveWord = false
+  let mode = 'bare'
+  for (let index = 0; index < command.length; index += 1) {
+    const character = command[index]
+    if (mode === 'single') {
+      if (character === "'") mode = 'bare'
+      else word += character
+      haveWord = true
+      continue
+    }
+    if (mode === 'double') {
+      if (character === '"') { mode = 'bare'; haveWord = true; continue }
+      if (character === '\\') {
+        const next = command[index + 1]
+        if (next === '"' || next === '\\') { word += next; index += 1 }
+        else word += character
+      } else word += character
+      haveWord = true
+      continue
+    }
+    if (/\s/.test(character)) {
+      if (haveWord) { words.push(word); word = ''; haveWord = false }
+      continue
+    }
+    if (character === "'") { mode = 'single'; haveWord = true; continue }
+    if (character === '"') { mode = 'double'; haveWord = true; continue }
+    if (character === '\\') {
+      const next = command[index + 1]
+      if (next === undefined) return null
+      word += next; index += 1; haveWord = true; continue
+    }
+    word += character
+    haveWord = true
+  }
+  if (mode !== 'bare') return null
+  if (haveWord) words.push(word)
+  return words
+}
+
+function wordsEqual(left, right) {
+  return Array.isArray(left) && Array.isArray(right) && left.length === right.length && left.every((word, index) => word === right[index])
+}
+
+function defaultMeasureTree(cwd, deps = {}) {
+  const spawnSync = deps.spawnSync || nodeSpawnSync
+  const lstat = deps.lstatSync || lstatSync
+  const runGit = (args) => {
+    let result
+    try { result = spawnSync('git', args, { cwd, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 }) } catch (error) { return { ok: false, error } }
+    const error = result?.error
+    if (error || result?.status !== 0 || result?.signal) return { ok: false, error, result }
+    const stdout = result.stdout === undefined || result.stdout === null
+      ? ''
+      : Buffer.isBuffer(result.stdout) ? result.stdout.toString('utf8') : String(result.stdout)
+    return { ok: true, stdout }
+  }
+  const gitDir = runGit(['rev-parse', '--git-dir'])
+  if (!gitDir.ok) return { measured: false, cause: gitDir.error?.code === 'ENOENT' ? 'git-missing' : 'not-a-repository', detail: gitDir.error?.message || gitDir.result?.stderr || '' }
+  const tracked = runGit(['ls-files', '-v'])
+  if (!tracked.ok) return { measured: false, cause: 'git-failed', detail: tracked.error?.message || tracked.result?.stderr || '' }
+  if (tracked.stdout.split('\n').some((line) => line && line[0] !== 'H')) return { measured: false, cause: 'assumed-or-skip-worktree', detail: tracked.stdout }
+  const staged = runGit(['ls-files', '--stage'])
+  if (!staged.ok) return { measured: false, cause: 'git-failed', detail: staged.error?.message || staged.result?.stderr || '' }
+  if (staged.stdout.split('\n').some((line) => /^160000\s/.test(line))) return { measured: false, cause: 'submodule', detail: staged.stdout }
+  const status = runGit(['status', '--porcelain=v1', '-z', '--untracked-files=all'])
+  if (!status.ok) return { measured: false, cause: 'git-failed', detail: status.error?.message || status.result?.stderr || '' }
+  const diff = runGit(['diff', 'HEAD', '--'])
+  if (!diff.ok) return { measured: false, cause: 'git-failed', detail: diff.error?.message || diff.result?.stderr || '' }
+  const head = runGit(['rev-parse', 'HEAD'])
+  if (!head.ok || !head.stdout.trim()) return { measured: false, cause: 'git-failed', detail: head.error?.message || head.result?.stderr || '' }
+  const untracked = []
+  const statusParts = status.stdout.split('\0')
+  for (const part of statusParts) {
+    if (!part.startsWith('?? ')) continue
+    const rel = part.slice(3)
+    if (!rel) return { measured: false, cause: 'unreadable', detail: 'empty untracked path' }
+    let stat
+    try { stat = lstat(join(cwd, rel)) } catch (error) { return { measured: false, cause: 'unreadable', detail: error?.message || String(error) } }
+    if (stat?.isSymbolicLink?.()) return { measured: false, cause: 'untracked-symlink', detail: rel }
+    const size = Number(stat?.size)
+    const mtimeMs = Number(stat?.mtimeMs)
+    if (!Number.isFinite(size) || !Number.isFinite(mtimeMs)) return { measured: false, cause: 'unreadable', detail: rel }
+    untracked.push([rel, size, mtimeMs])
+  }
+  const payload = { status: status.stdout, diff: diff.stdout, head: head.stdout.trim(), untracked }
+  const digest = createHash('sha256').update(JSON.stringify(payload)).digest('hex')
+  return { measured: true, digest }
+}
+
+function recordUnmeasured(path, cause, appendFile, now) {
+  try {
+    const at = (() => { try { return now() } catch { return defaultNow() } })()
+    appendFile(path, `${JSON.stringify({ at, builder_loop_unmeasured: { cause } })}\n`)
+  } catch {}
+}
+
+function recordRefusal(path, reason, words, appendFile, now) {
+  try {
+    const at = (() => { try { return now() } catch { return defaultNow() } })()
+    appendFile(path, `${JSON.stringify({ at, builder_loop_refusal: { rule: RERUN_REFUSAL_RULE, command: words, previous: reason } })}\n`)
+  } catch {}
 }
 
 export function fencedNodeTestCommand(current) {
@@ -598,6 +708,20 @@ function currentRole(env) {
   return String(env?.CREW_ROLE || '')
 }
 
+function eligibleTestWords(words, current) {
+  if (!Array.isArray(words) || words.length < 2) return false
+  const program = String(words[0]).split('/').at(-1)
+  if (program !== 'node' || !words.includes('--test')) return false
+  let operands = 0
+  for (const word of words.slice(1)) {
+    if (word.startsWith('-')) continue
+    const operand = testOperand(word)
+    if (!operand || !inFence(current?.files_in_scope, operand)) return false
+    operands += 1
+  }
+  return operands > 0
+}
+
 export function createBuilderLoop(value = {}) {
   const input = value && typeof value === 'object' ? value : {}
   const deps = input.deps || {}
@@ -609,6 +733,7 @@ export function createBuilderLoop(value = {}) {
   const runTests = input.runNodeTests || deps.runNodeTests || runNodeTests
   const appendFile = deps.appendFile || deps.appendFileSync || defaultAppend
   const now = deps.now || defaultNow
+  const measureTree = deps.measureTree || ((cwd) => defaultMeasureTree(cwd, deps))
   const journalPath = join(dirname(taskDir), 'journal.jsonl')
   const contextDeps = deps.contextDeps || deps
   const runnerDeps = deps.runnerDeps || deps
@@ -618,6 +743,45 @@ export function createBuilderLoop(value = {}) {
     const row = { at: (() => { try { return now() } catch { return defaultNow() } })(), builder_loop_failure: payload, ...payload }
     appendFile(journalPath, `${JSON.stringify(row)}\n`)
   })
+
+  let last = null
+
+  function onToolCall(event, ctx) {
+    try {
+      if (role !== 'builder' || event?.toolName !== 'bash') return undefined
+      const raw = event?.input?.command
+      if (typeof raw !== 'string') return undefined
+      const words = decodeShellWords(raw)
+      if (words === null) return undefined
+      const loaded = loadContext({ taskDir, env, deps: contextDeps })
+      if (!loaded || typeof loaded !== 'object') return undefined
+      const laneWords = []
+      if (fencedNodeTestCommand(loaded)) {
+        const decodedLane = decodeShellWords(loaded.validation_lane)
+        if (decodedLane) laneWords.push(decodedLane)
+      }
+      const decodedGate = decodeShellWords(loaded.gate_cmd)
+      if (decodedGate) laneWords.push(decodedGate)
+      const eligible = laneWords.some((candidate) => wordsEqual(candidate, words)) || eligibleTestWords(words, loaded)
+      if (!eligible) return undefined
+      const cwd = ctx?.cwd || cwdDefault
+      const fingerprint = measureTree(cwd)
+      if (!fingerprint || !fingerprint.measured) {
+        recordUnmeasured(journalPath, fingerprint.cause, appendFile, now); return undefined
+      }
+      if (last !== null) {
+        const sameWords = wordsEqual(last.words, words)
+        const sameTree = last.digest === fingerprint.digest
+        if (sameWords && sameTree) {
+          const reason = RERUN_REFUSAL_RULE + ': rerun of ' + last.raw
+          recordRefusal(journalPath, reason, words, appendFile, now)
+          return { block: true, reason }
+        }
+      }
+      last = { words, digest: fingerprint.digest, raw, toolName: event.toolName }
+      return undefined
+    } catch { return undefined }
+  }
 
   async function onToolResult(event, ctx) {
     let loaded
@@ -638,7 +802,7 @@ export function createBuilderLoop(value = {}) {
     }
   }
 
-  return { onToolResult }
+  return { onToolCall, onToolResult }
 }
 
 function eligible(event, current, cwd) {
@@ -654,6 +818,7 @@ function eligible(event, current, cwd) {
 export function attachBuilderLoop(pi, options = {}) {
   const loop = createBuilderLoop(options)
   if (typeof pi?.on !== 'function') throw new Error('builder loop extension needs pi.on')
+  pi.on('tool_call', (event, ctx) => loop.onToolCall(event, ctx))
   pi.on('tool_result', (event, ctx) => loop.onToolResult(event, ctx))
   return loop
 }

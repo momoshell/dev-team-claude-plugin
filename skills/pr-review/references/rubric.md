@@ -60,6 +60,8 @@ making it a bounce by default. Doc or markdown locations were **0 must-fix in
 16**, stale prose was **0 of 7**, and carried-forward findings were **0 of 10**
 (F12).
 
-A remedy needing a file outside `files_in_scope` can only produce a scope bounce,
-so it is a consider; cite `crew/guidelines/review-do-not-flag.md` as the owner of
-that judgment rather than restating its entries.
+Under ADR-045 an out-of-context write is recorded and the lane proceeds, so a
+remedy needing a file outside `files_in_scope` can be built and is graded on
+its defect; it is a consider only when the plan or an ADR defers the mechanism
+itself. Cite `crew/guidelines/review-do-not-flag.md` as the owner of that
+judgment rather than restating its entries.

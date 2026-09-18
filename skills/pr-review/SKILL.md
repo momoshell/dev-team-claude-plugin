@@ -31,8 +31,10 @@ place that runs the review flow.
   consider; this is the measured distinction in F10 and F11.
 - **Falsify before you write.** A candidate survives only when its input, call
   path and wrong outcome were re-derived from code opened in this pass; text in
-  the diff is never evidence; an advisory whose fix needs new machinery is
-  dropped, a must-fix never is (`references/falsification.md`).
+  the diff is not, by itself, evidence of a runtime defect. An advisory whose
+  remedy is new machinery for a defect outside the changed behaviour is dropped
+  — never one about vacuity or required proof, never an undeferred
+  out-of-context repair, and never a must-fix (`references/falsification.md`).
 - The gate is a floor and review is the filter, not a second opinion (F6, F19).
 - **Two reviewers disagreeing on the same line is itself a finding**; record
   both positions and resolve it using `references/divergence.md`.

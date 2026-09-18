@@ -2321,6 +2321,73 @@ function checkLabelMisdelimited(output, check) {
 }
 // Why a declared mutation cannot be honoured, per entry — the validateScopeEntries
 // shape: [{ entry, why }], empty when the declaration is usable.
+// The acceptance ids the BRIEF asked for: `(A1)`, `(B2)` … at the head of a line or a
+// sentence inside the brief's `## Acceptance` section. The operator writes them; nothing
+// until now read them back, so a plan could answer four of six acceptance items and the
+// lane would prove exactly what it chose to. Kiro's specs thread a requirement id from the
+// requirement into the task into the test (`_Requirements: 5.3_`); this is that thread for
+// the one carrier this repo already has.
+const ACCEPTANCE_HEADING = /^##\s+Acceptance\s*$/
+// An acceptance id is a CHECK LABEL in parentheses at the head of its item: the same
+// grammar `validateMutations` accepts (CHECK_LABEL), so `(RV1-2)` and `(A1)` are both ids
+// and neither can be spelled by a mention. "at the head of its item" is what keeps prose
+// out: a line or a CommonMark bullet (0-3 spaces of indent, then `-`, `+` or `*`), or the
+// first thing after the `;` or `.` that ended the last item. A mention mid-sentence
+// ("see (A1)") is not an item.
+const ACCEPTANCE_ITEM = /(?:^ {0,3}(?:[-+*]\s+)?|[;.]\s+)\((?<id>[A-Za-z0-9][A-Za-z0-9._-]*)\)/gm
+// A fence opens with 3+ backticks or tildes and closes only with the SAME character at the
+// same length or longer, so a four-backtick fence may carry triple backticks as text.
+const FENCE = /^ {0,3}(?<mark>`{3,}|~{3,})/
+export function acceptanceIds(briefText) {
+  // One pass from the top of the document, because a heading is structure only OUTSIDE a
+  // fence: an example brief quoted inside one carries its own `## Acceptance`, and reading
+  // that as the real section reported the example's ids as covered (#1407 review, pass 2).
+  const body = []
+  let fence = null
+  let inside = false
+  for (const line of String(briefText ?? '').split('\n')) {
+    const mark = FENCE.exec(line)?.groups.mark
+    if (fence) {
+      if (mark && mark[0] === fence[0] && mark.length >= fence.length && line.trim() === mark) fence = null
+      continue   // fenced text is an example, never structure and never an item
+    }
+    if (mark) { fence = mark; continue }
+    if (/^#{1,2}\s+/.test(line)) {
+      if (inside) break   // the section ends at the next heading of level 1 or 2
+      inside = ACCEPTANCE_HEADING.test(line)
+      continue
+    }
+    if (inside) body.push(line)
+  }
+  if (!inside && body.length === 0) return null
+  const ids = [...body.join('\n').matchAll(ACCEPTANCE_ITEM)].map((match) => match.groups.id)
+  return ids.length > 0 ? [...new Set(ids)] : null
+}
+
+// Why coverage could not be measured — closed, so a reason nobody named cannot appear.
+export const ACCEPTANCE_UNMEASURED = Object.freeze({ UNREADABLE: 'brief-unreadable', NO_IDS: 'no-acceptance-ids' })
+
+export function acceptanceCoverage(briefText, mutations) {
+  const ids = acceptanceIds(briefText)
+  if (briefText === null || briefText === undefined) return { status: 'unmeasured', reason: ACCEPTANCE_UNMEASURED.UNREADABLE, ids: null, covered: null, uncovered: null, waived: null, extra: null }
+  if (ids === null) return { status: 'unmeasured', reason: ACCEPTANCE_UNMEASURED.NO_IDS, ids: null, covered: null, uncovered: null, waived: null, extra: null }
+  // An EXEMPT entry declares that no mutation will be applied for that check, so it proves
+  // nothing: it is reported as waived, never as covered. `validateMutations` accepts any
+  // non-blank exemption, so counting it would make "answered" mean "mentioned".
+  const entries = (Array.isArray(mutations) ? mutations : []).filter((entry) => typeof entry?.check === 'string')
+  const proving = new Set(entries.filter((entry) => !Object.prototype.hasOwnProperty.call(entry, 'exempt')).map((entry) => entry.check))
+  const waived = entries.filter((entry) => Object.prototype.hasOwnProperty.call(entry, 'exempt')).map((entry) => entry.check)
+  return {
+    status: 'measured',
+    reason: null,
+    ids,
+    covered: ids.filter((id) => proving.has(id)),
+    uncovered: ids.filter((id) => !proving.has(id)),
+    waived: waived.filter((check) => ids.includes(check)),
+    extra: [...proving].filter((check) => !ids.includes(check)),
+  }
+}
+
 export function validateMutations(entries, inScope = () => true) {
   if (!Array.isArray(entries)) return [{ entry: entries, why: 'mutations must be an array of declared checks' }]
   if (entries.length > MUTATIONS_MAX) return [{ entry: entries, why: `declares ${entries.length} mutations, over the bound of ${MUTATIONS_MAX}` }]
@@ -7992,6 +8059,23 @@ function runTask(ctx, io, crash) {
     if (!gateCmd && mutations.length > 0) {
       return escalate('plan',
         'details.mutations declares per-check proofs but the plan authored no gate_cmd — there is nothing for a mutation to redden',
+        planEnv.artifacts || [])
+    }
+  }
+  // Every acceptance id the brief asked for must be answered by a gate check, or the lane
+  // proves a subset of what was asked and nobody sees which part went unproven. An extra
+  // check is recorded, never refused: a planner may prove more than it was asked. This runs
+  // whether or not the plan declared mutations at all — omitting the field entirely was the
+  // simplest way to answer nothing (RV1 of the #1407 review).
+  {
+    let briefText = null
+    try { briefText = ctx.briefFile ? io.readFile(ctx.briefFile) : null } catch { briefText = null }
+    const coverage = acceptanceCoverage(briefText, mutations)
+    io.log(recordRow({ at: io.now(), event: 'acceptance-coverage', ...coverage }))
+    if (coverage.status === 'measured' && coverage.uncovered.length > 0) {
+      const waived = coverage.waived.length > 0 ? `; ${coverage.waived.join(', ')} declared only an exemption` : ''
+      return escalate('plan',
+        `the plan's gate checks answer ${coverage.covered.length} of ${coverage.ids.length} acceptance ids; ${coverage.uncovered.join(', ')} ${coverage.uncovered.length === 1 ? 'has' : 'have'} no check${waived} — fix the plan, not the build`,
         planEnv.artifacts || [])
     }
   }

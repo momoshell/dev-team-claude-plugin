@@ -3886,6 +3886,7 @@ test('shellWords decodes quoting, escapes and concatenation and keeps a quote in
   assert.deepEqual(shellWords(`node --test --test-name-pattern="foo'bar" a.mjs`), ['node', '--test', "--test-name-pattern=foo'bar", 'a.mjs'])
   assert.deepEqual(shellWords('a\\ b "a b" \'a b\' foo"bar" \'x\'"y" ""'), ['a b', 'a b', 'a b', 'foobar', 'xy', ''])
   assert.deepEqual(shellWords('"a\\"b" "c\\\\d" \'e\\f\''), ['a"b', 'c\\d', 'e\\f'])
+  assert.deepEqual(shellWords("'a\"b' \"c'd\""), ['a"b', "c'd"], 'the other quote inside each kind of span is data')
   assert.deepEqual(shellWords('   '), [])
 })
 

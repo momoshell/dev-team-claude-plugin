@@ -3370,6 +3370,47 @@ test('RV1-2 whole-invocation grammar fails closed across unsafe flags and fence 
   assert.deepEqual(suitePolicyReport(null), { suite_policy: null, suite_policy_absent: null })
 })
 
+test('b853 shell-word decoding protects quoted test targets and fails closed', () => {
+  const gatePath = '/tmp/b853/gate.mjs'
+  const apostropheCommand = `node --test "crew/foo'bar.test.mjs"`
+  assert.deepEqual(testTargets(apostropheCommand), ["crew/foo'bar.test.mjs"])
+  assert.equal(suiteRunPolicy({ role: 'builder', command: apostropheCommand, fence: ['crew/foobar.test.mjs'], gatePath }).decision, 'refuse')
+  assert.equal(suiteRunPolicy({ role: 'builder', command: apostropheCommand, fence: ["crew/foo'bar.test.mjs"], gatePath }).decision, 'admit')
+
+  for (const [command, target] of [
+    [`node --test 'crew/foo"bar.test.mjs'`, 'crew/foo"bar.test.mjs'],
+    [`node --test crew/"foo"bar.test.mjs`, 'crew/foobar.test.mjs'],
+  ]) assert.deepEqual(testTargets(command), [target], command)
+
+  for (const command of [
+    'node --test "crew/foo.test.mjs',
+    "node --test 'crew/foo.test.mjs",
+  ]) {
+    assert.equal(testTargets(command), null, command)
+    assert.equal(recogniseSuiteInvocation(command, { gatePath, suiteCommand: 'npm test' }), null, command)
+  }
+  assert.equal(testTargets('node --test crew/foo.test.mjs\\'), null, 'trailing backslash word fails concreteTestFile')
+  assert.equal(recogniseSuiteInvocation('node --test crew/foo.test.mjs\\', { gatePath, suiteCommand: 'npm test' }), 'suite')
+  assert.equal(suiteRunPolicy({ role: 'lead', command: 'node --test "**/*.test.mjs"\\', fence: [], gatePath }).decision, 'refuse')
+  assert.equal(suiteRunPolicy({ role: 'builder', command: 'node --test crew/drive.test.mjs\\', fence: ['crew/headless.test.mjs'], gatePath }).decision, 'refuse')
+
+  for (const { command, target } of [
+    { command: `node --test "crew/single'quote.test.mjs"`, target: "crew/single'quote.test.mjs" },
+    { command: `node --test 'crew/double"quote.test.mjs'`, target: 'crew/double"quote.test.mjs' },
+    { command: `node --test crew/"con"cat.test.mjs`, target: 'crew/concat.test.mjs' },
+    { command: String.raw`node --test "crew/esc\"aped.test.mjs"`, target: 'crew/esc"aped.test.mjs' },
+    { command: String.raw`node --test crew/a\ b.test.mjs`, target: 'crew/a b.test.mjs' },
+  ]) assert.deepEqual(testTargets(command), [target], command)
+})
+
+test('b853 RV1-1 trailing backslash refuses in the enforcement direction', () => {
+  const gatePath = '/tmp/b853/gate.mjs'
+  assert.equal(testTargets('node --test crew/foo.test.mjs\\'), null)
+  assert.equal(recogniseSuiteInvocation('node --test crew/foo.test.mjs\\', { gatePath, suiteCommand: 'npm test' }), 'suite')
+  assert.equal(suiteRunPolicy({ role: 'lead', command: 'node --test "**/*.test.mjs"\\', fence: [], gatePath }).decision, 'refuse')
+  assert.equal(suiteRunPolicy({ role: 'builder', command: 'node --test crew/drive.test.mjs\\', fence: ['crew/headless.test.mjs'], gatePath }).decision, 'refuse')
+})
+
 test('b416 RV1-2 suite policy coverage guards ownership, laundering, and spent planner allowance', () => {
   const gatePath = '/tmp/b416/gate.mjs'
   const fence = ['crew/headless.mjs', 'crew/headless.test.mjs']

@@ -20,8 +20,8 @@ const FINDING_KEYS = ['claim', 'evidence', 'confidence']
 const CONFIDENCE_ENUM = '"verified" | "assumed"'
 const MANDATORY = '`confidence` is not optional'
 const CLOSED = 'No other keys are permitted'
-const CATEGORY_INTRO = 'The optional reviewer finding `category` is closed to these five over-building tags:'
-const OVER_BUILDING_CATEGORIES = ['delete', 'stdlib', 'native', 'yagni', 'shrink']
+const CATEGORY_INTRO = 'The optional reviewer finding `category` is closed to the five complexity tags the reviewer charter owns'
+const REVIEWER_CHARTER = join(REPO, 'crew/roles/reviewer.md')
 const REPLACEMENT_RULE = 'A finding carrying any category above must also name a replacement: what to use instead, never only a complaint.'
 const NET_SUMMARY = 'Summarize the total removable code as `net: -N lines possible`.'
 const SKILL_ROUTE = 'When this rubric finds over-building, route the finding through the closed `category` in `references/findings-shape.md` and name what to use instead.'
@@ -55,12 +55,11 @@ function blockFrom(text, from) {
   throw new Error('unterminated shape block')
 }
 
-function overBuildingCategories(text) {
-  const start = text.indexOf(CATEGORY_INTRO)
-  if (start < 0) return []
-  const end = text.indexOf(REPLACEMENT_RULE, start + CATEGORY_INTRO.length)
-  if (end < 0) return []
-  return [...text.slice(start, end).matchAll(/^- `([^`]+)` — .+$/gm)].map((match) => match[1])
+// The five tags have ONE home: the reviewer charter's 'Tags are closed:' sentence. The
+// reference doc points at it and restates nothing, so this parses the charter, not the doc.
+function overBuildingCategories(charter) {
+  const sentence = charter.replace(/\s+/g, ' ').match(/Tags are closed: (.+?)\. Every tag names a concrete replacement\./)
+  return sentence ? [...sentence[1].matchAll(/\`([a-z]+)\`/g)].map((m) => m[1]) : []
 }
 
 const scoutPrompt = JSON.parse(readFileSync(SCOUT, 'utf8')).prompt
@@ -142,7 +141,14 @@ test('every worked example in the skill conforms to the shape', () => {
 })
 
 test('over-building category is closed and requires replacements', () => {
-  assert.deepEqual(overBuildingCategories(doc), OVER_BUILDING_CATEGORIES)
+  // Derived from the reviewer charter — the one home. Five, distinct; the exact set is digest-pinned in crew/drive-docs.test.mjs.
+  const categories = overBuildingCategories(readFileSync(REVIEWER_CHARTER, 'utf8'))
+  assert.equal(categories.length, 5)
+  assert.equal(new Set(categories).size, 5)
+  // The reference doc names the home and restates no tag bullet.
+  assert.ok(doc.includes(CATEGORY_INTRO))
+  assert.ok(doc.includes('crew/roles/reviewer.md'))
+  assert.equal([...doc.matchAll(new RegExp('^- \`(' + categories.join('|') + ')\` — ', 'gm'))].length, 0, 'tags restated in findings-shape.md')
   assert.ok(doc.includes(REPLACEMENT_RULE))
   assert.ok(doc.includes(NET_SUMMARY))
   assert.ok(skill.includes(SKILL_ROUTE))

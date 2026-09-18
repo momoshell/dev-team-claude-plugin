@@ -1460,14 +1460,14 @@ test('the charter ceilings and source budgets are the delivered bytes, below the
   assert.equal(Object.isFrozen(CHARTER_SOURCE_BUDGET), true)
   assert.equal(Object.isFrozen(CHARTER_BASELINE_BYTES), true)
   assert.deepEqual(CHARTER_BASELINE_BYTES, { _shared: 3432, builder: 5169, lead: 9378, planner: 16930, reviewer: 7697, 'tech-lead': 6529 })
-  assert.deepEqual(CHARTER_SOURCE_BUDGET, { _shared: 3750, builder: 4278, lead: 9099, planner: 16928, reviewer: 7025, 'tech-lead': 6210 })
-  assert.deepEqual(CHARTER_CEILINGS, { builder: 8030, lead: 12851, planner: 20680, reviewer: 10777, 'tech-lead': 9962 })
+  assert.deepEqual(CHARTER_SOURCE_BUDGET, { _shared: 4825, builder: 3963, lead: 9099, planner: 16928, reviewer: 7675, 'tech-lead': 6295 })
+  assert.deepEqual(CHARTER_CEILINGS, { builder: 8790, lead: 13926, planner: 21755, reviewer: 12502, 'tech-lead': 11122 })
   for (const value of [...Object.values(CHARTER_BASELINE_BYTES), ...Object.values(CHARTER_SOURCE_BUDGET), ...Object.values(CHARTER_CEILINGS)]) assert.equal(Number.isInteger(value), true)
   for (const role of roles) {
     assert.equal(CHARTER_CEILINGS[role], CHARTER_SOURCE_BUDGET._shared + 2 + CHARTER_SOURCE_BUDGET[role])
     assert.ok(CHARTER_SOURCE_BUDGET[role] < CHARTER_BASELINE_BYTES[role])
   }
-  assert.equal(CHARTER_SOURCE_TOTAL_BUDGET, 47290)
+  assert.equal(CHARTER_SOURCE_TOTAL_BUDGET, 48785)
   assert.equal(CHARTER_SOURCE_TOTAL_BUDGET, Object.values(CHARTER_SOURCE_BUDGET).reduce((sum, value) => sum + value, 0))
   assert.ok(CHARTER_SOURCE_TOTAL_BUDGET < 49135)
 
@@ -1546,19 +1546,15 @@ test('a memory addendum is measured outside the ceiling, and an unreadable chart
   assert.notEqual(unreadable.bytes.planner, 0)
 })
 
-test('lean charter arm appends its tail to the complete control charter', () => {
-  const shared = 'shared charter'
-  const card = 'role card'
-  const section = 'measured section'
-  const control = composeRolePrompt(shared, card, section, 'control')
-  const lean = composeRolePrompt(shared, card, section, 'lean')
-  const terse = composeRolePrompt(shared, card, section, 'terse-tail')
-  const doctrine = 'Before adding code, apply these checks in order: delete, stdlib, native, yagni, shrink; name a concrete replacement for each tag; implement the smallest satisfying change'
-  assert.equal(lean.startsWith(control), true)
-  assert.equal(lean.slice(control.length).includes(doctrine), true)
-  assert.equal(control.includes(doctrine), false)
-  assert.equal(lean.indexOf(doctrine), control.length + 2)
-  assert.notEqual(lean, terse)
+test('lean charter arm composes exactly as control; only terse-tail still appends', () => {
+  // The lean tail is empty by design: its content moved into _shared.md and reviewer.md,
+  // which every arm receives. One home per concern — the arm survives for the enum.
+  const control = composeRolePrompt('shared charter', 'role card', 'measured section', 'control')
+  const lean = composeRolePrompt('shared charter', 'role card', 'measured section', 'lean')
+  const terse = composeRolePrompt('shared charter', 'role card', 'measured section', 'terse-tail')
+  assert.equal(lean, control)
+  assert.equal(terse.startsWith(control), true)
+  assert.notEqual(terse, control)
 })
 
 test('D1 prototype-named charter arms compose control exactly', () => {

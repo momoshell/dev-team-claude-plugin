@@ -164,7 +164,10 @@ export const ROLE_ORDER = Object.freeze(['lead', 'planner', 'builder', 'reviewer
 
 const CHARTER_ARMS = Object.freeze(['control', 'terse-tail', 'lean'])
 const CHARTER_TERSE_TAIL = '\n\nBe terse: state the result in the fewest words that carry it, and do not restate context the reader already has.\n'
-export const CHARTER_LEAN_TAIL = '\n\nBefore adding code, apply these checks in order: delete, stdlib, native, yagni, shrink; name a concrete replacement for each tag; implement the smallest satisfying change; never simplify away the hard rules your charter already lists.\n'
+// The lean arm once appended the ladder and the five complexity tags here. Both now live in
+// the charters every arm receives (_shared.md, reviewer.md), so the arm is kept for the flag
+// enum and its holdout measurements while adding NOTHING — one home per concern.
+export const CHARTER_LEAN_TAIL = ''
 const CHARTER_TAILS = Object.freeze({ control: '', 'terse-tail': CHARTER_TERSE_TAIL, lean: CHARTER_LEAN_TAIL, })
 
 const FFF_EXTENSION_SUFFIX = '/crew/pi/extensions/fff.ts'
@@ -2637,22 +2640,22 @@ export const CHARTER_BASELINE_BYTES = Object.freeze({
 
 // Delivered source bytes, per file. Every card is below its baseline above.
 export const CHARTER_SOURCE_BUDGET = Object.freeze({
-  _shared: 3750,
-  builder: 4278,
+  _shared: 4825,
+  builder: 3963,
   lead: 9099,
   planner: 16928,
-  reviewer: 7025,
-  'tech-lead': 6210,
+  reviewer: 7675,
+  'tech-lead': 6295,
 })
-export const CHARTER_SOURCE_TOTAL_BUDGET = 47290
+export const CHARTER_SOURCE_TOTAL_BUDGET = 48785
 
 // Delivered COMPILED bytes, per role: CHARTER_SOURCE_BUDGET._shared + 2 + card.
 export const CHARTER_CEILINGS = Object.freeze({
-  builder: 8030,
-  lead: 12851,
-  planner: 20680,
-  reviewer: 10777,
-  'tech-lead': 9962,
+  builder: 8790,
+  lead: 13926,
+  planner: 21755,
+  reviewer: 12502,
+  'tech-lead': 11122,
 })
 
 export const CHARTER_BUDGET_REFUSAL = 'charter-over-ceiling'

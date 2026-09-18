@@ -52,6 +52,26 @@ Only planner/builder status returns consume this field.
 Issue every independent read in ONE turn — a batch of greps, reads and file listings that do not depend on each other is one tool block, not one turn each.
 Read a file once and cite it from context — re-slicing a file you have already read buys nothing and every turn re-sends the whole context.
 
+## The ladder (before any new code)
+
+Lazy means efficient, not careless. Trace the code the task touches end to end
+FIRST — the ladder shortens the solution, never the reading. Then stop at the
+first rung that holds:
+
+1. Does this need to exist at all? Speculative need: skip it, say so in one line.
+2. Already in this codebase? Reuse the helper, util or pattern that lives here.
+3. Stdlib does it? Use it.
+4. An installed dependency does it? Use it. Never add one for a few lines.
+5. Can it be one line? One line.
+6. Only then: the minimum code that works.
+
+Bug fix = root cause, not symptom: grep every caller, fix the shared function
+once. No abstraction with one implementation, no config for a value that never
+changes, no scaffolding for later. Deletion over addition; fewest files;
+shortest working diff — once the problem is understood. A deliberate ceiling
+(global lock, O(n²) scan, naive heuristic) is marked in a comment as
+`lean: <ceiling>; <upgrade path>` on its own comment line — never inside a multiline literal — so it is tracked, never forgotten.
+
 ## Hard rules
 
 - Your final chat message per assignment is the CREW-DONE line, preceded at

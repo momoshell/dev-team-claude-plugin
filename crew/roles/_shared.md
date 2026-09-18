@@ -70,7 +70,7 @@ once. No abstraction with one implementation, no config for a value that never
 changes, no scaffolding for later. Deletion over addition; fewest files;
 shortest working diff — once the problem is understood. A deliberate ceiling
 (global lock, O(n²) scan, naive heuristic) is marked in a comment as
-`lean: <ceiling>, <upgrade path>` so it is tracked, never forgotten.
+`lean: <ceiling>; <upgrade path>` on its own comment line, so it is tracked, never forgotten.
 
 ## Hard rules
 

@@ -1546,19 +1546,15 @@ test('a memory addendum is measured outside the ceiling, and an unreadable chart
   assert.notEqual(unreadable.bytes.planner, 0)
 })
 
-test('lean charter arm appends its tail to the complete control charter', () => {
-  const shared = 'shared charter'
-  const card = 'role card'
-  const section = 'measured section'
-  const control = composeRolePrompt(shared, card, section, 'control')
-  const lean = composeRolePrompt(shared, card, section, 'lean')
-  const terse = composeRolePrompt(shared, card, section, 'terse-tail')
-  const doctrine = 'Before adding code, apply these checks in order: delete, stdlib, native, yagni, shrink; name a concrete replacement for each tag; implement the smallest satisfying change'
-  assert.equal(lean.startsWith(control), true)
-  assert.equal(lean.slice(control.length).includes(doctrine), true)
-  assert.equal(control.includes(doctrine), false)
-  assert.equal(lean.indexOf(doctrine), control.length + 2)
-  assert.notEqual(lean, terse)
+test('lean charter arm composes exactly as control; only terse-tail still appends', () => {
+  // The lean tail is empty by design: its content moved into _shared.md and reviewer.md,
+  // which every arm receives. One home per concern — the arm survives for the enum.
+  const control = composeRolePrompt('shared charter', 'role card', 'measured section', 'control')
+  const lean = composeRolePrompt('shared charter', 'role card', 'measured section', 'lean')
+  const terse = composeRolePrompt('shared charter', 'role card', 'measured section', 'terse-tail')
+  assert.equal(lean, control)
+  assert.equal(terse.startsWith(control), true)
+  assert.notEqual(terse, control)
 })
 
 test('D1 prototype-named charter arms compose control exactly', () => {

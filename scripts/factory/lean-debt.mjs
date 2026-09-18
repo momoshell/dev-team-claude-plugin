@@ -2,37 +2,45 @@
 // lean-debt — harvest every `lean:` ceiling marker into one ledger, so a deliberate
 // shortcut cannot quietly become permanent. Reads and reports; changes nothing.
 //
-// The marker convention (crew/roles/_shared.md): `lean: <ceiling>, <upgrade path>` in a
-// comment. Only a comment-prefixed marker counts — prose that merely mentions the
-// convention is not debt. A marker with no comma-separated upgrade path is `no-trigger`:
+// A marker is a WHOLE COMMENT LINE (crew/roles/_shared.md): the line, trimmed, begins
+// with a comment prefix and then `lean:`. A `lean:` trailing on a code line, or inside a
+// string, template or regex literal, is text — not debt. This is a lexical rule a grep
+// can hold, not a heuristic about what surrounds it.
+//
+// Record shape: `lean: <ceiling>; <upgrade path>`. The FIRST `;` splits, so a ceiling
+// may contain commas ("tuple key (tenant, user)"). No `;` → no upgrade path → `no-trigger`:
 // those are the ones that rot.
-import { readFileSync, readdirSync, statSync } from 'node:fs'
+import { readFileSync, readdirSync, lstatSync } from 'node:fs'
 import { join, relative } from 'node:path'
 
-// A comment prefix preceded by a quote, backtick or slash is INSIDE a string, template or
-// regex literal — an example or a fixture, not debt. Block-comment continuation  is
-// too loose a prefix (it matches inside regex source) and is not one.
-export const MARKER = /(?<!['"`\/])(?:\/\/|#|\/\*|<!--)\s*lean:\s*(.+?)\s*(?:\*\/|-->)?\s*$/
+// Comment prefixes: line, hash, block open, block continuation `*`, HTML open.
+export const MARKER = /^\s*(?:\/\/|#|\/\*+|\*|<!--)\s*lean:\s*(.*?)\s*(?:\*\/|-->)?\s*$/
 export const SKIP_DIRS = Object.freeze(new Set(['node_modules', '.git', 'dist', 'returns', '.crew']))
 export const TEXT_EXT = /\.(?:mjs|cjs|js|ts|svelte|md|json|sh|yml|yaml|css|html)$/
 
-export function parseMarker(text) {
-  const m = MARKER.exec(text)
+export function parseMarker(line) {
+  const m = MARKER.exec(String(line).replace(/\r$/, ''))
   if (!m) return null
   const body = m[1].trim()
-  const comma = body.indexOf(',')
-  if (comma === -1) return { ceiling: body, upgrade: null, tag: 'no-trigger' }
-  const upgrade = body.slice(comma + 1).trim()
-  return { ceiling: body.slice(0, comma).trim(), upgrade: upgrade || null, tag: upgrade ? null : 'no-trigger' }
+  if (!body) return null
+  const at = body.indexOf(';')
+  if (at === -1) return { ceiling: body, upgrade: null, tag: 'no-trigger' }
+  const upgrade = body.slice(at + 1).trim()
+  return { ceiling: body.slice(0, at).trim(), upgrade: upgrade || null, tag: upgrade ? null : 'no-trigger' }
 }
 
+// lstat, not stat: a symlink is neither a directory nor a file under lstat, so it is never
+// followed (a link to `.` once harvested one marker 35 times). A directory that cannot be
+// read is skipped, never thrown: a ledger is a report.
 export function* walk(root, dir = root) {
-  for (const name of readdirSync(dir)) {
+  let names
+  try { names = readdirSync(dir) } catch { return }
+  for (const name of names) {
     if (SKIP_DIRS.has(name)) continue
     const p = join(dir, name)
-    let st; try { st = statSync(p) } catch { continue }
+    let st; try { st = lstatSync(p) } catch { continue }
     if (st.isDirectory()) yield* walk(root, p)
-    else if (TEXT_EXT.test(name)) yield p
+    else if (st.isFile() && TEXT_EXT.test(name)) yield p
   }
 }
 
@@ -51,13 +59,12 @@ export function harvest(root) {
 
 export function render(rows) {
   if (rows.length === 0) return 'No lean: debt. Clean ledger.\n'
-  const out = rows.map((r) => `${r.file}:${r.line}, ${r.ceiling}. ceiling: ${r.ceiling}. upgrade: ${r.upgrade ?? '(none)'}.${r.tag ? ` [${r.tag}]` : ''}`)
+  const out = rows.map((r) => `${r.file}:${r.line}: ${r.ceiling}. upgrade: ${r.upgrade ?? '(none)'}.${r.tag ? ` [${r.tag}]` : ''}`)
   const none = rows.filter((r) => r.tag === 'no-trigger').length
   out.push('', `${rows.length} markers, ${none} with no trigger.`)
   return out.join('\n') + '\n'
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  const root = process.argv[2] || process.cwd()
-  process.stdout.write(render(harvest(root)))
+  process.stdout.write(render(harvest(process.argv[2] || process.cwd())))
 }

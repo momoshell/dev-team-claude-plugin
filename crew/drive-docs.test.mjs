@@ -3,12 +3,15 @@
 // Shared fixtures live in ./drive-fixtures.mjs; this file carries its OWN ledger
 // sandbox because it imports a ledger door directly (see below).
 import { test } from 'node:test'
+import { createHash } from 'node:crypto'
+import { statSync } from 'node:fs'
+import { relative } from 'node:path'
 import assert from 'node:assert/strict'
 import {
   FINDING_DISPOSITIONS, FINDING_SEVERITIES, GATE_CUSTODIAN, MAX_QUESTIONS, PROTECTED_PATHS, REPO_ROOT, RESIDUAL_TYPES, applyPrescriptionLines, checkAnchors, existsSync, join, laneFence, mkdirSync, partitionShifts, shiftsAreOwedHere, protectedHits, readFileSync, readdirSync, rmSync, scratchDir, spawnSync,
   carriedSilenceDefect, findingIdDefect, parseQuestions, patchTargets,
 } from './drive-fixtures.mjs'
-import { bootCmd, composeRolePrompt, FLAG_VALUE_CONTRACT, KNOWN_FLAGS, BOOLEAN_FLAGS, BOOT_ONLY_FLAGS, compiledCharterBytes, charterBudgetRefusals, CHARTER_CEILINGS } from './crew.mjs'
+import { bootCmd, composeRolePrompt, FLAG_VALUE_CONTRACT, KNOWN_FLAGS, BOOLEAN_FLAGS, BOOT_ONLY_FLAGS, compiledCharterBytes, charterBudgetRefusals, CHARTER_CEILINGS, CHARTER_LEAN_TAIL } from './crew.mjs'
 import { after } from 'node:test'
 import { tmpdir } from 'node:os'
 import {
@@ -148,22 +151,27 @@ test('E1/E2 compose every role prompt with byte-identical control and a final te
   }
 })
 
-test('B1 lean charter tail is self-contained and identical for every seat', () => {
+test('B1 the lean charter arm adds nothing: its former tail lives in the charters every arm receives', () => {
+  // The lean arm once appended the ladder and the five complexity tags. Both now live in
+  // _shared.md and reviewer.md for EVERY arm, so the arm composes identically to control.
+  // It is kept only so the --charter-arm enum and its holdout measurements stay valid.
   const roles = ['lead', 'planner', 'builder', 'reviewer', 'tech-lead']
   const rolesDir = join(REPO_ROOT, 'crew', 'roles')
   const shared = readFileSync(join(rolesDir, '_shared.md'), 'utf8')
   const section = 'memory: retained context'
-  const tail = '\n\nBefore adding code, apply these checks in order: delete, stdlib, native, yagni, shrink; name a concrete replacement for each tag; implement the smallest satisfying change; never simplify away the hard rules your charter already lists.\n'
-  const tags = ['delete', 'stdlib', 'native', 'yagni', 'shrink']
-  assert.doesNotMatch(tail, /ladder/i)
-  assert.ok(tail.includes('apply these checks in order'))
-  assert.ok(tail.includes('name a concrete replacement for each tag'))
-  for (const tag of tags) assert.ok(tail.includes(tag))
+  assert.equal(CHARTER_LEAN_TAIL, '')
   for (const role of roles) {
     const card = readFileSync(join(rolesDir, `${role}.md`), 'utf8')
     const control = `${shared}\n\n${card}\n\n${section}`
     assert.equal(composeRolePrompt(shared, card, section, 'control'), control)
-    assert.equal(composeRolePrompt(shared, card, section, 'lean'), control + tail)
+    assert.equal(composeRolePrompt(shared, card, section, 'lean'), control)
+  }
+  // The five tags have exactly one home.
+  const reviewer = readFileSync(join(rolesDir, 'reviewer.md'), 'utf8')
+  assert.ok(reviewer.includes('## Complexity findings'))
+  for (const role of roles.filter((r) => r !== 'reviewer')) {
+    const card = readFileSync(join(rolesDir, `${role}.md`), 'utf8')
+    assert.equal(/\`delete\`.*\`stdlib\`.*\`native\`.*\`yagni\`.*\`shrink\`/s.test(card), false, `the five tags are restated in ${role}.md`)
   }
 })
 
@@ -227,21 +235,32 @@ test('BC2', () => {
   assert.equal(charter.split(sentence).length - 1, 1)
 })
 
+// Re-pin ONLY when the ladder in _shared.md is deliberately changed; nothing else may move it.
+const LADDER_SHA256 = 'a59dffd5ba471ad9fa6d49a73f765a59a0bbfd47010c1cc354a95dd599302841'
+
 test('the ladder lives once, in _shared.md; builder keeps only its output rule; lean-build carries the repo examples', () => {
   const sharedLines = readFileSync(join(REPO_ROOT, 'crew', 'roles', '_shared.md'), 'utf8').split('\n')
   const builderLines = readFileSync(join(REPO_ROOT, 'crew', 'roles', 'builder.md'), 'utf8').split('\n')
-  // The six rungs, exact, exactly once, in the charter EVERY seat receives.
-  const rungs = [
-    '1. Does this need to exist at all? Speculative need: skip it, say so in one line.',
-    '2. Already in this codebase? Reuse the helper, util or pattern that lives here.',
-    '3. Stdlib does it? Use it.',
-    '4. An installed dependency does it? Use it. Never add one for a few lines.',
-    '5. Can it be one line? One line.',
-    '6. Only then: the minimum code that works.',
-  ]
-  for (const rung of rungs) assert.equal(sharedLines.filter((line) => line === rung).length, 1, rung)
+  // The rungs are DERIVED from _shared.md, never copied here: a test that carries the six
+  // sentences is itself a second home for the ladder. Exactness is pinned by digest.
+  const ladderStart = sharedLines.findIndex((line) => line === '## The ladder (before any new code)')
+  const ladderEnd = sharedLines.findIndex((line, i) => i > ladderStart && line.startsWith('## '))
+  assert.ok(ladderStart > 0 && ladderEnd > ladderStart, 'the ladder section exists in _shared.md')
+  const ladderBlock = sharedLines.slice(ladderStart, ladderEnd)
+  const rungs = ladderBlock.filter((line) => /^[1-6]\. /.test(line))
+  assert.equal(rungs.length, 6, 'six rungs')
+  assert.deepEqual(rungs.map((line) => line[0]), ['1', '2', '3', '4', '5', '6'])
+  assert.equal(createHash('sha256').update(ladderBlock.join('\n')).digest('hex'), LADDER_SHA256, 'the ladder block changed — re-pin deliberately, and only here')
+  // ONE home: no rung sentence appears anywhere else a seat or a skill could read it.
+  const scanRoots = ['crew', 'skills', '.agents']
+  const elsewhere = []
+  const walk = (dir) => { for (const name of readdirSync(dir)) { const p = join(dir, name); if (name === 'node_modules' || name === '.git') continue
+    if (statSync(p).isDirectory()) walk(p); else if (/\.(md|mjs|ts|json)$/.test(name) && !p.endsWith('crew/roles/_shared.md')) {
+      const text = readFileSync(p, 'utf8'); for (const rung of rungs) if (text.includes(rung)) elsewhere.push(`${relative(REPO_ROOT, p)}: ${rung}`) } } }
+  for (const root of scanRoots) walk(join(REPO_ROOT, root))
+  assert.deepEqual(elsewhere, [], 'the ladder must live once, in _shared.md')
   assert.ok(sharedLines.some((line) => line.startsWith('Bug fix = root cause, not symptom')), 'root-cause rule in _shared')
-  assert.ok(sharedLines.some((line) => line.includes('\`lean: <ceiling>, <upgrade path>\`')), 'the lean: marker convention in _shared')
+  assert.ok(sharedLines.some((line) => line.includes('\`lean: <ceiling>; <upgrade path>\`')), 'the lean: marker convention in _shared')
   // NO duplicate: the the builder former copy of the ladder is gone; its output rule stays.
   for (const gone of ['- Before writing code, reuse what is already here.', '- If not, use the standard library.', '- If not, use a platform feature.', '- If not, use an installed dependency.', '- Leave one runnable check for the behavior you changed.']) {
     assert.equal(builderLines.includes(gone), false, `ladder duplicated in builder.md: ${gone}`)
@@ -259,14 +278,16 @@ test('the ladder lives once, in _shared.md; builder keeps only its output rule; 
   for (const rung of rungs) assert.equal(skill.includes(rung), false, `ladder duplicated in the skill: ${rung}`)
   const tieBreak = 'When two standard-library options are the same size, choose the edge-case-correct one.'
   assert.equal(skillLines.filter((line) => line === tieBreak).length, 1, tieBreak)
-  assert.ok(skill.includes('// lean: global lock, per-account locks if throughput matters'), 'the marker example')
+  assert.ok(skill.includes('// lean: global lock; per-account locks if throughput matters'), 'the marker example')
   assert.ok(skill.includes('scripts/factory/lean-debt.mjs'), 'names the harvester')
   // The five complexity tags are what the REVIEWER judges, so they live in its charter, closed.
   const reviewer = readFileSync(join(REPO_ROOT, 'crew', 'roles', 'reviewer.md'), 'utf8')
   const reviewerProse = reviewer.replace(/\s+/g, ' ')
   assert.ok(reviewer.includes('## Complexity findings'))
   for (const tag of ['delete', 'stdlib', 'native', 'yagni', 'shrink']) assert.ok(reviewer.includes(`\`${tag}\``), tag)
+  assert.ok(reviewerProse.includes('Tags are closed:'), 'the tag set is closed, not suggested')
   assert.ok(reviewerProse.includes('Every tag names a concrete replacement.'))
+  assert.ok(reviewerProse.includes('Scope is complexity only; correctness, security and performance go through the normal findings.'), 'complexity-only scope, exact')
   assert.ok(reviewerProse.includes('do not flag it'), 'the one smoke test is never bloat')
   assert.equal(skill.includes('Review tags:'), false, 'tags are not duplicated into the skill')
 

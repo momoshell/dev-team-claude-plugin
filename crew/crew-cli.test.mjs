@@ -2087,10 +2087,11 @@ test('C1 boot records each seat\'s charter costs within an independent tail budg
       const controlBytes = Buffer.byteLength(controlPrompt, 'utf8')
       const leanBytes = Buffer.byteLength(leanPrompt, 'utf8')
       const delta = leanBytes - controlBytes
-      const maxTailBytes = 256
+      // The lean tail is EMPTY by design: its content moved into _shared.md and reviewer.md,
+      // which every arm receives. The arm survives for the enum; it adds nothing.
       assert.equal(controlBytes, CHARTER_CEILINGS[role])
-      assert.ok(leanBytes > controlBytes)
-      assert.ok(delta > 0 && delta <= maxTailBytes)
+      assert.equal(leanBytes, controlBytes)
+      assert.equal(delta, 0)
       assert.equal(boot.charter_base_bytes[role], leanBytes)
     }
   } finally {

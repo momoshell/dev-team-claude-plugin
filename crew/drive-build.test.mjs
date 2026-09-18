@@ -4,7 +4,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  acceptanceCoverage, acceptanceIds,
+  acceptanceCoverage, acceptanceIds, ACCEPTANCE_UNMEASURED,
   B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_IMPL_FILE, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, B384_CORRECTED_FIND, B384_CORRECTED_REPLACE, B384_GREEN, B384_MUTATION, B384_RED, B384_REFACTORED_BUILDER, B384_REFACTORED_UNCORRECTED_BUILDER, B44_LEADLESS_CTX, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_PLAN, CHECK_RUNS, CONVERGE_CTX, CONVERGE_GATE, CONVERGE_PLAN, CTX, CTX_DIRECTED, CTX_REPAIR, DIRECTED_FILES, D_ASK, D_AUTO, ENVELOPE_FIELD_KINDS, EXECUTIONS, FAILURE_UPGRADE, GATE_REAP_CMD_EOF, GATE_REAP_SWEEP_MARKER, GATE_SUMMARY_PREFIX, HARDENING_MARKS, HARDENING_OUTCOMES, HARDENING_REFUSALS, MODIFIER_OUTCOMES, MUTATIONS_MAX, MUTATION_BINDING_FAILURES, MUTATION_CORRECTION_REFUSALS, MUTATION_OUTCOMES, PARTIAL_REVIEWED, RED, SENSITIVITY_FLOOR, SHAPE_MAJOR_PHASES, SHAPE_ROUNDED_STAGES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, UNIVERSAL_STAGE_HEADS, VALIDATION_LANE_UNLOADABLE, VARIANTS, VARIANT_NAMES, WRITE_SURFACES, applyMutationAnchor, applyPrescriptionLines, b127GatePaths, b127PidAlive, b318Builders, b318SiteA, b376Build, b376DiskProofIo, b376ProofIo, b376Review, b376StageStack, b384Io, b384RefactoredIo, b44AssertLeadlessGate, b44GatePlan, bindMutationAnchor, buildEnv, collapseStages, dispositionIo, driveTask, existsSync, fakeIo, fenceBase, fenceDiff, fenceSpan, gateReapCommand, gateReapFresh, gateReapOriginal, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, hardeningBounceLines, hardeningBriefLines, hardeningDebt, hardeningOf, join, laneFence, leadEnv, mutationChangesTokens, outOfScopeFiles, planEnv, protectedPlanEnv, readFileSync, resumeGreen, resumeRed, reviewConvergeRun, reviewEnv, reviewFindings, rmSync, s843Ctx, s843Io, s843PlanEnv, s843Rows, scopeMatcher, scopedPath, scratchDir, shapeDefect, spawnSync, stageShape, treeDigest, triageEnv, undeclaredStage, validateHardened, validateMutations, validationPlan, validationProbeRun, validationRows,
 } from './drive-fixtures.mjs'
 import { CENSUS_CARRIER_FILES, CHECK_MATCHES, FROZEN_FACTORY_ENV_FILE, FROZEN_INVENTORY_FILE, HARDENING_APPEAL_SHAPE, HARDENING_CLASSES, HARDENING_PRESCRIPTION_REASONS, HARDENING_PRESCRIPTION_RESOLUTION, LIMITS, POST_COMMIT_FROZEN_REPAIR_MAX, classifyFrozenInventoryDelta, hardeningAppealLines, hardeningAppealRequest, hardeningClassOf, hardeningPrescriptionConflict, hardeningTestPath, mutationProofScope } from './drive.mjs'
@@ -6308,28 +6308,37 @@ test('C1 builder leaves an ungranted skill assignment unchanged', () => {
 
 // The sibling problem of #1395, from the Kiro specs: an acceptance id the brief asked for
 // and no gate check answers means the lane proves a SUBSET of what was asked, and nobody
-// sees which part went unproven. The ids are the (A1) labels the operator already writes
-// in the ## Acceptance section; the checks are the declared mutations of the plan.
-// Mutation killed: admitting a plan whose uncovered list is non-empty (it then answers two
-// of three and the lane proceeds); reading the ids from the whole brief rather than the
-// Acceptance section (the (Z9) in Ask then counts as asked-for).
-test('acceptanceIds reads the Acceptance section only, and coverage is unmeasured without ids', () => {
-  const brief = ['# Task', '', '## Ask', 'do the thing (Z9) which is not an acceptance id', '', '## Acceptance', '(A1) the first; (B1) the second;', '(C1c) the third', '', '## Out of scope', '(D1) not this'].join('\n')
-  assert.deepEqual(acceptanceIds(brief), ['A1', 'B1', 'C1c'])
-  assert.equal(acceptanceIds('# Task\n\nno sections here\n'), null)
-  const measured = acceptanceCoverage(brief, [{ check: 'A1' }, { check: 'B1' }, { check: 'extra' }])
-  assert.deepEqual([measured.status, measured.covered, measured.uncovered, measured.extra], ['measured', ['A1', 'B1'], ['C1c'], ['extra']])
-  const none = acceptanceCoverage('# Task\n\n## Acceptance\nno ids at all\n', [{ check: 'A1' }])
-  assert.deepEqual([none.status, none.reason, none.ids], ['unmeasured', 'no acceptance ids in the brief', null])
-  assert.equal(acceptanceCoverage(null, [{ check: 'A1' }]).status, 'unmeasured')
+// sees which part went unproven. The ids are the check labels in parentheses at the head of
+// an acceptance item; the checks are the declared mutations of the plan.
+// Mutation killed: admitting a plan whose uncovered list is non-empty; reading the ids from
+// the whole brief rather than the Acceptance section; counting an exempt entry as covering.
+test('acceptance ids are check labels at the head of an item, from the Acceptance section only', () => {
+  const brief = ['# T', '', '## Ask', 'see (A1) in prose, and (Z9) too', '', '## Acceptance',
+    '(A1) first; (RV1-2) second', '- (B1c) third', '', '### a deeper heading is still acceptance', '(D1) fourth', '',
+    '```', '## Acceptance', '(F9) inside a fence is text', '```', '', '# Other', '(Y7) not acceptance'].join('\n')
+  assert.deepEqual(acceptanceIds(brief), ['A1', 'RV1-2', 'B1c', 'D1'])
+  assert.equal(acceptanceIds('# T\n\nno sections here\n'), null)
+  assert.equal(acceptanceIds('# T\n\n## Acceptance\nprose with no ids\n'), null)
+  // A mention INSIDE the section is not an item: only a line, a bullet, or the first thing
+  // after the separator that ended the previous item introduces one.
+  assert.deepEqual(acceptanceIds('# T\n\n## Acceptance\n(A1) first, as described in (B1) above\n'), ['A1'])
+  // A fence that contains its own heading does not end the section early either.
+  assert.deepEqual(acceptanceIds(['# T', '', '## Acceptance', '```', '(F9) an example', '```', '(G1) a real item'].join('\n')), ['G1'])
+})
+
+test('acceptance coverage waives an exempt entry, never covers it, and names why it is unmeasured', () => {
+  const brief = '# T\n\n## Acceptance\n(A1) proven; (B1) exempted\n'
+  const coverage = acceptanceCoverage(brief, [{ ...CHECK_MUTATION, check: 'A1' }, { check: 'B1', exempt: 'not applicable' }, { ...CHECK_MUTATION, check: 'extra' }])
+  assert.deepEqual([coverage.covered, coverage.uncovered, coverage.waived, coverage.extra], [['A1'], ['B1'], ['B1'], ['extra']])
+  assert.deepEqual([acceptanceCoverage(null, []).reason, acceptanceCoverage('# T\n\n## Acceptance\nnothing\n', []).reason], [ACCEPTANCE_UNMEASURED.UNREADABLE, ACCEPTANCE_UNMEASURED.NO_IDS])
+  assert.deepEqual(Object.values(ACCEPTANCE_UNMEASURED).sort(), ['brief-unreadable', 'no-acceptance-ids'])
 })
 
 test('a plan whose gate checks leave an acceptance id unanswered escalates at plan, naming the id', () => {
   const brief = ['# Task', '', '## Acceptance', '(A1) the first check; (B1) the second check'].join('\n')
-  const mutations = [{ ...CHECK_MUTATION, check: 'A1' }]
   const io = fakeIo({
     files: { [CTX.briefFile]: brief },
-    envelopes: { 'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations } }) },
+    envelopes: { 'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations: [{ ...CHECK_MUTATION, check: 'A1' }] } }) },
     runs: { 'gate-cmd': { ok: true, output: '' }, 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
   })
   const result = driveTask(CTX, io)
@@ -6337,6 +6346,22 @@ test('a plan whose gate checks leave an acceptance id unanswered escalates at pl
   assert.match(result.details.escalation.why, /answer 1 of 2 acceptance ids; B1 has no check/)
   const row = io.calls.logs.find((entry) => entry.event === 'acceptance-coverage')
   assert.deepEqual([row.status, row.ids, row.covered, row.uncovered], ['measured', ['A1', 'B1'], ['A1'], ['B1']])
+})
+
+// RV1 of the #1407 review: omitting `details.mutations` entirely was the simplest way to
+// answer nothing — the whole check lived inside `if (declared != null)`.
+// Mutation killed: putting the coverage block back inside that branch.
+test('a plan that declares no mutations at all still answers for every acceptance id', () => {
+  const brief = ['# Task', '', '## Acceptance', '(A1) the only asked-for check'].join('\n')
+  const io = fakeIo({
+    files: { [CTX.briefFile]: brief },
+    envelopes: { 'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }) },
+    runs: { 'gate-cmd': { ok: true, output: '' }, 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+  })
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'escalation')
+  assert.match(result.details.escalation.why, /answer 0 of 1 acceptance ids; A1 has no check/)
+  assert.ok(io.calls.logs.some((entry) => entry.event === 'acceptance-coverage'), 'the row is emitted even with no declaration')
 })
 
 test('a plan that answers every acceptance id proceeds, and an extra check is recorded rather than refused', () => {

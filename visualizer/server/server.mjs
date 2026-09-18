@@ -973,9 +973,7 @@ export function startServer(options = {}) {
   return { server, feed, agents }
 }
 
-// realpath both sides: the ESM loader realpaths import.meta.url while argv[1]
-// stays literal, so under a symlinked path component a literal compare is
-// silently false and this CLI would no-op (h5 F3).
+// For the dist fence above: a path that cannot be realpathed is compared as written.
 function realpathOr(path) {
   try { return realpathSync(path) } catch { return path }
 }

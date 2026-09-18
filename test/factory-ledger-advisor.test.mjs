@@ -861,6 +861,30 @@ test('advisor-ab needs no database', () => {
   assert.doesNotThrow(() => JSON.parse(result.stdout))
   assert.equal(existsSync(dbPath), false)
 })
+test('a request that times out is endpoint-timeout, by TimeoutError as AbortSignal.timeout names it', { skip: SKIP }, async () => {
+  const { ledger } = triageLedger()
+  const id = 'timeout-run'
+  const crewDir = makeTriageFixture({ id, ledger })
+  const durableRecord = loadDurableEscalationRecord({ crewDir, ledger })
+  const result = await triageEscalation({ durableRecord, endpoint: 'http://triage.test/v1', model: TRIAGE_MODEL, ledger }, {
+    request: async () => { throw Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' }) },
+  })
+  assert.deepEqual(result, { recorded: false, reason: 'endpoint-timeout' })
+  assert.equal(ledger.escalationProposalFor(id), null)
+})
+
+test('a durable read interrupted by a TimeoutError is diagnosed ABORT_ERR and -interrupted, never treated as absent', { skip: SKIP }, () => {
+  const { ledger } = triageLedger()
+  const crewDir = makeTriageFixture({ id: 'read-timeout', ledger })
+  const record = loadDurableEscalationRecord({ crewDir, ledger }, {
+    readdirSync: () => { throw Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' }) },
+  })
+  const hit = record.diagnostics.find((d) => d.source === 'streams')
+  assert.ok(hit, 'a streams diagnostic is recorded')
+  assert.equal(hit.reason, 'streams-interrupted')
+  assert.equal(hit.code, 'ABORT_ERR')
+})
+
 test('A1 escalation proposal remains separate from measured outcome', { skip: SKIP }, async (t) => {
   const { dir, ledger } = triageLedger()
   const id = 'a1-run'

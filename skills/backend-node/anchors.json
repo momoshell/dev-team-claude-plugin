@@ -32,14 +32,14 @@
   "crew/shape-validator.mjs:248": "ENVELOPE_FIELD_KINDS.includes(field?.kind)",
   "crew/drive-review.test.mjs:1627": "Object.isFrozen(DECISIONS) && Object.isFrozen(LIMITS)",
   "crew/shape-validator.mjs:237": "if (!shape || typeof shape !== 'object')",
-  "scripts/factory/ledger.mjs:7064": "function refuseUnknownFlags(verb, flags)",
   "test/factory-emit.test.mjs:1710": "CLI: emit-cli-unknown-flag-refusal",
   "crew/pi/extensions/subagent.test.mjs:485": "Object.hasOwn(absent.result, 'usage')",
-  "scripts/factory/ledger.mjs:7031": "const VERB_FLAGS = Object.freeze",
-  "scripts/factory/ledger.mjs:7072": "unknown flag --${name}",
   "scripts/factory/emit.mjs:1561": "function refuseUnknownFlags(verb, flags)",
-  "scripts/factory/ledger.mjs:8483": "unknown verb: ${verb}",
-  "scripts/factory/ledger.mjs:3923": "requireEnum(input.decision, CI_DECISIONS",
   "scripts/factory/reap-stale.mjs:80": "export const REAP_ACCOUNTING = Object.freeze",
-  "crew/pi/extensions/subagent.test.mjs:473": "usage is a complete pi Usage or absent"
+  "crew/pi/extensions/subagent.test.mjs:473": "usage is a complete pi Usage or absent",
+  "scripts/factory/ledger.mjs:7060": "function refuseUnknownFlags(verb, flags)",
+  "scripts/factory/ledger.mjs:7027": "const VERB_FLAGS = Object.freeze",
+  "scripts/factory/ledger.mjs:7068": "unknown flag --${name}",
+  "scripts/factory/ledger.mjs:8479": "unknown verb: ${verb}",
+  "scripts/factory/ledger.mjs:3919": "requireEnum(input.decision, CI_DECISIONS"
 }

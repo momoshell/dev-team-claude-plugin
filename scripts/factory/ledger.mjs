@@ -2205,12 +2205,8 @@ function versionAtLeast(v, floor) {
   return true
 }
 
-// realpath both sides: the ESM loader realpaths import.meta.url while
-// argv[1] stays literal, so under a symlinked path component (macOS TMPDIR
-// is /var -> /private/var, used by this module's own tmp-dir tests) a
-// literal compare is silently false and the CLI would no-op. Copied
-// verbatim from scripts/task-cost-log.mjs:284-296 (4th copy of this idiom;
-// not promoted to a shared helper in this task).
+// import.meta.main: the platform decides whether this module is the entry point, so the
+// symlinked TMPDIR this module's own tests run under cannot make the guard silently false.
 function chmodIfExists(path, mode) {
   try {
     chmodSync(path, mode)

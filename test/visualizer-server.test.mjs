@@ -790,7 +790,7 @@ test('all 405 responses advertise an allowed method', { skip: SKIP }, async () =
   }
 })
 
-test('server direct invocation realpaths both sides of its guard', () => {
+test('server direct invocation is import.meta.main; realpathOr stays for its other uses', () => {
   const source = readFileSync(SERVER_SCRIPT, 'utf8')
   assert.match(source, /const invokedDirectly = import\.meta\.main/,)
   assert.match(source, /function realpathOr\(path\)[\s\S]*realpathSync\(path\)/)

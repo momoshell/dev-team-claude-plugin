@@ -2,9 +2,11 @@
 
 How a finding earns the right to be written, and what happens to it across
 rounds. The rubric (`references/rubric.md`) says what to attack; this says what
-survives. Adapted from KiroCrew's review prompts (Apache-2.0,
-`kirodotdev/KiroCrew/.github/review-prompts`), cut to this repo's seats and
-carriers.
+survives. Adapted from KiroCrew's review prompts (Apache-2.0; licence and
+NOTICE in `THIRD-PARTY-NOTICES.md`), rewritten for this repo's seats, severity
+enum and carriers. Nothing here overrides the verdict contract in
+`crew/roles/reviewer.md`: line 1 of a review is still the verdict, and the
+severities are still `must-fix`, `should-fix`, `consider`.
 
 ## The diff is not evidence
 
@@ -26,19 +28,33 @@ candidate survives only if you re-derived, from code you opened in this pass:
 2. the call path from that input to the site,
 3. the observable outcome that is wrong.
 
-Drop everything else silently. This is the counterexample rule of
-`references/rubric.md` stated as a procedure: a finding that names its state
-and wrong observable is graded must-fix **74% (95 of 129)** of the time; one
-that does not, **20% (25 of 125)** (F10).
+What did not survive is never a `must-fix`. It is dropped when the code you
+opened answers it; it is kept as a `consider` naming the defense you could
+not confirm when the uncertainty is itself worth recording — the rubric's rule
+(`references/rubric.md`: grade the point a consider) and the charter's
+(`crew/roles/reviewer.md`: unsupported scenarios are considers). This is the
+counterexample rule stated as a procedure: a finding that names its state and
+wrong observable is graded must-fix **74% (95 of 129)** of the time; one that
+does not, **20% (25 of 125)** (F10).
 
 ## The fix bar
 
-An advisory finding — `should-fix` or `consider` — whose remedy needs a new
-function, module, abstraction, configuration knob, retention or backup
-mechanism, or an edit to code the change did not touch, is dropped. Proposing
-more machinery is the failure mode, not the fix; the ladder in
+An advisory finding — `should-fix` or `consider` — whose remedy is NEW
+MACHINERY (a new function, module, abstraction, configuration knob, retention
+or backup mechanism) for a defect outside the changed behaviour is dropped.
+Proposing more machinery is the failure mode, not the fix; the ladder in
 `crew/roles/_shared.md` and `skills/lean-build` apply to the reviewer's remedy
-as much as to the builder's code.
+as much as to the builder's code. The test is whether the defect belongs to the
+behaviour this change touched — not whether its correction happens to land on
+an already-modified line. Two classes are never subject to the bar:
+
+- **vacuity and required proof** — a guard the change adds without a
+  kill-mutation, a check that stays green with the behaviour removed
+  (`CLAUDE.md`: a guard is vacuous unless proven by mutation; the rubric
+  grades vacuity should-fix by default), even when the proof lands in a test
+  file the change did not touch;
+- **an out-of-context repair** the plan or an ADR has not deferred
+  (`crew/guidelines/review-do-not-flag.md`) — it stays visible.
 
 A `must-fix` is never dropped or demoted on fix cost. Whether closing it is
 worth the machinery is the lead's call, on the full evidence; demoting it here
@@ -48,12 +64,15 @@ as free.
 
 ## Rulings persist across rounds
 
-The driver carries findings forward (`crew/roles/reviewer.md`, *Carried
-plan-check findings*; `carriedResolution` and `predecessorFindingsClosed` in
-`crew/drive.mjs`). A ruling already made on a finding — fixed, refuted by the
-lead with a stated reason, or overridden by the operator — covers the exact
-instance it names and any variant its rationale equally applies to. Rules, in
-order:
+What the driver carries today is narrower than a ruling ledger, and the rules
+below apply to exactly that: the **plan-check findings** carried into the
+review (`crew/roles/reviewer.md`, *Carried plan-check findings*, resolved by
+`carriedResolution` in `crew/drive.mjs`) and the `CLOSED:` markers of an
+adopted plan (`predecessorFindingsClosed`, which caps planning rounds). No
+review adjudication — a lead's refutation, an operator override — is handed to
+a later reviewer by any carrier in the tree; that is a stated blind spot, not a
+mechanism. Where a ruling IS carried, it covers the exact instance it names
+and any variant its rationale equally applies to. Rules, in order:
 
 1. Do not re-report what a ruling covers; a covered variant is at most a
    `consider`.
@@ -73,17 +92,20 @@ rulings, not a fresh re-litigation of the whole diff at a lower bar.
 
 ## Calibration
 
-Most changes are correct. "No findings" is the expected output on a typical
-change, not a failed review: **140 of 269** reviews in the corpus correctly
-find nothing (F5), and a quota would optimise against that measurement. Report
-findings only, must-fix first, one finding per root cause, no preamble and no
-recap of what the change does.
+"No findings" is an ordinary output, not a failed review: **140 of 269**
+reviews in the corpus recorded no findings (F5) — under F28 that measures
+output frequency, not correctness, since the corpus has no independent ground
+truth for a defect (`references/evidence.md`). A quota would optimise against
+that measurement. After the mandatory verdict line, emit findings without
+narrative preamble, must-fix first, one finding per root cause, no recap of
+what the change does.
 
 ## For a hand review
 
 When running a model directly over an unreviewed diff (the recipe in
 `sol-reviews-hand-written-diffs`), paste this reference after the doctrine
-paragraph and before the diff. Ask for: findings as must-fix / should-fix /
-verified with `file:line` and a correction each; every kill-mutation the
-change claims verified independently; and a final `net: merge` or
-`net: do not merge` line.
+paragraph and before the diff. Ask for: findings as `must-fix` / `should-fix`
+/ `consider` with `file:line` and a correction each; a separate **Verified**
+section (not a severity) listing what was checked and held, including every
+kill-mutation the change claims re-run independently; and a final
+`net: merge` or `net: do not merge` line.

@@ -6,7 +6,7 @@ import { spawn, spawnSync } from 'node:child_process'
 import { writeFileSync, readFileSync, existsSync, globSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { ROOT, childTracker, rawRequest, scratchDir, startFileWriter, writeTornFile } from './helpers.mjs'
+import { ROOT, childTracker, forAll, rawRequest, scratchDir, startFileWriter, writeTornFile } from './helpers.mjs'
 
 const listen = async (server) => {
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve) })
@@ -180,7 +180,7 @@ test('writeTornFile refuses a prefix that parses', () => {
 // crew/harvest.mjs cannot be flagged, by construction rather than by exception.
 // Blind spot, stated: a test file under a NEW top-level directory is not scanned;
 // the count assertion below is the cheap guard against a scan that reads nothing.
-const HELPER_NAMES = 'sqliteAvailable|git|gitResult|treeDigest|scratchDir|rawRequest|startFileWriter|writeTornFile|makeSeedLane'
+const HELPER_NAMES = 'sqliteAvailable|git|gitResult|treeDigest|scratchDir|rawRequest|startFileWriter|writeTornFile|makeSeedLane|forAll'
 // Regrowth is written however the next author writes small helpers, not only as
 // a column-0 `function` declaration. A const arrow is the commonest form in this
 // repo, and a helper re-declared inside a test() body is indented. Matching only
@@ -371,4 +371,22 @@ test('childTracker does not count a child whose exit lands inside the grace', as
   const track = childTracker((fn) => { hook = fn }, assert)
   track(spawn('sleep', ['0.05'], { stdio: 'ignore' }))
   await hook()
+})
+
+// The property harness itself. Mutation killed: dropping the seed (two runs then differ);
+// returning state without the zero bump (seed 0 is stuck at 0 forever); counting runs from
+// 1; dropping the input from the failure message.
+test('forAll is seeded, bounded to [0,1), runs exactly N times, and names run, seed and input on failure', () => {
+  const sequence = (seed) => { const out = []; forAll((random) => out.push(random()), () => {}, { runs: 5, seed }); return out }
+  assert.deepEqual(sequence(7), sequence(7), 'the same seed is the same sequence')
+  assert.notDeepEqual(sequence(7), sequence(8))
+  assert.ok(sequence(0).every((x) => x > 0 && x < 1), 'seed 0 is normalised: the stream moves and stays inside [0,1)')
+  let runs = 0
+  assert.equal(forAll(() => runs++, () => {}, { runs: 37 }), 37)
+  assert.equal(runs, 37)
+  assert.throws(() => forAll((random) => ({ n: Math.floor(random() * 100) }), (input) => { if (input.n >= 0) throw new Error('nope') }, { runs: 3, seed: 11 }),
+    (error) => /^property failed on run 0 of 3 \(seed 11\) with input \{"n":\d+\}\nnope$/.test(error.message) && error.cause?.message === 'nope')
+  const circular = {}; circular.self = circular
+  assert.throws(() => forAll(() => circular, () => { throw new Error('still named') }, { runs: 1 }), /with input \[object Object\]\nstill named/)
+  assert.throws(() => forAll(() => { throw new Error('gen') }, () => {}, { runs: 1 }), (error) => /generator failed on run 0 of 1 \(seed \d+\): gen/.test(error.message) && error.cause?.message === 'gen')
 })

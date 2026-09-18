@@ -22,7 +22,7 @@ import { headlessRpcIo } from './headless-rpc.mjs'
 import { assignmentLine, assignmentPrompt } from './driver.mjs'
 import { cellFailureKind, HEADLESS_TRANSPORT, seatIo } from './seat-io.mjs'
 import { DRIVER_GONE_PERIODS, HEARTBEAT_PERIOD_MS } from '../scripts/factory/lane-watch.mjs'
-import { ROOT, scratchDir, startFileWriter } from '../test/helpers.mjs'
+import { ROOT, forAll, scratchDir, startFileWriter } from '../test/helpers.mjs'
 
 // The final three bytes of each real 2026-08-30 refusal tail, copied
 // byte-for-byte so classification is adjudicated against the provider's own
@@ -4107,4 +4107,93 @@ test('the total-wait bound covers the provider five-hour window', () => {
   const beyond = providerRetryDecision({ ...measured, reset: { at_ms: PROVIDER_RETRY_TOTAL_WAIT_MS + 60 * 60 * 1000 } })
   assert.equal(beyond.retry, false)
   assert.equal(typeof beyond.reset_at, 'number')
+})
+
+// ---- properties over the shell grammar ---------------------------------------
+// The example tests above pin the spellings that killed lanes. These pin the CLAIMS the
+// grammar makes over inputs nobody wrote down, generated from a seed: a red run prints
+// the run, the seed and the input.
+
+const pick = (random, items) => items[Math.floor(random() * items.length)]
+const word = (random) => Array.from({ length: 1 + Math.floor(random() * 6) }, () => pick(random, 'abcdefxyz_-./0123456789'.split(''))).join('')
+
+// The splitter's grammar, at its edges. Blind spot, stated: inside double quotes a
+// backslash does NOT escape the next quote here (`echo "a \\"; b" && c` splits on the `;`).
+// Sol found it on #1403; fixing it moves recorded rows of the suite-policy corpus out of
+// their recorded selection, so it goes with the corpus decision, not this change. The
+// generator below therefore emits no \\" inside a double-quoted body.
+test('splitShellCommands: a backslash is literal inside single quotes, a connector needs no whitespace, empty segments drop', () => {
+  assert.deepEqual(splitShellCommands("echo 'a \\'; b"), ["echo 'a \\'", 'b'], 'inside single quotes a backslash is literal and the quote closes')
+  assert.deepEqual(splitShellCommands('a&&b||c|d;e\nf'), ['a', 'b', 'c', 'd', 'e', 'f'], 'a connector needs no surrounding whitespace')
+  assert.deepEqual(splitShellCommands(';; a ;; ; b ;'), ['a', 'b'], 'empty segments are dropped')
+})
+
+// Every production of the segment grammar, from atoms: unquoted text with escapes, a
+// single-quoted body holding `"` and operators, a double-quoted body holding \" and \\ and
+// operators, concatenated spans, every connector with and without whitespace, and empty or
+// adjacent segments — everything the splitter's grammar claims, minus the \\" it does not
+// honour (stated above); a double-quoted body does carry \\\\, \; and \\| so a splitter that
+// closed a double quote on any backslash reddens. The oracle is the generator's own segment list. Mutation killed:
+// dropping the quote tracking; dropping the two-character connectors; recognising `&&`/`||`
+// only between spaces.
+test('property: splitShellCommands splits on every unquoted connector and never inside a quoted span, whatever the span holds', () => {
+  const connectors = ['&&', '||', '|', ';', '\n']
+  const bare = (random) => Array.from({ length: 1 + Math.floor(random() * 5) }, () => pick(random, 'abcxyz_-./09'.split(''))).join('')
+  const hazards = [';', '|', '&&', '||', ' ', '\n', '#']
+  const atom = (random) => {
+    switch (Math.floor(random() * 5)) {
+      case 0: return bare(random)
+      case 1: return `${bare(random)}\\${pick(random, [' ', '"', "'", ';', '|'])}${bare(random)}`
+      case 2: return `'${bare(random)}${pick(random, [...hazards, '"'])}${bare(random)}'`
+      case 3: return `"${bare(random)}${pick(random, [...hazards, "'", '\\\\', '\\;', '\\|', '\\&'])}${bare(random)}"`
+      default: return `${bare(random)}"${pick(random, hazards)}"'${pick(random, hazards)}'${bare(random)}`
+    }
+  }
+  forAll((random) => {
+    const segments = Array.from({ length: 1 + Math.floor(random() * 4) }, () => Array.from({ length: 1 + Math.floor(random() * 3) }, () => atom(random)).join(' '))
+    let joined = ''
+    const expected = []
+    for (const segment of segments) {
+      const connector = pick(random, connectors)
+      const pad = pick(random, ['', ' ', '  '])
+      const empty = random() < 0.15
+      joined += (joined === '' ? '' : `${pad}${connector}${pad}`) + (empty ? '' : segment)
+      if (empty) { joined += `${pick(random, connectors)}${segment}`; expected.push(segment) } else expected.push(segment)
+    }
+    return { joined, expected }
+  }, ({ joined, expected }) => {
+    assert.deepEqual(splitShellCommands(joined), expected.map((s) => s.trim()).filter(Boolean))
+  })
+})
+
+// A scoped run is EXACTLY the test files it names, in order, whatever else the line
+// carries in whatever position; one unsafe token anywhere — before or after `--test`,
+// including an option nobody has named — makes the whole invocation null. The records are
+// tagged as they are generated and shuffled (Fisher–Yates), and the expectation is read
+// from the tags, never rediscovered from the serialized command. Mutation killed:
+// admitting a glob or a `..` segment; skipping an unknown option; reading only the tokens
+// after `--test`.
+test('property: testTargets returns exactly the tagged test files, and any unsafe token anywhere makes the invocation null', () => {
+  const safe = ['--test-only', '--test-force-exit', '--test-reporter=tap', '--test-reporter=spec', '--test-timeout=30000', '--test-name-pattern=x', '--test-concurrency=2', '--test-shard=1/2']
+  const safePair = [['--test-reporter', 'dot'], ['--test-timeout', '5000'], ['--test-name-pattern', 'b485']]
+  const bareWord = (random) => Array.from({ length: 1 + Math.floor(random() * 5) }, () => pick(random, 'abcxyz09_-'.split(''))).join('')
+  const target = (random) => { const depth = Math.floor(random() * 3); const path = ['crew', 'test', 'skills/x'][Math.floor(random() * 3)] + Array.from({ length: depth }, () => `/${bareWord(random)}`).join('') + `/${bareWord(random)}.test.mjs`; const quote = pick(random, ['', '"', "'"]); return { tag: 'target', text: `${quote}${path}${quote}`, path } }
+  const unsafe = (random) => pick(random, [
+    () => `--${bareWord(random)}`, () => `--${bareWord(random)}=${bareWord(random)}`, () => '--require=./x.mjs', () => '--import=./x.mjs', () => '--watch',
+    () => '--test-reporter=./x.mjs', () => `crew/${bareWord(random)}*.test.mjs`, () => `crew/../${bareWord(random)}.test.mjs`, () => `/${bareWord(random)}/x.test.mjs`, () => `${bareWord(random)}.mjs`, () => `crew/${bareWord(random)}.test.js`,
+  ])()
+  const shuffle = (random, items) => { for (let i = items.length - 1; i > 0; i -= 1) { const j = Math.floor(random() * (i + 1)); [items[i], items[j]] = [items[j], items[i]] } return items }
+  forAll((random) => {
+    const records = [{ tag: 'flag', tokens: ['--test'] }]
+    for (let n = 1 + Math.floor(random() * 3); n > 0; n -= 1) records.push(target(random))
+    for (let n = Math.floor(random() * 3); n > 0; n -= 1) records.push(random() < 0.7 ? { tag: 'safe', tokens: [pick(random, safe)] } : { tag: 'safe', tokens: pick(random, safePair) })
+    shuffle(random, records)
+    const tokens = records.flatMap((record) => record.tokens ?? [record.text])
+    const expected = records.filter((record) => record.tag === 'target').map((record) => record.path)
+    const at = Math.floor(random() * (tokens.length + 1))
+    return { command: `node ${tokens.join(' ')}`, expected, poisoned: `node ${[...tokens.slice(0, at), unsafe(random), ...tokens.slice(at)].join(' ')}` }
+  }, ({ command, expected, poisoned }) => {
+    assert.deepEqual(testTargets(command), expected, command)
+    assert.equal(testTargets(poisoned), null, poisoned)
+  })
 })

@@ -9,11 +9,11 @@ Driver suites (pristine baseline: measured leaf tests, or the reason it was not)
 - crew/drive-review.test.mjs: 308 tests
 - crew/drive.test.mjs: 246 tests
 Mutants selected: 17 of 17 (100%)
-Mutants measured: 16 of 17 (94.1%)
+Mutants measured (over the baseline-eligible suites only): 16 of 17 (94.1%)
 Mutants killed: 9 of 17 (52.9%)
 Tests observed: 1085
 Tests with a kill-set: 74 of 1085 (6.8%)
-Wall clock seconds: 145.304
+Wall clock seconds (baseline census and mutation loop): 150.84
 
 ## Sampling
 Lines requested: 40
@@ -26,8 +26,8 @@ Candidates omitted: 19 of 36 (52.8%)
 
 ## Provenance
 Seed: 0
-Checkout HEAD: 8211b094b6bdb6c1d7e332d2fdc95f7ad9da7761
-Tool sha256: 0eef4809e85398a181e3c14a816a91ebb9f197d9e8dfe778524cb86724da12dd
+Checkout HEAD: a4a706f010a0fbbb5edbe2855269c8703590d38e
+Tool sha256: a67949a2ba94b3615fc1a74543b12629947150fa1967a6aa113532422a36fd95
 Node: v26.8.2
 
 ## Redundancy candidates (sampled kill-set subsumption, not proof of redundancy)
@@ -36,13 +36,14 @@ The sample is finite and one operator per line; shared hooks and ordering effect
 not modelled. Unsampled mutants may separate the two tests.
 - none observed
 
-## Survivors (gaps in this sample)
-- if: 2 of 7 (28.6%) survivors
-- DISCRIMINATE: 1 of 7 (14.3%) survivors
-- resumeEscalate: 1 of 7 (14.3%) survivors
-- resolveDiffMutationCap: 1 of 7 (14.3%) survivors
+## Survivors (gaps in this sample), grouped by enclosing declaration — best-effort
+- documentStringLiterals: 1 of 7 (14.3%) survivors
+- settleFailedProof: 1 of 7 (14.3%) survivors
+- gateReapVerdict: 1 of 7 (14.3%) survivors
+- runWarmSuite: 1 of 7 (14.3%) survivors
+- captureProofTree: 1 of 7 (14.3%) survivors
 - parseQuestions: 1 of 7 (14.3%) survivors
-- Error: 1 of 7 (14.3%) survivors
+- operational: 1 of 7 (14.3%) survivors
 
 ## Unmeasured outcomes
 - 821c27b99f3f5ff7e3281d71220319aeecd155fef63b2c7c4b453dedcfbd3eba: file-level-failure

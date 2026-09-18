@@ -8,7 +8,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { openLedger } from '../scripts/factory/ledger.mjs'
 import { openRun, _resetNoticeGuardsForTest } from '../scripts/factory/emit.mjs'
-import { composeLayout, DEFAULT_ROLES, bootAllocation, resolveWorkerBin, docOpenArgs, resolveTier, resolveSeatModels, FALLBACK_REFUSALS, refuseFallback, loadRoster, normalizeRoster, refuseRoster, rosterSeating, serializeRosterV1, serializeRosterV2, ROSTER_REFUSALS, ROSTER_SCHEMA_VERSIONS, ROSTER_TRANSPORTS, assertRosterTransportPolicies, offCriticalPathStages, rosterSourcePath, loadRosterSource, writeRosterSnapshot, rosterSnapshotReader, loadLadder, assertBandFloors, grantedDefModels, assertDefBandFloors, refuseBandFloor, seatModelKey, bandForMember, bandForRaw, seatBand, LADDER_PATH, BAND_FLOOR_REFUSALS, shadowCandidates, assertSeats, parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, RUN_START_EVENT, assignmentsFromJournal, resolveRunConfig, aliasDeprecationLines, persistedRunConfig, awaitSeatsReady, teardownCore, teardownCmd, TEARDOWN_EXIT_SEATLESS, TEARDOWN_EXIT_UNPROVEN, TEARDOWN_ABSENT_CAUSES, teardownAbsentCause, TEARDOWN_DRAIN_MS, TEARDOWN_DRAIN_ERROR_MS, installRunFinalizers, writeTerminalLine, BOOT_DESCENDANT_REFUSALS, descendantRefusal, refuseStaleDescendants, loadCapabilities, reviewIdentityFromArgs } from './crew.mjs'
+import { composeLayout, DEFAULT_ROLES, bootAllocation, resolveWorkerBin, docOpenArgs, resolveTier, resolveSeatModels, FALLBACK_REFUSALS, refuseFallback, loadRoster, normalizeRoster, refuseRoster, rosterSeating, serializeRosterV1, serializeRosterV2, ROSTER_REFUSALS, ROSTER_SCHEMA_VERSIONS, ROSTER_TRANSPORTS, assertRosterTransportPolicies, offCriticalPathStages, rosterSourcePath, loadRosterSource, writeRosterSnapshot, rosterSnapshotReader, loadLadder, assertBandFloors, grantedDefModels, assertDefBandFloors, refuseBandFloor, seatModelKey, bandForMember, bandForRaw, seatBand, LADDER_PATH, BAND_FLOOR_REFUSALS, shadowCandidates, assertSeats, parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, RUN_START_EVENT, assignmentsFromJournal, resolveRunConfig, aliasDeprecationLines, persistedRunConfig, awaitSeatsReady, teardownCore, teardownCmd, TEARDOWN_EXIT_SEATLESS, TEARDOWN_EXIT_UNPROVEN, TEARDOWN_ABSENT_CAUSES, teardownAbsentCause, TEARDOWN_DRAIN_MS, TEARDOWN_DRAIN_ERROR_MS, installRunFinalizers, writeTerminalLine, BOOT_DESCENDANT_REFUSALS, descendantRefusal, refuseStaleDescendants, loadCapabilities, reviewIdentityFromArgs, KNOWN_FLAGS, FLAG_VALUE_CONTRACT, BOOLEAN_FLAGS, assertUsage, assertPanelAgentsDistinct } from './crew.mjs'
 import { specExecution } from './child.mjs'
 import { resolveRunConfig as resolveDaemonRunConfig } from './daemon.mjs'
 import { resolveRunConfig as resolveFactoryRunConfig, parseArgs as parseFactoryArgs, runVerb } from './factoryctl.mjs'
@@ -24,7 +24,7 @@ import { scratchDir } from '../test/helpers.mjs'
 import { shippedRoster, roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter } from './crew-test-helpers.mjs'
 
 // Keep lexical import reach visible before byte-pinned regex test bodies.
-void [test, assert, createHash, readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync, execSync, spawn, tmpdir, join, fileURLToPath, openLedger, openRun, _resetNoticeGuardsForTest, composeLayout, DEFAULT_ROLES, bootAllocation, resolveWorkerBin, docOpenArgs, resolveTier, resolveSeatModels, FALLBACK_REFUSALS, refuseFallback, loadRoster, normalizeRoster, refuseRoster, rosterSeating, serializeRosterV1, serializeRosterV2, ROSTER_REFUSALS, ROSTER_SCHEMA_VERSIONS, ROSTER_TRANSPORTS, assertRosterTransportPolicies, offCriticalPathStages, rosterSourcePath, loadRosterSource, writeRosterSnapshot, rosterSnapshotReader, loadLadder, assertBandFloors, grantedDefModels, assertDefBandFloors, refuseBandFloor, seatModelKey, bandForMember, bandForRaw, seatBand, LADDER_PATH, BAND_FLOOR_REFUSALS, shadowCandidates, assertSeats, parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, RUN_START_EVENT, assignmentsFromJournal, resolveRunConfig, aliasDeprecationLines, persistedRunConfig, awaitSeatsReady, teardownCore, teardownCmd, TEARDOWN_EXIT_SEATLESS, TEARDOWN_EXIT_UNPROVEN, TEARDOWN_ABSENT_CAUSES, teardownAbsentCause, TEARDOWN_DRAIN_MS, TEARDOWN_DRAIN_ERROR_MS, installRunFinalizers, writeTerminalLine, BOOT_DESCENDANT_REFUSALS, descendantRefusal, refuseStaleDescendants, loadCapabilities, reviewIdentityFromArgs, specExecution, resolveDaemonRunConfig, resolveFactoryRunConfig, parseFactoryArgs, runVerb, TASK_PROFILES, ASSURANCES, ASSURANCE_ALIASES, ASSURANCE_ALIAS_OF, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, reclaimStore, claudeModelString, piModelString, seatIo, paneTeardownRows, PANE_SETTLE_POLLS, PANE_SETTLE_MS, testCheckout, scratchDir, shippedRoster, roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter]
+void [test, assert, createHash, readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync, execSync, spawn, tmpdir, join, fileURLToPath, openLedger, openRun, _resetNoticeGuardsForTest, composeLayout, DEFAULT_ROLES, bootAllocation, resolveWorkerBin, docOpenArgs, resolveTier, resolveSeatModels, FALLBACK_REFUSALS, refuseFallback, loadRoster, normalizeRoster, refuseRoster, rosterSeating, serializeRosterV1, serializeRosterV2, ROSTER_REFUSALS, ROSTER_SCHEMA_VERSIONS, ROSTER_TRANSPORTS, assertRosterTransportPolicies, offCriticalPathStages, rosterSourcePath, loadRosterSource, writeRosterSnapshot, rosterSnapshotReader, loadLadder, assertBandFloors, grantedDefModels, assertDefBandFloors, refuseBandFloor, seatModelKey, bandForMember, bandForRaw, seatBand, LADDER_PATH, BAND_FLOOR_REFUSALS, shadowCandidates, assertSeats, parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, RUN_START_EVENT, assignmentsFromJournal, resolveRunConfig, aliasDeprecationLines, persistedRunConfig, awaitSeatsReady, teardownCore, teardownCmd, TEARDOWN_EXIT_SEATLESS, TEARDOWN_EXIT_UNPROVEN, TEARDOWN_ABSENT_CAUSES, teardownAbsentCause, TEARDOWN_DRAIN_MS, TEARDOWN_DRAIN_ERROR_MS, installRunFinalizers, writeTerminalLine, BOOT_DESCENDANT_REFUSALS, descendantRefusal, refuseStaleDescendants, loadCapabilities, reviewIdentityFromArgs, specExecution, resolveDaemonRunConfig, resolveFactoryRunConfig, parseFactoryArgs, runVerb, TASK_PROFILES, ASSURANCES, ASSURANCE_ALIASES, ASSURANCE_ALIAS_OF, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, reclaimStore, claudeModelString, piModelString, seatIo, paneTeardownRows, PANE_SETTLE_POLLS, PANE_SETTLE_MS, testCheckout, scratchDir, shippedRoster, roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter, KNOWN_FLAGS, FLAG_VALUE_CONTRACT, BOOLEAN_FLAGS, assertUsage, assertPanelAgentsDistinct]
 
 const rosterLadder = JSON.parse(readFileSync(new URL('./model-ladder.json', import.meta.url), 'utf8'))
 
@@ -2333,4 +2333,29 @@ test('a lead-less layout is still strictly binary, with the first seated role on
   const layout = composeLayout(['planner', 'builder', 'reviewer'], mk)
   assert.equal(assertBinary(layout), 3)
   assert.equal(layout.children[0].pane.surfaces[0].name, 'planner')
+})
+
+test('panel-distinct-agents is a boolean boot flag with a value contract', () => {
+  assert.ok(KNOWN_FLAGS.boot.includes('panel-distinct-agents'))
+  assert.equal(FLAG_VALUE_CONTRACT['panel-distinct-agents'], 'boolean')
+  assert.ok(BOOLEAN_FLAGS.includes('panel-distinct-agents'))
+  assert.deepEqual(BOOLEAN_FLAGS, [...BOOLEAN_FLAGS].sort())
+  assert.doesNotThrow(() => assertUsage('boot', { task: 'panel-flags', 'panel-distinct-agents': true }))
+  assert.throws(() => assertUsage('boot', { task: 'panel-flags', 'panel-distinct-agents': 'yes' }))
+  assert.throws(() => assertUsage('run', { task: 'panel-flags', 'brief-file': 'brief.md', 'panel-distinct-agents': true }))
+})
+
+test('assertPanelAgentsDistinct refuses only equal agents under the flag', () => {
+  assert.throws(
+    () => assertPanelAgentsDistinct({ reviewerAgent: 'claude', techLeadAgent: 'claude', distinct: true }),
+    (error) => /panel-same-agent/.test(error.message) && /claude/.test(error.message),
+  )
+  assert.deepEqual(
+    assertPanelAgentsDistinct({ reviewerAgent: 'claude', techLeadAgent: 'claude', distinct: false }),
+    { reviewer: 'claude', 'tech-lead': 'claude' },
+  )
+  assert.deepEqual(
+    assertPanelAgentsDistinct({ reviewerAgent: 'claude', techLeadAgent: 'pi', distinct: true }),
+    { reviewer: 'claude', 'tech-lead': 'pi' },
+  )
 })

@@ -1877,3 +1877,49 @@ test("a child run with no suite in its spec drives the owner's command", () => {
     assert.equal(seen.suite, JSON.parse(readFileSync(new URL('../package.json', import.meta.url))).scripts.test)
   } finally { rmSync(f.root, { recursive: true, force: true }) }
 })
+
+test('panel-distinct-agents refuses equal resolved agents before any workspace', async () => {
+  const home = scratchDir('crew-panel-refusal-home-')
+  const { root: checkoutRoot, checkout } = testCheckout('crew-panel-refusal-checkout-')
+  const cmux = callCounter()
+  const tree = callCounter()
+  try {
+    execSync('git init -q', { cwd: checkout })
+    await assert.rejects(
+      () => withHome(home, () => bootCmd(
+        { task: 'panel-refusal', checkout, roles: 'reviewer,tech-lead', 'headless-all': true, 'claude-bin': process.execPath, 'panel-distinct-agents': true },
+        { cmux, tree, renameTab: callCounter(), register: capabilityRegister() },
+      )),
+      (error) => /panel-same-agent/.test(error.message),
+    )
+    assert.equal(existsSync(testCrewDir(home, checkout, 'panel-refusal')), false)
+    assert.equal(cmux.calls.length, 0)
+    assert.equal(tree.calls.length, 0)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+})
+
+test('panel boots record both resolved agents with and without the flag', async () => {
+  for (const [name, extra, expected] of [
+    ['panel-distinct', { 'agent-reviewer': 'pi', 'agent-tech-lead': 'claude', 'panel-distinct-agents': true }, { reviewer: 'pi', 'tech-lead': 'claude' }],
+    ['panel-same-allowed', {}, { reviewer: 'claude', 'tech-lead': 'claude' }],
+  ]) {
+    const home = scratchDir(`crew-${name}-home-`)
+    const { root: checkoutRoot, checkout } = testCheckout(`crew-${name}-checkout-`)
+    try {
+      execSync('git init -q', { cwd: checkout })
+      await withHome(home, () => bootCmd(
+        { task: name, checkout, roles: 'reviewer,tech-lead', 'headless-all': true, 'claude-bin': process.execPath, ...extra },
+        { cmux: callCounter(), tree: callCounter(), renameTab: callCounter(), register: capabilityRegister() },
+      ))
+      const crew = JSON.parse(readFileSync(join(testCrewDir(home, checkout, name), 'crew.json'), 'utf8'))
+      assert.equal(crew.members.reviewer.agent, expected.reviewer)
+      assert.equal(crew.members['tech-lead'].agent, expected['tech-lead'])
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+      rmSync(checkoutRoot, { recursive: true, force: true })
+    }
+  }
+})

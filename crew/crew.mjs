@@ -716,6 +716,11 @@ function seatAgent(role, args) {
   return args[`agent-${role}`] || SEAT_DEFAULTS[role].agent
 }
 
+export function assertPanelAgentsDistinct({ reviewerAgent, techLeadAgent, distinct }) {
+  if (distinct && reviewerAgent === techLeadAgent) throw new Error(`panel-same-agent: reviewer and tech-lead resolve to the same agent ${JSON.stringify(reviewerAgent)} with --panel-distinct-agents [panel-same-agent]`)
+  return { reviewer: reviewerAgent, 'tech-lead': techLeadAgent }
+}
+
 // Enforce that the resolved adapter can actually deliver what the seat's
 // charter needs. Every seat has a non-empty deny list, so an adapter that
 // can't enforce it would boot a silently weaker seat. Returns undefined on
@@ -2950,6 +2955,7 @@ export async function bootCmd(args, deps = {}) {
     noteRunlessCellFailure({ taskSlug, role: err.role ?? null, kind: 'boot-refusal', err, cell: err.cell ?? null })
     throw err
   }
+  if (roles.includes('reviewer') && roles.includes('tech-lead')) assertPanelAgentsDistinct({ reviewerAgent: adapters.reviewer?.name ?? null, techLeadAgent: adapters['tech-lead']?.name ?? null, distinct: args['panel-distinct-agents'] === true });
   const registry = adapters.registry || loadCapabilities()
   const seats = tierSeats ? resolveSeatModels(tierSeats, adapters, registry.local_providers) : null
   // #291: enforce the RATIFIED tier band floors. A below-floor seat is an
@@ -4707,7 +4713,7 @@ export function parseArgs(argv) {
 }
 
 export const KNOWN_FLAGS = Object.freeze({
-  boot: Object.freeze(['task', 'checkout', 'roles', 'tier', 'fences', 'lane', 'headless', 'headless-rpc', 'headless-all', 'memory-dir', 'memory-backend', 'memory-budget-bytes', 'claude-bin', 'profile', 'assurance', 'roster', 'workflow', 'charter-arm', ...TURN_CEILING_FLAGS]),
+  boot: Object.freeze(['task', 'checkout', 'roles', 'tier', 'fences', 'lane', 'headless', 'headless-rpc', 'headless-all', 'memory-dir', 'memory-backend', 'memory-budget-bytes', 'claude-bin', 'profile', 'assurance', 'roster', 'workflow', 'charter-arm', 'panel-distinct-agents', ...TURN_CEILING_FLAGS]),
   run: Object.freeze(['task', 'checkout', 'brief-file', 'variant', 'execution', 'files-in-scope', 'validation-lane', 'lane', 'plan-rounds', 'build-rounds', 'review-rounds', 'review-base-sha', 'review-head-sha', ...WAIT_FLAGS, 'suite', 'keep', 'claude-bin']),
   resume: Object.freeze(['task', 'checkout', 'suite', 'keep']),
   handoff: Object.freeze(['task', 'checkout', 'brief-file']),
@@ -4736,6 +4742,7 @@ export const FLAG_VALUE_CONTRACT = Object.freeze({
   ...Object.fromEntries(TURN_CEILING_FLAGS.map((flag) => [flag, 'value'])),
   suite: 'value', 'claude-bin': 'value', 'timeout-s': 'value', pid: 'value',
   'memory-dir': 'value', 'memory-backend': 'value', 'memory-budget-bytes': 'value',
+  'panel-distinct-agents': 'boolean',
   // --headless and --headless-rpc take a comma-separated ROLE LIST; bare, they
   // degrade to an empty list (:470-474) — a silent no-op, not a boolean.
   headless: 'value', 'headless-rpc': 'value',
@@ -4749,7 +4756,7 @@ export const FLAG_VALUE_CONTRACT = Object.freeze({
 })
 // The boolean flags, named and exported rather than inlined as exceptions, so
 // the argv matrix in crew/crew.test.mjs can be exhaustive by construction.
-const BOOLEAN_FLAG_NAMES = Object.freeze(['headless-all', 'keep'])
+const BOOLEAN_FLAG_NAMES = Object.freeze(['headless-all', 'keep', 'panel-distinct-agents'])
 export const BOOLEAN_FLAGS = Object.freeze(Object.keys(FLAG_VALUE_CONTRACT)
   .filter((flag) => BOOLEAN_FLAG_NAMES.includes(flag) && FLAG_VALUE_CONTRACT[flag] === 'boolean').sort())
 export const ROLE_FLAG_PREFIXES = Object.freeze(['model-', 'agent-', 'effort-', 'allow-shortfall-'])

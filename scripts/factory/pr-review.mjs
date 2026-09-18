@@ -149,11 +149,13 @@ function positivePr(value) {
 
 export function parseMainArgs(argv) {
   if (!Array.isArray(argv) || argv.length === 0) {
-    refuse(PR_REVIEW_REFUSALS.MALFORMED_PR, 'usage: node scripts/factory/pr-review.mjs --pr <positive decimal integer> [--request-changes] [--no-post]')
+    refuse(PR_REVIEW_REFUSALS.MALFORMED_PR, 'usage: node scripts/factory/pr-review.mjs --pr <positive decimal integer> [--request-changes] [--no-post] [--panel] [--panel-distinct-agents]')
   }
   let pr = null
   let requestChanges = false
   let noPost = false
+  let panel = false
+  let panelDistinctAgents = false
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]
     if (argument === '--pr') {
@@ -169,14 +171,20 @@ export function parseMainArgs(argv) {
     } else if (argument === '--no-post') {
       if (noPost) refuse(PR_REVIEW_REFUSALS.MALFORMED_PR, 'duplicate --no-post option')
       noPost = true
+    } else if (argument === '--panel') {
+      if (panel) refuse(PR_REVIEW_REFUSALS.MALFORMED_PR, 'duplicate --panel option')
+      panel = true
+    } else if (argument === '--panel-distinct-agents') {
+      if (panelDistinctAgents) refuse(PR_REVIEW_REFUSALS.MALFORMED_PR, 'duplicate --panel-distinct-agents option')
+      panelDistinctAgents = true
     } else {
       refuse(PR_REVIEW_REFUSALS.MALFORMED_PR, `unknown option: ${String(argument)}`)
     }
   }
   if (pr === null) {
-    refuse(PR_REVIEW_REFUSALS.MALFORMED_PR, 'usage: node scripts/factory/pr-review.mjs --pr <positive decimal integer> [--request-changes] [--no-post]')
+    refuse(PR_REVIEW_REFUSALS.MALFORMED_PR, 'usage: node scripts/factory/pr-review.mjs --pr <positive decimal integer> [--request-changes] [--no-post] [--panel] [--panel-distinct-agents]')
   }
-  return { pr, requestChanges, noPost }
+  return { pr, requestChanges, noPost, panel, panelDistinctAgents }
 }
 
 function parseJson(value) {
@@ -240,11 +248,11 @@ export function parseChangedFiles(output) {
   return textOf(output).split('\0').filter((path) => path.length > 0)
 }
 
-function buildBrief({ title, body, diff, skill, rubric, base, head }) {
+function buildBrief({ title, body, diff, skill, rubric, base, head, panel }) {
   return [
     '# Pull-request review',
     '',
-    'execution: review_only',
+    `execution: ${panel ? 'review_panel' : 'review_only'}`,
     'profile: code_review',
     `base_sha: ${base}`,
     `head_sha: ${head}`,
@@ -283,6 +291,7 @@ export function reportCounts(values, changedFiles) {
 }
 
 export function renderReviewBody(report, verdict) {
+  const panelSection = report.panel == null ? {} : { panel: report.panel };
   const payload = {
     schema: 'review_only',
     head: report.head,
@@ -303,7 +312,9 @@ export function renderReviewBody(report, verdict) {
       unreviewable_files: { count: report.counts.unreviewable_files.count, reason: report.counts.unreviewable_files.reason },
     },
     unreviewable_files: report.unreviewable_files.map((row) => ({ path: row.path, reason: row.reason })),
+    ...panelSection,
   }
+  if (payload.panel) payload.panel = { changed_files: report.panel.changed_files, reviewers: report.panel.reviewers, adjudicator: report.panel.adjudicator, findings: report.panel.findings.map((finding) => ({ id: finding.id, raised_by: finding.raised_by, panel_disposition: finding.panel_disposition, reason: finding.reason })) };
   const canonical = JSON.stringify(payload)
   const digest = createHash('sha256').update(canonical, 'utf8').digest('hex')
   const marker = `<!-- review-only:${digest} -->`
@@ -374,7 +385,63 @@ function acceptedUnreviewable(value) {
     && typeof value.reason === 'string' && REVIEW_UNREVIEWABLE_REASONS.has(value.reason)
 }
 
-async function readTaskEnvelope(pointer, expected, d) {
+const REVIEW_PANEL_DISPOSITIONS = new Set(['consensus', 'upheld', 'dismissed'])
+
+function acceptedPanelCoverage(value) {
+  return hasExactFields(value, ['role', 'reviewed_files', 'unreviewable_files'])
+    && typeof value.role === 'string' && value.role.length > 0
+    && Array.isArray(value.reviewed_files)
+    && value.reviewed_files.every((path) => typeof path === 'string' && path.length > 0)
+    && Array.isArray(value.unreviewable_files)
+    && value.unreviewable_files.every(acceptedUnreviewable)
+}
+
+function acceptedPanelFinding(value) {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    && typeof value.id === 'string' && value.id.trim().length > 0
+    && Array.isArray(value.raised_by) && value.raised_by.length > 0
+    && value.raised_by.every((role) => typeof role === 'string' && role.trim().length > 0)
+    && typeof value.panel_disposition === 'string' && REVIEW_PANEL_DISPOSITIONS.has(value.panel_disposition)
+    && typeof value.reason === 'string' && value.reason.trim().length > 0
+}
+
+// The two seats that inspect the diff. The lead adjudicates and is NOT a reviewer.
+const PANEL_REVIEWER_ROLES = Object.freeze(['reviewer', 'tech-lead'])
+const sameSet = (a, b) => a.length === b.length && new Set(a).size === a.length && a.every((x) => b.includes(x))
+
+/**
+ * Panel provenance is a TRUST BOUNDARY, not a shape. A seat can claim any
+ * coverage it likes; the only authority for what changed is the PR diff we
+ * measured ourselves, and the only authority for which findings are real is
+ * the envelope's own top-level findings. Anything a seat asserts beyond those
+ * two is fabricated, and this refuses it rather than posting it as measured.
+ */
+function acceptedPanel(value, changedFiles = null, findingIds = null) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  if (!Array.isArray(value.changed_files)
+    || !value.changed_files.every((path) => typeof path === 'string' && path.length > 0)) return false
+  // Exact equality with the measured diff: a claimed file we did not measure is invented.
+  if (changedFiles && !sameSet(value.changed_files, changedFiles)) return false
+  if (!Array.isArray(value.reviewers) || !value.reviewers.every(acceptedPanelCoverage)) return false
+  // Exactly the two reviewer roles, each once. No invented role, no missing seat.
+  if (!sameSet(value.reviewers.map((seat) => seat.role), [...PANEL_REVIEWER_ROLES])) return false
+  // A seat may only claim to have read a file that actually changed.
+  if (!value.reviewers.every((seat) => seat.reviewed_files.every((f) => value.changed_files.includes(f)))) return false
+  if (!acceptedPanelCoverage(value.adjudicator) || value.adjudicator.role !== 'lead') return false
+  if (!Array.isArray(value.findings) || !value.findings.every(acceptedPanelFinding)) return false
+  const ids = value.findings.map((f) => f.id)
+  if (new Set(ids).size !== ids.length) return false
+  for (const f of value.findings) {
+    // raised_by is a CLOSED membership over the two reviewer seats.
+    if (!f.raised_by.every((role) => PANEL_REVIEWER_ROLES.includes(role))) return false
+    if (new Set(f.raised_by).size !== f.raised_by.length) return false
+    // An upheld finding must exist in the actionable findings it claims to be.
+    if (findingIds && f.panel_disposition !== 'dismissed' && !findingIds.includes(f.id)) return false
+  }
+  return true
+}
+
+async function readTaskEnvelope(pointer, expected, d, panel = false, changedFiles = null) {
   let raw
   try { raw = await d.readFile(pointer, 'utf8') } catch (error) {
     refuse(PR_REVIEW_REFUSALS.TASK_RETURN_UNREADABLE, `cannot read task envelope ${pointer}: ${errorText(error)}`)
@@ -396,7 +463,8 @@ async function readTaskEnvelope(pointer, expected, d) {
     || !Array.isArray(values.reviewed_files)
     || !values.reviewed_files.every((path) => typeof path === 'string' && path.length > 0)
     || !Array.isArray(values.unreviewable_files)
-    || !values.unreviewable_files.every(acceptedUnreviewable)) {
+    || !values.unreviewable_files.every(acceptedUnreviewable)
+    || (panel && !acceptedPanel(values.panel, changedFiles, values.findings.map((f) => f.id)))) {
     refuse(PR_REVIEW_REFUSALS.TASK_RETURN_INVALID, `task envelope ${pointer} is not an accepted review envelope`)
   }
   return { task, values }
@@ -626,7 +694,7 @@ export async function runPrReview(input = {}, maybeDeps = {}) {
     try {
       skill = await d.readFile(join(d.checkout, 'skills/pr-review/SKILL.md'), 'utf8')
       rubric = await d.readFile(join(d.checkout, 'skills/pr-review/references/rubric.md'), 'utf8')
-      await d.writeFile(briefPath, buildBrief({ title: metadata.title, body: metadata.body, diff, skill: textOf(skill), rubric: textOf(rubric), base, head: metadata.head_sha }), 'utf8')
+      await d.writeFile(briefPath, buildBrief({ title: metadata.title, body: metadata.body, diff, skill: textOf(skill), rubric: textOf(rubric), base, head: metadata.head_sha, panel: config.panel === true }), 'utf8')
     } catch (error) {
       refuse(PR_REVIEW_REFUSALS.REVIEW_INPUT_UNREADABLE, `cannot build the review brief: ${errorText(error)}`)
     }
@@ -642,14 +710,27 @@ export async function runPrReview(input = {}, maybeDeps = {}) {
 
     const task = `pr-review-${pr}`
     bootAttempted = true
-    requireCommandSuccess(await crewCommand(d, ['boot', '--task', task, '--checkout', worktree, '--roles', 'reviewer', '--profile', 'code_review'], worktree), 'crew boot')
-    const runResult = await crewCommand(d, [
-      'run', '--task', task, '--checkout', worktree, '--brief-file', briefPath,
-      '--execution', 'review_only', '--review-base-sha', base, '--review-head-sha', metadata.head_sha, '--keep',
-    ], worktree)
+    const bootArgs = config.panel
+      ? ['boot', '--task', task, '--checkout', worktree, '--roles', 'reviewer,tech-lead,lead', '--profile', 'code_review']
+      : ['boot', '--task', task, '--checkout', worktree, '--roles', 'reviewer', '--profile', 'code_review']
+    if (config.panelDistinctAgents) bootArgs.push('--panel-distinct-agents')
+    requireCommandSuccess(await crewCommand(d, bootArgs, worktree), 'crew boot')
+    const runArgs = config.panel
+      ? ['run', '--task', task, '--checkout', worktree, '--brief-file', briefPath, '--execution', 'review_panel', '--review-base-sha', base, '--review-head-sha', metadata.head_sha, '--keep']
+      : ['run', '--task', task, '--checkout', worktree, '--brief-file', briefPath, '--execution', 'review_only', '--review-base-sha', base, '--review-head-sha', metadata.head_sha, '--keep']
+    const runResult = await crewCommand(d, runArgs, worktree)
     const terminal = parseTerminalLine(commandOutput(runResult))
+    if (terminal.status === 'escalation') {
+      const escalationPointer = resolve(terminal.task_return)
+      let escalationTask = null
+      try { escalationTask = readJsonValue(await d.readFile(escalationPointer, 'utf8')) } catch { escalationTask = null }
+      const failure = escalationTask?.details?.panel?.failure
+      const escalationReason = failure?.reason || escalationTask?.details?.reason || 'escalation'
+      const escalationSeat = failure?.seat || escalationTask?.details?.seat || null
+      refuse(PR_REVIEW_REFUSALS.CREW_FAILED, `panel refusal ${escalationReason}${escalationSeat ? ` (${escalationSeat})` : ''}`)
+    }
     const pointer = resolve(terminal.task_return)
-    const accepted = await readTaskEnvelope(pointer, { base, head: metadata.head_sha }, d)
+    const accepted = await readTaskEnvelope(pointer, { base, head: metadata.head_sha }, d, config.panel === true, changedFiles)
     const counts = reportCounts(accepted.values, changedFiles)
     report = {
       pr: pr,
@@ -662,6 +743,7 @@ export async function runPrReview(input = {}, maybeDeps = {}) {
       unreviewable_files: accepted.values.unreviewable_files,
       changed_files: changedFiles,
       counts,
+      panel: config.panel === true ? (accepted.values.panel ?? null) : null,
       terminal_status: terminal.status,
       task_return: pointer,
       brief_file: briefPath,
@@ -692,9 +774,9 @@ export async function runPrReview(input = {}, maybeDeps = {}) {
       try { d.rmSync(root, { recursive: true, force: true }) } catch { /* worktree verification owns the verdict */ }
     }
   }
+  if (primaryError) throw primaryError
   if (removalError) throw removalError
   if (teardownError) throw teardownError
-  if (primaryError) throw primaryError
   return postReview(pr, report, config, d)
 }
 

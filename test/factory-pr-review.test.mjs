@@ -641,12 +641,16 @@ test('POST-E1', async () => {
 })
 
 test('POST-cli-refusals', () => {
-  assert.deepEqual(parseMainArgs(['--pr', '48']), { pr: '48', requestChanges: false, noPost: false })
-  assert.deepEqual(parseMainArgs(['--request-changes', '--no-post', '--pr', '49']), { pr: '49', requestChanges: true, noPost: true })
+  assert.deepEqual(parseMainArgs(['--pr', '48']), { pr: '48', requestChanges: false, noPost: false, panel: false, panelDistinctAgents: false })
+  assert.deepEqual(parseMainArgs(['--request-changes', '--no-post', '--pr', '49']), { pr: '49', requestChanges: true, noPost: true, panel: false, panelDistinctAgents: false })
+  assert.deepEqual(parseMainArgs(['--pr', '50', '--panel']), { pr: '50', requestChanges: false, noPost: false, panel: true, panelDistinctAgents: false })
+  assert.deepEqual(parseMainArgs(['--pr', '50', '--panel', '--panel-distinct-agents']), { pr: '50', requestChanges: false, noPost: false, panel: true, panelDistinctAgents: true })
   for (const args of [
     ['--pr', '48', '--pr', '49'],
     ['--pr', '48', '--request-changes', '--request-changes'],
     ['--pr', '48', '--no-post', '--no-post'],
+    ['--pr', '48', '--panel', '--panel'],
+    ['--pr', '48', '--panel-distinct-agents', '--panel-distinct-agents'],
     ['--pr', '48', '--unknown'],
     ['--pr', '48', '--approve'],
   ]) assert.throws(() => parseMainArgs(args), (error) => error.reason === 'malformed-pr')
@@ -798,4 +802,190 @@ test('G1-sha', () => {
     { 'review-base-sha': 'a'.repeat(41), 'review-head-sha': HEAD40 },
     { 'review-base-sha': BASE40, 'review-head-sha': 'b'.repeat(63) },
   ]) assert.throws(() => reviewIdentityFromArgs(args), (error) => error.reason === 'invalid-review-identity')
+})
+
+function panelFinding(id, panelDisposition, reason, raisedBy) {
+  return { ...DEFAULT_VALUES.findings[0], id, raised_by: raisedBy, panel_disposition: panelDisposition, reason }
+}
+
+function panelEnvelope(findings) {
+  // Provenance and the actionable findings must AGREE: an upheld or consensus
+  // panel row names a finding the review is actually raising. A dismissed row
+  // names one it is not, so it has no actionable counterpart.
+  const actionable = findings.filter((row) => row.panel_disposition !== 'dismissed')
+    .map((row) => ({ ...DEFAULT_VALUES.findings[0], id: row.id }))
+  return {
+    ...DEFAULT_VALUES,
+    findings: actionable.length > 0 ? actionable : DEFAULT_VALUES.findings,
+    panel: {
+      changed_files: ['src/a.mjs', 'src/b.mjs'],
+      reviewers: [
+        { role: 'reviewer', reviewed_files: ['src/a.mjs'], unreviewable_files: [] },
+        { role: 'tech-lead', reviewed_files: ['src/a.mjs'], unreviewable_files: [{ path: 'src/b.mjs', reason: 'binary' }] },
+      ],
+      adjudicator: { role: 'lead', reviewed_files: ['src/a.mjs'], unreviewable_files: [{ path: 'src/b.mjs', reason: 'binary' }] },
+      findings,
+    },
+  }
+}
+
+function crewCall(fixtureValue, verb) {
+  return fixtureValue.calls.crew.find(({ args }) => args[0] === verb)
+}
+
+test('panel boot runs three seats under review_panel with a panel brief', async () => {
+  const current = fixture({ values: panelEnvelope([panelFinding('F1', 'consensus', 'reviewer and tech-lead agreed on this finding', ['reviewer', 'tech-lead'])]) })
+  const report = await runPrReview({ pr: 60, panel: true, noPost: true, deps: current.deps })
+  const boot = crewCall(current, 'boot')
+  const run = crewCall(current, 'run')
+  assert.deepEqual(boot.args.slice(0, 5), ['boot', '--task', 'pr-review-60', '--checkout', current.worktree])
+  assert.deepEqual(boot.args.slice(5), ['--roles', 'reviewer,tech-lead,lead', '--profile', 'code_review'])
+  assert.deepEqual(run.args.slice(5, 9), ['--brief-file', run.args[6], '--execution', 'review_panel'])
+  const brief = current.calls.writes.find((write) => write.data.startsWith('# Pull-request review'))
+  assert.ok(brief.data.includes('execution: review_panel'))
+  assert.ok(report.panel)
+  assert.equal(report.posted, false)
+  assertCleaned(current)
+})
+
+test('panel-distinct-agents forwards onto boot and is accepted without panel', async () => {
+  const forwarded = fixture()
+  await runPrReview({ pr: 61, noPost: true, panelDistinctAgents: true, deps: forwarded.deps })
+  assert.ok(crewCall(forwarded, 'boot').args.includes('--panel-distinct-agents'))
+  assertCleaned(forwarded)
+  const single = fixture()
+  await runPrReview({ pr: 62, noPost: true, deps: single.deps })
+  assert.equal(crewCall(single, 'boot').args.includes('--panel-distinct-agents'), false)
+  assertCleaned(single)
+})
+
+test('single-seat boot and run argv stay byte-identical with no panel key', async () => {
+  const current = fixture()
+  const report = await runPrReview({ pr: 63, noPost: true, deps: current.deps })
+  const boot = crewCall(current, 'boot')
+  const run = crewCall(current, 'run')
+  assert.deepEqual(boot.args.slice(5), ['--roles', 'reviewer', '--profile', 'code_review'])
+  assert.deepEqual(run.args.slice(7), ['--execution', 'review_only', '--review-base-sha', BASE40, '--review-head-sha', HEAD40, '--keep'])
+  const brief = current.calls.writes.find((write) => write.data.startsWith('# Pull-request review'))
+  assert.ok(brief.data.includes('execution: review_only'))
+  assert.equal(report.panel, null)
+  assert.ok(!('panel' in bodyPayload(report.review_body)))
+  assertCleaned(current)
+})
+
+test('panel post renders every disposition with provenance and coverage', async () => {
+  const current = fixture({ values: panelEnvelope([
+    panelFinding('F1', 'consensus', 'reviewer and tech-lead agreed on this finding', ['reviewer', 'tech-lead']),
+    panelFinding('panel-tech-lead-0', 'upheld', 'adjudicator kept this divergent finding', ['tech-lead']),
+    panelFinding('panel-reviewer-1', 'dismissed', 'adjudicator dismissed: unreachable from this diff', ['reviewer']),
+  ]) })
+  const report = await runPrReview({ pr: 64, panel: true, noPost: true, deps: current.deps })
+  const payload = bodyPayload(report.review_body)
+  assert.equal(payload.panel.findings.length, 3)
+  const byId = new Map(payload.panel.findings.map((row) => [row.id, row]))
+  assert.deepEqual(byId.get('F1').raised_by, ['reviewer', 'tech-lead'])
+  assert.equal(byId.get('F1').panel_disposition, 'consensus')
+  assert.equal(byId.get('panel-tech-lead-0').panel_disposition, 'upheld')
+  assert.equal(byId.get('panel-reviewer-1').panel_disposition, 'dismissed')
+  assert.match(byId.get('panel-reviewer-1').reason, /unreachable/)
+  assert.deepEqual(payload.panel.reviewers.map((row) => row.role).sort(), ['reviewer', 'tech-lead'])
+  assert.equal(payload.panel.adjudicator.role, 'lead')
+  bodyMarker(report.review_body)
+  assertCleaned(current)
+})
+
+test('panel provenance a seat invented is refused at the boundary', async () => {
+  const base = () => panelEnvelope([panelFinding('F1', 'consensus', 'reviewer and tech-lead agreed on this finding', ['reviewer', 'tech-lead'])])
+  const attacks = [
+    ['a changed file the PR diff never had', (v) => { v.panel.changed_files = ['src/a.mjs', 'src/b.mjs', 'src/invented.mjs'] }],
+    ['a changed file the PR diff did have, dropped', (v) => { v.panel.changed_files = ['src/a.mjs'] }],
+    ['an invented reviewer role', (v) => { v.panel.reviewers[1].role = 'intruder' }],
+    ['a duplicated reviewer seat', (v) => { v.panel.reviewers[1].role = 'reviewer' }],
+    ['a third reviewer seat', (v) => { v.panel.reviewers.push({ role: 'lead', reviewed_files: [], unreviewable_files: [] }) }],
+    ['a seat claiming a file outside the diff', (v) => { v.panel.reviewers[0].reviewed_files = ['src/elsewhere.mjs'] }],
+    ['an invented raised_by role', (v) => { v.panel.findings[0].raised_by = ['intruder'] }],
+    ['a whitespace finding id', (v) => { v.panel.findings[0].id = '   ' }],
+    ['a whitespace reason', (v) => { v.panel.findings[0].reason = '  \t ' }],
+    ['a duplicate finding id', (v) => { v.panel.findings.push({ ...v.panel.findings[0] }) }],
+    ['an upheld row absent from the actionable findings', (v) => { v.panel.findings[0].id = 'never-raised' }],
+  ]
+  for (const [name, attack] of attacks) {
+    const values = base()
+    attack(values)
+    const current = fixture({ values })
+    await assert.rejects(
+      runPrReview({ pr: 66, panel: true, noPost: true, deps: current.deps }),
+      (error) => error.reason === 'task-return-invalid',
+      name,
+    )
+  }
+})
+
+test('a non-panel run carries no panel, whatever the envelope volunteered', async () => {
+  for (const stray of [{}, { reviewers: [] }, panelEnvelope([panelFinding('F1', 'consensus', 'agreed here', ['reviewer'])]).panel]) {
+    const current = fixture({ values: { ...DEFAULT_VALUES, panel: stray } })
+    const report = await runPrReview({ pr: 67, noPost: true, deps: current.deps })
+    assert.equal(report.panel, null)
+    assert.ok(!('panel' in bodyPayload(report.review_body)))
+    assertCleaned(current)
+  }
+})
+
+test('a pre-workspace panel refusal is not masked by the teardown that follows it', async () => {
+  const current = fixture({ values: panelEnvelope([panelFinding('F1', 'consensus', 'agreed here', ['reviewer'])]) })
+  const realCrew = current.deps.crew
+  current.deps.crew = async (args, options) => {
+    if (args[0] === 'boot') {
+      const error = new Error('panel-same-agent: reviewer and tech-lead resolved to the same agent')
+      error.stdout = 'panel-same-agent'
+      return { status: 1, stdout: 'panel-same-agent', stderr: '' }
+    }
+    if (args[0] === 'teardown') return { status: 1, stdout: '', stderr: 'no crew booted' }
+    return realCrew(args, options)
+  }
+  await assert.rejects(
+    runPrReview({ pr: 68, panel: true, panelDistinctAgents: true, noPost: true, deps: current.deps }),
+    (error) => {
+      assert.notEqual(error.reason, 'teardown-failed', 'teardown must not outrank the cause')
+      assert.match(String(error.detail), /panel-same-agent/)
+      return true
+    },
+  )
+})
+
+test('provenance-only panel changes move the idempotency digest', async () => {
+  const values = (disposition, reason) => panelEnvelope([panelFinding('F1', disposition, reason, ['reviewer'])])
+  const first = fixture({ values: values('upheld', 'adjudicator kept this divergent finding') })
+  const second = fixture({ values: values('dismissed', 'adjudicator dropped this divergent finding') })
+  const hexOf = (body) => body.match(/<!-- review-only:([0-9a-f]{64}) -->/)[1]
+  const hexA = hexOf((await runPrReview({ pr: 65, panel: true, noPost: true, deps: first.deps })).review_body)
+  const hexB = hexOf((await runPrReview({ pr: 65, panel: true, noPost: true, deps: second.deps })).review_body)
+  assert.notEqual(hexA, hexB)
+  assertCleaned(first)
+  assertCleaned(second)
+})
+
+test('panel envelope without provenance is refused', async () => {
+  const current = fixture({ values: { ...DEFAULT_VALUES, panel: { changed_files: [] } } })
+  await rejectedReason(runPrReview({ pr: 66, panel: true, deps: current.deps }), 'task-return-invalid')
+  assert.equal(current.calls.review.length, 0)
+  assertCleaned(current)
+})
+
+test('panel escalation refuses crew-failed carrying the reason and posts nothing', async () => {
+  const current = fixture({
+    taskValue: { status: 'escalation', details: { panel: { failure: { reason: 'panel-partner-absent', seat: 'tech-lead' } } } },
+  })
+  const innerCrew = current.deps.crew
+  current.deps.crew = async (args, options) => {
+    const result = await innerCrew(args, options)
+    if (args[0] === 'run') return { status: 0, stdout: `progress\n${terminal(current.pointer, 'escalation')}\n` }
+    return result
+  }
+  await assert.rejects(
+    runPrReview({ pr: 67, panel: true, deps: current.deps }),
+    (error) => error instanceof PrReviewError && error.reason === 'crew-failed' && /panel-partner-absent/.test(error.detail),
+  )
+  assert.equal(current.calls.review.length, 0)
+  assertCleaned(current)
 })

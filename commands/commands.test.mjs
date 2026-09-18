@@ -85,7 +85,7 @@ test('argument-taking commands declare a hint and pass the argument through', ()
 test('review command pins its invocation, safety guarantees, and closed refusals', () => {
   const { body } = parts('review.md')
   assert.ok(body.includes('npm run crew:review -- --pr $ARGUMENTS'))
-  assert.ok(body.includes('npm run crew:review -- --pr <positive decimal integer> [--request-changes] [--no-post]'))
+  assert.ok(body.includes('npm run crew:review -- --pr <positive decimal integer> [--request-changes] [--no-post] [--panel] [--panel-distinct-agents]'))
   assert.match(body, /`--no-post`[^.\n]*without touching GitHub/)
   assert.match(body, /never posts APPROVE/)
 

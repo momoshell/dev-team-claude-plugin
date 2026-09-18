@@ -1,6 +1,6 @@
 ---
 description: Review a pull request through the measured PR-review lane.
-argument-hint: <positive decimal integer> [--request-changes] [--no-post]
+argument-hint: <positive decimal integer> [--request-changes] [--no-post] [--panel] [--panel-distinct-agents]
 ---
 
 Use `/review` when you need the existing PR-review workflow to inspect a pull request.
@@ -8,10 +8,16 @@ Use `/review` when you need the existing PR-review workflow to inspect a pull re
 Load the `pr-review` skill (`skills/pr-review/SKILL.md`) and follow it for the review above. This command only names the procedure and passes the argument through.
 
 Usage:
-- Literal: `npm run crew:review -- --pr <positive decimal integer> [--request-changes] [--no-post]`
+- Literal: `npm run crew:review -- --pr <positive decimal integer> [--request-changes] [--no-post] [--panel] [--panel-distinct-agents]`
 - Executable: `npm run crew:review -- --pr $ARGUMENTS`
 
 The lane never posts APPROVE; it posts only COMMENT or REQUEST_CHANGES when posting is enabled. `--no-post` renders without touching GitHub for publication.
+
+## Panel mode
+
+`--panel` boots reviewer, tech-lead and lead under `review_panel` and posts the fused findings with each finding's `raised_by` and `panel_disposition`. Dismissed findings are shown with the adjudicator's reason, never omitted. The idempotency digest covers the panel provenance, so a provenance-only change moves the marker.
+
+`--panel-distinct-agents` refuses `panel-same-agent` when reviewer and tech-lead resolve to the same agent; without the flag both resolved agents are recorded on the seats.
 
 ## Refusals
 

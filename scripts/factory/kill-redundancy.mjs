@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { performance } from 'node:perf_hooks'
 import { dirname, join, relative } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { generateDiffCandidates, applyDiffCandidate } from './prove-mutations.mjs'
 
 export const DRIVER_SUITES = Object.freeze([
@@ -19,8 +20,11 @@ export const MUTANT_UNMEASURED_REASONS = Object.freeze([
 ])
 export const USAGE = `usage: node scripts/factory/kill-redundancy.mjs [--mutants <n>] [--out <json>] [--md <markdown>] [--suites <suite>] [--checkout <dir>] [--timeout-ms <n>] [--seed <n>]`
 
+// xorshift32 is stuck at zero forever, so seed 0 is folded with the golden-ratio constant
+// and a zero state is bumped: every seed is a distinct, deterministic stream.
 function seededNumber(seed) {
-  let value = Number.isFinite(Number(seed)) ? Number(seed) >>> 0 : 0x9e3779b9
+  let value = ((Number.isFinite(Number(seed)) ? Number(seed) >>> 0 : 0) ^ 0x9e3779b9) >>> 0
+  if (value === 0) value = 1
   return () => {
     value = (value ^ (value << 13)) >>> 0
     value = (value ^ (value >>> 17)) >>> 0
@@ -60,26 +64,54 @@ export function mutantsForLines({ target, lines, texts } = {}) {
     if (!sampled.has(candidate.line) || candidates.some((item) => item.line === candidate.line)) continue
     candidates.push(candidate)
   }
-  return { candidates, skips: generated.skips }
+  // Every count the selection dropped, so the report can state them with their denominators.
+  const candidateLines = new Set(generated.candidates.map((candidate) => candidate.line).filter((line) => sampled.has(line)))
+  const sampling = {
+    sampledLines: sampled.size,
+    candidateLines: candidateLines.size,
+    skippedLines: sampled.size - candidateLines.size,
+    generatedCandidates: generated.candidates.filter((candidate) => sampled.has(candidate.line)).length,
+    selectedCandidates: candidates.length,
+  }
+  sampling.omittedCandidates = sampling.generatedCandidates - sampling.selectedCandidates
+  return { candidates, skips: generated.skips, sampling }
 }
 
-export function parseTapKills(output) {
-  if (typeof output !== 'string' || !/^# tests\s+\d+\s*$/m.test(output.replace(/\x1b\[[0-9;]*m/g, ''))) return null
+// TAP as `node --test --test-reporter=tap <one file>` emits it: top-level `ok N - title`
+// records, nested subtests indented four spaces under `# Subtest: name`, a parent's record
+// AFTER its children, and a file-level failure as a single record whose title is the
+// file. A test key is `<suite> :: <subtest path>`; a parent that has children is a
+// container and is never a killer or an observed test on its own. Null when the text is
+// not a finished TAP run (no `# tests` summary).
+export function parseTapKills(output, suite = null) {
+  if (typeof output !== 'string') return null
   const text = output.replace(/\x1b\[[0-9;]*m/g, '')
-  let file = null
-  const killers = []
+  const totalsMatch = /^# tests\s+(\d+)\s*$/m.exec(text)
+  if (!totalsMatch) return null
+  const count = (name) => { const m = new RegExp(`^# ${name}\\s+(\\d+)\\s*$`, 'm').exec(text); return m ? Number(m[1]) : null }
+  const totals = { tests: Number(totalsMatch[1]), pass: count('pass'), fail: count('fail'), cancelled: count('cancelled') }
+  const prefix = suite ? `${suite} :: ` : ''
+  const names = []
+  const records = []
+  let fileLevel = false
   for (const line of text.split(/\r?\n/)) {
-    const match = /^\s*(ok|not ok)\s+\d+\s*(?:-\s*(.*))?\s*$/.exec(line)
+    const subtest = /^(\s*)# Subtest: (.*)$/.exec(line)
+    if (subtest) { names[subtest[1].length / 4] = subtest[2].trim(); continue }
+    const match = /^(\s*)(ok|not ok)\s+\d+\s*(?:-\s*(.*))?\s*$/.exec(line)
     if (!match) continue
-    const title = (match[2] || '').trim()
-    const indented = /^\s+/.test(line)
-    if (!indented && /(?:^|[/\\])[^/\\]+\.test\.mjs$/.test(title)) {
-      file = title
-      continue
-    }
-    if (indented && match[1] === 'not ok' && file) killers.push(`${file} :: ${title}`)
+    const depth = match[1].length / 4
+    const title = (match[3] || '').trim()
+    if (depth === 0 && /(?:^|[/\\])[^/\\]+\.test\.mjs$/.test(title)) { if (match[2] === 'not ok') fileLevel = true; continue }
+    const path = [...names.slice(0, depth), title].filter(Boolean).join(' > ')
+    records.push({ depth, failed: match[2] === 'not ok', key: `${prefix}${path}` })
   }
-  return { killers: [...new Set(killers)] }
+  const leaves = records.filter((record, index) => !(index > 0 && records[index - 1].depth > record.depth))
+  const killers = [...new Set(leaves.filter((record) => record.failed).map((record) => record.key))]
+  const observed = [...new Set(leaves.map((record) => record.key))]
+  // Node's `# fail` counts containers too, so attribution is checked against every failed
+  // record, while kills and observations are the leaves.
+  const failedRecords = records.filter((record) => record.failed).length + (fileLevel ? 1 : 0)
+  return { killers, observed, totals, fileLevel, failedRecords }
 }
 
 function resultError(result) {
@@ -89,35 +121,44 @@ function resultError(result) {
   return null
 }
 
+// A mutant is MEASURED only when every suite run finished with attributable outcomes: a
+// failure the parser could not put on a test (a file-level crash, a non-zero exit with no
+// failing record, a `# fail` total above the records attributed) is an unmeasured mutant
+// with a closed reason — never a survivor, never a kill.
 export function classifyMutantOutcome({ suiteOutputs = [] } = {}) {
-  if (!suiteOutputs.length) return { status: 'unmeasured', reason: 'no-tap-output', survivor: false, killers: [] }
+  const unmeasured = (reason) => ({ status: 'unmeasured', reason, survivor: false, killers: [], observed: [], suitesMeasured: [] })
+  if (!suiteOutputs.length) return unmeasured('no-tap-output')
   const killers = new Set()
+  const observed = new Set()
+  const suitesMeasured = []
   for (const result of suiteOutputs) {
     const error = resultError(result)
-    if (result?.timedOut || result?.timeout || error?.code === 'ETIMEDOUT') {
-      return { status: 'unmeasured', reason: 'timeout', survivor: false, killers: [] }
-    }
-    if (result?.interrupted || result?.signal) {
-      return { status: 'unmeasured', reason: 'interrupted', survivor: false, killers: [] }
-    }
-    if (error) {
-      const reason = error.code === 'ENOENT' ? 'suite-missing' : 'spawn-denied'
-      return { status: 'unmeasured', reason, survivor: false, killers: [] }
-    }
-    const parsed = parseTapKills(`${result?.stdout || ''}${result?.stderr || ''}`)
-    if (!parsed) return { status: 'unmeasured', reason: 'no-tap-output', survivor: false, killers: [] }
+    if (result?.timedOut || result?.timeout || error?.code === 'ETIMEDOUT') return unmeasured('timeout')
+    if (result?.interrupted || result?.signal) return unmeasured('interrupted')
+    if (error) return unmeasured(error.code === 'ENOENT' ? 'suite-missing' : 'spawn-denied')
+    const parsed = parseTapKills(`${result?.stdout || ''}${result?.stderr || ''}`, result?.suite ?? null)
+    if (!parsed) return unmeasured('no-tap-output')
+    if (parsed.fileLevel) return unmeasured('file-level-failure')
+    const failed = Number.isInteger(parsed.totals.fail) ? parsed.totals.fail : null
+    if (failed !== null && failed > parsed.failedRecords) return unmeasured('failures-unattributed')
+    if (typeof result?.status === 'number' && result.status !== 0 && parsed.killers.length === 0) return unmeasured('suite-exit-unattributed')
     for (const killer of parsed.killers) killers.add(killer)
+    for (const key of parsed.observed) observed.add(key)
+    suitesMeasured.push(result?.suite ?? null)
   }
   const list = [...killers]
-  return { status: 'measured', survivor: list.length === 0, killers: list }
+  return { status: 'measured', survivor: list.length === 0, killers: list, observed: [...observed], suitesMeasured }
 }
 
 function mutantOf(result) {
   return result?.mutant || result || {}
 }
 
-function redundantRecord(candidate, candidateKills, dominator) {
-  return { key: candidate, kills: [...candidateKills], status: 'redundant', dominatedBy: dominator };
+// A strict subset of a sampled kill-set is a CANDIDATE for redundancy, not proof of it:
+// the sample is finite, one operator per line, and tests can share hooks or order effects.
+export const REDUNDANCY_CANDIDATE = 'redundancy-candidate'
+function redundantRecord(candidate, candidateKills, dominator, dominatorKills) {
+  return { candidate, kills: [...candidateKills], dominator, dominatorKills: [...dominatorKills], status: REDUNDANCY_CANDIDATE }
 }
 
 export function analyzeKills({ mutantResults = [], observedTests = [] } = {}) {
@@ -154,7 +195,7 @@ export function analyzeKills({ mutantResults = [], observedTests = [] } = {}) {
       if (candidateName === dominatorName) continue
       const candidateKills = [...candidate]
       if (candidate.size < dominator.size && [...candidate].every((m) => dominator.has(m))) {
-        const record = redundantRecord(candidate, candidateKills, dominator)
+        const record = redundantRecord(candidateName, candidateKills, dominatorName, dominator)
         redundant.push(record)
         const row = testRows.find((test) => test.key === candidateName)
         if (row) { row.status = record.status; row.dominatedBy = dominatorName }
@@ -189,6 +230,19 @@ export function snapshotFile(path) {
 
 export function restoreSnapshot(snapshot) {
   writeFileSync(snapshot.path, snapshot.bytes)
+}
+
+// What a reader needs to reproduce the run exactly: the seed, the checkout's commit, the
+// tool's own bytes, the runtime. A checkout that is not a repository states that.
+function provenance(checkout, options, spawn) {
+  let headSha = null
+  try {
+    const head = spawn('git', ['-C', checkout, 'rev-parse', 'HEAD'], { encoding: 'utf8' })
+    headSha = head && head.status === 0 && typeof head.stdout === 'string' && /^[0-9a-f]{40}/.test(head.stdout.trim()) ? head.stdout.trim() : null
+  } catch { headSha = null }
+  let toolSha256 = null
+  try { toolSha256 = createHash('sha256').update(readFileSync(fileURLToPath(import.meta.url))).digest('hex') } catch { toolSha256 = null }
+  return { seed: options.seed, mutantsRequested: options.mutants, headSha, toolSha256, node: process.version }
 }
 
 function neutralEnv(base = process.env) {
@@ -247,15 +301,13 @@ function functionForLine(lines, lineNumber) {
   return '(best-effort enclosing function unavailable)'
 }
 
+// A rate is a numerator AND its denominator; a zero denominator is not 0%, it is a cell
+// nobody could measure.
 export function formatRate(k, total) {
   const denominator = Number(total)
   const numerator = Number(k)
-  const percent = denominator > 0 ? Number(((numerator / denominator) * 100).toFixed(1)) : 0
-  return `${k} of ${total} (${percent}%)`;
-}
-
-function namesForSet(analysis, set) {
-  return analysis.tests?.filter((test) => test.kills && test.kills.size === set.size && [...set].every((id) => test.kills.has(id))).map((test) => test.name) || []
+  if (!(denominator > 0)) return `${k} of ${total} (unmeasured: denominator 0)`
+  return `${k} of ${total} (${Number(((numerator / denominator) * 100).toFixed(1))}%)`
 }
 
 export function buildMarkdown(analysis = {}) {
@@ -264,24 +316,47 @@ export function buildMarkdown(analysis = {}) {
   const observed = analysis.observedTests ?? analysis.tests?.length ?? 0
   const withKillSet = analysis.testsWithKillSet ?? analysis.tests?.filter((test) => test.kills?.size).length ?? 0
   const seconds = Number(analysis.wallClockSeconds || 0)
+  const suites = analysis.suitePaths || DRIVER_SUITES
+  const runs = analysis.suiteRuns || { measured: null, total: null }
+  const sampling = analysis.sampling || {}
+  const provenance = analysis.provenance || {}
   const lines = [
     '# Driver test redundancy measurement',
     '',
-    `Suites measured: ${formatRate(analysis.suitesMeasured ?? DRIVER_SUITES.length, DRIVER_SUITES.length)}`,
+    `Suites with at least one measured run: ${formatRate(analysis.suitesMeasured ?? 0, suites.length)}`,
+    `Suite runs measured: ${formatRate(runs.measured ?? 0, runs.total ?? 0)}`,
     'Driver suites:',
-    ...(analysis.suitePaths || DRIVER_SUITES).map((suite) => `- ${suite}`),
-    `Mutants sampled: ${formatRate(sampled, sampled)}`,
+    ...suites.map((suite) => `- ${suite}`),
+    `Mutants selected: ${formatRate(sampled, sampled)}`,
+    `Mutants measured: ${formatRate(sampled - (analysis.unmeasured?.length ?? 0), sampled)}`,
     `Mutants killed: ${formatRate(killed, sampled)}`,
-    `Tests observed: ${formatRate(observed, observed)}`,
+    `Tests observed: ${observed > 0 ? `${observed}` : 'unmeasured (no suite run finished with attributable outcomes)'}`,
     `Tests with a kill-set: ${formatRate(withKillSet, observed)}`,
-    `Wall clock seconds: ${formatRate(seconds, seconds)}`,
+    `Wall clock seconds: ${seconds}`,
     '',
-    '## Redundancy candidates (grouped by dominating test)',
+    '## Sampling',
+    `Lines requested: ${provenance.mutantsRequested ?? sampling.sampledLines ?? 'unmeasured'}`,
+    `Lines sampled: ${sampling.sampledLines ?? 'unmeasured'}`,
+    `Lines with a candidate: ${formatRate(sampling.candidateLines ?? 0, sampling.sampledLines ?? 0)}`,
+    `Lines skipped (no candidate): ${formatRate(sampling.skippedLines ?? 0, sampling.sampledLines ?? 0)}`,
+    `Candidates generated on sampled lines: ${sampling.generatedCandidates ?? 'unmeasured'}`,
+    `Candidates selected (first per line): ${formatRate(sampling.selectedCandidates ?? 0, sampling.generatedCandidates ?? 0)}`,
+    `Candidates omitted: ${formatRate(sampling.omittedCandidates ?? 0, sampling.generatedCandidates ?? 0)}`,
+    '',
+    '## Provenance',
+    `Seed: ${provenance.seed ?? 'unmeasured'}`,
+    `Checkout HEAD: ${provenance.headSha ?? 'unmeasured (not a git checkout or git unavailable)'}`,
+    `Tool sha256: ${provenance.toolSha256 ?? 'unmeasured'}`,
+    `Node: ${provenance.node ?? 'unmeasured'}`,
+    '',
+    '## Redundancy candidates (sampled kill-set subsumption, not proof of redundancy)',
+    'A candidate is a test whose sampled kill-set is a strict subset of another test\'s.',
+    'The sample is finite and one operator per line; shared hooks and ordering effects are',
+    'not modelled. Unsampled mutants may separate the two tests.',
   ]
   if (!analysis.redundant?.length) lines.push('- none observed')
   else for (const entry of analysis.redundant) {
-    const dominators = namesForSet(analysis, entry.dominatedBy)
-    lines.push(`- ${dominators.join(', ') || '(dominating test key unavailable)'} dominates ${formatRate(entry.kills.length, sampled)} mutant kills`)
+    lines.push(`- ${entry.dominator} dominates ${entry.candidate}: ${formatRate(entry.kills.length, sampled)} of its sampled kills are also the dominator's (dominator: ${formatRate(entry.dominatorKills.length, sampled)})`)
   }
   lines.push('', '## Survivors (gaps in this sample)')
   if (!analysis.survivors?.length) lines.push('- none observed')
@@ -325,6 +400,9 @@ export function main(argv = process.argv.slice(2), deps = {}) {
   const generated = mutantsForLines({ target, lines: lineNumbers, texts: lineNumbers.map((line) => sourceLines[line - 1]) })
   const spawn = deps.spawnSync || spawnSync
   const kill = deps.kill || ((pid, signal) => process.kill(pid, signal))
+  const observedTests = new Set()
+  const suitesWithMeasuredRun = new Set()
+  const suiteRuns = { measured: 0, total: 0 }
   // The signal source is a seam: node --test's own child listens for SIGINT on process
   // and aborts the file, so a test hands in its own emitter.
   const signals = deps.signals || process
@@ -357,17 +435,25 @@ export function main(argv = process.argv.slice(2), deps = {}) {
         restoreSnapshot(snapshot)
         inFlightSnapshot = null
       }
-      mutantResults.push({ mutant, ...classifyMutantOutcome({ suiteOutputs }) })
+      const outcome = classifyMutantOutcome({ suiteOutputs })
+      suiteRuns.total += suiteOutputs.length
+      suiteRuns.measured += outcome.suitesMeasured.length
+      for (const suite of outcome.suitesMeasured) if (suite) suitesWithMeasuredRun.add(suite)
+      for (const key of outcome.observed) observedTests.add(key)
+      mutantResults.push({ mutant, ...outcome })
     }
   } finally {
     signals.removeListener('SIGINT', handleSigint)
     if (inFlightSnapshot) restoreSnapshot(inFlightSnapshot)
   }
-  const analysis = analyzeKills({ mutantResults })
+  const analysis = analyzeKills({ mutantResults, observedTests: [...observedTests] })
   analysis.sourceLines = sourceLines
-  analysis.suitesMeasured = options.suites.length
+  analysis.suitesMeasured = suitesWithMeasuredRun.size
+  analysis.suiteRuns = suiteRuns
   analysis.suitePaths = options.suites
   analysis.sampledMutants = generated.candidates.length
+  analysis.sampling = generated.sampling
+  analysis.provenance = provenance(checkout, options, spawn)
   analysis.wallClockSeconds = Number(((performance.now() - started) / 1000).toFixed(3))
   const markdown = buildMarkdown(analysis)
   const outputPath = (path) => path.startsWith('/') ? path : join(checkout, path)

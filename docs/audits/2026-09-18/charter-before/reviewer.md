@@ -40,7 +40,7 @@ Where one of its classes still worries you in this diff, write it as a
 
 ## Carried plan-check findings
 
-A carried plan-check finding arrives at the HEAD of the brief with its id, severity, and the check's prescribed correction. Adjudicate it against the DIFF. Clear it by listing its id in the envelope's carried-clearance field; restate it by carrying a finding with the same id. A finding cleared in an earlier round is not shown again and is not owed again.
+A carried plan-check finding arrives at the HEAD of the brief with its id, severity, and the check's prescribed correction. Adjudicate it against the DIFF. Clear it by listing its id in the envelope's carried-clearance field; restate it by carrying a finding with the same id. Silence on a carried id is a review defect: the envelope is refused as `carried-silent` and re-asked. A finding cleared in an earlier round is not shown again and is not owed again.
 
 ## Envelope details fields
 
@@ -70,7 +70,8 @@ only if the whole patch's write surface is readable and inside the plan's
 validation lane and the acceptance gate against the patched tree. A patch that
 fails any of those is refused, journalled, and sent to the builder.
 
-Ship an ordinary text hunk
+Rename, copy, binary, quoted-path, mode-only and empty-path sections are refused
+unread, and one bad section refuses the WHOLE patch. Ship an ordinary text hunk
 or accept a builder round.
 
 `ask-user` touches behaviour or scope. Code never closes one: it goes to the
@@ -95,7 +96,8 @@ execution.
 
 Each `id` is yours to mint (for example, `RV1-1`), must be unique within this
 review, and must match `^[A-Za-z0-9_-]{1,64}$`. The driver interpolates it into a
-patch artifact FILENAME — a
+patch artifact FILENAME, so an id outside that set is refused by shape
+(`finding-id`), re-asked, and **never rewritten and never truncated** — a
 truncated id is a collision, and two findings sharing one artifact path is
 worse than a refusal. `RV1-1` and `panel-class-3` are inside it; `../x`, an id
 carrying a space, and a 1,000-character id are not.

@@ -10,10 +10,10 @@ Driver suites (pristine baseline: measured leaf tests, or the reason it was not)
 - crew/drive.test.mjs: 246 tests
 Mutants selected: 17 of 17 (100%)
 Mutants measured (over the baseline-eligible suites only): 16 of 17 (94.1%)
-Mutants killed: 9 of 17 (52.9%)
+Mutants killed: 10 of 17 (58.8%)
 Tests observed: 1085
-Tests with a kill-set: 74 of 1085 (6.8%)
-Wall clock seconds (baseline census and mutation loop): 157.866
+Tests with a kill-set: 75 of 1085 (6.9%)
+Wall clock seconds (baseline census and mutation loop): 151.424
 
 ## Sampling
 Lines requested: 40
@@ -26,10 +26,10 @@ Candidates omitted: 19 of 36 (52.8%)
 
 ## Provenance
 Seed: 0
-Checkout HEAD: 2acf50ae514334704c3dd69b4b77733670c7975f
-Tool sha256: f387eeb8aebaaff6a25129436f8cc33d7904c63a1aebfed0135175391de999b6
+Checkout HEAD: 26fc5f01a55f74596ceccd60e4a84376f500b6e2
+Tool sha256: a0acad08b380c3e0e482df2a4a19ba13ede4eb31450c15273955857af797cec7
 Node: v26.8.2
-Mutations ran in: a disposable git worktree at that HEAD
+Mutations ran in: a disposable git worktree at that HEAD, removed at the end; a run killed uncatchably leaves that worktree registered until the next run prunes it
 
 ## Redundancy candidates (sampled kill-set subsumption, not proof of redundancy)
 A candidate is a test whose sampled kill-set is a strict subset of another test's.
@@ -38,13 +38,12 @@ not modelled. Unsampled mutants may separate the two tests.
 - none observed
 
 ## Survivors (gaps in this sample), grouped by enclosing declaration — best-effort
-- documentStringLiterals: 1 of 7 (14.3%) survivors
-- settleFailedProof: 1 of 7 (14.3%) survivors
-- gateReapVerdict: 1 of 7 (14.3%) survivors
-- runWarmSuite: 1 of 7 (14.3%) survivors
-- captureProofTree: 1 of 7 (14.3%) survivors
-- parseQuestions: 1 of 7 (14.3%) survivors
-- operational: 1 of 7 (14.3%) survivors
+- documentStringLiterals: 1 of 6 (16.7%) survivors
+- settleFailedProof: 1 of 6 (16.7%) survivors
+- gateReapVerdict: 1 of 6 (16.7%) survivors
+- captureProofTree: 1 of 6 (16.7%) survivors
+- parseQuestions: 1 of 6 (16.7%) survivors
+- operational: 1 of 6 (16.7%) survivors
 
 ## Unmeasured outcomes
 - 821c27b99f3f5ff7e3281d71220319aeecd155fef63b2c7c4b453dedcfbd3eba: file-level-failure

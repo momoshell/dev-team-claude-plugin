@@ -423,7 +423,7 @@ export function buildMarkdown(analysis = {}) {
     `Checkout HEAD: ${provenance.headSha ?? 'unmeasured (not a git checkout or git unavailable)'}`,
     `Tool sha256: ${provenance.toolSha256 ?? 'unmeasured'}`,
     `Node: ${provenance.node ?? 'unmeasured'}`,
-    `Mutations ran in: ${provenance.isolated === false ? `the checkout itself (--in-place)` : 'a disposable git worktree at that HEAD'}`,
+    `Mutations ran in: ${provenance.isolated === false ? `the checkout itself (--in-place)` : 'a disposable git worktree at that HEAD, removed at the end; a run killed uncatchably leaves that worktree registered until the next run prunes it'}`,
     '',
     '## Redundancy candidates (sampled kill-set subsumption, not proof of redundancy)',
     'A candidate is a test whose sampled kill-set is a strict subset of another test\'s.',
@@ -479,7 +479,13 @@ function isolationRoot(checkout, target, options, deps) {
     if (!added || added.status !== 0) throw new Error(added?.stderr?.trim() || 'git worktree add failed')
     if (!(deps.existsSync || existsSync)(join(root, target))) throw new Error(`the worktree does not carry ${target}`)
   } catch (error) {
-    if (root) { try { (deps.rmSync || rmSync)(root, { recursive: true, force: true }) } catch { /* nothing to reclaim */ } }
+    // Delete, then prune: prune drops exactly the registry rows whose directories are gone,
+    // which is what a refusal leaves behind. (`worktree remove` here was belt-and-braces
+    // that no test could distinguish, so it is not here.)
+    if (root) {
+      try { (deps.rmSync || rmSync)(root, { recursive: true, force: true }) } catch { /* nothing to reclaim */ }
+      try { spawn('git', ['-C', checkout, 'worktree', 'prune'], { encoding: 'utf8' }) } catch { /* reclaimed by the next run */ }
+    }
     return { root: null, isolated: false, reason: `worktree unavailable: ${error?.message ?? String(error)}`, cleanup: () => {} }
   }
   return {
@@ -489,6 +495,7 @@ function isolationRoot(checkout, target, options, deps) {
     cleanup: () => {
       try { spawn('git', ['-C', checkout, 'worktree', 'remove', '--force', root], { encoding: 'utf8' }) } catch { /* the prune below still reclaims it */ }
       try { (deps.rmSync || rmSync)(root, { recursive: true, force: true }) } catch { /* left for git worktree prune */ }
+      try { spawn('git', ['-C', checkout, 'worktree', 'prune'], { encoding: 'utf8' }) } catch { /* the next run reclaims it */ }
     },
   }
 }
@@ -506,99 +513,108 @@ export function main(argv = process.argv.slice(2), deps = {}) {
     ;(deps.stderr || process.stderr).write(`refusing to mutate the checkout in place: ${isolation.reason}\nrun with --in-place to accept that a crash can leave a mutant in ${checkout}\n`)
     return 3
   }
-  const runRoot = isolation.root
-  const targetPath = join(runRoot, target)
-  const source = readFileSync(targetPath, 'utf8')
-  const sourceLines = source.split(/\r?\n/)
-  const lineNumbers = sampleLineNumbers({ lineCount: sourceLines.length, count: options.mutants, seed: options.seed })
-  const generated = mutantsForLines({ target, lines: lineNumbers, texts: lineNumbers.map((line) => sourceLines[line - 1]) })
-  const spawn = deps.spawnSync || spawnSync
-  const kill = deps.kill || ((pid, signal) => process.kill(pid, signal))
-  const observedTests = new Set()
-  const testLabels = {}
-  const suitesWithMeasuredRun = new Set()
-  const suiteRuns = { measured: 0, total: 0 }
-  const started = performance.now()
-  // Pristine census first: what each suite measures with nothing mutated. A suite whose
-  // baseline is unmeasured (or red) is not run against mutants at all.
-  const baselines = new Map()
-  const baselineOutcomes = []
-  for (const suite of options.suites) {
-    const census = baselineCensus(runSuite(suite, runRoot, options.timeoutMs, spawn))
-    baselineOutcomes.push(census)
-    if (census.status === 'measured') { baselines.set(suite, census.observed); for (const key of census.observed) observedTests.add(key); Object.assign(testLabels, census.labels) }
-  }
-  const measurableSuites = options.suites.filter((suite) => baselines.has(suite))
-  // The signal source is a seam: node --test's own child listens for SIGINT on process
-  // and aborts the file, so a test hands in its own emitter.
-  const signals = deps.signals || process
-  const mutantResults = []
-  let inFlightSnapshot = null
-  // EVERY termination signal restores first: SIGTERM left the checkout mutated (Sol, #1401).
-  // The handler removes ITSELF before re-raising, so the default disposition kills us once.
-  const handleSignal = (signal) => {
-    if (inFlightSnapshot) restoreSnapshot(inFlightSnapshot)
-    for (const name of TERMINATION_SIGNALS) signals.removeListener(name, handlers[name])
-    kill(process.pid, signal)
-  }
-  const handlers = Object.fromEntries(TERMINATION_SIGNALS.map((name) => [name, () => handleSignal(name)]))
-  for (const name of TERMINATION_SIGNALS) signals.on(name, handlers[name])
+  // Every path from here — a read that throws, an output that cannot be written, a refusal —
+  // gives the worktree back. Only an uncatchable signal can skip this, and the prune at the
+  // head of the next run is what reclaims that one.
+  let mdPath = null
   try {
-    for (const mutant of generated.candidates) {
-      const snapshot = snapshotFile(targetPath)
-      inFlightSnapshot = snapshot
-      let suiteOutputs = []
-      try {
-        const applied = applyDiffCandidate(snapshot.bytes, mutant)
-        if (!applied?.bytes) {
-          suiteOutputs = [{ error: Object.assign(new Error(applied?.reason || 'apply failed'), { code: 'EACCES' }) }]
-        } else {
-          const nextBytes = applied.bytes
-          writeFileSync(targetPath, nextBytes)
-          suiteOutputs = measurableSuites.length === 0
-            ? [{ error: Object.assign(new Error('no suite has a measured baseline'), { code: 'BASELINE' }) }]
-            : measurableSuites.map((suite) => runSuite(suite, runRoot, options.timeoutMs, spawn))
-        }
-      } catch (error) {
-        suiteOutputs = [{ error }]
-      } finally {
-        restoreSnapshot(snapshot)
-        inFlightSnapshot = null
-      }
-      const outcome = suiteOutputs[0]?.error?.code === 'BASELINE' ? { status: 'unmeasured', reason: REASON.BASELINE_UNMEASURED, survivor: false, killers: [], observed: [], suitesMeasured: [] } : classifyMutantOutcome({ suiteOutputs, baselines })
-      // The denominator is every configured suite for this mutant, not only the eligible ones.
-      suiteRuns.total += options.suites.length
-      suiteRuns.measured += outcome.suitesMeasured.length
-      for (const suite of outcome.suitesMeasured) if (suite) suitesWithMeasuredRun.add(suite)
-      Object.assign(testLabels, outcome.labels)
-      mutantResults.push({ mutant, ...outcome })
+    const runRoot = isolation.root
+    const targetPath = join(runRoot, target)
+    const source = readFileSync(targetPath, 'utf8')
+    const sourceLines = source.split(/\r?\n/)
+    const lineNumbers = sampleLineNumbers({ lineCount: sourceLines.length, count: options.mutants, seed: options.seed })
+    const generated = mutantsForLines({ target, lines: lineNumbers, texts: lineNumbers.map((line) => sourceLines[line - 1]) })
+    const spawn = deps.spawnSync || spawnSync
+    const kill = deps.kill || ((pid, signal) => process.kill(pid, signal))
+    const observedTests = new Set()
+    const testLabels = {}
+    const suitesWithMeasuredRun = new Set()
+    const suiteRuns = { measured: 0, total: 0 }
+    const started = performance.now()
+    // Pristine census first: what each suite measures with nothing mutated. A suite whose
+    // baseline is unmeasured (or red) is not run against mutants at all.
+    const baselines = new Map()
+    const baselineOutcomes = []
+    for (const suite of options.suites) {
+      const census = baselineCensus(runSuite(suite, runRoot, options.timeoutMs, spawn))
+      baselineOutcomes.push(census)
+      if (census.status === 'measured') { baselines.set(suite, census.observed); for (const key of census.observed) observedTests.add(key); Object.assign(testLabels, census.labels) }
     }
+    const measurableSuites = options.suites.filter((suite) => baselines.has(suite))
+    // The signal source is a seam: node --test's own child listens for SIGINT on process
+    // and aborts the file, so a test hands in its own emitter.
+    const signals = deps.signals || process
+    const mutantResults = []
+    let inFlightSnapshot = null
+    // EVERY termination signal restores first: SIGTERM left the checkout mutated (Sol, #1401).
+    // The handler removes ITSELF before re-raising, so the default disposition kills us once.
+    const handleSignal = (signal) => {
+      if (inFlightSnapshot) restoreSnapshot(inFlightSnapshot)
+      for (const name of TERMINATION_SIGNALS) signals.removeListener(name, handlers[name])
+      kill(process.pid, signal)
+    }
+    const handlers = Object.fromEntries(TERMINATION_SIGNALS.map((name) => [name, () => handleSignal(name)]))
+    for (const name of TERMINATION_SIGNALS) signals.on(name, handlers[name])
+    try {
+      for (const mutant of generated.candidates) {
+        const snapshot = snapshotFile(targetPath)
+        inFlightSnapshot = snapshot
+        let suiteOutputs = []
+        try {
+          const applied = applyDiffCandidate(snapshot.bytes, mutant)
+          if (!applied?.bytes) {
+            suiteOutputs = [{ error: Object.assign(new Error(applied?.reason || 'apply failed'), { code: 'EACCES' }) }]
+          } else {
+            const nextBytes = applied.bytes
+            writeFileSync(targetPath, nextBytes)
+            suiteOutputs = measurableSuites.length === 0
+              ? [{ error: Object.assign(new Error('no suite has a measured baseline'), { code: 'BASELINE' }) }]
+              : measurableSuites.map((suite) => runSuite(suite, runRoot, options.timeoutMs, spawn))
+          }
+        } catch (error) {
+          suiteOutputs = [{ error }]
+        } finally {
+          restoreSnapshot(snapshot)
+          inFlightSnapshot = null
+        }
+        const outcome = suiteOutputs[0]?.error?.code === 'BASELINE' ? { status: 'unmeasured', reason: REASON.BASELINE_UNMEASURED, survivor: false, killers: [], observed: [], suitesMeasured: [] } : classifyMutantOutcome({ suiteOutputs, baselines })
+        // The denominator is every configured suite for this mutant, not only the eligible ones.
+        suiteRuns.total += options.suites.length
+        suiteRuns.measured += outcome.suitesMeasured.length
+        for (const suite of outcome.suitesMeasured) if (suite) suitesWithMeasuredRun.add(suite)
+        Object.assign(testLabels, outcome.labels)
+        mutantResults.push({ mutant, ...outcome })
+      }
+    } finally {
+      for (const name of TERMINATION_SIGNALS) signals.removeListener(name, handlers[name])
+      if (inFlightSnapshot) restoreSnapshot(inFlightSnapshot)
+    }
+    const analysis = analyzeKills({ mutantResults, observedTests: [...observedTests] })
+    analysis.sourceLines = sourceLines
+    analysis.suitesMeasured = suitesWithMeasuredRun.size
+    analysis.suiteRuns = suiteRuns
+    analysis.baselines = baselineOutcomes.map((census) => ({ suite: census.suite, status: census.status, reason: census.reason, tests: census.observed ? census.observed.length : null }))
+    analysis.suitePaths = options.suites
+    analysis.sampledMutants = generated.candidates.length
+    analysis.sampling = generated.sampling
+    analysis.testLabels = testLabels
+    analysis.provenance = { ...provenance(checkout, options, spawn), isolated: isolation.isolated, isolation_reason: isolation.reason }
+    analysis.wallClockSeconds = Number(((performance.now() - started) / 1000).toFixed(3))
+    const markdown = buildMarkdown(analysis)
+    const outputPath = (path) => path.startsWith('/') ? path : join(checkout, path)
+    const writtenMdPath = outputPath(options.md)
+    mkdirSync(dirname(writtenMdPath), { recursive: true })
+    writeFileSync(writtenMdPath, markdown)
+    if (options.out) {
+      const outPath = outputPath(options.out)
+      mkdirSync(dirname(outPath), { recursive: true })
+      writeFileSync(outPath, `${JSON.stringify(jsonAnalysis(analysis), null, 2)}\n`)
+    }
+
+    mdPath = writtenMdPath
   } finally {
-    for (const name of TERMINATION_SIGNALS) signals.removeListener(name, handlers[name])
-    if (inFlightSnapshot) restoreSnapshot(inFlightSnapshot)
+    isolation.cleanup()
   }
-  const analysis = analyzeKills({ mutantResults, observedTests: [...observedTests] })
-  analysis.sourceLines = sourceLines
-  analysis.suitesMeasured = suitesWithMeasuredRun.size
-  analysis.suiteRuns = suiteRuns
-  analysis.baselines = baselineOutcomes.map((census) => ({ suite: census.suite, status: census.status, reason: census.reason, tests: census.observed ? census.observed.length : null }))
-  analysis.suitePaths = options.suites
-  analysis.sampledMutants = generated.candidates.length
-  analysis.sampling = generated.sampling
-  analysis.testLabels = testLabels
-  analysis.provenance = { ...provenance(checkout, options, spawn), isolated: isolation.isolated, isolation_reason: isolation.reason }
-  analysis.wallClockSeconds = Number(((performance.now() - started) / 1000).toFixed(3))
-  const markdown = buildMarkdown(analysis)
-  const outputPath = (path) => path.startsWith('/') ? path : join(checkout, path)
-  const mdPath = outputPath(options.md)
-  mkdirSync(dirname(mdPath), { recursive: true })
-  writeFileSync(mdPath, markdown)
-  if (options.out) {
-    const outPath = outputPath(options.out)
-    mkdirSync(dirname(outPath), { recursive: true })
-    writeFileSync(outPath, `${JSON.stringify(jsonAnalysis(analysis), null, 2)}\n`)
-  }
-  isolation.cleanup()
   ;(deps.stdout || process.stdout).write(`wrote ${relative(checkout, mdPath)}\n`)
   return 0
 }

@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { ROOT, scratchDir, git, gitResult } from './helpers.mjs'
 import {
@@ -455,4 +455,92 @@ test('a checkout it cannot isolate is refused, naming --in-place', () => {
   assert.match(stderr, /refusing to mutate the checkout in place/)
   assert.match(stderr, /--in-place/)
   assert.equal(existsSync(join(dir, 'k.md')), false, 'nothing was written')
+})
+
+// Sol on #1401, pass 7: the commit claimed these two and no test pinned them. The suites run
+// under the node running this tool, with the test runner's own context stripped — inheriting
+// NODE_TEST_CONTEXT made the spawned runner report to that parent instead of running the
+// file, so a tool invoked from inside a suite measured nothing in milliseconds.
+// Mutation killed: spawning PATH 'node'; keeping NODE_TEST_CONTEXT; keeping NODE_OPTIONS.
+test('the measured runs use this node and carry no test-runner context', () => {
+  const dir = scratchDir('kr-spawn-')
+  mkdirSync(join(dir, 'crew'), { recursive: true })
+  writeFileSync(join(dir, 'crew', 'drive.mjs'), ['export const a = 1', 'export function f(x) { return x + 1 }', ''].join('\n'))
+  const seen = []
+  const spawnSync = (bin, args, options) => {
+    seen.push({ bin, args, env: options?.env ?? null })
+    return { status: 0, stdout: 'TAP version 13\n# Subtest: x\nok 1 - x\n1..1\n# tests 1\n# pass 1\n# fail 0\n', stderr: '' }
+  }
+  const before = { NODE_TEST_CONTEXT: process.env.NODE_TEST_CONTEXT, NODE_OPTIONS: process.env.NODE_OPTIONS }
+  process.env.NODE_TEST_CONTEXT = 'child-v8'
+  process.env.NODE_OPTIONS = '--require=/tmp/evil.js'
+  try {
+    main(['--in-place', '--mutants', '1', '--seed', '1', '--suites', 's.test.mjs', '--md', join(dir, 'k.md'), '--checkout', dir], { spawnSync })
+  } finally {
+    for (const [key, value] of Object.entries(before)) { if (value === undefined) delete process.env[key]; else process.env[key] = value }
+  }
+  const runs = seen.filter((call) => Array.isArray(call.args) && call.args.includes('--test'))
+  assert.ok(runs.length > 0, 'no suite run was spawned')
+  for (const run of runs) {
+    assert.equal(run.bin, process.execPath, 'the suites run under the node running this tool')
+    assert.equal(run.env.NODE_TEST_CONTEXT, undefined, 'the runner context never reaches a measured run')
+    assert.equal(run.env.NODE_OPTIONS, undefined, 'NODE_OPTIONS can load code into a measured run')
+    assert.equal(run.env.NO_COLOR, '1')
+  }
+})
+
+// The isolation gives the worktree back on EVERY catchable path. Mutation killed: the
+// cleanup outside the finally (an output that cannot be written then keeps the worktree);
+// no unregister on a failed add (the refusal then leaves a registry row).
+test('a refusal and a failed output both leave the source repository with no extra worktree', () => {
+  const dir = scratchDir('kr-leak-')
+  git(dir, 'init', '-q')
+  mkdirSync(join(dir, 'crew'), { recursive: true })
+  writeFileSync(join(dir, 'crew', 'drive.mjs'), 'export const a = 1\nexport function f(x) { return x + 1 }\n')
+  writeFileSync(join(dir, 's.test.mjs'), "import { test } from 'node:test'\ntest('x', () => {})\n")
+  git(dir, 'add', '-A'); git(dir, 'commit', '-q', '-m', 'base')
+  const worktrees = () => gitResult(dir, 'worktree', 'list').stdout.split('\n').filter(Boolean).length
+  const registry = () => { try { return readdirSync(join(dir, '.git', 'worktrees')).length } catch { return 0 } }
+  assert.deepEqual([worktrees(), registry()], [1, 0])
+  // 1. the output cannot be written: the md path is a directory
+  mkdirSync(join(dir, 'blocked.md'), { recursive: true })
+  assert.throws(() => main(['--mutants', '1', '--seed', '1', '--suites', 's.test.mjs', '--md', join(dir, 'blocked.md'), '--checkout', dir], {
+    spawnSync: (bin, args, options) => (Array.isArray(args) && args.includes('--test')
+      ? { status: 0, stdout: 'TAP version 13\n# Subtest: x\nok 1 - x\n1..1\n# tests 1\n# pass 1\n# fail 0\n', stderr: '' }
+      : spawnSync(bin, args, options)),
+  }))
+  assert.deepEqual([worktrees(), registry()], [1, 0], 'a failed output gives the worktree back')
+  // 2. a repository without the target: refused, and nothing registered stays behind
+  const bare = scratchDir('kr-leak-bare-')
+  git(bare, 'init', '-q'); writeFileSync(join(bare, 'x.md'), 'x\n'); git(bare, 'add', '-A'); git(bare, 'commit', '-q', '-m', 'base')
+  let stderr = ''
+  assert.equal(main(['--mutants', '1', '--suites', 's', '--md', join(bare, 'k.md'), '--checkout', bare], { stderr: { write: (text) => { stderr += text } } }), 3)
+  assert.match(stderr, /refusing to mutate the checkout in place/)
+  assert.equal(gitResult(bare, 'worktree', 'list').stdout.split('\n').filter(Boolean).length, 1, 'the refusal registered no worktree')
+  assert.equal((() => { try { return readdirSync(join(bare, '.git', 'worktrees')).length } catch { return 0 } })(), 0, 'and left no registry row')
+})
+
+// The one leftover an uncatchable kill leaves is a registered worktree whose directory is
+// gone once the operator or a later run deletes it. A run reclaims such a row on its way
+// out, so the registry does not accumulate. Mutation killed: dropping the prune from
+// cleanup — the stale row then survives the run.
+test('a run reclaims the registry rows a killed predecessor left behind', () => {
+  const dir = scratchDir('kr-stale-')
+  git(dir, 'init', '-q')
+  mkdirSync(join(dir, 'crew'), { recursive: true })
+  writeFileSync(join(dir, 'crew', 'drive.mjs'), 'export const a = 1\nexport function f(x) { return x + 1 }\n')
+  writeFileSync(join(dir, 's.test.mjs'), "import { test } from 'node:test'\ntest('x', () => {})\n")
+  git(dir, 'add', '-A'); git(dir, 'commit', '-q', '-m', 'base')
+  // Exactly what a SIGKILLed run leaves: a registered worktree with no directory.
+  const orphan = join(scratchDir('kr-orphan-'), 'gone')
+  git(dir, 'worktree', 'add', '--detach', '--quiet', orphan, 'HEAD')
+  rmSync(orphan, { recursive: true, force: true })
+  assert.equal(readdirSync(join(dir, '.git', 'worktrees')).length, 1, 'the stale row is there to begin with')
+  main(['--mutants', '1', '--seed', '1', '--suites', 's.test.mjs', '--md', join(dir, 'k.md'), '--checkout', dir], {
+    spawnSync: (bin, args, options) => (Array.isArray(args) && args.includes('--test')
+      ? { status: 0, stdout: 'TAP version 13\n# Subtest: x\nok 1 - x\n1..1\n# tests 1\n# pass 1\n# fail 0\n', stderr: '' }
+      : spawnSync(bin, args, options)),
+  })
+  assert.equal(gitResult(dir, 'worktree', 'list').stdout.split('\n').filter(Boolean).length, 1, 'only the checkout is left')
+  assert.equal((() => { try { return readdirSync(join(dir, '.git', 'worktrees')).length } catch { return 0 } })(), 0, 'and the stale row is gone')
 })

@@ -8,11 +8,12 @@ import {
   readdirSync as fsReaddirSync,
   writeFileSync as fsWriteFileSync,
   renameSync as fsRenameSync,
+  statSync as fsStatSync,
 } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { stripVTControlCharacters } from 'node:util'
-import { spawn as cpSpawn } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
+import { spawn as cpSpawn, spawnSync as cpSpawnSync } from 'node:child_process'
+import { randomUUID, createHash } from 'node:crypto'
 
 import { assignmentDelivery, assignmentPrompt } from './driver.mjs'
 import { headlessCommand as defaultHeadlessCommand } from './adapters/adapter-claude.mjs'
@@ -940,25 +941,62 @@ export function turnCeilingDetail({ at = Date.now(), role, id, turns, budget, ab
   }
 }
 
-// Per ROLE for the run. `last_run` / `edited_since_run` are the rerun rule's state: the last
-// admitted command and whether any edit tool call has been observed since it.
-export function suitePolicyCounters() { return { refused: 0, admitted: 0, unrecognised: 0, allowance_spent: 0, last_run: null, edited_since_run: true } }
+// Per ROLE for the run. `last_run` / `last_run_tree` are the rerun rule's state: the last
+// admitted scoped-test or gate command and the working-tree fingerprint at that moment.
+// `rerun_unmeasured` counts repeats the rule could not judge because a tree was unmeasured.
+export function suitePolicyCounters() { return { refused: 0, admitted: 0, unrecognised: 0, allowance_spent: 0, last_run: null, last_run_tree: null, rerun_unmeasured: 0 } }
+
+// The kinds the rerun rule judges. An own-task probe and a suite run are outside it by
+// contract: the rule is about the fenced tests and the gate.
+export const RERUN_KINDS = Object.freeze(['scoped-test', 'gate'])
 
 // Facts beyond the decision, all accounting-only, all defaulted so a legacy two-argument
 // call keeps its old meaning: `kind` absent charges the allowance, `blind` absent invents
-// no blind spot, `command` absent records no last run.
-export function countSuiteDecision(counters, decision, { kind = null, blind = false, command = null } = {}) {
+// no blind spot, `command` absent records no last run, `tree` absent records it unmeasured.
+export function countSuiteDecision(counters, decision, { kind = null, blind = false, command = null, tree = null, rerunUnmeasured = false } = {}) {
   if (decision === 'refuse') counters.refused += 1
   else if (decision === 'admit') counters.admitted += 1
   else counters.unrecognised += 1
   if (decision === 'admit' && kind !== 'gate' && kind !== 'task-local') counters.allowance_spent += 1
-  if (decision === 'admit' && typeof command === 'string') { counters.last_run = command; counters.edited_since_run = false }
+  if (decision === 'admit' && RERUN_KINDS.includes(kind) && typeof command === 'string') { counters.last_run = command; counters.last_run_tree = tree }
+  if (rerunUnmeasured) counters.rerun_unmeasured += 1
   if (blind && decision !== 'unrecognised') counters.unrecognised += 1
   return counters
 }
 
-// An edit tool call was observed: the next identical run is a measurement again.
-export function noteEditCall(counters) { counters.edited_since_run = true; return counters }
+// The working tree as one hash: the status list, tracked changes (`git diff HEAD`) and, for
+// every untracked path, its size and mtime — content git does not see. What a seat DID to
+// the tree, whatever tool did it: `sed -i` and `git apply` through Bash count, a return
+// envelope written outside the checkout does not. Null when any part cannot be measured;
+// null never refuses. Blind spot, stated: an untracked file rewritten to the same size
+// within one mtime tick reads unchanged.
+export function treeFingerprint(checkout, deps = {}) {
+  if (typeof checkout !== 'string' || checkout === '') return null
+  const run = deps.spawnSync || cpSpawnSync
+  const stat = deps.statSync || fsStatSync
+  const git = (args) => {
+    let result
+    try { result = run('git', ['-C', checkout, ...args], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }) } catch { return null }
+    return result && result.status === 0 && typeof result.stdout === 'string' ? result.stdout : null
+  }
+  const status = git(['status', '--porcelain=v1', '-z', '--untracked-files=all', '--no-renames'])
+  const diff = status === null ? null : git(['diff', 'HEAD', '--no-color', '--no-ext-diff'])
+  if (status === null || diff === null) return null
+  const hash = createHash('sha256').update(status).update('\0').update(diff)
+  for (const entry of status.split('\0')) {
+    if (!entry.startsWith('?? ')) continue
+    const path = entry.slice(3)
+    try { const s = stat(join(checkout, path)); hash.update(`\0${path}:${s.size}:${s.mtimeMs}`) } catch { return null }
+  }
+  return hash.digest('hex')
+}
+
+// The rerun rule's inputs for one shell call, with the tree fingerprinted ONLY when the
+// command repeats the last admitted run — one git call per candidate repeat, not per call.
+export function rerunContext(counters, command, fingerprint) {
+  const repeat = sameInvocation(command, counters.last_run)
+  return { lastRun: counters.last_run, lastRunTree: counters.last_run_tree, tree: repeat ? fingerprint() : null }
+}
 
 export const SUITE_POLICY_STREAM_UNAVAILABLE = 'suite-policy-stream-unavailable'
 
@@ -966,6 +1004,9 @@ export const SUITE_POLICY_STREAM_UNAVAILABLE = 'suite-policy-stream-unavailable'
 // unrecognised, `refused` and `admitted` are LOWER BOUNDS and not measurements,
 // so they are reported as null with a reason and the bounds keep their own
 // names. A zero here would claim the transport looked and saw no violation.
+// A repeat the rerun rule could not judge is a stated blind spot, present only when it happened.
+const rerunUnmeasured = (counters) => (counters.rerun_unmeasured > 0 ? { rerun_unmeasured: counters.rerun_unmeasured } : {})
+
 export function suitePolicyReport(counters, { read = true } = {}) {
   if (counters === null || counters === undefined) return { suite_policy: null, suite_policy_absent: null }
   if (read === false) {
@@ -973,7 +1014,7 @@ export function suitePolicyReport(counters, { read = true } = {}) {
       suite_policy: {
         refused: null, admitted: null, unrecognised: null,
         refused_at_least: counters.refused, admitted_at_least: counters.admitted,
-        unrecognised_at_least: counters.unrecognised,
+        unrecognised_at_least: counters.unrecognised, ...rerunUnmeasured(counters),
       },
       suite_policy_absent: SUITE_POLICY_STREAM_UNAVAILABLE,
     }
@@ -982,13 +1023,13 @@ export function suitePolicyReport(counters, { read = true } = {}) {
     return {
       suite_policy: {
         refused: null, admitted: null, unrecognised: counters.unrecognised,
-        refused_at_least: counters.refused, admitted_at_least: counters.admitted,
+        refused_at_least: counters.refused, admitted_at_least: counters.admitted, ...rerunUnmeasured(counters),
       },
       suite_policy_absent: SUITE_RUN_UNRECOGNISED,
     }
   }
   return {
-    suite_policy: { refused: counters.refused, admitted: counters.admitted, unrecognised: 0 },
+    suite_policy: { refused: counters.refused, admitted: counters.admitted, unrecognised: 0, ...rerunUnmeasured(counters) },
     suite_policy_absent: null,
   }
 }
@@ -1336,8 +1377,10 @@ function rerunRefusal(role, command, gatePath, kind) {
     role, command, kind, gate_path: gatePath,
   }
 }
-const sameInvocation = (command, lastRun) => typeof lastRun === 'string'
-  && String(command).trim().replace(/\s+/g, ' ') === lastRun.trim().replace(/\s+/g, ' ')
+// Two spellings of one invocation: the same quote-aware tokens (SHELL_TOKEN_RE keeps a quoted
+// span intact, so whitespace INSIDE quotes is data and still distinguishes two commands).
+const invocationKey = (command) => (String(command ?? '').match(SHELL_TOKEN_RE) || []).join(' ')
+const sameInvocation = (command, lastRun) => typeof lastRun === 'string' && invocationKey(command) === invocationKey(lastRun)
 
 function decideSuiteRun({ role, command, fence, gatePath, ranBefore, suiteCommand, taskDir, kind }) {
   if (kind === null) return { decision: 'unrecognised', reason: SUITE_RUN_UNRECOGNISED, role, command, kind: null, gate_path: gatePath }
@@ -1362,22 +1405,23 @@ function fencedScopedTest(command, fence, taskDir) {
   return targets !== null && targets.every((target) => fenceCovers(fence, target))
 }
 
-export function suiteRunPolicy({ role, command, fence = [], gatePath = null, ranBefore = 0, suiteCommand = null, taskDir = null, lastRun = null, editedSinceRun = true } = {}) {
+export function suiteRunPolicy({ role, command, fence = [], gatePath = null, ranBefore = 0, suiteCommand = null, taskDir = null, lastRun = null, lastRunTree = null, tree = null } = {}) {
   const { kind, blind } = recogniseInvocation(command, { suiteCommand, gatePath, taskDir })
   const verdict = decideSuiteRun({ role, command, fence, gatePath, ranBefore, suiteCommand, taskDir, kind })
-  // The rerun rule applies to the role that EDITS: ownership is decided first, so a repeated
-  // unowned command still reads as unowned; the planner never edits and re-measures its gate
-  // every plan round, so its repeats are measurements.
-  if (verdict.decision === 'admit' && SUITE_RUN_OWNERSHIP[role] === 'fenced' && !editedSinceRun && sameInvocation(command, lastRun)) {
-    return { ...rerunRefusal(role, command, gatePath, kind), blind }
+  // The rerun rule applies to the role that EDITS, on the kinds it covers: ownership is
+  // decided first, so a repeated unowned command still reads as unowned; the planner never
+  // edits and re-measures its gate every plan round, so its repeats are measurements. An
+  // UNMEASURED tree on either side never refuses — it is counted, not guessed.
+  if (verdict.decision === 'admit' && SUITE_RUN_OWNERSHIP[role] === 'fenced' && RERUN_KINDS.includes(kind) && sameInvocation(command, lastRun)) {
+    if (lastRunTree === null || tree === null) return { ...verdict, blind, rerun_unmeasured: true }
+    if (tree === lastRunTree) return { ...rerunRefusal(role, command, gatePath, kind), blind }
   }
   return { ...verdict, blind }
 }
 
-// Every tool call the claude stream ALREADY recorded, in order, with the tool-use id that
-// makes each one adjudicable exactly once. Edits are observed here too: the rerun rule
-// needs to know that one happened between two identical runs.
-export function streamToolCalls(text) {
+// Every shell invocation the claude stream ALREADY recorded, in order, with the
+// tool-use id that makes each one adjudicable exactly once.
+export function shellToolCalls(text) {
   const calls = []
   for (const line of String(text ?? '').split('\n')) {
     if (!line.trim()) continue
@@ -1386,18 +1430,14 @@ export function streamToolCalls(text) {
     if (frame?.type !== 'assistant') continue
     const content = Array.isArray(frame.message?.content) ? frame.message.content : []
     for (const use of content) {
-      if (use?.type !== 'tool_use' || typeof use?.name !== 'string') continue
-      calls.push({ id: use.id ?? null, name: use.name, input: use.input })
+      if (use?.type !== 'tool_use') continue
+      if (typeof use?.name !== 'string' || use.name.toLowerCase() !== 'bash') continue
+      const command = use.input?.command
+      if (typeof command !== 'string' || command.trim() === '') continue
+      calls.push({ id: use.id ?? null, command })
     }
   }
   return calls
-}
-
-// The shell invocations among them, as { id, command }.
-export function shellToolCalls(text) {
-  return streamToolCalls(text)
-    .filter((call) => call.name.toLowerCase() === 'bash' && typeof call.input?.command === 'string' && call.input.command.trim() !== '')
-    .map((call) => ({ id: call.id, command: call.input.command }))
 }
 
 function censusRow(run, transport, stream) {
@@ -1731,6 +1771,7 @@ function persistCrew(paths, role, patch, deps) {
 }
 
 export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turnCeilings = null, deps = {} }) {
+  const fingerprintTree = deps.treeFingerprint || (() => treeFingerprint(checkout || crew?.checkout))
   const spawn = deps.spawn || cpSpawn
   const now = deps.now || (() => Date.now())
   const sleep = deps.sleep || defaultSleep
@@ -2418,22 +2459,18 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turn
     if (!run.policy) return null
     const counters = suiteCountersFor(run.role)
     let refused = null
-    for (const call of streamToolCalls(text)) {
-      const isShell = call.name.toLowerCase() === 'bash'
-      const command = isShell ? call.input?.command : null
-      if (isShell && (typeof command !== 'string' || command.trim() === '')) continue
-      const key = call.id ?? `${run.id}:${call.name}:${JSON.stringify(call.input ?? null)}`
+    for (const call of shellToolCalls(text)) {
+      const key = call.id ?? `${run.id}:${call.command}`
       if (run.seenToolCalls.has(key)) continue
       run.seenToolCalls.add(key)
-      // An edit is observed for the rerun rule and adjudicated as nothing.
-      if (!isShell) { if (classifyToolCall(call.name, call.input) === 'edit') noteEditCall(counters); continue }
       const verdict = suiteRunPolicy({
-        role: run.role, command,
+        role: run.role, command: call.command,
         fence: run.policy.fence || [], gatePath: run.policy.gatePath || null,
-        ranBefore: counters.allowance_spent, lastRun: counters.last_run, editedSinceRun: counters.edited_since_run,
+        ranBefore: counters.allowance_spent, ...rerunContext(counters, call.command, fingerprintTree),
         suiteCommand: run.policy.suiteCommand || null, taskDir: taskDir || paths.taskDir,
       })
-      countSuiteDecision(counters, verdict.decision, { kind: verdict.kind, blind: verdict.blind, command })
+      const tree = verdict.decision === 'admit' && RERUN_KINDS.includes(verdict.kind) ? fingerprintTree() : null
+      countSuiteDecision(counters, verdict.decision, { kind: verdict.kind, blind: verdict.blind, command: call.command, tree, rerunUnmeasured: verdict.rerun_unmeasured === true })
       // The FIRST refusal decides the dispatch, and the loop still FINISHES: the
       // remaining calls are in bytes this read already consumed, and a count that
       // stops at the refusal is not a count of what was read. Mirrors R7.

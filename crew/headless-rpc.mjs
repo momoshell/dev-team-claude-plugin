@@ -13,7 +13,7 @@ import { spawn as cpSpawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 
 import { assignmentDelivery, assignmentPrompt } from './driver.mjs'
-import { shq, classifyRun, noEnvelopeDetail, readEnvelopeOrThrow, updateCrewJson, attributeExit, decodeExitStatus, stderrTail, classifyToolCall, TOOL_CLASSES, CENSUS_ABSENT_CAUSES, censusFileOperands, suitePolicyCounters, countSuiteDecision, noteEditCall, suiteRunPolicy, suitePolicyRow, suiteRefusalRow, suiteRefusalEnvelope, turnCeilingBreached, turnCeilingEnvelope, turnCeilingDetail } from './headless.mjs'
+import { shq, classifyRun, noEnvelopeDetail, readEnvelopeOrThrow, updateCrewJson, attributeExit, decodeExitStatus, stderrTail, classifyToolCall, TOOL_CLASSES, CENSUS_ABSENT_CAUSES, censusFileOperands, suitePolicyCounters, countSuiteDecision, suiteRunPolicy, rerunContext, treeFingerprint, RERUN_KINDS, suitePolicyRow, suiteRefusalRow, suiteRefusalEnvelope, turnCeilingBreached, turnCeilingEnvelope, turnCeilingDetail } from './headless.mjs'
 import { reclaimStore, PHASES, VERDICTS, EVIDENCE_KINDS, LIVENESS } from './reclaim.mjs'
 import { readJsonTri } from './json-leaf.mjs'
 import { PI_BUILTIN_TOOLS, piActivatedTools, translateDeny } from './adapters/adapter-pi.mjs'
@@ -740,6 +740,7 @@ export function emptyTurnEnvelope({ id, role, returnPath, census = null }) {
 
 export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, turnCeilings = null, deps = {} }) {
   const spawn = deps.spawn || cpSpawn
+  const fingerprintTree = deps.treeFingerprint || (() => treeFingerprint(checkout || crew?.checkout))
   const open = deps.openSync || fsOpenSync
   const writeFd = deps.writeSync || fsWriteSync
   const closeFd = deps.closeSync || fsCloseSync
@@ -1483,11 +1484,12 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
   // once for the run. They are deliberately not restated here, so §4.11 remains
   // the single text K3's anchor binds against in crew/headless.mjs.
   //
-  // Only SHELL frames are ADJUDICATED (round-2 finding 5): the recorded capture
+  // Only SHELL frames (round-2 finding 5): the recorded capture
   // pi-a1-json-baseline.jsonl carries a `toolName: 'write'` frame whose args hold
   // path/content and no command, and counting that unrecognised would report a
-  // blind spot this transport does not have. An edit frame is OBSERVED for the
-  // rerun rule and decided as nothing. Mirrors the claude loop in crew/headless.mjs.
+  // blind spot this transport does not have. Mirrors shellToolCalls, which also
+  // selects only calls carrying a command string. The rerun rule reads the TREE,
+  // not the frames, so an edit through any tool counts and an envelope write does not.
   const suiteCounters = new Map()
   const suiteCountersFor = (role) => {
     if (!suiteCounters.has(role)) suiteCounters.set(role, suitePolicyCounters())
@@ -1497,21 +1499,21 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
     if (!turn || !turn.policy) return null
     const counters = suiteCountersFor(turn.role)
     for (const frame of frames) {
-      if (frame?.type !== 'tool_execution_start' || typeof frame.toolName !== 'string') continue
-      const isShell = frame.toolName.toLowerCase() === 'bash'
-      const command = isShell ? frame.args?.command : null
-      if (isShell && (typeof command !== 'string' || command.trim() === '')) continue
-      const key = frame.toolCallId ?? `${turn.id}:${frame.toolName}:${JSON.stringify(frame.args ?? null)}`
+      if (frame?.type !== 'tool_execution_start') continue
+      if (typeof frame.toolName !== 'string' || frame.toolName.toLowerCase() !== 'bash') continue
+      const command = frame.args?.command
+      if (typeof command !== 'string' || command.trim() === '') continue
+      const key = frame.toolCallId ?? `${turn.id}:${command}`
       if (turn.seenToolCalls.has(key)) continue
       turn.seenToolCalls.add(key)
-      if (!isShell) { if (classifyToolCall(frame.toolName, frame.args) === 'edit') noteEditCall(counters); continue }
       const verdict = suiteRunPolicy({
         role: turn.role, command,
         fence: turn.policy.fence || [], gatePath: turn.policy.gatePath || null,
-        ranBefore: counters.allowance_spent, lastRun: counters.last_run, editedSinceRun: counters.edited_since_run,
+        ranBefore: counters.allowance_spent, ...rerunContext(counters, command, fingerprintTree),
         suiteCommand: turn.policy.suiteCommand || null, taskDir: taskDir || paths.taskDir,
       })
-      countSuiteDecision(counters, verdict.decision, { kind: verdict.kind, blind: verdict.blind, command })
+      const tree = verdict.decision === 'admit' && RERUN_KINDS.includes(verdict.kind) ? fingerprintTree() : null
+      countSuiteDecision(counters, verdict.decision, { kind: verdict.kind, blind: verdict.blind, command, tree, rerunUnmeasured: verdict.rerun_unmeasured === true })
       // The FIRST refusal is the decision; a later one never overwrites it.
       if (verdict.decision === 'refuse' && !turn.pendingSuiteRefusal) turn.pendingSuiteRefusal = verdict
     }

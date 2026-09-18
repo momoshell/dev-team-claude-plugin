@@ -59,6 +59,7 @@ function fixture(options = {}) {
     ...(options.now ? { now: options.now } : {}),
     ...(Object.hasOwn(options, 'promptDeliveryWindowMs') ? { promptDeliveryWindowMs: options.promptDeliveryWindowMs } : {}),
     ...(options.emit ? { emit: options.emit } : {}),
+    ...(options.treeFingerprint ? { treeFingerprint: options.treeFingerprint } : {}),
     ...(options.telemetry ? { censusReducer: options.telemetry } : {}),
     ...(options.preFirstTurnFinalizer ? { preFirstTurnFinalizer: options.preFirstTurnFinalizer } : {}),
   }
@@ -2574,32 +2575,42 @@ test("the builder's declared npm test is refused on headless rpc: the driver's s
   } finally { f.cleanup() }
 })
 
-// The rerun rule across the transport that pi seats run on. Counters are per role for the
-// run, so a repeat across two dispatches is still a repeat. Mutation killed: dropping the
-// edit observation from adjudicateRpcFrames — the second case then refuses too.
-test('on headless rpc a scoped test repeated with no edit between is a rerun, and with an edit between a measurement', () => {
+// The rerun rule across the transport that pi seats run on: judged by the TREE, so an edit
+// the frames never show (a Bash `sed -i`) admits and an envelope `write` frame does not
+// launder. Counters are per role for the run, so a repeat across two dispatches is still a
+// repeat. Mutation killed: reading frames instead of the tree — case 2 refuses, case 3 admits.
+test('on headless rpc a repeated scoped test is judged by the working tree, not by which tool ran between', () => {
   const policy = { suiteCommand: 'npm test', gatePath: '/tmp/b502/gate.mjs', fence: ['crew/'] }
   const command = 'node --test crew/headless-rpc.test.mjs'
-  const editFrames = [
+  const frames = (toolName, args, id) => [
     { type: 'turn_start' },
-    { type: 'tool_execution_start', toolCallId: 'b502-edit', toolName: 'write', args: { path: 'crew/headless-rpc.mjs', content: '' } },
-    { type: 'tool_execution_end', toolCallId: 'b502-edit', toolName: 'write' },
+    { type: 'tool_execution_start', toolCallId: id, toolName, args },
+    { type: 'tool_execution_end', toolCallId: id, toolName },
     { type: 'turn_end' },
   ]
-  for (const [between, expected] of [[[], 'insufficient'], [editFrames, 'done']]) {
-    const f = fixture()
+  const cases = [
+    { between: [], trees: ['t1', 't1'], expected: 'insufficient', why: 'same tree' },
+    { between: frames('bash', { command: "sed -i '' 's/a/b/' crew/headless-rpc.mjs" }, 'b502-sed'), trees: ['t1', 't2'], expected: 'done', why: 'a Bash edit changed the tree' },
+    { between: frames('write', { path: '/task/returns/r/d2.builder.json', content: '{}' }, 'b502-env'), trees: ['t1', 't1'], expected: 'insufficient', why: 'an envelope write is not a checkout edit' },
+    { between: [], trees: [null, null], expected: 'done', why: 'an unmeasured tree never refuses' },
+  ]
+  for (const { between, trees, expected, why } of cases) {
+    const queue = [...trees]
+    const rows = []
+    const f = fixture({ log: (row) => rows.push(row), treeFingerprint: () => (queue.length > 1 ? queue.shift() : queue[0]) })
     try {
       const first = f.io.assign({ role: 'builder', briefFile: '/brief.md', policy })
       b502AppendRpcStream(f, 'builder', b502RpcFrames(command, 'b502-run-1'))
       writeFileSync(first.returnPath, JSON.stringify({ assignment_id: first.id, role: 'builder', status: 'done', summary: 'first', artifacts: [], details: {} }))
-      assert.equal(f.io.wait(first.returnPath, 60).status, 'done')
+      assert.equal(f.io.wait(first.returnPath, 60).status, 'done', why)
 
       const second = f.io.assign({ role: 'builder', briefFile: '/brief-again.md', policy })
       b502AppendRpcStream(f, 'builder', [...between, ...b502RpcFrames(command, 'b502-run-2')])
       writeFileSync(second.returnPath, JSON.stringify({ assignment_id: second.id, role: 'builder', status: 'done', summary: 'second', artifacts: [], details: {} }))
       const envelope = f.io.wait(second.returnPath, 60)
-      assert.equal(envelope.status, expected, between.length ? 'edit between' : 'no edit between')
-      if (expected === 'insufficient') assert.deepEqual([envelope.details.suite_refusal.command, envelope.details.suite_refusal.refusal], [command, 'test-rerun-without-edit'])
+      assert.equal(envelope.status, expected, why)
+      if (expected === 'insufficient') assert.deepEqual([envelope.details.suite_refusal.command, envelope.details.suite_refusal.refusal], [command, 'test-rerun-without-edit'], why)
+      if (trees[0] === null) assert.equal(rows.filter((row) => row.suite_policy).at(-1)?.suite_policy.rerun_unmeasured, 1, 'the unmeasured repeat is stated')
     } finally { f.cleanup() }
   }
 })

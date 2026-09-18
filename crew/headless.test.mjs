@@ -13,8 +13,8 @@ import {
   SESSION_BUSY_EVENT, SESSION_BUSY_SETTLE_MS, SESSION_BUSY_VERDICTS, SESSION_BUSY_PHASES,
   SESSION_ROUND_BASES, SESSION_STAGE_ABSENT, SESSION_DRIVER_BASIS, SESSION_ROUND_BASIS, SESSION_ROUND_UNMEASURED,
   SEAT_SUITE_POLICY_EVENT, SUITE_RUN_REFUSAL, SUITE_RUN_UNRECOGNISED, SUITE_POLICY_STREAM_UNAVAILABLE,
-  suiteRunPolicy, recogniseSuiteInvocation, testTargets, fenceCovers, shellToolCalls, streamToolCalls, noteEditCall,
-  SUITE_RERUN_REFUSAL, suiteRefusalEnvelope, suiteRefusalRow,
+  suiteRunPolicy, recogniseSuiteInvocation, testTargets, fenceCovers, shellToolCalls,
+  SUITE_RERUN_REFUSAL, suiteRefusalEnvelope, suiteRefusalRow, treeFingerprint, rerunContext, RERUN_KINDS,
   splitShellCommands, executableText, stripHeredocBodies, commandTokens,
   suitePolicyCounters, countSuiteDecision, suitePolicyReport, SUITE_RUN_OWNERSHIP, SUITE_RUN_OWNERSHIP_KINDS,
 } from './headless.mjs'
@@ -23,7 +23,7 @@ import { headlessRpcIo } from './headless-rpc.mjs'
 import { assignmentLine, assignmentPrompt } from './driver.mjs'
 import { cellFailureKind, HEADLESS_TRANSPORT, seatIo } from './seat-io.mjs'
 import { DRIVER_GONE_PERIODS, HEARTBEAT_PERIOD_MS } from '../scripts/factory/lane-watch.mjs'
-import { ROOT, scratchDir, startFileWriter } from '../test/helpers.mjs'
+import { ROOT, git, scratchDir, startFileWriter } from '../test/helpers.mjs'
 
 // The final three bytes of each real 2026-08-30 refusal tail, copied
 // byte-for-byte so classification is adjudicated against the provider's own
@@ -2953,7 +2953,7 @@ function b416ClaudeStream({ turns = 2, command = null } = {}) {
   return `${frames.map((frame) => JSON.stringify(frame)).join('\n')}\n`
 }
 
-function b416JsonFixture({ role = 'builder', policy = null, fallback = null, onSleep = null, turnCeilings = null, telemetry = null, writeExitOnTerm = false } = {}) {
+function b416JsonFixture({ role = 'builder', policy = null, fallback = null, onSleep = null, turnCeilings = null, telemetry = null, writeExitOnTerm = false, treeFingerprint = null } = {}) {
   const dir = scratchDir('b416-json-')
   const taskDir = join(dir, 'task'); const returnsDir = join(dir, 'returns')
   mkdirSync(taskDir); mkdirSync(returnsDir)
@@ -2966,6 +2966,7 @@ function b416JsonFixture({ role = 'builder', policy = null, fallback = null, onS
     adapters: { [role]: { adapter } }, bin: '/worker/bin', turnCeilings,
     deps: {
       ...(telemetry ? { parseStream: telemetry } : {}),
+      ...(treeFingerprint ? { treeFingerprint } : {}),
       spawn: () => ({ pid: 4242, unref() {} }), uuid: () => 'b416-json-session',
       now: () => state.clock,
       sleep: (ms) => {
@@ -3374,7 +3375,7 @@ test('RV1-2 whole-invocation grammar fails closed across unsafe flags and fence 
 test('b416 RV1-2 suite policy coverage guards ownership, laundering, and spent planner allowance', () => {
   const gatePath = '/tmp/b416/gate.mjs'
   const fence = ['crew/headless.mjs', 'crew/headless.test.mjs']
-  assert.deepEqual(suitePolicyCounters(), { refused: 0, admitted: 0, unrecognised: 0, allowance_spent: 0, last_run: null, edited_since_run: true })
+  assert.deepEqual(suitePolicyCounters(), { refused: 0, admitted: 0, unrecognised: 0, allowance_spent: 0, last_run: null, last_run_tree: null, rerun_unmeasured: 0 })
   for (const role of ['reviewer', 'tech-lead', 'lead']) {
     assert.equal(suiteRunPolicy({ role, command: 'npm test', gatePath }).decision, 'refuse')
   }
@@ -3564,7 +3565,11 @@ test("the builder's declared npm test is refused on headless json: the driver's 
   } finally { f.cleanup() }
 })
 
-// Frames for an arbitrary sequence of tool calls, so a stream can carry an EDIT between two runs.
+// The rerun rule on the claude transport reads the TREE, not the frames: the fixture's
+// fingerprint is a value the test moves. Sol's two counterexamples on #1400 are the cases —
+// an edit the frames never show (`sed -i` through Bash) changes the tree and admits; a
+// `Write` that is not a checkout edit (the return envelope) leaves it and refuses.
+// Mutation killed: comparing frames instead of trees — case 2 refuses, case 3 admits.
 function b416ClaudeCalls(calls) {
   return `${calls.map((call, n) => {
     const id = `b416-call-${n + 1}`
@@ -3575,23 +3580,31 @@ function b416ClaudeCalls(calls) {
   }).join('\n')}\n`
 }
 
-// Mutation killed: dropping the edit observation from adjudicateSuiteCalls — the second
-// case then refuses too, because no edit is ever seen.
-test('on headless json a scoped test repeated with no edit between is a rerun, and with an edit between a measurement', () => {
+test('on headless json a repeated scoped test is judged by the working tree, not by which tool ran between', () => {
   const policy = { suiteCommand: 'npm test', gatePath: '/tmp/b502/gate.mjs', fence: ['crew/'] }
   const run = { name: 'Bash', input: { command: 'node --test crew/headless.test.mjs' } }
-  const edit = { name: 'Edit', input: { file_path: 'crew/headless.mjs', old_string: 'a', new_string: 'b' } }
-  for (const [calls, expected] of [[[run, run], 'insufficient'], [[run, edit, run], 'done']]) {
-    const f = b416JsonFixture({ role: 'builder', policy })
+  const sedEdit = { name: 'Bash', input: { command: "sed -i '' 's/a/b/' crew/headless.mjs" } }
+  const envelopeWrite = { name: 'Write', input: { file_path: '/task/returns/r/d2.builder.json', content: '{}' } }
+  const cases = [
+    { calls: [run, run], trees: ['t1', 't1'], expected: 'insufficient', why: 'same tree, no edit' },
+    { calls: [run, sedEdit, run], trees: ['t1', 't2'], expected: 'done', why: 'a Bash edit changed the tree' },
+    { calls: [run, envelopeWrite, run], trees: ['t1', 't1'], expected: 'insufficient', why: 'an envelope write is not a checkout edit' },
+    { calls: [run, run], trees: [null, null], expected: 'done', why: 'an unmeasured tree never refuses' },
+  ]
+  for (const { calls, trees, expected, why } of cases) {
+    const queue = [...trees]
+    // The first admitted run records trees[0]; the repeat measures trees[1] (or the last).
+    const f = b416JsonFixture({ role: 'builder', policy, treeFingerprint: () => (queue.length > 1 ? queue.shift() : queue[0]) })
     try {
       f.writeStream(b416ClaudeCalls(calls))
       writeFileSync(f.assigned.returnPath, JSON.stringify({ assignment_id: f.assigned.id, role: 'builder', status: 'done', summary: 'built', artifacts: [], details: {} }))
       const envelope = f.io.wait(f.assigned.returnPath, 60)
-      assert.equal(envelope.status, expected, JSON.stringify(calls.map((c) => c.name)))
+      assert.equal(envelope.status, expected, why)
       if (expected === 'insufficient') {
-        assert.equal(envelope.details.suite_refusal.refusal, SUITE_RERUN_REFUSAL)
-        assert.equal(f.rows.find((row) => row.refusal)?.refusal, SUITE_RERUN_REFUSAL)
+        assert.equal(envelope.details.suite_refusal.refusal, SUITE_RERUN_REFUSAL, why)
+        assert.equal(f.rows.find((row) => row.refusal)?.refusal, SUITE_RERUN_REFUSAL, why)
       }
+      if (trees[0] === null) assert.equal(f.rows.find((row) => row.suite_policy)?.suite_policy.rerun_unmeasured, 1, 'the unmeasured repeat is stated')
     } finally { f.cleanup() }
   }
 })
@@ -3702,57 +3715,70 @@ test('the builder owns no full-suite run: the declared command refuses in every 
   assert.equal(suiteRunPolicy({ role: 'builder', command: 'node --test crew/drive.test.mjs', fence, gatePath, suiteCommand: 'npm test' }).reason, 'fenced-test')
 })
 
-// Mutation killed: not recording the admitted command — last_run stays null and the
-// rerun rule never fires.
-test('an admitted run becomes the last run and clears the edited flag; the gate is free of the allowance', () => {
+// Mutation killed: not recording the admitted command or its tree — last_run stays null
+// and the rerun rule never fires; recording the gate too keeps a gate rerun judged.
+test('an admitted scoped test or gate becomes the last run with the tree it ran on; a suite run or probe does not', () => {
   const fence = ['crew/drive.mjs', 'crew/drive.test.mjs']
   const gatePath = '/task/gate.mjs'
   const counters = suitePolicyCounters()
   const scoped = suiteRunPolicy({ role: 'builder', command: 'node --test crew/drive.test.mjs', fence, gatePath, suiteCommand: 'npm test' })
-  countSuiteDecision(counters, scoped.decision, { kind: scoped.kind, blind: scoped.blind, command: 'node --test crew/drive.test.mjs' })
-  assert.deepEqual([counters.allowance_spent, counters.last_run, counters.edited_since_run], [1, 'node --test crew/drive.test.mjs', false])
+  countSuiteDecision(counters, scoped.decision, { kind: scoped.kind, blind: scoped.blind, command: 'node --test crew/drive.test.mjs', tree: 'tree-a' })
+  assert.deepEqual([counters.allowance_spent, counters.last_run, counters.last_run_tree], [1, 'node --test crew/drive.test.mjs', 'tree-a'])
   const gate = suiteRunPolicy({ role: 'builder', command: `node ${gatePath}`, fence, gatePath, suiteCommand: 'npm test' })
   assert.deepEqual([gate.decision, gate.kind], ['admit', 'gate'])
-  countSuiteDecision(counters, gate.decision, { kind: gate.kind, blind: gate.blind, command: `node ${gatePath}` })
-  assert.deepEqual([counters.allowance_spent, counters.last_run], [1, `node ${gatePath}`])
-  assert.equal(noteEditCall(counters).edited_since_run, true)
+  countSuiteDecision(counters, gate.decision, { kind: gate.kind, blind: gate.blind, command: `node ${gatePath}`, tree: 'tree-b' })
+  assert.deepEqual([counters.allowance_spent, counters.last_run, counters.last_run_tree], [1, `node ${gatePath}`, 'tree-b'])
+  const probe = suiteRunPolicy({ role: 'builder', command: 'node --test /tmp/lane/task/p.test.mjs', taskDir: '/tmp/lane/task', fence, gatePath, suiteCommand: 'npm test' })
+  countSuiteDecision(counters, probe.decision, { kind: probe.kind, blind: probe.blind, command: 'node --test /tmp/lane/task/p.test.mjs', tree: 'tree-c' })
+  assert.equal(counters.last_run, `node ${gatePath}`, 'an own-task probe is outside the rule and records nothing')
+  assert.deepEqual(RERUN_KINDS, ['scoped-test', 'gate'])
 })
 
-// The charter's "never rerun a command without an intervening edit", made mechanical.
-// Mutation killed: dropping the `!editedSinceRun` guard admits the repeat; dropping
-// sameInvocation's whitespace normalisation admits the re-spaced repeat.
-test('a scoped test repeated with no edit between is refused as a rerun; an edit, or a different command, is a measurement', () => {
+// The charter's "never rerun a command without an intervening edit", made mechanical on
+// the working tree. Mutation killed: inverting `tree === lastRunTree` refuses the changed
+// tree and admits the unchanged one; dropping the null guard refuses an unmeasured tree.
+test('a scoped test repeated on an unchanged tree is refused as a rerun; a changed tree, a different command, or an unmeasured tree is a measurement', () => {
   const fence = ['crew/drive.mjs', 'crew/drive.test.mjs', 'crew/drive-plan.test.mjs']
   const gatePath = '/task/gate.mjs'
   const counters = suitePolicyCounters()
-  const decide = (command) => {
-    const verdict = suiteRunPolicy({ role: 'builder', command, fence, gatePath, suiteCommand: 'npm test', lastRun: counters.last_run, editedSinceRun: counters.edited_since_run })
-    countSuiteDecision(counters, verdict.decision, { kind: verdict.kind, blind: verdict.blind, command })
+  const decide = (command, tree) => {
+    const verdict = suiteRunPolicy({ role: 'builder', command, fence, gatePath, suiteCommand: 'npm test', lastRun: counters.last_run, lastRunTree: counters.last_run_tree, tree })
+    countSuiteDecision(counters, verdict.decision, { kind: verdict.kind, blind: verdict.blind, command, tree, rerunUnmeasured: verdict.rerun_unmeasured === true })
     return verdict
   }
-  assert.equal(decide('node --test crew/drive.test.mjs').decision, 'admit')
-  const rerun = decide('node  --test   crew/drive.test.mjs ')
+  assert.equal(decide('node --test crew/drive.test.mjs', 'A').decision, 'admit')
+  const rerun = decide('node  --test   crew/drive.test.mjs ', 'A')
   assert.deepEqual([rerun.decision, rerun.refusal, rerun.kind], ['refuse', SUITE_RERUN_REFUSAL, 'scoped-test'])
   assert.match(rerun.reason, /nothing was edited since/)
-  assert.equal(decide('node --test crew/drive-plan.test.mjs').decision, 'admit', 'a different command is a new measurement')
-  assert.equal(decide('node --test crew/drive-plan.test.mjs').refusal, SUITE_RERUN_REFUSAL)
-  noteEditCall(counters)
-  assert.equal(decide('node --test crew/drive-plan.test.mjs').decision, 'admit', 'an edit makes the same run a measurement again')
-  assert.equal(decide('node --test crew/drive-plan.test.mjs').refusal, SUITE_RERUN_REFUSAL, 'and only once')
-  assert.deepEqual([counters.refused, counters.admitted], [3, 3])
+  assert.equal(decide('node --test crew/drive.test.mjs', 'B').decision, 'admit', 'the tree changed: a measurement')
+  assert.equal(decide('node --test crew/drive-plan.test.mjs', 'B').decision, 'admit', 'a different command is a new measurement')
+  const unmeasured = decide('node --test crew/drive-plan.test.mjs', null)
+  assert.deepEqual([unmeasured.decision, unmeasured.rerun_unmeasured], ['admit', true], 'an unmeasured tree never refuses, and says so')
+  assert.deepEqual([counters.refused, counters.admitted, counters.rerun_unmeasured], [1, 4, 1])
 })
 
-// Mutation killed: applying the rule to every role — the planner re-measures its gate
-// every plan round and never edits, so its repeats are measurements.
-test('the rerun rule covers the gate and the own-task probe for the builder, and never the planner', () => {
+// Sol on #1400: whitespace INSIDE a quoted argument is data. Mutation killed: normalising
+// on \s+ over the whole string — these two then compare equal and the second refuses.
+test('two invocations that differ only inside a quoted argument are different measurements', () => {
+  const fence = ['crew/headless.test.mjs']
+  const gatePath = '/task/gate.mjs'
+  const first = 'node --test --test-name-pattern="foo  bar" crew/headless.test.mjs'
+  const second = 'node --test --test-name-pattern="foo bar" crew/headless.test.mjs'
+  assert.equal(suiteRunPolicy({ role: 'builder', command: second, fence, gatePath, suiteCommand: 'npm test', lastRun: first, lastRunTree: 'A', tree: 'A' }).decision, 'admit')
+  assert.equal(suiteRunPolicy({ role: 'builder', command: `  ${first.replace(' crew/', '   crew/')}`, fence, gatePath, suiteCommand: 'npm test', lastRun: first, lastRunTree: 'A', tree: 'A' }).refusal, SUITE_RERUN_REFUSAL, 'separator whitespace is not')
+})
+
+// Mutation killed: applying the rule to every role, or to every kind — the planner
+// re-measures its gate every plan round and never edits; an own-task probe is outside
+// the contract.
+test('the rerun rule covers the gate for the builder, never the planner, and never an own-task probe', () => {
   const taskDir = '/tmp/b502-lane/task'
   const gatePath = `${taskDir}/gate.mjs`
-  const repeated = { lastRun: null, editedSinceRun: false }
-  for (const command of [`node ${gatePath}`, `node --test ${taskDir}/probe.test.mjs`]) {
-    repeated.lastRun = command
-    assert.equal(suiteRunPolicy({ role: 'builder', command, taskDir, fence: [], gatePath, suiteCommand: 'npm test', ...repeated }).refusal, SUITE_RERUN_REFUSAL, command)
-    assert.equal(suiteRunPolicy({ role: 'planner', command, taskDir, fence: [], gatePath, suiteCommand: 'npm test', ...repeated }).decision, 'admit', command)
-  }
+  const same = { lastRunTree: 'A', tree: 'A' }
+  assert.equal(suiteRunPolicy({ role: 'builder', command: `node ${gatePath}`, taskDir, fence: [], gatePath, suiteCommand: 'npm test', lastRun: `node ${gatePath}`, ...same }).refusal, SUITE_RERUN_REFUSAL)
+  assert.equal(suiteRunPolicy({ role: 'planner', command: `node ${gatePath}`, taskDir, fence: [], gatePath, suiteCommand: 'npm test', lastRun: `node ${gatePath}`, ...same }).decision, 'admit')
+  const probe = `node --test ${taskDir}/probe.test.mjs`
+  assert.equal(suiteRunPolicy({ role: 'builder', command: probe, taskDir, fence: [], gatePath, suiteCommand: 'npm test', lastRun: probe, ...same }).decision, 'admit')
 })
 
 // Mutation killed: deciding the rerun rule before ownership — a repeated unowned run
@@ -3761,7 +3787,7 @@ test('a repeated unowned command is refused as unowned, never as a rerun', () =>
   const fence = ['crew/drive.mjs']
   const gatePath = '/task/gate.mjs'
   for (const command of ['npm test', 'node --test crew/daemon.test.mjs']) {
-    const verdict = suiteRunPolicy({ role: 'builder', command, fence, gatePath, suiteCommand: 'npm test', lastRun: command, editedSinceRun: false })
+    const verdict = suiteRunPolicy({ role: 'builder', command, fence, gatePath, suiteCommand: 'npm test', lastRun: command, lastRunTree: 'A', tree: 'A' })
     assert.deepEqual([verdict.decision, verdict.refusal], ['refuse', SUITE_RUN_REFUSAL], command)
   }
 })
@@ -3769,7 +3795,7 @@ test('a repeated unowned command is refused as unowned, never as a rerun', () =>
 // Mutation killed: hard-coding SUITE_RUN_REFUSAL in the envelope summary or the journal
 // row — the brief would then tell a rerun "run the gate at its absolute path instead".
 test('the refusal envelope and journal row carry the rule that fired', () => {
-  const verdict = suiteRunPolicy({ role: 'builder', command: 'node --test crew/drive.test.mjs', fence: ['crew/drive.test.mjs'], gatePath: '/task/gate.mjs', suiteCommand: 'npm test', lastRun: 'node --test crew/drive.test.mjs', editedSinceRun: false })
+  const verdict = suiteRunPolicy({ role: 'builder', command: 'node --test crew/drive.test.mjs', fence: ['crew/drive.test.mjs'], gatePath: '/task/gate.mjs', suiteCommand: 'npm test', lastRun: 'node --test crew/drive.test.mjs', lastRunTree: 'A', tree: 'A' })
   const envelope = suiteRefusalEnvelope({ id: 'd2', role: 'builder', returnPath: '/returns/r/d2.builder.json', transport: 'headless-rpc', verdict })
   assert.match(envelope.summary, /^test-rerun-without-edit: builder ran/)
   assert.equal(envelope.details.suite_refusal.refusal, SUITE_RERUN_REFUSAL)
@@ -3778,17 +3804,39 @@ test('the refusal envelope and journal row carry the rule that fired', () => {
   assert.match(suiteRefusalEnvelope({ id: 'd2', role: 'builder', returnPath: '/r', transport: 'headless-rpc', verdict: unowned }).summary, /^suite-run-not-owned: /)
 })
 
-// Mutation killed: filtering to shell calls inside streamToolCalls — the edit between two
-// runs is then never seen by the claude transport.
-test('streamToolCalls yields every recorded tool call and shellToolCalls only the shell ones', () => {
-  const text = [
-    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'node --test a.test.mjs' } }, { type: 'tool_use', id: 't2', name: 'Edit', input: { file_path: 'a.mjs' } }] } }),
-    JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1' }] } }),
-    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 't3', name: 'Bash', input: { command: '   ' } }, { type: 'text', text: 'done' }] } }),
-    'not json',
-  ].join('\n')
-  assert.deepEqual(streamToolCalls(text).map((call) => [call.id, call.name]), [['t1', 'Bash'], ['t2', 'Edit'], ['t3', 'Bash']])
-  assert.deepEqual(shellToolCalls(text), [{ id: 't1', command: 'node --test a.test.mjs' }])
+// Mutation killed: fingerprinting on every shell call — the fake then counts a call for
+// `ls`; or never fingerprinting — the repeat carries tree null and is never judged.
+test('rerunContext fingerprints the tree only when the command repeats the last run', () => {
+  let calls = 0
+  const fingerprint = () => { calls += 1; return 'T' }
+  const counters = { ...suitePolicyCounters(), last_run: 'node --test a.test.mjs', last_run_tree: 'S' }
+  assert.deepEqual(rerunContext(counters, 'ls -la', fingerprint), { lastRun: 'node --test a.test.mjs', lastRunTree: 'S', tree: null })
+  assert.deepEqual(rerunContext(counters, 'node   --test a.test.mjs', fingerprint), { lastRun: 'node --test a.test.mjs', lastRunTree: 'S', tree: 'T' })
+  assert.equal(calls, 1)
+})
+
+// The instrument itself, on a real repository: what a seat DID to the tree, whatever tool did
+// it. Mutation killed: dropping the untracked size/mtime fold — the rewritten untracked file
+// then reads unchanged; returning '' instead of null on a git failure — a non-repo then
+// "matches" itself and refuses.
+test('treeFingerprint changes with a tracked edit, a new file and a rewritten untracked file, and is null outside a repository', () => {
+  const dir = scratchDir('tree-fp-')
+  git(dir, 'init', '-q')
+  writeFileSync(join(dir, 'a.mjs'), 'export const a = 1\n'); git(dir, 'add', 'a.mjs'); git(dir, 'commit', '-q', '-m', 'base')
+  const clean = treeFingerprint(dir)
+  assert.match(clean, /^[0-9a-f]{64}$/)
+  assert.equal(treeFingerprint(dir), clean, 'stable while nothing moves')
+  writeFileSync(join(dir, 'a.mjs'), 'export const a = 2\n')
+  const edited = treeFingerprint(dir)
+  assert.notEqual(edited, clean, 'a tracked edit through any tool moves it')
+  writeFileSync(join(dir, 'b.test.mjs'), 'x')
+  const added = treeFingerprint(dir)
+  assert.notEqual(added, edited, 'a new untracked file moves it')
+  writeFileSync(join(dir, 'b.test.mjs'), 'xyzzy')
+  assert.notEqual(treeFingerprint(dir), added, 'rewriting an untracked file moves it')
+  assert.equal(treeFingerprint(join(dir, 'nowhere')), null, 'no repository: unmeasured, never a value')
+  assert.equal(treeFingerprint(''), null)
+  assert.equal(treeFingerprint(dir, { spawnSync: () => { throw new Error('no git') } }), null, 'a throwing git is unmeasured')
 })
 
 // Mutation killed: widening a never-owner to the builder's ownership, or giving the
@@ -3799,6 +3847,7 @@ test('no role but the planner owns a full-suite run', () => {
     assert.equal(suiteRunPolicy({ role, command: 'npm test', gatePath: '/task/gate.mjs', suiteCommand: 'npm test' }).decision, 'refuse', role)
   }
   assert.equal(SUITE_RUN_OWNERSHIP.planner, 'once')
+  assert.equal(SUITE_RUN_OWNERSHIP.builder, 'fenced')
   assert.equal(suiteRunPolicy({ role: 'planner', command: 'npm test', gatePath: '/task/gate.mjs', suiteCommand: 'npm test' }).decision, 'admit')
 })
 

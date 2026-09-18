@@ -139,13 +139,15 @@ test('a mutant is measured only when every suite run finished with attributable 
     'file-level-failure': { suite: 's', status: 1, stdout: 'TAP version 13\n# Subtest: s\nnot ok 1 - s\n  exitCode: 7\n1..1\n# tests 1\n# fail 1\n', stderr: '' },
     cancelled: { suite: 's', status: 1, stdout: tap('# Subtest: a\nok 1 - a\n# Subtest: b\nnot ok 2 - b', 1).replace('# fail 1', '# fail 1\n# cancelled 1'), stderr: '' },
     'failures-unattributed': { suite: 's', status: 1, stdout: tap('# Subtest: a\nok 1 - a\n# Subtest: b\nok 2 - b', 1), stderr: '' },
+    // and the other direction: a failing record the footer does not count is the same lie
+    'failures-unattributed ': { suite: 's', status: 1, stdout: tap('# Subtest: a\nok 1 - a\n# Subtest: b\nnot ok 2 - b', 0), stderr: '' },
     'suite-exit-unattributed': { suite: 's', status: 1, stdout: tap('# Subtest: a\nok 1 - a\n# Subtest: b\nok 2 - b', 0), stderr: '' },
     'no-tap-output': { suite: 's', status: 0, stdout: '', stderr: '' },
   }
   for (const [reason, output] of Object.entries(reasons)) {
     const verdict = classifyMutantOutcome({ suiteOutputs: [ok, output] })
-    assert.deepEqual([verdict.status, verdict.reason, verdict.survivor], ['unmeasured', reason, false], reason)
-    assert.ok(MUTANT_UNMEASURED_REASONS.includes(reason), `${reason} is in the closed enum`)
+    assert.deepEqual([verdict.status, verdict.reason, verdict.survivor], ['unmeasured', reason.trim(), false], reason)
+    assert.ok(MUTANT_UNMEASURED_REASONS.includes(reason.trim()), `${reason} is in the closed enum`)
   }
   // A TODO failure is not a kill and `# fail 0` reconciles: the mutant is measured, a survivor.
   const todo = { suite: 's', status: 0, stdout: 'TAP version 13\n# Subtest: a\nok 1 - a\n# Subtest: t\nnot ok 2 - t # TODO\n1..2\n# tests 2\n# pass 1\n# fail 0\n# todo 1\n', stderr: '' }
@@ -191,7 +193,7 @@ test('a redundancy candidate survives --out serialization and is named in the re
   assert.deepEqual(report.baselines, [{ suite: 's', status: 'measured', reason: null, tests: 2 }])
   const md = readFileSync(join(dir, 'k.md'), 'utf8')
   assert.match(md, /- s :: A dominates s :: B: \d+ of \d+ \(/)
-  assert.match(md, /Sample blind spot: .* of the candidates generated on sampled lines/)
+  assert.ok(md.includes(`Sample blind spot: only the first generated candidate per sampled line was measured (${report.sampling.selectedCandidates} of ${report.sampling.generatedCandidates} (`), 'the blind-spot line states selected of generated')
 })
 
 test('a zero denominator is stated as unmeasured, never as 0%', () => {

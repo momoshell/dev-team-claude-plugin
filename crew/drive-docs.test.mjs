@@ -227,38 +227,48 @@ test('BC2', () => {
   assert.equal(charter.split(sentence).length - 1, 1)
 })
 
-test('builder lean rules and lean-build skill stay exact', () => {
-  const charterLines = readFileSync(join(REPO_ROOT, 'crew', 'roles', 'builder.md'), 'utf8').split('\n')
-  const rules = [
-    '- Before writing code, reuse what is already here.',
-    '- If not, use the standard library.',
-    '- If not, use a platform feature.',
-    '- If not, use an installed dependency.',
-    '- For a bug fix, grep every caller, fix the root cause, and put one guard in the shared function.',
-    '- Leave one runnable check for the behavior you changed.',
-    '- Output the code, then at most three lines of `skipped X, add when Y`.',
+test('the ladder lives once, in _shared.md; builder keeps only its output rule; lean-build carries the repo examples', () => {
+  const sharedLines = readFileSync(join(REPO_ROOT, 'crew', 'roles', '_shared.md'), 'utf8').split('\n')
+  const builderLines = readFileSync(join(REPO_ROOT, 'crew', 'roles', 'builder.md'), 'utf8').split('\n')
+  // The six rungs, exact, exactly once, in the charter EVERY seat receives.
+  const rungs = [
+    '1. Does this need to exist at all? Speculative need: skip it, say so in one line.',
+    '2. Already in this codebase? Reuse the helper, util or pattern that lives here.',
+    '3. Stdlib does it? Use it.',
+    '4. An installed dependency does it? Use it. Never add one for a few lines.',
+    '5. Can it be one line? One line.',
+    '6. Only then: the minimum code that works.',
   ]
-  for (const rule of rules) assert.equal(charterLines.filter((line) => line === rule).length, 1, rule)
+  for (const rung of rungs) assert.equal(sharedLines.filter((line) => line === rung).length, 1, rung)
+  assert.ok(sharedLines.some((line) => line.startsWith('Bug fix = root cause, not symptom')), 'root-cause rule in _shared')
+  assert.ok(sharedLines.some((line) => line.includes('\`lean: <ceiling>, <upgrade path>\`')), 'the lean: marker convention in _shared')
+  // NO duplicate: the the builder former copy of the ladder is gone; its output rule stays.
+  for (const gone of ['- Before writing code, reuse what is already here.', '- If not, use the standard library.', '- If not, use a platform feature.', '- If not, use an installed dependency.', '- Leave one runnable check for the behavior you changed.']) {
+    assert.equal(builderLines.includes(gone), false, `ladder duplicated in builder.md: ${gone}`)
+  }
+  assert.equal(builderLines.filter((line) => line === '- Output the code, then at most three lines of \`skipped X, add when Y\`.').length, 1)
 
   const skill = readFileSync(join(REPO_ROOT, 'skills/lean-build/SKILL.md'), 'utf8')
   const skillLines = skill.split('\n')
   assert.equal(skillLines[0], '---')
   assert.equal(skillLines[1], 'name: lean-build')
-  assert.match(skillLines[2] || '', /^description: .+$/)
-  assert.equal(skillLines[3], 'compatibility: Delivered only to pi builder and planner seats; claude seats receive nothing because adapter-claude refuses skill grants.')
+  assert.match(skillLines[2] || '', /^description: .+_shared\.md.+$/)
+  assert.equal(skillLines[3], 'compatibility: Delivered to pi builder and planner seats; claude seats receive nothing because adapter-claude refuses skill grants. The ladder itself reaches every seat through _shared.md.')
   assert.equal(skillLines[4], '---')
-  const flow = "Trace the change's flow until you understand it; only then climb the ladder."
-  const ladder = 'Apply the ladder before writing new code.'
-  const review = 'Every review tag requires a concrete replacement.'
-  const tags = 'Review tags: `delete`, `stdlib`, `native`, `yagni`, and `shrink`.'
+  // The skill must NOT restate the ladder — one home.
+  for (const rung of rungs) assert.equal(skill.includes(rung), false, `ladder duplicated in the skill: ${rung}`)
   const tieBreak = 'When two standard-library options are the same size, choose the edge-case-correct one.'
-  for (const line of [flow, ladder, review, tags, tieBreak]) {
-    assert.equal(skillLines.filter((candidate) => candidate === line).length, 1, line)
-  }
-  assert.ok(skillLines.indexOf(flow) < skillLines.indexOf(ladder))
-  for (const tag of ['delete', 'stdlib', 'native', 'yagni', 'shrink']) {
-    assert.equal(skillLines.filter((line) => line === tags && line.includes(`\`${tag}\``)).length, 1, tag)
-  }
+  assert.equal(skillLines.filter((line) => line === tieBreak).length, 1, tieBreak)
+  assert.ok(skill.includes('// lean: global lock, per-account locks if throughput matters'), 'the marker example')
+  assert.ok(skill.includes('scripts/factory/lean-debt.mjs'), 'names the harvester')
+  // The five complexity tags are what the REVIEWER judges, so they live in its charter, closed.
+  const reviewer = readFileSync(join(REPO_ROOT, 'crew', 'roles', 'reviewer.md'), 'utf8')
+  const reviewerProse = reviewer.replace(/\s+/g, ' ')
+  assert.ok(reviewer.includes('## Complexity findings'))
+  for (const tag of ['delete', 'stdlib', 'native', 'yagni', 'shrink']) assert.ok(reviewer.includes(`\`${tag}\``), tag)
+  assert.ok(reviewerProse.includes('Every tag names a concrete replacement.'))
+  assert.ok(reviewerProse.includes('do not flag it'), 'the one smoke test is never bloat')
+  assert.equal(skill.includes('Review tags:'), false, 'tags are not duplicated into the skill')
 
   const expectedExamples = [
     { line: '- Standard library: replace a shell-built `git add` command with `execFileSync(\'git\', [\'add\', \'--\', ...toAdd])` (crew/seat-io.mjs:3608).', file: 'crew/seat-io.mjs', first: 3608, last: 3608, firstFragment: "execFileSync('git', ['add', '--', ...toAdd]", lastFragment: "execFileSync('git', ['add', '--', ...toAdd]" },
@@ -288,8 +298,9 @@ test('builder lean rules and lean-build skill stay exact', () => {
     assert.ok(sourceLines[last - 1].includes(expected.lastFragment), `${file}:${last} did not contain ${expected.lastFragment}`)
   }
 
-  const neverSimplify = 'Never simplify away: trust-boundary validation; data-loss error handling; security checks; anything the task explicitly requested; closed enums; honest absence with a reason; a denominator beside every rate.'
-  assert.equal(skillLines.filter((line) => line === neverSimplify).length, 1)
+  // The never-simplify list lives ONCE, in _shared.md (every seat); the skill does not restate it.
+  const sharedProse = readFileSync(join(REPO_ROOT, 'crew', 'roles', '_shared.md'), 'utf8')
+  assert.ok(sharedProse.includes('- Never simplify away:'))
   for (const limit of [
     'trust-boundary validation',
     'data-loss error handling',
@@ -298,7 +309,8 @@ test('builder lean rules and lean-build skill stay exact', () => {
     'closed enums',
     'honest absence with a reason',
     'a denominator beside every rate',
-  ]) assert.equal(skillLines.filter((line) => line === neverSimplify && line.includes(limit)).length, 1, limit)
+  ]) assert.ok(sharedProse.includes(`  - ${limit}`), limit)
+  assert.equal(skill.includes('Never simplify away'), false, 'never-simplify duplicated into the skill')
   for (const retired of ['lru_cache', 'safeParse', 'type="date"']) assert.equal(skill.includes(retired), false, retired)
 })
 

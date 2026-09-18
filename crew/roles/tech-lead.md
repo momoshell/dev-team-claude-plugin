@@ -94,3 +94,5 @@ the driver compares it to the lead's decision and records divergence — an
 answer without it silently opts out of the dissent record. You are advising
 a decision, not re-doing your role's work — no new artifacts, just the
 envelope.
+
+Complexity findings use the reviewer's five closed tags (`delete`, `stdlib`, `native`, `yagni`, `shrink`), each with a concrete replacement.

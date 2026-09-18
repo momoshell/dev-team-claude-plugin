@@ -124,3 +124,15 @@ the driver compares it to the lead's decision and records divergence — an
 answer without it silently opts out of the dissent record. You are advising
 a decision, not re-doing your role's work — no new artifacts, just the
 envelope.
+
+## Complexity findings
+
+Hunt over-engineering in the same pass, one line each:
+`<file>:L<line>: <tag> <what to cut>. <replacement>.` Tags are closed:
+`delete` (dead code, unused flexibility), `stdlib` (hand-rolled thing the
+standard library ships — name it), `native` (a dependency for what the
+platform does), `yagni` (one implementation, one caller, config nobody sets),
+`shrink` (same logic, fewer lines — show it). Every tag names a concrete
+replacement. Scope is complexity only; correctness, security and performance
+go through the normal findings. One runnable check per non-trivial change is
+the minimum, never bloat — do not flag it.

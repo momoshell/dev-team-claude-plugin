@@ -134,7 +134,10 @@ export function parseTapKills(output, suite = null) {
   // Occurrence identity: the second test titled `same` is `same#2`, so a run that dropped
   // one of two duplicates, or ran them in another order, measured something else.
   const seen = new Map()
-  for (const record of leaves) { if (!measuring(record)) continue; const n = (seen.get(record.key) ?? 0) + 1; seen.set(record.key, n); record.id = n === 1 ? record.key : `${record.key}#${n}` }
+  // A title can contain any text, so a suffix like `#2` can collide with a real title; the
+  // first occurrence keeps its plain key (what a reader sees) and every later one carries its
+  // ordinal in a form no title can produce (a NUL-separated tail).
+  for (const record of leaves) { if (!measuring(record)) continue; const n = (seen.get(record.key) ?? 0) + 1; seen.set(record.key, n); record.id = n === 1 ? record.key : `${record.key}\u0000${n}` }
   const killers = leaves.filter((record) => record.failed && measuring(record)).map((record) => record.id)
   const observed = leaves.filter(measuring).map((record) => record.id)
   // Node's `# fail` counts containers too and excludes TODO failures, so attribution is
@@ -337,12 +340,16 @@ function parseArgs(argv) {
   return parsed
 }
 
+// Best-effort: the nearest preceding column-0 or indented `function NAME(` / `const NAME = (…) =>`
+// DECLARATION. Calls, keywords and strings are never a group; a line inside an arrow the
+// scan cannot see lands in the declaration above it, which is the stated limit.
 function functionForLine(lines, lineNumber) {
   for (let index = Math.min(lines.length - 1, lineNumber - 1); index >= 0; index -= 1) {
-    const match = /\bfunction\s+([A-Za-z_$][\w$]*)/.exec(lines[index]) || /\b([A-Za-z_$][\w$]*)\s*\(/.exec(lines[index])
+    const match = /^\s*(?:export\s+)?(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)\s*\(/.exec(lines[index])
+      || /^\s*(?:export\s+)?(?:const|let)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>/.exec(lines[index])
     if (match) return match[1]
   }
-  return '(best-effort enclosing function unavailable)'
+  return '(top level: no enclosing declaration found)'
 }
 
 // A rate is a numerator AND its denominator; a zero denominator is not 0%, it is a cell
@@ -372,11 +379,11 @@ export function buildMarkdown(analysis = {}) {
     'Driver suites (pristine baseline: measured leaf tests, or the reason it was not):',
     ...suites.map((suite) => { const b = (analysis.baselines || []).find((row) => row.suite === suite); return `- ${suite}: ${b ? (b.status === 'measured' ? `${b.tests} tests` : `unmeasured (${b.reason})`) : 'no baseline recorded'}` }),
     `Mutants selected: ${formatRate(sampled, sampled)}`,
-    `Mutants measured: ${formatRate(sampled - (analysis.unmeasured?.length ?? 0), sampled)}`,
+    `Mutants measured (over the baseline-eligible suites only): ${formatRate(sampled - (analysis.unmeasured?.length ?? 0), sampled)}`,
     `Mutants killed: ${formatRate(killed, sampled)}`,
     `Tests observed: ${observed > 0 ? `${observed}` : 'unmeasured (no suite run finished with attributable outcomes)'}`,
     `Tests with a kill-set: ${formatRate(withKillSet, observed)}`,
-    `Wall clock seconds: ${seconds}`,
+    `Wall clock seconds (baseline census and mutation loop): ${seconds}`,
     '',
     '## Sampling',
     `Lines requested: ${provenance.mutantsRequested ?? sampling.sampledLines ?? 'unmeasured'}`,
@@ -402,7 +409,7 @@ export function buildMarkdown(analysis = {}) {
   else for (const entry of analysis.redundant) {
     lines.push(`- ${entry.dominator} dominates ${entry.candidate}: ${formatRate(entry.kills.length, sampled)} of its sampled kills are also the dominator's (dominator: ${formatRate(entry.dominatorKills.length, sampled)})`)
   }
-  lines.push('', '## Survivors (gaps in this sample)')
+  lines.push('', '## Survivors (gaps in this sample), grouped by enclosing declaration — best-effort')
   if (!analysis.survivors?.length) lines.push('- none observed')
   else {
     const groups = new Map()
@@ -447,6 +454,7 @@ export function main(argv = process.argv.slice(2), deps = {}) {
   const observedTests = new Set()
   const suitesWithMeasuredRun = new Set()
   const suiteRuns = { measured: 0, total: 0 }
+  const started = performance.now()
   // Pristine census first: what each suite measures with nothing mutated. A suite whose
   // baseline is unmeasured (or red) is not run against mutants at all.
   const baselines = new Map()
@@ -468,7 +476,6 @@ export function main(argv = process.argv.slice(2), deps = {}) {
     kill(process.pid, 'SIGINT')
   }
   signals.on('SIGINT', handleSigint)
-  const started = performance.now()
   try {
     for (const mutant of generated.candidates) {
       const snapshot = snapshotFile(targetPath)

@@ -50,6 +50,18 @@ test('an empty observed kill-set is unmeasured with its closed reason', () => {
   assert.equal(silent.status, 'unmeasured')
 })
 
+// Survivors are grouped by the enclosing DECLARATION, never by a call, keyword or string on
+// a nearer line. Mutation killed: the call-shaped fallback regex (`if`, `Error` groups).
+test('survivors group by enclosing declaration, not by the nearest call or keyword', () => {
+  const lines = ['export function documentStringLiterals(x) {', '  const s = "DISCRIMINATE(" + x', '  if (x) throw new Error(s)', '  return s', '}', 'const arrow = (y) => {', '  foo(y)', '}']
+  const result = analyzeKills({ mutantResults: [{ mutant: { id: 'm1', line: 3 }, killers: [], survivor: true }, { mutant: { id: 'm2', line: 7 }, killers: [], survivor: true }] })
+  const markdown = buildMarkdown({ ...result, sourceLines: lines, wallClockSeconds: 1 })
+  assert.match(markdown, /- documentStringLiterals: 1 of 2/)
+  assert.match(markdown, /- arrow: 1 of 2/)
+  assert.doesNotMatch(markdown, /- (if|Error|DISCRIMINATE|foo):/)
+  assert.match(markdown, /best-effort/)
+})
+
 test('survivors are retained and markdown labels the sample gap', () => {
   const result = analyzeKills({ mutantResults: [{ mutant: { id: 'm1', line: 1 }, killers: [], survivor: true }] })
   assert.deepEqual(result.survivors, ['m1'])
@@ -177,12 +189,17 @@ test('a mutant run whose observed set differs from the pristine baseline is unme
   // Sol on #1401, pass 3: occurrence identity. Two tests titled the same are two tests; a
   // run that dropped one, or reordered them, measured something else.
   const twin = baselineCensus({ suite: 's', status: 0, stdout: tap('# Subtest: same\nok 1 - same\n# Subtest: same\nok 2 - same\n# Subtest: b\nok 3 - b', 0, 3), stderr: '' })
-  assert.deepEqual(twin.observed, ['s :: same', 's :: same#2', 's :: b'])
+  assert.deepEqual(twin.observed, ['s :: same', 's :: same\u00002', 's :: b'])
   const twins = new Map([['s', twin.observed]])
   assert.equal(classifyMutantOutcome({ suiteOutputs: [{ suite: 's', status: 1, stdout: tap('# Subtest: same\nnot ok 1 - same\n# Subtest: b\nok 2 - b', 1, 2), stderr: '' }], baselines: twins }).reason, 'outcome-set-differs', 'a duplicate dropped')
   assert.equal(classifyMutantOutcome({ suiteOutputs: [{ suite: 's', status: 0, stdout: tap('# Subtest: b\nok 1 - b\n# Subtest: same\nok 2 - same\n# Subtest: same\nok 3 - same', 0, 3), stderr: '' }], baselines: twins }).reason, 'outcome-set-differs', 'reordered')
   assert.equal(classifyMutantOutcome({ suiteOutputs: [{ suite: 's', status: 0, stdout: tap('# Subtest: same\nok 1 - same\n# Subtest: same\nok 2 - same\n# Subtest: c\nok 3 - c', 0, 3), stderr: '' }], baselines: twins }).reason, 'outcome-set-differs', 'a title the mutant changed')
-  assert.deepEqual(classifyMutantOutcome({ suiteOutputs: [{ suite: 's', status: 1, stdout: tap('# Subtest: same\nok 1 - same\n# Subtest: same\nnot ok 2 - same\n# Subtest: b\nok 3 - b', 1, 3), stderr: '' }], baselines: twins }).killers, ['s :: same#2'], 'the second twin is the killer')
+  assert.deepEqual(classifyMutantOutcome({ suiteOutputs: [{ suite: 's', status: 1, stdout: tap('# Subtest: same\nok 1 - same\n# Subtest: same\nnot ok 2 - same\n# Subtest: b\nok 3 - b', 1, 3), stderr: '' }], baselines: twins }).killers, ['s :: same\u00002'], 'the second twin is the killer')
+  // Sol on #1401, pass 4: a title that spells the ordinal suffix cannot collide with one.
+  const spelled = baselineCensus({ suite: 's', status: 0, stdout: tap('# Subtest: same\nok 1 - same\n# Subtest: same\nok 2 - same\n# Subtest: same#2\nok 3 - same#2', 0, 3), stderr: '' })
+  assert.equal(new Set(spelled.observed).size, 3, 'three distinct identities')
+  const reordered = { suite: 's', status: 0, stdout: tap('# Subtest: same\nok 1 - same\n# Subtest: same#2\nok 2 - same#2\n# Subtest: same\nok 3 - same', 0, 3), stderr: '' }
+  assert.equal(classifyMutantOutcome({ suiteOutputs: [reordered], baselines: new Map([['s', spelled.observed]]) }).reason, 'outcome-set-differs', 'reordering around a spelled suffix is caught')
 })
 
 // Every unmeasured path, table-tested for membership in the one closed source (Sol on
@@ -212,6 +229,14 @@ test('every unmeasured path emits a reason from the closed source', () => {
   }
   assert.equal(classifyMutantOutcome({ suiteOutputs: [ok], baselines }).status, 'measured')
   assert.equal(baselineCensus({ suite: 's', status: 1, stdout: tap('# Subtest: a\nnot ok 1 - a', 1, 1), stderr: '' }).reason, 'baseline-red')
+  // The one reason only main emits: no suite had a measured baseline, so every mutant is unmeasured.
+  const dir = scratchDir('kr-nobase-')
+  mkdirSync(join(dir, 'crew'), { recursive: true })
+  writeFileSync(join(dir, 'crew', 'drive.mjs'), ['export const a = 1', 'export function f(x) { return x + 1 }', ''].join('\n'))
+  assert.equal(main(['--mutants', '2', '--seed', '1', '--suites', 'r', '--out', join(dir, 'k.json'), '--md', join(dir, 'k.md'), '--checkout', dir], { spawnSync: () => ({ status: 1, stdout: tap('# Subtest: a\nnot ok 1 - a', 1, 1), stderr: '' }) }), 0)
+  const none = JSON.parse(readFileSync(join(dir, 'k.json'), 'utf8'))
+  assert.ok(none.unmeasured.length > 0 && none.unmeasured.every((row) => row.reason === REASON.BASELINE_UNMEASURED), JSON.stringify(none.unmeasured))
+  assert.ok(MUTANT_UNMEASURED_REASONS.includes(none.unmeasured[0].reason))
   assert.deepEqual(Object.values(REASON).sort(), [...MUTANT_UNMEASURED_REASONS].sort())
   assert.equal(MUTANT_UNMEASURED_REASONS.length, 12)
 })

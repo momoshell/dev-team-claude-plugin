@@ -5,14 +5,14 @@
   "scripts/factory/make-brief.mjs:136": "STALE_READ_ACK = 'stale-read-ack'",
   "scripts/factory/make-brief.mjs:1687": "a recorded baseline is a fact about a commit and is never consumed",
   "crew/drive.test.mjs:1378": "'/path/that/does/not/exist'",
-  "scripts/factory/dispatch-batch.mjs:36": "FENCE_NOT_ARRIVED = 'fence-not-arrived'",
-  "scripts/factory/dispatch-batch.mjs:157": "PANE_TRANSPORT = 'panes'",
-  "scripts/factory/dispatch-batch.mjs:23": "TRANSPORT_CONFLICT = 'transport-conflict'",
-  "scripts/factory/dispatch-batch.mjs:41": "DEPENDENT_BASE_STALE = 'dependent-base-stale'",
   "crew/drive.mjs:32": "plan_rounds: 2, // planner attempts",
   "crew/drive.mjs:57": "builder: 2400, reviewer: 1800",
   "crew/drive.mjs:762": "export const GATE_REAP_SHELL = '/bin/bash'",
-  "scripts/factory/dispatch-batch.mjs:156": "BOOT_TRANSPORT = 'headless-all'",
-  "scripts/factory/dispatch-batch.mjs:40": "DEPENDENCY_UNKNOWN = 'dependency-unknown'",
-  "scripts/factory/dispatch-batch.mjs:39": "DEPENDENCY_CYCLE = 'dependency-cycle'"
+  "scripts/factory/dispatch-batch.mjs:38": "FENCE_NOT_ARRIVED = 'fence-not-arrived'",
+  "scripts/factory/dispatch-batch.mjs:170": "BOOT_TRANSPORT = 'headless-all'",
+  "scripts/factory/dispatch-batch.mjs:171": "PANE_TRANSPORT = 'panes'",
+  "scripts/factory/dispatch-batch.mjs:25": "TRANSPORT_CONFLICT = 'transport-conflict'",
+  "scripts/factory/dispatch-batch.mjs:42": "DEPENDENCY_UNKNOWN = 'dependency-unknown'",
+  "scripts/factory/dispatch-batch.mjs:43": "DEPENDENT_BASE_STALE = 'dependent-base-stale'",
+  "scripts/factory/dispatch-batch.mjs:41": "DEPENDENCY_CYCLE = 'dependency-cycle'"
 }

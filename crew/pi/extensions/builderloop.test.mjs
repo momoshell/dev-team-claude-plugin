@@ -9,19 +9,20 @@ import * as mod from './builderloop.ts'
 function fixture({ lane = 'node --test in.test.mjs', scope = ['in.test.mjs'], gate = 'node task/gate.mjs' } = {}) {
   const root = scratchDir('builder-loop-')
   const taskDir = join(root, 'task')
-  const returns = join(root, 'returns')
+  const runId = 'run-fixture-1'
+  const returns = join(root, 'returns', runId)   // run-scoped, as the driver writes it since 2fac235d
   mkdirSync(taskDir, { recursive: true })
   mkdirSync(returns, { recursive: true })
   writeFileSync(join(root, 'in.test.mjs'), 'export {}\n')
   writeFileSync(join(root, 'out.test.mjs'), 'export {}\n')
   writeFileSync(join(root, 'fixture.mjs'), 'original bytes\n')
-  writeFileSync(join(root, 'journal.jsonl'), `${JSON.stringify({ event: 'run-start', at: new Date(Date.now() - 500).toISOString() })}\n`)
+  writeFileSync(join(root, 'journal.jsonl'), `${JSON.stringify({ event: 'run-start', run_id: runId, at: new Date(Date.now() - 500).toISOString() })}\n`)
   writeFileSync(join(returns, 'd1.planner.json'), JSON.stringify({
     assignment_id: 'd1', role: 'planner', status: 'done', details: {
       files_in_scope: scope, validation_lane: lane, gate_cmd: gate,
     },
   }))
-  return { root, taskDir, returns }
+  return { root, taskDir, returns, runId }
 }
 
 function event(toolName, path, { isError = false, text = 'original result' } = {}) {
@@ -183,16 +184,16 @@ test('planner context is lazy, current-run only, and requires a done planner env
   writeFileSync(planner, JSON.stringify({ role: 'planner', status: 'working', details: { files_in_scope: ['in.test.mjs'], validation_lane: 'node --test in.test.mjs', gate_cmd: 'node task/gate.mjs' } }))
   assert.equal(mod.loadPlannerContext({ taskDir: f.taskDir }), null)
   writeFileSync(planner, JSON.stringify({ role: 'planner', status: 'done', details: { files_in_scope: ['in.test.mjs'], validation_lane: 'node --test in.test.mjs', gate_cmd: 'node task/gate.mjs' } }))
-  writeFileSync(journal, `${JSON.stringify({ event: 'run-start', at: new Date(Date.now() + 10).toISOString() })}\n`)
+  writeFileSync(journal, `${JSON.stringify({ event: 'run-start', run_id: f.runId, at: new Date(Date.now() + 10).toISOString() })}\n`)
   assert.equal(mod.loadPlannerContext({ taskDir: f.taskDir }), null)
-  writeFileSync(journal, `${JSON.stringify({ event: 'run-start', at: new Date(Date.now() - 500).toISOString() })}\n`)
+  writeFileSync(journal, `${JSON.stringify({ event: 'run-start', run_id: f.runId, at: new Date(Date.now() - 500).toISOString() })}\n`)
   assert.deepEqual(mod.loadPlannerContext({ taskDir: f.taskDir }), { files_in_scope: ['in.test.mjs'], validation_lane: 'node --test in.test.mjs', gate_cmd: 'node task/gate.mjs' })
 })
 
 test('RV1-1 reads oversized journals from the tail and bounded head fallback', () => {
   const f = fixture()
   const journal = join(f.root, 'journal.jsonl')
-  const start = JSON.stringify({ event: 'run-start', at: new Date(Date.now() - 60_000).toISOString() })
+  const start = JSON.stringify({ event: 'run-start', run_id: f.runId, at: new Date(Date.now() - 60_000).toISOString() })
   const noise = `${JSON.stringify({ event: 'noise', payload: 'x'.repeat(70_000) })}\n`
   const expected = { files_in_scope: ['in.test.mjs'], validation_lane: 'node --test in.test.mjs', gate_cmd: 'node task/gate.mjs' }
 
@@ -218,7 +219,7 @@ test('RV2-1 walks bounded journal windows to honor the last run-start', () => {
   const stale = { role: 'planner', status: 'done', details: { files_in_scope: ['stale.test.mjs'], validation_lane: 'node --test stale.test.mjs', gate_cmd: 'node task/gate.mjs' } }
   const fresh = { role: 'planner', status: 'done', details: { files_in_scope: ['fresh.test.mjs'], validation_lane: 'node --test fresh.test.mjs', gate_cmd: 'node task/gate.mjs' } }
 
-  writeFileSync(journal, `${JSON.stringify({ event: 'run-start', at: oldRun.toISOString() })}\n${filler}${JSON.stringify({ event: 'run-start', at: newRun.toISOString() })}\n${filler}`)
+  writeFileSync(journal, `${JSON.stringify({ event: 'run-start', run_id: f.runId, at: oldRun.toISOString() })}\n${filler}${JSON.stringify({ event: 'run-start', run_id: f.runId, at: newRun.toISOString() })}\n${filler}`)
   writeFileSync(staleReturn, JSON.stringify(stale))
   writeFileSync(freshReturn, JSON.stringify(fresh))
   utimesSync(staleReturn, new Date(now - 60 * 60_000), new Date(now - 60 * 60_000))
@@ -299,4 +300,20 @@ test('builderloop is zero-dependency, erasable, and exposes only its test seam',
   assert.ok(imports.every((specifier) => specifier.startsWith('node:')), imports.join(', '))
   assert.doesNotMatch(source, /^\s*(enum|namespace)\s/m)
   assert.deepEqual(Object.keys(mod).sort(), ['attachBuilderLoop', 'createBuilderLoop', 'default', 'fencedNodeTestCommand', 'loadPlannerContext', 'runNodeTests'].sort())
+})
+
+// 2fac235d moved returns under returns/<run_id>/ and this hook kept scanning returns/ — inert for
+// five days, and every builder ran its own tests instead. These pin the contract that failed.
+test('a planner return in the pre-09-13 flat layout is NOT read: only returns/<run_id>/ is the driver\'s authority', () => {
+  const f = fixture()
+  writeFileSync(join(f.root, 'returns', 'd9.planner.json'), JSON.stringify({ assignment_id: 'd9', role: 'planner', status: 'done', details: { files_in_scope: ['other.mjs'], validation_lane: 'node --test other.test.mjs' } }))
+  const seen = mod.loadPlannerContext({ taskDir: f.taskDir })
+  assert.ok(seen, 'the run-scoped d1 return is found')
+  assert.notDeepEqual(seen.files_in_scope, ['other.mjs'], 'the flat d9 (a higher number) must not win: it is not in the run directory')
+})
+
+test('a run-start that carries no run_id names no returns directory, so the hook stays inert rather than guessing', () => {
+  const f = fixture()
+  writeFileSync(join(f.root, 'journal.jsonl'), `${JSON.stringify({ event: 'run-start', at: new Date(Date.now() - 500).toISOString() })}\n`)
+  assert.equal(mod.loadPlannerContext({ taskDir: f.taskDir }), null)
 })

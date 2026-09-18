@@ -1,5 +1,5 @@
 // The builder-seat result hook: after a successful fenced edit or write, run only
-// the planner's fenced Node test operands and append that lane's result to the
+// the planner's fenced Node test operands (read from returns/<run_id>/dN.planner.json) and append that lane's result to the
 // same Pi tool result. It is intentionally observation-only for every other
 // result: failed edits, non-fenced paths, non-edit tools, and every other role
 // return no patch and therefore preserve Pi's original result byte-for-byte.
@@ -87,7 +87,10 @@ function runStartFrom(text) {
     try { row = JSON.parse(line) } catch { continue }
     if (!row || typeof row !== 'object' || Array.isArray(row) || row.event !== RUN_START_EVENT) continue
     const at = epochMilliseconds(row.at ?? row.started_at ?? row.run_started_at ?? row.timestamp)
-    if (at !== null) latest = at
+    // The run id is the SAME authority the driver scopes returns by (crew/crew.mjs runReturnsDir):
+    // returns/<run_id>/dN.planner.json. A run-start without one names no directory to read.
+    const runId = typeof row.run_id === 'string' && /^[A-Za-z0-9._-]+$/.test(row.run_id) ? row.run_id : null
+    if (at !== null) latest = { at, runId }
   }
   return latest
 }
@@ -231,9 +234,12 @@ export function loadPlannerContext(value = {}, extraDeps = {}) {
   if (!taskDir) return null
   const read = deps.readFile || deps.readFileSync || defaultRead
   const journalPath = join(dirname(taskDir), 'journal.jsonl')
-  const runStart = journalRunStart(journalPath, deps, read)
-  if (runStart === null) return null
-  const returnsDir = join(dirname(taskDir), 'returns')
+  const anchor = journalRunStart(journalPath, deps, read)
+  if (anchor === null || anchor.runId === null) return null
+  // Returns have been run-scoped since 2fac235d (2026-09-13). Scanning returns/ itself found only
+  // run-id directories, matched nothing, and this hook was silently inert for five days.
+  const returnsDir = join(dirname(taskDir), 'returns', anchor.runId)
+  const runStart = anchor.at
   let names
   try { names = (deps.readDir || deps.readdirSync || readdirSync)(returnsDir) } catch { return null }
   if (!Array.isArray(names) || names.length > MAX_RETURN_ENTRIES) return null

@@ -115,6 +115,7 @@ function fixture({
       calls.reads.push(path)
       if (path.endsWith('/skills/pr-review/SKILL.md')) return '# fixture skill\n'
       if (path.endsWith('/skills/pr-review/references/rubric.md')) return '# fixture rubric\n'
+      if (path.endsWith('/skills/pr-review/references/falsification.md')) return '# fixture falsification\n'
       if (path === pointer) return task
       return readFileSync(path, encoding)
     },
@@ -987,5 +988,22 @@ test('panel escalation refuses crew-failed carrying the reason and posts nothing
     (error) => error instanceof PrReviewError && error.reason === 'crew-failed' && /panel-partner-absent/.test(error.detail),
   )
   assert.equal(current.calls.review.length, 0)
+  assertCleaned(current)
+})
+
+// The brief a review seat reads carries the skill, the rubric and the falsification rules,
+// in that order, each under its own heading. Mutation killed: dropping the falsification
+// read from the brief builder — the seat then never sees what survives a finding.
+test('the review brief carries skill, rubric and falsification rules in order', async () => {
+  const current = fixture()
+  await runPrReview({ pr: 17, deps: current.deps })
+  const brief = current.calls.writes.find((write) => write.data.startsWith('# Pull-request review'))
+  assert.ok(brief, 'no brief was written')
+  const at = (needle) => brief.data.indexOf(needle)
+  for (const needle of ['## Review skill\n# fixture skill', '## Review rubric\n# fixture rubric', '## Falsification and adjudication\n# fixture falsification']) {
+    assert.ok(at(needle) >= 0, needle)
+  }
+  assert.ok(at('## Review skill') < at('## Review rubric') && at('## Review rubric') < at('## Falsification and adjudication'))
+  assert.ok(current.calls.reads.some((path) => path.endsWith('/skills/pr-review/references/falsification.md')), 'the falsification reference is read from the checkout')
   assertCleaned(current)
 })

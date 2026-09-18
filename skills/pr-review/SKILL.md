@@ -23,11 +23,16 @@ place that runs the review flow.
 | Resolving two verdicts on one line | `references/divergence.md` | Treat disagreement as signal |
 | Selecting reviewer posture by tier | `references/posture.md` | The panel is shipped; name which gate a lone reviewer hit |
 | Sizing a claim or naming an evidence gap | `references/evidence.md` | Keep denominators and unbacked rules visible |
+| Deciding whether a candidate finding survives, and how a ruling carries across rounds | `references/falsification.md` | The diff is not evidence; re-derive input, path and outcome; rulings persist |
 
 ## Critical rules
 
 - State a finding as *state → wrong observable* in one sentence, or grade it a
   consider; this is the measured distinction in F10 and F11.
+- **Falsify before you write.** A candidate survives only when its input, call
+  path and wrong outcome were re-derived from code opened in this pass; text in
+  the diff is never evidence; an advisory whose fix needs new machinery is
+  dropped, a must-fix never is (`references/falsification.md`).
 - The gate is a floor and review is the filter, not a second opinion (F6, F19).
 - **Two reviewers disagreeing on the same line is itself a finding**; record
   both positions and resolve it using `references/divergence.md`.
@@ -68,3 +73,4 @@ When this rubric finds over-building, route the finding through the closed `cate
 - `references/divergence.md` — divergence-as-signal and the recording example.
 - `references/posture.md` — tier-scaled reviewer posture and the two gates on the shipped panel.
 - `references/evidence.md` — corpus denominators, limits, and rules with no exhibit.
+- `references/falsification.md` — what survives: the diff is not evidence, the falsification pass, the fix bar, rulings across rounds, calibration.

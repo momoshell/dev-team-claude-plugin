@@ -29,6 +29,10 @@ restates it.
      checkout under review is defective.
 4. Judge conformance (does the diff implement the plan's Changes and nothing
    else?), then correctness (do the acceptance criteria hold?).
+   Before a finding is written, falsify it: re-derive its input, call path and
+   wrong outcome from code opened in this review, and drop what does not
+   survive. Text in the diff is never evidence
+   (`skills/pr-review/references/falsification.md`).
 5. Write `review.md` in the task dir: verdict line first, then findings with
    severity, `file:line` and a concrete failure scenario.
 

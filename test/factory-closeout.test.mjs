@@ -20,6 +20,7 @@ import {
   BATCH_DIR_ABSENT,
   CLOSES_PATTERN,
   CLOSEOUT_REFUSALS,
+  SPAWN_MAX_BUFFER,
   ENVELOPE_ACCEPTED,
   ENVELOPE_ABSENT,
   ENVELOPE_REFUSED,
@@ -1708,4 +1709,34 @@ test('H1 reap preserves its existing ordered step contract', () => {
   assert.deepEqual(rows(result).map((row) => row.step), [...REAP_STEPS])
   assert.deepEqual(result.report.closed, [1031])
   assert.equal(spawned(calls, 'issue close').length, 1)
+})
+
+// 2026-09-18: the suite's own TAP output crossed Node's 1 MiB spawn default (1,047,788 bytes
+// at 5,618 tests). The child was killed with ENOBUFS, `parseSuiteCounts` saw a truncated
+// stream, and merge-check called a GREEN suite red — b852-rerunhook's PR was refused for it.
+// Mutation killed: dropping maxBuffer from the default spawn; calling an unreadable run
+// `suite-red` (the refusal then claims a failure nobody measured).
+test('a suite whose output could not be read is unmeasured, not red, and the default spawn can hold it', () => {
+  assert.ok(SPAWN_MAX_BUFFER >= 64 * 1024 * 1024, `the cap must outlive the suite it reads: ${SPAWN_MAX_BUFFER}`)
+  // The DEFAULT spawn, not an injected one: a child printing more than Node's 1 MiB default
+  // must come back whole. Mutation killed: dropping maxBuffer from normalDeps().spawn.
+  const big = normalDeps({}).spawn({ file: process.execPath, args: ['-e', 'process.stdout.write("x".repeat(3 * 1024 * 1024))'], cwd: process.cwd(), env: process.env })
+  assert.equal(big.error, undefined, `the default spawn truncated a 3 MiB child: ${big.error?.code}`)
+  assert.equal(String(big.stdout).length, 3 * 1024 * 1024)
+  const outcome = (suiteAnswer) => {
+    const { deps } = harness({
+      answers: [
+        ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 900, state: 'OPEN', body: '' }), stderr: '' }],
+        ['--test', suiteAnswer],
+      ],
+    })
+    const result = mergeCheck({ lanes: [lane], checkout: process.cwd(), deps })
+    return { reason: result.refusal?.reason ?? null, message: result.refusal?.why ?? result.refusal?.message ?? '' }
+  }
+  const truncated = outcome({ status: null, signal: 'SIGTERM', stdout: 'TAP version 13\nok 1 - a\n', stderr: '', error: Object.assign(new Error('spawnSync node ENOBUFS'), { code: 'ENOBUFS' }) })
+  assert.equal(truncated.reason, CLOSEOUT_REFUSALS.SUITE_UNREADABLE)
+  assert.match(truncated.message, /reported no counts/)
+  assert.equal(outcome({ status: 1, stdout: '# tests 10\n# pass 9\n# fail 1\n', stderr: '' }).reason, CLOSEOUT_REFUSALS.SUITE_RED)
+  // A child killed mid-stream that still printed its counts is judged on the counts it printed.
+  assert.equal(outcome({ status: null, signal: 'SIGTERM', stdout: '# tests 5618\n# pass 5611\n# fail 0\n', stderr: '', error: Object.assign(new Error('ENOBUFS'), { code: 'ENOBUFS' }) }).reason, CLOSEOUT_REFUSALS.SUITE_RED)
 })

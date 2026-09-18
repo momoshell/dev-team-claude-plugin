@@ -5,7 +5,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { ROOT } from '../../test/helpers.mjs'
-import { checkAnchors, collectAnchors, laneFence, partitionShifts, pinnedKey, skillDocs } from '../qa-test-writing/anchor-pin.mjs'
+import { checkAnchors, collectAnchors, laneFence, partitionShifts, shiftsAreOwedHere, pinnedKey, skillDocs } from '../qa-test-writing/anchor-pin.mjs'
 import { PROTECTED_PATHS, resolveProtectedPaths } from '../../crew/protected-paths.mjs'
 import { DRY_RUN_BLIND_SPOT, TEST_REACH_BLIND_SPOT, collectTestReach } from '../../scripts/factory/dispatch-batch.mjs'
 
@@ -89,8 +89,15 @@ test('every crew-dispatch path:line anchor carries what the prose claims', () =>
   const manifest = JSON.parse(readText(join(HERE, 'anchors.json')))
   const result = checkAnchors({ root: ROOT, docs, manifest })
   assert.deepEqual(result.failures, [])
-  const { inFence, outOfFence } = partitionShifts({ shifted: result.shifted, fence: laneFence({ root: ROOT }).paths, manifest: 'skills/crew-dispatch/anchors.json' })
-  for (const shift of outOfFence) console.warn(`shifted ${shift.key} -> line ${shift.to}; repair after this lane merges, on main with: node skills/qa-test-writing/anchor-pin.mjs --repair-all skills/crew-dispatch`)
+  const fence = laneFence({ root: ROOT })
+  const { inFence, outOfFence } = partitionShifts({ shifted: result.shifted, fence: fence.paths, manifest: 'skills/crew-dispatch/anchors.json' })
+  const repair = 'node skills/qa-test-writing/anchor-pin.mjs --repair-all skills/crew-dispatch'
+  // On the default branch there is no lane to defer to: this IS the post-merge pass
+  // the warning names, so a deferred shift is owed here rather than warned about again.
+  if (shiftsAreOwedHere(fence)) {
+    assert.deepEqual(outOfFence.map((shift) => `${shift.key} -> ${shift.to}`), [], `no lane to defer to — repair here with: ${repair}`)
+  }
+  for (const shift of outOfFence) console.warn(`shifted ${shift.key} -> line ${shift.to}; repair after this lane merges, on main with: ${repair}`)
   assert.deepEqual(inFence, [], 'a shift this lane can repair here must be repaired, not tolerated')
   assert.ok(result.anchors >= MIN_ANCHORS)
 })

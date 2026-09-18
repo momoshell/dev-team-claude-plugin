@@ -4,6 +4,7 @@ import {
   readdirSync as fsReaddirSync, statSync as fsStatSync, realpathSync as fsRealpathSync,
 } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
+import { stripVTControlCharacters } from 'node:util'
 import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { homedir, tmpdir } from 'node:os'
@@ -1698,7 +1699,6 @@ const PANE_RETRY_LINES = 40
 // The same CSI shape as crew/headless.mjs:68, kept local because that module is
 // outside this lane's fence. A pane frame is ANSI-laden and an unstripped
 // matcher can miss a banner split by a colour reset.
-const RETRY_ANSI_CSI = /\x1b\[[0-?]*[ -/]*[@-~]/g
 // PRIVATE: implementation detail of recogniseProviderRetry, with no external
 // consumer.
 const PROVIDER_RETRY_BACKOFF = /retrying in (\d+)\s*s/i
@@ -1709,7 +1709,7 @@ const PROVIDER_RETRY_ATTEMPT = /attempt (\d+)\s*\/\s*(\d+)/i
 // read out of the banner and never inferred from a symbol (#623).
 export function recogniseProviderRetry(text) {
   if (typeof text !== 'string' || !text) return null
-  const plain = text.replace(RETRY_ANSI_CSI, '')
+  const plain = stripVTControlCharacters(text)
   const backoff = PROVIDER_RETRY_BACKOFF.exec(plain)
   if (backoff === null) return null
   const attempt = PROVIDER_RETRY_ATTEMPT.exec(plain)

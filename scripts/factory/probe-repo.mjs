@@ -1422,6 +1422,5 @@ export function main(argv = []) {
   }
 }
 
-const invokedDirectly = process.argv[1]
-  && realpathOr(process.argv[1]) === realpathOr(fileURLToPath(import.meta.url))
+const invokedDirectly = import.meta.main
 if (invokedDirectly) process.exitCode = main(process.argv.slice(2))

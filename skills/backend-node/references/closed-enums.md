@@ -7,7 +7,7 @@ Exhibit: `scripts/factory/ledger.mjs:468` (`CI_DECISIONS`).
 Exhibit: `crew/drive.mjs:524`.
 
 Production code reads `CI_DECISIONS` when it validates a decision.
-Exhibit: `scripts/factory/ledger.mjs:3931`.
+Exhibit: `scripts/factory/ledger.mjs:3923`.
 
 `DECISIONS` is exported and frozen but read by no production code; only
 `crew/drive-review.test.mjs:1626-1628` reads it, so it is not the exhibit for "callers
@@ -29,7 +29,7 @@ Exhibit: `crew/drive-review.test.mjs:1628`.
 Exhibit: `crew/reclaim.mjs:12`.
 
 `REAP_ACCOUNTING` shows the pattern in a factory script.
-Exhibit: `scripts/factory/reap-stale.mjs:82`.
+Exhibit: `scripts/factory/reap-stale.mjs:80`.
 
 Do not infer closure from an uppercase name or an exported array alone.
 Exhibit: `crew/drive-review.test.mjs:1628`.

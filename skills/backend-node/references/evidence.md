@@ -89,7 +89,7 @@ No local mutation test separately measures an interrupted child or a malformed
 usage parse after work has started.
 
 The complete-or-absent getter and omitted-key assertion are backed at
-`crew/pi/extensions/subagent.ts:471` and `crew/pi/extensions/subagent.test.mjs:486`.
+`crew/pi/extensions/subagent.ts:471` and `crew/pi/extensions/subagent.test.mjs:485`.
 
 Keep interrupted-child and failed-parse instructions in `usage-records.md`
 marked unbacked until those paths receive a measured fixture.

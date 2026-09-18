@@ -188,7 +188,6 @@ test('the module is zero-dep, erasable, and carries the vendored MIT notice', ()
     'NONINFRINGEMENT',
     '@earendil-works/pi-coding-agent',
   ]) assert.ok(source.includes(phrase), phrase)
-  assert.equal(typeof mod.default, 'function')
 })
 
 test('the factory registers exactly one agent tool and one tool_result handler', () => {

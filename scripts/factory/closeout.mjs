@@ -16,10 +16,9 @@ import {
   writeFileSync as fsWriteFileSync,
 } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
+import { stripVTControlCharacters } from 'node:util'
 import { basename, dirname, join } from 'node:path'
 import { spawnSync } from 'node:child_process'
-import { fileURLToPath } from 'node:url'
-import { realpathSync } from 'node:fs'
 import {
   collectAnchorPins,
   crewJsonPath,
@@ -201,7 +200,7 @@ export function colourNeutralEnv(base = process.env) {
 }
 
 export function stripAnsi(text) {
-  return String(text).replace(/\x1b\[[0-9;]*m/g, '')
+  return stripVTControlCharacters(String(text))
 }
 
 // Keep this run-log loop as the single convention used by all three verbs.
@@ -1627,9 +1626,5 @@ export function main(argv, deps = {}) {
   }
 }
 
-function realpathOr(path) {
-  try { return realpathSync(path) } catch { return path }
-}
-
-const invokedDirectly = process.argv[1] && realpathOr(process.argv[1]) === realpathOr(fileURLToPath(import.meta.url))
+const invokedDirectly = import.meta.main
 if (invokedDirectly) process.exitCode = await main(process.argv.slice(2))

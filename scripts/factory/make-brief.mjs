@@ -41,6 +41,7 @@ import {
   existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, readdirSync, rmSync, statSync, writeFileSync,
 } from 'node:fs'
 import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path'
+import { stripVTControlCharacters } from 'node:util'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import {
@@ -65,7 +66,6 @@ const UNSUPPORTED_EXPORT_FORMS = Object.freeze(['var', 'star', 'interface'])
 const PREMISE_FIELDS = Object.freeze(['ask', 'done_means', 'out_of_scope'])
 const PREMISE_CITATION = /(?<![\w./\\-])(?<citation>(?<path>[A-Za-z0-9_@.-]+(?:\/[A-Za-z0-9_@.-]+)*):(?<start>[1-9][0-9]*)(?:-(?<end>[1-9][0-9]*))?)(?![\w/-])/g
 export const PREMISE_UNMEASURED_REASONS = Object.freeze(['no-checkable-claim', 'quote-without-citation', 'citation-without-quote', 'optout-unmatched'])
-const ANSI_CSI = /\x1b\[[0-?]*[ -/]*[@-~]/g
 const ERROR_CODE = /^[a-z0-9]+(?:[-:][a-z0-9]+)+$/
 const WRITTEN_PATH = /^[A-Za-z0-9_.\-/]+\.[A-Za-z0-9]+$/
 // #967: keep the quoted-literal alternatives disjoint at backslashes to avoid catastrophic backtracking.
@@ -1130,7 +1130,7 @@ export function gatherBaseline({ checkout, lane = null, laneBasis = null } = {})
   }
   if (result.signal) return unknownBaseline(selectedLane, 'timeout', basis)
 
-  const output = `${result.stdout || ''}\n${result.stderr || ''}`.replace(ANSI_CSI, '')
+  const output = stripVTControlCharacters(`${result.stdout || ''}\n${result.stderr || ''}`)
   const passMatch = output.match(/^\s*(?:ℹ\s*)?pass\s+(\d+)\s*$/m)
   const failMatch = output.match(/^\s*(?:ℹ\s*)?fail\s+(\d+)\s*$/m)
   if (!passMatch || !failMatch) return unknownBaseline(selectedLane, 'missing-summary', basis)
@@ -3778,7 +3778,7 @@ function realpathOr(path) {
   try { return realpathSync(path) } catch { return path }
 }
 
-const invokedDirectly = process.argv[1] && realpathOr(process.argv[1]) === realpathOr(fileURLToPath(import.meta.url))
+const invokedDirectly = import.meta.main
 if (invokedDirectly) {
   process.exitCode = main(process.argv.slice(2))
 }

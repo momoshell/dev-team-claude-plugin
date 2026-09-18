@@ -79,12 +79,12 @@ test('RV1-2 full reorder pins the same refusal as every other shape', () => {
 })
 
 // Derived from the live inventory, never copied from it: a lane that edits
-// test/visualizer-server.test.mjs or test/visualizer-shape.test.mjs moves both
+// crew/reclaim-descendants.test.mjs or test/visualizer-shape.test.mjs moves both
 // values, and literal replacements then silently no-op (b740, b741).
 const frozenSourcePair = () => {
   const current = readFileSync(FROZEN_INVENTORY_FILE, 'utf8')
   const committed = current
-    .replace(/test\/visualizer-server\.test\.mjs:(\d+)/, (_, line) => `test/visualizer-server.test.mjs:${Number(line) === 1672 ? 1673 : 1672}`)
+    .replace(/crew\/reclaim-descendants\.test\.mjs:(\d+)/, (_, line) => `crew/reclaim-descendants.test.mjs:${Number(line) === 820 ? 821 : 820}`)
     .replace(/('test\/visualizer-shape\.test\.mjs': ')([0-9a-f]{64})'/, (_, key, hash) => `${key}${hash === '0'.repeat(64) ? '1'.repeat(64) : '0'.repeat(64)}'`)
   assert.equal(current.split('\n').filter((line, index) => line !== committed.split('\n')[index]).length, 2, 'frozenSourcePair must move exactly one citation and one digest')
   return { committed, current }
@@ -92,7 +92,7 @@ const frozenSourcePair = () => {
 const frozenAuditedIdentity = (source, member) => source.split('\n').find((line) => line.includes(member)).match(/"([^"]+)"/)[1]
 
 const frozenPlan = () => planEnv({ details: { ...planEnv().details, files_in_scope: ['a.mjs', FROZEN_INVENTORY_FILE] } })
-const frozenRed = () => ({ ok: false, output: `not ok 1 - ${CTX.checkout}/${FROZEN_INVENTORY_FILE}:203\nnot ok 2 - ${CTX.checkout}/test/visualizer-server.test.mjs:365` })
+const frozenRed = () => ({ ok: false, output: `not ok 1 - ${CTX.checkout}/${FROZEN_INVENTORY_FILE}:203\nnot ok 2 - ${CTX.checkout}/crew/reclaim-descendants.test.mjs:365` })
 const frozenGreen = () => ({ ok: true, output: 'ok 1 - vacuity' })
 
 function frozenCycleIo({ suite = [frozenRed(), frozenGreen()], builder2 = null, builder3 = null, reviewer1 = reviewEnv('pass'), reviewer2 = reviewEnv('pass'), reviewer3 = reviewEnv('pass'), runs = {}, changed = null, ctx = {}, laneFence = undefined, protectedPaths = undefined, onSuite = null, onRun = null, commitResults = null, census = false, gateCmd = null, cleanRuns = null } = {}) {
@@ -5817,7 +5817,7 @@ test('C1 frozen inventory repair refuses detector regex and warranty logic edits
     assert.equal(result.action, 'refuse', label)
     assert.equal(result.reason, 'logic', label)
   }
-  const decoy = classifyFrozenInventoryDelta('test/decoy.mjs', source, source.replace(digest, replacementDigest).replace('test/visualizer-server.test.mjs:1834', 'test/visualizer-server.test.mjs:1672'))
+  const decoy = classifyFrozenInventoryDelta('test/decoy.mjs', source, source.replace(digest, replacementDigest).replace('crew/reclaim-descendants.test.mjs:820', 'crew/reclaim-descendants.test.mjs:821'))
   assert.equal(decoy.action, 'refuse')
   assert.equal(decoy.reason, 'logic')
   assert.match(decoy.why, /refused as logic/)

@@ -979,7 +979,7 @@ export function startServer(options = {}) {
 function realpathOr(path) {
   try { return realpathSync(path) } catch { return path }
 }
-const invokedDirectly = process.argv[1] && realpathOr(process.argv[1]) === realpathOr(fileURLToPath(import.meta.url))
+const invokedDirectly = import.meta.main
 if (invokedDirectly) {
   // process.exitCode, not process.exit: the refusal happens BEFORE
   // startServer, so nothing is bound, no ledger is opened and no state is

@@ -2,10 +2,9 @@
 // scripts/factory/suite-cost.mjs — a read-only, repository-wide test-suite cost
 // sweep. Importing this module never runs a suite; the CLI is the only runner.
 
-import { lstatSync, readFileSync, realpathSync, statSync } from 'node:fs'
+import { lstatSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
-import { fileURLToPath } from 'node:url'
 
 const DEFAULT_RUNS = 3
 const DEFAULT_TIMEOUT_MS = 30_000
@@ -745,10 +744,5 @@ export const RECORDED_SUITE_COST_REPORT = Object.freeze({
   fixture_substitutions: RECORDED_CHEAPER_TESTS,
 })
 
-function realpathOr(path) {
-  try { return realpathSync(path) } catch { return path }
-}
-
-const invokedDirectly = !process.env.NODE_TEST_CONTEXT && process.argv[1]
-  && realpathOr(process.argv[1]) === realpathOr(fileURLToPath(import.meta.url))
+const invokedDirectly = !process.env.NODE_TEST_CONTEXT && import.meta.main
 if (invokedDirectly) process.exitCode = main()

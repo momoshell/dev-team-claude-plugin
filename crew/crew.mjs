@@ -547,8 +547,6 @@ export function resolveTaskReturn(pathsOrDir, deps = {}) {
 
 // Descriptive aliases keep the boundary resolver usable by readers that name
 // the policy rather than the path. They intentionally point at one function.
-export const resolveBoundaryTaskReturn = resolveTaskReturn
-export const resolveAuthoritativeTaskReturn = resolveTaskReturn
 
 function descendantStampStatus(taskDir, expected = 0) {
   const storeDir = join(taskDir, 'descendants')

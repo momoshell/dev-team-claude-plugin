@@ -234,3 +234,25 @@ export function makeSeedLane(now) {
     return { dir, taskDir, journal: join(dir, 'journal.jsonl') }
   }
 }
+
+// One tracker per suite: every spawned child is checked at the end, so a process that
+// outlives its test is a failure, never a zombie. Replaces three copies — two of which only
+// killed and never asserted, and were hiding exactly that.
+//
+// The condition is OS liveness (kill(pid, 0)), not the 'exit' event: under a concurrent
+// npm test a child can have exited while its event is still queued, and counting it as a
+// survivor is a race, not a leak. A live pid is killed AND counted; a dead one is neither.
+export function childTracker(after, assert) {
+  const spawned = new Set()
+  const alive = (child) => { if (!child?.pid) return false; try { process.kill(child.pid, 0); return true } catch { return false } }
+  after(() => {
+    const survivors = [...spawned].filter(alive)
+    for (const child of survivors) { try { child.kill('SIGKILL') } catch { /* raced to exit */ } }
+    // Name the command, not only the pid: a pid is unmappable after the run; a command names the test.
+    const named = survivors.map((c) => `${c.pid} ${(c.spawnargs || []).join(' ').slice(0, 120)}`)
+    // The suite that leaked, not only the child: under --test each file is its own process.
+    named.push(`in ${process.argv[1]}`)
+    assert.equal(survivors.length, 0, `${survivors.length} spawned child process(es) outlived the suite: ${named.join(' | ')}`)
+  })
+  return (child) => { spawned.add(child); child.on('exit', () => spawned.delete(child)); return child }
+}

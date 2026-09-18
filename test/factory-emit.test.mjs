@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { spawn, spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { ROOT, nonTempCheckout, scratchDir, sqliteAvailable } from './helpers.mjs'
+import { ROOT, nonTempCheckout, scratchDir, sqliteAvailable, childTracker } from './helpers.mjs'
 import { openRun, parseProposalBrief, recordCellFailure, recordPhaseSlotWait, _resetNoticeGuardsForTest, main } from '../scripts/factory/emit.mjs'
 import { openLedger, PAYLOAD_KEYS, NODE_FLOOR } from '../scripts/factory/ledger.mjs'
 import { headlessIo } from '../crew/headless.mjs'
@@ -46,20 +46,7 @@ function freshDir(label) {
   return mkdtempSync(join(fixtureRoot, `${label}-`))
 }
 
-const spawnedChildren = new Set()
-function trackChild(child) {
-  spawnedChildren.add(child)
-  child.on('exit', () => spawnedChildren.delete(child))
-  return child
-}
-after(() => {
-  const survivors = [...spawnedChildren]
-  for (const child of survivors) {
-    try { child.kill('SIGKILL') } catch { /* already gone */ }
-  }
-  assert.equal(survivors.length, 0,
-    `${survivors.length} spawned child process(es) outlived the suite (pids ${survivors.map((c) => c.pid).join(', ')})`)
-})
+const trackChild = childTracker(after, assert)
 
 test('proposal-v2 J1', () => {
   const v2 = ['```proposal', JSON.stringify({
@@ -1791,11 +1778,11 @@ test('symlinked invocation: emit.mjs still runs its CLI body when invoked throug
   assert.equal(parsed.emitted, 0)
 })
 
-test('source-text pin: main() never calls process.exit, and the invokedDirectly guard realpathSyncs BOTH sides', () => {
+test('source-text pin: main() never calls process.exit, and the invokedDirectly guard is import.meta.main', () => {
   const codeLines = EMIT_SOURCE.split('\n').filter((line) => !line.trim().startsWith('//'))
   assert.ok(!codeLines.some((line) => /process\.exit\(/.test(line)), 'emit.mjs calls process.exit somewhere outside a comment')
   assert.ok(codeLines.some((line) => /process\.exitCode\s*=\s*main\(/.test(line)), 'the invokedDirectly guard must set process.exitCode, not process.exit')
-  assert.match(EMIT_SOURCE, /realpathOr\(process\.argv\[1\]\)\s*===\s*realpathOr\(fileURLToPath\(import\.meta\.url\)\)/, 'the invokedDirectly guard must realpathSync BOTH process.argv[1] and import.meta.url')
+  assert.match(EMIT_SOURCE, /const invokedDirectly = import\.meta\.main/, 'the invokedDirectly guard is import.meta.main — the platform resolves both sides, no hand-rolled realpath')
 })
 
 test('in-process main(): an unknown verb returns 2 without throwing', () => {

@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync, spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { ROOT } from './helpers.mjs'
+import { ROOT, childTracker } from './helpers.mjs'
 import {
   openLedger, EVENT_TYPES, LedgerUsageError, WRITERS, NODE_FLOOR, isLockedError,
   PLANNER_SYMBOLS_ARMS, CHARTER_TERSE_ARMS, CHARTER_LEAN_ARMS, BRIEF_TRIPWIRES_ARMS, EXPERIMENT_REGISTRY,
@@ -42,17 +42,7 @@ function test(name, optionsOrFn, maybeFn) {
 // Safety-net cleanup for the one test in this file that spawns a real
 // child process — swept unconditionally so a failing assertion mid-test
 // cannot leak it.
-const spawnedChildren = new Set()
-function trackChild(child) {
-  spawnedChildren.add(child)
-  child.on('exit', () => spawnedChildren.delete(child))
-  return child
-}
-after(() => {
-  for (const child of spawnedChildren) {
-    try { child.kill('SIGKILL') } catch { /* already gone */ }
-  }
-})
+const trackChild = childTracker(after, assert)
 
 // A wait observes the CONDITION it asserts, never a duration. The 400ms sleep
 // this replaces lost its race on 2026-08-24: four lane suites ran npm test

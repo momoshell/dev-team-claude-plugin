@@ -89,7 +89,6 @@ import {
 import { basename, dirname, join, resolve, sep } from 'node:path'
 import { tmpdir } from 'node:os'
 import { randomUUID } from 'node:crypto'
-import { fileURLToPath } from 'node:url'
 import {
   openLedger, homeDefaultDbPath, isoMs, SESSION_STATUSES, mkdirpBounded,
 } from './ledger.mjs'
@@ -1833,15 +1832,7 @@ export function main(argv) {
 // argv[1] stays literal, so under a symlinked path component a literal
 // compare is silently false and the CLI would no-op (mirrors
 // the retired dispatch.mjs's realpathOr / invokedDirectly shape exactly).
-function realpathOr(path) {
-  try {
-    return realpathSync(path)
-  } catch {
-    return path
-  }
-}
-
-const invokedDirectly = process.argv[1] && realpathOr(process.argv[1]) === realpathOr(fileURLToPath(import.meta.url))
+const invokedDirectly = import.meta.main
 if (invokedDirectly) {
   // process.exitCode, not process.exit: a piped stdout can be truncated by
   // process.exit's synchronous teardown (reproduced at exactly 65536 bytes).

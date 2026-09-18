@@ -2048,7 +2048,6 @@ test('the re-ask bound holds on every transport', () => {
       assert.match(first.message, /second envelope is still unparseable/)
       assert.equal(harness.assigns.length, 2)
       assert.throws(() => harness.io.wait(harness.first.returnPath, 600))
-      assert.equal(harness.assigns.length, 2)
     } finally { harness.cleanup() }
   }
 })

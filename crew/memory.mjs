@@ -4,7 +4,6 @@
 // and are not part of this seam.
 import { openMarkdownMemory } from './memory-md.mjs'
 
-export const BACKENDS = Object.freeze({ markdown: openMarkdownMemory })
 export const DEFAULT_BACKEND = 'markdown'
 export const DEFAULT_BUDGET_BYTES = 8000
 
@@ -121,15 +120,15 @@ export class MemoryLintError extends Error {
 
 export function openMemory({ dir, backend = DEFAULT_BACKEND, budgetBytes = DEFAULT_BUDGET_BYTES } = {}) {
   if (!dir) throw new Error('memory dir is required')
-  const open = BACKENDS[backend]
-  if (typeof open !== 'function') throw new Error(`unknown memory backend "${backend}"`)
-  const handle = open({ dir, budgetBytes })
+  // One backend exists. The name stays a closed check so a misspelt flag refuses by name.
+  if (backend !== DEFAULT_BACKEND) throw new Error(`unknown memory backend "${backend}"`)
+  const handle = openMarkdownMemory({ dir, budgetBytes })
   const linted = (verb) => (delta = {}) => {
     const verdict = lintMemoryDelta(delta)
     if (!verdict.ok) throw new MemoryLintError(verdict)
     return verb(delta)
   }
-  // openMemory is the enforced seam; raw BACKENDS entries are unguarded mechanism.
+  // openMemory is the enforced seam; the raw backend is unguarded mechanism.
   // context and gc are read/maintenance verbs over existing memory, so this is a
   // write-path admission check only and does not retroactively lint either verb.
   return { ...handle, propose: linted(handle.propose), reconcile: linted(handle.reconcile) }

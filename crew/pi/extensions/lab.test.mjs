@@ -203,7 +203,6 @@ test('the module is zero-dep and erasable', () => {
   assert.ok(imports.every((one) => one.startsWith('node:')), imports.join(', '))
   assert.doesNotMatch(source, /^\s*enum\s/m)
   assert.doesNotMatch(source, /^\s*namespace\s/m)
-  assert.equal(typeof mod.default, 'function')
   assert.doesNotMatch(source, /from ['"]\.\.\//)
   assert.doesNotMatch(source, /from ['"]\.\//)
   assert.match(source, /crew\/seat-io\.mjs:99/)

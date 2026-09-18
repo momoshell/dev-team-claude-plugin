@@ -440,14 +440,5 @@ export function inspectWorkflowNode(graphOrNode, nodeId, options = {}) {
   }
 }
 
-export const workflowTierOptions = workflowOptions
-export const shapeWorkflowOptions = workflowOptions
-export const topologyEditDraft = draftTopologyEdit
-export const topologyDraft = draftTopologyEdit
-export const layoutGraph = layoutWorkflowGraph
-export const layoutDagre = layoutWorkflowGraph
-export const nodeInspection = inspectWorkflowNode
-export const inspectNode = inspectWorkflowNode
-export const enforcementComparison = compareSeat
 
 export { stageHead }

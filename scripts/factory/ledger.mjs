@@ -73,7 +73,7 @@
 // inline.
 
 import {
-  appendFileSync, mkdirSync, chmodSync, existsSync, readFileSync, realpathSync, statSync, readdirSync,
+  appendFileSync, mkdirSync, chmodSync, existsSync, readFileSync, statSync, readdirSync,
 } from 'node:fs'
 import { dirname, join, resolve, parse, sep } from 'node:path'
 import { homedir } from 'node:os'
@@ -2211,14 +2211,6 @@ function versionAtLeast(v, floor) {
 // literal compare is silently false and the CLI would no-op. Copied
 // verbatim from scripts/task-cost-log.mjs:284-296 (4th copy of this idiom;
 // not promoted to a shared helper in this task).
-function realpathOr(path) {
-  try {
-    return realpathSync(path)
-  } catch {
-    return path
-  }
-}
-
 function chmodIfExists(path, mode) {
   try {
     chmodSync(path, mode)
@@ -8500,7 +8492,7 @@ export function main(argv) {
   }
 }
 
-const invokedDirectly = process.argv[1] && realpathOr(process.argv[1]) === realpathOr(fileURLToPath(import.meta.url))
+const invokedDirectly = import.meta.main
 if (invokedDirectly) {
   // process.exitCode, not process.exit: a piped stdout (sessions/doctor
   // emit JSON that can exceed 65536 bytes) is truncated by process.exit's

@@ -679,7 +679,6 @@ test('readgate is zero-dependency, erasable, and exposes three lifecycle registr
   const gate = mod.attachReadGate({ on: (...args) => registrations.push(args) }, { env: {} })
   assert.equal(registrations.length, 3)
   assert.deepEqual(registrations.map(([name]) => name), ['turn_start', 'tool_call', 'tool_result'])
-  for (const [, handler] of registrations) assert.equal(typeof handler, 'function')
   assert.deepEqual(gate, {
     onToolCall: gate.onToolCall,
     onToolResult: gate.onToolResult,

@@ -17,11 +17,10 @@
 // it says FAIL — and a declaration SHAPE the driver would reject is never accepted here.
 
 import { execFileSync, spawnSync } from 'node:child_process'
-import { existsSync, lstatSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdtempSync, readFileSync, readlinkSync, writeFileSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, sep } from 'node:path'
 import { createHash } from 'node:crypto'
-import { fileURLToPath } from 'node:url'
 import { applyMutationAnchor, baselineGateDefect, bindMutationDeclarations, checkFailureLine, DIFF_RUNNER_UNAVAILABLE_CAUSES, parseGateSummary, scopeMatcher, validateMutationCorrections, validateMutations } from '../../crew/drive.mjs'
 
 export { DIFF_RUNNER_UNAVAILABLE_CAUSES }
@@ -588,10 +587,6 @@ export function parseUnifiedZeroPatch(patch) {
 
 // Friendly aliases keep the pure helper useful to callers that call the input a
 // diff rather than a patch. They all return the same closed object.
-export const parseDiffPatch = parseUnifiedZeroPatch
-export const parseUnifiedPatch = parseUnifiedZeroPatch
-export const parseUnifiedDiff = parseUnifiedZeroPatch
-export const parseDiff = parseUnifiedZeroPatch
 
 function codeMaskState(line, initialMode = 'code') {
   const chars = String(line).split('')
@@ -783,7 +778,6 @@ export function generateDiffCandidates(input) {
   })
   return { candidates, skips }
 }
-export const generateCandidates = generateDiffCandidates
 
 function bytesOf(value) {
   try {
@@ -1037,7 +1031,6 @@ export function runDiffMutationProof(config, deps = {}) {
   }
   return countDiffReport(records, generatedCount, omitted, config, generated.candidates.length, fatal, admissionSkips)
 }
-export const proveDiffMutations = runDiffMutationProof
 
 function anchorLabel(row) {
   return row?.provenance === 'builder-correction' ? 'builder-correction (standalone validation)' : row?.provenance ?? 'planner-declaration'
@@ -1186,11 +1179,7 @@ export async function main(argv, deps = {}) {
   return result.counts.killed + result.counts.exempt === result.counts.declared && result.kept.length === 0 ? 0 : 1
 }
 
-function realpathOr(path) {
-  try { return realpathSync(path) } catch { return path }
-}
-
-const invokedDirectly = process.argv[1] && realpathOr(process.argv[1]) === realpathOr(fileURLToPath(import.meta.url))
+const invokedDirectly = import.meta.main
 if (invokedDirectly) {
   process.exitCode = await main(process.argv.slice(2))
 }

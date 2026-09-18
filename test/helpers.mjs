@@ -258,3 +258,28 @@ export function childTracker(after, assert) {
   })
   return (child) => { spawned.add(child); child.on('exit', () => spawned.delete(child)); return child }
 }
+
+// A property over generated inputs: `generate(random)` builds one case from a seeded
+// PRNG (xorshift32), `property(input)` asserts on it, and a red run names the run index,
+// the seed and the input so it is reproducible by hand. Universal claims about a pure
+// function — a tokenizer, a classifier, a normaliser — belong here rather than in a list
+// of examples somebody thought of; the quoted-whitespace defect Sol found on #1400 sat in
+// exactly the input a list did not have.
+// lean: no shrinking; add a halving shrinker when a failing input is too large to read.
+export function forAll(generate, property, { runs = 200, seed = 0x9e3779b9 } = {}) {
+  let state = seed >>> 0 || 1
+  const random = () => {
+    state ^= state << 13; state >>>= 0
+    state ^= state >>> 17
+    state ^= state << 5; state >>>= 0
+    return state / 0x100000000
+  }
+  for (let run = 0; run < runs; run += 1) {
+    const input = generate(random)
+    try { property(input) } catch (error) {
+      error.message = `property failed on run ${run} of ${runs} (seed ${seed}) with input ${JSON.stringify(input)}\n${error.message}`
+      throw error
+    }
+  }
+  return runs
+}

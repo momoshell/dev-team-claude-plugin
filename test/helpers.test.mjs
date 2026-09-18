@@ -180,7 +180,7 @@ test('writeTornFile refuses a prefix that parses', () => {
 // crew/harvest.mjs cannot be flagged, by construction rather than by exception.
 // Blind spot, stated: a test file under a NEW top-level directory is not scanned;
 // the count assertion below is the cheap guard against a scan that reads nothing.
-const HELPER_NAMES = 'sqliteAvailable|git|gitResult|treeDigest|scratchDir|rawRequest|startFileWriter|writeTornFile|makeSeedLane'
+const HELPER_NAMES = 'sqliteAvailable|git|gitResult|treeDigest|scratchDir|rawRequest|startFileWriter|writeTornFile|makeSeedLane|forAll'
 // Regrowth is written however the next author writes small helpers, not only as
 // a column-0 `function` declaration. A const arrow is the commonest form in this
 // repo, and a helper re-declared inside a test() body is indented. Matching only

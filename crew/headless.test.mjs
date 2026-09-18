@@ -22,7 +22,7 @@ import { headlessRpcIo } from './headless-rpc.mjs'
 import { assignmentLine, assignmentPrompt } from './driver.mjs'
 import { cellFailureKind, HEADLESS_TRANSPORT, seatIo } from './seat-io.mjs'
 import { DRIVER_GONE_PERIODS, HEARTBEAT_PERIOD_MS } from '../scripts/factory/lane-watch.mjs'
-import { ROOT, scratchDir, startFileWriter } from '../test/helpers.mjs'
+import { ROOT, forAll, scratchDir, startFileWriter } from '../test/helpers.mjs'
 
 // The final three bytes of each real 2026-08-30 refusal tail, copied
 // byte-for-byte so classification is adjudicated against the provider's own
@@ -4107,4 +4107,54 @@ test('the total-wait bound covers the provider five-hour window', () => {
   const beyond = providerRetryDecision({ ...measured, reset: { at_ms: PROVIDER_RETRY_TOTAL_WAIT_MS + 60 * 60 * 1000 } })
   assert.equal(beyond.retry, false)
   assert.equal(typeof beyond.reset_at, 'number')
+})
+
+// ---- properties over the shell grammar ---------------------------------------
+// The example tests above pin the spellings that killed lanes. These pin the CLAIMS the
+// grammar makes over inputs nobody wrote down, generated from a seed: a red run prints
+// the run, the seed and the input.
+
+const pick = (random, items) => items[Math.floor(random() * items.length)]
+const word = (random) => Array.from({ length: 1 + Math.floor(random() * 6) }, () => pick(random, 'abcdefxyz_-./0123456789'.split(''))).join('')
+
+// Every operator that splits a command line, and the same characters inside quotes,
+// which must not. Mutation killed: dropping the quote tracking in splitShellCommands —
+// a quoted `;` then splits; dropping the two-character operators — `&&` then joins.
+test('property: splitShellCommands splits on every unquoted operator and never inside a quoted span', () => {
+  const operators = [' && ', ' || ', ' | ', '; ', '\n']
+  const inside = [';', '|', '&&', '||', ' ', '\n']
+  forAll((random) => {
+    const segments = Array.from({ length: 1 + Math.floor(random() * 4) }, () => {
+      const parts = Array.from({ length: 1 + Math.floor(random() * 3) }, () => {
+        const w = word(random)
+        const quote = pick(random, ['', '"', "'"])
+        return quote ? `${quote}${w}${pick(random, inside)}${w}${quote}` : w
+      })
+      return parts.join(' ')
+    })
+    const joined = segments.map((segment, index) => (index === 0 ? segment : `${pick(random, operators)}${segment}`)).join('')
+    return { segments, joined }
+  }, ({ segments, joined }) => {
+    assert.deepEqual(splitShellCommands(joined), segments.map((s) => s.trim()))
+  })
+})
+
+// A scoped run is EXACTLY the concrete test files it names, in order, with every safe
+// option carried; one unsafe token anywhere makes the whole invocation null.
+// Mutation killed: admitting a glob or a `..` segment in concreteTestFile; skipping an
+// unknown option instead of returning null.
+test('property: testTargets returns exactly the named test files, and any unsafe token makes the invocation null', () => {
+  const safe = ['--test-only', '--test-force-exit', '--test-reporter=tap', '--test-timeout=30000', '--test-name-pattern=x', '--test-concurrency=2']
+  const unsafe = ['--require=./x.mjs', '--import=./x.mjs', '--watch', '--test-reporter=./x.mjs', 'crew/*.test.mjs', 'crew/../x.test.mjs', '/abs/x.test.mjs', 'x.mjs']
+  forAll((random) => {
+    const files = Array.from({ length: 1 + Math.floor(random() * 3) }, () => `crew/${word(random).replace(/[./]/g, 'a')}.test.mjs`)
+    const flags = Array.from({ length: Math.floor(random() * 3) }, () => pick(random, safe))
+    const tokens = [...flags, ...files].sort(() => random() - 0.5)
+    const bad = pick(random, unsafe)
+    const at = Math.floor(random() * (tokens.length + 1))
+    return { files, command: `node --test ${tokens.join(' ')}`, poisoned: `node --test ${[...tokens.slice(0, at), bad, ...tokens.slice(at)].join(' ')}` }
+  }, ({ files, command, poisoned }) => {
+    assert.deepEqual(testTargets(command), files.filter((f) => command.includes(f)).sort((a, b) => command.indexOf(a) - command.indexOf(b)))
+    assert.equal(testTargets(poisoned), null, poisoned)
+  })
 })

@@ -9231,6 +9231,10 @@ function runTask(ctx, io, crash) {
   // This counter belongs to the whole accepted lane, not to suiteCycle: a retained
   // conflict may re-enter that cycle, but it must not mint a fresh rebase budget.
   let rebaseConflictBounces = 0
+  // The stated blind spots belong to the whole accepted lane too: a post-commit repair that
+  // re-enters suiteCycle (suite red, census, rebase conflict) must not erase what an earlier
+  // hardening round could not measure — only a later `killed` or `ungateable` settles one.
+  let hardenBlindSpots = []   // ANCHOR B5g
   const fullOidFromResult = (result) => {
     if (result?.ok !== true || typeof result.output !== 'string') return null
     const oid = result.output.trim()
@@ -9604,7 +9608,6 @@ function runTask(ctx, io, crash) {
   let accepted = null
   let extraReviews = 0
   let hardenOwed = { owed: [], exempt: [] }
-  let hardenBlindSpots = []
   let hardenWitness = null              // Map<repo-relative path, {state, bytes}>, or null
   // #910/#900 — ONE reviewer appeal per REVIEWED DEBT GENERATION (R4-1). The turn exists so
   // a request only the reviewer can grant is not held behind a gate scheduled before the

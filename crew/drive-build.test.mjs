@@ -6682,3 +6682,19 @@ test('an approved appeal that marks the finding ungateable clears the blind spot
   assert.equal(result.details.hardening_unmeasured, undefined, JSON.stringify(result.details.hardening_unmeasured))
   assert.doesNotMatch(prBodyOf(result), /witness-absent/)
 })
+
+// Pass 3 of this lane review: the blind spots were declared INSIDE suiteCycle, so any
+// post-commit repair that re-enters the cycle (suite red, census, rebase conflict) reset
+// them, and a lane finished done with a journalled witness-absent and no stated blind spot.
+// The list belongs to the whole accepted lane, like the rebase-conflict counter beside it.
+// Mutation killed: declaring hardenBlindSpots inside the cycle again.
+test('a blind spot recorded before a post-commit suite-red repair survives the re-entered cycle', () => {
+  const { result, outcomes, io } = settledRun({
+    runs: { 'suite-cmd:1': { ok: false, output: suiteRed('a.test.mjs', 4, 'post-commit failure') }, 'suite-cmd:2': { ok: true, output: 'suite green' } },
+  })
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.assign.filter(({ role, note }) => role === 'builder' && note === 'suite-red-fix').length, 1, 'the cycle really re-entered')
+  assert.deepEqual(outcomes, ['witness-absent'])
+  assert.deepEqual((result.details.hardening_unmeasured ?? []).map((entry) => [entry.finding, entry.outcome]), [['F1', 'witness-absent']])
+  assert.match(prBodyOf(result), /F1/)
+})

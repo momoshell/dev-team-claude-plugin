@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { dirname, join, relative } from 'node:path'
-import { spawn as realSpawn } from 'node:child_process'
+import { spawn as realSpawn, spawnSync as realSpawnSync } from 'node:child_process'
 import { scratchDir } from '../../../test/helpers.mjs'
 import * as mod from './builderloop.ts'
 
@@ -321,6 +321,81 @@ test('a real short timeout removes the detached process group, not merely its pa
   assert.equal(rows(f).at(-1)?.builder_loop_failure?.reason, 'timeout')
   assert.ok(capturedPid)
   assert.throws(() => process.kill(-capturedPid, 0), (error) => error?.code === 'ESRCH')
+})
+
+function bashCall(loop, command, cwd, toolName = 'bash') {
+  return loop.onToolCall({ type: 'tool_call', toolCallId: `bash-${command}`, toolName, input: { command } }, { cwd })
+}
+
+test('tool_call refuses an unchanged repeated lane and preserves decoded word equality', () => {
+  const f = fixture()
+  const loop = loopFor(f, { deps: { measureTree: () => ({ measured: true, digest: 'same' }) } })
+  assert.equal(bashCall(loop, 'node --test in.test.mjs', f.root), undefined)
+  const blocked = bashCall(loop, 'node --test in.test.mjs', f.root)
+  assert.equal(blocked?.block, true)
+  assert.match(blocked.reason, /builder-rerun-refusal: rerun of node --test in.test.mjs/)
+  const refusal = rows(f).at(-1)?.builder_loop_refusal
+  assert.equal(refusal.rule, 'builder-rerun-refusal')
+  assert.deepEqual(refusal.command, ['node', '--test', 'in.test.mjs'])
+})
+
+test('tool_call quoting changes are compared as decoded words', () => {
+  const f = fixture({ lane: 'node --test --test-name-pattern="foo bar" in.test.mjs' })
+  const loop = loopFor(f, { deps: { measureTree: () => ({ measured: true, digest: 'same' }) } })
+  assert.equal(bashCall(loop, 'node --test --test-name-pattern="foo bar" in.test.mjs', f.root), undefined)
+  assert.equal(bashCall(loop, "node --test --test-name-pattern='foo bar' in.test.mjs", f.root)?.block, true)
+  assert.equal(bashCall(loop, 'node --test --test-name-pattern="foo  bar" in.test.mjs', f.root), undefined)
+})
+
+test('tool_call admits a changed tree regardless of prior writer', () => {
+  const f = fixture()
+  const digests = ['first', 'second']
+  const loop = loopFor(f, { deps: { measureTree: () => ({ measured: true, digest: digests.shift() }) } })
+  assert.equal(bashCall(loop, 'node --test in.test.mjs', f.root), undefined)
+  assert.equal(bashCall(loop, 'node --test in.test.mjs', f.root, 'bash'), undefined)
+})
+
+test('tool_call records unmeasured trees and never blocks', () => {
+  const f = fixture()
+  const loop = loopFor(f, { deps: { measureTree: () => ({ measured: false, cause: 'not-a-repository' }) } })
+  assert.equal(bashCall(loop, 'node --test in.test.mjs', f.root), undefined)
+  assert.equal(bashCall(loop, 'node --test in.test.mjs', f.root), undefined)
+  assert.equal(rows(f).at(-1)?.builder_loop_unmeasured?.cause, 'not-a-repository')
+})
+
+test('tool_call swallows seam failures while a broken journal cannot lose a refusal', () => {
+  const f = fixture()
+  const loadFailure = loopFor(f, { deps: { loadPlannerContext: () => { throw new Error('load') } } })
+  assert.equal(bashCall(loadFailure, 'node --test in.test.mjs', f.root), undefined)
+  const measureFailure = loopFor(f, { deps: { measureTree: () => { throw new Error('measure') } } })
+  assert.equal(bashCall(measureFailure, 'node --test in.test.mjs', f.root), undefined)
+  const broken = loopFor(f, { deps: { measureTree: () => ({ measured: true, digest: 'same' }), appendFile: () => { throw new Error('sink') } } })
+  assert.equal(bashCall(broken, 'node --test in.test.mjs', f.root), undefined)
+  assert.equal(bashCall(broken, 'node --test in.test.mjs', f.root)?.block, true)
+})
+
+test('attachBuilderLoop registers both tool hooks', () => {
+  const hooks = new Map()
+  const pi = { on(name, handler) { hooks.set(name, handler) } }
+  const f = fixture()
+  const loop = mod.attachBuilderLoop(pi, { env: { CREW_ROLE: 'builder', CREW_TASK_DIR: f.taskDir }, cwd: f.root, deps: { loadPlannerContext: () => ({ files_in_scope: ['in.test.mjs'], validation_lane: 'node --test in.test.mjs', gate_cmd: 'node task/gate.mjs' }), measureTree: () => ({ measured: true, digest: 'same' }) } })
+  assert.equal(loop.onToolCall({ type: 'tool_call', toolName: 'read', input: { command: 'echo' } }, { cwd: f.root }), undefined)
+  assert.deepEqual([...hooks.keys()].sort(), ['tool_call', 'tool_result'])
+})
+
+test('default tree measurement uses real git when available', (t) => {
+  const root = scratchDir('builder-loop-git-')
+  const init = realSpawnSync('git', ['init'], { cwd: root, encoding: 'utf8' })
+  if (init.error || init.status !== 0) return t.skip(`git unavailable: ${init.error?.message || init.stderr || 'git init failed'}`)
+  writeFileSync(join(root, 'in.test.mjs'), 'export {}\\n')
+  realSpawnSync('git', ['add', '--', 'in.test.mjs'], { cwd: root })
+  const commit = realSpawnSync('git', ['-c', 'user.email=test@example.invalid', '-c', 'user.name=test', 'commit', '-m', 'fixture'], { cwd: root, encoding: 'utf8' })
+  if (commit.error || commit.status !== 0) return t.skip(`git commit unavailable: ${commit.error?.message || commit.stderr || 'commit failed'}`)
+  const taskDir = join(root, 'task')
+  mkdirSync(taskDir, { recursive: true })
+  const loop = mod.createBuilderLoop({ env: { CREW_ROLE: 'builder', CREW_TASK_DIR: taskDir }, cwd: root, deps: { loadPlannerContext: () => ({ files_in_scope: ['in.test.mjs'], validation_lane: 'node --test in.test.mjs', gate_cmd: 'node task/gate.mjs' }) } })
+  assert.equal(bashCall(loop, 'node --test in.test.mjs', root), undefined)
+  assert.equal(bashCall(loop, 'node --test in.test.mjs', root)?.block, true)
 })
 
 // Keep the source-level extension contract explicit: no pi or package imports,

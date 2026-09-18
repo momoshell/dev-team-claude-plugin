@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { spawn, spawnSync } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { ROOT, scratchDir, git, gitResult } from './helpers.mjs'
@@ -11,7 +11,9 @@ import {
   classifyMutantOutcome,
   formatRate,
   main,
+  ISOLATION_PREFIX,
   MUTANT_UNMEASURED_REASONS,
+  reclaimAbandoned,
   REASON,
   TERMINATION_SIGNALS,
   baselineCensus,
@@ -520,27 +522,39 @@ test('a refusal and a failed output both leave the source repository with no ext
   assert.equal((() => { try { return readdirSync(join(bare, '.git', 'worktrees')).length } catch { return 0 } })(), 0, 'and left no registry row')
 })
 
-// The one leftover an uncatchable kill leaves is a registered worktree whose directory is
-// gone once the operator or a later run deletes it. A run reclaims such a row on its way
-// out, so the registry does not accumulate. Mutation killed: dropping the prune from
-// cleanup — the stale row then survives the run.
-test('a run reclaims the registry rows a killed predecessor left behind', () => {
+// What a SIGKILLed run really leaves is BOTH the registry row and its directory, and
+// `git worktree prune` cannot reclaim a worktree whose directory still exists (Sol, #1401
+// pass 8 — the earlier test deleted the directory first and so modelled a state that does
+// not happen). A run removes its own abandoned worktrees, directory and row together,
+// before it makes its own; the prefix is what makes one safe to take.
+// Mutation killed: reclaiming only by prune; matching every worktree rather than ours.
+test('a run reclaims the worktrees a killed predecessor left behind, directory and row', () => {
   const dir = scratchDir('kr-stale-')
   git(dir, 'init', '-q')
   mkdirSync(join(dir, 'crew'), { recursive: true })
   writeFileSync(join(dir, 'crew', 'drive.mjs'), 'export const a = 1\nexport function f(x) { return x + 1 }\n')
   writeFileSync(join(dir, 's.test.mjs'), "import { test } from 'node:test'\ntest('x', () => {})\n")
   git(dir, 'add', '-A'); git(dir, 'commit', '-q', '-m', 'base')
-  // Exactly what a SIGKILLed run leaves: a registered worktree with no directory.
-  const orphan = join(scratchDir('kr-orphan-'), 'gone')
-  git(dir, 'worktree', 'add', '--detach', '--quiet', orphan, 'HEAD')
-  rmSync(orphan, { recursive: true, force: true })
-  assert.equal(readdirSync(join(dir, '.git', 'worktrees')).length, 1, 'the stale row is there to begin with')
-  main(['--mutants', '1', '--seed', '1', '--suites', 's.test.mjs', '--md', join(dir, 'k.md'), '--checkout', dir], {
+  // Exactly what a killed run leaves: our own worktree, still registered, still on disk.
+  const abandoned = join(scratchDir('kr-abandoned-'), `${ISOLATION_PREFIX}dead`)
+  git(dir, 'worktree', 'add', '--detach', '--quiet', abandoned, 'HEAD')
+  // And one that is NOT ours, which must survive untouched.
+  const foreign = join(scratchDir('kr-foreign-'), 'someone-elses')
+  git(dir, 'worktree', 'add', '--detach', '--quiet', foreign, 'HEAD')
+  assert.equal(readdirSync(join(dir, '.git', 'worktrees')).length, 2)
+  const reclaimed = reclaimAbandoned(dir)
+  assert.deepEqual(reclaimed.removed.map((path) => basename(path)), [`${ISOLATION_PREFIX}dead`])
+  assert.equal(existsSync(abandoned), false, 'the directory is gone, not only the row')
+  assert.equal(existsSync(foreign), true, 'a worktree that is not ours is untouched')
+  assert.equal(readdirSync(join(dir, '.git', 'worktrees')).length, 1)
+  // And a whole run does it on the way in.
+  git(dir, 'worktree', 'add', '--detach', '--quiet', join(dirname(abandoned), `${ISOLATION_PREFIX}dead2`), 'HEAD')
+  main(['--mutants', '1', '--seed', '1', '--suites', 's.test.mjs', '--md', join(dir, 'k.md'), '--out', join(dir, 'k.json'), '--checkout', dir], {
     spawnSync: (bin, args, options) => (Array.isArray(args) && args.includes('--test')
       ? { status: 0, stdout: 'TAP version 13\n# Subtest: x\nok 1 - x\n1..1\n# tests 1\n# pass 1\n# fail 0\n', stderr: '' }
       : spawnSync(bin, args, options)),
   })
-  assert.equal(gitResult(dir, 'worktree', 'list').stdout.split('\n').filter(Boolean).length, 1, 'only the checkout is left')
-  assert.equal((() => { try { return readdirSync(join(dir, '.git', 'worktrees')).length } catch { return 0 } })(), 0, 'and the stale row is gone')
+  assert.equal(JSON.parse(readFileSync(join(dir, 'k.json'), 'utf8')).provenance.reclaimed, 1, 'the report states what it reclaimed')
+  assert.deepEqual(gitResult(dir, 'worktree', 'list').stdout.split('\n').filter(Boolean).length, 2, 'the checkout and the foreign worktree remain')
 })
+

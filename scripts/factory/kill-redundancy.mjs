@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { performance } from 'node:perf_hooks'
-import { dirname, join, relative } from 'node:path'
+import { basename, dirname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { generateDiffCandidates, applyDiffCandidate } from './prove-mutations.mjs'
 
@@ -18,6 +18,9 @@ export const DRIVER_SUITES = Object.freeze([
 export const SAMPLE_UNMEASURED_REASON = 'sample-killed-nothing'
 // The signals that end this process while a mutant is in the target file.
 export const TERMINATION_SIGNALS = Object.freeze(['SIGINT', 'SIGTERM', 'SIGHUP'])
+// Every disposable worktree this tool makes carries this prefix, which is what makes one
+// safe to reclaim: nothing else in the repository is named for it.
+export const ISOLATION_PREFIX = 'kill-redundancy-'
 // Every reason an unmeasured mutant can carry, named once; every emit site reads a name
 // from here, so a reason outside the closed list cannot be spelled.
 export const REASON = Object.freeze({
@@ -423,7 +426,8 @@ export function buildMarkdown(analysis = {}) {
     `Checkout HEAD: ${provenance.headSha ?? 'unmeasured (not a git checkout or git unavailable)'}`,
     `Tool sha256: ${provenance.toolSha256 ?? 'unmeasured'}`,
     `Node: ${provenance.node ?? 'unmeasured'}`,
-    `Mutations ran in: ${provenance.isolated === false ? `the checkout itself (--in-place)` : 'a disposable git worktree at that HEAD, removed at the end; a run killed uncatchably leaves that worktree registered until the next run prunes it'}`,
+    `Mutations ran in: ${provenance.isolated === false ? `the checkout itself (--in-place)` : 'a disposable git worktree at that HEAD, removed at the end; a run killed uncatchably leaves one behind, and the next run removes it before starting'}`,
+    `Abandoned worktrees reclaimed at start: ${provenance.reclaimed ?? 0}`,
     '',
     '## Redundancy candidates (sampled kill-set subsumption, not proof of redundancy)',
     'A candidate is a test whose sampled kill-set is a strict subset of another test\'s.',
@@ -468,13 +472,40 @@ function jsonAnalysis(analysis) {
 // is removed at the end; a leftover lives in the system temp directory and `git worktree
 // prune` reclaims it. `--in-place` opts out, for a tree whose uncommitted state IS the
 // subject; it says so in the report.
+// A run killed uncatchably leaves BOTH its registry row and its directory, and prune cannot
+// reclaim a worktree whose directory still exists (Sol, #1401 pass 8). A run therefore
+// removes its own predecessors first: every registered worktree whose path is one of ours
+// and whose HEAD is not live — we own the `kill-redundancy-` prefix under the temp root, so
+// no other tool's worktree can match. `worktree remove --force` takes the directory and the
+// row together; prune then clears rows whose directories are already gone.
+export function reclaimAbandoned(checkout, deps = {}) {
+  const spawn = deps.spawnSync || spawnSync
+  let listed
+  try { listed = spawn('git', ['-C', checkout, 'worktree', 'list', '--porcelain'], { encoding: 'utf8' }) } catch { return { removed: [], reason: 'git unavailable' } }
+  if (!listed || listed.status !== 0 || typeof listed.stdout !== 'string') return { removed: [], reason: 'worktree list unreadable' }
+  const removed = []
+  for (const line of listed.stdout.split(String.fromCharCode(10))) {
+    const match = /^worktree (.+)$/.exec(line)
+    if (!match) continue
+    const path = match[1]
+    if (!basename(path).startsWith(ISOLATION_PREFIX)) continue
+    try { spawn('git', ['-C', checkout, 'worktree', 'remove', '--force', path], { encoding: 'utf8' }) } catch { /* prune below */ }
+    try { (deps.rmSync || rmSync)(path, { recursive: true, force: true }) } catch { /* prune below */ }
+    removed.push(path)
+  }
+  try { spawn('git', ['-C', checkout, 'worktree', 'prune'], { encoding: 'utf8' }) } catch { /* the next run reclaims it */ }
+  return { removed, reason: null }
+}
+
 function isolationRoot(checkout, target, options, deps) {
   if (options.inPlace) return { root: checkout, isolated: false, reason: 'in-place requested', cleanup: () => {} }
   const spawn = deps.spawnSync || spawnSync
   const mkdtemp = deps.mkdtempSync || mkdtempSync
   let root = null
+  // Our own abandoned worktrees first: a predecessor that was killed cannot have cleaned up.
+  const reclaimed = reclaimAbandoned(checkout, deps)
   try {
-    root = mkdtemp(join(deps.tmpRoot || tmpdir(), 'kill-redundancy-'))
+    root = mkdtemp(join(deps.tmpRoot || tmpdir(), ISOLATION_PREFIX))
     const added = spawn('git', ['-C', checkout, 'worktree', 'add', '--detach', '--quiet', root, 'HEAD'], { encoding: 'utf8' })
     if (!added || added.status !== 0) throw new Error(added?.stderr?.trim() || 'git worktree add failed')
     if (!(deps.existsSync || existsSync)(join(root, target))) throw new Error(`the worktree does not carry ${target}`)
@@ -492,6 +523,7 @@ function isolationRoot(checkout, target, options, deps) {
     root,
     isolated: true,
     reason: null,
+    reclaimed: reclaimed.removed,
     cleanup: () => {
       try { spawn('git', ['-C', checkout, 'worktree', 'remove', '--force', root], { encoding: 'utf8' }) } catch { /* the prune below still reclaims it */ }
       try { (deps.rmSync || rmSync)(root, { recursive: true, force: true }) } catch { /* left for git worktree prune */ }
@@ -598,7 +630,7 @@ export function main(argv = process.argv.slice(2), deps = {}) {
     analysis.sampledMutants = generated.candidates.length
     analysis.sampling = generated.sampling
     analysis.testLabels = testLabels
-    analysis.provenance = { ...provenance(checkout, options, spawn), isolated: isolation.isolated, isolation_reason: isolation.reason }
+    analysis.provenance = { ...provenance(checkout, options, spawn), isolated: isolation.isolated, isolation_reason: isolation.reason, reclaimed: (isolation.reclaimed || []).length }
     analysis.wallClockSeconds = Number(((performance.now() - started) / 1000).toFixed(3))
     const markdown = buildMarkdown(analysis)
     const outputPath = (path) => path.startsWith('/') ? path : join(checkout, path)

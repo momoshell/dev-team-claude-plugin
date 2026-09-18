@@ -213,13 +213,18 @@ test('RV2-1 walks bounded journal windows to honor the last run-start', () => {
   const now = Date.now()
   const oldRun = new Date(now - 2 * 60 * 60_000)
   const newRun = new Date(now - 10 * 60_000)
-  const staleReturn = join(f.returns, 'd3.planner.json')
+  // Two RUNS, not two envelopes in one run: the stale plan sits in the OLD run's directory with
+  // the higher assignment number, so a reader that honours the last run-start's timestamp but
+  // keeps the first run's id (Sol, #1399) would find and return it.
+  const oldReturns = join(f.root, 'returns', 'run-old')
+  mkdirSync(oldReturns, { recursive: true })
+  const staleReturn = join(oldReturns, 'd3.planner.json')
   const freshReturn = join(f.returns, 'd1.planner.json')
   const filler = `${JSON.stringify({ event: 'noise', payload: 'x'.repeat(70_000) })}\n`
   const stale = { role: 'planner', status: 'done', details: { files_in_scope: ['stale.test.mjs'], validation_lane: 'node --test stale.test.mjs', gate_cmd: 'node task/gate.mjs' } }
   const fresh = { role: 'planner', status: 'done', details: { files_in_scope: ['fresh.test.mjs'], validation_lane: 'node --test fresh.test.mjs', gate_cmd: 'node task/gate.mjs' } }
 
-  writeFileSync(journal, `${JSON.stringify({ event: 'run-start', run_id: f.runId, at: oldRun.toISOString() })}\n${filler}${JSON.stringify({ event: 'run-start', run_id: f.runId, at: newRun.toISOString() })}\n${filler}`)
+  writeFileSync(journal, `${JSON.stringify({ event: 'run-start', run_id: 'run-old', at: oldRun.toISOString() })}\n${filler}${JSON.stringify({ event: 'run-start', run_id: f.runId, at: newRun.toISOString() })}\n${filler}`)
   writeFileSync(staleReturn, JSON.stringify(stale))
   writeFileSync(freshReturn, JSON.stringify(fresh))
   utimesSync(staleReturn, new Date(now - 60 * 60_000), new Date(now - 60 * 60_000))
@@ -227,6 +232,22 @@ test('RV2-1 walks bounded journal windows to honor the last run-start', () => {
 
   assert.deepEqual(mod.loadPlannerContext({ taskDir: f.taskDir }), fresh.details)
   assert.deepEqual(mod.loadPlannerContext({ taskDir: f.taskDir, deps: { readFile: readFileSync } }), fresh.details)
+})
+
+// Sol on #1399: RV2-1's first run-start sits outside the tail window, so a reader that keeps
+// the FIRST run's id while honouring the last timestamp passed it. Here both rows share one
+// window and the stale plan's mtime is fresh, so only the run id can tell the runs apart.
+test('two run-starts in one window: the LAST run\'s id names the returns directory, not the first\'s', () => {
+  const f = fixture()
+  const now = Date.now()
+  const oldReturns = join(f.root, 'returns', 'run-old')
+  mkdirSync(oldReturns, { recursive: true })
+  const stale = { role: 'planner', status: 'done', details: { files_in_scope: ['stale.test.mjs'], validation_lane: 'node --test stale.test.mjs', gate_cmd: 'node task/gate.mjs' } }
+  const fresh = { role: 'planner', status: 'done', details: { files_in_scope: ['fresh.test.mjs'], validation_lane: 'node --test fresh.test.mjs', gate_cmd: 'node task/gate.mjs' } }
+  writeFileSync(join(oldReturns, 'd3.planner.json'), JSON.stringify(stale))
+  writeFileSync(join(f.returns, 'd1.planner.json'), JSON.stringify(fresh))
+  writeFileSync(join(f.root, 'journal.jsonl'), `${JSON.stringify({ event: 'run-start', run_id: 'run-old', at: new Date(now - 60 * 60_000).toISOString() })}\n${JSON.stringify({ event: 'run-start', run_id: f.runId, at: new Date(now - 10 * 60_000).toISOString() })}\n`)
+  assert.deepEqual(mod.loadPlannerContext({ taskDir: f.taskDir }), fresh.details)
 })
 
 test('the production runner bounds the combined stdout/stderr tail', async () => {
@@ -315,5 +336,7 @@ test('a planner return in the pre-09-13 flat layout is NOT read: only returns/<r
 test('a run-start that carries no run_id names no returns directory, so the hook stays inert rather than guessing', () => {
   const f = fixture()
   writeFileSync(join(f.root, 'journal.jsonl'), `${JSON.stringify({ event: 'run-start', at: new Date(Date.now() - 500).toISOString() })}\n`)
+  // A complete, valid flat envelope: the pre-fix scanner of returns/ itself would read THIS.
+  writeFileSync(join(f.root, 'returns', 'd1.planner.json'), JSON.stringify({ assignment_id: 'd1', role: 'planner', status: 'done', details: { files_in_scope: ['flat.mjs'], validation_lane: 'node --test flat.test.mjs', gate_cmd: 'node task/gate.mjs' } }))
   assert.equal(mod.loadPlannerContext({ taskDir: f.taskDir }), null)
 })

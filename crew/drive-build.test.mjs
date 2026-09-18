@@ -6638,17 +6638,47 @@ test('a hardening bounce names the findings that declared no guard at all', () =
 // recorded unmeasured in one round and settled ungateable in the next — by an approved
 // appeal, or by an ordinary review exemption — kept its stale blind spot in the done
 // envelope and the PR body, reporting unmeasured for something already adjudicated.
+// Both fixtures are two-generation: the witness has no cell for the declared implementation
+// (files: {}), so round 2 journals witness-absent and RECORDS the blind spot; only then does
+// the reviewer settle it. The control proves the blind spot exists when nobody settles it.
 // Mutation killed: dropping either settleBlindSpots call, or the filter inside it.
-test('an ungateable mark clears the blind spot it settles, from an appeal or an ordinary review', () => {
-  for (const [why, options] of [
-    ['appeal', { hardened: [{ ...B376_APPEAL_REQUEST }], reviewer2: b376Review('changes-needed', [B376_APPEAL_MARK]) }],
-    ['ordinary review', { hardened: [{ ...B376_HARDENED }], reviewer2: b376Review('changes-needed', [B376_APPEAL_MARK]), proofOutputs: [B376_GREEN, { ok: true, output: 'ok 1 - some other test\n# pass 1\n# fail 0' }, B376_GREEN] }],
-  ]) {
-    const io = b376ProofIo({ files: { ...B376_FILES }, ...options })
-    const result = driveTask({ ...CTX, limits: { build_rounds: 2, review_rounds: 3 } }, io)
-    if (result.status !== 'done') continue   // the other paths of this fixture are covered above
-    assert.ok(!result.details.hardening?.unmeasured?.length, `${why}: a settled finding leaves no blind spot: ${JSON.stringify(result.details.hardening)}`)
-    const body = composePrBody(result.details, { task: 't1' })
-    assert.equal(/hardening_unmeasured|unmeasured — /.test(String(body)), false, `${why}: the PR body carries no settled blind spot`)
+const settledRun = (options, extraReviewer) => {
+  const io = b376ProofIo({ hardened: [{ ...B376_HARDENED }], files: {}, ...options })
+  if (extraReviewer) {
+    const wait = io.wait
+    io.wait = function (path, timeout) { return path === 'reviewer:4' ? extraReviewer : wait.call(this, path, timeout) }
   }
+  const result = driveTask({ ...CTX, limits: { build_rounds: 3, review_rounds: 4 } }, io)
+  const outcomes = io.calls.logs.filter((entry) => entry.finding_hardened).map((entry) => entry.finding_hardened.outcome)
+  return { result, outcomes, io }
+}
+const prBodyOf = (result) => composePrBody({ intent: 'guard the defect', hardening: result.details.hardening_unmeasured ? { unmeasured: result.details.hardening_unmeasured } : null })
+
+test('control: an unmeasured guard nobody settles stays a blind spot in the envelope and the PR body', () => {
+  const { result, outcomes } = settledRun({})
+  assert.equal(result.status, 'done')
+  assert.deepEqual(outcomes, ['witness-absent'])
+  assert.deepEqual(result.details.hardening_unmeasured.map((entry) => [entry.finding, entry.outcome]), [['F1', 'witness-absent']])
+  assert.match(prBodyOf(result), /F1/)
+})
+
+test('an ordinary review that marks the finding ungateable clears the blind spot it settles', () => {
+  const { result, outcomes } = settledRun({ reviewer2: b376Review('changes-needed', [B376_APPEAL_MARK]), reviewer3: b376Review('pass', []) })
+  assert.equal(result.status, 'done')
+  assert.deepEqual(outcomes, ['witness-absent', 'ungateable'])
+  assert.equal(result.details.hardening_unmeasured, undefined, JSON.stringify(result.details.hardening_unmeasured))
+  assert.doesNotMatch(prBodyOf(result), /witness-absent/)
+})
+
+test('an approved appeal that marks the finding ungateable clears the blind spot it settles', () => {
+  const { result, outcomes, io } = settledRun({
+    builder3: b376Build([{ ...B376_APPEAL_REQUEST }]),
+    reviewer2: b376Review('changes-needed', [B376_FINDING]),
+    reviewer3: b376Review('changes-needed', [B376_APPEAL_MARK]),
+  }, b376Review('pass', []))
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.assign.filter(({ role, note }) => role === 'reviewer' && note === 'harden-appeal').length, 1)
+  assert.deepEqual(outcomes, ['witness-absent', 'ungateable'])
+  assert.equal(result.details.hardening_unmeasured, undefined, JSON.stringify(result.details.hardening_unmeasured))
+  assert.doesNotMatch(prBodyOf(result), /witness-absent/)
 })

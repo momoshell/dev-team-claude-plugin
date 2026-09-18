@@ -32,6 +32,9 @@ import { loadCapabilities } from '../../crew/capabilities.mjs'
 import { CELL_RATE_FLOOR, defaultDbPath as defaultLedgerDbPath, ingestJournal as defaultIngestJournal, openLedger as defaultOpenLedger } from './ledger.mjs'
 import { probeDriverIdentity as defaultProbeDriverIdentity } from './lane-watch.mjs'
 
+// 256 MiB: the suite's own output is the largest thing this module reads, and a truncated
+// read is indistinguishable from a failure without it.
+export const SPAWN_MAX_BUFFER = 256 * 1024 * 1024
 export const CLOSEOUT_VERBS = Object.freeze(['merge-check', 'reap', 'recover', 'reconcile'])
 export const EXIT_OK = 0
 export const EXIT_REFUSED = 1
@@ -87,6 +90,7 @@ export const CLOSEOUT_REFUSALS = Object.freeze({
   PR_NOT_MERGED: 'pr-not-merged',
   MERGE_CONFLICT: 'merge-conflict',
   SUITE_RED: 'suite-red',
+  SUITE_UNREADABLE: 'suite-unreadable',
   ANCHOR_ROT: 'anchor-rot',
   ANCHOR_AMBIGUOUS: 'anchor-ambiguous',
   ISSUE_CLOSE_FAILED: 'issue-close-failed',
@@ -171,7 +175,10 @@ export function normalDeps(deps = {}) {
     renameSync: deps.renameSync || fsRenameSync,
     rmSync: deps.rmSync || fsRmSync,
     writeFileSync: deps.writeFileSync || fsWriteFileSync,
-    spawn: deps.spawn || ((options) => spawnSync(options.file, options.args, { cwd: options.cwd, env: options.env, encoding: 'utf8' })),
+    // The suite's TAP output passed Node's 1 MiB default on 2026-09-18 (1,047,788 bytes at
+    // 5,618 tests), and a child that overruns it is killed with ENOBUFS — which merge-check
+    // read as a RED SUITE. A cap this measurement can outgrow is a cap that lies about it.
+    spawn: deps.spawn || ((options) => spawnSync(options.file, options.args, { cwd: options.cwd, env: options.env, encoding: 'utf8', maxBuffer: SPAWN_MAX_BUFFER })),
     newest: deps.newest || newestMtime,
     now: deps.now || (() => Date.now()),
     sleep: deps.sleep || sleepSync,
@@ -921,8 +928,13 @@ function runSuite({ cwd, deps, env, reason = CLOSEOUT_REFUSALS.SUITE_RED, step =
   const d = normalDeps(deps)
   const result = runCommand(suiteCommand(cwd, env), d)
   const suite = parseSuiteCounts(stripAnsi(textOf(result?.stdout)))
-  if (!commandOk(result) || !suite || suite.fail > 0) {
-    refuse(`suite failed in ${cwd}: ${suite ? JSON.stringify(suite) : childFailure(result)}`, reason, step)
+  // A run whose OUTPUT could not be read is unmeasured, and saying "the suite is red" about
+  // it is a claim nobody made: ENOBUFS killed the child mid-stream, so `fail` is unknown.
+  if (!suite) {
+    refuse(`the suite in ${cwd} reported no counts: ${childFailure(result)}`, CLOSEOUT_REFUSALS.SUITE_UNREADABLE, step)
+  }
+  if (!commandOk(result) || suite.fail > 0) {
+    refuse(`suite failed in ${cwd}: ${JSON.stringify(suite)}`, reason, step)
   }
   return suite
 }

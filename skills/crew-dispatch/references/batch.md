@@ -33,6 +33,14 @@ run before `createWorktrees`, so a bad register refuses before a branch exists;
 `references/flags.md` records what `--dry-run` is for and what a green one does
 not mean.
 
+## Chunked plans
+
+`--from-plan` compiles a parent planner envelope into request files before the ordinary batch flow. The accepted parent is a done planner envelope under `<parent>/returns`: both an immediate `*.planner.json` and one run-scoped `<run-id>/*.planner.json` are considered, and the lexicographically greatest relative path wins. Resolution never reads mtime. A parent uses `details.chunks` entries with `id`, `files_in_scope`, optional `depends_on`, `goal`, and `checks_owned`; when that list is absent, non-empty `details.carve_slices` becomes independent chunks `c1`, `c2`, and so on.
+
+The reader validates the entire program before writing anything. Its closed refusal reasons are `chunks-absent`, `chunk-id-invalid`, `chunk-duplicate-id`, `chunk-deps-unordered`, `chunk-scope-outside-parent`, and `chunk-deps-unsettled`. IDs are bounded and `.`/`..` are refused; dependencies must name an earlier chunk; and every child scope must pass the shared scope validator and be covered by the parent's literal or directory-prefix scope. `--only <id>` still validates the whole program and writes only the selected request, after proving every dependency is done; otherwise it refuses `chunk-deps-unsettled`.
+
+Compilation stages requests beside the target, removes stale target files, then atomically renames the staging directory into place. A failed read, parse, validation, or partial write leaves the target empty. Generated requests use `assurance: quick`, carry `adopt` as the parent directory, preserve chunk metadata, and map dependencies to `<parent>-<chunk>` lane names. The recorded wave is the topological level, not the source-array index; recompiling upserts ownership rather than retaining stale `checks_owned` values. Chunk progress is read from `ledger chunk-progress <parent_lane> [--chunk <id>]`; unbooted and unmeasured cells are null with reasons, never zeroes.
+
 ## Parked conditions go stale
 
 **`parked`** names a trigger, and triggers can be met silently, so **`audit the trigger against the code`** before repeating it. **`#291`** had both halves met

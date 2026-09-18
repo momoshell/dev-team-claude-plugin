@@ -3,7 +3,7 @@
 // It owns the ordered checks between a batch request directory and background
 // crew runs; every failed check is a named refusal and stops the batch.
 
-import { appendFileSync, closeSync, existsSync as fsExistsSync, lstatSync as fsLstatSync, openSync, readFileSync as fsReadFileSync, readdirSync as fsReaddirSync, mkdirSync, realpathSync, rmSync, statSync as fsStatSync, writeFileSync } from 'node:fs'
+import { appendFileSync, closeSync, existsSync as fsExistsSync, lstatSync as fsLstatSync, openSync, readFileSync as fsReadFileSync, readdirSync as fsReaddirSync, mkdirSync, realpathSync, renameSync, rmSync, statSync as fsStatSync, writeFileSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { homedir, tmpdir } from 'node:os'
 import { spawn as childSpawn, spawnSync } from 'node:child_process'
@@ -16,6 +16,8 @@ import { loadCapabilities } from '../../crew/capabilities.mjs'
 import { protectedHitsIn, resolveProtectedPaths, PROMPT_SURFACE_BLIND_SPOT as SHARED_PROMPT_SURFACE_BLIND_SPOT, promptSurfacePaths } from '../../crew/protected-paths.mjs'
 import { fenceScopesIntersect, parseFenceScope } from '../../crew/fence-scope.mjs'
 import { slug } from '../../crew/slug.mjs'
+import { openRun } from './emit.mjs'
+import { chunkProgress, upsertChunkRun } from './ledger.mjs'
 import { LADDER_BANDS, PROPOSAL_BLOCK, PROPOSAL_V2_KEYS, TIER_NAMES, extractSymbols, isTripwireFile, validateRequest } from './make-brief.mjs'
 
 const BATCH_EMPTY = 'batch-empty'
@@ -50,6 +52,12 @@ const PLAN_ADOPT_UNREADABLE = 'plan-adopt-unreadable'
 const TEST_REACH_UNFENCED = 'test-reach-unfenced'
 const FENCE_ADMISSION_UNSOURCED = 'fence-admission-unsourced'
 const PLAN_ADOPT_GATE_ABSOLUTE_PATH = 'plan-adopt-gate-absolute-path'
+const CHUNKS_ABSENT = 'chunks-absent'
+const CHUNK_ID_INVALID = 'chunk-id-invalid'
+const CHUNK_DUPLICATE_ID = 'chunk-duplicate-id'
+const CHUNK_DEPS_UNORDERED = 'chunk-deps-unordered'
+const CHUNK_SCOPE_OUTSIDE_PARENT = 'chunk-scope-outside-parent'
+const CHUNK_DEPS_UNSETTLED = 'chunk-deps-unsettled'
 
 export const FENCE_ADMISSION_EVENT = 'fence-admitted'
 export const FENCE_OBSERVATION_EVENT = 'fence-observation'
@@ -80,6 +88,12 @@ export const REFUSAL_REASONS = Object.freeze([
   TEST_REACH_UNFENCED,
   FENCE_ADMISSION_UNSOURCED,
   PLAN_ADOPT_GATE_ABSOLUTE_PATH,
+  CHUNKS_ABSENT,
+  CHUNK_ID_INVALID,
+  CHUNK_DUPLICATE_ID,
+  CHUNK_DEPS_UNORDERED,
+  CHUNK_SCOPE_OUTSIDE_PARENT,
+  CHUNK_DEPS_UNSETTLED,
 ])
 export const WARNING_ROWS_UNPERSISTED_PREFIX = 'dispatch-batch: WARNING rows-unpersisted:'
 
@@ -144,7 +158,7 @@ export const TOOL_CLASSES = ['edit', 'read', 'test', 'other']
 // the dispatcher logs and persists the decision. A dispatch-only key, so the compiler's
 // closed schema never sees it.
 export const TEST_REACH_OVERRIDE_KEY = 'allow_test_reach'
-export const DISPATCH_ONLY_REQUEST_KEYS = Object.freeze(['assurance', 'tier', 'execution', 'variant', 'depends_on', 'seats', 'adopt', TEST_REACH_OVERRIDE_KEY])
+export const DISPATCH_ONLY_REQUEST_KEYS = Object.freeze(['assurance', 'tier', 'execution', 'variant', 'depends_on', 'seats', 'adopt', 'chunk', TEST_REACH_OVERRIDE_KEY])
 // The transports a dispatched batch can boot. Headless is the software-factory
 // mode and stays the DEFAULT, so an unflagged batch behaves exactly as it did
 // before this flag existed. #617 made the transport STATED; it is choosable
@@ -822,6 +836,216 @@ export function normalDeps(deps = {}) {
   }
 }
 
+function chunkDeps(deps = {}) {
+  const d = normalDeps(deps)
+  return { ...d, rmSync: deps.rmSync || rmSync, renameSync: deps.renameSync || renameSync }
+}
+
+function entryName(entry) {
+  if (typeof entry === 'string') return entry
+  return entry && typeof entry.name === 'string' ? entry.name : null
+}
+
+function entryIsDirectory(entry) {
+  if (entry && typeof entry.isDirectory === 'function') {
+    try { return entry.isDirectory() === true } catch { return null }
+  }
+  return typeof entry === 'string' ? null : false
+}
+
+export function readChunkProgram(parentDir, deps = {}) {
+  const d = chunkDeps(deps)
+  const root = typeof parentDir === 'string' && parentDir.trim() ? resolve(parentDir) : null
+  if (!root) refuse('parent directory is required', CHUNKS_ABSENT)
+  const returnsRoot = join(root, 'returns')
+  const candidates = []
+  const readEntries = (directory) => {
+    try {
+      const entries = d.readdirSync(directory, { withFileTypes: true })
+      return Array.isArray(entries) ? entries : []
+    } catch (first) {
+      try {
+        const entries = d.readdirSync(directory)
+        return Array.isArray(entries) ? entries : []
+      } catch { return [] }
+    }
+  }
+  const direct = readEntries(returnsRoot)
+  for (const entry of direct) {
+    const name = entryName(entry)
+    if (!name) continue
+    const child = join(returnsRoot, name)
+    const kind = entryIsDirectory(entry)
+    if (name.endsWith('.planner.json') && kind !== true) candidates.push({ path: child, relative: name })
+    if (kind === true || kind === null) {
+      for (const nested of readEntries(child)) {
+        const nestedName = entryName(nested)
+        if (nestedName?.endsWith('.planner.json') && entryIsDirectory(nested) !== true) {
+          candidates.push({ path: join(child, nestedName), relative: `${name}/${nestedName}` })
+        }
+      }
+    }
+  }
+  const usable = []
+  for (const candidate of candidates.sort((a, b) => a.relative < b.relative ? -1 : a.relative > b.relative ? 1 : 0)) {
+    let envelope
+    try { envelope = JSON.parse(textOf(d.readFileSync(candidate.path, 'utf8'))) } catch { continue }
+    if (!plainObject(envelope) || envelope.role !== 'planner' || envelope.status !== 'done') continue
+    const details = envelope.details
+    if (!plainObject(details)) continue
+    let chunks = Array.isArray(details.chunks) && details.chunks.length > 0 ? details.chunks : null
+    if (!chunks && Array.isArray(details.carve_slices) && details.carve_slices.length > 0) {
+      chunks = details.carve_slices.map((slice, index) => ({
+        id: `c${index + 1}`,
+        files_in_scope: plainObject(slice) ? slice.files_in_scope : null,
+        depends_on: [],
+      }))
+    }
+    if (chunks) usable.push({ envelope, details, chunks })
+  }
+  if (usable.length === 0) refuse(`no accepted planner chunk program under ${returnsRoot}`, CHUNKS_ABSENT)
+  const selected = usable[usable.length - 1]
+  const parentScope = selected.details.files_in_scope
+  if (!Array.isArray(parentScope) || parentScope.length === 0 || driveValidateScopeEntries(parentScope).length > 0) {
+    refuse('accepted planner envelope has no valid non-empty files_in_scope', CHUNKS_ABSENT)
+  }
+  const chunks = []
+  const seenIds = new Set()
+  const seen = new Set()
+  for (const raw of selected.chunks) {
+    if (!plainObject(raw) || typeof raw.id !== 'string' || !/^[A-Za-z0-9._-]{1,64}$/.test(raw.id) || raw.id === '.' || raw.id === '..') {
+      refuse('chunk id must be a valid non-special identifier', CHUNK_ID_INVALID)
+    }
+    const id = raw.id.toLowerCase()
+    if (seenIds.has(id)) refuse(`duplicate chunk id: ${raw.id}`, CHUNK_DUPLICATE_ID)
+    seenIds.add(id)
+    const declaredDeps = raw.depends_on === undefined ? [] : raw.depends_on
+    if (!Array.isArray(declaredDeps)) refuse(`chunk ${raw.id} dependencies are not an array`, CHUNK_DEPS_UNORDERED)
+    const dependsOn = []
+    for (const depValue of declaredDeps) {
+      const dep = typeof depValue === 'string' ? depValue.toLowerCase() : depValue
+      if (!seen.has(dep)) refuse(`chunk ${raw.id} depends on an unknown or forward chunk ${String(depValue)}`, CHUNK_DEPS_UNORDERED)
+      if (!dependsOn.includes(dep)) dependsOn.push(dep)
+    }
+    const files = raw.files_in_scope
+    if (!Array.isArray(files) || files.length === 0 || driveValidateScopeEntries(files).length > 0) {
+      refuse(`chunk ${raw.id} has invalid files_in_scope`, CHUNK_SCOPE_OUTSIDE_PARENT)
+    }
+    const coveredEntries = []
+    for (const childEntry of files) {
+      const covered = scopeMatcher(parentScope)(childEntry)
+      if (!covered) refuse(`chunk ${raw.id} files_in_scope entry is outside the parent scope: ${childEntry}`, CHUNK_SCOPE_OUTSIDE_PARENT)
+      coveredEntries.push(childEntry)
+    }
+    chunks.push({
+      ...raw,
+      id,
+      files_in_scope: coveredEntries,
+      depends_on: dependsOn,
+      goal: typeof raw.goal === 'string' ? raw.goal : null,
+      checks_owned: Array.isArray(raw.checks_owned) ? [...raw.checks_owned] : [],
+    })
+    seen.add(id)
+  }
+  return { parentLane: basename(root), parentScope, chunks }
+}
+
+function chunkRequestDoc(program, chunk, parentDir) {
+  return {
+    ask: chunk.goal || `Implement chunk ${chunk.id}`,
+    where: [...chunk.files_in_scope],
+    done_means: `the checks owned by chunk ${chunk.id} pass`,
+    out_of_scope: 'all files outside the parent planner scope',
+    assurance: 'quick',
+    adopt: parentDir,
+    depends_on: chunk.depends_on.map((dep) => `${program.parentLane}-${dep}`),
+    chunk: { id: chunk.id, files_in_scope: [...chunk.files_in_scope], depends_on: chunk.depends_on.map((dep) => `${program.parentLane}-${dep}`), goal: chunk.goal, checks_owned: [...chunk.checks_owned] },
+  }
+}
+
+function stageChunkRequests({ program, parentDir, outputDir, selected, d }) {
+  const staging = `${outputDir}.staging-${process.pid}`
+  d.rmSync(staging, { recursive: true, force: true })
+  d.mkdirSync(staging, { recursive: true })
+  const staged = []
+  for (const chunk of selected) {
+    const outPath = join(staging, `${program.parentLane}-${chunk.id}${REQUEST_SUFFIX}`)
+    const requestDoc = chunkRequestDoc(program, chunk, parentDir)
+    d.writeFileSync(outPath, JSON.stringify(requestDoc, null, 2) + '\n');
+    staged.push(outPath)
+  }
+  rmSync(outputDir, { recursive: true, force: true });
+  d.renameSync(staging, outputDir)
+  return staged.map((path) => join(outputDir, path.slice(staging.length + 1)))
+}
+
+export function writeChunkRequests({ parentDir, outputDir, deps = {} } = {}) {
+  const d = chunkDeps(deps)
+  const target = typeof outputDir === 'string' && outputDir.trim() ? resolve(outputDir) : null
+  if (!target) refuse('output directory is required', CHUNKS_ABSENT)
+  const clear = () => {
+    try { d.rmSync(target, { recursive: true, force: true }); d.mkdirSync(target, { recursive: true }) } catch { /* refusal remains the measured outcome */ }
+  }
+  let program
+  try { program = readChunkProgram(parentDir, deps) } catch (err) { clear(); throw err }
+  try {
+    return stageChunkRequests({ program, parentDir, outputDir: target, selected: program.chunks, d })
+  } catch (err) {
+    try { d.rmSync(`${target}.staging-${process.pid}`, { recursive: true, force: true }) } catch { /* partial staging is not load-bearing */ }
+    clear()
+    throw err
+  }
+}
+
+export function compileFromPlan({ parentDir, outputDir, only = null, emit = null, runFlags = {}, deps = {} } = {}) {
+  const d = chunkDeps(deps)
+  const program = readChunkProgram(parentDir, deps)
+  const lanes = program.chunks.map((chunk) => ({ lane: `${program.parentLane}-${chunk.id}`, depends_on: chunk.depends_on.map((dep) => `${program.parentLane}-${dep}`) }))
+  const wavePlan = planWaves({ lanes })
+  const waves = new Map()
+  wavePlan.waves.forEach((wave, index) => wave.forEach((lane) => waves.set(lane, index)))
+  let selected = program.chunks
+  if (only !== null) {
+    const id = typeof only === 'string' ? only.toLowerCase() : only
+    const chunk = program.chunks.find((candidate) => candidate.id === id)
+    if (!chunk) refuse(`unknown chunk for --only: ${String(only)}`, CHUNK_ID_INVALID)
+    for (const dep of chunk.depends_on) {
+      let progress = null
+      try {
+        if (typeof deps.chunkProgress === 'function') progress = deps.chunkProgress(program.parentLane, dep)
+        else if (deps.ledger && typeof deps.ledger.chunkProgress === 'function') progress = deps.ledger.chunkProgress(program.parentLane, dep)
+        else if (deps.conn) progress = chunkProgress({ conn: deps.conn, parentLane: program.parentLane, chunkId: dep })
+      } catch { progress = null }
+      if (!progress?.chunk || progress.chunk.done !== true) refuse(`dependency ${dep} is not done for --only ${chunk.id}`, CHUNK_DEPS_UNSETTLED)
+    }
+    selected = [chunk]
+  }
+  const target = typeof outputDir === 'string' && outputDir.trim() ? resolve(outputDir) : null
+  if (!target) refuse('output directory is required', CHUNKS_ABSENT)
+  const clear = () => {
+    try { d.rmSync(target, { recursive: true, force: true }); d.mkdirSync(target, { recursive: true }) } catch { /* keep refusal honest */ }
+  }
+  try {
+    const paths = stageChunkRequests({ program, parentDir, outputDir: target, selected, d })
+    const upsert = deps.upsertChunkRun || (deps.ledger && deps.ledger.upsertChunkRun) || upsertChunkRun
+    for (const chunk of program.chunks) {
+      if (typeof emit === 'function') {
+        try { emit((handle) => handle.recordChunkRun({ parentLane: program.parentLane, chunkId: chunk.id, lane: `${program.parentLane}-${chunk.id}`, wave: waves.get(`${program.parentLane}-${chunk.id}`), dependsOn: chunk.depends_on, checksOwned: chunk.checks_owned })) } catch { /* emitter is instrumentation and never blocks compilation */ }
+      } else {
+        try {
+          const conn = deps.conn || deps.ledger?.readConnection?.()
+          if (conn) upsert(conn, { parentLane: program.parentLane, chunkId: chunk.id, lane: `${program.parentLane}-${chunk.id}`, wave: waves.get(`${program.parentLane}-${chunk.id}`), dependsOn: chunk.depends_on, checksOwned: chunk.checks_owned })
+        } catch { /* a degraded ledger must not invalidate generated requests */ }
+      }
+    }
+    return { parentLane: program.parentLane, outputDir: target, chunks: selected, waves: Object.fromEntries(waves), paths, runFlags }
+  } catch (err) {
+    try { d.rmSync(`${target}.staging-${process.pid}`, { recursive: true, force: true }) } catch { /* partial staging is not load-bearing */ }
+    clear()
+    throw err
+  }
+}
+
 export function parsePlannerSymbolsHoldoutFraction(value) {
   if (value === undefined || value === null) return null
   const text = typeof value === 'number' ? String(value) : value
@@ -1262,6 +1486,10 @@ export function readBatch({ batchDir, checkout, deps } = {}) {
       refuse(`cannot read or validate request ${requestPath}: ${err?.message || String(err)}`, BATCH_UNREADABLE)
     }
     const scoped = sanitiseRequestScope(request, requestPath)
+    const chunkMeta = dispatch.chunk == null ? null
+      : plainObject(dispatch.chunk) && typeof dispatch.chunk.id === 'string' && dispatch.chunk.id.trim() !== ''
+        ? dispatch.chunk
+        : refuse(`request ${requestPath} has an invalid chunk metadata object`, BATCH_UNREADABLE)
     lanes.push({
       lane,
       name,
@@ -1276,6 +1504,7 @@ export function readBatch({ batchDir, checkout, deps } = {}) {
       assuranceFromTier,
       variantSupplied,
       tierSupplied,
+      ...(chunkMeta == null ? {} : { chunk: chunkMeta }),
       tier: tierSupplied && typeof dispatch.tier === 'string' ? dispatch.tier : null,
       variant: variantSupplied && typeof dispatch.variant === 'string' ? dispatch.variant : null,
       seats: dispatch.seats && typeof dispatch.seats === 'object' ? dispatch.seats : null,
@@ -1286,7 +1515,16 @@ export function readBatch({ batchDir, checkout, deps } = {}) {
       creates: Array.isArray(scoped.request.creates) ? scoped.request.creates.map(normaliseRepoPath) : [],
     })
   }
-  return lanes.sort((a, b) => a.lane < b.lane ? -1 : a.lane > b.lane ? 1 : 0)
+  const ordered = lanes.sort((a, b) => a.lane < b.lane ? -1 : a.lane > b.lane ? 1 : 0)
+  if (ordered.some((lane) => lane.chunk)) {
+    const { waves } = planWaves({ lanes: ordered.filter((lane) => lane.chunk) })
+    waves.forEach((wave, index) => wave.forEach((name) => {
+      const lane = ordered.find((candidate) => candidate.lane === name)
+      if (lane?.chunk) lane.chunk = { ...lane.chunk, wave: index }
+      if (lane?.chunk) lane.wave = index
+    }))
+  }
+  return ordered
 }
 
 export function planWaves({ lanes } = {}) {
@@ -4233,7 +4471,7 @@ export function parseCliArgs(argv) {
     ...TURN_CEILING_FLAGS,
     ...BOOT_MEMORY_FLAGS,
   ])
-  const booleanFlags = new Set(['dry-run', 'force', 'no-keep', PANE_TRANSPORT, BOOT_TRANSPORT])
+  const booleanFlags = new Set(['dry-run', 'force', 'no-keep', 'from-plan', PANE_TRANSPORT, BOOT_TRANSPORT])
   const repeatableFlags = new Set(['adopt', TURN_CENSUS_FLAG])
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]
@@ -4274,6 +4512,10 @@ export async function main(argv, deps = {}) {
     const checkout = resolve(typeof flags.checkout === 'string' ? flags.checkout : process.cwd())
     const parentDir = typeof flags.parent === 'string' ? resolve(flags.parent) : dirname(checkout)
     const outDir = typeof flags.out === 'string' ? resolve(flags.out) : join(resolve(flags.batch), 'out')
+    if (flags['from-plan']) {
+      const emitter = openRun()
+      compileFromPlan({ parentDir, outputDir: resolve(flags.batch), emit: emitter?.emit, runFlags: flags, deps })
+    }
     const requestedExecution = resolveRequestedExecution({ execution: flags.execution, variant: flags.variant })
     const requestedTier = resolveRequestedTier({ tier: flags.tier, assurance: flags.assurance })
     let register

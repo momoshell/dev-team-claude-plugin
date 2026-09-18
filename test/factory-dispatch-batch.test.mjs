@@ -78,6 +78,9 @@ import {
   compileLane,
   historicalIssueBindings,
   dispatchBatch,
+  readChunkProgram,
+  writeChunkRequests,
+  compileFromPlan,
   factoryStateRoot,
   formatTurnBudgetReport,
   readTurnCensus,
@@ -5532,4 +5535,54 @@ test('checkFences warns with the citation-carrier prefix and names the fence add
     assert.equal(warning.text.includes(retired), false, `retired carrier wording: ${retired}`)
   }
   assert.equal(warning.text.includes(CITATION_CARRIER_BLIND_SPOT), true)
+})
+
+function chunkParentDir(chunks, { filesInScope = ['crew/a.mjs', 'crew/b.mjs', 'crew/c.mjs'], shape = 'chunks' } = {}) {
+  const dir = scratchDir('chunk-rv12-')
+  mkdirSync(join(dir, 'returns', 'run-1'), { recursive: true })
+  const details = {
+    plan_path: join(dir, 'plan.md'),
+    files_in_scope: filesInScope,
+    validation_lane: 'node --test x.test.mjs',
+  }
+  if (shape === 'chunks') details.chunks = chunks
+  else details.carve_slices = chunks.map((c) => ({ summary: c.id, files_in_scope: c.files_in_scope }))
+  writeFileSync(join(dir, 'returns', 'run-1', 'r1.planner.json'), JSON.stringify({
+    assignment_id: 'x', role: 'planner', status: 'done', summary: 'parent plan', artifacts: [], details,
+  }))
+  return dir
+}
+
+test('chunk RV1-2 compileFromPlan live path writes parseable chunk requests with mapped lanes', () => {
+  const parentDir = chunkParentDir([
+    { id: 'c1', files_in_scope: ['crew/a.mjs'], checks_owned: ['A1'] },
+    { id: 'c2', files_in_scope: ['crew/b.mjs'], checks_owned: ['A2'] },
+    { id: 'c3', files_in_scope: ['crew/c.mjs'], depends_on: ['c1'], checks_owned: ['A3'] },
+  ])
+  const parentLane = parentDir.split('/').pop()
+  const outDir = join(parentDir, 'chunk-out')
+  const result = compileFromPlan({ parentDir, outputDir: outDir })
+  assert.equal(result.paths.length, 3)
+  const names = fsReaddirSync(outDir).sort()
+  assert.deepEqual(names, [`${parentLane}-c1${REQUEST_SUFFIX}`, `${parentLane}-c2${REQUEST_SUFFIX}`, `${parentLane}-c3${REQUEST_SUFFIX}`].sort())
+  const parsed = names.map((n) => JSON.parse(readFileSync(join(outDir, n), 'utf8')))
+  for (const doc of parsed) {
+    assert.equal(doc.assurance, 'quick')
+    assert.equal(doc.adopt, parentDir)
+  }
+  const byId = new Map(parsed.map((doc) => [doc.chunk.id, doc]))
+  assert.deepEqual(byId.get('c3').depends_on, [`${parentLane}-c1`])
+  assert.deepEqual(byId.get('c3').chunk.depends_on, [`${parentLane}-c1`])
+  const lanes = readBatch({ batchDir: outDir })
+  assert.equal(lanes.length, 3)
+  const byChunk = new Map(lanes.map((l) => [l?.chunk?.id, l]))
+  assert.deepEqual([byChunk.get('c1')?.wave, byChunk.get('c2')?.wave, byChunk.get('c3')?.wave], [0, 0, 1])
+})
+
+test('chunk readChunkProgram refuses an out-of-scope carve slice without writing', () => {
+  const parentDir = chunkParentDir([{ id: 'elsewhere', files_in_scope: ['crew/elsewhere.mjs'] }], { shape: 'carve' })
+  const outDir = join(parentDir, 'chunk-out')
+  mkdirSync(outDir, { recursive: true })
+  assert.throws(() => writeChunkRequests({ parentDir, outputDir: outDir }), (err) => err instanceof BatchRefusal && err.reason === 'chunk-scope-outside-parent')
+  assert.deepEqual(fsReaddirSync(outDir), [])
 })

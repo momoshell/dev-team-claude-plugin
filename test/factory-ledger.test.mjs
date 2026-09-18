@@ -1964,3 +1964,21 @@ function triageResponse(cause = 'budget', evidence = 'measured budget exhaustion
 export {
   NONCE_PREFIX, SCRIPT, require, SQLITE_OK, SKIP, bootTieredRun, bootBriefRun, fixture, paneReviewRun, spawnedChildren, trackChild, nextDir, run, openTestLedger, openB499Ledger, seedCellUsage, makeUnenforcedSeatIndexDb, exerciseEveryWriter, seedTaskAgentSession, MARKER_ADW, seedAllWritersWithMarker, MARKER_PLAIN, MARKER_NONCE_ONLY, CALIBRATED_RENDEZVOUS_DELAY_MS, CALIBRATED_RENDEZVOUS_DELAYS_MS, resolveRendezvousDelayMs, waitForEmitterReady, runConcurrentEmitterTrial, RUNSET_SINCE, RUNSET_UNTIL, seedRun, seedConfigurationRun, seedConfigurationSeat, EXECUTION_AXIS_BOOT_CONFIGURATION, executionAxisState, writeExecutionAxisCrew, writeExecutionAxisJournal, executionAxisRuntime, executionAxisRow, readerFixture, ADVISOR_AB_EPOCH, advisorAbFixture, advisorAbEnvelope, advisorAbFinding, runAdvisorAb, advisorReasons, advisorNote, SANDBOX_LEDGER_URL, SANDBOX_DEFAULT_RESOLVER, runSandboxChild, B381_PROVIDER_FAILURE_LINE, B395_SLOT_WAIT_GATE_LINE, B395_SLOT_WAIT_WARM_LINE, B395_SLOT_WAIT_COLD_LINE, B395_OLD_CORPUS_LINES, B381_PLAN_SCOPE_LINE, B381_TIMEOUT_REASK_LINE, B381_RPC_EXIT_LINE, B381_PLAN_ADOPTION_LINE, B381_EXTERNAL_REGISTER, ingestJournalLine, journalFactsCli, measuredJournalFactsDb, assertMeasuredAndAbsent, writeTurnsCorpusJournal, turnsCorpusPayload, builderTurnRole, holdoutLedger, addHoldoutLane, holdoutRows, TRIAGE_MODEL, makeTriageFixture, triageLedger, triageResponse,
 }
+
+test('chunk CLI chunk-progress prints parent progress and refuses unknown flags', () => {
+  const ledger = openTestLedger()
+  ledger.recordChunkRun({ parentLane: 'cli-p', chunkId: 'c1', lane: 'cli-p-c1', wave: 0, checksOwned: ['A1', 'A2'] })
+  const dbPath = ledger._dbPath
+  const env = { ...process.env, DEVTEAM_LEDGER_DB: dbPath }
+  const ok = spawnSync(process.execPath, [SCRIPT, 'chunk-progress', 'cli-p'], { env, encoding: 'utf8' })
+  assert.equal(ok.status, 0)
+  const payload = JSON.parse(ok.stdout)
+  assert.equal(payload.parent_lane, 'cli-p')
+  assert.equal(payload.chunks_total, 1)
+  assert.equal(payload.chunks[0].owned_total, 2)
+  assert.equal(payload.chunks[0].owned_green, null)
+  assert.equal(payload.chunks[0].reason, 'chunk-lane-unbooted')
+  const bad = spawnSync(process.execPath, [SCRIPT, 'chunk-progress', 'cli-p', '--bogus', 'x'], { env, encoding: 'utf8' })
+  assert.equal(bad.status, 2)
+  ledger.close()
+})

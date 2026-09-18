@@ -6340,6 +6340,27 @@ test('acceptance ids come from the real section, not a fenced example of one, an
   assert.deepEqual(acceptanceIds(['# T', '## Acceptance', '    (X1) code', '(A1) real'].join('\n')), ['A1'])
 })
 
+// Pass 3 of the #1407 review: each conjunct of the fence-closing rule, driven through the
+// driver. Inside a backtick fence, a tilde marker and an info-bearing marker are both TEXT;
+// reading either as the close ends the fence early, exposes the pseudo-section of the example,
+// and reports (F9) covered 1/1 while the real (A1) is never owed.
+// Mutation killed, independently: the same-character conjunct; the bare-marker conjunct.
+for (const [why, inner] of [['a tilde marker inside a backtick fence', '~~~~'], ['an info-bearing marker inside a backtick fence', '`'.repeat(3) + 'js']]) {
+  test(`${why} does not close it, so the real acceptance id stays owed`, () => {
+    const F3 = '`'.repeat(3)
+    const brief = ['# Task', '', F3, inner, '## Acceptance', '(F9) an example id', F3, '', '## Acceptance', '(A1) the real id'].join('\n')
+    assert.deepEqual(acceptanceIds(brief), ['A1'])
+    const io = fakeIo({
+      files: { [CTX.briefFile]: brief },
+      envelopes: { 'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations: [{ ...CHECK_MUTATION, check: 'F9' }] } }) },
+      runs: { 'gate-cmd': { ok: true, output: '' }, 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    })
+    const result = driveTask(CTX, io)
+    assert.equal(result.status, 'escalation')
+    assert.match(result.details.escalation.why, /answer 0 of 1 acceptance ids; A1 has no check/)
+  })
+}
+
 for (const [form, line] of [['an indented dash bullet', '  - (A1) the asked-for check'], ['a plus bullet', '+ (A1) the asked-for check']]) {
   test(`an acceptance id written as ${form} is still owed a check by the driver`, () => {
     const io = fakeIo({

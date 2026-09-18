@@ -388,5 +388,5 @@ test('forAll is seeded, bounded to [0,1), runs exactly N times, and names run, s
     (error) => /^property failed on run 0 of 3 \(seed 11\) with input \{"n":\d+\}\nnope$/.test(error.message) && error.cause?.message === 'nope')
   const circular = {}; circular.self = circular
   assert.throws(() => forAll(() => circular, () => { throw new Error('still named') }, { runs: 1 }), /with input \[object Object\]\nstill named/)
-  assert.throws(() => forAll(() => { throw new Error('gen') }, () => {}, { runs: 1 }), /generator failed on run 0 of 1 \(seed \d+\): gen/)
+  assert.throws(() => forAll(() => { throw new Error('gen') }, () => {}, { runs: 1 }), (error) => /generator failed on run 0 of 1 \(seed \d+\): gen/.test(error.message) && error.cause?.message === 'gen')
 })

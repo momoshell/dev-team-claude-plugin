@@ -4132,7 +4132,8 @@ test('splitShellCommands: a backslash is literal inside single quotes, a connect
 // single-quoted body holding `"` and operators, a double-quoted body holding \" and \\ and
 // operators, concatenated spans, every connector with and without whitespace, and empty or
 // adjacent segments — everything the splitter's grammar claims, minus the \\" it does not
-// honour (stated above). The oracle is the generator's own segment list. Mutation killed:
+// honour (stated above); a double-quoted body does carry \\\\, \; and \\| so a splitter that
+// closed a double quote on any backslash reddens. The oracle is the generator's own segment list. Mutation killed:
 // dropping the quote tracking; dropping the two-character connectors; recognising `&&`/`||`
 // only between spaces.
 test('property: splitShellCommands splits on every unquoted connector and never inside a quoted span, whatever the span holds', () => {
@@ -4144,7 +4145,7 @@ test('property: splitShellCommands splits on every unquoted connector and never 
       case 0: return bare(random)
       case 1: return `${bare(random)}\\${pick(random, [' ', '"', "'", ';', '|'])}${bare(random)}`
       case 2: return `'${bare(random)}${pick(random, [...hazards, '"'])}${bare(random)}'`
-      case 3: return `"${bare(random)}${pick(random, [...hazards, "'"])}${bare(random)}"`
+      case 3: return `"${bare(random)}${pick(random, [...hazards, "'", '\\\\', '\\;', '\\|', '\\&'])}${bare(random)}"`
       default: return `${bare(random)}"${pick(random, hazards)}"'${pick(random, hazards)}'${bare(random)}`
     }
   }

@@ -13,7 +13,8 @@ import {
   SESSION_BUSY_EVENT, SESSION_BUSY_SETTLE_MS, SESSION_BUSY_VERDICTS, SESSION_BUSY_PHASES,
   SESSION_ROUND_BASES, SESSION_STAGE_ABSENT, SESSION_DRIVER_BASIS, SESSION_ROUND_BASIS, SESSION_ROUND_UNMEASURED,
   SEAT_SUITE_POLICY_EVENT, SUITE_RUN_REFUSAL, SUITE_RUN_UNRECOGNISED, SUITE_POLICY_STREAM_UNAVAILABLE,
-  suiteRunPolicy, recogniseSuiteInvocation, testTargets, fenceCovers, shellToolCalls,
+  suiteRunPolicy, recogniseSuiteInvocation, testTargets, fenceCovers, shellToolCalls, streamToolCalls, noteEditCall,
+  SUITE_RERUN_REFUSAL, suiteRefusalEnvelope, suiteRefusalRow,
   splitShellCommands, executableText, stripHeredocBodies, commandTokens,
   suitePolicyCounters, countSuiteDecision, suitePolicyReport, SUITE_RUN_OWNERSHIP, SUITE_RUN_OWNERSHIP_KINDS,
 } from './headless.mjs'
@@ -3373,7 +3374,7 @@ test('RV1-2 whole-invocation grammar fails closed across unsafe flags and fence 
 test('b416 RV1-2 suite policy coverage guards ownership, laundering, and spent planner allowance', () => {
   const gatePath = '/tmp/b416/gate.mjs'
   const fence = ['crew/headless.mjs', 'crew/headless.test.mjs']
-  assert.deepEqual(suitePolicyCounters(), { refused: 0, admitted: 0, unrecognised: 0, allowance_spent: 0, suite_allowance_spent: 0 })
+  assert.deepEqual(suitePolicyCounters(), { refused: 0, admitted: 0, unrecognised: 0, allowance_spent: 0, last_run: null, edited_since_run: true })
   for (const role of ['reviewer', 'tech-lead', 'lead']) {
     assert.equal(suiteRunPolicy({ role, command: 'npm test', gatePath }).decision, 'refuse')
   }
@@ -3474,27 +3475,25 @@ test('an own-task test is admitted for every role with both allowances spent', (
   const taskDir = '/tmp/b502-lane/task'
   const command = `node --test ${taskDir}/probe.test.mjs`
   for (const role of Object.keys(SUITE_RUN_OWNERSHIP)) {
-    const verdict = suiteRunPolicy({ role, command, taskDir, fence: [], gatePath: `${taskDir}/gate.mjs`, suiteCommand: 'npm test', ranBefore: 1, suiteRanBefore: 1 })
+    const verdict = suiteRunPolicy({ role, command, taskDir, fence: [], gatePath: `${taskDir}/gate.mjs`, suiteCommand: 'npm test', ranBefore: 1 })
     assert.equal(verdict.kind, 'task-local', role)
     assert.equal(verdict.decision, 'admit', role)
   }
 })
 
-test('an own-task test spends neither allowance', () => {
+test('an own-task test spends no allowance', () => {
   const taskDir = '/tmp/b502-lane/task'
   const command = `node --test ${taskDir}/probe.test.mjs`
   for (const role of Object.keys(SUITE_RUN_OWNERSHIP)) {
     const verdict = suiteRunPolicy({ role, command, taskDir, fence: [], gatePath: `${taskDir}/gate.mjs`, suiteCommand: 'npm test' })
     const counters = countSuiteDecision(suitePolicyCounters(), verdict.decision, { kind: verdict.kind, blind: verdict.blind })
     assert.equal(counters.allowance_spent, 0, role)
-    assert.equal(counters.suite_allowance_spent, 0, role)
   }
   const plannerLocal = suiteRunPolicy({ role: 'planner', command, taskDir, gatePath: `${taskDir}/gate.mjs`, suiteCommand: 'npm test' })
   const plannerCounters = countSuiteDecision(suitePolicyCounters(), plannerLocal.decision, { kind: plannerLocal.kind, blind: plannerLocal.blind })
   assert.equal(suiteRunPolicy({ role: 'planner', command: 'npm test', taskDir, gatePath: `${taskDir}/gate.mjs`, suiteCommand: 'npm test', ranBefore: plannerCounters.allowance_spent }).decision, 'admit')
-  const builderLocal = suiteRunPolicy({ role: 'builder', command, taskDir, gatePath: `${taskDir}/gate.mjs`, suiteCommand: 'npm test' })
-  const builderCounters = countSuiteDecision(suitePolicyCounters(), builderLocal.decision, { kind: builderLocal.kind, blind: builderLocal.blind })
-  assert.equal(suiteRunPolicy({ role: 'builder', command: 'npm test', taskDir, gatePath: `${taskDir}/gate.mjs`, suiteCommand: 'npm test', suiteRanBefore: builderCounters.suite_allowance_spent }).decision, 'admit')
+  // The builder has no full-suite run to spend, probe or no probe.
+  assert.equal(suiteRunPolicy({ role: 'builder', command: 'npm test', taskDir, gatePath: `${taskDir}/gate.mjs`, suiteCommand: 'npm test' }).decision, 'refuse')
 })
 
 test('a sibling task dir, another lane task dir and an outside path stay refused', () => {
@@ -3502,7 +3501,7 @@ test('a sibling task dir, another lane task dir and an outside path stay refused
   const targets = [`${taskDir}-other/probe.test.mjs`, '/tmp/b502-sibling/task/probe.test.mjs', '/etc/probe.test.mjs']
   for (const role of Object.keys(SUITE_RUN_OWNERSHIP)) {
     for (const target of targets) {
-      const verdict = suiteRunPolicy({ role, command: `node --test ${target}`, taskDir, gatePath: `${taskDir}/gate.mjs`, suiteCommand: 'npm test', ranBefore: 1, suiteRanBefore: 1 })
+      const verdict = suiteRunPolicy({ role, command: `node --test ${target}`, taskDir, gatePath: `${taskDir}/gate.mjs`, suiteCommand: 'npm test', ranBefore: 1 })
       assert.equal(verdict.decision, 'refuse', `${role}: ${target}`)
     }
   }
@@ -3528,7 +3527,7 @@ test('a gate invocation compounded with an own-task probe is a suite run', () =>
   const taskDir = '/tmp/b502-lane/task'
   const command = `node ${taskDir}/gate.mjs && node --test ${taskDir}/probe.test.mjs`
   for (const role of Object.keys(SUITE_RUN_OWNERSHIP)) {
-    const verdict = suiteRunPolicy({ role, command, taskDir, fence: [], gatePath: `${taskDir}/gate.mjs`, suiteCommand: 'npm test', ranBefore: 1, suiteRanBefore: 1 })
+    const verdict = suiteRunPolicy({ role, command, taskDir, fence: [], gatePath: `${taskDir}/gate.mjs`, suiteCommand: 'npm test', ranBefore: 1 })
     assert.equal(recogniseSuiteInvocation(command, { taskDir, gatePath: `${taskDir}/gate.mjs`, suiteCommand: 'npm test' }), 'suite', role)
     assert.equal(verdict.decision, 'refuse', role)
   }
@@ -3553,23 +3552,48 @@ test('an own-task probe is admitted end to end on headless json from the transpo
   } finally { f.cleanup() }
 })
 
-test('two declared builder npm test calls across headless json dispatches spend the allowance exactly once', () => {
-  const gatePath = '/tmp/b502/gate.mjs'
-  const policy = { suiteCommand: 'npm test', gatePath, fence: ['crew/'] }
+test("the builder's declared npm test is refused on headless json: the driver's suite stage owns the full suite", () => {
+  const policy = { suiteCommand: 'npm test', gatePath: '/tmp/b502/gate.mjs', fence: ['crew/'] }
   const f = b416JsonFixture({ role: 'builder', policy })
   try {
     f.writeStream(b416ClaudeStream({ turns: 1, command: 'npm test' }))
     writeFileSync(f.assigned.returnPath, JSON.stringify({ assignment_id: f.assigned.id, role: 'builder', status: 'done', summary: 'first', artifacts: [], details: {} }))
-    writeFileSync(join(f.taskDir, 'headless', f.assigned.id, 'exit'), '0')
-    assert.equal(f.io.wait(f.assigned.returnPath, 60).status, 'done')
-
-    const second = f.io.assign({ role: 'builder', briefFile: join(f.taskDir, 'brief-again.md'), policy })
-    f.writeStream(b416ClaudeStream({ turns: 1, command: 'npm test' }), second.id)
-    writeFileSync(second.returnPath, JSON.stringify({ assignment_id: second.id, role: 'builder', status: 'done', summary: 'second', artifacts: [], details: {} }))
-    const envelope = f.io.wait(second.returnPath, 60)
+    const envelope = f.io.wait(f.assigned.returnPath, 60)
     assert.equal(envelope.status, 'insufficient')
-    assert.equal(envelope.details.suite_refusal.command, 'npm test')
+    assert.deepEqual([envelope.details.suite_refusal.command, envelope.details.suite_refusal.refusal], ['npm test', SUITE_RUN_REFUSAL])
   } finally { f.cleanup() }
+})
+
+// Frames for an arbitrary sequence of tool calls, so a stream can carry an EDIT between two runs.
+function b416ClaudeCalls(calls) {
+  return `${calls.map((call, n) => {
+    const id = `b416-call-${n + 1}`
+    return [
+      JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id, name: call.name, input: call.input }] } }),
+      JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: id }] } }),
+    ].join('\n')
+  }).join('\n')}\n`
+}
+
+// Mutation killed: dropping the edit observation from adjudicateSuiteCalls — the second
+// case then refuses too, because no edit is ever seen.
+test('on headless json a scoped test repeated with no edit between is a rerun, and with an edit between a measurement', () => {
+  const policy = { suiteCommand: 'npm test', gatePath: '/tmp/b502/gate.mjs', fence: ['crew/'] }
+  const run = { name: 'Bash', input: { command: 'node --test crew/headless.test.mjs' } }
+  const edit = { name: 'Edit', input: { file_path: 'crew/headless.mjs', old_string: 'a', new_string: 'b' } }
+  for (const [calls, expected] of [[[run, run], 'insufficient'], [[run, edit, run], 'done']]) {
+    const f = b416JsonFixture({ role: 'builder', policy })
+    try {
+      f.writeStream(b416ClaudeCalls(calls))
+      writeFileSync(f.assigned.returnPath, JSON.stringify({ assignment_id: f.assigned.id, role: 'builder', status: 'done', summary: 'built', artifacts: [], details: {} }))
+      const envelope = f.io.wait(f.assigned.returnPath, 60)
+      assert.equal(envelope.status, expected, JSON.stringify(calls.map((c) => c.name)))
+      if (expected === 'insufficient') {
+        assert.equal(envelope.details.suite_refusal.refusal, SUITE_RERUN_REFUSAL)
+        assert.equal(f.rows.find((row) => row.refusal)?.refusal, SUITE_RERUN_REFUSAL)
+      }
+    } finally { f.cleanup() }
+  }
 })
 
 test('a refused suite run is still counted in the turn census on headless json', () => {
@@ -3662,69 +3686,120 @@ test('b416 G2 leaves an unconfigured JSON seat unmeasured while partial Claude c
   } finally { f.cleanup() }
 })
 
-// RV1-7. The builder's ownership is `fenced-once`, not `fenced`: every brief in
-// this repo makes `npm test` green a Done condition, so a policy refusing the
-// full suite outright would end the dispatch of a builder doing exactly what it
-// was told. The allowance is ONE run, charged on its own counter, so #866's
-// 18-49 runs per lane still become one.
-// Mutation killed: builder: 'fenced' in SUITE_RUN_OWNERSHIP.
-test('the builder owns exactly one full-suite run and the second is refused', () => {
+// The builder owns NO full-suite run. Its charter says "never the full suite, which the
+// driver's own suite stage owns and re-runs after you", and the one-run allowance that
+// used to live here was spent by none of 318 recorded commands. Mutation killed:
+// builder: 'once' (or the old 'fenced-once') in SUITE_RUN_OWNERSHIP.
+test('the builder owns no full-suite run: the declared command refuses in every spelling and a fenced test still admits', () => {
   const fence = ['crew/drive.mjs', 'crew/drive.test.mjs']
   const gatePath = '/task/gate.mjs'
-  const opts = { role: 'builder', command: 'npm test', fence, gatePath, suiteCommand: 'npm test' }
-  assert.equal(SUITE_RUN_OWNERSHIP.builder, 'fenced-once')
-  const first = suiteRunPolicy(opts)
-  assert.equal(first.decision, 'admit')
-  assert.equal(first.reason, 'suite-allowance')
-  assert.equal(first.kind, 'suite')
-  assert.equal(suiteRunPolicy({ ...opts, suiteRanBefore: 1 }).decision, 'refuse')
-  assert.equal(suiteRunPolicy({ ...opts, suiteRanBefore: 2 }).decision, 'refuse')
-})
-
-// Mutation killed: charging the suite allowance from `allowance_spent`, which
-// every non-gate admit increments — a builder that ran two fenced tests would
-// then be refused the full-suite run its Done condition requires.
-test('a fenced scoped test never spends the builder full-suite allowance', () => {
-  const fence = ['crew/drive.mjs', 'crew/drive.test.mjs']
-  const gatePath = '/task/gate.mjs'
-  const counters = suitePolicyCounters()
-  for (const command of ['node --test crew/drive.test.mjs', 'node --test crew/drive.test.mjs']) {
+  assert.equal(SUITE_RUN_OWNERSHIP.builder, 'fenced')
+  for (const command of ['npm test', 'cd /Users/x/dt-lane && npm test', 'npm test && npm test']) {
     const verdict = suiteRunPolicy({ role: 'builder', command, fence, gatePath, suiteCommand: 'npm test' })
-    assert.equal(verdict.decision, 'admit', command)
-    countSuiteDecision(counters, verdict.decision, { kind: verdict.kind, blind: verdict.blind })
+    assert.deepEqual([verdict.decision, verdict.refusal], ['refuse', SUITE_RUN_REFUSAL], command)
   }
-  assert.equal(counters.allowance_spent, 2)
-  assert.equal(counters.suite_allowance_spent, 0)
-  const suite = suiteRunPolicy({
-    role: 'builder', command: 'npm test', fence, gatePath, suiteCommand: 'npm test',
-    ranBefore: counters.allowance_spent, suiteRanBefore: counters.suite_allowance_spent,
-  })
-  assert.equal(suite.decision, 'admit')
-  countSuiteDecision(counters, suite.decision, { kind: suite.kind, blind: suite.blind })
-  assert.equal(counters.suite_allowance_spent, 1)
+  assert.equal(suiteRunPolicy({ role: 'builder', command: 'npm test', fence, gatePath }).decision, 'refuse', 'no declared command is no licence')
+  assert.equal(suiteRunPolicy({ role: 'builder', command: 'node --test crew/drive.test.mjs', fence, gatePath, suiteCommand: 'npm test' }).reason, 'fenced-test')
 })
 
-// Mutation killed: admitting the gate against the suite allowance. The gate is
-// the builder's mechanical proof and is re-run every round by charter.
-test('the gate is free for the builder and never charges the suite allowance', () => {
+// Mutation killed: not recording the admitted command — last_run stays null and the
+// rerun rule never fires.
+test('an admitted run becomes the last run and clears the edited flag; the gate is free of the allowance', () => {
+  const fence = ['crew/drive.mjs', 'crew/drive.test.mjs']
   const gatePath = '/task/gate.mjs'
   const counters = suitePolicyCounters()
-  const verdict = suiteRunPolicy({ role: 'builder', command: `node ${gatePath}`, fence: [], gatePath, suiteCommand: 'npm test' })
-  assert.equal(verdict.decision, 'admit')
-  assert.equal(verdict.kind, 'gate')
-  countSuiteDecision(counters, verdict.decision, { kind: verdict.kind, blind: verdict.blind })
-  assert.equal(counters.suite_allowance_spent, 0)
-  assert.equal(counters.allowance_spent, 0)
+  const scoped = suiteRunPolicy({ role: 'builder', command: 'node --test crew/drive.test.mjs', fence, gatePath, suiteCommand: 'npm test' })
+  countSuiteDecision(counters, scoped.decision, { kind: scoped.kind, blind: scoped.blind, command: 'node --test crew/drive.test.mjs' })
+  assert.deepEqual([counters.allowance_spent, counters.last_run, counters.edited_since_run], [1, 'node --test crew/drive.test.mjs', false])
+  const gate = suiteRunPolicy({ role: 'builder', command: `node ${gatePath}`, fence, gatePath, suiteCommand: 'npm test' })
+  assert.deepEqual([gate.decision, gate.kind], ['admit', 'gate'])
+  countSuiteDecision(counters, gate.decision, { kind: gate.kind, blind: gate.blind, command: `node ${gatePath}` })
+  assert.deepEqual([counters.allowance_spent, counters.last_run], [1, `node ${gatePath}`])
+  assert.equal(noteEditCall(counters).edited_since_run, true)
 })
 
-// Mutation killed: widening a never-owner to the builder's allowance. Only the
-// builder gets one; reviewer, tech-lead and lead own no suite run at all.
-test('the suite allowance belongs to the builder alone', () => {
+// The charter's "never rerun a command without an intervening edit", made mechanical.
+// Mutation killed: dropping the `!editedSinceRun` guard admits the repeat; dropping
+// sameInvocation's whitespace normalisation admits the re-spaced repeat.
+test('a scoped test repeated with no edit between is refused as a rerun; an edit, or a different command, is a measurement', () => {
+  const fence = ['crew/drive.mjs', 'crew/drive.test.mjs', 'crew/drive-plan.test.mjs']
+  const gatePath = '/task/gate.mjs'
+  const counters = suitePolicyCounters()
+  const decide = (command) => {
+    const verdict = suiteRunPolicy({ role: 'builder', command, fence, gatePath, suiteCommand: 'npm test', lastRun: counters.last_run, editedSinceRun: counters.edited_since_run })
+    countSuiteDecision(counters, verdict.decision, { kind: verdict.kind, blind: verdict.blind, command })
+    return verdict
+  }
+  assert.equal(decide('node --test crew/drive.test.mjs').decision, 'admit')
+  const rerun = decide('node  --test   crew/drive.test.mjs ')
+  assert.deepEqual([rerun.decision, rerun.refusal, rerun.kind], ['refuse', SUITE_RERUN_REFUSAL, 'scoped-test'])
+  assert.match(rerun.reason, /nothing was edited since/)
+  assert.equal(decide('node --test crew/drive-plan.test.mjs').decision, 'admit', 'a different command is a new measurement')
+  assert.equal(decide('node --test crew/drive-plan.test.mjs').refusal, SUITE_RERUN_REFUSAL)
+  noteEditCall(counters)
+  assert.equal(decide('node --test crew/drive-plan.test.mjs').decision, 'admit', 'an edit makes the same run a measurement again')
+  assert.equal(decide('node --test crew/drive-plan.test.mjs').refusal, SUITE_RERUN_REFUSAL, 'and only once')
+  assert.deepEqual([counters.refused, counters.admitted], [3, 3])
+})
+
+// Mutation killed: applying the rule to every role — the planner re-measures its gate
+// every plan round and never edits, so its repeats are measurements.
+test('the rerun rule covers the gate and the own-task probe for the builder, and never the planner', () => {
+  const taskDir = '/tmp/b502-lane/task'
+  const gatePath = `${taskDir}/gate.mjs`
+  const repeated = { lastRun: null, editedSinceRun: false }
+  for (const command of [`node ${gatePath}`, `node --test ${taskDir}/probe.test.mjs`]) {
+    repeated.lastRun = command
+    assert.equal(suiteRunPolicy({ role: 'builder', command, taskDir, fence: [], gatePath, suiteCommand: 'npm test', ...repeated }).refusal, SUITE_RERUN_REFUSAL, command)
+    assert.equal(suiteRunPolicy({ role: 'planner', command, taskDir, fence: [], gatePath, suiteCommand: 'npm test', ...repeated }).decision, 'admit', command)
+  }
+})
+
+// Mutation killed: deciding the rerun rule before ownership — a repeated unowned run
+// would then be told to "edit first" instead of that it is not its to run.
+test('a repeated unowned command is refused as unowned, never as a rerun', () => {
+  const fence = ['crew/drive.mjs']
+  const gatePath = '/task/gate.mjs'
+  for (const command of ['npm test', 'node --test crew/daemon.test.mjs']) {
+    const verdict = suiteRunPolicy({ role: 'builder', command, fence, gatePath, suiteCommand: 'npm test', lastRun: command, editedSinceRun: false })
+    assert.deepEqual([verdict.decision, verdict.refusal], ['refuse', SUITE_RUN_REFUSAL], command)
+  }
+})
+
+// Mutation killed: hard-coding SUITE_RUN_REFUSAL in the envelope summary or the journal
+// row — the brief would then tell a rerun "run the gate at its absolute path instead".
+test('the refusal envelope and journal row carry the rule that fired', () => {
+  const verdict = suiteRunPolicy({ role: 'builder', command: 'node --test crew/drive.test.mjs', fence: ['crew/drive.test.mjs'], gatePath: '/task/gate.mjs', suiteCommand: 'npm test', lastRun: 'node --test crew/drive.test.mjs', editedSinceRun: false })
+  const envelope = suiteRefusalEnvelope({ id: 'd2', role: 'builder', returnPath: '/returns/r/d2.builder.json', transport: 'headless-rpc', verdict })
+  assert.match(envelope.summary, /^test-rerun-without-edit: builder ran/)
+  assert.equal(envelope.details.suite_refusal.refusal, SUITE_RERUN_REFUSAL)
+  assert.equal(suiteRefusalRow({ role: 'builder', transport: 'headless-rpc', verdict }).refusal, SUITE_RERUN_REFUSAL)
+  const unowned = suiteRunPolicy({ role: 'builder', command: 'npm test', fence: [], gatePath: '/task/gate.mjs', suiteCommand: 'npm test' })
+  assert.match(suiteRefusalEnvelope({ id: 'd2', role: 'builder', returnPath: '/r', transport: 'headless-rpc', verdict: unowned }).summary, /^suite-run-not-owned: /)
+})
+
+// Mutation killed: filtering to shell calls inside streamToolCalls — the edit between two
+// runs is then never seen by the claude transport.
+test('streamToolCalls yields every recorded tool call and shellToolCalls only the shell ones', () => {
+  const text = [
+    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'node --test a.test.mjs' } }, { type: 'tool_use', id: 't2', name: 'Edit', input: { file_path: 'a.mjs' } }] } }),
+    JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1' }] } }),
+    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 't3', name: 'Bash', input: { command: '   ' } }, { type: 'text', text: 'done' }] } }),
+    'not json',
+  ].join('\n')
+  assert.deepEqual(streamToolCalls(text).map((call) => [call.id, call.name]), [['t1', 'Bash'], ['t2', 'Edit'], ['t3', 'Bash']])
+  assert.deepEqual(shellToolCalls(text), [{ id: 't1', command: 'node --test a.test.mjs' }])
+})
+
+// Mutation killed: widening a never-owner to the builder's ownership, or giving the
+// builder the planner's one run.
+test('no role but the planner owns a full-suite run', () => {
   for (const role of ['reviewer', 'tech-lead', 'lead']) {
     assert.equal(SUITE_RUN_OWNERSHIP[role], 'never', role)
-    assert.equal(suiteRunPolicy({ role, command: 'npm test', gatePath: '/task/gate.mjs', suiteCommand: 'npm test', suiteRanBefore: 0 }).decision, 'refuse', role)
+    assert.equal(suiteRunPolicy({ role, command: 'npm test', gatePath: '/task/gate.mjs', suiteCommand: 'npm test' }).decision, 'refuse', role)
   }
   assert.equal(SUITE_RUN_OWNERSHIP.planner, 'once')
+  assert.equal(suiteRunPolicy({ role: 'planner', command: 'npm test', gatePath: '/task/gate.mjs', suiteCommand: 'npm test' }).decision, 'admit')
 })
 
 // Mutation killed: an ownership value outside the closed set silently falling
@@ -3736,56 +3811,14 @@ test('every ownership value is declared and an unknown one refuses', () => {
   assert.equal(suiteRunPolicy({ role: 'nonesuch', command: 'npm test', gatePath: '/task/gate.mjs', suiteCommand: 'npm test' }).decision, 'refuse')
 })
 
-// Mutation killed: admitting any `kind: 'suite'` against the allowance. `suite`
-// is overloaded — it is also the recognised-but-unaccountable fall-through of
-// #904's posture — so an unsafe invocation must refuse AND spend nothing,
-// leaving the builder's one declared run still available.
-test('an unaccountable suite invocation refuses and never spends the allowance', () => {
-  const fence = ['crew/drive.mjs']
-  const gatePath = '/task/gate.mjs'
-  const counters = suitePolicyCounters()
+// Mutation killed: admitting any `kind: 'suite'` for the builder. `suite` is
+// overloaded — it is also the recognised-but-unaccountable fall-through of #904's
+// posture — so an unsafe invocation must refuse whatever the fence says.
+test('an unaccountable suite invocation refuses for the builder', () => {
+  const fence = ['crew/drive.mjs', 'crew/headless.test.mjs']
   for (const command of ['node --require=./crew/daemon.mjs --test crew/headless.test.mjs', 'node --test --watch crew/drive.test.mjs']) {
-    const verdict = suiteRunPolicy({
-      role: 'builder', command, fence, gatePath, suiteCommand: 'npm test',
-      ranBefore: counters.allowance_spent, suiteRanBefore: counters.suite_allowance_spent,
-    })
-    assert.equal(verdict.decision, 'refuse', command)
-    countSuiteDecision(counters, verdict.decision, { kind: verdict.kind, blind: verdict.blind })
+    assert.equal(suiteRunPolicy({ role: 'builder', command, fence, gatePath: '/task/gate.mjs', suiteCommand: 'npm test' }).decision, 'refuse', command)
   }
-  assert.equal(counters.suite_allowance_spent, 0)
-  assert.equal(suiteRunPolicy({
-    role: 'builder', command: 'npm test', fence, gatePath, suiteCommand: 'npm test',
-    suiteRanBefore: counters.suite_allowance_spent,
-  }).decision, 'admit')
-})
-
-// Mutation killed: treating an absent suiteCommand as a licence. With nothing
-// declared there is no command the allowance could name.
-test('with no declared suite command the builder allowance admits nothing', () => {
-  assert.equal(suiteRunPolicy({ role: 'builder', command: 'npm test', fence: [], gatePath: '/task/gate.mjs' }).decision, 'refuse')
-})
-
-// b438-refstrailer, 2026-09-05: the builder ran `cd <checkout> && npm test` on
-// its first build round, the two-segment command failed the declared-run guard,
-// its dispatch was ended as suite-run-not-owned before it could write an
-// envelope, and the lane escalated `seat-died`. The allowance must count the
-// declared command, not require it to be the only segment.
-// Mutation killed: requiring segments.length === 1 in isDeclaredSuiteRun.
-test('the builder suite allowance admits the declared command after a cd', () => {
-  const opts = { role: 'builder', fence: ['crew/drive.mjs'], gatePath: '/task/gate.mjs', suiteCommand: 'npm test' }
-  for (const command of ['npm test', 'cd /Users/x/dt-lane && npm test', 'cd /tmp/a && cd /tmp/b && npm test']) {
-    const v = suiteRunPolicy({ ...opts, command, suiteRanBefore: 0 })
-    assert.equal(v.decision, 'admit', command)
-    assert.equal(v.reason, 'suite-allowance', command)
-  }
-})
-
-// Mutation killed: counting any match instead of exactly one. Two declared runs
-// in one command line are two runs, and the allowance is one.
-test('two declared suite runs in one command line are refused', () => {
-  const opts = { role: 'builder', fence: ['crew/drive.mjs'], gatePath: '/task/gate.mjs', suiteCommand: 'npm test' }
-  assert.equal(suiteRunPolicy({ ...opts, command: 'npm test && npm test', suiteRanBefore: 0 }).decision, 'refuse')
-  assert.equal(suiteRunPolicy({ ...opts, command: 'cd /tmp/x && npm test', suiteRanBefore: 1 }).decision, 'refuse')
 })
 
 // #929 — three lanes (b443-providerretry, b444-charterbytes, b445-hardenproof)
@@ -3932,10 +3965,10 @@ test('#929 a suite run at the command word still refuses, in every spelling', ()
   const fence = ['crew/headless.test.mjs']
   assert.equal(suiteRunPolicy({ role: 'builder', command: 'node --test crew/headless.test.mjs', fence, gatePath, suiteCommand }).decision, 'admit')
   assert.equal(testTargets('node --test "**/*.test.mjs"'), null)
-  // The declared command spends the builder's one allowance, exactly once.
-  const builder = { role: 'builder', fence, gatePath, suiteCommand, command: 'npm test' }
-  assert.equal(suiteRunPolicy({ ...builder, suiteRanBefore: 0 }).decision, 'admit')
-  assert.equal(suiteRunPolicy({ ...builder, suiteRanBefore: 1 }).decision, 'refuse')
+  // The declared command is the driver's, in every spelling: the builder owns no run of it.
+  for (const command of ['npm test', 'cd /x && npm test']) {
+    assert.equal(suiteRunPolicy({ role: 'builder', fence, gatePath, suiteCommand, command }).decision, 'refuse', command)
+  }
 })
 
 // The command-word rule alone saves b449's PROSE line, whose first word is
@@ -4037,8 +4070,7 @@ const CORPUS_SELECTION_RULE = 'Every distinct recorded command the recogniser cl
 const CORPUS_CONTEXTS = {
   lead: (command) => suiteRunPolicy({ role: 'lead', command, fence: [], gatePath: null, suiteCommand: 'npm test' }),
   planner: (command) => suiteRunPolicy({ role: 'planner', command, fence: [], gatePath: null, ranBefore: 0, suiteCommand: 'npm test' }),
-  builder: (command) => suiteRunPolicy({ role: 'builder', command, fence: [], gatePath: null, suiteRanBefore: 0, suiteCommand: 'npm test' }),
-  builder_spent: (command) => suiteRunPolicy({ role: 'builder', command, fence: [], gatePath: null, suiteRanBefore: 1, suiteCommand: 'npm test' }),
+  builder: (command) => suiteRunPolicy({ role: 'builder', command, fence: [], gatePath: null, suiteCommand: 'npm test' }),
 }
 const corpusDigest = (command) => createHash('sha256').update(String(command), 'utf8').digest('hex')
 // PRODUCTION decides what runs a test, not a hand-written regex: a family member is
@@ -4086,7 +4118,7 @@ test('#929 every corpus entry states a complete verdict, a role and its source s
     assert.equal(CORPUS_ROLES.includes(entry.role), true, `${entry.id} role ${entry.role}`)
     assert.equal(entry.source_stream.endsWith('/stream.jsonl'), true, `${entry.id} ${entry.source_stream}`)
     assert.equal(['recognised', 'sample'].includes(entry.selected_by), true, `${entry.id} ${entry.selected_by}`)
-    assert.deepEqual(Object.keys(entry.decisions), ['lead', 'planner', 'builder', 'builder_spent'], entry.id)
+    assert.deepEqual(Object.keys(entry.decisions), ['lead', 'planner', 'builder'], entry.id)
     for (const context of Object.keys(CORPUS_CONTEXTS)) {
       assert.equal(CORPUS_DECISIONS.includes(entry.decisions[context]), true, `${entry.id} ${context}`)
     }
@@ -4140,60 +4172,35 @@ test('#929 the corpus is redacted and stable across machines', () => {
   }
 })
 
-// #929 (3) — the shape that bit us, in all three joiners and both allowance
-// states. b438-refstrailer's builder wrote `cd <checkout> && npm test`, the `cd`
-// made it two segments, its one legitimate suite run was refused, and the lane
-// escalated seat-died. `;` and `|` are the same shape with a different connector
-// and each can regress on its own, so each is its own named test.
+// #929 (3) — the shape that bit us, in all three joiners. b438-refstrailer's builder
+// wrote `cd <checkout> && npm test`, the `cd` made it two segments, and its run was
+// refused as undeclared. The fix then was a one-run allowance; the allowance is gone
+// (the builder's charter says "never the full suite", the driver's suite stage runs
+// it), so the same three spellings now refuse for the RIGHT reason: not owned. Each
+// joiner is its own assertion because each can regress alone.
+// Mutation killed: builder: 'once' in SUITE_RUN_OWNERSHIP admits all three.
 const CD_AND = 'cd ~/Dev/dt-b438-refstrailer && npm test'
 const CD_SEMI = 'cd ~/Dev/dt-b438-refstrailer ; npm test'
 const CD_PIPE = 'cd ~/Dev/dt-b438-refstrailer | npm test'
 const CORPUS_BUILDER = { role: 'builder', fence: ['crew/headless.test.mjs'], gatePath: '/task/gate.mjs', suiteCommand: 'npm test' }
 
-test('#929 a cd-and-suite command admits for a builder with an unspent allowance', () => {
-  // MUTATION J1: flip this expectation and the `&&` spelling that cost
-  // b438-refstrailer a lane is no longer pinned as admitted.
-  assert.equal(suiteRunPolicy({ ...CORPUS_BUILDER, command: CD_AND, suiteRanBefore: 0 }).decision, 'admit', CD_AND)
+test('#929 the cd-then-suite family refuses for the builder in all three joiners, as not owned', () => {
+  for (const command of [CD_AND, CD_SEMI, CD_PIPE]) {
+    const verdict = suiteRunPolicy({ ...CORPUS_BUILDER, command })
+    assert.deepEqual([verdict.decision, verdict.refusal, verdict.kind], ['refuse', SUITE_RUN_REFUSAL, 'suite'], command)
+  }
 })
 
-test('#929 a cd-and-suite command refuses for a builder with the allowance spent', () => {
-  // MUTATION J2: flip this expectation and the allowance stops being exactly one.
-  assert.equal(suiteRunPolicy({ ...CORPUS_BUILDER, command: CD_AND, suiteRanBefore: 1 }).decision, 'refuse', CD_AND)
-})
-
-test('#929 a cd-semicolon-suite command admits for a builder with an unspent allowance', () => {
-  // MUTATION J3: flip this expectation and the `;` connector may regress alone.
-  assert.equal(suiteRunPolicy({ ...CORPUS_BUILDER, command: CD_SEMI, suiteRanBefore: 0 }).decision, 'admit', CD_SEMI)
-})
-
-test('#929 a cd-semicolon-suite command refuses for a builder with the allowance spent', () => {
-  // MUTATION J4: flip this expectation and a spent allowance stops refusing `;`.
-  assert.equal(suiteRunPolicy({ ...CORPUS_BUILDER, command: CD_SEMI, suiteRanBefore: 1 }).decision, 'refuse', CD_SEMI)
-})
-
-test('#929 a cd-pipe-suite command admits for a builder with an unspent allowance', () => {
-  // MUTATION J5: flip this expectation and the `|` connector may regress alone.
-  assert.equal(suiteRunPolicy({ ...CORPUS_BUILDER, command: CD_PIPE, suiteRanBefore: 0 }).decision, 'admit', CD_PIPE)
-})
-
-test('#929 a cd-pipe-suite command refuses for a builder with the allowance spent', () => {
-  // MUTATION J6: flip this expectation and a spent allowance stops refusing `|`.
-  assert.equal(suiteRunPolicy({ ...CORPUS_BUILDER, command: CD_PIPE, suiteRanBefore: 1 }).decision, 'refuse', CD_PIPE)
-})
-
-// The RECORDED half of the same shape. Measured, and reported as a finding rather
-// than fixed here (#929 fences `crew/headless.mjs` out of this lane): every one of
-// the recorded family members REFUSES in both allowance states, because
-// `isDeclaredSuiteRun` compares a whole segment to the declared command and every
-// real spelling carries a `2>&1` or a `>` INSIDE that segment. Across the whole
-// recorded population not one command carries a segment equal to `npm test`.
-test('#929 the recorded cd-then-test-run family states both builder allowance verdicts', () => {
+// The RECORDED half of the same shape: every family member refuses for the builder, and
+// did so under the old one-run allowance too — every real spelling carries a `2>&1` or
+// a `>` INSIDE its segment, so not one recorded command was ever a bare declared run.
+// That measurement is why the allowance is gone.
+test('#929 the recorded cd-then-test-run family refuses for the builder', () => {
   const family = CORPUS.filter((entry) => corpusIsFamily(entry.command))
   assert.ok(family.length >= 100, `family of ${family.length}`)
   assert.equal(family.length, CORPUS_HEADER.cd_then_test_family_count)
   for (const entry of family) {
     assert.equal(entry.decisions.builder, CORPUS_CONTEXTS.builder(entry.command).decision, entry.id)
-    assert.equal(entry.decisions.builder_spent, CORPUS_CONTEXTS.builder_spent(entry.command).decision, entry.id)
   }
 })
 

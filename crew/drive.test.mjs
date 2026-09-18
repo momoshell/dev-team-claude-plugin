@@ -3363,6 +3363,28 @@ test('#846 scope refusals distinguish envelope debris from ordinary edits', () =
   assert.match(brief, /OUTSIDE the plan's scope/)
 })
 
+// The wrapper's SECOND rule reaches the next brief through the same correlation. Mutation
+// killed: WRAPPER_REFUSAL_MARKERS holding only suite-run-not-owned — the rerun envelope is
+// then an ordinary insufficient, and no enforcement brief is written.
+test('a rerun refusal reaches the next brief and names its own rule, not "not owned"', () => {
+  const owned = suiteRefusalEnv()
+  const rerun = { ...owned, details: { ...owned.details, suite_refusal: { ...owned.details.suite_refusal, refusal: 'test-rerun-without-edit', reason: 'test-rerun-without-edit: this exact command already ran and nothing was edited since, so its result cannot have changed' } } }
+  const io = fakeIo({
+    envelopes: { 'planner:1': rerun, 'lead:1': leadEnv('bounce'), 'planner:2': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } }, changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'done', JSON.stringify({ result, assigns: io.calls.assign }))
+  const second = io.calls.assign.find((entry) => entry.role === 'planner' && entry.n === 2)
+  assert.match(second.briefFile, new RegExp(`^${TD}/enforcement-planner-r\\d+\\.md$`))
+  const brief = io.calls.writes[second.briefFile]
+  assert.match(brief, /^# Enforcement \(test-rerun-without-edit\)/)
+  assert.match(brief, /with no edit in between/)
+  assert.match(brief, /edit first, then run once/)
+  assert.equal(brief.includes('which your role does not own'), false)
+  assert.equal(result.details.enforcements[0].kind, 'test-rerun-without-edit')
+})
+
 test('b433 suite refusal reaches the next brief and survives a configured ceiling', () => {
   const baseEnvelopes = {
     'planner:1': suiteRefusalEnv(), 'lead:1': leadEnv('bounce'), 'planner:2': planEnv(),

@@ -244,6 +244,8 @@ export function predecessorFindingsClosed(planCheckText, planText) {
 // the transports and does not grow one for a string. Same rule as
 // CENSUS_ABSENT_REASONS (:262) — the driver owns the vocabulary it publishes.
 export const SUITE_RUN_NOT_OWNED = 'suite-run-not-owned'
+// The second rule the seat wrapper enforces: an identical test run with no edit between.
+export const TEST_RERUN_WITHOUT_EDIT = 'test-rerun-without-edit'
 
 // A refused suite run BOUNCES the seat (#969). Other recoverable seat-level failures
 // already have bounded routes: an invalid envelope is re-asked, and a gate defect
@@ -259,13 +261,14 @@ export const ZERO_TURN_REASK_MAX = 1
 
 // CORRELATION, not merely shape. An envelope is this dispatch's refusal only when
 // it is ADDRESSED to this dispatch: a non-empty outer assignment_id and role, an
-// inner role that EQUALS the outer one, and the producer's marker as a
+// inner role that EQUALS the outer one, and one of the wrapper's two markers as a
 // token-bound PREFIX.
+const WRAPPER_REFUSAL_MARKERS = Object.freeze([SUITE_RUN_NOT_OWNED, TEST_RERUN_WITHOUT_EDIT])
 function correlatedRefusal(env, refusal) {
   return typeof env.assignment_id === 'string' && env.assignment_id !== ''
     && typeof env.role === 'string' && env.role !== ''
     && refusal.role === env.role
-    && refusal.reason.startsWith(`${SUITE_RUN_NOT_OWNED}:`)
+    && WRAPPER_REFUSAL_MARKERS.some((marker) => refusal.reason.startsWith(`${marker}:`))
 }
 
 // The ONE predicate for "this envelope IS the wrapper's refusal", shared by
@@ -381,6 +384,15 @@ function handledEnvelopeRefusalWhy(env) {
 function suiteRefusalPreamble(env) {
   const refusal = suiteRefusalOf(env)
   if (!refusal) return { kind: null, lines: [] }
+  if (refusal.reason.startsWith(`${TEST_RERUN_WITHOUT_EDIT}:`)) {
+    return {
+      kind: TEST_RERUN_WITHOUT_EDIT,
+      lines: [
+        `Your previous dispatch was REFUSED: ${TEST_RERUN_WITHOUT_EDIT}. You re-ran ${JSON.stringify(refusal.command)} with no edit in between, so its result could not have changed.`,
+        'The same assignment is asked again — edit first, then run once. The driver re-proves the gate and the full suite after you.',
+      ],
+    }
+  }
   return {
     kind: 'suite-run-not-owned',
     lines: [

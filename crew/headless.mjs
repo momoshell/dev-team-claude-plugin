@@ -865,22 +865,29 @@ export const SEAT_SUITE_POLICY_EVENT = 'seat-suite-policy'
 export const PANE_NO_INTERCEPT = 'pane-no-intercept'
 export const SUITE_RUN_REFUSAL = 'suite-run-not-owned'
 export const SUITE_RUN_UNRECOGNISED = 'suite-run-unrecognised'
+// The charter's "never rerun a command without an intervening edit" (builder.md), made
+// mechanical: the same run with nothing edited since has the same result. b849's builder
+// paid ten admitted scoped runs for the sentence being prose.
+export const SUITE_RERUN_REFUSAL = 'test-rerun-without-edit'
 // DATA, not branches: a policy change is a data edit, the posture
 // SEAT_REFUSAL_ACTIONS (:71) already takes.
 export const SUITE_RUN_OWNERSHIP = Object.freeze({
-  planner: 'once', 'tech-lead': 'never', builder: 'fenced-once', reviewer: 'never', lead: 'never',
+  planner: 'once', 'tech-lead': 'never', builder: 'fenced', reviewer: 'never', lead: 'never',
 })
-// Closed, so a typo in the table above is a refusal and never a silent admit.
-export const SUITE_RUN_OWNERSHIP_KINDS = Object.freeze(['never', 'once', 'fenced', 'fenced-once'])
+// Closed, so a typo in the table above is a refusal and never a silent admit. The builder
+// owns NO full-suite run: its charter says so, and the driver's suite stage runs it after
+// every build. The one-run allowance that used to sit here ('fenced-once') was spent by
+// zero recorded commands — not one of 318 in the corpus is a bare declared run.
+export const SUITE_RUN_OWNERSHIP_KINDS = Object.freeze(['never', 'once', 'fenced'])
 
 export function suiteRefusalEnvelope({ id, role, returnPath, transport, verdict }) {
   return {
     assignment_id: id, role, status: 'insufficient',
-    summary: `${SUITE_RUN_REFUSAL}: ${role} ran ${JSON.stringify(verdict.command)} on ${transport}; the dispatch was ended and the seat envelope at ${returnPath} was not accepted`,
+    summary: `${verdict.refusal}: ${role} ran ${JSON.stringify(verdict.command)} on ${transport}; the dispatch was ended and the seat envelope at ${returnPath} was not accepted`,
     artifacts: [],
     details: {
       suite_refusal: {
-        role, transport, command: verdict.command, kind: verdict.kind,
+        role, transport, command: verdict.command, kind: verdict.kind, refusal: verdict.refusal,
         gate_path: verdict.gate_path, reason: verdict.reason,
       },
     },
@@ -889,7 +896,7 @@ export function suiteRefusalEnvelope({ id, role, returnPath, transport, verdict 
 
 export function suiteRefusalRow({ role, transport, verdict }) {
   return {
-    event: SEAT_SUITE_POLICY_EVENT, role, transport, refusal: SUITE_RUN_REFUSAL,
+    event: SEAT_SUITE_POLICY_EVENT, role, transport, refusal: verdict.refusal,
     command: verdict.command, kind: verdict.kind, gate_path: verdict.gate_path, reason: verdict.reason,
   }
 }
@@ -933,22 +940,25 @@ export function turnCeilingDetail({ at = Date.now(), role, id, turns, budget, ab
   }
 }
 
-export function suitePolicyCounters() { return { refused: 0, admitted: 0, unrecognised: 0, allowance_spent: 0, suite_allowance_spent: 0 } }
+// Per ROLE for the run. `last_run` / `edited_since_run` are the rerun rule's state: the last
+// admitted command and whether any edit tool call has been observed since it.
+export function suitePolicyCounters() { return { refused: 0, admitted: 0, unrecognised: 0, allowance_spent: 0, last_run: null, edited_since_run: true } }
 
-// Two facts beyond the decision, both accounting-only, both defaulted so a legacy
-// two-argument call keeps its old meaning: `kind` absent charges the allowance,
-// `blind` absent invents no blind spot.
-export function countSuiteDecision(counters, decision, { kind = null, blind = false } = {}) {
+// Facts beyond the decision, all accounting-only, all defaulted so a legacy two-argument
+// call keeps its old meaning: `kind` absent charges the allowance, `blind` absent invents
+// no blind spot, `command` absent records no last run.
+export function countSuiteDecision(counters, decision, { kind = null, blind = false, command = null } = {}) {
   if (decision === 'refuse') counters.refused += 1
   else if (decision === 'admit') counters.admitted += 1
   else counters.unrecognised += 1
   if (decision === 'admit' && kind !== 'gate' && kind !== 'task-local') counters.allowance_spent += 1
-  // The builder's ONE full-suite run is charged on its own counter: a fenced
-  // scoped test must not spend the allowance its Done condition needs.
-  if (decision === 'admit' && kind === 'suite') counters.suite_allowance_spent += 1
+  if (decision === 'admit' && typeof command === 'string') { counters.last_run = command; counters.edited_since_run = false }
   if (blind && decision !== 'unrecognised') counters.unrecognised += 1
   return counters
 }
+
+// An edit tool call was observed: the next identical run is a measurement again.
+export function noteEditCall(counters) { counters.edited_since_run = true; return counters }
 
 export const SUITE_POLICY_STREAM_UNAVAILABLE = 'suite-policy-stream-unavailable'
 
@@ -1311,7 +1321,7 @@ export function recogniseSuiteInvocation(command, options = {}) {
 
 function suiteRefusal(role, command, gatePath, kind) {
   return {
-    decision: 'refuse',
+    decision: 'refuse', refusal: SUITE_RUN_REFUSAL,
     reason: `${SUITE_RUN_REFUSAL}: the driver's gate-proof stage carries this evidence at ${gatePath}`,
     role, command, kind, gate_path: gatePath,
   }
@@ -1319,7 +1329,17 @@ function suiteRefusal(role, command, gatePath, kind) {
 
 function suiteAdmit(why, kind) { return { decision: 'admit', reason: why, kind } }
 
-function decideSuiteRun({ role, command, fence, gatePath, ranBefore, suiteRanBefore, suiteCommand, taskDir, kind }) {
+function rerunRefusal(role, command, gatePath, kind) {
+  return {
+    decision: 'refuse', refusal: SUITE_RERUN_REFUSAL,
+    reason: `${SUITE_RERUN_REFUSAL}: this exact command already ran and nothing was edited since, so its result cannot have changed`,
+    role, command, kind, gate_path: gatePath,
+  }
+}
+const sameInvocation = (command, lastRun) => typeof lastRun === 'string'
+  && String(command).trim().replace(/\s+/g, ' ') === lastRun.trim().replace(/\s+/g, ' ')
+
+function decideSuiteRun({ role, command, fence, gatePath, ranBefore, suiteCommand, taskDir, kind }) {
   if (kind === null) return { decision: 'unrecognised', reason: SUITE_RUN_UNRECOGNISED, role, command, kind: null, gate_path: gatePath }
   if (kind === 'task-local' && SUITE_RUN_OWNERSHIP[role] !== undefined) return suiteAdmit('task-local', kind)
   if (SUITE_RUN_OWNERSHIP[role] === 'never') return suiteRefusal(role, command, gatePath, kind)
@@ -1334,41 +1354,7 @@ function decideSuiteRun({ role, command, fence, gatePath, ranBefore, suiteRanBef
     if (kind === 'suite') return suiteRefusal(role, command, gatePath, kind)
     return fencedScopedTest(command, fence, taskDir) ? suiteAdmit('fenced-test', kind) : suiteRefusal(role, command, gatePath, kind)
   }
-  // `fenced-once` is `fenced` plus the ONE full-suite run the builder's Done
-  // condition requires. Every brief in this repo makes `npm test` green a
-  // condition of done, so a policy that refused it outright would end the
-  // dispatch of a builder doing exactly what it was told (RV1-7). It still
-  // kills #866's grievance: the 18-49 runs per lane become one.
-  if (SUITE_RUN_OWNERSHIP[role] === 'fenced-once') {
-    if (kind === 'gate') return suiteAdmit('gate', kind)
-    if (kind === 'suite') {
-      // `suite` is overloaded: it is BOTH the declared suite command and the
-      // recognised-but-unaccountable fall-through (#904's posture). Only the
-      // DECLARED command may spend the allowance — an unaccountable invocation
-      // refuses and is charged nothing, so it can never buy the builder's one run.
-      if (!isDeclaredSuiteRun(command, suiteCommand)) return suiteRefusal(role, command, gatePath, kind)
-      return suiteRanBefore >= 1 ? suiteRefusal(role, command, gatePath, kind) : suiteAdmit('suite-allowance', kind)
-    }
-    return fencedScopedTest(command, fence, taskDir) ? suiteAdmit('fenced-test', kind) : suiteRefusal(role, command, gatePath, kind)
-  }
   return suiteRefusal(role, command, gatePath, kind)
-}
-
-// Fail-closed by construction: with no declared suite command there is nothing
-// the allowance could name, so nothing spends it.
-//
-// EXACTLY ONE segment must be the declared command. Requiring it to be the ONLY
-// segment was wrong and cost b438-refstrailer a lane on its first build round:
-// `cd <checkout> && npm test` is how a seat actually runs the suite, and the
-// `cd` made it two segments, so the builder's one legitimate run was refused
-// and its dispatch ended before it could write an envelope. Counting instead of
-// requiring solitude keeps the allowance exact — `npm test && npm test` is two
-// declared runs and still refuses — while admitting the ordinary spelling.
-function isDeclaredSuiteRun(command, suiteCommand) {
-  if (typeof suiteCommand !== 'string' || suiteCommand.trim() === '') return false
-  const declared = suiteCommand.trim()
-  const matches = splitShellCommands(command).filter((segment) => segment.trim() === declared)
-  return matches.length === 1
 }
 
 function fencedScopedTest(command, fence, taskDir) {
@@ -1376,14 +1362,22 @@ function fencedScopedTest(command, fence, taskDir) {
   return targets !== null && targets.every((target) => fenceCovers(fence, target))
 }
 
-export function suiteRunPolicy({ role, command, fence = [], gatePath = null, ranBefore = 0, suiteRanBefore = 0, suiteCommand = null, taskDir = null } = {}) {
+export function suiteRunPolicy({ role, command, fence = [], gatePath = null, ranBefore = 0, suiteCommand = null, taskDir = null, lastRun = null, editedSinceRun = true } = {}) {
   const { kind, blind } = recogniseInvocation(command, { suiteCommand, gatePath, taskDir })
-  return { ...decideSuiteRun({ role, command, fence, gatePath, ranBefore, suiteRanBefore, suiteCommand, taskDir, kind }), blind }
+  const verdict = decideSuiteRun({ role, command, fence, gatePath, ranBefore, suiteCommand, taskDir, kind })
+  // The rerun rule applies to the role that EDITS: ownership is decided first, so a repeated
+  // unowned command still reads as unowned; the planner never edits and re-measures its gate
+  // every plan round, so its repeats are measurements.
+  if (verdict.decision === 'admit' && SUITE_RUN_OWNERSHIP[role] === 'fenced' && !editedSinceRun && sameInvocation(command, lastRun)) {
+    return { ...rerunRefusal(role, command, gatePath, kind), blind }
+  }
+  return { ...verdict, blind }
 }
 
-// Every shell invocation the claude stream ALREADY recorded, in order, with the
-// tool-use id that makes each one adjudicable exactly once.
-export function shellToolCalls(text) {
+// Every tool call the claude stream ALREADY recorded, in order, with the tool-use id that
+// makes each one adjudicable exactly once. Edits are observed here too: the rerun rule
+// needs to know that one happened between two identical runs.
+export function streamToolCalls(text) {
   const calls = []
   for (const line of String(text ?? '').split('\n')) {
     if (!line.trim()) continue
@@ -1392,14 +1386,18 @@ export function shellToolCalls(text) {
     if (frame?.type !== 'assistant') continue
     const content = Array.isArray(frame.message?.content) ? frame.message.content : []
     for (const use of content) {
-      if (use?.type !== 'tool_use') continue
-      if (typeof use?.name !== 'string' || use.name.toLowerCase() !== 'bash') continue
-      const command = use.input?.command
-      if (typeof command !== 'string' || command.trim() === '') continue
-      calls.push({ id: use.id ?? null, command })
+      if (use?.type !== 'tool_use' || typeof use?.name !== 'string') continue
+      calls.push({ id: use.id ?? null, name: use.name, input: use.input })
     }
   }
   return calls
+}
+
+// The shell invocations among them, as { id, command }.
+export function shellToolCalls(text) {
+  return streamToolCalls(text)
+    .filter((call) => call.name.toLowerCase() === 'bash' && typeof call.input?.command === 'string' && call.input.command.trim() !== '')
+    .map((call) => ({ id: call.id, command: call.input.command }))
 }
 
 function censusRow(run, transport, stream) {
@@ -2420,17 +2418,22 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turn
     if (!run.policy) return null
     const counters = suiteCountersFor(run.role)
     let refused = null
-    for (const call of shellToolCalls(text)) {
-      const key = call.id ?? `${run.id}:${call.command}`
+    for (const call of streamToolCalls(text)) {
+      const isShell = call.name.toLowerCase() === 'bash'
+      const command = isShell ? call.input?.command : null
+      if (isShell && (typeof command !== 'string' || command.trim() === '')) continue
+      const key = call.id ?? `${run.id}:${call.name}:${JSON.stringify(call.input ?? null)}`
       if (run.seenToolCalls.has(key)) continue
       run.seenToolCalls.add(key)
+      // An edit is observed for the rerun rule and adjudicated as nothing.
+      if (!isShell) { if (classifyToolCall(call.name, call.input) === 'edit') noteEditCall(counters); continue }
       const verdict = suiteRunPolicy({
-        role: run.role, command: call.command,
+        role: run.role, command,
         fence: run.policy.fence || [], gatePath: run.policy.gatePath || null,
-        ranBefore: counters.allowance_spent, suiteRanBefore: counters.suite_allowance_spent,
+        ranBefore: counters.allowance_spent, lastRun: counters.last_run, editedSinceRun: counters.edited_since_run,
         suiteCommand: run.policy.suiteCommand || null, taskDir: taskDir || paths.taskDir,
       })
-      countSuiteDecision(counters, verdict.decision, { kind: verdict.kind, blind: verdict.blind })
+      countSuiteDecision(counters, verdict.decision, { kind: verdict.kind, blind: verdict.blind, command })
       // The FIRST refusal decides the dispatch, and the loop still FINISHES: the
       // remaining calls are in bytes this read already consumed, and a count that
       // stops at the refusal is not a count of what was read. Mirrors R7.

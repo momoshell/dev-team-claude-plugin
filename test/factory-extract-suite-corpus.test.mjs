@@ -20,7 +20,7 @@ import {
   verifyCorpus,
 } from '../scripts/factory/extract-suite-corpus.mjs'
 
-const DECISION_KEYS = ['lead', 'planner', 'builder', 'builder_spent']
+const DECISION_KEYS = ['lead', 'planner', 'builder']
 const ROW_KEYS = ['id', 'role', 'source_stream', 'command', 'kind', 'decisions', 'selected_by']
 const SAMPLE_PREFIXES = ['00', '01', '02', '03']
 
@@ -110,7 +110,7 @@ test('A1 selection keeps recognised, sampled, duplicate, nonsampled, and unattri
     source_stream: '~/.crew/headless-rpc/builder/stream.jsonl',
     command: 'npm test',
     kind: 'suite',
-    decisions: { lead: 'refuse', planner: 'admit', builder: 'admit', builder_spent: 'refuse' },
+    decisions: { lead: 'refuse', planner: 'admit', builder: 'refuse' },
     selected_by: 'recognised',
   }
   const expectedSampled = {
@@ -119,7 +119,7 @@ test('A1 selection keeps recognised, sampled, duplicate, nonsampled, and unattri
     source_stream: '~/.crew/headless-rpc/reviewer/stream.jsonl',
     command: sampledCommand,
     kind: null,
-    decisions: { lead: 'unrecognised', planner: 'unrecognised', builder: 'unrecognised', builder_spent: 'unrecognised' },
+    decisions: { lead: 'unrecognised', planner: 'unrecognised', builder: 'unrecognised' },
     selected_by: 'sample',
   }
   assert.deepEqual(extraction.rows, [expectedRecognised, expectedSampled].sort((a, b) => (a.id < b.id ? -1 : 1)))

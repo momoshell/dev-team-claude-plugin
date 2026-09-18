@@ -2561,22 +2561,47 @@ test('an own-task probe is admitted on headless rpc from the transports task dir
   } finally { f.cleanup() }
 })
 
-test('two declared builder npm test calls across dispatches spend the allowance exactly once', () => {
+test("the builder's declared npm test is refused on headless rpc: the driver's suite stage owns the full suite", () => {
   const f = fixture()
   try {
     const policy = { suiteCommand: 'npm test', gatePath: '/tmp/b502/gate.mjs', fence: ['crew/'] }
     const first = f.io.assign({ role: 'builder', briefFile: '/brief.md', policy })
     b502AppendRpcStream(f, 'builder', b502RpcFrames('npm test', 'b502-npm-1'))
     writeFileSync(first.returnPath, JSON.stringify({ assignment_id: first.id, role: 'builder', status: 'done', summary: 'first', artifacts: [], details: {} }))
-    assert.equal(f.io.wait(first.returnPath, 60).status, 'done')
-
-    const second = f.io.assign({ role: 'builder', briefFile: '/brief-again.md', policy })
-    b502AppendRpcStream(f, 'builder', b502RpcFrames('npm test', 'b502-npm-2'))
-    writeFileSync(second.returnPath, JSON.stringify({ assignment_id: second.id, role: 'builder', status: 'done', summary: 'second', artifacts: [], details: {} }))
-    const envelope = f.io.wait(second.returnPath, 60)
+    const envelope = f.io.wait(first.returnPath, 60)
     assert.equal(envelope.status, 'insufficient')
-    assert.equal(envelope.details.suite_refusal.command, 'npm test')
+    assert.deepEqual([envelope.details.suite_refusal.command, envelope.details.suite_refusal.refusal], ['npm test', 'suite-run-not-owned'])
   } finally { f.cleanup() }
+})
+
+// The rerun rule across the transport that pi seats run on. Counters are per role for the
+// run, so a repeat across two dispatches is still a repeat. Mutation killed: dropping the
+// edit observation from adjudicateRpcFrames — the second case then refuses too.
+test('on headless rpc a scoped test repeated with no edit between is a rerun, and with an edit between a measurement', () => {
+  const policy = { suiteCommand: 'npm test', gatePath: '/tmp/b502/gate.mjs', fence: ['crew/'] }
+  const command = 'node --test crew/headless-rpc.test.mjs'
+  const editFrames = [
+    { type: 'turn_start' },
+    { type: 'tool_execution_start', toolCallId: 'b502-edit', toolName: 'write', args: { path: 'crew/headless-rpc.mjs', content: '' } },
+    { type: 'tool_execution_end', toolCallId: 'b502-edit', toolName: 'write' },
+    { type: 'turn_end' },
+  ]
+  for (const [between, expected] of [[[], 'insufficient'], [editFrames, 'done']]) {
+    const f = fixture()
+    try {
+      const first = f.io.assign({ role: 'builder', briefFile: '/brief.md', policy })
+      b502AppendRpcStream(f, 'builder', b502RpcFrames(command, 'b502-run-1'))
+      writeFileSync(first.returnPath, JSON.stringify({ assignment_id: first.id, role: 'builder', status: 'done', summary: 'first', artifacts: [], details: {} }))
+      assert.equal(f.io.wait(first.returnPath, 60).status, 'done')
+
+      const second = f.io.assign({ role: 'builder', briefFile: '/brief-again.md', policy })
+      b502AppendRpcStream(f, 'builder', [...between, ...b502RpcFrames(command, 'b502-run-2')])
+      writeFileSync(second.returnPath, JSON.stringify({ assignment_id: second.id, role: 'builder', status: 'done', summary: 'second', artifacts: [], details: {} }))
+      const envelope = f.io.wait(second.returnPath, 60)
+      assert.equal(envelope.status, expected, between.length ? 'edit between' : 'no edit between')
+      if (expected === 'insufficient') assert.deepEqual([envelope.details.suite_refusal.command, envelope.details.suite_refusal.refusal], [command, 'test-rerun-without-edit'])
+    } finally { f.cleanup() }
+  }
 })
 
 test('a refused suite run is still counted in the turn census on headless rpc', () => {

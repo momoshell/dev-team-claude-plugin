@@ -8,7 +8,7 @@ import {
   readdirSync as fsReaddirSync,
   writeFileSync as fsWriteFileSync,
   renameSync as fsRenameSync,
-  statSync as fsStatSync,
+  lstatSync as fsLstatSync,
 } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { stripVTControlCharacters } from 'node:util'
@@ -964,29 +964,45 @@ export function countSuiteDecision(counters, decision, { kind = null, blind = fa
   return counters
 }
 
-// The working tree as one hash: the status list, tracked changes (`git diff HEAD`) and, for
-// every untracked path, its size and mtime — content git does not see. What a seat DID to
-// the tree, whatever tool did it: `sed -i` and `git apply` through Bash count, a return
-// envelope written outside the checkout does not. Null when any part cannot be measured;
-// null never refuses. Blind spot, stated: an untracked file rewritten to the same size
-// within one mtime tick reads unchanged.
+// The working tree as one hash: the tree HEAD points at, the status list, tracked changes
+// (`git diff HEAD`) and, for every untracked path, its size and mtime — content git does
+// not see. What a seat DID to the tree, whatever tool did it: `sed -i` and `git apply`
+// through Bash count, a return envelope written outside the checkout does not. Null when
+// any part cannot be measured OR when the tree carries state this instrument cannot
+// see through — an assume-unchanged or skip-worktree entry, a submodule, an untracked
+// symlink — and null never refuses. Blind spots, stated: a git-ignored path is not
+// measured at all; an untracked file rewritten to the same size within one mtime tick
+// reads unchanged.
 export function treeFingerprint(checkout, deps = {}) {
   if (typeof checkout !== 'string' || checkout === '') return null
   const run = deps.spawnSync || cpSpawnSync
-  const stat = deps.statSync || fsStatSync
+  const lstat = deps.lstatSync || fsLstatSync
   const git = (args) => {
     let result
     try { result = run('git', ['-C', checkout, ...args], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }) } catch { return null }
     return result && result.status === 0 && typeof result.stdout === 'string' ? result.stdout : null
   }
   const status = git(['status', '--porcelain=v1', '-z', '--untracked-files=all', '--no-renames'])
-  const diff = status === null ? null : git(['diff', 'HEAD', '--no-color', '--no-ext-diff'])
-  if (status === null || diff === null) return null
-  const hash = createHash('sha256').update(status).update('\0').update(diff)
+  if (status === null) return null
+  // An unborn branch has no HEAD tree; that is a measured state, not a failure.
+  const head = git(['rev-parse', '--verify', '--quiet', 'HEAD^{tree}']) ?? 'unborn'
+  const diff = head === 'unborn' ? '' : git(['diff', 'HEAD', '--no-color', '--no-ext-diff'])
+  const index = git(['ls-files', '-v', '-s', '-z'])
+  if (diff === null || index === null) return null
+  for (const entry of index.split('\0')) {
+    if (entry === '') continue
+    // `-v` prefixes the tag: a lowercase tag is assume-unchanged, `S` is skip-worktree;
+    // `-s` then gives the mode, and 160000 is a submodule. None of these is measurable here.
+    if (/^[a-z]/.test(entry) || entry.startsWith('S') || /^\S 160000 /.test(entry)) return null
+  }
+  const hash = createHash('sha256').update(head).update('\0').update(status).update('\0').update(diff)
   for (const entry of status.split('\0')) {
     if (!entry.startsWith('?? ')) continue
     const path = entry.slice(3)
-    try { const s = stat(join(checkout, path)); hash.update(`\0${path}:${s.size}:${s.mtimeMs}`) } catch { return null }
+    let s
+    try { s = lstat(join(checkout, path)) } catch { return null }
+    if (s.isSymbolicLink()) return null
+    hash.update(`\0${path}:${s.size}:${s.mtimeMs}`)
   }
   return hash.digest('hex')
 }
@@ -1373,13 +1389,14 @@ function suiteAdmit(why, kind) { return { decision: 'admit', reason: why, kind }
 function rerunRefusal(role, command, gatePath, kind) {
   return {
     decision: 'refuse', refusal: SUITE_RERUN_REFUSAL,
-    reason: `${SUITE_RERUN_REFUSAL}: this exact command already ran and nothing was edited since, so its result cannot have changed`,
+    reason: `${SUITE_RERUN_REFUSAL}: this exact command already ran and no tracked or untracked file has changed since (git-ignored paths are not measured), so its result cannot have changed`,
     role, command, kind, gate_path: gatePath,
   }
 }
-// Two spellings of one invocation: the same quote-aware tokens (SHELL_TOKEN_RE keeps a quoted
-// span intact, so whitespace INSIDE quotes is data and still distinguishes two commands).
-const invocationKey = (command) => (String(command ?? '').match(SHELL_TOKEN_RE) || []).join(' ')
+// Two spellings of one invocation: the same shell words. Quotes are decoded (`"a.mjs"` and
+// `a.mjs` are one word, `'foo bar'` and `"foo bar"` too) and the words are joined on NUL,
+// so whitespace INSIDE a word is data and still distinguishes two commands.
+const invocationKey = (command) => shellTokens(command).join('\0')
 const sameInvocation = (command, lastRun) => typeof lastRun === 'string' && invocationKey(command) === invocationKey(lastRun)
 
 function decideSuiteRun({ role, command, fence, gatePath, ranBefore, suiteCommand, taskDir, kind }) {
@@ -1417,6 +1434,21 @@ export function suiteRunPolicy({ role, command, fence = [], gatePath = null, ran
     if (tree === lastRunTree) return { ...rerunRefusal(role, command, gatePath, kind), blind }
   }
   return { ...verdict, blind }
+}
+
+// The id of the LAST tool_use the stream carries — the one tool event no later event
+// follows in this read, so a fingerprint taken now is the tree it ran on.
+export function lastToolUseId(text) {
+  let last = null
+  for (const line of String(text ?? '').split('\n')) {
+    if (!line.trim()) continue
+    let frame
+    try { frame = JSON.parse(line) } catch { continue }
+    if (frame?.type !== 'assistant') continue
+    const content = Array.isArray(frame.message?.content) ? frame.message.content : []
+    for (const use of content) if (use?.type === 'tool_use' && typeof use.id === 'string') last = use.id
+  }
+  return last
 }
 
 // Every shell invocation the claude stream ALREADY recorded, in order, with the
@@ -2459,17 +2491,25 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turn
     if (!run.policy) return null
     const counters = suiteCountersFor(run.role)
     let refused = null
+    // A fingerprint taken now describes the tree AFTER every call this read carries, so it
+    // is attached only to the call the read ENDED on — no later tool event observed. A
+    // call batched behind another is admitted unmeasured and counted, never judged against
+    // a tree it did not run on. Only the role the rule covers pays for a fingerprint.
+    const lastId = lastToolUseId(text)
+    const judged = SUITE_RUN_OWNERSHIP[run.role] === 'fenced'
     for (const call of shellToolCalls(text)) {
       const key = call.id ?? `${run.id}:${call.command}`
       if (run.seenToolCalls.has(key)) continue
       run.seenToolCalls.add(key)
+      const measure = judged && call.id !== null && call.id === lastId ? fingerprintTree : () => null
+      const context = rerunContext(counters, call.command, measure)
       const verdict = suiteRunPolicy({
         role: run.role, command: call.command,
         fence: run.policy.fence || [], gatePath: run.policy.gatePath || null,
-        ranBefore: counters.allowance_spent, ...rerunContext(counters, call.command, fingerprintTree),
+        ranBefore: counters.allowance_spent, ...context,
         suiteCommand: run.policy.suiteCommand || null, taskDir: taskDir || paths.taskDir,
       })
-      const tree = verdict.decision === 'admit' && RERUN_KINDS.includes(verdict.kind) ? fingerprintTree() : null
+      const tree = verdict.decision === 'admit' && RERUN_KINDS.includes(verdict.kind) && judged ? (context.tree ?? measure()) : null
       countSuiteDecision(counters, verdict.decision, { kind: verdict.kind, blind: verdict.blind, command: call.command, tree, rerunUnmeasured: verdict.rerun_unmeasured === true })
       // The FIRST refusal decides the dispatch, and the loop still FINISHES: the
       // remaining calls are in bytes this read already consumed, and a count that

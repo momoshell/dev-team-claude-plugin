@@ -14,7 +14,7 @@ import {
   SESSION_ROUND_BASES, SESSION_STAGE_ABSENT, SESSION_DRIVER_BASIS, SESSION_ROUND_BASIS, SESSION_ROUND_UNMEASURED,
   SEAT_SUITE_POLICY_EVENT, SUITE_RUN_REFUSAL, SUITE_RUN_UNRECOGNISED, SUITE_POLICY_STREAM_UNAVAILABLE,
   suiteRunPolicy, recogniseSuiteInvocation, testTargets, fenceCovers, shellToolCalls,
-  SUITE_RERUN_REFUSAL, suiteRefusalEnvelope, suiteRefusalRow, treeFingerprint, rerunContext, RERUN_KINDS,
+  SUITE_RERUN_REFUSAL, suiteRefusalEnvelope, suiteRefusalRow, treeFingerprint, rerunContext, RERUN_KINDS, lastToolUseId,
   splitShellCommands, executableText, stripHeredocBodies, commandTokens,
   suitePolicyCounters, countSuiteDecision, suitePolicyReport, SUITE_RUN_OWNERSHIP, SUITE_RUN_OWNERSHIP_KINDS,
 } from './headless.mjs'
@@ -24,6 +24,7 @@ import { assignmentLine, assignmentPrompt } from './driver.mjs'
 import { cellFailureKind, HEADLESS_TRANSPORT, seatIo } from './seat-io.mjs'
 import { DRIVER_GONE_PERIODS, HEARTBEAT_PERIOD_MS } from '../scripts/factory/lane-watch.mjs'
 import { ROOT, git, scratchDir, startFileWriter } from '../test/helpers.mjs'
+import { symlinkSync } from 'node:fs'
 
 // The final three bytes of each real 2026-08-30 refusal tail, copied
 // byte-for-byte so classification is adjudicated against the provider's own
@@ -2953,7 +2954,7 @@ function b416ClaudeStream({ turns = 2, command = null } = {}) {
   return `${frames.map((frame) => JSON.stringify(frame)).join('\n')}\n`
 }
 
-function b416JsonFixture({ role = 'builder', policy = null, fallback = null, onSleep = null, turnCeilings = null, telemetry = null, writeExitOnTerm = false, treeFingerprint = null } = {}) {
+function b416JsonFixture({ role = 'builder', policy = null, fallback = null, onSleep = null, turnCeilings = null, telemetry = null, writeExitOnTerm = false } = {}) {
   const dir = scratchDir('b416-json-')
   const taskDir = join(dir, 'task'); const returnsDir = join(dir, 'returns')
   mkdirSync(taskDir); mkdirSync(returnsDir)
@@ -2966,7 +2967,6 @@ function b416JsonFixture({ role = 'builder', policy = null, fallback = null, onS
     adapters: { [role]: { adapter } }, bin: '/worker/bin', turnCeilings,
     deps: {
       ...(telemetry ? { parseStream: telemetry } : {}),
-      ...(treeFingerprint ? { treeFingerprint } : {}),
       spawn: () => ({ pid: 4242, unref() {} }), uuid: () => 'b416-json-session',
       now: () => state.clock,
       sleep: (ms) => {
@@ -3565,14 +3565,10 @@ test("the builder's declared npm test is refused on headless json: the driver's 
   } finally { f.cleanup() }
 })
 
-// The rerun rule on the claude transport reads the TREE, not the frames: the fixture's
-// fingerprint is a value the test moves. Sol's two counterexamples on #1400 are the cases —
-// an edit the frames never show (`sed -i` through Bash) changes the tree and admits; a
-// `Write` that is not a checkout edit (the return envelope) leaves it and refuses.
-// Mutation killed: comparing frames instead of trees — case 2 refuses, case 3 admits.
-function b416ClaudeCalls(calls) {
+// Frames for an arbitrary sequence of tool calls.
+function b416ClaudeCalls(calls, from = 1) {
   return `${calls.map((call, n) => {
-    const id = `b416-call-${n + 1}`
+    const id = `b416-call-${from + n}`
     return [
       JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id, name: call.name, input: call.input }] } }),
       JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: id }] } }),
@@ -3580,31 +3576,50 @@ function b416ClaudeCalls(calls) {
   }).join('\n')}\n`
 }
 
-test('on headless json a repeated scoped test is judged by the working tree, not by which tool ran between', () => {
+// The fixture checkout as a real repository: the task dir the transport writes into sits
+// inside it, so it is git-ignored — exactly the production shape, where task dirs live
+// outside the checkout.
+function b416Repo(f) {
+  git(f.dir, 'init', '-q')
+  writeFileSync(join(f.dir, '.gitignore'), 'task/\nreturns/\n')
+  mkdirSync(join(f.dir, 'crew'), { recursive: true })
+  writeFileSync(join(f.dir, 'crew', 'x.test.mjs'), 'export const x = 1\n')
+  git(f.dir, 'add', '-A'); git(f.dir, 'commit', '-q', '-m', 'base')
+}
+
+// The rerun rule on the claude transport, against a REAL working tree and the transport's
+// real poll cadence (Sol on #1400, pass 2): a fingerprint is attached only to the call a
+// read ended on. Two identical runs that arrive in ONE read are admitted unmeasured and
+// counted; a repeat that arrives in a LATER read is judged against the tree the first run
+// was fingerprinted on — unchanged refuses; an edit through the filesystem (no tool frame
+// at all) or a new commit admits. Mutation killed: fingerprinting every call in a read
+// (the batched case then refuses); dropping HEAD from the hash (the commit case refuses).
+test('on headless json a repeat is judged against the tree of the read it ended, and a batched repeat is unmeasured', () => {
   const policy = { suiteCommand: 'npm test', gatePath: '/tmp/b502/gate.mjs', fence: ['crew/'] }
-  const run = { name: 'Bash', input: { command: 'node --test crew/headless.test.mjs' } }
-  const sedEdit = { name: 'Bash', input: { command: "sed -i '' 's/a/b/' crew/headless.mjs" } }
-  const envelopeWrite = { name: 'Write', input: { file_path: '/task/returns/r/d2.builder.json', content: '{}' } }
+  const run = { name: 'Bash', input: { command: 'node --test crew/x.test.mjs' } }
+  const done = (f) => writeFileSync(f.assigned.returnPath, JSON.stringify({ assignment_id: f.assigned.id, role: 'builder', status: 'done', summary: 'built', artifacts: [], details: {} }))
   const cases = [
-    { calls: [run, run], trees: ['t1', 't1'], expected: 'insufficient', why: 'same tree, no edit' },
-    { calls: [run, sedEdit, run], trees: ['t1', 't2'], expected: 'done', why: 'a Bash edit changed the tree' },
-    { calls: [run, envelopeWrite, run], trees: ['t1', 't1'], expected: 'insufficient', why: 'an envelope write is not a checkout edit' },
-    { calls: [run, run], trees: [null, null], expected: 'done', why: 'an unmeasured tree never refuses' },
+    { why: 'batched: both runs in one read', between: null, expected: 'done', unmeasured: 1 },
+    { why: 'later read, same tree', between: () => {}, expected: 'insufficient', unmeasured: 0 },
+    { why: 'later read, a tracked edit with no tool frame', between: (f) => writeFileSync(join(f.dir, 'crew', 'x.test.mjs'), 'export const x = 2\n'), expected: 'done', unmeasured: 0 },
+    { why: 'later read, a new commit on a clean tree', between: (f) => { writeFileSync(join(f.dir, 'crew', 'x.test.mjs'), 'export const x = 3\n'); git(f.dir, 'commit', '-q', '-am', 'next') }, expected: 'done', unmeasured: 0 },
   ]
-  for (const { calls, trees, expected, why } of cases) {
-    const queue = [...trees]
-    // The first admitted run records trees[0]; the repeat measures trees[1] (or the last).
-    const f = b416JsonFixture({ role: 'builder', policy, treeFingerprint: () => (queue.length > 1 ? queue.shift() : queue[0]) })
+  for (const { why, between, expected, unmeasured } of cases) {
+    let fixture = null
+    const f = b416JsonFixture({ role: 'builder', policy, onSleep: ({ appendStream, sleepCount }) => {
+      if (between === null || sleepCount !== 1) return
+      between(fixture)
+      appendStream(b416ClaudeCalls([run], 2))
+      done(fixture)
+    } })
+    fixture = f
     try {
-      f.writeStream(b416ClaudeCalls(calls))
-      writeFileSync(f.assigned.returnPath, JSON.stringify({ assignment_id: f.assigned.id, role: 'builder', status: 'done', summary: 'built', artifacts: [], details: {} }))
+      b416Repo(f)
+      if (between === null) { f.writeStream(b416ClaudeCalls([run, run])); done(f) } else f.writeStream(b416ClaudeCalls([run]))
       const envelope = f.io.wait(f.assigned.returnPath, 60)
       assert.equal(envelope.status, expected, why)
-      if (expected === 'insufficient') {
-        assert.equal(envelope.details.suite_refusal.refusal, SUITE_RERUN_REFUSAL, why)
-        assert.equal(f.rows.find((row) => row.refusal)?.refusal, SUITE_RERUN_REFUSAL, why)
-      }
-      if (trees[0] === null) assert.equal(f.rows.find((row) => row.suite_policy)?.suite_policy.rerun_unmeasured, 1, 'the unmeasured repeat is stated')
+      if (expected === 'insufficient') assert.equal(envelope.details.suite_refusal.refusal, SUITE_RERUN_REFUSAL, why)
+      assert.equal(f.rows.find((row) => row.suite_policy)?.suite_policy.rerun_unmeasured ?? 0, unmeasured, `${why}: unmeasured repeats stated`)
     } finally { f.cleanup() }
   }
 })
@@ -3749,7 +3764,7 @@ test('a scoped test repeated on an unchanged tree is refused as a rerun; a chang
   assert.equal(decide('node --test crew/drive.test.mjs', 'A').decision, 'admit')
   const rerun = decide('node  --test   crew/drive.test.mjs ', 'A')
   assert.deepEqual([rerun.decision, rerun.refusal, rerun.kind], ['refuse', SUITE_RERUN_REFUSAL, 'scoped-test'])
-  assert.match(rerun.reason, /nothing was edited since/)
+  assert.match(rerun.reason, /no tracked or untracked file has changed since \(git-ignored paths are not measured\)/)
   assert.equal(decide('node --test crew/drive.test.mjs', 'B').decision, 'admit', 'the tree changed: a measurement')
   assert.equal(decide('node --test crew/drive-plan.test.mjs', 'B').decision, 'admit', 'a different command is a new measurement')
   const unmeasured = decide('node --test crew/drive-plan.test.mjs', null)
@@ -3757,15 +3772,23 @@ test('a scoped test repeated on an unchanged tree is refused as a rerun; a chang
   assert.deepEqual([counters.refused, counters.admitted, counters.rerun_unmeasured], [1, 4, 1])
 })
 
-// Sol on #1400: whitespace INSIDE a quoted argument is data. Mutation killed: normalising
-// on \s+ over the whole string — these two then compare equal and the second refuses.
-test('two invocations that differ only inside a quoted argument are different measurements', () => {
+// Sol on #1400, both halves: whitespace INSIDE a shell word is data, and two quotings of
+// one word are one word. Mutation killed: joining raw spellings (equivalent quoting then
+// admits); normalising \s+ over the whole string (inner whitespace then refuses).
+test('invocations compare as shell words: quoting is not a difference, whitespace inside a word is', () => {
   const fence = ['crew/headless.test.mjs']
   const gatePath = '/task/gate.mjs'
-  const first = 'node --test --test-name-pattern="foo  bar" crew/headless.test.mjs'
-  const second = 'node --test --test-name-pattern="foo bar" crew/headless.test.mjs'
-  assert.equal(suiteRunPolicy({ role: 'builder', command: second, fence, gatePath, suiteCommand: 'npm test', lastRun: first, lastRunTree: 'A', tree: 'A' }).decision, 'admit')
-  assert.equal(suiteRunPolicy({ role: 'builder', command: `  ${first.replace(' crew/', '   crew/')}`, fence, gatePath, suiteCommand: 'npm test', lastRun: first, lastRunTree: 'A', tree: 'A' }).refusal, SUITE_RERUN_REFUSAL, 'separator whitespace is not')
+  const same = { role: 'builder', fence, gatePath, suiteCommand: 'npm test', lastRunTree: 'A', tree: 'A' }
+  const base = 'node --test --test-name-pattern="foo bar" crew/headless.test.mjs'
+  for (const spelling of [
+    "node --test --test-name-pattern='foo bar' crew/headless.test.mjs",
+    'node --test --test-name-pattern="foo bar" "crew/headless.test.mjs"',
+    'node --test --test-name-pattern=foo" "bar crew/headless.test.mjs',
+    `  node   --test --test-name-pattern="foo bar"   crew/headless.test.mjs `,
+  ]) {
+    assert.equal(suiteRunPolicy({ ...same, command: spelling, lastRun: base }).refusal, SUITE_RERUN_REFUSAL, spelling)
+  }
+  assert.equal(suiteRunPolicy({ ...same, command: 'node --test --test-name-pattern="foo  bar" crew/headless.test.mjs', lastRun: base }).decision, 'admit', 'two spaces inside the word select different tests')
 })
 
 // Mutation killed: applying the rule to every role, or to every kind — the planner
@@ -3816,12 +3839,15 @@ test('rerunContext fingerprints the tree only when the command repeats the last 
 })
 
 // The instrument itself, on a real repository: what a seat DID to the tree, whatever tool did
-// it. Mutation killed: dropping the untracked size/mtime fold — the rewritten untracked file
-// then reads unchanged; returning '' instead of null on a git failure — a non-repo then
-// "matches" itself and refuses.
-test('treeFingerprint changes with a tracked edit, a new file and a rewritten untracked file, and is null outside a repository', () => {
+// it, AND which commit the tree sits on. Mutation killed: dropping the untracked size/mtime
+// fold (the rewritten untracked file reads unchanged); dropping the HEAD tree from the hash
+// (two clean checkouts of different commits read equal); returning '' instead of null on a
+// git failure (a non-repo then "matches" itself); dropping the index scan (an
+// assume-unchanged edit reads unchanged); statSync for lstat (a symlink is followed).
+test('treeFingerprint moves with a tracked edit, a new file, a rewritten untracked file and a new commit; refuses what it cannot see', () => {
   const dir = scratchDir('tree-fp-')
   git(dir, 'init', '-q')
+  assert.match(treeFingerprint(dir), /^[0-9a-f]{64}$/, 'an unborn branch is a measured state')
   writeFileSync(join(dir, 'a.mjs'), 'export const a = 1\n'); git(dir, 'add', 'a.mjs'); git(dir, 'commit', '-q', '-m', 'base')
   const clean = treeFingerprint(dir)
   assert.match(clean, /^[0-9a-f]{64}$/)
@@ -3829,14 +3855,43 @@ test('treeFingerprint changes with a tracked edit, a new file and a rewritten un
   writeFileSync(join(dir, 'a.mjs'), 'export const a = 2\n')
   const edited = treeFingerprint(dir)
   assert.notEqual(edited, clean, 'a tracked edit through any tool moves it')
+  git(dir, 'commit', '-q', '-am', 'edit')
+  const committed = treeFingerprint(dir)
+  assert.notEqual(committed, clean, 'a clean tree on a different commit is a different tree')
   writeFileSync(join(dir, 'b.test.mjs'), 'x')
   const added = treeFingerprint(dir)
-  assert.notEqual(added, edited, 'a new untracked file moves it')
+  assert.notEqual(added, committed, 'a new untracked file moves it')
   writeFileSync(join(dir, 'b.test.mjs'), 'xyzzy')
   assert.notEqual(treeFingerprint(dir), added, 'rewriting an untracked file moves it')
+  writeFileSync(join(dir, '.gitignore'), 'ignored.mjs\n'); git(dir, 'add', '.gitignore'); git(dir, 'commit', '-q', '-m', 'ignore')
+  const withIgnore = treeFingerprint(dir)
+  writeFileSync(join(dir, 'ignored.mjs'), 'invisible')
+  assert.equal(treeFingerprint(dir), withIgnore, 'a git-ignored path is the stated blind spot: not measured')
+  symlinkSync(join(dir, 'a.mjs'), join(dir, 'link.mjs'))
+  assert.equal(treeFingerprint(dir), null, 'an untracked symlink: unmeasured')
+  rmSync(join(dir, 'link.mjs'))
+  git(dir, 'update-index', '--assume-unchanged', 'a.mjs')
+  assert.equal(treeFingerprint(dir), null, 'an assume-unchanged entry: unmeasured')
+  git(dir, 'update-index', '--no-assume-unchanged', 'a.mjs')
+  git(dir, 'update-index', '--skip-worktree', 'a.mjs')
+  assert.equal(treeFingerprint(dir), null, 'a skip-worktree entry: unmeasured')
+  git(dir, 'update-index', '--no-skip-worktree', 'a.mjs')
   assert.equal(treeFingerprint(join(dir, 'nowhere')), null, 'no repository: unmeasured, never a value')
   assert.equal(treeFingerprint(''), null)
   assert.equal(treeFingerprint(dir, { spawnSync: () => { throw new Error('no git') } }), null, 'a throwing git is unmeasured')
+})
+
+// Mutation killed: returning the FIRST tool_use — a fingerprint would then be attached to
+// a call the read did not end on.
+test('lastToolUseId names the tool call no later tool event follows', () => {
+  const text = [
+    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'ls' } }] } }),
+    JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1' }] } }),
+    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'ok' }, { type: 'tool_use', id: 't2', name: 'Edit', input: {} }] } }),
+    'not json',
+  ].join('\n')
+  assert.equal(lastToolUseId(text), 't2')
+  assert.equal(lastToolUseId(''), null)
 })
 
 // Mutation killed: widening a never-owner to the builder's ownership, or giving the

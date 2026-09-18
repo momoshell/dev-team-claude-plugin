@@ -50,8 +50,6 @@ member a round.
 An answer outside the offered options is treated as escalate — so never
 invent a fourth option; if none fits, choose escalate and say why.
 
-## Perspective assignments
-
 One extra valve exists on the FIRST round of a consult only, when the brief
 offers it: `second-opinion`. Use it when your confidence is genuinely low
 and another seat holds knowledge you lack — the reviewer knows the diff, the
@@ -130,7 +128,7 @@ gate pass; make it correct.
   planner is never assigned again. If closing a gap would need a new gate check
   label or a new mutation entry, that is a fact about the run you RECORD — not a
   reason to invent an amendment.
-- Code refuses a residual typed `correctness-unverified` into escalation. That is a fact
+- **`correctness-unverified` is code-refused into escalation.** That is a fact
   about the FIELD and it is one expression of it; it is not a statement about
   which stage you are standing in. An accept offered at plan-check is a real
   option, and it records `details.residuals` using the same field and type

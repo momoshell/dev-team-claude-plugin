@@ -274,11 +274,16 @@ export function forAll(generate, property, { runs = 200, seed = 0x9e3779b9 } = {
     state ^= state << 5; state >>>= 0
     return state / 0x100000000
   }
+  const show = (value) => { try { return JSON.stringify(value) ?? String(value) } catch { return String(value) } }
   for (let run = 0; run < runs; run += 1) {
-    const input = generate(random)
+    let input
+    try { input = generate(random) } catch (error) {
+      throw new Error(`generator failed on run ${run} of ${runs} (seed ${seed}): ${error?.message ?? String(error)}`, { cause: error })
+    }
     try { property(input) } catch (error) {
-      error.message = `property failed on run ${run} of ${runs} (seed ${seed}) with input ${JSON.stringify(input)}\n${error.message}`
-      throw error
+      const failure = new Error(`property failed on run ${run} of ${runs} (seed ${seed}) with input ${show(input)}\n${error?.message ?? String(error)}`, { cause: error })
+      if (error && typeof error === 'object' && 'stack' in error) failure.stack = `${failure.message}\n${String(error.stack).split('\n').slice(1).join('\n')}`
+      throw failure
     }
   }
   return runs

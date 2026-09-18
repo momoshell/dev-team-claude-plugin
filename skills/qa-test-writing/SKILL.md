@@ -34,7 +34,7 @@ can trust.
 | Asserting on a value nobody measured | Absent with a reason, never zero | `references/absence.md` |
 | Writing a test for a malformed or hostile input | If you cannot express the malformed input, you have not tested the guard | `references/affordances.md` |
 | Citing a file from prose or from a comment | Prose citations are pinned by content; comments name the symbol | `references/citations.md` |
-| Pinning a universal claim about a pure function (a tokenizer, classifier, normaliser) | Generate the inputs — `forAll` in `test/helpers.mjs`, seeded, the failing input printed — and keep one example test for the shape | this table |
+| Pinning a universal claim about a pure function (a tokenizer, classifier, normaliser) | Generate the inputs from every production of the grammar the claim is about — `forAll` in `test/helpers.mjs`, seeded, the failing input printed — with an oracle the generator carries itself, never one rediscovered from the serialized input; keep one example test for the shape | this table |
 
 Read the reference before writing the check. The rules below are the
 irreducible ones; the references carry the exhibits and the failure modes.

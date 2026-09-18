@@ -89,7 +89,8 @@ function runStartFrom(text) {
     const at = epochMilliseconds(row.at ?? row.started_at ?? row.run_started_at ?? row.timestamp)
     // The run id is the SAME authority the driver scopes returns by (crew/crew.mjs runReturnsDir):
     // returns/<run_id>/dN.planner.json. A run-start without one names no directory to read.
-    const runId = typeof row.run_id === 'string' && /^[A-Za-z0-9._-]+$/.test(row.run_id) ? row.run_id : null
+    // `.` and `..` pass a character-class check and would read returns/ itself or escape it (Sol, #1399).
+    const runId = typeof row.run_id === 'string' && /^(?!\.{1,2}$)[A-Za-z0-9._-]+$/.test(row.run_id) ? row.run_id : null
     if (at !== null) latest = { at, runId }
   }
   return latest

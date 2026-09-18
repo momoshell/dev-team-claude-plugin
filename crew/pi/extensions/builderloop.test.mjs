@@ -250,6 +250,17 @@ test('two run-starts in one window: the LAST run\'s id names the returns directo
   assert.deepEqual(mod.loadPlannerContext({ taskDir: f.taskDir }), fresh.details)
 })
 
+// Sol on #1399: `.` and `..` pass a character-class check; the first reads returns/ itself
+// (the flat layout again), the second escapes to the crew root. Neither names a run.
+test('a run id of "." or ".." names no returns directory', () => {
+  for (const runId of ['.', '..']) {
+    const f = fixture()
+    writeFileSync(join(f.root, 'returns', 'd9.planner.json'), JSON.stringify({ assignment_id: 'd9', role: 'planner', status: 'done', details: { files_in_scope: ['flat.mjs'], validation_lane: 'node --test flat.test.mjs', gate_cmd: 'node task/gate.mjs' } }))
+    writeFileSync(join(f.root, 'journal.jsonl', ), `${JSON.stringify({ event: 'run-start', run_id: runId, at: new Date(Date.now() - 500).toISOString() })}\n`)
+    assert.equal(mod.loadPlannerContext({ taskDir: f.taskDir }), null, runId)
+  }
+})
+
 test('the production runner bounds the combined stdout/stderr tail', async () => {
   const childSource = `process.stdout.write('o'.repeat(10000)); process.stderr.write('e'.repeat(10000) + 'TAIL_SENTINEL');`
   const result = await mod.runNodeTests({ bin: process.execPath, args: ['-e', childSource] }, { cwd: process.cwd(), deadlineMs: 5000 })

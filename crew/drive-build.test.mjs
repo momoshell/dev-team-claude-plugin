@@ -7,7 +7,7 @@ import {
   acceptanceCoverage, acceptanceIds, ACCEPTANCE_UNMEASURED,
   B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_IMPL_FILE, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, B384_CORRECTED_FIND, B384_CORRECTED_REPLACE, B384_GREEN, B384_MUTATION, B384_RED, B384_REFACTORED_BUILDER, B384_REFACTORED_UNCORRECTED_BUILDER, B44_LEADLESS_CTX, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_PLAN, CHECK_RUNS, CONVERGE_CTX, CONVERGE_GATE, CONVERGE_PLAN, CTX, CTX_DIRECTED, CTX_REPAIR, DIRECTED_FILES, D_ASK, D_AUTO, ENVELOPE_FIELD_KINDS, EXECUTIONS, FAILURE_UPGRADE, GATE_REAP_CMD_EOF, GATE_REAP_SWEEP_MARKER, GATE_SUMMARY_PREFIX, HARDENING_MARKS, HARDENING_OUTCOMES, HARDENING_REFUSALS, MODIFIER_OUTCOMES, MUTATIONS_MAX, MUTATION_BINDING_FAILURES, MUTATION_CORRECTION_REFUSALS, MUTATION_OUTCOMES, PARTIAL_REVIEWED, RED, SENSITIVITY_FLOOR, SHAPE_MAJOR_PHASES, SHAPE_ROUNDED_STAGES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, UNIVERSAL_STAGE_HEADS, VALIDATION_LANE_UNLOADABLE, VARIANTS, VARIANT_NAMES, WRITE_SURFACES, applyMutationAnchor, applyPrescriptionLines, b127GatePaths, b127PidAlive, b318Builders, b318SiteA, b376Build, b376DiskProofIo, b376ProofIo, b376Review, b376StageStack, b384Io, b384RefactoredIo, b44AssertLeadlessGate, b44GatePlan, bindMutationAnchor, buildEnv, collapseStages, dispositionIo, driveTask, existsSync, fakeIo, fenceBase, fenceDiff, fenceSpan, gateReapCommand, gateReapFresh, gateReapOriginal, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, hardeningBounceLines, hardeningBriefLines, hardeningDebt, hardeningOf, join, laneFence, leadEnv, mutationChangesTokens, outOfScopeFiles, planEnv, protectedPlanEnv, readFileSync, resumeGreen, resumeRed, reviewConvergeRun, reviewEnv, reviewFindings, rmSync, s843Ctx, s843Io, s843PlanEnv, s843Rows, scopeMatcher, scopedPath, scratchDir, shapeDefect, spawnSync, stageShape, treeDigest, triageEnv, undeclaredStage, validateHardened, validateMutations, validationPlan, validationProbeRun, validationRows,
 } from './drive-fixtures.mjs'
-import { CENSUS_CARRIER_FILES, CHECK_MATCHES, FROZEN_FACTORY_ENV_FILE, FROZEN_INVENTORY_FILE, HARDENING_APPEAL_SHAPE, HARDENING_CLASSES, HARDENING_PRESCRIPTION_REASONS, HARDENING_PRESCRIPTION_RESOLUTION, LIMITS, POST_COMMIT_FROZEN_REPAIR_MAX, classifyFrozenInventoryDelta, hardeningAppealLines, hardeningAppealRequest, hardeningClassOf, hardeningPrescriptionConflict, hardeningTestPath, mutationProofScope } from './drive.mjs'
+import { CENSUS_CARRIER_FILES, CHECK_MATCHES, FROZEN_FACTORY_ENV_FILE, FROZEN_INVENTORY_FILE, HARDENING_APPEAL_SHAPE, HARDENING_CLASSES, HARDENING_PRESCRIPTION_REASONS, HARDENING_PRESCRIPTION_RESOLUTION, HARDENING_PROVEN, HARDENING_REFUTED, HARDENING_UNMEASURED, LIMITS, POST_COMMIT_FROZEN_REPAIR_MAX, classifyFrozenInventoryDelta, hardeningAppealLines, hardeningAppealRequest, hardeningClassOf, hardeningPrescriptionConflict, hardeningRowBucket, hardeningStageCleared, hardeningTestPath, mutationProofScope, preRepairGreenOutcome, preRepairRefutes, composePrBody } from './drive.mjs'
 import { openLedger, MUTATION_ANCHOR_REFUSALS } from '../scripts/factory/ledger.mjs'
 import { CENSUS_QUALIFYING_FILES, runCensusExhibits, selectCensusExhibits } from './census-exhibits.mjs'
 import { emitAdapter } from './seat-io.mjs'
@@ -3299,8 +3299,13 @@ test('b376 B5c an existing named test is not gate growth', () => {
   })
   const unprovenResult = driveTask({ ...CTX, limits: { build_rounds: 2 } }, unprovenIo)
   const unproven = unprovenIo.calls.logs.find((entry) => entry.finding_hardened)?.finding_hardened
-  assert.equal(unprovenResult.status, 'escalation')
+  assert.equal(unprovenResult.status, 'done')
   assert.equal(unproven.outcome, 'unproven')
+  assert.match(unproven.why, /proves nothing/)
+  assert.equal(unprovenResult.details.hardening_unmeasured.length, 1)
+  assert.equal(unprovenResult.details.hardening_unmeasured[0].finding, 'F1')
+  assert.equal(unprovenResult.details.hardening_unmeasured[0].outcome, 'unproven')
+  assert.match(unprovenResult.details.hardening_unmeasured[0].why, /proves nothing/)
 })
 
 test('b376 B5d hardening must fail on the witnessed pre-repair surface', () => {
@@ -3716,9 +3721,13 @@ test('#839 witness cells distinguish read, absent, and unreadable review-time pa
   const absentIo = b376ProofIo({ files: absentFiles })
   const absentResult = driveTask({ ...CTX, limits: { build_rounds: 2 } }, absentIo)
   const absentRow = absentIo.calls.logs.find((entry) => entry.finding_hardened)?.finding_hardened
-  assert.equal(absentResult.details.escalation.where, 'harden')
+  assert.equal(absentResult.status, 'done')
   assert.equal(absentRow.outcome, 'witness-absent')
   assert.match(absentRow.why, /did not exist/)
+  assert.equal(absentResult.details.hardening_unmeasured.length, 1)
+  assert.equal(absentResult.details.hardening_unmeasured[0].finding, 'F1')
+  assert.equal(absentResult.details.hardening_unmeasured[0].outcome, 'witness-absent')
+  assert.match(absentResult.details.hardening_unmeasured[0].why, /did not exist/)
 
   const unreadableIo = b376ProofIo({ files: freshFiles() })
   const baseRead = unreadableIo.readFile
@@ -3732,10 +3741,14 @@ test('#839 witness cells distinguish read, absent, and unreadable review-time pa
   }
   const unreadableResult = driveTask({ ...CTX, limits: { build_rounds: 2 } }, unreadableIo)
   const unreadableRow = unreadableIo.calls.logs.find((entry) => entry.finding_hardened)?.finding_hardened
-  assert.equal(unreadableResult.details.escalation.where, 'harden')
+  assert.equal(unreadableResult.status, 'done')
   assert.equal(unreadableRow.outcome, 'witness-unreadable')
   assert.match(unreadableRow.why, /EACCES/)
   assert.doesNotMatch(unreadableRow.why, /did not exist/)
+  assert.equal(unreadableResult.details.hardening_unmeasured.length, 1)
+  assert.equal(unreadableResult.details.hardening_unmeasured[0].finding, 'F1')
+  assert.equal(unreadableResult.details.hardening_unmeasured[0].outcome, 'witness-unreadable')
+  assert.match(unreadableResult.details.hardening_unmeasured[0].why, /EACCES/)
 })
 
 test('#839 hardening briefs and bounces retain specific findings', () => {
@@ -3770,11 +3783,14 @@ test('#839 hardening proof restores the dirty built tree after success and each 
     assert.notEqual(readFileSync(fixture.testPath, 'utf8'), fixture.witnessedTest, label)
     assert.notEqual(readFileSync(fixture.implementationPath, 'utf8'), fixture.witnessedImplementation, label)
     assert.equal(row.outcome, outcome, label)
+    assert.equal(result.status, 'done', label)
+    assert.equal(result.details.escalation, null, label)
     if (throwAtProofRun === null) {
-      assert.equal(result.status, 'done', label)
+      assert.equal(result.details.hardening_unmeasured, undefined, label)
     } else {
-      assert.equal(result.details.escalation.where, 'harden', label)
-      assert.doesNotMatch(result.details.escalation.why, /could not restore the built tree/, label)
+      assert.equal(result.details.hardening_unmeasured.length, 1, label)
+      assert.equal(result.details.hardening_unmeasured[0].outcome, 'unproven', label)
+      assert.match(result.details.hardening_unmeasured[0].why, /interrupted/, label)
     }
   }
 })
@@ -6440,4 +6456,180 @@ test('a plan that answers every acceptance id proceeds, and an extra check is re
   // The plan is accepted: whatever this fixture does later, it is not a plan refusal.
   assert.notEqual(result.details.escalation?.where, 'plan')
   assert.equal(io.calls.assign.some((entry) => entry.role === 'lead'), true, 'the plan reached the lead')
+})
+
+test('b851 A1 hardening buckets partition HARDENING_OUTCOMES without overlap', () => {
+  for (const bucket of [HARDENING_PROVEN, HARDENING_REFUTED, HARDENING_UNMEASURED]) assert.equal(Object.isFrozen(bucket), true)
+  const dup = HARDENING_OUTCOMES.filter((member) => [HARDENING_PROVEN, HARDENING_REFUTED, HARDENING_UNMEASURED].filter((bucket) => bucket.includes(member)).length > 1)
+  assert.deepEqual(dup, [])
+})
+
+test('b851 A2 every HARDENING_OUTCOMES member sits in exactly one bucket', () => {
+  const homeless = HARDENING_OUTCOMES.filter((member) => [HARDENING_PROVEN, HARDENING_REFUTED, HARDENING_UNMEASURED].filter((bucket) => bucket.includes(member)).length < 1)
+  assert.deepEqual(homeless, [])
+  const outsiders = [...HARDENING_PROVEN, ...HARDENING_REFUTED, ...HARDENING_UNMEASURED].filter((member) => !HARDENING_OUTCOMES.includes(member))
+  assert.deepEqual(outsiders, [])
+  assert.equal(HARDENING_PROVEN.length + HARDENING_REFUTED.length + HARDENING_UNMEASURED.length, HARDENING_OUTCOMES.length)
+  for (const outcome of ['killed', 'ungateable']) assert.equal(hardeningRowBucket({ outcome }), 'proven', outcome)
+  for (const outcome of ['pre-repair-green', 'survived']) assert.equal(hardeningRowBucket({ outcome }), 'refuted', outcome)
+  assert.equal(hardeningRowBucket({ outcome: 'witness-missing' }), 'unmeasured')
+  assert.equal(hardeningRowBucket({ outcome: 'no-such-outcome' }), 'refuted')
+})
+
+test('b851 B1 hardeningStageCleared bounces refuted rows and refusals', () => {
+  const survived = [{ finding: 'F1', test: 'a.test.mjs', name: 'F1 guard', outcome: 'survived', why: 'the declared mutation left F1 guard passed' }]
+  assert.equal(hardeningStageCleared([], survived), false)
+  assert.equal(hardeningStageCleared([], [{ ...survived[0], outcome: 'killed', why: null }]), true)
+  assert.equal(hardeningStageCleared([], [{ ...survived[0], outcome: 'witness-missing', why: 'no cell' }]), true)
+  assert.equal(hardeningStageCleared([{ finding: 'F1', reason: 'no-declaration', why: 'x' }], []), false)
+  assert.match(hardeningBounceLines(2, [], survived).join('\n'), /survived/)
+})
+
+test('b851 D1 preRepairGreenOutcome keeps present modes refuted', () => {
+  for (const [mode, find, bytes] of [
+    ['exact', 'const guard = false', 'const guard = false\n'],
+    ['normalized', 'a  b', 'a b\n'],
+    ['ambiguous', 'a  b', 'a b\na b\n'],
+    ['unsafe', "a // note\nb", "a  // note\nb"],
+  ]) {
+    assert.equal(bindMutationAnchor(bytes, find).mode, mode, mode)
+    assert.equal(preRepairGreenOutcome(find, bytes), 'pre-repair-green', mode)
+  }
+})
+
+test('b851 E1 preRepairGreenOutcome reads absence as unmeasured', () => {
+  for (const [label, find, bytes] of [['absent text', 'compileFromPlan', 'export const other = 1\n'], ['null bytes', 'x', null], ['empty find', '', 'x']]) {
+    assert.equal(preRepairGreenOutcome(find, bytes), 'unproven', label)
+  }
+  assert.equal(hardeningRowBucket({ outcome: 'unproven' }), 'unmeasured')
+})
+
+test('b851 C1 a witness-missing row clears with its closed reason in the envelope', () => {
+  const missing = { finding: 'F1', test: 'extra.test.mjs', name: 'F1 guard', file: 'extra.mjs', find: 'const guard = false', replace: 'const guard = true' }
+  // Isolated files map: the shared B376_FILES default is written through by earlier tests.
+  const io = b376ProofIo({ hardened: [missing], files: { [`${CTX.checkout}/${B376_TEST_FILE}`]: 'export const repaired = true\n', [`${CTX.checkout}/${B376_IMPL_FILE}`]: 'const guard = false\n' } })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  assert.equal(result.status, 'done')
+  const row = io.calls.logs.find((entry) => entry.finding_hardened)?.finding_hardened
+  assert.equal(row.outcome, 'witness-missing')
+  assert.deepEqual(result.details.hardening_unmeasured, [{ finding: 'F1', test: 'extra.test.mjs', check: 'F1 guard', outcome: 'witness-missing', why: 'the review-time witness has no cell for extra.test.mjs' }])
+})
+
+test('b851 G1 an unmeasured row never reads as proven in the envelope journal or PR body', () => {
+  const missing = { finding: 'F1', test: 'extra.test.mjs', name: 'F1 guard', file: 'extra.mjs', find: 'const guard = false', replace: 'const guard = true' }
+  const io = b376ProofIo({ hardened: [missing], files: { [`${CTX.checkout}/${B376_TEST_FILE}`]: 'export const repaired = true\n', [`${CTX.checkout}/${B376_IMPL_FILE}`]: 'const guard = false\n' } })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  assert.equal(result.status, 'done')
+  const entries = result.details.hardening_unmeasured
+  assert.ok(Array.isArray(entries) && entries.length === 1)
+  for (const entry of entries) assert.equal(hardeningRowBucket({ outcome: entry.outcome }), 'unmeasured')
+  assert.doesNotMatch(JSON.stringify(entries), /\bproven\b/)
+  const journalRow = io.calls.logs.find((entry) => entry.finding_hardened)?.finding_hardened
+  assert.equal(journalRow.outcome, 'witness-missing')
+  assert.doesNotMatch(JSON.stringify(journalRow), /\bproven\b/)
+  const body = composePrBody({ intent: 'guard the defect', hardening: { unmeasured: entries } })
+  assert.ok(body.includes('## Hardening blind spots'))
+  assert.ok(body.includes('unmeasured'))
+  assert.doesNotMatch(body, /\bproven\b/)
+})
+
+test('b851 TL4 a later proven generation removes the stale blind spot', () => {
+  const io = b376ProofIo({ reviewer2: b376Review('changes-needed', [B376_FINDING]), files: { [`${CTX.checkout}/${B376_TEST_FILE}`]: 'export const repaired = true\n', [`${CTX.checkout}/${B376_IMPL_FILE}`]: 'const guard = false\n' } })
+  let witnessCalls = 0
+  const baseRun = io.run
+  io.run = function (cmd) {
+    if (cmd === hardenWitnessCommand(B376_TEST_FILE)) {
+      witnessCalls += 1
+      if (witnessCalls === 1) return { ok: false, output: 'not ok 1 - unrelated\n# pass 0\n# fail 1' }
+    }
+    return baseRun.call(this, cmd)
+  }
+  const result = driveTask({ ...CTX, limits: { build_rounds: 3, review_rounds: 3 } }, io)
+  const rows = io.calls.logs.filter((entry) => entry.finding_hardened).map((entry) => entry.finding_hardened)
+  assert.deepEqual(rows.map((row) => row.outcome), ['unproven', 'killed'])
+  assert.equal(result.status, 'done')
+  assert.equal(result.details.hardening_unmeasured, undefined)
+})
+
+test('b851 TL4 repeated unmeasured adjudication does not duplicate the blind spot', () => {
+  const io = b376ProofIo({
+    reviewer2: b376Review('changes-needed', [B376_FINDING]),
+    files: { [`${CTX.checkout}/${B376_TEST_FILE}`]: 'export const repaired = true\n', [`${CTX.checkout}/${B376_IMPL_FILE}`]: 'const guard = false\n' },
+    witnessOutput: { ok: false, output: 'not ok 1 - unrelated\n# pass 0\n# fail 1' },
+  })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 3, review_rounds: 3 } }, io)
+  assert.equal(result.status, 'done')
+  assert.equal(result.details.hardening_unmeasured.length, 1)
+  assert.equal(result.details.hardening_unmeasured[0].finding, 'F1')
+  assert.equal(result.details.hardening_unmeasured[0].outcome, 'unproven')
+})
+
+test('b851 RV1-1 a passing pre-repair verdict with an introduced region stays pre-repair-green', () => {
+  const introduced = { finding: 'F1', test: B376_TEST_FILE, name: 'F1 guard', file: B376_IMPL_FILE, find: 'if (x == null) return null', replace: 'if (x == null) return guard' }
+  const io = b376ProofIo({ hardened: [introduced], files: { [`${CTX.checkout}/${B376_TEST_FILE}`]: 'export const repaired = true\n', [`${CTX.checkout}/${B376_IMPL_FILE}`]: 'const guard = false\n' }, proofOutputs: [B376_GREEN, B376_GREEN, B376_MUT_RED] })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'harden')
+  const row = io.calls.logs.find((entry) => entry.finding_hardened)?.finding_hardened
+  assert.equal(row.outcome, 'pre-repair-green')
+  assert.match(row.why, /witnessed pre-repair/)
+})
+
+// RV1-1, the evasion itself, at the rule: the guard is NEW, so the pre-repair run never
+// names it, and the mutated region is new too — the anchor is absent from the pre-repair
+// bytes by construction. The old shape read that absence as "could not reach its subject",
+// cleared the stage, and a tautological guard shipped. The rule now concludes nothing from a
+// verdict that is not a real PASS, so the mutation proof on the repaired tree decides.
+// Mutation killed: widening the rule to `pre !== 'failed'`.
+test('only a pre-repair run that ran the check and passed refutes a guard', () => {
+  assert.equal(preRepairRefutes('passed'), true)
+  for (const pre of ['absent', 'ambiguous', 'skipped', 'failed', null, undefined]) {
+    assert.equal(preRepairRefutes(pre), false, String(pre))
+  }
+})
+
+// RV1-1, driven: a repair that ADDS the region it mutates, with a guard that never failed
+// on the review-time bytes. The pre-repair run reports the guard as PASSED there, which is
+// the whole evidence — the lane must not clear. Mutation killed: consulting the repaired
+// anchor again (it is absent pre-repair by construction, so the row reads unmeasured and the
+// stage clears).
+test('a guard that passed on the review-time bytes is refuted even when its mutated region is new', () => {
+  const io = b376ProofIo({
+    hardened: [{ ...B376_HARDENED }], files: { ...B376_FILES },
+    // green on the repaired tree, GREEN on the pre-repair witness (it passed there), then red under the mutation
+    proofOutputs: [B376_GREEN, B376_GREEN, B376_MUT_RED],
+  })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'harden')
+  const row = io.calls.logs.filter((entry) => entry.finding_hardened).at(-1)?.finding_hardened
+  assert.equal(row.outcome, 'pre-repair-green', JSON.stringify(row))
+})
+
+// RV1-1 of this lane review: the pre-repair discriminator must not rest on an anchor the
+// builder chose in the REPAIRED file. A repair that ADDS the region it mutates has that
+// anchor absent from the pre-repair bytes by construction, so deciding "could not reach its
+// subject" from that absence cleared a tautological guard. The pre-repair RUN decides.
+// Mutation killed: restoring the anchor consult (a new guard over new code then reads
+// unmeasured and clears); treating an absent pre-repair verdict as pre-repair-green (a
+// legitimate new guard then bounces).
+test('a pre-repair run that PASSED is refuted; one that never ran the check concludes nothing from the repaired anchor', () => {
+  assert.equal(hardeningRowBucket({ outcome: 'pre-repair-green' }), 'refuted')
+  assert.equal(hardeningRowBucket({ outcome: 'unproven' }), 'unmeasured')
+  // The discriminator itself: bytes that lack the anchor are not evidence either way.
+  assert.equal(preRepairGreenOutcome('added region', 'the pre-repair file without it'), 'unproven')
+  assert.equal(preRepairGreenOutcome('present', 'a file with present in it'), 'pre-repair-green')
+})
+
+// RV1-2: a bounce that lists only the refuted rows tells a builder its undeclared findings
+// are settled. Mutation killed: dropping the undeclared block.
+test('a hardening bounce names the findings that declared no guard at all', () => {
+  const lines = hardeningBounceLines(2, [{ finding: 'RV1-1', reason: 'no-declaration', why: 'no details.hardened entry names finding RV1-1' }], [
+    { finding: 'RV1-2', outcome: 'survived', why: 'the mutation did not redden the check' },
+    { finding: 'RV1-3', outcome: 'witness-missing', why: 'the witness has no cell' },
+  ]).join('\n')
+  assert.match(lines, /No guard was declared for:/)
+  assert.match(lines, /- RV1-1/)
+  assert.match(lines, /RV1-2: survived/)
+  assert.match(lines, /Measured nothing — not blocking:[\s\S]*RV1-3: witness-missing/)
 })

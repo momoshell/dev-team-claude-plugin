@@ -13,7 +13,7 @@ Mutants measured (over the baseline-eligible suites only): 16 of 17 (94.1%)
 Mutants killed: 9 of 17 (52.9%)
 Tests observed: 1085
 Tests with a kill-set: 74 of 1085 (6.8%)
-Wall clock seconds (baseline census and mutation loop): 148.75
+Wall clock seconds (baseline census and mutation loop): 152.005
 
 ## Sampling
 Lines requested: 40
@@ -26,8 +26,8 @@ Candidates omitted: 19 of 36 (52.8%)
 
 ## Provenance
 Seed: 0
-Checkout HEAD: 860571a3b6942053d631acec2e8601a699a0847c
-Tool sha256: c091c94fdedbf63a2a3447fb407ee7476c29bc9f22a05f111c3e0ccac072cdfe
+Checkout HEAD: 5386b6b4038c54315dd35e4be83907794e63da60
+Tool sha256: 8b235f28665df94d580653d16ea6bc4a944fd7a07c2f0a75db2359831c7ff630
 Node: v26.8.2
 Mutations ran in: a disposable git worktree at that HEAD, removed at the end; a run killed uncatchably leaves one behind, and the next run removes it before starting
 Abandoned worktrees reclaimed at start: 0 verified gone; 0 left — a recycled pid reads as live, so such a worktree is left, never taken

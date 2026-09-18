@@ -14,6 +14,7 @@ import {
   main,
   ISOLATION_PREFIX,
   RECLAIM_SKIPPED,
+  RECLAIM_UNMEASURED,
   ownerRecordPath,
   MUTANT_UNMEASURED_REASONS,
   reclaimAbandoned,
@@ -595,3 +596,54 @@ test('a run reclaims only worktrees whose owner is provably gone, and counts onl
 })
 
 
+
+// Pass 10. (1) The lock check can go stale between the listing and the removal: git then
+// refuses, and a raw delete after that refusal took the directory of a worktree somebody
+// had just locked. Only git deletes now. (2) An unreadable census measured nothing, and
+// the report printed "0 left" for it — a zero nobody measured.
+// Mutation killed: a raw delete after git's refusal; an unreadable census reported as
+// empty lists.
+const reclaimRepo = () => {
+  const dir = scratchDir('kr-race-')
+  git(dir, 'init', '-q')
+  mkdirSync(join(dir, 'crew'), { recursive: true })
+  writeFileSync(join(dir, 'crew', 'drive.mjs'), 'export const a = 1\nexport function f(x) { return x + 1 }\n')
+  writeFileSync(join(dir, 's.test.mjs'), "import { test } from 'node:test'\ntest('x', () => {})\n")
+  git(dir, 'add', '-A'); git(dir, 'commit', '-q', '-m', 'base')
+  return dir
+}
+
+test('a worktree locked between the listing and the removal keeps its directory and is not counted', () => {
+  const dir = reclaimRepo()
+  const raced = join(scratchDir('kr-raced-'), `${ISOLATION_PREFIX}raced`)
+  git(dir, 'worktree', 'add', '--detach', '--quiet', raced, 'HEAD')
+  writeFileSync(ownerRecordPath(raced), JSON.stringify({ pid: 999_999_991 }))
+  const reclaimed = reclaimAbandoned(dir, {
+    pidAlive: () => false,
+    spawnSync: (bin, args, options) => {
+      // The race, made deterministic: somebody locks it after our listing, before our removal.
+      if (args.includes('remove')) git(dir, 'worktree', 'lock', raced)
+      return spawnSync(bin, args, options)
+    },
+  })
+  assert.deepEqual(reclaimed.removed, [])
+  assert.deepEqual(reclaimed.skipped.map(({ reason }) => reason), [RECLAIM_SKIPPED.UNVERIFIED])
+  assert.equal(existsSync(join(raced, 'crew', 'drive.mjs')), true, 'the locked worktree still has its files')
+  assert.match(gitResult(dir, 'worktree', 'list', '--porcelain').stdout, /raced\n[\s\S]*?locked/)
+})
+
+test('an unreadable worktree census is unmeasured in the result, the provenance and the report, never zero', () => {
+  const dir = reclaimRepo()
+  const failingList = (bin, args, options) => {
+    if (Array.isArray(args) && args.includes('list')) return { status: 128, stdout: '', stderr: 'fatal: unreadable' }
+    if (Array.isArray(args) && args.includes('--test')) return { status: 0, stdout: 'TAP version 13\n# Subtest: x\nok 1 - x\n1..1\n# tests 1\n# pass 1\n# fail 0\n', stderr: '' }
+    return spawnSync(bin, args, options)
+  }
+  assert.deepEqual(reclaimAbandoned(dir, { spawnSync: failingList }), { removed: null, skipped: null, reason: RECLAIM_UNMEASURED })
+  main(['--mutants', '1', '--seed', '1', '--suites', 's.test.mjs', '--md', join(dir, 'k.md'), '--out', join(dir, 'k.json'), '--checkout', dir], { spawnSync: failingList })
+  const provenance = JSON.parse(readFileSync(join(dir, 'k.json'), 'utf8')).provenance
+  assert.deepEqual([provenance.reclaimed, provenance.reclaim_skipped, provenance.reclaim_unmeasured_reason], [null, null, RECLAIM_UNMEASURED])
+  const report = readFileSync(join(dir, 'k.md'), 'utf8')
+  assert.match(report, /reclaimed at start: unmeasured \(worktree-list-unreadable\)/)
+  assert.doesNotMatch(report, /reclaimed at start: \d/)
+})

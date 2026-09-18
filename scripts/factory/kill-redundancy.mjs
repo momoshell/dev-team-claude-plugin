@@ -427,7 +427,9 @@ export function buildMarkdown(analysis = {}) {
     `Tool sha256: ${provenance.toolSha256 ?? 'unmeasured'}`,
     `Node: ${provenance.node ?? 'unmeasured'}`,
     `Mutations ran in: ${provenance.isolated === false ? `the checkout itself (--in-place)` : 'a disposable git worktree at that HEAD, removed at the end; a run killed uncatchably leaves one behind, and the next run removes it before starting'}`,
-    `Abandoned worktrees reclaimed at start: ${provenance.reclaimed ?? 0} verified gone; ${(provenance.reclaim_skipped ?? []).length} left${(provenance.reclaim_skipped ?? []).length > 0 ? ` (${provenance.reclaim_skipped.join(', ')})` : ''} — a recycled pid reads as live, so such a worktree is left, never taken`,
+    Array.isArray(provenance.reclaim_skipped) && Number.isInteger(provenance.reclaimed)
+      ? `Abandoned worktrees reclaimed at start: ${provenance.reclaimed} verified gone; ${provenance.reclaim_skipped.length} left${provenance.reclaim_skipped.length > 0 ? ` (${provenance.reclaim_skipped.join(', ')})` : ''} — a recycled pid reads as live, so such a worktree is left, never taken`
+      : `Abandoned worktrees reclaimed at start: unmeasured (${provenance.reclaim_unmeasured_reason ?? 'not recorded'})`,
     '',
     '## Redundancy candidates (sampled kill-set subsumption, not proof of redundancy)',
     'A candidate is a test whose sampled kill-set is a strict subset of another test\'s.',
@@ -481,6 +483,7 @@ function jsonAnalysis(analysis) {
 // else is left and reported with a closed reason.
 // Blind spot, stated: a recycled pid reads as live, so that worktree is left — never taken.
 export const RECLAIM_SKIPPED = Object.freeze({ LOCKED: 'locked', OWNER_UNKNOWN: 'owner-unknown', OWNER_LIVE: 'owner-live', UNVERIFIED: 'removal-unverified' })
+export const RECLAIM_UNMEASURED = 'worktree-list-unreadable'
 export const ownerRecordPath = (root) => `${root}.owner.json`
 
 function pidAlive(pid) {
@@ -505,7 +508,8 @@ export function reclaimAbandoned(checkout, deps = {}) {
   const exists = deps.existsSync || existsSync
   const alive = deps.pidAlive || pidAlive
   const before = registeredWorktrees(checkout, spawn)
-  if (before === null) return { removed: [], skipped: [], reason: 'worktree list unreadable' }
+  // An unreadable census measured nothing: the counts are null with a reason, never zero.
+  if (before === null) return { removed: null, skipped: null, reason: RECLAIM_UNMEASURED }
   const attempted = []
   const skipped = []
   for (const { path, locked } of before) {
@@ -515,8 +519,11 @@ export function reclaimAbandoned(checkout, deps = {}) {
     try { owner = JSON.parse((deps.readFileSync || readFileSync)(ownerRecordPath(path), 'utf8')) } catch { owner = null }
     if (!Number.isInteger(owner?.pid)) { skipped.push({ path, reason: RECLAIM_SKIPPED.OWNER_UNKNOWN }); continue }
     if (alive(owner.pid)) { skipped.push({ path, reason: RECLAIM_SKIPPED.OWNER_LIVE }); continue }
+    // Git is the only thing that deletes here. The lock check above can go stale between
+    // the listing and this call; git then REFUSES, and a raw delete after that refusal would
+    // take the directory of a worktree somebody just locked (pass 10). A refusal is left
+    // exactly as it is and reported unverified.
     try { spawn('git', ['-C', checkout, 'worktree', 'remove', '--force', path], { encoding: 'utf8' }) } catch { /* verified below */ }
-    try { (deps.rmSync || rmSync)(path, { recursive: true, force: true }) } catch { /* verified below */ }
     attempted.push(path)
   }
   try { spawn('git', ['-C', checkout, 'worktree', 'prune'], { encoding: 'utf8' }) } catch { /* verified below */ }
@@ -563,6 +570,7 @@ function isolationRoot(checkout, target, options, deps) {
     reason: null,
     reclaimed: reclaimed.removed,
     reclaim_skipped: reclaimed.skipped,
+    reclaim_reason: reclaimed.reason,
     cleanup: () => {
       try { (deps.rmSync || rmSync)(ownerRecordPath(root), { force: true }) } catch { /* an orphan record names no worktree */ }
       try { spawn('git', ['-C', checkout, 'worktree', 'remove', '--force', root], { encoding: 'utf8' }) } catch { /* the prune below still reclaims it */ }
@@ -670,7 +678,7 @@ export function main(argv = process.argv.slice(2), deps = {}) {
     analysis.sampledMutants = generated.candidates.length
     analysis.sampling = generated.sampling
     analysis.testLabels = testLabels
-    analysis.provenance = { ...provenance(checkout, options, spawn), isolated: isolation.isolated, isolation_reason: isolation.reason, reclaimed: (isolation.reclaimed || []).length, reclaim_skipped: (isolation.reclaim_skipped || []).map(({ reason }) => reason) }
+    analysis.provenance = { ...provenance(checkout, options, spawn), isolated: isolation.isolated, isolation_reason: isolation.reason, reclaimed: Array.isArray(isolation.reclaimed) ? isolation.reclaimed.length : null, reclaim_skipped: Array.isArray(isolation.reclaim_skipped) ? isolation.reclaim_skipped.map(({ reason }) => reason) : null, reclaim_unmeasured_reason: isolation.reclaim_reason ?? null }
     analysis.wallClockSeconds = Number(((performance.now() - started) / 1000).toFixed(3))
     const markdown = buildMarkdown(analysis)
     const outputPath = (path) => path.startsWith('/') ? path : join(checkout, path)

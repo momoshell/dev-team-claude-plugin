@@ -2561,19 +2561,14 @@ test('an own-task probe is admitted on headless rpc from the transports task dir
   } finally { f.cleanup() }
 })
 
-test('two declared builder npm test calls across dispatches spend the allowance exactly once', () => {
+test("the builder's declared npm test is refused on headless rpc: the driver's suite stage owns the full suite", () => {
   const f = fixture()
   try {
     const policy = { suiteCommand: 'npm test', gatePath: '/tmp/b502/gate.mjs', fence: ['crew/'] }
     const first = f.io.assign({ role: 'builder', briefFile: '/brief.md', policy })
     b502AppendRpcStream(f, 'builder', b502RpcFrames('npm test', 'b502-npm-1'))
     writeFileSync(first.returnPath, JSON.stringify({ assignment_id: first.id, role: 'builder', status: 'done', summary: 'first', artifacts: [], details: {} }))
-    assert.equal(f.io.wait(first.returnPath, 60).status, 'done')
-
-    const second = f.io.assign({ role: 'builder', briefFile: '/brief-again.md', policy })
-    b502AppendRpcStream(f, 'builder', b502RpcFrames('npm test', 'b502-npm-2'))
-    writeFileSync(second.returnPath, JSON.stringify({ assignment_id: second.id, role: 'builder', status: 'done', summary: 'second', artifacts: [], details: {} }))
-    const envelope = f.io.wait(second.returnPath, 60)
+    const envelope = f.io.wait(first.returnPath, 60)
     assert.equal(envelope.status, 'insufficient')
     assert.equal(envelope.details.suite_refusal.command, 'npm test')
   } finally { f.cleanup() }

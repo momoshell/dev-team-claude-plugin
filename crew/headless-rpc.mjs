@@ -1507,7 +1507,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
       const verdict = suiteRunPolicy({
         role: turn.role, command,
         fence: turn.policy.fence || [], gatePath: turn.policy.gatePath || null,
-        ranBefore: counters.allowance_spent, suiteRanBefore: counters.suite_allowance_spent,
+        ranBefore: counters.allowance_spent,
         suiteCommand: turn.policy.suiteCommand || null, taskDir: taskDir || paths.taskDir,
       })
       countSuiteDecision(counters, verdict.decision, { kind: verdict.kind, blind: verdict.blind })

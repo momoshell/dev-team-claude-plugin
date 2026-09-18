@@ -22,7 +22,6 @@ const MANDATORY = '`confidence` is not optional'
 const CLOSED = 'No other keys are permitted'
 const CATEGORY_INTRO = 'The optional reviewer finding `category` is closed to the five complexity tags the reviewer charter owns'
 const REVIEWER_CHARTER = join(REPO, 'crew/roles/reviewer.md')
-const OVER_BUILDING_CATEGORIES = ['delete', 'stdlib', 'native', 'yagni', 'shrink']
 const REPLACEMENT_RULE = 'A finding carrying any category above must also name a replacement: what to use instead, never only a complaint.'
 const NET_SUMMARY = 'Summarize the total removable code as `net: -N lines possible`.'
 const SKILL_ROUTE = 'When this rubric finds over-building, route the finding through the closed `category` in `references/findings-shape.md` and name what to use instead.'
@@ -142,11 +141,14 @@ test('every worked example in the skill conforms to the shape', () => {
 })
 
 test('over-building category is closed and requires replacements', () => {
-  assert.deepEqual(overBuildingCategories(readFileSync(REVIEWER_CHARTER, 'utf8')), OVER_BUILDING_CATEGORIES)
+  // Derived from the reviewer charter — the one home. Five, distinct; the exact set is digest-pinned in crew/drive-docs.test.mjs.
+  const categories = overBuildingCategories(readFileSync(REVIEWER_CHARTER, 'utf8'))
+  assert.equal(categories.length, 5)
+  assert.equal(new Set(categories).size, 5)
   // The reference doc names the home and restates no tag bullet.
   assert.ok(doc.includes(CATEGORY_INTRO))
   assert.ok(doc.includes('crew/roles/reviewer.md'))
-  assert.equal([...doc.matchAll(/^- \`(delete|stdlib|native|yagni|shrink)\` — /gm)].length, 0, 'tags restated in findings-shape.md')
+  assert.equal([...doc.matchAll(new RegExp('^- \`(' + categories.join('|') + ')\` — ', 'gm'))].length, 0, 'tags restated in findings-shape.md')
   assert.ok(doc.includes(REPLACEMENT_RULE))
   assert.ok(doc.includes(NET_SUMMARY))
   assert.ok(skill.includes(SKILL_ROUTE))

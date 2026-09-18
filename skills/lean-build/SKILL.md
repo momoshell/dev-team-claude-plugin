@@ -14,7 +14,7 @@ The ladder is in your shared charter; this skill does not restate it. These are 
 When two standard-library options are the same size, choose the edge-case-correct one.
 A rate is never reported without its denominator; a guard is never claimed without its kill-mutation.
 
-A deliberate ceiling is a comment line, not a silence: `// lean: global lock; per-account locks if throughput matters`. The marker is the whole comment line — never trailing on code — and `;` separates ceiling from upgrade path, so a ceiling may contain commas. `node scripts/factory/lean-debt.mjs` harvests every marker into a ledger and flags one with no upgrade path `no-trigger`.
+A deliberate ceiling is a comment line, not a silence: `// lean: global lock; per-account locks if throughput matters`. The marker is the whole comment line — never trailing on code, never inside a multiline literal (the scan is line-based) — and `;` separates ceiling from upgrade path, so a ceiling may contain commas. `node scripts/factory/lean-debt.mjs` harvests every marker into a ledger and flags one with no upgrade path `no-trigger`.
 
 Lazy code without its check is unfinished: leave ONE runnable check per non-trivial change — the smallest thing that fails if the logic breaks. Trivial one-liners need none.
 

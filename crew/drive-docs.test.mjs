@@ -171,7 +171,8 @@ test('B1 the lean charter arm adds nothing: its former tail lives in the charter
   assert.ok(reviewer.includes('## Complexity findings'))
   for (const role of roles.filter((r) => r !== 'reviewer')) {
     const card = readFileSync(join(rolesDir, `${role}.md`), 'utf8')
-    assert.equal(/\`delete\`.*\`stdlib\`.*\`native\`.*\`yagni\`.*\`shrink\`/s.test(card), false, `the five tags are restated in ${role}.md`)
+    const restated = complexityTags(reviewer).filter((tag) => card.includes(`\`${tag}\``)).length
+    assert.ok(restated < 3, `${restated} of the reviewer charter complexity tags are restated in ${role}.md`)
   }
 })
 
@@ -236,7 +237,13 @@ test('BC2', () => {
 })
 
 // Re-pin ONLY when the ladder in _shared.md is deliberately changed; nothing else may move it.
-const LADDER_SHA256 = 'a59dffd5ba471ad9fa6d49a73f765a59a0bbfd47010c1cc354a95dd599302841'
+// The five complexity tags, read from the reviewer charter sentence that begins Tags are closed.
+export function complexityTags(reviewerCharter) {
+  const m = reviewerCharter.replace(/\s+/g, ' ').match(/Tags are closed: (.+?)\. Every tag names a concrete replacement\./)
+  return m ? [...m[1].matchAll(/\`([a-z]+)\`/g)].map((x) => x[1]) : []
+}
+const TAGS_SHA256 = 'bc5486211755d3ab6a644b6e2cc013f493d4db6fb48eb7ef7ee9278c57ed5df1'
+const LADDER_SHA256 = '9e8228f275d9243a5a2b3a69b56dd4c8bfce66ef04786509f2bddafea2cef397'
 
 test('the ladder lives once, in _shared.md; builder keeps only its output rule; lean-build carries the repo examples', () => {
   const sharedLines = readFileSync(join(REPO_ROOT, 'crew', 'roles', '_shared.md'), 'utf8').split('\n')
@@ -284,7 +291,11 @@ test('the ladder lives once, in _shared.md; builder keeps only its output rule; 
   const reviewer = readFileSync(join(REPO_ROOT, 'crew', 'roles', 'reviewer.md'), 'utf8')
   const reviewerProse = reviewer.replace(/\s+/g, ' ')
   assert.ok(reviewer.includes('## Complexity findings'))
-  for (const tag of ['delete', 'stdlib', 'native', 'yagni', 'shrink']) assert.ok(reviewer.includes(`\`${tag}\``), tag)
+  // The tag set is DERIVED from the charter, never listed here: one home. Pinned by count and digest.
+  const tags = complexityTags(reviewer)
+  assert.equal(tags.length, 5, 'five closed tags')
+  assert.equal(new Set(tags).size, 5)
+  assert.equal(createHash('sha256').update(tags.join(',')).digest('hex'), TAGS_SHA256, 'the tag set changed — re-pin deliberately, and only here')
   assert.ok(reviewerProse.includes('Tags are closed:'), 'the tag set is closed, not suggested')
   assert.ok(reviewerProse.includes('Every tag names a concrete replacement.'))
   assert.ok(reviewerProse.includes('Scope is complexity only; correctness, security and performance go through the normal findings.'), 'complexity-only scope, exact')

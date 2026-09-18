@@ -2,11 +2,11 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import http from 'node:http'
 import net from 'node:net'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { writeFileSync, readFileSync, existsSync, globSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { ROOT, rawRequest, scratchDir, startFileWriter, writeTornFile } from './helpers.mjs'
+import { ROOT, childTracker, rawRequest, scratchDir, startFileWriter, writeTornFile } from './helpers.mjs'
 
 const listen = async (server) => {
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve) })
@@ -360,4 +360,15 @@ test('the narrowed discovery pattern still collects every test file in the tree'
 test('no file carries a test-shaped name the narrowed pattern would drop', () => {
   const orphans = repoFiles().filter((rel) => DROPPED_NAME_FORMS.test(rel))
   assert.deepEqual(orphans, [], "these files are named for one of node --test's other default patterns, which the narrowed pattern never collects")
+})
+
+// A child whose exit is still in flight when the suite ends — exited but unreaped, or a few
+// milliseconds from exiting — answers kill(pid, 0) and was counted as a leak (Sol on #1398).
+// The tracker gives the exit a bounded grace; a real leak is still alive at its end.
+// Mutation: put the single drained turn back in childTracker and this counts a survivor.
+test('childTracker does not count a child whose exit lands inside the grace', async () => {
+  let hook = null
+  const track = childTracker((fn) => { hook = fn }, assert)
+  track(spawn('sleep', ['0.05'], { stdio: 'ignore' }))
+  await hook()
 })

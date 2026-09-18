@@ -239,15 +239,15 @@ export function makeSeedLane(now) {
 // outlives its test is a failure, never a zombie. Replaces three copies — two of which only
 // killed and never asserted, and were hiding exactly that.
 //
-// The probe is kill(pid, 0) after one event-loop turn. A child that has exited but not yet
-// been reaped still answers signal 0 — so the probe can only over-report (a conservative false
-// positive), never clear a live child. The drained turn lets a queued 'exit' land first, which
-// removes the common race under a concurrent npm test; a survivor after that is reported.
+// The probe is kill(pid, 0). A child that has exited but not yet been reaped still answers
+// signal 0 — so the probe can only over-report, never clear a live child. Until libuv reaps it
+// in a poll phase that child is a zombie, and one drained turn was measured not to be enough
+// (Sol, #1398): the reap gets a bounded grace, and what still answers at its end is reported.
 export function childTracker(after, assert) {
   const spawned = new Set()
   const alive = (child) => { if (!child?.pid) return false; try { process.kill(child.pid, 0); return true } catch { return false } }
   after(async () => {
-    await new Promise((resolve) => setImmediate(resolve))
+    for (let waited = 0; waited < 500 && [...spawned].some(alive); waited += 10) await new Promise((resolve) => setTimeout(resolve, 10))
     const survivors = [...spawned].filter(alive)
     for (const child of survivors) { try { child.kill('SIGKILL') } catch { /* raced to exit */ } }
     // Name the command, not only the pid: a pid is unmappable after the run; a command names the test.

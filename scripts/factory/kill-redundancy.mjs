@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { performance } from 'node:perf_hooks'
 import { dirname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -25,7 +26,7 @@ export const REASON = Object.freeze({
   CANCELLED: 'cancelled', OUTCOME_SET_DIFFERS: 'outcome-set-differs', BASELINE_UNMEASURED: 'baseline-unmeasured', BASELINE_RED: 'baseline-red',
 })
 export const MUTANT_UNMEASURED_REASONS = Object.freeze(Object.values(REASON))
-export const USAGE = `usage: node scripts/factory/kill-redundancy.mjs [--mutants <n>] [--out <json>] [--md <markdown>] [--suites <suite>] [--checkout <dir>] [--timeout-ms <n>] [--seed <n>]`
+export const USAGE = `usage: node scripts/factory/kill-redundancy.mjs [--mutants <n>] [--out <json>] [--md <markdown>] [--suites <suite>] [--checkout <dir>] [--timeout-ms <n>] [--seed <n>] [--in-place]`
 
 // xorshift32 is stuck at zero forever, so seed 0 is folded with the golden-ratio constant
 // and a zero state is bumped: every seed is a distinct, deterministic stream.
@@ -309,13 +310,22 @@ function neutralEnv(base = process.env) {
   const env = { ...base }
   delete env.FORCE_COLOR
   delete env.CLICOLOR_FORCE
+  // A test runner's own context must not reach the suites being measured: with
+  // NODE_TEST_CONTEXT inherited, the spawned `node --test` reports to that parent instead of
+  // running the file, so a tool invoked from inside a suite measured nothing and said so
+  // in milliseconds. NODE_OPTIONS goes for the same reason: it can load code into the run.
+  delete env.NODE_TEST_CONTEXT
+  delete env.NODE_OPTIONS
   env.NO_COLOR = '1'
   return env
 }
 
 function runSuite(suite, checkout, timeoutMs, spawn) {
   try {
-    const result = spawn('node', ['--test', '--test-reporter=tap', suite], {
+    // The node running this tool, not whatever `node` a PATH happens to resolve: under a
+    // test runner there may be none, and a suite that "could not be spawned" reads as an
+    // unmeasured mutant rather than a missing interpreter.
+    const result = spawn(process.execPath, ['--test', '--test-reporter=tap', suite], {
       cwd: checkout,
       encoding: 'utf8',
       timeout: timeoutMs,
@@ -328,7 +338,7 @@ function runSuite(suite, checkout, timeoutMs, spawn) {
 }
 
 function parseArgs(argv) {
-  const parsed = { mutants: 200, out: null, md: 'docs/audits/2026-09-18/kill-redundancy.md', suites: [], checkout: process.cwd(), timeoutMs: 30000, seed: 0 }
+  const parsed = { mutants: 200, out: null, md: 'docs/audits/2026-09-18/kill-redundancy.md', suites: [], checkout: process.cwd(), timeoutMs: 30000, seed: 0, inPlace: false }
   const args = [...(argv || [])]
   for (let i = 0; i < args.length; i += 1) {
     const flag = args[i]
@@ -345,6 +355,7 @@ function parseArgs(argv) {
     else if (flag === '--checkout') parsed.checkout = needs(flag)
     else if (flag === '--timeout-ms') parsed.timeoutMs = Number(needs(flag))
     else if (flag === '--seed') parsed.seed = Number(needs(flag))
+    else if (flag === '--in-place') parsed.inPlace = true
     else throw new Error(`unknown flag ${flag}`)
   }
   if (!Number.isSafeInteger(parsed.mutants) || parsed.mutants <= 0) throw new Error('--mutants must be a positive integer')
@@ -412,6 +423,7 @@ export function buildMarkdown(analysis = {}) {
     `Checkout HEAD: ${provenance.headSha ?? 'unmeasured (not a git checkout or git unavailable)'}`,
     `Tool sha256: ${provenance.toolSha256 ?? 'unmeasured'}`,
     `Node: ${provenance.node ?? 'unmeasured'}`,
+    `Mutations ran in: ${provenance.isolated === false ? `the checkout itself (--in-place)` : 'a disposable git worktree at that HEAD'}`,
     '',
     '## Redundancy candidates (sampled kill-set subsumption, not proof of redundancy)',
     'A candidate is a test whose sampled kill-set is a strict subset of another test\'s.',
@@ -450,6 +462,37 @@ function jsonAnalysis(analysis) {
   }
 }
 
+// The mutations run in a DISPOSABLE git worktree at the checkout's HEAD, never in the
+// checkout itself: no signal, crash or SIGKILL can leave a mutant in code someone is
+// working in (Sol, #1401 passes 5 and 6 — a real SIGTERM did exactly that). The worktree
+// is removed at the end; a leftover lives in the system temp directory and `git worktree
+// prune` reclaims it. `--in-place` opts out, for a tree whose uncommitted state IS the
+// subject; it says so in the report.
+function isolationRoot(checkout, target, options, deps) {
+  if (options.inPlace) return { root: checkout, isolated: false, reason: 'in-place requested', cleanup: () => {} }
+  const spawn = deps.spawnSync || spawnSync
+  const mkdtemp = deps.mkdtempSync || mkdtempSync
+  let root = null
+  try {
+    root = mkdtemp(join(deps.tmpRoot || tmpdir(), 'kill-redundancy-'))
+    const added = spawn('git', ['-C', checkout, 'worktree', 'add', '--detach', '--quiet', root, 'HEAD'], { encoding: 'utf8' })
+    if (!added || added.status !== 0) throw new Error(added?.stderr?.trim() || 'git worktree add failed')
+    if (!(deps.existsSync || existsSync)(join(root, target))) throw new Error(`the worktree does not carry ${target}`)
+  } catch (error) {
+    if (root) { try { (deps.rmSync || rmSync)(root, { recursive: true, force: true }) } catch { /* nothing to reclaim */ } }
+    return { root: null, isolated: false, reason: `worktree unavailable: ${error?.message ?? String(error)}`, cleanup: () => {} }
+  }
+  return {
+    root,
+    isolated: true,
+    reason: null,
+    cleanup: () => {
+      try { spawn('git', ['-C', checkout, 'worktree', 'remove', '--force', root], { encoding: 'utf8' }) } catch { /* the prune below still reclaims it */ }
+      try { (deps.rmSync || rmSync)(root, { recursive: true, force: true }) } catch { /* left for git worktree prune */ }
+    },
+  }
+}
+
 export function main(argv = process.argv.slice(2), deps = {}) {
   let options
   try { options = parseArgs(argv) } catch (error) {
@@ -458,7 +501,13 @@ export function main(argv = process.argv.slice(2), deps = {}) {
   }
   const checkout = options.checkout
   const target = 'crew/drive.mjs'
-  const targetPath = join(checkout, target)
+  const isolation = isolationRoot(checkout, target, options, deps)
+  if (isolation.root === null) {
+    ;(deps.stderr || process.stderr).write(`refusing to mutate the checkout in place: ${isolation.reason}\nrun with --in-place to accept that a crash can leave a mutant in ${checkout}\n`)
+    return 3
+  }
+  const runRoot = isolation.root
+  const targetPath = join(runRoot, target)
   const source = readFileSync(targetPath, 'utf8')
   const sourceLines = source.split(/\r?\n/)
   const lineNumbers = sampleLineNumbers({ lineCount: sourceLines.length, count: options.mutants, seed: options.seed })
@@ -475,7 +524,7 @@ export function main(argv = process.argv.slice(2), deps = {}) {
   const baselines = new Map()
   const baselineOutcomes = []
   for (const suite of options.suites) {
-    const census = baselineCensus(runSuite(suite, checkout, options.timeoutMs, spawn))
+    const census = baselineCensus(runSuite(suite, runRoot, options.timeoutMs, spawn))
     baselineOutcomes.push(census)
     if (census.status === 'measured') { baselines.set(suite, census.observed); for (const key of census.observed) observedTests.add(key); Object.assign(testLabels, census.labels) }
   }
@@ -508,7 +557,7 @@ export function main(argv = process.argv.slice(2), deps = {}) {
           writeFileSync(targetPath, nextBytes)
           suiteOutputs = measurableSuites.length === 0
             ? [{ error: Object.assign(new Error('no suite has a measured baseline'), { code: 'BASELINE' }) }]
-            : measurableSuites.map((suite) => runSuite(suite, checkout, options.timeoutMs, spawn))
+            : measurableSuites.map((suite) => runSuite(suite, runRoot, options.timeoutMs, spawn))
         }
       } catch (error) {
         suiteOutputs = [{ error }]
@@ -537,7 +586,7 @@ export function main(argv = process.argv.slice(2), deps = {}) {
   analysis.sampledMutants = generated.candidates.length
   analysis.sampling = generated.sampling
   analysis.testLabels = testLabels
-  analysis.provenance = provenance(checkout, options, spawn)
+  analysis.provenance = { ...provenance(checkout, options, spawn), isolated: isolation.isolated, isolation_reason: isolation.reason }
   analysis.wallClockSeconds = Number(((performance.now() - started) / 1000).toFixed(3))
   const markdown = buildMarkdown(analysis)
   const outputPath = (path) => path.startsWith('/') ? path : join(checkout, path)
@@ -549,6 +598,7 @@ export function main(argv = process.argv.slice(2), deps = {}) {
     mkdirSync(dirname(outPath), { recursive: true })
     writeFileSync(outPath, `${JSON.stringify(jsonAnalysis(analysis), null, 2)}\n`)
   }
+  isolation.cleanup()
   ;(deps.stdout || process.stdout).write(`wrote ${relative(checkout, mdPath)}\n`)
   return 0
 }

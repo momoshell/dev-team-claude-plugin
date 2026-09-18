@@ -13,7 +13,7 @@ Mutants measured (over the baseline-eligible suites only): 16 of 17 (94.1%)
 Mutants killed: 9 of 17 (52.9%)
 Tests observed: 1085
 Tests with a kill-set: 74 of 1085 (6.8%)
-Wall clock seconds (baseline census and mutation loop): 149.472
+Wall clock seconds (baseline census and mutation loop): 157.866
 
 ## Sampling
 Lines requested: 40
@@ -26,9 +26,10 @@ Candidates omitted: 19 of 36 (52.8%)
 
 ## Provenance
 Seed: 0
-Checkout HEAD: 1eb8fc33c991cf11c555c6cd48d7b1645c562d2e
-Tool sha256: 5efb194f284173450094f2e0c96231b73f8d3bb7dfa7c86f947be1a043501fb3
+Checkout HEAD: 2acf50ae514334704c3dd69b4b77733670c7975f
+Tool sha256: f387eeb8aebaaff6a25129436f8cc33d7904c63a1aebfed0135175391de999b6
 Node: v26.8.2
+Mutations ran in: a disposable git worktree at that HEAD
 
 ## Redundancy candidates (sampled kill-set subsumption, not proof of redundancy)
 A candidate is a test whose sampled kill-set is a strict subset of another test's.

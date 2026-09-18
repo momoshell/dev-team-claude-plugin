@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { spawn } from 'node:child_process'
 import { EventEmitter } from 'node:events'
-import { ROOT, scratchDir } from './helpers.mjs'
+import { ROOT, scratchDir, git, gitResult } from './helpers.mjs'
 import {
   analyzeKills,
   buildMarkdown,
@@ -250,7 +251,7 @@ test('every unmeasured path emits a reason from the closed source', () => {
   const dir = scratchDir('kr-nobase-')
   mkdirSync(join(dir, 'crew'), { recursive: true })
   writeFileSync(join(dir, 'crew', 'drive.mjs'), ['export const a = 1', 'export function f(x) { return x + 1 }', ''].join('\n'))
-  assert.equal(main(['--mutants', '2', '--seed', '1', '--suites', 'r', '--out', join(dir, 'k.json'), '--md', join(dir, 'k.md'), '--checkout', dir], { spawnSync: () => ({ status: 1, stdout: tap('# Subtest: a\nnot ok 1 - a', 1, 1), stderr: '' }) }), 0)
+  assert.equal(main(['--in-place', '--mutants', '2', '--seed', '1', '--suites', 'r', '--out', join(dir, 'k.json'), '--md', join(dir, 'k.md'), '--checkout', dir], { spawnSync: () => ({ status: 1, stdout: tap('# Subtest: a\nnot ok 1 - a', 1, 1), stderr: '' }) }), 0)
   const none = JSON.parse(readFileSync(join(dir, 'k.json'), 'utf8'))
   assert.ok(none.unmeasured.length > 0 && none.unmeasured.every((row) => row.reason === REASON.BASELINE_UNMEASURED), JSON.stringify(none.unmeasured))
   assert.ok(MUTANT_UNMEASURED_REASONS.includes(none.unmeasured[0].reason))
@@ -270,7 +271,7 @@ test('a baseline-red suite stays in the denominator and is named in the report',
   writeFileSync(join(dir, 'crew', 'drive.mjs'), ['export const a = 1', 'export function f(x) { return x + 1 }', ''].join('\n'))
   const tap = (fails) => `TAP version 13\n# Subtest: A\n${fails ? 'not ok' : 'ok'} 1 - A\n1..1\n# tests 1\n# pass ${fails ? 0 : 1}\n# fail ${fails ? 1 : 0}\n`
   const spawnSync = (_bin, args) => { const suite = args[args.length - 1]; return suite === 'red' ? { status: 1, stdout: tap(true), stderr: '' } : { status: 0, stdout: tap(false), stderr: '' } }
-  assert.equal(main(['--mutants', '2', '--seed', '1', '--suites', 'good', '--suites', 'red', '--out', join(dir, 'k.json'), '--md', join(dir, 'k.md'), '--checkout', dir], { spawnSync }), 0)
+  assert.equal(main(['--in-place', '--mutants', '2', '--seed', '1', '--suites', 'good', '--suites', 'red', '--out', join(dir, 'k.json'), '--md', join(dir, 'k.md'), '--checkout', dir], { spawnSync }), 0)
   const report = JSON.parse(readFileSync(join(dir, 'k.json'), 'utf8'))
   assert.deepEqual(report.baselines.map((b) => [b.suite, b.status, b.reason]), [['good', 'measured', null], ['red', 'unmeasured', 'baseline-red']])
   assert.equal(report.suiteRuns.total, 2 * report.sampledMutants, 'both configured suites count for every mutant')
@@ -289,7 +290,7 @@ test('a redundancy candidate survives --out serialization and is named in the re
   // Run 1 is the pristine baseline; odd mutants are killed by A alone, even ones by A and B,
   // so B's sampled kill-set is a strict subset of A's once two mutants ran.
   const spawnSync = () => { runs += 1; const fails = runs === 1 ? [] : runs % 2 === 0 ? ['A'] : ['A', 'B']; return { status: fails.length ? 1 : 0, stdout: tap(fails), stderr: '' } }
-  const code = main(['--mutants', '4', '--seed', '3', '--suites', 's', '--out', join(dir, 'k.json'), '--md', join(dir, 'k.md'), '--checkout', dir], { spawnSync })
+  const code = main(['--in-place', '--mutants', '4', '--seed', '3', '--suites', 's', '--out', join(dir, 'k.json'), '--md', join(dir, 'k.md'), '--checkout', dir], { spawnSync })
   assert.equal(code, 0)
   const report = JSON.parse(readFileSync(join(dir, 'k.json'), 'utf8'))
   assert.ok(report.sampling.selectedCandidates >= 2, `at least two mutants: ${JSON.stringify(report.sampling)}`)
@@ -360,7 +361,7 @@ test('every termination signal restores the target before re-raising', () => {
       return { status: 0, stdout: 'TAP version 13\n# Subtest: x\nok 1 - x\n1..1\n# tests 1\n# fail 0\n', stderr: '' }
     }
     for (let seed = 0; seed < 10 && raised.length === 0; seed += 1) {
-      main(['--mutants', '1', '--seed', String(seed), '--suites', 's', '--out', join(dir, 'k.json'), '--md', join(dir, 'k.md'), '--checkout', dir], { spawnSync, signals, kill })
+      main(['--in-place', '--mutants', '1', '--seed', String(seed), '--suites', 's', '--out', join(dir, 'k.json'), '--md', join(dir, 'k.md'), '--checkout', dir], { spawnSync, signals, kill })
     }
     assert.ok(calls > 1, `${signal}: no seed produced a mutated run`)
     assert.deepEqual(raised, [[signal, true]], `${signal}: one re-raise, bytes restored at that instant`)
@@ -389,10 +390,69 @@ test('SIGINT mid-mutant restores the target before the process re-raises the sig
     return { status: 0, stdout: 'TAP version 13\n# Subtest: x\nok 1 - x\n1..1\n# tests 1\n# fail 0\n', stderr: '' }
   }
   for (let seed = 0; seed < 10 && raised.length === 0; seed += 1) {
-    main(['--mutants', '1', '--seed', String(seed), '--suites', 's', '--out', join(dir, 'k.json'), '--md', join(dir, 'k.md'), '--checkout', dir], { spawnSync, signals, kill })
+    main(['--in-place', '--mutants', '1', '--seed', String(seed), '--suites', 's', '--out', join(dir, 'k.json'), '--md', join(dir, 'k.md'), '--checkout', dir], { spawnSync, signals, kill })
   }
   assert.ok(calls > 1, 'no seed in 0..9 produced a mutated run')
   assert.equal(seenMutated, true, 'the runner must see the mutant in the target')
   assert.deepEqual(raised, [[process.pid, 'SIGINT', true]], 'exactly one re-raise, with the original bytes already restored at that instant')
   assert.ok(readFileSync(target).equals(original))
+})
+
+// Sol on #1401, pass 6: a mocked signal cannot prove the process dies, and a SIGKILL cannot
+// be handled at all. The guarantee is therefore structural — the mutations run in a
+// disposable worktree, so the CHECKOUT cannot carry a mutant however the run ends. Proven
+// with a real subprocess killed mid-run. Mutation killed: mutating the checkout (the default
+// isolation removed) — the checkout's bytes then differ after the kill.
+test('a SIGKILL mid-run cannot leave the checkout mutated, because the mutations are not in the checkout', async () => {
+  const dir = scratchDir('kr-kill-')
+  git(dir, 'init', '-q')
+  mkdirSync(join(dir, 'crew'), { recursive: true })
+  const target = join(dir, 'crew', 'drive.mjs')
+  const original = ['export const a = 1', 'export function f(x) { return x + 1 }', 'export const b = a + 2', 'export const c = b > 1', ''].join('\n')
+  writeFileSync(target, original)
+  // A suite slow enough that the kill lands while a mutant is in the worktree.
+  // Fast for the pristine census, then slow for the first MUTATED run — so the kill lands
+  // while a mutant exists, wherever the tool put it.
+  writeFileSync(join(dir, 'slow.test.mjs'), [
+    "import { test } from 'node:test'",
+    "import { readFileSync } from 'node:fs'",
+    `const pristine = ${JSON.stringify(original)}`,
+    "test('slow when mutated', async () => {",
+    "  if (readFileSync('crew/drive.mjs', 'utf8') !== pristine) await new Promise((resolve) => setTimeout(resolve, 60000))",
+    '})',
+    '',
+  ].join('\n'))
+  git(dir, 'add', '-A'); git(dir, 'commit', '-q', '-m', 'base')
+  const child = spawn(process.execPath, [join(ROOT, 'scripts/factory/kill-redundancy.mjs'), '--mutants', '2', '--seed', '1', '--suites', 'slow.test.mjs', '--timeout-ms', '600000', '--md', join(dir, 'k.md'), '--checkout', dir], { stdio: ['ignore', 'pipe', 'pipe'] })
+  let say = ''
+  for (const stream of [child.stdout, child.stderr]) stream.on('data', (chunk) => { say += chunk })
+  // Wait until a mutant exists ANYWHERE — the disposable worktree, or (if the tool were to
+  // mutate in place) the checkout itself — then kill the way nothing can catch. The
+  // condition holds in both worlds, so the assertion below is what separates them.
+  const mutantAt = (root) => { try { return readFileSync(join(root, 'crew', 'drive.mjs'), 'utf8') !== original } catch { return false } }
+  const roots = () => gitResult(dir, 'worktree', 'list').stdout.split('\n').map((line) => line.split(' ')[0]).filter(Boolean)
+  const mutantExists = () => roots().some(mutantAt)
+  const deadline = Date.now() + 90000
+  while (Date.now() < deadline && !mutantExists() && child.exitCode === null) await new Promise((resolve) => setTimeout(resolve, 100))
+  assert.equal(child.exitCode, null, `the run finished before the kill: ${say.slice(0, 300)}`)
+  assert.ok(mutantExists(), `no mutant appeared in ${roots().join(', ')}`)
+  child.kill('SIGKILL')
+  await new Promise((resolve) => child.on('exit', resolve))
+  assert.equal(readFileSync(target, 'utf8'), original, 'the checkout still carries its own bytes')
+  assert.equal(gitResult(dir, 'status', '--porcelain').stdout.trim(), '', 'and nothing else moved in it')
+  gitResult(dir, 'worktree', 'prune')
+})
+
+// Without a worktree — a checkout that is not a git repository — the tool REFUSES rather than
+// mutating something a crash could leave broken, and says how to accept that risk.
+// Mutation killed: falling back to the checkout when the worktree cannot be made.
+test('a checkout it cannot isolate is refused, naming --in-place', () => {
+  const dir = scratchDir('kr-norepo-')
+  mkdirSync(join(dir, 'crew'), { recursive: true })
+  writeFileSync(join(dir, 'crew', 'drive.mjs'), 'export const a = 1\n')
+  let stderr = ''
+  assert.equal(main(['--mutants', '1', '--suites', 's', '--md', join(dir, 'k.md'), '--checkout', dir], { stderr: { write: (text) => { stderr += text } }, spawnSync: () => ({ status: 0, stdout: '', stderr: '' }) }), 3)
+  assert.match(stderr, /refusing to mutate the checkout in place/)
+  assert.match(stderr, /--in-place/)
+  assert.equal(existsSync(join(dir, 'k.md')), false, 'nothing was written')
 })

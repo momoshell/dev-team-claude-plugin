@@ -9793,6 +9793,15 @@ function runTask(ctx, io, crash) {
   // MUTATION B5a: bypass hardeningStageCleared here and the proven/refuted/unmeasured
   // partition stops deciding the debt — every harden verdict must funnel through one predicate.
   const hardenCleared = (refusals, rows) => hardeningStageCleared(refusals, rows)   // ANCHOR B5a
+  // RV2-1 of this lane's review: a blind spot is what the LATEST adjudication says, and an
+  // `ungateable` mark — from an approved appeal or from an ordinary review exemption — is a
+  // terminal adjudication. Without this, a finding recorded unmeasured in an earlier round
+  // kept its blind spot in the envelope and the PR after the reviewer had settled it.
+  // MUTATION B5f: drop the argument and a settled finding keeps reporting unmeasured.
+  const settleBlindSpots = (findings) => {   // ANCHOR B5f
+    const settled = new Set(findings)
+    hardenBlindSpots = hardenBlindSpots.filter((entry) => !settled.has(entry.finding))
+  }
   // MUTATION B8: route the proof through runGate and each of its invocations becomes
   // a gate_results row, moving the gate-review-gap numerator (#839 (i).
   const hardenRun = (cmd) => io.run(cmd)                                             // ANCHOR B8
@@ -10228,6 +10237,7 @@ function runTask(ctx, io, crash) {
         // MUTATION C6: drop the status guard and a NON-done appeal envelope waives the debt.
         const marks = appeal?.status === 'done' ? hardeningAppealMarks(appeal.details, hardenOwed.owed) : []   // ANCHOR HA5
         for (const { id, why } of marks) logHardened(round, { finding: id, test: null, name: null, outcome: 'ungateable', why })
+        settleBlindSpots(marks.map(({ id }) => id))
         excused = new Set(marks.map(({ id }) => id))
         hardenOwed = { owed: hardenOwed.owed.filter(({ id }) => !excused.has(id)), exempt: [...hardenOwed.exempt, ...marks] }
         stageComplete()
@@ -10427,6 +10437,7 @@ function runTask(ctx, io, crash) {
           for (const { id, why } of debt.exempt) {
             logHardened(roundNo, { finding: id, test: null, name: null, outcome: 'ungateable', why })
           }
+          settleBlindSpots(debt.exempt.map(({ id }) => id))
         }
       }
       // #800 revision 2 — journalled HERE, not in the pass branch below, because the

@@ -6633,3 +6633,22 @@ test('a hardening bounce names the findings that declared no guard at all', () =
   assert.match(lines, /RV1-2: survived/)
   assert.match(lines, /Measured nothing — not blocking:[\s\S]*RV1-3: witness-missing/)
 })
+
+// RV2-1 of this lane review: a blind spot is what the LATEST adjudication says. A finding
+// recorded unmeasured in one round and settled ungateable in the next — by an approved
+// appeal, or by an ordinary review exemption — kept its stale blind spot in the done
+// envelope and the PR body, reporting unmeasured for something already adjudicated.
+// Mutation killed: dropping either settleBlindSpots call, or the filter inside it.
+test('an ungateable mark clears the blind spot it settles, from an appeal or an ordinary review', () => {
+  for (const [why, options] of [
+    ['appeal', { hardened: [{ ...B376_APPEAL_REQUEST }], reviewer2: b376Review('changes-needed', [B376_APPEAL_MARK]) }],
+    ['ordinary review', { hardened: [{ ...B376_HARDENED }], reviewer2: b376Review('changes-needed', [B376_APPEAL_MARK]), proofOutputs: [B376_GREEN, { ok: true, output: 'ok 1 - some other test\n# pass 1\n# fail 0' }, B376_GREEN] }],
+  ]) {
+    const io = b376ProofIo({ files: { ...B376_FILES }, ...options })
+    const result = driveTask({ ...CTX, limits: { build_rounds: 2, review_rounds: 3 } }, io)
+    if (result.status !== 'done') continue   // the other paths of this fixture are covered above
+    assert.ok(!result.details.hardening?.unmeasured?.length, `${why}: a settled finding leaves no blind spot: ${JSON.stringify(result.details.hardening)}`)
+    const body = composePrBody(result.details, { task: 't1' })
+    assert.equal(/hardening_unmeasured|unmeasured — /.test(String(body)), false, `${why}: the PR body carries no settled blind spot`)
+  }
+})

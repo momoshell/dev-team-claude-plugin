@@ -85,6 +85,7 @@ test('no review-skill document calls the shipped panel parked', () => {
     'skills/pr-review/SKILL.md',
     'skills/pr-review/references/posture.md',
     'skills/pr-review/references/evidence.md',
+    'skills/pr-review/references/falsification.md',
     '.agents/skills/review-procedure/SKILL.md',
   ]
   const needles = ['parked', 'has never', 'pretending it runs', 'broken checkout']

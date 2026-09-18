@@ -248,7 +248,7 @@ export function parseChangedFiles(output) {
   return textOf(output).split('\0').filter((path) => path.length > 0)
 }
 
-function buildBrief({ title, body, diff, skill, rubric, base, head, panel }) {
+function buildBrief({ title, body, diff, skill, rubric, falsification, base, head, panel }) {
   return [
     '# Pull-request review',
     '',
@@ -273,6 +273,9 @@ function buildBrief({ title, body, diff, skill, rubric, base, head, panel }) {
     '',
     '## Review rubric',
     rubric,
+    '',
+    '## Falsification and adjudication',
+    falsification,
     '',
   ].join('\n')
 }
@@ -691,10 +694,12 @@ export async function runPrReview(input = {}, maybeDeps = {}) {
     const briefPath = join(root, 'brief.md')
     let skill
     let rubric
+    let falsification
     try {
       skill = await d.readFile(join(d.checkout, 'skills/pr-review/SKILL.md'), 'utf8')
       rubric = await d.readFile(join(d.checkout, 'skills/pr-review/references/rubric.md'), 'utf8')
-      await d.writeFile(briefPath, buildBrief({ title: metadata.title, body: metadata.body, diff, skill: textOf(skill), rubric: textOf(rubric), base, head: metadata.head_sha, panel: config.panel === true }), 'utf8')
+      falsification = await d.readFile(join(d.checkout, 'skills/pr-review/references/falsification.md'), 'utf8')
+      await d.writeFile(briefPath, buildBrief({ title: metadata.title, body: metadata.body, diff, skill: textOf(skill), rubric: textOf(rubric), falsification: textOf(falsification), base, head: metadata.head_sha, panel: config.panel === true }), 'utf8')
     } catch (error) {
       refuse(PR_REVIEW_REFUSALS.REVIEW_INPUT_UNREADABLE, `cannot build the review brief: ${errorText(error)}`)
     }

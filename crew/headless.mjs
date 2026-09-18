@@ -998,6 +998,52 @@ const SHELL_TOKEN_RE = /(?:[^\s"']+|"[^"]*"|'[^']*')+/g
 function shellTokens(text) {
   return [...String(text ?? '').matchAll(SHELL_TOKEN_RE)].map((match) => match[0].replace(/["']/g, ''))
 }
+// SHELL-WORD decoding for the fence path (issue 1406). Mirrors drive.mjs#shellWords
+// (crew/drive.mjs:11804-11827) — headless.mjs must not import the driver, so the
+// scanner is mirrored rather than imported, exactly as fenceCovers mirrors
+// scopeMatcher below. A trailing `\` is accumulated LITERALLY, matching
+// drive.mjs:11821: the decoded word then fails concreteTestFile (it does not end
+// in .test.mjs) so testTargets still returns null, while isNodeTestInvocation stays
+// TRUE and the segment classifies `suite` and refuses. The null-returning alternative
+// looks fail-closed but is fail-open because `unrecognised` is not enforced —
+// crew/headless.mjs:2479 and crew/headless-rpc.mjs:1515 end the dispatch only on `refuse`.
+// Returns null on unterminated-quote input — an unterminated quote is not a command
+// this policy can vouch for.
+// `$` and backticks are NOT expanded: the decoded word keeps them literally,
+// which fails closed through concreteTestFile (no fence entry can name them).
+const DQUOTE_ESCAPABLE = '"\\$`'
+function shellWords(text) {
+  const source = String(text ?? '')
+  const words = []
+  let current = ''
+  let quote = null
+  let started = false
+  const pushWord = () => { if (started) { words.push(current); current = ''; started = false } }
+  for (let index = 0; index < source.length; index += 1) {
+    const ch = source[index]
+    if (quote === "'") {
+      if (ch === "'") quote = null
+      else current += ch
+      continue
+    }
+    if (quote === '"') {
+      if (ch === '"') { quote = null; continue }
+      if (ch === '\\' && index + 1 < source.length && DQUOTE_ESCAPABLE.includes(source[index + 1])) { current += source[index + 1]; index += 1; continue }
+      current += ch
+      continue
+    }
+    if (ch === "'" || ch === '"') { quote = ch; started = true; continue }
+    if (ch === '\\') {
+      if (index + 1 >= source.length) { current += ch; started = true; continue }
+      current += source[index + 1]; index += 1; started = true; continue
+    }
+    if (/\s/.test(ch)) { pushWord(); continue }
+    current += ch; started = true
+  }
+  if (quote !== null) return null
+  pushWord()
+  return words
+}
 // The ONLY options a scoped run may carry, by NAME and by MEANING. Everything
 // else — every option Node adds after this list was written, every separated
 // value form, every bare flag we cannot name — makes the invocation a SUITE run.
@@ -1097,8 +1143,8 @@ function isNodeTestInvocation(text) {
   // `'node' --test` is a real invocation. The `--test` FLAG must come from the
   // executable text, because `node -p "…--test…"` is a read whose quoted script
   // may not supply it — b443's lead died exactly there.
-  const named = dropPrefixes(shellTokens(text))
-  const running = dropPrefixes(shellTokens(executableText(text)))
+  const named = dropPrefixes(shellWords(text) ?? [])
+  const running = dropPrefixes(shellWords(executableText(text)) ?? [])
   // No slice(1) here: when the command word itself was QUOTED it has been blanked
   // out of `running`, so position 0 of that list is already an argument.
   return named.length > 0 && nodeExecutable(named[0]) && running.includes('--test')
@@ -1109,8 +1155,8 @@ function isNodeTestInvocation(text) {
 // after `--test`: a preload sits BEFORE it (`node --require=./x.mjs --test a.test.mjs`)
 // and a non-option prefix operand is a script Node runs instead of the tests.
 export function testTargets(command, taskDir = null) {
-  const tokens = shellTokens(command)
-  if (tokens.length === 0) return null
+  const tokens = shellWords(command)
+  if (tokens === null || tokens.length === 0) return null
   const targets = []
   const rest = tokens.slice(1)
   for (let index = 0; index < rest.length; index += 1) {

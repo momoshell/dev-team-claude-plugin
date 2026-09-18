@@ -6326,6 +6326,47 @@ test('acceptance ids are check labels at the head of an item, from the Acceptanc
   assert.deepEqual(acceptanceIds(['# T', '', '## Acceptance', '```', '(F9) an example', '```', '(G1) a real item'].join('\n')), ['G1'])
 })
 
+// Pass 2 of the #1407 review. A heading is structure only OUTSIDE a fence, and a fence
+// closes only on its own character at its own length or longer.
+// Mutation killed: finding the section by a whole-text search; closing a fence on any
+// marker; refusing indented, plus-marked or star-marked bullets.
+test('acceptance ids come from the real section, not a fenced example of one, and from every bullet form', () => {
+  const F3 = '`'.repeat(3)
+  const F4 = '`'.repeat(4)
+  assert.deepEqual(acceptanceIds(['# T', F3, '## Acceptance', '(F9) example', F3, '', '## Acceptance', '(A1) real'].join('\n')), ['A1'])
+  assert.deepEqual(acceptanceIds(['# T', '## Acceptance', F4, F3, '(F9) example', F3, '## Other', F4, '(A1) real'].join('\n')), ['A1'])
+  assert.deepEqual(acceptanceIds(['# T', '## Acceptance', '  - (A1) one', '+ (B1) two', '* (C1) three', '   (D1) four'].join('\n')), ['A1', 'B1', 'C1', 'D1'])
+  // Four spaces of indent is an indented code block, not an item.
+  assert.deepEqual(acceptanceIds(['# T', '## Acceptance', '    (X1) code', '(A1) real'].join('\n')), ['A1'])
+})
+
+for (const [form, line] of [['an indented dash bullet', '  - (A1) the asked-for check'], ['a plus bullet', '+ (A1) the asked-for check']]) {
+  test(`an acceptance id written as ${form} is still owed a check by the driver`, () => {
+    const io = fakeIo({
+      files: { [CTX.briefFile]: ['# Task', '', '## Acceptance', line].join('\n') },
+      envelopes: { 'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations: [{ ...CHECK_MUTATION, check: 'other' }] } }) },
+      runs: { 'gate-cmd': { ok: true, output: '' }, 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    })
+    const result = driveTask(CTX, io)
+    assert.equal(result.status, 'escalation')
+    assert.match(result.details.escalation.why, /answer 0 of 1 acceptance ids; A1 has no check/)
+  })
+}
+
+// Mutation killed: dropping the waived clause from the escalation, or the field from the row.
+test('an acceptance id answered only by an exemption escalates, and the refusal and the row both name it waived', () => {
+  const io = fakeIo({
+    files: { [CTX.briefFile]: ['# Task', '', '## Acceptance', '(A1) proven; (B1) only exempted'].join('\n') },
+    envelopes: { 'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations: [{ ...CHECK_MUTATION, check: 'A1' }, { check: 'B1', exempt: 'not applicable here' }] } }) },
+    runs: { 'gate-cmd': { ok: true, output: '' }, 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+  })
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'escalation')
+  assert.match(result.details.escalation.why, /answer 1 of 2 acceptance ids; B1 has no check; B1 declared only an exemption/)
+  const row = io.calls.logs.find((entry) => entry.event === 'acceptance-coverage')
+  assert.deepEqual([row.covered, row.uncovered, row.waived], [['A1'], ['B1'], ['B1']])
+})
+
 test('acceptance coverage waives an exempt entry, never covers it, and names why it is unmeasured', () => {
   const brief = '# T\n\n## Acceptance\n(A1) proven; (B1) exempted\n'
   const coverage = acceptanceCoverage(brief, [{ ...CHECK_MUTATION, check: 'A1' }, { check: 'B1', exempt: 'not applicable' }, { ...CHECK_MUTATION, check: 'extra' }])

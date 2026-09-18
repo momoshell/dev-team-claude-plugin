@@ -2327,36 +2327,43 @@ function checkLabelMisdelimited(output, check) {
 // lane would prove exactly what it chose to. Kiro's specs thread a requirement id from the
 // requirement into the task into the test (`_Requirements: 5.3_`); this is that thread for
 // the one carrier this repo already has.
-const ACCEPTANCE_SECTION = /^##\s+Acceptance\s*$/m
+const ACCEPTANCE_HEADING = /^##\s+Acceptance\s*$/
 // An acceptance id is a CHECK LABEL in parentheses at the head of its item: the same
 // grammar `validateMutations` accepts (CHECK_LABEL), so `(RV1-2)` and `(A1)` are both ids
 // and neither can be spelled by a mention. "at the head of its item" is what keeps prose
-// out: a line, or a list bullet, or the first thing after a `;` that ends the last item —
-// which is how these are written. A mention mid-sentence ("see (A1)") is not an item.
-const ACCEPTANCE_ITEM = /(?:^|^[-*]\s+|[;.]\s+)\((?<id>[A-Za-z0-9][A-Za-z0-9._-]*)\)/gm
+// out: a line or a CommonMark bullet (0-3 spaces of indent, then `-`, `+` or `*`), or the
+// first thing after the `;` or `.` that ended the last item. A mention mid-sentence
+// ("see (A1)") is not an item.
+const ACCEPTANCE_ITEM = /(?:^ {0,3}(?:[-+*]\s+)?|[;.]\s+)\((?<id>[A-Za-z0-9][A-Za-z0-9._-]*)\)/gm
+// A fence opens with 3+ backticks or tildes and closes only with the SAME character at the
+// same length or longer, so a four-backtick fence may carry triple backticks as text.
+const FENCE = /^ {0,3}(?<mark>`{3,}|~{3,})/
 export function acceptanceIds(briefText) {
-  const text = String(briefText ?? '')
-  const start = text.search(ACCEPTANCE_SECTION)
-  if (start < 0) return null
-  // The section ends at the next heading of level 1 or 2 — a deeper heading is part of it,
-  // and a heading inside a fenced block is text, not structure.
-  const lines = text.slice(start).split('\n')
+  // One pass from the top of the document, because a heading is structure only OUTSIDE a
+  // fence: an example brief quoted inside one carries its own `## Acceptance`, and reading
+  // that as the real section reported the example's ids as covered (#1407 review, pass 2).
   const body = []
-  let fenced = false
-  for (let index = 1; index < lines.length; index += 1) {
-    const line = lines[index]
-    if (/^\s*(?:```|~~~)/.test(line)) { fenced = !fenced; continue }
-    if (fenced) continue   // a fenced block is an example, not a list of acceptance items
-    if (/^#{1,2}\s+/.test(line)) break
-    body.push(line)
+  let fence = null
+  let inside = false
+  for (const line of String(briefText ?? '').split('\n')) {
+    const mark = FENCE.exec(line)?.groups.mark
+    if (fence) {
+      if (mark && mark[0] === fence[0] && mark.length >= fence.length && line.trim() === mark) fence = null
+      continue   // fenced text is an example, never structure and never an item
+    }
+    if (mark) { fence = mark; continue }
+    if (/^#{1,2}\s+/.test(line)) {
+      if (inside) break   // the section ends at the next heading of level 1 or 2
+      inside = ACCEPTANCE_HEADING.test(line)
+      continue
+    }
+    if (inside) body.push(line)
   }
+  if (!inside && body.length === 0) return null
   const ids = [...body.join('\n').matchAll(ACCEPTANCE_ITEM)].map((match) => match.groups.id)
   return ids.length > 0 ? [...new Set(ids)] : null
 }
 
-// Which acceptance ids the plan's gate checks answer. UNMEASURED — null, never an empty
-// set — when the brief states no ids or could not be read: an operator who writes no ids
-// is not owed a refusal, and a brief nobody could read proves nothing either way.
 // Why coverage could not be measured — closed, so a reason nobody named cannot appear.
 export const ACCEPTANCE_UNMEASURED = Object.freeze({ UNREADABLE: 'brief-unreadable', NO_IDS: 'no-acceptance-ids' })
 

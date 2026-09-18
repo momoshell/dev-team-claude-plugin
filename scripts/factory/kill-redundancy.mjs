@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { performance } from 'node:perf_hooks'
-import { basename, dirname, join, relative } from 'node:path'
+import { dirname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { generateDiffCandidates, applyDiffCandidate } from './prove-mutations.mjs'
 
@@ -18,9 +18,6 @@ export const DRIVER_SUITES = Object.freeze([
 export const SAMPLE_UNMEASURED_REASON = 'sample-killed-nothing'
 // The signals that end this process while a mutant is in the target file.
 export const TERMINATION_SIGNALS = Object.freeze(['SIGINT', 'SIGTERM', 'SIGHUP'])
-// Every disposable worktree this tool makes carries this prefix, which is what makes one
-// safe to reclaim: nothing else in the repository is named for it.
-export const ISOLATION_PREFIX = 'kill-redundancy-'
 // Every reason an unmeasured mutant can carry, named once; every emit site reads a name
 // from here, so a reason outside the closed list cannot be spelled.
 export const REASON = Object.freeze({
@@ -426,10 +423,7 @@ export function buildMarkdown(analysis = {}) {
     `Checkout HEAD: ${provenance.headSha ?? 'unmeasured (not a git checkout or git unavailable)'}`,
     `Tool sha256: ${provenance.toolSha256 ?? 'unmeasured'}`,
     `Node: ${provenance.node ?? 'unmeasured'}`,
-    `Mutations ran in: ${provenance.isolated === false ? `the checkout itself (--in-place)` : 'a disposable git worktree at that HEAD, removed at the end; a run killed uncatchably leaves one behind, and the next run removes it before starting'}`,
-    Array.isArray(provenance.reclaim_skipped) && Number.isInteger(provenance.reclaimed)
-      ? `Abandoned worktrees reclaimed at start: ${provenance.reclaimed} verified gone; ${provenance.reclaim_skipped.length} left${provenance.reclaim_skipped.length > 0 ? ` (${provenance.reclaim_skipped.join(', ')})` : ''} — a recycled pid reads as live, so such a worktree is left, never taken`
-      : `Abandoned worktrees reclaimed at start: unmeasured (${provenance.reclaim_unmeasured_reason ?? 'not recorded'})`,
+    `Mutations ran in: ${provenance.isolated === false ? `the checkout itself (--in-place)` : 'a disposable git worktree at that HEAD, removed at the end. A run killed uncatchably (SIGKILL) leaves that worktree behind and NOTHING here reclaims it: remove it by hand with `git worktree remove --force <path>` (listed by `git worktree list`)'}`,
     '',
     '## Redundancy candidates (sampled kill-set subsumption, not proof of redundancy)',
     'A candidate is a test whose sampled kill-set is a strict subset of another test\'s.',
@@ -471,94 +465,26 @@ function jsonAnalysis(analysis) {
 // The mutations run in a DISPOSABLE git worktree at the checkout's HEAD, never in the
 // checkout itself: no signal, crash or SIGKILL can leave a mutant in code someone is
 // working in (Sol, #1401 passes 5 and 6 — a real SIGTERM did exactly that). The worktree
-// is removed at the end; a leftover lives in the system temp directory and `git worktree
-// prune` reclaims it. `--in-place` opts out, for a tree whose uncommitted state IS the
+// is removed at the end. A SIGKILLed run leaves its worktree (directory and registry row)
+// in the system temp directory, and this tool deliberately does NOT reclaim it: deleting
+// by inference is where every hazard was (a concurrent run, a lock taken mid-removal), for
+// a leftover that harms nothing and one command removes. The report says so. `--in-place` opts out, for a tree whose uncommitted state IS the
 // subject; it says so in the report.
-// A run killed uncatchably leaves BOTH its registry row and its directory, and prune cannot
-// reclaim a worktree whose directory still exists (Sol, #1401 pass 8). But a worktree that
-// carries our prefix is not thereby ABANDONED: a concurrent run owns one too (pass 9). So
-// every worktree we make has a sibling owner record naming the pid that made it, and one is
-// taken only when that pid is provably gone and git has not locked it. Reclamation is
-// counted only after the directory AND the registry row are verified absent; everything
-// else is left and reported with a closed reason.
-// Blind spot, stated: a recycled pid reads as live, so that worktree is left — never taken.
-export const RECLAIM_SKIPPED = Object.freeze({ LOCKED: 'locked', OWNER_UNKNOWN: 'owner-unknown', OWNER_LIVE: 'owner-live', UNVERIFIED: 'removal-unverified' })
-export const RECLAIM_UNMEASURED = 'worktree-list-unreadable'
-export const ownerRecordPath = (root) => `${root}.owner.json`
-
-function pidAlive(pid) {
-  try { process.kill(pid, 0); return true } catch (error) { return error?.code === 'EPERM' }
-}
-
-function registeredWorktrees(checkout, spawn) {
-  let listed
-  try { listed = spawn('git', ['-C', checkout, 'worktree', 'list', '--porcelain'], { encoding: 'utf8' }) } catch { return null }
-  if (!listed || listed.status !== 0 || typeof listed.stdout !== 'string') return null
-  const records = []
-  for (const line of listed.stdout.split(String.fromCharCode(10))) {
-    const head = /^worktree (.+)$/.exec(line)
-    if (head) records.push({ path: head[1], locked: false })
-    else if (/^locked\b/.test(line) && records.length > 0) records.at(-1).locked = true
-  }
-  return records
-}
-
-export function reclaimAbandoned(checkout, deps = {}) {
-  const spawn = deps.spawnSync || spawnSync
-  const exists = deps.existsSync || existsSync
-  const alive = deps.pidAlive || pidAlive
-  const before = registeredWorktrees(checkout, spawn)
-  // An unreadable census measured nothing: the counts are null with a reason, never zero.
-  if (before === null) return { removed: null, skipped: null, reason: RECLAIM_UNMEASURED }
-  const attempted = []
-  const skipped = []
-  for (const { path, locked } of before) {
-    if (!basename(path).startsWith(ISOLATION_PREFIX)) continue
-    if (locked) { skipped.push({ path, reason: RECLAIM_SKIPPED.LOCKED }); continue }
-    let owner = null
-    try { owner = JSON.parse((deps.readFileSync || readFileSync)(ownerRecordPath(path), 'utf8')) } catch { owner = null }
-    if (!Number.isInteger(owner?.pid)) { skipped.push({ path, reason: RECLAIM_SKIPPED.OWNER_UNKNOWN }); continue }
-    if (alive(owner.pid)) { skipped.push({ path, reason: RECLAIM_SKIPPED.OWNER_LIVE }); continue }
-    // Git is the only thing that deletes here. The lock check above can go stale between
-    // the listing and this call; git then REFUSES, and a raw delete after that refusal would
-    // take the directory of a worktree somebody just locked (pass 10). A refusal is left
-    // exactly as it is and reported unverified.
-    try { spawn('git', ['-C', checkout, 'worktree', 'remove', '--force', path], { encoding: 'utf8' }) } catch { /* verified below */ }
-    attempted.push(path)
-  }
-  try { spawn('git', ['-C', checkout, 'worktree', 'prune'], { encoding: 'utf8' }) } catch { /* verified below */ }
-  const after = registeredWorktrees(checkout, spawn)
-  const stillListed = new Set((after ?? before).map((record) => record.path))
-  const removed = []
-  for (const path of attempted) {
-    if (after !== null && !stillListed.has(path) && !exists(path)) {
-      removed.push(path)
-      try { (deps.rmSync || rmSync)(ownerRecordPath(path), { force: true }) } catch { /* an orphan record names no worktree */ }
-    } else skipped.push({ path, reason: RECLAIM_SKIPPED.UNVERIFIED })
-  }
-  return { removed, skipped, reason: null }
-}
-
 function isolationRoot(checkout, target, options, deps) {
   if (options.inPlace) return { root: checkout, isolated: false, reason: 'in-place requested', cleanup: () => {} }
   const spawn = deps.spawnSync || spawnSync
   const mkdtemp = deps.mkdtempSync || mkdtempSync
   let root = null
-  // Our own abandoned worktrees first: a predecessor that was killed cannot have cleaned up.
-  const reclaimed = reclaimAbandoned(checkout, deps)
   try {
-    root = mkdtemp(join(deps.tmpRoot || tmpdir(), ISOLATION_PREFIX))
+    root = mkdtemp(join(deps.tmpRoot || tmpdir(), 'kill-redundancy-'))
     const added = spawn('git', ['-C', checkout, 'worktree', 'add', '--detach', '--quiet', root, 'HEAD'], { encoding: 'utf8' })
     if (!added || added.status !== 0) throw new Error(added?.stderr?.trim() || 'git worktree add failed')
     if (!(deps.existsSync || existsSync)(join(root, target))) throw new Error(`the worktree does not carry ${target}`)
-    // The owner record is what lets a LATER run tell this worktree from an abandoned one.
-    ;(deps.writeFileSync || writeFileSync)(ownerRecordPath(root), `${JSON.stringify({ pid: process.pid, started: new Date().toISOString() })}\n`)
   } catch (error) {
     // Delete, then prune: prune drops exactly the registry rows whose directories are gone,
     // which is what a refusal leaves behind. (`worktree remove` here was belt-and-braces
     // that no test could distinguish, so it is not here.)
     if (root) {
-      try { (deps.rmSync || rmSync)(ownerRecordPath(root), { force: true }) } catch { /* nothing to reclaim */ }
       try { (deps.rmSync || rmSync)(root, { recursive: true, force: true }) } catch { /* nothing to reclaim */ }
       try { spawn('git', ['-C', checkout, 'worktree', 'prune'], { encoding: 'utf8' }) } catch { /* reclaimed by the next run */ }
     }
@@ -568,11 +494,7 @@ function isolationRoot(checkout, target, options, deps) {
     root,
     isolated: true,
     reason: null,
-    reclaimed: reclaimed.removed,
-    reclaim_skipped: reclaimed.skipped,
-    reclaim_reason: reclaimed.reason,
     cleanup: () => {
-      try { (deps.rmSync || rmSync)(ownerRecordPath(root), { force: true }) } catch { /* an orphan record names no worktree */ }
       try { spawn('git', ['-C', checkout, 'worktree', 'remove', '--force', root], { encoding: 'utf8' }) } catch { /* the prune below still reclaims it */ }
       try { (deps.rmSync || rmSync)(root, { recursive: true, force: true }) } catch { /* left for git worktree prune */ }
       try { spawn('git', ['-C', checkout, 'worktree', 'prune'], { encoding: 'utf8' }) } catch { /* the next run reclaims it */ }
@@ -594,8 +516,8 @@ export function main(argv = process.argv.slice(2), deps = {}) {
     return 3
   }
   // Every path from here — a read that throws, an output that cannot be written, a refusal —
-  // gives the worktree back. Only an uncatchable signal can skip this, and the prune at the
-  // head of the next run is what reclaims that one.
+  // gives the worktree back. Only an uncatchable signal can skip this; that leftover is the
+  // operator's to remove, and the report names the command.
   let mdPath = null
   try {
     const runRoot = isolation.root
@@ -678,7 +600,7 @@ export function main(argv = process.argv.slice(2), deps = {}) {
     analysis.sampledMutants = generated.candidates.length
     analysis.sampling = generated.sampling
     analysis.testLabels = testLabels
-    analysis.provenance = { ...provenance(checkout, options, spawn), isolated: isolation.isolated, isolation_reason: isolation.reason, reclaimed: Array.isArray(isolation.reclaimed) ? isolation.reclaimed.length : null, reclaim_skipped: Array.isArray(isolation.reclaim_skipped) ? isolation.reclaim_skipped.map(({ reason }) => reason) : null, reclaim_unmeasured_reason: isolation.reclaim_reason ?? null }
+    analysis.provenance = { ...provenance(checkout, options, spawn), isolated: isolation.isolated, isolation_reason: isolation.reason }
     analysis.wallClockSeconds = Number(((performance.now() - started) / 1000).toFixed(3))
     const markdown = buildMarkdown(analysis)
     const outputPath = (path) => path.startsWith('/') ? path : join(checkout, path)

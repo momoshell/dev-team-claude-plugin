@@ -1,8 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { basename, dirname, join } from 'node:path'
+import { join } from 'node:path'
 import { spawn, spawnSync } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { ROOT, scratchDir, git, gitResult } from './helpers.mjs'
@@ -12,12 +11,7 @@ import {
   classifyMutantOutcome,
   formatRate,
   main,
-  ISOLATION_PREFIX,
-  RECLAIM_SKIPPED,
-  RECLAIM_UNMEASURED,
-  ownerRecordPath,
   MUTANT_UNMEASURED_REASONS,
-  reclaimAbandoned,
   REASON,
   TERMINATION_SIGNALS,
   baselineCensus,
@@ -526,124 +520,32 @@ test('a refusal and a failed output both leave the source repository with no ext
   assert.equal((() => { try { return readdirSync(join(bare, '.git', 'worktrees')).length } catch { return 0 } })(), 0, 'and left no registry row')
 })
 
-// What a SIGKILLed run really leaves is BOTH the registry row and its directory, and
-// `git worktree prune` cannot reclaim a worktree whose directory still exists (pass 8). But
-// the prefix alone does not prove abandonment — a concurrent run owns one too (pass 9) — so
-// a worktree is taken only when its owner record names a pid that is gone and git has not
-// locked it, and it is COUNTED only once directory and row are verified absent.
-// Mutation killed: taking a live owner; taking a locked or ownerless one; counting an
-// unverified removal; matching a worktree that is not ours; skipping reclaim at run start.
-test('a run reclaims only worktrees whose owner is provably gone, and counts only verified removals', () => {
+// NOT a reclaim of a killed run: a SIGKILL leaves the directory too, and nothing here takes
+// that. This pins only what cleanup does on its way out — `git worktree prune`, which drops
+// registry rows whose directories are ALREADY gone (an operator deleted the temp dir by
+// hand). Mutation killed: dropping the prune from cleanup — the stale row then survives.
+test('cleanup prunes registry rows whose directories are already gone, and claims nothing more', () => {
   const dir = scratchDir('kr-stale-')
   git(dir, 'init', '-q')
   mkdirSync(join(dir, 'crew'), { recursive: true })
   writeFileSync(join(dir, 'crew', 'drive.mjs'), 'export const a = 1\nexport function f(x) { return x + 1 }\n')
   writeFileSync(join(dir, 's.test.mjs'), "import { test } from 'node:test'\ntest('x', () => {})\n")
   git(dir, 'add', '-A'); git(dir, 'commit', '-q', '-m', 'base')
-  const home = scratchDir('kr-abandoned-')
-  const make = (name, owner) => {
-    const path = join(home, name)
-    git(dir, 'worktree', 'add', '--detach', '--quiet', path, 'HEAD')
-    if (owner !== undefined) writeFileSync(ownerRecordPath(path), JSON.stringify(owner))
-    return path
-  }
-  const DEAD = 999_999_991, LIVE = 999_999_992
-  const dead = make(`${ISOLATION_PREFIX}dead`, { pid: DEAD })
-  const live = make(`${ISOLATION_PREFIX}live`, { pid: LIVE })
-  const locked = make(`${ISOLATION_PREFIX}locked`, { pid: DEAD })
-  git(dir, 'worktree', 'lock', locked)
-  const ownerless = make(`${ISOLATION_PREFIX}ownerless`)
-  const foreign = make('someone-elses', { pid: DEAD })
-  const reclaimed = reclaimAbandoned(dir, { pidAlive: (pid) => pid === LIVE })
-  assert.deepEqual(reclaimed.removed.map((path) => basename(path)), [`${ISOLATION_PREFIX}dead`])
-  assert.deepEqual(reclaimed.skipped.map(({ path, reason }) => [basename(path), reason]).sort(), [
-    [`${ISOLATION_PREFIX}live`, RECLAIM_SKIPPED.OWNER_LIVE],
-    [`${ISOLATION_PREFIX}locked`, RECLAIM_SKIPPED.LOCKED],
-    [`${ISOLATION_PREFIX}ownerless`, RECLAIM_SKIPPED.OWNER_UNKNOWN],
-  ])
-  assert.equal(existsSync(dead), false, 'the directory is gone, not only the row')
-  assert.equal(existsSync(ownerRecordPath(dead)), false, 'and its owner record with it')
-  for (const kept of [live, locked, ownerless, foreign]) assert.equal(existsSync(kept), true, `${basename(kept)} is untouched`)
-  assert.deepEqual(Object.values(RECLAIM_SKIPPED).sort(), ['locked', 'owner-live', 'owner-unknown', 'removal-unverified'])
-
-  // A removal git refuses is not counted: the row is still listed, so it is unverified.
-  const stuck = make(`${ISOLATION_PREFIX}stuck`, { pid: DEAD })
-  const refusing = reclaimAbandoned(dir, {
-    pidAlive: (pid) => pid === LIVE,
-    rmSync: () => { throw new Error('EPERM') },
-    spawnSync: (bin, args, options) => (args.includes('remove') || args.includes('prune') ? { status: 1, stdout: '', stderr: 'refused' } : spawnSync(bin, args, options)),
+  // A registered worktree whose directory an operator already deleted by hand.
+  const orphan = join(scratchDir('kr-orphan-'), 'gone')
+  git(dir, 'worktree', 'add', '--detach', '--quiet', orphan, 'HEAD')
+  rmSync(orphan, { recursive: true, force: true })
+  assert.equal(readdirSync(join(dir, '.git', 'worktrees')).length, 1, 'the stale row is there to begin with')
+  main(['--mutants', '1', '--seed', '1', '--suites', 's.test.mjs', '--md', join(dir, 'k.md'), '--checkout', dir], {
+    spawnSync: (bin, args, options) => (Array.isArray(args) && args.includes('--test')
+      ? { status: 0, stdout: 'TAP version 13\n# Subtest: x\nok 1 - x\n1..1\n# tests 1\n# pass 1\n# fail 0\n', stderr: '' }
+      : spawnSync(bin, args, options)),
   })
-  assert.deepEqual(refusing.removed, [])
-  assert.ok(refusing.skipped.some(({ path, reason }) => path.endsWith('stuck') && reason === RECLAIM_SKIPPED.UNVERIFIED))
-
-  // A whole run reclaims on the way in, reports both counts, and leaves no owner record of its own.
-  const ownRecords = () => readdirSync(tmpdir()).filter((name) => name.startsWith(ISOLATION_PREFIX) && name.endsWith('.owner.json') && JSON.parse(readFileSync(join(tmpdir(), name), 'utf8')).pid === process.pid)
-  let recordsWhileRunning = null
-  main(['--mutants', '1', '--seed', '1', '--suites', 's.test.mjs', '--md', join(dir, 'k.md'), '--out', join(dir, 'k.json'), '--checkout', dir], {
-    pidAlive: (pid) => pid === LIVE,
-    spawnSync: (bin, args, options) => {
-      if (!(Array.isArray(args) && args.includes('--test'))) return spawnSync(bin, args, options)
-      recordsWhileRunning ??= ownRecords().length
-      return { status: 0, stdout: 'TAP version 13\n# Subtest: x\nok 1 - x\n1..1\n# tests 1\n# pass 1\n# fail 0\n', stderr: '' }
-    },
-  })
-  assert.equal(recordsWhileRunning, 1, 'a running tool is named by exactly one owner record, which is what protects it from a concurrent run')
-  const provenance = JSON.parse(readFileSync(join(dir, 'k.json'), 'utf8')).provenance
-  assert.equal(provenance.reclaimed, 1, 'the stuck worktree, now removable, is reclaimed by the run')
-  assert.deepEqual([...provenance.reclaim_skipped].sort(), ['locked', 'owner-live', 'owner-unknown'])
-  assert.match(readFileSync(join(dir, 'k.md'), 'utf8'), /reclaimed at start: 1 verified gone; 3 left \(/)
-  assert.deepEqual(ownRecords(), [], 'a finished run leaves no owner record')
-})
-
-
-
-// Pass 10. (1) The lock check can go stale between the listing and the removal: git then
-// refuses, and a raw delete after that refusal took the directory of a worktree somebody
-// had just locked. Only git deletes now. (2) An unreadable census measured nothing, and
-// the report printed "0 left" for it — a zero nobody measured.
-// Mutation killed: a raw delete after git's refusal; an unreadable census reported as
-// empty lists.
-const reclaimRepo = () => {
-  const dir = scratchDir('kr-race-')
-  git(dir, 'init', '-q')
-  mkdirSync(join(dir, 'crew'), { recursive: true })
-  writeFileSync(join(dir, 'crew', 'drive.mjs'), 'export const a = 1\nexport function f(x) { return x + 1 }\n')
-  writeFileSync(join(dir, 's.test.mjs'), "import { test } from 'node:test'\ntest('x', () => {})\n")
-  git(dir, 'add', '-A'); git(dir, 'commit', '-q', '-m', 'base')
-  return dir
-}
-
-test('a worktree locked between the listing and the removal keeps its directory and is not counted', () => {
-  const dir = reclaimRepo()
-  const raced = join(scratchDir('kr-raced-'), `${ISOLATION_PREFIX}raced`)
-  git(dir, 'worktree', 'add', '--detach', '--quiet', raced, 'HEAD')
-  writeFileSync(ownerRecordPath(raced), JSON.stringify({ pid: 999_999_991 }))
-  const reclaimed = reclaimAbandoned(dir, {
-    pidAlive: () => false,
-    spawnSync: (bin, args, options) => {
-      // The race, made deterministic: somebody locks it after our listing, before our removal.
-      if (args.includes('remove')) git(dir, 'worktree', 'lock', raced)
-      return spawnSync(bin, args, options)
-    },
-  })
-  assert.deepEqual(reclaimed.removed, [])
-  assert.deepEqual(reclaimed.skipped.map(({ reason }) => reason), [RECLAIM_SKIPPED.UNVERIFIED])
-  assert.equal(existsSync(join(raced, 'crew', 'drive.mjs')), true, 'the locked worktree still has its files')
-  assert.match(gitResult(dir, 'worktree', 'list', '--porcelain').stdout, /raced\n[\s\S]*?locked/)
-})
-
-test('an unreadable worktree census is unmeasured in the result, the provenance and the report, never zero', () => {
-  const dir = reclaimRepo()
-  const failingList = (bin, args, options) => {
-    if (Array.isArray(args) && args.includes('list')) return { status: 128, stdout: '', stderr: 'fatal: unreadable' }
-    if (Array.isArray(args) && args.includes('--test')) return { status: 0, stdout: 'TAP version 13\n# Subtest: x\nok 1 - x\n1..1\n# tests 1\n# pass 1\n# fail 0\n', stderr: '' }
-    return spawnSync(bin, args, options)
-  }
-  assert.deepEqual(reclaimAbandoned(dir, { spawnSync: failingList }), { removed: null, skipped: null, reason: RECLAIM_UNMEASURED })
-  main(['--mutants', '1', '--seed', '1', '--suites', 's.test.mjs', '--md', join(dir, 'k.md'), '--out', join(dir, 'k.json'), '--checkout', dir], { spawnSync: failingList })
-  const provenance = JSON.parse(readFileSync(join(dir, 'k.json'), 'utf8')).provenance
-  assert.deepEqual([provenance.reclaimed, provenance.reclaim_skipped, provenance.reclaim_unmeasured_reason], [null, null, RECLAIM_UNMEASURED])
+  assert.equal(gitResult(dir, 'worktree', 'list').stdout.split('\n').filter(Boolean).length, 1, 'only the checkout is left')
+  assert.equal((() => { try { return readdirSync(join(dir, '.git', 'worktrees')).length } catch { return 0 } })(), 0, 'and the stale row is gone')
+  // The report states the blind spot and the one command that clears it, and counts nothing.
   const report = readFileSync(join(dir, 'k.md'), 'utf8')
-  assert.match(report, /reclaimed at start: unmeasured \(worktree-list-unreadable\)/)
-  assert.doesNotMatch(report, /reclaimed at start: \d/)
+  assert.match(report, /killed uncatchably \(SIGKILL\) leaves that worktree behind and NOTHING here reclaims it/)
+  assert.match(report, /git worktree remove --force <path>/)
+  assert.doesNotMatch(report, /reclaimed at start/)
 })

@@ -13,7 +13,7 @@ import { spawn as cpSpawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 
 import { assignmentDelivery, assignmentPrompt } from './driver.mjs'
-import { shq, classifyRun, noEnvelopeDetail, readEnvelopeOrThrow, updateCrewJson, attributeExit, decodeExitStatus, stderrTail, classifyToolCall, TOOL_CLASSES, CENSUS_ABSENT_CAUSES, censusFileOperands, suitePolicyCounters, countSuiteDecision, suiteRunPolicy, rerunContext, treeFingerprint, RERUN_KINDS, SUITE_RUN_OWNERSHIP, suitePolicyRow, suiteRefusalRow, suiteRefusalEnvelope, turnCeilingBreached, turnCeilingEnvelope, turnCeilingDetail } from './headless.mjs'
+import { shq, classifyRun, noEnvelopeDetail, readEnvelopeOrThrow, updateCrewJson, attributeExit, decodeExitStatus, stderrTail, classifyToolCall, TOOL_CLASSES, CENSUS_ABSENT_CAUSES, censusFileOperands, suitePolicyCounters, countSuiteDecision, suiteRunPolicy, rerunContext, treeFingerprint, stableFingerprint, RERUN_KINDS, SUITE_RUN_OWNERSHIP, suitePolicyRow, suiteRefusalRow, suiteRefusalEnvelope, turnCeilingBreached, turnCeilingEnvelope, turnCeilingDetail } from './headless.mjs'
 import { reclaimStore, PHASES, VERDICTS, EVIDENCE_KINDS, LIVENESS } from './reclaim.mjs'
 import { readJsonTri } from './json-leaf.mjs'
 import { PI_BUILTIN_TOOLS, piActivatedTools, translateDeny } from './adapters/adapter-pi.mjs'
@@ -1110,7 +1110,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
     const turn = seat.turn
     const frames = fold(seat, readFrames(seat))
     if (seat.turn) seat.turn.policyRead = seat.lastRead !== false
-    adjudicateRpcFrames(seat.turn, frames)
+    adjudicateRpcFrames(seat.turn, frames, seat)
     if (frames.length > 0) acknowledgePrompt(seat, turn)
     return frames
   }
@@ -1495,12 +1495,15 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
     if (!suiteCounters.has(role)) suiteCounters.set(role, suitePolicyCounters())
     return suiteCounters.get(role)
   }
-  function adjudicateRpcFrames(turn, frames) {
+  function adjudicateRpcFrames(turn, frames, seat = null) {
     if (!turn || !turn.policy) return null
     const counters = suiteCountersFor(turn.role)
     // A fingerprint taken now describes the tree AFTER every frame this read carries, so
-    // it is attached only to the tool call the read ENDED on. Mirrors crew/headless.mjs.
-    const lastStart = frames.findLast?.((frame) => frame?.type === 'tool_execution_start') ?? [...frames].reverse().find((frame) => frame?.type === 'tool_execution_start')
+    // it is attached only to the call whose tool_execution_end is the last tool boundary in
+    // the batch, and only if the stream did not move while it was taken. Mirrors
+    // crew/headless.mjs: a start with no end yet is in flight and never measured.
+    const boundary = [...frames].reverse().find((frame) => frame?.type === 'tool_execution_start' || frame?.type === 'tool_execution_end')
+    const finalId = boundary?.type === 'tool_execution_end' && typeof boundary.toolCallId === 'string' ? boundary.toolCallId : null
     const judged = SUITE_RUN_OWNERSHIP[turn.role] === 'fenced'
     for (const frame of frames) {
       if (frame?.type !== 'tool_execution_start') continue
@@ -1510,7 +1513,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
       const key = frame.toolCallId ?? `${turn.id}:${command}`
       if (turn.seenToolCalls.has(key)) continue
       turn.seenToolCalls.add(key)
-      const measure = judged && frame === lastStart ? fingerprintTree : () => null
+      const measure = judged && frame.toolCallId === finalId ? () => stableFingerprint(seat.stream, fingerprintTree, fileSize) : () => null
       const context = rerunContext(counters, command, measure)
       const verdict = suiteRunPolicy({
         role: turn.role, command,

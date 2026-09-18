@@ -59,6 +59,7 @@ function fixture(options = {}) {
     ...(options.now ? { now: options.now } : {}),
     ...(Object.hasOwn(options, 'promptDeliveryWindowMs') ? { promptDeliveryWindowMs: options.promptDeliveryWindowMs } : {}),
     ...(options.emit ? { emit: options.emit } : {}),
+    ...(options.treeFingerprint ? { treeFingerprint: options.treeFingerprint } : {}),
     ...(options.telemetry ? { censusReducer: options.telemetry } : {}),
     ...(options.preFirstTurnFinalizer ? { preFirstTurnFinalizer: options.preFirstTurnFinalizer } : {}),
   }
@@ -2614,6 +2615,44 @@ test('on headless rpc a repeat is judged against the tree of the read it ended, 
         if (expected === 'insufficient') assert.deepEqual([result.details.suite_refusal.command, result.details.suite_refusal.refusal], [command, 'test-rerun-without-edit'], why)
       }
       assert.equal(rows.filter((row) => row.suite_policy).at(-1)?.suite_policy.rerun_unmeasured ?? 0, unmeasured, `${why}: unmeasured repeats stated`)
+    } finally { f.cleanup() }
+  }
+})
+
+// Sol on #1400, pass 3, on this transport: a start with no end in the batch is in flight
+// and never measured; a stream that moves while the fingerprint is taken invalidates it.
+// Mutation killed: measuring on the last start (case 1 measures); dropping the stability
+// check (case 2 refuses).
+test('on headless rpc a call in flight is never measured and a measurement the stream moved under is discarded', () => {
+  const policy = { suiteCommand: 'npm test', gatePath: '/tmp/b502/gate.mjs', fence: ['crew/'] }
+  const command = 'node --test crew/x.test.mjs'
+  const envelope = (run, summary) => writeFileSync(run.returnPath, JSON.stringify({ assignment_id: run.id, role: 'builder', status: 'done', summary, artifacts: [], details: {} }))
+  {
+    let calls = 0
+    const f = fixture({ treeFingerprint: () => { calls += 1; return 'T' } })
+    try {
+      const run = f.io.assign({ role: 'builder', briefFile: '/brief.md', policy })
+      // r1 completes, r2 starts and never ends before the envelope: the last boundary is a start.
+      b502AppendRpcStream(f, 'builder', [...b502RpcFrames(command, 'r1').slice(0, -1), { type: 'turn_start' }, { type: 'tool_execution_start', toolCallId: 'r2', toolName: 'bash', args: { command } }, { type: 'agent_settled' }])
+      envelope(run, 'first')
+      assert.equal(f.io.wait(run.returnPath, 60).status, 'done')
+      assert.equal(calls, 0, 'no completed call was the last boundary')
+    } finally { f.cleanup() }
+  }
+  {
+    let calls = 0
+    let f = null
+    f = fixture({ treeFingerprint: () => { calls += 1; if (calls === 1) f.writeStream(`${JSON.stringify({ type: 'tool_execution_start', toolCallId: 'e1', toolName: 'bash', args: { command: 'sed -i s/a/b/ crew/x.mjs' } })}\n`); return 'T' } })
+    try {
+      const first = f.io.assign({ role: 'builder', briefFile: '/brief.md', policy })
+      b502AppendRpcStream(f, 'builder', b502RpcFrames(command, 'r1'))
+      envelope(first, 'first')
+      assert.equal(f.io.wait(first.returnPath, 60).status, 'done')
+      assert.equal(calls, 1)
+      const second = f.io.assign({ role: 'builder', briefFile: '/again.md', policy })
+      b502AppendRpcStream(f, 'builder', b502RpcFrames(command, 'r2'))
+      envelope(second, 'second')
+      assert.equal(f.io.wait(second.returnPath, 60).status, 'done', 'the moved baseline was discarded, so the repeat is unmeasured')
     } finally { f.cleanup() }
   }
 })

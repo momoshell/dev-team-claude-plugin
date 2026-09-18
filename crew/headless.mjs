@@ -9,6 +9,7 @@ import {
   writeFileSync as fsWriteFileSync,
   renameSync as fsRenameSync,
   lstatSync as fsLstatSync,
+  statSync as fsStatSync,
 } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { stripVTControlCharacters } from 'node:util'
@@ -1393,10 +1394,37 @@ function rerunRefusal(role, command, gatePath, kind) {
     role, command, kind, gate_path: gatePath,
   }
 }
-// Two spellings of one invocation: the same shell words. Quotes are decoded (`"a.mjs"` and
-// `a.mjs` are one word, `'foo bar'` and `"foo bar"` too) and the words are joined on NUL,
-// so whitespace INSIDE a word is data and still distinguishes two commands.
-const invocationKey = (command) => shellTokens(command).join('\0')
+// The shell's words, decoded the way the shell decodes them: whitespace outside quotes
+// splits; `'…'` is literal; `"…"` honours \\ and \"; a backslash outside quotes escapes the
+// next character; adjacent spans concatenate into one word. A quote character INSIDE a
+// span is data and survives (`"foo'bar"` is foo'bar, not foobar), which is what
+// shellTokens — the option grammar's tokenizer, which strips every quote — cannot say.
+export function shellWords(command) {
+  const source = String(command ?? '')
+  const words = []
+  let current = null
+  let quote = null
+  for (let index = 0; index < source.length; index += 1) {
+    const ch = source[index]
+    if (quote === "'") { if (ch === "'") quote = null; else current += ch; continue }
+    if (quote === '"') {
+      if (ch === '"') { quote = null; continue }
+      if (ch === '\\' && index + 1 < source.length && '"\\$`'.includes(source[index + 1])) { current += source[index + 1]; index += 1; continue }
+      current += ch
+      continue
+    }
+    if (ch === '\\' && index + 1 < source.length) { current = (current ?? '') + source[index + 1]; index += 1; continue }
+    if (ch === "'" || ch === '"') { quote = ch; current ??= ''; continue }
+    if (/\s/.test(ch)) { if (current !== null) { words.push(current); current = null }; continue }
+    current = (current ?? '') + ch
+  }
+  if (current !== null) words.push(current)
+  return words
+}
+
+// Two spellings of one invocation: the same decoded shell words joined on NUL, so
+// whitespace INSIDE a word is data and still distinguishes two commands.
+const invocationKey = (command) => shellWords(command).join('\0')
 const sameInvocation = (command, lastRun) => typeof lastRun === 'string' && invocationKey(command) === invocationKey(lastRun)
 
 function decideSuiteRun({ role, command, fence, gatePath, ranBefore, suiteCommand, taskDir, kind }) {
@@ -1436,19 +1464,35 @@ export function suiteRunPolicy({ role, command, fence = [], gatePath = null, ran
   return { ...verdict, blind }
 }
 
-// The id of the LAST tool_use the stream carries — the one tool event no later event
-// follows in this read, so a fingerprint taken now is the tree it ran on.
-export function lastToolUseId(text) {
+// The id of the tool call whose COMPLETION is the last tool boundary the stream carries:
+// its tool_result is in, and no tool_use follows it. A fingerprint taken now is the tree
+// that call ran on. A call still in flight (tool_use with no result yet) is never it.
+export function finalCompletedToolUseId(text) {
   let last = null
   for (const line of String(text ?? '').split('\n')) {
     if (!line.trim()) continue
     let frame
     try { frame = JSON.parse(line) } catch { continue }
-    if (frame?.type !== 'assistant') continue
-    const content = Array.isArray(frame.message?.content) ? frame.message.content : []
-    for (const use of content) if (use?.type === 'tool_use' && typeof use.id === 'string') last = use.id
+    const content = Array.isArray(frame?.message?.content) ? frame.message.content : []
+    if (frame?.type === 'assistant') {
+      for (const use of content) if (use?.type === 'tool_use' && typeof use.id === 'string') last = { kind: 'start', id: use.id }
+    } else if (frame?.type === 'user') {
+      for (const result of content) if (result?.type === 'tool_result' && typeof result.tool_use_id === 'string') last = { kind: 'end', id: result.tool_use_id }
+    }
   }
-  return last
+  return last?.kind === 'end' ? last.id : null
+}
+
+// A fingerprint is causal only if the stream did not move while it was taken: a tool that
+// starts (and edits) during the measurement would otherwise be folded into a baseline the
+// measured call never saw. Measured against the stream's byte length, before and after.
+export function stableFingerprint(streamPath, fingerprint, size) {
+  let before
+  try { before = size(streamPath) } catch { before = null }
+  const tree = fingerprint()
+  let after
+  try { after = size(streamPath) } catch { after = null }
+  return before !== null && after === before ? tree : null
 }
 
 // Every shell invocation the claude stream ALREADY recorded, in order, with the
@@ -1804,6 +1848,7 @@ function persistCrew(paths, role, patch, deps) {
 
 export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turnCeilings = null, deps = {} }) {
   const fingerprintTree = deps.treeFingerprint || (() => treeFingerprint(checkout || crew?.checkout))
+  const streamSize = (path) => (deps.statSync || fsStatSync)(path).size
   const spawn = deps.spawn || cpSpawn
   const now = deps.now || (() => Date.now())
   const sleep = deps.sleep || defaultSleep
@@ -2492,16 +2537,17 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turn
     const counters = suiteCountersFor(run.role)
     let refused = null
     // A fingerprint taken now describes the tree AFTER every call this read carries, so it
-    // is attached only to the call the read ENDED on — no later tool event observed. A
-    // call batched behind another is admitted unmeasured and counted, never judged against
-    // a tree it did not run on. Only the role the rule covers pays for a fingerprint.
-    const lastId = lastToolUseId(text)
+    // is attached only to the call whose COMPLETION the read ended on, and only if the
+    // stream did not move while it was taken. A call batched behind another, or still in
+    // flight, is admitted unmeasured and counted — never judged against a tree it did not
+    // run on. Only the role the rule covers pays for a fingerprint.
+    const finalId = finalCompletedToolUseId(text)
     const judged = SUITE_RUN_OWNERSHIP[run.role] === 'fenced'
     for (const call of shellToolCalls(text)) {
       const key = call.id ?? `${run.id}:${call.command}`
       if (run.seenToolCalls.has(key)) continue
       run.seenToolCalls.add(key)
-      const measure = judged && call.id !== null && call.id === lastId ? fingerprintTree : () => null
+      const measure = judged && call.id !== null && call.id === finalId ? () => stableFingerprint(run.stream, fingerprintTree, streamSize) : () => null
       const context = rerunContext(counters, call.command, measure)
       const verdict = suiteRunPolicy({
         role: run.role, command: call.command,

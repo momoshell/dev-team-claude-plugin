@@ -14,7 +14,7 @@ import {
   SESSION_ROUND_BASES, SESSION_STAGE_ABSENT, SESSION_DRIVER_BASIS, SESSION_ROUND_BASIS, SESSION_ROUND_UNMEASURED,
   SEAT_SUITE_POLICY_EVENT, SUITE_RUN_REFUSAL, SUITE_RUN_UNRECOGNISED, SUITE_POLICY_STREAM_UNAVAILABLE,
   suiteRunPolicy, recogniseSuiteInvocation, testTargets, fenceCovers, shellToolCalls,
-  SUITE_RERUN_REFUSAL, suiteRefusalEnvelope, suiteRefusalRow, treeFingerprint, rerunContext, RERUN_KINDS, lastToolUseId,
+  SUITE_RERUN_REFUSAL, suiteRefusalEnvelope, suiteRefusalRow, treeFingerprint, rerunContext, RERUN_KINDS, finalCompletedToolUseId, stableFingerprint, shellWords,
   splitShellCommands, executableText, stripHeredocBodies, commandTokens,
   suitePolicyCounters, countSuiteDecision, suitePolicyReport, SUITE_RUN_OWNERSHIP, SUITE_RUN_OWNERSHIP_KINDS,
 } from './headless.mjs'
@@ -2954,7 +2954,7 @@ function b416ClaudeStream({ turns = 2, command = null } = {}) {
   return `${frames.map((frame) => JSON.stringify(frame)).join('\n')}\n`
 }
 
-function b416JsonFixture({ role = 'builder', policy = null, fallback = null, onSleep = null, turnCeilings = null, telemetry = null, writeExitOnTerm = false } = {}) {
+function b416JsonFixture({ role = 'builder', policy = null, fallback = null, onSleep = null, turnCeilings = null, telemetry = null, writeExitOnTerm = false, treeFingerprint = null } = {}) {
   const dir = scratchDir('b416-json-')
   const taskDir = join(dir, 'task'); const returnsDir = join(dir, 'returns')
   mkdirSync(taskDir); mkdirSync(returnsDir)
@@ -2967,6 +2967,7 @@ function b416JsonFixture({ role = 'builder', policy = null, fallback = null, onS
     adapters: { [role]: { adapter } }, bin: '/worker/bin', turnCeilings,
     deps: {
       ...(telemetry ? { parseStream: telemetry } : {}),
+      ...(treeFingerprint ? { treeFingerprint } : {}),
       spawn: () => ({ pid: 4242, unref() {} }), uuid: () => 'b416-json-session',
       now: () => state.clock,
       sleep: (ms) => {
@@ -3624,6 +3625,92 @@ test('on headless json a repeat is judged against the tree of the read it ended,
   }
 })
 
+// Sol on #1400, pass 3 — the deterministic races, through the fingerprint seam:
+// - a call whose result is not in yet is in flight and never measured;
+// - a tool that starts while the fingerprint is being taken invalidates it;
+// and the cost claims: a role outside the rule never pays for a fingerprint, and an
+// admitted repeat stores the snapshot its comparison took (three runs, three calls).
+// Mutation killed: measuring the last tool_use instead of the last completed one (case 1
+// measures); dropping the stability check (case 2 stores the moved tree); fingerprinting
+// every role (case 3 counts); a second measurement on an admitted repeat (case 4 counts 4).
+test('on headless json a call in flight is never measured, a measurement the stream moved under is discarded, and fingerprints are counted', () => {
+  const policy = { suiteCommand: 'npm test', gatePath: '/tmp/b502/gate.mjs', fence: ['crew/'] }
+  const use = (id, command) => JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id, name: 'Bash', input: { command } }] } })
+  const result = (id) => JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: id }] } })
+  const command = 'node --test crew/x.test.mjs'
+  const done = (f, role = 'builder') => writeFileSync(f.assigned.returnPath, JSON.stringify({ assignment_id: f.assigned.id, role, status: 'done', summary: 'built', artifacts: [], details: {} }))
+  {
+    // 1. start-only: the second run's result never arrives before the envelope
+    let calls = 0
+    const f = b416JsonFixture({ role: 'builder', policy, treeFingerprint: () => { calls += 1; return 'T' } })
+    try {
+      f.writeStream(`${[use('r1', command), result('r1')].join('\n')}\n`)
+      let first = true
+      const io = f.io
+      // The first poll measures r1; the second poll sees r2 started but not finished.
+      f.writeStream(`${[use('r1', command), result('r1'), use('r2', command)].join('\n')}\n`)
+      done(f)
+      const envelope = io.wait(f.assigned.returnPath, 60)
+      assert.equal(envelope.status, 'done', 'a call in flight is not judged')
+      assert.equal(calls, 0, 'nothing completed as the last boundary, nothing measured')
+      void first
+    } finally { f.cleanup() }
+  }
+  {
+    // 2. the stream moves while the fingerprint is taken: the baseline is discarded, so
+    //    the later identical run is unmeasured rather than judged against a moved tree
+    let calls = 0
+    let fixture = null
+    const f = b416JsonFixture({ role: 'builder', policy, treeFingerprint: () => { calls += 1; if (calls === 1) writeFileSync(join(fixture.taskDir, 'headless', fixture.assigned.id, 'stream.jsonl'), `${use('e1', 'sed -i s/a/b/ crew/x.mjs')}\n`, { flag: 'a' }); return 'T' } })
+    fixture = f
+    try {
+      f.writeStream(`${[use('r1', command), result('r1')].join('\n')}\n`)
+      done(f)
+      f.io.wait(f.assigned.returnPath, 60)
+      writeFileSync(join(f.taskDir, 'headless', f.assigned.id, 'exit'), '0')
+      const rows = f.rows.filter((row) => row.suite_policy)
+      assert.equal(calls, 1)
+      // The counters are per role for the io: a second dispatch repeats the run on tree T.
+      const second = f.io.assign({ role: 'builder', briefFile: join(f.taskDir, 'again.md'), policy })
+      f.writeStream(`${[use('r2', command), result('r2')].join('\n')}\n`, second.id)
+      writeFileSync(second.returnPath, JSON.stringify({ assignment_id: second.id, role: 'builder', status: 'done', summary: 'again', artifacts: [], details: {} }))
+      const envelope = f.io.wait(second.returnPath, 60)
+      assert.equal(envelope.status, 'done', 'the discarded baseline leaves the repeat unmeasured, never refused')
+      assert.equal(f.rows.filter((row) => row.suite_policy).at(-1)?.suite_policy.rerun_unmeasured, 1)
+      void rows
+    } finally { f.cleanup() }
+  }
+  {
+    // 3. a planner's gate, twice: outside the rule, so no fingerprint is ever taken
+    let calls = 0
+    const f = b416JsonFixture({ role: 'planner', policy: { ...policy, gatePath: '/tmp/b502/gate.mjs' }, treeFingerprint: () => { calls += 1; return 'T' } })
+    try {
+      f.writeStream(`${[use('g1', 'node /tmp/b502/gate.mjs'), result('g1'), use('g2', 'node /tmp/b502/gate.mjs'), result('g2')].join('\n')}\n`)
+      done(f, 'planner')
+      assert.equal(f.io.wait(f.assigned.returnPath, 60).status, 'done')
+      assert.equal(calls, 0, 'the planner never pays for a fingerprint')
+    } finally { f.cleanup() }
+  }
+  {
+    // 4. three runs on a moving tree across three dispatches: one fingerprint each — the
+    //    repeat's comparison snapshot is the one stored, never a second measurement
+    const trees = ['A', 'B', 'C']
+    let calls = 0
+    const f = b416JsonFixture({ role: 'builder', policy, treeFingerprint: () => trees[calls++] })
+    try {
+      let run = f.assigned
+      for (let n = 1; n <= 3; n += 1) {
+        if (n > 1) run = f.io.assign({ role: 'builder', briefFile: join(f.taskDir, `b${n}.md`), policy })
+        f.writeStream(`${[use(`r${n}`, command), result(`r${n}`)].join('\n')}\n`, run.id)
+        writeFileSync(run.returnPath, JSON.stringify({ assignment_id: run.id, role: 'builder', status: 'done', summary: 'n', artifacts: [], details: {} }))
+        assert.equal(f.io.wait(run.returnPath, 60).status, 'done', `run ${n} on tree ${trees[n - 1]}`)
+        writeFileSync(join(f.taskDir, 'headless', run.id, 'exit'), '0')
+      }
+      assert.equal(calls, 3, 'one fingerprint per run: the baseline, then one comparison per repeat, each stored as taken')
+    } finally { f.cleanup() }
+  }
+})
+
 test('a refused suite run is still counted in the turn census on headless json', () => {
   const f = b416JsonFixture({ role: 'reviewer', policy: { suiteCommand: 'npm test', gatePath: '/tmp/b502/gate.mjs', fence: [] } })
   try {
@@ -3772,9 +3859,11 @@ test('a scoped test repeated on an unchanged tree is refused as a rerun; a chang
   assert.deepEqual([counters.refused, counters.admitted, counters.rerun_unmeasured], [1, 4, 1])
 })
 
-// Sol on #1400, both halves: whitespace INSIDE a shell word is data, and two quotings of
-// one word are one word. Mutation killed: joining raw spellings (equivalent quoting then
-// admits); normalising \s+ over the whole string (inner whitespace then refuses).
+// Sol on #1400, all three halves: whitespace INSIDE a shell word is data, two quotings of
+// one word are one word, and a quote character inside a word is data too. Mutation
+// killed: joining raw spellings (equivalent quoting then admits); normalising \s+ over the
+// whole string (inner whitespace then refuses); stripping every quote character
+// (`"foo'bar"` then equals `foobar`).
 test('invocations compare as shell words: quoting is not a difference, whitespace inside a word is', () => {
   const fence = ['crew/headless.test.mjs']
   const gatePath = '/task/gate.mjs'
@@ -3789,6 +3878,15 @@ test('invocations compare as shell words: quoting is not a difference, whitespac
     assert.equal(suiteRunPolicy({ ...same, command: spelling, lastRun: base }).refusal, SUITE_RERUN_REFUSAL, spelling)
   }
   assert.equal(suiteRunPolicy({ ...same, command: 'node --test --test-name-pattern="foo  bar" crew/headless.test.mjs', lastRun: base }).decision, 'admit', 'two spaces inside the word select different tests')
+  assert.equal(suiteRunPolicy({ ...same, command: `node --test --test-name-pattern="foo'bar" crew/headless.test.mjs`, lastRun: 'node --test --test-name-pattern=foobar crew/headless.test.mjs' }).decision, 'admit', 'a quote inside the word is a different pattern')
+})
+
+// The scanner behind the comparison, as the shell decodes: Sol's counterexamples on #1400.
+test('shellWords decodes quoting, escapes and concatenation and keeps a quote inside a word', () => {
+  assert.deepEqual(shellWords(`node --test --test-name-pattern="foo'bar" a.mjs`), ['node', '--test', "--test-name-pattern=foo'bar", 'a.mjs'])
+  assert.deepEqual(shellWords('a\\ b "a b" \'a b\' foo"bar" \'x\'"y" ""'), ['a b', 'a b', 'a b', 'foobar', 'xy', ''])
+  assert.deepEqual(shellWords('"a\\"b" "c\\\\d" \'e\\f\''), ['a"b', 'c\\d', 'e\\f'])
+  assert.deepEqual(shellWords('   '), [])
 })
 
 // Mutation killed: applying the rule to every role, or to every kind — the planner
@@ -3876,22 +3974,35 @@ test('treeFingerprint moves with a tracked edit, a new file, a rewritten untrack
   git(dir, 'update-index', '--skip-worktree', 'a.mjs')
   assert.equal(treeFingerprint(dir), null, 'a skip-worktree entry: unmeasured')
   git(dir, 'update-index', '--no-skip-worktree', 'a.mjs')
+  const sub = scratchDir('tree-fp-sub-')
+  git(sub, 'init', '-q'); writeFileSync(join(sub, 's.mjs'), 'export {}\n'); git(sub, 'add', 's.mjs'); git(sub, 'commit', '-q', '-m', 'sub')
+  git(dir, 'submodule', '--quiet', 'add', sub, 'vendor'); git(dir, 'commit', '-q', '-m', 'submodule')
+  assert.equal(treeFingerprint(dir), null, 'a submodule: unmeasured')
   assert.equal(treeFingerprint(join(dir, 'nowhere')), null, 'no repository: unmeasured, never a value')
   assert.equal(treeFingerprint(''), null)
   assert.equal(treeFingerprint(dir, { spawnSync: () => { throw new Error('no git') } }), null, 'a throwing git is unmeasured')
 })
 
-// Mutation killed: returning the FIRST tool_use — a fingerprint would then be attached to
-// a call the read did not end on.
-test('lastToolUseId names the tool call no later tool event follows', () => {
-  const text = [
-    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'ls' } }] } }),
-    JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1' }] } }),
-    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'ok' }, { type: 'tool_use', id: 't2', name: 'Edit', input: {} }] } }),
-    'not json',
-  ].join('\n')
-  assert.equal(lastToolUseId(text), 't2')
-  assert.equal(lastToolUseId(''), null)
+// Mutation killed: naming the last tool_use instead of the last completed one — a call
+// still in flight would then be fingerprinted with whatever it is about to do.
+test('finalCompletedToolUseId names the call whose completion is the last tool boundary, never one in flight', () => {
+  const use = (id) => JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id, name: 'Bash', input: { command: 'ls' } }] } })
+  const result = (id) => JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: id }] } })
+  assert.equal(finalCompletedToolUseId([use('t1'), result('t1')].join('\n')), 't1')
+  assert.equal(finalCompletedToolUseId([use('t1'), result('t1'), use('t2')].join('\n')), null, 't2 is in flight')
+  assert.equal(finalCompletedToolUseId([use('t1'), result('t1'), use('t2'), result('t2'), 'not json'].join('\n')), 't2')
+  assert.equal(finalCompletedToolUseId(''), null)
+})
+
+// Mutation killed: dropping the after-size comparison — a fingerprint taken while the
+// stream grew (a tool started, and may have edited, during the measurement) would then be
+// stored as the baseline of a call that never saw that edit.
+test('stableFingerprint discards a measurement taken while the stream moved', () => {
+  let size = 10
+  const grows = () => { size += 5; return 'tree' }
+  assert.equal(stableFingerprint('/s', () => 'tree', () => size), 'tree')
+  assert.equal(stableFingerprint('/s', grows, () => size), null)
+  assert.equal(stableFingerprint('/s', () => 'tree', () => { throw new Error('gone') }), null)
 })
 
 // Mutation killed: widening a never-owner to the builder's ownership, or giving the

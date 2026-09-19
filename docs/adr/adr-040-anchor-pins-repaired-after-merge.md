@@ -52,7 +52,7 @@ That sequencing is the ground for choosing direction 1 first: the measured
 concurrency cost is removed without pretending either deeper format change is
 free.
 
-## Accepted cost
+## Accepted cost — superseded by Amendment 1
 
 In the window **between the merge and the post-merge repair**, `main`'s manifest
 keys and prose citations carry stale line numbers: a reader who follows one
@@ -61,6 +61,44 @@ so every shift is a warning — which also means the repair is not forced by CI.
 An operator who skips the pass leaves the drift standing until the next one.
 That is the price of the concurrency, and it is accepted because the alternative
 was serialising unrelated lanes behind a transitive documentation fence.
+
+## Amendment 1 (2026-09-19) — an owed-here shift is fatal on the default branch
+
+The Accepted cost above is superseded in one clause. **"Nothing goes RED" was
+already false when this ADR was ratified, and it is no longer the rule.**
+
+An out-of-fence shift is **fatal** when the lane fence is MEASURED and EMPTY —
+which is the default branch, where `laneFence` finds no changed paths, so there
+is no lane to defer the repair to. Everywhere else it stays a warning: inside a
+lane, whose fence is non-empty; and on an UNMEASURED fence, which is a stated
+blind spot rather than a clear.
+
+**Grounds, measured 2026-09-19.** Three call sites already applied this rule by
+hand and were never reconciled with the Accepted cost —
+`crew/drive-docs.test.mjs:574`, `skills/crew-dispatch/exhibits.test.mjs:99` and
+`crew/drive-review.test.mjs:3919`. The contradiction was not theoretical: on
+2026-09-19 `main` was RED on `crew/drive-review.test.mjs` `b600 N1` with six
+shifted pins in `skills/pr-review/anchors.json`. Before that, 13 pins across
+`skills/crew-recovery` and `skills/backend-node` were stale on `main` while
+`npm test` reported 5746 pass / 0 fail — the largest, `crew/drive.mjs:8101`, by
+453 lines. The warning printed to stderr inside a green suite, where nobody
+reads it, and the operator pass the Accepted cost relies on was simply not run.
+
+`assertAnchorsPinned` now consults `shiftsAreOwedHere` on the measured branch,
+so the rule that governed 3 manifests governs 7 — adding `skills/crew-recovery`,
+`skills/devops`, `skills/backend-node` and `skills/lean-build`.
+
+**What does NOT change.** The concurrency argument is untouched: a lane still
+never repairs a pinning manifest outside its own fence, and `--repair-all` on
+`main` after the wave remains the sanctioned fix. Only the claim that CI does
+not force it moves. The cost that replaces it is honest and smaller: the repair
+is now owed at a named moment — the first suite run on `main` after a merge —
+instead of being owed to nobody in particular.
+
+**Blind spot, stated.** An explicit `fence` array passed by a caller is a
+DECLARATION, not a git measurement, so an explicit `[]` keeps the warning. A
+caller that declares an empty surface is not thereby standing on `main`, and no
+check here can tell the difference.
 
 ## What does not move
 

@@ -351,6 +351,9 @@ export function assertAnchorsPinned({ root, skillDir, manifestPath, minAnchors, 
       outOfFence.shift()
     } else log(warning)
   }
+  if (fence === undefined && shiftsAreOwedHere(measured) && outOfFence.length > 0) {
+    throw new Error(outOfFence.map((shift) => shiftLine(shift, skillDir, false)).join('\n'))
+  }
   for (const shift of outOfFence) log(shiftLine(shift, skillDir, false))
   return total
 }

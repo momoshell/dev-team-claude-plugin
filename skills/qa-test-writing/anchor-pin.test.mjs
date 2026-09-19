@@ -829,9 +829,11 @@ test('repair-all CLI repairs a committed shift on clean main', () => {
   assert.match(String(cleanFence.baseCommit), /^[0-9a-f]{40}$/, 'the fence reports the commit it measured against')
   assert.deepEqual({ ...cleanFence, baseCommit: undefined }, { paths: [], measured: true, reason: null, base: 'origin/main', baseCommit: undefined })
   const warnings = []
-  assert.equal(assertAnchorsPinned({ root: repoRoot, skillDir, manifestPath, minAnchors: 1, log: warnings.push.bind(warnings) }), 1)
-  assert.equal(warnings.length, 1)
-  assert.match(warnings[0], /--repair-all/)
+  assert.throws(
+    () => assertAnchorsPinned({ root: repoRoot, skillDir, manifestPath, minAnchors: 1, log: warnings.push.bind(warnings) }),
+    /--repair-all/,
+  )
+  assert.equal(warnings.length, 0)
   const output = []
   assert.equal(repairCli(['--repair-all', skillDir, '--root', repoRoot], output.push.bind(output)), 0)
   assert.deepEqual(output, ['ANCHOR_REPAIR_ROW {"manifest":"skills/sample/anchors.json","pin":"crew/sample.mjs:1","old_line":1,"new_line":2,"base":null,"base_commit":null}'])
@@ -1567,4 +1569,65 @@ test('an out-of-fence shift fails on the default branch and only warns inside a 
   assert.deepEqual(inLane, { owed: false, deferred: 1 }, 'a lane that owns neither side still defers')
   const unmeasured = decide({ measured: false, paths: [] })
   assert.deepEqual(unmeasured, { owed: false, deferred: 1 }, 'an unmeasured fence never turns a warning into a failure')
+})
+
+test('a shift owed here throws naming --repair-all instead of warning', () => {
+  // Mutation killed: warning on a measured-empty fence lets pins rot on main inside a green suite.
+  const source = ['// header', '// inserted before the declaration', `const ${EXPECTED}`, 'const other = 1', 'export default KEY', '']
+  const fx = fixture({ source })
+  const captured = []
+  try {
+    git(fx.root, 'init', '--quiet')
+    git(fx.root, 'symbolic-ref', 'HEAD', 'refs/heads/main')
+    git(fx.root, 'add', '.')
+    git(fx.root, 'commit', '--quiet', '-m', 'base')
+    git(fx.root, 'update-ref', 'refs/remotes/origin/main', 'HEAD')
+    const measured = laneFence({ root: fx.root })
+    assert.equal(measured.measured, true)
+    assert.deepEqual(measured.paths, [])
+    assert.throws(
+      () => assertAnchorsPinned({ root: fx.root, skillDir: fx.skillDir, manifestPath: fx.manifestPath, minAnchors: 1, log: (line) => captured.push(line) }),
+      /--repair-all/,
+    )
+    assert.equal(captured.length, 0)
+  } finally {
+    dispose(fx)
+  }
+})
+
+test('an explicit empty fence keeps the out-of-fence shift a warning', () => {
+  // Mutation killed: routing an explicit fence through the predicate turns a caller-declared lane into a hard failure.
+  const source = ['// header', '// inserted before the declaration', `const ${EXPECTED}`, 'const other = 1', 'export default KEY', '']
+  const fx = fixture({ source })
+  const captured = []
+  try {
+    assert.equal(assertAnchorsPinned({ root: fx.root, skillDir: fx.skillDir, manifestPath: fx.manifestPath, minAnchors: 1, fence: [], log: (line) => captured.push(line) }), 1)
+    assert.equal(captured.length, 1)
+    assert.match(captured[0], /--repair-all/)
+  } finally {
+    dispose(fx)
+  }
+})
+
+test('a measured non-empty fence keeps the out-of-fence shift a warning', () => {
+  // Mutation killed: throwing for any measured fence reddens lanes that still have a post-merge pass to defer to.
+  const source = ['// header', '// inserted before the declaration', `const ${EXPECTED}`, 'const other = 1', 'export default KEY', '']
+  const fx = fixture({ source })
+  const captured = []
+  try {
+    git(fx.root, 'init', '--quiet')
+    git(fx.root, 'symbolic-ref', 'HEAD', 'refs/heads/main')
+    git(fx.root, 'add', '.')
+    git(fx.root, 'commit', '--quiet', '-m', 'base')
+    git(fx.root, 'update-ref', 'refs/remotes/origin/main', 'HEAD')
+    writeFileSync(join(fx.root, 'lane-note.md'), '# lane work\n')
+    const measured = laneFence({ root: fx.root })
+    assert.equal(measured.measured, true)
+    assert.ok(measured.paths.length > 0)
+    assert.equal(assertAnchorsPinned({ root: fx.root, skillDir: fx.skillDir, manifestPath: fx.manifestPath, minAnchors: 1, log: (line) => captured.push(line) }), 1)
+    assert.equal(captured.length, 1)
+    assert.match(captured[0], /--repair-all/)
+  } finally {
+    dispose(fx)
+  }
 })

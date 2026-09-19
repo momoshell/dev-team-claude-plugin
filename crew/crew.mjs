@@ -2786,6 +2786,19 @@ export function writeMcpConfigs({ taskDir, roles, adapters }, deps = {}) {
   }
 }
 
+export function writeClaudeSkills({ taskDir, roles, adapters }, deps = {}) {
+  for (const role of roles || []) {
+    const entry = adapters?.[role]
+    if (entry?.name !== 'claude') continue
+    const grants = entry.grants || EMPTY_GRANTS
+    if ((grants?.skills?.length ?? 0) === 0) continue
+    if (typeof entry.adapter?.writeSeatSkills !== 'function') {
+      throw refuse('grant-unsupported', `seat ${role} adapter ${entry.name || '<unknown>'} holds skill grants but has no writeSeatSkills — refusing to boot a silently weaker seat`)
+    }
+    entry.adapter.writeSeatSkills({ taskDir, role, grants }, deps)
+  }
+}
+
 function paneCommand(role, args, { taskDir, bootBrief, adapter, tierSeat, grants = EMPTY_GRANTS, search = null, configDir = null, advisorCell = null }) {
   const seat = SEAT_DEFAULTS[role]
   const merged = join(taskDir, `role-${role}.md`)
@@ -2863,6 +2876,7 @@ export async function bootCmd(args, deps = {}) {
     loadavg: loadavgDep = null, cpus: cpusDep = null,
     probeEndpoint: probeEndpointDep = null, register: registerDep = null,
     writeMcpConfigs: writeMcpConfigsDep = writeMcpConfigs,
+    writeClaudeSkills: writeClaudeSkillsDep = writeClaudeSkills,
     awaitSeatsReady: awaitSeatsReadyDep = awaitSeatsReady,
     readRosterFile: readRosterFileDep = readFileSync,
     writeRosterSnapshot: writeRosterSnapshotDep = writeRosterSnapshot,
@@ -3148,6 +3162,7 @@ export async function bootCmd(args, deps = {}) {
   // command or creating a workspace. A failed write is a boot failure: strict
   // mode must never fall back to user configuration.
   writeMcpConfigsDep({ taskDir: paths.taskDir, roles, adapters })
+  writeClaudeSkillsDep({ taskDir: paths.taskDir, roles, adapters })
   let workspace = null
   let windowId = null
   const members = {}

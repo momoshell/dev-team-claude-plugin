@@ -659,8 +659,9 @@ test('BG1', () => {
   assert.ok(piSeatCommand(builder).includes('-e "/repo/crew/pi/extensions/readgate.ts"'))
   const claudeBuilder = grantsFor(register, 'builder', { ...PIN_ROOT, agent: 'claude' })
   assert.deepEqual(claudeBuilder.extensions, [])
-  // The lean-build skill is granted under the pi overlay, because the claude agent refuses the
-  // skills dimension; a claude builder therefore holds no skills grant and boots without one.
+  // The lean-build skill is granted under the pi overlay, which delivers it via
+  // --skill; a claude builder holds no skill grant under the shipped register
+  // and boots without a plugin dir.
   assert.deepEqual(claudeBuilder.skills, [])
   assert.doesNotThrow(() => seatCommand({ ...builder, grants: claudeBuilder }))
   for (const role of ROLE_ORDER.filter((name) => name !== 'builder')) {

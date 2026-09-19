@@ -1,18 +1,18 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { mcpConfigDocument, SEAT_DEFAULTS, FANOUT_TOOLS, DEFAULT_ROLES, ROLE_ORDER, transportFor, seatTransport, HEADLESS_TRANSPORTS, assertCapabilities, resolveAdapters, bootAllocation, resolveTier, resolveSeatModels, loadLadder, shadowPickBoot, bootCmd, CAPABILITY_REFUSALS, loadCapabilities, EMPTY_GRANTS } from './crew.mjs'
-import { seatCommand, headlessCommand as claudeHeadlessCommand, capabilitiesFor, modelString as claudeModelString, mcpConfigPath, paneUsageRecords } from './adapters/adapter-claude.mjs'
+import { seatCommand, headlessCommand as claudeHeadlessCommand, capabilitiesFor, modelString as claudeModelString, mcpConfigPath, paneUsageRecords, skillsPluginDir, skillDirName, seatSkillFiles, writeSeatSkills, assertSkillsMaterialised } from './adapters/adapter-claude.mjs'
 import { capabilitiesFor as piCapabilitiesFor, translateDeny } from './adapters/adapter-pi.mjs'
 import { testCheckout } from '../test/fixtures.mjs'
 import { ROOT, scratchDir } from '../test/helpers.mjs'
 import { shippedRoster, roster, withHome, testCrewDir, capabilityRegister, capabilityFixtureRoot } from './crew-test-helpers.mjs'
 
 // Keep lexical import reach visible before byte-pinned regex test bodies.
-void [test, assert, readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, tmpdir, join, dirname, fileURLToPath, mcpConfigDocument, SEAT_DEFAULTS, FANOUT_TOOLS, DEFAULT_ROLES, ROLE_ORDER, transportFor, seatTransport, HEADLESS_TRANSPORTS, assertCapabilities, resolveAdapters, bootAllocation, resolveTier, resolveSeatModels, loadLadder, shadowPickBoot, bootCmd, CAPABILITY_REFUSALS, loadCapabilities, EMPTY_GRANTS, seatCommand, claudeHeadlessCommand, capabilitiesFor, claudeModelString, mcpConfigPath, paneUsageRecords, piCapabilitiesFor, translateDeny, testCheckout, ROOT, scratchDir, shippedRoster, roster, withHome, testCrewDir, capabilityRegister, capabilityFixtureRoot]
+void [test, assert, readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, tmpdir, join, dirname, fileURLToPath, mcpConfigDocument, SEAT_DEFAULTS, FANOUT_TOOLS, DEFAULT_ROLES, ROLE_ORDER, transportFor, seatTransport, HEADLESS_TRANSPORTS, assertCapabilities, resolveAdapters, bootAllocation, resolveTier, resolveSeatModels, loadLadder, shadowPickBoot, bootCmd, CAPABILITY_REFUSALS, loadCapabilities, EMPTY_GRANTS, seatCommand, claudeHeadlessCommand, capabilitiesFor, claudeModelString, mcpConfigPath, paneUsageRecords, skillsPluginDir, skillDirName, seatSkillFiles, writeSeatSkills, assertSkillsMaterialised, piCapabilitiesFor, translateDeny, testCheckout, ROOT, scratchDir, shippedRoster, roster, withHome, testCrewDir, capabilityRegister, capabilityFixtureRoot]
 
 const CLAUDE_USAGE_SETTINGS = fileURLToPath(new URL('./adapters/claude-usage.settings.json', import.meta.url))
 // Hoisted: tests both above and below this point branch on it. Below the
@@ -304,15 +304,15 @@ test('assertCapabilities rejects an adapter that cannot enforce tool denial, nam
   assert.doesNotThrow(() => assertCapabilities('builder', 'claude', { tool_deny: true }))
 })
 
-test('resolveAdapters rejects an unknown --agent-<role>, and refuses a role-wide skills grant on claude', async () => {
+test('resolveAdapters rejects an unknown --agent-<role>; role-wide skills on claude resolve while extensions still refuse', async () => {
   await assert.rejects(
     () => resolveAdapters(['builder'], { 'agent-builder': 'nope' }, null, { register: capabilityRegister() }),
     (error) => error.reason === 'agent-unresolved'
       && /seat builder/.test(error.message)
       && /coding_agents\.nope/.test(error.message),
   )
-  // The shipped register grants lean-build under pi overlays; claude refuses the skills
-  // dimension, so both claude authoring seats resolve without a skill grant.
+  // The shipped register grants lean-build under pi overlays; claude seats hold
+  // no skill grant under it, so both claude authoring seats resolve without one.
   const shipped = JSON.parse(readFileSync(new URL('./capabilities.json', import.meta.url), 'utf8'))
   const withoutPiSkills = JSON.parse(JSON.stringify(shipped))
   for (const role of ['planner', 'builder']) delete withoutPiSkills.roles[role].by_agent.pi.skills
@@ -330,15 +330,182 @@ test('resolveAdapters rejects an unknown --agent-<role>, and refuses a role-wide
       seatCommand({ ...seat, grants: after[role].grants }),
     )
   }
-  // The refusal itself still fires for a register that grants skills role-wide.
+  // A register that grants skills role-wide now resolves on claude and delivers
+  // via the seat plugin dir; role-wide extensions still refuse.
   const roleWide = JSON.parse(readFileSync(new URL('./capabilities.json', import.meta.url), 'utf8'))
   roleWide.roles.builder.skills = ['skills/lean-build/SKILL.md']
+  const resolved = await resolveAdapters(['builder'], {}, null, { register: roleWide })
+  assert.equal(resolved.builder.grants.skills.length, 1)
+  const roleWideDir = scratchDir('b860-role-wide-skills-')
+  try {
+    writeSeatSkills({ taskDir: roleWideDir, role: 'builder', grants: resolved.builder.grants })
+    assert.equal(
+      readFileSync(join(roleWideDir, 'claude-skills', 'builder', 'skills', 'lean-build', 'SKILL.md'), 'utf8'),
+      readFileSync(join(ROOT, 'skills/lean-build/SKILL.md'), 'utf8'),
+    )
+    assert.match(seatCommand({
+      role: 'builder', model: 'sonnet', promptFile: `/tmp/crew-task/role-builder.md`,
+      tools: SEAT_DEFAULTS.builder.tools, deny: SEAT_DEFAULTS.builder.deny,
+      taskDir: roleWideDir, bootBrief: 'boot', grants: resolved.builder.grants,
+    }), /--plugin-dir/)
+  } finally {
+    rmSync(roleWideDir, { recursive: true, force: true })
+  }
+  const extWide = JSON.parse(readFileSync(new URL('./capabilities.json', import.meta.url), 'utf8'))
+  extWide.roles.builder.extensions = ['crew/pi/extensions/builderloop.ts']
   await assert.rejects(
-    () => resolveAdapters(['builder'], {}, null, { register: roleWide }),
+    () => resolveAdapters(['builder'], {}, null, { register: extWide }),
     (error) => error.reason === 'grant-unsupported'
       && error.message.includes('builder')
-      && error.message.includes('skills'),
+      && error.message.includes('extensions'),
   )
+})
+
+test('a claude seat with a skill grant resolves, materialises, and composes --plugin-dir on pane and headless argv', async () => {
+  const shipped = JSON.parse(readFileSync(new URL('./capabilities.json', import.meta.url), 'utf8'))
+  const register = JSON.parse(JSON.stringify(shipped))
+  register.roles.builder.by_agent = {
+    ...(register.roles.builder.by_agent || {}),
+    claude: { skills: ['skills/lean-build/SKILL.md'] },
+  }
+  const resolved = await resolveAdapters(['builder'], { 'agent-builder': 'claude' }, null, { register })
+  const grants = resolved.builder.grants
+  assert.equal(grants.skills.length, 1)
+  assert.equal(grants.skills[0].endsWith('skills/lean-build/SKILL.md'), true)
+  const taskDir = scratchDir('b860-claude-skill-delivery-')
+  try {
+    const seat = {
+      role: 'builder', model: 'sonnet', promptFile: join(taskDir, 'role-builder.md'),
+      tools: '', deny: '', taskDir, bootBrief: 'boot', grants,
+    }
+    const headlessSeat = {
+      ...seat, prompt: 'hi', sessionId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', bin: '/bin/claude',
+    }
+    assert.throws(() => seatCommand(seat), (err) => err.reason === 'grant-unsupported')
+    assert.throws(() => claudeHeadlessCommand(headlessSeat), (err) => err.reason === 'grant-unsupported')
+    writeSeatSkills({ taskDir, role: 'builder', grants })
+    const dir = skillsPluginDir({ taskDir, role: 'builder' })
+    assert.deepEqual(seatSkillFiles({ taskDir, role: 'builder', grants }), [join(dir, 'skills', 'lean-build', 'SKILL.md')])
+    assert.equal(skillDirName(grants.skills[0]), 'lean-build')
+    assert.equal(
+      readFileSync(join(dir, 'skills', 'lean-build', 'SKILL.md'), 'utf8'),
+      readFileSync(join(ROOT, 'skills/lean-build/SKILL.md'), 'utf8'),
+    )
+    assert.doesNotThrow(() => assertSkillsMaterialised({ taskDir, role: 'builder', grants }))
+    assert.equal(seatCommand(seat).includes(`--plugin-dir "${dir}"`), true)
+    const head = claudeHeadlessCommand(headlessSeat)
+    assert.equal(head.args.includes('--plugin-dir'), true)
+    assert.equal(head.args.includes(dir), true)
+  } finally {
+    rmSync(taskDir, { recursive: true, force: true })
+  }
+})
+
+test('bootCmd materialises the claude skills dir for a claude skill grant', async () => {
+  const home = scratchDir('b860-claude-skills-boot-home-')
+  const { root: checkoutRoot, checkout } = testCheckout('b860-claude-skills-boot-checkout-')
+  const task = 'b860-claude-skills-boot'
+  const shipped = JSON.parse(readFileSync(new URL('./capabilities.json', import.meta.url), 'utf8'))
+  const register = JSON.parse(JSON.stringify(shipped))
+  register.roles.builder.by_agent = {
+    ...(register.roles.builder.by_agent || {}),
+    claude: { skills: ['skills/lean-build/SKILL.md'] },
+  }
+  let workspaceCalls = 0
+  try {
+    await withHome(home, () => bootCmd(
+      { task, checkout, roles: 'builder', 'agent-builder': 'claude', 'headless-all': true, 'claude-bin': process.execPath },
+      { register, cmux: () => { workspaceCalls += 1; return {} }, awaitSeatsReady: async () => {} },
+    ))
+    assert.equal(workspaceCalls, 0)
+    assert.equal(
+      readFileSync(join(testCrewDir(home, checkout, task), 'task', 'claude-skills', 'builder', 'skills', 'lean-build', 'SKILL.md'), 'utf8'),
+      readFileSync(join(ROOT, 'skills/lean-build/SKILL.md'), 'utf8'),
+    )
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+})
+
+test('mixed-agent boot keeps the pi planner skill grant while materialising the claude builder plugin root', async () => {
+  const home = scratchDir('b860-mixed-skills-boot-home-')
+  const { root: checkoutRoot, checkout } = testCheckout('b860-mixed-skills-boot-checkout-')
+  const task = 'b860-mixed-skills-boot'
+  const shipped = JSON.parse(readFileSync(new URL('./capabilities.json', import.meta.url), 'utf8'))
+  const register = JSON.parse(JSON.stringify(shipped))
+  register.roles.builder.by_agent = {
+    ...(register.roles.builder.by_agent || {}),
+    claude: { skills: ['skills/lean-build/SKILL.md'] },
+  }
+  const args = { 'agent-planner': 'pi', 'agent-builder': 'claude' }
+  const resolved = await resolveAdapters(['planner', 'builder'], args, null, { register })
+  assert.equal(resolved.planner.grants.skills.length, 1)
+  assert.equal(resolved.planner.grants.skills[0].endsWith('skills/lean-build/SKILL.md'), true)
+  assert.equal(resolved.builder.grants.skills.length, 1)
+  assert.equal(resolved.builder.grants.skills[0].endsWith('skills/lean-build/SKILL.md'), true)
+  let workspaceCalls = 0
+  try {
+    await withHome(home, () => bootCmd(
+      { task, checkout, roles: 'planner,builder', ...args, 'headless-all': true, 'claude-bin': process.execPath },
+      { register, cmux: () => { workspaceCalls += 1; return {} }, awaitSeatsReady: async () => {} },
+    ))
+    assert.equal(workspaceCalls, 0)
+    assert.equal(
+      readFileSync(join(testCrewDir(home, checkout, task), 'task', 'claude-skills', 'builder', 'skills', 'lean-build', 'SKILL.md'), 'utf8'),
+      readFileSync(join(ROOT, 'skills/lean-build/SKILL.md'), 'utf8'),
+    )
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+})
+
+test('writeSeatSkills replaces the role plugin root from scratch on rewrite', () => {
+  const taskDir = scratchDir('b860-claude-skills-reboot-')
+  try {
+    const fixture = scratchDir('b860-claude-skills-reboot-src-')
+    try {
+      for (const name of ['alpha', 'beta']) {
+        mkdirSync(join(fixture, name), { recursive: true })
+        writeFileSync(join(fixture, name, 'SKILL.md'), `# ${name}\n`)
+      }
+      const both = { skills: [join(fixture, 'alpha', 'SKILL.md'), join(fixture, 'beta', 'SKILL.md')] }
+      writeSeatSkills({ taskDir, role: 'builder', grants: both })
+      assert.equal(readFileSync(join(taskDir, 'claude-skills', 'builder', 'skills', 'alpha', 'SKILL.md'), 'utf8'), '# alpha\n')
+      assert.equal(readFileSync(join(taskDir, 'claude-skills', 'builder', 'skills', 'beta', 'SKILL.md'), 'utf8'), '# beta\n')
+      writeSeatSkills({ taskDir, role: 'builder', grants: { skills: [join(fixture, 'alpha', 'SKILL.md')] } })
+      assert.equal(readFileSync(join(taskDir, 'claude-skills', 'builder', 'skills', 'alpha', 'SKILL.md'), 'utf8'), '# alpha\n')
+      assert.equal(existsSync(join(taskDir, 'claude-skills', 'builder', 'skills', 'beta')), false)
+    } finally {
+      rmSync(fixture, { recursive: true, force: true })
+    }
+  } finally {
+    rmSync(taskDir, { recursive: true, force: true })
+  }
+})
+
+test('writeSeatSkills refuses colliding skill names without writing', () => {
+  const taskDir = scratchDir('b860-claude-skills-collision-')
+  try {
+    const fixture = scratchDir('b860-claude-skills-collision-src-')
+    try {
+      for (const side of ['left', 'right']) {
+        mkdirSync(join(fixture, side, 'dup'), { recursive: true })
+        writeFileSync(join(fixture, side, 'dup', 'SKILL.md'), `# ${side}\n`)
+      }
+      const grants = { skills: [join(fixture, 'left', 'dup', 'SKILL.md'), join(fixture, 'right', 'dup', 'SKILL.md')] }
+      assert.throws(
+        () => writeSeatSkills({ taskDir, role: 'builder', grants }),
+        (err) => err.reason === 'grant-unsupported' && /duplicate skill name/.test(err.message),
+      )
+      assert.equal(existsSync(skillsPluginDir({ taskDir, role: 'builder' })), false)
+    } finally {
+      rmSync(fixture, { recursive: true, force: true })
+    }
+  } finally {
+    rmSync(taskDir, { recursive: true, force: true })
+  }
 })
 
 test('resolveAdapters refuses a recorded proposal stub before checking its adapter path', async () => {
@@ -632,11 +799,10 @@ test('C1O raw model override discards its roster fallback admission checks', asy
   assert.equal(seen.some((path) => /adapters\/adapter-claude/.test(path)), true)
 })
 
-test('C1R declared grant shortfalls refuse before adapter import', async () => {
+test('C1R declared grant shortfalls refuse before adapter import; a claude skill grant is admitted', async () => {
   const server = { name: 'search', command: { bin: '/opt/mcp-search', args: [] }, url: null }
   const cases = [
     { label: 'extension', agent: 'claude', grant: { extensions: ['crew/pi/extensions/builderloop.ts'] } },
-    { label: 'skill', agent: 'claude', grant: { skills: ['crew/pi/skills/scout.md'] } },
     { label: 'MCP', agent: 'pi', grant: { by_agent: { pi: { mcp_servers: [server] } } } },
   ]
   for (const { agent, grant } of cases) {
@@ -659,6 +825,33 @@ test('C1R declared grant shortfalls refuse before adapter import', async () => {
       assert.equal(seen.some((path) => /adapters\/adapter-/.test(path)), false)
     } finally { rmSync(root, { recursive: true, force: true }) }
   }
+  // The skills arm left the claude refusal: a skill grant resolves, imports the
+  // adapter, and delivers through the seat plugin dir once materialised.
+  const skillRoot = capabilityFixtureRoot()
+  try {
+    const base = capabilityRegister()
+    const register = capabilityRegister({ roles: { builder: { ...base.roles.builder, skills: ['crew/pi/skills/scout.md'] } },
+      coding_agents: { ...base.coding_agents, claude: { ...base.coding_agents.claude, refuses: ['extensions', 'local_provider'] } } })
+    const seat = admissionSeat({ agent: 'claude', provider: 'anthropic', id: 'claude-opus-5' })
+    const seen = []
+    const resolved = await resolveAdapters(['builder'], {}, { builder: seat }, {
+      register, root: skillRoot,
+      exists: (path) => { seen.push(path); return existsSync(path) },
+      probeEndpoint: async () => { throw new Error('must not probe') },
+    })
+    assert.equal(seen.some((path) => /adapters\/adapter-/.test(path)), true)
+    assert.deepEqual(resolved.builder.grants.skills, [join(skillRoot, 'crew/pi/skills/scout.md')])
+    const taskDir = scratchDir('b860-c1r-skill-')
+    try {
+      writeSeatSkills({ taskDir, role: 'builder', grants: resolved.builder.grants })
+      assert.equal(readFileSync(join(taskDir, 'claude-skills', 'builder', 'skills', 'scout', 'SKILL.md'), 'utf8'), '# skill\n')
+      assert.match(seatCommand({
+        role: 'builder', model: 'sonnet', promptFile: '/tmp/role-builder.md',
+        tools: SEAT_DEFAULTS.builder.tools, deny: SEAT_DEFAULTS.builder.deny,
+        taskDir, bootBrief: 'boot', grants: resolved.builder.grants,
+      }), /--plugin-dir/)
+    } finally { rmSync(taskDir, { recursive: true, force: true }) }
+  } finally { rmSync(skillRoot, { recursive: true, force: true }) }
 })
 
 test('C1RLP primary local-provider shortfall refuses before adapter import', async () => {
@@ -1552,4 +1745,57 @@ test('adapter-claude inline MCP grants rely on strict config without wildcard de
   assert.match(args, /--disallowedTools Task,Agent/)
   assert.doesNotMatch(args, /mcp__\*/)
   assert.deepEqual(mcpConfigDocument(grants), { mcpServers: { search: { command: '/opt/mcp-search', args: ['--stdio'] } } })
+})
+
+// Sol's three reproductions on #1426, each silent before this: a symlinked plugin parent
+// wrote OUTSIDE the task dir and deleted what stood there; a granted path that is a
+// DIRECTORY named SKILL.md passed every existence check and booted a seat whose skill the
+// CLI would not load; and on a case-insensitive filesystem two names differing only in
+// case became one destination, so the second copy replaced the first without a word.
+// Mutation killed: dropping the containment check, the file check, or lowercasing the
+// collision key.
+test('RV1 writeSeatSkills refuses to write outside the task dir, to take a non-file, or to collapse two names into one', () => {
+  const fixture = scratchDir('b860-rv1-src-')
+  const skill = (name, body = '# skill\n') => {
+    mkdirSync(join(fixture, name), { recursive: true })
+    writeFileSync(join(fixture, name, 'SKILL.md'), body)
+    return join(fixture, name, 'SKILL.md')
+  }
+
+  // 1. The plugin parent is a symlink out of the task dir, with something already there.
+  const escapeTask = scratchDir('b860-rv1-task-')
+  const outside = scratchDir('b860-rv1-outside-')
+  const sentinel = join(outside, 'do-not-delete.txt')
+  writeFileSync(sentinel, 'operator bytes\n')
+  const pluginRoot = skillsPluginDir({ taskDir: escapeTask, role: 'builder' })
+  mkdirSync(dirname(pluginRoot), { recursive: true })
+  symlinkSync(outside, pluginRoot)
+  assert.throws(
+    () => writeSeatSkills({ taskDir: escapeTask, role: 'builder', grants: { skills: [skill('alpha')] } }),
+    (err) => err.reason === 'grant-unsupported' && /outside the task dir/.test(err.message),
+  )
+  assert.equal(existsSync(sentinel), true, 'the bytes outside the task dir are untouched')
+  assert.equal(readFileSync(sentinel, 'utf8'), 'operator bytes\n')
+
+  // 2. A granted path that is a directory named SKILL.md.
+  const dirTask = scratchDir('b860-rv1-dirtask-')
+  mkdirSync(join(fixture, 'bad', 'SKILL.md'), { recursive: true })
+  assert.throws(
+    () => writeSeatSkills({ taskDir: dirTask, role: 'builder', grants: { skills: [join(fixture, 'bad', 'SKILL.md')] } }),
+    (err) => err.reason === 'grant-unsupported' && /is not a file/.test(err.message),
+  )
+  assert.equal(existsSync(skillsPluginDir({ taskDir: dirTask, role: 'builder' })), false, 'nothing was written')
+
+  // 3. Two names differing only in case.
+  const caseTask = scratchDir('b860-rv1-casetask-')
+  assert.throws(
+    () => writeSeatSkills({ taskDir: caseTask, role: 'builder', grants: { skills: [skill('Foo'), skill('foo')] } }),
+    (err) => err.reason === 'grant-unsupported' && /differs only in case/.test(err.message),
+  )
+  assert.equal(existsSync(skillsPluginDir({ taskDir: caseTask, role: 'builder' })), false, 'nothing was written')
+
+  // And the honest path still works: one skill, inside the task dir, is materialised.
+  const goodTask = scratchDir('b860-rv1-good-')
+  writeSeatSkills({ taskDir: goodTask, role: 'builder', grants: { skills: [skill('gamma')] } })
+  assert.equal(existsSync(join(skillsPluginDir({ taskDir: goodTask, role: 'builder' }), 'skills', 'gamma', 'SKILL.md')), true)
 })

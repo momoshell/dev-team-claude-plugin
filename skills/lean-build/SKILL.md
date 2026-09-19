@@ -1,7 +1,7 @@
 ---
 name: lean-build
 description: This repo's worked examples for the ladder in crew/roles/_shared.md — the rungs that recur here, each with the replacement that was accepted.
-compatibility: Delivered to pi builder and planner seats; claude seats receive nothing because adapter-claude refuses skill grants. The ladder itself reaches every seat through _shared.md.
+compatibility: Delivered to pi seats via `--skill` and to claude seats via the seat's session plugin dir; the ladder still reaches every seat through `_shared.md`.
 ---
 
 The ladder is in your shared charter; this skill does not restate it. These are its rungs as this codebase has already climbed them — reach for the accepted shape before inventing one.

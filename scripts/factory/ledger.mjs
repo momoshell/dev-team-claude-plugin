@@ -3274,8 +3274,11 @@ export function openLedger({
         ? boundText(payload.message, REQUEST_MAX_CHARS)
         : boundFreeText(payload.message, REQUEST_MAX_CHARS)
     }
-    const startedAt = input.started_at != null ? isoMs(input.started_at) : (input.type === 'tool_call' ? isoMs(now()) : null)
-    const endedAt = input.ended_at != null ? isoMs(input.ended_at) : (input.type === 'tool_call' ? isoMs(now()) : null)
+    // #1412: agent_start carries started_at and agent_end carries ended_at, so an agent event
+    // can be placed in time; the stamp lands here, inside the adapter's emit call.
+    // log and decision stay NULL: point-in-time annotations with no interval and no time consumer.
+    const startedAt = input.started_at != null ? isoMs(input.started_at) : (input.type === 'tool_call' || input.type === 'agent_start' ? isoMs(now()) : null)
+    const endedAt = input.ended_at != null ? isoMs(input.ended_at) : (input.type === 'tool_call' || input.type === 'agent_end' ? isoMs(now()) : null)
     const inserted = insertSequenced({
       jsonlKind: 'recordEvent',
       adwId: input.adw_id,

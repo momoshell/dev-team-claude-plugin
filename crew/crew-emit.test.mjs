@@ -83,6 +83,32 @@ test('emitAdapter maps drive events to closed ledger vocabulary with explicit se
   assert.ok(calls.events.some((event) => event.type === 'log' && event.payload.level === 'warn'))
 })
 
+test('emitAdapter forwards agent event times only when supplied and keeps annotations timeless', () => {
+  const events = []
+  const emitter = {
+    adwId: 'adw-time-forward',
+    phaseTransition: () => ({ phase_id: 3 }),
+    emit: (fn) => fn({ recordEvent: (event) => events.push(event) }, () => events.length + 1),
+  }
+  const adapter = emitAdapter(emitter)
+  const at = 1700400000123
+  adapter({ kind: 'assign', id: 'timed-start', role: 'builder', at })
+  adapter({ kind: 'envelope', id: 'timed-end', role: 'builder', status: 'done', at })
+  adapter({ kind: 'assign', id: 'untimed-start', role: 'builder' })
+  adapter({ kind: 'envelope', id: 'untimed-end', role: 'builder', status: 'done' })
+  adapter({ kind: 'decision', decided: 'accept', why: 'at ignored', at })
+  adapter({ kind: 'stage', label: 'timeless log', at })
+
+  assert.equal(events[0].started_at, at)
+  assert.equal(Object.hasOwn(events[0], 'ended_at'), false)
+  assert.equal(events[1].ended_at, at)
+  assert.equal(Object.hasOwn(events[1], 'started_at'), false)
+  for (const event of events.slice(2)) {
+    assert.equal(Object.hasOwn(event, 'started_at'), false)
+    assert.equal(Object.hasOwn(event, 'ended_at'), false)
+  }
+})
+
 test('emitAdapter maps cell-failure events to the booted crew cell, with a null-cell fallback', () => {
   const calls = []
   const emitter = {

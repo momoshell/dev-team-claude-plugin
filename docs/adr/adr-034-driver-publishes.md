@@ -79,6 +79,21 @@ publishes the code-composed body unchanged. **Narration is additive and narratio
 load-bearing**, so `composePrBody` stays a pure function of the record and the facts
 below the heading are byte-identical to the body a run with no narrator publishes.
 
+Amended 2026-09-19 (#1423, #1431): the model is **declared or resolved, in that
+order**. `crew/capabilities.schema.json`'s `$defs.localprovider` now carries an
+OPTIONAL `model`; a safe configured value is sent VERBATIM and only its ABSENCE
+falls back to resolving the served id from `GET <root>/models`, so the
+"must answer with exactly one id" rule above binds only the fallback. The
+declaration exists because llama-swap serves three models behind one root and the
+resolve step could no longer be unambiguous. The narrator is `qwen3.8-27b`,
+chosen by replaying the driver's own narrator over 20 past lanes' publish
+records: 18/20 accepted at p50 38s, against `gpt-oss-20b` at 13/20 (it invents a
+fact in over a third of runs) and `gemma4-31b` at 2/10, which cannot finish
+inside `NARRATION_BACKSTOP_SECONDS`. Between a94517e6 (2026-09-17) and #1431
+(2026-09-19) the narrator ran and its text was DISCARDED rather than published;
+that window is closed and the `## Narrative (local model)` heading is in the
+body again. Nothing about "additive and never load-bearing" moves.
+
 Publication ends at an open PR. Merging, branch deletion and worktree reaping are
 the batch closeout's (#758), never the driver's. Issue closing is now **declared**
 by the plan and **executed by GitHub**: a plan's `details.closes` becomes a

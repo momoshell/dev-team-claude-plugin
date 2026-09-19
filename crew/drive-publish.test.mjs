@@ -1773,8 +1773,8 @@ test('A1 narrator declaration is admitted and supplies the configured model', ()
   const shippedText = readFileSync(new URL('./capabilities.json', import.meta.url), 'utf8')
   const shipped = JSON.parse(shippedText)
   const config = narratorConfig(shippedText)
-  assert.equal(shipped.narrator.model, 'gpt-oss-20b')
-  assert.deepEqual(config, { root: 'http://10.112.20.20:8080/v1', model: 'gpt-oss-20b' })
+  assert.equal(shipped.narrator.model, 'qwen3.8-27b')
+  assert.deepEqual(config, { root: 'http://10.112.20.20:8080/v1', model: 'qwen3.8-27b' })
   const collect = []
   const accepted = narrateRecord({
     record: NARRATION_RECORD,
@@ -1790,8 +1790,8 @@ test('A1 narrator declaration is admitted and supplies the configured model', ()
   assert.equal(chatCalls.length, 1)
   assert.equal(accepted.refused, undefined)
   assert.equal(accepted.text, HONEST_NARRATION)
-  assert.equal(accepted.model, 'gpt-oss-20b')
-  assert.equal(chatCalls[0].includes('"model":"gpt-oss-20b"'), true)
+  assert.equal(accepted.model, 'qwen3.8-27b')
+  assert.equal(chatCalls[0].includes('"model":"qwen3.8-27b"'), true)
 })
 
 test('B1 absent model still refuses an ambiguous multi-model endpoint', () => {
@@ -1901,7 +1901,7 @@ test('A1 narrator command bounds low-speed transfer and names a stall refusal', 
   const collect = []
   const stalled = narrateRecord({
     record: NARRATION_RECORD,
-    registerText: configuredNarratorRegister('http://proxy.lan:1234', 'gpt-oss-20b'),
+    registerText: configuredNarratorRegister('http://proxy.lan:1234', 'qwen3.8-27b'),
     io: narratorIo({ collect, chat: { ok: false, output: 'curl: (28) Operation too slow. Less than 1 bytes/sec transferred the last 60 seconds' } }),
   })
   const command = collect.find((entry) => entry.includes('/chat/completions'))
@@ -1912,7 +1912,7 @@ test('A1 narrator command bounds low-speed transfer and names a stall refusal', 
 })
 
 test('B1 narrator command streams and joins ordered SSE content without the old cap', () => {
-  const command = narratorCommand({ root: 'http://proxy.lan:1234/v1', model: 'gpt-oss-20b', prompt: 'hello' })
+  const command = narratorCommand({ root: 'http://proxy.lan:1234/v1', model: 'qwen3.8-27b', prompt: 'hello' })
   const sse = [
     ': keep-alive',
     'data: {"choices":[{"delta":{"content":"The lane "}}]}',
@@ -1930,12 +1930,12 @@ test('B1 narrator command streams and joins ordered SSE content without the old 
 })
 
 test('C1 narrator command retains the absolute 300-second backstop', () => {
-  const command = narratorCommand({ root: 'http://proxy.lan:1234/v1', model: 'gpt-oss-20b', prompt: 'hello' })
+  const command = narratorCommand({ root: 'http://proxy.lan:1234/v1', model: 'qwen3.8-27b', prompt: 'hello' })
   assert.match(command, /--max-time 300(?:\s|$)/)
 })
 
 test('D1 low-speed, absolute-timeout, and dead-endpoint refusals stay distinct', () => {
-  const configured = configuredNarratorRegister('http://proxy.lan:1234', 'gpt-oss-20b')
+  const configured = configuredNarratorRegister('http://proxy.lan:1234', 'qwen3.8-27b')
   const ask = (output) => narrateRecord({
     record: NARRATION_RECORD,
     registerText: configured,
@@ -1955,7 +1955,7 @@ test('D1 low-speed, absolute-timeout, and dead-endpoint refusals stay distinct',
 
 test('E1 each transport refusal preserves the published body byte-for-byte', () => {
   const base = runPublished({})
-  const configured = configuredNarratorRegister('http://proxy.lan:1234', 'gpt-oss-20b')
+  const configured = configuredNarratorRegister('http://proxy.lan:1234', 'qwen3.8-27b')
   const cases = [
     [NARRATION_REFUSALS.stall, 'curl: (28) Operation too slow. Less than 1 bytes/sec transferred the last 60 seconds'],
     [NARRATION_REFUSALS.timeout, 'curl: (28) Operation timed out after 300000 milliseconds'],
@@ -1980,7 +1980,7 @@ test('malformed SSE after valid content fails closed without returning a prefix'
   assert.equal(narrationFromResponse(malformed), null)
   const refused = narrateRecord({
     record: NARRATION_RECORD,
-    registerText: configuredNarratorRegister('http://proxy.lan:1234', 'gpt-oss-20b'),
+    registerText: configuredNarratorRegister('http://proxy.lan:1234', 'qwen3.8-27b'),
     io: narratorIo({ chat: { ok: true, output: malformed } }),
   })
   assert.equal(refused.text, undefined)
@@ -1988,7 +1988,7 @@ test('malformed SSE after valid content fails closed without returning a prefix'
 })
 
 test('RV1-1 the narration length ceiling keeps its own executable witness', () => {
-  const configured = configuredNarratorRegister('http://proxy.lan:1234', 'gpt-oss-20b')
+  const configured = configuredNarratorRegister('http://proxy.lan:1234', 'qwen3.8-27b')
   const reply = (content) => narrateRecord({
     record: NARRATION_RECORD, registerText: configured,
     io: narratorIo({ chat: { ok: true, output: JSON.stringify({ choices: [{ message: { content } }] }) } }),
@@ -2000,7 +2000,7 @@ test('RV1-1 the narration length ceiling keeps its own executable witness', () =
 })
 
 test('RV1-2 accepted prose quoting the curl timeout token is never reclassified', () => {
-  const configured = configuredNarratorRegister('http://proxy.lan:1234', 'gpt-oss-20b')
+  const configured = configuredNarratorRegister('http://proxy.lan:1234', 'qwen3.8-27b')
   const prose = 'The lane ran 2 build rounds. curl: (28)'
   const accepted = narrateRecord({
     record: { ...NARRATION_RECORD, marker_code: 28 }, registerText: configured,
@@ -2012,7 +2012,7 @@ test('RV1-2 accepted prose quoting the curl timeout token is never reclassified'
 })
 
 test('narration attempts carry duration model and outcome into the journal', () => {
-  const configured = configuredNarratorRegister('http://proxy.lan:1234', 'gpt-oss-20b')
+  const configured = configuredNarratorRegister('http://proxy.lan:1234', 'qwen3.8-27b')
   const accepted = runPublished({
     capabilities: configured,
     commands: {
@@ -2024,7 +2024,7 @@ test('narration attempts carry duration model and outcome into the journal', () 
   })
   const acceptedRow = accepted.io.calls.logs.find((entry) => entry.narration)?.narration
   assert.deepEqual(acceptedRow, {
-    attempted: true, model: 'gpt-oss-20b', duration_ms: 10, outcome: 'accepted',
+    attempted: true, model: 'qwen3.8-27b', duration_ms: 10, outcome: 'accepted',
     reason: null, chars: 'The lane ran 2 build rounds.'.length,
   })
 
@@ -2033,7 +2033,7 @@ test('narration attempts carry duration model and outcome into the journal', () 
     commands: { [NARRATOR_CHAT_COMMAND_PREFIX]: { ok: false, output: 'connection refused' } },
   })
   assert.deepEqual(refused.io.calls.logs.find((entry) => entry.narration)?.narration, {
-    attempted: true, model: 'gpt-oss-20b', duration_ms: 10, outcome: 'refused',
+    attempted: true, model: 'qwen3.8-27b', duration_ms: 10, outcome: 'refused',
     reason: NARRATION_REFUSALS.unreachable,
   })
 

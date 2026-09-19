@@ -1851,7 +1851,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turn
     err.stage = 'headless-unresolvable-reservation'; err.role = role; return err
   }
   // #944 — the lane journal is this transport's only view of the driver's round.
-  // crew/seat-io.mjs:3620 and this module's own log() write the SAME file, so the
+  // crew/seat-io.mjs:3626 and this module's own log() write the SAME file, so the
   // {stage}/{stage_done}/{assign} record rows are already on disk when assign
   // runs. Replaying the stage rows as a STACK reproduces the driver's openStages;
   // its top is openStages.at(-1) — the round the refusal belongs to. Counting the

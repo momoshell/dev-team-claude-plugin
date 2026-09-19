@@ -8506,7 +8506,7 @@ function runTask(ctx, io, crash) {
       let changed = null
       try { changed = io.changedFiles() } catch { changed = null }
       const stat = typeof io.stat === 'function' ? (path) => io.stat(path) : null
-      const verdict = staleSpawnProof({ gateSource, checkout: ctx.checkout, changedFiles: changed, stat })
+      const verdict = staleSpawnProof({ gateSource, gateFile, checkout: ctx.checkout, changedFiles: changed, stat })
       io.log(recordRow({ at: io.now(), gate_stale_artifact: verdict.journal }))
     } catch {
       try { io.log(recordRow({ at: io.now(), gate_stale_artifact: { verdict: 'unmeasured', compared: [], ignored: [], stale: [], reason: STALE_SPAWN_REASONS.STAT_UNAVAILABLE } })) } catch { /* journal faults never indict the build */ }
@@ -12462,7 +12462,10 @@ export const STALE_SPAWN_REASONS = Object.freeze({
   NO_STATABLE_SOURCES: 'no-statable-sources',
   STAT_FAILED: 'stat-failed',
 })
-export function staleSpawnProof({ gateSource, checkout, changedFiles, stat }) {
+export function staleSpawnProof({ gateSource, gateFile = null, checkout, changedFiles, stat }) {
+  // A spawn before any check()/test() label belongs to the gate FILE, not to a constant:
+  // 49 of 60 sampled gates carry no label at all, so every row read "gate" (RV1-1).
+  const gateName = typeof gateFile === 'string' && gateFile.trim() !== '' ? gateFile.split('/').pop() : 'gate'
   const unmeasured = (reason) => ({ verdict: 'unmeasured', stale: [], compared: [], ignored: [], reason, journal: { verdict: 'unmeasured', compared: [], ignored: [], stale: [], reason } })
   if (typeof gateSource !== 'string') return unmeasured(STALE_SPAWN_REASONS.GATE_UNREADABLE)
   if (typeof stat !== 'function') return unmeasured(STALE_SPAWN_REASONS.STAT_UNAVAILABLE)
@@ -12477,7 +12480,7 @@ export function staleSpawnProof({ gateSource, checkout, changedFiles, stat }) {
       if (match.index < index) label = match[2]
       else break
     }
-    return label ?? 'gate'
+    return label ?? gateName
   }
   const candidates = []
   for (const match of gateSource.matchAll(/\b(?:spawnSync|spawn|execFileSync|execFile|fork)\s*\(\s*('(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*")/g)) candidates.push({ path: match[1].slice(1, -1), check: labelAt(match.index) })
@@ -12521,11 +12524,14 @@ export function staleSpawnProof({ gateSource, checkout, changedFiles, stat }) {
       stale.push({ check, path: resolved, artifactMtime, sourceMtime: newestSourceMtime, source: newestSource })
     }
   }
+  // RV1-6 left as the reviewer rated it, a consider: a gate that spawns no in-checkout
+  // artifact returns `fresh` with `compared: []`, so the row carries its own denominator
+  // and a reader can tell nothing was compared. Making it `unmeasured` would contradict
+  // the accepted plan's B1 and C1, which assert this shape; that is a plan change, not a
+  // repair. Any later aggregation must read `compared`, never the verdict alone.
   const verdict = stale.length > 0 ? 'stale' : 'fresh'
-  const reason = null
-  const measured = { verdict, stale, compared, ignored, reason, journal: { verdict, compared, ignored, stale, reason } }
-  if (measured.verdict === 'stale') return measured
-  return { verdict: 'fresh', reason: null, stale: measured.stale, compared: measured.compared, ignored: measured.ignored, reason: measured.reason, journal: measured.journal }
+  const measured = { verdict, stale, compared, ignored, reason: null, journal: { verdict, compared, ignored, stale, reason: null } }
+  return measured
 }
 export function gateFileFromCommand(cmd) {
   const { words } = shellWords(String(cmd ?? ''))

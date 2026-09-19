@@ -4,6 +4,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  staleSpawnProof,
   acceptanceCoverage, acceptanceIds, ACCEPTANCE_UNMEASURED,
   B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_IMPL_FILE, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, B384_CORRECTED_FIND, B384_CORRECTED_REPLACE, B384_GREEN, B384_MUTATION, B384_RED, B384_REFACTORED_BUILDER, B384_REFACTORED_UNCORRECTED_BUILDER, B44_LEADLESS_CTX, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_PLAN, CHECK_RUNS, CONVERGE_CTX, CONVERGE_GATE, CONVERGE_PLAN, CTX, CTX_DIRECTED, CTX_REPAIR, DIRECTED_FILES, D_ASK, D_AUTO, ENVELOPE_FIELD_KINDS, EXECUTIONS, FAILURE_UPGRADE, GATE_REAP_CMD_EOF, GATE_REAP_SWEEP_MARKER, GATE_SUMMARY_PREFIX, HARDENING_MARKS, HARDENING_OUTCOMES, HARDENING_REFUSALS, MODIFIER_OUTCOMES, MUTATIONS_MAX, MUTATION_BINDING_FAILURES, MUTATION_CORRECTION_REFUSALS, MUTATION_OUTCOMES, PARTIAL_REVIEWED, RED, SENSITIVITY_FLOOR, SHAPE_MAJOR_PHASES, SHAPE_ROUNDED_STAGES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, UNIVERSAL_STAGE_HEADS, VALIDATION_LANE_UNLOADABLE, VARIANTS, VARIANT_NAMES, WRITE_SURFACES, applyMutationAnchor, applyPrescriptionLines, b127GatePaths, b127PidAlive, b318Builders, b318SiteA, b376Build, b376DiskProofIo, b376ProofIo, b376Review, b376StageStack, b384Io, b384RefactoredIo, b44AssertLeadlessGate, b44GatePlan, bindMutationAnchor, buildEnv, collapseStages, dispositionIo, driveTask, existsSync, fakeIo, fenceBase, fenceDiff, fenceSpan, gateReapCommand, gateReapFresh, gateReapOriginal, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, hardeningBounceLines, hardeningBriefLines, hardeningDebt, hardeningOf, join, laneFence, leadEnv, mutationChangesTokens, outOfScopeFiles, planEnv, protectedPlanEnv, readFileSync, resumeGreen, resumeRed, reviewConvergeRun, reviewEnv, reviewFindings, rmSync, s843Ctx, s843Io, s843PlanEnv, s843Rows, scopeMatcher, scopedPath, scratchDir, shapeDefect, spawnSync, stageShape, treeDigest, triageEnv, undeclaredStage, validateHardened, validateMutations, validationPlan, validationProbeRun, validationRows,
 } from './drive-fixtures.mjs'
@@ -6863,11 +6864,41 @@ test('a missing stat capability records unmeasured without blocking', () => {
     gateSource: "check('C7', () => {\n  spawnSync('target/debug/power', ['--version']);\n});",
     changed: ['crates/power-cli/src/main.rs'],
   })
-  assert.equal(typeof io.stat, 'undefined')
+  assert.equal('stat' in io, false)
   const res = driveTask(CTX, io)
   assert.equal(res.status, 'done')
   const rows = staleRows(io)
   assert.equal(rows.length, 1)
   assert.equal(rows[0].gate_stale_artifact.verdict, 'unmeasured')
   assert.equal(rows[0].gate_stale_artifact.reason, 'stat-unavailable')
+})
+
+// RV1-1 of this lane's review: a row that names no check names nothing. 49 of 60 sampled
+// gates carry no check()/test() label before their first spawn, so every row read the
+// constant "gate". The gate FILE's own basename is the honest fallback.
+// Mutation killed: restoring the constant; dropping gateFile at the call site.
+test('a spawn before any check label is attributed to the gate file, not to a constant', () => {
+  const gateSource = "import { spawnSync } from 'node:child_process'\nspawnSync('target/debug/power', [])\ncheck('C7', () => spawnSync('target/debug/power-server', []))\n"
+  const stat = (path) => ({ mtimeMs: path.endsWith('power') || path.endsWith('power-server') ? 1_000 : 9_000 })
+  const proof = staleSpawnProof({ gateSource, gateFile: 'task/acceptance-gate.mjs', checkout: '/repo', changedFiles: ['src/main.rs'], stat })
+  assert.deepEqual(proof.compared.map((row) => row.check), ['acceptance-gate.mjs', 'C7'])
+  assert.deepEqual(proof.stale.map((row) => row.check), ['acceptance-gate.mjs', 'C7'])
+  // With no gate file named, the old constant remains the last resort rather than a crash.
+  const nameless = staleSpawnProof({ gateSource, checkout: '/repo', changedFiles: ['src/main.rs'], stat })
+  assert.deepEqual(nameless.compared.map((row) => row.check), ['gate', 'C7'])
+})
+
+// The driven half of RV1-1: the gate FILE reaches staleSpawnProof from the lane, so a
+// spawn with no check label is attributed to that file rather than the constant.
+// Mutation killed: dropping gateFile at the call site.
+test('a lane attributes an unlabelled spawn to its own gate file', () => {
+  const io = staleIo({
+    gateSource: "spawnSync('target/debug/power', ['--version']);",
+    changed: ['crates/power-cli/src/main.rs'],
+    stats: { [STALE_ARTIFACT]: STALE_OLD, [STALE_SOURCE]: STALE_NEW },
+  })
+  assert.equal(driveTask(CTX, io).status, 'done')
+  const journal = staleRows(io)[0].gate_stale_artifact
+  assert.equal(journal.verdict, 'stale')
+  assert.deepEqual(journal.stale.map(({ check }) => check), [STALE_GATE_FILE.split('/').pop()])
 })

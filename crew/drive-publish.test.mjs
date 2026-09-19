@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import {
   COMMIT_TRAILER, CTX, HONEST_NARRATION, NARRATION_HEADING, NARRATION_RECORD, NARRATION_REFUSALS, NARRATION_REFUSAL_NAMES, NARRATION_STAGE_VOCABULARY, NARRATOR_REGISTER, PUBLISH_REFUSALS, PUBLISH_REFUSAL_NAMES, RUN_START_EVENT, TD, VARIANTS, applyNarration, bounceDetail, bounceSeatOf, buildEnv, commitIntent, composeCommitMessage, composePrBody, convergeRun, driveTask, fakeIo, issueTrailers, journalRowsSinceRunStart, narrateRecord, narrationDefect, narrationFromResponse, narrationIsRawJson, narrationPrompt, narrationStageDefect, narratorApiRoot, narratorCommand, narratorConfig, narratorIo, narratorModelId, narratorModelsCommand, planEnv, prAnomalies, publicationIo, readFileSync, refsFromCommitMessage, reviewEnv, shellArg,
 } from './drive-fixtures.mjs'
-import { anchorConflictMechanical, canonicalAnchorManifest, canonicalCitationDoc, lineNumberOnlyAnchorResolution, promptMeasurementDefect, rebaseConflictRoute, resumeTask, resumeWorktreeSha256 } from './drive.mjs'
+import { anchorConflictMechanical, canonicalAnchorManifest, canonicalCitationDoc, lineNumberOnlyAnchorResolution, promptMeasurementDefect, rebaseConflictRoute, resumeCheckpointDefect, resumeTask, resumeWorktreeSha256 } from './drive.mjs'
 
 const A1_RESUME_TRACE = Object.freeze(['gate', 'suite', 'suite', 'publish'])
 const A1_CONVERGE_TRACE = Object.freeze(['converge', 'suite', 'commit', 'publish'])
@@ -68,7 +68,7 @@ function resumeCheckpointFixture(overrides = {}) {
     reviewer: { status: 'done', role: 'reviewer', artifacts: [], details: {} },
   }
   const base = {
-    version: 1, kind: 'rebase', frozen_where: 'rebase', head_oid: 'pre1111',
+    version: 2, kind: 'rebase', frozen_where: 'rebase', head_oid: 'pre1111', chunk: null,
     tree: { index_oid: 'tree1111', files: [file], worktree_sha256: resumeWorktreeSha256([file]) },
     accepted_scope: ['a.mjs'], returns,
     decision: { accepted_via: 'review pass', verdict: 'pass', residuals: [], carried_findings: [], accept_findings: [], accept_decision: { where: 'review', outcome: 'accepted', residuals: [] }, panel_contributors: ['reviewer'] },
@@ -2381,4 +2381,58 @@ test('b851 F1 hardening blind spots render with rows and reasons, absent when un
   assert.ok(section.includes('the review-time witness has no cell for a.mjs'))
   const sparse = composePrBody({ intent: 'guard the defect' })
   assert.equal(sparse.includes('## Hardening blind spots'), false)
+})
+
+test('chunk publication narrates owned/deferred from the persisted summary and leaves unchunked bodies alone', () => {
+  const record = {
+    intent: 'build chunk c2',
+    gate: { cmd: 'node gate.mjs', summary: { total: 2, failed: 1, errored: 0 }, discrimination: 'proven', generation: 1, repairs: 0 },
+    review: { verdict: 'pass', residuals: [] },
+    suite: {}, files: ['crew/b.mjs'], stages: ['gate'],
+  }
+  const plain = composePrBody(record)
+  assert.doesNotMatch(plain, /Chunk /)
+  const chunked = composePrBody({ ...record, chunk: { id: 'c2', owned: 1, deferred: 1 } })
+  assert.match(chunked, /Chunk c2: 1 owned, 1 deferred/)
+  const chunkedLines = chunked.split('\n')
+  const plainLines = plain.split('\n')
+  assert.equal(chunkedLines.length, plainLines.length + 1)
+  assert.deepEqual(chunkedLines.filter((line) => line !== '- Chunk c2: 1 owned, 1 deferred'), plainLines)
+})
+
+test('chunk v1 checkpoints refuse with an unsupported version', () => {
+  assert.equal(resumeCheckpointDefect({ ...resumeCheckpointFixture(), version: 1 }), 'unsupported checkpoint version')
+})
+
+test('chunk resumed publication narrates the restored summary', () => {
+  const treeFile = { path: 'crew/a.mjs', state: 'present', bytes: `file:-:${'a'.repeat(64)}` }
+  const checkpoint = resumeCheckpointFixture({
+    kind: 'gate', frozen_where: 'gate',
+    accepted_scope: ['crew/a.mjs'],
+    tree: { index_oid: 'tree1111', files: [treeFile], worktree_sha256: resumeWorktreeSha256([treeFile]) },
+    chunk: { id: 'c1', owned: ['A1'], owners: { A2: 'c2' }, exempt: [], summary: { id: 'c1', owned: 1, deferred: 1 } },
+    commit: { oid: null, pending: true, files: ['crew/a.mjs'], message: 'feat: chunk\n\nCloses #42', subject: 'feat: chunk' },
+    proof: { gate_cmd: 'gate-cmd', gate_path: `${TD}/gate.mjs`, summary: { total: 2, failed: 1, errored: 0 }, discrimination: 'proven', generation: 1, repairs: 0 },
+    suite: { cmd: 'suite-cmd', warm: null, cold: null },
+    publish: { branch: 'feature/chunk', base: null, base_sha: 'base1111' },
+  })
+  assert.equal(resumeCheckpointDefect(checkpoint), null)
+  const io = fakeIo({
+    runs: {
+      'gate-cmd': { ok: false, output: `FAIL A2: other red\nGATE-SUMMARY {"total":2,"failed":1,"errored":0}` },
+      'suite-cmd': { ok: true, output: '# pass 1\n# fail 0\n' },
+      "git diff --name-only -z 'base1111'...HEAD": { ok: true, output: 'crew/a.mjs\0' },
+    },
+    cold: { ok: true, output: '# pass 1\n# fail 0\n', path: '/zz/aa11bb', kept: null },
+  })
+  const baseRun = io.run.bind(io)
+  io.run = function (cmd) {
+    const text = String(cmd)
+    if (text.startsWith('gh pr view ')) return { ok: false, output: 'no pull requests found for this branch\n' }
+    if (text.startsWith('gh pr create ')) return { ok: true, output: 'https://github.com/o/r/pull/42\n' }
+    return baseRun(cmd)
+  }
+  const result = resumeTask({ ...CTX, task: 'resume-chunk-pub', publish: { branch: 'feature/chunk' }, files_in_scope: ['crew/a.mjs'] }, io, checkpoint)
+  assert.equal(result.status, 'done', JSON.stringify(result.details.escalation))
+  assert.match(io.calls.writes[`${TD}/pr-body.md`], /Chunk c1: 1 owned, 1 deferred/)
 })

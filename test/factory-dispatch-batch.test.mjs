@@ -79,6 +79,7 @@ import {
   historicalIssueBindings,
   dispatchBatch,
   readChunkProgram,
+  runCommand,
   writeChunkRequests,
   compileFromPlan,
   factoryStateRoot,
@@ -133,7 +134,7 @@ import {
   resolveRequestedExecution,
   resolveRequestedTier,
 } from '../scripts/factory/dispatch-batch.mjs'
-import { parseDirectedBrief, WAITS_S } from '../crew/drive.mjs'
+import { parseDirectedBrief, validateChunks, WAITS_S } from '../crew/drive.mjs'
 import { promptSurfacePaths } from '../crew/protected-paths.mjs'
 import { openLedger } from '../scripts/factory/ledger.mjs'
 import { partitionShifts } from '../skills/qa-test-writing/anchor-pin.mjs'
@@ -5585,4 +5586,46 @@ test('chunk readChunkProgram refuses an out-of-scope carve slice without writing
   mkdirSync(outDir, { recursive: true })
   assert.throws(() => writeChunkRequests({ parentDir, outputDir: outDir }), (err) => err instanceof BatchRefusal && err.reason === 'chunk-scope-outside-parent')
   assert.deepEqual(fsReaddirSync(outDir), [])
+})
+
+test('chunk runCommand forwards --chunked --chunk for chunk lanes and neither for ordinary lanes', () => {
+  const chunked = runCommand({ lane: 'parent-c1', laneDir: '/tmp/p', briefPath: '/tmp/p/r.request.json', files: [], chunk: { id: 'c1' } })
+  assert.ok(chunked.args.includes('--chunked'))
+  const at = chunked.args.indexOf('--chunk')
+  assert.notEqual(at, -1)
+  assert.equal(chunked.args[at + 1], 'c1')
+  const plain = runCommand({ lane: 'parent', laneDir: '/tmp/p', briefPath: 'brief.md', files: [] })
+  assert.equal(plain.args.includes('--chunked'), false)
+  assert.equal(plain.args.includes('--chunk'), false)
+  const blank = runCommand({ lane: 'parent', laneDir: '/tmp/p', briefPath: 'brief.md', files: [], chunk: { id: '  ' } })
+  assert.equal(blank.args.includes('--chunked'), false)
+})
+
+test('chunk compiled checks_owned program validates end to end in the driver', () => {
+  const parentDir = chunkParentDir([
+    { id: 'c1', files_in_scope: ['crew/a.mjs'], checks_owned: ['A1'] },
+    { id: 'c2', files_in_scope: ['crew/b.mjs'], checks_owned: ['A2'] },
+  ])
+  const outDir = join(parentDir, 'chunk-out')
+  const compiled = compileFromPlan({ parentDir, outputDir: outDir })
+  assert.equal(compiled.paths.length, 2)
+  const req = JSON.parse(readFileSync(compiled.paths[0], 'utf8'))
+  assert.equal(req.chunk.id, 'c1')
+  const cmd = runCommand({ lane: 'x-c1', laneDir: parentDir, briefPath: compiled.paths[0], files: [], chunk: req.chunk })
+  assert.ok(cmd.args.includes('--chunked'))
+  assert.equal(cmd.args[cmd.args.indexOf('--chunk') + 1], 'c1')
+  const program = readChunkProgram(parentDir)
+  const mutations = [
+    { check: 'A1', file: 'crew/a.mjs', find: 'x', replace: 'y' },
+    { check: 'A2', file: 'crew/b.mjs', find: 'x', replace: 'y' },
+  ]
+  const v = validateChunks({ chunks: program.chunks }, {
+    scope: ['crew/a.mjs', 'crew/b.mjs', 'crew/c.mjs'], checkLabels: ['A1', 'A2'], mutations,
+  })
+  assert.equal(v.defect, null)
+  const legacy = validateChunks({ chunks: [{ id: 'c1', files_in_scope: ['crew/a.mjs'], checks: ['A1'] }] }, {
+    scope: ['crew/a.mjs'], checkLabels: ['A1'],
+    mutations: [{ check: 'A1', file: 'crew/a.mjs', find: 'x', replace: 'y' }],
+  })
+  assert.ok(legacy.defect)
 })

@@ -5,9 +5,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { seatReadySignal, waitForEnvelope, WAIT_POLL_MS, LIVENESS_PROBE_MS, LIVENESS_MISSES_TO_DIE, seatLiveness } from './crew.mjs'
 import { driveTask } from './drive.mjs'
-import { cellFailureKind, paneAlive, paneProbe, seatIo, SEAT_REFUSAL_STAGE, SUBSTRATE_GRACE_MS, SUBSTRATE_MISSES_TO_DIE } from './seat-io.mjs'
+import { cellFailureKind, emitAdapter, gateLedgerChecks, paneAlive, paneProbe, seatIo, SEAT_REFUSAL_STAGE, SUBSTRATE_GRACE_MS, SUBSTRATE_MISSES_TO_DIE } from './seat-io.mjs'
 import { scratchDir } from '../test/helpers.mjs'
 import { callCounter } from './crew-test-helpers.mjs'
+void [emitAdapter, gateLedgerChecks]
 
 // Keep lexical import reach visible before byte-pinned regex test bodies.
 void [test, assert, mkdtempSync, rmSync, mkdirSync, tmpdir, join, seatReadySignal, waitForEnvelope, WAIT_POLL_MS, LIVENESS_PROBE_MS, LIVENESS_MISSES_TO_DIE, seatLiveness, driveTask, cellFailureKind, paneAlive, paneProbe, seatIo, SEAT_REFUSAL_STAGE, SUBSTRATE_GRACE_MS, SUBSTRATE_MISSES_TO_DIE, scratchDir, callCounter]
@@ -482,4 +483,35 @@ test('paneProbe separates substrate and seat outcomes while paneAlive keeps its 
 test('cellFailureKind keeps substrate-gone on the transport axis', () => {
   assert.equal(cellFailureKind({ stage: 'substrate-gone' }), 'transport-error')
   assert.notEqual(cellFailureKind({ stage: 'substrate-gone' }), 'seat-died')
+})
+
+test('gateLedgerChecks persists the chunk-local summary plus deferred owned-by rows', () => {
+  const summary = { id: 'c2', owned: 1, deferred: 1 }
+  const rows = [{ check: 'foreign9', status: 'owned-by:c9' }]
+  assert.deepEqual(
+    gateLedgerChecks({ kind: 'gate', ok: true, summary: { total: 2, failed: 1, errored: 0 }, chunk: { summary, deferredRows: rows } }),
+    { checks: [summary, ...rows], violations: [] },
+  )
+  assert.deepEqual(
+    gateLedgerChecks({ kind: 'gate', ok: true, summary: { total: 1, failed: 0, errored: 0 } }),
+    { checks: [{ total: 1, failed: 0, errored: 0 }], violations: [] },
+  )
+})
+
+test('chunk gate events reach recordGateResult with ledger checks', () => {
+  const gates = []
+  const emitter = {
+    adwId: 'adw-test',
+    phaseTransition: () => null,
+    emit: (fn) => fn({ recordGateResult: (event) => gates.push(event) }, () => 1),
+  }
+  const adapter = emitAdapter(emitter)
+  const summary = { id: 'c2', owned: 1, deferred: 1 }
+  const rows = [{ check: 'foreign9', status: 'owned-by:c9' }]
+  adapter({ kind: 'gate', name: 'gate', attempt: 1, ok: true, summary: { total: 2, failed: 1, errored: 0 }, chunk: { summary, deferredRows: rows } })
+  adapter({ kind: 'gate', name: 'gate', attempt: 2, ok: true, summary: { total: 1, failed: 0, errored: 0 } })
+  assert.equal(gates.length, 2)
+  assert.deepEqual(gates[0].checks, [summary, ...rows])
+  assert.deepEqual(gates[0].violations, [])
+  assert.deepEqual(gates[1].checks, [{ total: 1, failed: 0, errored: 0 }])
 })

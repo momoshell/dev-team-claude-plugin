@@ -3692,6 +3692,7 @@ export function runCmd(args, deps = {}) {
     ...(crew.turn_ceilings ? { turnCeilings: crew.turn_ceilings } : {}),
     ...(reviewIdentity ? { review_identity: reviewIdentity } : {}),
     ...(filesInScope ? { files_in_scope: filesInScope } : {}),
+    ...chunkCtxFromArgs(args),
   }
   // Keep run identity available to the driver without making otherwise stable
   // context snapshots differ solely because each run has a fresh token.
@@ -4718,7 +4719,7 @@ export function parseArgs(argv) {
 
 export const KNOWN_FLAGS = Object.freeze({
   boot: Object.freeze(['task', 'checkout', 'roles', 'tier', 'fences', 'lane', 'headless', 'headless-rpc', 'headless-all', 'memory-dir', 'memory-backend', 'memory-budget-bytes', 'claude-bin', 'profile', 'assurance', 'roster', 'workflow', 'charter-arm', 'panel-distinct-agents', ...TURN_CEILING_FLAGS]),
-  run: Object.freeze(['task', 'checkout', 'brief-file', 'variant', 'execution', 'files-in-scope', 'validation-lane', 'lane', 'plan-rounds', 'build-rounds', 'review-rounds', 'review-base-sha', 'review-head-sha', ...WAIT_FLAGS, 'suite', 'keep', 'claude-bin']),
+  run: Object.freeze(['task', 'checkout', 'brief-file', 'variant', 'execution', 'files-in-scope', 'validation-lane', 'lane', 'plan-rounds', 'build-rounds', 'review-rounds', 'review-base-sha', 'review-head-sha', ...WAIT_FLAGS, 'suite', 'keep', 'claude-bin', 'chunked', 'chunk']),
   resume: Object.freeze(['task', 'checkout', 'suite', 'keep']),
   handoff: Object.freeze(['task', 'checkout', 'brief-file']),
   wait: Object.freeze(['task', 'checkout', 'timeout-s']),
@@ -4757,10 +4758,13 @@ export const FLAG_VALUE_CONTRACT = Object.freeze({
   // --keep is a switch: runCmd reads only its truthiness (:1887) to skip the
   // auto-teardown a done run would otherwise perform.
   keep: 'boolean',
+  // --chunked is a switch and --chunk carries the chunk id: a chunk lane runs the
+  // named chunk's scope with its owned checks, an ordinary lane carries neither.
+  chunked: 'boolean', chunk: 'value',
 })
 // The boolean flags, named and exported rather than inlined as exceptions, so
 // the argv matrix in crew/crew.test.mjs can be exhaustive by construction.
-const BOOLEAN_FLAG_NAMES = Object.freeze(['headless-all', 'keep', 'panel-distinct-agents'])
+const BOOLEAN_FLAG_NAMES = Object.freeze(['chunked', 'headless-all', 'keep', 'panel-distinct-agents'])
 export const BOOLEAN_FLAGS = Object.freeze(Object.keys(FLAG_VALUE_CONTRACT)
   .filter((flag) => BOOLEAN_FLAG_NAMES.includes(flag) && FLAG_VALUE_CONTRACT[flag] === 'boolean').sort())
 export const ROLE_FLAG_PREFIXES = Object.freeze(['model-', 'agent-', 'effort-', 'allow-shortfall-'])
@@ -4791,6 +4795,17 @@ export function paneTurnCeilingRefusals(paneRoles, resolved) {
 
 function usageRefusal(message) {
   return Object.assign(new UsageError(message), { reason: FLAG_VALUE_REFUSAL })
+}
+
+export function chunkCtxFromArgs(args = {}) {
+  const supplied = args && typeof args === 'object' ? args : {}
+  const raw = supplied.chunk
+  const hasChunk = raw !== undefined && raw !== null && String(raw).trim() !== ''
+  const hasChunked = supplied.chunked === true
+  if (hasChunk && !hasChunked) throw new UsageError('crew.mjs run --chunk names a chunk without --chunked: add --chunked to run the named chunk lane')
+  if (hasChunked && !hasChunk) throw new UsageError('crew.mjs run --chunked needs --chunk <id>: name the chunk this lane builds')
+  if (hasChunk && hasChunked) return { chunked: true, chunk: String(raw) }
+  return {}
 }
 
 export function assertUsage(verb, args) {

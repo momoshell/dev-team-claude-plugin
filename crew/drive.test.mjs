@@ -4,10 +4,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  B44_LEADLESS_CTX, adversarialPlanEnv, CENSUS_ROW_ABSENT, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_RUNS, CONVERGE_CTX, CONVERGE_GATE, CRASH_WHY, CTX, CTX_DIRECTED, CTX_REPAIR, CTX_TL, DEFAULT_VARIANT, DIRECTED_BRIEF_PATH, DIRECTED_BRIEF_TEXT, DIRECTED_FILES, DRIVE_JOURNAL_EXPECTED, D_ASK, D_AUTO, D_GREEN_GATE, D_PATCH_A, D_PATCH_B, D_PATCH_EMPTY_PATH, D_PATCH_MIXED_MODE, D_PATCH_MIXED_RENAME, D_RED_GATE, ENVELOPE_DEBRIS, GATE_CUSTODIAN, GATE_SUMMARY_PREFIX, HEALTHY_RESULT, JOURNAL_CHANNELS, JOURNAL_CHANNEL_NAMES, JUDGE_TIER, MAX_QUESTIONS, MODIFIER_OUTCOMES, PHASE_SLOT_WAIT_EVENT, PROTECTED_PATHS, RED, REPO_ROOT, REVIEWED_CORE_STAGES, S843_ADDED, S843_D2, S843_RUNS, SCOPE_REFUSALS, SEAT_REFUSAL_STAGE, SENSITIVITY_FLOOR, SHAPE_SOURCES, SKILL_NAMES, SUITE_SLOT_PHASES, SUITE_SLOT_PHASE_NAMES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, TRIAGE_SOURCES, TRIAGE_STAGES, TRIAGE_STAGE_HEAD, VARIANTS, VARIANT_NAMES, WAITS_S, WAIT_FLAGS, WAIT_REFUSALS, WAIT_ROLES, WAIT_SECONDS_MAX, WAIT_SECONDS_MIN, ZERO_CAPACITY_LOGS, ZERO_CAPACITY_RESULT, answerBounceLines, assertSeats, b127GatePaths, b127InvokeGate, b318Builders, b318ReviewGrants, b318SiteA, b318SiteB, b44AssertLeadlessGate, b44GateFixIo, b44GatePlan, b44MidRunRepairIo, baselineGateDefect, bothExhaustionPointsScenario, buildEnv, carveRun, checkEnv, checkFailureLine, closeoutIo, convergeIo, convergeRun, crashIo, crashRun, dApplyCommand, dAutoRows, dBuilders, dGitApplies, dLeads, dReviewEnv, deliberateRun, directSlotRun, dispositionIo, divergentPlanScenario, driveJournalSites, driveTask, enforcementPreamble, envelopeDefect, envelopeFieldsPresent, escalationStageRows, exhaustionAcceptIo, existsSync, fakeIo, fenceBase, fenceDiff, fenceSpan, gateReapCommand, guardedWrite, join, laneFence, laneFenceHits, laneProbeCommand, laneProbeKinds, leadEnv, matchAnswers, mkdirSync, normaliseJournalTimes, operationalRow, osCpus, parseDirectedBrief, parseGateSummary, parseQuestions, parseSuiteCounts, patchTargets, phaseTrace, planEnv, postCommitCrashRun, protectedPlanEnv, protectedReseatRefusal, questionConsultLines, readFileSync, reconEnv, recordRow, refuseWait, replayResumeStages, resolveProtectedPaths, resolveWaits, resumeDoneRows, resumeKeys, resumeStageRows, reviewEnv, rmSync, runChild, runCmd, runCmdFixture, s843Ctx, s843Io, s843PathsIn, s843PlanEnv, scopeBounceBrief, scopeMatcher, scopeRefusal, scratchDir, shapeDefect, shellArg, shellWords, slotCtx, slotFactory, sourcesDefect, spawnSync, stageEnabled, suiteRefusalEnv, throwAutoFixWrites, throwingWaitRun, tmpdir, traceLabels, triageEnv, undeclaredStage, validateScopeEntries, waitsCtx, waitsRecord, writeFileSync,
+  B44_LEADLESS_CTX, adversarialPlanEnv, CENSUS_ROW_ABSENT, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_RUNS, CHUNK_ACCEPTED_GATE, CHUNK_CTX, CHUNK_FILES, CHUNK_MUTATIONS, CHUNK_OWNERSHIP, CHUNK_PLAN, CHUNK_PROGRAM, CHUNK_PROOF_CTX, CHUNK_PROOF_FILES, CHUNK_PROOF_MUTATIONS, CHUNK_PROOF_OWNERSHIP, CHUNK_PROOF_PLAN, CHUNK_PROOF_PROGRAM, CHUNK_SCOPE, CONVERGE_CTX, CONVERGE_GATE, CRASH_WHY, CTX, CTX_DIRECTED, CTX_REPAIR, CTX_TL, DEFAULT_VARIANT, DIRECTED_BRIEF_PATH, DIRECTED_BRIEF_TEXT, DIRECTED_FILES, DRIVE_JOURNAL_EXPECTED, D_ASK, D_AUTO, D_GREEN_GATE, D_PATCH_A, D_PATCH_B, D_PATCH_EMPTY_PATH, D_PATCH_MIXED_MODE, D_PATCH_MIXED_RENAME, D_RED_GATE, ENVELOPE_DEBRIS, GATE_CUSTODIAN, GATE_SUMMARY_PREFIX, HEALTHY_RESULT, JOURNAL_CHANNELS, JOURNAL_CHANNEL_NAMES, JUDGE_TIER, MAX_QUESTIONS, MODIFIER_OUTCOMES, PHASE_SLOT_WAIT_EVENT, PROTECTED_PATHS, RED, REPO_ROOT, REVIEWED_CORE_STAGES, S843_ADDED, S843_D2, S843_RUNS, SCOPE_REFUSALS, SEAT_REFUSAL_STAGE, SENSITIVITY_FLOOR, SHAPE_SOURCES, SKILL_NAMES, SUITE_SLOT_PHASES, SUITE_SLOT_PHASE_NAMES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, TRIAGE_SOURCES, TRIAGE_STAGES, TRIAGE_STAGE_HEAD, VARIANTS, VARIANT_NAMES, WAITS_S, WAIT_FLAGS, WAIT_REFUSALS, WAIT_ROLES, WAIT_SECONDS_MAX, WAIT_SECONDS_MIN, ZERO_CAPACITY_LOGS, ZERO_CAPACITY_RESULT, answerBounceLines, assertSeats, b127GatePaths, b127InvokeGate, b318Builders, b318ReviewGrants, b318SiteA, b318SiteB, b44AssertLeadlessGate, b44GateFixIo, b44GatePlan, b44MidRunRepairIo, baselineGateDefect, bothExhaustionPointsScenario, buildEnv, carveRun, checkEnv, checkFailureLine, closeoutIo, convergeIo, convergeRun, crashIo, crashRun, dApplyCommand, dAutoRows, dBuilders, dGitApplies, dLeads, dReviewEnv, deliberateRun, directSlotRun, dispositionIo, divergentPlanScenario, driveJournalSites, driveTask, enforcementPreamble, envelopeDefect, envelopeFieldsPresent, escalationStageRows, exhaustionAcceptIo, existsSync, fakeIo, fenceBase, fenceDiff, fenceSpan, gateReapCommand, guardedWrite, join, laneFence, laneFenceHits, laneProbeCommand, laneProbeKinds, leadEnv, matchAnswers, mkdirSync, normaliseJournalTimes, operationalRow, osCpus, parseDirectedBrief, parseGateSummary, parseQuestions, parseSuiteCounts, patchTargets, phaseTrace, planEnv, postCommitCrashRun, protectedPlanEnv, protectedReseatRefusal, questionConsultLines, readFileSync, reconEnv, recordRow, refuseWait, replayResumeStages, resolveProtectedPaths, resolveWaits, resumeDoneRows, resumeKeys, resumeStageRows, reviewEnv, rmSync, runChild, runCmd, runCmdFixture, s843Ctx, s843Io, s843PathsIn, s843PlanEnv, scopeBounceBrief, scopeMatcher, scopeRefusal, scratchDir, shapeDefect, shellArg, shellWords, slotCtx, slotFactory, sourcesDefect, spawnSync, stageEnabled, suiteRefusalEnv, throwAutoFixWrites, throwingWaitRun, tmpdir, traceLabels, triageEnv, undeclaredStage, validateScopeEntries, waitsCtx, waitsRecord, writeFileSync,
 } from './drive-fixtures.mjs'
 import { envelopeFieldMetadataDefect as leafEnvelopeFieldMetadataDefect, EXECUTOR_TOPOLOGIES, SHAPE_DEFECT_CODES, shapeValidationDefect } from './shape-validator.mjs'
-import { ADVERSARY_REFUSAL, ADVERSARY_REFUSALS, ADVERSARY_TRIGGERS, CENSUS_CARRIER_FILES as RUNTIME_CENSUS_CARRIER_FILES, SCOPE_ADMISSION_SOURCES, SCOPE_REQUEST_KINDS, fenceScopeOf, fenceScopesIntersect, parseUnifiedZeroHunks, resolveAdversaryTrigger, scopeAdmissionDecision, scopeRequestOf, siblingSpanIntersects, suiteRedTestFiles, RESUME_CHECKPOINT_VERSION, RESUME_CHECKPOINT_FAMILIES, resumeCheckpointDefect, resumeTask, resumeWorktreeSha256 } from './drive.mjs'
+import { ADVERSARY_REFUSAL, ADVERSARY_REFUSALS, ADVERSARY_TRIGGERS, CENSUS_CARRIER_FILES as RUNTIME_CENSUS_CARRIER_FILES, SCOPE_ADMISSION_SOURCES, SCOPE_REQUEST_KINDS, fenceScopeOf, fenceScopesIntersect, parseUnifiedZeroHunks, resolveAdversaryTrigger, scopeAdmissionDecision, scopeRequestOf, siblingSpanIntersects, suiteRedTestFiles, adjudicateOwnedProof, chunkDeferredRows, chunkGateVerdict, chunkLedgerChecks, chunkLocalSummary, chunkOwnership, ownedMutations, ownedProofMatch, refuseChunkWithoutChunked, resolveChunkSelection, restoreChunkState, selectActiveChunk, storeChunkSummary, validateChunks, RESUME_CHECKPOINT_VERSION, RESUME_CHECKPOINT_FAMILIES, resumeCheckpointDefect, resumeTask, resumeWorktreeSha256 } from './drive.mjs'
 import { CENSUS_CARRIER_FILES as DISPATCH_CENSUS_CARRIER_FILES } from '../scripts/factory/dispatch-batch.mjs'
 import { ANTI_REPLAY_REFUSAL_REASONS, envelopeFieldMetadataDefect } from './drive.mjs'
 
@@ -3533,6 +3533,7 @@ function resumeCheckpointForTest(overrides = {}) {
     commit: { oid: 'abc1234', pending: false, files: ['a.mjs'], message: 'feat: resume\n\nCloses #42', subject: 'feat: resume' },
     proof: { gate_cmd: 'gate-cmd', gate_path: `${TD}/gate.mjs`, summary: { total: 1, failed: 0, errored: 0 }, discrimination: 'proven', generation: 1, repairs: 0 },
     suite: { cmd: 'custom-suite', warm: null, cold: null }, publish: { branch: null, base: null }, prior_stages: ['review:r1', 'commit'],
+    chunk: null,
   }
   return {
     ...base, ...overrides,
@@ -3546,7 +3547,7 @@ function resumeCheckpointForTest(overrides = {}) {
   }
 }
 
-const RESUME_CHECKPOINT_KEYS = ['version', 'kind', 'frozen_where', 'head_oid', 'tree', 'accepted_scope', 'returns', 'decision', 'commit', 'proof', 'suite', 'publish', 'prior_stages']
+const RESUME_CHECKPOINT_KEYS = ['version', 'kind', 'frozen_where', 'head_oid', 'tree', 'accepted_scope', 'returns', 'decision', 'commit', 'proof', 'suite', 'publish', 'prior_stages', 'chunk']
 
 test('resume checkpoint schema is complete for every supported terminal family', () => {
   assert.deepEqual(RESUME_CHECKPOINT_FAMILIES, ['gate', 'rebase', 'suite', 'publish'])
@@ -3730,4 +3731,476 @@ test('D1 missing assignment id remains tolerated', () => {
   const { io, ctx } = scopedIdentityFixture({ ...reconEnv(), run_id: 'run-1' })
   assert.doesNotThrow(() => driveTask(ctx, io))
   assert.equal(io.calls.logs.some((row) => row.envelope_refused), false)
+})
+// --- chunked build (driver half) ------------------------------------------------
+// A gate stub that adjudicates the A1/A2 lane from the LIVE tree (writeThrough
+// files): A1 fails while crew/a.mjs lacks its 'alpha' marker, A2 while
+// crew/b.mjs lacks 'beta'. The accepted tree is owned-green/foreign-red.
+const chunkGateFiles = () => ({ [`${CTX.checkout}/crew/a.mjs`]: 'alpha\n', [`${CTX.checkout}/crew/b.mjs`]: 'unrelated\n' })
+const chunkGateRun = (files, total = 2, seen = null) => (text, n, calls) => {
+  // The fake builder seat returns an envelope but materializes no bytes, so the
+  // stub keys the owned check on the build stage itself: red before the builder
+  // is assigned (pre-build tree, stashed/pristine tree) and marker-decided after,
+  // exactly as a writing builder would leave it. A content-only stub would model
+  // pre-existing work — the vacuous lane, which has its own test below.
+  const built = !!calls && Array.isArray(calls.assign) && calls.assign.some((entry) => entry.role === 'builder')
+  const fails = []
+  if (!built || !String(files[`${CTX.checkout}/crew/a.mjs`] ?? '').includes('alpha')) fails.push('FAIL A1: killed by mutation')
+  if (!String(files[`${CTX.checkout}/crew/b.mjs`] ?? '').includes('beta')) fails.push('FAIL A2: other red')
+  const result = { ok: fails.length === 0, output: [...fails, `GATE-SUMMARY {"total":${total},"failed":${fails.length},"errored":0}`].join('\n') }
+  if (seen) seen.push({ n, built, a: files[`${CTX.checkout}/crew/a.mjs`], b: files[`${CTX.checkout}/crew/b.mjs`], ok: result.ok })
+  return result
+}
+const chunkLaneIo = ({ plan = CHUNK_PLAN(), suite = { ok: true, output: '' }, extraRuns = {}, changed = ['crew/a.mjs'] } = {}) => {
+  const files = chunkGateFiles()
+  const seen = []
+  const gate = chunkGateRun(files, 2, seen)
+  const io = fakeIo({
+    files, writeThrough: true,
+    cleanRuns: { 'gate-cmd': { ok: false, output: `FAIL A1: stashed work\nFAIL A2: other red\nGATE-SUMMARY {"total":2,"failed":2,"errored":0}` } },
+    envelopes: { 'planner:1': plan, 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'gate-cmd': gate, 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': suite, ...extraRuns },
+    changed, emit: true,
+  })
+  return { io, files, seen }
+}
+
+test('chunk validateChunks accepts the canonical checks_owned program', () => {
+  const r = validateChunks(
+    { chunks: CHUNK_PROGRAM.map((chunk) => ({ ...chunk })) },
+    { scope: [...CHUNK_SCOPE], checkLabels: ['A1', 'A2'], mutations: [...CHUNK_MUTATIONS] },
+  )
+  assert.equal(r.defect, null)
+  assert.equal(r.chunks.length, 2)
+  assert.deepEqual(r.chunks[0].depends_on, [])
+  assert.deepEqual(r.exemptLabels, [])
+})
+
+test('chunk validateChunks refuses malformed programs with closed reasons', () => {
+  const scope = ['crew/a.mjs']
+  const labels = ['k']
+  const muts = [{ check: 'k', file: 'crew/a.mjs', find: 'x', replace: 'y' }]
+  const base = { id: 'c1', files_in_scope: ['crew/a.mjs'], checks_owned: ['k'] }
+  const check = (chunks, expected) => {
+    const r = validateChunks({ chunks }, { scope, checkLabels: labels, mutations: muts })
+    assert.equal(r.defect, expected, JSON.stringify(chunks))
+  }
+  check(null, 'chunks-not-array')
+  check([{ ...base, id: 'bad id!' }], 'chunk-id-invalid')
+  check([base, { ...base }], 'chunk-id-dup')
+  check([{ ...base, files_in_scope: ['crew/other.mjs'] }], 'chunk-files-outside-plan')
+  check([{ ...base, files_in_scope: [] }], 'chunk-files-outside-plan')
+  check([{ ...base, checks_owned: 'k' }], 'chunk-checks-not-array')
+  check([{ ...base, checks_owned: [] }], 'chunk-checks-not-array')
+  check([{ ...base, checks_owned: ['nope'] }], 'chunk-checks-not-array')
+  check([{ id: 'c1', files_in_scope: ['crew/a.mjs'], checks: ['k'] }], 'chunk-checks-not-array')
+  check([{ ...base, depends_on: null }], 'chunk-dep-not-array')
+  check([{ ...base, depends_on: 'c1' }], 'chunk-dep-not-array')
+  check([{ ...base, depends_on: ['ghost'] }], 'chunk-dep-unknown')
+  check([
+    { ...base, id: 'c1', depends_on: ['c2'] },
+    { ...base, id: 'c2' },
+  ], 'chunk-dep-forward')
+  check([{ ...base, checks_owned: ['k'] }, { id: 'c2', files_in_scope: ['crew/a.mjs'], checks_owned: ['k'] }], 'chunk-check-double-owned')
+})
+
+test('chunk validateChunks enforces all-and-only ownership with an exempt third bucket', () => {
+  const scope = ['crew/a.mjs', 'crew/b.mjs']
+  const muts = [
+    { check: 'A1', file: 'crew/a.mjs', find: 'x', replace: 'y' },
+    { check: 'A2', file: 'crew/b.mjs', find: 'x', replace: 'y' },
+    { check: 'X1', exempt: 'not applicable to this lane' },
+  ]
+  const labels = ['A1', 'A2', 'X1']
+  const owned = [
+    { id: 'c1', files_in_scope: ['crew/a.mjs'], checks_owned: ['A1'] },
+    { id: 'c2', files_in_scope: ['crew/b.mjs'], checks_owned: ['A2'] },
+  ]
+  const accepted = validateChunks({ chunks: owned }, { scope, checkLabels: labels, mutations: muts })
+  assert.equal(accepted.defect, null)
+  assert.deepEqual(accepted.exemptLabels, ['X1'])
+  const missing = validateChunks({ chunks: [owned[0]] }, { scope, checkLabels: labels, mutations: muts })
+  assert.equal(missing.defect, 'chunk-check-unowned')
+  const exemptOwned = validateChunks(
+    { chunks: [owned[0], { id: 'c2', files_in_scope: ['crew/b.mjs'], checks_owned: ['A2', 'X1'] }] },
+    { scope, checkLabels: labels, mutations: muts },
+  )
+  assert.equal(exemptOwned.defect, 'chunk-check-unknown')
+})
+
+test('chunk validateChunks refuses an unbuildable first chunk', () => {
+  const scope = ['crew/a.mjs', 'crew/b.mjs']
+  const labels = ['A1', 'A2']
+  const muts = [
+    { check: 'A1', file: 'crew/a.mjs', find: 'x', replace: 'y' },
+    { check: 'A2', file: 'crew/b.mjs', find: 'x', replace: 'y' },
+  ]
+  const withDep = validateChunks({ chunks: [
+    { id: 'c1', files_in_scope: ['crew/a.mjs'], checks_owned: ['A1'], depends_on: ['c2'] },
+    { id: 'c2', files_in_scope: ['crew/b.mjs'], checks_owned: ['A2'] },
+  ] }, { scope, checkLabels: labels, mutations: muts })
+  assert.equal(withDep.defect, 'chunk-dep-forward')
+  const narrowFirst = validateChunks({ chunks: [
+    { id: 'c1', files_in_scope: ['crew/other.mjs'], checks_owned: ['A1'] },
+    { id: 'c2', files_in_scope: ['crew/b.mjs'], checks_owned: ['A2'] },
+  ] }, { scope: [...scope, 'crew/other.mjs'], checkLabels: labels, mutations: muts })
+  assert.equal(narrowFirst.defect, 'chunk-first-unbuildable')
+})
+
+test('chunk selection refuses without --chunked, unknown chunks, and chunkless plans', () => {
+  assert.deepEqual(refuseChunkWithoutChunked({ chunk: 'c1' }, null), { defect: 'chunk-without-chunked', why: 'ctx names chunk "c1" without --chunked' })
+  assert.equal(refuseChunkWithoutChunked({}, null), null)
+  assert.equal(refuseChunkWithoutChunked({ chunked: true, chunk: 'c1' }, [{ id: 'c1' }]), null)
+  assert.deepEqual(resolveChunkSelection({ chunk: 'c9', chunked: true }, [{ id: 'c1' }]).defect, 'chunk-unknown')
+  assert.deepEqual(resolveChunkSelection({ chunk: 'c1', chunked: true }, [{ id: 'c1' }]), { id: 'c1' })
+  assert.deepEqual(selectActiveChunk({ chunk: 'c2', chunked: true }, null).defect, 'chunk-unknown')
+  assert.deepEqual(selectActiveChunk({ chunk: 'c2', chunked: true }, []).defect, 'chunk-unknown')
+  assert.deepEqual(selectActiveChunk({ chunk: 'c1', chunked: true }, [{ id: 'c1' }]), { id: 'c1' })
+  assert.equal(selectActiveChunk({}, null), null)
+  assert.equal(selectActiveChunk({ chunk: 'c1' }, [{ id: 'c1' }]), null)
+})
+
+test('chunk acceptance selects through selectActiveChunk with no validatedChunks short-circuit', () => {
+  const source = readFileSync(new URL('./drive.mjs', import.meta.url), 'utf8')
+  assert.ok(source.includes('selectActiveChunk(ctx, validatedChunks)'))
+  assert.equal(source.includes('validatedChunks &&'), false)
+})
+
+test('chunk verdict adjudicates owned-green/foreign-red and fails closed', () => {
+  const ownership = { chunk: 'c1', owned: ['A1'], owners: { A2: 'c2' } }
+  const green = chunkGateVerdict(CHUNK_ACCEPTED_GATE, ownership)
+  assert.equal(green.ok, true)
+  assert.deepEqual(green.deferred, [{ check: 'A2', status: 'owned-by:c2' }])
+  assert.deepEqual(chunkDeferredRows(CHUNK_ACCEPTED_GATE, ownership), [{ check: 'A2', status: 'owned-by:c2' }])
+  assert.deepEqual(chunkLedgerChecks({ id: 'c1', owned: 1, deferred: 1 }, green.deferred),
+    [{ id: 'c1', owned: 1, deferred: 1 }, { check: 'A2', status: 'owned-by:c2' }])
+  assert.equal(chunkGateVerdict(CHUNK_ACCEPTED_GATE, null), null)
+  assert.equal(refuseChunkWithoutChunked({}, null), null)
+  const mystery = chunkGateVerdict(
+    `FAIL mystery: boom\nGATE-SUMMARY {"total":2,"failed":1,"errored":0}`, ownership)
+  assert.equal(mystery.ok, false)
+  assert.equal(mystery.defect, 'chunk-fail-unowned')
+  const unmeasured = chunkGateVerdict('no summary here', ownership)
+  assert.equal(unmeasured.ok, false)
+  const malformed = chunkGateVerdict(CHUNK_ACCEPTED_GATE, { chunk: 'c1' })
+  assert.equal(malformed.ok, false)
+  assert.equal(malformed.defect, 'chunk-ownership-malformed')
+})
+
+test('chunk verdict counts an exempt third bucket but refuses its FAILs', () => {
+  const ownership = { chunk: 'c1', owned: ['a'], owners: { f: 'c9' }, exempt: ['x1'] }
+  const green = chunkGateVerdict(`FAIL f: other red\nGATE-SUMMARY {"total":3,"failed":1,"errored":0}`, ownership)
+  assert.equal(green.ok, true)
+  const bad = chunkGateVerdict(`FAIL x1: boom\nGATE-SUMMARY {"total":3,"failed":1,"errored":0}`, ownership)
+  assert.equal(bad.ok, false)
+  assert.equal(bad.defect, 'chunk-fail-exempt')
+})
+
+test('chunk refusal carries the deferred owned-by rows it persists', () => {
+  const ownership = { chunk: 'c1', owned: ['a'], owners: { k2: 'c2' } }
+  const output = `FAIL mystery: boom\nFAIL k2: other red\nGATE-SUMMARY {"total":2,"failed":2,"errored":0}`
+  const v = chunkGateVerdict(output, ownership)
+  const rows = chunkDeferredRows(output, ownership)
+  assert.deepEqual(rows, [{ check: 'k2', status: 'owned-by:c2' }])
+  assert.deepEqual(v.deferred, rows)
+})
+
+test('chunk summary seam protects accepted counts from proof runs', () => {
+  const state = { summary: { id: 'c1', owned: 1, deferred: 1 } }
+  storeChunkSummary(state, { id: 'c1', owned: 1, deferred: 0 }, true)
+  assert.deepEqual(state.summary, { id: 'c1', owned: 1, deferred: 1 })
+  storeChunkSummary(state, { id: 'c1', owned: 1, deferred: 0 }, false)
+  assert.deepEqual(state.summary, { id: 'c1', owned: 1, deferred: 0 })
+})
+
+test('chunk helpers shape ownership, summaries, and proof scope', () => {
+  assert.deepEqual(chunkOwnership(CHUNK_PROGRAM, 'c1', []),
+    { chunk: 'c1', owned: ['A1'], owners: { A2: 'c2' }, exempt: [] })
+  assert.deepEqual(chunkOwnership(CHUNK_PROGRAM, 'c1', ['X1']).exempt, ['X1'])
+  assert.deepEqual(chunkLocalSummary({ chunk: 'c2', owned: ['a'], deferred: [{ check: 'f', status: 'owned-by:c9' }] }),
+    { id: 'c2', owned: 1, deferred: 1 })
+  assert.deepEqual(ownedMutations([...CHUNK_MUTATIONS, { check: 'X1', exempt: 'why' }], ['A1']), [CHUNK_MUTATIONS[0]])
+  const output = `FAIL A1: killed by mutation\nTHREW A2: boom\nGATE-SUMMARY {"total":2,"failed":1,"errored":1}`
+  assert.equal(adjudicateOwnedProof(output, 'A1'), 'killed')
+  assert.equal(ownedProofMatch(output, 'A1'), 'matched')
+  assert.equal(ownedProofMatch('green', 'A1'), 'unmatched')
+  const restored = restoreChunkState({ version: 2, chunk: { id: 'c2', owned: ['a'], owners: { f: 'c9' }, summary: { id: 'c2', owned: 1, deferred: 1 } } })
+  assert.equal(restored.activeChunk, 'c2')
+  assert.deepEqual(restored.owned, ['a'])
+  assert.deepEqual(restored.owners, { f: 'c9' })
+  assert.equal(restoreChunkState({ version: 2, chunk: null }), null)
+})
+
+test('chunk lane completes owned-green/foreign-red with the local summary on journal and events', () => {
+  const { io, seen } = chunkLaneIo()
+  const result = driveTask({ ...CHUNK_CTX, head: 'abc1234' }, io)
+  assert.equal(result.status, 'done', JSON.stringify({ escalation: result.details.escalation, gateCalls: seen, runs: io.calls.run }))
+  const expected = { id: 'c1', owned: 1, deferred: 1 }
+  const gateEvents = io.calls.emits.filter((event) => event.kind === 'gate' && event.chunk)
+  assert.ok(gateEvents.length > 0)
+  for (const event of gateEvents) assert.deepEqual(event.chunk.summary, expected)
+  const laneRows = io.calls.logs.filter((row) => row.chunk_lane)
+  assert.ok(laneRows.length > 0)
+  for (const row of laneRows) assert.deepEqual(row.chunk_lane.summary, expected)
+  const builderAssign = io.calls.assign.find(({ role }) => role === 'builder')
+  assert.deepEqual(builderAssign.policy.fence, ['crew/a.mjs'])
+  const discriminations = io.calls.logs.filter((row) => row.gate_check_discrimination)
+  assert.ok(discriminations.length > 0)
+  for (const row of discriminations) {
+    assert.deepEqual(row.gate_check_discriminations.map((entry) => entry.check), ['A1'])
+    assert.deepEqual(row.gate_check_discriminations.map((entry) => entry.outcome), ['killed'])
+  }
+  const baselineRows = io.calls.logs.filter((row) => row.gate_discrimination)
+  assert.ok(baselineRows.some((row) => row.gate_discrimination === 'proven'))
+})
+
+test('chunk lane with an owned-red gate escalates instead of completing', () => {
+  const files = chunkGateFiles()
+  const gate = () => ({ ok: false, output: `FAIL A1: owned red\nFAIL A2: other red\nGATE-SUMMARY {"total":2,"failed":2,"errored":0}` })
+  const io = fakeIo({
+    files, writeThrough: true,
+    cleanRuns: { 'gate-cmd': gate() },
+    envelopes: { 'planner:1': CHUNK_PLAN(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'gate-cmd': gate, 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['crew/a.mjs'], emit: true,
+  })
+  const result = driveTask({ ...CHUNK_CTX, head: 'abc1234' }, io)
+  assert.equal(result.status, 'escalation')
+})
+
+test('chunk guard refuses a named chunk without --chunked before any build', () => {
+  const io = fakeIo({ envelopes: { 'planner:1': CHUNK_PLAN() } })
+  const result = driveTask({ ...CTX, chunk: 'c1' }, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'plan-chunks')
+  assert.match(result.details.escalation.why, /chunk-without-chunked/)
+  assert.equal(io.calls.assign.some(({ role }) => role === 'builder'), false)
+})
+
+test('chunk acceptance refuses an unknown chunk before any build', () => {
+  const io = fakeIo({ envelopes: { 'planner:1': CHUNK_PLAN() } })
+  const result = driveTask({ ...CTX, chunked: true, chunk: 'c9' }, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'plan-chunks')
+  assert.match(result.details.escalation.why, /chunk-unknown/)
+  assert.equal(io.calls.assign.some(({ role }) => role === 'builder'), false)
+})
+
+test('chunk lanes leave ordinary runs without a chunk key', () => {
+  const io = fakeIo({
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'done')
+  for (const blob of [result, io.calls.emits, io.calls.logs]) {
+    assert.doesNotMatch(JSON.stringify(blob), /chunk/)
+  }
+})
+
+test('chunk lane proves an exemption reaches the verdict and completes green', () => {
+  const plan = CHUNK_PLAN([...CHUNK_MUTATIONS, { check: 'X1', exempt: 'not applicable to this lane' }])
+  const files = chunkGateFiles()
+  const gate = chunkGateRun(files, 3)
+  const io = fakeIo({
+    files, writeThrough: true,
+    cleanRuns: { 'gate-cmd': { ok: false, output: `FAIL A1: stashed work\nFAIL A2: other red\nGATE-SUMMARY {"total":3,"failed":2,"errored":0}` } },
+    envelopes: { 'planner:1': plan, 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'gate-cmd': gate, 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['crew/a.mjs'], emit: true,
+  })
+  const result = driveTask({ ...CHUNK_CTX, head: 'abc1234' }, io)
+  assert.equal(result.status, 'done')
+  const laneRows = io.calls.logs.filter((row) => row.chunk_lane)
+  assert.ok(laneRows.length > 0)
+  assert.deepEqual(laneRows.at(-1).chunk_lane.summary, { id: 'c1', owned: 1, deferred: 1 })
+})
+
+test('chunk proof runs cannot replace the accepted checkpoint summary', () => {
+  const files = {
+    [`${CTX.checkout}/crew/a.mjs`]: 'a-ok\n',
+    [`${CTX.checkout}/crew/b.mjs`]: 'f-marker\n',
+  }
+  const gate = (text, n, calls) => {
+    const built = !!calls && Array.isArray(calls.assign) && calls.assign.some((entry) => entry.role === 'builder')
+    const fails = []
+    if (!built || !String(files[`${CTX.checkout}/crew/a.mjs`] ?? '').includes('a-ok')) fails.push('FAIL a: missing a-ok')
+    if (!String(files[`${CTX.checkout}/crew/b.mjs`] ?? '').includes('f-ok')) fails.push('FAIL f: missing f-ok')
+    return { ok: fails.length === 0, output: [...fails, 'GATE-SUMMARY {"total":2,"failed":1,"errored":0}'.replace('"failed":1', `"failed":${fails.length}`)].join('\n') }
+  }
+  const io = fakeIo({
+    files, writeThrough: true,
+    cleanRuns: { 'gate-cmd': { ok: false, output: `FAIL a: missing a-ok\nFAIL f: missing f-ok\nGATE-SUMMARY {"total":2,"failed":2,"errored":0}` } },
+    envelopes: { 'planner:1': CHUNK_PROOF_PLAN(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: {
+      'gate-cmd': gate, 'lane-cmd': { ok: true, output: '' },
+      'suite-cmd': { ok: false, output: 'suite red' },
+      'git write-tree': { ok: true, output: 'tree1234\n' },
+    },
+    changed: ['crew/a.mjs'], emit: true,
+  })
+  io.fingerprintTree = () => ({ measured: true, entries: { 'crew/a.mjs': `file:-:${'a'.repeat(64)}` } })
+  const result = driveTask({ ...CHUNK_PROOF_CTX, head: 'abc1234' }, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'suite')
+  assert.deepEqual(result.details.resume_checkpoint.chunk.summary, { id: 'c1', owned: 1, deferred: 1 })
+  assert.equal(resumeCheckpointDefect(result.details.resume_checkpoint), null)
+  const rows = io.calls.logs.filter((row) => row.gate_check_discrimination)
+  assert.ok(rows.some((row) => (row.gate_check_discriminations || []).some((entry) => entry.check === 'a' && entry.outcome === 'killed')))
+})
+
+test('chunk completing lane publishes the accepted counts in the PR body', () => {
+  const files = {
+    [`${CTX.checkout}/crew/a.mjs`]: 'a-ok\n',
+    [`${CTX.checkout}/crew/b.mjs`]: 'f-marker\n',
+  }
+  const gate = (text, n, calls) => {
+    const built = !!calls && Array.isArray(calls.assign) && calls.assign.some((entry) => entry.role === 'builder')
+    const fails = []
+    if (!built || !String(files[`${CTX.checkout}/crew/a.mjs`] ?? '').includes('a-ok')) fails.push('FAIL a: missing a-ok')
+    if (!String(files[`${CTX.checkout}/crew/b.mjs`] ?? '').includes('f-ok')) fails.push('FAIL f: missing f-ok')
+    return { ok: fails.length === 0, output: [...fails, `GATE-SUMMARY {"total":2,"failed":${fails.length},"errored":0}`].join('\n') }
+  }
+  const branch = 'feature/chunk'
+  const io = fakeIo({
+    files, writeThrough: true,
+    cleanRuns: { 'gate-cmd': { ok: false, output: `FAIL a: missing a-ok\nFAIL f: missing f-ok\nGATE-SUMMARY {"total":2,"failed":2,"errored":0}` } },
+    envelopes: { 'planner:1': CHUNK_PROOF_PLAN(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: {
+      'gate-cmd': gate, 'lane-cmd': { ok: true, output: '' },
+      'suite-cmd': { ok: true, output: '# pass 1\n# fail 0\n' },
+      'git write-tree': { ok: true, output: 'tree1234\n' },
+      'git fetch origin main': { ok: true, output: '' },
+      'git rev-parse origin/main': { ok: true, output: 'base1111\n' },
+      'git merge-base HEAD origin/main': { ok: true, output: 'base1111\n' },
+      'git rev-parse HEAD': { ok: true, output: 'abc1234\n' },
+      'command -v gh': { ok: true, output: '/usr/bin/gh\n' },
+      'gh auth status': { ok: true, output: 'logged in\n' },
+    },
+    changed: ['crew/a.mjs'], emit: true,
+    cold: { ok: true, output: '# pass 1\n# fail 0\n', path: '/zz/aa11bb', kept: null },
+  })
+  io.fingerprintTree = () => ({ measured: true, entries: { 'crew/a.mjs': `file:-:${'a'.repeat(64)}` } })
+  const baseRun = io.run.bind(io)
+  io.run = function (cmd) {
+    const text = String(cmd)
+    if (text.startsWith('gh pr view ')) return { ok: false, output: 'no pull requests found for this branch\n' }
+    if (text.startsWith('gh pr create ')) return { ok: true, output: 'https://github.com/o/r/pull/42\n' }
+    return baseRun(cmd)
+  }
+  const result = driveTask({ ...CHUNK_PROOF_CTX, head: 'abc1234', publish: { branch } }, io)
+  assert.equal(result.status, 'done', JSON.stringify(result.details.escalation))
+  const body = io.calls.writes[`${TD}/pr-body.md`]
+  assert.match(body, /Chunk c1: 1 owned, 1 deferred/)
+})
+
+test('chunk vacuous baseline bounces an owned-green gate before any build', () => {
+  // RV1-1 guard: the work the owned check looks for already exists, so the
+  // pre-build baseline is owned-green/foreign-red. The fold must turn that
+  // into baseline.ok true so the vacuous-gate green-bounce fires instead of
+  // building against a gate that measures nothing. A content-only stub models
+  // the pre-existing work here; without the fold the lane would complete.
+  const files = chunkGateFiles()
+  const gate = () => ({ ok: false, output: `FAIL A2: other red\nGATE-SUMMARY {"total":2,"failed":1,"errored":0}` })
+  const io = fakeIo({
+    files, writeThrough: true,
+    envelopes: { 'planner:1': CHUNK_PLAN() },
+    runs: { 'gate-cmd': gate, 'lane-cmd': { ok: true, output: '' } },
+    changed: ['crew/a.mjs'],
+  })
+  const result = driveTask({ ...CHUNK_CTX, head: 'abc1234' }, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'lead')
+  assert.equal(io.calls.assign.some(({ role }) => role === 'builder'), false)
+})
+
+test('chunk foreign throw during owned proof still adjudicates killed', () => {
+  // RV1-2 guard: the foreign check THROWS while the owned mutation is under
+  // proof. The aggregate summary carries errored:1, which must not turn the
+  // demonstrably killed owned mutation into an errored survivor.
+  const files = {
+    [`${CTX.checkout}/crew/a.mjs`]: 'a-ok\n',
+    [`${CTX.checkout}/crew/b.mjs`]: 'f-marker\n',
+  }
+  const gate = (text, n, calls) => {
+    const built = !!calls && Array.isArray(calls.assign) && calls.assign.some((entry) => entry.role === 'builder')
+    const a = String(files[`${CTX.checkout}/crew/a.mjs`] ?? '')
+    const fails = []
+    if (!built || !a.includes('a-ok')) fails.push('FAIL a: missing a-ok')
+    const threw = a.includes('f-ok') ? ['THREW f: boom'] : []
+    if (!a.includes('f-ok')) fails.push('FAIL f: missing f-ok')
+    const errored = threw.length > 0 ? 1 : 0
+    return { ok: fails.length === 0 && errored === 0, output: [...fails, ...threw, `GATE-SUMMARY {"total":2,"failed":${fails.length},"errored":${errored}}`].join('\n') }
+  }
+  const io = fakeIo({
+    files, writeThrough: true,
+    cleanRuns: { 'gate-cmd': { ok: false, output: `FAIL a: missing a-ok\nFAIL f: missing f-ok\nGATE-SUMMARY {"total":2,"failed":2,"errored":0}` } },
+    envelopes: { 'planner:1': CHUNK_PROOF_PLAN(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'gate-cmd': gate, 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['crew/a.mjs'], emit: true,
+  })
+  const result = driveTask({ ...CHUNK_PROOF_CTX, head: 'abc1234' }, io)
+  assert.equal(result.status, 'done', JSON.stringify(result.details.escalation))
+  const rows = io.calls.logs.filter((row) => row.gate_check_discrimination)
+  assert.ok(rows.some((row) => (row.gate_check_discriminations || []).some((entry) => entry.check === 'a' && entry.outcome === 'killed' && entry.match === 'matched')))
+})
+
+test('chunk single-chunk lane keeps a resumable checkpoint', () => {
+  // RV1-3 guard: one chunk owns every check, so owners is {}. The escalation
+  // checkpoint must still validate and carry the persisted summary instead of
+  // being silently dropped by the validator.
+  const files = { [`${CTX.checkout}/crew/a.mjs`]: 'alpha\n' }
+  const gate = (text, n, calls) => {
+    const built = !!calls && Array.isArray(calls.assign) && calls.assign.some((entry) => entry.role === 'builder')
+    const fails = []
+    if (!built || !String(files[`${CTX.checkout}/crew/a.mjs`] ?? '').includes('alpha')) fails.push('FAIL A1: missing')
+    return { ok: fails.length === 0, output: [...fails, `GATE-SUMMARY {"total":1,"failed":${fails.length},"errored":0}`].join('\n') }
+  }
+  const plan = planEnv({
+    details: {
+      ...planEnv().details, files_in_scope: ['crew/a.mjs'], gate_cmd: 'gate-cmd',
+      mutations: [{ check: 'A1', file: 'crew/a.mjs', find: 'alpha', replace: 'ALPHA' }],
+      chunks: [{ id: 'c1', files_in_scope: ['crew/a.mjs'], checks_owned: ['A1'] }],
+    },
+  })
+  const io = fakeIo({
+    files, writeThrough: true,
+    cleanRuns: { 'gate-cmd': { ok: false, output: `FAIL A1: missing\nGATE-SUMMARY {"total":1,"failed":1,"errored":0}` } },
+    envelopes: { 'planner:1': plan, 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: {
+      'gate-cmd': gate, 'lane-cmd': { ok: true, output: '' },
+      'suite-cmd': { ok: false, output: 'suite red' },
+      'git write-tree': { ok: true, output: 'tree1234\n' },
+    },
+    changed: ['crew/a.mjs'], emit: true,
+  })
+  io.fingerprintTree = () => ({ measured: true, entries: { 'crew/a.mjs': `file:-:${'a'.repeat(64)}` } })
+  const result = driveTask({ ...CTX, chunked: true, chunk: 'c1', head: 'abc1234' }, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'suite')
+  assert.deepEqual(result.details.resume_checkpoint.chunk.summary, { id: 'c1', owned: 1, deferred: 0 })
+  assert.equal(resumeCheckpointDefect(result.details.resume_checkpoint), null)
+})
+
+test('chunk resume adjudicates the resumed gate through restored ownership', () => {
+  const treeFile = { path: 'crew/a.mjs', state: 'present', bytes: `file:-:${'a'.repeat(64)}` }
+  const checkpoint = resumeCheckpointForTest({
+    kind: 'gate', frozen_where: 'gate',
+    accepted_scope: ['crew/a.mjs'],
+    tree: { index_oid: 'tree1234', files: [treeFile], worktree_sha256: resumeWorktreeSha256([treeFile]) },
+    chunk: { id: 'c1', owned: ['A1'], owners: { A2: 'c2' }, exempt: [], summary: { id: 'c1', owned: 1, deferred: 1 } },
+    commit: { oid: null, pending: true, files: ['crew/a.mjs'], message: 'feat: chunk', subject: 'feat: chunk' },
+    proof: { gate_cmd: 'gate-cmd', gate_path: `${TD}/gate.mjs`, summary: { total: 2, failed: 1, errored: 0 }, discrimination: 'proven', generation: 1, repairs: 0 },
+    suite: { cmd: 'suite-cmd', warm: null, cold: null },
+  })
+  assert.equal(resumeCheckpointDefect(checkpoint), null)
+  const io = fakeIo({
+    runs: {
+      'gate-cmd': { ok: false, output: CHUNK_ACCEPTED_GATE },
+      'suite-cmd': { ok: true, output: '' },
+    },
+  })
+  const result = resumeTask({ ...CTX, task: 'resume-chunk', files_in_scope: ['crew/a.mjs'] }, io, checkpoint)
+  assert.equal(result.status, 'done')
 })

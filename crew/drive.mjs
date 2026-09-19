@@ -2464,6 +2464,197 @@ export function scopeMatcher(entries) {
     : repoRelativePath === entry)
 }
 
+// --- chunked build (driver half) -------------------------------------------------
+// A chunked plan splits the parent scope into chunks, each owning a subset of the
+// gate checks. The driver validates the program at plan acceptance, selects the
+// active chunk for --chunked lanes, narrows the builder fence to its files, and
+// adjudicates the gate per owned check, failing closed on anything unattributed.
+// Exempt labels are a third accounting bucket: real declarations excluded from
+// ownership, counted in the total, and refused behind their own guard when red.
+export const CHUNK_ID = /^[A-Za-z0-9._-]{1,64}$/
+const chunkIdValid = (id) => typeof id === 'string' && CHUNK_ID.test(id) && id !== '.' && id !== '..'
+
+export function validateChunks(details, { scope = [], checkLabels = [], mutations = [] } = {}) {
+  const program = details && typeof details === 'object' && !Array.isArray(details) ? details.chunks : undefined
+  if (!Array.isArray(program)) return { chunks: [], exemptLabels: [], defect: 'chunks-not-array', why: 'plan chunks field is not an array' }
+  const declared = Array.isArray(mutations) ? mutations : []
+  const exemptLabels = []
+  for (const mutation of declared) {
+    if (mutation && typeof mutation === 'object' && Object.prototype.hasOwnProperty.call(mutation, 'exempt')
+      && typeof mutation.check === 'string' && mutation.check.length > 0) exemptLabels.push(mutation.check)
+  }
+  const ownable = new Set()
+  for (const mutation of declared) {
+    if (mutation && typeof mutation === 'object' && !Object.prototype.hasOwnProperty.call(mutation, 'exempt')
+      && typeof mutation.check === 'string') ownable.add(mutation.check)
+  }
+  const planScope = Array.isArray(scope) ? scope : []
+  const chunkFileCovered = scopeMatcher(planScope)
+  const labels = Array.isArray(checkLabels) ? checkLabels : []
+  const ids = new Set()
+  const chunks = []
+  for (const entry of program) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return { chunks: [], exemptLabels, defect: 'chunk-id-invalid', why: 'chunk entry must be an object' }
+    const chunk = { ...entry }
+    if (!chunkIdValid(chunk.id)) return { chunks: [], exemptLabels, defect: 'chunk-id-invalid', why: `chunk id is invalid: ${JSON.stringify(chunk.id)}` }
+    if (ids.has(chunk.id)) return { chunks: [], exemptLabels, defect: 'chunk-id-dup', why: `duplicate chunk id: ${chunk.id}` }
+    ids.add(chunk.id)
+    if (!Array.isArray(chunk.files_in_scope) || chunk.files_in_scope.length === 0
+      || validateScopeEntries(chunk.files_in_scope).length > 0 || !chunk.files_in_scope.every(chunkFileCovered)) {
+      return { chunks: [], exemptLabels, defect: 'chunk-files-outside-plan', why: `chunk ${chunk.id} files_in_scope is outside the plan scope` }
+    }
+    if (!Array.isArray(chunk.checks_owned) || chunk.checks_owned.length === 0
+      || !chunk.checks_owned.every((label) => labels.includes(label))) {
+      return { chunks: [], exemptLabels, defect: 'chunk-checks-not-array', why: `chunk ${chunk.id} checks_owned must be a non-empty array of declared gate labels` }
+    }
+    if (chunk.depends_on === undefined) chunk.depends_on = []
+    if (!Array.isArray(chunk.depends_on)) return { chunks: [], exemptLabels, defect: 'chunk-dep-not-array', why: `chunk ${chunk.id} depends_on must be an array` }
+    chunks.push(chunk)
+  }
+  const orderOf = new Map(chunks.map((chunk, index) => [chunk.id, index]))
+  for (const [index, chunk] of chunks.entries()) {
+    for (const dep of chunk.depends_on) {
+      if (typeof dep !== 'string' || !orderOf.has(dep)) return { chunks: [], exemptLabels, defect: 'chunk-dep-unknown', why: `chunk ${chunk.id} depends on unknown chunk ${JSON.stringify(dep)}` }
+      if (orderOf.get(dep) >= index) return { chunks: [], exemptLabels, defect: 'chunk-dep-forward', why: `chunk ${chunk.id} depends on forward chunk ${dep}` }
+    }
+  }
+  const ownershipCount = new Map()
+  for (const chunk of chunks) {
+    for (const label of chunk.checks_owned) {
+      if (!ownable.has(label)) return { chunks: [], exemptLabels, defect: 'chunk-check-unknown', why: `chunk ${chunk.id} owns unownable check ${label}` }
+      ownershipCount.set(label, (ownershipCount.get(label) || 0) + 1)
+    }
+  }
+  for (const label of ownable) {
+    const count = ownershipCount.get(label) || 0
+    if (count === 0) return { chunks: [], exemptLabels, defect: 'chunk-check-unowned', why: `check ${label} is owned by no chunk` }
+    if (count > 1) return { chunks: [], exemptLabels, defect: 'chunk-check-double-owned', why: `check ${label} is owned by more than one chunk` }
+  }
+  if (chunks.length > 0) {
+    const first = chunks[0]
+    if (first.depends_on.length > 0) return { chunks: [], exemptLabels, defect: 'chunk-first-unbuildable', why: `first chunk ${first.id} must have no dependencies` }
+    const firstCovered = scopeMatcher(first.files_in_scope)
+    for (const label of first.checks_owned) {
+      for (const mutation of declared) {
+        if (mutation && typeof mutation === 'object' && !Object.prototype.hasOwnProperty.call(mutation, 'exempt')
+          && mutation.check === label && typeof mutation.file === 'string' && !firstCovered(mutation.file)) {
+          return { chunks: [], exemptLabels, defect: 'chunk-first-unbuildable', why: `first chunk ${first.id} cannot build proof file ${mutation.file} for owned check ${label}` }
+        }
+      }
+    }
+  }
+  return { chunks, exemptLabels, defect: null, why: null }
+}
+
+export function refuseChunkWithoutChunked(ctx, planChunks) {
+  if (ctx.chunk != null && ctx.chunked !== true) return { defect: 'chunk-without-chunked', why: `ctx names chunk ${JSON.stringify(ctx.chunk)} without --chunked` }
+  return null
+}
+
+export function resolveChunkSelection(ctx, validatedChunks) {
+  const selectedChunk = validatedChunks.find((entry) => entry.id === ctx.chunk)
+  if (!selectedChunk) return { defect: 'chunk-unknown', why: `unknown chunk ${ctx.chunk}` }
+  return selectedChunk
+}
+
+export function selectActiveChunk(ctx, validatedChunks) {
+  if (ctx.chunk == null || ctx.chunked !== true) return null
+  if (!Array.isArray(validatedChunks) || validatedChunks.length === 0) return { defect: 'chunk-unknown', why: 'plan declares no chunks' }
+  return resolveChunkSelection(ctx, validatedChunks)
+}
+
+export function chunkOwnership(chunks, chunkId, exemptLabels = []) {
+  const list = Array.isArray(chunks) ? chunks : []
+  const entry = list.find((candidate) => candidate && candidate.id === chunkId)
+  const owned = entry && Array.isArray(entry.checks_owned) ? [...entry.checks_owned] : []
+  const owners = {}
+  for (const chunk of list) {
+    if (!chunk || chunk.id === chunkId || !Array.isArray(chunk.checks_owned)) continue
+    for (const label of chunk.checks_owned) owners[label] = chunk.id
+  }
+  return { chunk: chunkId, owned, owners, exempt: [...exemptLabels] }
+}
+
+export function chunkLocalSummary({ chunk: chunkId, owned: ownedLabels, deferred: deferredRows }) {
+  return { id: chunkId, owned: ownedLabels.length, deferred: deferredRows.length }
+}
+
+export function chunkDeferredRows(output, ownership) {
+  const owners = ownership && ownership.owners && typeof ownership.owners === 'object' ? ownership.owners : {}
+  return Object.keys(owners)
+    .filter((label) => checkFailureLine(output, label))
+    .map((label) => ({ check: label, status: `owned-by:${owners[label]}` }))
+}
+
+export function chunkLedgerChecks(localSummary, deferredRows) {
+  return [localSummary, ...(Array.isArray(deferredRows) ? deferredRows : [])]
+}
+
+export function chunkGateVerdict(output, ownership) {
+  if (ownership == null) return null
+  const summary = parseGateSummary(output)
+  if (!summary) return { ok: false, defect: 'chunk-summary-unmeasured', deferred: [] }
+  const owned = Array.isArray(ownership.owned) ? ownership.owned : null
+  const owners = ownership.owners && typeof ownership.owners === 'object' && !Array.isArray(ownership.owners) ? ownership.owners : null
+  if (typeof ownership.chunk !== 'string' || owned === null || owners === null) return { ok: false, defect: 'chunk-ownership-malformed', deferred: [] }
+  const exemptLabels = ownership.exempt === undefined ? [] : ownership.exempt
+  if (!Array.isArray(exemptLabels)) return { ok: false, defect: 'chunk-ownership-malformed', deferred: [] }
+  const exemptFailLabels = exemptLabels.filter((label) => checkFailureLine(output, label))
+  if (exemptFailLabels.length > 0) return { ok: false, defect: 'chunk-fail-exempt', deferred: chunkDeferredRows(output, ownership) }
+  if (summary.total !== owned.length + Object.keys(ownership.owners).length + exemptLabels.length) return { ok: false, defect: 'chunk-total-mismatch', deferred: chunkDeferredRows(output, ownership) }
+  const known = new Set([...owned, ...Object.keys(owners)])
+  const unknownFailLabels = []
+  for (const raw of String(output || '').split('\n')) {
+    const line = raw.trim()
+    if (!line.startsWith(`${CHECK_FAIL_PREFIX} `)) continue
+    let knownLine = false
+    for (const label of known) {
+      if (checkFailureLine(line, label)) { knownLine = true; break }
+    }
+    if (!knownLine) unknownFailLabels.push(line)
+  }
+  const unownedDeferred = chunkDeferredRows(output, ownership)
+  if (unknownFailLabels.length > 0) return { ok: false, defect: 'chunk-fail-unowned', deferred: unownedDeferred }
+  const ownedFailed = owned.filter((label) => checkFailureLine(output, label))
+  if (summary.failed + summary.errored !== ownedFailed.length + chunkDeferredRows(output, ownership).length) {
+    return { ok: false, defect: 'chunk-counts-unattributed', deferred: chunkDeferredRows(output, ownership) }
+  }
+  return { ok: ownedFailed.length === 0, ownedFailed, deferred: chunkDeferredRows(output, ownership) }
+}
+
+export function adjudicateOwnedProof(output, check) {
+  if (checkFailureLine(output, check)) return 'killed'
+  return 'survived'
+}
+
+export function ownedProofMatch(output, check) {
+  if (checkFailureLine(output, check)) return 'matched'
+  if (checkLabelMisdelimited(output, check)) return 'misdelimited'
+  return 'unmatched'
+}
+
+export function ownedMutations(mutations, ownedChecks) {
+  const owned = new Set(Array.isArray(ownedChecks) ? ownedChecks : [])
+  return (Array.isArray(mutations) ? mutations : []).filter((mutation) => mutation && !Object.prototype.hasOwnProperty.call(mutation, 'exempt') && owned.has(mutation.check))
+}
+
+export function storeChunkSummary(state, summary, isProofRun) {
+  if (!isProofRun) state.summary = summary
+  return state.summary
+}
+
+export function restoreChunkState(checkpoint) {
+  const chunk = checkpoint ? checkpoint.chunk : undefined
+  if (chunk === undefined || chunk === null) return null
+  return {
+    activeChunk: chunk.id,
+    owned: Array.isArray(chunk.owned) ? [...chunk.owned] : [],
+    owners: chunk.owners && typeof chunk.owners === 'object' ? { ...chunk.owners } : {},
+    exempt: Array.isArray(chunk.exempt) ? [...chunk.exempt] : [],
+    summary: chunk.summary && typeof chunk.summary === 'object' ? { ...chunk.summary } : null,
+  }
+}
+
 // The changed-hunk supplement owns one bounded integer for the whole task. The
 // runner receives this already-resolved value in its closed config and therefore
 // never consults ambient environment state itself.
@@ -4379,6 +4570,7 @@ export function composePrBody(record) {
   const why = whyParts.length ? whyParts.join(' · ') : 'No issue named.'
   const gate = record?.gate || null
   const summary = gate?.summary || null
+  const chunkRecord = record?.chunk || null
   const gateLines = (() => {
     if (!gate) return ['No acceptance gate ran.']
     if (!summary) {
@@ -4389,7 +4581,10 @@ export function composePrBody(record) {
     const discrimination = generation === null ? 'unproven' : (gate.discrimination || 'unproven')
     const gen = generation === null ? '' : ` on generation ${generation}`
     const cmd = gate.cmd ? ` (\`${gate.cmd}\`)` : ''
-    return [`- Gate: ${summary.total} checks, ${summary.failed} failed, ${summary.errored} errored — discrimination ${discrimination}${gen}${cmd}`]
+    const lines = [`- Gate: ${summary.total} checks, ${summary.failed} failed, ${summary.errored} errored — discrimination ${discrimination}${gen}${cmd}`]
+    const chunkLine = chunkRecord ? `Chunk ${chunkRecord.id}: ${chunkRecord.owned} owned, ${chunkRecord.deferred} deferred` : null
+    if (chunkLine) lines.push(`- ${chunkLine}`)
+    return lines
   })()
   const suite = record?.suite || {}
   const countText = (label, value) => (value && typeof value === 'object'
@@ -4715,7 +4910,7 @@ export function applyNarration(record, _narrated) {
 }
 
 // --- persisted post-build checkpoints -----------------------------------------
-export const RESUME_CHECKPOINT_VERSION = 1
+export const RESUME_CHECKPOINT_VERSION = 2
 export const RESUME_CHECKPOINT_FAMILIES = Object.freeze(['gate', 'rebase', 'suite', 'publish'])
 
 export function resumeCheckpointFamily(where) {
@@ -4787,6 +4982,27 @@ export function resumeCheckpointDefect(checkpoint) {
   const publish = checkpoint.publish
   if (!publish || typeof publish !== 'object' || Array.isArray(publish) || (publish.branch !== null && typeof publish.branch !== 'string') || (publish.base !== null && typeof publish.base !== 'string')) return 'checkpoint publication state is incomplete'
   if (!Array.isArray(checkpoint.prior_stages)) return 'checkpoint prior stages are absent'
+  const chunk = checkpoint.chunk
+  if (chunk !== undefined && chunk !== null) {
+    if (!chunk || typeof chunk !== 'object' || Array.isArray(chunk)) return 'checkpoint chunk is not an object'
+    if (typeof chunk.id !== 'string' || !CHUNK_ID.test(chunk.id) || chunk.id === '.' || chunk.id === '..') return 'checkpoint chunk id is invalid'
+    if (!Array.isArray(chunk.owned) || chunk.owned.length === 0 || chunk.owned.some((label) => typeof label !== 'string' || !label) || new Set(chunk.owned).size !== chunk.owned.length) return 'checkpoint chunk owned labels are invalid'
+    if (!chunk.owners || typeof chunk.owners !== 'object' || Array.isArray(chunk.owners)) return 'checkpoint chunk owners are invalid'
+    const ownerKeys = Object.keys(chunk.owners)
+    if (ownerKeys.some((label) => typeof label !== 'string' || !label) || new Set(ownerKeys).size !== ownerKeys.length) return 'checkpoint chunk owners are invalid'
+    if (ownerKeys.some((label) => chunk.owned.includes(label))) return 'checkpoint chunk owners overlap owned labels'
+    for (const owner of Object.values(chunk.owners)) {
+      if (typeof owner !== 'string' || !CHUNK_ID.test(owner) || owner === '.' || owner === '..') return 'checkpoint chunk owner is invalid'
+    }
+    const exempt = chunk.exempt === undefined ? [] : chunk.exempt
+    if (!Array.isArray(exempt) || exempt.some((label) => typeof label !== 'string' || !label) || new Set(exempt).size !== exempt.length) return 'checkpoint chunk exempt labels are invalid'
+    if (exempt.some((label) => chunk.owned.includes(label) || Object.hasOwn(chunk.owners, label))) return 'checkpoint chunk exempt overlaps owned labels'
+    const summary = chunk.summary
+    if (!summary || typeof summary !== 'object' || Array.isArray(summary)) return 'checkpoint chunk summary is absent'
+    if (summary.id !== chunk.id) return 'checkpoint chunk summary id does not match'
+    if (summary.owned !== chunk.owned.length) return 'checkpoint chunk summary owned count does not match'
+    if (!Number.isSafeInteger(summary.deferred) || summary.deferred < 0 || summary.deferred > ownerKeys.length) return 'checkpoint chunk summary deferred count is invalid'
+  }
   return null
 }
 
@@ -4843,6 +5059,7 @@ function captureResumeCheckpoint(result, ctx, io) {
     suite: { ...source.suite, cmd: source.suite?.cmd || ctx.suite },
     publish: source.publish || { branch: ctx.publish?.branch ?? null, base: typeof ctx.publish?.branch === 'string' && ctx.publish.branch.trim() ? PUBLISH_BASE : null },
     prior_stages: Array.isArray(source.prior_stages) ? [...source.prior_stages] : (result?.details?.stages || []),
+    chunk: source.chunk !== undefined ? source.chunk : null,
   }
   return resumeCheckpointDefect(checkpoint) ? null : checkpoint
 }
@@ -5722,6 +5939,10 @@ function runTask(ctx, io, crash) {
   // is nothing a builder may run inside one. `acceptedGatePath` defaults to the
   // task gate so every refusal can name a useful gate-proof path.
   let acceptedScope = []
+  // The chunk lane's live ownership: null on unchunked lanes, { activeChunk, owned,
+  // owners, exempt, summary } once a --chunked lane selects its chunk. Declared
+  // beside the scope bindings because selection narrows them; never module-global.
+  let activeChunkState = null
   let verifiedPublishBaseSha = null
   let acceptedGatePath = art('gate.mjs')
   let admitScope = null; const logScopeAdmission = (row) => io.log(recordRow({ at: io.now(), scope_admission: row }))
@@ -5939,7 +6160,7 @@ function runTask(ctx, io, crash) {
   // shipped implementation had. Bind here rather than forbid `this` in io
   // implementations: every other io call site in this file is a method call,
   // and this keeps that true for runners too.
-  const runGate = (name, cmd, runner = io.run, pristine = false) => {
+  const runGate = (name, cmd, runner = io.run, pristine = false, isProofRun = false) => {
     gateAttempt += 1
     // The task dir, never the checkout: runClean stashes --include-untracked
     // around this call (crew/seat-io.mjs:1741-1753) and an untracked file in
@@ -5973,7 +6194,7 @@ function runTask(ctx, io, crash) {
     let gateStartedAt = null
     let gateEndedAt = null
     let res
-    try {
+    let laneChunk = null;    try {
       res = phaseSlot(SUITE_SLOT_PHASES.gate, () => {
         gateStartedAt = readGateClock()
         try { return runner.call(io, wrappable ? wrapped : cmd) }
@@ -5998,7 +6219,16 @@ function runTask(ctx, io, crash) {
     if (reap.outcome !== 'already-dead') {
       io.log(operationalRow({ at: io.now(), gate_reap: { name, attempt: gateAttempt, ...reap } }))
     }
-    emit({ kind: 'gate', name, attempt: gateAttempt, ok: !!res.ok, cmd, summary: parseGateSummary(res.output), generation: gateGeneration, pristine, gate_run_ms: gateTiming.gate_run_ms, gate_run_ms_absent_reason: gateTiming.gate_run_ms_absent_reason, reap })
+    // Chunk lanes fold the ownership verdict into the effective result: the aggregate
+    // process failure of an owned-green/foreign-red lane is not the lane's verdict.
+    // The persisted summary is built uniformly from the CURRENT verdict's deferred
+    // rows on every path, never read back from state.summary. The fold applies to
+    // every gate run including baselines: it yields ok:true only when no owned
+    // check failed, so a healthy pre-build baseline (owned red, work unbuilt) is
+    // unaffected, while an owned-green baseline is the vacuous gate the
+    // green-bounce exists to hand the gate custodian.
+    if (activeChunkState != null) { const laneOwnership = { chunk: activeChunkState.activeChunk, owned: activeChunkState.owned, owners: activeChunkState.owners, exempt: activeChunkState.exempt }; const laneVerdict = chunkGateVerdict(res.output, laneOwnership); if (laneVerdict != null) { laneChunk = { summary: chunkLocalSummary({ chunk: laneOwnership.chunk, owned: laneOwnership.owned, deferred: laneVerdict.deferred || [] }), deferredRows: laneVerdict.deferred || [] }; storeChunkSummary(activeChunkState, laneChunk.summary, isProofRun); res = { ...res, ok: laneVerdict.ok }; io.log(recordRow({ at: io.now(), chunk_lane: laneChunk })); } }
+    emit({ kind: 'gate', name, attempt: gateAttempt, ok: !!res.ok, cmd, summary: parseGateSummary(res.output), generation: gateGeneration, pristine, ...(laneChunk != null ? { chunk: laneChunk } : {}), gate_run_ms: gateTiming.gate_run_ms, gate_run_ms_absent_reason: gateTiming.gate_run_ms_absent_reason, reap })
     return res
   }
   // Attention fires ONLY where the gate loop stops being self-correcting:
@@ -6498,6 +6728,9 @@ function runTask(ctx, io, crash) {
       },
       accepted_scope: snapshotFiles,
       prior_stages: Array.isArray(details.stages) ? [...details.stages] : [...S.stages],
+      chunk: activeChunkState
+        ? { id: activeChunkState.activeChunk, owned: [...activeChunkState.owned], owners: { ...activeChunkState.owners }, exempt: [...activeChunkState.exempt], summary: activeChunkState.summary ? { ...activeChunkState.summary } : null }
+        : null,
       head_oid: typeof details.commit === 'string' && details.commit.trim() ? details.commit : (details.head || ctx.head || null),
       version: RESUME_CHECKPOINT_VERSION,
       kind,
@@ -7196,6 +7429,7 @@ function runTask(ctx, io, crash) {
     S.planAccept = checkpoint.decision.accept_decision
     S.commit = checkpoint.commit.oid
     const priorCommit = checkpoint.commit.oid
+    activeChunkState = restoreChunkState(checkpoint)
     let commitOid = checkpoint.commit.oid
     let resumeGateResult = null
     let warmCounts = checkpoint.suite.warm ?? null
@@ -7235,7 +7469,7 @@ function runTask(ctx, io, crash) {
     // fresh: persisted green output is evidence, not permission to skip the run.
     if (checkpoint.kind === 'gate' || checkpoint.kind === 'suite' || checkpoint.kind === 'publish') {
       stage('gate')
-      const gateResult = runGate('resume', gateCmd)
+      const gateResult = runGate('resume', gateCmd, io.run, false, false)
       resumeGateResult = gateResult
       lastGateOutput = gateResult?.output ?? null
       if (!gateResult?.ok) {
@@ -7370,6 +7604,7 @@ function runTask(ctx, io, crash) {
           issues: issueTrailers(checkpoint.commit.message).refs,
           stages: [...S.stages], cursor: roundCursor(S.stages), files: [...publishFiles],
           gate: { cmd: relativizeCommand(gateCmd, { checkout: resumeCtx.checkout, taskDir: resumeCtx.taskDir }), summary: resumeGateResult ? parseGateSummary(resumeGateResult.output) : checkpoint.proof.summary, discrimination: resumeGateResult ? (parseGateSummary(resumeGateResult.output) ? 'proven' : 'unproven') : checkpoint.proof.discrimination, generation: gateGeneration, repairs: gateRepairs },
+          ...(activeChunkState?.summary ? { chunk: { ...activeChunkState.summary } } : {}),
           review: { verdict: checkpoint.decision.verdict, residuals: checkpoint.decision.residuals, carried: checkpoint.decision.carried_findings },
           suite: { warm: warmCounts, cold: coldSuite.counts, cold_verified: coldSuite.counts !== null }, anomalies: [],
         }
@@ -8086,7 +8321,8 @@ function runTask(ctx, io, crash) {
   let gateCmd = planEnv.details?.gate_cmd || null
   activeGateCmd = gateCmd
   const declared = planEnv.details?.mutations
-  const mutations = declared == null ? [] : declared
+  const allMutations = declared == null ? [] : declared
+  const mutations = allMutations
   if (declared != null) {
     const mutationErrors = validateMutations(mutations, inScope)
     if (mutationErrors.length > 0) {
@@ -8117,6 +8353,32 @@ function runTask(ctx, io, crash) {
         planEnv.artifacts || [])
     }
   }
+  // Chunked lanes validate the chunk program against the retained parent scope,
+  // select the active chunk, and narrow the builder fence to its files. Unchunked
+  // lanes never read the field. validateChunks runs after validateMutations so
+  // exemption entries are already known to be well-formed declarations.
+  const chunkPlanDetails = planEnv.details && typeof planEnv.details === 'object' ? planEnv.details : {}
+  let validatedChunks = []
+  let validatedExemptLabels = []
+  if (ctx.chunked === true || ctx.chunk != null) {
+    const chunkGuard = refuseChunkWithoutChunked(ctx, chunkPlanDetails.chunks ?? null)
+    if (chunkGuard) return escalate('plan-chunks', `chunk selection refused (${chunkGuard.defect}): ${chunkGuard.why}`, planEnv.artifacts || [])
+    const chunkLabels = allMutations.map((mutation) => mutation?.check).filter((label) => typeof label === 'string')
+    const validated = validateChunks(chunkPlanDetails, { scope: scopeFiles, checkLabels: chunkLabels, mutations: allMutations })
+    if (validated.defect) return escalate('plan-chunks', `chunk plan validation refused (${validated.defect}): ${validated.why}`, planEnv.artifacts || [])
+    validatedChunks = validated.chunks
+    validatedExemptLabels = validated.exemptLabels
+    const selectedChunk = selectActiveChunk(ctx, validatedChunks)
+    if (selectedChunk && selectedChunk.defect) return escalate('plan-chunks', `chunk selection refused (${selectedChunk.defect}): ${selectedChunk.why}`, planEnv.artifacts || [])
+    if (selectedChunk) {
+      scopeFiles = [...selectedChunk.files_in_scope]
+      acceptedScope = scopeFiles
+      inScope = scopeMatcher(scopeFiles)
+      const ownership = chunkOwnership(validatedChunks, ctx.chunk, validatedExemptLabels)
+      activeChunkState = { activeChunk: ownership.chunk, owned: ownership.owned, owners: ownership.owners, exempt: ownership.exempt, summary: null }
+    }
+  }
+  const proofMutations = activeChunkState != null ? ownedMutations(allMutations, activeChunkState.owned) : allMutations;
   gateRepairs = 0
   failDelimiterRepairs = 0 // one bounded correction that does not spend gateRepairs
   gateReverified = null // set only when a MID-RUN repair is accepted:
@@ -8190,7 +8452,7 @@ function runTask(ctx, io, crash) {
     stage(label)
     let pristine
     try {
-      pristine = runGate(label, gateCmd, io.runClean, true)
+      pristine = runGate(label, gateCmd, io.runClean, true, true)
     } catch (err) {
       gateDiscrimination = 'unproven'
       gateProofNote = err.message
@@ -8205,7 +8467,7 @@ function runTask(ctx, io, crash) {
       : baselineGateDefect(pristine.output)
     gateDiscrimination = defect ? 'failed' : 'proven'
     gateProofNote = defect // null when proven; the throw path sets it above
-    if (gateDiscrimination === 'proven' && mutations.length > 0) checkProofPending = gateGeneration
+    if (gateDiscrimination === 'proven' && proofMutations.length > 0) checkProofPending = gateGeneration
     settleProof(parseGateSummary(pristine.output))
     stageComplete()
     return pristine
@@ -8223,7 +8485,7 @@ function runTask(ctx, io, crash) {
   const completeCheckProof = (label, options = {}) => {
     checkProofPending = null
     stage(label)
-    const proofMutations = Array.isArray(options.mutations) ? options.mutations : mutations
+    const scopedMutations = Array.isArray(options.mutations) ? options.mutations : proofMutations
     const carriedRows = Array.isArray(options.carried) ? options.carried : []
     const fresh = options.fresh === true
     const freshFields = () => (fresh ? { proof: 'fresh', measured_generation: gateGeneration } : {})
@@ -8239,7 +8501,7 @@ function runTask(ctx, io, crash) {
       // than lose the build.
       // MUTATION A1: hand this the empty list and no declaration is ever bind-checked — the
       // b381-journalfacts and b384-suiteslot blind spot, restored.
-      const binds = bindMutationDeclarations(proofMutations, readBuilt)                              // ANCHOR A1
+      const binds = bindMutationDeclarations(scopedMutations, readBuilt)                              // ANCHOR A1
       checkProofBinds = binds.map((row) => ({ ...row, correction: 'none' }))
       // #874 — set ONLY here, and only after every declaration was read: bindMutationDeclarations
       // either returns all rows or throws, so reaching this line is exactly the condition
@@ -8247,10 +8509,10 @@ function runTask(ctx, io, crash) {
       // without it. MUTATION A3 flips the reset above, not this line, because a mutant that never
       // measures anything is silent while one that always claims to have measured is the defect.
       checkProofBindMeasured = true
-      corrections = validateMutationCorrections(builderEnv?.details, binds, proofMutations, readBuilt)
+      corrections = validateMutationCorrections(builderEnv?.details, binds, scopedMutations, readBuilt)
       // MUTATION C1: drop the accepted candidates here and the builder's one authoring moment is
       // discarded — a corrected anchor never reaches the proof and b384's lane escalates as it did.
-      const effective = correctedMutations(proofMutations, binds, corrections.entries)               // ANCHOR C1
+      const effective = correctedMutations(scopedMutations, binds, corrections.entries)               // ANCHOR C1
       for (const [index, mutation] of effective.entries()) {
         if (mutation.exempt) {
           rows.push({ check: mutation.check, outcome: 'exempt', match: null, why: mutation.exempt, file: null, summary: null, ...freshFields() })
@@ -8277,13 +8539,18 @@ function runTask(ctx, io, crash) {
         try {
           active.writeAttempted = true
           io.writeFile(abs, bound.text)
-          res = runGate(mutationLabel(label, index), gateCmd)
+          res = runGate(mutationLabel(label, index), gateCmd, io.run, false, true)
         } finally { io.writeFile(abs, original) }
         active = null                              // restored: nothing in flight
         const summary = parseGateSummary(res.output)
         const wantedLine = JSON.stringify(`${CHECK_FAIL_PREFIX} ${mutation.check}`)
+        // RV1-2: on chunk lanes the owned proof is adjudicated per-check, never
+        // through the aggregate baseline: a foreign THROW must not turn a killed
+        // owned mutation into an errored survivor.
+        const ownedKilled = activeChunkState != null && adjudicateOwnedProof(res.output, mutation.check) === 'killed'
         const matchOf = () => {
           if (res.ok) return 'gate-green'
+          if (activeChunkState != null) return ownedProofMatch(res.output, mutation.check)
           if (baselineGateDefect(res.output)) return 'errored'
           // MUTATION F1: collapse the unmatched arm into `matched` and a check the gate
           // never named reads exactly like one it named and failed.
@@ -8291,7 +8558,7 @@ function runTask(ctx, io, crash) {
             : checkLabelMisdelimited(res.output, mutation.check) ? 'misdelimited'
             : 'unmatched'
         }
-        const why = res.ok
+        const why = ownedKilled ? null : res.ok
           ? 'the gate stayed GREEN under the mutation'
           : baselineGateDefect(res.output)
             || (checkFailureLine(res.output, mutation.check)
@@ -8318,10 +8585,10 @@ function runTask(ctx, io, crash) {
     checkProofUnbound = finalized.unresolved
     checkProofUnlabelledRefusals = finalized.unlabelledRefusals
     rows.splice(0, rows.length, ...finalized.rows)
-    if (proofMutations.length !== mutations.length || carriedRows.length > 0) {
+    if (scopedMutations.length !== proofMutations.length || carriedRows.length > 0) {
       const freshByCheck = new Map(rows.map((row) => [row.check, row]))
       const carriedByCheck = new Map(carriedRows.map((row) => [row.check, row]))
-      rows.splice(0, rows.length, ...mutations.map((mutation) => freshByCheck.get(mutation.check) || carriedByCheck.get(mutation.check)).filter(Boolean))
+      rows.splice(0, rows.length, ...proofMutations.map((mutation) => freshByCheck.get(mutation.check) || carriedByCheck.get(mutation.check)).filter(Boolean))
     }
     checkProofs = rows
     // #733/#874 — three precedences, and each matters. A KNOWN survivor is a gate defect even if
@@ -8565,7 +8832,7 @@ function runTask(ctx, io, crash) {
   }
   const settleDiffMutationProof = (round) => {
     if (diffMutationSettledGeneration === gateGeneration) return { settled: true, noop: true }
-    if (gateDiscrimination !== 'proven' || (mutations.length > 0 && checkProofVerdict !== 'proven')) return { settled: false, eligible: false }
+    if (gateDiscrimination !== 'proven' || (proofMutations.length > 0 && checkProofVerdict !== 'proven')) return { settled: false, eligible: false }
     if (diffBaselineFatal) {
       diffMutationReport = diffZeroReport('tree-not-restored')
       diffMutationReport.fatal = { reason: 'tree-not-restored', why: diffBaselineFatal }
@@ -8692,7 +8959,7 @@ function runTask(ctx, io, crash) {
     }
   }
 
-  const mutationTargetFiles = () => [...new Set(mutations
+  const mutationTargetFiles = () => [...new Set(proofMutations
     .filter((mutation) => mutation && !mutation.exempt && typeof mutation.file === 'string')
     .map((mutation) => mutation.file))]
   const proofScopeStaleFiles = (staleProofFiles, unknown = false) => {
@@ -8851,7 +9118,7 @@ function runTask(ctx, io, crash) {
     gateDiscrimination = 'proven'
     gateProvenGeneration = generation
     gateProofNote = null
-    checkProofPending = mutations.length > 0 ? generation : null
+    checkProofPending = proofMutations.length > 0 ? generation : null
   }
 
   const pureDelimiterDefect = () => {
@@ -9024,11 +9291,11 @@ function runTask(ctx, io, crash) {
       && comparison.unknown === false
       && correctedChecks.size === 0
       && staleProofFiles.every((file) => changedProofFiles.includes(file))
-      && gateDiscrimination === 'proven' && (mutations.length === 0 || checkProofVerdict === 'proven')
+      && gateDiscrimination === 'proven' && (proofMutations.length === 0 || checkProofVerdict === 'proven')
     let carryScope = null
     if (carryableAdmissionProof === true) {
       const scope = mutationProofScope({
-        mutations,
+        mutations: proofMutations,
         previousRows,
         staleProofFiles: [],
         correctedChecks,
@@ -9053,7 +9320,7 @@ function runTask(ctx, io, crash) {
         gateGeneration = gateGeneration + 1
         resetCheckProof()
         carryGateProof(previousMeasuredGeneration, changedProofFiles)
-        if (mutations.length > 0) {
+        if (proofMutations.length > 0) {
           if (carryScope.selected.length > 0) {
             completeCheckProof(`gate-proof:${gateGeneration}:checks`, { mutations: carryScope.selected, carried: carryScope.carried })
           } else {
@@ -9095,7 +9362,7 @@ function runTask(ctx, io, crash) {
       const baselineContainsCommittedWork = committedBaseline === true
       if (baselineContainsCommittedWork && gateProvenGeneration === previousGeneration) {
         const scope = mutationProofScope({
-          mutations,
+          mutations: proofMutations,
           previousRows,
           staleProofFiles: proofScopeStaleFiles(staleProofFiles, comparison.unknown),
           correctedChecks,
@@ -9108,14 +9375,14 @@ function runTask(ctx, io, crash) {
         carried = scope.carried
         resetCheckProof()
         carryGateProof(previousMeasuredGeneration, changedProofFiles)
-        checkProofPending = mutations.length > 0 ? gateGeneration : null
+        checkProofPending = proofMutations.length > 0 ? gateGeneration : null
         carriedWholeGateProof = true
       } else {
         if (baselineContainsCommittedWork) {
           return { ok: false, escalation: gateEscalate(`the acceptance gate is unproven on a committed baseline (same-gate proof generation ${previousGeneration} was not available); no verified parent runner is available, so pristine discrimination is refused`) }
         }
         const scope = mutationProofScope({
-          mutations,
+          mutations: proofMutations,
           previousRows,
           staleProofFiles: proofScopeStaleFiles(staleProofFiles, comparison.unknown),
           correctedChecks,
@@ -9131,14 +9398,14 @@ function runTask(ctx, io, crash) {
       let settled = settleFailedProof(committedBaseline)
       if (settled.escalation) return { ok: false, escalation: settled.escalation }
       if (settled.repaired) {
-        selected = mutations
+        selected = proofMutations
         carried = []
         forceFullCheckProof = settled.forceFullCheckProof === true
         gateRes = runGate(settled.runLabel || `gate-repair:${gateRepairs}`, gateCmd)
       }
       while (gateRes?.ok && checkProofPending === gateGeneration) {
         if (forceFullCheckProof) {
-          selected = mutations
+          selected = proofMutations
           carried = []
         }
         const freshCheckProof = true
@@ -9153,14 +9420,14 @@ function runTask(ctx, io, crash) {
         settled = settleFailedProof(committedBaseline)
         if (settled.escalation) return { ok: false, escalation: settled.escalation }
         if (settled.repaired) {
-          selected = mutations
+          selected = proofMutations
           carried = []
           forceFullCheckProof = settled.forceFullCheckProof === true
           gateRes = runGate(settled.runLabel || `gate-repair:${gateRepairs}`, gateCmd)
         }
       }
       if (!gateRes?.ok) return { ok: false, gateRes }
-      if (gateDiscrimination !== 'proven' || (mutations.length > 0 && checkProofVerdict !== 'proven')) {
+      if (gateDiscrimination !== 'proven' || (proofMutations.length > 0 && checkProofVerdict !== 'proven')) {
         return { ok: true, gateRes, unproven: true }
       }
       const diffSettled = settleDiffMutationProof(round)
@@ -10099,13 +10366,13 @@ function runTask(ctx, io, crash) {
         let selected
         let carried
         if (forceFullCheckProof) {
-          selected = mutations
+          selected = proofMutations
           carried = []
         } else {
           const comparison = compareProofTree()
           const correctedChecks = correctedMutationChecks()
           const scope = mutationProofScope({
-            mutations,
+            mutations: proofMutations,
             previousRows: Array.isArray(proofTreeWitness?.checkProofs) ? proofTreeWitness.checkProofs : [],
             staleProofFiles: proofScopeStaleFiles(comparison.staleProofFiles, comparison.unknown),
             correctedChecks,
@@ -10156,7 +10423,7 @@ function runTask(ctx, io, crash) {
           gateRes = runGate(settled.runLabel || `gate-repair:${gateRepairs}`, gateCmd)
         }
       }
-      if (!pendingRebaseConflict && gateRes.ok && gateDiscrimination === 'proven' && (!mutations.length || checkProofVerdict === 'proven')) {
+      if (!pendingRebaseConflict && gateRes.ok && gateDiscrimination === 'proven' && (!proofMutations.length || checkProofVerdict === 'proven')) {
         if (!proofTreeWitness || proofTreeWitness.generation < gateGeneration) {
           const diffSettled = settleDiffMutationProof(round)
           if (diffSettled.fatal || gateProofFatal) {
@@ -11323,6 +11590,7 @@ function runTask(ctx, io, crash) {
         generation: gateNow.generation ?? null,
         repairs: gateNow.repairs ?? 0,
       } : null,
+      ...(activeChunkState?.summary ? { chunk: { ...activeChunkState.summary } } : {}),
       review: { verdict: finalReview.verdict === 'pass' ? 'pass' : 'changes-needed', residuals: finalReview.residuals, ...carriedBlock() },
       suite: { warm: warmCounts, cold: coldSuite.counts, cold_verified: coldSuite.counts !== null },
       anomalies: prAnomalies(journalRowsSinceRunStart(journalText)),

@@ -1419,3 +1419,21 @@ test('charter preservation rows quote the cited line', () => {
     assert.ok(cited.includes(row.quote), `quote not on its cited line ${row.source}: ${row.quote.slice(0, 80)}`)
   }
 })
+
+// RV2-1: the two enforced rows whose quotes moved when the narration diff landed
+// above them must cite the lines carrying the quotes, not the stale numbers.
+test('RV2-1 charter-preservation source cells cite the quoted lines', () => {
+  const table = readFileSync(join(REPO_ROOT, 'docs/audits/2026-09-18/charter-preservation-reviewermdandsharedmd.md'), 'utf8')
+  const source = readFileSync(join(REPO_ROOT, 'crew/drive.mjs'), 'utf8').split('\n')
+  const lineOf = (quote) => {
+    const at = source.findIndex((line) => line.includes(quote))
+    assert.ok(at >= 0, `quote not found: ${quote.slice(0, 60)}`)
+    return at + 1
+  }
+  for (const quote of [
+    'refused BY NAME and re-asked. It is never rewritten and never truncated: truncation',
+    '`diff --git` section and the WHOLE patch is refused when ANY section fails, because',
+  ]) {
+    assert.ok(table.includes(`crew/drive.mjs:${lineOf(quote)}`), quote.slice(0, 60))
+  }
+})

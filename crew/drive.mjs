@@ -3483,6 +3483,7 @@ export const NARRATION_REFUSALS = Object.freeze({
   modelAbsent: 'narrator-model-absent',
   modelAmbiguous: 'narrator-model-ambiguous',
   rawJson: 'narration-raw-json',
+  trailer: 'narration-trailer',
 })
 export const NARRATION_REFUSAL_NAMES = Object.freeze(Object.values(NARRATION_REFUSALS))
 const PROMPT_CLAIM_LINE_START = String.raw`(?:^|\n)`
@@ -4630,9 +4631,11 @@ export function composePrBody(record) {
     ['## Run', runLines.join('\n')],
     ...(claims.length > 0 ? [['## Prompt measurement', claims.join('\n')]] : []),
   ]
-  return SECTION_ORDER.filter((h) => prSections.some(([hh]) => hh === h))
+  const narrative = String(record?.narrative ?? '').trim()
+  const body = SECTION_ORDER.filter((h) => prSections.some(([hh]) => hh === h))
     .map((h) => `${h}\n${prSections.find(([hh]) => hh === h)[1]}`.trimEnd())
     .join('\n\n')
+  return narrative ? `${NARRATION_HEADING}\n${narrative}\n\n${body}` : body
 }
 
 // --- record-only narration (#806 U6) -------------------------------------------
@@ -4688,11 +4691,12 @@ export function narratorModelId(output) {
   return { id: ids[0] }
 }
 
-// The prompt's first line names a destination the output no longer reaches: since
-// this lane, narration reaches only the narration journal row
-// (attempted/outcome/reason/chars) and never composePrBody. The wording is retained
-// deliberately so the measurement is not silently redefined — see the 2026-09-17
-// docs/conventions.md entry and the pending ADR-034 §U6 amendment.
+// The prompt's first line names where accepted output goes: accepted narration is
+// prepended under NARRATION_HEADING by composePrBody, on both the ordinary and the
+// resumed publication routes. A refusal, an empty reply or a failed validation
+// publishes the code-composed body unchanged. The wording is retained deliberately
+// so the measurement is not silently redefined — see the 2026-09-19
+// docs/conventions.md entry (the 2026-09-17 entry stands as history).
 // The falsification rules reach every reviewing seat from ONE file. `scripts/factory/pr-review.mjs` already
 // pastes it into a PR-review brief; a lane reviewer saw none of it, which is the whole
 // point of having written it down. It cannot be a capability grant: pi takes a skill as a
@@ -4824,6 +4828,12 @@ export function narrationDefect(text, record) {
   if (!narration) return NARRATION_REFUSALS.empty
   if (narration.length > NARRATION_MAX_CHARS) return NARRATION_REFUSALS.tooLong
   if (narrationIsRawJson(narration)) return NARRATION_REFUSALS.rawJson
+  // A line-initial trailer token reaches the post-merge parsers as MACHINE INPUT:
+  // scripts/factory/closeout.mjs:59-60 (REFS_PATTERN / CLOSES_PATTERN, harvested
+  // per line by trailerIssues at :240-251) and :62-63 (PROMPT_MEASURE_LINE /
+  // PROMPT_UNMEASURED_LINE). Mid-sentence prose ('the lane closes #1424') is not
+  // the hazard and stays accepted — only a line-initial token is refused here.
+  if (/^[ \t]*(?:Closes|Refs|Measure|unmeasured)\b/im.test(narration)) return NARRATION_REFUSALS.trailer
   const facts = recordFacts(record)
   const knownPath = (token) => facts.paths.has(token) || [...facts.paths].some((known) => known.endsWith(`/${token}`))
   // Stages before numbers: `audit:r9` must be refused as an invented STAGE, not
@@ -4902,11 +4912,14 @@ export function narrateRecord({ record, registerText, io } = {}) {
   return { text, model, attempted: true, duration_ms, outcome: 'accepted' }
 }
 
-// Narration no longer reaches the PR body: the published body is identical
-// with or without a narrator. The narrator pipeline, its refusals and its
-// journal row are untouched.
-export function applyNarration(record, _narrated) {
-  return record
+// Accepted narration is additive: defect-free accepted text is stored as
+// `record.narrative` for composePrBody to prepend under NARRATION_HEADING.
+// A refusal, an empty reply, or text naming a fact the record does not carry
+// leaves the record — and therefore the published body — untouched.
+export function applyNarration(record, narrated) {
+  const text = typeof narrated?.text === 'string' ? narrated.text.trim() : ''
+  if (!text || narrated?.refused || narrationDefect(text, record)) return record
+  return { ...record, narrative: text }
 }
 
 // --- persisted post-build checkpoints -----------------------------------------
@@ -7630,9 +7643,24 @@ function runTask(ctx, io, crash) {
           suite: { warm: warmCounts, cold: coldSuite.counts, cold_verified: coldSuite.counts !== null }, anomalies: [],
         }
         const bodyPath = art('pr-body.md')
+        let resumeRegisterText = ''
+        try { resumeRegisterText = String(resumeIo.readFile(`${resumeCtx.checkout}/crew/capabilities.json`) || '') } catch { /* narration is never load-bearing */ }
+        const resumeNarrated = narrateRecord({ record: bodyRecord, registerText: resumeRegisterText, io: resumeIo })
+        const resumeBodyRecord = applyNarration(bodyRecord, resumeNarrated)
+        const resumePublishedNarrative = typeof resumeBodyRecord?.narrative === 'string' ? resumeBodyRecord.narrative : ''
+        try {
+          resumeIo.log(recordRow({ at: resumeIo.now(), narration: {
+            attempted: resumeNarrated.attempted ?? false,
+            duration_ms: resumeNarrated.duration_ms ?? null,
+            model: resumeNarrated.model ?? null,
+            outcome: resumePublishedNarrative ? 'accepted' : 'refused',
+            reason: resumePublishedNarrative ? null : resumeNarrated.refused ?? null,
+            ...(resumePublishedNarrative ? { chars: resumePublishedNarrative.length } : {}),
+          } }))
+        } catch { /* instrumentation is never load-bearing */ }
         let created
         try {
-          resumeIo.writeFile(bodyPath, composePrBody(bodyRecord))
+          resumeIo.writeFile(bodyPath, composePrBody(resumeBodyRecord))
           created = resumeIo.run(`gh pr create --base ${shellArg(baseName)} --head ${shellArg(publishBranch)} --title ${shellArg(checkpoint.commit.subject)} --body-file ${shellArg(bodyPath)}`)
         } catch (error) { created = { ok: false, output: error?.message ?? String(error) } }
         const urlMatch = String(created?.output || '').match(/https:\/\/[^\s]+\/pull\/(\d+)/)
@@ -11647,14 +11675,15 @@ function runTask(ctx, io, crash) {
     try { registerText = String(io.readFile(`${ctx.checkout}/crew/capabilities.json`) || '') } catch { /* narration is never load-bearing */ }
     const narrated = narrateRecord({ record, registerText, io })
     const bodyRecord = applyNarration(record, narrated)
+    const publishedNarrative = typeof bodyRecord?.narrative === 'string' ? bodyRecord.narrative : ''
     try {
       io.log(recordRow({ at: io.now(), narration: {
         attempted: narrated.attempted ?? false,
         duration_ms: narrated.duration_ms ?? null,
         model: narrated.model ?? null,
-        outcome: narrated.text ? 'accepted' : 'refused',
-        reason: narrated.text ? null : narrated.refused ?? null,
-        ...(narrated.text ? { chars: narrated.text.length } : {}),
+        outcome: publishedNarrative ? 'accepted' : 'refused',
+        reason: publishedNarrative ? null : narrated.refused ?? null,
+        ...(publishedNarrative ? { chars: publishedNarrative.length } : {}),
       } }))
     } catch { /* instrumentation is never load-bearing */ }
     const prCreateStartedAt = io.now()

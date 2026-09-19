@@ -2220,3 +2220,32 @@ test('chunk upsertChunkRun recompile replaces owned checks and CHUNK_PROGRESS_SQ
     ledger.close()
   }
 })
+
+// Sol, #1414 pass 1: every JSONL row carries both time keys, and the old agent rows carry an
+// explicit null. The first cut of #1412 treated `!= null` as "absent", so replayJsonl stamped
+// those rows with the REPLAY's clock — a time nobody measured. Only an absent key is defaulted.
+// Mutation killed: treating an explicit null as absent (`input[key] == null`).
+test('an agent row recorded with no time replays with no time, while a fresh one is stamped', () => {
+  const dir = scratchDir('ledger-replay-null-')
+  const written = openLedger({ dbPath: join(dir, 'live.db'), stderr: { write: () => {} } })
+  try {
+    written.startSession({ adw_id: 'replay-null', repo_slug: 'r', task_slug: 't' })
+    // The shape an old row was written with: both keys present and null.
+    written.recordEvent({ adw_id: 'replay-null', type: 'agent_start', payload: { role: 'builder', dispatch_id: 'old' }, started_at: null, ended_at: null })
+    written.recordEvent({ adw_id: 'replay-null', type: 'agent_end', payload: { role: 'builder', outcome: 'done', dispatch_id: 'old' }, started_at: null, ended_at: null })
+    // A fresh emit with the keys absent.
+    written.recordEvent({ adw_id: 'replay-null', type: 'agent_start', payload: { role: 'builder', dispatch_id: 'new' } })
+  } finally { written.close() }
+  const replayClock = Date.parse('2030-06-01T12:34:56.789Z')
+  const rebuilt = openLedger({ dbPath: join(dir, 'rebuilt.db'), jsonlPath: join(dir, 'rebuilt.jsonl'), now: () => replayClock, stderr: { write: () => {} } })
+  try {
+    replayJsonl(join(dir, 'ledger.jsonl'), rebuilt)
+    const rows = rebuilt.dumpTable('events').filter((row) => row.adw_id === 'replay-null')
+    const byDispatch = (type, id) => rows.find((row) => row.type === type && JSON.parse(row.payload_json).dispatch_id === id)
+    assert.equal(byDispatch('agent_start', 'old').started_at, null)
+    assert.equal(byDispatch('agent_end', 'old').ended_at, null)
+    const fresh = byDispatch('agent_start', 'new').started_at
+    assert.match(fresh, /^\d{4}-\d\d-\d\dT/)
+    assert.notEqual(fresh, new Date(replayClock).toISOString(), 'the fresh row keeps the time it was written, not the replay clock')
+  } finally { rebuilt.close() }
+})

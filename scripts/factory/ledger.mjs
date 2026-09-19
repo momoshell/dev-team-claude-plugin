@@ -3277,8 +3277,14 @@ export function openLedger({
     // #1412: agent_start carries started_at and agent_end carries ended_at, so an agent event
     // can be placed in time; the stamp lands here, inside the adapter's emit call.
     // log and decision stay NULL: point-in-time annotations with no interval and no time consumer.
-    const startedAt = input.started_at != null ? isoMs(input.started_at) : (input.type === 'tool_call' || input.type === 'agent_start' ? isoMs(now()) : null)
-    const endedAt = input.ended_at != null ? isoMs(input.ended_at) : (input.type === 'tool_call' || input.type === 'agent_end' ? isoMs(now()) : null)
+    // Only an ABSENT key takes the emit-time default. An explicit null is a recorded "no
+    // time" and stays null: every JSONL row carries both keys, and replayJsonl must rebuild
+    // the NULL an old row was written with, never stamp it with the replay's clock.
+    const stampedAt = (key, types) => (input[key] != null
+      ? isoMs(input[key])
+      : (input[key] === undefined && types.includes(input.type) ? isoMs(now()) : null))
+    const startedAt = stampedAt('started_at', ['tool_call', 'agent_start'])
+    const endedAt = stampedAt('ended_at', ['tool_call', 'agent_end'])
     const inserted = insertSequenced({
       jsonlKind: 'recordEvent',
       adwId: input.adw_id,

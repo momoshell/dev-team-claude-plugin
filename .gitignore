@@ -21,7 +21,16 @@ visualizer/web/dist/
 # Crew return envelopes never belong in the checkout
 returns/
 
+# Bench output a model-eval candidate writes, and the ledger a tool points at a checkout
+.bench-out/
+.dev-team/
+
 # Local secrets and machine-specific environment
 .env
 .env.*
 !.env.example
+
+# pi runtime state: credentials and machine-local files, never the repo's
+crew/pi/auth.json
+crew/pi/models-store.json
+crew/pi/bin/

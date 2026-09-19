@@ -289,7 +289,7 @@ export async function compileBench({ dir, deps = {} } = {}) {
   const productionModel = rosterProduction(candidateDocument, deps.readRoster)
   const production = candidates.find((candidate) => candidateModel(candidate) === productionModel) ?? null
   if (production === null) {
-    const where = NON_BLANK(candidateDocument.tier) ? ` in tier ${candidateDocument.tier}` : ' (the role is seated with more than one model across tiers — name one with candidates.json tier)'
+    const where = NON_BLANK(candidateDocument.tier) ? ` in tier ${candidateDocument.tier}` : ' (the roster seats this role with no single model — none, or more than one across tiers; a bench of one tier names it with candidates.json tier)'
     throw refusal('production-absent', `the seated ${candidateDocument.role} model${productionModel === null ? where : ` ${productionModel}`} is not among candidates`)
   }
 
@@ -317,10 +317,17 @@ export async function compileBench({ dir, deps = {} } = {}) {
     gate_path: source.gatePath,
     judge,
     role: candidateDocument.role,
+    // The roster tier this bench stands in for, or null for a tierless bench. Routing
+    // evidence is filed under it, so a mechanical bench never counts as a build choice.
+    tier: NON_BLANK(candidateDocument.tier) ? candidateDocument.tier : null,
     candidates,
     production,
   })
 }
+
+// A tierless bench keeps filing under `build`, as every bench did before tiers existed.
+export const BENCH_DEFAULT_ROUTING_TIER = 'build'
+const benchRoutingTier = (bench) => bench.tier ?? BENCH_DEFAULT_ROUTING_TIER
 
 function usageFromSeat(seat) {
   const usage = seat?.usage
@@ -375,7 +382,7 @@ function benchRoutingMeasurements(bench, ledger, policy) {
   // advisory candidate set. Append bench-only cells only to preserve their
   // explicit undeclared-candidate evidence; the serial evaluator below still
   // owns their execution order and never consults this recommendation.
-  const declared = policy?.routes?.build?.[bench.role]?.candidates
+  const declared = policy?.routes?.[benchRoutingTier(bench)]?.[bench.role]?.candidates
   const cells = []
   const seen = new Set()
   for (const candidate of [...(Array.isArray(declared) ? declared : []), ...bench.candidates]) {
@@ -427,7 +434,7 @@ export async function runBench({ dir, deps = {} } = {}) {
     routingChoice = deps.materialiseRoutingChoice({
       policy: routingLoaded.policy,
       policyHash: routingLoaded.policyHash,
-      tier: 'build',
+      tier: benchRoutingTier(bench),
       role: bench.role,
       measurements: benchRoutingMeasurements(bench, deps.ledger, routingLoaded.policy),
       entryPoint: 'bench',

@@ -16,6 +16,7 @@ import {
   normalDeps,
   EVAL_SEAT_FAILURE_REASONS,
   EvalRefusal,
+  BENCH_DEFAULT_ROUTING_TIER,
 } from '../scripts/factory/model-eval.mjs'
 import { EVAL_ABSENT_REASONS, evalsReadout } from '../scripts/factory/ledger.mjs'
 import { PI_PROVIDERS } from '../crew/adapters/adapter-pi.mjs'
@@ -1349,7 +1350,7 @@ test('a bench that names its roster tier resolves production from that tier alon
   const unnamed = writeBench({ judge, candidates: [mechanical, build], production })
   const ambiguous = await refusalFor({ dir: unnamed.dir, readRoster })
   assert.equal(ambiguous.caught.refusal, 'production-absent')
-  assert.match(ambiguous.caught.detail, /more than one model across tiers/)
+  assert.match(ambiguous.caught.detail, /no single model — none, or more than one across tiers/)
 
   const missing = writeBench({ judge, candidates: [mechanical, build], production, tier: 'nonexistent' })
   const absent = await refusalFor({ dir: missing.dir, readRoster })
@@ -1358,4 +1359,49 @@ test('a bench that names its roster tier resolves production from that tier alon
 
   const blank = writeBench({ judge, candidates: [mechanical, build], production, tier: ' ' })
   assert.equal((await refusalFor({ dir: blank.dir, readRoster })).caught.refusal, 'bench-unreadable')
+})
+
+// Sol, #1413 pass 1: the tier resolved production but compileBench dropped it, and runBench
+// filed the bench's routing choice under a hard-coded `build`, so a mechanical bench counted
+// as a build choice in the ledger. The tier now reaches both the policy lookup and the
+// materialised choice; a tierless bench keeps `build`.
+// Mutation killed: dropping `tier` from the compiled bench; hard-coding either routing site.
+test('a tiered bench files its routing choice under its own tier, and a tierless one under build', async () => {
+  const { materialiseRoutingChoice } = await import('../crew/crew.mjs')
+  const mechanical = { provider: 'meta', id: 'muse-spark-1.3-contributor', agent: 'pi', effort: 'low', source: 'models.dev' }
+  const build = { provider: 'openai', id: 'gpt-5.6-luna', agent: 'pi', effort: 'high', source: 'models.dev' }
+  const judge = { model: 'anthropic/claude-opus-5', vendor: 'anthropic' }
+  const readRoster = () => ({ mechanical: { builder: mechanical }, build: { builder: build }, judge: { builder: build } })
+  const filedUnder = async (tier, production, roster = readRoster) => {
+    const bench = writeBench({ judge, candidates: [mechanical, build], production, ...(tier ? { tier } : {}) })
+    const seen = []
+    const deps = { ...depsFor({ readRoster: roster }), materialiseRoutingChoice: (input) => { seen.push(input.tier); return materialiseRoutingChoice(input) } }
+    const compiled = await compileBench({ dir: bench.dir, deps })
+    await runBench({ dir: bench.dir, deps })
+    return { compiledTier: compiled.tier, routed: seen }
+  }
+  assert.deepEqual(await filedUnder('mechanical', 'meta/muse-spark-1.3-contributor'), { compiledTier: 'mechanical', routed: ['mechanical'] })
+  // A tierless bench needs a role seated alike everywhere, or it refuses before routing.
+  const tierless = await filedUnder(null, 'openai/gpt-5.6-luna', () => ({ mechanical: { builder: build }, build: { builder: build }, judge: { builder: build } }))
+  assert.deepEqual(tierless, { compiledTier: null, routed: [BENCH_DEFAULT_ROUTING_TIER] })
+
+  // The policy route is read from the bench's tier too. The shipped policy declares the same
+  // builder candidate for mechanical and build, so inject one where they differ and read the
+  // candidate set the choice was materialised from. Mutation killed: the lookup hard-coded
+  // to build.
+  const { loadRoutingPolicy } = await import('../crew/crew.mjs')
+  const real = loadRoutingPolicy()
+  const policy = structuredClone(real.policy)
+  const marker = { ...policy.routes.build.builder.candidates[0], provider: 'meta', id: 'muse-spark-1.3-contributor', effort: 'low' }
+  policy.routes.mechanical.builder.candidates = [marker]
+  const bench = writeBench({ judge, candidates: [mechanical, build], production: 'meta/muse-spark-1.3-contributor', tier: 'mechanical' })
+  const cellsSeen = []
+  const deps = {
+    ...depsFor({ readRoster }),
+    loadRoutingPolicy: () => ({ policy, policyHash: real.policyHash }),
+    materialiseRoutingChoice: (input) => { cellsSeen.push(input.measurements.map((row) => row.cell?.id ?? row.id ?? row.model_id)); return materialiseRoutingChoice(input) },
+  }
+  await runBench({ dir: bench.dir, deps })
+  assert.equal(cellsSeen.length, 1)
+  assert.equal(cellsSeen[0][0], 'muse-spark-1.3-contributor', `the mechanical route leads the candidate set: ${JSON.stringify(cellsSeen[0])}`)
 })

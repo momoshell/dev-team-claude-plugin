@@ -1437,3 +1437,105 @@ test('RV2-1 charter-preservation source cells cite the quoted lines', () => {
     assert.ok(table.includes(`crew/drive.mjs:${lineOf(quote)}`), quote.slice(0, 60))
   }
 })
+
+// Lead-guard (b866): the lead/tech-lead charter-preservation table uses two
+// citation forms. The FIRST citation in an enforced row's source cell is the
+// quote site (bare rule: the row's quote appears on that line); every LATER
+// `path:line <name>` citation is labelled (its <name> appears on that line).
+const LEAD_PRESERVATION_TABLE = 'docs/audits/2026-09-18/charter-preservation-leadmdandtech-leadmd.md'
+
+function parseLeadCitations(sourceCell) {
+  const leadCitations = [...sourceCell.matchAll(/([A-Za-z0-9_@./-]+\.(?:mjs|js|md|json)):(\d+)/g)]
+  const parsed = []
+  for (const match of leadCitations) {
+    const after = sourceCell.slice(match.index + match[0].length)
+    const named = after.match(/^ ([A-Za-z_$][\w$]*)/)
+    parsed.push({ path: match[1], line: Number(match[2]), name: named ? named[1] : null, text: match[0] })
+  }
+  return parsed
+}
+
+function readLeadRow() {
+  const table = readFileSync(join(REPO_ROOT, LEAD_PRESERVATION_TABLE), 'utf8')
+  const rows = []
+  for (const line of table.split('\n')) {
+    const trimmed = line.trim()
+    if (!trimmed.startsWith('|')) continue
+    if (/^\|[\s:|-]+\|$/.test(trimmed)) continue
+    const cells = trimmed.split('|').slice(1, -1).map((cell) => cell.trim())
+    if (cells.length !== 5) continue
+    if (cells[0] === 'sentence') continue
+    rows.push({ sentence: cells[0], subject: cells[1], cls: cells[2], source: cells[3], quote: cells[4] })
+  }
+  const enforced = rows.filter((row) => row.cls === 'enforced')
+  assert.equal(enforced.length, 1)
+  assert.ok(enforced[0].quote.length > 0, 'lead preservation row carries no quote')
+  return enforced[0]
+}
+
+function readLeadDriveLines() {
+  return readFileSync(join(REPO_ROOT, 'crew/drive.mjs'), 'utf8').split('\n')
+}
+
+function verifyLeadRow(row, driveLines) {
+  const citations = parseLeadCitations(row.source)
+  assert.ok(citations.length > 0, `lead preservation row names no path:line source: ${row.source}`)
+  let verified = 0
+  for (const citation of citations) {
+    const cited = driveLines[citation.line - 1]
+    assert.ok(typeof cited === 'string', `lead cited line is past end of file: ${citation.text}`)
+    if (verified === 0) {
+      assert.ok(cited.includes(row.quote), `lead quote not on its cited line ${citation.text}`)
+    } else {
+      assert.ok(citation.name, `lead tail citation carries no name: ${citation.text}`)
+      assert.ok(cited.includes(citation.name), `lead ${citation.name} not on its cited line ${citation.text}`)
+    }
+    verified += 1
+  }
+  assert.equal(verified, citations.length, `lead citation skipped: verified ${verified} of ${citations.length}`)
+  return verified
+}
+
+test('lead preservation A1 bare citation quotes its line', () => {
+  const row = readLeadRow()
+  const citations = parseLeadCitations(row.source)
+  assert.ok(citations.length > 0)
+  const driveLines = readLeadDriveLines()
+  const primary = citations[0]
+  assert.ok(driveLines[primary.line - 1].includes(row.quote))
+})
+
+test('lead preservation B1 labelled settleAccept names its line', () => {
+  const row = readLeadRow()
+  const target = parseLeadCitations(row.source).find((citation) => citation.name === 'settleAccept')
+  assert.ok(target)
+  assert.ok(readLeadDriveLines()[target.line - 1].includes('settleAccept'))
+})
+
+test('lead preservation B2 labelled ACCEPT_REFUSALS names its line', () => {
+  const row = readLeadRow()
+  const driveLines = readLeadDriveLines()
+  const citations = parseLeadCitations(row.source)
+  assert.equal(verifyLeadRow(row, driveLines), citations.length)
+  const target = citations.find((citation) => citation.name === 'ACCEPT_REFUSALS')
+  assert.ok(target)
+  assert.ok(driveLines[target.line - 1].includes('ACCEPT_REFUSALS'))
+})
+
+test('lead preservation C1 every citation is verified', () => {
+  const row = readLeadRow()
+  const citations = parseLeadCitations(row.source)
+  assert.equal(verifyLeadRow(row, readLeadDriveLines()), citations.length)
+})
+
+test('lead preservation D1 past-end citation fails by name', () => {
+  const row = readLeadRow()
+  const driveLines = readLeadDriveLines()
+  const pastEnd = { ...row, source: `crew/drive.mjs:${driveLines.length + 100} settleAccept` }
+  assert.throws(() => verifyLeadRow(pastEnd, driveLines), /past end of file/)
+})
+
+test('lead preservation D2 citation-free source fails by name', () => {
+  const row = readLeadRow()
+  assert.throws(() => verifyLeadRow({ ...row, source: 'no citations here' }, readLeadDriveLines()), /no path:line/)
+})

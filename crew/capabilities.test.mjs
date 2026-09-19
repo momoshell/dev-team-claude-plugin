@@ -814,7 +814,7 @@ test('E1 the local provider frozen inventory rejects an unexpected provider', ()
     settings: 'crew/pi/settings.json',
     pi_provider: 'llama-swap',
     base_url: 'http://10.112.20.20:8080/v1',
-    model: 'gpt-oss-20b',
+    model: 'qwen3.8-27b',
   })
   assert.deepEqual(Object.keys(providers['llama-swap']).sort(), ['base_url', 'pi_provider', 'settings'])
   assert.deepEqual(providers['llama-swap'], {
@@ -1505,7 +1505,7 @@ test('F1 narrator model description and command share the measured streaming pol
     /28\.345s/, /29\.305s/, /6\.6s/, /12\.6s/, /35\.2s warm \/ 44\.0s cold/, /continued progress rather than total duration governs acceptance/,
   ]) assert.match(description, phrase)
   assert.doesNotMatch(description, /30-second wall|cold model loading occurs inside it/)
-  const command = narratorCommand({ root: 'http://127.0.0.1:11434/v1', model: 'gpt-oss-20b', prompt: 'hello' })
+  const command = narratorCommand({ root: 'http://127.0.0.1:11434/v1', model: 'qwen3.8-27b', prompt: 'hello' })
   for (const [flag, value] of [['--connect-timeout', NARRATION_CONNECT_TIMEOUT_SECONDS], ['--speed-limit', NARRATION_MIN_BYTES_PER_SECOND], ['--speed-time', NARRATION_STALL_SECONDS], ['--max-time', NARRATION_BACKSTOP_SECONDS]]) {
     assert.match(command, new RegExp(`${flag} ${value}(?:\\s|$)`))
   }

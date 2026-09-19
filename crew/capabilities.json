@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-09-12",
+  "updated_at": "2026-09-19",
   "coding_agents": {
     "pi": {
       "providers": [
@@ -158,6 +158,6 @@
     "settings": "crew/pi/settings.json",
     "pi_provider": "llama-swap",
     "base_url": "http://10.112.20.20:8080/v1",
-    "model": "gpt-oss-20b"
+    "model": "qwen3.8-27b"
   }
 }

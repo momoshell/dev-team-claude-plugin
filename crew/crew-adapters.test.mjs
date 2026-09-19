@@ -1101,6 +1101,106 @@ test('G1 ordinary hosted raw provider remains unchanged', async () => {
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
+test('A1 raw slash provider resolves across every split point', async () => {
+  const root = scratchDir('crew-raw-slash-a1-')
+  const raw = 'openrouter/meta/muse-spark-1.3-contributor'
+  try {
+    const base = capabilityRegister()
+    const register = capabilityRegister({ coding_agents: {
+      pi: { ...base.coding_agents.pi, providers: ['openai', 'anthropic', 'meta', 'llama-swap'] },
+    } })
+    const probed = []
+    const adapters = await resolveAdapters(['planner'], {
+      'model-planner': raw, 'agent-planner': 'pi', 'allow-shortfall-planner': 'subagents',
+    }, null, { register, root, probeEndpoint: async (url) => { probed.push(url); return true } })
+    assert.equal(adapters.planner.configDir, null)
+    const command = adapters.planner.adapter.seatCommand({
+      role: 'planner', model: raw, promptFile: '/tmp/role-planner.md',
+      tools: SEAT_DEFAULTS.planner.tools, deny: SEAT_DEFAULTS.planner.deny, taskDir: root,
+      bootBrief: 'boot', effort: 'high', grants: adapters.planner.grants, configDir: adapters.planner.configDir,
+    })
+    assert.ok(command.includes('--model openrouter/meta/muse-spark-1.3-contributor'))
+    assert.deepEqual(probed, [])
+    await assert.rejects(
+      () => resolveAdapters(['planner'], {
+        'model-planner': raw, 'agent-planner': 'pi', 'allow-shortfall-planner': 'subagents',
+      }, null, { register: capabilityRegister(), root, probeEndpoint: async () => true }),
+      (err) => err.reason === 'agent-provider-unsupported',
+    )
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('B1 raw single-slash provider remains hosted', async () => {
+  const root = scratchDir('crew-raw-single-slash-b1-')
+  const raw = 'openai-codex/gpt-5.6-luna'
+  try {
+    const probed = []
+    const adapters = await resolveAdapters(['builder'], {
+      'model-builder': raw, 'agent-builder': 'pi',
+    }, null, { register: capabilityRegister(), root, probeEndpoint: async (url) => { probed.push(url); return true } })
+    assert.equal(adapters.builder.configDir, null)
+    const command = adapters.builder.adapter.seatCommand({
+      role: 'builder', model: raw, promptFile: '/tmp/role-builder.md',
+      tools: SEAT_DEFAULTS.builder.tools, deny: SEAT_DEFAULTS.builder.deny, taskDir: root,
+      bootBrief: 'boot', effort: 'max', grants: adapters.builder.grants, configDir: adapters.builder.configDir,
+    })
+    assert.ok(command.includes('--model openai-codex/gpt-5.6-luna'))
+    assert.deepEqual(probed, [])
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('C1 raw unknown provider refuses before probing', async () => {
+  const root = scratchDir('crew-raw-unknown-c1-')
+  try {
+    const probed = []
+    await assert.rejects(
+      () => resolveAdapters(['builder'], {
+        'model-builder': 'unknown-provider/qwen3-coder', 'agent-builder': 'pi',
+      }, null, { register: capabilityRegister(), root, probeEndpoint: async (url) => { probed.push(url); return true } }),
+      (err) => err.reason === 'agent-provider-unsupported' && CAPABILITY_REFUSALS.includes(err.reason),
+    )
+    assert.deepEqual(probed, [])
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('D1 raw matching providers refuse ambiguity', async () => {
+  const root = scratchDir('crew-raw-dual-match-d1-')
+  try {
+    const base = capabilityRegister()
+    const local = () => ({ settings: 'crew/pi/settings.json', pi_provider: 'anthropic', base_url: 'http://127.0.0.1:11434/v1' })
+    const register = capabilityRegister({
+      local_providers: { 'a-box': local(), 'b-box': local() },
+      coding_agents: { pi: { ...base.coding_agents.pi, providers: ['openai', 'a-box', 'b-box'] } },
+    })
+    const probed = []
+    await assert.rejects(
+      () => resolveAdapters(['builder'], {
+        'model-builder': 'anthropic/dual-match-model', 'agent-builder': 'pi',
+      }, null, { register, root, probeEndpoint: async (url) => { probed.push(url); return true } }),
+      (err) => err.reason === 'agent-provider-unsupported',
+    )
+    assert.deepEqual(probed, [])
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('E2 raw trailing slash refuses without probing', async () => {
+  const root = scratchDir('crew-raw-trailing-slash-e2-')
+  try {
+    const base = capabilityRegister()
+    const register = capabilityRegister({ coding_agents: {
+      pi: { ...base.coding_agents.pi, providers: ['openai', 'anthropic', 'meta', 'llama-swap'] },
+    } })
+    const probed = []
+    await assert.rejects(
+      () => resolveAdapters(['planner'], {
+        'model-planner': 'openrouter/meta/', 'agent-planner': 'pi', 'allow-shortfall-planner': 'subagents',
+      }, null, { register, root, probeEndpoint: async (url) => { probed.push(url); return true } }),
+      (err) => err.reason === 'agent-provider-unsupported',
+    )
+    assert.deepEqual(probed, [])
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
 test('H1 roster local provider path remains unchanged', async () => {
   const root = scratchDir('crew-roster-local-h1-')
   try {

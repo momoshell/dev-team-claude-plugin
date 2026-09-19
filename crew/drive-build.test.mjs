@@ -8,7 +8,7 @@ import {
   acceptanceCoverage, acceptanceIds, ACCEPTANCE_UNMEASURED,
   B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_IMPL_FILE, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, B384_CORRECTED_FIND, B384_CORRECTED_REPLACE, B384_GREEN, B384_MUTATION, B384_RED, B384_REFACTORED_BUILDER, B384_REFACTORED_UNCORRECTED_BUILDER, B44_LEADLESS_CTX, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_PLAN, CHECK_RUNS, CONVERGE_CTX, CONVERGE_GATE, CONVERGE_PLAN, CTX, CTX_DIRECTED, CTX_REPAIR, DIRECTED_FILES, D_ASK, D_AUTO, ENVELOPE_FIELD_KINDS, EXECUTIONS, FAILURE_UPGRADE, GATE_REAP_CMD_EOF, GATE_REAP_SWEEP_MARKER, GATE_SUMMARY_PREFIX, HARDENING_MARKS, HARDENING_OUTCOMES, HARDENING_REFUSALS, MODIFIER_OUTCOMES, MUTATIONS_MAX, MUTATION_BINDING_FAILURES, MUTATION_CORRECTION_REFUSALS, MUTATION_OUTCOMES, PARTIAL_REVIEWED, RED, SENSITIVITY_FLOOR, SHAPE_MAJOR_PHASES, SHAPE_ROUNDED_STAGES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, UNIVERSAL_STAGE_HEADS, VALIDATION_LANE_UNLOADABLE, VARIANTS, VARIANT_NAMES, WRITE_SURFACES, applyMutationAnchor, applyPrescriptionLines, b127GatePaths, b127PidAlive, b318Builders, b318SiteA, b376Build, b376DiskProofIo, b376ProofIo, b376Review, b376StageStack, b384Io, b384RefactoredIo, b44AssertLeadlessGate, b44GatePlan, bindMutationAnchor, buildEnv, collapseStages, dispositionIo, driveTask, existsSync, fakeIo, fenceBase, fenceDiff, fenceSpan, gateReapCommand, gateReapFresh, gateReapOriginal, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, hardeningBounceLines, hardeningBriefLines, hardeningDebt, hardeningOf, join, laneFence, leadEnv, mutationChangesTokens, outOfScopeFiles, planEnv, protectedPlanEnv, readFileSync, resumeGreen, resumeRed, reviewConvergeRun, reviewEnv, reviewFindings, rmSync, s843Ctx, s843Io, s843PlanEnv, s843Rows, scopeMatcher, scopedPath, scratchDir, shapeDefect, spawnSync, stageShape, treeDigest, triageEnv, undeclaredStage, validateHardened, validateMutations, validationPlan, validationProbeRun, validationRows,
 } from './drive-fixtures.mjs'
-import { CENSUS_CARRIER_FILES, CHECK_MATCHES, FROZEN_FACTORY_ENV_FILE, FROZEN_INVENTORY_FILE, HARDENING_APPEAL_SHAPE, HARDENING_CLASSES, HARDENING_PRESCRIPTION_REASONS, HARDENING_PRESCRIPTION_RESOLUTION, HARDENING_PROVEN, HARDENING_REFUTED, HARDENING_UNMEASURED, LIMITS, POST_COMMIT_FROZEN_REPAIR_MAX, classifyFrozenInventoryDelta, hardeningAppealLines, hardeningAppealRequest, hardeningClassOf, hardeningPrescriptionConflict, hardeningRowBucket, hardeningStageCleared, hardeningTestPath, mutationProofScope, preRepairGreenOutcome, preRepairRefutes, composePrBody } from './drive.mjs'
+import { CENSUS_CARRIER_FILES, CHECK_MATCHES, FROZEN_FACTORY_ENV_FILE, FROZEN_INVENTORY_FILE, HARDENING_APPEAL_SHAPE, HARDENING_CLASSES, HARDENING_PRESCRIPTION_REASONS, HARDENING_PRESCRIPTION_RESOLUTION, HARDENING_PROVEN, HARDENING_REFUTED, HARDENING_UNMEASURED, LIMITS, POST_COMMIT_FROZEN_REPAIR_MAX, classifyFrozenInventoryDelta, hardeningAppealLines, hardeningAppealRequest, hardeningClassOf, hardeningInvocation, hardeningPrescriptionConflict, hardeningRowBucket, hardeningStageCleared, hardeningTestPath, mutationProofScope, preRepairGreenOutcome, preRepairRefutes, composePrBody } from './drive.mjs'
 import { openLedger, MUTATION_ANCHOR_REFUSALS } from '../scripts/factory/ledger.mjs'
 import { CENSUS_QUALIFYING_FILES, runCensusExhibits, selectCensusExhibits } from './census-exhibits.mjs'
 import { emitAdapter } from './seat-io.mjs'
@@ -3674,7 +3674,7 @@ test('#839 reviewer hardening marks preserve the five-key finding shape unless v
   assert.deepEqual(HARDENING_CLASSES, ['behavioural', 'coverage'])
   assert.deepEqual(HARDENING_REFUSALS, [
     'no-declaration', 'not-an-array', 'unknown-finding', 'duplicate-finding',
-    'test-path-invalid', 'test-not-in-scope', 'file-not-in-scope', 'name-missing', 'name-file-wrapper', 'find-missing',
+    'test-path-invalid', 'test-invocation-conflict', 'invocation-invalid', 'test-not-in-scope', 'file-not-in-scope', 'name-missing', 'name-file-wrapper', 'find-missing',
     'replace-identical', 'builder-exemption', 'class-unknown',
   ])
   assert.deepEqual(HARDENING_OUTCOMES, [
@@ -6050,6 +6050,65 @@ test('I1 hardening declarations require the shared test path', () => {
   assert.equal(result.refusals.length, 1)
   assert.equal(result.refusals[0].finding, 'F1')
   assert.equal(result.refusals[0].reason, 'test-path-invalid')
+})
+
+const B863_INVOCATION = 'cargo test -p power-domain --bin generate_schemas stray_committed_schema_is_drift'
+const b863InvocationEntry = (over = {}) => ({
+  finding: 'F1', invocation: B863_INVOCATION, name: 'F1 guard',
+  file: 'a.mjs', find: 'const guard = false', replace: 'const guard = true',
+  ...over,
+})
+
+test('b863 A1 a cargo invocation guard validates and clears as unmeasured', () => {
+  const scope = scopeMatcher(['a.mjs', 'a.test.mjs', 'src/x.rs'])
+  const result = validateHardened({ hardened: [b863InvocationEntry()] }, [{ id: 'F1' }], scope)
+  assert.equal(result.entries.length, 1)
+  assert.equal(result.refusals.length, 0)
+  const io = b376ProofIo({ hardened: [b863InvocationEntry()] })
+  const done = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  assert.equal(done.status, 'done')
+  const row = io.calls.logs.find((entry) => entry.finding_hardened)?.finding_hardened
+  assert.equal(row?.finding, 'F1')
+  assert.equal(row?.outcome, 'unproven')
+})
+
+test('b863 C1 a guard naming both a path and an invocation, or neither, is refused', () => {
+  const scope = scopeMatcher(['a.mjs', 'a.test.mjs'])
+  const both = validateHardened(
+    { hardened: [{ ...b863InvocationEntry(), test: 'a.test.mjs' }] }, [{ id: 'F1' }], scope)
+  assert.equal(both.entries.length, 0)
+  assert.equal(both.refusals.length, 1)
+  assert.equal(both.refusals[0].reason, 'test-invocation-conflict')
+  const neither = validateHardened(
+    { hardened: [{ finding: 'F1', name: 'F1 guard', file: 'a.mjs', find: 'const guard = false', replace: 'const guard = true' }] },
+    [{ id: 'F1' }], scope)
+  assert.equal(neither.entries.length, 0)
+  assert.equal(neither.refusals.length, 1)
+  assert.equal(neither.refusals[0].reason, 'test-path-invalid')
+})
+
+test('b863 D1 blank, multi-line and flag-only invocations are invocation-invalid', () => {
+  const scope = scopeMatcher(['a.mjs', 'a.test.mjs'])
+  for (const invocation of ['   ', '', 'cargo test\ncargo test', 'cargo test\rcargo test', '-k foo']) {
+    const result = validateHardened(
+      { hardened: [b863InvocationEntry({ invocation })] }, [{ id: 'F1' }], scope)
+    assert.equal(result.entries.length, 0, JSON.stringify(invocation))
+    assert.equal(result.refusals.length, 1, JSON.stringify(invocation))
+    assert.equal(result.refusals[0].reason, 'invocation-invalid', JSON.stringify(invocation))
+  }
+})
+
+test('b863 E1 a metachar invocation is admitted without path treatment', () => {
+  assert.equal(hardeningInvocation('cargo test -p x'), true)
+  assert.equal(hardeningInvocation('-k foo'), false)
+  assert.equal(hardeningInvocation('  '), false)
+  assert.equal(hardeningInvocation('a\nb'), false)
+  assert.equal(hardeningTestPath('pytest -k "test_*"'), false)
+  const scope = scopeMatcher(['a.mjs', 'a.test.mjs'])
+  const result = validateHardened(
+    { hardened: [b863InvocationEntry({ invocation: 'pytest -k "test_*"' })] }, [{ id: 'F1' }], scope)
+  assert.equal(result.entries.length, 1)
+  assert.equal(result.refusals.length, 0)
 })
 
 test('RV1-1 disposition-less pinned prescriptions conflict', () => {

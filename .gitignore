@@ -25,3 +25,8 @@ returns/
 .env
 .env.*
 !.env.example
+
+# pi runtime state: credentials and machine-local files, never the repo's
+crew/pi/auth.json
+crew/pi/models-store.json
+crew/pi/bin/

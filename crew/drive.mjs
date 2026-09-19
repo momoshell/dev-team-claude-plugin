@@ -5731,6 +5731,7 @@ function proveHardeningEntries({ entries, hardenWitness, ctx, io, hardenRun, dir
   const proveEntry = (entry) => {
     let active = null
     const row = (outcome, why) => ({ finding: entry.finding, test: entry.test, name: entry.name, outcome, why })
+    if (entry.invocation !== undefined) return row('unproven', `the guard is the invocation ${entry.invocation}; this repo executes no foreign runner, so the guard is recorded and unmeasured`)
     try {
       const W = hardenWitness?.get(entry.test)
       const S = hardenWitness?.get(entry.file)
@@ -13300,7 +13301,7 @@ export const HARDENING_PRESCRIPTION_RESOLUTION = 'refuse-prescription'
 
 export const HARDENING_REFUSALS = Object.freeze([
   'no-declaration', 'not-an-array', 'unknown-finding', 'duplicate-finding',
-  'test-path-invalid', 'test-not-in-scope', 'file-not-in-scope', 'name-missing', 'name-file-wrapper', 'find-missing',
+  'test-path-invalid', 'test-invocation-conflict', 'invocation-invalid', 'test-not-in-scope', 'file-not-in-scope', 'name-missing', 'name-file-wrapper', 'find-missing',
   'replace-identical', 'builder-exemption', 'class-unknown',
 ])
 // Proof OUTCOMES. `name-not-new` is the check's own word for an already-existing test
@@ -13548,6 +13549,20 @@ export function mutationChangesTokens(find, replace) {
   return normalizeAnchor(find).text !== normalizeAnchor(replace).text                    // ANCHOR B13
 }
 
+// A deliberate ceiling: this proves only that the value is a single non-blank line whose
+// first token is not a flag — never that the binary exists, that the command succeeds, or
+// that its filter matches anything.
+// lean: O(1) token peek; upgrade path is a runner-aware grammar only if a lane ever needs it
+export function hardeningInvocation(value) {
+  if (typeof value !== 'string') return false
+  const trimmed = value.trim()
+  if (trimmed === '') return false
+  if (/[\r\n\0]/.test(value)) return false
+  const first = trimmed.split(/\s+/, 1)[0]
+  if (first.startsWith('-')) return false
+  return true
+}
+
 export function hardeningTestPath(file) {
   return typeof file === 'string' && file.trim() !== '' && file.endsWith('.test.mjs')
 }
@@ -13615,13 +13630,26 @@ export function validateHardened(details, owed, inScope) {
       refuse(id, 'class-unknown', `the hardened entry for finding ${id} declares class ${JSON.stringify(entry.class)}; the closed set is ${HARDENING_CLASSES.join(' or ')}`)
       continue
     }
-    if (!hardeningTestPath(entry.test)) {
-      refuse(id, 'test-path-invalid', `the hardened test ${entry.test ?? '(missing)'} for finding ${id} must be a non-empty path ending in .test.mjs`)
+    const namesTest = entry.test !== undefined
+    const namesInvocation = entry.invocation !== undefined
+    if (namesTest && namesInvocation) {
+      refuse(id, 'test-invocation-conflict', `the hardened entry for finding ${id} names both a test path and an invocation; name the guard by exactly one of the two`)
       continue
     }
-    if (!scopedPath(entry.test, scope)) {
-      refuse(id, 'test-not-in-scope', `the hardened test ${entry.test ?? '(missing)'} must be a concrete repo-relative literal path`)
-      continue
+    if (namesInvocation) {
+      if (!hardeningInvocation(entry.invocation)) {
+        refuse(id, 'invocation-invalid', `the hardened invocation ${JSON.stringify(entry.invocation)} for finding ${id} must be a single non-blank line naming a runnable command`)
+        continue
+      }
+    } else {
+      if (!hardeningTestPath(entry.test)) {
+        refuse(id, 'test-path-invalid', `the hardened test ${entry.test ?? '(missing)'} for finding ${id} must be a non-empty path ending in .test.mjs`)
+        continue
+      }
+      if (!scopedPath(entry.test, scope)) {
+        refuse(id, 'test-not-in-scope', `the hardened test ${entry.test ?? '(missing)'} must be a concrete repo-relative literal path`)
+        continue
+      }
     }
     if (!scopedPath(entry.file, scope)) {
       refuse(id, 'file-not-in-scope', `the hardened implementation ${entry.file ?? '(missing)'} must be a concrete repo-relative literal path`)
@@ -13683,7 +13711,7 @@ export function hardeningBounceLines(round, refusals, rows) {
   if (undeclared.length > 0) lines.push('No guard was declared for:', ...undeclared.map((refusal) => `- ${refusal.finding}`))
   const unmeasured = Array.isArray(rows) ? rows.filter((row) => hardeningRowBucket(row) === 'unmeasured') : []
   if (unmeasured.length > 0) lines.push('Measured nothing — not blocking:', ...unmeasured.map((row) => `- ${row.finding}: ${row.outcome} — ${row.why}`))
-  lines.push('', 'Return details.hardened entries shaped exactly as { finding, test, name, file, find, replace }, and "class": "coverage" when the implementation was already correct at review time; the declared name must not exist on the tree the review read.', `Hardening proof for round ${round} did not close every finding.`)
+  lines.push('', 'Return details.hardened entries shaped exactly as { finding, test, name, file, find, replace } or { finding, invocation, name, file, find, replace }, and "class": "coverage" when the implementation was already correct at review time; the declared name must not exist on the tree the review read.', `Hardening proof for round ${round} did not close every finding.`)
   lines.push(`A finding whose defect class cannot become a mechanical guard is asked about, not waived: ask with an entry of exactly ${HARDENING_APPEAL_SHAPE}, which is still refused builder-exemption until the reviewer approves it.`)
   return lines
 }
@@ -13693,7 +13721,7 @@ export function hardeningBriefLines(owed, exempt) {
   if (findings.length === 0) return []
   const lines = ['', '## Permanent guards required (#839)', 'Every must-fix below needs a permanent named test guard, and its declared kill-mutation must be proven by the driver.']
   lines.push(...findings.map(({ id, location, summary }) => `- ${id} (${location || 'location unspecified'}) — ${summary || 'close this finding with a named guard'}`))
-  lines.push('Declare each guard in details.hardened with the exact shape { finding, test, name, file, find, replace }, plus "class": "coverage" when the implementation the finding names was ALREADY correct at review time and the finding was that nothing durable guarded it.',
+  lines.push('Declare each guard in details.hardened with the exact shape { finding, test, name, file, find, replace } or { finding, invocation, name, file, find, replace }, plus "class": "coverage" when the implementation the finding names was ALREADY correct at review time and the finding was that nothing durable guarded it.',
     'A coverage declaration is certified WITHOUT a red pre-repair: its file must be byte-identical to the review-time witness, so editing the implementation to manufacture one is refused as source-regressed.',
     'The declared name must be one that does not exist on the tree the review read; only the reviewer may mark a finding ungateable with a non-empty hardening_why.',
     `If a finding's defect class cannot become a mechanical guard, ASK: return that finding's entry as exactly ${HARDENING_APPEAL_SHAPE} and nothing else. That request is still refused builder-exemption and grants nothing until the reviewer approves it in a hardening appeal; an entry that mixes the request with a declaration is not a request.`)

@@ -61,7 +61,17 @@ With a ratified profile, a lane can be dispatched against the target using
 `--checkout`. Follow `crew-dispatch` for the dispatch itself; nothing about
 fences, tiers or flags changes because the checkout is foreign.
 
-Two things that do change:
+Three things that do change:
+
+- The **exhibit census does not run**. It measures THIS repo's exhibit corpus
+  by running `crew/census-exhibits.mjs` resolved against the lane's checkout,
+  so a checkout that does not ship that script has no corpus for it to
+  measure. Presence is probed at each census, and an absent instrument is
+  recorded as `census-instrument-absent` and skipped. Until that distinction
+  existed, every foreign lane ran the command anyway, got MODULE_NOT_FOUND,
+  and escalated `census-malformed-output` at pre-build — correctly by the rule
+  that an unmeasured census is never a clear, on a question the foreign
+  checkout was never asked.
 
 - The worktree is created beside the **target**, not beside this repo.
 - The crew root is still the operator's (`~/.crew`, or `DEVTEAM_CREW_ROOT`), so

@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join, relative } from 'node:path'
 import { ROOT, git, scratchDir } from '../../test/helpers.mjs'
 import { anchorManifestDirs, assertAnchorsPinned, checkAnchors, checkSkillAnchors, citationCarrierTests, collectAnchors, collectNamed, collectRanges, INVERTED_MARK, laneFence, MIN_EXPECTED_LENGTH, partitionShifts, shiftsAreOwedHere, pinnedKey, pinnedLiteralsInTests, repairAnchors, repairAnchorsInPlace, repairCli, resolveNamed, rewriteCitations, skillDocs, PINNED_LITERAL_BLIND_SPOT } from './anchor-pin.mjs'
@@ -850,6 +850,15 @@ test('the discovered anchor-manifest corpus checks clean', () => {
   const relativeDirs = dirs.map((dir) => relative(ROOT, dir))
   assert.ok(relativeDirs.includes('skills/pr-review'))
   for (const dir of dirs) {
+    if (relative(ROOT, dir) === 'skills/frontend-svelte') {
+      // Exempt: the shipped ANCHOR_PATTERN accepts only mjs|ts|js|json|md|sh|yml,
+      // so this corpus cannot tokenize that skill's .svelte citations and would report
+      // every pin as orphaned without ever checking content. Its pins are enforced
+      // instead by its skill-local skills/frontend-svelte/exhibits.test.mjs (superset
+      // parser with .svelte, hyphen/en-dash/comma) and by gate A1/D1/E1.
+      assert.ok(existsSync(join(dir, 'exhibits.test.mjs')), 'frontend-svelte must keep its skill-local checker')
+      continue
+    }
     const docs = skillDocs(dir).filter((doc) => {
       // tier.md is exempt for the duplicated quoted-runtime anchor, as documented at skills/crew-dispatch/exhibits.test.mjs:56-62.
       return doc !== join(dir, 'references/tier.md')

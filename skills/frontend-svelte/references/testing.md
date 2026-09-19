@@ -12,7 +12,7 @@ The package declares `svelte`, `vite`, and `@sveltejs/vite-plugin-svelte` as dev
 
 ## Source pins are exact
 
-A `.svelte` file can be pinned with `readFileSync` plus a regex or exact substring, not rendered output. The exact pins at `test/visualizer-panels.test.mjs:623,627,629,845–847` cover FleetTable's header and status rules and PhaseGantt's layout locals; `test/visualizer-shape.test.mjs:750–751` covers the runes-only source rule. Reformatting a pinned string can therefore break a test without changing runtime behaviour. Preserve the local source shape when a test is explicitly pinning it.
+A `.svelte` file can be pinned with `readFileSync` plus a regex or exact substring, not rendered output. The exact pins at `test/visualizer-panels.test.mjs:1487,1492,1493` cover FleetTable's header and status rules and `test/visualizer-panels.test.mjs:1764,1771,1837` cover PhaseGantt's layout locals; `test/visualizer-shape.test.mjs:973-975` covers the runes-only source rule. Reformatting a pinned string can therefore break a test without changing runtime behaviour. Preserve the local source shape when a test is explicitly pinning it.
 
 The `qa-test-writing` skill is the route for making a source check non-vacuous: prove the check can fail, keep expected values independent from implementation, and record the mutation it kills. Do not restate that skill's full test-writing method here; this reference only explains why a Svelte component is source text at test time.
 

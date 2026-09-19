@@ -1,0 +1,7 @@
+{
+  "crew/seat-io.mjs:3626": "if (toAdd.length > 0) execFileSync('git', ['add', '--', ...toAdd], { cwd: checkout })",
+  "crew/variants.mjs:12": "stages: Object.freeze(['plan', 'check', 'build', 'scope-gate', 'lane', 'gate',",
+  "crew/variants.mjs:13": "'gate-baseline', 'gate-repair', 'gate-reverify', 'gate-proof', 'review',",
+  "test/helpers.mjs:39": "export function scratchDir(prefix = 'crew-test-', { parent = tmpdir() } = {}) {",
+  "crew/headless-rpc.mjs:129": "unreadable.push({ lane, candidates: null, reason: closedReason(error) })"
+}

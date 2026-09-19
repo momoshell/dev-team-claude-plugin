@@ -131,7 +131,7 @@ const fenceDiff = (path, oldStart, oldCount = 1, newStart = oldStart, newCount =
 
 // Scripted fake io: `script` maps `${role}:${n-th call}` -> envelope; runs and
 // git are scripted per call. Everything is recorded for assertions.
-function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cleanThrows = false, cold = 'green', showDoc = false, documentDiff = '', emit = false, files = {}, reseat = null, gh = null, writeThrough = false, throwOn = null, throwWrites = [], seqIds = false, now = () => 0, slots = null, diffListing = '', diffHunks = {}, diffReports = [], fenceBases = {}, fenceDiffs = {}, baseBlobs = {}, spanDiffs = {}, onRun = null, onCommit = null, commitResults = null, screener = null } = {}) {
+function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cleanThrows = false, cold = 'green', showDoc = false, documentDiff = '', emit = false, files = {}, reseat = null, gh = null, writeThrough = false, throwOn = null, throwWrites = [], seqIds = false, now = () => 0, slots = null, diffListing = '', diffHunks = {}, diffReports = [], fenceBases = {}, fenceDiffs = {}, baseBlobs = {}, spanDiffs = {}, onRun = null, onCommit = null, commitResults = null, screener = null, stats = null } = {}) {
   const calls = { order: [], trace: [], assign: [], run: [], diffRuns: [], fenceShows: [], fenceDiffs: [], diffInventory: [], diffConfigs: [], runClean: [], runCold: [], wrapped: [], sweeps: [], reseat: [], commits: [], writes: {}, writeLog: [], checkoutLog: [], logs: [], showDoc: [], emits: [], gh: [], waits: [], sleeps: [], slotFactories: [], files, screener: { models: [], diffs: [], children: [] } }
   const counts = {}; let seq = 0
 
@@ -265,6 +265,13 @@ function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cle
     status(label) { (calls.status ||= []).push(label) },
     log(obj) { calls.logs.push(obj) },
     now() { return now() },
+  }
+  if (stats != null) {
+    io.stat = (p) => {
+      if (!Object.prototype.hasOwnProperty.call(stats, p)) return null
+      const value = stats[p]
+      return typeof value === 'number' ? { mtimeMs: value } : value
+    }
   }
   if (cold !== null) {
     io.runCold = (cmd, names) => {
@@ -1471,6 +1478,8 @@ const DRIVE_JOURNAL_EXPECTED = Object.freeze([
   ["recordRow", "event='acceptance-coverage'", "at ...coverage"],
   ["recordRow", "", "at gate_discrimination gate_generation gate_summary gate_proof_note"],
   ["recordRow", "", "at gate_proof_unproven gate_generation"],
+  ["recordRow", "", "at gate_stale_artifact"],
+  ["recordRow", "", "at gate_stale_artifact"],
   ["recordRow", "", "at gate_check_proof_unproven gate_generation"],
   ["recordRow", "", "at diff_mutation_proof"],
   ["recordRow", "", "at kind diff_mutant_judgment"],

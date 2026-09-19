@@ -14,7 +14,7 @@ import { parseGateSummary } from './drive.mjs'
 import { assignmentLine } from './driver.mjs'
 
 const REQUIRED = ['assign', 'wait', 'writeFile', 'readFile', 'run', 'changedFiles', 'fingerprintTree', 'commit', 'log', 'now']
-const OPTIONAL = ['runClean', 'status', 'showDoc', 'emit', 'reseat', 'teardown']
+const OPTIONAL = ['runClean', 'stat', 'status', 'showDoc', 'emit', 'reseat', 'teardown']
 const FAULT = process.env.CREW_IO_CONTRACT_FAULT || ''
 
 function dirs() {
@@ -465,6 +465,15 @@ test('outer seatIo exposes fingerprintTree and preserves injected unmeasured res
   assert.equal(typeof io.fingerprintTree, 'function')
   assert.strictEqual(io.fingerprintTree(paths.dir), unmeasured)
   assert.equal(received, paths.dir)
+})
+
+test('seatIo stat reports mtimes and null for a missing path', () => {
+  const f = makeSeatIo()
+  const target = join(f.paths.taskDir, 'witness.txt')
+  fsWriteFileSync(target, 'witness')
+  const witnessed = f.io.stat(target)
+  assert.equal(typeof witnessed?.mtimeMs, 'number')
+  assert.equal(f.io.stat(join(f.paths.taskDir, 'missing.txt')), null)
 })
 
 test('seatIo commit stages changed files and returns the short hash', () => {

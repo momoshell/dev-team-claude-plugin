@@ -8492,6 +8492,26 @@ function runTask(ctx, io, crash) {
     stageComplete()
     return pristine
   }
+  // b861-staleartifact (closes #1424) — recorded beside gate-proof, never blocking:
+  // after an accepted green run, mtime-compare every in-checkout path the gate's own
+  // commands spawn against the newest changed file. Unknown is never green, and a stale
+  // artifact is a journal row, not a red gate. Never throws outward.
+  const recordStaleSpawnProof = () => {
+    try {
+      const gateFile = gateCmd ? gateFileFromCommand(gateCmd) : null
+      let gateSource = null
+      if (gateFile) {
+        try { gateSource = io.readFile(gateFile.startsWith('/') ? gateFile : `${ctx.checkout}/${gateFile}`) } catch { gateSource = null }
+      }
+      let changed = null
+      try { changed = io.changedFiles() } catch { changed = null }
+      const stat = typeof io.stat === 'function' ? (path) => io.stat(path) : null
+      const verdict = staleSpawnProof({ gateSource, checkout: ctx.checkout, changedFiles: changed, stat })
+      io.log(recordRow({ at: io.now(), gate_stale_artifact: verdict.journal }))
+    } catch {
+      try { io.log(recordRow({ at: io.now(), gate_stale_artifact: { verdict: 'unmeasured', compared: [], ignored: [], stale: [], reason: STALE_SPAWN_REASONS.STAT_UNAVAILABLE } })) } catch { /* journal faults never indict the build */ }
+    }
+  }
   // Two CLASSES, two sentences, distinguishable by machine and not only by a reader
   // (#733). A binding failure is a PLAN/BUILD disagreement — the plan predicted source
   // the builder did not write; `survived` keeps today's wording, because it is the one
@@ -10468,6 +10488,7 @@ function runTask(ctx, io, crash) {
           gateRes = refreshed.gateRes || gateRes
         }
       }
+      if (gateRes?.ok) recordStaleSpawnProof();
       if (!gateRes.ok) {
         if (finalRound()) {
           const c = consultLead(
@@ -12425,6 +12446,92 @@ export const JOURNAL_CHANNEL_NAMES = Object.freeze(Object.keys(JOURNAL_CHANNELS)
 // payload (crew/drive.mjs:2787 spreads a caller-built panel entry).
 export const recordRow = (row) => ({ ...row, channel: JOURNAL_CHANNELS.record })
 export const operationalRow = (row) => ({ ...row, channel: JOURNAL_CHANNELS.operational })
+
+// b861-staleartifact (closes #1424) — driver-side spawn freshness. `gate-proof` asks
+// whether a check CAN fail; this asks whether it failed for THIS tree: every in-checkout
+// path the accepted gate's own commands spawn is mtime-compared against the newest
+// changed file. Recorded in the journal, never blocking; unknown is never green.
+// Pure (all filesystem through `stat`) so fake-io tests pin it without a checkout.
+// (lean: textual spawn attribution heuristic; upgrade path: a structured spawn manifest
+// if gates ever declare one.)
+export const STALE_SPAWN_REASONS = Object.freeze({
+  GATE_UNREADABLE: 'gate-unreadable',
+  STAT_UNAVAILABLE: 'stat-unavailable',
+  CHANGED_FILES_UNREADABLE: 'changed-files-unreadable',
+  NO_CHANGED_FILES: 'no-changed-files',
+  NO_STATABLE_SOURCES: 'no-statable-sources',
+  STAT_FAILED: 'stat-failed',
+})
+export function staleSpawnProof({ gateSource, checkout, changedFiles, stat }) {
+  const unmeasured = (reason) => ({ verdict: 'unmeasured', stale: [], compared: [], ignored: [], reason, journal: { verdict: 'unmeasured', compared: [], ignored: [], stale: [], reason } })
+  if (typeof gateSource !== 'string') return unmeasured(STALE_SPAWN_REASONS.GATE_UNREADABLE)
+  if (typeof stat !== 'function') return unmeasured(STALE_SPAWN_REASONS.STAT_UNAVAILABLE)
+  if (!Array.isArray(changedFiles)) return unmeasured(STALE_SPAWN_REASONS.CHANGED_FILES_UNREADABLE)
+  if (changedFiles.length === 0) return unmeasured(STALE_SPAWN_REASONS.NO_CHANGED_FILES)
+  const root = String(checkout).replace(/\/+$/, '')
+  const insideCheckout = (resolved) => resolved === root || resolved.startsWith(`${root}/`)
+  const labels = [...gateSource.matchAll(/\b(?:check|test)\s*\(\s*(['"])([^'"]+)\1/g)]
+  const labelAt = (index) => {
+    let label = null
+    for (const match of labels) {
+      if (match.index < index) label = match[2]
+      else break
+    }
+    return label ?? 'gate'
+  }
+  const candidates = []
+  for (const match of gateSource.matchAll(/\b(?:spawnSync|spawn|execFileSync|execFile|fork)\s*\(\s*('(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*")/g)) candidates.push({ path: match[1].slice(1, -1), check: labelAt(match.index) })
+  for (const match of gateSource.matchAll(/\b(?:execSync|exec)\s*\(\s*('(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*")/g)) {
+    for (const token of match[1].slice(1, -1).split(/\s+/)) {
+      if (token.includes('/')) candidates.push({ path: token, check: labelAt(match.index) })
+    }
+  }
+  const ignored = []
+  const pending = []
+  for (const { path, check } of candidates) {
+    if (!path.startsWith('/') && !path.includes('/')) { ignored.push({ path, reason: 'bare-name' }); continue }
+    const resolved = path.startsWith('/') ? path : join(root, path)
+    if (!insideCheckout(resolved)) { ignored.push({ path: resolved, reason: 'outside-checkout' }); continue }
+    pending.push({ check, resolved })
+  }
+  let newestSourceMtime = -Infinity
+  let newestSource = null
+  let statable = 0
+  for (const file of changedFiles) {
+    if (typeof file !== 'string' || file.length === 0) continue
+    const abs = file.startsWith('/') ? file : join(root, file)
+    let witness = null
+    try { witness = stat(abs) } catch { witness = null }
+    if (witness == null || typeof witness.mtimeMs !== 'number') continue
+    statable += 1
+    if (witness.mtimeMs > newestSourceMtime) { newestSourceMtime = witness.mtimeMs; newestSource = abs }
+  }
+  if (statable === 0) return unmeasured(STALE_SPAWN_REASONS.NO_STATABLE_SOURCES)
+  const compared = []
+  const stale = []
+  for (const { check, resolved } of pending) {
+    let witness = null
+    let failed = false
+    try { witness = stat(resolved) } catch { failed = true }
+    if (witness == null || typeof witness.mtimeMs !== 'number') failed = true
+    if (failed) return unmeasured(`${STALE_SPAWN_REASONS.STAT_FAILED}:${resolved}`)
+    const artifactMtime = witness.mtimeMs
+    compared.push({ check, path: resolved, artifactMtime })
+    if (artifactMtime < newestSourceMtime) {
+      stale.push({ check, path: resolved, artifactMtime, sourceMtime: newestSourceMtime, source: newestSource })
+    }
+  }
+  const verdict = stale.length > 0 ? 'stale' : 'fresh'
+  const reason = null
+  const measured = { verdict, stale, compared, ignored, reason, journal: { verdict, compared, ignored, stale, reason } }
+  if (measured.verdict === 'stale') return measured
+  return { verdict: 'fresh', reason: null, stale: measured.stale, compared: measured.compared, ignored: measured.ignored, reason: measured.reason, journal: measured.journal }
+}
+export function gateFileFromCommand(cmd) {
+  const { words } = shellWords(String(cmd ?? ''))
+  const gate = words.find((word) => word.endsWith('.mjs') || word.endsWith('.cjs') || word.endsWith('.js'))
+  return gate ?? null
+}
 
 // --- suite slots (#824, parent #822) -----------------------------------------------
 // The phases below are the only places this driver competes with OTHER LANES for local

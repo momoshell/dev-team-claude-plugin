@@ -6735,3 +6735,139 @@ test('a blind spot recorded before a post-commit suite-red repair survives the r
   assert.deepEqual((result.details.hardening_unmeasured ?? []).map((entry) => [entry.finding, entry.outcome]), [['F1', 'witness-absent']])
   assert.match(prBodyOf(result), /F1/)
 })
+
+// b861-staleartifact (closes #1424): the driver records spawn freshness beside
+// gate-proof — a stale artifact is a journal row, never a red gate.
+const STALE_SCOPE = ['a.mjs', 'a.test.mjs', 'crates/power-cli/src/main.rs', 'target/debug/power']
+const STALE_GATE = 'node task/gate.mjs'
+const STALE_OLD = 1700000000000
+const STALE_NEW = STALE_OLD + 180000
+const STALE_GATE_FILE = `${CTX.checkout}/task/gate.mjs`
+const STALE_ARTIFACT = `${CTX.checkout}/target/debug/power`
+const STALE_SOURCE = `${CTX.checkout}/crates/power-cli/src/main.rs`
+const staleGreen = () => `green\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":0,"errored":0}`
+const staleIo = ({ gateSource, changed, stats }) => fakeIo({
+  files: gateSource == null ? {} : { [STALE_GATE_FILE]: gateSource },
+  envelopes: {
+    'planner:1': planEnv({ details: { ...planEnv().details, files_in_scope: STALE_SCOPE, gate_cmd: STALE_GATE } }),
+    'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+  },
+  runs: {
+    [`${STALE_GATE}:1`]: { ok: false, output: RED(3) },
+    [`${STALE_GATE}:2`]: { ok: true, output: staleGreen() },
+    'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+  },
+  cleanRuns: { [STALE_GATE]: { ok: false, output: RED(3) } },
+  changed, ...(stats === undefined ? {} : { stats }), emit: true,
+})
+const staleRows = (io) => io.calls.logs.filter((line) => line && line.gate_stale_artifact)
+
+test('a stale spawned artifact is recorded with check, path and both mtimes', () => {
+  const io = staleIo({
+    gateSource: "check('C7', () => {\n  spawnSync('target/debug/power', ['--version']);\n});",
+    changed: ['crates/power-cli/src/main.rs'],
+    stats: { [STALE_ARTIFACT]: STALE_OLD, [STALE_SOURCE]: STALE_NEW },
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  const rows = staleRows(io)
+  assert.equal(rows.length, 1)
+  const journal = rows[0].gate_stale_artifact
+  assert.equal(journal.verdict, 'stale')
+  assert.deepEqual(journal.stale.map(({ check, path, artifactMtime, sourceMtime }) => ({ check, path, artifactMtime, sourceMtime })), [
+    { check: 'C7', path: STALE_ARTIFACT, artifactMtime: STALE_OLD, sourceMtime: STALE_NEW },
+  ])
+})
+
+test('a rebuilt artifact stays fresh', () => {
+  const io = staleIo({
+    gateSource: "check('C7', () => {\n  spawnSync('target/debug/power', ['--version']);\n});",
+    changed: ['crates/power-cli/src/main.rs'],
+    stats: { [STALE_ARTIFACT]: STALE_NEW + 60000, [STALE_SOURCE]: STALE_NEW },
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  const rows = staleRows(io)
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].gate_stale_artifact.verdict, 'fresh')
+  assert.deepEqual(rows[0].gate_stale_artifact.stale, [])
+})
+
+test('a spawn-free gate is untouched fresh with zero compared', () => {
+  const io = staleIo({
+    gateSource: "check('C1', () => {\n  assert.equal(1 + 1, 2);\n});",
+    changed: ['a.mjs'],
+    stats: { [`${CTX.checkout}/a.mjs`]: STALE_NEW },
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  const rows = staleRows(io)
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].gate_stale_artifact.verdict, 'fresh')
+  assert.deepEqual(rows[0].gate_stale_artifact.compared, [])
+})
+
+test('a spawned path outside the checkout is ignored, never compared', () => {
+  const io = staleIo({
+    gateSource: "check('C13', () => {\n  execFileSync('/usr/bin/cargo', ['--version']);\n});",
+    changed: ['crates/power-cli/src/main.rs'],
+    stats: { [STALE_SOURCE]: STALE_NEW },
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  const rows = staleRows(io)
+  assert.equal(rows.length, 1)
+  const journal = rows[0].gate_stale_artifact
+  assert.equal(journal.verdict, 'fresh')
+  assert.deepEqual(journal.compared, [])
+  assert.ok(journal.ignored.some((row) => String(row.path).includes('/usr/bin/cargo')))
+})
+
+test('unmeasurable spawn freshness is recorded, never green nor red', () => {
+  const spawned = "check('C7', () => {\n  spawnSync('target/debug/power', []);\n});"
+  const noStat = staleIo({ gateSource: spawned, changed: ['a.mjs'], stats: { [`${CTX.checkout}/a.mjs`]: STALE_NEW } })
+  assert.equal(driveTask(CTX, noStat).status, 'done')
+  const noStatRow = staleRows(noStat)[0]?.gate_stale_artifact
+  assert.equal(noStatRow?.verdict, 'unmeasured')
+  assert.match(noStatRow?.reason ?? '', /^stat-failed:/)
+  const noGate = staleIo({ gateSource: null, changed: ['a.mjs'], stats: { [`${CTX.checkout}/a.mjs`]: STALE_NEW } })
+  assert.equal(driveTask(CTX, noGate).status, 'done')
+  const noGateRow = staleRows(noGate)[0]?.gate_stale_artifact
+  assert.equal(noGateRow?.verdict, 'unmeasured')
+  assert.equal(noGateRow?.reason, 'gate-unreadable')
+  const noChanged = staleIo({ gateSource: spawned, changed: [], stats: { [STALE_ARTIFACT]: STALE_OLD } })
+  assert.equal(driveTask(CTX, noChanged).status, 'done')
+  const noChangedRow = staleRows(noChanged)[0]?.gate_stale_artifact
+  assert.equal(noChangedRow?.verdict, 'unmeasured')
+  assert.equal(noChangedRow?.reason, 'no-changed-files')
+})
+
+test('the journal row states what was compared and what was not', () => {
+  const io = staleIo({
+    gateSource: "check('C7', () => {\n  spawnSync('target/debug/power', ['--version']);\n  execFileSync('/usr/bin/cargo', ['--version']);\n});",
+    changed: ['crates/power-cli/src/main.rs'],
+    stats: { [STALE_ARTIFACT]: STALE_OLD, [STALE_SOURCE]: STALE_NEW },
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  const rows = staleRows(io)
+  assert.equal(rows.length, 1)
+  const journal = rows[0].gate_stale_artifact
+  assert.equal(journal.verdict, 'stale')
+  assert.ok(journal.compared.some((row) => String(row.path).includes('target/debug/power')))
+  assert.ok(journal.ignored.some((row) => String(row.path).includes('/usr/bin/cargo')))
+})
+
+test('a missing stat capability records unmeasured without blocking', () => {
+  const io = staleIo({
+    gateSource: "check('C7', () => {\n  spawnSync('target/debug/power', ['--version']);\n});",
+    changed: ['crates/power-cli/src/main.rs'],
+  })
+  assert.equal(typeof io.stat, 'undefined')
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  const rows = staleRows(io)
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].gate_stale_artifact.verdict, 'unmeasured')
+  assert.equal(rows[0].gate_stale_artifact.reason, 'stat-unavailable')
+})

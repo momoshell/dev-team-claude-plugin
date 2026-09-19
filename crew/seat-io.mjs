@@ -3223,6 +3223,11 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
     // not ship from one that ran and failed. readFile would answer the same question by
     // reading the whole file, and a null from it cannot tell absent from unreadable.
     exists(path) { return existsSync(path) },
+    stat(abspath) {
+      try {
+        return { mtimeMs: fsStatSync(abspath).mtimeMs }
+      } catch { return null }
+    },
     run(cmd) {
       const res = spawnSync('/bin/sh', ['-c', cmd], { cwd: checkout, encoding: 'utf8', timeout: 900_000, maxBuffer: RUN_MAX_BUFFER_BYTES, env: colorNeutralEnv(deps.env || process.env) })
       // A timeout kill or a spawn failure must be legible in the output a

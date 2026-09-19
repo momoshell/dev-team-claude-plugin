@@ -1296,8 +1296,8 @@ export function emitAdapter(emitter, crew = null) {
   // stores today, so this can never change a run.
   let phaseId = null
   const usageTotals = new Map()
-  const record = (type, payload) => emitter.emit((handle, nextSeq) => handle.recordEvent({
-    adw_id: emitter.adwId, type, seq: nextSeq('event'), phase_id: phaseId, payload,
+  const record = (type, payload, extra = {}) => emitter.emit((handle, nextSeq) => handle.recordEvent({
+    adw_id: emitter.adwId, type, seq: nextSeq('event'), phase_id: phaseId, payload, ...extra,
   }))
   return (event) => {
     if (!event || typeof event !== 'object') return
@@ -1306,9 +1306,12 @@ export function emitAdapter(emitter, crew = null) {
       phaseId = typeof t?.phase_id === 'number' ? t.phase_id : null
       record('log', { level: 'info', message: event.label })
     } else if (event.kind === 'assign') {
-      record('agent_start', { role: event.role, dispatch_id: event.id })
+      // #1412: the driver carries no time today (drive.mjs:6122), so the recordEvent
+      // default stamps this at emitter time; forward event.at if one ever arrives.
+      record('agent_start', { role: event.role, dispatch_id: event.id }, Number.isFinite(event.at) ? { started_at: event.at } : {})
     } else if (event.kind === 'envelope') {
-      record('agent_end', { role: event.role, outcome: event.status, dispatch_id: event.id })
+      // #1412: same basis as assign (drive.mjs:6159); this side stamps ended_at.
+      record('agent_end', { role: event.role, outcome: event.status, dispatch_id: event.id }, Number.isFinite(event.at) ? { ended_at: event.at } : {})
       if (event.review) {
         // The reviewing seat's CELL, read from the booted crew — the same
         // source and the same reason as the cell-failure branch below (:1080):

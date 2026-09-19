@@ -381,6 +381,70 @@ test('T8: replaying a ledger authority into itself preserves its bytes', { skip:
     assert.equal(ledger.dumpTable('events').length, 1)
   } finally { ledger.close() }
 })
+test('recordEvent stamps agent boundaries, preserves explicit times, and keeps annotations timeless', { skip: SKIP }, () => {
+  const fixedAt = 1700400000123
+  const ledger = openTestLedger({ now: () => fixedAt })
+  const explicitStart = '2024-01-01T00:00:01.000Z'
+  const explicitEnd = '2024-01-01T00:00:02.000Z'
+  try {
+    ledger.recordEvent({ adw_id: 'event-times', type: 'agent_start', payload: { role: 'builder', dispatch_id: 'd1' } })
+    ledger.recordEvent({ adw_id: 'event-times', type: 'agent_end', payload: { role: 'builder', outcome: 'done', dispatch_id: 'd1' } })
+    ledger.recordEvent({
+      adw_id: 'event-times', type: 'agent_start', started_at: explicitStart, ended_at: explicitEnd,
+      payload: { role: 'planner', dispatch_id: 'd2' },
+    })
+    ledger.recordEvent({
+      adw_id: 'event-times', type: 'agent_end', started_at: explicitStart, ended_at: explicitEnd,
+      payload: { role: 'planner', outcome: 'done', dispatch_id: 'd2' },
+    })
+    ledger.recordEvent({ adw_id: 'event-times', type: 'log', payload: { level: 'info', message: 'annotation' } })
+    ledger.recordEvent({ adw_id: 'event-times', type: 'decision', payload: { decided: 'accept', why: 'annotation' } })
+    ledger.recordEvent({ adw_id: 'event-times', type: 'tool_call', payload: { tool: 'test', ok: true } })
+
+    const rows = ledger.dumpTable('events')
+    const row = (type, dispatch_id = null) => rows.find((candidate) => (
+      candidate.type === type && (dispatch_id === null || JSON.parse(candidate.payload_json).dispatch_id === dispatch_id)
+    ))
+    assert.deepEqual(
+      { started_at: row('agent_start', 'd1').started_at, ended_at: row('agent_start', 'd1').ended_at },
+      { started_at: new Date(fixedAt).toISOString(), ended_at: null },
+    )
+    assert.deepEqual(
+      { started_at: row('agent_end', 'd1').started_at, ended_at: row('agent_end', 'd1').ended_at },
+      { started_at: null, ended_at: new Date(fixedAt).toISOString() },
+    )
+    assert.deepEqual(
+      { started_at: row('agent_start', 'd2').started_at, ended_at: row('agent_start', 'd2').ended_at },
+      { started_at: explicitStart, ended_at: explicitEnd },
+    )
+    assert.deepEqual(
+      { started_at: row('agent_end', 'd2').started_at, ended_at: row('agent_end', 'd2').ended_at },
+      { started_at: explicitStart, ended_at: explicitEnd },
+    )
+    assert.deepEqual({ started_at: row('log').started_at, ended_at: row('log').ended_at }, { started_at: null, ended_at: null })
+    assert.deepEqual({ started_at: row('decision').started_at, ended_at: row('decision').ended_at }, { started_at: null, ended_at: null })
+    assert.deepEqual(
+      { started_at: row('tool_call').started_at, ended_at: row('tool_call').ended_at },
+      { started_at: new Date(fixedAt).toISOString(), ended_at: new Date(fixedAt).toISOString() },
+    )
+  } finally { ledger.close() }
+})
+
+test('agent start and end stamps are ordered for one dispatch', { skip: SKIP }, () => {
+  const ledger = openTestLedger({ now: () => 1700400000123 })
+  try {
+    ledger.recordEvent({ adw_id: 'event-order', type: 'agent_start', payload: { role: 'builder', dispatch_id: 'ordered' } })
+    ledger.recordEvent({ adw_id: 'event-order', type: 'agent_end', payload: { role: 'builder', outcome: 'done', dispatch_id: 'ordered' } })
+    const rows = ledger.dumpTable('events').map((row) => ({
+      type: row.type, dispatch_id: JSON.parse(row.payload_json).dispatch_id, started_at: row.started_at, ended_at: row.ended_at,
+    }))
+    const start = rows.find((row) => row.type === 'agent_start' && row.dispatch_id === 'ordered')
+    const end = rows.find((row) => row.type === 'agent_end' && row.dispatch_id === 'ordered')
+    assert.ok(start && end)
+    assert.ok(Date.parse(start.started_at) <= Date.parse(end.ended_at))
+  } finally { ledger.close() }
+})
+
 test('T9: replay counts malformed and failing lines, then applies later good lines', { skip: SKIP }, () => {
   const jsonlPath = join(nextDir(), 'partial-authority.jsonl')
   const line = (kind, args) => JSON.stringify({ v: 1, kind, at: '2024-01-01T00:00:00.000Z', args })
@@ -2155,4 +2219,33 @@ test('chunk upsertChunkRun recompile replaces owned checks and CHUNK_PROGRESS_SQ
     conn.close()
     ledger.close()
   }
+})
+
+// Sol, #1414 pass 1: every JSONL row carries both time keys, and the old agent rows carry an
+// explicit null. The first cut of #1412 treated `!= null` as "absent", so replayJsonl stamped
+// those rows with the REPLAY's clock — a time nobody measured. Only an absent key is defaulted.
+// Mutation killed: treating an explicit null as absent (`input[key] == null`).
+test('an agent row recorded with no time replays with no time, while a fresh one is stamped', () => {
+  const dir = scratchDir('ledger-replay-null-')
+  const written = openLedger({ dbPath: join(dir, 'live.db'), stderr: { write: () => {} } })
+  try {
+    written.startSession({ adw_id: 'replay-null', repo_slug: 'r', task_slug: 't' })
+    // The shape an old row was written with: both keys present and null.
+    written.recordEvent({ adw_id: 'replay-null', type: 'agent_start', payload: { role: 'builder', dispatch_id: 'old' }, started_at: null, ended_at: null })
+    written.recordEvent({ adw_id: 'replay-null', type: 'agent_end', payload: { role: 'builder', outcome: 'done', dispatch_id: 'old' }, started_at: null, ended_at: null })
+    // A fresh emit with the keys absent.
+    written.recordEvent({ adw_id: 'replay-null', type: 'agent_start', payload: { role: 'builder', dispatch_id: 'new' } })
+  } finally { written.close() }
+  const replayClock = Date.parse('2030-06-01T12:34:56.789Z')
+  const rebuilt = openLedger({ dbPath: join(dir, 'rebuilt.db'), jsonlPath: join(dir, 'rebuilt.jsonl'), now: () => replayClock, stderr: { write: () => {} } })
+  try {
+    replayJsonl(join(dir, 'ledger.jsonl'), rebuilt)
+    const rows = rebuilt.dumpTable('events').filter((row) => row.adw_id === 'replay-null')
+    const byDispatch = (type, id) => rows.find((row) => row.type === type && JSON.parse(row.payload_json).dispatch_id === id)
+    assert.equal(byDispatch('agent_start', 'old').started_at, null)
+    assert.equal(byDispatch('agent_end', 'old').ended_at, null)
+    const fresh = byDispatch('agent_start', 'new').started_at
+    assert.match(fresh, /^\d{4}-\d\d-\d\dT/)
+    assert.notEqual(fresh, new Date(replayClock).toISOString(), 'the fresh row keeps the time it was written, not the replay clock')
+  } finally { rebuilt.close() }
 })

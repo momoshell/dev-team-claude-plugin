@@ -2432,9 +2432,12 @@ export async function resolveAdapters(roles, args, seats = null, deps = {}) {
           const candidates = [...new Set([...Object.keys(registry.local_providers), ...(registry.coding_agents[name]?.providers || [])])]
           const matches = []
           for (const candidate of candidates) {
-            let candidateModel
-            try { candidateModel = adapter.modelString({ provider: candidate, id, localProviders: registry.local_providers }) } catch { continue }
-            if (candidateModel === rawModel) matches.push(candidate)
+            for (let cut = slash; cut !== -1; cut = rawModel.indexOf('/', cut + 1)) {
+              if (cut > slash && cut === rawModel.length - 1) break
+              let candidateModel
+              try { candidateModel = adapter.modelString({ provider: candidate, id: rawModel.slice(cut + 1), localProviders: registry.local_providers }) } catch { continue }
+              if (candidateModel === rawModel) { matches.push(candidate); break }
+            }
           }
           if (matches.length === 1) rawProvider = matches[0]
           else {

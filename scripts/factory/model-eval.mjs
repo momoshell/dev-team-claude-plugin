@@ -127,6 +127,12 @@ function validateBenchShape({ task, gate, judge, candidates, benchSha }) {
     || !Array.isArray(candidates.candidates) || candidates.candidates.length === 0) {
     throw new Error('candidates.json must contain role, production and a non-empty candidates array')
   }
+  // `tier` is optional and names the roster tier this bench stands in for. A role can be
+  // seated with different models in different tiers — the builder is on 2026-09-19 — and
+  // without it the production comparison has no single answer and must refuse.
+  if (Object.prototype.hasOwnProperty.call(candidates, 'tier') && !NON_BLANK(candidates.tier)) {
+    throw new Error('candidates.json tier, when present, must be a non-blank roster tier name')
+  }
   for (const [index, candidate] of candidates.candidates.entries()) {
     if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)
       || !NON_BLANK(candidate.provider) || !NON_BLANK(candidate.id)
@@ -216,6 +222,11 @@ function rosterProduction(candidates, readRoster) {
     if (!seating || typeof seating !== 'object' || Array.isArray(seating) || Object.keys(seating).length === 0) {
       throw new Error('roster seating is unreadable')
     }
+    // A declared tier is read alone; an absent tier or an unseated role there is no claim.
+    if (NON_BLANK(candidates.tier)) {
+      const cell = seating[candidates.tier]?.[candidates.role]
+      return cell && typeof cell === 'object' && !Array.isArray(cell) ? (candidateModel(cell) || null) : null
+    }
     const cells = Object.values(seating)
       .map((preset) => preset?.[candidates.role])
       .filter((cell) => cell && typeof cell === 'object' && !Array.isArray(cell))
@@ -278,7 +289,8 @@ export async function compileBench({ dir, deps = {} } = {}) {
   const productionModel = rosterProduction(candidateDocument, deps.readRoster)
   const production = candidates.find((candidate) => candidateModel(candidate) === productionModel) ?? null
   if (production === null) {
-    throw refusal('production-absent', `the seated ${candidateDocument.role} model ${productionModel} is not among candidates`)
+    const where = NON_BLANK(candidateDocument.tier) ? ` in tier ${candidateDocument.tier}` : ' (the roster seats this role with no single model — none, or more than one across tiers; a bench of one tier names it with candidates.json tier)'
+    throw refusal('production-absent', `the seated ${candidateDocument.role} model${productionModel === null ? where : ` ${productionModel}`} is not among candidates`)
   }
 
   const judge = normalizeJudge(judgeMetadata)
@@ -305,10 +317,17 @@ export async function compileBench({ dir, deps = {} } = {}) {
     gate_path: source.gatePath,
     judge,
     role: candidateDocument.role,
+    // The roster tier this bench stands in for, or null for a tierless bench. Routing
+    // evidence is filed under it, so a mechanical bench never counts as a build choice.
+    tier: NON_BLANK(candidateDocument.tier) ? candidateDocument.tier : null,
     candidates,
     production,
   })
 }
+
+// A tierless bench keeps filing under `build`, as every bench did before tiers existed.
+export const BENCH_DEFAULT_ROUTING_TIER = 'build'
+const benchRoutingTier = (bench) => bench.tier ?? BENCH_DEFAULT_ROUTING_TIER
 
 function usageFromSeat(seat) {
   const usage = seat?.usage
@@ -363,7 +382,7 @@ function benchRoutingMeasurements(bench, ledger, policy) {
   // advisory candidate set. Append bench-only cells only to preserve their
   // explicit undeclared-candidate evidence; the serial evaluator below still
   // owns their execution order and never consults this recommendation.
-  const declared = policy?.routes?.build?.[bench.role]?.candidates
+  const declared = policy?.routes?.[benchRoutingTier(bench)]?.[bench.role]?.candidates
   const cells = []
   const seen = new Set()
   for (const candidate of [...(Array.isArray(declared) ? declared : []), ...bench.candidates]) {
@@ -415,7 +434,7 @@ export async function runBench({ dir, deps = {} } = {}) {
     routingChoice = deps.materialiseRoutingChoice({
       policy: routingLoaded.policy,
       policyHash: routingLoaded.policyHash,
-      tier: 'build',
+      tier: benchRoutingTier(bench),
       role: bench.role,
       measurements: benchRoutingMeasurements(bench, deps.ledger, routingLoaded.policy),
       entryPoint: 'bench',

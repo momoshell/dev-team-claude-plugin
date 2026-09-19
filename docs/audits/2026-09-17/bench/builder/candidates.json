@@ -2,6 +2,7 @@
   "schema": 1,
   "role": "builder",
   "production": "meta/muse-spark-1.3-contributor",
+  "tier": "mechanical",
   "candidates": [
     {
       "provider": "meta",

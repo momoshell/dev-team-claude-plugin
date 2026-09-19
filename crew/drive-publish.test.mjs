@@ -2368,3 +2368,17 @@ test('F1 existing rebase escalation text remains exact', () => {
   assert.equal(unprovedRecovery.result.details.recovery_ref, undefined)
   assert.equal(unprovedRecovery.io.calls.run.some((command) => command === 'git rebase --abort'), false)
 })
+
+test('b851 F1 hardening blind spots render with rows and reasons, absent when unmeasured', () => {
+  const record = { intent: 'guard the defect', hardening: { unmeasured: [{ finding: 'RV1-2', outcome: 'witness-missing', why: 'the review-time witness has no cell for a.mjs' }] } }
+  const body = composePrBody(record)
+  assert.ok(body.includes('## Hardening blind spots'))
+  assert.ok(body.includes('RV1-2'))
+  assert.ok(body.includes('witness-missing'))
+  assert.ok(body.includes('the review-time witness has no cell for a.mjs'))
+  const section = body.slice(body.indexOf('## Hardening blind spots'))
+  assert.ok(section.includes('RV1-2'))
+  assert.ok(section.includes('the review-time witness has no cell for a.mjs'))
+  const sparse = composePrBody({ intent: 'guard the defect' })
+  assert.equal(sparse.includes('## Hardening blind spots'), false)
+})

@@ -4362,7 +4362,7 @@ export function carriedPrLines(carried) {
     ...rows.map((row) => `- ${row?.id ?? ''} (${row?.severity ?? ''}) carried-to-review: ${row?.correction ?? ''}`), '']
 }
 
-const SECTION_ORDER = ['## What', '## Why', '## Proof', '## Changed', '## Run', '## Prompt measurement']
+const SECTION_ORDER = ['## What', '## Why', '## Proof', '## Hardening blind spots', '## Changed', '## Run', '## Prompt measurement']
 
 export function promptClaimLines(intent) {
   const lines = String(intent ?? '').split('\n')
@@ -4413,6 +4413,8 @@ export function composePrBody(record) {
     ...residuals.map((row) => `  - ${row?.id ?? ''} (${row?.type ?? ''}): ${row?.summary ?? ''}`),
     ...carried.map((row) => `  - ${row?.id ?? ''} (${row?.severity ?? ''}) carried-to-review: ${row?.correction ?? ''}`),
   ]
+  const hardeningRows = Array.isArray(record?.hardening?.unmeasured) ? record.hardening.unmeasured : []
+  const hardeningLines = hardeningRows.map((row) => `- ${row?.finding ?? '(unknown finding)'}: unmeasured — ${row?.outcome ?? ''}: ${row?.why ?? ''}`)
   const files = Array.isArray(record?.files) ? [...record.files].sort() : []
   const stages = Array.isArray(record?.stages) ? record.stages : []
   const shape = stageShape(stages)
@@ -4428,6 +4430,7 @@ export function composePrBody(record) {
     ['## What', intent],
     ['## Why', why],
     ['## Proof', [...gateLines, ...suiteLines, ...reviewLines].join('\n')],
+    ...(hardeningLines.length > 0 ? [['## Hardening blind spots', hardeningLines.join('\n')]] : []),
     ...(files.length ? [['## Changed', files.map((f) => `- ${f}`).join('\n')]] : []),
     ['## Run', runLines.join('\n')],
     ...(claims.length > 0 ? [['## Prompt measurement', claims.join('\n')]] : []),
@@ -5574,7 +5577,21 @@ function proveHardeningEntries({ entries, hardenWitness, ctx, io, hardenRun, dir
         // `false`: both `pre !== 'failed'` and `false` are false for a valid behavioural
         // repair, so replacing the condition with `false` changes nothing this check can
         // observe (R3-1).
-        if (pre !== 'failed') return row('pre-repair-green', `the declared check ${entry.name} does not fail on the witnessed pre-repair ${entry.file}: ${pre}`)   // ANCHOR B5d
+        // RV1-1 (b851 review): `entry.find` is an anchor the builder chose in the REPAIRED
+        // file, so for any repair that ADDS the region it mutates the anchor is absent from
+        // the pre-repair bytes by construction. Deciding "the test could not reach its
+        // subject" from that absence let a builder add a region, declare it, and ship a
+        // tautological guard: pre-repair reached no verdict, the anchor was absent, the row
+        // read unmeasured, and the stage cleared. The PRE-REPAIR RUN decides instead:
+        //   passed  — the named check RAN on the review-time bytes and did not fail: the
+        //             guard does not discriminate. REFUTED, exactly as before this lane.
+        //   absent / ambiguous / skipped — the check did not run there at all, which is the
+        //             ordinary shape of a NEW guard over new code. Nothing is concluded from
+        //             the pre-repair bytes; the mutation proof on the repaired tree, below,
+        //             is the evidence, and it either kills the check or does not.
+        if (preRepairRefutes(pre)) {
+          return row('pre-repair-green', `the declared check ${entry.name} does not fail on the witnessed pre-repair ${entry.file}: ${pre}`)   // ANCHOR B5d
+        }
       }
       const bound = applyMutationAnchor(repairedFile, entry.find, entry.replace)
       if (bound.text === null) return row(BINDING_OUTCOME[bound.mode], bindingWhy(bound.mode, entry.file))
@@ -9214,6 +9231,10 @@ function runTask(ctx, io, crash) {
   // This counter belongs to the whole accepted lane, not to suiteCycle: a retained
   // conflict may re-enter that cycle, but it must not mint a fresh rebase budget.
   let rebaseConflictBounces = 0
+  // The stated blind spots belong to the whole accepted lane too: a post-commit repair that
+  // re-enters suiteCycle (suite red, census, rebase conflict) must not erase what an earlier
+  // hardening round could not measure — only a later `killed` or `ungateable` settles one.
+  let hardenBlindSpots = []   // ANCHOR B5g
   const fullOidFromResult = (result) => {
     if (result?.ok !== true || typeof result.output !== 'string') return null
     const oid = result.output.trim()
@@ -9772,9 +9793,18 @@ function runTask(ctx, io, crash) {
 
   // #839 + #910 — ONE predicate for "the debt is closed", so the appeal below and the
   // accept branch can never disagree about what closing it means.
-  // MUTATION B5a: narrow this to an outcome nothing produces and no repair, however well
-  // proven, is ever accepted.
-  const hardenCleared = (refusals, rows) => refusals.length === 0 && rows.every((row) => row.outcome === 'killed' || row.outcome === 'ungateable')   // ANCHOR B5a
+  // MUTATION B5a: bypass hardeningStageCleared here and the proven/refuted/unmeasured
+  // partition stops deciding the debt — every harden verdict must funnel through one predicate.
+  const hardenCleared = (refusals, rows) => hardeningStageCleared(refusals, rows)   // ANCHOR B5a
+  // RV2-1 of this lane's review: a blind spot is what the LATEST adjudication says, and an
+  // `ungateable` mark — from an approved appeal or from an ordinary review exemption — is a
+  // terminal adjudication. Without this, a finding recorded unmeasured in an earlier round
+  // kept its blind spot in the envelope and the PR after the reviewer had settled it.
+  // MUTATION B5f: drop the argument and a settled finding keeps reporting unmeasured.
+  const settleBlindSpots = (findings) => {   // ANCHOR B5f
+    const settled = new Set(findings)
+    hardenBlindSpots = hardenBlindSpots.filter((entry) => !settled.has(entry.finding))
+  }
   // MUTATION B8: route the proof through runGate and each of its invocations becomes
   // a gate_results row, moving the gate-review-gap numerator (#839 (i).
   const hardenRun = (cmd) => io.run(cmd)                                             // ANCHOR B8
@@ -10210,6 +10240,7 @@ function runTask(ctx, io, crash) {
         // MUTATION C6: drop the status guard and a NON-done appeal envelope waives the debt.
         const marks = appeal?.status === 'done' ? hardeningAppealMarks(appeal.details, hardenOwed.owed) : []   // ANCHOR HA5
         for (const { id, why } of marks) logHardened(round, { finding: id, test: null, name: null, outcome: 'ungateable', why })
+        settleBlindSpots(marks.map(({ id }) => id))
         excused = new Set(marks.map(({ id }) => id))
         hardenOwed = { owed: hardenOwed.owed.filter(({ id }) => !excused.has(id)), exempt: [...hardenOwed.exempt, ...marks] }
         stageComplete()
@@ -10218,6 +10249,15 @@ function runTask(ctx, io, crash) {
       const liveRows = rows.filter((row) => !excused.has(row.finding))
       if (hardenCleared(liveRefusals, liveRows)) {
         hardenOwed = { owed: [], exempt: [] }
+        const latest = new Map(liveRows.map((row) => [row.finding, row]))
+        hardenBlindSpots = hardenBlindSpots.filter((entry) => !latest.has(entry.finding) || hardeningRowBucket(latest.get(entry.finding)) === 'unmeasured')
+        for (const row of liveRows) {
+          if (hardeningRowBucket(row) !== 'unmeasured') continue
+          const at = hardenBlindSpots.findIndex((entry) => entry.finding === row.finding)
+          const next = { finding: row.finding, test: row.test, check: row.name, outcome: row.outcome, why: row.why }
+          if (at === -1) hardenBlindSpots.push(next)
+          else hardenBlindSpots[at] = next
+        }
         hardenWitness = null
         stageComplete()
       } else if (!plans || finalRound()) {
@@ -10400,6 +10440,7 @@ function runTask(ctx, io, crash) {
           for (const { id, why } of debt.exempt) {
             logHardened(roundNo, { finding: id, test: null, name: null, outcome: 'ungateable', why })
           }
+          settleBlindSpots(debt.exempt.map(({ id }) => id))
         }
       }
       // #800 revision 2 — journalled HERE, not in the pass branch below, because the
@@ -11261,6 +11302,7 @@ function runTask(ctx, io, crash) {
       review: { verdict: finalReview.verdict === 'pass' ? 'pass' : 'changes-needed', residuals: finalReview.residuals, ...carriedBlock() },
       suite: { warm: warmCounts, cold: coldSuite.counts, cold_verified: coldSuite.counts !== null },
       anomalies: prAnomalies(journalRowsSinceRunStart(journalText)),
+      hardening: hardenBlindSpots.length > 0 ? { unmeasured: hardenBlindSpots } : null,
     }
     let registerText = ''
     try { registerText = String(io.readFile(`${ctx.checkout}/crew/capabilities.json`) || '') } catch { /* narration is never load-bearing */ }
@@ -11310,6 +11352,7 @@ function runTask(ctx, io, crash) {
       cold_suite: coldSuite,   // the COLD verdict, never folded into the lane's own suite result
       extra_rounds_granted: S.grants, growth: S.growth, modifiers: S.modifiers, enforcements: S.enforcements,
       gate: gateBlock(),
+      ...(hardenBlindSpots.length > 0 ? { hardening_unmeasured: hardenBlindSpots.map((entry) => ({ finding: entry.finding, test: entry.test, check: entry.check, outcome: entry.outcome, why: entry.why })) } : {}),
       ...(frozenInventoryReports.length > 0 ? { frozen_inventory_repairs: frozenInventoryReports.map((report) => ({ ...report })) } : {}),
       ...acceptDecisionBlock(),
       ...carriedBlock(),
@@ -12841,6 +12884,38 @@ export const HARDENING_OUTCOMES = Object.freeze([
   'unproven', 'unapplied', 'anchor-absent', 'anchor-ambiguous', 'anchor-unsafe',
 ])
 
+export const HARDENING_PROVEN = Object.freeze(['killed', 'ungateable'])
+export const HARDENING_REFUTED = Object.freeze([
+  'survived', 'source-regressed', 'pre-repair-green',
+  'name-not-new', 'name-absent', 'name-ambiguous', 'control-red', 'control-skipped',
+])
+export const HARDENING_UNMEASURED = Object.freeze([
+  'witness-missing', 'witness-absent', 'witness-unreadable',
+  'unproven', 'unapplied', 'anchor-absent', 'anchor-ambiguous', 'anchor-unsafe',
+])
+export function hardeningRowBucket(row) {
+  if (HARDENING_PROVEN.includes(row?.outcome)) return 'proven'   // ANCHOR B5g
+  if (HARDENING_REFUTED.includes(row?.outcome)) return 'refuted'
+  if (HARDENING_UNMEASURED.includes(row?.outcome)) return 'unmeasured'
+  return 'refuted'
+}
+export function hardeningStageCleared(refusals, rows) {
+  if (!Array.isArray(refusals) || refusals.length > 0) return false
+  return Array.isArray(rows) && rows.every((row) => hardeningRowBucket(row) !== 'refuted')
+}
+// Only a check that RAN on the review-time bytes and did not fail refutes a guard. Every
+// other verdict — absent, ambiguous, skipped — means the check never ran there, which is the
+// ordinary shape of a new guard over new code: nothing is concluded, and the mutation proof
+// on the repaired tree decides. MUTATION B5e: widen this to `pre !== 'failed'` and a new
+// guard is refuted for never having existed.
+export const preRepairRefutes = (pre) => pre === 'passed'   // ANCHOR B5e
+
+export function preRepairGreenOutcome(find, preRepairBytes) {
+  const bound = bindMutationAnchor(preRepairBytes, find)
+  if (bound.mode === 'absent') return 'unproven'
+  return 'pre-repair-green'
+}
+
 // #958 — `survived` is ONE token for two different facts: a gate that stayed GREEN under
 // the mutation (the gate does not discriminate) and a gate that went RED while the
 // declared label never reached a `FAIL` line (the check under proof never adjudicated at
@@ -13167,9 +13242,17 @@ export function hardeningBounceLines(round, refusals, rows) {
     lines.push(`- ${refusal.finding ?? '(unknown finding)'}: ${refusal.reason} — ${refusal.why}`)
   }
   for (const row of Array.isArray(rows) ? rows : []) {
-    if (row.outcome === 'killed' || row.outcome === 'ungateable') continue
+    if (hardeningRowBucket(row) !== 'refuted') continue
     lines.push(`- ${row.finding}: ${row.outcome} — ${row.why}`)
   }
+  // RV1-2 (b851 review): a bounce that lists only the refuted rows tells a builder its other
+  // findings are settled. A finding with NO row at all is the commonest bounce of all — the
+  // builder declared nothing for it — and it is what the brief must ask for first.
+  const declared = new Set((Array.isArray(rows) ? rows : []).map((row) => row.finding))
+  const undeclared = (Array.isArray(refusals) ? refusals : []).filter((refusal) => refusal.finding && !declared.has(refusal.finding))
+  if (undeclared.length > 0) lines.push('No guard was declared for:', ...undeclared.map((refusal) => `- ${refusal.finding}`))
+  const unmeasured = Array.isArray(rows) ? rows.filter((row) => hardeningRowBucket(row) === 'unmeasured') : []
+  if (unmeasured.length > 0) lines.push('Measured nothing — not blocking:', ...unmeasured.map((row) => `- ${row.finding}: ${row.outcome} — ${row.why}`))
   lines.push('', 'Return details.hardened entries shaped exactly as { finding, test, name, file, find, replace }, and "class": "coverage" when the implementation was already correct at review time; the declared name must not exist on the tree the review read.', `Hardening proof for round ${round} did not close every finding.`)
   lines.push(`A finding whose defect class cannot become a mechanical guard is asked about, not waived: ask with an entry of exactly ${HARDENING_APPEAL_SHAPE}, which is still refused builder-exemption until the reviewer approves it.`)
   return lines

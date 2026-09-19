@@ -1,11 +1,11 @@
 {
-  "crew/seat-io.mjs:1710": "export function recogniseProviderRetry(text) {",
   "scripts/factory/make-brief.mjs:992": "function colourNeutralEnv(base = process.env)",
   "crew/drive.mjs:57": "builder: 2400, reviewer: 1800",
-  "crew/crew.mjs:3776": "escalation -> NEVER teardown",
-  "crew/crew.mjs:4433": "seats.proven !== seats.seats || seats.recorded !== seats.seats",
-  "crew/crew.mjs:4320": "const seats = rows.length",
   "scripts/factory/crew-watch.mjs:184": "export function seatLivenessLines(",
   "crew/seat-io.mjs:126": "export const TRANSCRIPT_STALE_MS = 900_000",
-  "crew/drive.mjs:8101": "const completeCheckProof = (label, options = {}) => {"
+  "crew/crew.mjs:3795": "escalation -> NEVER teardown",
+  "crew/crew.mjs:4452": "seats.proven !== seats.seats || seats.recorded !== seats.seats",
+  "crew/crew.mjs:4339": "const seats = rows.length",
+  "crew/seat-io.mjs:1719": "export function recogniseProviderRetry(text) {",
+  "crew/drive.mjs:8554": "const completeCheckProof = (label, options = {}) => {"
 }

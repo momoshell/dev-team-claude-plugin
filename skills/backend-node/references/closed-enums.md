@@ -7,23 +7,23 @@ Exhibit: `scripts/factory/ledger.mjs:468` (`CI_DECISIONS`).
 Exhibit: `crew/drive.mjs:524`.
 
 Production code reads `CI_DECISIONS` when it validates a decision.
-Exhibit: `scripts/factory/ledger.mjs:3919`.
+Exhibit: `scripts/factory/ledger.mjs:3928`.
 
 `DECISIONS` is exported and frozen but read by no production code; only
-`crew/drive-review.test.mjs:1626-1628` reads it, so it is not the exhibit for "callers
+`crew/drive-review.test.mjs:1627-1629` reads it, so it is not the exhibit for "callers
 actually consult".
 
 Keep the refusal message derived from the same set.
 Exhibit: `crew/shape-validator.mjs:248`.
 
 Pin the expected members independently in the test.
-Exhibit: `crew/drive-review.test.mjs:1628`.
+Exhibit: `crew/drive-review.test.mjs:1629`.
 
 Pin immutability independently with `Object.isFrozen`.
-Exhibit: `crew/drive-review.test.mjs:1627`.
+Exhibit: `crew/drive-review.test.mjs:1628`.
 
 The paired assertions catch value drift and freeze drift.
-Exhibit: `crew/drive-review.test.mjs:1628`.
+Exhibit: `crew/drive-review.test.mjs:1629`.
 
 `PARK_STATES` supplies the same frozen-data pattern elsewhere.
 Exhibit: `crew/reclaim.mjs:12`.
@@ -32,14 +32,14 @@ Exhibit: `crew/reclaim.mjs:12`.
 Exhibit: `scripts/factory/reap-stale.mjs:80`.
 
 Do not infer closure from an uppercase name or an exported array alone.
-Exhibit: `crew/drive-review.test.mjs:1628`.
+Exhibit: `crew/drive-review.test.mjs:1629`.
 
 A mutation that removes the freeze must make the test fail even when members
 are unchanged.
-Exhibit: `crew/drive-review.test.mjs:1627`.
+Exhibit: `crew/drive-review.test.mjs:1628`.
 
 A mutation that adds a member must also make the literal expectation fail.
-Exhibit: `crew/drive-review.test.mjs:1628`.
+Exhibit: `crew/drive-review.test.mjs:1629`.
 
 Read `docs/conventions.md:126` for the repo decision; this file owns the test
 shape that keeps the decision observable.
@@ -52,8 +52,8 @@ Empty and null declarations are invalid data, not empty closed enums.
 Exhibit: `crew/shape-validator.mjs:237`.
 
 Keep a rule's exhibit beside the declaration and beside its drift guard.
-Exhibit: `crew/drive-review.test.mjs:1627` and `:4161`.
+Exhibit: `crew/drive-review.test.mjs:1628` and `:4161`.
 
 The cost of one missing half is a contract that appears closed while remaining
 mutable.
-Exhibit: `crew/drive-review.test.mjs:1628`.
+Exhibit: `crew/drive-review.test.mjs:1629`.

@@ -4183,6 +4183,43 @@ test('A1 census runs after baseline gate before first builder dispatch', () => {
   assert.equal(io.calls.assign.find(({ role }) => role === 'builder').note, 'build')
 })
 
+test('A1a a checkout shipping no census instrument drives through without running it', () => {
+  // The driver half of the foreign-checkout fix. A1 above proves the census runs before the
+  // first builder dispatch; this proves the ONLY thing that stops it is a measured absence,
+  // and that the lane still finishes instead of escalating `census-malformed-output` the way
+  // every foreign checkout did while `node crew/census-exhibits.mjs` was run unconditionally.
+  const { ctx, io } = censusDriveIo([censusRecord(), censusRecord()], { publish: true, ctx: { publish: { branch: 'feature/census' } } })
+  io.exists = () => false
+  const result = driveTask(ctx, io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.run.some(({ cmd }) => cmd === 'node crew/census-exhibits.mjs'), false)
+  // One row per phase REACHED, carrying the name of that phase: presence is re-probed at each
+  // census, so the rows report what was true when each would have run, not once per lane.
+  const rows = io.calls.logs.filter((row) => row.census_exhibits).map((row) => row.census_exhibits)
+  assert.deepEqual(rows.map((row) => [row.phase, row.action, row.verdict, row.reason]), [
+    ['pre-build', 'skip', null, 'census-instrument-absent'],
+    ['post-commit', 'skip', null, 'census-instrument-absent'],
+  ])
+})
+
+test('A1b presence is re-probed per phase, so an instrument removed mid-lane is not a stale clear', () => {
+  // crew/census-exhibits.mjs is NOT in PROTECTED_PATHS, so a lane can delete it after the
+  // pre-build census. A presence probed once per lane would keep censusEnabled true and send
+  // the post-commit census to a MODULE_NOT_FOUND escalation — the very defect this fix
+  // removes, relocated to post-commit, where the warm suite would no longer name the cause.
+  const { ctx, io } = censusDriveIo([censusRecord(), censusRecord()], { publish: true, ctx: { publish: { branch: 'feature/census' } } })
+  const probes = []
+  io.exists = (path) => { probes.push(path); return probes.length === 1 }
+  const result = driveTask(ctx, io)
+  assert.equal(result.status, 'done')
+  assert.equal(probes.length, 2)
+  assert.deepEqual([...new Set(probes)], [`${ctx.checkout}/crew/census-exhibits.mjs`])
+  // Present at pre-build: it RAN. Absent at post-commit: recorded as skipped, not escalated.
+  const rows = io.calls.logs.filter((row) => row.census_exhibits).map((row) => row.census_exhibits)
+  assert.deepEqual(rows.map((row) => [row.phase, row.action]), [['pre-build', 'none'], ['post-commit', 'skip']])
+  assert.equal(io.calls.run.filter(({ cmd }) => cmd === 'node crew/census-exhibits.mjs').length, 1)
+})
+
 test('B1 census reruns after commit before publish', () => {
   const { ctx, io } = censusDriveIo([censusRecord(), censusRecord()], { publish: true, ctx: { publish: { branch: 'feature/census' } } })
   const result = driveTask(ctx, io)

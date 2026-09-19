@@ -7450,8 +7450,25 @@ function runTask(ctx, io, crash) {
       } catch { return null }
     }
     const runCensus = () => {
-      try { return decodeCensusResult(resumeIo.run('node crew/census-exhibits.mjs')) }
+      if (!censusInstrumentPresent(resumeIo, resumeCtx.checkout)) return censusSkipped()
+      try { return decodeCensusResult(resumeIo.run(CENSUS_COMMAND)) }
       catch (error) { return decodeCensusResult(null, error) }
+    }
+    // The resume path journalled no census at all before this. Without a row on BOTH paths
+    // an absent row still means either "ran and was green" or "escalated before the census",
+    // so the skip row alone could not tell a census that found nothing from one that never ran.
+    const journalResumeCensus = (census) => {
+      try {
+        resumeIo.log(recordRow({ at: resumeIo.now(), census_exhibits: {
+          phase: 'post-commit', action: census?.action ?? 'none', verdict: census?.verdict ?? null,
+          selected: census?.selected ?? [], failures: census?.failures ?? [],
+          selection_ms: census?.selection_ms ?? null, duration_ms: census?.duration_ms ?? null,
+          selection_seconds: census?.selection_seconds ?? null, run_seconds: census?.run_seconds ?? null,
+          total_seconds: census?.total_seconds ?? null, elapsed_seconds: census?.elapsed_seconds ?? null,
+          denominator: census?.denominator ?? { suites: null, tests: null },
+          measurement: census?.measurement ?? null, cost: census?.cost ?? null, reason: census?.reason ?? null,
+        } }))
+      } catch { /* evidence is never load-bearing */ }
     }
     const runWarmSuite = () => {
       stage('suite')
@@ -7525,8 +7542,11 @@ function runTask(ctx, io, crash) {
 
     if (!commitOid || typeof commitOid !== 'string' || !commitOid.trim()) return resumeEscalate('gate', 'the resumed path has no committed oid')
 
+    // A checkout that ships no census instrument has no corpus to prove clean, and an
+    // absent instrument must not read as a red tree.
     const census = runCensus()
-    if (census.verdict !== 'green' || (Array.isArray(census.failures) && census.failures.length > 0)) {
+    journalResumeCensus(census)
+    if (census.action !== 'skip' && (census.verdict !== 'green' || (Array.isArray(census.failures) && census.failures.length > 0))) {
       return resumeEscalate('census-exhibits', `the post-commit census could not prove a clean committed tree: ${census.reason || census.verdict || 'non-green'}`, { census })
     }
 
@@ -9694,8 +9714,13 @@ function runTask(ctx, io, crash) {
     } catch { /* evidence is never load-bearing */ }
   }
   const runCensus = (phase) => {
+    // Probed at EVERY phase, never once per lane. crew/census-exhibits.mjs is not in
+    // PROTECTED_PATHS, so a lane may remove or rename the instrument between the pre-build
+    // census and the post-commit one; a presence measured before the builder ran proves
+    // nothing about the tree after it. Each phase's row therefore reports that phase.
+    if (!censusInstrumentPresent(io, ctx.checkout)) return censusSkipped()
     let result
-    try { result = io.run('node crew/census-exhibits.mjs') }
+    try { result = io.run(CENSUS_COMMAND) }
     catch (error) { return decodeCensusResult(null, error) }
     return decodeCensusResult(result)
   }
@@ -13565,6 +13590,40 @@ export function hardeningBriefLines(owed, exempt) {
 
 export const POST_COMMIT_CENSUS_BOUNCE_MAX = 1
 export const CENSUS_CARRIER_FILES = Object.freeze(['skills/crew-dispatch/references/batch.md', 'skills/crew-dispatch/exhibits.test.mjs'])
+
+// The census measures THIS repo's exhibit corpus by running THIS repo's script, resolved
+// against the lane's checkout. A checkout that does not ship that script has no corpus for
+// the census to measure: that is a measured fact about the checkout, in the same family as
+// the `empty-denominator` and `empty-selection` reasons crew/census-exhibits.mjs deliberately
+// keeps OUT of CENSUS_UNMEASURED_REASONS — not a measurement that failed. Before this
+// distinction existed, every foreign checkout ran `node crew/census-exhibits.mjs`, got
+// MODULE_NOT_FOUND, decoded no JSON line, and escalated `census-malformed-output` at
+// pre-build; the first such lane escalated with a complete plan and an empty tree.
+// This narrows nothing that was ever measured. An io that provides no `exists` — which is
+// every injected harness io — keeps the census ENABLED, and an `exists` that throws does
+// too: the bias stays toward measuring, never toward skipping.
+export const CENSUS_INSTRUMENT = 'crew/census-exhibits.mjs'
+export const CENSUS_COMMAND = `node ${CENSUS_INSTRUMENT}`
+export const CENSUS_INSTRUMENT_ABSENT = 'census-instrument-absent'
+// The shape a skipped census returns. `verdict: null` and not `'unmeasured'` on purpose:
+// `censusRoute` escalates every unmeasured verdict, and this is not a measurement that
+// failed. It names no files, so every file-based branch below is correctly empty.
+export function censusSkipped() {
+  return {
+    action: 'skip', verdict: null, selected: [], failures: [], defects: [], detail: null,
+    reason: CENSUS_INSTRUMENT_ABSENT, selection_ms: null, duration_ms: null,
+    selection_seconds: null, run_seconds: null, total_seconds: null, elapsed_seconds: null,
+    denominator: { suites: null, tests: null }, measurement: null, cost: null,
+  }
+}
+export function censusInstrumentPresent(io, checkout) {
+  if (typeof io?.exists !== 'function') return true
+  if (typeof checkout !== 'string' || checkout === '') return true
+  // `!== false`, never `=== true`: only an io that ANSWERS absent skips the census. A truthy
+  // non-boolean, or a stub that forgets its return, must read as PRESENT — mapping those to
+  // absent is precisely the silent disabling this function exists to make impossible.
+  try { return io.exists(join(checkout, CENSUS_INSTRUMENT)) !== false } catch { return true }
+}
 
 function decodeCensusResult(result, error = null) {
   const output = typeof result === 'string'

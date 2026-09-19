@@ -10,6 +10,7 @@ import { envelopeFieldMetadataDefect as leafEnvelopeFieldMetadataDefect, EXECUTO
 import { ADVERSARY_REFUSAL, ADVERSARY_REFUSALS, ADVERSARY_TRIGGERS, CENSUS_CARRIER_FILES as RUNTIME_CENSUS_CARRIER_FILES, SCOPE_ADMISSION_SOURCES, SCOPE_REQUEST_KINDS, fenceScopeOf, fenceScopesIntersect, parseUnifiedZeroHunks, resolveAdversaryTrigger, scopeAdmissionDecision, scopeRequestOf, siblingSpanIntersects, suiteRedTestFiles, adjudicateOwnedProof, chunkDeferredRows, chunkGateVerdict, chunkLedgerChecks, chunkLocalSummary, chunkOwnership, ownedMutations, ownedProofMatch, refuseChunkWithoutChunked, resolveChunkSelection, restoreChunkState, selectActiveChunk, storeChunkSummary, validateChunks, RESUME_CHECKPOINT_VERSION, RESUME_CHECKPOINT_FAMILIES, resumeCheckpointDefect, resumeTask, resumeWorktreeSha256 } from './drive.mjs'
 import { CENSUS_CARRIER_FILES as DISPATCH_CENSUS_CARRIER_FILES } from '../scripts/factory/dispatch-batch.mjs'
 import { ANTI_REPLAY_REFUSAL_REASONS, envelopeFieldMetadataDefect } from './drive.mjs'
+import { CENSUS_COMMAND, CENSUS_INSTRUMENT, CENSUS_INSTRUMENT_ABSENT, censusInstrumentPresent } from './drive.mjs'
 
 const A1_FULL_TRACE = Object.freeze(['plan', 'build', 'scope-gate', 'lane', 'review', 'commit', 'document', 'suite'])
 const A1_PUBLISH_DISABLED_TRACE = Object.freeze(['commit', 'document', 'suite', 'suite'])
@@ -3648,6 +3649,70 @@ test('cold resume failures retain a suite checkpoint and never restart seats', (
     assert.equal(io.calls.run.some(({ cmd }) => cmd === 'gate-cmd'), true)
     assert.equal(io.calls.run.some(({ cmd }) => cmd === 'custom-suite'), true)
   }
+})
+
+test('census instrument presence defaults to PRESENT for every io that cannot answer', () => {
+  // The bias is the whole point: an io with no `exists` (every injected harness in this
+  // suite) and an `exists` that throws must both keep the census RUNNING. Only a measured
+  // absence skips it, so a wiring mistake can never silently disable the census.
+  assert.equal(censusInstrumentPresent({}, '/tmp/repo'), true)
+  assert.equal(censusInstrumentPresent({ exists: () => { throw new Error('EACCES') } }, '/tmp/repo'), true)
+  assert.equal(censusInstrumentPresent({ exists: () => true }, ''), true)
+  assert.equal(censusInstrumentPresent({ exists: () => true }, '/tmp/repo'), true)
+  assert.equal(censusInstrumentPresent({ exists: () => false }, '/tmp/repo'), false)
+  // Only a measured `false` is an absence. A truthy non-boolean and an undefined return are
+  // both io defects, and an io defect must leave the census RUNNING, not silently off.
+  assert.equal(censusInstrumentPresent({ exists: () => 'yes' }, '/tmp/repo'), true)
+  assert.equal(censusInstrumentPresent({ exists: () => {} }, '/tmp/repo'), true)
+  assert.equal(censusInstrumentPresent({ exists: () => null }, '/tmp/repo'), true)
+  const probed = []
+  censusInstrumentPresent({ exists: (path) => { probed.push(path); return true } }, '/tmp/repo')
+  assert.deepEqual(probed, [`/tmp/repo/${CENSUS_INSTRUMENT}`])
+})
+
+test('an absent census instrument is recorded and skipped, never escalated as unmeasured', () => {
+  // The foreign-checkout defect: `node crew/census-exhibits.mjs` resolves against the LANE'S
+  // checkout, so a repo that does not ship the script got MODULE_NOT_FOUND, decoded no JSON,
+  // and escalated `census-malformed-output` with a complete plan and an empty tree.
+  const checkpoint = resumeCheckpointForTest({ kind: 'publish', frozen_where: 'publish' })
+  const io = fakeIo({
+    runs: {
+      'gate-cmd': { ok: true, output: `${GATE_SUMMARY_PREFIX} {"total":1,"failed":0,"errored":0}` },
+      [CENSUS_COMMAND]: { ok: false, output: "Error: Cannot find module '/tmp/repo/crew/census-exhibits.mjs'\n" },
+    },
+  })
+  const probed = []
+  io.exists = (path) => { probed.push(path); return false }
+  const result = resumeTask({ ...CTX, task: 'resume-census-absent', files_in_scope: ['a.mjs'] }, io, checkpoint)
+  assert.notEqual(result.details.escalation?.where, 'census-exhibits')
+  assert.equal(io.calls.run.some(({ cmd }) => cmd === CENSUS_COMMAND), false)
+  assert.deepEqual(probed, [`${CTX.checkout}/${CENSUS_INSTRUMENT}`])
+  // Skipped is not silent: the row names the reason, and carries no verdict it did not measure.
+  const rows = io.calls.logs.filter((row) => row?.census_exhibits).map((row) => row.census_exhibits)
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].reason, CENSUS_INSTRUMENT_ABSENT)
+  assert.equal(rows[0].action, 'skip')
+  assert.equal(rows[0].verdict, null)
+  assert.deepEqual(rows[0].failures, [])
+})
+
+test('a census instrument that IS present and answers badly still escalates', () => {
+  // The kill-mutation for the skip above: make censusInstrumentPresent always answer false,
+  // or drop `&& censusInstrument` from censusEnabled, and this test goes green when it must
+  // not. An absent census is never a clear — that rule survives the foreign-checkout fix.
+  const checkpoint = resumeCheckpointForTest({ kind: 'publish', frozen_where: 'publish' })
+  const io = fakeIo({
+    runs: {
+      'gate-cmd': { ok: true, output: `${GATE_SUMMARY_PREFIX} {"total":1,"failed":0,"errored":0}` },
+      [CENSUS_COMMAND]: { ok: true, output: 'not json at all\n' },
+    },
+  })
+  io.exists = () => true
+  const result = resumeTask({ ...CTX, task: 'resume-census-present', files_in_scope: ['a.mjs'] }, io, checkpoint)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'census-exhibits')
+  assert.equal(io.calls.run.some(({ cmd }) => cmd === CENSUS_COMMAND), true)
+  assert.match(result.details.escalation.why, /census-malformed-output/)
 })
 
 test('resumed census failure uses the ordinary escalation carrier before suite or publication', () => {

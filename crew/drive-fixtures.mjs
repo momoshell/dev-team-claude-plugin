@@ -1313,7 +1313,10 @@ const escalationStageRows = (io) => io.calls.logs
 
 // The source inventory deliberately mirrors the acceptance gate's two projections:
 // event discriminators and top-level payload keys are independently pinned.
-const DRIVE_SINK = /(?:io\?\.log\?\.\(|io\.log\(|(?<![.\w])log\?\.\(|logLine\(join\(paths\.dir, 'journal\.jsonl'\), )/g
+// `resumeIo.log(` is matched explicitly. The lowercase `io\.log\(` alternative does NOT
+// cover it — the capital I fails the literal — so the resume path's emits were invisible to
+// this inventory, which is the one guard whose whole job is to see every emit in this file.
+const DRIVE_SINK = /(?:io\?\.log\?\.\(|(?<![.\w])resumeIo\.log\(|io\.log\(|(?<![.\w])log\?\.\(|logLine\(join\(paths\.dir, 'journal\.jsonl'\), )/g
 
 function drivePayloadElements(text, from) {
   let i = from
@@ -1449,6 +1452,7 @@ const DRIVE_JOURNAL_EXPECTED = Object.freeze([
   ["recordRow", "", "at accept_reask"],
   ["recordRow", "", "at accept_decision"],
   ["recordRow", "", "at envelope_accepted"],
+  ["recordRow", "", "at census_exhibits"],
   ["recordRow", "", "at triage"],
   ["recordRow", "", "at directed"],
   ["recordRow", "", "at plan_round_cap"],

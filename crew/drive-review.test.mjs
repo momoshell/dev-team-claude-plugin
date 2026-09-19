@@ -5,6 +5,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { cpSync, mkdirSync } from 'node:fs'
 import {
+  FALSIFICATION_HEADING, FALSIFICATION_PATH, FALSIFICATION_ABSENT, falsificationLines,
   ACCEPT_FINDINGS, ACCEPT_FINDINGS_SOFT, ACCEPT_REASKS, adversarialPlanEnv, ACCEPT_REFUSALS, B318_GATED_RUNS, B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, CENSUS_ABSENT_REASONS, CENSUS_ROW_ABSENT, CENSUS_TURNS_ABSENT, CENSUS_UNREADABLE, SCREENER_MODELS, SCREENER_REGISTER, screenerResult, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_MUTATION, CHECK_RUNS, CLOBBER_R2, CONVERGE_GATE, CONVERGE_PLAN, CRASH_FINDINGS, CRASH_STAGES, CTX, CTX_REPAIR, CTX_TL, DECISIONS, D_ASK, D_AUTO, D_COLLISION_CTX, D_PANEL_CTX, D_PATCH_A, D_PATCH_B, ENVELOPE_REFUSAL_REASONS, FINDING_DISPOSITIONS, LIMITS, MUST_FIX_REFUTATION_FINDINGS, NAME_VERDICTS, PANEL_ADJUDICATORS, PANEL_PARTNERS, PERSPECTIVE_TARGETS, PLAN_CHECK_FINDINGS, PLAN_RESIDUAL, PLAN_SCOPE, PLAN_SCOPE_VERDICTS, RED, REFUTATION_CLAIM, REFUTATION_CONVERGE_PLAN, REFUTATION_CONVERGE_RUNS, REFUTATION_EVIDENCE_MAX, RESIDUAL_TYPES, REVIEW_FINDINGS, REVIEW_GATE_PASS, S843_ADDED, S843_D2, S843_DISPATCHED, S843_DROPPED, S843_NARROWED, S843_RUNS, SECOND_OPINION, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, VARIANTS, acceptBounceLines, acceptContractLines, acceptedRawById, assertDriverIdRefusal, b127GroupCommand, b127InvokeGate, b127Lines, b127PidAlive, b127Spy, b318Builders, b318GatedPlan, b318Options, b318ReviewGrants, b318SiteA, b318SiteB, b376ProofIo, bounceTargetOf, buildEnv, checkEnv, classCollisionIo, closeoutIo, crashRun, dAdjEnv, dAutoRows, dBuilders, dDecisionBrief, dGitApplies, dLeads, dOffers, dPanelOutcomes, dPartnerEnv, dPatchWrite, dPlanEnv, dRemintRows, dReviewEnv, dispositionIo, dispositionOf, dispositionPanelIo, dispositionPlan, divergentCollisionIo, divergentPlanScenario, driveTask, envelopeDefect, envelopeFieldsPresent, exhaustionAcceptIo, fakeIo, findingIdDefect, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, join, leadEnv, legacyReviewerExemptions, nameVerdict, observeTurnCensus, panelSeats, phaseTrace, planAcceptContractLines, planCheckAcceptIo, planEnv, planRevisionRun, planScopeVerdict, planThenReviewIo, protectedPlanEnv, protectedReseatRefusal, publicationIo, readFileSync, reconEnv, regrantVerdict, resolveValidationLane, reviewConvergeRun, reviewEnv, reviewFindings, reviewOutcome, reviewShapeDefect, rmSync, roundCursor, s843Ctx, s843Io, s843PlanEnv, s843Rows, scratchDir, shapeDefect, slotCtx, slotFactory, spawnSync, staleVerdictLines, triageEnv, turnCeilingBreached, twoRoundReviewIo, validateAcceptDecision, validateCarve, validatePlanResiduals, validateScopeEntries, validationPlan, validationProbeRun, validationRows, verdictFindingsDefect, writeFileSync,
 } from './drive-fixtures.mjs'
 import { CREATES_MARK, HARDENING_PRESCRIPTION_REASONS, HARDENING_PRESCRIPTION_RESOLUTION, createsFromBrief, hardeningPrescriptionConflict, hardeningTestPath, planScopeWhy, prescriptionAuthorshipEvidence, prescriptionSpanIsLaneAuthored, prescriptionSpansAreLaneAuthored, scopeSuggestions, shellArg, VACUITY_CLAIMS, vacuityFindingDefect } from './drive.mjs'
@@ -5620,4 +5621,65 @@ test('D1 malformed refusal names path and correction', () => {
   assert.ok(result.details.escalation.why.includes(bad))
   assert.ok(result.details.escalation.why.includes(`did you mean ${candidate}, which is in your surface?`))
   assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 0)
+})
+
+// The falsification rules (ponytail-derived, Apache-2.0, see THIRD-PARTY-NOTICES.md) were
+// written for reviewers and reached none of them: `scripts/factory/pr-review.mjs` pastes
+// them into a PR-review brief, but a LANE reviewer saw only its charter. They cannot be a
+// capability grant — pi takes a skill as a --skill flag while adapter-claude refuses any
+// skill grant, and the judge tier's reviewer is a claude seat — so the brief carries them,
+// from the one file, to every reviewing seat whatever agent it runs.
+// Mutation killed: dropping the lines from the ordinary review brief; dropping them from
+// the panel seat brief; swallowing an unreadable file instead of stating it.
+test('every reviewing seat is briefed with the falsification rules, from the one file', () => {
+  const rules = readFileSync(join(REPO_ROOT, FALSIFICATION_PATH), 'utf8').trim()
+  const opening = rules.split('\n').find((line) => line.startsWith('How a finding earns'))
+  assert.ok(opening, 'the rules file still opens with its own sentence')
+
+  // The fake io serves the rules file the way a real checkout does; every other read is
+  // untouched, so this proves the brief carries what the file says, not a fixture of it.
+  const serveRules = (io, checkout) => {
+    const base = io.readFile.bind(io)
+    io.readFile = (path) => (path === `${checkout}/${FALSIFICATION_PATH}` ? rules : base(path))
+    return io
+  }
+  const ordinaryIo = serveRules(injectedScreenerIo(), CTX.checkout)
+  driveTask({ ...CTX, head: 'base-head' }, ordinaryIo)
+  const ordinary = ordinaryIo.calls.writes[`${TD}/review-brief-1.md`]
+  assert.ok(ordinary.includes(FALSIFICATION_HEADING), 'the ordinary review brief carries the heading')
+  assert.ok(ordinary.includes(opening), 'and the rules themselves, not a summary of them')
+
+  // The in-lane panel, whose seat briefs extend the ordinary one.
+  const panelIo = serveRules(injectedScreenerIo({ panel: true }), D_PANEL_CTX.checkout)
+  driveTask({ ...D_PANEL_CTX, head: 'base-head' }, panelIo)
+  for (const name of ['panel-a-brief-1.md', 'panel-b-brief-1.md']) {
+    const brief = panelIo.calls.writes[`${TD}/${name}`]
+    assert.ok(brief.includes(FALSIFICATION_HEADING), `${name} carries the heading`)
+    assert.ok(brief.includes(opening), `${name} carries the rules`)
+  }
+
+  // And the review_panel VARIANT, which builds its own seat briefs from scratch — a
+  // separate carrier that the in-lane assertions above cannot see.
+  const variantIo = serveRules(strictPanelIo(), CTX.checkout)
+  driveTask(panelContext(), variantIo)
+  for (const name of ['review-panel-reviewer-r1.md', 'review-panel-tech-lead-r1.md']) {
+    const brief = variantIo.calls.writes[`${TD}/${name}`]
+    assert.ok(brief, `${name} was written`)
+    assert.ok(brief.includes(FALSIFICATION_HEADING), `${name} carries the heading`)
+    assert.ok(brief.includes(opening), `${name} carries the rules`)
+  }
+})
+
+// Unknown is stated, never dropped: a reviewer told nothing would judge on the verdict
+// contract alone without knowing the rules were missing.
+test('an unreadable rules file is named in the brief rather than silently omitted', () => {
+  for (const [why, reader] of [
+    ['throws', () => { throw new Error('gone') }],
+    ['empty', () => '   '],
+  ]) {
+    const lines = falsificationLines({ readFile: reader }, '/checkout')
+    assert.ok(lines.at(-1).startsWith(FALSIFICATION_ABSENT), `${why}: the absence is stated`)
+    assert.ok(lines.at(-1).includes(FALSIFICATION_PATH), `${why}: it names the file`)
+    assert.equal(lines.includes(FALSIFICATION_HEADING), false, `${why}: no heading over nothing`)
+  }
 })

@@ -303,7 +303,7 @@ test('the ladder lives once, in _shared.md; builder keeps only its output rule; 
   assert.equal(skill.includes('Review tags:'), false, 'tags are not duplicated into the skill')
 
   const expectedExamples = [
-    { line: '- Standard library: replace a shell-built `git add` command with `execFileSync(\'git\', [\'add\', \'--\', ...toAdd])` (crew/seat-io.mjs:3621).', file: 'crew/seat-io.mjs', first: 3621, last: 3621, firstFragment: "execFileSync('git', ['add', '--', ...toAdd]", lastFragment: "execFileSync('git', ['add', '--', ...toAdd]" },
+    { line: '- Standard library: replace a shell-built `git add` command with `execFileSync(\'git\', [\'add\', \'--\', ...toAdd])` (crew/seat-io.mjs:3626).', file: 'crew/seat-io.mjs', first: 3626, last: 3626, firstFragment: "execFileSync('git', ['add', '--', ...toAdd]", lastFragment: "execFileSync('git', ['add', '--', ...toAdd]" },
     { line: "- Closed enum: replace an open stage string with `Object.freeze(['plan', 'check', 'build', ...])` (crew/variants.mjs:12-13).", file: 'crew/variants.mjs', first: 12, last: 13, firstFragment: "stages: Object.freeze(['plan', 'check', 'build'", lastFragment: "'gate-baseline'" },
     { line: '- Existing helper: replace a reimplemented temporary-directory cleanup fixture with `scratchDir(...)` (test/helpers.mjs:39-42).', file: 'test/helpers.mjs', first: 39, last: 42, firstFragment: 'export function scratchDir(', lastFragment: 'return dir' },
     { line: '- Honest absence: replace an invented candidate count of zero with `candidates: null` and a closed reason (crew/headless-rpc.mjs:129).', file: 'crew/headless-rpc.mjs', first: 129, last: 129, firstFragment: 'candidates: null, reason: closedReason(error)', lastFragment: 'candidates: null, reason: closedReason(error)' },

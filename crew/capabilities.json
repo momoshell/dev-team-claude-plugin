@@ -34,7 +34,6 @@
       "adapter": "crew/adapters/adapter-claude.mjs",
       "refuses": [
         "extensions",
-        "skills",
         "local_provider"
       ],
       "display_name": "Claude Code",

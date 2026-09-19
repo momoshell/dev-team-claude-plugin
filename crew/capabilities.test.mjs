@@ -54,7 +54,7 @@ function capabilityRegister(overrides = {}) {
     local_providers: {},
     coding_agents: {
       pi: { providers: ['openai', 'anthropic', 'llama-swap'], transports: ['pane', 'headless-rpc'], adapter: 'crew/adapters/adapter-pi.mjs', refuses: ['mcp_servers'], display_name: 'Pi', binary: 'pi', install_hint: 'Install Pi and ensure the pi binary is on PATH.', availability: 'executable', availability_reason: 'executable' },
-      claude: { providers: ['anthropic'], transports: ['pane', 'headless-json'], adapter: 'crew/adapters/adapter-claude.mjs', refuses: ['extensions', 'skills', 'local_provider'], display_name: 'Claude Code', binary: 'claude', install_hint: 'Install Claude Code and ensure the claude binary is on PATH.', availability: 'executable', availability_reason: 'executable' },
+      claude: { providers: ['anthropic'], transports: ['pane', 'headless-json'], adapter: 'crew/adapters/adapter-claude.mjs', refuses: ['extensions', 'local_provider'], display_name: 'Claude Code', binary: 'claude', install_hint: 'Install Claude Code and ensure the claude binary is on PATH.', availability: 'executable', availability_reason: 'executable' },
     },
   }
   const local_providers = { ...base.local_providers, ...(overrides.local_providers || {}) }
@@ -1418,7 +1418,6 @@ test('B1R coding agent refusals derive from shipped adapters', () => {
   const adapterRefusals = []
   for (const [dimension, grants] of [
     ['extensions', { ...EMPTY_GRANTS, extensions: ['/tmp/ext'] }],
-    ['skills', { ...EMPTY_GRANTS, skills: ['/tmp/skill'] }],
     ['local_provider', { ...seat, configDir: '/tmp/config' }],
   ]) {
     try {
@@ -1427,13 +1426,14 @@ test('B1R coding agent refusals derive from shipped adapters', () => {
       if (err.reason === 'grant-unsupported') adapterRefusals.push(dimension)
     }
   }
-  assert.deepEqual(adapterRefusals, ['extensions', 'skills', 'local_provider'])
+  assert.deepEqual(adapterRefusals, ['extensions', 'local_provider'])
   assert.equal(capabilitiesFor({ transport: 'pane' }).local_provider, false)
   assert.deepEqual(shipped.coding_agents.claude.refuses, adapterRefusals)
   assert.throws(
     () => assertAgentRefusals(shipped, 'claude', adapterRefusals, { role: 'builder' }),
     (err) => err.reason === 'grant-unsupported' && /coding_agents\.claude\.refuses/.test(err.message),
   )
+  assert.doesNotThrow(() => assertAgentRefusals(shipped, 'claude', ['skills'], { role: 'builder' }))
 })
 
 // A vendor grant carries its OWN tool names and they are backed against the

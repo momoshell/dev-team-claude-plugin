@@ -1,5 +1,5 @@
-import { readFileSync as fsReadFileSync, realpathSync } from 'node:fs'
-import { isAbsolute, join } from 'node:path'
+import { readFileSync as fsReadFileSync, realpathSync, existsSync, cpSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { isAbsolute, join, basename, dirname } from 'node:path'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 
@@ -240,12 +240,84 @@ function deniedTools(deny, grants = NO_GRANTS) {
   return [...new Set(names)].join(',')
 }
 
+const PLUGIN_DIR_FLAG = '--plugin-dir'
+
 function assertSupportedGrants(grants = NO_GRANTS) {
-  if ((grants?.extensions?.length ?? 0) > 0 || (grants?.skills?.length ?? 0) > 0) {
+  if ((grants?.extensions?.length ?? 0) > 0) {
     throw Object.assign(
-      new Error(`adapter-claude cannot express extension/skill grants ${JSON.stringify({ extensions: grants.extensions, skills: grants.skills })} — refusing to boot a silently weaker seat [grant-unsupported]`),
+      new Error(`adapter-claude cannot express extension grants ${JSON.stringify({ extensions: grants.extensions })} — refusing to boot a silently weaker seat [grant-unsupported]`),
       { reason: 'grant-unsupported' },
     )
+  }
+}
+
+export function skillsPluginDir({ taskDir, role } = {}) {
+  if (typeof taskDir !== 'string' || !isAbsolute(taskDir)) {
+    throw new Error(`adapter-claude.skillsPluginDir: taskDir must be an ABSOLUTE path, got ${JSON.stringify(taskDir)}`)
+  }
+  if (typeof role !== 'string' || role.trim() === '') {
+    throw new Error(`adapter-claude.skillsPluginDir: role must be non-blank, got ${JSON.stringify(role)}`)
+  }
+  return join(taskDir, 'claude-skills', role)
+}
+
+export function skillDirName(source) {
+  const base = basename(String(source))
+  if (base === 'SKILL.md') return basename(dirname(String(source)))
+  return base.endsWith('.md') ? base.slice(0, -3) : base
+}
+
+export function seatSkillFiles({ taskDir, role, grants } = {}) {
+  return (grants?.skills || []).map((source) => join(skillsPluginDir({ taskDir, role }), 'skills', skillDirName(source), 'SKILL.md'))
+}
+
+export function writeSeatSkills({ taskDir, role, grants } = {}, deps = {}) {
+  const skills = grants?.skills || []
+  if (skills.length === 0) return
+  const cp = deps.cpSync ?? cpSync
+  const mkdir = deps.mkdirSync ?? mkdirSync
+  const write = deps.writeFileSync ?? writeFileSync
+  const rm = deps.rmSync ?? rmSync
+  const seen = new Set()
+  for (const source of skills) {
+    const name = skillDirName(source)
+    if (seen.has(name)) {
+      throw Object.assign(
+        new Error(`adapter-claude cannot materialise duplicate skill name ${JSON.stringify(name)} — refusing to boot an ambiguous seat [grant-unsupported]`),
+        { reason: 'grant-unsupported' },
+      )
+    }
+    seen.add(name)
+  }
+  const root = skillsPluginDir({ taskDir, role })
+  rm(root, { recursive: true, force: true })
+  mkdir(root, { recursive: true })
+  for (const source of skills) {
+    const name = skillDirName(source)
+    const destDir = join(root, 'skills', name)
+    mkdir(destDir, { recursive: true })
+    if (basename(String(source)) === 'SKILL.md') cp(dirname(String(source)), destDir, { recursive: true })
+    else cp(String(source), join(destDir, 'SKILL.md'))
+  }
+  mkdir(join(root, '.claude-plugin'), { recursive: true })
+  write(join(root, '.claude-plugin', 'plugin.json'), JSON.stringify({
+    name: `crew-skills-${role}`,
+    version: '0.0.0',
+    description: `Crew skills for the ${role} seat`,
+    author: { name: 'crew' },
+  }, null, 2))
+}
+
+export function assertSkillsMaterialised({ taskDir, role, grants } = {}) {
+  const skills = grants?.skills || []
+  if (skills.length === 0) return
+  for (const skillFile of seatSkillFiles({ taskDir, role, grants })) {
+    if (!existsSync(skillFile)) {
+      throw Object.assign(
+        new Error(`adapter-claude skills not materialised at ${JSON.stringify(skillFile)} — refusing to boot a silently weaker seat [grant-unsupported]`),
+        { reason: 'grant-unsupported' },
+      )
+    }
   }
 }
 
@@ -278,6 +350,7 @@ export function modelString({ provider, id, localProviders }) {
 export function headlessCommand({ role, model, promptFile, tools, deny, taskDir,
                                   prompt, sessionId, resume = false, bin, effort, grants = NO_GRANTS, configDir = null }) {
   assertSupportedGrants(grants)
+  assertSkillsMaterialised({ taskDir, role, grants })
   assertNoLocalProvider(configDir)
   if (!bin || !bin.startsWith('/')) throw new Error(`adapter-claude.headlessCommand: bin must be an ABSOLUTE frozen worker binary path, got ${JSON.stringify(bin)} — refusing to inherit whatever PATH resolves`)
   if (!sessionId) throw new Error('adapter-claude.headlessCommand: sessionId is required (one session per seat)')
@@ -292,6 +365,7 @@ export function headlessCommand({ role, model, promptFile, tools, deny, taskDir,
       ...STRICT_MCP_ARGS,
       '--mcp-config', mcpConfigPath({ taskDir, role }),
       '--settings', PANE_USAGE_SETTINGS,
+      ...((grants?.skills?.length ?? 0) > 0 ? [PLUGIN_DIR_FLAG, skillsPluginDir({ taskDir, role })] : []),
       ...(effort ? ['--effort', effort] : []),
       '--allowedTools', allowedTools(tools, grants),
       '--disallowedTools', deniedTools(deny, grants),
@@ -304,6 +378,7 @@ export function headlessCommand({ role, model, promptFile, tools, deny, taskDir,
 
 export function seatCommand({ role, model, promptFile, tools, deny, taskDir, bootBrief, effort, grants = NO_GRANTS, configDir = null }) {
   assertSupportedGrants(grants)
+  assertSkillsMaterialised({ taskDir, role, grants })
   assertNoLocalProvider(configDir)
   const fff = fffEnvironment(grants)
   // `env` (a real binary) sets the vars regardless of how cmux runs the
@@ -323,6 +398,7 @@ export function seatCommand({ role, model, promptFile, tools, deny, taskDir, boo
     ...STRICT_MCP_ARGS,
     '--mcp-config', `"${mcpConfigPath({ taskDir, role })}"`,
     '--settings', `"${PANE_USAGE_SETTINGS}"`,
+    ...((grants?.skills?.length ?? 0) > 0 ? [PLUGIN_DIR_FLAG, `"${skillsPluginDir({ taskDir, role })}"`] : []),
     ...(effort ? ['--effort', `"${effort}"`] : []),
     '--allowedTools', `"${allowedTools(tools, grants)}"`,
     '--disallowedTools', `"${deniedTools(deny, grants)}"`,

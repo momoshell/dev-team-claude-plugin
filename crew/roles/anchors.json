@@ -1,5 +1,4 @@
 {
-  "crew/adapters/adapter-claude.mjs:244": "grants?.skills?.length",
   "crew/drive.mjs:1908": "export function applyPrescriptionLines(source) {",
   "crew/drive.mjs:2104": "export function planAcceptContractLines() {",
   "crew/drive.mjs:1260": "function verdictOf(env) {",
@@ -12,5 +11,6 @@
   "crew/drive.mjs:8119": "if (planAdversary.trigger === 'none') {",
   "crew/drive.mjs:8157": "const check = assignAndWait('tech-lead', checkBrief, 'plan-check')",
   "crew/drive.mjs:8158": "const v = verdictOf(check)",
-  "crew/drive.mjs:8343": "const declared = planEnv.details?.mutations"
+  "crew/drive.mjs:8343": "const declared = planEnv.details?.mutations",
+  "crew/adapters/adapter-claude.mjs:368": "PLUGIN_DIR_FLAG, skillsPluginDir({ taskDir, role })"
 }

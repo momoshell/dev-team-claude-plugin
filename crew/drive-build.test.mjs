@@ -1155,7 +1155,7 @@ test('a repaired gate proven red on the pristine tree proceeds — and the proof
 })
 
 // REGRESSION: seatIo.runClean is a shorthand METHOD that calls `this.run(cmd)`
-// (crew/seat-io.mjs:241,245). #130 routed the reverify call through
+// (crew/seat-io.mjs:3252). #130 routed the reverify call through
 // runGate(..., io.runClean), detaching it, and every real gate-reverify
 // crashed with "Cannot read properties of undefined (reading 'run')" — caught
 // only by a live run. The fakes above cannot catch it: their runClean is an

@@ -1168,8 +1168,18 @@ function fixtureGit(cwd, args) {
   return result
 }
 
+// A fixture carries its gate at the bench's real path, committed, as a bench checkout does:
+// the planner gate excludes that directory from its scan, and W1 reads the working tree.
+function fixtureGatePath(dir) {
+  for (const role of ROLE_NAMES) {
+    const path = join(dir, ROLE_BENCH_ROOT, role, 'gate.mjs')
+    if (existsSync(path)) return path
+  }
+  return join(dir, 'gate.mjs')
+}
+
 function runFixtureGate(dir) {
-  const result = spawnSync(process.execPath, [join(dir, 'gate.mjs')], {
+  const result = spawnSync(process.execPath, [fixtureGatePath(dir)], {
     cwd: dir,
     encoding: 'utf8',
     env: { ...process.env, MODEL_EVAL_TEST_ENDPOINT: 'http://127.0.0.1:1' },
@@ -1181,16 +1191,19 @@ function runFixtureGate(dir) {
   return { ...result, output, summary: gateSummaryFromOutput(output) }
 }
 
-function plannerGateFixture({ output } = {}) {
+function plannerGateFixture({ output, stray = false } = {}) {
   const dir = scratchDir('factory-model-eval-planner-gate-')
   mkdirSync(dir, { recursive: true })
   fixtureGit(dir, ['init', '-q'])
   const source = `header\n${PLANNER_TARGET}\nfooter\n${PLANNER_TARGET}\n`
   writeFileSync(join(dir, 'source.mjs'), source)
-  fixtureGit(dir, ['add', 'source.mjs'])
+  // The gate is committed at its real bench path, which the gate's own scan excludes.
+  mkdirSync(join(dir, ROLE_BENCH_ROOT, 'planner'), { recursive: true })
+  writeFileSync(join(dir, ROLE_BENCH_ROOT, 'planner', 'gate.mjs'), readFileSync(roleBenchPath('planner', 'gate.mjs'), 'utf8'))
+  fixtureGit(dir, ['add', '.'])
   fixtureGit(dir, ['-c', 'commit.gpgsign=false', 'commit', '-qm', 'fixture'])
-  writeFileSync(join(dir, 'gate.mjs'), readFileSync(roleBenchPath('planner', 'gate.mjs'), 'utf8'))
   mkdirSync(join(dir, '.bench-out'), { recursive: true })
+  if (stray) writeFileSync(join(dir, 'scout-report.md'), 'an unauthorized write\n')
   const findings = [
     { path: 'source.mjs', line: 2, classification: 'fixture occurrence' },
     { path: 'source.mjs', line: 4, classification: 'fixture occurrence' },
@@ -1209,16 +1222,17 @@ function builderCanonicalReadme(scaffold) {
   return scaffold.replace(input, '[-1,2,3]')
 }
 
-function builderGateFixture({ readme = null, extraDiff = false } = {}) {
+function builderGateFixture({ readme = null, extraDiff = false, stray = false } = {}) {
   const dir = scratchDir('factory-model-eval-builder-gate-')
   mkdirSync(join(dir, 'docs/audits/2026-09-17/bench/builder'), { recursive: true })
   fixtureGit(dir, ['init', '-q'])
   const scaffold = readFileSync(roleBenchPath('builder', 'README.md'), 'utf8')
   writeFileSync(join(dir, BUILDER_README), scaffold)
   if (extraDiff) writeFileSync(join(dir, 'fixture-noise.txt'), 'fixture baseline\n')
+  writeFileSync(join(dir, ROLE_BENCH_ROOT, 'builder', 'gate.mjs'), readFileSync(roleBenchPath('builder', 'gate.mjs'), 'utf8'))
   fixtureGit(dir, ['add', '.'])
   fixtureGit(dir, ['-c', 'commit.gpgsign=false', 'commit', '-qm', 'fixture'])
-  writeFileSync(join(dir, 'gate.mjs'), readFileSync(roleBenchPath('builder', 'gate.mjs'), 'utf8'))
+  if (stray) writeFileSync(join(dir, 'scratch-notes.txt'), 'an unauthorized write\n')
   if (readme !== null) writeFileSync(join(dir, BUILDER_README), readme)
   if (extraDiff) writeFileSync(join(dir, 'fixture-noise.txt'), 'fixture changed\n')
   return { dir, scaffold, canonical: builderCanonicalReadme(scaffold) }
@@ -1292,11 +1306,17 @@ test('E1 real bench compile coverage remains offline', async () => {
   ]) assert.equal(e1Source.includes(fragment), false, `E1 must not contain ${fragment}`)
 })
 
-test('planner candidate gate exercises every P1-P4 check in both directions', () => {
+test('planner candidate gate exercises every P1-P4 and W1 check in both directions', () => {
   const positive = plannerGateFixture()
   const green = runFixtureGate(positive.dir)
   assert.equal(green.status, 0, green.output)
-  assert.deepEqual(green.summary, { total: 4, failed: 0, errored: 0 })
+  assert.deepEqual(green.summary, { total: 5, failed: 0, errored: 0 })
+  // W1: a complete, correct answer plus one untracked file elsewhere — the defect that let
+  // qwen3.8-27b score 4/4 on 2026-09-19 while writing two files the task forbade.
+  const strayRed = runFixtureGate(plannerGateFixture({ stray: true }).dir)
+  assert.notEqual(strayRed.status, 0, 'W1 stray write must make the gate red')
+  assert.match(strayRed.output, /^FAIL W1: wrote outside the declared output \.bench-out\/planner-scout\.json: scout-report\.md$/m)
+  assert.match(strayRed.output, /^PASS P4$/m, 'P4 alone could not see it')
   for (const [label, output] of [
     ['P1', []],
     ['P2', { schema: 1, target: PLANNER_TARGET, findings: [{ ...positive.findings[0], classification: '' }, positive.findings[1]] }],
@@ -1310,11 +1330,15 @@ test('planner candidate gate exercises every P1-P4 check in both directions', ()
   }
 })
 
-test('builder candidate gate exercises every B1-B3 check in both directions', () => {
+test('builder candidate gate exercises every B1-B3 and W1 check in both directions', () => {
   const positive = builderGateFixture({ readme: builderCanonicalReadme(readFileSync(roleBenchPath('builder', 'README.md'), 'utf8')) })
   const green = runFixtureGate(positive.dir)
   assert.equal(green.status, 0, green.output)
-  assert.deepEqual(green.summary, { total: 3, failed: 0, errored: 0 })
+  assert.deepEqual(green.summary, { total: 4, failed: 0, errored: 0 })
+  const strayRed = runFixtureGate(builderGateFixture({ readme: builderCanonicalReadme(readFileSync(roleBenchPath('builder', 'README.md'), 'utf8')), stray: true }).dir)
+  assert.notEqual(strayRed.status, 0, 'W1 stray write must make the gate red')
+  assert.match(strayRed.output, /^FAIL W1: wrote outside the declared output .*: scratch-notes\.txt$/m)
+  assert.match(strayRed.output, /^PASS B3$/m, 'B3 alone could not see an untracked file')
 
   const scaffold = readFileSync(roleBenchPath('builder', 'README.md'), 'utf8')
   for (const [label, options] of [

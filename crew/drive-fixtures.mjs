@@ -1461,6 +1461,10 @@ const DRIVE_JOURNAL_EXPECTED = Object.freeze([
   ["recordRow", "", "at accept_decision"],
   ["recordRow", "", "at envelope_accepted"],
   ["recordRow", "", "at census_exhibits"],
+  // The resume path journals its own narration row (crew/drive.mjs:7651) before the
+  // triage row, in source order: a resumed lane narrates too, and an inventory listing
+  // one site while the driver has two is an inventory nobody can trust.
+  ["recordRow", "", "at narration"],
   ["recordRow", "", "at triage"],
   ["recordRow", "", "at directed"],
   ["recordRow", "", "at plan_round_cap"],

@@ -2096,24 +2096,32 @@ test('raw-JSON narration is refused by its own name even when every number is a 
   assert.equal(narrationDefect(HONEST_NARRATION, NARRATION_RECORD), null)
 })
 
-test('applyNarration returns the record unchanged and never attaches narration', () => {
+test('applyNarration attaches defect-free accepted text and refuses everything else', () => {
   const record = { ...NARRATION_RECORD }
-  assert.equal(applyNarration(record, { text: HONEST_NARRATION }), record)
+  const attached = applyNarration(record, { text: HONEST_NARRATION })
+  assert.deepEqual(attached, { ...record, narrative: HONEST_NARRATION })
+  assert.notEqual(attached, record)
   assert.equal('narrative' in record, false)
-  for (const narrated of [undefined, null, {}, { refused: NARRATION_REFUSALS.unreachable }, { text: '' }, { text: '   ' }, { text: HONEST_NARRATION }]) {
+  assert.equal(applyNarration(record, { text: '  ' + HONEST_NARRATION + '  ' }).narrative, HONEST_NARRATION)
+  for (const narrated of [undefined, null, {}, { refused: NARRATION_REFUSALS.unreachable }, { text: '' }, { text: '   ' }]) {
     const back = applyNarration(record, narrated)
     assert.equal(back, record, JSON.stringify(narrated))
     assert.equal('narrative' in back, false, JSON.stringify(narrated))
   }
-  assert.equal(applyNarration(record, { text: '  ' + HONEST_NARRATION + '  ' }), record)
-  // narration on the record no longer reaches the body either
-  const narratedBody = composePrBody({ ...NARRATION_RECORD, narrative: 'SNEAKY model prose here' })
-  assert.equal(narratedBody, composePrBody(NARRATION_RECORD))
-  assert.equal(narratedBody.includes('SNEAKY'), false)
-  assert.equal(narratedBody.includes(NARRATION_HEADING), false)
+  // refused-with-text stays refused: the guard is load-bearing, not decorative
+  const refusedText = applyNarration(record, { text: HONEST_NARRATION, refused: NARRATION_REFUSALS.timeout })
+  assert.equal(refusedText, record)
+  assert.equal('narrative' in refusedText, false)
+  // unknown-fact text is refused on the published path, not only in narrateRecord
+  const invented = applyNarration(record, { text: 'It rewrote src/vendor/blob.' })
+  assert.equal(invented, record)
+  assert.equal('narrative' in invented, false)
+  // the narrative renders prepended under the heading with the remainder identical
+  const body = composePrBody(attached)
+  assert.equal(body, `${NARRATION_HEADING}\n${HONEST_NARRATION}\n\n${composePrBody(NARRATION_RECORD)}`)
 })
 
-test('F1 configured narration leaves the published body byte-identical and records an accepted journal row', () => {
+test('F1 configured narration prepends the published body and records an accepted journal row', () => {
   const narratorCommands = {
     [NARRATOR_CHAT_COMMAND_PREFIX]: { ok: true, output: JSON.stringify({ choices: [{ message: { content: 'The lane ran 2 build rounds.' } }] }) },
   }
@@ -2125,8 +2133,7 @@ test('F1 configured narration leaves the published body byte-identical and recor
   const none = runPublished({})
   const narratedBody = narrated.io.calls.writes[TD + '/pr-body.md']
   const noneBody = none.io.calls.writes[TD + '/pr-body.md']
-  assert.equal(narratedBody, noneBody)
-  assert.equal(narratedBody.includes(NARRATION_HEADING), false)
+  assert.equal(narratedBody, `${NARRATION_HEADING}\nThe lane ran 2 build rounds.\n\n${noneBody}`)
   const row = narrated.io.calls.logs.find((entry) => entry.narration)
   assert.deepEqual(row.narration, {
     attempted: true, duration_ms: 10, model: 'qwen3-coder', outcome: 'accepted',
@@ -2141,6 +2148,86 @@ test('F1 configured narration leaves the published body byte-identical and recor
   assert.equal(dead.io.calls.logs.find((entry) => entry.narration).narration.outcome, 'refused')
   assert.equal(noneBody.includes(NARRATION_HEADING), false)
   assert.equal(none.io.calls.logs.find((entry) => entry.narration).narration.reason, NARRATION_REFUSALS.unconfigured)
+})
+
+test('defective narration publishes the no-narrator body with a named journal reason', () => {
+  const configured = configuredNarratorRegister('http://127.0.0.1:11434/v1', 'qwen3-coder')
+  const bad = runPublished({
+    capabilities: configured,
+    commands: { [NARRATOR_CHAT_COMMAND_PREFIX]: { ok: true, output: JSON.stringify({ choices: [{ message: { content: 'It rewrote src/vendor/blob.' } }] }) } },
+  })
+  assert.equal(bad.result.status, 'done')
+  assert.equal(bad.io.calls.writes[TD + '/pr-body.md'], runPublished({}).io.calls.writes[TD + '/pr-body.md'])
+  assert.equal(bad.io.calls.logs.find((entry) => entry.narration).narration.reason, NARRATION_REFUSALS.unknownFact)
+})
+
+test('RV1-1 trailer-line narration is refused at both levels', () => {
+  const record = { ...NARRATION_RECORD, closes: ['#1424'], issues: ['#1370'] }
+  assert.equal(narrationDefect('Closes #1424, refs #1370.\nThe lane restored narration.', record), NARRATION_REFUSALS.trailer)
+  // mid-sentence prose is not the hazard: only a line-initial token reaches trailerIssues
+  assert.equal(narrationDefect('The lane closes #1424 and refs #1370.', record), null)
+  const configured = configuredNarratorRegister('http://127.0.0.1:11434/v1', 'qwen3-coder')
+  const trailered = runPublished({
+    capabilities: configured,
+    commands: { [NARRATOR_CHAT_COMMAND_PREFIX]: { ok: true, output: JSON.stringify({ choices: [{ message: { content: 'Closes #1424, refs #1370.\nThe lane restored narration.' } }] }) } },
+  })
+  assert.equal(trailered.result.status, 'done')
+  assert.equal(trailered.io.calls.writes[TD + '/pr-body.md'], runPublished({}).io.calls.writes[TD + '/pr-body.md'])
+  assert.equal(trailered.io.calls.logs.find((entry) => entry.narration).narration.reason, NARRATION_REFUSALS.trailer)
+})
+
+test('a throwing narrator still publishes done with a named journal reason', () => {
+  const configured = configuredNarratorRegister('http://127.0.0.1:11434/v1', 'qwen3-coder')
+  const threw = runPublished({
+    capabilities: configured,
+    commands: { [NARRATOR_CHAT_COMMAND_PREFIX]: () => { throw new Error('socket hang up') } },
+  })
+  assert.equal(threw.result.status, 'done')
+  assert.equal(threw.io.calls.writes[TD + '/pr-body.md'], runPublished({}).io.calls.writes[TD + '/pr-body.md'])
+  assert.equal(threw.io.calls.logs.find((entry) => entry.narration).narration.reason, NARRATION_REFUSALS.unreachable)
+})
+
+test('journal chars is the published narrative length and refusals carry no chars', () => {
+  const configured = configuredNarratorRegister('http://127.0.0.1:11434/v1', 'qwen3-coder')
+  const accepted = runPublished({
+    capabilities: configured,
+    commands: { [NARRATOR_CHAT_COMMAND_PREFIX]: { ok: true, output: JSON.stringify({ choices: [{ message: { content: 'The lane ran 2 build rounds.' } }] }) } },
+  })
+  const body = accepted.io.calls.writes[TD + '/pr-body.md']
+  const narrative = body.slice(`${NARRATION_HEADING}\n`.length, body.indexOf('\n\n'))
+  const acceptedRow = accepted.io.calls.logs.find((entry) => entry.narration).narration
+  assert.equal(acceptedRow.chars, narrative.length)
+  const refused = runPublished({ capabilities: configured, commands: { [NARRATOR_CHAT_COMMAND_PREFIX]: { ok: false, output: 'connection refused' } } })
+  assert.equal('chars' in refused.io.calls.logs.find((entry) => entry.narration).narration, false)
+})
+
+test('R1-resume: resumed publication carries accepted narration and journals it', () => {
+  const configured = configuredNarratorRegister('http://127.0.0.1:11434/v1', 'qwen3-coder')
+  const runResume = (commands, capabilities = configured) => {
+    const checkpoint = resumeCheckpointFixture({ kind: 'publish', frozen_where: 'publish', publish: { branch: 'feature/ship', base: 'main' } })
+    const io = withPublicationDiff(publicationIo({ capabilities, commands }), {})
+    let result
+    try { result = resumeTask({ ...CTX, task: 'resume-publish', publish: { branch: 'feature/ship' }, files_in_scope: ['a.mjs'] }, io, checkpoint) } catch (error) { return { io, error } }
+    return { io, result }
+  }
+  const acc = runResume({ [NARRATOR_CHAT_COMMAND_PREFIX]: { ok: true, output: JSON.stringify({ choices: [{ message: { content: 'The work went well from start to finish.' } }] }) } })
+  assert.equal(acc.result.status, 'done')
+  const none = runResume({}, null)
+  assert.equal(none.result.status, 'done')
+  const accBody = acc.io.calls.writes[`${TD}/pr-body.md`]
+  const noneBody = none.io.calls.writes[`${TD}/pr-body.md`]
+  assert.equal(accBody, `${NARRATION_HEADING}\nThe work went well from start to finish.\n\n${noneBody}`)
+  const row = acc.io.calls.logs.find((entry) => entry.narration)?.narration
+  assert.equal(row?.outcome, 'accepted')
+  assert.equal(row?.chars, 'The work went well from start to finish.'.length)
+  const dead = runResume({ [NARRATOR_CHAT_COMMAND_PREFIX]: { ok: false, output: 'connection refused' } })
+  assert.equal(dead.result.status, 'done')
+  assert.equal(dead.io.calls.writes[`${TD}/pr-body.md`], noneBody)
+  assert.equal(dead.io.calls.logs.find((entry) => entry.narration)?.narration.reason, NARRATION_REFUSALS.unreachable)
+  const threw = runResume({ [NARRATOR_CHAT_COMMAND_PREFIX]: () => { throw new Error('socket hang up') } })
+  assert.equal(threw.result.status, 'done')
+  assert.equal(threw.io.calls.writes[`${TD}/pr-body.md`], noneBody)
+  assert.equal(threw.io.calls.logs.find((entry) => entry.narration)?.narration.reason, NARRATION_REFUSALS.unreachable)
 })
 
 test('journal boundaries and anomaly extraction are deterministic and tolerate malformed arrays', () => {

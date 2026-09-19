@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -1745,4 +1745,57 @@ test('adapter-claude inline MCP grants rely on strict config without wildcard de
   assert.match(args, /--disallowedTools Task,Agent/)
   assert.doesNotMatch(args, /mcp__\*/)
   assert.deepEqual(mcpConfigDocument(grants), { mcpServers: { search: { command: '/opt/mcp-search', args: ['--stdio'] } } })
+})
+
+// Sol's three reproductions on #1426, each silent before this: a symlinked plugin parent
+// wrote OUTSIDE the task dir and deleted what stood there; a granted path that is a
+// DIRECTORY named SKILL.md passed every existence check and booted a seat whose skill the
+// CLI would not load; and on a case-insensitive filesystem two names differing only in
+// case became one destination, so the second copy replaced the first without a word.
+// Mutation killed: dropping the containment check, the file check, or lowercasing the
+// collision key.
+test('RV1 writeSeatSkills refuses to write outside the task dir, to take a non-file, or to collapse two names into one', () => {
+  const fixture = scratchDir('b860-rv1-src-')
+  const skill = (name, body = '# skill\n') => {
+    mkdirSync(join(fixture, name), { recursive: true })
+    writeFileSync(join(fixture, name, 'SKILL.md'), body)
+    return join(fixture, name, 'SKILL.md')
+  }
+
+  // 1. The plugin parent is a symlink out of the task dir, with something already there.
+  const escapeTask = scratchDir('b860-rv1-task-')
+  const outside = scratchDir('b860-rv1-outside-')
+  const sentinel = join(outside, 'do-not-delete.txt')
+  writeFileSync(sentinel, 'operator bytes\n')
+  const pluginRoot = skillsPluginDir({ taskDir: escapeTask, role: 'builder' })
+  mkdirSync(dirname(pluginRoot), { recursive: true })
+  symlinkSync(outside, pluginRoot)
+  assert.throws(
+    () => writeSeatSkills({ taskDir: escapeTask, role: 'builder', grants: { skills: [skill('alpha')] } }),
+    (err) => err.reason === 'grant-unsupported' && /outside the task dir/.test(err.message),
+  )
+  assert.equal(existsSync(sentinel), true, 'the bytes outside the task dir are untouched')
+  assert.equal(readFileSync(sentinel, 'utf8'), 'operator bytes\n')
+
+  // 2. A granted path that is a directory named SKILL.md.
+  const dirTask = scratchDir('b860-rv1-dirtask-')
+  mkdirSync(join(fixture, 'bad', 'SKILL.md'), { recursive: true })
+  assert.throws(
+    () => writeSeatSkills({ taskDir: dirTask, role: 'builder', grants: { skills: [join(fixture, 'bad', 'SKILL.md')] } }),
+    (err) => err.reason === 'grant-unsupported' && /is not a file/.test(err.message),
+  )
+  assert.equal(existsSync(skillsPluginDir({ taskDir: dirTask, role: 'builder' })), false, 'nothing was written')
+
+  // 3. Two names differing only in case.
+  const caseTask = scratchDir('b860-rv1-casetask-')
+  assert.throws(
+    () => writeSeatSkills({ taskDir: caseTask, role: 'builder', grants: { skills: [skill('Foo'), skill('foo')] } }),
+    (err) => err.reason === 'grant-unsupported' && /differs only in case/.test(err.message),
+  )
+  assert.equal(existsSync(skillsPluginDir({ taskDir: caseTask, role: 'builder' })), false, 'nothing was written')
+
+  // And the honest path still works: one skill, inside the task dir, is materialised.
+  const goodTask = scratchDir('b860-rv1-good-')
+  writeSeatSkills({ taskDir: goodTask, role: 'builder', grants: { skills: [skill('gamma')] } })
+  assert.equal(existsSync(join(skillsPluginDir({ taskDir: goodTask, role: 'builder' }), 'skills', 'gamma', 'SKILL.md')), true)
 })

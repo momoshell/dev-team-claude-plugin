@@ -12,5 +12,5 @@
   "crew/drive.mjs:8157": "const check = assignAndWait('tech-lead', checkBrief, 'plan-check')",
   "crew/drive.mjs:8158": "const v = verdictOf(check)",
   "crew/drive.mjs:8343": "const declared = planEnv.details?.mutations",
-  "crew/adapters/adapter-claude.mjs:368": "PLUGIN_DIR_FLAG, skillsPluginDir({ taskDir, role })"
+  "crew/adapters/adapter-claude.mjs:421": "PLUGIN_DIR_FLAG, skillsPluginDir({ taskDir, role })"
 }

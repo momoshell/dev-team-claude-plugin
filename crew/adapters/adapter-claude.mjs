@@ -1,4 +1,4 @@
-import { readFileSync as fsReadFileSync, realpathSync, existsSync, cpSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { readFileSync as fsReadFileSync, realpathSync, existsSync, cpSync, mkdirSync, statSync, writeFileSync, rmSync } from 'node:fs'
 import { isAbsolute, join, basename, dirname } from 'node:path'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
@@ -271,6 +271,39 @@ export function seatSkillFiles({ taskDir, role, grants } = {}) {
   return (grants?.skills || []).map((source) => join(skillsPluginDir({ taskDir, role }), 'skills', skillDirName(source), 'SKILL.md'))
 }
 
+// Sol on #1426 reproduced three ways a materialisation can go wrong, all of them silent:
+// a symlinked plugin parent wrote OUTSIDE the task dir (and deleted what was there), a
+// granted path that is a DIRECTORY named SKILL.md passed every existence check and booted
+// a seat whose skill the CLI would not load, and on a case-insensitive filesystem
+// `Foo/SKILL.md` and `foo/SKILL.md` collapsed to one destination so the second silently
+// replaced the first. Each is refused by name before anything is written.
+const REAL = (path, deps) => {
+  try { return (deps.realpathSync ?? realpathSync)(path) } catch { return null }
+}
+
+// The plugin root, and every parent of it that exists, must live inside the task dir: a
+// symlink anywhere on that chain is an escape, and this function WRITES and REMOVES.
+function assertInsideTaskDir(root, taskDir, deps) {
+  const realTask = REAL(taskDir, deps) ?? taskDir
+  let probe = root
+  for (;;) {
+    const real = REAL(probe, deps)
+    if (real !== null) {
+      const contained = real === realTask || real.startsWith(`${realTask}/`)
+      if (!contained) {
+        throw Object.assign(
+          new Error(`adapter-claude refuses to materialise skills at ${JSON.stringify(root)}: ${JSON.stringify(probe)} resolves to ${JSON.stringify(real)}, outside the task dir ${JSON.stringify(realTask)} — refusing to write outside the seat [grant-unsupported]`),
+          { reason: 'grant-unsupported' },
+        )
+      }
+      return
+    }
+    const parent = dirname(probe)
+    if (parent === probe) return
+    probe = parent
+  }
+}
+
 export function writeSeatSkills({ taskDir, role, grants } = {}, deps = {}) {
   const skills = grants?.skills || []
   if (skills.length === 0) return
@@ -278,18 +311,38 @@ export function writeSeatSkills({ taskDir, role, grants } = {}, deps = {}) {
   const mkdir = deps.mkdirSync ?? mkdirSync
   const write = deps.writeFileSync ?? writeFileSync
   const rm = deps.rmSync ?? rmSync
-  const seen = new Set()
+  const stat = deps.statSync ?? statSync
+  const seen = new Map()
   for (const source of skills) {
     const name = skillDirName(source)
-    if (seen.has(name)) {
+    // A granted source must be a readable FILE. A directory named SKILL.md satisfies
+    // existsSync and produces a plugin the CLI does not load.
+    let sourceStat
+    try { sourceStat = stat(String(source)) } catch (error) {
       throw Object.assign(
-        new Error(`adapter-claude cannot materialise duplicate skill name ${JSON.stringify(name)} — refusing to boot an ambiguous seat [grant-unsupported]`),
+        new Error(`adapter-claude cannot read granted skill ${JSON.stringify(String(source))} (${error?.message ?? error}) — refusing to boot a silently weaker seat [grant-unsupported]`),
         { reason: 'grant-unsupported' },
       )
     }
-    seen.add(name)
+    if (!sourceStat.isFile()) {
+      throw Object.assign(
+        new Error(`adapter-claude granted skill ${JSON.stringify(String(source))} is not a file — refusing to boot a seat whose skill the CLI will not load [grant-unsupported]`),
+        { reason: 'grant-unsupported' },
+      )
+    }
+    // Case-insensitive, because APFS and NTFS are: two names differing only in case
+    // become ONE destination, and the second copy replaces the first without a word.
+    const key = name.toLowerCase()
+    if (seen.has(key)) {
+      throw Object.assign(
+        new Error(`adapter-claude cannot materialise duplicate skill name ${JSON.stringify(name)}: it collides with ${JSON.stringify(seen.get(key))}, which differs only in case on a case-insensitive filesystem — refusing to boot an ambiguous seat [grant-unsupported]`),
+        { reason: 'grant-unsupported' },
+      )
+    }
+    seen.set(key, name)
   }
   const root = skillsPluginDir({ taskDir, role })
+  assertInsideTaskDir(root, taskDir, deps)
   rm(root, { recursive: true, force: true })
   mkdir(root, { recursive: true })
   for (const source of skills) {

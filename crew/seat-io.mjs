@@ -21,7 +21,7 @@ import {
 } from './headless.mjs'
 import { headlessRpcIo as defaultHeadlessRpcIo, teardownOutcome } from './headless-rpc.mjs'
 import { LIVENESS, PHASES, reservationEngine, markerLockName } from './reclaim.mjs'
-import { operationalRow, recordRow } from './drive.mjs'
+import { chunkLedgerChecks, operationalRow, recordRow } from './drive.mjs'
 import { readJsonTri } from './json-leaf.mjs'
 import { modelString as claudeModelString, paneUsageRecords as claudePaneUsageRecords } from './adapters/adapter-claude.mjs'
 import { readSessionUsage } from '../scripts/factory/transcript.mjs'
@@ -1288,6 +1288,11 @@ export function cellFailureKind(err) {
   return 'transport-error'
 }
 
+export function gateLedgerChecks(event) {
+  if (event && event.chunk) return { checks: chunkLedgerChecks(event.chunk.summary, event.chunk.deferredRows), violations: [] }
+  return { checks: event && event.summary ? [event.summary] : [], violations: [] }
+}
+
 export function emitAdapter(emitter, crew = null) {
   // The emitter owns the phase cursor and hands it back from every
   // phaseTransition; carry it onto every event so agent rows can be
@@ -1341,10 +1346,11 @@ export function emitAdapter(emitter, crew = null) {
       })
     } else if (event.kind === 'gate') {
       // The ledger's own gate tables, not a generic log row (#130).
+      const ledgerChecks = gateLedgerChecks(event)
       emitter.emit((handle) => handle.recordGateResult({
         adw_id: emitter.adwId, phase_id: phaseId,
         gate_name: String(event.name ?? 'gate'), attempt: event.attempt, ok: !!event.ok,
-        checks: event.summary ? [event.summary] : [], violations: [],
+        checks: ledgerChecks.checks, violations: ledgerChecks.violations,
         gate_generation: event.generation ?? null, pristine: !!event.pristine,
         gate_run_ms: event.gate_run_ms, gate_run_ms_absent_reason: event.gate_run_ms_absent_reason,
       }))

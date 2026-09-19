@@ -3762,7 +3762,7 @@ function preflightRunOptions({ execution, runFlags = {}, lanes = [] } = {}) {
   }
 }
 
-function runCommand({ lane, laneDir, briefPath, files, execution, keep, runFlags = {} }) {
+export function runCommand({ lane, laneDir, briefPath, files, execution, keep, runFlags = {}, chunk = null }) {
   const args = ['crew/crew.mjs', 'run', '--task', lane, '--checkout', laneDir, '--brief-file', briefPath]
   if (keep) args.push('--keep')
   const add = (flag, value) => {
@@ -3776,6 +3776,7 @@ function runCommand({ lane, laneDir, briefPath, files, execution, keep, runFlags
     'plan-rounds', 'build-rounds', 'review-rounds', 'wait-builder', 'wait-planner',
     'wait-reviewer', 'wait-lead', 'wait-tech-lead', 'suite',
   ]) add(flag, runFlags[flag])
+  if (chunk != null && String(chunk.id || '').trim() !== '') args.push('--chunked', '--chunk', String(chunk.id))
   return { file: 'node', args, cwd: laneDir }
 }
 
@@ -4399,6 +4400,7 @@ function launchDispatchWave(compiled) {
           execution: item.execution,
           keep,
           runFlags,
+          chunk: item.chunk ?? null,
         }),
         background: true,
         logPath: runLog,

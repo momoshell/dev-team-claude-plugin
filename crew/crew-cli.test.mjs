@@ -9,7 +9,8 @@ import { fileURLToPath } from 'node:url'
 import { openLedger, USAGE_ABSENT_CAUSES } from '../scripts/factory/ledger.mjs'
 import { TURN_CEILING_FLAGS } from './drive.mjs'
 import { openRun, _resetNoticeGuardsForTest } from '../scripts/factory/emit.mjs'
-import { SEAT_DEFAULTS, FANOUT_TOOLS, ROLE_ORDER, resolveAdapters, resolveTier, loadLadder, shadowCandidates, shadowExclusion, shadowPick, shadowPickBoot, SHADOW_EXCLUSIONS, SHADOW_OUTCOMES, SHADOW_ABSENT, loadRoutingPolicy, materialiseRoutingChoice, replayRoutingChoice, ROUTING_EXCLUSION_REASONS, ROUTING_PRECEDENCE, bootCmd, runCmd, runExitCode, runOutcome, RUN_EXIT_CODES, RUN_EXIT_UNEXPECTED, RUN_START_EVENT, readHead, readBranch, teardownDecision, stagesFromJournal, resolveValidationLane, awaitSeatsReady, teardownCore, installExitMarker, installRunFinalizers, writeTerminalLine, terminalLineSeen, runScopedPaths, returnsInheritanceRecord, RETURNS_INHERITANCE_REASONS, resolveTaskReturn, archivedReturn, UsageError, KNOWN_FLAGS, ROLE_FLAG_PREFIXES, REQUIRED_FLAGS, BOOT_ONLY_FLAGS, assertUsage, parseArgs, FLAG_VALUE_REFUSAL, FLAG_VALUE_CONTRACT, BOOLEAN_FLAGS, resolveTimeoutS, TIMEOUT_S_REFUSAL, TIMEOUT_S_DEFAULT, MEMORY_ROLES, CHARTER_CEILINGS, CAPABILITY_REFUSALS, loadCapabilities, grantsFor, assertGrantsBacked, assertFanoutCoherent, deniedFanout, EMPTY_GRANTS, probeLocalEndpoint, effectiveTools, persistedAdapters, GRANT_SNAPSHOT_REFUSAL, ADVISOR_CONFIG_VERSION, ADVISOR_BOOT_REFUSALS, SAFE_MODEL, classifyAdvisorCell, advisorBootRecord, advisorJournalRecord, advisorEndpointOrigin, assertAdvisorCellLive, advisorManifest, assertAdvisorManifest, packageSuite, SUITE_OWNER_PATH, SUITE_REFUSAL, PANE_TURN_CEILING_UNMEASURED, paneTurnCeilingRefusals, resumeCmd, validateResumeState, RESUME_REFUSALS, RESUME_REFUSAL_NAMES, refuseResume } from './crew.mjs'
+import { SEAT_DEFAULTS, FANOUT_TOOLS, ROLE_ORDER, resolveAdapters, resolveTier, loadLadder, shadowCandidates, shadowExclusion, shadowPick, shadowPickBoot, SHADOW_EXCLUSIONS, SHADOW_OUTCOMES, SHADOW_ABSENT, loadRoutingPolicy, materialiseRoutingChoice, replayRoutingChoice, ROUTING_EXCLUSION_REASONS, ROUTING_PRECEDENCE, bootCmd, runCmd, runExitCode, runOutcome, RUN_EXIT_CODES, RUN_EXIT_UNEXPECTED, RUN_START_EVENT, readHead, readBranch, teardownDecision, stagesFromJournal, resolveValidationLane, awaitSeatsReady, teardownCore, installExitMarker, installRunFinalizers, writeTerminalLine, terminalLineSeen, runScopedPaths, returnsInheritanceRecord, RETURNS_INHERITANCE_REASONS, resolveTaskReturn, archivedReturn, UsageError, KNOWN_FLAGS, ROLE_FLAG_PREFIXES, REQUIRED_FLAGS, BOOT_ONLY_FLAGS, assertUsage, parseArgs, FLAG_VALUE_REFUSAL, FLAG_VALUE_CONTRACT, BOOLEAN_FLAGS, resolveTimeoutS, TIMEOUT_S_REFUSAL, TIMEOUT_S_DEFAULT, MEMORY_ROLES, CHARTER_CEILINGS, CAPABILITY_REFUSALS, loadCapabilities, grantsFor, assertGrantsBacked, assertFanoutCoherent, deniedFanout, EMPTY_GRANTS, probeLocalEndpoint, effectiveTools, persistedAdapters, GRANT_SNAPSHOT_REFUSAL, ADVISOR_CONFIG_VERSION, ADVISOR_BOOT_REFUSALS, SAFE_MODEL, classifyAdvisorCell, advisorBootRecord, advisorJournalRecord, advisorEndpointOrigin, assertAdvisorCellLive, advisorManifest, assertAdvisorManifest, packageSuite, SUITE_OWNER_PATH, SUITE_REFUSAL, PANE_TURN_CEILING_UNMEASURED, paneTurnCeilingRefusals, resumeCmd, validateResumeState, RESUME_REFUSALS, RESUME_REFUSAL_NAMES, refuseResume, chunkCtxFromArgs } from './crew.mjs'
+import { runCmdFixture } from './drive-fixtures.mjs'
 import { composeRolePrompt } from './crew.mjs'
 import { runChild, packageSuite as childPackageSuite, SUITE_OWNER_PATH as CHILD_SUITE_OWNER_PATH } from './child.mjs'
 import { driveTask, resumeWorktreeSha256 } from './drive.mjs'
@@ -1522,7 +1523,7 @@ test('argv value contracts cover every known flag and every hostile shape', () =
   for (const flags of Object.values(KNOWN_FLAGS)) for (const flag of flags) union.add(flag)
   assert.deepEqual([...Object.keys(FLAG_VALUE_CONTRACT)].sort(), [...union].sort())
   assert.ok(Object.values(FLAG_VALUE_CONTRACT).every((contract) => contract === 'value' || contract === 'boolean'))
-  assert.deepEqual(BOOLEAN_FLAGS, ['headless-all', 'keep', 'panel-distinct-agents'])
+  assert.deepEqual(BOOLEAN_FLAGS, ['chunked', 'headless-all', 'keep', 'panel-distinct-agents'])
 
   const requiredPrefix = (verb) => {
     const prefix = ['--task', 't']
@@ -3308,7 +3309,7 @@ function resumeValidationFixture(prefix = 'crew-resume-validation-') {
     reviewer: { status: 'done', role: 'reviewer', summary: 'review', artifacts: [reviewPath], details: { review_path: reviewPath } },
   }
   const checkpoint = {
-    version: 1, kind: 'suite', frozen_where: 'suite', head_oid: head,
+    version: 2, kind: 'suite', frozen_where: 'suite', head_oid: head, chunk: null,
     tree: { index_oid: index, files: [file], worktree_sha256: resumeWorktreeSha256([file]) },
     accepted_scope: ['a.mjs'], returns,
     decision: { accepted_via: 'review pass', verdict: 'pass', residuals: [], carried_findings: [], accept_findings: [], accept_decision: { where: 'review', outcome: 'accepted', residuals: [] }, panel_contributors: ['reviewer'] },
@@ -3402,7 +3403,7 @@ function resumeCommandFixture(prefix = 'crew-resume-command-') {
   for (const path of [gatePath, planPath, reviewPath]) writeFileSync(path, `${basename(path)}\n`)
   const file = { path: 'a.mjs', state: 'present', bytes: `file:-:${createHash('sha256').update(source).digest('hex')}` }
   const checkpoint = {
-    version: 1, kind: 'suite', frozen_where: 'suite', head_oid: head,
+    version: 2, kind: 'suite', frozen_where: 'suite', head_oid: head, chunk: null,
     tree: { index_oid: index, files: [file], worktree_sha256: resumeWorktreeSha256([file]) }, accepted_scope: ['a.mjs'],
     returns: {
       planner: { status: 'done', role: 'planner', summary: 'plan', artifacts: [planPath], details: { plan_path: planPath } },
@@ -3451,7 +3452,7 @@ test('resume refusal matrix is closed and fails before any side effect', () => {
     [RESUME_REFUSALS.envelopeUnreadable, (f) => f.setEnvelope('{')],
     [RESUME_REFUSALS.notEscalation, (f) => f.setEnvelope({ status: 'done' })],
     [RESUME_REFUSALS.stateMissing, (f) => f.setEnvelope({ status: 'escalation', details: { escalation: { where: 'suite' } } })],
-    [RESUME_REFUSALS.unsupportedCheckpoint, (f) => { f.checkpoint.version = 2; f.setEnvelope(f.envelope()) }],
+    [RESUME_REFUSALS.unsupportedCheckpoint, (f) => { f.checkpoint.version = 1; f.setEnvelope(f.envelope()) }],
     [RESUME_REFUSALS.oidUnresolved, (f) => { f.checkpoint.head_oid = 'deadbeef'; f.setEnvelope(f.envelope()) }],
     [RESUME_REFUSALS.worktreeMoved, (f) => execSync('git commit --allow-empty -qm moved', { cwd: f.checkout })],
     [RESUME_REFUSALS.fingerprintMismatch, (f) => writeFileSync(join(f.checkout, 'a.mjs'), 'changed bytes\n')],
@@ -4458,4 +4459,24 @@ test('routing RV1-1 keeps a below-floor boot review rate absent with its denomin
   assert.ok(decision.exclusions.some((entry) => entry.reason === 'rate-absent'))
   const measurement = decision.normalized_measurements.find((row) => row.cell.id === 'gpt-5.6-luna')
   assert.deepEqual(measurement.rate, { numerator: 10, denominator: 11, value: null, reason: 'rate-absent' })
+})
+
+test('chunk flags travel from argv to the driver ctx and refuse a lone --chunk', () => {
+  const parsed = parseArgs(['--task', 't', '--brief-file', 'b', '--chunked', '--chunk', 'c1'])
+  assert.equal(parsed.chunked, true)
+  assert.equal(parsed.chunk, 'c1')
+  assert.doesNotThrow(() => assertUsage('run', parsed))
+  assert.deepEqual(chunkCtxFromArgs(parsed), { chunked: true, chunk: 'c1' })
+  assert.deepEqual(chunkCtxFromArgs(parseArgs(['--task', 't', '--brief-file', 'b'])), {})
+  assert.deepEqual(chunkCtxFromArgs({}), {})
+  assert.throws(() => chunkCtxFromArgs({ chunk: 'c1' }), (err) => err instanceof UsageError && /without --chunked/.test(err.message))
+  assert.throws(() => chunkCtxFromArgs({ chunked: true }), (err) => err instanceof UsageError && /needs --chunk/.test(err.message))
+  assert.throws(() => chunkCtxFromArgs({ chunked: true, chunk: '   ' }), (err) => err instanceof UsageError)
+  assert.throws(() => runCmdFixture({ chunk: 'c1' }), /without --chunked/)
+  const chunked = runCmdFixture({ chunked: true, chunk: 'c1' })
+  assert.equal(chunked.ctx.chunked, true)
+  assert.equal(chunked.ctx.chunk, 'c1')
+  const ordinary = runCmdFixture({})
+  assert.equal(ordinary.ctx.chunked, undefined)
+  assert.equal(ordinary.ctx.chunk, undefined)
 })

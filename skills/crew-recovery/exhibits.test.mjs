@@ -177,3 +177,12 @@ test('H1 suite escalation documentation names the bounded frozen-pin repair', ()
   assert.equal(text.split(sentence).length - 1, 1)
   assert.match(text, /A named failing test path is recorded as context for the already-budgeted builder repair\./)
 })
+
+test('plan-chunks escalation names both producers and the --chunked remedy', () => {
+  const text = readText(join(HERE, 'references/escalations.md'))
+  const row = text.split('\n').find((line) => line.includes('escalate:plan-chunks'))
+  assert.ok(row, 'escalations.md is missing the escalate:plan-chunks row')
+  assert.ok(row.includes('validateChunks'), 'plan-chunks row must name the validateChunks producer')
+  assert.ok(row.includes('chunk-without-chunked'), 'plan-chunks row must name the chunk-without-chunked producer')
+  assert.ok(row.includes('--chunked'), 'plan-chunks row must name the --chunked remedy')
+})

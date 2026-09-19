@@ -7,7 +7,7 @@ are written without the leading `--`; role-prefixed names are accepted only on
 ```json
 {
   "boot": ["task", "checkout", "assurance", "tier", "roles", "fences", "lane", "headless-all", "max-turns-planner", "max-turns-tech-lead", "max-turns-builder", "max-turns-reviewer", "max-turns-lead", "model-reviewer", "effort-reviewer", "agent-reviewer"],
-  "run":  ["task", "checkout", "brief-file", "execution", "variant", "files-in-scope", "validation-lane", "plan-rounds", "build-rounds", "review-rounds", "wait-planner", "wait-tech-lead", "wait-builder", "wait-reviewer", "wait-lead", "suite", "keep"],
+  "run":  ["task", "checkout", "brief-file", "execution", "variant", "files-in-scope", "validation-lane", "plan-rounds", "build-rounds", "review-rounds", "wait-planner", "wait-tech-lead", "wait-builder", "wait-reviewer", "wait-lead", "suite", "keep", "chunked", "chunk"],
   "boot_only": ["fences", "lane", "max-turns-planner", "max-turns-tech-lead", "max-turns-builder", "max-turns-reviewer", "max-turns-lead"]
 }
 ```

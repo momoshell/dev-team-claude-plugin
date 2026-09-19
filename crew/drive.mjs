@@ -4498,6 +4498,26 @@ export function narratorModelId(output) {
 // (attempted/outcome/reason/chars) and never composePrBody. The wording is retained
 // deliberately so the measurement is not silently redefined — see the 2026-09-17
 // docs/conventions.md entry and the pending ADR-034 §U6 amendment.
+// The falsification rules reach every reviewing seat from ONE file. `scripts/factory/pr-review.mjs` already
+// pastes it into a PR-review brief; a lane reviewer saw none of it, which is the whole
+// point of having written it down. It cannot be a capability grant: pi takes a skill as a
+// --skill flag but adapter-claude REFUSES any skill grant, and the judge tier's reviewer is
+// a claude seat — so the brief is the only carrier every agent shares.
+// An unreadable file is STATED in the brief, never silently dropped.
+export const FALSIFICATION_PATH = 'skills/pr-review/references/falsification.md'
+export const FALSIFICATION_HEADING = '## Falsification and adjudication (how a finding earns the right to be written)'
+export const FALSIFICATION_ABSENT = 'FALSIFICATION RULES UNAVAILABLE'
+
+export function falsificationLines(io, checkout) {
+  let text
+  try { text = io?.readFile?.(`${checkout}/${FALSIFICATION_PATH}`) } catch (error) {
+    return ['', `${FALSIFICATION_ABSENT}: ${FALSIFICATION_PATH} could not be read (${error?.message ?? String(error)}) — judge findings on the verdict contract alone.`]
+  }
+  const body = typeof text === 'string' ? text.trim() : ''
+  if (body === '') return ['', `${FALSIFICATION_ABSENT}: ${FALSIFICATION_PATH} is empty or unreadable — judge findings on the verdict contract alone.`]
+  return ['', FALSIFICATION_HEADING, '', body]
+}
+
 export function narrationPrompt(record) {
   return [
     'You are writing the narrative paragraph of a pull-request body for an automated code lane.',
@@ -6723,6 +6743,7 @@ function runTask(ctx, io, crash) {
         ? 'Return base and head, adjudications for every collision-safe divergent id, each disposition uphold or dismiss, each with a non-empty reason, and your own reviewed_files and unreviewable_files.'
         : 'Return the complete review-only fields: base, head, outcome, findings, reviewed_files, and unreviewable_files. Review independently; do not rely on another seat or write to the checkout.',
       'Do not create, edit, delete, checkout, or commit anything in the checkout. Read-only validation is permitted.',
+      ...falsificationLines(io, ctx.checkout),
       `Transport identity is exact: assignment_id=${JSON.stringify(id ?? '<dispatch id>')}, run_id=${JSON.stringify(runId ?? '<current run id>')}, role=${JSON.stringify(role)}.`,
     ].join('\n')
     const writeBriefAndAssign = (role, file, note, briefBuilder) => {
@@ -10360,6 +10381,9 @@ function runTask(ctx, io, crash) {
         'An explicitly supplied vacuity_claim outside "mutation-survived" and "source-text-only" is refused; do not invent values or rely on natural-language matching.',
         ...staleVerdictLines(staleVerdict),
         ...screenerBriefLines(screenerResult.proposals),
+        // Before the diff-mutant findings: that section ends the brief with a JSON array,
+        // and a reader (and a test) takes everything after its heading as that array.
+        ...falsificationLines(io, ctx.checkout),
         ...diffFindingLines(report),
       ].join('\n')
       io.writeFile(revBrief, panelBriefText)

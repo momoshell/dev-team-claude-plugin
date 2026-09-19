@@ -5,6 +5,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import {
+  FALSIFICATION_ABSENT, FALSIFICATION_PATH,
   ADOPTED_PLAN_HEADING, ADOPT_BLOCK, adversarialPlanEnv, CENSUS_ROW_ABSENT, CENSUS_TURNS_ABSENT, CENSUS_UNREADABLE, CTX, CTX_DIRECTED, CTX_TL, DIRECTED_FILES, ENVELOPE_REFUSAL_REASONS, FAILURE_UPGRADE, GATE_SUMMARY_PREFIX, GROWTH_DIVERGENCE_FACTOR, LANE_COMMAND_SHAPES, LANE_INPUT_VERDICTS, LANE_PATH_OPTIONS, LANE_VALUE_OPTIONS, LIMITS, NO_TURN_CEILING, PLAN_CHECK_ABSENT, PLAN_CHECK_INVALID, PLAN_CHECK_SEVERITIES, PLAN_CONVERGENCE_REASONS, RED, RUN_START_EVENT, S843_ADDED, S843_D2, S843_DISPATCHED, S843_NARROWED, SUITE_REASK_MAX, TD, THREW, TRIAGE_NOTE, TURN_CEILING_DEFAULTS, TURN_CEILING_REFUSALS, TURN_CEILING_ROLES, VALIDATION_LANE_UNLOADABLE, adoptionSignal, bothExhaustionPointsScenario, buildEnv, carriedPrLines, carriedPreambleLines, carriedResolution, carriedSilenceDefect, checkEnv, composeCommitMessage, divergeThenExhaustPlanScenario, divergenceConsultLines, divergentPlanScenario, driveTask, enforcementPreamble, fakeIo, growthLines, growthRecord, join, laneCommandInputs, laneCommandShape, laneFence, leadEnv, lineageFromJournal, persistentDivergenceScenario, planCheckAcceptIo, planCheckFindings, planCheckFindingsFromText, planConvergence, planEnv, planRevisionRun, planRoundCap, planThenReviewIo, protectedPlanEnv, resolveTurnCeilings, resolveValidationLane, resumeGreen, resumeKeys, resumeRed, reviewConvergeRun, reviewEnv, s843Bullets, s843Ctx, s843Io, s843PlanEnv, suiteRefusalEnv, turnCeilingsRecord, triageEnv, validationPlan, validationProbeOutput, validationProbeRun, validationRows, laneProbeCommand,
 } from './drive-fixtures.mjs'
 import {
@@ -1825,6 +1826,10 @@ test('non-continuation keeps the ordinary assignment and review brief write set 
     'A typed finding may carry vacuity_claim "source-text-only" when source text proves the behavior is present but no executable witness can prove it.',
     'Either recognized vacuity_claim requires the marker itself, severity "must-fix", and a disposition other than "no-op"; ordinary observations must omit the marker.',
     'An explicitly supplied vacuity_claim outside "mutation-survived" and "source-text-only" is refused; do not invent values or rely on natural-language matching.',
+    // This io serves no files, so the falsification rules are unreadable here — and the
+    // brief SAYS so rather than leaving the reviewer to assume it was told everything.
+    '',
+    `${FALSIFICATION_ABSENT}: ${FALSIFICATION_PATH} is empty or unreadable — judge findings on the verdict contract alone.`,
     '## Diff-mutant findings',
     '[]',
   ].join('\n'))

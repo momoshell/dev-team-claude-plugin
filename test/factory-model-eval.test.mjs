@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { ROOT, scratchDir, sqliteAvailable } from './helpers.mjs'
 import {
   benchSha,
@@ -1404,4 +1404,151 @@ test('a tiered bench files its routing choice under its own tier, and a tierless
   await runBench({ dir: bench.dir, deps })
   assert.equal(cellsSeen.length, 1)
   assert.equal(cellsSeen[0][0], 'muse-spark-1.3-contributor', `the mechanical route leads the candidate set: ${JSON.stringify(cellsSeen[0])}`)
+})
+
+const ADDED_BENCHES = [
+  { name: 'planner-2', role: 'planner', kind: 'anchor-inventory' },
+  { name: 'planner-3', role: 'planner', kind: 'manifest-reconciliation' },
+  { name: 'builder-2', role: 'builder', kind: 'object-key-order' },
+  { name: 'builder-3', role: 'builder', kind: 'markdown-table-sync' },
+]
+const ADDED_BENCH_ROOT = 'docs/audits/2026-09-19/bench'
+
+function addedBenchPath(name, file) {
+  return join(ROOT, ADDED_BENCH_ROOT, name, file)
+}
+
+// Every gate run happens in a throwaway root holding a copy of its bench: the gates take
+// their root from the working directory and read only their own bench directory and
+// `.bench-out/`. Running them in the checkout wrote into it, rewrote tracked READMEs in
+// place, and let a stale operator `.bench-out/` file turn the untouched run green.
+function benchScratch(name) {
+  const root = scratchDir(`bench-${name}-`)
+  cpSync(addedBenchPath(name, ''), join(root, ADDED_BENCH_ROOT, name), { recursive: true })
+  return root
+}
+
+function runAddedGate(name, root = benchScratch(name)) {
+  const result = spawnSync(process.execPath, [join(root, ADDED_BENCH_ROOT, name, 'gate.mjs')], {
+    cwd: root,
+    encoding: 'utf8',
+  })
+  assert.equal(result.error, undefined, `${name} gate must start: ${result.error?.message || ''}`)
+  assert.equal(result.signal, null, `${name} gate must not be interrupted`)
+  assert.equal(typeof result.status, 'number', `${name} gate must return an exit status`)
+  const output = `${result.stdout || ''}\n${result.stderr || ''}`
+  const summary = gateSummaryFromOutput(output)
+  return { ...result, output, summary }
+}
+
+function planner2Canonical() {
+  const findings = []
+  for (const file of ['a.mjs', 'b.mjs']) {
+    const text = readFileSync(addedBenchPath('planner-2', `fixture/${file}`), 'utf8')
+    text.split(/\r?\n/).forEach((line, index) => {
+      for (const match of line.matchAll(/ANCHOR\(([^)\r\n]+)\)/g)) {
+        findings.push({ path: `docs/audits/2026-09-19/bench/planner-2/fixture/${file}`, line: index + 1, anchor: match[1] })
+      }
+    })
+  }
+  findings.sort((a, b) => a.path.localeCompare(b.path) || a.line - b.line)
+  return { schema: 1, kind: 'anchor-inventory', findings }
+}
+
+function planner3Canonical() {
+  const manifest = JSON.parse(readFileSync(addedBenchPath('planner-3', 'fixture/manifest.json'), 'utf8'))
+  const listed = [...manifest.files].sort()
+  const disk = readdirSync(addedBenchPath('planner-3', 'fixture/files')).sort()
+  const onDisk = new Set(disk)
+  const inManifest = new Set(listed)
+  return {
+    schema: 1,
+    kind: 'manifest-reconciliation',
+    present: listed.filter((name) => onDisk.has(name)),
+    missing: listed.filter((name) => !onDisk.has(name)),
+    extra: disk.filter((name) => !inManifest.has(name)),
+  }
+}
+
+function withAddedOutput(name, value, fn) {
+  const root = benchScratch(name)
+  mkdirSync(join(root, '.bench-out'), { recursive: true })
+  writeFileSync(join(root, '.bench-out', `${name}.json`), `${JSON.stringify(value, null, 2)}\n`)
+  return fn(root)
+}
+
+function withAddedReadme(name, canonicalLines, fn) {
+  const root = benchScratch(name)
+  const path = join(root, ADDED_BENCH_ROOT, name, 'README.md')
+  const original = readFileSync(path, 'utf8')
+  {
+    const lines = original.split('\n')
+    const open = lines.findIndex((line) => line.trim() === '```BENCH_WORK_ITEM')
+    const close = lines.findIndex((line, index) => index > open && line.trim() === '```')
+    assert.ok(open >= 0 && close > open, `${name} work-item fence must resolve`)
+    writeFileSync(path, [...lines.slice(0, open + 1), ...canonicalLines, ...lines.slice(close)].join('\n'))
+    return fn(root)
+  }
+}
+
+test('A1 added benches compile offline with their declared role and digest', async () => {
+  for (const bench of ADDED_BENCHES) {
+    const compiled = await compileBench({
+      dir: addedBenchPath(bench.name, ''),
+      deps: { probe: async () => true, readRoster: null },
+    })
+    assert.equal(compiled.role, bench.role, `${bench.name} role`)
+    assert.match(compiled.sha, /^[a-f0-9]{64}$/, `${bench.name} sha`)
+  }
+})
+
+test('B1 added gates reject untouched work and accept each canonical answer', () => {
+  for (const bench of ADDED_BENCHES) {
+    const red = runAddedGate(bench.name)
+    assert.notEqual(red.status, 0, `${bench.name} must reject untouched work`)
+    const green = bench.name === 'planner-2'
+      ? withAddedOutput(bench.name, planner2Canonical(), (root) => runAddedGate(bench.name, root))
+      : bench.name === 'planner-3'
+        ? withAddedOutput(bench.name, planner3Canonical(), (root) => runAddedGate(bench.name, root))
+        : withAddedReadme(bench.name,
+          bench.name === 'builder-2' ? ['{\"a\": 1, \"m\": 2, \"z\": 3}'] : [
+            '| model | band |',
+            '| gemma4-31b | basement |',
+            '| gpt-oss-20b | basement |',
+            '| qwen3.8-27b | basement |',
+          ],
+          (root) => runAddedGate(bench.name, root))
+    assert.equal(green.status, 0, `${bench.name} canonical answer: ${green.output}`)
+  }
+})
+
+test('C1 every added gate emits a positive mechanical summary', () => {
+  for (const bench of ADDED_BENCHES) {
+    const result = runAddedGate(bench.name)
+    assert.ok(result.summary.total > 0, `${bench.name} summary total`)
+    assert.equal(result.summary.errored, 0, `${bench.name} summary errors`)
+  }
+})
+
+test('D1 added kinds are pairwise distinct within each seat role', () => {
+  const expected = { planner: 'tree-literal-hunt', builder: 'sorted-unique-array' }
+  for (const role of ['planner', 'builder']) {
+    const kinds = [expected[role]]
+    for (const bench of ADDED_BENCHES.filter(({ role: benchRole }) => benchRole === role)) {
+      const source = readFileSync(addedBenchPath(bench.name, 'README.md'), 'utf8')
+      const match = /^kind:\s*(\S+)\s*$/m.exec(source)
+      assert.ok(match, `${bench.name} kind line`)
+      assert.equal(match[1], bench.kind)
+      kinds.push(match[1])
+    }
+    assert.equal(new Set(kinds).size, kinds.length, `${role} kinds`)
+  }
+})
+
+test('E1 builder declarations are mechanical and planner declarations have no tier', () => {
+  for (const bench of ADDED_BENCHES) {
+    const document = JSON.parse(readFileSync(addedBenchPath(bench.name, 'candidates.json'), 'utf8'))
+    if (bench.role === 'builder') assert.equal(document.tier, 'mechanical', `${bench.name} tier`)
+    else assert.equal(Object.hasOwn(document, 'tier'), false, `${bench.name} planner tier`)
+  }
 })

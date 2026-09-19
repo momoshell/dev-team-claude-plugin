@@ -1,0 +1,4 @@
+{
+  "schema": 1,
+  "files": ["alpha.txt", "beta.txt", "gamma.txt", "delta.txt"]
+}

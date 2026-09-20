@@ -4437,6 +4437,14 @@ test('C1 census prefilter tripwire names an unlisted candidate', () => {
   assert.match(selected.defects[0].detail, new RegExp(file))
 })
 
+test('census register covers every literal tracked census-shaped test', () => {
+    // The pre-filter is a LITERAL substring scan, so a suite that enumerates the checkout through a helper, an imported constant or a command built at run time is invisible to it. Silence from this check is not a complete census of census suites.
+    const selected = selectCensusExhibits({ checkout: process.cwd() })
+    const remedy = 'add a CENSUS_EXHIBIT_REGISTER entry with its kind and reason'
+    const failure = selected.defects.map(({ file }) => `${file}: ${remedy}`).join('\n')
+    assert.equal(selected.reason, null, failure || `census exhibit selection failed: ${selected.reason}`)
+  })
+
 test('C1b unavailable discovery is null with one closed reason', () => {
   const blank = runCensusExhibits({ checkout: CENSUS_ROOT, deps: { run: () => ({ ok: true, output: '' }) } })
   assert.deepEqual(blank.denominator, { suites: null, tests: null })

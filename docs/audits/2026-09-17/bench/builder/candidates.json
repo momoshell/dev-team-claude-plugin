@@ -8,7 +8,7 @@
       "provider": "meta",
       "id": "muse-spark-1.3-contributor",
       "agent": "pi",
-      "effort": "low",
+      "effort": "medium",
       "source": "models.dev"
     },
     {

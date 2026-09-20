@@ -1115,9 +1115,12 @@ test('routing policy and ledger write refusals stop bench admission without fabr
 const ROLE_BENCH_ROOT = 'docs/audits/2026-09-17/bench'
 const ROLE_NAMES = ['planner', 'builder']
 const reviewedCandidateShas = {
-  planner: 'b7a3b776e298eeecfeda1fffaee2012df30d9295f421d4be36c0d473dbcb450a',
-  // Re-reviewed 2026-09-19: the only change is `"tier": "mechanical"`.
-  builder: '0da40d85297b3eb8d431e28b04241d309e173b5b00d5b96f3591cdb6c051ae84',
+  // Re-reviewed 2026-09-20 by the operator: production moves to the newly seated
+  // mechanical planner openai/gpt-5.6-sol at medium; the local candidate set is unchanged.
+  planner: '48540ec650bbbad61e9709abd57f932e099198550f9c66d8eb14c711a83cf06e',
+  // Re-reviewed 2026-09-20 by the operator: the mechanical builder effort moves low -> medium.
+  // (Re-reviewed 2026-09-19: the only change then was `"tier": "mechanical"`.)
+  builder: '061c879340054af7221a8dba80019dbe0f1042e8104ab1c3e337b8ff8a8a74e5',
 }
 const PLANNER_TARGET = ['bench', 'sha', 'mismatch'].join('-')
 const BUILDER_README = `${ROLE_BENCH_ROOT}/builder/README.md`

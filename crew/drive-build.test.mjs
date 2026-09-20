@@ -5,7 +5,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   staleSpawnProof,
-  acceptanceCoverage, acceptanceIds, ACCEPTANCE_UNMEASURED,
+  acceptanceCoverage, acceptanceIds, ACCEPTANCE_UNMEASURED, ACCEPTANCE_REFUSALS, gateCheckIds,
   B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_IMPL_FILE, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, B384_CORRECTED_FIND, B384_CORRECTED_REPLACE, B384_GREEN, B384_MUTATION, B384_RED, B384_REFACTORED_BUILDER, B384_REFACTORED_UNCORRECTED_BUILDER, B44_LEADLESS_CTX, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_PLAN, CHECK_RUNS, CONVERGE_CTX, CONVERGE_GATE, CONVERGE_PLAN, CTX, CTX_DIRECTED, CTX_REPAIR, DIRECTED_FILES, D_ASK, D_AUTO, ENVELOPE_FIELD_KINDS, EXECUTIONS, FAILURE_UPGRADE, GATE_REAP_CMD_EOF, GATE_REAP_SWEEP_MARKER, GATE_SUMMARY_PREFIX, HARDENING_MARKS, HARDENING_OUTCOMES, HARDENING_REFUSALS, MODIFIER_OUTCOMES, MUTATIONS_MAX, MUTATION_BINDING_FAILURES, MUTATION_CORRECTION_REFUSALS, MUTATION_OUTCOMES, PARTIAL_REVIEWED, RED, SENSITIVITY_FLOOR, SHAPE_MAJOR_PHASES, SHAPE_ROUNDED_STAGES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, UNIVERSAL_STAGE_HEADS, VALIDATION_LANE_UNLOADABLE, VARIANTS, VARIANT_NAMES, WRITE_SURFACES, applyMutationAnchor, applyPrescriptionLines, b127GatePaths, b127PidAlive, b318Builders, b318SiteA, b376Build, b376DiskProofIo, b376ProofIo, b376Review, b376StageStack, b384Io, b384RefactoredIo, b44AssertLeadlessGate, b44GatePlan, bindMutationAnchor, buildEnv, collapseStages, dispositionIo, driveTask, existsSync, fakeIo, fenceBase, fenceDiff, fenceSpan, gateReapCommand, gateReapFresh, gateReapOriginal, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, hardeningBounceLines, hardeningBriefLines, hardeningDebt, hardeningOf, join, laneFence, leadEnv, mutationChangesTokens, outOfScopeFiles, planEnv, protectedPlanEnv, readFileSync, resumeGreen, resumeRed, reviewConvergeRun, reviewEnv, reviewFindings, rmSync, s843Ctx, s843Io, s843PlanEnv, s843Rows, scopeMatcher, scopedPath, scratchDir, shapeDefect, spawnSync, stageShape, treeDigest, triageEnv, undeclaredStage, validateHardened, validateMutations, validationPlan, validationProbeRun, validationRows,
 } from './drive-fixtures.mjs'
 import { CENSUS_CARRIER_FILES, CHECK_MATCHES, FROZEN_FACTORY_ENV_FILE, FROZEN_INVENTORY_FILE, HARDENING_APPEAL_SHAPE, HARDENING_CLASSES, HARDENING_PRESCRIPTION_REASONS, HARDENING_PRESCRIPTION_RESOLUTION, HARDENING_PROVEN, HARDENING_REFUTED, HARDENING_UNMEASURED, LIMITS, POST_COMMIT_FROZEN_REPAIR_MAX, classifyFrozenInventoryDelta, hardeningAppealLines, hardeningAppealRequest, hardeningClassOf, hardeningInvocation, hardeningPrescriptionConflict, hardeningRowBucket, hardeningStageCleared, hardeningTestPath, mutationProofScope, preRepairGreenOutcome, preRepairRefutes, composePrBody } from './drive.mjs'
@@ -6514,7 +6514,7 @@ test('acceptance coverage waives an exempt entry, never covers it, and names why
   const coverage = acceptanceCoverage(brief, [{ ...CHECK_MUTATION, check: 'A1' }, { check: 'B1', exempt: 'not applicable' }, { ...CHECK_MUTATION, check: 'extra' }])
   assert.deepEqual([coverage.covered, coverage.uncovered, coverage.waived, coverage.extra], [['A1'], ['B1'], ['B1'], ['extra']])
   assert.deepEqual([acceptanceCoverage(null, []).reason, acceptanceCoverage('# T\n\n## Acceptance\nnothing\n', []).reason], [ACCEPTANCE_UNMEASURED.UNREADABLE, ACCEPTANCE_UNMEASURED.NO_IDS])
-  assert.deepEqual(Object.values(ACCEPTANCE_UNMEASURED).sort(), ['brief-unreadable', 'no-acceptance-ids'])
+  assert.deepEqual(Object.values(ACCEPTANCE_UNMEASURED).sort(), ['brief-unreadable', 'gate-ids-incomplete', 'no-acceptance-ids'])
 })
 
 test('a plan whose gate checks leave an acceptance id unanswered escalates at plan, naming the id', () => {
@@ -6561,6 +6561,188 @@ test('a plan that answers every acceptance id proceeds, and an extra check is re
   // The plan is accepted: whatever this fixture does later, it is not a plan refusal.
   assert.notEqual(result.details.escalation?.where, 'plan')
   assert.equal(io.calls.assign.some((entry) => entry.role === 'lead'), true, 'the plan reached the lead')
+})
+
+// b870 phantom-check fixtures: bindable mutations over one checkout file, and the
+// red-baseline / green-proof run script shared by the six gate tests below.
+const B870_BRIEF = (item) => ['# Task', '', '## Acceptance', item].join('\n')
+const B870_FILE_BYTES = 'export const guard = true\nexport const other = false\nexport const spare = 1\n'
+const B870_MUT = (check, find, replace) => ({ check, file: 'a.mjs', find, replace })
+const B870_A1 = () => B870_MUT('A1', 'guard = true', 'guard = false')
+const B870_GREEN = (total) => ({ ok: true, output: `green\n${GATE_SUMMARY_PREFIX} {"total":${total},"failed":0,"errored":0}` })
+const B870_RED = (lines, total, failed) => ({ ok: false, output: `${lines}\n${GATE_SUMMARY_PREFIX} {"total":${total},"failed":${failed},"errored":0}` })
+const B870_BUILD_IO = ({ brief, mutations, runs, envelopes = null }) => fakeIo({
+  files: { [CTX.briefFile]: brief, [CHECK_FILE]: B870_FILE_BYTES }, writeThrough: true, cleanRuns: CHECK_CLEAN,
+  envelopes: envelopes ?? CHECK_ENVELOPES(mutations),
+  runs: { ...runs, 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+  changed: ['a.mjs', 'a.test.mjs'], emit: true,
+})
+const B870_BUILDERS = (io) => io.calls.assign.filter((entry) => entry.role === 'builder').length
+const B870_RECONCILIATION = (io) => io.calls.logs.find((entry) => entry.event === 'mutation-check-coverage')
+
+test('A1 runtime gate output admits a declared mutation whose check is implemented', () => {
+  // Parser table: trimmed bare and colon-delimited FAIL/PASS lines are evidence;
+  // prefix collisions, space/em-dash delimiters, and `FAIL cache:v2: why` for
+  // `cache` are not.
+  assert.deepEqual([...gateCheckIds('  FAIL A1  \nFAIL A1:\nFAIL A1: why\nPASS B2\n  PASS B2: ok  ')].sort(), ['A1', 'B2'])
+  assert.deepEqual([...gateCheckIds('FAIL A12: why\nFAIL A1-v2: why\nFAIL A1 why\nFAIL A1 \u2014 why\nFAIL cache:v2: why\nPASS')].sort(), ['A1-v2', 'A12'])
+  assert.deepEqual([...gateCheckIds('')], [])
+  assert.deepEqual([...gateCheckIds(null)], [])
+  const mutations = [B870_A1()]
+  const before = JSON.parse(JSON.stringify(mutations))
+  const red = 'FAIL A1: not built'
+  const io = B870_BUILD_IO({
+    brief: B870_BRIEF('(A1) the only asked-for check'), mutations,
+    runs: { 'gate-cmd:1': B870_RED(red, 1, 1), 'gate-cmd:2': B870_GREEN(1), 'gate-cmd:3': B870_RED(red, 1, 1) },
+  })
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'done')
+  assert.equal(B870_BUILDERS(io), 1)
+  const row = B870_RECONCILIATION(io)
+  assert.deepEqual([row.status, row.reason, row.implemented, row.total, row.phantom, row.gate_path], ['measured', null, ['A1'], 1, [], `${TD}/gate.mjs`])
+  assert.deepEqual(mutations, before)
+})
+
+test('B1 phantom mutation is refused by mutation-check-unimplemented', () => {
+  assert.equal(Object.isFrozen(ACCEPTANCE_REFUSALS), true)
+  assert.deepEqual(ACCEPTANCE_REFUSALS, { CHECK_UNIMPLEMENTED: 'mutation-check-unimplemented' })
+  const red = 'FAIL A1: not built'
+  const repairedLead = { status: 'done', role: 'lead', details: { gate_cmd: 'gate-cmd' } }
+  const drive = ({ brief, runs, lead = false }) => {
+    const mutations = [B870_A1(), B870_MUT('ghost', 'other = false', 'other = true')]
+    const snapshot = JSON.parse(JSON.stringify(mutations))
+    const io = B870_BUILD_IO({ brief, mutations, runs, envelopes: lead ? { ...CHECK_ENVELOPES(mutations), 'lead:1': repairedLead } : undefined })
+    return { result: driveTask(CTX, io), io, mutations, snapshot }
+  }
+  const checkRefusal = ({ result, io, mutations, snapshot }) => {
+    assert.equal(result.status, 'escalation')
+    assert.equal(result.details.escalation.where, 'plan')
+    assert.match(result.details.escalation.why, /mutation-check-unimplemented/)
+    assert.match(result.details.escalation.why, /ghost/)
+    assert.equal(B870_BUILDERS(io), 0)
+    const row = B870_RECONCILIATION(io)
+    assert.deepEqual([row.status, row.reason, row.implemented, row.total, row.phantom], ['measured', null, ['A1'], 1, ['ghost']])
+    assert.deepEqual(mutations, snapshot)
+  }
+  checkRefusal(drive({ brief: B870_BRIEF('(A1) the only asked-for check'), runs: { 'gate-cmd': B870_RED(red, 1, 1) } }))
+  // Phantom evidence is independent of readable brief ids: no acceptance section,
+  // same refusal.
+  checkRefusal(drive({ brief: '# Task\n\nno acceptance section here\n', runs: { 'gate-cmd': B870_RED(red, 1, 1) } }))
+  // Both baseline-repair branches, with final complete output still missing ghost.
+  checkRefusal(drive({ brief: B870_BRIEF('(A1) the only asked-for check'), runs: { 'gate-cmd:1': B870_GREEN(1), 'gate-cmd:2': B870_RED(red, 1, 1) }, lead: true }))
+  checkRefusal(drive({ brief: B870_BRIEF('(A1) the only asked-for check'), runs: { 'gate-cmd:1': { ok: false, output: 'boom, no summary' }, 'gate-cmd:2': B870_RED(red, 1, 1) }, lead: true }))
+})
+
+test('B2 silent green check leaves gate ids incomplete without refusing the plan', () => {
+  const drive = (baseline) => {
+    const mutations = [B870_A1(), B870_MUT('silent', 'spare = 1', 'spare = 2')]
+    const snapshot = JSON.parse(JSON.stringify(mutations))
+    const io = B870_BUILD_IO({
+      brief: B870_BRIEF('(A1) the only asked-for check'), mutations,
+      runs: {
+        'gate-cmd:1': { ok: false, output: baseline },
+        'gate-cmd:2': B870_GREEN(2),
+        'gate-cmd:3': B870_RED('FAIL A1: not built', 2, 1),
+        'gate-cmd:4': B870_RED('FAIL silent: not built', 2, 1),
+      },
+    })
+    return { result: driveTask(CTX, io), io, mutations, snapshot }
+  }
+  for (const baseline of [
+    'FAIL A1: not built\nGATE-SUMMARY {"total":2,"failed":1,"errored":0}',
+    'FAIL A1: first\nFAIL A1: second\nGATE-SUMMARY {"total":2,"failed":1,"errored":0}',
+  ]) {
+    const { result, io, mutations, snapshot } = drive(baseline)
+    assert.equal(result.status, 'done')
+    assert.equal(B870_BUILDERS(io), 1)
+    const row = B870_RECONCILIATION(io)
+    assert.deepEqual([row.status, row.reason, row.implemented, row.total, row.phantom], ['unmeasured', 'gate-ids-incomplete', ['A1'], 2, null])
+    assert.notEqual(result.details.escalation?.where, 'plan')
+    assert.deepEqual(mutations, snapshot)
+  }
+})
+
+test('C1 phantom refusal names the check id and accepted gate path', () => {
+  const gatePath = `${TD}/custom-gate.mjs`
+  const mutations = [B870_A1(), B870_MUT('ghost', 'other = false', 'other = true')]
+  const snapshot = JSON.parse(JSON.stringify(mutations))
+  const io = B870_BUILD_IO({
+    brief: B870_BRIEF('(A1) the only asked-for check'), mutations,
+    runs: { 'gate-cmd': B870_RED('FAIL A1: not built', 1, 1) },
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', gate_path: gatePath, mutations } }),
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+  })
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'plan')
+  assert.match(result.details.escalation.why, /mutation-check-unimplemented/)
+  assert.ok(result.details.escalation.why.includes('ghost'), 'refusal names the check id')
+  assert.ok(result.details.escalation.why.includes(gatePath), 'refusal names the accepted gate path')
+  const row = B870_RECONCILIATION(io)
+  assert.equal(row.gate_path, gatePath)
+  assert.deepEqual(row.phantom, ['ghost'])
+  assert.equal(B870_BUILDERS(io), 0)
+  assert.deepEqual(mutations, snapshot)
+})
+
+test('D1 runtime gate output discovers a dynamically built check id', () => {
+  const d1 = ['D', '1'].join('')
+  const mutations = [{ check: d1, file: 'a.mjs', find: 'guard = true', replace: 'guard = false' }]
+  const snapshot = JSON.parse(JSON.stringify(mutations))
+  const red = `FAIL ${d1}: not built`
+  const io = fakeIo({
+    files: {
+      [CTX.briefFile]: B870_BRIEF('(D1) the dynamic check'),
+      [CHECK_FILE]: B870_FILE_BYTES,
+      [`${TD}/gate.mjs`]: `// gate source: no literal result lines\nconst id = ['D', '1'].join('')\ncheck(id, () => { throw new Error('not built') })\n`,
+    },
+    writeThrough: true, cleanRuns: CHECK_CLEAN,
+    envelopes: CHECK_ENVELOPES(mutations),
+    runs: {
+      'gate-cmd:1': B870_RED(red, 1, 1),
+      'gate-cmd:2': B870_GREEN(1),
+      'gate-cmd:3': B870_RED(red, 1, 1),
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    changed: ['a.mjs', 'a.test.mjs'], emit: true,
+  })
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'done')
+  assert.equal(B870_BUILDERS(io), 1)
+  const row = B870_RECONCILIATION(io)
+  assert.deepEqual([row.status, row.implemented, row.phantom], ['measured', ['D1'], []])
+  assert.deepEqual(mutations, snapshot)
+})
+
+test('E1 implemented non-acceptance check remains a legitimate extra', () => {
+  const drive = (baseline) => {
+    const mutations = [B870_A1(), B870_MUT('extra', 'spare = 1', 'spare = 2')]
+    const snapshot = JSON.parse(JSON.stringify(mutations))
+    const io = B870_BUILD_IO({
+      brief: B870_BRIEF('(A1) the only asked-for check'), mutations,
+      runs: {
+        'gate-cmd:1': { ok: false, output: baseline },
+        'gate-cmd:2': B870_GREEN(2),
+        'gate-cmd:3': B870_RED('FAIL A1: not built', 2, 1),
+        'gate-cmd:4': B870_RED('FAIL extra: not built', 2, 1),
+      },
+    })
+    return { result: driveTask(CTX, io), io, mutations, snapshot }
+  }
+  for (const baseline of [
+    'FAIL A1: not built\nPASS extra\nGATE-SUMMARY {"total":2,"failed":1,"errored":0}',
+    'FAIL A1: not built\nFAIL extra: not built\nGATE-SUMMARY {"total":2,"failed":2,"errored":0}',
+  ]) {
+    const { result, io, mutations, snapshot } = drive(baseline)
+    assert.equal(result.status, 'done')
+    assert.equal(B870_BUILDERS(io), 1)
+    assert.deepEqual(io.calls.logs.find((entry) => entry.event === 'acceptance-coverage').extra, ['extra'])
+    const row = B870_RECONCILIATION(io)
+    assert.deepEqual([row.status, row.implemented, row.phantom], ['measured', ['A1', 'extra'], []])
+    assert.deepEqual(mutations, snapshot)
+  }
 })
 
 test('b851 A1 hardening buckets partition HARDENING_OUTCOMES without overlap', () => {

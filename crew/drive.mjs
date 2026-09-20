@@ -5753,8 +5753,9 @@ function proveHardeningEntries({ entries, hardenWitness, ctx, io, hardenRun, dir
     const row = (outcome, why) => ({ finding: entry.finding, test: entry.test, name: entry.name, outcome, why })
     if (entry.invocation !== undefined) return row('unproven', `the guard is the invocation ${entry.invocation}; this repo executes no foreign runner, so the guard is recorded and unmeasured`)
     try {
-      const W = hardenWitness?.get(entry.test)
-      const S = hardenWitness?.get(entry.file)
+      const witness = hardenWitness?.get(entry.finding)
+      const W = witness?.get(entry.test)
+      const S = witness?.get(entry.file)
       if (!W || !S) return row('witness-missing', `the review-time witness has no cell for ${!W ? entry.test : entry.file}`)
       if (W.state === 'unreadable' || S.state === 'unreadable') {
         const unreadable = W.state === 'unreadable' ? entry.test : entry.file
@@ -10006,7 +10007,7 @@ function runTask(ctx, io, crash) {
   let accepted = null
   let extraReviews = 0
   let hardenOwed = { owed: [], exempt: [] }
-  let hardenWitness = null              // Map<repo-relative path, {state, bytes}>, or null
+  let hardenWitness = new Map()         // Map<finding id, Map<repo-relative path, {state, bytes}>>
   // #910/#900 — ONE reviewer appeal per REVIEWED DEBT GENERATION (R4-1). The turn exists so
   // a request only the reviewer can grant is not held behind a gate scheduled before the
   // reviewer; it is bounded because an unbounded one lets a reviewer that grants nothing
@@ -10595,7 +10596,8 @@ function runTask(ctx, io, crash) {
     // ADR-038: proof on the changed surface beats argument about it.
     if (hardenOwed.owed.length > 0) {
       stage(`lane:harden:r${round}`)
-      const { entries, refusals } = validateHardened(builderEnv.details, hardenOwed.owed, inScope)
+      const { entries, refusals, observations } = validateHardened(builderEnv.details, hardenOwed.owed, inScope)
+      for (const observation of observations ?? []) panelLog({ hardening_observation: { round, ...observation } })
       const { rows, fatal } = proveHardeningEntries({ entries, hardenWitness, ctx, io, hardenRun, dirtyAfterFailure })
       for (const row of rows) logHardened(round, row)
       // #839 — a failed RESTORE is not a repair bounce. `settleFailedProof`
@@ -10641,13 +10643,16 @@ function runTask(ctx, io, crash) {
         for (const { id, why } of marks) logHardened(round, { finding: id, test: null, name: null, outcome: 'ungateable', why })
         settleBlindSpots(marks.map(({ id }) => id))
         excused = new Set(marks.map(({ id }) => id))
+        for (const id of excused) hardenWitness.delete(id)
         hardenOwed = { owed: hardenOwed.owed.filter(({ id }) => !excused.has(id)), exempt: [...hardenOwed.exempt, ...marks] }
         stageComplete()
       }
       const liveRefusals = refusals.filter((refusal) => !excused.has(refusal.finding))
       const liveRows = rows.filter((row) => !excused.has(row.finding))
       if (hardenCleared(liveRefusals, liveRows)) {
-        hardenOwed = { owed: [], exempt: [] }
+        const stillOwed = new Set(liveRows.filter((row) => row.outcome === 'unproven').map((row) => row.finding))
+        hardenOwed = { owed: hardenOwed.owed.filter(({ id }) => stillOwed.has(id)), exempt: hardenOwed.exempt }
+        for (const id of [...hardenWitness.keys()]) if (!stillOwed.has(id)) hardenWitness.delete(id)
         const latest = new Map(liveRows.map((row) => [row.finding, row]))
         hardenBlindSpots = hardenBlindSpots.filter((entry) => !latest.has(entry.finding) || hardeningRowBucket(latest.get(entry.finding)) === 'unmeasured')
         for (const row of liveRows) {
@@ -10657,7 +10662,6 @@ function runTask(ctx, io, crash) {
           if (at === -1) hardenBlindSpots.push(next)
           else hardenBlindSpots[at] = next
         }
-        hardenWitness = null
         stageComplete()
       } else if (!plans || finalRound()) {
         stageComplete()
@@ -10831,10 +10835,19 @@ function runTask(ctx, io, crash) {
         const debt = hardeningDebt(review.details)
         if (debt.owed.length > 0 || debt.exempt.length > 0) {
           hardenAppeals = 0
-          hardenOwed = debt
-          hardenWitness = witnessTree(scopeFiles)
-          const prescriptionAuthored = prescriptionAuthorshipEvidence(review.details, hardenWitness, ctx, io)
-          const prescriptionConflict = hardeningPrescriptionConflict(review.details, hardenWitness, prescriptionAuthored, hardenWitness)
+          const tree = witnessTree(scopeFiles)
+          const exempted = new Set(debt.exempt.map(({ id }) => id))
+          hardenOwed = { owed: hardenOwed.owed.filter(({ id }) => !exempted.has(id)), exempt: hardenOwed.exempt }
+          for (const id of exempted) hardenWitness.delete(id)
+          const carried = new Set(hardenOwed.owed.map(({ id }) => id))
+          for (const finding of debt.owed) {
+            if (carried.has(finding.id)) continue
+            hardenOwed.owed.push(finding)
+            hardenWitness.set(finding.id, tree)
+          }
+          hardenOwed = { owed: hardenOwed.owed, exempt: debt.exempt }
+          const prescriptionAuthored = prescriptionAuthorshipEvidence(review.details, tree, ctx, io)
+          const prescriptionConflict = hardeningPrescriptionConflict(review.details, tree, prescriptionAuthored, tree)
           if (prescriptionConflict) {
             stageComplete()
             return escalate('harden', `[pinned-test-prescription] finding ${prescriptionConflict.finding.id} prescribes a change to hardening-witnessed ${prescriptionConflict.file}; refusing the prescription`, [], { hardening_prescription_conflict: prescriptionConflict })
@@ -13637,6 +13650,7 @@ export function validateHardened(details, owed, inScope) {
   const wantedIds = wanted.map(({ id }) => id)
   const wantedSet = new Set(wantedIds)
   const refusals = []
+  const observations = []
   const entries = []
   const refusedOwed = new Set()
   const refuse = (finding, reason, why, appeal = null) => {
@@ -13649,13 +13663,14 @@ export function validateHardened(details, owed, inScope) {
   const declared = details?.hardened
   if (declared !== undefined && !Array.isArray(declared)) {
     for (const id of wantedIds) refuse(id, 'not-an-array', 'details.hardened must be an array of declarations')
-    return { entries, refusals }
+    return { entries, refusals, observations }
   }
   const byFinding = new Map()
   for (const entry of Array.isArray(declared) ? declared : []) {
     const id = entry && typeof entry === 'object' && typeof entry.finding === 'string' ? entry.finding : null
     if (!id || !wantedSet.has(id)) {
-      refuse(id, 'unknown-finding', `the hardened entry names ${id ?? '(no finding)'} but the review carries no owed finding with that id`)
+      const why = `the hardened entry names ${id ?? '(no finding)'} but the review carries no owed finding with that id`
+      observations.push({ finding: id, reason: 'unknown-finding', why })
       continue
     }
     if (byFinding.has(id)) {
@@ -13756,7 +13771,7 @@ export function validateHardened(details, owed, inScope) {
     }
     entries.push(entry)
   }
-  return { entries, refusals }
+  return { entries, refusals, observations }
 }
 
 export function hardeningBounceLines(round, refusals, rows) {
@@ -13772,7 +13787,7 @@ export function hardeningBounceLines(round, refusals, rows) {
   // findings are settled. A finding with NO row at all is the commonest bounce of all — the
   // builder declared nothing for it — and it is what the brief must ask for first.
   const declared = new Set((Array.isArray(rows) ? rows : []).map((row) => row.finding))
-  const undeclared = (Array.isArray(refusals) ? refusals : []).filter((refusal) => refusal.finding && !declared.has(refusal.finding))
+  const undeclared = (Array.isArray(refusals) ? refusals : []).filter((refusal) => refusal.reason === 'no-declaration')
   if (undeclared.length > 0) lines.push('No guard was declared for:', ...undeclared.map((refusal) => `- ${refusal.finding}`))
   const unmeasured = Array.isArray(rows) ? rows.filter((row) => hardeningRowBucket(row) === 'unmeasured') : []
   if (unmeasured.length > 0) lines.push('Measured nothing — not blocking:', ...unmeasured.map((row) => `- ${row.finding}: ${row.outcome} — ${row.why}`))

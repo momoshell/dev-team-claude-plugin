@@ -108,10 +108,10 @@ citation rule it enforces.
 
 Recorded so no later sweep re-spends them — these **do** discriminate:
 
-- the billed-money null assertion (`shape.mjs:220` null→zero reddens)
+- the billed-money null assertion (`test/visualizer-shape.test.mjs (shapeRun never derives a billed money value)` null→zero reddens)
 - the transcript drift guard **for the `tools` literal itself** (adding `Agent`
   reddens)
-- the direct `guardedKill` helper assertion (`reap-stale.mjs:58` → `false`
+- the direct `guardedKill` helper assertion (`scripts/factory/reap-stale.mjs (guardedKill)` → `false`
   reddens)
 
 Note V4/N2 as a pair: that guard genuinely pins `tools` and does **not** pin

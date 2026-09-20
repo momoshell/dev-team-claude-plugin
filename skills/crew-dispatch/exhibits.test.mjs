@@ -238,7 +238,7 @@ test('C1 E1 span reach doctrine records the measured choice', () => {
 test('RV1-1 census-carrier span false negative and anchor obligation distinctions remain documented', () => {
   const text = readText(join(HERE, 'references/batch.md'))
   const secondFalseNegative = 'The second is a fence entry carrying a span: `skills/crew-dispatch/exhibits.test.mjs:START-END` is scored as held because `parseFenceScope` supplies the bare path to `matchOwn`, so that carrier is never reported missing and never admitted, while the owed RV2-1 repairs to the dynamically computed `current` and `pristine` reach shapes plus integer `ownerDelta` and `pairDelta` assertions sit outside the authored span and remain contextual rather than enforcement.'
-  assert.equal(text.split('There are two false negatives this warning does not measure.').length - 1, 1)
+  assert.equal(text.split('There are two false negatives the **census-carrier** warning does not measure.').length - 1, 1)
   assert.equal(text.split(secondFalseNegative).length - 1, 1)
   assert.equal(text.includes('span-scoped carrier'), false)
   const sentence = 'A manifest pinning only files the lane does not write is not an obligation on that lane; when the lane writes a pinned file, dispatch admits the unheld pinning manifest automatically.'

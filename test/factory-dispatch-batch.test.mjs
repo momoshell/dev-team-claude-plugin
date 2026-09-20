@@ -27,6 +27,10 @@ import {
   CITATION_CARRIER_BLIND_SPOT,
   CENSUS_CARRIER_BLIND_SPOT,
   CENSUS_CARRIER_FILES,
+  SUITE_COST_SUITE,
+  SUITE_COST_WARNING_PREFIX,
+  SUITE_COST_REPAIR,
+  SUITE_COST_BLIND_SPOT,
   CITATION_CARRIER_POST_MERGE,
   CITATION_CARRIER_ROW_LIMIT,
   CITATION_CARRIER_WARNING_PREFIX,
@@ -143,7 +147,7 @@ test('E1 journals sourced admissions and refuses an unsourced admission', async 
     assert.throws(() => fenceAdmission({ lane: 'lane-a', file: './src/owned.mjs', source }), (error) => error instanceof BatchRefusal && error.reason === 'fence-admission-unsourced')
   }
   assert.equal(REFUSAL_REASONS.includes('fence-admission-unsourced'), true)
-  assert.deepEqual(FENCE_ADMISSION_SOURCES, ['test-reach', 'anchor-pin', 'census-carrier'])
+  assert.deepEqual(FENCE_ADMISSION_SOURCES, ['test-reach', 'anchor-pin', 'census-carrier', 'suite-cost'])
   for (const source of FENCE_ADMISSION_SOURCES) {
     const row = fenceAdmission({ lane: 'lane-a', file: './src/owned.mjs', source })
     assert.deepEqual(row, { lane: 'lane-a', file: 'src/owned.mjs', source })
@@ -205,8 +209,8 @@ test('E1 journals sourced admissions and refuses an unsourced admission', async 
 })
 
 test('G1 preserves every scan blind spot byte-identically', () => {
-  const expected = { anchor: ANCHOR_BLIND_SPOT, test: TEST_REACH_BLIND_SPOT, census: CENSUS_CARRIER_BLIND_SPOT }
-  assert.deepEqual({ anchor: ANCHOR_BLIND_SPOT, test: TEST_REACH_BLIND_SPOT, census: CENSUS_CARRIER_BLIND_SPOT }, expected)
+  const expected = { anchor: ANCHOR_BLIND_SPOT, test: TEST_REACH_BLIND_SPOT, census: CENSUS_CARRIER_BLIND_SPOT, suite: SUITE_COST_BLIND_SPOT }
+  assert.deepEqual({ anchor: ANCHOR_BLIND_SPOT, test: TEST_REACH_BLIND_SPOT, census: CENSUS_CARRIER_BLIND_SPOT, suite: SUITE_COST_BLIND_SPOT }, expected)
   const admittedCheckout = namedReachFixture('blind-admitted', { 'test/census.test.mjs': 'const census = true\n' })
   const admitted = checkFences({
     fences: [entry('lane-a', ['test/census.test.mjs'])],
@@ -220,6 +224,7 @@ test('G1 preserves every scan blind spot byte-identically', () => {
   assert.deepEqual(admittedPersisted.blind_spots['anchor-pin'], ANCHOR_BLIND_SPOT)
   assert.deepEqual(admittedPersisted.blind_spots['test-reach'], TEST_REACH_BLIND_SPOT)
   assert.deepEqual(admittedPersisted.blind_spots['census-carrier'], CENSUS_CARRIER_BLIND_SPOT)
+  assert.deepEqual(admittedPersisted.blind_spots['suite-cost'], SUITE_COST_BLIND_SPOT)
   const held = authoredHolderFixture('blind-held', CENSUS_CARRIER_FILES[0])
   const heldOut = join(held.checkout, 'out')
   const heldReport = checkFences({
@@ -768,6 +773,7 @@ test('C1', () => {
     'citation-carrier': 'BLIND SPOT: this finds docs carrying a PINNED path:line citation and nothing else. A citation no manifest pins is in no key, and a doc whose exhibit set-compares a documented table against source (skills/crew-recovery/references/escalations.md and the escalate() producers) reddens with every citation in it still correct. Neither is discoverable here; read the exhibits suites of the manifests named above before choosing this fence',
     'test-reach': 'BLIND SPOT: this is a proxy in BOTH directions and names candidates, never proof. A test can assert the changed behaviour through a higher-level entry point without importing the changed file at all, and a computed path or dynamic import is invisible to a static scan — crew/crew.mjs loads every adapter that way. A test can equally import a fenced file without asserting anything about the part being changed. The literal symbol scan sees only whole-word occurrences of an exported name, is blind to a renamed re-export, and drops any symbol naming more than 8 test files as too broad to be evidence. Read the named files before choosing this fence; an unnamed one is not cleared. An apostrophe or quote inside a // or /* */ comment opens a phantom literal and hides every real path literal after it in that file.',
     'census-carrier': CENSUS_CARRIER_BLIND_SPOT,
+    'suite-cost': SUITE_COST_BLIND_SPOT,
   }
   assert.deepEqual(report.blind_spots, expected)
   const text = readFileSync(join(repoRoot, 'skills/crew-dispatch/references/batch.md'), 'utf8')
@@ -1264,8 +1270,9 @@ test('a batch with no reaching tests writes the fence report it wrote before', (
       'citation-carrier': CITATION_CARRIER_BLIND_SPOT,
       'test-reach': TEST_REACH_BLIND_SPOT,
       'census-carrier': CENSUS_CARRIER_BLIND_SPOT,
+      'suite-cost': SUITE_COST_BLIND_SPOT,
     },
-    lanes: [{ lane: 'lane-a', test_reach: [], test_reach_dropped: [], citation_carriers: [], anchor_pins: [], census_carriers: [] }],
+    lanes: [{ lane: 'lane-a', test_reach: [], test_reach_dropped: [], citation_carriers: [], anchor_pins: [], census_carriers: [], suite_costs: [] }],
   }, null, 2) + '\n'
   assert.equal(readFileSync(join(outDir, FENCE_REPORT_FILE), 'utf8'), expected)
   assert.equal(result.logs.some((line) => line.startsWith(TEST_REACH_WARNING_PREFIX)), false)
@@ -5582,4 +5589,107 @@ test('chunk compiled checks_owned program validates end to end in the driver', (
     mutations: [{ check: 'A1', file: 'crew/a.mjs', find: 'x', replace: 'y' }],
   })
   assert.ok(legacy.defect)
+})
+
+test('suite-cost warns and admits when a lane creates a test file', () => {
+  const checkout = namedReachFixture('suite-cost-warn', { 'test/census.test.mjs': 'const census = true\n' })
+  const outDir = join(checkout, 'suite-cost-out')
+  const logs = []
+  const report = checkFences({
+    fences: [entry('lane-a', ['crew/capabilities.mjs'])],
+    lanes: [{ lane: 'lane-a', where: ['crew/capabilities.mjs'], creates: ['test/zz-new-suite.test.mjs'] }],
+    checkout,
+    outDir,
+    deps: { home: join(root, 'suite-cost-warn-home'), log: (line) => logs.push(String(line)) },
+  })
+  const warnings = report.warnings.filter(({ kind }) => kind === 'suite-cost')
+  assert.equal(warnings.length, 1)
+  const [warning] = warnings
+  assert.equal(warning.text.startsWith(SUITE_COST_WARNING_PREFIX), true)
+  for (const literal of ['test/zz-new-suite.test.mjs', SUITE_COST_SUITE, 'sorted position', 'WARNING, not a refusal']) assert.equal(warning.text.includes(literal), true)
+  assert.deepEqual(warning.creates, ['test/zz-new-suite.test.mjs'])
+  assert.equal(warning.suite, SUITE_COST_SUITE)
+  assert.equal(warning.repair, SUITE_COST_REPAIR)
+  assert.equal(warning.blind_spot, SUITE_COST_BLIND_SPOT)
+  assert.notEqual(warning.blind_spot, CENSUS_CARRIER_BLIND_SPOT)
+  assert.equal(warning.text.endsWith(SUITE_COST_BLIND_SPOT), true)
+  const admissions = report.admissions.filter((row) => row.source === 'suite-cost')
+  assert.deepEqual(admissions.map((row) => row.file), [SUITE_COST_SUITE])
+  assert.equal(report.perLane['lane-a'].files.includes(SUITE_COST_SUITE), true)
+  const persisted = JSON.parse(readFileSync(join(outDir, FENCE_REPORT_FILE), 'utf8'))
+  assert.deepEqual(persisted.lanes[0].suite_costs.length, 1)
+  assert.deepEqual(persisted.lanes[0].suite_costs[0].text, warning.text)
+  assert.equal(persisted.blind_spots['suite-cost'], SUITE_COST_BLIND_SPOT)
+  const summary = logs.find((line) => line.startsWith('dispatch-batch: WARNING-SUMMARY '))
+  assert.ok(summary)
+  assert.equal(summary.includes('suite-cost=1'), true)
+})
+
+test('suite-cost stays silent without a test creates entry', () => {
+  const checkout = namedReachFixture('suite-cost-silent', { 'test/census.test.mjs': 'const census = true\n' })
+  const outDir = join(checkout, 'suite-cost-silent-out')
+  const logs = []
+  const report = checkFences({
+    fences: [entry('lane-a', ['crew/capabilities.mjs'])],
+    lanes: [{ lane: 'lane-a', where: ['crew/capabilities.mjs'], creates: ['scripts/factory/zz-helper.mjs'] }],
+    checkout,
+    outDir,
+    deps: { home: join(root, 'suite-cost-silent-home'), log: (line) => logs.push(String(line)) },
+  })
+  assert.equal(report.warnings.some(({ kind }) => kind === 'suite-cost'), false)
+  assert.deepEqual(JSON.parse(readFileSync(join(outDir, FENCE_REPORT_FILE), 'utf8')).lanes[0].suite_costs, [])
+  const summary = logs.find((line) => line.startsWith('dispatch-batch: WARNING-SUMMARY '))
+  assert.ok(summary)
+  assert.equal(summary.includes('suite-cost=0'), true)
+})
+
+test('suite-cost warning stays warning-only when another lane holds the suite', () => {
+  const held = authoredHolderFixture('suite-cost-held', SUITE_COST_SUITE)
+  const report = checkFences({
+    fences: [entry('lane-a', ['crew/capabilities.mjs']), entry(held.holder, [held.candidate])],
+    lanes: [{ lane: 'lane-a', where: ['crew/capabilities.mjs'], creates: ['test/zz-held-suite.test.mjs'] }, { lane: held.holder, where: [] }],
+    checkout: held.checkout,
+    outDir: join(held.checkout, 'out'),
+    deps: { home: root, log: () => {} },
+  })
+  const warning = report.warnings.find(({ kind }) => kind === 'suite-cost')
+  assert.ok(warning)
+  assert.equal(report.admissions.some((row) => row.file === SUITE_COST_SUITE && row.source === 'suite-cost'), false)
+  assert.equal(report.perLane['lane-a'].files.includes(SUITE_COST_SUITE), false)
+})
+
+test('suite-cost leaves the census carrier list frozen', () => {
+  assert.deepEqual([...CENSUS_CARRIER_FILES].sort(), ['skills/crew-dispatch/exhibits.test.mjs', 'skills/crew-dispatch/references/batch.md'])
+  const checkout = namedReachFixture('suite-cost-census', { 'test/census.test.mjs': 'const census = true\n' })
+  const report = checkFences({
+    fences: [entry('lane-a', ['test/census.test.mjs'])],
+    lanes: [{ lane: 'lane-a', where: ['test/census.test.mjs'] }],
+    checkout,
+    outDir: join(checkout, 'suite-cost-census-out'),
+    deps: { home: join(root, 'suite-cost-census-home'), log: () => {} },
+  })
+  assert.ok(report.warnings.some(({ kind }) => kind === 'census-carrier'))
+  assert.equal(report.warnings.some(({ kind }) => kind === 'suite-cost'), false)
+})
+
+test('suite-cost warns without admitting when the lane already fences the suite', () => {
+  const checkout = namedReachFixture('suite-cost-self-held', { 'test/census.test.mjs': 'const census = true\n' })
+  const outDir = join(checkout, 'suite-cost-self-held-out')
+  const logs = []
+  const report = checkFences({
+    fences: [entry('lane-a', ['crew/capabilities.mjs', SUITE_COST_SUITE])],
+    lanes: [{ lane: 'lane-a', where: ['crew/capabilities.mjs', SUITE_COST_SUITE], creates: ['test/zz-new.test.mjs'] }],
+    checkout,
+    outDir,
+    deps: { home: join(root, 'suite-cost-self-held-home'), log: (line) => logs.push(String(line)) },
+  })
+  const warnings = report.warnings.filter(({ kind }) => kind === 'suite-cost')
+  assert.equal(warnings.length, 1)
+  assert.deepEqual(report.admissions.filter((row) => row.source === 'suite-cost'), [])
+  const persisted = JSON.parse(readFileSync(join(outDir, FENCE_REPORT_FILE), 'utf8'))
+  assert.deepEqual(persisted.lanes[0].suite_costs.length, 1)
+  assert.deepEqual(persisted.lanes[0].suite_costs[0].text, warnings[0].text)
+  const summary = logs.find((line) => line.startsWith('dispatch-batch: WARNING-SUMMARY '))
+  assert.ok(summary)
+  assert.equal(summary.includes('suite-cost=1'), true)
 })

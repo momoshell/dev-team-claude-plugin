@@ -61,7 +61,7 @@ const CHUNK_DEPS_UNSETTLED = 'chunk-deps-unsettled'
 
 export const FENCE_ADMISSION_EVENT = 'fence-admitted'
 export const FENCE_OBSERVATION_EVENT = 'fence-observation'
-export const FENCE_ADMISSION_SOURCES = Object.freeze(['test-reach', 'anchor-pin', 'census-carrier'])
+export const FENCE_ADMISSION_SOURCES = Object.freeze(['test-reach', 'anchor-pin', 'census-carrier', 'suite-cost'])
 
 export const REFUSAL_REASONS = Object.freeze([
   BATCH_EMPTY,
@@ -325,12 +325,17 @@ export const CENSUS_CARRIER_FILES = Object.freeze(['skills/crew-dispatch/referen
 export const CENSUS_CARRIER_WARNING_PREFIX = 'dispatch-batch: WARNING census-carrier-unfenced:'
 export const CENSUS_CARRIER_REPAIR = "No repair is OWEd: the census is DERIVED from git discovery, so there is no stated number this lane cannot reach from outside its fence. This names the carriers a test-file edit can move; re-measure with the command in batch.md."
 export const CENSUS_CARRIER_BLIND_SPOT = 'BLIND SPOT: this warning fires on the POSSIBILITY that a fenced *.test.mjs edit moves either repository-wide census, not on the fact; dispatch cannot inspect bytes the builder has not written and cannot predict whether either census will move.'
+export const SUITE_COST_SUITE = 'test/factory-suite-cost.test.mjs'
+export const SUITE_COST_WARNING_PREFIX = 'dispatch-batch: WARNING suite-cost-unfenced:'
+export const SUITE_COST_REPAIR = 'No repair is OWED by dispatch: the lane inserts the created suite into test/factory-suite-cost.test.mjs D1 in sorted position.'
+export const SUITE_COST_BLIND_SPOT = 'BLIND SPOT: this warning fires on the POSSIBILITY that a newly created *.test.mjs breaks the stated unmeasured-suite list, not on the fact; dispatch cannot see whether the builder will insert the line into test/factory-suite-cost.test.mjs, nor in what sorted position it will land.'
 export const WARNING_DOCTRINE = 'skills/crew-dispatch/references/batch.md'
 export const FENCE_BLIND_SPOTS = Object.freeze({
   'anchor-pin': ANCHOR_BLIND_SPOT,
   'citation-carrier': CITATION_CARRIER_BLIND_SPOT,
   'test-reach': TEST_REACH_BLIND_SPOT,
   'census-carrier': CENSUS_CARRIER_BLIND_SPOT,
+  'suite-cost': SUITE_COST_BLIND_SPOT,
 })
 export const TEST_REACH_OVERRIDE_PREFIX = 'dispatch-batch: test-reach-override:'
 export const TEST_REACH_REFUSAL_REMEDY = 'the remedy is mechanical — fence the named test; the corrected files_in_scope is'
@@ -752,7 +757,7 @@ function writeFenceReport({ path, lanes, deps } = {}) {
 function warningSummary({ lane, counts, refusals, citation, warnings }) {
   const warningEvidence = `report=${citation} doctrine=${WARNING_DOCTRINE}`
   const refusalNames = Array.isArray(refusals) && refusals.length > 0 ? refusals.join(',') : 'none'
-  return `dispatch-batch: WARNING-SUMMARY lane=${lane} refusals=${refusalNames} anchor-pin=${counts.anchorPin} · citation-carrier=${counts.citationCarrier} · test-reach=${counts.testReach} · actionable=${counts.actionable} · collapsed=${counts.testReachDropped} · census-carrier=${counts.censusCarrier} ${warningEvidence}`
+  return `dispatch-batch: WARNING-SUMMARY lane=${lane} refusals=${refusalNames} anchor-pin=${counts.anchorPin} · citation-carrier=${counts.citationCarrier} · test-reach=${counts.testReach} · actionable=${counts.actionable} · collapsed=${counts.testReachDropped} · census-carrier=${counts.censusCarrier} · suite-cost=${counts.suiteCost} ${warningEvidence}`
 }
 
 export class BatchRefusal extends Error {
@@ -1888,6 +1893,25 @@ export function checkFences({ fences, lanes, graph, checkout, outDir, deps } = {
         if (!holder) automaticAdmission('census-carrier', carrier)
       }
     }
+    const suiteCostCreates = ownCreates.filter((created) => created.endsWith('.test.mjs'))
+    const suiteCostExposure = suiteCostCreates.length > 0
+    let suiteCostWarning = null
+    if (suiteCostExposure) {
+      suiteCostWarning = {
+        kind: 'suite-cost',
+        lane: name,
+        suite: SUITE_COST_SUITE,
+        creates: suiteCostCreates,
+        repair: SUITE_COST_REPAIR,
+        blind_spot: SUITE_COST_BLIND_SPOT,
+        text: `${SUITE_COST_WARNING_PREFIX} lane ${name} creates test file(s) ${suiteCostCreates.join(', ')} covered by the test/factory-suite-cost.test.mjs D1 unmeasured-suite list; insert each created suite there in sorted position; WARNING, not a refusal. ${SUITE_COST_REPAIR} ${SUITE_COST_BLIND_SPOT}`,
+      }
+      warnings.push(suiteCostWarning)
+    }
+    if (suiteCostExposure && !matchOwn(SUITE_COST_SUITE)) {
+      const holder = holderFor(name, SUITE_COST_SUITE)
+      if (!holder) automaticAdmission('suite-cost', SUITE_COST_SUITE)
+    }
     const ownSurface = [...requestedSurface]
     const outside = ownSurface.filter((path) => !matchOwn(path))
     if (outside.length > 0) {
@@ -1977,13 +2001,14 @@ export function checkFences({ fences, lanes, graph, checkout, outDir, deps } = {
     const overrideField = overridden.length > 0 ? { test_reach_overrides: overridden } : {}
     const arbitrationField = admissionArbitrations.get(name)?.length > 0 ? { fence_admission_arbitrated: admissionArbitrations.get(name) } : {}
     const laneObservations = observationsFor(name)
-    reportLanes.push({ lane: name, test_reach: reachRows, test_reach_dropped: droppedReachRows, citation_carriers: unfencedCarriers, anchor_pins: unfencedPins, census_carriers: censusWarning ? [censusWarning] : [], ...(laneAdmissions.length > 0 ? { fence_admissions: laneAdmissions } : {}), ...(laneObservations.length > 0 ? { observations: laneObservations } : {}), ...arbitrationField, ...overrideField })
+    reportLanes.push({ lane: name, test_reach: reachRows, test_reach_dropped: droppedReachRows, citation_carriers: unfencedCarriers, anchor_pins: unfencedPins, census_carriers: censusWarning ? [censusWarning] : [], suite_costs: suiteCostWarning ? [suiteCostWarning] : [], ...(laneAdmissions.length > 0 ? { fence_admissions: laneAdmissions } : {}), ...(laneObservations.length > 0 ? { observations: laneObservations } : {}), ...arbitrationField, ...overrideField })
     summaryLanes.push({
       lane: name,
       counts: {
         anchorPin: unfencedPins.reduce((total, row) => total + (Array.isArray(row.keys) ? row.keys.length : 0), 0),
         citationCarrier: unfencedCarriers.length,
         censusCarrier: censusWarning ? 1 : 0,
+        suiteCost: suiteCostWarning ? 1 : 0,
         testReach: reachRows.length,
         actionable: refusedRows.length,
         testReachDropped: droppedReachRows.length,

@@ -2063,7 +2063,7 @@ test('C1 boot records each seat\'s charter costs within an independent tail budg
           { cmux: callCounter(), tree: callCounter(), renameTab: callCounter(), register: capabilityRegisterForBoot() },
         )
         await bootCmd(
-          { task, checkout, roles: roles.join(','), 'headless-all': true, 'claude-bin': process.execPath, 'charter-arm': 'lean' },
+          { task, checkout, roles: roles.join(','), 'headless-all': true, 'claude-bin': process.execPath, 'charter-arm': 'terse-tail' },
           { cmux: callCounter(), tree: callCounter(), renameTab: callCounter(), register: capabilityRegisterForBoot() },
         )
       }))
@@ -2073,7 +2073,7 @@ test('C1 boot records each seat\'s charter costs within an independent tail budg
     const boot = bootRecord(dir)
     const crew = JSON.parse(readFileSync(join(dir, 'crew.json'), 'utf8'))
     const result = JSON.parse(output.trim().split('\n').at(-1))
-    assert.equal(crew.charter_arm, 'lean')
+    assert.equal(crew.charter_arm, 'terse-tail')
     assert.equal(boot.charter_arm, crew.charter_arm)
     assert.equal(result.charter_arm, crew.charter_arm)
     assert.deepEqual(result.charter_bytes, boot.charter_bytes)
@@ -2085,16 +2085,15 @@ test('C1 boot records each seat\'s charter costs within an independent tail budg
       const sharedPrompt = readFileSync(new URL('./roles/_shared.md', import.meta.url), 'utf8')
       const cardPrompt = readFileSync(new URL(`./roles/${role}.md`, import.meta.url), 'utf8')
       const controlPrompt = composeRolePrompt(sharedPrompt, cardPrompt, '', 'control')
-      const leanPrompt = composeRolePrompt(sharedPrompt, cardPrompt, '', 'lean')
+      const tersePrompt = composeRolePrompt(sharedPrompt, cardPrompt, '', 'terse-tail')
       const controlBytes = Buffer.byteLength(controlPrompt, 'utf8')
-      const leanBytes = Buffer.byteLength(leanPrompt, 'utf8')
-      const delta = leanBytes - controlBytes
-      // The lean tail is EMPTY by design: its content moved into _shared.md and reviewer.md,
-      // which every arm receives. The arm survives for the enum; it adds nothing.
+      const terseBytes = Buffer.byteLength(tersePrompt, 'utf8')
+      const delta = terseBytes - controlBytes
+      // The terse tail appends to the control prompt: the treatment differs by exactly the tail.
       assert.equal(controlBytes, CHARTER_CEILINGS[role])
-      assert.equal(leanBytes, controlBytes)
-      assert.equal(delta, 0)
-      assert.equal(boot.charter_base_bytes[role], leanBytes)
+      assert.equal(tersePrompt, controlPrompt + '\n\nBe terse: state the result in the fewest words that carry it, and do not restate context the reader already has.\n')
+      assert.ok(delta > 0)
+      assert.equal(boot.charter_base_bytes[role], terseBytes)
     }
   } finally {
     process.stdout.write = previousWrite

@@ -1546,15 +1546,33 @@ test('a memory addendum is measured outside the ceiling, and an unreadable chart
   assert.notEqual(unreadable.bytes.planner, 0)
 })
 
-test('lean charter arm composes exactly as control; only terse-tail still appends', () => {
-  // The lean tail is empty by design: its content moved into _shared.md and reviewer.md,
-  // which every arm receives. One home per concern — the arm survives for the enum.
+test('retired lean charter arm refuses at boot; unknown arms compose control, only terse-tail appends', async () => {
+  // The lean tail was always '': unknown arms fall back to the control prompt (#1441),
+  // while the --charter-arm enum no longer offers lean.
   const control = composeRolePrompt('shared charter', 'role card', 'measured section', 'control')
   const lean = composeRolePrompt('shared charter', 'role card', 'measured section', 'lean')
   const terse = composeRolePrompt('shared charter', 'role card', 'measured section', 'terse-tail')
   assert.equal(lean, control)
   assert.equal(terse.startsWith(control), true)
   assert.notEqual(terse, control)
+  const home = scratchDir('crew-charter-lean-retired-home-')
+  const { root: checkoutRoot, checkout } = testCheckout('crew-charter-lean-retired-checkout-')
+  const cmux = callCounter()
+  const tree = callCounter()
+  try {
+    await assert.rejects(
+      () => withHome(home, () => bootCmd(
+        { task: 'charter-lean-retired', checkout, tier: 'build', 'headless-all': true, 'charter-arm': 'lean' },
+        { cmux, tree, renameTab: callCounter(), register: capabilityRegister() },
+      )),
+      (error) => error?.message === `invalid --charter-arm "lean"; expected one of control|terse-tail`,
+    )
+    assert.equal(cmux.calls.length, 0)
+    assert.equal(tree.calls.length, 0)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
 })
 
 test('D1 prototype-named charter arms compose control exactly', () => {
@@ -1575,10 +1593,7 @@ test('B1 an invalid charter arm still refuses by name', async () => {
         { task: 'charter-invalid', checkout, tier: 'build', 'headless-all': true, 'charter-arm': 'rogue-arm' },
         { cmux, tree, renameTab: callCounter(), register: capabilityRegister() },
       )),
-      (error) => error?.message.includes('rogue-arm')
-        && error.message.includes('control')
-        && error.message.includes('terse-tail')
-        && error.message.includes('lean'),
+      (error) => error?.message === `invalid --charter-arm "rogue-arm"; expected one of control|terse-tail`,
     )
     assert.equal(existsSync(testCrewDir(home, checkout, 'charter-invalid')), false)
     assert.equal(cmux.calls.length, 0)

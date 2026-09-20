@@ -162,13 +162,11 @@ export const MEMORY_ROLES = Object.freeze(['lead', 'planner'])
 // Must stay key-identical to SEAT_DEFAULTS (pinned by a test).
 export const ROLE_ORDER = Object.freeze(['lead', 'planner', 'builder', 'reviewer', 'tech-lead'])
 
-const CHARTER_ARMS = Object.freeze(['control', 'terse-tail', 'lean'])
+const CHARTER_ARMS = Object.freeze(['control', 'terse-tail'])
 const CHARTER_TERSE_TAIL = '\n\nBe terse: state the result in the fewest words that carry it, and do not restate context the reader already has.\n'
-// The lean arm once appended the ladder and the five complexity tags here. Both now live in
-// the charters every arm receives (_shared.md, reviewer.md), so the arm is kept for the flag
-// enum and its holdout measurements while adding NOTHING — one home per concern.
-export const CHARTER_LEAN_TAIL = ''
-const CHARTER_TAILS = Object.freeze({ control: '', 'terse-tail': CHARTER_TERSE_TAIL, lean: CHARTER_LEAN_TAIL, })
+// The lean arm was retired (#1441): its tail was always '' because the ladder and the
+// five complexity tags live in the charters every arm receives (_shared.md, reviewer.md).
+const CHARTER_TAILS = Object.freeze({ control: '', 'terse-tail': CHARTER_TERSE_TAIL, })
 
 const FFF_EXTENSION_SUFFIX = '/crew/pi/extensions/fff.ts'
 const FFF_MCP_NAME = 'fff'

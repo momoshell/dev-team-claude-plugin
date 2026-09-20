@@ -111,16 +111,13 @@ import {
   resolveTransport,
   parsePlannerSymbolsHoldoutFraction,
   parseCharterTerseHoldoutFraction,
-  parseCharterLeanHoldoutFraction,
   parseBriefTripwiresHoldoutFraction,
   selectPlannerSymbolsArm,
   selectCharterTerseArm,
-  selectCharterLeanArm,
   selectBriefTripwiresArm,
   PLANNER_SYMBOLS_ARM_EVENT,
   PLANNER_SYMBOLS_EXPERIMENT,
   CHARTER_TERSE_EXPERIMENT,
-  CHARTER_LEAN_EXPERIMENT,
   BRIEF_TRIPWIRES_EXPERIMENT,
   ROSTER_PATH,
   seatFloorRefusal,
@@ -3367,76 +3364,33 @@ test('new holdout parsers and selectors use closed canonical values', () => {
   assert.equal(selectBriefTripwiresArm(0.5, () => 0.9), 'tripwires-omitted')
 })
 
-test('C1 lean holdout parses selects forwards resumes and refuses like terse', async () => {
-  for (const value of [0, 1, 0.5]) assert.equal(parseCharterLeanHoldoutFraction(value), value)
-  for (const value of ['', 'NaN', 'Infinity', '-0.1', '1.1', ' 0.5', '0.5x']) {
-    assert.throws(() => parseCharterLeanHoldoutFraction(value), (error) => error instanceof BatchRefusal && error.reason === 'batch-unreadable')
-  }
-  assert.equal(selectCharterLeanArm(0.5, () => 0.49), 'control')
-  assert.equal(selectCharterLeanArm(0.5, () => 0.5), 'lean')
-  assert.equal(selectCharterLeanArm(0.5, () => 0.99), 'lean')
-  assert.equal(selectCharterLeanArm(null, () => { throw new Error('null arm selector must not draw') }), null)
-  assert.deepEqual(parseCliArgs(['--batch', 'batch', '--fences', 'fences.json', '--charter-lean-holdout-fraction', '0.25']), {
-    batch: 'batch', fences: 'fences.json', 'charter-lean-holdout-fraction': '0.25',
-  })
-
-  const deferred = await dispatchFixture({
-    label: 'lean-holdout-resume',
-    names: ['lane-a', 'lane-b'],
-    requests: { 'lane-b': requestFor('lane-b', { depends_on: ['lane-a'] }) },
-    runFlags: { wave: 2, 'charter-lean-holdout-fraction': '0.25' },
-  })
-  assert.ok(deferred.logs.some((line) => line.includes('--charter-lean-holdout-fraction 0.25')), JSON.stringify(deferred.logs))
-
-  const treatment = await dispatchFixture({
-    label: 'lean-holdout-treatment', names: ['lane-a'],
-    runFlags: { 'charter-lean-holdout-fraction': '0' }, random: () => 0.9,
-  })
-  const treatmentBoot = treatment.spawned.find(({ args }) => args.includes('boot'))
-  assert.deepEqual(treatmentBoot.args.slice(treatmentBoot.args.indexOf('--charter-arm'), treatmentBoot.args.indexOf('--charter-arm') + 2), ['--charter-arm', 'lean'])
-
-  const control = await dispatchFixture({
-    label: 'lean-holdout-control', names: ['lane-a'],
-    runFlags: { 'charter-lean-holdout-fraction': '1' }, random: () => 0.9,
-  })
-  const controlBoot = control.spawned.find(({ args }) => args.includes('boot'))
-  assert.equal(controlBoot.args.includes('--charter-arm'), false)
+test('C1 retired charter-lean flag refuses by name at CLI and dispatch layers', async () => {
+  assert.throws(() => parseCliArgs(['--batch', 'batch', '--fences', 'fences.json', '--charter-lean-holdout-fraction', '0.25']),
+    (error) => error instanceof BatchRefusal
+      && error.reason === 'batch-unreadable'
+      && error.message.includes('--charter-lean-holdout-fraction')
+      && /retir/i.test(error.message)
+      && error.message.includes('control'))
 
   let draws = 0
   await assert.rejects(() => dispatchFixture({
-    label: 'lean-holdout-conflict', names: ['lane-a'],
-    runFlags: { 'charter-terse-holdout-fraction': '0.5', 'charter-lean-holdout-fraction': '0.5' },
+    label: 'lean-retired-refusal', names: ['lane-a'],
+    runFlags: { 'charter-lean-holdout-fraction': '0.25' },
     random: () => { draws += 1; throw new Error('draw must not run') },
   }), (error) => error instanceof BatchRefusal
     && error.reason === 'batch-unreadable'
-    && error.message.includes('--charter-terse-holdout-fraction')
-    && error.message.includes('--charter-lean-holdout-fraction'))
+    && error.message.includes('--charter-lean-holdout-fraction')
+    && /retir/i.test(error.message)
+    && error.message.includes('control'))
   assert.equal(draws, 0)
+  // No resume-forwarding pin: prepareDispatchContext's first statement in
+  // scripts/factory/dispatch-batch.mjs refuses any runFlags carrying the retired
+  // flag before resumeCommand is ever reached, so no reachable state could
+  // falsify such an assertion. The retirement is pinned by the two refusals
+  // above and by gate A1 instead.
 })
 
-test('D1 every selected lane records its lean charter arm and absence stays unmeasured', async () => {
-  const treatment = await dispatchFixture({
-    label: 'lean-record-treatment', names: ['lane-a'],
-    runFlags: { 'charter-lean-holdout-fraction': '0' }, random: () => 0.9,
-  })
-  const treatmentRecord = JSON.parse(readFileSync(join(treatment.out, 'lane-a.dispatch.json'), 'utf8'))
-  assert.equal(treatmentRecord.charter_arm, 'lean')
-  assert.deepEqual(treatmentRecord.experiments, [{ name: CHARTER_LEAN_EXPERIMENT, arm: 'lean', fraction: 0 }])
-  const treatmentJournal = treatment.appended
-    .map(({ content }) => String(content).trim()).filter(Boolean).map((line) => JSON.parse(line))
-    .find((row) => row.experiment === CHARTER_LEAN_EXPERIMENT)
-  assert.equal(treatmentJournal.arm, treatmentRecord.charter_arm)
-  const treatmentBoot = treatment.spawned.find(({ args }) => args.includes('boot'))
-  assert.deepEqual(treatmentBoot.args.slice(treatmentBoot.args.indexOf('--charter-arm'), treatmentBoot.args.indexOf('--charter-arm') + 2), ['--charter-arm', treatmentRecord.charter_arm])
-
-  const resolvedControl = await dispatchFixture({
-    label: 'lean-record-control', names: ['lane-a'],
-    runFlags: { 'charter-lean-holdout-fraction': '1' }, random: () => 0.9,
-  })
-  const controlRecord = JSON.parse(readFileSync(join(resolvedControl.out, 'lane-a.dispatch.json'), 'utf8'))
-  assert.equal(controlRecord.charter_arm, 'control')
-  assert.deepEqual(controlRecord.experiments, [{ name: CHARTER_LEAN_EXPERIMENT, arm: 'control', fraction: 1 }])
-
+test('D1 retired charter-lean vocabulary still reports an empty holdout', async () => {
   const legacyRoot = scratchDir('dispatch-lean-legacy-')
   const ledger = openLedger({ dbPath: join(legacyRoot, 'ledger.db'), nodeVersion: '20.11.0', stderr: { write: () => {} } })
   try {

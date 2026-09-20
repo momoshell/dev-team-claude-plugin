@@ -11,7 +11,7 @@ import {
   FINDING_DISPOSITIONS, FINDING_SEVERITIES, GATE_CUSTODIAN, MAX_QUESTIONS, PROTECTED_PATHS, REPO_ROOT, RESIDUAL_TYPES, applyPrescriptionLines, checkAnchors, existsSync, join, laneFence, mkdirSync, partitionShifts, shiftsAreOwedHere, protectedHits, readFileSync, readdirSync, rmSync, scratchDir, spawnSync,
   carriedSilenceDefect, findingIdDefect, parseQuestions, patchTargets,
 } from './drive-fixtures.mjs'
-import { bootCmd, composeRolePrompt, FLAG_VALUE_CONTRACT, KNOWN_FLAGS, BOOLEAN_FLAGS, BOOT_ONLY_FLAGS, compiledCharterBytes, charterBudgetRefusals, CHARTER_CEILINGS, CHARTER_LEAN_TAIL } from './crew.mjs'
+import { bootCmd, composeRolePrompt, FLAG_VALUE_CONTRACT, KNOWN_FLAGS, BOOLEAN_FLAGS, BOOT_ONLY_FLAGS, compiledCharterBytes, charterBudgetRefusals, CHARTER_CEILINGS } from './crew.mjs'
 import { after } from 'node:test'
 import { tmpdir } from 'node:os'
 import {
@@ -128,7 +128,7 @@ test('bootCmd rejects an unknown charter-arm before crew state', async () => {
     const arm = 'unknown-arm'
     await assert.rejects(
       () => fixture.boot({ 'charter-arm': arm }),
-      (error) => error?.message === `invalid --charter-arm ${JSON.stringify(arm)}; expected one of control|terse-tail|lean`,
+      (error) => error?.message === `invalid --charter-arm ${JSON.stringify(arm)}; expected one of control|terse-tail`,
     )
     assert.equal(existsSync(join(fixture.crewDir, 'crew.json')), false)
   } finally { fixture.cleanup() }
@@ -151,15 +151,14 @@ test('E1/E2 compose every role prompt with byte-identical control and a final te
   }
 })
 
-test('B1 the lean charter arm adds nothing: its former tail lives in the charters every arm receives', () => {
-  // The lean arm once appended the ladder and the five complexity tags. Both now live in
-  // _shared.md and reviewer.md for EVERY arm, so the arm composes identically to control.
-  // It is kept only so the --charter-arm enum and its holdout measurements stay valid.
+test('B1 the lean charter arm is retired: unknown arms fall back to control and boot refuses lean', async () => {
+  // The lean tail was always '': its content lives in _shared.md and reviewer.md for
+  // EVERY arm, so the retired arm composes identically to control (#1441). The
+  // --charter-arm enum no longer offers lean, so boot refuses it by name.
   const roles = ['lead', 'planner', 'builder', 'reviewer', 'tech-lead']
   const rolesDir = join(REPO_ROOT, 'crew', 'roles')
   const shared = readFileSync(join(rolesDir, '_shared.md'), 'utf8')
   const section = 'memory: retained context'
-  assert.equal(CHARTER_LEAN_TAIL, '')
   for (const role of roles) {
     const card = readFileSync(join(rolesDir, `${role}.md`), 'utf8')
     const control = `${shared}\n\n${card}\n\n${section}`
@@ -174,6 +173,14 @@ test('B1 the lean charter arm adds nothing: its former tail lives in the charter
     const restated = complexityTags(reviewer).filter((tag) => card.includes(`\`${tag}\``)).length
     assert.ok(restated < 3, `${restated} of the reviewer charter complexity tags are restated in ${role}.md`)
   }
+  const fixture = charterBootFixture('lean-retired')
+  try {
+    await assert.rejects(
+      () => fixture.boot({ 'charter-arm': 'lean' }),
+      (error) => error?.message === `invalid --charter-arm "lean"; expected one of control|terse-tail`,
+    )
+    assert.equal(existsSync(join(fixture.crewDir, 'crew.json')), false)
+  } finally { fixture.cleanup() }
 })
 
 test('RV1-2 split crew suite imports helpers rather than redefining them', () => {

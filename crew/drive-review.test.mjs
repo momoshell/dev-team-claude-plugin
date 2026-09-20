@@ -3258,14 +3258,20 @@ function diffDriverIo({ report = diffReport([diffSurvivor]), mutations = [], rev
     ...planEnv().details, files_in_scope: ['a.mjs'], gate_cmd: 'gate-cmd', validation_lane: 'lane-cmd', mutations,
   } })
   const envelopes = { 'planner:1': plan, 'builder:1': buildEnv(), 'reviewer:1': review }
+  // The declared mutations name implemented checks, so the red baseline inventories
+  // them: a complete baseline missing a declared check reads as a phantom refusal.
+  const declaredFails = mutations.filter((entry) => entry && typeof entry.check === 'string').map((entry) => `FAIL ${entry.check}: caught`)
+  const baselineOutput = declaredFails.length === 0
+    ? 'FAIL baseline\nGATE-SUMMARY {"total":1,"failed":1,"errored":0}'
+    : `${declaredFails.join('\n')}\nGATE-SUMMARY {"total":${declaredFails.length},"failed":${declaredFails.length},"errored":0}`
   const runs = {
-    'gate-cmd:1': { ok: false, output: 'FAIL baseline\nGATE-SUMMARY {"total":1,"failed":1,"errored":0}' },
+    'gate-cmd:1': { ok: false, output: baselineOutput },
     'gate-cmd:2': { ok: true, output: 'green\nGATE-SUMMARY {"total":1,"failed":0,"errored":0}' },
     'gate-cmd:3': { ok: false, output: 'FAIL declared: caught\nGATE-SUMMARY {"total":1,"failed":1,"errored":0}' },
     'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
   }
   const options = {
-    envelopes, runs, cleanRuns: { 'gate-cmd': { ok: false, output: 'FAIL baseline\nGATE-SUMMARY {"total":1,"failed":1,"errored":0}' },
+    envelopes, runs, cleanRuns: { 'gate-cmd': { ok: false, output: baselineOutput },
     }, files: { [`${CTX.checkout}/a.mjs`]: target }, writeThrough: true,
     diffListing: 'a.mjs\0', changed: Array.from({ length: 12 }, () => ['a.mjs']),
     diffReports: report === null ? [{ ok: true, output: '' }] : [{ ok: true, output: `DIFF-MUTATION-SUMMARY ${JSON.stringify(report)}` }],

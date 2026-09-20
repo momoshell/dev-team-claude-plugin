@@ -2365,19 +2365,26 @@ export function acceptanceIds(briefText) {
 }
 
 // Why coverage could not be measured — closed, so a reason nobody named cannot appear.
-export const ACCEPTANCE_UNMEASURED = Object.freeze({ UNREADABLE: 'brief-unreadable', NO_IDS: 'no-acceptance-ids' })
+export const ACCEPTANCE_UNMEASURED = Object.freeze({ UNREADABLE: 'brief-unreadable', NO_IDS: 'no-acceptance-ids', GATE_IDS_INCOMPLETE: 'gate-ids-incomplete' })
 
-export function acceptanceCoverage(briefText, mutations) {
+export function acceptanceCoverage(briefText, mutations, implementedCheckIds = null) {
   const ids = acceptanceIds(briefText)
-  if (briefText === null || briefText === undefined) return { status: 'unmeasured', reason: ACCEPTANCE_UNMEASURED.UNREADABLE, ids: null, covered: null, uncovered: null, waived: null, extra: null }
-  if (ids === null) return { status: 'unmeasured', reason: ACCEPTANCE_UNMEASURED.NO_IDS, ids: null, covered: null, uncovered: null, waived: null, extra: null }
+  // Hoisted ahead of the early returns so the runtime-gate comparison below is
+  // independent of readable brief ids: a missing brief cannot bypass it.
+  const entries = (Array.isArray(mutations) ? mutations : []).filter((entry) => typeof entry?.check === 'string')
+  const proving = new Set(entries.filter((entry) => !Object.prototype.hasOwnProperty.call(entry, 'exempt')).map((entry) => entry.check))
+  const implemented = implementedCheckIds instanceof Set ? implementedCheckIds : null
+  const phantom = implemented === null ? null : [...proving].filter((check) => !implemented.has(check))
+  // Two-argument callers keep their exact historical shapes: the phantom field is
+  // attached only when an explicit runtime inventory was supplied.
+  const withPhantom = (row) => (implemented === null ? row : { ...row, phantom })
+  if (briefText === null || briefText === undefined) return withPhantom({ status: 'unmeasured', reason: ACCEPTANCE_UNMEASURED.UNREADABLE, ids: null, covered: null, uncovered: null, waived: null, extra: null })
+  if (ids === null) return withPhantom({ status: 'unmeasured', reason: ACCEPTANCE_UNMEASURED.NO_IDS, ids: null, covered: null, uncovered: null, waived: null, extra: null })
   // An EXEMPT entry declares that no mutation will be applied for that check, so it proves
   // nothing: it is reported as waived, never as covered. `validateMutations` accepts any
   // non-blank exemption, so counting it would make "answered" mean "mentioned".
-  const entries = (Array.isArray(mutations) ? mutations : []).filter((entry) => typeof entry?.check === 'string')
-  const proving = new Set(entries.filter((entry) => !Object.prototype.hasOwnProperty.call(entry, 'exempt')).map((entry) => entry.check))
   const waived = entries.filter((entry) => Object.prototype.hasOwnProperty.call(entry, 'exempt')).map((entry) => entry.check)
-  return {
+  return withPhantom({
     status: 'measured',
     reason: null,
     ids,
@@ -2385,7 +2392,7 @@ export function acceptanceCoverage(briefText, mutations) {
     uncovered: ids.filter((id) => !proving.has(id)),
     waived: waived.filter((check) => ids.includes(check)),
     extra: [...proving].filter((check) => !ids.includes(check)),
-  }
+  })
 }
 
 export function validateMutations(entries, inScope = () => true) {
@@ -8390,9 +8397,9 @@ function runTask(ctx, io, crash) {
   // check is recorded, never refused: a planner may prove more than it was asked. This runs
   // whether or not the plan declared mutations at all — omitting the field entirely was the
   // simplest way to answer nothing (RV1 of the #1407 review).
+  // The brief text read once above (`readOrNull(ctx.briefFile)`): reusing the single
+  // read path here also puts the value in scope for the pre-build reconciliation below.
   {
-    let briefText = null
-    try { briefText = ctx.briefFile ? io.readFile(ctx.briefFile) : null } catch { briefText = null }
     const coverage = acceptanceCoverage(briefText, mutations)
     io.log(recordRow({ at: io.now(), event: 'acceptance-coverage', ...coverage }))
     if (coverage.status === 'measured' && coverage.uncovered.length > 0) {
@@ -9514,6 +9521,7 @@ function runTask(ctx, io, crash) {
   if (gateCmd) {
     stage('gate-baseline')
     const baseline = runGate('gate-baseline', gateCmd)
+    let finalBaselineOutput = baseline.output
     if (baseline.ok) {
       if (noGateCustodian()) {
         stageComplete()
@@ -9532,6 +9540,7 @@ function runTask(ctx, io, crash) {
       gateCmd = env2.details.gate_cmd
       activeGateCmd = gateCmd
       const re = runGate('gate-baseline:recheck', gateCmd)
+      finalBaselineOutput = re.output
       if (re.ok) {
         stageComplete()
         return gateEscalate('repaired gate STILL green at baseline — vacuous acceptance cannot be built against')
@@ -9569,6 +9578,7 @@ function runTask(ctx, io, crash) {
         gateCmd = env3.details.gate_cmd
         activeGateCmd = gateCmd
         const re = runGate('gate-baseline:recheck', gateCmd)
+        finalBaselineOutput = re.output
         if (re.ok) {
           stageComplete()
           return gateEscalate('repaired gate is GREEN at baseline — vacuous acceptance cannot be built against')
@@ -9581,6 +9591,32 @@ function runTask(ctx, io, crash) {
       }
     }
     stageComplete()
+    // Mutation/gate reconciliation (plan admission, pre-build): every declared
+    // non-exempt mutation must name a check the accepted baseline output actually
+    // ran. A green check may legally print no result line, so an inventory smaller
+    // than the gate's declared total is INCOMPLETE — unknown, never a refusal.
+    const nonExemptMutations = mutations.filter((entry) => entry && typeof entry === 'object' && !Object.prototype.hasOwnProperty.call(entry, 'exempt'))
+    if (nonExemptMutations.length > 0) {
+      const implementedCheckIds = gateCheckIds(finalBaselineOutput)
+      const summary = parseGateSummary(finalBaselineOutput)
+      const enumerationComplete = implementedCheckIds.size >= summary.total
+      const implementedCoverage = acceptanceCoverage(briefText, mutations, implementedCheckIds)
+      const reconciliation = {
+        status: enumerationComplete ? 'measured' : 'unmeasured',
+        reason: enumerationComplete ? null : ACCEPTANCE_UNMEASURED.GATE_IDS_INCOMPLETE,
+        gate_path: acceptedGatePath,
+        implemented: [...implementedCheckIds],
+        total: summary.total,
+        phantom: enumerationComplete ? implementedCoverage.phantom : null,
+      }
+      io.log(recordRow({ at: io.now(), event: 'mutation-check-coverage', ...reconciliation }))
+      if (enumerationComplete && implementedCoverage.phantom.length > 0) {
+        stageComplete()
+        return escalate('plan',
+          `${ACCEPTANCE_REFUSALS.CHECK_UNIMPLEMENTED}: ${implementedCoverage.phantom.join(', ')} names no implemented check in ${acceptedGatePath} — fix the plan, not the build`,
+          planEnv.artifacts || [])
+      }
+    }
   }
 
   const censusEnabled = !io.calls || typeof io.runClean === 'function'
@@ -13846,4 +13882,31 @@ function createdPathFromWhereLine(line) {
   const declared = normaliseLaneInput(line.slice(CREATES_MARK.length))
   const warning = ' · warning: parent is unresolved'
   return declared.endsWith(warning) ? declared.slice(0, -warning.length) : declared
+}
+
+// Closed refusal for a declared mutation no runtime check implements. A phantom is a
+// plan defect, never a build task: the plan is refused before any builder assignment.
+export const ACCEPTANCE_REFUSALS = Object.freeze({ CHECK_UNIMPLEMENTED: 'mutation-check-unimplemented' })
+
+// The runtime inventory of implemented checks: unique ids from trimmed FAIL/PASS lines.
+// Both outcomes share the label grammar (CHECK_LABEL) and the colon-only delimiter of
+// checkFailureLine — a bare id, a bare colon, or a colon followed by whitespace. Anything
+// else (a space delimiter, an em-dash, a colon glued to more label, as in
+// `FAIL cache:v2: why` for `cache`) is not evidence. PASS output is optional, so the set
+// may legitimately be smaller than the gate total; callers compare against the summary.
+export function gateCheckIds(output) {
+  const ids = new Set()
+  for (const raw of String(output || '').split('\n')) {
+    const line = raw.trim()
+    for (const prefix of [`${CHECK_FAIL_PREFIX} `, 'PASS ']) {
+      if (!line.startsWith(prefix)) continue
+      const rest = line.slice(prefix.length)
+      const cut = rest.search(/[^A-Za-z0-9._-]/)
+      const candidate = cut === -1 ? rest : rest.slice(0, cut)
+      const tail = cut === -1 ? '' : rest.slice(cut)
+      if (candidate.length > 0 && CHECK_LABEL.test(candidate) && (tail.length === 0 || (tail[0] === ':' && (tail.length === 1 || /^\s/.test(tail[1]))))) ids.add(candidate)
+      break
+    }
+  }
+  return ids
 }

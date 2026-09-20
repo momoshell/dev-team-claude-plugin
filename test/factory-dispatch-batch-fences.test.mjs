@@ -127,7 +127,8 @@ const NO_ADMISSION_REPORT_FIXTURE = `{
     "anchor-pin": "BLIND SPOT: an unpinned file:line citation is in no manifest key, so neither this check nor the citation-carrier check can find it; a citation the anchor corpus does not pin is still discoverable only by hand",
     "citation-carrier": "BLIND SPOT: this finds docs carrying a PINNED path:line citation and nothing else. A citation no manifest pins is in no key, and a doc whose exhibit set-compares a documented table against source (skills/crew-recovery/references/escalations.md and the escalate() producers) reddens with every citation in it still correct. Neither is discoverable here; read the exhibits suites of the manifests named above before choosing this fence",
     "test-reach": "BLIND SPOT: this is a proxy in BOTH directions and names candidates, never proof. A test can assert the changed behaviour through a higher-level entry point without importing the changed file at all, and a computed path or dynamic import is invisible to a static scan — crew/crew.mjs loads every adapter that way. A test can equally import a fenced file without asserting anything about the part being changed. The literal symbol scan sees only whole-word occurrences of an exported name, is blind to a renamed re-export, and drops any symbol naming more than 8 test files as too broad to be evidence. Read the named files before choosing this fence; an unnamed one is not cleared. An apostrophe or quote inside a // or /* */ comment opens a phantom literal and hides every real path literal after it in that file.",
-    "census-carrier": "BLIND SPOT: this warning fires on the POSSIBILITY that a fenced *.test.mjs edit moves either repository-wide census, not on the fact; dispatch cannot inspect bytes the builder has not written and cannot predict whether either census will move."
+    "census-carrier": "BLIND SPOT: this warning fires on the POSSIBILITY that a fenced *.test.mjs edit moves either repository-wide census, not on the fact; dispatch cannot inspect bytes the builder has not written and cannot predict whether either census will move.",
+    "suite-cost": "BLIND SPOT: this warning fires on the POSSIBILITY that a newly created *.test.mjs breaks the stated unmeasured-suite list, not on the fact; dispatch cannot see whether the builder will insert the line into test/factory-suite-cost.test.mjs, nor in what sorted position it will land."
   },
   "lanes": [
     {
@@ -136,7 +137,8 @@ const NO_ADMISSION_REPORT_FIXTURE = `{
       "test_reach_dropped": [],
       "citation_carriers": [],
       "anchor_pins": [],
-      "census_carriers": []
+      "census_carriers": [],
+      "suite_costs": []
     }
   ]
 }

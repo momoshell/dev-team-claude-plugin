@@ -29,6 +29,9 @@ import {
   CENSUS_CARRIER_FILES,
   CENSUS_CARRIER_REPAIR,
   CENSUS_CARRIER_WARNING_PREFIX,
+  SUITE_COST_SUITE,
+  SUITE_COST_WARNING_PREFIX,
+  SUITE_COST_BLIND_SPOT,
   CITATION_CARRIER_POST_MERGE,
   CITATION_CARRIER_ROW_LIMIT,
   CITATION_CARRIER_WARNING_PREFIX,
@@ -647,4 +650,50 @@ test('a ratified band-floor refusal is not retried', async () => {
   assert.equal(error.reason, 'seat-floor-conflict')
   assert.equal(boots, 1)
   assert.equal(teardowns, 0)
+})
+
+function suiteCostFixture(name, { creates, fenceFiles = ['crew/capabilities.mjs'], withReport = false } = {}) {
+  const checkout = namedReachFixture(`suitecost-${name}`, {
+    'test/census.test.mjs': 'const census = true\nif (!census) throw new Error("unreachable")\n',
+  })
+  const outDir = withReport ? join(checkout, `${name}-out`) : undefined
+  const logs = []
+  const report = checkFences({
+    fences: [entry('lane-a', fenceFiles)],
+    lanes: [{ lane: 'lane-a', where: fenceFiles, creates }],
+    checkout,
+    outDir,
+    deps: { home: join(root, `suitecost-${name}-home`), log: (line) => logs.push(String(line)) },
+  })
+  return { checkout, outDir, report, logs }
+}
+
+test('suite-cost A1 warns when a lane creates a test file', () => {
+  const fixture = suiteCostFixture('warn', { creates: ['test/zz-new-suite.test.mjs'] })
+  const warnings = fixture.report.warnings.filter(({ kind }) => kind === 'suite-cost')
+  assert.equal(warnings.length, 1)
+  const [warning] = warnings
+  assert.equal(warning.text.startsWith(SUITE_COST_WARNING_PREFIX), true)
+  for (const literal of ['test/zz-new-suite.test.mjs', SUITE_COST_SUITE, 'sorted position', 'WARNING, not a refusal']) assert.equal(warning.text.includes(literal), true)
+  assert.equal(warning.text.endsWith(SUITE_COST_BLIND_SPOT), true)
+  const admissions = fixture.report.admissions.filter((row) => row.source === 'suite-cost')
+  assert.deepEqual(admissions.map((row) => row.file), [SUITE_COST_SUITE])
+})
+
+test('suite-cost B1 stays silent without a test creates entry', () => {
+  const fixture = suiteCostFixture('silent', { creates: ['scripts/factory/zz-helper.mjs'], withReport: true })
+  assert.equal(fixture.report.warnings.some(({ kind }) => kind === 'suite-cost'), false)
+  assert.deepEqual(JSON.parse(readFileSync(join(fixture.outDir, FENCE_REPORT_FILE), 'utf8')).lanes[0].suite_costs, [])
+  const summary = fixture.logs.find((line) => line.startsWith('dispatch-batch: WARNING-SUMMARY '))
+  assert.ok(summary)
+  assert.equal(summary.includes('suite-cost=0'), true)
+})
+
+test('suite-cost D1 carries its own blind spot', () => {
+  const fixture = suiteCostFixture('blind', { creates: ['test/zz-blind-suite.test.mjs'] })
+  const warning = fixture.report.warnings.find(({ kind }) => kind === 'suite-cost')
+  assert.ok(warning)
+  assert.equal(warning.blind_spot, SUITE_COST_BLIND_SPOT)
+  assert.notEqual(warning.blind_spot, CENSUS_CARRIER_BLIND_SPOT)
+  assert.equal(warning.text.endsWith(warning.blind_spot), true)
 })

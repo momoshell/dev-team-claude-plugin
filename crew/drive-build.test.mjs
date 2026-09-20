@@ -7151,3 +7151,97 @@ test('a lane attributes an unlabelled spawn to its own gate file', () => {
   assert.equal(journal.verdict, 'stale')
   assert.deepEqual(journal.stale.map(({ check }) => check), [STALE_GATE_FILE.split('/').pop()])
 })
+
+test('b869 hardening acceptance', async (t) => {
+  await t.test('A1', () => {
+    const RV1 = { id: 'RV1', severity: 'must-fix', location: 'a.mjs:1', summary: 'the first defect' }
+    const RV2 = { id: 'RV2', severity: 'must-fix', location: 'a.mjs:2', summary: 'the second defect' }
+    const invocation = { finding: 'RV1', invocation: 'node --test a.test.mjs', name: 'RV1 guard', file: B376_IMPL_FILE, find: 'const guard = false', replace: 'const guard = true' }
+    const proper = (id) => ({ finding: id, test: B376_TEST_FILE, name: `${id} guard`, file: B376_IMPL_FILE, find: 'const guard = false', replace: 'const guard = true' })
+    const io = b376ProofIo({
+      reviewer1: b376Review('changes-needed', [RV1]),
+      builder2: b376Build([invocation]),
+      reviewer2: b376Review('changes-needed', [RV2]),
+      builder3: b376Build([proper('RV1'), proper('RV2')]),
+      files: { [`${CTX.checkout}/${B376_TEST_FILE}`]: 'export const repaired = true\n', [`${CTX.checkout}/${B376_IMPL_FILE}`]: 'const guard = false\n' },
+    })
+    const baseRun = io.run
+    const greenFor = (name) => ({ ok: true, output: `ok 1 - ${name}\n# pass 1\n# fail 0` })
+    const redFor = (name) => ({ ok: false, output: `not ok 1 - ${name}\n# pass 0\n# fail 1` })
+    io.run = function (cmd) {
+      const result = baseRun.call(this, cmd)
+      for (const id of ['RV1', 'RV2']) {
+        if (cmd === hardenCommand(B376_TEST_FILE, `${id} guard`)) {
+          const count = this.calls.run.filter(({ cmd: seen }) => seen === cmd).length
+          return [greenFor(`${id} guard`), redFor(`${id} guard`), redFor(`${id} guard`)][count - 1] ?? redFor(`${id} guard`)
+        }
+      }
+      return result
+    }
+    const result = driveTask({ ...CTX, limits: { build_rounds: 3, review_rounds: 3 } }, io)
+    assert.equal(result.status, 'done')
+    assert.equal(result.details.stages.includes('lane:harden:r3'), true)
+    const killed = io.calls.logs.filter((entry) => entry.finding_hardened?.outcome === 'killed').map((entry) => entry.finding_hardened.finding)
+    assert.deepEqual(killed, ['RV1', 'RV2'])
+    assert.equal(io.calls.logs.filter((entry) => entry.hardening_observation?.finding === 'RV1').length, 0)
+    assert.doesNotMatch(Object.values(io.calls.writes).join('\n'), /unknown-finding/)
+  })
+
+  await t.test('B1', () => {
+    const extra = { ...B376_HARDENED, finding: 'ZZ9' }
+    const scope = scopeMatcher(['a.mjs', 'a.test.mjs'])
+    const checked = validateHardened({ hardened: [B376_HARDENED, extra] }, [{ id: 'F1' }], scope)
+    assert.equal(checked.entries.length, 1)
+    assert.equal(checked.refusals.length, 0)
+    assert.equal(checked.observations.length, 1)
+    assert.deepEqual(checked.observations[0], { finding: 'ZZ9', reason: 'unknown-finding', why: 'the hardened entry names ZZ9 but the review carries no owed finding with that id' })
+    const io = b376ProofIo({ hardened: [B376_HARDENED, extra], files: { [`${CTX.checkout}/${B376_TEST_FILE}`]: 'export const repaired = true\n', [`${CTX.checkout}/${B376_IMPL_FILE}`]: 'const guard = false\n' } })
+    const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+    assert.equal(result.status, 'done')
+    const journalled = io.calls.logs.filter((entry) => entry.hardening_observation)
+    assert.equal(journalled.length, 1)
+    assert.equal(journalled[0].hardening_observation.finding, 'ZZ9')
+    assert.equal(journalled[0].hardening_observation.reason, 'unknown-finding')
+  })
+
+  await t.test('C1', () => {
+    const extra = { ...B376_HARDENED, finding: 'ZZ9' }
+    const io = b376ProofIo({ hardened: [B376_HARDENED, extra], files: { [`${CTX.checkout}/${B376_TEST_FILE}`]: 'export const repaired = true\n', [`${CTX.checkout}/${B376_IMPL_FILE}`]: 'const guard = false\n' } })
+    const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+    assert.equal(result.status, 'done')
+    assert.equal(io.calls.logs.find((entry) => entry.finding_hardened)?.finding_hardened.outcome, 'killed')
+  })
+
+  await t.test('D1', () => {
+    const lines = hardeningBounceLines(2, [
+      { finding: 'ZZ9', reason: 'unknown-finding', why: 'the hardened entry names ZZ9 but the review carries no owed finding with that id' },
+      { finding: 'F1', reason: 'no-declaration', why: 'no details.hardened entry names finding F1' },
+    ], [])
+    const at = lines.indexOf('No guard was declared for:')
+    assert.notEqual(at, -1)
+    const section = lines.slice(at).join('\n')
+    assert.match(section, /- F1/)
+    assert.doesNotMatch(section, /- ZZ9/)
+  })
+
+  await t.test('E1', () => {
+    const scope = scopeMatcher(['a.mjs', 'a.test.mjs'])
+    const checked = validateHardened({ hardened: [] }, [{ id: 'F1' }], scope)
+    assert.equal(checked.entries.length, 0)
+    assert.equal(checked.refusals.length, 1)
+    assert.deepEqual(checked.refusals[0], { finding: 'F1', reason: 'no-declaration', why: 'no details.hardened entry names finding F1' })
+    const text = hardeningBounceLines(2, checked.refusals, []).join('\n')
+    assert.match(text, /F1/)
+    assert.match(text, /no-declaration/)
+    assert.match(text, /no details\.hardened entry names finding F1/)
+    assert.doesNotMatch(text, /insufficient\b/)
+  })
+
+  await t.test('F1', () => {
+    assert.deepEqual(HARDENING_REFUSALS, [
+      'no-declaration', 'not-an-array', 'unknown-finding', 'duplicate-finding',
+      'test-path-invalid', 'test-invocation-conflict', 'invocation-invalid', 'test-not-in-scope', 'file-not-in-scope', 'name-missing', 'name-file-wrapper', 'find-missing',
+      'replace-identical', 'builder-exemption', 'class-unknown',
+    ])
+  })
+})

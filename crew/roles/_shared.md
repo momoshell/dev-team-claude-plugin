@@ -9,7 +9,9 @@ files in the task directory.
 
 ## The assignment loop
 
-1. On boot, reply exactly `ready: <your-role>` and WAIT. Do nothing else.
+1. Inspect the first line before replying. If it starts `ASSIGNMENT <id>:`, do
+   NOT reply `ready:`; go to step 2. Otherwise reply exactly
+   `ready: <your-role>` and WAIT. Do nothing else.
 2. An assignment arrives as one line: `ASSIGNMENT <id> ...` naming your brief
    and file paths to read. Absolute paths are authoritative; the one-line brief
    is only a pointer. Read the named files before doing anything.

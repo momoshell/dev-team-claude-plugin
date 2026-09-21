@@ -1453,6 +1453,25 @@ test('a missing memory budget value falls back to the default and records invali
   assert.equal(cfg.reason, 'invalid-budget')
 })
 
+// Byte pins are incidental protection for this rule: they catch a charter that GREW, not one that
+// reverted the branch. 19 sol planner d1 assignments answered `ready: planner` to a first message
+// that already carried ASSIGNMENT, settled, and wrote no envelope. The rule is that the assignment
+// test comes BEFORE the readiness reply, and it must be asserted as a rule.
+// Mutation killed: reorder so `ready:` is the unconditional first imperative, or drop the
+// ASSIGNMENT branch, and this test reddens while every byte pin stays green.
+test('the shared charter tests for an assignment BEFORE it tells a seat to reply ready', () => {
+  const shared = readFileSync(join(ROOT, 'crew', 'roles', '_shared.md'), 'utf8')
+  const step = shared.split('\n').findIndex((line) => line.startsWith('1. '))
+  assert.ok(step >= 0, 'the assignment loop has no step 1')
+  const body = shared.split('\n').slice(step, step + 4).join('\n')
+  const assignmentAt = body.indexOf('ASSIGNMENT')
+  const readyAt = body.indexOf('`ready:')
+  assert.ok(assignmentAt >= 0, 'step 1 never mentions ASSIGNMENT')
+  assert.ok(readyAt >= 0, 'step 1 never mentions the readiness reply')
+  assert.ok(assignmentAt < readyAt, 'step 1 must branch on ASSIGNMENT before instructing the ready reply')
+  assert.match(body, /do\s*\n?\s*NOT reply `ready:`/i)
+})
+
 test('the charter ceilings and source budgets are the delivered bytes, below the 2026-09-05 baseline', () => {
   const roles = ['builder', 'lead', 'planner', 'reviewer', 'tech-lead']
   const guided = ['builder', 'planner', 'reviewer']
@@ -1461,7 +1480,7 @@ test('the charter ceilings and source budgets are the delivered bytes, below the
   assert.equal(Object.isFrozen(CHARTER_SOURCE_BUDGET), true)
   assert.equal(Object.isFrozen(CHARTER_BASELINE_BYTES), true)
   assert.deepEqual(CHARTER_BASELINE_BYTES, { _shared: 3432, builder: 5169, lead: 9378, planner: 16930, reviewer: 7697, 'tech-lead': 6529 })
-  assert.deepEqual(CHARTER_SOURCE_BUDGET, { _shared: 4825, builder: 3963, lead: 9099, planner: 16928, reviewer: 7675, 'tech-lead': 6295 })
+  assert.deepEqual(CHARTER_SOURCE_BUDGET, { _shared: 4942, builder: 3963, lead: 9099, planner: 16928, reviewer: 7675, 'tech-lead': 6295 })
   for (const value of [...Object.values(CHARTER_BASELINE_BYTES), ...Object.values(CHARTER_SOURCE_BUDGET), ...Object.values(CHARTER_CEILINGS)]) assert.equal(Number.isInteger(value), true)
   const shared = readFileSync(join(ROOT, 'crew', 'roles', '_shared.md'), 'utf8')
   const cards = Object.fromEntries(roles.map((role) => [role, readFileSync(join(ROOT, 'crew', 'roles', `${role}.md`), 'utf8')]))
@@ -1473,7 +1492,7 @@ test('the charter ceilings and source budgets are the delivered bytes, below the
     assert.equal(CHARTER_CEILINGS[role], guided.includes(role) ? base + delta : base)
     assert.ok(CHARTER_SOURCE_BUDGET[role] < CHARTER_BASELINE_BYTES[role])
   }
-  assert.equal(CHARTER_SOURCE_TOTAL_BUDGET, 48785)
+  assert.equal(CHARTER_SOURCE_TOTAL_BUDGET, 48902)
   assert.equal(CHARTER_SOURCE_TOTAL_BUDGET, Object.values(CHARTER_SOURCE_BUDGET).reduce((sum, value) => sum + value, 0))
   assert.ok(CHARTER_SOURCE_TOTAL_BUDGET < 49135)
 

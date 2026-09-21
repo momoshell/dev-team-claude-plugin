@@ -474,7 +474,7 @@ test('E1 booted lanes persist an empty lane fence and journal it', async () => {
     },
     fences: [entry('lane-a', ['src/a.mjs']), entry('lane-b', ['src/b.mjs'])],
   })
-  const bootCalls = result.spawned.filter(({ args }) => args.includes('crew/crew.mjs') && args.includes('boot'))
+  const bootCalls = result.spawned.filter(({ args }) => String(args[0]).endsWith('/crew/crew.mjs') && args.includes('boot'))
   assert.equal(bootCalls.length, 2)
   for (const call of bootCalls) {
     const registerPath = String(call.args[call.args.indexOf('--fences') + 1])
@@ -1086,7 +1086,7 @@ test('RV1-1', async () => {
     names: ['span'],
     fences: [entry('span', [span])],
   })
-  const run = result.spawned.find(({ args }) => args.includes('crew/crew.mjs') && args.includes('--files-in-scope'))
+  const run = result.spawned.find(({ args }) => String(args[0]).endsWith('/crew/crew.mjs') && args.includes('--files-in-scope'))
   assert.ok(run)
   const args = run.args.map(String)
   assert.equal(args[args.indexOf('--files-in-scope') + 1], path)
@@ -2749,7 +2749,7 @@ test('TB6', async () => {
   const checkoutIndex = ordinaryRun.args.indexOf('--checkout')
   const briefIndex = ordinaryRun.args.indexOf('--brief-file')
   assert.deepEqual(ordinaryRun.args, [
-    'crew/crew.mjs', 'run', '--task', 'lane-a', '--checkout', ordinaryRun.args[checkoutIndex + 1],
+    join(repoRoot, 'crew', 'crew.mjs'), 'run', '--task', 'lane-a', '--checkout', ordinaryRun.args[checkoutIndex + 1],
     '--brief-file', ordinaryRun.args[briefIndex + 1], '--keep', '--execution', 'full',
     '--files-in-scope', 'crew/owned-lane-a.mjs',
   ])
@@ -4940,7 +4940,7 @@ test('closing output states the transport, keep policy, and names one teardown c
   assert.equal(result.logs.filter((line) => line.startsWith('dispatch-batch: workspaces keep=true')).length, 1)
   for (const lane of ['lane-a', 'lane-b']) {
     assert.ok(result.logs.includes(
-      `dispatch-batch: teardown lane=${lane} command=node crew/crew.mjs teardown --task ${lane} --checkout ${join(result.parent, `dt-${lane}`)}`,
+      `dispatch-batch: teardown lane=${lane} command=node ${join(repoRoot, 'crew', 'crew.mjs')} teardown --task ${lane} --checkout ${join(result.parent, `dt-${lane}`)}`,
     ))
   }
   assert.equal(result.logs.filter((line) => line === 'dispatch-batch: merge-check command=node scripts/factory/closeout.mjs merge-check lane-a lane-b').length, 1)
@@ -5310,6 +5310,38 @@ test('a first boot failure tears the lane down, re-boots once, and the lane proc
     .map(({ args }) => args.includes('boot') ? 'boot' : 'teardown')
   assert.deepEqual(lifecycle, ['boot', 'teardown', 'boot'])
   assert.deepEqual(result.report.lanes.map(({ lane }) => lane), ['lane-a'])
+})
+
+test('lifecycle spawns share one absolute crew entry point and keep the lane checkout cwd', async () => {
+  let boots = 0
+  const result = await dispatchFixture({
+    label: 'lifecycle-crew-path',
+    names: ['lane-a'],
+    spawnResult: (args) => {
+      if (args.includes('boot')) {
+        boots += 1
+        return boots === 1
+          ? { status: 1, stdout: '', stderr: 'first boot failed' }
+          : { status: 0, stdout: '', stderr: '' }
+      }
+      if (args.includes('teardown')) return { status: 0, stdout: '', stderr: '' }
+      return { status: 0, stdout: '', stderr: '' }
+    },
+  })
+  const expected = join(repoRoot, 'crew', 'crew.mjs')
+  assert.equal(fsExistsSync(expected), true)
+  const laneDir = join(result.parent, 'dt-lane-a')
+  const byVerb = (verb) => result.spawned.filter(({ args }) => args[1] === verb)
+  const bootsSeen = byVerb('boot')
+  const teardowns = byVerb('teardown')
+  const runs = byVerb('run')
+  assert.ok(bootsSeen.length >= 1)
+  assert.ok(teardowns.length >= 1)
+  assert.ok(runs.length >= 1)
+  for (const call of [...bootsSeen, ...teardowns, ...runs]) {
+    assert.equal(call.args[0], expected)
+    assert.equal(call.cwd, laneDir)
+  }
 })
 
 test('the boot-retried row carries the FIRST failure\'s reason', async () => {

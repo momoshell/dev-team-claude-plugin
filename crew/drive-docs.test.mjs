@@ -1325,15 +1325,6 @@ test('J1 structural documentation runs one fenced crew-dispatch anchor repair', 
   assert.equal(io.commits[0].files.length, 3)
 })
 
-// CHARTER-PRESERVATION-MIRROR-START
-// before-source: fixture
-// before-lead-sha256: 2448872e30f1765649a62c5b520b01a5ff16f543732041b65f63a82225a63d55
-// before-tech-lead-sha256: f14559227cee0ed481997255d15cbd804b455b3be25c2c6233944e5b8add2748
-// f1-anchor-builder-sha256: a77542834deb53d0211af4f4fcffd6fb836f34d97eaaf555b87a2a036416f14e
-// | sentence | subject | class | source | quote |
-// | --- | --- | --- | --- | --- |
-// | **`correctness-unverified` is code-refused into escalation.** | into escalation | enforced | crew/drive.mjs:2109 planAcceptContractLines; enforcement crew/drive.mjs:6542 settleAccept and crew/drive.mjs:2127 ACCEPT_REFUSALS | A residual typed correctness-unverified is legitimate but asks a human, so code refuses it into escalation — the same rule as at review exhaustion. That is a fact about the FIELD, not about which stage you are standing in. |
-// CHARTER-PRESERVATION-MIRROR-END
 
 // RV1-1b (b847): the citation guard below proves a row QUOTES its cited line.
 // It cannot prove the cited code still DOES anything — three of the four

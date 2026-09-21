@@ -134,6 +134,7 @@ test('D1 a tracked suite added after the recorded measurement is unmeasured, not
     'test/factory-ledger-sessions.test.mjs',
     'test/factory-ledger-store.test.mjs',
     'test/factory-ledger-turns.test.mjs',
+    'test/factory-model-reeval.test.mjs',
     'test/factory-seat-priors.test.mjs',
     'test/zz-added-after-measurement.test.mjs',
   ])

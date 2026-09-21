@@ -447,6 +447,7 @@ test('E1 package and production import contracts contain only the doctor script 
     'crew:reap', 'crew:watch', 'ledger:eligible-tasks', 'ledger:gate-review-gap',
     'ledger:phases', 'ledger:procs', 'ledger:run-set', 'ledger:sessions', 'ledger:tail',
     'crew:review', 'ledger:task', 'test', 'viz:build', 'viz:dev', 'viz:serve',
+    'model:reeval',
   ].sort())
   const source = readFileSync(join(ROOT, 'scripts/factory/agent-doctor.mjs'), 'utf8')
   const specifiers = [...source.matchAll(/\bfrom\s+['"]([^'"]+)['"]/g)].map((match) => match[1])

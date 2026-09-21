@@ -29,6 +29,7 @@ import {
   openLedger,
   defaultDbPath,
 } from './ledger.mjs'
+import { composeMoves, readLadder } from '../../visualizer/server/roster-ladder.mjs'
 
 export const EVAL_REFUSALS = Object.freeze([
   'bench-unreadable', 'bench-sha-mismatch',
@@ -251,16 +252,9 @@ function gateAsserts(gate = null) {
 
 export async function compileBench({ dir, deps = {} } = {}) {
   deps = normalDeps(deps)
-  const source = readBench(dir)
-  const sha = benchSha({
-    task: source.task,
-    gate: source.gate,
-    judge: source.judgeText,
-    candidates: source.candidatesText,
-  })
-  if (sha !== source.benchSha) {
-    throw refusal('bench-sha-mismatch', `bench.sha ${source.benchSha} does not match the digest of task.md, gate.mjs, judge.json and candidates.json (${sha})`)
-  }
+  const meta = readBenchMeta(dir)
+  const source = meta.source
+  const sha = meta.sha
 
   let baseline
   try {
@@ -546,9 +540,418 @@ export async function runBench({ dir, deps = {} } = {}) {
   return {
     bench: bench.sha,
     task_sha: createHash('sha256').update(bench.task).digest('hex'),
+    role: bench.role,
+    tier: bench.tier ?? null,
     routing_choice: routingChoice,
     cells: recorded,
     production: bench.production,
+  }
+}
+
+// --all-seats re-evaluation cadence ---------------------------------------------
+// Offline-testable sweep over every tracked authored bench. runBench stays the
+// only candidate runner/writer; this section only discovers benches, shapes the
+// report, classifies stored absences, and composes (never applies) a roster diff.
+
+const CANDIDATES_BASENAME = 'candidates.json'
+const ALL_SEATS_ROSTER_PATH = 'crew/roster.json'
+
+export function isMeasuredCell(row) {
+  return row?.absent_reason == null && row?.asserts_declared != null && row?.asserts_passed != null
+}
+
+function cellRate(row) {
+  const numerator = row?.asserts_passed ?? null
+  const denominator = row?.asserts_declared ?? null
+  const value = Number.isSafeInteger(numerator) && Number.isSafeInteger(denominator) && denominator > 0
+    ? numerator / denominator
+    : null
+  return { numerator, denominator, value }
+}
+
+function routingCellKeyOf(cell) {
+  return [cell?.provider, cell?.id, cell?.agent, cell?.effort].map((value) => String(value ?? '')).join('\u001f')
+}
+
+function defaultListTrackedFiles(checkout, { spawn = spawnSync } = {}) {
+  const result = spawn('git', ['ls-files', '-z', '--', ':(glob)**/candidates.json'], {
+    cwd: checkout,
+    encoding: 'utf8',
+  })
+  if (result?.error) throw refusal('bench-unreadable', `tracked bench discovery failed (${result.error.message || String(result.error)})`)
+  if (result?.signal) throw refusal('bench-unreadable', `tracked bench discovery was interrupted by ${result.signal}`)
+  if (result?.status !== 0) {
+    throw refusal('bench-unreadable', `git ls-files exited ${String(result?.status)} (${String(result?.stderr || result?.stdout || '').trim()})`)
+  }
+  return String(result?.stdout || '').split('\0')
+}
+
+export async function discoverAuthoredBenches({ checkout = CHECKOUT, deps = {} } = {}) {
+  const root = resolve(String(checkout || ''))
+  let paths
+  if (typeof deps?.listTrackedFiles === 'function') {
+    paths = await deps.listTrackedFiles(root)
+  } else {
+    paths = defaultListTrackedFiles(root, { spawn: deps?.spawnSync ?? spawnSync })
+  }
+  if (!Array.isArray(paths)) throw refusal('bench-unreadable', 'tracked bench discovery returned no path list')
+  const dirs = new Set()
+  for (const entry of paths) {
+    const text = String(entry || '').replace(/\\/g, '/').replace(/^\.\//, '').trim()
+    if (!text) continue
+    if (text !== CANDIDATES_BASENAME && !text.endsWith(`/${CANDIDATES_BASENAME}`)) continue
+    const slash = text.lastIndexOf('/')
+    dirs.add(slash < 0 ? '.' : text.slice(0, slash))
+  }
+  const sorted = [...dirs].sort()
+  if (sorted.length === 0) throw refusal('bench-unreadable', 'no tracked candidates.json bench was discovered — refusing an empty sweep')
+  return sorted
+}
+
+export function classifyStoredAbsences(rows = []) {
+  const input = Array.isArray(rows) ? rows : []
+  const current = new Set(EVAL_ABSENT_REASONS)
+  const current_reasons = {}
+  const legacy_reasons = {}
+  let measured = 0
+  for (const row of input) {
+    const reason = row?.absent_reason ?? null
+    if (reason == null) {
+      measured += 1
+      continue
+    }
+    if (current.has(reason)) current_reasons[reason] = (current_reasons[reason] ?? 0) + 1
+    else legacy_reasons[String(reason)] = (legacy_reasons[String(reason)] ?? 0) + 1
+  }
+  const current_total = Object.values(current_reasons).reduce((sum, count) => sum + count, 0)
+  const legacy_total = Object.values(legacy_reasons).reduce((sum, count) => sum + count, 0)
+  return {
+    total: input.length,
+    measured,
+    absent: current_total + legacy_total,
+    current_total,
+    legacy_total,
+    current_reasons,
+    legacy_reasons,
+    policy: 'Legacy stored absent reasons (such as seat-refused) are retained as historical unmeasured evidence: they stay in the stored-row denominator, are excluded from current-reason membership and proposal evidence, and are not current enum members.',
+  }
+}
+
+// Read-only bench identity: readBench plus the digest comparison, shared by
+// compileBench and the all-seats sweep so trust-boundary validation is never
+// duplicated. Returns the bench SHA with the authored role, tier, candidates
+// and declared production; it never probes endpoints or writes ledger rows.
+export function readBenchMeta(dir, { readBench: readFn = readBench } = {}) {
+  const source = readFn(dir)
+  const sha = benchSha({
+    task: source.task,
+    gate: source.gate,
+    judge: source.judgeText,
+    candidates: source.candidatesText,
+  })
+  if (sha !== source.benchSha) {
+    throw refusal('bench-sha-mismatch', `bench.sha ${source.benchSha} does not match the digest of task.md, gate.mjs, judge.json and candidates.json (${sha})`)
+  }
+  const document = source.candidates
+  return {
+    sha,
+    role: document?.role ?? null,
+    tier: NON_BLANK(document?.tier) ? document.tier : null,
+    candidates: Array.isArray(document?.candidates) ? document.candidates : [],
+    production: document?.production ?? null,
+    source,
+  }
+}
+
+// A refused bench stays named: the report carries the refusal reason and no
+// placeholder candidate row is ever shaped or written for it.
+function refusedSeatReport(dir, err) {
+  return {
+    seat: dir, path: dir, role: null, tier: null, effective_tier: null,
+    runs_attempted: 0, measured: 0, absent: 0, absent_by_reason: {},
+    refusal: err?.refusal ?? 'bench-unreadable', refusal_detail: err?.detail ?? err?.message ?? String(err),
+  }
+}
+
+function shapeCandidateRow(seat, row) {
+  // Missing metrics stay null, never 0: a null gate numerator/denominator is
+  // unmeasured, and defaulting it to zero would fabricate a measured failure.
+  return {
+    seat,
+    bench: row?.bench ?? null,
+    provider: row?.provider ?? null,
+    model_id: row?.model_id ?? row?.id ?? null,
+    agent: row?.agent ?? null,
+    effort: row?.effort ?? null,
+    role: row?.role ?? null,
+    production: row?.production ?? null,
+    asserts_declared: row?.asserts_declared ?? null,
+    asserts_passed: row?.asserts_passed ?? null,
+    absent_reason: row?.absent_reason ?? null,
+    duration_ms: row?.duration_ms ?? null,
+    rate: cellRate(row),
+  }
+}
+
+async function defaultReadStoredRows({ ledger, benches = [] } = {}) {
+  if (!ledger || typeof ledger.evalCells !== 'function') {
+    throw new Error('model-eval: a ledger with evalCells is required to read stored rows')
+  }
+  const rows = []
+  for (const sha of [...new Set(benches.filter((value) => typeof value === 'string' && value))]) {
+    const found = await ledger.evalCells({ bench: sha })
+    if (Array.isArray(found)) rows.push(...found)
+  }
+  const stats = typeof ledger.stats === 'function' ? ledger.stats() : null
+  if (stats?.degraded === true) {
+    const why = stats?.degraded_reason ?? stats?.degraded_message ?? 'unknown'
+    throw new Error(`model-eval: the stored ledger is degraded (${why}) — unanswerable, not empty`)
+  }
+  return rows
+}
+
+export async function runAllSeats({ provisioned = false, checkout = CHECKOUT, deps = {} } = {}) {
+  const source = deps && typeof deps === 'object' && !Array.isArray(deps) ? deps : {}
+  const nd = normalDeps(source)
+  const runBenchFn = typeof source.runBench === 'function' ? source.runBench : runBench
+  const readMetaFn = typeof source.readBenchMeta === 'function' ? source.readBenchMeta : (dir) => readBenchMeta(dir)
+  const readStoredRows = typeof source.readStoredRows === 'function' ? source.readStoredRows : defaultReadStoredRows
+  const readRosterText = typeof source.readRosterText === 'function' ? source.readRosterText : () => readFileSync(ROSTER, 'utf8')
+  const rosterPath = source.rosterPath ?? ALL_SEATS_ROSTER_PATH
+  const readLadderFn = typeof source.readLadder === 'function' ? source.readLadder : () => readLadder({})
+  const composeMovesFn = typeof source.composeMoves === 'function' ? source.composeMoves : composeMoves
+  const dirs = await discoverAuthoredBenches({ checkout, deps: source })
+  // An uninjected ledger opens read-only on the default path: the dry-run
+  // cadence must not ensure dirs, set WAL, or migrate. runBench writes, so
+  // the provisioned path keeps the writable open.
+  const ledger = nd.ledger ?? (provisioned ? nd.openLedger() : nd.openLedger({ dbPath: defaultDbPath(), readOnly: true }))
+  const seat_reports = []
+  const candidate_rows = []
+  const admitted = []
+  const storedRowsAll = []
+  for (const dir of dirs) {
+    let meta = null
+    let result = null
+    try {
+      meta = await readMetaFn(dir)
+      if (provisioned) result = await runBenchFn({ dir, deps: { ...nd, ledger } })
+    } catch (err) {
+      if (err instanceof EvalRefusal) {
+        seat_reports.push(refusedSeatReport(dir, err))
+        continue
+      }
+      throw err
+    }
+    // The default cadence is strictly read-only: denominators and proposals
+    // come from stored evalCells rows and runBench is never reached. A seat
+    // with no stored rows stays reported as unmeasured, never as zero
+    // performance and never as a failure.
+    let cells
+    let stored_error = null
+    if (provisioned) {
+      cells = Array.isArray(result?.cells) ? result.cells : []
+    } else {
+      try {
+        const found = await readStoredRows({ ledger, benches: [meta.sha], dirs: [dir], deps: nd })
+        cells = Array.isArray(found) ? found.filter((row) => row == null || row.bench == null || row.bench === meta.sha) : []
+      } catch (err) {
+        stored_error = err?.message || String(err)
+        cells = []
+      }
+    }
+    // Role and tier come from the read-only bench authority by default; a
+    // provisioned runBench return may carry the tier it actually admitted and
+    // ran, which then takes precedence for that seat.
+    const role = provisioned ? (result?.role ?? meta.role) : meta.role
+    const declaredTier = provisioned
+      ? (NON_BLANK(result?.tier) ? result.tier : meta.tier)
+      : meta.tier
+    const effective_tier = declaredTier ?? BENCH_DEFAULT_ROUTING_TIER
+    let measured = 0
+    const absent_by_reason = {}
+    for (const row of cells) {
+      candidate_rows.push(shapeCandidateRow(dir, row))
+      if (isMeasuredCell(row)) measured += 1
+      else {
+        const reason = row?.absent_reason ?? 'unknown'
+        absent_by_reason[reason] = (absent_by_reason[reason] ?? 0) + 1
+      }
+    }
+    storedRowsAll.push(...cells)
+    const seatReport = {
+      seat: dir, path: dir, role, tier: declaredTier ?? null, effective_tier,
+      runs_attempted: cells.length, measured, absent: cells.length - measured, absent_by_reason,
+      unmeasured_reason: stored_error != null ? 'ledger-degraded' : (cells.length === 0 && !provisioned ? 'no-stored-cells' : null),
+      stored_error,
+      refusal: null,
+    }
+    seat_reports.push(seatReport)
+    admitted.push({ dir, role, tier: effective_tier, result, cells, meta })
+  }
+  const stored_absences = classifyStoredAbsences(storedRowsAll)
+  // A degraded stored read is never a clean sweep: every seat stays reported
+  // with its denominators, but the result cannot read ok:true.
+  const degradedSeats = seat_reports.filter((seat) => seat.stored_error != null).map((seat) => seat.seat)
+  const hasStoredError = degradedSeats.length > 0
+  let policy = null
+  let policyHash = null
+  let policyError = null
+  try {
+    const loaded = nd.loadRoutingPolicy()
+    policy = loaded?.policy ?? null
+    policyHash = loaded?.policyHash ?? null
+    if (!policy || !policyHash) throw new Error('loader returned no policy and hash')
+  } catch (err) {
+    policyError = err
+  }
+  const moves = []
+  const conflicts = []
+  const abstentions = []
+  if (policyError == null) {
+    // Legacy stored rows stay in the denominator above but never enter
+    // proposal evidence: only measured rows and current-enum absences do.
+    const currentReasons = new Set(EVAL_ABSENT_REASONS)
+    const byTarget = new Map()
+    for (const seat of admitted) {
+      if (seat.role == null) {
+        conflicts.push({ tier: seat.tier, role: seat.role, seat: seat.dir, reason: 'role-unknown', detail: 'the admitted bench names no role, so no move is proposed' })
+        continue
+      }
+      const measurements = seat.cells.filter((row) => row?.absent_reason == null || currentReasons.has(row.absent_reason)).map((row) => ({
+        cell: { provider: row?.provider ?? null, id: row?.model_id ?? row?.id ?? null, agent: row?.agent ?? null, effort: row?.effort ?? null },
+        rate: cellRate(row),
+        cost_usd: row?.cost_usd ?? row?.billed_cost_usd ?? null,
+      }))
+      let choice = null
+      try {
+        choice = await nd.materialiseRoutingChoice({
+          policy, policyHash, tier: seat.tier, role: seat.role, measurements, entryPoint: 'bench',
+        })
+      } catch (err) {
+        conflicts.push({ tier: seat.tier, role: seat.role, seat: seat.dir, reason: 'choice-failed', detail: err?.message || String(err) })
+        continue
+      }
+      if (!choice || choice.outcome !== 'chosen' || !choice.chosen_cell) {
+        abstentions.push({ tier: seat.tier, role: seat.role, seat: seat.dir, outcome: choice?.outcome ?? 'unknown' })
+        continue
+      }
+      const key = `${seat.tier}\u001f${seat.role}`
+      if (!byTarget.has(key)) byTarget.set(key, { tier: seat.tier, role: seat.role, cells: new Map(), seats: [] })
+      const group = byTarget.get(key)
+      const cellKey = routingCellKeyOf(choice.chosen_cell)
+      if (!group.cells.has(cellKey)) group.cells.set(cellKey, choice.chosen_cell)
+      group.seats.push(seat.dir)
+    }
+    let seating = null
+    try {
+      seating = JSON.parse(String(await readRosterText()))?.tiers ?? null
+    } catch {
+      seating = null
+    }
+    for (const group of byTarget.values()) {
+      if (group.cells.size > 1) {
+        conflicts.push({
+          tier: group.tier, role: group.role, seats: group.seats,
+          reason: 'conflicting-choices',
+          detail: `benches ${group.seats.join(', ')} disagree on ${group.tier}/${group.role}; no move is proposed`,
+        })
+        continue
+      }
+      const [chosen] = group.cells.values()
+      const current = seating?.[group.tier]?.[group.role] ?? null
+      if (routingCellKeyOf(current) !== routingCellKeyOf(chosen)) {
+        moves.push({ tier: group.tier, role: group.role, cell: { ...chosen } })
+      }
+    }
+  }
+  let proposal
+  if (policyError != null) {
+    proposal = {
+      ok: false, moves, conflicts, abstentions, patch: null, branch: null, commit_subject: null,
+      checks: [], refusals: [{ code: 'routing-policy', message: policyError?.message || String(policyError) }],
+    }
+  } else if (moves.length === 0) {
+    proposal = {
+      ok: !hasStoredError, moves, conflicts, abstentions, patch: null, branch: null, commit_subject: null,
+      checks: [], refusals: [], note: hasStoredError ? 'ledger-degraded' : 'no-roster-changes',
+    }
+  } else {
+    let rosterText = null
+    try {
+      rosterText = String(await readRosterText())
+    } catch (err) {
+      rosterText = null
+    }
+    if (rosterText == null) {
+      proposal = {
+        ok: false, moves, conflicts, abstentions, patch: null, branch: null, commit_subject: null,
+        checks: [], refusals: [{ code: 'roster_unreadable', message: `unable to read roster at ${rosterPath}` }],
+      }
+    } else {
+      const ladder = await readLadderFn()
+      // Non-applying by construction: composeMoves stages a patch and never
+      // writes. applyMoves and any roster writer are never referenced here.
+      const composed = await composeMovesFn({
+        rosterText, rosterPath, moves, ladder, breaker: null, readBreaker: () => null,
+      })
+      proposal = {
+        ok: composed?.ok === true, moves, conflicts, abstentions,
+        patch: composed?.patch ?? null, branch: composed?.branch ?? null,
+        commit_subject: composed?.commit_subject ?? null,
+        checks: composed?.checks ?? [], refusals: composed?.refusals ?? [],
+        roster_sha: createHash('sha256').update(rosterText).digest('hex'),
+        roster_bytes: Buffer.byteLength(rosterText),
+      }
+    }
+  }
+  let provisioned_check
+  if (!provisioned) {
+    provisioned_check = { ran: false, refusal: 'provisioned-flag-required' }
+  } else {
+    const missing = []
+    let real_cells = 0
+    for (const seat of admitted) {
+      const declared = Array.isArray(seat.result?.candidates) && seat.result.candidates.length > 0
+        ? seat.result.candidates.map((candidate) => `${candidate?.provider}/${candidate?.id}`)
+        : [...new Set(seat.cells.map((row) => `${row?.provider}/${row?.model_id ?? row?.id}`))]
+      const realByModel = new Map()
+      for (const row of seat.cells) {
+        if (!isMeasuredCell(row)) continue
+        const key = `${row?.provider}/${row?.model_id ?? row?.id}`
+        realByModel.set(key, (realByModel.get(key) ?? 0) + 1)
+        real_cells += 1
+      }
+      for (const model of declared) {
+        if (realByModel.get(model) !== 1) missing.push({ seat: seat.dir, model, real_cells: realByModel.get(model) ?? 0 })
+      }
+    }
+    provisioned_check = missing.length === 0
+      ? { ran: true, ok: true, real_cells }
+      : {
+        ran: true, ok: false, refusal: 'provisioned-incomplete', missing,
+        detail: `provisioned sweep left ${missing.length} candidate model(s) without exactly one real cell`,
+      }
+  }
+  const ok = proposal.ok === true && provisioned_check.ok !== false && !hasStoredError
+  return {
+    schema: 1,
+    mode: 'all-seats',
+    provisioned,
+    ok,
+    metadata: {
+      mode: 'all-seats',
+      provisioned,
+      seats_discovered: dirs.length,
+      seats_admitted: admitted.length,
+      seats_refused: seat_reports.length - admitted.length,
+    },
+    seat_reports,
+    candidate_rows,
+    stored_absences,
+    stored_ledger: hasStoredError ? { ok: false, reason: 'ledger-degraded', seats: degradedSeats } : { ok: true },
+    proposal,
+    provisioned_check,
+    cell_health: { value: null, reason: 'breaker-unconfigured' },
   }
 }
 
@@ -841,7 +1244,7 @@ export function normalDeps(deps = {}) {
     },
     readRoster: source.readRoster === null ? null : (source.readRoster ?? defaultReadRoster),
     ledger: source.ledger === undefined ? null : source.ledger,
-    openLedger: source.openLedger ?? (() => openLedger({ dbPath: defaultDbPath() })),
+    openLedger: source.openLedger ?? ((options = {}) => openLedger({ dbPath: defaultDbPath(), ...options })),
     now: runtime.now,
     commandResult: runtime.commandResult,
     makeWorktree: runtime.makeWorktree,
@@ -863,6 +1266,23 @@ function cliRefusal(refusalName, detail) {
 export function main(argv = []) {
   return (async () => {
     const args = Array.isArray(argv) ? [...argv] : []
+    if (args[0] === '--all-seats') {
+      const rest = args.slice(1)
+      const provisioned = rest.includes('--provisioned')
+      const unknown = rest.find((arg) => arg !== '--provisioned')
+      if (unknown !== undefined) {
+        return cliRefusal('bench-unreadable', `unknown argument ${JSON.stringify(unknown)} — use --all-seats [--provisioned]`)
+      }
+      try {
+        const report = await runAllSeats({ provisioned })
+        process.stdout.write(`${JSON.stringify(report)}\n`)
+        return report?.ok === false ? 2 : 0
+      } catch (err) {
+        if (err instanceof EvalRefusal) return cliRefusal(err.refusal, err.detail)
+        process.stdout.write(`${JSON.stringify({ error: err?.message || String(err) })}\n`)
+        return 1
+      }
+    }
     const command = args.shift()
     if (command !== 'compile' && command !== 'run') {
       return cliRefusal('bench-unreadable', 'usage: model-eval.mjs <compile|run> --bench <dir>')

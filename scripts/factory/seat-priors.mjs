@@ -44,8 +44,26 @@ function assertWatermark(value) {
   return value;
 }
 
-function defaultLedgerPath() {
-  return process.env.DEVTEAM_LEDGER_JSONL || join(homedir(), '.dev-team', 'factory', 'ledger.jsonl');
+function homeDefaultJsonlPath() {
+  return join(homedir(), '.dev-team', 'factory', 'ledger.jsonl');
+}
+
+function underTest() {
+  return Boolean(process.env.NODE_TEST_CONTEXT);
+}
+
+// The home JSONL is the live factory's authority. A test process that reached it
+// would read 280k real records and, worse, make a green run depend on this
+// machine's history. scripts/factory/ledger.mjs owns the same refusal for the
+// mutable mirror (defaultDbPath, `home_ledger_under_test`); this is that rule for
+// the JSONL, and it is why LEDGER_DOORS warrants this function.
+export function defaultLedgerPath() {
+  if (process.env.DEVTEAM_LEDGER_JSONL) return process.env.DEVTEAM_LEDGER_JSONL;
+  const path = homeDefaultJsonlPath();
+  if (underTest()) {
+    fail(`defaultLedgerPath: refusing the home ledger at ${path} from a process under node --test — set DEVTEAM_LEDGER_JSONL to a temporary path in this process's own environment, or pass --ledger; scripts/factory/seat-priors.mjs owns this refusal [home_ledger_under_test]`);
+  }
+  return path;
 }
 
 // Read exactly the first `watermark` records. Lines past W are never parsed,

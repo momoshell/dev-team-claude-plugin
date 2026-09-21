@@ -118,6 +118,10 @@ test('config.md review_defaults section documents scripts/factory/*.mjs', () => 
 // records the exported reach points and the explicit openers. The registry is
 // deliberately reviewed against every production home-defaulting expression.
 const LEDGER_DOORS = new Map([
+  ['scripts/factory/seat-priors.mjs#defaultLedgerPath', {
+    kind: 'home-default',
+    why: 'seat-priors.mjs defaultLedgerPath reaches ~/.dev-team/factory/ledger.jsonl when DEVTEAM_LEDGER_JSONL is unset, and refuses that path outright under NODE_TEST_CONTEXT — the JSONL counterpart of ledger.mjs defaultDbPath\'s home_ledger_under_test refusal',
+  }],
   ['crew/drive.mjs#driveTask', {
     kind: 'home-default',
     why: 'driveTask resolves the suite-slot root through slotAdmission; without DEVTEAM_LEDGER_DIR it reaches ~/.dev-team/factory/slots',

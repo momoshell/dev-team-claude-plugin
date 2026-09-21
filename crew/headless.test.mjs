@@ -20,9 +20,10 @@ import {
 import { KNOWN_FLAGS, main, wakeVerb } from './factoryctl.mjs'
 import { headlessRpcIo } from './headless-rpc.mjs'
 import { assignmentLine, assignmentPrompt } from './driver.mjs'
-import { cellFailureKind, HEADLESS_TRANSPORT, seatIo } from './seat-io.mjs'
+import { cellFailureKind, HEADLESS_TRANSPORT, readEnvelopeFile, seatIo } from './seat-io.mjs'
 import { DRIVER_GONE_PERIODS, HEARTBEAT_PERIOD_MS } from '../scripts/factory/lane-watch.mjs'
 import { ROOT, forAll, scratchDir, startFileWriter } from '../test/helpers.mjs'
+import { absenceFailure, gitGrepHits } from '../scripts/factory/absence.mjs'
 
 // The final three bytes of each real 2026-08-30 refusal tail, copied
 // byte-for-byte so classification is adjudicated against the provider's own
@@ -126,6 +127,7 @@ function directEnvelopeFixture(raw, role = 'tech-lead') {
   const dir = scratchDir('envelope-repair-')
   const returnsDir = join(dir, 'returns')
   mkdirSync(returnsDir)
+  writeFileSync(join(dir, 'crew.json'), '{}')
   const path = join(returnsDir, `d6.${role}.json`)
   writeFileSync(path, raw)
   const writes = []
@@ -858,6 +860,7 @@ test('wait returns an envelope as soon as it appears', () => {
 
 test('A1 a recorded raw-control envelope continues through the JSON transport', () => {
   const f = fixture()
+  writeFileSync(join(f.dir, 'crew.json'), '{}')
   try {
     const run = f.io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
     writeFileSync(run.returnPath, RECORDED_TECH_LEAD)
@@ -943,6 +946,7 @@ test('B1e a rename between reads cannot turn a repairable envelope terminal', ()
   const returnsDir = join(dir, 'returns')
   mkdirSync(returnsDir)
   const path = join(returnsDir, 'd6.tech-lead.json')
+  writeFileSync(join(dir, 'crew.json'), '{}')
   writeFileSync(path, RECORDED_TECH_LEAD)
   const writes = []
   let reads = 0
@@ -4237,4 +4241,193 @@ test('property: testTargets returns exactly the tagged test files, and any unsaf
     assert.deepEqual(testTargets(command), expected, command)
     assert.equal(testTargets(poisoned), null, poisoned)
   })
+})
+
+// repairshared: the narrow JSON-string C0 repair lives in exactly one leaf
+// module; the RPC/headless and pane readers delegate to it and journal every
+// successful repair beside the lane's crew.json for flat and run-scoped returns.
+
+function repairSharedCrew({ scoped = false } = {}) {
+  const dir = scratchDir('repairshared-')
+  const returnsDir = scoped ? join(dir, 'returns', 'run-1') : join(dir, 'returns')
+  mkdirSync(returnsDir, { recursive: true })
+  writeFileSync(join(dir, 'crew.json'), '{}')
+  return { dir, returnsDir, cleanup: () => rmSync(dir, { recursive: true, force: true }) }
+}
+
+function repairSharedRaw(inner = 'a\nb') {
+  return `{"assignment_id":"d1","role":"builder","status":"done","summary":"${inner}"}`
+}
+
+function repairSharedReaders(role = 'builder') {
+  return [
+    ['rpc', (path, options = {}) => readEnvelopeOrThrow(path, {
+      existsSync, readFileSync, stage: 'headless-parse-error', role, now: () => 1700000000000, ...options,
+    })],
+    ['pane', (path, options = {}) => readEnvelopeFile(path, {
+      existsSync, readFileSync, role, now: () => 1700000000000, ...options,
+    })],
+  ]
+}
+
+function repairSharedStage(name) {
+  return name === 'rpc' ? 'headless-parse-error' : 'pane-parse-error'
+}
+
+test('repairshared/C1 exactly one repair owner with both readers delegating', () => {
+  const scanner = ['function repair', 'JsonStringControls'].join('')
+  assert.equal(absenceFailure({ needle: scanner, paths: ['crew/headless.mjs', 'crew/seat-io.mjs'] }), null)
+  assert.equal(gitGrepHits({ needle: scanner, paths: ['crew/envelope-repair.mjs'] }).count, 1)
+  assert.ok(gitGrepHits({ needle: 'readEnvelopeWithRepair', paths: ['crew/headless.mjs'] }).count >= 1)
+  assert.ok(gitGrepHits({ needle: 'readEnvelopeWithRepair', paths: ['crew/seat-io.mjs'] }).count >= 1)
+})
+
+test('repairshared/D1 malformed UTF-8 is refused on both readers, never repaired', () => {
+  for (const [name, invoke] of repairSharedReaders('tech-lead')) {
+    const dir = scratchDir(`repairshared-d1-${name}-`)
+    const returnsDir = join(dir, 'returns')
+    mkdirSync(returnsDir)
+    writeFileSync(join(dir, 'crew.json'), '{}')
+    const path = join(returnsDir, 'd6.tech-lead.json')
+    writeFileSync(path, Buffer.concat([
+      Buffer.from('{"role":"tech-lead","summary":"', 'utf8'),
+      Buffer.from([0xff]),
+      Buffer.from('\nend"}', 'utf8'),
+    ]))
+    const before = readFileSync(path)
+    const writes = []
+    try {
+      assert.throws(() => invoke(path, { writeFileSync: (...args) => writes.push(args) }), (error) => {
+        assert.equal(error.stage, repairSharedStage(name))
+        assert.equal(cellFailureKind(error), 'unusable-envelope')
+        return true
+      }, name)
+      assert.deepEqual(writes, [], `${name}: a refused envelope records no repair`)
+      assert.equal(readFileSync(path).equals(before), true, `${name}: a refused envelope is untouched`)
+    } finally { rmSync(dir, { recursive: true, force: true }) }
+  }
+})
+
+test('repairshared/E1 parseable non-object JSON stays outside the envelope shape on both readers', () => {
+  for (const [name, invoke] of repairSharedReaders()) {
+    const dir = scratchDir(`repairshared-e1-${name}-`)
+    const returnsDir = join(dir, 'returns')
+    mkdirSync(returnsDir)
+    const path = join(returnsDir, 'd1.builder.json')
+    for (const raw of ['42', '"just a string"']) {
+      writeFileSync(path, raw)
+      const writes = []
+      try {
+        assert.equal(invoke(path, { writeFileSync: (...args) => writes.push(args) }), null, `${name}: ${raw}`)
+        assert.deepEqual(writes, [], `${name}: no repair row for ${raw}`)
+      } finally { rmSync(path, { force: true }) }
+    }
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('repairshared/F1 repaired and terminal reads leave return bytes identical on both readers', () => {
+  for (const [name, invoke] of repairSharedReaders()) {
+    const f = repairSharedCrew()
+    try {
+      const repairedPath = join(f.returnsDir, 'd1.builder.json')
+      const raw = repairSharedRaw()
+      writeFileSync(repairedPath, raw)
+      const before = readFileSync(repairedPath)
+      const value = invoke(repairedPath)
+      assert.equal(value.summary, 'a\nb', `${name}: the authored value parses`)
+      assert.equal(readFileSync(repairedPath).equals(before), true, `${name}: a repair writes nothing back`)
+      const terminalPath = join(f.returnsDir, 'd1.retry.builder.json')
+      const terminal = '{"assignment_id":"d1","role":"builder","status":"done","summary":"x",}'
+      writeFileSync(terminalPath, terminal)
+      const terminalBefore = readFileSync(terminalPath)
+      assert.throws(() => invoke(terminalPath), (error) => {
+        assert.equal(error.stage, repairSharedStage(name))
+        assert.equal(error.raw, terminal)
+        return true
+      }, name)
+      assert.equal(readFileSync(terminalPath).equals(terminalBefore), true, `${name}: a refusal writes nothing back`)
+    } finally { f.cleanup() }
+  }
+})
+
+test('repairshared/G1 flat returns journal beside crew.json, never by path depth', () => {
+  const retired = 'dirname(dirname(path))'
+  assert.equal(absenceFailure({ needle: retired, paths: ['crew/envelope-repair.mjs'] }), null)
+  assert.equal(gitGrepHits({ needle: "join(crewDir, 'journal.jsonl')", paths: ['crew/envelope-repair.mjs'] }).count, 1)
+  const f = repairSharedCrew()
+  try {
+    const returnPath = join(f.returnsDir, 'd1.builder.json')
+    writeFileSync(returnPath, repairSharedRaw())
+    for (const [name, invoke] of repairSharedReaders()) {
+      assert.equal(invoke(returnPath).summary, 'a\nb', `${name}: flat repair parses`)
+    }
+    const rows = readFileSync(join(f.dir, 'journal.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse)
+    assert.equal(rows.length, 2)
+    for (const row of rows) assert.equal(row.event, 'envelope-repair')
+    assert.equal(existsSync(join(f.returnsDir, 'journal.jsonl')), false)
+  } finally { f.cleanup() }
+})
+
+test('repairshared/H1 run-scoped returns journal beside crew.json, never beside the returns dir', () => {
+  const f = repairSharedCrew({ scoped: true })
+  try {
+    const returnPath = join(f.returnsDir, 'd1.builder.json')
+    writeFileSync(returnPath, repairSharedRaw())
+    for (const [name, invoke] of repairSharedReaders()) {
+      assert.equal(invoke(returnPath).summary, 'a\nb', `${name}: scoped repair parses`)
+    }
+    const rows = readFileSync(join(f.dir, 'journal.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse)
+    assert.equal(rows.length, 2)
+    for (const row of rows) {
+      assert.equal(row.event, 'envelope-repair')
+      assert.equal(row.return_path, returnPath)
+    }
+    assert.equal(existsSync(join(f.returnsDir, 'journal.jsonl')), false)
+    assert.equal(existsSync(join(f.dir, 'returns', 'journal.jsonl')), false)
+  } finally { f.cleanup() }
+})
+
+test('repairshared/I1 repair rows carry exact UTF-8 offsets and the caller role', () => {
+  const prefix = '\u{1F600}\u6F22'
+  const raw = `{"role":"builder","summary":"${prefix}\nend","assignment_id":"d1","status":"done"}`
+  const byteOffset = Buffer.byteLength(raw.slice(0, raw.indexOf('\n')), 'utf8')
+  assert.notEqual(byteOffset, raw.slice(0, raw.indexOf('\n')).length, 'the fixture must tell bytes from code units')
+  for (const [name, invoke] of repairSharedReaders()) {
+    const f = repairSharedCrew()
+    try {
+      const returnPath = join(f.returnsDir, 'd1.builder.json')
+      writeFileSync(returnPath, raw)
+      const value = invoke(returnPath)
+      assert.equal(value.summary, `${prefix}\nend`)
+      const rows = readFileSync(join(f.dir, 'journal.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse)
+      assert.equal(rows.length, 1, name)
+      assert.equal(rows[0].escaped_count, 1, name)
+      assert.deepEqual(rows[0].escaped_offsets, [byteOffset], name)
+      assert.equal(rows[0].role, 'builder', name)
+    } finally { f.cleanup() }
+  }
+})
+
+test('a repair with no crew.json ancestor fails closed instead of journaling by depth', () => {
+  for (const [name, invoke] of repairSharedReaders()) {
+    const f = repairSharedCrew()
+    try {
+      const returnPath = join(f.returnsDir, 'd1.builder.json')
+      const raw = repairSharedRaw()
+      writeFileSync(returnPath, raw)
+      const writes = []
+      const hideCrewJson = (p) => !String(p).endsWith('crew.json') && existsSync(p)
+      assert.throws(() => invoke(returnPath, {
+        existsSync: hideCrewJson,
+        writeFileSync: (...args) => writes.push(args),
+      }), (error) => {
+        assert.equal(error.stage, repairSharedStage(name))
+        assert.equal(error.raw, raw)
+        assert.equal(cellFailureKind(error), 'unusable-envelope')
+        return true
+      }, name)
+      assert.deepEqual(writes, [], `${name}: no journal row without a crew directory`)
+    } finally { f.cleanup() }
+  }
 })

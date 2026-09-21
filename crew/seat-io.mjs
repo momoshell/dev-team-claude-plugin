@@ -23,6 +23,7 @@ import { headlessRpcIo as defaultHeadlessRpcIo, teardownOutcome } from './headle
 import { LIVENESS, PHASES, reservationEngine, markerLockName } from './reclaim.mjs'
 import { chunkLedgerChecks, operationalRow, recordRow } from './drive.mjs'
 import { readJsonTri } from './json-leaf.mjs'
+import { readEnvelopeWithRepair } from './envelope-repair.mjs'
 import { modelString as claudeModelString, paneUsageRecords as claudePaneUsageRecords } from './adapters/adapter-claude.mjs'
 import { readSessionUsage } from '../scripts/factory/transcript.mjs'
 import { modelString as piModelString } from './adapters/adapter-pi.mjs'
@@ -1596,24 +1597,17 @@ export function paneTeardownRows(crew, deps = {}) {
 // envelope' about a file sitting on disk). Fail at the READ boundary instead,
 // staged so cellFailureKind maps it onto the EXISTING 'unusable-envelope'
 // kind (:972). No new vocabulary, and no repair of the seat's own file.
+//
+// The repair itself is the shared crew/envelope-repair.mjs boundary: a raw
+// C0 control inside a JSON string parses to its authored value and journals
+// an `envelope-repair` row beside the lane's crew.json, byte-identical on
+// disk. A parseable primitive still has no envelope shape to return, so the
+// shared object-or-null contract maps it to `null` and the wait loop polls it
+// to the seat deadline — the same outcome the RPC reader always had.
 export function readEnvelopeFile(returnPath, deps = {}) {
   const existsSync = deps.existsSync || fsExistsSync
   const readFileSync = deps.readFileSync || fsReadFileSync
-  if (!existsSync(returnPath)) return null
-  let raw
-  // A read that loses a race with a rename, or that comes back denied, is an
-  // ABSENCE and not a defect: the next poll sees the file. Only bytes we
-  // actually read and cannot parse are terminal.
-  try { raw = String(readFileSync(returnPath, 'utf8')) } catch { return null }
-  try { return JSON.parse(raw) } catch (err) {
-    const parseFailure = new Error(`unusable envelope at ${returnPath}: the file EXISTED (${raw.length} bytes) and is not JSON this driver can read: ${err.message}`)
-    parseFailure.stage = 'pane-parse-error'
-    if (deps.role) parseFailure.role = deps.role
-    parseFailure.raw = raw   // the exact bytes that failed to parse, so a re-ask
-    // can tell "not re-emitted yet" from "re-emitted and still broken". Nothing
-    // ever writes them back: reading is not authoring.
-    throw parseFailure
-  }
+  return readEnvelopeWithRepair(returnPath, { ...deps, existsSync, readFileSync, stage: 'pane-parse-error' })
 }
 
 // Who may be re-asked, decided from measured facts only. Exported and pure so

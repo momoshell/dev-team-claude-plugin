@@ -1420,7 +1420,7 @@ test('readEnvelopeFile returns null when the read itself fails', () => {
 
 test("readEnvelopeFile throws a pane-parse-error naming the path, its existence and the parser's position", () => {
   const returnPath = '/tmp/pane-return.json'
-  const malformed = '{"summary":"finished\nthe build"}'
+  const malformed = '{"summary":"finished",}'
   let error
   try {
     readEnvelopeFile(returnPath, {
@@ -1436,6 +1436,30 @@ test("readEnvelopeFile throws a pane-parse-error naming the path, its existence 
   assert.match(error.message, /EXIST/i)
   assert.match(error.message, /position \d+/)
   assert.equal(cellFailureKind(error), 'unusable-envelope')
+})
+
+test('repairshared/A1 pane repair parses, journals beside crew.json, and preserves bytes', () => {
+  const dir = scratchDir('pane-repair-')
+  const returnsDir = join(dir, 'returns')
+  mkdirSync(returnsDir, { recursive: true })
+  writeFileSync(join(dir, 'crew.json'), '{}')
+  const returnPath = join(returnsDir, 'd1.builder.json')
+  const raw = '{"assignment_id":"d1","role":"builder","status":"done","summary":"finished\nthe build"}'
+  writeFileSync(returnPath, raw)
+  const before = readFileSync(returnPath)
+  try {
+    const value = readEnvelopeFile(returnPath, { role: 'builder', now: () => 1700000000000 })
+    assert.equal(value.summary, 'finished\nthe build')
+    assert.equal(readFileSync(returnPath).equals(before), true)
+    const rows = readFileSync(join(dir, 'journal.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse)
+    assert.equal(rows.length, 1)
+    assert.deepEqual(rows[0], {
+      at: 1700000000000, event: 'envelope-repair', outcome: 'repaired', role: 'builder',
+      assignment_id: 'd1', return_path: returnPath, escaped_count: 1,
+      escaped_offsets: [Buffer.byteLength(raw.slice(0, raw.indexOf('\n')), 'utf8')],
+    })
+    assert.equal(existsSync(join(returnsDir, 'journal.jsonl')), false)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
 test('seatIo.wait surfaces a malformed return file immediately as an unusable-envelope cell failure', () => {
@@ -1557,8 +1581,8 @@ function makeRetryHarness({ transport = 'pane', screen = () => '529 Overloaded Â
   } }
 }
 
-const MALFORMED_REASK = '{"assignment_id":"d1","role":"builder","status":"done","summary":"finished\nthe build"}'
-const MALFORMED_REASK_2 = '{"assignment_id":"d1","role":"builder","status":"done","summary":"second\ntry"}'
+const MALFORMED_REASK = '{"assignment_id":"d1","role":"builder","status":"done","summary":"finished",}'
+const MALFORMED_REASK_2 = '{"assignment_id":"d1","role":"builder","status":"done","summary":"second",}'
 const VALID_REASK = JSON.stringify({ assignment_id: 'd1', role: 'builder', status: 'done', summary: 'finished the build', artifacts: [], details: {} })
 
 function makeTransportReaskHarness({ transport = HEADLESS_TRANSPORT, waits = [], assignFails = [], onWait = null, unmeasuredFirst = false, policy = undefined } = {}) {

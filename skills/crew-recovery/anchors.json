@@ -4,8 +4,8 @@
   "scripts/factory/crew-watch.mjs:184": "export function seatLivenessLines(",
   "crew/seat-io.mjs:126": "export const TRANSCRIPT_STALE_MS = 900_000",
   "crew/seat-io.mjs:1719": "export function recogniseProviderRetry(text) {",
-  "crew/drive.mjs:8562": "const completeCheckProof = (label, options = {}) => {",
   "crew/crew.mjs:3800": "escalation -> NEVER teardown",
   "crew/crew.mjs:4457": "seats.proven !== seats.seats || seats.recorded !== seats.seats",
-  "crew/crew.mjs:4344": "const seats = rows.length"
+  "crew/crew.mjs:4344": "const seats = rows.length",
+  "crew/drive.mjs:8573": "const completeCheckProof = (label, options = {}) => {"
 }

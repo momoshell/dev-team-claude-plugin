@@ -4518,8 +4518,19 @@ export function parseSuiteCounts(output) {
     if (!match) continue
     measured[match[1]] = Number(match[2])
   }
-  if (measured.pass === null || measured.fail === null) return null
-  return { pass: measured.pass, fail: measured.fail, skipped: measured.skipped === null ? 0 : measured.skipped }
+  if (measured.pass !== null && measured.fail !== null) return { pass: measured.pass, fail: measured.fail, skipped: measured.skipped === null ? 0 : measured.skipped }
+  const cargo = { pass: 0, fail: 0, skipped: 0 }
+  let cargoMeasured = false
+  for (const line of text.split('\n')) {
+    const cargoMatch = /^test result: (?:ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored; \d+ measured; \d+ filtered out; finished in .+$/.exec(line)
+    if (!cargoMatch) continue
+    cargoMeasured = true
+    cargo.pass += Number(cargoMatch[1])
+    cargo.fail += Number(cargoMatch[2])
+    cargo.skipped += Number(cargoMatch[3])
+  }
+  if (!cargoMeasured) return null
+  return cargo
 }
 
 export function refsFromCommitMessage(message) {

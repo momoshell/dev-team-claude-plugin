@@ -3914,6 +3914,7 @@ test('b600 M1', () => {
 })
 
 test('b600 N1', () => {
+  // Deliberate inline exception: b600 N1 has no anchor-count floor, while assertAnchorsPinned requires one; inventing a floor would change valid deletions.
   const skillDir = join(REPO_ROOT, 'skills/pr-review')
   const result = checkSkillAnchors({ root: REPO_ROOT, skillDir, manifestPath: join(skillDir, 'anchors.json') })
   assert.deepEqual(result.failures, [])

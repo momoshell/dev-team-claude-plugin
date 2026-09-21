@@ -1,0 +1,56 @@
+{
+  "schema": 1,
+  "role": "reviewer",
+  "tier": "build",
+  "production": "anthropic/claude-opus-5",
+  "candidates": [
+    {
+      "provider": "anthropic",
+      "id": "claude-opus-5",
+      "agent": "claude",
+      "effort": "high"
+    },
+    {
+      "provider": "openai",
+      "id": "gpt-5.6-sol",
+      "agent": "pi",
+      "effort": "medium"
+    },
+    {
+      "provider": "anthropic",
+      "id": "claude-fable-5",
+      "agent": "claude",
+      "effort": "medium"
+    },
+    {
+      "provider": "openai",
+      "id": "gpt-6-astra",
+      "agent": "pi",
+      "effort": "medium"
+    },
+    {
+      "provider": "meta",
+      "id": "muse-spark-1.3-contributor",
+      "agent": "pi",
+      "effort": "medium"
+    },
+    {
+      "provider": "openai",
+      "id": "gpt-5.6-terra",
+      "agent": "pi",
+      "effort": "medium"
+    },
+    {
+      "provider": "anthropic",
+      "id": "claude-sonnet-5",
+      "agent": "claude",
+      "effort": "medium"
+    },
+    {
+      "provider": "openai",
+      "id": "gpt-5.6-luna",
+      "agent": "pi",
+      "effort": "medium"
+    }
+  ]
+}

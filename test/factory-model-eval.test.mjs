@@ -1432,3 +1432,236 @@ test('a tiered bench files its routing choice under its own tier, and a tierless
   assert.equal(cellsSeen.length, 1)
   assert.equal(cellsSeen[0][0], 'muse-spark-1.3-contributor', `the mechanical route leads the candidate set: ${JSON.stringify(cellsSeen[0])}`)
 })
+
+import { readdirSync } from 'node:fs'
+
+// 2026-09-21 reviewer and tech-lead benches: offline, answer-free, floor-compliant
+// declarations under docs/audits/2026-09-21/bench. The 2026-09-17 D1 block above
+// is untouched; the live-derivation D1 below is a new test with a distinct name.
+const NEW_BENCH_ROOT = 'docs/audits/2026-09-21/bench'
+const NEW_ROLES = ['reviewer', 'tech-lead']
+const NEW_REQUIRED_FILES = ['README.md', 'bench.sha', 'candidates.json', 'gate.mjs', 'judge.json', 'task.md']
+
+function newBenchPath(role, name) {
+  return join(ROOT, NEW_BENCH_ROOT, role, name)
+}
+
+function newBenchJson(role, name) {
+  return JSON.parse(readFileSync(newBenchPath(role, name), 'utf8'))
+}
+
+function newCandidateKey(candidate) {
+  return `${candidate.provider}/${candidate.id}`
+}
+
+function liveEligibleModels(tier) {
+  const ladder = JSON.parse(readFileSync(join(ROOT, 'crew/model-ladder.json'), 'utf8'))
+  const rankByBand = new Map(ladder.bands.map((band) => [band.band, band.rank]))
+  const rankByModel = new Map()
+  for (const band of ladder.bands) for (const model of band.members) rankByModel.set(model, band.rank)
+  const floor = rankByBand.get(ladder.tier_floors[tier])
+  assert.ok(Number.isSafeInteger(floor), `live ladder must resolve a floor rank for tier ${tier}`)
+  return [...rankByModel].filter(([, rank]) => rank >= floor).map(([model]) => model).sort()
+}
+
+function liveRosterCell(role, tier) {
+  const roster = JSON.parse(readFileSync(join(ROOT, 'crew/roster.json'), 'utf8'))
+  const cell = roster.tiers[tier]?.[role]
+  assert.ok(cell, `live roster must seat ${role} at tier ${tier}`)
+  return cell
+}
+
+function newRoleGateFixture(role, outputName, { output = undefined, stray = false } = {}) {
+  const dir = scratchDir(`factory-model-eval-new-gate-${role}-`)
+  mkdirSync(dir, { recursive: true })
+  fixtureGit(dir, ['init', '-q'])
+  writeFileSync(join(dir, 'gate.mjs'), readFileSync(newBenchPath(role, 'gate.mjs'), 'utf8'))
+  fixtureGit(dir, ['add', '.'])
+  fixtureGit(dir, ['-c', 'commit.gpgsign=false', 'commit', '-qm', 'fixture'])
+  mkdirSync(join(dir, '.bench-out'), { recursive: true })
+  if (output !== undefined) writeFileSync(join(dir, outputName), JSON.stringify(output, null, 2))
+  if (stray) writeFileSync(join(dir, 'stray-notes.txt'), 'an unauthorized write\n')
+  return { dir }
+}
+
+function runNewRoleGate(dir) {
+  const result = spawnSync(process.execPath, [join(dir, 'gate.mjs')], { cwd: dir, encoding: 'utf8', env: { ...process.env } })
+  assert.equal(result.error, undefined, `new role gate must start: ${result.error?.message || ''}`)
+  assert.equal(result.signal, null, 'new role gate must not be interrupted')
+  assert.equal(typeof result.status, 'number', 'new role gate must return an exit status')
+  const output = `${result.stdout || ''}\n${result.stderr || ''}`
+  return { ...result, output, summary: gateSummaryFromOutput(output) }
+}
+
+test('A1/B1 new role benches hold exact six-file shape and compile offline', async () => {
+  for (const role of NEW_ROLES) {
+    assert.deepEqual(readdirSync(join(ROOT, NEW_BENCH_ROOT, role)).sort(), NEW_REQUIRED_FILES)
+    const candidates = newBenchJson(role, 'candidates.json')
+    const judge = newBenchJson(role, 'judge.json')
+    assert.equal(candidates.schema, 1)
+    assert.equal(candidates.role, role)
+    assert.ok(typeof candidates.tier === 'string' && candidates.tier.trim() !== '')
+    assert.ok(typeof candidates.production === 'string' && candidates.production.trim() !== '')
+    assert.ok(Array.isArray(candidates.candidates) && candidates.candidates.length > 0)
+    assert.ok(typeof judge.model === 'string' && judge.model.trim() !== '')
+    assert.ok(typeof judge.vendor === 'string' && judge.vendor.trim() !== '')
+    const probes = []
+    const compiled = await compileBench({
+      dir: join(ROOT, NEW_BENCH_ROOT, role),
+      deps: {
+        runGate: async () => ({ total: 3, failed: 1, errored: 0 }),
+        probe: async (url) => { probes.push(url); return true },
+        resolveAdapters: (roles, args, seats) => fixtureAdapters(roles, args, seats),
+      },
+    })
+    assert.equal(compiled.role, role)
+    assert.match(compiled.sha, /^[a-f0-9]{64}$/)
+    assert.equal(probes.length, 0, 'floor-compliant benches ship zero local arms, so no endpoint is probed')
+  }
+})
+
+test('C1 new bench production equals the roster cell at its declared tier', () => {
+  for (const role of NEW_ROLES) {
+    const doc = newBenchJson(role, 'candidates.json')
+    const cell = liveRosterCell(role, doc.tier)
+    assert.equal(doc.production, `${cell.provider}/${cell.id}`)
+    const arm = doc.candidates.find((candidate) => newCandidateKey(candidate) === doc.production)
+    assert.ok(arm, 'production arm must be listed')
+    assert.equal(arm.agent, cell.agent)
+    assert.equal(arm.effort, cell.effort)
+  }
+})
+
+test('D1 new benches admit all and only models at or above the live tier floor', () => {
+  for (const role of NEW_ROLES) {
+    const doc = newBenchJson(role, 'candidates.json')
+    const actual = doc.candidates.map(newCandidateKey).sort()
+    assert.deepEqual(actual, liveEligibleModels(doc.tier))
+    assert.equal(new Set(actual).size, actual.length, 'candidate arms must not repeat')
+  }
+})
+
+test('E1 new bench production occurs exactly once in its own list', () => {
+  for (const role of NEW_ROLES) {
+    const doc = newBenchJson(role, 'candidates.json')
+    assert.equal(doc.candidates.filter((candidate) => newCandidateKey(candidate) === doc.production).length, 1)
+  }
+})
+
+test('F1 new bench digests recompute and reject nonhex and stale digests', async () => {
+  const inputNames = { task: 'task.md', gate: 'gate.mjs', judge: 'judge.json', candidates: 'candidates.json' }
+  for (const role of NEW_ROLES) {
+    const input = {}
+    for (const [name, file] of Object.entries(inputNames)) input[name] = readFileSync(newBenchPath(role, file), 'utf8')
+    const expectedDigest = benchSha(input)
+    assert.match(expectedDigest, /^[a-f0-9]{64}$/)
+    assert.equal(readFileSync(newBenchPath(role, 'bench.sha'), 'utf8').trim(), expectedDigest)
+    for (const name of Object.keys(input)) {
+      assert.notEqual(benchSha({ ...input, [name]: `${input[name]}changed` }), expectedDigest, `${role} digest must change when ${name} changes`)
+    }
+  }
+  const hexless = writeBench({ sha: `${'0'.repeat(63)}z` })
+  assert.equal((await refusalFor({ dir: hexless.dir })).caught?.refusal, 'bench-unreadable')
+  const stale = writeBench({})
+  writeFileSync(join(stale.dir, 'task.md'), `${readFileSync(join(stale.dir, 'task.md'), 'utf8')}changed\n`)
+  assert.equal((await refusalFor({ dir: stale.dir })).caught?.refusal, 'bench-sha-mismatch')
+})
+
+test('G1 new role gate contract', () => {
+  const specs = [
+    {
+      role: 'reviewer',
+      output: '.bench-out/reviewer-review.json',
+      valid: { schema: 1, verdict: 'request-changes', findings: [{ id: 'R1', severity: 'major', path: 'lib/retry.mjs', line: 4, message: 'Line 4 halves the attempt-0 wait: the exponent must be attempt, not attempt - 1.' }] },
+      malformed: [
+        {},
+        { schema: 1, verdict: 'pass', findings: [] },
+      ],
+    },
+    {
+      role: 'tech-lead',
+      output: '.bench-out/tech-lead-adjudication.json',
+      valid: { schema: 1, decision: 'changes-required', dispositions: [{ finding_id: 'T1', disposition: 'uphold', rationale: 'Line 4 contradicts the stated attempt-0 wait.' }, { finding_id: 'T2', disposition: 'dismiss', rationale: 'The contract requires a nonnegative safe integer.' }] },
+      malformed: [
+        {},
+        { schema: 1, decision: 'approved', dispositions: [] },
+      ],
+    },
+  ]
+  for (const spec of specs) {
+    const green = runNewRoleGate(newRoleGateFixture(spec.role, spec.output, { output: spec.valid }).dir)
+    assert.equal(green.status, 0, green.output)
+    assert.deepEqual(green.summary, { total: 3, failed: 0, errored: 0 })
+    const absent = runNewRoleGate(newRoleGateFixture(spec.role, spec.output).dir)
+    assert.notEqual(absent.status, 0, `${spec.role} gate must be red when its output is absent`)
+    assert.match(absent.output, /^(FAIL R1|FAIL J1): .*missing/m)
+    assert.equal(absent.summary.errored, 0)
+    for (const output of spec.malformed) {
+      const red = runNewRoleGate(newRoleGateFixture(spec.role, spec.output, { output }).dir)
+      assert.notEqual(red.status, 0, `${spec.role} gate must be red for malformed output ${JSON.stringify(output)}`)
+      assert.match(red.output, /^FAIL (R1|R2|J1|J2): /m)
+      assert.equal(red.summary.errored, 0)
+    }
+    const stray = runNewRoleGate(newRoleGateFixture(spec.role, spec.output, { output: spec.valid, stray: true }).dir)
+    assert.notEqual(stray.status, 0, `${spec.role} gate must be red when a stray file is written`)
+    assert.match(stray.output, /^FAIL W1: wrote outside the declared output /m)
+  }
+})
+
+test('H1 local candidate contract', async () => {
+  const synthetic = { source: 'local', provider: 'llama-swap', id: 'h1-contract-local', agent: 'pi', effort: 'medium', base_url: 'http://127.0.0.1:65531/h1-contract' }
+  for (const role of NEW_ROLES) {
+    const doc = newBenchJson(role, 'candidates.json')
+    assert.equal(doc.candidates.filter((candidate) => candidate.source === 'local').length, 0, 'shipped benches carry zero local arms')
+    const dir = scratchDir(`factory-model-eval-h1-${role}-`)
+    mkdirSync(dir, { recursive: true })
+    const input = {}
+    for (const [name, file] of Object.entries({ task: 'task.md', gate: 'gate.mjs', judge: 'judge.json' })) {
+      input[name] = readFileSync(newBenchPath(role, file), 'utf8')
+      writeFileSync(join(dir, file), input[name])
+    }
+    const withLocal = [...doc.candidates.map((candidate) => ({ ...candidate })), { ...synthetic }]
+    input.candidates = `${JSON.stringify({ schema: 1, role: doc.role, tier: doc.tier, production: doc.production, candidates: withLocal }, null, 2)}\n`
+    writeFileSync(join(dir, 'candidates.json'), input.candidates)
+    writeFileSync(join(dir, 'bench.sha'), `${benchSha(input)}\n`)
+    const probes = []
+    const deps = {
+      runGate: async () => ({ total: 3, failed: 1, errored: 0 }),
+      probe: async (url) => { probes.push(url); return true },
+      resolveAdapters: (roles, args, seats) => fixtureAdapters(roles, args, seats),
+    }
+    const compiled = await compileBench({ dir, deps })
+    assert.equal(compiled.candidates.length, withLocal.length)
+    assert.deepEqual(probes, [synthetic.base_url])
+    const cloned = withLocal.map((candidate) => ({ ...candidate }))
+    const c = cloned.at(-1)
+    delete c.base_url
+    const withoutUrl = `${JSON.stringify({ schema: 1, role: doc.role, tier: doc.tier, production: doc.production, candidates: cloned }, null, 2)}\n`
+    writeFileSync(join(dir, 'candidates.json'), withoutUrl)
+    writeFileSync(join(dir, 'bench.sha'), `${benchSha({ ...input, candidates: withoutUrl })}\n`)
+    assert.equal((await refusalFor({ dir, ...deps })).caught?.refusal, 'bench-unreadable')
+  }
+})
+
+test('I1 answer-free task contract', () => {
+  const normalize = (text) => text.replace(/\s+/g, ' ')
+  const reviewer = normalize(readFileSync(newBenchPath('reviewer', 'task.md'), 'utf8'))
+  const techLead = normalize(readFileSync(newBenchPath('tech-lead', 'task.md'), 'utf8'))
+  assert.ok(reviewer.includes('verdict: one of `pass` or `request-changes`'), 'reviewer task pins its shape-only verdict line')
+  assert.ok(readFileSync(newBenchPath('reviewer', 'task.md'), 'utf8').split('\n').some((line) => line.trim() === 'Write only .bench-out/reviewer-review.json.'), 'reviewer task pins its write boundary')
+  for (const pattern of [/"R1"/, /"verdict"\s*:\s*"[^"]*"/, /"request-changes"/, /"severity"\s*:\s*"(major|minor)"/]) {
+    assert.equal(pattern.test(reviewer), false, `reviewer task must not contain a filled answer matching ${pattern}`)
+  }
+  assert.ok(techLead.includes('decision: one of `approved` or `changes-required`'), 'tech-lead task pins its shape-only decision line')
+  for (const pattern of [/"T[12]"/, /"decision"\s*:\s*"[^"]*"/, /"changes-required"/, /"disposition"\s*:\s*"(uphold|dismiss)"/, /"uphold"/, /"dismiss"/]) {
+    assert.equal(pattern.test(techLead), false, `tech-lead task must not contain a filled answer matching ${pattern}`)
+  }
+})
+
+test('RV1-1 snippet line 5 sleeps unconditionally', () => {
+  for (const role of NEW_ROLES) {
+    const task = readFileSync(newBenchPath(role, 'task.md'), 'utf8')
+    assert.ok(task.includes('    await sleep(delay);'), `${role} snippet line 5 must sleep unconditionally`)
+    assert.equal(task.includes('if (attempt > 0)'), false, `${role} snippet must not skip the attempt-0 wait`)
+  }
+})

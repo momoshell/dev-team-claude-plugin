@@ -269,6 +269,8 @@ export function turnCeilingFlagArgs(runFlags = {}) {
 export const ROSTER_PATH = fileURLToPath(new URL('../../crew/roster.json', import.meta.url))
 const COMPILER_PATH = fileURLToPath(new URL('./make-brief.mjs', import.meta.url))
 const CREW_PATH = fileURLToPath(new URL('../../crew/crew.mjs', import.meta.url))
+const DISPATCH_PATH = fileURLToPath(new URL('./dispatch-batch.mjs', import.meta.url))
+const WATCH_PATH = fileURLToPath(new URL('./crew-watch.mjs', import.meta.url))
 // Boot's own closed band-floor reason enum (crew/crew.mjs:770). A boot refusal
 // carrying one of these is a ratified FLOOR refusal, not a generic boot failure,
 // and the dispatcher names it rather than swallowing it as boot-failed.
@@ -3797,7 +3799,7 @@ export function runCommand({ lane, laneDir, briefPath, files, execution, keep, r
 }
 
 function resumeCommand({ batchDir, fences, checkout, parentDir, outDir, tier, execution, runFlags = {}, wave }) {
-  const args = ['node', 'scripts/factory/dispatch-batch.mjs']
+  const args = ['node', DISPATCH_PATH]
   const add = (flag, value) => {
     if (value === undefined || value === null || value === '') return
     args.push(`--${flag}`, String(value))
@@ -4423,7 +4425,7 @@ function launchDispatchWave(compiled) {
     if (pid !== null) {
       try { writeFileSync(join(crewDir, 'run.pid'), `${pid}\n`) } catch { /* a lane never fails for want of a diagnostic */ }
     }
-    const watchArgs = ['scripts/factory/crew-watch.mjs', item.lane, '--follow']
+    const watchArgs = [WATCH_PATH, item.lane, '--follow']
     d.log(`dispatch-batch: watch lane=${item.lane} crew_dir=${crewDir} journal=${journal} run_log=${runLog} run pid=${pid ?? 'none'} command=node ${watchArgs.join(' ')}`)
     runs.push({ lane: item.lane, laneDir: item.plan.dir, result: run, crewDir, journal, runLog, watch: { file: 'node', args: watchArgs, cwd: root }, workspaceId: item.workspaceId, staffing: item.staffing, record: item.record })
   }

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { appendFileSync as fsAppendFileSync, existsSync as fsExistsSync, mkdirSync, readFileSync, readdirSync as fsReaddirSync, rmSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, isAbsolute, join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import {
@@ -5775,4 +5775,141 @@ test('suite-cost warns without admitting when the lane already fences the suite'
   const summary = logs.find((line) => line.startsWith('dispatch-batch: WARNING-SUMMARY '))
   assert.ok(summary)
   assert.equal(summary.includes('suite-cost=1'), true)
+})
+
+test('A1 watch log uses module-absolute path', async () => {
+  const result = await dispatchFixture({ label: 'b883-A1', names: ['lane-a'] })
+  const line = result.logs.find((entry) => entry.includes('watch lane=lane-a'))
+  assert.ok(line, 'a dispatched lane must print a watch command')
+  const script = line.split('command=node ')[1].split(' ')[0]
+  assert.equal(isAbsolute(script), true, `watch script must be absolute: ${script}`)
+  assert.equal(script, join(repoRoot, 'scripts', 'factory', 'crew-watch.mjs'))
+})
+
+test('B1 deferred resume uses module-absolute path', async () => {
+  const result = await dispatchFixture({
+    label: 'b883-B1',
+    names: ['lane-a', 'lane-b'],
+    requests: { 'lane-b': requestFor('lane-b', { depends_on: ['lane-a'] }) },
+    runFlags: { wave: '1' },
+  })
+  const line = result.logs.find((entry) => entry.startsWith('dispatch-batch: deferred lane=lane-b '))
+  assert.ok(line, 'wave one must print a resume command for the deferred lane')
+  const script = line.split('resume=node ')[1].split(' ')[0]
+  assert.equal(isAbsolute(script), true, `resume script must be absolute: ${script}`)
+  assert.equal(script, join(repoRoot, 'scripts', 'factory', 'dispatch-batch.mjs'))
+})
+
+test('C1 printed operator script paths exist', async () => {
+  const result = await dispatchFixture({
+    label: 'b883-C1',
+    names: ['lane-a', 'lane-b'],
+    requests: { 'lane-b': requestFor('lane-b', { depends_on: ['lane-a'] }) },
+    runFlags: { wave: '1' },
+  })
+  const watchLine = result.logs.find((entry) => entry.includes('watch lane=lane-a'))
+  assert.ok(watchLine, 'wave one must print a watch command for the dispatched lane')
+  const watchScript = watchLine.split('command=node ')[1].split(' ')[0]
+  const resumeLine = result.logs.find((entry) => entry.startsWith('dispatch-batch: deferred lane=lane-b '))
+  assert.ok(resumeLine, 'wave one must print a resume command for the deferred lane')
+  const resumeScript = resumeLine.split('resume=node ')[1].split(' ')[0]
+  assert.equal(isAbsolute(watchScript), true)
+  assert.equal(isAbsolute(resumeScript), true)
+  assert.equal(fsExistsSync(watchScript), true, `watch script must exist: ${watchScript}`)
+  assert.equal(fsExistsSync(resumeScript), true, `resume script must exist: ${resumeScript}`)
+})
+
+test('D1 watch result and log use same path', async () => {
+  const result = await dispatchFixture({ label: 'b883-D1', names: ['lane-a'] })
+  const line = result.logs.find((entry) => entry.includes('watch lane=lane-a'))
+  assert.ok(line, 'a dispatched lane must print a watch command')
+  const script = line.split('command=node ')[1].split(' ')[0]
+  assert.equal(script, result.report.lanes[0].watch.args[0])
+})
+
+test('E1 resume preserves flag order after script', async () => {
+  const firstArchive = adoptionArchive('b883-e1-first')
+  const secondArchive = adoptionArchive('b883-e1-second')
+  const baseline = put(join(root, 'b883-e1-baseline.json'), JSON.stringify({ sha: 'a'.repeat(40), command: 'npm test', pass: 1, fail: 0, status: 'green' }))
+  const censusA = put(join(root, 'b883-e1-census-a.jsonl'), `${JSON.stringify({ seat_turn_census: turnCensusRow({ turns: 2, out_of_tool_ms: 20, span_ms: 30 }) })}\n`)
+  const censusB = put(join(root, 'b883-e1-census-b.jsonl'), `${JSON.stringify({ seat_turn_census: turnCensusRow({ turns: 3, out_of_tool_ms: 30, span_ms: 40 }) })}\n`)
+  const result = await adoptionDispatchFixture({
+    label: 'b883-e1',
+    names: ['lane-a', 'lane-b'],
+    requests: { 'lane-b': requestFor('lane-b', { depends_on: ['lane-a'] }) },
+    runFlags: {
+      wave: '1',
+      execution: 'full',
+      baseline,
+      'planner-symbols-holdout-fraction': '0.25',
+      'charter-terse-holdout-fraction': '0.5',
+      ...parseCliArgs(['--adopt', `lane-a=${firstArchive}`, '--adopt', `lane-b=${secondArchive}`]),
+      [TURN_CENSUS_FLAG]: [censusA, censusB],
+      'plan-rounds': '2',
+      'build-rounds': '3',
+      'review-rounds': '4',
+      'wait-builder': '100',
+      'wait-planner': '101',
+      'wait-reviewer': '102',
+      'wait-lead': '103',
+      'wait-tech-lead': '104',
+      'validation-lane': 'lane-a',
+      suite: 'my-suite',
+      'max-turns-planner': '70',
+      'max-turns-tech-lead': '71',
+      'max-turns-builder': '72',
+      'max-turns-reviewer': '73',
+      'max-turns-lead': '74',
+      'memory-dir': '/tmp/mem',
+      'memory-backend': 'sqlite',
+      'memory-budget-bytes': '4096',
+      'model-planner': 'raw-model',
+      'agent-planner': 'claude',
+      'no-keep': true,
+      force: true,
+    },
+  })
+  const line = result.logs.find((entry) => entry.startsWith('dispatch-batch: deferred lane=lane-b '))
+  assert.ok(line, 'wave one must print a resume command for the deferred lane')
+  const tokens = line.split('resume=node ')[1].split(' ')
+  assert.equal(tokens[0], join(repoRoot, 'scripts', 'factory', 'dispatch-batch.mjs'))
+  assert.deepEqual(tokens.slice(1), [
+    '--batch', result.batch,
+    '--fences', result.report.registerPath,
+    '--checkout', result.report.lanes[0].watch.cwd,
+    '--parent', result.parent,
+    '--out', result.out,
+    '--execution', 'full',
+    '--assurance', 'quick',
+    '--baseline', baseline,
+    '--planner-symbols-holdout-fraction', '0.25',
+    '--charter-terse-holdout-fraction', '0.5',
+    '--adopt', `lane-a=${firstArchive}`,
+    '--adopt', `lane-b=${secondArchive}`,
+    `--${TURN_CENSUS_FLAG}`, censusA,
+    `--${TURN_CENSUS_FLAG}`, censusB,
+    '--plan-rounds', '2',
+    '--build-rounds', '3',
+    '--review-rounds', '4',
+    '--wait-builder', '100',
+    '--wait-planner', '101',
+    '--wait-reviewer', '102',
+    '--wait-lead', '103',
+    '--wait-tech-lead', '104',
+    '--validation-lane', 'lane-a',
+    '--suite', 'my-suite',
+    '--max-turns-planner', '70',
+    '--max-turns-tech-lead', '71',
+    '--max-turns-builder', '72',
+    '--max-turns-reviewer', '73',
+    '--max-turns-lead', '74',
+    '--memory-dir', '/tmp/mem',
+    '--memory-backend', 'sqlite',
+    '--memory-budget-bytes', '4096',
+    '--agent-planner', 'claude',
+    '--model-planner', 'raw-model',
+    '--no-keep',
+    '--force',
+    '--wave', '2',
+  ])
 })

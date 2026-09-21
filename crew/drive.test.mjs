@@ -3024,12 +3024,27 @@ test('shellArg round-trips through a real /bin/sh without executing payload meta
   } finally { rmSync(sentinel, { force: true }) }
 })
 
-test('parseSuiteCounts handles TAP, default reporter, ANSI, and last-summary precedence', () => {
+test('A1 parseSuiteCounts handles TAP, default reporter, ANSI, and last-summary precedence', () => {
   assert.deepEqual(parseSuiteCounts('# pass 2\n# fail 1\n# skipped 3\n'), { pass: 2, fail: 1, skipped: 3 })
   assert.deepEqual(parseSuiteCounts('ℹ pass 4\nℹ fail 0\nℹ skipped 1\n'), { pass: 4, fail: 0, skipped: 1 })
   assert.deepEqual(parseSuiteCounts('\x1b[32m# pass 5\x1b[0m\n\x1b[31m# fail 0\x1b[0m\n'), { pass: 5, fail: 0, skipped: 0 })
   assert.deepEqual(parseSuiteCounts('# pass 1\n# fail 9\n# pass 2910\n# fail 0\n# skipped 4\n'), { pass: 2910, fail: 0, skipped: 4 })
   assert.equal(parseSuiteCounts('# pass 1\n'), null)
+})
+
+test('B1 parseSuiteCounts parses one Cargo binary', () => {
+  assert.deepEqual(parseSuiteCounts('test result: ok. 176 passed; 0 failed; 4 ignored; 0 measured; 2 filtered out; finished in 0.05s\n'), { pass: 176, fail: 0, skipped: 4 })
+})
+
+test('C1 parseSuiteCounts sums all Cargo binaries', () => {
+  assert.deepEqual(parseSuiteCounts([
+    'test result: ok. 3 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s',
+    'test result: ok. 5 passed; 0 failed; 2 ignored; 0 measured; 1 filtered out; finished in 0.02s',
+  ].join('\n')), { pass: 8, fail: 0, skipped: 3 })
+})
+
+test('E1 parseSuiteCounts preserves a nonzero Cargo failure count', () => {
+  assert.deepEqual(parseSuiteCounts('test result: FAILED. 52 passed; 3 failed; 7 ignored; 0 measured; 0 filtered out; finished in 0.05s\n'), { pass: 52, fail: 3, skipped: 7 })
 })
 
 test('an unarmed context retains the legacy local finish without rebase or publication stages', () => {

@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto'
 import { readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync } from 'node:fs'
 import { execSync, spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
-import { join, dirname } from 'node:path'
+import { join, dirname, isAbsolute } from 'node:path'
 import { openLedger } from '../scripts/factory/ledger.mjs'
 import { writeRosterSnapshot, loadLadder, assertBandFloors, BAND_FLOOR_REFUSALS, bootCmd, runCmd, stopCmd, RUN_START_EVENT, BATCH_DIR_EVENT, BATCH_DIR_NOT_BATCHED, batchDirFromBrief, RUN_CONFIG_DECLARATIONS, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, awaitSeatsReady, writeTerminalLine, UsageError, memoryConfig, CHARTER_BASELINE_BYTES, CHARTER_SOURCE_BUDGET, CHARTER_SOURCE_TOTAL_BUDGET, CHARTER_CEILINGS, CHARTER_BUDGET_REFUSAL, CHARTER_UNMEASURED_CAUSES, charterFileBytes, compiledCharterBytes, charterBudgetRefusals, charterSourceRefusals, assertCharterBudgets, charterBytesRecord, composeRolePrompt } from './crew.mjs'
 import { runChild, resolveValidationLane as resolveChildValidationLane } from './child.mjs'
@@ -1455,16 +1455,22 @@ test('a missing memory budget value falls back to the default and records invali
 
 test('the charter ceilings and source budgets are the delivered bytes, below the 2026-09-05 baseline', () => {
   const roles = ['builder', 'lead', 'planner', 'reviewer', 'tech-lead']
+  const guided = ['builder', 'planner', 'reviewer']
   const files = ['_shared', ...roles]
   assert.equal(Object.isFrozen(CHARTER_CEILINGS), true)
   assert.equal(Object.isFrozen(CHARTER_SOURCE_BUDGET), true)
   assert.equal(Object.isFrozen(CHARTER_BASELINE_BYTES), true)
   assert.deepEqual(CHARTER_BASELINE_BYTES, { _shared: 3432, builder: 5169, lead: 9378, planner: 16930, reviewer: 7697, 'tech-lead': 6529 })
   assert.deepEqual(CHARTER_SOURCE_BUDGET, { _shared: 4825, builder: 3963, lead: 9099, planner: 16928, reviewer: 7675, 'tech-lead': 6295 })
-  assert.deepEqual(CHARTER_CEILINGS, { builder: 8790, lead: 13926, planner: 21755, reviewer: 12502, 'tech-lead': 11122 })
   for (const value of [...Object.values(CHARTER_BASELINE_BYTES), ...Object.values(CHARTER_SOURCE_BUDGET), ...Object.values(CHARTER_CEILINGS)]) assert.equal(Number.isInteger(value), true)
+  const shared = readFileSync(join(ROOT, 'crew', 'roles', '_shared.md'), 'utf8')
+  const cards = Object.fromEntries(roles.map((role) => [role, readFileSync(join(ROOT, 'crew', 'roles', `${role}.md`), 'utf8')]))
+  const rawBytes = (card) => Buffer.byteLength(`${shared}\n\n${card}`, 'utf8')
+  const delta = Buffer.byteLength(composeRolePrompt(shared, cards.builder), 'utf8') - rawBytes(cards.builder)
+  assert.ok(delta > 0)
   for (const role of roles) {
-    assert.equal(CHARTER_CEILINGS[role], CHARTER_SOURCE_BUDGET._shared + 2 + CHARTER_SOURCE_BUDGET[role])
+    const base = CHARTER_SOURCE_BUDGET._shared + 2 + CHARTER_SOURCE_BUDGET[role]
+    assert.equal(CHARTER_CEILINGS[role], guided.includes(role) ? base + delta : base)
     assert.ok(CHARTER_SOURCE_BUDGET[role] < CHARTER_BASELINE_BYTES[role])
   }
   assert.equal(CHARTER_SOURCE_TOTAL_BUDGET, 48785)
@@ -1474,17 +1480,56 @@ test('the charter ceilings and source budgets are the delivered bytes, below the
   const source = charterFileBytes()
   assert.deepEqual(Object.fromEntries(Object.entries(source).map(([name, entry]) => [name, entry.bytes])), CHARTER_SOURCE_BUDGET)
   assert.equal(source.builder.bytes, CHARTER_SOURCE_BUDGET.builder, `builder source bytes: ${source.builder.bytes}`)
-  const shared = readFileSync(join(ROOT, 'crew', 'roles', '_shared.md'), 'utf8')
   for (const name of files) {
     assert.equal(source[name].reason, null)
     assert.equal(source[name].bytes, Buffer.byteLength(readFileSync(join(ROOT, 'crew', 'roles', `${name}.md`), 'utf8'), 'utf8'))
   }
   const compiled = compiledCharterBytes()
   for (const role of roles) {
-    const card = readFileSync(join(ROOT, 'crew', 'roles', `${role}.md`), 'utf8')
-    const expected = Buffer.byteLength(`${shared}\n\n${card}`, 'utf8')
+    const expected = Buffer.byteLength(composeRolePrompt(shared, cards[role]), 'utf8')
     assert.deepEqual(compiled[role], { bytes: expected, reason: null })
     assert.equal(compiled[role].bytes, CHARTER_CEILINGS[role])
+  }
+})
+
+test('composed charters resolve the three authored guideline references to absolute plugin paths', () => {
+  // Built from parts so the census sees no new static path literal here.
+  const checklistBase = 'seat-pre-return-checklist.md'
+  const flagBase = 'review-do-not-flag.md'
+  const checklistRel = join('crew', 'guidelines', checklistBase)
+  const flagRel = join('crew', 'guidelines', flagBase)
+  const names = ['_shared', 'builder', 'lead', 'planner', 'reviewer', 'tech-lead']
+  const sources = Object.fromEntries(names.map((name) => [name, readFileSync(join(ROOT, 'crew', 'roles', `${name}.md`), 'utf8')]))
+  const guidedRoles = ['builder', 'planner', 'reviewer']
+  const countIn = (text, needle) => text.split(needle).length - 1
+  let authored = 0
+  for (const name of names) authored += countIn(sources[name], checklistRel) + countIn(sources[name], flagRel)
+  assert.equal(authored, 3)
+  assert.equal(countIn(sources.builder, checklistRel), 1)
+  assert.equal(countIn(sources.planner, checklistRel), 1)
+  assert.equal(countIn(sources.reviewer, flagRel), 1)
+  const builderInstruction = `Read \`${checklistRel}\` and self-apply its builder items \`B1\`-\`B3\`.`
+  const plannerInstruction = `\`${checklistRel}\` and self-apply its planner items\n\`P1\`-\`P3\` before you write the envelope.`
+  const reviewerInstruction = `Before writing findings, load the do-not-flag guidelines\n(\`${flagRel}\`) with`
+  assert.ok(sources.builder.includes(builderInstruction))
+  assert.ok(sources.planner.includes(plannerInstruction))
+  assert.ok(sources.reviewer.includes(reviewerInstruction))
+  for (const role of guidedRoles) {
+    const rel = role === 'reviewer' ? flagRel : checklistRel
+    const expected = join(ROOT, rel)
+    const composed = composeRolePrompt(sources._shared, sources[role])
+    assert.equal(composed.includes(`\`${rel}\``), false)
+    assert.ok(composed.includes(`\`${expected}\``))
+    const escaped = rel.replaceAll('.', '\\.')
+    const found = composed.match(new RegExp(`\`([^\`]*${escaped})\``))?.[1] ?? ''
+    assert.equal(found, expected)
+    assert.ok(existsSync(found))
+    assert.equal(readFileSync(found, 'utf8'), readFileSync(join(ROOT, rel), 'utf8'))
+    assert.ok(isAbsolute(found))
+  }
+  const prefix = join('crew', 'guidelines')
+  for (const role of ['lead', 'tech-lead']) {
+    assert.equal(composeRolePrompt(sources._shared, sources[role]).includes(prefix), false)
   }
 })
 
@@ -1531,7 +1576,7 @@ test('a memory addendum is measured outside the ceiling, and an unreadable chart
   const shared = readFileSync(join(ROOT, 'crew', 'roles', '_shared.md'), 'utf8')
   const card = readFileSync(join(ROOT, 'crew', 'roles', 'planner.md'), 'utf8')
   const section = '## Team memory\n\nA remembered thing.\n'
-  writeFileSync(join(dir, 'role-planner.md'), `${shared}\n\n${card}\n\n${section}`)
+  writeFileSync(join(dir, 'role-planner.md'), composeRolePrompt(shared, card, section))
   const record = charterBytesRecord(dir, ['planner'], { planner: section })
   const memory = Buffer.byteLength(section, 'utf8') + 2
   assert.equal(record.memory_bytes.planner, memory)

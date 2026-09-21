@@ -97,6 +97,8 @@ function assertAgentRefusals(register, agent, activeDimensions, { role = 'unknow
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROLES_DIR = join(HERE, 'roles')
 const SHARED_PROMPT = join(ROLES_DIR, '_shared.md')
+const CHARTER_GUIDELINES_DIR = join(HERE, 'guidelines')
+const CHARTER_GUIDELINE_PATH = /crew\/guidelines\/([\w./-]+\.md)/g
 
 export const HEADLESS_TRANSPORTS = Object.freeze([HEADLESS_TRANSPORT, HEADLESS_RPC_TRANSPORT])
 
@@ -2608,7 +2610,9 @@ export function memoryExtracts(roles, args, taskSlug) {
 // its size is a per-turn cost and nothing measured it. Two DIFFERENT things are
 // bounded here and they must not be confused:
 //   CHARTER_CEILINGS      — per ROLE, the COMPILED base charter writeRolePrompt
-//                           writes: _shared + the 2-byte separator + the card.
+//                           writes: _shared + the 2-byte separator + the card,
+//                           plus the installation-path delta where the card
+//                           names a guideline (builder, planner, reviewer).
 //                           This is the number charter_bytes reports, minus any
 //                           memory addendum, which is measured separately and
 //                           sits OUTSIDE the ceiling (charter_memory_bytes).
@@ -2648,12 +2652,14 @@ export const CHARTER_SOURCE_BUDGET = Object.freeze({
 })
 export const CHARTER_SOURCE_TOTAL_BUDGET = 48785
 
-// Delivered COMPILED bytes, per role: CHARTER_SOURCE_BUDGET._shared + 2 + card.
+// Delivered installation-aware compiled bytes, per role: CHARTER_SOURCE_BUDGET._shared + 2 + card,
+// plus the installation-path delta for the three seats whose cards name a guideline.
+const CHARTER_GUIDELINE_DELTA = Buffer.byteLength(CHARTER_GUIDELINES_DIR, 'utf8') - Buffer.byteLength('crew/guidelines', 'utf8')
 export const CHARTER_CEILINGS = Object.freeze({
-  builder: 8790,
+  builder: 8790 + CHARTER_GUIDELINE_DELTA,
   lead: 13926,
-  planner: 21755,
-  reviewer: 12502,
+  planner: 21755 + CHARTER_GUIDELINE_DELTA,
+  reviewer: 12502 + CHARTER_GUIDELINE_DELTA,
   'tech-lead': 11122,
 })
 
@@ -2677,7 +2683,7 @@ export function compiledCharterBytes(dir = ROLES_DIR, deps = {}) {
   const read = deps.readFileSync || readFileSync
   const sizes = {}
   for (const role of Object.keys(CHARTER_CEILINGS)) {
-    try { sizes[role] = { bytes: Buffer.byteLength(`${read(join(dir, '_shared.md'), 'utf8')}\n\n${read(join(dir, `${role}.md`), 'utf8')}`, 'utf8'), reason: null } }
+    try { sizes[role] = { bytes: Buffer.byteLength(composeRolePrompt(read(join(dir, '_shared.md'), 'utf8'), read(join(dir, `${role}.md`), 'utf8')), 'utf8'), reason: null } }
     catch { sizes[role] = { bytes: null, reason: CHARTER_UNMEASURED_CAUSES[0] } }
   }
   return sizes
@@ -2738,7 +2744,8 @@ export function charterBytesRecord(taskDir, roles, sections = {}, deps = {}) {
 }
 
 export function composeRolePrompt(shared, card, section = '', charterArm = 'control') {
-  const control = `${shared}\n\n${card}${section ? `\n\n${section}` : ''}`
+  const charter = `${shared}\n\n${card}`.replace(CHARTER_GUIDELINE_PATH, (_match, path) => join(CHARTER_GUIDELINES_DIR, path))
+  const control = `${charter}${section ? `\n\n${section}` : ''}`
   const tail = Object.hasOwn(CHARTER_TAILS, charterArm) ? CHARTER_TAILS[charterArm] : ''
   return `${control}${tail}`
 }

@@ -267,6 +267,7 @@ export function turnCeilingFlagArgs(runFlags = {}) {
 // The ratified staffing artifact. A lane may not staff a role its settled tier
 // does not seat, and crew/roster.json is where that is ratified.
 export const ROSTER_PATH = fileURLToPath(new URL('../../crew/roster.json', import.meta.url))
+const COMPILER_PATH = fileURLToPath(new URL('./make-brief.mjs', import.meta.url))
 // Boot's own closed band-floor reason enum (crew/crew.mjs:770). A boot refusal
 // carrying one of these is a ratified FLOOR refusal, not a generic boot failure,
 // and the dispatcher names it rather than swallowing it as boot-failed.
@@ -2734,7 +2735,7 @@ export function measureBatchBaseline({ plans, outDir, checkout, heads, deps } = 
     try {
       result = d.spawn({
         file: 'node',
-        args: ['scripts/factory/make-brief.mjs', '--measure-baseline', path, '--checkout', plans[0].dir],
+        args: [COMPILER_PATH, '--measure-baseline', path, '--checkout', plans[0].dir],
         cwd: plans[0].dir,
       })
     } catch (err) {
@@ -2753,7 +2754,7 @@ export function measureBatchBaseline({ plans, outDir, checkout, heads, deps } = 
 
 function compileCommand({ requestPath, lane, laneDir, registerPath, outDir, baselinePath, issueBodyPath, packOmission = null }) {
   const args = [
-    'scripts/factory/make-brief.mjs',
+    COMPILER_PATH,
     '--request', requestPath,
     '--checkout', laneDir,
     '--fences', registerPath,
@@ -2772,7 +2773,7 @@ function compileCommand({ requestPath, lane, laneDir, registerPath, outDir, base
 // compile that follows is the only other pass (#737).
 function discoverCommand({ requestPath, lane, laneDir, registerPath }) {
   const args = [
-    'scripts/factory/make-brief.mjs',
+    COMPILER_PATH,
     '--discover-reads', lane,
     '--request', requestPath,
     '--checkout', laneDir,

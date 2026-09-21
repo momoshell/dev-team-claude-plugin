@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { appendFileSync as fsAppendFileSync, existsSync as fsExistsSync, mkdirSync, readFileSync, readdirSync as fsReaddirSync, writeFileSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, join, resolve, sep } from 'node:path'
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import {
@@ -144,10 +144,20 @@ const NO_ADMISSION_REPORT_FIXTURE = `{
 }
 `
 
+// These fixtures hand `put` a path taken from a spawned command's argv, and argv now carries the
+// ABSOLUTE path of the real compiler at args[0] (it was a relative string before the compiler was
+// resolved from its own location). One off-by-one in an argv index therefore writes a fixture over
+// a production source file: on 2026-09-21 a transient one replaced scripts/factory/make-brief.mjs
+// with a 106-byte baseline record. Refuse any write outside the scratch root rather than rely on
+// every caller indexing argv correctly.
 function put(path, content) {
-  mkdirSync(dirname(path), { recursive: true })
-  writeFileSync(path, content)
-  return path
+  const target = resolve(String(path))
+  if (target === resolve(repoRoot) || target.startsWith(`${resolve(repoRoot)}${sep}`)) {
+    throw new Error(`fixture write into the checkout: ${target}`)
+  }
+  mkdirSync(dirname(target), { recursive: true })
+  writeFileSync(target, content)
+  return target
 }
 
 function anchorFixtures(checkout, manifests) {

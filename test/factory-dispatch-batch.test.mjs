@@ -2873,6 +2873,57 @@ test('a single-lane batch takes no separate batch measurement', async () => {
   assert.equal(result.report.lanes.length, 1)
 })
 
+test('A1', async () => {
+  const result = await dispatchFixture({ label: 'b878-foreign-check', names: ['lane-a'] })
+  const compile = result.spawned.find(({ args }) => (args || []).some((arg) => String(arg).endsWith('make-brief.mjs')) && (args || []).includes('--out'))
+  assert.ok(compile)
+  assert.equal(compile.args[0], compiler)
+  assert.notEqual(compile.cwd, repoRoot)
+  mkdirSync(compile.cwd, { recursive: true })
+  const checked = spawnSync(process.execPath, ['--check', compile.args[0]], { cwd: compile.cwd, encoding: 'utf8' })
+  assert.equal(checked.status, 0)
+})
+
+test('B1', async () => {
+  const result = await fakedDispatch({ label: 'b878-sites', names: ['lane-a', 'lane-b'], shaFor: () => 'a'.repeat(40) })
+  assert.equal(result.measures.length, 1)
+  assert.equal(result.discovers.length, 2)
+  assert.equal(result.compiles.length, 2)
+  for (const call of [...result.measures, ...result.discovers, ...result.compiles]) {
+    assert.equal(call.file, 'node')
+    assert.equal(call.args[0], compiler)
+  }
+})
+
+test('C1', async () => {
+  const result = await fakedDispatch({ label: 'b878-checkout', names: ['lane-a', 'lane-b'], shaFor: () => 'a'.repeat(40) })
+  assert.equal(result.measures.length, 1)
+  assert.equal(result.discovers.length, 2)
+  assert.equal(result.compiles.length, 2)
+  for (const call of [...result.measures, ...result.discovers, ...result.compiles]) {
+    const indexes = call.args.map((arg, index) => String(arg) === '--checkout' ? index : -1).filter((index) => index !== -1)
+    assert.equal(indexes.length, 1)
+    assert.equal(call.args[indexes[0] + 1], call.cwd)
+  }
+})
+
+test('D1', async () => {
+  const result = await dispatchFixture({ label: 'b878-same-repo', names: ['lane-a'], checkout: repoRoot })
+  const compiles = result.spawned.filter(({ args }) => (args || []).some((arg) => String(arg).endsWith('make-brief.mjs')) && (args || []).includes('--out'))
+  assert.equal(compiles.length, 1)
+  const call = compiles[0]
+  assert.equal(call.args[0], compiler)
+  const requestPath = call.args[call.args.indexOf('--request') + 1]
+  const laneDir = call.args[call.args.indexOf('--checkout') + 1]
+  const registerPath = call.args[call.args.indexOf('--fences') + 1]
+  const outPath = call.args[call.args.indexOf('--out') + 1]
+  assert.deepEqual(call.args, [compiler, '--request', requestPath, '--checkout', laneDir, '--fences', registerPath, '--lane', 'lane-a', '--out', outPath, '--force', '--pack', result.out])
+  assert.equal(call.cwd, laneDir)
+  assert.equal(result.report.lanes.length, 1)
+  assert.equal(result.report.lanes[0].lane, 'lane-a')
+  assert.equal(result.report.lanes[0].result.status, 0)
+})
+
 test('three lanes start compiling before any compile returns', async () => {
   const sha = 'a'.repeat(40)
   const home = join(root, 'concurrency-three-home')

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join, relative } from 'node:path'
 import { ROOT, git, scratchDir } from '../../test/helpers.mjs'
-import { anchorManifestDirs, assertAnchorsPinned, checkAnchors, checkSkillAnchors, citationCarrierTests, collectAnchors, collectNamed, collectRanges, INVERTED_MARK, laneFence, MIN_EXPECTED_LENGTH, partitionShifts, shiftsAreOwedHere, pinnedKey, pinnedLiteralsInTests, repairAnchors, repairAnchorsInPlace, repairCli, resolveNamed, rewriteCitations, skillDocs, PINNED_LITERAL_BLIND_SPOT } from './anchor-pin.mjs'
+import { anchorManifestDirs, assertAnchorsPinned, checkAnchors, classifyCheckRefusal, checkSkillAnchors, citationCarrierTests, collectAnchors, collectNamed, collectRanges, INVERTED_MARK, laneFence, MIN_EXPECTED_LENGTH, partitionShifts, shiftsAreOwedHere, pinnedKey, pinnedLiteralsInTests, repairAnchors, repairAnchorsInPlace, repairCli, resolveNamed, rewriteCitations, skillDocs, PINNED_LITERAL_BLIND_SPOT } from './anchor-pin.mjs'
 
 const EXPECTED = "KEY = 'anchored-sentinel-value'"
 const RANGE_EXPECTED = "RANGE = 'range-first-sentinel-value'"
@@ -900,30 +900,46 @@ test('the discovered anchor-manifest corpus checks clean', () => {
     ["skills/ui-design", "visualizer/web/src/lib/RunDetail.svelte", "manifest has no entry", 1],
     ["skills/ui-design", "visualizer/web/src/lib/TeardownPanel.svelte", "manifest has no entry", 1],
   ]
+  // OWNERSHIP IS PART OF THE IDENTITY. An earlier version carried a manifest per
+  // row and then destructured it away, so an orphan could move to a DIFFERENT
+  // manifest at constant path and count and stay green. The tally is therefore
+  // built by scanning each manifest SEPARATELY — the corpus run above cannot
+  // attribute a refusal to an owner, because the refusal text names none.
   const tally = new Map()
-  for (const line of output.filter((entry) => entry.startsWith('refused '))) {
-    const body = line.slice('refused '.length)
-    const split = body.indexOf(': ')
-    const key = body.slice(0, split)
-    const why = body.slice(split + 2)
-    const path = key.slice(0, key.lastIndexOf(':'))
-    const id = JSON.stringify([path, why])
-    tally.set(id, (tally.get(id) ?? 0) + 1)
+  for (const dir of anchorManifestDirs(join(ROOT, 'skills'))) {
+    const owner = relative(ROOT, dir)
+    const perManifest = []
+    repairCli(['--check', dir, '--root', ROOT], perManifest.push.bind(perManifest))
+    for (const line of perManifest.filter((entry) => entry.startsWith('refused '))) {
+      const body = line.slice('refused '.length)
+      const split = body.indexOf(': ')
+      const path = body.slice(0, split).slice(0, body.slice(0, split).lastIndexOf(':'))
+      const id = JSON.stringify([owner, path, body.slice(split + 2)])
+      tally.set(id, (tally.get(id) ?? 0) + 1)
+    }
   }
-  const expected = new Map(ACCEPTED_DEBT.map(([, path, why, count]) => [JSON.stringify([path, why]), count]))
+  const expected = new Map(ACCEPTED_DEBT.map(([manifest, path, why, count]) => [JSON.stringify([manifest, path, why]), count]))
   const drift = []
   for (const [id, count] of tally) {
-    const want = expected.get(id)
-    if (want !== count) drift.push(`${JSON.parse(id)[0]} — ${JSON.parse(id)[1]}: expected ${want ?? 0}, found ${count}`)
+    if (expected.get(id) !== count) {
+      const [owner, path, why] = JSON.parse(id)
+      drift.push(`${owner} ${path} — ${why}: expected ${expected.get(id) ?? 0}, found ${count}`)
+    }
   }
   for (const [id, count] of expected) {
-    if (!tally.has(id)) drift.push(`${JSON.parse(id)[0]} — ${JSON.parse(id)[1]}: expected ${count}, found 0 (delete this row)`)
+    if (!tally.has(id)) {
+      const [owner, path, why] = JSON.parse(id)
+      drift.push(`${owner} ${path} — ${why}: expected ${count}, found 0 (delete this row)`)
+    }
   }
   assert.deepEqual(drift, [], `accepted curation debt moved:\n${drift.join('\n')}`)
 
-  // Edit 1's exit-code guard, asserted. Without this the `unverified` term can be
-  // removed from `failed` and every test here stays green — which is exactly the
-  // silent-zero regression this whole change exists to end.
+  // BLIND SPOT, stated: identity is manifest + path + reason + count and carries
+  // no line number, so replacing one orphan in a path with a DIFFERENT orphan in
+  // that same path and manifest reads identical here. A content fingerprint would
+  // close it; a path:line literal would not, because it would itself become a
+  // citation that rots.
+
   assert.equal(status, 1, 'the corpus carries accepted debt, so --check must exit non-zero')
 })
 
@@ -1880,3 +1896,28 @@ test('pin-check H1', () => {
   }
 })
 
+// Sol's confirmation pass deleted BOTH named-prose branches of
+// classifyCheckRefusal and all 94 tests stayed green: nothing referenced it
+// directly and the live corpus happens to carry no named rot. A classifier with
+// no mutation guard is vacuous — the exact standard this change enforces
+// everywhere else.
+test('pin-check RC1 — named rot and named ambiguity are not counted as unverified', () => {
+  // MUTATION RC1: deleting either named-prose branch drops these to null.
+  assert.equal(classifyCheckRefusal('crew/x.mjs:9: content appears nowhere in crew/x.mjs; this is rot, not a shift'), 'rot')
+  assert.equal(classifyCheckRefusal('crew/x.mjs:9: content occurs 3 times in crew/x.mjs; a named anchor must resolve to exactly one line'), 'ambiguous')
+})
+
+test('pin-check RC2 — a tagged refusal is classified behind a real key', () => {
+  // MUTATION RC2: dropping the tagged branch drops both to null.
+  assert.equal(classifyCheckRefusal('crew/x.mjs:12: rot: content is gone'), 'rot')
+  assert.equal(classifyCheckRefusal('crew/x.mjs:12: ambiguous: two matches'), 'ambiguous')
+})
+
+test('pin-check RC3 — a manifest key cannot spoof a measured reason', () => {
+  // MUTATION RC3: classifying the tagged form BEFORE the terminal forms counts
+  // this orphan as measured rot. Manifest keys are not validated before an
+  // orphan refusal is formatted, so the key is attacker-shaped.
+  assert.equal(classifyCheckRefusal('bogus:12: rot: planted: manifest entry is orphaned (no citation)'), null,
+    'an orphan refusal is never measured rot, whatever its key says')
+  assert.equal(classifyCheckRefusal('crew/x.mjs:12: manifest has no entry'), null)
+})

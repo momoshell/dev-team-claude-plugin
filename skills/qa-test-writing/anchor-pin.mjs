@@ -672,16 +672,28 @@ function logRefusal(log, refusal) {
 // whatever produced it. Both are category errors, so the tagged form is matched
 // ANCHORED behind a `path:line` or `path:start-end` key rather than found
 // anywhere in the string.
+// A refusal whose TERMINAL form identifies itself is classified by that form
+// FIRST. Sol's spoof: a manifest key `bogus:12: rot: planted` formats an ORPHAN
+// refusal as `bogus:12: rot: planted: manifest entry is orphaned (no citation)`,
+// which a leading tagged-form match counted as measured rot. Manifest keys are
+// not validated before an orphan refusal is produced, so the key is
+// attacker-shaped and the tag must never be trusted ahead of a self-identifying
+// form.
+const TERMINAL_UNVERIFIED = [
+  ': manifest entry is orphaned (no citation)',
+  ': manifest has no entry',
+]
 const TAGGED_REFUSAL = /^.+?:\d+(?:-\d+)?: (rot|ambiguous|excluded-by-scope): /
 const NAMED_ROT = /: content appears nowhere in .*; this is rot, not a shift$/
 const NAMED_AMBIGUOUS = /: content occurs \d+ times in .*; a named anchor must resolve to exactly one line$/
 
 export function classifyCheckRefusal(refusal) {
   const text = String(refusal ?? '')
-  const tagged = TAGGED_REFUSAL.exec(text)
-  if (tagged) return tagged[1]
+  if (TERMINAL_UNVERIFIED.some((suffix) => text.endsWith(suffix))) return null
   if (NAMED_ROT.test(text)) return REPAIR_REASONS.rot
   if (NAMED_AMBIGUOUS.test(text)) return REPAIR_REASONS.ambiguous
+  const tagged = TAGGED_REFUSAL.exec(text)
+  if (tagged) return tagged[1]
   return null
 }
 

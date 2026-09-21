@@ -268,6 +268,7 @@ export function turnCeilingFlagArgs(runFlags = {}) {
 // does not seat, and crew/roster.json is where that is ratified.
 export const ROSTER_PATH = fileURLToPath(new URL('../../crew/roster.json', import.meta.url))
 const COMPILER_PATH = fileURLToPath(new URL('./make-brief.mjs', import.meta.url))
+const CREW_PATH = fileURLToPath(new URL('../../crew/crew.mjs', import.meta.url))
 // Boot's own closed band-floor reason enum (crew/crew.mjs:770). A boot refusal
 // carrying one of these is a ratified FLOOR refusal, not a generic boot failure,
 // and the dispatcher names it rather than swallowing it as boot-failed.
@@ -3644,7 +3645,7 @@ export function bootCommand({ lane, laneDir, tier, registerPath, transport, seat
   return {
     file: 'node',
     args: [
-      'crew/crew.mjs', 'boot',
+      CREW_PATH, 'boot',
       '--task', lane,
       '--checkout', laneDir,
       ...tierArgs,
@@ -3669,7 +3670,7 @@ export function bootCommand({ lane, laneDir, tier, registerPath, transport, seat
 function teardownCommand({ lane, laneDir }) {
   return {
     file: 'node',
-    args: ['crew/crew.mjs', 'teardown', '--task', lane, '--checkout', laneDir],
+    args: [CREW_PATH, 'teardown', '--task', lane, '--checkout', laneDir],
     cwd: laneDir,
   }
 }
@@ -3778,7 +3779,7 @@ function preflightRunOptions({ execution, runFlags = {}, lanes = [] } = {}) {
 }
 
 export function runCommand({ lane, laneDir, briefPath, files, execution, keep, runFlags = {}, chunk = null }) {
-  const args = ['crew/crew.mjs', 'run', '--task', lane, '--checkout', laneDir, '--brief-file', briefPath]
+  const args = [CREW_PATH, 'run', '--task', lane, '--checkout', laneDir, '--brief-file', briefPath]
   if (keep) args.push('--keep')
   const add = (flag, value) => {
     if (value === undefined || value === null || value === '') return
@@ -4438,7 +4439,7 @@ function launchDispatchWave(compiled) {
     ? 'dispatch-batch: workspaces keep=true — every lane workspace and crew dir is kept for inspection; pass --no-keep to let a lane that finishes done tear itself down'
     : 'dispatch-batch: workspaces keep=false — a lane that finishes done tears itself down and archives its crew dir; an escalated lane is kept either way')
   for (const item of runs) {
-    d.log(`dispatch-batch: teardown lane=${item.lane} command=node crew/crew.mjs teardown --task ${item.lane} --checkout ${item.laneDir}`)
+    d.log(`dispatch-batch: teardown lane=${item.lane} command=node ${CREW_PATH} teardown --task ${item.lane} --checkout ${item.laneDir}`)
   }
   d.log(mergeCheckLine(runs.map((item) => item.lane)))
   return { lanes: runs, plans, registerPath, outDir: outputDir, keep, transport, waves, wave: waveNumber, deferred, unstarted, fences: fenceReport }

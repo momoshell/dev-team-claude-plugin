@@ -1215,9 +1215,10 @@ test('C1 an authored RPC envelope remains byte-identical and gets no synthetic r
   } finally { f.cleanup() }
 })
 
-test('a repaired RPC envelope continues, journals, and remains byte-identical', () => {
+test('repairshared/B1 a repaired RPC envelope continues, journals beside crew.json, and remains byte-identical', () => {
   const events = []
   const f = fixture({ log: (row) => events.push(row) })
+  writeFileSync(join(f.dir, 'crew.json'), '{}')
   try {
     const run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
     settle(f, run)
@@ -1233,6 +1234,8 @@ test('a repaired RPC envelope continues, journals, and remains byte-identical', 
     assert.equal(repairRows.escaped_count, 1)
     const offset = bytes.indexOf('\n', bytes.indexOf('"summary"'))
     assert.deepEqual(repairRows.escaped_offsets, [offset])
+    assert.equal(join(f.dir, 'journal.jsonl'), join(join(f.dir, 'crew.json'), '..', 'journal.jsonl'), 'the repair row sits beside the fixture crew.json')
+    assert.equal(existsSync(join(f.paths.returnsDir, 'journal.jsonl')), false)
     assert.equal(events.some((row) => row.rpc_outcome === 'parse-error'), false)
     assert.equal(readFileSync(run.returnPath).equals(before), true)
   } finally { f.cleanup() }

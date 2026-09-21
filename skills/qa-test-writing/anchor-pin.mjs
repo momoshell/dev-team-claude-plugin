@@ -658,6 +658,33 @@ function logRefusal(log, refusal) {
 // unpinned prose exhibits and orphaned keys are logged as refused rows for
 // visibility, but the fully resolved corpus they accompany still exits zero.
 // lean: O(docs x lines) scan per manifest, same as repair; no index is kept.
+// Two producers describe the SAME two defects in different words, and a
+// substring test on `: rot:` gets both of them wrong.
+//
+//  * `classifiedRepairRefusal` emits the tagged `<key>: <reason>: <detail>`.
+//  * `resolveNamed` emits untagged prose. Its exact wording is a CONSUMED
+//    contract — test/factory-closeout.test.mjs maps it onto
+//    CLOSEOUT_REFUSALS.ANCHOR_ROT and skills/frontend-svelte/exhibits.test.mjs
+//    reproduces it — so the classifier adapts to the prose, never the reverse.
+//
+// Measured before this existed: a named rot and a named ambiguity both counted
+// as `unverified`, and a refusal containing the literal `: rot: ` counted as rot
+// whatever produced it. Both are category errors, so the tagged form is matched
+// ANCHORED behind a `path:line` or `path:start-end` key rather than found
+// anywhere in the string.
+const TAGGED_REFUSAL = /^.+?:\d+(?:-\d+)?: (rot|ambiguous|excluded-by-scope): /
+const NAMED_ROT = /: content appears nowhere in .*; this is rot, not a shift$/
+const NAMED_AMBIGUOUS = /: content occurs \d+ times in .*; a named anchor must resolve to exactly one line$/
+
+export function classifyCheckRefusal(refusal) {
+  const text = String(refusal ?? '')
+  const tagged = TAGGED_REFUSAL.exec(text)
+  if (tagged) return tagged[1]
+  if (NAMED_ROT.test(text)) return REPAIR_REASONS.rot
+  if (NAMED_AMBIGUOUS.test(text)) return REPAIR_REASONS.ambiguous
+  return null
+}
+
 export function checkAnchorManifests({ root, scanRoot, log = console.log }) {
   const totals = { scanned: 0, manifests: 0, rot: 0, ambiguous: 0, moved: 0, unverified: 0, other: 0 }
   try {
@@ -679,12 +706,13 @@ export function checkAnchorManifests({ root, scanRoot, log = console.log }) {
         log(`moved ${repair.key} -> ${repair.nextKey}`)
       }
       for (const refusal of result.refusals) {
+        const reason = classifyCheckRefusal(refusal)
+        if (reason === REPAIR_REASONS.rot) totals.rot += 1
+        else if (reason === REPAIR_REASONS.ambiguous) totals.ambiguous += 1
         // RV1-1: a refusal this scan cannot CLASSIFY is still a pin it cannot
         // vouch for — an unreadable target, a too-short expected string, an
         // orphaned entry. Counting only rot and ambiguity let 45 real refusals
         // exit 0, which is the silent-green the check exists to end.
-        if (refusal.includes(': rot:')) totals.rot += 1
-        else if (refusal.includes(': ambiguous:')) totals.ambiguous += 1
         else totals.unverified += 1
         logRefusal(log, refusal)
       }

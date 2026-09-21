@@ -854,7 +854,7 @@ test('the discovered anchor-manifest corpus checks clean', () => {
   assert.ok(relativeDirs.includes('skills/frontend-svelte'))
   assert.ok(relativeDirs.includes('skills/pr-review'))
   const output = []
-  repairCli(['--check', join(ROOT, 'skills'), '--root', ROOT], output.push.bind(output))
+  const status = repairCli(['--check', join(ROOT, 'skills'), '--root', ROOT], output.push.bind(output))
   const summary = output.find((line) => line.includes('pins across'))
   assert.ok(summary !== undefined, 'expected a scanned/manifests summary row')
   assert.ok(summary.includes('185 pins across 8 manifests'), `expected the 185-pin summary, found: ${summary}`)
@@ -864,18 +864,67 @@ test('the discovered anchor-manifest corpus checks clean', () => {
   assert.ok(summary.includes('rot 0') && summary.includes('ambiguous 0') && summary.includes('moved 0'),
     `rotted, ambiguous or drifted pin(s): ${summary}\n${output.filter((line) => line.startsWith('refused ')).join('\n')}`)
 
-  // A STATED NUMBER for the curation debt, not a floor and not a pass.
-  // Measured 2026-09-21: 45 — 40 citations in skills/ui-design carrying no
-  // manifest entry, 5 orphaned entries in skills/frontend-svelte carrying no
-  // citation. `--repair-all` refuses these too and changes nothing, so they are
-  // manual curation, not mechanical repair. This assertion fails when the debt
-  // GROWS and equally when it SHRINKS: lower the number in the same commit that
-  // clears the entries, so it is never stale. The exit code already reports
-  // them — this pins the count so they cannot accumulate unnoticed.
-  const UNVERIFIED = 45
-  const unverified = Number(summary.match(/unverified (\d+)/)[1])
-  assert.equal(unverified, UNVERIFIED,
-    `manifest curation debt moved from ${UNVERIFIED} to ${unverified} — update this number in the commit that changes it.\n${output.filter((line) => line.startsWith('refused ')).join('\n')}`)
+  // THE ACCEPTED DEBT, BY IDENTITY AND OWNER — not by a fungible count.
+  //
+  // Measured 2026-09-21: 45 refusals that are NOT line drift. 40 are citations
+  // in skills/ui-design carrying no manifest entry; 5 are orphaned entries in
+  // skills/frontend-svelte carrying no citation. `--repair-all` refuses these
+  // too and changes nothing, so they are manual curation, not mechanical repair.
+  //
+  // A SCALAR BUDGET WAS TRIED AND IS WRONG. Pinning only the total let one
+  // orphan move from frontend-svelte into ui-design at a constant 45 and stay
+  // green — admitting a brand-new failure in a manifest that had none, while
+  // the "40 UI / 5 frontend" claim silently became false.
+  //
+  // Rows are [manifest, path, reason, count] and deliberately carry NO line
+  // number: a `path:line` literal here would itself become a citation that
+  // rots, which the pinned-literal tripwire in this same file forbids.
+  //
+  // Clear debt by lowering a count or deleting a row in the same commit that
+  // fixes the entries. Adding a row is accepting new debt — argue for it.
+  const ACCEPTED_DEBT = [
+    ["skills/frontend-svelte", "test/visualizer-panels.test.mjs", "manifest entry is orphaned (no citation)", 4],
+    ["skills/frontend-svelte", "visualizer/web/src/App.svelte", "manifest entry is orphaned (no citation)", 1],
+    ["skills/ui-design", "visualizer/web/src/App.svelte", "manifest has no entry", 8],
+    ["skills/ui-design", "visualizer/web/src/lib/AcceptPanel.svelte", "manifest has no entry", 1],
+    ["skills/ui-design", "visualizer/web/src/lib/EnvelopeInspector.svelte", "manifest has no entry", 1],
+    ["skills/ui-design", "visualizer/web/src/lib/FleetTable.svelte", "manifest has no entry", 8],
+    ["skills/ui-design", "visualizer/web/src/lib/GateChips.svelte", "manifest has no entry", 1],
+    ["skills/ui-design", "visualizer/web/src/lib/IntakePanel.svelte", "manifest has no entry", 2],
+    ["skills/ui-design", "visualizer/web/src/lib/PhaseDots.svelte", "manifest has no entry", 2],
+    ["skills/ui-design", "visualizer/web/src/lib/PhaseGantt.svelte", "manifest has no entry", 4],
+    ["skills/ui-design", "visualizer/web/src/lib/PhasePanel.svelte", "manifest has no entry", 1],
+    ["skills/ui-design", "visualizer/web/src/lib/RoleTag.svelte", "manifest has no entry", 2],
+    ["skills/ui-design", "visualizer/web/src/lib/RosterPanel.svelte", "manifest has no entry", 3],
+    ["skills/ui-design", "visualizer/web/src/lib/RunCard.svelte", "manifest has no entry", 5],
+    ["skills/ui-design", "visualizer/web/src/lib/RunDetail.svelte", "manifest has no entry", 1],
+    ["skills/ui-design", "visualizer/web/src/lib/TeardownPanel.svelte", "manifest has no entry", 1],
+  ]
+  const tally = new Map()
+  for (const line of output.filter((entry) => entry.startsWith('refused '))) {
+    const body = line.slice('refused '.length)
+    const split = body.indexOf(': ')
+    const key = body.slice(0, split)
+    const why = body.slice(split + 2)
+    const path = key.slice(0, key.lastIndexOf(':'))
+    const id = JSON.stringify([path, why])
+    tally.set(id, (tally.get(id) ?? 0) + 1)
+  }
+  const expected = new Map(ACCEPTED_DEBT.map(([, path, why, count]) => [JSON.stringify([path, why]), count]))
+  const drift = []
+  for (const [id, count] of tally) {
+    const want = expected.get(id)
+    if (want !== count) drift.push(`${JSON.parse(id)[0]} — ${JSON.parse(id)[1]}: expected ${want ?? 0}, found ${count}`)
+  }
+  for (const [id, count] of expected) {
+    if (!tally.has(id)) drift.push(`${JSON.parse(id)[0]} — ${JSON.parse(id)[1]}: expected ${count}, found 0 (delete this row)`)
+  }
+  assert.deepEqual(drift, [], `accepted curation debt moved:\n${drift.join('\n')}`)
+
+  // Edit 1's exit-code guard, asserted. Without this the `unverified` term can be
+  // removed from `failed` and every test here stays green — which is exactly the
+  // silent-zero regression this whole change exists to end.
+  assert.equal(status, 1, 'the corpus carries accepted debt, so --check must exit non-zero')
 })
 
 test('no citation carrier test restates a currently pinned anchor key', () => {

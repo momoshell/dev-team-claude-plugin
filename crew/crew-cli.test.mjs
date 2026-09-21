@@ -2113,7 +2113,7 @@ test('unconfigured boot keeps every merged prompt byte-identical and omits memor
     const shared = readFileSync(new URL('./roles/_shared.md', import.meta.url), 'utf8')
     for (const role of ['lead', 'planner', 'builder', 'reviewer']) {
       const card = readFileSync(new URL(`./roles/${role}.md`, import.meta.url), 'utf8')
-      assert.equal(readFileSync(join(dir, 'task', `role-${role}.md`), 'utf8'), `${shared}\n\n${card}`)
+      assert.equal(readFileSync(join(dir, 'task', `role-${role}.md`), 'utf8'), composeRolePrompt(shared, card))
     }
     assert.equal(Object.hasOwn(bootRecord(dir), 'memory'), false)
   } finally { rmSync(home, { recursive: true, force: true }); rmSync(checkoutRoot, { recursive: true, force: true }) }
@@ -2159,7 +2159,7 @@ test('configured boot with a missing memory directory succeeds and records no-di
     const shared = readFileSync(new URL('./roles/_shared.md', import.meta.url), 'utf8')
     for (const role of ['lead', 'planner', 'builder', 'reviewer']) {
       const card = readFileSync(new URL(`./roles/${role}.md`, import.meta.url), 'utf8')
-      assert.equal(readFileSync(join(dir, 'task', `role-${role}.md`), 'utf8'), `${shared}\n\n${card}`)
+      assert.equal(readFileSync(join(dir, 'task', `role-${role}.md`), 'utf8'), composeRolePrompt(shared, card))
     }
     assert.equal(bootRecord(dir).memory.reason, 'no-dir')
   } finally { rmSync(home, { recursive: true, force: true }); rmSync(checkoutRoot, { recursive: true, force: true }) }
@@ -2178,7 +2178,7 @@ test('unknown memory backend cannot fail boot and records its error', async () =
     const shared = readFileSync(new URL('./roles/_shared.md', import.meta.url), 'utf8')
     for (const role of ['lead', 'planner']) {
       const card = readFileSync(new URL(`./roles/${role}.md`, import.meta.url), 'utf8')
-      assert.equal(readFileSync(join(dir, 'task', `role-${role}.md`), 'utf8'), `${shared}\n\n${card}`)
+      assert.equal(readFileSync(join(dir, 'task', `role-${role}.md`), 'utf8'), composeRolePrompt(shared, card))
     }
     assert.match(bootRecord(dir).memory.error, /no-such-backend/)
   } finally { rmSync(home, { recursive: true, force: true }); rmSync(checkoutRoot, { recursive: true, force: true }); rmSync(fixture, { recursive: true, force: true }) }

@@ -91,6 +91,7 @@ test('PS9', () => {
 
 // Mutation killed: changing a cited source line or deleting a citation must make the dispatch pin red.
 test('every crew-dispatch path:line anchor carries what the prose claims', () => {
+  // Deliberate inline exception: assertAnchorsPinned cannot exclude references/tier.md, so delegation would widen this doc set.
   const docs = skillDocs(HERE).filter((doc) => doc !== TIER)
   const manifest = JSON.parse(readText(join(HERE, 'anchors.json')))
   const result = checkAnchors({ root: ROOT, docs, manifest })

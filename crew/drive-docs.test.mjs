@@ -8,9 +8,10 @@ import { statSync } from 'node:fs'
 import { relative } from 'node:path'
 import assert from 'node:assert/strict'
 import {
-  FINDING_DISPOSITIONS, FINDING_SEVERITIES, GATE_CUSTODIAN, MAX_QUESTIONS, PROTECTED_PATHS, REPO_ROOT, RESIDUAL_TYPES, applyPrescriptionLines, checkAnchors, existsSync, join, laneFence, mkdirSync, partitionShifts, shiftsAreOwedHere, protectedHits, readFileSync, readdirSync, rmSync, scratchDir, spawnSync,
+  FINDING_DISPOSITIONS, FINDING_SEVERITIES, GATE_CUSTODIAN, MAX_QUESTIONS, PROTECTED_PATHS, REPO_ROOT, RESIDUAL_TYPES, applyPrescriptionLines, existsSync, join, mkdirSync, protectedHits, readFileSync, readdirSync, rmSync, scratchDir, spawnSync,
   carriedSilenceDefect, findingIdDefect, parseQuestions, patchTargets,
 } from './drive-fixtures.mjs'
+import { assertAnchorsPinned } from '../skills/qa-test-writing/anchor-pin.mjs'
 import { bootCmd, composeRolePrompt, FLAG_VALUE_CONTRACT, KNOWN_FLAGS, BOOLEAN_FLAGS, BOOT_ONLY_FLAGS, compiledCharterBytes, charterBudgetRefusals, CHARTER_CEILINGS } from './crew.mjs'
 import { after } from 'node:test'
 import { tmpdir } from 'node:os'
@@ -564,25 +565,11 @@ test('the tech-lead charter documents envelope custody and the residual it canno
 test('every crew/drive.mjs anchor the tech-lead charter cites resolves to the code it names', () => {
   const charterPath = join(REPO_ROOT, 'crew', 'roles', 'tech-lead.md')
   const charter = readFileSync(charterPath, 'utf8')
-  const manifest = JSON.parse(readFileSync(join(REPO_ROOT, 'crew', 'roles', 'anchors.json'), 'utf8'))
   // Every charter in crew/roles, not only the tech-lead's: the manifest is directory-wide
   // and anchor-pin.mjs --repair crew/roles scans the same set, so a pin cited only by
   // planner.md or reviewer.md is a citation here, never an orphan.
   const rolesDir = join(REPO_ROOT, 'crew', 'roles')
-  const docs = readdirSync(rolesDir).filter((name) => name.endsWith('.md')).sort().map((name) => join(rolesDir, name))
-  const result = checkAnchors({ root: REPO_ROOT, docs, manifest })
-  assert.ok(result.anchors >= 12, `expected at least 12 anchors, found ${result.anchors}`)
-  assert.deepEqual(result.failures, [])
-  const fence = laneFence({ root: REPO_ROOT })
-  const { inFence, outOfFence } = partitionShifts({ shifted: result.shifted, fence: fence.paths, manifest: 'crew/roles/anchors.json' })
-  const repair = 'node skills/qa-test-writing/anchor-pin.mjs --repair-all crew/roles'
-  // On the default branch there is no lane to defer to: this IS the post-merge pass
-  // the warning names, so a deferred shift is owed here rather than warned about again.
-  if (shiftsAreOwedHere(fence)) {
-    assert.deepEqual(outOfFence.map((shift) => `${shift.key} -> ${shift.to}`), [], `no lane to defer to — repair here with: ${repair}`)
-  }
-  for (const shift of outOfFence) console.warn(`shifted ${shift.key} -> line ${shift.to}; repair after this lane merges, on main with: ${repair}`)
-  assert.deepEqual(inFence, [], 'a shift this lane can repair here must be repaired, not tolerated')
+  assertAnchorsPinned({ root: REPO_ROOT, skillDir: rolesDir, manifestPath: join(rolesDir, 'anchors.json'), minAnchors: 12 })
   // Both citation forms of the four anchors #698 found stale: the qualified
   // `crew/drive.mjs:2299` and the bare `:2226` continuation the file also used.
   for (const retired of [':2299', ':2226', ':2319', ':2217']) {

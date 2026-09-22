@@ -703,6 +703,7 @@ test('B1', () => {
     assert.equal(run.error?.stage, SEAT_DIED_STAGE)
     assert.ok(run.diedRow)
     assert.equal(run.diedRow.exit_status_reason, HEADLESS_EXIT_REASONS.ABSENT)
+    assert.equal(run.diedRow.exit_status, null)
   })
 })
 

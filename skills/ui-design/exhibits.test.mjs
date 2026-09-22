@@ -9,11 +9,11 @@ import { checkSkillAnchors, pinnedKey } from '../qa-test-writing/anchor-pin.mjs'
 const HERE = fileURLToPath(new URL('./', import.meta.url))
 const MANIFEST = join(HERE, 'anchors.json')
 const OWNER = 'skills/ui-design/anchors.json'
-const MIN_ANCHORS = 5;
+const MIN_ANCHORS = 45;
 
-// The shipped helper cannot see css or html citations, and it reports svelte
-// citations as unpinned (they carry no manifest key by design), so this table
-// covers every such citation endpoint in the repaired docs. Each row is a
+// The shipped helper cannot see css or html citations, so this table covers
+// every such citation endpoint in the repaired docs, alongside an independent
+// Svelte content census of the manifest-backed source pins. Each row is a
 // JSON-compatible triple naming the line the prose claims.
 const UNPINNABLE_PINS = [
   ["visualizer/web/index.html", 2, "<meta charset=\"UTF-8\">"],
@@ -126,11 +126,7 @@ test('every ui-design path:line anchor carries what the prose claims', () => {
   assert.equal(Object.keys(manifest).length, MIN_ANCHORS)
   const result = checkSkillAnchors({ root: ROOT, skillDir: HERE, manifestPath: MANIFEST })
   assert.deepEqual(result.shifted, [], 'a drifted manifest pin must be repaired, not tolerated')
-  const prefixes = Object.keys(manifest).map((key) => `${key}:`)
-  for (const failure of result.failures) {
-    assert.ok(prefixes.every((prefix) => !failure.startsWith(prefix)), `manifest pin failure: ${failure}`)
-    assert.match(failure, /\.svelte:\d+: manifest has no entry$/, `only the separately-covered svelte exhibits may surface here: ${failure}`)
-  }
+  assert.deepEqual(result.failures, [], `manifest-backed pins must check clean: ${result.failures.join('\n')}`)
 })
 
 // Mutation killed: move any svelte, css, or html exhibit line, or corrupt its

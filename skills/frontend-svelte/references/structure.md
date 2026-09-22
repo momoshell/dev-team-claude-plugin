@@ -4,13 +4,13 @@ The app is a small Svelte shell over plain JavaScript shaping modules. These fac
 
 ## Shell and ownership
 
-`visualizer/web/src/main.js` imports the token sheet and mounts `App` into `#app`. `App.svelte` owns hash route state (`visualizer/web/src/App.svelte:25`), the `os`/`paper`/`ink` theme choice (`visualizer/web/src/App.svelte:72`), and the fleet/envelope fetch loop (`visualizer/web/src/App.svelte:117`), and composes the top-level views (`visualizer/web/src/App.svelte:186,228`). It passes shaped rows and callbacks into the components under `visualizer/web/src/lib/`; a child does not take over route or theme ownership.
+`visualizer/web/src/main.js` imports the token sheet and mounts `App` into `#app`. `App.svelte` owns hash route state (`visualizer/web/src/App.svelte:25`), the `os`/`paper`/`ink` theme choice (`visualizer/web/src/App.svelte:72`), and the fleet/envelope fetch loop (`visualizer/web/src/App.svelte:117`), and composes the top-level views (`visualizer/web/src/App.svelte:186`, `visualizer/web/src/App.svelte:228`). It passes shaped rows and callbacks into the components under `visualizer/web/src/lib/`; a child does not take over route or theme ownership.
 
 main.js is the only importer of theme.css.
 
 The stylesheet is loaded before the mount call in `visualizer/web/src/main.js:1-5`. `visualizer/web/src/App.svelte:72` applies the selected `data-theme` after the component starts; a new component consumes aliases and does not import or re-select the sheet.
 
-There are 33 `.svelte` components under `visualizer/web/src/lib/` (tracked files: `git ls-files 'visualizer/web/src/lib/*.svelte'`). The shell composes them for fleet, operations, roster, run, and phase views. A panel's placement matters for spacing: `visualizer/web/src/App.svelte:186,228` mounts panels directly under `.page`, while `visualizer/web/src/lib/RunDetail.svelte:286` owns a grid gap for its children.
+There are 33 `.svelte` components under `visualizer/web/src/lib/` (tracked files: `git ls-files 'visualizer/web/src/lib/*.svelte'`). The shell composes them for fleet, operations, roster, run, and phase views. A panel's placement matters for spacing: `visualizer/web/src/App.svelte:186`, `visualizer/web/src/App.svelte:228` mounts panels directly under `.page`, while `visualizer/web/src/lib/RunDetail.svelte:286` owns a grid gap for its children.
 
 ## Plain module split
 

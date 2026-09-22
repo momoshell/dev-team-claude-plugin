@@ -5779,8 +5779,8 @@ function proveHardeningEntries({ entries, hardenWitness, ctx, io, hardenRun, dir
   let fatal = null
   const proveEntry = (entry) => {
     let active = null
-    const row = (outcome, why) => ({ finding: entry.finding, test: entry.test, name: entry.name, outcome, why })
-    if (entry.invocation !== undefined) return row('unproven', `the guard is the invocation ${entry.invocation}; this repo executes no foreign runner, so the guard is recorded and unmeasured`)
+    const row = (outcome, why) => ({ finding: entry.finding, test: entry.test, name: entry.name, outcome, why: entry.invocation !== undefined ? invocationWhy(entry, why) : why })
+    if (entry.invocation !== undefined) { const proof = proveInvocationEntry({ entry, ctx, io, hardenRun, hardenWitness, row, dirtyAfterFailure }); fatal = proof.fatal; return proof.row }
     try {
       const witness = hardenWitness?.get(entry.finding)
       const W = witness?.get(entry.test)
@@ -10251,7 +10251,7 @@ function runTask(ctx, io, crash) {
   }
   // MUTATION B8: route the proof through runGate and each of its invocations becomes
   // a gate_results row, moving the gate-review-gap numerator (#839 (i).
-  const hardenRun = (cmd) => io.run(cmd)                                             // ANCHOR B8
+  const hardenRun = (cmd, opts) => runHardenInvocation(io, ctx, cmd, opts)                                             // ANCHOR B8
 
   // #958 — the build-defect-vs-gate-defect triage and its single gate repair, lifted
   // out of the gate stage so the SAME valve is reachable from a builder round that did
@@ -13971,4 +13971,251 @@ export function gateCheckIds(output) {
     }
   }
   return ids
+}
+
+// b916-foreignguard: run and adjudicate invocation-declared hardening guards.
+//
+// The named-test path above is unchanged; every invocation-only concern lives here,
+// appended after existing code so existing file:line charter anchors do not shift.
+// An invocation is adjudicated on process exit status alone: control 0 plus mutant
+// nonzero is `killed`, control 0 plus mutant 0 is `survived`, an ordinary nonzero
+// control short-circuits as `control-red`, and anything that could not execute
+// (status 126/127, missing status, signal/timeout kill, thrown runner, truncated
+// output) is `unproven`, never refuted and never killed.
+const INVOCATION_LIMIT = 'the result is based only on process exit status and cannot prove the named guard ran'
+const invocationWhy = (entry, why) => {
+  const base = why ?? `the invocation ${entry.invocation} left no measured reason`
+  return `${base}; ${INVOCATION_LIMIT}`
+}
+
+// lean: process-wide sequence; upgrade path is a per-task counter if lanes ever share a process
+let invocationSeq = 0
+function runHardenInvocation(io, ctx, cmd, opts) {
+  if (opts?.reap !== true) return io.run(cmd)
+  invocationSeq += 1
+  const reapPaths = {
+    cmdFile: `${ctx.taskDir}/gate-reap-invocation.${invocationSeq}.cmd.sh`,
+    launchFile: `${ctx.taskDir}/gate-reap-invocation.${invocationSeq}.launch.sh`,
+    pgidFile: `${ctx.taskDir}/gate-reap-invocation.${invocationSeq}.pgid`,
+    report: `${ctx.taskDir}/gate-reap-invocation.${invocationSeq}.json`,
+  }
+  try { io.writeFile(reapPaths.report, '') } catch { /* a stale report is never read on this path */ }
+  const wrapped = gateReapCommand({ cmd, ...reapPaths })
+  try { return io.run(wrapped) }
+  finally { try { io.run(gateReapSweepCommand(reapPaths)) } catch { /* an unswept group reads unproven */ } }
+}
+
+class InvocationSnapshotError extends Error {}
+
+const invocationOid = (output) => {
+  const line = String(output ?? '').trim().split('\n')[0]?.trim() ?? ''
+  return /^[0-9a-f]{40}$/.test(line) ? line : null
+}
+
+const classifyInvocationResult = (result) => {
+  if (result === null || typeof result !== 'object') return { runnable: false, reason: 'missing-result' }
+  if (result.truncated === true) return { runnable: false, reason: 'truncated-output' }
+  if (result.status === 126 || result.status === 127) return { runnable: false, reason: `command-not-executed-exit-${result.status}` }
+  if (typeof result.status !== 'number') return { runnable: false, reason: 'missing-status' }
+  return { runnable: true, reason: null }
+}
+
+const invocationGit = (io, checkout, args, what) => {
+  let res = null
+  try { res = io.run(`git -C ${shQuote(checkout)} ${args}`) }
+  catch (err) { throw new InvocationSnapshotError(`the invocation ${what}: ${err?.message ?? String(err)}`) }
+  if (res?.ok !== true) throw new InvocationSnapshotError(`the invocation ${what}: git ${args} exited ${res?.status ?? 'unknown'}`)
+  return res
+}
+
+const invocationStaged = (io, checkout, tmpIndex, args, what) => {
+  let res = null
+  try { res = io.run(`GIT_INDEX_FILE=${shQuote(tmpIndex)} git -C ${shQuote(checkout)} ${args}`) }
+  catch (err) { throw new InvocationSnapshotError(`the invocation ${what}: ${err?.message ?? String(err)}`) }
+  if (res?.ok !== true) throw new InvocationSnapshotError(`the invocation ${what}: git ${args} exited ${res?.status ?? 'unknown'}`)
+  return res
+}
+
+const invocationHead = (io, checkout, what) => invocationOid(invocationGit(io, checkout, 'rev-parse HEAD', what).output)
+
+function captureInvocationSnapshot({ ctx, io }) {
+  const checkout = ctx.checkout
+  let fingerprint = null
+  if (typeof io.fingerprintTree === 'function') {
+    try { fingerprint = io.fingerprintTree(checkout) }
+    catch (err) { throw new InvocationSnapshotError(`the invocation checkout could not be fingerprinted before the control run: ${err?.message ?? String(err)}`) }
+    if (fingerprint?.measured !== true) throw new InvocationSnapshotError(`the invocation checkout could not be fingerprinted before the control run: ${fingerprint?.cause ?? 'unmeasured'}${fingerprint?.detail ? ` (${fingerprint.detail})` : ''}`)
+  }
+  const head = invocationHead(io, checkout, 'HEAD could not be read before the control run')
+  if (head === null) throw new InvocationSnapshotError('the invocation HEAD could not be read before the control run: git rev-parse HEAD returned no commit object')
+  const indexTree = invocationOid(invocationGit(io, checkout, 'write-tree', 'index tree could not be captured before the control run').output)
+  if (indexTree === null) throw new InvocationSnapshotError('the invocation index tree could not be captured before the control run: git write-tree returned no tree object')
+  invocationSeq += 1
+  const tmpIndex = `${ctx.taskDir}/invocation-snap.${invocationSeq}.index`
+  invocationStaged(io, checkout, tmpIndex, `read-tree ${indexTree}`, 'temporary index could not be seeded from the captured index tree')
+  invocationStaged(io, checkout, tmpIndex, 'add -A', 'checkout could not be staged into the temporary index')
+  const tree = invocationOid(invocationStaged(io, checkout, tmpIndex, 'write-tree', 'checkout tree could not be captured before the control run').output)
+  if (tree === null) throw new InvocationSnapshotError('the invocation checkout tree could not be captured before the control run: git write-tree returned no tree object')
+  return { fingerprint, head, indexTree, tree, tmpIndex }
+}
+
+function captureInvocationAfter({ ctx, io, snapshot }) {
+  const checkout = ctx.checkout
+  let fingerprint = null
+  if (typeof io.fingerprintTree === 'function') {
+    try { fingerprint = io.fingerprintTree(checkout) }
+    catch (err) { throw new InvocationSnapshotError(`the invocation checkout could not be fingerprinted after the run: ${err?.message ?? String(err)}`) }
+    if (fingerprint?.measured !== true) throw new InvocationSnapshotError(`the invocation checkout could not be fingerprinted after the run: ${fingerprint?.cause ?? 'unmeasured'}${fingerprint?.detail ? ` (${fingerprint.detail})` : ''}`)
+  }
+  const head = invocationHead(io, checkout, 'HEAD could not be read after the run')
+  const indexTree = invocationOid(invocationGit(io, checkout, 'write-tree', 'index tree could not be read after the run').output)
+  if (indexTree === null) throw new InvocationSnapshotError('the invocation index tree could not be read after the run: git write-tree returned no tree object')
+  invocationStaged(io, checkout, snapshot.tmpIndex, 'add -A', 'checkout could not be re-staged into the temporary index')
+  const tree = invocationOid(invocationStaged(io, checkout, snapshot.tmpIndex, 'write-tree', 'checkout tree could not be read after the run').output)
+  if (tree === null) throw new InvocationSnapshotError('the invocation checkout tree could not be read after the run: git write-tree returned no tree object')
+  return { fingerprint, head, indexTree, tree }
+}
+
+function restoreInvocationSnapshot({ ctx, io, snapshot, after, fileAbs, fileBytes }) {
+  let firstError = null
+  const note = (err) => { if (firstError === null) firstError = err?.message ?? String(err) }
+  try { io.writeFile(fileAbs, fileBytes) } catch (err) { note(err) }
+  const run = (args, what) => {
+    try {
+      const res = io.run(`git -C ${shQuote(ctx.checkout)} ${args}`)
+      if (res?.ok !== true) { note(new Error(`the invocation ${what}: git ${args} exited ${res?.status ?? 'unknown'}`)); return false }
+    } catch (err) { note(new Error(`the invocation ${what}: ${err?.message ?? String(err)}`)); return false }
+    return true
+  }
+  const headMoved = after === null || after === undefined || after.head !== snapshot.head
+  if (headMoved && snapshot.head !== null) run(`reset --soft ${snapshot.head}`, 'moved HEAD could not be reset to its captured commit')
+  if (headMoved && snapshot.head === null) note(new Error('the invocation HEAD appeared during the run and cannot be restored to its absent pre-control state'))
+  // A failed reset leaves the original index in place, against which clean -fd
+  // would delete pre-existing untracked files the snapshot existed to protect:
+  // abort the sequence here and surface the fatal instead (RV1-1).
+  if (!run(`read-tree --reset -u ${snapshot.tree}`, 'checkout could not be reset to its pre-control tree')) return firstError
+  run('clean -fd', 'guard-created untracked files could not be removed')
+  run(`read-tree ${snapshot.indexTree}`, 'index could not be restored to its pre-control tree')
+  return firstError
+}
+
+function diffInvocationSnapshots({ ctx, io, snapshot, after, entryFile }) {
+  const paths = new Set()
+  if (snapshot.fingerprint !== null || after.fingerprint !== null) {
+    const comparison = compareFingerprints(snapshot.fingerprint, after.fingerprint)
+    if (comparison.outcome === FINGERPRINT_OUTCOMES.unmeasurable) throw new InvocationSnapshotError(`the invocation checkout changes could not be compared: ${comparison.cause ?? 'unmeasurable'}`)
+    if (comparison.outcome !== FINGERPRINT_OUTCOMES.unchanged) {
+      for (const path of [...(comparison.added ?? []), ...(comparison.removed ?? []), ...(comparison.modified ?? [])]) {
+        if (path !== entryFile) paths.add(path)
+      }
+      if (comparison.head_changed !== null && comparison.head_changed !== undefined) paths.add('<HEAD>')
+    }
+  }
+  if (after.tree !== snapshot.tree) {
+    let res = null
+    try { res = io.run(`git -C ${shQuote(ctx.checkout)} diff --no-ext-diff --name-only ${snapshot.tree} ${after.tree}`) }
+    catch (err) { throw new InvocationSnapshotError(`the invocation checkout changes could not be listed: ${err?.message ?? String(err)}`) }
+    if (res?.ok !== true) throw new InvocationSnapshotError(`the invocation checkout changes could not be listed: git diff exited ${res?.status ?? 'unknown'}`)
+    for (const path of String(res.output ?? '').split('\n').map((line) => line.trim()).filter(Boolean)) {
+      if (path !== entryFile) paths.add(path)
+    }
+  }
+  if (after.head !== snapshot.head) paths.add('<HEAD>')
+  if (after.indexTree !== snapshot.indexTree) paths.add('<index>')
+  return [...paths].sort()
+}
+
+function invokeAndRestore({ ctx, io, invoke, snapshot, entry, fileAbs, fileBytes }) {
+  let result = null
+  let thrown = null
+  try { result = invoke() } catch (err) { thrown = err }
+  let after = null
+  try { after = captureInvocationAfter({ ctx, io, snapshot }) }
+  catch (err) {
+    const restoreError = restoreInvocationSnapshot({ ctx, io, snapshot, after: null, fileAbs, fileBytes })
+    const message = err instanceof InvocationSnapshotError ? err.message : `the invocation checkout could not be re-measured after the run: ${err?.message ?? String(err)}`
+    return { result, thrown, outside: [], fatal: restoreError === null ? message : `${message}; restore also failed: ${restoreError}` }
+  }
+  const restoreError = restoreInvocationSnapshot({ ctx, io, snapshot, after, fileAbs, fileBytes })
+  if (restoreError !== null) return { result, thrown, after, outside: [], fatal: `the invocation checkout could not be restored after the run: ${restoreError}` }
+  return { result, thrown, outside: diffInvocationSnapshots({ ctx, io, snapshot, after, entryFile: entry.file }), fatal: null }
+}
+
+// Never throws: capture/restore failures are returned as `fatal` so the existing
+// hardening fatal path stops the run instead of crashing mid-restore (the dispatch
+// sits before the named-test try/catch and cannot see it).
+function proveInvocationEntry({ entry, ctx, io, hardenRun, hardenWitness, row, dirtyAfterFailure }) {
+  const invoke = () => hardenRun(entry.invocation, { reap: true })
+  let fatal = null
+  let active = null
+  const run = () => {
+    const fileAbs = `${ctx.checkout}/${entry.file}`
+    const witness = hardenWitness?.get(entry.finding)
+    const S = witness?.get(entry.file)
+    if (S === undefined) return row('witness-missing', `the review-time witness has no cell for ${entry.file}`)
+    if (S.state === 'unreadable') return row('witness-unreadable', `the review-time witness could not read ${entry.file}: ${S.why}`)
+    if (S.state !== 'read') return row('witness-absent', `the declared implementation ${entry.file} did not exist on the review-time tree`)
+    const repairedFile = io.readFile(fileAbs)
+    if (repairedFile === null) return row('unapplied', `${entry.file} does not exist in the built tree`)
+    if (hardeningClassOf(entry) === 'coverage') {
+      if (repairedFile !== S.bytes) return row('source-regressed', `source-regressed: the built ${entry.file} is not byte-identical to the review-time witness, so this is not a coverage repair: a coverage repair certifies that the implementation was already correct at review time, and regressing it to buy a red pre-repair is refused`)
+      return row('unproven', `invocation-coverage-unprovable:the coverage class cannot be adjudicated through an opaque runner because novelty cannot be witnessed`)
+    }
+    const bound = applyMutationAnchor(repairedFile, entry.find, entry.replace)
+    if (bound.text === null) return row(BINDING_OUTCOME[bound.mode], bindingWhy(bound.mode, entry.file))
+    const snapshot = captureInvocationSnapshot({ ctx, io })
+    const checkSideEffects = (phase, outside) => {
+      if (outside.length > 0) return row('unproven', `invocation-${phase}-side-effects:${outside.join(', ')}`)
+      return null
+    }
+    active = { abs: fileAbs, original: repairedFile, writeAttempted: false }
+    let preRun = null
+    try {
+      active.writeAttempted = true
+      io.writeFile(fileAbs, S.bytes)
+      preRun = invokeAndRestore({ ctx, io, invoke, snapshot, entry, fileAbs, fileBytes: repairedFile })
+    } finally { io.writeFile(fileAbs, repairedFile) }
+    active = null
+    if (preRun.fatal !== null) { fatal = preRun.fatal; return row('unproven', preRun.fatal) }
+    const preSideEffected = checkSideEffects('pre-repair', preRun.outside)
+    if (preSideEffected !== null) return preSideEffected
+    if (preRun.thrown !== null) return row('unproven', `invocation-pre-repair-unrunnable:threw-${preRun.thrown?.message ?? String(preRun.thrown)}`)
+    const preClass = classifyInvocationResult(preRun.result)
+    if (!preClass.runnable) return row('unproven', `invocation-pre-repair-unrunnable:${preClass.reason}`)
+    if (preRun.result.status === 0) return row('pre-repair-green', `the invocation guard does not fail on the witnessed pre-repair ${entry.file}: pre-repair exited ${preRun.result.status}`)
+    const controlRun = invokeAndRestore({ ctx, io, invoke, snapshot, entry, fileAbs, fileBytes: repairedFile })
+    if (controlRun.fatal !== null) { fatal = controlRun.fatal; return row('unproven', controlRun.fatal) }
+    const controlSideEffected = checkSideEffects('control', controlRun.outside)
+    if (controlSideEffected !== null) return controlSideEffected
+    if (controlRun.thrown !== null) return row('unproven', `invocation-control-unrunnable:threw-${controlRun.thrown?.message ?? String(controlRun.thrown)}`)
+    const controlClass = classifyInvocationResult(controlRun.result)
+    if (!controlClass.runnable) return row('unproven', `invocation-control-unrunnable:${controlClass.reason}`)
+    if (controlRun.result.status !== 0) return row('control-red', `the invocation guard exited ${controlRun.result.status} on control`)
+    active = { abs: fileAbs, original: repairedFile, writeAttempted: false }
+    let mutantRun = null
+    try {
+      active.writeAttempted = true
+      io.writeFile(fileAbs, bound.text)
+      mutantRun = invokeAndRestore({ ctx, io, invoke, snapshot, entry, fileAbs, fileBytes: repairedFile })
+    } finally { io.writeFile(fileAbs, repairedFile) }
+    active = null
+    if (mutantRun.fatal !== null) { fatal = mutantRun.fatal; return row('unproven', mutantRun.fatal) }
+    const mutantSideEffected = checkSideEffects('mutant', mutantRun.outside)
+    if (mutantSideEffected !== null) return mutantSideEffected
+    if (mutantRun.thrown !== null) return row('unproven', `invocation-mutant-unrunnable:threw-${mutantRun.thrown?.message ?? String(mutantRun.thrown)}`)
+    const mutantClass = classifyInvocationResult(mutantRun.result)
+    if (!mutantClass.runnable) return row('unproven', `invocation-mutant-unrunnable:${mutantClass.reason}`)
+    const mutant = { ok: mutantRun.result.status === 0, status: mutantRun.result.status }
+    const observed = `control ${controlRun.result.status} mutant ${mutant.status}`
+    if (mutant.ok) return row('survived', observed)
+    return row('killed', observed)
+  }
+  try {
+    return { row: run(), fatal }
+  } catch (err) {
+    if (err instanceof InvocationSnapshotError) return { row: row('unproven', err.message), fatal: err.message }
+    const why = err?.message || String(err)
+    fatal = dirtyAfterFailure(active, err)
+    return { row: row('unproven', `the hardening proof was interrupted: ${why}`), fatal }
+  }
 }

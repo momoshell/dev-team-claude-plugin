@@ -270,3 +270,29 @@ test('D1', () => {
 test('F1 retired plan-scope-widened has no escalation question', () => {
   assert.throws(() => escalationQuestion('plan-scope-widened'), /undeclared escalation where/)
 })
+
+test('suite escalation question is state-neutral', () => {
+  assert.equal(ESCALATION_QUESTIONS.suite.prompt, 'What should happen next at the suite stage?')
+})
+
+test('lane escalation question is state-neutral', () => {
+  assert.equal(ESCALATION_QUESTIONS.lane.prompt, 'What should happen next at the validation lane stage?')
+})
+
+test('heterogeneous questions assert no reached pass/fail outcome', () => {
+  const outcome = /\b(?:(?:remains?|stays?|is|was)\s+(?:red|green)|(?:has\s+)?(?:passed|failed))\b/i
+  const offenders = Object.entries(ESCALATION_QUESTIONS)
+    .filter(([, question]) => question.reason?.startsWith('heterogeneous failures at '))
+    .filter(([, question]) => outcome.test(question.prompt))
+    .map(([where]) => where)
+  assert.deepEqual(offenders, [])
+})
+
+test('escalation stages remain the closed 28-member vocabulary', () => {
+  assert.deepEqual([...ESCALATION_WHERE], [
+    'converge-pr', 'scope', 'gate', 'envelope', 'triage', 'triage-scope', 'plan', 'plan-carve',
+    'plan-check', 'plan-chunks', 'sensitivity-floor', 'anchor-absent', 'census-exhibits', 'scope-request', 'build',
+    'lane', 'harden', 'review', 'refuted-must-fix', 'diff-mutation', 'review-unresolved', 'rebase',
+    'suite', 'cold-suite', 'publish', 'scout', 'directed', 'plan-scope-malformed',
+  ])
+})

@@ -122,6 +122,7 @@ test('D1 a tracked suite added after the recorded measurement is unmeasured, not
     'skills/frontend-svelte/exhibits.test.mjs',
     'skills/lean-build/exhibits.test.mjs',
     'skills/ui-design/exhibits.test.mjs',
+    'skills/ux/exhibits.test.mjs',
     'test/factory-kill-redundancy.test.mjs',
     'test/factory-lean-debt.test.mjs',
     'test/factory-ledger-advisor.test.mjs',

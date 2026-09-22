@@ -2965,14 +2965,17 @@ export function openLedger({
     let changes = 0
     let mirrorChecked = false
     mirror((conn) => {
-      const result = conn.prepare('INSERT OR IGNORE INTO escalation_proposals (adw_id, proposed_cause, proposed_by, proposed_evidence, created_at) SELECT ?, ?, ?, ?, ? FROM sessions WHERE adw_id = ? AND (terminal_reason IS NULL OR terminal_reason = ?)').run(args.adw_id, args.proposed_cause, args.proposed_by, args.proposed_evidence, args.created_at, args.adw_id, ESCALATION_CAUSE_UNCLASSIFIED)
+      // Triage-eligible sessions only: never measured (NULL) or measured as a
+      // non-blame reason (legacy unclassified, rule-gap, unmeasured) — never a
+      // classified blame cause.
+      const result = conn.prepare('INSERT OR IGNORE INTO escalation_proposals (adw_id, proposed_cause, proposed_by, proposed_evidence, created_at) SELECT ?, ?, ?, ?, ? FROM sessions WHERE adw_id = ? AND (terminal_reason IS NULL OR terminal_reason IN (?, ?, ?))').run(args.adw_id, args.proposed_cause, args.proposed_by, args.proposed_evidence, args.created_at, args.adw_id, ESCALATION_CAUSE_UNCLASSIFIED, ESCALATION_CAUSE_RULE_GAP, ESCALATION_CAUSE_UNMEASURED)
       changes = Number(result?.changes ?? 0)
       mirrorChecked = true
     })
     if (changes === 1) return { recorded: true, reason: 'recorded' }
     let session = null
     try { session = getSession(args.adw_id) } catch { session = null }
-    if (session && session.terminal_reason != null && session.terminal_reason !== ESCALATION_CAUSE_UNCLASSIFIED) {
+    if (session && session.terminal_reason != null && ESCALATION_CAUSES.includes(session.terminal_reason)) {
       return { recorded: false, reason: 'already-classified' }
     }
     let current = null

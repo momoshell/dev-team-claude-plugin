@@ -3253,7 +3253,7 @@ const diffReport = (mutants = [], over = {}) => ({
 })
 const diffSurvivor = { id: 'diff-survivor-1', path: 'a.mjs', line: 1, operator: 'literal', replacement: 'const value = false', validation_lane: 'lane-cmd', gate_cmd: 'gate-cmd', outcome: 'survived' }
 
-function diffDriverIo({ report = diffReport([diffSurvivor]), mutations = [], review = reviewEnv('pass'), target = 'const value = true\n', capEnv = undefined } = {}) {
+function diffDriverIo({ report = diffReport([diffSurvivor]), mutations = [], review = reviewEnv('pass'), target = 'const value = true\n', capEnv = undefined, reportFile = undefined, runnerStatus = 0, runnerStderr = '' } = {}) {
   const plan = planEnv({ details: {
     ...planEnv().details, files_in_scope: ['a.mjs'], gate_cmd: 'gate-cmd', validation_lane: 'lane-cmd', mutations,
   } })
@@ -3270,11 +3270,15 @@ function diffDriverIo({ report = diffReport([diffSurvivor]), mutations = [], rev
     'gate-cmd:3': { ok: false, output: 'FAIL declared: caught\nGATE-SUMMARY {"total":1,"failed":1,"errored":0}' },
     'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
   }
+  const files = { [`${CTX.checkout}/a.mjs`]: target }
+  if (reportFile !== undefined) files[`${TD}/diff-mutation-1.report.json`] = typeof reportFile === 'string' ? reportFile : JSON.stringify(reportFile)
+  const runnerEntry = { ok: runnerStatus === 0, output: '', status: runnerStatus, stderr: runnerStderr }
+  if (report !== null) runnerEntry.output = `DIFF-MUTATION-SUMMARY ${JSON.stringify(report)}`
   const options = {
     envelopes, runs, cleanRuns: { 'gate-cmd': { ok: false, output: baselineOutput },
-    }, files: { [`${CTX.checkout}/a.mjs`]: target }, writeThrough: true,
+    }, files, writeThrough: true,
     diffListing: 'a.mjs\0', changed: Array.from({ length: 12 }, () => ['a.mjs']),
-    diffReports: report === null ? [{ ok: true, output: '' }] : [{ ok: true, output: `DIFF-MUTATION-SUMMARY ${JSON.stringify(report)}` }],
+    diffReports: [runnerEntry],
   }
   return fakeIo({ ...options, ...(capEnv === undefined ? {} : { env: { CREW_DIFF_MUTATION_CAP: capEnv } }) })
 }
@@ -5689,4 +5693,80 @@ test('an unreadable rules file is named in the brief rather than silently omitte
     assert.ok(lines.at(-1).includes(FALSIFICATION_PATH), `${why}: it names the file`)
     assert.equal(lines.includes(FALSIFICATION_HEADING), false, `${why}: no heading over nothing`)
   }
+})
+
+const b646Killed = (n) => ({ id: `b646-killed-${n}`, path: 'a.mjs', line: n, operator: 'literal', replacement: 'const value = false', outcome: 'killed' })
+const b646FileReport = () => diffReport(
+  [...Array.from({ length: 7 }, (_, index) => b646Killed(index + 1)),
+    { id: 'b646-skipped-1', path: 'a.mjs', line: 8, operator: null, outcome: 'skipped', skip_reason: 'comment-or-blank' }],
+  { total_candidates: 8, skip_counts: { 'comment-or-blank': 1 } },
+)
+const diffProofRow = (io) => io.calls.logs.find((entry) => entry.diff_mutation_proof)?.diff_mutation_proof
+
+test('A1 recovers valid on-disk diff report without sentinel', () => {
+  const io = diffDriverIo({ report: null, reportFile: b646FileReport() })
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'done')
+  const row = diffProofRow(io)
+  assert.equal(row.generated, 8)
+  assert.equal(row.killed, 7)
+  assert.equal(row.survived, 0)
+  assert.equal(row.skipped, 1)
+  assert.deepEqual(row.skip_counts, { 'comment-or-blank': 1 })
+  assert.equal(row.mutants.length, 8)
+  assert.equal(row.report_source, 'report-file')
+  assert.equal(row.skip_counts['runner-unavailable'], undefined)
+})
+
+test('B1 rejects invalid on-disk diff report through shared validation', () => {
+  const io = diffDriverIo({ report: null, reportFile: diffReport([diffSurvivor], { generation: 2 }) })
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'done')
+  const row = diffProofRow(io)
+  assert.deepEqual(row.skip_counts, { 'runner-unavailable': 1 })
+  assert.equal(row.generated, 0)
+  assert.equal(row.survived, 0)
+})
+
+test('C1 uses runner-unavailable only when both report sources are invalid', () => {
+  const sentinelOnly = diffDriverIo({ report: diffReport([diffSurvivor]), reportFile: diffReport([diffSurvivor], { generation: 2 }) })
+  assert.equal(driveTask(CTX, sentinelOnly).status, 'done')
+  const sentinelRow = diffProofRow(sentinelOnly)
+  assert.equal(sentinelRow.survived, 1)
+  assert.equal(sentinelRow.skip_counts['runner-unavailable'], undefined)
+
+  const fileOnly = diffDriverIo({ report: null, reportFile: b646FileReport() })
+  assert.equal(driveTask(CTX, fileOnly).status, 'done')
+  const fileRow = diffProofRow(fileOnly)
+  assert.equal(fileRow.generated, 8)
+  assert.equal(fileRow.skip_counts['runner-unavailable'], undefined)
+
+  const neither = diffDriverIo({ report: null, reportFile: diffReport([diffSurvivor], { generation: 2 }) })
+  assert.equal(driveTask(CTX, neither).status, 'done')
+  assert.deepEqual(diffProofRow(neither).skip_counts, { 'runner-unavailable': 1 })
+})
+
+test('D1 records runner exit status and stderr in unavailable why', () => {
+  const io = diffDriverIo({ report: null, reportFile: 'torn-bytes{{{', runnerStatus: 3, runnerStderr: 'b907-distinctive-stderr-boom\n' })
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'done')
+  const row = diffProofRow(io)
+  assert.deepEqual(row.skip_counts, { 'runner-unavailable': 1 })
+  assert.match(row.why, /exit status 3/)
+  assert.match(row.why, /b907-distinctive-stderr-boom/)
+  assert.equal(row.why.includes('the diff runner emitted no final DIFF-MUTATION-SUMMARY sentinel'), false)
+})
+
+test('E1 distinguishes sentinel and report-file sources', () => {
+  const sentinelIo = diffDriverIo({ report: diffReport([diffSurvivor]) })
+  driveTask(CTX, sentinelIo)
+  assert.equal(diffProofRow(sentinelIo).report_source, 'stdout-sentinel')
+
+  const fileIo = diffDriverIo({ report: null, reportFile: b646FileReport() })
+  driveTask(CTX, fileIo)
+  assert.equal(diffProofRow(fileIo).report_source, 'report-file')
+
+  const unavailableIo = diffDriverIo({ report: null })
+  driveTask(CTX, unavailableIo)
+  assert.equal(diffProofRow(unavailableIo).report_source, 'runner-unavailable')
 })

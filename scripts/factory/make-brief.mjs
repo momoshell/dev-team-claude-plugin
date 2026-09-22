@@ -3425,8 +3425,8 @@ function renderValidation(baseline, discovery, pack) {
   return `narrow: ${narrow}\nfull: ${full} · ${basis} ${count}`
 }
 
-function briefSection(name, lines) {
-  return { name, lines }
+function briefSection(name, source, lines, authored = null) {
+  return { name, source, lines, authoredBytes: authored == null ? null : Buffer.byteLength(authored, 'utf8') }
 }
 
 function renderBriefSections(gathered) {
@@ -3447,25 +3447,25 @@ function renderBriefSections(gathered) {
   const coupling = gathered.coupling ?? crossCheckCoupling({ discovery, writeSurface, enforce: false })
   const proposal = gathered.proposal ?? proposeTier({ where, discovery })
   const sections = [
-    briefSection('task', [`# Task: ${request.ask}`]),
-    briefSection('the ask', ['## The ask', request.ask]),
-    briefSection('intent', ['## Intent', resolveIntent(request)]),
-    briefSection('proposed tier', ['## Proposed tier', renderProposedTier(proposal), renderProposalBlock(proposal)]),
-    briefSection('where', ['## Where', renderWhere(where, creates)]),
-    briefSection('premise check', ['## Premise check', renderPremiseCheck(premise)]),
-    ...(pack == null ? [] : [briefSection('context pack', renderContextPack(pack))]),
-    briefSection('done means', ['## Done means', request.done_means]),
-    briefSection('tripwires', ['## Tripwires', renderTripwireSlot(discovery, pack)]),
-    briefSection('coupled sources', ['## Coupled sources', renderCoupledPointer(coupling, pack)]),
-    briefSection('baseline', ['## Baseline', formatBaseline(baseline, profile, supplied)]),
-    briefSection('out of scope', ['## Out of scope', request.out_of_scope]),
-    briefSection('fences', ['## Fences', renderFences(fences)]),
-    briefSection('what the crew decides', ['## What the crew decides', SLOT_MARKER]),
-    briefSection('acceptance', ['## Acceptance', `${request.done_means} · Full suite green. · ${SLOT_MARKER}`]),
-    briefSection('acceptance gate', ['## Acceptance gate', standingBlocks().acceptance]),
-    briefSection('per-check mutations', ['## Per-check mutations', standingBlocks().mutations]),
-    briefSection('validation lane', ['## Validation lane', renderValidation(baseline, discovery, pack)]),
-    briefSection('conventions', [
+    briefSection('task', 'ask', [`# Task: ${request.ask}`], request.ask),
+    briefSection('the ask', 'ask', ['## The ask', request.ask], request.ask),
+    briefSection('intent', null, ['## Intent', resolveIntent(request)]),
+    briefSection('proposed tier', null, ['## Proposed tier', renderProposedTier(proposal), renderProposalBlock(proposal)]),
+    briefSection('where', null, ['## Where', renderWhere(where, creates)]),
+    briefSection('premise check', null, ['## Premise check', renderPremiseCheck(premise)]),
+    ...(pack == null ? [] : [briefSection('context pack', null, renderContextPack(pack))]),
+    briefSection('done means', 'done_means', ['## Done means', request.done_means], request.done_means),
+    briefSection('tripwires', null, ['## Tripwires', renderTripwireSlot(discovery, pack)]),
+    briefSection('coupled sources', null, ['## Coupled sources', renderCoupledPointer(coupling, pack)]),
+    briefSection('baseline', null, ['## Baseline', formatBaseline(baseline, profile, supplied)]),
+    briefSection('out of scope', 'out_of_scope', ['## Out of scope', request.out_of_scope], request.out_of_scope),
+    briefSection('fences', null, ['## Fences', renderFences(fences)]),
+    briefSection('what the crew decides', null, ['## What the crew decides', SLOT_MARKER]),
+    briefSection('acceptance', 'done_means', ['## Acceptance', `${request.done_means} · Full suite green. · ${SLOT_MARKER}`], request.done_means),
+    briefSection('acceptance gate', null, ['## Acceptance gate', standingBlocks().acceptance]),
+    briefSection('per-check mutations', null, ['## Per-check mutations', standingBlocks().mutations]),
+    briefSection('validation lane', null, ['## Validation lane', renderValidation(baseline, discovery, pack)]),
+    briefSection('conventions', null, [
       '## Conventions',
       renderConventionsSlot(writeSurface, pack),
       ...(pack == null ? [
@@ -3478,7 +3478,7 @@ function renderBriefSections(gathered) {
   ]
   if (request.directed) {
     const index = sections.findIndex((section) => section.name === 'intent')
-    sections.splice(index + 1, 0, briefSection('directed plan', directedSection(request.directed)))
+    sections.splice(index + 1, 0, briefSection('directed plan', null, directedSection(request.directed)))
   }
   return { request, sections }
 }
@@ -3507,7 +3507,7 @@ export function renderBrief(gathered) {
 }
 
 function unmeasuredBrief() {
-  return { status: 'unmeasured', bytes: null, largestSection: null }
+  return { status: 'unmeasured', bytes: null, contributions: null, largestContributor: null }
 }
 
 export function measureBrief(content, sections) {
@@ -3525,14 +3525,34 @@ export function measureBrief(content, sections) {
     `${section.lines.join('\n')}${index < sections.length - 1 ? '\n' : ''}`,
     'utf8',
   ))
-  let largestIndex = 0
-  for (let index = 1; index < sectionBytes.length; index += 1) {
-    if (sectionBytes[index] > sectionBytes[largestIndex]) largestIndex = index
+  const contributions = []
+  const bySource = new Map()
+  for (let index = 0; index < sections.length; index += 1) {
+    const section = sections[index]
+    const source = section.source ?? null
+    if (source == null) {
+      contributions.push({ name: section.name, bytes: sectionBytes[index], occurrences: 1, contributionBytes: sectionBytes[index] })
+      continue
+    }
+    if (source !== 'ask' && source !== 'done_means' && source !== 'out_of_scope') return unmeasuredBrief()
+    if (!Number.isInteger(section.authoredBytes) || section.authoredBytes < 0) return unmeasuredBrief()
+    let contribution = bySource.get(source)
+    if (!contribution) {
+      contribution = { name: source === 'ask' ? 'the ask' : source, bytes: section.authoredBytes, occurrences: 0, contributionBytes: 0 }
+      bySource.set(source, contribution)
+      contributions.push(contribution)
+    } else if (contribution.bytes !== section.authoredBytes) {
+      return unmeasuredBrief()
+    }
+    contribution.occurrences += 1
+    contribution.contributionBytes += contribution.bytes
   }
+  const largestContributor = contributions.reduce((largest, contribution) => contribution.contributionBytes > largest.contributionBytes ? contribution : largest)
   return {
     status: 'measured',
     bytes: Buffer.byteLength(content, 'utf8'),
-    largestSection: { name: sections[largestIndex].name, bytes: sectionBytes[largestIndex] },
+    contributions,
+    largestContributor,
   }
 }
 
@@ -3542,8 +3562,9 @@ export function admitBrief(content, sections) {
     refuseUsage('brief size is unmeasured; the candidate was not admitted', BRIEF_SIZE_UNMEASURED)
   }
   if (measured.bytes > BRIEF_BYTE_LIMIT) {
+    const largest = measured.largestContributor
     refuseUsage(
-      `brief candidate is ${measured.bytes} bytes; limit is ${BRIEF_BYTE_LIMIT} bytes (51,200-byte limit); largest generated section is ${measured.largestSection.name} at ${measured.largestSection.bytes} bytes`,
+      `brief candidate is ${measured.bytes} bytes; limit is ${BRIEF_BYTE_LIMIT} bytes (51,200-byte limit); largest contributor is ${largest.name} at ${largest.bytes} bytes x ${largest.occurrences} ${largest.occurrences === 1 ? 'occurrence' : 'occurrences'} = ${largest.contributionBytes} bytes (the ask and done_means are each emitted twice; out_of_scope once)`,
       BRIEF_TOO_LARGE,
     )
   }

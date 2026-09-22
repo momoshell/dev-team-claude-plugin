@@ -850,14 +850,15 @@ test('the discovered anchor-manifest corpus checks clean', () => {
   // discovered manifest below skills/ is covered by the same read-only check.
   const dirs = anchorManifestDirs(join(ROOT, 'skills'))
   const relativeDirs = dirs.map((dir) => relative(ROOT, dir))
-  assert.equal(dirs.length, 8)
+  assert.equal(dirs.length, 9)
   assert.ok(relativeDirs.includes('skills/frontend-svelte'))
   assert.ok(relativeDirs.includes('skills/pr-review'))
+  assert.ok(relativeDirs.includes('skills/ux'))
   const output = []
   const status = repairCli(['--check', join(ROOT, 'skills'), '--root', ROOT], output.push.bind(output))
   const summary = output.find((line) => line.includes('pins across'))
   assert.ok(summary !== undefined, 'expected a scanned/manifests summary row')
-  assert.ok(summary.includes('225 pins across 8 manifests'), `expected the 225-pin summary, found: ${summary}`)
+  assert.ok(summary.includes('244 pins across 9 manifests'), `expected the 244-pin summary, found: ${summary}`)
 
   // ZERO TOLERANCE for the classes #1471 is about. A pin whose content is gone,
   // resolves twice, or has drifted a line fails this suite immediately.

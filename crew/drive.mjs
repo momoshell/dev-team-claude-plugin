@@ -5780,8 +5780,45 @@ function proveHardeningEntries({ entries, hardenWitness, ctx, io, hardenRun, dir
   const proveEntry = (entry) => {
     let active = null
     const row = (outcome, why) => ({ finding: entry.finding, test: entry.test, name: entry.name, outcome, why })
-    if (entry.invocation !== undefined) return row('unproven', `the guard is the invocation ${entry.invocation}; this repo executes no foreign runner, so the guard is recorded and unmeasured`)
     try {
+      if (entry.invocation !== undefined) {
+        const invocationBlindSpot = `the invocation ${entry.invocation} is adjudicated by exit status only; an exit status cannot prove the named guard ${entry.name} ran`
+        const unavailable = (phase, reason) => row('unproven', `invocation-${phase}-unrunnable:${reason}; ${invocationBlindSpot}`)
+        const invocationVerdict = (result) => {
+          if (typeof result !== 'object' || result === null) return { runnable: false, reason: 'result-not-object' }
+          if (result.error != null || result.signal != null || result.completed === false || result.status === null) return { runnable: false, reason: 'result-incomplete' }
+          if (typeof result.ok !== 'boolean') return { runnable: false, reason: 'ok-missing' }
+          if ((result.ok && result.status !== 0) || (!result.ok && result.status === 0)) return { runnable: false, reason: 'status-ok-mismatch' }
+          if (result.truncated === true) return { runnable: false, reason: 'output-truncated' }
+          return { runnable: true }
+        }
+        const invocationStatus = (result) => (typeof result.status === 'number' ? ` (exit ${result.status})` : '')
+        let control = null
+        try { control = hardenRun(entry.invocation) } catch { return unavailable('control', 'runner-threw') }
+        const controlVerdict = invocationVerdict(control)
+        if (!controlVerdict.runnable) return unavailable('control', controlVerdict.reason)
+        if (!control.ok) return row('control-red', `control red${invocationStatus(control)}; ${invocationBlindSpot}`)
+        const fileAbs = `${ctx.checkout}/${entry.file}`
+        const repairedFile = io.readFile(fileAbs)
+        if (repairedFile === null) return row('unapplied', `${entry.file} does not exist in the built tree`)
+        const bound = applyMutationAnchor(repairedFile, entry.find, entry.replace)
+        if (bound.text === null) return row(BINDING_OUTCOME[bound.mode], bindingWhy(bound.mode, entry.file))
+        active = { abs: fileAbs, original: repairedFile, writeAttempted: false }
+        let mutant = null
+        let mutantThrew = false
+        try {
+          active.writeAttempted = true
+          io.writeFile(fileAbs, bound.text)
+          try { mutant = hardenRun(entry.invocation) } catch { mutantThrew = true }
+        } finally { io.writeFile(fileAbs, repairedFile) }
+        active = null
+        if (mutantThrew) return unavailable('mutant', 'runner-threw')
+        const mutantVerdict = invocationVerdict(mutant)
+        if (!mutantVerdict.runnable) return unavailable('mutant', mutantVerdict.reason)
+        const observed = `control green${invocationStatus(control)}; mutant ${mutant.ok ? 'green' : 'red'}${invocationStatus(mutant)}`
+        if (mutant.ok) return row('survived', `${observed}; ${invocationBlindSpot}`)
+        return row('killed', `${observed}; ${invocationBlindSpot}`)
+      }
       const witness = hardenWitness?.get(entry.finding)
       const W = witness?.get(entry.test)
       const S = witness?.get(entry.file)

@@ -6067,17 +6067,129 @@ const b863InvocationEntry = (over = {}) => ({
   ...over,
 })
 
-test('b863 A1 a cargo invocation guard validates and clears as unmeasured', () => {
-  const scope = scopeMatcher(['a.mjs', 'a.test.mjs', 'src/x.rs'])
-  const result = validateHardened({ hardened: [b863InvocationEntry()] }, [{ id: 'F1' }], scope)
-  assert.equal(result.entries.length, 1)
-  assert.equal(result.refusals.length, 0)
-  const io = b376ProofIo({ hardened: [b863InvocationEntry()] })
-  const done = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
-  assert.equal(done.status, 'done')
+const invocationRuns = (...results) => (text, n) => {
+  const value = results[n - 1] ?? results.at(-1)
+  return typeof value === 'function' ? value(text, n) : value
+}
+
+const B914_FILES = {
+  [`${CTX.checkout}/${B376_TEST_FILE}`]: 'export const repaired = true\n',
+  [`${CTX.checkout}/${B376_IMPL_FILE}`]: 'const guard = false\n',
+}
+
+test('A1 invocation control green and mutant red is proven', () => {
+  const io = b376ProofIo({
+    hardened: [b863InvocationEntry()],
+    files: { ...B914_FILES },
+    runs: { [B863_INVOCATION]: invocationRuns({ ok: true, status: 0, output: 'green' }, { ok: false, status: 1, output: 'red' }) },
+  })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.run.filter(({ cmd }) => cmd === B863_INVOCATION).length, 2)
   const row = io.calls.logs.find((entry) => entry.finding_hardened)?.finding_hardened
-  assert.equal(row?.finding, 'F1')
-  assert.equal(row?.outcome, 'unproven')
+  assert.equal(row?.outcome, 'killed')
+  assert.equal(hardeningRowBucket(row), 'proven')
+})
+
+test('B1 invocation mutant green is refuted with both statuses', () => {
+  const io = b376ProofIo({
+    hardened: [b863InvocationEntry()],
+    files: { ...B914_FILES },
+    runs: { [B863_INVOCATION]: invocationRuns({ ok: true, status: 0, output: 'green' }, { ok: true, status: 0, output: 'green' }) },
+  })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'harden')
+  const row = io.calls.logs.find((entry) => entry.finding_hardened)?.finding_hardened
+  assert.equal(row?.outcome, 'survived')
+  assert.equal(hardeningRowBucket(row), 'refuted')
+  assert.match(row?.why ?? '', /control green/)
+  assert.match(row?.why ?? '', /mutant green/)
+  const redIo = b376ProofIo({
+    hardened: [b863InvocationEntry()],
+    files: { ...B914_FILES },
+    runs: { [B863_INVOCATION]: invocationRuns({ ok: false, status: 1, output: 'red' }) },
+  })
+  const redResult = driveTask({ ...CTX, limits: { build_rounds: 2 } }, redIo)
+  assert.equal(redResult.status, 'escalation')
+  assert.equal(redResult.details.escalation.where, 'harden')
+  assert.equal(redIo.calls.run.filter(({ cmd }) => cmd === B863_INVOCATION).length, 1)
+  const redRow = redIo.calls.logs.find((entry) => entry.finding_hardened)?.finding_hardened
+  assert.equal(redRow?.outcome, 'control-red')
+  assert.equal(hardeningRowBucket(redRow), 'refuted')
+  assert.match(redRow?.why ?? '', /control red \(exit 1\)/)
+})
+
+test('RV1-1 red control is refuted without a mutant run', () => {
+  const io = b376ProofIo({
+    hardened: [b863InvocationEntry()],
+    files: { ...B914_FILES },
+    runs: { [B863_INVOCATION]: invocationRuns({ ok: false, status: 1, output: 'red' }) },
+  })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'harden')
+  assert.equal(io.calls.run.filter(({ cmd }) => cmd === B863_INVOCATION).length, 1)
+  const row = io.calls.logs.find((entry) => entry.finding_hardened)?.finding_hardened
+  assert.equal(row?.outcome, 'control-red')
+  assert.equal(hardeningRowBucket(row), 'refuted')
+  assert.match(row?.why ?? '', /control red \(exit 1\)/)
+})
+
+test('C1 unrunnable invocations retain closed reasons', () => {
+  const throwing = () => { throw new Error('spawn ENOENT') }
+  const cases = [
+    ['result-not-object null', 'control', 'result-not-object', null, null],
+    ['result-not-object string', 'control', 'result-not-object', 'boom', null],
+    ['result-incomplete null status', 'control', 'result-incomplete', { ok: false, status: null, output: '' }, null],
+    ['result-incomplete error', 'control', 'result-incomplete', { ok: false, status: 1, output: '', error: new Error('boom') }, null],
+    ['result-incomplete signal', 'control', 'result-incomplete', { ok: false, status: null, output: '', signal: 'SIGTERM' }, null],
+    ['result-incomplete not completed', 'control', 'result-incomplete', { ok: false, status: 1, output: '', completed: false }, null],
+    ['ok-missing', 'control', 'ok-missing', { status: 0, output: '' }, null],
+    ['status-ok-mismatch green nonzero', 'control', 'status-ok-mismatch', { ok: true, status: 1, output: '' }, null],
+    ['status-ok-mismatch red zero', 'control', 'status-ok-mismatch', { ok: false, status: 0, output: '' }, null],
+    ['output-truncated', 'control', 'output-truncated', { ok: true, status: 0, output: 'green', truncated: true }, null],
+    ['runner-threw control', 'control', 'runner-threw', throwing, null],
+    ['result-incomplete mutant', 'mutant', 'result-incomplete', { ok: true, status: 0, output: 'green' }, { ok: true, status: null, output: '' }],
+    ['runner-threw mutant', 'mutant', 'runner-threw', { ok: true, status: 0, output: 'green' }, throwing],
+  ]
+  for (const [label, phase, reason, controlScript, mutantScript] of cases) {
+    const runs = mutantScript === null
+      ? { [B863_INVOCATION]: invocationRuns(controlScript) }
+      : { [B863_INVOCATION]: invocationRuns(controlScript, mutantScript) }
+    const io = b376ProofIo({ hardened: [b863InvocationEntry()], files: { ...B914_FILES }, runs })
+    const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+    assert.equal(result.status, 'done', label)
+    const row = io.calls.logs.find((entry) => entry.finding_hardened)?.finding_hardened
+    assert.equal(row?.outcome, 'unproven', label)
+    assert.equal(hardeningRowBucket(row), 'unmeasured', label)
+    assert.match(row?.why ?? '', new RegExp(`invocation-${phase}-unrunnable:${reason}`), label)
+    assert.equal((row?.why ?? '').includes('this repo executes no foreign runner'), false, label)
+  }
+})
+
+test('D1 invocation records the exit-status blind spot', () => {
+  const io = b376ProofIo({
+    hardened: [b863InvocationEntry()],
+    files: { ...B914_FILES },
+    runs: { [B863_INVOCATION]: invocationRuns({ ok: true, status: 0, output: 'green' }, { ok: false, status: 1, output: 'red' }) },
+  })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  assert.equal(result.status, 'done')
+  const row = io.calls.logs.find((entry) => entry.finding_hardened)?.finding_hardened
+  assert.equal(row?.outcome, 'killed')
+  assert.match(row?.why ?? '', /adjudicated by exit status only/)
+  assert.match(row?.why ?? '', /cannot prove the named guard F1 guard ran/)
+})
+
+test('E1 named-test adjudication remains exact-name based', () => {
+  const io = b376ProofIo({ files: { ...B914_FILES } })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  assert.equal(result.status, 'done')
+  const row = io.calls.logs.find((entry) => entry.finding_hardened)?.finding_hardened
+  assert.deepEqual(row, { round: 2, finding: 'F1', test: 'a.test.mjs', check: 'F1 guard', outcome: 'killed', why: null })
+  assert.equal(io.calls.run.some(({ cmd }) => cmd === hardenCommand(B376_TEST_FILE, 'F1 guard')), true)
+  assert.equal(io.calls.run.filter(({ cmd }) => cmd === B863_INVOCATION).length, 0)
 })
 
 test('b863 C1 a guard naming both a path and an invocation, or neither, is refused', () => {

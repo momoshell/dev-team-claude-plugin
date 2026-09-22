@@ -3507,6 +3507,23 @@ export function promptMeasurementDefect({ files, body, register = loadCapabiliti
   return `prompt-change PR body must name a ledger cell measure with before/after and n, or say unmeasured — n insufficient with a reason and re-measure seat count; prompt surface: ${hits.join(', ')}`
 }
 
+export function issueStatementDefect({ brief, details } = {}) {
+  const text = typeof brief === 'string' ? brief : String(brief ?? '')
+  if (!text) return null
+  const lines = text.split('\n')
+  let issue = null
+  for (let index = 0; index < lines.length; index += 1) {
+    if (lines[index].trim() !== '## Context pack') continue
+    const next = index + 1 < lines.length ? lines[index + 1] : ''
+    const match = /^issue: #([1-9]\d*)\b/.exec(next)
+    if (match) { issue = match[1]; break }
+  }
+  if (issue === null) return null
+  if (Array.isArray(details?.closes) && details.closes.length > 0) return null
+  if (Array.isArray(details?.issues) && details.issues.length > 0) return null
+  return `issue-bound lane must declare details.closes or details.issues before publication; dispatched issue #${issue}`
+}
+
 function publishDiffFiles(io, baseSha) {
   if (typeof io?.run !== 'function' || typeof baseSha !== 'string' || baseSha.trim() === '') return null
   try {
@@ -3526,6 +3543,7 @@ export const PUBLISH_REFUSALS = Object.freeze({
   pushRejected: 'push-rejected',
   prCreate: 'pr-create',
   promptMeasurement: 'prompt-measurement-missing',
+  issueStatement: 'issue-statement-missing',
 })
 export const PUBLISH_REFUSAL_NAMES = Object.freeze(Object.values(PUBLISH_REFUSALS))
 
@@ -7624,6 +7642,9 @@ function runTask(ctx, io, crash) {
         return resumeEscalate('publish', `publish refused (${reason}): ${detail}`, { publish: { refused: reason } })
       }
       if (publishBranch === baseName) return refusePublish(PUBLISH_REFUSALS.branchMain, `the checkout branch is ${baseName}`)
+      const resumeBriefText = (() => { try { const value = resumeIo.readFile(resumeCtx.briefFile); return typeof value === 'string' ? value : null } catch { return null } })()
+      const resumeIssueDefect = issueStatementDefect({ brief: resumeBriefText, details: checkpoint.returns?.planner?.details })
+      if (resumeIssueDefect) return refusePublish(PUBLISH_REFUSALS.issueStatement, resumeIssueDefect)
       const promptDefect = promptMeasurementDefect({ files: publishFiles, body: composePrBody({ intent: commitIntent(checkpoint.commit.message) }) })
       if (promptDefect) return refusePublish(PUBLISH_REFUSALS.promptMeasurement, promptDefect)
       let ghMissing
@@ -11677,6 +11698,8 @@ function runTask(ctx, io, crash) {
     }
     if (!branch) return refusePublish(PUBLISH_REFUSALS.branchUnresolved, 'the checkout branch is unresolved (detached HEAD)')
     if (branch === PUBLISH_BASE) return refusePublish(PUBLISH_REFUSALS.branchMain, `the checkout branch is ${PUBLISH_BASE}`)
+    const issueDefect = issueStatementDefect({ brief: briefText, details: planEnv?.details })
+    if (issueDefect) return refusePublish(PUBLISH_REFUSALS.issueStatement, issueDefect)
     const promptDefect = promptMeasurementDefect({ files: publishFiles, body: composePrBody({ intent: commitIntent(message) }) })
     if (promptDefect) return refusePublish(PUBLISH_REFUSALS.promptMeasurement, promptDefect)
 

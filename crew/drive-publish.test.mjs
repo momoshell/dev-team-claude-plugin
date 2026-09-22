@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import {
   COMMIT_TRAILER, CTX, HONEST_NARRATION, NARRATION_HEADING, NARRATION_RECORD, NARRATION_REFUSALS, NARRATION_REFUSAL_NAMES, NARRATION_STAGE_VOCABULARY, NARRATOR_REGISTER, PUBLISH_REFUSALS, PUBLISH_REFUSAL_NAMES, RUN_START_EVENT, TD, VARIANTS, applyNarration, bounceDetail, bounceSeatOf, buildEnv, commitIntent, composeCommitMessage, composePrBody, convergeRun, driveTask, fakeIo, issueTrailers, journalRowsSinceRunStart, narrateRecord, narrationDefect, narrationFromResponse, narrationIsRawJson, narrationPrompt, narrationStageDefect, narratorApiRoot, narratorCommand, narratorConfig, narratorIo, narratorModelId, narratorModelsCommand, parseSuiteCounts, planEnv, prAnomalies, publicationIo, readFileSync, refsFromCommitMessage, reviewEnv, shellArg,
 } from './drive-fixtures.mjs'
-import { anchorConflictMechanical, canonicalAnchorManifest, canonicalCitationDoc, lineNumberOnlyAnchorResolution, promptMeasurementDefect, rebaseConflictRoute, resumeCheckpointDefect, resumeTask, resumeWorktreeSha256 } from './drive.mjs'
+import { anchorConflictMechanical, canonicalAnchorManifest, canonicalCitationDoc, lineNumberOnlyAnchorResolution, issueStatementDefect, promptMeasurementDefect, rebaseConflictRoute, resumeCheckpointDefect, resumeTask, resumeWorktreeSha256 } from './drive.mjs'
 
 const A1_RESUME_TRACE = Object.freeze(['gate', 'suite', 'suite', 'publish'])
 const A1_CONVERGE_TRACE = Object.freeze(['converge', 'suite', 'commit', 'publish'])
@@ -210,6 +210,11 @@ function runPublished(options = {}) {
     ...(options.ctx || {}), publish: options.publish === undefined ? { branch } : options.publish,
   }
   const io = installParentProbe(withPublicationDiff(publicationIo({ ...options, branch }), options), options.commands?.['git rev-parse HEAD^'])
+  if (Object.hasOwn(options, 'briefText')) {
+    const baseRead = io.readFile.bind(io)
+    const briefText = options.briefText
+    io.readFile = (path) => (path === ctx.briefFile ? briefText : baseRead(path))
+  }
   let result
   try { result = driveTask(ctx, io) } catch (error) { return { ctx, io, error } }
   return { ctx, io, result }
@@ -1390,6 +1395,37 @@ test('F1 capability-register grants require claims and identify the triggering s
   assert.equal(promptMeasurementDefect({ files: ['skills/pr-review/SKILL.md'], body: '', register }), null)
 })
 
+const ISSUE_BOUND_BRIEF = [
+  '# Task brief',
+  '',
+  'Deliver the dispatched fix. Unrelated prose mentions issue #9999 and branch fix/1467-draft, neither of which binds.',
+  '',
+  '## Context pack',
+  'issue: #1467 · body inlined below',
+  '',
+  'Issue 1467 body: the lane must name its issue statement.',
+  '',
+].join('\n')
+
+const NO_DISPATCH_BRIEF = [
+  '# Task brief',
+  '',
+  'Deliver without a dispatch. Prose mentions issue #1467 here, outside the compiler-owned row, so it must not bind.',
+  '',
+  '## Context pack',
+  'issue: (none) — basis: no issue dispatched',
+  '',
+].join('\n')
+
+function runIssueResume(briefText, checkpoint, options = {}) {
+  const io = withPublicationDiff(publicationIo(options.ioOptions || {}), options.diff || {})
+  const ctx = { ...CTX, task: options.task || 'resume-issue-task', publish: { branch: 'feature/ship' }, files_in_scope: ['a.mjs'], ...(options.ctx || {}) }
+  const baseRead = io.readFile.bind(io)
+  io.readFile = (path) => (path === ctx.briefFile ? briefText : baseRead(path))
+  const result = resumeTask(ctx, io, checkpoint)
+  return { ctx, io, result }
+}
+
 test('each closed publish refusal is named and never creates a pull request', () => {
   const cases = [
     ['branch-unresolved', { branch: '' }],
@@ -1400,6 +1436,7 @@ test('each closed publish refusal is named and never creates a pull request', ()
     ['pr-check', { commands: { 'gh pr view': { ok: false, output: 'permission denied' } } }],
     ['push-rejected', { commands: { 'git push -u origin': { ok: false, output: 'rejected' } } }],
     ['prompt-measurement-missing', promptPublicationOptions(' ')],
+    ['issue-statement-missing', { briefText: ISSUE_BOUND_BRIEF }],
     ['pr-create', { commands: { 'gh pr create': { ok: true, output: 'created but URL omitted' } } }],
   ]
   assert.deepEqual(new Set(cases.map(([reason]) => reason)), new Set(PUBLISH_REFUSAL_NAMES))
@@ -1412,6 +1449,95 @@ test('each closed publish refusal is named and never creates a pull request', ()
     assert.equal(run.result.details.pr, undefined, reason)
     if (reason !== 'pr-create') assert.equal(run.io.calls.run.some((command) => command.startsWith('gh pr create')), false, reason)
   }
+})
+
+test('A1 issue-bound publication refuses without a planner issue statement', () => {
+  const ordinary = runPublished({ briefText: ISSUE_BOUND_BRIEF, task: 'issue-bound-ordinary' })
+  assert.equal(ordinary.result.status, 'escalation')
+  assert.equal(ordinary.result.details.escalation.where, 'publish')
+  assert.equal(ordinary.result.details.publish.refused, 'issue-statement-missing')
+  assert.match(ordinary.result.details.escalation.why, /issue-statement-missing/)
+  assert.match(ordinary.result.details.escalation.why, /details\.closes/)
+  assert.match(ordinary.result.details.escalation.why, /details\.issues/)
+  assert.match(ordinary.result.details.escalation.why, /#1467/)
+  assert.equal(ordinary.io.calls.run.some((command) => command.startsWith('git push -u origin')), false)
+  assert.equal(ordinary.io.calls.run.some((command) => command.startsWith('gh pr create')), false)
+  const checkpoint = resumeCheckpointFixture({ kind: 'publish', frozen_where: 'publish', publish: { branch: 'feature/ship', base: 'main' } })
+  const resumed = runIssueResume(ISSUE_BOUND_BRIEF, checkpoint, { task: 'issue-bound-resumed' })
+  assert.equal(resumed.result.status, 'escalation')
+  assert.equal(resumed.result.details.escalation.where, 'publish')
+  assert.equal(resumed.result.details.publish.refused, 'issue-statement-missing')
+  assert.match(resumed.result.details.escalation.why, /issue-statement-missing/)
+  assert.match(resumed.result.details.escalation.why, /details\.closes/)
+  assert.match(resumed.result.details.escalation.why, /details\.issues/)
+  assert.match(resumed.result.details.escalation.why, /#1467/)
+  assert.equal(resumed.io.calls.run.some((command) => command.startsWith('git push -u origin')), false)
+  assert.equal(resumed.io.calls.run.some((command) => command.startsWith('gh pr create')), false)
+})
+
+test('B1 issue-bound publication accepts closes and renders one closing keyword', () => {
+  const run = runPublished({
+    briefText: ISSUE_BOUND_BRIEF, task: 'issue-bound-closes',
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, closes: ['#1467'] } }),
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+  })
+  assert.equal(run.result.status, 'done')
+  const body = run.io.calls.writes[`${TD}/pr-body.md`]
+  assert.match(body, /Closes #1467/)
+  assert.equal((body.match(/^Closes\b/gm) || []).length, 1)
+})
+
+test('C1 issue-bound publication accepts issues-only partial delivery', () => {
+  const run = runPublished({
+    briefText: ISSUE_BOUND_BRIEF, task: 'issue-bound-issues',
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, issues: ['#1467'] } }),
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+  })
+  assert.equal(run.result.status, 'done')
+  const body = run.io.calls.writes[`${TD}/pr-body.md`]
+  assert.match(body, /Refs #1467/)
+  assert.doesNotMatch(body, /Closes #1467/)
+  assert.equal((body.match(/^(Closes|Fixes|Resolves)\b/gmi) || []).length, 0)
+})
+
+test('D1 publication without a dispatch issue needs no issue statement', () => {
+  assert.equal(issueStatementDefect({ brief: NO_DISPATCH_BRIEF, details: {} }), null)
+  assert.equal(issueStatementDefect({ brief: 'See issue #1467 in prose.\n', details: {} }), null)
+  const run = runPublished({ briefText: NO_DISPATCH_BRIEF, task: 'no-dispatch-issue' })
+  assert.equal(run.result.status, 'done')
+  assert.ok(run.io.calls.writes[`${TD}/pr-body.md`])
+})
+
+test('E1 issue statement refusal belongs to the closed publish refusal set', () => {
+  assert.equal(PUBLISH_REFUSALS.issueStatement, 'issue-statement-missing')
+  assert.equal(PUBLISH_REFUSAL_NAMES.includes(PUBLISH_REFUSALS.issueStatement), true)
+  assert.deepEqual(new Set(PUBLISH_REFUSAL_NAMES), new Set(Object.values(PUBLISH_REFUSALS)))
+})
+
+test('F1 composer emits exactly one closing keyword for a declared close', () => {
+  const body = composePrBody({ closes: ['#1467'] })
+  assert.equal((body.match(/Closes #1467/g) || []).length, 1)
+  assert.equal((body.match(/^Closes\b/gm) || []).length, 1)
+})
+
+test('G1 overlapping closes and issues omit the duplicate reference', () => {
+  const message = composeCommitMessage({
+    task: 't1',
+    planEnv: planEnv({ details: { ...planEnv().details, closes: ['#1467'], issues: ['#1467'] } }),
+    builderEnv: buildEnv(),
+  })
+  assert.match(message, /Closes: #1467/)
+  assert.doesNotMatch(message, /Refs: #1467/)
+  const trailers = issueTrailers(message)
+  assert.deepEqual(trailers.closes, ['#1467'])
+  assert.deepEqual(trailers.refs, [])
+  const body = composePrBody({ closes: trailers.closes, issues: trailers.refs })
+  assert.match(body, /Closes #1467/)
+  assert.doesNotMatch(body, /Refs #1467/)
 })
 
 test('all branch and task paths are shellArg quoted in publication commands', () => {

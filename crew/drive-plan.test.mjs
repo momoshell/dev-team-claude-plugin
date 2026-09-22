@@ -133,7 +133,7 @@ test('H1 planner assignment briefs require the adversary declaration', () => {
 
 test('planner wrapper states executable and command boundaries', () => {
   const wrapper = plannerWrapper()
-  assert.match(wrapper, /details\.validation_lane must be ONE invocation whose executable is `node`, with explicit files: no environment prefix, shell operator, or second command\./)
+  assert.match(wrapper, /details\.validation_lane must be ONE invocation with explicit files: no environment prefix, shell operator, or second command; an executable that is not `node --test` is ACCEPTED and classified `opaque`, which makes no `node --test` claim\./)
 })
 
 test('planner wrapper names accepted validation-lane option tables', () => {
@@ -1942,7 +1942,7 @@ test('gate attempt high water counts every gate invocation', () => {
 
 // MUTATIONS A16 and A18 — node-test-ness is established before the fail-closed shape arm.
 test('a lane that does not attempt a node --test run is opaque; one that does and cannot be parsed is unparsable', () => {
-  for (const lane of ['lane-cmd', 'npm test', 'node build.mjs']) {
+  for (const lane of ['lane-cmd', 'npm test', 'node build.mjs', 'cargo test --workspace']) {
     const shaped = laneCommandShape(lane)
     assert.equal(shaped.shape, 'opaque')
     assert.ok(shaped.why.includes(lane.split(' ')[0]))

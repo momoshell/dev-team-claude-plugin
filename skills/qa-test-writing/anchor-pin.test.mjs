@@ -857,7 +857,7 @@ test('the discovered anchor-manifest corpus checks clean', () => {
   const status = repairCli(['--check', join(ROOT, 'skills'), '--root', ROOT], output.push.bind(output))
   const summary = output.find((line) => line.includes('pins across'))
   assert.ok(summary !== undefined, 'expected a scanned/manifests summary row')
-  assert.ok(summary.includes('185 pins across 8 manifests'), `expected the 185-pin summary, found: ${summary}`)
+  assert.ok(summary.includes('225 pins across 8 manifests'), `expected the 225-pin summary, found: ${summary}`)
 
   // ZERO TOLERANCE for the classes #1471 is about. A pin whose content is gone,
   // resolves twice, or has drifted a line fails this suite immediately.
@@ -866,10 +866,9 @@ test('the discovered anchor-manifest corpus checks clean', () => {
 
   // THE ACCEPTED DEBT, BY IDENTITY AND OWNER — not by a fungible count.
   //
-  // Measured 2026-09-21: 45 refusals that are NOT line drift. 40 are citations
-  // in skills/ui-design carrying no manifest entry; 5 are orphaned entries in
-  // skills/frontend-svelte carrying no citation. `--repair-all` refuses these
-  // too and changes nothing, so they are manual curation, not mechanical repair.
+  // Cleared: the 45 refusals curated here (40 UI manifest entries plus 5
+  // frontend citations rewritten as full path:line keys) are fixed in this
+  // commit, so the table below is empty and any future refusal is unexpected.
   //
   // A SCALAR BUDGET WAS TRIED AND IS WRONG. Pinning only the total let one
   // orphan move from frontend-svelte into ui-design at a constant 45 and stay
@@ -882,24 +881,7 @@ test('the discovered anchor-manifest corpus checks clean', () => {
   //
   // Clear debt by lowering a count or deleting a row in the same commit that
   // fixes the entries. Adding a row is accepting new debt — argue for it.
-  const ACCEPTED_DEBT = [
-    ["skills/frontend-svelte", "test/visualizer-panels.test.mjs", "manifest entry is orphaned (no citation)", 4],
-    ["skills/frontend-svelte", "visualizer/web/src/App.svelte", "manifest entry is orphaned (no citation)", 1],
-    ["skills/ui-design", "visualizer/web/src/App.svelte", "manifest has no entry", 8],
-    ["skills/ui-design", "visualizer/web/src/lib/AcceptPanel.svelte", "manifest has no entry", 1],
-    ["skills/ui-design", "visualizer/web/src/lib/EnvelopeInspector.svelte", "manifest has no entry", 1],
-    ["skills/ui-design", "visualizer/web/src/lib/FleetTable.svelte", "manifest has no entry", 8],
-    ["skills/ui-design", "visualizer/web/src/lib/GateChips.svelte", "manifest has no entry", 1],
-    ["skills/ui-design", "visualizer/web/src/lib/IntakePanel.svelte", "manifest has no entry", 2],
-    ["skills/ui-design", "visualizer/web/src/lib/PhaseDots.svelte", "manifest has no entry", 2],
-    ["skills/ui-design", "visualizer/web/src/lib/PhaseGantt.svelte", "manifest has no entry", 4],
-    ["skills/ui-design", "visualizer/web/src/lib/PhasePanel.svelte", "manifest has no entry", 1],
-    ["skills/ui-design", "visualizer/web/src/lib/RoleTag.svelte", "manifest has no entry", 2],
-    ["skills/ui-design", "visualizer/web/src/lib/RosterPanel.svelte", "manifest has no entry", 3],
-    ["skills/ui-design", "visualizer/web/src/lib/RunCard.svelte", "manifest has no entry", 5],
-    ["skills/ui-design", "visualizer/web/src/lib/RunDetail.svelte", "manifest has no entry", 1],
-    ["skills/ui-design", "visualizer/web/src/lib/TeardownPanel.svelte", "manifest has no entry", 1],
-  ]
+  const ACCEPTED_DEBT = []
   // OWNERSHIP IS PART OF THE IDENTITY. An earlier version carried a manifest per
   // row and then destructured it away, so an orphan could move to a DIFFERENT
   // manifest at constant path and count and stay green. The tally is therefore
@@ -940,7 +922,7 @@ test('the discovered anchor-manifest corpus checks clean', () => {
   // close it; a path:line literal would not, because it would itself become a
   // citation that rots.
 
-  assert.equal(status, 1, 'the corpus carries accepted debt, so --check must exit non-zero')
+  assert.equal(status, 0, 'the curated corpus checks clean, so --check must exit zero')
 })
 
 test('no citation carrier test restates a currently pinned anchor key', () => {

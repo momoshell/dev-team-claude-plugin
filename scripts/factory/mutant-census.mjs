@@ -10,8 +10,8 @@
 // against one checkout and never claim crash-proof cleanup.
 import { lstatSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join, resolve, sep } from 'node:path'
-import { spawnSync } from 'node:child_process'
+import { basename, dirname, join, resolve, sep } from 'node:path'
+import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { formatRate, restoreSnapshot, snapshotFile } from './kill-redundancy.mjs'
 
@@ -170,7 +170,12 @@ function resolveTarget(checkout, repoPath) {
   if (lexical !== root && !lexical.startsWith(root + sep)) {
     throw new CensusError('unsafe-target', repoPath)
   }
-  const abs = realOrSelf(lexical)
+  let abs
+  try {
+    abs = realpathSync(lexical)
+  } catch {
+    abs = join(realOrSelf(dirname(lexical)), basename(lexical))
+  }
   if (abs !== root && !abs.startsWith(root + sep)) {
     throw new CensusError('unsafe-target', `${repoPath} resolves outside the checkout`)
   }
@@ -205,6 +210,7 @@ export function classifyMutants(mutants, options = {}) {
 }
 
 export function parseRunCount(value) {
+  if (typeof value === 'string' && !/^\d+$/.test(value)) throw new CensusError('run-invalid', `--run accepts only a non-negative safe integer, got ${value}`)
   const count = typeof value === 'number' ? value : Number(value)
   if (!Number.isSafeInteger(count) || count < 0) throw new CensusError('run-invalid', `--run accepts only a non-negative safe integer, got ${value}`)
   return count
@@ -216,12 +222,34 @@ export function selectTranche(classified, count) {
   return applicable.sort(compareId).slice(0, count)
 }
 
-export function defaultRunSuite({ checkout }) {
-  try {
-    return spawnSync('npm', ['test'], { cwd: checkout, encoding: 'utf8', shell: false })
-  } catch (err) {
-    return { status: null, signal: null, error: err }
+// Every suite child this process starts is tracked here so a catchable signal
+// can kill the suite before the census re-raises it; otherwise an interrupted
+// `--run` leaves `npm test` running in a checkout the next run mutates, breaking
+// the one-census-per-checkout invariant. Children are spawned detached so the
+// kill reaches the whole suite process group, not just the npm wrapper.
+const liveSuiteChildren = new Set()
+function killSuiteChildren() {
+  for (const child of liveSuiteChildren) {
+    try { process.kill(-child.pid, 'SIGKILL') } catch {}
+    try { child.kill('SIGKILL') } catch {}
   }
+  liveSuiteChildren.clear()
+}
+export function defaultRunSuite({ checkout }) {
+  return new Promise((settle) => {
+    let done = false
+    const resolveOnce = (value) => { if (!done) { done = true; settle(value) } }
+    let child
+    try {
+      child = spawn('npm', ['test'], { cwd: checkout, shell: false, detached: true, stdio: ['ignore', 'ignore', 'ignore'] })
+    } catch (err) {
+      resolveOnce({ status: null, signal: null, error: err })
+      return
+    }
+    liveSuiteChildren.add(child)
+    child.on('error', (error) => { liveSuiteChildren.delete(child); resolveOnce({ status: null, signal: null, error }) })
+    child.on('close', (status, signal) => { liveSuiteChildren.delete(child); resolveOnce({ status, signal, error: null }) })
+  })
 }
 
 function interpretSuiteResult(result) {
@@ -234,17 +262,44 @@ function interpretSuiteResult(result) {
   return { outcome: 'unmeasured', reason: 'suite-indeterminate' }
 }
 
-// RESTORATION UNDER TERMINATION IS UNSOLVED HERE, and is stated rather than claimed.
-// A signal handler was tried and REVERTED: runTranche and its spawnSync suite are
-// synchronous, so node never runs a signal callback between them. The handler never
-// fired, and installing it made things WORSE — SIGTERM stopped terminating and the
-// process exited 0 with the file restored only because the run completed (Sol, 2nd pass).
-// A real fix needs an asynchronous runner or a disposable worktree, not a handler.
-export function runTranche(selected, { checkout = process.cwd(), runSuite = defaultRunSuite } = {}) {
+// A catchable signal must leave pristine bytes: while a snapshot is live, each
+// handler synchronously restores through the validated helper, removes all
+// handlers, and re-raises the same signal. The synchronous spawnSync suite never
+// ran these callbacks, so the runner is asynchronous (see defaultRunSuite).
+// SIGKILL cannot run JavaScript restoration; never claim otherwise.
+const RESTORATION_SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP']
+function installRestorationHandlers(restore) {
+  const handlers = new Map()
+  function removeRestorationHandlers() {
+    for (const [signal, handler] of handlers) process.removeListener(signal, handler)
+    handlers.clear()
+  }
+  for (const signal of RESTORATION_SIGNALS) {
+    const handler = () => {
+      try { killSuiteChildren(); restore() } finally {
+        removeRestorationHandlers()
+        process.kill(process.pid, signal)
+      }
+    }
+    handlers.set(signal, handler)
+    process.on(signal, handler)
+  }
+  return removeRestorationHandlers
+}
+function restoreMutantSnapshot(checkout, mutant, snapshot) {
+  const currentRestoreTarget = resolveTarget(checkout, mutant.path)
+  if (currentRestoreTarget !== snapshot.path) throw new CensusError('unsafe-target', `${mutant.path} moved during the run; mutant bytes remain at ${snapshot.path} (expected sha256 ${snapshot.sha256})`)
+  restoreSnapshot(snapshot)
+}
+export async function runTranche(selected, { checkout = process.cwd(), runSuite = defaultRunSuite } = {}) {
   const results = []
   for (const mutant of selected ?? []) {
+    try {
     const abs = resolveTarget(checkout, mutant.path)
     const snapshot = snapshotFile(abs)
+    const removeRestorationHandlers = installRestorationHandlers(() => restoreMutantSnapshot(checkout, mutant, snapshot))
+    let wrote = false
+    let rowsBeforeVerdict = results.length
     try {
       const text = snapshot.bytes.toString('utf8')
       const first = text.indexOf(mutant.original)
@@ -252,10 +307,56 @@ export function runTranche(selected, { checkout = process.cwd(), runSuite = defa
         results.push({ id: mutant.id, path: mutant.path, outcome: 'unmeasured', reason: 'target-changed' })
         continue
       }
-      writeFileSync(abs, `${text.slice(0, first)}${mutant.replacement}${text.slice(first + mutant.original.length)}`)
-      const verdict = interpretSuiteResult(runSuite({ checkout, mutant, abs }))
+      const currentWriteTarget = resolveTarget(checkout, mutant.path)
+      if (currentWriteTarget !== snapshot.path) throw new CensusError('unsafe-target', `${mutant.path} moved before the write`)
+      writeFileSync(currentWriteTarget, `${text.slice(0, first)}${mutant.replacement}${text.slice(first + mutant.original.length)}`)
+      wrote = true
+      rowsBeforeVerdict = results.length
+      const verdict = interpretSuiteResult(await runSuite({ checkout, mutant, abs: currentWriteTarget }))
       results.push({ id: mutant.id, path: mutant.path, outcome: verdict.outcome, ...(verdict.reason ? { reason: verdict.reason } : {}) })
-    } finally { restoreSnapshot(snapshot) }
+    } finally {
+      removeRestorationHandlers()
+      try {
+        restoreMutantSnapshot(checkout, mutant, snapshot)
+      } catch (restoreErr) {
+        const isRefusal = restoreErr instanceof CensusError && restoreErr.code === 'unsafe-target'
+        // Any failure after the write leaves mutant bytes installed, refusal
+        // or not: name the dirty path and its expected sha256. Reword
+        // refusals; annotate anything else as context on the original error
+        // so its errno still reaches the caller (a blind spot is stated).
+        const residue = `${mutant.path} moved during the run; mutant bytes remain at ${snapshot.path} (expected sha256 ${snapshot.sha256})`
+        if (!wrote && isRefusal) {
+          // Nothing was written for this mutant (target-changed skip, or a
+          // pre-write refusal already propagating): never write through a
+          // swapped path to "restore". Falling through skips only the
+          // redundant restore; a propagating body error continues past this
+          // finally untouched (a `continue`/`return` here would discard it).
+        } else {
+          let errToThrow = restoreErr
+          if (isRefusal && restoreErr.detail !== residue) errToThrow = new CensusError('unsafe-target', residue)
+          if (wrote && isRefusal) {
+            // The suite verdict recorded above was measured against a target
+            // that has since moved, so it is not a measurement: replace it
+            // with the refusal before the error escapes, so the outer catch
+            // attaches the corrected rows.
+            results.length = rowsBeforeVerdict
+            results.push({ id: mutant.id, path: mutant.path, outcome: 'unmeasured', reason: 'restore-refused' })
+          } else if (wrote) {
+            restoreErr.residue = residue
+          }
+          throw errToThrow
+        }
+      }
+    }
+    } catch (err) {
+      // Single attachment point for every mid-tranche abort — resolveTarget
+      // and snapshotFile before the inner try included, and non-refusal
+      // restore failures too: the completed rows travel on the error so main
+      // can still print a partial summary. Only object errors can carry rows;
+      // anything else rethrows untouched rather than masking itself.
+      if (err !== null && (typeof err === 'object' || typeof err === 'function')) err.results = results
+      throw err
+    }
   }
   return results
 }
@@ -354,7 +455,7 @@ export function assertDisjointRoots(corpus, checkout) {
   }
 }
 
-export function main(argv = process.argv.slice(2), deps = {}) {
+export async function main(argv = process.argv.slice(2), deps = {}) {
   const stdout = deps.stdout ?? console.log
   const options = parseArgs(argv)
   const discovery = discoverSurvivors(options.corpus)
@@ -366,7 +467,21 @@ export function main(argv = process.argv.slice(2), deps = {}) {
   // tranche is refused (Sol, 2nd pass).
   // MUTATION: drop this guard and `--corpus X --checkout X --run 1` mutates the corpus.
   if (options.run !== 0) assertDisjointRoots(options.corpus, options.checkout)
-  const results = options.run === 0 ? [] : runTranche(tranche, { checkout: options.checkout, runSuite: deps.runSuite })
+  let results
+  try {
+    results = options.run === 0 ? [] : await runTranche(tranche, { checkout: options.checkout, runSuite: deps.runSuite })
+  } catch (err) {
+    // A mid-tranche abort carries the measurements completed so far: print the
+    // partial summary before the error propagates, so hours of suite runs are
+    // not discarded with it. Any error with rows travels, not just closed
+    // CensusErrors — filesystem codes stay closed and unwrapped.
+    if (Array.isArray(err.results)) {
+      const partial = summarizeCensus({ discovery, classified, requested: options.run, results: err.results })
+      stdout(JSON.stringify(partial.json))
+      for (const line of partial.lines) stdout(line)
+    }
+    throw err
+  }
   const summary = summarizeCensus({ discovery, classified, requested: options.run, results })
   stdout(JSON.stringify(summary.json))
   for (const line of summary.lines) stdout(line)
@@ -383,7 +498,7 @@ const invokedAsCli = (() => {
 
 if (invokedAsCli) {
   try {
-    main()
+    await main()
   } catch (err) {
     if (err instanceof CensusError && err.code === 'help') {
       console.log(USAGE)

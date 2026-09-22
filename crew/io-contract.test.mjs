@@ -641,7 +641,7 @@ test('outer seatIo keeps runClean available for headless-json and headless-rpc s
         spawnSync: (_bin, argv) => { executed.push(argv); return { status: 0, stdout: '', stderr: '' } },
       },
     )
-    assert.deepEqual(io.runClean.call(io, 'outer-seat-io-run'), { ok: true, output: '' })
+    assert.deepEqual(io.runClean.call(io, 'outer-seat-io-run'), { ok: true, output: '', status: 0, stderr: '' })
   }
   assert.deepEqual(executed, [['-c', 'outer-seat-io-run'], ['-c', 'outer-seat-io-run']])
 })

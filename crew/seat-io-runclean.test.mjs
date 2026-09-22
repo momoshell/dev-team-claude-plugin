@@ -417,7 +417,7 @@ test('runClean on a clean tree runs without creating a stash entry', () => {
   withRepo({ dirty: false }, (fixture) => {
     const io = makeIo(fixture)
     const result = io.runClean('printf clean-tree')
-    assert.deepEqual(result, { ok: true, output: 'clean-tree' })
+    assert.deepEqual(result, { ok: true, output: 'clean-tree', status: 0, stderr: '' })
     assert.equal(git(fixture.repoDir, 'stash', 'list').trim(), '')
   })
 })
@@ -447,7 +447,7 @@ test('runClean reports an added path without refusing the window', () => {
     const journal = []
     const result = makeIo(fixture, { logLine: (_path, row) => journal.push(row) })
       .runClean("printf 'new\\n' > witness-added.txt; printf ok")
-    assert.deepEqual(result, { ok: true, output: 'ok' })
+    assert.deepEqual(result, { ok: true, output: 'ok', status: 0, stderr: '' })
     const row = journal.find((entry) => entry.event === 'tree-witness')
     assert.ok(row)
     assert.equal(row.outcome, 'changed')
@@ -506,7 +506,7 @@ test('runClean keeps a quiet window unchanged and unjournalled', () => {
   withRepo({}, (fixture) => {
     const journal = []
     const result = makeIo(fixture, { logLine: (_path, row) => journal.push(row) }).runClean('printf clean')
-    assert.deepEqual(result, { ok: true, output: 'clean' })
+    assert.deepEqual(result, { ok: true, output: 'clean', status: 0, stderr: '' })
     restored(fixture)
     assert.equal(journal.some((entry) => entry.event === 'tree-witness'), false)
   })

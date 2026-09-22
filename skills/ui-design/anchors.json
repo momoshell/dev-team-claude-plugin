@@ -43,5 +43,6 @@
   "visualizer/web/src/lib/fleet.js:518": "export function deriveStatus(run = {}, taskEnvelope = null)",
   "visualizer/web/src/lib/fleet.js:533": "if (run?.running && !run?.phases?.length)",
   "visualizer/web/src/lib/fleet.js:535": "word: 'status not recorded'",
-  "visualizer/web/src/lib/trace.js:3": "ROLE_ORDER = Object.freeze(['planner', 'builder'"
+  "visualizer/web/src/lib/trace.js:3": "ROLE_ORDER = Object.freeze(['planner', 'builder'",
+  "visualizer/web/src/lib/RunCard.svelte:73": ".mono { font-family:var(--mono); font-variant-numeric:tabular-nums; }"
 }

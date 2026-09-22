@@ -12,7 +12,7 @@ const OWNER = 'skills/ux/anchors.json'
 const LIB = join(ROOT, 'visualizer/web/src/lib')
 const SKILL_DOC = join(HERE, 'SKILL.md')
 const REF_DIR = join(HERE, 'references')
-const EXPECTED_REFS = ['absence.md', 'keyboard-focus.md', 'motion.md', 'states.md']
+const EXPECTED_REFS = ['absence.md', 'keyboard-focus.md', 'motion.md', 'sources.md', 'states.md']
 const VERCEL_ID = 'vercel-web-interface-guidelines.md'
 const CSV_ID = 'ui-ux-pro-max-ux-guidelines.csv'
 
@@ -182,7 +182,8 @@ test('ux adopted rules carry both stable source identities', () => {
   }
   for (const body of readDocs()) {
     for (const line of body.split('\n')) {
-      if (line.includes(VERCEL_ID)) vercel += 1
+      // sources.md is provenance, not a rule: its one vercel row is pinned by A1, not counted here.
+      if (line.includes(VERCEL_ID) && !body.includes('| source file named in citations |')) vercel += 1
       const found = line.match(/ui-ux-pro-max-ux-guidelines\.csv — row \d+/g)
       if (found) csv += found.length
     }
@@ -229,4 +230,157 @@ test('ux empty-result exhibit is cited exactly once', () => {
   assert.equal(taskKeys.length, 1)
   const joined = readDocs().join('\n').split(`TaskList.svelte${':120'}`).length - 1
   assert.equal(joined, 1, 'the empty-result line is cited exactly once in prose')
+})
+
+// Mutation killed: altering a recorded source digest breaks provenance verification.
+test('A1', () => {
+  const uxSources = readFileSync(join(REF_DIR, 'sources.md'), 'utf8')
+  const designSources = readFileSync(join(ROOT, 'skills/ui-design/references/sources.md'), 'utf8')
+  for (const body of [uxSources, designSources]) {
+    for (const row of [
+      'vercel-web-interface-guidelines.md',
+      'https://raw.githubusercontent.com/vercel-labs/web-interface-guidelines/main/command.md',
+      'e3d624baaf29dc1fc645aff3e38f03e564d2d6b1',
+      '5a775e6411f790f518dbc9c1fa7c50a89e6873502d9a3530a6eb223a590bcfe8',
+      'ui-ux-pro-max-ux-guidelines.csv',
+      'https://raw.githubusercontent.com/nextlevelbuilder/ui-ux-pro-max-skill/main/src/ui-ux-pro-max/data/ux-guidelines.csv',
+      'dcc40ff5133ef78276117db0cc34e7b83cc8aeba',
+      'ff81ec613f70ba9fc3fcce52dbe4ae35d44b2079dbe6dc066d2d6e38c28facd5',
+    ]) {
+      assert.ok(body.includes(row), `sources.md must carry the exact provenance row ${row.slice(0, 32)}`)
+    }
+    assert.ok(body.includes('| MIT |') || body.includes('|MIT|'), 'sources.md must record the MIT license')
+    assert.ok(body.includes('Neither source is vendored'), 'sources.md records provenance only, never vendored content')
+    assert.ok(body.length < 4000, 'sources.md is a metadata record, not a vendored source body')
+  }
+})
+
+// Mutation killed: adding an absolute-path read under skills breaks the repository boundary.
+// lean: regex literals are opaque to this scan; a homedir() inside /.../ is a pattern, not a call.
+function tokenizeOutsideStrings(source) {
+  const code = source.split('')
+  const strings = []
+  let i = 0
+  const blank = (from, to) => { for (let k = from; k < to; k += 1) if (code[k] !== '\n') code[k] = ' ' }
+  const prevSignificant = (pos) => {
+    for (let k = pos - 1; k >= 0; k -= 1) {
+      if (code[k] !== ' ' && code[k] !== '\n' && code[k] !== '\t' && code[k] !== '\r') return source[k]
+    }
+    return ''
+  }
+  while (i < source.length) {
+    const ch = source[i]
+    if (ch === '/' && source[i + 1] === '/') {
+      let j = source.indexOf('\n', i)
+      if (j === -1) j = source.length
+      blank(i, j)
+      i = j
+      continue
+    }
+    if (ch === '/' && source[i + 1] === '*') {
+      const j = source.indexOf('*/', i + 2)
+      const end = j === -1 ? source.length : j + 2
+      blank(i, end)
+      i = end
+      continue
+    }
+    if (ch === "'" || ch === '"' || ch === '`') {
+      let j = i + 1
+      while (j < source.length) {
+        if (source[j] === '\\') { j += 2; continue }
+        if (source[j] === ch) break
+        j += 1
+      }
+      const end = Math.min(j + 1, source.length)
+      strings.push({ value: source.slice(i + 1, j), start: i })
+      blank(i, end)
+      i = end
+      continue
+    }
+    if (ch === '/') {
+      const prev = prevSignificant(i)
+      const isRegex = prev === '' || '([{,:;=!&|?+-*%^~<>'.includes(prev) || /(return|typeof|instanceof|in|of|new|delete|void|throw|case|do|else|yield|await)$/.test(source.slice(0, i).split(/\s+/).pop() || '')
+      if (isRegex) {
+        let j = i + 1
+        let inClass = false
+        while (j < source.length) {
+          if (source[j] === '\\') { j += 2; continue }
+          if (source[j] === '[') inClass = true
+          if (source[j] === ']') inClass = false
+          if (source[j] === '/' && !inClass) break
+          if (source[j] === '\n') break
+          j += 1
+        }
+        let end = Math.min(j + 1, source.length)
+        while (end < source.length && /[a-z]/.test(source[end])) end += 1
+        blank(i, end)
+        i = end
+        continue
+      }
+    }
+    i += 1
+  }
+  return { code: code.join(''), strings }
+}
+
+const REPO_READ_CALLS = new Set(['readFileSync', 'readFile', 'readdirSync', 'readdir', 'writeFileSync', 'writeFile', 'appendFileSync', 'appendFile', 'openSync', 'open', 'statSync', 'stat', 'lstatSync', 'lstat', 'existsSync', 'accessSync', 'access', 'createReadStream', 'createWriteStream', 'opendirSync', 'opendir', 'realpathSync', 'realpath', 'copyFileSync', 'mkdirSync', 'mkdtempSync', 'rmSync', 'renameSync'])
+
+function outsideReads(rel, source) {
+  const { code, strings } = tokenizeOutsideStrings(source)
+  const byStart = new Map(strings.map((s) => [s.start, s.value]))
+  const violations = []
+  for (const match of code.matchAll(/\b([A-Za-z_$][\w$]*)\s*\(/g)) {
+    const name = match[1]
+    const after = match.index + match[0].length
+    if (name === 'homedir') {
+      violations.push(`${rel}: executed homedir() call`)
+      continue
+    }
+    if (!REPO_READ_CALLS.has(name)) continue
+    let k = after
+    while (k < source.length && /\s/.test(source[k])) k += 1
+    const value = byStart.get(k)
+    if (value !== undefined && (value.startsWith('/') || value === '~' || value.startsWith('~/'))) {
+      violations.push(`${rel}: absolute or home-relative path argument to ${name}()`)
+    }
+  }
+  return violations
+}
+
+function skillSources() {
+  const found = []
+  const walk = (dir) => {
+    for (const entry of readdirSync(join(ROOT, dir), { withFileTypes: true })) {
+      const rel = join(dir, entry.name)
+      if (entry.isDirectory()) { walk(rel); continue }
+      if (/\.m?js$/.test(entry.name)) found.push(rel)
+    }
+  }
+  walk('skills')
+  return found.sort()
+}
+
+test('B1', () => {
+  const fixtureCall = "readFileSync('/etc/hosts', 'utf8')"
+  assert.equal(outsideReads('fixture.mjs', `const probe = ${fixtureCall}`).length, 1, 'an absolute-path read is an executed read')
+  assert.equal(outsideReads('fixture.mjs', 'const probe = homedir()').length, 1, 'an executed homedir() is outside the repository')
+  assert.equal(outsideReads('fixture.mjs', 'const probe = readFileSync(join(ROOT, "hosts"), "utf8")').length, 0, 'a repository-relative read stays inside')
+  const violations = []
+  const files = skillSources()
+  assert.ok(files.length > 0, 'expected tracked sources under skills/')
+  for (const rel of files) {
+    // Fixture strings are not executable reads: only calls outside strings count.
+    for (const violation of outsideReads(rel, readFileSync(join(ROOT, rel), 'utf8'))) violations.push(violation)
+  }
+  assert.deepEqual(violations, [], `no test or script under skills/ may read outside the repository:\n${violations.join('\n')}`)
+})
+
+// Mutation killed: removing one sources.md routing row breaks exact routing.
+test('C1', () => {
+  for (const skillDir of [HERE, join(ROOT, 'skills/ui-design')]) {
+    const skill = readFileSync(join(skillDir, 'SKILL.md'), 'utf8')
+    const actual = readdirSync(join(skillDir, 'references')).filter((name) => name.endsWith('.md')).sort()
+    const routed = [...new Set([...skill.matchAll(/`references\/([A-Za-z0-9_-]+\.md)`/g)].map((match) => match[1]))].sort()
+    assert.deepEqual(routed, actual, `${skillDir} must route every references/*.md that exists and none that does not`)
+  }
 })

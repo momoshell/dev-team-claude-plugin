@@ -19,6 +19,7 @@ This is the measured UX boundary an agent works inside. The counts below describ
 | Showing loading, empty, or error | Keep loading explicit, empty states actionable, errors announced | `references/states.md` |
 | Adding keyboard behavior or focus style | Stay native-first, operable, and visibly focused | `references/keyboard-focus.md` |
 | Adding or keeping animation | Honor reduced motion for every animation | `references/motion.md` |
+| Provenance for cited rule sources | Verify canonical URL, commit, digest, and license without vendoring | `references/sources.md` |
 
 ## Critical rules
 
@@ -28,3 +29,5 @@ This is the measured UX boundary an agent works inside. The counts below describ
 - **M1.** Every animation honors reduced motion; the current animations do not yet, which the reference records as a counted gap.
 
 The numbers in this skill re-derive from the component tree with plain text search; read the references before adding a rule the exhibit suite does not enforce.
+
+- Provenance for the two cited rule sources lives in the sources reference: record URL, commit, digest, and license without vendoring either source.

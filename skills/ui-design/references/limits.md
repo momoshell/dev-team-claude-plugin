@@ -21,6 +21,97 @@ A second contrast limit belongs to lane blocks: `visualizer/web/src/lib/PhaseGan
 
 Neither the status contrast problem nor the lane-block contrast problem is fixed by this lane. A new component must use the aliases and surface the limitation rather than claim that a theme switch makes a status colour safe.
 
+## Hover contrast — per-rule register
+
+Each of the 25 `:hover` rule blocks below is classified independently from source alone: one record per hover CSS block, not one verdict per component, so a mixed component keeps every computable rule. A value is `literal` when it contains a hex, a CSS named colour (including `white`/`black`), or `rgb(`/`rgba(`/`hsl(` — even beside `var()`; it is `token` when it contains `var()`/`color-mix()` and no literal; it is `none` when the rule declares no color-affecting declaration. Only source-declared foregrounds and each state's own background are resolved: the rest ratio is computed against the rest background, never the hover background, and when a hover rule declares no background its ground is the rest rule's background on the same element. A transparent, inherited, missing, or otherwise unresolvable ground is recorded as `Unmeasured — <closed reason>` rather than borrowed. Ratios are WCAG relative-luminance contrasts of the state foreground against the state ground, paper first then ink, shown as rest → hover. The RosterPanel `.scope button` rest rule declares `background:transparent`, so its rest ratio is unmeasured because the rest ground is transparent (see `RosterPanel.svelte:712`).
+
+### `Dropdown.svelte` — 2 rules
+
+| File | Selector | Hover declarations | Verdict | Rest ground | Hover ground | Contrast (paper / ink) |
+|---|---|---|---|---|---|---|
+| `Dropdown.svelte` | `.dropdown-trigger:hover:not(:disabled),.dropdown-trigger[aria-expanded='true']` | `border-color: color-mix(in srgb,var(--accent) 62%,var(--line)); background: color-mix(in srgb,var(--accent) 6%,var(--bg))` | token | `var(--bg)` | `color-mix(in srgb,var(--accent) 6%,var(--bg))` | Unmeasured — foreground token --text has no source-declared value |
+| `Dropdown.svelte` | `.dropdown-menu button:hover,.dropdown-menu button.active` | `background: var(--accent-soft); color: var(--text)` | token | `transparent` | `var(--accent-soft)` | Unmeasured — rest ground is transparent |
+
+### `EnvelopeInspector.svelte` — 1 rule
+
+| File | Selector | Hover declarations | Verdict | Rest ground | Hover ground | Contrast (paper / ink) |
+|---|---|---|---|---|---|---|
+| `EnvelopeInspector.svelte` | `.roles button:hover,.roles button.active` | `border-color: color-mix(in srgb,var(--role-color) 55%,var(--line)); background: color-mix(in srgb,var(--role-color) 8%,var(--panel))` | token | `var(--bg)` | `color-mix(in srgb,var(--role-color) 8%,var(--panel))` | Unmeasured — rest foreground is inherited, not source-declared |
+
+### `EventStory.svelte` — 1 rule
+
+| File | Selector | Hover declarations | Verdict | Rest ground | Hover ground | Contrast (paper / ink) |
+|---|---|---|---|---|---|---|
+| `EventStory.svelte` | `.expand:hover` | `border-color: var(--accent); color: var(--accent)` | token | `var(--panel-raised)` | `var(--panel-raised)` | paper 5.56 → 5.65; ink 6.01 → 6.95 |
+
+### `EventStream.svelte` — 1 rule
+
+| File | Selector | Hover declarations | Verdict | Rest ground | Hover ground | Contrast (paper / ink) |
+|---|---|---|---|---|---|---|
+| `EventStream.svelte` | `.refresh:hover,.clear:hover` | `border-color: var(--accent); color: var(--accent)` | token | `var(--panel-raised)` | `var(--panel-raised)` | paper 5.56 → 5.65; ink 6.01 → 6.95 |
+
+### `MetricsStrip.svelte` — 1 rule
+
+| File | Selector | Hover declarations | Verdict | Rest ground | Hover ground | Contrast (paper / ink) |
+|---|---|---|---|---|---|---|
+| `MetricsStrip.svelte` | `.metric-card:hover` | `border-color: color-mix(in srgb,var(--accent) 45%,var(--line)); background: color-mix(in srgb,var(--accent) 4%,var(--panel))` | token | `color-mix(in srgb,var(--panel) 91%,transparent)` | `color-mix(in srgb,var(--accent) 4%,var(--panel))` | Unmeasured — rest background is a color-mix, not a flat token value |
+
+### `PhaseGantt.svelte` — 6 rules
+
+| File | Selector | Hover declarations | Verdict | Rest ground | Hover ground | Contrast (paper / ink) |
+|---|---|---|---|---|---|---|
+| `PhaseGantt.svelte` | `.trace-guide > summary:hover,.trace-guide[open] > summary` | `background: color-mix(in srgb,var(--accent) 6%,transparent)` | token | `none declared` | `color-mix(in srgb,var(--accent) 6%,transparent)` | Unmeasured — no source-declared rest background |
+| `PhaseGantt.svelte` | `.waterfall-row:hover,.waterfall-row.selected` | `background: var(--accent-soft)` | token | `transparent` | `var(--accent-soft)` | Unmeasured — rest ground is transparent |
+| `PhaseGantt.svelte` | `.bounce-hotspot:hover > span,.bounce-hotspot:focus-visible > span` | `(none)` | none | `var(--panel)` | `var(--panel)` | Unmeasured — rule declares no color-affecting declaration |
+| `PhaseGantt.svelte` | `.round-row:hover,.round-row.selected-step` | `background: color-mix(in srgb,var(--accent) 9%,var(--panel))` | token | `linear-gradient(90deg,color-mix(in srgb,var(--accent) 4%,var(--bg)),color-mix(in srgb,var(--bg) 28%,transparent))` | `color-mix(in srgb,var(--accent) 9%,var(--panel))` | Unmeasured — rest background is a color-mix, not a flat token value |
+| `PhaseGantt.svelte` | `.factory-steps > summary:hover` | `background: var(--accent-soft)` | token | `none declared` | `var(--accent-soft)` | Unmeasured — no source-declared rest background |
+| `PhaseGantt.svelte` | `.checkpoint:hover,.checkpoint.selected-step` | `background: color-mix(in srgb,var(--accent) 7%,transparent)` | token | `transparent` | `color-mix(in srgb,var(--accent) 7%,transparent)` | Unmeasured — rest ground is transparent |
+
+### `PhasePanel.svelte` — 1 rule
+
+| File | Selector | Hover declarations | Verdict | Rest ground | Hover ground | Contrast (paper / ink) |
+|---|---|---|---|---|---|---|
+| `PhasePanel.svelte` | `.envelope-documents summary:hover` | `background: color-mix(in srgb,var(--document-role) 6%,transparent)` | token | `none declared` | `color-mix(in srgb,var(--document-role) 6%,transparent)` | Unmeasured — no source-declared rest background |
+
+### `RosterPanel.svelte` — 7 rules
+
+| File | Selector | Hover declarations | Verdict | Rest ground | Hover ground | Contrast (paper / ink) |
+|---|---|---|---|---|---|---|
+| `RosterPanel.svelte` | `.seat.changeable:hover` | `border-color: var(--accent); background: var(--accent-soft)` | token | `none declared` | `var(--accent-soft)` | Unmeasured — no source-declared rest background |
+| `RosterPanel.svelte` | `.source-setup a:hover` | `color: var(--accent)` | token | `none declared` | `none declared` | Unmeasured — no source-declared rest background |
+| `RosterPanel.svelte` | `.directory-list article:hover` | `background: color-mix(in srgb,var(--accent) 3%,var(--panel))` | token | `none declared` | `color-mix(in srgb,var(--accent) 3%,var(--panel))` | Unmeasured — no source-declared rest background |
+| `RosterPanel.svelte` | `.directory-pager button:hover:not(:disabled)` | `background: var(--accent-soft); color: var(--accent)` | token | `transparent` | `var(--accent-soft)` | Unmeasured — rest ground is transparent |
+| `RosterPanel.svelte` | `.scope button:hover` | `background: var(--panel-raised); color: var(--text)` | token | `transparent` | `var(--panel-raised)` | Unmeasured — rest ground is transparent |
+| `RosterPanel.svelte` | `.model-palette article:hover` | `border-color: color-mix(in srgb,var(--accent) 55%,var(--line))` | token | `var(--panel-raised)` | `var(--panel-raised)` | Unmeasured — rest foreground is inherited, not source-declared |
+| `RosterPanel.svelte` | `.remove-model:hover` | `color: var(--status-fail)` | token | `transparent` | `transparent` | Unmeasured — rest ground is transparent |
+
+### `RunDetail.svelte` — 1 rule
+
+| File | Selector | Hover declarations | Verdict | Rest ground | Hover ground | Contrast (paper / ink) |
+|---|---|---|---|---|---|---|
+| `RunDetail.svelte` | `.crew-seat > summary:hover` | `background: color-mix(in srgb,var(--accent) 5%,transparent)` | token | `none declared` | `color-mix(in srgb,var(--accent) 5%,transparent)` | Unmeasured — no source-declared rest background |
+
+### `TaskList.svelte` — 2 rules
+
+| File | Selector | Hover declarations | Verdict | Rest ground | Hover ground | Contrast (paper / ink) |
+|---|---|---|---|---|---|---|
+| `TaskList.svelte` | `tbody tr:hover` | `background: var(--accent-soft)` | token | `none declared` | `var(--accent-soft)` | Unmeasured — no source-declared rest background |
+| `TaskList.svelte` | `tr:hover .open` | `border-color: var(--accent); color: var(--accent)` | token | `var(--panel-raised)` | `var(--panel-raised)` | Unmeasured — rest foreground is inherited, not source-declared |
+
+### `Trajectory.svelte` — 1 rule
+
+| File | Selector | Hover declarations | Verdict | Rest ground | Hover ground | Contrast (paper / ink) |
+|---|---|---|---|---|---|---|
+| `Trajectory.svelte` | `.activity > button:hover` | `background: color-mix(in srgb,var(--activity-color) 5%,transparent)` | token | `transparent` | `color-mix(in srgb,var(--activity-color) 5%,transparent)` | Unmeasured — rest ground is transparent |
+
+### `WorkflowGraph.svelte` — 1 rule
+
+| File | Selector | Hover declarations | Verdict | Rest ground | Hover ground | Contrast (paper / ink) |
+|---|---|---|---|---|---|---|
+| `WorkflowGraph.svelte` | `.stage-node:hover` | `border-color: var(--accent)` | token | `var(--panel-raised)` | `var(--panel-raised)` | paper 5.56 → 5.56; ink 6.01 → 6.01 |
+
+25 rules in 12/33 components. Three rules carry measured rest → hover ratios; the rest stop at a closed reason instead of borrowing a ground.
+
 ## Vacuous theme-sheet coverage
 
 Known limit: the visualizer shape suite checks role/lane name presence over theme.css and inspects no value, so deleting --status-escalated leaves the suite green.

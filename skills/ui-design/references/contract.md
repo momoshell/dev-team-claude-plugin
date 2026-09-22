@@ -8,7 +8,7 @@ A component may name only Tier-2 aliases: `--bg`, `--panel`, `--line`, `--muted`
 
 ## T2 - painted colour comes from a token
 
-Make every painted foreground, background, border, marker, and fill resolve to a token rather than a literal colour. The measured code violates this in **4 of 21 components, 22 times**, all in state-colour rules; the inventory is in `references/state-colour.md` L1. Exhibit: `visualizer/web/src/lib/GateChips.svelte:13`, `visualizer/web/src/lib/AcceptPanel.svelte:23`, `visualizer/web/src/lib/PhasePanel.svelte:100`, and the gantt row at `visualizer/web/src/lib/PhaseGantt.svelte:257`. The suite currently has no general hex ban and no general requirement that a colour declaration use `var()`.
+Make every painted foreground, background, border, marker, and fill resolve to a token rather than a literal colour. The measured code violates this in **4 of 33 components, 22 times**, all in state-colour rules; the inventory is in `references/state-colour.md` L1. Exhibit: `visualizer/web/src/lib/GateChips.svelte:13`, `visualizer/web/src/lib/AcceptPanel.svelte:23`, `visualizer/web/src/lib/PhasePanel.svelte:100`, and the gantt row at `visualizer/web/src/lib/PhaseGantt.svelte:257`. The suite currently has no general hex ban and no general requirement that a colour declaration use `var()`.
 
 ## T3 - escalation goes through the alias
 
@@ -35,3 +35,17 @@ The mechanical floor is narrow and must be described honestly:
 There is no suite rule banning a hex colour, requiring every painted colour to be a token, counting declarations in `theme.css`, checking theme values, checking `data-theme`, or checking `prefers-color-scheme`. A checker author must not mistake issue prose for a colour: the old EventStream `#123` and MetricsStrip `#83` copy traps are gone from the sources. Restrict a detector to CSS values.
 
 The six-filename role/lane blocklist, the exact FleetTable rules, the PhaseGantt locals, and the runes-only rule are the floor inherited by a new component. They are not evidence that T2 is enforced; a skill remains the broader constraint.
+
+## Tabular numerals — measured register
+
+A component belongs in this census when its markup applies `mono` to runtime content or its local `.mono` rule declares `font-variant-numeric:tabular-nums`. Monospace alone (`font-family:var(--mono)` without the numeric declaration and without a `mono` class on runtime content) is not compliance. The global rule lives at `visualizer/web/src/lib/theme.css:165`; the only local tabular rule is at `visualizer/web/src/lib/RunCard.svelte:73`.
+
+| Component | Verdict | Rule source |
+|---|---|---|
+| `AgentsPage.svelte` | compliant | global `.mono` at `visualizer/web/src/lib/theme.css:165` |
+| `EventStory.svelte` | compliant | global `.mono` at `visualizer/web/src/lib/theme.css:165` |
+| `FleetTable.svelte` | compliant | global `.mono` at `visualizer/web/src/lib/theme.css:165` |
+| `RunCard.svelte` | compliant | local `.mono` at `visualizer/web/src/lib/RunCard.svelte:73` |
+| `WorkflowsPage.svelte` | compliant | global `.mono` at `visualizer/web/src/lib/theme.css:165` |
+
+`5/5 compliant, 0/5 non-compliant`.

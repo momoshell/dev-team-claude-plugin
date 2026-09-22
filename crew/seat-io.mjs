@@ -2419,7 +2419,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
       waited_ms: waitedMs, budget_ms: budgetMs,
       wasted_ms: Math.max(0, budgetMs - waitedMs),   // verbatim: mutation A5
       final_turn_usage: null,                        // verbatim: mutation A6
-      final_turn_usage_reason: FINAL_TURN_UNMEASURED[info?.transport] ?? null,
+      final_turn_usage_reason: FINAL_TURN_UNMEASURED[info?.transport] ?? null, ...seatDiedExit(info, paths.taskDir, { existsSync, readFileSync }),
     }
   }
   const refusalError = (info, returnPath, frame) => {
@@ -3837,3 +3837,44 @@ export function piTranscriptPaths({ checkout, deps = {} } = {}) {
 const SHIPPED_TRANSCRIPT_READERS = Object.freeze({ claude: claudeTranscriptPaths, pi: piTranscriptPaths })
 
 const SHIPPED_REFUSAL_READERS = Object.freeze({ claude: claudeRefusalFrames, pi: piRefusalFrames })
+
+// The headless-json wrapper records its shell status atomically at
+// headless/<workerId>/exit (crew/headless.mjs). This section only consumes
+// that durable file: a closed diagnosis for the seat_died journal row, never a
+// change to death detection, stage, or escalation. It lives at the end of the
+// file so no cited line above it shifts.
+export const HEADLESS_EXIT_REASONS = Object.freeze({
+  ABSENT: 'exit-file-absent',
+  UNREADABLE_OR_MALFORMED: 'exit-file-unreadable-or-malformed',
+})
+// A diagnostic reader that never throws: EPERM/ENOENT on existence, a throw on
+// read, an empty file, non-decimal bytes, and an out-of-range status all fold
+// into the closed reason set. A partial write cannot occur (the shell writes
+// via .tmp plus rename), and a file deleted between the existence check and
+// the read lands in the catch below.
+export function readHeadlessExit(path, deps = {}) {
+  try {
+    const existsSync = deps.existsSync || fsExistsSync
+    const readFileSync = deps.readFileSync || fsReadFileSync
+    if (!existsSync(path)) return { status: null, reason: HEADLESS_EXIT_REASONS.ABSENT }
+    const raw = String(readFileSync(path, 'utf8')).trim()
+    if (/^[0-9]+$/.test(raw)) {
+      const status = Number(raw)
+      if (status >= 0 && status <= 255) return { status: Number(raw), reason: null }
+    }
+    return { status: null, reason: HEADLESS_EXIT_REASONS.UNREADABLE_OR_MALFORMED }
+  } catch { return { reason: HEADLESS_EXIT_REASONS.UNREADABLE_OR_MALFORMED, status: null } }
+}
+// The seat_died row's wrapper-exit diagnosis, spread onto the row by seatDiedRow.
+// Only headless-json has a wrapper exit file; every other transport keeps null
+// diagnosis fields rather than overclaiming an absence reason. Deliberately no
+// try/catch here: readHeadlessExit is total, and a reader failure must stay
+// visible to the F1 proof instead of being folded into a diagnosis.
+export function seatDiedExit(info, taskDir, fs = {}) {
+  if (info?.transport !== HEADLESS_TRANSPORT || typeof info?.workerId !== 'string' || !info.workerId) return { exit_status: null, exit_status_reason: null }
+  const exit = readHeadlessExit(join(taskDir, 'headless', info.workerId, 'exit'), fs)
+  return {
+    exit_status: exit.status,
+    exit_status_reason: exit.reason,
+  }
+}

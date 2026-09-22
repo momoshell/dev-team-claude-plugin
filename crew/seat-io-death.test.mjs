@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { scratchDir } from '../test/helpers.mjs'
 import {
   DESCENDANT_DIR,
+  HEADLESS_EXIT_REASONS,
   HEADLESS_RPC_TRANSPORT,
   HEADLESS_TRANSPORT,
   REASK_GRACE_POLICY,
@@ -14,6 +15,7 @@ import {
   WAIT_POLL_MS,
   ROOT_DEATH_GROWTH_WINDOW_MS,
   ROOT_DEATH_SUPPRESSED_EVENT,
+  cellFailureKind,
   seatIo,
   seatRootDeath,
 } from './seat-io.mjs'
@@ -90,6 +92,8 @@ function runHeadless({
   growthThrows = false,
   growth = null,
   logThrowsOn = null,
+  exitBytes = null,
+  exitReadThrows = false,
 } = {}) {
   const dir = scratchDir('seat-io-death-')
   const taskDir = join(dir, 'task')
@@ -98,6 +102,13 @@ function runHeadless({
   mkdirSync(returnsDir)
   if (record) writeRecord(taskDir, { transport, seatId: recordSeatId, ...patch })
   if (corruptStore) writeFileSync(join(taskDir, DESCENDANT_DIR), 'not a directory')
+  // The bound workerId falls back to the logical dispatch id, so the wrapper
+  // exit file lives at headless/<dispatchId>/exit.
+  const exitPath = join(taskDir, 'headless', dispatchId, 'exit')
+  if (exitBytes != null) {
+    mkdirSync(join(taskDir, 'headless', dispatchId), { recursive: true })
+    writeFileSync(exitPath, exitBytes)
+  }
 
   let clock = 0
   let ticks = 0
@@ -150,6 +161,15 @@ function runHeadless({
     spawnSync: () => ({ status: 1, stdout: '' }),
     headlessIo: transport === HEADLESS_TRANSPORT ? fakeTransport : undefined,
     headlessRpcIo: transport === HEADLESS_RPC_TRANSPORT ? fakeTransport : undefined,
+  }
+  // An exit-path-only read failure: descendant-record reads still reach the
+  // real fs, so the death probe is undisturbed and only the diagnosis degrades.
+  if (exitReadThrows) {
+    const realRead = readFileSync
+    deps.readFileSync = (path, ...rest) => {
+      if (String(path) === exitPath) throw new Error('injected exit-file read failure')
+      return realRead(path, ...rest)
+    }
   }
   if (growthThrows || growth) {
     const names = growth?.dirs ? Object.keys(growth.dirs) : ['d1']
@@ -665,4 +685,89 @@ test('D1 recovered re-ask journals the charged shared-slot policy by name', () =
   assert.ok(recovered)
   assert.equal(recovered.grace_slot_policy, REASK_GRACE_POLICY)
   assert.equal(REASK_GRACE_POLICY, 'charged-shared-slot')
+})
+
+// MUTATION A1: replace the valid-file return's recorded status with null.
+test('A1', () => {
+  withRun({ ps: 'absent', exitBytes: '23' }, (run) => {
+    assert.equal(run.error?.stage, SEAT_DIED_STAGE)
+    assert.ok(run.diedRow)
+    assert.equal(run.diedRow.exit_status, 23)
+    assert.equal(run.diedRow.exit_status_reason, null)
+  })
+})
+
+// MUTATION B1: coalesce the journal status to a number when the reader reports absence.
+test('B1', () => {
+  withRun({ ps: 'absent' }, (run) => {
+    assert.equal(run.error?.stage, SEAT_DIED_STAGE)
+    assert.ok(run.diedRow)
+    assert.equal(run.diedRow.exit_status_reason, HEADLESS_EXIT_REASONS.ABSENT)
+    assert.equal(run.diedRow.exit_status, null)
+  })
+})
+
+// MUTATION C1: replace the absent-file reader result's null status with zero.
+test('C1', () => {
+  withRun({ ps: 'absent' }, (run) => {
+    assert.equal(run.error?.stage, SEAT_DIED_STAGE)
+    assert.ok(run.diedRow)
+    assert.equal(run.diedRow.exit_status, null)
+    assert.ok(typeof run.diedRow.exit_status !== 'number')
+    assert.notEqual(run.diedRow.exit_status, 0)
+  })
+})
+
+// MUTATION D1: make the malformed-file result carry both the absent reason and a numeric status.
+test('D1', () => {
+  for (const exitBytes of ['', 'not-a-status\n', '256']) {
+    withRun({ ps: 'absent', exitBytes }, (run) => {
+      assert.equal(run.error?.stage, SEAT_DIED_STAGE)
+      assert.ok(run.diedRow, `exit bytes ${JSON.stringify(exitBytes)} must still journal a seat_died row`)
+      assert.equal(run.diedRow.exit_status, null)
+      assert.equal(run.diedRow.exit_status_reason, HEADLESS_EXIT_REASONS.UNREADABLE_OR_MALFORMED)
+      assert.notEqual(run.diedRow.exit_status_reason, HEADLESS_EXIT_REASONS.ABSENT)
+    })
+  }
+})
+
+// MUTATION E1: replace the journal's enum-derived reason with an ad-hoc string.
+test('E1', () => {
+  assert.ok(Object.isFrozen(HEADLESS_EXIT_REASONS))
+  assert.deepEqual({ ...HEADLESS_EXIT_REASONS }, {
+    ABSENT: 'exit-file-absent',
+    UNREADABLE_OR_MALFORMED: 'exit-file-unreadable-or-malformed',
+  })
+  const members = new Set(Object.values(HEADLESS_EXIT_REASONS))
+  const reasons = []
+  withRun({ ps: 'absent' }, (run) => { reasons.push(run.diedRow?.exit_status_reason ?? null) })
+  withRun({ ps: 'absent', exitBytes: '' }, (run) => { reasons.push(run.diedRow?.exit_status_reason ?? null) })
+  withRun({ ps: 'absent', exitBytes: '23' }, (run) => { reasons.push(run.diedRow?.exit_status_reason ?? null) })
+  assert.ok(reasons.some((reason) => reason != null), 'at least one run must emit a reason to check')
+  for (const reason of reasons) {
+    if (reason != null) assert.ok(members.has(reason), `reason ${reason} must be a member of HEADLESS_EXIT_REASONS`)
+  }
+})
+
+// MUTATION F1: rethrow the filesystem read failure instead of returning its closed reason.
+test('F1', () => {
+  withRun({ ps: 'absent', exitBytes: '23', exitReadThrows: true }, (run) => {
+    assert.equal(run.error?.stage, SEAT_DIED_STAGE)
+    assert.ok(run.diedRow)
+    assert.equal(run.diedRow.exit_status, null)
+    assert.equal(run.diedRow.exit_status_reason, HEADLESS_EXIT_REASONS.UNREADABLE_OR_MALFORMED)
+  })
+})
+
+// MUTATION G1: change the established SEAT_DIED_STAGE assignment on the thrown error.
+test('G1', () => {
+  withRun({ ps: 'absent', exitBytes: '23' }, (run) => {
+    assert.equal(run.error?.stage, SEAT_DIED_STAGE)
+    assert.equal(cellFailureKind(run.error), 'seat-died')
+    assert.ok(run.diedRow)
+    assert.equal(run.error?.reclaim?.root_pid, ROOT_PID)
+    assert.equal(run.error?.reclaim?.root_liveness, 'dead')
+    assert.equal(run.error?.reclaim?.reason, 'probe-dead')
+    assert.match(run.error?.message ?? '', /worker root 999001 \(pgid 999001\) is gone/)
+  })
 })

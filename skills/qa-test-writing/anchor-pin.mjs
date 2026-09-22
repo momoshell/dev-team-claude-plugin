@@ -1,18 +1,18 @@
 // Content pins for prose citations; see references/citations.md and vacuity.md's detector-key section.
 import { existsSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs'
-import { join, relative } from 'node:path'
+import { isAbsolute, join, relative } from 'node:path'
 import { execFileSync } from 'node:child_process'
 
 export const MIN_EXPECTED_LENGTH = 12
 export const ANCHOR_ROOTS = Object.freeze(['crew', 'scripts', 'test', 'docs', 'skills', 'visualizer', 'tasks', '.github'])
-export const ANCHOR_PATTERN = '([A-Za-z0-9_.-]+(?:\\/[A-Za-z0-9_.-]+)+\\.(?:mjs|ts|js|json|md|sh|yml)):(\\d+)'
+export const ANCHOR_PATTERN = '([A-Za-z0-9_.-]+(?:\\/[A-Za-z0-9_.-]+)+\\.(?:mjs|ts|js|json|md|sh|yml|svelte)):(\\d+)'
 export const RANGE_PATTERN = `${ANCHOR_PATTERN}-(\\d+)(?!\\d)`
 
 // A NAMED citation carries no line number, so nothing about it can shift and nothing about it
 // can be repaired: the manifest maps `path@name` to the content that identifies the line, and
 // the line is resolved at check time. An `// ANCHOR X` comment in the target needs no extra
 // machinery — declare `ANCHOR X` as that name's content and the strong form is cited. #971
-export const NAMED_PATTERN = '([A-Za-z0-9_.-]+(?:\\/[A-Za-z0-9_.-]+)+\\.(?:mjs|ts|js|json|md|sh|yml))@([a-z0-9][a-z0-9-]*)'
+export const NAMED_PATTERN = '([A-Za-z0-9_.-]+(?:\\/[A-Za-z0-9_.-]+)+\\.(?:mjs|ts|js|json|md|sh|yml|svelte))@([a-z0-9][a-z0-9-]*)'
 
 const ANCHOR_RE = new RegExp(ANCHOR_PATTERN, 'g')
 
@@ -647,10 +647,102 @@ export function repairAnchorsInPlace({ root, skillDir, manifestPath, repairAll =
   return result
 }
 
+function logRefusal(log, refusal) {
+  log(`refused ${refusal}`)
+}
+
+// Read-only exposition of the repair classifier: every manifest below scanRoot is
+// probed with the pure repairAnchors (never the writing wrapper), so --check reports
+// rot, ambiguity, and movement without touching the checkout. Only the three
+// operator classes rot/ambiguous/moved (plus an unreadable scan or manifest) fail:
+// unpinned prose exhibits and orphaned keys are logged as refused rows for
+// visibility, but the fully resolved corpus they accompany still exits zero.
+// lean: O(docs x lines) scan per manifest, same as repair; no index is kept.
+// Two producers describe the SAME two defects in different words, and a
+// substring test on `: rot:` gets both of them wrong.
+//
+//  * `classifiedRepairRefusal` emits the tagged `<key>: <reason>: <detail>`.
+//  * `resolveNamed` emits untagged prose. Its exact wording is a CONSUMED
+//    contract — test/factory-closeout.test.mjs maps it onto
+//    CLOSEOUT_REFUSALS.ANCHOR_ROT and skills/frontend-svelte/exhibits.test.mjs
+//    reproduces it — so the classifier adapts to the prose, never the reverse.
+//
+// Measured before this existed: a named rot and a named ambiguity both counted
+// as `unverified`, and a refusal containing the literal `: rot: ` counted as rot
+// whatever produced it. Both are category errors, so the tagged form is matched
+// ANCHORED behind a `path:line` or `path:start-end` key rather than found
+// anywhere in the string.
+// A refusal whose TERMINAL form identifies itself is classified by that form
+// FIRST. Sol's spoof: a manifest key `bogus:12: rot: planted` formats an ORPHAN
+// refusal as `bogus:12: rot: planted: manifest entry is orphaned (no citation)`,
+// which a leading tagged-form match counted as measured rot. Manifest keys are
+// not validated before an orphan refusal is produced, so the key is
+// attacker-shaped and the tag must never be trusted ahead of a self-identifying
+// form.
+const TERMINAL_UNVERIFIED = [
+  ': manifest entry is orphaned (no citation)',
+  ': manifest has no entry',
+]
+const TAGGED_REFUSAL = /^.+?:\d+(?:-\d+)?: (rot|ambiguous|excluded-by-scope): /
+const NAMED_ROT = /: content appears nowhere in .*; this is rot, not a shift$/
+const NAMED_AMBIGUOUS = /: content occurs \d+ times in .*; a named anchor must resolve to exactly one line$/
+
+export function classifyCheckRefusal(refusal) {
+  const text = String(refusal ?? '')
+  if (TERMINAL_UNVERIFIED.some((suffix) => text.endsWith(suffix))) return null
+  if (NAMED_ROT.test(text)) return REPAIR_REASONS.rot
+  if (NAMED_AMBIGUOUS.test(text)) return REPAIR_REASONS.ambiguous
+  const tagged = TAGGED_REFUSAL.exec(text)
+  if (tagged) return tagged[1]
+  return null
+}
+
+export function checkAnchorManifests({ root, scanRoot, log = console.log }) {
+  const totals = { scanned: 0, manifests: 0, rot: 0, ambiguous: 0, moved: 0, unverified: 0, other: 0 }
+  try {
+    for (const skillDir of anchorManifestDirs(scanRoot)) {
+      let manifest
+      try {
+        manifest = JSON.parse(readFileSync(join(skillDir, 'anchors.json'), 'utf8'))
+      } catch (error) {
+        totals.other += 1
+        logRefusal(log, `could not read anchor manifest ${join(skillDir, 'anchors.json')}: ${error?.message || String(error)}`)
+        continue
+      }
+      const keys = manifest && typeof manifest === 'object' && !Array.isArray(manifest) ? Object.keys(manifest) : []
+      totals.manifests += 1
+      totals.scanned += keys.length
+      const result = repairAnchors({ root, docs: skillDocs(skillDir), manifest, repairAll: true })
+      for (const repair of result.repairs) {
+        totals.moved += 1
+        log(`moved ${repair.key} -> ${repair.nextKey}`)
+      }
+      for (const refusal of result.refusals) {
+        const reason = classifyCheckRefusal(refusal)
+        if (reason === REPAIR_REASONS.rot) totals.rot += 1
+        else if (reason === REPAIR_REASONS.ambiguous) totals.ambiguous += 1
+        // RV1-1: a refusal this scan cannot CLASSIFY is still a pin it cannot
+        // vouch for — an unreadable target, a too-short expected string, an
+        // orphaned entry. Counting only rot and ambiguity let 45 real refusals
+        // exit 0, which is the silent-green the check exists to end.
+        else totals.unverified += 1
+        logRefusal(log, refusal)
+      }
+    }
+  } catch (error) {
+    totals.other += 1
+    logRefusal(log, `scan directory ${scanRoot} could not be read (${error?.code || error?.message || String(error)})`)
+  }
+  log(`checked ${totals.scanned} pins across ${totals.manifests} manifests: rot ${totals.rot}, ambiguous ${totals.ambiguous}, moved ${totals.moved}, unverified ${totals.unverified}`)
+  const failed = totals.rot > 0 || totals.ambiguous > 0 || totals.moved > 0 || totals.unverified > 0 || totals.other > 0
+  return failed ? 1 : 0
+}
+
 export function repairCli(argv, log = console.log) {
   let skillDir = null
   let repairAll = false
   let root = process.cwd()
+  let scanRoot = null
   // The caller may KNOW this lane's branch point — the driver records a resolved HEAD at
   // run-start and arm worktrees are cut from a resolved pin — and a known commit beats any
   // ref this tool could guess at. Absent, it falls back to the default remote-tracking ref
@@ -664,12 +756,20 @@ export function repairCli(argv, log = console.log) {
       i += 1
       continue
     }
+    if (argv[i] === '--check') { scanRoot = argv[i + 1]; i += 1; continue }
     if (argv[i] === '--root') { root = argv[i + 1]; i += 1; continue }
     log(`unknown argument ${argv[i]}`)
     return 2
   }
+  if (scanRoot !== null && scanRoot !== undefined) {
+    if (skillDir !== null || !root) {
+      log('usage: node skills/qa-test-writing/anchor-pin.mjs (--repair | --repair-all) <dir> [--root <root>] | --check <directory> [--root <root>]')
+      return 2
+    }
+    return checkAnchorManifests({ root, scanRoot: isAbsolute(scanRoot) ? scanRoot : join(root, scanRoot), log })
+  }
   if (!skillDir || !root) {
-    log('usage: node skills/qa-test-writing/anchor-pin.mjs (--repair | --repair-all) <dir> [--root <root>]')
+    log('usage: node skills/qa-test-writing/anchor-pin.mjs (--repair | --repair-all) <dir> [--root <root>] | --check <directory> [--root <root>]')
     return 2
   }
   const manifestPath = join(skillDir, 'anchors.json')
@@ -685,7 +785,7 @@ export function repairCli(argv, log = console.log) {
     }
     log(`ANCHOR_REPAIR_ROW ${JSON.stringify(row)}`)
   }
-  for (const refusal of result.refusals) log(`refused ${refusal}`)
+  for (const refusal of result.refusals) logRefusal(log, refusal)
   return result.refusals.length > 0 ? 1 : 0
 }
 

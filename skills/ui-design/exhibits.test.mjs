@@ -4,14 +4,15 @@ import { readFileSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { ROOT } from '../../test/helpers.mjs'
-import { assertAnchorsPinned, pinnedKey } from '../qa-test-writing/anchor-pin.mjs'
+import { checkSkillAnchors, pinnedKey } from '../qa-test-writing/anchor-pin.mjs'
 
 const HERE = fileURLToPath(new URL('./', import.meta.url))
 const MANIFEST = join(HERE, 'anchors.json')
 const OWNER = 'skills/ui-design/anchors.json'
 const MIN_ANCHORS = 5;
 
-// The shipped helper cannot see svelte, css, or html citations, so this table
+// The shipped helper cannot see css or html citations, and it reports svelte
+// citations as unpinned (they carry no manifest key by design), so this table
 // covers every such citation endpoint in the repaired docs. Each row is a
 // JSON-compatible triple naming the line the prose claims.
 const UNPINNABLE_PINS = [
@@ -121,7 +122,15 @@ const UNPINNABLE_PINS = [
 // Mutation killed: move any cited source line, or delete a docs citation,
 // and this test reddens - each pin carries content, not just shape.
 test('every ui-design path:line anchor carries what the prose claims', () => {
-  assert.equal(assertAnchorsPinned({ root: ROOT, skillDir: HERE, manifestPath: MANIFEST, minAnchors: MIN_ANCHORS }), MIN_ANCHORS)
+  const manifest = JSON.parse(readFileSync(MANIFEST, 'utf8'))
+  assert.equal(Object.keys(manifest).length, MIN_ANCHORS)
+  const result = checkSkillAnchors({ root: ROOT, skillDir: HERE, manifestPath: MANIFEST })
+  assert.deepEqual(result.shifted, [], 'a drifted manifest pin must be repaired, not tolerated')
+  const prefixes = Object.keys(manifest).map((key) => `${key}:`)
+  for (const failure of result.failures) {
+    assert.ok(prefixes.every((prefix) => !failure.startsWith(prefix)), `manifest pin failure: ${failure}`)
+    assert.match(failure, /\.svelte:\d+: manifest has no entry$/, `only the separately-covered svelte exhibits may surface here: ${failure}`)
+  }
 })
 
 // Mutation killed: move any svelte, css, or html exhibit line, or corrupt its

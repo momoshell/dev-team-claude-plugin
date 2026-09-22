@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join, relative } from 'node:path'
 import { ROOT, git, scratchDir } from '../../test/helpers.mjs'
-import { anchorManifestDirs, assertAnchorsPinned, checkAnchors, checkSkillAnchors, citationCarrierTests, collectAnchors, collectNamed, collectRanges, INVERTED_MARK, laneFence, MIN_EXPECTED_LENGTH, partitionShifts, shiftsAreOwedHere, pinnedKey, pinnedLiteralsInTests, repairAnchors, repairAnchorsInPlace, repairCli, resolveNamed, rewriteCitations, skillDocs, PINNED_LITERAL_BLIND_SPOT } from './anchor-pin.mjs'
+import { anchorManifestDirs, assertAnchorsPinned, checkAnchors, classifyCheckRefusal, checkSkillAnchors, citationCarrierTests, collectAnchors, collectNamed, collectRanges, INVERTED_MARK, laneFence, MIN_EXPECTED_LENGTH, partitionShifts, shiftsAreOwedHere, pinnedKey, pinnedLiteralsInTests, repairAnchors, repairAnchorsInPlace, repairCli, resolveNamed, rewriteCitations, skillDocs, PINNED_LITERAL_BLIND_SPOT } from './anchor-pin.mjs'
 
 const EXPECTED = "KEY = 'anchored-sentinel-value'"
 const RANGE_EXPECTED = "RANGE = 'range-first-sentinel-value'"
@@ -846,27 +846,101 @@ test('repair-all CLI repairs a committed shift on clean main', () => {
 
 test('the discovered anchor-manifest corpus checks clean', () => {
   // Mutation killed: omitting a discovered manifest, especially skills/pr-review, leaves a new pin corpus unverified.
-  const dirs = anchorManifestDirs(ROOT)
+  // The frontend exemption is gone: .svelte citations use the shared parser, so every
+  // discovered manifest below skills/ is covered by the same read-only check.
+  const dirs = anchorManifestDirs(join(ROOT, 'skills'))
   const relativeDirs = dirs.map((dir) => relative(ROOT, dir))
+  assert.equal(dirs.length, 8)
+  assert.ok(relativeDirs.includes('skills/frontend-svelte'))
   assert.ok(relativeDirs.includes('skills/pr-review'))
-  for (const dir of dirs) {
-    if (relative(ROOT, dir) === 'skills/frontend-svelte') {
-      // Exempt: the shipped ANCHOR_PATTERN accepts only mjs|ts|js|json|md|sh|yml,
-      // so this corpus cannot tokenize that skill's .svelte citations and would report
-      // every pin as orphaned without ever checking content. Its pins are enforced
-      // instead by its skill-local skills/frontend-svelte/exhibits.test.mjs (superset
-      // parser with .svelte, hyphen/en-dash/comma) and by gate A1/D1/E1.
-      assert.ok(existsSync(join(dir, 'exhibits.test.mjs')), 'frontend-svelte must keep its skill-local checker')
-      continue
+  const output = []
+  const status = repairCli(['--check', join(ROOT, 'skills'), '--root', ROOT], output.push.bind(output))
+  const summary = output.find((line) => line.includes('pins across'))
+  assert.ok(summary !== undefined, 'expected a scanned/manifests summary row')
+  assert.ok(summary.includes('185 pins across 8 manifests'), `expected the 185-pin summary, found: ${summary}`)
+
+  // ZERO TOLERANCE for the classes #1471 is about. A pin whose content is gone,
+  // resolves twice, or has drifted a line fails this suite immediately.
+  assert.ok(summary.includes('rot 0') && summary.includes('ambiguous 0') && summary.includes('moved 0'),
+    `rotted, ambiguous or drifted pin(s): ${summary}\n${output.filter((line) => line.startsWith('refused ')).join('\n')}`)
+
+  // THE ACCEPTED DEBT, BY IDENTITY AND OWNER — not by a fungible count.
+  //
+  // Measured 2026-09-21: 45 refusals that are NOT line drift. 40 are citations
+  // in skills/ui-design carrying no manifest entry; 5 are orphaned entries in
+  // skills/frontend-svelte carrying no citation. `--repair-all` refuses these
+  // too and changes nothing, so they are manual curation, not mechanical repair.
+  //
+  // A SCALAR BUDGET WAS TRIED AND IS WRONG. Pinning only the total let one
+  // orphan move from frontend-svelte into ui-design at a constant 45 and stay
+  // green — admitting a brand-new failure in a manifest that had none, while
+  // the "40 UI / 5 frontend" claim silently became false.
+  //
+  // Rows are [manifest, path, reason, count] and deliberately carry NO line
+  // number: a `path:line` literal here would itself become a citation that
+  // rots, which the pinned-literal tripwire in this same file forbids.
+  //
+  // Clear debt by lowering a count or deleting a row in the same commit that
+  // fixes the entries. Adding a row is accepting new debt — argue for it.
+  const ACCEPTED_DEBT = [
+    ["skills/frontend-svelte", "test/visualizer-panels.test.mjs", "manifest entry is orphaned (no citation)", 4],
+    ["skills/frontend-svelte", "visualizer/web/src/App.svelte", "manifest entry is orphaned (no citation)", 1],
+    ["skills/ui-design", "visualizer/web/src/App.svelte", "manifest has no entry", 8],
+    ["skills/ui-design", "visualizer/web/src/lib/AcceptPanel.svelte", "manifest has no entry", 1],
+    ["skills/ui-design", "visualizer/web/src/lib/EnvelopeInspector.svelte", "manifest has no entry", 1],
+    ["skills/ui-design", "visualizer/web/src/lib/FleetTable.svelte", "manifest has no entry", 8],
+    ["skills/ui-design", "visualizer/web/src/lib/GateChips.svelte", "manifest has no entry", 1],
+    ["skills/ui-design", "visualizer/web/src/lib/IntakePanel.svelte", "manifest has no entry", 2],
+    ["skills/ui-design", "visualizer/web/src/lib/PhaseDots.svelte", "manifest has no entry", 2],
+    ["skills/ui-design", "visualizer/web/src/lib/PhaseGantt.svelte", "manifest has no entry", 4],
+    ["skills/ui-design", "visualizer/web/src/lib/PhasePanel.svelte", "manifest has no entry", 1],
+    ["skills/ui-design", "visualizer/web/src/lib/RoleTag.svelte", "manifest has no entry", 2],
+    ["skills/ui-design", "visualizer/web/src/lib/RosterPanel.svelte", "manifest has no entry", 3],
+    ["skills/ui-design", "visualizer/web/src/lib/RunCard.svelte", "manifest has no entry", 5],
+    ["skills/ui-design", "visualizer/web/src/lib/RunDetail.svelte", "manifest has no entry", 1],
+    ["skills/ui-design", "visualizer/web/src/lib/TeardownPanel.svelte", "manifest has no entry", 1],
+  ]
+  // OWNERSHIP IS PART OF THE IDENTITY. An earlier version carried a manifest per
+  // row and then destructured it away, so an orphan could move to a DIFFERENT
+  // manifest at constant path and count and stay green. The tally is therefore
+  // built by scanning each manifest SEPARATELY — the corpus run above cannot
+  // attribute a refusal to an owner, because the refusal text names none.
+  const tally = new Map()
+  for (const dir of anchorManifestDirs(join(ROOT, 'skills'))) {
+    const owner = relative(ROOT, dir)
+    const perManifest = []
+    repairCli(['--check', dir, '--root', ROOT], perManifest.push.bind(perManifest))
+    for (const line of perManifest.filter((entry) => entry.startsWith('refused '))) {
+      const body = line.slice('refused '.length)
+      const split = body.indexOf(': ')
+      const path = body.slice(0, split).slice(0, body.slice(0, split).lastIndexOf(':'))
+      const id = JSON.stringify([owner, path, body.slice(split + 2)])
+      tally.set(id, (tally.get(id) ?? 0) + 1)
     }
-    const docs = skillDocs(dir).filter((doc) => {
-      // tier.md is exempt for the duplicated quoted-runtime anchor, as documented at skills/crew-dispatch/exhibits.test.mjs:56-62.
-      return doc !== join(dir, 'references/tier.md')
-    })
-    const manifest = JSON.parse(readFileSync(join(dir, 'anchors.json'), 'utf8'))
-    const result = checkAnchors({ root: ROOT, docs, manifest })
-    assert.deepEqual(result.failures, [], `${relative(ROOT, dir)} manifest failures`)
   }
+  const expected = new Map(ACCEPTED_DEBT.map(([manifest, path, why, count]) => [JSON.stringify([manifest, path, why]), count]))
+  const drift = []
+  for (const [id, count] of tally) {
+    if (expected.get(id) !== count) {
+      const [owner, path, why] = JSON.parse(id)
+      drift.push(`${owner} ${path} — ${why}: expected ${expected.get(id) ?? 0}, found ${count}`)
+    }
+  }
+  for (const [id, count] of expected) {
+    if (!tally.has(id)) {
+      const [owner, path, why] = JSON.parse(id)
+      drift.push(`${owner} ${path} — ${why}: expected ${count}, found 0 (delete this row)`)
+    }
+  }
+  assert.deepEqual(drift, [], `accepted curation debt moved:\n${drift.join('\n')}`)
+
+  // BLIND SPOT, stated: identity is manifest + path + reason + count and carries
+  // no line number, so replacing one orphan in a path with a DIFFERENT orphan in
+  // that same path and manifest reads identical here. A content fingerprint would
+  // close it; a path:line literal would not, because it would itself become a
+  // citation that rots.
+
+  assert.equal(status, 1, 'the corpus carries accepted debt, so --check must exit non-zero')
 })
 
 test('no citation carrier test restates a currently pinned anchor key', () => {
@@ -1639,4 +1713,211 @@ test('a measured non-empty fence keeps the out-of-fence shift a warning', () => 
   } finally {
     dispose(fx)
   }
+})
+
+function snapTree(root) {
+  const entries = []
+  const visit = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name)
+      if (entry.isDirectory()) visit(path)
+      else if (entry.isFile()) entries.push([relative(root, path), readFileSync(path, 'utf8')])
+    }
+  }
+  visit(root)
+  return entries.sort((a, b) => (a[0] < b[0] ? -1 : 1))
+}
+
+function writeTarget(root, rel, content) {
+  mkdirSync(join(root, dirname(rel)), { recursive: true })
+  writeFileSync(join(root, rel), content)
+}
+
+function checkSkillFiles(skillDir, entries, citations = Object.keys(entries)) {
+  mkdirSync(skillDir, { recursive: true })
+  writeFileSync(join(skillDir, 'SKILL.md'), `# sample\n\n${citations.map((key) => `Exhibit: \`${key}\`.`).join('\n')}\n`)
+  writeFileSync(join(skillDir, 'anchors.json'), `${JSON.stringify(entries, null, 2)}\n`)
+}
+
+const EXPECTED_C = "const C = 'anchor-c-distinctive-value'"
+
+test('pin-check A1', () => {
+  // MUTATION A1: disabling the rot contribution lets this isolated rotted pin exit zero.
+  const root = scratchDir('pin-check-a1-')
+  writeTarget(root, 'scripts/a.mjs', "const OTHER = 'not-the-pinned-content'\n")
+  contractSkill(root, { 'scripts/a.mjs:1': EXPECTED_A })
+  try {
+    const output = []
+    assert.equal(repairCli(['--check', join(root, 'skills'), '--root', root], output.push.bind(output)), 1)
+    const rows = output.filter((line) => line.startsWith('refused scripts/a.mjs:1:'))
+    assert.equal(rows.length, 1)
+    assert.match(rows[0], /: rot:/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('pin-check B1', () => {
+  // MUTATION B1: disabling the ambiguity contribution lets this duplicated content exit zero.
+  const root = scratchDir('pin-check-b1-')
+  writeTarget(root, 'scripts/a.mjs', `${EXPECTED_A}\n${EXPECTED_A}\n`)
+  contractSkill(root, { 'scripts/a.mjs:3': EXPECTED_A })
+  try {
+    const output = []
+    assert.equal(repairCli(['--check', join(root, 'skills'), '--root', root], output.push.bind(output)), 1)
+    const rows = output.filter((line) => line.startsWith('refused scripts/a.mjs:3:'))
+    assert.equal(rows.length, 1)
+    assert.match(rows[0], /: ambiguous:/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('pin-check C1', () => {
+  // MUTATION C1: inverting the clean return arm fails this clean corpus.
+  const root = scratchDir('pin-check-c1-')
+  writeTarget(root, 'scripts/a.mjs', `${EXPECTED_A}\n`)
+  contractSkill(root, { 'scripts/a.mjs:1': EXPECTED_A })
+  try {
+    const output = []
+    assert.equal(repairCli(['--check', join(root, 'skills'), '--root', root], output.push.bind(output)), 0)
+    assert.ok(output.some((line) => line.includes('1 pins across 1 manifests')))
+    assert.equal(output.filter((line) => line.startsWith('refused ') || line.startsWith('moved ')).length, 0)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('pin-check D1', () => {
+  // MUTATION D1: probing with repairAnchorsInPlace instead of repairAnchors writes the moved companion.
+  const root = scratchDir('pin-check-d1-')
+  writeTarget(root, 'scripts/a.mjs', "const OTHER = 'not-the-pinned-content'\n")
+  writeTarget(root, 'scripts/b.mjs', `// inserted above\n${EXPECTED_B}\n`)
+  contractSkill(root, { 'scripts/a.mjs:1': EXPECTED_A, 'scripts/b.mjs:1': EXPECTED_B })
+  try {
+    const before = snapTree(root)
+    const output = []
+    assert.equal(repairCli(['--check', join(root, 'skills'), '--root', root], output.push.bind(output)), 1)
+    assert.ok(output.some((line) => line.startsWith('refused scripts/a.mjs:1:') && line.includes(': rot:')), 'the rot companion is reported')
+    assert.ok(output.some((line) => line === 'moved scripts/b.mjs:1 -> scripts/b.mjs:2'), 'the moved companion is reported')
+    assert.deepEqual(snapTree(root), before, '--check writes no file')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('pin-check E1', () => {
+  // MUTATION E1: labelling the moved row as rot collapses movement into disappearance.
+  const root = scratchDir('pin-check-e1-')
+  writeTarget(root, 'scripts/a.mjs', "const OTHER = 'not-the-pinned-content'\n")
+  writeTarget(root, 'scripts/b.mjs', `// inserted above\n${EXPECTED_B}\n`)
+  contractSkill(root, { 'scripts/a.mjs:1': EXPECTED_A, 'scripts/b.mjs:1': EXPECTED_B })
+  try {
+    const output = []
+    assert.equal(repairCli(['--check', join(root, 'skills'), '--root', root], output.push.bind(output)), 1)
+    assert.ok(output.some((line) => line === 'moved scripts/b.mjs:1 -> scripts/b.mjs:2'), 'movement keeps the moved label')
+    const gone = output.filter((line) => line.startsWith('refused scripts/a.mjs:1:'))
+    assert.equal(gone.length, 1)
+    assert.match(gone[0], /: rot:/, 'disappearance keeps the rot label')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('pin-check F1', () => {
+  // MUTATION F1: replacing the refusal row with a bare summary hides every offending path:line.
+  const root = scratchDir('pin-check-f1-')
+  writeTarget(root, 'scripts/a.mjs', "const OTHER = 'not-a'\n")
+  writeTarget(root, 'scripts/b.mjs', "const OTHER = 'not-b'\n")
+  writeTarget(root, 'scripts/c.mjs', "const OTHER = 'not-c'\n")
+  contractSkill(root, { 'scripts/a.mjs:1': EXPECTED_A, 'scripts/b.mjs:1': EXPECTED_B, 'scripts/c.mjs:1': EXPECTED_C })
+  try {
+    const output = []
+    assert.equal(repairCli(['--check', join(root, 'skills'), '--root', root], output.push.bind(output)), 1)
+    for (const key of ['scripts/a.mjs:1', 'scripts/b.mjs:1', 'scripts/c.mjs:1']) {
+      assert.ok(output.some((line) => line.startsWith(`refused ${key}:`)), `every offender names ${key}`)
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('pin-check G1', () => {
+  // MUTATION G1: iterating the scan root alone instead of discovering recursively skips the nested manifest.
+  const root = scratchDir('pin-check-g1-')
+  writeTarget(root, 'scripts/a.mjs', `${EXPECTED_A}\n`)
+  writeTarget(root, 'scripts/b.mjs', `${EXPECTED_B}\n`)
+  const scan = join(root, 'scan')
+  checkSkillFiles(join(scan, 'outer'), { 'scripts/a.mjs:1': EXPECTED_A })
+  checkSkillFiles(join(scan, 'outer', 'inner'), { 'scripts/b.mjs:1': EXPECTED_B })
+  try {
+    const clean = []
+    assert.equal(repairCli(['--check', scan, '--root', root], clean.push.bind(clean)), 0)
+    assert.ok(clean.some((line) => line.includes('2 pins across 2 manifests')))
+    writeTarget(root, 'scripts/b.mjs', "const OTHER = 'not-the-pinned-content'\n")
+    const output = []
+    assert.equal(repairCli(['--check', scan, '--root', root], output.push.bind(output)), 1)
+    assert.ok(output.some((line) => line.startsWith('refused scripts/b.mjs:1:')), 'the nested manifest offender is named')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('pin-check H1', () => {
+  // MUTATION H1: disabling the moved-pin contribution keeps this real one-line drift green.
+  // Every value below is derived at runtime from a real manifest entry, so this file
+  // restates no currently pinned anchor key and the checkout itself is never written.
+  const realManifest = JSON.parse(readFileSync(join(ROOT, 'skills/lean-build/anchors.json'), 'utf8'))
+  const [realKey, realExpected] = Object.entries(realManifest)[0]
+  const sep = realKey.lastIndexOf(':')
+  const rel = realKey.slice(0, sep)
+  const line = Number(realKey.slice(sep + 1))
+  const movedKey = `${rel}:${line + 1}`
+  const root = scratchDir('pin-check-h1-')
+  const target = []
+  for (let i = 1; i < line; i += 1) target.push('// filler')
+  target.push(realExpected)
+  writeTarget(root, rel, `${target.join('\n')}\n`)
+  const skillDir = join(root, 'skills/sample')
+  const writePair = (key) => checkSkillFiles(skillDir, { [key]: realExpected }, [key])
+  try {
+    writePair(realKey)
+    const resolved = []
+    assert.equal(repairCli(['--check', join(root, 'skills'), '--root', root], resolved.push.bind(resolved)), 0)
+    writePair(movedKey)
+    const drifted = []
+    assert.equal(repairCli(['--check', join(root, 'skills'), '--root', root], drifted.push.bind(drifted)), 1)
+    assert.ok(drifted.some((row) => row === `moved ${movedKey} -> ${realKey}`), 'the one-line drift is labelled moved')
+    writePair(realKey)
+    const restored = []
+    assert.equal(repairCli(['--check', join(root, 'skills'), '--root', root], restored.push.bind(restored)), 0)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+// Sol's confirmation pass deleted BOTH named-prose branches of
+// classifyCheckRefusal and all 94 tests stayed green: nothing referenced it
+// directly and the live corpus happens to carry no named rot. A classifier with
+// no mutation guard is vacuous — the exact standard this change enforces
+// everywhere else.
+test('pin-check RC1 — named rot and named ambiguity are not counted as unverified', () => {
+  // MUTATION RC1: deleting either named-prose branch drops these to null.
+  assert.equal(classifyCheckRefusal('crew/x.mjs:9: content appears nowhere in crew/x.mjs; this is rot, not a shift'), 'rot')
+  assert.equal(classifyCheckRefusal('crew/x.mjs:9: content occurs 3 times in crew/x.mjs; a named anchor must resolve to exactly one line'), 'ambiguous')
+})
+
+test('pin-check RC2 — a tagged refusal is classified behind a real key', () => {
+  // MUTATION RC2: dropping the tagged branch drops both to null.
+  assert.equal(classifyCheckRefusal('crew/x.mjs:12: rot: content is gone'), 'rot')
+  assert.equal(classifyCheckRefusal('crew/x.mjs:12: ambiguous: two matches'), 'ambiguous')
+})
+
+test('pin-check RC3 — a manifest key cannot spoof a measured reason', () => {
+  // MUTATION RC3: classifying the tagged form BEFORE the terminal forms counts
+  // this orphan as measured rot. Manifest keys are not validated before an
+  // orphan refusal is formatted, so the key is attacker-shaped.
+  assert.equal(classifyCheckRefusal('bogus:12: rot: planted: manifest entry is orphaned (no citation)'), null,
+    'an orphan refusal is never measured rot, whatever its key says')
+  assert.equal(classifyCheckRefusal('crew/x.mjs:12: manifest has no entry'), null)
 })

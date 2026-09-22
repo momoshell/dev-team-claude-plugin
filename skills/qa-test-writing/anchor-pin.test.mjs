@@ -858,7 +858,7 @@ test('the discovered anchor-manifest corpus checks clean', () => {
   const status = repairCli(['--check', join(ROOT, 'skills'), '--root', ROOT], output.push.bind(output))
   const summary = output.find((line) => line.includes('pins across'))
   assert.ok(summary !== undefined, 'expected a scanned/manifests summary row')
-  assert.ok(summary.includes('244 pins across 9 manifests'), `expected the 244-pin summary, found: ${summary}`)
+  assert.ok(summary.includes('245 pins across 9 manifests'), `expected the 245-pin summary, found: ${summary}`)
 
   // ZERO TOLERANCE for the classes #1471 is about. A pin whose content is gone,
   // resolves twice, or has drifted a line fails this suite immediately.

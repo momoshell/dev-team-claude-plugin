@@ -394,6 +394,8 @@ test('E1', () => {
 
 // Mutation killed: flipping one tabular-nums verdict in the published register.
 test('F1', () => {
+  // Resolve the local tabular rule through the manifest by content, never by restated line literal.
+  const localKey = pinnedKey({ manifestPath: MANIFEST, expected: '.mono { font-family:var(--mono); font-variant-numeric:tabular-nums; }' })
   const derived = new Map()
   for (const file of libFiles()) {
     const { markup, rules } = componentParts(file)
@@ -402,7 +404,7 @@ test('F1', () => {
     if (!markupMono && !localTabular) continue
     derived.set(file, {
       verdict: 'compliant',
-      source: localTabular ? 'visualizer/web/src/lib/RunCard.svelte:73' : 'visualizer/web/src/lib/theme.css:165',
+      source: localTabular ? localKey : 'visualizer/web/src/lib/theme.css:165',
     })
   }
   assert.deepEqual([...derived.keys()].sort(), ['AgentsPage.svelte', 'EventStory.svelte', 'FleetTable.svelte', 'RunCard.svelte', 'WorkflowsPage.svelte'])

@@ -281,6 +281,21 @@ test('batch doctrine mirrors the computed path blind spot', () => {
   assert.equal(text.split(TEST_REACH_BLIND_SPOT).length - 1, 1)
 })
 
+test('surface movement doctrine pins warning semantics and blind spots', () => {
+  const text = readText(join(HERE, 'references/batch.md'))
+  assert.ok(text.includes('dispatch-batch: WARNING surface-unmeasured: lane=<name> commits=unmeasured reason=<reason>'))
+  assert.ok(text.includes('old-committer-date'))
+  assert.equal(text.includes('old-author-date'), false)
+  assert.ok(text.includes('dispatch intentionally does not fetch'))
+  for (const state of ['surface-moved=1', 'surface-moved=0', 'surface-moved=unmeasured']) {
+    assert.ok(text.includes(state), `batch.md must pin the summary state ${state}`)
+  }
+  for (const reason of ['scope-entry-invalid', 'base-commit-not-immutable', 'request-stat-unreadable', 'fence-surface-absent', 'probe-timeout']) {
+    assert.ok(text.includes(reason), `batch.md must name the closed unmeasured reason ${reason}`)
+  }
+  assert.ok(text.includes('never refuses'))
+})
+
 test('B1 fixture retains an absolute same-basename collision', () => {
   const source = readText(join(ROOT, 'test/factory-dispatch-batch.test.mjs'))
   assert.ok(source.includes("readFileSync('/tmp/crew-task/planner.md', 'utf8')"))

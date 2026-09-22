@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { appendFileSync as fsAppendFileSync, existsSync as fsExistsSync, mkdirSync, readFileSync, readdirSync as fsReaddirSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync as fsAppendFileSync, existsSync as fsExistsSync, mkdirSync, readFileSync, readdirSync as fsReaddirSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
@@ -53,6 +53,7 @@ import {
   REQUEST_SUFFIX,
   SEAT_FIELDS,
   STALE_READ_ACK,
+  SURFACE_SCAN_TIMEOUT_MS,
   SYMBOL_FANOUT_LIMIT,
   TEST_REACH_BLIND_SPOT,
   TEST_REACH_DEPTH,
@@ -134,13 +135,14 @@ import {
   readRegister,
   resolveRequestedExecution,
   resolveRequestedTier,
+  scanSurfaceMovement,
 } from '../scripts/factory/dispatch-batch.mjs'
 import { parseDirectedBrief, validateChunks, WAITS_S } from '../crew/drive.mjs'
 import { promptSurfacePaths } from '../crew/protected-paths.mjs'
 import { openLedger } from '../scripts/factory/ledger.mjs'
 import { partitionShifts } from '../skills/qa-test-writing/anchor-pin.mjs'
 import { crossCheckCoupling, discoverTripwires, laneFenceFor, renderBrief, resolveWriteSurface, verifyWhere, writePack } from '../scripts/factory/make-brief.mjs'
-import { scratchDir } from './helpers.mjs'
+import { git, scratchDir } from './helpers.mjs'
 
 test('E1 journals sourced admissions and refuses an unsourced admission', async () => {
   for (const source of [undefined, 'unknown']) {
@@ -1633,6 +1635,304 @@ test('readBatch excludes unsafe authored request values from authority', () => {
   const [lane] = readBatch({ batchDir: batch, checkout: root })
   assert.deepEqual(lane.where, ['crew/drive.mjs'])
   assert.equal(lane.scope_observations.some(({ field, reason }) => field === 'where' && reason === 'scope-entry-invalid'), true)
+})
+
+function surfaceLane(name, where, extra = {}) {
+  return {
+    lane: name,
+    where: [...where],
+    authored_request: { ask: `measure ${name} surface behavior`, where: [...where], done_means: 'done', out_of_scope: 'none' },
+    scope_observations: [],
+    ...extra,
+  }
+}
+
+function surfaceRepo(label, files = { 'surface/owned.mjs': 'export const OWNED = 1\n' }) {
+  const dir = join(root, `surface-${label}-${Math.random().toString(36).slice(2)}`)
+  mkdirSync(dir, { recursive: true })
+  for (const [file, body] of Object.entries(files)) put(join(dir, file), body)
+  const init = spawnSync('git', ['init', '-b', 'main', dir], { encoding: 'utf8' })
+  assert.equal(init.status, 0, init.stderr)
+  git(dir, 'add', '-A')
+  git(dir, 'commit', '-m', 'surface base')
+  return dir
+}
+
+function withSurfaceDates(dates, fn) {
+  const prevAuthor = process.env.GIT_AUTHOR_DATE
+  const prevCommitter = process.env.GIT_COMMITTER_DATE
+  const apply = (key, value) => {
+    if (value === undefined) return
+    if (value === null) delete process.env[key]
+    else process.env[key] = value
+  }
+  try {
+    apply('GIT_AUTHOR_DATE', dates.author)
+    apply('GIT_COMMITTER_DATE', dates.committer)
+    return fn()
+  } finally {
+    if (prevAuthor === undefined) delete process.env.GIT_AUTHOR_DATE
+    else process.env.GIT_AUTHOR_DATE = prevAuthor
+    if (prevCommitter === undefined) delete process.env.GIT_COMMITTER_DATE
+    else process.env.GIT_COMMITTER_DATE = prevCommitter
+  }
+}
+
+test('A1 surface movement requires a complete scan of every declared where entry', () => {
+  const cases = [
+    { where: ['src/*'], label: 'glob' },
+    { where: [123], label: 'non-string' },
+    { where: ['../unsafe.mjs'], label: 'traversal' },
+    { where: ['/tmp/unsafe.mjs'], label: 'absolute' },
+    { where: ['crew/owned.mjs', '../unsafe.mjs'], label: 'partial-drop' },
+  ]
+  for (const { where, label } of cases) {
+    const spawns = []
+    const movement = scanSurfaceMovement({
+      lane: surfaceLane(`a1-${label}`, where),
+      checkout: root,
+      deps: { spawn: (call) => { spawns.push(call); return { status: 0, stdout: '', stderr: '' } }, log: () => {} },
+    })
+    assert.deepEqual(movement, { lane: `a1-${label}`, commits: null, moved: null, reason: 'scope-entry-invalid', basis: null })
+    assert.equal(spawns.length, 0, `invalid ${label} entry must fail closed before any git probe`)
+  }
+  const dropped = scanSurfaceMovement({
+    lane: {
+      ...surfaceLane('a1-dropped', ['crew/owned.mjs']),
+      scope_observations: [{ kind: 'scope-entry', field: 'where', index: 1, authored: '../unsafe.mjs', reason: 'scope-entry-invalid' }],
+    },
+    checkout: root,
+    deps: { log: () => {} },
+  })
+  assert.equal(dropped.reason, 'scope-entry-invalid')
+  assert.equal(dropped.moved, null)
+  const seen = []
+  const span = scanSurfaceMovement({
+    lane: surfaceLane('a1-span', ['surface/owned.mjs:1-2']),
+    checkout: root,
+    deps: {
+      statSync: () => ({ mtime: new Date('2026-01-01T00:00:00.000Z') }),
+      spawn: (call) => {
+        seen.push(call)
+        const args = (call.args || []).map(String)
+        if (args[0] === 'rev-parse') return { status: 0, stdout: `${'t'.repeat(40)}\n`, stderr: '' }
+        if (args[0] === 'rev-list') return { status: 0, stdout: `${'b'.repeat(40)}\n`, stderr: '' }
+        if (args[0] === 'log') return { status: 0, stdout: '', stderr: '' }
+        return { status: 1, stdout: '', stderr: '' }
+      },
+      log: () => {},
+    },
+  })
+  assert.deepEqual(span, { lane: 'a1-span', commits: [], moved: false, reason: null, basis: 'request-mtime' })
+  const logged = seen.find((call) => (call.args || [])[0] === 'log')
+  assert.ok(logged, 'a valid span must reach the graph range as its file path')
+  assert.equal(logged.args.includes('surface/owned.mjs'), true)
+  const checkout = surfaceRepo('a1')
+  const batch = makeBatch(['a1-lane'])
+  put(join(batch, `a1-lane${REQUEST_SUFFIX}`), JSON.stringify({ ...request('retain the valid scope', ['crew/drive.mjs']), where: ['src/*'] }))
+  const [lane] = readBatch({ batchDir: batch, checkout })
+  const logs = []
+  checkFences({
+    fences: [entry('a1-lane', ['surface/owned.mjs'])],
+    lanes: [lane],
+    checkout,
+    outDir: join(checkout, 'a1-out'),
+    deps: { home: join(root, 'a1-home'), log: (line) => logs.push(String(line)) },
+  })
+  const summary = logs.find((line) => line.startsWith('dispatch-batch: WARNING-SUMMARY '))
+  assert.ok(summary)
+  assert.equal(summary.includes('surface-moved=unmeasured'), true)
+})
+
+test('B1 graph range warns for a commit touching the declared where path', () => {
+  const dir = surfaceRepo('b1')
+  const target = 'surface/owned.mjs'
+  const other = 'surface/other.mjs'
+  const base = git(dir, 'rev-parse', 'HEAD').trim()
+  put(join(dir, target), 'export const OWNED = 2\n')
+  git(dir, 'add', '-A')
+  git(dir, 'commit', '-m', 'relevant change')
+  const relevant = git(dir, 'rev-parse', '--short', 'HEAD').trim()
+  put(join(dir, other), 'export const OTHER = 1\n')
+  git(dir, 'add', '-A')
+  git(dir, 'commit', '-m', 'irrelevant change')
+  const irrelevant = git(dir, 'rev-parse', '--short', 'HEAD').trim()
+  assert.notEqual(relevant, irrelevant)
+  const movement = scanSurfaceMovement({
+    lane: { ...surfaceLane('b1-lane', [target]), base_commit: base },
+    checkout: dir,
+  })
+  assert.equal(movement.reason, null)
+  assert.equal(movement.moved, true)
+  assert.equal(movement.basis, 'base-commit')
+  assert.deepEqual(movement.commits, [relevant])
+})
+
+test('C1 timestamp fallback finds an old-committer-date side commit on the same path', () => {
+  const dir = join(root, `surface-c1-${Math.random().toString(36).slice(2)}`)
+  mkdirSync(dir, { recursive: true })
+  const target = 'surface/owned.mjs'
+  put(join(dir, target), 'export const OWNED = 1\nexport const MIDDLE = 0\nexport const EXTRA = 0\n')
+  const init = spawnSync('git', ['init', '-b', 'main', dir], { encoding: 'utf8' })
+  assert.equal(init.status, 0, init.stderr)
+  withSurfaceDates({ author: '2020-01-01T00:00:00+00:00', committer: '2020-01-01T00:00:00+00:00' }, () => {
+    git(dir, 'add', '-A')
+    git(dir, 'commit', '-m', 'base')
+  })
+  git(dir, 'checkout', '-b', 'side')
+  put(join(dir, target), 'export const OWNED = 1\nexport const MIDDLE = 0\nexport const EXTRA = 2\n')
+  withSurfaceDates({ author: '2020-02-01T00:00:00+00:00', committer: '2019-01-01T00:00:00+00:00' }, () => {
+    git(dir, 'add', '-A')
+    git(dir, 'commit', '-m', 'side change with an old committer date')
+  })
+  const side = git(dir, 'rev-parse', '--short', 'HEAD').trim()
+  git(dir, 'checkout', 'main')
+  put(join(dir, target), 'export const OWNED = 3\nexport const MIDDLE = 0\nexport const EXTRA = 0\n')
+  withSurfaceDates({ author: '2020-06-01T00:00:00+00:00', committer: '2020-06-01T00:00:00+00:00' }, () => {
+    git(dir, 'add', '-A')
+    git(dir, 'commit', '-m', 'main advance')
+  })
+  const requestPath = join(dir, 'lane-c1.request.json')
+  put(requestPath, JSON.stringify('pending'))
+  const mtime = new Date('2021-01-01T00:00:00.000Z')
+  utimesSync(requestPath, mtime, mtime)
+  withSurfaceDates({ author: '2022-01-01T00:00:00+00:00', committer: '2022-01-01T00:00:00+00:00' }, () => {
+    git(dir, 'merge', 'side', '-m', 'merge side')
+  })
+  const movement = scanSurfaceMovement({
+    lane: { ...surfaceLane('c1-lane', [target]), requestPath },
+    checkout: dir,
+  })
+  assert.equal(movement.reason, null)
+  assert.equal(movement.moved, true)
+  assert.equal(movement.basis, 'request-mtime')
+  assert.equal(movement.commits.includes(side), true)
+})
+
+test('D1 mutable base commit is unmeasured and never clean', () => {
+  const dir = surfaceRepo('d1')
+  const movement = scanSurfaceMovement({
+    lane: { ...surfaceLane('d1-lane', ['surface/owned.mjs']), base_commit: 'main' },
+    checkout: dir,
+  })
+  assert.deepEqual(movement, { lane: 'd1-lane', commits: null, moved: null, reason: 'base-commit-not-immutable', basis: null })
+})
+
+test('E1 unmeasured warning states only its closed reason', () => {
+  const dir = surfaceRepo('e1')
+  const lane = { ...surfaceLane('e1-lane', ['surface/owned.mjs']), requestPath: join(dir, 'missing.request.json') }
+  const logs = []
+  const report = checkFences({
+    fences: [entry('e1-lane', ['surface/owned.mjs'])],
+    lanes: [lane],
+    checkout: dir,
+    outDir: join(dir, 'e1-out'),
+    deps: { home: join(root, 'e1-home'), log: (line) => logs.push(String(line)) },
+  })
+  const warning = report.warnings.find(({ kind }) => kind === 'surface-unmeasured')
+  assert.ok(warning)
+  assert.equal(warning.text, 'dispatch-batch: WARNING surface-unmeasured: lane=e1-lane commits=unmeasured reason=request-stat-unreadable')
+  assert.equal(warning.text.includes('where changed'), false)
+  assert.equal(warning.text.includes('request-mtime'), false)
+  const persisted = JSON.parse(readFileSync(join(dir, 'e1-out', FENCE_REPORT_FILE), 'utf8'))
+  assert.deepEqual(persisted.lanes[0].surface_movement, { lane: 'e1-lane', commits: null, moved: null, reason: 'request-stat-unreadable', basis: null })
+})
+
+test('F1 summary distinguishes unmeasured from measured clean', () => {
+  const dir = surfaceRepo('f1')
+  const target = 'surface/owned.mjs'
+  const base = git(dir, 'rev-parse', 'HEAD').trim()
+  const lanes = [
+    { ...surfaceLane('f1-clean', [target]), base_commit: base },
+    surfaceLane('f1-unmeasured', ['src/*']),
+  ]
+  const logs = []
+  checkFences({
+    fences: [entry('f1-clean', [target]), entry('f1-unmeasured', [target])],
+    lanes,
+    checkout: dir,
+    outDir: join(dir, 'f1-out'),
+    deps: { home: join(root, 'f1-home'), log: (line) => logs.push(String(line)) },
+  })
+  const clean = logs.find((line) => line.startsWith('dispatch-batch: WARNING-SUMMARY lane=f1-clean '))
+  const unmeasured = logs.find((line) => line.startsWith('dispatch-batch: WARNING-SUMMARY lane=f1-unmeasured '))
+  assert.ok(clean)
+  assert.ok(unmeasured)
+  assert.equal(clean.includes('surface-moved=0'), true)
+  assert.equal(unmeasured.includes('surface-moved=unmeasured'), true)
+})
+
+test('surface movement without an on-disk fence surface is unmeasured, never clean', () => {
+  const dir = surfaceRepo('rv12')
+  const lane = surfaceLane('rv12-lane', ['surface/owned.mjs'])
+  const logs = []
+  const spawned = []
+  const report = checkFences({
+    fences: [entry('rv12-lane', ['surface/not-yet-created.mjs'])],
+    lanes: [lane],
+    checkout: dir,
+    outDir: join(dir, 'rv12-out'),
+    deps: {
+      home: join(root, 'rv12-home'),
+      log: (line) => logs.push(String(line)),
+      spawn: (call) => { spawned.push(call); return { status: 0, stdout: '', stderr: '' } },
+    },
+  })
+  assert.deepEqual(spawned.filter(({ file, args }) => file === 'git' && (args || []).includes('--end-of-options')), [])
+  const warning = report.warnings.find(({ kind }) => kind === 'surface-unmeasured')
+  assert.ok(warning)
+  assert.equal(warning.text, 'dispatch-batch: WARNING surface-unmeasured: lane=rv12-lane commits=unmeasured reason=fence-surface-absent')
+  const persisted = JSON.parse(readFileSync(join(dir, 'rv12-out', FENCE_REPORT_FILE), 'utf8'))
+  assert.deepEqual(persisted.lanes[0].surface_movement, { lane: 'rv12-lane', commits: null, moved: null, reason: 'fence-surface-absent', basis: null })
+  const summary = logs.find((line) => line.startsWith('dispatch-batch: WARNING-SUMMARY '))
+  assert.ok(summary)
+  assert.equal(summary.includes('surface-moved=unmeasured'), true)
+})
+
+test('G1 run option preflight precedes surface movement git probes', async () => {
+  const batch = makeBatch(['g1-lane'])
+  const spawned = []
+  const error = await dispatchBatch({
+    batchDir: batch,
+    fences: [entry('g1-lane', ['crew/drive.mjs'])],
+    checkout: repoRoot,
+    parentDir: root,
+    outDir: join(root, 'g1-out'),
+    tier: 'mechanical',
+    variant: 'full',
+    runFlags: { 'plan-rounds': '0' },
+    deps: {
+      home: root,
+      env: { DEVTEAM_LEDGER_DIR: root },
+      spawn: (call) => { spawned.push(call); return { status: 0, stdout: '', stderr: '' } },
+      log: () => {},
+    },
+  }).then(() => null, (err) => err)
+  assert.ok(error instanceof BatchRefusal)
+  assert.equal(error.reason, 'run-failed')
+  const surfaceProbes = spawned.filter(({ file, args }) => file === 'git' && (args || []).includes('--end-of-options'))
+  assert.deepEqual(surfaceProbes, [])
+})
+
+test('H1 stalled git probes time out to a closed unmeasured reason', () => {
+  const calls = []
+  const timeoutError = new Error('spawnSync timed out')
+  timeoutError.code = 'ETIMEDOUT'
+  const movement = scanSurfaceMovement({
+    lane: { ...surfaceLane('h1-lane', ['surface/owned.mjs']), base_commit: 'a'.repeat(40) },
+    checkout: root,
+    deps: {
+      spawn: (call) => {
+        calls.push(call)
+        return { status: null, signal: 'SIGTERM', stdout: '', stderr: '', error: timeoutError }
+      },
+      log: () => {},
+    },
+  })
+  assert.ok(calls.length > 0)
+  assert.equal(calls.every((call) => call.file === 'git' && call.timeout === SURFACE_SCAN_TIMEOUT_MS), true)
+  assert.equal(SURFACE_SCAN_TIMEOUT_MS, 5000)
+  assert.deepEqual(movement, { lane: 'h1-lane', commits: null, moved: null, reason: 'probe-timeout', basis: null })
 })
 
 test('checkFences permits overlap across dependency edges', () => {
@@ -3875,7 +4175,7 @@ test('briefMeasure reports UTF-8 bytes and the largest section, or null', () => 
 
 test('normalDeps supplies the house-style dependency surface', () => {
   const deps = normalDeps({})
-  assert.deepEqual(Object.keys(deps).sort(), ['appendFileSync', 'assertQuiet', 'env', 'existsSync', 'home', 'log', 'mkdirSync', 'now', 'random', 'readFileSync', 'readdirSync', 'sleep', 'slots', 'spawn', 'spawnAsync', 'writeFileSync'])
+  assert.deepEqual(Object.keys(deps).sort(), ['appendFileSync', 'assertQuiet', 'env', 'existsSync', 'home', 'log', 'mkdirSync', 'now', 'random', 'readFileSync', 'readdirSync', 'sleep', 'slots', 'spawn', 'spawnAsync', 'statSync', 'writeFileSync'])
 })
 
 test('C1 an unacknowledged read does not stop batch dispatch', async () => {
@@ -5007,12 +5307,12 @@ test('an unflagged no-edges dispatch adds no wave output and reports empty defer
   assert.deepEqual(result.report.unstarted, [])
 
   const dry = await dispatchFixture({ label: 'no-edges-dry-run', runFlags: { 'dry-run': true } })
-  assert.deepEqual(dry.logs.filter((line) => !line.startsWith('dispatch-batch: WARNING-SUMMARY ') && !line.startsWith('dispatch-batch: turn-budget ')), [
+  assert.deepEqual(dry.logs.filter((line) => !line.startsWith('dispatch-batch: WARNING-SUMMARY ') && !line.startsWith('dispatch-batch: turn-budget ') && !line.startsWith('dispatch-batch: WARNING surface-')), [
     JSON.stringify({ dispatch: 'dry-run', plans: dry.report.plans }),    'dispatch-batch: dry-run lane=lane-a tier=mechanical seats=none seats_from=none',
     'dispatch-batch: dry-run lane=lane-b tier=mechanical seats=none seats_from=none',
     DRY_RUN_BLIND_SPOT,
   ])
-  assert.equal(dry.logs.filter((line) => !line.startsWith('dispatch-batch: WARNING-SUMMARY ') && !line.startsWith('dispatch-batch: turn-budget '))[0].startsWith('{"dispatch":"dry-run","plans":['), true)
+  assert.equal(dry.logs.filter((line) => !line.startsWith('dispatch-batch: WARNING-SUMMARY ') && !line.startsWith('dispatch-batch: turn-budget ') && !line.startsWith('dispatch-batch: WARNING surface-'))[0].startsWith('{"dispatch":"dry-run","plans":['), true)
   assert.equal(dry.report.waves.length, 1)
   assert.deepEqual(dry.report.deferred, [])
   assert.deepEqual(dry.report.unstarted, [])

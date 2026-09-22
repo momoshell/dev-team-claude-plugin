@@ -1,11 +1,11 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, readdirSync } from 'node:fs'
+import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { ROOT } from '../../test/helpers.mjs'
-import { checkSkillAnchors, pinnedKey } from '../qa-test-writing/anchor-pin.mjs'
+import { ROOT, scratchDir } from '../../test/helpers.mjs'
+import { checkAnchorManifests, checkSkillAnchors, pinnedKey } from '../qa-test-writing/anchor-pin.mjs'
 
 const HERE = fileURLToPath(new URL('./', import.meta.url))
 const MANIFEST = join(HERE, 'anchors.json')
@@ -489,9 +489,99 @@ test('J1', () => {
     assert.equal(lines.filter((candidate) => candidate.includes(expected)).length, 1, `${rel}:${line} expected text must occur exactly once`)
     assert.ok(lines[line - 1].includes(expected), `${rel}:${line} does not carry the claimed content`)
   }
-  const out = execFileSync(process.execPath, [join(ROOT, 'skills/qa-test-writing/anchor-pin.mjs'), '--check', 'skills'], { cwd: ROOT, encoding: 'utf8' })
-  const finalLine = out.trim().split('\n').pop().trim()
-  assert.ok(finalLine.endsWith('rot 0, ambiguous 0, moved 0, unverified 0'), `anchor check must stay clean, got: ${finalLine}`)
+})
+
+// The repository root sweep carries ten manifests at HEAD: nine under skills/
+// plus one outside it. The floor stays a lower bound so an eleventh manifest
+// remains green while a regression to the skills-only nine goes red.
+const MANIFEST_FLOOR = 10
+const CLEAN_SUMMARY_SUFFIX = 'rot 0, ambiguous 0, moved 0, unverified 0'
+
+function isCleanSummary(summary) {
+  return summary.endsWith(CLEAN_SUMMARY_SUFFIX)
+}
+
+function parseManifestCount(summary) {
+  const match = /across (\d+) manifests/.exec(summary)
+  assert.ok(match, `summary must name a manifest count, got: ${summary}`)
+  return Number(match[1])
+}
+
+function assertManifestFloor(summary) {
+  assert.equal(isCleanSummary(summary), true, `anchor check must stay clean, got: ${summary}`)
+  const manifestCount = parseManifestCount(summary)
+  assert.ok(manifestCount >= MANIFEST_FLOOR, `anchor sweep must cover at least ${MANIFEST_FLOOR} manifests, got: ${summary}`)
+}
+
+// A pinned directory is a notes.md citing one anchor plus its anchors.json.
+// The target file carries the cited line so the pin resolves as clean.
+function writePinFixture(root, { dir, targetRel, targetContent, cite, manifest }) {
+  const fixtureDir = join(root, dir)
+  mkdirSync(fixtureDir, { recursive: true })
+  if (targetRel) {
+    mkdirSync(join(root, targetRel.split('/').slice(0, -1).join('/')), { recursive: true })
+    writeFileSync(join(root, targetRel), targetContent)
+  }
+  writeFileSync(join(fixtureDir, 'notes.md'), `# fixture\n\nExhibit: \`${cite}\`.\n`)
+  writeFileSync(join(fixtureDir, 'anchors.json'), JSON.stringify(manifest, null, 2))
+}
+
+function captureLog() {
+  const lines = []
+  const log = (line) => { lines.push(String(line)) }
+  return { lines, log }
+}
+
+// Mutation killed: narrowing the sweep back to skills drops the count to nine.
+test('pin-sweep A1', () => {
+  const checkArgs = ['--check', '.']
+  const out = execFileSync(process.execPath, [join(ROOT, 'skills/qa-test-writing/anchor-pin.mjs'), ...checkArgs], { cwd: ROOT, encoding: 'utf8' })
+  const summary = out.trim().split('\n').pop().trim()
+  assertManifestFloor(summary)
+})
+
+// Mutation killed: an equality floor rejects the eleventh manifest.
+test('pin-sweep B1', () => {
+  const root = scratchDir('b904-pin-sweep-b1-')
+  for (let index = 0; index < MANIFEST_FLOOR + 1; index += 1) {
+    writePinFixture(root, { dir: `manifest-${index}`, cite: 'no citations here', manifest: {} })
+  }
+  const { lines, log } = captureLog()
+  const status = checkAnchorManifests({ root, scanRoot: root, log })
+  assert.equal(status, 0)
+  assertManifestFloor(lines.at(-1).trim())
+})
+
+// Mutation killed: scanning only scratch skills/ hides the outside rot.
+test('pin-sweep C1', () => {
+  const fxRoot = scratchDir('b904-pin-sweep-c1-')
+  const cleanExpected = `const CLEAN = 'clean-distinctive-sentinel-value'`
+  writePinFixture(fxRoot, {
+    dir: 'skills/clean',
+    targetRel: 'skills/clean/target.mjs',
+    targetContent: `fixture header line\n${cleanExpected}\nexport default CLEAN\n`,
+    cite: 'skills/clean/target.mjs:2',
+    manifest: { 'skills/clean/target.mjs:2': cleanExpected },
+  })
+  const rottedExpected = `const ROTTED = 'rotted-distinctive-sentinel-value'`
+  writePinFixture(fxRoot, {
+    dir: 'docs/rotten',
+    targetRel: 'docs/rotten/target.mjs',
+    targetContent: `fixture header line\nconst OTHER = 'entirely-different-target-content'\nexport default OTHER\n`,
+    cite: 'docs/rotten/target.mjs:2',
+    manifest: { 'docs/rotten/target.mjs:2': rottedExpected },
+  })
+  const fx = { root: fxRoot }
+  const { lines, log } = captureLog()
+  const status = checkAnchorManifests({ root: fx.root, scanRoot: fx.root, log })
+  assert.equal(status, 1)
+  assert.match(lines.at(-1), /rot [1-9]/)
+})
+
+// Mutation killed: accepting unverified 1 as clean hides unclassifiable pins.
+test('pin-sweep D1', () => {
+  assert.equal(isCleanSummary('checked 259 pins across 10 manifests: rot 0, ambiguous 0, moved 0, unverified 0'), true)
+  assert.equal(isCleanSummary('checked 259 pins across 10 manifests: rot 0, ambiguous 0, moved 0, unverified 1'), false)
 })
 
 // Guard for RV1-1: editing the register's denominator sentence reddens this test.

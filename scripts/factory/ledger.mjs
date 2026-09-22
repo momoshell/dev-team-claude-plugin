@@ -6963,6 +6963,127 @@ function effectiveTermToKillMs() {
   return Math.min(n, TERM_TO_KILL_MS)
 }
 
+// ---------------------------------------------------------------------------
+// settle helper — operator-invoked CLI verb only, never a convenience
+// library export. It settles a `running` session as operator-aborted only
+// after proving the linked driver PID is gone with a conservative signal-0
+// probe: a successful probe or EPERM is alive, only ESRCH is gone, and every
+// other outcome (missing/malformed/unreadable/interrupted/unknown) is
+// unknown and refuses. It never touches the retired process table.
+// ---------------------------------------------------------------------------
+
+function settleDriverState(pid) {
+  try {
+    process.kill(pid, 0)
+    return 'alive'
+  } catch (error) {
+    const code = error?.code
+    if (code === 'EPERM') return 'alive'
+    if (code === 'ESRCH') return 'gone'
+    return 'unknown'
+  }
+}
+
+function settleCandidateDirs(crewDir) {
+  const dirs = []
+  if (typeof crewDir === 'string' && crewDir) dirs.push(crewDir)
+  try {
+    const base = parse(crewDir).base
+    const parent = dirname(crewDir)
+    for (const entry of readdirSync(parent)) {
+      if (entry.startsWith(`${base}.archive-`)) dirs.push(join(parent, entry))
+    }
+  } catch {
+    // lean: an unreadable parent degrades archive discovery to the live path; the probe below still refuses unless death is proven.
+  }
+  return dirs
+}
+
+function settleSidecarAdwId(dir) {
+  try {
+    const sidecar = JSON.parse(readFileSync(join(dir, 'ledger', 'run.json'), 'utf8'))
+    return typeof sidecar?.adw_id === 'string' ? sidecar.adw_id : null
+  } catch {
+    return null
+  }
+}
+
+function settlePidState(dir) {
+  let raw = null
+  try {
+    raw = readFileSync(join(dir, 'run.pid'), 'utf8')
+  } catch (error) {
+    if (error?.code !== 'ENOENT') return { state: 'unknown', pid: null }
+    try {
+      raw = readFileSync(join(dir, 'ledger', 'run.pid'), 'utf8')
+    } catch {
+      return { state: 'unknown', pid: null }
+    }
+  }
+  const text = typeof raw === 'string' ? raw.trim() : ''
+  if (!/^\d+$/.test(text)) return { state: 'unknown', pid: null }
+  const pid = Number(text)
+  if (!Number.isSafeInteger(pid) || pid <= 1) return { state: 'unknown', pid: null }
+  return { state: settleDriverState(pid), pid }
+}
+
+function settleVerb(ledger, { adwId, reasonInput }, stdout, stderr) {
+  if (typeof reasonInput !== 'string' || reasonInput.trim() === '') {
+    stderr.write('ledger settle: requires --reason <text>\n')
+    return 2
+  }
+  const reason = reasonInput.trim()
+  if (reason.length > TIER_MAX_CHARS) {
+    stderr.write(`ledger settle: refused — --reason must be at most ${TIER_MAX_CHARS} characters (got ${reason.length})\n`)
+    return 2
+  }
+  let session = ledger.getSession(adwId)
+  if (session === null) {
+    stderr.write(`ledger settle: refused — no session for adw_id ${adwId}\n`)
+    return 2
+  }
+  const links = ledger.dumpTable('run_links').filter((row) => row.adw_id === adwId)
+  const candidates = []
+  for (const link of links) {
+    for (const dir of settleCandidateDirs(link.crew_dir)) {
+      if (settleSidecarAdwId(dir) === adwId) candidates.push(dir)
+    }
+  }
+  let driverState = 'unknown'
+  let driverPid = null
+  if (candidates.length > 0) {
+    driverState = 'gone'
+    for (const dir of candidates) {
+      const probe = settlePidState(dir)
+      if (probe.state !== 'gone') {
+        driverState = probe.state
+        driverPid = probe.pid
+        break
+      }
+    }
+  }
+  if (driverState !== 'gone') {
+    if (driverState === 'alive') {
+      stderr.write(`ledger settle: refused — driver is still alive (pid ${driverPid})\n`)
+    } else {
+      stderr.write('ledger settle: refused — driver death could not be proven\n')
+    }
+    return 2
+  }
+  session = ledger.getSession(adwId)
+  if (session === null) {
+    stderr.write(`ledger settle: refused — no session for adw_id ${adwId}\n`)
+    return 2
+  }
+  if (session.status !== 'running') {
+    stderr.write(`ledger settle: refused — session ${adwId} is not running (status=${session.status})\n`)
+    return 2
+  }
+  ledger.endSession({ adw_id: adwId, status: 'aborted', outcome: 'aborted', terminal_reason: reason, terminal_actor: 'operator' })
+  stdout.write(`${JSON.stringify({ adw_id: adwId, status: 'aborted', outcome: 'aborted', terminal_reason: reason, terminal_actor: 'operator' })}\n`)
+  return 0
+}
+
 function killVerb(ledger, { adwId, pid, yes }, stdout, stderr) {
   if (!adwId || !pid || !yes) {
     stderr.write('ledger kill: requires --adw-id, --pid and --yes\n')
@@ -7061,6 +7182,7 @@ const VERB_FLAGS = Object.freeze({
   'advisor-ab': new Set(['run-dir', 'run-started-at', 'adjudications']),
   doctor: new Set([]),
   kill: new Set(['adw-id', 'pid', 'yes']),
+  settle: new Set(['reason']),
 })
 
 // parseArgs collects every `--name` it sees; this is the one place that decides
@@ -7578,7 +7700,7 @@ export function main(argv) {
   try {
     const { verb, positional, flags } = parseArgs(argv)
     if (!verb) {
-      refuse('a verb is required: sessions | phases | tail | procs | gate-review-gap | chunk-progress <parent_lane> [--chunk <id>] | eligible-tasks | phantom-sessions | run-set --since <iso> [--until <iso>] | configurations [--since <iso>] [--until <iso>] | cell-failures [--since <iso>] [--until <iso>] | cells [--since <iso>] [--until <iso>] [--prices <path>] | evals --bench <sha> [--prices <path>] | modifier-attempts [--since <iso>] [--until <iso>] | seat-teardowns [--since <iso>] [--until <iso>] | escalations --since <iso> [--until <iso>] | ci-cycles [--since <iso>] [--until <iso>] | intake-sweeps [--since <iso>] [--until <iso>] | journal-facts [--since <iso>] [--until <iso>] | screener-adoptions [--since <iso>] [--until <iso>] | turns [--since <iso>] [--until <iso>] | task | request <adw_id> --from-brief <path> | advisor-ab --run-dir <dir> --run-started-at <iso|ms> --adjudications <path> <dispatch-id>… | doctor | kill')
+      refuse('a verb is required: sessions | phases | tail | procs | gate-review-gap | chunk-progress <parent_lane> [--chunk <id>] | eligible-tasks | phantom-sessions | run-set --since <iso> [--until <iso>] | configurations [--since <iso>] [--until <iso>] | cell-failures [--since <iso>] [--until <iso>] | cells [--since <iso>] [--until <iso>] [--prices <path>] | evals --bench <sha> [--prices <path>] | modifier-attempts [--since <iso>] [--until <iso>] | seat-teardowns [--since <iso>] [--until <iso>] | escalations --since <iso> [--until <iso>] | ci-cycles [--since <iso>] [--until <iso>] | intake-sweeps [--since <iso>] [--until <iso>] | journal-facts [--since <iso>] [--until <iso>] | screener-adoptions [--since <iso>] [--until <iso>] | turns [--since <iso>] [--until <iso>] | task | request <adw_id> --from-brief <path> | advisor-ab --run-dir <dir> --run-started-at <iso|ms> --adjudications <path> <dispatch-id>… | doctor | kill | settle <adw-id> --reason <text>')
     }
 
     // TEST SEAM: DEVTEAM_LEDGER_FAKE_NODE_VERSION substitutes for
@@ -8479,6 +8601,14 @@ export function main(argv) {
       }
       stderr.write('ledger: doctor readout printed above\n')
       return 0
+    }
+
+    if (verb === 'settle') {
+      if (positional.length !== 1 || !positional[0]) {
+        stderr.write('ledger settle: requires exactly one <adw-id> positional argument\n')
+        return 2
+      }
+      return settleVerb(ledger, { adwId: positional[0], reasonInput: flags.reason }, stdout, stderr)
     }
 
     if (verb === 'kill') {

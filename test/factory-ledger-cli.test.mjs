@@ -483,3 +483,149 @@ test('phantom-sessions CLI refuses malformed input and a degraded mirror', { ski
   assert.equal(degraded.status, 2, degraded.stderr)
   assert.match(degraded.stderr, /unanswerable/)
 })
+
+// ---------------------------------------------------------------------------
+// settle verb: refusal-gated operator settlement of a running session whose
+// linked driver PID is proven gone via run_links sidecars (A1-H1).
+// ---------------------------------------------------------------------------
+
+function settleSeedDb(adwId, crewDir) {
+  const dir = nextDir()
+  const dbPath = join(dir, 'ledger.db')
+  const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+  try {
+    ledger.startSession({ adw_id: adwId, repo_slug: 'r', task_slug: 'settle' })
+    ledger.linkRun({ run_id: `run-${adwId}`, adw_id: adwId, crew_dir: crewDir })
+  } finally {
+    ledger.close()
+  }
+  return dbPath
+}
+
+function settleWriteSidecar(crewDir, adwId, pid) {
+  mkdirSync(join(crewDir, 'ledger'), { recursive: true })
+  writeFileSync(join(crewDir, 'ledger', 'run.json'), JSON.stringify({ adw_id: adwId }))
+  writeFileSync(join(crewDir, 'run.pid'), `${pid}\n`)
+}
+
+function settleReadSession(dbPath, adwId) {
+  const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+  try {
+    return ledger.getSession(adwId)
+  } finally {
+    ledger.close()
+  }
+}
+
+async function settleGonePid() {
+  const child = spawn(process.execPath, ['-e', 'process.exit(0)'], { stdio: 'ignore' })
+  await new Promise((resolve) => child.on('close', resolve))
+  return child.pid
+}
+
+test('A1', async () => {
+  const adwId = 'settle-a1-archived'
+  const parent = scratchDir('settle-a1-')
+  const live = join(parent, 'crew-a1')
+  const archived = `${live}.archive-2026-09-02T00-00-00-000Z`
+  settleWriteSidecar(archived, adwId, await settleGonePid())
+  const dbPath = settleSeedDb(adwId, live)
+  const res = run(['settle', adwId, '--reason', 'driver SIGKILLED after teardown'], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(res.status, 0, res.stderr)
+  assert.equal(JSON.parse(res.stdout).status, 'aborted')
+  const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+  try {
+    assert.deepEqual(ledger.dumpTable('processes'), [])
+    const session = ledger.getSession(adwId)
+    assert.equal(session.status, 'aborted')
+    assert.equal(session.outcome, 'aborted')
+    assert.equal(session.terminal_reason, 'driver SIGKILLED after teardown')
+  } finally {
+    ledger.close()
+  }
+})
+
+test('B1', async () => {
+  const adwId = 'settle-b1-live'
+  const crewDir = scratchDir('settle-b1-')
+  const child = trackChild(spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }))
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    settleWriteSidecar(crewDir, adwId, child.pid)
+    const dbPath = settleSeedDb(adwId, crewDir)
+    const before = settleReadSession(dbPath, adwId)
+    const res = run(['settle', adwId, '--reason', 'attempt while live'], { DEVTEAM_LEDGER_DB: dbPath })
+    assert.equal(res.status, 2, res.stdout)
+    assert.match(res.stderr, /still alive/)
+    assert.deepEqual(settleReadSession(dbPath, adwId), before)
+    assert.doesNotThrow(() => process.kill(child.pid, 0))
+  } finally {
+    child.kill('SIGKILL')
+  }
+})
+
+test('C1', async () => {
+  const adwId = 'settle-c1-actor'
+  const crewDir = scratchDir('settle-c1-')
+  settleWriteSidecar(crewDir, adwId, await settleGonePid())
+  const dbPath = settleSeedDb(adwId, crewDir)
+  const res = run(['settle', adwId, '--reason', 'operator stop by hand'], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(res.status, 0, res.stderr)
+  assert.equal(settleReadSession(dbPath, adwId).terminal_actor, 'operator')
+})
+
+test('D1', async () => {
+  const adwId = 'settle-d1-reason'
+  const crewDir = scratchDir('settle-d1-')
+  settleWriteSidecar(crewDir, adwId, await settleGonePid())
+  const dbPath = settleSeedDb(adwId, crewDir)
+  const before = settleReadSession(dbPath, adwId)
+  const omitted = run(['settle', adwId], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(omitted.status, 2)
+  assert.match(omitted.stderr, /--reason/)
+  const blank = run(['settle', adwId, '--reason', '   '], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(blank.status, 2)
+  assert.match(blank.stderr, /--reason/)
+  const long = run(['settle', adwId, '--reason', 'x'.repeat(65)], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(long.status, 2)
+  assert.match(long.stderr, /at most 64 characters/)
+  assert.match(long.stderr, /ledger settle/)
+  assert.deepEqual(settleReadSession(dbPath, adwId), before)
+})
+
+test('E1', () => {
+  const adwId = 'settle-e1-absent'
+  const dir = nextDir()
+  const dbPath = join(dir, 'ledger.db')
+  const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+  ledger.close()
+  const res = run(['settle', adwId, '--reason', 'no such run'], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(res.status, 2)
+  assert.match(res.stderr, /settle-e1-absent/)
+  assert.equal(settleReadSession(dbPath, adwId), null)
+})
+
+test('F1', async () => {
+  const adwId = 'settle-f1-terminal'
+  const crewDir = scratchDir('settle-f1-')
+  settleWriteSidecar(crewDir, adwId, await settleGonePid())
+  const dbPath = settleSeedDb(adwId, crewDir)
+  const first = run(['settle', adwId, '--reason', 'first terminal write'], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(first.status, 0, first.stderr)
+  const row = settleReadSession(dbPath, adwId)
+  assert.equal(row.status, 'aborted')
+  const second = run(['settle', adwId, '--reason', 'second attempt'], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(second.status, 2)
+  assert.deepEqual(settleReadSession(dbPath, adwId), row)
+})
+
+test('G1', () => {
+  const res = run(['kill', '--adw-id', 'settle-g1-norow', '--pid', '999999', '--yes'])
+  assert.equal(res.status, 2)
+  assert.equal(res.stderr, 'ledger kill: refused — no matching processes row for that (adw_id, pid)\n')
+})
+
+test('H1', () => {
+  const doc = readFileSync(join(ROOT, 'skills/devops/references/processes.md'), 'utf8')
+  assert.ok(doc.includes('After SIGKILL, run `node scripts/factory/ledger.mjs settle <adw-id> --reason <text>`'), 'processes.md must name the post-SIGKILL settle command')
+})

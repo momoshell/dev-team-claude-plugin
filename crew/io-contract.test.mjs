@@ -346,8 +346,10 @@ test('seatIo removes stale return files and round-trips files', () => {
 
 test('seatIo run reports status, spawn errors, and signals', () => {
   const f = makeSeatIo()
-  assert.deepEqual(f.io.run('ok'), { ok: true, output: '' })
+  assert.deepEqual(f.io.run('ok'), { ok: true, output: '', status: 0, stderr: '' })
   assert.equal(f.io.run('fail').ok, false)
+  assert.equal(f.io.run('fail').status, 3)
+  assert.equal(f.io.run('fail').stderr, 'err\n')
   assert.match(f.io.run('signal').output, /spawn error|killed by SIGTERM/)
 })
 
@@ -389,8 +391,8 @@ test('seatIo run keeps a non-ENOBUFS red byte-compatible', () => {
     spawnSync: () => ({ status: 1, stdout: 'bad\n', stderr: 'err\n' }),
   })
   const result = io.run('anything')
-  assert.deepEqual(Object.keys(result).sort(), ['ok', 'output'])
-  assert.deepEqual(result, { ok: false, output: 'bad\nerr\n' })
+  assert.deepEqual(Object.keys(result).sort(), ['ok', 'output', 'status', 'stderr'])
+  assert.deepEqual(result, { ok: false, output: 'bad\nerr\n', status: 1, stderr: 'err\n' })
 })
 
 test('seatIo run neutralises colour while preserving the inherited environment', () => {

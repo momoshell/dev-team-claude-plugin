@@ -8984,18 +8984,31 @@ function runTask(ctx, io, crash) {
       gateProofFatal = `tree-not-restored: diff config could not be written: ${err?.message ?? String(err)}`
       return { settled: false, fatal: gateProofFatal }
     }
+    const reportPath = configPath.replace(/\.json$/, '.report.json')
+    const parseReportFile = (path) => {
+      try {
+        const raw = io.readFile(path)
+        return parseDiffReport(`${DIFF_MUTATION_SUMMARY_PREFIX} ${raw ?? ''}`)
+      } catch { return null }
+    }
     let runner
     try {
       runner = phaseSlot(SUITE_SLOT_PHASES.gate, () => io.run(`node scripts/factory/prove-mutations.mjs --diff-config ${shellArg(configPath)}`))
     } catch (err) { runner = { ok: false, output: '', error: err?.message ?? String(err) } }
     const runnerOutput = runner?.output ?? `${runner?.stdout || ''}${runner?.stderr || ''}`
+    let reportSource = 'stdout-sentinel'
     diffMutationReport = parseDiffReport(runnerOutput)
     if (!diffMutationReport) {
-      diffMutationReport = diffZeroReport('runner-unavailable')
-      diffMutationReport.runner_unavailable = typeof runner?.error === 'string'
-        ? runner.error
-        : runner?.error?.message || 'the diff runner emitted no final DIFF-MUTATION-SUMMARY sentinel'
+      diffMutationReport = parseReportFile(reportPath)
+      if (diffMutationReport) reportSource = 'report-file'
     }
+    const runnerReportUnavailable = diffMutationReport === null
+    if (runnerReportUnavailable) {
+      reportSource = 'runner-unavailable'
+      diffMutationReport = diffZeroReport('runner-unavailable')
+      diffMutationReport.why = `exit status ${runner?.status ?? 'unknown'}; stderr: ${String(runner?.stderr ?? '').trim() || '<empty>'}`
+    }
+    diffMutationReport.report_source = reportSource
     if (diffMutationReport.fatal) {
       journalDiffMutation()
       diffMutationReports.push(diffMutationReport)

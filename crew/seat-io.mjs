@@ -3234,7 +3234,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
       // marker is appended LAST so it is what a reader and a test see at the end.
       const overflowed = res.error?.code === 'ENOBUFS'
       if (overflowed) output += `\n[output exceeded ${RUN_MAX_BUFFER_BYTES} bytes — this run is UNMEASURED, not red]`
-      const result = { ok: res.status === 0, output }
+      const result = { ok: res.status === 0, output, status: res.status, stderr: String(res.stderr || '') }
       if (overflowed) result.truncated = true
       return result
     },

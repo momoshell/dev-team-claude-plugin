@@ -2410,6 +2410,14 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
     const waitedMs = Math.max(0, at - waitStartedAt)
     const budgetMs = Math.max(0, Math.round(Number(timeoutS) * 1000))
     const death = failure.reclaim || {}
+    // The wrapper exit file exists only for headless-json at
+    // headless/<workerId>/exit; every other transport keeps null diagnosis
+    // fields rather than overclaiming an absence reason. Instrumentation is
+    // never load-bearing, so a diagnostic failure still journals a row.
+    let exit = { status: null, reason: null }
+    if (info?.transport === HEADLESS_TRANSPORT && typeof info?.workerId === 'string' && info.workerId) {
+      try { exit = readHeadlessExit(join(paths.taskDir, 'headless', info.workerId, 'exit'), { existsSync, readFileSync }) } catch { exit = { status: null, reason: HEADLESS_EXIT_REASONS.UNREADABLE_OR_MALFORMED } }
+    }
     return {
       at, seat_died: info?.role || 'unknown', returnPath,
       transport: info?.transport ?? null,
@@ -2420,6 +2428,8 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
       wasted_ms: Math.max(0, budgetMs - waitedMs),   // verbatim: mutation A5
       final_turn_usage: null,                        // verbatim: mutation A6
       final_turn_usage_reason: FINAL_TURN_UNMEASURED[info?.transport] ?? null,
+      exit_status: exit.status,
+      exit_status_reason: exit.reason,
     }
   }
   const refusalError = (info, returnPath, frame) => {
@@ -3702,6 +3712,32 @@ export const SEAT_REFUSAL_STAGE = 'seat-refused'
 // #815: a seat whose process is measurably dead is NOT a budget overrun. Named
 // here, beside the other stage tokens, and never folded into a transport timeout.
 export const SEAT_DIED_STAGE = 'seat-died'   // verbatim: mutation A2
+// The headless-json wrapper records its shell status atomically at
+// headless/<workerId>/exit (crew/headless.mjs). The reader below only consumes
+// that durable file: a closed diagnosis for the seat_died journal row, never a
+// change to death detection, stage, or escalation.
+export const HEADLESS_EXIT_REASONS = Object.freeze({
+  ABSENT: 'exit-file-absent',
+  UNREADABLE_OR_MALFORMED: 'exit-file-unreadable-or-malformed',
+})
+// A diagnostic reader that never throws: EPERM/ENOENT on existence, a throw on
+// read, an empty file, non-decimal bytes, and an out-of-range status all fold
+// into the closed reason set. A partial write cannot occur (the shell writes
+// via .tmp plus rename), and a file deleted between the existence check and
+// the read lands in the catch below.
+export function readHeadlessExit(path, deps = {}) {
+  try {
+    const existsSync = deps.existsSync || fsExistsSync
+    const readFileSync = deps.readFileSync || fsReadFileSync
+    if (!existsSync(path)) return { status: null, reason: HEADLESS_EXIT_REASONS.ABSENT }
+    const raw = String(readFileSync(path, 'utf8')).trim()
+    if (/^[0-9]+$/.test(raw)) {
+      const status = Number(raw)
+      if (status >= 0 && status <= 255) return { status: Number(raw), reason: null }
+    }
+    return { status: null, reason: HEADLESS_EXIT_REASONS.UNREADABLE_OR_MALFORMED }
+  } catch { return { reason: HEADLESS_EXIT_REASONS.UNREADABLE_OR_MALFORMED, status: null } }
+}
 const PI_REFUSAL_STOPS = new Set(['error', 'length'])
 
 export function piSessionDir(checkout, deps = {}) {

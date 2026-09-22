@@ -185,6 +185,12 @@ export const ESCALATION_CAUSES = Object.freeze([
   'envelope-unusable', 'envelope-absent', 'build-rounds-exhausted',
 ])
 export const ESCALATION_CAUSE_UNCLASSIFIED = 'unclassified'
+export const ESCALATION_CAUSE_RULE_GAP = 'rule-gap'
+export const ESCALATION_CAUSE_UNMEASURED = 'unmeasured'
+export const ESCALATION_MEASUREMENT_REASONS = Object.freeze([
+  ESCALATION_CAUSE_RULE_GAP, ESCALATION_CAUSE_UNMEASURED,
+])
+const ESCALATION_UNMEASURED_DEFINITION = 'unmeasured means no readable task envelope survives; it may have been reaped or archived, and this view cannot tell those apart'
 
 // The driver's own wait ceiling (crew/drive.mjs:2541), wrapped by
 // crew/drive.mjs:617 fail() into `${stage}: ${msg}` and recorded by the crash
@@ -319,8 +325,8 @@ export function escalationCause(input = {}) {
   if (new Set(['driver', 'cold-suite', 'suite', 'rebase', 'publish', 'converge-pr']).has(where)) {
     return Object.freeze({ cause: 'infrastructure', actor: 'driver' })
   }
-  // No rule matched: unclassified is an honest non-answer, with no actor guess.
-  return Object.freeze({ cause: ESCALATION_CAUSE_UNCLASSIFIED, actor: null })
+  // No rule matched: a readable location with no rule is a rule gap; no usable location is unmeasured — never a guess, never an actor.
+  return Object.freeze({ cause: where === '' ? ESCALATION_CAUSE_UNMEASURED : ESCALATION_CAUSE_RULE_GAP, actor: null })
 }
 export const REQUEST_SOURCES = Object.freeze(['dispatch', 'brief-file'])
 export const REQUEST_MAX_CHARS = 2000
@@ -5334,7 +5340,7 @@ export function openLedger({
   function escalationWindow({ since = null, until = null } = {}) {
     const snapshotRows = queryRows(`
       WITH window_sessions AS (
-        SELECT outcome, terminal_reason, terminal_actor, ended_at
+        SELECT adw_id, task_slug, outcome, terminal_reason, terminal_actor, ended_at
         FROM sessions
         WHERE ${excludeSynthetic()} AND ended_at IS NOT NULL
           AND (? IS NULL OR ended_at >= ?) AND (? IS NULL OR ended_at < ?)
@@ -5350,24 +5356,42 @@ export function openLedger({
         SELECT outcome, COUNT(*) AS count, MIN(ended_at) AS first_at, MAX(ended_at) AS last_at
         FROM window_sessions
         GROUP BY outcome
+      ),
+      measurement_evidence AS (
+        SELECT window_sessions.adw_id AS adw_id, window_sessions.task_slug AS task_slug,
+          window_sessions.ended_at AS ended_at, run_links.crew_dir AS crew_dir
+        FROM window_sessions LEFT JOIN run_links ON run_links.adw_id = window_sessions.adw_id
+        WHERE window_sessions.outcome = 'escalated'
+          AND (window_sessions.terminal_reason IN (?, ?, ?) OR window_sessions.terminal_reason IS NULL OR window_sessions.terminal_reason = '')
       )
-      SELECT 'escalation' AS row_kind, cause, actor, count, first_at, last_at, NULL AS outcome
+      SELECT 'escalation' AS row_kind, cause, actor, count, first_at, last_at, NULL AS outcome,
+        NULL AS adw_id, NULL AS task_slug, NULL AS ended_at, NULL AS crew_dir
       FROM grouped_escalations
       UNION ALL
-      SELECT 'ended' AS row_kind, NULL AS cause, NULL AS actor, count, first_at, last_at, outcome
+      SELECT 'ended' AS row_kind, NULL AS cause, NULL AS actor, count, first_at, last_at, outcome,
+        NULL AS adw_id, NULL AS task_slug, NULL AS ended_at, NULL AS crew_dir
       FROM grouped_ended_runs
+      UNION ALL
+      SELECT 'evidence' AS row_kind, NULL AS cause, NULL AS actor, NULL AS count,
+        NULL AS first_at, NULL AS last_at, NULL AS outcome,
+        adw_id, task_slug, ended_at, crew_dir
+      FROM measurement_evidence
       ORDER BY row_kind DESC, cause, actor, outcome
-    `, [since, since, until, until])
+    `, [since, since, until, until,
+      ESCALATION_CAUSE_UNCLASSIFIED, ESCALATION_CAUSE_RULE_GAP, ESCALATION_CAUSE_UNMEASURED])
     const rows = []
     const endedRows = []
+    const evidence = []
     for (const row of snapshotRows) {
       if (row.row_kind === 'escalation') {
         rows.push({ cause: row.cause, actor: row.actor, count: row.count, first_at: row.first_at, last_at: row.last_at })
+      } else if (row.row_kind === 'evidence') {
+        evidence.push({ adw_id: row.adw_id, task_slug: row.task_slug, ended_at: row.ended_at, crew_dir: row.crew_dir })
       } else {
         endedRows.push({ outcome: row.outcome, count: row.count, first_at: row.first_at, last_at: row.last_at })
       }
     }
-    return { rows, endedRows }
+    return { rows, endedRows, evidence }
   }
 
   function seatReclaims({ since = null, until = null } = {}) {
@@ -6999,6 +7023,80 @@ function settleCandidateDirs(crewDir) {
   return dirs
 }
 
+// Re-read the durable return for each measurement-state escalation the SQLite
+// snapshot flagged, and re-run the same escalationCause over its surviving
+// `details.escalation`: a readable uncovered `where` is a rule gap, a readable
+// covered pair keeps its cause/actor, and anything without a readable task
+// envelope (ENOENT, EPERM, malformed JSON, truncated write, reap, archive
+// loss) is honest `unmeasured` — those losses are indistinguishable here, so
+// nothing is guessed and no row ever carries a null classification.
+function foldMeasurementEvidence(groupedRows, evidence) {
+  const legacyReasons = new Set([
+    ESCALATION_CAUSE_UNCLASSIFIED, ESCALATION_CAUSE_RULE_GAP, ESCALATION_CAUSE_UNMEASURED,
+  ])
+  const rows = []
+  for (const row of groupedRows ?? []) {
+    if (row == null || typeof row.cause !== 'string' || row.cause === '' || legacyReasons.has(row.cause)) continue
+    rows.push({ ...row })
+  }
+  const byAdwId = new Map()
+  for (const row of evidence ?? []) {
+    if (row == null || typeof row.adw_id !== 'string' || row.adw_id === '') continue
+    if (!byAdwId.has(row.adw_id)) byAdwId.set(row.adw_id, { ended_at: null, crew_dirs: [] })
+    const entry = byAdwId.get(row.adw_id)
+    if (typeof row.ended_at === 'string' && row.ended_at !== ''
+      && (entry.ended_at == null || row.ended_at < entry.ended_at)) entry.ended_at = row.ended_at
+    if (typeof row.crew_dir === 'string' && row.crew_dir !== '' && !entry.crew_dirs.includes(row.crew_dir)) {
+      entry.crew_dirs.push(row.crew_dir)
+    }
+  }
+  const projected = new Map()
+  const uncovered = new Map()
+  for (const entry of byAdwId.values()) {
+    let escalation = null
+    for (const dir of entry.crew_dirs.flatMap((crewDir) => settleCandidateDirs(crewDir))) {
+      let text = null
+      try {
+        text = readFileSync(join(dir, 'returns', 'task.json'), 'utf8')
+      } catch {
+        continue // ENOENT/EPERM/archive loss: the next sibling may still read; else unmeasured below.
+      }
+      let parsed = null
+      try {
+        parsed = JSON.parse(text)
+      } catch {
+        continue // empty/truncated/interrupted write: never a guessed cause.
+      }
+      if (parsed != null && typeof parsed === 'object') {
+        escalation = parsed.details?.escalation ?? null
+        break // first readable envelope wins; its absence of escalation is itself the evidence.
+      }
+    }
+    const input = escalation != null && typeof escalation === 'object' ? escalation : {}
+    const { cause, actor } = escalationCause(input)
+    const key = JSON.stringify([cause, actor])
+    if (!projected.has(key)) {
+      projected.set(key, { cause, actor, count: 0, first_at: entry.ended_at, last_at: entry.ended_at })
+    }
+    const bucket = projected.get(key)
+    bucket.count += 1
+    if (typeof entry.ended_at === 'string' && entry.ended_at !== '') {
+      if (bucket.first_at == null || entry.ended_at < bucket.first_at) bucket.first_at = entry.ended_at
+      if (bucket.last_at == null || entry.ended_at > bucket.last_at) bucket.last_at = entry.ended_at
+    }
+    if (cause === ESCALATION_CAUSE_RULE_GAP && typeof input.where === 'string' && input.where !== '') {
+      uncovered.set(input.where, (uncovered.get(input.where) ?? 0) + 1)
+    }
+  }
+  for (const bucket of projected.values()) rows.push(bucket)
+  rows.sort((a, b) => (a.cause < b.cause ? -1 : a.cause > b.cause ? 1
+    : (a.actor ?? '') < (b.actor ?? '') ? -1 : (a.actor ?? '') > (b.actor ?? '') ? 1 : 0))
+  const uncoveredWhere = [...uncovered.entries()]
+    .map(([where, count]) => ({ where, count }))
+    .sort((a, b) => b.count - a.count || (a.where < b.where ? -1 : a.where > b.where ? 1 : 0))
+  return { rows, uncoveredWhere }
+}
+
 function settleSidecarAdwId(dir) {
   try {
     const sidecar = JSON.parse(readFileSync(join(dir, 'ledger', 'run.json'), 'utf8'))
@@ -8232,32 +8330,40 @@ export function main(argv) {
       const hasUntil = Object.prototype.hasOwnProperty.call(flags, 'until')
       const until = hasUntil ? windowBound(flags.until, 'until', 'escalations') : null
       if (until != null && until <= since) refuse('escalations: --until must be later than --since')
-      const { rows, endedRows } = ledger.escalationWindow({ since, until })
+      const { rows: groupedRows, endedRows, evidence } = ledger.escalationWindow({ since, until })
       if (ledger.stats().degraded) refuse('escalations: the ledger mirror is degraded — this window is unanswerable, not empty')
       // A window in which NO run ended was not measured — the honesty rule
       // ci-cycles already follows with watchedWindow (:5136). A window that ended
       // runs and lost NONE of them still reports a real measured zero (#854).
       const settledWindow = endedRows.length > 0
       const runsEnded = settledWindow ? endedRows.reduce((n, row) => n + Number(row.count ?? 0), 0) : null
+      // Legacy measurement-state rows discarded `where` at write time; re-read
+      // the durable return for exactly those rows (same SQLite snapshot above)
+      // and fold the projection back without rewriting history.
+      const { rows, uncoveredWhere } = foldMeasurementEvidence(groupedRows, evidence)
       stdout.write(`${JSON.stringify({
         schema: 1,
         question: 'How many lanes did the factory lose to itself, and to what?',
         definition: {
           unit: 'one run whose outcome is escalated',
           window: 'counted at sessions.ended_at — an escalation is a terminal fact',
-          cause: `the closed vocabulary (${ESCALATION_CAUSES.join(', ')}), plus ${ESCALATION_CAUSE_UNCLASSIFIED} for a pair no rule classifies — never a guess`,
+          cause: `the closed blame vocabulary (${ESCALATION_CAUSES.join(', ')}); legacy ${ESCALATION_CAUSE_UNCLASSIFIED} rows are re-read from their durable return below — never a guess`,
+          measurement: `closed measurement reasons (${ESCALATION_MEASUREMENT_REASONS.join(', ')}) for a pair no blame rule classifies`,
+          unmeasured: ESCALATION_UNMEASURED_DEFINITION,
           denominator: 'runs_ended counts every session whose ended_at falls in the window, whatever its outcome — the total this loss is a share OF; null with an `absent` marker means no run ended here, never a measured zero',
           absent: 'null with an `absent` marker means the window was never measured — never a measured zero',
-          coverage: 'crew/crew.mjs records typed escalation causes; child-driven runs still carry NULL typed outcome fields until their endRun writer is widened, so they remain unmeasured here',
+          coverage: 'crew/crew.mjs records typed escalation causes; child-driven runs whose typed outcome fields are NULL are re-read from their durable returns/task.json like legacy measurement rows — classified by escalationCause when a readable envelope survives, unmeasured otherwise',
         },
         since,
         until,
         causes: [...ESCALATION_CAUSES, ESCALATION_CAUSE_UNCLASSIFIED],
+        measurement_reasons: [...ESCALATION_MEASUREMENT_REASONS],
         actors: TERMINAL_ACTORS,
         measured: settledWindow,
         escalated: settledWindow ? rows.reduce((n, row) => n + Number(row.count ?? 0), 0) : null,
         runs_ended: runsEnded,
         rows,
+        uncovered_where: uncoveredWhere,
         absent: settledWindow ? null : { escalations: 'no run ended in this window — not measured, never a measured zero' },
       })}\n`)
       return 0

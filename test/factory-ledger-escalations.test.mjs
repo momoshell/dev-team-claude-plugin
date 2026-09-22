@@ -8,12 +8,14 @@ import {
 
 import { join } from 'node:path'
 
-import { spawn } from 'node:child_process'
+import { spawnSync } from 'node:child_process'
 
 import { ROOT, scratchDir } from './helpers.mjs'
 
 import {
-  ESCALATION_CAUSES, escalationCause, TABLES,
+  ESCALATION_CAUSES, ESCALATION_CAUSE_UNCLASSIFIED, ESCALATION_CAUSE_RULE_GAP,
+  ESCALATION_CAUSE_UNMEASURED, ESCALATION_MEASUREMENT_REASONS,
+  escalationCause, openLedger, TABLES,
 } from '../scripts/factory/ledger.mjs'
 
 import { SUBMIT_BLIND_SPOT } from '../crew/driver.mjs'
@@ -69,15 +71,21 @@ test('escalationCause maps the archived envelopes and never guesses an unknown p
   }
   for (const input of [
     {}, { where: 42, why: 17 }, { where: null, why: false }, null, 'not-an-envelope',
+    undefined,
+  ]) {
+    assert.deepEqual(escalationCause(input), { cause: 'unmeasured', actor: null })
+    assert.equal(Object.isFrozen(escalationCause(input)), true)
+  }
+  for (const input of [
     { where: 'plan-check', why: 'The one remaining High is a crash path, not a blemish: an unbounded reviewer id is interpolated into a patch artifact filename and written through an unguarded `io.writeFile`, aborting the run before the auto-fix is either applied or journalled as refused. I therefore cannot type it `cosmetic` without laundering a correctness gap, and `correctness-unverified` is refused into escalation by rule — so no honest accept exists here. Closing it requires two new gate checks with new labels and two new mutation entries, and the plan\'s `details.mutations` is a contract no seat may amend after acceptance, which puts the fix above my station. The divergence evidence (combined 91718 vs 44567, ratio 2.06) says another unfunded planning round is unlikely to produce a smaller shape, and I declined the second-opinion valve because both offered seats\' relevant knowledge is already on the page: the tech-lead authored this verdict and the reviewer has no diff to read at plan stage.' },
   ]) {
-    assert.deepEqual(escalationCause(input), { cause: 'unclassified', actor: null })
+    assert.deepEqual(escalationCause(input), { cause: 'rule-gap', actor: null })
   }
   assert.deepEqual(escalationCause({ where: 'driver', why: 'anchor-absent in an unapplied change' }), { cause: 'plan-build-disagreement', actor: 'driver' })
   assert.deepEqual(escalationCause({ where: 'scope', why: 'exceeded its 1800s budget' }), { cause: 'plan-build-disagreement', actor: 'driver' })
   // Matched on `where` alone: prose is never what carries a seat death.
   assert.deepEqual(escalationCause({ where: 'seat-died', why: '' }), { cause: 'seat-lost', actor: 'driver' })
-  assert.deepEqual(escalationCause({ where: 'transport', why: 'a location no producer emits' }), { cause: 'unclassified', actor: null })
+  assert.deepEqual(escalationCause({ where: 'transport', why: 'a location no producer emits' }), { cause: 'rule-gap', actor: null })
   assert.ok(ESCALATION_CAUSES.includes('seat-lost'))
   for (const cause of ['seat-timeout', 'seat-aborted', 'plan-rounds-exhausted']) {
     assert.ok(ESCALATION_CAUSES.includes(cause))
@@ -112,8 +120,8 @@ test('escalationCause matches a seat failure on its stage, not on its prose', ()
 test('the plan round cap is bounded to its own sentence', () => {
   assert.deepEqual(escalationCause({ where: 'plan', why: 'no accepted plan within 7 rounds' }), { cause: 'plan-rounds-exhausted', actor: 'lead' })
   assert.deepEqual(escalationCause({ where: 'plan', why: 'no accepted plan within 12 rounds' }), { cause: 'plan-rounds-exhausted', actor: 'lead' })
-  assert.deepEqual(escalationCause({ where: 'plan', why: 'no accepted plan within rounds' }), { cause: 'unclassified', actor: null })
-  assert.deepEqual(escalationCause({ where: 'plan', why: 'planner envelope carries no files_in_scope — the scope gate cannot run without it' }), { cause: 'unclassified', actor: null })
+  assert.deepEqual(escalationCause({ where: 'plan', why: 'no accepted plan within rounds' }), { cause: 'rule-gap', actor: null })
+  assert.deepEqual(escalationCause({ where: 'plan', why: 'planner envelope carries no files_in_scope — the scope gate cannot run without it' }), { cause: 'rule-gap', actor: null })
   assert.deepEqual(escalationCause({ where: 'plan', why: "allowlisted read-only recipe' test reddens the moment package.json gains factory:closeout. The compiled brief therefore demands (acceptance h + 'Full suite green') something its own fence forbids — a contradiction inside an artifact compiled outside this workspace. A bounce is wo" }), { cause: 'brief-contradiction', actor: 'operator' })
 })
 
@@ -126,7 +134,7 @@ test('review-unresolved producer stage maps to the named cause', () => {
 
 test('build round cap is anchored to its own generated sentence', () => {
   assert.deepEqual(escalationCause({ where: 'build', why: 'no accepted build within 6 rounds' }), { cause: 'build-rounds-exhausted', actor: 'lead' })
-  assert.deepEqual(escalationCause({ where: 'build', why: 'no accepted build within rounds' }), { cause: 'unclassified', actor: null })
+  assert.deepEqual(escalationCause({ where: 'build', why: 'no accepted build within rounds' }), { cause: 'rule-gap', actor: null })
 })
 
 test('plan-scope-widened producer stage maps to a plan-build disagreement', () => {
@@ -204,4 +212,179 @@ test('ledger query docs pin typed outcomes, run seats, closed vocabularies, and 
   assert.ok(docs.includes('`phase_slot_waits`'))
   assert.ok(docs.includes('Recipe M'))
   assert.match(docs, /FROM\s+run_seats/i)
+})
+
+// A1–E1: the closed measurement split — rule-gap vs unmeasured — and its CLI surface.
+const ESCALATIONS_SCRIPT = join(ROOT, 'scripts', 'factory', 'ledger.mjs')
+const UNMEASURED_DEFINITION = 'unmeasured means no readable task envelope survives; it may have been reaped or archived, and this view cannot tell those apart'
+
+function writeTaskReturn(crewDir, escalation) {
+  const returnsDir = join(crewDir, 'returns')
+  mkdirSync(returnsDir, { recursive: true })
+  writeFileSync(join(returnsDir, 'task.json'), `${JSON.stringify({ details: { escalation } })}\n`)
+}
+
+function seedEscalationWindow() {
+  const root = scratchDir('factory-ledger-escsplit-')
+  const dbPath = join(root, 'ledger.db')
+  const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+  try {
+    const seed = (adwId, i, terminal, actor, crewDir) => {
+      ledger.startSession({
+        adw_id: adwId, repo_slug: 'r', task_slug: adwId, started_at: '2026-09-15T00:00:00.000Z',
+      })
+      ledger.endSession({
+        adw_id: adwId, status: 'aborted', outcome: 'escalated',
+        terminal_reason: terminal, terminal_actor: actor, ended_at: `2026-09-16T00:00:0${i}.000Z`,
+      })
+      if (crewDir != null) ledger.linkRun({ run_id: `run-${adwId}`, adw_id: adwId, crew_dir: crewDir })
+    }
+    // Covered escalations keep their cause/actor with no envelope read.
+    seed('esc-covered-transport', 0, 'transport', 'driver', null)
+    // Uncovered locations re-read from the durable return.
+    const liveHardenA = join(root, 'crew-harden-a')
+    writeTaskReturn(liveHardenA, { where: 'harden', why: 'an uncovered harden failure with no blame rule' })
+    seed('esc-harden-a', 1, ESCALATION_CAUSE_UNCLASSIFIED, null, liveHardenA)
+    const liveHardenB = join(root, 'crew-harden-b')
+    writeTaskReturn(liveHardenB, { where: 'harden', why: 'a second uncovered harden failure with no blame rule' })
+    seed('esc-harden-b', 2, ESCALATION_CAUSE_UNCLASSIFIED, null, liveHardenB)
+    // Archive sibling: the live dir survives with no return; the envelope reads from the archive.
+    const livePlanCheck = join(root, 'crew-plan-check')
+    mkdirSync(livePlanCheck, { recursive: true })
+    writeTaskReturn(`${livePlanCheck}.archive-2026-09-16T00-00-00-000Z`, { where: 'plan-check', why: 'an uncovered plan-check failure with no blame rule' })
+    seed('esc-plan-check', 3, ESCALATION_CAUSE_UNCLASSIFIED, null, livePlanCheck)
+    // Legacy unclassified row with a readable covered envelope reroutes to the unchanged covered cause.
+    const liveReroute = join(root, 'crew-reroute')
+    writeTaskReturn(liveReroute, { where: 'review', why: 'the lead could not settle finding 2 within its rounds' })
+    seed('esc-reroute', 4, ESCALATION_CAUSE_UNCLASSIFIED, null, liveReroute)
+    // No surviving envelope (reaped crew dir): honest unmeasured.
+    seed('esc-gone', 5, ESCALATION_CAUSE_UNCLASSIFIED, null, join(root, 'crew-reaped'))
+    // NULL typed cause (child-driven run): re-read from the durable return like a legacy row.
+    const liveNullCovered = join(root, 'crew-null-covered')
+    writeTaskReturn(liveNullCovered, { where: 'review', why: 'the lead could not settle finding 3 within its rounds' })
+    seed('esc-null-covered', 6, null, null, liveNullCovered)
+  } finally {
+    ledger.close()
+  }
+  return { root, dbPath }
+}
+
+function runEscalationsCli(dbPath) {
+  const result = spawnSync(process.execPath, [
+    ESCALATIONS_SCRIPT, 'escalations', '--since', '2026-09-15T00:00:00.000Z', '--until', '2026-09-17T00:00:00.000Z',
+  ], { encoding: 'utf8', env: { ...process.env, DEVTEAM_LEDGER_DB: dbPath } })
+  assert.equal(result.status, 0, result.stderr)
+  return JSON.parse(result.stdout)
+}
+
+test('A1', () => {
+  const gap = escalationCause({ where: 'harden', why: 'an uncovered harden failure with no blame rule' })
+  assert.deepEqual(gap, { cause: 'rule-gap', actor: null })
+  assert.equal(Object.isFrozen(gap), true)
+  const missing = escalationCause({})
+  assert.deepEqual(missing, { cause: 'unmeasured', actor: null })
+  assert.equal(Object.isFrozen(missing), true)
+  assert.notEqual(gap.cause, missing.cause)
+})
+
+test('B1', () => {
+  assert.ok(!ESCALATION_CAUSES.includes(ESCALATION_CAUSE_UNMEASURED))
+  assert.ok(!ESCALATION_CAUSES.includes(ESCALATION_CAUSE_RULE_GAP))
+  assert.deepEqual([...ESCALATION_MEASUREMENT_REASONS], ['rule-gap', 'unmeasured'])
+  for (const input of [{}, { where: 42, why: 17 }, null, 'not-an-envelope', { where: '', why: 'x' }]) {
+    const mapped = escalationCause(input)
+    assert.deepEqual(mapped, { cause: 'unmeasured', actor: null })
+    assert.ok(!ESCALATION_CAUSES.includes(mapped.cause))
+  }
+})
+
+test('C1', () => {
+  const { root, dbPath } = seedEscalationWindow()
+  try {
+    const payload = runEscalationsCli(dbPath)
+    assert.equal(payload.measured, true)
+    assert.equal(payload.escalated, 7)
+    assert.equal(payload.runs_ended, 7)
+    assert.deepEqual(payload.rows.map(({ cause, actor, count }) => ({ cause, actor, count })), [
+      { cause: 'review-unresolved', actor: 'lead', count: 2 },
+      { cause: 'rule-gap', actor: null, count: 3 },
+      { cause: 'transport', actor: 'driver', count: 1 },
+      { cause: 'unmeasured', actor: null, count: 1 },
+    ])
+    for (const row of payload.rows) {
+      assert.equal(typeof row.cause, 'string')
+      assert.notEqual(row.cause, null)
+    }
+    assert.equal(payload.rows.filter((row) => row.cause == null).length, 0)
+    assert.equal(payload.rows.reduce((n, row) => n + Number(row.count ?? 0), 0), 7)
+    assert.deepEqual(payload.uncovered_where, [
+      { where: 'harden', count: 2 },
+      { where: 'plan-check', count: 1 },
+    ])
+    assert.deepEqual(payload.measurement_reasons, ['rule-gap', 'unmeasured'])
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('D1', () => {
+  assert.deepEqual(
+    escalationCause({ where: 'review', why: 'the lead could not settle finding 2 within its rounds' }),
+    { cause: 'review-unresolved', actor: 'lead' },
+  )
+  assert.deepEqual(
+    escalationCause({ where: 'driver', why: 'sendLine: echo not verified exactly once over baseline (before 0, last 0)' }),
+    { cause: 'transport', actor: 'driver' },
+  )
+  const root = scratchDir('factory-ledger-escsplit-d1-')
+  const dbPath = join(root, 'ledger.db')
+  const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+  try {
+    const crewDir = join(root, 'crew-reroute')
+    writeTaskReturn(crewDir, { where: 'review', why: 'the lead could not settle finding 2 within its rounds' })
+    ledger.startSession({
+      adw_id: 'esc-legacy-covered', repo_slug: 'r', task_slug: 'esc-legacy-covered', started_at: '2026-09-15T00:00:00.000Z',
+    })
+    ledger.endSession({
+      adw_id: 'esc-legacy-covered', status: 'aborted', outcome: 'escalated',
+      terminal_reason: ESCALATION_CAUSE_UNCLASSIFIED, terminal_actor: null, ended_at: '2026-09-16T00:00:00.000Z',
+    })
+    ledger.linkRun({ run_id: 'run-esc-legacy-covered', adw_id: 'esc-legacy-covered', crew_dir: crewDir })
+  } finally {
+    ledger.close()
+  }
+  try {
+    const payload = runEscalationsCli(dbPath)
+    assert.deepEqual(payload.rows.map(({ cause, actor, count }) => ({ cause, actor, count })), [
+      { cause: 'review-unresolved', actor: 'lead', count: 1 },
+    ])
+    assert.deepEqual(payload.uncovered_where, [])
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('E1', () => {
+  const root = scratchDir('factory-ledger-escsplit-e1-')
+  const dbPath = join(root, 'ledger.db')
+  const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+  try {
+    ledger.startSession({
+      adw_id: 'esc-gone', repo_slug: 'r', task_slug: 'esc-gone', started_at: '2026-09-15T00:00:00.000Z',
+    })
+    ledger.endSession({
+      adw_id: 'esc-gone', status: 'aborted', outcome: 'escalated',
+      terminal_reason: ESCALATION_CAUSE_UNCLASSIFIED, terminal_actor: null, ended_at: '2026-09-16T00:00:00.000Z',
+    })
+  } finally {
+    ledger.close()
+  }
+  try {
+    const payload = runEscalationsCli(dbPath)
+    assert.equal(payload.definition.unmeasured, UNMEASURED_DEFINITION)
+    assert.match(payload.definition.unmeasured, /reaped or archived/)
+    assert.match(payload.definition.unmeasured, /cannot tell those apart/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
 })

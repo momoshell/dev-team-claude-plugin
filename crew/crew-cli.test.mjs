@@ -403,7 +403,7 @@ const RUN_OUTCOME_CASES = [
   [{ status: 'escalation', details: { escalation: { where: 'gate', why: 'a gate defect remained' } } }, { status: 'aborted', outcome: 'escalated', terminal_reason: 'gate-defect', terminal_actor: 'lead' }],
   [{ status: 'escalation', details: { escalation: { where: 'review', why: 'the review remained unresolved' } } }, { status: 'aborted', outcome: 'escalated', terminal_reason: 'review-unresolved', terminal_actor: 'lead' }],
   [{ status: 'escalation', details: { escalation: { where: 'cold-suite', why: 'the cold suite had no checkout' } } }, { status: 'aborted', outcome: 'escalated', terminal_reason: 'infrastructure', terminal_actor: 'driver' }],
-  [{ status: 'escalation', details: { escalation: { where: 'weather', why: 'it rained' } } }, { status: 'aborted', outcome: 'escalated', terminal_reason: 'unclassified', terminal_actor: null }],
+  [{ status: 'escalation', details: { escalation: { where: 'weather', why: 'it rained' } } }, { status: 'aborted', outcome: 'escalated', terminal_reason: 'rule-gap', terminal_actor: null }],
 ]
 
 

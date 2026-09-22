@@ -8,7 +8,6 @@ import { fileURLToPath } from 'node:url'
 import { isAbsolute, join } from 'node:path'
 import {
   ESCALATION_CAUSES,
-  ESCALATION_CAUSE_UNCLASSIFIED,
   escalationCause,
   defaultDbPath,
   openLedger,
@@ -469,11 +468,13 @@ export async function triageEscalation(input = {}, deps = {}) {
   const durableRecord = config.durableRecord
   const ledger = config.ledger
   const measured = escalationCause(durableRecord?.escalation)
-  if (measured.cause !== ESCALATION_CAUSE_UNCLASSIFIED) return unchanged('already-classified')
+  // Triage-eligible means no blame rule classified the pair: the legacy
+  // unclassified token and the rule-gap/unmeasured measurement reasons alike.
+  if (ESCALATION_CAUSES.includes(measured.cause)) return unchanged('already-classified')
 
   const session = sessionFromRecord(durableRecord, ledger)
   if (!session) return unchanged('session-missing')
-  if (session.terminal_reason != null && session.terminal_reason !== ESCALATION_CAUSE_UNCLASSIFIED) {
+  if (session.terminal_reason != null && ESCALATION_CAUSES.includes(session.terminal_reason)) {
     return unchanged('already-classified')
   }
   const existingProposal = proposalFromRecord(durableRecord, ledger)

@@ -24,6 +24,8 @@ const UI_OWNER = 'skills/ui-design/anchors.json'
 const UI_TEST_FILE = 'skills/ui-design/exhibits.test.mjs'
 const UX_OWNER = 'skills/ux/anchors.json'
 const UX_TEST_FILE = 'skills/ux/exhibits.test.mjs'
+const MUTANT_CENSUS_OWNER = 'scripts/factory/mutant-census.mjs'
+const MUTANT_CENSUS_TEST_FILE = 'test/factory-mutant-census.test.mjs'
 // #918: read the pin, never restate it. A key is a line number and a merge moves it;
 // the manifest's content value is what --repair-all preserves.
 const pin = (expected) => pinnedKey({ manifestPath: MANIFEST, expected })
@@ -340,8 +342,9 @@ test('I1 tracked non-test owners are covered by dynamic reach census', () => {
     ['visualizer/web/src/lib/WorkflowGraph.svelte', ['test/visualizer-panels.test.mjs']],
     ['visualizer/web/src/lib/stage-docs.json', ['test/visualizer-panels.test.mjs']],
     ['skills/lean-build/SKILL.md', ['crew/drive-docs.test.mjs']],
+    [MUTANT_CENSUS_OWNER, [MUTANT_CENSUS_TEST_FILE]],
   ]
-  const addedTests = ['test/factory-agent-doctor.test.mjs', 'test/factory-pr-review.test.mjs']
+  const addedTests = ['test/factory-agent-doctor.test.mjs', 'test/factory-pr-review.test.mjs', MUTANT_CENSUS_TEST_FILE]
   const currentReach = collectTestReach({ checkout: ROOT })
   const addedPaths = addedOwners.map(([owner]) => owner)
   const currentFiles = [...new Set([...gitPaths(['ls-files', '-z']), ...addedPaths, ...addedTests])]

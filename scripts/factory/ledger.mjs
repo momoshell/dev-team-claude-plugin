@@ -315,6 +315,30 @@ export function escalationCause(input = {}) {
   if (where === 'gate') {
     return Object.freeze({ cause: 'gate-defect', actor: 'lead' })
   }
+  // Rules 11b-11d classify three escalation locations whose sentences are emitted with
+  // INTERPOLATED values. Each is anchored on the stable prose with the varying part matched
+  // as a pattern, exactly the way Rules 7 and 8 are: a literal carrying a sample's round
+  // number, phase word or run id would fire only for that one sample and ship inert.
+  // MUTATION 11b: replace `\\d+` with a literal round and the rule stops matching any other round.
+  // Producer: crew/drive.mjs:8271.
+  if (where === 'plan-check' && /^the plan check returned a BLOCKER, or a finding malformed enough to be one, or is still at round 1, on round \d+, and no plan round remains to bounce it — neither is ever accepted$/.test(why)) {
+    return Object.freeze({ cause: 'plan-rounds-exhausted', actor: 'lead' })
+  }
+  // Producer: crew/drive.mjs:9863 — `the ${phase} census could not be measured: ${reason}.`
+  // ONLY unlisted-survivor is classified; every other reason stays an honest rule gap.
+  // MUTATION 11c: widen the reason to `.+` and an unrelated census reason is falsely claimed.
+  if (where === 'census-exhibits' && /^the \S+ census could not be measured: unlisted-survivor\. It made no claim either way, so this is not a clean census\.$/.test(why)) {
+    return Object.freeze({ cause: 'infrastructure', actor: 'driver' })
+  }
+  // Producer: crew/headless-rpc.mjs:1106 — the run id and the role interpolate, and nothing
+  // follows. The optional `: <error>` detail cannot appear WITH this reason:
+  // `prompt-unacknowledged` is set only when failPromptDelivery sees no prior failure and no
+  // error (crew/headless-rpc.mjs:1085-1094), so the detail is empty. The tail is therefore
+  // ANCHORED — left open it classified any arbitrary suffix as transport.
+  // MUTATION 11d: anchor the run id to a literal and the rule fires for one run only.
+  if (where === 'rpc-prompt-undelivered' && /^rpc prompt \S+ for seat \S+ was not delivered \(prompt-unacknowledged\)$/.test(why)) {
+    return Object.freeze({ cause: 'transport', actor: 'driver' })
+  }
   // Rule 12: review locations identify an unresolved review. 'review-unresolved'
   // is the driver's own location for a finding the lead could not settle
   // (crew/drive.mjs:4264) and reaches the cause of the same name.

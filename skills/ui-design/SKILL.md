@@ -16,9 +16,10 @@ This is the boundary an agent designs inside. The visualizer's system is real in
 | Doing… | Rule that governs it | Details |
 |---|---|---|
 | Choosing a raw or component-facing token | Use the two-tier vocabulary and measured cascade | `references/tokens.md` |
-| Checking whether a component obeys the theme contract | Apply T1–T4 and distinguish enforced tests from stated rules | `references/contract.md` |
+| Checking whether a component obeys the theme contract | Apply T1–T4 and distinguish enforced tests from stated rules; consult the tabular-numerals register for measured figures | `references/contract.md` |
 | Choosing status, role, lane, or absence colour | Route state through tones and aliases; inspect the leak inventory and divergences | `references/state-colour.md` |
-| Assessing contrast or what this lane cannot establish | Preserve the measured limits and absences | `references/limits.md` |
+| Assessing contrast or what this lane cannot establish | Preserve the measured limits and absences, including the per-rule hover-contrast register | `references/limits.md` |
+| Provenance for cited rule sources | Verify canonical URL, commit, digest, and license without vendoring | `references/sources.md` |
 
 ## Critical rules
 
@@ -26,7 +27,7 @@ Every colour a component paints resolves to a Tier-2 alias token; a component ne
 
 Both ramps are positionally parallel five-step scales: ground -> panel -> hairline -> text -> muted.
 
-T1 (name only Tier-2 aliases) is obeyed except where the register says otherwise; T2 (every painted colour comes from a token) is violated in 4 of 21 components, 22 times.
+T1 (name only Tier-2 aliases) is obeyed except where the register says otherwise; T2 (every painted colour comes from a token) is violated in 4 of 33 components, 22 times.
 
 The leak boundary is exactly state-vs-chrome: 19 background:var(--panel) sites and 45 var(--line) sites, zero hard-coded surfaces or separators.
 
@@ -50,4 +51,5 @@ The counts in this file are reproducible with `grep` over `visualizer/web/src`, 
 - `references/tokens.md` — Tier 1 raw tokens, Tier 2 aliases, cascade, and legitimate locals
 - `references/contract.md` — T1–T4, switch ownership, and the mechanical test floor
 - `references/state-colour.md` — R1–R5, leak inventory, and divergences
-- `references/limits.md` — contrast, vacuous coverage, and recon limits
+- `references/limits.md` — contrast, hover states, vacuous coverage, and recon limits
+- `references/sources.md` — provenance for the two cited rule sources; record URL, commit, digest, and license without vendoring either source

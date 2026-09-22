@@ -26,7 +26,7 @@ The lane fallback is the `?? 6` overflow index at `visualizer/web/src/lib/PhaseG
 
 ## L1 - measured state-colour leak inventory
 
-The measured leak is **22 hex literals in 4 of 21 components**. They are all state colours, so they remain theme-invariant. The complete inventory is:
+The measured leak is **22 hex literals in 4 of 33 components**. They are all state colours, so they remain theme-invariant. The complete inventory is:
 
 | File and exhibit | Literals | Count |
 |---|---|---:|

@@ -518,8 +518,39 @@ test('a packed no-code fence emits no symbol index', () => {
   assert.equal(existsSync(join(pack, 'nocode.symbols.md')), false)
 })
 
-test('D1 brief-too-large remains a refusal', () => {
-  const root = fixture('oversized-brief')
+test('A1 authored-source declarations', () => {
+  const source = readFileSync(SCRIPT, 'utf8')
+  const declared = [...source.matchAll(/briefSection\(\s*'[^']*'\s*,\s*(null|'(?:ask|done_means|out_of_scope)')/g)]
+  const total = [...source.matchAll(/briefSection\('/g)].length
+  assert.equal(declared.length, total, `every rendered briefSection call must declare an explicit closed source, found ${declared.length} of ${total}`)
+  const counts = { ask: 0, done_means: 0, out_of_scope: 0 }
+  for (const match of declared) {
+    if (match[1] === "'ask'") counts.ask += 1
+    else if (match[1] === "'done_means'") counts.done_means += 1
+    else if (match[1] === "'out_of_scope'") counts.out_of_scope += 1
+  }
+  assert.deepEqual(counts, { ask: 2, done_means: 2, out_of_scope: 1 })
+  assert.ok(source.includes("briefSection('task', 'ask', ["))
+})
+
+test('B1 grouped contributor maximum', () => {
+  const sections = [
+    { name: 'the ask', source: 'ask', lines: ['a'], authoredBytes: 100 },
+    { name: 'the ask', source: 'ask', lines: ['b'], authoredBytes: 100 },
+    { name: 'fixed', source: null, lines: ['c'.repeat(150)], authoredBytes: null },
+  ]
+  const content = sections.flatMap((section) => section.lines).join('\n')
+  const measured = measureBrief(content, sections)
+  assert.equal(measured.status, 'measured')
+  assert.deepEqual(measured.contributions, [
+    { name: 'the ask', bytes: 100, occurrences: 2, contributionBytes: 200 },
+    { name: 'fixed', bytes: 150, occurrences: 1, contributionBytes: 150 },
+  ])
+  assert.deepEqual(measured.largestContributor, { name: 'the ask', bytes: 100, occurrences: 2, contributionBytes: 200 })
+})
+
+test('C1 contributor occurrence arithmetic', () => {
+  const root = fixture('oversized-ask-arithmetic')
   const ask = `Please ${'x'.repeat(BRIEF_BYTE_LIMIT)} authored section`
   const requestPath = request(root, { ask })
   const outPath = join(root, 'oversized.md')
@@ -527,13 +558,23 @@ test('D1 brief-too-large remains a refusal', () => {
   assert.equal(result.status, 2)
   assert.match(result.stderr, /\[reason: brief-too-large\]/)
   assert.equal(existsSync(outPath), false)
-  const total = result.stderr.match(/brief candidate is (\d+) bytes/)
-  const largest = result.stderr.match(/largest generated section is ([a-z -]+) at (\d+) bytes/)
-  assert.ok(total)
-  assert.ok(largest)
-  assert.equal(Number(total[1]) > BRIEF_BYTE_LIMIT, true)
-  assert.equal(largest[1], 'the ask')
-  assert.equal(Number(largest[2]) > BRIEF_BYTE_LIMIT, true)
+  const raw = Buffer.byteLength(ask, 'utf8')
+  const expected = `largest contributor is the ask at ${raw} bytes x 2 occurrences = ${raw * 2} bytes (the ask and done_means are each emitted twice; out_of_scope once)`
+  assert.ok(result.stderr.includes(expected), `missing contributor arithmetic:\n${result.stderr}`)
+})
+
+test('D1 multiplicity beats authored size', () => {
+  const root = fixture('multiplicity-beats-size')
+  const ask = 'ask-word one two three '.repeat(1300)
+  const outOfScope = 'out-of-scope filler words here now '.repeat(1000)
+  assert.ok(Buffer.byteLength(outOfScope, 'utf8') > Buffer.byteLength(ask, 'utf8'))
+  const requestPath = request(root, { ask, out_of_scope: outOfScope, done_means: 'small' })
+  const outPath = join(root, 'oversized.md')
+  const result = run(root, ['--request', requestPath, '--checkout', root, '--out', outPath])
+  assert.equal(result.status, 2)
+  assert.match(result.stderr, /\[reason: brief-too-large\]/)
+  assert.equal(existsSync(outPath), false)
+  assert.match(result.stderr, /largest contributor is the ask at /)
 })
 
 test('an under-limit brief writes the rendered bytes unchanged', () => {
@@ -552,7 +593,8 @@ test('the brief byte cap is named and enforced at its exact boundary', () => {
   assert.deepEqual(measureBrief(exact, exactSections), {
     status: 'measured',
     bytes: BRIEF_BYTE_LIMIT,
-    largestSection: { name: 'boundary', bytes: BRIEF_BYTE_LIMIT },
+    contributions: [{ name: 'boundary', bytes: BRIEF_BYTE_LIMIT, occurrences: 1, contributionBytes: BRIEF_BYTE_LIMIT }],
+    largestContributor: { name: 'boundary', bytes: BRIEF_BYTE_LIMIT, occurrences: 1, contributionBytes: BRIEF_BYTE_LIMIT },
   })
   assert.equal(admitBrief(exact, exactSections), exact)
   const above = `${exact}x`
@@ -560,7 +602,7 @@ test('the brief byte cap is named and enforced at its exact boundary', () => {
 })
 
 test('an unmeasurable brief size refuses as unmeasured', () => {
-  assert.deepEqual(measureBrief('candidate', null), { status: 'unmeasured', bytes: null, largestSection: null })
+  assert.deepEqual(measureBrief('candidate', null), { status: 'unmeasured', bytes: null, contributions: null, largestContributor: null })
   assert.throws(() => admitBrief('candidate', null), (error) => error.reason === 'brief-size-unmeasured')
 })
 

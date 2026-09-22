@@ -2,6 +2,7 @@ import { readFileSync as fsReadFileSync, realpathSync, existsSync, cpSync, mkdir
 import { isAbsolute, join, basename, dirname } from 'node:path'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
+import { ROUTER_ATTEMPT_URL_ENV, routerAttemptUrl } from './adapter-pi.mjs'
 
 const require = createRequire(import.meta.url)
 let sharedFffSearchProgram
@@ -429,10 +430,15 @@ export function headlessCommand({ role, model, promptFile, tools, deny, taskDir,
   }
 }
 
-export function seatCommand({ role, model, promptFile, tools, deny, taskDir, bootBrief, effort, grants = NO_GRANTS, configDir = null }) {
+function shellSingleQuote(value) {
+  return `'${String(value).replaceAll("'", `\'"\'"\'`)}'`
+}
+
+export function seatCommand({ role, model, promptFile, tools, deny, taskDir, bootBrief, effort, grants = NO_GRANTS, configDir = null, env = process.env }) {
   assertSupportedGrants(grants)
   assertSkillsMaterialised({ taskDir, role, grants })
   assertNoLocalProvider(configDir)
+  const routerUrl = routerAttemptUrl(env)
   const fff = fffEnvironment(grants)
   // `env` (a real binary) sets the vars regardless of how cmux runs the
   // command. DEVTEAM_WORKER=1 keeps any installed dev-team plugin hooks
@@ -446,6 +452,7 @@ export function seatCommand({ role, model, promptFile, tools, deny, taskDir, boo
   // effort-less fff-aware adapter (the compatibility pin in crew.test.mjs holds).
   return [
     'env', 'DEVTEAM_WORKER=1', `CREW_ROLE=${role}`, `CREW_TASK_DIR="${taskDir}"`,
+    ...(routerUrl ? [`ANTHROPIC_BASE_URL=${shellSingleQuote(routerUrl)}`] : []),
     `CREW_FFF=${fff.CREW_FFF}`, `CREW_FFF_NODE="${fff.CREW_FFF_NODE}"`, `CREW_FFF_HOOK="${fff.CREW_FFF_HOOK}"`,
     'claude', '--model', model, '--permission-mode', 'bypassPermissions',
     ...STRICT_MCP_ARGS,

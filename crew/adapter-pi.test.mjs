@@ -3,10 +3,12 @@
 // well-intentioned edit would otherwise silently undo (#147).
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { accessSync, constants, readFileSync, realpathSync, statSync } from 'node:fs'
-import { execFileSync } from 'node:child_process'
+import { accessSync, chmodSync, constants, lstatSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { delimiter, dirname, join, basename } from 'node:path'
-import { seatCommand, capabilitiesFor, modelString, translateDeny, piActivatedTools, validatePiExtensionTools, PI_BUILTIN_TOOLS, PI_FIRST_PARTY_EXTENSION_TOOLS, PI_PROVIDERS, PI_ADVISOR_EXTENSION, shellSingleQuote } from './adapters/adapter-pi.mjs'
+import { seatCommand, capabilitiesFor, modelString, translateDeny, piActivatedTools, validatePiExtensionTools, PI_BUILTIN_TOOLS, PI_FIRST_PARTY_EXTENSION_TOOLS, PI_PROVIDERS, PI_ADVISOR_EXTENSION, shellSingleQuote, ROUTER_ATTEMPT_URL_ENV, routerAttemptUrl } from './adapters/adapter-pi.mjs'
+import { seatCommand as claudeSeatCommand, PANE_USAGE_SETTINGS } from './adapters/adapter-claude.mjs'
+import { scratchDir } from '../test/helpers.mjs'
 import { SEAT_DEFAULTS, ROLE_ORDER, assertFanoutCoherent } from './crew.mjs'
 import { childArgs, resolvePiBinary } from './pi/extensions/subagent.ts'
 
@@ -442,7 +444,7 @@ test('modelString handles null-prototype local provider registers', () => {
   )
 })
 
-test('F1', () => {
+test('legacy F1: mcp_servers do not alter the seat command', () => {
   const shape = {
     role: 'builder', model: 'sonnet', promptFile: '/tmp/prompt.md', tools: 'Read', deny: 'Task,Agent',
     taskDir: '/tmp/task', bootBrief: 'boot',
@@ -476,4 +478,255 @@ test('advisor grant appends only its extension and safely transports its cell', 
   assert.match(granted, /CREW_ADVISOR_ENDPOINT='http:\/\/127\.0\.0\.1\/it'"'"'s\/v1'/)
   assert.equal(shellSingleQuote("q'wen3"), `'q'"'"'wen3'`)
   assert.doesNotMatch(plain, /CREW_ADVISOR|advisor\.ts/)
+})
+
+// b896: default-off CREW_ROUTER_ATTEMPT_URL routing. A1-K1 pin the shared
+// validator, the isolated Pi config, explicit provider selection, Claude
+// base-URL routing, and byte-identical unset launches.
+const ROUTER_REFUSAL = 'refusing malformed CREW_ROUTER_ATTEMPT_URL (expected http://host/a/<token>/) — refusing a guessed endpoint'
+
+function shellWords(command) {
+  const words = []
+  let current = ''
+  let quote = null
+  let has = false
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]
+    if (quote === "'") {
+      if (ch === "'") quote = null
+      else current += ch
+    } else if (quote === '"') {
+      if (ch === '"') quote = null
+      else current += ch
+    } else if (ch === "'") { quote = "'"; has = true }
+    else if (ch === '"') { quote = '"'; has = true }
+    else if (ch === ' ' || ch === '\t') {
+      if (has || current !== '') { words.push(current); current = ''; has = false }
+    } else current += ch
+  }
+  if (has || current !== '') words.push(current)
+  return words
+}
+
+function routerDirs(taskDir) {
+  return readdirSync(taskDir).filter((name) => name.startsWith('router-pi-'))
+}
+
+function readRouterDoc(taskDir) {
+  const entries = routerDirs(taskDir)
+  assert.equal(entries.length, 1)
+  return { name: entries[0], doc: JSON.parse(readFileSync(join(taskDir, entries[0], 'models.json'), 'utf8')) }
+}
+
+function agentDirOf(command) {
+  const entry = shellWords(command).find((word) => word.startsWith('PI_CODING_AGENT_DIR='))
+  assert.ok(entry, 'expected PI_CODING_AGENT_DIR in the composed command')
+  return entry.slice('PI_CODING_AGENT_DIR='.length)
+}
+
+function piRouterShape(taskDir, url) {
+  return {
+    role: 'builder', model: 'openai-codex/gpt-5.6-luna', promptFile: '/tmp/prompt.md',
+    tools: 'Read', deny: 'Task,Agent', taskDir, bootBrief: 'boot',
+    env: { [ROUTER_ATTEMPT_URL_ENV]: url },
+  }
+}
+
+function claudeRouterShape(url) {
+  return {
+    role: 'builder', model: 'sonnet', promptFile: '/tmp/prompt.md',
+    tools: 'Read', deny: 'Task,Agent', taskDir: '/tmp/task', bootBrief: 'boot',
+    env: { [ROUTER_ATTEMPT_URL_ENV]: url },
+  }
+}
+
+test('A1', () => {
+  const dir = scratchDir('b896-a1-')
+  const shape = {
+    role: 'builder', model: 'anthropic/claude-opus-5', promptFile: '/tmp/prompt.md',
+    tools: 'Read', deny: 'Task,Agent', taskDir: dir, bootBrief: 'boot',
+  }
+  const expected = `env DEVTEAM_WORKER=1 CREW_ROLE=builder CREW_TASK_DIR="${dir}" pi --model anthropic/claude-opus-5 --tools "read,bash,edit,write,grep,find,ls" --no-extensions --no-skills --append-system-prompt "/tmp/prompt.md" "boot"`
+  assert.equal(seatCommand({ ...shape, env: {} }), expected)
+  if (process.env[ROUTER_ATTEMPT_URL_ENV] === undefined) assert.equal(seatCommand(shape), expected)
+  assert.doesNotMatch(seatCommand({ ...shape, env: {} }), /(^|\s)--provider(\s|$|=)/)
+  assert.ok(!seatCommand({ ...shape, env: {} }).includes('baseUrl'))
+  assert.ok(!seatCommand({ ...shape, env: {} }).includes('router-pi-'))
+  assert.deepEqual(readdirSync(dir), [])
+})
+
+test('B1', () => {
+  const shape = {
+    role: 'builder', model: 'sonnet', promptFile: '/tmp/prompt.md',
+    tools: 'Read', deny: 'Task,Agent', taskDir: '/tmp/task', bootBrief: 'boot',
+  }
+  const expected = `env DEVTEAM_WORKER=1 CREW_ROLE=builder CREW_TASK_DIR="/tmp/task" CREW_FFF=0 CREW_FFF_NODE="" CREW_FFF_HOOK="" claude --model sonnet --permission-mode bypassPermissions --strict-mcp-config --mcp-config "/tmp/task/mcp/builder.json" --settings "${PANE_USAGE_SETTINGS}" --allowedTools "Read" --disallowedTools "Task,Agent,mcp__*" --append-system-prompt-file "/tmp/prompt.md" "boot"`
+  assert.equal(claudeSeatCommand({ ...shape, env: {} }), expected)
+  if (process.env[ROUTER_ATTEMPT_URL_ENV] === undefined) assert.equal(claudeSeatCommand(shape), expected)
+  assert.ok(!claudeSeatCommand({ ...shape, env: {} }).includes('ANTHROPIC_BASE_URL'))
+})
+
+test('C1', () => {
+  const dir = scratchDir('b896-c1-')
+  const url = 'http://127.0.0.1:11/a/c1-token-7q/'
+  const cmd = seatCommand(piRouterShape(dir, url))
+  const { name, doc } = readRouterDoc(dir)
+  assert.deepEqual(doc, { providers: { 'openai-codex': { baseUrl: url } } })
+  assert.ok(cmd.includes(`PI_CODING_AGENT_DIR="${join(dir, name)}"`))
+  assert.ok(cmd.includes('--provider openai-codex'))
+})
+
+test('D1', () => {
+  const dir = scratchDir('b896-d1-')
+  const url = 'http://127.0.0.1:12/a/d1-token-3k/'
+  const cmd = seatCommand(piRouterShape(dir, url))
+  const words = shellWords(cmd)
+  assert.equal(words.filter((word) => word === '--provider').length, 1)
+  const flag = words.indexOf('--provider')
+  assert.notEqual(flag, -1)
+  const { doc } = readRouterDoc(dir)
+  assert.deepEqual(Object.keys(doc.providers), [words[flag + 1]])
+  assert.equal(doc.providers[words[flag + 1]].baseUrl, url)
+})
+
+test('E1', () => {
+  const url = 'http://127.0.0.1:13/a/e1-token-9z/'
+  const cmd = claudeSeatCommand(claudeRouterShape(url))
+  const entries = shellWords(cmd).filter((word) => word.startsWith('ANTHROPIC_BASE_URL='))
+  assert.equal(entries.length, 1)
+  assert.equal(entries[0].slice('ANTHROPIC_BASE_URL='.length), url)
+})
+
+test('F1', () => {
+  const dir = scratchDir('b896-f1-')
+  const url = 'http://127.0.0.1:14/a/f1-attempt-4m8x/'
+  seatCommand(piRouterShape(dir, url))
+  const clCmd = claudeSeatCommand(claudeRouterShape(url))
+  const tokenOf = (raw) => {
+    const match = new URL(raw).pathname.match(/^\/a\/([^/]+)\/$/)
+    assert.ok(match, `attempt URL carries no /a/<token>/ path: ${raw}`)
+    return match[1]
+  }
+  const { doc } = readRouterDoc(dir)
+  const piToken = tokenOf(doc.providers['openai-codex'].baseUrl)
+  const clEntry = shellWords(clCmd).find((word) => word.startsWith('ANTHROPIC_BASE_URL='))
+  assert.ok(clEntry)
+  const clToken = tokenOf(clEntry.slice('ANTHROPIC_BASE_URL='.length))
+  assert.ok(piToken.length > 0 && clToken.length > 0)
+  assert.equal(piToken, clToken)
+})
+
+test('G1', () => {
+  const binDir = scratchDir('b896-g1-bin-')
+  const workDir = scratchDir('b896-g1-')
+  const log = join(workDir, 'calls.log')
+  const fake = join(binDir, 'claude')
+  writeFileSync(fake, '#!/bin/sh\nprintf \'call\\n\' >> "$FAKE_CREW_LOG"\nif [ -n "${ANTHROPIC_BASE_URL:-}" ]; then exit 3; fi\nexit 0\n')
+  chmodSync(fake, 0o755)
+  const runEnv = { ...process.env, PATH: `${binDir}${delimiter}${process.env.PATH}`, FAKE_CREW_LOG: log }
+  delete runEnv.ANTHROPIC_BASE_URL
+  const shape = {
+    role: 'builder', model: 'sonnet', promptFile: '/tmp/prompt.md',
+    tools: 'Read', deny: 'Task,Agent', taskDir: '/tmp/task', bootBrief: 'boot',
+  }
+  const routed = spawnSync('sh', ['-c', claudeSeatCommand({ ...shape, env: { [ROUTER_ATTEMPT_URL_ENV]: 'http://127.0.0.1:0/a/dead-token/' } })], { env: runEnv, encoding: 'utf8' })
+  assert.equal(routed.status, 3)
+  assert.equal(readFileSync(log, 'utf8'), 'call\n')
+  const direct = spawnSync('sh', ['-c', claudeSeatCommand({ ...shape, env: {} })], { env: runEnv, encoding: 'utf8' })
+  assert.equal(direct.status, 0)
+  assert.equal(readFileSync(log, 'utf8'), 'call\ncall\n')
+})
+
+test('H1', () => {
+  const dir = scratchDir('b896-h1-')
+  const url = 'http://127.0.0.1:15/a/h1-token/'
+  const shape = {
+    role: 'builder', model: 'anthropic/claude-opus-5', promptFile: '/tmp/prompt.md',
+    tools: 'Read', deny: 'Task,Agent', taskDir: dir, bootBrief: 'boot',
+    env: { [ROUTER_ATTEMPT_URL_ENV]: url },
+  }
+  const first = seatCommand(shape)
+  const second = seatCommand(shape)
+  const a = agentDirOf(first)
+  const b = agentDirOf(second)
+  assert.notEqual(a, b)
+  assert.equal(routerDirs(dir).length, 2)
+  const expected = { providers: { anthropic: { baseUrl: url } } }
+  assert.deepEqual(JSON.parse(readFileSync(join(a, 'models.json'), 'utf8')), expected)
+  assert.deepEqual(JSON.parse(readFileSync(join(b, 'models.json'), 'utf8')), expected)
+})
+
+test('I1', () => {
+  const home = scratchDir('b896-i1-home-')
+  const secret = 'b896-sentinel-auth-secret-zz9'
+  const src = join(home, 'auth.json')
+  writeFileSync(src, JSON.stringify({ access_token: secret }))
+  const before = readFileSync(src, 'utf8')
+  const credentials = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY', 'GH_TOKEN', 'GITHUB_TOKEN', 'ANTHROPIC_AUTH_TOKEN']
+  const env = new Proxy({ [ROUTER_ATTEMPT_URL_ENV]: 'http://127.0.0.1:16/a/i1-token/' }, {
+    get(target, key) {
+      if (typeof key === 'string' && credentials.includes(key)) throw new Error(`credential read refused: ${key}`)
+      return target[key]
+    },
+  })
+  const dir = scratchDir('b896-i1-')
+  const shape = {
+    role: 'builder', model: 'openai-codex/gpt-5.6-luna', promptFile: '/tmp/prompt.md',
+    tools: 'Read', deny: 'Task,Agent', taskDir: dir, bootBrief: 'boot', configDir: home, env,
+  }
+  const piCmd = seatCommand(shape)
+  const clCmd = claudeSeatCommand({ ...shape, configDir: null })
+  assert.ok(!piCmd.includes(secret) && !clCmd.includes(secret))
+  assert.ok(!piCmd.includes(home))
+  const { name, doc } = readRouterDoc(dir)
+  assert.ok(!JSON.stringify(doc).includes(secret))
+  assert.equal(readFileSync(src, 'utf8'), before)
+  const link = join(dir, name, 'auth.json')
+  assert.ok(lstatSync(link).isSymbolicLink())
+  assert.equal(realpathSync(link), realpathSync(src))
+  assert.equal(readFileSync(link, 'utf8'), before)
+})
+
+test('J1', () => {
+  const piSrc = readFileSync(new URL('./adapters/adapter-pi.mjs', import.meta.url), 'utf8')
+  const clSrc = readFileSync(new URL('./adapters/adapter-claude.mjs', import.meta.url), 'utf8')
+  const count = (hay, needle) => hay.split(needle).length - 1
+  assert.equal(count(piSrc + clSrc, "ROUTER_ATTEMPT_URL_ENV = 'CREW_ROUTER_ATTEMPT_URL'"), 1)
+  assert.equal(count(clSrc, 'ROUTER_ATTEMPT_URL_ENV'), 1)
+  assert.equal(count(piSrc + clSrc, 'function routerAttemptUrl('), 1)
+  assert.equal(count(clSrc, 'function routerAttemptUrl'), 0)
+  assert.equal(count(piSrc + clSrc, ROUTER_REFUSAL), 1)
+  assert.ok(clSrc.includes("import { ROUTER_ATTEMPT_URL_ENV, routerAttemptUrl } from './adapter-pi.mjs'"))
+  assert.equal(routerAttemptUrl({}), null)
+  assert.equal(routerAttemptUrl({ [ROUTER_ATTEMPT_URL_ENV]: 'http://127.0.0.1:17/a/j1-token/' }), 'http://127.0.0.1:17/a/j1-token/')
+})
+
+test('K1', () => {
+  const bad = [
+    'https://127.0.0.1:20/a/t/',
+    'http://user:pass@127.0.0.1:20/a/t/',
+    'http://127.0.0.1:20/a/t/?x=1',
+    'http://127.0.0.1:20/a/t/#frag',
+    'http://127.0.0.1:20/a/',
+    'http://127.0.0.1:20/a//',
+    'http://127.0.0.1:20/b/t/',
+    '',
+    'not-a-url',
+    'http://',
+  ]
+  for (const value of bad) {
+    const dir = scratchDir('b896-k1-')
+    const env = { [ROUTER_ATTEMPT_URL_ENV]: value }
+    const piShape = {
+      role: 'builder', model: 'openai-codex/gpt-5.6-luna', promptFile: '/tmp/prompt.md',
+      tools: 'Read', deny: 'Task,Agent', taskDir: dir, bootBrief: 'boot', env,
+    }
+    const clShape = {
+      role: 'builder', model: 'sonnet', promptFile: '/tmp/prompt.md',
+      tools: 'Read', deny: 'Task,Agent', taskDir: '/tmp/task', bootBrief: 'boot', env,
+    }
+    assert.throws(() => seatCommand(piShape), (error) => error.message === ROUTER_REFUSAL, `pi accepted ${JSON.stringify(value)}`)
+    assert.throws(() => claudeSeatCommand(clShape), (error) => error.message === ROUTER_REFUSAL, `claude accepted ${JSON.stringify(value)}`)
+    assert.deepEqual(readdirSync(dir), [], `refused value wrote a launch artifact: ${JSON.stringify(value)}`)
+  }
 })

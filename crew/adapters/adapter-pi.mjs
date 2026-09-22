@@ -1,4 +1,7 @@
 import { fileURLToPath } from 'node:url'
+import { existsSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 
 // crew/adapters/adapter-pi.mjs — the pi agent adapter.
 //
@@ -87,6 +90,25 @@ export function capabilitiesFor({ transport, grants } = {}) {
 // DELIBERATE: that provider routes through the ChatGPT subscription OAuth
 // (verified `pi auth check --provider openai-codex`).
 export const PI_PROVIDERS = Object.freeze({ openai: 'openai-codex', anthropic: 'anthropic', meta: 'openrouter/meta' })
+
+export const ROUTER_ATTEMPT_URL_ENV = 'CREW_ROUTER_ATTEMPT_URL'
+const ROUTER_ATTEMPT_REFUSAL = 'refusing malformed CREW_ROUTER_ATTEMPT_URL (expected http://host/a/<token>/) — refusing a guessed endpoint'
+
+export function routerAttemptUrl(env) {
+  const value = env[ROUTER_ATTEMPT_URL_ENV]
+  if (value === undefined) return null
+  let url
+  try {
+    url = new URL(value)
+  } catch {
+    throw new Error(ROUTER_ATTEMPT_REFUSAL)
+  }
+  if (url.protocol !== 'http:') throw new Error(ROUTER_ATTEMPT_REFUSAL)
+  if (url.username !== '' || url.password !== '') throw new Error(ROUTER_ATTEMPT_REFUSAL)
+  if (url.search !== '' || url.hash !== '') throw new Error(ROUTER_ATTEMPT_REFUSAL)
+  if (!/^\/a\/[^/]+\/$/.test(url.pathname)) throw new Error(ROUTER_ATTEMPT_REFUSAL)
+  return value
+}
 
 // An OWN-property lookup on BOTH halves (#739): a bare bracket read reaches
 // Object.prototype, so a roster provider named `toString` or `constructor`
@@ -229,7 +251,24 @@ export function shellSingleQuote(value) {
 
 const NO_GRANTS = Object.freeze({ tools: [], extensions: [], agents: [], skills: [], advisor: false })
 
-export function seatCommand({ role, model, promptFile, tools, deny, taskDir, bootBrief, effort, grants = NO_GRANTS, configDir = null, advisorCell = null }) {
+export function seatCommand({ role, model, promptFile, tools, deny, taskDir, bootBrief, effort, grants = NO_GRANTS, configDir = null, advisorCell = null, env = process.env }) {
+  const routerUrl = routerAttemptUrl(env)
+  let router = null
+  let agentDir = configDir
+  if (routerUrl !== null) {
+    let provider = null
+    for (const candidate of Object.values(PI_PROVIDERS)) {
+      if (String(model).startsWith(`${candidate}/`) && (provider === null || candidate.length > provider.length)) provider = candidate
+    }
+    if (provider === null) throw new Error(`adapter-pi: no pi provider for router model "${model}" — refusing a guessed endpoint`)
+    const routerDir = mkdtempSync(join(taskDir, 'router-pi-'))
+    writeFileSync(join(routerDir, 'models.json'), `${JSON.stringify({ providers: { [provider]: { baseUrl: routerUrl } } }, null, 2)}\n`)
+    const preRouterDir = configDir !== null && configDir !== undefined ? configDir : join(homedir(), '.pi', 'agent')
+    const authSrc = join(preRouterDir, 'auth.json')
+    if (existsSync(authSrc)) symlinkSync(authSrc, join(routerDir, 'auth.json'))
+    router = { provider, dir: routerDir }
+    agentDir = routerDir
+  }
   // Same env-var contract as the claude adapter (`env`, DEVTEAM_WORKER=1,
   // CREW_ROLE, CREW_TASK_DIR) so plugin-quieting and role/taskDir discovery
   // work regardless of which binary fills the seat.
@@ -307,7 +346,7 @@ export function seatCommand({ role, model, promptFile, tools, deny, taskDir, boo
   const skills = grants?.skills || []
   return [
     'env', 'DEVTEAM_WORKER=1', `CREW_ROLE=${role}`, `CREW_TASK_DIR="${taskDir}"`,
-    ...(configDir !== null && configDir !== undefined ? [`PI_CODING_AGENT_DIR="${configDir}"`] : []),
+    ...(agentDir !== null && agentDir !== undefined ? [`PI_CODING_AGENT_DIR="${agentDir}"`] : []),
     // The advisor activates no tool; --tools stays the complete built-in set.
     ...(advisor ? [
       `${PI_ADVISOR_ENV}=1`,
@@ -322,6 +361,7 @@ export function seatCommand({ role, model, promptFile, tools, deny, taskDir, boo
       : []),
     'pi',
     '--model', model,
+    ...(router ? ['--provider', router.provider] : []),
     ...(effort ? ['--thinking', effort] : []),
     '--tools', `"${activatedTools.join(',')}"`,
     ...(piDeny.length ? ['--exclude-tools', `"${piDeny.join(',')}"`] : []),

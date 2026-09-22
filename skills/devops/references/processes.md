@@ -62,8 +62,8 @@ Exhibit: `crew/crew.mjs@unknown-boot-descendant`.
 
 There is no verb that stops a live lane. `teardown` archives the crew dir and
 reclaims the seats, but it leaves the driver process running, so the operator
-sequence is teardown, then signal the driver by pid, then confirm the session
-reached a terminal row. Measured 2026-09-02 stopping `b389-mutanchor`.
+sequence is teardown, then signal the driver by pid, then prove the driver dead
+and settle the session with `node scripts/factory/ledger.mjs settle <adw-id> --reason <text>`. Measured 2026-09-02 stopping `b389-mutanchor`.
 
 Do not expect SIGTERM to stop a driver. `run` arms SIGTERM and SIGINT handlers
 for the exit marker, and an armed handler suppresses the signal's default
@@ -98,3 +98,12 @@ Exhibit: `scripts/factory/ledger.mjs@terminal-actors`.
 
 The cost of skipping the terminal row is a session that reads `running`
 forever: two were found in the live ledger, one of them 4.4 days old (#877).
+
+After SIGKILL, run `node scripts/factory/ledger.mjs settle <adw-id> --reason <text>` to record the operator terminal row.
+
+`settle` refuses a live driver, an unknown or otherwise unprovable driver death,
+an absent adw id, and an already-terminal session; it never consults the retired
+`processes` table. `--reason` must be non-blank and at most 64 characters, or settle
+refuses and writes nothing. A run with no run_links row or no `run.pid` (run.pid is
+written only by dispatch-batch) cannot prove death, so settle always refuses for it. A proven death writes one terminal row: `aborted`/`aborted`
+with actor `operator` and the operator's non-blank `--reason` text.

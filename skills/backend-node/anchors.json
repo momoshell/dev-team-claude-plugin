@@ -35,11 +35,11 @@
   "scripts/factory/reap-stale.mjs:80": "export const REAP_ACCOUNTING = Object.freeze",
   "crew/pi/extensions/subagent.test.mjs:473": "usage is a complete pi Usage or absent",
   "crew/drive-review.test.mjs:1629": "assert.deepEqual([...DECISIONS], ['bounce', 'bounce-builder', 'bounce-reviewer', 'accept', 'escalate'])",
-  "scripts/factory/ledger.mjs:7069": "function refuseUnknownFlags(verb, flags)",
-  "scripts/factory/ledger.mjs:7036": "const VERB_FLAGS = Object.freeze",
-  "scripts/factory/ledger.mjs:7077": "unknown flag --${name}",
-  "scripts/factory/ledger.mjs:8488": "unknown verb: ${verb}",
   "scripts/factory/ledger.mjs:3928": "requireEnum(input.decision, CI_DECISIONS",
   "crew/drive-review.test.mjs:1628": "Object.isFrozen(DECISIONS) && Object.isFrozen(LIMITS)",
-  "crew/drive-review.test.mjs:1627": "DECISIONS and LIMITS are the frozen public contract"
+  "crew/drive-review.test.mjs:1627": "DECISIONS and LIMITS are the frozen public contract",
+  "scripts/factory/ledger.mjs:7191": "function refuseUnknownFlags(verb, flags)",
+  "scripts/factory/ledger.mjs:7157": "const VERB_FLAGS = Object.freeze",
+  "scripts/factory/ledger.mjs:7199": "unknown flag --${name}",
+  "scripts/factory/ledger.mjs:8618": "unknown verb: ${verb}"
 }

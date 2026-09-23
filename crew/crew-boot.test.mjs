@@ -1855,14 +1855,14 @@ test('pane boot snapshots before cmux and leaves no crew record when snapshottin
 
 test('model-not-in-catalog is closed for canonical cells while pure and raw band checks remain exempt', () => {
   const ladder = loadLadder()
-  const canonical = { builder: { provider: 'openai', id: 'gpt-5.6-sol' } }
+  const canonical = { builder: { provider: 'openai', id: 'gpt-6-sol' } }
   assert.throws(
     () => assertBandFloors(canonical, 'build', ladder, { models: {} }),
-    (err) => err.reason === 'model-not-in-catalog' && err.message.includes('openai/gpt-5.6-sol'),
+    (err) => err.reason === 'model-not-in-catalog' && err.message.includes('openai/gpt-6-sol'),
   )
   assert.doesNotThrow(() => assertBandFloors(canonical, 'build', ladder))
   assert.ok(BAND_FLOOR_REFUSALS.includes('model-not-in-catalog'))
-  const raw = { builder: { provider: null, id: null, model: 'openai-codex/gpt-5.6-sol' } }
+  const raw = { builder: { provider: null, id: null, model: 'openai-codex/gpt-6-sol' } }
   assert.doesNotThrow(() => assertBandFloors(raw, 'build', ladder, { models: {}, adapters: { builder: { adapter: { modelString: piModelString } } } }))
 })
 

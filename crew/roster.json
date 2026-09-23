@@ -1,12 +1,12 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-09-20",
+  "updated_at": "2026-09-23",
   "tiers": {
     "mechanical": {
       "lead": null,
       "planner": {
         "provider": "openai",
-        "id": "gpt-5.6-sol",
+        "id": "gpt-6-sol",
         "agent": "pi",
         "effort": "medium"
       },
@@ -18,7 +18,7 @@
       },
       "reviewer": {
         "provider": "anthropic",
-        "id": "claude-opus-5",
+        "id": "claude-opus-5-5",
         "agent": "claude",
         "effort": "medium"
       }
@@ -26,13 +26,13 @@
     "build": {
       "lead": {
         "provider": "anthropic",
-        "id": "claude-opus-5",
+        "id": "claude-opus-5-5",
         "agent": "claude",
         "effort": "high"
       },
       "planner": {
         "provider": "openai",
-        "id": "gpt-5.6-sol",
+        "id": "gpt-6-sol",
         "agent": "pi",
         "effort": "medium"
       },
@@ -44,7 +44,7 @@
       },
       "reviewer": {
         "provider": "anthropic",
-        "id": "claude-opus-5",
+        "id": "claude-opus-5-5",
         "agent": "claude",
         "effort": "high"
       }
@@ -52,13 +52,13 @@
     "judge": {
       "lead": {
         "provider": "anthropic",
-        "id": "claude-opus-5",
+        "id": "claude-opus-5-5",
         "agent": "claude",
         "effort": "high"
       },
       "planner": {
         "provider": "openai",
-        "id": "gpt-5.6-sol",
+        "id": "gpt-6-sol",
         "agent": "pi",
         "effort": "high"
       },
@@ -70,7 +70,7 @@
       },
       "reviewer": {
         "provider": "anthropic",
-        "id": "claude-opus-5",
+        "id": "claude-opus-5-5",
         "agent": "claude",
         "effort": "high"
       },
@@ -82,7 +82,7 @@
         "fallback": [
           {
             "provider": "anthropic",
-            "id": "claude-opus-5",
+            "id": "claude-opus-5-5",
             "agent": "claude",
             "effort": "high"
           }
@@ -91,12 +91,12 @@
     }
   },
   "models": {
-    "anthropic/claude-opus-5": {
-      "cost_in_per_mtok": 5,
-      "cost_out_per_mtok": 25,
-      "cost_cache_read_per_mtok": 0.5,
-      "cost_cache_write_per_mtok": 10,
-      "cache_rate_source": "anthropic published prompt-caching multipliers applied to this entry's own cost_in_per_mtok: cache read 0.10x, 1h-TTL cache write 2.00x. billed_cache_write_tokens collapses the 1h and 5m TTLs into one column, so pricing every cache write at the 1h rate is an explicit lossy convention, not a reconstruction of any session's TTL; 1h is the ratified one because this task's acceptance figures require it and because both sampled b168-paneusage claude-opus-5 pane seats used only 1h writes.",
+    "anthropic/claude-opus-5-5": {
+      "cost_in_per_mtok": 4,
+      "cost_out_per_mtok": 20,
+      "cost_cache_read_per_mtok": 0.2,
+      "cost_cache_write_per_mtok": 5,
+      "cache_rate_source": "models.dev lists cacheRead 0.2 and cacheWrite 5 per Mtok and context 1000000 for anthropic/claude-opus-5-5.",
       "context": 1000000,
       "tags": [
         "reasoning",
@@ -104,7 +104,7 @@
         "judge"
       ],
       "source": "models.dev",
-      "last_verified": "2026-08-13"
+      "last_verified": "2026-09-23"
     },
     "anthropic/claude-sonnet-5": {
       "cost_in_per_mtok": 2,
@@ -136,12 +136,12 @@
       "source": "models.dev",
       "last_verified": "2026-08-13"
     },
-    "openai/gpt-5.6-sol": {
-      "cost_in_per_mtok": 4,
-      "cost_out_per_mtok": 20,
-      "cost_cache_read_per_mtok": 0.4,
-      "cost_cache_write_per_mtok": 0,
-      "cache_rate_source": "openai published prompt-caching rates applied to this entry's own cost_in_per_mtok: cached input 0.10x, and cache writes are not charged, so cost_cache_write_per_mtok is a published 0.00x rate rather than an absent one.",
+    "openai/gpt-6-sol": {
+      "cost_in_per_mtok": 2,
+      "cost_out_per_mtok": 10,
+      "cost_cache_read_per_mtok": 0.2,
+      "cost_cache_write_per_mtok": 2.5,
+      "cache_rate_source": "models.dev lists cache writes at 2.5 per Mtok for openai/gpt-6-sol, contradicting the older statement that OpenAI cache writes are not charged.",
       "context": 1050000,
       "tags": [
         "reasoning",
@@ -149,7 +149,7 @@
         "vendor-diverse"
       ],
       "source": "models.dev",
-      "last_verified": "2026-08-30"
+      "last_verified": "2026-09-23"
     },
     "openai/gpt-5.6-terra": {
       "cost_in_per_mtok": 2,
@@ -166,12 +166,12 @@
       "source": "models.dev",
       "last_verified": "2026-08-13"
     },
-    "openai/gpt-5.6-luna": {
-      "cost_in_per_mtok": 0.2,
-      "cost_out_per_mtok": 1.2,
-      "cost_cache_read_per_mtok": 0.02,
-      "cost_cache_write_per_mtok": 0,
-      "cache_rate_source": "openai published prompt-caching rates applied to this entry's own cost_in_per_mtok: cached input 0.10x, and cache writes are not charged, so cost_cache_write_per_mtok is a published 0.00x rate rather than an absent one.",
+    "openai/gpt-6-luna": {
+      "cost_in_per_mtok": 0.1,
+      "cost_out_per_mtok": 0.5,
+      "cost_cache_read_per_mtok": 0.01,
+      "cost_cache_write_per_mtok": 0.125,
+      "cache_rate_source": "models.dev lists cacheRead 0.01 and cacheWrite 0.125 per Mtok and context 1050000 for openai/gpt-6-luna.",
       "context": 1050000,
       "tags": [
         "reasoning",
@@ -180,7 +180,7 @@
         "coding"
       ],
       "source": "models.dev",
-      "last_verified": "2026-08-13"
+      "last_verified": "2026-09-23"
     },
     "anthropic/claude-fable-5": {
       "cost_in_per_mtok": 10,
@@ -245,16 +245,16 @@
       "cost_out_per_mtok": 50,
       "cost_cache_read_per_mtok": 1,
       "cost_cache_write_per_mtok": 12.5,
-      "cache_rate_source": "pi's model directory publishes these rates directly for openai-codex/gpt-6-astra rather than as multipliers of this entry's cost_in_per_mtok: cacheRead 1.00 and cacheWrite 12.50 per Mtok. The directory also declares a second price tier above 272000 input tokens (input 20, output 50->75, cacheRead 2, cacheWrite 25); that tier is NOT represented here because the schema carries one rate per column, and it is unreachable within a single request since the tier threshold equals this model's whole context window. A conversation billed above the threshold would be underpriced by this entry.",
-      "context": 272000,
+      "cache_rate_source": "models.dev lists cacheRead 1 and cacheWrite 12.5 per Mtok and context 1050000 for openai/gpt-6-astra; the pi model directory (last_verified 2026-09-16) recorded context 272000 with a second price tier above 272000 input tokens (input 20, output 75, cacheRead 2, cacheWrite 25) that this single-rate entry cannot represent — at context 1050000 that threshold is reachable in one request, and a request billed above it would be underpriced by this entry.",
+      "context": 1050000,
       "tags": [
         "reasoning",
         "tool-call",
         "vendor-diverse",
         "frontier"
       ],
-      "source": "~/.pi/agent/models-store.json (pi model directory, provider openai-codex)",
-      "last_verified": "2026-09-16"
+      "source": "models.dev",
+      "last_verified": "2026-09-23"
     },
     "meta/muse-spark-1.3-contributor": {
       "cost_in_per_mtok": 0.1,

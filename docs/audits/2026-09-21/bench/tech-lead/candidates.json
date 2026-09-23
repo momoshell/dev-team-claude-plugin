@@ -6,13 +6,13 @@
   "candidates": [
     {
       "provider": "anthropic",
-      "id": "claude-opus-5",
+      "id": "claude-opus-5-5",
       "agent": "claude",
       "effort": "medium"
     },
     {
       "provider": "openai",
-      "id": "gpt-5.6-sol",
+      "id": "gpt-6-sol",
       "agent": "pi",
       "effort": "medium"
     },
@@ -48,7 +48,7 @@
     },
     {
       "provider": "openai",
-      "id": "gpt-5.6-luna",
+      "id": "gpt-6-luna",
       "agent": "pi",
       "effort": "medium"
     }

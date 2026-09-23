@@ -1521,7 +1521,7 @@ test('resolveTier(mechanical) seats no lead and carries the builder cell verbati
   const r = resolveTier(roster, 'mechanical', {})
   assert.deepEqual(r.roles, ['planner', 'builder', 'reviewer'])
   assert.equal(r.seats.lead, undefined)
-  assert.deepEqual(r.seats.builder, { agent: 'pi', effort: 'max', provider: 'openai', id: 'gpt-5.6-luna', model: null })
+  assert.deepEqual(r.seats.builder, { agent: 'pi', effort: 'max', provider: 'openai', id: 'gpt-6-luna', model: null })
 })
 
 test('resolveTier(judge) seats every role in canonical order, tech-lead last', () => {
@@ -1635,7 +1635,7 @@ test('roster transport policies are closed, conditional, and absent by default',
 
 test('resolveTier carries declared fallback chains and leaves absent keys absent', () => {
   const r = resolveTier(roster, 'judge', {})
-  assert.deepEqual(r.seats['tech-lead'].fallback, [{ provider: 'anthropic', id: 'claude-opus-5', agent: 'pi', effort: 'xhigh' }])
+  assert.deepEqual(r.seats['tech-lead'].fallback, [{ provider: 'anthropic', id: 'claude-opus-5-5', agent: 'pi', effort: 'xhigh' }])
   for (const role of ['lead', 'planner', 'builder', 'reviewer']) assert.equal(Object.hasOwn(r.seats[role], 'fallback'), false)
 })
 
@@ -2007,8 +2007,8 @@ test('resolveSeatModels: an agent-only override keeps the roster cell and transl
     agent: 'claude',
     effort: roster.tiers.build.reviewer.effort,
     provider: 'openai',
-    id: 'gpt-5.6-sol',
-    model: 'gpt-5.6-sol',
+    id: 'gpt-6-sol',
+    model: 'gpt-6-sol',
   })
 })
 
@@ -2022,9 +2022,9 @@ test('resolveSeatModels end to end through the REAL adapters, on the fixture ros
     reviewer: { name: 'pi', adapter: piMod },
   }
   const out = resolveSeatModels(seats, adapters)
-  assert.equal(out.builder.model, 'openai-codex/gpt-5.6-luna')
-  assert.equal(out.reviewer.model, 'openai-codex/gpt-5.6-sol')
-  assert.equal(out.planner.model, 'claude-opus-5')
+  assert.equal(out.builder.model, 'openai-codex/gpt-6-luna')
+  assert.equal(out.reviewer.model, 'openai-codex/gpt-6-sol')
+  assert.equal(out.planner.model, 'claude-opus-5-5')
 
   const judge = resolveTier(roster, 'judge', {})
   const judgeOut = resolveSeatModels(judge.seats, {
@@ -2034,8 +2034,8 @@ test('resolveSeatModels end to end through the REAL adapters, on the fixture ros
     reviewer: { name: 'claude', adapter: claudeMod },
     'tech-lead': { name: 'pi', adapter: piMod },
   })
-  assert.equal(judgeOut['tech-lead'].model, 'openai-codex/gpt-5.6-sol')
-  assert.equal(judgeOut['tech-lead'].fallback[0].model, 'anthropic/claude-opus-5')
+  assert.equal(judgeOut['tech-lead'].model, 'openai-codex/gpt-6-sol')
+  assert.equal(judgeOut['tech-lead'].fallback[0].model, 'anthropic/claude-opus-5-5')
   assert.equal(judgeOut['tech-lead'].fallback[0].effort, 'xhigh')
 })
 
@@ -2090,7 +2090,7 @@ test('assertDefBandFloors refuses below-floor and unknown pinned models', () => 
     () => assertDefBandFloors(defs('anthropic/no-such-model'), 'build', ladder, { adapters }),
     (err) => err.reason === 'band-unknown' && BAND_FLOOR_REFUSALS.includes(err.reason),
   )
-  assert.doesNotThrow(() => assertDefBandFloors(defs('anthropic/claude-opus-5'), 'build', ladder, { adapters }))
+  assert.doesNotThrow(() => assertDefBandFloors(defs('anthropic/claude-opus-5-5'), 'build', ladder, { adapters }))
   assert.doesNotThrow(() => assertDefBandFloors([], 'not-a-tier', ladder, { adapters }))
 })
 
@@ -2171,13 +2171,13 @@ test('raw overrides resolve through the pi adapter namespace and never by textua
   const adapter = { modelString: piModelString }
   const ctx = { adapters: { builder: { adapter } } }
   const raw = (model) => ({ builder: { provider: null, id: null, model } })
-  assert.equal(seatModelKey(raw('openai-codex/gpt-5.6-luna').builder), 'openai-codex/gpt-5.6-luna')
-  assert.deepEqual(bandForMember(ladder, 'openai/gpt-5.6-luna'), { member: 'openai/gpt-5.6-luna', band: 'utility' })
-  assert.deepEqual(bandForRaw(ladder, 'openai-codex/gpt-5.6-luna', adapter), { member: 'openai/gpt-5.6-luna', band: 'utility' })
-  assert.deepEqual(seatBand(ladder, raw('openai-codex/gpt-5.6-luna').builder, { adapter }), { member: 'openai/gpt-5.6-luna', band: 'utility' })
-  assert.doesNotThrow(() => assertBandFloors(raw('openai-codex/gpt-5.6-luna'), 'build', ladder, ctx))
+  assert.equal(seatModelKey(raw('openai-codex/gpt-6-luna').builder), 'openai-codex/gpt-6-luna')
+  assert.deepEqual(bandForMember(ladder, 'openai/gpt-6-luna'), { member: 'openai/gpt-6-luna', band: 'utility' })
+  assert.deepEqual(bandForRaw(ladder, 'openai-codex/gpt-6-luna', adapter), { member: 'openai/gpt-6-luna', band: 'utility' })
+  assert.deepEqual(seatBand(ladder, raw('openai-codex/gpt-6-luna').builder, { adapter }), { member: 'openai/gpt-6-luna', band: 'utility' })
+  assert.doesNotThrow(() => assertBandFloors(raw('openai-codex/gpt-6-luna'), 'build', ladder, ctx))
   assert.throws(() => assertBandFloors(raw('anthropic/claude-haiku-4-5'), 'build', ladder, ctx), (err) => err.reason === 'band-below-floor' && err.message.includes('anthropic/claude-haiku-4-5'))
-  assert.throws(() => assertBandFloors(raw('openai/gpt-5.6-luna'), 'build', ladder, ctx), (err) => err.reason === 'band-unknown')
+  assert.throws(() => assertBandFloors(raw('openai/gpt-6-luna'), 'build', ladder, ctx), (err) => err.reason === 'band-unknown')
 })
 
 test('raw overrides use the claude adapter namespace and unknown adapters prove nothing', () => {
@@ -2245,11 +2245,11 @@ test('a source:"local" roster model is refused from every judge seat at every ra
 
 test('a ratified judge roster fixture is admitted unchanged with its own model catalog in hand', () => {
   const { seats } = resolveTier(roster, 'judge', {})
-  assert.equal(seatModelKey(seats.lead), 'anthropic/claude-opus-5')
-  assert.equal(seatModelKey(seats.planner), 'anthropic/claude-opus-5')
-  assert.equal(seatModelKey(seats.builder), 'openai/gpt-5.6-luna')
-  assert.equal(seatModelKey(seats.reviewer), 'anthropic/claude-opus-5')
-  assert.equal(seatModelKey(seats['tech-lead']), 'openai/gpt-5.6-sol')
+  assert.equal(seatModelKey(seats.lead), 'anthropic/claude-opus-5-5')
+  assert.equal(seatModelKey(seats.planner), 'anthropic/claude-opus-5-5')
+  assert.equal(seatModelKey(seats.builder), 'openai/gpt-6-luna')
+  assert.equal(seatModelKey(seats.reviewer), 'anthropic/claude-opus-5-5')
+  assert.equal(seatModelKey(seats['tech-lead']), 'openai/gpt-6-sol')
   assert.doesNotThrow(() => assertBandFloors(seats, 'judge', loadLadder(), { models: roster.models }))
 })
 
@@ -2358,4 +2358,44 @@ test('assertPanelAgentsDistinct refuses only equal agents under the flag', () =>
     assertPanelAgentsDistinct({ reviewerAgent: 'claude', techLeadAgent: 'pi', distinct: true }),
     { reviewer: 'claude', 'tech-lead': 'pi' },
   )
+})
+
+test('shipped roster and ladder seat the ratified Sol, Luna and Opus successors', () => {
+  const shipped = JSON.parse(readFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
+  assert.equal(shipped.updated_at, '2026-09-23')
+  for (const tier of ['mechanical', 'build', 'judge']) {
+    assert.equal(shipped.tiers[tier].planner.id, 'gpt-6-sol')
+    assert.equal(shipped.tiers[tier].reviewer.id, 'claude-opus-5-5')
+  }
+  for (const tier of ['build', 'judge']) {
+    assert.equal(shipped.tiers[tier].lead.id, 'claude-opus-5-5')
+  }
+  assert.deepEqual(shipped.tiers.judge['tech-lead'].fallback.map((entry) => entry.id), ['claude-opus-5-5'])
+  const expectedCatalog = {
+    'openai/gpt-6-sol': [2, 10, 0.2, 2.5, 1050000],
+    'openai/gpt-6-luna': [0.1, 0.5, 0.01, 0.125, 1050000],
+    'openai/gpt-6-astra': [10, 50, 1, 12.5, 1050000],
+    'anthropic/claude-opus-5-5': [4, 20, 0.2, 5, 1000000],
+  }
+  for (const [key, prices] of Object.entries(expectedCatalog)) {
+    const model = shipped.models[key]
+    assert.deepEqual([model.cost_in_per_mtok, model.cost_out_per_mtok, model.cost_cache_read_per_mtok, model.cost_cache_write_per_mtok, model.context], prices)
+    assert.equal(model.source, 'models.dev')
+    assert.equal(model.last_verified, '2026-09-23')
+  }
+  for (const key of ['openai/gpt-5.6-sol', 'openai/gpt-5.6-luna', 'anthropic/claude-opus-5']) {
+    assert.equal(Object.hasOwn(shipped.models, key), false)
+  }
+  assert.equal(shipped.models['openai/gpt-6-sol'].cache_rate_source, 'models.dev lists cache writes at 2.5 per Mtok for openai/gpt-6-sol, contradicting the older statement that OpenAI cache writes are not charged.')
+  assert.equal(shipped.models['openai/gpt-6-astra'].cache_rate_source, 'models.dev lists cacheRead 1 and cacheWrite 12.5 per Mtok and context 1050000 for openai/gpt-6-astra; the pi model directory (last_verified 2026-09-16) recorded context 272000 with a second price tier above 272000 input tokens (input 20, output 75, cacheRead 2, cacheWrite 25) that this single-rate entry cannot represent — at context 1050000 that threshold is reachable in one request, and a request billed above it would be underpriced by this entry.')
+  const ladder = JSON.parse(readFileSync(new URL('./model-ladder.json', import.meta.url), 'utf8'))
+  const frontier = ladder.bands.find((band) => band.band === 'frontier')
+  const utility = ladder.bands.find((band) => band.band === 'utility')
+  assert.ok(frontier.members.includes('anthropic/claude-opus-5-5'))
+  assert.ok(frontier.members.includes('openai/gpt-6-sol'))
+  assert.ok(utility.members.includes('openai/gpt-6-luna'))
+  for (const band of [frontier, utility]) {
+    assert.match(String(band.membership_basis), /operator ratification on 2026-09-23/)
+    assert.match(String(band.membership_basis), /no successor benchmark score was supplied/)
+  }
 })

@@ -2374,7 +2374,7 @@ test('shipped roster and ladder seat the ratified Sol, Luna and Opus successors'
   const expectedCatalog = {
     'openai/gpt-6-sol': [2, 10, 0.2, 2.5, 1050000],
     'openai/gpt-6-luna': [0.1, 0.5, 0.01, 0.125, 1050000],
-    'anthropic/claude-opus-5-5': [4, 20, 0.2, 5, 1000000],
+    'anthropic/claude-opus-5-5': [4, 20, 0.2, 8, 1000000],
   }
   for (const [key, prices] of Object.entries(expectedCatalog)) {
     const model = shipped.models[key]
@@ -2385,7 +2385,8 @@ test('shipped roster and ladder seat the ratified Sol, Luna and Opus successors'
   for (const key of ['openai/gpt-5.6-sol', 'openai/gpt-5.6-luna', 'anthropic/claude-opus-5']) {
     assert.equal(Object.hasOwn(shipped.models, key), false)
   }
-  assert.equal(shipped.models['openai/gpt-6-sol'].cache_rate_source, 'models.dev lists cache writes at 2.5 per Mtok for openai/gpt-6-sol, contradicting the older statement that OpenAI cache writes are not charged.')
+  assert.match(shipped.models['openai/gpt-6-sol'].cache_rate_source, /second price tier above 272000 input tokens/)
+  assert.match(shipped.models['openai/gpt-6-luna'].cache_rate_source, /second price tier above 272000 input tokens/)
   // Astra is seated through pi's openai-codex route, which serves a 272K context; its second
   // price tier starts at 272000 input tokens, so it stays unreachable in one request only while
   // the entry keeps the route's context, not the generic API figure models.dev lists.

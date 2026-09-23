@@ -3,11 +3,12 @@ import assert from 'node:assert/strict'
 import {
   appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync,
 } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { scratchDir } from '../test/helpers.mjs'
 import {
-  ACP_CLIENT_CAPABILITIES, ACP_UPDATE_KINDS, acpClient,
+  ACP_CLIENT_CAPABILITIES, ACP_UPDATE_KINDS, acpClient, acpSeatPaths,
 } from './acp-client.mjs'
+import { seatCommandPath } from './headless-rpc.mjs'
 import { REGISTER_ROOT } from './capabilities.mjs'
 
 const FIXTURES = join(REGISTER_ROOT, 'test', 'fixtures', 'acp')
@@ -384,4 +385,118 @@ test('the client has only built-in or relative imports and the package has no ru
   const specifiers = [...source.matchAll(/from\s+'([^']+)'/g)].map((match) => match[1])
   assert.equal(specifiers.length > 0, true)
   assert.equal(specifiers.every((specifier) => specifier.startsWith('node:') || specifier.startsWith('./') || specifier.startsWith('../')), true)
+})
+
+test('E1', () => {
+  const root = scratchDir('acp-e1-parity-')
+  try {
+    const acpRoot = join(root, 'acp')
+    assert.equal(acpSeatPaths(acpRoot, 'builder').fifo, seatCommandPath(root, 'builder'))
+    assert.equal(acpSeatPaths(acpRoot, 'builder').fifo.startsWith(join(acpRoot, 'builder')), false)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+
+  const deadRoot = scratchDir('acp-e1-dead-')
+  try {
+    const acpRoot = join(deadRoot, 'acp')
+    mkdirSync(join(acpRoot, 'builder'), { recursive: true })
+    writeFileSync(join(acpRoot, 'builder', 'stream.jsonl'), '')
+    const fifo = acpSeatPaths(acpRoot, 'builder').fifo
+    const api = acpClient({
+      launch: { bin: '/bin/false', args: [], env: {} },
+      dir: acpRoot,
+      cwd: deadRoot,
+      role: 'builder',
+      sinks: {},
+      deps: {
+        pid: 900,
+        spawn: () => ({ pid: 901, unref() {} }),
+        openSync: () => 7,
+        writeSync: () => {},
+        closeSync: () => {},
+        kill: () => { writeFileSync(join(acpRoot, 'builder', 'exit'), '0') },
+        now: () => Date.now(),
+        sleep: () => {},
+        log: () => {},
+      },
+    })
+    api.start()
+    assert.equal(existsSync(dirname(fifo)), true)
+    writeFileSync(fifo, '')
+    const result = api.close()
+    assert.equal(result.outcome, 'proven')
+    assert.equal(existsSync(fifo), false)
+  } finally {
+    rmSync(deadRoot, { recursive: true, force: true })
+  }
+
+  let clock = 0
+  const heldRoot = scratchDir('acp-e1-held-')
+  try {
+    const acpRoot = join(heldRoot, 'acp')
+    mkdirSync(join(acpRoot, 'builder'), { recursive: true })
+    writeFileSync(join(acpRoot, 'builder', 'stream.jsonl'), '')
+    const fifo = acpSeatPaths(acpRoot, 'builder').fifo
+    const api = acpClient({
+      launch: { bin: '/bin/false', args: [], env: {} },
+      dir: acpRoot,
+      cwd: heldRoot,
+      role: 'builder',
+      sinks: {},
+      deps: {
+        pid: 900,
+        spawn: () => ({ pid: 901, unref() {} }),
+        openSync: () => 7,
+        writeSync: () => {},
+        closeSync: () => {},
+        kill: () => true,
+        now: () => clock++,
+        sleep: () => {},
+        log: () => {},
+      },
+    })
+    api.start()
+    assert.equal(existsSync(dirname(fifo)), true)
+    writeFileSync(fifo, '')
+    const result = api.close()
+    assert.notEqual(result.outcome, 'proven')
+    assert.equal(existsSync(fifo), true)
+  } finally {
+    rmSync(heldRoot, { recursive: true, force: true })
+  }
+})
+
+test('RV1-1', () => {
+  const root = scratchDir('acp-rv1-1-')
+  let clock = 0
+  try {
+    const acpRoot = join(root, 'acp')
+    mkdirSync(join(acpRoot, 'builder'), { recursive: true })
+    writeFileSync(join(acpRoot, 'builder', 'stream.jsonl'), '')
+    const fifo = acpSeatPaths(acpRoot, 'builder').fifo
+    const api = acpClient({
+      launch: { bin: '/bin/false', args: [], env: {} },
+      dir: acpRoot,
+      cwd: root,
+      role: 'builder',
+      sinks: {},
+      deps: {
+        pid: 900,
+        spawn: () => ({ pid: 901, unref() {} }),
+        openSync: () => 7,
+        writeSync: () => {},
+        closeSync: () => {},
+        kill: () => true,
+        now: () => clock++,
+        sleep: () => {},
+        log: () => {},
+      },
+    })
+    api.start()
+    assert.equal(existsSync(dirname(fifo)), true)
+    api.close()
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
 })

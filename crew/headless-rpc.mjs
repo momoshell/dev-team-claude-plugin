@@ -8,7 +8,7 @@ import {
   openSync as fsOpenSync, writeSync as fsWriteSync, closeSync as fsCloseSync,
   renameSync as fsRenameSync, statSync as fsStatSync, constants as fsConstants,
 } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { spawn as cpSpawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 
@@ -59,7 +59,11 @@ export function teardownOutcome(liveness) {
 }
 
 export const SEAT_COMMAND_FILE = 'cmd.fifo'
-export function seatCommandPath(taskDir, role) {
+export function seatCommandPath(crewDir, role) {
+  return join(crewDir, 'rpc', role, SEAT_COMMAND_FILE)
+}
+// Where a worker spawned before #1496 reads its commands: inside the seat-visible task/ tree.
+export function legacySeatCommandPath(taskDir, role) {
   return join(taskDir, 'headless-rpc', role, SEAT_COMMAND_FILE)
 }
 export function steerFrame(message) { return { type: 'steer', message } }
@@ -881,6 +885,16 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
   }
   function seatDir(role) { return join(root, role) }
   function seatFile(role, name) { return join(seatDir(role), name) }
+  // Workers spawned before #1496 read commands from a FIFO inside the seat dir, under
+  // the seat-visible task/ tree. One still live across the upgrade keeps that pipe: it
+  // is adopted where it is (its stdin cannot move, and killing it would drop its turn),
+  // so it keeps the grep-hang hazard until it ends. No new spawn ever uses the path.
+  function legacySeatFifo(role) { return legacySeatCommandPath(taskDir || paths.taskDir, role) }
+  function unlinkSeatFifos(role) {
+    for (const path of [seatCommandPath(paths.dir, role), legacySeatFifo(role)]) {
+      try { if (exists(path)) unlink(path) } catch {}
+    }
+  }
   function sessionPath(role) { return seatFile(role, 'session.json') }
   function readJson(path) {
     try { return readJsonTri(path, { existsSync: exists, readFileSync: read }) ?? null }
@@ -1202,7 +1216,9 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
     const dir = seatDir(role)
     mkdir(dir, { recursive: true })
     const stream = seatFile(role, 'stream.jsonl'), stderr = seatFile(role, 'stderr.log')
-    const exit = seatFile(role, 'exit'), pgid = seatFile(role, 'pgid'), fifo = seatFile(role, SEAT_COMMAND_FILE), cmdPath = seatFile(role, 'cmd.json')
+    const exit = seatFile(role, 'exit'), pgid = seatFile(role, 'pgid'), cmdPath = seatFile(role, 'cmd.json')
+    const fifo = seatCommandPath(paths.dir, role)
+    mkdir(dirname(fifo), { recursive: true })
     const old = session(role)
     const sessionId = member.session_id || old.sessionId || uuid()
     const resume = !!(member.started || old.sessionId)
@@ -1218,14 +1234,17 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
     let child = null
     if (marker.verdict === VERDICTS.BUSY && marker.marker?.pid) {
       // Adopt a still-running seat rather than opening a second pi session.
-      fd = open(fifo, fsConstants.O_RDWR | fsConstants.O_NONBLOCK)
-      seat = { role, dir, stream, stderr, exit, pgid, fifo, cmdPath, fd, pid: marker.marker.pid, sessionId, readOffset: fileSize(stream), rest: Buffer.alloc(0), responses: new Map(), turn: null, settling: null, signalled: false, deliveryFailed: false, handle: marker.handle }
+      const adoptFifo = !exists(fifo) && exists(legacySeatFifo(role)) ? legacySeatFifo(role) : fifo
+      fd = open(adoptFifo, fsConstants.O_RDWR | fsConstants.O_NONBLOCK)
+      seat = { role, dir, stream, stderr, exit, pgid, fifo: adoptFifo, cmdPath, fd, pid: marker.marker.pid, sessionId, readOffset: fileSize(stream), rest: Buffer.alloc(0), responses: new Map(), turn: null, settling: null, signalled: false, deliveryFailed: false, handle: marker.handle }
       seats.set(role, seat)
       ensureReuse.set(seat, true)
       return seat
     }
     if (marker.verdict === VERDICTS.UNRESOLVABLE) throw staged('rpc-unresolvable-reservation', `rpc seat ${role} has an unresolvable reservation`, role)
     if (marker.verdict === VERDICTS.RECLAIMABLE) { try { store.clear(marker.handle) } catch {} }
+    // No live worker holds a legacy pipe past this point: a stale one would hang grep -r task/.
+    try { if (exists(legacySeatFifo(role))) unlink(legacySeatFifo(role)) } catch {}
     const adapter = adapterFor(adapters, role)
     const commandFactory = adapter?.rpcCommand || rpcCommand
     const command = commandFactory.call(adapter, {
@@ -1446,6 +1465,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
     }
     try { closeFd(seat.fd) } catch {}
     const proof = proveGroupDead(seat)
+    if (proof.liveness === LIVENESS.DEAD) unlinkSeatFifos(role)
     // Do not clear here: proveGroupDead retains an unproven reservation so a
     // later reader can still find the worker whose death we could not prove.
     // The session id survives a retire on purpose: ensureProcess will resume it
@@ -1803,6 +1823,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
         const proof = proveGroupDead({
           role, pid: targetPid, exit: seatFile(role, 'exit'), handle: current.handle,
         })
+        if (proof.liveness === LIVENESS.DEAD) unlinkSeatFifos(role)
         rows.push(row(role, {
           ...common, outcome: teardownOutcome(proof.liveness), reason: proof.reason, forced: false,
         }))

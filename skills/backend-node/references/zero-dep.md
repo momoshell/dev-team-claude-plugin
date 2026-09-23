@@ -52,8 +52,8 @@ The cost of skipping it is paid at process startup, when the backend loads.
 When a first-party edge is allowed for a leaf exception, pin that target's own
 leaf property too; intentional non-leaf helpers such as `crew/headless-rpc.mjs`
 are outside this rule.
-Exhibit: `crew/daemon.test.mjs:259`, `crew/daemon.test.mjs:261`, and
-`crew/daemon.test.mjs:263`.
+Exhibit: `crew/daemon.test.mjs:261`, `crew/daemon.test.mjs:263`, and
+`crew/daemon.test.mjs:265`.
 
 See `import-firewall.md` for that second boundary.
 The source and its test are the maintenance surface for future dependency changes.

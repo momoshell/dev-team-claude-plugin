@@ -293,14 +293,15 @@ export function catalogEntry(key, rawCatalog, { tags = [], today }) {
 // figure may be right (Opus 5.5 reads at 0.05x), and deciding that is a ratification, not a bump.
 export const RATIFIED_CACHE_MULTIPLIERS = Object.freeze({
   anthropic: Object.freeze({ read: 0.10, write: 2.00 }),
-  openai: Object.freeze({ read: 0.10, write: 0 }),
+  // No write multiplier: gpt-6-sol and gpt-6-luna were ratified at their published, non-zero writes.
+  openai: Object.freeze({ read: 0.10, write: null }),
 })
 export function rateDepartures(key, entry) {
   const ratified = RATIFIED_CACHE_MULTIPLIERS[key.slice(0, key.indexOf('/'))]
   if (!ratified || !Number.isFinite(entry?.cost_in_per_mtok)) return []
   const out = []
   for (const [column, field] of [['read', 'cost_cache_read_per_mtok'], ['write', 'cost_cache_write_per_mtok']]) {
-    if (!Number.isFinite(entry[field])) continue
+    if (!Number.isFinite(entry[field]) || ratified[column] == null) continue
     const expected = entry.cost_in_per_mtok * ratified[column]
     if (Math.abs(entry[field] - expected) > 1e-12) out.push(`${key}: cache ${column} ${entry[field]} per Mtok, not the ratified ${ratified[column].toFixed(2)}x (${expected})`)
   }
@@ -471,13 +472,15 @@ export function replacedBenches(benchRoot, from, fsx = { existsSync, readdirSync
   const benches = []
   const unscanned = []
   const list = (path) => { try { return fsx.readdirSync(path) } catch (err) { unscanned.push(`${path} (${err.code || err.message})`); return [] } }
-  if (!fsx.existsSync(benchRoot)) return { benches, unscanned }
+  if (!fsx.existsSync(benchRoot)) { unscanned.push(`${benchRoot} (absent)`); return { benches, unscanned } }
   for (const day of list(benchRoot)) {
     const bench = join(benchRoot, day, 'bench')
     if (!fsx.existsSync(bench)) continue
     for (const role of list(bench)) {
       const path = join(bench, role, 'candidates.json')
-      try { if (from.has(JSON.parse(fsx.readFileSync(path, 'utf8')).production)) benches.push(path) } catch {}
+      let text
+      try { text = fsx.readFileSync(path, 'utf8') } catch (err) { if (err.code !== 'ENOENT') unscanned.push(`${path} (${err.code || err.message})`); continue }
+      try { if (from.has(JSON.parse(text).production)) benches.push(path) } catch { unscanned.push(`${path} (not JSON)`) }
     }
   }
   return { benches, unscanned }
@@ -485,20 +488,33 @@ export function replacedBenches(benchRoot, from, fsx = { existsSync, readdirSync
 
 const USAGE = 'usage: node crew/roster-refresh.mjs [--roster <path>] [--catalog <path>] [--out <path>] [--apply]'
 
+// Closed argument grammar. Any token it does not know — `--roster=<path>`, a typo, a flag given
+// no value — is refused: under --apply, a flag silently ignored means the SHIPPED roster is
+// rewritten instead of the one named.
+export function parseArgs(argv) {
+  const opts = { help: false, apply: false, roster: null, catalog: null, out: null }
+  for (let i = 0; i < argv.length; i += 1) {
+    const a = argv[i]
+    if (a === '--help') opts.help = true
+    else if (a === '--apply') opts.apply = true
+    else if (a === '--roster' || a === '--catalog' || a === '--out') {
+      const v = argv[i + 1]
+      if (typeof v !== 'string' || v === '' || v.startsWith('--')) throw new Error(`roster-refresh: ${a} was given no path; refusing rather than falling back to a default\n${USAGE}`)
+      opts[a.slice(2)] = v
+      i += 1
+    } else throw new Error(`roster-refresh: unknown argument ${JSON.stringify(a)}; refusing rather than ignoring it\n${USAGE}`)
+  }
+  return opts
+}
+
 if (import.meta.main) {
-  if (process.argv.includes('--help')) {
+  let args
+  try { args = parseArgs(process.argv.slice(2)) } catch (err) { console.error(err.message); process.exit(1) }
+  if (args.help) {
     console.log(USAGE)
     process.exit(0)
   }
-
-  const rosterIdx = process.argv.indexOf('--roster')
-  // A --roster with no value (an unset "$ROSTER", a trailing flag) must never fall back to the
-  // shipped roster: under --apply that would rewrite this checkout's own configuration.
-  if (rosterIdx !== -1 && !process.argv[rosterIdx + 1]) {
-    console.error(`roster-refresh: --roster was given no path; refusing rather than falling back to the shipped roster\n${USAGE}`)
-    process.exit(1)
-  }
-  const rosterPath = rosterIdx !== -1 ? process.argv[rosterIdx + 1] : new URL('./roster.json', import.meta.url)
+  const rosterPath = args.roster ?? new URL('./roster.json', import.meta.url)
   const roster = JSON.parse(readFileSync(rosterPath, 'utf8'))
 
   let before
@@ -509,8 +525,7 @@ if (import.meta.main) {
     process.exit(1)
   }
 
-  const catalogIdx = process.argv.indexOf('--catalog')
-  const catalogPath = catalogIdx !== -1 && process.argv[catalogIdx + 1] ? process.argv[catalogIdx + 1] : null
+  const catalogPath = args.catalog
   let catalog
   if (catalogPath) {
     catalog = JSON.parse(readFileSync(catalogPath, 'utf8'))
@@ -542,9 +557,8 @@ if (import.meta.main) {
 
   console.log(report)
 
-  const outIdx = process.argv.indexOf('--out')
-  if (outIdx !== -1 && process.argv[outIdx + 1]) {
-    writeFileSync(process.argv[outIdx + 1], report)
+  if (args.out) {
+    writeFileSync(args.out, report)
   }
 
   // --apply: move every model the factory uses to the newest version of its family, in the
@@ -557,7 +571,7 @@ if (import.meta.main) {
     ...plan.skipped.map((s) => `- ${s.key}: ${s.reason}`),
   ]
   console.log(planLines.join('\n'))
-  if (process.argv.includes('--apply') && plan.bumps.length) {
+  if (args.apply && plan.bumps.length) {
     const dir = dirname(fileURLToPath(typeof rosterPath === 'string' ? pathToFileURL(resolve(rosterPath)) : rosterPath))
     const read = (name) => { const path = join(dir, name); return { path, doc: JSON.parse(readFileSync(path, 'utf8')) } }
     const today = new Date().toISOString().slice(0, 10)

@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
-import { normalizeCatalog, diffModels, readRosterModels, renderReport, successorOf, planBump, applyBump, catalogEntry, proseMentions, commitWrites, bumpLadder, replaceIds, modelFamily, rateDepartures, replacedBenches } from './roster-refresh.mjs'
+import { parseArgs, normalizeCatalog, diffModels, readRosterModels, renderReport, successorOf, planBump, applyBump, catalogEntry, proseMentions, commitWrites, bumpLadder, replaceIds, modelFamily, rateDepartures, replacedBenches } from './roster-refresh.mjs'
 
 const roster = JSON.parse(readFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
 const schema = JSON.parse(readFileSync(new URL('./roster.schema.json', import.meta.url), 'utf8'))
@@ -691,6 +691,9 @@ test('BOUNDS1 a catalog value outside the schema bounds is refused, not written'
   assert.throws(() => catalogEntry('openai/gpt-6-sol', catalog({ input: 2, output: 10 }, 1.5), { today: '2026-09-23' }), /context is outside/)
   assert.throws(() => catalogEntry('openai/gpt-6-sol', catalog({ input: 2, output: 10, cache_write: -1 }, 1000), { today: '2026-09-23' }), /cache_write is outside/)
   assert.equal(catalogEntry('openai/gpt-6-sol', catalog({ input: 2, output: 10, cache_write: 0 }, 1000), { today: '2026-09-23' }).cost_cache_write_per_mtok, 0)
+  // An ABSENT input or output price is refused too; the bounds check only sees values present.
+  assert.throws(() => catalogEntry('openai/gpt-6-sol', catalog({ output: 10 }, 1000), { today: '2026-09-23' }), /publishes no input\/output price/)
+  assert.throws(() => catalogEntry('openai/gpt-6-sol', catalog({ input: 2 }, 1000), { today: '2026-09-23' }), /publishes no input\/output price/)
 })
 
 // Mutation killed: copying models.dev's anthropic cacheWrite ships the 5-minute rate under the
@@ -841,7 +844,10 @@ test('BETA1 an alpha, beta or deprecated catalog entry is never a successor', ()
 test('DEPART1 a published cache rate off its vendor multiplier is reported, not normalised', () => {
   assert.deepEqual(rateDepartures('anthropic/claude-opus-5-5', { cost_in_per_mtok: 4, cost_cache_read_per_mtok: 0.2, cost_cache_write_per_mtok: 8 }), ['anthropic/claude-opus-5-5: cache read 0.2 per Mtok, not the ratified 0.10x (0.4)'])
   assert.deepEqual(rateDepartures('anthropic/claude-sonnet-5', { cost_in_per_mtok: 2, cost_cache_read_per_mtok: 0.2, cost_cache_write_per_mtok: 4 }), [])
-  assert.equal(rateDepartures('openai/gpt-6-sol', { cost_in_per_mtok: 2, cost_cache_read_per_mtok: 0.2, cost_cache_write_per_mtok: 2.5 }).length, 1)
+  // openai has no ratified write multiplier (gpt-6-sol and gpt-6-luna were ratified as published);
+  // its read convention still holds.
+  assert.deepEqual(rateDepartures('openai/gpt-6-sol', { cost_in_per_mtok: 2, cost_cache_read_per_mtok: 0.2, cost_cache_write_per_mtok: 2.5 }), [])
+  assert.equal(rateDepartures('openai/gpt-6-sol', { cost_in_per_mtok: 2, cost_cache_read_per_mtok: 0.1, cost_cache_write_per_mtok: 2.5 }).length, 1)
   assert.deepEqual(rateDepartures('meta/muse-spark-1.4', { cost_in_per_mtok: 1, cost_cache_read_per_mtok: 0.002 }), [])
 })
 
@@ -862,10 +868,10 @@ test('CLI2 an empty --roster is refused, never the shipped roster', () => {
   try {
     const catalogPath = join(dir, 'catalog.json')
     writeFileSync(catalogPath, '{}')
-    for (const args of [['--roster', ''], ['--roster']]) {
+    for (const args of [['--roster', ''], ['--roster'], [`--roster=${join(dir, 'roster.json')}`], ['--rooster', join(dir, 'roster.json')]]) {
       const result = spawnSync(process.execPath, [REFRESH_TOOL, '--catalog', catalogPath, '--apply', ...args], { encoding: 'utf8' })
       assert.equal(result.status, 1, JSON.stringify(args))
-      assert.match(result.stderr, /--roster was given no path/)
+      assert.match(result.stderr, /given no path|unknown argument/)
     }
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
@@ -890,4 +896,55 @@ test('BENCH1 an unreadable bench directory is named, never fatal', () => {
   const out = replacedBenches(root, new Set(['anthropic/claude-opus-5']), fsx)
   assert.deepEqual(out.benches, ['/r/docs/audits/2026-09-21/bench/reviewer/candidates.json'])
   assert.deepEqual(out.unscanned, ['/r/docs/audits/2026-09-22/bench (EACCES)'])
+  // A malformed candidates.json and an absent root are named too: the scan measured nothing there.
+  const malformed = replacedBenches(root, new Set(), { ...fsx, readdirSync: (p) => (p === root ? ['2026-09-21'] : ['reviewer']), readFileSync: () => '{ not json' })
+  assert.deepEqual(malformed.unscanned, ['/r/docs/audits/2026-09-21/bench/reviewer/candidates.json (not JSON)'])
+  assert.deepEqual(replacedBenches(root, new Set(), { ...fsx, existsSync: () => false }).unscanned, ['/r/docs/audits (absent)'])
+})
+
+// Mutation killed: a grammar that ignores what it does not know reads `--roster=<path>` as no
+// --roster at all, and --apply then rewrites the shipped roster.
+test('ARGS1 the argument grammar is closed', () => {
+  assert.deepEqual(parseArgs(['--roster', 'r.json', '--catalog', 'c.json', '--apply']), { help: false, apply: true, roster: 'r.json', catalog: 'c.json', out: null })
+  for (const argv of [['--roster=r.json'], ['--rooster', 'r.json'], ['--catalog', ''], ['--catalog'], ['--roster', '--apply'], ['r.json']]) {
+    assert.throws(() => parseArgs(argv), /given no path|unknown argument/, JSON.stringify(argv))
+  }
+})
+
+// Mutation killed: writing a document the bump does not change re-serialises it — a hand-compacted
+// routing policy grew from 114 to 344 lines for an apply that named nothing in it.
+test('CLI3 a file the bump does not change keeps its exact bytes', () => {
+  const dir = scratchDir('roster-refresh-cli3-')
+  try {
+    const read = (name) => JSON.parse(readFileSync(new URL(`./${name}`, import.meta.url), 'utf8'))
+    const shipped = read('roster.json')
+    const planner = shipped.tiers.build.planner
+    const current = `${planner.provider}/${planner.id}`
+    const plantedId = planner.id.replace(/\d+/, '0')
+    const planted = `${planner.provider}/${plantedId}`
+    // Only the build planner's seat and its catalog row name the predecessor: the ladder, the
+    // routing policy and the workflow already name the successor, so none of them change.
+    const roster = JSON.parse(JSON.stringify(shipped))
+    roster.tiers.build.planner.id = plantedId
+    roster.models[planted] = shipped.models[current]
+    writeFileSync(join(dir, 'roster.json'), JSON.stringify(roster, null, 2))
+    const compact = {}
+    for (const name of ['model-ladder.json', 'routing-policy.json', 'workflows/full.json']) {
+      mkdirSync(dirname(join(dir, name)), { recursive: true })
+      compact[name] = JSON.stringify(read(name))
+      writeFileSync(join(dir, name), compact[name])
+    }
+    const catalog = {}
+    for (const [key, e] of Object.entries(roster.models)) {
+      const [provider, ...rest] = key.split('/')
+      catalog[provider] ??= { models: {} }
+      catalog[provider].models[rest.join('/')] = { cost: { input: e.cost_in_per_mtok, output: e.cost_out_per_mtok, cache_read: e.cost_cache_read_per_mtok, cache_write: e.cost_cache_write_per_mtok }, limit: { context: e.context } }
+    }
+    writeFileSync(join(dir, 'catalog.json'), JSON.stringify(catalog))
+    const result = spawnSync(process.execPath, [REFRESH_TOOL, '--roster', join(dir, 'roster.json'), '--catalog', join(dir, 'catalog.json'), '--apply'], { encoding: 'utf8' })
+    assert.equal(result.status, 0, result.stderr)
+    assert.match(result.stdout, /applied 1 bump\(s\)/)
+    assert.equal(JSON.parse(readFileSync(join(dir, 'roster.json'), 'utf8')).tiers.build.planner.id, planner.id)
+    for (const [name, bytes] of Object.entries(compact)) assert.equal(readFileSync(join(dir, name), 'utf8'), bytes, name)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
 })

@@ -2360,7 +2360,7 @@ test('assertPanelAgentsDistinct refuses only equal agents under the flag', () =>
   )
 })
 
-test('shipped roster and ladder seat the ratified Sol, Luna and Opus successors', () => {
+test('shipped roster and ladder seat the ratified Sol, Luna, Opus and Fable successors', () => {
   const shipped = JSON.parse(readFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
   assert.equal(shipped.updated_at, '2026-09-23')
   for (const tier of ['mechanical', 'build', 'judge']) {
@@ -2371,10 +2371,16 @@ test('shipped roster and ladder seat the ratified Sol, Luna and Opus successors'
     assert.equal(shipped.tiers[tier].lead.id, 'claude-opus-5-5')
   }
   assert.deepEqual(shipped.tiers.judge['tech-lead'].fallback.map((entry) => entry.id), ['claude-opus-5-5'])
+  assert.equal(shipped.tiers.judge['tech-lead'].id, 'claude-fable-5-1')
+  // Fable is reached by explicit seating only: its override-only tag keeps the failure-upgrade
+  // reseat from climbing onto it from a cheaper anthropic seat.
+  assert.ok(shipped.models['anthropic/claude-fable-5-1'].tags.includes('override-only'))
+  assert.equal(nextModelRung(shipped, { provider: 'anthropic', id: 'claude-opus-5-5', agent: 'claude', effort: 'high' }), null)
   const expectedCatalog = {
     'openai/gpt-6-sol': [2, 10, 0.2, 2.5, 1050000],
     'openai/gpt-6-luna': [0.1, 0.5, 0.01, 0.125, 1050000],
     'anthropic/claude-opus-5-5': [4, 20, 0.2, 8, 1000000],
+    'anthropic/claude-fable-5-1': [10, 50, 0.25, 20, 1000000],
   }
   for (const [key, prices] of Object.entries(expectedCatalog)) {
     const model = shipped.models[key]
@@ -2386,7 +2392,7 @@ test('shipped roster and ladder seat the ratified Sol, Luna and Opus successors'
   // fallback or ladder band names them, and seating one is refused as band-unknown.
   const ladderMembers = JSON.parse(readFileSync(new URL('./model-ladder.json', import.meta.url), 'utf8')).bands.flatMap((band) => band.members)
   const seated = JSON.stringify(shipped.tiers)
-  for (const key of ['openai/gpt-5.6-sol', 'openai/gpt-5.6-luna', 'anthropic/claude-opus-5']) {
+  for (const key of ['openai/gpt-5.6-sol', 'openai/gpt-5.6-luna', 'anthropic/claude-opus-5', 'anthropic/claude-fable-5']) {
     assert.equal(Object.hasOwn(shipped.models, key), true)
     assert.equal(ladderMembers.includes(key), false)
     assert.equal(seated.includes(`"${key.slice(key.indexOf('/') + 1)}"`), false)
@@ -2417,6 +2423,8 @@ test('shipped roster and ladder seat the ratified Sol, Luna and Opus successors'
   assert.ok(frontier.members.includes('anthropic/claude-opus-5-5'))
   assert.ok(frontier.members.includes('openai/gpt-6-sol'))
   assert.ok(utility.members.includes('openai/gpt-6-luna'))
+  assert.ok(frontier.members.includes('anthropic/claude-fable-5-1'))
+  assert.match(String(frontier.membership_basis), /anthropic\/claude-fable-5-1 replace their predecessors/)
   for (const band of [frontier, utility]) {
     assert.match(String(band.membership_basis), /operator ratification on 2026-09-23/)
     assert.match(String(band.membership_basis), /no successor benchmark score was supplied/)

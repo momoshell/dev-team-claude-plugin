@@ -14,7 +14,7 @@ validation; no ledger row is written by any check here.
 
 The judge is `openai/gpt-6-sol` (vendor `openai`). Sol sits in the frontier
 band and is already exercised by the harness; it is neither bench's production
-candidate (tech-lead production is `anthropic/claude-fable-5`), so no
+candidate (tech-lead production is `anthropic/claude-fable-5-1`), so no
 candidate is judged by itself, and the choice adds vendor diversity without
 reviving the retired same-vendor refusal (#983).
 

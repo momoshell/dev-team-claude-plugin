@@ -18,7 +18,7 @@
     },
     {
       "provider": "anthropic",
-      "id": "claude-fable-5",
+      "id": "claude-fable-5-1",
       "agent": "claude",
       "effort": "medium"
     },

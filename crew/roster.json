@@ -96,7 +96,7 @@
       "cost_out_per_mtok": 20,
       "cost_cache_read_per_mtok": 0.2,
       "cost_cache_write_per_mtok": 8,
-      "cache_rate_source": "models.dev lists anthropic/claude-opus-5-5 at input 4, cacheRead 0.2 and cacheWrite 5 per Mtok. The cache read is recorded as published: 0.05x, not the 0.10x other anthropic entries carry. models.dev's cacheWrite is the 5-minute rate (1.25x, as it is for every anthropic model it lists); this entry instead prices writes at the ratified 1h-TTL rate, anthropic's 2.00x multiplier applied to cost_in_per_mtok, because billed_cache_write_tokens collapses both TTLs into one column and the anthropic convention prices that column at 1h. The 1h figure is derived from the multiplier, not read from a published per-model table.",
+      "cache_rate_source": "models.dev lists anthropic/claude-opus-5-5 at input 4, cacheRead 0.2 and cacheWrite 5 per Mtok. The cache read is recorded as published: 0.05x, not the 0.10x other anthropic entries carry. models.dev's cacheWrite is the 5-minute rate; this entry prices writes at the ratified 1h-TTL rate, because billed_cache_write_tokens collapses both TTLs into one column and the anthropic convention prices that column at 1h. Claude Code 2.1.280's model price table publishes that rate for this model (tier_4_20_cache_read_0_20: cache_write_5m 5, cache_write_1h 8), equal to anthropic's 2.00x multiplier.",
       "context": 1000000,
       "tags": [
         "reasoning",
@@ -105,6 +105,21 @@
       ],
       "source": "models.dev",
       "last_verified": "2026-09-23"
+    },
+    "anthropic/claude-opus-5": {
+      "cost_in_per_mtok": 5,
+      "cost_out_per_mtok": 25,
+      "cost_cache_read_per_mtok": 0.5,
+      "cost_cache_write_per_mtok": 10,
+      "cache_rate_source": "anthropic published prompt-caching multipliers applied to this entry's own cost_in_per_mtok: cache read 0.10x, 1h-TTL cache write 2.00x. billed_cache_write_tokens collapses the 1h and 5m TTLs into one column, so pricing every cache write at the 1h rate is an explicit lossy convention, not a reconstruction of any session's TTL; 1h is the ratified one because this task's acceptance figures require it and because both sampled b168-paneusage claude-opus-5 pane seats used only 1h writes.",
+      "context": 1000000,
+      "tags": [
+        "reasoning",
+        "tool-call",
+        "judge"
+      ],
+      "source": "models.dev",
+      "last_verified": "2026-08-13"
     },
     "anthropic/claude-sonnet-5": {
       "cost_in_per_mtok": 2,
@@ -151,6 +166,21 @@
       "source": "models.dev",
       "last_verified": "2026-09-23"
     },
+    "openai/gpt-5.6-sol": {
+      "cost_in_per_mtok": 4,
+      "cost_out_per_mtok": 20,
+      "cost_cache_read_per_mtok": 0.4,
+      "cost_cache_write_per_mtok": 0,
+      "cache_rate_source": "openai published prompt-caching rates applied to this entry's own cost_in_per_mtok: cached input 0.10x, and cache writes are not charged, so cost_cache_write_per_mtok is a published 0.00x rate rather than an absent one.",
+      "context": 1050000,
+      "tags": [
+        "reasoning",
+        "tool-call",
+        "vendor-diverse"
+      ],
+      "source": "models.dev",
+      "last_verified": "2026-08-30"
+    },
     "openai/gpt-5.6-terra": {
       "cost_in_per_mtok": 2,
       "cost_out_per_mtok": 12,
@@ -181,6 +211,22 @@
       ],
       "source": "models.dev",
       "last_verified": "2026-09-23"
+    },
+    "openai/gpt-5.6-luna": {
+      "cost_in_per_mtok": 0.2,
+      "cost_out_per_mtok": 1.2,
+      "cost_cache_read_per_mtok": 0.02,
+      "cost_cache_write_per_mtok": 0,
+      "cache_rate_source": "openai published prompt-caching rates applied to this entry's own cost_in_per_mtok: cached input 0.10x, and cache writes are not charged, so cost_cache_write_per_mtok is a published 0.00x rate rather than an absent one.",
+      "context": 1050000,
+      "tags": [
+        "reasoning",
+        "tool-call",
+        "cheap",
+        "coding"
+      ],
+      "source": "models.dev",
+      "last_verified": "2026-08-13"
     },
     "anthropic/claude-fable-5": {
       "cost_in_per_mtok": 10,

@@ -2382,8 +2382,14 @@ test('shipped roster and ladder seat the ratified Sol, Luna and Opus successors'
     assert.equal(model.source, 'models.dev')
     assert.equal(model.last_verified, '2026-09-23')
   }
+  // The predecessors stay as PRICE rows only, so the ledger's history stays priced: no seat,
+  // fallback or ladder band names them, and seating one is refused as band-unknown.
+  const ladderMembers = JSON.parse(readFileSync(new URL('./model-ladder.json', import.meta.url), 'utf8')).bands.flatMap((band) => band.members)
+  const seated = JSON.stringify(shipped.tiers)
   for (const key of ['openai/gpt-5.6-sol', 'openai/gpt-5.6-luna', 'anthropic/claude-opus-5']) {
-    assert.equal(Object.hasOwn(shipped.models, key), false)
+    assert.equal(Object.hasOwn(shipped.models, key), true)
+    assert.equal(ladderMembers.includes(key), false)
+    assert.equal(seated.includes(`"${key.slice(key.indexOf('/') + 1)}"`), false)
   }
   assert.match(shipped.models['openai/gpt-6-sol'].cache_rate_source, /second price tier above 272000 input tokens/)
   assert.match(shipped.models['openai/gpt-6-luna'].cache_rate_source, /second price tier above 272000 input tokens/)

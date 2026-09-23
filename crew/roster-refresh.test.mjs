@@ -309,7 +309,7 @@ test('readRosterModels refuses a record with no numeric cost', () => {
 
 test('readRosterModels accepts the shipped roster', () => {
   const models = readRosterModels(roster, 'crew/roster.json')
-  assert.equal(Object.keys(models).length, 12)
+  assert.equal(Object.keys(models).length, 15)
 })
 
 test('synthetic catalog leaves every shipped llama-swap model under cannot confirm', () => {

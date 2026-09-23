@@ -402,10 +402,11 @@ export function modelString({ provider, id, localProviders }) {
 // resume=false CREATES the session (--session-id); resume=true CONTINUES it
 // (--resume).
 export function headlessCommand({ role, model, promptFile, tools, deny, taskDir,
-                                  prompt, sessionId, resume = false, bin, effort, grants = NO_GRANTS, configDir = null }) {
+                                  prompt, sessionId, resume = false, bin, effort, grants = NO_GRANTS, configDir = null, env = process.env }) {
   assertSupportedGrants(grants)
   assertSkillsMaterialised({ taskDir, role, grants })
   assertNoLocalProvider(configDir)
+  const headlessRouterUrl = routerAttemptUrl(env)
   if (!bin || !bin.startsWith('/')) throw new Error(`adapter-claude.headlessCommand: bin must be an ABSOLUTE frozen worker binary path, got ${JSON.stringify(bin)} — refusing to inherit whatever PATH resolves`)
   if (!sessionId) throw new Error('adapter-claude.headlessCommand: sessionId is required (one session per seat)')
   return {
@@ -426,7 +427,7 @@ export function headlessCommand({ role, model, promptFile, tools, deny, taskDir,
       '--append-system-prompt-file', promptFile,
       ...(resume ? ['--resume', sessionId] : ['--session-id', sessionId]),
     ],
-    env: { DEVTEAM_WORKER: '1', CREW_ROLE: role, CREW_TASK_DIR: taskDir, ...fffEnvironment(grants) },
+    env: { DEVTEAM_WORKER: '1', CREW_ROLE: role, CREW_TASK_DIR: taskDir, ...(headlessRouterUrl ? { ANTHROPIC_BASE_URL: headlessRouterUrl } : {}), ...fffEnvironment(grants) },
   }
 }
 

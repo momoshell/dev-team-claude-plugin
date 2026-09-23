@@ -11,6 +11,14 @@ import { testCheckout } from '../test/fixtures.mjs'
 import { ROOT, scratchDir } from '../test/helpers.mjs'
 import { shippedRoster, roster, withHome, testCrewDir, capabilityRegister, capabilityFixtureRoot } from './crew-test-helpers.mjs'
 
+// Hermetic against the operator's router switch. The adapters default `env` to
+// process.env, so a call that omits `env` resolves CREW_ROUTER_ATTEMPT_URL from the
+// ambient environment — and before this line the suite went red whenever an operator
+// exported it, which is exactly the configuration the router exists to serve (#1497).
+// Every router test here passes the switch explicitly through `env`, so none relies on
+// the ambient value. MUTATION: delete this line and run with the switch exported.
+delete process.env.CREW_ROUTER_ATTEMPT_URL
+
 // Keep lexical import reach visible before byte-pinned regex test bodies.
 void [test, assert, readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, tmpdir, join, dirname, fileURLToPath, mcpConfigDocument, SEAT_DEFAULTS, FANOUT_TOOLS, DEFAULT_ROLES, ROLE_ORDER, transportFor, seatTransport, HEADLESS_TRANSPORTS, assertCapabilities, resolveAdapters, bootAllocation, resolveTier, resolveSeatModels, loadLadder, shadowPickBoot, bootCmd, CAPABILITY_REFUSALS, loadCapabilities, EMPTY_GRANTS, seatCommand, claudeHeadlessCommand, capabilitiesFor, claudeModelString, mcpConfigPath, paneUsageRecords, skillsPluginDir, skillDirName, seatSkillFiles, writeSeatSkills, assertSkillsMaterialised, piCapabilitiesFor, translateDeny, testCheckout, ROOT, scratchDir, shippedRoster, roster, withHome, testCrewDir, capabilityRegister, capabilityFixtureRoot]
 
@@ -1798,4 +1806,75 @@ test('RV1 writeSeatSkills refuses to write outside the task dir, to take a non-f
   const goodTask = scratchDir('b860-rv1-good-')
   writeSeatSkills({ taskDir: goodTask, role: 'builder', grants: { skills: [skill('gamma')] } })
   assert.equal(existsSync(join(skillsPluginDir({ taskDir: goodTask, role: 'builder' }), 'skills', 'gamma', 'SKILL.md')), true)
+})
+
+test('claude headless carries the validated router switch as a structured child-env entry', () => {
+  const url = 'http://127.0.0.1:8091/a/router-token/'
+  const base = {
+    role: 'builder', model: 'sonnet', promptFile: '/tmp/role-builder.md', tools: 'Read', deny: 'Task,Agent',
+    taskDir: '/tmp/task', prompt: 'go', sessionId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', bin: '/usr/local/bin/claude',
+  }
+  const routed = claudeHeadlessCommand({ ...base, env: { CREW_ROUTER_ATTEMPT_URL: url } })
+  assert.equal(routed.env.ANTHROPIC_BASE_URL, url)
+})
+
+test('claude headless without the router switch matches the pre-change command snapshot', () => {
+  const base = {
+    role: 'builder', model: 'sonnet', promptFile: '/tmp/role-builder.md', tools: 'Read', deny: 'Task,Agent',
+    taskDir: '/tmp/task', prompt: 'go', sessionId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', bin: '/usr/local/bin/claude',
+  }
+  const EXPECTED = {
+    bin: '/usr/local/bin/claude',
+    args: [
+      '-p', 'go',
+      '--output-format', 'stream-json',
+      '--verbose',
+      '--model', 'sonnet',
+      '--permission-mode', 'bypassPermissions',
+      '--strict-mcp-config',
+      '--mcp-config', '/tmp/task/mcp/builder.json',
+      '--settings', CLAUDE_USAGE_SETTINGS,
+      '--allowedTools', 'Read',
+      '--disallowedTools', 'Task,Agent,mcp__*',
+      '--append-system-prompt-file', '/tmp/role-builder.md',
+      '--session-id', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    ],
+    env: { DEVTEAM_WORKER: '1', CREW_ROLE: 'builder', CREW_TASK_DIR: '/tmp/task', CREW_FFF: '0', CREW_FFF_NODE: '', CREW_FFF_HOOK: '' },
+  }
+  const unset = claudeHeadlessCommand({ ...base, env: {} })
+  assert.deepEqual(unset, EXPECTED)
+  assert.equal('ANTHROPIC_BASE_URL' in unset.env, false)
+})
+
+test('claude headless shares the pane router URL refusal', () => {
+  const bad = { CREW_ROUTER_ATTEMPT_URL: 'https://user:pass@127.0.0.1/a/token/?query=1' }
+  const base = {
+    role: 'builder', model: 'sonnet', promptFile: '/tmp/role-builder.md', tools: 'Read', deny: 'Task,Agent',
+    taskDir: '/tmp/task', prompt: 'go', sessionId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', bin: '/usr/local/bin/claude',
+  }
+  const paneError = (() => { try { seatCommand({ ...base, bootBrief: 'boot', env: bad }); return null } catch (error) { return error } })()
+  const headlessError = (() => { try { claudeHeadlessCommand({ ...base, env: bad }); return null } catch (error) { return error } })()
+  assert.ok(paneError instanceof Error)
+  assert.ok(headlessError instanceof Error)
+  assert.equal(headlessError.message, paneError.message)
+})
+
+test('claude headless preserves a metacharacter router token byte-exact in structured env', () => {
+  const url = "http://127.0.0.1:8091/a/quote'token/"
+  const base = {
+    role: 'builder', model: 'sonnet', promptFile: '/tmp/role-builder.md', tools: 'Read', deny: 'Task,Agent',
+    taskDir: '/tmp/task', prompt: 'go', sessionId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', bin: '/usr/local/bin/claude',
+  }
+  assert.equal(claudeHeadlessCommand({ ...base, env: { CREW_ROUTER_ATTEMPT_URL: url } }).env.ANTHROPIC_BASE_URL, url)
+})
+
+test('claude headless routing changes only the base-URL env entry', () => {
+  const url = 'http://127.0.0.1:8091/a/router-token/'
+  const base = {
+    role: 'builder', model: 'sonnet', promptFile: '/tmp/role-builder.md', tools: 'Read', deny: 'Task,Agent',
+    taskDir: '/tmp/task', prompt: 'go', sessionId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', bin: '/usr/local/bin/claude',
+  }
+  const unset = claudeHeadlessCommand({ ...base, env: {} }).env
+  const { ANTHROPIC_BASE_URL: _ignored, ...withoutRouter } = claudeHeadlessCommand({ ...base, env: { CREW_ROUTER_ATTEMPT_URL: url } }).env
+  assert.deepEqual(withoutRouter, unset)
 })

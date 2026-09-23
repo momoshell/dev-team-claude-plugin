@@ -22,6 +22,14 @@ import {
 import { headlessIo } from '../../headless.mjs'
 import { scratchDir } from '../../../test/helpers.mjs'
 
+// Hermetic against the operator's router switch. The adapters default `env` to
+// process.env, so a call that omits `env` resolves CREW_ROUTER_ATTEMPT_URL from the
+// ambient environment — and before this line the suite went red whenever an operator
+// exported it, which is exactly the configuration the router exists to serve (#1497).
+// Every router test here passes the switch explicitly through `env`, so none relies on
+// the ambient value. MUTATION: delete this line and run with the switch exported.
+delete process.env.CREW_ROUTER_ATTEMPT_URL
+
 const LEDGER_SANDBOX = join(tmpdir(), `fff-ledger-${process.pid}`)
 const LEDGER_SANDBOX_PREVIOUS = process.env.DEVTEAM_LEDGER_DIR
 const LEDGER_DB_PREVIOUS = process.env.DEVTEAM_LEDGER_DB

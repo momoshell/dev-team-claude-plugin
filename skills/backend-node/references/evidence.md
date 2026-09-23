@@ -10,7 +10,7 @@ covered by the nearest passing check.
 ### No repository-wide import scan
 
 The zero-dependency assertion is per module, not a whole-repository sweep.
-Exhibit for that limitation: `crew/pi/extensions/subagent.test.mjs:171`.
+Exhibit for that limitation: `crew/pi/extensions/subagent.test.mjs:174`.
 
 No checkout-wide import scan was found in the cited enforcement shape.
 
@@ -22,7 +22,7 @@ This is an enforcement gap, not a claim that the module rule lacks evidence.
 ### TypeScript constructs outside the grep
 
 The extension test searches `enum` and `namespace`.
-Exhibit: `crew/pi/extensions/subagent.test.mjs:179` and `crew/pi/extensions/subagent.test.mjs:180`.
+Exhibit: `crew/pi/extensions/subagent.test.mjs:182` and `crew/pi/extensions/subagent.test.mjs:183`.
 
 It does not grep `parameter properties`.
 
@@ -89,7 +89,7 @@ No local mutation test separately measures an interrupted child or a malformed
 usage parse after work has started.
 
 The complete-or-absent getter and omitted-key assertion are backed at
-`crew/pi/extensions/subagent.ts:471` and `crew/pi/extensions/subagent.test.mjs:485`.
+`crew/pi/extensions/subagent.ts:471` and `crew/pi/extensions/subagent.test.mjs:488`.
 
 Keep interrupted-child and failed-parse instructions in `usage-records.md`
 marked unbacked until those paths receive a measured fixture.

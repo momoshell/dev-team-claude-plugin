@@ -17,6 +17,9 @@ import { openRun, parseProposalBrief, recordCellFailure, recordPhaseSlotWait, _r
 import { openLedger, PAYLOAD_KEYS, NODE_FLOOR } from '../scripts/factory/ledger.mjs'
 import { headlessIo } from '../crew/headless.mjs'
 
+// Keep tests hermetic against the operator's router switch; adapter commands inherit process.env.
+delete process.env.CREW_ROUTER_ATTEMPT_URL
+
 // A handful of this file's tests query the real SQLite mirror directly (via
 // openLedger().dumpTable(...)) or otherwise assert a real, non-null
 // phase_id/mirror row count from an UNFORCED (real process.versions.node)

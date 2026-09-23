@@ -18,13 +18,13 @@ Node's unflagged TypeScript stripping is the other loader to satisfy.
 Exhibit: `crew/pi/extensions/subagent.ts:5-9`.
 
 The local extension test greps for `enum`.
-Exhibit: `crew/pi/extensions/subagent.test.mjs:179`.
+Exhibit: `crew/pi/extensions/subagent.test.mjs:182`.
 
 It also greps for `namespace`.
-Exhibit: `crew/pi/extensions/subagent.test.mjs:180`.
+Exhibit: `crew/pi/extensions/subagent.test.mjs:183`.
 
 That grep has a declared gap: `parameter properties` are not searched.
-Exhibit: `crew/pi/extensions/subagent.test.mjs:179`.
+Exhibit: `crew/pi/extensions/subagent.test.mjs:182`.
 
 Decorators have the same unsearched status; the import test catches failures
 only when loading the module.
@@ -38,7 +38,7 @@ Exhibit: `crew/pi/extensions/subagent.ts:5-9`.
 
 Do not claim the grep covers parameter properties or decorators; the gap is
 part of this register's honest checklist.
-Exhibit: `crew/pi/extensions/subagent.test.mjs:179` and `:175`.
+Exhibit: `crew/pi/extensions/subagent.test.mjs:182` and `:178`.
 
 An interrupted import is not a passing syntax check, and an empty source is not
 proof that a construct is absent.
@@ -53,4 +53,4 @@ serve a request.
 Exhibit: `crew/pi/extensions/subagent.ts:5-9`.
 
 When the gap closes, update both this checklist and its co-located test.
-Exhibit: `crew/pi/extensions/subagent.test.mjs:179` and `:175`.
+Exhibit: `crew/pi/extensions/subagent.test.mjs:182` and `:178`.

@@ -21,6 +21,9 @@ import { ROOT, scratchDir } from '../test/helpers.mjs'
 import { probeRepo } from '../scripts/factory/probe-repo.mjs'
 import { roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter, capabilityRegister } from './crew-test-helpers.mjs'
 
+// Keep tests hermetic against the operator's router switch; adapter commands inherit process.env.
+delete process.env.CREW_ROUTER_ATTEMPT_URL
+
 // Keep lexical import reach visible before byte-pinned regex test bodies.
 void [test, after, assert, createHash, readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync, execSync, spawn, tmpdir, join, dirname, openLedger, writeRosterSnapshot, loadLadder, assertBandFloors, BAND_FLOOR_REFUSALS, bootCmd, runCmd, stopCmd, RUN_START_EVENT, BATCH_DIR_EVENT, BATCH_DIR_NOT_BATCHED, batchDirFromBrief, RUN_CONFIG_DECLARATIONS, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, awaitSeatsReady, writeTerminalLine, UsageError, memoryConfig, CHARTER_BASELINE_BYTES, CHARTER_SOURCE_BUDGET, CHARTER_SOURCE_TOTAL_BUDGET, CHARTER_CEILINGS, CHARTER_BUDGET_REFUSAL, CHARTER_UNMEASURED_CAUSES, charterFileBytes, compiledCharterBytes, charterBudgetRefusals, charterSourceRefusals, assertCharterBudgets, charterBytesRecord, composeRolePrompt, runChild, resolveChildValidationLane, daemon, DAEMON_RUN_CONFIG_DECLARATIONS, FACTORY_RUN_CONFIG_DECLARATIONS, completionLogPath, TASK_PROFILES, ASSURANCES, ASSURANCE_ALIASES, driveTask, LIMITS, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, PROTECTED_PATHS, validateScopeEntries, LIMIT_REFUSALS, PLAN_ROUNDS_MAX, BUILD_ROUNDS_MAX, REVIEW_ROUNDS_MAX, limitsCtx, limitsRecord, resolveBuildRounds, resolveLimits, resolvePlanRounds, resolveReviewRounds, piModelString, seatIo, testCheckout, ROOT, scratchDir, probeRepo, roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter, capabilityRegister, globalThis.realWrite]
 

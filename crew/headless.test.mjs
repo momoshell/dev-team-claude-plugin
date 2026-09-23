@@ -25,6 +25,9 @@ import { DRIVER_GONE_PERIODS, HEARTBEAT_PERIOD_MS } from '../scripts/factory/lan
 import { ROOT, forAll, scratchDir, startFileWriter } from '../test/helpers.mjs'
 import { absenceFailure, gitGrepHits } from '../scripts/factory/absence.mjs'
 
+// Keep tests hermetic against the operator's router switch; adapter commands inherit process.env.
+delete process.env.CREW_ROUTER_ATTEMPT_URL
+
 // The final three bytes of each real 2026-08-30 refusal tail, copied
 // byte-for-byte so classification is adjudicated against the provider's own
 // stream shape rather than a synthetic approximation.

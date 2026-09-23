@@ -18,6 +18,9 @@ import { cellFailureKind } from './seat-io.mjs'
 import { CENSUS_ABSENT_CAUSES, NO_ENVELOPE_CENSUS_ABSENT_REASONS, NO_ENVELOPE_REASONS, SEAT_SUITE_POLICY_EVENT, SUITE_RUN_REFUSAL, SUITE_RUN_UNRECOGNISED, WAIT_POLL_MS, claudeCensus, noEnvelopeDetail } from './headless.mjs'
 import { scratchDir } from '../test/helpers.mjs'
 
+// Keep tests hermetic against the operator's router switch; adapter commands inherit process.env.
+delete process.env.CREW_ROUTER_ATTEMPT_URL
+
 const KEEPALIVE_LIFETIME_ENV = 'CREW_TEST_KEEPALIVE_LIFETIME_MS'
 const KEEPALIVE_LIFETIME_DEFAULT_MS = 300_000
 

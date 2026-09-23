@@ -10,6 +10,9 @@ import * as adapter from '../../adapters/adapter-pi.mjs'
 import * as capabilities from '../../capabilities.mjs'
 import * as rpc from '../../headless-rpc.mjs'
 
+// Keep tests hermetic against the operator's router switch; adapter commands inherit process.env.
+delete process.env.CREW_ROUTER_ATTEMPT_URL
+
 const EXTENSION = fileURLToPath(new URL('./subagent.ts', import.meta.url))
 const FINDINGS = {
   summary: 'one sentence',

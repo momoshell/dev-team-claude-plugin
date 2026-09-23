@@ -1,5 +1,4 @@
 {
-  "crew/pi/extensions/subagent.test.mjs:173": "imports.every((specifier) => specifier.startsWith('node:'))",
   "crew/pi/extensions/subagent.test.mjs:8": "import * as mod from './subagent.ts'",
   "crew/pi/extensions/subagent.ts:5": "Why .ts: pi loads extensions through jiti",
   "skills/qa-test-writing/references/absence.md:3": "value nobody measured is recorded as absent",
@@ -7,11 +6,8 @@
   "test/factory-intake.test.mjs:1112": "assert.equal((uncommented.match(/import\\s*\\(/g) || []).length, 0)",
   "test/factory-intake.test.mjs:1114": "const specifiers = [...uncommented.matchAll(",
   "test/factory-intake.test.mjs:1115": "assert.deepEqual(specifiers.filter((specifier) => !specifier.startsWith('node:')), ['./ledger.mjs', './make-brief.mjs'])",
-  "crew/pi/extensions/subagent.test.mjs:171": "module is zero-dep, erasable, and carries",
-  "crew/pi/extensions/subagent.test.mjs:179": "assert.doesNotMatch(source, /^\\s*enum",
   "crew/pi/extensions/subagent.ts:471": "usage: () => (measured ? billed : null)",
   "crew/reclaim.mjs:12": "export const PARK_STATES = Object.freeze",
-  "crew/pi/extensions/subagent.test.mjs:180": "assert.doesNotMatch(source, /^\\s*namespace",
   "crew/pi/extensions/subagent.ts:473": "totals.cost += usage.cost.total",
   "crew/pi/extensions/subagent.ts:653": "Complete or absent — never partial",
   "test/factory-ledger-cli.test.mjs:142": "refused.status, 2, refused.stderr",
@@ -22,11 +18,8 @@
   "crew/drive.mjs:524": "export const DECISIONS = Object.freeze",
   "crew/shape-validator.mjs:248": "ENVELOPE_FIELD_KINDS.includes(field?.kind)",
   "crew/shape-validator.mjs:237": "if (!shape || typeof shape !== 'object')",
-  "test/factory-emit.test.mjs:1710": "CLI: emit-cli-unknown-flag-refusal",
-  "crew/pi/extensions/subagent.test.mjs:485": "Object.hasOwn(absent.result, 'usage')",
   "scripts/factory/emit.mjs:1561": "function refuseUnknownFlags(verb, flags)",
   "scripts/factory/reap-stale.mjs:80": "export const REAP_ACCOUNTING = Object.freeze",
-  "crew/pi/extensions/subagent.test.mjs:473": "usage is a complete pi Usage or absent",
   "crew/drive-review.test.mjs:1629": "assert.deepEqual([...DECISIONS], ['bounce', 'bounce-builder', 'bounce-reviewer', 'accept', 'escalate'])",
   "crew/drive-review.test.mjs:1628": "Object.isFrozen(DECISIONS) && Object.isFrozen(LIMITS)",
   "crew/drive-review.test.mjs:1627": "DECISIONS and LIMITS are the frozen public contract",
@@ -41,5 +34,12 @@
   "crew/daemon.test.mjs:229": "IMPORT FIREWALL: daemon.mjs carries no top-level import",
   "crew/daemon.test.mjs:298": "DAEMON_CODE.includes(adapterImport)",
   "crew/daemon.test.mjs:263": "assert.doesNotMatch(policyCode",
-  "crew/daemon.test.mjs:261": "assert.doesNotMatch(slugCode"
+  "crew/daemon.test.mjs:261": "assert.doesNotMatch(slugCode",
+  "crew/pi/extensions/subagent.test.mjs:174": "module is zero-dep, erasable, and carries",
+  "test/factory-emit.test.mjs:1713": "CLI: emit-cli-unknown-flag-refusal",
+  "crew/pi/extensions/subagent.test.mjs:182": "assert.doesNotMatch(source, /^\\s*enum",
+  "crew/pi/extensions/subagent.test.mjs:488": "Object.hasOwn(absent.result, 'usage')",
+  "crew/pi/extensions/subagent.test.mjs:183": "assert.doesNotMatch(source, /^\\s*namespace",
+  "crew/pi/extensions/subagent.test.mjs:476": "usage is a complete pi Usage or absent",
+  "crew/pi/extensions/subagent.test.mjs:176": "imports.every((specifier) => specifier.startsWith('node:'))"
 }

@@ -15,6 +15,9 @@ import { seatCommand as piSeatCommand, capabilitiesFor as piCapabilitiesFor, PI_
 import { scratchDir } from '../test/helpers.mjs'
 import { NARRATION_BACKSTOP_SECONDS, NARRATION_CONNECT_TIMEOUT_SECONDS, NARRATION_MIN_BYTES_PER_SECOND, NARRATION_STALL_SECONDS, narratorCommand } from './drive.mjs'
 
+// Keep tests hermetic against the operator's router switch; adapter commands inherit process.env.
+delete process.env.CREW_ROUTER_ATTEMPT_URL
+
 test('G1T freezes the exhaustive first-party extension declaration table and matches registrars', () => {
   const expected = {
     'crew/pi/extensions/advisor.ts': [],

@@ -12,6 +12,9 @@ import { scratchDir } from '../test/helpers.mjs'
 import { SEAT_DEFAULTS, ROLE_ORDER, assertFanoutCoherent } from './crew.mjs'
 import { childArgs, resolvePiBinary } from './pi/extensions/subagent.ts'
 
+// Keep tests hermetic against the operator's router switch; adapter commands inherit process.env.
+delete process.env.CREW_ROUTER_ATTEMPT_URL
+
 const SKELETONREAD_EXTENSION = join(process.cwd(), 'crew/pi/extensions/skeletonread.ts')
 const RETRIEVE_TOOL = PI_FIRST_PARTY_EXTENSION_TOOLS['crew/pi/extensions/skeletonread.ts'][0]
 

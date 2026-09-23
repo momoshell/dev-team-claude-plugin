@@ -701,3 +701,11 @@ test('DD1', () => {
   // so verbatim, because a reader who infers a precedence rule will pass both.
   assert.ok(text.includes('refuses as\n`transport-conflict` and names both flags, **even when the values agree**'))
 })
+
+test('the batch reference carries the standalone Claude executor subsection', () => {
+  const text = readText(join(HERE, 'references', 'batch.md'))
+  assert.ok(text.includes('## Standalone Claude batch executor'))
+  assert.ok(text.includes('`crew/batch.mjs`'))
+  assert.ok(text.includes('`crew/batch.test.mjs`'))
+  assert.ok(text.includes('--fork-session'))
+})

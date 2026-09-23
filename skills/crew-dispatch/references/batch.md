@@ -272,3 +272,25 @@ Each wave is one invocation (`--wave`), because `run` is backgrounded and this
 file already forbids nesting a waiter inside another background call. Wave
 one reports later waves as deferred with the resume command, and a later
 invocation enforces the predecessor outcome before it creates any worktree.
+
+## Standalone Claude batch executor
+
+Dispatch above moves lanes; it does not run model calls itself. The operator
+CLI `crew/batch.mjs` runs them: it warms one shared JSON session from a
+context file, then runs each JSONL item as an independent bounded fork of
+that session with `--resume` and `--fork-session`. One ledger lands at
+`<out>/batch.jsonl` (one base row plus one row per item, in input order) and
+each successful item also lands at `<out>/<id>.txt`. A failed warm call stops
+the batch before any fork runs; a failed item leaves its row with a reason
+while the queue continues. Behaviour is pinned by `crew/batch.test.mjs`,
+which drives the executor through recorded fixtures only and never resolves
+or runs a live binary.
+
+```sh
+node crew/batch.mjs --context context.txt --items items.jsonl --model model-id --out out --effort high --concurrency 4
+```
+
+`--context`, `--items`, `--model`, and `--out` are required; `--effort` and
+`--concurrency` (an integer from 1 to 16, default 4) are optional. Unknown
+options are refused, and a validation, warm-call, or ledger-write failure
+exits nonzero.

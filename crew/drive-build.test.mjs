@@ -6,13 +6,15 @@ import assert from 'node:assert/strict'
 import {
   staleSpawnProof,
   acceptanceCoverage, acceptanceIds, ACCEPTANCE_UNMEASURED, ACCEPTANCE_REFUSALS, gateCheckIds,
-  B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_IMPL_FILE, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, B384_CORRECTED_FIND, B384_CORRECTED_REPLACE, B384_GREEN, B384_MUTATION, B384_RED, B384_REFACTORED_BUILDER, B384_REFACTORED_UNCORRECTED_BUILDER, B44_LEADLESS_CTX, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_PLAN, CHECK_RUNS, CONVERGE_CTX, CONVERGE_GATE, CONVERGE_PLAN, CTX, CTX_DIRECTED, CTX_REPAIR, DIRECTED_FILES, D_ASK, D_AUTO, ENVELOPE_FIELD_KINDS, EXECUTIONS, FAILURE_UPGRADE, GATE_REAP_CMD_EOF, GATE_REAP_SWEEP_MARKER, GATE_SUMMARY_PREFIX, HARDENING_MARKS, HARDENING_OUTCOMES, HARDENING_REFUSALS, MODIFIER_OUTCOMES, MUTATIONS_MAX, MUTATION_BINDING_FAILURES, MUTATION_CORRECTION_REFUSALS, MUTATION_OUTCOMES, PARTIAL_REVIEWED, RED, SENSITIVITY_FLOOR, SHAPE_MAJOR_PHASES, SHAPE_ROUNDED_STAGES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, UNIVERSAL_STAGE_HEADS, VALIDATION_LANE_UNLOADABLE, VARIANTS, VARIANT_NAMES, WRITE_SURFACES, applyMutationAnchor, applyPrescriptionLines, b127GatePaths, b127PidAlive, b318Builders, b318SiteA, b376Build, b376DiskProofIo, b376ProofIo, b376Review, b376StageStack, b384Io, b384RefactoredIo, b44AssertLeadlessGate, b44GatePlan, bindMutationAnchor, buildEnv, collapseStages, dispositionIo, driveTask, existsSync, fakeIo, fenceBase, fenceDiff, fenceSpan, gateReapCommand, gateReapFresh, gateReapOriginal, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, hardeningBounceLines, hardeningBriefLines, hardeningDebt, hardeningOf, join, laneFence, leadEnv, mutationChangesTokens, outOfScopeFiles, planEnv, protectedPlanEnv, readFileSync, resumeGreen, resumeRed, reviewConvergeRun, reviewEnv, reviewFindings, rmSync, s843Ctx, s843Io, s843PlanEnv, s843Rows, scopeMatcher, scopedPath, scratchDir, shapeDefect, spawnSync, stageShape, treeDigest, triageEnv, undeclaredStage, validateHardened, validateMutations, validationPlan, validationProbeRun, validationRows,
+  B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_IMPL_FILE, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, B384_CORRECTED_FIND, B384_CORRECTED_REPLACE, B384_GREEN, B384_MUTATION, B384_RED, B384_REFACTORED_BUILDER, B384_REFACTORED_UNCORRECTED_BUILDER, B44_LEADLESS_CTX, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_PLAN, CHECK_RUNS, CONVERGE_CTX, CONVERGE_GATE, CONVERGE_PLAN, CTX, CTX_DIRECTED, CTX_REPAIR, DIRECTED_FILES, D_ASK, D_AUTO, ENVELOPE_FIELD_KINDS, EXECUTIONS, FAILURE_UPGRADE, GATE_REAP_CMD_EOF, GATE_REAP_SWEEP_MARKER, GATE_SUMMARY_PREFIX, HARDENING_MARKS, HARDENING_OUTCOMES, HARDENING_REFUSALS, MODIFIER_OUTCOMES, MUTATIONS_MAX, MUTATION_BINDING_FAILURES, MUTATION_CORRECTION_REFUSALS, MUTATION_OUTCOMES, PARTIAL_REVIEWED, RED, SENSITIVITY_FLOOR, SHAPE_MAJOR_PHASES, SHAPE_ROUNDED_STAGES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, UNIVERSAL_STAGE_HEADS, VALIDATION_LANE_UNLOADABLE, VARIANTS, VARIANT_NAMES, WRITE_SURFACES, applyMutationAnchor, applyPrescriptionLines, b127GatePaths, b127PidAlive, b318Builders, b318SiteA, b376Build, b376DiskProofIo, b376ProofIo, b376Review, b376StageStack, b384Io, b384RefactoredIo, b44AssertLeadlessGate, b44GatePlan, bindMutationAnchor, buildEnv, chmodSync, collapseStages, dispositionIo, driveTask, existsSync, fakeIo, fenceBase, fenceDiff, fenceSpan, gateReapCommand, gateReapFresh, gateReapOriginal, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, hardeningBounceLines, hardeningBriefLines, hardeningDebt, hardeningOf, join, laneFence, leadEnv, mutationChangesTokens, outOfScopeFiles, planEnv, protectedPlanEnv, readFileSync, resumeGreen, resumeRed, reviewConvergeRun, reviewEnv, reviewFindings, rmSync, s843Ctx, s843Io, s843PlanEnv, s843Rows, scopeMatcher, scopedPath, scratchDir, shapeDefect, spawnSync, stageShape, treeDigest, triageEnv, undeclaredStage, validateHardened, validateMutations, validationPlan, validationProbeRun, validationRows, writeFileSync,
 } from './drive-fixtures.mjs'
 import { CENSUS_CARRIER_FILES, CHECK_MATCHES, FROZEN_FACTORY_ENV_FILE, FROZEN_INVENTORY_FILE, HARDENING_APPEAL_SHAPE, HARDENING_CLASSES, HARDENING_PRESCRIPTION_REASONS, HARDENING_PRESCRIPTION_RESOLUTION, HARDENING_PROVEN, HARDENING_REFUTED, HARDENING_UNMEASURED, LIMITS, POST_COMMIT_FROZEN_REPAIR_MAX, classifyFrozenInventoryDelta, hardeningAppealLines, hardeningAppealRequest, hardeningClassOf, hardeningInvocation, hardeningPrescriptionConflict, hardeningRowBucket, hardeningStageCleared, hardeningTestPath, mutationProofScope, preRepairGreenOutcome, preRepairRefutes, composePrBody } from './drive.mjs'
 import { openLedger, MUTATION_ANCHOR_REFUSALS } from '../scripts/factory/ledger.mjs'
 import { CENSUS_QUALIFYING_FILES, runCensusExhibits, selectCensusExhibits } from './census-exhibits.mjs'
 import { emitAdapter } from './seat-io.mjs'
 import { GATE_RUN_MS_ABSENT_REASONS, gateRunTiming } from './drive.mjs'
+import { symlinkSync } from 'node:fs'
+import { fingerprintTree } from './tree-fingerprint.mjs'
 
 const A1_DIRECTED_TRACE = Object.freeze(['directed', 'gate-baseline', 'build', 'scope-gate', 'lane', 'gate', 'gate-proof', 'review', 'commit', 'document', 'suite'])
 const A1_GATE_REPAIR_TRACE = Object.freeze(['gate', 'gate-repair', 'gate-reverify', 'gate-proof'])
@@ -6067,17 +6069,338 @@ const b863InvocationEntry = (over = {}) => ({
   ...over,
 })
 
-test('b863 A1 a cargo invocation guard validates and clears as unmeasured', () => {
-  const scope = scopeMatcher(['a.mjs', 'a.test.mjs', 'src/x.rs'])
-  const result = validateHardened({ hardened: [b863InvocationEntry()] }, [{ id: 'F1' }], scope)
-  assert.equal(result.entries.length, 1)
-  assert.equal(result.refusals.length, 0)
-  const io = b376ProofIo({ hardened: [b863InvocationEntry()] })
-  const done = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
-  assert.equal(done.status, 'done')
-  const row = io.calls.logs.find((entry) => entry.finding_hardened)?.finding_hardened
-  assert.equal(row?.finding, 'F1')
+// b916's seven gate-named invocation tests share one fake-io helper below
+const B863_FILES = { [`${CTX.checkout}/a.mjs`]: 'const guard = false\n' }
+const INVOCATION_LIMIT_TEXT = 'based only on process exit status'
+const b863Green = (status = 0) => ({ ok: status === 0, status, output: '', stderr: '' })
+const invocationProofIo = ({ entry = b863InvocationEntry(), runFn = (text, n) => (n === 2 ? b863Green(0) : b863Green(1)), files = { ...B863_FILES }, fingerprints = null, extraRuns = {}, changed = ['a.mjs'], flipTo = null } = {}) => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(),
+      'builder:1': buildEnv(), 'builder:2': b376Build([entry]), 'builder:3': b376Build([entry]),
+      'reviewer:1': b376Review('changes-needed', [B376_FINDING]),
+      'reviewer:2': b376Review('pass', []), 'reviewer:3': b376Review('pass', []),
+    },
+    files, writeThrough: true,
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' }, [entry.invocation]: runFn, ...extraRuns },
+    changed, fingerprints,
+  })
+  if (flipTo !== null) {
+    const baseWait = io.wait.bind(io)
+    io.wait = (returnPath, timeoutS) => {
+      if (returnPath === 'builder:2') {
+        for (const gone of flipTo.delete ?? []) delete files[gone]
+        Object.assign(files, flipTo.set ?? {})
+      }
+      return baseWait(returnPath, timeoutS)
+    }
+  }
+  return io
+}
+const invocationRows = (io) => io.calls.logs.filter((logged) => logged.finding_hardened?.finding === 'F1').map((logged) => logged.finding_hardened)
+const invocationExecutions = (io, invocation = B863_INVOCATION) => io.calls.run.filter(({ cmd }) => cmd === invocation)
+
+test('A1 invocation guard proves a green control and red mutant', () => {
+  const entry = b863InvocationEntry()
+  const io = invocationProofIo({ entry })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  assert.equal(result.status, 'done')
+  assert.equal(invocationExecutions(io).length, 3)
+  const row = invocationRows(io).at(-1)
+  assert.equal(row.outcome, 'killed')
+  assert.equal(hardeningRowBucket(row), 'proven')
+  assert.match(row.why, /control 0/)
+  assert.match(row.why, /mutant 1/)
+  assert.match(row.why, new RegExp(INVOCATION_LIMIT_TEXT))
+})
+
+test('B1 invocation guard refutes a green mutant and reports both statuses', () => {
+  const entry = b863InvocationEntry()
+  const survivedIo = invocationProofIo({ entry, runFn: (text, n) => (n === 1 ? b863Green(1) : b863Green(0)) })
+  const survived = driveTask({ ...CTX, limits: { build_rounds: 2 } }, survivedIo)
+  assert.equal(survived.status, 'escalation')
+  assert.equal(survived.details.escalation.where, 'harden')
+  const survivedRow = invocationRows(survivedIo).at(-1)
+  assert.equal(survivedRow.outcome, 'survived')
+  assert.equal(hardeningRowBucket(survivedRow), 'refuted')
+  assert.match(survivedRow.why, /control 0/)
+  assert.match(survivedRow.why, /mutant 0/)
+  assert.match(survivedRow.why, new RegExp(INVOCATION_LIMIT_TEXT))
+  assert.equal(invocationExecutions(survivedIo).length, 3)
+  const redIo = invocationProofIo({ entry, runFn: () => b863Green(3) })
+  const red = driveTask({ ...CTX, limits: { build_rounds: 2 } }, redIo)
+  assert.equal(red.status, 'escalation')
+  assert.equal(invocationExecutions(redIo).length, 2)
+  const redRow = invocationRows(redIo).at(-1)
+  assert.equal(redRow.outcome, 'control-red')
+  assert.equal(hardeningRowBucket(redRow), 'refuted')
+  assert.match(redRow.why, /3/)
+  assert.match(redRow.why, new RegExp(INVOCATION_LIMIT_TEXT))
+})
+
+test('C1 missing invocation runner is unproven and never refuted', () => {
+  const probe = spawnSync('/bin/sh', ['-c', 'crew-nonexistent-runner-b916'], { encoding: 'utf8' })
+  assert.equal(probe.status, 127)
+  const entry = b863InvocationEntry()
+  const io = invocationProofIo({ entry, runFn: () => ({ ok: false, status: probe.status, output: `${probe.stdout || ''}${probe.stderr || ''}`, stderr: String(probe.stderr || '') }) })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  assert.equal(result.status, 'done')
+  const rows = invocationRows(io)
+  assert.ok(rows.length > 0)
+  for (const row of rows) {
+    assert.equal(row.outcome, 'unproven')
+    assert.equal(hardeningRowBucket(row), 'unmeasured')
+  }
+  const row = rows.at(-1)
+  assert.match(row.why, /invocation-pre-repair-unrunnable:command-not-executed-exit-127/)
+  assert.match(row.why, new RegExp(INVOCATION_LIMIT_TEXT))
+})
+
+test('D1 invocation side effects are unproven and the checkout is restored', () => {
+  const checkout = scratchDir('b916-invocation-side-effects-')
+  const taskDir = scratchDir('b916-invocation-side-effects-task-')
+  try {
+    const sh = (args) => {
+      const res = spawnSync(args[0], args.slice(1), { cwd: checkout, encoding: 'utf8' })
+      assert.equal(res.status, 0, `${args.join(' ')} failed: ${res.stderr || res.stdout || ''}`)
+      return res
+    }
+    sh(['git', 'init', '-q'])
+    sh(['git', 'config', 'user.email', 'crew-tests@example.invalid'])
+    sh(['git', 'config', 'user.name', 'crew tests'])
+    writeFileSync(join(checkout, 'a.mjs'), 'const guard = false\n')
+    writeFileSync(join(checkout, 'keep.txt'), 'kept\n')
+    writeFileSync(join(checkout, 'run.sh'), '#!/bin/sh\necho hi\n')
+    chmodSync(join(checkout, 'run.sh'), 0o755)
+    symlinkSync('keep.txt', join(checkout, 'link'))
+    sh(['git', 'add', '-A'])
+    sh(['git', 'commit', '-q', '-m', 'init'])
+    writeFileSync(join(checkout, 'orig-untracked.txt'), 'original untracked\n')
+    writeFileSync(join(checkout, 'keep.txt'), 'kept\nstaged change\n')
+    sh(['git', 'add', 'keep.txt'])
+    const OUTSIDE = 'side-effect-outside.txt'
+    const entry = b863InvocationEntry()
+    const realIo = (onInvocation) => {
+      const io = fakeIo({
+        envelopes: {
+          'planner:1': planEnv(),
+          'builder:1': buildEnv(), 'builder:2': b376Build([entry]), 'builder:3': b376Build([entry]),
+          'reviewer:1': b376Review('changes-needed', [B376_FINDING]),
+          'reviewer:2': b376Review('pass', []), 'reviewer:3': b376Review('pass', []),
+        },
+        runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' }, [B863_INVOCATION]: onInvocation },
+      })
+      const baseRead = io.readFile
+      const baseWrite = io.writeFile
+      const baseRun = io.run
+      io.readFile = (path) => (typeof path === 'string' && path.startsWith(`${checkout}/`)
+        ? (existsSync(path) ? readFileSync(path, 'utf8') : null)
+        : baseRead(path))
+      io.writeFile = (path, content) => {
+        if (typeof path === 'string' && path.startsWith(`${checkout}/`)) {
+          io.calls.writes[path] = content
+          io.calls.writeLog.push({ path, content })
+          writeFileSync(path, content)
+          return
+        }
+        return baseWrite(path, content)
+      }
+      io.run = (cmd) => {
+        const text = String(cmd)
+        if (text.includes('git -C ')) {
+          io.calls.run.push({ cmd: text, n: io.calls.run.length + 1 })
+          const res = spawnSync('/bin/sh', ['-c', text], { cwd: checkout, encoding: 'utf8' })
+          return { ok: res.status === 0, status: res.status, output: `${res.stdout || ''}${res.stderr || ''}`, stderr: String(res.stderr || '') }
+        }
+        return baseRun(cmd)
+      }
+      io.changedFiles = () => {
+        const res = spawnSync('git', ['status', '--porcelain', '-uall'], { cwd: checkout, encoding: 'utf8' })
+        assert.equal(res.status, 0)
+        return String(res.stdout || '').split('\n').filter(Boolean).map((line) => line.slice(3))
+      }
+      io.fingerprintTree = (target) => fingerprintTree(target)
+      return io
+    }
+    const stateOf = () => ({
+      indexTree: sh(['git', 'write-tree']).stdout.trim(),
+      head: sh(['git', 'rev-parse', 'HEAD']).stdout.trim(),
+      stagedKeep: sh(['git', 'show', ':keep.txt']).stdout,
+      status: sh(['git', 'status', '--porcelain', '-uall']).stdout,
+      fingerprint: ((fp) => ({ measured: fp.measured, checkout: fp.checkout, head: fp.head, entries: fp.entries }))(fingerprintTree(checkout)),
+    })
+    const before = stateOf()
+    const controlIo = realIo((text, n) => {
+      if (n === 1) return b863Green(1)
+      writeFileSync(join(checkout, OUTSIDE), 'smuggled by the control run\n')
+      writeFileSync(join(checkout, 'a.mjs'), 'const guard = false\n// control-side entry.file write\n')
+      return b863Green(0)
+    })
+    const controlResult = driveTask({ ...CTX, checkout, taskDir, limits: { build_rounds: 2 } }, controlIo)
+    assert.equal(controlResult.status, 'done')
+    assert.equal(controlIo.calls.run.filter(({ cmd }) => cmd === B863_INVOCATION).length, 2)
+    const controlRow = invocationRows(controlIo).at(-1)
+    assert.equal(controlRow.outcome, 'unproven')
+    assert.match(controlRow.why, new RegExp(`invocation-control-side-effects:.*${OUTSIDE}`))
+    assert.match(controlRow.why, new RegExp(INVOCATION_LIMIT_TEXT))
+    assert.deepEqual(stateOf(), before)
+    assert.equal(existsSync(join(checkout, OUTSIDE)), false)
+    assert.ok(!controlIo.changedFiles().includes(OUTSIDE))
+    const mutantIo = realIo((text, n) => {
+      if (n === 1) return b863Green(1)
+      if (n === 3) writeFileSync(join(checkout, OUTSIDE), 'smuggled by the mutant run\n')
+      return n === 2 ? b863Green(0) : b863Green(1)
+    })
+    const mutantResult = driveTask({ ...CTX, checkout, taskDir, limits: { build_rounds: 2 } }, mutantIo)
+    assert.equal(mutantResult.status, 'done')
+    assert.equal(mutantIo.calls.run.filter(({ cmd }) => cmd === B863_INVOCATION).length, 3)
+    const mutantRow = invocationRows(mutantIo).at(-1)
+    assert.equal(mutantRow.outcome, 'unproven')
+    assert.match(mutantRow.why, new RegExp(`invocation-mutant-side-effects:.*${OUTSIDE}`))
+    assert.match(mutantRow.why, new RegExp(INVOCATION_LIMIT_TEXT))
+    assert.deepEqual(stateOf(), before)
+    assert.equal(existsSync(join(checkout, OUTSIDE)), false)
+    assert.ok(!mutantIo.changedFiles().includes(OUTSIDE))
+  } finally {
+    rmSync(checkout, { recursive: true, force: true })
+    rmSync(taskDir, { recursive: true, force: true })
+  }
+})
+
+test('E1 every invocation result states the exit-status-only limitation', () => {
+  const entry = b863InvocationEntry()
+  const fpBefore = { measured: true, checkout: CTX.checkout, at: 'before', head: 'h', entries: { 'a.mjs': 'file:-:aaa' } }
+  const fpOutside = { measured: true, checkout: CTX.checkout, at: 'after', head: 'h', entries: { 'a.mjs': 'file:-:aaa', 'outside-e1.txt': 'file:-:bbb' } }
+  const unsafeEntry = b863InvocationEntry({ find: 'const tag = 1 // the guard\nconst guard = false', replace: 'const tag = 1 // the guard\nconst guard = true' })
+  const coverageEntry = b863InvocationEntry({ class: 'coverage' })
+  const denyWitnessRead = (io) => {
+    const baseRead = io.readFile.bind(io)
+    let denied = false
+    io.readFile = function (p) {
+      if (!denied && p === `${CTX.checkout}/a.mjs`) { denied = true; throw new Error('EACCES: witness read denied') }
+      return baseRead(p)
+    }
+  }
+  const cases = [
+    ['witness-missing', { entry: b863InvocationEntry({ file: 'extra.mjs' }), files: { [`${CTX.checkout}/extra.mjs`]: 'const guard = false\n', ...B863_FILES }, runFn: () => b863Green(0) }, 'witness-missing'],
+    ['witness-unreadable', { files: { ...B863_FILES }, runFn: () => b863Green(0), wrap: denyWitnessRead }, 'witness-unreadable'],
+    ['witness-absent', { files: {}, runFn: () => b863Green(0) }, 'witness-absent'],
+    ['unapplied', { files: { ...B863_FILES }, flipTo: { delete: [`${CTX.checkout}/a.mjs`] }, runFn: () => b863Green(0) }, 'unapplied'],
+    ['absent', { entry: b863InvocationEntry({ find: 'no such anchor anywhere' }), runFn: () => b863Green(0) }, 'anchor-absent'],
+    ['ambiguous', { files: { [`${CTX.checkout}/a.mjs`]: 'const  guard  =  false\nconst\tguard\t=\tfalse\n' }, runFn: () => b863Green(0) }, 'anchor-ambiguous'],
+    ['unsafe', { entry: unsafeEntry, files: { [`${CTX.checkout}/a.mjs`]: 'const tag = 1 // the guard\nconst  guard = false\n' }, runFn: () => b863Green(0) }, 'anchor-unsafe'],
+    ['pre-repair-green', { runFn: () => b863Green(0) }, 'pre-repair-green', /does not fail on the witnessed pre-repair/],
+    ['source-regressed', { entry: coverageEntry, files: { [`${CTX.checkout}/a.mjs`]: 'const guard = true\n' }, flipTo: { set: { [`${CTX.checkout}/a.mjs`]: 'const guard = false\n' } }, runFn: () => b863Green(0) }, 'source-regressed'],
+    ['coverage-unprovable', { entry: coverageEntry, runFn: () => b863Green(0) }, 'unproven', /cannot be adjudicated/],
+    ['control-interruption', { runFn: (text, n) => { if (n === 2) throw new Error('boom-control'); return b863Green(1) } }, 'unproven'],
+    ['mutant-interruption', { runFn: (text, n) => { if (n === 3) throw new Error('boom-mutant'); return b863Green(n === 2 ? 0 : 1) } }, 'unproven'],
+    ['survived', { runFn: (text, n) => (n === 1 ? b863Green(1) : b863Green(0)) }, 'survived'],
+    ['killed', { runFn: (text, n) => (n === 2 ? b863Green(0) : b863Green(1)) }, 'killed'],
+    ['side-effects', { fingerprints: (target, calls) => (calls.run.filter(({ cmd }) => cmd === B863_INVOCATION).length >= 2 ? fpOutside : fpBefore), runFn: (text, n) => (n === 2 ? b863Green(0) : b863Green(1)) }, 'unproven'],
+  ]
+  for (const [label, options, outcome, match] of cases) {
+    const io = invocationProofIo({ entry: options.entry ?? entry, files: options.files ?? { ...B863_FILES }, fingerprints: options.fingerprints ?? null, runFn: options.runFn, flipTo: options.flipTo ?? null })
+    if (typeof options.wrap === 'function') options.wrap(io)
+    driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+    const row = invocationRows(io).at(-1)
+    assert.equal(row?.outcome, outcome, label)
+    assert.match(row?.why ?? '', new RegExp(INVOCATION_LIMIT_TEXT), label)
+    if (match !== undefined) assert.match(row?.why ?? '', match, label)
+  }
+})
+
+test('F1 invocation runs are bounded and descendants are reaped', { timeout: 90_000 }, () => {
+  const dir = scratchDir('b916-invocation-reap-')
+  try {
+    const entry = b863InvocationEntry({ invocation: 'nohup sleep 40 >/dev/null 2>&1 & echo "leaked $!"; sleep 60' })
+    let leaked = null
+    let timedOut = null
+    let elapsedMs = null
+    const io = invocationProofIo({
+      entry,
+      runFn: (text) => {
+        const started = Date.now()
+        const res = spawnSync('/bin/sh', ['-c', text], { encoding: 'utf8', timeout: 4_000 })
+        elapsedMs = Date.now() - started
+        timedOut = res.error?.code ?? null
+        leaked ??= /leaked (\d+)/.exec(`${res.stdout || ''}`)?.[1] ?? null
+        return { ok: false, status: res.status ?? null, output: `${res.stdout || ''}${res.stderr || ''}`, stderr: String(res.stderr || '') }
+      },
+    })
+    const result = driveTask({ ...CTX, taskDir: dir, limits: { build_rounds: 2 } }, io)
+    assert.equal(result.status, 'done')
+    assert.equal(timedOut, 'ETIMEDOUT')
+    assert.ok(elapsedMs !== null && elapsedMs < 15_000, `expected the runner timeout to bound the invocation, elapsed ${elapsedMs}ms`)
+    assert.ok(leaked, 'expected the fixture to report its leaked descendant pid')
+    assert.equal(invocationExecutions(io, entry.invocation).length, 1)
+    const wrapped = io.calls.wrapped.filter((record) => record.cmd === entry.invocation)
+    assert.ok(wrapped.length >= 1)
+    assert.ok(wrapped.every((record) => record.wrapped !== record.cmd))
+    assert.ok(io.calls.sweeps.length >= 1)
+    assert.ok(io.calls.sweeps.every((cmd) => String(cmd).includes(GATE_REAP_SWEEP_MARKER)))
+    const row = invocationRows(io).at(-1)
+    assert.equal(row?.outcome, 'unproven')
+    assert.match(row?.why ?? '', new RegExp(INVOCATION_LIMIT_TEXT))
+    const sweep = spawnSync('/bin/sh', ['-c', io.calls.sweeps.at(-1)], { encoding: 'utf8', timeout: 120_000 })
+    assert.equal(sweep.status, 0)
+    const deadline = Date.now() + 10_000
+    while (b127PidAlive(leaked) && Date.now() < deadline) spawnSync('sleep', ['0.05'])
+    assert.equal(b127PidAlive(leaked), false, `leaked descendant ${leaked} remained alive after the timeout sweep`)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('G1 named-test hardening remains exact-name adjudicated', () => {
+  const io = b376ProofIo({ files: { [`${CTX.checkout}/${B376_TEST_FILE}`]: 'export const repaired = true\n', [`${CTX.checkout}/${B376_IMPL_FILE}`]: 'const guard = false\n' } })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  assert.equal(result.status, 'done')
+  const row = io.calls.logs.find((logged) => logged.finding_hardened)?.finding_hardened
+  const { round: _round, ...stable } = row
+  assert.deepEqual(stable, { finding: 'F1', test: 'a.test.mjs', check: 'F1 guard', outcome: 'killed', why: null })
+  assert.equal(io.calls.run.filter(({ cmd }) => cmd === hardenWitnessCommand(B376_TEST_FILE)).length, 1)
+  assert.equal(io.calls.run.filter(({ cmd }) => cmd === hardenCommand(B376_TEST_FILE, 'F1 guard')).length, 3)
+  const hardeningCmds = new Set([hardenWitnessCommand(B376_TEST_FILE), hardenCommand(B376_TEST_FILE, 'F1 guard')])
+  for (const record of io.calls.wrapped.filter((record) => hardeningCmds.has(record.cmd))) {
+    assert.equal(record.wrapped, record.cmd)
+  }
+  assert.ok(io.calls.sweeps.every((cmd) => !String(cmd).includes('invocation')))
+})
+
+test('a failed tree reset aborts before git clean and escalates harden', () => {
+  const entry = b863InvocationEntry()
+  const resetCmd = `git -C '${CTX.checkout}' read-tree --reset -u ${'2'.repeat(40)}`
+  const io = invocationProofIo({
+    entry,
+    runFn: (text, n) => (n === 1 ? b863Green(1) : b863Green(0)),
+    extraRuns: { [resetCmd]: (text, n) => (n === 1
+      ? { ok: true, status: 0, output: '', stderr: '' }
+      : { ok: false, status: 128, output: 'fatal: unable to create file: Permission denied', stderr: '' }) },
+  })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'harden')
+  assert.equal(invocationExecutions(io).length, 2)
+  const row = invocationRows(io).at(-1)
   assert.equal(row?.outcome, 'unproven')
+  assert.match(row?.why ?? '', /could not be restored/)
+  assert.match(row?.why ?? '', /read-tree/)
+  assert.match(row?.why ?? '', new RegExp(INVOCATION_LIMIT_TEXT))
+  const ranAt = io.calls.run.map(({ cmd }) => String(cmd))
+  const lastReset = ranAt.lastIndexOf(resetCmd)
+  assert.notEqual(lastReset, -1)
+  assert.ok(ranAt.slice(0, lastReset).some((cmd) => cmd.includes('clean -fd')))
+  assert.ok(!ranAt.slice(lastReset).some((cmd) => cmd.includes('clean -fd')))
+})
+
+test('a behavioural invocation passing on witnessed bytes is refuted pre-repair-green', () => {
+  const io = invocationProofIo({ runFn: () => b863Green(0) })
+  driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  assert.equal(invocationExecutions(io).length, 1)
+  const row = invocationRows(io).at(-1)
+  assert.equal(row?.outcome, 'pre-repair-green')
+  assert.match(row?.why ?? '', /does not fail on the witnessed pre-repair/)
+  assert.match(row?.why ?? '', new RegExp(INVOCATION_LIMIT_TEXT))
 })
 
 test('b863 C1 a guard naming both a path and an invocation, or neither, is refused', () => {

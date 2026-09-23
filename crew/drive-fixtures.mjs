@@ -132,7 +132,18 @@ const fenceDiff = (path, oldStart, oldCount = 1, newStart = oldStart, newCount =
 
 // Scripted fake io: `script` maps `${role}:${n-th call}` -> envelope; runs and
 // git are scripted per call. Everything is recorded for assertions.
-function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cleanThrows = false, cold = 'green', showDoc = false, documentDiff = '', emit = false, files = {}, reseat = null, gh = null, writeThrough = false, throwOn = null, throwWrites = [], seqIds = false, now = () => 0, slots = null, diffListing = '', diffHunks = {}, diffReports = [], fenceBases = {}, fenceDiffs = {}, baseBlobs = {}, spanDiffs = {}, onRun = null, onCommit = null, commitResults = null, screener = null, stats = null } = {}) {
+// Canned answers for driver-issued git snapshot plumbings (invocation proof only).
+// Consulted after the scripted runs map, so a test can fail one on purpose;
+// matched on the unwrapped command, so a reap-wrapped invocation containing
+// git text still reaches its scripted runs entry. Anything else is blank.
+const invocationGitCanned = (original) => {
+  if (!/^(GIT_INDEX_FILE=\S+ )?git -C /.test(String(original ?? ''))) return null
+  if (original.includes('rev-parse HEAD')) return { ok: true, status: 0, output: `${'1'.repeat(40)}\n`, stderr: '' }
+  if (original.includes('write-tree')) return { ok: true, status: 0, output: `${'2'.repeat(40)}\n`, stderr: '' }
+  if (original.includes('diff --name-only')) return { ok: true, status: 0, output: '', stderr: '' }
+  return { ok: true, status: 0, output: '', stderr: '' }
+}
+function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cleanThrows = false, cold = 'green', showDoc = false, documentDiff = '', emit = false, files = {}, reseat = null, gh = null, writeThrough = false, throwOn = null, throwWrites = [], seqIds = false, now = () => 0, slots = null, diffListing = '', diffHunks = {}, diffReports = [], fenceBases = {}, fenceDiffs = {}, baseBlobs = {}, spanDiffs = {}, onRun = null, onCommit = null, commitResults = null, screener = null, stats = null, fingerprints = null } = {}) {
   const calls = { order: [], trace: [], assign: [], run: [], diffRuns: [], fenceShows: [], fenceDiffs: [], diffInventory: [], diffConfigs: [], runClean: [], runCold: [], wrapped: [], sweeps: [], reseat: [], commits: [], writes: {}, writeLog: [], checkoutLog: [], logs: [], showDoc: [], emits: [], gh: [], waits: [], sleeps: [], slotFactories: [], files, screener: { models: [], diffs: [], children: [] } }
   const counts = {}; let seq = 0
 
@@ -249,7 +260,9 @@ function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cle
       // UNMEASURED and escalates, so a blank default would escalate every drive fixture that
       // never meant to exercise the census. A test that cares stubs the command explicitly.
       const r = runs[`${original}:${counts[original]}`] ?? runs[original]
-        ?? (original.includes('census-exhibits.mjs') ? { ok: true, output: CENSUS_GREEN_OUTPUT } : { ok: true, output: '' })
+        ?? (original.includes('census-exhibits.mjs') ? { ok: true, output: CENSUS_GREEN_OUTPUT } : null)
+        ?? invocationGitCanned(original)
+        ?? { ok: true, output: '' }
       if (typeof onRun === 'function') onRun(text, original, counts[original], calls)
       return typeof r === 'function' ? r(text, counts[original], calls) : r
     },
@@ -272,6 +285,14 @@ function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cle
       if (!Object.prototype.hasOwnProperty.call(stats, p)) return null
       const value = stats[p]
       return typeof value === 'number' ? { mtimeMs: value } : value
+    }
+  }
+  if (fingerprints !== null && fingerprints !== undefined) {
+    const fingerprintQueue = Array.isArray(fingerprints) ? [...fingerprints] : null
+    io.fingerprintTree = (checkout) => {
+      if (typeof fingerprints === 'function') return fingerprints(checkout, calls)
+      if (fingerprintQueue !== null) return fingerprintQueue.length > 1 ? fingerprintQueue.shift() : fingerprintQueue[0]
+      return fingerprints
     }
   }
   if (cold !== null) {

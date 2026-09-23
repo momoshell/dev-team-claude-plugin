@@ -10,7 +10,7 @@ import {
   declaredCapabilities, effectiveCapabilities, grantsFor, loadCapabilities, probeCapability, validateRosterAgents,
   refuse, seatableLocalProviderNames, validateCapabilities, vendorRoots,
 } from './capabilities.mjs'
-import { seatCommand as claudeSeatCommand, capabilitiesFor } from './adapters/adapter-claude.mjs'
+import { seatCommand as claudeSeatCommand, capabilitiesFor, skillsPluginDir, writeSeatSkills } from './adapters/adapter-claude.mjs'
 import { seatCommand as piSeatCommand, capabilitiesFor as piCapabilitiesFor, PI_FIRST_PARTY_EXTENSION_TOOLS, PI_BUILTIN_TOOLS, PI_PROVIDERS } from './adapters/adapter-pi.mjs'
 import { scratchDir } from '../test/helpers.mjs'
 import { NARRATION_BACKSTOP_SECONDS, NARRATION_CONNECT_TIMEOUT_SECONDS, NARRATION_MIN_BYTES_PER_SECOND, NARRATION_STALL_SECONDS, narratorCommand } from './drive.mjs'
@@ -653,13 +653,48 @@ test('the shipped planner pi overlay resolves its checkout-pinned bundle', () =>
     join(REGISTER_ROOT, 'crew/pi/extensions/lab.ts'),
     join(REGISTER_ROOT, 'crew/pi/extensions/readgate.ts'),
   ]
-  const expectedSkills = [join(REGISTER_ROOT, 'skills/lean-build/SKILL.md')]
   const grants = grantsFor(loaded, 'planner', { agent: 'pi' })
   assert.deepEqual(grants.extensions, expected)
-  assert.deepEqual(grants.skills, expectedSkills)
-  for (const path of [...expected, ...expectedSkills]) assert.equal(existsSync(path), true)
+  for (const path of expected) assert.equal(existsSync(path), true)
   assert.doesNotThrow(() => assertGrantsBacked('planner', grants, loaded, { agent: 'pi' }))
   assert.deepEqual(grants.agents, [{ name: 'scout', def: join(REGISTER_ROOT, 'crew/pi/agents/scout.json') }])
+})
+
+test('the shipped register grants lean-build to every role on both agents', () => {
+  const loaded = loadCapabilities()
+  const expectedSkills = [join(REGISTER_ROOT, 'skills/lean-build/SKILL.md')]
+  for (const role of ['lead', 'planner', 'builder', 'reviewer', 'tech-lead']) {
+    for (const agent of ['pi', 'claude']) {
+      const grants = grantsFor(loaded, role, { agent })
+      assert.deepEqual(grants.skills, expectedSkills)
+      assert.doesNotThrow(() => assertGrantsBacked(role, grants, loaded, { agent }))
+    }
+  }
+})
+
+test('shipped claude reviewer and lead seats compose their session plugin dir with the granted skill', () => {
+  const loaded = loadCapabilities()
+  for (const role of ['reviewer', 'lead']) {
+    const grants = grantsFor(loaded, role, { agent: 'claude' })
+    assert.deepEqual(grants.skills, [join(REGISTER_ROOT, 'skills/lean-build/SKILL.md')])
+    assert.doesNotThrow(() => assertGrantsBacked(role, grants, loaded, { agent: 'claude' }))
+    const taskDir = scratchDir(`crew-shipped-claude-${role}-`)
+    try {
+      writeSeatSkills({ taskDir, role, grants })
+      const pluginDir = skillsPluginDir({ taskDir, role })
+      assert.equal(
+        readFileSync(join(pluginDir, 'skills', 'lean-build', 'SKILL.md'), 'utf8'),
+        readFileSync(join(REGISTER_ROOT, 'skills/lean-build/SKILL.md'), 'utf8'),
+      )
+      const command = claudeSeatCommand({
+        role, model: 'claude-fable-5', promptFile: join(taskDir, `role-${role}.md`),
+        tools: 'Read,Glob,Grep,Bash', deny: 'Edit,NotebookEdit', taskDir, bootBrief: 'boot', grants,
+      })
+      assert.equal(command.includes(`--plugin-dir "${pluginDir}"`), true)
+    } finally {
+      rmSync(taskDir, { recursive: true, force: true })
+    }
+  }
 })
 
 test('the shipped builder pi overlay resolves its checkout-pinned extensions', () => {
@@ -678,7 +713,8 @@ test('the shipped builder pi overlay resolves its checkout-pinned extensions', (
   assert.doesNotThrow(() => assertGrantsBacked('builder', pi, loaded, { agent: 'pi' }))
   const claude = grantsFor(loaded, 'builder', { agent: 'claude' })
   assert.deepEqual(claude.extensions, [])
-  assert.deepEqual(claude.skills, [])
+  assert.deepEqual(claude.skills, expectedSkills)
+  assert.doesNotThrow(() => assertGrantsBacked('builder', claude, loaded, { agent: 'claude' }))
   const forged = { ...pi, extensions: [...pi.extensions, join(REGISTER_ROOT, 'crew/pi/extensions/forged.ts')] }
   assert.throws(
     () => assertGrantsBacked('builder', forged, loaded, { agent: 'pi' }),
@@ -721,8 +757,12 @@ test('the read gate is absent from lead and reviewer pi and all claude overlays'
 })
 
 test('an adapter without an overlay gets exactly the role-level grant', () => {
-  const shipped = loadCapabilities()
+  const base = capabilityRegister()
+  const shipped = loadCapabilities({ register: capabilityRegister({ roles: {
+    planner: { ...base.roles.planner, by_agent: { pi: { skills: ['skills/lean-build/SKILL.md'] } } },
+  } }) })
   const roleLevel = grantsFor(shipped, 'planner')
+  assert.deepEqual(grantsFor(shipped, 'planner', { agent: 'pi' }).skills, [join(REGISTER_ROOT, 'skills/lean-build/SKILL.md')])
   const claude = grantsFor(shipped, 'planner', { agent: 'claude' })
   assert.deepEqual(claude, roleLevel)
   assert.deepEqual(claude.extensions, [])

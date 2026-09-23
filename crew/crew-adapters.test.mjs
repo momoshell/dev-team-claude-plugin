@@ -319,24 +319,37 @@ test('resolveAdapters rejects an unknown --agent-<role>; role-wide skills on cla
       && /seat builder/.test(error.message)
       && /coding_agents\.nope/.test(error.message),
   )
-  // The shipped register grants lean-build under pi overlays; claude seats hold
-  // no skill grant under it, so both claude authoring seats resolve without one.
+  // The shipped register grants lean-build under every role/agent overlay, so
+  // both claude authoring seats resolve WITH the skill grant. Deleting the pi
+  // overlay skills must leave those claude grants unchanged; seatCommand refuses
+  // an unmaterialised skill grant, so each side is materialised into the same
+  // scratch task dir before its command is composed.
   const shipped = JSON.parse(readFileSync(new URL('./capabilities.json', import.meta.url), 'utf8'))
   const withoutPiSkills = JSON.parse(JSON.stringify(shipped))
   for (const role of ['planner', 'builder']) delete withoutPiSkills.roles[role].by_agent.pi.skills
   const claudeArgs = { 'agent-builder': 'claude', 'agent-reviewer': 'claude' }
   const before = await resolveAdapters(['builder', 'reviewer'], claudeArgs, null, { register: shipped })
   const after = await resolveAdapters(['builder', 'reviewer'], claudeArgs, null, { register: withoutPiSkills })
-  for (const role of ['builder', 'reviewer']) {
-    const seat = {
-      role, model: 'sonnet', promptFile: `/tmp/crew-task/role-${role}.md`,
-      tools: SEAT_DEFAULTS[role].tools, deny: SEAT_DEFAULTS[role].deny,
-      taskDir: '/tmp/crew-task', bootBrief: 'boot',
+  const taskDir = scratchDir('b921-shipped-skills-')
+  try {
+    for (const role of ['builder', 'reviewer']) {
+      assert.deepEqual(before[role].grants.skills, after[role].grants.skills)
+      assert.equal(before[role].grants.skills.length, 1)
+      assert.equal(before[role].grants.skills[0].endsWith('skills/lean-build/SKILL.md'), true)
+      writeSeatSkills({ taskDir, role, grants: before[role].grants })
+      const seat = {
+        role, model: 'sonnet', promptFile: `/tmp/crew-task/role-${role}.md`,
+        tools: SEAT_DEFAULTS[role].tools, deny: SEAT_DEFAULTS[role].deny,
+        taskDir, bootBrief: 'boot',
+      }
+      assert.equal(
+        seatCommand({ ...seat, grants: before[role].grants }),
+        seatCommand({ ...seat, grants: after[role].grants }),
+      )
+      assert.match(seatCommand({ ...seat, grants: before[role].grants }), /--plugin-dir/)
     }
-    assert.equal(
-      seatCommand({ ...seat, grants: before[role].grants }),
-      seatCommand({ ...seat, grants: after[role].grants }),
-    )
+  } finally {
+    rmSync(taskDir, { recursive: true, force: true })
   }
   // A register that grants skills role-wide now resolves on claude and delivers
   // via the seat plugin dir; role-wide extensions still refuse.

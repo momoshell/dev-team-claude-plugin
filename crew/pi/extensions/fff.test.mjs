@@ -18,6 +18,7 @@ import { seatCommand as piSeatCommand } from '../../adapters/adapter-pi.mjs'
 import {
   FFF_HOOK_PATH, PANE_USAGE_SETTINGS, capabilitiesFor as claudeCapabilitiesFor,
   fffHookDecision, headlessCommand as claudeHeadlessCommand, seatCommand as claudeSeatCommand,
+  writeSeatSkills,
 } from '../../adapters/adapter-claude.mjs'
 import { headlessIo } from '../../headless.mjs'
 import { scratchDir } from '../../../test/helpers.mjs'
@@ -71,10 +72,21 @@ function piCommand(entry, search = entry.search) {
   })
 }
 
+// Mirrors boot (crew/crew.mjs writeClaudeSkills): a claude seat holding skill grants
+// refuses to build its command until those skills are materialised under its task dir, so
+// a granted entry gets a scratch task dir with the skills written first. An ungranted entry
+// keeps the fixed path, which keeps the byte-for-byte comparison against it meaningful.
+function claudeTaskDir(entry) {
+  if ((entry.grants?.skills?.length ?? 0) === 0) return '/tmp/crew-task'
+  const taskDir = scratchDir('fff-claude-task-')
+  writeSeatSkills({ taskDir, role: 'builder', grants: entry.grants })
+  return taskDir
+}
+
 function claudeCommand(entry, search = entry.search) {
   return claudeSeatCommand({
     role: 'builder', model: 'sonnet', promptFile: '/tmp/role-builder.md',
-    tools: SEAT_DEFAULTS.builder.tools, deny: effectiveDeny('builder', search), taskDir: '/tmp/crew-task',
+    tools: SEAT_DEFAULTS.builder.tools, deny: effectiveDeny('builder', search), taskDir: claudeTaskDir(entry),
     bootBrief: 'boot', grants: entry.grants, configDir: entry.configDir,
   })
 }
@@ -499,6 +511,7 @@ test('fff-H1-headless-grant', async () => {
   const taskDir = join(dir, 'task')
   const returnsDir = join(dir, 'returns')
   mkdirSync(taskDir); mkdirSync(returnsDir)
+  writeSeatSkills({ taskDir, role: 'builder', grants: entry.grants })
   const crew = {
     roles: ['builder'], checkout: dir,
     members: {

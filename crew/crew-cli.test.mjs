@@ -14,7 +14,7 @@ import { runCmdFixture } from './drive-fixtures.mjs'
 import { composeRolePrompt } from './crew.mjs'
 import { runChild, packageSuite as childPackageSuite, SUITE_OWNER_PATH as CHILD_SUITE_OWNER_PATH } from './child.mjs'
 import { driveTask, resumeWorktreeSha256 } from './drive.mjs'
-import { seatCommand } from './adapters/adapter-claude.mjs'
+import { seatCommand, skillsPluginDir, writeSeatSkills } from './adapters/adapter-claude.mjs'
 import { seatCommand as piSeatCommand, translateDeny, PI_BUILTIN_TOOLS } from './adapters/adapter-pi.mjs'
 import { rpcCommand } from './headless-rpc.mjs'
 import { seatIo, DEFAULT_TRANSPORT, HEADLESS_TRANSPORT } from './seat-io.mjs'
@@ -25,7 +25,7 @@ import { WORKFLOW_REFUSALS, SEAT_BEARING_STAGES, loadWorkflow, validateWorkflow 
 import { shippedRoster, roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter, capabilityRegister, capabilityFixtureRoot } from './crew-test-helpers.mjs'
 
 // Keep lexical import reach visible before byte-pinned regex test bodies.
-void [test, after, assert, createHash, readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync, chmodSync, symlinkSync, cpSync, realpathSync, execSync, spawn, spawnSync, tmpdir, homedir, join, basename, dirname, fileURLToPath, openLedger, USAGE_ABSENT_CAUSES, TURN_CEILING_FLAGS, openRun, _resetNoticeGuardsForTest, SEAT_DEFAULTS, FANOUT_TOOLS, ROLE_ORDER, resolveAdapters, resolveTier, loadLadder, shadowCandidates, shadowExclusion, shadowPick, shadowPickBoot, SHADOW_EXCLUSIONS, SHADOW_OUTCOMES, SHADOW_ABSENT, loadRoutingPolicy, materialiseRoutingChoice, replayRoutingChoice, ROUTING_EXCLUSION_REASONS, ROUTING_PRECEDENCE, bootCmd, runCmd, runExitCode, runOutcome, RUN_EXIT_CODES, RUN_EXIT_UNEXPECTED, RUN_START_EVENT, readHead, readBranch, teardownDecision, stagesFromJournal, resolveValidationLane, awaitSeatsReady, teardownCore, installExitMarker, installRunFinalizers, writeTerminalLine, terminalLineSeen, runScopedPaths, returnsInheritanceRecord, RETURNS_INHERITANCE_REASONS, resolveTaskReturn, archivedReturn, UsageError, KNOWN_FLAGS, ROLE_FLAG_PREFIXES, REQUIRED_FLAGS, BOOT_ONLY_FLAGS, assertUsage, parseArgs, FLAG_VALUE_REFUSAL, FLAG_VALUE_CONTRACT, BOOLEAN_FLAGS, resolveTimeoutS, TIMEOUT_S_REFUSAL, TIMEOUT_S_DEFAULT, MEMORY_ROLES, CHARTER_CEILINGS, CAPABILITY_REFUSALS, loadCapabilities, grantsFor, assertGrantsBacked, assertFanoutCoherent, deniedFanout, EMPTY_GRANTS, probeLocalEndpoint, effectiveTools, persistedAdapters, GRANT_SNAPSHOT_REFUSAL, ADVISOR_CONFIG_VERSION, ADVISOR_BOOT_REFUSALS, SAFE_MODEL, classifyAdvisorCell, advisorBootRecord, advisorJournalRecord, advisorEndpointOrigin, assertAdvisorCellLive, advisorManifest, assertAdvisorManifest, packageSuite, SUITE_OWNER_PATH, SUITE_REFUSAL, PANE_TURN_CEILING_UNMEASURED, paneTurnCeilingRefusals, resumeCmd, validateResumeState, RESUME_REFUSALS, RESUME_REFUSAL_NAMES, refuseResume, runChild, childPackageSuite, CHILD_SUITE_OWNER_PATH, driveTask, resumeWorktreeSha256, seatCommand, piSeatCommand, translateDeny, PI_BUILTIN_TOOLS, rpcCommand, seatIo, DEFAULT_TRANSPORT, HEADLESS_TRANSPORT, testCheckout, ROOT, scratchDir, FINGERPRINT_FILE, FINGERPRINT_OUTCOMES, FINGERPRINT_WITHHELD, checkRecordedTree, WORKFLOW_REFUSALS, SEAT_BEARING_STAGES, loadWorkflow, validateWorkflow, shippedRoster, roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter, capabilityRegister, capabilityFixtureRoot, composeRolePrompt, globalThis.appendFileSync]
+void [test, after, assert, createHash, readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync, chmodSync, symlinkSync, cpSync, realpathSync, execSync, spawn, spawnSync, tmpdir, homedir, join, basename, dirname, fileURLToPath, openLedger, USAGE_ABSENT_CAUSES, TURN_CEILING_FLAGS, openRun, _resetNoticeGuardsForTest, SEAT_DEFAULTS, FANOUT_TOOLS, ROLE_ORDER, resolveAdapters, resolveTier, loadLadder, shadowCandidates, shadowExclusion, shadowPick, shadowPickBoot, SHADOW_EXCLUSIONS, SHADOW_OUTCOMES, SHADOW_ABSENT, loadRoutingPolicy, materialiseRoutingChoice, replayRoutingChoice, ROUTING_EXCLUSION_REASONS, ROUTING_PRECEDENCE, bootCmd, runCmd, runExitCode, runOutcome, RUN_EXIT_CODES, RUN_EXIT_UNEXPECTED, RUN_START_EVENT, readHead, readBranch, teardownDecision, stagesFromJournal, resolveValidationLane, awaitSeatsReady, teardownCore, installExitMarker, installRunFinalizers, writeTerminalLine, terminalLineSeen, runScopedPaths, returnsInheritanceRecord, RETURNS_INHERITANCE_REASONS, resolveTaskReturn, archivedReturn, UsageError, KNOWN_FLAGS, ROLE_FLAG_PREFIXES, REQUIRED_FLAGS, BOOT_ONLY_FLAGS, assertUsage, parseArgs, FLAG_VALUE_REFUSAL, FLAG_VALUE_CONTRACT, BOOLEAN_FLAGS, resolveTimeoutS, TIMEOUT_S_REFUSAL, TIMEOUT_S_DEFAULT, MEMORY_ROLES, CHARTER_CEILINGS, CAPABILITY_REFUSALS, loadCapabilities, grantsFor, assertGrantsBacked, assertFanoutCoherent, deniedFanout, EMPTY_GRANTS, probeLocalEndpoint, effectiveTools, persistedAdapters, GRANT_SNAPSHOT_REFUSAL, ADVISOR_CONFIG_VERSION, ADVISOR_BOOT_REFUSALS, SAFE_MODEL, classifyAdvisorCell, advisorBootRecord, advisorJournalRecord, advisorEndpointOrigin, assertAdvisorCellLive, advisorManifest, assertAdvisorManifest, packageSuite, SUITE_OWNER_PATH, SUITE_REFUSAL, PANE_TURN_CEILING_UNMEASURED, paneTurnCeilingRefusals, resumeCmd, validateResumeState, RESUME_REFUSALS, RESUME_REFUSAL_NAMES, refuseResume, runChild, childPackageSuite, CHILD_SUITE_OWNER_PATH, driveTask, resumeWorktreeSha256, seatCommand, skillsPluginDir, writeSeatSkills, piSeatCommand, translateDeny, PI_BUILTIN_TOOLS, rpcCommand, seatIo, DEFAULT_TRANSPORT, HEADLESS_TRANSPORT, testCheckout, ROOT, scratchDir, FINGERPRINT_FILE, FINGERPRINT_OUTCOMES, FINGERPRINT_WITHHELD, checkRecordedTree, WORKFLOW_REFUSALS, SEAT_BEARING_STAGES, loadWorkflow, validateWorkflow, shippedRoster, roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter, capabilityRegister, capabilityFixtureRoot, composeRolePrompt, globalThis.appendFileSync]
 
 const KEEPALIVE_LIFETIME_DEFAULT_MS = 300 * 1000
 const CLAUDE_USAGE_SETTINGS = fileURLToPath(new URL('./adapters/claude-usage.settings.json', import.meta.url))
@@ -563,26 +563,51 @@ function capabilityRegisterForBoot() {
 
 test('the default claude planner pane command is pinned byte for byte across the granted and ungranted paths', () => {
   const register = loadCapabilities()
+  // The task dir is a scratch dir, not a fixed /tmp path: writeSeatSkills
+  // refuses to materialise into a task dir that does not exist yet, and a fixed
+  // path would let a concurrent lane delete this lane's materialisation between
+  // write and compose. The pin stays byte-exact by interpolating the dir.
+  const taskDir = scratchDir('crew-claude-planner-pin-')
+  const seat = {
+    role: 'planner', promptFile: join(taskDir, 'role-planner.md'),
+    tools: SEAT_DEFAULTS.planner.tools, deny: SEAT_DEFAULTS.planner.deny, taskDir,
+    bootBrief: `Crew for task demo. Task dir ${taskDir}. Read your role in the system prompt, reply exactly ready: your-role, then wait.`,
+  }
+  try {
   // GRANTED: the register's role-level `tools: ["Task"]` reaches --allowedTools
-  // through adapter-claude's allowedTools() merge. Byte-for-byte, no exceptions.
-  assert.equal(
-    seatCommand({ ...PIN_SEAT, model: 'opus', grants: pinnedGrants(register, 'claude') }),
-    `env DEVTEAM_WORKER=1 CREW_ROLE=planner CREW_TASK_DIR="/tmp/crew-task" CREW_FFF=0 CREW_FFF_NODE="" CREW_FFF_HOOK="" claude --model opus --permission-mode bypassPermissions --strict-mcp-config --mcp-config "/tmp/crew-task/mcp/planner.json" --settings "${CLAUDE_USAGE_SETTINGS}" --allowedTools "Read,Glob,Grep,Bash,Write,Task" --disallowedTools "Edit,NotebookEdit,mcp__*" --append-system-prompt-file "/tmp/crew-task/role-planner.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."`,
-  )
-  // UNGRANTED: the same seat with no grants at all composes a DIFFERENT command
-  // (no Task), so the granted assertion above is not vacuous.
-  assert.equal(
-    seatCommand({ ...PIN_SEAT, model: 'opus', grants: EMPTY_GRANTS }),
-    `env DEVTEAM_WORKER=1 CREW_ROLE=planner CREW_TASK_DIR="/tmp/crew-task" CREW_FFF=0 CREW_FFF_NODE="" CREW_FFF_HOOK="" claude --model opus --permission-mode bypassPermissions --strict-mcp-config --mcp-config "/tmp/crew-task/mcp/planner.json" --settings "${CLAUDE_USAGE_SETTINGS}" --allowedTools "Read,Glob,Grep,Bash,Write" --disallowedTools "Edit,NotebookEdit,mcp__*" --append-system-prompt-file "/tmp/crew-task/role-planner.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."`,
-  )
-  // The load-bearing constraint of #403: the by_agent overlay never reaches the
-  // claude planner, so stripping it from the register moves NOTHING.
-  const stripped = JSON.parse(JSON.stringify(register))
-  delete stripped.roles.planner.by_agent
-  assert.equal(
-    seatCommand({ ...PIN_SEAT, model: 'opus', grants: pinnedGrants(loadCapabilities({ register: stripped }), 'claude') }),
-    seatCommand({ ...PIN_SEAT, model: 'opus', grants: pinnedGrants(register, 'claude') }),
-  )
+  // through adapter-claude's allowedTools() merge, and the claude overlay's
+  // lean-build skill reaches its session plugin dir. Byte-for-byte, no exceptions.
+  // seatCommand refuses an unmaterialised skill grant, so the granted skill is
+  // materialised into the scratch task dir first (resolved from the real checkout
+  // root; the materialised file name is root-independent, so the PIN_ROOT
+  // command below finds it).
+  const grantedReal = grantsFor(register, 'planner', { agent: 'claude' })
+  assert.doesNotThrow(() => assertGrantsBacked('planner', grantedReal, register, { agent: 'claude' }))
+  writeSeatSkills({ taskDir, role: 'planner', grants: grantedReal })
+    assert.equal(
+      seatCommand({ ...seat, model: 'opus', grants: pinnedGrants(register, 'claude') }),
+      `env DEVTEAM_WORKER=1 CREW_ROLE=planner CREW_TASK_DIR="${taskDir}" CREW_FFF=0 CREW_FFF_NODE="" CREW_FFF_HOOK="" claude --model opus --permission-mode bypassPermissions --strict-mcp-config --mcp-config "${taskDir}/mcp/planner.json" --settings "${CLAUDE_USAGE_SETTINGS}" --plugin-dir "${skillsPluginDir({ taskDir, role: 'planner' })}" --allowedTools "Read,Glob,Grep,Bash,Write,Task" --disallowedTools "Edit,NotebookEdit,mcp__*" --append-system-prompt-file "${taskDir}/role-planner.md" "${seat.bootBrief}"`,
+    )
+    // UNGRANTED: the same seat with no grants at all composes a DIFFERENT command
+    // (no Task, no plugin dir), so the granted assertion above is not vacuous.
+    assert.equal(
+      seatCommand({ ...seat, model: 'opus', grants: EMPTY_GRANTS }),
+      `env DEVTEAM_WORKER=1 CREW_ROLE=planner CREW_TASK_DIR="${taskDir}" CREW_FFF=0 CREW_FFF_NODE="" CREW_FFF_HOOK="" claude --model opus --permission-mode bypassPermissions --strict-mcp-config --mcp-config "${taskDir}/mcp/planner.json" --settings "${CLAUDE_USAGE_SETTINGS}" --allowedTools "Read,Glob,Grep,Bash,Write" --disallowedTools "Edit,NotebookEdit,mcp__*" --append-system-prompt-file "${taskDir}/role-planner.md" "${seat.bootBrief}"`,
+    )
+    // The by_agent overlay now carries the claude planner's lean-build skill, so
+    // stripping it removes exactly the session plugin dir and nothing else: the
+    // stripped command is the pre-grant pin byte for byte.
+    const stripped = JSON.parse(JSON.stringify(register))
+    delete stripped.roles.planner.by_agent
+    const strippedGrants = pinnedGrants(loadCapabilities({ register: stripped }), 'claude')
+    assert.deepEqual(strippedGrants.skills, [])
+    assert.equal(
+      seatCommand({ ...seat, model: 'opus', grants: strippedGrants }),
+      `env DEVTEAM_WORKER=1 CREW_ROLE=planner CREW_TASK_DIR="${taskDir}" CREW_FFF=0 CREW_FFF_NODE="" CREW_FFF_HOOK="" claude --model opus --permission-mode bypassPermissions --strict-mcp-config --mcp-config "${taskDir}/mcp/planner.json" --settings "${CLAUDE_USAGE_SETTINGS}" --allowedTools "Read,Glob,Grep,Bash,Write,Task" --disallowedTools "Edit,NotebookEdit,mcp__*" --append-system-prompt-file "${taskDir}/role-planner.md" "${seat.bootBrief}"`,
+    )
+  } finally {
+    rmSync(taskDir, { recursive: true, force: true })
+  }
 })
 
 test('the granted pi planner pane command is pinned byte for byte so by_agent delivery reaches argv', () => {
@@ -657,13 +682,16 @@ test('BG1', () => {
   assert.ok(builderCommand.includes('-e "/repo/crew/pi/extensions/fff.ts"'))
   assert.ok(builderCommand.includes('-e "/repo/crew/pi/extensions/builderloop.ts"'))
   assert.ok(piSeatCommand(builder).includes('-e "/repo/crew/pi/extensions/readgate.ts"'))
+  const claudeTaskDir = scratchDir('crew-claude-bg1-')
+  try {
   const claudeBuilder = grantsFor(register, 'builder', { ...PIN_ROOT, agent: 'claude' })
   assert.deepEqual(claudeBuilder.extensions, [])
-  // The lean-build skill is granted under the pi overlay, which delivers it via
-  // --skill; a claude builder holds no skill grant under the shipped register
-  // and boots without a plugin dir.
-  assert.deepEqual(claudeBuilder.skills, [])
-  assert.doesNotThrow(() => seatCommand({ ...builder, grants: claudeBuilder }))
+  // The lean-build skill is granted under both overlays; the claude builder
+  // materialises it into its session plugin dir before composing its command.
+  assert.deepEqual(claudeBuilder.skills, ['/repo/skills/lean-build/SKILL.md'])
+  writeSeatSkills({ taskDir: claudeTaskDir, role: 'builder', grants: grantsFor(register, 'builder', { agent: 'claude' }) })
+  assert.doesNotThrow(() => seatCommand({ ...builder, taskDir: claudeTaskDir, grants: claudeBuilder }))
+  assert.equal(seatCommand({ ...builder, taskDir: claudeTaskDir, grants: claudeBuilder }).includes(`--plugin-dir "${skillsPluginDir({ taskDir: claudeTaskDir, role: 'builder' })}"`), true)
   for (const role of ROLE_ORDER.filter((name) => name !== 'builder')) {
     const grants = grantsFor(register, role, { ...PIN_ROOT, agent: 'pi' })
     assert.doesNotThrow(() => assertGrantsBacked(role, grants, register, { agent: 'pi' }))
@@ -672,17 +700,22 @@ test('BG1', () => {
       tools: SEAT_DEFAULTS[role].tools, deny: SEAT_DEFAULTS[role].deny, grants,
     })
     assert.equal(command.includes('/repo/crew/pi/extensions/builderloop.ts'), false)
-    assert.equal(command.split('--skill "/repo/skills/lean-build/SKILL.md"').length - 1, role === 'planner' ? 1 : 0)
-    assert.equal(command.includes('--no-skills'), role !== 'planner')
+    assert.equal(command.split('--skill "/repo/skills/lean-build/SKILL.md"').length - 1, 1)
+    assert.equal(command.includes('--no-skills'), false)
     assert.equal(command.includes('/repo/crew/pi/extensions/readgate.ts'), role === 'planner' || role === 'tech-lead')
   }
   for (const role of ROLE_ORDER.filter((name) => name !== 'builder')) {
     const grants = grantsFor(register, role, { ...PIN_ROOT, agent: 'claude' })
+    writeSeatSkills({ taskDir: claudeTaskDir, role, grants: grantsFor(register, role, { agent: 'claude' }) })
     const command = seatCommand({
-      ...builder, role, model: 'opus', promptFile: `/tmp/role-${role}.md`,
+      ...builder, taskDir: claudeTaskDir, role, model: 'opus', promptFile: `/tmp/role-${role}.md`,
       tools: SEAT_DEFAULTS[role].tools, deny: SEAT_DEFAULTS[role].deny, grants,
     })
     assert.equal(command.includes('/repo/crew/pi/extensions/readgate.ts'), false)
+    assert.equal(command.includes(`--plugin-dir "${skillsPluginDir({ taskDir: claudeTaskDir, role })}"`), true)
+  }
+  } finally {
+    rmSync(claudeTaskDir, { recursive: true, force: true })
   }
 })
 
@@ -723,9 +756,9 @@ test('BG2', () => {
       env: { CREW_ROLE: role, CREW_TASK_DIR: '/tmp/crew-task' }, grants,
     })
     assert.equal(command.args.includes('/repo/crew/pi/extensions/builderloop.ts'), false)
-    assert.equal(command.args.filter((value) => value === '--skill').length, role === 'planner' ? 1 : 0)
-    assert.equal(command.args.filter((value) => value === '/repo/skills/lean-build/SKILL.md').length, role === 'planner' ? 1 : 0)
-    assert.equal(command.args.includes('--no-skills'), role !== 'planner')
+    assert.equal(command.args.filter((value) => value === '--skill').length, 1)
+    assert.equal(command.args.filter((value) => value === '/repo/skills/lean-build/SKILL.md').length, 1)
+    assert.equal(command.args.includes('--no-skills'), false)
     assert.equal(command.args.includes('/repo/crew/pi/extensions/readgate.ts'), role === 'planner' || role === 'tech-lead')
   }
 })
@@ -2435,7 +2468,8 @@ test('the shipped register is where the fan-out grant lives', async () => {
     assert.deepEqual(register.roles[role].extensions, [])
     assert.deepEqual(register.roles[role].agents, [])
     assert.deepEqual(register.roles[role].skills, [])
-    assert.deepEqual(register.roles[role].by_agent?.pi?.skills ?? [], ['planner', 'builder'].includes(role) ? ['skills/lean-build/SKILL.md'] : [])
+    assert.deepEqual(register.roles[role].by_agent?.pi?.skills ?? [], ['skills/lean-build/SKILL.md'])
+    assert.deepEqual(register.roles[role].by_agent?.claude?.skills ?? [], ['skills/lean-build/SKILL.md'])
     assert.equal(register.roles[role].advisor, false)
   }
   for (const tier of Object.keys(roster.tiers)) {

@@ -32,9 +32,9 @@ scenario are considers, not must-fixes.
 Before writing findings, load the do-not-flag guidelines
 (`crew/guidelines/review-do-not-flag.md`) with
 `node .agents/skills/review-procedure/scripts/load-guidelines.mjs`, not a skill:
-the reviewer seat is granted no skill: pi boots it `--no-skills`
-(`crew/adapters/adapter-pi.mjs:370`) and claude is passed no plugin dir
-(`crew/adapters/adapter-claude.mjs:423`), so that route is closed.
+the reviewer's only skill is lean-build (pi `--skill`, claude a session
+`--plugin-dir`); these guidelines are judgment data, not a skill, so
+they never come by that route: load them via the script above.
 Where one of its classes still worries you in this diff, write it as a
 `consider` naming the defense you think fails.
 

@@ -5634,11 +5634,11 @@ test('D1 malformed refusal names path and correction', () => {
   assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 0)
 })
 
-// The falsification rules (ponytail-derived, Apache-2.0, see THIRD-PARTY-NOTICES.md) were
+// The falsification rules (KiroCrew-derived, Apache-2.0, see THIRD-PARTY-NOTICES.md) were
 // written for reviewers and reached none of them: `scripts/factory/pr-review.mjs` pastes
-// them into a PR-review brief, but a LANE reviewer saw only its charter. They cannot be a
-// capability grant — pi takes a skill as a --skill flag while adapter-claude refuses any
-// skill grant, and the judge tier's reviewer is a claude seat — so the brief carries them,
+// them into a PR-review brief, but a LANE reviewer saw only its charter. They are not a
+// capability grant — claude accepts skill grants through its session --plugin-dir, but
+// these review-specific rules are brief text, not a skill — so the brief carries them,
 // from the one file, to every reviewing seat whatever agent it runs.
 // Mutation killed: dropping the lines from the ordinary review brief; dropping them from
 // the panel seat brief; swallowing an unreadable file instead of stating it.

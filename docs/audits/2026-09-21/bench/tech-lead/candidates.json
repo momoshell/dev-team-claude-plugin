@@ -2,7 +2,7 @@
   "schema": 1,
   "role": "tech-lead",
   "tier": "judge",
-  "production": "anthropic/claude-fable-5",
+  "production": "anthropic/claude-fable-5-1",
   "candidates": [
     {
       "provider": "anthropic",
@@ -18,7 +18,7 @@
     },
     {
       "provider": "anthropic",
-      "id": "claude-fable-5",
+      "id": "claude-fable-5-1",
       "agent": "claude",
       "effort": "medium"
     },

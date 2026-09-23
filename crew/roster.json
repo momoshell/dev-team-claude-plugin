@@ -76,7 +76,7 @@
       },
       "tech-lead": {
         "provider": "anthropic",
-        "id": "claude-fable-5",
+        "id": "claude-fable-5-1",
         "agent": "claude",
         "effort": "medium",
         "fallback": [
@@ -246,6 +246,22 @@
       ],
       "source": "models.dev",
       "last_verified": "2026-08-13"
+    },
+    "anthropic/claude-fable-5-1": {
+      "cost_in_per_mtok": 10,
+      "cost_out_per_mtok": 50,
+      "cost_cache_read_per_mtok": 0.25,
+      "cost_cache_write_per_mtok": 20,
+      "cache_rate_source": "models.dev lists anthropic/claude-fable-5-1 at input 10, cacheRead 0.25 and cacheWrite 12.5 per Mtok. The cache read is recorded as published: 0.025x, not the 0.10x other anthropic entries carry. models.dev's cacheWrite is the 5-minute rate; this entry prices writes at the ratified 1h-TTL rate, because billed_cache_write_tokens collapses both TTLs into one column and the anthropic convention prices that column at 1h. Claude Code 2.1.280's model price table publishes both for this model (tier_10_50_cache_read_0_25: cache_write_5m 12.5, cache_write_1h 20, cache_read 0.25).",
+      "context": 1000000,
+      "tags": [
+        "reasoning",
+        "tool-call",
+        "frontier",
+        "override-only"
+      ],
+      "source": "models.dev",
+      "last_verified": "2026-09-23"
     },
     "llama-swap/qwen3.8-27b": {
       "cost_in_per_mtok": 0,

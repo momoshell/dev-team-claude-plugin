@@ -439,9 +439,11 @@ export function commitWrites(writes, fsx) {
     }
     throw new Error(`roster-refresh: --apply failed part-way and restored all ${done.length} file(s) it had replaced — ${err.message}`)
   }
+  // The apply HAS succeeded here, so a backup it cannot remove is returned, not thrown: the
+  // caller still owes the operator the post-apply advice, and only then the non-zero exit.
   const kept = []
   for (const st of staged) { try { fsx.unlinkSync(st.bak) } catch { kept.push(st.bak) } }
-  if (kept.length) throw new Error(`roster-refresh: --apply succeeded, but could not remove ${kept.join(', ')}; delete it before the next run, which refuses while it exists`)
+  return { kept }
 }
 
 // Old ids still named in PROSE after an apply — reported for a human, never rewritten.
@@ -579,6 +581,7 @@ if (import.meta.main) {
     // Each file keeps its own ending: a trailing newline only where the original had one.
     const json = (doc, original) => `${JSON.stringify(doc, null, 2)}${original.endsWith('\n') ? '\n' : ''}`
     let next
+    let keptBackups = []
     try {
       const ladder = read('model-ladder.json')
       const routing = read('routing-policy.json')
@@ -608,7 +611,7 @@ if (import.meta.main) {
           register: loadCapabilities(), ladder: loadLadder({ path: writes.some((x) => x.path === ladder.path) ? `${ladder.path}.roster-refresh.tmp` : ladder.path }), tier: 'build', roles: ['lead', 'planner', 'builder', 'reviewer'], path: tmp,
         })))
       }
-      commitWrites(writes, { accessSync, constants, existsSync, writeFileSync, renameSync, unlinkSync })
+      ;({ kept: keptBackups } = commitWrites(writes, { accessSync, constants, existsSync, writeFileSync, renameSync, unlinkSync }))
       console.log(`\napplied ${plan.bumps.length} bump(s) to ${writes.map((w) => w.path).join(', ')}`)
     } catch (err) {
       console.error(err.message)
@@ -628,7 +631,13 @@ if (import.meta.main) {
     const { benches, unscanned } = replacedBenches(benchRoot, from)
     if (unscanned.length) console.log(`bench directories that could not be scanned for a replaced production (unmeasured, not clear):\n${unscanned.map((u) => `- ${u}`).join('\n')}`)
     if (benches.length) console.log(`dated benches whose production is a replaced model — model-eval refuses them (production-absent) until they are re-declared, and they are dated records:\n${benches.map((b) => `- ${b}`).join('\n')}`)
+    // Blind spot, stated: nothing here asks the seat's provider whether it serves a successor.
+    console.log('unmeasured: whether each successor is served by the seat\'s provider account; the first lane on it is the probe.')
     console.log('next: run npm test. The ratified-rates check pins every catalog key, so each new row is ratified there by hand. Move tests that pin which models are SEATED; a format, price-history or dated-record check that fails is a finding, not a test to update.')
+    if (keptBackups.length) {
+      console.error(`roster-refresh: --apply succeeded, but could not remove ${keptBackups.join(', ')}; delete it before the next run, which refuses while it exists`)
+      process.exit(1)
+    }
   }
 
   process.exit(0)

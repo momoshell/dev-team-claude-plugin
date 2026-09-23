@@ -744,7 +744,7 @@ test('BAK1 a failed backup write changes no file and leaves nothing behind', () 
 })
 
 // Mutation killed: swallowing a failed backup removal reports a clean apply that blocks the next run.
-test('BAK2 a backup that cannot be removed after a successful apply is reported', () => {
+test('BAK2 a backup that cannot be removed after a successful apply is returned for the caller to report', () => {
   const files = new Map([['a', 'A0']])
   const fsx = {
     constants: { W_OK: 2 }, accessSync: () => {},
@@ -753,7 +753,8 @@ test('BAK2 a backup that cannot be removed after a successful apply is reported'
     unlinkSync: (p) => { if (p.endsWith('.bak')) throw new Error('EPERM'); files.delete(p) },
     existsSync: (p) => files.has(p),
   }
-  assert.throws(() => commitWrites([{ path: 'a', original: 'A0', next: 'A1' }], fsx), /succeeded, but could not remove a\.roster-refresh\.bak/)
+  // Returned, not thrown: the apply succeeded, and the CLI still prints its advice first.
+  assert.deepEqual(commitWrites([{ path: 'a', original: 'A0', next: 'A1' }], fsx), { kept: ['a.roster-refresh.bak'] })
   assert.equal(files.get('a'), 'A1')
 })
 
@@ -800,6 +801,8 @@ test('CLI1 --apply rewrites a scratch roster, ladder, routing policy and workflo
     const result = spawnSync(process.execPath, [REFRESH_TOOL, '--roster', join(dir, 'roster.json'), '--catalog', catalogPath, '--apply'], { encoding: 'utf8' })
     assert.equal(result.status, 0, result.stderr)
     assert.match(result.stdout, /applied 1 bump\(s\)/)
+    // The provider availability of a successor is stated as unmeasured, never implied.
+    assert.match(result.stdout, /unmeasured: whether each successor is served by the seat's provider account/)
     const after = JSON.parse(readFileSync(join(dir, 'roster.json'), 'utf8'))
     assert.equal(Object.hasOwn(after.models, current), true)
     assert.equal(Object.hasOwn(after.models, planted), true)

@@ -106,31 +106,31 @@ function serverRosterFixture() {
     tiers: {
       mechanical: {
         lead: null,
-        planner: cell('anthropic', 'claude-opus-5', 'claude', 'medium'),
-        builder: cell('openai', 'gpt-5.6-luna', 'pi', 'max'),
-        reviewer: cell('openai', 'gpt-5.6-sol', 'pi', 'medium'),
+        planner: cell('anthropic', 'claude-opus-5-5', 'claude', 'medium'),
+        builder: cell('openai', 'gpt-6-luna', 'pi', 'max'),
+        reviewer: cell('openai', 'gpt-6-sol', 'pi', 'medium'),
       },
       build: {
-        lead: cell('anthropic', 'claude-opus-5', 'claude', 'medium'),
-        planner: cell('anthropic', 'claude-opus-5', 'claude', 'medium'),
-        builder: cell('openai', 'gpt-5.6-luna', 'pi', 'max'),
-        reviewer: cell('openai', 'gpt-5.6-sol', 'pi', 'high'),
+        lead: cell('anthropic', 'claude-opus-5-5', 'claude', 'medium'),
+        planner: cell('anthropic', 'claude-opus-5-5', 'claude', 'medium'),
+        builder: cell('openai', 'gpt-6-luna', 'pi', 'max'),
+        reviewer: cell('openai', 'gpt-6-sol', 'pi', 'high'),
       },
       judge: {
-        lead: cell('anthropic', 'claude-opus-5', 'claude', 'high'),
-        planner: cell('anthropic', 'claude-opus-5', 'claude', 'high'),
-        builder: cell('openai', 'gpt-5.6-luna', 'pi', 'max'),
-        reviewer: cell('anthropic', 'claude-opus-5', 'claude', 'xhigh'),
-        'tech-lead': cell('openai', 'gpt-5.6-sol', 'pi', 'xhigh'),
+        lead: cell('anthropic', 'claude-opus-5-5', 'claude', 'high'),
+        planner: cell('anthropic', 'claude-opus-5-5', 'claude', 'high'),
+        builder: cell('openai', 'gpt-6-luna', 'pi', 'max'),
+        reviewer: cell('anthropic', 'claude-opus-5-5', 'claude', 'xhigh'),
+        'tech-lead': cell('openai', 'gpt-6-sol', 'pi', 'xhigh'),
       },
     },
     models: {
-      'anthropic/claude-opus-5': { cost_in_per_mtok: 5, cost_out_per_mtok: 25, context: 1000000, tags: ['reasoning'], source: 'models.dev', last_verified: '2026-08-13' },
       'anthropic/claude-sonnet-5': { cost_in_per_mtok: 2, cost_out_per_mtok: 10, context: 1000000, tags: ['reasoning'], source: 'models.dev', last_verified: '2026-08-13' },
       'anthropic/claude-haiku-4-5': { cost_in_per_mtok: 1, cost_out_per_mtok: 5, context: 200000, tags: ['cheap'], source: 'models.dev', last_verified: '2026-08-13' },
-      'openai/gpt-5.6-sol': { cost_in_per_mtok: 4, cost_out_per_mtok: 20, context: 1050000, tags: ['reasoning'], source: 'models.dev', last_verified: '2026-08-30' },
+      'anthropic/claude-opus-5-5': { cost_in_per_mtok: 5, cost_out_per_mtok: 25, context: 1000000, tags: ['reasoning'], source: 'models.dev', last_verified: '2026-08-13' },
+      'openai/gpt-6-sol': { cost_in_per_mtok: 4, cost_out_per_mtok: 20, context: 1050000, tags: ['reasoning'], source: 'models.dev', last_verified: '2026-08-30' },
       'openai/gpt-5.6-terra': { cost_in_per_mtok: 2, cost_out_per_mtok: 12, context: 1050000, tags: ['review'], source: 'models.dev', last_verified: '2026-08-13' },
-      'openai/gpt-5.6-luna': { cost_in_per_mtok: 0.2, cost_out_per_mtok: 1.2, context: 1050000, tags: ['coding'], source: 'models.dev', last_verified: '2026-08-13' },
+      'openai/gpt-6-luna': { cost_in_per_mtok: 0.2, cost_out_per_mtok: 1.2, context: 1050000, tags: ['coding'], source: 'models.dev', last_verified: '2026-08-13' },
       'anthropic/claude-fable-5': { cost_in_per_mtok: 10, cost_out_per_mtok: 50, context: 1000000, tags: ['override-only'], source: 'models.dev', last_verified: '2026-08-13' },
     },
   }
@@ -1760,7 +1760,7 @@ test('roster proposals validate, refuse safely, and never write the roster', asy
     assert.equal(legal.json.ok, true)
     assert.match(legal.json.diff, /^--- a\/crew\/roster\.json$/m)
     assert.match(legal.json.diff, /^\+\+\+ b\/crew\/roster\.json$/m)
-    const sameVendor = await json(base, '/api/roster/propose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ tier: 'build', role: 'reviewer', cell: { provider: 'anthropic', id: 'claude-opus-5', agent: 'claude', effort: 'high' } }) })
+    const sameVendor = await json(base, '/api/roster/propose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ tier: 'build', role: 'reviewer', cell: { provider: 'anthropic', id: 'claude-opus-5-5', agent: 'claude', effort: 'high' } }) })
     assert.equal(sameVendor.status, 200)
     assert.equal(sameVendor.json.ok, true)
     assert.notEqual(sameVendor.json.diff, null)
@@ -2460,7 +2460,7 @@ test('roster pick validates its read-only query and explains the selected bench'
   fixture(ledgerDb)
   const writer = openLedger({ dbPath:ledgerDb, stderr:{ write() {} } })
   writer.recordEvalCell({
-    bench:'bench-pick-newest', role:'reviewer', provider:'openai', model_id:'gpt-5.6-sol', agent:'pi', effort:'high',
+    bench:'bench-pick-newest', role:'reviewer', provider:'openai', model_id:'gpt-6-sol', agent:'pi', effort:'high',
     envelope_status:'received', production:1, asserts_passed:12, asserts_declared:12,
     billed_input_tokens:100, billed_output_tokens:200, billed_cache_read_tokens:300, billed_cache_write_tokens:400,
     created_at:'2026-09-15T00:00:00.000Z',
@@ -2472,12 +2472,12 @@ test('roster pick validates its read-only query and explains the selected bench'
     ({ child, base } = await startServer(ledgerDb, triageDb, null, fixtureRoster.path))
     const success = await json(base, '/api/roster/pick?tier=build&role=reviewer')
     assert.equal(success.status, 200)
-    assert.equal(success.json.current_cell.id, 'gpt-5.6-sol')
+    assert.equal(success.json.current_cell.id, 'gpt-6-sol')
     assert.equal(success.json.policy_candidates.length, 1)
     assert.equal(success.json.policy_candidates[0].rate.denominator, 12)
     assert.equal(success.json.policy_candidates[0].cost.source, 'roster model catalog')
-    assert.equal(success.json.chosen_cell.id, 'gpt-5.6-sol')
-    assert.equal(success.json.ranked_survivors[0].cell.id, 'gpt-5.6-sol')
+    assert.equal(success.json.chosen_cell.id, 'gpt-6-sol')
+    assert.equal(success.json.ranked_survivors[0].cell.id, 'gpt-6-sol')
     assert.equal(success.json.eval_cells.length, 1)
     assert.equal(success.json.eval_cells[0].role, 'reviewer')
     assert.equal((await json(base, '/api/roster/pick?tier=build')).status, 400)
@@ -2542,7 +2542,7 @@ test('roster ladder apply updates only the configured local roster for the next 
     assert.equal((await json(handles.base, '/api/roster/ladder/apply', { method:'POST', headers:{ 'content-type':'application/json' }, body:'{}' })).status, 400)
     const vendorApply = await json(handles.base, '/api/roster/ladder/apply', {
       method:'POST', headers:{ 'content-type':'application/json' },
-      body:JSON.stringify({ moves:[{ tier:'build', role:'reviewer', cell:{ provider:'anthropic', id:'claude-opus-5', agent:'claude', effort } }] }),
+      body:JSON.stringify({ moves:[{ tier:'build', role:'reviewer', cell:{ provider:'anthropic', id:'claude-opus-5-5', agent:'claude', effort } }] }),
     })
     assert.equal(vendorApply.status, 200)
     assert.equal(vendorApply.json.ok, true)

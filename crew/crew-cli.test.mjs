@@ -864,13 +864,13 @@ test('C1 boot seat recording remains non load bearing', async () => {
 test('D1 raw model override records operator provenance', async () => {
   const rows = await bootSeatRows({
     task: 'seat-writer-d1',
-    args: { 'model-builder': 'openai-codex/gpt-5.6-luna' },
+    args: { 'model-builder': 'openai-codex/gpt-6-luna' },
   })
   const row = rows.find((candidate) => candidate.role === 'builder')
   assert.ok(row)
   assert.equal(row.provider, null)
   assert.equal(row.model_id, null)
-  assert.equal(row.model, 'openai-codex/gpt-5.6-luna')
+  assert.equal(row.model, 'openai-codex/gpt-6-luna')
   assert.equal(row.source, 'operator_override')
 })
 
@@ -1993,9 +1993,9 @@ test('a below-threshold breaker verdict is journaled alongside allocation', asyn
   writeFileSync(dbPath, 'fake ledger')
   const openLedger = fakeBreakerLedger([breakerRow({ failures: 1 })], { attemptRows: [
     breakerAttempt(),
-    breakerAttempt({ provider: 'anthropic', model_id: 'claude-opus-5', agent: 'claude', effort: 'high', role: 'lead' }),
-    breakerAttempt({ provider: 'openai', model_id: 'gpt-5.6-sol', agent: 'pi', effort: 'medium', role: 'planner' }),
-    breakerAttempt({ provider: 'anthropic', model_id: 'claude-opus-5', agent: 'claude', effort: 'high', role: 'reviewer' }),
+    breakerAttempt({ provider: 'anthropic', model_id: 'claude-opus-5-5', agent: 'claude', effort: 'high', role: 'lead' }),
+    breakerAttempt({ provider: 'openai', model_id: 'gpt-6-sol', agent: 'pi', effort: 'medium', role: 'planner' }),
+    breakerAttempt({ provider: 'anthropic', model_id: 'claude-opus-5-5', agent: 'claude', effort: 'high', role: 'reviewer' }),
   ] })
   try {
     await withBreakerEnv({ CREW_BREAKER_THRESHOLD: '0.2', CREW_BREAKER_WINDOW_MS: '3600000', DEVTEAM_LEDGER_DB: dbPath }, () => withHome(home, () => bootCmd(
@@ -2366,13 +2366,13 @@ test('bootCmd accepts an at-floor raw override and preserves its untranslated re
   const task = 'band-floor-accepted'
   try {
     await withBreakerEnv({}, () => withHome(home, () => bootCmd(
-      { task, checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath, 'model-builder': 'openai-codex/gpt-5.6-luna' },
+      { task, checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath, 'model-builder': 'openai-codex/gpt-6-luna' },
       { cmux: callCounter(), tree: callCounter(), renameTab: callCounter() },
     )))
     const record = JSON.parse(readFileSync(join(testCrewDir(home, checkout, task), 'crew.json'), 'utf8'))
     assert.equal(record.members.builder.provider, null)
     assert.equal(record.members.builder.id, null)
-    assert.equal(record.members.builder.model, 'openai-codex/gpt-5.6-luna')
+    assert.equal(record.members.builder.model, 'openai-codex/gpt-6-luna')
   } finally {
     rmSync(home, { recursive: true, force: true })
     rmSync(checkoutRoot, { recursive: true, force: true })
@@ -2873,8 +2873,8 @@ test('shadow exclusion and outcome vocabularies are frozen and closed', () => {
 test('shadowPick ranks measured non-thin rates and leaves thin samples behind', () => {
   const localRoster = { schema_version: 1, tiers: {
     build: {
-      planner: { provider: 'anthropic', id: 'claude-opus-5', agent: 'claude', effort: 'medium' },
-      reviewer: { provider: 'openai', id: 'gpt-5.6-luna', agent: 'pi', effort: 'max' },
+      planner: { provider: 'anthropic', id: 'claude-opus-5-5', agent: 'claude', effort: 'medium' },
+      reviewer: { provider: 'openai', id: 'gpt-6-luna', agent: 'pi', effort: 'max' },
     },
     judge: { reviewer: { provider: 'openai', id: 'gpt-5.6-terra', agent: 'pi', effort: 'max' } },
   } }
@@ -2882,23 +2882,23 @@ test('shadowPick ranks measured non-thin rates and leaves thin samples behind', 
     roster: localRoster, tier: 'build', seats: { planner: localRoster.tiers.build.planner, reviewer: localRoster.tiers.build.reviewer },
     sources: { planner: { model: 'roster' }, reviewer: { model: 'roster' } }, ladder: loadLadder(), breaker: null,
     reviewRows: [
-      { provider: 'openai', model_id: 'gpt-5.6-luna', agent: 'pi', effort: 'max', role: 'reviewer', reviews: 20, first_round_reviews: 20, first_round_passes: 4 },
+      { provider: 'openai', model_id: 'gpt-6-luna', agent: 'pi', effort: 'max', role: 'reviewer', reviews: 20, first_round_reviews: 20, first_round_passes: 4 },
       { provider: 'openai', model_id: 'gpt-5.6-terra', agent: 'pi', effort: 'max', role: 'reviewer', reviews: 3, first_round_reviews: 3, first_round_passes: 3 },
     ],
   })
   const reviewer = record.seats.reviewer
   const terra = reviewer.candidates.find((candidate) => candidate.id === 'gpt-5.6-terra')
   assert.equal(terra.thin, true)
-  assert.deepEqual(reviewer.picked, { provider: 'openai', id: 'gpt-5.6-luna', agent: 'pi', effort: 'max' })
+  assert.deepEqual(reviewer.picked, { provider: 'openai', id: 'gpt-6-luna', agent: 'pi', effort: 'max' })
 })
 
 test('shadowPick stands without evidence and abstains when the seated cell is ineligible', () => {
   const localRoster = { tiers: {
     build: {
-      builder: { provider: 'openai', id: 'gpt-5.6-luna', agent: 'pi', effort: 'max' },
+      builder: { provider: 'openai', id: 'gpt-6-luna', agent: 'pi', effort: 'max' },
     },
     judge: {
-      builder: { provider: 'openai', id: 'gpt-5.6-sol', agent: 'pi', effort: 'xhigh' },
+      builder: { provider: 'openai', id: 'gpt-6-sol', agent: 'pi', effort: 'xhigh' },
     },
   } }
   const base = {
@@ -2906,14 +2906,14 @@ test('shadowPick stands without evidence and abstains when the seated cell is in
     sources: { builder: { model: 'roster' } }, ladder: loadLadder(), breaker: null, reviewRows: [],
   }
   assert.equal(shadowPick(base).seats.builder.outcome, 'stands')
-  const abstained = shadowPick({ ...base, capabilityFit: (_role, candidate) => ({ ok: candidate.id !== 'gpt-5.6-luna' }) })
+  const abstained = shadowPick({ ...base, capabilityFit: (_role, candidate) => ({ ok: candidate.id !== 'gpt-6-luna' }) })
   assert.equal(abstained.seats.builder.outcome, 'abstained')
   assert.equal(abstained.seats.builder.picked, null)
 })
 
 test('shadowPick records a floor-empty no-candidate result without a fallback', () => {
   const localRoster = { tiers: {
-    build: { reviewer: { provider: 'openai', id: 'gpt-5.6-luna', agent: 'pi', effort: 'max' } },
+    build: { reviewer: { provider: 'openai', id: 'gpt-6-luna', agent: 'pi', effort: 'max' } },
   } }
   const baseLadder = loadLadder()
   const ladder = { ...baseLadder, floors: { ...baseLadder.floors, build: 'frontier' } }
@@ -2946,13 +2946,13 @@ test('shadowPick admits a same-vendor reviewer candidate', () => {
 
 test('shadowPick excludes open breaker cells and marks absent breaker health as unmeasured', () => {
   const localRoster = { tiers: {
-    build: { builder: { provider: 'openai', id: 'gpt-5.6-luna', agent: 'pi', effort: 'max' } },
+    build: { builder: { provider: 'openai', id: 'gpt-6-luna', agent: 'pi', effort: 'max' } },
   } }
   const args = {
     roster: localRoster, tier: 'build', seats: localRoster.tiers.build, sources: { builder: { model: 'roster' } },
     ladder: loadLadder(), reviewRows: [],
   }
-  const open = shadowPick({ ...args, breaker: { cells: [{ provider: 'openai', model_id: 'gpt-5.6-luna', agent: 'pi', effort: 'max', verdict: 'open' }] } })
+  const open = shadowPick({ ...args, breaker: { cells: [{ provider: 'openai', model_id: 'gpt-6-luna', agent: 'pi', effort: 'max', verdict: 'open' }] } })
   assert.equal(open.seats.builder.candidates[0].excluded_by.reason, 'breaker-open')
   const absent = shadowPick({ ...args, breaker: null })
   assert.equal(absent.absent.breaker, SHADOW_ABSENT.breaker)
@@ -4046,6 +4046,10 @@ test('D1-valid shipped workflow validates', () => {
     assert.equal(seat.availability, 'unmeasured')
     assert.equal(Object.isFrozen(seat), true)
   }
+  assert.equal(resolved.seats.planner.id, 'gpt-6-sol')
+  assert.equal(resolved.seats.lead.id, 'claude-opus-5-5')
+  assert.equal(resolved.seats.reviewer.id, 'claude-opus-5-5')
+  assert.equal(resolved.seats.builder.id, 'muse-spark-1.3-contributor')
 })
 
 test('D1-codes workflow refusal set is frozen and every validator code is reachable', () => {
@@ -4289,6 +4293,22 @@ test('routing A1 validates the checkout-pinned schema and returns exactly one ch
   assert.deepEqual(result.chosen_cell, policy.routes.build.builder.candidates[0])
   assert.equal(Object.hasOwn(result, 'chosen_cells'), false)
   assert.equal(Array.isArray(result.chosen_cell), false)
+  const shippedPolicyText = JSON.stringify(loaded.policy)
+  // Each route's candidates, exactly: main's routes with only the three ids renamed.
+  const opus = 'anthropic/claude-opus-5-5', luna = 'openai/gpt-6-luna', sol = 'openai/gpt-6-sol'
+  const routeCandidates = {}
+  for (const [tier, roles] of Object.entries(loaded.policy.routes)) {
+    for (const [role, route] of Object.entries(roles)) routeCandidates[`${tier}.${role}`] = route.candidates.map((cell) => `${cell.provider}/${cell.id}`)
+  }
+  assert.deepEqual(routeCandidates, {
+    'mechanical.planner': [opus], 'mechanical.builder': [luna], 'mechanical.reviewer': [sol],
+    'build.lead': [opus], 'build.planner': [opus], 'build.builder': [luna], 'build.reviewer': [sol],
+    'judge.lead': [opus], 'judge.planner': [opus], 'judge.builder': [luna], 'judge.reviewer': [opus], 'judge.tech-lead': [sol],
+  })
+  for (const predecessor of ['gpt-5.6-sol', 'gpt-5.6-luna']) {
+    assert.equal(shippedPolicyText.includes(predecessor), false, `shipped routing policy must not seat ${predecessor}`)
+  }
+  assert.deepEqual(shippedPolicyText.split(/[^A-Za-z0-9._-]+/).filter((token) => token === 'claude-opus-5'), [])
 })
 
 test('routing B1 keeps every exclusion paired with a closed reason', () => {
@@ -4369,7 +4389,7 @@ test('routing RV1-1 uses ledger first-round measurements before boot without cha
           ledger.recordReviewOutcome({
             adw_id, dispatch_id: `routing-rv1-1-dispatch-${index}`, role: 'builder',
             verdict: index < 45 ? 'pass' : 'changes-needed',
-            provider: 'openai', model_id: 'gpt-5.6-luna', model: 'gpt-5.6-luna', agent: 'pi', effort: 'max',
+            provider: 'openai', model_id: 'gpt-6-luna', model: 'gpt-6-luna', agent: 'pi', effort: 'max',
             created_at,
           })
         }
@@ -4382,7 +4402,7 @@ test('routing RV1-1 uses ledger first-round measurements before boot without cha
   assert.equal(decision.abstention_reason, 'no-eligible-candidate')
   assert.ok(decision.exclusions.some((entry) => entry.reason === 'cost-absent'))
   assert.equal(decision.exclusions.some((entry) => entry.reason === 'rate-absent'), false)
-  const measurement = decision.normalized_measurements.find((row) => row.cell.id === 'gpt-5.6-luna')
+  const measurement = decision.normalized_measurements.find((row) => row.cell.id === 'gpt-6-luna')
   assert.notEqual(measurement.rate.value, null)
   assert.equal(measurement.rate.value, measurement.rate.numerator / measurement.rate.denominator)
   assert.deepEqual(measurement.rate, { numerator: 45, denominator: 50, value: 0.9, reason: null })
@@ -4406,7 +4426,7 @@ test('routing RV2-1 leaves boot cost absent and applies the declared lookback', 
         cellReviewCalls += 1
         reviewOptions = options
         return [{
-          provider: 'openai', model_id: 'gpt-5.6-luna', agent: 'pi', effort: 'max', role: 'builder',
+          provider: 'openai', model_id: 'gpt-6-luna', agent: 'pi', effort: 'max', role: 'builder',
           reviews: 50, first_round_reviews: 50, first_round_passes: 45,
         }]
       },
@@ -4426,7 +4446,7 @@ test('routing RV2-1 leaves boot cost absent and applies the declared lookback', 
   assert.equal(decision.outcome, 'abstained')
   assert.ok(decision.exclusions.some((entry) => entry.reason === 'cost-absent'))
   assert.equal(decision.exclusions.some((entry) => entry.reason === 'rate-absent'), false)
-  const measurement = decision.normalized_measurements.find((row) => row.cell.id === 'gpt-5.6-luna')
+  const measurement = decision.normalized_measurements.find((row) => row.cell.id === 'gpt-6-luna')
   assert.deepEqual(measurement.cost_usd, { value: null, reason: 'cost-absent' })
 })
 
@@ -4443,7 +4463,7 @@ test('routing RV1-1 abstains honestly when boot review evidence is absent or deg
       openLedger: () => ({
         degraded: true,
         cellReviews: () => [{
-          provider: 'openai', model_id: 'gpt-5.6-luna', agent: 'pi', effort: 'max', role: 'builder',
+          provider: 'openai', model_id: 'gpt-6-luna', agent: 'pi', effort: 'max', role: 'builder',
           reviews: 50, first_round_reviews: 50, first_round_passes: 45,
         }],
         stats: () => ({ mirror_errors: 0 }),
@@ -4456,7 +4476,7 @@ test('routing RV1-1 abstains honestly when boot review evidence is absent or deg
       openLedger: () => ({
         degraded: false,
         cellReviews: () => [{
-          provider: 'openai', model_id: 'gpt-5.6-luna', agent: 'pi', effort: 'max', role: 'builder',
+          provider: 'openai', model_id: 'gpt-6-luna', agent: 'pi', effort: 'max', role: 'builder',
           reviews: 50, first_round_reviews: 50, first_round_passes: 45,
         }],
         stats: () => ({ mirror_errors: 1 }),
@@ -4469,7 +4489,7 @@ test('routing RV1-1 abstains honestly when boot review evidence is absent or deg
     const decision = rows.boot.routing_choice.decisions.builder
     assert.equal(decision.outcome, 'abstained')
     assert.ok(decision.exclusions.some((entry) => entry.reason === 'rate-absent'))
-    const measurement = decision.normalized_measurements.find((row) => row.cell.id === 'gpt-5.6-luna')
+    const measurement = decision.normalized_measurements.find((row) => row.cell.id === 'gpt-6-luna')
     assert.deepEqual(measurement.rate, { numerator: null, denominator: null, value: null, reason: 'rate-absent' })
   }
 })
@@ -4481,7 +4501,7 @@ test('routing RV1-1 keeps a below-floor boot review rate absent with its denomin
     openLedger: () => ({
       degraded: false,
       cellReviews: () => [{
-        provider: 'openai', model_id: 'gpt-5.6-luna', agent: 'pi', effort: 'max', role: 'builder',
+        provider: 'openai', model_id: 'gpt-6-luna', agent: 'pi', effort: 'max', role: 'builder',
         reviews: 11, first_round_reviews: 11, first_round_passes: 10,
       }],
       stats: () => ({ mirror_errors: 0 }),
@@ -4491,7 +4511,7 @@ test('routing RV1-1 keeps a below-floor boot review rate absent with its denomin
   const decision = rows.boot.routing_choice.decisions.builder
   assert.equal(decision.outcome, 'abstained')
   assert.ok(decision.exclusions.some((entry) => entry.reason === 'rate-absent'))
-  const measurement = decision.normalized_measurements.find((row) => row.cell.id === 'gpt-5.6-luna')
+  const measurement = decision.normalized_measurements.find((row) => row.cell.id === 'gpt-6-luna')
   assert.deepEqual(measurement.rate, { numerator: 10, denominator: 11, value: null, reason: 'rate-absent' })
 })
 

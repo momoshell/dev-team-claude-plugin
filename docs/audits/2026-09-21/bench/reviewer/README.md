@@ -12,9 +12,9 @@ eligibility, and digest coverage without contacting an endpoint. Running
 `model-eval.mjs run` is operator-only and is not part of gate or contract
 validation; no ledger row is written by any check here.
 
-The judge is `openai/gpt-5.6-sol` (vendor `openai`). Sol sits in the frontier
+The judge is `openai/gpt-6-sol` (vendor `openai`). Sol sits in the frontier
 band and is already exercised by the harness; it is neither bench's production
-candidate (reviewer production is `anthropic/claude-opus-5`), so no candidate
+candidate (reviewer production is `anthropic/claude-opus-5-5`), so no candidate
 is judged by itself, and the choice adds vendor diversity without reviving the
 retired same-vendor refusal (#983).
 

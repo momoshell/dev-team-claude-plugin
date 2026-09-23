@@ -1,7 +1,7 @@
 {
   "$comment": "The policy composes over, and does not supersede, crew/roster.json or crew/model-ladder.json; roster supplies current seats/catalog, ladder supplies tier floors, and this policy may only narrow and order declared cells. It is advisory evidence only and grants no permission to affect execution.",
   "schema_version": 1,
-  "updated_at": "2026-09-12",
+  "updated_at": "2026-09-23",
   "precedence": "the policy composes over, and does not supersede, crew/roster.json or crew/model-ladder.json; roster supplies current seats/catalog, ladder supplies tier floors, and this policy may only narrow and order declared cells",
   "exclusion_reasons": [
     "capability-shortfall",
@@ -22,21 +22,21 @@
   "routes": {
     "mechanical": {
       "planner": {
-        "candidates": [{ "provider": "anthropic", "id": "claude-opus-5", "agent": "claude", "effort": "medium" }],
+        "candidates": [{ "provider": "anthropic", "id": "claude-opus-5-5", "agent": "claude", "effort": "medium" }],
         "tie_break": ["first_round_pass_rate_desc", "cost_usd_asc", "policy_order"],
         "measurement_window": { "lookback_days": 30, "minimum_rate_denominator": 12 },
         "null_handling": { "rate": "exclude-with-reason", "cost": "exclude-with-reason" },
         "abstention_reasons": ["no-eligible-candidate"]
       },
       "builder": {
-        "candidates": [{ "provider": "openai", "id": "gpt-5.6-luna", "agent": "pi", "effort": "max" }],
+        "candidates": [{ "provider": "openai", "id": "gpt-6-luna", "agent": "pi", "effort": "max" }],
         "tie_break": ["first_round_pass_rate_desc", "cost_usd_asc", "policy_order"],
         "measurement_window": { "lookback_days": 30, "minimum_rate_denominator": 12 },
         "null_handling": { "rate": "exclude-with-reason", "cost": "exclude-with-reason" },
         "abstention_reasons": ["no-eligible-candidate"]
       },
       "reviewer": {
-        "candidates": [{ "provider": "openai", "id": "gpt-5.6-sol", "agent": "pi", "effort": "medium" }],
+        "candidates": [{ "provider": "openai", "id": "gpt-6-sol", "agent": "pi", "effort": "medium" }],
         "tie_break": ["first_round_pass_rate_desc", "cost_usd_asc", "policy_order"],
         "measurement_window": { "lookback_days": 30, "minimum_rate_denominator": 12 },
         "null_handling": { "rate": "exclude-with-reason", "cost": "exclude-with-reason" },
@@ -45,28 +45,28 @@
     },
     "build": {
       "lead": {
-        "candidates": [{ "provider": "anthropic", "id": "claude-opus-5", "agent": "claude", "effort": "medium" }],
+        "candidates": [{ "provider": "anthropic", "id": "claude-opus-5-5", "agent": "claude", "effort": "medium" }],
         "tie_break": ["first_round_pass_rate_desc", "cost_usd_asc", "policy_order"],
         "measurement_window": { "lookback_days": 30, "minimum_rate_denominator": 12 },
         "null_handling": { "rate": "exclude-with-reason", "cost": "exclude-with-reason" },
         "abstention_reasons": ["no-eligible-candidate"]
       },
       "planner": {
-        "candidates": [{ "provider": "anthropic", "id": "claude-opus-5", "agent": "claude", "effort": "medium" }],
+        "candidates": [{ "provider": "anthropic", "id": "claude-opus-5-5", "agent": "claude", "effort": "medium" }],
         "tie_break": ["first_round_pass_rate_desc", "cost_usd_asc", "policy_order"],
         "measurement_window": { "lookback_days": 30, "minimum_rate_denominator": 12 },
         "null_handling": { "rate": "exclude-with-reason", "cost": "exclude-with-reason" },
         "abstention_reasons": ["no-eligible-candidate"]
       },
       "builder": {
-        "candidates": [{ "provider": "openai", "id": "gpt-5.6-luna", "agent": "pi", "effort": "max" }],
+        "candidates": [{ "provider": "openai", "id": "gpt-6-luna", "agent": "pi", "effort": "max" }],
         "tie_break": ["first_round_pass_rate_desc", "cost_usd_asc", "policy_order"],
         "measurement_window": { "lookback_days": 30, "minimum_rate_denominator": 12 },
         "null_handling": { "rate": "exclude-with-reason", "cost": "exclude-with-reason" },
         "abstention_reasons": ["no-eligible-candidate"]
       },
       "reviewer": {
-        "candidates": [{ "provider": "openai", "id": "gpt-5.6-sol", "agent": "pi", "effort": "high" }],
+        "candidates": [{ "provider": "openai", "id": "gpt-6-sol", "agent": "pi", "effort": "high" }],
         "tie_break": ["first_round_pass_rate_desc", "cost_usd_asc", "policy_order"],
         "measurement_window": { "lookback_days": 30, "minimum_rate_denominator": 12 },
         "null_handling": { "rate": "exclude-with-reason", "cost": "exclude-with-reason" },
@@ -75,35 +75,35 @@
     },
     "judge": {
       "lead": {
-        "candidates": [{ "provider": "anthropic", "id": "claude-opus-5", "agent": "claude", "effort": "high" }],
+        "candidates": [{ "provider": "anthropic", "id": "claude-opus-5-5", "agent": "claude", "effort": "high" }],
         "tie_break": ["first_round_pass_rate_desc", "cost_usd_asc", "policy_order"],
         "measurement_window": { "lookback_days": 30, "minimum_rate_denominator": 12 },
         "null_handling": { "rate": "exclude-with-reason", "cost": "exclude-with-reason" },
         "abstention_reasons": ["no-eligible-candidate"]
       },
       "planner": {
-        "candidates": [{ "provider": "anthropic", "id": "claude-opus-5", "agent": "claude", "effort": "high" }],
+        "candidates": [{ "provider": "anthropic", "id": "claude-opus-5-5", "agent": "claude", "effort": "high" }],
         "tie_break": ["first_round_pass_rate_desc", "cost_usd_asc", "policy_order"],
         "measurement_window": { "lookback_days": 30, "minimum_rate_denominator": 12 },
         "null_handling": { "rate": "exclude-with-reason", "cost": "exclude-with-reason" },
         "abstention_reasons": ["no-eligible-candidate"]
       },
       "builder": {
-        "candidates": [{ "provider": "openai", "id": "gpt-5.6-luna", "agent": "pi", "effort": "max" }],
+        "candidates": [{ "provider": "openai", "id": "gpt-6-luna", "agent": "pi", "effort": "max" }],
         "tie_break": ["first_round_pass_rate_desc", "cost_usd_asc", "policy_order"],
         "measurement_window": { "lookback_days": 30, "minimum_rate_denominator": 12 },
         "null_handling": { "rate": "exclude-with-reason", "cost": "exclude-with-reason" },
         "abstention_reasons": ["no-eligible-candidate"]
       },
       "reviewer": {
-        "candidates": [{ "provider": "anthropic", "id": "claude-opus-5", "agent": "claude", "effort": "xhigh" }],
+        "candidates": [{ "provider": "anthropic", "id": "claude-opus-5-5", "agent": "claude", "effort": "xhigh" }],
         "tie_break": ["first_round_pass_rate_desc", "cost_usd_asc", "policy_order"],
         "measurement_window": { "lookback_days": 30, "minimum_rate_denominator": 12 },
         "null_handling": { "rate": "exclude-with-reason", "cost": "exclude-with-reason" },
         "abstention_reasons": ["no-eligible-candidate"]
       },
       "tech-lead": {
-        "candidates": [{ "provider": "openai", "id": "gpt-5.6-sol", "agent": "pi", "effort": "xhigh" }],
+        "candidates": [{ "provider": "openai", "id": "gpt-6-sol", "agent": "pi", "effort": "xhigh" }],
         "tie_break": ["first_round_pass_rate_desc", "cost_usd_asc", "policy_order"],
         "measurement_window": { "lookback_days": 30, "minimum_rate_denominator": 12 },
         "null_handling": { "rate": "exclude-with-reason", "cost": "exclude-with-reason" },

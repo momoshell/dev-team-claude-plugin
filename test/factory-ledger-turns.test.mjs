@@ -577,13 +577,16 @@ test('CELL_PRICE_UNITS describes what cells computes', { skip: SKIP }, () => {
 test('every roster model carries its ratified cache rates and their provenance', () => {
   const roster = JSON.parse(readFileSync(join(ROOT, 'crew', 'roster.json'), 'utf8'))
   const expectedRates = {
+    'anthropic/claude-opus-5-5': { read: 0.2, write: 8 },
     'anthropic/claude-opus-5': { read: 0.5, write: 10 },
     'anthropic/claude-sonnet-5': { read: 0.2, write: 4 },
     'anthropic/claude-haiku-4-5': { read: 0.1, write: 2 },
     'anthropic/claude-fable-5': { read: 1, write: 20 },
+    'openai/gpt-6-sol': { read: 0.2, write: 2.5 },
     'openai/gpt-5.6-sol': { read: 0.4, write: 0 },
     'openai/gpt-5.6-terra': { read: 0.2, write: 0 },
     'openai/gpt-5.6-luna': { read: 0.02, write: 0 },
+    'openai/gpt-6-luna': { read: 0.01, write: 0.125 },
     'openai/gpt-6-astra': { read: 1, write: 12.5 },
     "meta/muse-spark-1.3-contributor": { read: 0.002, write: 0 },
     'llama-swap/qwen3.8-27b': { read: 0, write: 0 },
@@ -594,6 +597,9 @@ test('every roster model carries its ratified cache rates and their provenance',
     anthropic: "anthropic published prompt-caching multipliers applied to this entry's own cost_in_per_mtok: cache read 0.10x, 1h-TTL cache write 2.00x. billed_cache_write_tokens collapses the 1h and 5m TTLs into one column, so pricing every cache write at the 1h rate is an explicit lossy convention, not a reconstruction of any session's TTL; 1h is the ratified one because this task's acceptance figures require it and because both sampled b168-paneusage claude-opus-5 pane seats used only 1h writes.",
     openai: "openai published prompt-caching rates applied to this entry's own cost_in_per_mtok: cached input 0.10x, and cache writes are not charged, so cost_cache_write_per_mtok is a published 0.00x rate rather than an absent one.",
     "openai/gpt-6-astra": "pi's model directory publishes these rates directly for openai-codex/gpt-6-astra rather than as multipliers of this entry's cost_in_per_mtok: cacheRead 1.00 and cacheWrite 12.50 per Mtok. The directory also declares a second price tier above 272000 input tokens (input 20, output 50->75, cacheRead 2, cacheWrite 25); that tier is NOT represented here because the schema carries one rate per column, and it is unreachable within a single request since the tier threshold equals this model's whole context window. A conversation billed above the threshold would be underpriced by this entry.",
+    'anthropic/claude-opus-5-5': 'models.dev lists anthropic/claude-opus-5-5 at input 4, cacheRead 0.2 and cacheWrite 5 per Mtok. The cache read is recorded as published: 0.05x, not the 0.10x other anthropic entries carry. models.dev\'s cacheWrite is the 5-minute rate; this entry prices writes at the ratified 1h-TTL rate, because billed_cache_write_tokens collapses both TTLs into one column and the anthropic convention prices that column at 1h. Claude Code 2.1.280\'s model price table publishes that rate for this model (tier_4_20_cache_read_0_20: cache_write_5m 5, cache_write_1h 8), equal to anthropic\'s 2.00x multiplier.',
+    'openai/gpt-6-sol': 'models.dev lists cache writes at 2.5 per Mtok for openai/gpt-6-sol, contradicting the older statement that OpenAI cache writes are not charged. It lists openai/gpt-6-sol at input 2, output 10, cacheRead 0.2, cacheWrite 2.5 per Mtok. It also declares a second price tier above 272000 input tokens (input 4, output 15, cacheRead 0.4, cacheWrite 5) that this single-rate entry cannot represent; the openai-codex route this model is seated through serves a 272K context, so one request cannot reach it there, but a route serving the listed 1050000 context would be underpriced by this entry.',
+    'openai/gpt-6-luna': 'models.dev lists openai/gpt-6-luna at input 0.1, output 0.5, cacheRead 0.01, cacheWrite 0.125 per Mtok and context 1050000. It also declares a second price tier above 272000 input tokens (input 0.2, output 0.75, cacheRead 0.02, cacheWrite 0.25) that this single-rate entry cannot represent; the openai-codex route this model is seated through serves a 272K context, so one request cannot reach it there, but a route serving the listed 1050000 context would be underpriced by this entry.',
     "meta/muse-spark-1.3-contributor": "openrouter publishes a cacheRead of 0.002 per Mtok against a 0.1 input rate for meta/muse-spark-1.3-contributor — a 0.02x multiplier, NOT the 0.10x that anthropic and openai publish. The figure is recorded as served rather than normalised to the ratified 0.10x, because a rate nobody charges is not a cheaper guess, it is a wrong one. cacheWrite is a published 0.00x rate rather than an absent one.",
     'llama-swap/qwen3.8-27b': 'llama-swap local serving has a published 0 rate rather than an absent one for llama-swap/qwen3.8-27b cache reads and writes.',
     'llama-swap/gpt-oss-20b': 'llama-swap local serving has a published 0 rate rather than an absent one for llama-swap/gpt-oss-20b cache reads and writes.',
@@ -613,10 +619,18 @@ test('every roster model carries its ratified cache rates and their provenance',
       // and openai publish. Pinned to the SERVED figure so a 0.10x normalisation
       // cannot creep back in: the exemption is this one key, not the rule.
       assert.ok(Math.abs(model.cost_cache_read_per_mtok - model.cost_in_per_mtok * 0.02) <= 1e-12)
+    } else if (key === 'anthropic/claude-opus-5-5') {
+      // models.dev (2026-09-23) lists this model's cache reads at 0.2 against a 4 input
+      // rate: 0.05x, not the 0.10x multiplier. Pinned to the PUBLISHED figure, as muse
+      // is above, so neither a 0.10x normalisation nor a drift passes silently.
+      assert.ok(Math.abs(model.cost_cache_read_per_mtok - model.cost_in_per_mtok * 0.05) <= 1e-12)
     } else {
       assert.ok(Math.abs(model.cost_cache_read_per_mtok - model.cost_in_per_mtok * 0.10) <= 1e-12)
     }
     const vendor = key.slice(0, key.indexOf('/'))
+    // Every anthropic write is priced at the ratified 1h-TTL rate, 2.00x input, whatever
+    // 5-minute figure a catalog lists (models.dev lists 1.25x for all of them).
+    if (vendor === 'anthropic') assert.ok(Math.abs(model.cost_cache_write_per_mtok - model.cost_in_per_mtok * 2) <= 1e-12, key)
     assert.equal(model.cache_rate_source, expectedSources[key] || expectedSources[vendor])
   }
 })

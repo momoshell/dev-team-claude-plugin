@@ -598,8 +598,8 @@ test('RV1-2 bootCmd admits selected cells despite unavailable unselected roster 
   const { root: checkoutRoot, checkout } = testCheckout('crew-selected-roster-admission-checkout-')
   const task = 'crew-selected-roster-admission'
   const rawRoster = JSON.parse(readFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
-  rawRoster.tiers.build.planner = { ...rawRoster.tiers.build.planner, provider: 'anthropic', id: 'claude-opus-5', agent: 'claude' }
-  rawRoster.tiers.build.builder = { ...rawRoster.tiers.build.builder, provider: 'anthropic', id: 'claude-opus-5', agent: 'claude' }
+  rawRoster.tiers.build.planner = { ...rawRoster.tiers.build.planner, provider: 'anthropic', id: 'claude-opus-5-5', agent: 'claude' }
+  rawRoster.tiers.build.builder = { ...rawRoster.tiers.build.builder, provider: 'anthropic', id: 'claude-opus-5-5', agent: 'claude' }
   const base = capabilityRegister()
   const register = capabilityRegister({ coding_agents: {
     pi: { ...base.coding_agents.pi, availability: 'discovered-unavailable', availability_reason: 'discovered-unavailable' },
@@ -983,14 +983,14 @@ test('G1TR inverse transport drift is a closed register-invalid refusal', async 
 })
 
 test('RV1-1/RV1-2 shadow fit admits a shipped roster candidate through post-import checks', async () => {
-  const candidate = { provider: 'openai', id: 'gpt-5.6-luna', agent: 'pi', effort: 'max' }
+  const candidate = { provider: 'openai', id: 'gpt-6-luna', agent: 'pi', effort: 'max' }
   const input = shadowAdmission({ candidate })
   const record = await shadowPickBoot({ ...input, dbPath: join(tmpdir(), 'shadow-rv1-admit-no-ledger.db') })
   assert.equal(record.seats.builder.candidates[0].excluded_by, null)
 })
 
 test('H1A shadow missing agent exclusion names the register entry', async () => {
-  const candidate = { provider: 'openai', id: 'gpt-5.6-luna', agent: 'missing-shadow-agent', effort: 'max' }
+  const candidate = { provider: 'openai', id: 'gpt-6-luna', agent: 'missing-shadow-agent', effort: 'max' }
   const input = shadowAdmission({ candidate })
   const record = await shadowPickBoot({ ...input, dbPath: join(tmpdir(), 'shadow-h1a-no-ledger.db') })
   const result = record.seats.builder.candidates[0]
@@ -1000,7 +1000,7 @@ test('H1A shadow missing agent exclusion names the register entry', async () => 
 })
 
 test('H1P shadow provider exclusion names the register entry', async () => {
-  const candidate = { provider: 'openai', id: 'gpt-5.6-luna', agent: 'claude', effort: 'max' }
+  const candidate = { provider: 'openai', id: 'gpt-6-luna', agent: 'claude', effort: 'max' }
   const input = shadowAdmission({ candidate })
   const record = await shadowPickBoot({ ...input, dbPath: join(tmpdir(), 'shadow-h1p-no-ledger.db') })
   const result = record.seats.builder.candidates[0]
@@ -1010,7 +1010,7 @@ test('H1P shadow provider exclusion names the register entry', async () => {
 })
 
 test('H1T shadow transport exclusion names the register entry', async () => {
-  const candidate = { provider: 'openai', id: 'gpt-5.6-luna', agent: 'pi', effort: 'max' }
+  const candidate = { provider: 'openai', id: 'gpt-6-luna', agent: 'pi', effort: 'max' }
   const input = shadowAdmission({ candidate, transport: 'headless-json' })
   const record = await shadowPickBoot({ ...input, dbPath: join(tmpdir(), 'shadow-h1t-no-ledger.db') })
   const result = record.seats.builder.candidates[0]
@@ -1022,9 +1022,9 @@ test('H1T shadow transport exclusion names the register entry', async () => {
 test('H1RG shadow grant capability refusal names the register entry', async () => {
   const server = { name: 'search', command: { bin: '/opt/mcp-search', args: [] }, url: null }
   const cases = [
-    { agent: 'claude', provider: 'anthropic', id: 'claude-opus-5', extension: 'crew/pi/extensions/builderloop.ts' },
-    { agent: 'claude', provider: 'anthropic', id: 'claude-opus-5', skill: 'crew/pi/skills/scout.md' },
-    { agent: 'pi', provider: 'openai', id: 'gpt-5.6-luna', mcp_servers: [server] },
+    { agent: 'claude', provider: 'anthropic', id: 'claude-opus-5-5', extension: 'crew/pi/extensions/builderloop.ts' },
+    { agent: 'claude', provider: 'anthropic', id: 'claude-opus-5-5', skill: 'crew/pi/skills/scout.md' },
+    { agent: 'pi', provider: 'openai', id: 'gpt-6-luna', mcp_servers: [server] },
   ]
   for (const grant of cases) {
     const root = capabilityFixtureRoot()

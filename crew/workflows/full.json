@@ -5,7 +5,7 @@
       "role": "planner",
       "agent": "pi",
       "provider": "openai",
-      "id": "gpt-5.6-sol",
+      "id": "gpt-6-sol",
       "effort": "medium",
       "skills": [],
       "extensions": [
@@ -31,7 +31,7 @@
       "role": "lead",
       "agent": "claude",
       "provider": "anthropic",
-      "id": "claude-opus-5",
+      "id": "claude-opus-5-5",
       "effort": "high",
       "skills": [],
       "extensions": []
@@ -40,7 +40,7 @@
       "role": "reviewer",
       "agent": "claude",
       "provider": "anthropic",
-      "id": "claude-opus-5",
+      "id": "claude-opus-5-5",
       "effort": "high",
       "skills": [],
       "extensions": []

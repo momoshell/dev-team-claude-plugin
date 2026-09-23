@@ -18,31 +18,33 @@ const rosterFixture = () => ({
   tiers: {
     mechanical: {
       lead: null,
-      planner: { provider: 'anthropic', id: 'claude-opus-5', agent: 'claude', effort: 'medium' },
-      builder: { provider: 'openai', id: 'gpt-5.6-luna', agent: 'pi', effort: 'max' },
-      reviewer: { provider: 'openai', id: 'gpt-5.6-sol', agent: 'pi', effort: 'medium' },
+      planner: { provider: 'anthropic', id: 'claude-opus-5-5', agent: 'claude', effort: 'medium' },
+      builder: { provider: 'openai', id: 'gpt-6-luna', agent: 'pi', effort: 'max' },
+      reviewer: { provider: 'openai', id: 'gpt-6-sol', agent: 'pi', effort: 'medium' },
     },
     build: {
-      lead: { provider: 'anthropic', id: 'claude-opus-5', agent: 'claude', effort: 'medium' },
-      planner: { provider: 'anthropic', id: 'claude-opus-5', agent: 'claude', effort: 'medium' },
-      builder: { provider: 'openai', id: 'gpt-5.6-luna', agent: 'pi', effort: 'max' },
+      lead: { provider: 'anthropic', id: 'claude-opus-5-5', agent: 'claude', effort: 'medium' },
+      planner: { provider: 'anthropic', id: 'claude-opus-5-5', agent: 'claude', effort: 'medium' },
+      builder: { provider: 'openai', id: 'gpt-6-luna', agent: 'pi', effort: 'max' },
       reviewer: { provider: 'anthropic', id: 'claude-sonnet-5', agent: 'claude', effort: 'high' },
     },
     judge: {
-      lead: { provider: 'anthropic', id: 'claude-opus-5', agent: 'claude', effort: 'high' },
-      planner: { provider: 'anthropic', id: 'claude-opus-5', agent: 'claude', effort: 'high' },
-      builder: { provider: 'openai', id: 'gpt-5.6-luna', agent: 'pi', effort: 'max' },
-      reviewer: { provider: 'anthropic', id: 'claude-opus-5', agent: 'claude', effort: 'xhigh' },
-      'tech-lead': { provider: 'anthropic', id: 'claude-opus-5', agent: 'claude', effort: 'xhigh' },
+      lead: { provider: 'anthropic', id: 'claude-opus-5-5', agent: 'claude', effort: 'high' },
+      planner: { provider: 'anthropic', id: 'claude-opus-5-5', agent: 'claude', effort: 'high' },
+      builder: { provider: 'openai', id: 'gpt-6-luna', agent: 'pi', effort: 'max' },
+      reviewer: { provider: 'anthropic', id: 'claude-opus-5-5', agent: 'claude', effort: 'xhigh' },
+      'tech-lead': { provider: 'anthropic', id: 'claude-opus-5-5', agent: 'claude', effort: 'xhigh' },
     },
   },
   models: {
     'anthropic/claude-opus-5': { cost_in_per_mtok: 5, cost_out_per_mtok: 25, context: 1000000, tags: ['reasoning'], source: 'models.dev', last_verified: '2026-08-13' },
     'anthropic/claude-sonnet-5': { cost_in_per_mtok: 2, cost_out_per_mtok: 10, context: 1000000, tags: ['reasoning'], source: 'models.dev', last_verified: '2026-08-13' },
     'anthropic/claude-haiku-4-5': { cost_in_per_mtok: 1, cost_out_per_mtok: 5, context: 200000, tags: ['cheap'], source: 'models.dev', last_verified: '2026-08-13' },
-    'openai/gpt-5.6-sol': { cost_in_per_mtok: 4, cost_out_per_mtok: 20, context: 1050000, tags: ['reasoning'], source: 'models.dev', last_verified: '2026-08-30' },
+    'anthropic/claude-opus-5-5': { cost_in_per_mtok: 5, cost_out_per_mtok: 25, context: 1000000, tags: ['reasoning'], source: 'models.dev', last_verified: '2026-08-13' },
+    'openai/gpt-6-sol': { cost_in_per_mtok: 4, cost_out_per_mtok: 20, context: 1050000, tags: ['reasoning'], source: 'models.dev', last_verified: '2026-08-30' },
     'openai/gpt-5.6-terra': { cost_in_per_mtok: 2, cost_out_per_mtok: 12, context: 1050000, tags: ['review'], source: 'models.dev', last_verified: '2026-08-13' },
     'openai/gpt-5.6-luna': { cost_in_per_mtok: 0.2, cost_out_per_mtok: 1.2, context: 1050000, tags: ['coding'], source: 'models.dev', last_verified: '2026-08-13' },
+    'openai/gpt-6-luna': { cost_in_per_mtok: 0.2, cost_out_per_mtok: 1.2, context: 1050000, tags: ['coding'], source: 'models.dev', last_verified: '2026-08-13' },
     'anthropic/claude-fable-5': { cost_in_per_mtok: 10, cost_out_per_mtok: 50, context: 1000000, tags: ['override-only'], source: 'models.dev', last_verified: '2026-08-13' },
   },
 })
@@ -201,7 +203,7 @@ test('an unknown model is refused without exposing its catalog record', async ()
 })
 
 test('a same-vendor reviewer/partner pairing is admitted', async () => {
-  const result = await edit({ cell: { provider: 'anthropic', id: 'claude-opus-5', agent: 'claude', effort: 'high' } })
+  const result = await edit({ cell: { provider: 'anthropic', id: 'claude-opus-5-5', agent: 'claude', effort: 'high' } })
   assert.equal(result.ok, true)
   assert.notEqual(result.diff, null)
   assert.equal(result.refusals.some(({ code }) => code === 'cross_vendor' || code === 'judge_vendor_split'), false)
@@ -273,7 +275,7 @@ test('propose-time and boot-time refusals agree for every seat, adapter and tran
 })
 
 test('a pi planner is refused before a diff is composed', async () => {
-  const result = await edit({ role: 'planner', cell: { provider: 'anthropic', id: 'claude-opus-5', agent: 'pi', effort: 'high' } })
+  const result = await edit({ role: 'planner', cell: { provider: 'anthropic', id: 'claude-opus-5-5', agent: 'pi', effort: 'high' } })
   assert.equal(result.ok, false)
   assert.equal(result.diff, null)
   assert.equal(result.after, null)
@@ -283,7 +285,7 @@ test('a pi planner is refused before a diff is composed', async () => {
 })
 
 test('a seat the adapter can hold still proposes exactly as before', async () => {
-  const result = await edit({ role: 'builder', cell: { provider: 'anthropic', id: 'claude-opus-5', agent: 'pi', effort: 'high' } })
+  const result = await edit({ role: 'builder', cell: { provider: 'anthropic', id: 'claude-opus-5-5', agent: 'pi', effort: 'high' } })
   assert.equal(result.ok, true)
   assert.equal(result.after.agent, 'pi')
   assert.equal(typeof result.diff, 'string')
@@ -298,7 +300,7 @@ test('an agent with no adapter is unknown, and unknown refuses', async () => {
   const seatSchema = loadSeatSchema()
   assert.equal(seatSchema.properties.agent.enum, undefined)
   assert.equal(seatSchema.properties.agent.pattern, '^[a-z0-9][a-z0-9-]*$')
-  const result = await edit({ role: 'planner', seatSchema, cell: { provider: 'anthropic', id: 'claude-opus-5', agent: 'nosuch-agent', effort: 'high' } })
+  const result = await edit({ role: 'planner', seatSchema, cell: { provider: 'anthropic', id: 'claude-opus-5-5', agent: 'nosuch-agent', effort: 'high' } })
   assert.equal(result.ok, false)
   assert.equal(result.diff, null)
   assert.ok(result.refusals.some(({ code }) => code === 'capability_unknown'))
@@ -365,7 +367,7 @@ test('ladderView keeps ratified drift, measured records and tier rail separate',
 })
 
 const pickCells = {
-  first: { provider:'openai', id:'gpt-5.6-sol', agent:'pi', effort:'medium' },
+  first: { provider:'openai', id:'gpt-6-sol', agent:'pi', effort:'medium' },
   thin: { provider:'openai', id:'gpt-5.6-terra', agent:'pi', effort:'max' },
   winner: { provider:'anthropic', id:'claude-sonnet-5', agent:'claude', effort:'high' },
 }
@@ -472,7 +474,7 @@ test('stageMoves names floor and cost refusals and reports vendor pairing', asyn
   assert.equal(floor.ok, false); assert.equal(floor.diff, null); assert.equal(floor.checks.find((entry) => entry.check === 'band_floor').ok, false); assert.match(floor.checks.find((entry) => entry.check === 'band_floor').message, /utility.*build.*builder.*claude-haiku-4-5/)
   const cost = await stageLadder([{ tier: 'build', role: 'reviewer', cell: { provider: 'anthropic', id: 'claude-fable-5', agent: 'claude', effort: 'high' } }])
   assert.equal(cost.checks.find((entry) => entry.check === 'cost_ceiling').ok, false); assert.match(cost.checks.find((entry) => entry.check === 'cost_ceiling').message, /25.*build.*reviewer.*claude-fable-5/)
-  const vendor = await stageLadder([{ tier: 'build', role: 'reviewer', cell: { provider: 'anthropic', id: 'claude-opus-5', agent: 'claude', effort: 'high' } }])
+  const vendor = await stageLadder([{ tier: 'build', role: 'reviewer', cell: { provider: 'anthropic', id: 'claude-opus-5-5', agent: 'claude', effort: 'high' } }])
   assert.equal(vendor.checks.find((entry) => entry.check === 'vendor_diversity').ok, true)
   assert.match(vendor.checks.find((entry) => entry.check === 'vendor_diversity').message, /reviewer anthropic, planner anthropic/)
   assert.equal(vendor.ok, true)

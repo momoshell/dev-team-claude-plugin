@@ -158,7 +158,7 @@ export const TOOL_CLASSES = ['edit', 'read', 'test', 'other']
 // the dispatcher logs and persists the decision. A dispatch-only key, so the compiler's
 // closed schema never sees it.
 export const TEST_REACH_OVERRIDE_KEY = 'allow_test_reach'
-export const DISPATCH_ONLY_REQUEST_KEYS = Object.freeze(['assurance', 'tier', 'execution', 'variant', 'depends_on', 'seats', 'adopt', 'chunk', TEST_REACH_OVERRIDE_KEY])
+export const DISPATCH_ONLY_REQUEST_KEYS = Object.freeze(['assurance', 'tier', 'execution', 'variant', 'depends_on', 'seats', 'adopt', 'chunk', 'base_commit', TEST_REACH_OVERRIDE_KEY])
 // The transports a dispatched batch can boot. Headless is the software-factory
 // mode and stays the DEFAULT, so an unflagged batch behaves exactly as it did
 // before this flag existed. #617 made the transport STATED; it is choosable
@@ -758,10 +758,11 @@ function writeFenceReport({ path, lanes, deps } = {}) {
   }
 }
 
-function warningSummary({ lane, counts, refusals, citation, warnings }) {
+function warningSummary({ lane, counts, refusals, citation, warnings, surfaceMoved }) {
   const warningEvidence = `report=${citation} doctrine=${WARNING_DOCTRINE}`
   const refusalNames = Array.isArray(refusals) && refusals.length > 0 ? refusals.join(',') : 'none'
-  return `dispatch-batch: WARNING-SUMMARY lane=${lane} refusals=${refusalNames} anchor-pin=${counts.anchorPin} · citation-carrier=${counts.citationCarrier} · test-reach=${counts.testReach} · actionable=${counts.actionable} · collapsed=${counts.testReachDropped} · census-carrier=${counts.censusCarrier} · suite-cost=${counts.suiteCost} ${warningEvidence}`
+  const surfaceClause = surfaceMoved === undefined ? '' : ` · surface-moved=${surfaceMoved}`
+  return `dispatch-batch: WARNING-SUMMARY lane=${lane} refusals=${refusalNames} anchor-pin=${counts.anchorPin} · citation-carrier=${counts.citationCarrier} · test-reach=${counts.testReach} · actionable=${counts.actionable} · collapsed=${counts.testReachDropped} · census-carrier=${counts.censusCarrier} · suite-cost=${counts.suiteCost}${surfaceClause} ${warningEvidence}`
 }
 
 export class BatchRefusal extends Error {
@@ -830,7 +831,8 @@ export function normalDeps(deps = {}) {
     home: deps.home || homedir(),
     spawn: deps.spawn || ((options) => options?.background
       ? spawnBackground(options)
-      : spawnSync(options.file, options.args, { cwd: options.cwd, env: options.env, encoding: 'utf8' })),
+      : spawnSync(options.file, options.args, { cwd: options.cwd, env: options.env, encoding: 'utf8', timeout: options.timeout })),
+    statSync: deps.statSync || fsStatSync,
     env: deps.env || process.env,
     spawnAsync: deps.spawnAsync || deps.spawn || spawnAsyncDefault,
     assertQuiet: deps.assertQuiet || ((env) => assertHostQuiet(hostLoad({ policy: loadPolicy(env) }))),
@@ -1149,6 +1151,128 @@ function sanitiseRequestScope(request, requestPath) {
   return { request: sanitized, observations }
 }
 
+export const SURFACE_SCAN_TIMEOUT_MS = 5000
+const IMMUTABLE_COMMIT = /^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/
+const SURFACE_BASE_COMMIT = 'base-commit'
+const SURFACE_REQUEST_MTIME = 'request-mtime'
+
+function unmeasuredSurface(name, reason) {
+  return { lane: name, commits: null, moved: null, reason, basis: null }
+}
+
+function gitProbe(args, { checkout, deps } = {}) {
+  const d = normalDeps(deps)
+  try {
+    const result = d.spawn({ file: 'git', args, cwd: checkout, timeout: SURFACE_SCAN_TIMEOUT_MS })
+    const failure = result?.error
+    if (failure) {
+      const code = failure.code
+      const message = String(failure.message || failure)
+      if (code === 'ETIMEDOUT' || message.includes('ETIMEDOUT') || /timed out/i.test(message)) {
+        return { ok: false, reason: 'probe-timeout', result }
+      }
+      return { ok: false, reason: 'probe-error', result }
+    }
+    if (result?.signal != null && result?.status == null) return { ok: false, reason: 'probe-timeout', result }
+    if (result?.status !== 0) return { ok: false, reason: 'probe-error', result }
+    return { ok: true, reason: null, result, stdout: String(result?.stdout ?? '') }
+  } catch (error) {
+    const code = error?.code
+    const message = String(error?.message || error)
+    if (code === 'ETIMEDOUT' || message.includes('ETIMEDOUT') || /timed out/i.test(message)) {
+      return { ok: false, reason: 'probe-timeout', error }
+    }
+    return { ok: false, reason: 'probe-error', error }
+  }
+}
+
+function surfaceRangeCommits(base, tip, paths, { checkout, deps } = {}) {
+  const rangeArgs = ['log', '--format=%h', '--end-of-options', `${base}..${tip}`, '--', ...paths]
+  const probe = gitProbe(rangeArgs, { checkout, deps })
+  if (!probe.ok) return { ok: false, reason: probe.reason }
+  const commits = String(probe.stdout ?? '').split('\n').map((line) => line.trim()).filter(Boolean)
+  return { ok: true, reason: null, commits }
+}
+
+function renderSurfaceMoved(name, movement) {
+  const commits = Array.isArray(movement?.commits) ? movement.commits : []
+  return `dispatch-batch: WARNING surface-moved: lane=${name} commits=${commits.join(',')} basis=${movement?.basis} — the lane's own where changed after its request was authored`
+}
+
+function renderSurfaceUnmeasured(name, reason) {
+  return `dispatch-batch: WARNING surface-unmeasured: lane=${name} commits=unmeasured reason=${reason}`
+}
+
+export function scanSurfaceMovement({ lane, checkout: checkoutDir, deps } = {}) {
+  const d = normalDeps(deps)
+  const checkout = typeof checkoutDir === 'string' && checkoutDir.trim() ? checkoutDir : process.cwd()
+  let name = 'unknown'
+  try {
+    name = laneNameOf(lane)
+    const authored = lane?.authored_request && typeof lane.authored_request === 'object' && !Array.isArray(lane.authored_request)
+      ? lane.authored_request
+      : null
+    const declaredWhere = authored && Array.isArray(authored.where) ? authored.where : []
+    const scopeObservations = Array.isArray(lane?.scope_observations) ? lane.scope_observations : []
+    const paths = []
+    for (const value of declaredWhere) {
+      if (typeof value !== 'string') continue
+      const parsed = parseFenceScope(normaliseRepoPath(value))
+      if (parsed.kind === 'invalid') continue
+      if (parsed.kind === 'span') {
+        paths.push(parsed.path)
+        continue
+      }
+      if (requestScopeReason(value, 'where') !== null) continue
+      paths.push(parsed.path)
+    }
+    if (scopeObservations.length > 0 || paths.length !== declaredWhere.length) return unmeasuredSurface(name, SCOPE_ENTRY_INVALID)
+    const baseCommit = typeof lane?.base_commit === 'string' && lane.base_commit !== '' ? lane.base_commit : null
+    if (paths.length === 0) {
+      return { lane: name, commits: [], moved: false, reason: null, basis: baseCommit !== null ? SURFACE_BASE_COMMIT : SURFACE_REQUEST_MTIME }
+    }
+    if (baseCommit !== null) {
+      if (!IMMUTABLE_COMMIT.test(baseCommit)) return unmeasuredSurface(name, 'base-commit-not-immutable')
+      const base = baseCommit
+      const typeProbe = gitProbe(['cat-file', '-t', '--end-of-options', base], { checkout, deps: d })
+      if (!typeProbe.ok) return unmeasuredSurface(name, typeProbe.reason === 'probe-timeout' ? typeProbe.reason : 'base-commit-unknown')
+      if (typeProbe.stdout.trim() !== 'commit') return unmeasuredSurface(name, 'base-commit-unknown')
+      const tipProbe = gitProbe(['rev-parse', '--verify', '--end-of-options', `${DISPATCH_BASE_REF}^{commit}`], { checkout, deps: d })
+      if (!tipProbe.ok) return unmeasuredSurface(name, tipProbe.reason === 'probe-timeout' ? tipProbe.reason : 'base-tip-unresolvable')
+      const tip = tipProbe.stdout.trim().split('\n')[0]?.trim()
+      if (!tip) return unmeasuredSurface(name, 'base-tip-unresolvable')
+      const ancestorProbe = gitProbe(['merge-base', '--is-ancestor', base, tip], { checkout, deps: d })
+      if (!ancestorProbe.ok) return unmeasuredSurface(name, ancestorProbe.reason === 'probe-timeout' ? ancestorProbe.reason : 'base-commit-not-ancestor')
+      const range = surfaceRangeCommits(base, tip, paths, { checkout, deps: d })
+      if (!range.ok) return unmeasuredSurface(name, range.reason === 'probe-timeout' ? range.reason : 'range-unmeasurable')
+      return { lane: name, commits: range.commits, moved: range.commits.length > 0, reason: null, basis: SURFACE_BASE_COMMIT }
+    }
+    let since
+    try {
+      const stat = d.statSync(lane.requestPath)
+      const mtime = stat?.mtime
+      const time = mtime instanceof Date ? mtime.getTime() : Number(mtime)
+      if (!Number.isFinite(time)) return unmeasuredSurface(name, 'request-stat-unreadable')
+      since = new Date(time).toISOString()
+    } catch {
+      return unmeasuredSurface(name, 'request-stat-unreadable')
+    }
+    const tipProbe = gitProbe(['rev-parse', '--verify', '--end-of-options', DISPATCH_BASE_REF], { checkout, deps: d })
+    if (!tipProbe.ok) return unmeasuredSurface(name, tipProbe.reason === 'probe-timeout' ? tipProbe.reason : 'base-tip-unresolvable')
+    const tip = tipProbe.stdout.trim().split('\n')[0]?.trim()
+    if (!tip) return unmeasuredSurface(name, 'base-tip-unresolvable')
+    const baseProbe = gitProbe(['rev-list', '--first-parent', `--before=${since}`, '-1', '--end-of-options', tip], { checkout, deps: d })
+    if (!baseProbe.ok) return unmeasuredSurface(name, baseProbe.reason === 'probe-timeout' ? baseProbe.reason : 'request-mtime-base-unresolvable')
+    const base = String(baseProbe.stdout ?? '').trim().split('\n')[0]?.trim()
+    if (!base) return unmeasuredSurface(name, 'request-mtime-base-unresolvable')
+    const range = surfaceRangeCommits(base, tip, paths, { checkout, deps: d })
+    if (!range.ok) return unmeasuredSurface(name, range.reason === 'probe-timeout' ? range.reason : 'range-unmeasurable')
+    return { lane: name, commits: range.commits, moved: range.commits.length > 0, reason: null, basis: SURFACE_REQUEST_MTIME }
+  } catch {
+    return unmeasuredSurface(name, 'scan-failed')
+  }
+}
+
 export function fenceAdmission({ lane, file, source, holder } = {}) {
   if (!FENCE_ADMISSION_SOURCES.includes(source)) {
     refuse(`fence admission for lane ${lane ?? '(unknown)'} and file ${file ?? '(unknown)'} has no allowed source: ${JSON.stringify(source)}`, FENCE_ADMISSION_UNSOURCED)
@@ -1433,6 +1557,10 @@ function splitDispatchKeys(parsed, requestPath) {
     const defect = seatsDefect(dispatch.seats)
     if (defect) refuse(`request ${requestPath} has an invalid seats: ${defect}`, BATCH_UNREADABLE)
   }
+  if (Object.prototype.hasOwnProperty.call(dispatch, 'base_commit')
+      && (typeof dispatch.base_commit !== 'string' || dispatch.base_commit.trim() === '')) {
+    refuse(`request ${requestPath} has an invalid base_commit; expected a non-empty string`, BATCH_UNREADABLE)
+  }
   return {
     dispatch,
     request,
@@ -1491,9 +1619,11 @@ export function readBatch({ batchDir, checkout, deps } = {}) {
     lanes.push({
       lane,
       name,
+      requestPath,
       request: scoped.request,
       scope_observations: scoped.observations,
       authored_request: request,
+      base_commit: typeof dispatch.base_commit === 'string' ? dispatch.base_commit : null,
       execution: execution ?? null,
       assurance: assurance ?? null,
       executionSpelling,
@@ -2005,7 +2135,18 @@ export function checkFences({ fences, lanes, graph, checkout, outDir, deps } = {
     const overrideField = overridden.length > 0 ? { test_reach_overrides: overridden } : {}
     const arbitrationField = admissionArbitrations.get(name)?.length > 0 ? { fence_admission_arbitrated: admissionArbitrations.get(name) } : {}
     const laneObservations = observationsFor(name)
-    reportLanes.push({ lane: name, test_reach: reachRows, test_reach_dropped: droppedReachRows, citation_carriers: unfencedCarriers, anchor_pins: unfencedPins, census_carriers: censusWarning ? [censusWarning] : [], suite_costs: suiteCostWarning ? [suiteCostWarning] : [], ...(laneAdmissions.length > 0 ? { fence_admissions: laneAdmissions } : {}), ...(laneObservations.length > 0 ? { observations: laneObservations } : {}), ...arbitrationField, ...overrideField })
+    const movement = lane?.authored_request ? (fenceHasSurface ? scanSurfaceMovement({ lane, checkout: scanRoot, deps: d }) : unmeasuredSurface(name, 'fence-surface-absent')) : null
+    if (movement) {
+      const text = movement.reason ? renderSurfaceUnmeasured(name, movement.reason) : renderSurfaceMoved(name, movement)
+      if (movement.reason) {
+        warnings.push({ kind: 'surface-unmeasured', lane: name, surface_movement: movement, text })
+        d.log(text)
+      } else if (movement.moved === true) {
+        warnings.push({ kind: 'surface-moved', lane: name, surface_movement: movement, text })
+        d.log(text)
+      }
+    }
+    reportLanes.push({ lane: name, test_reach: reachRows, test_reach_dropped: droppedReachRows, citation_carriers: unfencedCarriers, anchor_pins: unfencedPins, census_carriers: censusWarning ? [censusWarning] : [], suite_costs: suiteCostWarning ? [suiteCostWarning] : [], ...(laneAdmissions.length > 0 ? { fence_admissions: laneAdmissions } : {}), ...(laneObservations.length > 0 ? { observations: laneObservations } : {}), ...arbitrationField, ...overrideField, ...(movement ? { surface_movement: movement } : {}) })
     summaryLanes.push({
       lane: name,
       counts: {
@@ -2018,6 +2159,7 @@ export function checkFences({ fences, lanes, graph, checkout, outDir, deps } = {
         testReachDropped: droppedReachRows.length,
       },
       refusals: refusedRows.length > 0 ? [TEST_REACH_UNFENCED] : [],
+      movement: movement ?? { lane: name, commits: [], moved: false, reason: null, basis: null },
     })
 
     const siblings = []
@@ -2071,12 +2213,15 @@ export function checkFences({ fences, lanes, graph, checkout, outDir, deps } = {
     for (const warning of warnings) if (typeof warning.text === 'string' && warning.text) d.log(warning.text)
   }
   for (const state of summaryLanes) {
+    const movement = state.movement
+    const surfaceMoved = movement.reason ? 'unmeasured' : movement.moved ? 1 : 0
     d.log(warningSummary({
       lane: state.lane,
       counts: state.counts,
       refusals: state.refusals,
       citation,
       warnings,
+      surfaceMoved,
     }))
   }
   // #960. This REFUSES where the surrounding reach scan only warns, and the difference is
@@ -3890,15 +4035,13 @@ function prepareDispatchContext(options) {
   const { waves, graph } = planWaves({ lanes })
   const parent = typeof parentDir === 'string' && parentDir.trim() ? parentDir : dirname(resolve(root))
   const outputDir = typeof outDir === 'string' && outDir.trim() ? resolve(outDir) : join(resolve(batchDir), 'out')
+  // Preflight BEFORE fence and surface scanning: the movement scan probes git,
+  // so an invalid run option must refuse before any probe runs. A refusal must
+  // name the cause it measured, not the first one it tripped over.
+  preflightRunOptions({ execution, runFlags, lanes })
   const fenceReport = checkFences({ fences, lanes, graph, checkout, outDir: outputDir, deps: d })
   const hasAdmissions = fenceReport.admissions.length > 0
   const effectiveFences = fenceReport.fences
-  // Preflight BEFORE planWorktrees: planWorktrees probes git for existing
-  // branches, so an unsupported --variant reached here after the probe and was
-  // reported as `branch-taken` when the real cause was an invalid run option
-  // (RV3-1). A refusal must name the cause it measured, not the first one it
-  // tripped over. Ordering is the whole fix — both refusals still fire.
-  preflightRunOptions({ execution, runFlags, lanes })
   const waitBuilder = runFlags['wait-builder']
   const waitSeconds = Number(waitBuilder === undefined || waitBuilder === null || String(waitBuilder).trim() === '' ? WAITS_S.builder : waitBuilder)
   const census = readTurnCensus(runFlags[TURN_CENSUS_FLAG], d)

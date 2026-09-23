@@ -3546,10 +3546,12 @@ test('#900 hardening briefs and appeal briefs state their contracts', () => {
   assert.equal(briefText.split('source-regressed').length - 1, 1)
   assert.match(briefText, new RegExp(HARDENING_APPEAL_SHAPE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
   assert.match(briefText, /grants nothing until the reviewer approves it/)
+  assert.match(briefText, /test is a repo-relative \.test\.mjs path run by node --test; any other runner goes in invocation with the exact command that runs it\./)
   const bounceText = hardeningBounceLines(2, [{ finding: 'F1', reason: 'builder-exemption', why: 'refused' }], []).join('\n')
   assert.match(bounceText, /"class": "coverage"/)
   assert.match(bounceText, /HARDENING_APPEAL_SHAPE|finding.*hardening.*ungateable/)
   assert.match(bounceText, /grants nothing until the reviewer approves it|until the reviewer approves it/)
+  assert.match(bounceText, /test is a repo-relative \.test\.mjs path run by node --test; any other runner goes in invocation with the exact command that runs it\./)
   const appealText = hardeningAppealLines(2, [{ id: 'F1', location: 'a.mjs:1', summary: 'the implementation defect' }], [{ finding: 'F1', reason: 'builder-exemption', why: 'refused', appeal: B376_APPEAL_REASON }], []).join('\n')
   assert.match(appealText, /a\.mjs:1/)
   assert.match(appealText, /the implementation defect/)
@@ -6054,12 +6056,20 @@ test('I1 hardening declarations require the shared test path', () => {
   assert.equal(hardeningTestPath('a.test.mjs'), true)
   assert.equal(hardeningTestPath('checks.mjs'), false)
   assert.equal(hardeningTestPath(''), false)
-  const entry = { ...B376_HARDENED, test: 'checks.mjs' }
-  const result = validateHardened({ hardened: [entry] }, [{ id: 'F1' }], scopeMatcher(['a.mjs', 'checks.mjs']))
+  const entry = { ...B376_HARDENED, test: 'sse::tests::E1' }
+  const result = validateHardened({ hardened: [entry] }, [{ id: 'F1' }], scopeMatcher(['a.mjs', 'a.test.mjs']))
   assert.equal(result.entries.length, 0)
   assert.equal(result.refusals.length, 1)
   assert.equal(result.refusals[0].finding, 'F1')
   assert.equal(result.refusals[0].reason, 'test-path-invalid')
+  assert.match(result.refusals[0].why, /sse::tests::E1/)
+  assert.match(result.refusals[0].why, /invocation/)
+  assert.match(result.refusals[0].why, /node --test/)
+  assert.match(result.refusals[0].why, /exact command/)
+  const bounce = hardeningBounceLines(2, result.refusals, []).join('\n')
+  assert.match(bounce, /sse::tests::E1/)
+  assert.match(bounce, /invocation/)
+  assert.match(bounce, /exact command/)
 })
 
 const B863_INVOCATION = 'cargo test -p power-domain --bin generate_schemas stray_committed_schema_is_drift'
@@ -6440,6 +6450,13 @@ test('b863 E1 a metachar invocation is admitted without path treatment', () => {
     { hardened: [b863InvocationEntry({ invocation: 'pytest -k "test_*"' })] }, [{ id: 'F1' }], scope)
   assert.equal(result.entries.length, 1)
   assert.equal(result.refusals.length, 0)
+  const pairTest = { ...B376_HARDENED }
+  const pairInvocation = b863InvocationEntry({ finding: 'F2' })
+  const pair = validateHardened({ hardened: [pairTest, pairInvocation] }, [{ id: 'F1' }, { id: 'F2' }], scope)
+  assert.equal(pair.refusals.length, 0)
+  assert.equal(pair.entries.length, 2)
+  assert.equal(pair.entries[0], pairTest)
+  assert.equal(pair.entries[1], pairInvocation)
 })
 
 test('RV1-1 disposition-less pinned prescriptions conflict', () => {

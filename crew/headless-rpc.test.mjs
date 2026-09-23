@@ -3384,3 +3384,23 @@ test('RV2-3 a marker-only proven teardown after a supervisor restart removes the
     } finally { restarted.cleanup() }
   } finally { first.cleanup() }
 })
+
+test('RV2-4 a marker-only teardown that cannot prove death keeps the live worker pipe', () => {
+  const first = fixture({ kill: () => {} })
+  try {
+    first.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    const fifo = seatCommandPath(first.dir, 'builder')
+    writeFileSync(fifo, '')
+    let clock = 0
+    const restarted = fixture({
+      dir: first.dir, pid: 800, existsSync,
+      now: () => clock, sleep: (ms) => { clock += ms }, kill: () => true,
+    })
+    try {
+      const rows = restarted.io.teardown()
+      assert.equal(rows.length, 1)
+      assert.notEqual(rows[0].outcome, 'proven')
+      assert.equal(existsSync(fifo), true)
+    } finally { restarted.cleanup() }
+  } finally { first.cleanup() }
+})

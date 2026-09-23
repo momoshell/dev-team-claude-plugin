@@ -41,8 +41,9 @@ restates it.
 
 - pi: `pi --print --skill .agents/skills/review-procedure -- 'list your available skills'`
   (pi 0.84.2 discovers `<cwd>/.agents/skills` on its own; crew's pi transport
-  currently boots seats with `--no-skills`, so the flag above is how you see it
-  today).
+  boots a seat with `--skill` for each granted skill — lean-build for every
+  role since #1504 — and `--no-skills` only when none is granted, so a seat
+  never sees this skill unless it is granted; the flag above is how you see it).
 - claude: `claude -p 'list your available skills'` — claude 2.1.233 discovers
   project skills under `.claude/skills` only and does NOT read `.agents/`, so
   this probe is expected to NOT list this skill on that build. Do not report it

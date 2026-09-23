@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { normalizeCatalog, diffModels, readRosterModels, renderReport, successorOf, planBump, applyBump, catalogEntry, proseMentions, commitWrites, bumpLadder } from './roster-refresh.mjs'
 
 const roster = JSON.parse(readFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
@@ -267,7 +267,7 @@ test('renderReport body is deterministic', () => {
 
 import { spawnSync } from 'node:child_process'
 import { scratchDir } from '../test/helpers.mjs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 
 const REFRESH_TOOL = new URL('./roster-refresh.mjs', import.meta.url).pathname
@@ -493,7 +493,11 @@ test('APPLY1 every seat, fallback, catalog key, ladder member and route moves to
   assert.equal(next.roster.tiers.judge['tech-lead'].fallback[0].id, 'gpt-6-sol')
   // The replaced entries stay as unseated price rows; the ladder no longer admits them.
   assert.deepEqual(Object.keys(next.roster.models).sort(), ['anthropic/claude-opus-5', 'anthropic/claude-opus-5-5', 'openai/gpt-5.6-sol', 'openai/gpt-6-sol'])
-  assert.deepEqual(next.roster.models['openai/gpt-5.6-sol'], BUMP_ROSTER.models['openai/gpt-5.6-sol'])
+  // Kept as it was, plus the override-only tag nextModelRung's upgrade walk skips; each successor
+  // sits right after the row it replaced.
+  assert.deepEqual(next.roster.models['openai/gpt-5.6-sol'], { ...BUMP_ROSTER.models['openai/gpt-5.6-sol'], tags: [...(BUMP_ROSTER.models['openai/gpt-5.6-sol'].tags || []), 'override-only'] })
+  const order = Object.keys(next.roster.models)
+  assert.equal(order.indexOf('openai/gpt-6-sol'), order.indexOf('openai/gpt-5.6-sol') + 1)
   assert.deepEqual(next.ladder.bands[0].members, ['anthropic/claude-opus-5-5', 'openai/gpt-6-sol'])
   assert.equal(next.routing.routes.build.reviewer.candidates[0].id, 'gpt-6-sol')
   assert.equal(next.roster.updated_at, '2026-09-23')
@@ -707,12 +711,15 @@ test('HOUR1 an anthropic cache write is priced at the 1h rate, other vendors as 
 // Mutation killed: planning a kept price row as a bump re-reports it, and re-applies it, on every run.
 test('RETAIN1 an unseated predecessor whose successor is already held is a price row, not a bump', () => {
   const roster = { tiers: { build: { planner: { provider: 'openai', id: 'gpt-6-sol', agent: 'pi' } } }, models: {
-    'openai/gpt-5.6-sol': { cost_in_per_mtok: 4, cost_out_per_mtok: 20, context: 1, tags: [], source: 'models.dev', last_verified: '2026-01-01' },
+    'openai/gpt-5.6-sol': { cost_in_per_mtok: 4, cost_out_per_mtok: 20, context: 1, tags: ['override-only'], source: 'models.dev', last_verified: '2026-01-01' },
     'openai/gpt-6-sol': { cost_in_per_mtok: 2, cost_out_per_mtok: 10, context: 1, tags: [], source: 'models.dev', last_verified: '2026-09-23' },
   } }
   const plan = planBump(roster, BUMP_CATALOG)
   assert.deepEqual(plan.bumps, [])
   assert.deepEqual(plan.skipped.find((s) => s.key === 'openai/gpt-5.6-sol'), { key: 'openai/gpt-5.6-sol', reason: 'retained-price-row' })
+  // A newer successor arriving later moves only the seated model; the kept row stays a price row.
+  const later = { ...BUMP_CATALOG, openai: { models: { ...BUMP_CATALOG.openai.models, 'gpt-7-sol': price(1, 5) } } }
+  assert.deepEqual(planBump(roster, later).bumps, [{ from: 'openai/gpt-6-sol', to: 'openai/gpt-7-sol' }])
 })
 
 // Mutation killed: a backup write outside the staging try escapes raw and leaves .tmp and .bak
@@ -749,7 +756,10 @@ test('BAK2 a backup that cannot be removed after a successful apply is reported'
 test('CLI1 --apply rewrites a scratch roster, ladder and routing policy end to end', () => {
   const dir = scratchDir('roster-refresh-cli1-')
   try {
-    for (const name of ['roster.json', 'model-ladder.json', 'routing-policy.json']) writeFileSync(join(dir, name), readFileSync(new URL(`./${name}`, import.meta.url)))
+    for (const name of ['roster.json', 'model-ladder.json', 'routing-policy.json', 'workflows/full.json']) {
+      mkdirSync(dirname(join(dir, name)), { recursive: true })
+      writeFileSync(join(dir, name), readFileSync(new URL(`./${name}`, import.meta.url)))
+    }
     const shipped = JSON.parse(readFileSync(join(dir, 'roster.json'), 'utf8'))
     const catalog = {}
     const add = (key, e) => {
@@ -770,6 +780,28 @@ test('CLI1 --apply rewrites a scratch roster, ladder and routing policy end to e
     assert.equal(Object.hasOwn(after.models, 'openai/gpt-5.6-sol'), true)
     assert.equal(JSON.stringify(after.tiers).includes('"gpt-5.6-sol"'), false)
     assert.notEqual(readFileSync(join(dir, 'routing-policy.json'), 'utf8'), before)
+    // The workflow map moves with the seats, and every file keeps its own byte format.
+    assert.equal(JSON.stringify(JSON.parse(readFileSync(join(dir, 'workflows/full.json'), 'utf8'))).includes('"gpt-5.6-sol"'), false)
+    for (const name of ['roster.json', 'model-ladder.json', 'routing-policy.json', 'workflows/full.json']) {
+      const shippedText = readFileSync(new URL(`./${name}`, import.meta.url), 'utf8')
+      assert.equal(readFileSync(join(dir, name), 'utf8').endsWith('\n'), shippedText.endsWith('\n'), name)
+    }
     assert.deepEqual(readdirSync(dir).filter((n) => /\.roster-refresh\.(tmp|bak)$/.test(n)), [])
+    // A catalog refusal is a printed message and an unchanged tree, never a stack trace.
+    const bad = JSON.parse(readFileSync(catalogPath, 'utf8'))
+    bad.openai.models['gpt-7-sol'] = { cost: { input: -1, output: 10 }, limit: { context: 1050000 } }
+    writeFileSync(catalogPath, JSON.stringify(bad))
+    const settled = readFileSync(join(dir, 'roster.json'), 'utf8')
+    const refused = spawnSync(process.execPath, [REFRESH_TOOL, '--roster', join(dir, 'roster.json'), '--catalog', catalogPath, '--apply'], { encoding: 'utf8' })
+    assert.equal(refused.status, 1)
+    assert.match(refused.stderr, /^roster-refresh: refusing to write openai\/gpt-7-sol/)
+    assert.doesNotMatch(refused.stderr, /\n\s+at /)
+    assert.equal(readFileSync(join(dir, 'roster.json'), 'utf8'), settled)
   } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+// Mutation killed: without the check a fallback bumped onto its own primary seats one model twice.
+test('FALLBACK1 a bump that lands a fallback on its primary is refused', () => {
+  const roster = { tiers: { judge: { 'tech-lead': { provider: 'anthropic', id: 'claude-opus-5-5', agent: 'claude', fallback: [{ provider: 'anthropic', id: 'claude-opus-5', agent: 'claude' }] } } }, models: {} }
+  assert.throws(() => applyBump({ roster }, { bumps: [{ from: 'anthropic/claude-opus-5', to: 'anthropic/claude-opus-5-5' }] }, BUMP_CATALOG, { today: '2026-09-23' }), /fallback would become its own primary/)
 })

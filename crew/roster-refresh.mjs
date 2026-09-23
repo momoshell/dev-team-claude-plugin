@@ -1,4 +1,4 @@
-import { accessSync, constants, existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { accessSync, constants, existsSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { rosterSeating } from './roster.mjs'
@@ -147,9 +147,10 @@ export function renderReport(diff, { generatedAt, rosterUpdatedAt, seatedCount }
 // ---- successors: bump every model the factory uses to the newest version in its family ----
 //
 // A family is recognised only by an explicit, closed set of id shapes. Anything else — a
-// local model, a codex variant, a tier suffix on a named model (gpt-6-sol-pro), a dated
+// local model, a tier suffix on a named model (gpt-6-sol-pro), a dated
 // snapshot — has NO family and is never bumped: a wrong guess would silently reseat the
-// factory onto a different model. A bare tier name IS a family (gpt-5-mini -> gpt-5.4-mini).
+// factory onto a different model. A bare name token IS a family, whatever it names
+// (gpt-5-mini -> gpt-5.4-mini, gpt-5.3-codex -> a newer gpt-*-codex).
 export const FAMILY_SHAPES = Object.freeze([
   // gpt-<version>-<name>: gpt-5.6-sol, gpt-6-sol. One name token only, so gpt-6-sol-pro is not a sol.
   { pattern: /^gpt-(\d+)(?:\.(\d+))?-([a-z]+)$/, family: (m) => `gpt-*-${m[3]}` },
@@ -229,9 +230,10 @@ export function planBump(roster, rawCatalog) {
   const seated = new Set(seatedModelKeys(roster))
   for (const key of usedModelKeys(roster)) {
     const r = successorOf(key, catalogKeys)
-    // A predecessor kept only as a PRICE row (its successor already in the roster, no seat naming
-    // it) stays: the ledger prices its history from it. It is not a pending bump.
-    if (r.successor && !seated.has(key) && Object.hasOwn(roster?.models || {}, r.successor)) skipped.push({ key, reason: 'retained-price-row' })
+    // A predecessor an earlier apply kept as a PRICE row (unseated, tagged override-only) stays:
+    // the ledger prices its history from it. It is never a pending bump, whatever newer
+    // successor the catalog lists since.
+    if (r.successor && !seated.has(key) && (roster?.models?.[key]?.tags || []).includes('override-only')) skipped.push({ key, reason: 'retained-price-row' })
     else if (r.successor) bumps.push({ from: key, to: r.successor })
     else skipped.push({ key, reason: r.reason })
   }
@@ -321,9 +323,17 @@ export function bumpLadder(ladder, keyMap) {
   return { ...ladder, bands }
 }
 
-export function applyBump({ roster, ladder, routing }, plan, rawCatalog, { today }) {
+export function applyBump({ roster, ladder, routing, workflows = {} }, plan, rawCatalog, { today }) {
   const keyMap = Object.fromEntries(plan.bumps.map((b) => [b.from, b.to]))
   const nextRoster = replaceIds(roster, keyMap)
+  // A bump that lands a fallback on its own primary seats one model twice: a placement decision.
+  for (const [tier, seats] of Object.entries(rosterSeating(nextRoster) || {})) {
+    for (const [role, seat] of Object.entries(seats || {})) {
+      for (const fb of Array.isArray(seat?.fallback) ? seat.fallback : []) {
+        if (fb?.provider === seat.provider && fb?.id === seat.id) throw new Error(`roster-refresh: refusing to apply — ${tier}.${role}'s fallback would become its own primary ${seat.provider}/${seat.id}; which fallback it needs is a placement decision, not a version bump`)
+      }
+    }
+  }
   // Every successor key gets ONE fresh catalog entry, carrying the union of the tags of the
   // entries it replaces. A successor the roster already held is refreshed too: iteration order
   // must never let a stale retained entry win over the price just read from the catalog.
@@ -333,23 +343,31 @@ export function applyBump({ roster, ladder, routing }, plan, rawCatalog, { today
     if (target) tagsFor[target] = [...new Set([...(tagsFor[target] || []), ...(entry.tags || [])])]
   }
   // A replaced model's entry STAYS as an unseated price row: the ledger prices its recorded
-  // history from this catalog, and dropping it would turn that history unpriced. No seat names it
-  // after the bump, and the ladder no longer admits it, so it cannot be seated again.
+  // history from this catalog, and dropping it would turn that history unpriced. It is tagged
+  // override-only, the tag nextModelRung's failure-upgrade walk skips, so no reseat can land on
+  // it; no seat names it and the ladder no longer admits it. Order is kept: each successor sits
+  // right after the row it replaces, so the diff is the change and nothing else.
+  const successors = new Set(Object.values(keyMap))
   const models = {}
+  const place = (to) => { if (!Object.hasOwn(models, to)) models[to] = catalogEntry(to, rawCatalog, { tags: tagsFor[to] || [], today }) }
   for (const [key, entry] of Object.entries(roster.models || {})) {
-    if (Object.values(keyMap).includes(key)) continue
+    if (successors.has(key)) { place(key); continue }
+    if (keyMap[key]) {
+      models[key] = { ...entry, tags: [...new Set([...(entry.tags || []), 'override-only'])] }
+      place(keyMap[key])
+      continue
+    }
     models[key] = entry
   }
-  for (const to of new Set(Object.values(keyMap))) {
-    models[to] = catalogEntry(to, rawCatalog, { tags: tagsFor[to] || [], today })
-  }
-  nextRoster.models = Object.fromEntries(Object.entries(models).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+  for (const to of successors) place(to)
+  nextRoster.models = models
   nextRoster.updated_at = today
   const dated = (doc) => (doc && Object.hasOwn(doc, 'updated_at') ? { ...doc, updated_at: today } : doc)
   return {
     roster: nextRoster,
     ladder: ladder ? dated(bumpLadder(ladder, keyMap)) : ladder,
     routing: routing ? dated(replaceIds(routing, keyMap)) : routing,
+    workflows: Object.fromEntries(Object.entries(workflows).map(([name, doc]) => [name, replaceIds(doc, keyMap)])),
   }
 }
 
@@ -491,26 +509,50 @@ if (import.meta.main) {
     const read = (name) => { const path = join(dir, name); return { path, doc: JSON.parse(readFileSync(path, 'utf8')) } }
     const ladder = read('model-ladder.json')
     const routing = read('routing-policy.json')
+    // Workflow maps pin seats too (crew/workflows/*.json); a bump that left them behind would make
+    // `crew boot --workflow <name>` refuse the old model the ladder no longer lists.
+    const workflowDir = join(dir, 'workflows')
+    const workflows = existsSync(workflowDir)
+      ? readdirSync(workflowDir).filter((n) => n.endsWith('.json') && !n.endsWith('.schema.json')).map((n) => read(join('workflows', n)))
+      : []
     const today = new Date().toISOString().slice(0, 10)
-    const next = applyBump({ roster, ladder: ladder.doc, routing: routing.doc }, plan, catalog, { today })
     const rosterFile = typeof rosterPath === 'string' ? rosterPath : fileURLToPath(rosterPath)
-    const json = (doc) => `${JSON.stringify(doc, null, 2)}\n`
+    // Each file keeps its own ending: a trailing newline only where the original had one.
+    const json = (doc, original) => `${JSON.stringify(doc, null, 2)}${original.endsWith('\n') ? '\n' : ''}`
+    let next
     try {
+      next = applyBump({ roster, ladder: ladder.doc, routing: routing.doc, workflows: Object.fromEntries(workflows.map((w) => [w.path, w.doc])) }, plan, catalog, { today })
       const { loadLadder, loadRoutingPolicy } = await import('./crew.mjs')
       const { loadRoster } = await import('./roster.mjs')
-      commitWrites([
-        { path: rosterFile, original: readFileSync(rosterFile, 'utf8'), next: json(next.roster), validate: (tmp) => loadRoster(tmp) },
-        { path: ladder.path, original: readFileSync(ladder.path, 'utf8'), next: json(next.ladder), validate: (tmp) => loadLadder({ path: tmp }) },
-        { path: routing.path, original: readFileSync(routing.path, 'utf8'), next: json(next.routing), validate: (tmp) => loadRoutingPolicy({ path: tmp }) },
-      ], { accessSync, constants, existsSync, writeFileSync, renameSync, unlinkSync })
+      const { validateWorkflow } = await import('./workflows.mjs')
+      const { loadCapabilities } = await import('./capabilities.mjs')
+      const file = (path, doc, validate) => { const original = readFileSync(path, 'utf8'); return { path, original, next: json(doc, original), validate } }
+      const writes = [
+        file(rosterFile, next.roster, (tmp) => loadRoster(tmp)),
+        file(ladder.path, next.ladder, (tmp) => loadLadder({ path: tmp })),
+        file(routing.path, next.routing, (tmp) => loadRoutingPolicy({ path: tmp })),
+      ]
+      // Validated as the shipped D1 check does (build tier, all four workflow roles) against the
+      // STAGED ladder, so a workflow the new ladder refuses is never written.
+      for (const w of workflows) {
+        if (JSON.stringify(next.workflows[w.path]) === JSON.stringify(w.doc)) continue
+        writes.push(file(w.path, next.workflows[w.path], (tmp) => validateWorkflow(JSON.parse(readFileSync(tmp, 'utf8')), {
+          register: loadCapabilities(), ladder: loadLadder({ path: `${ladder.path}.roster-refresh.tmp` }), tier: 'build', roles: ['lead', 'planner', 'builder', 'reviewer'], path: tmp,
+        })))
+      }
+      commitWrites(writes, { accessSync, constants, existsSync, writeFileSync, renameSync, unlinkSync })
+      console.log(`\napplied ${plan.bumps.length} bump(s) to ${writes.map((w) => w.path).join(', ')}`)
     } catch (err) {
       console.error(err.message)
       process.exit(1)
     }
-    const prose = [...proseMentions(next.ladder, plan.bumps).map((h) => `model-ladder.json${h.path}`), ...proseMentions(next.routing, plan.bumps).map((h) => `routing-policy.json${h.path}`)]
-    console.log(`\napplied ${plan.bumps.length} bump(s) to ${rosterFile}, ${ladder.path}, ${routing.path}`)
+    const prose = [
+      ...proseMentions(next.ladder, plan.bumps).map((h) => `model-ladder.json${h.path}`),
+      ...proseMentions(next.routing, plan.bumps).map((h) => `routing-policy.json${h.path}`),
+      ...Object.entries(next.workflows).flatMap(([path, doc]) => proseMentions(doc, plan.bumps).map((h) => `${path}${h.path}`)),
+    ]
     if (prose.length) console.log(`still naming an old id, NOT rewritten (prose records what was measured; anything else is a reference the tool could not bump):\n${[...new Set(prose)].map((p) => `- ${p}`).join('\n')}`)
-    console.log('next: run npm test; tests that assert the shipped roster move with it, historical fixtures do not.')
+    console.log('next: run npm test. Move only tests that pin which models are SEATED; a format, price-history or dated-record check that fails is a finding, not a test to update.')
   }
 
   process.exit(0)

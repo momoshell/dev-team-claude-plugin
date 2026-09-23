@@ -13770,7 +13770,7 @@ export function validateHardened(details, owed, inScope) {
       }
     } else {
       if (!hardeningTestPath(entry.test)) {
-        refuse(id, 'test-path-invalid', `the hardened test ${entry.test ?? '(missing)'} for finding ${id} must be a non-empty path ending in .test.mjs`)
+        refuse(id, 'test-path-invalid', `the hardened test ${entry.test ?? '(missing)'} for finding ${id} must be a non-empty path ending in .test.mjs${namesTest ? '; for a guard run by any runner other than node --test, declare invocation with the exact command that runs it' : ''}`)
         continue
       }
       if (!scopedPath(entry.test, scope)) {
@@ -13838,7 +13838,7 @@ export function hardeningBounceLines(round, refusals, rows) {
   if (undeclared.length > 0) lines.push('No guard was declared for:', ...undeclared.map((refusal) => `- ${refusal.finding}`))
   const unmeasured = Array.isArray(rows) ? rows.filter((row) => hardeningRowBucket(row) === 'unmeasured') : []
   if (unmeasured.length > 0) lines.push('Measured nothing — not blocking:', ...unmeasured.map((row) => `- ${row.finding}: ${row.outcome} — ${row.why}`))
-  lines.push('', 'Return details.hardened entries shaped exactly as { finding, test, name, file, find, replace } or { finding, invocation, name, file, find, replace }, and "class": "coverage" when the implementation was already correct at review time; the declared name must not exist on the tree the review read.', `Hardening proof for round ${round} did not close every finding.`)
+  lines.push('', 'Return details.hardened entries shaped exactly as { finding, test, name, file, find, replace } or { finding, invocation, name, file, find, replace }, and "class": "coverage" when the implementation was already correct at review time; the declared name must not exist on the tree the review read. In this bounce, test is a repo-relative .test.mjs path run by node --test; any other runner goes in invocation with the exact command that runs it.', `Hardening proof for round ${round} did not close every finding.`)
   lines.push(`A finding whose defect class cannot become a mechanical guard is asked about, not waived: ask with an entry of exactly ${HARDENING_APPEAL_SHAPE}, which is still refused builder-exemption until the reviewer approves it.`)
   return lines
 }
@@ -13848,7 +13848,7 @@ export function hardeningBriefLines(owed, exempt) {
   if (findings.length === 0) return []
   const lines = ['', '## Permanent guards required (#839)', 'Every must-fix below needs a permanent named test guard, and its declared kill-mutation must be proven by the driver.']
   lines.push(...findings.map(({ id, location, summary }) => `- ${id} (${location || 'location unspecified'}) — ${summary || 'close this finding with a named guard'}`))
-  lines.push('Declare each guard in details.hardened with the exact shape { finding, test, name, file, find, replace } or { finding, invocation, name, file, find, replace }, plus "class": "coverage" when the implementation the finding names was ALREADY correct at review time and the finding was that nothing durable guarded it.',
+  lines.push('Declare each guard in details.hardened with the exact shape { finding, test, name, file, find, replace } or { finding, invocation, name, file, find, replace }, plus "class": "coverage" when the implementation the finding names was ALREADY correct at review time and the finding was that nothing durable guarded it. For each guard, test is a repo-relative .test.mjs path run by node --test; any other runner goes in invocation with the exact command that runs it.',
     'A coverage declaration is certified WITHOUT a red pre-repair: its file must be byte-identical to the review-time witness, so editing the implementation to manufacture one is refused as source-regressed.',
     'The declared name must be one that does not exist on the tree the review read; only the reviewer may mark a finding ungateable with a non-empty hardening_why.',
     `If a finding's defect class cannot become a mechanical guard, ASK: return that finding's entry as exactly ${HARDENING_APPEAL_SHAPE} and nothing else. That request is still refused builder-exemption and grants nothing until the reviewer approves it in a hardening appeal; an entry that mixes the request with a declaration is not a request.`)

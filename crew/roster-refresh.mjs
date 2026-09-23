@@ -181,7 +181,7 @@ function newer(a, b) {
 }
 
 // The newest same-provider, same-family id in the catalog, or null with a closed reason.
-export function successorOf(key, catalogKeys) {
+export function successorOf(key, catalogKeys, unreleased = new Set()) {
   const slash = key.indexOf('/')
   const provider = key.slice(0, slash)
   const id = key.slice(slash + 1)
@@ -191,14 +191,19 @@ export function successorOf(key, catalogKeys) {
   // about it — including that something newer replaces it — is made.
   if (!catalogKeys.includes(key)) return { key, successor: null, reason: 'not-in-catalog' }
   let best = null
+  let flagged = false
   for (const candidate of catalogKeys) {
     if (!candidate.startsWith(`${provider}/`)) continue
     const theirs = modelFamily(candidate.slice(provider.length + 1))
     if (!theirs || theirs.family !== own.family) continue
     if (!newer(theirs.version, own.version)) continue
+    // A catalog entry flagged beta or deprecated is never a successor: reseating onto it is a
+    // decision about an unreleased or retiring model, not a version bump.
+    if (unreleased.has(candidate)) { flagged = true; continue }
     if (!best || newer(theirs.version, best.version)) best = { key: candidate, version: theirs.version }
   }
-  return best ? { key, successor: best.key, reason: null } : { key, successor: null, reason: 'already-newest' }
+  if (best) return { key, successor: best.key, reason: null }
+  return { key, successor: null, reason: flagged ? 'newer-only-beta-or-deprecated' : 'already-newest' }
 }
 
 // Every seat (and fallback) as provider/id.
@@ -222,14 +227,18 @@ export function usedModelKeys(roster) {
 
 export function planBump(roster, rawCatalog) {
   const catalogKeys = []
+  const unreleased = new Set()
   for (const [providerId, provider] of Object.entries(rawCatalog || {})) {
-    for (const modelId of Object.keys(provider?.models || {})) catalogKeys.push(`${providerId}/${modelId}`)
+    for (const [modelId, m] of Object.entries(provider?.models || {})) {
+      catalogKeys.push(`${providerId}/${modelId}`)
+      if (m?.status === 'beta' || m?.status === 'deprecated') unreleased.add(`${providerId}/${modelId}`)
+    }
   }
   const bumps = []
   const skipped = []
   const seated = new Set(seatedModelKeys(roster))
   for (const key of usedModelKeys(roster)) {
-    const r = successorOf(key, catalogKeys)
+    const r = successorOf(key, catalogKeys, unreleased)
     // A predecessor an earlier apply kept as a PRICE row (unseated, tagged override-only) stays:
     // the ledger prices its history from it. It is never a pending bump, whatever newer
     // successor the catalog lists since.
@@ -276,6 +285,25 @@ export function catalogEntry(key, rawCatalog, { tags = [], today }) {
   entry.source = 'models.dev'
   entry.last_verified = today
   return entry
+}
+
+// The ratified per-vendor cache multipliers the shipped price check holds every row to. A new row
+// whose published rate departs from them is REPORTED, never silently normalised: a published
+// figure may be right (Opus 5.5 reads at 0.05x), and deciding that is a ratification, not a bump.
+export const RATIFIED_CACHE_MULTIPLIERS = Object.freeze({
+  anthropic: Object.freeze({ read: 0.10, write: 2.00 }),
+  openai: Object.freeze({ read: 0.10, write: 0 }),
+})
+export function rateDepartures(key, entry) {
+  const ratified = RATIFIED_CACHE_MULTIPLIERS[key.slice(0, key.indexOf('/'))]
+  if (!ratified || !Number.isFinite(entry?.cost_in_per_mtok)) return []
+  const out = []
+  for (const [column, field] of [['read', 'cost_cache_read_per_mtok'], ['write', 'cost_cache_write_per_mtok']]) {
+    if (!Number.isFinite(entry[field])) continue
+    const expected = entry.cost_in_per_mtok * ratified[column]
+    if (Math.abs(entry[field] - expected) > 1e-12) out.push(`${key}: cache ${column} ${entry[field]} per Mtok, not the ratified ${ratified[column].toFixed(2)}x (${expected})`)
+  }
+  return out
 }
 
 // Rewrite by FULL key only. A `provider/id` string is replaced when it is exactly an old key; an
@@ -329,9 +357,9 @@ export function applyBump({ roster, ladder, routing, workflows = {} }, plan, raw
   // A bump that lands a fallback on its own primary seats one model twice: a placement decision.
   for (const [tier, seats] of Object.entries(rosterSeating(nextRoster) || {})) {
     for (const [role, seat] of Object.entries(seats || {})) {
-      for (const fb of Array.isArray(seat?.fallback) ? seat.fallback : []) {
-        if (fb?.provider === seat.provider && fb?.id === seat.id) throw new Error(`roster-refresh: refusing to apply — ${tier}.${role}'s fallback would become its own primary ${seat.provider}/${seat.id}; which fallback it needs is a placement decision, not a version bump`)
-      }
+      const chain = [seat, ...(Array.isArray(seat?.fallback) ? seat.fallback : [])].map((c) => `${c?.provider}/${c?.id}`)
+      const twice = chain.find((k, i) => chain.indexOf(k) !== i)
+      if (twice) throw new Error(`roster-refresh: refusing to apply — ${tier}.${role} would name ${twice} twice across its primary and fallbacks; which fallback it needs is a placement decision, not a version bump`)
     }
   }
   // Every successor key gets ONE fresh catalog entry, carrying the union of the tags of the
@@ -507,20 +535,20 @@ if (import.meta.main) {
   if (process.argv.includes('--apply') && plan.bumps.length) {
     const dir = dirname(fileURLToPath(typeof rosterPath === 'string' ? pathToFileURL(resolve(rosterPath)) : rosterPath))
     const read = (name) => { const path = join(dir, name); return { path, doc: JSON.parse(readFileSync(path, 'utf8')) } }
-    const ladder = read('model-ladder.json')
-    const routing = read('routing-policy.json')
-    // Workflow maps pin seats too (crew/workflows/*.json); a bump that left them behind would make
-    // `crew boot --workflow <name>` refuse the old model the ladder no longer lists.
-    const workflowDir = join(dir, 'workflows')
-    const workflows = existsSync(workflowDir)
-      ? readdirSync(workflowDir).filter((n) => n.endsWith('.json') && !n.endsWith('.schema.json')).map((n) => read(join('workflows', n)))
-      : []
     const today = new Date().toISOString().slice(0, 10)
     const rosterFile = typeof rosterPath === 'string' ? rosterPath : fileURLToPath(rosterPath)
     // Each file keeps its own ending: a trailing newline only where the original had one.
     const json = (doc, original) => `${JSON.stringify(doc, null, 2)}${original.endsWith('\n') ? '\n' : ''}`
     let next
     try {
+      const ladder = read('model-ladder.json')
+      const routing = read('routing-policy.json')
+      // Workflow maps pin seats too (crew/workflows/*.json); a bump that left them behind would
+      // make `crew boot --workflow <name>` refuse the old model the ladder no longer lists.
+      const workflowDir = join(dir, 'workflows')
+      const workflows = existsSync(workflowDir)
+        ? readdirSync(workflowDir).filter((n) => n.endsWith('.json') && !n.endsWith('.schema.json')).map((n) => read(join('workflows', n)))
+        : []
       next = applyBump({ roster, ladder: ladder.doc, routing: routing.doc, workflows: Object.fromEntries(workflows.map((w) => [w.path, w.doc])) }, plan, catalog, { today })
       const { loadLadder, loadRoutingPolicy } = await import('./crew.mjs')
       const { loadRoster } = await import('./roster.mjs')
@@ -552,7 +580,24 @@ if (import.meta.main) {
       ...Object.entries(next.workflows).flatMap(([path, doc]) => proseMentions(doc, plan.bumps).map((h) => `${path}${h.path}`)),
     ]
     if (prose.length) console.log(`still naming an old id, NOT rewritten (prose records what was measured; anything else is a reference the tool could not bump):\n${[...new Set(prose)].map((p) => `- ${p}`).join('\n')}`)
-    console.log('next: run npm test. Move only tests that pin which models are SEATED; a format, price-history or dated-record check that fails is a finding, not a test to update.')
+    // Everything below is for a human: the tool changes none of it.
+    const departures = [...new Set(plan.bumps.map((b) => b.to))].flatMap((to) => rateDepartures(to, next.roster.models[to]))
+    if (departures.length) console.log(`published cache rates that depart from the vendor's ratified multiplier — written as published; ratify each or correct it:\n${departures.map((d) => `- ${d}`).join('\n')}`)
+    const benchRoot = join(dir, '..', 'docs', 'audits')
+    const from = new Set(plan.bumps.map((b) => b.from))
+    const benches = []
+    if (existsSync(benchRoot)) {
+      for (const day of readdirSync(benchRoot)) {
+        const bench = join(benchRoot, day, 'bench')
+        if (!existsSync(bench)) continue
+        for (const role of readdirSync(bench)) {
+          const path = join(bench, role, 'candidates.json')
+          try { if (from.has(JSON.parse(readFileSync(path, 'utf8')).production)) benches.push(path) } catch {}
+        }
+      }
+    }
+    if (benches.length) console.log(`dated benches whose production is a replaced model — model-eval refuses them (production-absent) until they are re-declared, and they are dated records:\n${benches.map((b) => `- ${b}`).join('\n')}`)
+    console.log('next: run npm test. The ratified-rates check pins every catalog key, so each new row is ratified there by hand. Move tests that pin which models are SEATED; a format, price-history or dated-record check that fails is a finding, not a test to update.')
   }
 
   process.exit(0)

@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
-import { normalizeCatalog, diffModels, readRosterModels, renderReport, successorOf, planBump, applyBump, catalogEntry, proseMentions, commitWrites, bumpLadder } from './roster-refresh.mjs'
+import { normalizeCatalog, diffModels, readRosterModels, renderReport, successorOf, planBump, applyBump, catalogEntry, proseMentions, commitWrites, bumpLadder, replaceIds, modelFamily, rateDepartures } from './roster-refresh.mjs'
 
 const roster = JSON.parse(readFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
 const schema = JSON.parse(readFileSync(new URL('./roster.schema.json', import.meta.url), 'utf8'))
@@ -753,14 +753,31 @@ test('BAK2 a backup that cannot be removed after a successful apply is reported'
 
 // Mutation killed: the CLI's own fs object lacking a method commitWrites calls fails every real
 // --apply while every injected-fs unit test stays green.
-test('CLI1 --apply rewrites a scratch roster, ladder and routing policy end to end', () => {
+test('CLI1 --apply rewrites a scratch roster, ladder, routing policy and workflow end to end', () => {
   const dir = scratchDir('roster-refresh-cli1-')
   try {
-    for (const name of ['roster.json', 'model-ladder.json', 'routing-policy.json', 'workflows/full.json']) {
-      mkdirSync(dirname(join(dir, name)), { recursive: true })
-      writeFileSync(join(dir, name), readFileSync(new URL(`./${name}`, import.meta.url)))
+    // Plant a predecessor of the shipped build planner everywhere it is named, so the apply has a
+    // real bump to make whatever the shipped roster seats today.
+    const read = (name) => JSON.parse(readFileSync(new URL(`./${name}`, import.meta.url), 'utf8'))
+    const shipped = read('roster.json')
+    const planner = shipped.tiers.build.planner
+    const current = `${planner.provider}/${planner.id}`
+    const planted = `${planner.provider}/gpt-1-${modelFamily(planner.id).family.split('-').pop()}`
+    assert.equal(successorOf(planted, [planted, current]).successor, current)
+    const back = { [current]: planted }
+    const roster = replaceIds(shipped, back)
+    roster.models = Object.fromEntries(Object.entries(shipped.models).map(([k, v]) => [k === current ? planted : k, v]))
+    const files = {
+      'roster.json': roster,
+      'model-ladder.json': bumpLadder(read('model-ladder.json'), back),
+      'routing-policy.json': replaceIds(read('routing-policy.json'), back),
+      'workflows/full.json': replaceIds(read('workflows/full.json'), back),
     }
-    const shipped = JSON.parse(readFileSync(join(dir, 'roster.json'), 'utf8'))
+    for (const [name, doc] of Object.entries(files)) {
+      mkdirSync(dirname(join(dir, name)), { recursive: true })
+      const shippedText = readFileSync(new URL(`./${name}`, import.meta.url), 'utf8')
+      writeFileSync(join(dir, name), `${JSON.stringify(doc, null, 2)}${shippedText.endsWith('\n') ? '\n' : ''}`)
+    }
     const catalog = {}
     const add = (key, e) => {
       const [provider, ...rest] = key.split('/')
@@ -768,40 +785,64 @@ test('CLI1 --apply rewrites a scratch roster, ladder and routing policy end to e
       catalog[provider].models[rest.join('/')] = { cost: { input: e.cost_in_per_mtok, output: e.cost_out_per_mtok, cache_read: e.cost_cache_read_per_mtok, cache_write: e.cost_cache_write_per_mtok }, limit: { context: e.context } }
     }
     for (const [key, e] of Object.entries(shipped.models)) add(key, e)
-    add('openai/gpt-6-sol', { cost_in_per_mtok: 2, cost_out_per_mtok: 10, cost_cache_read_per_mtok: 0.2, cost_cache_write_per_mtok: 2.5, context: 1050000 })
+    add(planted, shipped.models[current])
     const catalogPath = join(dir, 'catalog.json')
     writeFileSync(catalogPath, JSON.stringify(catalog))
-    const before = readFileSync(join(dir, 'routing-policy.json'), 'utf8')
+    const plantedId = planted.slice(planted.indexOf('/') + 1)
     const result = spawnSync(process.execPath, [REFRESH_TOOL, '--roster', join(dir, 'roster.json'), '--catalog', catalogPath, '--apply'], { encoding: 'utf8' })
     assert.equal(result.status, 0, result.stderr)
     assert.match(result.stdout, /applied 1 bump\(s\)/)
     const after = JSON.parse(readFileSync(join(dir, 'roster.json'), 'utf8'))
-    assert.equal(Object.hasOwn(after.models, 'openai/gpt-6-sol'), true)
-    assert.equal(Object.hasOwn(after.models, 'openai/gpt-5.6-sol'), true)
-    assert.equal(JSON.stringify(after.tiers).includes('"gpt-5.6-sol"'), false)
-    assert.notEqual(readFileSync(join(dir, 'routing-policy.json'), 'utf8'), before)
-    // The workflow map moves with the seats, and every file keeps its own byte format.
-    assert.equal(JSON.stringify(JSON.parse(readFileSync(join(dir, 'workflows/full.json'), 'utf8'))).includes('"gpt-5.6-sol"'), false)
-    for (const name of ['roster.json', 'model-ladder.json', 'routing-policy.json', 'workflows/full.json']) {
+    assert.equal(Object.hasOwn(after.models, current), true)
+    assert.equal(Object.hasOwn(after.models, planted), true)
+    for (const name of Object.keys(files)) {
+      assert.equal(readFileSync(join(dir, name), 'utf8').includes(`"${plantedId}"`) && name !== 'roster.json', false, `${name} still seats ${plantedId}`)
+      // Every file keeps its own byte format.
       const shippedText = readFileSync(new URL(`./${name}`, import.meta.url), 'utf8')
       assert.equal(readFileSync(join(dir, name), 'utf8').endsWith('\n'), shippedText.endsWith('\n'), name)
     }
+    assert.equal(JSON.stringify(after.tiers).includes(`"${plantedId}"`), false)
     assert.deepEqual(readdirSync(dir).filter((n) => /\.roster-refresh\.(tmp|bak)$/.test(n)), [])
     // A catalog refusal is a printed message and an unchanged tree, never a stack trace.
     const bad = JSON.parse(readFileSync(catalogPath, 'utf8'))
-    bad.openai.models['gpt-7-sol'] = { cost: { input: -1, output: 10 }, limit: { context: 1050000 } }
+    const [provider] = current.split('/')
+    bad[provider].models[`gpt-99-${modelFamily(planner.id).family.split('-').pop()}`] = { cost: { input: -1, output: 10 }, limit: { context: 1050000 } }
     writeFileSync(catalogPath, JSON.stringify(bad))
     const settled = readFileSync(join(dir, 'roster.json'), 'utf8')
     const refused = spawnSync(process.execPath, [REFRESH_TOOL, '--roster', join(dir, 'roster.json'), '--catalog', catalogPath, '--apply'], { encoding: 'utf8' })
     assert.equal(refused.status, 1)
-    assert.match(refused.stderr, /^roster-refresh: refusing to write openai\/gpt-7-sol/)
+    assert.match(refused.stderr, /^roster-refresh: refusing to write /)
     assert.doesNotMatch(refused.stderr, /\n\s+at /)
     assert.equal(readFileSync(join(dir, 'roster.json'), 'utf8'), settled)
+    // So is a directory missing the files the apply rewrites.
+    rmSync(join(dir, 'model-ladder.json'))
+    const missing = spawnSync(process.execPath, [REFRESH_TOOL, '--roster', join(dir, 'roster.json'), '--catalog', catalogPath, '--apply'], { encoding: 'utf8' })
+    assert.equal(missing.status, 1)
+    assert.doesNotMatch(missing.stderr, /\n\s+at /)
   } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+// Mutation killed: dropping the status filter reseats a family onto a beta or deprecated model.
+test('BETA1 a beta or deprecated catalog entry is never a successor', () => {
+  const keys = ['openai/gpt-6-sol', 'openai/gpt-7-sol']
+  assert.deepEqual(successorOf('openai/gpt-6-sol', keys, new Set(['openai/gpt-7-sol'])), { key: 'openai/gpt-6-sol', successor: null, reason: 'newer-only-beta-or-deprecated' })
+  const catalog = { openai: { models: { 'gpt-6-sol': price(2, 10), 'gpt-7-sol': { ...price(1, 5), status: 'beta' } } } }
+  assert.deepEqual(planBump({ tiers: { build: { planner: { provider: 'openai', id: 'gpt-6-sol', agent: 'pi' } } }, models: {} }, catalog).bumps, [])
+})
+
+// Mutation killed: a rate check that ignores the vendor multipliers lets a 0.05x read through unsaid.
+test('DEPART1 a published cache rate off its vendor multiplier is reported, not normalised', () => {
+  assert.deepEqual(rateDepartures('anthropic/claude-opus-5-5', { cost_in_per_mtok: 4, cost_cache_read_per_mtok: 0.2, cost_cache_write_per_mtok: 8 }), ['anthropic/claude-opus-5-5: cache read 0.2 per Mtok, not the ratified 0.10x (0.4)'])
+  assert.deepEqual(rateDepartures('anthropic/claude-sonnet-5', { cost_in_per_mtok: 2, cost_cache_read_per_mtok: 0.2, cost_cache_write_per_mtok: 4 }), [])
+  assert.equal(rateDepartures('openai/gpt-6-sol', { cost_in_per_mtok: 2, cost_cache_read_per_mtok: 0.2, cost_cache_write_per_mtok: 2.5 }).length, 1)
+  assert.deepEqual(rateDepartures('meta/muse-spark-1.4', { cost_in_per_mtok: 1, cost_cache_read_per_mtok: 0.002 }), [])
 })
 
 // Mutation killed: without the check a fallback bumped onto its own primary seats one model twice.
 test('FALLBACK1 a bump that lands a fallback on its primary is refused', () => {
   const roster = { tiers: { judge: { 'tech-lead': { provider: 'anthropic', id: 'claude-opus-5-5', agent: 'claude', fallback: [{ provider: 'anthropic', id: 'claude-opus-5', agent: 'claude' }] } } }, models: {} }
-  assert.throws(() => applyBump({ roster }, { bumps: [{ from: 'anthropic/claude-opus-5', to: 'anthropic/claude-opus-5-5' }] }, BUMP_CATALOG, { today: '2026-09-23' }), /fallback would become its own primary/)
+  assert.throws(() => applyBump({ roster }, { bumps: [{ from: 'anthropic/claude-opus-5', to: 'anthropic/claude-opus-5-5' }] }, BUMP_CATALOG, { today: '2026-09-23' }), /would name anthropic\/claude-opus-5-5 twice/)
+  // Two fallbacks collapsing onto one model are refused the same way.
+  const pair = { tiers: { judge: { 'tech-lead': { provider: 'openai', id: 'gpt-6-sol', agent: 'pi', fallback: [{ provider: 'anthropic', id: 'claude-opus-5', agent: 'claude' }, { provider: 'anthropic', id: 'claude-opus-5-5', agent: 'claude' }] } } }, models: {} }
+  assert.throws(() => applyBump({ roster: pair }, { bumps: [{ from: 'anthropic/claude-opus-5', to: 'anthropic/claude-opus-5-5' }] }, BUMP_CATALOG, { today: '2026-09-23' }), /twice/)
 })

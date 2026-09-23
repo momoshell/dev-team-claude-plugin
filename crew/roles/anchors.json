@@ -12,5 +12,5 @@
   "crew/drive.mjs:6925": "function settleAccept(c, where, contextPaths = []) {",
   "crew/drive.mjs:6563": "lead requested a second second-opinion",
   "crew/adapters/adapter-pi.mjs:370": "['--no-skills']",
-  "crew/adapters/adapter-claude.mjs:422": "PLUGIN_DIR_FLAG, skillsPluginDir({ taskDir, role })"
+  "crew/adapters/adapter-claude.mjs:423": "PLUGIN_DIR_FLAG, skillsPluginDir({ taskDir, role })"
 }

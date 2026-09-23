@@ -34,7 +34,7 @@ Before writing findings, load the do-not-flag guidelines
 `node .agents/skills/review-procedure/scripts/load-guidelines.mjs`, not a skill:
 the reviewer seat is granted no skill: pi boots it `--no-skills`
 (`crew/adapters/adapter-pi.mjs:370`) and claude is passed no plugin dir
-(`crew/adapters/adapter-claude.mjs:422`), so that route is closed.
+(`crew/adapters/adapter-claude.mjs:423`), so that route is closed.
 Where one of its classes still worries you in this diff, write it as a
 `consider` naming the defense you think fails.
 

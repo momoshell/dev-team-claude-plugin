@@ -3330,3 +3330,57 @@ test('D1', () => {
     assert.equal(existsSync(fifo), true)
   } finally { held.cleanup() }
 })
+
+// RV2: a worker spawned before the FIFO moved reads from the legacy pipe inside the seat
+// dir. These fixtures use the real existsSync (the default fixture reports every cmd.fifo
+// present), so which path exists is the thing under test.
+test('RV2-1 a pre-upgrade worker is adopted on its legacy pipe and teardown removes it', () => {
+  const first = fixture({ kill: () => {} })
+  try {
+    first.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    const legacy = join(first.paths.taskDir, 'headless-rpc', 'builder', 'cmd.fifo')
+    writeFileSync(legacy, '')
+    const opened = []
+    const adopted = fixture({
+      dir: first.dir, pid: 800, spawnPid: 801, existsSync,
+      openSync: (path) => { opened.push(path); return 10 },
+    })
+    try {
+      adopted.io.assign({ role: 'builder', briefFile: '/brief.md' })
+      assert.deepEqual(opened, [legacy])
+      const rows = adopted.io.teardown()
+      assert.equal(rows[0].outcome, 'proven')
+      assert.equal(existsSync(legacy), false)
+    } finally { adopted.cleanup() }
+  } finally { first.cleanup() }
+})
+
+test('RV2-2 a fresh spawn removes a stale legacy pipe no worker holds', () => {
+  const dir = scratchDir('headless-rpc-rv2-2-')
+  try {
+    const legacy = join(dir, 'task', 'headless-rpc', 'builder', 'cmd.fifo')
+    mkdirSync(dirname(legacy), { recursive: true })
+    writeFileSync(legacy, '')
+    const opened = []
+    const f = fixture({ dir, existsSync, openSync: (path) => { opened.push(path); return 10 } })
+    f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    assert.equal(existsSync(legacy), false)
+    assert.deepEqual(opened, [seatCommandPath(dir, 'builder')])
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('RV2-3 a marker-only proven teardown after a supervisor restart removes the pipe', () => {
+  const first = fixture({ kill: () => {} })
+  try {
+    first.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    const fifo = seatCommandPath(first.dir, 'builder')
+    writeFileSync(fifo, '')
+    const restarted = fixture({ dir: first.dir, pid: 800, existsSync })
+    try {
+      const rows = restarted.io.teardown()
+      assert.equal(rows.length, 1)
+      assert.equal(rows[0].outcome, 'proven')
+      assert.equal(existsSync(fifo), false)
+    } finally { restarted.cleanup() }
+  } finally { first.cleanup() }
+})

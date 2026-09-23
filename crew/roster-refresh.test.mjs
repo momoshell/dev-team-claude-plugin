@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { parseArgs, normalizeCatalog, diffModels, readRosterModels, renderReport, successorOf, planBump, applyBump, catalogEntry, proseMentions, commitWrites, bumpLadder, replaceIds, modelFamily, rateDepartures, replacedBenches } from './roster-refresh.mjs'
 
 const roster = JSON.parse(readFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
@@ -268,6 +268,7 @@ test('renderReport body is deterministic', () => {
 import { spawnSync } from 'node:child_process'
 import { scratchDir } from '../test/helpers.mjs'
 import { dirname, join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { tmpdir } from 'node:os'
 
 const REFRESH_TOOL = new URL('./roster-refresh.mjs', import.meta.url).pathname
@@ -743,8 +744,8 @@ test('BAK1 a failed backup write changes no file and leaves nothing behind', () 
   assert.deepEqual([...files.entries()], [['a', 'A0'], ['b', 'B0']])
 })
 
-// Mutation killed: swallowing a failed backup removal reports a clean apply that blocks the next run.
-test('BAK2 a backup that cannot be removed after a successful apply is reported', () => {
+// Mutation killed: swallowing a failed backup removal inside commitWrites loses it (CLI4 covers the CLI).
+test('BAK2 a backup that cannot be removed after a successful apply is returned for the caller to report', () => {
   const files = new Map([['a', 'A0']])
   const fsx = {
     constants: { W_OK: 2 }, accessSync: () => {},
@@ -753,7 +754,8 @@ test('BAK2 a backup that cannot be removed after a successful apply is reported'
     unlinkSync: (p) => { if (p.endsWith('.bak')) throw new Error('EPERM'); files.delete(p) },
     existsSync: (p) => files.has(p),
   }
-  assert.throws(() => commitWrites([{ path: 'a', original: 'A0', next: 'A1' }], fsx), /succeeded, but could not remove a\.roster-refresh\.bak/)
+  // Returned, not thrown: the apply succeeded, and the CLI still prints its advice first.
+  assert.deepEqual(commitWrites([{ path: 'a', original: 'A0', next: 'A1' }], fsx), { kept: ['a.roster-refresh.bak'] })
   assert.equal(files.get('a'), 'A1')
 })
 
@@ -800,6 +802,8 @@ test('CLI1 --apply rewrites a scratch roster, ladder, routing policy and workflo
     const result = spawnSync(process.execPath, [REFRESH_TOOL, '--roster', join(dir, 'roster.json'), '--catalog', catalogPath, '--apply'], { encoding: 'utf8' })
     assert.equal(result.status, 0, result.stderr)
     assert.match(result.stdout, /applied 1 bump\(s\)/)
+    // The provider availability of a successor is stated as unmeasured, never implied.
+    assert.match(result.stdout, /unmeasured: whether each successor is served by the seat's provider account/)
     const after = JSON.parse(readFileSync(join(dir, 'roster.json'), 'utf8'))
     assert.equal(Object.hasOwn(after.models, current), true)
     assert.equal(Object.hasOwn(after.models, planted), true)
@@ -946,5 +950,45 @@ test('CLI3 a file the bump does not change keeps its exact bytes', () => {
     assert.match(result.stdout, /applied 1 bump\(s\)/)
     assert.equal(JSON.parse(readFileSync(join(dir, 'roster.json'), 'utf8')).tiers.build.planner.id, planner.id)
     for (const [name, bytes] of Object.entries(compact)) assert.equal(readFileSync(join(dir, name), 'utf8'), bytes, name)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+// Mutation killed: dropping the CLI's kept-backup report exits 0 on a clean-looking apply whose
+// leftover .bak makes the next run refuse. A preload makes every .bak removal fail, so the real
+// CLI runs the whole path: advice first, then the report, then exit 1.
+test('CLI4 a backup the CLI cannot remove is reported after the advice, with exit 1', () => {
+  const dir = scratchDir('roster-refresh-cli4-')
+  try {
+    const read = (name) => JSON.parse(readFileSync(new URL(`./${name}`, import.meta.url), 'utf8'))
+    const shipped = read('roster.json')
+    const planner = shipped.tiers.build.planner
+    const current = `${planner.provider}/${planner.id}`
+    const plantedId = planner.id.replace(/\d+/, '0')
+    const roster = JSON.parse(JSON.stringify(shipped))
+    roster.tiers.build.planner.id = plantedId
+    roster.models[`${planner.provider}/${plantedId}`] = shipped.models[current]
+    writeFileSync(join(dir, 'roster.json'), JSON.stringify(roster, null, 2))
+    for (const name of ['model-ladder.json', 'routing-policy.json']) writeFileSync(join(dir, name), JSON.stringify(read(name)))
+    const catalog = {}
+    for (const [key, e] of Object.entries(roster.models)) {
+      const [provider, ...rest] = key.split('/')
+      catalog[provider] ??= { models: {} }
+      catalog[provider].models[rest.join('/')] = { cost: { input: e.cost_in_per_mtok, output: e.cost_out_per_mtok, cache_read: e.cost_cache_read_per_mtok, cache_write: e.cost_cache_write_per_mtok }, limit: { context: e.context } }
+    }
+    writeFileSync(join(dir, 'catalog.json'), JSON.stringify(catalog))
+    const preload = join(dir, 'unlink-bak-fails.mjs')
+    writeFileSync(preload, [
+      "import fs from 'node:fs'",
+      "import { syncBuiltinESMExports } from 'node:module'",
+      'const unlink = fs.unlinkSync',
+      "fs.unlinkSync = (p, ...rest) => { if (String(p).endsWith('.roster-refresh.bak')) throw Object.assign(new Error('EPERM'), { code: 'EPERM' }); return unlink(p, ...rest) }",
+      'syncBuiltinESMExports()',
+    ].join('\n'))
+    const result = spawnSync(process.execPath, ['--import', pathToFileURL(preload).href, REFRESH_TOOL, '--roster', join(dir, 'roster.json'), '--catalog', join(dir, 'catalog.json'), '--apply'], { encoding: 'utf8' })
+    assert.equal(result.status, 1, result.stderr)
+    assert.match(result.stdout, /applied 1 bump\(s\)/)
+    assert.match(result.stdout, /next: run npm test/)
+    assert.match(result.stderr, /succeeded, but could not remove .*roster\.json\.roster-refresh\.bak/)
+    assert.equal(existsSync(join(dir, 'roster.json.roster-refresh.bak')), true)
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })

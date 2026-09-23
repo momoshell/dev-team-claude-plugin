@@ -3889,3 +3889,17 @@ test('F1 daemon child refuses boot and run execution disagreement', () => {
     assert.equal(existsSync(f.taskReturn), false)
   } finally { f.cleanup() }
 })
+
+test('RV3-1 send delivers to a pre-upgrade worker on its legacy in-task pipe', async () => {
+  await each(async (f) => {
+    const { run_id: run } = f.d.enqueue({ crew_dir: f.crewDir })
+    const dir = stageRpcSeat(f, 'builder')
+    rmSync(join(f.crewDir, 'rpc', 'builder', 'cmd.fifo'))
+    writeFileSync(join(dir, 'cmd.fifo'), '')
+    const result = await f.d.send({ run, message: 'guidance', role: 'builder' })
+    assert.equal(result.delivered, 'command-channel')
+    const frame = JSON.parse(readFileSync(join(dir, 'cmd.fifo'), 'utf8').trim())
+    assert.equal(frame.message, 'guidance')
+    assert.equal(frame.id, result.command_id)
+  }, { roles: ['builder'], transport: 'headless-rpc', agent: 'pi' })
+})

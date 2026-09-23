@@ -62,6 +62,10 @@ export const SEAT_COMMAND_FILE = 'cmd.fifo'
 export function seatCommandPath(crewDir, role) {
   return join(crewDir, 'rpc', role, SEAT_COMMAND_FILE)
 }
+// Where a worker spawned before #1496 reads its commands: inside the seat-visible task/ tree.
+export function legacySeatCommandPath(taskDir, role) {
+  return join(taskDir, 'headless-rpc', role, SEAT_COMMAND_FILE)
+}
 export function steerFrame(message) { return { type: 'steer', message } }
 
 // Do not use node:readline here. captures/pi-b5-readline-trap.txt has two
@@ -885,7 +889,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
   // the seat-visible task/ tree. One still live across the upgrade keeps that pipe: it
   // is adopted where it is (its stdin cannot move, and killing it would drop its turn),
   // so it keeps the grep-hang hazard until it ends. No new spawn ever uses the path.
-  function legacySeatFifo(role) { return seatFile(role, SEAT_COMMAND_FILE) }
+  function legacySeatFifo(role) { return legacySeatCommandPath(taskDir || paths.taskDir, role) }
   function unlinkSeatFifos(role) {
     for (const path of [seatCommandPath(paths.dir, role), legacySeatFifo(role)]) {
       try { if (exists(path)) unlink(path) } catch {}
